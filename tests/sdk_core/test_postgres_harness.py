@@ -10,15 +10,17 @@ from typing import Any
 
 import pytest
 import yaml
-from sqlalchemy import event
+from sqlalchemy import event, text
 from sqlalchemy.engine import URL, Connection, Engine
 from sqlalchemy.ext.asyncio import create_async_engine
 from tests.sdk_core.postgres_harness import (
     ADMIN_DATABASE,
+    ADMIN_URL,
     ADMIN_USER,
     INSTANCE_MARKER,
     LOOPBACK,
     PORT,
+    TEST_DATABASE_PREFIX,
     HarnessMisconfiguredError,
     isolated_database,
     parse_admin_url,
@@ -128,3 +130,30 @@ async def test_every_ddl_connection_verifies_the_instance_first(test_postgres: N
     for index, conn in ddl:
         earlier = [sql for c, sql in executed[:index] if c == conn]
         assert "SHOW cluster_name" in earlier, executed[index][1]
+
+
+async def _existing_test_databases() -> set[str]:
+    engine = create_async_engine(parse_admin_url(ADMIN_URL))
+    try:
+        async with engine.connect() as conn:
+            rows = await conn.execute(
+                text("SELECT datname FROM pg_database WHERE datname LIKE :prefix"),
+                {"prefix": f"{TEST_DATABASE_PREFIX}%"},
+            )
+            return {row[0] for row in rows}
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.loopback
+async def test_database_is_dropped_when_the_body_raises(test_postgres: None) -> None:
+    created: list[str] = []
+    with pytest.raises(RuntimeError, match="body failure"):
+        async with isolated_database() as url:
+            assert url.database is not None
+            created.append(url.database)
+            assert url.database in await _existing_test_databases()
+            raise RuntimeError("body failure")
+
+    assert created
+    assert created[0] not in await _existing_test_databases()

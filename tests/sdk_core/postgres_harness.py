@@ -52,8 +52,11 @@ async def isolated_database() -> AsyncIterator[URL]:
     engine = create_async_engine(admin, isolation_level="AUTOCOMMIT")
     try:
         await _verified_ddl(engine, f'CREATE DATABASE "{name}"')
-        yield admin.set(database=name)
-        await _verified_ddl(engine, f'DROP DATABASE IF EXISTS "{name}" WITH (FORCE)')
+        try:
+            yield admin.set(database=name)
+        finally:
+            # 调用体失败也要删除；删除同样先在执行连接上核对实例。
+            await _verified_ddl(engine, f'DROP DATABASE IF EXISTS "{name}" WITH (FORCE)')
     finally:
         await engine.dispose()
 
