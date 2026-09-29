@@ -50,7 +50,7 @@
 
 **Task 1 未覆盖、留给后续任务：** MCP HTTP 接收字节上限、认证、超时与关闭行为（Task 4）；`tool_input_guardrails` / `tool_filter` 未验证；应用表、表版本检查（Task 2）；Session 写入前过滤（Task 3）；模型 HTTP 接入与真实模型（Task 1B、Task 5）。显式开启 tracing 时的字段限制未验证。
 
-CI integration job 设置 `SDK_TEST_POSTGRES_URL`，启动 `compose.sdk-test.yml`，运行完整 `pytest -q`，并用 shell `EXIT` trap 清理测试项目；不保留旧 PostgreSQL service。SDK 地址缺失时 fixture 明确失败，避免数据库测试静默跳过。
+CI integration job 设置 `SDK_TEST_POSTGRES_URL`，启动 `compose.sdk-test.yml`，运行完整 `python -m pytest -q`，并用 shell `EXIT` trap 清理测试项目；不保留旧 PostgreSQL service。SDK 地址缺失时 fixture 明确失败，避免数据库测试静默跳过。
 
 **下一项：** 确认 Task 1 已进入 `main` 后，从该目标分支开始 Task 1B（模型 API 配置与 SDK 接入）；此 PR 的精确 head、base、差异及 CI 状态以 GitHub 当前记录为准。
 
