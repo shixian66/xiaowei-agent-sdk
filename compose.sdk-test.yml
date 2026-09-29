@@ -1,0 +1,28 @@
+# 仅供 tests/sdk_core 的临时 PostgreSQL；不是产品部署，不连接任何已有运行数据。
+#
+#   docker-compose -p xiaowei-sdk-test -f compose.sdk-test.yml up -d --wait
+#   SDK_TEST_POSTGRES_URL=postgresql+asyncpg://postgres@127.0.0.1:55432/postgres \
+#     uv run --locked --extra dev python -m pytest tests/sdk_core -q
+#   docker-compose -p xiaowei-sdk-test -f compose.sdk-test.yml down -v
+#
+# 端口只发布到 loopback；数据放 tmpfs，down 后不留卷。trust 认证仅限这个一次性本机实例，
+# 因此仓库里没有任何口令。测试 fixture 只接受上面这一个管理地址，并在执行 DDL 前核对
+# 服务器的 cluster_name；通过后才在其中为每个用例新建并删除独立数据库。
+name: xiaowei-sdk-test
+
+services:
+  postgres:
+    image: postgres:16.15-bookworm@sha256:bb3e1a57e5407e0a5280b4211980a5e537f4abd234a87014ac979849a78dd825
+    # cluster_name 是实例标识：测试 fixture 在任何 DDL 之前用 SHOW cluster_name 核对。
+    command: ["postgres", "-c", "cluster_name=xiaowei-sdk-test"]
+    environment:
+      POSTGRES_HOST_AUTH_METHOD: trust
+    ports:
+      - "127.0.0.1:55432:5432"
+    tmpfs:
+      - /var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "postgres"]
+      interval: 1s
+      timeout: 3s
+      retries: 30

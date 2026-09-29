@@ -68,16 +68,27 @@
 
 ## Task 1：锁定 SDK 并验证公开扩展点
 
-**Files:** Modify `pyproject.toml`、`uv.lock`；Create `src/xiaowei/__init__.py`、`src/xiaowei/config.py`、`src/xiaowei/storage.py`、`compose.sdk-test.yml`、`tests/sdk_core/conftest.py`、`tests/sdk_core/test_sdk_contract.py`。
+**Files:** Modify `pyproject.toml`、`uv.lock`、`tests/security/test_dependency_baseline.py`；Create `src/xiaowei/__init__.py`、`src/xiaowei/config.py`、`src/xiaowei/storage.py`、`compose.sdk-test.yml`、`tests/sdk_core/conftest.py`、`tests/sdk_core/test_sdk_contract.py`。
 
 **Interfaces:** 消费官方 `Agent`、`Runner`、`Model`、`Session`、`SQLAlchemySession` 与 MCP 公共类型；产出 `configure_runtime() -> None`，负责显式关闭默认 tracing/export，以及可安装的新包。`storage.py` 提供 `open_engine(database_url: SecretStr) -> AsyncIterator[AsyncEngine]` 异步上下文管理器、显式部署入口使用的 `async initialize_storage(engine: AsyncEngine) -> None` 与运行时 `async check_storage(engine: AsyncEngine) -> None`；本任务只处理 SDK 表，Task 2 加入应用表及版本检查。URL 仅来自私有配置，不打印或进入 context；具体 SDK 初始化/Session 方法签名以锁定版本为准，在本任务测试中固定。
 
-- [ ] 编写 `test_real_runner_calls_tool_and_returns_typed_answer`、`test_postgres_session_public_roundtrip`、`test_storage_unavailable_or_uninitialized_is_rejected`、`test_public_mcp_interception_contract`、`test_default_tracing_has_no_export`。使用官方 Model 接口实现测试用 scripted Model；核心断言分别为 `tool_calls == 1`、类型化回答正确、SQLAlchemySession 在真实 PostgreSQL 上重建对象后仍可回放成对调用、存储未就绪时不调用模型、公开 MCP 边界可拦截、`trace_exports == []`。
-- [ ] 运行 `uv run --extra dev python -m pytest tests/sdk_core/test_sdk_contract.py -q`；记录新依赖/模块缺失或能力不满足的失败，不把安装故障当行为测试通过。
-- [ ] 安装核对当前 Python 兼容版本，将 `openai-agents[sqlalchemy]`、SQLAlchemy、asyncpg 和开发依赖锁入 `uv.lock`，核对 extra 的实际依赖；将 `src/xiaowei` 加入打包但不把旧 CLI 宣称为新产品。实现运行配置，验证 SDK Session、MCP 调用/结果拦截、HTTP transport 的超时与接收限额扩展点。只使用公开 API；若不能实现必要边界，记录具体 API 限制并调整本计划，不绕过治理启用该能力。
-- [ ] 建立测试专用 PostgreSQL Compose 与 fixture，锁定镜像、限制 loopback 访问，只清理本测试创建的项目/数据库，禁止指向已有运行数据。实现有界连接池、超时及退出释放，确认 SDK 的公开建表路径；正式运行不在普通请求中自动建表。记录初始化、启动、健康等待和清理的实际命令，SDK 与应用表不共享写事务的假设由后续失败测试覆盖。
-- [ ] 运行 `uv sync --locked --extra dev` 和 `uv run --locked --extra dev python -m pytest tests/sdk_core/test_sdk_contract.py -q`；预期全部 PASS。测试不得访问真实模型或读取既有凭据；新包 import 不加载旧 `xiaowei_agent`。
-- [ ] 仅暂存本任务文件，提交 `build: establish verified Agents SDK runtime`；记录锁定版本及 Python 版本。
+- [x] 编写 `test_real_runner_calls_tool_and_returns_typed_answer`、`test_postgres_session_public_roundtrip`、`test_storage_unavailable_or_uninitialized_is_rejected`、`test_public_mcp_interception_contract`、`test_default_tracing_has_no_export`。使用官方 Model 接口实现测试用 scripted Model；核心断言分别为 `tool_calls == 1`、类型化回答正确、SQLAlchemySession 在真实 PostgreSQL 上重建对象后仍可回放成对调用、存储未就绪时不调用模型、公开 MCP 边界可拦截、`trace_exports == []`。
+- [ ] 运行 `uv run --extra dev python -m pytest tests/sdk_core/test_sdk_contract.py -q`；记录新依赖/模块缺失或能力不满足的失败，不把安装故障当行为测试通过。（实施时先写实现后写测试，未留下“先失败”的记录；改用反向验证证明测试有效，见下方实测记录。）
+- [x] 安装核对当前 Python 兼容版本，将 `openai-agents[sqlalchemy]`、SQLAlchemy、asyncpg 和开发依赖锁入 `uv.lock`，核对 extra 的实际依赖；将 `src/xiaowei` 加入打包但不把旧 CLI 宣称为新产品。实现运行配置，验证 SDK Session、MCP 调用/结果拦截、HTTP transport 的超时与接收限额扩展点。只使用公开 API；若不能实现必要边界，记录具体 API 限制并调整本计划，不绕过治理启用该能力。
+- [x] 建立测试专用 PostgreSQL Compose 与 fixture，锁定镜像、限制 loopback 访问，只清理本测试创建的项目/数据库，禁止指向已有运行数据。实现有界连接池、超时及退出释放，确认 SDK 的公开建表路径；正式运行不在普通请求中自动建表。记录初始化、启动、健康等待和清理的实际命令，SDK 与应用表不共享写事务的假设由后续失败测试覆盖。
+- [x] 运行 `uv sync --locked --extra dev` 和 `uv run --locked --extra dev python -m pytest tests/sdk_core/test_sdk_contract.py -q`；预期全部 PASS。测试不得访问真实模型或读取既有凭据；新包 import 不加载旧 `xiaowei_agent`。
+- [x] 仅暂存本任务文件，提交 `build: establish verified Agents SDK runtime`；记录锁定版本及 Python 版本。
+
+**Task 1 实测记录（锁版后与计划的差异）：**
+
+- 锁定 `openai-agents[sqlalchemy]` 0.22.3（约束 `>=0.22.3,<0.23`），传递依赖包括 `openai` 3.20.0、`mcp` 2.2.0、`httpx2` 2.13.1、SQLAlchemy 2.0.52、asyncpg 0.30.0；Python 3.11.16。旧 `tests/security/test_dependency_baseline.py` 的运行依赖白名单同步加入 `openai-agents`，保留集合相等的审查机制。
+- 测试模型直接使用 SDK 公开的 `agents.testing.ScriptedModel`（它就是一个 `Model` 实现），不再自写 scripted Model。
+- SDK 表初始化的公开路径是 `SQLAlchemySession(..., create_tables=True)`，在首次读写时建表；`initialize_storage` 用只读探针 `get_items(limit=0)` 触发，不写会话数据。默认表名 `agent_sessions` / `agent_messages`，时间列为无时区 `TIMESTAMP`。运行时会话保持 `create_tables=False`，缺表由 `check_storage` 拒绝。
+- MCP 2.x 的 `httpx_client_factory` 必须返回 `httpx2.AsyncClient`（不是 `httpx`）；已验证 SDK 实际使用应用提供的工厂，超时参数得到传递，请求可在客户端观察。**接收字节上限尚未实测**，留给 Task 4。
+- MCP 调用前检查与返回后过滤：`tool_output_guardrails` 只能放行、以固定消息拒绝或抛错，不能改写返回内容，不满足“过滤后交给模型”。已验证的路径是不把 `MCPServer` 挂到 Agent，而是用公开的 `list_tools()` / `call_tool()` 构造薄 `FunctionTool`：拒绝时零 `tools/call` 请求，放行时禁止字段不进入模型输入。`tool_input_guardrails` 与 `tool_filter` 存在，但本任务未验证。Task 4 按薄 FunctionTool 路径实现。
+- Tracing 需要两步：`set_tracing_disabled(True)` 关闭生成，`set_trace_processors([])` 移除默认导出处理器；测试以默认处理器的对照组证明能观察到导出，再分别证明两步各自生效。
+- 本机没有 `docker compose` 插件，使用独立的 `docker-compose` 5.5.1；命令见 `compose.sdk-test.yml` 文件头。
+- 测试 PostgreSQL 的身份由代码核对（首轮审查后补充）：镜像按 `tag@sha256` 固定；`tests/sdk_core/postgres_harness.py` 要求环境变量与唯一管理地址逐字相同（SQLAlchemy 会用查询参数覆盖主字段，因此不能只比较解析后的字段），连接目标只取自该常量；每条 `CREATE/DROP DATABASE` 都在执行它的同一连接上先核对服务器 `cluster_name`。旧安全护栏中与架构无关的两条（禁止直接导入 asyncpg、禁止 `type: ignore`）改为扫描整个 `src/`。
 
 ## Task 1B：模型 API 配置与 SDK 接入
 

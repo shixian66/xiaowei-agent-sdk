@@ -24,7 +24,8 @@ import pytest
 
 pytestmark = pytest.mark.security
 
-_SRC = Path(__file__).resolve().parents[2] / "src" / "xiaowei_agent"
+_SRC_ROOT = Path(__file__).resolve().parents[2] / "src"
+_SRC = _SRC_ROOT / "xiaowei_agent"
 
 
 def _type_ignore_comment_lines(source: str) -> list[int]:
@@ -43,9 +44,10 @@ def _type_ignore_comment_lines(source: str) -> list[int]:
 
 def test_no_module_silences_a_type_error() -> None:
     offenders: list[str] = []
-    for path in sorted(_SRC.rglob("*.py")):
+    # 与架构无关的类型纪律：扫描 src/ 下的全部包，包括新包 xiaowei。
+    for path in sorted(_SRC_ROOT.rglob("*.py")):
         for line in _type_ignore_comment_lines(path.read_text(encoding="utf-8")):
-            offenders.append(f"{path.relative_to(_SRC)}:{line}")
+            offenders.append(f"{path.relative_to(_SRC_ROOT)}:{line}")
     assert not offenders, offenders
 
 
