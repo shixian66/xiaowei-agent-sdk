@@ -93,16 +93,32 @@
 
 ## Task 1B：模型 API 配置与 SDK 接入
 
-**Files:** Modify `src/xiaowei/config.py`；Create `src/xiaowei/model_api.py`、`tests/sdk_core/test_model_api.py`。本任务不引入通用网关、自动路由或第三方 Agent 运行引擎；直接使用已锁定 SDK 与其 OpenAI HTTP 客户端依赖。
+**Files:** Modify `src/xiaowei/config.py`、`AGENT_HANDOFF.md`、本计划；Create `src/xiaowei/model_api.py`、`tests/sdk_core/test_model_api.py`。本任务不引入通用网关、自动路由或第三方 Agent 运行引擎；直接使用已锁定 SDK 与其 OpenAI HTTP 客户端依赖。
 
 **Interfaces:** `ModelProfile` 为 Pydantic 配置类型，字段固定为 `profile_id: str`、`provider: Literal["openai", "gemini", "deepseek", "openai_compatible"]`、`base_url: str`、`api_mode: Literal["responses", "chat_completions"]`、`model: str`、`api_key_ref: str`、`output_mode: Literal["json_schema", "json_object"]`、`request_timeout_seconds: float`、`max_output_tokens: int`、`max_request_bytes: int`、`max_response_bytes: int`、`data_policy_id: str`、`reasoning_effort: str | None`。期限/限额为正值，地址为可信 HTTPS 端点，模型 ID 必填，不使用 SDK 隐式模型默认值；推理参数仅接受所验证 Profile 的允许值。`open_model(profile: ModelProfile, *, api_key: SecretStr) -> AsyncIterator[Model]` 是异步上下文管理器，装配并关闭独立客户端，返回 SDK `Model`；`settings_for(profile: ModelProfile) -> ModelSettings` 返回 SDK 设置。`profile_fingerprint(profile: ModelProfile) -> str` 返回不含凭据的稳定配置版本，供会话绑定；`SecretStr` 来自 Pydantic，SDK 类型直接使用。
 
-- [ ] 编写 `test_sdk_responses_and_chat_completions_tool_roundtrip`、`test_json_object_still_validates_output_type`、`test_profiles_keep_keys_and_endpoints_separate`、`test_api_failure_has_no_retry_or_fallback`、`test_request_and_output_limits`。使用 HTTP mock transport 接真实 SDK Model 与 Runner，不以 scripted Model 冒充 API 适配测试；本任务最终回答先用测试文件内的简单 Pydantic schema，Task 5 再测真实 `AgentAnswer`。断言工具调用后确有模型续轮；JSON mode 缺字段/错类型/空内容不能返回成功；三个 Profile 的假密钥仅发往各自端点；401/403、429、503、超时和非法 JSON 无跨端点请求、无自动重试、无重复工具执行。
-- [ ] 运行 `uv run --locked --extra dev python -m pytest tests/sdk_core/test_model_api.py -q`；预期因模型配置与装配缺失失败，mock transport 不建立外网连接。
-- [ ] 实现上述配置与装配，使用锁定版 SDK 的公开 Responses / Chat Completions 模型接入。客户端设置明确请求超时、`max_retries=0` 与禁止跨端点重定向，凭据由应用解析安全引用后传入；不设置可变全局客户端。通过公开 HTTP hook 在发出前检查序列化请求字节上限；模型输出 token 上限映射到所选协议，在 HTTP 读取阶段落实 `max_response_bytes`，不能读完整超大响应后才切片；usage 缺失不记为 0。供应商专有参数通过少量经验证的映射生成，不开放任意配置透传。
-- [ ] 对 `json_object` 路径，只用 SDK 公开模型设置或薄 `Model` 委托适配请求编码及 schema 提示，保留外层 `output_type` 的类型校验；工具选择和循环仍由 Runner 完成。验证工具 strict 参数、最终输出模式与推理字段的组合；必要字段不能与 Session 策略兼容的模式保持禁用。若公开接口无法满足某组合，记录不兼容原因，不删除校验或改写 SDK 私有代码，不将该 Profile 标为已支持。
-- [ ] 重跑本任务命令；预期所有已实现路径及拒绝路径 PASS。核对请求无未支持参数，假密钥不进入日志/错误/trace，Profile 指纹不含密钥值，客户端正常关闭。记录 SDK 实际类名、方法签名与三家验证矩阵；HTTP mock 通过仍不等于供应商真实验证通过。
-- [ ] 仅暂存本任务文件，提交 `feat: configure SDK model API profiles`。
+- [x] 编写 `test_sdk_responses_and_chat_completions_tool_roundtrip`、`test_json_object_still_validates_output_type`、`test_profiles_keep_keys_and_endpoints_separate`、`test_api_failure_has_no_retry_or_fallback`、`test_request_and_output_limits`。使用 HTTP mock transport 接真实 SDK Model 与 Runner，不以 scripted Model 冒充 API 适配测试；本任务最终回答先用测试文件内的简单 Pydantic schema，Task 5 再测真实 `AgentAnswer`。断言工具调用后确有模型续轮；JSON mode 缺字段/错类型/空内容不能返回成功；三个 Profile 的假密钥仅发往各自端点；401/403、429、503、超时和非法 JSON 无跨端点请求、无自动重试、无重复工具执行。
+- [x] 运行 `uv run --locked --extra dev python -m pytest tests/sdk_core/test_model_api.py -q`；预期因模型配置与装配缺失失败，mock transport 不建立外网连接。
+- [x] 实现上述配置与装配，使用锁定版 SDK 的公开 Responses / Chat Completions 模型接入。客户端设置明确请求超时、`max_retries=0` 与禁止跨端点重定向，凭据由应用解析安全引用后传入；不设置可变全局客户端。通过公开 HTTP hook 在发出前检查序列化请求字节上限；模型输出 token 上限映射到所选协议，在 HTTP 读取阶段落实 `max_response_bytes`，不能读完整超大响应后才切片；usage 缺失不记为 0。供应商专有参数通过少量经验证的映射生成，不开放任意配置透传。
+- [x] 对 `json_object` 路径，只用 SDK 公开模型设置或薄 `Model` 委托适配请求编码及 schema 提示，保留外层 `output_type` 的类型校验；工具选择和循环仍由 Runner 完成。验证工具 strict 参数、最终输出模式与推理字段的组合；必要字段不能与 Session 策略兼容的模式保持禁用。若公开接口无法满足某组合，记录不兼容原因，不删除校验或改写 SDK 私有代码，不将该 Profile 标为已支持。
+- [x] 重跑本任务命令；预期所有已实现路径及拒绝路径 PASS。核对请求无未支持参数，假密钥不进入日志/错误/trace，Profile 指纹不含密钥值，客户端正常关闭。记录 SDK 实际类名、方法签名与三家验证矩阵；HTTP mock 通过仍不等于供应商真实验证通过。
+- [x] 仅暂存本任务文件，提交 `feat: configure SDK model API profiles`。
+
+**Task 1B 实测记录（与计划的差异与发现）：**
+
+- SDK 类：`OpenAIResponsesModel(model, openai_client)`、`OpenAIChatCompletionsModel(model, openai_client)`；客户端为 `openai.AsyncOpenAI`，底层是 `httpx2.AsyncClient`（不是 `httpx`）。`open_model` 比计划多一个仅限关键字的 `transport` 参数，只替换最底层发送，供 mock transport 使用；限额与请求头约束始终生效。
+- **环境凭据泄漏（已修复）：** `AsyncOpenAI` 在构造时读取 `OPENAI_ORG_ID`、`OPENAI_PROJECT_ID`、`OPENAI_CUSTOM_HEADERS`，并随每个请求发送；`OPENAI_CUSTOM_HEADERS` 中的 `Authorization` 会覆盖显式传入的密钥。实测默认装配会把这些值发往 Gemini/DeepSeek 端点。首轮修复只按名字过滤请求头，审查证实同名环境头（`Host`、`Accept`、`Content-Type`、`Content-Length`）的值仍会外发。现 `_GuardedTransport` 不沿用 SDK 请求中的任何头值：`Host`、`Content-Length` 由 httpx 从可信 URL 与实际 body 生成，其余为固定协议值，`Authorization` 为本 Profile 的凭据。默认 `AsyncHTTPTransport` 显式 `trust_env=False`（外层客户端的 `trust_env` 不作用于它，否则 `SSL_CERT_FILE` 等会改变 TLS 配置）。
+- 请求/响应字节限额都在 transport 上落实（计划写的是 HTTP hook）：发出前检查序列化后的请求体；响应按实际读取的字节逐块计数，超限即停止，不依赖可伪造的 `Content-Length`；请求固定 `Accept-Encoding: identity` 并拒绝压缩响应（含错误响应），避免压缩体解压后绕过上限。
+- **Chat 终态（审查后修复）：** 锁定 SDK 只取第一个 choice，且只在没有任何文本、工具或 refusal 时拒绝 `finish_reason="length"`；转换为 `ModelResponse` 后终态丢失。因此截断但合法的 JSON 会成为成功答案，截断的工具调用会被执行。现 transport 在有界读取后、SDK 解析前要求每个 choice 的 `finish_reason` 属于 `stop`/`tool_calls`，截断、过滤、缺失或空 choices 一律拒绝。Responses 的 `status="incomplete"` 由 SDK 自身拒绝，不重复校验。成功响应必须是合法 JSON，流式（SSE）因此不开放。
+- **并行工具调用（审查后修复）：** `parallel_tool_calls=None` 时 SDK 不发送该字段，供应商默认通常开启；现显式 `False`。这只是请求参数，供应商仍可能返回多个调用，Task 2 须保留原子预算检查。
+- 重试与期限各有两层，任一层即可生效：`ModelSettings.retry=ModelRetrySettings(max_retries=0)` 会让 SDK 把客户端重试改为 0，客户端本身也是 `max_retries=0`；`AsyncOpenAI` 未传期限时沿用 `httpx2.AsyncClient` 的期限。反向验证只去掉一层时测试仍通过，两层同时去掉才失败。
+- Responses 路径显式 `store=False`；推理强度映射为 Responses 的 `reasoning.effort` 与 Chat Completions 的 `reasoning_effort`。允许值按供应商公开文档设定（DeepSeek 与 `openai_compatible` 暂不开放），未经真实 API 验证。
+- `api_key_ref` 只接受 `env:NAME`，`config.resolve_secret_ref` 解析；原始密钥误填入配置时校验失败。`data_policy_id` 已进入 Profile 与指纹，由 Task 5 装配到数据投影。
+- `json_object` 仅用于 Chat Completions：薄 `Model` 委托不把 schema 交给内层模型，改用 `extra_args={"response_format": {"type": "json_object"}}`，并在 system 说明末尾附 JSON Schema；Runner 仍按 `output_type` 校验。非法 JSON、缺字段、错类型抛 `ModelBehaviorError`；空内容或 `null` 不被当作最终输出，Runner 继续请求直到 `MaxTurnsExceeded`。
+- usage：SDK 把缺失的 usage 规范化为 0；`preserve_raw_usage=True` 后 `ModelResponse.raw_usage` 在未上报时为 `None`，Task 5 以此区分“未上报”和“为 0”。
+- 失败路径：401/403/429/503 抛 `APIStatusError`，超时抛 `APITimeoutError`，非法 JSON 成功响应抛 `ModelResponseRejectedError`；跨端点 307 不跟随（`APIStatusError`）。均只发出一次请求、工具只执行一次、无其他端点请求。**SDK 客户端把上游错误体放进异常消息**，原始异常不能直接展示或记录；Task 5 的应用出口必须映射为固定的受控失败。
+- 工具定义默认发送 `strict: true`；DeepSeek/Gemini 是否接受该字段及 JSON mode 与工具、推理字段的组合，只有 HTTP mock 证据。
+- 验证矩阵：OpenAI Responses、Gemini Chat Completions（json_schema）、DeepSeek Chat Completions（json_object）均**仅 HTTP mock 通过，真实 API 未验证**。
 
 ## Task 2：本地受治理工具、数据投影与 Evidence
 
