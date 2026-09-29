@@ -31,6 +31,7 @@ from tests.sdk_core.synthetic_tools import (
     catalog,
     context,
     ready_engine,
+    request,
     sdk_tool,
     store,
 )
@@ -197,8 +198,9 @@ class Harness:
 
 
 @asynccontextmanager
-async def harness(url: URL) -> AsyncIterator[Harness]:
-    grants, clock, adapter = Grants(), Clock(), RecordingAdapter(total=100)
+async def harness(url: URL, adapter: RecordingAdapter | None = None) -> AsyncIterator[Harness]:
+    grants, clock = Grants(), Clock()
+    adapter = adapter or RecordingAdapter(total=100)
     grants.grant("alice", TOTAL_TOOL)
     async with ready_engine(url) as engine:
         evidence = store(engine, grants, clock)
@@ -219,7 +221,8 @@ async def test_runner_session_filters_before_write(postgres_url: URL) -> None:
         await Runner.run(h.agent(model), "东区订单？", context=ctx, session=session)
         # SDK 已在运行中写入用户输入、工具配对与最终消息，但都只在暂存区。
         assert await h.stored() == []
-        assert '"total": 100' in _outputs(model.calls[1].input)[0]  # 本轮模型看到模型投影
+        # 本轮模型看到的是模型可达投影：共有字段 rows，不含只允许给模型的 total。
+        assert json.loads(_outputs(model.calls[1].input)[0])["data"].keys() == {"rows"}
 
         await session.commit_validated()
         stored = await h.stored()
@@ -249,8 +252,8 @@ async def test_valid_tool_pair_survives_followup(postgres_url: URL) -> None:
     assert [i["call_id"] for i in replayed if i.get("type") == "function_call"] == ["c1"]
     (output,) = _outputs(replayed)
     data = json.loads(output)["data"]
-    # 回放的是当前 Session 投影（region、rows），不是本轮模型投影，也不是保存的引用。
-    assert set(data) == {"region", "rows"}
+    # 回放内容受模型、Session 与渠道三者共同约束：只有共有字段 rows。
+    assert set(data) == {"rows"}
     assert PRIVATE_NOTE not in json.dumps(replayed, ensure_ascii=False)
     assert len(h.adapter.calls) == 1  # 追问不重跑工具
     assert result.final_output.evidence_ids
@@ -508,3 +511,174 @@ async def test_history_without_evidence_is_still_owned(postgres_url: URL, intrud
         else:
             ctx = context(channel="feishu", turn="t2")
         await h.refused(ctx)
+
+
+MODEL_ONLY_TOTAL = 987654321
+SESSION_ONLY = "SESSION_ONLY_REGION"
+SHARED = "SHARED_ROWS_MARKER"
+
+
+class _LabelledAdapter(RecordingAdapter):
+    """地区字段取固定标记值：它只允许进入 Session，模型不能从自己的参数得知。"""
+
+    async def execute(self, request: Any) -> Any:
+        observation = await super().execute(request)
+        return observation.model_copy(
+            update={"payload": {**observation.payload, "region": SESSION_ONLY}}
+        )
+
+
+def _copy_everything(next_call: str | None) -> ModelStep:
+    """脚本模型把看到的全部工具结果抄进中间文字、下一次工具参数或最终分析。"""
+
+    def respond(call: ModelCall) -> Any:
+        seen = "\n".join(_outputs(call.input))
+        if next_call is not None:
+            return [
+                assistant_message(seen),
+                function_call("order_total", {"region": seen}, call_id=next_call),
+            ]
+        evidence_id = json.loads(_outputs(call.input)[-1])["evidence_id"]
+        answer = {
+            "evidence_ids": [evidence_id],
+            "inferences": [{"text": seen, "evidence_ids": [evidence_id]}],
+            "clarification": None,
+        }
+        return [assistant_message(json.dumps(answer, ensure_ascii=False))]
+
+    return ModelStep.respond(respond)
+
+
+async def test_model_reachable_data_is_bounded_both_ways(postgres_url: URL) -> None:
+    """模型文字会落入 Session，Session 会回放给模型：两者都只能含三方共有的字段。"""
+    adapter = _LabelledAdapter(total=MODEL_ONLY_TOTAL, memo=SHARED)
+    async with harness(postgres_url, adapter) as h:
+        first, _ = await h.turn(
+            context(), [_call(), _copy_everything("c2"), _copy_everything(None)]
+        )
+        followup, _ = await h.turn(context(turn="t2"), [_cite()])
+        stored = json.dumps(await h.stored(), ensure_ascii=False)
+    to_model = json.dumps(
+        [c.input for c in first.calls] + [followup.calls[0].input], ensure_ascii=False
+    )
+    # Model-only 字段不会被模型抄进文字、工具参数后落库。
+    assert str(MODEL_ONLY_TOTAL) not in stored
+    # Session-only 字段不会在回放中进入模型。
+    assert SESSION_ONLY not in to_model
+    # 对照：共有字段经模型文字保存，并在下一轮正常回放。
+    assert SHARED in stored
+    assert SHARED in json.dumps(followup.calls[0].input, ensure_ascii=False)
+
+
+async def test_orphan_sdk_history_is_not_claimed(postgres_url: URL) -> None:
+    """应用元数据缺失而底层已有历史：不自动登记归属，也不返回历史。"""
+    async with harness(postgres_url) as h:
+        orphan = [
+            {"role": "user", "content": "ORPHAN_USER_TEXT"},
+            {"role": "assistant", "content": "ORPHAN_ASSISTANT_TEXT"},
+        ]
+        await h.inner().add_items(orphan)  # type: ignore[arg-type]
+        await h.refused(context())
+        with pytest.raises(SessionUnavailableError):
+            await h.session(context()).clear_session()
+        assert await h.state() is None
+        assert len(await h.stored()) == 2
+        # 对照：空的底层 Session 正常登记并运行。
+        await h.turn(context(session="s2"), [_call(), _cite()])
+        assert await h.state("s2") == ("active", 1)
+
+
+async def _rewrite(h: Harness, change: Any) -> None:
+    """直接改写 SDK 表中的保存项，模拟历史被篡改。"""
+    async with h.engine.begin() as conn:
+        rows = (await conn.execute(text("SELECT id, message_data FROM agent_messages"))).all()
+        items = {row[0]: json.loads(row[1]) for row in rows}
+        change(list(items.values()))
+        for row_id, item in items.items():
+            await conn.execute(
+                text("UPDATE agent_messages SET message_data = :d WHERE id = :id"),
+                {"d": json.dumps(item, ensure_ascii=False), "id": row_id},
+            )
+
+
+def _of(items: list[dict[str, Any]], kind: str, call_id: str) -> dict[str, Any]:
+    (found,) = [i for i in items if i.get("type") == kind and i.get("call_id") == call_id]
+    return found
+
+
+def _rename(items: list[dict[str, Any]]) -> None:
+    _of(items, "function_call", "c1")["name"] = "run_query"
+
+
+def _reargue(items: list[dict[str, Any]]) -> None:
+    _of(items, "function_call", "c1")["arguments"] = json.dumps({"region": "west"})
+
+
+def _recall(items: list[dict[str, Any]]) -> None:
+    _of(items, "function_call", "c1")["call_id"] = "c9"
+    _of(items, "function_call_output", "c1")["call_id"] = "c9"
+
+
+def _unparsable(items: list[dict[str, Any]]) -> None:
+    _of(items, "function_call", "c1")["arguments"] = "region=east"
+
+
+def _swap(items: list[dict[str, Any]]) -> None:
+    first, second = (
+        _of(items, "function_call_output", "c1"),
+        _of(items, "function_call_output", "c2"),
+    )
+    first["output"], second["output"] = second["output"], first["output"]
+
+
+@pytest.mark.parametrize(
+    "change",
+    [None, _rename, _reargue, _unparsable, _recall, _swap],
+    ids=["intact", "tool-name", "arguments", "unparsable-arguments", "call-id", "evidence-ref"],
+)
+async def test_replay_binds_evidence_to_the_whole_call(postgres_url: URL, change: Any) -> None:
+    west = [function_call("order_total", {"region": "west"}, call_id="c2")]
+    async with harness(postgres_url) as h:
+        await h.turn(context(), [_call(), _cite()])
+        await h.turn(context(turn="t2"), [west, _cite()])
+        if change is None:
+            followup, _ = await h.turn(context(turn="t3"), [_cite()])
+            assert len(_outputs(followup.calls[0].input)) == 2
+        else:
+            await _rewrite(h, change)
+            await h.refused(context(turn="t3"))
+
+
+@pytest.mark.parametrize(
+    ("name", "arguments", "accepted"),
+    [
+        ("order_total", {"region": "east"}, True),
+        ("run_query", {"region": "east"}, False),
+        ("order_total", {"region": "west"}, False),
+        ("order_total", None, False),
+        (None, None, False),
+    ],
+    ids=["intact", "tool-name", "arguments", "unparsable-arguments", "no-call"],
+)
+async def test_staging_binds_evidence_to_the_whole_call(
+    postgres_url: URL, name: str | None, arguments: dict[str, str] | None, accepted: bool
+) -> None:
+    async with harness(postgres_url) as h:
+        ctx = context()
+        req = request(call_id="c7")
+        observation = await h.adapter.execute(req)
+        envelope = (await h.evidence.record(ctx, req, observation)).model_content
+        call = {
+            "type": "function_call",
+            "call_id": "c7",
+            "name": name,
+            "arguments": "region=east" if arguments is None else json.dumps(arguments),
+        }
+        output = {"type": "function_call_output", "call_id": "c7", "output": envelope}
+        batch = [output] if name is None else [call, output]
+        session = h.session(ctx)
+        if accepted:
+            await session.add_items(batch)  # type: ignore[arg-type]
+        else:
+            with pytest.raises(SessionItemRejectedError):
+                await session.add_items(batch)  # type: ignore[arg-type]

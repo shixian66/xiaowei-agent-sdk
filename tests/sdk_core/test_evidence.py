@@ -79,10 +79,12 @@ async def _saved_text(engine: AsyncEngine) -> str:
 
 
 def _expected_fields(audience: Audience, channel: Channel) -> set[str]:
-    """模型与 Session 内容最终可能经模型文字到达渠道，因此受接收渠道字段约束。"""
+    """模型文字会写入 Session 并到达渠道，Session 又回放给模型：两者受三方共同字段约束。"""
     declared = set(PROJECTIONS[audience].fields)
     if audience in ("model", "session"):
-        return declared & set(PROJECTIONS[channel].fields)
+        return declared.intersection(
+            *(PROJECTIONS[a].fields for a in ("model", "session", channel))
+        )
     return declared
 
 
@@ -112,7 +114,8 @@ async def test_four_data_boundaries(postgres_url: URL) -> None:
                 assert set(model_data(content)["data"]) == _expected_fields(audience, channel)  # type: ignore[arg-type]
                 assert len(content.encode()) <= PROJECTIONS[audience].max_bytes
                 assert PRIVATE_NOTE not in content
-            assert len(set(views.values())) == len(views)
+            # 模型与 Session 的有效范围相同（模型可达内容）；渠道展示是另一份投影。
+            assert views["model"] == views["session"] != views[channel]
 
         # 渠道投影只交给相应渠道：Web 会话里的证据不能投影给飞书，反之亦然。
         with pytest.raises(EvidenceUnavailableError):
@@ -134,13 +137,13 @@ async def test_truncated_and_empty_results_are_explicit(postgres_url: URL) -> No
     async with ready_engine(postgres_url) as engine:
         evidence = store(engine, grants, clock)
 
-        # 行数较多：模型上限放不下 rows，按字段整体省略并标明截断；Web 上限更大，仍完整。
+        # 行数多：模型上限放不下 rows，整体省略并标明截断（不是空结果）；Web 上限更大，仍完整。
         many = await evidence.record(
             context(), request(), await RecordingAdapter(rows=30).execute(request())
         )
         model = model_data(many.model_content)
-        assert many.truncated and model["truncated"] is True
-        assert set(model["data"]) == {"total"}  # type: ignore[arg-type]
+        assert many.truncated and model["truncated"] is True and model["empty"] is False
+        assert model["data"] == {}
         web = model_data(await evidence.project(many.evidence_id, context(), "web"))
         assert web["truncated"] is False and len(web["data"]["rows"]) == 30  # type: ignore[index]
 

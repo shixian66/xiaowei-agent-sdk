@@ -16,6 +16,8 @@ CREATE TABLE xiaowei_evidence (
     target_id text NOT NULL,
     tool_id text NOT NULL,
     call_id text NOT NULL,
+    tool_name text NOT NULL,
+    arguments_digest text NOT NULL,
     policy_id text NOT NULL,
     policy_fingerprint text NOT NULL,
     captured_at timestamptz NOT NULL,

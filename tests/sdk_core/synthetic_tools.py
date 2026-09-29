@@ -155,7 +155,11 @@ def request(
     tool_id: str = TOTAL_TOOL, region: str = "east", call_id: str = "call-1"
 ) -> ToolRequest:
     return ToolRequest(
-        tool_id=tool_id, target_id=TARGET, call_id=call_id, arguments={"region": region}
+        tool_id=tool_id,
+        target_id=TARGET,
+        call_id=call_id,
+        tool_name=tool_id.split("/", 1)[1],
+        arguments={"region": region},
     )
 
 
@@ -170,6 +174,7 @@ def sdk_tool(governed: GovernedTools, adapter: RecordingAdapter, tool_id: str) -
             tool_id=tool_id,
             target_id=TARGET,
             call_id=ctx.tool_call_id,
+            tool_name=ctx.tool_name,
             arguments={"region": region},
         )
         result = await governed.invoke(ctx.context, req, lambda: adapter.execute(req))
