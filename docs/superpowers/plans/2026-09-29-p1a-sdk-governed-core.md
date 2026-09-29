@@ -61,7 +61,7 @@
 - `Budget(max_turns: int, max_tool_calls: int, timeout_seconds: float)` 为正数上限；工具次数计数器按可信 subject/session/turn 键在治理对象内部隔离，并在轮次结束时清理，不是模型可改字段。
 - `RunContext(identity: Identity, target_scope: frozenset[str], tool_scope: frozenset[str], budget: Budget, evidence_ids: tuple[str, ...])`；无任意对象扩展字段。用途选择在应用入口转换为本轮 `tool_scope`，不向 context 塞入客户端或额外的授权引擎。
 - `ToolContract(tool_id: str, target_id: str, input_schema: dict[str, object], policy_id: str)` 为启动时获准的契约；`tool_id` 使用 `local/name` 或 `server_id/name`。参数与结果策略由 `policy_id` 对应的明确 Python 函数提供，不设计策略 DSL。
-- `ToolRequest(tool_id: str, target_id: str, arguments: dict[str, object])`；`ToolObservation(payload: dict[str, object], captured_at: datetime, truncated: bool)` 只容纳已限制读取大小的临时结果，不自动序列化给模型。
+- `ToolRequest(tool_id: str, target_id: str, call_id: str, arguments: dict[str, object])`，`call_id` 取自 SDK 工具上下文；`ToolObservation(payload: dict[str, object], captured_at: datetime, truncated: bool)` 只容纳已限制读取大小的临时结果，不自动序列化给模型。
 - `EvidenceRecord` 包含代码生成的 `evidence_id`、可信身份/会话、target/tool/call 标识、采集与过期时间、截断状态及各用途获准内容；持久化不保留原始结果。
 - `ToolResult(evidence_id: str, model_content: str, truncated: bool)` 仅为模型可见内容。`AnswerInference(text: str, evidence_ids: tuple[str, ...])` 和 `AgentAnswer(evidence_ids: tuple[str, ...], inferences: list[AnswerInference], clarification: str | None)` 作为 `output_type`；不让模型提交“已核实数值/实际 SQL”等事实字段。每条分析必须有有效引用，且属于回答选择的 Evidence；代码从这些记录的获准投影生成事实区域，分析单独标注。澄清不允许展示查询结果或与结果/分析混用；自由文字的语义仍靠评测，不能把 schema 校验当作事实验证。
 - `Delivery(content: str, evidence_ids: tuple[str, ...], channel: Channel)` 是通过验证的渠道输出；同一回答也要按接收渠道重新生成。
@@ -122,16 +122,27 @@
 
 ## Task 2：本地受治理工具、数据投影与 Evidence
 
-**Files:** Modify `src/xiaowei/storage.py`；Create `src/xiaowei/models.py`、`src/xiaowei/governance.py`、`src/xiaowei/evidence.py`、`migrations/sdk_app/001_initial.sql`、`tests/sdk_core/test_governance.py`、`tests/sdk_core/test_evidence.py`。
+**Files:** Modify `src/xiaowei/storage.py`；Create `src/xiaowei/models.py`、`src/xiaowei/governance.py`、`src/xiaowei/evidence.py`、`src/xiaowei/migrations/001_initial.sql`（随 wheel 打包）、`tests/sdk_core/synthetic_tools.py`、`tests/sdk_core/test_governance.py`、`tests/sdk_core/test_evidence.py`。
 
 **Interfaces:** 定义上文类型；`GovernedTools.allowed_contracts(ctx: RunContext) -> list[ToolContract]`、`async GovernedTools.invoke(ctx: RunContext, request: ToolRequest, execute: Callable[[], Awaitable[ToolObservation]]) -> ToolResult`。依赖通过构造器装配，`execute` 只能由应用绑定，模型不能提供。`async EvidenceStore.record(ctx: RunContext, request: ToolRequest, observation: ToolObservation) -> ToolResult`；`async EvidenceStore.project(evidence_id: str, ctx: RunContext, audience: Literal["model", "session", "web", "feishu"]) -> str`；`async EvidenceStore.validate_answer(answer: AgentAnswer, ctx: RunContext) -> Delivery`。存储使用 SQLAlchemy / asyncpg 操作独立的 PostgreSQL 应用表，当前授权查询由应用提供的回调执行。首次应用表含 Evidence、Session 元数据与 schema 版本；版本化 SQL 只作用于应用表，由显式初始化/升级路径执行并检查版本，不建设通用迁移框架。
 
-- [ ] 编写 `test_revoked_tool_never_reaches_io`、`test_parallel_calls_share_one_budget`、`test_context_rejects_dependencies`、`test_four_data_boundaries`、`test_forged_foreign_expired_evidence_is_denied`、`test_query_claim_without_evidence_is_denied`。关键断言：拒绝时 `recorded_calls == []`；上限 1 时两个并行请求总执行数为 1；原始合成字段 `private_note` 不出现在模型/Session/渠道；为四种投影设置不同字段/字节上限并分别满足；撤权后不能读取已保存内容。
-- [ ] 编写 `test_diagnose_scope_hides_and_denies_query`、`test_facts_are_rendered_from_evidence`、`test_app_schema_version_is_checked`。用合成查询工具验证：即使用户拥有查询权限，诊断轮也不展示且强行调用零 I/O；真实值 100 的事实区域只能由 Evidence 生成，模型额外提交事实数值字段被拒绝，分析里的文字不被放入事实区域；SDK 与应用表互不改写，版本不匹配拒绝使用。测试不声称能够识别任意自然语言中的错误推断。
-- [ ] 运行 `uv run --locked --extra dev python -m pytest tests/sdk_core/test_governance.py tests/sdk_core/test_evidence.py -q`；预期因缺少新类型/行为失败。
-- [ ] 实现上述类型与最少服务方法。允许集合来自可信配置并受本轮 Tool Scope 限制，实际调用时复核目标、契约、参数与最新权限，原子预占工具预算。用仅测试存在的合成 function tools/recording adapter 验证；不包装成伪 StarRocks。代码生成证据 ID，按用途投影后才写入 Evidence；未知投影规则拒绝。事实区域由代码从引用的获准投影生成，分析单独标注并验证引用；回答类型拒绝额外事实字段。错误转成有限、安全的工具失败，不携带 raw payload。
-- [ ] 重跑本任务命令；预期全部 PASS。确认不同用户/会话/渠道不能读取彼此证据，截断和空结果都有明确语义，真实 PostgreSQL 保存内容不含合成禁止字段，重建存储对象后归属/权限/过期检查仍成立。
-- [ ] 仅暂存本任务文件，提交 `feat: govern tool execution and evidence boundaries`。
+- [x] 编写 `test_revoked_tool_never_reaches_io`、`test_parallel_calls_share_one_budget`、`test_context_rejects_dependencies`、`test_four_data_boundaries`、`test_forged_foreign_expired_evidence_is_denied`、`test_query_claim_without_evidence_is_denied`。关键断言：拒绝时 `recorded_calls == []`；上限 1 时两个并行请求总执行数为 1；原始合成字段 `private_note` 不出现在模型/Session/渠道；为四种投影设置不同字段/字节上限并分别满足；撤权后不能读取已保存内容。
+- [x] 编写 `test_diagnose_scope_hides_and_denies_query`、`test_facts_are_rendered_from_evidence`、`test_app_schema_version_is_checked`。用合成查询工具验证：即使用户拥有查询权限，诊断轮也不展示且强行调用零 I/O；真实值 100 的事实区域只能由 Evidence 生成，模型额外提交事实数值字段被拒绝，分析里的文字不被放入事实区域；SDK 与应用表互不改写，版本不匹配拒绝使用。测试不声称能够识别任意自然语言中的错误推断。
+- [x] 运行 `uv run --locked --extra dev python -m pytest tests/sdk_core/test_governance.py tests/sdk_core/test_evidence.py -q`；预期因缺少新类型/行为失败。
+- [x] 实现上述类型与最少服务方法。允许集合来自可信配置并受本轮 Tool Scope 限制，实际调用时复核目标、契约、参数与最新权限，原子预占工具预算。用仅测试存在的合成 function tools/recording adapter 验证；不包装成伪 StarRocks。代码生成证据 ID，按用途投影后才写入 Evidence；未知投影规则拒绝。事实区域由代码从引用的获准投影生成，分析单独标注并验证引用；回答类型拒绝额外事实字段。错误转成有限、安全的工具失败，不携带 raw payload。
+- [x] 重跑本任务命令；预期全部 PASS。确认不同用户/会话/渠道不能读取彼此证据，截断和空结果都有明确语义，真实 PostgreSQL 保存内容不含合成禁止字段，重建存储对象后归属/权限/过期检查仍成立。
+- [x] 仅暂存本任务文件，提交 `feat: govern tool execution and evidence boundaries`。
+
+**Task 2 实测记录（与计划的差异与发现）：**
+
+- 迁移 SQL 放在包内 `src/xiaowei/migrations/001_initial.sql`（计划写 `migrations/sdk_app/`），随 wheel 发布，由 `importlib.resources` 读取。`initialize_storage` 在一个事务内加咨询锁、只在未安装时执行；SQLAlchemy 的 asyncpg 适配层不支持一次多语句，因此按行尾分号逐条执行。`check_storage` 同时要求 SDK 表、应用表与版本 1，版本不符抛 `StorageVersionMismatchError`，初始化也不自动升级。
+- 首版应用表只有 `xiaowei_schema_version` 与 `xiaowei_evidence`。Session 元数据（Profile 绑定、失效、封存）没有 Task 2 消费者，移到 Task 3 与 `PolicySession` 一起定义（v1 尚未发布，Task 3 直接修改 001 或新增 002 由该任务决定）。
+- `ToolRequest` 增加 `call_id`；`ToolPolicy(policy_id, arguments: type[BaseModel], projections)` 用 Pydantic 参数模型校验参数（须 `extra="forbid"`），`ToolCatalog` 启动时要求契约 `input_schema` 与参数模型的 JSON Schema 一致、每个策略恰好定义四种用途投影，否则拒绝装配。
+- 投影按声明字段顺序整体纳入顶层字段，超出字节上限的字段整体省略并标 `truncated`，不切开字段值；`empty` 表示结果中没有任何获准字段；来源截断在各用途都保留。Evidence 行只保存四份投影与可信元数据，不含原始结果。
+- 读取复核：归属（subject/session/channel）写在 SQL 条件中，再查过期（应用时钟）、当前 Target Scope 与应用授权回调；Web/飞书投影只交给相同渠道。伪造、他人、撤权、过期返回同一信息。Tool Scope 不参与读取：诊断轮可引用本会话已有证据，但不能执行查询。
+- 治理顺序：契约/目标 → 本轮范围 → 参数 → 授权回调 → 预算预占 → 执行 → Evidence。结构性拒绝不调用授权回调、不耗预算；预占与检查之间没有 `await`，SDK 并行执行的两个调用只有一个越过上限。执行失败不退还预算，异常以固定信息抛出且不带原因链。计数在 `GovernedTools` 进程内，Task 5 在轮次结束调用 `end_turn`。
+- `AgentAnswer` 禁止额外字段：模型多提交 `verified_total` 时 SDK 抛 `ModelBehaviorError`。`validate_answer` 要求非澄清回答至少一个引用、无重复、每条分析有引用且属于回答所选证据，澄清不能与引用或分析混用；事实区域只由接收渠道的投影生成，分析区单独标注为模型推断。自由文字中的错误推断无法由代码识别。
+- 可信类型原计划启用 Pydantic `strict`；反向验证表明阻止依赖对象的是 `extra="forbid"` 与字段类型，`strict` 不承重，已去掉。
 
 ## Task 3：原生 Session 的存储前与回放前策略
 
