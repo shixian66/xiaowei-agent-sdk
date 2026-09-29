@@ -18,12 +18,17 @@ import pytest
 import uvicorn
 from mcp.server.mcpserver import MCPServer as FixtureMCPServer
 from sqlalchemy import text
-from sqlalchemy.engine import URL, make_url
+from sqlalchemy.engine import URL
 from sqlalchemy.ext.asyncio import create_async_engine
+from tests.sdk_core.postgres_harness import (
+    LOOPBACK,
+    HarnessMisconfiguredError,
+    parse_admin_url,
+    verify_test_instance,
+)
 
 from xiaowei.config import configure_runtime
 
-LOOPBACK = "127.0.0.1"
 POSTGRES_URL_ENV = "SDK_TEST_POSTGRES_URL"
 _TEST_DB_PREFIX = "xw_sdk_test_"
 _POSTGRES_URL_STASH: pytest.StashKey[str | None] = pytest.StashKey()
@@ -52,10 +57,10 @@ def _admin_url(config: pytest.Config) -> URL:
         pytest.fail(
             f"{POSTGRES_URL_ENV} 未设置：需要隔离的真实 PostgreSQL，见 compose.sdk-test.yml"
         )
-    url = make_url(raw)
-    if url.drivername != "postgresql+asyncpg" or url.host != LOOPBACK:
-        pytest.fail(f"{POSTGRES_URL_ENV} 必须是 {LOOPBACK} 上的 postgresql+asyncpg 测试实例")
-    return url
+    try:
+        return parse_admin_url(raw)
+    except HarnessMisconfiguredError as exc:
+        pytest.fail(f"{POSTGRES_URL_ENV} {exc}")
 
 
 @pytest.fixture
@@ -66,6 +71,10 @@ async def postgres_url(request: pytest.FixtureRequest) -> AsyncIterator[URL]:
     engine = create_async_engine(admin, isolation_level="AUTOCOMMIT")
     try:
         async with engine.connect() as conn:
+            try:
+                await verify_test_instance(conn)
+            except HarnessMisconfiguredError as exc:
+                pytest.fail(f"{POSTGRES_URL_ENV} {exc}")
             await conn.execute(text(f'CREATE DATABASE "{name}"'))
         yield admin.set(database=name)
         async with engine.connect() as conn:

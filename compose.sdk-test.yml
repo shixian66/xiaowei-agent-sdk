@@ -6,12 +6,15 @@
 #   docker-compose -p xiaowei-sdk-test -f compose.sdk-test.yml down -v
 #
 # 端口只发布到 loopback；数据放 tmpfs，down 后不留卷。trust 认证仅限这个一次性本机实例，
-# 因此仓库里没有任何口令。测试 fixture 在其中为每次运行新建并删除独立数据库。
+# 因此仓库里没有任何口令。测试 fixture 只接受上面这一个管理地址，并在执行 DDL 前核对
+# 服务器的 cluster_name；通过后才在其中为每个用例新建并删除独立数据库。
 name: xiaowei-sdk-test
 
 services:
   postgres:
-    image: postgres:16.15-bookworm
+    image: postgres:16.15-bookworm@sha256:bb3e1a57e5407e0a5280b4211980a5e537f4abd234a87014ac979849a78dd825
+    # cluster_name 是实例标识：测试 fixture 在任何 DDL 之前用 SHOW cluster_name 核对。
+    command: ["postgres", "-c", "cluster_name=xiaowei-sdk-test"]
     environment:
       POSTGRES_HOST_AUTH_METHOD: trust
     ports:

@@ -24,7 +24,8 @@ import pytest
 pytestmark = pytest.mark.security
 
 _ROOT = Path(__file__).resolve().parents[2]
-_SRC = _ROOT / "src" / "xiaowei_agent"
+# 扫描整个 src/：新包 xiaowei 与过渡期旧包 xiaowei_agent 都受同一条导入禁令约束。
+_SRC = _ROOT / "src"
 
 # ``[project].dependencies`` 的包名集合——新增任何一项都必须先改这里，
 # 从而必须在 review 里被看见。P1-A Task 1 按新产品方向加入 OpenAI Agents SDK
