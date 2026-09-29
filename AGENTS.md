@@ -1,165 +1,81 @@
-# AGENTS.md
+# 小维产品开发规则
 
-## 项目身份
+**OpenAI Agents SDK 负责 Agent Loop；小维负责权限、受治理工具执行、证据真实性和数据边界。**
 
-这是从 0 开始建设的小维 Agent 2.0 项目，目标是提供一套可持续扩展的、策略治理的运维工作流 Agent。
+按资深 Python 首席架构师与 Agent 开发专家的标准交付：严谨、Pythonic、可维护、能运行、可验证。使用简洁中文，依据事实判断；旧代码只是可选素材，兼容旧架构不是目标。
 
-旧项目 `/Users/kloenguyen/Documents/ivor_aiops` 只作为行为参考、问题样本和安全边界的 oracle，不是本项目的代码依赖，也不是本项目当前状态的事实来源。新项目的事实必须以本目录中的代码、测试、运行证据和 `AGENT_HANDOFF.md` 为准。
+## 1. 接手与文档分工
 
-## 优先阅读
+首次进入任务按下表顺序阅读五份文档，再读取当前切片计划和涉及的源码、测试。继续同一任务时先核对用户新指令、`git status --short`、`git rev-parse HEAD` 和相关差异，复用未变化的上下文，不反复全仓扫描。
 
-开始任何任务前按以下顺序阅读：
+| 文档 | 唯一维护内容 |
+| --- | --- |
+| 本文 | AI 与人的协作、开发和验证规则 |
+| [ARCHITECTURE.md](ARCHITECTURE.md) | 产品范围、架构决策、数据与执行边界 |
+| [AGENT_HANDOFF.md](AGENT_HANDOFF.md) | 当前代码与计划状态、验证证据、缺口、下一项工作 |
+| [README.md](README.md) | 产品介绍、环境准备和已验证的使用方法 |
+| [DEVELOPMENT_PLAN.md](DEVELOPMENT_PLAN.md) | 阶段交付、实施顺序和退出条件 |
 
-1. 本文件：稳定的协作、代码和安全规则。
-2. `ARCHITECTURE.md`：目标架构、模块边界和不可破坏的契约。
-3. `AGENT_HANDOFF.md`：当前阶段、已验证事实、风险和下一步。
-4. `README.md`：人类开发者的启动和导航信息。
-5. `DEVELOPMENT_PLAN.md`：里程碑顺序、决策门、交付物和退出标准。
+当前用户明确指令优先于仓库旧约定；文档按各自责任维护，不以“文件更多”决定权威。发现事实冲突先核对 Git、源码和实际输出，修正对应文档；涉及产品范围或权限边界的冲突才向用户确认。旧 ADR、里程碑、CI 与运行记录只证明旧系统，不约束新产品设计，也不证明新产品可用。
 
-编辑前必须先检查目标文件和相关调用链，不基于文件名或旧项目经验猜测实现。发现文档与代码冲突时，报告冲突及证据，不要静默选择一方。
+## 2. Vibe Coding 的工作节奏
 
-## 继承自 ivor_aiops 的开发习惯
+用户负责目标、取舍和验收，AI 负责把任务做成可运行、可审阅的结果。每次围绕一个能验证的交付工作，不把“继续开发”扩大成同时实现所有阶段。
 
-本项目明确继承以下工程纪律：
+1. **明确本次结果。** 从当前指令和 handoff 确认目标、范围、验收方式及不做事项；能从已有上下文确定的内容不重复提问。
+2. **只细化当前任务。** 简单文档和局部修复用简短说明即可；跨模块或边界变更写清接口、失败行为和验证方法。已有计划直接补齐，不另建重复的需求表、Context Pack 或计划体系。
+3. **实现最小闭环。** 默认在当前任务中串行完成一个可独立验证的单元。先用 SDK 公开能力；依赖、签名或行为不确定时先做小实验，不凭在线示例批量生成代码。
+4. **边做边验证。** 按第 5 节选择检查。出现失败先定位原因；不能靠删断言、放宽权限、吞异常或伪造成功让检查变绿。
+5. **审查真实差异。** 检查任务范围、边界、可维护性和失败路径；高风险改动与阶段交付需要独立审查，普通文档修订不强制增加多轮评审。
+6. **留下可接续的结果。** 选择性提交，记录验证与缺口，更新 handoff 的下一项工作；继续推进已授权范围，不逐文件、逐命令请求同一许可。
 
-- 所有用户可见回复使用简洁中文。
-- 尊重事实高于迎合观点；结论区分“源码事实、测试验证、运行验证、部署验证、用户验收”和“只读推理”。
-- 先确认问题的真实调用链、边界和复现条件，再提出架构或代码改动。
-- 变更保持小范围、单一目的、可回滚；一个 PR 原则上只处理一个根因或一个垂直能力闭环。
-- Claude 负责计划和实现，Codex 负责基于精确 commit SHA 的审查与验收；不以 PR 描述替代真实 diff。
-- 新工作从最新 `main` 创建 `claude/<topic>` 分支；不直接在 `main` 上开发，不自行合并。
-- 非平凡行为变更必须留下持久资产：回归测试、契约测试、eval、知识/SOP 或配置护栏中的至少一项。
-- 不伪造测试、部署或线上验证结果。没有执行就明确写“未验证”。
-- 不使用 `git add -A`，只暂存本次任务明确涉及的文件；保留他人的修改和未跟踪文件。
-- 禁止把 secret、token、password、webhook、连接串或真实生产数据写入代码、日志、测试夹具、文档和提交记录。
-- 脱敏测试需要「看起来像 secret」的输入才能证明脱敏有效，因此**伪造字面量一律拆开写**（`"hunter" + "2-plain"`、`"token=" + _FAKE`），使它在源码里从不构成连续可扫描串。连续写法会被 CI 的 `secret-scan` 拦下，且**一旦提交就进了历史**——只能靠豁免或重写历史清除，两者代价都不小。本地由 `tests/security/test_secret_shaped_literals.py` 在 `python -m pytest -m security -q` 内前置拦截。
+合理且可逆的实现细节由 AI 决定，并说明关键假设。只有影响产品方向、权限/数据范围、破坏性操作或缺少不可替代信息时才询问；只暂停依赖该答案的部分。缺少真实服务时继续独立离线工作，保留实战缺口。执行方式或技能选择本身不是额外审批门。
 
-## 不可破坏的运行边界
+用户可按“目标 + 本次范围 + 完成判据”给任务；未写全时由 AI 从当前文档补齐，不要求用户填写固定模板。技能与工具服务于交付，不要求安装一套插件才能开发。
 
-下面的边界优先于便利性、模型能力和框架默认行为。**授权边界（真实调用许可、E1 写权限、租户与环境上下文）的规范真源是 [ADR-007](docs/adr/ADR-007-first-capabilities-execution-context-and-live-call-authorization.md)；本节是必须随时可读的摘要，冲突时以 ADR-007 为准，并回头修正本节。**
+## 3. 不可绕过的架构约束
 
-1. **LLM 不拥有执行权。** 模型最多产生结构化 `IntentDraft`、解释性 `Advisory` 或候选线索；它不能决定最终 capability、目标、可执行 SQL、审批结果、写操作或工具调用顺序。
-2. **真实执行走确定性链路。** 统一链路为：
+详细契约只在 [ARCHITECTURE.md](ARCHITECTURE.md) 维护；下面是改代码时必须核对的边界。
 
-   `IntentDraft → CapabilityResolver → PlanCompiler → WorkflowRunner(step) → StepAdmission(ToolPolicy → SQLGuard → ApprovalGate*) → ToolGateway → Readback（需要时）→ Evidence → Outcome`
+1. **SDK 是唯一 Agent Loop。** 使用公开 Agent、Runner、Model、function tools、Session 等能力；不重建 Planner/Resolver、能力 DSL、通用调度或另一套模型工具循环。首版单 Agent、单进程。
+2. **模型服务可选，授权来自配置。** OpenAI/Gemini/DeepSeek 通过可信 Model Profile 接入；每个端点/协议/模型组合单独验证，一轮一个模型，不自动跨厂商 fallback。换供应商、端点、协议或模型开新会话；不能为兼容 JSON mode 取消最终类型和 Evidence 验证。
+3. **Context 不携带依赖。** RunContext 只放可信身份、Target Scope、Tool Scope、预算及必要 Evidence 标识/元数据；禁止凭据、连接串、连接、客户端及可间接取得它们的服务引用。应用装配依赖，工具闭包只访问受治理服务。
+4. **先治理，再 I/O。** 本地 function tool 经 Governed Tool Layer 进入 Adapter；MCP 请求发出前复用治理核心。动态工具集合提前隐藏不支持/无权限能力，调用时仍复核当前权限、参数、目标和预算；禁止并发修改共享 Agent 的 tools。
+5. **MCP 只负责标准接入。** 直接使用 SDK 官方客户端能力，静态可信配置、空配置可运行；未知风险或契约不匹配的工具不开放。客户端治理不替代远端 Server 的执行约束，首版不自建业务 MCP Server。
+6. **首版只读。** SQL AST、真实只读账号、对象/函数范围和资源限额共同约束查询；入口按本轮明确的查询/诊断选择收窄 Tool Scope，不沿用上一轮查询许可。诊断轮隐藏实际查询工具，调用前仍拒绝，不执行被分析 SQL 或 EXPLAIN ANALYZE。模型意图不授予权限，工具 effect/risk 由可信代码定义。未来生产写按通用 Action 管理，明确展示并取得有权限用户确认，再复核 Policy / Approval / Action Binding；改动关键内容须重新确认，未知执行结果不自动重试。首版不预建写操作框架。
+7. **四种数据边界独立。** 原始结果、模型、Session 和 Web/飞书展示各有字段、容量、保留与接收权限；不能把同一 payload 无条件传遍各层。Evidence 只保存获准的最小事实，不作原始数据仓库。
+8. **结构正确不等于证据真实。** 最终持久化、发送、历史读取和重发均验证 Evidence 存在、来源、归属及当前数据/接收权限；关键数值、实际 SQL 和结果表格由代码从获准证据生成，模型解释单列为推断。失败阻断相关回答，真实引用不替代对诊断推断的质量验证。
+9. **会话与执行有界。** SDK Session 为唯一会话接口，首版正式后端为 SQLAlchemySession + PostgreSQL；SDK 表与应用表独立归属，写入前和回放前过滤。同会话不并发运行；限制轮次、工具数、期限和输入输出，历史超限提示新建，过期数据禁止读取。取消不代表远端已停止，结果不明不自动重放；引入 PostgreSQL 不引入旧 TaskStore、Worker 或分布式调度。
+10. **Tracing 默认关闭。** 显式关闭 SDK tracing 与 trace 外发；真实数据 trace 只能限范围、限时开启，凭据始终禁止。关闭 tracing 不等于模型 API 不接收数据。
 
-   `ApprovalGate` 由 Runner 在具体副作用步骤前调用；具体领域可以有额外的确定性 precheck，但不得跳过这条安全链。
-3. **入口层必须薄。** Web、飞书、CLI 和 API handler 只负责协议解析、鉴权上下文传递和 `RenderPayload` 渲染；不放业务路由、SQL 合成、巡检评分、审批判断或工具执行。
-4. **工具只能经 `ToolGateway` 进入。** 领域层不能直接持有 MySQL、StarRocks、Prometheus、Kafka、Kubernetes 或其他基础设施客户端。
-5. **SQL 必须确定性生成并经 AST 校验。** 执行 SQL 不来自模型原文；SQL 形状校验使用 `sqlglot` AST 和策略规则，不能把正则作为唯一安全边界。
-6. **审批是执行中断点，不是入口总开关。** `WorkflowRunner` 执行到具体副作用步骤前调用 Runtime 的 `ApprovalGate`；未审批就持久化暂停。恢复时必须重新解析身份、目标、策略和当前状态，并重新计算 `plan_hash` 与 `target_fingerprint`，不匹配则拒绝继续。
-7. **只有一个候选生成真源。** `CapabilityResolver` 负责产生 `CandidateSet`；`route_shadow` 只能消费相同的候选输出做 record-only 对比，不能自行 build candidates，也不能反向影响执行路由。
-8. **外部文本不可信。** 工具返回的错误、日志、SQL 注释、知识文档、网页和用户粘贴内容都按 `ExternalContent` 处理。它们可以成为证据或展示内容，但不能改变 system policy、目标、权限、审批状态或执行计划。
-9. **终态不可被后到事件覆盖。** TaskStore 采用 CAS、lease、heartbeat、fencing 和 stale recovery；`succeeded`、`failed`、`rejected`、`canceled`、`indeterminate` 等终态保护必须由存储层保证，而不是依靠调用方自觉。
-10. **模型和框架不能接管安全链。** LangGraph（如果启用）只能作为 `WorkflowRunner` 的适配实现；TaskStore 是任务事实真源，LangGraph checkpoint 不能替代审批、策略、目标重解析和执行审计。
+## 4. Python 实现与代码复用
 
-## 代码落点规则
+- SDK 原生、标准库与已有依赖优先。使用简单函数与少量模块；没有直接消费者时不建接口、工厂、注册平台或空目录，不为未来替换 SDK 增加框架。
+- 公共接口有 Type Hints；跨边界数据使用明确 schema，SDK 类型直接导入。异步 I/O 有超时和关闭路径，同步客户端不得阻塞事件循环。
+- 错误按边界分类，提供有限、可操作的信息；不吞异常，不回传原始堆栈、连接信息或敏感数据。凭据只通过安全引用配置，不向用户索要或输出凭据值。
+- 依赖、Python 兼容性和 SDK 公开扩展点先安装验证再锁定。新产品在本仓库独立环境验证，测试工具也须纳入依赖配置；不借用旧项目环境宣称新产品通过。
+- 旧代码仅在当前需求确实适用、依赖少且复用成本低于重写时提取。新包不导入旧 Runtime；迁移量和旧测试数量不是目标。
+- 治理或协议适配确需包装时保持薄层、可验证，不使用 SDK 私有 API 或 monkey patch。遇到公开接口不满足边界时，记录具体限制，调整实现方案，不能静默放宽约束。
+- 使用主题分支，保留用户未提交工作、凭据和运行数据；清理旧源码先列范围和依赖。需要隔离时使用独立工作树，不覆盖他人修改；不自行合并、部署或归档。
 
-默认采用模块化单体。新增代码先按下面的边界放置：
+## 5. 按风险验证与交付
 
-| 关注点 | 推荐落点 | 禁止落点 |
-| --- | --- | --- |
-| HTTP、飞书、CLI、鉴权适配 | `interfaces/` | 领域模块、工具适配器中复制入口判断 |
-| 请求/任务/计划/结果契约 | `contracts/` | 用无结构 `dict` 作为跨模块协议 |
-| Runtime 编排 | `application/` | handler、模型 prompt、基础设施客户端 |
-| capability 声明和候选解析 | `capabilities/` | 入口层关键词分支、独立 shadow 路由 |
-| 确定性规划和参数合成 | `planning/` | LLM 原文、Web/飞书 handler |
-| Policy、审批、SQLGuard | `governance/` | Tool adapter、UI 按钮回调 |
-| 任务持久化和状态迁移 | `persistence/` | LangGraph state、内存全局变量 |
-| 工作流执行和恢复 | `runners/` | 在 capability、入口或 LangGraph 节点中复制生命周期语义 |
-| 外部系统访问 | `tools/` | Runtime 直接 import 第三方客户端；不再使用并列的 `integrations/` 落点 |
-| 事实、证据、记忆 | `evidence/` | 在 prompt 或入口层拼隐式业务结果 |
-| 反思与可答性判断 | `reflection/` | 让模型或入口层决定执行权限 |
-| 回复投影 | `rendering/` | 在 Web、飞书、CLI 中复制业务文案和状态判断 |
-| trace/audit 事件出口 | `observability/` | 在各业务模块内各自实现采集 |
-| 脱敏规则 | `redaction.py`（顶层叶子模块） | 在 `log/` 与 `contracts/` 中各写一份 |
-| 测试和离线评测 | `tests/unit/`、`tests/contract/`、`tests/security/`、`tests/integration/`、`tests/evals/` | 只在手工对话中验证 |
+| 改动 | 最小验证 |
+| --- | --- |
+| 文档/文案 | 差异、链接、命令与源码事实一致；运行受影响的现有文档检查，不为纯文字修改扩大全仓测试 |
+| 业务行为/修复 | 先定义可观察的预期；针对关键分支和失败路径测试，缺陷补能复现问题的回归检查，再运行相关 lint/type 检查 |
+| 权限、SQL、数据/Evidence、Session、MCP、SDK 接入 | 正常及拒绝路径；用真 SDK/实际存储或协议验证边界，拒绝时断言没有未授权 I/O；对具体差异做独立审查 |
+| 模型/提示词/工具契约 | 离线契约回归 + 获准模型上的固定任务样例；比较工具选择、事实、证据、限制表达和耗时/用量，不要求模型逐字相同 |
+| 用户入口/阶段交付 | 相关检查 + 正式启动后的浏览器/飞书/真实只读工具路径；分别记录证据，不用 helper、mock 或旧 CI 代替 |
 
-可以随着第一轮实现调整目录，但必须先更新 `ARCHITECTURE.md`，并保证每个模块仍只有一个责任。
+测试验证行为与安全边界，不复制实现细节。不为可逆低风险文字改动新造测试；检查已通过且没有新变更或未解决问题时，不反复扩大或重跑。
 
-## 契约与实现规范
+**命令以当前切片计划、实际 `pyproject.toml` 和锁文件为准。** SDK 开发检查只针对新包与相关测试；旧仓库全量检查与新产品检查分开记。当前尚未落地的命令只能作为计划，不写成已可启动的产品入口。新工程完成后将可复制的安装/启动/检查命令写入 README，并在 CI 验证。
 
-- Python 代码遵循 PEP 8，所有公共函数、方法和 Protocol 都写清晰的 Type Hints。
-- 跨边界数据优先使用 Pydantic model；内部纯值对象可使用 frozen dataclass。禁止让同一契约在多个层用不同字段名表达。
-- 核心方法提供精简 Docstring，描述目的、关键前置条件和异常语义，不写重复实现的长篇注释。
-- DTO 默认不可变或通过显式构造更新；禁止在多个层共享可变嵌套 `dict` 作为隐式状态。
-- capability 必须有稳定 ID、版本、参数 schema、policy profile、证据契约和测试/eval 入口。
-- DB/资产域可以使用受限 DSL 型 capability，但 DSL 只能描述资源、操作、选择器和参数；不能携带任意 Python、任意 SQL、任意 executor 或绕过 Policy/SQLGuard 的 escape hatch。
-- `ToolResult` 由 `ToolGateway` 的私有工厂构造；adapter 返回内部 `AdapterResponse`。Python 的私有约定不是语言级绝对安全，因此还必须用 Protocol、静态检查和契约测试防止绕过。
-- 所有外部调用必须有超时、trace_id、脱敏日志和结构化错误；写操作还要支持幂等键、readback 和 indeterminate 结果。
-- 不为尚未验证的未来场景提前引入微服务、向量数据库、消息总线、ReAct、多 Agent 或复杂框架。
+每次交付说明：改了什么、对应版本/差异、执行过的检查及结果、未覆盖项和下一步。独立审查必须针对具体版本；自行复查不能称为独立审查。源码、离线测试、真实模型、真实工具、部署与用户验收分别记录，不能自动晋级为“完成并归档”。
 
-## 开发与评审流程
+## 6. 文档随实现更新
 
-### 开工前
+只更新事实或约定受影响的文档，不要求每个任务重写全部五份文件。handoff 保留当前快照、有效证据与下一项工作，修改历史由 Git 保存；不持续追加“上轮/本轮”的讨论流水账，也不为写入本文件自己的提交 SHA 反复提交。
 
-1. 按本文件「优先阅读」一节的顺序读取五份文档。
-2. 执行 `git status --short --branch`，确认分支、未提交变更和未跟踪文件。
-3. 从最新 `main` 创建 `claude/<topic>` 分支；若仓库尚未初始化，先在 handoff 中记录，不假装已经具备分支/PR证据。
-4. 写清目标、范围、架构落点、风险、验证命令和不做什么；复杂任务先写计划，等确认后实现。
-5. 先检查现有代码、测试和真实调用链；先修根因，不先重建框架。
-
-### 实现中
-
-1. 行为变更采用 TDD：先补失败测试，再写最小实现，再补边界和回归。
-2. 每个能力优先完成一个垂直闭环：契约 → planner → policy → fake adapter → evidence → render → eval。
-3. 入口、模型、工具和存储都通过 Protocol/adapter 解耦；核心测试不依赖真实生产服务。
-4. 高风险路径必须 fail-closed；超时、权限不足、目标漂移、审批冲突和无法确认结果不能伪装成成功。
-5. 所有新配置、状态、环境变量和 feature flag 都写出默认值、来源、优先级和回滚方式。
-
-### 提交前验收
-
-按风险分档，不为了文档或纯机械重构运行不必要的重型验证：
-
-- 轻档：相关测试、格式/静态检查、真实 diff。
-- 中档：相关测试 + 契约/eval + 真实 diff；收尾时再跑全量。
-- 深档：全量测试 + 安全契约 + offline eval + TDD 反证 + 精确 SHA 逐行 diff。
-
-触及 `governance/`、`planning/` 或 `tools/` 的任何变更，必须全量运行安全测试（`python -m pytest -m security -q`），不得以轻档或中档为由豁免。所有安全测试放在 `tests/security/`，并标记为 `security`；该门是全量测试之外的显式 CI gate。
-
-验收结论必须附真实命令及尾部输出，并分开写：
-
-- 已验证：确实执行过的命令和结果。
-- 只读推理：没有运行时证据的判断。
-- 未覆盖：尚未验证的边界。
-- 残余风险：即使测试通过仍存在的风险。
-
-任何“修复有效”的关键安全变更，应尽可能做 TDD 反证：撤掉承重保护，确认相应测试变红；临时变体使用独立的 `PYTHONDONTWRITEBYTECODE`/pycache 隔离并确认加载的是变异代码。
-
-## 测试与证据标准
-
-测试至少分为：
-
-1. 单元测试：纯函数、状态迁移、canonicalization、策略判定，位于 `tests/unit/`。
-2. 契约测试：入口到 Runtime、Runtime 到 Runner、Gateway 到 adapter 的 DTO 和错误语义，位于 `tests/contract/`。
-3. 安全测试：模型输出污染、SQL AST 绕过、目标漂移、审批重放、并发 lease/fencing、外部文本注入，位于 `tests/security/` 并标记 `security`。
-4. 集成测试：Compose 中 PostgreSQL、worker 和 fake/recording tool adapter 的真实连接，位于 `tests/integration/`。
-5. Eval：按 L0-L3 分层，位于 `tests/evals/`，分别测安全边界、意图/补槽、证据回答和完整生命周期；不以单一“回答像不像”分数替代安全验收。
-
-代码可运行后，默认验证入口固定为下列四条命令（**规范真源为 [ADR-008](docs/adr/ADR-008-engineering-and-test-baseline.md)**）：
-
-```bash
-python -m pytest -q
-python -m pytest -m security -q
-ruff check .
-mypy src
-```
-
-这四条命令是全项目单一真源，README 与 CI 共用同一份定义；禁止在文档、脚本或 CI 中使用裸 `pytest` 调用形式。测试框架基线明确选择 pytest，原因是参数化恶意输入矩阵、组合 fixture、异步测试和 marker gate 都是本项目的核心测试需求；Ruff 是唯一 linter，mypy 是唯一类型检查器。后续若要更换 runner、linter 或类型检查器，必须先修订 [ADR-008](docs/adr/ADR-008-engineering-and-test-baseline.md)，并同步更新 `README.md`、`ARCHITECTURE.md`、本文件和 CI，不允许出现多个未说明的入口。
-
-## 文档与交接纪律
-
-- `AGENTS.md`：稳定开发规则；不写每日进展和具体 PR 流水。
-- `README.md`：人类开发者的定位、启动、目录和快速路径；不复制完整架构。
-- `ARCHITECTURE.md`：稳定目标架构、接口契约、状态/安全语义和演进门槛；不写未经验证的线上事实。
-- `DEVELOPMENT_PLAN.md`：里程碑顺序、决策门、交付物、退出标准和规划所依赖的稳定前提；不写易漂移的 commit SHA、分支名、里程碑进度和验证证据，这些只放 `AGENT_HANDOFF.md`。
-- `AGENT_HANDOFF.md`：当前状态、精确 SHA/分支/部署证据、风险、下一步和禁止盲改点；只保留当前有效口径。
-- `docs/adr/`：架构决策记录；每个 ADR 写明背景、决策、后果、备选方案和变更门，不把争议留在代码默认值里。
-- `docs/CAPABILITIES.md`：当前能力地图；由 Registry/代码生成并由 CI 检查，不手工维护关键词总表。
-- 历史 handoff 和详细复盘放到 `docs/handoff/archive/`，由 Git 历史承载时间线。
-- 行为、配置、默认值、测试契约或已知风险变化时更新 handoff；纯拼写或无行为机械变更可不更新。
-- 文档发生冲突时，先记录冲突再修改；不得为了让文档看起来一致而降低安全边界或伪造状态。
-
-## 回复风格
-
-用简洁中文说明：改了什么、为什么、如何验证、还有什么未验证或风险。引用本地文件时使用绝对路径 Markdown 链接。不要把“计划完成”写成“已经完成”，不要把离线测试写成生产验证。
+SDK 签名、模块划分等实现细节可在不改变需求与边界的前提下据实修订计划，并同步受影响接口；不要为未经锁版验证的伪代码生造兼容层。改变产品范围或架构边界必须明确提出，不能藏在局部修复里。

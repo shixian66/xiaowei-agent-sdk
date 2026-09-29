@@ -16,6 +16,9 @@ requires-python = ">=3.11,<3.12"
 #   asyncpg     —— SQLAlchemy 2.0 的 async PostgreSQL 驱动。
 #   fastapi     —— M5 薄 HTTP gateway。
 #   uvicorn     —— M5 容器内 ASGI 进程。
+#   openai-agents[sqlalchemy] —— 新产品 src/xiaowei 的 Agent Loop、MCP 客户端与
+#                  SQLAlchemySession（P1-A Task 1 实装核对后锁定 0.22.x）。
+#   新包另用 pydantic / sqlalchemy / asyncpg；其余仅旧包 src/xiaowei_agent 使用，P1-B 列明清理范围。
 dependencies = [
     "pydantic>=2.13,<3",
     "sqlglot>=27,<31",
@@ -24,6 +27,7 @@ dependencies = [
     "asyncpg>=0.30,<0.31",
     "fastapi>=0.115,<1",
     "uvicorn>=0.34,<1",
+    "openai-agents[sqlalchemy]>=0.22.3,<0.23",
 ]
 
 [project.scripts]
@@ -44,7 +48,7 @@ dev = [
 ]
 
 [tool.hatch.build.targets.wheel]
-packages = ["src/xiaowei_agent"]
+packages = ["src/xiaowei_agent", "src/xiaowei"]
 
 [tool.pytest.ini_options]
 addopts = "--strict-markers --strict-config --disable-socket --allow-unix-socket"

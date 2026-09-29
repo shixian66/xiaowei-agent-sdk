@@ -28,33 +28,14 @@ jobs:
           enable-cache: false
           activate-environment: true
       - run: uv sync --extra dev --frozen
-      - run: python -m pytest -q
+      - run: python -m pytest -q --ignore=tests/sdk_core
 
   integration:
     name: integration
     runs-on: ubuntu-24.04
-    # 与 tests job 执行**同一条**命令。差别只有两处：一个 PostgreSQL service，
-    # 和一个 PYTEST_POSTGRES_DSN。ADR-008 的四条验证命令一字不改，不产生第五条。
-    services:
-      postgres:
-        # 钉到 digest。版本 tag 是可变的——同一个 `postgres:16.10` 在两次 CI 之间
-        # 可以指向不同的镜像，那样"CI 绿过"就不再指向一个确定的运行内容。
-        # 这个 digest 不是编的：它取自 run 33829385450 的 `Initialize containers`
-        # 步骤输出，即本仓库真实拉取并跑绿过的那一个。
-        image: postgres:16.10@sha256:21f6013073bc6b92830a2129570e2f5ec42a6c734b5a985a41e83aa58f54c3c1
-        env:
-          # 无凭证：CI 不持有任何 secret，工作流里也不出现任何密码形状的字面量。
-          # trust 只对这个一次性的、只在 job 内可达的容器生效。
-          POSTGRES_HOST_AUTH_METHOD: trust
-        ports:
-          - 5432:5432
-        options: >-
-          --health-cmd pg_isready
-          --health-interval 10s
-          --health-timeout 5s
-          --health-retries 10
+    # SDK 测试数据库与本地一致；旧数据库集成测试维持本地默认跳过行为。
     env:
-      PYTEST_POSTGRES_DSN: postgresql+asyncpg://postgres@127.0.0.1:5432/postgres
+      SDK_TEST_POSTGRES_URL: postgresql+asyncpg://postgres@127.0.0.1:55432/postgres
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
@@ -66,7 +47,16 @@ jobs:
           enable-cache: false
           activate-environment: true
       - run: uv sync --extra dev --frozen
-      - run: python -m pytest -q
+      - name: Run full suite with isolated SDK PostgreSQL
+        run: |
+          set -euo pipefail
+          project=xiaowei-sdk-test
+          cleanup() {
+            docker compose -p "$project" -f compose.sdk-test.yml down -v
+          }
+          trap cleanup EXIT
+          docker compose -p "$project" -f compose.sdk-test.yml up -d --wait
+          python -m pytest -q
 
   compose-smoke:
     name: compose-smoke
