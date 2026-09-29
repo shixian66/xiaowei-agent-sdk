@@ -33,6 +33,9 @@ Authorizer = Callable[[Identity, str, str], Awaitable[bool]]
 # 最小投影上限：须容纳证据标识与截断/空结果标记组成的外层结构。
 MIN_PROJECTION_BYTES = 256
 
+# JSON schema 中只供阅读的文字：不改变数据形状。
+_SCHEMA_TEXT = frozenset({"title", "description"})
+
 
 class ToolRejectedError(Exception):
     """调用前治理拒绝；未发生任何工具 I/O。"""
@@ -60,8 +63,9 @@ class Projection:
 class ToolPolicy:
     """``policy_id`` 对应的明确策略：参数模型、四种用途各自的投影，以及不可信来源的结果模型。
 
-    ``result`` 用于 MCP 等远端结果：只保留其声明的字段并校验类型，不合约的结果整体拒绝。
-    本地 Adapter 由可信代码产生结果，可不提供。
+    ``result`` 用于 MCP 等远端结果：按严格类型校验，只保留其声明的字段，不合约的结果整体
+    拒绝；它不能接收未声明字段（含嵌套模型），投影也只能取它声明的字段。本地 Adapter 由
+    可信代码产生结果，可不提供。
     """
 
     policy_id: str
@@ -81,6 +85,8 @@ class ToolCatalog:
                 raise ValueError(f"工具目录：策略 {policy.policy_id} 必须且只能定义四种用途投影")
             if policy.arguments.model_config.get("extra") != "forbid":
                 raise ValueError(f"工具目录：策略 {policy.policy_id} 的参数模型必须禁止额外字段")
+            if policy.result is not None:
+                _check_result_model(policy, policy.result)
         for contract in contracts:
             registered = self._policies.get(contract.policy_id)
             if registered is None:
@@ -166,6 +172,51 @@ class GovernedTools:
         if used >= ctx.budget.max_tool_calls:
             raise ToolRejectedError("本轮工具调用次数已用完")
         self._used[key] = used + 1
+
+
+def schema_shape(node: object, *, ignore_extra_flags: bool = False) -> object:
+    """决定数据形状的 JSON schema：去掉标题与说明文字（``properties`` 中的字段名本身保留）。
+
+    ``ignore_extra_flags`` 另外忽略布尔的 ``additionalProperties``（对象是否接受额外字段）；
+    值为 schema 的 ``additionalProperties`` 描述映射的值类型，始终保留。
+    """
+    if isinstance(node, list):
+        return [schema_shape(value, ignore_extra_flags=ignore_extra_flags) for value in node]
+    if not isinstance(node, dict):
+        return node
+    shape: dict[str, object] = {}
+    for key, value in node.items():
+        if key in _SCHEMA_TEXT or (
+            ignore_extra_flags and key == "additionalProperties" and isinstance(value, bool)
+        ):
+            continue
+        if key == "properties" and isinstance(value, dict):
+            shape[key] = {
+                name: schema_shape(spec, ignore_extra_flags=ignore_extra_flags)
+                for name, spec in value.items()
+            }
+        else:
+            shape[key] = schema_shape(value, ignore_extra_flags=ignore_extra_flags)
+    return shape
+
+
+def _check_result_model(policy: ToolPolicy, result: type[BaseModel]) -> None:
+    declared = set(result.model_fields)
+    if any(name not in declared for spec in policy.projections.values() for name in spec.fields):
+        raise ValueError(f"工具目录：策略 {policy.policy_id} 的投影字段不在结果模型中")
+    if _accepts_undeclared(result.model_json_schema()):
+        raise ValueError(f"工具目录：策略 {policy.policy_id} 的结果模型不能接收未声明字段")
+
+
+def _accepts_undeclared(node: object) -> bool:
+    """声明了字段的对象（模型）是否还接收未声明字段；映射（没有 ``properties``）不算。"""
+    if isinstance(node, list):
+        return any(_accepts_undeclared(value) for value in node)
+    if not isinstance(node, dict):
+        return False
+    if "properties" in node and node.get("additionalProperties", False) is not False:
+        return True
+    return any(_accepts_undeclared(value) for value in node.values())
 
 
 def _in_scope(ctx: RunContext, contract: ToolContract) -> bool:

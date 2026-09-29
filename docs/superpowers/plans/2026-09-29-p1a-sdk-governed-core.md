@@ -198,12 +198,18 @@
 
 - 接口：`MCPServerConfig` 比计划多 `max_response_bytes`（接收上限）；`server_id` 只允许小写字母、数字与连字符且不能为 `local`，SDK 函数名为 `<server_id>__<tool>`，因此能唯一还原到 server/tool，组合长度不超过 64。`MCPIntegration(configs, governance, *, resolve_secret, clock)` 是异步上下文管理器，`tools_for(ctx)` 是同步方法（筛选不需要 I/O）。`GovernedTools` 增加只读属性 `catalog`。
 - 登记与目录对应：每个获准远端工具必须在工具目录中有 `server_id/tool` 契约且策略一致；`ToolPolicy` 增加可选的 `result` 结果模型，MCP 工具的策略必须提供；SDK 函数名与其他工具（本地工具以 `tool_id` 名字部分为函数名）冲突、`server_id` 重复时拒绝装配。`ToolContract` 增加可信的 `description`，交给模型的工具说明只取它，远端说明文字不交给模型。
-- 发现时核对：远端缺少登记的工具、同名多个、参数 schema 与契约不符（比较前去掉 `title`、`description`、`additionalProperties` 这类与参数含义无关的注释；发出的参数总是先经禁止额外字段的策略参数模型校验）时只隐藏该工具。未登记的工具（含远端自称只读的）不开放。远端输出 schema 不比较，改为每次结果按结果模型校验。
-- 结果契约：`is_error`、任何非文本内容（图片、资源链接等，资源不读取）、非 JSON 对象、结构化内容缺失时文本不是恰好一段 JSON 对象、结果模型校验失败，一律拒绝；通过时只保留结果模型声明的字段，再进入 Evidence 投影。远端自带的 `evidence_id`/`xiaowei_evidence_ref` 等字段不在结果模型中，不保存也不交给模型，来源由 Evidence 的 `tool_id`（`server_id/tool`）记录。
+- 发现时核对：远端缺少登记的工具、同名多个、参数 schema 与契约不符（比较前去掉 `title`、`description` 与布尔的 `additionalProperties`；发出的参数总是先经禁止额外字段的策略参数模型校验。值为 schema 的 `additionalProperties` 即映射值类型保留比较）时只隐藏该工具。未登记的工具（含远端自称只读的）不开放。远端输出 schema 不比较，改为每次结果按结果模型校验。
+- 结果契约：`is_error`、任何非文本内容（图片、资源链接等，资源不读取）、非 JSON 对象、结构化内容缺失时文本不是恰好一段 JSON 对象、结果模型按 JSON 严格模式校验失败，一律拒绝；通过时只保留结果模型声明的字段，再进入 Evidence 投影。远端自带的 `evidence_id`/`xiaowei_evidence_ref` 等字段不在结果模型中，不保存也不交给模型，来源由 Evidence 的 `tool_id`（`server_id/tool`）记录。
 - 调用：薄 `FunctionTool` 解析参数（不是 JSON 对象时在治理前拒绝，远端零请求），经 `GovernedTools.invoke` 执行 `call_tool`。治理与证据的受控失败按 SDK 公开的 `default_tool_error_function` 交给模型，与本地 function tool 的默认行为一致；直接构造的 FunctionTool 抛错时 SDK 会中止整轮（实测），因此不能直接抛出。
-- HTTP：`httpx_client_factory` 返回 `trust_env=False`、`follow_redirects=False` 的客户端，底层 transport 只向登记端点的 scheme/host/port/path 发送，Bearer 凭据只在这里加上（认证引用在进入时解析，不进入 RunContext）。锁定版 MCP 客户端会自行跟随同源重定向、不跟随跨源重定向；同源不同路径由 transport 拒绝。响应按实际读取字节计数，超过上限即停止；请求 `Accept-Encoding: identity`，压缩响应拒绝（少量压缩字节可解压成很大的内容）。超限异常继承 `httpx2.StreamError`，MCP 客户端据此把本次请求解析为错误。
+- HTTP：`httpx_client_factory` 返回 `trust_env=False`、`follow_redirects=False` 的客户端，底层 transport 只向与登记端点完全相同的规范化 URL（含 userinfo、未解码路径与 query）发送，Bearer 凭据只在这里加上（认证引用在进入时解析，不进入 RunContext）。锁定版 MCP 客户端会自行跟随同源重定向、不跟随跨源重定向；同源不同路径由 transport 拒绝。响应按实际读取字节计数，超过上限即停止；请求 `Accept-Encoding: identity`，压缩响应拒绝（少量压缩字节可解压成很大的内容）。超限异常继承 `httpx2.StreamError`，MCP 客户端据此把本次请求解析为错误。
 - **超时拖垮连接（实现中发现并修复）：** 起初 HTTP 读取期限等于调用期限，读取超时在 MCP 客户端的 POST 任务中抛出，会关闭整个连接，此后该 Server 的所有调用失败。现单次调用期限由 SDK `client_session_timeout_seconds` 执行（它会中止对应的 POST），HTTP 读取期限为其 2 倍作兜底。补充断言“超时后的下一次调用照常执行”，修复前失败、修复后通过。越出端点或压缩编码在响应头阶段拒绝时仍会关闭该连接（失败方向安全）。
 - 生命周期：进入时逐个连接，认证引用无法解析、连接或列出工具失败只隐藏该 Server 的工具并记录类型（不记录异常消息）；退出时清空工具并关闭全部连接。锁定版 SDK 与 fixture 关闭时未见 `DELETE` 会话终止请求，关闭验证以服务端连接数归零和无遗留 asyncio 任务为准。
+- **首轮独立审查修复（4 组 P1）：**
+  - 端点比较只看解码后的路径：同源重定向到 `/mcp?other-service=1` 或 `/mcp%2Ftenant-a` 仍带 Bearer。改为比较完整规范化 URL，补 query 与编码路径重定向用例。
+  - 结果契约宽松且未绑定证据：结果模型默认宽松校验会把 `"7"` 转成整数，`extra="allow"` 会保留未声明字段；证据指纹不含结果模型，却含工具说明。改为 JSON 严格模式校验；工具目录要求结果模型（含嵌套）不接收未声明字段、投影字段属于结果模型；指纹加入去掉标题/说明的结果 schema 与参数 schema，排除工具说明，投影规则版本升为 `model-reachable-shared/4`（旧证据失效）。
+  - MCP 库的 DEBUG 日志在本地过滤前记录完整参数与远端结果：连接前把进程内 `mcp` logger 改为不向上传递，经处理器只转出来源模块、级别与异常类型。pytest 的日志捕获会直接挂到不向上传递的 logger 上，回归用例改用 root 上的普通处理器观察应用所见。
+  - FunctionTool 的严格 schema 转换在连接之后、单 Server 隔离之外执行，映射参数会中止整个接入：工具改在构造时（连接前）建好，不支持的形状作为登记错误拒绝；远端工具核对移入单 Server 的异常边界。映射参数暂不支持。
+  - 审查修复反向验证 13 项均使对应用例失败：端点只比路径、只比解码路径加 query、宽松结果校验、允许结果模型额外字段、不检查嵌套模型、不检查投影字段、指纹不含结果 schema、指纹含工具说明、指纹用未规范化的结果 schema、不约束 `mcp` 日志、转出时保留原消息、工具构造错误不转为登记错误、契约一侧不忽略布尔 `additionalProperties`。另有一项只改远端一侧的变异无效（远端 schema 本无该字段），不计入。
 - 反向验证 30 项均使对应用例失败：展示不按范围、绕过治理、去掉 schema 比较或比较忽略 `type`、去掉名字冲突/策略一致/结果模型/`server_id` 重复检查、接受 `is_error`、接受非文本内容、不按结果模型校验、去掉端点检查、不加认证、去掉接收上限、接受压缩、读取期限等于调用期限、受控失败直接抛出、去掉参数形状检查、退出后保留工具、退出不关闭、连接不登记关闭、认证引用或连接失败时中止启动，以及配置的 HTTP 非 loopback、用户信息、查询参数、原始凭据、`local`、名字过长、非法工具名。转发前删除已有 `Authorization` 头与运行时 `RunContext` 类型检查、`ensure_strict_json_schema` 转换经判断不承重，已删除。
 
 ## Task 5：组合可验证的运行核心并交接 P1-B

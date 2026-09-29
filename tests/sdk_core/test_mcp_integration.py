@@ -5,11 +5,12 @@ fixture 记录到达的 HTTP 请求与实际执行的工具；拒绝路径断言
 """
 
 import asyncio
+import io
 import json
 import logging
 import time
-from collections.abc import AsyncIterator, Callable, Sequence
-from contextlib import asynccontextmanager
+from collections.abc import AsyncIterator, Callable, Iterator, Sequence
+from contextlib import asynccontextmanager, contextmanager
 from dataclasses import dataclass
 from typing import Any
 
@@ -27,14 +28,11 @@ from tests.sdk_core.mcp_fixture import (
     FORGED_EVIDENCE,
     INJECTION,
     PRIVATE,
-    ASGIApp,
-    Recorder,
     gzipped,
     mcp_app,
-    recording,
     redirecting,
+    rerouted,
     serve,
-    tool_server,
 )
 from tests.sdk_core.synthetic_tools import (
     CONTRACTS,
@@ -65,6 +63,7 @@ REGISTERED = (
     "drifted",
     "missing",
     "wrong_type",
+    "stringly",
     "picture",
     "failing",
     "slow",
@@ -78,7 +77,7 @@ class KeyArgs(BaseModel):
 
 
 class KeyResult(BaseModel):
-    model_config = ConfigDict(strict=True)
+    # 默认的宽松配置：严格校验必须由 MCP 接入执行，不依赖策略作者的模型配置。
     key: str
     value: int
     note: str
@@ -93,6 +92,19 @@ FIXTURE_POLICY = ToolPolicy(
         "web": Projection(fields=("key", "value", "note"), max_bytes=4000),
         "feishu": Projection(fields=("key", "value"), max_bytes=1000),
     },
+    result=KeyResult,
+)
+
+
+class MapArgs(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+    filters: dict[str, int]
+
+
+MAP_POLICY = ToolPolicy(
+    policy_id="fixture.map",
+    arguments=MapArgs,
+    projections=FIXTURE_POLICY.projections,
     result=KeyResult,
 )
 
@@ -120,6 +132,7 @@ def config(
     *,
     server_id: str = "fixture",
     tools: Sequence[str] = REGISTERED,
+    policy: str = "fixture.key",
     auth_ref: str | None = None,
     timeout: float = 5.0,
     max_bytes: int = 64_000,
@@ -130,7 +143,7 @@ def config(
         auth_ref=auth_ref,
         timeout_seconds=timeout,
         max_response_bytes=max_bytes,
-        allowed_tools=dict.fromkeys(tools, "fixture.key"),
+        allowed_tools=dict.fromkeys(tools, policy),
     )
 
 
@@ -399,6 +412,25 @@ async def test_unknown_schema_and_collision_fail_closed(postgres_url: URL) -> No
                 MCPIntegration(
                     (config(fixture.url),), GovernedTools(no_result, c.evidence, authorize=c.grants)
                 )
+            # SDK 严格 schema 不支持的参数形状（映射）：连接任何 Server 之前拒绝整份登记，
+            # 而不是连上之后在构造工具时中止全部 MCP 装配。
+            mapped = ToolContract(
+                tool_id="maps/mapped",
+                target_id=FIXTURE_TARGET,
+                input_schema=MapArgs.model_json_schema(),
+                policy_id="fixture.map",
+            )
+            with_map = ToolCatalog((*fixture_contracts(), mapped), (FIXTURE_POLICY, MAP_POLICY))
+            with pytest.raises(ValueError, match="schema"):
+                MCPIntegration(
+                    (
+                        config(fixture.url),
+                        config(
+                            fixture.url, server_id="maps", tools=("mapped",), policy="fixture.map"
+                        ),
+                    ),
+                    GovernedTools(with_map, c.evidence, authorize=c.grants),
+                )
             assert fixture.recorder.requests == []
 
         # 远端改了参数 schema、缺少登记的工具、未登记的“只读”工具：一律不开放。
@@ -537,26 +569,20 @@ async def test_redirect_never_carries_credentials(
                     assert integration.tools_for(mcp_context()) == []
             assert other.recorder.requests == []
 
-        # 同源但不同路径的重定向：MCP 客户端会跟随，transport 拒绝发往登记端点以外的路径。
-        def moved(recorder: Recorder) -> ASGIApp:
-            inner = recording(
-                tool_server(recorder).streamable_http_app(host="127.0.0.1"), recorder, token=None
-            )
-            redirect = redirecting("/mcp", recorder)
-
-            async def app(scope: Any, receive: Any, send: Any) -> None:
-                if scope["type"] == "http" and scope["path"] == "/moved":
-                    await redirect(scope, receive, send)
-                else:
-                    await inner(scope, receive, send)
-
-            return app
-
-        with serve(moved, path="/moved") as same_origin:
+    # 同源重定向：MCP 客户端会跟随；登记端点之外的目标（不同路径、附加 query、编码不同的
+    # 路径）一律不发出，登记端点本身照常带认证（对照）。
+    for registered, location in (
+        ("/moved", "/mcp"),
+        ("/mcp", "/mcp?other-service=1"),
+        ("/mcp/tenant-a", "/mcp%2Ftenant-a"),
+    ):
+        with serve(rerouted(registered, location), path=registered) as same_origin:
             async with core(postgres_url) as c:
                 async with c.integration(config(same_origin.url, auth_ref=ref)) as integration:
                     assert integration.tools_for(mcp_context()) == []
-            assert {path for _, path, _ in same_origin.recorder.requests} == {"/moved"}
+            requests = same_origin.recorder.requests
+            assert requests
+            assert {(t, a) for _, t, a in requests} == {(registered, f"Bearer {FAKE_TOKEN}")}
 
 
 @pytest.mark.loopback
@@ -571,6 +597,55 @@ async def test_compressed_response_is_rejected(postgres_url: URL) -> None:
         assert compressed.recorder.requests
 
 
+# --- 日志 ---------------------------------------------------------------------------------
+
+
+@contextmanager
+def root_log() -> Iterator[io.StringIO]:
+    """应用在 root logger 上配置的处理器看到的全部日志（DEBUG 起，含异常堆栈）。
+
+    不用 caplog：pytest 会把捕获处理器直接挂到不向上传递的 logger 上，看到的不是应用所见。
+    """
+    stream = io.StringIO()
+    handler = logging.StreamHandler(stream)
+    handler.setFormatter(logging.Formatter("%(name)s %(levelname)s %(message)s"))
+    root = logging.getLogger()
+    level = root.level
+    root.addHandler(handler)
+    root.setLevel(logging.DEBUG)
+    try:
+        yield stream
+    finally:
+        root.removeHandler(handler)
+        root.setLevel(level)
+
+
+@pytest.mark.loopback
+async def test_wire_logs_carry_no_tool_data(
+    postgres_url: URL, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # MCP 库在本地过滤之前记录完整的 JSON-RPC 消息（参数与远端结果）；日志不能绕过数据边界。
+    monkeypatch.setenv(TOKEN_ENV, FAKE_TOKEN)
+    marker = "arg-marker-5c1e"
+    with root_log() as log, serve(mcp_app(token=FAKE_TOKEN)) as fixture:
+        async with (
+            core(postgres_url) as c,
+            c.integration(config(fixture.url, auth_ref=f"env:{TOKEN_ENV}")) as integration,
+        ):
+            ctx = mcp_context()
+            tools = integration.tools_for(ctx)
+            model = await c.run(tools, [call("fixture__lookup", marker), cite()], ctx)
+            await c.run(tools, [call("fixture__failing", marker, "mcp-2"), clarify()], ctx)
+    # 对照：调用真实发生，参数经获准字段回到模型。
+    assert [name for name, _ in fixture.recorder.tool_calls] == ["lookup", "failing"]
+    assert marker in seen(model)
+    for forbidden in (marker, PRIVATE, FORGED_EVIDENCE, INJECTION, FAKE_TOKEN, "remote failure"):
+        assert forbidden not in log.getvalue()
+    # 对照：MCP 库的日志没有被静默丢弃，而是以固定信息转出。
+    relayed = "xiaowei.mcp DEBUG MCP 库日志：mcp.client.streamable_http（内容已省略）"
+    assert relayed in log.getvalue()
+
+
 # --- 结果过滤 -----------------------------------------------------------------------------
 
 
@@ -581,7 +656,8 @@ async def test_mcp_payload_filtered_before_model(postgres_url: URL) -> None:
             core(postgres_url) as c,
             c.integration(config(fixture.url, max_bytes=20_000)) as integration,
         ):
-            ctx = mcp_context()
+            # 本轮 1 次成功调用 + 5 次被拒绝的调用。
+            ctx = mcp_context(max_tool_calls=6)
             tools = integration.tools_for(ctx)
             session = PolicySession(
                 SQLAlchemySession("s1", engine=c.engine),
@@ -623,7 +699,7 @@ async def test_mcp_payload_filtered_before_model(postgres_url: URL) -> None:
             evidence_before = await c.evidence_count()
 
             # 不合约的类型、图片、远端错误、超过接收上限：执行一次，结果不交给模型、不生成证据。
-            for name in ("wrong_type", "picture", "failing", "huge"):
+            for name in ("wrong_type", "stringly", "picture", "failing", "huge"):
                 rejected = await c.run(
                     tools, [call(f"fixture__{name}", call_id=name), clarify()], ctx
                 )

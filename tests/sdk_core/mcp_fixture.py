@@ -38,7 +38,7 @@ class Recorder:
     url: str = ""
     tool_calls: list[tuple[str, dict[str, Any]]] = field(default_factory=list)
     requests: list[tuple[str, str, str | None]] = field(default_factory=list)
-    """(method, path, authorization)"""
+    """(method, 原始请求目标即未解码路径加 query, authorization)"""
 
     def methods(self) -> list[str]:
         return [method for method, _, _ in self.requests]
@@ -82,6 +82,18 @@ def tool_server(recorder: Recorder, *, slow_seconds: float = 3.0) -> MCPServer:
         return {"key": key, "value": 0, "note": ""}
 
     @app.tool()
+    def stringly(key: str) -> dict[str, Any]:
+        """数值以字符串返回：可被宽松校验转换成整数，但不符合结果契约。"""
+        called("stringly", key=key)
+        return {"key": key, "value": "7", "note": ""}
+
+    @app.tool()
+    def mapped(filters: dict[str, int]) -> dict[str, Any]:
+        """映射参数：SDK 严格 schema 不支持。"""
+        called("mapped", filters=filters)
+        return {"key": "", "value": len(filters), "note": ""}
+
+    @app.tool()
     def wrong_type(key: str) -> dict[str, Any]:
         called("wrong_type", key=key)
         return {"key": key, "value": "seven", "note": ""}
@@ -123,6 +135,13 @@ def tool_server(recorder: Recorder, *, slow_seconds: float = 3.0) -> MCPServer:
     return app
 
 
+def target(scope: Scope) -> str:
+    """HTTP 请求的原始目标：未解码的路径加 query。"""
+    raw = (scope.get("raw_path") or scope["path"].encode()).decode()
+    query = scope.get("query_string", b"").decode()
+    return f"{raw}?{query}" if query else raw
+
+
 def recording(inner: ASGIApp, recorder: Recorder, *, token: str | None) -> ASGIApp:
     """记录每个 HTTP 请求；配置了 token 时拒绝没有正确 Bearer 的请求。"""
 
@@ -132,7 +151,7 @@ def recording(inner: ASGIApp, recorder: Recorder, *, token: str | None) -> ASGIA
             return
         headers = {k.decode().lower(): v.decode() for k, v in scope["headers"]}
         authorization = headers.get("authorization")
-        recorder.requests.append((scope["method"], scope["path"], authorization))
+        recorder.requests.append((scope["method"], target(scope), authorization))
         if token is not None and authorization != f"Bearer {token}":
             await send({"type": "http.response.start", "status": 401, "headers": []})
             await send({"type": "http.response.body", "body": b""})
@@ -180,7 +199,7 @@ def redirecting(location: str, recorder: Recorder) -> ASGIApp:
         if scope["type"] != "http":
             return
         headers = {k.decode().lower(): v.decode() for k, v in scope["headers"]}
-        recorder.requests.append((scope["method"], scope["path"], headers.get("authorization")))
+        recorder.requests.append((scope["method"], target(scope), headers.get("authorization")))
         await send(
             {
                 "type": "http.response.start",
@@ -191,6 +210,24 @@ def redirecting(location: str, recorder: Recorder) -> ASGIApp:
         await send({"type": "http.response.body", "body": b""})
 
     return app
+
+
+def rerouted(source: str, location: str) -> Callable[[Recorder], ASGIApp]:
+    """原始目标为 ``source`` 的请求返回 307 指向 ``location``，其余交给正常的 MCP 应用。"""
+
+    def build(recorder: Recorder) -> ASGIApp:
+        inner = mcp_app()(recorder)
+        redirect = redirecting(location, recorder)
+
+        async def app(scope: Scope, receive: Any, send: Any) -> None:
+            if scope["type"] == "http" and target(scope) == source:
+                await redirect(scope, receive, send)
+            else:
+                await inner(scope, receive, send)
+
+        return app
+
+    return build
 
 
 @dataclass

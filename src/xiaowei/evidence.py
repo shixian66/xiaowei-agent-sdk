@@ -20,7 +20,7 @@ from sqlalchemy import text
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncEngine
 
-from xiaowei.governance import Authorizer, ToolCatalog, ToolPolicy
+from xiaowei.governance import Authorizer, ToolCatalog, ToolPolicy, schema_shape
 from xiaowei.models import (
     AgentAnswer,
     Audience,
@@ -43,8 +43,8 @@ _COLUMNS: Mapping[Audience, str] = {
 }
 # 模型可达的用途：模型文字会被保存进 Session、交付到渠道，Session 又回放给模型。
 _MODEL_REACHABLE: tuple[Audience, ...] = ("model", "session")
-# 投影规则变化时更新，使旧规则生成的证据不再可读。
-_PROJECTION_RULE = "model-reachable-shared/3"
+# 投影或指纹规则变化时更新，使旧规则生成的证据不再可读。
+_PROJECTION_RULE = "model-reachable-shared/4"
 _UNAVAILABLE = "证据不存在、已过期或当前无权读取"
 _FACTS_HEADER = "查询结果（系统根据证据生成）"
 _ANALYSIS_HEADER = "分析建议（模型推断，未经系统核实）"
@@ -301,10 +301,19 @@ def _channel_limits(policy: ToolPolicy, audience: Audience) -> tuple[tuple[str, 
 
 
 def _policy_fingerprint(contract: ToolContract, policy: ToolPolicy) -> str:
-    """契约（含参数 schema 与目标）、四种投影的字段/上限与投影规则的稳定摘要。"""
+    """契约（参数 schema 与目标）、结果契约、四种投影的字段/上限与投影规则的稳定摘要。
+
+    结果契约决定远端数据如何成为事实，改变后旧证据不再可用；schema 的标题与说明文字、交给
+    模型的工具说明只影响阅读，不参与摘要。
+    """
+    result = policy.result
     body = {
         "rule": _PROJECTION_RULE,
-        "contract": contract.model_dump(mode="json"),
+        "contract": {
+            **contract.model_dump(mode="json", exclude={"description", "input_schema"}),
+            "input_schema": schema_shape(contract.input_schema),
+        },
+        "result": None if result is None else schema_shape(result.model_json_schema()),
         "projections": {
             audience: {"fields": list(spec.fields), "max_bytes": spec.max_bytes}
             for audience, spec in policy.projections.items()

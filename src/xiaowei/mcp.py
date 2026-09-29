@@ -3,8 +3,12 @@
 不把 ``MCPServer`` 挂到 Agent：SDK 的 MCP 工具把远端结果直接交给模型，输出护栏只能放行或
 拒绝，不能过滤（Task 1 实测）。这里只用公开的 ``connect``/``list_tools``/``call_tool``：
 启动时按静态登记核对远端工具，每个获准工具包装为 FunctionTool，调用前复用
-``GovernedTools.invoke``，结果按登记的结果模型校验后进入 Evidence 投影。远端的只读标注、
+``GovernedTools.invoke``，结果按登记的结果模型严格校验后进入 Evidence 投影。远端的只读标注、
 说明文字与自带的证据标识都不参与授权，也不交给模型。
+
+MCP 库会在本地过滤之前把完整的 JSON-RPC 消息（工具参数与远端结果）写入 DEBUG 日志。连接前
+把进程内 ``mcp`` 日志改为只转出固定信息（来源模块、级别、异常类型）；应用若之后重新配置
+``mcp`` logger，须保持同样的约束。
 """
 
 from __future__ import annotations
@@ -20,15 +24,16 @@ from types import TracebackType
 from typing import Any
 
 import httpx2
-from agents import FunctionTool, Tool, default_tool_error_function
+from agents import FunctionTool, Tool, UserError, default_tool_error_function
 from agents.mcp import MCPServerStreamableHttp
 from agents.tool_context import ToolContext
 from mcp.types import CallToolResult, TextContent
+from mcp.types import Tool as MCPTool
 from pydantic import BaseModel, SecretStr
 
 from xiaowei.config import MCPServerConfig, resolve_secret_ref
 from xiaowei.evidence import EvidenceError
-from xiaowei.governance import GovernedTools, ToolExecutionError, ToolRejectedError
+from xiaowei.governance import GovernedTools, ToolExecutionError, ToolRejectedError, schema_shape
 from xiaowei.models import RunContext, ToolContract, ToolObservation, ToolRequest
 
 logger = logging.getLogger(__name__)
@@ -37,10 +42,6 @@ _READ_TIMEOUT_FACTOR = 2
 
 # 治理与证据边界的受控失败：与本地 function tool 一样按 SDK 默认格式交给模型，消息固定。
 _TOOL_FAILURES = (ToolRejectedError, ToolExecutionError, EvidenceError)
-
-# 与参数含义无关的 schema 注释：远端生成的标题/说明各不相同；远端是否接受额外字段也不影响
-# 调用，因为发出的参数总是先经策略参数模型（禁止额外字段）校验。
-_SCHEMA_ANNOTATIONS = frozenset({"title", "description", "additionalProperties"})
 
 
 class MCPTransportError(httpx2.StreamError):
@@ -78,6 +79,12 @@ class MCPIntegration:
         self._resolve_secret = resolve_secret
         self._clock = clock
         self._planned = _bindings(self._configs, governance)
+        # 连接之前构造全部工具：SDK 在构造时做严格 schema 转换，不支持的参数形状在这里作为
+        # 登记错误拒绝，而不是在某个 Server 连上之后中止整个接入。
+        self._prepared = {
+            name: self._function_tool(name, binding) for name, binding in self._planned.items()
+        }
+        self._servers: dict[str, MCPServerStreamableHttp] = {}
         self._tools: dict[str, FunctionTool] = {}
         self._stack: AsyncExitStack | None = None
 
@@ -90,6 +97,7 @@ class MCPIntegration:
                 await self._start(config, stack)
         except BaseException:
             self._tools.clear()
+            self._servers.clear()
             await stack.aclose()
             raise
         self._stack = stack
@@ -102,6 +110,7 @@ class MCPIntegration:
         tb: TracebackType | None,
     ) -> None:
         self._tools.clear()
+        self._servers.clear()
         stack, self._stack = self._stack, None
         if stack is not None:
             await stack.aclose()
@@ -116,6 +125,7 @@ class MCPIntegration:
         ]
 
     async def _start(self, config: MCPServerConfig, stack: AsyncExitStack) -> None:
+        _contain_wire_logs()
         try:
             authorization = (
                 None
@@ -138,11 +148,12 @@ class MCPIntegration:
             client_session_timeout_seconds=config.timeout_seconds,
             max_retry_attempts=0,
         )
-        # SDK 在连接失败时自行清理；列出工具失败时由本 Server 自己的栈关闭连接。
+        # 远端相关的处理都在本 Server 的边界内：SDK 在连接失败时自行清理；之后的失败由本
+        # Server 自己的栈关闭连接，只隐藏它的工具。
         connection = AsyncExitStack()
         try:
             await connection.enter_async_context(server)
-            listed = await server.list_tools()
+            verified = _verified(await server.list_tools(), self._planned, config)
         except Exception as exc:
             await connection.aclose()
             # 只记录类型：下层异常消息可能包含远端返回的内容。
@@ -151,21 +162,11 @@ class MCPIntegration:
             )
             return
         stack.push_async_callback(connection.aclose)
+        self._servers[config.server_id] = server
+        for name in verified:
+            self._tools[name] = self._prepared[name]
 
-        for name, binding in self._planned.items():
-            if binding.config is not config:
-                continue
-            matches = [tool for tool in listed if tool.name == binding.remote_name]
-            if len(matches) != 1 or _schema(matches[0].input_schema) != _schema(
-                binding.contract.input_schema
-            ):
-                logger.warning("MCP 工具 %s 未发现或契约不符，已隐藏", binding.contract.tool_id)
-                continue
-            self._tools[name] = self._function_tool(name, binding, server)
-
-    def _function_tool(
-        self, name: str, binding: _Binding, server: MCPServerStreamableHttp
-    ) -> FunctionTool:
+    def _function_tool(self, name: str, binding: _Binding) -> FunctionTool:
         contract = binding.contract
 
         async def invoke(tool_ctx: ToolContext[Any], raw_arguments: str) -> str:
@@ -186,6 +187,8 @@ class MCPIntegration:
             )
 
             async def execute() -> ToolObservation:
+                # 只有已连接并核对过的 Server 的工具会展示；关闭之后的调用按执行失败处理。
+                server = self._servers[binding.config.server_id]
                 result = await server.call_tool(binding.remote_name, request.arguments)
                 return ToolObservation(
                     payload=_payload(result, binding.result),
@@ -199,13 +202,18 @@ class MCPIntegration:
                 return default_tool_error_function(tool_ctx, exc)
             return result.model_content
 
-        return FunctionTool(
-            name=name,
-            description=contract.description,
-            params_json_schema=copy.deepcopy(contract.input_schema),
-            on_invoke_tool=invoke,
-            strict_json_schema=True,
-        )
+        try:
+            return FunctionTool(
+                name=name,
+                description=contract.description,
+                params_json_schema=copy.deepcopy(contract.input_schema),
+                on_invoke_tool=invoke,
+                strict_json_schema=True,
+            )
+        except UserError:
+            raise ValueError(
+                f"MCP 登记：{contract.tool_id} 的参数 schema 不受 SDK 严格模式支持"
+            ) from None
 
 
 def _bindings(
@@ -238,6 +246,28 @@ def _bindings(
     if clash := other_names & bindings.keys():
         raise ValueError(f"MCP 登记：SDK 工具名与其他工具冲突：{sorted(clash)}")
     return bindings
+
+
+def _verified(
+    listed: list[MCPTool], planned: dict[str, _Binding], config: MCPServerConfig
+) -> list[str]:
+    """本 Server 上与登记一致的工具：远端恰有一个同名工具，参数 schema 的形状相同。
+
+    远端生成的标题/说明各不相同；远端对象是否接受额外字段也不影响调用，因为发出的参数总是
+    先经策略参数模型（禁止额外字段）校验。映射的值类型等其他差异一律视为不符。
+    """
+    verified = []
+    for name, binding in planned.items():
+        if binding.config is not config:
+            continue
+        matches = [tool for tool in listed if tool.name == binding.remote_name]
+        if len(matches) == 1 and schema_shape(
+            matches[0].input_schema, ignore_extra_flags=True
+        ) == schema_shape(binding.contract.input_schema, ignore_extra_flags=True):
+            verified.append(name)
+        else:
+            logger.warning("MCP 工具 %s 未发现或契约不符，已隐藏", binding.contract.tool_id)
+    return verified
 
 
 def _client_factory(
@@ -287,14 +317,9 @@ class _EndpointTransport(httpx2.AsyncBaseTransport):
         self._max_response_bytes = max_response_bytes
 
     async def handle_async_request(self, request: httpx2.Request) -> httpx2.Response:
-        url = request.url
-        if (url.scheme, url.host, url.port, url.path) != (
-            self._endpoint.scheme,
-            self._endpoint.host,
-            self._endpoint.port,
-            self._endpoint.path,
-        ):
-            # MCP 客户端会跟随同源重定向；不同路径同样视为其他端点，不带认证发出。
+        # 比较规范化后的完整 URL（含 userinfo、未解码的路径与 query）：MCP 客户端会跟随同源
+        # 重定向，附加 query 或编码不同的路径都可能是同一域名下的其他服务。
+        if request.url != self._endpoint:
             raise MCPTransportError("MCP 请求目标不是登记的端点")
         if self._authorization is not None:
             request.headers["authorization"] = self._authorization
@@ -342,33 +367,36 @@ class _BoundedStream(httpx2.AsyncByteStream):
 def _payload(result: CallToolResult, model: type[BaseModel]) -> dict[str, object]:
     """只接受登记的 JSON 结果契约：结构化内容，或唯一一段 JSON 对象文本；其他一律拒绝。
 
-    资源链接、图片等内容类型不读取；结果按结果模型校验，只保留声明的字段。
+    资源链接、图片等内容类型不读取。结果按 JSON 严格模式校验：不做字符串转数字之类的类型
+    转换；工具目录保证结果模型不接收未声明字段，输出只含声明的字段。
     """
     if result.is_error or any(not isinstance(item, TextContent) for item in result.content):
         raise ValueError("MCP 结果不符合登记契约")
-    data: object = result.structured_content
-    if data is None:
+    if result.structured_content is not None:
+        raw = json.dumps(result.structured_content)
+    else:
         texts = [item.text for item in result.content if isinstance(item, TextContent)]
         if len(texts) != 1:
             raise ValueError("MCP 结果不符合登记契约")
-        data = json.loads(texts[0])
-    if not isinstance(data, dict):
-        raise ValueError("MCP 结果不符合登记契约")
-    return model.model_validate(data).model_dump(mode="json")
+        raw = texts[0]
+    return model.model_validate_json(raw, strict=True).model_dump(mode="json")
 
 
-def _schema(node: object) -> object:
-    """去掉与参数含义无关的注释后的 schema，用于核对远端工具与登记契约。"""
-    if isinstance(node, dict):
-        return {
-            key: (
-                {name: _schema(spec) for name, spec in value.items()}
-                if key == "properties" and isinstance(value, dict)
-                else _schema(value)
-            )
-            for key, value in node.items()
-            if key not in _SCHEMA_ANNOTATIONS
-        }
-    if isinstance(node, list):
-        return [_schema(value) for value in node]
-    return node
+class _WireLogRelay(logging.Handler):
+    """``mcp`` 日志只以固定信息转出：来源模块、级别与异常类型；消息参数、协议内容与堆栈不输出。"""
+
+    def emit(self, record: logging.LogRecord) -> None:
+        exc = record.exc_info[1] if record.exc_info else None
+        logger.log(
+            record.levelno,
+            "MCP 库日志：%s%s（内容已省略）",
+            record.name,
+            "" if exc is None else f"，异常 {type(exc).__name__}",
+        )
+
+
+def _contain_wire_logs() -> None:
+    wire = logging.getLogger("mcp")
+    if not any(isinstance(handler, _WireLogRelay) for handler in wire.handlers):
+        wire.addHandler(_WireLogRelay())
+    wire.propagate = False

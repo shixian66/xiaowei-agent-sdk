@@ -10,6 +10,7 @@ from agents import Agent, Runner
 from agents.exceptions import ModelBehaviorError
 from agents.extensions.memory import SQLAlchemySession
 from agents.testing import ModelCall, ModelStep, ScriptedModel, assistant_message, function_call
+from pydantic import BaseModel, Field
 from sqlalchemy import inspect, text
 from sqlalchemy.engine import URL
 from sqlalchemy.ext.asyncio import AsyncEngine
@@ -474,6 +475,51 @@ async def test_stored_evidence_follows_current_policy(
         for ctx, ch in ((web, "web"), (feishu, "feishu")):
             with pytest.raises(AnswerRejectedError):
                 await changed.validate_answer(answer[ch], ctx)
+
+
+class _TotalResult(BaseModel):
+    region: str
+    total: int
+    rows: int
+
+
+class _DocumentedResult(BaseModel):
+    """与 ``_TotalResult`` 相同的结果契约，只多了标题与说明文字。"""
+
+    region: str = Field(description="地区")
+    total: int = Field(description="订单总额")
+    rows: int
+
+
+class _TextTotalResult(BaseModel):
+    region: str
+    total: str
+    rows: int
+
+
+def _with_result(result: type[BaseModel], description: str) -> ToolCatalog:
+    policy = ToolPolicy(
+        policy_id="synthetic.region", arguments=RegionArgs, projections=PROJECTIONS, result=result
+    )
+    contracts = tuple(c.model_copy(update={"description": description}) for c in CONTRACTS)
+    return ToolCatalog(contracts, (policy,))
+
+
+async def test_evidence_is_bound_to_the_result_contract(postgres_url: URL) -> None:
+    grants, clock = Grants(), Clock()
+    grants.grant("alice", TOTAL_TOOL)
+    ctx = context()
+    async with ready_engine(postgres_url) as engine:
+        saved = await _record(store(engine, grants, clock, _with_result(_TotalResult, "汇总")), ctx)
+
+    async with open_engine(secret(postgres_url)) as engine:
+        # 只改交给模型的说明文字与 schema 标题/说明：结果契约没变，证据照常可读。
+        documented = store(engine, grants, clock, _with_result(_DocumentedResult, "按地区汇总"))
+        await documented.project(saved, ctx, "model")
+        # 结果字段改型：旧证据是按旧契约接收的事实，不能按新契约继续使用。
+        retyped = store(engine, grants, clock, _with_result(_TextTotalResult, "汇总"))
+        with pytest.raises(EvidenceUnavailableError):
+            await retyped.project(saved, ctx, "model")
 
 
 async def test_app_schema_version_is_checked(postgres_url: URL) -> None:
