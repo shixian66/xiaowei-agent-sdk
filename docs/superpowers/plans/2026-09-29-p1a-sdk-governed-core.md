@@ -187,12 +187,24 @@
 
 **Interfaces:** `MCPServerConfig(server_id: str, url: str, auth_ref: str | None, timeout_seconds: float, allowed_tools: dict[str, str])` 为静态可信登记，`allowed_tools` 将远端工具名映射到已有 `policy_id`，对应策略代码固定预期输入/输出 schema 与参数含义；`MCPIntegration(configs: tuple[MCPServerConfig, ...], governance: GovernedTools)` 支持异步生命周期；`async tools_for(ctx: RunContext) -> list[Tool]` 返回 SDK 原生可用工具。具体绑定采用 Task 1 已验证的公共 SDK 扩展点，所有远程调用走 SDK；若以薄 function tool 暴露，则只转交，不自写协议或模型调用循环。
 
-- [ ] 编写 `test_empty_config_performs_no_network`、`test_sdk_runner_calls_governed_mcp`、`test_revoked_mcp_tool_has_zero_calls`、`test_unknown_schema_and_collision_fail_closed`、`test_auth_timeout_and_shutdown`、`test_mcp_payload_filtered_before_model`。临时 fixture 仅绑定 loopback；断言未获准或撤权请求 `fixture.tool_calls == []`，未知/写工具不在 Model tools，文本和 structuredContent 的禁止字段、不合约内容及伪造的可信 evidence_id 不进入 Model/Session，注入文本不能改变执行权限/预算，关闭后无遗留任务/连接。
-- [ ] 运行 `uv run --locked --extra dev python -m pytest tests/sdk_core/test_mcp_integration.py -q`；按 fixture 需要允许 MCP 与 PostgreSQL loopback，不修改全套测试为允许外网。预期新集成缺失失败。
-- [ ] 实现一个 Streamable HTTP 接入路径，认证首片只支持无认证的测试 fixture 和可信配置引用的 Bearer 认证；认证引用在 app 装配解析，值不进入 RunContext。远端须 HTTPS，HTTP 只允许 loopback 测试；重定向不得将认证转交其他端点。端点不能来自用户/模型参数。发现工具后核对登记 schema 与参数/结果策略，名字按 server/tool 唯一映射，缓存不能跨授权范围共用。
-- [ ] 接通 `GovernedTools.invoke` 和 Evidence 结果入口；检查 MCP 文本、结构化内容、错误与资源引用。首片只支持明确登记的文本/JSON 结果契约；不支持内容类型拒绝，不自动读取资源链接。用 Task 1 核对过的 transport 公共扩展点设置接收上限，解析后再限制内容大小，禁止只在全部读取后切片冒充读取上限。超时/未知执行结果不自动重试；单个 Server 不可用仅隐藏其工具，本地工具继续可用。
-- [ ] 重跑本任务命令；预期全部 PASS。追加协议断言覆盖认证失败、超时、超大响应、取消与关闭；测试用假凭据不得出现在 Model、PostgreSQL 保存内容、日志或错误中。远端 readonly 标注不授予权限，远端 Evidence 仅作来源属性，小维另建可信绑定。
-- [ ] 仅暂存本任务文件，提交 `feat: add governed SDK MCP client integration`。
+- [x] 编写 `test_empty_config_performs_no_network`、`test_sdk_runner_calls_governed_mcp`、`test_revoked_mcp_tool_has_zero_calls`、`test_unknown_schema_and_collision_fail_closed`、`test_auth_timeout_and_shutdown`、`test_mcp_payload_filtered_before_model`。临时 fixture 仅绑定 loopback；断言未获准或撤权请求 `fixture.tool_calls == []`，未知/写工具不在 Model tools，文本和 structuredContent 的禁止字段、不合约内容及伪造的可信 evidence_id 不进入 Model/Session，注入文本不能改变执行权限/预算，关闭后无遗留任务/连接。
+- [ ] 运行 `uv run --locked --extra dev python -m pytest tests/sdk_core/test_mcp_integration.py -q`；按 fixture 需要允许 MCP 与 PostgreSQL loopback，不修改全套测试为允许外网。预期新集成缺失失败。（实施时实现先于测试，未留下“先失败”的记录；以 30 项反向验证和实现中发现的缺陷先红后绿代替，见实测记录。）
+- [x] 实现一个 Streamable HTTP 接入路径，认证首片只支持无认证的测试 fixture 和可信配置引用的 Bearer 认证；认证引用在 app 装配解析，值不进入 RunContext。远端须 HTTPS，HTTP 只允许 loopback 测试；重定向不得将认证转交其他端点。端点不能来自用户/模型参数。发现工具后核对登记 schema 与参数/结果策略，名字按 server/tool 唯一映射，缓存不能跨授权范围共用。
+- [x] 接通 `GovernedTools.invoke` 和 Evidence 结果入口；检查 MCP 文本、结构化内容、错误与资源引用。首片只支持明确登记的文本/JSON 结果契约；不支持内容类型拒绝，不自动读取资源链接。用 Task 1 核对过的 transport 公共扩展点设置接收上限，解析后再限制内容大小，禁止只在全部读取后切片冒充读取上限。超时/未知执行结果不自动重试；单个 Server 不可用仅隐藏其工具，本地工具继续可用。
+- [x] 重跑本任务命令；预期全部 PASS。追加协议断言覆盖认证失败、超时、超大响应、取消与关闭；测试用假凭据不得出现在 Model、PostgreSQL 保存内容、日志或错误中。远端 readonly 标注不授予权限，远端 Evidence 仅作来源属性，小维另建可信绑定。
+- [x] 仅暂存本任务文件，提交 `feat: add governed SDK MCP client integration`。
+
+**Task 4 实测记录（与计划的差异与发现）：**
+
+- 接口：`MCPServerConfig` 比计划多 `max_response_bytes`（接收上限）；`server_id` 只允许小写字母、数字与连字符且不能为 `local`，SDK 函数名为 `<server_id>__<tool>`，因此能唯一还原到 server/tool，组合长度不超过 64。`MCPIntegration(configs, governance, *, resolve_secret, clock)` 是异步上下文管理器，`tools_for(ctx)` 是同步方法（筛选不需要 I/O）。`GovernedTools` 增加只读属性 `catalog`。
+- 登记与目录对应：每个获准远端工具必须在工具目录中有 `server_id/tool` 契约且策略一致；`ToolPolicy` 增加可选的 `result` 结果模型，MCP 工具的策略必须提供；SDK 函数名与其他工具（本地工具以 `tool_id` 名字部分为函数名）冲突、`server_id` 重复时拒绝装配。`ToolContract` 增加可信的 `description`，交给模型的工具说明只取它，远端说明文字不交给模型。
+- 发现时核对：远端缺少登记的工具、同名多个、参数 schema 与契约不符（比较前去掉 `title`、`description`、`additionalProperties` 这类与参数含义无关的注释；发出的参数总是先经禁止额外字段的策略参数模型校验）时只隐藏该工具。未登记的工具（含远端自称只读的）不开放。远端输出 schema 不比较，改为每次结果按结果模型校验。
+- 结果契约：`is_error`、任何非文本内容（图片、资源链接等，资源不读取）、非 JSON 对象、结构化内容缺失时文本不是恰好一段 JSON 对象、结果模型校验失败，一律拒绝；通过时只保留结果模型声明的字段，再进入 Evidence 投影。远端自带的 `evidence_id`/`xiaowei_evidence_ref` 等字段不在结果模型中，不保存也不交给模型，来源由 Evidence 的 `tool_id`（`server_id/tool`）记录。
+- 调用：薄 `FunctionTool` 解析参数（不是 JSON 对象时在治理前拒绝，远端零请求），经 `GovernedTools.invoke` 执行 `call_tool`。治理与证据的受控失败按 SDK 公开的 `default_tool_error_function` 交给模型，与本地 function tool 的默认行为一致；直接构造的 FunctionTool 抛错时 SDK 会中止整轮（实测），因此不能直接抛出。
+- HTTP：`httpx_client_factory` 返回 `trust_env=False`、`follow_redirects=False` 的客户端，底层 transport 只向登记端点的 scheme/host/port/path 发送，Bearer 凭据只在这里加上（认证引用在进入时解析，不进入 RunContext）。锁定版 MCP 客户端会自行跟随同源重定向、不跟随跨源重定向；同源不同路径由 transport 拒绝。响应按实际读取字节计数，超过上限即停止；请求 `Accept-Encoding: identity`，压缩响应拒绝（少量压缩字节可解压成很大的内容）。超限异常继承 `httpx2.StreamError`，MCP 客户端据此把本次请求解析为错误。
+- **超时拖垮连接（实现中发现并修复）：** 起初 HTTP 读取期限等于调用期限，读取超时在 MCP 客户端的 POST 任务中抛出，会关闭整个连接，此后该 Server 的所有调用失败。现单次调用期限由 SDK `client_session_timeout_seconds` 执行（它会中止对应的 POST），HTTP 读取期限为其 2 倍作兜底。补充断言“超时后的下一次调用照常执行”，修复前失败、修复后通过。越出端点或压缩编码在响应头阶段拒绝时仍会关闭该连接（失败方向安全）。
+- 生命周期：进入时逐个连接，认证引用无法解析、连接或列出工具失败只隐藏该 Server 的工具并记录类型（不记录异常消息）；退出时清空工具并关闭全部连接。锁定版 SDK 与 fixture 关闭时未见 `DELETE` 会话终止请求，关闭验证以服务端连接数归零和无遗留 asyncio 任务为准。
+- 反向验证 30 项均使对应用例失败：展示不按范围、绕过治理、去掉 schema 比较或比较忽略 `type`、去掉名字冲突/策略一致/结果模型/`server_id` 重复检查、接受 `is_error`、接受非文本内容、不按结果模型校验、去掉端点检查、不加认证、去掉接收上限、接受压缩、读取期限等于调用期限、受控失败直接抛出、去掉参数形状检查、退出后保留工具、退出不关闭、连接不登记关闭、认证引用或连接失败时中止启动，以及配置的 HTTP 非 loopback、用户信息、查询参数、原始凭据、`local`、名字过长、非法工具名。转发前删除已有 `Authorization` 头与运行时 `RunContext` 类型检查、`ensure_strict_json_schema` 转换经判断不承重，已删除。
 
 ## Task 5：组合可验证的运行核心并交接 P1-B
 

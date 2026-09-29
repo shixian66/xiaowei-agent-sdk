@@ -58,11 +58,16 @@ class Projection:
 
 @dataclass(frozen=True)
 class ToolPolicy:
-    """``policy_id`` 对应的明确策略：参数模型与四种用途各自的投影。"""
+    """``policy_id`` 对应的明确策略：参数模型、四种用途各自的投影，以及不可信来源的结果模型。
+
+    ``result`` 用于 MCP 等远端结果：只保留其声明的字段并校验类型，不合约的结果整体拒绝。
+    本地 Adapter 由可信代码产生结果，可不提供。
+    """
 
     policy_id: str
     arguments: type[BaseModel]
     projections: Mapping[str, Projection]
+    result: type[BaseModel] | None = None
 
 
 class ToolCatalog:
@@ -107,6 +112,10 @@ class GovernedTools:
         self._evidence = evidence
         self._authorize = authorize
         self._used: dict[tuple[str, str, str], int] = {}
+
+    @property
+    def catalog(self) -> ToolCatalog:
+        return self._catalog
 
     def allowed_contracts(self, ctx: RunContext) -> list[ToolContract]:
         """本轮可展示的工具：可信配置与本轮 Tool Scope、Target Scope 的交集。"""

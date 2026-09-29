@@ -2,9 +2,19 @@
 
 import os
 import re
+from typing import Annotated
+from urllib.parse import urlsplit
 
 from agents import set_trace_processors, set_tracing_disabled
-from pydantic import SecretStr
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    SecretStr,
+    StringConstraints,
+    field_validator,
+    model_validator,
+)
 
 # 凭据只以引用形式出现在配置中；目前唯一支持的来源是具名环境变量。
 _ENV_REF = re.compile(r"env:([A-Z][A-Z0-9_]*)")
@@ -38,3 +48,72 @@ def resolve_secret_ref(ref: str) -> SecretStr:
     if not value:
         raise SecretRefError(f"环境变量 {name} 未设置或为空")
     return SecretStr(value)
+
+
+_LOOPBACK_HOSTS = frozenset({"127.0.0.1", "::1"})
+_MCP_TOOL_NAME = re.compile(r"[a-z0-9_-]{1,64}")
+_SDK_TOOL_NAME_MAX = 64
+
+
+class MCPServerConfig(BaseModel):
+    """静态可信的 MCP Server 登记：端点、认证引用、期限、接收上限与获准工具。
+
+    ``allowed_tools`` 把远端工具名映射到已登记的 ``policy_id``；端点只来自这里，不来自用户或
+    模型参数。远端须 HTTPS，明文 HTTP 只允许 loopback 测试地址；地址不能携带用户信息。
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    # 不含下划线：SDK 工具名 ``<server_id>__<tool>`` 因此能唯一还原到 server/tool。
+    server_id: Annotated[str, StringConstraints(pattern=r"^[a-z0-9-]{1,32}$")]
+    url: str
+    auth_ref: str | None
+    timeout_seconds: float = Field(gt=0)
+    max_response_bytes: int = Field(gt=0)
+    allowed_tools: dict[str, Annotated[str, StringConstraints(min_length=1, max_length=200)]]
+
+    @field_validator("server_id")
+    @classmethod
+    def _not_local(cls, value: str) -> str:
+        if value == "local":
+            raise ValueError("server_id 不能使用本地工具命名空间 local")
+        return value
+
+    @field_validator("url")
+    @classmethod
+    def _trusted_endpoint(cls, value: str) -> str:
+        parts = urlsplit(value)
+        if parts.username is not None or parts.password is not None:
+            raise ValueError("MCP 地址不能携带用户信息")
+        if parts.query or parts.fragment or not parts.hostname:
+            raise ValueError("MCP 地址必须是不含查询与片段的完整地址")
+        if parts.scheme == "https" or (
+            parts.scheme == "http" and parts.hostname in _LOOPBACK_HOSTS
+        ):
+            return value
+        raise ValueError("MCP 地址必须使用 HTTPS；HTTP 只允许 loopback 测试地址")
+
+    @field_validator("auth_ref")
+    @classmethod
+    def _secret_reference(cls, value: str | None) -> str | None:
+        if value is not None and not is_secret_ref(value):
+            raise ValueError("auth_ref 必须是 env:NAME 形式的凭据引用")
+        return value
+
+    @model_validator(mode="after")
+    def _tool_names(self) -> "MCPServerConfig":
+        if not self.allowed_tools:
+            raise ValueError("MCP Server 至少登记一个获准工具")
+        for name in self.allowed_tools:
+            if _MCP_TOOL_NAME.fullmatch(name) is None:
+                raise ValueError("MCP 工具名只能包含小写字母、数字、下划线与连字符")
+            if len(self.sdk_tool_name(name)) > _SDK_TOOL_NAME_MAX:
+                raise ValueError("MCP 工具名与 server_id 组合后过长")
+        return self
+
+    def sdk_tool_name(self, remote_name: str) -> str:
+        """交给模型的函数名；server_id 不含下划线，第一个 ``__`` 之前恰好是 server_id。"""
+        return f"{self.server_id}__{remote_name}"
+
+    def tool_id(self, remote_name: str) -> str:
+        return f"{self.server_id}/{remote_name}"

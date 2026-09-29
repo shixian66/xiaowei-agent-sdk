@@ -53,6 +53,8 @@ class ToolContract(_Trusted):
     target_id: Label
     input_schema: dict[str, object]
     policy_id: Label
+    # 交给模型的工具说明，来自可信登记；MCP 远端的说明文字不交给模型。
+    description: Annotated[str, StringConstraints(max_length=1000)] = ""
 
 
 class ToolRequest(_Trusted):
