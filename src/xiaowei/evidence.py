@@ -1,10 +1,15 @@
 """Evidence 记录、四种用途投影与最终回答校验。
 
-工具结果在写入前按策略投影为模型、Session、Web、飞书四份内容，PostgreSQL 只保存这四份投影
-与可信元数据，不保存原始结果。每次读取都复核归属、渠道、过期、目标范围与当前授权；不同
-拒绝原因返回同一条信息，不暴露记录是否存在。事实区域由代码从获准投影生成，模型分析单独标注。
+工具结果在写入前按策略投影为模型、Session、Web、飞书四份内容，PostgreSQL 只保存这四份投影、
+生成它们的策略指纹与可信元数据，不保存原始结果。模型与 Session 内容会经模型文字到达渠道，
+因此同时受记录所在渠道的字段与容量约束。
+
+所有出口（交给模型的工具结果、各用途读取、最终回答）都经同一个读取边界，复核归属、渠道、
+过期、目标范围、当前策略与当前授权；不同拒绝原因返回同一条信息，不暴露记录是否存在。
+事实区域由代码从获准投影生成，模型分析单独标注。
 """
 
+import hashlib
 import json
 import secrets
 from collections.abc import Callable, Mapping
@@ -14,7 +19,7 @@ from sqlalchemy import text
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncEngine
 
-from xiaowei.governance import Authorizer, Projection, ToolCatalog
+from xiaowei.governance import Authorizer, ToolCatalog, ToolPolicy
 from xiaowei.models import (
     AgentAnswer,
     Audience,
@@ -22,6 +27,7 @@ from xiaowei.models import (
     EvidenceRecord,
     Identity,
     RunContext,
+    ToolContract,
     ToolObservation,
     ToolRequest,
     ToolResult,
@@ -33,6 +39,10 @@ _COLUMNS: Mapping[Audience, str] = {
     "web": "web_content",
     "feishu": "feishu_content",
 }
+# 模型可达的用途：其内容可能被模型复述进最终回答或在后续轮次回放。
+_MODEL_REACHABLE: frozenset[Audience] = frozenset({"model", "session"})
+# 投影规则变化时更新，使旧规则生成的证据不再可读。
+_PROJECTION_RULE = "channel-bounded/1"
 _UNAVAILABLE = "证据不存在、已过期或当前无权读取"
 _FACTS_HEADER = "查询结果（系统根据证据生成）"
 _ANALYSIS_HEADER = "分析建议（模型推断，未经系统核实）"
@@ -42,11 +52,11 @@ _INSERT = text(
     """
     INSERT INTO xiaowei_evidence (
         evidence_id, subject_id, session_id, turn_id, channel, target_id, tool_id, call_id,
-        policy_id, captured_at, recorded_at, expires_at, truncated,
+        policy_id, policy_fingerprint, captured_at, recorded_at, expires_at, truncated,
         model_content, session_content, web_content, feishu_content
     ) VALUES (
         :evidence_id, :subject_id, :session_id, :turn_id, :channel, :target_id, :tool_id, :call_id,
-        :policy_id, :captured_at, :recorded_at, :expires_at, :truncated,
+        :policy_id, :policy_fingerprint, :captured_at, :recorded_at, :expires_at, :truncated,
         :model_content, :session_content, :web_content, :feishu_content
     )
     """
@@ -55,7 +65,7 @@ _INSERT = text(
 _SELECT_OWNED = text(
     """
     SELECT evidence_id, subject_id, session_id, turn_id, channel, target_id, tool_id, call_id,
-           policy_id, captured_at, expires_at, truncated,
+           policy_id, policy_fingerprint, captured_at, expires_at, truncated,
            model_content, session_content, web_content, feishu_content
     FROM xiaowei_evidence
     WHERE evidence_id = :evidence_id AND subject_id = :subject_id
@@ -104,18 +114,22 @@ class EvidenceStore:
     async def record(
         self, ctx: RunContext, request: ToolRequest, observation: ToolObservation
     ) -> ToolResult:
-        """投影并保存证据；证据标识由代码生成，返回的只有模型可见内容。"""
+        """投影并保存证据，再经读取边界取回模型可见内容；证据标识由代码生成。
+
+        执行与写入都会等待，期间权限可能被撤销；返回前按当前权限与策略重新读取，拒绝时
+        结果不交给模型（I/O 已发生，不退还预算、不重试）。
+        """
         contract = self._catalog.contract(request.tool_id)
         if contract is None or contract.target_id != request.target_id:
             raise EvidenceStoreError("未登记的工具结果不能生成证据")
         policy = self._catalog.policy_for(contract)
         evidence_id = f"ev_{secrets.token_hex(16)}"
+        identity = ctx.identity
         projected = {
-            audience: _project(evidence_id, observation, policy.projections[audience])
+            audience: _project(evidence_id, observation, *_limits(policy, audience, identity))
             for audience in _COLUMNS
         }
         recorded_at = self._clock()
-        identity = ctx.identity
         row = {
             "evidence_id": evidence_id,
             "subject_id": identity.subject_id,
@@ -126,6 +140,7 @@ class EvidenceStore:
             "tool_id": contract.tool_id,
             "call_id": request.call_id,
             "policy_id": contract.policy_id,
+            "policy_fingerprint": _policy_fingerprint(contract, policy),
             "captured_at": observation.captured_at,
             "recorded_at": recorded_at,
             "expires_at": recorded_at + self._retention,
@@ -137,8 +152,11 @@ class EvidenceStore:
                 await conn.execute(_INSERT, row)
         except (OSError, SQLAlchemyError):
             raise EvidenceStoreError("证据保存失败，工具结果未交给模型") from None
-        content, truncated = projected["model"]
-        return ToolResult(evidence_id=evidence_id, model_content=content, truncated=truncated)
+        record = await self._readable(evidence_id, ctx, "model")
+        _, truncated = projected["model"]
+        return ToolResult(
+            evidence_id=evidence_id, model_content=record.projections["model"], truncated=truncated
+        )
 
     async def project(self, evidence_id: str, ctx: RunContext, audience: Audience) -> str:
         """按当前身份、范围与权限读取一种用途的获准内容。"""
@@ -187,12 +205,21 @@ class EvidenceStore:
         record = await self._load(evidence_id, identity)
         if (
             record is None
+            or not self._matches_current_policy(record)
             or self._clock() >= record.expires_at
             or record.target_id not in ctx.target_scope
             or not await self._currently_authorized(identity, record)
         ):
             raise EvidenceUnavailableError
         return record
+
+    def _matches_current_policy(self, record: EvidenceRecord) -> bool:
+        """保存内容须由当前登记的同一契约与投影策略生成；策略收窄、换版或移除后旧证据失效。"""
+        contract = self._catalog.contract(record.tool_id)
+        if contract is None or contract.target_id != record.target_id:
+            return False
+        current = _policy_fingerprint(contract, self._catalog.policy_for(contract))
+        return current == record.policy_fingerprint
 
     async def _currently_authorized(self, identity: Identity, record: EvidenceRecord) -> bool:
         try:
@@ -227,6 +254,7 @@ class EvidenceStore:
             tool_id=row["tool_id"],
             call_id=row["call_id"],
             policy_id=row["policy_id"],
+            policy_fingerprint=row["policy_fingerprint"],
             captured_at=row["captured_at"],
             expires_at=row["expires_at"],
             truncated=row["truncated"],
@@ -234,24 +262,52 @@ class EvidenceStore:
         )
 
 
-def _project(evidence_id: str, observation: ToolObservation, spec: Projection) -> tuple[str, bool]:
+def _limits(
+    policy: ToolPolicy, audience: Audience, identity: Identity
+) -> tuple[tuple[str, ...], int]:
+    """一种用途的有效字段与上限；模型可达的用途再与记录所在渠道取字段交集和较小上限。"""
+    spec = policy.projections[audience]
+    if audience not in _MODEL_REACHABLE:
+        return spec.fields, spec.max_bytes
+    channel = policy.projections[identity.channel]
+    fields = tuple(name for name in spec.fields if name in channel.fields)
+    return fields, min(spec.max_bytes, channel.max_bytes)
+
+
+def _policy_fingerprint(contract: ToolContract, policy: ToolPolicy) -> str:
+    """契约（含参数 schema 与目标）、四种投影的字段/上限与投影规则的稳定摘要。"""
+    body = {
+        "rule": _PROJECTION_RULE,
+        "contract": contract.model_dump(mode="json"),
+        "projections": {
+            audience: {"fields": list(spec.fields), "max_bytes": spec.max_bytes}
+            for audience, spec in policy.projections.items()
+        },
+    }
+    canonical = json.dumps(body, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+    return f"sha256:{hashlib.sha256(canonical.encode()).hexdigest()}"
+
+
+def _project(
+    evidence_id: str, observation: ToolObservation, fields: tuple[str, ...], max_bytes: int
+) -> tuple[str, bool]:
     """按字段顺序整体纳入获准字段，放不下的字段整体省略并标记截断，不切开字段值。
 
     ``empty`` 表示结果中没有任何获准字段；``truncated`` 表示来源已截断或本用途省略了字段。
     """
-    present = [name for name in spec.fields if name in observation.payload]
+    present = [name for name in fields if name in observation.payload]
     data: dict[str, object] = {}
     omitted = False
     for name in present:
         candidate = {**data, name: observation.payload[name]}
         # 以两个标记都为 false 的最长形式估算，最终内容只会更短。
-        if _size(_envelope(evidence_id, candidate, truncated=False, empty=False)) <= spec.max_bytes:
+        if _size(_envelope(evidence_id, candidate, truncated=False, empty=False)) <= max_bytes:
             data = candidate
         else:
             omitted = True
     truncated = observation.truncated or omitted
     content = _envelope(evidence_id, data, truncated=truncated, empty=not present)
-    if _size(content) > spec.max_bytes:
+    if _size(content) > max_bytes:
         raise EvidenceStoreError("工具结果无法满足证据投影上限")
     return content, truncated
 

@@ -45,7 +45,7 @@ class RegionArgs(BaseModel):
 # 四种用途各自的字段与字节上限；private_note 不属于任何用途。
 PROJECTIONS = {
     "model": Projection(fields=("total", "rows"), max_bytes=400),
-    "session": Projection(fields=("total",), max_bytes=300),
+    "session": Projection(fields=("region", "rows"), max_bytes=400),
     "web": Projection(fields=("region", "total", "rows"), max_bytes=2000),
     "feishu": Projection(fields=("region", "total"), max_bytes=300),
 }
@@ -73,11 +73,12 @@ def catalog() -> ToolCatalog:
     return ToolCatalog(CONTRACTS, POLICIES)
 
 
-def payload(region: str, total: int = 100, rows: int = 2) -> dict[str, object]:
+def payload(region: str, total: int = 100, rows: int = 2, memo: str = "") -> dict[str, object]:
+    extra = {"memo": memo} if memo else {}
     return {
         "region": region,
         "total": total,
-        "rows": [{"day": f"2026-09-{d:02d}", "orders": 50} for d in range(1, rows + 1)],
+        "rows": [{"day": f"2026-09-{d:02d}", "orders": 50, **extra} for d in range(1, rows + 1)],
         "private_note": PRIVATE_NOTE,
     }
 
@@ -119,12 +120,15 @@ class RecordingAdapter:
     calls: list[ToolRequest] = field(default_factory=list)
     total: int = 100
     rows: int = 2
+    memo: str = ""
 
     async def execute(self, request: ToolRequest) -> ToolObservation:
         self.calls.append(request)
         region = str(request.arguments["region"])
         return ToolObservation(
-            payload=payload(region, self.total, self.rows), captured_at=START, truncated=False
+            payload=payload(region, self.total, self.rows, self.memo),
+            captured_at=START,
+            truncated=False,
         )
 
 

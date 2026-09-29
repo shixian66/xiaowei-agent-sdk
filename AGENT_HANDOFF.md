@@ -12,11 +12,11 @@
 | 本地目录 / 分支 | `/Users/kloenguyen/Desktop/agent-SDK` / `claude/p1a-task2-governed-tools`（从 `main` 的 `310c2bd` 分出；`main` 已包含 Task 1 与 Task 1B） |
 | M5 历史起点 | `372c381f44ecfa1fa53961f137d0058033cbd805`；不是远端当前 main 的核验结论 |
 | 本次实施起点 | `310c2bdd4677d75e64c82b018bda81670fbd93bf`（PR #3 合并后的 `main`）；开始时工作树干净 |
-| 当前阶段 | P1-A Task 1（PR #2）与 Task 1B（PR #3，审查修复后合入）已在 `main`；Task 2（本地受治理工具、数据投影与 Evidence）已在本分支完成离线实现，待独立审查；未推送、无 PR |
+| 当前阶段 | P1-A Task 1（PR #2）与 Task 1B（PR #3，审查修复后合入）已在 `main`；Task 2（本地受治理工具、数据投影与 Evidence）首轮审查（`cc8cbd3`）暂不通过，3 项 P1 已在本分支按两个根因修复，待增量复审 |
 | 当前源码与依赖 | 新包 `src/xiaowei/`（`config.py`、`storage.py`、`model_api.py`、`models.py`、`governance.py`、`evidence.py`、`migrations/001_initial.sql`）与旧 `src/xiaowei_agent/` 并存；锁定 `openai-agents[sqlalchemy]` 0.22.3、`mcp` 2.2.0、`openai` 3.20.0、SQLAlchemy 2.0.52、asyncpg 0.30.0，Python 3.11.16；wheel 同时打包两个包，CLI 仍指向旧包 |
 | 新产品入口 | 只有开发验证命令（见第 5 节）；尚无产品启动入口，旧 CLI/Compose 不算新入口 |
 | 本次工作范围 | Task 2：可信类型、`ToolCatalog`/`GovernedTools`、`EvidenceStore`、应用表 v1 与版本检查，及 `tests/sdk_core/{synthetic_tools,test_governance,test_evidence}.py`；无依赖变更，未改 Compose、CI 或 README |
-| 外部操作 | 未调用真实模型、StarRocks 或飞书；Task 2 只用合成工具、ScriptedModel 与隔离测试 PostgreSQL；仅本地提交；没有部署或用户验收 |
+| 外部操作 | 未调用真实模型、StarRocks 或飞书；Task 2 只用合成工具、ScriptedModel 与隔离测试 PostgreSQL；分支已推送并开 PR，未合并；没有部署或用户验收 |
 
 表中的 SHA 是本次实施起点，Task 1 提交在其之后。接手先用 `git rev-parse HEAD` 和 `git status --short` 取得实际版本；本文件的修改历史由 Git 保存。
 
@@ -36,7 +36,7 @@
 
 ## 3. 当前计划与下一项工作
 
-唯一详细计划：[P1-A：SDK 与治理执行核心](docs/superpowers/plans/2026-09-29-p1a-sdk-governed-core.md)。任务顺序为 **Task 1 → Task 1B → Task 2–5**。Task 1 经 PR #2、Task 1B 经 PR #3 合入 `main`（`310c2bd`）。Task 2 在本分支完成离线实现，待独立审查。与计划的差异记录在计划各任务的“实测记录”中。
+唯一详细计划：[P1-A：SDK 与治理执行核心](docs/superpowers/plans/2026-09-29-p1a-sdk-governed-core.md)。任务顺序为 **Task 1 → Task 1B → Task 2–5**。Task 1 经 PR #2、Task 1B 经 PR #3 合入 `main`（`310c2bd`）。Task 2 在本分支完成离线实现；首轮审查意见已修复，待增量复审。与计划的差异记录在计划各任务的“实测记录”中。
 
 **Task 1 已证明（离线、合成数据、scripted 模型）：**
 
@@ -60,16 +60,16 @@
 
 **Task 2 已证明（离线、合成工具、真 Runner + ScriptedModel、隔离的真实 PostgreSQL）：**
 
-- 工具展示后撤权：SDK 仍按模型请求调用，治理层在 I/O 前拒绝，recording adapter 零调用，模型收到固定拒绝信息。越出 Tool/Target Scope、目标不符、未登记工具、参数类型错误/缺失/多余时同样零 I/O，且不调用授权回调。
+- 工具展示后撤权：SDK 仍按模型请求调用，治理层在 I/O 前拒绝，recording adapter 零调用，模型收到固定拒绝信息。执行期间或证据写入期间撤权：执行 1 次，模型收到固定信息而无业务字段，同轮不重试。越出 Tool/Target Scope、目标不符、未登记工具、参数类型错误/缺失/多余时同样零 I/O，且不调用授权回调。
 - 诊断轮（Tool Scope 不含查询工具）即使用户有查询权限也不展示查询工具，模型强行调用零 I/O。
 - 预算上限 1：`asyncio.gather` 与 SDK 并行执行的两个调用都只执行一次；计数按 subject/session/turn 隔离，`end_turn` 后清理。执行失败不退还预算，错误不含下层异常文本与原因链。
 - RunContext 拒绝额外字段（客户端、连接串、密钥）、非声明类型的元素、空标识、未知渠道与非正预算，构造后不可修改。
-- 四种投影各自只含声明字段并满足各自字节上限；合成禁止字段不出现在任何投影和 PostgreSQL 行中；截断（字段省略或来源截断）与空结果有明确标记。
-- 伪造、他人、其他会话/渠道、目标越出范围、撤权与过期的证据均不可读，信息相同；重建引擎和存储对象后检查仍成立。
+- 四种投影各自只含获准字段并满足各自字节上限，模型与 Session 投影另受记录所在渠道的字段与上限约束：模型把工具结果原样抄进分析或澄清，飞书交付中也不出现飞书禁止的字段（Web 对照中该字段正常出现）；合成禁止字段不出现在任何投影和 PostgreSQL 行中；截断（字段省略或来源截断）与空结果有明确标记。
+- 伪造、他人、其他会话/渠道、目标越出范围、撤权与过期的证据均不可读，信息相同；重建引擎和存储对象后检查仍成立。重建时策略字段或上限收窄、策略换版或工具移除，旧证据的四种投影和最终回答都被拒绝，同一策略重建则照常可读。
 - 最终回答：无引用的结论、分析引用未选证据/伪造证据、重复引用、空回答、澄清与结果混用均被拒绝；真实值 100 只出现在代码生成的事实区域，模型分析中的“200”只在标注为推断的分析区；模型多交事实字段时 SDK 拒绝最终输出。
 - 应用表缺失、版本不符时拒绝就绪；重复初始化不重建，版本不符时初始化也不升级；证据写入不改动 SDK 会话项。
 
-**Task 2 缺口：** 预算计数在进程内，依赖 Task 5 在每轮结束调用 `end_turn`；Session 元数据表移到 Task 3；渠道展示仍是 JSON 投影，表格/摘要格式属 P1-B；证据物理清理命令属 P1-B；授权回调是应用接口，真实权限来源未接入。
+**Task 2 缺口：** 代码不能识别自由文字，渠道边界靠“模型只看得到渠道允许的数据”保证，用户自己输入或模型自身知识不在此约束内；复核与交给 SDK 之间仍有极短的检查-使用窗口；撤权后已写入的证据行保留到过期（不可读）；每条证据仍保存另一渠道的投影（永不可读，可在清理任务中收窄）；预算计数在进程内，依赖 Task 5 在每轮结束调用 `end_turn`；Session 元数据表移到 Task 3；渠道展示仍是 JSON 投影，表格/摘要格式属 P1-B；证据物理清理命令属 P1-B；授权回调是应用接口，真实权限来源未接入。
 
 **Task 1B 缺口：** 三家均无真实 API 证据；`parallel_tool_calls=false` 只是请求参数，供应商不遵守时仍会返回多个调用（Task 2 原子预算兜底）；真实供应商若返回 `stop`/`tool_calls` 以外的正常终态会被拒绝，需实测确认；`strict` 工具、JSON mode 与推理字段的供应商兼容性只由 mock 覆盖。SDK 客户端把上游错误体写进异常消息，原始异常尚未映射为受控失败（Task 5 应用出口负责）。流式调用未验证。
 
@@ -77,7 +77,7 @@
 
 CI integration job 设置 `SDK_TEST_POSTGRES_URL`，启动 `compose.sdk-test.yml`，运行完整 `python -m pytest -q`，并用 shell `EXIT` trap 清理测试项目；不保留旧 PostgreSQL service。SDK 地址缺失时 fixture 明确失败，避免数据库测试静默跳过。
 
-**下一项：** Task 2 独立审查；通过后按集成门推送、建 PR、核对 CI 并单独批准合并，再从合并后的 `main` 开始 Task 3（原生 Session 的存储前与回放前策略）。
+**下一项：** Task 2 修复的增量复审；分支已推送并开 PR，核对 CI 后需单独批准合并，再从合并后的 `main` 开始 Task 3（原生 Session 的存储前与回放前策略）。
 
 P1-A 是内部核心。P1-B 才接真实查询与双入口并切换正式入口，P2 增加诊断，P3 做实际用户验收。环境缺失不阻塞独立离线任务，但不能跳过对应实战退出条件。
 
@@ -130,13 +130,13 @@ Task 2 验证（同一环境，锁文件未变）：
 
 | 命令 | 结果 |
 | --- | --- |
-| `SDK_TEST_POSTGRES_URL=$SDK_PG uv run --locked --extra dev python -m pytest tests/sdk_core/test_governance.py tests/sdk_core/test_evidence.py -q` | 实现前因缺少 `xiaowei.evidence` 在收集阶段失败；实现后 27 passed |
-| `SDK_TEST_POSTGRES_URL=$SDK_PG uv run --locked --extra dev python -m pytest tests/sdk_core -q` | 125 passed |
-| `SDK_TEST_POSTGRES_URL=$SDK_PG uv run --locked --extra dev python -m pytest -q` | 1839 passed，152 skipped；无残留测试库 |
-| `uv run --locked --extra dev ruff check src/xiaowei tests/sdk_core`、`ruff format --check src/xiaowei tests/sdk_core`、`mypy src/xiaowei` | 通过 |
+| `SDK_TEST_POSTGRES_URL=$SDK_PG uv run --locked --extra dev python -m pytest tests/sdk_core/test_governance.py tests/sdk_core/test_evidence.py -q` | 实现前因缺少 `xiaowei.evidence` 在收集阶段失败；首轮 27 passed。审查修复前新增/调整用例 9 项按预期失败（模型收到撤权后的 `total=100`、飞书交付含模型专属标记、策略收窄后旧证据仍可读），修复后 36 passed |
+| `SDK_TEST_POSTGRES_URL=$SDK_PG uv run --locked --extra dev python -m pytest tests/sdk_core -q` | 134 passed |
+| `SDK_TEST_POSTGRES_URL=$SDK_PG uv run --locked --extra dev python -m pytest -q` | 1848 passed，152 skipped；无残留测试库 |
+| `uv run --locked --extra dev ruff check .`、`ruff format --check src/xiaowei tests/sdk_core`、`mypy src` | 通过 |
 | `uv build --wheel`（输出到临时目录） | wheel 含 `xiaowei/migrations/001_initial.sql` |
 
-Task 2 反向验证：分别去掉撤权复核、调用时范围检查、展示范围过滤、目标一致性、参数校验、预算预占，把预算检查与计数拆到 `await` 两侧，保留执行异常原因链，去掉契约 schema 比对、SQL 归属条件、过期/目标/授权/渠道检查，改为投影全部字段、忽略投影上限或来源截断，去掉回答的引用子集/非空/去重/澄清混用检查、`AgentAnswer` 或 RunContext 的 `extra="forbid"`、应用表版本/存在检查、已安装判断，共 26 项，对应用例均失败。可信类型的 `strict` 经变异证明不承重，已删除。
+Task 2 反向验证：分别去掉撤权复核、调用时范围检查、展示范围过滤、目标一致性、参数校验、预算预占，把预算检查与计数拆到 `await` 两侧，保留执行异常原因链，去掉契约 schema 比对、SQL 归属条件、过期/目标/授权/渠道检查，改为投影全部字段、忽略投影上限或来源截断，去掉回答的引用子集/非空/去重/澄清混用检查、`AgentAnswer` 或 RunContext 的 `extra="forbid"`、应用表版本/存在检查、已安装判断，共 26 项；审查修复后另加 8 项：去掉写入后复核、模型或 Session 的渠道约束（分别及同时）、较小上限、策略指纹比较，指纹去掉投影或契约部分。34 项对应用例均失败。可信类型的 `strict` 经变异证明不承重，已删除。
 
 Task 1B 反向验证：分别改为沿用 SDK 请求头，或去掉密钥固定、`identity` 编码、压缩检查、逐块计数、默认 transport 的 `trust_env=False`、Chat 终态检查（含只查第一个 choice、允许空 choices、允许 `length`）、JSON 解析检查、`parallel_tool_calls=False`、请求上限、`follow_redirects=False`、`store=False`、`preserve_raw_usage`、`json_object` 委托、推理强度白名单、HTTPS 校验，对应用例均失败；媒体类型与声明长度检查经变异证明分别被 JSON 解析与逐块计数覆盖，已删除。重试与期限各有两层（SDK 设置与客户端），只去掉一层时测试仍通过；两层同时去掉时 429/503/超时与期限断言失败。
 

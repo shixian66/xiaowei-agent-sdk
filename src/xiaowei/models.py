@@ -81,6 +81,7 @@ class EvidenceRecord(_Trusted):
     tool_id: ToolId
     call_id: Label
     policy_id: Label
+    policy_fingerprint: Label
     captured_at: datetime
     expires_at: datetime
     truncated: bool

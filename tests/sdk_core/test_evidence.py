@@ -1,6 +1,7 @@
 """Task 2：Evidence 记录、四种数据投影、最终回答校验与应用表版本。真实 PostgreSQL + 真 Runner。"""
 
 import json
+from collections.abc import Callable
 from importlib.resources import files
 from typing import Any
 
@@ -13,7 +14,9 @@ from sqlalchemy import inspect, text
 from sqlalchemy.engine import URL
 from sqlalchemy.ext.asyncio import AsyncEngine
 from tests.sdk_core.synthetic_tools import (
+    CONTRACTS,
     OTHER_TARGET,
+    POLICIES,
     PRIVATE_NOTE,
     PROJECTIONS,
     RETENTION_SECONDS,
@@ -22,6 +25,7 @@ from tests.sdk_core.synthetic_tools import (
     Clock,
     Grants,
     RecordingAdapter,
+    RegionArgs,
     catalog,
     context,
     model_data,
@@ -33,8 +37,15 @@ from tests.sdk_core.synthetic_tools import (
 )
 
 from xiaowei.evidence import AnswerRejectedError, EvidenceStore, EvidenceUnavailableError
-from xiaowei.governance import GovernedTools
-from xiaowei.models import AgentAnswer, AnswerInference, RunContext, ToolObservation
+from xiaowei.governance import GovernedTools, Projection, ToolCatalog, ToolPolicy
+from xiaowei.models import (
+    AgentAnswer,
+    AnswerInference,
+    Audience,
+    Channel,
+    RunContext,
+    ToolObservation,
+)
 from xiaowei.storage import (
     APP_TABLES,
     SDK_MESSAGES_TABLE,
@@ -67,39 +78,49 @@ async def _saved_text(engine: AsyncEngine) -> str:
     return json.dumps([[str(v) for v in row] for row in rows], ensure_ascii=False)
 
 
+def _expected_fields(audience: Audience, channel: Channel) -> set[str]:
+    """模型与 Session 内容最终可能经模型文字到达渠道，因此受接收渠道字段约束。"""
+    declared = set(PROJECTIONS[audience].fields)
+    if audience in ("model", "session"):
+        return declared & set(PROJECTIONS[channel].fields)
+    return declared
+
+
 async def test_four_data_boundaries(postgres_url: URL) -> None:
     grants, clock, adapter = Grants(), Clock(), RecordingAdapter()
     grants.grant("alice", TOTAL_TOOL)
     async with ready_engine(postgres_url) as engine:
         evidence = store(engine, grants, clock)
         governed = GovernedTools(catalog(), evidence, authorize=grants)
-        web = context()
-        result = await governed.invoke(web, request(), lambda: adapter.execute(request()))
+        channel_views: dict[Channel, dict[Audience, str]] = {}
+        ids: dict[Channel, str] = {}
+        channel: Channel
+        for channel in ("web", "feishu"):
+            ctx = context(channel=channel, session=f"{channel}-1")
+            result = await governed.invoke(ctx, request(), lambda: adapter.execute(request()))
+            assert model_data(result.model_content)["evidence_id"] == result.evidence_id
+            ids[channel] = result.evidence_id
+            channel_views[channel] = {
+                "model": result.model_content,
+                "session": await evidence.project(result.evidence_id, ctx, "session"),
+                channel: await evidence.project(result.evidence_id, ctx, channel),
+            }
 
-        model = model_data(result.model_content)
-        assert model["evidence_id"] == result.evidence_id
-        assert set(model["data"]) == {"total", "rows"}  # type: ignore[arg-type]
-        views = {"model": result.model_content}
-        views["session"] = await evidence.project(result.evidence_id, web, "session")
-        views["web"] = await evidence.project(result.evidence_id, web, "web")
-
-        feishu = context(channel="feishu", session="f1")
-        feishu_id = await _record(evidence, feishu)
-        views["feishu"] = await evidence.project(feishu_id, feishu, "feishu")
-
-        # 每种用途只含各自声明的字段并满足各自的字节上限；原始禁止字段处处不出现。
-        for audience, content in views.items():
-            spec = PROJECTIONS[audience]
-            assert set(model_data(content)["data"]) == set(spec.fields)  # type: ignore[arg-type]
-            assert len(content.encode()) <= spec.max_bytes
-            assert PRIVATE_NOTE not in content
-        assert views["session"] != views["model"] != views["web"]
+        # 每种用途只含各自获准的字段并满足各自的字节上限；原始禁止字段处处不出现。
+        for channel, views in channel_views.items():
+            for audience, content in views.items():
+                assert set(model_data(content)["data"]) == _expected_fields(audience, channel)  # type: ignore[arg-type]
+                assert len(content.encode()) <= PROJECTIONS[audience].max_bytes
+                assert PRIVATE_NOTE not in content
+            assert len(set(views.values())) == len(views)
 
         # 渠道投影只交给相应渠道：Web 会话里的证据不能投影给飞书，反之亦然。
         with pytest.raises(EvidenceUnavailableError):
-            await evidence.project(result.evidence_id, web, "feishu")
+            await evidence.project(ids["web"], context(session="web-1"), "feishu")
         with pytest.raises(EvidenceUnavailableError):
-            await evidence.project(feishu_id, feishu, "web")
+            await evidence.project(
+                ids["feishu"], context(channel="feishu", session="feishu-1"), "web"
+            )
 
         # PostgreSQL 保存的是按用途投影后的内容，不含原始结果。
         saved = await _saved_text(engine)
@@ -109,6 +130,7 @@ async def test_four_data_boundaries(postgres_url: URL) -> None:
 
 async def test_truncated_and_empty_results_are_explicit(postgres_url: URL) -> None:
     grants, clock = Grants(), Clock()
+    grants.grant("alice", TOTAL_TOOL)
     async with ready_engine(postgres_url) as engine:
         evidence = store(engine, grants, clock)
 
@@ -119,7 +141,6 @@ async def test_truncated_and_empty_results_are_explicit(postgres_url: URL) -> No
         model = model_data(many.model_content)
         assert many.truncated and model["truncated"] is True
         assert set(model["data"]) == {"total"}  # type: ignore[arg-type]
-        grants.grant("alice", TOTAL_TOOL)
         web = model_data(await evidence.project(many.evidence_id, context(), "web"))
         assert web["truncated"] is False and len(web["data"]["rows"]) == 30  # type: ignore[index]
 
@@ -135,6 +156,28 @@ async def test_truncated_and_empty_results_are_explicit(postgres_url: URL) -> No
         nothing = model_data((await evidence.record(context(), request(), empty)).model_content)
         assert nothing["empty"] is True and nothing["data"] == {}
         assert nothing["truncated"] is False
+
+
+async def test_model_reachable_content_uses_the_smaller_channel_limit(postgres_url: URL) -> None:
+    """渠道容量小于模型容量时，模型与 Session 内容按渠道容量截断，模型不能多拿再复述。"""
+    grants, clock = Grants(), Clock()
+    grants.grant("alice", TOTAL_TOOL)
+    wide = Projection(fields=("region", "total", "rows"), max_bytes=4000)
+    narrow_channel = _narrowed(model=wide, session=wide, feishu=Projection(wide.fields, 300))
+    feishu = context(channel="feishu", session="f1")
+    async with ready_engine(postgres_url) as engine:
+        evidence = EvidenceStore(
+            engine, narrow_channel, authorize=grants, clock=clock, retention_seconds=60
+        )
+        result = await evidence.record(
+            feishu, request(), await RecordingAdapter(rows=10).execute(request())
+        )
+        session = await evidence.project(result.evidence_id, feishu, "session")
+
+    for content in (result.model_content, session):
+        assert len(content.encode()) <= 300
+        assert model_data(content)["truncated"] is True
+        assert "rows" not in model_data(content)["data"]  # type: ignore[operator]
 
 
 async def test_forged_foreign_expired_evidence_is_denied(postgres_url: URL) -> None:
@@ -291,6 +334,145 @@ async def test_facts_are_rendered_from_evidence(postgres_url: URL) -> None:
     assert PRIVATE_NOTE not in delivery.content
 
 
+MODEL_ONLY = "MODEL_ONLY_SYNTHETIC_VALUE"
+
+
+def _copy_tool_output(into: str) -> ModelStep:
+    """脚本模型把收到的工具结果原样抄进回答文字，模拟模型复述它看到的一切。"""
+
+    def respond(call: ModelCall) -> Any:
+        items = call.input
+        assert isinstance(items, list)
+        raw = [i for i in items if i.get("type") == "function_call_output"][-1]["output"]
+        evidence_id = json.loads(raw)["evidence_id"]
+        if into == "inference":
+            answer = {
+                "evidence_ids": [evidence_id],
+                "inferences": [{"text": raw, "evidence_ids": [evidence_id]}],
+                "clarification": None,
+            }
+        else:
+            answer = {"evidence_ids": [], "inferences": [], "clarification": raw}
+        return [assistant_message(json.dumps(answer, ensure_ascii=False))]
+
+    return ModelStep.respond(respond)
+
+
+@pytest.mark.parametrize("into", ["inference", "clarification"])
+async def test_model_text_cannot_carry_fields_the_channel_forbids(
+    postgres_url: URL, into: str
+) -> None:
+    """``rows`` 允许给模型和 Web，不允许给飞书；飞书会话中模型根本拿不到它。"""
+    grants, clock = Grants(), Clock()
+    grants.grant("alice", TOTAL_TOOL)
+    adapter = RecordingAdapter(memo=MODEL_ONLY)
+    deliveries: dict[str, str] = {}
+    sessions: dict[str, str] = {}
+    async with ready_engine(postgres_url) as engine:
+        evidence = store(engine, grants, clock)
+        governed = GovernedTools(catalog(), evidence, authorize=grants)
+        channel: Channel
+        for channel in ("feishu", "web"):
+            ctx = context(channel=channel, session=f"{channel}-1")
+            model = ScriptedModel(
+                [
+                    [function_call("order_total", {"region": "east"}, call_id="c1")],
+                    _copy_tool_output(into),
+                ]
+            )
+            agent = Agent[RunContext](
+                name="governed",
+                model=model,
+                tools=[sdk_tool(governed, adapter, TOTAL_TOOL)],
+                output_type=AgentAnswer,
+            )
+            result = await Runner.run(agent, "东区？", context=ctx)
+            deliveries[channel] = (await evidence.validate_answer(result.final_output, ctx)).content
+            items = model.calls[1].input
+            assert isinstance(items, list)
+            (raw,) = [i["output"] for i in items if i.get("type") == "function_call_output"]
+            evidence_id = str(model_data(str(raw))["evidence_id"])
+            sessions[channel] = await evidence.project(evidence_id, ctx, "session")
+
+    assert MODEL_ONLY not in deliveries["feishu"]
+    # Session 内容会在后续轮次回放给模型，同样不能含飞书禁止的字段。
+    assert MODEL_ONLY not in sessions["feishu"]
+    # 对照：Web 允许 rows，该标记是真实可交付的数据，而不是被测试本身滤掉。
+    assert MODEL_ONLY in deliveries["web"]
+    assert MODEL_ONLY in sessions["web"]
+
+
+def _narrowed(**projections: Projection) -> ToolCatalog:
+    policy = ToolPolicy(
+        policy_id="synthetic.region",
+        arguments=RegionArgs,
+        projections={**PROJECTIONS, **projections},
+    )
+    return ToolCatalog(CONTRACTS, (policy,))
+
+
+def _renamed() -> ToolCatalog:
+    policy = ToolPolicy(
+        policy_id="synthetic.region.v2", arguments=RegionArgs, projections=PROJECTIONS
+    )
+    contracts = tuple(c.model_copy(update={"policy_id": policy.policy_id}) for c in CONTRACTS)
+    return ToolCatalog(contracts, (policy,))
+
+
+@pytest.mark.parametrize(
+    "current",
+    [
+        pytest.param(
+            lambda: _narrowed(web=Projection(fields=("region",), max_bytes=2000)), id="fields"
+        ),
+        pytest.param(
+            lambda: _narrowed(model=Projection(fields=("total", "rows"), max_bytes=256)), id="bytes"
+        ),
+        pytest.param(lambda: ToolCatalog(CONTRACTS[1:], POLICIES), id="tool-removed"),
+        pytest.param(_renamed, id="policy-replaced"),
+    ],
+)
+async def test_stored_evidence_follows_current_policy(
+    postgres_url: URL, current: Callable[[], ToolCatalog]
+) -> None:
+    grants, clock = Grants(), Clock()
+    grants.grant("alice", TOTAL_TOOL)
+    web, feishu = context(), context(channel="feishu", session="f1")
+    async with ready_engine(postgres_url) as engine:
+        original = store(engine, grants, clock)
+        saved = {"web": await _record(original, web), "feishu": await _record(original, feishu)}
+
+    # 重建引擎与存储对象（相当于重启或恢复）后读取。
+    async with open_engine(secret(postgres_url)) as engine:
+        answer = {
+            ch: AgentAnswer(evidence_ids=(eid,), inferences=[], clarification=None)
+            for ch, eid in saved.items()
+        }
+        cases: list[tuple[RunContext, str, Audience]] = [
+            (web, saved["web"], "model"),
+            (web, saved["web"], "session"),
+            (web, saved["web"], "web"),
+            (feishu, saved["feishu"], "feishu"),
+        ]
+        # 对照：同一份策略重建后照常可读。
+        same = EvidenceStore(
+            engine, catalog(), authorize=grants, clock=clock, retention_seconds=RETENTION_SECONDS
+        )
+        for ctx, eid, audience in cases:
+            await same.project(eid, ctx, audience)
+        await same.validate_answer(answer["web"], web)
+
+        changed = EvidenceStore(
+            engine, current(), authorize=grants, clock=clock, retention_seconds=RETENTION_SECONDS
+        )
+        for ctx, eid, audience in cases:
+            with pytest.raises(EvidenceUnavailableError):
+                await changed.project(eid, ctx, audience)
+        for ctx, ch in ((web, "web"), (feishu, "feishu")):
+            with pytest.raises(AnswerRejectedError):
+                await changed.validate_answer(answer[ch], ctx)
+
+
 async def test_app_schema_version_is_checked(postgres_url: URL) -> None:
     grants, clock = Grants(), Clock()
     async with open_engine(secret(postgres_url)) as engine:
@@ -311,6 +493,7 @@ async def test_app_schema_version_is_checked(postgres_url: URL) -> None:
         # SDK 与应用表互不改写：写证据不产生 SDK 会话项，SDK 会话读写也不触碰证据。
         session = SQLAlchemySession("web:alice:s1", engine=engine)
         await session.add_items([{"role": "user", "content": "hi"}])
+        grants.grant("alice", TOTAL_TOOL)
         await _record(store(engine, grants, clock))
         assert len(await session.get_items()) == 1
         async with engine.connect() as conn:

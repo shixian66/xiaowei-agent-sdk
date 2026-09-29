@@ -7,6 +7,7 @@ import pytest
 from agents import Agent, Runner
 from agents.testing import ModelStep, ScriptedModel, assistant_message, function_call
 from pydantic import BaseModel, ConfigDict, ValidationError
+from sqlalchemy import event
 from sqlalchemy.engine import URL
 from tests.sdk_core.synthetic_tools import (
     CONTRACTS,
@@ -36,7 +37,14 @@ from xiaowei.governance import (
     ToolPolicy,
     ToolRejectedError,
 )
-from xiaowei.models import Budget, Identity, RunContext, ToolContract, ToolRequest
+from xiaowei.models import (
+    Budget,
+    Identity,
+    RunContext,
+    ToolContract,
+    ToolObservation,
+    ToolRequest,
+)
 
 pytestmark = pytest.mark.loopback
 
@@ -71,6 +79,51 @@ async def test_revoked_tool_never_reaches_io(postgres_url: URL) -> None:
     (output,) = _outputs(model, 1)
     assert "当前无权调用该工具" in output
     assert grants.checks == [("alice", TARGET, TOTAL_TOOL)]
+
+
+@pytest.mark.parametrize("phase", ["execute", "record"])
+async def test_revocation_after_io_withholds_result(postgres_url: URL, phase: str) -> None:
+    """授权在执行前通过，执行期间或证据写入期间撤权：结果不得交给模型。"""
+    grants, adapter = Grants(), RecordingAdapter()
+    grants.grant("alice", TOTAL_TOOL)
+    async with ready_engine(postgres_url) as engine:
+        if phase == "execute":
+            original = adapter.execute
+
+            async def revoke_while_executing(req: ToolRequest) -> ToolObservation:
+                observation = await original(req)
+                grants.revoke_all()
+                return observation
+
+            adapter.execute = revoke_while_executing  # type: ignore[method-assign]
+        else:
+
+            def revoke_on_insert(_conn: Any, _cursor: Any, statement: str, *_: Any) -> None:
+                if "INSERT INTO xiaowei_evidence" in statement:
+                    grants.revoke_all()
+
+            event.listen(engine.sync_engine, "before_cursor_execute", revoke_on_insert)
+
+        governed = GovernedTools(catalog(), store(engine, grants, Clock()), authorize=grants)
+        model = ScriptedModel(
+            [[function_call("order_total", {"region": "east"}, call_id="call-1")], _DONE]
+        )
+        agent = Agent[RunContext](
+            name="governed", model=model, tools=[sdk_tool(governed, adapter, TOTAL_TOOL)]
+        )
+        await Runner.run(agent, "东区订单？", context=context(max_tool_calls=1), max_turns=3)
+
+        # 结果未知不重试：同一轮再次调用因预算已用而拒绝，执行次数保持 1。
+        with pytest.raises(ToolRejectedError):
+            await governed.invoke(
+                context(max_tool_calls=1), request(), lambda: adapter.execute(request())
+            )
+
+    assert len(adapter.calls) == 1
+    (output,) = _outputs(model, 1)
+    assert "当前无权读取" in output
+    for business in ('"total"', "100", '"rows"', "2026-09-01"):
+        assert business not in output
 
 
 def _reject_cases() -> list[Any]:
