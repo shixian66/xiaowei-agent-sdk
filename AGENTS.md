@@ -4,7 +4,7 @@
 
 **OpenAI Agents SDK 负责 Agent Loop；小维负责权限、受治理工具执行、证据真实性和数据边界。**
 
-这是小维架构的最高原则。具体实现不得绕开这些边界，也不得为治理重建 SDK 的 Agent Loop。
+这是小维架构的最高原则。具体实现不得绕开这些边界，也不得为治理重建 SDK 的 Agent Loop。MCP 是标准化工具接入机制，不能替代小维的业务授权与数据边界。
 
 ## 1. 项目与工作方式
 
@@ -38,7 +38,8 @@
 - 直接使用公开的 `Agent`、`Runner`、function tools、Session、guardrails、tracing 与结构化输出；有人工审批需求时使用 SDK interruptions / RunState。
 - Agent 负责理解、澄清、选择获准工具、按结果继续调查和生成回答。应用提供可信上下文、工具实现与权限，不自行重建 Agent 循环。
 - 先查 SDK 原生能力，之后才增加最小应用代码。不要重建 Agent/Runner/Session 机制，也不为未来替换 SDK 建通用框架；数据策略的薄包装使用 SDK 公开接口并委托其原生实现。
-- 单 Agent 是初始方案；只有工具、上下文或职责隔离确有收益时增加 handoffs / `Agent.as_tool()`。MCP 按集成需求使用。
+- 单 Agent 是初始方案；只有工具、上下文或职责隔离确有收益时增加 handoffs / `Agent.as_tool()`。首版同时交付最小 MCP Client Integration，直接使用 SDK 官方接入能力；外部业务 MCP Server 按实际需求接入，不在首版自建。
+- MCP Client Integration 属于后端的应用装配，不是另一个 Runtime；只维护一套通用接入，不为数据库、Jenkins、K8s 分别造 Client。Server Registry 首版使用静态可信配置，禁止模型指定端点、凭据或启动命令。
 - 工具是有清晰业务含义的函数；类型、描述和结果帮助 Agent 正确使用。不构造能力 DSL、关键词路由总表或通用计划编译器。
 - 会话依赖 SDK Session 接口；首版采用 SQLiteSession，不自建同名抽象，不把 SQLite 绑定为长期架构。
 - 小维的 RunContext 只放可信身份、Target Scope、Tool Scope、预算及最少 Evidence 标识/元数据；禁止密码、API key、连接串、DB connection、客户端及间接携带它们的服务对象。依赖由应用装配到治理工具服务和 Adapter，不经 context 注入。
@@ -48,7 +49,7 @@
 ## 4. 产品必需的执行边界
 
 1. 身份和连接配置由服务端提供；模型可以提出目标选择器，不能提供凭据、连接串或自授权限。
-2. 所有 SDK function tools 必须经过 Governed Tool Layer，再进入业务 Adapter；该层在外部 I/O 前复核 Tool Scope、目标、参数、最新权限和预算。不支持或无权限的工具不暴露；工具隐藏仍不能替代执行鉴权。
+2. 本地 function tools 经 Governed Tool Layer 进入 Adapter；MCP 调用在发送请求前复用小维治理核心，并在结果进入模型前过滤和绑定 Evidence。两条路径都复核 Tool Scope、目标、参数、最新权限和预算。远端 Server 另负服务端执行治理责任，不假定第三方复用了本地 SQLGuard；工具隐藏不能替代执行鉴权。
 3. 数据库操作使用只读账号、有限查询范围、超时与结果上限。暴露通用 SQL 时必须实现与该能力匹配的 SQL 校验；不因旧系统存在 SQLGuard 就视为已经满足。
 4. 分别约束原始数据库结果、Model-visible、Session-visible 与 Web/飞书展示结果。字段、行数/字节、保留周期和接收权限独立配置，不默认复用同一份结果。Session 写入前和回放前过滤，工具和知识中的文本不能改变权限。
 5. output_type 只约束结构。最终发送、历史读取和重发前，代码验证 Evidence 存在、归属、来源、当前目标/数据权限与渠道接收权限；失败阻断相关回答。引用真实不等于模型推断成立，事实与推断仍需区分。
@@ -65,6 +66,7 @@
 - 从最少的模块开始；一个应用进程即可满足时，不预建 Worker、队列、租约与分布式调度。
 - 公共接口使用 Type Hints；跨边界输入和业务输出使用清晰 schema。SDK 类型直接使用，不为每个 SDK 对象复制 DTO。
 - async I/O 具备超时和取消语义；同步客户端不得阻塞事件循环。错误按边界归类，不吞异常、不伪造成功。
+- MCP 配置为空时，本地产品仍可运行；只读策略之外或没有安全映射的远端工具拒绝注册，不因远端声明 readonly 就信任。协议测试服务只属测试设施，不算已交付业务 MCP Server。
 - 简单纯函数、标准库和已有依赖优先；不预建无消费者的接口、工厂、注册框架和扩展点。
 - 文档说明关键前提和异常语义，避免重复代码的大段注释。
 - 配置有明确默认值、合法范围和错误提示；依赖通过锁文件复现，不借用原项目环境宣称新产品通过。

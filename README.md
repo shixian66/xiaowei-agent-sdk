@@ -2,7 +2,7 @@
 
 小维是一款以 **OpenAI Agents SDK** 为核心设计的数据库助手。首版目标是在 **Web 对话和飞书单聊** 中完成“查结构 → 只读查询 → 解释结果 → 分析慢查询”的连续对话。
 
-> 当前处于新产品设计阶段。仓库源码仍是 M5 历史基线，SDK 产品尚未实现；下文能力描述是首版目标。准确状态与验证记录见 [AGENT_HANDOFF.md](AGENT_HANDOFF.md)。
+> 产品方向已确认，P1-A 实施计划已编写、待审阅。仓库源码仍是 M5 历史基线，SDK 产品尚未实现；下文能力描述是首版目标。准确状态与验证记录见 [AGENT_HANDOFF.md](AGENT_HANDOFF.md)。
 
 **OpenAI Agents SDK 负责 Agent Loop；小维负责权限、受治理工具执行、证据真实性和数据边界。**
 
@@ -13,7 +13,7 @@
 - 继续追问“这条 SQL 为什么慢”，查看普通执行计划，得到有依据的优化建议与局限说明。
 - 在 Web 或飞书连续对话，查看实际 SQL、有限结果和诊断依据。
 
-查询与诊断共用一个 Agent。Agent 只看到当前获准且可用的工具，通过统一的 Governed Tool Layer 进入 StarRocks Adapter；执行前复核权限，最终发送前验证 Evidence。模型、会话、Web 与飞书分别接收各自允许的数据。
+查询与诊断共用一个 Agent。首版 StarRocks 使用本地 function tools，同时具备通用 MCP Client Integration，连接未来获准的外部工具服务；首版不自建业务 MCP Server。两条工具路径都在调用前复核权限、结果进入模型前过滤，最终发送前验证 Evidence。模型、会话、Web 与飞书分别接收各自允许的数据。
 
 ## 最小产品形态
 
@@ -23,12 +23,15 @@
 | Web | 本机使用的简单对话页，显示文本、SQL、有限结果与执行提示 |
 | 飞书 | 获准用户与企业自建机器人的单聊文本消息 |
 | 数据源 | 一个服务端配置的 StarRocks 只读连接及明确授权范围 |
+| MCP | 官方 SDK 接入能力 + 小维可信配置与治理；配置为空时，本地功能照常运行 |
 | 会话 | 两端分别保留上下文，共用业务逻辑；暂不跨渠道同步 |
 | 运行与存储 | 单 Python 应用进程；依赖 SDK Session，首版用 SQLiteSession；飞书优先长连接 |
 
 SQLite 是首版实现选择，不是长期架构绑定。生产默认关闭 tracing 与外发；真实数据 trace 需要显式配置允许范围。
 
 已有审计源与 Query Profile 按环境能力接入。缺少它们时，仍可分析 SQL 与执行计划，但必须明确证据不足；不会自动修改目标配置来开启采集。
+
+MCP 负责标准化工具接入，不能替代业务授权。只有参数含义、风险和结果策略已有支持的服务，才能主要通过配置注册；并非填写一个地址就可安全使用任意工具。
 
 首版不执行数据修改、配置变更或优化建议；不建设复杂管理后台、多 Agent 或分布式任务平台。
 
@@ -51,6 +54,7 @@ SQLite 是首版实现选择，不是长期架构绑定。生产默认关闭 tra
 - [ARCHITECTURE.md](ARCHITECTURE.md)：完整产品设计、工具、双入口与执行边界。
 - [AGENT_HANDOFF.md](AGENT_HANDOFF.md)：当前代码与已经验证的事实。
 - [DEVELOPMENT_PLAN.md](DEVELOPMENT_PLAN.md)：逐步交付的顺序和验收目标。
+- [P1-A 实施计划](docs/superpowers/plans/2026-09-29-p1a-sdk-governed-core.md)：先验证 SDK、治理与 MCP 核心，再接真实数据库和双入口。
 
 设计直接使用 [OpenAI Agents SDK](https://developers.openai.com/api/docs/guides/agents/sdk) 原生能力。旧实现只在有明确价值时提取少量业务素材，兼容旧框架不是新产品目标。
 

@@ -1,10 +1,10 @@
 # 小维：基于 OpenAI Agents SDK 的产品设计
 
-> 本文是新产品的书面设计草案。已确定方向是 SDK 原生开发、允许从零开始；首版同时支持 Web 与飞书对话。实现事实与待确认项见 [AGENT_HANDOFF.md](AGENT_HANDOFF.md)。
+> 产品方向已确认：SDK 原生开发、允许从零开始；首版支持 Web 与飞书、本地 StarRocks 工具和最小 MCP Client Integration。本文是该决定的工程设计，具体代码计划另行审阅。实现事实见 [AGENT_HANDOFF.md](AGENT_HANDOFF.md)。
 
 **OpenAI Agents SDK 负责 Agent Loop；小维负责权限、受治理工具执行、证据真实性和数据边界。**
 
-这是最高架构原则。SDK 保留运行循环的所有权；下述治理、数据和证据检查由确定性应用代码落实。
+这是最高架构原则。SDK 保留运行循环的所有权；下述治理、数据和证据检查由确定性应用代码落实。**MCP 是标准化工具接入机制，不能替代小维的业务授权与数据边界。**
 
 ## 1. 产品目标
 
@@ -31,8 +31,9 @@ Agent 可以理解自然语言、生成 SQL、选择工具、根据工具结果�
 | Web | 本机对话页；消息、执行提示、SQL、有限结果、诊断回答 |
 | 飞书 | 获准用户与企业自建机器人的单聊；文本输入与文本回复 |
 | 会话 | 同一入口可连续追问；Web 与飞书分别持有会话 |
+| 工具接入 | StarRocks 走薄 function tools；同时交付 SDK 原生的最小 MCP Client Integration |
 | 运行 | 一个 Python 应用进程；会话依赖 SDK Session，首版用 SQLiteSession；少量应用记录首版也存 SQLite |
-| 暂缓 | 数据修改、配置变更、自动执行优化 SQL、导出、文件上传、群聊、跨渠道账号绑定、复杂工作台、多租户、多 Agent、后台任务平台 |
+| 暂缓 | 数据修改、配置变更、自动执行优化 SQL、导出、文件上传、群聊、跨渠道账号绑定、复杂工作台、多租户、多 Agent、后台任务平台、自建业务 MCP Server |
 
 双入口采用共享应用服务：比只交付一个入口多两端联调，但能在同一版本满足实际使用。各渠道维护独立 Agent 会造成工具、规则和结果分叉，因此不采用。复用旧 Runtime 会使设计依赖旧计划与调度机制，也不采用。
 
@@ -47,14 +48,20 @@ flowchart TD
     C --> A[共享应用服务：请求去重、并发限制、结果响应]
     A --> R[OpenAI Agents SDK Runner]
     R <--> G[一个 StarRocks Agent]
-    R --> T[SDK function tools]
-    T --> B[Governed Tool Layer]
-    B --> D[StarRocks Adapter]
+    R --> T[薄 function tools]
+    R --> I[MCP Integration：官方 SDK 接入]
+    T --> B[小维治理核心：调用前鉴权与约束]
+    I --> B
+    B --> D[本地 StarRocks Adapter]
     D <--> DB[获准的 StarRocks]
-    D --> B
-    B --> M[Model-visible result]
+    B --> MC[官方 SDK MCP Client 调用]
+    MC -. 配置启用 .-> MS[外部 MCP Server：服务端治理]
+    MS --> X[外部目标系统]
+    D --> P1[小维结果过滤与 Evidence 绑定]
+    MS -. 调用结果 .-> P1
+    P1 --> M[Model-visible result]
     M --> R
-    B --> E[受限 Evidence 记录]
+    P1 --> E[受限 Evidence 记录]
     R <--> H[Session 写入与回放过滤]
     H <--> S[SDK Session]
     A --> P[轻量请求与结果记录]
@@ -63,6 +70,8 @@ flowchart TD
     V --> O[Web / 飞书各自展示投影]
     O --> C
 ```
+
+MCP Client Integration 与 Web/飞书共享同一个后端。图中外部 Server 是接入边界，首版不交付自建数据库、Jenkins 或 K8s MCP 服务；本地 StarRocks 路径不依赖 MCP 可用性。远端请求先经过小维治理，远端自身仍需鉴权并约束实际执行。
 
 SDK 负责模型与工具调用循环；应用负责接入、实际权限、领域工具和运行边界。应用直接调用 `Runner.run` 或 `Runner.run_streamed`，不解析模型文本自行调用工具，不创建通用计划编译器，不在 SDK 外面再运行一套 Agent 引擎。
 
@@ -74,7 +83,8 @@ SDK 负责模型与工具调用循环；应用负责接入、实际权限、领�
 | --- | --- |
 | `Agent` / instructions | 定义数据库助手、澄清条件、工具选择与回答规范 |
 | `Runner` | 唯一 Agent 循环；工具返回后继续推理或回答 |
-| function tools | 暴露本轮允许的类型化操作；统一经过 Governed Tool Layer |
+| function tools | 本地业务的薄入口；转换参数并调用 Governed Tool Service |
+| SDK MCP integration | 复用官方连接、发现与调用能力；小维装配可信配置、工具过滤、调用前治理与结果过滤 |
 | `RunContextWrapper` | 只承载可信身份、Target Scope、Tool Scope、预算及 Evidence 标识/元数据 |
 | SDK `Session` | 会话接口；首版存储采用 `SQLiteSession`，独立落实写入/回放的数据策略与访问限制 |
 | `output_type` | 约束最终回答结构；Evidence 真实性、归属和权限另由代码验证 |
@@ -87,7 +97,7 @@ Session 抽象直接使用 SDK 的公开接口，SQLiteSession 只是首版后�
 
 会话只选 SDK Session 一条历史管理路径，不同时自建聊天记录再手工回灌，也不与服务端 conversation continuation 重复叠加。流式执行先展示受控的进度事件，最终结构化回答完成并校验后发送；不把半截 JSON 或未校验结论直接当成回答。[运行与会话](https://developers.openai.com/api/docs/guides/agents/running-agents)、[结果](https://developers.openai.com/api/docs/guides/agents/results)。
 
-首版没有写操作，不建设审批平台。有具体写场景后采用 SDK interruptions / RunState，并补动作绑定、权限复核与回读。handoffs、`Agent.as_tool()` 和 MCP 按实际需求启用。[Guardrails 与审批](https://developers.openai.com/api/docs/guides/agents/guardrails-approvals)。
+首版没有写操作，不建设审批平台。有具体写场景后采用 SDK interruptions / RunState，并补动作绑定、权限复核与回读。首版 MCP 仅开放经审查的只读工具，未知风险或需要审批的工具默认不开放；不为客户端基础能力预建审批平台。handoffs 与 `Agent.as_tool()` 按实际需求启用。[Guardrails 与审批](https://developers.openai.com/api/docs/guides/agents/guardrails-approvals)。
 
 ## 5. 动态工具与受治理执行
 
@@ -95,11 +105,34 @@ Session 抽象直接使用 SDK 的公开接口，SQLiteSession 只是首版后�
 
 工具可见性只回答“这轮可以考虑什么”；调用时必须再回答“当前参数和具体资源是否仍获准”。权限撤销、环境变动或参数越界时，Governed Tool Layer 在 I/O 前拒绝。无法事先得知的临时故障仍需正常报告，不能承诺隐藏工具能消除所有运行错误。
 
-所有 SDK function tools 遵守唯一业务执行路径：**SDK function tool → Governed Tool Layer → StarRocks Adapter**。治理层完成工具/目标权限复核、参数与 SQL 检查、预算及期限检查，再调用 Adapter；接收原始结果后生成受限 Evidence 与分别面向模型、会话、渠道的数据。Adapter 只负责协议、连接生命周期和有界 I/O，不替模型作决策。
+本地路径是 **function tool → Governed Tool Service → StarRocks Adapter**；远端路径是 **MCP Integration → 小维调用前治理 → SDK MCP Client → 外部 MCP Server**。返回结果均先经小维过滤和 Evidence 绑定，再交给 SDK。共享的是身份/目标授权、预算、结果策略与证据验证；SQLGuard 只用于适用的 SQL 工具，不能声称客户端能约束未知远端实现内部的全部行为。
+
+本地治理服务使用稳定的类型化 request/response，SDK 装饰函数只转换参数和调用。领域逻辑不依赖 MCP 报文或 SDK context 类型。将来自建 MCP Server 可复用同一领域服务代码；第三方 Server 不假定能复用它，必须独立核查认证、目标绑定、执行限制与返回契约。Adapter 负责协议、连接生命周期和有界 I/O，不替模型作决策。
 
 治理层首版是共享的少量函数或服务方法，工具只调用对应的受治理方法；不另建通用工作流、调度器或第二套 Agent Loop。凭据只在应用私有配置和 Adapter 生命周期内使用，错误及日志不得携出。最终 Evidence 发送验证是独立的输出关口，不能用执行成功替代。
 
-### 首版工具
+### 最小 MCP Client Integration
+
+首版由 SDK 官方接入对象承担协议工作，小维只做薄的配置与治理装配。不自研 MCP 协议，不建设通用 Gateway、DSL、插件市场或配置管理平台，也不按领域分别实现 Client。
+
+| 职责 | 首版边界 |
+| --- | --- |
+| Server Registry | 静态可信配置：server_id、固定端点、启用状态、认证引用、超时、tool allowlist 和治理映射；默认空集合 |
+| Connection Lifecycle | 官方 SDK 管理连接与关闭，小维设置期限、受限并发和可用状态；一个 Server 失败不阻断本地工具，不无界重连 |
+| Discovery / Filtering | 以 server_id + tool name 标识工具，核对输入/输出契约、风险和权限后才暴露；未知工具、重名冲突、未接受的 schema 变化默认拒绝 |
+| Trust / Auth | 配置和认证材料仅在应用装配层持有，不进 RunContext；服务凭据不自动代表最终用户授权，按身份和目标范围限制每次调用 |
+| Policy Mapping | 绑定已支持的参数含义、目标选择、只读风险与结果投影；没有映射就不开放，不能由模型或远端 annotations 自行批准 |
+| Call / Result Boundary | 每次请求发出前复核权限、参数与预算；结果进入模型前限制类型、字段、大小并建立本地 Evidence |
+
+首版先验证一条 transport，具体选择在当前实施计划中固定；其他 transport 和认证流程按真实消费者需求增加。Hosted MCP 不作为首版默认接入路径，避免把“运行时可过滤结果”的设计无验证地套到托管调用路径上。官方区分由平台调用的 hosted MCP 和运行时直接连接的 stdio/Streamable HTTP；两者的过滤位置与网络边界不同。[SDK MCP 接入](https://developers.openai.com/api/docs/guides/agents/integrations-observability)。
+
+MCP Integration 的治理必须覆盖实际发送动作，不能只过滤 `list_tools` 或在响应后检查。不要直接把未经治理的 SDK MCP Server 对象挂到 Agent 上；也不要假定 function tool guardrails 自动覆盖 MCP。实现时先验证所锁定 SDK 的公开扩展点可拦截调用与结果，不能以私有 API、源码 monkey patch 或自研 Agent Loop 绕过限制。[Guardrails 的执行范围](https://developers.openai.com/api/docs/guides/agents/guardrails-approvals)。
+
+对已经支持的认证、参数与结果契约，增加 Server 应主要修改配置；新领域语义、风险或返回格式仍可能需要新的策略/转换代码。一个 Server 可以有多个连接实例，但共享缓存或连接不得串用不同用户的权限和凭据。远端可接收的输入也受限制，不能把本地身份、会话历史、预算对象整体序列化转发。
+
+配置为空时不建立连接、不增加产品启动依赖；启用后必须具备真实协议级验证。测试可启动只服务合成数据的临时 MCP fixture，它不属于产品部署或业务 MCP Server。未来服务按领域、权限、网络、凭据和部署生命周期拆分，当前不预设数量。
+
+### 首版 StarRocks 工具
 
 下列名称是设计接口，尚非已实现 API。先实现前四项；后两项按真实环境能力增加，不以开通审计或更改目标配置作为前提。
 
@@ -173,12 +206,14 @@ SDK Session 保存经过 Session 数据策略处理的对话。首版以 SDK 公
 
 | 数据边界 | 允许内容与主要约束 | 落点 |
 | --- | --- | --- |
-| 数据库原始结果 | 只读取获准资源，源端超时与读取行数/字节上限；仍可能含不能外发的字段 | Adapter 与治理层受限临时内存；默认不持久化、不进入日志/trace |
+| 数据库原始结果 / MCP 原始响应 | 只读取获准资源；源端和客户端分别设置期限、读取/接收上限；MCP 文本、structuredContent、资源引用都属于待检查输入 | Adapter 或 MCP 接入层的受限临时内存；默认不持久化、不进入日志/trace |
 | Model-visible result | 模型允许接收的字段、脱敏样本或聚合、来源标识、时间和截断说明；有独立 token/字节限额 | SDK 工具返回和本轮模型输入 |
 | Session-visible result | 后续对话需要且允许保留的摘要、受限事实和 Evidence 引用；独立存储字段、容量与保留期，可能比本轮模型输入更少 | SDK Session 写入与回放 |
 | Web / 飞书展示结果 | 当前接收者与渠道获准的数据；Web 表格和飞书摘要可有不同字段、行数、长度和接收限制 | 最终渠道响应；历史查询和重发同样复核 |
 
 四种边界不默认内容相同，也不是一条不断裁剪的单向链。若某字段只允许在 Web 给有权用户查看而不允许发给模型，由服务端从获准的展示结果直接生成受限表格；不能先让模型看见再靠 prompt 要求保密。飞书权限不因 Web 可见而自动成立。首版为每个工具显式定义投影字段及上限，不建设通用数据策略平台。
+
+MCP 返回值不得原样进入模型；同时检查文本与结构化内容，不把模型不可见的 Web 数据藏在工具返回的另一个字段中。未经授权的资源链接不得自动抓取。远端自带 evidence_id 只是外部标识，小维另行记录 server/tool、契约版本、调用关联、可信归属、采集时间与过滤后的内容；它证明“该来源返回了这些信息”，不自动证明实际数据库状态正确。
 
 Evidence 记录仅保存获准保留的最小事实、引用元数据与必要的展示投影，并独立设置访问和保留限制；它不能成为绕过 Session 策略的原始数据仓库。渠道重发结果也按相同规则存储、读取和失效。
 
@@ -205,9 +240,9 @@ Evidence 记录仅保存获准保留的最小事实、引用元数据与必要�
 
 ## 10. 工程组织与旧代码
 
-以 Python 3.11 起步，具体 SDK、数据库驱动、SQL 解析库和飞书包必须安装核对后锁定。建议新应用使用独立的 `src/xiaowei/` 包，避免新入口意外装配旧 `xiaowei_agent` Runtime。首个切片同步调整打包与唯一主启动入口，不长期维护两套正式产品。
+以 Python 3.11 起步，具体 SDK、数据库驱动、SQL 解析库和飞书包必须安装核对后锁定。建议新应用使用独立的 `src/xiaowei/` 包，避免新入口意外装配旧 `xiaowei_agent` Runtime。P1-A 先交付可独立安装、验证的运行核心；P1-B 完成主启动入口切换与过渡依赖清理。P1 内形成唯一正式产品入口，不长期维护两套正式产品。
 
-起步按职责设置少量文件：配置、Agent 定义、应用服务、Governed Tool Layer、StarRocks Adapter 与 SQL 校验、结果投影与 Evidence 验证、Web 与飞书入口、SDK Session 策略及轻量存储、静态页面。只有文件复杂度需要时再拆包；不预生成多层框架。
+起步按职责设置少量文件：配置、Agent 定义、应用服务、Governed Tool Layer、StarRocks Adapter 与 SQL 校验、薄 MCP Integration、结果投影与 Evidence 验证、Web 与飞书入口、SDK Session 策略及轻量存储、静态页面。只有文件复杂度需要时再拆包；不预生成多层框架。
 
 旧代码不是保留清单。参数处理、SQL 样本、脱敏函数、错误样本等只有在当前切片确实有价值且成本低于重写时才迁入；旧 Runtime、Resolver、PlanCompiler、Worker 与 TaskStore 不进入新应用的默认设计。历史由 Git 保留，源码清理列明范围并保护用户数据。
 
@@ -219,8 +254,10 @@ Evidence 记录仅保存获准保留的最小事实、引用元数据与必要�
 - 不可用/无权限工具不出现在本轮工具集合；权限撤销或参数越界即使发生在工具展示后，也在 Adapter I/O 前被治理层拒绝。
 - RunContext 无凭据、连接和客户端引用；四种数据边界有独立断言；伪造、跨会话、失效或权限撤销的 Evidence 不能进入最终回答、历史响应或重发。
 - 生产默认 tracing 关闭且无 trace 网络外发；开启后的字段和接收端限制有验证证据。
+- MCP 空配置不影响本地功能；通过真实 SDK 与临时 MCP fixture 验证发现、过滤、调用、关闭、鉴权失败、超时、schema 变化和不合规结果。拒绝发生在请求发出前，不能只看事后报错。
+- MCP 与本地工具遵守同一身份、预算和结果边界；未知风险工具默认不可见，远端证据不能未经绑定进入最终回答。协议测试不代表某个外部业务 Server 已通过接入验收。
 - 未授权用户/对象、危险 SQL、外部文本注入、超限、超时与渠道发送失败有对应结果。
 - 正式浏览器、真实飞书消息、真实模型和获准 StarRocks 环境分别留证，fake 测试不替代这些证据。
 - 没有 Profile 时能说明诊断限制；没有真实慢查询来源时不能展示虚构的历史慢查询列表。
 
-实施顺序见 [DEVELOPMENT_PLAN.md](DEVELOPMENT_PLAN.md)。设计写完不等于 SDK 产品已经运行，也不等于负责人已接受书面设计。
+实施顺序见 [DEVELOPMENT_PLAN.md](DEVELOPMENT_PLAN.md)。方向确认和文档落地不等于 SDK 产品已经运行；具体实施计划、运行证据与用户验收分别记录。
