@@ -26,10 +26,20 @@ pytestmark = pytest.mark.security
 _ROOT = Path(__file__).resolve().parents[2]
 _SRC = _ROOT / "src" / "xiaowei_agent"
 
-# ``[project].dependencies`` 的包名集合。恰为七项——新增任何一项都必须先改这里，
-# 从而必须在 review 里被看见。
+# ``[project].dependencies`` 的包名集合——新增任何一项都必须先改这里，
+# 从而必须在 review 里被看见。P1-A Task 1 按新产品方向加入 OpenAI Agents SDK
+# （``openai-agents[sqlalchemy]``）；旧包专用的依赖在 P1-B 清理时重新取舍。
 _EXPECTED_RUNTIME_DEPENDENCIES = frozenset(
-    {"pydantic", "sqlglot", "sqlalchemy", "alembic", "asyncpg", "fastapi", "uvicorn"}
+    {
+        "pydantic",
+        "sqlglot",
+        "sqlalchemy",
+        "alembic",
+        "asyncpg",
+        "fastapi",
+        "uvicorn",
+        "openai-agents",
+    }
 )
 
 _EXPECTED_DEV_DEPENDENCIES = frozenset(
@@ -76,7 +86,7 @@ def _internal_module_imports(path: Path) -> set[str]:
     return found
 
 
-def test_runtime_dependency_set_is_exactly_the_approved_seven() -> None:
+def test_runtime_dependency_set_is_exactly_the_approved_set() -> None:
     """依赖面用集合相等钉死，不用禁用清单。
 
     禁用清单只挡得住已经想到的那些；集合相等连"想不到的"一起挡住。
