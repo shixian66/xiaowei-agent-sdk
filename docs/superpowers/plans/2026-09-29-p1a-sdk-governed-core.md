@@ -88,7 +88,7 @@
 - MCP 调用前检查与返回后过滤：`tool_output_guardrails` 只能放行、以固定消息拒绝或抛错，不能改写返回内容，不满足“过滤后交给模型”。已验证的路径是不把 `MCPServer` 挂到 Agent，而是用公开的 `list_tools()` / `call_tool()` 构造薄 `FunctionTool`：拒绝时零 `tools/call` 请求，放行时禁止字段不进入模型输入。`tool_input_guardrails` 与 `tool_filter` 存在，但本任务未验证。Task 4 按薄 FunctionTool 路径实现。
 - Tracing 需要两步：`set_tracing_disabled(True)` 关闭生成，`set_trace_processors([])` 移除默认导出处理器；测试以默认处理器的对照组证明能观察到导出，再分别证明两步各自生效。
 - 本机没有 `docker compose` 插件，使用独立的 `docker-compose` 5.5.1；命令见 `compose.sdk-test.yml` 文件头。
-- 测试 PostgreSQL 的身份由代码核对（首轮审查后补充）：镜像按 `tag@sha256` 固定；`tests/sdk_core/postgres_harness.py` 只接受文档中的那一个管理地址，并在任何 `CREATE/DROP DATABASE` 之前核对服务器 `cluster_name`。旧安全护栏中与架构无关的两条（禁止直接导入 asyncpg、禁止 `type: ignore`）改为扫描整个 `src/`。
+- 测试 PostgreSQL 的身份由代码核对（首轮审查后补充）：镜像按 `tag@sha256` 固定；`tests/sdk_core/postgres_harness.py` 要求环境变量与唯一管理地址逐字相同（SQLAlchemy 会用查询参数覆盖主字段，因此不能只比较解析后的字段），连接目标只取自该常量；每条 `CREATE/DROP DATABASE` 都在执行它的同一连接上先核对服务器 `cluster_name`。旧安全护栏中与架构无关的两条（禁止直接导入 asyncpg、禁止 `type: ignore`）改为扫描整个 `src/`。
 
 ## Task 1B：模型 API 配置与 SDK 接入
 

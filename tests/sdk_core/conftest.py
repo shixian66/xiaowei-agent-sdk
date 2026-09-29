@@ -9,7 +9,6 @@ import os
 import socket
 import threading
 import time
-import uuid
 from collections.abc import AsyncIterator, Iterator
 from dataclasses import dataclass, field
 from typing import Any
@@ -17,20 +16,17 @@ from typing import Any
 import pytest
 import uvicorn
 from mcp.server.mcpserver import MCPServer as FixtureMCPServer
-from sqlalchemy import text
 from sqlalchemy.engine import URL
-from sqlalchemy.ext.asyncio import create_async_engine
 from tests.sdk_core.postgres_harness import (
     LOOPBACK,
     HarnessMisconfiguredError,
+    isolated_database,
     parse_admin_url,
-    verify_test_instance,
 )
 
 from xiaowei.config import configure_runtime
 
 POSTGRES_URL_ENV = "SDK_TEST_POSTGRES_URL"
-_TEST_DB_PREFIX = "xw_sdk_test_"
 _POSTGRES_URL_STASH: pytest.StashKey[str | None] = pytest.StashKey()
 
 
@@ -51,36 +47,28 @@ def _product_runtime() -> None:
     configure_runtime()
 
 
-def _admin_url(config: pytest.Config) -> URL:
-    raw = config.stash.get(_POSTGRES_URL_STASH, None)
+@pytest.fixture
+def test_postgres(request: pytest.FixtureRequest) -> None:
+    """显式启用：环境变量必须指向唯一声明的测试实例；地址本身只取自 harness 常量。"""
+    raw = request.config.stash.get(_POSTGRES_URL_STASH, None)
     if raw is None:
         pytest.fail(
             f"{POSTGRES_URL_ENV} 未设置：需要隔离的真实 PostgreSQL，见 compose.sdk-test.yml"
         )
     try:
-        return parse_admin_url(raw)
+        parse_admin_url(raw)
     except HarnessMisconfiguredError as exc:
         pytest.fail(f"{POSTGRES_URL_ENV} {exc}")
 
 
 @pytest.fixture
-async def postgres_url(request: pytest.FixtureRequest) -> AsyncIterator[URL]:
+async def postgres_url(test_postgres: None) -> AsyncIterator[URL]:
     """在测试实例中新建一个独立数据库，用例结束后只删除这个数据库。"""
-    admin = _admin_url(request.config)
-    name = f"{_TEST_DB_PREFIX}{uuid.uuid4().hex[:12]}"
-    engine = create_async_engine(admin, isolation_level="AUTOCOMMIT")
     try:
-        async with engine.connect() as conn:
-            try:
-                await verify_test_instance(conn)
-            except HarnessMisconfiguredError as exc:
-                pytest.fail(f"{POSTGRES_URL_ENV} {exc}")
-            await conn.execute(text(f'CREATE DATABASE "{name}"'))
-        yield admin.set(database=name)
-        async with engine.connect() as conn:
-            await conn.execute(text(f'DROP DATABASE IF EXISTS "{name}" WITH (FORCE)'))
-    finally:
-        await engine.dispose()
+        async with isolated_database() as url:
+            yield url
+    except HarnessMisconfiguredError as exc:
+        pytest.fail(f"{POSTGRES_URL_ENV} {exc}")
 
 
 @dataclass
