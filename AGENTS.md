@@ -38,6 +38,7 @@
 - 直接使用公开的 `Agent`、`Runner`、function tools、Session、guardrails、tracing 与结构化输出；有人工审批需求时使用 SDK interruptions / RunState。
 - Agent 负责理解、澄清、选择获准工具、按结果继续调查和生成回答。应用提供可信上下文、工具实现与权限，不自行重建 Agent 循环。
 - 先查 SDK 原生能力，之后才增加最小应用代码。不要重建 Agent/Runner/Session 机制，也不为未来替换 SDK 建通用框架；数据策略的薄包装使用 SDK 公开接口并委托其原生实现。
+- 模型服务允许 OpenAI、Gemini、DeepSeek 及经验证的兼容网关，直接使用 SDK 公开 Model/provider 能力；用静态可信 Profile 绑定端点、协议、模型、凭据引用和参数，一次运行只用一个明确模型，不自建 LLM 路由框架。每个组合单独验证工具调用、结构化输出和 Session；JSON mode 不能冒充服务端严格 schema 约束，最终类型与 Evidence 校验不能省略。首版不自动跨供应商 fallback，换端点/协议/模型开启新会话；客户端与凭据不进入 RunContext。
 - 单 Agent 是初始方案；只有工具、上下文或职责隔离确有收益时增加 handoffs / `Agent.as_tool()`。首版同时交付最小 MCP Client Integration，直接使用 SDK 官方接入能力；外部业务 MCP Server 按实际需求接入，不在首版自建。
 - MCP Client Integration 属于后端的应用装配，不是另一个 Runtime；只维护一套通用接入，不为数据库、Jenkins、K8s 分别造 Client。Server Registry 首版使用静态可信配置，禁止模型指定端点、凭据或启动命令。
 - 工具是有清晰业务含义的函数；类型、描述和结果帮助 Agent 正确使用。不构造能力 DSL、关键词路由总表或通用计划编译器。

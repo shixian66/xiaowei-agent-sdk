@@ -2,9 +2,11 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** 交付可独立安装与测试的运行核心：一个真实 SDK Runner 能调用受治理的本地合成工具和 MCP 工具，完成有权限边界的连续对话与证据校验。
+**Goal:** 交付可独立安装与测试的运行核心：通过明确的模型 API 配置驱动真实 SDK Runner，调用受治理的本地合成工具和 MCP 工具，完成有权限边界的连续对话与证据校验。
 
 **Architecture:** 新应用位于 `src/xiaowei/`，直接使用 SDK Agent/Runner/Session。小维在工具实际 I/O 前执行治理，在工具返回、Session 读写和最终回答出口分别过滤及校验证据；不另造运行引擎。MCP 首条接入使用 SDK 的 Streamable HTTP，空配置不连接任何服务。
+
+模型服务覆盖 OpenAI、Gemini、DeepSeek 的接入目标：前者先验证 Responses，后两者先验证 Chat Completions 兼容路径；组合是否可用由实测决定。静态 Profile 装配 SDK 模型，一次运行一个模型，无自动跨服务 fallback。新增 Task 1B，执行顺序为 Task 1 → Task 1B → Task 2–5。
 
 **Tech Stack:** Python 3.11、OpenAI Agents SDK、Pydantic、SDK SQLiteSession、标准库 sqlite3、uv、pytest/pytest-asyncio/pytest-socket、Ruff、mypy；SDK 与传递依赖在 Task 1 实装核对后锁定。
 
@@ -18,6 +20,7 @@
 - SDK Session 为架构接口，SQLiteSession 为首版实现；不复制 SDK 会话机制。
 - 本地与 MCP 工具都必须在实际 I/O 前复核最新权限与预算；动态工具过滤不是最终授权。
 - 原始、模型、会话和渠道数据分别约束；默认关闭 tracing 与 trace 外发。
+- 模型端点、模型 ID、参数及凭据引用来自可信 Profile；首版模型 HTTP 自动重试显式为 0。更换端点/协议/模型开启新会话，不自动重放历史或切换供应商。最终结构和 Evidence 校验不能为兼容 API 而取消。
 - 本片只用合成数据和临时本地 MCP fixture；不开放通用 SQL、不接生产系统、不构建 Web/飞书入口。StarRocks SQLGuard/Adapter、两端真实收发、请求去重/重发及正式主入口在 P1-B 完成，P2/P3 仍保留全部验收要求。
 - 旧 `src/xiaowei_agent/`、旧 CLI 和相关依赖本片保留为过渡历史；新包不得导入旧 Runtime。P1-B 明确删除范围并切换唯一正式入口。
 - 测试使用本仓库独立 `.venv`；禁止以原项目环境证明新产品通过。离线测试禁止外网，仅 MCP fixture 测试显式允许 loopback。
@@ -28,7 +31,7 @@
 2. SDK 自动写入工具结果和最终回答：禁止内容不能先落盘后擦除，回放还需复核当前权限，工具调用配对不能损坏（Task 3、5）。
 3. MCP 名字冲突、schema 漂移与伪造 readonly/evidence 声明：拒绝未登记契约，远端标识不能成为可信本地证据（Task 4）。
 4. 两个用户并发与工具并行：工具表、连接认证、Evidence、预算和 Session 不串用；同会话明确拒绝重入（Task 2、5）。
-5. MCP 超时、畸形/过大内容与 SDK 默认 trace：受限失败，不泄露原始错误/数据、不绕过过滤、不自动重试未知执行结果（Task 1、4、5）。
+5. 模型/MCP API 超时、鉴权/限流、畸形/过大内容与 SDK 默认 trace：受限失败，不泄露原始错误/数据、不绕过过滤、不自动重试未知执行结果（Task 1、1B、4、5）。
 
 ## 文件与接口约定
 
@@ -37,6 +40,7 @@
 | 文件 | 职责 |
 | --- | --- |
 | `src/xiaowei/config.py` | 有限配置、静态 MCP 登记、默认 tracing 关闭 |
+| `src/xiaowei/model_api.py` | 可信模型配置、SDK 模型与 HTTP 客户端装配、必要的响应格式适配 |
 | `src/xiaowei/models.py` | 可信 context、工具结果、证据、结构化回答与渠道输出类型 |
 | `src/xiaowei/governance.py` | 调用前权限/参数/预算检查，共享结果入口 |
 | `src/xiaowei/evidence.py` | 证据记录、四种数据投影与最终回答校验 |
@@ -68,6 +72,19 @@
 - [ ] 运行 `uv sync --locked` 和 `uv run --locked python -m pytest tests/sdk_core/test_sdk_contract.py -q`；预期全部 PASS。测试不得访问真实模型或读取既有凭据；新包 import 不加载旧 `xiaowei_agent`。
 - [ ] 仅暂存本任务文件，提交 `build: establish verified Agents SDK runtime`；记录锁定版本及 Python 版本。
 
+## Task 1B：模型 API 配置与 SDK 接入
+
+**Files:** Modify `src/xiaowei/config.py`；Create `src/xiaowei/model_api.py`、`tests/sdk_core/test_model_api.py`。本任务不引入通用网关、自动路由或第三方 Agent 运行引擎；直接使用已锁定 SDK 与其 OpenAI HTTP 客户端依赖。
+
+**Interfaces:** `ModelProfile` 为 Pydantic 配置类型，字段固定为 `profile_id: str`、`provider: Literal["openai", "gemini", "deepseek", "openai_compatible"]`、`base_url: str`、`api_mode: Literal["responses", "chat_completions"]`、`model: str`、`api_key_ref: str`、`output_mode: Literal["json_schema", "json_object"]`、`request_timeout_seconds: float`、`max_output_tokens: int`、`max_request_bytes: int`、`max_response_bytes: int`、`data_policy_id: str`、`reasoning_effort: str | None`。期限/限额为正值，地址为可信 HTTPS 端点，模型 ID 必填，不使用 SDK 隐式模型默认值；推理参数仅接受所验证 Profile 的允许值。`open_model(profile: ModelProfile, *, api_key: SecretStr) -> AsyncIterator[Model]` 是异步上下文管理器，装配并关闭独立客户端，返回 SDK `Model`；`settings_for(profile: ModelProfile) -> ModelSettings` 返回 SDK 设置。`profile_fingerprint(profile: ModelProfile) -> str` 返回不含凭据的稳定配置版本，供会话绑定；`SecretStr` 来自 Pydantic，SDK 类型直接使用。
+
+- [ ] 编写 `test_sdk_responses_and_chat_completions_tool_roundtrip`、`test_json_object_still_validates_output_type`、`test_profiles_keep_keys_and_endpoints_separate`、`test_api_failure_has_no_retry_or_fallback`、`test_request_and_output_limits`。使用 HTTP mock transport 接真实 SDK Model 与 Runner，不以 scripted Model 冒充 API 适配测试；本任务最终回答先用测试文件内的简单 Pydantic schema，Task 5 再测真实 `AgentAnswer`。断言工具调用后确有模型续轮；JSON mode 缺字段/错类型/空内容不能返回成功；三个 Profile 的假密钥仅发往各自端点；401/403、429、503、超时和非法 JSON 无跨端点请求、无自动重试、无重复工具执行。
+- [ ] 运行 `uv run --locked python -m pytest tests/sdk_core/test_model_api.py -q`；预期因模型配置与装配缺失失败，mock transport 不建立外网连接。
+- [ ] 实现上述配置与装配，使用锁定版 SDK 的公开 Responses / Chat Completions 模型接入。客户端设置明确请求超时、`max_retries=0` 与禁止跨端点重定向，凭据由应用解析安全引用后传入；不设置可变全局客户端。通过公开 HTTP hook 在发出前检查序列化请求字节上限；模型输出 token 上限映射到所选协议，在 HTTP 读取阶段落实 `max_response_bytes`，不能读完整超大响应后才切片；usage 缺失不记为 0。供应商专有参数通过少量经验证的映射生成，不开放任意配置透传。
+- [ ] 对 `json_object` 路径，只用 SDK 公开模型设置或薄 `Model` 委托适配请求编码及 schema 提示，保留外层 `output_type` 的类型校验；工具选择和循环仍由 Runner 完成。验证工具 strict 参数、最终输出模式与推理字段的组合；必要字段不能与 Session 策略兼容的模式保持禁用。若公开接口无法满足某组合，记录不兼容原因，不删除校验或改写 SDK 私有代码，不将该 Profile 标为已支持。
+- [ ] 重跑本任务命令；预期所有已实现路径及拒绝路径 PASS。核对请求无未支持参数，假密钥不进入日志/错误/trace，Profile 指纹不含密钥值，客户端正常关闭。记录 SDK 实际类名、方法签名与三家验证矩阵；HTTP mock 通过仍不等于供应商真实验证通过。
+- [ ] 仅暂存本任务文件，提交 `feat: configure SDK model API profiles`。
+
 ## Task 2：本地受治理工具、数据投影与 Evidence
 
 **Files:** Create `src/xiaowei/models.py`、`src/xiaowei/governance.py`、`src/xiaowei/evidence.py`、`tests/sdk_core/test_governance.py`、`tests/sdk_core/test_evidence.py`。
@@ -84,9 +101,10 @@
 
 **Files:** Create `src/xiaowei/session.py`、`tests/sdk_core/test_session_policy.py`。
 
-**Interfaces:** 消费 `RunContext`、`EvidenceStore.project` 与 SDK `Session`；产出 `PolicySession(inner: Session, context: RunContext, evidence: EvidenceStore)`，实现锁定版 SDK 所需的公开 Session 接口并委托底层。提供 `async discard_pending() -> None`、`async commit_validated() -> None`；后者只由验证成功的应用路径调用。
+**Interfaces:** 消费 `RunContext`、`EvidenceStore.project`、Task 1B 的 Profile 指纹与 SDK `Session`；产出 `PolicySession(inner: Session, context: RunContext, evidence: EvidenceStore, profile_fingerprint: str)`，实现锁定版 SDK 所需的公开 Session 接口并委托底层。会话的 Profile 绑定保存在应用元数据中；不匹配时拒绝历史读取，要求新建会话。提供 `async discard_pending() -> None`、`async commit_validated() -> None`；后者只由验证成功的应用路径调用。
 
 - [ ] 编写 `test_runner_session_filters_before_write`、`test_replay_rechecks_permissions`、`test_valid_tool_pair_survives_followup`、`test_invalid_final_never_persists`、`test_partial_store_failure_invalidates_session`。用临时真实 SQLiteSession 和真 Runner 断言：`forbidden_text not in stored_items`，撤权数据不在第二轮 Model 输入，SDK 能消费过滤后成对工具项，未经验证最终输出不会落盘。
+- [ ] 编写 `test_changed_model_profile_cannot_read_old_session`，断言端点/协议/模型或数据接收策略变化后，旧历史在首个模型 HTTP 请求前被拒绝；新建会话可独立运行，不复制旧内容。
 - [ ] 运行 `uv run --locked python -m pytest tests/sdk_core/test_session_policy.py -q`；预期新包装/行为缺失失败。
 - [ ] 实现 `PolicySession`：在 SDK 写入请求时先按 Session 策略处理并暂存本轮项，最终校验后才委托写入；回放前重新检验证据和权限。敏感用户输入也受字段/字节策略约束；不能只过滤工具结果。保持 SDK item 类型与 call/result 配对，若无安全回放形式则拒绝继续该历史。失败丢弃待写项，底层部分写失败时隔离该会话，不能自动重跑或将其视作完整历史。
 - [ ] 重跑本任务命令；预期全部 PASS。验证 clear/pop 等 SDK 公共契约与待写项一致；持久化和 replay 不是同一份未经处理的模型记录。
@@ -109,17 +127,17 @@
 
 **Files:** Create `src/xiaowei/app.py`、`tests/sdk_core/test_app.py`；Modify `README.md`、`AGENT_HANDOFF.md`、`.github/workflows/ci.yml`。
 
-**Interfaces:** `Application` 构造时接收可信配置、SDK Model、治理/Evidence 与 Session 依赖；`async Application.run_turn(ctx: RunContext, message: str) -> Delivery` 是后续两渠道共用入口。每轮创建相应工具集合的 SDK Agent，`output_type=AgentAnswer`，调用原生 `Runner.run`；会话从可信身份定位，不能由用户请求任意指定他人的 session。
+**Interfaces:** `Application` 构造时接收可信配置、Task 1B 装配的 SDK Model/ModelSettings 与 Profile 指纹、治理/Evidence 与 Session 依赖；`async Application.run_turn(ctx: RunContext, message: str) -> Delivery` 是后续两渠道共用入口。每轮创建相应工具集合的 SDK Agent，`output_type=AgentAnswer`，调用原生 `Runner.run`；会话从可信身份定位，不能由用户请求任意指定他人的 session。模型接入凭据、客户端与 Profile 配置均不进入 RunContext。应用将 `data_policy_id` 装配到模型输入/结果与 Session 投影策略中，发送前按实际接收方检查数据权限。
 
 - [ ] 编写 `test_local_and_mcp_followup_through_real_runner`、`test_concurrent_sessions_are_isolated`、`test_same_session_reentry_is_rejected`、`test_invalid_answer_is_never_delivered_or_committed`、`test_timeout_does_not_replay_tools`。断言两轮工具结果可合法引用；不同渠道得到不同获准投影；一轮权限变化不能改写另一轮 Agent tools；超限/取消无成功 Delivery，未经校验内容既不提交 Session 也不发送。
 - [ ] 运行 `uv run --locked python -m pytest tests/sdk_core/test_app.py -q`；预期新应用入口缺失失败。
 - [ ] 实现上述 `run_turn`：总期限、有限并发、同会话互斥、每轮权限表；校验 SDK 最终结构与 Evidence 后才提交 Session，交付前再复核权限和渠道。校验不通过返回受控失败，不把模型完整回答当报错输出。本片不发送外部渠道消息，不提供未校验结论流。
 - [ ] 运行 `uv run --locked python -m pytest tests/sdk_core -q`、`uv run --locked ruff check src/xiaowei tests/sdk_core`、`uv run --locked mypy src/xiaowei`；预期全部通过。CI 增加明确的新包检查，旧检查标识为历史检查，不用旧通过率代替新能力验证。
-- [ ] 在已获准模型环境使用合成数据试跑一条本地和一条 MCP 调用，记录 SDK/模型、用量与结果；没有环境则明确留待验证，不能将 scripted Model 记作真实模型通过。更新 README 的核心开发验证命令、handoff 的精确 SHA/证据/缺口；保持正式 Web/飞书启动说明未交付的事实。
+- [ ] 在已获准模型环境使用合成数据，按 OpenAI/Gemini/DeepSeek 的每个选定 Profile 分别验证本地和 MCP 工具调用、工具结果回传、真实 `AgentAnswer` 类型/Evidence 校验与下一轮 Session 追问；至少先完成一个 Profile。记录 SDK、端点标识、协议、模型/模式、用量和结果，其他组合如实标为未验证/不兼容；不因一家通过宣称全部支持，不用 scripted Model 或 HTTP mock 代替真实验证。更新 README 的核心开发验证命令、handoff 的精确 SHA/证据/缺口；保持正式 Web/飞书启动说明未交付的事实。
 - [ ] 仅暂存本任务文件，提交 `feat: compose verified SDK application core`。对整个 P1-A 分支做一次独立审查，修复阻塞项后细化 P1-B；不自动合并、部署或归档。
 
 ## 完成定义与覆盖边界
 
-本片离线完成要求：真 Runner、两条治理工具路径、真实 loopback MCP 协议、SQLiteSession 读写/回放与证据校验均有对应测试；新包独立可安装且默认无 trace 外发。真实模型验证单列状态，缺失时仍为待验证。
+本片离线完成要求：真 Runner、SDK 模型 API 的 HTTP 契约、两条治理工具路径、真实 loopback MCP 协议、SQLiteSession 读写/回放与证据校验均有对应测试；新包独立可安装且默认无 trace 外发。真实模型验证按 Profile 单列状态，缺失时仍为待验证；至少一个 Profile 通过实际工具闭环后才有真实模型运行证据。
 
 本片产出是运行核心，不是首版可用产品。真实 StarRocks 的读取/SQL 限制、Web 和飞书的真实用户路径、渠道去重/发送失败/重发以及正式历史读取入口属于 P1-B；EXPLAIN 诊断属于 P2；部署与用户接受属于 P3。不得把本片测试通过写成这些能力已经完成。

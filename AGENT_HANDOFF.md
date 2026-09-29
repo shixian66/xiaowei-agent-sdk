@@ -8,6 +8,7 @@
 - 按 SDK 原生方式从产品需求出发设计，允许从零开始。旧代码能低成本复用才复用，不能复用就放弃；不要求保留旧架构。
 - 用户提出把“数据库查询助手”与“慢查询诊断”设计为一个场景；产品据此统一为 StarRocks 数据库助手。
 - 首版同时支持飞书与 Web 对话，并明确要求最小化。
+- 用户希望模型 API 可接入 Gemini、DeepSeek、OpenAI 等服务；Agent Runtime 仍固定为 OpenAI Agents SDK。尚未指定首个实测端点、具体模型或凭据配置。
 - 用户已确认 MCP 定位：首版有最小通用 MCP Client Integration；StarRocks 先走本地受治理工具；首版不自建业务 MCP Server。
 - 用户已确认未来生产写操作先展示具体动作与影响，取得有审批权限的用户明确确认，再执行；批准绑定具体动作，不能绕过权限，关键内容变化须重新确认。
 - 按资深 Python 架构师与 Agent 开发专家标准逐步交付，最终进行实际环境验证。
@@ -32,7 +33,9 @@ MCP 是标准化工具接入机制，不能替代业务授权。外部 Server �
 
 方向确认不代表代码实施、实战验证或产品验收。
 
-本轮将生产变更按 Action 统一描述，并写入四项边界：模型意图不是执行授权；effect/risk 由可信代码判断；诊断/读取不能自动升级为写；所有生产写操作重新经过 Policy / Approval / Action Binding。Action 契约覆盖数据库、配置与运行状态变更，SDK 原生审批仍负责暂停与恢复。当前仅更新文档，首版仍只读，不新增 Action 执行框架，也不将本次方向确认当作实际生产操作授权。
+前轮已将生产变更按 Action 统一描述，并写入四项边界：模型意图不是执行授权；effect/risk 由可信代码判断；诊断/读取不能自动升级为写；所有生产写操作重新经过 Policy / Approval / Action Binding。Action 契约覆盖数据库、配置与运行状态变更，SDK 原生审批仍负责暂停与恢复。该决定仅更新文档，首版仍只读，不新增 Action 执行框架，也不将方向确认当作实际生产操作授权。
+
+本轮补齐模型 API 设计：静态 Model Profile、SDK 原生模型接入、端点/凭据隔离、JSON Schema 与 JSON mode 的差异、默认无自动重试/跨服务 fallback、Profile 变更后新建会话，以及按供应商/端点/模型单独验证。首版只选一个活动模型，三家均为待验证目标，不宣称已经兼容。
 
 ## 3. 当前书面设计与实施计划
 
@@ -42,7 +45,7 @@ MCP 是标准化工具接入机制，不能替代业务授权。外部 Server �
 
 已编写 [P1-A：SDK 与治理执行核心实施计划](docs/superpowers/plans/2026-09-29-p1a-sdk-governed-core.md)，等待用户审阅计划和选择执行方式；产品代码尚未实施。此片固定先验证 Streamable HTTP，仅使用合成数据与临时 loopback MCP fixture，不交付业务 MCP Server。
 
-P1-A 是可独立验证的内部核心，包含真实 SDK Runner、工具治理、Evidence、Session 数据策略与 MCP 协议验证。P1-B 接真实 StarRocks 和双入口并完成唯一主入口切换；P2 诊断、P3 实战继续按路线推进。不能用内部核心完成代替首版用户产品完成。
+P1-A 是可独立验证的内部核心，包含真实 SDK Runner、模型 API 接入、工具治理、Evidence、Session 数据策略与 MCP 协议验证。新增 Task 1B，在锁定 SDK 后落实模型配置与协议测试；原 Task 2–5 顺序保留，共六项任务。P1-B 接真实 StarRocks 和双入口并完成唯一主入口切换；P2 诊断、P3 实战继续按路线推进。不能用内部核心完成代替首版用户产品完成。
 
 ## 4. 当前仓库事实
 
@@ -53,8 +56,8 @@ P1-A 是可独立验证的内部核心，包含真实 SDK Runner、工具治理�
 | 本轮源码基线 / 拉取时 main | `372c381f44ecfa1fa53961f137d0058033cbd805` |
 | 基线提交标题 | `docs(m5): record postgres and compose evidence` |
 | 工作分支 | `claude/sdk-core-docs` |
-| 本次审查起点 | `c0ee117e343f948beb359323b685e8a777ffe85a`，MCP 定位与 P1-A 计划的本地文档提交 |
-| 本轮变更 | 五份根文档；已有 P1-A 实施计划未修改 |
+| 本次审查起点 | `7bdc6d296bf907a80ccf4d5e3a7fc82612a771c4`，生产 Action 与明确确认规则的本地文档提交 |
+| 本轮变更 | 五份根文档与已有 P1-A 实施计划，共六份 Markdown 文件 |
 | 新产品实现 | 尚未实现；依赖中没有 `openai-agents`，没有新的双入口 SDK 产品 |
 | 当前源码 | 旧 `xiaowei_agent` 包，规则解释器、确定性 Resolver/PlanCompiler/Runner 与 fake 慢查询场景 |
 | 其他文件 | 业务代码、测试、依赖锁文件、CI 与 Compose 未修改 |
@@ -78,24 +81,26 @@ M5 是历史起点，历史验收不证明新 SDK 产品可用。保留旧文件
 
 已核对 StarRocks 普通 EXPLAIN、EXPLAIN ANALYZE 和获取 Profile 文档：分析计划与实际执行不同，Profile 获取受环境影响。也核对了飞书官方 Python SDK 文档，其 Channel API 存在包迁移；实施时需验证发布包，不能把在线示例当成已安装可用接口。
 
+本轮另核对 SDK Models and providers、Gemini OpenAI compatibility，以及 DeepSeek 接入、Tool Calls 和 JSON Output 官方文档。兼容路径存在不代表已通过本产品工具/结构化输出/Session 组合测试；Model Profile 的具体 SDK 适配和必要格式差异仍需锁版后验证。
+
 来源链接集中在 [ARCHITECTURE.md](ARCHITECTURE.md)。尚未安装锁定 SDK、模型、数据库驱动、SQL 解析库或飞书包，也未核对目标 StarRocks 版本与权限；不能宣称依赖兼容性已经通过。
 
 ## 7. 验证记录与限制
 
-本轮 Action 与用户确认规则修订后执行：
+本轮模型 API 设计与计划修订后执行：
 
-- `git diff --check`：exit 0；变更范围仅为五份根文档。
+- `git diff --check`：exit 0；变更范围为五份根文档与 P1-A 实施计划。
 - 六份文档的 28 个本地链接、Markdown 代码围栏、占位标记及最高原则检查：0 个错误。
 - `python -m pytest tests/security/test_docs_command_consistency.py tests/contract/test_doc_fact_binding.py -q`：5 passed，exit 0。
 
-已检查五份根文档中的 Action 范围、用户明确确认、动作绑定、Policy 拒绝、禁止读转写及未知结果不重试的表述一致；已有 P1-A 计划仍为只读，未扩大实施范围。
+本轮检查范围增加模型 API 的配置/协议边界、最终类型验证、端点与凭据隔离、Session 绑定、无自动 fallback 和逐 Profile 验收；P1-A 仍为只读。
 
 验证使用原项目现有虚拟环境 `/Users/kloenguyen/Desktop/agent/.venv/bin/python`，显式设置本仓库 `src` 为 `PYTHONPATH`；未安装新依赖。该结果只用于选中文档检查，不证明新工程锁定环境或新产品运行通过。
 
-文档测试覆盖命令与部分旧事实绑定，不验证新架构语义；尚无独立审查、SDK 实现测试、全量产品测试、正式浏览器、真实模型、真实 StarRocks 或飞书运行证据。生产 Action 与用户确认机制仅为设计约束，尚无实现或运行证据。
+文档测试覆盖命令与部分旧事实绑定，不验证新架构语义；尚无独立审查、SDK 实现测试、全量产品测试、正式浏览器、真实模型、真实 StarRocks 或飞书运行证据。生产 Action 与用户确认机制仅为设计约束，尚无实现或运行证据；OpenAI、Gemini、DeepSeek 模型 API 接入均未实现或实测。
 
 ## 8. 下一步
 
-审阅 P1-A 的五项任务并确定执行方式后，从锁定 SDK、验证公开 Session/MCP 扩展点开始实施。MCP 方向已确定，不重复开启方向评审；后续发现 SDK 约束时记录具体证据，调整实现方式。
+审阅更新后的 P1-A 六项任务并确定执行方式后，从锁定 SDK、验证公开 Session/MCP 扩展点与模型 API 接入开始实施。MCP 方向已确定，不重复开启方向评审；后续发现 SDK 约束时记录具体证据，调整实现方式。
 
-进入真实联调时需要确认：可用模型与预算、允许外发的数据、StarRocks 版本和获准只读范围、飞书应用及允许的单聊身份。凭据通过本机安全配置引用，不能粘贴到对话或文档。上述环境信息不阻塞设计和独立离线开发，但对应实战退出条件必须保留。
+进入真实联调时需要确认：首个实测模型 Profile 的服务端点/协议/模型 ID 与预算、允许向该接收方外发的数据、StarRocks 版本和获准只读范围、飞书应用及允许的单聊身份。凭据通过本机安全配置引用，不能粘贴到对话或文档。上述环境信息不阻塞设计和独立离线开发，但对应实战退出条件必须保留。
