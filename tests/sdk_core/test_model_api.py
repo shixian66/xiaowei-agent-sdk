@@ -286,6 +286,20 @@ async def test_sdk_responses_and_chat_completions_tool_roundtrip(
 
 
 @pytest.mark.parametrize(
+    "profile", [OPENAI, GEMINI, DEEPSEEK], ids=["openai", "gemini", "deepseek"]
+)
+async def test_parallel_tool_calls_are_disabled(
+    profile: ModelProfile, no_ambient_openai_env: None
+) -> None:
+    endpoint = Endpoint([_text(profile, FINAL)])
+    async with open_model(
+        profile, api_key=SecretStr(OPENAI_KEY), transport=endpoint.transport
+    ) as m:
+        await Runner.run(_agent(m, profile, []), "hi")
+    assert endpoint.bodies()[0]["parallel_tool_calls"] is False
+
+
+@pytest.mark.parametrize(
     ("profile", "effort", "field_path"),
     [
         (OPENAI, "low", ("reasoning", "effort")),
@@ -383,6 +397,100 @@ async def test_json_object_invalid_final_output_is_not_success(
     assert len(endpoint.requests) == 1
 
 
+def _chat_finished(body: dict[str, Any], finish_reason: str | None) -> dict[str, Any]:
+    body["choices"][0]["finish_reason"] = finish_reason
+    return body
+
+
+@pytest.mark.parametrize("profile", [GEMINI, DEEPSEEK], ids=["gemini", "deepseek"])
+@pytest.mark.parametrize("finish_reason", ["length", "content_filter", None])
+@pytest.mark.parametrize("kind", ["final-json", "tool-call"])
+async def test_incomplete_chat_result_is_rejected_before_the_sdk_sees_it(
+    profile: ModelProfile, finish_reason: str | None, kind: str, no_ambient_openai_env: None
+) -> None:
+    """内容碰巧合法也不行：截断/过滤终态不能成为成功答案，截断的工具调用不能执行。"""
+    body = _chat_text(FINAL) if kind == "final-json" else _tool_call(profile)
+    endpoint = Endpoint([_chat_finished(body, finish_reason)])
+    executed: list[str] = []
+    async with open_model(
+        profile, api_key=SecretStr(OPENAI_KEY), transport=endpoint.transport
+    ) as m:
+        with pytest.raises(ModelResponseRejectedError):
+            await Runner.run(_agent(m, profile, executed), "hi")
+    assert executed == []
+    assert len(endpoint.requests) == 1  # 没有续轮
+
+
+def _no_choices() -> dict[str, Any]:
+    body = _chat_text(FINAL)
+    body["choices"] = []
+    return body
+
+
+def _one_truncated_choice() -> dict[str, Any]:
+    body = _chat_text(FINAL)
+    truncated = dict(body["choices"][0], index=1, finish_reason="length")
+    body["choices"].append(truncated)
+    return body
+
+
+@pytest.mark.parametrize(
+    "body", [_no_choices(), _one_truncated_choice()], ids=["no-choices", "one-truncated"]
+)
+async def test_chat_without_complete_choices_is_rejected(
+    body: dict[str, Any], no_ambient_openai_env: None
+) -> None:
+    endpoint = Endpoint([body])
+    async with open_model(GEMINI, api_key=SecretStr(OPENAI_KEY), transport=endpoint.transport) as m:
+        with pytest.raises(ModelResponseRejectedError):
+            await Runner.run(_agent(m, GEMINI, []), "hi")
+    assert len(endpoint.requests) == 1
+
+
+@pytest.mark.parametrize("finish_reason", ["stop", "tool_calls"])
+async def test_complete_chat_tool_call_is_executed(
+    finish_reason: str, no_ambient_openai_env: None
+) -> None:
+    endpoint = Endpoint([_chat_finished(_tool_call(GEMINI), finish_reason), _chat_text(FINAL)])
+    executed: list[str] = []
+    async with open_model(GEMINI, api_key=SecretStr(OPENAI_KEY), transport=endpoint.transport) as m:
+        result = await Runner.run(_agent(m, GEMINI, executed), "hi")
+    assert executed == ["east"]
+    assert result.final_output == TotalAnswer(total=100, note="ok")
+
+
+async def test_incomplete_responses_result_is_rejected_by_the_sdk(
+    no_ambient_openai_env: None,
+) -> None:
+    """对照：Responses 的 incomplete 终态由 SDK 自身拒绝，这里不重复校验。"""
+    body = _responses_tool_call("synthetic_total", {"region": "east"}, "call-1")
+    body["status"] = "incomplete"
+    body["incomplete_details"] = {"reason": "max_output_tokens"}
+    endpoint = Endpoint([body])
+    executed: list[str] = []
+    async with open_model(OPENAI, api_key=SecretStr(OPENAI_KEY), transport=endpoint.transport) as m:
+        with pytest.raises(ModelBehaviorError):
+            await Runner.run(_agent(m, OPENAI, executed), "hi")
+    assert executed == []
+    assert len(endpoint.requests) == 1
+
+
+@pytest.mark.parametrize("profile", [OPENAI, GEMINI], ids=["responses", "chat_completions"])
+async def test_successful_response_must_be_json(
+    profile: ModelProfile, no_ambient_openai_env: None
+) -> None:
+    """流式（SSE）与非 JSON 的成功响应未经验证，不交给 SDK 解析。"""
+    sse = httpx2.Response(
+        200, headers={"content-type": "text/event-stream"}, content=b"data: {}\n\n"
+    )
+    endpoint = Endpoint([sse])
+    async with open_model(
+        profile, api_key=SecretStr(OPENAI_KEY), transport=endpoint.transport
+    ) as m:
+        with pytest.raises(ModelResponseRejectedError):
+            await Runner.run(_agent(m, profile, []), "hi")
+
+
 # ---- 凭据与端点隔离 ---------------------------------------------------------------------
 
 
@@ -427,6 +535,54 @@ async def test_profiles_keep_keys_and_endpoints_separate(monkeypatch: pytest.Mon
             request.headers["authorization"].removeprefix("Bearer ")
         }
         assert not any(k in sent for k in others)
+
+
+@pytest.mark.parametrize(
+    "profile", [OPENAI, GEMINI, DEEPSEEK], ids=["openai", "gemini", "deepseek"]
+)
+async def test_ambient_headers_cannot_replace_protocol_headers(
+    profile: ModelProfile, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """白名单只说明“发哪些头”，值必须来自可信 URL、实际 body 与固定协议值。"""
+    monkeypatch.setenv(
+        "OPENAI_CUSTOM_HEADERS",
+        "\n".join(
+            [
+                "Host: foreign-tenant.example",
+                "Accept: application/x-ambient-sentinel",
+                "Content-Type: text/plain",
+                "Content-Length: 1",
+                "User-Agent: ambient-agent",
+                "Accept-Encoding: gzip",
+            ]
+        ),
+    )
+    endpoint = Endpoint([_text(profile, FINAL)])
+    async with open_model(
+        profile, api_key=SecretStr(OPENAI_KEY), transport=endpoint.transport
+    ) as m:
+        await Runner.run(_agent(m, profile, []), "hi")
+
+    (request,) = endpoint.requests
+    assert request.headers["host"] == httpx2.URL(profile.base_url).host
+    assert request.headers["content-length"] == str(len(request.content))
+    assert request.headers["content-type"] == "application/json"
+    assert request.headers["accept"] == "application/json"
+    assert request.headers["accept-encoding"] == "identity"
+    sent = json.dumps(dict(request.headers))
+    for sentinel in ("foreign-tenant", "x-ambient-sentinel", "text/plain", "ambient-agent"):
+        assert sentinel not in sent
+
+
+async def test_default_transport_ignores_tls_environment(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Any
+) -> None:
+    """默认网络 transport 不从环境读取证书或代理配置。"""
+    missing = str(tmp_path / "missing-ca.pem")
+    monkeypatch.setenv("SSL_CERT_FILE", missing)
+    monkeypatch.setenv("SSL_CERT_DIR", missing)
+    async with open_model(GEMINI, api_key=SecretStr(GEMINI_KEY)) as m:
+        assert isinstance(m, Model)
 
 
 def test_profile_fingerprint_is_stable_and_has_no_secret() -> None:
@@ -486,7 +642,7 @@ def _redirect(request: httpx2.Request) -> httpx2.Response:
         pytest.param(_status(429, {"retry-after": "0"}), APIStatusError, id="429"),
         pytest.param(_status(503), APIStatusError, id="503"),
         pytest.param(_raise_timeout, APITimeoutError, id="timeout"),
-        pytest.param(_invalid_json, json.JSONDecodeError, id="invalid-json"),
+        pytest.param(_invalid_json, ModelResponseRejectedError, id="invalid-json"),
         pytest.param(_redirect, APIStatusError, id="cross-endpoint-redirect"),
     ],
 )
@@ -571,32 +727,20 @@ async def test_response_over_limit_stops_reading_early(no_ambient_openai_env: No
     assert stream.pulled <= 5  # 超过上限即停止，不读完整个响应
 
 
-def _declared_too_long(request: httpx2.Request) -> httpx2.Response:
-    return httpx2.Response(200, headers={"content-length": "999999"}, stream=_ChunkStream([b"{}"]))
-
-
-def _compressed(request: httpx2.Request) -> httpx2.Response:
-    # 小于上限的压缩体解压后可以任意大。
+@pytest.mark.parametrize("status", [200, 503])
+async def test_compressed_response_is_rejected(status: int, no_ambient_openai_env: None) -> None:
+    """小于上限的压缩体解压后可以任意大；错误响应同样会被客户端解压读取。"""
     body = gzip.compress(json.dumps(_chat_text(FINAL)).encode())
-    return httpx2.Response(200, headers={"content-encoding": "gzip"}, stream=_ChunkStream([body]))
-
-
-@pytest.mark.parametrize(
-    "reply",
-    [
-        pytest.param(_declared_too_long, id="declared-length"),
-        pytest.param(_compressed, id="compressed"),
-    ],
-)
-async def test_response_limit_cannot_be_bypassed(reply: Reply, no_ambient_openai_env: None) -> None:
     profile = GEMINI.model_copy(update={"max_response_bytes": 4_096})
-    endpoint = Endpoint([reply])
+    endpoint = Endpoint(
+        [httpx2.Response(status, headers={"content-encoding": "gzip"}, stream=_ChunkStream([body]))]
+    )
     async with open_model(
         profile, api_key=SecretStr(GEMINI_KEY), transport=endpoint.transport
     ) as m:
         with pytest.raises(ModelResponseRejectedError):
             await Runner.run(_agent(m, profile, []), "hi")
-    # 请求声明只接受未压缩内容，压缩响应无法在读取阶段按字节限额。
+    # 请求声明只接受未压缩内容。
     assert endpoint.requests[0].headers["accept-encoding"] == "identity"
 
 

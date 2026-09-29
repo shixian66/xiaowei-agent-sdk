@@ -4,7 +4,8 @@ Agent Loop、工具续轮与最终输出校验全部由 SDK ``Runner`` 完成；
 
 - 用静态 Profile 装配锁定版 SDK 的 ``OpenAIResponsesModel`` 或 ``OpenAIChatCompletionsModel``；
 - 为每个 Profile 建立独立 HTTP 客户端：明确期限、客户端与 Runner 重试均为 0、不跟随重定向；
-- 在 transport 上限制请求/响应字节，并只发送白名单请求头与本 Profile 的凭据；
+- 在 transport 上限制请求/响应字节；请求头全部由可信值重新生成，凭据只用本 Profile 的；
+- 成功响应必须是 JSON，Chat Completions 还须是完整终态，否则在 SDK 解析和工具执行前拒绝；
 - ``json_object`` 模式用薄 ``Model`` 委托改写请求编码，外层 ``output_type`` 校验保持不变。
 """
 
@@ -47,8 +48,11 @@ _REASONING_EFFORTS: dict[Provider, frozenset[str]] = {
     "openai_compatible": frozenset(),
 }
 
-# 发往模型端点的请求头白名单；SDK 客户端从环境变量读取的组织、项目与自定义头一律不转发。
-_FORWARDED_HEADERS = frozenset({"accept", "content-type", "content-length", "user-agent", "host"})
+_JSON = "application/json"
+
+# Chat Completions 中表示“正常完成”的终态；截断（length）、过滤（content_filter）、缺失或
+# 供应商私有值都不交给 SDK，因为 SDK 转换为 ModelResponse 后会丢失该终态。
+_COMPLETE_CHAT_FINISH_REASONS = frozenset({"stop", "tool_calls"})
 
 _JSON_OBJECT_HINT = "\n\n只输出一个 JSON 对象，不要输出其他文字。该对象必须满足以下 JSON Schema：\n"
 
@@ -108,16 +112,16 @@ class ModelProfile(BaseModel):
         return self
 
 
-class ModelAPILimitError(Exception):
-    """模型请求或响应超出 Profile 限额；消息固定，不包含内容、地址或凭据。"""
+class ModelAPIRejectedError(Exception):
+    """模型请求或响应越过 Profile 边界；消息固定，不包含内容、地址或凭据。"""
 
 
-class ModelRequestRejectedError(ModelAPILimitError):
+class ModelRequestRejectedError(ModelAPIRejectedError):
     """请求在发出前被拒绝。"""
 
 
-class ModelResponseRejectedError(ModelAPILimitError):
-    """响应在读取阶段被拒绝。"""
+class ModelResponseRejectedError(ModelAPIRejectedError):
+    """响应在交给 SDK 解析前被拒绝：超限、压缩、非 JSON 或非完整终态。"""
 
 
 def profile_fingerprint(profile: ModelProfile) -> str:
@@ -137,6 +141,8 @@ def settings_for(profile: ModelProfile) -> ModelSettings:
         ),
         # Responses 默认在服务端保存对话；Chat Completions 不发送该字段。
         store=False if profile.api_mode == "responses" else None,
+        # 并行工具调用未经验证，不使用供应商默认值（通常为开启）。
+        parallel_tool_calls=False,
         retry=ModelRetrySettings(max_retries=0),
         timeout=profile.request_timeout_seconds,
         # SDK 会把缺失的 usage 规范化为 0；保留原始 usage 以区分“未上报”和“为 0”。
@@ -156,10 +162,12 @@ async def open_model(
     ``transport`` 仅替换最底层的网络发送（测试使用 mock transport）；限额与请求头约束始终生效。
     """
     guarded = _GuardedTransport(
-        transport or httpx2.AsyncHTTPTransport(retries=0),
+        # 证书与代理不从环境读取；外层 AsyncClient 的 trust_env 不作用于这里创建的 transport。
+        transport or httpx2.AsyncHTTPTransport(retries=0, trust_env=False),
         authorization=f"Bearer {api_key.get_secret_value()}",
         max_request_bytes=profile.max_request_bytes,
         max_response_bytes=profile.max_response_bytes,
+        require_complete_chat=profile.api_mode == "chat_completions",
     )
     timeout = httpx2.Timeout(profile.request_timeout_seconds)
     http_client = httpx2.AsyncClient(
@@ -186,7 +194,7 @@ async def open_model(
 
 
 class _GuardedTransport(httpx2.AsyncBaseTransport):
-    """发出前检查请求字节并重建请求头；读取响应时按字节计数，超限即停止。"""
+    """模型 HTTP 的唯一出入口：请求在发出前、响应在交给 SDK 前各检查一次。"""
 
     def __init__(
         self,
@@ -195,72 +203,90 @@ class _GuardedTransport(httpx2.AsyncBaseTransport):
         authorization: str,
         max_request_bytes: int,
         max_response_bytes: int,
+        require_complete_chat: bool,
     ) -> None:
         self._inner = inner
         self._authorization = authorization
         self._max_request_bytes = max_request_bytes
         self._max_response_bytes = max_response_bytes
+        self._require_complete_chat = require_complete_chat
 
     async def handle_async_request(self, request: httpx2.Request) -> httpx2.Response:
         body = await request.aread()
         if len(body) > self._max_request_bytes:
             raise ModelRequestRejectedError("模型请求超过 Profile 的请求字节上限")
-        headers = {k: v for k, v in request.headers.items() if k.lower() in _FORWARDED_HEADERS}
-        headers["authorization"] = self._authorization
-        # 压缩内容无法在读取阶段按实际字节限额，只接受未压缩响应。
-        headers["accept-encoding"] = "identity"
+        # 不沿用 SDK 请求中的任何头值：SDK 客户端会把环境变量中的自定义头合并进来。
+        # Host 与 Content-Length 由 httpx 从可信 URL 与实际 body 生成，其余为固定协议值。
         forwarded = httpx2.Request(
             request.method,
             request.url,
-            headers=headers,
+            headers={
+                "authorization": self._authorization,
+                "accept": _JSON,
+                "content-type": _JSON,
+                # 压缩内容无法在读取阶段按实际字节限额，只接受未压缩响应。
+                "accept-encoding": "identity",
+            },
             content=body,
             extensions=request.extensions,
         )
 
         response = await self._inner.handle_async_request(forwarded)
-        stream = response.stream
         try:
-            self._check_declared(response.headers)
-            if not isinstance(stream, httpx2.AsyncByteStream):
-                raise ModelResponseRejectedError("模型响应不是异步字节流")
-        except ModelResponseRejectedError:
+            content = await self._read_bounded(response)
+        finally:
             await response.aclose()
-            raise
+        if httpx2.codes.is_success(response.status_code):
+            self._check_success_body(content)
+        headers = [
+            (k, v)
+            for k, v in response.headers.multi_items()
+            if k.lower() not in ("content-length", "transfer-encoding")
+        ]
         return httpx2.Response(
             response.status_code,
-            headers=response.headers,
-            stream=_LimitedStream(stream, self._max_response_bytes),
+            headers=headers,
+            content=content,
             extensions=response.extensions,
         )
 
-    def _check_declared(self, headers: httpx2.Headers) -> None:
-        if headers.get("content-encoding", "identity").lower() != "identity":
+    async def _read_bounded(self, response: httpx2.Response) -> bytes:
+        """按实际读取的字节计数；不依赖可伪造的 Content-Length。"""
+        if response.headers.get("content-encoding", "identity").lower() != "identity":
             raise ModelResponseRejectedError("模型响应使用了压缩编码，无法按字节上限读取")
-        declared = headers.get("content-length")
-        if declared is not None and (
-            not declared.isdigit() or int(declared) > self._max_response_bytes
-        ):
-            raise ModelResponseRejectedError("模型响应超过 Profile 的响应字节上限")
-
-    async def aclose(self) -> None:
-        await self._inner.aclose()
-
-
-class _LimitedStream(httpx2.AsyncByteStream):
-    def __init__(self, inner: httpx2.AsyncByteStream, limit: int) -> None:
-        self._inner = inner
-        self._limit = limit
-
-    async def __aiter__(self) -> AsyncIterator[bytes]:
+        stream = response.stream
+        if not isinstance(stream, httpx2.AsyncByteStream):
+            raise ModelResponseRejectedError("模型响应不是异步字节流")
+        chunks: list[bytes] = []
         received = 0
-        async for chunk in self._inner:
+        async for chunk in stream:
             received += len(chunk)
-            if received > self._limit:
+            if received > self._max_response_bytes:
                 raise ModelResponseRejectedError("模型响应超过 Profile 的响应字节上限")
-            yield chunk
+            chunks.append(chunk)
+        return b"".join(chunks)
+
+    def _check_success_body(self, content: bytes) -> None:
+        # 流式（SSE）与非 JSON 成功响应未经验证，不交给 SDK 解析。
+        try:
+            payload = json.loads(content)
+        except ValueError:
+            raise ModelResponseRejectedError("模型成功响应不是合法 JSON") from None
+        if self._require_complete_chat:
+            _require_complete_chat(payload)
 
     async def aclose(self) -> None:
         await self._inner.aclose()
+
+
+def _require_complete_chat(payload: object) -> None:
+    choices = payload.get("choices") if isinstance(payload, dict) else None
+    if not isinstance(choices, list) or not choices:
+        raise ModelResponseRejectedError("模型响应没有完整的 Chat Completions 终态")
+    for choice in choices:
+        reason = choice.get("finish_reason") if isinstance(choice, dict) else None
+        if reason not in _COMPLETE_CHAT_FINISH_REASONS:
+            raise ModelResponseRejectedError("模型响应没有完整的 Chat Completions 终态")
 
 
 class _JsonObjectModel(Model):

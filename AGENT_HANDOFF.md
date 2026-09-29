@@ -12,7 +12,7 @@
 | 本地目录 / 分支 | `/Users/kloenguyen/Desktop/agent-SDK` / `claude/p1a-task1b-model-api`（从 `main` 的 `9b3517d` 分出；`main` 已包含 Task 1 与 CI harness） |
 | M5 历史起点 | `372c381f44ecfa1fa53961f137d0058033cbd805`；不是远端当前 main 的核验结论 |
 | 本次实施起点 | `9b3517d42051cec511dec95e58c6ee8dcb8bae70`（PR #2 合并后的 `main`）；开始时工作树干净 |
-| 当前阶段 | P1-A Task 1 已合入 `main`；Task 1B（模型 API Profile 与 SDK 接入）已在本分支完成离线实现与 HTTP mock 验证，待独立审查；未推送、无 PR |
+| 当前阶段 | P1-A Task 1 已合入 `main`；Task 1B（模型 API Profile 与 SDK 接入）首轮审查（`3d8e796`）暂不通过，2 项 P1 与 1 项 P2 已在本分支修复，待增量复审；未推送、无 PR |
 | 当前源码与依赖 | 新包 `src/xiaowei/`（`config.py`、`storage.py`、`model_api.py`）与旧 `src/xiaowei_agent/` 并存；锁定 `openai-agents[sqlalchemy]` 0.22.3、`mcp` 2.2.0、`openai` 3.20.0、SQLAlchemy 2.0.52、asyncpg 0.30.0，Python 3.11.16；wheel 同时打包两个包，CLI 仍指向旧包 |
 | 新产品入口 | 只有开发验证命令（见第 5 节）；尚无产品启动入口，旧 CLI/Compose 不算新入口 |
 | 本次工作范围 | Task 1B：`ModelProfile`、`open_model`、`settings_for`、`profile_fingerprint`、`resolve_secret_ref` 及 `tests/sdk_core/test_model_api.py`；无依赖变更，未改 Compose、CI 或 README |
@@ -36,7 +36,7 @@
 
 ## 3. 当前计划与下一项工作
 
-唯一详细计划：[P1-A：SDK 与治理执行核心](docs/superpowers/plans/2026-09-29-p1a-sdk-governed-core.md)。任务顺序为 **Task 1 → Task 1B → Task 2–5**。Task 1 已通过本地技术验收并经 PR #2 合入 `main`（`9b3517d`）。Task 1B 在本分支完成离线实现，待独立审查。与计划的差异记录在计划的“Task 1 实测记录”和“Task 1B 实测记录”中。
+唯一详细计划：[P1-A：SDK 与治理执行核心](docs/superpowers/plans/2026-09-29-p1a-sdk-governed-core.md)。任务顺序为 **Task 1 → Task 1B → Task 2–5**。Task 1 已通过本地技术验收并经 PR #2 合入 `main`（`9b3517d`）。Task 1B 在本分支完成离线实现；首轮审查意见已修复，待增量复审。与计划的差异记录在计划的“Task 1 实测记录”和“Task 1B 实测记录”中。
 
 **Task 1 已证明（离线、合成数据、scripted 模型）：**
 
@@ -52,12 +52,13 @@
 
 - Responses（OpenAI Profile）与 Chat Completions（Gemini Profile）经真实 `OpenAIResponsesModel` / `OpenAIChatCompletionsModel` 完成工具调用 → 工具结果回传 → 类型化最终回答；请求使用 Profile 的端点、期限与输出 token 上限，Responses 发送 `store=false`，未配置的推理/采样参数不发送。
 - `json_object`（DeepSeek Profile）经薄 `Model` 委托发送 `response_format={"type":"json_object"}` 并附 schema 说明；缺字段、错类型、非 JSON、空内容与 `null` 都不会成为成功结果。
-- 三个 Profile 的假密钥只发往各自端点；`OPENAI_API_KEY`、`OPENAI_BASE_URL`、`OPENAI_ORG_ID`、`OPENAI_PROJECT_ID`、`OPENAI_CUSTOM_HEADERS` 等环境值不随请求发出（修复前 `OPENAI_CUSTOM_HEADERS` 的 `Authorization` 会覆盖 Profile 密钥）。Profile 指纹稳定、不含密钥，端点/协议/模型/输出模式任一变化都会变。
+- 三个 Profile 的假密钥只发往各自端点；`OPENAI_API_KEY`、`OPENAI_BASE_URL`、`OPENAI_ORG_ID`、`OPENAI_PROJECT_ID`、`OPENAI_CUSTOM_HEADERS` 等环境值不随请求发出，同名的 `Host`/`Accept`/`Content-Type`/`Content-Length` 也不能替换协议头；默认网络 transport 不读取 `SSL_CERT_FILE` 等环境配置。Profile 指纹稳定、不含密钥，端点/协议/模型/输出模式任一变化都会变。
+- Chat Completions 截断、过滤或缺失终态（含合法 JSON 与语法完整的工具调用）在 SDK 解析前拒绝，工具零执行、无续轮；Responses `incomplete` 由 SDK 拒绝作为对照。三个 Profile 的带工具请求都发送 `parallel_tool_calls=false`。
 - 401/403/429/503、超时、非法 JSON 与跨端点 307：只发出一次请求、不重试、不跟随、不切换端点、工具只执行一次。
-- 请求超限在发出前拒绝（端点收到 0 个请求）；响应超限在读取阶段停止（64 KiB 响应只读取不超过 5 块）；声明长度超限和压缩响应被拒绝。
+- 请求超限在发出前拒绝（端点收到 0 个请求）；响应超限在读取阶段停止（64 KiB 响应只读取不超过 5 块）；压缩响应（200 与 503）被拒绝；SSE 或非 JSON 的成功响应被拒绝。
 - 缺失 usage 时 `raw_usage is None`，不与“为 0”混淆。Profile 校验拒绝非 HTTPS、带用户信息/查询、原始密钥、非正限额、未映射参数、不支持的协议/输出模式/推理强度组合。
 
-**Task 1B 缺口：** 三家均无真实 API 证据；`strict` 工具、JSON mode 与推理字段的供应商兼容性只由 mock 覆盖。SDK 客户端把上游错误体写进异常消息，原始异常尚未映射为受控失败（Task 5 应用出口负责）。流式调用未验证。
+**Task 1B 缺口：** 三家均无真实 API 证据；`parallel_tool_calls=false` 只是请求参数，供应商不遵守时仍会返回多个调用（Task 2 原子预算兜底）；真实供应商若返回 `stop`/`tool_calls` 以外的正常终态会被拒绝，需实测确认；`strict` 工具、JSON mode 与推理字段的供应商兼容性只由 mock 覆盖。SDK 客户端把上游错误体写进异常消息，原始异常尚未映射为受控失败（Task 5 应用出口负责）。流式调用未验证。
 
 **Task 1 未覆盖、留给后续任务：** MCP HTTP 接收字节上限、认证、超时与关闭行为（Task 4）；`tool_input_guardrails` / `tool_filter` 未验证；应用表、表版本检查（Task 2）；Session 写入前过滤（Task 3）；真实模型（Task 5）。显式开启 tracing 时的字段限制未验证。
 
@@ -107,12 +108,12 @@ Task 1B 验证（同一环境，锁文件未变）：
 
 | 命令 | 结果 |
 | --- | --- |
-| `uv run --locked --extra dev python -m pytest tests/sdk_core/test_model_api.py -q` | 实现前因缺少接口在收集阶段失败；实现后 44 passed |
-| `SDK_TEST_POSTGRES_URL=$SDK_PG uv run --locked --extra dev python -m pytest tests/sdk_core -q` | 72 passed |
-| `SDK_TEST_POSTGRES_URL=$SDK_PG uv run --locked --extra dev python -m pytest -q` | 1786 passed，152 skipped；无残留测试库 |
+| `uv run --locked --extra dev python -m pytest tests/sdk_core/test_model_api.py -q` | 实现前因缺少接口在收集阶段失败；首轮 44 passed。审查修复前新增用例 22 项按预期失败，修复后 70 passed |
+| `SDK_TEST_POSTGRES_URL=$SDK_PG uv run --locked --extra dev python -m pytest tests/sdk_core -q` | 98 passed |
+| `SDK_TEST_POSTGRES_URL=$SDK_PG uv run --locked --extra dev python -m pytest -q` | 1812 passed，152 skipped；无残留测试库 |
 | `uv run --locked --extra dev ruff check .`、`ruff format --check src/xiaowei tests/sdk_core`、`mypy src` | 通过 |
 
-Task 1B 反向验证：分别去掉请求头白名单、密钥固定、`identity` 编码、声明长度检查、流式计数、请求上限、`follow_redirects=False`、`store=False`、`preserve_raw_usage`、`json_object` 委托、推理强度白名单、HTTPS 校验，对应用例均失败。重试与期限各有两层（SDK 设置与客户端），只去掉一层时测试仍通过；两层同时去掉时 429/503/超时与期限断言失败。
+Task 1B 反向验证：分别改为沿用 SDK 请求头，或去掉密钥固定、`identity` 编码、压缩检查、逐块计数、默认 transport 的 `trust_env=False`、Chat 终态检查（含只查第一个 choice、允许空 choices、允许 `length`）、JSON 解析检查、`parallel_tool_calls=False`、请求上限、`follow_redirects=False`、`store=False`、`preserve_raw_usage`、`json_object` 委托、推理强度白名单、HTTPS 校验，对应用例均失败；媒体类型与声明长度检查经变异证明分别被 JSON 解析与逐块计数覆盖，已删除。重试与期限各有两层（SDK 设置与客户端），只去掉一层时测试仍通过；两层同时去掉时 429/503/超时与期限断言失败。
 
 Task 1 反向验证（临时改动，验证后已恢复）：
 
