@@ -56,11 +56,20 @@ class ToolContract(_Trusted):
 
 
 class ToolRequest(_Trusted):
-    """一次工具调用；``call_id`` 取自 SDK 工具上下文，不来自模型参数。"""
+    """一次工具调用；``call_id`` 与 ``tool_name`` 取自 SDK 工具上下文，不来自模型参数。"""
 
     tool_id: ToolId
     target_id: Label
     call_id: Label
+    tool_name: Label
+    arguments: dict[str, object]
+
+
+class ToolCall(_Trusted):
+    """会话历史中的一次工具调用：SDK 函数名、调用标识与参数，用于核对证据来源。"""
+
+    call_id: Label
+    tool_name: Label
     arguments: dict[str, object]
 
 
@@ -80,6 +89,8 @@ class EvidenceRecord(_Trusted):
     target_id: Label
     tool_id: ToolId
     call_id: Label
+    tool_name: Label
+    arguments_digest: Label
     policy_id: Label
     policy_fingerprint: Label
     captured_at: datetime

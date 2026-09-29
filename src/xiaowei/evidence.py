@@ -1,8 +1,9 @@
 """Evidence 记录、四种用途投影与最终回答校验。
 
 工具结果在写入前按策略投影为模型、Session、Web、飞书四份内容，PostgreSQL 只保存这四份投影、
-生成它们的策略指纹与可信元数据，不保存原始结果。模型与 Session 内容会经模型文字到达渠道，
-因此同时受记录所在渠道的字段与容量约束。
+生成它们的策略指纹与可信元数据，不保存原始结果。模型读到的内容会经模型文字写入 Session
+并到达渠道，Session 内容又会回放给模型，因此这两种模型可达内容是同一份投影：按模型的
+字段优先级，只取模型、Session 与记录所在渠道都允许的字段，受三者中最小的容量约束。
 
 所有出口（交给模型的工具结果、各用途读取、最终回答）都经同一个读取边界，复核归属、渠道、
 过期、目标范围、当前策略与当前授权；不同拒绝原因返回同一条信息，不暴露记录是否存在。
@@ -27,6 +28,7 @@ from xiaowei.models import (
     EvidenceRecord,
     Identity,
     RunContext,
+    ToolCall,
     ToolContract,
     ToolObservation,
     ToolRequest,
@@ -39,10 +41,10 @@ _COLUMNS: Mapping[Audience, str] = {
     "web": "web_content",
     "feishu": "feishu_content",
 }
-# 模型可达的用途：其内容可能被模型复述进最终回答或在后续轮次回放。
-_MODEL_REACHABLE: frozenset[Audience] = frozenset({"model", "session"})
+# 模型可达的用途：模型文字会被保存进 Session、交付到渠道，Session 又回放给模型。
+_MODEL_REACHABLE: tuple[Audience, ...] = ("model", "session")
 # 投影规则变化时更新，使旧规则生成的证据不再可读。
-_PROJECTION_RULE = "channel-bounded/1"
+_PROJECTION_RULE = "model-reachable-shared/3"
 _UNAVAILABLE = "证据不存在、已过期或当前无权读取"
 _FACTS_HEADER = "查询结果（系统根据证据生成）"
 _ANALYSIS_HEADER = "分析建议（模型推断，未经系统核实）"
@@ -52,11 +54,12 @@ _INSERT = text(
     """
     INSERT INTO xiaowei_evidence (
         evidence_id, subject_id, session_id, turn_id, channel, target_id, tool_id, call_id,
-        policy_id, policy_fingerprint, captured_at, recorded_at, expires_at, truncated,
-        model_content, session_content, web_content, feishu_content
+        tool_name, arguments_digest, policy_id, policy_fingerprint, captured_at, recorded_at,
+        expires_at, truncated, model_content, session_content, web_content, feishu_content
     ) VALUES (
         :evidence_id, :subject_id, :session_id, :turn_id, :channel, :target_id, :tool_id, :call_id,
-        :policy_id, :policy_fingerprint, :captured_at, :recorded_at, :expires_at, :truncated,
+        :tool_name, :arguments_digest, :policy_id, :policy_fingerprint, :captured_at, :recorded_at,
+        :expires_at, :truncated,
         :model_content, :session_content, :web_content, :feishu_content
     )
     """
@@ -65,7 +68,8 @@ _INSERT = text(
 _SELECT_OWNED = text(
     """
     SELECT evidence_id, subject_id, session_id, turn_id, channel, target_id, tool_id, call_id,
-           policy_id, policy_fingerprint, captured_at, expires_at, truncated,
+           tool_name, arguments_digest, policy_id, policy_fingerprint, captured_at, expires_at,
+           truncated,
            model_content, session_content, web_content, feishu_content
     FROM xiaowei_evidence
     WHERE evidence_id = :evidence_id AND subject_id = :subject_id
@@ -125,8 +129,12 @@ class EvidenceStore:
         policy = self._catalog.policy_for(contract)
         evidence_id = f"ev_{secrets.token_hex(16)}"
         identity = ctx.identity
+        # 模型与 Session 复用同一份投影：模型看到的内容恰好是 Session 可保存、可回放的内容。
+        reachable = _project(evidence_id, observation, *_reachable_limits(policy, identity))
         projected = {
-            audience: _project(evidence_id, observation, *_limits(policy, audience, identity))
+            audience: reachable
+            if audience in _MODEL_REACHABLE
+            else _project(evidence_id, observation, *_channel_limits(policy, audience))
             for audience in _COLUMNS
         }
         recorded_at = self._clock()
@@ -139,6 +147,8 @@ class EvidenceStore:
             "target_id": contract.target_id,
             "tool_id": contract.tool_id,
             "call_id": request.call_id,
+            "tool_name": request.tool_name,
+            "arguments_digest": _arguments_digest(request.arguments),
             "policy_id": contract.policy_id,
             "policy_fingerprint": _policy_fingerprint(contract, policy),
             "captured_at": observation.captured_at,
@@ -158,9 +168,21 @@ class EvidenceStore:
             evidence_id=evidence_id, model_content=record.projections["model"], truncated=truncated
         )
 
-    async def project(self, evidence_id: str, ctx: RunContext, audience: Audience) -> str:
-        """按当前身份、范围与权限读取一种用途的获准内容。"""
+    async def project(
+        self, evidence_id: str, ctx: RunContext, audience: Audience, *, call: ToolCall | None = None
+    ) -> str:
+        """按当前身份、范围与权限读取一种用途的获准内容。
+
+        给出 ``call`` 时证据还须由同一次调用生成：调用标识、SDK 函数名与规范化参数都一致；
+        Session 据此保证历史中的工具调用与其结果来源相符。
+        """
         record = await self._readable(evidence_id, ctx, audience)
+        if call is not None and (
+            record.call_id != call.call_id
+            or record.tool_name != call.tool_name
+            or record.arguments_digest != _arguments_digest(call.arguments)
+        ):
+            raise EvidenceUnavailableError
         return record.projections[audience]
 
     async def validate_answer(self, answer: AgentAnswer, ctx: RunContext) -> Delivery:
@@ -253,6 +275,8 @@ class EvidenceStore:
             target_id=row["target_id"],
             tool_id=row["tool_id"],
             call_id=row["call_id"],
+            tool_name=row["tool_name"],
+            arguments_digest=row["arguments_digest"],
             policy_id=row["policy_id"],
             policy_fingerprint=row["policy_fingerprint"],
             captured_at=row["captured_at"],
@@ -262,16 +286,18 @@ class EvidenceStore:
         )
 
 
-def _limits(
-    policy: ToolPolicy, audience: Audience, identity: Identity
-) -> tuple[tuple[str, ...], int]:
-    """一种用途的有效字段与上限；模型可达的用途再与记录所在渠道取字段交集和较小上限。"""
+def _reachable_limits(policy: ToolPolicy, identity: Identity) -> tuple[tuple[str, ...], int]:
+    """模型可达投影：按模型字段优先级，取模型、Session 与记录所在渠道的共同字段与最小上限。"""
+    bounds = [policy.projections[a] for a in (*_MODEL_REACHABLE, identity.channel)]
+    fields = tuple(
+        name for name in policy.projections["model"].fields if all(name in b.fields for b in bounds)
+    )
+    return fields, min(b.max_bytes for b in bounds)
+
+
+def _channel_limits(policy: ToolPolicy, audience: Audience) -> tuple[tuple[str, ...], int]:
     spec = policy.projections[audience]
-    if audience not in _MODEL_REACHABLE:
-        return spec.fields, spec.max_bytes
-    channel = policy.projections[identity.channel]
-    fields = tuple(name for name in spec.fields if name in channel.fields)
-    return fields, min(spec.max_bytes, channel.max_bytes)
+    return spec.fields, spec.max_bytes
 
 
 def _policy_fingerprint(contract: ToolContract, policy: ToolPolicy) -> str:
@@ -285,6 +311,17 @@ def _policy_fingerprint(contract: ToolContract, policy: ToolPolicy) -> str:
         },
     }
     canonical = json.dumps(body, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+    return f"sha256:{hashlib.sha256(canonical.encode()).hexdigest()}"
+
+
+def _arguments_digest(arguments: Mapping[str, object]) -> str:
+    """规范化参数摘要：键排序、紧凑 JSON，与参数的书写顺序和空白无关。"""
+    try:
+        canonical = json.dumps(
+            arguments, sort_keys=True, separators=(",", ":"), ensure_ascii=False, allow_nan=False
+        )
+    except (TypeError, ValueError):
+        raise EvidenceStoreError("工具参数不符合证据契约") from None
     return f"sha256:{hashlib.sha256(canonical.encode()).hexdigest()}"
 
 
