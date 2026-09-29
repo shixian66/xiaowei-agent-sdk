@@ -194,9 +194,15 @@ async def ready_engine(url: URL) -> AsyncIterator[AsyncEngine]:
         yield engine
 
 
-def store(engine: AsyncEngine, grants: Grants, clock: Clock) -> EvidenceStore:
+def store(
+    engine: AsyncEngine, grants: Grants, clock: Clock, tools: ToolCatalog | None = None
+) -> EvidenceStore:
     return EvidenceStore(
-        engine, catalog(), authorize=grants, clock=clock, retention_seconds=RETENTION_SECONDS
+        engine,
+        tools or catalog(),
+        authorize=grants,
+        clock=clock,
+        retention_seconds=RETENTION_SECONDS,
     )
 
 

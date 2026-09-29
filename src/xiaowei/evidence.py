@@ -2,8 +2,8 @@
 
 工具结果在写入前按策略投影为模型、Session、Web、飞书四份内容，PostgreSQL 只保存这四份投影、
 生成它们的策略指纹与可信元数据，不保存原始结果。模型读到的内容会经模型文字写入 Session
-并到达渠道，Session 内容又会回放给模型，因此这两种模型可达内容同时受模型、Session 与记录
-所在渠道三者的字段与容量约束。
+并到达渠道，Session 内容又会回放给模型，因此这两种模型可达内容是同一份投影：按模型的
+字段优先级，只取模型、Session 与记录所在渠道都允许的字段，受三者中最小的容量约束。
 
 所有出口（交给模型的工具结果、各用途读取、最终回答）都经同一个读取边界，复核归属、渠道、
 过期、目标范围、当前策略与当前授权；不同拒绝原因返回同一条信息，不暴露记录是否存在。
@@ -44,7 +44,7 @@ _COLUMNS: Mapping[Audience, str] = {
 # 模型可达的用途：模型文字会被保存进 Session、交付到渠道，Session 又回放给模型。
 _MODEL_REACHABLE: tuple[Audience, ...] = ("model", "session")
 # 投影规则变化时更新，使旧规则生成的证据不再可读。
-_PROJECTION_RULE = "model-session-channel-bounded/2"
+_PROJECTION_RULE = "model-reachable-shared/3"
 _UNAVAILABLE = "证据不存在、已过期或当前无权读取"
 _FACTS_HEADER = "查询结果（系统根据证据生成）"
 _ANALYSIS_HEADER = "分析建议（模型推断，未经系统核实）"
@@ -129,8 +129,12 @@ class EvidenceStore:
         policy = self._catalog.policy_for(contract)
         evidence_id = f"ev_{secrets.token_hex(16)}"
         identity = ctx.identity
+        # 模型与 Session 复用同一份投影：模型看到的内容恰好是 Session 可保存、可回放的内容。
+        reachable = _project(evidence_id, observation, *_reachable_limits(policy, identity))
         projected = {
-            audience: _project(evidence_id, observation, *_limits(policy, audience, identity))
+            audience: reachable
+            if audience in _MODEL_REACHABLE
+            else _project(evidence_id, observation, *_channel_limits(policy, audience))
             for audience in _COLUMNS
         }
         recorded_at = self._clock()
@@ -282,16 +286,18 @@ class EvidenceStore:
         )
 
 
-def _limits(
-    policy: ToolPolicy, audience: Audience, identity: Identity
-) -> tuple[tuple[str, ...], int]:
-    """一种用途的有效字段与上限；模型可达的用途取模型、Session 与记录所在渠道的共同范围。"""
-    spec = policy.projections[audience]
-    if audience not in _MODEL_REACHABLE:
-        return spec.fields, spec.max_bytes
+def _reachable_limits(policy: ToolPolicy, identity: Identity) -> tuple[tuple[str, ...], int]:
+    """模型可达投影：按模型字段优先级，取模型、Session 与记录所在渠道的共同字段与最小上限。"""
     bounds = [policy.projections[a] for a in (*_MODEL_REACHABLE, identity.channel)]
-    fields = tuple(name for name in spec.fields if all(name in b.fields for b in bounds))
+    fields = tuple(
+        name for name in policy.projections["model"].fields if all(name in b.fields for b in bounds)
+    )
     return fields, min(b.max_bytes for b in bounds)
+
+
+def _channel_limits(policy: ToolPolicy, audience: Audience) -> tuple[tuple[str, ...], int]:
+    spec = policy.projections[audience]
+    return spec.fields, spec.max_bytes
 
 
 def _policy_fingerprint(contract: ToolContract, policy: ToolPolicy) -> str:

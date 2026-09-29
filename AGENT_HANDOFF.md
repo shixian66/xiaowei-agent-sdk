@@ -12,10 +12,10 @@
 | 本地目录 / 分支 | `/Users/kloenguyen/Desktop/agent-SDK` / `claude/p1a-task3-session-policy`（从 `main` 的 `f8aadb1` 分出；`main` 已包含 Task 1、1B 与 2） |
 | M5 历史起点 | `372c381f44ecfa1fa53961f137d0058033cbd805`；不是远端当前 main 的核验结论 |
 | 本次实施起点 | `f8aadb1351ba79419fa8debbf7a09e34136bc2fc`（PR #4 合并后的 `main`）；开始时工作树干净 |
-| 当前阶段 | P1-A Task 1（PR #2）、Task 1B（PR #3）与 Task 2（PR #4，审查修复后合入）已在 `main`；Task 3（Session 写入前与回放前策略）首轮审查（`5004951`）暂不通过，3 项 P1 已在本分支按三个根因修复，待增量复审 |
+| 当前阶段 | P1-A Task 1（PR #2）、Task 1B（PR #3）与 Task 2（PR #4，审查修复后合入）已在 `main`；Task 3（Session 写入前与回放前策略）首轮审查（`5004951`）的 3 项 P1 中两项已由增量复审（`11f9b13`）确认关闭；剩余模型可达数据一项的同根缺口（投影分别计算、用户输入无准入策略）已修复，待再次增量复审 |
 | 当前源码与依赖 | 新包 `src/xiaowei/`（`config.py`、`storage.py`、`model_api.py`、`models.py`、`governance.py`、`evidence.py`、`session.py`、`migrations/001_initial.sql`）与旧 `src/xiaowei_agent/` 并存；锁定 `openai-agents[sqlalchemy]` 0.22.3、`mcp` 2.2.0、`openai` 3.20.0、SQLAlchemy 2.0.52、asyncpg 0.30.0，Python 3.11.16；wheel 同时打包两个包，CLI 仍指向旧包 |
 | 新产品入口 | 只有开发验证命令（见第 5 节）；尚无产品启动入口，旧 CLI/Compose 不算新入口 |
-| 本次工作范围 | Task 3：`PolicySession`/`SessionLimits`、应用表 `xiaowei_session`（并入 v1）、Evidence 的完整调用绑定（`tool_name`、参数摘要）与模型可达投影规则 `/2`，及 `tests/sdk_core/test_session_policy.py`；无依赖变更，未改 Compose、CI 或 README |
+| 本次工作范围 | Task 3：`PolicySession`/`SessionLimits`、应用表 `xiaowei_session`（并入 v1）、Evidence 的完整调用绑定（`tool_name`、参数摘要）、模型与 Session 共用一份投影（规则 `/3`）、用户输入准入策略 `SessionInputPolicy`，及 `tests/sdk_core/test_session_policy.py`；无依赖变更，未改 Compose、CI 或 README |
 | 外部操作 | 未调用真实模型、StarRocks 或飞书；Task 3 只用合成工具、ScriptedModel 与隔离测试 PostgreSQL；分支未推送；没有部署或用户验收 |
 
 表中的 SHA 是本次实施起点，Task 1 提交在其之后。接手先用 `git rev-parse HEAD` 和 `git status --short` 取得实际版本；本文件的修改历史由 Git 保存。
@@ -36,7 +36,7 @@
 
 ## 3. 当前计划与下一项工作
 
-唯一详细计划：[P1-A：SDK 与治理执行核心](docs/superpowers/plans/2026-09-29-p1a-sdk-governed-core.md)。任务顺序为 **Task 1 → Task 1B → Task 2–5**。Task 1 经 PR #2、Task 1B 经 PR #3、Task 2 经 PR #4 合入 `main`（`f8aadb1`）。Task 3 在本分支完成离线实现；首轮审查意见已修复，待增量复审。与计划的差异记录在计划各任务的“实测记录”中。
+唯一详细计划：[P1-A：SDK 与治理执行核心](docs/superpowers/plans/2026-09-29-p1a-sdk-governed-core.md)。任务顺序为 **Task 1 → Task 1B → Task 2–5**。Task 1 经 PR #2、Task 1B 经 PR #3、Task 2 经 PR #4 合入 `main`（`f8aadb1`）。Task 3 在本分支完成离线实现；审查与增量复审意见已修复，待再次增量复审。与计划的差异记录在计划各任务的“实测记录”中。
 
 **Task 1 已证明（离线、合成数据、scripted 模型）：**
 
@@ -72,6 +72,8 @@
 **Task 3 已证明（离线、合成工具、真 Runner + ScriptedModel、SQLAlchemySession + 隔离的真实 PostgreSQL）：**
 
 - SDK 在一轮内写入的用户输入、工具配对与最终消息先进入暂存区：`Runner.run` 返回后、提交前 SDK 表为空；提交后 SDK 表只有纯文本消息、工具调用与证据引用，不含合成禁止字段，也不含 SDK 的 item `id`/`status`。
+- 模型与 Session 共用同一份投影：字段相同、顺序相反且容量只放得下一个字段时，模型看到的就是 Session 保存的那一个，Session 未选中的字段不经模型文字落库。
+- 超过字节上限或含禁止模式的用户输入在首个模型调用前拒绝：模型零调用、工具零执行、SDK 表为空；符合策略的文字照常保存与回放（对照）；策略收紧后含旧禁止模式的历史整段拒绝。
 - 模型可达的工具数据取模型、Session、渠道三方共有字段：模型把看到的一切抄进中间文字、下一次工具参数和最终分析，Model-only 值不落库；Session-only 值不进入任何一轮模型输入；共有字段正常保存并回放（对照）。
 - 追问时 SDK 消费重建的调用/结果配对，回放内容是当前的模型可达投影（`rows`），工具不重跑。回放与暂存都核对证据由同一次调用生成：只改函数名、参数、调用标识、证据引用，或参数无法解析、缺少调用项，都整段拒绝；完整匹配的对照正常回放。
 - 应用元数据缺失而底层已有纯文字历史时，不登记、不返回历史、模型零调用，`clear_session` 也拒绝；空 Session 正常登记（对照）。撤权、Target Scope 收窄、他人或其他渠道使用同一会话标识（含只有文字、没有证据的历史）时，新一轮在首个模型调用前拒绝；恢复权限后原历史照常可用。
@@ -81,7 +83,7 @@
 - 端点、协议、模型或 `data_policy_id` 任一变化：旧会话在首个模型请求前拒绝；新会话独立运行，首个模型输入只有新消息。
 - 图片输入、system 角色、托管工具项没有保存形式，整轮拒绝；治理拒绝的工具输出以固定文字保存与回放；篡改的历史（原始内容、未知证据、证据挂到其他调用、错配/孤立结果、未应答调用）整段拒绝。`pop_item` 只撤回暂存项；`clear_session` 底层清除失败时会话已关闭、不可回放。
 
-**Task 3 缺口：** 用户自己输入的文字按原文保存（只受文本类型与历史字节约束），代码不从中剔除字段；`ToolRequest.tool_name` 由应用的工具包装从 SDK 上下文填入，治理层不另行核对它与 `tool_id` 的对应；参数有默认值而模型省略时，规范化摘要可能与执行参数不同，回放会保守拒绝；任一证据失效即整段历史不可回放，撤权或证据保留期短于会话保留期时会话提前结束（有意的保守选择）；推理项不保存，真实推理模型经 Responses 的无状态续轮需实测；单轮用户输入大小只在提交时计入历史字节，模型输入前的单轮上限属 Task 5；同会话互斥与轮次结束清理由 Task 5 应用入口负责，`PolicySession` 只以状态比较交换防止重复提交；SDK 的 RunState 恢复路径（`get_items(limit)`）不支持；物理清理命令与渠道新建会话属 P1-B；未经独立审查。
+**Task 3 缺口：** 用户输入准入只按可信配置的字节上限与禁止模式判断，不能识别模式之外的敏感内容，也不对模型自身知识写出的文字做模式检查；准入策略与 Profile `data_policy_id` 的对应由 Task 5 装配；Evidence 的 Session 列现与模型列内容相同（保留列结构，未另做迁移）；`ToolRequest.tool_name` 由应用的工具包装从 SDK 上下文填入，治理层不另行核对它与 `tool_id` 的对应；参数有默认值而模型省略时，规范化摘要可能与执行参数不同，回放会保守拒绝；任一证据失效即整段历史不可回放，撤权或证据保留期短于会话保留期时会话提前结束（有意的保守选择）；推理项不保存，真实推理模型经 Responses 的无状态续轮需实测；单轮用户输入大小只在提交时计入历史字节，模型输入前的单轮上限属 Task 5；同会话互斥与轮次结束清理由 Task 5 应用入口负责，`PolicySession` 只以状态比较交换防止重复提交；SDK 的 RunState 恢复路径（`get_items(limit)`）不支持；物理清理命令与渠道新建会话属 P1-B；未经独立审查。
 
 **Task 2 缺口：** 代码不能识别自由文字，渠道边界靠“模型只看得到渠道允许的数据”保证，用户自己输入或模型自身知识不在此约束内；复核与交给 SDK 之间仍有极短的检查-使用窗口；撤权后已写入的证据行保留到过期（不可读）；每条证据仍保存另一渠道的投影（永不可读，可在清理任务中收窄）；预算计数在进程内，依赖 Task 5 在每轮结束调用 `end_turn`；渠道展示仍是 JSON 投影，表格/摘要格式属 P1-B；证据物理清理命令属 P1-B；授权回调是应用接口，真实权限来源未接入。
 
@@ -154,12 +156,12 @@ Task 3 验证（同一环境，锁文件未变）：
 
 | 命令 | 结果 |
 | --- | --- |
-| `SDK_TEST_POSTGRES_URL=$SDK_PG uv run --locked --extra dev python -m pytest tests/sdk_core/test_session_policy.py -q` | 移走 `session.py` 时收集阶段失败；首轮 30 passed。审查修复前新增/调整用例 7 项按预期失败（`region` 进入下一轮模型、`987654321` 落库、孤立历史被读取并调用模型、改名/改参数仍回放或暂存），修复后 43 passed |
-| `SDK_TEST_POSTGRES_URL=$SDK_PG uv run --locked --extra dev python -m pytest tests/sdk_core -q` | 177 passed（`-W error` 下同样通过） |
-| `SDK_TEST_POSTGRES_URL=$SDK_PG uv run --locked --extra dev python -m pytest -q` | 1891 passed，152 skipped；5 条警告来自旧网络隔离测试，原有行为 |
+| `SDK_TEST_POSTGRES_URL=$SDK_PG uv run --locked --extra dev python -m pytest tests/sdk_core/test_session_policy.py -q` | 移走 `session.py` 时收集阶段失败；首轮 30 passed。审查修复前新增/调整用例 7 项按预期失败（`region` 进入下一轮模型、`987654321` 落库、孤立历史被读取并调用模型、改名/改参数仍回放或暂存），修复后 43 passed。增量复审修复前新增用例 4 项按预期失败，修复后 47 passed |
+| `SDK_TEST_POSTGRES_URL=$SDK_PG uv run --locked --extra dev python -m pytest tests/sdk_core -q` | 181 passed（pytest `-W error` 下同样通过） |
+| `SDK_TEST_POSTGRES_URL=$SDK_PG uv run --locked --extra dev python -m pytest -q` | 1895 passed，152 skipped；5 条警告来自旧网络隔离测试，原有行为 |
 | `uv run --locked --extra dev ruff check src/xiaowei tests/sdk_core`、`ruff format --check`、`mypy src/xiaowei` | 通过 |
 
-Task 3 反向验证 33 项见计划“Task 3 实测记录”，全部使对应用例失败。
+Task 3 反向验证 37 项见计划“Task 3 实测记录”，全部使对应用例失败。
 
 Task 2 反向验证：分别去掉撤权复核、调用时范围检查、展示范围过滤、目标一致性、参数校验、预算预占，把预算检查与计数拆到 `await` 两侧，保留执行异常原因链，去掉契约 schema 比对、SQL 归属条件、过期/目标/授权/渠道检查，改为投影全部字段、忽略投影上限或来源截断，去掉回答的引用子集/非空/去重/澄清混用检查、`AgentAnswer` 或 RunContext 的 `extra="forbid"`、应用表版本/存在检查、已安装判断，共 26 项；审查修复后另加 8 项：去掉写入后复核、模型或 Session 的渠道约束（分别及同时）、较小上限、策略指纹比较，指纹去掉投影或契约部分。34 项对应用例均失败。可信类型的 `strict` 经变异证明不承重，已删除。
 

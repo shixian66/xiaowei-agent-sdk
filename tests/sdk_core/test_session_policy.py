@@ -20,14 +20,17 @@ from sqlalchemy.engine import URL
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncEngine
 from tests.sdk_core.synthetic_tools import (
+    CONTRACTS,
     OTHER_TARGET,
     PRIVATE_NOTE,
+    PROJECTIONS,
     RETENTION_SECONDS,
     TARGET,
     TOTAL_TOOL,
     Clock,
     Grants,
     RecordingAdapter,
+    RegionArgs,
     catalog,
     context,
     ready_engine,
@@ -37,13 +40,14 @@ from tests.sdk_core.synthetic_tools import (
 )
 
 from xiaowei.evidence import EvidenceStore
-from xiaowei.governance import GovernedTools
+from xiaowei.governance import GovernedTools, Projection, ToolCatalog, ToolPolicy
 from xiaowei.model_api import ModelProfile, profile_fingerprint
 from xiaowei.models import AgentAnswer, RunContext
 from xiaowei.session import (
     NO_EVIDENCE_OUTPUT,
     PolicySession,
     SessionError,
+    SessionInputPolicy,
     SessionItemRejectedError,
     SessionLimitError,
     SessionLimits,
@@ -57,6 +61,7 @@ SESSION_RETENTION = RETENTION_SECONDS * 2
 LIMITS = SessionLimits(
     max_history_turns=5, max_history_bytes=20_000, retention_seconds=SESSION_RETENTION
 )
+INPUT_POLICY = SessionInputPolicy(max_bytes=2000)
 
 
 def _profile(**overrides: Any) -> ModelProfile:
@@ -128,6 +133,7 @@ class Harness:
         *,
         profile: str = PROFILE,
         limits: SessionLimits = LIMITS,
+        input_policy: SessionInputPolicy = INPUT_POLICY,
         inner: SQLAlchemySession | None = None,
     ) -> PolicySession:
         return PolicySession(
@@ -136,6 +142,7 @@ class Harness:
             self.evidence,
             profile,
             limits,
+            input_policy=input_policy,
             engine=self.engine,
             clock=self.clock,
         )
@@ -198,13 +205,16 @@ class Harness:
 
 
 @asynccontextmanager
-async def harness(url: URL, adapter: RecordingAdapter | None = None) -> AsyncIterator[Harness]:
+async def harness(
+    url: URL, adapter: RecordingAdapter | None = None, tools: ToolCatalog | None = None
+) -> AsyncIterator[Harness]:
     grants, clock = Grants(), Clock()
     adapter = adapter or RecordingAdapter(total=100)
+    tools = tools or catalog()
     grants.grant("alice", TOTAL_TOOL)
     async with ready_engine(url) as engine:
-        evidence = store(engine, grants, clock)
-        governed = GovernedTools(catalog(), evidence, authorize=grants)
+        evidence = store(engine, grants, clock, tools)
+        governed = GovernedTools(tools, evidence, authorize=grants)
         yield Harness(engine, grants, clock, adapter, evidence, governed)
 
 
@@ -682,3 +692,76 @@ async def test_staging_binds_evidence_to_the_whole_call(
         else:
             with pytest.raises(SessionItemRejectedError):
                 await session.add_items(batch)  # type: ignore[arg-type]
+
+
+ROWS_MARKER = "ROWS_ONLY_MARKER".ljust(40, "x")
+
+
+def _reversed_priorities() -> ToolCatalog:
+    """模型与 Session 字段相同、顺序相反，上限只放得下其中一个字段。"""
+    policy = ToolPolicy(
+        policy_id="synthetic.region",
+        arguments=RegionArgs,
+        projections={
+            **PROJECTIONS,
+            "model": Projection(fields=("total", "rows"), max_bytes=300),
+            "session": Projection(fields=("rows", "total"), max_bytes=300),
+        },
+    )
+    return ToolCatalog(CONTRACTS, (policy,))
+
+
+async def test_model_and_session_share_one_projection(postgres_url: URL) -> None:
+    """模型看到的就是 Session 保存的：字段优先级不同也不能各自选出不同内容。"""
+    adapter = RecordingAdapter(total=MODEL_ONLY_TOTAL, memo=ROWS_MARKER)
+    async with harness(postgres_url, adapter, _reversed_priorities()) as h:
+        model, result = await h.turn(context(), [_call(), _copy_everything(None)])
+        stored = json.dumps(await h.stored(), ensure_ascii=False)
+        (evidence_id,) = result.final_output.evidence_ids
+        session = await h.evidence.project(evidence_id, context(turn="t2"), "session")
+    (seen,) = _outputs(model.calls[1].input)
+    assert seen == session
+    data = json.loads(session)["data"]
+    assert len(data) == 1 and json.loads(session)["truncated"] is True
+    # Session 未选中的字段，不能经模型文字出现在 SDK 表中。
+    markers = {"total": str(MODEL_ONLY_TOTAL), "rows": ROWS_MARKER}
+    for field, marker in markers.items():
+        assert (marker in stored) == (field in data)
+
+
+SECRET_POLICY = SessionInputPolicy(max_bytes=200, forbidden_patterns=(r"SYNTH-SECRET-\d+",))
+
+
+@pytest.mark.parametrize(
+    "message",
+    ["东区订单？口令 SYNTH-SECRET-42", "东区订单？" + "很" * 100],
+    ids=["forbidden-pattern", "too-long"],
+)
+async def test_user_input_outside_session_policy_never_enters_session(
+    postgres_url: URL, message: str
+) -> None:
+    async with harness(postgres_url) as h:
+        model = ScriptedModel([_call(), _cite()])
+        session = h.session(context(), input_policy=SECRET_POLICY)
+        with pytest.raises(SessionItemRejectedError):
+            await Runner.run(h.agent(model), message, context=context(), session=session)
+        await session.discard_pending()
+        # SDK 在首个模型调用前写入用户输入：拒绝发生在模型与工具之前。
+        assert model.calls == ()
+        assert h.adapter.calls == []
+        assert await h.stored() == []
+        # 对照：符合策略的文字照常保存，并在下一轮回放。
+        await h.turn(context(), [_call(), _cite()], "东区订单？", input_policy=SECRET_POLICY)
+        followup, _ = await h.turn(
+            context(turn="t2"), [_cite()], "继续", input_policy=SECRET_POLICY
+        )
+    assert {"role": "user", "content": "东区订单？"} in followup.calls[0].input  # type: ignore[operator]
+
+
+async def test_replay_rechecks_user_input_policy(postgres_url: URL) -> None:
+    """已保存的用户文字在策略收紧后不再回放。"""
+    async with harness(postgres_url) as h:
+        await h.turn(context(), [_call(), _cite()], "东区 SYNTH-SECRET-7 订单？")
+        await h.refused(context(turn="t2"), input_policy=SECRET_POLICY)
+        followup, _ = await h.turn(context(turn="t3"), [_cite()])
+    assert len(followup.calls) == 1

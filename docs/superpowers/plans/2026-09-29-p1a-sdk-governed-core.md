@@ -152,7 +152,7 @@
 
 **Files:** Create `src/xiaowei/session.py`、`tests/sdk_core/test_session_policy.py`。
 
-**Interfaces:** 消费 `RunContext`、异步 `EvidenceStore.project`、Task 1B 的 Profile 指纹与 SDK `Session`；产出 `PolicySession(inner: Session, context: RunContext, evidence: EvidenceStore, profile_fingerprint: str, limits: SessionLimits)`，实现锁定版 SDK 所需的公开 Session 接口并委托底层。`SessionLimits(max_history_turns: int, max_history_bytes: int, retention_seconds: int)` 均为正值，由可信配置提供，不把 SDK `max_turns` 当作历史上限；应用元数据记录会话失效时间。会话的 Profile 绑定保存在应用元数据中；不匹配时拒绝历史读取，要求新建会话。提供 `async discard_pending() -> None`、`async commit_validated() -> None`；后者只由验证成功的应用路径调用。
+**Interfaces:** 消费 `RunContext`、异步 `EvidenceStore.project`、Task 1B 的 Profile 指纹与 SDK `Session`；产出 `PolicySession(inner: Session, context: RunContext, evidence: EvidenceStore, profile_fingerprint: str, limits: SessionLimits)`（实现另有关键字参数 `input_policy`、`engine`、`clock`，见实测记录），实现锁定版 SDK 所需的公开 Session 接口并委托底层。`SessionLimits(max_history_turns: int, max_history_bytes: int, retention_seconds: int)` 均为正值，由可信配置提供，不把 SDK `max_turns` 当作历史上限；应用元数据记录会话失效时间。会话的 Profile 绑定保存在应用元数据中；不匹配时拒绝历史读取，要求新建会话。提供 `async discard_pending() -> None`、`async commit_validated() -> None`；后者只由验证成功的应用路径调用。
 
 - [x] 编写 `test_runner_session_filters_before_write`、`test_replay_rechecks_permissions`、`test_valid_tool_pair_survives_followup`、`test_invalid_final_never_persists`、`test_partial_store_failure_invalidates_session`。用 SQLAlchemySession、隔离的真实 PostgreSQL 和真 Runner 断言：`forbidden_text not in stored_items`，撤权数据不在第二轮 Model 输入，SDK 能消费过滤后成对工具项，未经验证最终输出不会落盘。
 - [x] 编写 `test_history_limit_stops_before_model_call`、`test_expired_history_or_evidence_cannot_replay`。轮数/字节达到配置上限时新轮零模型调用并提示新建；用可控时间验证未执行物理清理的过期记录也不能回放。若本轮暂存项仍使总历史超限，则拒绝提交、封存会话并返回受控的新建提示，不裁掉半组工具项，不自动重跑已执行工具。
@@ -175,7 +175,11 @@
   - 元数据缺失时认领已有历史：登记新会话前先确认底层 Session 为空，`get_items`、`commit_validated`、`clear_session` 共用同一登记路径；孤立历史拒绝且不登记。
   - 证据只绑定 `call_id`：`ToolRequest` 增加取自 SDK 工具上下文的 `tool_name`，Evidence 保存 `tool_name` 与规范化参数摘要，`project(call=ToolCall)` 核对调用标识、函数名与参数；暂存与回放都传入历史中的完整调用，调用缺失或参数不是 JSON 对象时拒绝。暂存改为逐项进行，使同批次的工具结果能找到先到的调用项。
   - 修复前新增/调整用例 7 项按预期失败；修复后因规则改变更新 3 个旧断言（模型不再看到 Session 不允许的 `total`，模型与 Session 内容相同）。
-- 反向验证 24 项（去掉暂存、保存原始工具结果、回放不复核、归属/Profile/过期/状态检查、轮数/字节上限（开始与提交两处）、最终回答校验、`writing` 状态、pop 已提交历史、先清除后关闭、调用绑定、暂存时证据核对、角色/文字片段/未知类型白名单、配对两处检查、引用格式、保留错误原文）均使对应用例失败。首轮有 3 项未变红：归属检查（原用例被 Evidence 查询顺带拦下，补“无证据历史”用例）、消息片段类型检查（被文字字段检查覆盖，已删除）、孤立结果（原用例总留有未配对调用，补孤立输出用例）。审查修复后另加 9 项（`_limits` 分别去掉模型/Session/渠道约束、恢复旧规则、去掉最小上限，绑定分别去掉调用标识/函数名/参数，登记前不查空），并对调用无法解析的两处拒绝补用例后变红；暂存批次回滚经判断不承重，已删除。共 33 项均失败。
+- **增量复审后修复（`11f9b13` 暂不通过的 1 项 P1，两处同根）：**
+  - 模型与 Session 投影仍分别计算：字段集合和上限相同，但各按自己的字段顺序取舍，容量只放得下一个字段时两者选出不同内容，模型可把 Session 未选中的字段写进文字落库。现 `record` 只计算一次模型可达投影（按模型字段优先级，取三方共同字段与最小上限），同一份内容同时存为模型与 Session 投影，投影规则升为 `/3`。
+  - 用户输入没有 Session 数据策略：`PolicySession` 增加必填的 `input_policy: SessionInputPolicy(max_bytes, forbidden_patterns)`，由可信配置提供（Task 5 按 Profile 的 `data_policy_id` 装配）。锁定版 SDK 在首个模型调用前写入用户输入，因此不符合时本轮零模型调用、零工具执行、不落库；回放时按当前策略复核，策略收紧后旧历史整段拒绝。代码只按确定的字节与模式判断，不识别任意自由文字中的敏感内容。
+  - 修复前新增用例 4 项按预期失败（模型看到 `total` 而 Session 选中 `rows`；超长与含禁止模式的输入未被拒绝；收紧策略后仍回放），修复后通过，未修改任何已有断言。
+- 反向验证 24 项（去掉暂存、保存原始工具结果、回放不复核、归属/Profile/过期/状态检查、轮数/字节上限（开始与提交两处）、最终回答校验、`writing` 状态、pop 已提交历史、先清除后关闭、调用绑定、暂存时证据核对、角色/文字片段/未知类型白名单、配对两处检查、引用格式、保留错误原文）均使对应用例失败。首轮有 3 项未变红：归属检查（原用例被 Evidence 查询顺带拦下，补“无证据历史”用例）、消息片段类型检查（被文字字段检查覆盖，已删除）、孤立结果（原用例总留有未配对调用，补孤立输出用例）。审查修复后另加 9 项（`_limits` 分别去掉模型/Session/渠道约束、恢复旧规则、去掉最小上限，绑定分别去掉调用标识/函数名/参数，登记前不查空），并对调用无法解析的两处拒绝补用例后变红；暂存批次回滚经判断不承重，已删除。增量复审修复后按新结构调整模型可达投影的变异，并新增分别计算投影（含 `11f9b13` 的同集合不同顺序形态）、去掉输入准入/字节/模式检查、回放不复核输入策略等项；共 37 项均失败。
 
 ## Task 4：最小 MCP Client Integration
 

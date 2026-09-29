@@ -14,13 +14,14 @@ Evidence 读取边界按当前权限、目标范围、策略与过期取回 Sess
 """
 
 import json
+import re
 from collections.abc import Callable, Mapping
 from datetime import datetime, timedelta
 from typing import Any, Literal, cast
 
 from agents import TResponseInputItem
 from agents.memory import Session
-from pydantic import BaseModel, ConfigDict, Field, ValidationError
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
 from sqlalchemy import TextClause, text
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncEngine
@@ -109,6 +110,34 @@ class SessionLimits(BaseModel):
     retention_seconds: int = Field(gt=0)
 
 
+class SessionInputPolicy(BaseModel):
+    """可信配置的用户输入准入策略：用户文字进入会话的字节上限与禁止保存的模式。
+
+    SDK 在首个模型调用前写入用户输入，拒绝即本轮零模型调用；回放时按当前策略复核。
+    代码只能按确定的模式判断，不能识别任意自由文字中的敏感内容。
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    max_bytes: int = Field(gt=0)
+    forbidden_patterns: tuple[str, ...] = ()
+
+    @field_validator("forbidden_patterns")
+    @classmethod
+    def _compilable(cls, patterns: tuple[str, ...]) -> tuple[str, ...]:
+        for pattern in patterns:
+            try:
+                re.compile(pattern)
+            except re.error:
+                raise ValueError("禁止模式不是合法的正则表达式") from None
+        return patterns
+
+    def admits(self, text: str) -> bool:
+        return len(text.encode()) <= self.max_bytes and not any(
+            re.search(pattern, text) for pattern in self.forbidden_patterns
+        )
+
+
 class PolicySession:
     """实现 SDK ``Session`` 协议，委托底层 Session 存储；一个对象只服务一轮。"""
 
@@ -122,6 +151,7 @@ class PolicySession:
         profile_fingerprint: str,
         limits: SessionLimits,
         *,
+        input_policy: SessionInputPolicy,
         engine: AsyncEngine,
         clock: Callable[[], datetime],
     ) -> None:
@@ -135,6 +165,7 @@ class PolicySession:
         self._evidence = evidence
         self._profile = profile_fingerprint
         self._limits = limits
+        self._input_policy = input_policy
         self._engine = engine
         self._clock = clock
         self._pending: list[TResponseInputItem] = []
@@ -270,7 +301,7 @@ class PolicySession:
             # 推理项是模型内部内容，不进入历史；回放不依赖它。
             return None
         if kind == "message":
-            return _message(raw)
+            return _message(raw, self._input_policy)
         if kind == "function_call":
             return _function_call(raw)
         if kind == "function_call_output":
@@ -307,7 +338,7 @@ class PolicySession:
                 raw = cast(dict[str, Any], item)
                 kind = raw.get("type", "message")
                 if kind == "message":
-                    replay.append(_message(raw))
+                    replay.append(_message(raw, self._input_policy))
                 elif kind == "function_call":
                     call_id = _text(raw.get("call_id"))
                     if call_id in open_calls or call_id in closed_calls:
@@ -381,21 +412,28 @@ class PolicySession:
         }
 
 
-def _message(raw: dict[str, Any]) -> TResponseInputItem:
-    """用户与助手消息只保留纯文本；图片、文件、拒答片段与其他角色没有安全保存形式。"""
+def _message(raw: dict[str, Any], input_policy: SessionInputPolicy) -> TResponseInputItem:
+    """用户与助手消息只保留纯文本；用户文字另须符合输入准入策略。
+
+    图片、文件、拒答片段与其他角色没有安全保存形式。助手文字只能复述模型可达内容（工具数据
+    已按 Session 约束投影，用户输入已准入），不另做模式检查。
+    """
     role = raw.get("role")
     content = raw.get("content")
     if role not in ("user", "assistant"):
         raise SessionItemRejectedError("本轮包含不支持保存的会话内容")
     if isinstance(content, str):
-        return cast(TResponseInputItem, {"role": role, "content": content})
-    if not isinstance(content, list) or not content:
+        text = content
+    elif isinstance(content, list) and content:
+        # 只接受携带文字的片段；图片、文件、音频与拒答片段没有 text，整轮拒绝。
+        text = "".join(
+            _text(p.get("text") if isinstance(p, dict) else None, allow_empty=True) for p in content
+        )
+    else:
         raise SessionItemRejectedError("本轮包含不支持保存的会话内容")
-    # 只接受携带文字的片段；图片、文件、音频与拒答片段没有 text，整轮拒绝。
-    texts = [
-        _text(p.get("text") if isinstance(p, dict) else None, allow_empty=True) for p in content
-    ]
-    return cast(TResponseInputItem, {"role": role, "content": "".join(texts)})
+    if role == "user" and not input_policy.admits(text):
+        raise SessionItemRejectedError("用户输入不符合会话数据策略，本轮未执行")
+    return cast(TResponseInputItem, {"role": role, "content": text})
 
 
 def _function_call(raw: dict[str, Any]) -> TResponseInputItem:
