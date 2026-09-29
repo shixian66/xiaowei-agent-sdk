@@ -9,6 +9,7 @@
 - 用户提出把“数据库查询助手”与“慢查询诊断”设计为一个场景；产品据此统一为 StarRocks 数据库助手。
 - 首版同时支持飞书与 Web 对话，并明确要求最小化。
 - 用户已确认 MCP 定位：首版有最小通用 MCP Client Integration；StarRocks 先走本地受治理工具；首版不自建业务 MCP Server。
+- 用户已确认未来生产写操作先展示具体动作与影响，取得有审批权限的用户明确确认，再执行；批准绑定具体动作，不能绕过权限，关键内容变化须重新确认。
 - 按资深 Python 架构师与 Agent 开发专家标准逐步交付，最终进行实际环境验证。
 
 本版移除了上一稿“必须保留 PostgreSQL、Worker、TaskStore、CAS/fencing 底座”的前提。旧 S0–S6 迁移路线被 P0–P3 产品路线替代，上一稿复用表不再是实施约束。
@@ -31,6 +32,8 @@ MCP 是标准化工具接入机制，不能替代业务授权。外部 Server �
 
 方向确认不代表代码实施、实战验证或产品验收。
 
+本轮将生产变更按 Action 统一描述，并写入四项边界：模型意图不是执行授权；effect/risk 由可信代码判断；诊断/读取不能自动升级为写；所有生产写操作重新经过 Policy / Approval / Action Binding。Action 契约覆盖数据库、配置与运行状态变更，SDK 原生审批仍负责暂停与恢复。当前仅更新文档，首版仍只读，不新增 Action 执行框架，也不将本次方向确认当作实际生产操作授权。
+
 ## 3. 当前书面设计与实施计划
 
 当前设计：一个 StarRocks Agent、SDK Runner/function tools/Session、Governed Tool Layer 与 StarRocks Adapter、最小 MCP Client Integration、一个 Python 进程，同一应用服务供 Web 与飞书调用。首版 Session 存储采用 SQLiteSession，应用记录先用 SQLite。
@@ -50,8 +53,8 @@ P1-A 是可独立验证的内部核心，包含真实 SDK Runner、工具治理�
 | 本轮源码基线 / 拉取时 main | `372c381f44ecfa1fa53961f137d0058033cbd805` |
 | 基线提交标题 | `docs(m5): record postgres and compose evidence` |
 | 工作分支 | `claude/sdk-core-docs` |
-| 本次审查起点 | `1b65691f55b66f63073bc53635340b3699f4f02b`，七项治理建议的本地文档提交 |
-| 本轮变更 | 五份根文档与新增 P1-A 实施计划，共六份 Markdown 文件 |
+| 本次审查起点 | `c0ee117e343f948beb359323b685e8a777ffe85a`，MCP 定位与 P1-A 计划的本地文档提交 |
+| 本轮变更 | 五份根文档；已有 P1-A 实施计划未修改 |
 | 新产品实现 | 尚未实现；依赖中没有 `openai-agents`，没有新的双入口 SDK 产品 |
 | 当前源码 | 旧 `xiaowei_agent` 包，规则解释器、确定性 Resolver/PlanCompiler/Runner 与 fake 慢查询场景 |
 | 其他文件 | 业务代码、测试、依赖锁文件、CI 与 Compose 未修改 |
@@ -79,15 +82,17 @@ M5 是历史起点，历史验收不证明新 SDK 产品可用。保留旧文件
 
 ## 7. 验证记录与限制
 
-本轮 MCP 定位与实施计划修订后执行：
+本轮 Action 与用户确认规则修订后执行：
 
-- `git diff --check`：exit 0；变更范围为五份根文档与新增 P1-A 实施计划。
+- `git diff --check`：exit 0；变更范围仅为五份根文档。
 - 六份文档的 28 个本地链接、Markdown 代码围栏、占位标记及最高原则检查：0 个错误。
 - `python -m pytest tests/security/test_docs_command_consistency.py tests/contract/test_doc_fact_binding.py -q`：5 passed，exit 0。
 
+已检查五份根文档中的 Action 范围、用户明确确认、动作绑定、Policy 拒绝、禁止读转写及未知结果不重试的表述一致；已有 P1-A 计划仍为只读，未扩大实施范围。
+
 验证使用原项目现有虚拟环境 `/Users/kloenguyen/Desktop/agent/.venv/bin/python`，显式设置本仓库 `src` 为 `PYTHONPATH`；未安装新依赖。该结果只用于选中文档检查，不证明新工程锁定环境或新产品运行通过。
 
-本轮自检范围为 MCP 首版定位、调用前/结果后治理、四种数据投影、Session 与 Evidence 边界，以及 P1-A/P1-B 交付范围。文档测试覆盖命令与部分旧事实绑定，不验证新架构语义；尚无独立审查、SDK 实现测试、全量产品测试、正式浏览器、真实模型、真实 StarRocks 或飞书运行证据。
+文档测试覆盖命令与部分旧事实绑定，不验证新架构语义；尚无独立审查、SDK 实现测试、全量产品测试、正式浏览器、真实模型、真实 StarRocks 或飞书运行证据。生产 Action 与用户确认机制仅为设计约束，尚无实现或运行证据。
 
 ## 8. 下一步
 
