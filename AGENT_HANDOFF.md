@@ -12,11 +12,11 @@
 | 本地目录 / 分支 | `/Users/kloenguyen/Desktop/agent-SDK` / `claude/p1a-task1-sdk-runtime`（从 `claude/sdk-core-docs` 的 `e6aa728` 分出） |
 | M5 历史起点 | `372c381f44ecfa1fa53961f137d0058033cbd805`；不是远端当前 main 的核验结论 |
 | 本次实施起点 | `e6aa728f46ca7d12229b2baba9865138fc3816c2`；开始时工作树干净 |
-| 当前阶段 | P1-A Task 1：经三轮审查修复（`bf8963d`、`6dbbb6b`、`5aee8f5` 未通过），`8dba33a` 本地技术验收通过；尚未推送、建 PR 或合并；Task 1B 未开始 |
+| 当前阶段 | P1-A Task 1：`8dba33a` 的 SDK 实现通过本地技术验收；CI 已接入同一 SDK 测试 Compose harness。Task 1B 未开始，只能从已包含 Task 1 的 `main` 开始 |
 | 当前源码与依赖 | 新包 `src/xiaowei/`（`config.py`、`storage.py`）与旧 `src/xiaowei_agent/` 并存；锁定 `openai-agents[sqlalchemy]` 0.22.3、`mcp` 2.2.0、`openai` 3.20.0、SQLAlchemy 2.0.52、asyncpg 0.30.0，Python 3.11.16；wheel 同时打包两个包，CLI 仍指向旧包 |
 | 新产品入口 | 只有开发验证命令（见第 5 节）；尚无产品启动入口，旧 CLI/Compose 不算新入口 |
-| 本次工作范围 | 只做 Task 1：新包、依赖锁定、测试用 PostgreSQL Compose、SDK 契约测试；未改 CI、正式 Compose、README |
-| 外部操作 | 未调用真实模型、StarRocks 或飞书；只向 PyPI 查询包信息与漏洞库；未 push、合并、部署或归档 |
+| 本次工作范围 | Task 1：新包、依赖锁定、测试用 PostgreSQL Compose、SDK 契约测试及 CI harness 接入；未改正式 Compose 或 README |
+| 外部操作 | 未调用真实模型、StarRocks 或飞书；代码通过 PR 提交到 GitHub，CI 结果单独核验；没有部署或用户验收 |
 
 表中的 SHA 是本次实施起点，Task 1 提交在其之后。接手先用 `git rev-parse HEAD` 和 `git status --short` 取得实际版本；本文件的修改历史由 Git 保存。
 
@@ -36,7 +36,7 @@
 
 ## 3. 当前计划与下一项工作
 
-唯一详细计划：[P1-A：SDK 与治理执行核心](docs/superpowers/plans/2026-09-29-p1a-sdk-governed-core.md)。任务顺序为 **Task 1 → Task 1B → Task 2–5**。Task 1 三轮审查意见已修复，`8dba33a` 本地技术验收通过，但尚未集成；合并到目标分支之前不开始 Task 1B。锁版后与计划的差异记录在计划的“Task 1 实测记录”中。
+唯一详细计划：[P1-A：SDK 与治理执行核心](docs/superpowers/plans/2026-09-29-p1a-sdk-governed-core.md)。任务顺序为 **Task 1 → Task 1B → Task 2–5**。Task 1 SDK 实现于 `8dba33a` 通过本地技术验收，CI 现使用相同的 SDK 测试 Compose harness；Task 1B 尚未开始，只能从包含 Task 1 的 `main` 开始。锁版后与计划的差异记录在计划的“Task 1 实测记录”中。
 
 **Task 1 已证明（离线、合成数据、scripted 模型）：**
 
@@ -48,9 +48,11 @@
 - `configure_runtime()` 关闭 tracing 并移除默认导出处理器；对照组能观察到导出，处理后 `trace_exports == []`。
 - 反向验证：缺少 `SDK_TEST_POSTGRES_URL` 时报错而不是跳过；去掉 tracing 两步中任一步、MCP 前检查或结果过滤中任一项，对应测试都会失败。
 
-**Task 1 未覆盖、留给后续任务：** MCP HTTP 接收字节上限、认证、超时与关闭行为（Task 4）；`tool_input_guardrails` / `tool_filter` 未验证；应用表、表版本检查（Task 2）；Session 写入前过滤（Task 3）；模型 HTTP 接入与真实模型（Task 1B、Task 5）；CI 尚未加入新包检查与 PostgreSQL 服务（Task 5）。显式开启 tracing 时的字段限制未验证。
+**Task 1 未覆盖、留给后续任务：** MCP HTTP 接收字节上限、认证、超时与关闭行为（Task 4）；`tool_input_guardrails` / `tool_filter` 未验证；应用表、表版本检查（Task 2）；Session 写入前过滤（Task 3）；模型 HTTP 接入与真实模型（Task 1B、Task 5）。显式开启 tracing 时的字段限制未验证。
 
-**下一项：** 集成门——获得明确授权后推送分支并创建 PR，核对目标分支、PR 差异与 CI；合并另需单独批准，合并后验证远端目标分支包含预期提交，再基于合并后的目标分支开始 Task 1B（模型 API 配置与 SDK 接入）。
+CI integration job 设置 `SDK_TEST_POSTGRES_URL`，启动 `compose.sdk-test.yml`，运行完整 `pytest -q`，并用 shell `EXIT` trap 清理测试项目；不保留旧 PostgreSQL service。SDK 地址缺失时 fixture 明确失败，避免数据库测试静默跳过。
+
+**下一项：** 确认 Task 1 已进入 `main` 后，从该目标分支开始 Task 1B（模型 API 配置与 SDK 接入）；此 PR 的精确 head、base、差异及 CI 状态以 GitHub 当前记录为准。
 
 P1-A 是内部核心。P1-B 才接真实查询与双入口并切换正式入口，P2 增加诊断，P3 做实际用户验收。环境缺失不阻塞独立离线任务，但不能跳过对应实战退出条件。
 
@@ -88,6 +90,8 @@ Task 1 验证环境：本仓库 `.venv`，Python 3.11.16。测试 PostgreSQL 由
 | `uv export --frozen --no-emit-project --extra dev -o $AUDIT` 后执行 `uv run --locked --extra dev pip-audit --strict -r $AUDIT` | 没有已知漏洞。直接运行 `pip-audit --strict` 会因为本地项目不在 PyPI 而失败，必须先导出 |
 | `docker-compose -p xiaowei-sdk-test -f compose.sdk-test.yml down -v` | 清理测试容器与网络 |
 
+本轮 CI 同步验证：`tests/contract/test_integration_gate.py` 与 `tests/security/test_workflow_policy.py` 共 33 项通过；真实 SDK 测试库上的全量 pytest 为 1742 passed、152 skipped；`ruff check .`、相关文件格式检查、`mypy src` 与 workflow YAML 解析通过。容器由退出清理路径移除。
+
 反向验证（临时改动，验证后已恢复）：
 
 - 去掉 tracing 两步中任一步、MCP 前检查或结果过滤中任一项，对应用例都失败。
@@ -99,4 +103,4 @@ Task 1 验证环境：本仓库 `.venv`，Python 3.11.16。测试 PostgreSQL 由
 
 测试代码的类型检查不属于必需检查：`mypy --explicit-package-bases src/xiaowei tests/sdk_core`（`MYPYPATH=src`）只报一处 `yaml` 缺少类型存根，与现有 `tests/contract/test_compose_contract.py` 情况相同，未为此增加依赖或放宽配置。本机正在运行的旧 `xiaowei-release` 容器未被触及。
 
-独立审查：Codex 审查 `bf8963d`、`6dbbb6b`、`5aee8f5` 均为暂不通过，复审 `8dba33a` 为本地技术验收通过。本地验收不等于集成：没有推送、PR、CI 结果或合并。尚无真实模型、真实 StarRocks、正式浏览器、飞书运行或用户验收证据；离线测试通过不代表产品路径可用，未来生产 Action 仍只有设计约束。
+独立审查：Codex 审查 `bf8963d`、`6dbbb6b`、`5aee8f5` 均为暂不通过，复审 `8dba33a` 为本地技术验收通过。本轮只同步 CI 与对应合同测试，未将自查称为独立审查；GitHub CI 是独立执行证据，不代表真实服务或产品运行。尚无真实模型、真实 StarRocks、正式浏览器、飞书运行或用户验收证据，未来生产 Action 仍只有设计约束。

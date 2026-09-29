@@ -20,6 +20,8 @@ pytestmark = pytest.mark.security
 _WF = Path(__file__).resolve().parents[2] / ".github" / "workflows" / "ci.yml"
 _TEXT = _WF.read_text(encoding="utf-8")
 _LINES = _TEXT.splitlines()
+_SDK_COMPOSE = _WF.parents[2] / "compose.sdk-test.yml"
+_SDK_COMPOSE_TEXT = _SDK_COMPOSE.read_text(encoding="utf-8")
 
 _EXPECTED_JOBS = (
     "tests",
@@ -37,7 +39,7 @@ _EXPECTED_JOBS = (
 # 「多出的东西」，挡不住删除必需命令、重复摘要顶替、把配置挪到无关 action 下、
 # 或加 `continue-on-error` 让 gate 形同虚设。整文件摘要是唯一能覆盖全部
 # 增/删/改/移位的锚点；合法修改 workflow 时必须显式更新此常量。
-_WORKFLOW_SHA256 = "2431b7cfb1b84163418d171cf92f68abd6088a6f91fb1a7faf1b78280601dd4d"
+_WORKFLOW_SHA256 = "b371b1108b059ad8b81fd1fca875fbf50815ce2b20486d732309866ba8f86cea"
 
 # ---- 闭集白名单：改动 ci.yml 必须同步更新此处，否则测试变红 ----------------
 _ALLOWED_EXPRESSIONS = {"github.ref"}
@@ -47,24 +49,13 @@ _ALLOWED_USES = {
     "astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9",
 }
 
-_ALLOWED_RUN_COMMANDS = {
-    "uv sync --extra dev --frozen",
-    "python -m pytest -q",
-    "python -m pytest -m security -q",
-    "python -m scripts.compose_smoke",
-    "ruff check .",
-    "mypy src",
-    "uv export --frozen --no-emit-project --extra dev -o requirements-audit.txt",
-    "pip-audit --strict -r requirements-audit.txt",
-    './gitleaks git --log-opts="--all" --redact --no-banner .',
-}
-
 # 多行 run block 的规范化 SHA-256；改一个字符即变红。
 _ALLOWED_RUN_BLOCK_DIGESTS = {
     "14dccc18ea3ff5aa544415f4682995d6076e600dd7708d760aebcb0373229e62",  # install gitleaks
     "1542f514fb26fe1fec603de711f032493d5f46f74c7edfb1f7ef4340209f2ca5",  # scanner self-test
     # allowlist narrowness self-test
     "f7e4098014484c0b069b5769ea455b97cf25e34fa331636174cd3ab84ed2c475",
+    "28ac15963a97048c3ef875b67c01f1d1525928d052c4ea96b7d3aa4797494467",  # SDK test harness
 }
 
 
@@ -107,6 +98,12 @@ def _job_ids() -> list[str]:
     return ids
 
 
+def _job_text(job_id: str) -> str:
+    match = re.search(rf"(?ms)^  {re.escape(job_id)}:\n(.*?)(?=^  [\w-]+:\n|\Z)", _TEXT)
+    assert match, f"缺少 job: {job_id}"
+    return match.group(1)
+
+
 # ---- 闭集断言 --------------------------------------------------------------
 
 
@@ -146,19 +143,20 @@ def test_workflow_file_digest_is_pinned() -> None:
 def test_single_line_run_commands_match_exactly() -> None:
     """精确多重集：既拒绝多余命令，也拒绝删除必需命令。"""
     single, _ = _run_commands_and_block_digests()
-    expected = Counter({
-        "uv sync --extra dev --frozen": 7,
-        # 两次：tests job 与 integration job 执行**同一条**命令，差别只有一个
-        # PostgreSQL service 和一个 DSN。ADR-008 的四条命令因此一字不改。
-        "python -m pytest -q": 2,
-        "python -m pytest -m security -q": 1,
-        "python -m scripts.compose_smoke": 1,
-        "ruff check .": 1,
-        "mypy src": 1,
-        "uv export --frozen --no-emit-project --extra dev -o requirements-audit.txt": 1,
-        "pip-audit --strict -r requirements-audit.txt": 1,
-        './gitleaks git --log-opts="--all" --redact --no-banner .': 1,
-    })
+    expected = Counter(
+        {
+            "uv sync --extra dev --frozen": 7,
+            # 旧套件维持默认跳过；SDK PostgreSQL 全套在 integration 的 digest-pinned block 中运行。
+            "python -m pytest -q --ignore=tests/sdk_core": 1,
+            "python -m pytest -m security -q": 1,
+            "python -m scripts.compose_smoke": 1,
+            "ruff check .": 1,
+            "mypy src": 1,
+            "uv export --frozen --no-emit-project --extra dev -o requirements-audit.txt": 1,
+            "pip-audit --strict -r requirements-audit.txt": 1,
+            './gitleaks git --log-opts="--all" --redact --no-banner .': 1,
+        }
+    )
     assert Counter(single) == expected, f"run 命令多重集不符: {Counter(single)}"
 
 
@@ -233,8 +231,7 @@ def test_no_env_block_outside_declared_allowlist() -> None:
     allowed = {
         "GITLEAKS_VERSION",
         "GITLEAKS_SHA256",
-        "POSTGRES_HOST_AUTH_METHOD",
-        "PYTEST_POSTGRES_DSN",
+        "SDK_TEST_POSTGRES_URL",
     }
     names = set(re.findall(r"(?m)^\s+([A-Z][A-Z0-9_]*):\s", _TEXT))
     assert names <= allowed, f"出现未声明的 env 变量: {sorted(names - allowed)}"
@@ -244,7 +241,7 @@ def test_env_values_carry_no_credentials() -> None:
     """env 取值里不得出现任何凭证。
 
     与 ``test_secret_shaped_literals.py`` 互补：那边扫的是源码，这边扫的是 workflow。
-    DSN 是这里唯一一个"长得像连接串"的取值，因此单独钉死它的形状——**无密码段**。
+    SDK PostgreSQL URL 是这里唯一一个"长得像连接串"的取值，因此单独钉死其形状——**无密码段**。
     """
     values = re.findall(r"(?m)^\s+[A-Z][A-Z0-9_]*:\s*(.+)$", _TEXT)
     for value in values:
@@ -253,41 +250,27 @@ def test_env_values_carry_no_credentials() -> None:
         assert not re.search(r"//[^/\s]+:[^/\s@]+@", value), value
 
 
-def test_services_are_a_closed_set() -> None:
-    """只允许 ``integration`` 有 service，且只允许这一个 service、这一项配置。
+def test_workflow_does_not_declare_service_containers() -> None:
+    """CI 复用本地隔离 harness，不额外保留旧 PostgreSQL service。"""
+    assert not re.search(r"(?m)^\s*services:\s*$", _TEXT)
+    assert not re.search(r"(?m)^\s+image:\s", _TEXT)
 
-    没有这条，日后加一个带凭证的 service 只有整文件 SHA 会拦——而合法改 workflow
-    时那个常量本来就要更新，等于没拦。
-    """
-    assert _TEXT.count("    services:\n") == 1
-    assert _TEXT.count("      postgres:\n") == 1
-    images = re.findall(r"(?m)^\s+image:\s*(\S+)$", _TEXT)
+
+def test_sdk_postgres_compose_image_is_digest_pinned() -> None:
+    """integration 使用的本地 Compose 镜像必须固定到已审查的内容 digest。"""
+    images = re.findall(r"(?m)^\s+image:\s*(\S+)$", _SDK_COMPOSE_TEXT)
     assert images == [
-        "postgres:16.10@sha256:"
-        "21f6013073bc6b92830a2129570e2f5ec42a6c734b5a985a41e83aa58f54c3c1"
-    ], images
-    # service 的 env 恰为一项，且是"无凭证"那一项。
-    assert _TEXT.count("POSTGRES_HOST_AUTH_METHOD: trust") == 1
-
-
-def test_service_images_are_digest_pinned() -> None:
-    """镜像必须钉 **digest**，不是钉 tag。
-
-    此前这条只要求"带冒号或带 @sha256"，于是一个裸 tag 也能通过——而版本 tag 是
-    可变的：同一个 ``postgres:16.10`` 在两次 CI 之间可以指向不同镜像，"CI 绿过"
-    就不再指向一个确定的运行内容。计划写的是「首次 CI 绿灯后钉 digest」，绿灯已经
-    拿到（run 33829385450），因此这条现在按真正的不变量断言。
-    """
-    images = re.findall(r"(?m)^\s+image:\s*(\S+)$", _TEXT)
-    assert images, "没有扫到任何 service 镜像——这条检查就没有对象"
-    for image in images:
-        assert re.fullmatch(r"[^\s@:]+:[^\s@]+@sha256:[0-9a-f]{64}", image), image
-        assert not image.startswith("postgres:latest"), image
+        "postgres:16.15-bookworm@sha256:"
+        "bb3e1a57e5407e0a5280b4211980a5e537f4abd234a87014ac979849a78dd825"
+    ]
 
 
 def test_the_integration_job_runs_no_extra_command() -> None:
-    """integration 与 tests 跑的是同一条命令，不产生 ADR-008 之外的第五条。"""
-    assert _TEXT.count("- run: python -m pytest -q\n") == 2
+    """unit 与全套路径各有一条精确 pytest 命令；integration 包含全套路径。"""
+    assert _TEXT.count("- run: python -m pytest -q --ignore=tests/sdk_core\n") == 1
+    assert _job_text("integration").count("python -m pytest -q\n") == 1
+    assert "compose.sdk-test.yml up -d --wait" in _job_text("integration")
+    assert "compose.sdk-test.yml down -v" in _job_text("integration")
 
 
 def test_runner_is_pinned_not_latest() -> None:
@@ -301,8 +284,8 @@ def test_all_eight_gates_present_with_stable_names() -> None:
 
 
 def test_gates_run_adr008_commands_verbatim() -> None:
-    for cmd in ("python -m pytest -q", "python -m pytest -m security -q",
-                "ruff check .", "mypy src"):
+    assert "python -m pytest -q\n" in _job_text("integration")
+    for cmd in ("python -m pytest -m security -q", "ruff check .", "mypy src"):
         assert f"- run: {cmd}\n" in _TEXT, f"未原样执行 ADR-008 命令: {cmd}"
 
 
@@ -315,5 +298,6 @@ def test_secret_scan_uses_full_history_and_pinned_checksum() -> None:
 def test_gates_are_not_piped() -> None:
     for line in _LINES:
         if line.strip().startswith("- run:"):
-            assert "|" not in line or line.strip().endswith("run: |"), \
+            assert "|" not in line or line.strip().endswith("run: |"), (
                 f"gate 命令不得接管道，退出码会被吞: {line.strip()}"
+            )

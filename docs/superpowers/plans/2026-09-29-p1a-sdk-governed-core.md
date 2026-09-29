@@ -68,7 +68,7 @@
 
 ## Task 1：锁定 SDK 并验证公开扩展点
 
-**Files:** Modify `pyproject.toml`、`uv.lock`、`tests/security/test_dependency_baseline.py`；Create `src/xiaowei/__init__.py`、`src/xiaowei/config.py`、`src/xiaowei/storage.py`、`compose.sdk-test.yml`、`tests/sdk_core/conftest.py`、`tests/sdk_core/test_sdk_contract.py`。
+**Files:** Modify `pyproject.toml`、`uv.lock`、`tests/security/test_dependency_baseline.py`；Create `src/xiaowei/__init__.py`、`src/xiaowei/config.py`、`src/xiaowei/storage.py`、`compose.sdk-test.yml`、`tests/sdk_core/conftest.py`、`tests/sdk_core/postgres_harness.py`、`tests/sdk_core/test_sdk_contract.py`、`tests/sdk_core/test_postgres_harness.py`。
 
 **Interfaces:** 消费官方 `Agent`、`Runner`、`Model`、`Session`、`SQLAlchemySession` 与 MCP 公共类型；产出 `configure_runtime() -> None`，负责显式关闭默认 tracing/export，以及可安装的新包。`storage.py` 提供 `open_engine(database_url: SecretStr) -> AsyncIterator[AsyncEngine]` 异步上下文管理器、显式部署入口使用的 `async initialize_storage(engine: AsyncEngine) -> None` 与运行时 `async check_storage(engine: AsyncEngine) -> None`；本任务只处理 SDK 表，Task 2 加入应用表及版本检查。URL 仅来自私有配置，不打印或进入 context；具体 SDK 初始化/Session 方法签名以锁定版本为准，在本任务测试中固定。
 
@@ -89,6 +89,7 @@
 - Tracing 需要两步：`set_tracing_disabled(True)` 关闭生成，`set_trace_processors([])` 移除默认导出处理器；测试以默认处理器的对照组证明能观察到导出，再分别证明两步各自生效。
 - 本机没有 `docker compose` 插件，使用独立的 `docker-compose` 5.5.1；命令见 `compose.sdk-test.yml` 文件头。
 - 测试 PostgreSQL 的身份由代码核对（首轮审查后补充）：镜像按 `tag@sha256` 固定；`tests/sdk_core/postgres_harness.py` 要求环境变量与唯一管理地址逐字相同（SQLAlchemy 会用查询参数覆盖主字段，因此不能只比较解析后的字段），连接目标只取自该常量；每条 `CREATE/DROP DATABASE` 都在执行它的同一连接上先核对服务器 `cluster_name`。旧安全护栏中与架构无关的两条（禁止直接导入 asyncpg、禁止 `type: ignore`）改为扫描整个 `src/`。
+- CI 集成沿用同一 harness：integration job 显式设置 `SDK_TEST_POSTGRES_URL`，通过 `compose.sdk-test.yml` 启停隔离数据库并运行完整 pytest；使用 shell `EXIT` trap 清理，不配置旧 PostgreSQL service。合同测试将工作流变量、固定 URL、Compose 端口和完整测试命令相互绑定；安全策略继续校验工作流摘要、命令闭集、无凭据环境变量及 Compose 镜像 digest。
 
 ## Task 1B：模型 API 配置与 SDK 接入
 
@@ -155,7 +156,7 @@
 - [ ] 编写 `test_query_permission_is_not_inherited`、`test_commit_failure_does_not_replay_tools`、`test_stage_logs_contain_only_safe_metadata`。前一轮查询、下一轮默认诊断时，查询工具不出现且强行调用零执行；实际 PostgreSQL 提交边界注入保存失败后无成功交付，不自动补跑工具，必要时隔离会话；阶段日志共用请求编号且不含合成 SQL、结果、假凭据和原始异常。
 - [ ] 运行 `uv run --locked --extra dev python -m pytest tests/sdk_core/test_app.py -q`；预期新应用入口缺失失败。
 - [ ] 实现上述 `run_turn`：存储就绪检查、总期限、有限并发、同会话互斥、每轮权限表与受限阶段日志；校验 SDK 最终结构与 Evidence 后才提交 Session，交付前再复核权限和渠道。校验不通过返回受控失败，不把模型完整回答当报错输出。本片不发送外部渠道消息，不提供未校验结论流。P1-B 另验证 Session 已提交但最终结果保存失败的双存储边界，以及渠道投递状态。
-- [ ] 运行 `uv run --locked --extra dev python -m pytest tests/sdk_core -q`、`uv run --locked --extra dev ruff check src/xiaowei tests/sdk_core`、`uv run --locked --extra dev mypy src/xiaowei`；预期全部通过。CI 增加隔离 PostgreSQL 服务与明确的新包检查；数据库缺失/不可用不能 skip 成全绿。旧检查标识为历史检查，不用旧通过率代替新能力验证。
+- [ ] 运行 `uv run --locked --extra dev python -m pytest tests/sdk_core -q`、`uv run --locked --extra dev ruff check src/xiaowei tests/sdk_core`、`uv run --locked --extra dev mypy src/xiaowei`；预期全部通过。CI 已在 Task 1 集成中接入同一隔离 PostgreSQL harness 和完整 pytest 命令；新测试须继续进入该路径，数据库缺失/不可用不能 skip 成全绿。旧检查标识为历史检查，不用旧通过率代替新能力验证。
 - [ ] 在已获准模型环境使用合成数据，按 OpenAI/Gemini/DeepSeek 的每个选定 Profile 分别验证本地和 MCP 工具调用、工具结果回传、真实 `AgentAnswer` 类型/Evidence 校验与下一轮 Session 追问；至少先完成一个 Profile。记录 SDK、端点标识、协议、模型/模式、用量和结果，其他组合如实标为未验证/不兼容；不因一家通过宣称全部支持，不用 scripted Model 或 HTTP mock 代替真实验证。更新 README 的核心开发验证命令、handoff 的精确 SHA/证据/缺口；保持正式 Web/飞书启动说明未交付的事实。
 - [ ] 仅暂存本任务文件，提交 `feat: compose verified SDK application core`。对整个 P1-A 分支做一次独立审查，修复阻塞项后细化 P1-B；不自动合并、部署或归档。
 
