@@ -30,4 +30,16 @@ CREATE TABLE xiaowei_evidence (
 
 CREATE INDEX xiaowei_evidence_owner_idx ON xiaowei_evidence (subject_id, session_id);
 
+-- 会话元数据：归属、Profile 绑定与失效时间；只有 active 可回放，writing 表示写入未确认完成。
+CREATE TABLE xiaowei_session (
+    session_id text PRIMARY KEY,
+    subject_id text NOT NULL,
+    channel text NOT NULL CHECK (channel IN ('web', 'feishu')),
+    profile_fingerprint text NOT NULL,
+    created_at timestamptz NOT NULL,
+    expires_at timestamptz NOT NULL,
+    turns integer NOT NULL CHECK (turns >= 0),
+    state text NOT NULL CHECK (state IN ('active', 'writing', 'sealed', 'closed'))
+);
+
 INSERT INTO xiaowei_schema_version (version) VALUES (1);

@@ -158,9 +158,16 @@ class EvidenceStore:
             evidence_id=evidence_id, model_content=record.projections["model"], truncated=truncated
         )
 
-    async def project(self, evidence_id: str, ctx: RunContext, audience: Audience) -> str:
-        """按当前身份、范围与权限读取一种用途的获准内容。"""
+    async def project(
+        self, evidence_id: str, ctx: RunContext, audience: Audience, *, call_id: str | None = None
+    ) -> str:
+        """按当前身份、范围与权限读取一种用途的获准内容。
+
+        给出 ``call_id`` 时证据还须由该次工具调用生成，Session 回放据此保证调用/结果配对。
+        """
         record = await self._readable(evidence_id, ctx, audience)
+        if call_id is not None and record.call_id != call_id:
+            raise EvidenceUnavailableError
         return record.projections[audience]
 
     async def validate_answer(self, answer: AgentAnswer, ctx: RunContext) -> Delivery:

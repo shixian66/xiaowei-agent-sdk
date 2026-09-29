@@ -21,7 +21,7 @@ SDK_MESSAGES_TABLE = "agent_messages"
 _SDK_TABLES = frozenset({SDK_SESSIONS_TABLE, SDK_MESSAGES_TABLE})
 
 APP_SCHEMA_VERSION = 1
-APP_TABLES = frozenset({"xiaowei_schema_version", "xiaowei_evidence"})
+APP_TABLES = frozenset({"xiaowei_schema_version", "xiaowei_evidence", "xiaowei_session"})
 _APP_MIGRATION = "migrations/001_initial.sql"
 
 _DRIVER = "postgresql+asyncpg"

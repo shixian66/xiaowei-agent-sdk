@@ -154,13 +154,23 @@
 
 **Interfaces:** 消费 `RunContext`、异步 `EvidenceStore.project`、Task 1B 的 Profile 指纹与 SDK `Session`；产出 `PolicySession(inner: Session, context: RunContext, evidence: EvidenceStore, profile_fingerprint: str, limits: SessionLimits)`，实现锁定版 SDK 所需的公开 Session 接口并委托底层。`SessionLimits(max_history_turns: int, max_history_bytes: int, retention_seconds: int)` 均为正值，由可信配置提供，不把 SDK `max_turns` 当作历史上限；应用元数据记录会话失效时间。会话的 Profile 绑定保存在应用元数据中；不匹配时拒绝历史读取，要求新建会话。提供 `async discard_pending() -> None`、`async commit_validated() -> None`；后者只由验证成功的应用路径调用。
 
-- [ ] 编写 `test_runner_session_filters_before_write`、`test_replay_rechecks_permissions`、`test_valid_tool_pair_survives_followup`、`test_invalid_final_never_persists`、`test_partial_store_failure_invalidates_session`。用 SQLAlchemySession、隔离的真实 PostgreSQL 和真 Runner 断言：`forbidden_text not in stored_items`，撤权数据不在第二轮 Model 输入，SDK 能消费过滤后成对工具项，未经验证最终输出不会落盘。
-- [ ] 编写 `test_history_limit_stops_before_model_call`、`test_expired_history_or_evidence_cannot_replay`。轮数/字节达到配置上限时新轮零模型调用并提示新建；用可控时间验证未执行物理清理的过期记录也不能回放。若本轮暂存项仍使总历史超限，则拒绝提交、封存会话并返回受控的新建提示，不裁掉半组工具项，不自动重跑已执行工具。
-- [ ] 编写 `test_changed_model_profile_cannot_read_old_session`，断言端点/协议/模型或数据接收策略变化后，旧历史在首个模型 HTTP 请求前被拒绝；新建会话可独立运行，不复制旧内容。
-- [ ] 运行 `uv run --locked --extra dev python -m pytest tests/sdk_core/test_session_policy.py -q`；预期新包装/行为缺失失败。
-- [ ] 实现 `PolicySession`：在 SDK 写入请求时先按 Session 策略处理并暂存本轮项，最终校验后才委托写入；回放前重新检验证据和权限。敏感用户输入也受字段/字节策略约束；不能只过滤工具结果。保持 SDK item 类型与 call/result 配对，若无安全回放形式则拒绝继续该历史。失败丢弃待写项，底层部分写失败时隔离该会话，不能自动重跑或将其视作完整历史。
-- [ ] 重跑本任务命令；预期全部 PASS。验证 clear/pop 等 SDK 公共契约与待写项一致，应用元数据与 SDK 清理失败时仍保持不可回放状态；持久化和 replay 不是同一份未经处理的模型记录。物理清理命令及渠道新建会话在 P1-B 交付。
-- [ ] 仅暂存本任务文件，提交 `feat: enforce Session write and replay policy`。
+- [x] 编写 `test_runner_session_filters_before_write`、`test_replay_rechecks_permissions`、`test_valid_tool_pair_survives_followup`、`test_invalid_final_never_persists`、`test_partial_store_failure_invalidates_session`。用 SQLAlchemySession、隔离的真实 PostgreSQL 和真 Runner 断言：`forbidden_text not in stored_items`，撤权数据不在第二轮 Model 输入，SDK 能消费过滤后成对工具项，未经验证最终输出不会落盘。
+- [x] 编写 `test_history_limit_stops_before_model_call`、`test_expired_history_or_evidence_cannot_replay`。轮数/字节达到配置上限时新轮零模型调用并提示新建；用可控时间验证未执行物理清理的过期记录也不能回放。若本轮暂存项仍使总历史超限，则拒绝提交、封存会话并返回受控的新建提示，不裁掉半组工具项，不自动重跑已执行工具。
+- [x] 编写 `test_changed_model_profile_cannot_read_old_session`，断言端点/协议/模型或数据接收策略变化后，旧历史在首个模型 HTTP 请求前被拒绝；新建会话可独立运行，不复制旧内容。
+- [x] 运行 `uv run --locked --extra dev python -m pytest tests/sdk_core/test_session_policy.py -q`；预期新包装/行为缺失失败。
+- [x] 实现 `PolicySession`：在 SDK 写入请求时先按 Session 策略处理并暂存本轮项，最终校验后才委托写入；回放前重新检验证据和权限。敏感用户输入也受字段/字节策略约束；不能只过滤工具结果。保持 SDK item 类型与 call/result 配对，若无安全回放形式则拒绝继续该历史。失败丢弃待写项，底层部分写失败时隔离该会话，不能自动重跑或将其视作完整历史。
+- [x] 重跑本任务命令；预期全部 PASS。验证 clear/pop 等 SDK 公共契约与待写项一致，应用元数据与 SDK 清理失败时仍保持不可回放状态；持久化和 replay 不是同一份未经处理的模型记录。物理清理命令及渠道新建会话在 P1-B 交付。
+- [x] 仅暂存本任务文件，提交 `feat: enforce Session write and replay policy`。
+
+**Task 3 实测记录（与计划的差异与发现）：**
+
+- 锁定版 SDK 每轮开头调用一次 `get_items()`（异常原样抛出，模型零调用），并在 `Runner.run` 返回前依次 `add_items` 用户输入、工具调用/结果配对和最终消息，早于应用校验。因此 `add_items` 只把转换后的副本暂存在内存，底层写入只发生在 `commit_validated()`；运行失败、取消或校验失败调用 `discard_pending()`。一个 `PolicySession` 对象只服务一轮。
+- 构造器在计划签名外增加关键字参数 `engine`、`clock`（应用元数据表与可控时间），并要求底层 Session 标识与可信身份的会话一致。`commit_validated()` 不信任调用方：取本轮最后一项解析为 `AgentAnswer`，经同一个 `EvidenceStore.validate_answer` 校验后才写入（架构要求最终持久化复用 Evidence 验证器）。
+- 保存形式按类型白名单重建：用户/助手消息只保留纯文本（图片、文件、拒答等无文字片段整轮拒绝，system/developer 角色拒绝），工具调用只保留 `call_id/name/arguments`，推理项不保存，其他类型（托管工具等）整轮拒绝。工具结果只保存证据引用 `{"xiaowei_evidence_ref": ...}`；不含证据的输出（治理拒绝、执行失败）保存为固定文字，不保留原始错误文本。暂存时即核对证据属于本会话且由同一 `call_id` 生成（`EvidenceStore.project` 增加 `call_id` 参数），否则本轮不能提交。
+- 回放把引用经 Evidence 读取边界换成当前 Session 投影（归属、渠道、过期、目标范围、策略指纹、当前授权、调用绑定），同时核对调用/结果一一配对。任一项不可回放时整段拒绝、提示新建，不删掉半组工具项，也不以无来源文字替代：模型后续文字可能复述过该证据，只删工具结果不能阻断。
+- 应用表 `xiaowei_session`（v1 未部署过，直接加入 `001_initial.sql`；此前用旧 v1 初始化的开发库会被 `check_storage` 判为未初始化，需要重建）记录归属（subject、渠道）、Profile 指纹、创建/失效时间（创建时间 + 保留期，不滑动）、已提交轮数与状态。只有 `active` 可回放；提交先置 `writing`，底层写入与元数据更新都成功才回到 `active`，任一步失败会话停在 `writing` 不再回放；本轮使历史超出字节上限时置 `sealed` 并拒绝提交，不重跑工具。Profile 指纹包含端点、协议、模型、输出模式与 `data_policy_id`，任一变化都在首个模型请求前拒绝旧历史。
+- SDK 公共契约：`get_items(limit)` 按条数截断会拆开配对，给出 `limit` 时拒绝（只影响 SDK 的 RunState 恢复路径，本片不使用）；`pop_item()` 只撤回本轮暂存项，已提交历史不能逐条删除；`clear_session()` 先把会话置为 `closed` 再清除底层历史，清除失败时会话仍不可回放，清除后该会话标识不再使用。
+- 反向验证 24 项（去掉暂存、保存原始工具结果、回放不复核、归属/Profile/过期/状态检查、轮数/字节上限（开始与提交两处）、最终回答校验、`writing` 状态、pop 已提交历史、先清除后关闭、调用绑定、暂存时证据核对、角色/文字片段/未知类型白名单、配对两处检查、引用格式、保留错误原文）均使对应用例失败。首轮有 3 项未变红：归属检查（原用例被 Evidence 查询顺带拦下，补“无证据历史”用例）、消息片段类型检查（被文字字段检查覆盖，已删除）、孤立结果（原用例总留有未配对调用，补孤立输出用例）。
 
 ## Task 4：最小 MCP Client Integration
 
