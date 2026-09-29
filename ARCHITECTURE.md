@@ -6,6 +6,16 @@
 
 这是最高架构原则。SDK 保留运行循环的所有权；下述治理、数据和证据检查由确定性应用代码落实。**MCP 是标准化工具接入机制，不能替代小维的业务授权与数据边界。**
 
+本文区分三类约定，避免把设计伪代码当成 SDK 已验证能力：
+
+| 类别 | 内容 | 实施时如何处理 |
+| --- | --- | --- |
+| 已确定的产品与边界 | SDK 核心、查询与诊断、Web/飞书、最小 MCP 接入、只读与治理边界 | 实现必须满足；不能在局部改动中暗改范围或放宽权限 |
+| 首版实现选择 | 单 Agent/单进程、本机 Web、SQLiteSession、静态模型配置、非流式运行 | 按此起步；有实际约束时说明证据并更新设计，不预建多套方案 |
+| 锁版与联调后确定 | SDK 方法签名、包装扩展点、模型兼容组合、目标版本与依赖 | 先做最小验证，再落实代码；文档中出现名称不代表接口已经可用 |
+
+`Model Profile` 指模型服务配置，`Query Profile` 指 StarRocks 查询执行信息；两者不是同一对象。开发协作见 [AGENTS.md](AGENTS.md)，当前状态只在 [AGENT_HANDOFF.md](AGENT_HANDOFF.md) 维护。
+
 ## 1. 产品目标
 
 小维首版是 **StarRocks 数据库助手**，面向需要查数据、理解 SQL 和排查慢查询的运维与数据库工程师。查询助手和慢查询诊断使用同一 Agent、同一连接范围和同一渠道内的会话上下文。
@@ -48,6 +58,9 @@ flowchart TD
     C --> A[共享应用服务：请求去重、并发限制、结果响应]
     A --> R[OpenAI Agents SDK Runner]
     R <--> G[一个 StarRocks Agent]
+    A -. 可信 Model Profile 装配 .-> MP[SDK Model]
+    R <--> MP
+    MP <--> API[本轮选定的模型 API]
     R --> T[薄 function tools]
     R --> I[MCP Integration：官方 SDK 接入]
     T --> B[小维治理核心：调用前鉴权与约束]
@@ -73,7 +86,7 @@ flowchart TD
 
 MCP Client Integration 与 Web/飞书共享同一个后端。图中外部 Server 是接入边界，首版不交付自建数据库、Jenkins 或 K8s MCP 服务；本地 StarRocks 路径不依赖 MCP 可用性。远端请求先经过小维治理，远端自身仍需鉴权并约束实际执行。
 
-SDK 负责模型与工具调用循环；应用负责接入、实际权限、领域工具和运行边界。应用直接调用 `Runner.run` 或 `Runner.run_streamed`，不解析模型文本自行调用工具，不创建通用计划编译器，不在 SDK 外面再运行一套 Agent 引擎。
+SDK 负责模型与工具调用循环；应用负责接入、实际权限、领域工具和运行边界。首版直接调用非流式 `Runner.run`，不解析模型文本自行调用工具，不创建通用计划编译器，不在 SDK 外面再运行一套 Agent 引擎。渠道的“处理中”等状态提示由应用生成，不依赖模型文本流。
 
 这是 SDK 的原生用法：应用持有部署和工具，SDK 处理 Agent 循环。先使用一个职责清楚的 Agent，有实测收益再拆分。[OpenAI SDK 指南](https://developers.openai.com/api/docs/guides/agents/sdk)、[编排指南](https://developers.openai.com/api/docs/guides/agents/orchestration)。
 
@@ -96,7 +109,7 @@ Session 抽象直接使用 SDK 的公开接口，SQLiteSession 只是首版后�
 
 小维的 RunContext 是可信执行范围，不是依赖容器：Target Scope 仅含服务端目标标识与允许资源，Tool Scope 仅含允许操作；Evidence 信息限引用和必要元数据，不装原始结果、任意对象或服务定位器。密码、API key、连接串、DB connection、数据库/模型客户端及可间接取得这些对象的服务引用均不得进入 context。客户端由应用在装配时注入治理服务与 Adapter，工具只闭包捕获治理服务。SDK 本身允许本地 context 携带依赖且不自动传给模型；这里采用的是小维更严格的应用约定，不能误称 SDK 限制。[Agent 定义与本地 context](https://developers.openai.com/api/docs/guides/agents/define-agents)。
 
-会话只选 SDK Session 一条历史管理路径，不同时自建聊天记录再手工回灌，也不与服务端 conversation continuation 重复叠加。流式执行先展示受控的进度事件，最终结构化回答完成并校验后发送；不把半截 JSON 或未校验结论直接当成回答。[运行与会话](https://developers.openai.com/api/docs/guides/agents/running-agents)、[结果](https://developers.openai.com/api/docs/guides/agents/results)。
+会话只选 SDK Session 一条历史管理路径，不同时自建聊天记录再手工回灌，也不与服务端 conversation continuation 重复叠加。后续确需流式执行时再验证 `Runner.run_streamed`；最终结构化回答完成并校验后发送，不把半截 JSON 或未校验结论直接当成回答。[运行与会话](https://developers.openai.com/api/docs/guides/agents/running-agents)、[结果](https://developers.openai.com/api/docs/guides/agents/results)。
 
 首版没有写操作，不建设审批平台。有具体写场景后采用 SDK interruptions / RunState，并补动作绑定、权限复核与回读。首版 MCP 仅开放经审查的只读工具，未知风险或需要审批的工具默认不开放；不为客户端基础能力预建审批平台。handoffs 与 `Agent.as_tool()` 按实际需求启用。[Guardrails 与审批](https://developers.openai.com/api/docs/guides/agents/guardrails-approvals)。
 
@@ -146,7 +159,7 @@ Action Binding 将批准绑定到代码生成的动作标识、申请人和审�
 
 ## 5. 动态工具与受治理执行
 
-每轮调用 SDK 前，应用按可信身份、Target Scope、Tool Scope 与已确认的环境能力构造本轮工具集合。例如审计源未接入不暴露 `list_slow_queries`，无 Profile 访问权限不暴露 `get_query_profile`。未确认可用的能力不默认开放；相关工具说明和动态 instructions 同步收窄。直接使用 SDK 的工具配置能力，不建设新 Resolver 或能力 DSL，不并发修改共享 Agent 的工具列表。
+每轮调用 SDK 前，应用按可信身份、Target Scope、Tool Scope 与已确认的环境能力构造本轮工具集合。例如审计源未接入不暴露 `list_slow_queries`，无 Query Profile 访问权限不暴露 `get_query_profile`。未确认可用的能力不默认开放；相关工具说明和动态 instructions 同步收窄。直接使用 SDK 的工具配置能力，不建设新 Resolver 或能力 DSL，不并发修改共享 Agent 的工具列表。
 
 工具可见性只回答“这轮可以考虑什么”；调用时必须再回答“当前参数和具体资源是否仍获准”。权限撤销、环境变动或参数越界时，Governed Tool Layer 在 I/O 前拒绝。无法事先得知的临时故障仍需正常报告，不能承诺隐藏工具能消除所有运行错误。
 
@@ -215,7 +228,7 @@ MCP Integration 的治理必须覆盖实际发送动作，不能只过滤 `list_
 
 FastAPI 提供同源 API 和简单 HTML/CSS/JavaScript 对话页，避免首版引入独立前端平台。支持发消息、执行中提示、显示回答、查看实际 SQL 与有限表格结果、新建会话。Web 内容按文本或经净化的 Markdown 展示，数据库返回值不得成为可执行 HTML。
 
-默认仅绑定 loopback、供本机操作者使用；服务端固定身份，检查 Host/Origin，并使用不可猜测的会话凭证防止越权读取和跨站请求。数据库密钥和 OpenAI key 始终在服务端。不得直接把本机模式改成公网绑定就宣称可多人部署。
+默认仅绑定 loopback、供本机操作者使用；服务端固定身份，检查 Host/Origin，并使用不可猜测的会话凭证防止越权读取和跨站请求。数据库密钥和各模型服务的 API key 始终在服务端。不得直接把本机模式改成公网绑定就宣称可多人部署。
 
 ### 飞书
 
@@ -304,6 +317,6 @@ Evidence 记录仅保存获准保留的最小事实、引用元数据与必要�
 - MCP 与本地工具遵守同一身份、预算和结果边界；未知风险工具默认不可见，远端证据不能未经绑定进入最终回答。协议测试不代表某个外部业务 Server 已通过接入验收。
 - 未授权用户/对象、危险 SQL、外部文本注入、超限、超时与渠道发送失败有对应结果。
 - 正式浏览器、真实飞书消息、真实模型和获准 StarRocks 环境分别留证，fake 测试不替代这些证据。
-- 没有 Profile 时能说明诊断限制；没有真实慢查询来源时不能展示虚构的历史慢查询列表。
+- 没有 Query Profile 时能说明诊断限制；没有真实慢查询来源时不能展示虚构的历史慢查询列表。
 
 实施顺序见 [DEVELOPMENT_PLAN.md](DEVELOPMENT_PLAN.md)。方向确认和文档落地不等于 SDK 产品已经运行；具体实施计划、运行证据与用户验收分别记录。

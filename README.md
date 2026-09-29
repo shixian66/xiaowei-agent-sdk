@@ -2,11 +2,11 @@
 
 小维是一款以 **OpenAI Agents SDK** 为核心设计的数据库助手。首版目标是在 **Web 对话和飞书单聊** 中完成“查结构 → 只读查询 → 解释结果 → 分析慢查询”的连续对话。
 
-> 产品方向已确认，P1-A 实施计划已编写、待审阅。仓库源码仍是 M5 历史基线，SDK 产品尚未实现；下文能力描述是首版目标。准确状态与验证记录见 [AGENT_HANDOFF.md](AGENT_HANDOFF.md)。
+> 下文描述首版目标，不代表仓库已经具备全部能力。当前实现、可运行入口和验证状态统一见 [AGENT_HANDOFF.md](AGENT_HANDOFF.md)。
 
 **OpenAI Agents SDK 负责 Agent Loop；小维负责权限、受治理工具执行、证据真实性和数据边界。**
 
-## 首版可以解决什么
+## 首版目标
 
 - 了解获准 StarRocks 数据库的表、字段和结构。
 - 用自然语言生成 SQL，或提交自己的 SQL，在受控范围执行只读查询并解释结果。
@@ -30,7 +30,7 @@
 
 SQLite 是首版实现选择，不是长期架构绑定。生产默认关闭 tracing 与外发；真实数据 trace 需要显式配置允许范围。
 
-OpenAI Agents SDK 负责 Agent 运行，实际推理可由不同厂商提供。接入方案优先使用 SDK 原生 Responses / Chat Completions 模型能力；兼容 API 是否能完成工具调用、结构化回答和连续追问，按具体模型实测。当前三家均未完成本产品验证。首版通过服务端配置切换，换模型开启新会话，不自动把旧对话发送到另一家；不用先建设模型管理后台。
+OpenAI Agents SDK 负责 Agent 运行，实际推理可由不同厂商提供。接入方案优先使用 SDK 原生 Responses / Chat Completions 模型能力；是否能完成工具调用、结构化回答和连续追问，按具体端点与模型实测，兼容性记录见 handoff。首版通过服务端配置切换，换模型开启新会话，不自动把旧对话发送到另一家；不用先建设模型管理后台。
 
 已有审计源与 Query Profile 按环境能力接入。缺少它们时，仍可分析 SQL 与执行计划，但必须明确证据不足；不会自动修改目标配置来开启采集。
 
@@ -42,7 +42,7 @@ MCP 负责标准化工具接入，不能替代业务授权。只有参数含义�
 
 ## 怎样开始
 
-新产品启动命令将在首个可运行切片完成并验证后提供。目前不要把仓库里的旧 CLI、Worker 或 Compose 命令当成 SDK 产品入口。
+新产品启动命令须在对应入口完成并验证后提供。P1-A 只交付可验证的内部核心，正式 Web/飞书入口在 P1-B 交付；旧 CLI、Worker 或 Compose 命令不能当成 SDK 产品入口。
 
 实施时需要：
 
@@ -55,11 +55,15 @@ MCP 负责标准化工具接入，不能替代业务授权。只有参数含义�
 
 ## 设计与开发
 
+采用 AI 辅助的小步开发：给出本次目标和完成判据，按当前计划实现、验证、审查、更新交接，再继续下一项。开发规则和风险分级统一见 [AGENTS.md](AGENTS.md)，不需要为每次改动重复填写五份文档。
+
+换 AI 工具或新开任务时，明确要求它先按 AGENTS 的顺序读文档，并从 handoff 的下一项工作接续；不要假定它能看到旧对话。任务目标应写清是审查、修订计划还是实施代码。
+
 - [AGENTS.md](AGENTS.md)：开发规则、SDK 优先原则与工程质量要求。
 - [ARCHITECTURE.md](ARCHITECTURE.md)：完整产品设计、工具、双入口与执行边界。
 - [AGENT_HANDOFF.md](AGENT_HANDOFF.md)：当前代码与已经验证的事实。
 - [DEVELOPMENT_PLAN.md](DEVELOPMENT_PLAN.md)：逐步交付的顺序和验收目标。
-- [P1-A 实施计划](docs/superpowers/plans/2026-09-29-p1a-sdk-governed-core.md)：先验证 SDK、治理与 MCP 核心，再接真实数据库和双入口。
+- [P1-A 实施计划](docs/superpowers/plans/2026-09-29-p1a-sdk-governed-core.md)：先验证 SDK、模型 API、治理与 MCP 核心，再接真实数据库和双入口；当前执行到哪一步以 handoff 为准。
 
 设计直接使用 [OpenAI Agents SDK](https://developers.openai.com/api/docs/guides/agents/sdk) 原生能力。旧实现只在有明确价值时提取少量业务素材，兼容旧框架不是新产品目标。
 
