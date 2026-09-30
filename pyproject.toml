@@ -18,6 +18,8 @@ requires-python = ">=3.11,<3.12"
 #   uvicorn     —— M5 容器内 ASGI 进程。
 #   openai-agents[sqlalchemy] —— 新产品 src/xiaowei 的 Agent Loop、MCP 客户端与
 #                  SQLAlchemySession（P1-A Task 1 实装核对后锁定 0.22.x）。
+#   asyncmy     —— 新包 StarRocks Adapter 的 MySQL 协议驱动（P1-B Task 2）。精确钉版：Adapter 依赖
+#                  其 TLS 升级、非缓冲读取与关闭行为，升级须重新核对。
 #   新包另用 pydantic / sqlalchemy / asyncpg；其余仅旧包 src/xiaowei_agent 使用，P1-B 列明清理范围。
 dependencies = [
     "pydantic>=2.13,<3",
@@ -28,6 +30,7 @@ dependencies = [
     "fastapi>=0.115,<1",
     "uvicorn>=0.34,<1",
     "openai-agents[sqlalchemy]>=0.22.3,<0.23",
+    "asyncmy==0.2.15",
 ]
 
 [project.scripts]

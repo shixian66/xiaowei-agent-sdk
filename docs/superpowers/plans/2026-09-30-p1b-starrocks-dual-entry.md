@@ -135,6 +135,8 @@ P2 的 EXPLAIN 诊断需要分析用户任意 SQL 时，另行设计“只解析
 
 Adapter 只接受代码生成的元数据请求或 `GuardedQuery`。连接池获取有明确期限；每次 checkout 先用可信值设置 StarRocks 会话 `query_timeout`、`query_mem_limit` 和时区，再回读并核对实际生效值；任一设置或核对失败则废弃连接且不执行查询。TLS 开启时必须验证证书与主机。查询使用驱动公开的非缓冲流式读取能力，最多探测 `max_rows + 1`，并同时执行累计字节和单值字节限制，不预设驱动一定实现服务端游标。不得先把全部结果载入内存再裁剪。
 
+Task 2 实施修订（锁定 asyncmy 0.2.15 后核对）：asyncmy 自带连接池没有获取期限，且按 `connected` 决定回收，`close()` 后的连接仍可能回到空闲队列；因此 Adapter 不复用连接，`pool_size` 是并发槽位，每次请求新建连接并设置、回读会话变量，完整读完才 `QUIT`，其余情况直接断开。等待槽位与建立连接共用连接期限。StarRocks 4.1.4 实测错误码 5203（拒绝访问）映射为权限拒绝，5024（超过 `query_timeout`）单列为服务端超时。
+
 可进入 `ToolObservation` 的值只允许 `null | bool | int | finite float | string`：`Decimal` 用十进制字符串，日期/时间按目标时区输出 ISO 8601；bytes、非有限浮点和未知驱动类型拒绝。列名重复拒绝，避免映射覆盖。下一行或单值超过容量时不保留该行的部分值，停止读取并标记 `truncated=true`。返回字段至少包含实际 SQL、列、已返回行、已返回行数、截断、target、采集时间和耗时；不声称已知数据库中的总行数。
 
 连接/认证/语法/权限/超时/结果契约错误映射成固定安全错误码，不带地址、账号、SQL 字面量或服务端原始文本。截断、超时、取消、网络中断、驱动状态不明或仍有未读取结果时废弃连接，不回池；明确说明服务端可能继续到服务端超时，不自动重试。
@@ -263,7 +265,7 @@ Web 默认只接受配置的 loopback Host/Origin，按解析后的 scheme/host/
 
 **Result:** 通过 recording transport 和获准测试 StarRocks 分别证明：执行端只接受 `GuardedQuery`/代码生成元数据请求，结果读取有界，错误不泄露且没有自动重试。
 
-**Files:** Create `src/xiaowei/starrocks.py`, `tests/p1b/test_starrocks_adapter.py`, `tests/p1b/test_starrocks_real.py`; Modify `pyproject.toml`, `uv.lock`.
+**Files:** Create `src/xiaowei/starrocks.py`, `tests/p1b/test_starrocks_adapter.py`, `tests/p1b/test_starrocks_real.py`, `tests/p1b/conftest.py`（`starrocks_real` 显式开关）; Modify `pyproject.toml`, `uv.lock`, `tests/security/test_dependency_baseline.py`（批准依赖集合）.
 
 - [ ] 在临时实验中安装候选 `asyncmy==0.2.15`，核对 Python 3.11、TLS 证书验证、连接池获取/查询期限、非缓冲流式读取、取消/关闭、字段类型和 StarRocks MySQL 协议行为；实验不接获准环境时只锁公开 API，不宣称 StarRocks 兼容。
 - [ ] 先写 recording driver 测试：SQLGuard 拒绝时 pool acquire 为 0；pool acquire 有期限；checkout 后会话限额在查询前设置并回读生效值；执行 SQL 与 `GuardedQuery.normalized_sql` 完全相同；最多读 `max_rows + 1`；字节/单值/类型/重复列/超时/取消/网络错误均按契约关闭。
