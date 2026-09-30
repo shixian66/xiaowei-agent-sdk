@@ -9,16 +9,16 @@
 | 项目 | 已核对事实 |
 | --- | --- |
 | 仓库 | [shixian66/xiaowei-agent-sdk](https://github.com/shixian66/xiaowei-agent-sdk) |
-| 本地目录 / 分支 | `/Users/kloenguyen/.codex/worktrees/34c0/agent-SDK` / `codex/p1b-plan`（rebase 到 `origin/main` 的 `b0ae274`） |
+| 本地目录 / 分支 | `/Users/kloenguyen/Desktop/agent-SDK` / `claude/p1b-gate0`（从已审查的计划提交 `41adc3f` 分出；计划基于 `origin/main` 的 `b0ae274`） |
 | M5 历史起点 | `372c381f44ecfa1fa53961f137d0058033cbd805`；不是远端当前 main 的核验结论 |
 | P1-A 代码基线 / 当前主线 | `148abaa4729ac6644c03056cf265a9dc18f1acd8` / `b0ae2740cba20dd08d4c63fc58281be23e8e042a`；主线后两项提交只更新 P1-A 收尾文档与协作入口 |
-| 当前阶段 | **P1-A 离线完成，按用户决定收尾**：Task 1–5 经 PR #2–#7 合入；Task 5 复审通过且 8 项 CI 通过。Gemini 只有部分真实证据，工具续轮到交付与 Session 追问闭环仍是 P1-B 开工前 Gate 0 |
+| 当前阶段 | **P1-B 计划经三轮独立审查通过（`41adc3f`）；Gate 0 离线部分完成，真实运行未进行**。P1-A 离线完成（Task 1–5 经 PR #2–#7 合入）；Gemini 只有部分真实证据，工具续轮到交付与 Session 追问闭环仍待 Gate 0 真实运行，SQLGuard 尚未开始 |
 | 当前源码与依赖 | 新包 `src/xiaowei/`（`config.py`、`storage.py`、`model_api.py`、`models.py`、`governance.py`、`evidence.py`、`session.py`、`mcp.py`、`tools.py`、`app.py`、`migrations/001_initial.sql`）与旧 `src/xiaowei_agent/` 并存；锁定 `openai-agents[sqlalchemy]` 0.22.3、`mcp` 2.2.0、`openai` 3.20.0、SQLAlchemy 2.0.52、asyncpg 0.30.0，Python 3.11.16；wheel 同时打包两个包，CLI 仍指向旧包 |
 | 新产品入口 | 只有开发验证命令（见第 5 节）；尚无产品启动入口，旧 CLI/Compose 不算新入口 |
-| 本次工作范围 | 已按两轮独立审查修订 [P1-B 详细实施计划](docs/superpowers/plans/2026-09-30-p1b-starrocks-dual-entry.md) 的开工前阻断及对应验收项，并同步本交接；未写产品功能代码、未改依赖或迁移、未部署 |
-| 外部操作 | 主线曾获用户授权用合成数据调用 Gemini API（见第 3 节），验证后本机凭据文件已删除，用户负责作废该密钥；本次计划修订只核对源码、主线差异、锁定 SDK 与本地文档，不调用真实模型、StarRocks、飞书或外部 MCP Server |
+| 本次工作范围 | [P1-B 计划](docs/superpowers/plans/2026-09-30-p1b-starrocks-dual-entry.md) Gate 0 的离线部分：`tests/sdk_core/gate0.py`（专用合成工具与投影、产品路径装配、固定样例、不含内容的请求观测）、`tests/sdk_core/test_gate0.py`（Gemini 3 协议形状的 HTTP mock）与显式真实模型命令 `scripts/gate0_real_model.py`；未改 `src/xiaowei`、依赖或迁移，未部署 |
+| 外部操作 | 主线曾获用户授权用合成数据调用 Gemini API（见第 3 节），验证后本机凭据文件已删除，用户负责作废该密钥；本次 Gate 0 离线工作没有获准 Profile 与凭据，未调用真实模型、StarRocks、飞书或外部 MCP Server |
 
-表中分别列出 P1-B 所依据的 P1-A 代码基线与本次计划修订所依据的当前主线，不能混用。接手先用 `git rev-parse HEAD` 和 `git status --short` 取得实际版本；计划审查使用本次文档提交的精确 SHA，本文件的修改历史由 Git 保存。
+表中分别列出 P1-B 所依据的 P1-A 代码基线与计划所依据的当前主线，不能混用。接手先用 `git rev-parse HEAD` 和 `git status --short` 取得实际版本；审查使用对应提交的精确 SHA，本文件的修改历史由 Git 保存。
 
 ## 2. 已确定的产品边界
 
@@ -138,9 +138,25 @@ CI integration job 设置 `SDK_TEST_POSTGRES_URL`，启动 `compose.sdk-test.yml
 - 未完成：没有一轮到达交付（工具结果后的类型化回答被 503 中断，之后免费额度耗尽返回 429）；追问时 Session 回放是否保留签名、Gemini 是否接受回放历史，诊断轮隐藏查询工具与澄清表达均未观察到。
 - 发现：测试用 `PROJECTIONS` 的模型可达投影只有 `rows`，模型看不到 `total`，不适合作为真实模型样例（脚本另配投影）；3.x 模型在此期间多次 503。
 
-**本次 P1-B 计划修订验证：** `git diff --check` 与计划相对链接检查通过；使用同仓库主检出的锁定开发环境执行 `tests/security/test_docs_command_consistency.py` 和 `tests/contract/test_doc_fact_binding.py`，5 项通过。工作树本身没有 `.venv`，未运行产品测试、真实模型或真实服务。
+**P1-B 计划审查：** Claude 对 `df6aad1`、`e3f9702`、`41adc3f` 做了三轮独立审查，`41adc3f` 通过（开工前阻断清零）。该轮另提 3 项验收事项未写入计划，实施对应任务时落实：Task 3 启动容量检查直接用最坏情况的合成结果调用真实投影器，不另写算术公式；Task 3 在 `ToolPolicy` 声明必需字段，由投影器报告省略，不在 `EvidenceStore` 按工具 ID 特判；Task 4/8 所有请求状态迁移按期望前一状态条件更新，失锁的旧实例条件更新失败即 readiness false 并退出，并写明持锁连接探测间隔。计划修订时 `git diff --check`、计划相对链接、`tests/security/test_docs_command_consistency.py` 与 `tests/contract/test_doc_fact_binding.py` 通过。
 
-**下一项：** 对本次 P1-B 计划修订提交的精确 SHA 做增量独立复审，重点核对 §2.3、Task 3 与 G2 的飞书 `rows` 和容量契约。计划获准后，先用一个有额度的获准 Profile 完成 Gate 0：合成工具续轮到交付及经 `PolicySession` 的同会话追问；若失败则先形成独立修复切片，不能开始 SQLGuard 实施。
+**Gate 0 离线部分已证明（HTTP mock、真 Runner、`open_model` + 真实 `Application`、`PolicySession` + 隔离 PostgreSQL）：**
+
+- 固定 4 个样例（查询、同会话追问、诊断轮要求执行查询、模糊问题）经产品路径跑通：查询工具执行 1 次并交付引用证据的回答；追问回放上一轮工具调用、不重跑工具并引用上一轮证据；诊断轮只展示 `list_regions`，模型强行调用 `sales_total` 时本轮失败、查询零执行；模糊问题得到澄清。专用策略四种投影都含 `total` 与 `rows`。
+- 按 Gemini 3 OpenAI 兼容协议形状的 mock：本轮续调用时锁定 SDK 把 `extra_content.google.thought_signature` 原样带回（mock 对缺签名返回 400）；追问请求中回放的历史工具调用**不带签名**（`PolicySession` 保存形式只有 `call_id/name/arguments`）。若供应商也校验历史签名，追问在首个模型请求失败（400 → `model_failed`），工具不重跑——这正是 Gate 0 真实运行要判定的问题。
+- 真实模型命令 `scripts/gate0_real_model.py` 复用同一装配，只把最底层 transport 换成不重试、不读环境配置的网络 transport；输出 JSON 只含 Profile 摘要/指纹、SDK 版本、每个样例的判定、状态码、耗时、展示的工具名、签名计数与可取得的 usage，不含消息、模型文字、证据标识、工具结果或凭据。Profile 文件缺失/不合法、凭据引用未设置、测试 PostgreSQL 未设置或不是唯一声明的实例时退出码 2；样例未全部通过时退出码 1。命令在任何 SDK 导入前强制两项 `OPENAI_AGENTS_DONT_LOG_*` 为 1，外部预置 `0/false` 的子进程用例验证生效。
+- 反向验证：转发前剥掉本轮签名、诊断用途加入查询工具、追问脚本重跑工具、去掉日志开关强制，对应用例均失败。
+
+**Gate 0 未覆盖：** 没有获准 Profile 与凭据，未对任何真实端点运行；mock 只证明本应用与锁定 SDK 在该协议形状下的行为，不证明任何供应商接受回放历史、遵守 `parallel_tool_calls=false` 或给出可用的回答质量。样例数据与 Web 渠道固定，飞书渠道投影未在 Gate 0 中运行。
+
+**下一项：** 用户提供并授权一个有额度的 Profile（不含凭据的 `ModelProfile` JSON + 本机 `env:` 凭据引用）后运行：
+
+```bash
+SDK_TEST_POSTGRES_URL=postgresql+asyncpg://postgres@127.0.0.1:55432/postgres \
+  uv run --locked --extra dev python -m scripts.gate0_real_model --profile PROFILE.json
+```
+
+记录输出中的判定、状态、耗时与 usage。计入判定的三个样例（查询、同会话追问、诊断轮隐藏查询工具）全部通过后才开始 Task 1 SQLGuard；若追问因历史签名等供应商字段失败，先做计划中的 Session 保存形式前置修复（精确字段 allowlist、类型与容量限制，篡改/超长/非 allowlist 字段离线回归），再复验。
 
 P1-A 是内部核心。P1-B 才接真实查询与双入口并切换正式入口，P2 增加诊断，P3 做实际用户验收。Gate 0 是 P1-B 开工前例外；它通过后，其他环境缺失不阻塞不依赖该环境的离线部分，但不能跳过对应实战退出条件。
 
@@ -278,5 +294,15 @@ Task 1 反向验证（临时改动，验证后已恢复）：
 - 往 `src/xiaowei` 临时加入 `import asyncpg` 和 `type: ignore` 注释：修复前两个护栏都通过（假绿），修复后都失败。
 
 测试代码的类型检查不属于必需检查：`mypy --explicit-package-bases src/xiaowei tests/sdk_core`（`MYPYPATH=src`）只报一处 `yaml` 缺少类型存根，与现有 `tests/contract/test_compose_contract.py` 情况相同，未为此增加依赖或放宽配置。本机正在运行的旧 `xiaowei-release` 容器未被触及。
+
+Gate 0 离线部分验证（同一环境，锁文件未变）：
+
+| 命令 | 结果 |
+| --- | --- |
+| `SDK_TEST_POSTGRES_URL=$SDK_PG uv run --locked --extra dev python -m pytest tests/sdk_core/test_gate0.py -q -W error` | 6 passed；4 项反向验证（剥掉本轮签名、诊断用途加入查询工具、追问重跑工具、去掉日志开关强制）各使对应用例失败 |
+| `SDK_TEST_POSTGRES_URL=$SDK_PG uv run --locked --extra dev python -m pytest tests/sdk_core -q -W error` | 284 passed |
+| `SDK_TEST_POSTGRES_URL=$SDK_PG uv run --locked --extra dev python -m pytest -q` | 1998 passed，152 skipped；5 条警告来自旧网络隔离测试 |
+| `uv run --locked --extra dev ruff check .`、`ruff format --check src/xiaowei tests/sdk_core scripts/gate0_real_model.py`、`mypy src`、`git diff --check` | 通过；新增三个文件另以 `MYPYPATH=src mypy --explicit-package-bases` 检查通过 |
+| 未设置凭据引用时运行 `python -m scripts.gate0_real_model --profile <示例 Gemini Profile>` | `gate0: 环境变量 XIAOWEI_GATE0_GEMINI_KEY 未设置或为空`，退出码 2，未发出请求 |
 
 独立审查：Codex 审查 `bf8963d`、`6dbbb6b`、`5aee8f5` 均为暂不通过，复审 `8dba33a` 为本地技术验收通过。本轮只同步 CI 与对应合同测试，未将自查称为独立审查；GitHub CI 是独立执行证据，不代表真实服务或产品运行。真实模型只有 Gemini 部分证据（未完成闭环），尚无真实 StarRocks、正式浏览器、飞书运行或用户验收证据，未来生产 Action 仍只有设计约束。
