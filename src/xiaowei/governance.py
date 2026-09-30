@@ -9,7 +9,8 @@
 数值，并在校验调用上强制禁止未声明字段（含嵌套模型，不依赖模型自身配置或可被覆盖的
 JSON schema）。实际执行与证据都只使用规范化后的有效参数；会话历史中的调用经同一函数
 规范化后再与证据核对。参数模型的字段（含嵌套）必须全部必填：默认值不经校验，也不是
-模型给出的参数。
+模型给出的参数。有效参数与 MCP 结果都经 ``contract_dump`` 输出：计算字段不输出，序列化
+后的数据须仍按同一模型合约，自定义 serializer 不能加入契约外的字段或改变类型。
 """
 
 from __future__ import annotations
@@ -229,15 +230,30 @@ def normalize_arguments(policy: ToolPolicy, arguments: Mapping[str, object]) -> 
     """有效参数：JSON 严格模式、强制禁止未声明字段（含嵌套）后的规范化结果。
 
     不依赖参数模型自身的 ``extra`` 配置：校验调用本身强制 ``forbid``。非有限数值在序列化时
-    拒绝。字段校验器可以改写取值，执行与证据都以改写后的结果为准。
+    拒绝。字段校验器可以改写取值，执行与证据都以改写后的结果为准；改写后的输出本身也须
+    合约（见 ``contract_dump``），否则同样拒绝。
     """
     try:
         validated = policy.arguments.model_validate_json(
             json.dumps(arguments, allow_nan=False), strict=True, extra="forbid"
         )
+        return contract_dump(validated)
     except (ValueError, TypeError):
         raise ToolRejectedError("参数不符合工具契约") from None
-    return validated.model_dump(mode="json")
+
+
+def contract_dump(validated: BaseModel) -> dict[str, object]:
+    """已校验模型交给 I/O、模型与证据的 JSON 数据；序列化钩子不能改变契约形状。
+
+    计算字段是派生输出而非数据，不输出（含嵌套）。自定义 serializer、``exclude`` 等可以增删
+    字段或改变类型，因此输出须按同一模型再次严格校验（强制禁止未声明字段）才算合约；
+    不合约时抛出 ``ValueError``。
+    """
+    dumped = validated.model_dump(mode="json", exclude_computed_fields=True)
+    type(validated).model_validate_json(
+        json.dumps(dumped, allow_nan=False), strict=True, extra="forbid"
+    )
+    return dumped
 
 
 _SCALARS: tuple[type, ...] = (str, int, float, bool, type(None))

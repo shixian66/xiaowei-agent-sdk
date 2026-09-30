@@ -248,7 +248,8 @@
   - 凭据未绑定：`open_model(profile, *, transport=None)` 不再接收密钥，内部按 `profile.api_key_ref` 用 `resolve_secret_ref` 解析，失败时不创建客户端。测试经各 Profile 引用的环境变量提供假密钥。
   - 运行时行为取自可覆盖的 schema、执行与证据两个参数来源：`normalize_arguments(policy, arguments)` 为唯一规范化入口（`strict=True`、`extra="forbid"`、`allow_nan=False`），`invoke` 以它的结果构造单一有效请求，交给执行与 `EvidenceStore.record`；`EvidenceStore.project(call=...)` 先用同一函数规范化历史参数再比较摘要。MCP 结果校验加 `extra="ignore"`。工具目录删除基于 schema 的额外字段与必填检查（前者由校验调用强制，后者改为按 Pydantic 运行时字段递归检查，并限定参数类型为基本类型、枚举、Literal、嵌套模型及其容器）。原“参数/结果模型允许额外字段即登记失败”的目录用例相应改为运行时用例：额外参数在 I/O 前拒绝，额外结果字段被忽略。
   - 反向验证 8 项均使对应用例失败，见 handoff。
-- 未完成：真实模型验证（本会话没有获准的模型端点与凭据，三个 Profile 均未验证）；增量复审修复版本的独立复审。
+- **第三轮复审修复（针对 `bdae614` 的 1 项 P1）：** 严格校验之后仍以 `model_dump` 的输出作为有效数据，计算字段与自定义 serializer 可以加入契约外字段或改变类型（参数与 MCP 结果同根）。新增 `governance.contract_dump(validated)` 作为唯一输出入口：`exclude_computed_fields=True`（递归）后，按同一模型 `strict=True`、`extra="forbid"` 重新校验输出，不合约抛 `ValueError`。`normalize_arguments` 与 `mcp._payload` 都经它输出；参数不合约按原有分类在 I/O 前拒绝（回放时证据不可读），结果不合约按原有分类中止本轮。未在工具目录枚举钩子：运行时重新校验同时覆盖 `field_serializer`、`model_serializer`、`PlainSerializer`、`Field(exclude=True)` 等形态，目录检查会是不完整的重复保护。
+- 未完成：真实模型验证（本会话没有获准的模型端点与凭据，三个 Profile 均未验证）；第三轮修复版本的独立复审。
 
 ## 完成定义与覆盖边界
 

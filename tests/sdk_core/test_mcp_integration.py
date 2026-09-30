@@ -19,7 +19,15 @@ from agents import Agent, Runner, Tool, UserError
 from agents.exceptions import ModelBehaviorError
 from agents.extensions.memory import SQLAlchemySession
 from agents.testing import ModelCall, ModelStep, ScriptedModel, assistant_message, function_call
-from pydantic import BaseModel, ConfigDict, ValidationError
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    SerializerFunctionWrapHandler,
+    ValidationError,
+    computed_field,
+    field_serializer,
+    model_serializer,
+)
 from sqlalchemy import text
 from sqlalchemy.engine import URL
 from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
@@ -804,20 +812,7 @@ class _DisguisedResult(BaseModel):
 
 @pytest.mark.loopback
 async def test_result_fields_follow_the_contract_not_the_schema(postgres_url: URL) -> None:
-    nested = ToolContract(
-        tool_id="fixture/nested",
-        target_id=FIXTURE_TARGET,
-        input_schema=KeyArgs.model_json_schema(),
-        policy_id="fixture.nested",
-    )
-    view = Projection(fields=("key", "detail"), max_bytes=2000)
-    policy = ToolPolicy(
-        policy_id="fixture.nested",
-        arguments=KeyArgs,
-        projections=dict.fromkeys(("model", "session", "web", "feishu"), view),
-        result=_DisguisedResult,
-    )
-    tools = ToolCatalog((*CONTRACTS, nested), (*POLICIES, policy))
+    tools = _nested_catalog(_DisguisedResult)
     with serve(mcp_app()) as fixture:
         registration = config(fixture.url, tools=("nested",), policy="fixture.nested")
         async with core(postgres_url, tools) as c, c.integration(registration) as integration:
@@ -829,6 +824,100 @@ async def test_result_fields_follow_the_contract_not_the_schema(postgres_url: UR
     for leaked in (NESTED_SECRET, PRIVATE):
         assert leaked not in seen(model)
         assert leaked not in stored
+
+
+_HOOKED = "hook-output-4b1e"
+
+
+class _ComputedDetail(BaseModel):
+    safe: str
+
+    @computed_field  # type: ignore[prop-decorator]
+    @property
+    def derived(self) -> str:
+        return _HOOKED
+
+
+class _ComputedResult(BaseModel):
+    key: str
+    detail: _ComputedDetail
+
+
+class _SerializedDetail(BaseModel):
+    safe: str
+
+    @model_serializer(mode="wrap")
+    def _widen(self, handler: SerializerFunctionWrapHandler) -> dict[str, object]:
+        return {**handler(self), "derived": _HOOKED}
+
+
+class _NestedSerializedResult(BaseModel):
+    key: str
+    detail: _SerializedDetail
+
+
+class _FieldSerializedDetail(BaseModel):
+    safe: str
+
+    @field_serializer("safe")
+    def _as_object(self, value: str) -> dict[str, object]:
+        return {"safe": value, "derived": _HOOKED}
+
+
+class _FieldSerializedResult(BaseModel):
+    key: str
+    detail: _FieldSerializedDetail
+
+
+def _nested_catalog(result: type[BaseModel]) -> ToolCatalog:
+    nested = ToolContract(
+        tool_id="fixture/nested",
+        target_id=FIXTURE_TARGET,
+        input_schema=KeyArgs.model_json_schema(),
+        policy_id="fixture.nested",
+    )
+    view = Projection(fields=("key", "detail"), max_bytes=2000)
+    policy = ToolPolicy(
+        policy_id="fixture.nested",
+        arguments=KeyArgs,
+        projections=dict.fromkeys(("model", "session", "web", "feishu"), view),
+        result=result,
+    )
+    return ToolCatalog((*CONTRACTS, nested), (*POLICIES, policy))
+
+
+@pytest.mark.loopback
+@pytest.mark.parametrize(
+    "result",
+    [
+        pytest.param(_ComputedResult, id="nested-computed"),
+        pytest.param(_NestedSerializedResult, id="nested-model-serializer"),
+        pytest.param(_FieldSerializedResult, id="field-serializer"),
+    ],
+)
+async def test_result_serialization_hooks_cannot_add_content(
+    postgres_url: URL, result: type[BaseModel]
+) -> None:
+    """结果模型的序列化钩子不能向模型、Session 或 Evidence 加入契约外的内容。
+
+    计算字段不属于结果数据，照常交付声明字段；改变形状的 serializer 使结果不合约，本轮中止。
+    """
+    tools = _nested_catalog(result)
+    with serve(mcp_app()) as fixture:
+        registration = config(fixture.url, tools=("nested",), policy="fixture.nested")
+        async with core(postgres_url, tools) as c, c.integration(registration) as integration:
+            ctx = context(tools=frozenset({"fixture/nested"}), targets=frozenset({FIXTURE_TARGET}))
+            tools_now = integration.tools_for(ctx)
+            if result is _ComputedResult:
+                model = await c.run(tools_now, [call("fixture__nested"), cite()], ctx)
+                assert "safe" in seen(model)  # 对照：声明的嵌套字段照常进入
+            else:
+                model = await c.aborted(tools_now, "fixture__nested", ctx)
+                assert await c.evidence_count() == 0
+            stored = await c.dump()
+    assert fixture.recorder.tool_calls == [("nested", {"key": "k1"})]
+    assert _HOOKED not in seen(model)
+    assert _HOOKED not in stored
 
 
 async def _until(condition: Callable[[], bool], timeout: float = 3.0) -> None:

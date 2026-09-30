@@ -1,12 +1,23 @@
 """Task 2：本地受治理工具。真 SDK Runner + ScriptedModel，治理拒绝时 recording adapter 零 I/O。"""
 
 import asyncio
-from typing import Any
+from typing import Annotated, Any
 
 import pytest
 from agents import Agent, Runner, UserError
 from agents.testing import ModelStep, ScriptedModel, assistant_message, function_call
-from pydantic import BaseModel, ConfigDict, ValidationError
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    PlainSerializer,
+    SerializerFunctionWrapHandler,
+    ValidationError,
+    computed_field,
+    field_serializer,
+    field_validator,
+    model_serializer,
+)
 from sqlalchemy import event
 from sqlalchemy.engine import URL
 from tests.sdk_core.synthetic_tools import (
@@ -431,6 +442,153 @@ async def test_runtime_argument_behaviour_is_not_taken_from_the_schema(
         return
     async with ready_engine(postgres_url) as engine:
         governed = GovernedTools(store(engine, grants, Clock(), tools))
+        with pytest.raises(ToolRejectedError):
+            await governed.invoke(context(tools=frozenset({_COUNT_TOOL})), req, run)
+    assert executed == []
+
+
+class _ComputedArgs(BaseModel):
+    region: str
+
+    @computed_field  # type: ignore[prop-decorator]
+    @property
+    def privileged(self) -> bool:
+        return True
+
+
+class _ComputedWindow(BaseModel):
+    days: int
+
+    @computed_field  # type: ignore[prop-decorator]
+    @property
+    def privileged(self) -> bool:
+        return True
+
+
+class _NestedComputedArgs(BaseModel):
+    window: _ComputedWindow
+
+
+class _ValidatedArgs(BaseModel):
+    region: str
+
+    @field_validator("region")
+    @classmethod
+    def _canonical(cls, value: str) -> str:
+        return value.strip().upper()
+
+
+@pytest.mark.parametrize(
+    ("arguments", "sent", "effective"),
+    [
+        pytest.param(_ComputedArgs, {"region": "east"}, {"region": "east"}, id="root-computed"),
+        pytest.param(
+            _NestedComputedArgs,
+            {"window": {"days": 3}},
+            {"window": {"days": 3}},
+            id="nested-computed",
+        ),
+        # 对照：字段校验器的规范化照常生效，执行收到规范化后的值。
+        pytest.param(_ValidatedArgs, {"region": " east "}, {"region": "EAST"}, id="validator"),
+    ],
+)
+async def test_computed_fields_never_reach_execution(
+    postgres_url: URL,
+    arguments: type[BaseModel],
+    sent: dict[str, object],
+    effective: dict[str, object],
+) -> None:
+    """计算字段是派生输出，不是参数：模型只提交声明字段时，执行与证据也只有声明字段。"""
+    grants = Grants()
+    grants.grant("alice", _COUNT_TOOL)
+    executed: list[ToolRequest] = []
+
+    async def run(validated: ToolRequest) -> ToolObservation:
+        executed.append(validated)
+        return ToolObservation(payload={"total": 1}, captured_at=START, truncated=False)
+
+    req = ToolRequest(
+        tool_id=_COUNT_TOOL,
+        target_id=TARGET,
+        call_id="c1",
+        tool_name="count_orders",
+        arguments=sent,
+    )
+    async with ready_engine(postgres_url) as engine:
+        evidence = store(engine, grants, Clock(), _single_catalog(arguments))
+        await GovernedTools(evidence).invoke(context(tools=frozenset({_COUNT_TOOL})), req, run)
+    (seen,) = executed
+    assert seen.arguments == effective
+
+
+class _FieldSerializedArgs(BaseModel):
+    region: str
+
+    @field_serializer("region")
+    def _as_object(self, value: str) -> dict[str, object]:
+        return {"region": value, "privileged": True}
+
+
+class _ModelSerializedArgs(BaseModel):
+    region: str
+
+    @model_serializer(mode="wrap")
+    def _widen(self, handler: SerializerFunctionWrapHandler) -> dict[str, object]:
+        return {**handler(self), "privileged": True}
+
+
+class _SerializedWindow(BaseModel):
+    days: int
+
+    @model_serializer(mode="wrap")
+    def _widen(self, handler: SerializerFunctionWrapHandler) -> dict[str, object]:
+        return {**handler(self), "privileged": True}
+
+
+class _NestedSerializedArgs(BaseModel):
+    window: _SerializedWindow
+
+
+class _AnnotatedSerializedArgs(BaseModel):
+    region: Annotated[str, PlainSerializer(lambda value: {"privileged": True})]
+
+
+class _ExcludedArgs(BaseModel):
+    region: str
+    scope: str = Field(exclude=True)
+
+
+@pytest.mark.parametrize(
+    ("arguments", "sent"),
+    [
+        pytest.param(_FieldSerializedArgs, {"region": "east"}, id="field-serializer"),
+        pytest.param(_ModelSerializedArgs, {"region": "east"}, id="root-model-serializer"),
+        pytest.param(_NestedSerializedArgs, {"window": {"days": 3}}, id="nested-model-serializer"),
+        pytest.param(_AnnotatedSerializedArgs, {"region": "east"}, id="annotated-serializer"),
+        pytest.param(_ExcludedArgs, {"region": "east", "scope": "all"}, id="excluded-field"),
+    ],
+)
+async def test_serialized_arguments_must_still_satisfy_the_contract(
+    postgres_url: URL, arguments: type[BaseModel], sent: dict[str, object]
+) -> None:
+    """序列化钩子改变了参数形状（增删字段、改变类型）：执行前拒绝，零 I/O。"""
+    grants = Grants()
+    grants.grant("alice", _COUNT_TOOL)
+    executed: list[ToolRequest] = []
+
+    async def run(validated: ToolRequest) -> ToolObservation:
+        executed.append(validated)
+        return ToolObservation(payload={"total": 1}, captured_at=START, truncated=False)
+
+    req = ToolRequest(
+        tool_id=_COUNT_TOOL,
+        target_id=TARGET,
+        call_id="c1",
+        tool_name="count_orders",
+        arguments=sent,
+    )
+    async with ready_engine(postgres_url) as engine:
+        governed = GovernedTools(store(engine, grants, Clock(), _single_catalog(arguments)))
         with pytest.raises(ToolRejectedError):
             await governed.invoke(context(tools=frozenset({_COUNT_TOOL})), req, run)
     assert executed == []

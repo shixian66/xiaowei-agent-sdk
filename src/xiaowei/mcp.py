@@ -33,7 +33,7 @@ from mcp.types import Tool as MCPTool
 from pydantic import BaseModel, SecretStr
 
 from xiaowei.config import MCPServerConfig, resolve_secret_ref
-from xiaowei.governance import GovernedTools, schema_shape
+from xiaowei.governance import GovernedTools, contract_dump, schema_shape
 from xiaowei.models import RunContext, ToolContract, ToolObservation, ToolRequest
 from xiaowei.tools import governed_function_tool
 
@@ -342,7 +342,8 @@ def _payload(result: CallToolResult, model: type[BaseModel]) -> dict[str, object
     """只接受登记的 JSON 结果契约：结构化内容，或唯一一段 JSON 对象文本；其他一律拒绝。
 
     资源链接、图片等内容类型不读取。结果按 JSON 严格模式校验：不做字符串转数字之类的类型
-    转换；校验调用强制忽略未声明字段（含嵌套模型，不论模型自身配置），输出只含声明的字段。
+    转换；校验调用强制忽略未声明字段（含嵌套模型，不论模型自身配置），输出经
+    ``contract_dump`` 只含声明的字段，结果模型的序列化钩子不能加入其他内容。
     """
     if result.is_error or any(not isinstance(item, TextContent) for item in result.content):
         raise ValueError("MCP 结果不符合登记契约")
@@ -353,7 +354,7 @@ def _payload(result: CallToolResult, model: type[BaseModel]) -> dict[str, object
         if len(texts) != 1:
             raise ValueError("MCP 结果不符合登记契约")
         raw = texts[0]
-    return model.model_validate_json(raw, strict=True, extra="ignore").model_dump(mode="json")
+    return contract_dump(model.model_validate_json(raw, strict=True, extra="ignore"))
 
 
 class _WireSafeFactory:
