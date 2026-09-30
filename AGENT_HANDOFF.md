@@ -9,16 +9,16 @@
 | 项目 | 已核对事实 |
 | --- | --- |
 | 仓库 | [shixian66/xiaowei-agent-sdk](https://github.com/shixian66/xiaowei-agent-sdk) |
-| 本地目录 / 分支 | `/Users/kloenguyen/Desktop/agent-SDK` / `main`（`148abaa`，PR #7 合并后，含 P1-A Task 1–5） |
+| 本地目录 / 分支 | `/Users/kloenguyen/.codex/worktrees/34c0/agent-SDK` / `codex/p1b-plan`（rebase 到 `origin/main` 的 `b0ae274`） |
 | M5 历史起点 | `372c381f44ecfa1fa53961f137d0058033cbd805`；不是远端当前 main 的核验结论 |
-| Task 5 实施起点 | `3461ad73dae35684d010bb4f541e39db7e5960af`（PR #6 合并后的 `main`）；复审通过版本 `777b7253b17a10f32ca85f7ede0cbd54b761d61f` 经 PR #7 合入 |
-| 当前阶段 | **P1-A 离线完成，按用户决定收尾**：Task 1–5 经 PR #2–#7 合入 `main`；Task 5 经五轮独立审查修复，第六次复审（`777b725`）通过，8 项 CI 通过。真实模型闭环未完成（见第 3 节“真实模型尝试”），作为已知缺口带入 P1-B 前置 |
+| P1-A 代码基线 / 当前主线 | `148abaa4729ac6644c03056cf265a9dc18f1acd8` / `b0ae2740cba20dd08d4c63fc58281be23e8e042a`；主线后两项提交只更新 P1-A 收尾文档与协作入口 |
+| 当前阶段 | **P1-A 离线完成，按用户决定收尾**：Task 1–5 经 PR #2–#7 合入；Task 5 复审通过且 8 项 CI 通过。Gemini 只有部分真实证据，工具续轮到交付与 Session 追问闭环仍是 P1-B 开工前 Gate 0 |
 | 当前源码与依赖 | 新包 `src/xiaowei/`（`config.py`、`storage.py`、`model_api.py`、`models.py`、`governance.py`、`evidence.py`、`session.py`、`mcp.py`、`tools.py`、`app.py`、`migrations/001_initial.sql`）与旧 `src/xiaowei_agent/` 并存；锁定 `openai-agents[sqlalchemy]` 0.22.3、`mcp` 2.2.0、`openai` 3.20.0、SQLAlchemy 2.0.52、asyncpg 0.30.0，Python 3.11.16；wheel 同时打包两个包，CLI 仍指向旧包 |
 | 新产品入口 | 只有开发验证命令（见第 5 节）；尚无产品启动入口，旧 CLI/Compose 不算新入口 |
-| 本次工作范围 | Task 5：`app.py`（`AppConfig`、`DataPolicy`、`Application`、`TurnError`）、共享的受治理工具包装 `tools.py`（`mcp.py` 改用它，并增加 `available_tool_ids`、`governance`）、`PolicySession.session_settings` 的类型标注，及 `tests/sdk_core/test_app.py`；审查修复另改 `model_api.open_model`（返回 `ModelBinding`，凭据只按 Profile 引用解析）、`GovernedTools(evidence)`（目录与授权取自证据存储）、参数严格校验（校验调用强制禁止额外字段）与规范化执行、证据绑定有效参数、结果校验强制忽略额外字段、参数与结果经 `contract_dump` 按声明字段与类型从已校验实例生成（不经模型自己的序列化与二次校验）、执行后失败中止本轮；测试工具 `sdk_tool` 改走产品包装；README 增加核心开发验证命令；无依赖或迁移变更，未改 Compose 或 CI |
-| 外部操作 | 用户授权后以合成数据调用过 Gemini API（见第 3 节），验证后本机凭据文件已删除，用户负责作废该密钥；未调用 StarRocks、飞书或任何外部 MCP Server；没有部署或用户验收 |
+| 本次工作范围 | 只修订 [P1-B 详细实施计划](docs/superpowers/plans/2026-09-30-p1b-starrocks-dual-entry.md) 的独立审查阻断项，并同步本交接与计划导航；不写产品功能代码、不改依赖或迁移、不部署 |
+| 外部操作 | 主线曾获用户授权用合成数据调用 Gemini API（见第 3 节）；本次计划修订只核对源码、主线差异、锁定 SDK 与本地文档，不调用真实模型、StarRocks、飞书或外部 MCP Server |
 
-表中的 SHA 是本次实施起点，Task 1 提交在其之后。接手先用 `git rev-parse HEAD` 和 `git status --short` 取得实际版本；本文件的修改历史由 Git 保存。
+表中的 SHA 是 P1-B 计划所依据的代码基线。接手先用 `git rev-parse HEAD` 和 `git status --short` 取得实际版本；计划审查使用本次文档提交的精确 SHA，本文件的修改历史由 Git 保存。
 
 ## 2. 已确定的产品边界
 
@@ -36,7 +36,7 @@
 
 ## 3. 当前计划与下一项工作
 
-唯一详细计划：[P1-A：SDK 与治理执行核心](docs/superpowers/plans/2026-09-29-p1a-sdk-governed-core.md)。任务顺序为 **Task 1 → Task 1B → Task 2–5**。Task 1 经 PR #2、Task 1B 经 PR #3、Task 2 经 PR #4、Task 3 经 PR #5、Task 4 经 PR #6 合入 `main`（`3461ad7`），Task 5 经 PR #7 合入（`148abaa`）。与计划的差异记录在计划各任务的“实测记录”中。
+P1-A 实施事实保留在 [P1-A：SDK 与治理执行核心](docs/superpowers/plans/2026-09-29-p1a-sdk-governed-core.md)。下一阶段唯一详细计划是 [P1-B：真实只读查询与双入口](docs/superpowers/plans/2026-09-30-p1b-starrocks-dual-entry.md)，顺序为 **真实模型 Gate 0 → SQLGuard → StarRocks Adapter → 受治理工具/Evidence → PostgreSQL v2 → 共享 ChannelService → Web → 飞书 → 正式入口 → P1 实战退出**。产品边界仍以 `ARCHITECTURE.md` 为唯一权威，当前证据仍以本文为准。
 
 **Task 1 已证明（离线、合成数据、scripted 模型）：**
 
@@ -96,7 +96,7 @@
 - 全局 tracing 被重新打开并挂上处理器时，本应用的一轮仍不产生任何 trace/span。
 - 启动时拒绝：缺少查询或诊断用途、Profile 没有对应数据策略、用途中的工具未登记、本地工具不是已登记的 `local/` 工具。
 
-**Task 5 首轮审查修复（针对 `6d3464d` 的 4 组 P1及后续四轮复审；`777b725` 复审通过）：**
+**Task 5 审查修复（从 `6d3464d` 到最终提交 `777b725`；复审通过并经 PR #7 合入）：**
 
 - 运行依赖绑定：`open_model` 只按 Profile 的 `api_key_ref` 解析凭据（没有另传密钥的参数，引用无法解析时不创建客户端、零请求），返回只能由它创建的 `ModelBinding`（Profile、SDK Model、设置、指纹），`Application` 只接受它，直接构造或传入裸 Model 均拒绝；`GovernedTools(evidence)` 的工具目录与授权取自证据存储本身，`Application` 不再单独接收证据存储；MCP 接入使用另一个治理对象时拒绝装配，远端零请求。应用测试改为经 `open_model` + HTTP mock 驱动真实 `OpenAIResponsesModel`。
 - 数据策略绑定：会话绑定 Profile 指纹与规范化的数据策略内容；同一 `data_policy_id` 下收窄 `model_tools` 或输入上限后，旧会话在首个模型调用前拒绝，内容不变的新应用照常回放。工具投影字段与容量的收窄由已有的证据策略指纹覆盖（Task 2/3 用例）。
@@ -138,7 +138,7 @@ CI integration job 设置 `SDK_TEST_POSTGRES_URL`，启动 `compose.sdk-test.yml
 - 未完成：没有一轮到达交付（工具结果后的类型化回答被 503 中断，之后免费额度耗尽返回 429）；追问时 Session 回放是否保留签名、Gemini 是否接受回放历史，诊断轮隐藏查询工具与澄清表达均未观察到。
 - 发现：测试用 `PROJECTIONS` 的模型可达投影只有 `rows`，模型看不到 `total`，不适合作为真实模型样例（脚本另配投影）；3.x 模型在此期间多次 503。
 
-**下一项：** 用户已决定 P1-A 以离线完成收尾。开始 P1-B 实施前，用可用额度的获准 Profile（Gemini 付费额度、OpenAI 或 DeepSeek）补完至少一个 Profile 的真实工具闭环与追问；同时细化 P1-B 计划。
+**下一项：** 完成 P1-B 计划审查阻断修订并对新的精确 SHA 增量复审。计划获准后，先用一个有额度的获准 Profile 完成 Gate 0：合成工具续轮到交付及经 `PolicySession` 的同会话追问；若失败则先形成独立修复切片，不能开始 SQLGuard 实施。
 
 P1-A 是内部核心。P1-B 才接真实查询与双入口并切换正式入口，P2 增加诊断，P3 做实际用户验收。环境缺失不阻塞独立离线任务，但不能跳过对应实战退出条件。
 

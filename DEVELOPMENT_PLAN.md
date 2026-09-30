@@ -66,7 +66,7 @@ P1 是开发切片，不冒充已经完成首版全部功能；首版在 P1–P3
 P1 分为两个顺序实施的小切片：
 
 1. **P1-A：SDK 与治理执行核心。** 真 Runner、模型 API、本地合成工具契约、Session 数据策略与最小 MCP 协议闭环，交付开发者可验证的运行核心。详细计划见 [P1-A 实施计划](docs/superpowers/plans/2026-09-29-p1a-sdk-governed-core.md)。这不是首版用户产品完成。
-2. **P1-B：真实查询与双入口。** 在同一运行核心增加 StarRocks Adapter/SQLGuard，接最小 Web 与飞书；移除过渡旧入口与打包依赖，完成 P1 全部退出条件。此片在 P1-A 验证后细化。
+2. **P1-B：真实查询与双入口。** 在同一运行核心增加 StarRocks Adapter/SQLGuard，接最小 Web 与飞书；移除过渡旧入口与打包依赖，完成 P1 全部退出条件。详细接口、依赖顺序、失败语义和逐片验收见 [P1-B 实施计划](docs/superpowers/plans/2026-09-30-p1b-starrocks-dual-entry.md)。
 
 真实模型先使用合成或获准脱敏数据尽早试跑，再接获准测试库：Task 1 应先建立真 Runner 的合成工具闭环，Task 1B 模型接入可用后即可做一次获准模型的协议试跑；Task 5 再验完整治理、Evidence 和 Session。早期协议试跑不代表产品路径通过。未获得模型或目标环境时可完成离线部分，但不关闭对应验收项。
 
