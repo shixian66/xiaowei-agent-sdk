@@ -5,6 +5,7 @@
 """
 
 import gzip
+import inspect
 import json
 from collections.abc import AsyncIterator, Callable, Iterator
 from dataclasses import dataclass, field
@@ -15,7 +16,7 @@ import pytest
 from agents import Agent, Model, Runner, function_tool
 from agents.exceptions import MaxTurnsExceeded, ModelBehaviorError
 from openai import APIStatusError, APITimeoutError
-from pydantic import BaseModel, SecretStr, ValidationError
+from pydantic import BaseModel, ValidationError
 
 from xiaowei.config import SecretRefError, resolve_secret_ref
 from xiaowei.model_api import (
@@ -222,6 +223,20 @@ def _agent(model: Model, profile: ModelProfile, executed: list[str]) -> Agent[No
     )
 
 
+_KEYS = {
+    OPENAI.profile_id: OPENAI_KEY,
+    GEMINI.profile_id: GEMINI_KEY,
+    DEEPSEEK.profile_id: DEEPSEEK_KEY,
+}
+
+
+@pytest.fixture(autouse=True)
+def profile_keys(monkeypatch: pytest.MonkeyPatch) -> None:
+    """每个 Profile 的凭据引用指向各自的假密钥；open_model 只按引用解析。"""
+    for profile in (OPENAI, GEMINI, DEEPSEEK):
+        monkeypatch.setenv(profile.api_key_ref.removeprefix("env:"), _KEYS[profile.profile_id])
+
+
 @pytest.fixture
 def no_ambient_openai_env(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
     for name in (
@@ -246,9 +261,8 @@ async def test_sdk_responses_and_chat_completions_tool_roundtrip(
     endpoint = Endpoint([_tool_call(profile), _text(profile, FINAL)])
     executed: list[str] = []
 
-    async with open_model(
-        profile, api_key=SecretStr(OPENAI_KEY), transport=endpoint.transport
-    ) as m:
+    async with open_model(profile, transport=endpoint.transport) as opened:
+        m = opened.model
         result = await Runner.run(_agent(m, profile, executed), "东区订单总数？", max_turns=4)
 
     assert executed == ["east"]
@@ -260,7 +274,7 @@ async def test_sdk_responses_and_chat_completions_tool_roundtrip(
     first, second = endpoint.bodies()
     for request in endpoint.requests:
         assert str(request.url).startswith(profile.base_url + "/")
-        assert request.headers["authorization"] == f"Bearer {OPENAI_KEY}"
+        assert request.headers["authorization"] == f"Bearer {_KEYS[profile.profile_id]}"
         # 期限来自 Profile，而不是 SDK / 客户端默认值。
         assert request.extensions["timeout"]["read"] == profile.request_timeout_seconds
 
@@ -292,9 +306,8 @@ async def test_parallel_tool_calls_are_disabled(
     profile: ModelProfile, no_ambient_openai_env: None
 ) -> None:
     endpoint = Endpoint([_text(profile, FINAL)])
-    async with open_model(
-        profile, api_key=SecretStr(OPENAI_KEY), transport=endpoint.transport
-    ) as m:
+    async with open_model(profile, transport=endpoint.transport) as opened:
+        m = opened.model
         await Runner.run(_agent(m, profile, []), "hi")
     assert endpoint.bodies()[0]["parallel_tool_calls"] is False
 
@@ -312,9 +325,8 @@ async def test_reasoning_effort_maps_to_the_selected_protocol(
 ) -> None:
     profile = profile.model_copy(update={"reasoning_effort": effort})
     endpoint = Endpoint([_text(profile, FINAL)])
-    async with open_model(
-        profile, api_key=SecretStr(OPENAI_KEY), transport=endpoint.transport
-    ) as m:
+    async with open_model(profile, transport=endpoint.transport) as opened:
+        m = opened.model
         await Runner.run(_agent(m, profile, []), "hi")
 
     value: Any = endpoint.bodies()[0]
@@ -338,7 +350,8 @@ async def test_missing_usage_is_not_recorded_as_zero(
     usage: dict[str, Any] | None, expected_raw: dict[str, Any] | None, no_ambient_openai_env: None
 ) -> None:
     endpoint = Endpoint([_chat_text(FINAL, usage)])
-    async with open_model(GEMINI, api_key=SecretStr(GEMINI_KEY), transport=endpoint.transport) as m:
+    async with open_model(GEMINI, transport=endpoint.transport) as opened:
+        m = opened.model
         result = await Runner.run(_agent(m, GEMINI, []), "hi")
 
     (response,) = result.raw_responses
@@ -357,9 +370,8 @@ async def test_missing_usage_is_not_recorded_as_zero(
 async def test_json_object_still_validates_output_type(no_ambient_openai_env: None) -> None:
     endpoint = Endpoint([_tool_call(DEEPSEEK), _chat_text(FINAL)])
     executed: list[str] = []
-    async with open_model(
-        DEEPSEEK, api_key=SecretStr(DEEPSEEK_KEY), transport=endpoint.transport
-    ) as m:
+    async with open_model(DEEPSEEK, transport=endpoint.transport) as opened:
+        m = opened.model
         result = await Runner.run(_agent(m, DEEPSEEK, executed), "东区订单总数？")
 
     assert executed == ["east"]
@@ -388,9 +400,8 @@ async def test_json_object_invalid_final_output_is_not_success(
     content: str | None, no_ambient_openai_env: None
 ) -> None:
     endpoint = Endpoint([_chat_text(content)])
-    async with open_model(
-        DEEPSEEK, api_key=SecretStr(DEEPSEEK_KEY), transport=endpoint.transport
-    ) as m:
+    async with open_model(DEEPSEEK, transport=endpoint.transport) as opened:
+        m = opened.model
         # 非法 JSON 由 output_type 校验拒绝；空内容不是最终输出，Runner 继续请求直到轮次上限。
         with pytest.raises((ModelBehaviorError, MaxTurnsExceeded)):
             await Runner.run(_agent(m, DEEPSEEK, []), "hi", max_turns=1)
@@ -412,9 +423,8 @@ async def test_incomplete_chat_result_is_rejected_before_the_sdk_sees_it(
     body = _chat_text(FINAL) if kind == "final-json" else _tool_call(profile)
     endpoint = Endpoint([_chat_finished(body, finish_reason)])
     executed: list[str] = []
-    async with open_model(
-        profile, api_key=SecretStr(OPENAI_KEY), transport=endpoint.transport
-    ) as m:
+    async with open_model(profile, transport=endpoint.transport) as opened:
+        m = opened.model
         with pytest.raises(ModelResponseRejectedError):
             await Runner.run(_agent(m, profile, executed), "hi")
     assert executed == []
@@ -441,7 +451,8 @@ async def test_chat_without_complete_choices_is_rejected(
     body: dict[str, Any], no_ambient_openai_env: None
 ) -> None:
     endpoint = Endpoint([body])
-    async with open_model(GEMINI, api_key=SecretStr(OPENAI_KEY), transport=endpoint.transport) as m:
+    async with open_model(GEMINI, transport=endpoint.transport) as opened:
+        m = opened.model
         with pytest.raises(ModelResponseRejectedError):
             await Runner.run(_agent(m, GEMINI, []), "hi")
     assert len(endpoint.requests) == 1
@@ -453,7 +464,8 @@ async def test_complete_chat_tool_call_is_executed(
 ) -> None:
     endpoint = Endpoint([_chat_finished(_tool_call(GEMINI), finish_reason), _chat_text(FINAL)])
     executed: list[str] = []
-    async with open_model(GEMINI, api_key=SecretStr(OPENAI_KEY), transport=endpoint.transport) as m:
+    async with open_model(GEMINI, transport=endpoint.transport) as opened:
+        m = opened.model
         result = await Runner.run(_agent(m, GEMINI, executed), "hi")
     assert executed == ["east"]
     assert result.final_output == TotalAnswer(total=100, note="ok")
@@ -468,7 +480,8 @@ async def test_incomplete_responses_result_is_rejected_by_the_sdk(
     body["incomplete_details"] = {"reason": "max_output_tokens"}
     endpoint = Endpoint([body])
     executed: list[str] = []
-    async with open_model(OPENAI, api_key=SecretStr(OPENAI_KEY), transport=endpoint.transport) as m:
+    async with open_model(OPENAI, transport=endpoint.transport) as opened:
+        m = opened.model
         with pytest.raises(ModelBehaviorError):
             await Runner.run(_agent(m, OPENAI, executed), "hi")
     assert executed == []
@@ -484,14 +497,37 @@ async def test_successful_response_must_be_json(
         200, headers={"content-type": "text/event-stream"}, content=b"data: {}\n\n"
     )
     endpoint = Endpoint([sse])
-    async with open_model(
-        profile, api_key=SecretStr(OPENAI_KEY), transport=endpoint.transport
-    ) as m:
+    async with open_model(profile, transport=endpoint.transport) as opened:
+        m = opened.model
         with pytest.raises(ModelResponseRejectedError):
             await Runner.run(_agent(m, profile, []), "hi")
 
 
 # ---- 凭据与端点隔离 ---------------------------------------------------------------------
+
+
+async def test_credential_comes_from_the_profile_reference(
+    monkeypatch: pytest.MonkeyPatch, no_ambient_openai_env: None
+) -> None:
+    """装配层不能给 Profile 另配凭据：密钥只按 Profile 自己的引用解析。"""
+    assert "api_key" not in inspect.signature(open_model).parameters
+    seen: list[httpx2.Request] = []
+
+    def handle(request: httpx2.Request) -> httpx2.Response:
+        seen.append(request)
+        return httpx2.Response(200, json=_responses_text(FINAL))
+
+    transport = httpx2.MockTransport(handle)
+    async with open_model(OPENAI, transport=transport) as opened:
+        await Runner.run(_agent(opened.model, OPENAI, []), "hi")
+    assert [r.headers["authorization"] for r in seen] == [f"Bearer {OPENAI_KEY}"]
+
+    # 引用无法解析：不创建客户端，零请求。
+    monkeypatch.delenv("XIAOWEI_TEST_OPENAI_KEY")
+    with pytest.raises(SecretRefError):
+        async with open_model(OPENAI, transport=transport):
+            pass
+    assert len(seen) == 1
 
 
 async def test_profiles_keep_keys_and_endpoints_separate(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -516,8 +552,9 @@ async def test_profiles_keep_keys_and_endpoints_separate(monkeypatch: pytest.Mon
         return httpx2.Response(200, json=replies[request.url.host])
 
     shared = httpx2.MockTransport(handle)
-    for profile, key in ((OPENAI, OPENAI_KEY), (GEMINI, GEMINI_KEY), (DEEPSEEK, DEEPSEEK_KEY)):
-        async with open_model(profile, api_key=SecretStr(key), transport=shared) as m:
+    for profile in (OPENAI, GEMINI, DEEPSEEK):
+        async with open_model(profile, transport=shared) as opened:
+            m = opened.model
             await Runner.run(_agent(m, profile, []), "hi")
 
     by_host = {r.url.host: r for r in seen}
@@ -558,9 +595,8 @@ async def test_ambient_headers_cannot_replace_protocol_headers(
         ),
     )
     endpoint = Endpoint([_text(profile, FINAL)])
-    async with open_model(
-        profile, api_key=SecretStr(OPENAI_KEY), transport=endpoint.transport
-    ) as m:
+    async with open_model(profile, transport=endpoint.transport) as opened:
+        m = opened.model
         await Runner.run(_agent(m, profile, []), "hi")
 
     (request,) = endpoint.requests
@@ -581,7 +617,8 @@ async def test_default_transport_ignores_tls_environment(
     missing = str(tmp_path / "missing-ca.pem")
     monkeypatch.setenv("SSL_CERT_FILE", missing)
     monkeypatch.setenv("SSL_CERT_DIR", missing)
-    async with open_model(GEMINI, api_key=SecretStr(GEMINI_KEY)) as m:
+    async with open_model(GEMINI) as opened:
+        m = opened.model
         assert isinstance(m, Model)
 
 
@@ -602,7 +639,8 @@ def test_profile_fingerprint_is_stable_and_has_no_secret() -> None:
 
 async def test_model_client_is_closed_on_exit(no_ambient_openai_env: None) -> None:
     endpoint = Endpoint([_chat_text(FINAL), _chat_text(FINAL)])
-    async with open_model(GEMINI, api_key=SecretStr(GEMINI_KEY), transport=endpoint.transport) as m:
+    async with open_model(GEMINI, transport=endpoint.transport) as opened:
+        m = opened.model
         await Runner.run(_agent(m, GEMINI, []), "hi")
     with pytest.raises(RuntimeError):
         await Runner.run(_agent(m, GEMINI, []), "hi")
@@ -658,9 +696,8 @@ async def test_api_failure_has_no_retry_or_fallback(
         target = endpoint if request.url.host == "gemini.test" else other
         return target.handle(request)
 
-    async with open_model(
-        GEMINI, api_key=SecretStr(GEMINI_KEY), transport=httpx2.MockTransport(route)
-    ) as m:
+    async with open_model(GEMINI, transport=httpx2.MockTransport(route)) as opened:
+        m = opened.model
         with pytest.raises(error) as excinfo:
             await Runner.run(_agent(m, GEMINI, executed), "hi")
 
@@ -676,7 +713,8 @@ async def test_upstream_error_body_reaches_the_raw_exception(no_ambient_openai_e
     因此原始异常不能直接展示或记录；应用出口（Task 5）必须映射为固定的受控失败。
     """
     endpoint = Endpoint([_status(400)])
-    async with open_model(GEMINI, api_key=SecretStr(GEMINI_KEY), transport=endpoint.transport) as m:
+    async with open_model(GEMINI, transport=endpoint.transport) as opened:
+        m = opened.model
         with pytest.raises(APIStatusError) as excinfo:
             await Runner.run(_agent(m, GEMINI, []), "hi")
     assert "upstream-detail" in str(excinfo.value)
@@ -689,9 +727,8 @@ async def test_upstream_error_body_reaches_the_raw_exception(no_ambient_openai_e
 async def test_request_over_limit_is_rejected_before_sending(no_ambient_openai_env: None) -> None:
     profile = GEMINI.model_copy(update={"max_request_bytes": 2_000})
     endpoint = Endpoint([_chat_text(FINAL)])
-    async with open_model(
-        profile, api_key=SecretStr(GEMINI_KEY), transport=endpoint.transport
-    ) as m:
+    async with open_model(profile, transport=endpoint.transport) as opened:
+        m = opened.model
         with pytest.raises(ModelRequestRejectedError) as excinfo:
             await Runner.run(_agent(m, profile, []), "x" * 5_000)
     assert endpoint.requests == []
@@ -718,9 +755,8 @@ async def test_response_over_limit_stops_reading_early(no_ambient_openai_env: No
     endpoint = Endpoint(
         [httpx2.Response(200, headers={"content-type": "application/json"}, stream=stream)]
     )
-    async with open_model(
-        profile, api_key=SecretStr(GEMINI_KEY), transport=endpoint.transport
-    ) as m:
+    async with open_model(profile, transport=endpoint.transport) as opened:
+        m = opened.model
         with pytest.raises(ModelResponseRejectedError):
             await Runner.run(_agent(m, profile, []), "hi")
     assert len(endpoint.requests) == 1
@@ -735,9 +771,8 @@ async def test_compressed_response_is_rejected(status: int, no_ambient_openai_en
     endpoint = Endpoint(
         [httpx2.Response(status, headers={"content-encoding": "gzip"}, stream=_ChunkStream([body]))]
     )
-    async with open_model(
-        profile, api_key=SecretStr(GEMINI_KEY), transport=endpoint.transport
-    ) as m:
+    async with open_model(profile, transport=endpoint.transport) as opened:
+        m = opened.model
         with pytest.raises(ModelResponseRejectedError):
             await Runner.run(_agent(m, profile, []), "hi")
     # 请求声明只接受未压缩内容。

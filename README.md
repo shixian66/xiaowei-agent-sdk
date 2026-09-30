@@ -61,6 +61,20 @@ MCP 负责标准化工具接入，不能替代业务授权。只有参数含义�
 
 凭据仅在本机或部署环境配置，不粘贴到对话、仓库、浏览器或日志。缺少真实环境时可以开发和离线验证，但不能标记对应实战验收完成。
 
+**P1-A 核心的开发验证**（不是产品入口；只用合成数据、脚本模型、loopback MCP fixture 与隔离的测试 PostgreSQL，不连接任何真实模型或外部服务）：
+
+```bash
+uv sync --locked --extra dev
+docker compose -p xiaowei-sdk-test -f compose.sdk-test.yml up -d --wait   # 或独立的 docker-compose
+SDK_TEST_POSTGRES_URL=postgresql+asyncpg://postgres@127.0.0.1:55432/postgres \
+  uv run --locked --extra dev python -m pytest tests/sdk_core -q
+uv run --locked --extra dev ruff check src/xiaowei tests/sdk_core
+uv run --locked --extra dev mypy src/xiaowei
+docker compose -p xiaowei-sdk-test -f compose.sdk-test.yml down -v
+```
+
+`SDK_TEST_POSTGRES_URL` 只能是上面这一个测试地址；未设置时数据库用例明确失败而不是跳过。CI 的 integration job 以同样方式运行完整测试。
+
 正式交付提供两容器的配置、启动、停机、升级、清理及备份恢复说明。小维连接已有 StarRocks 和模型 API，不要求在本机部署模型；更新应用镜像时保留 PostgreSQL 数据卷。当前旧 Compose 文件仍属于历史实现，不代表上述部署方案已经落地。
 
 ## 设计与开发

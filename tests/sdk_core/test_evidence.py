@@ -10,7 +10,7 @@ from agents import Agent, Runner
 from agents.exceptions import ModelBehaviorError
 from agents.extensions.memory import SQLAlchemySession
 from agents.testing import ModelCall, ModelStep, ScriptedModel, assistant_message, function_call
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 from sqlalchemy import inspect, text
 from sqlalchemy.engine import URL
 from sqlalchemy.ext.asyncio import AsyncEngine
@@ -45,6 +45,7 @@ from xiaowei.models import (
     Audience,
     Channel,
     RunContext,
+    ToolCall,
     ToolObservation,
 )
 from xiaowei.storage import (
@@ -94,13 +95,13 @@ async def test_four_data_boundaries(postgres_url: URL) -> None:
     grants.grant("alice", TOTAL_TOOL)
     async with ready_engine(postgres_url) as engine:
         evidence = store(engine, grants, clock)
-        governed = GovernedTools(catalog(), evidence, authorize=grants)
+        governed = GovernedTools(evidence)
         channel_views: dict[Channel, dict[Audience, str]] = {}
         ids: dict[Channel, str] = {}
         channel: Channel
         for channel in ("web", "feishu"):
             ctx = context(channel=channel, session=f"{channel}-1")
-            result = await governed.invoke(ctx, request(), lambda: adapter.execute(request()))
+            result = await governed.invoke(ctx, request(), adapter.execute)
             assert model_data(result.model_content)["evidence_id"] == result.evidence_id
             ids[channel] = result.evidence_id
             channel_views[channel] = {
@@ -303,7 +304,7 @@ async def test_facts_are_rendered_from_evidence(postgres_url: URL) -> None:
     ctx = context()
     async with ready_engine(postgres_url) as engine:
         evidence = store(engine, grants, clock)
-        governed = GovernedTools(catalog(), evidence, authorize=grants)
+        governed = GovernedTools(evidence)
 
         def agent(model: ScriptedModel) -> Agent[RunContext]:
             return Agent[RunContext](
@@ -374,7 +375,7 @@ async def test_model_text_cannot_carry_fields_the_channel_forbids(
     sessions: dict[str, str] = {}
     async with ready_engine(postgres_url) as engine:
         evidence = store(engine, grants, clock)
-        governed = GovernedTools(catalog(), evidence, authorize=grants)
+        governed = GovernedTools(evidence)
         channel: Channel
         for channel in ("feishu", "web"):
             ctx = context(channel=channel, session=f"{channel}-1")
@@ -520,6 +521,44 @@ async def test_evidence_is_bound_to_the_result_contract(postgres_url: URL) -> No
         retyped = store(engine, grants, clock, _with_result(_TextTotalResult, "汇总"))
         with pytest.raises(EvidenceUnavailableError):
             await retyped.project(saved, ctx, "model")
+
+
+class _NormalizedRegion(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    region: str
+
+    @field_validator("region")
+    @classmethod
+    def _canonical(cls, value: str) -> str:
+        return value.strip().upper()
+
+
+async def test_evidence_is_bound_to_the_executed_arguments(postgres_url: URL) -> None:
+    """校验器会改写参数：执行与证据都使用改写后的有效参数，历史中的原始调用仍可核对。"""
+    grants, clock, adapter = Grants(), Clock(), RecordingAdapter()
+    grants.grant("alice", TOTAL_TOOL)
+    contract = CONTRACTS[0].model_copy(
+        update={"input_schema": _NormalizedRegion.model_json_schema(), "policy_id": "normalized"}
+    )
+    policy = ToolPolicy(
+        policy_id="normalized", arguments=_NormalizedRegion, projections=PROJECTIONS
+    )
+    tools = ToolCatalog((contract,), (policy,))
+    async with ready_engine(postgres_url) as engine:
+        evidence = store(engine, grants, clock, tools)
+        ctx = context()
+        result = await GovernedTools(evidence).invoke(
+            ctx, request(region=" east "), adapter.execute
+        )
+        assert [r.arguments for r in adapter.calls] == [{"region": "EAST"}]
+
+        def call(region: str) -> ToolCall:
+            return ToolCall(call_id="call-1", tool_name="order_total", arguments={"region": region})
+
+        for same in (" east ", "EAST"):
+            await evidence.project(result.evidence_id, ctx, "session", call=call(same))
+        with pytest.raises(EvidenceUnavailableError):
+            await evidence.project(result.evidence_id, ctx, "session", call=call("west"))
 
 
 async def test_app_schema_version_is_checked(postgres_url: URL) -> None:

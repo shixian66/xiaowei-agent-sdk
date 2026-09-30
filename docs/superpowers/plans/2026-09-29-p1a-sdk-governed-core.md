@@ -200,7 +200,7 @@
 - 登记与目录对应：每个获准远端工具必须在工具目录中有 `server_id/tool` 契约且策略一致；`ToolPolicy` 增加可选的 `result` 结果模型，MCP 工具的策略必须提供；SDK 函数名与其他工具（本地工具以 `tool_id` 名字部分为函数名）冲突、`server_id` 重复时拒绝装配。`ToolContract` 增加可信的 `description`，交给模型的工具说明只取它，远端说明文字不交给模型。
 - 发现时核对：远端缺少登记的工具、同名多个、参数 schema 与契约不符（比较前去掉 `title`、`description` 与布尔的 `additionalProperties`；发出的参数总是先经禁止额外字段的策略参数模型校验。值为 schema 的 `additionalProperties` 即映射值类型保留比较）时只隐藏该工具。未登记的工具（含远端自称只读的）不开放。远端输出 schema 不比较，改为每次结果按结果模型校验。
 - 结果契约：`is_error`、任何非文本内容（图片、资源链接等，资源不读取）、非 JSON 对象、结构化内容缺失时文本不是恰好一段 JSON 对象、结果模型按 JSON 严格模式校验失败，一律拒绝；通过时只保留结果模型声明的字段，再进入 Evidence 投影。远端自带的 `evidence_id`/`xiaowei_evidence_ref` 等字段不在结果模型中，不保存也不交给模型，来源由 Evidence 的 `tool_id`（`server_id/tool`）记录。
-- 调用：薄 `FunctionTool` 解析参数（不是 JSON 对象时在治理前拒绝，远端零请求），经 `GovernedTools.invoke` 执行 `call_tool`。治理与证据的受控失败按 SDK 公开的 `default_tool_error_function` 交给模型，与本地 function tool 的默认行为一致；直接构造的 FunctionTool 抛错时 SDK 会中止整轮（实测），因此不能直接抛出。
+- 调用：薄 `FunctionTool` 解析参数（不是 JSON 对象时在治理前拒绝，远端零请求），经 `GovernedTools.invoke` 执行 `call_tool`。治理与证据的受控失败按 SDK 公开的 `default_tool_error_function` 交给模型，与本地 function tool 的默认行为一致；直接构造的 FunctionTool 抛错时 SDK 会中止整轮（实测），因此不能直接抛出。（Task 5 审查修复后改为：只有 I/O 前的拒绝交给模型，执行开始后的失败直接抛出以中止整轮，见 Task 5 实测记录。）
 - HTTP：`httpx_client_factory` 返回 `trust_env=False`、`follow_redirects=False` 的客户端，底层 transport 只向与登记端点完全相同的规范化 URL（含 userinfo、未解码路径与 query）发送，Bearer 凭据只在这里加上（认证引用在进入时解析，不进入 RunContext）。锁定版 MCP 客户端会自行跟随同源重定向、不跟随跨源重定向；同源不同路径由 transport 拒绝。响应按实际读取字节计数，超过上限即停止；请求 `Accept-Encoding: identity`，压缩响应拒绝（少量压缩字节可解压成很大的内容）。超限异常继承 `httpx2.StreamError`，MCP 客户端据此把本次请求解析为错误。
 - **超时拖垮连接（实现中发现并修复）：** 起初 HTTP 读取期限等于调用期限，读取超时在 MCP 客户端的 POST 任务中抛出，会关闭整个连接，此后该 Server 的所有调用失败。现单次调用期限由 SDK `client_session_timeout_seconds` 执行（它会中止对应的 POST），HTTP 读取期限为其 2 倍作兜底。补充断言“超时后的下一次调用照常执行”，修复前失败、修复后通过。越出端点或压缩编码在响应头阶段拒绝时仍会关闭该连接（失败方向安全）。
 - 生命周期：进入时逐个连接，认证引用无法解析、连接或列出工具失败只隐藏该 Server 的工具并记录类型（不记录异常消息）；退出时清空工具并关闭全部连接。锁定版 SDK 与 fixture 关闭时未见 `DELETE` 会话终止请求，关闭验证以服务端连接数归零和无遗留 asyncio 任务为准。
@@ -220,13 +220,37 @@
 
 应用提供方法 `Application.scope_for_turn(mode: Literal["query", "diagnose"], authorized_tools: frozenset[str], available_tools: frozenset[str]) -> frozenset[str]`，与构造时装配的可信用途允许表取交集；入口每条消息重新调用，模型不能调用它授权自己。本片测试以可信合成入口构造 context，P1-B 实现按钮/指令解析。关联编号复用应用生成的 `turn_id`，阶段日志通过标准库 logging 输出白名单字段。
 
-- [ ] 编写 `test_local_and_mcp_followup_through_real_runner`、`test_concurrent_sessions_are_isolated`、`test_same_session_reentry_is_rejected`、`test_invalid_answer_is_never_delivered_or_committed`、`test_timeout_does_not_replay_tools`。断言两轮工具结果可合法引用；不同渠道得到不同获准投影；一轮权限变化不能改写另一轮 Agent tools；超限/取消无成功 Delivery，未经校验内容既不提交 Session 也不发送。
-- [ ] 编写 `test_query_permission_is_not_inherited`、`test_commit_failure_does_not_replay_tools`、`test_stage_logs_contain_only_safe_metadata`。前一轮查询、下一轮默认诊断时，查询工具不出现且强行调用零执行；实际 PostgreSQL 提交边界注入保存失败后无成功交付，不自动补跑工具，必要时隔离会话；阶段日志共用请求编号且不含合成 SQL、结果、假凭据和原始异常。
-- [ ] 运行 `uv run --locked --extra dev python -m pytest tests/sdk_core/test_app.py -q`；预期新应用入口缺失失败。
-- [ ] 实现上述 `run_turn`：存储就绪检查、总期限、有限并发、同会话互斥、每轮权限表与受限阶段日志；校验 SDK 最终结构与 Evidence 后才提交 Session，交付前再复核权限和渠道。校验不通过返回受控失败，不把模型完整回答当报错输出。本片不发送外部渠道消息，不提供未校验结论流。P1-B 另验证 Session 已提交但最终结果保存失败的双存储边界，以及渠道投递状态。
-- [ ] 运行 `uv run --locked --extra dev python -m pytest tests/sdk_core -q`、`uv run --locked --extra dev ruff check src/xiaowei tests/sdk_core`、`uv run --locked --extra dev mypy src/xiaowei`；预期全部通过。CI 已在 Task 1 集成中接入同一隔离 PostgreSQL harness 和完整 pytest 命令；新测试须继续进入该路径，数据库缺失/不可用不能 skip 成全绿。旧检查标识为历史检查，不用旧通过率代替新能力验证。
+- [x] 编写 `test_local_and_mcp_followup_through_real_runner`、`test_concurrent_sessions_are_isolated`、`test_same_session_reentry_is_rejected`、`test_invalid_answer_is_never_delivered_or_committed`、`test_timeout_does_not_replay_tools`。断言两轮工具结果可合法引用；不同渠道得到不同获准投影；一轮权限变化不能改写另一轮 Agent tools；超限/取消无成功 Delivery，未经校验内容既不提交 Session 也不发送。
+- [x] 编写 `test_query_permission_is_not_inherited`、`test_commit_failure_does_not_replay_tools`、`test_stage_logs_contain_only_safe_metadata`。前一轮查询、下一轮默认诊断时，查询工具不出现且强行调用零执行；实际 PostgreSQL 提交边界注入保存失败后无成功交付，不自动补跑工具，必要时隔离会话；阶段日志共用请求编号且不含合成 SQL、结果、假凭据和原始异常。
+- [x] 运行 `uv run --locked --extra dev python -m pytest tests/sdk_core/test_app.py -q`；预期新应用入口缺失失败。（实测：移走 `app.py` 时收集阶段失败。）
+- [x] 实现上述 `run_turn`：存储就绪检查、总期限、有限并发、同会话互斥、每轮权限表与受限阶段日志；校验 SDK 最终结构与 Evidence 后才提交 Session，交付前再复核权限和渠道。校验不通过返回受控失败，不把模型完整回答当报错输出。本片不发送外部渠道消息，不提供未校验结论流。P1-B 另验证 Session 已提交但最终结果保存失败的双存储边界，以及渠道投递状态。
+- [x] 运行 `uv run --locked --extra dev python -m pytest tests/sdk_core -q`、`uv run --locked --extra dev ruff check src/xiaowei tests/sdk_core`、`uv run --locked --extra dev mypy src/xiaowei`；预期全部通过。CI 已在 Task 1 集成中接入同一隔离 PostgreSQL harness 和完整 pytest 命令；新测试须继续进入该路径，数据库缺失/不可用不能 skip 成全绿。旧检查标识为历史检查，不用旧通过率代替新能力验证。
 - [ ] 在已获准模型环境使用合成数据，按 OpenAI/Gemini/DeepSeek 的每个选定 Profile 分别验证本地和 MCP 工具调用、工具结果回传、真实 `AgentAnswer` 类型/Evidence 校验与下一轮 Session 追问；至少先完成一个 Profile。记录 SDK、端点标识、协议、模型/模式、用量和结果，其他组合如实标为未验证/不兼容；不因一家通过宣称全部支持，不用 scripted Model 或 HTTP mock 代替真实验证。更新 README 的核心开发验证命令、handoff 的精确 SHA/证据/缺口；保持正式 Web/飞书启动说明未交付的事实。
-- [ ] 仅暂存本任务文件，提交 `feat: compose verified SDK application core`。对整个 P1-A 分支做一次独立审查，修复阻塞项后细化 P1-B；不自动合并、部署或归档。
+- [x] 仅暂存本任务文件，提交 `feat: compose verified SDK application core`。（P1-A 整体独立审查待进行。）对整个 P1-A 分支做一次独立审查，修复阻塞项后细化 P1-B；不自动合并、部署或归档。
+
+**Task 5 实测记录（与计划的差异与发现）：**
+
+- 接口：`AppConfig(instructions, purposes, data_policies, session_limits, max_concurrent_turns)` 为可信配置；`purposes` 必须同时给出 `query` 与 `diagnose`；`data_policies` 以 Profile 的 `data_policy_id` 为键，`DataPolicy(input: SessionInputPolicy, model_tools: frozenset[ToolId])` 给出用户输入准入与结果可交给该模型的工具。`Application(config, *, profile, model, engine, governance, evidence, local_tools, mcp=None, clock)`：接收 Profile 本身，由它计算 SDK 设置与指纹，避免三者不一致；`local_tools` 把已登记的 `local/` 工具映射到应用绑定的 I/O 函数，由应用构造受治理的 FunctionTool，调用方不能传入未经治理的工具。`available_tools` 返回本地工具与已核对的 MCP 工具（`MCPIntegration.available_tool_ids`）。`scope_for_turn` 按计划签名，另与数据策略的 `model_tools` 取交集。`run_turn` 失败时抛出 `TurnError(reason)`，原因代码固定，取消照常传播。
+- 共享包装：本地工具与 MCP 工具共用新模块 `tools.py` 的 `governed_function_tool`（参数解析、`ToolRequest`、`GovernedTools.invoke`、受控失败交给模型）；`mcp.py` 改为调用它，行为不变（Task 4 的 22 项用例照常通过）。
+- 每轮：同会话已在运行即拒绝（`session_busy`），并发达到上限即拒绝（`busy`），检查与登记之间没有 await；不排队。本轮 Tool Scope 超出数据策略时拒绝；存储就绪检查不通过时拒绝；二者都在模型调用前。之后新建本轮的 SDK Agent（工具列表只属于这一轮）与 `PolicySession`，调用 `Runner.run`（`max_turns` 取自预算，`RunConfig` 显式关闭 tracing）。最终回答先单独经 Evidence 校验（原因明确为 `answer_rejected`），再 `commit_validated`（其内再校验一次），提交后按接收渠道与当前权限重新生成 `Delivery`。总期限取 `Budget.timeout_seconds`，覆盖包括提交在内的整轮；期限或取消发生在提交过程中时会话停在 `writing`，不再回放（失败方向安全）。`finally` 中清理本轮工具计数并释放会话。
+- 错误映射：会话、证据与存储错误沿用本包的固定信息；SDK、模型客户端与其他异常一律为固定的 `model_failed`，不带原因链——模型客户端会把上游错误体写进异常消息。模型强行调用本轮未展示的工具时，SDK 抛出 `ModelBehaviorError`，本轮失败且不提交。
+- 阶段日志：`xiaowei.app` 输出 `turn=<turn_id> stage=<阶段> reason=<原因代码> elapsed_ms=<毫秒>`，阶段为 received、storage_ready、answered、committed、delivered，或 refused、failed、cancelled；不记录消息、回答、工具数据或异常。未替换 LogRecord 工厂，Task 4 的 MCP 日志约束保持。
+- `ci.yml` 未修改：integration job 已在隔离 PostgreSQL 上运行完整 pytest，新用例自动进入该路径。
+- 反向验证 21 项：去掉同会话检查、并发上限，检查与登记之间加 await，各轮共用同一工具列表，用途或数据策略不取交集，`run_turn` 不查数据策略，不查存储就绪，没有总期限，交付前不复核，提交前不单独校验，不清理轮次计数，透传下层异常消息，保留原因链，日志含消息，开启 tracing，本地工具不按范围，输入策略不按 Profile，不校验 `local/` 前缀，不校验用途登记。20 项使对应用例失败。“透传下层消息”起初未被发现（没有用例的下层异常消息含敏感内容），补充“上游错误”用例后失败。“失败时 `discard_pending`”经变异证明不承重（每轮新建 PolicySession，暂存随对象丢弃），已删除。另把共享包装改为绕过治理，Task 4 与 Task 5 共 15 项用例失败。
+- **首轮独立审查修复（针对 `6d3464d` 的 4 组 P1）：**
+  - 运行依赖未绑定：`Application` 分别接收 Profile、裸 Model、治理、证据与 MCP，错误装配可让数据发往另一端点而会话记录另一 Profile，或让回放使用另一授权来源。`open_model` 改为返回只能由它创建的 `ModelBinding`；`Application(config, *, model: ModelBinding, engine, governance, local_tools, mcp=None, clock)` 不再接收 Profile 与证据存储；`GovernedTools(evidence)` 的目录与授权取自证据存储；MCP 接入的治理对象必须相同。应用测试改为 `open_model` + `httpx2.MockTransport` 驱动真实 `OpenAIResponsesModel`。
+  - 数据策略未绑定会话：会话绑定改为 Profile 指纹与规范化数据策略（输入准入、排序后的 `model_tools`）的组合摘要，写入原 `profile_fingerprint` 列；回放时逐条检查工具是否仍在策略内与此重复，未另加。
+  - 参数校验会转换类型且结果被丢弃（Task 2 存量）：`invoke` 以 `json.dumps(allow_nan=False)` + `model_validate_json(strict=True)` 校验，`execute` 签名改为接收规范化后的 `ToolRequest`；工具目录要求参数模型（含嵌套）`additionalProperties: false` 且全部字段必填。证据摘要仍按模型原始参数计算，与会话历史中的调用一致。
+  - 结果未知仍交给模型（Task 4 包装层）：`governed_function_tool` 只把 `ToolRejectedError` 交给模型；其他异常由 SDK 包装为 `UserError` 中止本轮，应用按原因链映射为 `tool_failed`。测试工具 `sdk_tool` 改为调用产品包装；Task 2 的执行期间撤权与 Task 4 的执行后失败用例相应改为断言本轮中止、模型只调用一次。
+  - 反向验证 13 项均使对应用例失败：不检查模型绑定类型、绑定可直接构造、不检查 MCP 治理一致、会话只绑定 Profile、绑定不含工具、不含输入策略、非严格校验、允许非有限数值、执行收到原始参数、允许默认值、允许未声明参数、执行后失败交给模型、不映射工具失败。首轮 20 项在新装配下重跑仍全部失败。
+  - 另发现（未扩项）：SDK 模型错误日志的内容隐去依赖 `OPENAI_AGENTS_DONT_LOG_MODEL_DATA` 的默认值，已加用例；显式关闭时会记录上游错误体。
+- **增量复审修复（针对 `cd79114` 的 2 组 P1）：**
+  - 凭据未绑定：`open_model(profile, *, transport=None)` 不再接收密钥，内部按 `profile.api_key_ref` 用 `resolve_secret_ref` 解析，失败时不创建客户端。测试经各 Profile 引用的环境变量提供假密钥。
+  - 运行时行为取自可覆盖的 schema、执行与证据两个参数来源：`normalize_arguments(policy, arguments)` 为唯一规范化入口（`strict=True`、`extra="forbid"`、`allow_nan=False`），`invoke` 以它的结果构造单一有效请求，交给执行与 `EvidenceStore.record`；`EvidenceStore.project(call=...)` 先用同一函数规范化历史参数再比较摘要。MCP 结果校验加 `extra="ignore"`。工具目录删除基于 schema 的额外字段与必填检查（前者由校验调用强制，后者改为按 Pydantic 运行时字段递归检查，并限定参数类型为基本类型、枚举、Literal、嵌套模型及其容器）。原“参数/结果模型允许额外字段即登记失败”的目录用例相应改为运行时用例：额外参数在 I/O 前拒绝，额外结果字段被忽略。
+  - 反向验证 8 项均使对应用例失败，见 handoff。
+- **第三、四轮复审修复（针对 `bdae614`、`0ce5b2f` 各 1 项 P1，同根）：** 严格校验之后以 `model_dump` 的输出作为有效数据，计算字段与自定义 serializer 可以加入契约外字段或改变类型（参数与 MCP 结果同根）。第三轮改为排除计算字段并把输出交回同一模型校验，第四轮复审证明同一模型的 before validator 能在 `extra="forbid"` 之前删掉 serializer 加的字段，二次校验不能证明输出合约。现在 `governance.contract_dump(validated)` 不调用模型的序列化，也不交回同一模型校验：按声明字段与类型从已校验实例递归生成 JSON，每个值独立核对（严格类型、有限浮点、嵌套模型只取声明类型的字段、枚举取值），不符抛 `ValueError`。`normalize_arguments` 与 `mcp._payload` 都经它生成；工具目录把参数与结果模型的字段类型限定在生成规则之内（映射键只能是 `str`，枚举与 Literal 取值为 JSON 基本类型）。错误分类沿用：参数在 I/O 前拒绝（回放时证据不可读），结果不合约本轮中止。
+- **第五轮复审修复（针对 `f79bba3` 的 2 项 P1、2 项 P2）：** 两个根因。（1）生成器按注解重新解释值，没有跟随校验出的实际值：根部取实例的运行时类型、联合类型按声明顺序取第一个能投影的分支、枚举/Literal 解包后绕过有限数值检查。改为 `contract_dump(model, validated)` 由调用方传入登记模型；模型、枚举与基本类型要求类型完全一致，联合类型因此只匹配实际分支；取字段失败转为 `ValueError`；`_json_scalar` 统一核对有限 JSON 基本值，登记（枚举成员、Literal 选项）与生成共用。与复审矩阵的一处差异：根对象被 validator 换成子类时，矩阵期望投影回登记字段，现实现受控拒绝（零 I/O）——子类投影与"联合类型跟随实际分支"冲突（`Base | Derived` 中 `Derived` 也是 `Base`），而替换登记模型只可能来自自定义 validator。（2）数据生成规则变化没有使旧证据失效：`_PROJECTION_RULE` 升为 `/5`，注释写明结果数据生成规则变化也须升级。
+- 未完成：真实模型验证（本会话没有获准的模型端点与凭据，三个 Profile 均未验证）；第五轮修复版本的独立复审。
 
 ## 完成定义与覆盖边界
 

@@ -1,12 +1,27 @@
 """Task 2：本地受治理工具。真 SDK Runner + ScriptedModel，治理拒绝时 recording adapter 零 I/O。"""
 
 import asyncio
-from typing import Any
+from datetime import datetime
+from enum import Enum
+from typing import Annotated, Any, Literal
 
 import pytest
-from agents import Agent, Runner
+from agents import Agent, Runner, UserError
 from agents.testing import ModelStep, ScriptedModel, assistant_message, function_call
-from pydantic import BaseModel, ConfigDict, ValidationError
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    PlainSerializer,
+    SerializerFunctionWrapHandler,
+    ValidationError,
+    computed_field,
+    create_model,
+    field_serializer,
+    field_validator,
+    model_serializer,
+    model_validator,
+)
 from sqlalchemy import event
 from sqlalchemy.engine import URL
 from tests.sdk_core.synthetic_tools import (
@@ -15,13 +30,13 @@ from tests.sdk_core.synthetic_tools import (
     PRIVATE_NOTE,
     PROJECTIONS,
     QUERY_TOOL,
+    START,
     TARGET,
     TOTAL_TOOL,
     Clock,
     Grants,
     RecordingAdapter,
     RegionArgs,
-    catalog,
     context,
     ready_engine,
     request,
@@ -29,6 +44,7 @@ from tests.sdk_core.synthetic_tools import (
     store,
 )
 
+from xiaowei.evidence import EvidenceUnavailableError
 from xiaowei.governance import (
     GovernedTools,
     Projection,
@@ -36,6 +52,7 @@ from xiaowei.governance import (
     ToolExecutionError,
     ToolPolicy,
     ToolRejectedError,
+    normalize_arguments,
 )
 from xiaowei.models import (
     Budget,
@@ -61,7 +78,7 @@ async def test_revoked_tool_never_reaches_io(postgres_url: URL) -> None:
     grants, adapter = Grants(), RecordingAdapter()
     grants.grant("alice", TOTAL_TOOL)
     async with ready_engine(postgres_url) as engine:
-        governed = GovernedTools(catalog(), store(engine, grants, Clock()), authorize=grants)
+        governed = GovernedTools(store(engine, grants, Clock()))
         ctx = context()
         assert TOTAL_TOOL in {c.tool_id for c in governed.allowed_contracts(ctx)}
 
@@ -104,26 +121,26 @@ async def test_revocation_after_io_withholds_result(postgres_url: URL, phase: st
 
             event.listen(engine.sync_engine, "before_cursor_execute", revoke_on_insert)
 
-        governed = GovernedTools(catalog(), store(engine, grants, Clock()), authorize=grants)
+        governed = GovernedTools(store(engine, grants, Clock()))
         model = ScriptedModel(
             [[function_call("order_total", {"region": "east"}, call_id="call-1")], _DONE]
         )
         agent = Agent[RunContext](
             name="governed", model=model, tools=[sdk_tool(governed, adapter, TOTAL_TOOL)]
         )
-        await Runner.run(agent, "东区订单？", context=context(max_tool_calls=1), max_turns=3)
+        # I/O 已发生、结果不能交给模型：本轮中止，模型没有续轮，也就不能在同一轮重试。
+        with pytest.raises(UserError) as aborted:
+            await Runner.run(agent, "东区订单？", context=context(max_tool_calls=1), max_turns=3)
+        assert isinstance(aborted.value.__cause__, EvidenceUnavailableError)
 
         # 结果未知不重试：同一轮再次调用因预算已用而拒绝，执行次数保持 1。
         with pytest.raises(ToolRejectedError):
-            await governed.invoke(
-                context(max_tool_calls=1), request(), lambda: adapter.execute(request())
-            )
+            await governed.invoke(context(max_tool_calls=1), request(), adapter.execute)
 
     assert len(adapter.calls) == 1
-    (output,) = _outputs(model, 1)
-    assert "当前无权读取" in output
+    assert len(model.calls) == 1
     for business in ('"total"', "100", '"rows"', "2026-09-01"):
-        assert business not in output
+        assert business not in str(aborted.value)
 
 
 def _reject_cases() -> list[Any]:
@@ -155,9 +172,9 @@ async def test_invalid_request_is_rejected_before_io(
     grants.grant("alice", TOTAL_TOOL, QUERY_TOOL)
     grants.grant("alice", TOTAL_TOOL, target=OTHER_TARGET)
     async with ready_engine(postgres_url) as engine:
-        governed = GovernedTools(catalog(), store(engine, grants, Clock()), authorize=grants)
+        governed = GovernedTools(store(engine, grants, Clock()))
         with pytest.raises(ToolRejectedError):
-            await governed.invoke(ctx, req, lambda: adapter.execute(req))
+            await governed.invoke(ctx, req, adapter.execute)
     assert adapter.calls == []
     # 结构性拒绝发生在授权回调之前，也不消耗预算。
     assert grants.checks == []
@@ -167,13 +184,13 @@ async def test_parallel_calls_share_one_budget(postgres_url: URL) -> None:
     grants, adapter = Grants(), RecordingAdapter()
     grants.grant("alice", TOTAL_TOOL)
     async with ready_engine(postgres_url) as engine:
-        governed = GovernedTools(catalog(), store(engine, grants, Clock()), authorize=grants)
+        governed = GovernedTools(store(engine, grants, Clock()))
 
         # 同一轮的两个并发调用：授权回调都通过后才预占预算，只有一个能执行。
         ctx = context(turn="t-gather", max_tool_calls=1)
         results = await asyncio.gather(
             *(
-                governed.invoke(ctx, r, lambda r=r: adapter.execute(r))
+                governed.invoke(ctx, r, adapter.execute)
                 for r in (request(call_id="a"), request(call_id="b"))
             ),
             return_exceptions=True,
@@ -206,7 +223,7 @@ async def test_parallel_calls_share_one_budget(postgres_url: URL) -> None:
             context(session="s2", turn="t-gather", max_tool_calls=1),
             context(subject="bob", turn="t-gather", max_tool_calls=1),
         ):
-            await governed.invoke(other, request(), lambda: adapter.execute(request()))
+            await governed.invoke(other, request(), adapter.execute)
         assert len(adapter.calls) == 5
 
         # 轮次结束清理计数；同一轮次标识不会被旧计数永久锁死，也不无限累积。
@@ -214,7 +231,7 @@ async def test_parallel_calls_share_one_budget(postgres_url: URL) -> None:
         await governed.invoke(
             context(turn="t-gather", max_tool_calls=1),
             request(),
-            lambda: adapter.execute(request()),
+            adapter.execute,
         )
         assert len(adapter.calls) == 6
 
@@ -223,11 +240,11 @@ async def test_execution_failure_is_bounded(postgres_url: URL) -> None:
     grants = Grants()
     grants.grant("alice", TOTAL_TOOL)
 
-    async def failing() -> Any:
+    async def failing(_: ToolRequest) -> Any:
         raise RuntimeError(f"db=postgres://u:pw@host/x {PRIVATE_NOTE}")
 
     async with ready_engine(postgres_url) as engine:
-        governed = GovernedTools(catalog(), store(engine, grants, Clock()), authorize=grants)
+        governed = GovernedTools(store(engine, grants, Clock()))
         with pytest.raises(ToolExecutionError) as excinfo:
             await governed.invoke(context(max_tool_calls=1), request(), failing)
         # 执行结果未知，不退还预算，也不自动重试。
@@ -237,6 +254,590 @@ async def test_execution_failure_is_bounded(postgres_url: URL) -> None:
     message = str(excinfo.value)
     assert "pw" not in message and PRIVATE_NOTE not in message
     assert excinfo.value.__cause__ is None and excinfo.value.__suppress_context__
+
+
+class _Window(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    days: int
+
+
+class _CountArgs(BaseModel):
+    # 策略作者的默认（宽松）配置：严格校验必须由治理层执行。
+    model_config = ConfigDict(extra="forbid")
+    count: int
+    window: _Window
+    ratio: float
+
+
+_COUNT_TOOL = "local/count_orders"
+
+
+def _count_catalog() -> ToolCatalog:
+    contract = ToolContract(
+        tool_id=_COUNT_TOOL,
+        target_id=TARGET,
+        input_schema=_CountArgs.model_json_schema(),
+        policy_id="synthetic.count",
+    )
+    policy = ToolPolicy(policy_id="synthetic.count", arguments=_CountArgs, projections=PROJECTIONS)
+    return ToolCatalog((contract,), (policy,))
+
+
+_VALID_COUNT = {"count": 7, "window": {"days": 3}, "ratio": 1}
+
+
+@pytest.mark.parametrize(
+    "arguments",
+    [
+        pytest.param({**_VALID_COUNT, "count": "7"}, id="string-number"),
+        pytest.param({**_VALID_COUNT, "window": {"days": "3"}}, id="nested-string-number"),
+        pytest.param({**_VALID_COUNT, "count": 7.0}, id="float-for-int"),
+        pytest.param({**_VALID_COUNT, "ratio": float("nan")}, id="nan"),
+        pytest.param({**_VALID_COUNT, "ratio": float("inf")}, id="infinity"),
+    ],
+)
+async def test_arguments_are_checked_strictly_before_io(
+    postgres_url: URL, arguments: dict[str, object]
+) -> None:
+    grants = Grants()
+    grants.grant("alice", _COUNT_TOOL)
+    executed: list[ToolRequest] = []
+    req = ToolRequest(
+        tool_id=_COUNT_TOOL,
+        target_id=TARGET,
+        call_id="c1",
+        tool_name="count_orders",
+        arguments=arguments,
+    )
+
+    async def run(validated: ToolRequest) -> ToolObservation:
+        executed.append(validated)
+        return ToolObservation(payload={"total": 1}, captured_at=START, truncated=False)
+
+    async with ready_engine(postgres_url) as engine:
+        tools = _count_catalog()
+        governed = GovernedTools(store(engine, grants, Clock(), tools))
+        with pytest.raises(ToolRejectedError):
+            await governed.invoke(context(tools=frozenset({_COUNT_TOOL})), req, run)
+    assert executed == []
+
+
+async def test_execution_receives_only_validated_arguments(postgres_url: URL) -> None:
+    grants = Grants()
+    grants.grant("alice", _COUNT_TOOL)
+    executed: list[ToolRequest] = []
+    req = ToolRequest(
+        tool_id=_COUNT_TOOL,
+        target_id=TARGET,
+        call_id="c1",
+        tool_name="count_orders",
+        arguments=_VALID_COUNT,
+    )
+
+    async def run(validated: ToolRequest) -> ToolObservation:
+        executed.append(validated)
+        return ToolObservation(payload={"total": 1}, captured_at=START, truncated=False)
+
+    async with ready_engine(postgres_url) as engine:
+        tools = _count_catalog()
+        governed = GovernedTools(store(engine, grants, Clock(), tools))
+        await governed.invoke(context(tools=frozenset({_COUNT_TOOL})), req, run)
+    (seen,) = executed
+    assert seen.arguments == {"count": 7, "window": {"days": 3}, "ratio": 1.0}
+    assert type(seen.arguments["ratio"]) is float
+
+
+class _LooseArgs(BaseModel):
+    region: str
+
+
+class _LooseWindow(BaseModel):
+    days: int
+
+
+class _NestedLooseArgs(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    window: _LooseWindow
+
+
+class _DisguisedExtraArgs(BaseModel):
+    # 运行时接收额外字段，schema 却声明禁止：目录不能凭 schema 判断。
+    model_config = ConfigDict(extra="allow", json_schema_extra={"additionalProperties": False})
+    region: str
+
+
+class _DisguisedWindow(BaseModel):
+    model_config = ConfigDict(extra="allow", json_schema_extra={"additionalProperties": False})
+    days: int
+
+
+class _NestedDisguisedArgs(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    window: _DisguisedWindow
+
+
+def _disguise_required(schema: dict[str, Any]) -> None:
+    schema["required"] = list(schema["properties"])
+
+
+class _DisguisedDefaultArgs(BaseModel):
+    # 运行时有默认值，schema 却声明必填：默认值不经校验，也不是模型给出的参数。
+    model_config = ConfigDict(extra="forbid", json_schema_extra=_disguise_required)
+    region: str = "west"
+
+
+class _DefaultWindow(BaseModel):
+    model_config = ConfigDict(extra="forbid", json_schema_extra=_disguise_required)
+    days: int = 30
+
+
+class _NestedDefaultArgs(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    window: _DefaultWindow
+
+
+def _single_catalog(arguments: type[BaseModel]) -> ToolCatalog:
+    contract = ToolContract(
+        tool_id=_COUNT_TOOL,
+        target_id=TARGET,
+        input_schema=arguments.model_json_schema(),
+        policy_id="synthetic.single",
+    )
+    policy = ToolPolicy(policy_id="synthetic.single", arguments=arguments, projections=PROJECTIONS)
+    return ToolCatalog((contract,), (policy,))
+
+
+@pytest.mark.parametrize(
+    ("arguments", "sent"),
+    [
+        pytest.param(_DisguisedExtraArgs, {"region": "east", "admin": True}, id="root-extra"),
+        pytest.param(
+            _NestedDisguisedArgs, {"window": {"days": 3, "admin": True}}, id="nested-extra"
+        ),
+        pytest.param(_DisguisedDefaultArgs, {}, id="root-default"),
+        pytest.param(_NestedDefaultArgs, {"window": {}}, id="nested-default"),
+        # 模型配置为默认（忽略额外字段）时同样拒绝，而不是静默丢弃。
+        pytest.param(_LooseArgs, {"region": "east", "admin": True}, id="root-ignore"),
+        pytest.param(_NestedLooseArgs, {"window": {"days": 3, "admin": True}}, id="nested-ignore"),
+    ],
+)
+async def test_runtime_argument_behaviour_is_not_taken_from_the_schema(
+    postgres_url: URL, arguments: type[BaseModel], sent: dict[str, object]
+) -> None:
+    """schema 可以被覆盖；额外字段与默认值按 Pydantic 运行时行为约束，I/O 前拒绝。"""
+    grants = Grants()
+    grants.grant("alice", _COUNT_TOOL)
+    executed: list[ToolRequest] = []
+
+    async def run(validated: ToolRequest) -> ToolObservation:
+        executed.append(validated)
+        return ToolObservation(payload={"total": 1}, captured_at=START, truncated=False)
+
+    req = ToolRequest(
+        tool_id=_COUNT_TOOL,
+        target_id=TARGET,
+        call_id="c1",
+        tool_name="count_orders",
+        arguments=sent,
+    )
+    try:
+        tools = _single_catalog(arguments)
+    except ValueError as exc:
+        assert "工具目录" in str(exc)  # 登记时拒绝：同样零 I/O
+        return
+    async with ready_engine(postgres_url) as engine:
+        governed = GovernedTools(store(engine, grants, Clock(), tools))
+        with pytest.raises(ToolRejectedError):
+            await governed.invoke(context(tools=frozenset({_COUNT_TOOL})), req, run)
+    assert executed == []
+
+
+class _ComputedArgs(BaseModel):
+    region: str
+
+    @computed_field  # type: ignore[prop-decorator]
+    @property
+    def privileged(self) -> bool:
+        return True
+
+
+class _ComputedWindow(BaseModel):
+    days: int
+
+    @computed_field  # type: ignore[prop-decorator]
+    @property
+    def privileged(self) -> bool:
+        return True
+
+
+class _NestedComputedArgs(BaseModel):
+    window: _ComputedWindow
+
+
+class _ValidatedArgs(BaseModel):
+    region: str
+
+    @field_validator("region")
+    @classmethod
+    def _canonical(cls, value: str) -> str:
+        return value.strip().upper()
+
+
+def _drop_privileged(data: Any) -> Any:
+    # 与增加字段的 serializer 配合：二次校验同一模型时先删掉它，``extra="forbid"`` 看不到。
+    return {k: v for k, v in data.items() if k != "privileged"} if isinstance(data, dict) else data
+
+
+class _FieldSerializedArgs(BaseModel):
+    region: str
+
+    @field_serializer("region")
+    def _as_object(self, value: str) -> dict[str, object]:
+        return {"region": value, "privileged": True}
+
+    @field_validator("region", mode="before")
+    @classmethod
+    def _unwrap(cls, value: Any) -> Any:
+        return value["region"] if isinstance(value, dict) else value
+
+
+class _ModelSerializedArgs(BaseModel):
+    region: str
+
+    @model_serializer(mode="wrap")
+    def _widen(self, handler: SerializerFunctionWrapHandler) -> dict[str, object]:
+        return {**handler(self), "privileged": True}
+
+    _mask = model_validator(mode="before")(_drop_privileged)
+
+
+class _SerializedWindow(BaseModel):
+    days: int
+
+    @model_serializer(mode="wrap")
+    def _widen(self, handler: SerializerFunctionWrapHandler) -> dict[str, object]:
+        return {**handler(self), "privileged": True}
+
+    _mask = model_validator(mode="before")(_drop_privileged)
+
+
+class _NestedSerializedArgs(BaseModel):
+    window: _SerializedWindow
+
+
+class _AnnotatedSerializedArgs(BaseModel):
+    region: Annotated[str, PlainSerializer(lambda value: {"privileged": True})]
+
+    @field_validator("region", mode="before")
+    @classmethod
+    def _unwrap(cls, value: Any) -> Any:
+        return "east" if isinstance(value, dict) else value
+
+
+class _ExcludedArgs(BaseModel):
+    region: str
+    scope: str = Field(exclude=True)
+
+    @model_validator(mode="before")
+    @classmethod
+    def _fill(cls, data: Any) -> Any:
+        # 二次校验时补回被 ``exclude`` 去掉的必填字段。
+        return {"scope": "all", **data} if isinstance(data, dict) else data
+
+
+class _PlainWindow(BaseModel):
+    days: int
+
+
+class _WiderWindow(_PlainWindow):
+    privileged: bool
+
+
+class _SubstitutedArgs(BaseModel):
+    window: _PlainWindow
+
+    @model_validator(mode="after")
+    def _widen(self) -> "_SubstitutedArgs":
+        self.window = _WiderWindow(days=self.window.days, privileged=True)
+        return self
+
+
+@pytest.mark.parametrize(
+    ("arguments", "sent", "effective"),
+    [
+        pytest.param(_ComputedArgs, {"region": "east"}, {"region": "east"}, id="root-computed"),
+        pytest.param(
+            _NestedComputedArgs,
+            {"window": {"days": 3}},
+            {"window": {"days": 3}},
+            id="nested-computed",
+        ),
+        pytest.param(
+            _FieldSerializedArgs, {"region": "east"}, {"region": "east"}, id="field-serializer"
+        ),
+        pytest.param(
+            _ModelSerializedArgs, {"region": "east"}, {"region": "east"}, id="root-model-serializer"
+        ),
+        pytest.param(
+            _NestedSerializedArgs,
+            {"window": {"days": 3}},
+            {"window": {"days": 3}},
+            id="nested-model-serializer",
+        ),
+        pytest.param(
+            _AnnotatedSerializedArgs,
+            {"region": "east"},
+            {"region": "east"},
+            id="annotated-serializer",
+        ),
+        pytest.param(
+            _ExcludedArgs,
+            {"region": "east", "scope": "narrow"},
+            {"region": "east", "scope": "narrow"},
+            id="excluded-field",
+        ),
+        # 对照：字段校验器的规范化照常生效，执行收到规范化后的值。
+        pytest.param(_ValidatedArgs, {"region": " east "}, {"region": "EAST"}, id="validator"),
+    ],
+)
+async def test_execution_receives_only_declared_field_values(
+    postgres_url: URL,
+    arguments: type[BaseModel],
+    sent: dict[str, object],
+    effective: dict[str, object],
+) -> None:
+    """有效参数按声明字段从已校验实例生成，不经模型自己的序列化与再次校验。
+
+    计算字段、serializer、``exclude`` 以及能让同一模型二次校验通过的 validator 组合都不能
+    向执行与证据加入或去掉字段、改变类型；证据按同一有效参数记录，回放时同样规范化。
+    """
+    grants = Grants()
+    grants.grant("alice", _COUNT_TOOL)
+    executed: list[ToolRequest] = []
+
+    async def run(validated: ToolRequest) -> ToolObservation:
+        executed.append(validated)
+        return ToolObservation(payload={"total": 1}, captured_at=START, truncated=False)
+
+    req = ToolRequest(
+        tool_id=_COUNT_TOOL,
+        target_id=TARGET,
+        call_id="c1",
+        tool_name="count_orders",
+        arguments=sent,
+    )
+    tools = _single_catalog(arguments)
+    async with ready_engine(postgres_url) as engine:
+        evidence = store(engine, grants, Clock(), tools)
+        await GovernedTools(evidence).invoke(context(tools=frozenset({_COUNT_TOOL})), req, run)
+    (seen,) = executed
+    assert seen.arguments == effective
+    assert normalize_arguments(tools.policy_for(tools.contracts[0]), sent) == effective
+
+
+class _RetypedArgs(BaseModel):
+    region: str
+
+    @model_validator(mode="after")
+    def _retype(self) -> "_RetypedArgs":
+        # 校验之后不经校验地改写字段（未开启 validate_assignment）：类型不再合约。
+        self.__dict__["region"] = {"privileged": True}
+        return self
+
+
+class _RetypedWindow(BaseModel):
+    days: int
+
+    @model_validator(mode="after")
+    def _retype(self) -> "_RetypedWindow":
+        self.__dict__["days"] = "3"
+        return self
+
+
+class _NestedRetypedArgs(BaseModel):
+    window: _RetypedWindow
+
+
+class _ReplacedArgs(BaseModel):
+    window: _PlainWindow
+
+    @model_validator(mode="after")
+    def _replace(self) -> "_ReplacedArgs":
+        self.__dict__["window"] = {"days": 3, "privileged": True}
+        return self
+
+
+class _InfiniteArgs(BaseModel):
+    ratio: float
+
+    @model_validator(mode="after")
+    def _overflow(self) -> "_InfiniteArgs":
+        self.__dict__["ratio"] = float("inf")
+        return self
+
+
+class _BoolForIntArgs(BaseModel):
+    days: int
+
+    @model_validator(mode="after")
+    def _retype(self) -> "_BoolForIntArgs":
+        self.__dict__["days"] = True  # bool 是 int 的子类，但不是整数参数
+        return self
+
+
+class _InfiniteListArgs(BaseModel):
+    ratios: dict[str, list[float]]
+
+    @model_validator(mode="after")
+    def _overflow(self) -> "_InfiniteListArgs":
+        self.ratios["east"][0] = float("inf")
+        return self
+
+
+class _Scale(Enum):
+    ONE = 1.0
+
+    @classmethod
+    def _missing_(cls, value: object) -> "_Scale":
+        # 动态成员：取值不在登记时可见的成员中，只能在生成时核对。
+        member = object.__new__(cls)
+        member._value_ = value
+        member._name_ = "DYNAMIC"
+        return member
+
+
+class _InfiniteEnumArgs(BaseModel):
+    scale: _Scale
+
+    @model_validator(mode="after")
+    def _overflow(self) -> "_InfiniteEnumArgs":
+        self.scale = _Scale(float("inf"))
+        return self
+
+
+class _RootArgs(BaseModel):
+    region: str
+
+    @model_validator(mode="after")
+    def _widen(self) -> "_RootArgs":
+        return _WiderRootArgs.model_construct(region=self.region, privileged=True)
+
+
+class _WiderRootArgs(_RootArgs):
+    privileged: bool
+
+
+class _Unrelated(BaseModel):
+    privileged: bool
+
+
+class _UnrelatedRootArgs(BaseModel):
+    region: str
+
+    @model_validator(mode="after")
+    def _replace(self) -> Any:
+        return _Unrelated(privileged=True)
+
+
+class _DictRootArgs(BaseModel):
+    region: str
+
+    @model_validator(mode="after")
+    def _replace(self) -> Any:
+        return {"region": self.region, "privileged": True}
+
+
+class _RemovedFieldArgs(BaseModel):
+    region: str
+
+    @model_validator(mode="after")
+    def _remove(self) -> "_RemovedFieldArgs":
+        del self.region
+        return self
+
+
+@pytest.mark.parametrize(
+    ("arguments", "sent"),
+    [
+        pytest.param(_RetypedArgs, {"region": "east"}, id="root-retyped"),
+        pytest.param(_NestedRetypedArgs, {"window": {"days": 3}}, id="nested-retyped"),
+        pytest.param(_InfiniteArgs, {"ratio": 1.5}, id="non-finite"),
+        pytest.param(_ReplacedArgs, {"window": {"days": 3}}, id="nested-replaced"),
+        pytest.param(_SubstitutedArgs, {"window": {"days": 3}}, id="nested-subclass"),
+        pytest.param(_RootArgs, {"region": "east"}, id="root-subclass"),
+        pytest.param(_UnrelatedRootArgs, {"region": "east"}, id="root-unrelated"),
+        pytest.param(_DictRootArgs, {"region": "east"}, id="root-dict"),
+        pytest.param(_RemovedFieldArgs, {"region": "east"}, id="missing-field"),
+        pytest.param(_InfiniteListArgs, {"ratios": {"east": [1.5]}}, id="nested-non-finite"),
+        pytest.param(_BoolForIntArgs, {"days": 3}, id="bool-for-int"),
+        pytest.param(_InfiniteEnumArgs, {"scale": 1.0}, id="enum-non-finite"),
+    ],
+)
+async def test_off_contract_values_never_reach_execution(
+    postgres_url: URL, arguments: type[BaseModel], sent: dict[str, object]
+) -> None:
+    """已校验实例不是登记的模型、缺字段或字段值不符合声明类型：执行前受控拒绝，零 I/O。"""
+    grants = Grants()
+    grants.grant("alice", _COUNT_TOOL)
+    executed: list[ToolRequest] = []
+
+    async def run(validated: ToolRequest) -> ToolObservation:
+        executed.append(validated)
+        return ToolObservation(payload={"total": 1}, captured_at=START, truncated=False)
+
+    req = ToolRequest(
+        tool_id=_COUNT_TOOL,
+        target_id=TARGET,
+        call_id="c1",
+        tool_name="count_orders",
+        arguments=sent,
+    )
+    async with ready_engine(postgres_url) as engine:
+        governed = GovernedTools(store(engine, grants, Clock(), _single_catalog(arguments)))
+        with pytest.raises(ToolRejectedError):
+            await governed.invoke(context(tools=frozenset({_COUNT_TOOL})), req, run)
+    assert executed == []
+
+
+class _Query(BaseModel):
+    region: str
+
+
+class _LimitedQuery(_Query):
+    limit: int
+
+
+def _envelope(annotation: Any) -> ToolPolicy:
+    tools = _single_catalog(create_model("_Envelope", value=(annotation, ...)))
+    return tools.policy_for(tools.contracts[0])
+
+
+_LIMITED = {"region": "east", "limit": 5}
+
+
+@pytest.mark.parametrize(
+    ("annotation", "value"),
+    [
+        pytest.param(_Query | _LimitedQuery, _LIMITED, id="base-first"),
+        pytest.param(_LimitedQuery | _Query, _LIMITED, id="derived-first"),
+        pytest.param(list[_Query | _LimitedQuery], [_LIMITED], id="list-of-union"),
+        pytest.param(list[_Query] | list[_LimitedQuery], [_LIMITED], id="union-of-lists"),
+        pytest.param(
+            dict[str, _Query] | dict[str, _LimitedQuery], {"q": _LIMITED}, id="union-of-dicts"
+        ),
+        pytest.param(float | int, 1, id="int-after-float"),
+        pytest.param(int | float, 1.5, id="float-after-int"),
+        # 对照：选中基类分支时照常只有基类字段。
+        pytest.param(_LimitedQuery | _Query, {"region": "east"}, id="base-selected"),
+    ],
+)
+def test_union_keeps_the_branch_pydantic_selected(annotation: Any, value: object) -> None:
+    """联合类型按已校验值的实际分支生成，不按声明顺序投影；不同参数的摘要因此可以区分。"""
+    policy = _envelope(annotation)
+    assert normalize_arguments(policy, {"value": value}) == {"value": value}
+    if value == _LIMITED:
+        other = {**_LIMITED, "limit": 99}
+        assert normalize_arguments(policy, {"value": other}) == {"value": other}
 
 
 class _Dependency:
@@ -277,7 +878,7 @@ async def test_diagnose_scope_hides_and_denies_query(postgres_url: URL) -> None:
     grants.grant("alice", TOTAL_TOOL, QUERY_TOOL)
     diagnose = context(tools=frozenset({TOTAL_TOOL}))
     async with ready_engine(postgres_url) as engine:
-        governed = GovernedTools(catalog(), store(engine, grants, Clock()), authorize=grants)
+        governed = GovernedTools(store(engine, grants, Clock()))
         assert [c.tool_id for c in governed.allowed_contracts(diagnose)] == [TOTAL_TOOL]
         assert {c.tool_id for c in governed.allowed_contracts(context())} == {
             TOTAL_TOOL,
@@ -305,8 +906,10 @@ class _OtherArgs(BaseModel):
     limit: int
 
 
-class _LooseArgs(BaseModel):
-    region: str
+class _DefaultArgs(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    # 默认值不经校验：可以是参数模型声明的类型之外的值。
+    region: str = 0  # type: ignore[assignment]
 
 
 class _Result(BaseModel):
@@ -315,22 +918,33 @@ class _Result(BaseModel):
     rows: int
 
 
-class _OpenResult(_Result):
-    model_config = ConfigDict(extra="allow")
-
-
-class _Detail(BaseModel):
-    model_config = ConfigDict(extra="allow")
-    memo: str
-
-
-class _NestedOpenResult(_Result):
-    detail: _Detail
-
-
 class _NarrowResult(BaseModel):
     region: str
     total: int
+
+
+class _KeyedArgs(BaseModel):
+    totals: dict[int, str]
+
+
+class _Unbounded(Enum):
+    SMALL = 1.0
+    UNBOUNDED = float("inf")
+
+
+class _InfiniteEnumMemberArgs(BaseModel):
+    ratio: _Unbounded
+
+
+class _InfiniteLiteralArgs(BaseModel):
+    ratio: Literal[1.0, float("inf")]  # type: ignore[valid-type]
+
+
+class _DatedResult(BaseModel):
+    region: str
+    total: int
+    rows: int
+    captured: datetime
 
 
 def _policy(**overrides: Any) -> ToolPolicy:
@@ -340,6 +954,12 @@ def _policy(**overrides: Any) -> ToolPolicy:
         "projections": PROJECTIONS,
     }
     return ToolPolicy(**{**fields, **overrides})
+
+
+def _with_schema(arguments: type[BaseModel]) -> tuple[ToolContract, ...]:
+    return tuple(
+        c.model_copy(update={"input_schema": arguments.model_json_schema()}) for c in CONTRACTS
+    )
 
 
 @pytest.mark.parametrize(
@@ -358,18 +978,26 @@ def _policy(**overrides: Any) -> ToolPolicy:
         ),
         pytest.param(CONTRACTS, (_policy(arguments=_OtherArgs),), id="schema-drift"),
         pytest.param(
-            tuple(
-                c.model_copy(update={"input_schema": _LooseArgs.model_json_schema()})
-                for c in CONTRACTS
-            ),
-            (_policy(arguments=_LooseArgs),),
-            id="extra-args-allowed",
+            _with_schema(_DefaultArgs), (_policy(arguments=_DefaultArgs),), id="argument-default"
         ),
         pytest.param((*CONTRACTS, CONTRACTS[0]), (_policy(),), id="duplicate-tool"),
-        # 结果模型决定远端数据中哪些成为事实：不能接收未声明字段，投影也只能取声明的字段。
-        pytest.param(CONTRACTS, (_policy(result=_OpenResult),), id="result-allows-extra"),
-        pytest.param(CONTRACTS, (_policy(result=_NestedOpenResult),), id="nested-result-extra"),
+        # 结果模型决定远端数据中哪些成为事实：投影只能取它声明的字段（未声明字段在校验时忽略）。
         pytest.param(CONTRACTS, (_policy(result=_NarrowResult),), id="projection-not-in-result"),
+        # 有效数据按声明类型生成：生成规则之外的类型在登记时拒绝，而不是每次调用时失败。
+        pytest.param(
+            _with_schema(_KeyedArgs), (_policy(arguments=_KeyedArgs),), id="argument-non-string-key"
+        ),
+        pytest.param(CONTRACTS, (_policy(result=_DatedResult),), id="result-unsupported-type"),
+        pytest.param(
+            _with_schema(_InfiniteLiteralArgs),
+            (_policy(arguments=_InfiniteLiteralArgs),),
+            id="non-finite-literal",
+        ),
+        pytest.param(
+            _with_schema(_InfiniteEnumMemberArgs),
+            (_policy(arguments=_InfiniteEnumMemberArgs),),
+            id="non-finite-enum-member",
+        ),
     ],
 )
 def test_catalog_rejects_unregistered_contracts(

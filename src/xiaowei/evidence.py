@@ -20,7 +20,14 @@ from sqlalchemy import text
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncEngine
 
-from xiaowei.governance import Authorizer, ToolCatalog, ToolPolicy, schema_shape
+from xiaowei.governance import (
+    Authorizer,
+    ToolCatalog,
+    ToolPolicy,
+    ToolRejectedError,
+    normalize_arguments,
+    schema_shape,
+)
 from xiaowei.models import (
     AgentAnswer,
     Audience,
@@ -43,8 +50,9 @@ _COLUMNS: Mapping[Audience, str] = {
 }
 # 模型可达的用途：模型文字会被保存进 Session、交付到渠道，Session 又回放给模型。
 _MODEL_REACHABLE: tuple[Audience, ...] = ("model", "session")
-# 投影或指纹规则变化时更新，使旧规则生成的证据不再可读。
-_PROJECTION_RULE = "model-reachable-shared/4"
+# 结果数据生成（``governance.contract_dump``）、投影或指纹规则变化时更新，使旧规则生成的
+# 证据不再可读。/5：结果改为按登记模型的声明字段生成，不再经模型自己的序列化。
+_PROJECTION_RULE = "model-reachable-shared/5"
 _UNAVAILABLE = "证据不存在、已过期或当前无权读取"
 _FACTS_HEADER = "查询结果（系统根据证据生成）"
 _ANALYSIS_HEADER = "分析建议（模型推断，未经系统核实）"
@@ -115,6 +123,14 @@ class EvidenceStore:
         self._clock = clock
         self._retention = timedelta(seconds=retention_seconds)
 
+    @property
+    def catalog(self) -> ToolCatalog:
+        return self._catalog
+
+    @property
+    def authorize(self) -> Authorizer:
+        return self._authorize
+
     async def record(
         self, ctx: RunContext, request: ToolRequest, observation: ToolObservation
     ) -> ToolResult:
@@ -173,17 +189,28 @@ class EvidenceStore:
     ) -> str:
         """按当前身份、范围与权限读取一种用途的获准内容。
 
-        给出 ``call`` 时证据还须由同一次调用生成：调用标识、SDK 函数名与规范化参数都一致；
-        Session 据此保证历史中的工具调用与其结果来源相符。
+        给出 ``call`` 时证据还须由同一次调用生成：调用标识、SDK 函数名一致，且历史中的参数经
+        当前策略规范化后就是证据记录的有效执行参数；Session 据此保证历史中的工具调用与其
+        结果来源相符。
         """
         record = await self._readable(evidence_id, ctx, audience)
         if call is not None and (
             record.call_id != call.call_id
             or record.tool_name != call.tool_name
-            or record.arguments_digest != _arguments_digest(call.arguments)
+            or record.arguments_digest != self._effective_digest(record, call.arguments)
         ):
             raise EvidenceUnavailableError
         return record.projections[audience]
+
+    def _effective_digest(self, record: EvidenceRecord, arguments: dict[str, object]) -> str:
+        contract = self._catalog.contract(record.tool_id)
+        if contract is None:
+            raise EvidenceUnavailableError
+        try:
+            effective = normalize_arguments(self._catalog.policy_for(contract), arguments)
+        except ToolRejectedError:
+            raise EvidenceUnavailableError from None
+        return _arguments_digest(effective)
 
     async def validate_answer(self, answer: AgentAnswer, ctx: RunContext) -> Delivery:
         """最终回答出口：核对引用关系与当前可读性，再为接收渠道生成内容。"""
