@@ -50,8 +50,9 @@ _COLUMNS: Mapping[Audience, str] = {
 }
 # 模型可达的用途：模型文字会被保存进 Session、交付到渠道，Session 又回放给模型。
 _MODEL_REACHABLE: tuple[Audience, ...] = ("model", "session")
-# 投影或指纹规则变化时更新，使旧规则生成的证据不再可读。
-_PROJECTION_RULE = "model-reachable-shared/4"
+# 结果数据生成（``governance.contract_dump``）、投影或指纹规则变化时更新，使旧规则生成的
+# 证据不再可读。/5：结果改为按登记模型的声明字段生成，不再经模型自己的序列化。
+_PROJECTION_RULE = "model-reachable-shared/5"
 _UNAVAILABLE = "证据不存在、已过期或当前无权读取"
 _FACTS_HEADER = "查询结果（系统根据证据生成）"
 _ANALYSIS_HEADER = "分析建议（模型推断，未经系统核实）"

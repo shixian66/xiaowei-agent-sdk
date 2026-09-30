@@ -19,6 +19,7 @@ from agents import Agent, Runner, Tool, UserError
 from agents.exceptions import ModelBehaviorError
 from agents.extensions.memory import SQLAlchemySession
 from agents.testing import ModelCall, ModelStep, ScriptedModel, assistant_message, function_call
+from mcp.types import CallToolResult
 from pydantic import (
     BaseModel,
     ConfigDict,
@@ -71,7 +72,7 @@ from xiaowei.governance import (
     ToolExecutionError,
     ToolPolicy,
 )
-from xiaowei.mcp import MCPIntegration
+from xiaowei.mcp import MCPIntegration, _payload
 from xiaowei.models import AgentAnswer, RunContext, ToolContract
 from xiaowei.session import PolicySession, SessionInputPolicy, SessionLimits
 
@@ -898,6 +899,26 @@ class _RetypedResult(BaseModel):
     detail: _RetypedDetail
 
 
+class _PlainDetail(BaseModel):
+    safe: str
+
+
+class _ReplacedRootResult(BaseModel):
+    key: str
+    detail: _PlainDetail
+
+    @model_validator(mode="after")
+    def _widen(self) -> "_ReplacedRootResult":
+        # 根对象换成子类：登记的结果契约仍是本类。
+        return _WiderRootResult.model_construct(
+            key=self.key, detail={"safe": self.detail.safe, "derived": _HOOKED}
+        )
+
+
+class _WiderRootResult(_ReplacedRootResult):
+    detail: dict[str, str]  # type: ignore[assignment]
+
+
 def _nested_catalog(result: type[BaseModel]) -> ToolCatalog:
     nested = ToolContract(
         tool_id="fixture/nested",
@@ -923,6 +944,7 @@ def _nested_catalog(result: type[BaseModel]) -> ToolCatalog:
         pytest.param(_NestedSerializedResult, True, id="nested-model-serializer"),
         pytest.param(_FieldSerializedResult, True, id="field-serializer"),
         pytest.param(_RetypedResult, False, id="nested-retyped"),
+        pytest.param(_ReplacedRootResult, False, id="root-replaced"),
     ],
 )
 async def test_result_hooks_cannot_add_content(
@@ -946,6 +968,43 @@ async def test_result_hooks_cannot_add_content(
     assert fixture.recorder.tool_calls == [("nested", {"key": "k1"})]
     assert _HOOKED not in seen(model)
     assert _HOOKED not in stored
+
+
+class _NotedDetail(_PlainDetail):
+    note: str
+
+
+class _BaseFirstResult(BaseModel):
+    key: str
+    detail: _PlainDetail | _NotedDetail
+
+
+class _DerivedFirstResult(BaseModel):
+    key: str
+    detail: _NotedDetail | _PlainDetail
+
+
+class _RatioResult(BaseModel):
+    key: str
+    ratio: float
+
+
+def _wire(content: dict[str, object]) -> CallToolResult:
+    return CallToolResult(content=[], structuredContent=content, isError=False)
+
+
+@pytest.mark.parametrize("result", [_BaseFirstResult, _DerivedFirstResult])
+def test_result_union_keeps_the_branch_pydantic_selected(result: type[BaseModel]) -> None:
+    noted = {"key": "k1", "detail": {"safe": "ok", "note": "n"}}
+    plain = {"key": "k1", "detail": {"safe": "ok"}}
+    assert _payload(_wire(noted), result) == noted
+    assert _payload(_wire(plain), result) == plain  # 对照：选中基类分支
+
+
+def test_non_finite_result_values_are_rejected() -> None:
+    assert _payload(_wire({"key": "k1", "ratio": 0.5}), _RatioResult)["ratio"] == 0.5
+    with pytest.raises(ValueError):
+        _payload(_wire({"key": "k1", "ratio": float("inf")}), _RatioResult)
 
 
 async def _until(condition: Callable[[], bool], timeout: float = 3.0) -> None:

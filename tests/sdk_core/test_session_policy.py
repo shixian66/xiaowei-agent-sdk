@@ -39,7 +39,8 @@ from tests.sdk_core.synthetic_tools import (
     store,
 )
 
-from xiaowei.evidence import EvidenceStore
+from xiaowei import evidence as evidence_module
+from xiaowei.evidence import AnswerRejectedError, EvidenceStore, EvidenceUnavailableError
 from xiaowei.governance import GovernedTools, Projection, ToolCatalog, ToolPolicy
 from xiaowei.model_api import ModelProfile, profile_fingerprint
 from xiaowei.models import AgentAnswer, RunContext
@@ -287,6 +288,32 @@ async def test_replay_rechecks_permissions(postgres_url: URL, change: str) -> No
         h.grants.grant("alice", TOTAL_TOOL)
         followup, _ = await h.turn(context(turn="t3"), [_cite()])
     assert len(followup.calls) == 1
+
+
+# 结果数据改为按声明字段生成（不经模型自己的序列化）之前的证据规则版本。
+_BEFORE_DECLARED_FIELD_DATA = "model-reachable-shared/4"
+
+
+async def test_evidence_from_older_data_rules_cannot_replay(
+    postgres_url: URL, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """旧规则生成的证据可能含现在不允许的内容：回放在首个模型调用前拒绝，工具不重跑。"""
+    async with harness(postgres_url) as h:
+        with monkeypatch.context() as older:
+            older.setattr(evidence_module, "_PROJECTION_RULE", _BEFORE_DECLARED_FIELD_DATA)
+            _, first = await h.turn(context(), [_call(), _cite()])
+        answer = first.final_output
+        ctx = context(turn="t2")
+        with pytest.raises(EvidenceUnavailableError):
+            await h.evidence.project(answer.evidence_ids[0], ctx, "model")
+        with pytest.raises(AnswerRejectedError):
+            await h.evidence.validate_answer(answer, ctx)
+        await h.refused(ctx)
+        # 对照：当前规则写入的会话照常追问。
+        await h.turn(context(session="s2"), [_call(), _cite()])
+        followup, _ = await h.turn(context(session="s2", turn="t2"), [_cite()])
+    assert len(followup.calls) == 1
+    assert len(h.adapter.calls) == 2
 
 
 async def test_invalid_final_never_persists(postgres_url: URL) -> None:

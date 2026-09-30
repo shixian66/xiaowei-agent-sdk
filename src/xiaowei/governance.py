@@ -243,28 +243,34 @@ def normalize_arguments(policy: ToolPolicy, arguments: Mapping[str, object]) -> 
         validated = policy.arguments.model_validate_json(
             json.dumps(arguments, allow_nan=False), strict=True, extra="forbid"
         )
-        return contract_dump(validated)
+        return contract_dump(policy.arguments, validated)
     except (ValueError, TypeError):
         raise ToolRejectedError("参数不符合工具契约") from None
 
 
-def contract_dump(validated: BaseModel) -> dict[str, object]:
-    """已校验模型交给 I/O、模型与证据的 JSON 数据：按声明字段与类型从实例递归生成。
+def contract_dump(model: type[BaseModel], validated: object) -> dict[str, object]:
+    """已校验数据交给 I/O、模型与证据的 JSON：按登记模型的声明字段与类型递归生成。
 
     不调用模型自己的序列化（计算字段、自定义 serializer、``exclude`` 都不参与），也不把
-    输出交回同一模型校验（它的 validator 可以掩盖不合约的输出）。每个值按字段声明的类型
-    独立核对：严格类型、嵌套模型只取声明类型的字段、枚举取其值；不符时抛出 ``ValueError``。
+    输出交回同一模型校验（它的 validator 可以掩盖不合约的输出）。字段取自登记的 ``model``
+    而不是实例的运行时类型；每个值按声明类型独立核对，模型、枚举与基本类型要求类型完全
+    一致（子类或替换的对象不算），联合类型因此只匹配实际校验出的分支；数值须有限。
+    不符时抛出 ``ValueError``。
     """
-    return _model_data(validated, type(validated))
+    return _model_data(validated, model)
 
 
 def _model_data(value: object, model: type[BaseModel]) -> dict[str, object]:
-    if not isinstance(value, model):
+    if type(value) is not model:
         raise ValueError("字段值不符合声明类型")
-    return {
-        name: _json_value(getattr(value, name), field.annotation)
-        for name, field in model.model_fields.items()
-    }
+    data = {}
+    for name, field in model.model_fields.items():
+        try:
+            item = getattr(value, name)
+        except AttributeError:
+            raise ValueError("字段值不符合声明类型") from None
+        data[name] = _json_value(item, field.annotation)
+    return data
 
 
 def _json_value(value: object, annotation: object) -> object:
@@ -275,8 +281,10 @@ def _json_value(value: object, annotation: object) -> object:
     if origin is Literal:
         for option in args:
             if type(value) is type(option) and value == option:
+                # 选项在登记时已核对为有限 JSON 基本值。
                 return option.value if isinstance(option, enum.Enum) else option
     elif origin in (Union, types.UnionType):
+        # 类型完全一致时，同一个值能匹配的分支输出相同：顺序不影响结果。
         for option in args:
             try:
                 return _json_value(value, option)
@@ -291,17 +299,11 @@ def _json_value(value: object, annotation: object) -> object:
             return [_json_value(item, arg) for item, arg in zip(value, args, strict=True)]
     elif origin is dict and isinstance(value, dict):
         return {_json_value(k, args[0]): _json_value(v, args[1]) for k, v in value.items()}
-    elif isinstance(annotation, type):
+    elif isinstance(annotation, type) and type(value) is annotation:
         if issubclass(annotation, BaseModel):
             return _model_data(value, annotation)
-        if issubclass(annotation, enum.Enum):
-            if isinstance(value, annotation):
-                return value.value
-        elif annotation is float:
-            if type(value) is float and math.isfinite(value):
-                return value
-        elif type(value) is annotation:
-            return value
+        if issubclass(annotation, enum.Enum) or annotation in _SCALARS:
+            return _json_scalar(value)
     raise ValueError("字段值不符合声明类型")
 
 
@@ -318,12 +320,12 @@ def _supported_model(model: type[BaseModel], *, required: bool) -> bool:
 
 
 def _supported_type(annotation: object, required: bool) -> bool:
-    """JSON 基本类型、取值为 JSON 基本类型的枚举与 Literal、嵌套模型，及它们的容器/联合
+    """JSON 基本类型、取值为有限 JSON 基本值的枚举与 Literal、嵌套模型，及它们的容器/联合
     （映射的键只能是 ``str``）。``contract_dump`` 只能按这些类型核对与生成数据；其他结构
     （数据类等）的默认值与额外字段规则也无法在这里核对，不接受。"""
     origin, args = get_origin(annotation), get_args(annotation)
     if origin is Literal:
-        return all(_json_scalar(option) for option in args)
+        return all(_is_json_scalar(option) for option in args)
     if origin is Annotated:
         return _supported_type(args[0], required)
     if origin is dict:
@@ -334,15 +336,26 @@ def _supported_type(annotation: object, required: bool) -> bool:
         if issubclass(annotation, BaseModel):
             return _supported_model(annotation, required=required)
         if issubclass(annotation, enum.Enum):
-            return all(_json_scalar(member) for member in annotation)
+            return all(_is_json_scalar(member) for member in annotation)
         return annotation in _SCALARS
     return False
 
 
-def _json_scalar(value: object) -> bool:
+def _json_scalar(value: object) -> object:
+    """JSON 基本值（枚举取其值）；非基本类型或非有限数值抛出 ``ValueError``。登记与生成共用。"""
     if isinstance(value, enum.Enum):
         value = value.value
-    return type(value) in _SCALARS
+    if type(value) not in _SCALARS or (type(value) is float and not math.isfinite(value)):
+        raise ValueError("字段值不符合声明类型")
+    return value
+
+
+def _is_json_scalar(value: object) -> bool:
+    try:
+        _json_scalar(value)
+    except ValueError:
+        return False
+    return True
 
 
 def _in_scope(ctx: RunContext, contract: ToolContract) -> bool:

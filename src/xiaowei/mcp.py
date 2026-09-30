@@ -355,7 +355,7 @@ def _payload(result: CallToolResult, model: type[BaseModel]) -> dict[str, object
         if len(texts) != 1:
             raise ValueError("MCP 结果不符合登记契约")
         raw = texts[0]
-    return contract_dump(model.model_validate_json(raw, strict=True, extra="ignore"))
+    return contract_dump(model, model.model_validate_json(raw, strict=True, extra="ignore"))
 
 
 class _WireSafeFactory:

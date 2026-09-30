@@ -2,7 +2,8 @@
 
 import asyncio
 from datetime import datetime
-from typing import Annotated, Any
+from enum import Enum
+from typing import Annotated, Any, Literal
 
 import pytest
 from agents import Agent, Runner, UserError
@@ -15,6 +16,7 @@ from pydantic import (
     SerializerFunctionWrapHandler,
     ValidationError,
     computed_field,
+    create_model,
     field_serializer,
     field_validator,
     model_serializer,
@@ -594,12 +596,6 @@ class _SubstitutedArgs(BaseModel):
             {"region": "east", "scope": "narrow"},
             id="excluded-field",
         ),
-        pytest.param(
-            _SubstitutedArgs,
-            {"window": {"days": 3}},
-            {"window": {"days": 3}},
-            id="substituted-subclass",
-        ),
         # 对照：字段校验器的规范化照常生效，执行收到规范化后的值。
         pytest.param(_ValidatedArgs, {"region": " east "}, {"region": "EAST"}, id="validator"),
     ],
@@ -680,6 +676,86 @@ class _InfiniteArgs(BaseModel):
         return self
 
 
+class _BoolForIntArgs(BaseModel):
+    days: int
+
+    @model_validator(mode="after")
+    def _retype(self) -> "_BoolForIntArgs":
+        self.__dict__["days"] = True  # bool 是 int 的子类，但不是整数参数
+        return self
+
+
+class _InfiniteListArgs(BaseModel):
+    ratios: dict[str, list[float]]
+
+    @model_validator(mode="after")
+    def _overflow(self) -> "_InfiniteListArgs":
+        self.ratios["east"][0] = float("inf")
+        return self
+
+
+class _Scale(Enum):
+    ONE = 1.0
+
+    @classmethod
+    def _missing_(cls, value: object) -> "_Scale":
+        # 动态成员：取值不在登记时可见的成员中，只能在生成时核对。
+        member = object.__new__(cls)
+        member._value_ = value
+        member._name_ = "DYNAMIC"
+        return member
+
+
+class _InfiniteEnumArgs(BaseModel):
+    scale: _Scale
+
+    @model_validator(mode="after")
+    def _overflow(self) -> "_InfiniteEnumArgs":
+        self.scale = _Scale(float("inf"))
+        return self
+
+
+class _RootArgs(BaseModel):
+    region: str
+
+    @model_validator(mode="after")
+    def _widen(self) -> "_RootArgs":
+        return _WiderRootArgs.model_construct(region=self.region, privileged=True)
+
+
+class _WiderRootArgs(_RootArgs):
+    privileged: bool
+
+
+class _Unrelated(BaseModel):
+    privileged: bool
+
+
+class _UnrelatedRootArgs(BaseModel):
+    region: str
+
+    @model_validator(mode="after")
+    def _replace(self) -> Any:
+        return _Unrelated(privileged=True)
+
+
+class _DictRootArgs(BaseModel):
+    region: str
+
+    @model_validator(mode="after")
+    def _replace(self) -> Any:
+        return {"region": self.region, "privileged": True}
+
+
+class _RemovedFieldArgs(BaseModel):
+    region: str
+
+    @model_validator(mode="after")
+    def _remove(self) -> "_RemovedFieldArgs":
+        del self.region
+        return self
+
+
 @pytest.mark.parametrize(
     ("arguments", "sent"),
     [
@@ -687,12 +763,20 @@ class _InfiniteArgs(BaseModel):
         pytest.param(_NestedRetypedArgs, {"window": {"days": 3}}, id="nested-retyped"),
         pytest.param(_InfiniteArgs, {"ratio": 1.5}, id="non-finite"),
         pytest.param(_ReplacedArgs, {"window": {"days": 3}}, id="nested-replaced"),
+        pytest.param(_SubstitutedArgs, {"window": {"days": 3}}, id="nested-subclass"),
+        pytest.param(_RootArgs, {"region": "east"}, id="root-subclass"),
+        pytest.param(_UnrelatedRootArgs, {"region": "east"}, id="root-unrelated"),
+        pytest.param(_DictRootArgs, {"region": "east"}, id="root-dict"),
+        pytest.param(_RemovedFieldArgs, {"region": "east"}, id="missing-field"),
+        pytest.param(_InfiniteListArgs, {"ratios": {"east": [1.5]}}, id="nested-non-finite"),
+        pytest.param(_BoolForIntArgs, {"days": 3}, id="bool-for-int"),
+        pytest.param(_InfiniteEnumArgs, {"scale": 1.0}, id="enum-non-finite"),
     ],
 )
 async def test_off_contract_values_never_reach_execution(
     postgres_url: URL, arguments: type[BaseModel], sent: dict[str, object]
 ) -> None:
-    """已校验实例的字段值不符合声明类型：执行前拒绝，零 I/O。"""
+    """已校验实例不是登记的模型、缺字段或字段值不符合声明类型：执行前受控拒绝，零 I/O。"""
     grants = Grants()
     grants.grant("alice", _COUNT_TOOL)
     executed: list[ToolRequest] = []
@@ -713,6 +797,47 @@ async def test_off_contract_values_never_reach_execution(
         with pytest.raises(ToolRejectedError):
             await governed.invoke(context(tools=frozenset({_COUNT_TOOL})), req, run)
     assert executed == []
+
+
+class _Query(BaseModel):
+    region: str
+
+
+class _LimitedQuery(_Query):
+    limit: int
+
+
+def _envelope(annotation: Any) -> ToolPolicy:
+    tools = _single_catalog(create_model("_Envelope", value=(annotation, ...)))
+    return tools.policy_for(tools.contracts[0])
+
+
+_LIMITED = {"region": "east", "limit": 5}
+
+
+@pytest.mark.parametrize(
+    ("annotation", "value"),
+    [
+        pytest.param(_Query | _LimitedQuery, _LIMITED, id="base-first"),
+        pytest.param(_LimitedQuery | _Query, _LIMITED, id="derived-first"),
+        pytest.param(list[_Query | _LimitedQuery], [_LIMITED], id="list-of-union"),
+        pytest.param(list[_Query] | list[_LimitedQuery], [_LIMITED], id="union-of-lists"),
+        pytest.param(
+            dict[str, _Query] | dict[str, _LimitedQuery], {"q": _LIMITED}, id="union-of-dicts"
+        ),
+        pytest.param(float | int, 1, id="int-after-float"),
+        pytest.param(int | float, 1.5, id="float-after-int"),
+        # 对照：选中基类分支时照常只有基类字段。
+        pytest.param(_LimitedQuery | _Query, {"region": "east"}, id="base-selected"),
+    ],
+)
+def test_union_keeps_the_branch_pydantic_selected(annotation: Any, value: object) -> None:
+    """联合类型按已校验值的实际分支生成，不按声明顺序投影；不同参数的摘要因此可以区分。"""
+    policy = _envelope(annotation)
+    assert normalize_arguments(policy, {"value": value}) == {"value": value}
+    if value == _LIMITED:
+        other = {**_LIMITED, "limit": 99}
+        assert normalize_arguments(policy, {"value": other}) == {"value": other}
 
 
 class _Dependency:
@@ -802,6 +927,19 @@ class _KeyedArgs(BaseModel):
     totals: dict[int, str]
 
 
+class _Unbounded(Enum):
+    SMALL = 1.0
+    UNBOUNDED = float("inf")
+
+
+class _InfiniteEnumMemberArgs(BaseModel):
+    ratio: _Unbounded
+
+
+class _InfiniteLiteralArgs(BaseModel):
+    ratio: Literal[1.0, float("inf")]  # type: ignore[valid-type]
+
+
 class _DatedResult(BaseModel):
     region: str
     total: int
@@ -850,6 +988,16 @@ def _with_schema(arguments: type[BaseModel]) -> tuple[ToolContract, ...]:
             _with_schema(_KeyedArgs), (_policy(arguments=_KeyedArgs),), id="argument-non-string-key"
         ),
         pytest.param(CONTRACTS, (_policy(result=_DatedResult),), id="result-unsupported-type"),
+        pytest.param(
+            _with_schema(_InfiniteLiteralArgs),
+            (_policy(arguments=_InfiniteLiteralArgs),),
+            id="non-finite-literal",
+        ),
+        pytest.param(
+            _with_schema(_InfiniteEnumMemberArgs),
+            (_policy(arguments=_InfiniteEnumMemberArgs),),
+            id="non-finite-enum-member",
+        ),
     ],
 )
 def test_catalog_rejects_unregistered_contracts(

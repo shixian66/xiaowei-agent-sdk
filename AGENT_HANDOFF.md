@@ -12,7 +12,7 @@
 | 本地目录 / 分支 | `/Users/kloenguyen/Desktop/agent-SDK` / `claude/p1a-task5-app-core`（从 `main` 的 `3461ad7` 分出；`main` 已包含 Task 1–4） |
 | M5 历史起点 | `372c381f44ecfa1fa53961f137d0058033cbd805`；不是远端当前 main 的核验结论 |
 | 本次实施起点 | `3461ad73dae35684d010bb4f541e39db7e5960af`（PR #6 合并后的 `main`）；开始时工作树干净 |
-| 当前阶段 | P1-A Task 1（PR #2）、Task 1B（PR #3）、Task 2（PR #4）与 Task 3（PR #5）与 Task 4（PR #6，两轮审查修复后合入）已在 `main`；Task 5（组合可验证的运行核心）在本分支完成离线实现；首轮独立审查（`6d3464d`）的 4 组 P1、增量复审（`cd79114`）的 2 组 P1 与第三轮（`bdae614`）与第四轮（`0ce5b2f`）复审各 1 项 P1 已修复，修复版本待增量复审；真实模型验证未进行 |
+| 当前阶段 | P1-A Task 1（PR #2）、Task 1B（PR #3）、Task 2（PR #4）与 Task 3（PR #5）与 Task 4（PR #6，两轮审查修复后合入）已在 `main`；Task 5（组合可验证的运行核心）在本分支完成离线实现；首轮独立审查（`6d3464d`）的 4 组 P1、增量复审（`cd79114`）的 2 组 P1 与第三轮（`bdae614`）、第四轮（`0ce5b2f`）复审各 1 项 P1 与第五轮（`f79bba3`）复审 2 项 P1、2 项 P2 已修复，修复版本待增量复审；真实模型验证未进行 |
 | 当前源码与依赖 | 新包 `src/xiaowei/`（`config.py`、`storage.py`、`model_api.py`、`models.py`、`governance.py`、`evidence.py`、`session.py`、`mcp.py`、`tools.py`、`app.py`、`migrations/001_initial.sql`）与旧 `src/xiaowei_agent/` 并存；锁定 `openai-agents[sqlalchemy]` 0.22.3、`mcp` 2.2.0、`openai` 3.20.0、SQLAlchemy 2.0.52、asyncpg 0.30.0，Python 3.11.16；wheel 同时打包两个包，CLI 仍指向旧包 |
 | 新产品入口 | 只有开发验证命令（见第 5 节）；尚无产品启动入口，旧 CLI/Compose 不算新入口 |
 | 本次工作范围 | Task 5：`app.py`（`AppConfig`、`DataPolicy`、`Application`、`TurnError`）、共享的受治理工具包装 `tools.py`（`mcp.py` 改用它，并增加 `available_tool_ids`、`governance`）、`PolicySession.session_settings` 的类型标注，及 `tests/sdk_core/test_app.py`；审查修复另改 `model_api.open_model`（返回 `ModelBinding`，凭据只按 Profile 引用解析）、`GovernedTools(evidence)`（目录与授权取自证据存储）、参数严格校验（校验调用强制禁止额外字段）与规范化执行、证据绑定有效参数、结果校验强制忽略额外字段、参数与结果经 `contract_dump` 按声明字段与类型从已校验实例生成（不经模型自己的序列化与二次校验）、执行后失败中止本轮；测试工具 `sdk_tool` 改走产品包装；README 增加核心开发验证命令；无依赖或迁移变更，未改 Compose 或 CI |
@@ -100,8 +100,8 @@
 
 - 运行依赖绑定：`open_model` 只按 Profile 的 `api_key_ref` 解析凭据（没有另传密钥的参数，引用无法解析时不创建客户端、零请求），返回只能由它创建的 `ModelBinding`（Profile、SDK Model、设置、指纹），`Application` 只接受它，直接构造或传入裸 Model 均拒绝；`GovernedTools(evidence)` 的工具目录与授权取自证据存储本身，`Application` 不再单独接收证据存储；MCP 接入使用另一个治理对象时拒绝装配，远端零请求。应用测试改为经 `open_model` + HTTP mock 驱动真实 `OpenAIResponsesModel`。
 - 数据策略绑定：会话绑定 Profile 指纹与规范化的数据策略内容；同一 `data_policy_id` 下收窄 `model_tools` 或输入上限后，旧会话在首个模型调用前拒绝，内容不变的新应用照常回放。工具投影字段与容量的收窄由已有的证据策略指纹覆盖（Task 2/3 用例）。
-- 参数：`normalize_arguments` 按 JSON 严格模式校验，并在校验调用上强制禁止未声明字段（含嵌套模型，不论模型配置或被覆盖的 schema）；字符串数字、嵌套字符串数字、整数字段给浮点、NaN、Infinity、额外字段（模型配置为 allow/ignore 或 schema 伪装为禁止）都在 I/O 前拒绝。执行与证据使用同一有效请求（校验器改写后的值，如 `" east "` → `"EAST"`、`1` → `1.0`）；会话核对历史调用时经同一函数规范化后与证据比较，原始写法与等价有效写法都通过，其他参数不通过。工具目录按 Pydantic 运行时字段（不读 schema）要求参数字段（含嵌套模型）全部必填，且只由基本类型、枚举、Literal、嵌套模型及其容器组成；schema 伪装为必填的默认值在登记时拒绝。有效参数经 `contract_dump` 按声明字段与类型从已校验实例递归生成，不调用模型的序列化，也不交回同一模型校验：计算字段、`field_serializer`、根/嵌套 `model_serializer`、`PlainSerializer`、`Field(exclude=True)`，以及让同一模型二次校验通过的 before validator 组合，都不改变执行与证据收到的字段；validator 把嵌套模型换成带额外字段的子类时只取声明类型的字段；after validator 不经校验改写出的错误类型、非有限浮点数或以字典替换嵌套模型时在 I/O 前拒绝；字段校验器规范化照常（对照）。工具目录把参数与结果模型的字段类型限定在生成规则之内（映射的键只能是 `str`，枚举与 Literal 取值为 JSON 基本类型），其他类型在登记时拒绝。
-- 结果：MCP 结果校验强制忽略未声明字段（含嵌套），结果模型配置为 allow 且 schema 伪装为禁止时，嵌套的远端字段也不进入 Evidence、模型或会话；工具目录不再凭 schema 判断结果模型的额外字段规则。结果同样经 `contract_dump` 生成：嵌套计算字段、serializer 与 validator 组合的内容不进入模型、会话或 Evidence；结果字段值不符合声明类型时本轮中止、不生成证据。
+- 参数：`normalize_arguments` 按 JSON 严格模式校验，并在校验调用上强制禁止未声明字段（含嵌套模型，不论模型配置或被覆盖的 schema）；字符串数字、嵌套字符串数字、整数字段给浮点、NaN、Infinity、额外字段（模型配置为 allow/ignore 或 schema 伪装为禁止）都在 I/O 前拒绝。执行与证据使用同一有效请求（校验器改写后的值，如 `" east "` → `"EAST"`、`1` → `1.0`）；会话核对历史调用时经同一函数规范化后与证据比较，原始写法与等价有效写法都通过，其他参数不通过。工具目录按 Pydantic 运行时字段（不读 schema）要求参数字段（含嵌套模型）全部必填，且只由基本类型、枚举、Literal、嵌套模型及其容器组成；schema 伪装为必填的默认值在登记时拒绝。有效参数经 `contract_dump` 按声明字段与类型从已校验实例递归生成，不调用模型的序列化，也不交回同一模型校验：计算字段、`field_serializer`、根/嵌套 `model_serializer`、`PlainSerializer`、`Field(exclude=True)`，以及让同一模型二次校验通过的 before validator 组合，都不改变执行与证据收到的字段；字段取自登记模型而非实例的运行时类型；模型、枚举与基本类型要求类型完全一致，validator 把根或嵌套模型换成子类、无关模型或字典、删掉字段、改写出错误类型（含以 `bool` 充当整数）或非有限数值（含枚举动态成员、嵌套容器）时在 I/O 前受控拒绝；联合类型按实际校验出的分支生成（分支顺序互换、继承、列表与映射包裹均保留子类字段，不同参数的摘要可区分）；字段校验器规范化照常（对照）。工具目录把参数与结果模型的字段类型限定在生成规则之内（映射的键只能是 `str`，枚举成员与 Literal 选项须为有限 JSON 基本值），其他类型在登记时拒绝。
+- 结果：MCP 结果校验强制忽略未声明字段（含嵌套），结果模型配置为 allow 且 schema 伪装为禁止时，嵌套的远端字段也不进入 Evidence、模型或会话；工具目录不再凭 schema 判断结果模型的额外字段规则。结果同样经 `contract_dump` 生成：嵌套计算字段、serializer 与 validator 组合的内容不进入模型、会话或 Evidence；结果根对象被替换或字段值不符合声明类型时本轮中止、不生成证据；联合类型同样保留实际分支，非有限数值拒绝。证据规则版本升为 `/5`：按旧规则（模型自己的序列化）生成的证据不再可读，读取、交付与回放都在模型调用前拒绝。
 - 结果未知：只有 I/O 之前的治理拒绝交给模型修正；执行开始后的失败（本地执行错误、MCP 错误/超时/不合约/超限、证据无法保存或执行期间撤权）中止本轮，模型没有续轮，应用映射为 `tool_failed`，不提交。本地与 MCP 各有“执行后失败、模型试图再调用”用例，参数错误交给模型修正作为对照。
 
 **Task 5 缺口：** SDK 自身在模型错误时写 ERROR 日志，锁定版默认（`OPENAI_AGENTS_DONT_LOG_MODEL_DATA` 未设置）会隐去错误内容，已用例验证；显式关闭该默认时上游错误体会进入日志（对照已验证），应用未强制该运行配置；参数模型不能有默认值与可选字段，也不能用数据类、TypedDict 等结构；字段校验器改变取值时，校验器代码变化会使历史调用规范化结果变化，相应证据在回放时不可读（保守拒绝）；执行后失败会让整轮失败，模型不能自行换用其他工具继续；没有任何真实模型验证，OpenAI/Gemini/DeepSeek 三个 Profile 均未验证工具续轮、`AgentAnswer` 类型与追问，只有 ScriptedModel 与 Task 1B 的 HTTP mock；并发上限与同会话互斥在进程内，只拒绝不排队，多进程部署需另行设计（首版单进程）；总期限覆盖提交，期限或取消落在提交过程中时会话被隔离，只能新建；提交后到交付前撤权时本轮已保存但不交付，下一轮回放会因证据不可读而拒绝；最终结果与渠道投递状态的保存、Session 已提交而结果保存失败的双存储边界属 P1-B；阶段日志只经标准库 logging 输出，处理器、格式与保留未配置；MCP Server 不可用只减少 `available_tools`，未进入就绪检查；SDK 自身的 `OPENAI_AGENTS_DONT_LOG_*` 依赖默认值；用户消息大小由数据策略的输入准入上限约束；策略模型的 serializer 与计算字段不参与有效数据，需要派生值时由 Adapter 自己计算；after validator 不经校验改写的值只核对类型，`Field`/`Annotated` 的长度、范围等约束不重新检查；字段值类型不符只能在调用时发现，参数侧以固定的“参数不符合工具契约”交给模型；集合（`set`/`frozenset`）按迭代顺序输出，字符串集合的顺序随进程变化，证据回放可能因摘要不同而保守拒绝（此前的 `model_dump` 同样如此，未在本次处理）；审查修复版本待独立复审。
@@ -132,7 +132,7 @@
 
 CI integration job 设置 `SDK_TEST_POSTGRES_URL`，启动 `compose.sdk-test.yml`，运行完整 `python -m pytest -q`，并用 shell `EXIT` trap 清理测试项目；不保留旧 PostgreSQL service。SDK 地址缺失时 fixture 明确失败，避免数据库测试静默跳过。
 
-**下一项：** 对 Task 5 第四轮审查修复版本做针对具体版本的增量复审，修复阻塞项；需要时推送并开 PR，核对 CI 后单独批准合并。获准模型端点与凭据引用就绪后，至少完成一个 Profile 的真实工具闭环与追问验证。之后细化 P1-B。
+**下一项：** 对 Task 5 第五轮审查修复版本做针对具体版本的增量复审，修复阻塞项；需要时推送并开 PR，核对 CI 后单独批准合并。获准模型端点与凭据引用就绪后，至少完成一个 Profile 的真实工具闭环与追问验证。之后细化 P1-B。
 
 P1-A 是内部核心。P1-B 才接真实查询与双入口并切换正式入口，P2 增加诊断，P3 做实际用户验收。环境缺失不阻塞独立离线任务，但不能跳过对应实战退出条件。
 
@@ -245,15 +245,16 @@ Task 5 增量复审修复验证（同一环境，锁文件未变）：
 | `uv run --locked --extra dev ruff check .`、`ruff format --check src/xiaowei tests/sdk_core`、`mypy src` | 通过 |
 | 反向验证 | 8 项全部使对应用例失败：凭据不按 Profile 引用、参数不强制禁止额外字段、不检查必填、不递归嵌套模型、结果不强制忽略额外字段、证据记录原始请求、核对历史不规范化、执行收到原始参数 |
 
-Task 5 第三、四轮复审修复验证（同一环境，锁文件未变）：
+Task 5 第三至五轮复审修复验证（同一环境，锁文件未变）：
 
 | 命令 | 结果 |
 | --- | --- |
-| 修复前新增用例 | `bdae614` 上 10 项按预期失败（单独的计算字段与 serializer 使执行参数或模型输入出现契约外内容）；`0ce5b2f` 上 7 项组合用例按预期失败：serializer 增加字段 + before validator 删除、field/PlainSerializer 改型 + validator 转回、`exclude` + validator 补回，Adapter 收到 `privileged` 或缺少 `scope`，MCP 嵌套结果的钩子内容进入模型输入；登记边界 2 项（映射键非 `str`、结果含 `datetime`）按预期失败 |
-| `SDK_TEST_POSTGRES_URL=$SDK_PG uv run --locked --extra dev python -m pytest tests/sdk_core -q -W error` | 256 passed |
-| `SDK_TEST_POSTGRES_URL=$SDK_PG uv run --locked --extra dev python -m pytest -q` | 1970 passed，152 skipped；5 条警告来自旧网络隔离测试 |
+| 修复前新增用例 | `bdae614` 上 10 项、`0ce5b2f` 上 7 项组合与 2 项登记边界按预期失败（见 Git 历史）；`f79bba3` 上 15 项按预期失败：根/嵌套子类的 `privileged` 进入参数，无关模型、字典根与缺字段漏出 `AttributeError`，枚举动态成员的 Infinity 在 Adapter 执行后才因摘要失败，联合类型（基类在前、列表、映射、MCP 结果）丢掉子类字段，Infinity 的 Literal/枚举成员可登记，MCP 根对象替换使禁止内容进入模型，旧规则证据仍可回放 |
+| 复审 45 项矩阵（`f79bba3` 上 10 项失败） | 44 passed；余下 1 项期望根对象换成子类时投影回登记字段，现实现为受控拒绝（见计划） |
+| `SDK_TEST_POSTGRES_URL=$SDK_PG uv run --locked --extra dev python -m pytest tests/sdk_core -q -W error` | 278 passed |
+| `SDK_TEST_POSTGRES_URL=$SDK_PG uv run --locked --extra dev python -m pytest -q` | 1992 passed，152 skipped；5 条警告来自旧网络隔离测试 |
 | `uv run --locked --extra dev ruff check .`、`ruff format --check src/xiaowei tests/sdk_core`、`mypy src/xiaowei`、`git diff --check` | 通过 |
-| 反向验证 | 7 项全部使对应用例失败：改回模型序列化、按运行时类型取字段、不核对基本类型、不检查有限浮点、不检查实例类型、登记不检查结果类型、登记不检查映射键 |
+| 反向验证 | 第五轮 6 项均使对应用例失败：根按运行时类型取字段、根改为 isinstance、嵌套改为 isinstance（补 `bool` 充当整数用例后）、缺字段不转换、去掉有限数值检查、规则版本不升级。另 2 项证明不承重并删除：容器的完全类型检查、运行时再检查 Literal 选项（登记时已核对） |
 
 Task 2 反向验证：分别去掉撤权复核、调用时范围检查、展示范围过滤、目标一致性、参数校验、预算预占，把预算检查与计数拆到 `await` 两侧，保留执行异常原因链，去掉契约 schema 比对、SQL 归属条件、过期/目标/授权/渠道检查，改为投影全部字段、忽略投影上限或来源截断，去掉回答的引用子集/非空/去重/澄清混用检查、`AgentAnswer` 或 RunContext 的 `extra="forbid"`、应用表版本/存在检查、已安装判断，共 26 项；审查修复后另加 8 项：去掉写入后复核、模型或 Session 的渠道约束（分别及同时）、较小上限、策略指纹比较，指纹去掉投影或契约部分。34 项对应用例均失败。可信类型的 `strict` 经变异证明不承重，已删除。
 
