@@ -309,6 +309,30 @@ class _LooseArgs(BaseModel):
     region: str
 
 
+class _Result(BaseModel):
+    region: str
+    total: int
+    rows: int
+
+
+class _OpenResult(_Result):
+    model_config = ConfigDict(extra="allow")
+
+
+class _Detail(BaseModel):
+    model_config = ConfigDict(extra="allow")
+    memo: str
+
+
+class _NestedOpenResult(_Result):
+    detail: _Detail
+
+
+class _NarrowResult(BaseModel):
+    region: str
+    total: int
+
+
 def _policy(**overrides: Any) -> ToolPolicy:
     fields: dict[str, Any] = {
         "policy_id": "synthetic.region",
@@ -342,6 +366,10 @@ def _policy(**overrides: Any) -> ToolPolicy:
             id="extra-args-allowed",
         ),
         pytest.param((*CONTRACTS, CONTRACTS[0]), (_policy(),), id="duplicate-tool"),
+        # 结果模型决定远端数据中哪些成为事实：不能接收未声明字段，投影也只能取声明的字段。
+        pytest.param(CONTRACTS, (_policy(result=_OpenResult),), id="result-allows-extra"),
+        pytest.param(CONTRACTS, (_policy(result=_NestedOpenResult),), id="nested-result-extra"),
+        pytest.param(CONTRACTS, (_policy(result=_NarrowResult),), id="projection-not-in-result"),
     ],
 )
 def test_catalog_rejects_unregistered_contracts(
@@ -349,6 +377,10 @@ def test_catalog_rejects_unregistered_contracts(
 ) -> None:
     with pytest.raises(ValueError, match="工具目录"):
         ToolCatalog(contracts, policies)
+
+
+def test_catalog_accepts_a_declared_result_model() -> None:
+    ToolCatalog(CONTRACTS, (_policy(result=_Result),))
 
 
 def test_projection_limits_are_positive_and_fit_the_envelope() -> None:
