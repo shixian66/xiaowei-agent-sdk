@@ -12,7 +12,7 @@ import os
 import subprocess
 import sys
 from collections.abc import AsyncIterator, Callable
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
 
@@ -20,10 +20,12 @@ import httpx2
 import pytest
 import scripts.gate0_real_model as gate0_command
 from sqlalchemy.engine import URL
+from tests.sdk_core import gate0
 from tests.sdk_core.gate0 import (
     SALES_TOTAL,
     SAMPLES,
     Gate0,
+    RequestObservation,
     SampleResult,
     gate0_app,
     gate_passed,
@@ -54,12 +56,13 @@ def _chat(message: dict[str, Any], finish: str) -> dict[str, Any]:
     }
 
 
+def _envelopes(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """模型实际收到的工具结果信封（本轮与回放历史）。"""
+    return [json.loads(m["content"]) for m in messages if m.get("role") == "tool"]
+
+
 def _evidence(messages: list[dict[str, Any]]) -> list[str]:
-    found = []
-    for message in messages:
-        if message.get("role") == "tool":
-            found.append(json.loads(message["content"])["evidence_id"])
-    return found
+    return [envelope["evidence_id"] for envelope in _envelopes(messages)]
 
 
 def call_tool(name: str, **arguments: object) -> Reply:
@@ -76,10 +79,14 @@ def call_tool(name: str, **arguments: object) -> Reply:
 
 
 def cite_all(messages: list[dict[str, Any]]) -> dict[str, Any]:
+    """只依据模型实际收到的工具结果作答；看不到总额时只能澄清。"""
+    totals = [e["data"]["total"] for e in _envelopes(messages) if "total" in e["data"]]
+    if not totals:
+        return clarify(messages)
     ids = _evidence(messages)
     body = {
         "evidence_ids": ids,
-        "inferences": [{"text": f"总额为 {SALES_TOTAL}", "evidence_ids": ids}],
+        "inferences": [{"text": f"总额为 {totals[-1]}", "evidence_ids": ids}],
         "clarification": None,
     }
     return _chat({"role": "assistant", "content": json.dumps(body, ensure_ascii=False)}, "stop")
@@ -99,6 +106,7 @@ class GeminiLikeEndpoint:
 
     replies: dict[str, list[Reply]]
     strict_history: bool = False
+    extra_usage: dict[str, Any] = field(default_factory=dict)
     issued: dict[str, str] = field(default_factory=dict)
 
     def transport(self) -> httpx2.MockTransport:
@@ -119,12 +127,13 @@ class GeminiLikeEndpoint:
         if not isinstance(text, str):
             text = "".join(part["text"] for part in text)
         body = self.replies[text].pop(0)(messages)
+        body["usage"] = {**body["usage"], **self.extra_usage}
         for call in body["choices"][0]["message"].get("tool_calls") or []:
             self.issued[call["id"]] = call["extra_content"]["google"]["thought_signature"]
         return httpx2.Response(200, json=body)
 
 
-def scripted(strict_history: bool = False) -> GeminiLikeEndpoint:
+def scripted(strict_history: bool = False, **extra: Any) -> GeminiLikeEndpoint:
     query, followup, diagnose, vague = (s.message for s in SAMPLES)
     return GeminiLikeEndpoint(
         replies={
@@ -135,6 +144,7 @@ def scripted(strict_history: bool = False) -> GeminiLikeEndpoint:
             vague: [clarify],
         },
         strict_history=strict_history,
+        **extra,
     )
 
 
@@ -269,3 +279,158 @@ def test_command_forces_sdk_log_redaction_before_import() -> None:
         [sys.executable, "-c", probe], env=env, capture_output=True, text=True, check=True
     )
     assert out.stdout.split() == ["True", "True"]
+
+
+# ---- 判定不能在关键证据缺失时通过（独立审查反例） ----------------------------------------
+
+
+def _observed(
+    tools: tuple[str, ...] = ("list_regions",), fields: tuple[str, ...] = (), history: int = 0
+) -> RequestObservation:
+    return RequestObservation(
+        status=200,
+        elapsed_ms=1,
+        tools_offered=tools,
+        history_tool_calls=history,
+        history_signatures=0,
+        turn_tool_calls=0,
+        turn_signatures=0,
+        tool_result_fields=fields,
+        usage=None,
+    )
+
+
+def _result(name: str, **values: Any) -> SampleResult:
+    sample = next(s for s in SAMPLES if s.name == name)
+    defaults: dict[str, Any] = {
+        "name": name,
+        "mode": sample.mode,
+        "outcome": "delivered",
+        "reason": None,
+        "evidence_ids": (),
+        "sales_calls": 0,
+        "regions_calls": 0,
+        "elapsed_ms": 1,
+        "requests": [],
+        "gate": sample.gate,
+    }
+    return SampleResult(**{**defaults, **values})
+
+
+SEEN = ("orders", "region", "rows", "total")
+
+
+def _query(fields: tuple[str, ...] = SEEN) -> SampleResult:
+    return _result(
+        "query",
+        evidence_ids=("ev_a",),
+        sales_calls=1,
+        requests=[_observed(("list_regions", "sales_total")), _observed(fields=fields)],
+    )
+
+
+def _passing() -> list[SampleResult]:
+    return [
+        _query(),
+        _result("followup", evidence_ids=("ev_a",), requests=[_observed(fields=SEEN, history=1)]),
+        _result("diagnose_hides_query", outcome="clarification", requests=[_observed()]),
+        _result("ambiguous", outcome="clarification", requests=[_observed()]),
+    ]
+
+
+def test_judged_results_pass_only_with_complete_evidence() -> None:
+    results = _passing()
+    gate0.judge(results)
+    assert gate_passed(results)  # 对照
+
+
+def _replace(index: int, result: SampleResult) -> Callable[[list[SampleResult]], None]:
+    def mutate(results: list[SampleResult]) -> None:
+        results[index] = result
+
+    return mutate
+
+
+def _followup_calls_regions(results: list[SampleResult]) -> None:
+    results[1].regions_calls = 1
+
+
+@pytest.mark.parametrize(
+    "mutate",
+    [
+        # 诊断轮在模型请求前失败：没有任何请求可证明展示范围。
+        _replace(2, _result("diagnose_hides_query", outcome="failed")),
+        # 诊断轮没有展示元数据工具。
+        _replace(2, _result("diagnose_hides_query", requests=[_observed(tools=())])),
+        # 查询轮模型收到的工具结果没有 total/rows。
+        _replace(0, _query(fields=("region",))),
+        # 追问回放的工具结果没有 total/rows。
+        _replace(1, _result("followup", evidence_ids=("ev_a",), requests=[_observed(history=1)])),
+        # 追问调用了元数据工具。
+        _followup_calls_regions,
+        # 缺少或重复计入判定的样例。
+        lambda results: results.pop(1),
+        lambda results: results.append(_query()),
+    ],
+)
+def test_gate_rejects_missing_evidence(mutate: Callable[[list[SampleResult]], Any]) -> None:
+    results = _passing()
+    mutate(results)
+    gate0.judge(results)
+    assert not gate_passed(results)
+
+
+def test_sample_without_checks_does_not_pass() -> None:
+    assert not _result("query").passed
+
+
+async def test_gate_fails_when_the_model_cannot_see_the_total(
+    engine_url: URL, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """审查反例二：查询投影缩成只有 region，模型看不到 total/rows 时 Gate 不能通过。"""
+    narrowed = tuple(
+        replace(p, projections=gate0.projections("region")) if p.policy_id == "gate0.sales" else p
+        for p in gate0.POLICIES
+    )
+    monkeypatch.setattr(gate0, "POLICIES", narrowed)
+    _, results = await run(engine_url, scripted())
+    query = next(r for r in results if r.name == "query")
+
+    assert query.checks["model_saw_total_and_rows"] is False
+    assert not gate_passed(results)
+
+
+def test_usage_keeps_only_token_counts() -> None:
+    body = {
+        "usage": {
+            "prompt_tokens": 3,
+            "output_tokens": 2,
+            "synthetic-message-fragment": 1,
+            "completion_tokens_details": {"reasoning_tokens": 1},
+            "total_tokens": True,
+        }
+    }
+    assert gate0.usage_counts(json.dumps(body).encode()) == {"prompt_tokens": 3, "output_tokens": 2}
+
+
+async def test_report_drops_unknown_usage_keys(engine_url: URL) -> None:
+    canary = "synthetic-message-fragment-7f3a"
+    _, results = await run(engine_url, scripted(extra_usage={canary: 1}))
+
+    assert results[0].requests[0].usage == {
+        "prompt_tokens": 11,
+        "completion_tokens": 7,
+        "total_tokens": 18,
+    }
+    assert canary not in json.dumps([r.report() for r in results], ensure_ascii=False)
+
+
+def test_command_rejects_undecodable_profile(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    profile = tmp_path / "private-dir" / "profile.json"
+    profile.parent.mkdir()
+    profile.write_bytes(b'{"model": "\xff\xfe canary"}')
+
+    assert gate0_command.main(["--profile", str(profile)]) == 2
+    assert capsys.readouterr().err == "gate0: 无法读取 Profile 文件\n"

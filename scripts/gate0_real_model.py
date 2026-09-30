@@ -6,7 +6,8 @@
       uv run --locked --extra dev python -m scripts.gate0_real_model --profile PROFILE.json
 
 ``PROFILE.json`` 是不含凭据的 ``ModelProfile``；其 ``api_key_ref`` 指向的环境变量须已在本机
-设置。缺任何配置时以退出码 2 失败，不静默跳过；样例未全部通过时退出码为 1。
+设置。缺任何配置时以退出码 2 失败，不静默跳过；计入 Gate 的三个样例（查询、同会话追问、
+诊断轮隐藏查询工具）未全部通过时退出码为 1，模糊问题样例只记录行为。
 
 本命令会把合成数据发送到 Profile 的端点，只在用户授权该端点后运行。装配与样例见
 ``tests/sdk_core/gate0.py``：产品路径不变，只把最底层 transport 换成不重试、不读环境配置的
@@ -52,7 +53,7 @@ class ConfigurationError(Exception):
 def load_profile(path: Path) -> ModelProfile:
     try:
         profile = ModelProfile.model_validate_json(path.read_text(encoding="utf-8"))
-    except OSError:
+    except (OSError, UnicodeDecodeError):
         raise ConfigurationError("无法读取 Profile 文件") from None
     except ValidationError:
         raise ConfigurationError("Profile 文件不是合法的 ModelProfile") from None

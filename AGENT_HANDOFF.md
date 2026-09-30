@@ -145,7 +145,8 @@ CI integration job 设置 `SDK_TEST_POSTGRES_URL`，启动 `compose.sdk-test.yml
 - 固定 4 个样例（查询、同会话追问、诊断轮要求执行查询、模糊问题）经产品路径跑通：查询工具执行 1 次并交付引用证据的回答；追问回放上一轮工具调用、不重跑工具并引用上一轮证据；诊断轮只展示 `list_regions`，模型强行调用 `sales_total` 时本轮失败、查询零执行；模糊问题得到澄清。专用策略四种投影都含 `total` 与 `rows`。
 - 按 Gemini 3 OpenAI 兼容协议形状的 mock：本轮续调用时锁定 SDK 把 `extra_content.google.thought_signature` 原样带回（mock 对缺签名返回 400）；追问请求中回放的历史工具调用**不带签名**（`PolicySession` 保存形式只有 `call_id/name/arguments`）。若供应商也校验历史签名，追问在首个模型请求失败（400 → `model_failed`），工具不重跑——这正是 Gate 0 真实运行要判定的问题。
 - 真实模型命令 `scripts/gate0_real_model.py` 复用同一装配，只把最底层 transport 换成不重试、不读环境配置的网络 transport；输出 JSON 只含 Profile 摘要/指纹、SDK 版本、每个样例的判定、状态码、耗时、展示的工具名、签名计数与可取得的 usage，不含消息、模型文字、证据标识、工具结果或凭据。Profile 文件缺失/不合法、凭据引用未设置、测试 PostgreSQL 未设置或不是唯一声明的实例时退出码 2；样例未全部通过时退出码 1。命令在任何 SDK 导入前强制两项 `OPENAI_AGENTS_DONT_LOG_*` 为 1，外部预置 `0/false` 的子进程用例验证生效。
-- 反向验证：转发前剥掉本轮签名、诊断用途加入查询工具、追问脚本重跑工具、去掉日志开关强制，对应用例均失败。
+- 判定只认直接证据（PR #9 独立审查 `725473c` 的 2 个阻断已修复）：没有检查项的样例不算通过；三个计入判定的样例必须各出现一次；查询轮的模型请求中工具结果须含 `total` 与 `rows`（按字段名白名单观测），追问回放的工具结果同样须含二者，且两种工具都零调用；诊断轮须至少发出一次模型请求、每次都展示 `list_regions` 而不展示 `sales_total`。mock 只依据模型实际收到的工具结果作答，看不到总额时只能澄清。usage 只记录 `prompt/completion/input/output/total_tokens` 五个整数计数，供应商返回的其他键丢弃。Profile 文件不是合法 UTF-8 时退出码 2、固定错误信息。
+- 反向验证：转发前剥掉本轮签名、诊断用途加入查询工具、追问脚本重跑工具、去掉日志开关强制；审查修复后另 7 项（无检查项即通过、判定不核对样例集合、不核对模型是否看到 `total/rows`、诊断轮不要求模型请求与元数据工具、追问不计元数据工具调用、usage 不按白名单、不捕获 UTF-8 解码错误）。对应用例均失败。
 
 **Gate 0 未覆盖：** 没有获准 Profile 与凭据，未对任何真实端点运行；mock 只证明本应用与锁定 SDK 在该协议形状下的行为，不证明任何供应商接受回放历史、遵守 `parallel_tool_calls=false` 或给出可用的回答质量。样例数据与 Web 渠道固定，飞书渠道投影未在 Gate 0 中运行。
 
@@ -299,9 +300,9 @@ Gate 0 离线部分验证（同一环境，锁文件未变）：
 
 | 命令 | 结果 |
 | --- | --- |
-| `SDK_TEST_POSTGRES_URL=$SDK_PG uv run --locked --extra dev python -m pytest tests/sdk_core/test_gate0.py -q -W error` | 6 passed；4 项反向验证（剥掉本轮签名、诊断用途加入查询工具、追问重跑工具、去掉日志开关强制）各使对应用例失败 |
-| `SDK_TEST_POSTGRES_URL=$SDK_PG uv run --locked --extra dev python -m pytest tests/sdk_core -q -W error` | 284 passed |
-| `SDK_TEST_POSTGRES_URL=$SDK_PG uv run --locked --extra dev python -m pytest -q` | 1998 passed，152 skipped；5 条警告来自旧网络隔离测试 |
+| `SDK_TEST_POSTGRES_URL=$SDK_PG uv run --locked --extra dev python -m pytest tests/sdk_core/test_gate0.py -q -W error` | 首轮 6 passed；审查修复前新增用例在收集阶段因缺少接口失败，修复后 19 passed（含审查的两个反例：诊断轮无模型请求、查询投影只剩 `region`；未知 usage 键 canary；非法 UTF-8 Profile） |
+| `SDK_TEST_POSTGRES_URL=$SDK_PG uv run --locked --extra dev python -m pytest tests/sdk_core -q -W error` | 首轮 284 passed；审查修复后 297 passed |
+| `SDK_TEST_POSTGRES_URL=$SDK_PG uv run --locked --extra dev python -m pytest -q` | 首轮 1998 passed，152 skipped；5 条警告来自旧网络隔离测试（审查修复只改 Gate 0 三个文件，未重跑全量） |
 | `uv run --locked --extra dev ruff check .`、`ruff format --check src/xiaowei tests/sdk_core scripts/gate0_real_model.py`、`mypy src`、`git diff --check` | 通过；新增三个文件另以 `MYPYPATH=src mypy --explicit-package-bases` 检查通过 |
 | 未设置凭据引用时运行 `python -m scripts.gate0_real_model --profile <示例 Gemini Profile>` | `gate0: 环境变量 XIAOWEI_GATE0_GEMINI_KEY 未设置或为空`，退出码 2，未发出请求 |
 
