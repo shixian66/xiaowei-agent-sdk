@@ -15,8 +15,8 @@
 | 当前阶段 | **P1-A 离线完成，按用户决定收尾**：Task 1–5 经 PR #2–#7 合入；Task 5 复审通过且 8 项 CI 通过。Gemini 只有部分真实证据，工具续轮到交付与 Session 追问闭环仍是 P1-B 开工前 Gate 0 |
 | 当前源码与依赖 | 新包 `src/xiaowei/`（`config.py`、`storage.py`、`model_api.py`、`models.py`、`governance.py`、`evidence.py`、`session.py`、`mcp.py`、`tools.py`、`app.py`、`migrations/001_initial.sql`）与旧 `src/xiaowei_agent/` 并存；锁定 `openai-agents[sqlalchemy]` 0.22.3、`mcp` 2.2.0、`openai` 3.20.0、SQLAlchemy 2.0.52、asyncpg 0.30.0，Python 3.11.16；wheel 同时打包两个包，CLI 仍指向旧包 |
 | 新产品入口 | 只有开发验证命令（见第 5 节）；尚无产品启动入口，旧 CLI/Compose 不算新入口 |
-| 本次工作范围 | 已按独立审查修订 [P1-B 详细实施计划](docs/superpowers/plans/2026-09-30-p1b-starrocks-dual-entry.md) 的 5 个开工前阻断及对应验收项，并同步本交接；未写产品功能代码、未改依赖或迁移、未部署 |
-| 外部操作 | 主线曾获用户授权用合成数据调用 Gemini API（见第 3 节）；本次计划修订只核对源码、主线差异、锁定 SDK 与本地文档，不调用真实模型、StarRocks、飞书或外部 MCP Server |
+| 本次工作范围 | 已按两轮独立审查修订 [P1-B 详细实施计划](docs/superpowers/plans/2026-09-30-p1b-starrocks-dual-entry.md) 的开工前阻断及对应验收项，并同步本交接；未写产品功能代码、未改依赖或迁移、未部署 |
+| 外部操作 | 主线曾获用户授权用合成数据调用 Gemini API（见第 3 节），验证后本机凭据文件已删除，用户负责作废该密钥；本次计划修订只核对源码、主线差异、锁定 SDK 与本地文档，不调用真实模型、StarRocks、飞书或外部 MCP Server |
 
 表中分别列出 P1-B 所依据的 P1-A 代码基线与本次计划修订所依据的当前主线，不能混用。接手先用 `git rev-parse HEAD` 和 `git status --short` 取得实际版本；计划审查使用本次文档提交的精确 SHA，本文件的修改历史由 Git 保存。
 
@@ -140,7 +140,7 @@ CI integration job 设置 `SDK_TEST_POSTGRES_URL`，启动 `compose.sdk-test.yml
 
 **本次 P1-B 计划修订验证：** `git diff --check` 与计划相对链接检查通过；使用同仓库主检出的锁定开发环境执行 `tests/security/test_docs_command_consistency.py` 和 `tests/contract/test_doc_fact_binding.py`，5 项通过。工作树本身没有 `.venv`，未运行产品测试、真实模型或真实服务。
 
-**下一项：** 对本次 P1-B 计划修订提交的精确 SHA 做增量独立复审。计划获准后，先用一个有额度的获准 Profile 完成 Gate 0：合成工具续轮到交付及经 `PolicySession` 的同会话追问；若失败则先形成独立修复切片，不能开始 SQLGuard 实施。
+**下一项：** 对本次 P1-B 计划修订提交的精确 SHA 做增量独立复审，重点核对 §2.3、Task 3 与 G2 的飞书 `rows` 和容量契约。计划获准后，先用一个有额度的获准 Profile 完成 Gate 0：合成工具续轮到交付及经 `PolicySession` 的同会话追问；若失败则先形成独立修复切片，不能开始 SQLGuard 实施。
 
 P1-A 是内部核心。P1-B 才接真实查询与双入口并切换正式入口，P2 增加诊断，P3 做实际用户验收。Gate 0 是 P1-B 开工前例外；它通过后，其他环境缺失不阻塞不依赖该环境的离线部分，但不能跳过对应实战退出条件。
 
