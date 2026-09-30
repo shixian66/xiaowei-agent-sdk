@@ -15,7 +15,6 @@ MCP 库会在本地过滤之前把完整的 JSON-RPC 消息（工具参数与远
 
 from __future__ import annotations
 
-import copy
 import json
 import logging
 import os
@@ -24,28 +23,23 @@ from contextlib import AsyncExitStack
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from types import TracebackType
-from typing import Any
 
 import httpx2
 import mcp
-from agents import FunctionTool, Tool, UserError, default_tool_error_function
+from agents import FunctionTool, Tool
 from agents.mcp import MCPServerStreamableHttp
-from agents.tool_context import ToolContext
 from mcp.types import CallToolResult, TextContent
 from mcp.types import Tool as MCPTool
 from pydantic import BaseModel, SecretStr
 
 from xiaowei.config import MCPServerConfig, resolve_secret_ref
-from xiaowei.evidence import EvidenceError
-from xiaowei.governance import GovernedTools, ToolExecutionError, ToolRejectedError, schema_shape
+from xiaowei.governance import GovernedTools, schema_shape
 from xiaowei.models import RunContext, ToolContract, ToolObservation, ToolRequest
+from xiaowei.tools import governed_function_tool
 
 logger = logging.getLogger(__name__)
 
 _READ_TIMEOUT_FACTOR = 2
-
-# 治理与证据边界的受控失败：与本地 function tool 一样按 SDK 默认格式交给模型，消息固定。
-_TOOL_FAILURES = (ToolRejectedError, ToolExecutionError, EvidenceError)
 
 # MCP 库的源码目录：源自这里的日志记录可能含协议原文，生成时即换成固定信息。
 _WIRE_SOURCE = os.path.join(os.path.dirname(mcp.__file__), "")
@@ -122,6 +116,11 @@ class MCPIntegration:
         if stack is not None:
             await stack.aclose()
 
+    @property
+    def available_tool_ids(self) -> frozenset[str]:
+        """已连接并核对通过的远端工具的 ``tool_id``。"""
+        return frozenset(self._planned[name].contract.tool_id for name in self._tools)
+
     def tools_for(self, ctx: RunContext) -> list[Tool]:
         """本轮可展示的 MCP 工具：已核对的远端工具与本轮治理范围的交集；调用时仍复核。"""
         allowed = {contract.tool_id for contract in self._governance.allowed_contracts(ctx)}
@@ -174,53 +173,17 @@ class MCPIntegration:
             self._tools[name] = self._prepared[name]
 
     def _function_tool(self, name: str, binding: _Binding) -> FunctionTool:
-        contract = binding.contract
-
-        async def invoke(tool_ctx: ToolContext[Any], raw_arguments: str) -> str:
-            try:
-                arguments = json.loads(raw_arguments or "{}")
-            except ValueError:
-                arguments = None
-            if not isinstance(arguments, dict):
-                return default_tool_error_function(
-                    tool_ctx, ToolRejectedError("参数不符合工具契约")
-                )
-            request = ToolRequest(
-                tool_id=contract.tool_id,
-                target_id=contract.target_id,
-                call_id=tool_ctx.tool_call_id,
-                tool_name=tool_ctx.tool_name,
-                arguments=arguments,
+        async def execute(request: ToolRequest) -> ToolObservation:
+            # 只有已连接并核对过的 Server 的工具会展示；关闭之后的调用按执行失败处理。
+            server = self._servers[binding.config.server_id]
+            result = await server.call_tool(binding.remote_name, request.arguments)
+            return ToolObservation(
+                payload=_payload(result, binding.result),
+                captured_at=self._clock(),
+                truncated=False,
             )
 
-            async def execute() -> ToolObservation:
-                # 只有已连接并核对过的 Server 的工具会展示；关闭之后的调用按执行失败处理。
-                server = self._servers[binding.config.server_id]
-                result = await server.call_tool(binding.remote_name, request.arguments)
-                return ToolObservation(
-                    payload=_payload(result, binding.result),
-                    captured_at=self._clock(),
-                    truncated=False,
-                )
-
-            try:
-                result = await self._governance.invoke(tool_ctx.context, request, execute)
-            except _TOOL_FAILURES as exc:
-                return default_tool_error_function(tool_ctx, exc)
-            return result.model_content
-
-        try:
-            return FunctionTool(
-                name=name,
-                description=contract.description,
-                params_json_schema=copy.deepcopy(contract.input_schema),
-                on_invoke_tool=invoke,
-                strict_json_schema=True,
-            )
-        except UserError:
-            raise ValueError(
-                f"MCP 登记：{contract.tool_id} 的参数 schema 不受 SDK 严格模式支持"
-            ) from None
+        return governed_function_tool(name, binding.contract, self._governance, execute)
 
 
 def _bindings(

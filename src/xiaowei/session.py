@@ -20,7 +20,7 @@ from datetime import datetime, timedelta
 from typing import Any, Literal, cast
 
 from agents import TResponseInputItem
-from agents.memory import Session
+from agents.memory import Session, SessionSettings
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
 from sqlalchemy import TextClause, text
 from sqlalchemy.exc import SQLAlchemyError
@@ -141,7 +141,7 @@ class SessionInputPolicy(BaseModel):
 class PolicySession:
     """实现 SDK ``Session`` 协议，委托底层 Session 存储；一个对象只服务一轮。"""
 
-    session_settings = None
+    session_settings: SessionSettings | None = None
 
     def __init__(
         self,

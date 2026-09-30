@@ -1,6 +1,6 @@
 # 小维：当前交接
 
-> 更新：2026-09-29，Asia/Shanghai。这里只记录当前事实、证据与下一项工作；设计见 [ARCHITECTURE.md](ARCHITECTURE.md)，路线见 [DEVELOPMENT_PLAN.md](DEVELOPMENT_PLAN.md)，协作规则见 [AGENTS.md](AGENTS.md)。
+> 更新：2026-09-30，Asia/Shanghai。这里只记录当前事实、证据与下一项工作；设计见 [ARCHITECTURE.md](ARCHITECTURE.md)，路线见 [DEVELOPMENT_PLAN.md](DEVELOPMENT_PLAN.md)，协作规则见 [AGENTS.md](AGENTS.md)。
 
 **OpenAI Agents SDK 负责 Agent Loop；小维负责权限、受治理工具执行、证据真实性和数据边界。**
 
@@ -9,14 +9,14 @@
 | 项目 | 已核对事实 |
 | --- | --- |
 | 仓库 | [shixian66/xiaowei-agent-sdk](https://github.com/shixian66/xiaowei-agent-sdk) |
-| 本地目录 / 分支 | `/Users/kloenguyen/Desktop/agent-SDK` / `claude/p1a-task4-mcp-client`（从 `main` 的 `5add74b` 分出；`main` 已包含 Task 1、1B、2 与 3） |
+| 本地目录 / 分支 | `/Users/kloenguyen/Desktop/agent-SDK` / `claude/p1a-task5-app-core`（从 `main` 的 `3461ad7` 分出；`main` 已包含 Task 1–4） |
 | M5 历史起点 | `372c381f44ecfa1fa53961f137d0058033cbd805`；不是远端当前 main 的核验结论 |
-| 本次实施起点 | `5add74baad13dedb3bb2fbfbb38a0a37298b8235`（PR #5 合并后的 `main`）；开始时工作树干净 |
-| 当前阶段 | P1-A Task 1（PR #2）、Task 1B（PR #3）、Task 2（PR #4）与 Task 3（PR #5，两轮审查修复后合入）已在 `main`；Task 4（最小 MCP Client Integration）在本分支完成离线实现；首轮审查的 4 组 P1 与复审的 1 项 P1（日志）已修复，修复版本待复审 |
-| 当前源码与依赖 | 新包 `src/xiaowei/`（`config.py`、`storage.py`、`model_api.py`、`models.py`、`governance.py`、`evidence.py`、`session.py`、`mcp.py`、`migrations/001_initial.sql`）与旧 `src/xiaowei_agent/` 并存；锁定 `openai-agents[sqlalchemy]` 0.22.3、`mcp` 2.2.0、`openai` 3.20.0、SQLAlchemy 2.0.52、asyncpg 0.30.0，Python 3.11.16；wheel 同时打包两个包，CLI 仍指向旧包 |
+| 本次实施起点 | `3461ad73dae35684d010bb4f541e39db7e5960af`（PR #6 合并后的 `main`）；开始时工作树干净 |
+| 当前阶段 | P1-A Task 1（PR #2）、Task 1B（PR #3）、Task 2（PR #4）与 Task 3（PR #5）与 Task 4（PR #6，两轮审查修复后合入）已在 `main`；Task 5（组合可验证的运行核心）在本分支完成离线实现，真实模型验证与 P1-A 整体独立审查未进行 |
+| 当前源码与依赖 | 新包 `src/xiaowei/`（`config.py`、`storage.py`、`model_api.py`、`models.py`、`governance.py`、`evidence.py`、`session.py`、`mcp.py`、`tools.py`、`app.py`、`migrations/001_initial.sql`）与旧 `src/xiaowei_agent/` 并存；锁定 `openai-agents[sqlalchemy]` 0.22.3、`mcp` 2.2.0、`openai` 3.20.0、SQLAlchemy 2.0.52、asyncpg 0.30.0，Python 3.11.16；wheel 同时打包两个包，CLI 仍指向旧包 |
 | 新产品入口 | 只有开发验证命令（见第 5 节）；尚无产品启动入口，旧 CLI/Compose 不算新入口 |
-| 本次工作范围 | Task 4：`config.MCPServerConfig`、`mcp.MCPIntegration`（SDK 官方 Streamable HTTP 客户端 + 薄 FunctionTool）、`ToolPolicy.result` 与 `ToolContract.description`，及 `tests/sdk_core/mcp_fixture.py`、`tests/sdk_core/test_mcp_integration.py`；无依赖或迁移变更，未改 Compose、CI 或 README |
-| 外部操作 | 未调用真实模型、StarRocks、飞书或任何外部 MCP Server；Task 4 只用 loopback MCP fixture、合成数据、ScriptedModel 与隔离测试 PostgreSQL；分支未推送；没有部署或用户验收 |
+| 本次工作范围 | Task 5：`app.py`（`AppConfig`、`DataPolicy`、`Application`、`TurnError`）、共享的受治理工具包装 `tools.py`（`mcp.py` 改用它，并增加 `available_tool_ids`）、`PolicySession.session_settings` 的类型标注，及 `tests/sdk_core/test_app.py`；README 增加核心开发验证命令；无依赖或迁移变更，未改 Compose 或 CI |
+| 外部操作 | 未调用真实模型、StarRocks、飞书或任何外部 MCP Server；Task 5 只用合成数据、ScriptedModel、loopback MCP fixture 与隔离测试 PostgreSQL；分支未推送；没有部署或用户验收 |
 
 表中的 SHA 是本次实施起点，Task 1 提交在其之后。接手先用 `git rev-parse HEAD` 和 `git status --short` 取得实际版本；本文件的修改历史由 Git 保存。
 
@@ -36,7 +36,7 @@
 
 ## 3. 当前计划与下一项工作
 
-唯一详细计划：[P1-A：SDK 与治理执行核心](docs/superpowers/plans/2026-09-29-p1a-sdk-governed-core.md)。任务顺序为 **Task 1 → Task 1B → Task 2–5**。Task 1 经 PR #2、Task 1B 经 PR #3、Task 2 经 PR #4、Task 3 经 PR #5 合入 `main`（`5add74b`）。Task 4 在本分支完成离线实现，首轮审查问题已修复，待复审。与计划的差异记录在计划各任务的“实测记录”中。
+唯一详细计划：[P1-A：SDK 与治理执行核心](docs/superpowers/plans/2026-09-29-p1a-sdk-governed-core.md)。任务顺序为 **Task 1 → Task 1B → Task 2–5**。Task 1 经 PR #2、Task 1B 经 PR #3、Task 2 经 PR #4、Task 3 经 PR #5、Task 4 经 PR #6 合入 `main`（`3461ad7`）。Task 5 在本分支完成离线实现。与计划的差异记录在计划各任务的“实测记录”中。
 
 **Task 1 已证明（离线、合成数据、scripted 模型）：**
 
@@ -83,6 +83,21 @@
 - 端点、协议、模型或 `data_policy_id` 任一变化：旧会话在首个模型请求前拒绝；新会话独立运行，首个模型输入只有新消息。
 - 图片输入、system 角色、托管工具项没有保存形式，整轮拒绝；治理拒绝的工具输出以固定文字保存与回放；篡改的历史（原始内容、未知证据、证据挂到其他调用、错配/孤立结果、未应答调用）整段拒绝。`pop_item` 只撤回暂存项；`clear_session` 底层清除失败时会话已关闭、不可回放。
 
+**Task 5 已证明（离线、合成数据、真 Runner + ScriptedModel、loopback MCP fixture、SQLAlchemySession + 隔离的真实 PostgreSQL）：**
+
+- `Application.run_turn` 一轮内经真 Runner 调用本地工具与 MCP 工具各一次，最终回答通过 Evidence 校验后提交，Web 交付含代码生成的事实区域与标注为推断的分析；同一会话追问时模型从回放的历史引用上一轮两条证据，本地与远端工具都不重跑。同样的问题在飞书会话得到飞书投影（无 `rows` 与 `note`），禁止字段不出现在任何交付中。
+- 两个用户的会话并发：A 停在模型调用中时 B 以诊断范围完成一轮，A 之后的模型调用仍是自己的工具集合；两轮的工具预算各为 1，各自执行一次；交付只含本轮数据；B 引用 A 的证据被拒绝。
+- 同会话已有一轮在运行时，新消息立即拒绝（`session_busy`），同时到达的两条消息只有一条进入；并发达到上限时其他会话拒绝（`busy`）；被拒绝的消息模型零调用；结束后释放。
+- 引用伪造证据、夹带事实字段、非 JSON 回答与上游异常（消息含模型/上游内容）：无交付、SDK 表为空、会话轮数为 0，错误信息固定、不含模型内容且无原因链；下一轮模型输入只有新消息。
+- 总期限（0.5 秒）在模型调用中到期：在期限内失败，工具只执行一次，不提交；调用中取消：取消照常传播，不提交；下一轮不重放任何工具，看不到未提交轮次的内容。
+- 用途范围：查询轮展示并执行查询工具；下一轮为诊断时查询工具不展示，模型强行调用时 SDK 拒绝，本轮失败且零执行、不提交；用户未获查询授权时查询用途也不含它。本轮 Tool Scope 超出 Profile 数据策略、用户输入不符合数据策略的准入模式、存储未就绪：都在首个模型调用前拒绝。
+- 在真实 PostgreSQL 的 SDK 消息表上以触发器注入写入失败：无交付，工具执行一次，会话停在 `writing`；移除触发器后该会话在模型调用前拒绝，工具不补跑。提交之后、交付之前撤权：本轮已保存，但不交付。
+- 阶段日志：root 在 DEBUG 级别收集全部日志，`xiaowei.app` 每条都只有 `turn_id`、阶段、原因代码与耗时，成功与失败轮次各自的阶段序列完整；合成 SQL、模型分析、禁止字段、远端夹带内容与假 MCP 凭据不出现在任何 logger 的输出中。
+- 全局 tracing 被重新打开并挂上处理器时，本应用的一轮仍不产生任何 trace/span。
+- 启动时拒绝：缺少查询或诊断用途、Profile 没有对应数据策略、用途中的工具未登记、本地工具不是已登记的 `local/` 工具。
+
+**Task 5 缺口：** 没有任何真实模型验证，OpenAI/Gemini/DeepSeek 三个 Profile 均未验证工具续轮、`AgentAnswer` 类型与追问，只有 ScriptedModel 与 Task 1B 的 HTTP mock；并发上限与同会话互斥在进程内，只拒绝不排队，多进程部署需另行设计（首版单进程）；总期限覆盖提交，期限或取消落在提交过程中时会话被隔离，只能新建；提交后到交付前撤权时本轮已保存但不交付，下一轮回放会因证据不可读而拒绝；最终结果与渠道投递状态的保存、Session 已提交而结果保存失败的双存储边界属 P1-B；阶段日志只经标准库 logging 输出，处理器、格式与保留未配置；MCP Server 不可用只减少 `available_tools`，未进入就绪检查；SDK 自身的 `OPENAI_AGENTS_DONT_LOG_*` 依赖默认值；用户消息大小由数据策略的输入准入上限约束；P1-A 整体未经独立审查。
+
 **Task 4 已证明（离线、loopback MCP fixture、SDK 官方 Streamable HTTP 客户端、真 Runner + ScriptedModel、隔离的真实 PostgreSQL）：**
 
 - 空配置在禁止一切网络的用例中进入与退出，不建立连接，工具集合为空。
@@ -97,7 +112,7 @@
 - 超时（0.5 秒，远端 3 秒）在期限内失败，远端只执行一次、不重试，之后的调用照常；调用中取消本轮时抛出取消，远端调用不重放。退出后工具集合为空，服务端连接数归零，没有遗留 asyncio 任务。
 - 配置拒绝：非 loopback 的 HTTP、`localhost` 名字、用户信息、查询参数、原始凭据、`local` 或含下划线的 `server_id`、空工具表、非法或过长的工具名、非正期限。
 
-**Task 4 缺口：** 工具列表只在启动时发现一次，远端此后改动工具由每次调用的结果模型校验兜底，参数 schema 不再复核；远端输出 schema 不比较；schema 比较只覆盖平铺参数，嵌套 `$defs` 名字不同会保守隐藏；越出端点或压缩编码在响应头阶段被拒绝时会关闭该 Server 的连接，之后调用都失败，需重启恢复（失败方向安全）；Server 运行中断开不会自动重连或隐藏工具；认证只支持静态 Bearer，OAuth 与其他 transport 未实现；MCP 日志约束通过进程级 LogRecord 工厂实现，之后替换工厂而不串联原工厂的代码会解除约束，Task 5 装配日志时须保持；日志调用的 `extra` 字段在工厂之后写入记录，锁定版 MCP 客户端不使用 `extra`（只有服务端与 CLI 使用）；SDK 的 `OPENAI_AGENTS_DONT_LOG_TOOL_DATA` 被显式关闭时 SDK 自身会记录工具输入输出，属运行配置，未在此处强制；映射等严格模式不支持的参数形状不开放，需要时另行验证非严格模式与各模型；远端 schema 中值为 schema 的 `additionalProperties` 视为不符，这一分支没有 loopback 用例；认证引用解析失败与连接失败同样只记录日志，未进入就绪检查（Task 5/P1-B）；远端执行约束依赖远端自身，客户端治理不能证明远端只读；没有接入任何真实外部 MCP Server；修复版本未经复审。
+**Task 4 缺口：** 工具列表只在启动时发现一次，远端此后改动工具由每次调用的结果模型校验兜底，参数 schema 不再复核；远端输出 schema 不比较；schema 比较只覆盖平铺参数，嵌套 `$defs` 名字不同会保守隐藏；越出端点或压缩编码在响应头阶段被拒绝时会关闭该 Server 的连接，之后调用都失败，需重启恢复（失败方向安全）；Server 运行中断开不会自动重连或隐藏工具；认证只支持静态 Bearer，OAuth 与其他 transport 未实现；MCP 日志约束通过进程级 LogRecord 工厂实现，之后替换工厂而不串联原工厂的代码会解除约束，Task 5 装配日志时须保持；日志调用的 `extra` 字段在工厂之后写入记录，锁定版 MCP 客户端不使用 `extra`（只有服务端与 CLI 使用）；SDK 的 `OPENAI_AGENTS_DONT_LOG_TOOL_DATA` 被显式关闭时 SDK 自身会记录工具输入输出，属运行配置，未在此处强制；映射等严格模式不支持的参数形状不开放，需要时另行验证非严格模式与各模型；远端 schema 中值为 schema 的 `additionalProperties` 视为不符，这一分支没有 loopback 用例；认证引用解析失败与连接失败同样只记录日志，未进入就绪检查（Task 5/P1-B）；远端执行约束依赖远端自身，客户端治理不能证明远端只读；没有接入任何真实外部 MCP Server。修复版本经复审后由 PR #6 合入。
 
 **Task 3 缺口：** 用户输入准入只按可信配置的字节上限与禁止模式判断，不能识别模式之外的敏感内容，也不对模型自身知识写出的文字做模式检查；准入策略与 Profile `data_policy_id` 的对应由 Task 5 装配；Evidence 的 Session 列现与模型列内容相同（保留列结构，未另做迁移）；`ToolRequest.tool_name` 由应用的工具包装从 SDK 上下文填入，治理层不另行核对它与 `tool_id` 的对应；参数有默认值而模型省略时，规范化摘要可能与执行参数不同，回放会保守拒绝；任一证据失效即整段历史不可回放，撤权或证据保留期短于会话保留期时会话提前结束（有意的保守选择）；推理项不保存，真实推理模型经 Responses 的无状态续轮需实测；单轮用户输入大小只在提交时计入历史字节，模型输入前的单轮上限属 Task 5；同会话互斥与轮次结束清理由 Task 5 应用入口负责，`PolicySession` 只以状态比较交换防止重复提交；SDK 的 RunState 恢复路径（`get_items(limit)`）不支持；物理清理命令与渠道新建会话属 P1-B。
 
@@ -109,7 +124,7 @@
 
 CI integration job 设置 `SDK_TEST_POSTGRES_URL`，启动 `compose.sdk-test.yml`，运行完整 `python -m pytest -q`，并用 shell `EXIT` trap 清理测试项目；不保留旧 PostgreSQL service。SDK 地址缺失时 fixture 明确失败，避免数据库测试静默跳过。
 
-**下一项：** Task 4 修复版本的独立复审；需要时推送并开 PR，核对 CI 后单独批准合并，再从合并后的 `main` 开始 Task 5（组合可验证的运行核心）。
+**下一项：** 对 Task 5 以及整个 P1-A 做针对具体版本的独立审查，修复阻塞项；需要时推送并开 PR，核对 CI 后单独批准合并。获准模型端点与凭据引用就绪后，至少完成一个 Profile 的真实工具闭环与追问验证。之后细化 P1-B。
 
 P1-A 是内部核心。P1-B 才接真实查询与双入口并切换正式入口，P2 增加诊断，P3 做实际用户验收。环境缺失不阻塞独立离线任务，但不能跳过对应实战退出条件。
 
@@ -190,6 +205,17 @@ Task 4 验证（同一环境，锁文件未变）：
 | `uv run --locked --extra dev ruff check .`、`ruff format --check src/xiaowei tests/sdk_core`、`mypy src` | 通过 |
 
 Task 4 反向验证：首轮 30 项、首轮审查修复 13 项、复审修复 5 项，见计划“Task 4 实测记录”，全部使对应用例失败。
+
+Task 5 验证（同一环境，锁文件未变）：
+
+| 命令 | 结果 |
+| --- | --- |
+| `SDK_TEST_POSTGRES_URL=$SDK_PG uv run --locked --extra dev python -m pytest tests/sdk_core/test_app.py -q -W error` | 移走 `app.py` 时收集阶段失败；实现后 13 passed。首次运行时伪造证据的原因为 `content_rejected`（提交路径与输入拒绝同一异常），改为提交前单独校验后通过 |
+| `SDK_TEST_POSTGRES_URL=$SDK_PG uv run --locked --extra dev python -m pytest tests/sdk_core -q -W error` | 221 passed |
+| `SDK_TEST_POSTGRES_URL=$SDK_PG uv run --locked --extra dev python -m pytest -q` | 1935 passed，152 skipped；5 条警告来自旧网络隔离测试，原有行为 |
+| `uv run --locked --extra dev ruff check .`、`ruff format --check src/xiaowei tests/sdk_core`、`mypy src` | 通过 |
+
+Task 5 反向验证 21 项见计划“Task 5 实测记录”：20 项使对应用例失败（其中一项在补充用例后），1 项证明不承重并删除。
 
 Task 2 反向验证：分别去掉撤权复核、调用时范围检查、展示范围过滤、目标一致性、参数校验、预算预占，把预算检查与计数拆到 `await` 两侧，保留执行异常原因链，去掉契约 schema 比对、SQL 归属条件、过期/目标/授权/渠道检查，改为投影全部字段、忽略投影上限或来源截断，去掉回答的引用子集/非空/去重/澄清混用检查、`AgentAnswer` 或 RunContext 的 `extra="forbid"`、应用表版本/存在检查、已安装判断，共 26 项；审查修复后另加 8 项：去掉写入后复核、模型或 Session 的渠道约束（分别及同时）、较小上限、策略指纹比较，指纹去掉投影或契约部分。34 项对应用例均失败。可信类型的 `strict` 经变异证明不承重，已删除。
 

@@ -220,13 +220,24 @@
 
 应用提供方法 `Application.scope_for_turn(mode: Literal["query", "diagnose"], authorized_tools: frozenset[str], available_tools: frozenset[str]) -> frozenset[str]`，与构造时装配的可信用途允许表取交集；入口每条消息重新调用，模型不能调用它授权自己。本片测试以可信合成入口构造 context，P1-B 实现按钮/指令解析。关联编号复用应用生成的 `turn_id`，阶段日志通过标准库 logging 输出白名单字段。
 
-- [ ] 编写 `test_local_and_mcp_followup_through_real_runner`、`test_concurrent_sessions_are_isolated`、`test_same_session_reentry_is_rejected`、`test_invalid_answer_is_never_delivered_or_committed`、`test_timeout_does_not_replay_tools`。断言两轮工具结果可合法引用；不同渠道得到不同获准投影；一轮权限变化不能改写另一轮 Agent tools；超限/取消无成功 Delivery，未经校验内容既不提交 Session 也不发送。
-- [ ] 编写 `test_query_permission_is_not_inherited`、`test_commit_failure_does_not_replay_tools`、`test_stage_logs_contain_only_safe_metadata`。前一轮查询、下一轮默认诊断时，查询工具不出现且强行调用零执行；实际 PostgreSQL 提交边界注入保存失败后无成功交付，不自动补跑工具，必要时隔离会话；阶段日志共用请求编号且不含合成 SQL、结果、假凭据和原始异常。
-- [ ] 运行 `uv run --locked --extra dev python -m pytest tests/sdk_core/test_app.py -q`；预期新应用入口缺失失败。
-- [ ] 实现上述 `run_turn`：存储就绪检查、总期限、有限并发、同会话互斥、每轮权限表与受限阶段日志；校验 SDK 最终结构与 Evidence 后才提交 Session，交付前再复核权限和渠道。校验不通过返回受控失败，不把模型完整回答当报错输出。本片不发送外部渠道消息，不提供未校验结论流。P1-B 另验证 Session 已提交但最终结果保存失败的双存储边界，以及渠道投递状态。
-- [ ] 运行 `uv run --locked --extra dev python -m pytest tests/sdk_core -q`、`uv run --locked --extra dev ruff check src/xiaowei tests/sdk_core`、`uv run --locked --extra dev mypy src/xiaowei`；预期全部通过。CI 已在 Task 1 集成中接入同一隔离 PostgreSQL harness 和完整 pytest 命令；新测试须继续进入该路径，数据库缺失/不可用不能 skip 成全绿。旧检查标识为历史检查，不用旧通过率代替新能力验证。
+- [x] 编写 `test_local_and_mcp_followup_through_real_runner`、`test_concurrent_sessions_are_isolated`、`test_same_session_reentry_is_rejected`、`test_invalid_answer_is_never_delivered_or_committed`、`test_timeout_does_not_replay_tools`。断言两轮工具结果可合法引用；不同渠道得到不同获准投影；一轮权限变化不能改写另一轮 Agent tools；超限/取消无成功 Delivery，未经校验内容既不提交 Session 也不发送。
+- [x] 编写 `test_query_permission_is_not_inherited`、`test_commit_failure_does_not_replay_tools`、`test_stage_logs_contain_only_safe_metadata`。前一轮查询、下一轮默认诊断时，查询工具不出现且强行调用零执行；实际 PostgreSQL 提交边界注入保存失败后无成功交付，不自动补跑工具，必要时隔离会话；阶段日志共用请求编号且不含合成 SQL、结果、假凭据和原始异常。
+- [x] 运行 `uv run --locked --extra dev python -m pytest tests/sdk_core/test_app.py -q`；预期新应用入口缺失失败。（实测：移走 `app.py` 时收集阶段失败。）
+- [x] 实现上述 `run_turn`：存储就绪检查、总期限、有限并发、同会话互斥、每轮权限表与受限阶段日志；校验 SDK 最终结构与 Evidence 后才提交 Session，交付前再复核权限和渠道。校验不通过返回受控失败，不把模型完整回答当报错输出。本片不发送外部渠道消息，不提供未校验结论流。P1-B 另验证 Session 已提交但最终结果保存失败的双存储边界，以及渠道投递状态。
+- [x] 运行 `uv run --locked --extra dev python -m pytest tests/sdk_core -q`、`uv run --locked --extra dev ruff check src/xiaowei tests/sdk_core`、`uv run --locked --extra dev mypy src/xiaowei`；预期全部通过。CI 已在 Task 1 集成中接入同一隔离 PostgreSQL harness 和完整 pytest 命令；新测试须继续进入该路径，数据库缺失/不可用不能 skip 成全绿。旧检查标识为历史检查，不用旧通过率代替新能力验证。
 - [ ] 在已获准模型环境使用合成数据，按 OpenAI/Gemini/DeepSeek 的每个选定 Profile 分别验证本地和 MCP 工具调用、工具结果回传、真实 `AgentAnswer` 类型/Evidence 校验与下一轮 Session 追问；至少先完成一个 Profile。记录 SDK、端点标识、协议、模型/模式、用量和结果，其他组合如实标为未验证/不兼容；不因一家通过宣称全部支持，不用 scripted Model 或 HTTP mock 代替真实验证。更新 README 的核心开发验证命令、handoff 的精确 SHA/证据/缺口；保持正式 Web/飞书启动说明未交付的事实。
-- [ ] 仅暂存本任务文件，提交 `feat: compose verified SDK application core`。对整个 P1-A 分支做一次独立审查，修复阻塞项后细化 P1-B；不自动合并、部署或归档。
+- [x] 仅暂存本任务文件，提交 `feat: compose verified SDK application core`。（P1-A 整体独立审查待进行。）对整个 P1-A 分支做一次独立审查，修复阻塞项后细化 P1-B；不自动合并、部署或归档。
+
+**Task 5 实测记录（与计划的差异与发现）：**
+
+- 接口：`AppConfig(instructions, purposes, data_policies, session_limits, max_concurrent_turns)` 为可信配置；`purposes` 必须同时给出 `query` 与 `diagnose`；`data_policies` 以 Profile 的 `data_policy_id` 为键，`DataPolicy(input: SessionInputPolicy, model_tools: frozenset[ToolId])` 给出用户输入准入与结果可交给该模型的工具。`Application(config, *, profile, model, engine, governance, evidence, local_tools, mcp=None, clock)`：接收 Profile 本身，由它计算 SDK 设置与指纹，避免三者不一致；`local_tools` 把已登记的 `local/` 工具映射到应用绑定的 I/O 函数，由应用构造受治理的 FunctionTool，调用方不能传入未经治理的工具。`available_tools` 返回本地工具与已核对的 MCP 工具（`MCPIntegration.available_tool_ids`）。`scope_for_turn` 按计划签名，另与数据策略的 `model_tools` 取交集。`run_turn` 失败时抛出 `TurnError(reason)`，原因代码固定，取消照常传播。
+- 共享包装：本地工具与 MCP 工具共用新模块 `tools.py` 的 `governed_function_tool`（参数解析、`ToolRequest`、`GovernedTools.invoke`、受控失败交给模型）；`mcp.py` 改为调用它，行为不变（Task 4 的 22 项用例照常通过）。
+- 每轮：同会话已在运行即拒绝（`session_busy`），并发达到上限即拒绝（`busy`），检查与登记之间没有 await；不排队。本轮 Tool Scope 超出数据策略时拒绝；存储就绪检查不通过时拒绝；二者都在模型调用前。之后新建本轮的 SDK Agent（工具列表只属于这一轮）与 `PolicySession`，调用 `Runner.run`（`max_turns` 取自预算，`RunConfig` 显式关闭 tracing）。最终回答先单独经 Evidence 校验（原因明确为 `answer_rejected`），再 `commit_validated`（其内再校验一次），提交后按接收渠道与当前权限重新生成 `Delivery`。总期限取 `Budget.timeout_seconds`，覆盖包括提交在内的整轮；期限或取消发生在提交过程中时会话停在 `writing`，不再回放（失败方向安全）。`finally` 中清理本轮工具计数并释放会话。
+- 错误映射：会话、证据与存储错误沿用本包的固定信息；SDK、模型客户端与其他异常一律为固定的 `model_failed`，不带原因链——模型客户端会把上游错误体写进异常消息。模型强行调用本轮未展示的工具时，SDK 抛出 `ModelBehaviorError`，本轮失败且不提交。
+- 阶段日志：`xiaowei.app` 输出 `turn=<turn_id> stage=<阶段> reason=<原因代码> elapsed_ms=<毫秒>`，阶段为 received、storage_ready、answered、committed、delivered，或 refused、failed、cancelled；不记录消息、回答、工具数据或异常。未替换 LogRecord 工厂，Task 4 的 MCP 日志约束保持。
+- `ci.yml` 未修改：integration job 已在隔离 PostgreSQL 上运行完整 pytest，新用例自动进入该路径。
+- 反向验证 21 项：去掉同会话检查、并发上限，检查与登记之间加 await，各轮共用同一工具列表，用途或数据策略不取交集，`run_turn` 不查数据策略，不查存储就绪，没有总期限，交付前不复核，提交前不单独校验，不清理轮次计数，透传下层异常消息，保留原因链，日志含消息，开启 tracing，本地工具不按范围，输入策略不按 Profile，不校验 `local/` 前缀，不校验用途登记。20 项使对应用例失败。“透传下层消息”起初未被发现（没有用例的下层异常消息含敏感内容），补充“上游错误”用例后失败。“失败时 `discard_pending`”经变异证明不承重（每轮新建 PolicySession，暂存随对象丢弃），已删除。另把共享包装改为绕过治理，Task 4 与 Task 5 共 15 项用例失败。
+- 未完成：真实模型验证（本会话没有获准的模型端点与凭据，三个 Profile 均未验证）；P1-A 整体独立审查。
 
 ## 完成定义与覆盖边界
 
