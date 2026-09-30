@@ -246,15 +246,15 @@ Web 默认只接受配置的 loopback Host/Origin，按解析后的 scheme/host/
 
 **Result:** 给任意 SQL 与可信 `QueryPolicy`，只产生一个可执行的 `GuardedQuery`，或返回不含输入内容的枚举原因码与固定说明；全程无 I/O。
 
-**Files:** Create `src/xiaowei/sqlguard.py`, `tests/p1b/test_sqlguard.py`; optionally add shared fixtures under `tests/p1b/conftest.py` only when Task 2 consumes them.
+**Files:** Create `src/xiaowei/sqlguard.py`, `tests/p1b/test_p1b_sqlguard.py`（旧 `tests/security/test_sqlguard.py` 仍在，测试目录无 `__init__.py`，basename 不能重复）; optionally add shared fixtures under `tests/p1b/conftest.py` only when Task 2 consumes them.
 
 - [ ] 先写正例：单表、显式列、JOIN、非递归 CTE、非相关子查询、允许函数、较小 LIMIT，以及缺失/过大 LIMIT 被改成 `max_rows + 1`；断言规范化 SQL、物理对象和列集合。规范化 SQL 再进一次 SQLGuard 必须完全相同，`WITH` 的 LIMIT 必须落在最终查询主体。
 - [ ] 覆盖 SELECT、WHERE、JOIN、GROUP BY、HAVING、ORDER BY 与子查询中的列；单独验证 ORDER BY 输出别名。用大小写、反引号和 Unicode 等价/混淆样例验证标识符规范化与 allowlist 匹配。
 - [ ] 按节点类型验证函数闭集，至少覆盖 `Cast`、`If`、`Anonymous` 及普通聚合/标量函数；不能只靠 `exp.Func` 名称放行。
 - [ ] 先写关键反例：空/超长/多语句、DDL/DML、UNION、递归/相关、注释/hint、锁、变量、导出、外部/表函数、catalog/跨库、越权表/列/函数、歧义列、投影星号、非字面 LIMIT/OFFSET、未知节点与畸形方言；逐类断言稳定的 `QueryRejectionCode`、固定安全说明和 recording I/O 为 0，并证明原因不回显输入 SQL、对象名、字面量或解析器错误。
-- [ ] 运行 `uv run --locked --extra dev python -m pytest tests/p1b/test_sqlguard.py -q`，确认新增用例先因缺实现失败。
+- [ ] 运行 `uv run --locked --extra dev python -m pytest tests/p1b/test_p1b_sqlguard.py -q`，确认新增用例先因缺实现失败。
 - [ ] 只实现上述闭集；使用 sqlglot 公共 AST/scope 能力，不写字符串前缀判断，不自动查询数据库补列信息。
-- [ ] 运行目标测试、`ruff check src/xiaowei/sqlguard.py tests/p1b/test_sqlguard.py`、`mypy src/xiaowei/sqlguard.py`；对删除关键遍历、放行未授权函数、移除 LIMIT 重写做变异检查，相关测试必须变红。
+- [ ] 运行目标测试、`ruff check src/xiaowei/sqlguard.py tests/p1b/test_p1b_sqlguard.py`、`mypy src/xiaowei/sqlguard.py`；对删除关键遍历、放行未授权函数、移除 LIMIT 重写做变异检查，相关测试必须变红。
 - [ ] 独立审查候选精确 SHA，重点核对嵌套 scope、CTE 影子名、函数遍历与 fail-closed；提交 `feat: guard StarRocks read-only SQL`。
 
 ### Task 2：有界 StarRocks Adapter

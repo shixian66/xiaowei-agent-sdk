@@ -9,14 +9,14 @@
 | 项目 | 已核对事实 |
 | --- | --- |
 | 仓库 | [shixian66/xiaowei-agent-sdk](https://github.com/shixian66/xiaowei-agent-sdk) |
-| 本地目录 / 分支 | `/Users/kloenguyen/Desktop/agent-SDK` / `claude/p1b-gate0`（从已审查的计划提交 `41adc3f` 分出；计划基于 `origin/main` 的 `b0ae274`） |
+| 本地目录 / 分支 | `/Users/kloenguyen/Desktop/agent-SDK` / `claude/p1b-sqlguard`（从 `origin/main` 的 `3abd1b3` 分出，该提交合入了 Gate 0 离线部分 PR #9） |
 | M5 历史起点 | `372c381f44ecfa1fa53961f137d0058033cbd805`；不是远端当前 main 的核验结论 |
-| P1-A 代码基线 / 当前主线 | `148abaa4729ac6644c03056cf265a9dc18f1acd8` / `b0ae2740cba20dd08d4c63fc58281be23e8e042a`；主线后两项提交只更新 P1-A 收尾文档与协作入口 |
-| 当前阶段 | **P1-B 计划经三轮独立审查通过（`41adc3f`）；Gate 0 离线部分完成，真实运行未进行**。P1-A 离线完成（Task 1–5 经 PR #2–#7 合入）；Gemini 只有部分真实证据，工具续轮到交付与 Session 追问闭环仍待 Gate 0 真实运行，SQLGuard 尚未开始 |
+| P1-A 代码基线 / 当前主线 | `148abaa4729ac6644c03056cf265a9dc18f1acd8` / `3abd1b3c455a51565baa74192b3269b584b0fa8c`（P1-B 计划与 Gate 0 离线部分已合入） |
+| 当前阶段 | **P1-B Task 1 SQLGuard 离线实现完成，待独立审查**；Gate 0 离线部分已合入（PR #9），真实运行未进行，阻塞 Task 3–9。P1-A 离线完成（Task 1–5 经 PR #2–#7 合入）；Gemini 只有部分真实证据 |
 | 当前源码与依赖 | 新包 `src/xiaowei/`（`config.py`、`storage.py`、`model_api.py`、`models.py`、`governance.py`、`evidence.py`、`session.py`、`mcp.py`、`tools.py`、`app.py`、`migrations/001_initial.sql`）与旧 `src/xiaowei_agent/` 并存；锁定 `openai-agents[sqlalchemy]` 0.22.3、`mcp` 2.2.0、`openai` 3.20.0、SQLAlchemy 2.0.52、asyncpg 0.30.0，Python 3.11.16；wheel 同时打包两个包，CLI 仍指向旧包 |
 | 新产品入口 | 只有开发验证命令（见第 5 节）；尚无产品启动入口，旧 CLI/Compose 不算新入口 |
-| 本次工作范围 | [P1-B 计划](docs/superpowers/plans/2026-09-30-p1b-starrocks-dual-entry.md) Gate 0 的离线部分：`tests/sdk_core/gate0.py`（专用合成工具与投影、产品路径装配、固定样例、不含内容的请求观测）、`tests/sdk_core/test_gate0.py`（Gemini 3 协议形状的 HTTP mock）与显式真实模型命令 `scripts/gate0_real_model.py`；未改 `src/xiaowei`、依赖或迁移，未部署 |
-| 外部操作 | 主线曾获用户授权用合成数据调用 Gemini API（见第 3 节），验证后本机凭据文件已删除，用户负责作废该密钥；本次 Gate 0 离线工作没有获准 Profile 与凭据，未调用真实模型、StarRocks、飞书或外部 MCP Server |
+| 本次工作范围 | 计划顺序调整（用户批准：Gate 0 只阻塞 Task 3–9）与 [P1-B 计划](docs/superpowers/plans/2026-09-30-p1b-starrocks-dual-entry.md) Task 1：新增 `src/xiaowei/sqlguard.py` 与 `tests/p1b/test_p1b_sqlguard.py`；未接入 `GovernedTools`（Task 3），未改依赖或迁移，未部署 |
+| 外部操作 | 主线曾获用户授权用合成数据调用 Gemini API（见第 3 节），验证后本机凭据文件已删除，用户负责作废该密钥；Gate 0 与 SQLGuard 离线工作没有获准 Profile 与凭据，未调用真实模型、StarRocks、飞书或外部 MCP Server |
 
 表中分别列出 P1-B 所依据的 P1-A 代码基线与计划所依据的当前主线，不能混用。接手先用 `git rev-parse HEAD` 和 `git status --short` 取得实际版本；审查使用对应提交的精确 SHA，本文件的修改历史由 Git 保存。
 
@@ -150,7 +150,18 @@ CI integration job 设置 `SDK_TEST_POSTGRES_URL`，启动 `compose.sdk-test.yml
 
 **Gate 0 未覆盖：** 没有获准 Profile 与凭据，未对任何真实端点运行；mock 只证明本应用与锁定 SDK 在该协议形状下的行为，不证明任何供应商接受回放历史、遵守 `parallel_tool_calls=false` 或给出可用的回答质量。样例数据与 Web 渠道固定，飞书渠道投影未在 Gate 0 中运行。
 
-**下一项：** 用户提供并授权一个有额度的 Profile（不含凭据的 `ModelProfile` JSON + 本机 `env:` 凭据引用）后运行：
+**Task 1 SQLGuard 离线已证明（纯函数，锁定 sqlglot 30.17.0）：** `guard_readonly_query(sql, QueryPolicy) -> GuardedQuery`，拒绝抛 `QueryRejectedError`，只带 10 个 `QueryRejectionCode` 之一与固定说明，切断异常链。
+
+- 先分词：字节超限、空输入、注释/hint、多语句、非 `SELECT`/`WITH` 开头在解析前拒绝。非 SELECT 语句在 sqlglot 中会回退为 `Command` 并把原文写进 sqlglot 日志，因此必须在解析前挡住；用例断言拒绝时日志不含输入 canary。
+- 解析后按节点闭集与参数位置检查：集合运算、递归 CTE、窗口、变量/占位符、锁、hint、`INTO OUTFILE`、表函数/`FILES()`、`NATURAL`/`USING`、分区/索引 hint/时间旅行、列别名列表、十六进制与 `COLLATE` 等都拒绝；函数按 sqlglot 规范名（大写）过 allowlist，覆盖 `Anonymous`、`Cast`（含 `DATE '…'`）、`If`、`COUNT(*)`；`CASE WHEN` 不需要 `IF`。
+- 物理表按 sqlglot scope 与 CTE 区分，只允许默认 database 中的获准对象；再用 `qualify` 按“只含获准列”的 schema 完整限定。`qualify` 不校验 HAVING/ORDER BY 中的未限定名，因此逐 scope 遍历全部列复核；ORDER BY 输出别名替换为别名所指表达式，其余未限定名拒绝，执行的 SQL 中不留需要数据库再解析的名字。相关子查询、跨来源歧义列拒绝。
+- 顶层 LIMIT 缺失或超过 `max_rows` 改为 `max_rows + 1`，较小值保留；`OFFSET` 与非整数字面量拒绝。规范化 SQL 同样受字节上限约束，往返幂等。`GuardedQuery` 只能由 SQLGuard 构造。
+- 标识符按 sqlglot 的 StarRocks 语义大小写敏感比较：大小写、全角、同形字差异只会失败关闭。StarRocks 列名实际大小写不敏感，因此模型写错大小写会得到“列未获准”，可在本轮修正。
+- 反向验证 15 项（改用 `Scope.columns`、放行任意函数、去掉 LIMIT 改写/物理表检查/相关子查询检查/多语句检查/SELECT 开头检查/星号检查/参数位置检查/歧义检查/别名内联/规范化长度检查/异常链切断/构造封印/注释 hint 词元检查）均使用例失败。节点级 `comments` 检查经变异证明被词元检查完全覆盖，已删除。
+
+**SQLGuard 未覆盖：** 未接入 `GovernedTools` precheck 与预算（Task 3）；零 I/O 的 recording pool 断言属于 Task 2/3；未对真实 StarRocks 验证规范化 SQL 的执行语义（G1、Task 9）。
+
+**下一项：** Task 1 独立审查（精确 SHA 见 PR），通过后开始 Task 2 StarRocks Adapter 的离线部分。Gate 0 真实运行可并行：用户提供并授权一个有额度的 Profile（不含凭据的 `ModelProfile` JSON + 本机 `env:` 凭据引用）后运行：
 
 ```bash
 SDK_TEST_POSTGRES_URL=postgresql+asyncpg://postgres@127.0.0.1:55432/postgres \
@@ -305,5 +316,13 @@ Gate 0 离线部分验证（同一环境，锁文件未变）：
 | `SDK_TEST_POSTGRES_URL=$SDK_PG uv run --locked --extra dev python -m pytest -q` | 首轮 1998 passed，152 skipped；5 条警告来自旧网络隔离测试（审查修复只改 Gate 0 三个文件，未重跑全量） |
 | `uv run --locked --extra dev ruff check .`、`ruff format --check src/xiaowei tests/sdk_core scripts/gate0_real_model.py`、`mypy src`、`git diff --check` | 通过；新增三个文件另以 `MYPYPATH=src mypy --explicit-package-bases` 检查通过 |
 | 未设置凭据引用时运行 `python -m scripts.gate0_real_model --profile <示例 Gemini Profile>` | `gate0: 环境变量 XIAOWEI_GATE0_GEMINI_KEY 未设置或为空`，退出码 2，未发出请求 |
+
+SQLGuard 验证（同一环境，锁文件未变）：
+
+| 命令 | 结果 |
+| --- | --- |
+| `uv run --locked --extra dev python -m pytest tests/p1b/test_p1b_sqlguard.py -q` | 实现前收集阶段因缺少 `xiaowei.sqlguard` 失败；实现后 159 passed |
+| `uv run --locked --extra dev python -m pytest -q --ignore=tests/sdk_core`；`-m security` | 1873 passed，152 skipped；923 passed，79 skipped |
+| `ruff check .`、`ruff format --check src/xiaowei/sqlguard.py tests/p1b`、`mypy src`、`git diff --check` | 通过 |
 
 独立审查：Codex 审查 `bf8963d`、`6dbbb6b`、`5aee8f5` 均为暂不通过，复审 `8dba33a` 为本地技术验收通过。本轮只同步 CI 与对应合同测试，未将自查称为独立审查；GitHub CI 是独立执行证据，不代表真实服务或产品运行。真实模型只有 Gemini 部分证据（未完成闭环），尚无真实 StarRocks、正式浏览器、飞书运行或用户验收证据，未来生产 Action 仍只有设计约束。
