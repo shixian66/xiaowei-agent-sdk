@@ -24,7 +24,7 @@ from agents import set_tracing_disabled
 from agents.extensions.memory import SQLAlchemySession
 from agents.testing import assistant_message, function_call
 from agents.tracing import flush_traces, set_trace_processors
-from pydantic import SecretStr, ValidationError
+from pydantic import ValidationError
 from sqlalchemy import text
 from sqlalchemy.engine import URL
 from sqlalchemy.ext.asyncio import AsyncEngine
@@ -61,7 +61,7 @@ ALL_TOOLS = frozenset({TOTAL_TOOL, QUERY_TOOL, LOOKUP})
 SDK_NAMES = {TOTAL_TOOL: "order_total", QUERY_TOOL: "run_query", LOOKUP: "fixture__lookup"}
 SYNTHETIC_SQL = "SELECT secret_margin FROM synthetic_orders WHERE region = 'east'"
 MODEL_SECRET = "模型私下写的结论-5c1e"  # noqa: S105 - 模型输出标记，不是凭据
-FAKE_MODEL_KEY = SecretStr("sk-test-app-model")
+FAKE_MODEL_KEY = "sk-test-app-model"
 
 
 def app_config(**overrides: Any) -> AppConfig:
@@ -281,6 +281,7 @@ class Env:
 @pytest.fixture
 async def env(postgres_url: URL, monkeypatch: pytest.MonkeyPatch) -> AsyncIterator[Env]:
     monkeypatch.setenv(TOKEN_ENV, FAKE_TOKEN)
+    monkeypatch.setenv(PROFILE.api_key_ref.removeprefix("env:"), FAKE_MODEL_KEY)
     with serve(mcp_app(token=FAKE_TOKEN)) as running:
         async with ready_engine(postgres_url) as engine:
             grants, clock = Grants(), Clock()
@@ -293,7 +294,7 @@ async def env(postgres_url: URL, monkeypatch: pytest.MonkeyPatch) -> AsyncIterat
             configs = [mcp_config(running.url, tools=("lookup",), auth_ref=f"env:{TOKEN_ENV}")]
             scripts = Scripts()
             async with (
-                open_model(PROFILE, api_key=FAKE_MODEL_KEY, transport=scripts.transport()) as bound,
+                open_model(PROFILE, transport=scripts.transport()) as bound,
                 MCPIntegration(configs, governed, clock=clock) as integration,
             ):
                 yield Env(
@@ -793,7 +794,7 @@ async def test_configuration_is_checked_at_startup(env: Env) -> None:
     assert len(env.fixture.recorder.requests) == requests
 
     unknown = PROFILE.model_copy(update={"data_policy_id": "unknown"})
-    async with open_model(unknown, api_key=FAKE_MODEL_KEY, transport=env.scripts.transport()) as b:
+    async with open_model(unknown, transport=env.scripts.transport()) as b:
         with pytest.raises(ValueError, match="数据策略"):
             Application(
                 app_config(),

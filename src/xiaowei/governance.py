@@ -5,17 +5,21 @@
 执行期间撤权时结果不交给模型。拒绝与失败使用固定信息：SDK 默认把异常文本交给模型，
 因此这里的错误不能携带原始参数、结果、连接信息或下层异常。
 
-参数按 JSON 严格模式校验（不做字符串转数字等转换，拒绝非有限数值），实际执行只收到
-校验后规范化的参数；参数模型不能有默认值或接收未声明字段（含嵌套），因此模型给出的参数
-就是完整的执行参数。
+参数经 ``normalize_arguments`` 按 JSON 严格模式校验：不做字符串转数字等转换，拒绝非有限
+数值，并在校验调用上强制禁止未声明字段（含嵌套模型，不依赖模型自身配置或可被覆盖的
+JSON schema）。实际执行与证据都只使用规范化后的有效参数；会话历史中的调用经同一函数
+规范化后再与证据核对。参数模型的字段（含嵌套）必须全部必填：默认值不经校验，也不是
+模型给出的参数。
 """
 
 from __future__ import annotations
 
+import enum
 import json
+import types
 from collections.abc import Awaitable, Callable, Iterable, Mapping
 from dataclasses import dataclass
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Annotated, Literal, Union, get_args, get_origin
 
 from pydantic import BaseModel
 
@@ -71,9 +75,9 @@ class Projection:
 class ToolPolicy:
     """``policy_id`` 对应的明确策略：参数模型、四种用途各自的投影，以及不可信来源的结果模型。
 
-    ``result`` 用于 MCP 等远端结果：按严格类型校验，只保留其声明的字段，不合约的结果整体
-    拒绝；它不能接收未声明字段（含嵌套模型），投影也只能取它声明的字段。本地 Adapter 由
-    可信代码产生结果，可不提供。
+    ``result`` 用于 MCP 等远端结果：按严格类型校验，校验时强制忽略未声明字段（含嵌套模型，
+    不论模型自身配置），不合约的结果整体拒绝；投影只能取它声明的字段。本地 Adapter 由可信
+    代码产生结果，可不提供。
     """
 
     policy_id: str
@@ -91,13 +95,18 @@ class ToolCatalog:
         for policy in self._policies.values():
             if set(policy.projections) != set(AUDIENCES):
                 raise ValueError(f"工具目录：策略 {policy.policy_id} 必须且只能定义四种用途投影")
-            arguments = policy.arguments.model_json_schema()
-            if not _forbids_undeclared(arguments) or _has_optional(arguments):
+            if not _all_required(policy.arguments):
                 raise ValueError(
-                    f"工具目录：策略 {policy.policy_id} 的参数模型必须禁止额外字段且全部字段必填"
+                    f"工具目录：策略 {policy.policy_id} 的参数模型字段必须全部必填，"
+                    "且只由基本类型、枚举与嵌套模型组成"
                 )
-            if policy.result is not None:
-                _check_result_model(policy, policy.result)
+            result = policy.result
+            if result is not None and any(
+                name not in result.model_fields
+                for spec in policy.projections.values()
+                for name in spec.fields
+            ):
+                raise ValueError(f"工具目录：策略 {policy.policy_id} 的投影字段不在结果模型中")
         for contract in contracts:
             registered = self._policies.get(contract.policy_id)
             if registered is None:
@@ -150,32 +159,26 @@ class GovernedTools:
         request: ToolRequest,
         execute: Execute,
     ) -> ToolResult:
-        """治理通过后以规范化参数执行；证据按模型给出的调用（与会话历史一致）记录。"""
+        """治理通过后以规范化的有效参数执行，并按同一有效请求记录证据。"""
         contract = self._catalog.contract(request.tool_id)
         if contract is None or contract.target_id != request.target_id:
             raise ToolRejectedError("工具不可用")
         if not _in_scope(ctx, contract):
             raise ToolRejectedError("本轮不允许使用该工具")
-        try:
-            # 不依赖参数模型自身的配置：JSON 严格模式不做类型转换，非有限数值在序列化时拒绝。
-            validated = self._catalog.policy_for(contract).arguments.model_validate_json(
-                json.dumps(request.arguments, allow_nan=False), strict=True
-            )
-        except (ValueError, TypeError):
-            raise ToolRejectedError("参数不符合工具契约") from None
-        normalized = request.model_copy(update={"arguments": validated.model_dump(mode="json")})
+        arguments = normalize_arguments(self._catalog.policy_for(contract), request.arguments)
+        effective = request.model_copy(update={"arguments": arguments})
         if not await self._currently_authorized(ctx.identity, contract):
             raise ToolRejectedError("当前无权调用该工具")
         # 授权回调之后、执行之前不再 await：检查与计数在同一步完成，并行调用不能同时越过上限。
         self._reserve(ctx)
 
         try:
-            observation = await execute(normalized)
+            observation = await execute(effective)
         except Exception:
             raise ToolExecutionError("工具执行失败") from None
         if not isinstance(observation, ToolObservation):
             raise ToolExecutionError("工具执行失败")
-        return await self._evidence.record(ctx, request, observation)
+        return await self._evidence.record(ctx, effective, observation)
 
     def end_turn(self, identity: Identity) -> None:
         """轮次结束时由应用调用，清理该轮计数。"""
@@ -222,46 +225,47 @@ def schema_shape(node: object, *, ignore_extra_flags: bool = False) -> object:
     return shape
 
 
-def _check_result_model(policy: ToolPolicy, result: type[BaseModel]) -> None:
-    declared = set(result.model_fields)
-    if any(name not in declared for spec in policy.projections.values() for name in spec.fields):
-        raise ValueError(f"工具目录：策略 {policy.policy_id} 的投影字段不在结果模型中")
-    if _accepts_undeclared(result.model_json_schema()):
-        raise ValueError(f"工具目录：策略 {policy.policy_id} 的结果模型不能接收未声明字段")
+def normalize_arguments(policy: ToolPolicy, arguments: Mapping[str, object]) -> dict[str, object]:
+    """有效参数：JSON 严格模式、强制禁止未声明字段（含嵌套）后的规范化结果。
+
+    不依赖参数模型自身的 ``extra`` 配置：校验调用本身强制 ``forbid``。非有限数值在序列化时
+    拒绝。字段校验器可以改写取值，执行与证据都以改写后的结果为准。
+    """
+    try:
+        validated = policy.arguments.model_validate_json(
+            json.dumps(arguments, allow_nan=False), strict=True, extra="forbid"
+        )
+    except (ValueError, TypeError):
+        raise ToolRejectedError("参数不符合工具契约") from None
+    return validated.model_dump(mode="json")
 
 
-def _accepts_undeclared(node: object) -> bool:
-    """声明了字段的对象（模型）是否还接收未声明字段；映射（没有 ``properties``）不算。"""
-    if isinstance(node, list):
-        return any(_accepts_undeclared(value) for value in node)
-    if not isinstance(node, dict):
-        return False
-    if "properties" in node and node.get("additionalProperties", False) is not False:
+_SCALARS: tuple[type, ...] = (str, int, float, bool, type(None))
+
+
+def _all_required(model: type[BaseModel]) -> bool:
+    """按 Pydantic 运行时字段判断（不读可被覆盖的 schema）：字段（含嵌套模型）全部必填。"""
+    return all(
+        field.is_required() and _supported_argument_type(field.annotation)
+        for field in model.model_fields.values()
+    )
+
+
+def _supported_argument_type(annotation: object) -> bool:
+    """基本类型、枚举、Literal、嵌套模型及它们的容器/联合；其他结构（数据类等）的默认值与
+    额外字段规则无法在这里核对，不接受。"""
+    origin = get_origin(annotation)
+    if origin is Literal:
         return True
-    return any(_accepts_undeclared(value) for value in node.values())
-
-
-def _forbids_undeclared(node: object) -> bool:
-    """每个声明了字段的对象（含嵌套模型）都显式禁止未声明字段；默认的忽略也不行。"""
-    if isinstance(node, list):
-        return all(_forbids_undeclared(value) for value in node)
-    if not isinstance(node, dict):
-        return True
-    if "properties" in node and node.get("additionalProperties") is not False:
-        return False
-    return all(_forbids_undeclared(value) for value in node.values())
-
-
-def _has_optional(node: object) -> bool:
-    """声明了字段的对象是否有非必填字段（即带默认值，默认值不经校验）。"""
-    if isinstance(node, list):
-        return any(_has_optional(value) for value in node)
-    if not isinstance(node, dict):
-        return False
-    properties = node.get("properties")
-    if isinstance(properties, dict) and set(properties) != set(node.get("required", ())):
-        return True
-    return any(_has_optional(value) for value in node.values())
+    if origin is Annotated:
+        return _supported_argument_type(get_args(annotation)[0])
+    if origin in (Union, types.UnionType, list, tuple, dict, set, frozenset):
+        return all(arg is Ellipsis or _supported_argument_type(arg) for arg in get_args(annotation))
+    if isinstance(annotation, type):
+        if issubclass(annotation, BaseModel):
+            return _all_required(annotation)
+        return issubclass(annotation, (*_SCALARS, enum.Enum))
+    return False
 
 
 def _in_scope(ctx: RunContext, contract: ToolContract) -> bool:

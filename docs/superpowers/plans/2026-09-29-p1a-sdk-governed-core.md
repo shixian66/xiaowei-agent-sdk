@@ -244,7 +244,11 @@
   - 结果未知仍交给模型（Task 4 包装层）：`governed_function_tool` 只把 `ToolRejectedError` 交给模型；其他异常由 SDK 包装为 `UserError` 中止本轮，应用按原因链映射为 `tool_failed`。测试工具 `sdk_tool` 改为调用产品包装；Task 2 的执行期间撤权与 Task 4 的执行后失败用例相应改为断言本轮中止、模型只调用一次。
   - 反向验证 13 项均使对应用例失败：不检查模型绑定类型、绑定可直接构造、不检查 MCP 治理一致、会话只绑定 Profile、绑定不含工具、不含输入策略、非严格校验、允许非有限数值、执行收到原始参数、允许默认值、允许未声明参数、执行后失败交给模型、不映射工具失败。首轮 20 项在新装配下重跑仍全部失败。
   - 另发现（未扩项）：SDK 模型错误日志的内容隐去依赖 `OPENAI_AGENTS_DONT_LOG_MODEL_DATA` 的默认值，已加用例；显式关闭时会记录上游错误体。
-- 未完成：真实模型验证（本会话没有获准的模型端点与凭据，三个 Profile 均未验证）；审查修复版本的独立复审。
+- **增量复审修复（针对 `cd79114` 的 2 组 P1）：**
+  - 凭据未绑定：`open_model(profile, *, transport=None)` 不再接收密钥，内部按 `profile.api_key_ref` 用 `resolve_secret_ref` 解析，失败时不创建客户端。测试经各 Profile 引用的环境变量提供假密钥。
+  - 运行时行为取自可覆盖的 schema、执行与证据两个参数来源：`normalize_arguments(policy, arguments)` 为唯一规范化入口（`strict=True`、`extra="forbid"`、`allow_nan=False`），`invoke` 以它的结果构造单一有效请求，交给执行与 `EvidenceStore.record`；`EvidenceStore.project(call=...)` 先用同一函数规范化历史参数再比较摘要。MCP 结果校验加 `extra="ignore"`。工具目录删除基于 schema 的额外字段与必填检查（前者由校验调用强制，后者改为按 Pydantic 运行时字段递归检查，并限定参数类型为基本类型、枚举、Literal、嵌套模型及其容器）。原“参数/结果模型允许额外字段即登记失败”的目录用例相应改为运行时用例：额外参数在 I/O 前拒绝，额外结果字段被忽略。
+  - 反向验证 8 项均使对应用例失败，见 handoff。
+- 未完成：真实模型验证（本会话没有获准的模型端点与凭据，三个 Profile 均未验证）；增量复审修复版本的独立复审。
 
 ## 完成定义与覆盖边界
 

@@ -34,9 +34,9 @@ from agents.items import TResponseStreamEvent
 from openai import AsyncOpenAI
 from openai.types.responses.response_prompt_param import ResponsePromptParam
 from openai.types.shared import Reasoning, ReasoningEffort
-from pydantic import BaseModel, ConfigDict, Field, SecretStr, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
-from xiaowei.config import is_secret_ref
+from xiaowei.config import is_secret_ref, resolve_secret_ref
 
 Provider = Literal["openai", "gemini", "deepseek", "openai_compatible"]
 
@@ -191,13 +191,15 @@ class ModelBinding:
 async def open_model(
     profile: ModelProfile,
     *,
-    api_key: SecretStr,
     transport: httpx2.AsyncBaseTransport | None = None,
 ) -> AsyncIterator[ModelBinding]:
     """为一个 Profile 装配独立客户端与 SDK Model，返回不可拆分的运行绑定，退出时关闭客户端。
 
-    ``transport`` 仅替换最底层的网络发送（测试使用 mock transport）；限额与请求头约束始终生效。
+    凭据只按 Profile 自己的 ``api_key_ref`` 解析，调用方不能另配；解析失败时抛出
+    ``SecretRefError``，不创建客户端。``transport`` 仅替换最底层的网络发送（测试使用 mock
+    transport）；限额与请求头约束始终生效。
     """
+    api_key = resolve_secret_ref(profile.api_key_ref)
     guarded = _GuardedTransport(
         # 证书与代理不从环境读取；外层 AsyncClient 的 trust_env 不作用于这里创建的 transport。
         transport or httpx2.AsyncHTTPTransport(retries=0, trust_env=False),

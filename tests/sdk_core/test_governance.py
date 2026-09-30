@@ -331,6 +331,111 @@ async def test_execution_receives_only_validated_arguments(postgres_url: URL) ->
     assert type(seen.arguments["ratio"]) is float
 
 
+class _LooseArgs(BaseModel):
+    region: str
+
+
+class _LooseWindow(BaseModel):
+    days: int
+
+
+class _NestedLooseArgs(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    window: _LooseWindow
+
+
+class _DisguisedExtraArgs(BaseModel):
+    # 运行时接收额外字段，schema 却声明禁止：目录不能凭 schema 判断。
+    model_config = ConfigDict(extra="allow", json_schema_extra={"additionalProperties": False})
+    region: str
+
+
+class _DisguisedWindow(BaseModel):
+    model_config = ConfigDict(extra="allow", json_schema_extra={"additionalProperties": False})
+    days: int
+
+
+class _NestedDisguisedArgs(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    window: _DisguisedWindow
+
+
+def _disguise_required(schema: dict[str, Any]) -> None:
+    schema["required"] = list(schema["properties"])
+
+
+class _DisguisedDefaultArgs(BaseModel):
+    # 运行时有默认值，schema 却声明必填：默认值不经校验，也不是模型给出的参数。
+    model_config = ConfigDict(extra="forbid", json_schema_extra=_disguise_required)
+    region: str = "west"
+
+
+class _DefaultWindow(BaseModel):
+    model_config = ConfigDict(extra="forbid", json_schema_extra=_disguise_required)
+    days: int = 30
+
+
+class _NestedDefaultArgs(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    window: _DefaultWindow
+
+
+def _single_catalog(arguments: type[BaseModel]) -> ToolCatalog:
+    contract = ToolContract(
+        tool_id=_COUNT_TOOL,
+        target_id=TARGET,
+        input_schema=arguments.model_json_schema(),
+        policy_id="synthetic.single",
+    )
+    policy = ToolPolicy(policy_id="synthetic.single", arguments=arguments, projections=PROJECTIONS)
+    return ToolCatalog((contract,), (policy,))
+
+
+@pytest.mark.parametrize(
+    ("arguments", "sent"),
+    [
+        pytest.param(_DisguisedExtraArgs, {"region": "east", "admin": True}, id="root-extra"),
+        pytest.param(
+            _NestedDisguisedArgs, {"window": {"days": 3, "admin": True}}, id="nested-extra"
+        ),
+        pytest.param(_DisguisedDefaultArgs, {}, id="root-default"),
+        pytest.param(_NestedDefaultArgs, {"window": {}}, id="nested-default"),
+        # 模型配置为默认（忽略额外字段）时同样拒绝，而不是静默丢弃。
+        pytest.param(_LooseArgs, {"region": "east", "admin": True}, id="root-ignore"),
+        pytest.param(_NestedLooseArgs, {"window": {"days": 3, "admin": True}}, id="nested-ignore"),
+    ],
+)
+async def test_runtime_argument_behaviour_is_not_taken_from_the_schema(
+    postgres_url: URL, arguments: type[BaseModel], sent: dict[str, object]
+) -> None:
+    """schema 可以被覆盖；额外字段与默认值按 Pydantic 运行时行为约束，I/O 前拒绝。"""
+    grants = Grants()
+    grants.grant("alice", _COUNT_TOOL)
+    executed: list[ToolRequest] = []
+
+    async def run(validated: ToolRequest) -> ToolObservation:
+        executed.append(validated)
+        return ToolObservation(payload={"total": 1}, captured_at=START, truncated=False)
+
+    req = ToolRequest(
+        tool_id=_COUNT_TOOL,
+        target_id=TARGET,
+        call_id="c1",
+        tool_name="count_orders",
+        arguments=sent,
+    )
+    try:
+        tools = _single_catalog(arguments)
+    except ValueError as exc:
+        assert "工具目录" in str(exc)  # 登记时拒绝：同样零 I/O
+        return
+    async with ready_engine(postgres_url) as engine:
+        governed = GovernedTools(store(engine, grants, Clock(), tools))
+        with pytest.raises(ToolRejectedError):
+            await governed.invoke(context(tools=frozenset({_COUNT_TOOL})), req, run)
+    assert executed == []
+
+
 class _Dependency:
     """代表客户端、连接或服务引用；RunContext 不能容纳。"""
 
@@ -397,42 +502,16 @@ class _OtherArgs(BaseModel):
     limit: int
 
 
-class _LooseArgs(BaseModel):
-    region: str
-
-
 class _DefaultArgs(BaseModel):
     model_config = ConfigDict(extra="forbid")
     # 默认值不经校验：可以是参数模型声明的类型之外的值。
     region: str = 0  # type: ignore[assignment]
 
 
-class _LooseWindow(BaseModel):
-    days: int
-
-
-class _NestedLooseArgs(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-    window: _LooseWindow
-
-
 class _Result(BaseModel):
     region: str
     total: int
     rows: int
-
-
-class _OpenResult(_Result):
-    model_config = ConfigDict(extra="allow")
-
-
-class _Detail(BaseModel):
-    model_config = ConfigDict(extra="allow")
-    memo: str
-
-
-class _NestedOpenResult(_Result):
-    detail: _Detail
 
 
 class _NarrowResult(BaseModel):
@@ -471,25 +550,10 @@ def _with_schema(arguments: type[BaseModel]) -> tuple[ToolContract, ...]:
         ),
         pytest.param(CONTRACTS, (_policy(arguments=_OtherArgs),), id="schema-drift"),
         pytest.param(
-            tuple(
-                c.model_copy(update={"input_schema": _LooseArgs.model_json_schema()})
-                for c in CONTRACTS
-            ),
-            (_policy(arguments=_LooseArgs),),
-            id="extra-args-allowed",
-        ),
-        pytest.param(
             _with_schema(_DefaultArgs), (_policy(arguments=_DefaultArgs),), id="argument-default"
         ),
-        pytest.param(
-            _with_schema(_NestedLooseArgs),
-            (_policy(arguments=_NestedLooseArgs),),
-            id="nested-extra-args-allowed",
-        ),
         pytest.param((*CONTRACTS, CONTRACTS[0]), (_policy(),), id="duplicate-tool"),
-        # 结果模型决定远端数据中哪些成为事实：不能接收未声明字段，投影也只能取声明的字段。
-        pytest.param(CONTRACTS, (_policy(result=_OpenResult),), id="result-allows-extra"),
-        pytest.param(CONTRACTS, (_policy(result=_NestedOpenResult),), id="nested-result-extra"),
+        # 结果模型决定远端数据中哪些成为事实：投影只能取它声明的字段（未声明字段在校验时忽略）。
         pytest.param(CONTRACTS, (_policy(result=_NarrowResult),), id="projection-not-in-result"),
     ],
 )

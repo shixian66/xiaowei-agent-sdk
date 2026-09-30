@@ -29,6 +29,7 @@ from tests.sdk_core.mcp_fixture import (
     GARBLED_METHOD,
     GARBLED_TEXT,
     INJECTION,
+    NESTED_SECRET,
     PRIVATE,
     garbling,
     gzipped,
@@ -787,6 +788,47 @@ async def test_unknown_result_is_not_retried_by_the_model(postgres_url: URL) -> 
             assert "参数不符合工具契约" in outputs(corrected.calls[1])[0]
             assert fixture.recorder.tool_calls[-1] == ("lookup", {"key": "k1"})
             assert len(fixture.recorder.tool_calls) == 2
+
+
+class _DisguisedDetail(BaseModel):
+    # 运行时接收额外字段，schema 却声明禁止：结果约束不能凭 schema 判断。
+    model_config = ConfigDict(extra="allow", json_schema_extra={"additionalProperties": False})
+    safe: str
+
+
+class _DisguisedResult(BaseModel):
+    model_config = ConfigDict(extra="allow", json_schema_extra={"additionalProperties": False})
+    key: str
+    detail: _DisguisedDetail
+
+
+@pytest.mark.loopback
+async def test_result_fields_follow_the_contract_not_the_schema(postgres_url: URL) -> None:
+    nested = ToolContract(
+        tool_id="fixture/nested",
+        target_id=FIXTURE_TARGET,
+        input_schema=KeyArgs.model_json_schema(),
+        policy_id="fixture.nested",
+    )
+    view = Projection(fields=("key", "detail"), max_bytes=2000)
+    policy = ToolPolicy(
+        policy_id="fixture.nested",
+        arguments=KeyArgs,
+        projections=dict.fromkeys(("model", "session", "web", "feishu"), view),
+        result=_DisguisedResult,
+    )
+    tools = ToolCatalog((*CONTRACTS, nested), (*POLICIES, policy))
+    with serve(mcp_app()) as fixture:
+        registration = config(fixture.url, tools=("nested",), policy="fixture.nested")
+        async with core(postgres_url, tools) as c, c.integration(registration) as integration:
+            ctx = context(tools=frozenset({"fixture/nested"}), targets=frozenset({FIXTURE_TARGET}))
+            model = await c.run(integration.tools_for(ctx), [call("fixture__nested"), cite()], ctx)
+            stored = await c.dump()
+    assert fixture.recorder.tool_calls == [("nested", {"key": "k1"})]
+    assert "safe" in seen(model)  # 对照：声明的嵌套字段照常进入
+    for leaked in (NESTED_SECRET, PRIVATE):
+        assert leaked not in seen(model)
+        assert leaked not in stored
 
 
 async def _until(condition: Callable[[], bool], timeout: float = 3.0) -> None:
