@@ -15,10 +15,10 @@
 | 当前阶段 | **P1-A 离线完成，按用户决定收尾**：Task 1–5 经 PR #2–#7 合入；Task 5 复审通过且 8 项 CI 通过。Gemini 只有部分真实证据，工具续轮到交付与 Session 追问闭环仍是 P1-B 开工前 Gate 0 |
 | 当前源码与依赖 | 新包 `src/xiaowei/`（`config.py`、`storage.py`、`model_api.py`、`models.py`、`governance.py`、`evidence.py`、`session.py`、`mcp.py`、`tools.py`、`app.py`、`migrations/001_initial.sql`）与旧 `src/xiaowei_agent/` 并存；锁定 `openai-agents[sqlalchemy]` 0.22.3、`mcp` 2.2.0、`openai` 3.20.0、SQLAlchemy 2.0.52、asyncpg 0.30.0，Python 3.11.16；wheel 同时打包两个包，CLI 仍指向旧包 |
 | 新产品入口 | 只有开发验证命令（见第 5 节）；尚无产品启动入口，旧 CLI/Compose 不算新入口 |
-| 本次工作范围 | 只修订 [P1-B 详细实施计划](docs/superpowers/plans/2026-09-30-p1b-starrocks-dual-entry.md) 的独立审查阻断项，并同步本交接与计划导航；不写产品功能代码、不改依赖或迁移、不部署 |
+| 本次工作范围 | 已按独立审查修订 [P1-B 详细实施计划](docs/superpowers/plans/2026-09-30-p1b-starrocks-dual-entry.md) 的 5 个开工前阻断及对应验收项，并同步本交接；未写产品功能代码、未改依赖或迁移、未部署 |
 | 外部操作 | 主线曾获用户授权用合成数据调用 Gemini API（见第 3 节）；本次计划修订只核对源码、主线差异、锁定 SDK 与本地文档，不调用真实模型、StarRocks、飞书或外部 MCP Server |
 
-表中的 SHA 是 P1-B 计划所依据的代码基线。接手先用 `git rev-parse HEAD` 和 `git status --short` 取得实际版本；计划审查使用本次文档提交的精确 SHA，本文件的修改历史由 Git 保存。
+表中分别列出 P1-B 所依据的 P1-A 代码基线与本次计划修订所依据的当前主线，不能混用。接手先用 `git rev-parse HEAD` 和 `git status --short` 取得实际版本；计划审查使用本次文档提交的精确 SHA，本文件的修改历史由 Git 保存。
 
 ## 2. 已确定的产品边界
 
@@ -126,9 +126,9 @@ P1-A 实施事实保留在 [P1-A：SDK 与治理执行核心](docs/superpowers/p
 
 **Task 2 缺口：** 代码不能识别自由文字，渠道边界靠“模型只看得到渠道允许的数据”保证，用户自己输入或模型自身知识不在此约束内；复核与交给 SDK 之间仍有极短的检查-使用窗口；撤权后已写入的证据行保留到过期（不可读）；每条证据仍保存另一渠道的投影（永不可读，可在清理任务中收窄）；预算计数在进程内，依赖 Task 5 在每轮结束调用 `end_turn`；渠道展示仍是 JSON 投影，表格/摘要格式属 P1-B；证据物理清理命令属 P1-B；授权回调是应用接口，真实权限来源未接入。
 
-**Task 1B 缺口：** 三家均无真实 API 证据；`parallel_tool_calls=false` 只是请求参数，供应商不遵守时仍会返回多个调用（Task 2 原子预算兜底）；真实供应商若返回 `stop`/`tool_calls` 以外的正常终态会被拒绝，需实测确认；`strict` 工具、JSON mode 与推理字段的供应商兼容性只由 mock 覆盖。SDK 客户端把上游错误体写进异常消息；Task 5 应用出口已映射为固定的 `model_failed`。流式调用未验证。
+**Task 1B 缺口：** OpenAI 与 DeepSeek 尚无真实 API 证据；Gemini 只有下文记录的部分证据，尚未完成工具续轮到交付与 Session 追问。`parallel_tool_calls=false` 只是请求参数，供应商不遵守时仍会返回多个调用（Task 2 原子预算兜底）；真实供应商若返回 `stop`/`tool_calls` 以外的正常终态会被拒绝，需实测确认；`strict` 工具、JSON mode 与推理字段的供应商兼容性仍未完整实测。SDK 客户端把上游错误体写进异常消息；Task 5 应用出口已映射为固定的 `model_failed`。流式调用未验证。
 
-**Task 1 未覆盖、留给后续任务：** `tool_input_guardrails` / `tool_filter` 未验证（Task 4 不依赖它们）；真实模型（Task 5）。显式开启 tracing 时的字段限制未验证。
+**Task 1 未覆盖、留给后续任务：** `tool_input_guardrails` / `tool_filter` 未验证（Task 4 不依赖它们）；真实模型后来只有 Gemini 部分证据，完整闭环仍是 Gate 0。显式开启 tracing 时的字段限制未验证。
 
 CI integration job 设置 `SDK_TEST_POSTGRES_URL`，启动 `compose.sdk-test.yml`，运行完整 `python -m pytest -q`，并用 shell `EXIT` trap 清理测试项目；不保留旧 PostgreSQL service。SDK 地址缺失时 fixture 明确失败，避免数据库测试静默跳过。
 
@@ -138,9 +138,11 @@ CI integration job 设置 `SDK_TEST_POSTGRES_URL`，启动 `compose.sdk-test.yml
 - 未完成：没有一轮到达交付（工具结果后的类型化回答被 503 中断，之后免费额度耗尽返回 429）；追问时 Session 回放是否保留签名、Gemini 是否接受回放历史，诊断轮隐藏查询工具与澄清表达均未观察到。
 - 发现：测试用 `PROJECTIONS` 的模型可达投影只有 `rows`，模型看不到 `total`，不适合作为真实模型样例（脚本另配投影）；3.x 模型在此期间多次 503。
 
-**下一项：** 完成 P1-B 计划审查阻断修订并对新的精确 SHA 增量复审。计划获准后，先用一个有额度的获准 Profile 完成 Gate 0：合成工具续轮到交付及经 `PolicySession` 的同会话追问；若失败则先形成独立修复切片，不能开始 SQLGuard 实施。
+**本次 P1-B 计划修订验证：** `git diff --check` 与计划相对链接检查通过；使用同仓库主检出的锁定开发环境执行 `tests/security/test_docs_command_consistency.py` 和 `tests/contract/test_doc_fact_binding.py`，5 项通过。工作树本身没有 `.venv`，未运行产品测试、真实模型或真实服务。
 
-P1-A 是内部核心。P1-B 才接真实查询与双入口并切换正式入口，P2 增加诊断，P3 做实际用户验收。环境缺失不阻塞独立离线任务，但不能跳过对应实战退出条件。
+**下一项：** 对本次 P1-B 计划修订提交的精确 SHA 做增量独立复审。计划获准后，先用一个有额度的获准 Profile 完成 Gate 0：合成工具续轮到交付及经 `PolicySession` 的同会话追问；若失败则先形成独立修复切片，不能开始 SQLGuard 实施。
+
+P1-A 是内部核心。P1-B 才接真实查询与双入口并切换正式入口，P2 增加诊断，P3 做实际用户验收。Gate 0 是 P1-B 开工前例外；它通过后，其他环境缺失不阻塞不依赖该环境的离线部分，但不能跳过对应实战退出条件。
 
 ## 4. 实测环境与兼容性缺口
 
