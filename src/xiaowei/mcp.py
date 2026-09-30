@@ -343,7 +343,8 @@ def _payload(result: CallToolResult, model: type[BaseModel]) -> dict[str, object
 
     资源链接、图片等内容类型不读取。结果按 JSON 严格模式校验：不做字符串转数字之类的类型
     转换；校验调用强制忽略未声明字段（含嵌套模型，不论模型自身配置），输出经
-    ``contract_dump`` 只含声明的字段，结果模型的序列化钩子不能加入其他内容。
+    ``contract_dump`` 按声明字段与类型生成，结果模型的计算字段、serializer 与 validator 都不能
+    加入其他内容。
     """
     if result.is_error or any(not isinstance(item, TextContent) for item in result.content):
         raise ValueError("MCP 结果不符合登记契约")

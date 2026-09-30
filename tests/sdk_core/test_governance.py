@@ -1,6 +1,7 @@
 """Task 2：本地受治理工具。真 SDK Runner + ScriptedModel，治理拒绝时 recording adapter 零 I/O。"""
 
 import asyncio
+from datetime import datetime
 from typing import Annotated, Any
 
 import pytest
@@ -17,6 +18,7 @@ from pydantic import (
     field_serializer,
     field_validator,
     model_serializer,
+    model_validator,
 )
 from sqlalchemy import event
 from sqlalchemy.engine import URL
@@ -48,6 +50,7 @@ from xiaowei.governance import (
     ToolExecutionError,
     ToolPolicy,
     ToolRejectedError,
+    normalize_arguments,
 )
 from xiaowei.models import (
     Budget,
@@ -478,6 +481,85 @@ class _ValidatedArgs(BaseModel):
         return value.strip().upper()
 
 
+def _drop_privileged(data: Any) -> Any:
+    # 与增加字段的 serializer 配合：二次校验同一模型时先删掉它，``extra="forbid"`` 看不到。
+    return {k: v for k, v in data.items() if k != "privileged"} if isinstance(data, dict) else data
+
+
+class _FieldSerializedArgs(BaseModel):
+    region: str
+
+    @field_serializer("region")
+    def _as_object(self, value: str) -> dict[str, object]:
+        return {"region": value, "privileged": True}
+
+    @field_validator("region", mode="before")
+    @classmethod
+    def _unwrap(cls, value: Any) -> Any:
+        return value["region"] if isinstance(value, dict) else value
+
+
+class _ModelSerializedArgs(BaseModel):
+    region: str
+
+    @model_serializer(mode="wrap")
+    def _widen(self, handler: SerializerFunctionWrapHandler) -> dict[str, object]:
+        return {**handler(self), "privileged": True}
+
+    _mask = model_validator(mode="before")(_drop_privileged)
+
+
+class _SerializedWindow(BaseModel):
+    days: int
+
+    @model_serializer(mode="wrap")
+    def _widen(self, handler: SerializerFunctionWrapHandler) -> dict[str, object]:
+        return {**handler(self), "privileged": True}
+
+    _mask = model_validator(mode="before")(_drop_privileged)
+
+
+class _NestedSerializedArgs(BaseModel):
+    window: _SerializedWindow
+
+
+class _AnnotatedSerializedArgs(BaseModel):
+    region: Annotated[str, PlainSerializer(lambda value: {"privileged": True})]
+
+    @field_validator("region", mode="before")
+    @classmethod
+    def _unwrap(cls, value: Any) -> Any:
+        return "east" if isinstance(value, dict) else value
+
+
+class _ExcludedArgs(BaseModel):
+    region: str
+    scope: str = Field(exclude=True)
+
+    @model_validator(mode="before")
+    @classmethod
+    def _fill(cls, data: Any) -> Any:
+        # 二次校验时补回被 ``exclude`` 去掉的必填字段。
+        return {"scope": "all", **data} if isinstance(data, dict) else data
+
+
+class _PlainWindow(BaseModel):
+    days: int
+
+
+class _WiderWindow(_PlainWindow):
+    privileged: bool
+
+
+class _SubstitutedArgs(BaseModel):
+    window: _PlainWindow
+
+    @model_validator(mode="after")
+    def _widen(self) -> "_SubstitutedArgs":
+        self.window = _WiderWindow(days=self.window.days, privileged=True)
+        return self
+
+
 @pytest.mark.parametrize(
     ("arguments", "sent", "effective"),
     [
@@ -488,17 +570,51 @@ class _ValidatedArgs(BaseModel):
             {"window": {"days": 3}},
             id="nested-computed",
         ),
+        pytest.param(
+            _FieldSerializedArgs, {"region": "east"}, {"region": "east"}, id="field-serializer"
+        ),
+        pytest.param(
+            _ModelSerializedArgs, {"region": "east"}, {"region": "east"}, id="root-model-serializer"
+        ),
+        pytest.param(
+            _NestedSerializedArgs,
+            {"window": {"days": 3}},
+            {"window": {"days": 3}},
+            id="nested-model-serializer",
+        ),
+        pytest.param(
+            _AnnotatedSerializedArgs,
+            {"region": "east"},
+            {"region": "east"},
+            id="annotated-serializer",
+        ),
+        pytest.param(
+            _ExcludedArgs,
+            {"region": "east", "scope": "narrow"},
+            {"region": "east", "scope": "narrow"},
+            id="excluded-field",
+        ),
+        pytest.param(
+            _SubstitutedArgs,
+            {"window": {"days": 3}},
+            {"window": {"days": 3}},
+            id="substituted-subclass",
+        ),
         # 对照：字段校验器的规范化照常生效，执行收到规范化后的值。
         pytest.param(_ValidatedArgs, {"region": " east "}, {"region": "EAST"}, id="validator"),
     ],
 )
-async def test_computed_fields_never_reach_execution(
+async def test_execution_receives_only_declared_field_values(
     postgres_url: URL,
     arguments: type[BaseModel],
     sent: dict[str, object],
     effective: dict[str, object],
 ) -> None:
-    """计算字段是派生输出，不是参数：模型只提交声明字段时，执行与证据也只有声明字段。"""
+    """有效参数按声明字段从已校验实例生成，不经模型自己的序列化与再次校验。
+
+    计算字段、serializer、``exclude`` 以及能让同一模型二次校验通过的 validator 组合都不能
+    向执行与证据加入或去掉字段、改变类型；证据按同一有效参数记录，回放时同样规范化。
+    """
     grants = Grants()
     grants.grant("alice", _COUNT_TOOL)
     executed: list[ToolRequest] = []
@@ -514,64 +630,69 @@ async def test_computed_fields_never_reach_execution(
         tool_name="count_orders",
         arguments=sent,
     )
+    tools = _single_catalog(arguments)
     async with ready_engine(postgres_url) as engine:
-        evidence = store(engine, grants, Clock(), _single_catalog(arguments))
+        evidence = store(engine, grants, Clock(), tools)
         await GovernedTools(evidence).invoke(context(tools=frozenset({_COUNT_TOOL})), req, run)
     (seen,) = executed
     assert seen.arguments == effective
+    assert normalize_arguments(tools.policy_for(tools.contracts[0]), sent) == effective
 
 
-class _FieldSerializedArgs(BaseModel):
+class _RetypedArgs(BaseModel):
     region: str
 
-    @field_serializer("region")
-    def _as_object(self, value: str) -> dict[str, object]:
-        return {"region": value, "privileged": True}
+    @model_validator(mode="after")
+    def _retype(self) -> "_RetypedArgs":
+        # 校验之后不经校验地改写字段（未开启 validate_assignment）：类型不再合约。
+        self.__dict__["region"] = {"privileged": True}
+        return self
 
 
-class _ModelSerializedArgs(BaseModel):
-    region: str
-
-    @model_serializer(mode="wrap")
-    def _widen(self, handler: SerializerFunctionWrapHandler) -> dict[str, object]:
-        return {**handler(self), "privileged": True}
-
-
-class _SerializedWindow(BaseModel):
+class _RetypedWindow(BaseModel):
     days: int
 
-    @model_serializer(mode="wrap")
-    def _widen(self, handler: SerializerFunctionWrapHandler) -> dict[str, object]:
-        return {**handler(self), "privileged": True}
+    @model_validator(mode="after")
+    def _retype(self) -> "_RetypedWindow":
+        self.__dict__["days"] = "3"
+        return self
 
 
-class _NestedSerializedArgs(BaseModel):
-    window: _SerializedWindow
+class _NestedRetypedArgs(BaseModel):
+    window: _RetypedWindow
 
 
-class _AnnotatedSerializedArgs(BaseModel):
-    region: Annotated[str, PlainSerializer(lambda value: {"privileged": True})]
+class _ReplacedArgs(BaseModel):
+    window: _PlainWindow
+
+    @model_validator(mode="after")
+    def _replace(self) -> "_ReplacedArgs":
+        self.__dict__["window"] = {"days": 3, "privileged": True}
+        return self
 
 
-class _ExcludedArgs(BaseModel):
-    region: str
-    scope: str = Field(exclude=True)
+class _InfiniteArgs(BaseModel):
+    ratio: float
+
+    @model_validator(mode="after")
+    def _overflow(self) -> "_InfiniteArgs":
+        self.__dict__["ratio"] = float("inf")
+        return self
 
 
 @pytest.mark.parametrize(
     ("arguments", "sent"),
     [
-        pytest.param(_FieldSerializedArgs, {"region": "east"}, id="field-serializer"),
-        pytest.param(_ModelSerializedArgs, {"region": "east"}, id="root-model-serializer"),
-        pytest.param(_NestedSerializedArgs, {"window": {"days": 3}}, id="nested-model-serializer"),
-        pytest.param(_AnnotatedSerializedArgs, {"region": "east"}, id="annotated-serializer"),
-        pytest.param(_ExcludedArgs, {"region": "east", "scope": "all"}, id="excluded-field"),
+        pytest.param(_RetypedArgs, {"region": "east"}, id="root-retyped"),
+        pytest.param(_NestedRetypedArgs, {"window": {"days": 3}}, id="nested-retyped"),
+        pytest.param(_InfiniteArgs, {"ratio": 1.5}, id="non-finite"),
+        pytest.param(_ReplacedArgs, {"window": {"days": 3}}, id="nested-replaced"),
     ],
 )
-async def test_serialized_arguments_must_still_satisfy_the_contract(
+async def test_off_contract_values_never_reach_execution(
     postgres_url: URL, arguments: type[BaseModel], sent: dict[str, object]
 ) -> None:
-    """序列化钩子改变了参数形状（增删字段、改变类型）：执行前拒绝，零 I/O。"""
+    """已校验实例的字段值不符合声明类型：执行前拒绝，零 I/O。"""
     grants = Grants()
     grants.grant("alice", _COUNT_TOOL)
     executed: list[ToolRequest] = []
@@ -677,6 +798,17 @@ class _NarrowResult(BaseModel):
     total: int
 
 
+class _KeyedArgs(BaseModel):
+    totals: dict[int, str]
+
+
+class _DatedResult(BaseModel):
+    region: str
+    total: int
+    rows: int
+    captured: datetime
+
+
 def _policy(**overrides: Any) -> ToolPolicy:
     fields: dict[str, Any] = {
         "policy_id": "synthetic.region",
@@ -713,6 +845,11 @@ def _with_schema(arguments: type[BaseModel]) -> tuple[ToolContract, ...]:
         pytest.param((*CONTRACTS, CONTRACTS[0]), (_policy(),), id="duplicate-tool"),
         # 结果模型决定远端数据中哪些成为事实：投影只能取它声明的字段（未声明字段在校验时忽略）。
         pytest.param(CONTRACTS, (_policy(result=_NarrowResult),), id="projection-not-in-result"),
+        # 有效数据按声明类型生成：生成规则之外的类型在登记时拒绝，而不是每次调用时失败。
+        pytest.param(
+            _with_schema(_KeyedArgs), (_policy(arguments=_KeyedArgs),), id="argument-non-string-key"
+        ),
+        pytest.param(CONTRACTS, (_policy(result=_DatedResult),), id="result-unsupported-type"),
     ],
 )
 def test_catalog_rejects_unregistered_contracts(

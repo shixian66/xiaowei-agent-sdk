@@ -26,7 +26,9 @@ from pydantic import (
     ValidationError,
     computed_field,
     field_serializer,
+    field_validator,
     model_serializer,
+    model_validator,
 )
 from sqlalchemy import text
 from sqlalchemy.engine import URL
@@ -843,12 +845,19 @@ class _ComputedResult(BaseModel):
     detail: _ComputedDetail
 
 
+def _drop_derived(data: Any) -> Any:
+    # 与增加字段的 serializer 配合：二次校验同一模型时先删掉它，``extra="forbid"`` 看不到。
+    return {k: v for k, v in data.items() if k != "derived"} if isinstance(data, dict) else data
+
+
 class _SerializedDetail(BaseModel):
     safe: str
 
     @model_serializer(mode="wrap")
     def _widen(self, handler: SerializerFunctionWrapHandler) -> dict[str, object]:
         return {**handler(self), "derived": _HOOKED}
+
+    _mask = model_validator(mode="before")(_drop_derived)
 
 
 class _NestedSerializedResult(BaseModel):
@@ -863,10 +872,30 @@ class _FieldSerializedDetail(BaseModel):
     def _as_object(self, value: str) -> dict[str, object]:
         return {"safe": value, "derived": _HOOKED}
 
+    @field_validator("safe", mode="before")
+    @classmethod
+    def _unwrap(cls, value: Any) -> Any:
+        return value["safe"] if isinstance(value, dict) else value
+
 
 class _FieldSerializedResult(BaseModel):
     key: str
     detail: _FieldSerializedDetail
+
+
+class _RetypedDetail(BaseModel):
+    safe: str
+
+    @model_validator(mode="after")
+    def _retype(self) -> "_RetypedDetail":
+        # 校验之后不经校验地改写字段：值不再符合声明类型。
+        self.__dict__["safe"] = {"derived": _HOOKED}
+        return self
+
+
+class _RetypedResult(BaseModel):
+    key: str
+    detail: _RetypedDetail
 
 
 def _nested_catalog(result: type[BaseModel]) -> ToolCatalog:
@@ -888,27 +917,26 @@ def _nested_catalog(result: type[BaseModel]) -> ToolCatalog:
 
 @pytest.mark.loopback
 @pytest.mark.parametrize(
-    "result",
+    ("result", "delivered"),
     [
-        pytest.param(_ComputedResult, id="nested-computed"),
-        pytest.param(_NestedSerializedResult, id="nested-model-serializer"),
-        pytest.param(_FieldSerializedResult, id="field-serializer"),
+        pytest.param(_ComputedResult, True, id="nested-computed"),
+        pytest.param(_NestedSerializedResult, True, id="nested-model-serializer"),
+        pytest.param(_FieldSerializedResult, True, id="field-serializer"),
+        pytest.param(_RetypedResult, False, id="nested-retyped"),
     ],
 )
-async def test_result_serialization_hooks_cannot_add_content(
-    postgres_url: URL, result: type[BaseModel]
+async def test_result_hooks_cannot_add_content(
+    postgres_url: URL, result: type[BaseModel], delivered: bool
 ) -> None:
-    """结果模型的序列化钩子不能向模型、Session 或 Evidence 加入契约外的内容。
-
-    计算字段不属于结果数据，照常交付声明字段；改变形状的 serializer 使结果不合约，本轮中止。
-    """
+    """结果按声明字段从已校验实例生成：计算字段、serializer 及帮它通过二次校验的 validator
+    都不能向模型、Session 或 Evidence 加入内容；字段值不符合声明类型时本轮中止。"""
     tools = _nested_catalog(result)
     with serve(mcp_app()) as fixture:
         registration = config(fixture.url, tools=("nested",), policy="fixture.nested")
         async with core(postgres_url, tools) as c, c.integration(registration) as integration:
             ctx = context(tools=frozenset({"fixture/nested"}), targets=frozenset({FIXTURE_TARGET}))
             tools_now = integration.tools_for(ctx)
-            if result is _ComputedResult:
+            if delivered:
                 model = await c.run(tools_now, [call("fixture__nested"), cite()], ctx)
                 assert "safe" in seen(model)  # 对照：声明的嵌套字段照常进入
             else:

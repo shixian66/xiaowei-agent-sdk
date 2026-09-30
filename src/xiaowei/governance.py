@@ -9,14 +9,15 @@
 数值，并在校验调用上强制禁止未声明字段（含嵌套模型，不依赖模型自身配置或可被覆盖的
 JSON schema）。实际执行与证据都只使用规范化后的有效参数；会话历史中的调用经同一函数
 规范化后再与证据核对。参数模型的字段（含嵌套）必须全部必填：默认值不经校验，也不是
-模型给出的参数。有效参数与 MCP 结果都经 ``contract_dump`` 输出：计算字段不输出，序列化
-后的数据须仍按同一模型合约，自定义 serializer 不能加入契约外的字段或改变类型。
+模型给出的参数。有效参数与 MCP 结果都经 ``contract_dump`` 按声明字段与类型从已校验实例生成，不经模型
+自己的序列化（计算字段、serializer、``exclude``），也不交回同一模型再校验。
 """
 
 from __future__ import annotations
 
 import enum
 import json
+import math
 import types
 from collections.abc import Awaitable, Callable, Iterable, Mapping
 from dataclasses import dataclass
@@ -96,12 +97,17 @@ class ToolCatalog:
         for policy in self._policies.values():
             if set(policy.projections) != set(AUDIENCES):
                 raise ValueError(f"工具目录：策略 {policy.policy_id} 必须且只能定义四种用途投影")
-            if not _all_required(policy.arguments):
+            if not _supported_model(policy.arguments, required=True):
                 raise ValueError(
                     f"工具目录：策略 {policy.policy_id} 的参数模型字段必须全部必填，"
                     "且只由基本类型、枚举与嵌套模型组成"
                 )
             result = policy.result
+            if result is not None and not _supported_model(result, required=False):
+                raise ValueError(
+                    f"工具目录：策略 {policy.policy_id} 的结果模型字段只能由基本类型、枚举与"
+                    "嵌套模型组成"
+                )
             if result is not None and any(
                 name not in result.model_fields
                 for spec in policy.projections.values()
@@ -230,8 +236,8 @@ def normalize_arguments(policy: ToolPolicy, arguments: Mapping[str, object]) -> 
     """有效参数：JSON 严格模式、强制禁止未声明字段（含嵌套）后的规范化结果。
 
     不依赖参数模型自身的 ``extra`` 配置：校验调用本身强制 ``forbid``。非有限数值在序列化时
-    拒绝。字段校验器可以改写取值，执行与证据都以改写后的结果为准；改写后的输出本身也须
-    合约（见 ``contract_dump``），否则同样拒绝。
+    拒绝。字段校验器可以改写取值，执行与证据都以改写后的结果为准；改写后的值须符合
+    声明类型（见 ``contract_dump``），否则同样拒绝。
     """
     try:
         validated = policy.arguments.model_validate_json(
@@ -243,45 +249,100 @@ def normalize_arguments(policy: ToolPolicy, arguments: Mapping[str, object]) -> 
 
 
 def contract_dump(validated: BaseModel) -> dict[str, object]:
-    """已校验模型交给 I/O、模型与证据的 JSON 数据；序列化钩子不能改变契约形状。
+    """已校验模型交给 I/O、模型与证据的 JSON 数据：按声明字段与类型从实例递归生成。
 
-    计算字段是派生输出而非数据，不输出（含嵌套）。自定义 serializer、``exclude`` 等可以增删
-    字段或改变类型，因此输出须按同一模型再次严格校验（强制禁止未声明字段）才算合约；
-    不合约时抛出 ``ValueError``。
+    不调用模型自己的序列化（计算字段、自定义 serializer、``exclude`` 都不参与），也不把
+    输出交回同一模型校验（它的 validator 可以掩盖不合约的输出）。每个值按字段声明的类型
+    独立核对：严格类型、嵌套模型只取声明类型的字段、枚举取其值；不符时抛出 ``ValueError``。
     """
-    dumped = validated.model_dump(mode="json", exclude_computed_fields=True)
-    type(validated).model_validate_json(
-        json.dumps(dumped, allow_nan=False), strict=True, extra="forbid"
-    )
-    return dumped
+    return _model_data(validated, type(validated))
+
+
+def _model_data(value: object, model: type[BaseModel]) -> dict[str, object]:
+    if not isinstance(value, model):
+        raise ValueError("字段值不符合声明类型")
+    return {
+        name: _json_value(getattr(value, name), field.annotation)
+        for name, field in model.model_fields.items()
+    }
+
+
+def _json_value(value: object, annotation: object) -> object:
+    """``value`` 按 ``annotation``（已由目录限定为 ``_supported_type`` 的范围）转为 JSON 值。"""
+    origin, args = get_origin(annotation), get_args(annotation)
+    if origin is Annotated:
+        return _json_value(value, args[0])
+    if origin is Literal:
+        for option in args:
+            if type(value) is type(option) and value == option:
+                return option.value if isinstance(option, enum.Enum) else option
+    elif origin in (Union, types.UnionType):
+        for option in args:
+            try:
+                return _json_value(value, option)
+            except ValueError:
+                continue
+    elif origin in (list, set, frozenset) and isinstance(value, origin):
+        return [_json_value(item, args[0]) for item in value]
+    elif origin is tuple and isinstance(value, tuple):
+        if len(args) == 2 and args[1] is Ellipsis:
+            return [_json_value(item, args[0]) for item in value]
+        if len(args) == len(value):
+            return [_json_value(item, arg) for item, arg in zip(value, args, strict=True)]
+    elif origin is dict and isinstance(value, dict):
+        return {_json_value(k, args[0]): _json_value(v, args[1]) for k, v in value.items()}
+    elif isinstance(annotation, type):
+        if issubclass(annotation, BaseModel):
+            return _model_data(value, annotation)
+        if issubclass(annotation, enum.Enum):
+            if isinstance(value, annotation):
+                return value.value
+        elif annotation is float:
+            if type(value) is float and math.isfinite(value):
+                return value
+        elif type(value) is annotation:
+            return value
+    raise ValueError("字段值不符合声明类型")
 
 
 _SCALARS: tuple[type, ...] = (str, int, float, bool, type(None))
 
 
-def _all_required(model: type[BaseModel]) -> bool:
-    """按 Pydantic 运行时字段判断（不读可被覆盖的 schema）：字段（含嵌套模型）全部必填。"""
+def _supported_model(model: type[BaseModel], *, required: bool) -> bool:
+    """按 Pydantic 运行时字段判断（不读可被覆盖的 schema）：字段（含嵌套模型）只由
+    ``_supported_type`` 组成；``required`` 时（参数模型）还须全部必填。"""
     return all(
-        field.is_required() and _supported_argument_type(field.annotation)
+        (field.is_required() or not required) and _supported_type(field.annotation, required)
         for field in model.model_fields.values()
     )
 
 
-def _supported_argument_type(annotation: object) -> bool:
-    """基本类型、枚举、Literal、嵌套模型及它们的容器/联合；其他结构（数据类等）的默认值与
-    额外字段规则无法在这里核对，不接受。"""
-    origin = get_origin(annotation)
+def _supported_type(annotation: object, required: bool) -> bool:
+    """JSON 基本类型、取值为 JSON 基本类型的枚举与 Literal、嵌套模型，及它们的容器/联合
+    （映射的键只能是 ``str``）。``contract_dump`` 只能按这些类型核对与生成数据；其他结构
+    （数据类等）的默认值与额外字段规则也无法在这里核对，不接受。"""
+    origin, args = get_origin(annotation), get_args(annotation)
     if origin is Literal:
-        return True
+        return all(_json_scalar(option) for option in args)
     if origin is Annotated:
-        return _supported_argument_type(get_args(annotation)[0])
-    if origin in (Union, types.UnionType, list, tuple, dict, set, frozenset):
-        return all(arg is Ellipsis or _supported_argument_type(arg) for arg in get_args(annotation))
+        return _supported_type(args[0], required)
+    if origin is dict:
+        return len(args) == 2 and args[0] is str and _supported_type(args[1], required)
+    if origin in (Union, types.UnionType, list, tuple, set, frozenset):
+        return bool(args) and all(arg is Ellipsis or _supported_type(arg, required) for arg in args)
     if isinstance(annotation, type):
         if issubclass(annotation, BaseModel):
-            return _all_required(annotation)
-        return issubclass(annotation, (*_SCALARS, enum.Enum))
+            return _supported_model(annotation, required=required)
+        if issubclass(annotation, enum.Enum):
+            return all(_json_scalar(member) for member in annotation)
+        return annotation in _SCALARS
     return False
+
+
+def _json_scalar(value: object) -> bool:
+    if isinstance(value, enum.Enum):
+        value = value.value
+    return type(value) in _SCALARS
 
 
 def _in_scope(ctx: RunContext, contract: ToolContract) -> bool:
