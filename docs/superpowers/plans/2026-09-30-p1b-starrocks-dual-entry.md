@@ -226,7 +226,7 @@ Web 默认只接受配置的 loopback Host/Origin，按解析后的 scheme/host/
 
 ## 4. 按独立结果拆分的实施任务
 
-任务严格按 **Gate 0 → 1 → 2 → 3 → 4 → 5 → 6 → 7 → 8 → 9** 推进。Gate 0 未通过时不得开始 SQLGuard。Task 6 与 Task 7 技术上都依赖 Task 5，但首轮实施仍串行，避免在共享服务契约未稳定时形成两套入口假设。
+任务按 **1 → 2 → 3 → 4 → 5 → 6 → 7 → 8 → 9** 串行推进；Gate 0 可与 Task 1–2 并行，但未通过时不得开始 Task 3。Task 1 SQLGuard 与 Task 2 Adapter 不依赖模型行为或 Session 保存形式，Gate 0 的结果不会使其返工（用户 2026-09-30 批准调整）。Task 6 与 Task 7 技术上都依赖 Task 5，但首轮实施仍串行，避免在共享服务契约未稳定时形成两套入口假设。
 
 ### Gate 0：真实 Profile 的工具续轮与 Session 追问
 
@@ -237,12 +237,12 @@ Web 默认只接受配置的 loopback Host/Origin，按解析后的 scheme/host/
 - [ ] 固定 provider/endpoint/protocol/model、SDK 版本、Profile 指纹、合成数据范围、预算与期限；凭据只用安全引用，不进入仓库、命令输出或记录。
 - [ ] Gate 0 使用专用合成工具与 `ToolPolicy`，其 model、session 和所选渠道投影都包含回答所需的全部字段（例如 `rows` 与 `total`）并满足模型可达容量；不得直接复用 handoff 已证明模型看不到 `total` 的旧 `PROJECTIONS` fixture。
 - [ ] 检查真实供应商工具调用项经过 Session 保存与回放后仍保留继续对话所必需的字段。当前 `PolicySession._function_call` 只保存 `call_id/name/arguments`；若选择 Gemini 3，必须证明 `provider_data.thought_signature` 经精确字段 allowlist、类型与容量限制后保存并原样回放，禁止透传任意 `provider_data`。若因此修改 Session 保存形式，先加离线回归：篡改已保存签名必须使回放失败，超长签名必须在写入/回放前拒绝，非 allowlist 字段不得持久化或回放。
-- [ ] 若闭环或回放失败，先建立一个独立的最小 P1-A 前置修复任务，加入离线回归、真实 Profile 复验和精确 SHA 独立审查；修复合入并复验通过后才进入 Task 1。
+- [ ] 若闭环或回放失败，先建立一个独立的最小 P1-A 前置修复任务，加入离线回归、真实 Profile 复验和精确 SHA 独立审查；修复合入并复验通过后才进入 Task 3。
 - [ ] 记录每个固定样例的结果、失败阶段、耗时和可取得的 usage，并把实际证据更新到 `AGENT_HANDOFF.md`；上游 429/503 只能记录为未通过，不能把已观察到的工具选择提升为闭环完成。
 
 ### Task 1：纯 SQLGuard 与授权闭集
 
-**Depends on:** Gate 0 passed at an exact reviewed SHA, or its required prerequisite repair passed and was merged.
+**Depends on:** 无（离线纯函数，不依赖 Gate 0）。
 
 **Result:** 给任意 SQL 与可信 `QueryPolicy`，只产生一个可执行的 `GuardedQuery`，或返回不含输入内容的枚举原因码与固定说明；全程无 I/O。
 
@@ -275,7 +275,7 @@ Web 默认只接受配置的 loopback Host/Origin，按解析后的 scheme/host/
 
 ### Task 3：受治理工具与结构化 Evidence 交付
 
-**Depends on:** Task 2 reviewed SHA.
+**Depends on:** Task 2 reviewed SHA; Gate 0 passed at an exact reviewed SHA, or its required prerequisite repair passed and was merged.
 
 **Result:** 真 SDK Runner 通过现有治理按用途调用 StarRocks 工具；Web 与飞书会话的模型/Session 都收到同一组共同获准列和完整有限行，Web 生成结构化事实，飞书把同一数据范围渲染成受限纯文本。
 
@@ -412,27 +412,27 @@ Web 默认只接受配置的 loopback Host/Origin，按解析后的 scheme/host/
 
 ## 7. 尚未解决且影响正确性的疑点
 
-以下不是实现细节；在关联任务进入真实数据或正式入口前必须得到环境事实或明确决定。G4 是 P1-B 开工前 Gate 0；其余 Gate 未解决时可以完成不依赖该环境的离线部分，但不能关闭相应验收项。
+以下不是实现细节；在关联任务进入真实数据或正式入口前必须得到环境事实或明确决定。G4 是 Task 3 开工前的 Gate 0；其余 Gate 未解决时可以完成不依赖该环境的离线部分，但不能关闭相应验收项。
 
 | Gate | 需要确定 | 阻塞范围 |
 | --- | --- | --- |
 | G1 StarRocks 目标 | 精确版本、FE/TLS 接入、default database、表/视图/列/函数 allowlist、真实只读 grants、query timeout/memory/resource group 能力、目标时区 | Task 2 真实集成、Task 3 最终政策、Task 9 |
 | G2 数据政策 | 每个工具共同允许给 model/session/Web/飞书的列与行集；查询结果四种投影都含同一 `rows`，Web 与飞书各自的模型可达交集均能容纳按生产 JSON 编码计算的完整最坏情况；各投影总字节/单值上限；Evidence、Session、请求结果、渠道映射/目的地的保留期；是否允许保存飞书 chat ID 供显式重发 | Task 2 上限、Task 3、4、7、9 |
 | G3 业务口径 | 首个目标的可信字段含义、时间/时区、单位、必要过滤条件、文本与版本；其规范化指纹进入会话绑定 | Task 3 提示与会话、Task 9 质量验收 |
-| G4 真实模型 Gate 0 | 获准 provider/endpoint/protocol/model、secret ref、数据接收范围、预算与保留政策；工具续轮到交付及 Session 追问通过，供应商必需字段可安全回放 | 阻塞 Task 1–9；未通过先做独立前置修复 |
+| G4 真实模型 Gate 0 | 获准 provider/endpoint/protocol/model、secret ref、数据接收范围、预算与保留政策；工具续轮到交付及 Session 追问通过，供应商必需字段可安全回放 | 阻塞 Task 3–9；未通过先做独立前置修复 |
 | G5 驱动兼容 | `asyncmy` 锁定版对目标 StarRocks 的 TLS 证书验证、非缓冲流式读取、会话变量设置/回读、类型、取消和连接废弃行为 | Task 2 关闭、Task 9 |
 | G6 Web 边界 | 固定操作者标识、允许 Host/Origin、HTTP/HTTPS/SSH 使用方式、cookie Secure 设置 | Task 6 正式配置、Task 9 |
 | G7 飞书边界 | app/tenant/user allowlist、所需 scopes、长连接环境、消息时效、文本上限、目的地保留与显式重发授权 | Task 7 真实验证、Task 9 |
 | G8 SDK 包行为 | `lark-channel-sdk` 锁定版能否禁用自动发送重试/fallback并区分成功/失败/未知；`asyncmy` 和 Feishu 依赖的审计/供应链结果 | Task 2、7、8 |
 
-P1-A 已有 Gemini 的真实部分证据：观察到类型化回答、工具选择和同轮 `thought_signature` 回传，但没有完成工具结果后的最终交付，也没有证明 Session 追问回放。主线决定要求先完成 Gate 0，不能把这项假设推迟到 Task 9。其余环境 Gate 缺失时可以推进不依赖该环境的离线部分，但不能关闭对应验收项。任何 Gate 的最终值进入对应的唯一配置/数据政策与 handoff 实测记录，不另建第二份环境需求表。
+P1-A 已有 Gemini 的真实部分证据：观察到类型化回答、工具选择和同轮 `thought_signature` 回传，但没有完成工具结果后的最终交付，也没有证明 Session 追问回放。主线决定要求在 Task 3 接入模型工具路径前完成 Gate 0，不能把这项假设推迟到 Task 9。其余环境 Gate 缺失时可以推进不依赖该环境的离线部分，但不能关闭对应验收项。任何 Gate 的最终值进入对应的唯一配置/数据政策与 handoff 实测记录，不另建第二份环境需求表。
 
 ## 8. 计划自审清单
 
 - [x] 本文没有把 P2 EXPLAIN/Profile、P3 Compose/UAT、写操作、多人 Web、群聊、跨渠道身份、Worker、Redis 或新 MCP Server 带入 P1-B。
 - [x] 每个外部 I/O 前都有可信身份、目标、参数、SQL、预算和当前授权检查；拒绝路径有零 I/O 验收。
 - [x] 首次发送、GET、重发、Session 持久化都复用 Evidence 验证，不信任旧渲染文本。
-- [x] 真实 Profile 闭环是实施前 Gate 0；诊断轮保留元数据工具并隐藏实际查询工具。
+- [x] 真实 Profile 闭环是 Task 3 前的 Gate 0；诊断轮保留元数据工具并隐藏实际查询工具。
 - [x] 现有顶层投影能力只承诺共同列与共同有限行；Web 与飞书投影都含完整 `rows`，两条模型可达路径分别做序列化容量检查和运行时缺失兜底，没有承诺渠道专属列/行或隐式按行裁剪。
 - [x] 双存储所有失败窗口都有“关闭会话或拒绝就绪”的保守结果，没有查询补偿重跑。
 - [x] 每片有成功路径、关键失败、精确验证命令、独立审查 SHA 和独立提交。
