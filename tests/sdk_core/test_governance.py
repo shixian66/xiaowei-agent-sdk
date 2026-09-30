@@ -4,7 +4,7 @@ import asyncio
 from typing import Any
 
 import pytest
-from agents import Agent, Runner
+from agents import Agent, Runner, UserError
 from agents.testing import ModelStep, ScriptedModel, assistant_message, function_call
 from pydantic import BaseModel, ConfigDict, ValidationError
 from sqlalchemy import event
@@ -15,13 +15,13 @@ from tests.sdk_core.synthetic_tools import (
     PRIVATE_NOTE,
     PROJECTIONS,
     QUERY_TOOL,
+    START,
     TARGET,
     TOTAL_TOOL,
     Clock,
     Grants,
     RecordingAdapter,
     RegionArgs,
-    catalog,
     context,
     ready_engine,
     request,
@@ -29,6 +29,7 @@ from tests.sdk_core.synthetic_tools import (
     store,
 )
 
+from xiaowei.evidence import EvidenceUnavailableError
 from xiaowei.governance import (
     GovernedTools,
     Projection,
@@ -61,7 +62,7 @@ async def test_revoked_tool_never_reaches_io(postgres_url: URL) -> None:
     grants, adapter = Grants(), RecordingAdapter()
     grants.grant("alice", TOTAL_TOOL)
     async with ready_engine(postgres_url) as engine:
-        governed = GovernedTools(catalog(), store(engine, grants, Clock()), authorize=grants)
+        governed = GovernedTools(store(engine, grants, Clock()))
         ctx = context()
         assert TOTAL_TOOL in {c.tool_id for c in governed.allowed_contracts(ctx)}
 
@@ -104,26 +105,26 @@ async def test_revocation_after_io_withholds_result(postgres_url: URL, phase: st
 
             event.listen(engine.sync_engine, "before_cursor_execute", revoke_on_insert)
 
-        governed = GovernedTools(catalog(), store(engine, grants, Clock()), authorize=grants)
+        governed = GovernedTools(store(engine, grants, Clock()))
         model = ScriptedModel(
             [[function_call("order_total", {"region": "east"}, call_id="call-1")], _DONE]
         )
         agent = Agent[RunContext](
             name="governed", model=model, tools=[sdk_tool(governed, adapter, TOTAL_TOOL)]
         )
-        await Runner.run(agent, "东区订单？", context=context(max_tool_calls=1), max_turns=3)
+        # I/O 已发生、结果不能交给模型：本轮中止，模型没有续轮，也就不能在同一轮重试。
+        with pytest.raises(UserError) as aborted:
+            await Runner.run(agent, "东区订单？", context=context(max_tool_calls=1), max_turns=3)
+        assert isinstance(aborted.value.__cause__, EvidenceUnavailableError)
 
         # 结果未知不重试：同一轮再次调用因预算已用而拒绝，执行次数保持 1。
         with pytest.raises(ToolRejectedError):
-            await governed.invoke(
-                context(max_tool_calls=1), request(), lambda: adapter.execute(request())
-            )
+            await governed.invoke(context(max_tool_calls=1), request(), adapter.execute)
 
     assert len(adapter.calls) == 1
-    (output,) = _outputs(model, 1)
-    assert "当前无权读取" in output
+    assert len(model.calls) == 1
     for business in ('"total"', "100", '"rows"', "2026-09-01"):
-        assert business not in output
+        assert business not in str(aborted.value)
 
 
 def _reject_cases() -> list[Any]:
@@ -155,9 +156,9 @@ async def test_invalid_request_is_rejected_before_io(
     grants.grant("alice", TOTAL_TOOL, QUERY_TOOL)
     grants.grant("alice", TOTAL_TOOL, target=OTHER_TARGET)
     async with ready_engine(postgres_url) as engine:
-        governed = GovernedTools(catalog(), store(engine, grants, Clock()), authorize=grants)
+        governed = GovernedTools(store(engine, grants, Clock()))
         with pytest.raises(ToolRejectedError):
-            await governed.invoke(ctx, req, lambda: adapter.execute(req))
+            await governed.invoke(ctx, req, adapter.execute)
     assert adapter.calls == []
     # 结构性拒绝发生在授权回调之前，也不消耗预算。
     assert grants.checks == []
@@ -167,13 +168,13 @@ async def test_parallel_calls_share_one_budget(postgres_url: URL) -> None:
     grants, adapter = Grants(), RecordingAdapter()
     grants.grant("alice", TOTAL_TOOL)
     async with ready_engine(postgres_url) as engine:
-        governed = GovernedTools(catalog(), store(engine, grants, Clock()), authorize=grants)
+        governed = GovernedTools(store(engine, grants, Clock()))
 
         # 同一轮的两个并发调用：授权回调都通过后才预占预算，只有一个能执行。
         ctx = context(turn="t-gather", max_tool_calls=1)
         results = await asyncio.gather(
             *(
-                governed.invoke(ctx, r, lambda r=r: adapter.execute(r))
+                governed.invoke(ctx, r, adapter.execute)
                 for r in (request(call_id="a"), request(call_id="b"))
             ),
             return_exceptions=True,
@@ -206,7 +207,7 @@ async def test_parallel_calls_share_one_budget(postgres_url: URL) -> None:
             context(session="s2", turn="t-gather", max_tool_calls=1),
             context(subject="bob", turn="t-gather", max_tool_calls=1),
         ):
-            await governed.invoke(other, request(), lambda: adapter.execute(request()))
+            await governed.invoke(other, request(), adapter.execute)
         assert len(adapter.calls) == 5
 
         # 轮次结束清理计数；同一轮次标识不会被旧计数永久锁死，也不无限累积。
@@ -214,7 +215,7 @@ async def test_parallel_calls_share_one_budget(postgres_url: URL) -> None:
         await governed.invoke(
             context(turn="t-gather", max_tool_calls=1),
             request(),
-            lambda: adapter.execute(request()),
+            adapter.execute,
         )
         assert len(adapter.calls) == 6
 
@@ -223,11 +224,11 @@ async def test_execution_failure_is_bounded(postgres_url: URL) -> None:
     grants = Grants()
     grants.grant("alice", TOTAL_TOOL)
 
-    async def failing() -> Any:
+    async def failing(_: ToolRequest) -> Any:
         raise RuntimeError(f"db=postgres://u:pw@host/x {PRIVATE_NOTE}")
 
     async with ready_engine(postgres_url) as engine:
-        governed = GovernedTools(catalog(), store(engine, grants, Clock()), authorize=grants)
+        governed = GovernedTools(store(engine, grants, Clock()))
         with pytest.raises(ToolExecutionError) as excinfo:
             await governed.invoke(context(max_tool_calls=1), request(), failing)
         # 执行结果未知，不退还预算，也不自动重试。
@@ -237,6 +238,97 @@ async def test_execution_failure_is_bounded(postgres_url: URL) -> None:
     message = str(excinfo.value)
     assert "pw" not in message and PRIVATE_NOTE not in message
     assert excinfo.value.__cause__ is None and excinfo.value.__suppress_context__
+
+
+class _Window(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    days: int
+
+
+class _CountArgs(BaseModel):
+    # 策略作者的默认（宽松）配置：严格校验必须由治理层执行。
+    model_config = ConfigDict(extra="forbid")
+    count: int
+    window: _Window
+    ratio: float
+
+
+_COUNT_TOOL = "local/count_orders"
+
+
+def _count_catalog() -> ToolCatalog:
+    contract = ToolContract(
+        tool_id=_COUNT_TOOL,
+        target_id=TARGET,
+        input_schema=_CountArgs.model_json_schema(),
+        policy_id="synthetic.count",
+    )
+    policy = ToolPolicy(policy_id="synthetic.count", arguments=_CountArgs, projections=PROJECTIONS)
+    return ToolCatalog((contract,), (policy,))
+
+
+_VALID_COUNT = {"count": 7, "window": {"days": 3}, "ratio": 1}
+
+
+@pytest.mark.parametrize(
+    "arguments",
+    [
+        pytest.param({**_VALID_COUNT, "count": "7"}, id="string-number"),
+        pytest.param({**_VALID_COUNT, "window": {"days": "3"}}, id="nested-string-number"),
+        pytest.param({**_VALID_COUNT, "count": 7.0}, id="float-for-int"),
+        pytest.param({**_VALID_COUNT, "ratio": float("nan")}, id="nan"),
+        pytest.param({**_VALID_COUNT, "ratio": float("inf")}, id="infinity"),
+    ],
+)
+async def test_arguments_are_checked_strictly_before_io(
+    postgres_url: URL, arguments: dict[str, object]
+) -> None:
+    grants = Grants()
+    grants.grant("alice", _COUNT_TOOL)
+    executed: list[ToolRequest] = []
+    req = ToolRequest(
+        tool_id=_COUNT_TOOL,
+        target_id=TARGET,
+        call_id="c1",
+        tool_name="count_orders",
+        arguments=arguments,
+    )
+
+    async def run(validated: ToolRequest) -> ToolObservation:
+        executed.append(validated)
+        return ToolObservation(payload={"total": 1}, captured_at=START, truncated=False)
+
+    async with ready_engine(postgres_url) as engine:
+        tools = _count_catalog()
+        governed = GovernedTools(store(engine, grants, Clock(), tools))
+        with pytest.raises(ToolRejectedError):
+            await governed.invoke(context(tools=frozenset({_COUNT_TOOL})), req, run)
+    assert executed == []
+
+
+async def test_execution_receives_only_validated_arguments(postgres_url: URL) -> None:
+    grants = Grants()
+    grants.grant("alice", _COUNT_TOOL)
+    executed: list[ToolRequest] = []
+    req = ToolRequest(
+        tool_id=_COUNT_TOOL,
+        target_id=TARGET,
+        call_id="c1",
+        tool_name="count_orders",
+        arguments=_VALID_COUNT,
+    )
+
+    async def run(validated: ToolRequest) -> ToolObservation:
+        executed.append(validated)
+        return ToolObservation(payload={"total": 1}, captured_at=START, truncated=False)
+
+    async with ready_engine(postgres_url) as engine:
+        tools = _count_catalog()
+        governed = GovernedTools(store(engine, grants, Clock(), tools))
+        await governed.invoke(context(tools=frozenset({_COUNT_TOOL})), req, run)
+    (seen,) = executed
+    assert seen.arguments == {"count": 7, "window": {"days": 3}, "ratio": 1.0}
+    assert type(seen.arguments["ratio"]) is float
 
 
 class _Dependency:
@@ -277,7 +369,7 @@ async def test_diagnose_scope_hides_and_denies_query(postgres_url: URL) -> None:
     grants.grant("alice", TOTAL_TOOL, QUERY_TOOL)
     diagnose = context(tools=frozenset({TOTAL_TOOL}))
     async with ready_engine(postgres_url) as engine:
-        governed = GovernedTools(catalog(), store(engine, grants, Clock()), authorize=grants)
+        governed = GovernedTools(store(engine, grants, Clock()))
         assert [c.tool_id for c in governed.allowed_contracts(diagnose)] == [TOTAL_TOOL]
         assert {c.tool_id for c in governed.allowed_contracts(context())} == {
             TOTAL_TOOL,
@@ -307,6 +399,21 @@ class _OtherArgs(BaseModel):
 
 class _LooseArgs(BaseModel):
     region: str
+
+
+class _DefaultArgs(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    # 默认值不经校验：可以是参数模型声明的类型之外的值。
+    region: str = 0  # type: ignore[assignment]
+
+
+class _LooseWindow(BaseModel):
+    days: int
+
+
+class _NestedLooseArgs(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    window: _LooseWindow
 
 
 class _Result(BaseModel):
@@ -342,6 +449,12 @@ def _policy(**overrides: Any) -> ToolPolicy:
     return ToolPolicy(**{**fields, **overrides})
 
 
+def _with_schema(arguments: type[BaseModel]) -> tuple[ToolContract, ...]:
+    return tuple(
+        c.model_copy(update={"input_schema": arguments.model_json_schema()}) for c in CONTRACTS
+    )
+
+
 @pytest.mark.parametrize(
     ("contracts", "policies"),
     [
@@ -364,6 +477,14 @@ def _policy(**overrides: Any) -> ToolPolicy:
             ),
             (_policy(arguments=_LooseArgs),),
             id="extra-args-allowed",
+        ),
+        pytest.param(
+            _with_schema(_DefaultArgs), (_policy(arguments=_DefaultArgs),), id="argument-default"
+        ),
+        pytest.param(
+            _with_schema(_NestedLooseArgs),
+            (_policy(arguments=_NestedLooseArgs),),
+            id="nested-extra-args-allowed",
         ),
         pytest.param((*CONTRACTS, CONTRACTS[0]), (_policy(),), id="duplicate-tool"),
         # 结果模型决定远端数据中哪些成为事实：不能接收未声明字段，投影也只能取声明的字段。

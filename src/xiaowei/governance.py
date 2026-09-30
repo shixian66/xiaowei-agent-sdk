@@ -4,15 +4,20 @@
 检查契约、范围、参数、当前权限和预算；I/O 之后由 Evidence 结果入口按当前权限重新读取，
 执行期间撤权时结果不交给模型。拒绝与失败使用固定信息：SDK 默认把异常文本交给模型，
 因此这里的错误不能携带原始参数、结果、连接信息或下层异常。
+
+参数按 JSON 严格模式校验（不做字符串转数字等转换，拒绝非有限数值），实际执行只收到
+校验后规范化的参数；参数模型不能有默认值或接收未声明字段（含嵌套），因此模型给出的参数
+就是完整的执行参数。
 """
 
 from __future__ import annotations
 
+import json
 from collections.abc import Awaitable, Callable, Iterable, Mapping
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
-from pydantic import BaseModel, ValidationError
+from pydantic import BaseModel
 
 from xiaowei.models import (
     AUDIENCES,
@@ -29,6 +34,9 @@ if TYPE_CHECKING:
 
 Authorizer = Callable[[Identity, str, str], Awaitable[bool]]
 """应用提供的当前授权查询：``(identity, target_id, tool_id) -> 是否仍获准``。"""
+
+Execute = Callable[[ToolRequest], Awaitable[ToolObservation]]
+"""应用绑定的实际 I/O：只在治理通过后以校验、规范化后的请求调用。"""
 
 # 最小投影上限：须容纳证据标识与截断/空结果标记组成的外层结构。
 MIN_PROJECTION_BYTES = 256
@@ -83,8 +91,11 @@ class ToolCatalog:
         for policy in self._policies.values():
             if set(policy.projections) != set(AUDIENCES):
                 raise ValueError(f"工具目录：策略 {policy.policy_id} 必须且只能定义四种用途投影")
-            if policy.arguments.model_config.get("extra") != "forbid":
-                raise ValueError(f"工具目录：策略 {policy.policy_id} 的参数模型必须禁止额外字段")
+            arguments = policy.arguments.model_json_schema()
+            if not _forbids_undeclared(arguments) or _has_optional(arguments):
+                raise ValueError(
+                    f"工具目录：策略 {policy.policy_id} 的参数模型必须禁止额外字段且全部字段必填"
+                )
             if policy.result is not None:
                 _check_result_model(policy, policy.result)
         for contract in contracts:
@@ -109,19 +120,25 @@ class ToolCatalog:
 
 
 class GovernedTools:
-    """本地与 MCP 工具共用的治理入口；依赖由应用装配，``execute`` 只由应用绑定。"""
+    """本地与 MCP 工具共用的治理入口；依赖由应用装配，``execute`` 只由应用绑定。
 
-    def __init__(
-        self, catalog: ToolCatalog, evidence: EvidenceStore, *, authorize: Authorizer
-    ) -> None:
-        self._catalog = catalog
+    工具目录与授权查询取自证据存储本身：调用前治理、结果入口、回放与最终交付因此只有
+    一套契约与一个授权来源。
+    """
+
+    def __init__(self, evidence: EvidenceStore) -> None:
         self._evidence = evidence
-        self._authorize = authorize
+        self._catalog = evidence.catalog
+        self._authorize = evidence.authorize
         self._used: dict[tuple[str, str, str], int] = {}
 
     @property
     def catalog(self) -> ToolCatalog:
         return self._catalog
+
+    @property
+    def evidence(self) -> EvidenceStore:
+        return self._evidence
 
     def allowed_contracts(self, ctx: RunContext) -> list[ToolContract]:
         """本轮可展示的工具：可信配置与本轮 Tool Scope、Target Scope 的交集。"""
@@ -131,24 +148,29 @@ class GovernedTools:
         self,
         ctx: RunContext,
         request: ToolRequest,
-        execute: Callable[[], Awaitable[ToolObservation]],
+        execute: Execute,
     ) -> ToolResult:
+        """治理通过后以规范化参数执行；证据按模型给出的调用（与会话历史一致）记录。"""
         contract = self._catalog.contract(request.tool_id)
         if contract is None or contract.target_id != request.target_id:
             raise ToolRejectedError("工具不可用")
         if not _in_scope(ctx, contract):
             raise ToolRejectedError("本轮不允许使用该工具")
         try:
-            self._catalog.policy_for(contract).arguments.model_validate(request.arguments)
-        except ValidationError:
+            # 不依赖参数模型自身的配置：JSON 严格模式不做类型转换，非有限数值在序列化时拒绝。
+            validated = self._catalog.policy_for(contract).arguments.model_validate_json(
+                json.dumps(request.arguments, allow_nan=False), strict=True
+            )
+        except (ValueError, TypeError):
             raise ToolRejectedError("参数不符合工具契约") from None
+        normalized = request.model_copy(update={"arguments": validated.model_dump(mode="json")})
         if not await self._currently_authorized(ctx.identity, contract):
             raise ToolRejectedError("当前无权调用该工具")
         # 授权回调之后、执行之前不再 await：检查与计数在同一步完成，并行调用不能同时越过上限。
         self._reserve(ctx)
 
         try:
-            observation = await execute()
+            observation = await execute(normalized)
         except Exception:
             raise ToolExecutionError("工具执行失败") from None
         if not isinstance(observation, ToolObservation):
@@ -217,6 +239,29 @@ def _accepts_undeclared(node: object) -> bool:
     if "properties" in node and node.get("additionalProperties", False) is not False:
         return True
     return any(_accepts_undeclared(value) for value in node.values())
+
+
+def _forbids_undeclared(node: object) -> bool:
+    """每个声明了字段的对象（含嵌套模型）都显式禁止未声明字段；默认的忽略也不行。"""
+    if isinstance(node, list):
+        return all(_forbids_undeclared(value) for value in node)
+    if not isinstance(node, dict):
+        return True
+    if "properties" in node and node.get("additionalProperties") is not False:
+        return False
+    return all(_forbids_undeclared(value) for value in node.values())
+
+
+def _has_optional(node: object) -> bool:
+    """声明了字段的对象是否有非必填字段（即带默认值，默认值不经校验）。"""
+    if isinstance(node, list):
+        return any(_has_optional(value) for value in node)
+    if not isinstance(node, dict):
+        return False
+    properties = node.get("properties")
+    if isinstance(properties, dict) and set(properties) != set(node.get("required", ())):
+        return True
+    return any(_has_optional(value) for value in node.values())
 
 
 def _in_scope(ctx: RunContext, contract: ToolContract) -> bool:

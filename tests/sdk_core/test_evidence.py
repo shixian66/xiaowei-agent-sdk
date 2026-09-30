@@ -94,13 +94,13 @@ async def test_four_data_boundaries(postgres_url: URL) -> None:
     grants.grant("alice", TOTAL_TOOL)
     async with ready_engine(postgres_url) as engine:
         evidence = store(engine, grants, clock)
-        governed = GovernedTools(catalog(), evidence, authorize=grants)
+        governed = GovernedTools(evidence)
         channel_views: dict[Channel, dict[Audience, str]] = {}
         ids: dict[Channel, str] = {}
         channel: Channel
         for channel in ("web", "feishu"):
             ctx = context(channel=channel, session=f"{channel}-1")
-            result = await governed.invoke(ctx, request(), lambda: adapter.execute(request()))
+            result = await governed.invoke(ctx, request(), adapter.execute)
             assert model_data(result.model_content)["evidence_id"] == result.evidence_id
             ids[channel] = result.evidence_id
             channel_views[channel] = {
@@ -303,7 +303,7 @@ async def test_facts_are_rendered_from_evidence(postgres_url: URL) -> None:
     ctx = context()
     async with ready_engine(postgres_url) as engine:
         evidence = store(engine, grants, clock)
-        governed = GovernedTools(catalog(), evidence, authorize=grants)
+        governed = GovernedTools(evidence)
 
         def agent(model: ScriptedModel) -> Agent[RunContext]:
             return Agent[RunContext](
@@ -374,7 +374,7 @@ async def test_model_text_cannot_carry_fields_the_channel_forbids(
     sessions: dict[str, str] = {}
     async with ready_engine(postgres_url) as engine:
         evidence = store(engine, grants, clock)
-        governed = GovernedTools(catalog(), evidence, authorize=grants)
+        governed = GovernedTools(evidence)
         channel: Channel
         for channel in ("feishu", "web"):
             ctx = context(channel=channel, session=f"{channel}-1")

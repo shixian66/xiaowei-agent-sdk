@@ -2,26 +2,23 @@
 
 只做三件事：把模型给出的参数解析为 JSON 对象，用 SDK 工具上下文中的调用标识构造
 ``ToolRequest``，经 ``GovernedTools.invoke`` 执行由应用绑定的 ``execute``。模型只能提供参数，
-不能提供执行路径；治理与证据的受控失败按 SDK 公开的 ``default_tool_error_function`` 交给模型
-（直接构造的 FunctionTool 抛错会中止整轮），消息固定。
+不能提供执行路径。
+
+只有确定发生在 I/O 之前的治理拒绝（``ToolRejectedError``）按 SDK 公开的
+``default_tool_error_function`` 以固定信息交给模型，模型可以修正后再调用。执行已开始后的
+失败（执行错误、结果不合约、证据无法保存或执行期间撤权）结果未知，不能让模型在同一轮
+重试：异常照常抛出，SDK 据此中止整轮（包装为 ``UserError``，原异常为 ``__cause__``）。
 """
 
 import copy
 import json
-from collections.abc import Awaitable, Callable
 from typing import Any
 
 from agents import FunctionTool, UserError, default_tool_error_function
 from agents.tool_context import ToolContext
 
-from xiaowei.evidence import EvidenceError
-from xiaowei.governance import GovernedTools, ToolExecutionError, ToolRejectedError
-from xiaowei.models import ToolContract, ToolObservation, ToolRequest
-
-Execute = Callable[[ToolRequest], Awaitable[ToolObservation]]
-"""应用绑定的实际 I/O：只在治理通过后以已校验的请求调用。"""
-
-_TOOL_FAILURES = (ToolRejectedError, ToolExecutionError, EvidenceError)
+from xiaowei.governance import Execute, GovernedTools, ToolRejectedError
+from xiaowei.models import ToolContract, ToolRequest
 
 
 def governed_function_tool(
@@ -44,8 +41,8 @@ def governed_function_tool(
             arguments=arguments,
         )
         try:
-            result = await governance.invoke(tool_ctx.context, request, lambda: execute(request))
-        except _TOOL_FAILURES as exc:
+            result = await governance.invoke(tool_ctx.context, request, execute)
+        except ToolRejectedError as exc:
             return default_tool_error_function(tool_ctx, exc)
         return result.model_content
 

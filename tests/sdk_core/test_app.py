@@ -1,7 +1,8 @@
-"""Task 5：组合的运行核心。``Application.run_turn`` + 真 Runner + ScriptedModel + loopback MCP
-fixture + SQLAlchemySession + 隔离的真实 PostgreSQL。
+"""Task 5：组合的运行核心。``Application.run_turn`` + 真 Runner + ``open_model`` 装配的 SDK
+Responses 模型 + loopback MCP fixture + SQLAlchemySession + 隔离的真实 PostgreSQL。
 
-应用只持有一个 SDK Model 对象；并发的多轮共用它，脚本按本轮用户消息分派。
+模型端点由 ``httpx2.MockTransport`` 按脚本应答（不建立网络连接）；应用只持有一个模型绑定，
+并发的多轮共用它，脚本按请求中的本轮用户消息分派。HTTP mock 不等于真实模型验证。
 """
 
 import asyncio
@@ -12,17 +13,18 @@ import json
 import logging
 import re
 import time
-from collections.abc import AsyncIterator, Awaitable, Callable, Iterator, Sequence
+from collections.abc import AsyncIterator, Callable, Iterator, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from typing import Any
 
+import httpx2
 import pytest
 from agents import set_tracing_disabled
 from agents.extensions.memory import SQLAlchemySession
-from agents.testing import ModelCall, ModelStep, ScriptedModel, assistant_message, function_call
+from agents.testing import assistant_message, function_call
 from agents.tracing import flush_traces, set_trace_processors
-from pydantic import ValidationError
+from pydantic import SecretStr, ValidationError
 from sqlalchemy import text
 from sqlalchemy.engine import URL
 from sqlalchemy.ext.asyncio import AsyncEngine
@@ -41,13 +43,14 @@ from tests.sdk_core.synthetic_tools import (
 from tests.sdk_core.test_mcp_integration import FIXTURE_TARGET, TOKEN_ENV, mcp_catalog
 from tests.sdk_core.test_mcp_integration import config as mcp_config
 from tests.sdk_core.test_model_api import OPENAI as PROFILE
+from tests.sdk_core.test_model_api import _responses_body
 from tests.sdk_core.test_sdk_contract import _RecordingProcessor
 
 from xiaowei.app import AppConfig, Application, DataPolicy, TurnError
 from xiaowei.config import configure_runtime
-from xiaowei.evidence import EvidenceStore
 from xiaowei.governance import GovernedTools
 from xiaowei.mcp import MCPIntegration
+from xiaowei.model_api import ModelBinding, open_model
 from xiaowei.models import Budget, Channel, Identity, RunContext
 from xiaowei.session import SessionInputPolicy, SessionLimits
 
@@ -58,6 +61,7 @@ ALL_TOOLS = frozenset({TOTAL_TOOL, QUERY_TOOL, LOOKUP})
 SDK_NAMES = {TOTAL_TOOL: "order_total", QUERY_TOOL: "run_query", LOOKUP: "fixture__lookup"}
 SYNTHETIC_SQL = "SELECT secret_margin FROM synthetic_orders WHERE region = 'east'"
 MODEL_SECRET = "模型私下写的结论-5c1e"  # noqa: S105 - 模型输出标记，不是凭据
+FAKE_MODEL_KEY = SecretStr("sk-test-app-model")
 
 
 def app_config(**overrides: Any) -> AppConfig:
@@ -83,23 +87,28 @@ def app_config(**overrides: Any) -> AppConfig:
 
 # ---- 按消息分派的脚本模型 ------------------------------------------------------------
 
+
+@dataclass(frozen=True)
+class ModelCall:
+    """模型端点收到的一次 Responses 请求：输入项与工具名。"""
+
+    input: list[dict[str, Any]]
+    tools: list[str]
+
+
 Step = Callable[[ModelCall], Any]
 _call_ids = itertools.count(1)
 
 
 def _user_text(call: ModelCall) -> str:
-    items = call.input
-    assert isinstance(items, list)
-    content = [i for i in items if i.get("role") == "user"][-1]["content"]
+    content = [i for i in call.input if i.get("role") == "user"][-1]["content"]
     return content if isinstance(content, str) else "".join(p["text"] for p in content)
 
 
 def evidence_in(call: ModelCall) -> list[str]:
     """模型输入中所有工具结果（本轮与回放的历史）的证据标识，按出现顺序。"""
-    items = call.input
-    assert isinstance(items, list)
     found = []
-    for item in items:
+    for item in call.input:
         if item.get("type") != "function_call_output":
             continue
         try:
@@ -135,7 +144,9 @@ def clarify(question: str = "请说明要看的地区") -> Step:
 
 
 def upstream_error(call: ModelCall) -> Any:
-    raise RuntimeError(f"upstream 400: {MODEL_SECRET}")
+    """供应商返回错误；模型客户端会把错误体写进异常消息。"""
+    error = {"message": f"invalid request: {MODEL_SECRET}", "type": "invalid_request_error"}
+    return httpx2.Response(400, json={"error": error})
 
 
 def after(event: asyncio.Event, step: Step, *, entered: asyncio.Event | None = None) -> Step:
@@ -165,21 +176,28 @@ class Scripts:
     by_message: dict[str, list[Step]] = field(default_factory=dict)
     calls: dict[str, list[ModelCall]] = field(default_factory=dict)
 
-    def model(self) -> ScriptedModel:
-        return ScriptedModel([ModelStep.respond(self._route) for _ in range(200)])
+    def transport(self) -> httpx2.MockTransport:
+        return httpx2.MockTransport(self._handle)
 
     def add(self, message: str, *steps: Step) -> str:
         self.by_message[message] = list(steps)
         return message
 
     def tools_seen(self, message: str) -> list[set[str]]:
-        return [{tool.name for tool in call.tools} for call in self.calls.get(message, [])]
+        return [set(call.tools) for call in self.calls.get(message, [])]
 
-    async def _route(self, call: ModelCall) -> Any:
+    async def _handle(self, request: httpx2.Request) -> httpx2.Response:
+        body = json.loads(request.content)
+        call = ModelCall(body["input"], [tool["name"] for tool in body.get("tools", [])])
         message = _user_text(call)
         self.calls.setdefault(message, []).append(call)
         result = self.by_message[message].pop(0)(call)
-        return await result if inspect.isawaitable(result) else result
+        if inspect.isawaitable(result):
+            result = await result
+        if isinstance(result, httpx2.Response):
+            return result
+        output = [item.model_dump(mode="json", exclude_none=True) for item in result]
+        return httpx2.Response(200, json=_responses_body(output, usage=None))
 
 
 # ---- 装配 ----------------------------------------------------------------------------
@@ -192,7 +210,7 @@ class Env:
     clock: Clock
     adapter: RecordingAdapter
     scripts: Scripts
-    evidence: EvidenceStore
+    binding: ModelBinding
     governed: GovernedTools
     mcp: MCPIntegration
     fixture: Running
@@ -201,15 +219,16 @@ class Env:
     def __post_init__(self) -> None:
         self.app = self.application()
 
-    def application(self, config: AppConfig | None = None) -> Application:
+    def application(
+        self, config: AppConfig | None = None, *, local_tools: Any = None
+    ) -> Application:
         return Application(
             config or app_config(),
-            profile=PROFILE,
-            model=self.scripts.model(),
+            model=self.binding,
             engine=self.engine,
             governance=self.governed,
-            evidence=self.evidence,
-            local_tools={TOTAL_TOOL: self.adapter.execute, QUERY_TOOL: self.adapter.execute},
+            local_tools=local_tools
+            or {TOTAL_TOOL: self.adapter.execute, QUERY_TOOL: self.adapter.execute},
             mcp=self.mcp,
             clock=self.clock,
         )
@@ -270,16 +289,20 @@ async def env(postgres_url: URL, monkeypatch: pytest.MonkeyPatch) -> AsyncIterat
                 grants.grant(subject, LOOKUP, target=FIXTURE_TARGET)
             tools = mcp_catalog("fixture")
             evidence = store(engine, grants, clock, tools)
-            governed = GovernedTools(tools, evidence, authorize=grants)
+            governed = GovernedTools(evidence)
             configs = [mcp_config(running.url, tools=("lookup",), auth_ref=f"env:{TOKEN_ENV}")]
-            async with MCPIntegration(configs, governed, clock=clock) as integration:
+            scripts = Scripts()
+            async with (
+                open_model(PROFILE, api_key=FAKE_MODEL_KEY, transport=scripts.transport()) as bound,
+                MCPIntegration(configs, governed, clock=clock) as integration,
+            ):
                 yield Env(
                     engine=engine,
                     grants=grants,
                     clock=clock,
                     adapter=RecordingAdapter(),
-                    scripts=Scripts(),
-                    evidence=evidence,
+                    scripts=scripts,
+                    binding=bound,
                     governed=governed,
                     mcp=integration,
                     fixture=running,
@@ -510,6 +533,66 @@ async def test_turn_is_not_traced_even_if_tracing_is_reenabled(env: Env) -> None
     assert recorder.events == []
 
 
+async def test_unknown_tool_result_stops_the_turn(env: Env) -> None:
+    """工具已执行但结果未知：本轮中止，模型不能在同一轮重试，也不提交。"""
+
+    async def executed_then_failed(request: Any) -> Any:
+        env.adapter.calls.append(request)
+        raise RuntimeError("连接在返回结果前断开")
+
+    app = env.application(local_tools={TOTAL_TOOL: executed_then_failed})
+    message = env.scripts.add(
+        "东区",
+        tool_call("order_total", region="east"),
+        tool_call("order_total", region="east"),
+        clarify(),
+    )
+    with pytest.raises(TurnError) as failed:
+        await app.run_turn(env.ctx(turn="t1", max_tool_calls=2), message)
+    assert failed.value.reason == "tool_failed"
+    assert "断开" not in str(failed.value)
+    assert len(env.adapter.calls) == 1 and len(env.scripts.calls[message]) == 1
+    assert await env.stored("s1") == []
+
+    # 对照：I/O 之前的参数拒绝交给模型修正，本轮照常完成。
+    fixed = env.scripts.add(
+        "东区（修正）",
+        lambda call: [function_call("order_total", {"region": 1}, call_id="bad-arg")],
+        tool_call("order_total", region="east"),
+        cite(),
+    )
+    await env.app.run_turn(env.ctx(turn="t2", max_tool_calls=2), fixed)
+    assert "参数不符合工具契约" in json.dumps(env.scripts.calls[fixed][1].input, ensure_ascii=False)
+    assert len(env.adapter.calls) == 2
+
+
+async def test_session_is_bound_to_the_data_policy(env: Env) -> None:
+    first = env.scripts.add("东区", tool_call("order_total", region="east"), cite())
+    await env.app.run_turn(env.ctx(turn="t1"), first)
+
+    # 同一 data_policy_id、内容收窄：重启后的应用在首个模型调用前拒绝旧会话。
+    policy = app_config().data_policies[PROFILE.data_policy_id]
+    narrowed = {
+        "工具": policy.model_copy(update={"model_tools": frozenset({QUERY_TOOL, LOOKUP})}),
+        "输入容量": policy.model_copy(update={"input": SessionInputPolicy(max_bytes=1000)}),
+    }
+    for name, changed in narrowed.items():
+        app = env.application(app_config(data_policies={PROFILE.data_policy_id: changed}))
+        ctx = env.ctx(turn=f"t-{name}").model_copy(
+            update={"tool_scope": env.scope("query") & changed.model_tools}
+        )
+        followup = env.scripts.add(f"追问（{name}）", cite())
+        with pytest.raises(TurnError) as refused:
+            await app.run_turn(ctx, followup)
+        assert refused.value.reason == "session_unavailable", name
+        assert followup not in env.scripts.calls
+
+    # 对照：策略内容未变的新应用照常回放。
+    same = env.scripts.add("追问（未变）", cite())
+    await env.application().run_turn(env.ctx(turn="t2"), same)
+    assert len(evidence_in(env.scripts.calls[same][0])) == 1
+
+
 async def test_query_permission_is_not_inherited(env: Env) -> None:
     assert QUERY_TOOL in env.scope("query")
     assert QUERY_TOOL not in env.scope("diagnose")
@@ -601,10 +684,14 @@ async def test_stage_logs_contain_only_safe_metadata(env: Env) -> None:
         tool_call("order_total", region="east"),
         lambda c: answer(["ev_forged"], MODEL_SECRET),
     )
+    upstream = env.scripts.add(f"第三次，{SYNTHETIC_SQL}", upstream_error)
     with all_logs() as records:
         await env.app.run_turn(env.ctx(turn="req-ok"), ok)
         with pytest.raises(TurnError):
             await env.app.run_turn(env.ctx(turn="req-bad"), bad)
+        # SDK 自身也记录模型错误；上游错误体（含模型/上游内容）不得出现在任何日志中。
+        with pytest.raises(TurnError):
+            await env.app.run_turn(env.ctx(turn="req-upstream"), upstream)
 
     stages: dict[str, list[tuple[str, str]]] = {}
     for record in records:
@@ -626,7 +713,9 @@ async def test_stage_logs_contain_only_safe_metadata(env: Env) -> None:
             ("answered", "-"),
             ("failed", "answer_rejected"),
         ],
+        "req-upstream": [("received", "-"), ("storage_ready", "-"), ("failed", "model_failed")],
     }
+    assert any(r.name.startswith("openai.agents") and r.levelno >= logging.ERROR for r in records)
     stream = io.StringIO()
     formatter = logging.Formatter()
     for record in records:
@@ -674,32 +763,50 @@ async def test_turn_is_refused_before_the_model(env: Env) -> None:
 async def test_configuration_is_checked_at_startup(env: Env) -> None:
     with pytest.raises(ValidationError):
         app_config(purposes={"query": ALL_TOOLS})
-    other_profile = PROFILE.model_copy(update={"data_policy_id": "unknown"})
-    bad: dict[str, Callable[[], Awaitable[object] | object]] = {
-        "数据策略": lambda: Application(
+
+    # 模型：只接受 open_model 按 Profile 装配的运行绑定，不能另配一个 Model 对象。
+    with pytest.raises(TypeError):
+        ModelBinding(PROFILE, env.binding.model, opened_by=object())
+    with pytest.raises(TypeError):
+        Application(
             app_config(),
-            profile=other_profile,
-            model=env.scripts.model(),
+            model=env.binding.model,  # type: ignore[arg-type]
             engine=env.engine,
             governance=env.governed,
-            evidence=env.evidence,
             local_tools={},
             clock=env.clock,
-        ),
-        "未登记": lambda: env.application(
-            app_config(purposes={"query": frozenset({"local/unknown"}), "diagnose": frozenset()})
-        ),
-        "local/": lambda: Application(
+        )
+
+    # MCP 接入使用另一套治理（另一授权来源）：拒绝装配，远端零请求。
+    other = GovernedTools(store(env.engine, Grants(), env.clock, env.governed.catalog))
+    requests = len(env.fixture.recorder.requests)
+    with pytest.raises(ValueError, match="治理"):
+        Application(
             app_config(),
-            profile=PROFILE,
-            model=env.scripts.model(),
+            model=env.binding,
             engine=env.engine,
             governance=env.governed,
-            evidence=env.evidence,
-            local_tools={LOOKUP: env.adapter.execute},
+            local_tools={},
+            mcp=MCPIntegration([mcp_config(env.fixture.url, tools=("lookup",))], other),
             clock=env.clock,
-        ),
-    }
-    for expected, build in bad.items():
-        with pytest.raises(ValueError, match=expected):
-            build()
+        )
+    assert len(env.fixture.recorder.requests) == requests
+
+    unknown = PROFILE.model_copy(update={"data_policy_id": "unknown"})
+    async with open_model(unknown, api_key=FAKE_MODEL_KEY, transport=env.scripts.transport()) as b:
+        with pytest.raises(ValueError, match="数据策略"):
+            Application(
+                app_config(),
+                model=b,
+                engine=env.engine,
+                governance=env.governed,
+                local_tools={},
+                clock=env.clock,
+            )
+    with pytest.raises(ValueError, match="未登记"):
+        env.application(
+            app_config(purposes={"query": frozenset({"local/unknown"}), "diagnose": frozenset()})
+        )
+    with pytest.raises(ValueError, match="local/"):
+        env.application(local_tools={LOOKUP: env.adapter.execute})
+    assert env.scripts.calls == {}

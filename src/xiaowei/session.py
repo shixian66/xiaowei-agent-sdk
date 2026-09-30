@@ -7,10 +7,11 @@ Evidence 读取边界按当前权限、目标范围、策略与过期取回 Sess
 回放时整段拒绝并提示新建会话，不裁掉半组工具项、不以无来源文字替代失效证据。证据须由历史
 中同一次调用（调用标识、函数名、参数）生成，暂存与回放都经 Evidence 读取边界核对。
 
-应用表 ``xiaowei_session`` 记录会话归属、Profile 绑定、失效时间、已提交轮数与状态；只有
-底层 Session 为空时才登记新会话，缺少元数据的已有历史不被任何身份认领。SDK 表
-与应用表不共事务：提交前先把状态置为 ``writing``，底层写入与元数据更新都成功后才回到
-``active``；任一步失败会话保持不可回放，不自动重跑工具补偿。
+应用表 ``xiaowei_session`` 记录会话归属、运行绑定（应用传入 Profile 与数据策略的组合指纹，
+列名沿用 ``profile_fingerprint``）、失效时间、已提交轮数与状态；只有底层 Session 为空时才登记
+新会话，缺少元数据的已有历史不被任何身份认领。SDK 表与应用表不共事务：提交前先把状态置为
+``writing``，底层写入与元数据更新都成功后才回到 ``active``；任一步失败会话保持不可回放，
+不自动重跑工具补偿。
 """
 
 import json
@@ -248,7 +249,7 @@ class PolicySession:
         """返回可继续使用的会话已提交轮数；归属、Profile、状态或期限不符时拒绝。"""
         row = await self._claim()
         if row["profile_fingerprint"] != self._profile:
-            raise SessionUnavailableError("模型配置已变化，请新建会话")
+            raise SessionUnavailableError("模型配置或数据策略已变化，请新建会话")
         if row["state"] != "active" or self._clock() >= row["expires_at"]:
             raise SessionUnavailableError
         return cast(int, row["turns"])

@@ -115,6 +115,14 @@ class EvidenceStore:
         self._clock = clock
         self._retention = timedelta(seconds=retention_seconds)
 
+    @property
+    def catalog(self) -> ToolCatalog:
+        return self._catalog
+
+    @property
+    def authorize(self) -> Authorizer:
+        return self._authorize
+
     async def record(
         self, ctx: RunContext, request: ToolRequest, observation: ToolObservation
     ) -> ToolResult:

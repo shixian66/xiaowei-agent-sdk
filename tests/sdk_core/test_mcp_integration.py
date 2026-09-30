@@ -15,7 +15,7 @@ from dataclasses import dataclass
 from typing import Any
 
 import pytest
-from agents import Agent, Runner, Tool
+from agents import Agent, Runner, Tool, UserError
 from agents.exceptions import ModelBehaviorError
 from agents.extensions.memory import SQLAlchemySession
 from agents.testing import ModelCall, ModelStep, ScriptedModel, assistant_message, function_call
@@ -52,8 +52,14 @@ from tests.sdk_core.synthetic_tools import (
 )
 
 from xiaowei.config import MCPServerConfig
-from xiaowei.evidence import EvidenceStore
-from xiaowei.governance import GovernedTools, Projection, ToolCatalog, ToolPolicy
+from xiaowei.evidence import EvidenceError, EvidenceStore
+from xiaowei.governance import (
+    GovernedTools,
+    Projection,
+    ToolCatalog,
+    ToolExecutionError,
+    ToolPolicy,
+)
 from xiaowei.mcp import MCPIntegration
 from xiaowei.models import AgentAnswer, RunContext, ToolContract
 from xiaowei.session import PolicySession, SessionInputPolicy, SessionLimits
@@ -195,6 +201,15 @@ class Core:
         self.last_output = result.final_output
         return model
 
+    async def aborted(self, tools: Sequence[Tool], name: str, ctx: RunContext) -> ScriptedModel:
+        """远端已执行、结果不可用：本轮中止，模型只被调用一次，之后没有续轮。"""
+        model = ScriptedModel([call(name, call_id=f"{name}-1"), call(name, call_id=f"{name}-2")])
+        with pytest.raises(UserError) as aborted:
+            await Runner.run(self.agent(model, tools), "查 k1", context=ctx)
+        assert isinstance(aborted.value.__cause__, (ToolExecutionError, EvidenceError))
+        assert len(model.calls) == 1
+        return model
+
     async def dump(self) -> str:
         """应用表与 SDK 表的全部内容，用于断言禁止内容没有落库。"""
         async with self.engine.connect() as conn:
@@ -215,7 +230,7 @@ async def core(url: URL, catalog: ToolCatalog | None = None) -> AsyncIterator[Co
         grants, clock = Grants(), Clock()
         tools = catalog or mcp_catalog()
         evidence = store(engine, grants, clock, tools)
-        governed = GovernedTools(tools, evidence, authorize=grants)
+        governed = GovernedTools(evidence)
         grants.grant("alice", TOTAL_TOOL)
         grants.grant(
             "alice",
@@ -272,7 +287,7 @@ async def test_empty_config_performs_no_network() -> None:
     # 未标记 loopback：pytest-socket 禁止一切连接，任何网络访问都会让用例失败。
     tools = mcp_catalog()
     evidence = store(unreachable_engine(), Grants(), Clock(), tools)
-    governed = GovernedTools(tools, evidence, authorize=Grants())
+    governed = GovernedTools(evidence)
     async with MCPIntegration((), governed) as integration:
         assert integration.tools_for(mcp_context()) == []
 
@@ -395,7 +410,7 @@ async def test_unknown_schema_and_collision_fail_closed(postgres_url: URL) -> No
                 )
                 tools = mcp_catalog(extra=(clash,))
                 MCPIntegration(
-                    (config(fixture.url),), GovernedTools(tools, c.evidence, authorize=c.grants)
+                    (config(fixture.url),), GovernedTools(store(c.engine, c.grants, c.clock, tools))
                 )
             with pytest.raises(ValueError, match="不一致"):
                 MCPIntegration(
@@ -414,7 +429,8 @@ async def test_unknown_schema_and_collision_fail_closed(postgres_url: URL) -> No
             )
             with pytest.raises(ValueError, match="结果模型"):
                 MCPIntegration(
-                    (config(fixture.url),), GovernedTools(no_result, c.evidence, authorize=c.grants)
+                    (config(fixture.url),),
+                    GovernedTools(store(c.engine, c.grants, c.clock, no_result)),
                 )
             # SDK 严格 schema 不支持的参数形状（映射）：连接任何 Server 之前拒绝整份登记，
             # 而不是连上之后在构造工具时中止全部 MCP 装配。
@@ -433,7 +449,7 @@ async def test_unknown_schema_and_collision_fail_closed(postgres_url: URL) -> No
                             fixture.url, server_id="maps", tools=("mapped",), policy="fixture.map"
                         ),
                     ),
-                    GovernedTools(with_map, c.evidence, authorize=c.grants),
+                    GovernedTools(store(c.engine, c.grants, c.clock, with_map)),
                 )
             assert fixture.recorder.requests == []
 
@@ -492,14 +508,11 @@ async def test_auth_timeout_and_shutdown(
                 assert secured.recorder.tool_calls == [("lookup", {"key": "k1"})]
                 assert {a for _, _, a in secured.recorder.requests} == {f"Bearer {FAKE_TOKEN}"}
 
-                # 超时：远端已开始执行，结果未知，不自动重试。
+                # 超时：远端已开始执行，结果未知，本轮中止，不自动重试。
                 started = time.monotonic()
-                timed_out = await c.run(
-                    tools, [call("fixture__slow", call_id="mcp-2"), clarify()], ctx
-                )
+                timed_out = await c.aborted(tools, "fixture__slow", ctx)
                 assert time.monotonic() - started < 2.5
                 assert [n for n, _ in secured.recorder.tool_calls].count("slow") == 1
-                assert "工具执行失败" in outputs(timed_out.calls[1])[0]
                 # 一次超时不能拖垮整个连接：后续调用照常执行。
                 await c.run(tools, [call("fixture__lookup", "k2", "mcp-4"), cite()], ctx)
                 assert secured.recorder.tool_calls[-1] == ("lookup", {"key": "k2"})
@@ -646,12 +659,10 @@ async def test_wire_logs_carry_no_tool_data(
             ctx = mcp_context()
             tools = integration.tools_for(ctx)
             model = await c.run(tools, [call("fixture__lookup", marker), cite()], ctx)
-            await c.run(tools, [call("fixture__failing", marker, "mcp-2"), clarify()], ctx)
+            with pytest.raises(UserError):
+                await c.run(tools, [call("fixture__failing", marker, "mcp-2"), clarify()], ctx)
             # 远端夹带的协议内容：MCP 库以日志参数与异常文字记录它们。
-            garbled = await c.run(
-                tools, [call("fixture__garbled", call_id="mcp-3"), clarify()], ctx
-            )
-            assert "工具执行失败" in outputs(garbled.calls[1])[0]
+            await c.aborted(tools, "fixture__garbled", ctx)
     # 对照：调用真实发生，参数经获准字段回到模型。
     assert [name for name, _ in fixture.recorder.tool_calls] == ["lookup", "failing"]
     assert marker in seen(model)
@@ -727,16 +738,14 @@ async def test_mcp_payload_filtered_before_model(postgres_url: URL) -> None:
             assert fixture.recorder.tool_calls == [("lookup", {"key": "k1"})]
             evidence_before = await c.evidence_count()
 
-            # 不合约的类型、图片、远端错误、超过接收上限：执行一次，结果不交给模型、不生成证据。
+            # 不合约的类型、图片、远端错误、超过接收上限：执行一次，本轮中止，模型不能重试，
+            # 结果不交给模型、不生成证据。
             for name in ("wrong_type", "stringly", "picture", "failing", "huge"):
-                rejected = await c.run(
-                    tools, [call(f"fixture__{name}", call_id=name), clarify()], ctx
-                )
-                (content,) = outputs(rejected.calls[1])
-                assert "工具执行失败" in content
-                assert "seven" not in content and "remote failure" not in content
+                rejected = await c.aborted(tools, f"fixture__{name}", ctx)
+                assert "seven" not in seen(rejected) and "remote failure" not in seen(rejected)
                 assert PRIVATE not in seen(rejected)
                 assert fixture.recorder.tool_calls[-1] == (name, {"key": "k1"})
+                assert [n for n, _ in fixture.recorder.tool_calls].count(name) == 1
             assert await c.evidence_count() == evidence_before
             # 被拒绝的结果不影响连接：后续调用照常执行。
             next_turn = ctx.model_copy(
@@ -744,6 +753,40 @@ async def test_mcp_payload_filtered_before_model(postgres_url: URL) -> None:
             )
             await c.run(tools, [call("fixture__lookup", "k3", "after"), cite()], next_turn)
             assert fixture.recorder.tool_calls[-1] == ("lookup", {"key": "k3"})
+
+
+@pytest.mark.loopback
+async def test_unknown_result_is_not_retried_by_the_model(postgres_url: URL) -> None:
+    """远端已执行但结果不可用：本轮中止，模型不能在同一轮再次调用。"""
+    with serve(mcp_app()) as fixture:
+        async with core(postgres_url) as c, c.integration(config(fixture.url)) as integration:
+            ctx = mcp_context(max_tool_calls=3)
+            tools = integration.tools_for(ctx)
+            model = ScriptedModel(
+                [
+                    call("fixture__failing", call_id="first"),
+                    call("fixture__failing", call_id="again"),
+                    clarify(),
+                ]
+            )
+            with pytest.raises(UserError) as aborted:
+                await Runner.run(c.agent(model, tools), "查 k1", context=ctx)
+            assert isinstance(aborted.value.__cause__, ToolExecutionError)
+            assert len(model.calls) == 1
+            assert fixture.recorder.tool_calls == [("failing", {"key": "k1"})]
+
+            # 对照：I/O 之前的参数拒绝交给模型修正，之后的正确调用照常执行。
+            corrected = ScriptedModel(
+                [
+                    [function_call("fixture__lookup", {"key": 1}, call_id="bad")],
+                    call("fixture__lookup", call_id="good"),
+                    cite(),
+                ]
+            )
+            await Runner.run(c.agent(corrected, tools), "查 k1", context=ctx)
+            assert "参数不符合工具契约" in outputs(corrected.calls[1])[0]
+            assert fixture.recorder.tool_calls[-1] == ("lookup", {"key": "k1"})
+            assert len(fixture.recorder.tool_calls) == 2
 
 
 async def _until(condition: Callable[[], bool], timeout: float = 3.0) -> None:

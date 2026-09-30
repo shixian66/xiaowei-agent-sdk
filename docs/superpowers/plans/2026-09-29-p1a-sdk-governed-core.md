@@ -200,7 +200,7 @@
 - 登记与目录对应：每个获准远端工具必须在工具目录中有 `server_id/tool` 契约且策略一致；`ToolPolicy` 增加可选的 `result` 结果模型，MCP 工具的策略必须提供；SDK 函数名与其他工具（本地工具以 `tool_id` 名字部分为函数名）冲突、`server_id` 重复时拒绝装配。`ToolContract` 增加可信的 `description`，交给模型的工具说明只取它，远端说明文字不交给模型。
 - 发现时核对：远端缺少登记的工具、同名多个、参数 schema 与契约不符（比较前去掉 `title`、`description` 与布尔的 `additionalProperties`；发出的参数总是先经禁止额外字段的策略参数模型校验。值为 schema 的 `additionalProperties` 即映射值类型保留比较）时只隐藏该工具。未登记的工具（含远端自称只读的）不开放。远端输出 schema 不比较，改为每次结果按结果模型校验。
 - 结果契约：`is_error`、任何非文本内容（图片、资源链接等，资源不读取）、非 JSON 对象、结构化内容缺失时文本不是恰好一段 JSON 对象、结果模型按 JSON 严格模式校验失败，一律拒绝；通过时只保留结果模型声明的字段，再进入 Evidence 投影。远端自带的 `evidence_id`/`xiaowei_evidence_ref` 等字段不在结果模型中，不保存也不交给模型，来源由 Evidence 的 `tool_id`（`server_id/tool`）记录。
-- 调用：薄 `FunctionTool` 解析参数（不是 JSON 对象时在治理前拒绝，远端零请求），经 `GovernedTools.invoke` 执行 `call_tool`。治理与证据的受控失败按 SDK 公开的 `default_tool_error_function` 交给模型，与本地 function tool 的默认行为一致；直接构造的 FunctionTool 抛错时 SDK 会中止整轮（实测），因此不能直接抛出。
+- 调用：薄 `FunctionTool` 解析参数（不是 JSON 对象时在治理前拒绝，远端零请求），经 `GovernedTools.invoke` 执行 `call_tool`。治理与证据的受控失败按 SDK 公开的 `default_tool_error_function` 交给模型，与本地 function tool 的默认行为一致；直接构造的 FunctionTool 抛错时 SDK 会中止整轮（实测），因此不能直接抛出。（Task 5 审查修复后改为：只有 I/O 前的拒绝交给模型，执行开始后的失败直接抛出以中止整轮，见 Task 5 实测记录。）
 - HTTP：`httpx_client_factory` 返回 `trust_env=False`、`follow_redirects=False` 的客户端，底层 transport 只向与登记端点完全相同的规范化 URL（含 userinfo、未解码路径与 query）发送，Bearer 凭据只在这里加上（认证引用在进入时解析，不进入 RunContext）。锁定版 MCP 客户端会自行跟随同源重定向、不跟随跨源重定向；同源不同路径由 transport 拒绝。响应按实际读取字节计数，超过上限即停止；请求 `Accept-Encoding: identity`，压缩响应拒绝（少量压缩字节可解压成很大的内容）。超限异常继承 `httpx2.StreamError`，MCP 客户端据此把本次请求解析为错误。
 - **超时拖垮连接（实现中发现并修复）：** 起初 HTTP 读取期限等于调用期限，读取超时在 MCP 客户端的 POST 任务中抛出，会关闭整个连接，此后该 Server 的所有调用失败。现单次调用期限由 SDK `client_session_timeout_seconds` 执行（它会中止对应的 POST），HTTP 读取期限为其 2 倍作兜底。补充断言“超时后的下一次调用照常执行”，修复前失败、修复后通过。越出端点或压缩编码在响应头阶段拒绝时仍会关闭该连接（失败方向安全）。
 - 生命周期：进入时逐个连接，认证引用无法解析、连接或列出工具失败只隐藏该 Server 的工具并记录类型（不记录异常消息）；退出时清空工具并关闭全部连接。锁定版 SDK 与 fixture 关闭时未见 `DELETE` 会话终止请求，关闭验证以服务端连接数归零和无遗留 asyncio 任务为准。
@@ -237,7 +237,14 @@
 - 阶段日志：`xiaowei.app` 输出 `turn=<turn_id> stage=<阶段> reason=<原因代码> elapsed_ms=<毫秒>`，阶段为 received、storage_ready、answered、committed、delivered，或 refused、failed、cancelled；不记录消息、回答、工具数据或异常。未替换 LogRecord 工厂，Task 4 的 MCP 日志约束保持。
 - `ci.yml` 未修改：integration job 已在隔离 PostgreSQL 上运行完整 pytest，新用例自动进入该路径。
 - 反向验证 21 项：去掉同会话检查、并发上限，检查与登记之间加 await，各轮共用同一工具列表，用途或数据策略不取交集，`run_turn` 不查数据策略，不查存储就绪，没有总期限，交付前不复核，提交前不单独校验，不清理轮次计数，透传下层异常消息，保留原因链，日志含消息，开启 tracing，本地工具不按范围，输入策略不按 Profile，不校验 `local/` 前缀，不校验用途登记。20 项使对应用例失败。“透传下层消息”起初未被发现（没有用例的下层异常消息含敏感内容），补充“上游错误”用例后失败。“失败时 `discard_pending`”经变异证明不承重（每轮新建 PolicySession，暂存随对象丢弃），已删除。另把共享包装改为绕过治理，Task 4 与 Task 5 共 15 项用例失败。
-- 未完成：真实模型验证（本会话没有获准的模型端点与凭据，三个 Profile 均未验证）；P1-A 整体独立审查。
+- **首轮独立审查修复（针对 `6d3464d` 的 4 组 P1）：**
+  - 运行依赖未绑定：`Application` 分别接收 Profile、裸 Model、治理、证据与 MCP，错误装配可让数据发往另一端点而会话记录另一 Profile，或让回放使用另一授权来源。`open_model` 改为返回只能由它创建的 `ModelBinding`；`Application(config, *, model: ModelBinding, engine, governance, local_tools, mcp=None, clock)` 不再接收 Profile 与证据存储；`GovernedTools(evidence)` 的目录与授权取自证据存储；MCP 接入的治理对象必须相同。应用测试改为 `open_model` + `httpx2.MockTransport` 驱动真实 `OpenAIResponsesModel`。
+  - 数据策略未绑定会话：会话绑定改为 Profile 指纹与规范化数据策略（输入准入、排序后的 `model_tools`）的组合摘要，写入原 `profile_fingerprint` 列；回放时逐条检查工具是否仍在策略内与此重复，未另加。
+  - 参数校验会转换类型且结果被丢弃（Task 2 存量）：`invoke` 以 `json.dumps(allow_nan=False)` + `model_validate_json(strict=True)` 校验，`execute` 签名改为接收规范化后的 `ToolRequest`；工具目录要求参数模型（含嵌套）`additionalProperties: false` 且全部字段必填。证据摘要仍按模型原始参数计算，与会话历史中的调用一致。
+  - 结果未知仍交给模型（Task 4 包装层）：`governed_function_tool` 只把 `ToolRejectedError` 交给模型；其他异常由 SDK 包装为 `UserError` 中止本轮，应用按原因链映射为 `tool_failed`。测试工具 `sdk_tool` 改为调用产品包装；Task 2 的执行期间撤权与 Task 4 的执行后失败用例相应改为断言本轮中止、模型只调用一次。
+  - 反向验证 13 项均使对应用例失败：不检查模型绑定类型、绑定可直接构造、不检查 MCP 治理一致、会话只绑定 Profile、绑定不含工具、不含输入策略、非严格校验、允许非有限数值、执行收到原始参数、允许默认值、允许未声明参数、执行后失败交给模型、不映射工具失败。首轮 20 项在新装配下重跑仍全部失败。
+  - 另发现（未扩项）：SDK 模型错误日志的内容隐去依赖 `OPENAI_AGENTS_DONT_LOG_MODEL_DATA` 的默认值，已加用例；显式关闭时会记录上游错误体。
+- 未完成：真实模型验证（本会话没有获准的模型端点与凭据，三个 Profile 均未验证）；审查修复版本的独立复审。
 
 ## 完成定义与覆盖边界
 

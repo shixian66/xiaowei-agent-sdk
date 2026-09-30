@@ -10,24 +10,30 @@ Agent（工具集合只属于这一轮）→ 原生 ``Runner.run``（SDK Session
 客户端、凭据与 Profile 不进入 RunContext；Profile 的 ``data_policy_id`` 选择用户输入准入策略和
 可把结果交给该模型的工具。阶段日志只含白名单字段：请求编号（``turn_id``）、阶段、原因代码
 与耗时。
+
+相互依赖的运行对象只能来自同一次装配：模型只接受 ``open_model`` 生成的 ``ModelBinding``，
+证据存储取自治理对象，MCP 接入必须使用同一个治理对象。会话绑定 Profile 与解析后的数据策略
+内容：同一 ``data_policy_id`` 的策略内容变化后，旧会话在首个模型调用前拒绝。
 """
 
 import asyncio
+import hashlib
+import json
 import logging
 import time
 from collections.abc import Callable, Mapping
 from datetime import datetime
 from typing import Literal
 
-from agents import Agent, MaxTurnsExceeded, Model, RunConfig, Runner, Tool
+from agents import Agent, MaxTurnsExceeded, RunConfig, Runner, Tool
 from agents.extensions.memory import SQLAlchemySession
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 from sqlalchemy.ext.asyncio import AsyncEngine
 
-from xiaowei.evidence import AnswerRejectedError, EvidenceStore, EvidenceStoreError
-from xiaowei.governance import GovernedTools
+from xiaowei.evidence import AnswerRejectedError, EvidenceError, EvidenceStoreError
+from xiaowei.governance import Execute, GovernedTools, ToolExecutionError
 from xiaowei.mcp import MCPIntegration
-from xiaowei.model_api import ModelProfile, profile_fingerprint, settings_for
+from xiaowei.model_api import ModelBinding
 from xiaowei.models import AgentAnswer, Delivery, RunContext, ToolId
 from xiaowei.session import (
     PolicySession,
@@ -38,7 +44,7 @@ from xiaowei.session import (
     SessionUnavailableError,
 )
 from xiaowei.storage import StorageError, check_storage
-from xiaowei.tools import Execute, governed_function_tool
+from xiaowei.tools import governed_function_tool
 
 logger = logging.getLogger(__name__)
 
@@ -60,6 +66,7 @@ TurnReason = Literal[
     "storage_failed",
     "answer_rejected",
     "turn_limit",
+    "tool_failed",
     "timeout",
     "model_failed",
 ]
@@ -71,6 +78,7 @@ _MESSAGES: Mapping[TurnReason, str] = {
     "storage_unavailable": "存储未就绪，本轮未执行",
     "answer_rejected": "回答未通过证据校验，本轮未保存也未发送",
     "turn_limit": "本轮模型调用次数达到上限，未完成；已执行的工具不会自动重试",
+    "tool_failed": "工具已执行但结果不可用，本轮已停止；不会自动重试",
     "timeout": "本轮超过期限已停止；已执行的工具不会自动重试",
     "model_failed": "模型调用失败，本轮未完成；已执行的工具不会自动重试",
 }
@@ -119,16 +127,18 @@ class Application:
         self,
         config: AppConfig,
         *,
-        profile: ModelProfile,
-        model: Model,
+        model: ModelBinding,
         engine: AsyncEngine,
         governance: GovernedTools,
-        evidence: EvidenceStore,
         local_tools: Mapping[str, Execute],
         mcp: MCPIntegration | None = None,
         clock: Callable[[], datetime],
     ) -> None:
-        data_policy = config.data_policies.get(profile.data_policy_id)
+        if not isinstance(model, ModelBinding):
+            raise TypeError("应用配置：模型必须是 open_model 生成的运行绑定")
+        if mcp is not None and mcp.governance is not governance:
+            raise ValueError("应用配置：MCP 接入必须使用同一个治理对象")
+        data_policy = config.data_policies.get(model.profile.data_policy_id)
         if data_policy is None:
             raise ValueError("应用配置：没有 Profile 对应的数据策略")
         catalog = governance.catalog
@@ -145,11 +155,10 @@ class Application:
         self._config = config
         self._data_policy = data_policy
         self._model = model
-        self._settings = settings_for(profile)
-        self._fingerprint = profile_fingerprint(profile)
+        self._binding = _binding_fingerprint(model.fingerprint, data_policy)
         self._engine = engine
         self._governance = governance
-        self._evidence = evidence
+        self._evidence = governance.evidence
         self._mcp = mcp
         self._clock = clock
         self._run_config = RunConfig(tracing_disabled=True, trace_include_sensitive_data=False)
@@ -221,8 +230,8 @@ class Application:
         agent = Agent[RunContext](
             name="xiaowei",
             instructions=self._config.instructions,
-            model=self._model,
-            model_settings=self._settings,
+            model=self._model.model,
+            model_settings=self._model.settings,
             tools=self._tools_for(ctx),
             output_type=AgentAnswer,
         )
@@ -230,7 +239,7 @@ class Application:
             SQLAlchemySession(ctx.identity.session_id, engine=self._engine),
             ctx,
             self._evidence,
-            self._fingerprint,
+            self._binding,
             self._config.session_limits,
             input_policy=self._data_policy.input,
             engine=self._engine,
@@ -281,8 +290,31 @@ def _turn_error(exc: Exception) -> TurnError:
         return TurnError("answer_rejected")
     if isinstance(exc, MaxTurnsExceeded):
         return TurnError("turn_limit")
+    # 工具执行开始后的失败：SDK 把工具抛出的异常包装后中止本轮，原异常在原因链上。
+    if any(isinstance(e, (ToolExecutionError, EvidenceError)) for e in _causes(exc)):
+        return TurnError("tool_failed")
     # SDK 与模型客户端的异常消息可能含模型输出或上游错误体，不向外传递。
     return TurnError("model_failed")
+
+
+def _causes(exc: BaseException) -> list[BaseException]:
+    chain: list[BaseException] = []
+    current: BaseException | None = exc
+    while current is not None and current not in chain:
+        chain.append(current)
+        current = current.__cause__
+    return chain
+
+
+def _binding_fingerprint(profile_fingerprint: str, policy: DataPolicy) -> str:
+    """会话绑定：Profile 指纹与解析后的数据策略内容（规范化），任一变化都开启新会话。"""
+    body = {
+        "profile": profile_fingerprint,
+        "input": policy.input.model_dump(mode="json"),
+        "model_tools": sorted(policy.model_tools),
+    }
+    canonical = json.dumps(body, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+    return f"sha256:{hashlib.sha256(canonical.encode()).hexdigest()}"
 
 
 def _stage(turn: str, stage: str, started: float, reason: str = "-") -> None:

@@ -214,7 +214,7 @@ async def harness(
     grants.grant("alice", TOTAL_TOOL)
     async with ready_engine(url) as engine:
         evidence = store(engine, grants, clock, tools)
-        governed = GovernedTools(tools, evidence, authorize=grants)
+        governed = GovernedTools(evidence)
         yield Harness(engine, grants, clock, adapter, evidence, governed)
 
 

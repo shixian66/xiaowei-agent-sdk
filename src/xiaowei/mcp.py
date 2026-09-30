@@ -117,6 +117,10 @@ class MCPIntegration:
             await stack.aclose()
 
     @property
+    def governance(self) -> GovernedTools:
+        return self._governance
+
+    @property
     def available_tool_ids(self) -> frozenset[str]:
         """已连接并核对通过的远端工具的 ``tool_id``。"""
         return frozenset(self._planned[name].contract.tool_id for name in self._tools)

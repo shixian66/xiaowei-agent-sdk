@@ -9,8 +9,7 @@ from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 
-from agents import FunctionTool, function_tool
-from agents.tool_context import ToolContext
+from agents import FunctionTool
 from pydantic import BaseModel, ConfigDict, SecretStr
 from sqlalchemy.engine import URL
 from sqlalchemy.ext.asyncio import AsyncEngine
@@ -27,6 +26,7 @@ from xiaowei.models import (
     ToolRequest,
 )
 from xiaowei.storage import initialize_storage, open_engine
+from xiaowei.tools import governed_function_tool
 
 TARGET = "synthetic-warehouse"
 OTHER_TARGET = "other-warehouse"
@@ -164,23 +164,10 @@ def request(
 
 
 def sdk_tool(governed: GovernedTools, adapter: RecordingAdapter, tool_id: str) -> FunctionTool:
-    """测试用的薄 function tool：只转换参数并调用治理层，execute 由这里绑定而非模型提供。"""
-    name = tool_id.split("/", 1)[1]
-
-    @function_tool(name_override=name)
-    async def tool(ctx: ToolContext[RunContext], region: str) -> str:
-        """返回合成地区的订单数据。"""
-        req = ToolRequest(
-            tool_id=tool_id,
-            target_id=TARGET,
-            call_id=ctx.tool_call_id,
-            tool_name=ctx.tool_name,
-            arguments={"region": region},
-        )
-        result = await governed.invoke(ctx.context, req, lambda: adapter.execute(req))
-        return result.model_content
-
-    return tool
+    """产品同一路径的受治理函数工具；execute 由这里绑定而非模型提供。"""
+    contract = governed.catalog.contract(tool_id)
+    assert contract is not None
+    return governed_function_tool(tool_id.split("/", 1)[1], contract, governed, adapter.execute)
 
 
 def secret(url: URL) -> SecretStr:
