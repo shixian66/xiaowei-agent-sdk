@@ -152,7 +152,10 @@ class StarRocksTarget(BaseModel):
 
 
 class QueryResult(BaseModel):
-    """一次有界读取的结果；``rows`` 按列名给出 JSON 标量，不声称数据库中的总行数。"""
+    """一次有界读取的结果；``rows`` 按列名给出 JSON 标量。
+
+    ``row_count`` 是已返回行数，始终等于 ``len(rows)``，不声称数据库中的总行数。
+    """
 
     model_config = ConfigDict(frozen=True, extra="forbid")
 
@@ -163,10 +166,13 @@ class QueryResult(BaseModel):
     truncated: bool
     collected_at: datetime
     elapsed_ms: int
+    row_count: int
 
-    @property
-    def row_count(self) -> int:
-        return len(self.rows)
+    @model_validator(mode="after")
+    def _counted(self) -> QueryResult:
+        if self.row_count != len(self.rows):
+            raise ValueError("row_count 必须等于已返回行数")
+        return self
 
 
 class Connection(Protocol):
@@ -243,16 +249,18 @@ class StarRocksAdapter:
 
     async def _run(self, sql: str, args: tuple[object, ...] | None, max_rows: int) -> QueryResult:
         started = time.monotonic()
+        # 等待槽位与建立连接共用一个绝对期限；超期的阶段决定错误码。
+        deadline = asyncio.get_running_loop().time() + self._target.connect_timeout_seconds
         code: StarRocksErrorCode | None = None
         try:
-            async with asyncio.timeout(self._target.connect_timeout_seconds):
+            async with asyncio.timeout_at(deadline):
                 await self._slots.acquire()
         except TimeoutError:
             code = _Code.POOL_TIMEOUT
         if code is not None:
             raise StarRocksError(code)
         try:
-            conn, code = await self._open()
+            conn, code = await self._open(deadline)
             if conn is None:
                 raise StarRocksError(code or _Code.CONNECT_FAILED)
             rows, truncated, columns, code = await self._query(conn, sql, args, max_rows)
@@ -265,14 +273,15 @@ class StarRocksAdapter:
             sql=sql,
             columns=columns,
             rows=tuple(rows),
+            row_count=len(rows),
             truncated=truncated,
             collected_at=self._clock(),
             elapsed_ms=round((time.monotonic() - started) * 1000),
         )
 
-    async def _open(self) -> tuple[Connection | None, StarRocksErrorCode | None]:
+    async def _open(self, deadline: float) -> tuple[Connection | None, StarRocksErrorCode | None]:
         try:
-            async with asyncio.timeout(self._target.connect_timeout_seconds):
+            async with asyncio.timeout_at(deadline):
                 return await self._connect(), None
         except (MySQLError, OSError) as error:
             return None, _connect_code(error)
@@ -360,14 +369,18 @@ class StarRocksAdapter:
         raise _ResultContractError
 
     async def _release(self, conn: Connection, *, complete: bool) -> None:
-        if complete:
-            try:
+        """完整读完才尝试正常关闭；关闭未完成（含失败、超时、取消）时一律同步断开。"""
+        closed = False
+        try:
+            if complete:
                 async with asyncio.timeout(self._target.connect_timeout_seconds):
                     await conn.close()
-                return
-            except (MySQLError, OSError, TimeoutError):
-                pass
-        conn.abort()
+                closed = True
+        except (MySQLError, OSError):  # TimeoutError 是 OSError 子类
+            pass
+        finally:
+            if not closed:
+                conn.abort()
 
 
 def _json_size(value: object) -> int:

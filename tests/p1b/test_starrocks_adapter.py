@@ -138,11 +138,14 @@ class Driver:
     make: Callable[[], FakeConnection]
     connect_error: BaseException | None = None
     connect_hang: bool = False
+    connect_delay: float = 0.0
     connections: list[FakeConnection] = field(default_factory=list)
     attempts: int = 0
 
     async def __call__(self) -> FakeConnection:
         self.attempts += 1
+        if self.connect_delay:
+            await asyncio.sleep(self.connect_delay)
         if self.connect_hang:
             await asyncio.Event().wait()
         if self.connect_error is not None:
@@ -214,8 +217,8 @@ async def test_query_runs_the_guarded_sql_after_verified_session_setup() -> None
         truncated=False,
         collected_at=NOW,
         elapsed_ms=result.elapsed_ms,
+        row_count=2,
     )
-    assert result.row_count == 2
     assert result.elapsed_ms >= 0
     assert (conn.closed, conn.aborted) == (True, False)
 
@@ -532,6 +535,136 @@ async def test_close_failure_after_a_complete_read_falls_back_to_abort() -> None
     result = await adapter(drv).run_query(guarded())
     assert result.row_count == 1
     assert only(drv).aborted
+
+
+async def test_cancellation_while_closing_a_complete_read_still_aborts() -> None:
+    closing = asyncio.Event()
+
+    class Stuck(FakeConnection):
+        async def close(self) -> None:
+            closing.set()
+            await asyncio.Event().wait()
+
+    drv = driver()
+    base = drv.make
+    drv.make = lambda: Stuck(**{k: v for k, v in vars(base()).items() if not k.startswith("_")})
+    ada = adapter(drv, TARGET.model_copy(update={"pool_size": 1}))
+
+    task = asyncio.create_task(ada.run_query(guarded()))
+    async with asyncio.timeout(5):
+        await closing.wait()
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    conn = only(drv)
+    assert conn.rows_read == 1  # 已完整读完，取消发生在正常关闭阶段
+    assert (conn.closed, conn.aborted) == (False, True)
+    drv.make = driver().make
+    assert (await ada.run_query(guarded())).row_count == 1  # 槽位已释放
+    assert drv.attempts == 2  # 取消后没有自动重试
+
+
+# ---- 槽位等待与建连共用一个期限 --------------------------------------------------------------
+
+SHARED = TARGET.model_copy(update={"pool_size": 1, "connect_timeout_seconds": 0.3})
+
+
+async def hold_slot(ada: StarRocksAdapter, drv: Driver) -> asyncio.Task[Any]:
+    holder = asyncio.create_task(ada.run_query(guarded()))
+    while not drv.connections:
+        await asyncio.sleep(0)
+    return holder
+
+
+async def release_after(holder: asyncio.Task[Any], delay: float) -> None:
+    await asyncio.sleep(delay)
+    holder.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await holder
+
+
+async def test_slot_wait_and_connect_share_one_deadline() -> None:
+    drv = driver(Result(("region",), [("a",), ("b",)]), hang_on="fetch")
+    ada = adapter(drv, SHARED)
+    holder = await hold_slot(ada, drv)
+    drv.make = driver().make
+    drv.connect_delay = 0.2  # 单独看槽位等待 0.2s 与建连 0.2s 都小于 0.3s，合计超期
+
+    async with asyncio.timeout(5):
+        error, _ = await asyncio.gather(
+            failure(ada.run_query(guarded())), release_after(holder, 0.2)
+        )
+
+    assert error.code is Code.CONNECT_FAILED  # 已取得槽位，超期发生在建连阶段
+    assert_safe(error)
+    assert drv.attempts == 2  # 持有者一次 + 本次只尝试连接一次
+
+
+async def test_short_slot_wait_and_timely_connect_still_succeed() -> None:
+    drv = driver(Result(("region",), [("a",), ("b",)]), hang_on="fetch")
+    ada = adapter(drv, SHARED)
+    holder = await hold_slot(ada, drv)
+    drv.make = driver().make
+    drv.connect_delay = 0.05
+
+    async with asyncio.timeout(5):
+        result, _ = await asyncio.gather(ada.run_query(guarded()), release_after(holder, 0.05))
+
+    assert result.row_count == 1
+    assert drv.attempts == 2
+
+
+async def test_an_immediate_slot_leaves_the_whole_deadline_to_connect() -> None:
+    drv = driver()
+    drv.connect_delay = 0.2
+    result = await adapter(drv, SHARED).run_query(guarded())
+    assert result.row_count == 1
+    assert only(drv).closed
+
+
+# ---- 返回契约 -------------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("rows", "expected", "truncated"),
+    [
+        ([], 0, False),
+        ([("a",), ("b",)], 2, False),
+        ([(f"r{i}",) for i in range(50)], POLICY.max_rows, True),
+    ],
+)
+async def test_row_count_is_part_of_the_serialized_result(
+    rows: list[tuple[object, ...]], expected: int, truncated: bool
+) -> None:
+    result = await adapter(driver(Result(("region",), rows))).run_query(guarded())
+
+    dumped = json.loads(result.model_dump_json())
+    assert dumped["row_count"] == len(dumped["rows"]) == len(result.rows) == expected
+    assert result.model_dump()["row_count"] == expected
+    assert result.truncated is truncated
+
+
+def test_row_count_is_in_the_result_schema() -> None:
+    for mode in ("validation", "serialization"):
+        schema = QueryResult.model_json_schema(mode=mode)
+        assert "row_count" in schema["properties"]
+        assert "row_count" in schema["required"]
+
+
+@pytest.mark.parametrize("row_count", [0, 2, -1])
+def test_a_result_cannot_claim_a_different_row_count(row_count: int) -> None:
+    with pytest.raises(ValidationError):
+        QueryResult(
+            target_id="sr-test",
+            sql="SELECT 1",
+            columns=("region",),
+            rows=({"region": "a"},),
+            truncated=False,
+            collected_at=NOW,
+            elapsed_ms=0,
+            row_count=row_count,
+        )
 
 
 # ---- 只执行 SQLGuard 产物与代码生成的元数据查询 ----------------------------------------------

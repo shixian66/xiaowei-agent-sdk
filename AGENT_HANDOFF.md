@@ -164,10 +164,10 @@ CI integration job 设置 `SDK_TEST_POSTGRES_URL`，启动 `compose.sdk-test.yml
 
 **Task 2 StarRocks Adapter 已证明：**
 
-- 离线（recording 驱动替身，Adapter 其余代码全真实）：只执行本目标的 `GuardedQuery` 与代码生成、参数绑定的元数据查询；`describe_table` 与目标不符在 I/O 前拒绝。每次请求新建连接，先设置并回读 `query_timeout`、`query_mem_limit`、`time_zone`，失败即不执行查询。最多读 `max_returned_rows + 1` 行；总字节与单值按生产 JSON 编码（`ensure_ascii=False`）的 UTF-8 大小计数，覆盖控制字符、引号、反斜杠转义膨胀，放不下的行整行丢弃并标记截断。值只转为 `null/bool/int/有限 float/str`（Decimal 定点字符串，日期时间带目标时区的 ISO 8601），bytes、非有限数、`timedelta`、未知类型与重复列名拒绝。只有完整读完才正常关闭；截断、错误、超时、取消一律断开，且不重连、不重试。等待槽位与建立连接有期限，客户端期限覆盖会话设置、执行与读取。错误映射为 11 个固定码，不带服务端原文，`__cause__`/`__context__` 为空。
+- 离线（recording 驱动替身，Adapter 其余代码全真实）：只执行本目标的 `GuardedQuery` 与代码生成、参数绑定的元数据查询；`describe_table` 与目标不符在 I/O 前拒绝。每次请求新建连接，先设置并回读 `query_timeout`、`query_mem_limit`、`time_zone`，失败即不执行查询。最多读 `max_returned_rows + 1` 行；总字节与单值按生产 JSON 编码（`ensure_ascii=False`）的 UTF-8 大小计数，覆盖控制字符、引号、反斜杠转义膨胀，放不下的行整行丢弃并标记截断。值只转为 `null/bool/int/有限 float/str`（Decimal 定点字符串，日期时间带目标时区的 ISO 8601），bytes、非有限数、`timedelta`、未知类型与重复列名拒绝。只有完整读完才正常关闭；截断、错误、超时、取消（含正常关闭过程中的取消）一律同步断开，取消照常传播，且不重连、不重试。等待槽位与建立连接共用一个绝对期限，超期阶段分别映射为 `pool_timeout` / `connect_failed`；客户端期限覆盖会话设置、执行与读取。返回的 `row_count` 是显式字段，出现在 schema 与序列化结果中，校验恒等于 `len(rows)`。错误映射为 11 个固定码，不带服务端原文，`__cause__`/`__context__` 为空。
 - 连接不复用（与计划“池”的差异，已写入计划 §2.3）：asyncmy 自带池没有获取期限，且按 `connected` 回收，`close()` 后的连接仍可能回到空闲队列；每次新建连接保证中断或截断的连接不会被再次使用。
 - 本机 StarRocks 4.1.4 容器（显式 `-m starrocks_real`）：以只读账号验证类型与时区、`LIMIT` 改写后的截断与后续查询、读到一半的字节截断、元数据只列出获准且有权限的对象与列、未授权表映射为权限拒绝（实测错误码 5203）、只读账号写入被拒、服务端 `query_timeout` 终止慢查询（实测 5024，单列为 `server_timeout`）、取消后槽位释放、TLS 开启连接明文服务端失败关闭（不降级）、错误密码映射为认证失败、`SSCursor` 逐行读取。
-- 反向验证 15 项（行数上限、会话回读核对、总字节、单值、未读完时断开、槽位/连接/客户端期限、`describe_table` allowlist、目标核对、重复列、未知类型、在 except 内抛出、会话设置先于查询、5203 映射）均使用例失败；两项期限变异原本导致挂起，已给用例加外层期限使其快速失败。
+- 反向验证 15 项（行数上限、会话回读核对、总字节、单值、未读完时断开、槽位/连接/客户端期限、`describe_table` allowlist、目标核对、重复列、未知类型、在 except 内抛出、会话设置先于查询、5203 映射）均使用例失败；两项期限变异原本导致挂起，已给用例加外层期限使其快速失败。PR #11 审查修复另做 4 项（建连重新计时、关闭被取消时不断开、吞掉取消、去掉 `row_count` 一致性校验），均使对应用例失败。
 
 **Task 2 未覆盖：** 未连接用户的 StarRocks（G1/G5）：TLS 证书验证只证明了“开启 TLS 不降级”，未对启用 TLS 的服务端验证证书链与主机名；grants、资源组与目标版本错误码需在获准环境复核。Adapter 上限与 Web/飞书模型可达投影的启动容量对齐属于 Task 3。已知驱动噪音：截断或中止路径上，asyncmy `MySQLResult.__del__` 调用协程而不 await，产生 `RuntimeWarning: coroutine '_finish_unbuffered_query' was never awaited`；该协程不会运行、没有 I/O，产品代码未为此触碰驱动私有状态。
 
@@ -331,9 +331,9 @@ StarRocks Adapter 验证（锁文件新增 `asyncmy` 0.2.15）：
 
 | 命令 | 结果 |
 | --- | --- |
-| `uv run --locked --extra dev python -m pytest tests/p1b/test_starrocks_adapter.py -q` | 实现前收集阶段因缺少 `xiaowei.starrocks` 失败；实现后 82 passed |
-| `SDK_TEST_STARROCKS_ADMIN_URL=mysql://root@127.0.0.1:59030 uv run --locked --extra dev python -m pytest tests/p1b/test_starrocks_real.py -m starrocks_real -q` | 11 passed（本机 StarRocks 4.1.4 容器）；不设变量时 11 errors，非 loopback 地址同样失败；用后无残留合成库 |
-| `python -m pytest -q --ignore=tests/sdk_core`；`-m security` | 2048 passed，152 skipped，11 deselected；923 passed，79 skipped |
+| `uv run --locked --extra dev python -m pytest tests/p1b/test_starrocks_adapter.py -q` | 实现前收集阶段因缺少 `xiaowei.starrocks` 失败；实现后 82 passed。审查修复：新增用例在修复前 7 个失败，修复后 93 passed |
+| `SDK_TEST_STARROCKS_ADMIN_URL=mysql://root@127.0.0.1:59030 uv run --locked --extra dev python -m pytest tests/p1b/test_starrocks_real.py -m starrocks_real -q` | 11 passed（本机 StarRocks 4.1.4 容器，审查修复后重跑仍为 11 passed）；不设变量时 11 errors，非 loopback 地址同样失败；用后无残留合成库 |
+| `python -m pytest -q --ignore=tests/sdk_core`；`-m security` | 审查修复后 2059 passed，152 skipped，11 deselected；923 passed，79 skipped |
 | `ruff check .`、`ruff format --check`、`mypy src`、`pip-audit --strict`（导出的 dev 依赖）、`git diff --check` | 通过；无已知漏洞 |
 
 SQLGuard 验证（同一环境，锁文件未变）：
