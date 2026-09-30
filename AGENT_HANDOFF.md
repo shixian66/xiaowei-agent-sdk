@@ -150,14 +150,15 @@ CI integration job 设置 `SDK_TEST_POSTGRES_URL`，启动 `compose.sdk-test.yml
 
 **Gate 0 未覆盖：** 没有获准 Profile 与凭据，未对任何真实端点运行；mock 只证明本应用与锁定 SDK 在该协议形状下的行为，不证明任何供应商接受回放历史、遵守 `parallel_tool_calls=false` 或给出可用的回答质量。样例数据与 Web 渠道固定，飞书渠道投影未在 Gate 0 中运行。
 
-**Task 1 SQLGuard 离线已证明（纯函数，锁定 sqlglot 30.17.0）：** `guard_readonly_query(sql, QueryPolicy) -> GuardedQuery`，拒绝抛 `QueryRejectedError`，只带 10 个 `QueryRejectionCode` 之一与固定说明，切断异常链。
+**Task 1 SQLGuard 离线已证明（纯函数，锁定 sqlglot 30.17.0）：** `guard_readonly_query(sql, QueryPolicy) -> GuardedQuery`，拒绝抛 `QueryRejectedError`，只带 10 个 `QueryRejectionCode` 之一与固定说明；拒绝在下层 `except` 结束后才抛出，`__cause__` 与 `__context__` 都为空。预期的输入失败（sqlglot 的 `SqlglotError`、过深嵌套的 `RecursionError`、不可编码为 UTF-8 的孤立代理项）都映射为原因码，其余异常视为程序缺陷照常传播。
 
-- 先分词：字节超限、空输入、注释/hint、多语句、非 `SELECT`/`WITH` 开头在解析前拒绝。非 SELECT 语句在 sqlglot 中会回退为 `Command` 并把原文写进 sqlglot 日志，因此必须在解析前挡住；用例断言拒绝时日志不含输入 canary。
+- 先分词：字节超限、空输入、注释/hint（先查全部词元，再去掉可选尾部分号：尾部注释附着在分号词元上）、多语句、非 `SELECT`/`WITH` 开头在解析前拒绝。原始 SQL 只交给分词器，解析器只收到词元：sqlglot 解析器用原文生成诊断和 `Command` 回退日志（`WITH … SHOW` 这类输入在 `WITH` 之后仍会触发回退）。用例断言拒绝时全部日志不含输入 canary，非 SELECT 语句不产生任何 sqlglot 日志。
 - 解析后按节点闭集与参数位置检查：集合运算、递归 CTE、窗口、变量/占位符、锁、hint、`INTO OUTFILE`、表函数/`FILES()`、`NATURAL`/`USING`、分区/索引 hint/时间旅行、列别名列表、十六进制与 `COLLATE` 等都拒绝；函数按 sqlglot 规范名（大写）过 allowlist，覆盖 `Anonymous`、`Cast`（含 `DATE '…'`）、`If`、`COUNT(*)`；`CASE WHEN` 不需要 `IF`。
-- 物理表按 sqlglot scope 与 CTE 区分，只允许默认 database 中的获准对象；再用 `qualify` 按“只含获准列”的 schema 完整限定。`qualify` 不校验 HAVING/ORDER BY 中的未限定名，因此逐 scope 遍历全部列复核；ORDER BY 输出别名替换为别名所指表达式，其余未限定名拒绝，执行的 SQL 中不留需要数据库再解析的名字。相关子查询、跨来源歧义列拒绝。
+- 物理表按 sqlglot scope 与 CTE 区分，只允许默认 database 中的获准对象；再用 `qualify` 按“只含获准列”的 schema 完整限定。`qualify` 不校验 HAVING/ORDER BY 中的未限定名，因此逐 scope 遍历全部列复核；ORDER BY 输出别名替换为别名所指表达式，其余未限定名拒绝，执行的 SQL 中不留需要数据库再解析的名字。相关子查询、跨来源歧义列、重复的来源别名（sqlglot scope 抛 `OptimizeError`）拒绝。
 - 顶层 LIMIT 缺失或超过 `max_rows` 改为 `max_rows + 1`，较小值保留；`OFFSET` 与非整数字面量拒绝。规范化 SQL 同样受字节上限约束，往返幂等。`GuardedQuery` 只能由 SQLGuard 构造。
 - 标识符按 sqlglot 的 StarRocks 语义大小写敏感比较：大小写、全角、同形字差异只会失败关闭。StarRocks 列名实际大小写不敏感，因此模型写错大小写会得到“列未获准”，可在本轮修正。
 - 反向验证 15 项（改用 `Scope.columns`、放行任意函数、去掉 LIMIT 改写/物理表检查/相关子查询检查/多语句检查/SELECT 开头检查/星号检查/参数位置检查/歧义检查/别名内联/规范化长度检查/异常链切断/构造封印/注释 hint 词元检查）均使用例失败。节点级 `comments` 检查经变异证明被词元检查完全覆盖，已删除。
+- PR #10 独立审查（`b40f85a`）的 2 个阻断已修复：尾部分号后的注释/hint 曾被放行；重复来源别名与孤立代理项曾以原始异常逃逸，`WITH … SHOW` 曾把原文写进 sqlglot 日志，下层异常曾留在 `__context__`。隔离变异：注释检查挪回去掉分号之后、原文重新交给解析器、不转换 `OptimizeError` 或 `UnicodeEncodeError`、在 `except` 内抛拒绝，对应用例均失败；原有 15 项（另加 SELECT 开头检查以“不产生 sqlglot 日志”为证）重跑仍全部被捕获。
 
 **SQLGuard 未覆盖：** 未接入 `GovernedTools` precheck 与预算（Task 3）；零 I/O 的 recording pool 断言属于 Task 2/3；未对真实 StarRocks 验证规范化 SQL 的执行语义（G1、Task 9）。
 
@@ -321,7 +322,7 @@ SQLGuard 验证（同一环境，锁文件未变）：
 
 | 命令 | 结果 |
 | --- | --- |
-| `uv run --locked --extra dev python -m pytest tests/p1b/test_p1b_sqlguard.py -q` | 实现前收集阶段因缺少 `xiaowei.sqlguard` 失败；实现后 159 passed |
+| `uv run --locked --extra dev python -m pytest tests/p1b/test_p1b_sqlguard.py -q` | 实现前收集阶段因缺少 `xiaowei.sqlguard` 失败；实现后 159 passed。审查修复：新增用例在修复前 22 个失败，修复后 252 passed |
 | `uv run --locked --extra dev python -m pytest -q --ignore=tests/sdk_core`；`-m security` | 1873 passed，152 skipped；923 passed，79 skipped |
 | `ruff check .`、`ruff format --check src/xiaowei/sqlguard.py tests/p1b`、`mypy src`、`git diff --check` | 通过 |
 

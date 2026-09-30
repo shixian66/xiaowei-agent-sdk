@@ -389,6 +389,58 @@ def test_rejections_use_stable_codes(sql: str, code: Code) -> None:
     assert rejection(sql).code is code
 
 
+@pytest.mark.parametrize(
+    "sql",
+    [
+        "SELECT region FROM sales; -- note",
+        "SELECT region FROM sales; /* note */",
+        "SELECT region FROM sales; # note",
+        "SELECT region FROM sales; /*+ SET_VAR(query_timeout = 999) */",
+        "SELECT region FROM sales /*+ SET_VAR(query_timeout = 999) */;",
+    ],
+)
+def test_comments_and_hints_after_the_final_semicolon_are_rejected(sql: str) -> None:
+    """注释附着在尾部分号词元上：必须在去掉可选尾部分号之前检查。"""
+    assert rejection(sql).code is Code.UNSUPPORTED_SYNTAX
+
+
+@pytest.mark.parametrize(
+    "sql",
+    [
+        "SELECT region FROM sales;",
+        "SELECT region FROM sales ;  \n",
+        "WITH t AS (SELECT region FROM sales) SELECT region FROM t;",
+    ],
+)
+def test_a_single_trailing_semicolon_is_allowed(sql: str) -> None:
+    assert guard(sql).normalized_sql == guard(sql.rstrip().rstrip(";")).normalized_sql
+
+
+@pytest.mark.parametrize(
+    ("sql", "code"),
+    [
+        # 非 SELECT 语句藏在 WITH 之后：sqlglot 回退为 Command 时会把原文写进日志。
+        # sqlglot 回退后仍报解析错误（SHOW），或得到非 SELECT 根节点（DELETE）。
+        ("WITH c AS (SELECT 1 AS n) SHOW TABLES", Code.UNPARSABLE),
+        ("WITH c AS (SELECT 1 AS n) DELETE FROM sales", Code.UNSUPPORTED_SYNTAX),
+        # 重复的来源别名：sqlglot scope 在读取来源时抛 OptimizeError。
+        (
+            "SELECT c.region FROM sales c JOIN regions c ON c.region = c.region",
+            Code.AMBIGUOUS_REFERENCE,
+        ),
+        (
+            "WITH t AS (SELECT region FROM sales) SELECT t.region FROM t JOIN sales t ON 1 = 1",
+            Code.AMBIGUOUS_REFERENCE,
+        ),
+        # JSON 可表达、UTF-8 不可编码的孤立代理项。
+        ("\ud800", Code.UNPARSABLE),
+        ("SELECT '\udfff' AS v", Code.UNPARSABLE),
+    ],
+)
+def test_lower_level_input_errors_become_stable_rejections(sql: str, code: Code) -> None:
+    assert rejection(sql).code is code
+
+
 def test_oversized_input_is_rejected_before_parsing() -> None:
     sql = "SELECT region FROM sales WHERE region = '" + "x" * 4000 + "'"
     assert rejection(sql).code is Code.INPUT_TOO_LARGE
@@ -433,6 +485,13 @@ CANARY = "canary7f3a"
         f"SELECT region FROM sales LIMIT '{CANARY}'",
         f"SELECT region FROM sales WHERE region = 'x' COLLATE {CANARY}",
         f"SELECT region FROM sales TABLESAMPLE ({CANARY} PERCENT)",
+        f"SELECT '{CANARY}",
+        f"SELECT region FROM sales; -- {CANARY}",
+        f"WITH c AS (SELECT 1 AS n) SHOW {CANARY}",
+        f"WITH c AS (SELECT 1 AS n) SET {CANARY} = 1",
+        f"SELECT {CANARY}.region FROM sales {CANARY} JOIN regions {CANARY} "
+        f"ON {CANARY}.region = {CANARY}.region",
+        f"SELECT '{CANARY}\ud800' AS v",
     ],
 )
 def test_rejections_never_echo_the_input(sql: str, caplog: pytest.LogCaptureFixture) -> None:
@@ -443,8 +502,24 @@ def test_rejections_never_echo_the_input(sql: str, caplog: pytest.LogCaptureFixt
     assert error.args == (REJECTION_MESSAGES[error.code],)
     assert CANARY not in repr(error)
     assert error.__cause__ is None
-    assert error.__suppress_context__
+    assert error.__context__ is None  # 不只是隐藏：下层异常（带输入片段）不得挂在异常链上
     assert not [r for r in caplog.records if CANARY in r.getMessage()]
+
+
+@pytest.mark.parametrize(("sql", "code"), REJECTED)
+def test_no_rejection_keeps_a_lower_level_exception(sql: str, code: Code) -> None:
+    error = rejection(sql)
+    assert (error.__cause__, error.__context__) == (None, None)
+
+
+@pytest.mark.parametrize("sql", ["DROP TABLE sales", "SET CATALOG other", "SHOW TABLES"])
+def test_non_select_statements_never_reach_the_parser(
+    sql: str, caplog: pytest.LogCaptureFixture
+) -> None:
+    """解析前按首个词元拒绝：不触发 sqlglot 的 Command 回退与告警日志。"""
+    caplog.set_level(logging.DEBUG)
+    assert rejection(sql).code is Code.UNSUPPORTED_SYNTAX
+    assert not [r for r in caplog.records if r.name.startswith("sqlglot")]
 
 
 def test_every_code_has_a_fixed_message_without_placeholders() -> None:

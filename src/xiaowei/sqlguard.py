@@ -17,15 +17,20 @@
 标识符按 sqlglot 的 StarRocks 方言语义（大小写敏感）与 allowlist 精确比较，大小写、全角或
 同形字差异只会使匹配失败。函数名按 sqlglot 规范名（大写）比较，例如 ``DATE_TRUNC`` 解析为
 ``TIMESTAMP_TRUNC``。拒绝只带 ``QueryRejectionCode`` 与固定说明，不含 SQL、标识符、字面量或
-解析器原文，并切断异常链。
+解析器原文。
+
+拒绝边界：sqlglot 的输入错误（``SqlglotError``）与过深嵌套（``RecursionError``）是预期的输入
+失败，映射为固定原因码；拒绝总在下层 ``except`` 块结束后才抛出，``__cause__`` 与
+``__context__`` 都为空，不挂带输入片段的下层异常。其余异常是程序缺陷，照常传播。原始 SQL 只
+交给分词器，不交给解析器：解析器用它生成诊断和 ``Command`` 回退日志。
 """
 
 from __future__ import annotations
 
 import enum
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
-from typing import Annotated, Final, NoReturn
+from typing import Annotated, Final, NoReturn, TypeVar
 
 from pydantic import (
     BaseModel,
@@ -146,7 +151,7 @@ def guard_readonly_query(sql: str, policy: QueryPolicy) -> GuardedQuery:
 
     :raises QueryRejectedError: 任一规则不通过；只带原因码与固定说明。
     """
-    if len(sql.encode()) > policy.max_sql_bytes:
+    if _utf8_size(sql) > policy.max_sql_bytes:
         _reject(_Code.INPUT_TOO_LARGE)
     root = _parse(sql)
     _check_nodes(root, policy)
@@ -154,13 +159,11 @@ def guard_readonly_query(sql: str, policy: QueryPolicy) -> GuardedQuery:
     qualified = _qualify(root, policy)
     objects, columns = _resolve_columns(qualified, policy)
     returned = _cap_limit(qualified, policy.max_rows)
-    try:
-        normalized = qualified.sql(
-            dialect=DIALECT, unsupported_level=ErrorLevel.RAISE, comments=False
-        )
-    except Exception:
-        _reject(_Code.UNSUPPORTED_SYNTAX)
-    if len(normalized.encode()) > policy.max_sql_bytes:
+    normalized = _attempt(
+        lambda: qualified.sql(dialect=DIALECT, unsupported_level=ErrorLevel.RAISE, comments=False),
+        _Code.UNSUPPORTED_SYNTAX,
+    )
+    if _utf8_size(normalized) > policy.max_sql_bytes:
         _reject(_Code.INPUT_TOO_LARGE)
     return GuardedQuery(
         target_id=policy.target_id,
@@ -173,34 +176,50 @@ def guard_readonly_query(sql: str, policy: QueryPolicy) -> GuardedQuery:
 
 
 def _reject(code: QueryRejectionCode) -> NoReturn:
-    # 在 except 块内调用时也不保留下层异常：解析器错误带有 SQL 原文。
-    error = QueryRejectedError(code)
-    error.__suppress_context__ = True
-    raise error
+    """不得在 ``except`` 块内调用：那样下层异常会成为 ``__context__``。"""
+    raise QueryRejectedError(code)
+
+
+_T = TypeVar("_T")
+
+
+def _attempt(call: Callable[[], _T], code: QueryRejectionCode) -> _T:
+    """执行一步 sqlglot 处理；预期的输入错误在离开 ``except`` 后映射为 ``code``。"""
+    try:
+        return call()
+    except SqlglotError:
+        pass
+    except RecursionError:
+        code = _Code.UNSUPPORTED_SYNTAX
+    _reject(code)
+
+
+def _utf8_size(sql: str) -> int:
+    try:
+        return len(sql.encode())
+    except UnicodeEncodeError:  # 孤立代理项：JSON 可表达，UTF-8 不可编码
+        pass
+    _reject(_Code.UNPARSABLE)
 
 
 # ---- 1. 词元与解析 ---------------------------------------------------------------------------
 
 
 def _parse(sql: str) -> exp.Select:
-    try:
-        tokens: list[Token] = _DIALECT.tokenize(sql)
-    except Exception:
-        _reject(_Code.UNPARSABLE)
+    tokens: list[Token] = _attempt(lambda: _DIALECT.tokenize(sql), _Code.UNPARSABLE)
+    # 尾部注释附着在最后的分号词元上：先检查全部词元，再去掉可选的尾部分号。
+    if any(token.comments or token.token_type is TokenType.HINT for token in tokens):
+        _reject(_Code.UNSUPPORTED_SYNTAX)
     if tokens and tokens[-1].token_type is TokenType.SEMICOLON:
         tokens = tokens[:-1]
     if not tokens:
         _reject(_Code.UNPARSABLE)
     if any(token.token_type is TokenType.SEMICOLON for token in tokens):
         _reject(_Code.MULTIPLE_STATEMENTS)
-    if any(token.comments or token.token_type is TokenType.HINT for token in tokens):
-        _reject(_Code.UNSUPPORTED_SYNTAX)
     if tokens[0].token_type not in {TokenType.SELECT, TokenType.WITH}:
         _reject(_Code.UNSUPPORTED_SYNTAX)
-    try:
-        statements = _DIALECT.parser(error_level=ErrorLevel.RAISE).parse(tokens, sql)
-    except Exception:
-        _reject(_Code.UNPARSABLE)
+    parser = _DIALECT.parser(error_level=ErrorLevel.RAISE)
+    statements = _attempt(lambda: parser.parse(tokens, ""), _Code.UNPARSABLE)
     if len(statements) != 1 or statements[0] is None:
         _reject(_Code.MULTIPLE_STATEMENTS)
     root = statements[0]
@@ -299,17 +318,19 @@ def _limit_value(limit: exp.Limit) -> int:
 
 
 def _scopes(root: exp.Expr) -> list[Scope]:
-    try:
-        return traverse_scope(root)
-    except Exception:
-        _reject(_Code.UNSUPPORTED_SYNTAX)
+    return _attempt(lambda: traverse_scope(root), _Code.UNSUPPORTED_SYNTAX)
+
+
+def _sources(scope: Scope) -> list[tuple[exp.Expr, exp.Table | Scope]]:
+    """本 scope 的来源；同一别名指向两个来源时 sqlglot 抛 ``OptimizeError``。"""
+    return _attempt(lambda: list(scope.selected_sources.values()), _Code.AMBIGUOUS_REFERENCE)
 
 
 def _check_sources(root: exp.Select, policy: QueryPolicy) -> None:
     scopes = _scopes(root)
     seen: set[int] = set()
     for scope in scopes:
-        for node, source in scope.selected_sources.values():
+        for node, source in _sources(scope):
             seen.add(id(node))
             if isinstance(source, exp.Table) and source.name not in policy.allowed_objects:
                 _reject(_Code.OBJECT_NOT_ALLOWED)
@@ -318,10 +339,7 @@ def _check_sources(root: exp.Select, policy: QueryPolicy) -> None:
         _reject(_Code.UNSUPPORTED_SYNTAX)
     for scope in scopes:
         for column in scope.unqualified_columns:
-            providers = sum(
-                _provides(source, column.name, policy)
-                for _, source in scope.selected_sources.values()
-            )
+            providers = sum(_provides(source, column.name, policy) for _, source in _sources(scope))
             if providers > 1:
                 _reject(_Code.AMBIGUOUS_REFERENCE)
 
@@ -343,19 +361,17 @@ def _qualify(root: exp.Select, policy: QueryPolicy) -> exp.Select:
             for name, columns in policy.allowed_columns.items()
         }
     }
-    try:
-        qualified = qualify(
+    qualified = _attempt(
+        lambda: qualify(
             root,
             schema=schema,
             db=policy.default_database,
             dialect=DIALECT,
             validate_qualify_columns=True,
             identify=True,
-        )
-    except SqlglotError:
-        _reject(_Code.COLUMN_NOT_ALLOWED)
-    except Exception:
-        _reject(_Code.UNSUPPORTED_SYNTAX)
+        ),
+        _Code.COLUMN_NOT_ALLOWED,
+    )
     if not isinstance(qualified, exp.Select):
         _reject(_Code.UNSUPPORTED_SYNTAX)
     return qualified
@@ -369,7 +385,8 @@ def _resolve_columns(
     for scope in _scopes(root):
         if scope.external_columns:
             _reject(_Code.UNSUPPORTED_SYNTAX)  # 相关子查询
-        for _, source in scope.selected_sources.values():
+        sources = _sources(scope)
+        for _, source in sources:
             if isinstance(source, exp.Table):
                 _check_physical(source, policy)
                 objects.add(source.name)
@@ -378,8 +395,7 @@ def _resolve_columns(
             if not column.table:
                 _inline_alias_reference(column, scope)
                 continue
-            selected = scope.selected_sources.get(column.table)
-            owner = selected[1] if selected else None
+            owner = scope.sources.get(column.table)
             if isinstance(owner, exp.Table):
                 if column.name not in policy.allowed_columns[owner.name]:
                     _reject(_Code.COLUMN_NOT_ALLOWED)
