@@ -12,7 +12,7 @@
 | 本地目录 / 分支 | `/Users/kloenguyen/Desktop/agent-SDK` / `claude/p1a-task4-mcp-client`（从 `main` 的 `5add74b` 分出；`main` 已包含 Task 1、1B、2 与 3） |
 | M5 历史起点 | `372c381f44ecfa1fa53961f137d0058033cbd805`；不是远端当前 main 的核验结论 |
 | 本次实施起点 | `5add74baad13dedb3bb2fbfbb38a0a37298b8235`（PR #5 合并后的 `main`）；开始时工作树干净 |
-| 当前阶段 | P1-A Task 1（PR #2）、Task 1B（PR #3）、Task 2（PR #4）与 Task 3（PR #5，两轮审查修复后合入）已在 `main`；Task 4（最小 MCP Client Integration）在本分支完成离线实现；首轮独立审查的 4 组 P1 已修复，修复版本待复审 |
+| 当前阶段 | P1-A Task 1（PR #2）、Task 1B（PR #3）、Task 2（PR #4）与 Task 3（PR #5，两轮审查修复后合入）已在 `main`；Task 4（最小 MCP Client Integration）在本分支完成离线实现；首轮审查的 4 组 P1 与复审的 1 项 P1（日志）已修复，修复版本待复审 |
 | 当前源码与依赖 | 新包 `src/xiaowei/`（`config.py`、`storage.py`、`model_api.py`、`models.py`、`governance.py`、`evidence.py`、`session.py`、`mcp.py`、`migrations/001_initial.sql`）与旧 `src/xiaowei_agent/` 并存；锁定 `openai-agents[sqlalchemy]` 0.22.3、`mcp` 2.2.0、`openai` 3.20.0、SQLAlchemy 2.0.52、asyncpg 0.30.0，Python 3.11.16；wheel 同时打包两个包，CLI 仍指向旧包 |
 | 新产品入口 | 只有开发验证命令（见第 5 节）；尚无产品启动入口，旧 CLI/Compose 不算新入口 |
 | 本次工作范围 | Task 4：`config.MCPServerConfig`、`mcp.MCPIntegration`（SDK 官方 Streamable HTTP 客户端 + 薄 FunctionTool）、`ToolPolicy.result` 与 `ToolContract.description`，及 `tests/sdk_core/mcp_fixture.py`、`tests/sdk_core/test_mcp_integration.py`；无依赖或迁移变更，未改 Compose、CI 或 README |
@@ -92,12 +92,12 @@
 - 结果模型由工具目录约束：不能接收未声明字段（含嵌套模型），投影字段必须是它声明的字段。远端结果按 JSON 严格模式校验，字符串 `"7"` 不会转换成整数。
 - 结果过滤：禁止字段与远端伪造的证据标识不进入模型输入，也不出现在 Evidence、SDK 会话表与会话元数据中；下一轮从 Session 回放 MCP 证据，远端不重跑。不合约的类型（含可被宽松转换的字符串数字）、结构化内容合约但附带图片/资源链接、远端报告错误（附带形似合约的内容）、超过接收上限的响应：执行一次，模型只收到固定失败信息，不生成证据，之后的调用照常。压缩响应的 Server 整体不可用。
 - 认证：Bearer 凭据只随发往登记端点的请求发出；错误或缺失的凭据使该 Server 不可用，只隐藏它的工具，另一 Server 与本地工具照常。跨源重定向不跟随，另一端点零请求；同源重定向到不同路径、附加 query（`/mcp?other-service=1`）或编码不同的路径（`/mcp%2Ftenant-a`）时不发出，只有登记的原始目标收到请求且带凭据。假凭据不出现在模型输入、数据库或日志中。
-- 日志：MCP 库会在本地过滤前把完整 JSON-RPC 消息写入 DEBUG 日志；连接前将进程内 `mcp` logger 改为只转出固定信息。在 root 上挂处理器、DEBUG 级别运行真实调用与远端错误，工具参数、禁止字段、伪造证据、注入文字、远端错误内容与假凭据均不出现，固定信息照常输出。
+- 日志：MCP 库会在本地过滤前把完整 JSON-RPC 消息写入日志（会话模块的 logger 名为 `client`，不在 `mcp` 命名空间下）。连接前包装进程的 LogRecord 工厂，源自 `mcp` 包源文件的记录在生成时只保留 logger 名字、级别与异常类型。处理器分别挂在 root、`mcp`、`mcp.client.streamable_http`（接入前）与 `mcp.client`（接入后），DEBUG 级别运行成功调用、远端错误，以及远端夹带未知通知（日志参数）、参数无效的通知与畸形消息（异常文字）：工具参数、禁止字段、伪造证据、注入文字、远端错误内容、夹带内容与假凭据均不出现，固定信息与异常类型照常输出。
 - 证据指纹包含规范化的结果 schema（去掉标题与说明文字），不含工具说明：真实 PostgreSQL 中结果字段改型后旧证据不可读，只改说明文字时照常可读。
 - 超时（0.5 秒，远端 3 秒）在期限内失败，远端只执行一次、不重试，之后的调用照常；调用中取消本轮时抛出取消，远端调用不重放。退出后工具集合为空，服务端连接数归零，没有遗留 asyncio 任务。
 - 配置拒绝：非 loopback 的 HTTP、`localhost` 名字、用户信息、查询参数、原始凭据、`local` 或含下划线的 `server_id`、空工具表、非法或过长的工具名、非正期限。
 
-**Task 4 缺口：** 工具列表只在启动时发现一次，远端此后改动工具由每次调用的结果模型校验兜底，参数 schema 不再复核；远端输出 schema 不比较；schema 比较只覆盖平铺参数，嵌套 `$defs` 名字不同会保守隐藏；越出端点或压缩编码在响应头阶段被拒绝时会关闭该 Server 的连接，之后调用都失败，需重启恢复（失败方向安全）；Server 运行中断开不会自动重连或隐藏工具；认证只支持静态 Bearer，OAuth 与其他 transport 未实现；`mcp` 日志约束修改的是进程级 logger，应用之后若重新配置该 logger 或给它单独挂处理器（如 pytest 的日志捕获）会看到原始记录，Task 5 装配日志时须保持约束；SDK 的 `OPENAI_AGENTS_DONT_LOG_TOOL_DATA` 被显式关闭时 SDK 自身会记录工具输入输出，属运行配置，未在此处强制；映射等严格模式不支持的参数形状不开放，需要时另行验证非严格模式与各模型；远端 schema 中值为 schema 的 `additionalProperties` 视为不符，这一分支没有 loopback 用例；认证引用解析失败与连接失败同样只记录日志，未进入就绪检查（Task 5/P1-B）；远端执行约束依赖远端自身，客户端治理不能证明远端只读；没有接入任何真实外部 MCP Server；修复版本未经复审。
+**Task 4 缺口：** 工具列表只在启动时发现一次，远端此后改动工具由每次调用的结果模型校验兜底，参数 schema 不再复核；远端输出 schema 不比较；schema 比较只覆盖平铺参数，嵌套 `$defs` 名字不同会保守隐藏；越出端点或压缩编码在响应头阶段被拒绝时会关闭该 Server 的连接，之后调用都失败，需重启恢复（失败方向安全）；Server 运行中断开不会自动重连或隐藏工具；认证只支持静态 Bearer，OAuth 与其他 transport 未实现；MCP 日志约束通过进程级 LogRecord 工厂实现，之后替换工厂而不串联原工厂的代码会解除约束，Task 5 装配日志时须保持；日志调用的 `extra` 字段在工厂之后写入记录，锁定版 MCP 客户端不使用 `extra`（只有服务端与 CLI 使用）；SDK 的 `OPENAI_AGENTS_DONT_LOG_TOOL_DATA` 被显式关闭时 SDK 自身会记录工具输入输出，属运行配置，未在此处强制；映射等严格模式不支持的参数形状不开放，需要时另行验证非严格模式与各模型；远端 schema 中值为 schema 的 `additionalProperties` 视为不符，这一分支没有 loopback 用例；认证引用解析失败与连接失败同样只记录日志，未进入就绪检查（Task 5/P1-B）；远端执行约束依赖远端自身，客户端治理不能证明远端只读；没有接入任何真实外部 MCP Server；修复版本未经复审。
 
 **Task 3 缺口：** 用户输入准入只按可信配置的字节上限与禁止模式判断，不能识别模式之外的敏感内容，也不对模型自身知识写出的文字做模式检查；准入策略与 Profile `data_policy_id` 的对应由 Task 5 装配；Evidence 的 Session 列现与模型列内容相同（保留列结构，未另做迁移）；`ToolRequest.tool_name` 由应用的工具包装从 SDK 上下文填入，治理层不另行核对它与 `tool_id` 的对应；参数有默认值而模型省略时，规范化摘要可能与执行参数不同，回放会保守拒绝；任一证据失效即整段历史不可回放，撤权或证据保留期短于会话保留期时会话提前结束（有意的保守选择）；推理项不保存，真实推理模型经 Responses 的无状态续轮需实测；单轮用户输入大小只在提交时计入历史字节，模型输入前的单轮上限属 Task 5；同会话互斥与轮次结束清理由 Task 5 应用入口负责，`PolicySession` 只以状态比较交换防止重复提交；SDK 的 RunState 恢复路径（`get_items(limit)`）不支持；物理清理命令与渠道新建会话属 P1-B。
 
@@ -189,7 +189,7 @@ Task 4 验证（同一环境，锁文件未变）：
 | `SDK_TEST_POSTGRES_URL=$SDK_PG uv run --locked --extra dev python -m pytest -q` | 1922 passed，152 skipped；5 条警告来自旧网络隔离测试，原有行为 |
 | `uv run --locked --extra dev ruff check .`、`ruff format --check src/xiaowei tests/sdk_core`、`mypy src` | 通过 |
 
-Task 4 反向验证：首轮 30 项、审查修复 13 项，见计划“Task 4 实测记录”，全部使对应用例失败。
+Task 4 反向验证：首轮 30 项、首轮审查修复 13 项、复审修复 5 项，见计划“Task 4 实测记录”，全部使对应用例失败。
 
 Task 2 反向验证：分别去掉撤权复核、调用时范围检查、展示范围过滤、目标一致性、参数校验、预算预占，把预算检查与计数拆到 `await` 两侧，保留执行异常原因链，去掉契约 schema 比对、SQL 归属条件、过期/目标/授权/渠道检查，改为投影全部字段、忽略投影上限或来源截断，去掉回答的引用子集/非空/去重/澄清混用检查、`AgentAnswer` 或 RunContext 的 `extra="forbid"`、应用表版本/存在检查、已安装判断，共 26 项；审查修复后另加 8 项：去掉写入后复核、模型或 Session 的渠道约束（分别及同时）、较小上限、策略指纹比较，指纹去掉投影或契约部分。34 项对应用例均失败。可信类型的 `strict` 经变异证明不承重，已删除。
 

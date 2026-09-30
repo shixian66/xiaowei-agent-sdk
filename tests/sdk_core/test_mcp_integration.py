@@ -10,7 +10,7 @@ import json
 import logging
 import time
 from collections.abc import AsyncIterator, Callable, Iterator, Sequence
-from contextlib import asynccontextmanager, contextmanager
+from contextlib import ExitStack, asynccontextmanager, contextmanager
 from dataclasses import dataclass
 from typing import Any
 
@@ -26,8 +26,11 @@ from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
 from tests.sdk_core.mcp_fixture import (
     FAKE_TOKEN,
     FORGED_EVIDENCE,
+    GARBLED_METHOD,
+    GARBLED_TEXT,
     INJECTION,
     PRIVATE,
+    garbling,
     gzipped,
     mcp_app,
     redirecting,
@@ -64,6 +67,7 @@ REGISTERED = (
     "missing",
     "wrong_type",
     "stringly",
+    "garbled",
     "picture",
     "failing",
     "slow",
@@ -601,49 +605,74 @@ async def test_compressed_response_is_rejected(postgres_url: URL) -> None:
 
 
 @contextmanager
-def root_log() -> Iterator[io.StringIO]:
-    """应用在 root logger 上配置的处理器看到的全部日志（DEBUG 起，含异常堆栈）。
+def captured(name: str) -> Iterator[io.StringIO]:
+    """直接挂在 ``name`` logger 上的普通处理器（DEBUG 起，含异常堆栈）看到的全部日志。
 
-    不用 caplog：pytest 会把捕获处理器直接挂到不向上传递的 logger 上，看到的不是应用所见。
+    不用 caplog：它按自己的方式挂处理器，看到的不一定是应用配置的处理器所见。
     """
     stream = io.StringIO()
     handler = logging.StreamHandler(stream)
     handler.setFormatter(logging.Formatter("%(name)s %(levelname)s %(message)s"))
-    root = logging.getLogger()
-    level = root.level
-    root.addHandler(handler)
-    root.setLevel(logging.DEBUG)
+    target = logging.getLogger(name or None)
+    level = target.level
+    target.addHandler(handler)
+    target.setLevel(logging.DEBUG)
     try:
         yield stream
     finally:
-        root.removeHandler(handler)
-        root.setLevel(level)
+        target.removeHandler(handler)
+        target.setLevel(level)
 
 
 @pytest.mark.loopback
 async def test_wire_logs_carry_no_tool_data(
     postgres_url: URL, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    # MCP 库在本地过滤之前记录完整的 JSON-RPC 消息（参数与远端结果）；日志不能绕过数据边界。
+    # MCP 库在本地过滤之前记录完整的 JSON-RPC 消息（参数与远端结果）；无论应用把处理器挂在
+    # root、``mcp`` 还是某个 ``mcp.*`` logger 上，挂在接入之前还是之后，都不能看到这些内容。
     monkeypatch.setenv(TOKEN_ENV, FAKE_TOKEN)
     marker = "arg-marker-5c1e"
-    with root_log() as log, serve(mcp_app(token=FAKE_TOKEN)) as fixture:
+    with ExitStack() as logs:
+        before = {
+            name: logs.enter_context(captured(name))
+            for name in ("", "mcp", "mcp.client.streamable_http")
+        }
+        fixture = logs.enter_context(serve(lambda r: garbling(mcp_app(token=FAKE_TOKEN)(r))))
         async with (
             core(postgres_url) as c,
             c.integration(config(fixture.url, auth_ref=f"env:{TOKEN_ENV}")) as integration,
         ):
+            after = logs.enter_context(captured("mcp.client"))
             ctx = mcp_context()
             tools = integration.tools_for(ctx)
             model = await c.run(tools, [call("fixture__lookup", marker), cite()], ctx)
             await c.run(tools, [call("fixture__failing", marker, "mcp-2"), clarify()], ctx)
+            # 远端夹带的协议内容：MCP 库以日志参数与异常文字记录它们。
+            garbled = await c.run(
+                tools, [call("fixture__garbled", call_id="mcp-3"), clarify()], ctx
+            )
+            assert "工具执行失败" in outputs(garbled.calls[1])[0]
     # 对照：调用真实发生，参数经获准字段回到模型。
     assert [name for name, _ in fixture.recorder.tool_calls] == ["lookup", "failing"]
     assert marker in seen(model)
-    for forbidden in (marker, PRIVATE, FORGED_EVIDENCE, INJECTION, FAKE_TOKEN, "remote failure"):
-        assert forbidden not in log.getvalue()
-    # 对照：MCP 库的日志没有被静默丢弃，而是以固定信息转出。
-    relayed = "xiaowei.mcp DEBUG MCP 库日志：mcp.client.streamable_http（内容已省略）"
-    assert relayed in log.getvalue()
+    forbidden = (
+        marker,
+        PRIVATE,
+        FORGED_EVIDENCE,
+        INJECTION,
+        FAKE_TOKEN,
+        "remote failure",
+        GARBLED_METHOD,
+        GARBLED_TEXT,
+    )
+    logged = {where: stream.getvalue() for where, stream in {**before, "mcp.client": after}.items()}
+    assert {where for where, text_ in logged.items() if any(f in text_ for f in forbidden)} == set()
+    # 对照：MCP 库的日志没有被静默丢弃，来源与级别保留，内容换成固定信息。
+    fixed = "mcp.client.streamable_http DEBUG MCP 库日志（内容已省略）"
+    assert all(fixed in text_ for text_ in logged.values())
+    # 远端夹带的内容确实触发了带参数与异常的记录（会话 logger 名为 ``client``），只剩类型。
+    assert "client DEBUG MCP 库日志（内容已省略）" in logged[""]
+    assert "client WARNING MCP 库日志（内容已省略），异常 ValidationError" in logged[""]
 
 
 # --- 结果过滤 -----------------------------------------------------------------------------

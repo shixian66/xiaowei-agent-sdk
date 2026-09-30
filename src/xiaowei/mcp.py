@@ -7,8 +7,10 @@
 说明文字与自带的证据标识都不参与授权，也不交给模型。
 
 MCP 库会在本地过滤之前把完整的 JSON-RPC 消息（工具参数与远端结果）写入 DEBUG 日志。连接前
-把进程内 ``mcp`` 日志改为只转出固定信息（来源模块、级别、异常类型）；应用若之后重新配置
-``mcp`` logger，须保持同样的约束。
+包装进程的 LogRecord 工厂：源自 ``mcp`` 包的记录在生成时就只含固定信息（logger 名字、级别、
+异常类型），任何 logger 上的处理器、接入前后挂上的都看不到原始内容。按源文件而不是 logger
+名字判断：MCP 库并非都用模块名作 logger（客户端会话用的是 ``"client"``）。之后替换工厂而
+不串联原工厂的代码会解除这一约束。
 """
 
 from __future__ import annotations
@@ -16,6 +18,7 @@ from __future__ import annotations
 import copy
 import json
 import logging
+import os
 from collections.abc import AsyncIterator, Callable, Iterable
 from contextlib import AsyncExitStack
 from dataclasses import dataclass
@@ -24,6 +27,7 @@ from types import TracebackType
 from typing import Any
 
 import httpx2
+import mcp
 from agents import FunctionTool, Tool, UserError, default_tool_error_function
 from agents.mcp import MCPServerStreamableHttp
 from agents.tool_context import ToolContext
@@ -42,6 +46,9 @@ _READ_TIMEOUT_FACTOR = 2
 
 # 治理与证据边界的受控失败：与本地 function tool 一样按 SDK 默认格式交给模型，消息固定。
 _TOOL_FAILURES = (ToolRejectedError, ToolExecutionError, EvidenceError)
+
+# MCP 库的源码目录：源自这里的日志记录可能含协议原文，生成时即换成固定信息。
+_WIRE_SOURCE = os.path.join(os.path.dirname(mcp.__file__), "")
 
 
 class MCPTransportError(httpx2.StreamError):
@@ -382,21 +389,36 @@ def _payload(result: CallToolResult, model: type[BaseModel]) -> dict[str, object
     return model.model_validate_json(raw, strict=True).model_dump(mode="json")
 
 
-class _WireLogRelay(logging.Handler):
-    """``mcp`` 日志只以固定信息转出：来源模块、级别与异常类型；消息参数、协议内容与堆栈不输出。"""
+class _WireSafeFactory:
+    """LogRecord 工厂包装：源自 MCP 库的记录只保留 logger 名字、级别与异常类型。"""
 
-    def emit(self, record: logging.LogRecord) -> None:
-        exc = record.exc_info[1] if record.exc_info else None
-        logger.log(
-            record.levelno,
-            "MCP 库日志：%s%s（内容已省略）",
-            record.name,
-            "" if exc is None else f"，异常 {type(exc).__name__}",
-        )
+    def __init__(self, previous: Callable[..., logging.LogRecord]) -> None:
+        self._previous = previous
+
+    def __call__(
+        self,
+        name: str,
+        level: int,
+        fn: str,
+        lno: int,
+        msg: object,
+        args: object,
+        exc_info: object,
+        func: str | None = None,
+        sinfo: str | None = None,
+        **kwargs: object,
+    ) -> logging.LogRecord:
+        if fn.startswith(_WIRE_SOURCE):
+            exc = exc_info[1] if isinstance(exc_info, tuple) else None
+            msg = "MCP 库日志（内容已省略）" + (
+                "" if exc is None else f"，异常 {type(exc).__name__}"
+            )
+            args, exc_info, sinfo = (), None, None
+        return self._previous(name, level, fn, lno, msg, args, exc_info, func, sinfo, **kwargs)
 
 
 def _contain_wire_logs() -> None:
-    wire = logging.getLogger("mcp")
-    if not any(isinstance(handler, _WireLogRelay) for handler in wire.handlers):
-        wire.addHandler(_WireLogRelay())
-    wire.propagate = False
+    """包装当前的 LogRecord 工厂（已包装时不重复），使源自 MCP 库的日志记录不携带任何内容。"""
+    current = logging.getLogRecordFactory()
+    if not isinstance(current, _WireSafeFactory):
+        logging.setLogRecordFactory(_WireSafeFactory(current))
