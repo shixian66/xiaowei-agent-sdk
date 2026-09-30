@@ -9,14 +9,14 @@
 | 项目 | 已核对事实 |
 | --- | --- |
 | 仓库 | [shixian66/xiaowei-agent-sdk](https://github.com/shixian66/xiaowei-agent-sdk) |
-| 本地目录 / 分支 | `/Users/kloenguyen/Desktop/agent-SDK` / `claude/p1b-sqlguard`（从 `origin/main` 的 `3abd1b3` 分出，该提交合入了 Gate 0 离线部分 PR #9） |
+| 本地目录 / 分支 | `/Users/kloenguyen/Desktop/agent-SDK` / `claude/p1b-starrocks-adapter`（从 `origin/main` 的 `c0f7f95` 分出） |
 | M5 历史起点 | `372c381f44ecfa1fa53961f137d0058033cbd805`；不是远端当前 main 的核验结论 |
-| P1-A 代码基线 / 当前主线 | `148abaa4729ac6644c03056cf265a9dc18f1acd8` / `3abd1b3c455a51565baa74192b3269b584b0fa8c`（P1-B 计划与 Gate 0 离线部分已合入） |
-| 当前阶段 | **P1-B Task 1 SQLGuard 离线实现完成，待独立审查**；Gate 0 离线部分已合入（PR #9），真实运行未进行，阻塞 Task 3–9。P1-A 离线完成（Task 1–5 经 PR #2–#7 合入）；Gemini 只有部分真实证据 |
-| 当前源码与依赖 | 新包 `src/xiaowei/`（`config.py`、`storage.py`、`model_api.py`、`models.py`、`governance.py`、`evidence.py`、`session.py`、`mcp.py`、`tools.py`、`app.py`、`migrations/001_initial.sql`）与旧 `src/xiaowei_agent/` 并存；锁定 `openai-agents[sqlalchemy]` 0.22.3、`mcp` 2.2.0、`openai` 3.20.0、SQLAlchemy 2.0.52、asyncpg 0.30.0，Python 3.11.16；wheel 同时打包两个包，CLI 仍指向旧包 |
+| P1-A 代码基线 / 当前主线 | `148abaa4729ac6644c03056cf265a9dc18f1acd8` / `c0f7f959cc42026c99b76e8097b1ebbc3a811b90`（P1-B 计划、Gate 0 离线部分与 SQLGuard Task 1 的 PR #10 已合入） |
+| 当前阶段 | **P1-B Task 1 SQLGuard 已随 PR #10 合入；Task 2 StarRocks Adapter 离线部分完成，并在本机可丢弃的 StarRocks 4.1.4 容器上验证，待独立审查。** Gate 0 离线部分已合入，真实运行未进行；Gate 0 只阻塞 Task 3–9，Task 1–2 可先做离线工作。P1-A 离线完成（Task 1–5 经 PR #2–#7 合入）；Gemini 只有部分真实证据 |
+| 当前源码与依赖 | 新包 `src/xiaowei/` 含 `sqlguard.py` 与本分支新增的 `starrocks.py`；本分支锁定 `asyncmy==0.2.15`（精确钉版，已加入依赖基线）。另锁定 `openai-agents[sqlalchemy]` 0.22.3、`mcp` 2.2.0、`openai` 3.20.0、SQLAlchemy 2.0.52、asyncpg 0.30.0，Python 3.11.16；wheel 同时打包两个包，CLI 仍指向旧包 |
 | 新产品入口 | 只有开发验证命令（见第 5 节）；尚无产品启动入口，旧 CLI/Compose 不算新入口 |
-| 本次工作范围 | 计划顺序调整（用户批准：Gate 0 只阻塞 Task 3–9）与 [P1-B 计划](docs/superpowers/plans/2026-09-30-p1b-starrocks-dual-entry.md) Task 1：新增 `src/xiaowei/sqlguard.py` 与 `tests/p1b/test_p1b_sqlguard.py`；未接入 `GovernedTools`（Task 3），未改依赖或迁移，未部署 |
-| 外部操作 | 主线曾获用户授权用合成数据调用 Gemini API（见第 3 节），验证后本机凭据文件已删除，用户负责作废该密钥；Gate 0 与 SQLGuard 离线工作没有获准 Profile 与凭据，未调用真实模型、StarRocks、飞书或外部 MCP Server |
+| 本次工作范围 | [P1-B 计划](docs/superpowers/plans/2026-09-30-p1b-starrocks-dual-entry.md) Task 2：`src/xiaowei/starrocks.py`、离线测试 `tests/p1b/test_starrocks_adapter.py`、显式真实测试 `tests/p1b/test_starrocks_real.py` 与开关 `tests/p1b/conftest.py`、驱动依赖锁定。未接入 `GovernedTools`（Task 3），未连接用户 StarRocks，未部署 |
+| 外部操作 | 主线曾获用户授权用合成数据调用 Gemini API（见第 3 节），验证后本机凭据文件已删除，用户负责作废该密钥；Gate 0 与 SQLGuard 离线工作没有获准 Profile 与凭据，未调用真实模型、飞书或外部 MCP Server。Task 2 从 Docker Hub 拉取官方 `starrocks/allin1-ubuntu:latest`（digest `sha256:faf7ce9c…276b`，StarRocks 4.1.4）在本机 127.0.0.1:59030 运行可丢弃容器，只写入随机名合成库，用后删除；未连接用户的 StarRocks |
 
 表中分别列出 P1-B 所依据的 P1-A 代码基线与计划所依据的当前主线，不能混用。接手先用 `git rev-parse HEAD` 和 `git status --short` 取得实际版本；审查使用对应提交的精确 SHA，本文件的修改历史由 Git 保存。
 
@@ -162,7 +162,16 @@ CI integration job 设置 `SDK_TEST_POSTGRES_URL`，启动 `compose.sdk-test.yml
 
 **SQLGuard 未覆盖：** 未接入 `GovernedTools` precheck 与预算（Task 3）；零 I/O 的 recording pool 断言属于 Task 2/3；未对真实 StarRocks 验证规范化 SQL 的执行语义（G1、Task 9）。
 
-**下一项：** Task 1 独立审查（精确 SHA 见 PR），通过后开始 Task 2 StarRocks Adapter 的离线部分。Gate 0 真实运行可并行：用户提供并授权一个有额度的 Profile（不含凭据的 `ModelProfile` JSON + 本机 `env:` 凭据引用）后运行：
+**Task 2 StarRocks Adapter 已证明：**
+
+- 离线（recording 驱动替身，Adapter 其余代码全真实）：只执行本目标的 `GuardedQuery` 与代码生成、参数绑定的元数据查询；`describe_table` 与目标不符在 I/O 前拒绝。每次请求新建连接，先设置并回读 `query_timeout`、`query_mem_limit`、`time_zone`，失败即不执行查询。最多读 `max_returned_rows + 1` 行；总字节与单值按生产 JSON 编码（`ensure_ascii=False`）的 UTF-8 大小计数，覆盖控制字符、引号、反斜杠转义膨胀，放不下的行整行丢弃并标记截断。值只转为 `null/bool/int/有限 float/str`（Decimal 定点字符串，日期时间带目标时区的 ISO 8601），bytes、非有限数、`timedelta`、未知类型与重复列名拒绝。只有完整读完才正常关闭；截断、错误、超时、取消（含正常关闭过程中的取消）一律同步断开，取消照常传播，且不重连、不重试。等待槽位与建立连接共用一个绝对期限，超期阶段分别映射为 `pool_timeout` / `connect_failed`；客户端期限覆盖会话设置、执行与读取。返回的 `row_count` 是显式字段，出现在 schema 与序列化结果中，校验恒等于 `len(rows)`。错误映射为 11 个固定码，不带服务端原文，`__cause__`/`__context__` 为空。
+- 连接不复用（与计划“池”的差异，已写入计划 §2.3）：asyncmy 自带池没有获取期限，且按 `connected` 回收，`close()` 后的连接仍可能回到空闲队列；每次新建连接保证中断或截断的连接不会被再次使用。
+- 本机 StarRocks 4.1.4 容器（显式 `-m starrocks_real`）：以只读账号验证类型与时区、`LIMIT` 改写后的截断与后续查询、读到一半的字节截断、元数据只列出获准且有权限的对象与列、未授权表映射为权限拒绝（实测错误码 5203）、只读账号写入被拒、服务端 `query_timeout` 终止慢查询（实测 5024，单列为 `server_timeout`）、取消后槽位释放、TLS 开启连接明文服务端失败关闭（不降级）、错误密码映射为认证失败、`SSCursor` 逐行读取。
+- 反向验证 15 项（行数上限、会话回读核对、总字节、单值、未读完时断开、槽位/连接/客户端期限、`describe_table` allowlist、目标核对、重复列、未知类型、在 except 内抛出、会话设置先于查询、5203 映射）均使用例失败；两项期限变异原本导致挂起，已给用例加外层期限使其快速失败。PR #11 审查修复另做 4 项（建连重新计时、关闭被取消时不断开、吞掉取消、去掉 `row_count` 一致性校验），均使对应用例失败。
+
+**Task 2 未覆盖：** 未连接用户的 StarRocks（G1/G5）：TLS 证书验证只证明了“开启 TLS 不降级”，未对启用 TLS 的服务端验证证书链与主机名；grants、资源组与目标版本错误码需在获准环境复核。Adapter 上限与 Web/飞书模型可达投影的启动容量对齐属于 Task 3。已知驱动噪音：截断或中止路径上，asyncmy `MySQLResult.__del__` 调用协程而不 await，产生 `RuntimeWarning: coroutine '_finish_unbuffered_query' was never awaited`；该协程不会运行、没有 I/O，产品代码未为此触碰驱动私有状态。
+
+**下一项：** Task 2 独立审查（精确 SHA 见 PR）。通过后，Task 3 须先等 Gate 0 真实运行通过。Gate 0 真实运行：用户提供并授权一个有额度的 Profile（不含凭据的 `ModelProfile` JSON + 本机 `env:` 凭据引用）后运行：
 
 ```bash
 SDK_TEST_POSTGRES_URL=postgresql+asyncpg://postgres@127.0.0.1:55432/postgres \
@@ -317,6 +326,15 @@ Gate 0 离线部分验证（同一环境，锁文件未变）：
 | `SDK_TEST_POSTGRES_URL=$SDK_PG uv run --locked --extra dev python -m pytest -q` | 首轮 1998 passed，152 skipped；5 条警告来自旧网络隔离测试（审查修复只改 Gate 0 三个文件，未重跑全量） |
 | `uv run --locked --extra dev ruff check .`、`ruff format --check src/xiaowei tests/sdk_core scripts/gate0_real_model.py`、`mypy src`、`git diff --check` | 通过；新增三个文件另以 `MYPYPATH=src mypy --explicit-package-bases` 检查通过 |
 | 未设置凭据引用时运行 `python -m scripts.gate0_real_model --profile <示例 Gemini Profile>` | `gate0: 环境变量 XIAOWEI_GATE0_GEMINI_KEY 未设置或为空`，退出码 2，未发出请求 |
+
+StarRocks Adapter 验证（锁文件新增 `asyncmy` 0.2.15）：
+
+| 命令 | 结果 |
+| --- | --- |
+| `uv run --locked --extra dev python -m pytest tests/p1b/test_starrocks_adapter.py -q` | 实现前收集阶段因缺少 `xiaowei.starrocks` 失败；实现后 82 passed。审查修复：新增用例在修复前 7 个失败，修复后 93 passed |
+| `SDK_TEST_STARROCKS_ADMIN_URL=mysql://root@127.0.0.1:59030 uv run --locked --extra dev python -m pytest tests/p1b/test_starrocks_real.py -m starrocks_real -q` | 11 passed（本机 StarRocks 4.1.4 容器，审查修复后重跑仍为 11 passed）；不设变量时 11 errors，非 loopback 地址同样失败；用后无残留合成库 |
+| `python -m pytest -q --ignore=tests/sdk_core`；`-m security` | 审查修复后 2059 passed，152 skipped，11 deselected；923 passed，79 skipped |
+| `ruff check .`、`ruff format --check`、`mypy src`、`pip-audit --strict`（导出的 dev 依赖）、`git diff --check` | 通过；无已知漏洞 |
 
 SQLGuard 验证（同一环境，锁文件未变）：
 

@@ -29,7 +29,8 @@ _SRC = _ROOT / "src"
 
 # ``[project].dependencies`` 的包名集合——新增任何一项都必须先改这里，
 # 从而必须在 review 里被看见。P1-A Task 1 按新产品方向加入 OpenAI Agents SDK
-# （``openai-agents[sqlalchemy]``）；旧包专用的依赖在 P1-B 清理时重新取舍。
+# （``openai-agents[sqlalchemy]``）；P1-B Task 2 按计划加入 StarRocks 驱动 ``asyncmy``（精确钉版）。
+# 旧包专用的依赖在 P1-B 清理时重新取舍。
 _EXPECTED_RUNTIME_DEPENDENCIES = frozenset(
     {
         "pydantic",
@@ -40,6 +41,7 @@ _EXPECTED_RUNTIME_DEPENDENCIES = frozenset(
         "fastapi",
         "uvicorn",
         "openai-agents",
+        "asyncmy",
     }
 )
 
@@ -59,9 +61,7 @@ _EXPECTED_DEV_DEPENDENCIES = frozenset(
 
 
 def _pyproject() -> dict[str, object]:
-    data: dict[str, object] = tomllib.loads(
-        (_ROOT / "pyproject.toml").read_text(encoding="utf-8")
-    )
+    data: dict[str, object] = tomllib.loads((_ROOT / "pyproject.toml").read_text(encoding="utf-8"))
     return data
 
 
