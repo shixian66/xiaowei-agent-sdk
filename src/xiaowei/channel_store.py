@@ -45,15 +45,17 @@ from xiaowei.storage import InstanceLock, Readiness
 RequestState = Literal["accepted", "running", "completed", "failed", "interrupted"]
 DeliveryState = Literal["pending", "sending", "sent", "failed", "unknown"]
 SendOutcome = Literal["sent", "failed", "unknown"]
-# 安全失败码闭集（与迁移 002 的 CHECK 一致）：只表达失败类别，不携带异常文字。``fail()`` 可写入
-# 前五个；``interrupted`` 只由启动恢复写入。
-FailureCode = Literal[
-    "busy", "model_failed", "evidence_failed", "session_failed", "result_not_saved", "interrupted"
-]
+# 安全失败码闭集（与迁移 002 的 CHECK 一致）：只表达失败类别，不携带异常文字。调用者经 ``fail()``
+# 只能写入 ``CallerFailureCode``；两个内部码各有唯一写入路径：``result_not_saved`` 由结果保存
+# 失败路径与关闭 Session 同一事务写入，``interrupted`` 由启动恢复写入。
+CallerFailureCode = Literal["busy", "model_failed", "evidence_failed", "session_failed"]
+InternalFailureCode = Literal["result_not_saved", "interrupted"]
+FailureCode = CallerFailureCode | InternalFailureCode
 
-RESULT_NOT_SAVED: FailureCode = "result_not_saved"
-INTERRUPTED: FailureCode = "interrupted"
-_FAILURE_CODES = frozenset(get_args(FailureCode))
+RESULT_NOT_SAVED: InternalFailureCode = "result_not_saved"
+INTERRUPTED: InternalFailureCode = "interrupted"
+_CALLER_FAILURE_CODES = frozenset(get_args(CallerFailureCode))
+_FAILURE_CODES = _CALLER_FAILURE_CODES | frozenset(get_args(InternalFailureCode))
 _SESSION_ID_BYTES = 24
 
 _SELECT_CURRENT = text(
@@ -498,13 +500,13 @@ class ChannelStore:
             raise ResultNotSavedError
         return replace(record, state="completed", answer=answer)
 
-    async def fail(self, record: RequestRecord, code: FailureCode) -> RequestRecord:
+    async def fail(self, record: RequestRecord, code: CallerFailureCode) -> RequestRecord:
         """``accepted/running → failed``，保存安全失败码（如 Session 未提交的模型失败、繁忙）。
 
-        失败码不在闭集内（如误传异常文字）时不写入：失败状态无法保存，按关键状态失败锁低
-        readiness，请求留待重启恢复标为 interrupted。
+        失败码不在调用者闭集内（如误传异常文字或内部码）时不写入：失败状态无法保存，按关键
+        状态失败锁低 readiness，请求留待重启恢复标为 interrupted。
         """
-        if code not in _FAILURE_CODES or code == INTERRUPTED:
+        if code not in _CALLER_FAILURE_CODES:
             self._readiness.lock("request_fail_failed")
             raise ValueError("失败码不在允许的范围内")
         params = {"code": code}

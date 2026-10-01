@@ -12,7 +12,7 @@
 | 本地目录 / 分支 | `/Users/kloenguyen/Desktop/agent-SDK` / `claude/p1b-channel-store`（从 `origin/main` 的 `5058ae3` 分出） |
 | M5 历史起点 | `372c381f44ecfa1fa53961f137d0058033cbd805`；不是远端当前 main 的核验结论 |
 | P1-A 代码基线 / 当前主线 | `148abaa4729ac6644c03056cf265a9dc18f1acd8` / `5058ae34f79f2693728c8fbcfbdeb6d10daba30f`（P1-B 计划、Gate 0 离线部分、SQLGuard Task 1 的 PR #10、StarRocks Adapter Task 2 的 PR #11、urllib3 修复的 PR #12 与受治理工具 Task 3 的 PR #13 已合入） |
-| 当前阶段 | **P1-B Task 1 SQLGuard 已随 PR #10 合入；Task 2 StarRocks Adapter 随 PR #11 合入（`dd24d8a`）。Gate 0 在主线 `6389d78` 上以 `glm-4.7-flash` Profile 真实运行通过；Task 3 受治理工具与结构化 Evidence 交付经复审通过，随 PR #13 合入（`5058ae3`）；Task 4 PostgreSQL v2 请求与渠道状态已在本分支实现，首轮独立审查的 5 个阻断已修复，待复审。**P1-A 离线完成（Task 1–5 经 PR #2–#7 合入）。真实模型：Gate 0 通过的 Profile 只有 `bbtoken-glm-4.7-flash`；Gemini 只有 2026-09-30 的历史部分证据（未闭环）；同端点 DeepSeek V4 Flash 已实测不兼容 |
+| 当前阶段 | **P1-B Task 1 SQLGuard 已随 PR #10 合入；Task 2 StarRocks Adapter 随 PR #11 合入（`dd24d8a`）。Gate 0 在主线 `6389d78` 上以 `glm-4.7-flash` Profile 真实运行通过；Task 3 受治理工具与结构化 Evidence 交付经复审通过，随 PR #13 合入（`5058ae3`）；Task 4 PostgreSQL v2 请求与渠道状态已在本分支实现，首轮独立审查的 5 个阻断与复审的 1 个阻断已修复，待复审。**P1-A 离线完成（Task 1–5 经 PR #2–#7 合入）。真实模型：Gate 0 通过的 Profile 只有 `bbtoken-glm-4.7-flash`；Gemini 只有 2026-09-30 的历史部分证据（未闭环）；同端点 DeepSeek V4 Flash 已实测不兼容 |
 | 当前源码与依赖 | 新包 `src/xiaowei/` 含 `sqlguard.py`、`starrocks.py`、`starrocks_tools.py` 与本分支新增的 `channel_store.py`、`migrations/002_p1b_channels.sql`（应用表 v2）；锁定 `asyncmy==0.2.15`（精确钉版，已加入依赖基线）。另锁定 `openai-agents[sqlalchemy]` 0.22.3、`mcp` 2.2.0、`openai` 3.20.0、SQLAlchemy 2.0.52、asyncpg 0.30.0，urllib3 2.8.0（间接依赖，修复 CVE-2026-97687/97688/97689），Python 3.11.16；wheel 同时打包两个包，CLI 仍指向旧包 |
 | 新产品入口 | 只有开发验证命令（见第 5 节）；尚无产品启动入口，旧 CLI/Compose 不算新入口 |
 | 本次工作范围 | [P1-B 计划](docs/superpowers/plans/2026-09-30-p1b-starrocks-dual-entry.md) Task 4：应用表 v2 迁移与显式升级、单实例锁、请求去重与可重发结果、投递状态、会话映射、启动恢复与维护清理。锁文件未变；未接共享服务与渠道入口（Task 5–7），未部署 |
@@ -198,13 +198,13 @@ CI integration job 设置 `SDK_TEST_POSTGRES_URL`，启动 `compose.sdk-test.yml
 - 请求：只保存摘要，原消息、cookie 与请求编号原值不落库。同编号在 accepted/running/completed/failed 各状态返回原记录，不新建；正文或用途不同即冲突；不同 owner 或会话语境的同名编号互不影响、不能互读。两个引擎并发接受同一编号只创建一条，状态迁移只有一个成功。过期请求不可读、不可再接受、不能首次发送或重发。回答超出上限时标为 `result_not_saved`；被篡改为不合契约的回答读取时拒绝。
 - 投递：两个引擎并发首次发送只有一个取得；unknown/failed 时事件重投零取得，显式重发只有一个取得；sent 后两者都拒绝；pending 不能显式重发；failed 回执不能重发；其他 owner 不能重发；不在 sending 时结束投递锁低 readiness。
 - 双存储与关键状态：结果保存失败（触发器注入）时请求标为 failed、Session 关闭、readiness 保持；失败状态也写不了时 readiness 锁低、请求保持 running，此后拒绝新请求与新会话；readiness 锁低后已有映射仍可读取，不再创建新映射。开始执行、结束投递的写入失败都锁低 readiness。接受、状态迁移、结果保存、结果失败标记与启动恢复在数据库写入途中被取消（触发器 `pg_sleep` 延迟后取消）时，取消原样传播、readiness 锁低；模拟重启后持锁恢复不留 accepted/running，被中断请求的会话均已关闭。
-- 失败码：闭集内 5 个可写失败码均可往返；`interrupted`、含内部主机与用户的异常文字、超长与空字符串都不写入，请求保持原状态且 readiness 锁低；数据库 CHECK 拒绝闭集外的值与 failed 状态上的 `interrupted`；去掉约束后写入的未知值在读取时拒绝。
+- 失败码：调用者可写的 4 个失败码均可往返；内部码 `result_not_saved`、`interrupted` 与含内部主机和用户的异常文字、超长与空字符串都不经 `fail()` 写入，running 请求保持原状态、其 active Session 不变且 readiness 锁低，不会出现 `failed/result_not_saved` 而 Session 仍 active；数据库 CHECK 拒绝闭集外的值与 failed 状态上的 `interrupted`；去掉约束后写入的未知值在读取时拒绝。
 - 启动恢复（持锁连接、一个事务）：accepted/running 变为 interrupted 并关闭各自 Session，遗留 sending 变为 unknown，pending 与其他 Session 不变；之后中断回执可首次发送一次，unknown 只能显式重发；恢复失败整体回滚并锁低 readiness。
 - 会话映射：同一 owner/会话语境稳定返回同一 current 会话，不同 owner、语境或渠道互不相同。有运行中请求时拒绝新建；新建后 generation 递增、新请求绑定新会话、旧请求仍可读。两个引擎并发新建后只有一个 current。
 - 清理：只删除过期、非 current 会话的历史、元数据、映射与已过期请求，current 会话保留；有 sending 请求的会话跳过；与显式重发并发时未过期请求保留且重发照常取得；SDK 历史清除失败时停下，会话已关闭、历史保留，修复后再次运行完成；按批次大小分批。没有会话元数据的已退役映射（Agent 运行前新建会话的空会话、运行前 failed、恢复后 interrupted）过期后连同已过期请求删除；current 映射、发送中或运行中请求、未过期的终态请求及与显式重发竞争的请求都保留，请求过期后下一次清理完成。
-- 反向验证 21 项（初始化自动升级、维护不取锁、释放时连接放回连接池、锁丢失不锁低、版本检查顺序、首次发送可取 failed/unknown、重发不要求 completed、结束投递不要求 sending、不比较语义摘要、请求键不含 owner、结果失败不关闭会话或不锁低、恢复不关会话或不处理 sending、新建会话不查运行中请求、清理不跳过 sending 或 current、读取或发送不查过期、关键迁移失败不锁低、回答不限大小）均使对应用例失败。审查修复另做 12 项隔离变异：初始化先建表后取锁、首次创建映射不查 readiness、共享关键写入/结果保存/失败标记各自不处理取消、失败码写入/读取/数据库三处闭集检查、无元数据清理删除时不要求没有请求、两层同时去掉 `retired` 条件，共 10 项使对应用例失败；只去掉候选查询或删除语句其中一层的 `retired` 条件不失败（另一层仍拦截，属冗余防护）。
+- 反向验证 21 项（初始化自动升级、维护不取锁、释放时连接放回连接池、锁丢失不锁低、版本检查顺序、首次发送可取 failed/unknown、重发不要求 completed、结束投递不要求 sending、不比较语义摘要、请求键不含 owner、结果失败不关闭会话或不锁低、恢复不关会话或不处理 sending、新建会话不查运行中请求、清理不跳过 sending 或 current、读取或发送不查过期、关键迁移失败不锁低、回答不限大小）均使对应用例失败。审查修复另做 12 项隔离变异：初始化先建表后取锁、首次创建映射不查 readiness、共享关键写入/结果保存/失败标记各自不处理取消、失败码写入/读取/数据库三处闭集检查、无元数据清理删除时不要求没有请求、两层同时去掉 `retired` 条件，共 10 项使对应用例失败；复审修复再做 3 项（`fail()` 放行 `result_not_saved`、放行 `interrupted`、结果保存失败路径不关闭 Session），均使对应用例失败；只去掉候选查询或删除语句其中一层的 `retired` 条件不失败（另一层仍拦截，属冗余防护）。
 
-**Task 4 未覆盖：** `ChannelService` 的调用顺序与会话互斥属于 Task 5；`serve` 周期检查持锁连接并退出、启动时调用恢复与 readiness 端点属于 Task 8；飞书目的地是否保存供重发待 G2；保留期、回答上限与摘要密钥的正式配置值未定（G2）。接受新请求读 current 映射用共享锁、新建会话用排他锁，二者互斥只经过只读推理与并发新建用例，没有确定性地复现“接受与新建交错”的竞争。没有可用的 v1 → v2 真实部署数据，升级只在合成 v1 库上验证；升级前备份由操作者负责（P3 演练）。并发首次初始化用例在修复前也可能通过（锁外竞争不必然复现），“被拒绝的初始化不建表”由持锁空库用例确定性证明。取消只在数据库语句执行中途注入，没有在提交报文已发出、确认未返回的窗口精确注入，该窗口由 readiness 锁低与重启恢复兜底。新增失败码需要新迁移。
+**Task 4 未覆盖：** `ChannelService` 的调用顺序与会话互斥属于 Task 5；`serve` 周期检查持锁连接并退出、启动时调用恢复与 readiness 端点属于 Task 8；飞书目的地是否保存供重发待 G2；保留期、回答上限与摘要密钥的正式配置值未定（G2）。接受新请求读 current 映射用共享锁、新建会话用排他锁，二者互斥只经过只读推理与并发新建用例，没有确定性地复现“接受与新建交错”的竞争。没有可用的 v1 → v2 真实部署数据，升级只在合成 v1 库上验证；升级前备份由操作者负责（P3 演练）。并发首次初始化用例在修复前也可能通过（锁外竞争不必然复现），“被拒绝的初始化不建表”由持锁空库用例确定性证明。取消只在数据库语句执行中途注入，没有在提交报文已发出、确认未返回的窗口精确注入，该窗口由 readiness 锁低与重启恢复兜底。新增失败码需要新迁移；`Application.TurnReason` 到存储失败码的映射留给 Task 5。
 
 **下一项：** Task 4 复审（精确 SHA 见 PR）。通过并合入后进入 Task 5（共享 ChannelService）。
 
@@ -373,6 +373,7 @@ Task 4 请求与渠道状态验证（锁文件未变，测试 PostgreSQL 为本�
 | `SDK_TEST_POSTGRES_URL=$SDK_PG uv run --locked --extra dev python -m pytest tests/sdk_core/test_storage_v2.py tests/sdk_core/test_channel_store.py -q` | 测试先于实现写成。首次运行发现 1 个实现缺陷（就绪检查把 v1 报成“未初始化”，已修正）与 2 处用例自身错误（DELETE 触发器不能引用 `NEW`；恢复用例的请求共用一个会话），修正后 35 passed |
 | `SDK_TEST_POSTGRES_URL=$SDK_PG uv run --locked --extra dev python -m pytest -q`；`-m security` | 2421 passed，152 skipped，12 deselected；923 passed，79 skipped |
 | 审查修复：同上两个目标文件 | 新增 20 项回归；修复前 14 项失败（另 2 项为成功对照或并发用例，修复前也通过）；修复后 55 passed，`-W error` 通过；取消与竞争用例连续 10 次通过。全量 2441 passed，152 skipped，12 deselected；`-m security` 923 passed，79 skipped；文档检查 8 passed |
+| 复审修复：同上两个目标文件 | `fail()` 拒绝内部码的回归在修复前失败（`result-not-saved` 用例 1 项），修复后 55 passed，`-W error` 通过 |
 | `ruff check .`、`ruff format --check src/xiaowei tests/sdk_core tests/p1b`、`mypy src`、`git diff --check` | 通过；迁移 SQL 不含 `agent_` 表（用例核对） |
 
 StarRocks Adapter 验证（锁文件新增 `asyncmy` 0.2.15）：

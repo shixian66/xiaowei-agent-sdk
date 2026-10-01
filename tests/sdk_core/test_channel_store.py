@@ -21,9 +21,9 @@ from sqlalchemy.ext.asyncio import AsyncEngine
 from tests.sdk_core.synthetic_tools import Clock, ready_engine, secret
 
 from xiaowei.channel_store import (
+    CallerFailureCode,
     ChannelStore,
     ChannelStoreUnavailableError,
-    FailureCode,
     NotReadyError,
     RequestConflictError,
     RequestRecord,
@@ -712,10 +712,8 @@ async def test_cancelled_recovery_locks_readiness(postgres_url: URL) -> None:
     await _assert_recovered_consistently(postgres_url)
 
 
-@pytest.mark.parametrize(
-    "code", ["busy", "model_failed", "evidence_failed", "session_failed", "result_not_saved"]
-)
-async def test_allowed_failure_codes_round_trip(env: Env, code: FailureCode) -> None:
+@pytest.mark.parametrize("code", ["busy", "model_failed", "evidence_failed", "session_failed"])
+async def test_allowed_failure_codes_round_trip(env: Env, code: CallerFailureCode) -> None:
     record = (await env.accept()).record
     await env.store.fail(record, code)
     assert (await env.store.get("web", "alice", "cookie-1", "r1")).failure_code == code
@@ -726,18 +724,22 @@ async def test_allowed_failure_codes_round_trip(env: Env, code: FailureCode) -> 
     "code",
     [
         "interrupted",  # 只属于启动恢复
+        "result_not_saved",  # 只属于结果保存失败路径，须与关闭 Session 同一事务
         "connection to db.internal:5432 failed for user admin",
         "busy " * 1000,
         "",
     ],
-    ids=["interrupted", "exception-canary", "long", "empty"],
+    ids=["interrupted", "result-not-saved", "exception-canary", "long", "empty"],
 )
-async def test_unknown_failure_codes_are_never_written(env: Env, code: str) -> None:
-    record = (await env.accept()).record
+async def test_internal_and_unknown_failure_codes_are_never_written(env: Env, code: str) -> None:
+    record = await env.store.start((await env.accept()).record)
+    await env.register_session(record.session_id)
     with pytest.raises(ValueError):
         await env.store.fail(record, code)  # type: ignore[arg-type]
+    # 不落库，也不会出现“failed/result_not_saved + active Session”的矛盾状态。
     row = await env.row(record)
-    assert (row["state"], row["failure_code"]) == ("accepted", None)
+    assert (row["state"], row["failure_code"]) == ("running", None)
+    assert await env.session_state(record.session_id) == "active"
     # 失败状态无法保存：按关键状态失败锁低 readiness，留给重启恢复标为 interrupted。
     assert not env.readiness.ok
 
