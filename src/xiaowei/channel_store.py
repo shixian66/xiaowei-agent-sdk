@@ -314,6 +314,11 @@ class ChannelStore:
         self._session_retention = timedelta(seconds=session_retention_seconds)
         self._max_answer_bytes = max_answer_bytes
 
+    @property
+    def readiness(self) -> Readiness:
+        """本存储锁低的进程 readiness；共享服务据此判断会话能否继续开放。"""
+        return self._readiness
+
     # ---- 会话映射 --------------------------------------------------------------------
 
     async def current_session(

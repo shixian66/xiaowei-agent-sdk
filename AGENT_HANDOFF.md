@@ -9,13 +9,13 @@
 | 项目 | 已核对事实 |
 | --- | --- |
 | 仓库 | [shixian66/xiaowei-agent-sdk](https://github.com/shixian66/xiaowei-agent-sdk) |
-| 本地目录 / 分支 | `/Users/kloenguyen/Desktop/agent-SDK` / `claude/p1b-channel-store`（从 `origin/main` 的 `5058ae3` 分出） |
+| 本地目录 / 分支 | `/Users/kloenguyen/Desktop/agent-SDK` / `claude/p1b-channel-service`（从 `origin/main` 的 `e5e380c` 分出） |
 | M5 历史起点 | `372c381f44ecfa1fa53961f137d0058033cbd805`；不是远端当前 main 的核验结论 |
-| P1-A 代码基线 / 当前主线 | `148abaa4729ac6644c03056cf265a9dc18f1acd8` / `5058ae34f79f2693728c8fbcfbdeb6d10daba30f`（P1-B 计划、Gate 0 离线部分、SQLGuard Task 1 的 PR #10、StarRocks Adapter Task 2 的 PR #11、urllib3 修复的 PR #12 与受治理工具 Task 3 的 PR #13 已合入） |
-| 当前阶段 | **P1-B Task 1 SQLGuard 已随 PR #10 合入；Task 2 StarRocks Adapter 随 PR #11 合入（`dd24d8a`）。Gate 0 在主线 `6389d78` 上以 `glm-4.7-flash` Profile 真实运行通过；Task 3 受治理工具与结构化 Evidence 交付经复审通过，随 PR #13 合入（`5058ae3`）；Task 4 PostgreSQL v2 请求与渠道状态已在本分支实现，首轮独立审查的 5 个阻断与复审的 1 个阻断已修复，待复审。**P1-A 离线完成（Task 1–5 经 PR #2–#7 合入）。真实模型：Gate 0 通过的 Profile 只有 `bbtoken-glm-4.7-flash`；Gemini 只有 2026-09-30 的历史部分证据（未闭环）；同端点 DeepSeek V4 Flash 已实测不兼容 |
-| 当前源码与依赖 | 新包 `src/xiaowei/` 含 `sqlguard.py`、`starrocks.py`、`starrocks_tools.py` 与本分支新增的 `channel_store.py`、`migrations/002_p1b_channels.sql`（应用表 v2）；锁定 `asyncmy==0.2.15`（精确钉版，已加入依赖基线）。另锁定 `openai-agents[sqlalchemy]` 0.22.3、`mcp` 2.2.0、`openai` 3.20.0、SQLAlchemy 2.0.52、asyncpg 0.30.0，urllib3 2.8.0（间接依赖，修复 CVE-2026-97687/97688/97689），Python 3.11.16；wheel 同时打包两个包，CLI 仍指向旧包 |
+| P1-A 代码基线 / 当前主线 | `148abaa4729ac6644c03056cf265a9dc18f1acd8` / `e5e380c621a8f4a385ad3c4f14f55ad69be30503`（P1-B 计划、Gate 0 离线部分、SQLGuard Task 1 的 PR #10、StarRocks Adapter Task 2 的 PR #11、urllib3 修复的 PR #12、受治理工具 Task 3 的 PR #13 与请求和渠道状态 Task 4 的 PR #14 已合入） |
+| 当前阶段 | **P1-B Task 1 SQLGuard 已随 PR #10 合入；Task 2 StarRocks Adapter 随 PR #11 合入（`dd24d8a`）。Gate 0 在主线 `6389d78` 上以 `glm-4.7-flash` Profile 真实运行通过；Task 3 受治理工具与结构化 Evidence 交付经复审通过，随 PR #13 合入（`5058ae3`）；Task 4 PostgreSQL v2 请求与渠道状态经两轮审查修复与复审通过，随 PR #14 合入（`e5e380c`）；Task 5 共享 ChannelService 已在本分支实现，首轮独立审查的 1 个阻断（B1 授权来源可被代理对象绕过）已修复，待复审。**P1-A 离线完成（Task 1–5 经 PR #2–#7 合入）。真实模型：Gate 0 通过的 Profile 只有 `bbtoken-glm-4.7-flash`；Gemini 只有 2026-09-30 的历史部分证据（未闭环）；同端点 DeepSeek V4 Flash 已实测不兼容 |
+| 当前源码与依赖 | 新包 `src/xiaowei/` 含 `sqlguard.py`、`starrocks.py`、`starrocks_tools.py`、`channel_store.py`、`migrations/002_p1b_channels.sql`（应用表 v2）与本分支新增的 `channel.py`；锁定 `asyncmy==0.2.15`（精确钉版，已加入依赖基线）。另锁定 `openai-agents[sqlalchemy]` 0.22.3、`mcp` 2.2.0、`openai` 3.20.0、SQLAlchemy 2.0.52、asyncpg 0.30.0，urllib3 2.8.0（间接依赖，修复 CVE-2026-97687/97688/97689），Python 3.11.16；wheel 同时打包两个包，CLI 仍指向旧包 |
 | 新产品入口 | 只有开发验证命令（见第 5 节）；尚无产品启动入口，旧 CLI/Compose 不算新入口 |
-| 本次工作范围 | [P1-B 计划](docs/superpowers/plans/2026-09-30-p1b-starrocks-dual-entry.md) Task 4：应用表 v2 迁移与显式升级、单实例锁、请求去重与可重发结果、投递状态、会话映射、启动恢复与维护清理。锁文件未变；未接共享服务与渠道入口（Task 5–7），未部署 |
+| 本次工作范围 | [P1-B 计划](docs/superpowers/plans/2026-09-30-p1b-starrocks-dual-entry.md) Task 5：共享 ChannelService（可信入口信封、单一授权来源、本轮范围、去重、同会话互斥、双存储时序、交付重验与显式重发）。锁文件未变；未接 Web 与飞书协议（Task 6–7）与正式装配（Task 8），未部署 |
 | 外部操作 | 主线曾获用户授权用合成数据调用 Gemini API（见第 3 节），验证后本机凭据文件已删除，用户负责作废该密钥；Gate 0 离线部分与 SQLGuard 没有调用真实模型；全部工作均未调用飞书或外部 MCP Server。Gate 0 真实运行经用户授权使用第三方中转端点 `bbtoken.boywe.cn`（OpenAI 兼容 Chat Completions）发送合成数据，共 22 次模型请求（含诊断探测），另有 1 次模型列表查询，串行、不重试；凭据只写入仓库外权限 600 的临时文件，运行后已删除，用户负责作废该密钥。Task 2 从 Docker Hub 拉取官方 `starrocks/allin1-ubuntu:latest`（digest `sha256:faf7ce9c…276b`，StarRocks 4.1.4）在本机 127.0.0.1:59030 运行可丢弃容器，只写入随机名合成库，用后删除；未连接用户的 StarRocks |
 
 表中分别列出 P1-B 所依据的 P1-A 代码基线与计划所依据的当前主线，不能混用。接手先用 `git rev-parse HEAD` 和 `git status --short` 取得实际版本；审查使用对应提交的精确 SHA，本文件的修改历史由 Git 保存。
@@ -206,7 +206,19 @@ CI integration job 设置 `SDK_TEST_POSTGRES_URL`，启动 `compose.sdk-test.yml
 
 **Task 4 未覆盖：** `ChannelService` 的调用顺序与会话互斥属于 Task 5；`serve` 周期检查持锁连接并退出、启动时调用恢复与 readiness 端点属于 Task 8；飞书目的地是否保存供重发待 G2；保留期、回答上限与摘要密钥的正式配置值未定（G2）。接受新请求读 current 映射用共享锁、新建会话用排他锁，二者互斥只经过只读推理与并发新建用例，没有确定性地复现“接受与新建交错”的竞争。没有可用的 v1 → v2 真实部署数据，升级只在合成 v1 库上验证；升级前备份由操作者负责（P3 演练）。并发首次初始化用例在修复前也可能通过（锁外竞争不必然复现），“被拒绝的初始化不建表”由持锁空库用例确定性证明。取消只在数据库语句执行中途注入，没有在提交报文已发出、确认未返回的窗口精确注入，该窗口由 readiness 锁低与重启恢复兜底。新增失败码需要新迁移；`Application.TurnReason` 到存储失败码的映射留给 Task 5。
 
-**下一项：** Task 4 复审（精确 SHA 见 PR）。通过并合入后进入 Task 5（共享 ChannelService）。
+**Task 5 已证明（真 Runner + `open_model` 装配的脚本模型，HTTP mock 不建立网络连接；受治理合成工具；隔离的真实 PostgreSQL 16.15）：**
+
+- 授权失败关闭：`resolve` 抛异常、返回 `None` 或返回类型不符时都拒绝，请求、模型与工具都为 0。入口授权与 Evidence 授权必须是同一个 `AccessPolicy` 对象：`EvidenceStore.authorize` 须是绑定在该对象本身上的 `authorize`。另一个对象复用原绑定方法（含与原策略值相等的同类对象）、包装函数、同一对象的其他方法都在装配时拒绝，请求、模型、工具与 Adapter I/O 都为 0（修复前，复用原绑定方法的代理把 mallory 解析为 alice 后 Adapter 实际执行了 `local/order_total`）。应用与交付必须是同一个 `EvidenceStore`，否则装配失败。`ResultDelivery` 的存储、Evidence、授权来源、预算与 `ChannelService.results` 装配后只读，替换抛 `AttributeError`。
+- 本轮范围：查询轮展示实际查询工具，诊断轮不展示；撤销查询授权后下一轮查询也不展示，上一轮许可不延续。入口信封不能携带 session、target 或 tool scope，空消息拒绝；RunContext 的 subject、session、turn 与目标来自授权解析与服务端会话映射。
+- 去重：运行中重复提交返回“处理中”，完成后重复提交返回原记录，模型与工具调用次数不变。
+- 会话互斥：第一轮已从 `run_turn` 返回但结果尚未保存时，同会话第二轮记为 `failed/busy`，模型与工具 0 调用，新建会话被拒绝；第一轮保存后同会话继续可用。全局并发上限满时另一会话的请求同样记为 `failed/busy`。
+- 失败与双存储：模型失败、伪造证据引用、输入超出准入策略分别保存 `model_failed`、`evidence_failed`、`session_failed`，回执为固定文字，不含上游错误体。结果保存失败时请求为 `failed/result_not_saved`、Session 关闭、readiness 正常，同会话下一轮在模型调用前失败，新建会话后恢复；终态也写不了时 readiness 锁低，此后拒绝新请求与新会话。运行中取消时取消原样传播、readiness 锁低；重启持锁恢复后请求为 interrupted、会话关闭，中断回执只发送一次。
+- 交付：不持有 `Application` 的 `ResultDelivery` 重读 completed 结果并生成含结构化事实的 Web 交付；首次发送 failed 后事件重投零发送，显式重发只成功一次，两次发送内容相同，模型与工具调用次数不变。撤权后结果不可读、不发送并记为 delivery failed，同会话追问在模型调用前失败。其他身份、其他渠道与不存在的编号得到相同拒绝。发送函数抛出异常时记为 unknown 并原样传播，之后只能显式重发。失败回执不能显式重发。
+- 反向验证 14 项（同会话不互斥、`run_turn` 返回后即释放会话、取消不锁低 readiness、不核对单一 `AccessPolicy`、不核对同一 `EvidenceStore`、撤权结果不记 failed、失败码映射错位、授权返回值不核对类型、授权异常不按拒绝处理、范围不按本轮用途计算、发送异常不记 unknown、交付不重新验证、重复请求也运行、新建会话不先查 readiness）均使对应用例失败；其中前两项表现为用例卡住，按 90 秒超时判定。B1 修复另做 6 项：来源核对退化为 callable 相等、owner 改用 `==`、去掉 owner 身份、去掉方法相等、`access` 公开可写、`results` 公开可写，均使对应用例失败；最初的 `inspect.ismethod` 条件经变异证明与 `__self__` 身份核对等价，已删去。
+
+**Task 5 未覆盖：** 实现先于测试写成（未按计划先写测试），以上 14 项隔离变异用来证明测试能发现对应缺陷。HTTP 与飞书协议、Web cookie、飞书队列与 ack 属于 Task 6/7；`AccessPolicy` 的配置驱动实现与正式装配、`requests resend` 命令属于 Task 8（身份清单待 G6/G7）。失败码沿用 Task 4 的 4 个调用者码，多个应用层原因共用一个码，回执文字因此较笼统（如输入超限与会话不可回放都显示为 `session_failed`）；更细的提示需要新迁移，另行决定。readiness 锁低后会话不释放这一保护与“readiness 锁低拒绝一切新工作”重叠，单独去掉时没有可观察差异。新建会话的进程内忙碌检查与数据库条件（存在 accepted/running 请求时拒绝）重叠。真实模型与真实 StarRocks 未参与。
+
+**下一项：** Task 5 复审（精确 SHA 见 PR）。通过并合入后进入 Task 6（最小同源 Web）。
 
 P1-A 是内部核心。P1-B 才接真实查询与双入口并切换正式入口，P2 增加诊断，P3 做实际用户验收。Gate 0 是 Task 3 开工前例外；其他环境缺失不阻塞不依赖该环境的离线部分，但不能跳过对应实战退出条件。
 
@@ -365,6 +377,15 @@ Task 3 受治理工具验证（锁文件未变，测试 PostgreSQL 与 StarRocks
 | `SDK_TEST_STARROCKS_ADMIN_URL=mysql://root@127.0.0.1:59030 SDK_TEST_POSTGRES_URL=$SDK_PG … pytest tests/p1b/test_starrocks_real.py -m starrocks_real -q` | 12 passed（StarRocks 4.1.4）；用后无残留合成库 |
 | 首轮审查修复：`SDK_TEST_POSTGRES_URL=$SDK_PG … pytest tests/sdk_core/test_starrocks_tools.py tests/p1b/test_starrocks_tool_contracts.py tests/sdk_core/test_session_policy.py tests/sdk_core/test_evidence.py tests/sdk_core/test_app.py tests/sdk_core/test_gate0.py -q` | 修复前新增的飞书敌意数据、澄清伪造与必需字段收紧 3 个用例失败；修复后 127 passed。全量 2386 passed，152 skipped，12 deselected；`-m security` 923 passed。反向验证 9 项（单元格不转义竖线、不做单行编码、不转义 U+2028/2029、不转义 C1、表格行无首尾竖线、分析/澄清/JSON 事实不做单行编码、指纹不含 `required`）均使对应用例失败。未重跑真实模型与 StarRocks |
 | `ruff check .`、`ruff format --check src/xiaowei tests/p1b tests/sdk_core`、`mypy src`、`git diff --check` | 通过 |
+
+Task 5 共享 ChannelService 验证（锁文件未变，测试 PostgreSQL 为本机容器）：
+
+| 命令 | 结果 |
+| --- | --- |
+| `SDK_TEST_POSTGRES_URL=$SDK_PG uv run --locked --extra dev python -m pytest tests/sdk_core/test_channel_service.py tests/sdk_core/test_app.py tests/sdk_core/test_channel_store.py -q -W error` | 79 passed（新增 20 项）。实现先于测试；首次运行 2 项失败，均为用例或顺序问题（触发器未撤销；readiness 锁低时新建会话先报忙碌，改为先查 readiness） |
+| `SDK_TEST_POSTGRES_URL=$SDK_PG uv run --locked --extra dev python -m pytest -q`；`-m security` | 2461 passed，152 skipped，12 deselected；923 passed，79 skipped |
+| `ruff check .`、`ruff format --check src/xiaowei tests/sdk_core`、`mypy src`、`git diff --check` | 通过 |
+| B1 修复：同上三个目标文件另加 `test_evidence.py`、`test_governance.py` | 新增 6 项（成功对照 1、装配拒绝 4、装配后替换 1，原装配用例保留）；修复前先写的代理与替换 2 项失败（值相等孪生与同对象其他方法 2 个边界在变异后补充），修复后 169 passed，`-W error` 通过。全量 2467 passed，152 skipped，12 deselected；`-m security` 923 passed，79 skipped；文档检查 8 passed |
 
 Task 4 请求与渠道状态验证（锁文件未变，测试 PostgreSQL 为本机容器）：
 

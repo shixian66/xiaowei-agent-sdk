@@ -337,6 +337,16 @@ Task 4 实施修订（不改变产品范围与权限边界）：
 
 **Files:** Create `src/xiaowei/channel.py`, `tests/p1b/test_channel_service.py`; Modify `src/xiaowei/config.py`, `src/xiaowei/app.py` only for the fixed boundary methods.
 
+Task 5 实施修订（不改变产品范围与权限边界）：
+
+- 测试依赖真实 PostgreSQL，与 Task 3、4 同理放在 `tests/sdk_core/test_channel_service.py`。`config.py` 不需要修改：预算直接用现有 `Budget`，授权由 `AccessPolicy` 提供。`app.py` 只增加只读属性 `Application.evidence`；`channel_store.py` 只增加只读属性 `ChannelStore.readiness`。
+- `AccessPolicy` 是协议：`resolve(channel, subject_id) -> AccessDecision | None` 与 `authorize(identity, target_id, tool_id)`。读取、发送与新建会话没有消息正文，因此 `resolve` 只取可信身份，用途不参与授权（由 `scope_for_turn` 处理）。返回 `None`、类型不符或抛出任何异常都按拒绝处理。`AccessDecision` 固定内部 subject、唯一 `target_id`、允许工具与数据策略版本。配置驱动的具体实现随 Task 8 装配（G6/G7 决定身份清单）。
+- 拆为两个对象：`ResultDelivery`（请求存储 + `EvidenceStore` + `AccessPolicy`，负责 GET 视图、首次发送与显式重发）不持有 `Application` 或模型绑定，Task 8 的 `requests resend` 只装配它；`ChannelService`（`accept`、`process`、`new_session`）在其上加 `Application`。装配时核对授权来源对象身份相同：`EvidenceStore.authorize` 必须是绑定在这个 `AccessPolicy` 实例本身上的 `authorize`（只比较 callable 相等不够，另一个对象可复用原绑定方法并自行解析身份）；应用与交付使用同一个 `EvidenceStore`。两者的授权来源装配后只读，不能替换。
+- 本轮 Tool Scope 在 `accept` 时按本条消息的用途与当前授权计算一次，随接受回执交给 `process`；工具调用时治理层仍按当前授权复核。
+- `TurnReason` 映射到 Task 4 的调用者失败码闭集，不新增失败码：`session_busy/busy → busy`；`model_failed/turn_limit/timeout → model_failed`；`answer_rejected/tool_failed → evidence_failed`；`session_unavailable/content_rejected/storage_failed/storage_unavailable/scope_rejected → session_failed`。每个失败码有固定回执文字；更细的用户提示需要新迁移，另行决定。
+- 同会话互斥：进程内集合覆盖 `start → run_turn → complete/fail`；同会话已有请求在运行或等待保存时，新请求直接记为 `failed/busy`，模型与工具 0 调用。终态保存失败（readiness 已锁低）时该会话不再释放。`run_turn` 期间被取消时锁低 readiness 并原样传播，交给重启恢复标为 interrupted。
+- 发送：渠道提供单次发送函数（返回 `sent | failed | unknown`）。completed 结果先重新验证再取得投递权；验证失败时取得投递权并记为 failed，不发送旧内容；发送函数抛出异常或被取消时记为 unknown 并原样传播。failed/interrupted 回执只走首次发送，不能显式重发。
+
 - [ ] 先写 AccessPolicy 失败关闭、默认诊断、明确查询、每轮重新计算 scope、不可伪造 target/session、同会话繁忙、全局并发、重复请求、Session/结果双存储失败、状态写失败后 readiness false、新建会话和显式重验测试。
 - [ ] ChannelService 的会话锁必须覆盖 `run_turn` 以及随后 completed/failed 持久化。用可控屏障让第一轮已经从 `run_turn` 返回但尚未保存结果，此时同一 Web cookie/Session 的第二轮必须返回 busy，模型和工具调用均为 0；只有第一轮终态成功落库后才允许下一轮。状态落库失败时会话保持封闭并触发 readiness false。
 - [ ] 只实现 `InboundRequest`、`AccessDecision`、`RequestReceipt` 与 `ChannelService`；不把 HTTP、飞书 SDK、数据库客户端或凭据放入 RunContext。
