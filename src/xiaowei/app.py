@@ -32,7 +32,12 @@ from agents.extensions.memory import SQLAlchemySession
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 from sqlalchemy.ext.asyncio import AsyncEngine
 
-from xiaowei.evidence import AnswerRejectedError, EvidenceError, EvidenceStoreError
+from xiaowei.evidence import (
+    AnswerRejectedError,
+    EvidenceError,
+    EvidenceStore,
+    EvidenceStoreError,
+)
 from xiaowei.governance import Execute, GovernedTools, ToolExecutionError
 from xiaowei.mcp import MCPIntegration
 from xiaowei.model_api import ModelBinding
@@ -184,6 +189,11 @@ class Application:
         self._clock = clock
         self._run_config = RunConfig(tracing_disabled=True, trace_include_sensitive_data=False)
         self._active: set[str] = set()
+
+    @property
+    def evidence(self) -> EvidenceStore:
+        """本应用唯一的证据存储（取自治理对象）；渠道交付必须使用同一个。"""
+        return self._evidence
 
     @property
     def available_tools(self) -> frozenset[str]:
