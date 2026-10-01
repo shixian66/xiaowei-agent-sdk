@@ -310,6 +310,15 @@ Task 3 实施修订（不改变产品范围与权限边界）：
 
 **Files:** Create `src/xiaowei/migrations/002_p1b_channels.sql`, `src/xiaowei/channel_store.py`, `tests/p1b/test_storage_v2.py`, `tests/p1b/test_channel_store.py`; Modify `src/xiaowei/storage.py`, `src/xiaowei/session.py`.
 
+Task 4 实施修订（不改变产品范围与权限边界）：
+
+- 两个测试文件依赖真实 PostgreSQL，与 Task 3 同理放在 `tests/sdk_core/test_storage_v2.py`、`tests/sdk_core/test_channel_store.py`（CI 只有 `integration` 任务提供 PostgreSQL）。
+- `storage.py`：应用 schema 版本为 2，迁移按序号顺序执行；`upgrade_storage` 是唯一升级入口。就绪检查先比较版本：v1 报版本不符（需显式升级），不报“未初始化”。实例锁为 `hold_instance_lock`（专用连接上的会话级 `pg_try_advisory_lock`，退出时废弃该连接而不放回连接池）；初始化与升级在事务内用同一键的 `pg_try_advisory_xact_lock`，取不到即 `StorageBusyError`，不排队。持锁连接丢失由 `InstanceLock.verify()` 发现并锁低 `Readiness`；周期性检查与退出进程属于 Task 8 的 `serve`。
+- `channel_store.py` 的 `ChannelStore` 只用基本类型的入参（`InboundRequest` 属于 Task 5）。会话语境与请求编号只保存 HMAC 摘要；Web 的 cookie 就是 Web 的会话语境原值。飞书 chat ID 是否保存供显式重发取决于 G2，本任务不保存目的地，留给 Task 7。
+- readiness 规则：接受请求、状态迁移、取得投递权、结束投递与启动恢复的写入失败都锁低 readiness（接受请求的提交结果可能不明，锁低后交给重启恢复，避免同一请求编号永久“处理中”）。结果保存失败例外：先在同一事务把请求标为 `failed(result_not_saved)` 并关闭 Session，这一步也失败才锁低。锁低后拒绝新请求、新会话与新发送，在途请求仍可写入终态。
+- 投递：首次发送取得 `pending → sending` 的条件包括 completed 结果与 failed/interrupted 的固定回执；显式重发只对 completed 结果取得 `failed/unknown → sending`；两者都要求请求未过期并核对 owner。
+- 清理按对象各自的过期时间：会话已过期、非 current、没有 accepted/running/sending 请求时关闭并经 SDK `clear_session()` 清历史，再删除该会话已过期的请求（已结束且不在发送中）与证据；会话不再有任何请求时才删除元数据与已退役映射。未过期的请求与证据留到下一次清理。
+
 - [ ] 先写 v1→v2、fresh v2、重复命令、并发 advisory lock、未知版本、失败事务回滚和 v1/v2 双向拒绝测试。普通 `init` 与 `check` 不得把 v1 自动升级。
 - [ ] 先写请求状态测试：同 key running/completed/failed/interrupted、不同摘要冲突、两个进程竞争同 key、结果大小/结构校验、`pending/sending/sent/failed/unknown` 投递状态和过期读取。自动首次发送/事件重投只能竞争 `pending → sending`；只有显式 resend 能竞争 `failed/unknown → sending`，各自都只允许一个进程成功。
 - [ ] 先写一致性反例：Session 成功后结果写失败、结果成功后发送失败、进程在 accepted/running/sending 退出、恢复中断失败、当前会话运行中 `/新建`、清理与 serve/resend 并发、SDK clear 失败。事件重投遇到 failed/unknown 必须零发送，显式 resend 作为对照只发送一次。

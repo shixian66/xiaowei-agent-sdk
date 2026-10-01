@@ -12,20 +12,26 @@ Evidence 读取边界按当前权限、目标范围、策略与过期取回 Sess
 新会话，缺少元数据的已有历史不被任何身份认领。SDK 表与应用表不共事务：提交前先把状态置为
 ``writing``，底层写入与元数据更新都成功后才回到 ``active``；任一步失败会话保持不可回放，
 不自动重跑工具补偿。
+
+会话关闭与维护清理也只在本模块：``close_sessions`` 在调用方的应用表事务中把会话置为不可
+回放（不删历史）；``cleanup_expired`` 按显式批次、数据库过期与状态条件删除过期对象，历史经
+SDK 公共 ``clear_session()`` 清除，任一步失败即停下。
 """
 
 import json
 import re
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
+from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import Any, Literal, cast
 
 from agents import TResponseInputItem
+from agents.extensions.memory import SQLAlchemySession
 from agents.memory import Session, SessionSettings
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
 from sqlalchemy import TextClause, text
 from sqlalchemy.exc import SQLAlchemyError
-from sqlalchemy.ext.asyncio import AsyncEngine
+from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine
 
 from xiaowei.evidence import (
     AnswerRejectedError,
@@ -71,6 +77,76 @@ _CLOSE = text(
     """
     UPDATE xiaowei_session SET state = 'closed'
     WHERE session_id = :session_id AND subject_id = :subject_id AND channel = :channel
+    """
+)
+
+
+# 维护清理的条件（候选、关闭与删除都重新核对）：会话已过期、不是任何渠道的 current 会话，
+# 且没有未结束或正在发送的请求。
+_CLEANUP_CANDIDATES = text(
+    """
+    SELECT s.session_id FROM xiaowei_session s
+    WHERE s.expires_at <= :now
+      AND NOT EXISTS (
+          SELECT 1 FROM xiaowei_channel_session m
+          WHERE m.session_id = s.session_id AND m.state = 'current'
+      )
+      AND NOT EXISTS (
+          SELECT 1 FROM xiaowei_request r
+          WHERE r.session_id = s.session_id
+            AND (r.state IN ('accepted', 'running') OR r.delivery = 'sending')
+      )
+    ORDER BY s.expires_at, s.session_id LIMIT :limit
+    """
+)
+_CLEANUP_CLOSE = text(
+    """
+    UPDATE xiaowei_session s SET state = 'closed'
+    WHERE s.session_id = :session_id
+      AND s.expires_at <= :now
+      AND NOT EXISTS (
+          SELECT 1 FROM xiaowei_channel_session m
+          WHERE m.session_id = s.session_id AND m.state = 'current'
+      )
+      AND NOT EXISTS (
+          SELECT 1 FROM xiaowei_request r
+          WHERE r.session_id = s.session_id
+            AND (r.state IN ('accepted', 'running') OR r.delivery = 'sending')
+      )
+    """
+)
+# 过期请求只删除已结束且不在发送中的；未过期请求保留（仍可重读或显式重发）。
+_DELETE_EXPIRED_REQUESTS = text(
+    """
+    DELETE FROM xiaowei_request WHERE session_id = :session_id AND expires_at <= :now
+      AND state IN ('completed', 'failed', 'interrupted') AND delivery <> 'sending'
+    """
+)
+_DELETE_EXPIRED_EVIDENCE = text(
+    "DELETE FROM xiaowei_evidence WHERE session_id = :session_id AND expires_at <= :now"
+)
+# 元数据与映射在最后删除：会话仍须已关闭、仍满足清理条件，且不再有任何请求记录。
+_DELETE_SESSION = text(
+    """
+    DELETE FROM xiaowei_session s
+    WHERE s.session_id = :session_id AND s.state = 'closed'
+      AND NOT EXISTS (SELECT 1 FROM xiaowei_request r WHERE r.session_id = s.session_id)
+      AND s.expires_at <= :now
+      AND NOT EXISTS (
+          SELECT 1 FROM xiaowei_channel_session m
+          WHERE m.session_id = s.session_id AND m.state = 'current'
+      )
+      AND NOT EXISTS (
+          SELECT 1 FROM xiaowei_request r
+          WHERE r.session_id = s.session_id
+            AND (r.state IN ('accepted', 'running') OR r.delivery = 'sending')
+      )
+    """
+)
+_DELETE_MAPPINGS = text(
+    """
+    DELETE FROM xiaowei_channel_session WHERE session_id = :session_id AND state = 'retired'
+      AND NOT EXISTS (SELECT 1 FROM xiaowei_session s WHERE s.session_id = :session_id)
     """
 )
 
@@ -507,3 +583,54 @@ def _role(item: TResponseInputItem) -> object:
 
 def _size(items: list[TResponseInputItem]) -> int:
     return len(json.dumps(items, ensure_ascii=False).encode())
+
+
+async def close_sessions(conn: AsyncConnection, session_ids: Sequence[str]) -> None:
+    """在调用方的应用表事务中关闭会话：不可再回放，不删除历史，不补偿执行。"""
+    if session_ids:
+        await conn.execute(
+            text("UPDATE xiaowei_session SET state = 'closed' WHERE session_id = ANY(:ids)"),
+            {"ids": list(session_ids)},
+        )
+
+
+@dataclass(frozen=True)
+class CleanupReport:
+    """本批次完成清理（元数据已删除）的会话数。"""
+
+    sessions: int
+
+
+async def cleanup_expired(engine: AsyncEngine, *, now: datetime, batch_size: int) -> CleanupReport:
+    """显式维护：清理一批已过期、非 current、没有运行中或发送中请求的会话。
+
+    每个会话依次：带条件关闭 → SDK ``clear_session()`` 清历史 → 删除已过期的请求与证据 →
+    会话不再有任何请求时删除元数据与已退役映射。每条删除都重新核对条件，竞争导致条件不再
+    成立时跳过；任一步存储失败立即停下并抛出，已关闭的会话保持不可回放，可再次运行完成。
+    未过期的请求与证据保留到各自过期后的下一次清理。普通启动不调用本函数。
+    """
+    if batch_size <= 0:
+        raise ValueError("清理批次必须为正数")
+    params: dict[str, object] = {"now": now, "limit": batch_size}
+    try:
+        async with engine.connect() as conn:
+            candidates = [r[0] for r in await conn.execute(_CLEANUP_CANDIDATES, params)]
+    except (OSError, SQLAlchemyError):
+        raise SessionStoreError("会话存储不可用，清理未执行") from None
+    cleaned = 0
+    for session_id in candidates:
+        scoped = {"now": now, "session_id": session_id}
+        try:
+            async with engine.begin() as conn:
+                if (await conn.execute(_CLEANUP_CLOSE, scoped)).rowcount == 0:
+                    continue
+            await SQLAlchemySession(session_id, engine=engine).clear_session()
+            async with engine.begin() as conn:
+                await conn.execute(_DELETE_EXPIRED_REQUESTS, scoped)
+                await conn.execute(_DELETE_EXPIRED_EVIDENCE, scoped)
+                deleted = (await conn.execute(_DELETE_SESSION, scoped)).rowcount
+                await conn.execute(_DELETE_MAPPINGS, scoped)
+        except (OSError, SQLAlchemyError):
+            raise SessionStoreError("会话清理中断，已关闭的会话保持不可回放") from None
+        cleaned += deleted
+    return CleanupReport(sessions=cleaned)

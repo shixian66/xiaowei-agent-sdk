@@ -1,0 +1,191 @@
+"""P1-B Task 4：应用表 v2 的显式初始化与升级、版本双向拒绝和单实例锁。真实 PostgreSQL。
+
+普通初始化与就绪检查不升级 v1；只有显式 ``upgrade_storage`` 在实例锁与事务中把 v1 升到 v2，
+失败整体回滚。``serve`` 用专用连接持有会话级实例锁，初始化与升级必须独占同一把锁。
+"""
+
+import asyncio
+from importlib.resources import files
+
+import pytest
+from agents.extensions.memory import SQLAlchemySession
+from sqlalchemy import inspect, text
+from sqlalchemy.engine import URL
+from sqlalchemy.ext.asyncio import AsyncEngine
+from tests.sdk_core.synthetic_tools import secret
+
+from xiaowei.storage import (
+    APP_SCHEMA_VERSION,
+    APP_TABLES,
+    SDK_MESSAGES_TABLE,
+    SDK_SESSIONS_TABLE,
+    Readiness,
+    StorageBusyError,
+    StorageNotInitializedError,
+    StorageUnavailableError,
+    StorageVersionMismatchError,
+    check_storage,
+    hold_instance_lock,
+    initialize_storage,
+    open_engine,
+    upgrade_storage,
+)
+
+pytestmark = pytest.mark.loopback
+
+_V2_TABLES = {"xiaowei_channel_session", "xiaowei_request"}
+
+
+def _migration(name: str) -> str:
+    return files("xiaowei").joinpath(f"migrations/{name}").read_text(encoding="utf-8")
+
+
+async def _install_v1(engine: AsyncEngine) -> None:
+    """模拟 P1-A 部署：SDK 表与只执行 001 的应用表。"""
+    probe = SQLAlchemySession("probe", engine=engine, create_tables=True)
+    await probe.get_items(limit=0)
+    async with engine.begin() as conn:
+        for chunk in _migration("001_initial.sql").split(";\n"):
+            if chunk.strip():
+                await conn.execute(text(chunk.strip()))
+
+
+async def _version(engine: AsyncEngine) -> int:
+    async with engine.connect() as conn:
+        return int(
+            (await conn.execute(text("SELECT version FROM xiaowei_schema_version"))).one()[0]
+        )
+
+
+async def _tables(engine: AsyncEngine) -> set[str]:
+    async with engine.connect() as conn:
+        return set(await conn.run_sync(lambda c: inspect(c).get_table_names()))
+
+
+def test_v2_migration_only_touches_application_tables() -> None:
+    migration = _migration("002_p1b_channels.sql")
+    assert "agent_" not in migration
+    assert APP_SCHEMA_VERSION == 2
+    assert _V2_TABLES <= APP_TABLES
+    assert all(name.startswith("xiaowei_") for name in APP_TABLES)
+
+
+async def test_fresh_initialization_installs_v2(postgres_url: URL) -> None:
+    async with open_engine(secret(postgres_url)) as engine:
+        await initialize_storage(engine)
+        await initialize_storage(engine)  # 重复执行不重复建表
+        await check_storage(engine)
+        assert await _version(engine) == 2
+        assert await _tables(engine) == {SDK_SESSIONS_TABLE, SDK_MESSAGES_TABLE, *APP_TABLES}
+        assert await upgrade_storage(engine) == 2  # 已是 v2：显式升级无变化
+
+
+async def test_v1_is_rejected_until_explicit_upgrade(postgres_url: URL) -> None:
+    async with open_engine(secret(postgres_url)) as engine:
+        await _install_v1(engine)
+        with pytest.raises(StorageVersionMismatchError):
+            await check_storage(engine)
+        # 普通初始化不把 v1 升级：版本与表都不变。
+        with pytest.raises(StorageVersionMismatchError):
+            await initialize_storage(engine)
+        assert await _version(engine) == 1
+        assert not _V2_TABLES & await _tables(engine)
+
+        assert await upgrade_storage(engine) == 2
+        assert await upgrade_storage(engine) == 2  # 重复命令无变化
+        await check_storage(engine)
+        assert _V2_TABLES <= await _tables(engine)
+
+
+async def test_unknown_or_missing_versions_are_never_upgraded(postgres_url: URL) -> None:
+    async with open_engine(secret(postgres_url)) as engine:
+        with pytest.raises(StorageNotInitializedError):
+            await upgrade_storage(engine)
+        await initialize_storage(engine)
+        async with engine.begin() as conn:
+            await conn.execute(text("UPDATE xiaowei_schema_version SET version = 99"))
+        for operation in (check_storage, initialize_storage, upgrade_storage):
+            with pytest.raises(StorageVersionMismatchError):
+                await operation(engine)
+        assert await _version(engine) == 99
+
+
+async def test_v2_program_state_is_rejected_by_a_v1_check(postgres_url: URL) -> None:
+    """旧 v1 程序只接受版本 1：v2 数据库上的版本号不是 1，旧程序的就绪检查会拒绝。"""
+    async with open_engine(secret(postgres_url)) as engine:
+        await initialize_storage(engine)
+        assert await _version(engine) != 1
+
+
+async def test_failed_upgrade_rolls_back_completely(postgres_url: URL) -> None:
+    async with open_engine(secret(postgres_url)) as engine:
+        await _install_v1(engine)
+        # 迁移的第二个表名被占用：第一张表已建立后失败，整个事务回滚。
+        async with engine.begin() as conn:
+            await conn.execute(text("CREATE TABLE xiaowei_request (x int)"))
+        with pytest.raises(StorageUnavailableError):
+            await upgrade_storage(engine)
+        assert await _version(engine) == 1
+        assert "xiaowei_channel_session" not in await _tables(engine)
+
+
+async def test_concurrent_upgrades_run_the_migration_once(postgres_url: URL) -> None:
+    async with (
+        open_engine(secret(postgres_url)) as first,
+        open_engine(secret(postgres_url)) as second,
+    ):
+        await _install_v1(first)
+        results = await asyncio.gather(
+            upgrade_storage(first), upgrade_storage(second), return_exceptions=True
+        )
+        # 实例锁只让一个进程执行；另一个要么看到已完成的 v2，要么因锁被占用而拒绝。
+        assert any(r == 2 for r in results)
+        assert all(r == 2 or isinstance(r, StorageBusyError) for r in results)
+        assert await _version(first) == 2
+
+
+async def test_instance_lock_is_exclusive_with_serve_and_maintenance(postgres_url: URL) -> None:
+    async with (
+        open_engine(secret(postgres_url)) as engine,
+        open_engine(secret(postgres_url)) as other,
+    ):
+        await initialize_storage(engine)
+        readiness = Readiness()
+        async with hold_instance_lock(engine, readiness) as lock:
+            await lock.verify()
+            # 第二个 serve 与维护命令都不能与持锁实例并存。
+            with pytest.raises(StorageBusyError):
+                async with hold_instance_lock(other, Readiness()):
+                    pass
+            with pytest.raises(StorageBusyError):
+                await initialize_storage(other)
+            with pytest.raises(StorageBusyError):
+                await upgrade_storage(other)
+        # 释放后可再次取得。
+        async with hold_instance_lock(other, Readiness()):
+            pass
+        assert readiness.ok
+
+
+async def test_losing_the_lock_connection_locks_readiness(postgres_url: URL) -> None:
+    async with (
+        open_engine(secret(postgres_url)) as engine,
+        open_engine(secret(postgres_url)) as admin,
+    ):
+        await initialize_storage(engine)
+        readiness = Readiness()
+        async with hold_instance_lock(engine, readiness) as lock:
+            async with admin.begin() as conn:
+                terminated = await conn.scalar(
+                    text(
+                        "SELECT count(pg_terminate_backend(pid)) FROM pg_locks"
+                        " WHERE locktype = 'advisory' AND granted"
+                    )
+                )
+            assert terminated == 1
+            with pytest.raises(StorageUnavailableError):
+                await lock.verify()
+            assert not readiness.ok
+            # 锁已随连接释放：另一个实例此时可以取得，原实例必须停止服务。
+            async with hold_instance_lock(admin, Readiness()):
+                pass
