@@ -9,7 +9,8 @@
 
 - 请求：``accepted → running → completed``；``accepted/running → failed``；启动恢复把
   ``accepted/running`` 标为 ``interrupted`` 并关闭关联 Session。新请求的接收与接管恢复经数据库
-  屏障交接：恢复等待仍在提交的接收事务，恢复后的接收须在库内确认实例锁仍属本进程。
+  屏障交接：恢复等待仍在提交的接收事务；恢复后，接收（含重复请求）、创建或轮换会话与取得
+  投递权都须在同一事务内确认实例锁仍属本进程。
 - 投递：首次发送与事件重投只能竞争 ``pending → sending``；显式重发只对 completed 结果竞争
   ``failed/unknown → sending``；发送结束只能从 ``sending`` 改为 ``sent/failed/unknown``；启动恢复
   把遗留 ``sending`` 改为 ``unknown``，把飞书 completed 结果遗留的 ``pending`` 改为 ``failed``（回复
@@ -355,6 +356,7 @@ class ChannelStore:
         owner = self._owner(channel, subject_id, conversation)
         try:
             async with self._engine.begin() as conn:
+                await self._admit(conn)
                 current = await self._current(conn, owner, statement=_SELECT_CURRENT_FOR_UPDATE)
                 retired = await conn.execute(
                     _RETIRE_CURRENT, {**owner.params, "session_id": current.session_id}
@@ -375,10 +377,12 @@ class ChannelStore:
         *,
         statement: TextClause = _SELECT_CURRENT,
     ) -> ChannelSession:
-        """读取 current 映射；不存在时创建第一代（须 readiness 正常），并发创建时重新读取。"""
+        """读取 current 映射；不存在时创建第一代（须 readiness 正常且仍持有实例锁），并发创建时
+        重新读取。"""
         row = (await conn.execute(statement, owner.params)).mappings().one_or_none()
         if row is None:
             self._require_ready()
+            await self._admit(conn)
             created = await self._insert_current(conn, owner, 1)
             if created is not None:
                 return created
@@ -428,9 +432,8 @@ class ChannelStore:
     ) -> Acceptance:
         """持久接受请求，或返回同一请求已有的记录；同编号不同内容时拒绝冲突。
 
-        新请求绑定当前会话；与新建会话互斥（共享锁读取 current 映射）。本存储完成接管恢复后，新请求
-        只在数据库确认实例锁仍属本进程时写入，并与其他实例的接管恢复互斥（``InstanceLock.admits``）；
-        否则不写入、锁低 readiness 并拒绝。
+        新请求绑定当前会话；与新建会话互斥（共享锁读取 current 映射）。新请求与重复请求都先经
+        ``_admit``：失去实例锁的进程不写入，也不返回记录去重投。
         """
         self._require_ready()
         owner = self._owner(channel, subject_id, conversation)
@@ -442,12 +445,10 @@ class ChannelStore:
         # 提交结果不明时请求可能已存在：锁低 readiness，交给重启恢复，不让它永久“处理中”。
         with self._critical("request_accept_failed", "请求状态存储不可用"):
             async with self._engine.begin() as conn:
+                await self._admit(conn)
                 existing = await self._select(conn, key)
                 created = False
                 if existing is None:
-                    if self._instance is not None and not await self._instance.admits(conn):
-                        self._readiness.lock("instance_lock_lost")
-                        raise NotReadyError
                     session = await self._current(conn, owner, statement=_SELECT_CURRENT_FOR_SHARE)
                     inserted = await conn.execute(
                         _INSERT_REQUEST,
@@ -560,7 +561,11 @@ class ChannelStore:
         """
         self._require_ready()
         statement = _CLAIM_RESEND if resend else _CLAIM_FIRST
-        return await self._update(statement, record, critical="delivery_claim_failed") == 1
+        params = {**_keys(record), "now": self._clock()}
+        with self._critical("delivery_claim_failed", "请求状态无法保存"):
+            async with self._engine.begin() as conn:
+                await self._admit(conn)
+                return (await conn.execute(statement, params)).rowcount == 1
 
     async def finish_send(self, record: RequestRecord, outcome: SendOutcome) -> None:
         """``sending → sent/failed/unknown``；不在 sending 或无法写入时锁低 readiness。"""
@@ -596,6 +601,17 @@ class ChannelStore:
         return RecoveryReport(interrupted=len(sessions), unknown=unknown, unsent=unsent)
 
     # ---- 内部 ------------------------------------------------------------------------
+
+    async def _admit(self, conn: AsyncConnection) -> None:
+        """开始新工作的写入（接收、创建或轮换会话、取得投递权）在本事务内的实例所有权核对。
+
+        本存储经 ``recover`` 绑定实例锁后，取得接收屏障共享锁并在数据库内确认实例锁仍属本进程，
+        保持到事务结束（``InstanceLock.admits``）；失败时锁低 readiness 并拒绝。未绑定的存储（显式
+        重发等维护命令）不核对，仍只靠数据库条件更新。
+        """
+        if self._instance is not None and not await self._instance.admits(conn):
+            self._readiness.lock("instance_lock_lost")
+            raise NotReadyError
 
     def _require_ready(self) -> None:
         if not self._readiness.ok:

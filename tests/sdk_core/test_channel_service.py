@@ -457,16 +457,17 @@ async def test_cancelled_turn_locks_readiness_for_restart_recovery(
     assert record.state == "running"
     # 停止并重启：持锁恢复标为 interrupted 并关闭会话，中断回执最多发送一次。
     restarted = env.channel_store(readiness=Readiness())  # 新进程的 readiness
+    # 恢复后的工作在持锁期间进行（与 serve 相同）；绑定的锁释放后存储不再开始新工作。
     async with hold_instance_lock(env.engine, restarted.readiness) as lock:
         await restarted.recover(lock)
-    after_restart = await restarted.get("web", "alice", "cookie-1", "r1")
-    assert (after_restart.state, after_restart.failure_code) == ("interrupted", "interrupted")
-    assert await env.session_state(record.session_id) == "closed"
-    outbox = Outbox()
-    results = env.results(restarted)
-    assert await results.send(ref("r1"), outbox) == "sent"
-    assert await results.send(ref("r1"), outbox) is None
-    assert [d.content for d in outbox.sent] == ["上次处理已中断，请重新发送"]
+        after_restart = await restarted.get("web", "alice", "cookie-1", "r1")
+        assert (after_restart.state, after_restart.failure_code) == ("interrupted", "interrupted")
+        assert await env.session_state(record.session_id) == "closed"
+        outbox = Outbox()
+        results = env.results(restarted)
+        assert await results.send(ref("r1"), outbox) == "sent"
+        assert await results.send(ref("r1"), outbox) is None
+        assert [d.content for d in outbox.sent] == ["上次处理已中断，请重新发送"]
 
 
 async def test_new_session_rotates_without_copying_history(env: Env) -> None:
