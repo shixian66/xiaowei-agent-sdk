@@ -163,3 +163,46 @@ class WebConfig(BaseModel):
         if len({origin.split("://", 1)[1] for origin in value}) != len(value):
             raise ValueError("同一 host:port 只能对应一个 scheme")
         return value
+
+
+_Identifier = Annotated[str, StringConstraints(min_length=1, max_length=200)]
+_OpenId = Annotated[str, StringConstraints(pattern=r"^ou_[0-9A-Za-z_-]{1,64}$")]
+
+
+class FeishuConfig(BaseModel):
+    """飞书单聊入口：应用、唯一租户、获准用户、事件时效、文本上限、队列与期限。
+
+    ``users`` 把发送者 ``open_id`` 映射为内部 subject（再交给 ``AccessPolicy``），不在映射中的
+    发送者在持久化与模型前丢弃。``consumer_count`` 不得超过应用的全局并发上限，由
+    ``FeishuGateway`` 装配时核对。``queue_size`` 同时是 SDK 回调转交给应用循环的在途事件上限。
+    凭据只以 ``env:NAME`` 引用出现。
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    app_id: Annotated[str, StringConstraints(pattern=r"^cli_[0-9A-Za-z]{1,64}$")]
+    app_secret_ref: str
+    tenant_key: _Identifier
+    users: dict[_OpenId, _Identifier] = Field(min_length=1)
+    max_event_age_seconds: int = Field(gt=0, le=86_400)
+    max_message_chars: int = Field(gt=0, le=10_000)
+    max_reply_chars: int = Field(ge=200, le=3_500)
+    queue_size: int = Field(gt=0, le=1_000)
+    consumer_count: int = Field(gt=0)
+    send_timeout_seconds: float = Field(gt=0, le=120)
+    connect_timeout_seconds: float = Field(gt=0, le=300)
+    stop_timeout_seconds: float = Field(gt=0, le=60)
+
+    @field_validator("app_secret_ref")
+    @classmethod
+    def _secret_reference(cls, value: str) -> str:
+        if not is_secret_ref(value):
+            raise ValueError("app_secret_ref 必须是 env:NAME 形式的凭据引用")
+        return value
+
+    @field_validator("users")
+    @classmethod
+    def _distinct_subjects(cls, value: dict[str, str]) -> dict[str, str]:
+        if len(set(value.values())) != len(value):
+            raise ValueError("每个获准用户必须对应不同的内部 subject")
+        return value

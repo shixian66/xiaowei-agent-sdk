@@ -294,6 +294,11 @@ class ChannelService:
     def results(self) -> ResultDelivery:
         return self._results
 
+    @property
+    def max_concurrent_turns(self) -> int:
+        """应用的全局并发上限；渠道的消费者数不得超过它。"""
+        return self._app.max_concurrent_turns
+
     async def accept(self, inbound: InboundRequest) -> RequestReceipt:
         """当前授权通过后持久接受请求；同一请求编号返回已有记录，不再运行。"""
         decision = await _decide(self._access, inbound.channel, inbound.subject_id)
@@ -351,6 +356,12 @@ class ChannelService:
             # 终态保存失败时 readiness 已锁低：会话保持封闭，等待停止并重启。
             if self._store.readiness.ok:
                 self._running.discard(session_id)
+
+    async def reject_busy(self, receipt: RequestReceipt) -> RequestRecord:
+        """渠道无法排队时把新接受的请求记为 failed/busy，不运行；重复请求直接返回原记录。"""
+        if not receipt.created:
+            return receipt.record
+        return await self._store.fail(receipt.record, "busy")
 
     async def new_session(
         self, channel: Channel, subject_id: str, conversation_id: str
