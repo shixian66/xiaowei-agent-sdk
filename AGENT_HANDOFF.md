@@ -467,7 +467,7 @@ Task 7 飞书单聊验证（锁文件新增 `lark-channel-sdk==1.4.0`，测试 P
 | 审查修复：修复前（`58aa5f6`）新增回归 | B1/B3 共 23 项失败（正文 200 字符被判 `malformed`；保存后取消 readiness 仍为 true；`EvidenceStoreError` 被吞并误记为“结果不明”；消费者遇异常继续运行；`drain` 不存在）。B2/B4 用旧 API 复现：200 个事件启动 200 个协程；关闭 3 秒后仍在等待 |
 | 审查修复：`SDK_TEST_POSTGRES_URL=$SDK_PG uv run --locked --extra dev python -m pytest tests/sdk_core/test_feishu.py -q -W error` | 81 passed，连续 3 次通过 |
 | 审查修复：同上另加 `test_channel_service.py`、`test_channel_store.py` | 151 passed，`-W error` 通过 |
-| 审查修复：全量 `pytest -q`；`-m security` | 2620 passed，152 skipped，13 deselected；924 passed，79 skipped |
+| 审查修复：`SDK_TEST_POSTGRES_URL=$SDK_PG uv run --locked --extra dev python -m pytest -q`；`-m security` | 2620 passed，152 skipped，13 deselected；924 passed，79 skipped |
 | 审查修复：隔离变异 12 项 + 首轮 21 项复跑 | 全部使对应用例失败（正文恢复 200 上限、去掉解析前大小检查、去掉桥接准入、取消不保护、再次吞掉一般异常、去掉关闭期限、重复停止再次关闭、恢复不处理未发送结果、恢复误改 Web、`drain` 不停止接收、`drain` 超时不锁低、发送异常不转为 unknown） |
 | 审查修复：`ruff check src/xiaowei tests`、`ruff format --check src/xiaowei tests/sdk_core`、`mypy src`、`git diff --check` | 通过；测试文件以 `MYPYPATH=src mypy --explicit-package-bases` 检查无错误。依赖与锁文件未变 |
 
