@@ -282,7 +282,7 @@ CI integration job 设置 `SDK_TEST_POSTGRES_URL`，启动 `compose.sdk-test.yml
 - 正式入口的真实浏览器验收（`127.0.0.1:8501`，Chrome）：子进程 `xiaowei serve` 下 cookie 为 `HttpOnly`、`SameSite=Strict`，`document.cookie` 为空，失败回执带请求编号并在刷新后恢复，新建会话清空列表，脚本未加载时提交被 CSP 阻止，`localhost` 别名被拒且不换发 cookie；同一装配在进程内替换模型与 StarRocks 后，诊断、查询表格与模型调用中刷新恢复在 Chrome 中完成。
 - 反向验证 16 项（不强制模型或工具日志开关、包导入带副作用、启动不恢复、不核对持锁连接、先关长连接再 drain、飞书连不上即启动失败、允许非 loopback 监听、允许地址不含监听地址、Web 与飞书共用 subject、`authorize` 不核对目标、重发走首次发送路径、`/readyz` 不报组件、wheel 带旧包、alembic 回到生产依赖、配置错误回显输入）均使对应用例失败。
 
-**Task 8 与计划的差异**（JSON 配置、启动失败即退出、`serve` 不装配 MCP、重发的 chat_id 由操作者给出、legacy 镜像与 wheel 契约测试的调整、测试位置）记在计划 Task 8 的实施修订中。
+**Task 8 与计划的差异**（JSON 配置、启动失败即退出、`serve` 不装配 MCP、重发的 chat_id 由操作者给出、legacy 镜像与冒烟脚本、wheel 契约测试的调整、测试位置）记在计划 Task 8 的实施修订中。
 
 **Task 8 未覆盖：** 真实模型、真实 StarRocks、真实飞书长连接与发送（Task 9，需授权）；正式 `serve` 的成功轮次只在进程内替换模型后证明，子进程中的正式命令只证明到模型失败回执。持锁连接丢失的检测间隔为 `lock_check_seconds`（默认 5 秒），间隔内新请求仍可能被接受，随后由重启恢复处理。浏览器验收与 compose-smoke 的新镜像只在本机或 CI 运行过一次（浏览器用例未纳入 CI）。`.env.example` 仍是旧 M5 变量说明，未改。新产品 Compose、持久卷与备份恢复属 P3。
 

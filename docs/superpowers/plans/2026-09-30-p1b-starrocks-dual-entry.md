@@ -441,7 +441,7 @@ Task 8 实施修订（不改变产品边界）：
 - **启动失败：** 任一必要步骤失败时不对外服务，逆序关闭并以非零退出码结束（不是带着 `/readyz` 503 运行）；监听套接字先于数据库绑定。飞书长连接启动失败只让飞书不可用，`/readyz` 增加 `feishu: disabled | connected | unavailable`（`create_web_app` 新增可选 `components`）。
 - **MCP：** 正式 `serve` 不装配 MCP。MCP 工具策略需要代码定义的参数与结果类型，P1-B 没有获准的 Server；“空配置可运行”的约定不变，接入具体 Server 时另行扩展配置。
 - **显式重发：** 只针对飞书（Web 结果经 GET 读取，从不发送）。chat_id 由操作者给出（G2 未决，目的地不持久化）；它参与会话语境摘要，换 chat 定位不到原记录。重发用未启动长连接的 SDK 通道单次发送，不装配模型、不连接 StarRocks。
-- **打包与 legacy：** console script 改为 `xiaowei.cli:main`，wheel 只含 `src/xiaowei`。旧包唯一的专用依赖 `alembic` 移入 dev（旧测试）与新增的 `legacy` extra（旧 M5 镜像）；`Dockerfile` 只服务 legacy CI 的 compose-smoke，从源码复制旧包。`tests/contract/test_wheel_runs_without_tests.py` 改为新打包契约。CI 新增 `product-entry` 作业：wheel 在只装锁定运行依赖的环境中安装并运行两个入口。旧测试继续在原有作业中运行。
+- **打包与 legacy：** console script 改为 `xiaowei.cli:main`，wheel 只含 `src/xiaowei`。旧包唯一的专用依赖 `alembic` 移入 dev（旧测试）与新增的 `legacy` extra（旧 M5 镜像）；`Dockerfile` 只服务 legacy CI 的 compose-smoke，从源码复制旧包；`scripts/compose_smoke.py` 改为经模块调用旧 CLI（`xiaowei` 命令已指向新包）。`tests/contract/test_wheel_runs_without_tests.py` 改为新打包契约。CI 新增 `product-entry` 作业：wheel 在只装锁定运行依赖的环境中安装并运行两个入口。旧测试继续在原有作业中运行。
 - **测试位置：** 运行装配、命令与正式入口浏览器验收放在 `tests/sdk_core/`（`test_runtime.py`、`test_cli.py`、`test_serve_browser.py`），复用其 PostgreSQL 与浏览器 fixture。日志 canary 由子进程脚本 `tests/sdk_core/sdk_log_canary.py` 用真实 `OpenAIResponsesModel` + HTTP mock 跑工具轮次，并以不导入正式入口的对照进程证明检测有效。
 
 - [ ] 先写子进程测试，分别通过 console script `xiaowei` 和 `python -m xiaowei` 启动；确保 `src/xiaowei/__init__.py` 无导入副作用，两个 SDK `DONT_LOG` 环境值都在任何 `agents` import 前被强制为 `1`。预置 `0/false` 并触发含 canary 的模型/工具错误，所有 logger 输出不得出现 canary。
