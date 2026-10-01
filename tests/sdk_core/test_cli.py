@@ -42,6 +42,7 @@ ENTRIES = {
     "module": [sys.executable, "-m", "xiaowei"],
 }
 CANARY = "xw-cli-canary-41f9"
+ENDPOINT = "xw-endpoint-canary-7c2e"  # 只出现在模型端点路径中
 PRESET = {"OPENAI_AGENTS_DONT_LOG_MODEL_DATA": "0", "OPENAI_AGENTS_DONT_LOG_TOOL_DATA": "false"}
 
 
@@ -83,16 +84,23 @@ def test_importing_the_package_has_no_side_effects() -> None:
     assert result.stdout.split() == ["False", "0"]
 
 
+@pytest.mark.parametrize("level", ["INFO", "DEBUG"])
 @pytest.mark.parametrize("value", ["0", "false"])
-def test_entry_forces_sdk_data_logs_off_even_if_preset(value: str) -> None:
+def test_entry_forces_sdk_data_logs_off_even_if_preset(value: str, level: str) -> None:
+    """数据日志开关强制关闭，且正式日志配置不放行第三方的端点日志（成功响应路径）。"""
     env = child_env(OPENAI_AGENTS_DONT_LOG_MODEL_DATA=value, OPENAI_AGENTS_DONT_LOG_TOOL_DATA=value)
     script = [sys.executable, "-m", "tests.sdk_core.sdk_log_canary"]
-    control = run([*script, "control", CANARY], env)
+    control = run([*script, "control", CANARY, ENDPOINT, level], env)
     assert control.returncode == 0 and "final output received" in control.stdout
-    assert CANARY in control.stderr  # 对照：预置值确实让 SDK 记录模型与工具数据
-    entry = run([*script, "entry", CANARY], env)
+    # 对照：预置值让 SDK 记录模型与工具数据；根 logger 的 INFO 让 httpx2 写出完整端点。
+    if level == "DEBUG":
+        assert CANARY in control.stderr
+    assert f"https://model.test/{ENDPOINT}/v1/responses" in control.stderr
+    entry = run([*script, "entry", CANARY, ENDPOINT, level], env)
     assert entry.returncode == 0 and "final output received" in entry.stdout
-    assert "DEBUG" in entry.stderr and CANARY not in entry.stderr
+    assert "product event" in entry.stderr
+    secrets_absent(entry.stderr)
+    assert "model.test" not in entry.stderr and "sk-canary-test" not in entry.stderr
 
 
 # ---- 配置 ----------------------------------------------------------------------------
@@ -115,15 +123,15 @@ def test_configuration_errors_exit_2_without_values(entry: str, tmp_path: Path) 
 
 
 class Deployment:
-    """一份配置文件与它引用的环境变量；模型端点是本机已关闭的 HTTPS 端口。"""
+    """一份配置文件与它引用的环境变量；模型端点是本机已关闭的 HTTPS 端口（路径含端点 canary）。"""
 
     def __init__(self, url: URL, tmp_path: Path, port: int | None = None) -> None:
         self.port = port or free_port()
-        closed = free_port()
+        self.closed = closed = free_port()
         model = serve_config(self.port)["model"]
         config = serve_config(
             self.port,
-            model={**model, "base_url": f"https://127.0.0.1:{closed}/v1"},
+            model={**model, "base_url": f"https://127.0.0.1:{closed}/{ENDPOINT}/v1"},
             lock_check_seconds=1,
         )
         config["starrocks"] = {**config["starrocks"], "host": "127.0.0.1", "port": closed}
@@ -147,9 +155,9 @@ class Deployment:
         return run(self.command(entry, *args), self.env)
 
     @contextmanager
-    def serving(self, entry: str) -> Iterator[subprocess.Popen[str]]:
+    def serving(self, entry: str, level: str = "DEBUG") -> Iterator[subprocess.Popen[str]]:
         process = subprocess.Popen(  # noqa: S603 - 固定的本仓库入口
-            self.command(entry, "serve", level="DEBUG"),
+            self.command(entry, "serve", level=level),
             cwd=ROOT,
             env=self.env,
             stdout=subprocess.PIPE,
@@ -178,6 +186,7 @@ class Deployment:
 
 def secrets_absent(text: str) -> None:
     assert CANARY not in text, "日志或输出含凭据或消息正文"
+    assert ENDPOINT not in text, "日志或输出含模型端点"
 
 
 @pytest.mark.parametrize("entry", ENTRIES)
@@ -227,6 +236,48 @@ def test_formal_serve_from_a_fresh_database(entry: str, postgres_url: URL, tmp_p
     assert process.returncode == 0
     assert "启动恢复：interrupted=0" in err
     secrets_absent(out + err + before.stderr + second.stderr)
+
+
+@pytest.mark.parametrize("level", ["INFO", "DEBUG"])
+@pytest.mark.parametrize("entry", ENTRIES)
+def test_formal_logs_keep_product_events_and_drop_dependency_details(
+    entry: str, level: str, postgres_url: URL, tmp_path: Path
+) -> None:
+    """正式入口的 INFO/DEBUG 只放开本产品日志：第三方的端点、连接与请求细节不出现。
+
+    外部预置 ``OPENAI_LOG=debug`` 会让 openai 把自己的 logger 调到 DEBUG（写出端点与请求选项），
+    正式入口也不能因此放行。
+    """
+    deploy = Deployment(postgres_url, tmp_path)
+    deploy.env["OPENAI_LOG"] = "debug"
+    assert deploy.run(entry, "storage", "init").returncode == 0
+    with deploy.serving(entry, level) as process:
+        with httpx.Client(base_url=deploy.origin, timeout=60) as client:
+            client.get("/")
+            turn = client.post(
+                "/api/turns",
+                json={"request_id": "r1", "mode": "diagnose", "message": f"问 {CANARY}"},
+                headers={"origin": deploy.origin},
+            )
+            assert turn.json()["state"] == "failed"
+        process.send_signal(signal.SIGTERM)
+        out, err = process.communicate(timeout=60)
+    assert process.returncode == 0
+    logs = out + err
+    # 产品自身的阶段、状态与错误码日志仍在。
+    assert "启动恢复：interrupted=0" in logs
+    assert "stage=" in logs and "reason=" in logs
+    # 第三方细节：端点（含路径）、模型连接地址、数据库端口、请求行与请求选项。
+    for leak in (
+        f"127.0.0.1:{deploy.closed}",
+        f"port={deploy.closed}",
+        f":{postgres_url.port}",
+        "/responses",
+        "HTTP Request",
+        "Request options",
+    ):
+        assert leak not in logs, leak
+    secrets_absent(logs)
 
 
 def test_cleanup_rejects_an_out_of_range_batch(postgres_url: URL, tmp_path: Path) -> None:

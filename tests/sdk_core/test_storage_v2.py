@@ -219,3 +219,34 @@ async def test_losing_the_lock_connection_locks_readiness(postgres_url: URL) -> 
             # 锁已随连接释放：另一个实例此时可以取得，原实例必须停止服务。
             async with hold_instance_lock(admin, Readiness()):
                 pass
+
+
+async def test_lock_loss_is_signalled_without_a_check(postgres_url: URL) -> None:
+    """持锁连接被终止时，驱动的终止通知立即锁低 readiness，不需要等下一次 ``verify``。"""
+    async with (
+        open_engine(secret(postgres_url)) as engine,
+        open_engine(secret(postgres_url)) as admin,
+    ):
+        await initialize_storage(engine)
+        readiness = Readiness()
+        async with hold_instance_lock(engine, readiness) as lock:
+            assert not lock.lost.is_set()
+            async with admin.begin() as conn:
+                await conn.execute(
+                    text(
+                        "SELECT pg_terminate_backend(pid) FROM pg_locks"
+                        " WHERE locktype = 'advisory' AND granted"
+                    )
+                )
+            await asyncio.wait_for(lock.lost.wait(), 2)
+            assert readiness.reason == "instance_lock_lost"
+
+
+async def test_releasing_the_lock_is_not_a_loss(postgres_url: URL) -> None:
+    async with open_engine(secret(postgres_url)) as engine:
+        await initialize_storage(engine)
+        readiness = Readiness()
+        async with hold_instance_lock(engine, readiness) as lock:
+            await lock.verify()
+        await asyncio.sleep(0.1)  # 终止通知经事件循环回调，给它运行的机会
+        assert readiness.ok and not lock.lost.is_set()

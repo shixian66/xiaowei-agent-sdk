@@ -348,12 +348,83 @@ async def test_occupied_port_fails_before_touching_the_database(env: Env) -> Non
 # ---- 运行中失败 ----------------------------------------------------------------------
 
 
+TERMINATE_LOCK = (
+    "SELECT count(pg_terminate_backend(pid)) FROM pg_locks WHERE locktype = 'advisory' AND granted"
+)
+
+
+async def not_serving(served: Served, timeout: float = 2) -> None:
+    """``/readyz`` 在期限内不再返回 200（503 或监听已关闭都算）。"""
+    async with asyncio.timeout(timeout):
+        while True:
+            try:
+                if (await served.client.get("/readyz")).status_code != 200:
+                    return
+            except httpx.TransportError:
+                return
+            await asyncio.sleep(0.02)
+
+
 async def test_losing_the_instance_lock_stops_the_process(env: Env) -> None:
     async with env.running(env.config()) as served:
-        await env.scalar(
-            "SELECT pg_terminate_backend(pid) FROM pg_locks WHERE locktype = 'advisory' AND granted"
-        )
+        assert await env.scalar(TERMINATE_LOCK) == 1
         assert await asyncio.wait_for(served.task, 30) == 1
+
+
+async def test_normal_stop_during_a_lock_check_is_not_a_lock_loss(env: Env) -> None:
+    """核对查询频繁在途时正常停止：不能因中途取消核对而让持锁连接失效、被判为丢锁。"""
+    config = env.config(lock_check_seconds=0.001)
+    for _ in range(5):
+        async with env.running(config) as served:
+            await asyncio.sleep(0.05)
+            assert await served.finish() == 0
+
+
+async def test_lock_loss_is_noticed_at_once_not_at_the_next_check(env: Env) -> None:
+    """周期核对远在测试期限之外：只能靠连接终止通知立即锁低 readiness。"""
+    config = env.config(lock_check_seconds=60)
+    async with env.running(config) as served:
+        await served.page()
+        assert await env.scalar(TERMINATE_LOCK) == 1
+        await not_serving(served)
+        late = env.scripts.add("丢锁后的新请求", tool_call("list_tables"), cite())
+        try:
+            response = await served.turn(late, request_id="late")
+        except httpx.TransportError:
+            pass  # 监听已关闭
+        else:
+            assert response.status_code == 503
+        assert await asyncio.wait_for(served.task, 30) == 1
+    assert late not in env.scripts.calls  # 模型与工具都没有被调用
+    assert env.drv.attempts == 0
+
+
+async def test_second_instance_after_lock_loss_never_runs_the_old_request(env: Env) -> None:
+    """旧实例丢锁 → 第二实例取得锁并恢复 → 旧实例在途轮次的结果不能覆盖恢复结论。"""
+    gate, entered = asyncio.Event(), asyncio.Event()
+    slow = env.scripts.add(
+        "丢锁时在途", after(gate, tool_call("list_tables"), entered=entered), cite()
+    )
+    old = env.config(lock_check_seconds=60, shutdown_timeout_seconds=20)
+    async with env.running(old) as served:
+        await served.page()
+        pending = asyncio.create_task(served.turn(slow, request_id="inflight"))
+        await asyncio.wait_for(entered.wait(), 20)
+        assert await env.scalar(TERMINATE_LOCK) == 1
+        await not_serving(served)
+
+        second = Env(env.url, free_port(), env.scripts, env.clock, env.drv)
+        async with second.running(second.config()) as fresh:
+            assert await fresh.ready() == {"status": "ready", "feishu": "disabled"}
+            # 第二实例的启动恢复已把旧实例的在途请求标为 interrupted，且没有重跑它。
+            assert await env.scalar("SELECT state FROM xiaowei_request") == "interrupted"
+            gate.set()
+            response = await asyncio.wait_for(pending, 30)
+            assert response.status_code != 200 or response.json()["state"] != "completed"
+            assert await asyncio.wait_for(served.task, 30) == 1
+            assert await env.scalar("SELECT state FROM xiaowei_request") == "interrupted"
+            assert len(env.scripts.calls[slow]) <= 2  # 只来自旧实例的那一次运行
+            assert await fresh.finish() == 0
 
 
 # ---- 飞书 ----------------------------------------------------------------------------
@@ -532,6 +603,11 @@ async def test_storage_commands_use_the_configured_database(env: Env) -> None:
         ({"projection_bytes": {"model": 1}}, "projection_bytes"),
         ({"access": {"policy_version": "p1", "grants": {"a": ["local/drop_table"]}}}, "<root>"),
         ({"web": {**serve_config(1)["web"], "allowed_origins": ["http://127.0.0.1:9"]}}, "<root>"),
+        # 正式监听只有 HTTP：同一地址的 HTTPS Origin 不能代替它（浏览器实际发送 http://）。
+        (
+            {"web": {**serve_config(1)["web"], "allowed_origins": ["https://127.0.0.1:8501"]}},
+            "<root>",
+        ),
         ({"storage": {**serve_config(1)["storage"], "request_retention_seconds": 7200}}, "<root>"),
         ({"feishu": feishu_config(users={"ou_op": OPERATOR})}, "<root>"),
         ({"storage": {**serve_config(1)["storage"], "digest_key_ref": "plain-key"}}, "storage"),
@@ -542,6 +618,7 @@ async def test_storage_commands_use_the_configured_database(env: Env) -> None:
         "missing audiences",
         "unknown tool",
         "listen not allowed",
+        "https listen origin",
         "retention",
         "shared subject",
         "secret not ref",
@@ -565,6 +642,27 @@ def test_valid_configuration_round_trips_through_json(tmp_path: Path) -> None:
     config = runtime.load_config(file)
     assert config.listen_port == 8501 and config.feishu is not None
     assert config.starrocks == SR
+
+
+@pytest.mark.parametrize(
+    ("host", "origins"),
+    [
+        ("127.0.0.1", ["http://127.0.0.1:8501"]),
+        ("127.0.0.1", ["http://127.0.0.1:8501", "https://127.0.0.1:8443"]),
+        ("::1", ["http://[::1]:8501"]),
+    ],
+)
+def test_listen_origin_must_be_the_actual_http_address(
+    tmp_path: Path, host: str, origins: list[str]
+) -> None:
+    web = {**serve_config(1)["web"], "allowed_origins": origins}
+    file = tmp_path / "xiaowei.json"
+    file.write_text(json.dumps(serve_config(8501, listen_host=host, web=web)), encoding="utf-8")
+    assert runtime.load_config(file).web.allowed_origins == frozenset(origins)
+    only_https = {**web, "allowed_origins": [o.replace("http://", "https://") for o in origins]}
+    file.write_text(json.dumps(serve_config(8501, listen_host=host, web=only_https)), "utf-8")
+    with pytest.raises(runtime.ConfigError, match="http://"):
+        runtime.load_config(file)
 
 
 def test_unreadable_configuration(tmp_path: Path) -> None:

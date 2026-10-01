@@ -61,11 +61,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     if args.command == "storage" and args.action == "cleanup" and not 0 < args.batch_size <= 10_000:
         print("--batch-size 必须在 1 到 10000 之间", file=sys.stderr)
         return 2
-    logging.basicConfig(
-        level=args.log_level,
-        format="%(asctime)s %(levelname)s %(name)s %(message)s",
-        stream=sys.stderr,
-    )
+    configure_logging(args.log_level)
     # 惰性导入：此时 SDK 日志开关已强制关闭，且尚未进入事件循环。
     from xiaowei import runtime
 
@@ -118,6 +114,27 @@ async def _serve(config: "ServeConfig") -> int:
     finally:
         for sig in (signal.SIGINT, signal.SIGTERM):
             loop.remove_signal_handler(sig)
+
+
+def configure_logging(level: str) -> None:
+    """``--log-level`` 只作用于本产品的 ``xiaowei`` 日志；第三方依赖只输出 WARNING 及以上。
+
+    第三方的 INFO/DEBUG 会写出完整端点、连接地址与请求选项（如 httpx2 的 ``HTTP Request: POST
+    <url>``、httpcore2 的连接日志、``OPENAI_LOG`` 打开的 openai 请求日志）。库可以自行调高自己
+    logger 的级别，所以由输出端按来源过滤，而不只依赖根 logger 的级别。
+    """
+    threshold = max(logging.WARNING, logging.getLevelNamesMapping()[level])
+    handler = logging.StreamHandler(sys.stderr)
+    handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(name)s %(message)s"))
+    handler.addFilter(lambda record: _own(record.name) or record.levelno >= threshold)
+    root = logging.getLogger()
+    root.addHandler(handler)
+    root.setLevel(threshold)
+    logging.getLogger("xiaowei").setLevel(level)
+
+
+def _own(name: str) -> bool:
+    return name == "xiaowei" or name.startswith("xiaowei.")
 
 
 def _failure(exc: Exception) -> str:

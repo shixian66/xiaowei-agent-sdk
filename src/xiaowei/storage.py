@@ -10,9 +10,10 @@ SDK 表由 ``SQLAlchemySession`` 的公开建表路径管理；应用表以 ``xi
 URL 只来自私有配置，错误信息不携带 URL、主机或原始驱动异常。
 """
 
+import asyncio
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from importlib.resources import files
 
 from agents.extensions.memory import SQLAlchemySession
@@ -93,10 +94,19 @@ class Readiness:
 
 @dataclass
 class InstanceLock:
-    """持有实例锁的专用连接。只有持锁的 ``serve`` 启动阶段用它执行一致性恢复。"""
+    """持有实例锁的专用连接。只有持锁的 ``serve`` 启动阶段用它执行一致性恢复。
+
+    连接一旦终止，锁即随之释放、另一进程可以取得：``lost`` 由驱动的连接终止通知立即设置并同时
+    锁低 readiness，不等下一次 ``verify``。
+    """
 
     connection: AsyncConnection
     readiness: Readiness
+    lost: asyncio.Event = field(default_factory=asyncio.Event)
+
+    def mark_lost(self) -> None:
+        self.readiness.lock("instance_lock_lost")
+        self.lost.set()
 
     async def verify(self) -> None:
         """确认持锁连接仍然有效；连接丢失时锁已随之释放，锁低 readiness 并拒绝继续服务。"""
@@ -104,7 +114,7 @@ class InstanceLock:
             await self.connection.execute(text("SELECT 1"))
             await self.connection.commit()
         except (OSError, SQLAlchemyError):
-            self.readiness.lock("instance_lock_lost")
+            self.mark_lost()
             raise StorageUnavailableError("实例锁连接已断开，进程必须停止") from None
 
 
@@ -128,7 +138,24 @@ async def hold_instance_lock(
             raise StorageUnavailableError("PostgreSQL 不可用") from None
         if not acquired:
             raise StorageBusyError
-        yield InstanceLock(conn, readiness)
+        lock = InstanceLock(conn, readiness)
+        try:
+            driver = (await conn.get_raw_connection()).driver_connection
+        except (OSError, SQLAlchemyError):
+            driver = None
+        if driver is None:
+            raise StorageUnavailableError("PostgreSQL 不可用")
+
+        def terminated(_: object) -> None:
+            lock.mark_lost()
+
+        # asyncpg 公开的连接终止通知：服务端终止或网络断开时立即回调。主动释放前先注销，
+        # 正常关闭不算丢锁。
+        driver.add_termination_listener(terminated)
+        try:
+            yield lock
+        finally:
+            driver.remove_termination_listener(terminated)
     finally:
         # 关闭连接即释放会话级锁；连接已断开时关闭也不会再持有它。
         try:

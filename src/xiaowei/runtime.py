@@ -5,10 +5,11 @@
 模型绑定 → Application → ``ChannelService``。任一步失败时按相反顺序关闭已创建的资源并释放锁；
 启动失败不对外服务，而不是带着未就绪状态继续运行。
 
-``serve`` 在此之上运行 Web（Uvicorn，监听套接字先由本模块绑定）与可选飞书。运行中持锁连接丢失时
-锁低 readiness 并退出。停止顺序：Web 停止接收 → 飞书 ``drain``（停止接收，有界等待在途与队列）→
-取消消费者 → 关闭长连接；各步都有期限，任一步未在期限内完成或出现异常时返回非零退出码。飞书
-长连接在启动时连不上只让飞书不可用（``/readyz`` 标明），Web 照常服务。
+``serve`` 在此之上运行 Web（Uvicorn，监听套接字先由本模块绑定，只提供 HTTP）与可选飞书。运行中
+持锁连接终止时立即锁低 readiness（连接终止通知，周期核对兜底）并退出。停止顺序：Web 停止接收 →
+飞书 ``drain``（停止接收，有界等待在途与队列）→ 取消消费者 → 关闭长连接；各步都有期限，任一步
+未在期限内完成或出现异常时返回非零退出码。飞书长连接在启动时连不上只让飞书不可用（``/readyz``
+标明），Web 照常服务。
 
 维护命令：``initialize`` / ``upgrade`` 独占同一把实例锁；``cleanup`` 与 ``resend`` 不执行恢复，只靠
 数据库条件更新与在线 ``serve`` 并发。``resend`` 只重发飞书 failed/unknown 的已保存结果：不装配模型、
@@ -169,10 +170,10 @@ class ServeConfig(_Config):
         storage = self.storage
         if storage.request_retention_seconds > storage.evidence_retention_seconds:
             raise ValueError("可重发结果的保留期不得长于证据保留期")
+        # 正式监听不配置 TLS，浏览器发送的 Origin 必然是 http://；同址 HTTPS 不能代替它。
         netloc = f"[{self.listen_host}]" if ":" in self.listen_host else self.listen_host
-        own = {f"{scheme}://{netloc}:{self.listen_port}" for scheme in ("http", "https")}
-        if not own & self.web.allowed_origins:
-            raise ValueError("web.allowed_origins 必须包含本进程的监听地址")
+        if f"http://{netloc}:{self.listen_port}" not in self.web.allowed_origins:
+            raise ValueError("web.allowed_origins 必须包含本进程实际监听的 http://host:port")
         if self.feishu is not None:
             if self.web.operator_id in self.feishu.users.values():
                 raise ValueError("Web 操作者与飞书用户不能使用同一个内部 subject")
@@ -374,15 +375,31 @@ def _bind(host: str, port: int) -> socket.socket:
         raise ListenError(host, port) from None
 
 
-async def _watch(lock: InstanceLock, interval: float) -> None:
-    """周期核对持锁连接；丢失时 ``verify`` 已锁低 readiness，返回即触发停止。"""
-    while True:
-        await asyncio.sleep(interval)
-        try:
-            await lock.verify()
-        except StorageUnavailableError:
-            logger.error("实例锁连接已断开，停止服务")
-            return
+async def _watch(lock: InstanceLock, interval: float, stopping: asyncio.Event) -> None:
+    """等待持锁连接的终止通知（通知时 readiness 已锁低），返回即触发停止。
+
+    周期核对只是兜底：网络中断而本端未收到连接关闭时，由下一次 ``verify`` 发现。正常停止经
+    ``stopping`` 通知退出，不在核对查询中途取消（取消会使持锁连接失效，被误判为丢锁）。
+    """
+    lost = asyncio.create_task(lock.lost.wait())
+    stop = asyncio.create_task(stopping.wait())
+    try:
+        while True:
+            done, _ = await asyncio.wait(
+                {lost, stop}, timeout=interval, return_when=asyncio.FIRST_COMPLETED
+            )
+            if lost in done:
+                break
+            if stop in done:
+                return
+            try:
+                await lock.verify()
+            except StorageUnavailableError:
+                break
+    finally:
+        for task in (lost, stop):
+            task.cancel()
+    logger.error("实例锁连接已断开，停止服务")
 
 
 @dataclass
@@ -438,7 +455,8 @@ async def _serve(
         )
     )
     web = asyncio.create_task(server.serve(sockets=[sock]), name="xiaowei-web")
-    watch = asyncio.create_task(_watch(runtime.lock, config.lock_check_seconds))
+    stopping = asyncio.Event()
+    watch = asyncio.create_task(_watch(runtime.lock, config.lock_check_seconds, stopping))
     stopped = asyncio.create_task(stop.wait())
     waiting: set[asyncio.Task[Any]] = {web, watch, stopped}
     if feishu is not None:
@@ -456,8 +474,8 @@ async def _serve(
     if not _finished_cleanly(web):
         logger.error("Web 服务异常结束")
         healthy = False
-    for task in (watch, stopped):
-        task.cancel()
+    stopping.set()
+    stopped.cancel()
     await asyncio.wait({watch, stopped})
     if not runtime.readiness.ok:
         logger.error("readiness 已锁低（%s），需重启后由启动恢复处理", runtime.readiness.reason)
