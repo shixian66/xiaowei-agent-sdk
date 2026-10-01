@@ -34,7 +34,14 @@ from xiaowei.channel_store import (
 )
 from xiaowei.models import AgentAnswer, AnswerInference
 from xiaowei.session import SessionStoreError, cleanup_expired
-from xiaowei.storage import Readiness, hold_instance_lock, open_engine
+from xiaowei.storage import (
+    Backend,
+    Readiness,
+    _release,
+    hold_backend,
+    hold_instance_lock,
+    open_engine,
+)
 
 pytestmark = pytest.mark.loopback
 
@@ -488,6 +495,81 @@ async def test_restart_recovery_interrupts_and_never_sends(postgres_url: URL) ->
             assert not await env.store.claim_send(sending)
             assert await env.store.claim_send(sending, resend=True)
             assert (await env.accept("r2", conversation="c2")).record.state == "interrupted"
+
+
+class _SendAbortedError(Exception):
+    pass
+
+
+@pytest.mark.parametrize("exit_", ["return", "raise", "cancel"])
+async def test_a_released_resend_owner_no_longer_shields_its_sending(
+    postgres_url: URL, exit_: str
+) -> None:
+    """显式重发持有所有者连接时，启动恢复不动它的 sending；所有者以任何方式退出后（正常、
+    异常、取消），即使引擎仍打开，其后端身份也已消失，随后一次恢复把遗留 sending 记为 unknown。"""
+    async with environment(postgres_url) as env:
+        record = await env.completed()
+        await env.settle(record, "failed")
+        owners: list[Backend] = []
+        claimed, leave = asyncio.Event(), asyncio.Event()
+
+        async def resend() -> None:
+            # 模拟发送后落定未完成：取得投递权后就退出，记录仍是 sending。
+            async with hold_backend(env.engine) as sender:
+                owners.append(sender)
+                store = make_store(env.engine, env.clock, sender=sender)
+                assert await store.claim_send(record, resend=True)
+                claimed.set()
+                await leave.wait()
+                if exit_ == "raise":
+                    raise _SendAbortedError
+
+        task = asyncio.create_task(resend())
+        await asyncio.wait_for(claimed.wait(), 10)
+
+        async def recover() -> int:
+            async with environment(postgres_url) as other:
+                async with hold_instance_lock(other.engine, other.readiness) as lock:
+                    return (await other.store.recover(lock)).unknown
+
+        assert await recover() == 0  # 所有者仍在：不是遗留发送
+        assert (await env.row(record))["delivery"] == "sending"
+
+        if exit_ == "cancel":
+            task.cancel()
+        else:
+            leave.set()
+        if exit_ == "return":
+            await task
+        else:
+            with pytest.raises(_SendAbortedError if exit_ == "raise" else asyncio.CancelledError):
+                await task
+
+        (owner,) = owners
+        async with env.engine.connect() as conn:
+            alive = await conn.scalar(
+                text("SELECT count(*) FROM pg_stat_activity WHERE pid = :p AND backend_start = :s"),
+                {"p": owner.pid, "s": owner.started},
+            )
+        assert alive == 0
+        assert await recover() == 1
+        row = await env.row(record)
+        assert (row["delivery"], row["delivery_attempt"]) == ("unknown", None)
+        assert (row["delivery_owner_pid"], row["delivery_owner_started"]) == (None, None)
+
+
+async def test_an_owner_still_visible_after_discard_is_not_reported_released(env: Env) -> None:
+    """丢弃连接后若该身份仍在 ``pg_stat_activity``（强制断开后后端尚未退出），期限内确认不了
+    就不当作已释放。这里用另一条仍存活的连接充当该身份。"""
+    async with env.engine.connect() as survivor:
+        row = (
+            await survivor.execute(
+                text("SELECT pid, backend_start FROM pg_stat_activity WHERE pid = pg_backend_pid()")
+            )
+        ).one()
+        await survivor.commit()
+        discarded = await env.engine.connect()
+        assert not await _release(env.engine, discarded, Backend(row.pid, row.backend_start))
 
 
 async def test_recovery_failure_rolls_back_and_blocks_readiness(env: Env) -> None:

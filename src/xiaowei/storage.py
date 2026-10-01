@@ -108,6 +108,16 @@ class Backend:
 
 
 _SELF = text("SELECT pid, backend_start FROM pg_stat_activity WHERE pid = pg_backend_pid()")
+_ALIVE = text("SELECT 1 FROM pg_stat_activity WHERE pid = :pid AND backend_start = :started")
+_RELEASE_TIMEOUT_SECONDS = 5.0
+_RELEASE_POLL_SECONDS = 0.05
+
+
+class BackendNotReleasedError(StorageError):
+    """专用连接已丢弃，但无法确认其数据库后端已退出。"""
+
+    def __init__(self) -> None:
+        super().__init__("无法确认数据库连接已释放")
 
 
 @asynccontextmanager
@@ -115,21 +125,54 @@ async def hold_backend(engine: AsyncEngine) -> AsyncIterator[Backend]:
     """占用一条专用连接直到退出，返回它的身份。
 
     用于标记不持实例锁的工作（显式重发）仍在进行：连接存活即工作仍有所有者，进程退出或连接
-    断开后身份随之消失。
+    断开后身份随之消失。退出时丢弃物理连接（归还连接池不会结束后端，恢复会误以为工作仍在
+    进行），并确认该身份已从 ``pg_stat_activity`` 消失；正常退出时无法确认即报错，异常或取消
+    退出时原样传播原异常。
     """
     try:
         conn = await engine.connect()
     except (OSError, SQLAlchemyError):
         raise StorageUnavailableError("PostgreSQL 不可用") from None
     try:
-        try:
-            row = (await conn.execute(_SELF)).one()
-            await conn.commit()
-        except (OSError, SQLAlchemyError):
-            raise StorageUnavailableError("PostgreSQL 不可用") from None
-        yield Backend(row.pid, row.backend_start)
-    finally:
-        await conn.close()
+        row = (await conn.execute(_SELF)).one()
+        await conn.commit()
+    except (OSError, SQLAlchemyError):
+        await _discard(conn)
+        raise StorageUnavailableError("PostgreSQL 不可用") from None
+    except BaseException:
+        await _discard(conn)
+        raise
+    backend = Backend(row.pid, row.backend_start)
+    try:
+        yield backend
+    except BaseException:
+        await _release(engine, conn, backend)
+        raise
+    if not await _release(engine, conn, backend):
+        raise BackendNotReleasedError
+
+
+async def _discard(conn: AsyncConnection) -> None:
+    """丢弃物理连接：先作废再关闭，连接不回到连接池。"""
+    try:
+        await conn.invalidate()
+    except (OSError, SQLAlchemyError):
+        pass
+    await conn.close()
+
+
+async def _release(engine: AsyncEngine, conn: AsyncConnection, backend: Backend) -> bool:
+    """丢弃专用连接，并在期限内确认其后端已退出；无法确认时返回 False。"""
+    await _discard(conn)
+    params = {"pid": backend.pid, "started": backend.started}
+    try:
+        async with asyncio.timeout(_RELEASE_TIMEOUT_SECONDS), engine.connect() as check:
+            while (await check.scalar(_ALIVE, params)) is not None:
+                await check.commit()  # pg_stat_activity 在事务内是快照，重新读取前先结束事务
+                await asyncio.sleep(_RELEASE_POLL_SECONDS)
+    except (TimeoutError, OSError, SQLAlchemyError):
+        return False
+    return True
 
 
 @dataclass
