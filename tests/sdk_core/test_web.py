@@ -25,8 +25,8 @@ from xiaowei.web import COOKIE, create_web_app
 
 pytestmark = pytest.mark.loopback
 
-ORIGIN = "http://127.0.0.1:8765"
-OTHER_ALLOWED = "http://localhost:8765"
+ORIGIN = "http://127.0.0.1:8501"
+OTHER_ALLOWED = "http://localhost:8501"
 LIMIT = 4096
 STATIC = Path(__file__).resolve().parents[2] / "src" / "xiaowei" / "static"
 
@@ -108,7 +108,7 @@ async def raw(
         "root_path": "",
         "headers": headers,
         "client": ("127.0.0.1", 50000),
-        "server": ("127.0.0.1", 8765),
+        "server": ("127.0.0.1", 8501),
     }
     await app(scope, receive, send)
     body = b"".join(m.get("body", b"") for m in sent if m["type"] == "http.response.body")
@@ -117,7 +117,7 @@ async def raw(
 
 def same_origin(*extra: tuple[bytes, bytes]) -> list[tuple[bytes, bytes]]:
     return [
-        (b"host", b"127.0.0.1:8765"),
+        (b"host", b"127.0.0.1:8501"),
         (b"origin", ORIGIN.encode()),
         (b"content-type", b"application/json"),
         (b"cookie", f"{COOKIE}={'c' * 43}".encode()),
@@ -213,18 +213,18 @@ async def test_turn_body_must_be_strict_json(
 @pytest.mark.parametrize(
     "host",
     [
-        "rebind.example:8765",  # 外部域名解析到 loopback
-        "localhost.evil:8765",
+        "rebind.example:8501",  # 外部域名解析到 loopback
+        "localhost.evil:8501",
         "127.0.0.1:9999",
         "127.0.0.1",
-        "127.0.0.1.:8765",
-        "localhost.:8765",
-        "LOCALHOST:8765",
-        "user@127.0.0.1:8765",
-        "[::ffff:127.0.0.1]:8765",
-        "[0:0:0:0:0:0:0:1]:8765",
-        "127.1:8765",
-        "2130706433:8765",
+        "127.0.0.1.:8501",
+        "localhost.:8501",
+        "LOCALHOST:8501",
+        "user@127.0.0.1:8501",
+        "[::ffff:127.0.0.1]:8501",
+        "[0:0:0:0:0:0:0:1]:8501",
+        "127.1:8501",
+        "2130706433:8501",
         "",
     ],
 )
@@ -237,16 +237,16 @@ async def test_host_must_match_allowlist_literally(web: Web, host: str) -> None:
 
 
 async def test_duplicate_or_missing_host_is_rejected(web: Web) -> None:
-    for headers in ([], [(b"host", b"127.0.0.1:8765"), (b"host", b"127.0.0.1:8765")]):
+    for headers in ([], [(b"host", b"127.0.0.1:8501"), (b"host", b"127.0.0.1:8501")]):
         status, _, _ = await raw(web.app, "GET", "/healthz", headers)
         assert status == 400
 
 
 async def test_allowed_hosts_include_ipv6_and_named_loopback(env: Env) -> None:
     app = create_web_app(
-        env.service, config(allowed_origins=frozenset({"http://[::1]:8765", OTHER_ALLOWED}))
+        env.service, config(allowed_origins=frozenset({"http://[::1]:8501", OTHER_ALLOWED}))
     )
-    for host in (b"[::1]:8765", b"localhost:8765"):
+    for host in (b"[::1]:8501", b"localhost:8501"):
         status, _, _ = await raw(app, "GET", "/healthz", [(b"host", host)])
         assert status == 200
 
@@ -256,11 +256,11 @@ async def test_allowed_hosts_include_ipv6_and_named_loopback(env: Env) -> None:
     [
         None,
         "null",
-        "http://rebind.example:8765",
+        "http://rebind.example:8501",
         "http://127.0.0.1:9999",
-        "https://127.0.0.1:8765",
-        "http://127.0.0.1:8765/",
-        "http://127.0.0.1.:8765",
+        "https://127.0.0.1:8501",
+        "http://127.0.0.1:8501/",
+        "http://127.0.0.1.:8501",
         OTHER_ALLOWED,  # 允许的地址，但与本次请求的 Host 不同源
     ],
 )
@@ -513,9 +513,20 @@ async def test_page_is_static_and_script_never_parses_html(web: Web) -> None:
         style = await client.get("/assets/app.css")
         missing = await client.get("/assets/../web.py")
     csp = page.headers["content-security-policy"]
-    for directive in ("default-src 'none'", "script-src 'self'", "frame-ancestors 'none'"):
-        assert directive in csp
+    directives = {part.strip() for part in csp.split(";")}
+    for directive in (
+        "default-src 'none'",
+        "script-src 'self'",
+        "form-action 'none'",
+        "frame-ancestors 'none'",
+    ):
+        assert directive in directives
     assert "unsafe-inline" not in csp and "unsafe-eval" not in csp
+    # 脚本未加载时表单也不会把消息放进 URL：显式 POST 到 JSON 接口（非 JSON 正文得到 415），
+    # 且 CSP 的 form-action 'none' 阻止提交本身；浏览器行为由 test_web_browser.py 证明。
+    assert re.findall(r"<form[^>]*>", page.text) == [
+        '<form id="composer" method="post" action="/api/turns">'
+    ]
     assert script.headers["content-type"].startswith("text/javascript")
     assert style.headers["content-type"].startswith("text/css")
     assert missing.status_code == 404
@@ -539,21 +550,79 @@ async def test_page_is_static_and_script_never_parses_html(web: Web) -> None:
 
 
 def test_web_config_accepts_only_canonical_loopback_origins() -> None:
-    for origin in ("http://127.0.0.1:8765", "http://[::1]:8765", "https://localhost:8443"):
+    for origin in (
+        "http://127.0.0.1:8501",
+        "http://[::1]:8501",
+        "http://localhost:8501",
+        "https://localhost:8443",
+        "http://127.0.0.1:443",  # 不是 http 的默认端口，浏览器保留它
+        "https://127.0.0.1:80",
+    ):
         config(allowed_origins=frozenset({origin}))
     for origin in (
         "http://127.0.0.1",
-        "http://LOCALHOST:8765",
-        "http://localhost.:8765",
-        "http://u@127.0.0.1:8765",
-        "http://127.0.0.1:08765",
-        "http://127.0.0.1:8765/",
-        "http://rebind.example:8765",
-        "http://[0:0:0:0:0:0:0:1]:8765",
-        "http://127.1:8765",
-        "ftp://127.0.0.1:8765",
+        "http://LOCALHOST:8501",
+        "http://localhost.:8501",
+        "http://u@127.0.0.1:8501",
+        "http://127.0.0.1:08501",
+        "http://127.0.0.1:8501/",
+        "http://rebind.example:8501",
+        "http://[0:0:0:0:0:0:0:1]:8501",
+        "http://127.1:8501",
+        "ftp://127.0.0.1:8501",
     ):
         with pytest.raises(ValueError):
             config(allowed_origins=frozenset({origin}))
     with pytest.raises(ValueError):
-        config(allowed_origins=frozenset({ORIGIN, "https://127.0.0.1:8765"}))
+        config(allowed_origins=frozenset({ORIGIN, "https://127.0.0.1:8501"}))
+
+
+# 浏览器在 Host 与 Origin 中省略 scheme 的默认端口，端口 0 没有稳定的 origin：按字面匹配时
+# 这些配置下的每个请求都会被拒绝，因此在配置阶段失败。
+UNUSABLE_ORIGINS = ("http://127.0.0.1:0", "http://127.0.0.1:80", "https://localhost:443")
+
+
+@pytest.mark.parametrize("origin", UNUSABLE_ORIGINS)
+async def test_web_config_rejects_ports_a_browser_cannot_send(env: Env, origin: str) -> None:
+    message = env.scripts.add("端口配置", tool_call("order_total", region="east"), cite())
+    with pytest.raises(ValueError, match="端口"):
+        config(allowed_origins=frozenset({origin}))
+    # 同一组里混入可用地址也不放行。
+    with pytest.raises(ValueError, match="端口"):
+        config(allowed_origins=frozenset({ORIGIN, origin}))
+    assert await env.requests() == 0 and env.model_calls(message) == 0
+    assert env.adapter.calls == []
+
+
+@pytest.mark.parametrize(
+    ("origin", "host"),
+    [
+        (ORIGIN, b"127.0.0.1:8501"),
+        ("http://[::1]:8501", b"[::1]:8501"),
+        (OTHER_ALLOWED, b"localhost:8501"),
+    ],
+)
+async def test_allowed_origin_serves_a_same_origin_turn(env: Env, origin: str, host: bytes) -> None:
+    message = env.scripts.add("同源对照", tool_call("order_total", region="east"), cite())
+    app = create_web_app(env.service, config(allowed_origins=frozenset({origin})))
+    headers = [(b"host", host)]
+    status, page, _ = await raw(app, "GET", "/", headers)
+    assert status == 200 and b"<form" in page
+    body = json.dumps({"request_id": "r1", "mode": "query", "message": message}).encode()
+    post = [
+        (b"host", host),
+        (b"origin", origin.encode()),
+        (b"content-type", b"application/json"),
+        (b"cookie", f"{COOKIE}={'c' * 43}".encode()),
+    ]
+    status, response, _ = await raw(app, "POST", "/api/turns", post, (body,))
+    assert status == 200 and json.loads(response)["state"] == "completed"
+    assert env.model_calls(message) == 2 and len(env.adapter.calls) == 1
+
+
+async def test_secure_cookie_setting_marks_the_cookie_secure(env: Env) -> None:
+    app = create_web_app(env.service, config(secure_cookie=True))
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url=ORIGIN) as client:
+        page = await client.get("/")
+    cookie = page.headers["set-cookie"]
+    assert "Secure" in cookie and "HttpOnly" in cookie and "SameSite=strict" in cookie

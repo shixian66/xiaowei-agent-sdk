@@ -360,7 +360,7 @@ Task 5 实施修订（不改变产品范围与权限边界）：
 
 **Depends on:** Task 5 reviewed SHA.
 
-**Result:** 正式启动的浏览器路径可以新建会话、提交查询/诊断、轮询结果并安全显示受信事实；不能跨 cookie/session 读取或执行脚本。
+**Result:** `create_web_app` 在真实 Uvicorn 与 Chrome 中形成 Web 组件闭环：可以新建会话、提交查询/诊断、轮询结果并安全显示受信事实；不能跨 cookie/session 读取或执行脚本。正式 `xiaowei serve` 的浏览器验收属于 Task 8（2026-10-01 审查后调整）。
 
 **Files:** Create `src/xiaowei/web.py`, `src/xiaowei/static/index.html`, `tests/p1b/test_web.py`; Modify `src/xiaowei/config.py`.
 
@@ -371,12 +371,15 @@ Task 6 实施修订（不改变产品范围与权限边界）：
 - `create_web_app(service, config)` 接收已装配的 `ChannelService`；readiness 取自其请求存储。cookie 只由页面换发；`POST /api/turns` 与 `POST /api/sessions` 缺少有效 cookie 时拒绝，避免失败响应换发的 cookie 丢失后已保存请求无法读取，也使跨站请求在没有 `SameSite=Strict` cookie 时直接失败。`POST /api/sessions` 的正文为空 JSON 对象。
 - 结果状态为 accepted/running 而 readiness 已锁低时返回 503，不再以“处理中”服务；状态由重启恢复确定。
 - 页面把双向文字控制符显示为可见转义，表格单元格 `unicode-bidi: isolate`。
+- 允许地址的端口不能为 0 或 scheme 的默认端口（`http` 80、`https` 443）：浏览器在 Host/Origin 中省略默认端口，按字面匹配时这些配置下的每个请求都会被拒绝，因此在配置阶段失败。正式默认地址为 `http://127.0.0.1:8501`（用户 2026-10-01 决定），端口经配置传入，`web.py` 不写端口；HTTPS/SSH、操作者与 `Secure` 仍待 G6。
+- 表单显式 `method="post" action="/api/turns"`：脚本未加载时 CSP `form-action 'none'` 阻止提交；即使 CSP 失效，正文也不进入 URL，非 JSON 正文得到 415。
+- 浏览器证据由仓库内用例 `tests/sdk_core/test_web_browser.py`（标记 `browser`，默认不收集，`-m browser` 时缺少 `SDK_TEST_CHROME` 即失败）复现：进程内 Uvicorn 绑定 `127.0.0.1:8501`，经 `--remote-debugging-pipe` 驱动无头 Chrome，后端为测试装配。
 
 - [ ] 先写 ASGI 测试覆盖四个 API、cookie 建立、固定操作者、Host/Origin/JSON 检查、跨 cookie/request 读取、请求冲突、并发、新建会话和 readiness。Host/Origin 用精确 allowlist，覆盖外部域名解析到 loopback、`localhost.evil`、替代端口、尾点、用户信息与 IPv6 表示等 DNS rebinding/解析混淆反例。
 - [ ] 请求体限制同时覆盖：超限 `Content-Length` 在调用 receive 前拒绝；伪造较小长度、缺少长度和 chunked body 在累计读取达到上限时停止，不完整缓冲超限正文。
 - [ ] 加入含 `<script>`、事件属性、HTML 标签、Unicode 和超长值的结果；断言 API 是 JSON，页面代码只用 `textContent`/DOM 创建表格且没有 `innerHTML`、Markdown 或动态脚本执行。
 - [ ] 实现一个静态页面和最少 FastAPI route；不增加模板系统、前端框架、WebSocket、公开登录或多用户角色。
-- [ ] 用真实浏览器从正式 `xiaowei serve` 路径验证诊断、查询、有限表格、截断、失败编号、刷新后 GET 与新建会话。helper/ASGI 测试不能替代浏览器证据。
+- [ ] 用仓库内可执行的浏览器 smoke 在真实 Uvicorn + Chrome 中验证默认诊断、查询、有限表格、截断、固定失败与请求编号、刷新后 GET、新建会话、恶意 HTML/双向控制符、客户端断开后结果可读，以及脚本未加载时消息不进入 URL、历史或 access log。ASGI 测试不能替代浏览器证据；正式 `xiaowei serve` 路径的浏览器验收在 Task 8。
 - [ ] 运行目标测试、Ruff、mypy；独立审查候选精确 SHA，重点核对身份、CSRF、XSS、跨会话和数据投影；提交 `feat: add local Web chat entry`。
 
 ### Task 7：飞书单聊长连接
@@ -407,6 +410,7 @@ Task 6 实施修订（不改变产品范围与权限边界）：
 - [ ] 实现单一 runtime lifespan：配置校验 → 专用 PostgreSQL 连接取得单实例 advisory lock → schema 检查与中断恢复 → StarRocks Adapter → Evidence/Governance/Application/ChannelService → Web/飞书 → 反序关闭并释放锁。部分启动失败也要按逆序关闭已创建资源；持锁连接丢失时停止接收并退出。
 - [ ] 实现 `serve`、`storage init/upgrade/cleanup`、`requests resend`，不增加独立恢复命令；恢复只随持锁的 serve 启动执行，`storage init/upgrade` 也须独占同一锁。显式 resend 只接受当前 owner 下的 failed/unknown 记录，经 Evidence 重验与数据库 CAS 后发送一次。危险目标、未知请求、Evidence 过期、pending/sent/sending 或并发竞争均失败关闭；命令输出只给状态和请求编号。
 - [ ] 将 console script 改为 `xiaowei.cli:main`，增加同一行为的 `python -m xiaowei`，wheel 只包含 `src/xiaowei`。清点旧包与约 1700 项旧测试的依赖：新产品不使用、但旧测试仍需要的包移入现有 dev extra，不留在生产依赖；旧测试继续作为独立 legacy CI 回归，不计作 P1-B 证据。`tests/sdk_core`、`tests/p1b` 和仍适用的仓库级 security/contract checks 是新产品必过门禁。旧源码是否物理删除另列清理，不在本任务扩大差异。
+- [ ] Web 正式默认地址 `http://127.0.0.1:8501`，端口经配置传入。从正式 `xiaowei serve` 用真实浏览器验证页面、脚本与 cookie，以及 Task 6 smoke 覆盖的成功与保护性失败路径（含 Host/Origin 拒绝）；Task 6 的组件 smoke 不能替代这项证据。
 - [ ] 健康检查不发模型请求或查询；必要配置、PG schema/恢复失败时 readiness false，可选 MCP/飞书暂时不可用只影响相应能力并有安全状态。
 - [ ] 从空环境执行 `uv sync --locked --extra dev`、wheel 安装、两个入口的 CLI help、`tests/sdk_core`、`tests/p1b`、仓库级 security/contract checks、独立 legacy CI、Ruff、mypy 与依赖审计。独立审查候选精确 SHA 后提交 `build: switch to P1-B product entry`。
 
@@ -433,7 +437,7 @@ Task 6 实施修订（不改变产品范围与权限边界）：
 | PostgreSQL 集成 | 现有隔离 PostgreSQL 16 harness | migration、Session、Evidence、请求并发/恢复/清理 | 正式持久卷和备份恢复 |
 | StarRocks 集成 | 获准版本、TLS/FE、真实只读账号、受限测试对象 | 协议、类型、会话变量、只读/资源/超时 | 生产权限或业务口径 |
 | 模型实测 | 一个获准 Profile 与合成/脱敏数据 | 真实工具续轮、结构化结果、usage/期限 | 其他供应商/模型组合 |
-| 浏览器 | 正式 `xiaowei serve` 页面 | cookie、同源、DOM、正式路由 | ASGI helper |
+| 浏览器 | Task 6：真实 Uvicorn + Chrome 上的 `create_web_app`；Task 8 起：正式 `xiaowei serve` 页面 | cookie、同源、DOM；正式路由与启动链路只由后者证明 | ASGI helper |
 | 飞书 | 获准测试应用/tenant/user | 长连接、标准事件、重投、发送结果 | SDK fake |
 
 每个源码任务的最小检查是目标 pytest + 相关 P1-A 回归 + `ruff check` + `mypy`。依赖变化另做锁文件一致性与 `pip-audit`；数据库迁移另做真实 PostgreSQL；渠道阶段另做正式入口手工/自动化验证。纯文档任务只做链接、事实、命令和差异检查，不扩大到全仓产品测试。
@@ -459,7 +463,7 @@ Task 6 实施修订（不改变产品范围与权限边界）：
 | G3 业务口径 | 首个目标的可信字段含义、时间/时区、单位、必要过滤条件、文本与版本；其规范化指纹进入会话绑定 | Task 3 提示与会话、Task 9 质量验收 |
 | G4 真实模型 Gate 0 | 获准 provider/endpoint/protocol/model、secret ref、数据接收范围、预算与保留政策；工具续轮到交付及 Session 追问通过，供应商必需字段可安全回放 | 阻塞 Task 3–9；未通过先做独立前置修复 |
 | G5 驱动兼容 | `asyncmy` 锁定版对目标 StarRocks 的 TLS 证书验证、非缓冲流式读取、会话变量设置/回读、类型、取消和连接废弃行为 | Task 2 关闭、Task 9 |
-| G6 Web 边界 | 固定操作者标识、允许 Host/Origin、HTTP/HTTPS/SSH 使用方式、cookie Secure 设置 | Task 6 正式配置、Task 9 |
+| G6 Web 边界 | 固定操作者标识、允许 Host/Origin（默认地址 `http://127.0.0.1:8501` 已于 2026-10-01 确定）、HTTP/HTTPS/SSH 使用方式、cookie Secure 设置 | Task 6 正式配置、Task 9 |
 | G7 飞书边界 | app/tenant/user allowlist、所需 scopes、长连接环境、消息时效、文本上限、目的地保留与显式重发授权 | Task 7 真实验证、Task 9 |
 | G8 SDK 包行为 | `lark-channel-sdk` 锁定版能否禁用自动发送重试/fallback并区分成功/失败/未知；`asyncmy` 和 Feishu 依赖的审计/供应链结果 | Task 2、7、8 |
 
