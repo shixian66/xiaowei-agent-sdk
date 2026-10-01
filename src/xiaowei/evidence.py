@@ -15,7 +15,8 @@
 import hashlib
 import json
 import secrets
-from collections.abc import Callable, Mapping
+import unicodedata
+from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import TypeGuard
@@ -59,8 +60,8 @@ _COLUMNS: Mapping[Audience, str] = {
 _MODEL_REACHABLE: tuple[Audience, ...] = ("model", "session")
 # 结果数据生成（``governance.contract_dump``）、投影或指纹规则变化时更新，使旧规则生成的
 # 证据不再可读。/5：结果改为按登记模型的声明字段生成，不再经模型自己的序列化。/6：策略
-# 可声明每种用途都必须完整保留的字段。
-_PROJECTION_RULE = "model-reachable-shared/6"
+# 可声明每种用途都必须完整保留的字段。/7：必需字段进入策略指纹，/6 证据因此不再可读。
+_PROJECTION_RULE = "model-reachable-shared/7"
 _EVIDENCE_ID_BYTES = 16
 # 与 ``record`` 生成的证据标识等长：容量检查用它投影最坏结果。
 _SAMPLE_EVIDENCE_ID = "ev_" + "0" * (2 * _EVIDENCE_ID_BYTES)
@@ -232,7 +233,7 @@ class EvidenceStore:
         if answer.clarification is not None:
             if answer.evidence_ids or answer.inferences:
                 raise AnswerRejectedError("澄清不能与查询结果或分析混用")
-            content = f"{_CLARIFICATION_HEADER}\n{answer.clarification}"
+            content = f"{_CLARIFICATION_HEADER}\n{_one_line(answer.clarification)}"
             return Delivery(content=content, evidence_ids=(), channel=channel)
 
         cited = answer.evidence_ids
@@ -253,7 +254,8 @@ class EvidenceStore:
         if answer.inferences:
             sections.append(_ANALYSIS_HEADER)
             sections.extend(
-                f"- {i.text}（依据：{', '.join(i.evidence_ids)}）" for i in answer.inferences
+                f"- {_one_line(i.text)}（依据：{', '.join(i.evidence_ids)}）"
+                for i in answer.inferences
             )
         facts = tuple(_fact(item) for item in shown) if channel == "web" else ()
         return Delivery(
@@ -346,7 +348,7 @@ def _channel_limits(policy: ToolPolicy, audience: Audience) -> tuple[tuple[str, 
 
 
 def _policy_fingerprint(contract: ToolContract, policy: ToolPolicy) -> str:
-    """契约（参数 schema 与目标）、结果契约、四种投影的字段/上限与投影规则的稳定摘要。
+    """契约（参数 schema 与目标）、结果契约、四种投影的字段/上限、必需字段与投影规则的稳定摘要。
 
     结果契约决定远端数据如何成为事实，改变后旧证据不再可用；schema 的标题与说明文字、交给
     模型的工具说明只影响阅读，不参与摘要。
@@ -363,6 +365,8 @@ def _policy_fingerprint(contract: ToolContract, policy: ToolPolicy) -> str:
             audience: {"fields": list(spec.fields), "max_bytes": spec.max_bytes}
             for audience, spec in policy.projections.items()
         },
+        # 只有集合语义：顺序不同的同一组必需字段得到相同摘要。
+        "required": sorted(policy.required),
     }
     canonical = json.dumps(body, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
     return f"sha256:{hashlib.sha256(canonical.encode()).hexdigest()}"
@@ -467,12 +471,12 @@ def _render_fact(shown: _Shown, channel: Audience) -> str:
         return f"{meta}\n（无结果）"
     table = _table(data)
     if channel != "feishu" or table is None:
-        return f"{meta}\n{json.dumps(data, ensure_ascii=False)}"
+        return f"{meta}\n{_one_line(json.dumps(data, ensure_ascii=False))}"
     columns, rows = table
     lines = [meta]
     lines.extend(f"{name}: {_cell(value)}" for name, value in _scalars(data).items())
-    lines.append(" | ".join(_cell(name) for name in columns))
-    lines.extend(" | ".join(_cell(row.get(name)) for name in columns) for row in rows)
+    lines.append(_table_line(columns))
+    lines.extend(_table_line(row.get(name) for name in columns) for row in rows)
     if not rows:
         lines.append("（无数据行）")
     return "\n".join(lines)
@@ -529,7 +533,30 @@ def _scalars(data: Mapping[str, object]) -> dict[str, JsonScalar]:
     }
 
 
+def _table_line(cells: Iterable[object]) -> str:
+    """飞书表格行：以 ``| `` 开头、`` |`` 结尾，单元格之间是 `` | ``；数据行不会与标题行相同。"""
+    return "| " + " | ".join(_cell(value) for value in cells) + " |"
+
+
 def _cell(value: object) -> str:
-    """纯文本单元格：字符串去掉引号但保留 JSON 转义，换行等控制字符不会另起一行。"""
+    """纯文本单元格：字符串去掉引号但保留 JSON 转义，只占一行。
+
+    JSON 已把反斜杠写作 ``\\\\``，因此单元格中的竖线写作 ``\\|`` 后，没有转义的 `` | `` 只能是
+    分隔符。
+    """
     encoded = json.dumps(value, ensure_ascii=False)
-    return encoded[1:-1] if isinstance(value, str) else encoded
+    body = encoded[1:-1] if isinstance(value, str) else encoded
+    return _one_line(body).replace("|", "\\|")
+
+
+# JSON 在 ``ensure_ascii=False`` 时仍原样输出的分行与不可见字符：C1 控制字符（含 U+0085）、
+# DEL、行与段分隔符（U+2028/U+2029），以及可改变显示顺序的格式字符。
+_LINE_UNSAFE = frozenset({"Cc", "Zl", "Zp", "Cf"})
+
+
+def _one_line(content: str) -> str:
+    """把会另起一行或不可见的字符写成 JSON 转义；JSON 文本转换后仍是含义相同的 JSON。"""
+    return "".join(
+        json.dumps(char)[1:-1] if unicodedata.category(char) in _LINE_UNSAFE else char
+        for char in content
+    )

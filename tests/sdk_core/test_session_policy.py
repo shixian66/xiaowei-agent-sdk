@@ -316,6 +316,61 @@ async def test_evidence_from_older_data_rules_cannot_replay(
     assert len(h.adapter.calls) == 2
 
 
+# 四种用途字段相同；容量放得下地区与总额，放不下明细行，因此旧策略保存时省略 rows。
+_ROWS_DROPPED = Projection(fields=("region", "total", "rows"), max_bytes=256)
+
+
+def _requiring(*required: str) -> ToolCatalog:
+    policy = ToolPolicy(
+        policy_id="synthetic.region",
+        arguments=RegionArgs,
+        projections=dict.fromkeys(("model", "session", "web", "feishu"), _ROWS_DROPPED),
+        required=required,
+    )
+    return ToolCatalog(CONTRACTS, (policy,))
+
+
+@pytest.mark.parametrize("required", [(), ("rows",)], ids=["same-policy", "rows-now-required"])
+async def test_evidence_follows_newly_required_fields(
+    postgres_url: URL, required: tuple[str, ...]
+) -> None:
+    """只把 rows 加入必需字段（投影字段与容量不变）：此前省略 rows 的证据不再可读或回放。"""
+    web, feishu = context(), context(channel="feishu", session="f1")
+    adapter = RecordingAdapter(memo="m" * 200)
+    async with harness(postgres_url, adapter, _requiring()) as old:
+        _, web_turn = await old.turn(web, [_call(), _cite()])
+        _, feishu_turn = await old.turn(feishu, [_call(), _cite()])
+        saved = {"web": web_turn.final_output, "feishu": feishu_turn.final_output}
+        for ctx, answer in ((web, saved["web"]), (feishu, saved["feishu"])):
+            stored = await old.evidence.project(answer.evidence_ids[0], ctx, "model")
+            assert set(json.loads(stored)["data"]) == {"region", "total"}
+
+        # 同一数据库上按新策略重建 EvidenceStore（相当于改配置后重启）。
+        rebuilt = store(old.engine, old.grants, old.clock, _requiring(*required))
+        h = Harness(old.engine, old.grants, old.clock, old.adapter, rebuilt, GovernedTools(rebuilt))
+        cases = [(web, saved["web"], ("model", "session", "web"))]
+        cases.append((feishu, saved["feishu"], ("model", "session", "feishu")))
+        for ctx, answer, audiences in cases:
+            (eid,) = answer.evidence_ids
+            later = context(
+                channel=ctx.identity.channel, session=ctx.identity.session_id, turn="t2"
+            )
+            if not required:  # 对照：完全相同的策略重建后照常可读、交付与追问
+                for audience in audiences:
+                    await h.evidence.project(eid, later, audience)
+                await h.evidence.validate_answer(answer, later)
+                followup, _ = await h.turn(later, [_cite()])
+                assert len(followup.calls) == 1
+                continue
+            for audience in audiences:
+                with pytest.raises(EvidenceUnavailableError):
+                    await h.evidence.project(eid, later, audience)
+            with pytest.raises(AnswerRejectedError):
+                await h.evidence.validate_answer(answer, later)
+            await h.refused(later)
+    assert len(h.adapter.calls) == 2  # 回放与交付都不重跑工具
+
+
 async def test_invalid_final_never_persists(postgres_url: URL) -> None:
     async with harness(postgres_url) as h:
         # 引用伪造证据：SDK 类型通过，但提交复用 Evidence 验证器，拒绝保存。
