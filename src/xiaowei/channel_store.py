@@ -8,7 +8,8 @@
 状态迁移都是带前置状态条件的单条更新，影响 0 行即表示被其他进程取得或状态已变化：
 
 - 请求：``accepted → running → completed``；``accepted/running → failed``；启动恢复把
-  ``accepted/running`` 标为 ``interrupted`` 并关闭关联 Session。
+  ``accepted/running`` 标为 ``interrupted`` 并关闭关联 Session。新请求的接收与接管恢复经数据库
+  屏障交接：恢复等待仍在提交的接收事务，恢复后的接收须在库内确认实例锁仍属本进程。
 - 投递：首次发送与事件重投只能竞争 ``pending → sending``；显式重发只对 completed 结果竞争
   ``failed/unknown → sending``；发送结束只能从 ``sending`` 改为 ``sent/failed/unknown``；启动恢复
   把遗留 ``sending`` 改为 ``unknown``，把飞书 completed 结果遗留的 ``pending`` 改为 ``failed``（回复
@@ -323,6 +324,7 @@ class ChannelStore:
         self._request_retention = timedelta(seconds=request_retention_seconds)
         self._session_retention = timedelta(seconds=session_retention_seconds)
         self._max_answer_bytes = max_answer_bytes
+        self._instance: InstanceLock | None = None
 
     @property
     def readiness(self) -> Readiness:
@@ -426,7 +428,9 @@ class ChannelStore:
     ) -> Acceptance:
         """持久接受请求，或返回同一请求已有的记录；同编号不同内容时拒绝冲突。
 
-        新请求绑定当前会话；与新建会话互斥（共享锁读取 current 映射）。
+        新请求绑定当前会话；与新建会话互斥（共享锁读取 current 映射）。本存储完成接管恢复后，新请求
+        只在数据库确认实例锁仍属本进程时写入，并与其他实例的接管恢复互斥（``InstanceLock.admits``）；
+        否则不写入、锁低 readiness 并拒绝。
         """
         self._require_ready()
         owner = self._owner(channel, subject_id, conversation)
@@ -441,6 +445,9 @@ class ChannelStore:
                 existing = await self._select(conn, key)
                 created = False
                 if existing is None:
+                    if self._instance is not None and not await self._instance.admits(conn):
+                        self._readiness.lock("instance_lock_lost")
+                        raise NotReadyError
                     session = await self._current(conn, owner, statement=_SELECT_CURRENT_FOR_SHARE)
                     inserted = await conn.execute(
                         _INSERT_REQUEST,
@@ -571,18 +578,21 @@ class ChannelStore:
         """持有实例锁的启动一致性恢复：一个事务内中断未完成请求并关闭其会话，遗留发送改为未知，
         飞书已保存但未发送的结果记为发送失败。
 
-        不调用 Runner、不发送消息、不放回队列。失败整体回滚并锁低 readiness。
+        不调用 Runner、不发送消息、不放回队列。失败整体回滚并锁低 readiness。读取前先等待仍在提交的
+        接收事务（可能来自刚失去锁的旧实例）结束；恢复后本存储的接收都要经该锁核对。
         """
         await lock.verify()
         now = self._clock()
         conn = lock.connection
         with self._critical("recovery_failed", "启动恢复失败"):
             async with conn.begin():
+                await lock.exclude_accepts()
                 rows = await conn.execute(_RECOVER_RUNNING, {"code": INTERRUPTED, "now": now})
                 sessions = [r[0] for r in rows]
                 await close_sessions(conn, sessions)
                 unknown = (await conn.execute(_RECOVER_SENDING, {"now": now})).rowcount
                 unsent = (await conn.execute(_RECOVER_UNSENT, {"now": now})).rowcount
+        self._instance = lock
         return RecoveryReport(interrupted=len(sessions), unknown=unknown, unsent=unsent)
 
     # ---- 内部 ------------------------------------------------------------------------

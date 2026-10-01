@@ -103,6 +103,28 @@ def test_entry_forces_sdk_data_logs_off_even_if_preset(value: str, level: str) -
     assert "model.test" not in entry.stderr and "sk-canary-test" not in entry.stderr
 
 
+@pytest.mark.parametrize("level", ["INFO", "DEBUG"])
+def test_dependency_warnings_and_errors_do_not_reach_the_formal_logs(level: str) -> None:
+    """真实飞书 SDK 的端点探针失败：其自带 stdout handler 与根 logger 都会写出原始异常。
+
+    正式日志配置下 stdout 与 stderr 都不出现端点、主机、端口或原始异常；本产品的事件与原因码
+    仍按级别输出。
+    """
+    closed = free_port()
+    script = [sys.executable, "-m", "tests.sdk_core.lark_log_canary"]
+    env = child_env(OPENAI_LOG="debug")
+    control = run([*script, "control", ENDPOINT, str(closed), level], env)
+    assert control.returncode == 0 and "probe False" in control.stdout
+    # 对照：两条输出路径都带出端点、主机与端口。
+    assert ENDPOINT in control.stdout and f"port={closed}" in control.stdout
+    assert ENDPOINT in control.stderr and "HTTPConnectionPool" in control.stderr
+    entry = run([*script, "entry", ENDPOINT, str(closed), level], env)
+    assert entry.returncode == 0 and entry.stdout.split() == ["probe", "False"]
+    assert "product event" in entry.stderr and "reason=feishu_unavailable" in entry.stderr
+    for leak in (ENDPOINT, "127.0.0.1", str(closed), "HTTPConnectionPool", "[Lark]", "secret-"):
+        assert leak not in entry.stdout + entry.stderr, leak
+
+
 # ---- 配置 ----------------------------------------------------------------------------
 
 

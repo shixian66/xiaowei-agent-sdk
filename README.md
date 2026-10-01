@@ -72,7 +72,7 @@ uv run --locked xiaowei --config xiaowei.json storage cleanup --batch-size 100
 uv run --locked xiaowei --config xiaowei.json requests resend --subject <subject> --chat <chat_id> --message <message_id>
 ```
 
-`serve` 持有数据库实例锁并在启动时执行中断恢复，第二个实例会被拒绝；普通启动不建表、不升级。`requests resend` 只重发飞书中投递为 failed/unknown 的已保存结果，不重跑模型或查询。退出码：0 成功，1 运行失败或请求被拒，2 参数或配置错误。Web 只提供 HTTP，`web.allowed_origins` 必须包含 `http://<listen_host>:<listen_port>`；持锁的数据库连接一旦断开，进程立即停止接收并以 1 退出。`--log-level` 只作用于小维自身日志，第三方依赖只输出 WARNING 及以上。
+`serve` 持有数据库实例锁并在启动时执行中断恢复，第二个实例会被拒绝；普通启动不建表、不升级。`requests resend` 只重发飞书中投递为 failed/unknown 的已保存结果，不重跑模型或查询。退出码：0 成功，1 运行失败或请求被拒，2 参数或配置错误。Web 只提供 HTTP，`web.allowed_origins` 必须包含 `http://<listen_host>:<listen_port>`；持锁的数据库连接一旦断开，进程立即停止接收并以 1 退出；新实例接管时会等待旧实例仍在提交的请求接收，再执行恢复。正式日志只输出小维自身日志（级别由 `--log-level` 决定），依赖库的日志在任何级别都不输出。
 
 **开发验证**（只用合成数据、脚本模型、替身与隔离的测试 PostgreSQL，不连接任何真实模型或外部服务）：
 

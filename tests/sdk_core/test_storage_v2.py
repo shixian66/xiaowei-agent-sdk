@@ -19,6 +19,7 @@ from xiaowei.storage import (
     APP_TABLES,
     SDK_MESSAGES_TABLE,
     SDK_SESSIONS_TABLE,
+    InstanceLock,
     Readiness,
     StorageBusyError,
     StorageNotInitializedError,
@@ -250,3 +251,40 @@ async def test_releasing_the_lock_is_not_a_loss(postgres_url: URL) -> None:
             await lock.verify()
         await asyncio.sleep(0.1)  # 终止通知经事件循环回调，给它运行的机会
         assert readiness.ok and not lock.lost.is_set()
+
+
+async def test_a_lock_connection_closed_before_watching_is_a_lock_loss(postgres_url: URL) -> None:
+    """连接在取得锁之后、注册终止通知之前断开：通知已经错过，注册时必须立即按丢锁处理并拒绝，
+    不能等周期核对。"""
+    async with (
+        open_engine(secret(postgres_url)) as engine,
+        open_engine(secret(postgres_url)) as admin,
+    ):
+        await initialize_storage(engine)
+        readiness = Readiness()
+        conn = await engine.connect()
+        try:
+            row = (
+                await conn.execute(
+                    text(
+                        "SELECT pid, backend_start FROM pg_stat_activity"
+                        " WHERE pid = pg_backend_pid()"
+                    )
+                )
+            ).one()
+            await conn.commit()
+            driver = (await conn.get_raw_connection()).driver_connection
+            assert driver is not None
+            async with admin.begin() as other:
+                await other.execute(text("SELECT pg_terminate_backend(:p)"), {"p": row.pid})
+            async with asyncio.timeout(2):
+                while not driver.is_closed():
+                    await asyncio.sleep(0.01)
+            lock = InstanceLock(conn, readiness, row.pid, row.backend_start)
+            with pytest.raises(StorageUnavailableError):
+                async with lock.watching():
+                    pytest.fail("已关闭的持锁连接不能进入服务")
+            assert lock.lost.is_set() and readiness.reason == "instance_lock_lost"
+        finally:
+            await conn.invalidate()
+            await conn.close()

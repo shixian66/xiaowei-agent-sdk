@@ -12,7 +12,7 @@
 | 本地目录 / 分支 | `/Users/kloenguyen/Desktop/agent-SDK` / `claude/p1b-formal-entry`（从 `origin/main` 的 `0c3161c` 分出） |
 | M5 历史起点 | `372c381f44ecfa1fa53961f137d0058033cbd805`；不是远端当前 main 的核验结论 |
 | P1-A 代码基线 / 当前主线 | `148abaa4729ac6644c03056cf265a9dc18f1acd8` / `0c3161cd8100d177853185cafd1e22a828b0c3f5`（P1-B 计划、Gate 0 离线部分、SQLGuard Task 1 的 PR #10、StarRocks Adapter Task 2 的 PR #11、urllib3 修复的 PR #12、受治理工具 Task 3 的 PR #13、请求和渠道状态 Task 4 的 PR #14 、共享 ChannelService Task 5 的 PR #15、最小同源 Web Task 6 的 PR #16 与飞书单聊 Task 7 的 PR #17 已合入） |
-| 当前阶段 | **P1-B Task 1 SQLGuard 已随 PR #10 合入；Task 2 StarRocks Adapter 随 PR #11 合入（`dd24d8a`）。Gate 0 在主线 `6389d78` 上以 `glm-4.7-flash` Profile 真实运行通过；Task 3 受治理工具与结构化 Evidence 交付经复审通过，随 PR #13 合入（`5058ae3`）；Task 4 PostgreSQL v2 请求与渠道状态经两轮审查修复与复审通过，随 PR #14 合入（`e5e380c`）；Task 5 共享 ChannelService 经一轮审查修复（B1 授权来源对象身份）与复审通过，随 PR #15 合入（`98f4167`）；Task 6 最小同源 Web 经一轮审查修复（B1 不可用端口、B2 浏览器 smoke）与复审通过，随 PR #16 合入（`1d1aa01`）；Task 7 飞书单聊长连接（用户接受“先 ack、后落库”）经两轮审查修复（B1–B4、N1）与复审通过，随 PR #17 合入（`0c3161c`），真实飞书验证待授权；Task 8 正式装配、维护命令与打包切换已在本分支实现（PR #18），首轮审查的 B1–B3 已修复，待复审。**P1-A 离线完成（Task 1–5 经 PR #2–#7 合入）。真实模型：Gate 0 通过的 Profile 只有 `bbtoken-glm-4.7-flash`；Gemini 只有 2026-09-30 的历史部分证据（未闭环）；同端点 DeepSeek V4 Flash 已实测不兼容 |
+| 当前阶段 | **P1-B Task 1 SQLGuard 已随 PR #10 合入；Task 2 StarRocks Adapter 随 PR #11 合入（`dd24d8a`）。Gate 0 在主线 `6389d78` 上以 `glm-4.7-flash` Profile 真实运行通过；Task 3 受治理工具与结构化 Evidence 交付经复审通过，随 PR #13 合入（`5058ae3`）；Task 4 PostgreSQL v2 请求与渠道状态经两轮审查修复与复审通过，随 PR #14 合入（`e5e380c`）；Task 5 共享 ChannelService 经一轮审查修复（B1 授权来源对象身份）与复审通过，随 PR #15 合入（`98f4167`）；Task 6 最小同源 Web 经一轮审查修复（B1 不可用端口、B2 浏览器 smoke）与复审通过，随 PR #16 合入（`1d1aa01`）；Task 7 飞书单聊长连接（用户接受“先 ack、后落库”）经两轮审查修复（B1–B4、N1）与复审通过，随 PR #17 合入（`0c3161c`），真实飞书验证待授权；Task 8 正式装配、维护命令与打包切换已在本分支实现（PR #18），首轮审查 B1–B3 与增量复审的 B2（接管交接竞态）、B3（第三方 WARNING 与飞书 handler）已修复，待复审。**P1-A 离线完成（Task 1–5 经 PR #2–#7 合入）。真实模型：Gate 0 通过的 Profile 只有 `bbtoken-glm-4.7-flash`；Gemini 只有 2026-09-30 的历史部分证据（未闭环）；同端点 DeepSeek V4 Flash 已实测不兼容 |
 | 当前源码与依赖 | 新包 `src/xiaowei/` 含 `sqlguard.py`、`starrocks.py`、`starrocks_tools.py`、`channel_store.py`、`migrations/002_p1b_channels.sql`（应用表 v2）、`channel.py` 、`web.py` 与 `static/`，`feishu.py`，以及本分支新增的 `runtime.py`、`cli.py`、`__main__.py`；锁定 `asyncmy==0.2.15`、`lark-channel-sdk==1.4.0`（精确钉版，已加入依赖基线）。另锁定 `openai-agents[sqlalchemy]` 0.22.3、`mcp` 2.2.0、`openai` 3.20.0、SQLAlchemy 2.0.52、asyncpg 0.30.0，urllib3 2.8.0（间接依赖，修复 CVE-2026-97687/97688/97689），Python 3.11.16。本分支起 wheel 只含 `src/xiaowei`，`xiaowei` 命令指向 `xiaowei.cli:main`；旧包专用的 `alembic` 移出生产依赖（dev 与 `legacy` extra 保留），旧源码仍在工作树 |
 | 新产品入口 | 本分支：`xiaowei`（与 `python -m xiaowei` 相同）的 `serve`、`storage init/upgrade/cleanup`、`requests resend`，配置为 JSON 文件（示例 `examples/xiaowei.example.json`）。离线验证完成；真实模型、StarRocks 与飞书未参与。旧 CLI/Compose 不是产品入口 |
 | 本次工作范围 | [P1-B 计划](docs/superpowers/plans/2026-09-30-p1b-starrocks-dual-entry.md) Task 8：正式装配（`runtime.py`）、命令（`cli.py`、`__main__.py`）、打包切换（`pyproject.toml`、`uv.lock`、旧镜像 `Dockerfile`）、`/readyz` 组件状态、CI `product-entry` 作业与 README。未调用真实模型、StarRocks 或飞书，未部署 |
@@ -290,9 +290,19 @@ CI integration job 设置 `SDK_TEST_POSTGRES_URL`，启动 `compose.sdk-test.yml
 - 回归：HTTPS-only 同址配置被拒、HTTP 配置（含 `[::1]` 与额外的其他端口 HTTPS）通过，正式浏览器路径 POST 成功，其他 Host 400、跨源 403 不变；周期核对设为 60 秒时终止锁连接，旧实例 2 秒内不再 ready，丢锁后的新请求不调用模型与 StarRocks，退出码 1；旧实例在途轮次期间第二实例取得锁并恢复为 interrupted、不重跑，旧实例随后的结果不能覆盖（请求保持 interrupted）；核对查询频繁在途时连续 5 次正常停止均退出 0；两个入口在 INFO、DEBUG 下（预置 `OPENAI_LOG=debug`）不出现端点 canary、模型连接地址、数据库端口、请求行与请求选项、消息与凭据，产品自身的启动恢复与轮次阶段日志仍在；canary 子进程改用正式入口的 `configure_logging`，对照进程证明成功响应时 httpx2 会写出含端点 canary 的完整 URL。
 - 隔离变异 9 项（同址 HTTPS 算监听地址、不注册终止通知、watch 先睡满间隔、正常停止仍取消 watch、释放前不注销通知、通知不锁低 readiness、回到根 logger `basicConfig`、不按来源过滤、不放开产品 logger）均使对应用例失败。
 
+**Task 8 增量复审修复**（复审针对 `f8c03af`；B1 已确认闭合，B2、B3 经复现确认未完全闭合）：
+
+- B2 共同根因：锁丢失通知、旧实例正在提交的接收事务与新实例启动恢复之间没有数据库级交接边界。
+  - B2.1：旧实例的接收事务通过检查后、提交前失去锁，新实例的恢复看不到未提交的 INSERT，旧事务随后把请求提交为 accepted 并长期滞留。修复在 `storage.InstanceLock.admits` / `exclude_accepts` 与 `ChannelStore.accept` / `recover`：接收新请求的事务先取得接收屏障（独立 advisory 键）的共享事务锁，再在库内核对实例锁仍由本进程的持锁后端持有（`pg_locks` + `pg_stat_activity` 的 pid 与 backend_start）；核对失败不写入、锁低 readiness 并拒绝。恢复在持锁连接的事务内先取得同一屏障的排他事务锁，再读取请求，因此会等仍在提交的接收事务结束；恢复成功后该存储的接收都经此核对。修复前真实 PostgreSQL 上复现为请求停在 accepted（存储层恢复 interrupted=1 而非 2；正式装配的最终状态为 `['accepted', 'completed']`），终止通知被错过时旧实例仍能写入新请求。
+  - B2.2：f8c03af 在取得锁并提交后才注册终止通知，连接在此之前关闭则通知已错过（复现：`closed_before_listener True`、`late_listener_fired False`）。修复为 `InstanceLock.watching`：注册后立即复核 `is_closed()`，已关闭即按丢锁处理并拒绝启动（`StorageUnavailableError`），不等周期核对；正常停止不取消核对查询的修复保留。
+- B3 根因：日志输出端仍放行第三方 WARNING 及以上，且飞书 SDK 导入时给 `Lark` logger 自装 stdout handler，绕过输出端过滤；真实锁定版的端点探针失败时，stdout 与 stderr 都写出 `HTTPConnectionPool(host='127.0.0.1', port=…)` 与含端点的完整路径。修复在 `cli.configure_logging`：输出端只接受 `xiaowei` 日志，第三方在任何级别都不输出；先导入 `lark_channel.core.log` 再移除其 handler（保留传播，由根 handler 过滤），不改依赖源码。早期 SDK 日志开关强制关闭不变。
+- 回归：存储层与正式装配各一项“接收事务暂停 → 终止旧锁 → 新实例接管恢复 → 放行旧事务”，最终没有 accepted/running，重复请求得到 interrupted 终态，模型与 StarRocks 未调用、旧实例退出 1；终止通知被错过时持有者核对拒绝写入并锁低 readiness，新实例照常接收；已关闭连接注册通知时立即锁低并拒绝；真实 `lark_channel` 探针在 INFO/DEBUG（预置 `OPENAI_LOG=debug`）下，对照进程两路输出都含端点与主机端口，正式日志配置下 stdout 只有脚本自身输出，stderr 不含端点、主机、端口、`HTTPConnectionPool`、`[Lark]`，产品事件与 `reason=` 仍在。首轮回归（B1 的 IPv4/IPv6/跨源拒绝、正式浏览器、丢锁即停、正常停止）全部保留并通过。
+- 隔离变异 9 项（接收不取共享屏障、恢复不取排他屏障、不核对锁持有者、恢复后不绑定实例锁、核对失败仍写入、去掉注册后的关闭复核、重新允许第三方 WARNING、保留 Lark 自带 handler、第三方按所选级别放行）均使对应用例失败。
+- 首轮 B3 记录中“第三方只输出 WARNING 及以上”已被本轮取代。
+
 **Task 8 与计划的差异**（JSON 配置、启动失败即退出、`serve` 不装配 MCP、重发的 chat_id 由操作者给出、legacy 镜像与冒烟脚本、wheel 契约测试的调整、测试位置）记在计划 Task 8 的实施修订中。
 
-**Task 8 未覆盖：** 真实模型、真实 StarRocks、真实飞书长连接与发送（Task 9，需授权）；正式 `serve` 的成功轮次只在进程内替换模型后证明，子进程中的正式命令只证明到模型失败回执。丢锁检测依赖连接终止通知：服务端终止或本端收到断开时立即生效；网络中断而本端未收到断开时，仍要等周期核对（`lock_check_seconds`，默认 5 秒，加上命令超时）发现。丢锁时已在运行的轮次在停止期限内继续调用模型与 StarRocks，结果因数据库条件更新不能覆盖新实例的恢复结论，但这些调用发生在无锁状态；丢锁前已通过就绪检查、尚未提交的接受事务可能在新实例恢复之后落库为 accepted，不会被旧实例运行，留待下次启动恢复。第三方依赖的 WARNING 及以上日志仍输出，未逐条核对其内容。浏览器验收与 compose-smoke 的新镜像只在本机或 CI 运行过一次（浏览器用例未纳入 CI）。`.env.example` 仍是旧 M5 变量说明，未改。新产品 Compose、持久卷与备份恢复属 P3。
+**Task 8 未覆盖：** 真实模型、真实 StarRocks、真实飞书长连接与发送（Task 9，需授权）；正式 `serve` 的成功轮次只在进程内替换模型后证明，子进程中的正式命令只证明到模型失败回执。丢锁检测依赖连接终止通知：服务端终止或本端收到断开时立即生效；网络中断而本端未收到断开时，仍要等周期核对（`lock_check_seconds`，默认 5 秒，加上命令超时）发现。丢锁时已在运行的轮次在停止期限内继续调用模型与 StarRocks，结果因数据库条件更新不能覆盖新实例的恢复结论，但这些调用发生在无锁状态（立即取消需改变取消契约，未做）。旧实例的接收事务若在提交前长时间卡住（如网络分区下未断开），新实例的恢复在接收屏障上等待，超过命令超时即启动失败、需重试；持有者核对依赖同一数据库角色能读到持锁后端的 `backend_start`，读不到时按丢锁拒绝接收（失败关闭）。“取得锁后、注册通知前断连”的交错无法在正式进程中确定性注入，由对 `watching` 的直接用例与终止通知端到端用例共同证明。第三方依赖的日志不再输出，其中可能有助排障的错误需靠小维自身的原因码与退出码定位。浏览器验收与 compose-smoke 的新镜像只在本机或 CI 运行过一次（浏览器用例未纳入 CI）。`.env.example` 仍是旧 M5 变量说明，未改。新产品 Compose、持久卷与备份恢复属 P3。
 
 **下一项：** Task 8 复审（精确 SHA 见 PR #18）。通过并经用户同意合入后进入 Task 9；Task 7 的真实飞书验证（长连接收发、重投、发送失败、断线）与 Task 9 一并在用户授权后进行。
 
@@ -521,6 +531,10 @@ Task 8 正式入口验证（锁文件只把 alembic 从生产依赖移到 dev/le
 | 审查修复：全量；`-m security` | 2680 passed，152 skipped，15 deselected；927 passed，79 skipped |
 | 审查修复：隔离变异 9 项 | 全部使对应用例失败 |
 | 审查修复：`ruff check .`、`ruff format --check src/xiaowei tests/sdk_core`、`mypy src`、`git diff --check`、`uv lock --check` | 通过；依赖与锁文件未变 |
+| 增量复审修复：修复前运行新用例 | B2.1 存储层恢复 interrupted=1（期望 2），正式装配最终状态 `['accepted', 'completed']`，错过通知时旧实例仍写入（未抛 `NotReadyError`）；B2.2 草稿脚本按 `f8c03af` 的注册方式在已关闭连接上注册，通知不触发；B3 两级别下 stdout 含 `[Lark]` 原始异常、stderr 含第三方 WARNING 的端点 |
+| 增量复审修复：`SDK_TEST_POSTGRES_URL=$SDK_PG uv run --locked --extra dev python -m pytest tests/sdk_core/test_storage_v2.py tests/sdk_core/test_runtime.py tests/sdk_core/test_cli.py tests/sdk_core/test_channel_store.py -q` | 114 passed；接管与丢锁相关 9 项连续 5 次通过 |
+| 增量复审修复：浏览器；全量；`-m security` | 3 passed；2686 passed，152 skipped，15 deselected；927 passed，79 skipped |
+| 增量复审修复：隔离变异 9 项；`ruff check .`、`ruff format --check src/xiaowei tests/sdk_core`、`mypy src`、`git diff --check`、`uv lock --check` | 变异全部使对应用例失败；检查通过，依赖与锁文件未变 |
 
 Task 4 请求与渠道状态验证（锁文件未变，测试 PostgreSQL 为本机容器）：
 

@@ -6,14 +6,15 @@ SDK 表由 ``SQLAlchemySession`` 的公开建表路径管理；应用表以 ``xi
 
 ``serve`` 用一条专用连接在进程生命周期内持有会话级实例锁（``hold_instance_lock``）；初始化在
 任何建表前取得同一把会话级锁，升级在事务内尝试取得同一键的事务级锁，取不到即拒绝，因此
-不能与在线实例或彼此并发修改数据库。数据库
-URL 只来自私有配置，错误信息不携带 URL、主机或原始驱动异常。
+不能与在线实例或彼此并发修改数据库。请求接收与接管恢复另用一个屏障键交接
+（``InstanceLock.admits``）。数据库 URL 只来自私有配置，错误信息不携带 URL、主机或原始驱动异常。
 """
 
 import asyncio
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
+from datetime import datetime
 from importlib.resources import files
 
 from agents.extensions.memory import SQLAlchemySession
@@ -41,6 +42,8 @@ APP_TABLES = frozenset(
 _MIGRATIONS = ("migrations/001_initial.sql", "migrations/002_p1b_channels.sql")
 # 实例锁：会话级（serve）与事务级（初始化、升级）共用同一个键，二者互斥。锁按数据库区分。
 _INSTANCE_LOCK_KEY = 0x7869_6177_6569_0001
+# 接收屏障：请求接收事务持共享锁，接管恢复持排他锁（见 ``InstanceLock.admits``）。
+_ACCEPT_BARRIER_KEY = 0x7869_6177_6569_0002
 
 _DRIVER = "postgresql+asyncpg"
 _CONNECT_TIMEOUT_SECONDS = 5.0
@@ -97,11 +100,14 @@ class InstanceLock:
     """持有实例锁的专用连接。只有持锁的 ``serve`` 启动阶段用它执行一致性恢复。
 
     连接一旦终止，锁即随之释放、另一进程可以取得：``lost`` 由驱动的连接终止通知立即设置并同时
-    锁低 readiness，不等下一次 ``verify``。
+    锁低 readiness，不等下一次 ``verify``。``pid`` 与 ``started`` 是持锁后端在数据库中的身份，
+    接收事务据此在数据库内确认本进程仍持有实例锁（``admits``）。
     """
 
     connection: AsyncConnection
     readiness: Readiness
+    pid: int
+    started: datetime
     lost: asyncio.Event = field(default_factory=asyncio.Event)
 
     def mark_lost(self) -> None:
@@ -117,6 +123,81 @@ class InstanceLock:
             self.mark_lost()
             raise StorageUnavailableError("实例锁连接已断开，进程必须停止") from None
 
+    @asynccontextmanager
+    async def watching(self) -> AsyncIterator[None]:
+        """持锁期间接收 asyncpg 公开的连接终止通知；退出前先注销，正常关闭不算丢锁。
+
+        连接若在注册之前已经关闭，通知已经错过：注册后立即复核关闭状态，按丢锁处理并拒绝启动，
+        不留给周期核对。
+        """
+        try:
+            driver = (await self.connection.get_raw_connection()).driver_connection
+        except (OSError, SQLAlchemyError):
+            driver = None
+        if driver is None:
+            self.mark_lost()
+            raise StorageUnavailableError("实例锁连接已断开")
+
+        def terminated(_: object) -> None:
+            self.mark_lost()
+
+        driver.add_termination_listener(terminated)
+        try:
+            if driver.is_closed():
+                self.mark_lost()
+                raise StorageUnavailableError("实例锁连接已断开")
+            yield
+        finally:
+            driver.remove_termination_listener(terminated)
+
+    async def admits(self, conn: AsyncConnection) -> bool:
+        """在请求接收事务内调用：与接管恢复互斥，并确认实例锁仍由本进程的持锁后端持有。
+
+        先取得接收屏障的事务级共享锁并保持到事务结束，再在数据库内核对锁的持有者。新实例的接管
+        恢复在取得实例锁之后、读取请求之前取得同一屏障的排他锁（``exclude_accepts``），因此：
+        核对时锁仍属本进程的接收事务，恢复会等它提交后再读取；核对晚于接管的，持有者已变，
+        拒绝并按丢锁处理。只靠进程内 readiness 不够，检查与提交之间仍可能发生接管。
+        """
+        await conn.execute(_SHARE_ACCEPT_BARRIER, {"barrier": _ACCEPT_BARRIER_KEY})
+        held = await conn.scalar(
+            _HOLDS_INSTANCE_LOCK,
+            {
+                "classid": _INSTANCE_LOCK_KEY >> 32,
+                "objid": _INSTANCE_LOCK_KEY & 0xFFFF_FFFF,
+                "pid": self.pid,
+                "started": self.started,
+            },
+        )
+        if not held:
+            self.mark_lost()
+        return bool(held)
+
+    async def exclude_accepts(self) -> None:
+        """在持锁连接的恢复事务内调用：等待仍在提交的接收事务结束，并在本事务内阻止新的接收。"""
+        await self.connection.execute(_EXCLUDE_ACCEPTS, {"barrier": _ACCEPT_BARRIER_KEY})
+
+
+_ACQUIRE_INSTANCE_LOCK = text(
+    """
+    SELECT pg_try_advisory_lock(:key) AS acquired, pid, backend_start AS started
+    FROM pg_stat_activity WHERE pid = pg_backend_pid()
+    """
+)
+# bigint 键的 advisory 锁在 pg_locks 中拆为 classid（高 32 位）与 objid（低 32 位），objsubid = 1。
+_HOLDS_INSTANCE_LOCK = text(
+    """
+    SELECT EXISTS (
+        SELECT 1 FROM pg_locks AS l JOIN pg_stat_activity AS a ON a.pid = l.pid
+        WHERE l.locktype = 'advisory' AND l.granted AND l.mode = 'ExclusiveLock'
+          AND l.database = (SELECT oid FROM pg_database WHERE datname = current_database())
+          AND l.classid = CAST(:classid AS oid) AND l.objid = CAST(:objid AS oid)
+          AND l.objsubid = 1 AND l.pid = :pid AND a.backend_start = :started
+    )
+    """
+)
+_SHARE_ACCEPT_BARRIER = text("SELECT pg_advisory_xact_lock_shared(:barrier)")
+_EXCLUDE_ACCEPTS = text("SELECT pg_advisory_xact_lock(:barrier)")
+
 
 @asynccontextmanager
 async def hold_instance_lock(
@@ -129,33 +210,20 @@ async def hold_instance_lock(
         raise StorageUnavailableError("PostgreSQL 不可用") from None
     try:
         try:
-            acquired = await conn.scalar(
-                text("SELECT pg_try_advisory_lock(:key)"), {"key": _INSTANCE_LOCK_KEY}
+            row = (
+                (await conn.execute(_ACQUIRE_INSTANCE_LOCK, {"key": _INSTANCE_LOCK_KEY}))
+                .mappings()
+                .one()
             )
             # 会话级锁不随事务结束释放；提交只是结束本条查询的隐式事务。
             await conn.commit()
         except (OSError, SQLAlchemyError):
             raise StorageUnavailableError("PostgreSQL 不可用") from None
-        if not acquired:
+        if not row["acquired"]:
             raise StorageBusyError
-        lock = InstanceLock(conn, readiness)
-        try:
-            driver = (await conn.get_raw_connection()).driver_connection
-        except (OSError, SQLAlchemyError):
-            driver = None
-        if driver is None:
-            raise StorageUnavailableError("PostgreSQL 不可用")
-
-        def terminated(_: object) -> None:
-            lock.mark_lost()
-
-        # asyncpg 公开的连接终止通知：服务端终止或网络断开时立即回调。主动释放前先注销，
-        # 正常关闭不算丢锁。
-        driver.add_termination_listener(terminated)
-        try:
+        lock = InstanceLock(conn, readiness, row["pid"], row["started"])
+        async with lock.watching():
             yield lock
-        finally:
-            driver.remove_termination_listener(terminated)
     finally:
         # 关闭连接即释放会话级锁；连接已断开时关闭也不会再持有它。
         try:

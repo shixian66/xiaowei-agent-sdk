@@ -467,6 +467,88 @@ async def test_recovery_failure_rolls_back_and_blocks_readiness(env: Env) -> Non
     assert await env.session_state(running.session_id) == "active"
 
 
+# ---- 实例接管 ----------------------------------------------------------------------------
+
+# 只终止持有会话级实例锁的后端（排他）；接收事务的共享屏障锁不受影响。
+TERMINATE_INSTANCE_LOCK = text(
+    "SELECT count(pg_terminate_backend(pid)) FROM pg_locks"
+    " WHERE locktype = 'advisory' AND granted AND mode = 'ExclusiveLock'"
+)
+WAITING_ON_LOCK = text(
+    "SELECT count(*) FROM pg_stat_activity"
+    " WHERE wait_event_type = 'Lock' AND pid <> pg_backend_pid()"
+)
+
+
+async def waiting_on_locks(engine: AsyncEngine, count: int) -> bool:
+    """在期限内至少有 ``count`` 个后端在数据库锁上等待。"""
+    async with engine.connect() as conn:
+        for _ in range(100):
+            if await conn.scalar(WAITING_ON_LOCK) >= count:
+                return True
+            await conn.commit()
+            await asyncio.sleep(0.02)
+    return False
+
+
+async def test_takeover_recovery_waits_for_an_accept_still_committing(postgres_url: URL) -> None:
+    """旧实例的接收事务已通过检查、尚未提交时失去锁：新实例的恢复必须等它提交后再读取，
+    请求不能停在 accepted；重复请求得到已有终态。"""
+    async with environment(postgres_url) as old, environment(postgres_url) as new:
+        async with hold_instance_lock(old.engine, old.readiness) as old_lock:
+            await old.store.recover(old_lock)
+            await old.accept("r0")  # 建立 current 映射
+            # 暂停点：行锁挡住接收事务读取 current 映射（FOR SHARE），此时它已开始、未提交。
+            blocker = await new.engine.connect()
+            await blocker.begin()
+            await blocker.execute(text("SELECT 1 FROM xiaowei_channel_session FOR UPDATE"))
+            pending = asyncio.create_task(old.accept("r1", "接管时尚未提交"))
+            assert await waiting_on_locks(new.engine, 1)
+
+            async with new.engine.begin() as conn:
+                assert await conn.scalar(TERMINATE_INSTANCE_LOCK) == 1
+            await asyncio.wait_for(old_lock.lost.wait(), 2)
+
+            async with hold_instance_lock(new.engine, new.readiness) as new_lock:
+                recovery = asyncio.create_task(new.store.recover(new_lock))
+                await waiting_on_locks(new.engine, 2)  # 恢复在接收屏障上等待
+                await blocker.rollback()
+                await blocker.close()
+                late = await asyncio.wait_for(pending, 10)
+                report = await asyncio.wait_for(recovery, 10)
+                assert late.created and report.interrupted == 2
+                async with new.engine.connect() as conn:
+                    states = await conn.scalar(
+                        text("SELECT array_agg(DISTINCT state) FROM xiaowei_request")
+                    )
+                assert states == ["interrupted"]
+                again = await new.accept("r1", "接管时尚未提交")
+                assert not again.created and again.record.state == "interrupted"
+                with pytest.raises(NotReadyError):
+                    await old.store.start(late.record)
+
+
+async def test_accept_after_the_lock_moved_is_refused_without_the_notice(
+    postgres_url: URL,
+) -> None:
+    """终止通知被错过（锁的 readiness 与存储的不同）：数据库内的持有者核对仍拒绝写入新请求。"""
+    async with environment(postgres_url) as old, environment(postgres_url) as new:
+        async with hold_instance_lock(old.engine, Readiness()) as old_lock:
+            await old.store.recover(old_lock)
+            assert (await old.accept("r0")).created  # 对照：持锁时正常接收
+            async with new.engine.begin() as conn:
+                assert await conn.scalar(TERMINATE_INSTANCE_LOCK) == 1
+            async with hold_instance_lock(new.engine, new.readiness) as new_lock:
+                await new.store.recover(new_lock)
+                assert old.readiness.ok
+                with pytest.raises(NotReadyError):
+                    await old.accept("r1")
+                assert old.readiness.reason == "instance_lock_lost"
+                async with new.engine.connect() as conn:
+                    assert await conn.scalar(text("SELECT count(*) FROM xiaowei_request")) == 1
+                assert (await new.accept("r1")).created  # 新实例照常接收
+
+
 # ---- 会话映射 ----------------------------------------------------------------------------
 
 

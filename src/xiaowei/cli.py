@@ -117,20 +117,34 @@ async def _serve(config: "ServeConfig") -> int:
 
 
 def configure_logging(level: str) -> None:
-    """``--log-level`` 只作用于本产品的 ``xiaowei`` 日志；第三方依赖只输出 WARNING 及以上。
+    """正式日志只输出本产品的 ``xiaowei`` 日志，级别由 ``--log-level`` 决定；第三方日志一律不输出。
 
-    第三方的 INFO/DEBUG 会写出完整端点、连接地址与请求选项（如 httpx2 的 ``HTTP Request: POST
-    <url>``、httpcore2 的连接日志、``OPENAI_LOG`` 打开的 openai 请求日志）。库可以自行调高自己
-    logger 的级别，所以由输出端按来源过滤，而不只依赖根 logger 的级别。
+    第三方日志在任何级别都可能带出完整端点、连接地址、请求选项或原始异常：INFO/DEBUG 如 httpx2 的
+    ``HTTP Request: POST <url>``、``OPENAI_LOG`` 打开的 openai 请求日志，WARNING/ERROR 如飞书 SDK
+    探针与重连失败时的原始异常（含主机、端口与路径）。库可以自行调高自己 logger 的级别，所以由
+    输出端按来源过滤，而不只依赖级别。本产品的失败只以固定说明与原因码记录。
     """
-    threshold = max(logging.WARNING, logging.getLevelNamesMapping()[level])
     handler = logging.StreamHandler(sys.stderr)
     handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(name)s %(message)s"))
-    handler.addFilter(lambda record: _own(record.name) or record.levelno >= threshold)
+    handler.addFilter(lambda record: _own(record.name))
     root = logging.getLogger()
     root.addHandler(handler)
-    root.setLevel(threshold)
+    root.setLevel(logging.WARNING)
     logging.getLogger("xiaowei").setLevel(level)
+    _detach_dependency_handlers()
+
+
+def _detach_dependency_handlers() -> None:
+    """移除依赖在导入时自行安装的输出 handler，使其日志只经过上面的过滤。
+
+    飞书 SDK 的 ``lark_channel.core.log`` 在导入时给 ``"Lark"`` logger 安装 stdout handler；先导入
+    它让 handler 就位再移除，此后的导入不会重复安装。保留传播交给根 handler 过滤；不改依赖源码。
+    """
+    import lark_channel.core.log
+
+    lark = lark_channel.core.log.logger
+    for installed in list(lark.handlers):
+        lark.removeHandler(installed)
 
 
 def _own(name: str) -> bool:

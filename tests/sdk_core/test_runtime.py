@@ -348,9 +348,21 @@ async def test_occupied_port_fails_before_touching_the_database(env: Env) -> Non
 # ---- 运行中失败 ----------------------------------------------------------------------
 
 
+# 只终止持有会话级实例锁（排他）的后端；接收事务的共享屏障锁不受影响。
 TERMINATE_LOCK = (
-    "SELECT count(pg_terminate_backend(pid)) FROM pg_locks WHERE locktype = 'advisory' AND granted"
+    "SELECT count(pg_terminate_backend(pid)) FROM pg_locks"
+    " WHERE locktype = 'advisory' AND granted AND mode = 'ExclusiveLock'"
 )
+WAITING_ON_LOCK = "SELECT count(*) FROM pg_stat_activity WHERE wait_event_type = 'Lock'"
+
+
+async def waiting_on_locks(env: Env, count: int, timeout: float = 10) -> bool:
+    """在期限内至少有 ``count`` 个后端在数据库锁上等待。"""
+    for _ in range(int(timeout / 0.02)):
+        if await env.scalar(WAITING_ON_LOCK) >= count:
+            return True
+        await asyncio.sleep(0.02)
+    return False
 
 
 async def not_serving(served: Served, timeout: float = 2) -> None:
@@ -425,6 +437,51 @@ async def test_second_instance_after_lock_loss_never_runs_the_old_request(env: E
             assert await env.scalar("SELECT state FROM xiaowei_request") == "interrupted"
             assert len(env.scripts.calls[slow]) <= 2  # 只来自旧实例的那一次运行
             assert await fresh.finish() == 0
+
+
+async def test_accept_paused_across_a_takeover_ends_interrupted_not_stranded(env: Env) -> None:
+    """旧实例的接收事务未提交时失去锁、新实例接管：恢复等它提交后再读取，请求不停在 accepted；
+    重复请求在新实例得到已有终态，不运行模型或查询。"""
+    first = env.scripts.add("先建立会话", tool_call("list_tables"), cite())
+    late = env.scripts.add("接管时尚未提交", tool_call("list_tables"), cite())
+    old = env.config(lock_check_seconds=60)
+    async with env.running(old) as served:
+        await served.page()
+        assert (await served.turn(first, request_id="first")).json()["state"] == "completed"
+        attempts = env.drv.attempts
+        secret = SecretStr(env.url.render_as_string(hide_password=False))
+        async with open_engine(secret) as admin:
+            # 暂停点：行锁挡住接收事务读取 current 映射，此时它已开始、未提交。
+            blocker = await admin.connect()
+            await blocker.begin()
+            await blocker.execute(text("SELECT 1 FROM xiaowei_channel_session FOR UPDATE"))
+            pending = asyncio.create_task(served.turn(late, request_id="late"))
+            assert await waiting_on_locks(env, 1)
+            assert await env.scalar(TERMINATE_LOCK) == 1
+
+            second = Env(env.url, free_port(), env.scripts, env.clock, env.drv)
+            stop = asyncio.Event()
+            task = asyncio.create_task(second.serve(second.config(), stop))
+            # 新实例的恢复应在接收屏障上等待；没有屏障时它直接完成，这里只是等到期限。
+            await waiting_on_locks(env, 2, timeout=2)
+            await blocker.rollback()
+            await blocker.close()
+        response = await asyncio.wait_for(pending, 30)
+        assert response.status_code != 200 or response.json()["state"] != "completed"
+        assert await asyncio.wait_for(served.task, 30) == 1
+
+        async with httpx.AsyncClient(
+            base_url=second.origin, timeout=30, cookies=served.client.cookies
+        ) as client:
+            fresh = Served(client, task, stop)
+            await fresh.ready()
+            states = await env.scalar("SELECT array_agg(state ORDER BY state) FROM xiaowei_request")
+            assert states == ["completed", "interrupted"]
+            again = await fresh.turn(late, request_id="late")
+            assert again.status_code == 200 and again.json()["state"] == "interrupted"
+            assert await fresh.finish() == 0
+    assert late not in env.scripts.calls  # 模型与查询都没有为它运行
+    assert env.drv.attempts == attempts
 
 
 # ---- 飞书 ----------------------------------------------------------------------------
