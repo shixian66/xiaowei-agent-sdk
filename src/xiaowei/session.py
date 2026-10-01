@@ -149,6 +149,30 @@ _DELETE_MAPPINGS = text(
       AND NOT EXISTS (SELECT 1 FROM xiaowei_session s WHERE s.session_id = :session_id)
     """
 )
+# 从未进入 PolicySession 的渠道会话（Agent 运行前新建会话、繁忙或恢复的终态请求）没有会话
+# 元数据，也就没有 SDK 历史：映射已过期、已退役且没有运行中或发送中的请求时，删除其已过期
+# 的终态请求与证据，再在不再有任何请求时删除映射。不调用 SDK clear_session()。
+_UNREGISTERED_CANDIDATES = text(
+    """
+    SELECT m.session_id FROM xiaowei_channel_session m
+    WHERE m.state = 'retired' AND m.expires_at <= :now
+      AND NOT EXISTS (SELECT 1 FROM xiaowei_session s WHERE s.session_id = m.session_id)
+      AND NOT EXISTS (
+          SELECT 1 FROM xiaowei_request r
+          WHERE r.session_id = m.session_id
+            AND (r.state IN ('accepted', 'running') OR r.delivery = 'sending')
+      )
+    ORDER BY m.expires_at, m.session_id LIMIT :limit
+    """
+)
+_DELETE_UNREGISTERED_MAPPING = text(
+    """
+    DELETE FROM xiaowei_channel_session m
+    WHERE m.session_id = :session_id AND m.state = 'retired' AND m.expires_at <= :now
+      AND NOT EXISTS (SELECT 1 FROM xiaowei_session s WHERE s.session_id = m.session_id)
+      AND NOT EXISTS (SELECT 1 FROM xiaowei_request r WHERE r.session_id = m.session_id)
+    """
+)
 
 
 class SessionError(Exception):
@@ -596,18 +620,22 @@ async def close_sessions(conn: AsyncConnection, session_ids: Sequence[str]) -> N
 
 @dataclass(frozen=True)
 class CleanupReport:
-    """本批次完成清理（元数据已删除）的会话数。"""
+    """本批次完成清理的会话数：``sessions`` 为删除了会话元数据的，``unregistered`` 为没有会话
+    元数据、只删除了渠道映射的。"""
 
     sessions: int
+    unregistered: int = 0
 
 
 async def cleanup_expired(engine: AsyncEngine, *, now: datetime, batch_size: int) -> CleanupReport:
     """显式维护：清理一批已过期、非 current、没有运行中或发送中请求的会话。
 
     每个会话依次：带条件关闭 → SDK ``clear_session()`` 清历史 → 删除已过期的请求与证据 →
-    会话不再有任何请求时删除元数据与已退役映射。每条删除都重新核对条件，竞争导致条件不再
-    成立时跳过；任一步存储失败立即停下并抛出，已关闭的会话保持不可回放，可再次运行完成。
-    未过期的请求与证据保留到各自过期后的下一次清理。普通启动不调用本函数。
+    会话不再有任何请求时删除元数据与已退役映射。没有会话元数据的已退役映射（从未运行 Agent）
+    不清历史，只删除已过期的请求与证据，再在不再有任何请求时删除映射。两类合计不超过
+    ``batch_size``。每条删除都重新核对条件，竞争导致条件不再成立时跳过；任一步存储失败立即
+    停下并抛出，已关闭的会话保持不可回放，可再次运行完成。未过期的请求与证据保留到各自过期
+    后的下一次清理。普通启动不调用本函数。
     """
     if batch_size <= 0:
         raise ValueError("清理批次必须为正数")
@@ -633,4 +661,25 @@ async def cleanup_expired(engine: AsyncEngine, *, now: datetime, batch_size: int
         except (OSError, SQLAlchemyError):
             raise SessionStoreError("会话清理中断，已关闭的会话保持不可回放") from None
         cleaned += deleted
-    return CleanupReport(sessions=cleaned)
+    unregistered = 0
+    remaining = batch_size - len(candidates)
+    if remaining > 0:
+        unregistered = await _cleanup_unregistered(engine, now=now, limit=remaining)
+    return CleanupReport(sessions=cleaned, unregistered=unregistered)
+
+
+async def _cleanup_unregistered(engine: AsyncEngine, *, now: datetime, limit: int) -> int:
+    try:
+        async with engine.connect() as conn:
+            params = {"now": now, "limit": limit}
+            candidates = [r[0] for r in await conn.execute(_UNREGISTERED_CANDIDATES, params)]
+        cleaned = 0
+        for session_id in candidates:
+            scoped = {"now": now, "session_id": session_id}
+            async with engine.begin() as conn:
+                await conn.execute(_DELETE_EXPIRED_REQUESTS, scoped)
+                await conn.execute(_DELETE_EXPIRED_EVIDENCE, scoped)
+                cleaned += (await conn.execute(_DELETE_UNREGISTERED_MAPPING, scoped)).rowcount
+    except (OSError, SQLAlchemyError):
+        raise SessionStoreError("会话清理中断，可再次运行完成") from None
+    return cleaned

@@ -110,11 +110,11 @@ async def test_unknown_or_missing_versions_are_never_upgraded(postgres_url: URL)
         assert await _version(engine) == 99
 
 
-async def test_v2_program_state_is_rejected_by_a_v1_check(postgres_url: URL) -> None:
-    """旧 v1 程序只接受版本 1：v2 数据库上的版本号不是 1，旧程序的就绪检查会拒绝。"""
+async def test_initialization_advances_the_schema_version(postgres_url: URL) -> None:
+    """全新初始化把版本推进到 2。旧 v1 程序只接受版本 1 由基线源码保证，这里不复制旧实现。"""
     async with open_engine(secret(postgres_url)) as engine:
         await initialize_storage(engine)
-        assert await _version(engine) != 1
+        assert await _version(engine) == APP_SCHEMA_VERSION == 2
 
 
 async def test_failed_upgrade_rolls_back_completely(postgres_url: URL) -> None:
@@ -165,6 +165,36 @@ async def test_instance_lock_is_exclusive_with_serve_and_maintenance(postgres_ur
         async with hold_instance_lock(other, Readiness()):
             pass
         assert readiness.ok
+
+
+async def test_busy_initialization_leaves_an_empty_database_untouched(postgres_url: URL) -> None:
+    async with (
+        open_engine(secret(postgres_url)) as engine,
+        open_engine(secret(postgres_url)) as other,
+    ):
+        async with hold_instance_lock(engine, Readiness()):
+            with pytest.raises(StorageBusyError):
+                await initialize_storage(other)
+            # 被拒绝的命令没有建立任何表（含 SDK 表）。
+            assert await _tables(engine) == set()
+        await initialize_storage(other)
+        await check_storage(other)
+
+
+async def test_concurrent_first_initializations_have_one_writer(postgres_url: URL) -> None:
+    """并发首次初始化：取不到锁的进程直接拒绝（不建表），不会因锁外建表竞争而失败。"""
+    async with (
+        open_engine(secret(postgres_url)) as first,
+        open_engine(secret(postgres_url)) as second,
+    ):
+        for _ in range(3):
+            results = await asyncio.gather(
+                initialize_storage(first), initialize_storage(second), return_exceptions=True
+            )
+            assert any(r is None for r in results)
+            assert all(r is None or isinstance(r, StorageBusyError) for r in results)
+        await check_storage(first)
+        assert await _tables(first) == {SDK_SESSIONS_TABLE, SDK_MESSAGES_TABLE, *APP_TABLES}
 
 
 async def test_losing_the_lock_connection_locks_readiness(postgres_url: URL) -> None:

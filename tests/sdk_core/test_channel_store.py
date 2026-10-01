@@ -6,7 +6,7 @@
 
 import asyncio
 import json
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from datetime import timedelta
@@ -23,6 +23,7 @@ from tests.sdk_core.synthetic_tools import Clock, ready_engine, secret
 from xiaowei.channel_store import (
     ChannelStore,
     ChannelStoreUnavailableError,
+    FailureCode,
     NotReadyError,
     RequestConflictError,
     RequestRecord,
@@ -148,6 +149,43 @@ class Env:
         async with self.engine.begin() as conn:
             await conn.execute(text(f"DROP TRIGGER xw_fail ON {table}"))
             await conn.execute(text("DROP FUNCTION xw_fail()"))
+
+    async def slow_writes(self, when: str, events: str = "UPDATE") -> None:
+        """让 xiaowei_request 的匹配写入在数据库内等待，用于在关键事务中途取消。"""
+        async with self.engine.begin() as conn:
+            await conn.execute(
+                text(
+                    "CREATE FUNCTION xw_slow() RETURNS trigger LANGUAGE plpgsql AS"
+                    " $$ BEGIN PERFORM pg_sleep(3); RETURN NEW; END $$"
+                )
+            )
+            await conn.execute(
+                text(
+                    f"CREATE TRIGGER xw_slow BEFORE {events} ON xiaowei_request"
+                    f" FOR EACH ROW WHEN ({when}) EXECUTE FUNCTION xw_slow()"
+                )
+            )
+
+    async def heal_slow(self) -> None:
+        async with self.engine.begin() as conn:
+            await conn.execute(text("DROP TRIGGER xw_slow ON xiaowei_request"))
+            await conn.execute(text("DROP FUNCTION xw_slow()"))
+
+    async def cancel_while_sleeping(self, operation: Awaitable[object]) -> None:
+        """运行操作，待其写入在数据库内等待时取消；取消必须原样传播。"""
+        task = asyncio.ensure_future(operation)
+        async with self.engine.connect() as conn:
+            for _ in range(200):
+                sleeping = await conn.scalar(
+                    text("SELECT count(*) FROM pg_stat_activity WHERE wait_event = 'PgSleep'")
+                )
+                if sleeping or task.done():
+                    break
+                await asyncio.sleep(0.02)
+        assert not task.done(), "写入没有进入等待"
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
 
 
 @asynccontextmanager
@@ -582,3 +620,227 @@ async def test_cleanup_is_batched(env: Env) -> None:
     assert (await cleanup_expired(env.engine, now=env.clock(), batch_size=2)).sessions == 2
     assert (await cleanup_expired(env.engine, now=env.clock(), batch_size=2)).sessions == 1
     assert (await cleanup_expired(env.engine, now=env.clock(), batch_size=2)).sessions == 0
+
+
+# ---- 复审回归：readiness 门、取消、失败码闭集与无元数据会话清理 ---------------------------
+
+
+async def test_not_ready_refuses_to_create_a_mapping(env: Env) -> None:
+    existing = await env.store.current_session("web", "alice", "cookie-1")
+    env.readiness.lock("test")
+    # 已有映射仍可读取；不存在的映射不再创建，也没有写入。
+    assert await env.store.current_session("web", "alice", "cookie-1") == existing
+    with pytest.raises(NotReadyError):
+        await env.store.current_session("web", "alice", "cookie-2")
+    async with env.engine.connect() as conn:
+        assert await conn.scalar(text("SELECT count(*) FROM xiaowei_channel_session")) == 1
+
+
+async def _assert_recovered_consistently(postgres_url: URL) -> None:
+    """模拟停止并重启：持锁恢复后不再有未结束请求，被中断请求的会话均已关闭。"""
+    async with environment(postgres_url) as env:
+        async with hold_instance_lock(env.engine, env.readiness) as lock:
+            await env.store.recover(lock)
+        assert env.readiness.ok
+        async with env.engine.connect() as conn:
+            open_requests = await conn.scalar(
+                text("SELECT count(*) FROM xiaowei_request WHERE state IN ('accepted', 'running')")
+            )
+            unclosed = await conn.scalar(
+                text(
+                    "SELECT count(*) FROM xiaowei_request r JOIN xiaowei_session s"
+                    " USING (session_id) WHERE r.state = 'interrupted' AND s.state <> 'closed'"
+                )
+            )
+        assert (open_requests, unclosed) == (0, 0)
+
+
+async def _prepare_accept(env: Env) -> Callable[[], Awaitable[object]]:
+    await env.slow_writes("true", "INSERT")
+    return lambda: env.accept()
+
+
+async def _prepare_start(env: Env) -> Callable[[], Awaitable[object]]:
+    record = (await env.accept()).record
+    await env.slow_writes("NEW.state = 'running'")
+    return lambda: env.store.start(record)
+
+
+async def _prepare_complete(env: Env) -> Callable[[], Awaitable[object]]:
+    record = await env.store.start((await env.accept()).record)
+    await env.register_session(record.session_id)
+    await env.slow_writes("NEW.state = 'completed'")
+    return lambda: env.store.complete(record, ANSWER)
+
+
+async def _prepare_fail_after_commit(env: Env) -> Callable[[], Awaitable[object]]:
+    small = make_store(env.engine, env.clock, env.readiness, max_answer_bytes=50)
+    record = await small.start((await env.accept(store=small)).record)
+    await env.register_session(record.session_id)
+    await env.slow_writes("NEW.state = 'failed'")
+    return lambda: small.complete(record, ANSWER)  # 回答超限，转入失败写入
+
+
+@pytest.mark.parametrize(
+    "prepare",
+    [_prepare_accept, _prepare_start, _prepare_complete, _prepare_fail_after_commit],
+    ids=["accept", "update", "complete", "fail_after_commit"],
+)
+async def test_cancelled_critical_writes_lock_readiness(
+    postgres_url: URL, prepare: Callable[[Env], Awaitable[Callable[[], Awaitable[object]]]]
+) -> None:
+    async with environment(postgres_url) as env:
+        operation = await prepare(env)
+        await env.cancel_while_sleeping(operation())
+        assert not env.readiness.ok
+        with pytest.raises(NotReadyError):
+            await env.accept("r-next", conversation="other")
+        await env.heal_slow()
+    await _assert_recovered_consistently(postgres_url)
+
+
+async def test_cancelled_recovery_locks_readiness(postgres_url: URL) -> None:
+    async with environment(postgres_url) as env:
+        running = await env.store.start((await env.accept()).record)
+        await env.register_session(running.session_id)
+        await env.slow_writes("NEW.state = 'interrupted'")
+        async with hold_instance_lock(env.engine, env.readiness) as lock:
+            await env.cancel_while_sleeping(env.store.recover(lock))
+        assert not env.readiness.ok
+        await env.heal_slow()
+        assert (await env.row(running))["state"] == "running"  # 整体回滚
+    await _assert_recovered_consistently(postgres_url)
+
+
+@pytest.mark.parametrize(
+    "code", ["busy", "model_failed", "evidence_failed", "session_failed", "result_not_saved"]
+)
+async def test_allowed_failure_codes_round_trip(env: Env, code: FailureCode) -> None:
+    record = (await env.accept()).record
+    await env.store.fail(record, code)
+    assert (await env.store.get("web", "alice", "cookie-1", "r1")).failure_code == code
+    assert env.readiness.ok
+
+
+@pytest.mark.parametrize(
+    "code",
+    [
+        "interrupted",  # 只属于启动恢复
+        "connection to db.internal:5432 failed for user admin",
+        "busy " * 1000,
+        "",
+    ],
+    ids=["interrupted", "exception-canary", "long", "empty"],
+)
+async def test_unknown_failure_codes_are_never_written(env: Env, code: str) -> None:
+    record = (await env.accept()).record
+    with pytest.raises(ValueError):
+        await env.store.fail(record, code)  # type: ignore[arg-type]
+    row = await env.row(record)
+    assert (row["state"], row["failure_code"]) == ("accepted", None)
+    # 失败状态无法保存：按关键状态失败锁低 readiness，留给重启恢复标为 interrupted。
+    assert not env.readiness.ok
+
+
+async def test_failure_codes_are_closed_in_the_database_and_on_read(env: Env) -> None:
+    record = (await env.accept()).record
+    await env.store.fail(record, "busy")
+    for code in ("db.internal:5432 admin", "interrupted"):
+        with pytest.raises(Exception, match="check"):
+            async with env.engine.begin() as conn:
+                await conn.execute(
+                    text("UPDATE xiaowei_request SET failure_code = :c WHERE turn_id = :t"),
+                    {"c": code, "t": record.turn_id},
+                )
+    # 去掉约束后写入的未知值在读取时被拒绝，不回传给调用方。
+    async with env.engine.begin() as conn:
+        await conn.execute(
+            text("ALTER TABLE xiaowei_request DROP CONSTRAINT xiaowei_request_failure_code_check")
+        )
+        await conn.execute(
+            text("UPDATE xiaowei_request SET failure_code = 'leak' WHERE turn_id = :t"),
+            {"t": record.turn_id},
+        )
+    with pytest.raises(RequestUnavailableError):
+        await env.store.get("web", "alice", "cookie-1", "r1")
+
+
+async def _unregistered_counts(env: Env, session_id: str) -> tuple[int, int]:
+    """渠道映射与请求的条数（这些会话没有元数据，也没有 SDK 历史）。"""
+    sessions, requests, mappings, history = await _counts(env, session_id)
+    assert (sessions, history) == (0, 0)
+    return mappings, requests
+
+
+async def test_cleanup_removes_retired_sessions_that_never_ran(postgres_url: URL) -> None:
+    async with environment(postgres_url) as env:
+        # 空会话：创建映射后、首次运行前新建会话。
+        empty = await env.store.current_session("web", "alice", "c-empty")
+        await env.store.new_session("web", "alice", "c-empty")
+        # Agent 运行前失败（如繁忙）。
+        busy = (await env.accept("r1", conversation="c-busy")).record
+        await env.store.fail(busy, "busy")
+        await env.store.new_session("web", "alice", "c-busy")
+        # 接受后进程退出：恢复后的 interrupted。
+        stranded = (await env.accept("r2", conversation="c-int")).record
+    async with environment(postgres_url) as env:
+        async with hold_instance_lock(env.engine, env.readiness) as lock:
+            await env.store.recover(lock)
+        await env.store.new_session("web", "alice", "c-int")
+        current = await env.store.current_session("web", "alice", "c-int")
+
+        env.clock.advance(SESSION_RETENTION)
+        report = await cleanup_expired(env.engine, now=env.clock(), batch_size=10)
+        assert (report.sessions, report.unregistered) == (0, 3)
+        for session_id in (empty.session_id, busy.session_id, stranded.session_id):
+            assert await _unregistered_counts(env, session_id) == (0, 0)
+        # 当前会话即使过期也保留。
+        assert await _unregistered_counts(env, current.session_id) == (1, 0)
+
+
+async def test_unregistered_cleanup_keeps_active_and_unexpired_state(env: Env) -> None:
+    # 发送中的请求：会话已退役且过期，仍保留。
+    sending = await env.completed("r1", conversation="c-send")
+    assert await env.store.claim_send(sending)
+    await env.store.new_session("web", "alice", "c-send")
+    # 运行中的请求（构造：退役会话上不应出现，但清理不能依赖这一点）。
+    running = (await env.accept("r2", conversation="c-run")).record
+    await env.store.fail(running, "busy")
+    await env.store.new_session("web", "alice", "c-run")
+    async with env.engine.begin() as conn:
+        await conn.execute(
+            text(
+                "UPDATE xiaowei_request SET state = 'running', failure_code = NULL"
+                " WHERE turn_id = :t"
+            ),
+            {"t": running.turn_id},
+        )
+    # 映射过期而请求未过期：已结束、不在发送中的请求，以及与显式重发竞争的请求。
+    late = await env.store.current_session("web", "alice", "c-late")
+    unexpired = await env.store.current_session("web", "alice", "c-unexpired")
+    env.clock.advance(SESSION_RETENTION - 60)
+    await env.store.fail((await env.accept("r4", conversation="c-unexpired")).record, "busy")
+    await env.store.new_session("web", "alice", "c-unexpired")
+    resend = await env.completed("r3", conversation="c-late")
+    assert resend.session_id == late.session_id
+    await env.store.claim_send(resend)
+    await env.store.finish_send(resend, "failed")
+    await env.store.new_session("web", "alice", "c-late")
+    env.clock.advance(60)
+
+    claimed, report = await asyncio.gather(
+        env.store.claim_send(resend, resend=True),
+        cleanup_expired(env.engine, now=env.clock(), batch_size=10),
+    )
+    assert claimed and report.unregistered == 0
+    assert await _unregistered_counts(env, sending.session_id) == (1, 1)
+    assert await _unregistered_counts(env, running.session_id) == (1, 1)
+    assert await _unregistered_counts(env, late.session_id) == (1, 1)
+    assert await _unregistered_counts(env, unexpired.session_id) == (1, 1)
+
+    # 请求过期并结束投递后，下一次清理完成。
+    await env.store.finish_send(resend, "sent")
+    env.clock.advance(REQUEST_RETENTION)
+    assert (await cleanup_expired(env.engine, now=env.clock(), batch_size=10)).unregistered == 2
+    assert await _unregistered_counts(env, late.session_id) == (0, 0)
+    assert await _unregistered_counts(env, unexpired.session_id) == (0, 0)

@@ -13,21 +13,24 @@
   ``failed/unknown → sending``；发送结束只能从 ``sending`` 改为 ``sent/failed/unknown``；启动恢复
   把遗留 ``sending`` 改为 ``unknown``。任何路径都不自动再次发送。
 
-关键状态无法持久化时锁低进程 readiness：此后拒绝新请求、新会话与新发送，等待停止并重启后
-由持有实例锁的启动恢复处理。结果保存失败时先尝试把请求标为 failed 并关闭 Session，这也失败
-才锁低 readiness。
+关键状态无法持久化时锁低进程 readiness：此后拒绝新请求、新会话（含首次创建映射）与新发送，
+等待停止并重启后由持有实例锁的启动恢复处理。结果保存失败时先尝试把请求标为 failed 并关闭
+Session，这也失败才锁低 readiness。关键写入期间被取消时提交结果不明：锁低 readiness 后原样
+传播取消，同样交给重启恢复。失败码只能取 ``FailureCode`` 闭集，写入前与读取时都核对。
 """
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import hmac
 import json
 import secrets
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Iterator, Mapping
+from contextlib import contextmanager
 from dataclasses import dataclass, replace
 from datetime import datetime, timedelta
-from typing import Any, Literal
+from typing import Any, Literal, get_args
 
 from pydantic import SecretStr, ValidationError
 from sqlalchemy import TextClause, text
@@ -42,9 +45,15 @@ from xiaowei.storage import InstanceLock, Readiness
 RequestState = Literal["accepted", "running", "completed", "failed", "interrupted"]
 DeliveryState = Literal["pending", "sending", "sent", "failed", "unknown"]
 SendOutcome = Literal["sent", "failed", "unknown"]
+# 安全失败码闭集（与迁移 002 的 CHECK 一致）：只表达失败类别，不携带异常文字。``fail()`` 可写入
+# 前五个；``interrupted`` 只由启动恢复写入。
+FailureCode = Literal[
+    "busy", "model_failed", "evidence_failed", "session_failed", "result_not_saved", "interrupted"
+]
 
-RESULT_NOT_SAVED = "result_not_saved"
-INTERRUPTED = "interrupted"
+RESULT_NOT_SAVED: FailureCode = "result_not_saved"
+INTERRUPTED: FailureCode = "interrupted"
+_FAILURE_CODES = frozenset(get_args(FailureCode))
 _SESSION_ID_BYTES = 24
 
 _SELECT_CURRENT = text(
@@ -241,7 +250,7 @@ class RequestRecord:
     state: RequestState
     delivery: DeliveryState
     answer: AgentAnswer | None
-    failure_code: str | None
+    failure_code: FailureCode | None
     created_at: datetime
     expires_at: datetime
 
@@ -308,7 +317,10 @@ class ChannelStore:
     async def current_session(
         self, channel: Channel, subject_id: str, conversation: str
     ) -> ChannelSession:
-        """取得会话语境的 current 会话；不存在时创建第一代。客户端不能指定会话标识。"""
+        """取得会话语境的 current 会话；不存在时创建第一代。客户端不能指定会话标识。
+
+        readiness 锁低后仍可读取已有映射，但不再创建。
+        """
         owner = self._owner(channel, subject_id, conversation)
         try:
             async with self._engine.begin() as conn:
@@ -344,9 +356,10 @@ class ChannelStore:
         *,
         statement: TextClause = _SELECT_CURRENT,
     ) -> ChannelSession:
-        """读取 current 映射；不存在时创建第一代，并发创建时重新读取。"""
+        """读取 current 映射；不存在时创建第一代（须 readiness 正常），并发创建时重新读取。"""
         row = (await conn.execute(statement, owner.params)).mappings().one_or_none()
         if row is None:
+            self._require_ready()
             created = await self._insert_current(conn, owner, 1)
             if created is not None:
                 return created
@@ -405,7 +418,8 @@ class ChannelStore:
             "message", channel, subject_id, owner.conversation_key, mode, policy_version, message
         )
         now = self._clock()
-        try:
+        # 提交结果不明时请求可能已存在：锁低 readiness，交给重启恢复，不让它永久“处理中”。
+        with self._critical("request_accept_failed", "请求状态存储不可用"):
             async with self._engine.begin() as conn:
                 existing = await self._select(conn, key)
                 created = False
@@ -426,10 +440,6 @@ class ChannelStore:
                     )
                     created = inserted.rowcount == 1
                     existing = await self._select(conn, key)
-        except (OSError, SQLAlchemyError):
-            # 提交结果不明时请求可能已存在：锁低 readiness，交给重启恢复，不让它永久“处理中”。
-            self._readiness.lock("request_accept_failed")
-            raise ChannelStoreUnavailableError from None
         if existing is None:
             raise ChannelStoreUnavailableError
         if (
@@ -476,6 +486,10 @@ class ChannelStore:
                 saved = await conn.execute(
                     _COMPLETE, {**_keys(record), "answer": content, "now": self._clock()}
                 )
+        except asyncio.CancelledError:
+            # 保存结果不明，也不能在取消中再写失败状态：锁低后交给重启恢复。
+            self._readiness.lock("result_state_unwritable")
+            raise
         except (OSError, SQLAlchemyError):
             await self._fail_after_commit(record)
             raise ResultNotSavedError from None
@@ -484,8 +498,15 @@ class ChannelStore:
             raise ResultNotSavedError
         return replace(record, state="completed", answer=answer)
 
-    async def fail(self, record: RequestRecord, code: str) -> RequestRecord:
-        """``accepted/running → failed``，保存安全失败码（如 Session 未提交的模型失败、繁忙）。"""
+    async def fail(self, record: RequestRecord, code: FailureCode) -> RequestRecord:
+        """``accepted/running → failed``，保存安全失败码（如 Session 未提交的模型失败、繁忙）。
+
+        失败码不在闭集内（如误传异常文字）时不写入：失败状态无法保存，按关键状态失败锁低
+        readiness，请求留待重启恢复标为 interrupted。
+        """
+        if code not in _FAILURE_CODES or code == INTERRUPTED:
+            self._readiness.lock("request_fail_failed")
+            raise ValueError("失败码不在允许的范围内")
         params = {"code": code}
         if await self._update(_FAIL, record, critical="request_fail_failed", **params) != 1:
             raise RequestUnavailableError
@@ -499,6 +520,9 @@ class ChannelStore:
                 if (await conn.execute(_FAIL, params)).rowcount != 1:
                     raise ChannelStoreUnavailableError
                 await close_sessions(conn, [record.session_id])
+        except asyncio.CancelledError:
+            self._readiness.lock("result_state_unwritable")
+            raise
         except (OSError, SQLAlchemyError, ChannelStoreUnavailableError):
             self._readiness.lock("result_state_unwritable")
 
@@ -534,15 +558,12 @@ class ChannelStore:
         await lock.verify()
         now = self._clock()
         conn = lock.connection
-        try:
+        with self._critical("recovery_failed", "启动恢复失败"):
             async with conn.begin():
                 rows = await conn.execute(_RECOVER_RUNNING, {"code": INTERRUPTED, "now": now})
                 sessions = [r[0] for r in rows]
                 await close_sessions(conn, sessions)
                 unknown = (await conn.execute(_RECOVER_SENDING, {"now": now})).rowcount
-        except (OSError, SQLAlchemyError):
-            self._readiness.lock("recovery_failed")
-            raise ChannelStoreUnavailableError("启动恢复失败") from None
         return RecoveryReport(interrupted=len(sessions), unknown=unknown)
 
     # ---- 内部 ------------------------------------------------------------------------
@@ -551,16 +572,26 @@ class ChannelStore:
         if not self._readiness.ok:
             raise NotReadyError
 
+    @contextmanager
+    def _critical(self, reason: str, message: str) -> Iterator[None]:
+        """关键状态写入：存储失败时锁低 readiness 并转为固定错误；被取消时提交结果不明，
+        锁低后原样传播取消，不吞掉。"""
+        try:
+            yield
+        except asyncio.CancelledError:
+            self._readiness.lock(reason)
+            raise
+        except (OSError, SQLAlchemyError):
+            self._readiness.lock(reason)
+            raise ChannelStoreUnavailableError(message) from None
+
     async def _update(
         self, statement: TextClause, record: RequestRecord, *, critical: str, **extra: object
     ) -> int:
         params = {**_keys(record), "now": self._clock(), **extra}
-        try:
+        with self._critical(critical, "请求状态无法保存"):
             async with self._engine.begin() as conn:
                 return (await conn.execute(statement, params)).rowcount
-        except (OSError, SQLAlchemyError):
-            self._readiness.lock(critical)
-            raise ChannelStoreUnavailableError("请求状态无法保存") from None
 
     async def _select(
         self, conn: AsyncConnection, key: Mapping[str, str]
@@ -578,6 +609,8 @@ class ChannelStore:
                 answer = AgentAnswer.model_validate_json(raw)
             except ValidationError:
                 raise RequestUnavailableError from None
+        if row["failure_code"] is not None and row["failure_code"] not in _FAILURE_CODES:
+            raise RequestUnavailableError
         return RequestRecord(
             channel=row["channel"],
             request_key=row["request_key"],

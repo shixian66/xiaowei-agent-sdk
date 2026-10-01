@@ -4,8 +4,9 @@ SDK 表由 ``SQLAlchemySession`` 的公开建表路径管理；应用表以 ``xi
 版本化 SQL 建立并记录版本，二者互不改写。全新初始化顺序执行全部迁移；已有旧版本只由显式
 ``upgrade_storage`` 升级，普通初始化、就绪检查与请求路径从不升级或降级。
 
-``serve`` 用一条专用连接在进程生命周期内持有会话级实例锁（``hold_instance_lock``）；初始化与
-升级在事务内尝试取得同一把锁，取不到即拒绝，因此不能与在线实例或彼此并发修改应用表。数据库
+``serve`` 用一条专用连接在进程生命周期内持有会话级实例锁（``hold_instance_lock``）；初始化在
+任何建表前取得同一把会话级锁，升级在事务内尝试取得同一键的事务级锁，取不到即拒绝，因此
+不能与在线实例或彼此并发修改数据库。数据库
 URL 只来自私有配置，错误信息不携带 URL、主机或原始驱动异常。
 """
 
@@ -166,11 +167,13 @@ async def open_engine(database_url: SecretStr) -> AsyncIterator[AsyncEngine]:
 
 
 async def initialize_storage(engine: AsyncEngine) -> None:
-    """显式部署入口：建立 SDK Session 表与应用表，再做就绪检查。
+    """显式部署入口：取得实例锁后建立 SDK Session 表与应用表，再做就绪检查。
 
-    ``SQLAlchemySession`` 只在构造参数 ``create_tables=True`` 时于首次读写前建表；这里用一个
-    只读探针会话触发它，不写入任何会话数据。应用表只在尚未安装时顺序执行全部迁移；已安装但
-    版本不符时由就绪检查拒绝，不自动升级。普通请求路径不调用本函数。
+    任何建表前先在专用连接上取得会话级实例锁并持有到建表结束：锁被在线实例或另一个维护命令
+    持有时拒绝，且不修改数据库。``SQLAlchemySession`` 只在构造参数 ``create_tables=True`` 时
+    于首次读写前建表；这里用一个只读探针会话触发它，不写入任何会话数据。应用表在持锁连接上
+    的一个事务内、只在尚未安装时顺序执行全部迁移；已安装但版本不符时由就绪检查拒绝，不自动
+    升级。普通请求路径不调用本函数。
     """
     probe = SQLAlchemySession(
         _INIT_PROBE_SESSION_ID,
@@ -179,11 +182,12 @@ async def initialize_storage(engine: AsyncEngine) -> None:
         sessions_table=SDK_SESSIONS_TABLE,
         messages_table=SDK_MESSAGES_TABLE,
     )
-    try:
-        await probe.get_items(limit=0)
-        await _install_app_schema(engine)
-    except (OSError, SQLAlchemyError):
-        raise StorageUnavailableError("PostgreSQL 不可用，初始化未完成") from None
+    async with hold_instance_lock(engine, Readiness()) as lock:
+        try:
+            await probe.get_items(limit=0)
+            await _install_app_schema(lock.connection)
+        except (OSError, SQLAlchemyError):
+            raise StorageUnavailableError("PostgreSQL 不可用，初始化未完成") from None
     await check_storage(engine)
 
 
@@ -208,10 +212,9 @@ async def upgrade_storage(engine: AsyncEngine) -> int:
     return APP_SCHEMA_VERSION
 
 
-async def _install_app_schema(engine: AsyncEngine) -> None:
-    """在实例锁与一个事务内顺序执行全部迁移；已安装则不做任何修改。"""
-    async with engine.begin() as conn:
-        await _lock_for_maintenance(conn)
+async def _install_app_schema(conn: AsyncConnection) -> None:
+    """在已持有会话级实例锁的连接上用一个事务顺序执行全部迁移；已安装则不做任何修改。"""
+    async with conn.begin():
         installed = await conn.scalar(text("SELECT to_regclass('xiaowei_schema_version')"))
         if installed is None:
             await _apply_migrations(conn, after=0)

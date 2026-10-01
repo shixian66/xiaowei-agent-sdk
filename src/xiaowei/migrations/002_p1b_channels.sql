@@ -19,7 +19,8 @@ CREATE TABLE xiaowei_channel_session (
 CREATE UNIQUE INDEX xiaowei_channel_session_current_idx
     ON xiaowei_channel_session (channel, subject_id, conversation_key) WHERE state = 'current';
 
--- 请求与可重发结果：answer 只在 completed 时保存受限 AgentAnswer JSON。
+-- 请求与可重发结果：answer 只在 completed 时保存受限 AgentAnswer JSON；failure_code 只取安全
+-- 失败码闭集（与 channel_store.FailureCode 一致），interrupted 只属于 interrupted 状态。
 CREATE TABLE xiaowei_request (
     channel text NOT NULL CHECK (channel IN ('web', 'feishu')),
     request_key text NOT NULL,
@@ -32,14 +33,20 @@ CREATE TABLE xiaowei_request (
     state text NOT NULL
         CHECK (state IN ('accepted', 'running', 'completed', 'failed', 'interrupted')),
     answer text,
-    failure_code text,
+    failure_code text CHECK (
+        failure_code IN (
+            'busy', 'model_failed', 'evidence_failed', 'session_failed', 'result_not_saved',
+            'interrupted'
+        )
+    ),
     delivery text NOT NULL CHECK (delivery IN ('pending', 'sending', 'sent', 'failed', 'unknown')),
     created_at timestamptz NOT NULL,
     updated_at timestamptz NOT NULL,
     expires_at timestamptz NOT NULL,
     PRIMARY KEY (channel, request_key),
     CHECK ((state = 'completed') = (answer IS NOT NULL)),
-    CHECK ((state IN ('failed', 'interrupted')) = (failure_code IS NOT NULL))
+    CHECK ((state IN ('failed', 'interrupted')) = (failure_code IS NOT NULL)),
+    CHECK ((state = 'interrupted') = (failure_code = 'interrupted'))
 );
 
 CREATE INDEX xiaowei_request_session_idx ON xiaowei_request (session_id);
