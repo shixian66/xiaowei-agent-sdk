@@ -12,7 +12,7 @@
 | 本地目录 / 分支 | `/Users/kloenguyen/Desktop/agent-SDK` / `claude/p1b-feishu-channel`（从 `origin/main` 的 `1d1aa01` 分出） |
 | M5 历史起点 | `372c381f44ecfa1fa53961f137d0058033cbd805`；不是远端当前 main 的核验结论 |
 | P1-A 代码基线 / 当前主线 | `148abaa4729ac6644c03056cf265a9dc18f1acd8` / `1d1aa01ac42b08af5ce918aad149cab98cecbf9c`（P1-B 计划、Gate 0 离线部分、SQLGuard Task 1 的 PR #10、StarRocks Adapter Task 2 的 PR #11、urllib3 修复的 PR #12、受治理工具 Task 3 的 PR #13、请求和渠道状态 Task 4 的 PR #14 、共享 ChannelService Task 5 的 PR #15 与最小同源 Web Task 6 的 PR #16 已合入） |
-| 当前阶段 | **P1-B Task 1 SQLGuard 已随 PR #10 合入；Task 2 StarRocks Adapter 随 PR #11 合入（`dd24d8a`）。Gate 0 在主线 `6389d78` 上以 `glm-4.7-flash` Profile 真实运行通过；Task 3 受治理工具与结构化 Evidence 交付经复审通过，随 PR #13 合入（`5058ae3`）；Task 4 PostgreSQL v2 请求与渠道状态经两轮审查修复与复审通过，随 PR #14 合入（`e5e380c`）；Task 5 共享 ChannelService 经一轮审查修复（B1 授权来源对象身份）与复审通过，随 PR #15 合入（`98f4167`）；Task 6 最小同源 Web 经一轮审查修复（B1 不可用端口、B2 浏览器 smoke）与复审通过，随 PR #16 合入（`1d1aa01`）；Task 7 飞书单聊长连接：安装探针触发停工条件（SDK 总是先 ack），用户选择保留长连接并接受“先 ack、后落库”，已在本分支实现；首轮独立审查（`58aa5f6`）暂不通过，B1–B4 已修复，待复审与授权的真实飞书验证。**P1-A 离线完成（Task 1–5 经 PR #2–#7 合入）。真实模型：Gate 0 通过的 Profile 只有 `bbtoken-glm-4.7-flash`；Gemini 只有 2026-09-30 的历史部分证据（未闭环）；同端点 DeepSeek V4 Flash 已实测不兼容 |
+| 当前阶段 | **P1-B Task 1 SQLGuard 已随 PR #10 合入；Task 2 StarRocks Adapter 随 PR #11 合入（`dd24d8a`）。Gate 0 在主线 `6389d78` 上以 `glm-4.7-flash` Profile 真实运行通过；Task 3 受治理工具与结构化 Evidence 交付经复审通过，随 PR #13 合入（`5058ae3`）；Task 4 PostgreSQL v2 请求与渠道状态经两轮审查修复与复审通过，随 PR #14 合入（`e5e380c`）；Task 5 共享 ChannelService 经一轮审查修复（B1 授权来源对象身份）与复审通过，随 PR #15 合入（`98f4167`）；Task 6 最小同源 Web 经一轮审查修复（B1 不可用端口、B2 浏览器 smoke）与复审通过，随 PR #16 合入（`1d1aa01`）；Task 7 飞书单聊长连接：安装探针触发停工条件（SDK 总是先 ack），用户选择保留长连接并接受“先 ack、后落库”，已在本分支实现；首轮独立审查（`58aa5f6`）暂不通过，B1–B4 已修复；复审（`ee10951`）确认 B1、B2、B4 解决，另提出 N1（`drain` 不等落库前的 `receive`），已修复，待再次复审与授权的真实飞书验证。**P1-A 离线完成（Task 1–5 经 PR #2–#7 合入）。真实模型：Gate 0 通过的 Profile 只有 `bbtoken-glm-4.7-flash`；Gemini 只有 2026-09-30 的历史部分证据（未闭环）；同端点 DeepSeek V4 Flash 已实测不兼容 |
 | 当前源码与依赖 | 新包 `src/xiaowei/` 含 `sqlguard.py`、`starrocks.py`、`starrocks_tools.py`、`channel_store.py`、`migrations/002_p1b_channels.sql`（应用表 v2）、`channel.py` 、`web.py` 与 `static/`，以及本分支新增的 `feishu.py`；锁定 `asyncmy==0.2.15`、`lark-channel-sdk==1.4.0`（均精确钉版）（精确钉版，已加入依赖基线）。另锁定 `openai-agents[sqlalchemy]` 0.22.3、`mcp` 2.2.0、`openai` 3.20.0、SQLAlchemy 2.0.52、asyncpg 0.30.0，urllib3 2.8.0（间接依赖，修复 CVE-2026-97687/97688/97689），Python 3.11.16；wheel 同时打包两个包，CLI 仍指向旧包 |
 | 新产品入口 | 只有开发验证命令（见第 5 节）；尚无产品启动入口，旧 CLI/Compose 不算新入口 |
 | 本次工作范围 | [P1-B 计划](docs/superpowers/plans/2026-09-30-p1b-starrocks-dual-entry.md) Task 7：飞书单聊长连接（`src/xiaowei/feishu.py`、`FeishuConfig`、`ChannelService.reject_busy`、`Application.max_concurrent_turns`），锁定 `lark-channel-sdk==1.4.0`。未连接真实飞书，未部署；正式装配属 Task 8 |
@@ -262,11 +262,16 @@ CI integration job 设置 `SDK_TEST_POSTGRES_URL`，启动 `compose.sdk-test.yml
   - 启动恢复把飞书 `completed` + `pending` 记为 `failed`，之后只能显式重发、不重跑，Web 结果不变。
   - 覆盖的窗口：保存后、取得投递权前被取消；发送中被取消（记 unknown）；交付校验因证据存储故障失败（重投路径与消费者路径各一）；排队未运行时停止超时；正常 `drain`。
 - B4 关闭期限：SDK 公开的同步 `stop(join_timeout=…)` 在守护线程中运行，应用循环最多等待 `stop_timeout_seconds`（新增配置），超时返回 False。另验证了正常关闭、关闭一直不返回、重复停止、启动失败后停止，以及关闭异常原样传播。
-- 有意接受的残留：交付前撤权或结果过期时不发送，请求在进程内保持 `completed` + `pending`（无法按撤权后的身份定位记录并改状态），直到重启恢复记为 `failed`。显式重发仍复核当前权限。
+- 有意接受的残留（复审确认可接受）：交付前撤权或结果过期时不发送，请求在进程内保持 `completed` + `pending`（无法按撤权后的身份定位记录并改状态），直到重启恢复记为 `failed`。显式重发仍复核当前权限。相应不变量限定为“意外异常或取消不留下无人处理的 pending”。
+
+**Task 7 复审修复（针对 `ee10951` 的复审）：**
+
+- N1 关闭竞态：事件已过关闭检查、仍在 `ChannelService.accept()` 等数据库时，队列为空，`drain()` 立即成功；随后请求入队却没有消费者，readiness 仍为 true。修复后 `FeishuGateway` 统计已进入 `receive` 的调用，`drain()` 在同一期限内先等它们归零，再等队列；超时锁低 readiness。`/新建`、空命令提示与重复事件的首次发送同样计入。
+- 复审的非阻断建议一并处理：正文含孤立代理码点（`{"text":"\ud800"}`）时以 `content` 原因码拒绝，不再从 `InboundRequest` 抛 `ValidationError`；`LarkTransport.start()` 失败后恢复为不接收回调。
 
 **Task 7 未覆盖：** 真实长连接、平台事件字段、平台重投、真实发送结果、断线重连与关闭只能在获准的测试应用中验证（需要用户授权与 G7 配置）。离线用例的事件字典按 1.4.0 源码与探针构造，不能证明平台实际下发相同字段。chat ID 不持久化（G2）：重启后 interrupted 只在同一事件重投时回执，主动通知与 Task 8 显式重发的目的地待 G2 决定。`/新建` 与空命令提示只在进程内去重，重启后时效内的重投可能再次新建会话。SDK 自带的消息管线仍运行（无消费者）。真实分发器用例中 SDK 启动时会做一次域名解析（连接被 pytest-socket 阻断）。关闭超时后守护线程与长连接的实际残留未核对（G7/Task 9）。正式装配、`serve` 中的导入顺序约束、先 `drain` 再取消消费者并关闭长连接的停止顺序都属 Task 8。
 
-**下一项：** Task 7 复审（审查修复的精确 SHA 见 PR #17）；经用户授权后在获准测试应用中做真实长连接收发、重投、发送失败与断线验证。通过并经用户同意合入后进入 Task 8。
+**下一项：** Task 7 再次复审（N1 修复的精确 SHA 见 PR #17）；经用户授权后在获准测试应用中做真实长连接收发、重投、发送失败与断线验证。通过并经用户同意合入后进入 Task 8。
 
 P1-A 是内部核心。P1-B 才接真实查询与双入口并切换正式入口，P2 增加诊断，P3 做实际用户验收。Gate 0 是 Task 3 开工前例外；其他环境缺失不阻塞不依赖该环境的离线部分，但不能跳过对应实战退出条件。
 
@@ -470,6 +475,11 @@ Task 7 飞书单聊验证（锁文件新增 `lark-channel-sdk==1.4.0`，测试 P
 | 审查修复：`SDK_TEST_POSTGRES_URL=$SDK_PG uv run --locked --extra dev python -m pytest -q`；`-m security` | 2620 passed，152 skipped，13 deselected；924 passed，79 skipped |
 | 审查修复：隔离变异 12 项 + 首轮 21 项复跑 | 全部使对应用例失败（正文恢复 200 上限、去掉解析前大小检查、去掉桥接准入、取消不保护、再次吞掉一般异常、去掉关闭期限、重复停止再次关闭、恢复不处理未发送结果、恢复误改 Web、`drain` 不停止接收、`drain` 超时不锁低、发送异常不转为 unknown） |
 | 审查修复：`ruff check src/xiaowei tests`、`ruff format --check src/xiaowei tests/sdk_core`、`mypy src`、`git diff --check` | 通过；测试文件以 `MYPYPATH=src mypy --explicit-package-bases` 检查无错误。依赖与锁文件未变 |
+| 复审修复：修复前（`ee10951`）新增回归 | 4 项失败：落库前 `receive` 未结束时 `drain` 已返回 True、同一情形超时不锁低、命令与重复事件不计入等待、孤立代理码点不按 `content` 拒绝 |
+| 复审修复：`SDK_TEST_POSTGRES_URL=$SDK_PG uv run --locked --extra dev python -m pytest tests/sdk_core/test_feishu.py -q -W error` | 85 passed，连续 3 次通过；另加 `test_channel_service.py`、`test_channel_store.py` 共 155 passed |
+| 复审修复：`SDK_TEST_POSTGRES_URL=$SDK_PG uv run --locked --extra dev python -m pytest -q`；`-m security` | 2624 passed，152 skipped，13 deselected；924 passed，79 skipped |
+| 复审修复：隔离变异 5 项 | 全部使对应用例失败（`drain` 不等 `receive`、`receive` 不置未完成标志、`drain` 不等队列、不拒绝孤立代理码点、启动失败不复位接收） |
+| 复审修复：`ruff check src/xiaowei tests`、`ruff format --check src/xiaowei tests/sdk_core`、`mypy src`、`git diff --check` | 通过；`test_feishu.py` 以 `MYPYPATH=src mypy --explicit-package-bases` 检查无错误（测试目录原有 12 处不变）。依赖与锁文件未变 |
 
 Task 4 请求与渠道状态验证（锁文件未变，测试 PostgreSQL 为本机容器）：
 

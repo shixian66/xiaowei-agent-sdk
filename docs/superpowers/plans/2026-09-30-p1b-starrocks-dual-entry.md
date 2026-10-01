@@ -415,6 +415,7 @@ Task 7 实施修订（用户 2026-10-01 选择方案 1；以下替代 §2.5 中�
   - 正文：消息编号与会话编号沿用 200 字符上限；序列化正文的容器上限是 `max_message_chars × 12 + 64`（JSON 转义最多把一个字符写成 12 个），超出时在解析前以 `content_too_large` 拒绝；解析后仍按实际文本长度执行 `max_message_chars`。
   - 桥接准入：SDK 回调到应用循环的在途事件最多 `queue_size` 个，超出时不创建协程，在持久化前丢弃并只记 `intake_full`。**与已批准契约的差异：** 这是先 ack 契约下的又一种持久化前丢弃，不回复（同落库失败）；已持久化请求遇到队列满时，仍记 failed/busy 并回执一次，这一点不变。停止后的回调记 `closing` 丢弃。
   - 结果落定：已取得投递权的发送异常按 unknown 记录；在取得投递权前，校验或读取出现异常或被取消时，锁低 readiness 并原样传播。结果因撤权、期限或不可交付而不发送时只记录。消费者意外退出、被取消，或 `run` 结束时队列中仍有请求，都锁低 readiness。正常停止先调用 `FeishuGateway.drain(timeout)` 停止接收，并有界等待队列与投递结束；超时同样锁低 readiness。**恢复语义增补：** 飞书回复目的地只在进程内存在，因此启动恢复把飞书 `completed` + `pending` 记为 `failed`（确定未发送，只能显式重发、不重跑）；Web 结果不受影响。
+  - 复审修复（针对 `ee10951`，N1）：`drain` 先停止接收，再在同一期限内等待已进入 `receive` 的调用（落库、新建会话或发送提示中的）全部返回，最后等待队列；只看队列会在请求落库前误报已排空。正文含孤立代理码点时以 `content` 拒绝；`LarkTransport.start()` 失败后不再转交回调。撤权、过期或不可读取时保留 `completed/pending` 经复审确认可接受，不变量限定为“意外异常或取消不留下无人处理的 pending”。
   - 关闭：`LarkTransport.stop()` 在守护线程中调用 SDK 公开的同步 `stop(join_timeout=…)`，应用循环最多等待 `stop_timeout_seconds`（新增配置）。超时返回 False，重复调用返回首次结果，SDK 抛出的异常原样传播。真实长连接关闭与残余线程留给 G7/Task 9。
 
 - [ ] 用候选 `lark-channel-sdk==1.4.0` 做安装探针，固定实际 async connect/disconnect、事件字段、回调 ack/NACK/抛错与重投语义、发送 API、自动重试/fallback 设置与 `SendResult`；若持久化失败无法阻止成功 ack，或无法满足其他边界，记录具体限制并修订计划，不回退到未经验证的旧 raw client。

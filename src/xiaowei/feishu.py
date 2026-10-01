@@ -16,8 +16,8 @@
 - 新接受的请求进入有界队列，由固定数量的消费者运行；队列满时记为 failed/busy 并发送一次固定
   回执。发送只取得一次投递权：结果明确成功、明确失败或不明分别记录，任何路径都不自动重发。
 - 结果保存后到投递状态落定之间被取消或出现意外异常时锁低 readiness，交给重启恢复：已保存但
-  未发送的飞书结果在恢复中记为 failed，只能显式重发。正常停止先 ``drain`` 停止接收并有界等待，
-  长连接关闭有绝对期限。
+  未发送的飞书结果在恢复中记为 failed，只能显式重发。正常停止先 ``drain``：停止接收，在同一期限
+  内等待已进入 ``receive`` 的调用（含落库前的）和队列都结束；长连接关闭有绝对期限。
 """
 
 import asyncio
@@ -149,6 +149,10 @@ def _text(event: object, max_chars: int) -> str:
     text = content.get("text") if isinstance(content, dict) else None
     if not isinstance(text, str) or not text.strip():
         raise _RejectedError("content")
+    try:
+        text.encode("utf-8")  # JSON 允许孤立的代理码点，它不是合法文本
+    except UnicodeEncodeError:
+        raise _RejectedError("content") from None
     if len(text) > max_chars:
         raise _RejectedError("too_long")
     return text.strip()
@@ -249,6 +253,10 @@ class FeishuGateway:
         self._readiness = service.results.store.readiness
         self._queue: asyncio.Queue[_Job] = asyncio.Queue(maxsize=config.queue_size)
         self._closing = False
+        # 已过关闭检查、尚未返回的 receive 调用：落库前的请求还不在队列中，drain 必须等它们。
+        self._receiving = 0
+        self._received = asyncio.Event()
+        self._received.set()
         # 不写请求表的命令（/新建、空命令提示）只在进程内按消息编号去重。
         self._seen: OrderedDict[tuple[str, str], None] = OrderedDict()
 
@@ -268,6 +276,16 @@ class FeishuGateway:
         if self._closing:
             logger.info("飞书事件已丢弃：%s", "closing")
             return
+        self._receiving += 1
+        self._received.clear()
+        try:
+            await self._receive(event)
+        finally:
+            self._receiving -= 1
+            if not self._receiving:
+                self._received.set()
+
+    async def _receive(self, event: object) -> None:
         try:
             message = _parse(event, self._config, self._clock())
         except _RejectedError as rejected:
@@ -303,13 +321,15 @@ class FeishuGateway:
         await self._queue.join()
 
     async def drain(self, timeout: float) -> bool:
-        """正常停止的第一步：停止接收新事件，有界等待已入队请求处理并投递完毕。
+        """正常停止的第一步：停止接收新事件，在同一期限内先等已进入 ``receive`` 的调用结束（它们
+        可能仍在落库、新建会话或发送提示），再等队列中的请求处理并投递完毕。
 
-        超时返回 False 并锁低 readiness：剩余请求随后被取消，由重启恢复处理。
+        超时返回 False 并锁低 readiness：剩余工作随后被取消，由重启恢复处理。
         """
         self._closing = True
         try:
             async with asyncio.timeout(timeout):
+                await self._received.wait()
                 await self._queue.join()
         except TimeoutError:
             self._readiness.lock("feishu_drain_timeout")
@@ -522,7 +542,11 @@ class LarkTransport:
 
         self._channel.on("raw", on_raw)
         self._accepting = True
-        await self._channel.start_background(timeout=self._config.connect_timeout_seconds)
+        try:
+            await self._channel.start_background(timeout=self._config.connect_timeout_seconds)
+        except BaseException:
+            self._accepting = False  # 部分启动失败后不再转交回调
+            raise
 
     def _release(self, future: concurrent.futures.Future[None] | None) -> None:
         with self._lock:

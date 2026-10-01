@@ -26,8 +26,8 @@ from tests.sdk_core.test_channel_service import Env, app_config
 from tests.sdk_core.test_channel_service import env as env  # pytest fixture
 
 from xiaowei.app import Application
-from xiaowei.channel import ChannelService, RequestRef
-from xiaowei.channel_store import ChannelStore, RequestRecord
+from xiaowei.channel import ChannelService, InboundRequest, RequestReceipt, RequestRef
+from xiaowei.channel_store import ChannelSession, ChannelStore, RequestRecord
 from xiaowei.config import FeishuConfig
 from xiaowei.evidence import EvidenceStoreError
 from xiaowei.feishu import (
@@ -42,7 +42,7 @@ from xiaowei.feishu import (
     send_outcome,
 )
 from xiaowei.governance import GovernedTools
-from xiaowei.models import Delivery, RunContext
+from xiaowei.models import Channel, Delivery, RunContext
 from xiaowei.storage import Readiness, hold_instance_lock
 
 pytestmark = pytest.mark.loopback
@@ -247,6 +247,7 @@ REJECTED: dict[str, tuple[dict[str, Any], str]] = {
     "blank text": ({"content": json.dumps({"text": "  \n "})}, "content"),
     "content not json": ({"content": "not json"}, "content"),
     "text not string": ({"content": json.dumps({"text": 3})}, "content"),
+    "lone surrogate": ({"content": '{"text": "\\ud800"}'}, "content"),
     "too long": ({"content": json.dumps({"text": "长" * 201})}, "too_long"),
     "missing message id": ({"event__message__message_id": ""}, "malformed"),
     "message id too long": ({"event__message__message_id": "om_" + "x" * 198}, "malformed"),
@@ -710,6 +711,101 @@ async def test_drain_timeout_with_queued_work_blocks_readiness(env: Env) -> None
     assert await request_row(env) == ("accepted", "pending")
 
 
+class GatedService(ChannelService):
+    """在落库或新建会话前停住：``receive`` 已过关闭检查，请求尚未入队。"""
+
+    entered: asyncio.Event
+    release: asyncio.Event
+
+    async def _hold(self) -> None:
+        self.entered.set()
+        await self.release.wait()
+
+    async def accept(self, inbound: InboundRequest) -> RequestReceipt:
+        await self._hold()
+        return await super().accept(inbound)
+
+    async def new_session(
+        self, channel: Channel, subject_id: str, conversation_id: str
+    ) -> ChannelSession:
+        await self._hold()
+        return await super().new_session(channel, subject_id, conversation_id)
+
+
+def gated(env: Env) -> GatedService:
+    service = GatedService(env.app, env.results())
+    service.entered, service.release = asyncio.Event(), asyncio.Event()
+    return service
+
+
+async def test_drain_waits_for_receive_before_enqueue(env: Env) -> None:
+    service = gated(env)
+    async with running(env, service=service) as fs:
+        message = env.scripts.add("落库前停止", tool_call("order_total", region="east"), cite())
+        receiving = asyncio.create_task(fs.gateway.receive(fs.event(message)))
+        await asyncio.wait_for(service.entered.wait(), 5)
+        draining = asyncio.create_task(fs.gateway.drain(10))
+        await asyncio.sleep(0.2)
+        assert not draining.done()  # 队列为空，但仍有 receive 在落库前
+        service.release.set()
+        assert await asyncio.wait_for(draining, 10)
+        await receiving
+    assert await request_row(env) == ("completed", "sent")
+    assert len(fs.outbox.sent) == 1 and env.readiness.ok
+
+
+async def test_drain_timeout_with_receive_in_flight_blocks_readiness(env: Env) -> None:
+    service = gated(env)
+    async with running(env, service=service) as fs:
+        receiving = asyncio.create_task(
+            fs.gateway.receive(fs.event(env.scripts.add("卡住", cite())))
+        )
+        await asyncio.wait_for(service.entered.wait(), 5)
+        assert not await fs.gateway.drain(0.1)
+        assert not env.readiness.ok
+        service.release.set()
+        await receiving
+
+
+async def test_drain_waits_for_commands_and_duplicates(env: Env) -> None:
+    """不入队的路径（/新建、空命令提示、重复事件的首次发送）同样计入关闭等待。"""
+    hold = asyncio.Event()
+
+    class Held(Outbox):
+        async def __call__(self, chat_id: str, text: str) -> Any:
+            await hold.wait()
+            return await super().__call__(chat_id, text)
+
+    service = gated(env)
+    service.release.set()
+    outbox = Held()
+    async with running(env, outbox, service=service) as fs:
+        hold.set()
+        duplicate = fs.event(
+            env.scripts.add("重复事件", tool_call("order_total", region="east"), cite())
+        )
+        await fs.gateway.receive(duplicate)
+        await fs.drain()
+        hold.clear()  # 空命令提示停在发送
+        service.release.clear()  # /新建与重复事件停在服务调用
+        tasks = [
+            asyncio.create_task(fs.gateway.receive(event))
+            for event in (fs.event("/新建"), fs.event("/查询"), duplicate)
+        ]
+        await asyncio.sleep(0.2)
+        draining = asyncio.create_task(fs.gateway.drain(10))
+        await asyncio.sleep(0.2)
+        assert not draining.done()
+        hold.set()
+        await asyncio.sleep(0.2)
+        assert not draining.done()  # 空命令提示已发出，/新建与重复事件仍在途
+        service.release.set()
+        assert await asyncio.wait_for(draining, 10)
+        await asyncio.gather(*tasks)
+    assert outbox.texts()[1:] in ([NEW_SESSION, EMPTY_COMMAND], [EMPTY_COMMAND, NEW_SESSION])
+    assert env.readiness.ok
+
+
 # ---- 文本渲染与发送结果映射 -----------------------------------------------------------------
 
 
@@ -959,6 +1055,9 @@ async def test_stop_after_failed_start_and_repeated_stop() -> None:
 
     with pytest.raises(RuntimeError):
         await transport.start(receive)
+    with logs() as records:
+        fake.handlers["raw"]({"i": "after failed start"})
+    assert dropped(records) == ["closing"] and transport.in_flight == 0
     assert await transport.stop() is True
     assert await transport.stop() is True and fake.stops == 1
 
