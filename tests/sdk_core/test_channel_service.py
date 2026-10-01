@@ -560,6 +560,79 @@ async def test_fixed_receipts_are_not_resendable(env: Env) -> None:
 # ---- 装配 --------------------------------------------------------------------------------
 
 
+class Impersonator:
+    """另一个授权来源：复用原策略的 ``authorize`` 绑定方法，却把 mallory 解析成 alice。"""
+
+    def __init__(self, original: Access) -> None:
+        self.authorize = original.authorize
+        self._original = original
+
+    async def resolve(self, channel: Channel, subject_id: str) -> AccessDecision | None:
+        return await self._original.resolve(channel, "alice" if subject_id == "mallory" else "")
+
+
+async def test_same_access_policy_instance_assembles_and_serves(env: Env) -> None:
+    results = env.results()
+    service = ChannelService(env.app, results)
+    assert results.access is env.access and results.evidence is env.evidence
+    message = env.scripts.add("同一来源？", tool_call("order_total", region="east"), cite())
+    record = await service.process(await service.accept(env.inbound(message)))
+    assert record.state == "completed"
+    assert await results.send(ref(), Outbox()) == "sent"
+
+
+@pytest.mark.parametrize("source", ["impersonator", "equal_twin", "plain_callable", "other_method"])
+async def test_assembly_rejects_any_other_authorization_source(env: Env, source: str) -> None:
+    if source == "impersonator":
+        # 复用同一个绑定方法：callable 相等，但来源对象不同。
+        access: Any = Impersonator(env.access)
+        evidence = env.evidence
+        assert evidence.authorize == access.authorize
+    elif source == "equal_twin":
+        # 与原策略值相等（dataclass 比较字段）却是另一个对象，同样复用原绑定方法。
+        access = Access(env.grants)
+        access.authorize = env.access.authorize  # type: ignore[method-assign]
+        access.resolve = Impersonator(env.access).resolve  # type: ignore[method-assign]
+        evidence = env.evidence
+        assert access == env.access and evidence.authorize == access.authorize
+    else:
+        access = env.access
+
+        # 包装函数无法证明它来自这个 AccessPolicy；同一对象的其他方法也不是它的授权。
+        async def wrapped(identity: Identity, target_id: str, tool_id: str) -> bool:
+            return await env.access.authorize(identity, target_id, tool_id)
+
+        evidence = EvidenceStore(
+            env.engine,
+            catalog(),
+            authorize=wrapped if source == "plain_callable" else env.access.resolve,  # type: ignore[arg-type]
+            clock=env.clock,
+            retention_seconds=RETENTION_SECONDS,
+        )
+    message = env.scripts.add("冒充 alice", tool_call("order_total", region="east"), cite())
+    with pytest.raises(ValueError, match="AccessPolicy"):
+        ResultDelivery(env.store, evidence, access, budget=BUDGET)
+    # 启动装配即失败：没有可接收请求的服务，请求、模型、工具与 Adapter I/O 都为 0。
+    assert await env.requests() == 0
+    assert env.model_calls(message) == 0 and env.adapter.calls == []
+
+
+async def test_authorization_source_cannot_be_replaced_after_assembly(env: Env) -> None:
+    results = env.results()
+    service = ChannelService(env.app, results)
+    impostor = Impersonator(env.access)
+    for target, name, value in (
+        (results, "access", impostor),
+        (results, "evidence", env.evidence),
+        (results, "store", env.store),
+        (results, "budget", BUDGET),
+        (service, "results", env.results()),
+    ):
+        with pytest.raises(AttributeError):
+            setattr(target, name, value)
+    assert results.access is env.access and service.results is results
+
+
 async def test_entry_and_evidence_authorization_share_one_access_policy(env: Env) -> None:
     other = Access(env.grants)
     with pytest.raises(ValueError, match="AccessPolicy"):

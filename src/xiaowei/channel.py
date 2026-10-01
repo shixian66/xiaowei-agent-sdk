@@ -14,7 +14,8 @@
   固定回执。发送紧邻在取得投递权之后，只发送一次，结果按 sent/failed/unknown 记录，不自动重试。
 
 入口授权与 Evidence 授权必须是同一个 ``AccessPolicy`` 实例：装配时核对 ``EvidenceStore`` 的授权
-函数就是它的 ``authorize``。HTTP、飞书 SDK、数据库客户端与凭据都不进入 RunContext。
+函数是绑定在这个对象上的 ``authorize``（来源对象身份，而非 callable 相等），装配后不可替换。
+HTTP、飞书 SDK、数据库客户端与凭据都不进入 RunContext。
 """
 
 import asyncio
@@ -153,6 +154,14 @@ async def _decide(access: AccessPolicy, channel: Channel, subject_id: str) -> Ac
     return decision
 
 
+def _bound_to(authorize: object, access: AccessPolicy) -> bool:
+    """``authorize`` 是绑定在 ``access`` 本身上的 ``authorize`` 方法。
+
+    只比较 callable 不够：另一个对象可以把原策略的绑定方法存为自己的属性，再自行解析身份。
+    """
+    return getattr(authorize, "__self__", None) is access and authorize == access.authorize
+
+
 class ResultDelivery:
     """已保存结果的读取、首次发送与显式重发；不运行 Agent，不需要模型。"""
 
@@ -164,12 +173,29 @@ class ResultDelivery:
         *,
         budget: Budget,
     ) -> None:
-        if evidence.authorize != access.authorize:
+        if not _bound_to(evidence.authorize, access):
             raise ValueError("Evidence 的授权必须来自同一个 AccessPolicy")
-        self.store = store
-        self.evidence = evidence
-        self.access = access
-        self.budget = budget
+        self._store = store
+        self._evidence = evidence
+        self._access = access
+        self._budget = budget
+
+    @property
+    def store(self) -> ChannelStore:
+        return self._store
+
+    @property
+    def evidence(self) -> EvidenceStore:
+        return self._evidence
+
+    @property
+    def access(self) -> AccessPolicy:
+        """装配时核验过的唯一授权来源。"""
+        return self._access
+
+    @property
+    def budget(self) -> Budget:
+        return self._budget
 
     async def view(self, ref: RequestRef) -> RequestView:
         """按当前身份读取请求；completed 结果重新验证，不可交付时拒绝。"""
@@ -199,22 +225,22 @@ class ResultDelivery:
             delivery = self._receipt(record)
         else:
             return None
-        if not await self.store.claim_send(record, resend=resend):
+        if not await self._store.claim_send(record, resend=resend):
             return None
         if delivery is None:
-            await self.store.finish_send(record, "failed")
+            await self._store.finish_send(record, "failed")
             raise ResultUnavailableError
         try:
             outcome = await transmit(delivery)
         except BaseException:
-            await self.store.finish_send(record, "unknown")
+            await self._store.finish_send(record, "unknown")
             raise
-        await self.store.finish_send(record, outcome)
+        await self._store.finish_send(record, outcome)
         return outcome
 
     async def _load(self, ref: RequestRef) -> tuple[RequestRecord, AccessDecision]:
-        decision = await _decide(self.access, ref.channel, ref.subject_id)
-        record = await self.store.get(
+        decision = await _decide(self._access, ref.channel, ref.subject_id)
+        record = await self._store.get(
             ref.channel, decision.subject_id, ref.conversation_id, ref.request_id
         )
         return record, decision
@@ -223,7 +249,7 @@ class ResultDelivery:
         if record.answer is None:  # 数据库约束保证不会发生；不按“有回答”继续
             raise ResultUnavailableError
         try:
-            return await self.evidence.validate_answer(
+            return await self._evidence.validate_answer(
                 record.answer, self._context(record, decision)
             )
         except AnswerRejectedError:
@@ -240,7 +266,7 @@ class ResultDelivery:
             ),
             target_scope=frozenset({decision.target_id}),
             tool_scope=frozenset(),
-            budget=self.budget,
+            budget=self._budget,
         )
 
     @staticmethod
@@ -258,11 +284,15 @@ class ChannelService:
     def __init__(self, app: Application, results: ResultDelivery) -> None:
         if app.evidence is not results.evidence:
             raise ValueError("应用与交付必须使用同一个 EvidenceStore")
-        self.results = results
+        self._results = results
         self._app = app
         self._store = results.store
         self._access = results.access
         self._running: set[str] = set()
+
+    @property
+    def results(self) -> ResultDelivery:
+        return self._results
 
     async def accept(self, inbound: InboundRequest) -> RequestReceipt:
         """当前授权通过后持久接受请求；同一请求编号返回已有记录，不再运行。"""
@@ -289,7 +319,7 @@ class ChannelService:
             ),
             target_scope=frozenset({decision.target_id}),
             tool_scope=scope,
-            budget=self.results.budget,
+            budget=self._results.budget,
         )
         return RequestReceipt(record, acceptance.created, inbound.message, context)
 
