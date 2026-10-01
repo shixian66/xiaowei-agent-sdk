@@ -2,9 +2,10 @@
 
 ``Application.run_turn`` 是 Web 与飞书后续共用的入口：存储就绪检查 → 按本轮 context 装配 SDK
 Agent（工具集合只属于这一轮）→ 原生 ``Runner.run``（SDK Session 经 ``PolicySession`` 暂存）→
-最终回答校验后才提交 Session → 交付前按接收渠道再复核并生成 ``Delivery``。任一步失败都不交付，
-暂存项被丢弃，已执行的工具不补跑、不重试；错误是带固定信息与原因代码的 ``TurnError``，
-不携带模型输出、工具结果、连接信息或下层异常。
+最终回答校验后才提交 Session → 返回已校验的 ``AgentAnswer``。交付由调用方在发送前用同一
+``EvidenceStore.validate_answer`` 按接收渠道与当前权限重新生成 ``Delivery``；提交之后撤权时，
+本轮已保存但不能交付。任一步失败都不提交，暂存项被丢弃，已执行的工具不补跑、不重试；错误
+是带固定信息与原因代码的 ``TurnError``，不携带模型输出、工具结果、连接信息或下层异常。
 
 用途范围由 ``scope_for_turn`` 在可信入口每条消息重新计算，不是模型可调用的工具。模型接入的
 客户端、凭据与 Profile 不进入 RunContext；Profile 的 ``data_policy_id`` 选择用户输入准入策略和
@@ -13,7 +14,8 @@ Agent（工具集合只属于这一轮）→ 原生 ``Runner.run``（SDK Session
 
 相互依赖的运行对象只能来自同一次装配：模型只接受 ``open_model`` 生成的 ``ModelBinding``，
 证据存储取自治理对象，MCP 接入必须使用同一个治理对象。会话绑定 Profile 与解析后的数据策略
-内容：同一 ``data_policy_id`` 的策略内容变化后，旧会话在首个模型调用前拒绝。
+内容，以及配置的业务口径 ``BusinessContext``：任一变化后，旧会话在首个模型调用前拒绝。业务
+口径只进入 Agent instructions，解释字段含义、时区与单位，不改变工具或数据权限。
 """
 
 import asyncio
@@ -34,7 +36,7 @@ from xiaowei.evidence import AnswerRejectedError, EvidenceError, EvidenceStoreEr
 from xiaowei.governance import Execute, GovernedTools, ToolExecutionError
 from xiaowei.mcp import MCPIntegration
 from xiaowei.model_api import ModelBinding
-from xiaowei.models import AgentAnswer, Delivery, RunContext, ToolId
+from xiaowei.models import AgentAnswer, Label, RunContext, ToolId
 from xiaowei.session import (
     PolicySession,
     SessionInputPolicy,
@@ -101,6 +103,20 @@ class DataPolicy(BaseModel):
     model_tools: frozenset[ToolId]
 
 
+class BusinessContext(BaseModel):
+    """一个查询目标的可信业务口径：字段含义、时区、单位与必要过滤条件的说明。
+
+    只作为 Agent instructions 的一部分交给模型，不扩大工具、对象或数据权限；规范化内容进入
+    会话绑定，版本或内容变化后旧会话拒绝继续。
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    target_id: Label
+    version: Label
+    text: str = Field(min_length=1, max_length=8000)
+
+
 class AppConfig(BaseModel):
     """应用的可信配置；与 Profile、依赖对象一起在启动时装配。"""
 
@@ -112,6 +128,7 @@ class AppConfig(BaseModel):
     data_policies: dict[str, DataPolicy]
     session_limits: SessionLimits
     max_concurrent_turns: int = Field(gt=0)
+    business_context: BusinessContext | None = None
 
     @model_validator(mode="after")
     def _all_purposes(self) -> "AppConfig":
@@ -145,6 +162,9 @@ class Application:
         for tool_id in (*config.purposes["query"], *config.purposes["diagnose"]):
             if catalog.contract(tool_id) is None:
                 raise ValueError(f"应用配置：用途中的 {tool_id} 未登记")
+        context = config.business_context
+        if context is not None and all(c.target_id != context.target_id for c in catalog.contracts):
+            raise ValueError("应用配置：业务口径的目标没有登记的工具")
         self._local: dict[str, Tool] = {}
         for tool_id, execute in local_tools.items():
             contract = catalog.contract(tool_id)
@@ -155,7 +175,8 @@ class Application:
         self._config = config
         self._data_policy = data_policy
         self._model = model
-        self._binding = _binding_fingerprint(model.fingerprint, data_policy)
+        self._binding = _binding_fingerprint(model.fingerprint, data_policy, context)
+        self._instructions = _instructions(config.instructions, context)
         self._engine = engine
         self._governance = governance
         self._evidence = governance.evidence
@@ -186,8 +207,12 @@ class Application:
             & available_tools
         )
 
-    async def run_turn(self, ctx: RunContext, message: str) -> Delivery:
-        """执行一轮并返回通过验证的渠道输出；失败抛出 ``TurnError``，取消照常传播。"""
+    async def run_turn(self, ctx: RunContext, message: str) -> AgentAnswer:
+        """执行一轮，返回已校验并已提交 Session 的回答；失败抛出 ``TurnError``，取消照常传播。
+
+        回答不是可直接发送的内容：调用方在每次发送前用 ``EvidenceStore.validate_answer``
+        按接收渠道与当前权限生成 ``Delivery``。
+        """
         turn = ctx.identity.turn_id
         session_id = ctx.identity.session_id
         started = time.monotonic()
@@ -200,7 +225,7 @@ class Application:
         self._active.add(session_id)
         try:
             async with asyncio.timeout(ctx.budget.timeout_seconds):
-                delivery = await self._turn(ctx, message, started)
+                answer = await self._turn(ctx, message, started)
         except TurnError as exc:
             _stage(turn, "failed", started, exc.reason)
             raise
@@ -214,10 +239,10 @@ class Application:
         finally:
             self._governance.end_turn(ctx.identity)
             self._active.discard(session_id)
-        _stage(turn, "delivered", started)
-        return delivery
+        _stage(turn, "completed", started)
+        return answer
 
-    async def _turn(self, ctx: RunContext, message: str, started: float) -> Delivery:
+    async def _turn(self, ctx: RunContext, message: str, started: float) -> AgentAnswer:
         turn = ctx.identity.turn_id
         if not ctx.tool_scope <= self._data_policy.model_tools:
             raise TurnError("scope_rejected")
@@ -229,7 +254,7 @@ class Application:
 
         agent = Agent[RunContext](
             name="xiaowei",
-            instructions=self._config.instructions,
+            instructions=self._instructions,
             model=self._model.model,
             model_settings=self._model.settings,
             tools=self._tools_for(ctx),
@@ -260,8 +285,7 @@ class Application:
         await self._evidence.validate_answer(answer, ctx)
         await session.commit_validated()
         _stage(turn, "committed", started)
-        # 提交与交付之间权限可能变化：按接收渠道与当前权限重新生成。
-        return await self._evidence.validate_answer(answer, ctx)
+        return answer
 
     def _tools_for(self, ctx: RunContext) -> list[Tool]:
         """本轮 Agent 的工具：可信范围内的本地工具与 MCP 工具，列表只属于这一轮。"""
@@ -306,13 +330,29 @@ def _causes(exc: BaseException) -> list[BaseException]:
     return chain
 
 
-def _binding_fingerprint(profile_fingerprint: str, policy: DataPolicy) -> str:
-    """会话绑定：Profile 指纹与解析后的数据策略内容（规范化），任一变化都开启新会话。"""
-    body = {
+def _instructions(base: str, context: BusinessContext | None) -> str:
+    if context is None:
+        return base
+    return (
+        f"{base}\n\n以下是目标 {context.target_id} 的业务口径（版本 {context.version}），"
+        f"只说明字段含义、时区与单位，不改变可用的工具或数据范围：\n{context.text}"
+    )
+
+
+def _binding_fingerprint(
+    profile_fingerprint: str, policy: DataPolicy, context: BusinessContext | None
+) -> str:
+    """会话绑定：Profile 指纹、解析后的数据策略内容与业务口径（规范化），任一变化都开启新会话。
+
+    未配置业务口径时不加入该键，已有会话的绑定保持不变。
+    """
+    body: dict[str, object] = {
         "profile": profile_fingerprint,
         "input": policy.input.model_dump(mode="json"),
         "model_tools": sorted(policy.model_tools),
     }
+    if context is not None:
+        body["business_context"] = context.model_dump(mode="json")
     canonical = json.dumps(body, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
     return f"sha256:{hashlib.sha256(canonical.encode()).hexdigest()}"
 

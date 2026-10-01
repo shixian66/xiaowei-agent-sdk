@@ -283,6 +283,14 @@ Web 默认只接受配置的 loopback Host/Origin，按解析后的 scheme/host/
 
 **Files:** Modify `src/xiaowei/models.py`, `src/xiaowei/governance.py`, `src/xiaowei/evidence.py`, `src/xiaowei/app.py`, `src/xiaowei/starrocks.py`; Create `tests/p1b/test_starrocks_tools.py`, `tests/p1b/test_delivery_projection.py`.
 
+Task 3 实施修订（不改变产品范围与权限边界）：
+
+- 工具契约、参数、投影策略与执行绑定放在新模块 `src/xiaowei/starrocks_tools.py`，`starrocks.py` 只增加 `target` 属性与元数据 SQL 的字节上限，Adapter 不依赖治理层。
+- 前置检查是通用的 `Prechecked(check, run)`：`check` 同步、零 I/O，在当前授权之后、预算预留之前运行，`run` 只收到它的结果（查询为 `GuardedQuery`）。`describe_table` 的对象 allowlist 也走同一机制，参数名为 `table`。
+- 依赖真实 PostgreSQL 与真 Runner 的用例放在 `tests/sdk_core/test_starrocks_tools.py`（含交付投影用例）：CI 的 `tests` 任务忽略 `tests/sdk_core` 且不提供 PostgreSQL，只有 `integration` 任务提供。离线容量契约在 `tests/p1b/test_starrocks_tool_contracts.py`；真实 StarRocks + PostgreSQL 的端到端用例加入显式的 `test_starrocks_real.py`。
+- 启动容量检查按审查要求不写算术公式：按声明上限构造序列化后最大的合成结果，直接交给证据的真实投影器检查 Web 与飞书两条路径。服务端列名由同一上限在运行时约束，超出按结果契约失败。投影规则升为 `/6`（策略可声明必需字段），升级前的证据随之不可读。
+- `Application.run_turn` 返回已提交的 `AgentAnswer`，最后阶段日志由 `delivered` 改为 `completed`；交付由调用方经 `EvidenceStore.validate_answer` 生成。`DeliveryFact` 另带 `target_id`、`captured_at`、`truncated`。飞书纯文本逐行渲染表格并转义单元格中的控制字符，按消息长度分段留给 Task 7。
+
 - [ ] 先写真 Runner + scripted Model 用例：查询轮展示三个工具；诊断轮展示 `list_tables`、`describe_table` 且隐藏 `run_readonly_query`；未授权工具不展示。模型强行调用诊断轮查询、展示后撤权、参数越界均断言 Adapter 0 调用。
 - [ ] 为三个工具登记严格参数/结果 schema 与四种 `ToolPolicy`；`list_tables` 使用严格空参数对象。元数据结果和查询结果都只从受信 Adapter 输出建立 Evidence。
 - [ ] 在 `GovernedTools` 实现同步策略 precheck。证明 SQLGuard 拒绝返回带稳定 `QueryRejectionCode` 的 `ToolRejectedError`，pool/Adapter/SQL execute 为 0、工具调用预算不变且模型可按安全原因在剩余轮次修正；precheck 通过后的执行失败仍是 `ToolExecutionError`、预算已消耗且模型不续轮。

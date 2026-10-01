@@ -21,7 +21,6 @@ from typing import Any
 import httpx2
 import pytest
 from agents import set_tracing_disabled
-from agents.extensions.memory import SQLAlchemySession
 from agents.testing import assistant_message, function_call
 from agents.tracing import flush_traces, set_trace_processors
 from pydantic import ValidationError
@@ -48,10 +47,11 @@ from tests.sdk_core.test_sdk_contract import _RecordingProcessor
 
 from xiaowei.app import AppConfig, Application, DataPolicy, TurnError
 from xiaowei.config import configure_runtime
+from xiaowei.evidence import AnswerRejectedError
 from xiaowei.governance import GovernedTools
 from xiaowei.mcp import MCPIntegration
 from xiaowei.model_api import ModelBinding, open_model
-from xiaowei.models import Budget, Channel, Identity, RunContext
+from xiaowei.models import Budget, Channel, Delivery, Identity, RunContext
 from xiaowei.session import SessionInputPolicy, SessionLimits
 
 pytestmark = pytest.mark.loopback
@@ -233,6 +233,11 @@ class Env:
             clock=self.clock,
         )
 
+    async def deliver(self, ctx: RunContext, message: str) -> Delivery:
+        """渠道的做法：完成一轮后，按接收渠道与当前权限生成交付内容。"""
+        answer = await self.app.run_turn(ctx, message)
+        return await self.governed.evidence.validate_answer(answer, ctx)
+
     def scope(self, mode: Any, authorized: frozenset[str] = ALL_TOOLS) -> frozenset[str]:
         return self.app.scope_for_turn(mode, authorized, self.app.available_tools)
 
@@ -320,7 +325,7 @@ async def test_local_and_mcp_followup_through_real_runner(env: Env) -> None:
         tool_call("fixture__lookup", key="k1"),
         cite("两者都来自本轮工具"),
     )
-    delivered = await env.app.run_turn(env.ctx(turn="t1"), first)
+    delivered = await env.deliver(env.ctx(turn="t1"), first)
 
     assert env.scripts.tools_seen(first) == [set(SDK_NAMES.values())] * 3
     assert len(delivered.evidence_ids) == 2 and delivered.channel == "web"
@@ -332,7 +337,7 @@ async def test_local_and_mcp_followup_through_real_runner(env: Env) -> None:
 
     # 追问：历史从 Session 回放，模型引用上一轮证据，工具不重跑。
     followup = env.scripts.add("刚才两项再总结一下", cite("沿用上一轮证据"))
-    again = await env.app.run_turn(env.ctx(turn="t2"), followup)
+    again = await env.deliver(env.ctx(turn="t2"), followup)
     assert set(again.evidence_ids) == set(delivered.evidence_ids)
     assert evidence_in(env.scripts.calls[followup][0]) == list(delivered.evidence_ids)
     assert env.tool_ids() == [TOTAL_TOOL]
@@ -346,7 +351,7 @@ async def test_local_and_mcp_followup_through_real_runner(env: Env) -> None:
         tool_call("fixture__lookup", key="k1"),
         cite(),
     )
-    other = await env.app.run_turn(env.ctx(session="s2", turn="t3", channel="feishu"), feishu)
+    other = await env.deliver(env.ctx(session="s2", turn="t3", channel="feishu"), feishu)
     assert other.channel == "feishu" and len(other.evidence_ids) == 2
     assert '"total": 100' in other.content and '"value": 7' in other.content
     assert '"rows"' not in other.content and INJECTION not in other.content
@@ -367,9 +372,9 @@ async def test_concurrent_sessions_are_isolated(env: Env) -> None:
     alice = env.ctx("alice", "s-a", "t-a", max_tool_calls=1)
     bob = env.ctx("bob", "s-b", "t-b", mode="diagnose", max_tool_calls=1)
 
-    a_task = asyncio.create_task(env.app.run_turn(alice, a_message))
+    a_task = asyncio.create_task(env.deliver(alice, a_message))
     await a_entered.wait()
-    b = await env.app.run_turn(bob, b_message)
+    b = await env.deliver(bob, b_message)
     b_done.set()
     a = await a_task
 
@@ -490,21 +495,17 @@ async def test_timeout_does_not_replay_tools(env: Env) -> None:
     assert await env.state("s1") == ("active", 1)
 
 
-async def test_delivery_rechecks_permission_after_commit(
-    env: Env, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """提交之后、交付之前撤权：本轮已保存，但不交付。"""
-    committed = SQLAlchemySession.add_items
-
-    async def add_then_revoke(self: SQLAlchemySession, items: Any) -> None:
-        await committed(self, items)
-        env.grants.revoke_all()
-
-    monkeypatch.setattr(SQLAlchemySession, "add_items", add_then_revoke)
+async def test_delivery_rechecks_permission_after_commit(env: Env) -> None:
+    """提交之后、交付之前撤权：本轮已保存，但交付时按当前权限拒绝。"""
     message = env.scripts.add("东区", tool_call("order_total", region="east"), cite())
-    with pytest.raises(TurnError) as refused:
-        await env.app.run_turn(env.ctx(turn="t1"), message)
-    assert refused.value.reason == "answer_rejected"
+    ctx = env.ctx(turn="t1")
+    answer_ = await env.app.run_turn(ctx, message)
+    assert await env.state("s1") == ("active", 1)
+    assert (await env.governed.evidence.validate_answer(answer_, ctx)).evidence_ids
+
+    env.grants.revoke_all()
+    with pytest.raises(AnswerRejectedError):
+        await env.governed.evidence.validate_answer(answer_, ctx)
     assert await env.state("s1") == ("active", 1)
 
 
@@ -706,7 +707,7 @@ async def test_stage_logs_contain_only_safe_metadata(env: Env) -> None:
             ("storage_ready", "-"),
             ("answered", "-"),
             ("committed", "-"),
-            ("delivered", "-"),
+            ("completed", "-"),
         ],
         "req-bad": [
             ("received", "-"),
