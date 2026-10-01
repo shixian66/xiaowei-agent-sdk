@@ -390,6 +390,17 @@ Task 6 实施修订（不改变产品范围与权限边界）：
 
 **Files:** Create `src/xiaowei/feishu.py`, `tests/p1b/test_feishu.py`; Modify `src/xiaowei/config.py`, `pyproject.toml`, `uv.lock`.
 
+Task 7 安装探针结论（2026-10-01，主线 `1d1aa01`；**触发本任务停工条件，接入方案待用户决定**）：
+
+- 探针在仓库外的独立 venv 安装 `lark-channel-sdk==1.4.0`（依赖 requests、httpx、websockets 15.0.1、pycryptodome 等），只读源码并做离线帧实验，不用凭据、不连飞书；锁文件未改。
+- **高层 `FeishuChannel` 不能表达持久化失败。** 内置 `im.message.receive_v1` 处理器只把异步处理 `schedule` 到 SDK 自己的后台事件循环线程，随即返回；WS 客户端据此立即回写 ack，`_handle_message_event` 还会捕获并记录全部异常。`on_raw_event` 的处理器同样经 `schedule` 异步执行。离线实验：同一数据帧交给 `FeishuChannel` 的分发器时，`on("message")` 处理器抛错也写回 `code=200`。
+- **低层公开类 `lark_channel.ws.Client` 能回 500，但不满足其他边界。** 自建 `EventDispatcherHandler` 时，同步处理器抛错会写回 `code=500`（离线实验已复现）；但处理器在 WS 事件循环里同步执行，持久化须跨线程阻塞等待应用循环；`ws.client` 在导入时绑定模块级事件循环，`start()` 永久阻塞，且没有公开的 stop/close，有界关闭只能靠私有 `_disconnect`（`FeishuChannel.stop` 自己也这样做）。平台收到 500 后是否重投，离线无法证明。
+- 发送侧：`RetryConfig` 默认 5 次重试，可配置；`SendResult` 只有 `success`/`error`，传输异常被收为 `fail(UNKNOWN)`；回复目标消失会改为新建消息，富文本被拒会降级为纯文本。结果未知与明确失败的区分及禁用降级在方案确定后再逐项核实（G8）。
+- 候选方案（任何一项都改变本计划已写定的产品契约或部署前提，须用户选择）：
+  1. 保留 `FeishuChannel` 长连接，接受“先 ack、后持久化”：持久化失败时该消息不被处理、平台不重投，进程锁低 readiness 由操作者处理，用户需重发。其余去重、单次发送和不重跑语义不变。
+  2. 改用 HTTP 事件订阅（webhook）：应用路由在持久化成功后才返回 200，非 200 是否及何时重推须实测；需要飞书可达的公网 HTTPS 入口，改变“SSH 本地转发、无公网入口”的部署前提。
+  3. 低层 `ws.Client`：需接受私有 API 关闭路径，违反现有规则，不推荐。
+
 - [ ] 用候选 `lark-channel-sdk==1.4.0` 做安装探针，固定实际 async connect/disconnect、事件字段、回调 ack/NACK/抛错与重投语义、发送 API、自动重试/fallback 设置与 `SendResult`；若持久化失败无法阻止成功 ack，或无法满足其他边界，记录具体限制并修订计划，不回退到未经验证的旧 raw client。
 - [ ] 先写 SDK 边界 fake 测试：允许单聊、未授权 tenant/user、群聊、非文本、自身消息、过期事件、重复 message ID、持久化失败、队列满、出队 busy、进程取消/重启 interrupted、明确发送失败与未知结果。
 - [ ] 实现 `/查询`、`/诊断`、`/新建` 和普通诊断文本；指令只影响当前消息，新会话不继承查询许可。
@@ -463,7 +474,7 @@ Task 6 实施修订（不改变产品范围与权限边界）：
 | G3 业务口径 | 首个目标的可信字段含义、时间/时区、单位、必要过滤条件、文本与版本；其规范化指纹进入会话绑定 | Task 3 提示与会话、Task 9 质量验收 |
 | G4 真实模型 Gate 0 | 获准 provider/endpoint/protocol/model、secret ref、数据接收范围、预算与保留政策；工具续轮到交付及 Session 追问通过，供应商必需字段可安全回放 | 阻塞 Task 3–9；未通过先做独立前置修复 |
 | G5 驱动兼容 | `asyncmy` 锁定版对目标 StarRocks 的 TLS 证书验证、非缓冲流式读取、会话变量设置/回读、类型、取消和连接废弃行为 | Task 2 关闭、Task 9 |
-| G6 Web 边界 | 固定操作者标识、允许 Host/Origin（默认地址 `http://127.0.0.1:8501` 已于 2026-10-01 确定）、HTTP/HTTPS/SSH 使用方式、cookie Secure 设置 | Task 6 正式配置、Task 9 |
+| G6 Web 边界 | 固定操作者标识、允许 Host/Origin（默认地址 `http://127.0.0.1:8501` 已于 2026-10-01 确定）、HTTP/HTTPS/SSH 使用方式、cookie Secure 设置 | Task 8 正式配置、Task 9 |
 | G7 飞书边界 | app/tenant/user allowlist、所需 scopes、长连接环境、消息时效、文本上限、目的地保留与显式重发授权 | Task 7 真实验证、Task 9 |
 | G8 SDK 包行为 | `lark-channel-sdk` 锁定版能否禁用自动发送重试/fallback并区分成功/失败/未知；`asyncmy` 和 Feishu 依赖的审计/供应链结果 | Task 2、7、8 |
 
