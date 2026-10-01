@@ -445,7 +445,7 @@ class FeishuGateway:
         )
 
 
-class _Channel(Protocol):
+class LarkChannel(Protocol):
     """``LarkTransport`` 使用的 ``FeishuChannel`` 公开方法。"""
 
     def on(self, name: str, handler: Callable[..., Any]) -> Callable[[], None]: ...
@@ -499,7 +499,7 @@ class LarkTransport:
     它在独立的守护线程中运行，应用循环最多等待 ``stop_timeout_seconds``，超时返回 False。
     """
 
-    def __init__(self, channel: _Channel, config: FeishuConfig) -> None:
+    def __init__(self, channel: LarkChannel, config: FeishuConfig) -> None:
         self._channel = channel
         self._config = config
         self._lock = threading.Lock()

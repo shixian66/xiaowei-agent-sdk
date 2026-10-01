@@ -30,14 +30,13 @@ _SRC = _ROOT / "src"
 # ``[project].dependencies`` 的包名集合——新增任何一项都必须先改这里，
 # 从而必须在 review 里被看见。P1-A Task 1 按新产品方向加入 OpenAI Agents SDK
 # （``openai-agents[sqlalchemy]``）；P1-B Task 2 按计划加入 StarRocks 驱动 ``asyncmy``（精确钉版）；
-# P1-B Task 7 加入飞书 ``lark-channel-sdk``（精确钉版）。
-# 旧包专用的依赖在 P1-B 清理时重新取舍。
+# P1-B Task 7 加入飞书 ``lark-channel-sdk``（精确钉版）。P1-B Task 8 切换正式入口：wheel 只含新包，
+# 旧包专用的 ``alembic`` 移出生产依赖，只留在 dev（旧测试）与 legacy（旧 Compose 镜像）。
 _EXPECTED_RUNTIME_DEPENDENCIES = frozenset(
     {
         "pydantic",
         "sqlglot",
         "sqlalchemy",
-        "alembic",
         "asyncpg",
         "fastapi",
         "uvicorn",
@@ -58,8 +57,10 @@ _EXPECTED_DEV_DEPENDENCIES = frozenset(
         "hatchling",
         "httpx",
         "pyyaml",
+        "alembic",
     }
 )
+_EXPECTED_LEGACY_DEPENDENCIES = frozenset({"alembic"})
 
 
 def _pyproject() -> dict[str, object]:
@@ -115,6 +116,36 @@ def test_dev_dependency_set_is_exactly_the_approved_tools() -> None:
     assert isinstance(dev_specs, list)
     assert _requirement_names(dev_specs) == set(_EXPECTED_DEV_DEPENDENCIES)
     assert not ({"fastapi", "uvicorn"} & _requirement_names(dev_specs))
+
+
+def test_legacy_extra_only_carries_the_old_package_migration_tool() -> None:
+    """``legacy`` 只服务旧 M5 镜像；不能成为新运行依赖的侧门。"""
+    project = _pyproject()["project"]
+    assert isinstance(project, dict)
+    extras = project["optional-dependencies"]
+    assert isinstance(extras, dict)
+    assert set(extras) == {"dev", "legacy"}
+    assert _requirement_names(extras["legacy"]) == set(_EXPECTED_LEGACY_DEPENDENCIES)
+
+
+def test_wheel_and_command_only_point_at_the_new_package() -> None:
+    """正式命令与 wheel 只指向新包 ``xiaowei``；旧包源码只作历史留在工作树。"""
+    data = _pyproject()
+    project = data["project"]
+    assert isinstance(project, dict)
+    assert project["scripts"] == {"xiaowei": "xiaowei.cli:main"}
+    tool = data["tool"]
+    assert isinstance(tool, dict)
+    assert tool["hatch"]["build"]["targets"]["wheel"]["packages"] == ["src/xiaowei"]
+
+
+def test_new_package_never_imports_the_old_package() -> None:
+    offenders = [
+        str(path.relative_to(_ROOT))
+        for path in (_SRC / "xiaowei").rglob("*.py")
+        if "xiaowei_agent" in _internal_module_imports(path)
+    ]
+    assert not offenders
 
 
 @pytest.mark.parametrize("package", ["sqlalchemy", "alembic"])

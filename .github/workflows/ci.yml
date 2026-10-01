@@ -74,6 +74,35 @@ jobs:
       - run: uv sync --extra dev --frozen
       - run: python -m scripts.compose_smoke
 
+  # 正式入口：wheel 在不含 dev 依赖的干净环境中安装，两个入口都只指向新包（P1-B Task 8）。
+  product-entry:
+    name: product-entry
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9
+        with:
+          version: "0.12.8"
+          python-version: "3.11"
+          enable-cache: false
+      - name: Install the wheel with locked runtime dependencies only
+        run: |
+          set -euo pipefail
+          uv build --wheel -o dist
+          uv export --frozen --no-dev --no-emit-project -o runtime-requirements.txt
+          uv venv /tmp/product
+          uv pip install --python /tmp/product/bin/python -r runtime-requirements.txt
+          uv pip install --python /tmp/product/bin/python --no-deps dist/*.whl
+      - name: Both entries start from the new package
+        working-directory: /tmp
+        run: |
+          set -euo pipefail
+          /tmp/product/bin/xiaowei --help
+          /tmp/product/bin/python -m xiaowei --help
+          /tmp/product/bin/python -c "import importlib.util as u; assert u.find_spec('xiaowei_agent') is None; assert u.find_spec('alembic') is None"
+
   security-gate:
     name: security-gate
     runs-on: ubuntu-24.04

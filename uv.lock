@@ -1335,7 +1335,6 @@ name = "xiaowei-agent"
 version = "0.1.0"
 source = { editable = "." }
 dependencies = [
-    { name = "alembic" },
     { name = "asyncmy" },
     { name = "asyncpg" },
     { name = "fastapi" },
@@ -1349,6 +1348,7 @@ dependencies = [
 
 [package.optional-dependencies]
 dev = [
+    { name = "alembic" },
     { name = "hatchling" },
     { name = "httpx" },
     { name = "mypy" },
@@ -1359,10 +1359,14 @@ dev = [
     { name = "pyyaml" },
     { name = "ruff" },
 ]
+legacy = [
+    { name = "alembic" },
+]
 
 [package.metadata]
 requires-dist = [
-    { name = "alembic", specifier = ">=1.16,<2" },
+    { name = "alembic", marker = "extra == 'dev'", specifier = ">=1.16,<2" },
+    { name = "alembic", marker = "extra == 'legacy'", specifier = ">=1.16,<2" },
     { name = "asyncmy", specifier = "==0.2.15" },
     { name = "asyncpg", specifier = ">=0.30,<0.31" },
     { name = "fastapi", specifier = ">=0.115,<1" },
@@ -1382,4 +1386,4 @@ requires-dist = [
     { name = "sqlglot", specifier = ">=27,<31" },
     { name = "uvicorn", specifier = ">=0.34,<1" },
 ]
-provides-extras = ["dev"]
+provides-extras = ["dev", "legacy"]

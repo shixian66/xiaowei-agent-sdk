@@ -434,6 +434,16 @@ Task 7 实施修订（用户 2026-10-01 选择方案 1；以下替代 §2.5 中�
 
 **Files:** Create `src/xiaowei/runtime.py`, `src/xiaowei/cli.py`, `src/xiaowei/__main__.py`, `tests/p1b/test_runtime.py`, `tests/p1b/test_cli.py`; Modify `src/xiaowei/__init__.py`, `src/xiaowei/config.py`, `pyproject.toml`, `uv.lock`, `.env.example`, `.github/workflows/ci.yml`, `README.md`.
 
+Task 8 实施修订（不改变产品边界）：
+
+- **配置：** 一个 JSON 文件（`--config`），顶层模型 `ServeConfig` 在 `runtime.py`（放进 `config.py` 会与 `app`、`starrocks` 等形成循环导入）。不用 TOML：`ModelProfile.reasoning_effort`、`StarRocksTarget.tls_ca_file` 是必须显式写出的可空字段，TOML 无法表达 null，不为配置格式放宽已审查的契约。凭据只以 `env:NAME` 引用出现，在用到的装配步骤才解析；校验错误只报字段路径与固定说明。示例 `examples/xiaowei.example.json` 由测试保证可通过校验与投影容量检查。`.env.example` 是旧 M5 变量说明，未改。
+- **授权来源：** `StaticAccess` 读配置中的 subject → 工具授权表，`resolve` 与 `authorize` 同一实例（`ResultDelivery` 已核对绑定身份）；唯一目标取自 StarRocks 配置。配置校验：授权与模型工具只能是三个 StarRocks 工具；Web 操作者与飞书用户不能共用 subject；`consumer_count` 不超过全局并发；监听地址只允许 loopback，且必须在 `web.allowed_origins` 中。
+- **启动失败：** 任一必要步骤失败时不对外服务，逆序关闭并以非零退出码结束（不是带着 `/readyz` 503 运行）；监听套接字先于数据库绑定。飞书长连接启动失败只让飞书不可用，`/readyz` 增加 `feishu: disabled | connected | unavailable`（`create_web_app` 新增可选 `components`）。
+- **MCP：** 正式 `serve` 不装配 MCP。MCP 工具策略需要代码定义的参数与结果类型，P1-B 没有获准的 Server；“空配置可运行”的约定不变，接入具体 Server 时另行扩展配置。
+- **显式重发：** 只针对飞书（Web 结果经 GET 读取，从不发送）。chat_id 由操作者给出（G2 未决，目的地不持久化）；它参与会话语境摘要，换 chat 定位不到原记录。重发用未启动长连接的 SDK 通道单次发送，不装配模型、不连接 StarRocks。
+- **打包与 legacy：** console script 改为 `xiaowei.cli:main`，wheel 只含 `src/xiaowei`。旧包唯一的专用依赖 `alembic` 移入 dev（旧测试）与新增的 `legacy` extra（旧 M5 镜像）；`Dockerfile` 只服务 legacy CI 的 compose-smoke，从源码复制旧包。`tests/contract/test_wheel_runs_without_tests.py` 改为新打包契约。CI 新增 `product-entry` 作业：wheel 在只装锁定运行依赖的环境中安装并运行两个入口。旧测试继续在原有作业中运行。
+- **测试位置：** 运行装配、命令与正式入口浏览器验收放在 `tests/sdk_core/`（`test_runtime.py`、`test_cli.py`、`test_serve_browser.py`），复用其 PostgreSQL 与浏览器 fixture。日志 canary 由子进程脚本 `tests/sdk_core/sdk_log_canary.py` 用真实 `OpenAIResponsesModel` + HTTP mock 跑工具轮次，并以不导入正式入口的对照进程证明检测有效。
+
 - [ ] 先写子进程测试，分别通过 console script `xiaowei` 和 `python -m xiaowei` 启动；确保 `src/xiaowei/__init__.py` 无导入副作用，两个 SDK `DONT_LOG` 环境值都在任何 `agents` import 前被强制为 `1`。预置 `0/false` 并触发含 canary 的模型/工具错误，所有 logger 输出不得出现 canary。
 - [ ] 实现单一 runtime lifespan：配置校验 → 专用 PostgreSQL 连接取得单实例 advisory lock → schema 检查与中断恢复 → StarRocks Adapter → Evidence/Governance/Application/ChannelService → Web/飞书 → 反序关闭并释放锁。部分启动失败也要按逆序关闭已创建资源；持锁连接丢失时停止接收并退出。
 - [ ] 实现 `serve`、`storage init/upgrade/cleanup`、`requests resend`，不增加独立恢复命令；恢复只随持锁的 serve 启动执行，`storage init/upgrade` 也须独占同一锁。显式 resend 只接受当前 owner 下的 failed/unknown 记录，经 Evidence 重验与数据库 CAS 后发送一次。危险目标、未知请求、Evidence 过期、pending/sent/sending 或并发竞争均失败关闭；命令输出只给状态和请求编号。
