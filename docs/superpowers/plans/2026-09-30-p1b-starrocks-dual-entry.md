@@ -364,6 +364,14 @@ Task 5 实施修订（不改变产品范围与权限边界）：
 
 **Files:** Create `src/xiaowei/web.py`, `src/xiaowei/static/index.html`, `tests/p1b/test_web.py`; Modify `src/xiaowei/config.py`.
 
+Task 6 实施修订（不改变产品范围与权限边界）：
+
+- 测试依赖真实 PostgreSQL 与 Task 5 的装配，放在 `tests/sdk_core/test_web.py`。CSP 禁止内联脚本，因此脚本与样式是 `static/` 下的独立文件 `app.js`、`app.css`，经固定白名单路由 `/assets/{name}` 提供。
+- `config.py` 增加 `WebConfig(operator_id, allowed_origins, secure_cookie, max_body_bytes)`。允许地址写成规范的 `scheme://host:port`（端口显式），首版只允许 `127.0.0.1`、`[::1]`、`localhost`；同一 host:port 只对应一个 scheme。正式取值随 Task 8 装配，待 G6。
+- `create_web_app(service, config)` 接收已装配的 `ChannelService`；readiness 取自其请求存储。cookie 只由页面换发；`POST /api/turns` 与 `POST /api/sessions` 缺少有效 cookie 时拒绝，避免失败响应换发的 cookie 丢失后已保存请求无法读取，也使跨站请求在没有 `SameSite=Strict` cookie 时直接失败。`POST /api/sessions` 的正文为空 JSON 对象。
+- 结果状态为 accepted/running 而 readiness 已锁低时返回 503，不再以“处理中”服务；状态由重启恢复确定。
+- 页面把双向文字控制符显示为可见转义，表格单元格 `unicode-bidi: isolate`。
+
 - [ ] 先写 ASGI 测试覆盖四个 API、cookie 建立、固定操作者、Host/Origin/JSON 检查、跨 cookie/request 读取、请求冲突、并发、新建会话和 readiness。Host/Origin 用精确 allowlist，覆盖外部域名解析到 loopback、`localhost.evil`、替代端口、尾点、用户信息与 IPv6 表示等 DNS rebinding/解析混淆反例。
 - [ ] 请求体限制同时覆盖：超限 `Content-Length` 在调用 receive 前拒绝；伪造较小长度、缺少长度和 chunked body 在累计读取达到上限时停止，不完整缓冲超限正文。
 - [ ] 加入含 `<script>`、事件属性、HTML 标签、Unicode 和超长值的结果；断言 API 是 JSON，页面代码只用 `textContent`/DOM 创建表格且没有 `innerHTML`、Markdown 或动态脚本执行。

@@ -1,0 +1,30 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>小维</title>
+<link rel="stylesheet" href="/assets/app.css">
+<script src="/assets/app.js" defer></script>
+</head>
+<body>
+<header>
+<h1>小维</h1>
+<button id="new-session" type="button">新建会话</button>
+</header>
+<main>
+<ol id="turns"></ol>
+</main>
+<form id="composer">
+<label>用途
+<select id="mode" name="mode">
+<option value="diagnose" selected>诊断</option>
+<option value="query">查询</option>
+</select>
+</label>
+<textarea id="message" name="message" rows="3" required placeholder="输入问题"></textarea>
+<button id="send" type="submit">发送</button>
+<p id="notice" role="status"></p>
+</form>
+</body>
+</html>

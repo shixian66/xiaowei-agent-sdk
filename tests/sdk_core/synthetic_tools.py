@@ -121,6 +121,7 @@ class RecordingAdapter:
     total: int = 100
     rows: int = 2
     memo: str = ""
+    truncated: bool = False
 
     async def execute(self, request: ToolRequest) -> ToolObservation:
         self.calls.append(request)
@@ -128,7 +129,7 @@ class RecordingAdapter:
         return ToolObservation(
             payload=payload(region, self.total, self.rows, self.memo),
             captured_at=START,
-            truncated=False,
+            truncated=self.truncated,
         )
 
 

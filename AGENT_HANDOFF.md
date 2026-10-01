@@ -9,13 +9,13 @@
 | 项目 | 已核对事实 |
 | --- | --- |
 | 仓库 | [shixian66/xiaowei-agent-sdk](https://github.com/shixian66/xiaowei-agent-sdk) |
-| 本地目录 / 分支 | `/Users/kloenguyen/Desktop/agent-SDK` / `claude/p1b-channel-service`（从 `origin/main` 的 `e5e380c` 分出） |
+| 本地目录 / 分支 | `/Users/kloenguyen/Desktop/agent-SDK` / `claude/p1b-minimal-web`（从 `origin/main` 的 `98f4167` 分出） |
 | M5 历史起点 | `372c381f44ecfa1fa53961f137d0058033cbd805`；不是远端当前 main 的核验结论 |
-| P1-A 代码基线 / 当前主线 | `148abaa4729ac6644c03056cf265a9dc18f1acd8` / `e5e380c621a8f4a385ad3c4f14f55ad69be30503`（P1-B 计划、Gate 0 离线部分、SQLGuard Task 1 的 PR #10、StarRocks Adapter Task 2 的 PR #11、urllib3 修复的 PR #12、受治理工具 Task 3 的 PR #13 与请求和渠道状态 Task 4 的 PR #14 已合入） |
-| 当前阶段 | **P1-B Task 1 SQLGuard 已随 PR #10 合入；Task 2 StarRocks Adapter 随 PR #11 合入（`dd24d8a`）。Gate 0 在主线 `6389d78` 上以 `glm-4.7-flash` Profile 真实运行通过；Task 3 受治理工具与结构化 Evidence 交付经复审通过，随 PR #13 合入（`5058ae3`）；Task 4 PostgreSQL v2 请求与渠道状态经两轮审查修复与复审通过，随 PR #14 合入（`e5e380c`）；Task 5 共享 ChannelService 已在本分支实现，首轮独立审查的 1 个阻断（B1 授权来源可被代理对象绕过）已修复，待复审。**P1-A 离线完成（Task 1–5 经 PR #2–#7 合入）。真实模型：Gate 0 通过的 Profile 只有 `bbtoken-glm-4.7-flash`；Gemini 只有 2026-09-30 的历史部分证据（未闭环）；同端点 DeepSeek V4 Flash 已实测不兼容 |
-| 当前源码与依赖 | 新包 `src/xiaowei/` 含 `sqlguard.py`、`starrocks.py`、`starrocks_tools.py`、`channel_store.py`、`migrations/002_p1b_channels.sql`（应用表 v2）与本分支新增的 `channel.py`；锁定 `asyncmy==0.2.15`（精确钉版，已加入依赖基线）。另锁定 `openai-agents[sqlalchemy]` 0.22.3、`mcp` 2.2.0、`openai` 3.20.0、SQLAlchemy 2.0.52、asyncpg 0.30.0，urllib3 2.8.0（间接依赖，修复 CVE-2026-97687/97688/97689），Python 3.11.16；wheel 同时打包两个包，CLI 仍指向旧包 |
+| P1-A 代码基线 / 当前主线 | `148abaa4729ac6644c03056cf265a9dc18f1acd8` / `98f4167fc2d557edb9a8f09afe7816e2c78fa14b`（P1-B 计划、Gate 0 离线部分、SQLGuard Task 1 的 PR #10、StarRocks Adapter Task 2 的 PR #11、urllib3 修复的 PR #12、受治理工具 Task 3 的 PR #13、请求和渠道状态 Task 4 的 PR #14 与共享 ChannelService Task 5 的 PR #15 已合入） |
+| 当前阶段 | **P1-B Task 1 SQLGuard 已随 PR #10 合入；Task 2 StarRocks Adapter 随 PR #11 合入（`dd24d8a`）。Gate 0 在主线 `6389d78` 上以 `glm-4.7-flash` Profile 真实运行通过；Task 3 受治理工具与结构化 Evidence 交付经复审通过，随 PR #13 合入（`5058ae3`）；Task 4 PostgreSQL v2 请求与渠道状态经两轮审查修复与复审通过，随 PR #14 合入（`e5e380c`）；Task 5 共享 ChannelService 经一轮审查修复（B1 授权来源对象身份）与复审通过，随 PR #15 合入（`98f4167`）；Task 6 最小同源 Web 已在本分支实现，待独立审查。**P1-A 离线完成（Task 1–5 经 PR #2–#7 合入）。真实模型：Gate 0 通过的 Profile 只有 `bbtoken-glm-4.7-flash`；Gemini 只有 2026-09-30 的历史部分证据（未闭环）；同端点 DeepSeek V4 Flash 已实测不兼容 |
+| 当前源码与依赖 | 新包 `src/xiaowei/` 含 `sqlguard.py`、`starrocks.py`、`starrocks_tools.py`、`channel_store.py`、`migrations/002_p1b_channels.sql`（应用表 v2）、`channel.py` 与本分支新增的 `web.py`、`static/`；锁定 `asyncmy==0.2.15`（精确钉版，已加入依赖基线）。另锁定 `openai-agents[sqlalchemy]` 0.22.3、`mcp` 2.2.0、`openai` 3.20.0、SQLAlchemy 2.0.52、asyncpg 0.30.0，urllib3 2.8.0（间接依赖，修复 CVE-2026-97687/97688/97689），Python 3.11.16；wheel 同时打包两个包，CLI 仍指向旧包 |
 | 新产品入口 | 只有开发验证命令（见第 5 节）；尚无产品启动入口，旧 CLI/Compose 不算新入口 |
-| 本次工作范围 | [P1-B 计划](docs/superpowers/plans/2026-09-30-p1b-starrocks-dual-entry.md) Task 5：共享 ChannelService（可信入口信封、单一授权来源、本轮范围、去重、同会话互斥、双存储时序、交付重验与显式重发）。锁文件未变；未接 Web 与飞书协议（Task 6–7）与正式装配（Task 8），未部署 |
+| 本次工作范围 | [P1-B 计划](docs/superpowers/plans/2026-09-30-p1b-starrocks-dual-entry.md) Task 6：最小同源 Web（`create_web_app` 的四个 API、静态页面、cookie、Host/Origin/JSON 与正文上限）。锁文件未变；未接飞书（Task 7）与正式装配 `xiaowei serve`（Task 8），未部署 |
 | 外部操作 | 主线曾获用户授权用合成数据调用 Gemini API（见第 3 节），验证后本机凭据文件已删除，用户负责作废该密钥；Gate 0 离线部分与 SQLGuard 没有调用真实模型；全部工作均未调用飞书或外部 MCP Server。Gate 0 真实运行经用户授权使用第三方中转端点 `bbtoken.boywe.cn`（OpenAI 兼容 Chat Completions）发送合成数据，共 22 次模型请求（含诊断探测），另有 1 次模型列表查询，串行、不重试；凭据只写入仓库外权限 600 的临时文件，运行后已删除，用户负责作废该密钥。Task 2 从 Docker Hub 拉取官方 `starrocks/allin1-ubuntu:latest`（digest `sha256:faf7ce9c…276b`，StarRocks 4.1.4）在本机 127.0.0.1:59030 运行可丢弃容器，只写入随机名合成库，用后删除；未连接用户的 StarRocks |
 
 表中分别列出 P1-B 所依据的 P1-A 代码基线与计划所依据的当前主线，不能混用。接手先用 `git rev-parse HEAD` 和 `git status --short` 取得实际版本；审查使用对应提交的精确 SHA，本文件的修改历史由 Git 保存。
@@ -218,7 +218,21 @@ CI integration job 设置 `SDK_TEST_POSTGRES_URL`，启动 `compose.sdk-test.yml
 
 **Task 5 未覆盖：** 实现先于测试写成（未按计划先写测试），以上 14 项隔离变异用来证明测试能发现对应缺陷。HTTP 与飞书协议、Web cookie、飞书队列与 ack 属于 Task 6/7；`AccessPolicy` 的配置驱动实现与正式装配、`requests resend` 命令属于 Task 8（身份清单待 G6/G7）。失败码沿用 Task 4 的 4 个调用者码，多个应用层原因共用一个码，回执文字因此较笼统（如输入超限与会话不可回放都显示为 `session_failed`）；更细的提示需要新迁移，另行决定。readiness 锁低后会话不释放这一保护与“readiness 锁低拒绝一切新工作”重叠，单独去掉时没有可观察差异。新建会话的进程内忙碌检查与数据库条件（存在 accepted/running 请求时拒绝）重叠。真实模型与真实 StarRocks 未参与。
 
-**下一项：** Task 5 复审（精确 SHA 见 PR）。通过并合入后进入 Task 6（最小同源 Web）。
+**Task 6 已证明（ASGI 调用 FastAPI 应用，其后是与 Task 5 相同的真实路径：ChannelService → Application 真 Runner + HTTP mock 脚本模型 → 受治理合成工具 → 隔离的真实 PostgreSQL）：**
+
+- 页面换发随机 cookie（43 字符，`HttpOnly`、`SameSite=Strict`，未配置时不带 `Secure`）；API 写操作缺少或伪造格式的 cookie 时 403，不在失败响应里换发，请求与模型都为 0。身份是配置的固定操作者，会话来自 cookie；正文出现 session、subject、target 等多余字段即 400。
+- 查询轮完成后 POST 与刷新后 GET 返回同一交付（结构化事实含 `rows`），GET 不再调用模型或工具；模型失败给固定回执，不含上游错误体；结果保存失败给“结果保存失败”回执；终态也写不了时 POST 与随后的 GET 都返回 503，不再以“处理中”服务，readiness 锁低。
+- Host 只按允许地址字面匹配：外部域名、`localhost.evil`、替代端口、缺端口、尾点、大小写变体、用户信息、IPv4 映射与展开的 IPv6、`127.1`、十进制 IP、空值、重复或缺少 Host 都在读取正文前 400；`[::1]` 与 `localhost` 只在配置后放行。POST 必须带与 Host 同源的 Origin（缺少、`null`、他站、替代端口、其他 scheme、尾点、另一个允许但不同源的地址都 403，有效 cookie 的对照请求才被接受）；带他站 Origin 的 GET 403；不返回任何 CORS 头。Content-Type 必须是 JSON（415）。
+- 正文上限：声明超限在调用 receive 前 413；非法、负数、带空格、逗号或重复的 Content-Length 400；伪造较小长度、chunked 与缺少长度时在累计越过上限的那一块停止（20 块中只读 5 块）。
+- 其他 cookie 读取他人编号、无 cookie 读取与读取不存在的编号得到相同 404；他人可复用同一编号，互不冲突。同编号换内容或用途 409；撤权后 POST 403、零 I/O；先查后撤的结果 GET 403 且不含数据。同 cookie 运行中重复提交 202 “处理中”，并发第二条记为 busy，运行中新建会话 409；完成后重复提交返回原结果，新建会话后的请求落在新会话。readiness 锁低后 `/readyz` 503（不暴露原因）、新请求与新会话 503，`/healthz` 与已完成结果仍可读。
+- 显示：含 `<script>`、事件属性、HTML 标签、双向控制符与长文本的结果只以 JSON 返回（`nosniff`）；页面 CSP 禁止内联脚本与 eval，HTML 只有一个外部脚本且无事件属性，脚本不含 `innerHTML` 等 HTML 解析入口。
+- 反向验证 17 项（不查 Host、Host 大小写与尾点归一、非 GET 不查 Origin、Origin 只需在允许列表、GET 不查 Origin、不查 Content-Type、不预检长度、读取时不累计、API 写不要求 cookie、未就绪仍显示处理中、结果未保存不处理、接受任意 cookie 值、正文允许多余字段、cookie 非 HttpOnly、SameSite=Lax、去掉 CSP、去掉 nosniff）均使对应用例失败。“非 GET 不查 Origin”与“Origin 只需在允许列表”起初存活（用例没有 cookie，被 cookie 检查挡住），补上有效 cookie 与同源对照后失败。
+
+**Task 6 补充运行证据（不是正式入口）：** 在本机真实 Uvicorn 0.52.4 + Chrome 154 headless（CDP 驱动）上运行同一 `create_web_app` 与上述测试装配（脚本模型、合成工具、隔离 PostgreSQL），脚本不提交：`document.cookie` 为空（HttpOnly 生效）；默认用途为诊断；查询结果显示为 2 行表格；危险值显示为文字，`document.title` 未变、页面没有 `<img>`、只有 1 个 `<script>`、模型分析中的 `<b>` 不成为元素；截断说明显示；失败显示固定回执与请求编号；刷新后由 GET 恢复 3 条结果；新建会话后列表清空并提示。该运行发现表格单元格中的 U+202E 会生效改变显示顺序，已改为显示可见转义 `\u202e`（DOM 中不再含原字符）。客户端在模型调用中途断开后，该轮仍完成（模型 2 次、工具 1 次），之后同一 cookie 的 GET 得到 completed。
+
+**Task 6 未覆盖：** 计划要求的浏览器证据须来自正式 `xiaowei serve`，该命令属 Task 8，届时须在正式入口重做；上面的 Uvicorn + Chrome 运行只证明同一 ASGI 应用在真实服务器与浏览器中的行为，模型与工具是替身。允许地址只支持 loopback；经 HTTPS 反向代理或 SSH 的使用方式、`Secure` 设置与操作者标识待 G6。cookie 没有设置有效期（浏览器会话 cookie）；关闭浏览器后旧会话不能再从页面访问（数据仍按保留期保存）。交付 `content` 中的事实区域与 Web 表格重复显示同一数据（Task 3 交付格式），页面未去重。POST 在请求内等待本轮完成，没有单独的服务端请求期限，依赖 `Budget.timeout_seconds`。真实模型与真实 StarRocks 未参与。
+
+**下一项：** Task 6 独立审查（精确 SHA 见 PR）。通过并合入后进入 Task 7（飞书单聊长连接）。
 
 P1-A 是内部核心。P1-B 才接真实查询与双入口并切换正式入口，P2 增加诊断，P3 做实际用户验收。Gate 0 是 Task 3 开工前例外；其他环境缺失不阻塞不依赖该环境的离线部分，但不能跳过对应实战退出条件。
 
@@ -386,6 +400,16 @@ Task 5 共享 ChannelService 验证（锁文件未变，测试 PostgreSQL 为本
 | `SDK_TEST_POSTGRES_URL=$SDK_PG uv run --locked --extra dev python -m pytest -q`；`-m security` | 2461 passed，152 skipped，12 deselected；923 passed，79 skipped |
 | `ruff check .`、`ruff format --check src/xiaowei tests/sdk_core`、`mypy src`、`git diff --check` | 通过 |
 | B1 修复：同上三个目标文件另加 `test_evidence.py`、`test_governance.py` | 新增 6 项（成功对照 1、装配拒绝 4、装配后替换 1，原装配用例保留）；修复前先写的代理与替换 2 项失败（值相等孪生与同对象其他方法 2 个边界在变异后补充），修复后 169 passed，`-W error` 通过。全量 2467 passed，152 skipped，12 deselected；`-m security` 923 passed，79 skipped；文档检查 8 passed |
+
+Task 6 最小同源 Web 验证（锁文件未变，测试 PostgreSQL 为本机容器）：
+
+| 命令 | 结果 |
+| --- | --- |
+| `SDK_TEST_POSTGRES_URL=$SDK_PG uv run --locked --extra dev python -m pytest tests/sdk_core/test_web.py -q -W error` | 64 passed。测试先于实现写成，实现前收集阶段因缺少 `xiaowei.web` 失败；首次运行发现 1 处用例错误（空 Content-Type 被默认值替换）与 2 个实现缺陷（终态写不了时仍返回 202“处理中”；首个 POST 失败时新换发的 cookie 丢失，已保存的请求无法再读取，改为只由页面换发 cookie） |
+| 同上另加 `test_channel_service.py`、`test_app.py`、`test_channel_store.py`、`test_evidence.py`、`test_governance.py` | 233 passed，`-W error` 通过 |
+| `SDK_TEST_POSTGRES_URL=$SDK_PG uv run --locked --extra dev python -m pytest -q`；`-m security`；文档检查 | 2531 passed，152 skipped，12 deselected；923 passed，79 skipped；8 passed |
+| `ruff check .`、`ruff format --check src/xiaowei tests/sdk_core`、`mypy src`、`git diff --check` | 通过 |
+| `python -m hatchling build -t wheel` | wheel 含 `xiaowei/web.py` 与 `xiaowei/static/` 三个文件 |
 
 Task 4 请求与渠道状态验证（锁文件未变，测试 PostgreSQL 为本机容器）：
 
