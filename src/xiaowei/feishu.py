@@ -11,14 +11,21 @@
   ``chat_id``，请求编号是 ``message_id``。``chat_id`` 只在内存中用于本次回复，不持久化。
 - SDK 在自己的后台线程事件循环上调用处理器；``LarkTransport`` 只把事件转交给应用事件循环，
   数据库、``ChannelService`` 与队列都只在应用循环上运行。发送经 SDK 的 ``schedule`` 回到其循环。
+- SDK 回调到应用循环的转交最多同时有 ``queue_size`` 个事件在途；超出时在持久化前丢弃并记
+  ``intake_full``（与落库失败同属已接受的先 ack 契约），不创建协程。
 - 新接受的请求进入有界队列，由固定数量的消费者运行；队列满时记为 failed/busy 并发送一次固定
   回执。发送只取得一次投递权：结果明确成功、明确失败或不明分别记录，任何路径都不自动重发。
+- 结果保存后到投递状态落定之间被取消或出现意外异常时锁低 readiness，交给重启恢复：已保存但
+  未发送的飞书结果在恢复中记为 failed，只能显式重发。正常停止先 ``drain`` 停止接收并有界等待，
+  长连接关闭有绝对期限。
 """
 
 import asyncio
 import concurrent.futures
+import contextlib
 import json
 import logging
+import threading
 from collections import OrderedDict
 from collections.abc import Awaitable, Callable, Coroutine, Mapping
 from dataclasses import dataclass
@@ -42,13 +49,16 @@ from lark_channel.ws import client as ws_client
 
 from xiaowei.app import Mode
 from xiaowei.channel import (
+    AccessDeniedError,
     ChannelService,
     InboundRequest,
     RequestReceipt,
     RequestRef,
+    ResultUnavailableError,
 )
 from xiaowei.channel_store import (
     ChannelStoreError,
+    RequestUnavailableError,
     ResultNotSavedError,
     SendOutcome,
     SessionBusyError,
@@ -71,6 +81,13 @@ _COMMANDS: Mapping[str, Mode | Literal["new"]] = {
 }
 _CLOCK_SKEW = timedelta(seconds=60)
 _MAX_ID_CHARS = 200  # 与 InboundRequest 的 Label 上限一致
+# 序列化正文的容器上限：JSON 转义最多把一个字符写成 12 个（代理对 ``\\ud83d\\ude00``），再留出
+# ``{"text": ""}`` 与空白的余量。超过时在解析前拒绝，解析后仍按实际文本长度做最终限制。
+_JSON_ESCAPE_FACTOR = 12
+_CONTENT_OVERHEAD = 64
+# 结果已按当前身份、权限或期限决定不交付：投递状态已落定（不可交付时记为 failed），或者本就不能
+# 由这个身份读取，不需要锁低 readiness。
+_WITHHELD = (ResultUnavailableError, AccessDeniedError, RequestUnavailableError)
 _SEEN_COMMANDS = 1024
 # SDK 已确定未发出的错误类别；其余（含 unknown、超时、未连接）按结果不明处理。
 _DEFINITE_FAILURES = frozenset(
@@ -111,11 +128,30 @@ def _field(node: object, *path: str) -> object:
     return node
 
 
-def _string(node: object, *path: str, code: str = "malformed") -> str:
+def _string(node: object, *path: str, max_chars: int = _MAX_ID_CHARS) -> str:
     value = _field(node, *path)
-    if not isinstance(value, str) or not 0 < len(value) <= _MAX_ID_CHARS:
-        raise _RejectedError(code)
+    if not isinstance(value, str) or not 0 < len(value) <= max_chars:
+        raise _RejectedError("malformed")
     return value
+
+
+def _text(event: object, max_chars: int) -> str:
+    """序列化正文先按容器上限拒绝，再解析，最后按实际文本长度限制。"""
+    raw = _field(event, "event", "message", "content")
+    if not isinstance(raw, str):
+        raise _RejectedError("content")
+    if len(raw) > max_chars * _JSON_ESCAPE_FACTOR + _CONTENT_OVERHEAD:
+        raise _RejectedError("content_too_large")
+    try:
+        content = json.loads(raw)
+    except json.JSONDecodeError:
+        raise _RejectedError("content") from None
+    text = content.get("text") if isinstance(content, dict) else None
+    if not isinstance(text, str) or not text.strip():
+        raise _RejectedError("content")
+    if len(text) > max_chars:
+        raise _RejectedError("too_long")
+    return text.strip()
 
 
 def _parse(event: object, config: FeishuConfig, now: datetime) -> _Message:
@@ -147,20 +183,12 @@ def _parse(event: object, config: FeishuConfig, now: datetime) -> _Message:
     max_age = timedelta(seconds=config.max_event_age_seconds)
     if now - created > max_age or created - now > _CLOCK_SKEW:
         raise _RejectedError("stale")
-    try:
-        content = json.loads(_string(event, "event", "message", "content"))
-    except json.JSONDecodeError:
-        raise _RejectedError("content") from None
-    text = _field(content, "text")
-    if not isinstance(text, str) or not text.strip():
-        raise _RejectedError("content")
-    if len(text) > config.max_message_chars:
-        raise _RejectedError("too_long")
+    text = _text(event, config.max_message_chars)
     return _Message(
         message_id=_string(event, "event", "message", "message_id"),
         subject_id=subject,
         chat_id=_string(event, "event", "message", "chat_id"),
-        text=text.strip(),
+        text=text,
     )
 
 
@@ -218,7 +246,9 @@ class FeishuGateway:
         self._config = config
         self._send = send
         self._clock = clock
+        self._readiness = service.results.store.readiness
         self._queue: asyncio.Queue[_Job] = asyncio.Queue(maxsize=config.queue_size)
+        self._closing = False
         # 不写请求表的命令（/新建、空命令提示）只在进程内按消息编号去重。
         self._seen: OrderedDict[tuple[str, str], None] = OrderedDict()
 
@@ -235,6 +265,9 @@ class FeishuGateway:
 
     async def receive(self, event: object) -> None:
         """处理一条 raw 事件。SDK 已经 ack：这里的任何拒绝或失败都只记录安全原因码。"""
+        if self._closing:
+            logger.info("飞书事件已丢弃：%s", "closing")
+            return
         try:
             message = _parse(event, self._config, self._clock())
         except _RejectedError as rejected:
@@ -253,14 +286,36 @@ class FeishuGateway:
             logger.warning("飞书请求未处理：%s", type(exc).__name__)
 
     async def run(self) -> None:
-        """运行固定数量的消费者，直到被取消；消费者的意外异常结束整个渠道。"""
-        async with asyncio.TaskGroup() as group:
-            for _ in range(self._config.consumer_count):
-                group.create_task(self._consume())
+        """运行固定数量的消费者，直到被取消；消费者的意外异常锁低 readiness 并结束整个渠道。
+
+        取消时仍有已入队未运行的请求，同样锁低 readiness，交给重启恢复标为 interrupted。
+        """
+        try:
+            async with asyncio.TaskGroup() as group:
+                for _ in range(self._config.consumer_count):
+                    group.create_task(self._consume())
+        finally:
+            if not self._queue.empty():
+                self._readiness.lock("feishu_queue_abandoned")
 
     async def idle(self) -> None:
-        """等待已入队的请求全部处理完毕。"""
+        """等待已入队的请求全部处理完毕（不停止接收）。"""
         await self._queue.join()
+
+    async def drain(self, timeout: float) -> bool:
+        """正常停止的第一步：停止接收新事件，有界等待已入队请求处理并投递完毕。
+
+        超时返回 False 并锁低 readiness：剩余请求随后被取消，由重启恢复处理。
+        """
+        self._closing = True
+        try:
+            async with asyncio.timeout(timeout):
+                await self._queue.join()
+        except TimeoutError:
+            self._readiness.lock("feishu_drain_timeout")
+            logger.warning("飞书渠道停止等待超时")
+            return False
+        return True
 
     async def _accept(self, message: _Message, mode: Mode, body: str) -> None:
         receipt = await self._service.accept(self._request(message, mode, body))
@@ -284,24 +339,39 @@ class FeishuGateway:
                 except ResultNotSavedError:
                     pass  # 已记为 failed/result_not_saved，下面发送固定回执
                 await self._deliver(job)
+            except asyncio.CancelledError:
+                # 本条可能已保存却未落定投递：不再开放新工作，交给重启恢复。
+                self._readiness.lock("feishu_consumer_cancelled")
+                raise
             except ChannelStoreError as exc:
                 logger.warning("飞书请求处理失败：%s", type(exc).__name__)
+            except Exception:
+                self._readiness.lock("feishu_consumer_failed")
+                raise
             finally:
                 self._queue.task_done()
 
     async def _deliver(self, job: _Job) -> None:
+        """首次发送：结果已决定不交付时只记录；投递状态未能落定时锁低 readiness 并原样传播。"""
+
         async def transmit(delivery: Delivery) -> SendOutcome:
+            # 已取得投递权：发送异常按结果不明返回，由 ResultDelivery 记为 unknown。
             text = render(delivery.content, self._config.max_reply_chars)
-            return await self._send(job.chat_id, text)
+            try:
+                return await self._send(job.chat_id, text)
+            except Exception as exc:
+                logger.error("飞书发送异常，按结果不明记录：%s", type(exc).__name__)
+                return "unknown"
 
         try:
             outcome = await self._service.results.send(job.ref, transmit)
-        except ChannelStoreError:
-            raise
-        except Exception as exc:
-            # 投递状态已由 ResultDelivery 记为 unknown；不让一次发送异常停掉整个渠道。
-            logger.error("飞书结果发送异常，已记为结果不明：%s", type(exc).__name__)
+        except _WITHHELD as exc:
+            logger.warning("飞书结果不交付：%s", type(exc).__name__)
             return
+        except BaseException:
+            # 结果可能仍是 completed/pending，且回复目的地只在本进程内：不能以正常状态继续接活。
+            self._readiness.lock("feishu_delivery_unsettled")
+            raise
         if outcome is not None and outcome != "sent":
             logger.warning("飞书结果发送未成功：%s", outcome)
 
@@ -362,7 +432,7 @@ class _Channel(Protocol):
 
     async def start_background(self, *, timeout: float) -> None: ...
 
-    async def stop_background(self) -> None: ...
+    def stop(self, *, join_timeout: float) -> None: ...
 
     def schedule(self, coro: Coroutine[Any, Any, object]) -> concurrent.futures.Future[object]: ...
 
@@ -402,38 +472,70 @@ def lark_channel(config: FeishuConfig) -> FeishuChannel:
 
 
 class LarkTransport:
-    """``FeishuChannel`` 与应用事件循环之间的桥：raw 事件转交、单次限时发送、启动与关闭。"""
+    """``FeishuChannel`` 与应用事件循环之间的桥：有界转交 raw 事件、单次限时发送、有界关闭。
 
-    def __init__(self, channel: _Channel, *, send_timeout_seconds: float) -> None:
+    SDK 在自己的线程上调用 raw 处理器。在途事件（已转交、应用侧尚未处理完）最多 ``queue_size``
+    个，超出时在持久化前丢弃并记 ``intake_full``，不创建协程。关闭调用 SDK 公开的同步 ``stop``：
+    它在独立的守护线程中运行，应用循环最多等待 ``stop_timeout_seconds``，超时返回 False。
+    """
+
+    def __init__(self, channel: _Channel, config: FeishuConfig) -> None:
         self._channel = channel
-        self._send_timeout = send_timeout_seconds
+        self._config = config
+        self._lock = threading.Lock()
+        self._in_flight = 0
+        self._accepting = False
+        self._stopped: bool | None = None
 
-    async def start(
-        self,
-        receive: Callable[[dict[str, Any]], Coroutine[Any, Any, None]],
-        *,
-        connect_timeout_seconds: float,
-    ) -> None:
+    @property
+    def in_flight(self) -> int:
+        with self._lock:
+            return self._in_flight
+
+    async def start(self, receive: Callable[[dict[str, Any]], Coroutine[Any, Any, None]]) -> None:
         loop = asyncio.get_running_loop()
         # SDK 的长连接在导入时绑定模块级事件循环，并在自己的线程里运行它；它不能是应用循环。
         if ws_client.loop is loop:
             raise RuntimeError("飞书 SDK 必须在应用事件循环启动前导入")
 
         def on_raw(payload: dict[str, Any]) -> None:
-            future: concurrent.futures.Future[None] = asyncio.run_coroutine_threadsafe(
-                receive(payload), loop
-            )
-            future.add_done_callback(_report)
+            with self._lock:
+                reason = None
+                if not self._accepting:
+                    reason = "closing"
+                elif self._in_flight >= self._config.queue_size:
+                    reason = "intake_full"
+                else:
+                    self._in_flight += 1
+            if reason is not None:
+                logger.warning("飞书事件已丢弃：%s", reason)
+                return
+            coro = receive(payload)
+            try:
+                future = asyncio.run_coroutine_threadsafe(coro, loop)
+            except RuntimeError:  # 应用循环已关闭
+                coro.close()
+                self._release(None)
+                logger.warning("飞书事件已丢弃：%s", "closing")
+                return
+            future.add_done_callback(self._release)
 
         self._channel.on("raw", on_raw)
-        await self._channel.start_background(timeout=connect_timeout_seconds)
+        self._accepting = True
+        await self._channel.start_background(timeout=self._config.connect_timeout_seconds)
+
+    def _release(self, future: concurrent.futures.Future[None] | None) -> None:
+        with self._lock:
+            self._in_flight -= 1
+        if future is not None:
+            _report(future)
 
     async def send(self, chat_id: str, text: str) -> SendOutcome:
         future = self._channel.schedule(
             self._channel.send(chat_id, {"text": text}, {"receive_id_type": "chat_id"})
         )
         try:
-            async with asyncio.timeout(self._send_timeout):
+            async with asyncio.timeout(self._config.send_timeout_seconds):
                 result = await asyncio.wrap_future(future)
         except TimeoutError:
             logger.warning("飞书发送超时，结果不明")
@@ -443,8 +545,38 @@ class LarkTransport:
             return "unknown"
         return send_outcome(result)
 
-    async def stop(self) -> None:
-        await self._channel.stop_background()
+    async def stop(self) -> bool:
+        """停止接收并关闭 SDK；在期限内完成返回 True。重复调用返回第一次的结果，不再关闭。
+
+        超时后不再等待：守护线程不阻止进程退出，残余线程与真实长连接的关闭需在实测中核对。
+        SDK 关闭抛出的异常原样传播。
+        """
+        self._accepting = False
+        if self._stopped is not None:
+            return self._stopped
+        timeout = self._config.stop_timeout_seconds
+        done: concurrent.futures.Future[None] = concurrent.futures.Future()
+
+        def close() -> None:
+            try:
+                self._channel.stop(join_timeout=timeout)
+            except BaseException as exc:
+                with contextlib.suppress(concurrent.futures.InvalidStateError):
+                    done.set_exception(exc)
+            else:
+                with contextlib.suppress(concurrent.futures.InvalidStateError):
+                    done.set_result(None)
+
+        self._stopped = False
+        threading.Thread(target=close, name="xiaowei-feishu-stop", daemon=True).start()
+        try:
+            async with asyncio.timeout(timeout):
+                await asyncio.wrap_future(done)
+        except TimeoutError:
+            logger.error("飞书长连接关闭超时（%s 秒），不再等待", timeout)
+            return False
+        self._stopped = True
+        return True
 
 
 def _report(future: concurrent.futures.Future[None]) -> None:

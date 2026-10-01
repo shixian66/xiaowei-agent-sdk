@@ -19,14 +19,17 @@ import pytest
 from lark_channel.channel.errors import FeishuChannelErrorCode, SendError
 from lark_channel.channel.types import SendResult
 from pydantic import ValidationError
+from sqlalchemy import text as text_sql
 from tests.sdk_core.synthetic_tools import QUERY_TOOL
 from tests.sdk_core.test_app import after, cite, tool_call
 from tests.sdk_core.test_channel_service import Env, app_config
 from tests.sdk_core.test_channel_service import env as env  # pytest fixture
 
 from xiaowei.app import Application
-from xiaowei.channel import ChannelService
+from xiaowei.channel import ChannelService, RequestRef
+from xiaowei.channel_store import ChannelStore, RequestRecord
 from xiaowei.config import FeishuConfig
+from xiaowei.evidence import EvidenceStoreError
 from xiaowei.feishu import (
     EMPTY_COMMAND,
     NEW_SESSION,
@@ -39,6 +42,7 @@ from xiaowei.feishu import (
     send_outcome,
 )
 from xiaowei.governance import GovernedTools
+from xiaowei.models import Delivery, RunContext
 from xiaowei.storage import Readiness, hold_instance_lock
 
 pytestmark = pytest.mark.loopback
@@ -62,6 +66,7 @@ def config(**overrides: Any) -> FeishuConfig:
         "consumer_count": 1,
         "send_timeout_seconds": 5,
         "connect_timeout_seconds": 5,
+        "stop_timeout_seconds": 5,
     }
     values.update(overrides)
     return FeishuConfig(**values)
@@ -226,34 +231,42 @@ async def test_command_without_content_is_refused_before_the_model(env: Env, com
 # ---- 入站拒绝：持久化与模型之前 --------------------------------------------------------------
 
 
-REJECTED: dict[str, dict[str, Any]] = {
-    "other event type": {"header__event_type": "im.message.reaction.created_v1"},
-    "other app": {"header__app_id": "cli_other"},
-    "other tenant": {"header__tenant_key": "tenant-2"},
-    "sender tenant differs": {"event__sender__tenant_key": "tenant-2"},
-    "bot sender": {"event__sender__sender_type": "bot"},
-    "app sender": {"event__sender__sender_type": "app"},
-    "unknown sender": {"sender": "ou_mallory"},
-    "group chat": {"event__message__chat_type": "group"},
-    "image": {"event__message__message_type": "image"},
-    "post": {"event__message__message_type": "post"},
-    "stale": {"age_seconds": 301},
-    "from the future": {"age_seconds": -120},
-    "blank text": {"content": json.dumps({"text": "  \n "})},
-    "content not json": {"content": "not json"},
-    "text not string": {"content": json.dumps({"text": 3})},
-    "too long": {"content": json.dumps({"text": "长" * 201})},
-    "missing message id": {"event__message__message_id": ""},
-    "message id too long": {"event__message__message_id": "om_" + "x" * 198},
-    "chat id too long": {"event__message__chat_id": "oc_" + "x" * 198},
-    "missing chat": {"event__message__chat_id": None},
-    "not a mapping": {"event__message": "x"},
+REJECTED: dict[str, tuple[dict[str, Any], str]] = {
+    "other event type": ({"header__event_type": "im.message.reaction.created_v1"}, "event_type"),
+    "other app": ({"header__app_id": "cli_other"}, "app"),
+    "other tenant": ({"header__tenant_key": "tenant-2"}, "tenant"),
+    "sender tenant differs": ({"event__sender__tenant_key": "tenant-2"}, "tenant"),
+    "bot sender": ({"event__sender__sender_type": "bot"}, "sender_type"),
+    "app sender": ({"event__sender__sender_type": "app"}, "sender_type"),
+    "unknown sender": ({"sender": "ou_mallory"}, "sender"),
+    "group chat": ({"event__message__chat_type": "group"}, "chat_type"),
+    "image": ({"event__message__message_type": "image"}, "message_type"),
+    "post": ({"event__message__message_type": "post"}, "message_type"),
+    "stale": ({"age_seconds": 301}, "stale"),
+    "from the future": ({"age_seconds": -120}, "stale"),
+    "blank text": ({"content": json.dumps({"text": "  \n "})}, "content"),
+    "content not json": ({"content": "not json"}, "content"),
+    "text not string": ({"content": json.dumps({"text": 3})}, "content"),
+    "too long": ({"content": json.dumps({"text": "长" * 201})}, "too_long"),
+    "missing message id": ({"event__message__message_id": ""}, "malformed"),
+    "message id too long": ({"event__message__message_id": "om_" + "x" * 198}, "malformed"),
+    "chat id too long": ({"event__message__chat_id": "oc_" + "x" * 198}, "malformed"),
+    "missing chat": ({"event__message__chat_id": None}, "malformed"),
+    "not a mapping": ({"event__message": "x"}, "malformed"),
 }
+
+
+def dropped(records: list[logging.LogRecord]) -> list[str]:
+    """日志中的丢弃原因码（日志只有原因码，不含正文或标识）。"""
+    prefix = "飞书事件已丢弃："
+    return [
+        r.getMessage().removeprefix(prefix) for r in records if r.getMessage().startswith(prefix)
+    ]
 
 
 @pytest.mark.parametrize("name", REJECTED)
 async def test_unacceptable_events_never_reach_storage_or_the_model(env: Env, name: str) -> None:
-    changes = dict(REJECTED[name])
+    changes, code = REJECTED[name]
     async with running(env) as fs:
         message = env.scripts.add("不应运行", tool_call("order_total", region="east"), cite())
         with logs() as records:
@@ -261,8 +274,58 @@ async def test_unacceptable_events_never_reach_storage_or_the_model(env: Env, na
             await fs.drain()
     assert await env.requests() == 0 and env.scripts.calls == {} and fs.outbox.sent == []
     assert env.adapter.calls == []
-    assert [r.getMessage() for r in records if r.levelno >= logging.INFO]  # 有安全原因码
+    assert dropped(records) == [code]
     assert all(message not in r.getMessage() for r in records)
+
+
+# 上限 1000 字符内的各种正文：序列化后远超 200 字符，JSON 转义最多膨胀 12 倍（代理对 emoji）。
+LONG_TEXTS = {
+    "500 中文": "长" * 500,
+    "exactly the limit": "x" * 1000,
+    "quotes and backslashes": '"\\' * 500,
+    "control characters": "\x01\x02" * 500,
+    "emoji": "😀" * 1000,
+}
+
+
+@pytest.mark.parametrize("ascii_only", [True, False], ids=["escaped", "raw"])
+@pytest.mark.parametrize("name", LONG_TEXTS)
+def test_text_up_to_the_configured_limit_is_accepted(env: Env, name: str, ascii_only: bool) -> None:
+    gateway = FeishuGateway(env.service, config(max_message_chars=1000), Outbox(), clock=env.clock)
+    text = LONG_TEXTS[name]
+    content = json.dumps({"text": text}, ensure_ascii=ascii_only)
+    assert len(content) > 200
+    inbound = gateway.inbound(Feishu(env, gateway, Outbox()).event(content=content))
+    assert inbound is not None and inbound.message == text
+
+
+async def test_long_text_is_persisted_and_answered(env: Env) -> None:
+    outbox = Outbox()
+    gateway = FeishuGateway(env.service, config(max_message_chars=1000), outbox, clock=env.clock)
+    fs = Feishu(env, gateway, outbox)
+    await gateway.receive(fs.event("长" * 500))
+    assert await env.requests() == 1
+
+
+@pytest.mark.parametrize(
+    ("content", "code"),
+    [
+        (json.dumps({"text": "x" * 1001}), "too_long"),
+        (json.dumps({"text": "😀" * 1001}), "too_long"),  # 转义后约 12 KB，仍在容器上限内
+        (json.dumps({"text": "x" * 20_000}), "content_too_large"),
+        ("{" * 20_000, "content_too_large"),  # 超大且不合法：在解析前按大小拒绝
+        ("{", "content"),
+        (json.dumps({"text": ["x"]}), "content"),
+        (json.dumps(["x"]), "content"),
+    ],
+    ids=["limit+1", "emoji limit+1", "huge json", "huge malformed", "malformed", "list", "array"],
+)
+async def test_text_beyond_the_limit_is_rejected(env: Env, content: str, code: str) -> None:
+    async with running(env, max_message_chars=1000) as fs:
+        with logs() as records:
+            await fs.gateway.receive(fs.event(content=content))
+    assert dropped(records) == [code]
+    assert await env.requests() == 0 and env.scripts.calls == {}
 
 
 async def test_sender_without_current_authorization_is_dropped(env: Env) -> None:
@@ -477,6 +540,176 @@ async def test_cancelled_consumer_locks_readiness(env: Env) -> None:
     assert not env.readiness.ok
 
 
+# ---- 结果保存后到投递落定：取消与异常 -----------------------------------------------------
+
+
+class ClaimBarrierStore(ChannelStore):
+    """取得投递权前停住：结果已保存为 completed，投递仍是 pending。"""
+
+    entered: asyncio.Event
+    release: asyncio.Event
+
+    async def claim_send(self, record: RequestRecord, *, resend: bool = False) -> bool:
+        self.entered.set()
+        await self.release.wait()
+        return await super().claim_send(record, resend=resend)
+
+
+def feishu_ref(message_id: str, subject: str = "alice", chat: str = "oc_alice") -> RequestRef:
+    return RequestRef(
+        channel="feishu", subject_id=subject, conversation_id=chat, request_id=message_id
+    )
+
+
+async def request_row(env: Env) -> tuple[str, str]:
+    async with env.engine.connect() as conn:
+        row = (await conn.execute(text_sql("SELECT state, delivery FROM xiaowei_request"))).one()
+    return row[0], row[1]
+
+
+async def test_cancel_after_completed_before_claim_is_settled_by_recovery(env: Env) -> None:
+    store = env.channel_store(ClaimBarrierStore)
+    assert isinstance(store, ClaimBarrierStore)
+    store.entered, store.release = asyncio.Event(), asyncio.Event()
+    service = ChannelService(env.app, env.results(store))
+    outbox = Outbox()
+    gateway = FeishuGateway(service, config(), outbox, clock=env.clock)
+    fs = Feishu(env, gateway, outbox)
+    message = env.scripts.add("保存后取消", tool_call("order_total", region="east"), cite())
+    event = fs.event(message)
+    task = asyncio.create_task(gateway.run())
+    await gateway.receive(event)
+    await asyncio.wait_for(store.entered.wait(), 10)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    # 结果已保存但未取得投递权：不能以 readiness 正常的状态继续接活。
+    assert await request_row(env) == ("completed", "pending")
+    assert not env.readiness.ok and outbox.sent == []
+    # 停止并重启：持锁恢复把未发送的飞书结果记为 failed，之后只能显式重发，且不重跑。
+    restarted = env.channel_store(readiness=Readiness())
+    async with hold_instance_lock(env.engine, restarted.readiness) as lock:
+        report = await restarted.recover(lock)
+    assert report.unsent == 1
+    assert await request_row(env) == ("completed", "failed")
+    resend = Outbox()
+    message_id = event["event"]["message"]["message_id"]
+
+    async def transmit(delivery: Delivery) -> Any:
+        return await resend("oc_alice", delivery.content)
+
+    results = env.results(restarted)
+    assert await results.send(feishu_ref(message_id), transmit) is None  # 首次发送路径不再发送
+    assert await results.send(feishu_ref(message_id), transmit, resend=True) == "sent"
+    assert len(resend.sent) == 1 and env.model_calls(message) == 2
+
+
+async def test_recovery_leaves_web_results_pending(env: Env) -> None:
+    """Web 结果经 GET 读取，从不发送：恢复不改它的投递状态。"""
+    await env.run(env.scripts.add("网页结果", tool_call("order_total", region="east"), cite()))
+    restarted = env.channel_store(readiness=Readiness())
+    async with hold_instance_lock(env.engine, restarted.readiness) as lock:
+        report = await restarted.recover(lock)
+    assert report.unsent == 0
+    assert await request_row(env) == ("completed", "pending")
+
+
+async def test_cancel_during_send_records_unknown(env: Env) -> None:
+    hold = asyncio.Event()
+
+    class Hanging(Outbox):
+        async def __call__(self, chat_id: str, text: str) -> Any:
+            self.sent.append((chat_id, text))
+            await hold.wait()
+            return "sent"
+
+    outbox = Hanging()
+    gateway = FeishuGateway(env.service, config(), outbox, clock=env.clock)
+    fs = Feishu(env, gateway, outbox)
+    task = asyncio.create_task(gateway.run())
+    await gateway.receive(
+        fs.event(env.scripts.add("发送中取消", tool_call("order_total", region="east"), cite()))
+    )
+    async with asyncio.timeout(10):
+        while not outbox.sent:
+            await asyncio.sleep(0.02)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert await request_row(env) == ("completed", "unknown")
+    assert len(outbox.sent) == 1
+
+
+def failing_delivery_validation(env: Env, monkeypatch: pytest.MonkeyPatch) -> None:
+    """交付重验（``ResultDelivery`` 的 context 不授予任何工具）因证据存储故障失败；运行中的
+    预校验与 Session 提交照常。"""
+    original = env.evidence.validate_answer
+
+    async def validate(answer: Any, context: RunContext) -> Delivery:
+        if not context.tool_scope:
+            raise EvidenceStoreError("injected evidence read failure")
+        return await original(answer, context)
+
+    monkeypatch.setattr(env.evidence, "validate_answer", validate)
+
+
+async def test_evidence_failure_before_claim_is_not_swallowed(
+    env: Env, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    outbox = Outbox()
+    gateway = FeishuGateway(env.service, config(), outbox, clock=env.clock)
+    fs = Feishu(env, gateway, outbox)
+    message = env.scripts.add("证据读不出", tool_call("order_total", region="east"), cite())
+    event = fs.event(message)
+    inbound = gateway.inbound(event)
+    assert inbound is not None
+    await env.service.process(await env.service.accept(inbound))
+    failing_delivery_validation(env, monkeypatch)
+    with pytest.raises(EvidenceStoreError):
+        await gateway.receive(event)  # 重投触发首次发送；校验在取得投递权前失败
+    assert await request_row(env) == ("completed", "pending")
+    assert not env.readiness.ok and outbox.sent == []
+
+
+async def test_unexpected_consumer_failure_stops_taking_work(
+    env: Env, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    outbox = Outbox()
+    gateway = FeishuGateway(env.service, config(), outbox, clock=env.clock)
+    fs = Feishu(env, gateway, outbox)
+    failing_delivery_validation(env, monkeypatch)
+    task = asyncio.create_task(gateway.run())
+    await gateway.receive(
+        fs.event(env.scripts.add("交付失败", tool_call("order_total", region="east"), cite()))
+    )
+    with pytest.raises(ExceptionGroup) as raised:
+        await asyncio.wait_for(task, 10)
+    assert raised.group_contains(EvidenceStoreError)
+    assert await request_row(env) == ("completed", "pending")
+    assert not env.readiness.ok and outbox.sent == []
+
+
+async def test_drain_stops_intake_and_waits_for_delivery(env: Env) -> None:
+    async with running(env) as fs:
+        message = env.scripts.add("停止前的消息", tool_call("order_total", region="east"), cite())
+        await fs.gateway.receive(fs.event(message))
+        assert await fs.gateway.drain(10)
+        with logs() as records:
+            await fs.gateway.receive(fs.event(env.scripts.add("停止后", cite())))
+    assert dropped(records) == ["closing"]
+    assert len(fs.outbox.sent) == 1 and await env.requests() == 1
+    assert env.readiness.ok
+
+
+async def test_drain_timeout_with_queued_work_blocks_readiness(env: Env) -> None:
+    gateway = FeishuGateway(env.service, config(), Outbox(), clock=env.clock)
+    fs = Feishu(env, gateway, Outbox())  # 消费者未启动：请求停在队列中
+    await gateway.receive(fs.event(env.scripts.add("排队未运行", cite())))
+    assert not await gateway.drain(0.1)
+    assert not env.readiness.ok
+    assert await request_row(env) == ("accepted", "pending")
+
+
 # ---- 文本渲染与发送结果映射 -----------------------------------------------------------------
 
 
@@ -553,8 +786,11 @@ class FakeChannel:
     result: Any = field(default_factory=lambda: SendResult.ok(message_id="om_sent"))
     delay: float = 0.0
     sends: list[tuple[Any, ...]] = field(default_factory=list)
+    start_error: BaseException | None = None
+    stop_hangs: bool = False
     started: bool = False
-    stopped: bool = False
+    stops: int = 0
+    unblock_stop: threading.Event = field(default_factory=threading.Event)
     loop: asyncio.AbstractEventLoop = field(default_factory=asyncio.new_event_loop)
     thread: threading.Thread = field(init=False)
 
@@ -573,12 +809,21 @@ class FakeChannel:
         return lambda: None
 
     async def start_background(self, *, timeout: float) -> None:
+        if self.start_error is not None:
+            raise self.start_error
         self.started = True
 
-    async def stop_background(self) -> None:
-        self.stopped = True
-        self.loop.call_soon_threadsafe(self.loop.stop)
-        await asyncio.to_thread(self.thread.join, 5)
+    def stop(self, *, join_timeout: float) -> None:
+        """与 SDK 一样同步阻塞；``stop_hangs`` 模拟关闭一直不返回。"""
+        self.stops += 1
+        if self.stop_hangs:
+            self.unblock_stop.wait()
+        self.close_loop()
+
+    def close_loop(self) -> None:
+        if self.thread.is_alive():
+            self.loop.call_soon_threadsafe(self.loop.stop)
+            self.thread.join(5)
 
     def schedule(self, coro: Any) -> Any:
         return asyncio.run_coroutine_threadsafe(coro, self.loop)
@@ -592,6 +837,10 @@ class FakeChannel:
     def emit_raw_from_sdk_thread(self, payload: dict[str, Any]) -> None:
         self.loop.call_soon_threadsafe(self.handlers["raw"], payload)
 
+    async def flush(self) -> None:
+        """等 SDK 循环处理完此前排入的回调。"""
+        await asyncio.wrap_future(asyncio.run_coroutine_threadsafe(asyncio.sleep(0), self.loop))
+
 
 async def test_transport_bridges_raw_events_and_sends_across_loops() -> None:
     received: list[tuple[dict[str, Any], asyncio.AbstractEventLoop]] = []
@@ -602,8 +851,8 @@ async def test_transport_bridges_raw_events_and_sends_across_loops() -> None:
         done.set()
 
     fake = FakeChannel()
-    transport = LarkTransport(fake, send_timeout_seconds=1)
-    await transport.start(receive, connect_timeout_seconds=1)
+    transport = LarkTransport(fake, config(send_timeout_seconds=1))
+    await transport.start(receive)
     assert fake.started
     fake.emit_raw_from_sdk_thread({"k": "v"})
     await asyncio.wait_for(done.wait(), 5)
@@ -612,8 +861,117 @@ async def test_transport_bridges_raw_events_and_sends_across_loops() -> None:
     assert fake.sends == [("oc_1", {"text": "你好"}, {"receive_id_type": "chat_id"})]
     fake.delay = 5
     assert await transport.send("oc_1", "慢") == "unknown"  # 超时结果不明
+    assert await transport.stop() is True
+    assert fake.stops == 1
+
+
+async def test_bridge_admits_at_most_queue_size_events_in_flight() -> None:
+    started, release = 0, asyncio.Event()
+
+    async def receive(payload: dict[str, Any]) -> None:
+        nonlocal started
+        started += 1
+        await release.wait()
+
+    fake = FakeChannel()
+    transport = LarkTransport(fake, config(queue_size=4))
+    await transport.start(receive)
+    with logs() as records:
+        for i in range(200):
+            fake.emit_raw_from_sdk_thread({"i": i})
+        await fake.flush()
+        await asyncio.sleep(0.1)
+    assert started == 4 and transport.in_flight == 4
+    assert dropped(records) == ["intake_full"] * 196
+    assert all("'i'" not in r.getMessage() for r in records)
+    release.set()
+    async with asyncio.timeout(5):
+        while transport.in_flight:
+            await asyncio.sleep(0.01)
+    fake.emit_raw_from_sdk_thread({"i": "after"})  # 名额释放后重新接收
+    await fake.flush()
+    async with asyncio.timeout(5):
+        while started < 5:
+            await asyncio.sleep(0.01)
+    assert await transport.stop() is True
+    with logs() as records:
+        fake.handlers["raw"]({"i": "late"})  # 停止后 SDK 仍可能回调：直接丢弃
+    assert dropped(records) == ["closing"] and started == 5
+
+
+async def test_gateway_behind_the_bridge_runs_no_turn_for_dropped_events(env: Env) -> None:
+    """桥接超限发生在持久化前：被丢弃的事件零请求、零 Runner、零模型、零工具。"""
+    gate, entered = asyncio.Event(), asyncio.Event()
+    outbox = Outbox()
+    gateway = FeishuGateway(env.service, config(queue_size=1), outbox, clock=env.clock)
+    fs = Feishu(env, gateway, outbox)
+    original = gateway.receive
+
+    async def slow_receive(payload: dict[str, Any]) -> None:
+        entered.set()
+        await gate.wait()
+        await original(payload)
+
+    fake = FakeChannel()
+    transport = LarkTransport(fake, config(queue_size=1))
+    await transport.start(slow_receive)
+    first = env.scripts.add("桥内第一条", tool_call("order_total", region="east"), cite())
+    second = env.scripts.add("桥外第二条", tool_call("order_total", region="east"), cite())
+    fake.emit_raw_from_sdk_thread(fs.event(first))
+    await asyncio.wait_for(entered.wait(), 5)
+    fake.emit_raw_from_sdk_thread(fs.event(second))
+    await fake.flush()
+    gate.set()
+    async with asyncio.timeout(5):
+        while transport.in_flight:
+            await asyncio.sleep(0.01)
     await transport.stop()
-    assert fake.stopped
+    assert await env.requests() == 1 and env.model_calls(second) == 0
+    assert env.adapter.calls == []  # 第一条只入队，消费者未启动
+
+
+async def test_stop_is_bounded_when_the_sdk_never_returns() -> None:
+    fake = FakeChannel(stop_hangs=True)
+    transport = LarkTransport(fake, config(stop_timeout_seconds=0.2))
+
+    async def receive(payload: dict[str, Any]) -> None:
+        return None
+
+    await transport.start(receive)
+    loop = asyncio.get_running_loop()
+    began = loop.time()
+    try:
+        with logs() as records:
+            assert await asyncio.wait_for(transport.stop(), 3) is False
+    finally:
+        fake.unblock_stop.set()  # 测试失败时也放行替身的关闭线程
+    assert loop.time() - began < 2
+    assert any("关闭超时" in r.getMessage() for r in records)
+    assert await transport.stop() is False and fake.stops == 1  # 重复停止不再关闭
+
+
+async def test_stop_after_failed_start_and_repeated_stop() -> None:
+    fake = FakeChannel(start_error=RuntimeError("connect failed"))
+    transport = LarkTransport(fake, config())
+
+    async def receive(payload: dict[str, Any]) -> None:
+        return None
+
+    with pytest.raises(RuntimeError):
+        await transport.start(receive)
+    assert await transport.stop() is True
+    assert await transport.stop() is True and fake.stops == 1
+
+
+async def test_stop_error_is_not_swallowed() -> None:
+    class Broken(FakeChannel):
+        def stop(self, *, join_timeout: float) -> None:
+            self.close_loop()
+            raise RuntimeError("stop failed")
+
+    transport = LarkTransport(Broken(), config())
+    with pytest.raises(RuntimeError, match="stop failed"):
+        await transport.stop()
 
 
 async def test_real_sdk_dispatcher_feeds_the_gateway_through_the_raw_bridge(
@@ -630,10 +988,10 @@ async def test_real_sdk_dispatcher_feeds_the_gateway_through_the_raw_bridge(
     channel.config.transport.kind = "webhook"
     outbox = Outbox()
     gateway = FeishuGateway(env.service, config(), outbox, clock=env.clock)
-    transport = LarkTransport(channel, send_timeout_seconds=1)
+    transport = LarkTransport(channel, config())
     fs = Feishu(env, gateway, outbox)
     consumers = asyncio.create_task(gateway.run())
-    await transport.start(gateway.receive, connect_timeout_seconds=5)
+    await transport.start(gateway.receive)
     try:
         message = env.scripts.add("经真实分发器", tool_call("order_total", region="east"), cite())
         ignored = env.scripts.add("群聊消息", tool_call("order_total", region="east"), cite())
@@ -645,7 +1003,7 @@ async def test_real_sdk_dispatcher_feeds_the_gateway_through_the_raw_bridge(
                 await asyncio.sleep(0.02)
         await gateway.idle()
     finally:
-        await transport.stop()
+        assert await transport.stop() is True
         consumers.cancel()
         with pytest.raises(asyncio.CancelledError):
             await consumers

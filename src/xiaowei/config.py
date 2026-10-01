@@ -174,7 +174,8 @@ class FeishuConfig(BaseModel):
 
     ``users`` 把发送者 ``open_id`` 映射为内部 subject（再交给 ``AccessPolicy``），不在映射中的
     发送者在持久化与模型前丢弃。``consumer_count`` 不得超过应用的全局并发上限，由
-    ``FeishuGateway`` 装配时核对。凭据只以 ``env:NAME`` 引用出现。
+    ``FeishuGateway`` 装配时核对。``queue_size`` 同时是 SDK 回调转交给应用循环的在途事件上限。
+    凭据只以 ``env:NAME`` 引用出现。
     """
 
     model_config = ConfigDict(frozen=True, extra="forbid")
@@ -190,6 +191,7 @@ class FeishuConfig(BaseModel):
     consumer_count: int = Field(gt=0)
     send_timeout_seconds: float = Field(gt=0, le=120)
     connect_timeout_seconds: float = Field(gt=0, le=300)
+    stop_timeout_seconds: float = Field(gt=0, le=60)
 
     @field_validator("app_secret_ref")
     @classmethod

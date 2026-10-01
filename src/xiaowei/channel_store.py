@@ -11,7 +11,8 @@
   ``accepted/running`` 标为 ``interrupted`` 并关闭关联 Session。
 - 投递：首次发送与事件重投只能竞争 ``pending → sending``；显式重发只对 completed 结果竞争
   ``failed/unknown → sending``；发送结束只能从 ``sending`` 改为 ``sent/failed/unknown``；启动恢复
-  把遗留 ``sending`` 改为 ``unknown``。任何路径都不自动再次发送。
+  把遗留 ``sending`` 改为 ``unknown``，把飞书 completed 结果遗留的 ``pending`` 改为 ``failed``（回复
+  目的地只在进程内存在，重启后再无首次发送触发）。任何路径都不自动再次发送。
 
 关键状态无法持久化时锁低进程 readiness：此后拒绝新请求、新会话（含首次创建映射）与新发送，
 等待停止并重启后由持有实例锁的启动恢复处理。结果保存失败时先尝试把请求标为 failed 并关闭
@@ -185,6 +186,14 @@ _RECOVER_RUNNING = text(
 _RECOVER_SENDING = text(
     "UPDATE xiaowei_request SET delivery = 'unknown', updated_at = :now WHERE delivery = 'sending'"
 )
+# 飞书结果只在进程内持有回复目的地：进程退出时已保存却未取得投递权的结果再无发送触发。它们确定
+# 没有发出，记为 failed，之后只能显式重发。Web 结果经 GET 读取、从不发送，不在此列。
+_RECOVER_UNSENT = text(
+    """
+    UPDATE xiaowei_request SET delivery = 'failed', updated_at = :now
+    WHERE channel = 'feishu' AND state = 'completed' AND delivery = 'pending'
+    """
+)
 
 
 class ChannelStoreError(Exception):
@@ -267,6 +276,7 @@ class Acceptance:
 class RecoveryReport:
     interrupted: int
     unknown: int
+    unsent: int
 
 
 @dataclass(frozen=True)
@@ -558,7 +568,8 @@ class ChannelStore:
     # ---- 启动恢复 --------------------------------------------------------------------
 
     async def recover(self, lock: InstanceLock) -> RecoveryReport:
-        """持有实例锁的启动一致性恢复：一个事务内中断未完成请求并关闭其会话，遗留发送改为未知。
+        """持有实例锁的启动一致性恢复：一个事务内中断未完成请求并关闭其会话，遗留发送改为未知，
+        飞书已保存但未发送的结果记为发送失败。
 
         不调用 Runner、不发送消息、不放回队列。失败整体回滚并锁低 readiness。
         """
@@ -571,7 +582,8 @@ class ChannelStore:
                 sessions = [r[0] for r in rows]
                 await close_sessions(conn, sessions)
                 unknown = (await conn.execute(_RECOVER_SENDING, {"now": now})).rowcount
-        return RecoveryReport(interrupted=len(sessions), unknown=unknown)
+                unsent = (await conn.execute(_RECOVER_UNSENT, {"now": now})).rowcount
+        return RecoveryReport(interrupted=len(sessions), unknown=unknown, unsent=unsent)
 
     # ---- 内部 ------------------------------------------------------------------------
 

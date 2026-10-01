@@ -411,6 +411,11 @@ Task 7 实施修订（用户 2026-10-01 选择方案 1；以下替代 §2.5 中�
 - **命令：** `/查询`、`/诊断` 只作用于本条消息；普通文本为诊断。命令后为空则拒绝并回固定提示。`/新建` 调用 `ChannelService.new_session`，不进入模型、不写请求表，只在进程内按 `message_id` 去重，并受事件时效限制；进程重启后仍在时效内的重投可能再次新建会话，这是已接受的缺口。
 - **队列：** 接受成功且新建的请求 `put_nowait` 进入有界队列；队列满时由 `ChannelService.reject_busy`（本任务新增，只把新接受的请求记为 failed/busy）落库，再走首次发送发出繁忙回执。`consumer_count` 由 `FeishuGateway` 校验不超过 `Application.max_concurrent_turns`（本任务新增的只读属性）。重复事件不入队，只对已结束且投递仍为 pending 的记录尝试首次发送。
 - **文件与依赖：** 测试依赖真实 PostgreSQL，与 Task 3–6 同理放在 `tests/sdk_core/test_feishu.py`。`lark-channel-sdk==1.4.0` 精确钉版，加入依赖基线；它把间接依赖 `websockets` 从 16.1.1 降到 15.0.1（只有 openai-agents 的 realtime 部分用到，本产品不用）。SDK 没有 `py.typed`，mypy 只对 `lark_channel.*` 关闭缺少类型信息的报错，并由依赖基线测试钉住这唯一的放宽。`ws.client` 在导入时绑定模块级事件循环，因此 `feishu.py` 在模块顶层导入 SDK；`LarkTransport.start` 发现该循环就是应用循环时拒绝启动。Task 8 的 `serve` 必须在事件循环启动前导入飞书模块。
+- **审查修复（针对 `58aa5f6` 的首轮独立审查，B1–B4）：**
+  - 正文：消息编号与会话编号沿用 200 字符上限；序列化正文的容器上限是 `max_message_chars × 12 + 64`（JSON 转义最多把一个字符写成 12 个），超出时在解析前以 `content_too_large` 拒绝；解析后仍按实际文本长度执行 `max_message_chars`。
+  - 桥接准入：SDK 回调到应用循环的在途事件最多 `queue_size` 个，超出时不创建协程，在持久化前丢弃并只记 `intake_full`。**与已批准契约的差异：** 这是先 ack 契约下的又一种持久化前丢弃，不回复（同落库失败）；已持久化请求遇到队列满时，仍记 failed/busy 并回执一次，这一点不变。停止后的回调记 `closing` 丢弃。
+  - 结果落定：已取得投递权的发送异常按 unknown 记录；在取得投递权前，校验或读取出现异常或被取消时，锁低 readiness 并原样传播。结果因撤权、期限或不可交付而不发送时只记录。消费者意外退出、被取消，或 `run` 结束时队列中仍有请求，都锁低 readiness。正常停止先调用 `FeishuGateway.drain(timeout)` 停止接收，并有界等待队列与投递结束；超时同样锁低 readiness。**恢复语义增补：** 飞书回复目的地只在进程内存在，因此启动恢复把飞书 `completed` + `pending` 记为 `failed`（确定未发送，只能显式重发、不重跑）；Web 结果不受影响。
+  - 关闭：`LarkTransport.stop()` 在守护线程中调用 SDK 公开的同步 `stop(join_timeout=…)`，应用循环最多等待 `stop_timeout_seconds`（新增配置）。超时返回 False，重复调用返回首次结果，SDK 抛出的异常原样传播。真实长连接关闭与残余线程留给 G7/Task 9。
 
 - [ ] 用候选 `lark-channel-sdk==1.4.0` 做安装探针，固定实际 async connect/disconnect、事件字段、回调 ack/NACK/抛错与重投语义、发送 API、自动重试/fallback 设置与 `SendResult`；若持久化失败无法阻止成功 ack，或无法满足其他边界，记录具体限制并修订计划，不回退到未经验证的旧 raw client。
 - [ ] 先写 SDK 边界 fake 测试：允许单聊、未授权 tenant/user、群聊、非文本、自身消息、过期事件、重复 message ID、持久化失败、队列满、出队 busy、进程取消/重启 interrupted、明确发送失败与未知结果。
