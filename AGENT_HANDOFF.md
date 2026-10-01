@@ -1,6 +1,6 @@
 # 小维：当前交接
 
-> 更新：2026-09-30，Asia/Shanghai。这里只记录当前事实、证据与下一项工作；设计见 [ARCHITECTURE.md](ARCHITECTURE.md)，路线见 [DEVELOPMENT_PLAN.md](DEVELOPMENT_PLAN.md)，协作规则见 [AGENTS.md](AGENTS.md)。
+> 更新：2026-10-01，Asia/Shanghai。这里只记录当前事实、证据与下一项工作；设计见 [ARCHITECTURE.md](ARCHITECTURE.md)，路线见 [DEVELOPMENT_PLAN.md](DEVELOPMENT_PLAN.md)，协作规则见 [AGENTS.md](AGENTS.md)。
 
 **OpenAI Agents SDK 负责 Agent Loop；小维负责权限、受治理工具执行、证据真实性和数据边界。**
 
@@ -9,13 +9,13 @@
 | 项目 | 已核对事实 |
 | --- | --- |
 | 仓库 | [shixian66/xiaowei-agent-sdk](https://github.com/shixian66/xiaowei-agent-sdk) |
-| 本地目录 / 分支 | `/Users/kloenguyen/Desktop/agent-SDK` / `claude/p1b-starrocks-adapter`（从 `origin/main` 的 `c0f7f95` 分出） |
+| 本地目录 / 分支 | `/Users/kloenguyen/Desktop/agent-SDK` / `claude/urllib3-2.8.0`（从 `origin/main` 的 `dd24d8a` 分出） |
 | M5 历史起点 | `372c381f44ecfa1fa53961f137d0058033cbd805`；不是远端当前 main 的核验结论 |
-| P1-A 代码基线 / 当前主线 | `148abaa4729ac6644c03056cf265a9dc18f1acd8` / `c0f7f959cc42026c99b76e8097b1ebbc3a811b90`（P1-B 计划、Gate 0 离线部分与 SQLGuard Task 1 的 PR #10 已合入） |
+| P1-A 代码基线 / 当前主线 | `148abaa4729ac6644c03056cf265a9dc18f1acd8` / `dd24d8abec132d8dbd19ef30cfa359b7d9956f31`（P1-B 计划、Gate 0 离线部分、SQLGuard Task 1 的 PR #10 与 StarRocks Adapter Task 2 的 PR #11 已合入） |
 | 当前阶段 | **P1-B Task 1 SQLGuard 已随 PR #10 合入；Task 2 StarRocks Adapter 经独立复审通过，随 PR #11 合入（`dd24d8a`）。** Gate 0 离线部分已合入，真实运行未进行；Gate 0 只阻塞 Task 3–9，Task 1–2 可先做离线工作。P1-A 离线完成（Task 1–5 经 PR #2–#7 合入）；Gemini 只有部分真实证据 |
 | 当前源码与依赖 | 新包 `src/xiaowei/` 含 `sqlguard.py` 与 `starrocks.py`；锁定 `asyncmy==0.2.15`（精确钉版，已加入依赖基线）。另锁定 `openai-agents[sqlalchemy]` 0.22.3、`mcp` 2.2.0、`openai` 3.20.0、SQLAlchemy 2.0.52、asyncpg 0.30.0，urllib3 2.8.0（间接依赖，修复 CVE-2026-97687/97688/97689），Python 3.11.16；wheel 同时打包两个包，CLI 仍指向旧包 |
 | 新产品入口 | 只有开发验证命令（见第 5 节）；尚无产品启动入口，旧 CLI/Compose 不算新入口 |
-| 本次工作范围 | [P1-B 计划](docs/superpowers/plans/2026-09-30-p1b-starrocks-dual-entry.md) Task 2：`src/xiaowei/starrocks.py`、离线测试 `tests/p1b/test_starrocks_adapter.py`、显式真实测试 `tests/p1b/test_starrocks_real.py` 与开关 `tests/p1b/conftest.py`、驱动依赖锁定。未接入 `GovernedTools`（Task 3），未连接用户 StarRocks，未部署 |
+| 本次工作范围 | 依赖修复：`uv.lock` 中 urllib3 2.7.0 → 2.8.0，恢复 deps-audit；同步本文当前状态。`pyproject.toml`、产品代码、权限边界与 Gate 0 顺序不变，未调用真实模型、StarRocks 或飞书，未部署 |
 | 外部操作 | 主线曾获用户授权用合成数据调用 Gemini API（见第 3 节），验证后本机凭据文件已删除，用户负责作废该密钥；Gate 0 与 SQLGuard 离线工作没有获准 Profile 与凭据，未调用真实模型、飞书或外部 MCP Server。Task 2 从 Docker Hub 拉取官方 `starrocks/allin1-ubuntu:latest`（digest `sha256:faf7ce9c…276b`，StarRocks 4.1.4）在本机 127.0.0.1:59030 运行可丢弃容器，只写入随机名合成库，用后删除；未连接用户的 StarRocks |
 
 表中分别列出 P1-B 所依据的 P1-A 代码基线与计划所依据的当前主线，不能混用。接手先用 `git rev-parse HEAD` 和 `git status --short` 取得实际版本；审查使用对应提交的精确 SHA，本文件的修改历史由 Git 保存。
