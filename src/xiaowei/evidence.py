@@ -7,14 +7,19 @@
 
 所有出口（交给模型的工具结果、各用途读取、最终回答）都经同一个读取边界，复核归属、渠道、
 过期、目标范围、当前策略与当前授权；不同拒绝原因返回同一条信息，不暴露记录是否存在。
-事实区域由代码从获准投影生成，模型分析单独标注。
+事实区域由代码从获准投影生成，模型分析单独标注：Web 另得到从当前 Web 投影生成的结构化
+``DeliveryFact``；飞书只得到纯文本，表格数据逐行渲染，单元格内的换行等控制字符被转义，
+不能伪造其他段落。
 """
 
 import hashlib
 import json
 import secrets
-from collections.abc import Callable, Mapping
+import unicodedata
+from collections.abc import Callable, Iterable, Mapping
+from dataclasses import dataclass
 from datetime import datetime, timedelta
+from typing import TypeGuard
 
 from sqlalchemy import text
 from sqlalchemy.exc import SQLAlchemyError
@@ -31,9 +36,12 @@ from xiaowei.governance import (
 from xiaowei.models import (
     AgentAnswer,
     Audience,
+    Channel,
     Delivery,
+    DeliveryFact,
     EvidenceRecord,
     Identity,
+    JsonScalar,
     RunContext,
     ToolCall,
     ToolContract,
@@ -51,8 +59,12 @@ _COLUMNS: Mapping[Audience, str] = {
 # 模型可达的用途：模型文字会被保存进 Session、交付到渠道，Session 又回放给模型。
 _MODEL_REACHABLE: tuple[Audience, ...] = ("model", "session")
 # 结果数据生成（``governance.contract_dump``）、投影或指纹规则变化时更新，使旧规则生成的
-# 证据不再可读。/5：结果改为按登记模型的声明字段生成，不再经模型自己的序列化。
-_PROJECTION_RULE = "model-reachable-shared/5"
+# 证据不再可读。/5：结果改为按登记模型的声明字段生成，不再经模型自己的序列化。/6：策略
+# 可声明每种用途都必须完整保留的字段。/7：必需字段进入策略指纹，/6 证据因此不再可读。
+_PROJECTION_RULE = "model-reachable-shared/7"
+_EVIDENCE_ID_BYTES = 16
+# 与 ``record`` 生成的证据标识等长：容量检查用它投影最坏结果。
+_SAMPLE_EVIDENCE_ID = "ev_" + "0" * (2 * _EVIDENCE_ID_BYTES)
 _UNAVAILABLE = "证据不存在、已过期或当前无权读取"
 _FACTS_HEADER = "查询结果（系统根据证据生成）"
 _ANALYSIS_HEADER = "分析建议（模型推断，未经系统核实）"
@@ -143,14 +155,17 @@ class EvidenceStore:
         if contract is None or contract.target_id != request.target_id:
             raise EvidenceStoreError("未登记的工具结果不能生成证据")
         policy = self._catalog.policy_for(contract)
-        evidence_id = f"ev_{secrets.token_hex(16)}"
+        evidence_id = f"ev_{secrets.token_hex(_EVIDENCE_ID_BYTES)}"
         identity = ctx.identity
         # 模型与 Session 复用同一份投影：模型看到的内容恰好是 Session 可保存、可回放的内容。
-        reachable = _project(evidence_id, observation, *_reachable_limits(policy, identity))
+        required = policy.required
+        reachable = _project(
+            evidence_id, observation, *_reachable_limits(policy, identity.channel), required
+        )
         projected = {
             audience: reachable
             if audience in _MODEL_REACHABLE
-            else _project(evidence_id, observation, *_channel_limits(policy, audience))
+            else _project(evidence_id, observation, *_channel_limits(policy, audience), required)
             for audience in _COLUMNS
         }
         recorded_at = self._clock()
@@ -218,7 +233,7 @@ class EvidenceStore:
         if answer.clarification is not None:
             if answer.evidence_ids or answer.inferences:
                 raise AnswerRejectedError("澄清不能与查询结果或分析混用")
-            content = f"{_CLARIFICATION_HEADER}\n{answer.clarification}"
+            content = f"{_CLARIFICATION_HEADER}\n{_one_line(answer.clarification)}"
             return Delivery(content=content, evidence_ids=(), channel=channel)
 
         cited = answer.evidence_ids
@@ -234,13 +249,18 @@ class EvidenceStore:
         except EvidenceUnavailableError:
             raise AnswerRejectedError("回答引用的证据不可用") from None
 
-        sections = [_FACTS_HEADER, *(_render_fact(r, channel) for r in records)]
+        shown = [_shown(r, channel) for r in records]
+        sections = [_FACTS_HEADER, *(_render_fact(item, channel) for item in shown)]
         if answer.inferences:
             sections.append(_ANALYSIS_HEADER)
             sections.extend(
-                f"- {i.text}（依据：{', '.join(i.evidence_ids)}）" for i in answer.inferences
+                f"- {_one_line(i.text)}（依据：{', '.join(i.evidence_ids)}）"
+                for i in answer.inferences
             )
-        return Delivery(content="\n".join(sections), evidence_ids=cited, channel=channel)
+        facts = tuple(_fact(item) for item in shown) if channel == "web" else ()
+        return Delivery(
+            content="\n".join(sections), evidence_ids=cited, channel=channel, facts=facts
+        )
 
     async def _readable(
         self, evidence_id: str, ctx: RunContext, audience: Audience
@@ -313,9 +333,9 @@ class EvidenceStore:
         )
 
 
-def _reachable_limits(policy: ToolPolicy, identity: Identity) -> tuple[tuple[str, ...], int]:
+def _reachable_limits(policy: ToolPolicy, channel: Channel) -> tuple[tuple[str, ...], int]:
     """模型可达投影：按模型字段优先级，取模型、Session 与记录所在渠道的共同字段与最小上限。"""
-    bounds = [policy.projections[a] for a in (*_MODEL_REACHABLE, identity.channel)]
+    bounds = [policy.projections[a] for a in (*_MODEL_REACHABLE, channel)]
     fields = tuple(
         name for name in policy.projections["model"].fields if all(name in b.fields for b in bounds)
     )
@@ -328,7 +348,7 @@ def _channel_limits(policy: ToolPolicy, audience: Audience) -> tuple[tuple[str, 
 
 
 def _policy_fingerprint(contract: ToolContract, policy: ToolPolicy) -> str:
-    """契约（参数 schema 与目标）、结果契约、四种投影的字段/上限与投影规则的稳定摘要。
+    """契约（参数 schema 与目标）、结果契约、四种投影的字段/上限、必需字段与投影规则的稳定摘要。
 
     结果契约决定远端数据如何成为事实，改变后旧证据不再可用；schema 的标题与说明文字、交给
     模型的工具说明只影响阅读，不参与摘要。
@@ -345,6 +365,8 @@ def _policy_fingerprint(contract: ToolContract, policy: ToolPolicy) -> str:
             audience: {"fields": list(spec.fields), "max_bytes": spec.max_bytes}
             for audience, spec in policy.projections.items()
         },
+        # 只有集合语义：顺序不同的同一组必需字段得到相同摘要。
+        "required": sorted(policy.required),
     }
     canonical = json.dumps(body, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
     return f"sha256:{hashlib.sha256(canonical.encode()).hexdigest()}"
@@ -361,12 +383,35 @@ def _arguments_digest(arguments: Mapping[str, object]) -> str:
     return f"sha256:{hashlib.sha256(canonical.encode()).hexdigest()}"
 
 
+def check_projection_capacity(policy: ToolPolicy, observation: ToolObservation) -> None:
+    """用真实投影器检查容量：Web 与飞书两条路径的模型可达投影和渠道投影都能完整保留必需字段。
+
+    供启动装配用按声明上限构造的最坏结果调用；任一路径放不下时抛出 ``ValueError``。
+    """
+    channels: tuple[Channel, ...] = ("web", "feishu")
+    for channel in channels:
+        paths = {
+            f"{channel} 模型可达": _reachable_limits(policy, channel),
+            channel: _channel_limits(policy, channel),
+        }
+        for name, (fields, max_bytes) in paths.items():
+            try:
+                _project(_SAMPLE_EVIDENCE_ID, observation, fields, max_bytes, policy.required)
+            except EvidenceStoreError:
+                raise ValueError(f"{name}投影放不下最坏情况的必需字段") from None
+
+
 def _project(
-    evidence_id: str, observation: ToolObservation, fields: tuple[str, ...], max_bytes: int
+    evidence_id: str,
+    observation: ToolObservation,
+    fields: tuple[str, ...],
+    max_bytes: int,
+    required: tuple[str, ...],
 ) -> tuple[str, bool]:
     """按字段顺序整体纳入获准字段，放不下的字段整体省略并标记截断，不切开字段值。
 
     ``empty`` 表示结果中没有任何获准字段；``truncated`` 表示来源已截断或本用途省略了字段。
+    ``required`` 中的字段缺失或放不下时整体失败，不能以截断标记代替。
     """
     present = [name for name in fields if name in observation.payload]
     data: dict[str, object] = {}
@@ -378,6 +423,8 @@ def _project(
             data = candidate
         else:
             omitted = True
+    if any(name not in data for name in required):
+        raise EvidenceStoreError("工具结果的必需字段无法完整保留，结果未交给模型")
     truncated = observation.truncated or omitted
     content = _envelope(evidence_id, data, truncated=truncated, empty=not present)
     if _size(content) > max_bytes:
@@ -397,14 +444,119 @@ def _size(content: str) -> int:
     return len(content.encode())
 
 
-def _render_fact(record: EvidenceRecord, channel: Audience) -> str:
+@dataclass(frozen=True)
+class _Shown:
+    """一条证据在某渠道投影中的内容；``data`` 为 ``None`` 表示没有任何获准字段。"""
+
+    record: EvidenceRecord
+    data: dict[str, object] | None
+    truncated: bool
+
+
+def _shown(record: EvidenceRecord, channel: Audience) -> _Shown:
     envelope = json.loads(record.projections[channel])
+    data = None if envelope["empty"] else envelope["data"]
+    return _Shown(record=record, data=data, truncated=bool(envelope["truncated"]))
+
+
+def _render_fact(shown: _Shown, channel: Audience) -> str:
+    record, data = shown.record, shown.data
     meta = (
         f"[{record.evidence_id}] 来源 {record.tool_id} · 目标 {record.target_id}"
         f" · 采集于 {record.captured_at.isoformat()}"
     )
-    if envelope["truncated"]:
+    if shown.truncated:
         meta += " · 结果已截断"
-    if envelope["empty"]:
+    if data is None:
         return f"{meta}\n（无结果）"
-    return f"{meta}\n{json.dumps(envelope['data'], ensure_ascii=False)}"
+    table = _table(data)
+    if channel != "feishu" or table is None:
+        return f"{meta}\n{_one_line(json.dumps(data, ensure_ascii=False))}"
+    columns, rows = table
+    lines = [meta]
+    lines.extend(f"{name}: {_cell(value)}" for name, value in _scalars(data).items())
+    lines.append(_table_line(columns))
+    lines.extend(_table_line(row.get(name) for name in columns) for row in rows)
+    if not rows:
+        lines.append("（无数据行）")
+    return "\n".join(lines)
+
+
+def _fact(shown: _Shown) -> DeliveryFact:
+    record, data = shown.record, shown.data
+    table = _table(data) if data is not None else None
+    columns, rows = table if table is not None else ((), ())
+    return DeliveryFact(
+        evidence_id=record.evidence_id,
+        tool_id=record.tool_id,
+        target_id=record.target_id,
+        captured_at=record.captured_at,
+        truncated=shown.truncated,
+        columns=columns,
+        rows=rows,
+        metadata=_scalars(data) if data is not None else {},
+    )
+
+
+def _is_scalar(value: object) -> TypeGuard[JsonScalar]:
+    return value is None or isinstance(value, str | int | float | bool)
+
+
+def _table(
+    data: Mapping[str, object],
+) -> tuple[tuple[str, ...], tuple[dict[str, JsonScalar], ...]] | None:
+    """``rows`` 是由标量组成的行对象列表时给出 (列, 行)；列取 ``columns``，否则按行键出现顺序。"""
+    raw = data.get("rows")
+    if not isinstance(raw, list):
+        return None
+    rows: list[dict[str, JsonScalar]] = []
+    for row in raw:
+        if not isinstance(row, dict):
+            return None
+        cells = {str(name): value for name, value in row.items() if _is_scalar(value)}
+        if len(cells) != len(row):
+            return None
+        rows.append(cells)
+    declared = data.get("columns")
+    if isinstance(declared, list) and all(isinstance(name, str) for name in declared):
+        columns = tuple(str(name) for name in declared)
+    else:
+        columns = tuple(dict.fromkeys(name for row in rows for name in row))
+    return columns, tuple(rows)
+
+
+def _scalars(data: Mapping[str, object]) -> dict[str, JsonScalar]:
+    return {
+        name: value
+        for name, value in data.items()
+        if name not in ("rows", "columns") and _is_scalar(value)
+    }
+
+
+def _table_line(cells: Iterable[object]) -> str:
+    """飞书表格行：以 ``| `` 开头、`` |`` 结尾，单元格之间是 `` | ``；数据行不会与标题行相同。"""
+    return "| " + " | ".join(_cell(value) for value in cells) + " |"
+
+
+def _cell(value: object) -> str:
+    """纯文本单元格：字符串去掉引号但保留 JSON 转义，只占一行。
+
+    JSON 已把反斜杠写作 ``\\\\``，因此单元格中的竖线写作 ``\\|`` 后，没有转义的 `` | `` 只能是
+    分隔符。
+    """
+    encoded = json.dumps(value, ensure_ascii=False)
+    body = encoded[1:-1] if isinstance(value, str) else encoded
+    return _one_line(body).replace("|", "\\|")
+
+
+# JSON 在 ``ensure_ascii=False`` 时仍原样输出的分行与不可见字符：C1 控制字符（含 U+0085）、
+# DEL、行与段分隔符（U+2028/U+2029），以及可改变显示顺序的格式字符。
+_LINE_UNSAFE = frozenset({"Cc", "Zl", "Zp", "Cf"})
+
+
+def _one_line(content: str) -> str:
+    """把会另起一行或不可见的字符写成 JSON 转义；JSON 文本转换后仍是含义相同的 JSON。"""
+    return "".join(
+        json.dumps(char)[1:-1] if unicodedata.category(char) in _LINE_UNSAFE else char
+        for char in content
+    )

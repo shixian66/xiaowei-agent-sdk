@@ -1,8 +1,11 @@
 """StarRocks Adapter 的真实协议验证（显式运行）::
 
     SDK_TEST_STARROCKS_ADMIN_URL=mysql://root@127.0.0.1:59030 \\
+    SDK_TEST_POSTGRES_URL=postgresql+asyncpg://postgres@127.0.0.1:55432/postgres \\
       uv run --locked --extra dev python -m pytest tests/p1b/test_starrocks_real.py \\
       -m starrocks_real -q
+
+受治理工具的端到端用例另需测试 PostgreSQL（``compose.sdk-test.yml``）保存证据。
 
 fixture 以管理账号建一个随机名的合成数据库与只读账号（只授予其中一张表的 SELECT），用例
 结束后删除。Adapter 只用只读账号连接。它证明锁定的 asyncmy 与该实例在会话变量、非缓冲读取、
@@ -12,6 +15,7 @@ fixture 以管理账号建一个随机名的合成数据库与只读账号（只
 # ruff: noqa: S608 —— 合成库名由 fixture 随机生成，建表与插数语句是测试数据。
 
 import asyncio
+import os
 import secrets
 import time
 from collections.abc import AsyncIterator
@@ -23,7 +27,16 @@ import pytest
 from asyncmy.cursors import SSCursor
 from asyncmy.errors import MySQLError
 from tests.p1b.conftest import admin_address
+from tests.sdk_core.postgres_harness import (
+    HarnessMisconfiguredError,
+    isolated_database,
+    parse_admin_url,
+)
+from tests.sdk_core.synthetic_tools import Clock, Grants, ready_engine
 
+from xiaowei.evidence import EvidenceStore
+from xiaowei.governance import GovernedTools, ToolCatalog, ToolRejectedError
+from xiaowei.models import AgentAnswer, AnswerInference, Budget, Identity, RunContext, ToolRequest
 from xiaowei.sqlguard import QueryPolicy, guard_readonly_query
 from xiaowei.starrocks import (
     StarRocksAdapter,
@@ -32,6 +45,7 @@ from xiaowei.starrocks import (
     StarRocksTarget,
     open_starrocks,
 )
+from xiaowei.starrocks_tools import QUERY_TOOLS, RUN_QUERY, starrocks_tools
 
 pytestmark = pytest.mark.starrocks_real
 
@@ -270,3 +284,67 @@ async def test_driver_cursor_is_unbuffered(instance: Instance) -> None:
     assert await cursor.fetchone() == (0,)
     assert cursor._result.unbuffered_active  # 结果仍在流上，未被整体读入
     conn.close()
+
+
+async def test_governed_query_tool_end_to_end(instance: Instance) -> None:
+    """只读账号 → 治理 → SQLGuard → 真实驱动 → 证据（真实 PostgreSQL）→ Web 结构化事实。"""
+    raw = os.environ.get("SDK_TEST_POSTGRES_URL")
+    if not raw:
+        pytest.fail("SDK_TEST_POSTGRES_URL 未设置：端到端用例需要测试 PostgreSQL 保存证据")
+    try:
+        parse_admin_url(raw)
+    except HarnessMisconfiguredError as exc:
+        pytest.fail(f"SDK_TEST_POSTGRES_URL {exc}")
+
+    ada = adapter(instance)
+    tools = starrocks_tools(ada, dict.fromkeys(("model", "session", "web", "feishu"), 200_000))
+    grants = Grants()
+    grants.grant("alice", *QUERY_TOOLS, target="sr-real")
+    ctx = RunContext(
+        identity=Identity(subject_id="alice", session_id="s1", turn_id="t1", channel="web"),
+        target_scope=frozenset({"sr-real"}),
+        tool_scope=QUERY_TOOLS,
+        budget=Budget(max_turns=4, max_tool_calls=2, timeout_seconds=30.0),
+    )
+
+    def call(sql: str) -> ToolRequest:
+        return ToolRequest(
+            tool_id=RUN_QUERY,
+            target_id="sr-real",
+            call_id=secrets.token_hex(4),
+            tool_name="run_readonly_query",
+            arguments={"sql": sql},
+        )
+
+    async with isolated_database() as url, ready_engine(url) as engine:
+        evidence = EvidenceStore(
+            engine,
+            ToolCatalog(tools.contracts, tools.policies),
+            authorize=grants,
+            clock=Clock(datetime.now(UTC)),
+            retention_seconds=600,
+        )
+        governed = GovernedTools(evidence)
+        with pytest.raises(ToolRejectedError, match="column_not_allowed"):
+            await governed.invoke(ctx, call("SELECT secret FROM sales"), tools.executes[RUN_QUERY])
+
+        result = await governed.invoke(
+            ctx,
+            call("SELECT id, total, at FROM sales WHERE id IN (3, 5) ORDER BY id"),
+            tools.executes[RUN_QUERY],
+        )
+        answer = AgentAnswer(
+            evidence_ids=(result.evidence_id,),
+            inferences=[AnswerInference(text="两行", evidence_ids=(result.evidence_id,))],
+            clarification=None,
+        )
+        delivery = await evidence.validate_answer(answer, ctx)
+
+    (fact,) = delivery.facts
+    assert fact.columns == ("id", "total", "at")
+    assert fact.rows == (
+        {"id": 3, "total": "3.75", "at": "2026-09-01T03:30:00+08:00"},
+        {"id": 5, "total": "6.25", "at": "2026-09-01T05:30:00+08:00"},
+    )
+    assert fact.metadata["row_count"] == 2 and "`sales`" in str(fact.metadata["sql"])
+    assert not fact.truncated

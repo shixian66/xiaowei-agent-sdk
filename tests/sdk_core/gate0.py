@@ -26,7 +26,7 @@ from pydantic import BaseModel, ConfigDict
 from sqlalchemy.ext.asyncio import AsyncEngine
 
 from xiaowei.app import AppConfig, Application, DataPolicy, Mode, TurnError
-from xiaowei.evidence import EvidenceStore
+from xiaowei.evidence import AnswerRejectedError, EvidenceStore
 from xiaowei.governance import GovernedTools, Projection, ToolCatalog, ToolPolicy
 from xiaowei.model_api import ModelProfile, open_model
 from xiaowei.models import (
@@ -283,6 +283,7 @@ def usage_counts(body: bytes) -> dict[str, int] | None:
 @dataclass
 class Gate0:
     app: Application
+    evidence: EvidenceStore
     adapter: SyntheticAdapter
     observer: ObservingTransport
 
@@ -312,7 +313,7 @@ async def gate0_app(
             local_tools={SALES_TOOL: adapter.execute, REGIONS_TOOL: adapter.execute},
             clock=clock,
         )
-        yield Gate0(app=app, adapter=adapter, observer=observer)
+        yield Gate0(app=app, evidence=evidence, adapter=adapter, observer=observer)
 
 
 @dataclass(frozen=True)
@@ -410,12 +411,17 @@ async def run_samples(gate: Gate0, samples: Sequence[Sample] = SAMPLES) -> list[
         outcome: Literal["delivered", "clarification", "failed"]
         reason: str | None = None
         cited: tuple[str, ...] = ()
+        ctx = _context(sample, gate.app, run)
         try:
-            delivery = await gate.app.run_turn(_context(sample, gate.app, run), sample.message)
+            # 渠道的做法：完成一轮后按接收渠道与当前权限生成交付内容。
+            answer = await gate.app.run_turn(ctx, sample.message)
+            delivery = await gate.evidence.validate_answer(answer, ctx)
             cited = delivery.evidence_ids
             outcome = "delivered" if cited else "clarification"
         except TurnError as exc:
             outcome, reason = "failed", exc.reason
+        except AnswerRejectedError:
+            outcome, reason = "failed", "answer_rejected"
         results.append(
             SampleResult(
                 name=sample.name,

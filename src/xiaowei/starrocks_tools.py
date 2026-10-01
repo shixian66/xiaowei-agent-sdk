@@ -1,0 +1,218 @@
+"""StarRocks 受治理工具：三个工具的契约、参数与投影策略，以及绑定 Adapter 的执行函数。
+
+``local/list_tables`` 与 ``local/describe_table`` 只执行代码生成、参数绑定的元数据查询；
+``local/run_readonly_query`` 只执行 SQLGuard 产生的 ``GuardedQuery``。``describe_table`` 的
+对象核对与查询的 SQLGuard 都是 ``Prechecked`` 的同步前置检查：在当前授权之后、预算预留与
+任何 StarRocks I/O 之前运行，拒绝时模型只收到固定原因码与说明，可在本轮剩余轮次内修正。
+
+四种用途投影的字段相同且都必须完整保留（``required``）：模型、Session、Web 与飞书得到同一组
+获准列与有限行，只有容量不同。装配时按声明上限构造序列化后最大的合成结果，直接交给证据的
+真实投影器检查 Web 与飞书两条路径，任一路径放不下即拒绝启动；运行时 ``EvidenceStore`` 仍会
+在必需字段放不下时中止本轮。
+"""
+
+from __future__ import annotations
+
+import json
+from collections.abc import Mapping
+from dataclasses import dataclass
+from datetime import UTC, datetime
+from typing import Annotated, Final
+
+from pydantic import BaseModel, ConfigDict, StringConstraints
+
+from xiaowei.evidence import check_projection_capacity
+from xiaowei.governance import Execute, Prechecked, Projection, ToolPolicy, ToolRejectedError
+from xiaowei.models import AUDIENCES, Audience, ToolContract, ToolObservation, ToolRequest
+from xiaowei.sqlguard import (
+    REJECTION_MESSAGES,
+    GuardedQuery,
+    QueryRejectedError,
+    QueryRejectionCode,
+    guard_readonly_query,
+)
+from xiaowei.starrocks import (
+    QueryResult,
+    StarRocksAdapter,
+    StarRocksError,
+    StarRocksErrorCode,
+    metadata_sql_bytes,
+)
+
+LIST_TABLES: Final = "local/list_tables"
+DESCRIBE_TABLE: Final = "local/describe_table"
+RUN_QUERY: Final = "local/run_readonly_query"
+DIAGNOSE_TOOLS: Final = frozenset({LIST_TABLES, DESCRIBE_TABLE})
+"""诊断用途只展示元数据工具；实际查询工具不可见，强行调用仍由治理层拒绝。"""
+QUERY_TOOLS: Final = DIAGNOSE_TOOLS | {RUN_QUERY}
+
+RESULT_FIELDS: Final = ("sql", "columns", "rows", "row_count", "elapsed_ms")
+# JSON 转义膨胀最大的单字节字符：控制字符写作 \u00XX，一个字节变六个。
+_WIDEST_CHAR: Final = "\x01"
+# 有符号 64 位整数中十进制写法最长的值。
+_WIDEST_INT: Final = -(2**63)
+
+
+class ListTablesArgs(BaseModel):
+    """严格空对象：不接受过滤条件、catalog 或任何查询参数。"""
+
+    model_config = ConfigDict(extra="forbid")
+
+
+class DescribeTableArgs(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    table: Annotated[str, StringConstraints(min_length=1, max_length=256)]
+
+
+class RunQueryArgs(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    sql: Annotated[str, StringConstraints(min_length=1)]
+
+
+@dataclass(frozen=True)
+class StarRocksTools:
+    """装配结果：交给 ``ToolCatalog`` 的契约与策略，交给 ``Application`` 的执行函数。"""
+
+    contracts: tuple[ToolContract, ...]
+    policies: tuple[ToolPolicy, ...]
+    executes: Mapping[str, Execute]
+
+
+def starrocks_tools(adapter: StarRocksAdapter, max_bytes: Mapping[Audience, int]) -> StarRocksTools:
+    """按目标配置与四种用途的容量装配三个工具；容量容不下最坏结果时拒绝装配。"""
+    target = adapter.target
+    if set(max_bytes) != set(AUDIENCES):
+        raise ValueError("StarRocks 工具：必须且只能给出四种用途的容量")
+    worst = worst_case_observation(adapter)
+    projections: dict[str, Projection] = {
+        a: Projection(fields=RESULT_FIELDS, max_bytes=max_bytes[a]) for a in AUDIENCES
+    }
+
+    def policy(name: str, arguments: type[BaseModel]) -> ToolPolicy:
+        return ToolPolicy(
+            policy_id=f"starrocks.{name}",
+            arguments=arguments,
+            projections=projections,
+            required=RESULT_FIELDS,
+        )
+
+    def contract(tool_id: str, tool_policy: ToolPolicy, description: str) -> ToolContract:
+        return ToolContract(
+            tool_id=tool_id,
+            target_id=target.target_id,
+            input_schema=tool_policy.arguments.model_json_schema(),
+            policy_id=tool_policy.policy_id,
+            description=description,
+        )
+
+    list_policy = policy("list_tables", ListTablesArgs)
+    describe_policy = policy("describe_table", DescribeTableArgs)
+    query_policy = policy("run_readonly_query", RunQueryArgs)
+    # 三个策略的投影相同：检查一次即覆盖全部工具。
+    try:
+        check_projection_capacity(query_policy, worst)
+    except ValueError as exc:
+        raise ValueError(f"StarRocks 工具：{exc}") from None
+    bounds = _Bounds(
+        sql=_json_size(worst.payload["sql"]), columns=_json_size(worst.payload["columns"])
+    )
+
+    async def list_tables(request: ToolRequest) -> ToolObservation:
+        return _observation(await adapter.list_tables(), bounds)
+
+    def check_table(request: ToolRequest) -> str:
+        name = str(request.arguments["table"])
+        if name not in target.policy.allowed_objects:
+            raise ToolRejectedError("对象不在允许范围内，未执行；请先用 list_tables 查看可用对象")
+        return name
+
+    async def describe_table(name: str) -> ToolObservation:
+        return _observation(await adapter.describe_table(name), bounds)
+
+    def check_query(request: ToolRequest) -> GuardedQuery:
+        code: QueryRejectionCode | None = None
+        try:
+            return guard_readonly_query(str(request.arguments["sql"]), target.policy)
+        except QueryRejectedError as exc:
+            code = exc.code
+        # 在 except 之外抛出：拒绝只带固定原因码与说明，不带 SQLGuard 异常的上下文。
+        raise ToolRejectedError(f"查询未执行（{code}）：{REJECTION_MESSAGES[code]}")
+
+    async def run_query(query: GuardedQuery) -> ToolObservation:
+        return _observation(await adapter.run_query(query), bounds)
+
+    return StarRocksTools(
+        contracts=(
+            contract(LIST_TABLES, list_policy, "列出本目标允许查询的表与视图。"),
+            contract(
+                DESCRIBE_TABLE,
+                describe_policy,
+                "查看一张允许查询的表或视图的可用列、类型与是否可空。",
+            ),
+            contract(
+                RUN_QUERY,
+                query_policy,
+                "执行一条只读 SELECT。只能引用允许的表、列与函数，必须列出具体列；"
+                "结果行数有上限，超过时返回的结果标记为截断。",
+            ),
+        ),
+        policies=(list_policy, describe_policy, query_policy),
+        executes={
+            LIST_TABLES: list_tables,
+            DESCRIBE_TABLE: Prechecked(check=check_table, run=describe_table),
+            RUN_QUERY: Prechecked(check=check_query, run=run_query),
+        },
+    )
+
+
+def worst_case_observation(adapter: StarRocksAdapter) -> ToolObservation:
+    """按目标声明的上限构造序列化后最大的合成结果，供启动容量检查交给真实投影器。
+
+    实际 SQL 不超过 SQLGuard 字节上限与元数据模板中的较大者；列名来自服务端，按同一上限
+    约束（``_observation`` 在运行时执行）。两者都以 JSON 转义膨胀最大的字符填满。结果行的
+    序列化大小不超过 ``max_result_bytes``（Adapter 按同一编码计数）；投影只看序列化大小，
+    因此这里用同样大小的字符串代表行列表。
+    """
+    target = adapter.target
+    sql_bytes = max(target.policy.max_sql_bytes, metadata_sql_bytes(target.policy))
+    return ToolObservation(
+        payload={
+            "sql": _WIDEST_CHAR * sql_bytes,
+            "columns": [_WIDEST_CHAR * sql_bytes],
+            "rows": "x" * (target.max_result_bytes - 2),
+            "row_count": _WIDEST_INT,
+            "elapsed_ms": _WIDEST_INT,
+        },
+        captured_at=datetime(1, 1, 1, tzinfo=UTC),
+        truncated=False,
+    )
+
+
+@dataclass(frozen=True)
+class _Bounds:
+    sql: int
+    columns: int
+
+
+def _observation(result: QueryResult, bounds: _Bounds) -> ToolObservation:
+    """Adapter 结果转为工具观测；列名或 SQL 超过装配时假定的上限时按结果契约失败。"""
+    columns = list(result.columns)
+    if _json_size(result.sql) > bounds.sql or _json_size(columns) > bounds.columns:
+        raise StarRocksError(StarRocksErrorCode.RESULT_CONTRACT)
+    return ToolObservation(
+        payload={
+            "sql": result.sql,
+            "columns": columns,
+            "rows": [dict(row) for row in result.rows],
+            "row_count": result.row_count,
+            "elapsed_ms": result.elapsed_ms,
+        },
+        captured_at=result.collected_at,
+        truncated=result.truncated,
+    )
+
+
+def _json_size(value: object) -> int:
+    return len(json.dumps(value, ensure_ascii=False).encode())

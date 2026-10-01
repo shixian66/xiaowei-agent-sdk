@@ -14,6 +14,7 @@ Audience = Literal["model", "session", "web", "feishu"]
 AUDIENCES: tuple[Audience, ...] = ("model", "session", "web", "feishu")
 
 Label = Annotated[str, StringConstraints(min_length=1, max_length=200)]
+JsonScalar = None | bool | int | float | str
 ToolId = Annotated[str, StringConstraints(pattern=r"^[a-z0-9_-]{1,64}/[a-z0-9_.-]{1,64}$")]
 
 
@@ -128,9 +129,27 @@ class AgentAnswer(_Answer):
     clarification: Annotated[str, Field(min_length=1, max_length=2000)] | None
 
 
+class DeliveryFact(_Trusted):
+    """一条证据的结构化事实：只由 ``EvidenceStore`` 从当前 Web 投影生成，模型不能提交。
+
+    ``columns``/``rows`` 是投影中的表格数据；``metadata`` 是投影中其余的标量字段（如实际 SQL、
+    行数、耗时）。来源、目标、采集时间与截断来自证据记录。
+    """
+
+    evidence_id: Label
+    tool_id: ToolId
+    target_id: Label
+    captured_at: datetime
+    truncated: bool
+    columns: tuple[str, ...]
+    rows: tuple[dict[str, JsonScalar], ...]
+    metadata: dict[str, JsonScalar]
+
+
 class Delivery(_Trusted):
-    """通过验证、按接收渠道生成的输出。"""
+    """通过验证、按接收渠道生成的输出；``facts`` 只在 Web 渠道给出。"""
 
     content: str
     evidence_ids: tuple[str, ...]
     channel: Channel
+    facts: tuple[DeliveryFact, ...] = ()

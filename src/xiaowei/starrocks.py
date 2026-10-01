@@ -226,6 +226,10 @@ class StarRocksAdapter:
     def __repr__(self) -> str:
         return f"StarRocksAdapter(target_id={self._target.target_id!r})"
 
+    @property
+    def target(self) -> StarRocksTarget:
+        return self._target
+
     async def run_query(self, query: GuardedQuery) -> QueryResult:
         """执行 SQLGuard 产物中的规范化 SQL；只接受本目标的 ``GuardedQuery``。"""
         if not isinstance(query, GuardedQuery):
@@ -236,7 +240,7 @@ class StarRocksAdapter:
 
     async def list_tables(self) -> QueryResult:
         objects = tuple(sorted(self._target.policy.allowed_objects))
-        sql = _LIST_TABLES.format(", ".join(["%s"] * len(objects)))
+        sql = _list_tables_sql(len(objects))
         return await self._run(sql, (self._target.database, *objects), len(objects))
 
     async def describe_table(self, name: str) -> QueryResult:
@@ -244,7 +248,7 @@ class StarRocksAdapter:
         if name not in policy.allowed_objects:
             raise StarRocksError(_Code.OBJECT_NOT_ALLOWED)
         columns = tuple(sorted(policy.allowed_columns[name]))
-        sql = _DESCRIBE_TABLE.format(", ".join(["%s"] * len(columns)))
+        sql = _describe_table_sql(len(columns))
         return await self._run(sql, (self._target.database, name, *columns), len(columns))
 
     async def _run(self, sql: str, args: tuple[object, ...] | None, max_rows: int) -> QueryResult:
@@ -381,6 +385,23 @@ class StarRocksAdapter:
         finally:
             if not closed:
                 conn.abort()
+
+
+def _list_tables_sql(objects: int) -> str:
+    return _LIST_TABLES.format(", ".join(["%s"] * objects))
+
+
+def _describe_table_sql(columns: int) -> str:
+    return _DESCRIBE_TABLE.format(", ".join(["%s"] * columns))
+
+
+def metadata_sql_bytes(policy: QueryPolicy) -> int:
+    """元数据查询结果中 ``sql``（代码生成的模板，不含绑定值）的最大 UTF-8 字节数。"""
+    widest = max(len(columns) for columns in policy.allowed_columns.values())
+    return max(
+        len(_list_tables_sql(len(policy.allowed_objects)).encode()),
+        len(_describe_table_sql(widest).encode()),
+    )
 
 
 def _json_size(value: object) -> int:

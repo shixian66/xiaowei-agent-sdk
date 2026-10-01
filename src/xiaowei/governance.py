@@ -21,7 +21,17 @@ import math
 import types
 from collections.abc import Awaitable, Callable, Iterable, Mapping
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Annotated, Literal, Union, get_args, get_origin
+from typing import (
+    TYPE_CHECKING,
+    Annotated,
+    Any,
+    Generic,
+    Literal,
+    TypeVar,
+    Union,
+    get_args,
+    get_origin,
+)
 
 from pydantic import BaseModel
 
@@ -41,7 +51,22 @@ if TYPE_CHECKING:
 Authorizer = Callable[[Identity, str, str], Awaitable[bool]]
 """应用提供的当前授权查询：``(identity, target_id, tool_id) -> 是否仍获准``。"""
 
-Execute = Callable[[ToolRequest], Awaitable[ToolObservation]]
+Prepared = TypeVar("Prepared")
+
+
+@dataclass(frozen=True)
+class Prechecked(Generic[Prepared]):
+    """带同步前置检查的执行：``check`` 在授权之后、预算预留之前运行，``run`` 只收到它的结果。
+
+    ``check`` 必须是零 I/O 的纯函数：把规范化请求转换为执行所需的受信对象，拒绝时抛出信息
+    固定、不含参数原文的 ``ToolRejectedError``；此时本次调用不占预算，模型可以修正后再调用。
+    """
+
+    check: Callable[[ToolRequest], Prepared]
+    run: Callable[[Prepared], Awaitable[ToolObservation]]
+
+
+Execute = Callable[[ToolRequest], Awaitable[ToolObservation]] | Prechecked[Any]
 """应用绑定的实际 I/O：只在治理通过后以校验、规范化后的请求调用。"""
 
 # 最小投影上限：须容纳证据标识与截断/空结果标记组成的外层结构。
@@ -80,12 +105,16 @@ class ToolPolicy:
     ``result`` 用于 MCP 等远端结果：按严格类型校验，校验时强制忽略未声明字段（含嵌套模型，
     不论模型自身配置），不合约的结果整体拒绝；投影只能取它声明的字段。本地 Adapter 由可信
     代码产生结果，可不提供。
+
+    ``required`` 是每种用途都必须完整保留的字段：结果缺少它们，或任一投影放不下它们时，
+    证据生成失败，结果不交给模型，而不是静默省略。
     """
 
     policy_id: str
     arguments: type[BaseModel]
     projections: Mapping[str, Projection]
     result: type[BaseModel] | None = None
+    required: tuple[str, ...] = ()
 
 
 class ToolCatalog:
@@ -101,6 +130,14 @@ class ToolCatalog:
                 raise ValueError(
                     f"工具目录：策略 {policy.policy_id} 的参数模型字段必须全部必填，"
                     "且只由基本类型、枚举与嵌套模型组成"
+                )
+            if any(
+                name not in spec.fields
+                for spec in policy.projections.values()
+                for name in policy.required
+            ):
+                raise ValueError(
+                    f"工具目录：策略 {policy.policy_id} 的必需字段必须属于每种用途投影"
                 )
             result = policy.result
             if result is not None and not _supported_model(result, required=False):
@@ -176,11 +213,13 @@ class GovernedTools:
         effective = request.model_copy(update={"arguments": arguments})
         if not await self._currently_authorized(ctx.identity, contract):
             raise ToolRejectedError("当前无权调用该工具")
-        # 授权回调之后、执行之前不再 await：检查与计数在同一步完成，并行调用不能同时越过上限。
+        # 授权回调之后、执行之前不再 await：前置检查与计数在同一步完成，并行调用不能同时越过
+        # 上限；前置检查拒绝时尚未占用预算。
+        run = _bind(execute, effective)
         self._reserve(ctx)
 
         try:
-            observation = await execute(effective)
+            observation = await run()
         except Exception:
             raise ToolExecutionError("工具执行失败") from None
         if not isinstance(observation, ToolObservation):
@@ -204,6 +243,22 @@ class GovernedTools:
         if used >= ctx.budget.max_tool_calls:
             raise ToolRejectedError("本轮工具调用次数已用完")
         self._used[key] = used + 1
+
+
+def _bind(execute: Execute, request: ToolRequest) -> Callable[[], Awaitable[ToolObservation]]:
+    if not isinstance(execute, Prechecked):
+        return lambda: execute(request)
+    rejected: ToolRejectedError | None = None
+    try:
+        prepared = execute.check(request)
+    except ToolRejectedError as exc:
+        rejected = exc
+    except Exception:
+        rejected = ToolRejectedError("工具参数检查失败，未执行")
+    if rejected is not None:
+        # 在 except 之外抛出：拒绝不带下层异常的上下文。
+        raise rejected
+    return lambda: execute.run(prepared)
 
 
 def schema_shape(node: object, *, ignore_extra_flags: bool = False) -> object:
