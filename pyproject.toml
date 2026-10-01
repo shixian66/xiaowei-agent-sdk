@@ -20,6 +20,8 @@ requires-python = ">=3.11,<3.12"
 #                  SQLAlchemySession（P1-A Task 1 实装核对后锁定 0.22.x）。
 #   asyncmy     —— 新包 StarRocks Adapter 的 MySQL 协议驱动（P1-B Task 2）。精确钉版：Adapter 依赖
 #                  其 TLS 升级、非缓冲读取与关闭行为，升级须重新核对。
+#   lark-channel-sdk —— 飞书长连接与发送（P1-B Task 7）。精确钉版：入站 ack 时机、raw 事件字段、
+#                  发送重试与降级行为按 1.4.0 源码核对，升级须重新核对。
 #   新包另用 pydantic / sqlalchemy / asyncpg；其余仅旧包 src/xiaowei_agent 使用，P1-B 列明清理范围。
 dependencies = [
     "pydantic>=2.13,<3",
@@ -31,6 +33,7 @@ dependencies = [
     "uvicorn>=0.34,<1",
     "openai-agents[sqlalchemy]>=0.22.3,<0.23",
     "asyncmy==0.2.15",
+    "lark-channel-sdk==1.4.0",
 ]
 
 [project.scripts]
@@ -81,3 +84,9 @@ ignore = ["RUF001", "RUF002", "RUF003"]
 python_version = "3.11"
 strict = true
 warn_unused_configs = true
+
+# lark-channel-sdk 1.4.0 没有 py.typed：只对该包关闭“缺少类型信息”报错，其值按 Any 处理；
+# 本仓库代码仍按 strict 检查，SDK 返回值在 feishu.py 中显式核对类型。
+[[tool.mypy.overrides]]
+module = ["lark_channel.*"]
+ignore_missing_imports = true

@@ -196,6 +196,11 @@ class Application:
         return self._evidence
 
     @property
+    def max_concurrent_turns(self) -> int:
+        """全局并发上限：所有渠道的轮次共同受此约束。"""
+        return self._config.max_concurrent_turns
+
+    @property
     def available_tools(self) -> frozenset[str]:
         """当前实际可用的工具：本地工具与已连接并核对通过的 MCP 工具。"""
         remote = self._mcp.available_tool_ids if self._mcp is not None else frozenset()

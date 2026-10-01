@@ -390,7 +390,7 @@ Task 6 实施修订（不改变产品范围与权限边界）：
 
 **Files:** Create `src/xiaowei/feishu.py`, `tests/p1b/test_feishu.py`; Modify `src/xiaowei/config.py`, `pyproject.toml`, `uv.lock`.
 
-Task 7 安装探针结论（2026-10-01，主线 `1d1aa01`；**触发本任务停工条件，接入方案待用户决定**）：
+Task 7 安装探针结论（2026-10-01，主线 `1d1aa01`；触发本任务停工条件，用户同日选择方案 1）：
 
 - 探针在仓库外的独立 venv 安装 `lark-channel-sdk==1.4.0`（依赖 requests、httpx、websockets 15.0.1、pycryptodome 等），只读源码并做离线帧实验，不用凭据、不连飞书；锁文件未改。
 - **高层 `FeishuChannel` 不能表达持久化失败。** 内置 `im.message.receive_v1` 处理器只把异步处理 `schedule` 到 SDK 自己的后台事件循环线程，随即返回；WS 客户端据此立即回写 ack，`_handle_message_event` 还会捕获并记录全部异常。`on_raw_event` 的处理器同样经 `schedule` 异步执行。离线实验：同一数据帧交给 `FeishuChannel` 的分发器时，`on("message")` 处理器抛错也写回 `code=200`。
@@ -400,6 +400,17 @@ Task 7 安装探针结论（2026-10-01，主线 `1d1aa01`；**触发本任务停
   1. 保留 `FeishuChannel` 长连接，接受“先 ack、后持久化”：持久化失败时该消息不被处理、平台不重投，进程锁低 readiness 由操作者处理，用户需重发。其余去重、单次发送和不重跑语义不变。
   2. 改用 HTTP 事件订阅（webhook）：应用路由在持久化成功后才返回 200，非 200 是否及何时重推须实测；需要飞书可达的公网 HTTPS 入口，改变“SSH 本地转发、无公网入口”的部署前提。
   3. 低层 `ws.Client`：需接受私有 API 关闭路径，违反现有规则，不推荐。
+
+Task 7 实施修订（用户 2026-10-01 选择方案 1；以下替代 §2.5 中“持久化成功后才 ack”的要求，其余契约不变）：
+
+- **契约变化：** 长连接事件由 SDK 在应用处理前 ack。持久化失败（含 readiness 已锁低）时该消息不处理、不回复，平台不重投；只记录安全原因码，由操作者处理后用户重发。去重、单次发送、不重跑 Agent/查询与 failed/unknown 只能显式重发的语义不变。
+- **入站只用 `on("raw")`**（`inbound.emit_raw_events=True`）：处理器拿到 SDK 已认证的完整事件字典，包括 header 的 `app_id`、`tenant_key` 和 `create_time`。规范化后的 `InboundMessage` 不含 tenant，且会做 mention 渲染与文本合并，因此不用 `on("message")`。由 `feishu.py` 自己逐字段校验：事件类型、`app_id` 等于配置、`tenant_key` 等于配置、`sender_type == "user"`、发送者 `open_id` 在配置映射中、`chat_type == "p2p"`、`message_type == "text"`、事件未超过时效、文本非空且不超上限。任一项不符即在持久化与模型前丢弃，只记原因码。SDK 自带的消息管线照常运行但没有消费者；关闭合并转发展开、卡片拉取、媒体能力与发送者名称解析，避免入站触发额外 API 调用。
+- **身份：** `FeishuConfig.users` 把 `open_id` 映射为内部 subject，交给同一个 `AccessPolicy`；会话语境是 p2p `chat_id`，请求编号是 `message_id`；租户只允许配置的一个。chat ID 只在本进程内存中用于这次回复，不持久化（G2 未决）。因此重启后 interrupted 请求的“已中断”回执只在同一事件重投时发送，主动通知与 Task 8 显式重发的目的地待 G2 决定。
+- **线程：** SDK 处理器在 SDK 后台事件循环线程上被调用，只用 `run_coroutine_threadsafe` 把事件交给应用事件循环；数据库、`ChannelService` 与队列都只在应用循环上运行。发送经公开的 `FeishuChannel.schedule` 回到 SDK 循环执行 `send`，应用侧限时等待。
+- **出站：** `RetryConfig(max_attempts=1)`；只发 `text`，不设 `reply_to`，不会触发两种降级。正文由代码按行截断到 `max_reply_chars` 并附固定截断说明，`text_chunk_limit` 大于该上限，SDK 不再分段，因此每次发送恰好一条消息。`success` 为 sent；错误码为 `unknown`、发送超时或抛出异常时为 unknown；其余为 failed。
+- **命令：** `/查询`、`/诊断` 只作用于本条消息；普通文本为诊断。命令后为空则拒绝并回固定提示。`/新建` 调用 `ChannelService.new_session`，不进入模型、不写请求表，只在进程内按 `message_id` 去重，并受事件时效限制；进程重启后仍在时效内的重投可能再次新建会话，这是已接受的缺口。
+- **队列：** 接受成功且新建的请求 `put_nowait` 进入有界队列；队列满时由 `ChannelService.reject_busy`（本任务新增，只把新接受的请求记为 failed/busy）落库，再走首次发送发出繁忙回执。`consumer_count` 由 `FeishuGateway` 校验不超过 `Application.max_concurrent_turns`（本任务新增的只读属性）。重复事件不入队，只对已结束且投递仍为 pending 的记录尝试首次发送。
+- **文件与依赖：** 测试依赖真实 PostgreSQL，与 Task 3–6 同理放在 `tests/sdk_core/test_feishu.py`。`lark-channel-sdk==1.4.0` 精确钉版，加入依赖基线；它把间接依赖 `websockets` 从 16.1.1 降到 15.0.1（只有 openai-agents 的 realtime 部分用到，本产品不用）。SDK 没有 `py.typed`，mypy 只对 `lark_channel.*` 关闭缺少类型信息的报错，并由依赖基线测试钉住这唯一的放宽。`ws.client` 在导入时绑定模块级事件循环，因此 `feishu.py` 在模块顶层导入 SDK；`LarkTransport.start` 发现该循环就是应用循环时拒绝启动。Task 8 的 `serve` 必须在事件循环启动前导入飞书模块。
 
 - [ ] 用候选 `lark-channel-sdk==1.4.0` 做安装探针，固定实际 async connect/disconnect、事件字段、回调 ack/NACK/抛错与重投语义、发送 API、自动重试/fallback 设置与 `SendResult`；若持久化失败无法阻止成功 ack，或无法满足其他边界，记录具体限制并修订计划，不回退到未经验证的旧 raw client。
 - [ ] 先写 SDK 边界 fake 测试：允许单聊、未授权 tenant/user、群聊、非文本、自身消息、过期事件、重复 message ID、持久化失败、队列满、出队 busy、进程取消/重启 interrupted、明确发送失败与未知结果。

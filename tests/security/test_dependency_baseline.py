@@ -29,7 +29,8 @@ _SRC = _ROOT / "src"
 
 # ``[project].dependencies`` 的包名集合——新增任何一项都必须先改这里，
 # 从而必须在 review 里被看见。P1-A Task 1 按新产品方向加入 OpenAI Agents SDK
-# （``openai-agents[sqlalchemy]``）；P1-B Task 2 按计划加入 StarRocks 驱动 ``asyncmy``（精确钉版）。
+# （``openai-agents[sqlalchemy]``）；P1-B Task 2 按计划加入 StarRocks 驱动 ``asyncmy``（精确钉版）；
+# P1-B Task 7 加入飞书 ``lark-channel-sdk``（精确钉版）。
 # 旧包专用的依赖在 P1-B 清理时重新取舍。
 _EXPECTED_RUNTIME_DEPENDENCIES = frozenset(
     {
@@ -42,6 +43,7 @@ _EXPECTED_RUNTIME_DEPENDENCIES = frozenset(
         "uvicorn",
         "openai-agents",
         "asyncmy",
+        "lark-channel-sdk",
     }
 )
 
@@ -169,3 +171,16 @@ def test_mypy_stays_globally_strict() -> None:
     assert mypy_config["strict"] is True
     assert "ignore_missing_imports" not in mypy_config
     assert "follow_imports" not in mypy_config
+
+
+def test_mypy_relaxation_is_limited_to_the_untyped_feishu_sdk() -> None:
+    """唯一的 mypy 放宽：``lark-channel-sdk`` 1.4.0 没有 ``py.typed``，而飞书入口必须导入它。
+
+    只允许对 ``lark_channel.*`` 关闭缺少类型信息的报错；全局仍是 strict，新增任何放宽都要改这里。
+    """
+    mypy = _pyproject()["tool"]
+    assert isinstance(mypy, dict)
+    config = mypy["mypy"]
+    assert isinstance(config, dict)
+    assert config["strict"] is True
+    assert config["overrides"] == [{"module": ["lark_channel.*"], "ignore_missing_imports": True}]
