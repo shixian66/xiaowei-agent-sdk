@@ -24,6 +24,7 @@ from xiaowei.channel_store import (
     CallerFailureCode,
     ChannelStore,
     ChannelStoreUnavailableError,
+    DeliveryClaim,
     NotReadyError,
     RequestConflictError,
     RequestRecord,
@@ -91,6 +92,12 @@ class Env:
             message=message,
             policy_version="p1",
         )
+
+    async def settle(self, record: RequestRecord, outcome: str, *, resend: bool = False) -> None:
+        """取得投递权并落定一次发送（不实际发送）。"""
+        claim = await self.store.claim_send(record, resend=resend)
+        assert claim is not None
+        await self.store.finish_send(claim, outcome)  # type: ignore[arg-type]
 
     async def completed(self, request_id: str = "r1", **kwargs: Any) -> RequestRecord:
         record = (await self.accept(request_id, **kwargs)).record
@@ -286,8 +293,7 @@ async def test_two_processes_racing_on_one_key_create_one_request(postgres_url: 
 async def test_expired_requests_are_unreadable(env: Env) -> None:
     record = await env.completed()
     failed = await env.completed("r2")
-    assert await env.store.claim_send(failed)
-    await env.store.finish_send(failed, "failed")
+    await env.settle(failed, "failed")
     env.clock.advance(REQUEST_RETENTION)
     # 过期结果不能首次发送，也不能显式重发。
     assert not await env.store.claim_send(record)
@@ -326,20 +332,19 @@ async def test_first_send_and_resend_each_have_one_winner(postgres_url: URL) -> 
         record = await env.completed()
         # 首次发送与事件重投只竞争 pending → sending。
         claims = await asyncio.gather(*(s.claim_send(record) for s in (env.store, second) * 2))
-        assert sum(claims) == 1
+        (won,) = [c for c in claims if c is not None]
         assert not await env.store.claim_send(record, resend=True)  # sending 不能重发
-        await env.store.finish_send(record, "unknown")
+        await second.finish_send(won, "unknown")  # 落定只认尝试，不认取得它的存储对象
 
         # 重投遇到 unknown/failed：零发送。显式重发只有一个进程取得。
         assert not await env.store.claim_send(record)
         claims = await asyncio.gather(
             *(s.claim_send(record, resend=True) for s in (env.store, second) * 2)
         )
-        assert sum(claims) == 1
-        await second.finish_send(record, "failed")
+        (won,) = [c for c in claims if c is not None]
+        await second.finish_send(won, "failed")
         assert not await env.store.claim_send(record)
-        assert await env.store.claim_send(record, resend=True)
-        await env.store.finish_send(record, "sent")
+        await env.settle(record, "sent", resend=True)
         assert not await env.store.claim_send(record)
         assert not await env.store.claim_send(record, resend=True)
         assert (await env.row(record))["delivery"] == "sent"
@@ -352,13 +357,11 @@ async def test_resend_needs_a_completed_result_of_the_same_owner(env: Env) -> No
     failed = (await env.accept("r2")).record
     await env.store.fail(failed, "busy")
     # 固定回执走首次发送条件；它不是可重发的结果。
-    assert await env.store.claim_send(failed)
-    await env.store.finish_send(failed, "failed")
+    await env.settle(failed, "failed")
     assert not await env.store.claim_send(failed, resend=True)
 
     done = await env.completed("r3")
-    await env.store.claim_send(done)
-    await env.store.finish_send(done, "failed")
+    await env.settle(done, "failed")
     stranger = RequestRecord(**{**done.__dict__, "subject_id": "bob"})
     assert not await env.store.claim_send(stranger, resend=True)
 
@@ -366,8 +369,39 @@ async def test_resend_needs_a_completed_result_of_the_same_owner(env: Env) -> No
 async def test_finish_send_requires_the_sending_state(env: Env) -> None:
     record = await env.completed()
     with pytest.raises(ChannelStoreUnavailableError):
-        await env.store.finish_send(record, "sent")
+        await env.store.finish_send(DeliveryClaim(record, "never-claimed"), "sent")
     assert not env.readiness.ok
+
+
+async def test_finish_send_only_settles_its_own_attempt(env: Env) -> None:
+    """尝试标识不可复用：已落定的尝试、伪造的尝试都不能改写当前尝试。"""
+    record = await env.completed()
+    first = await env.store.claim_send(record)
+    assert first is not None
+    await env.store.finish_send(first, "unknown")
+    current = await env.store.claim_send(record, resend=True)
+    assert current is not None and current.attempt != first.attempt
+    for stale in (first, DeliveryClaim(record, "forged")):
+        with pytest.raises(ChannelStoreUnavailableError):
+            await env.store.finish_send(stale, "failed")
+    row = await env.row(record)
+    assert (row["delivery"], row["delivery_attempt"]) == ("sending", current.attempt)
+    await env.store.finish_send(current, "sent")
+    row = await env.row(record)
+    assert (row["delivery"], row["delivery_attempt"]) == ("sent", None)
+
+
+@pytest.mark.parametrize("outcome", ["sent", "failed", "unknown"])
+async def test_a_single_send_settles_each_outcome(env: Env, outcome: str) -> None:
+    record = await env.completed()
+    await env.settle(record, outcome)
+    row = await env.row(record)
+    assert (row["delivery"], row["delivery_attempt"], row["delivery_owner_pid"]) == (
+        outcome,
+        None,
+        None,
+    )
+    assert env.readiness.ok
 
 
 # ---- 双存储与关键状态失败 ------------------------------------------------------------------
@@ -411,10 +445,11 @@ async def test_key_transition_failures_lock_readiness(env: Env) -> None:
 
 async def test_send_outcome_failure_locks_readiness(env: Env) -> None:
     record = await env.completed()
-    assert await env.store.claim_send(record)
+    claim = await env.store.claim_send(record)
+    assert claim is not None
     await env.fail_writes("xiaowei_request")
     with pytest.raises(ChannelStoreUnavailableError):
-        await env.store.finish_send(record, "sent")
+        await env.store.finish_send(claim, "sent")
     assert not env.readiness.ok
     await env.heal("xiaowei_request")
     assert (await env.row(record))["delivery"] == "sending"
@@ -770,8 +805,7 @@ async def test_cleanup_racing_with_resend_keeps_unexpired_requests(env: Env) -> 
     env.clock.advance(SESSION_RETENTION - 60)
     record = await env.completed()
     assert record.session_id == old.session_id
-    await env.store.claim_send(record)
-    await env.store.finish_send(record, "failed")
+    await env.settle(record, "failed")
     await env.store.new_session("web", "alice", "cookie-1")
     env.clock.advance(60)
 
@@ -779,13 +813,13 @@ async def test_cleanup_racing_with_resend_keeps_unexpired_requests(env: Env) -> 
         env.store.claim_send(record, resend=True),
         cleanup_expired(env.engine, now=env.clock(), batch_size=10),
     )
-    assert claimed and report.sessions == 0
+    assert claimed is not None and report.sessions == 0
     assert (await env.row(record))["delivery"] == "sending"
     sessions, requests, _, _ = await _counts(env, old.session_id)
     assert (sessions, requests) == (1, 1)
 
     # 请求过期并结束投递后，下一次清理完成。
-    await env.store.finish_send(record, "sent")
+    await env.store.finish_send(claimed, "sent")
     env.clock.advance(REQUEST_RETENTION)
     assert (await cleanup_expired(env.engine, now=env.clock(), batch_size=10)).sessions == 1
     assert await _counts(env, old.session_id) == (0, 0, 0, 0)
@@ -986,7 +1020,8 @@ async def test_cleanup_removes_retired_sessions_that_never_ran(postgres_url: URL
 
         env.clock.advance(SESSION_RETENTION)
         report = await cleanup_expired(env.engine, now=env.clock(), batch_size=10)
-        assert (report.sessions, report.unregistered) == (0, 3)
+        # 恢复为被中断的会话写入已关闭的占位元数据，所以它按有元数据的会话清理；三者最终都被删除。
+        assert (report.sessions, report.unregistered) == (1, 2)
         for session_id in (empty.session_id, busy.session_id, stranded.session_id):
             assert await _unregistered_counts(env, session_id) == (0, 0)
         # 当前会话即使过期也保留。
@@ -1018,8 +1053,7 @@ async def test_unregistered_cleanup_keeps_active_and_unexpired_state(env: Env) -
     await env.store.new_session("web", "alice", "c-unexpired")
     resend = await env.completed("r3", conversation="c-late")
     assert resend.session_id == late.session_id
-    await env.store.claim_send(resend)
-    await env.store.finish_send(resend, "failed")
+    await env.settle(resend, "failed")
     await env.store.new_session("web", "alice", "c-late")
     env.clock.advance(60)
 
@@ -1027,14 +1061,14 @@ async def test_unregistered_cleanup_keeps_active_and_unexpired_state(env: Env) -
         env.store.claim_send(resend, resend=True),
         cleanup_expired(env.engine, now=env.clock(), batch_size=10),
     )
-    assert claimed and report.unregistered == 0
+    assert claimed is not None and report.unregistered == 0
     assert await _unregistered_counts(env, sending.session_id) == (1, 1)
     assert await _unregistered_counts(env, running.session_id) == (1, 1)
     assert await _unregistered_counts(env, late.session_id) == (1, 1)
     assert await _unregistered_counts(env, unexpired.session_id) == (1, 1)
 
     # 请求过期并结束投递后，下一次清理完成。
-    await env.store.finish_send(resend, "sent")
+    await env.store.finish_send(claimed, "sent")
     env.clock.advance(REQUEST_RETENTION)
     assert (await cleanup_expired(env.engine, now=env.clock(), batch_size=10)).unregistered == 2
     assert await _unregistered_counts(env, late.session_id) == (0, 0)

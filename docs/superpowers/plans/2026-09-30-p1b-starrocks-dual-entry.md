@@ -162,6 +162,7 @@ Task 2 实施修订（锁定 asyncmy 0.2.15 后核对）：asyncmy 自带连接�
 - 全新 `storage init` 在同一受控流程中顺序执行 001、002；现有 v1 只能由显式 `storage upgrade` 在 PostgreSQL advisory lock 和事务中升级到 v2。
 - 普通 `initialize_storage`、应用启动与请求路径遇到 v1 或未知版本必须拒绝，不自动升级。v2 程序拒绝 v1；旧 v1 程序也会因版本不符拒绝 v2。
 - v2 只增加两类应用状态：渠道会话映射，以及请求/可重发结果记录。继续复用现有 `xiaowei_session` 与 `xiaowei_evidence`，不创建聊天消息表、lease、任务队列、事件流或 Worker 表。
+- 实施修订（Task 8 审查 N3）：新增单向 `003_delivery_attempt.sql`，应用 schema 版本升为 3，只在 `xiaowei_request` 上增加投递尝试标识与显式重发命令的连接身份三列及两条 CHECK；升级规则与 v1→v2 相同（只由显式 `storage upgrade`，v2 程序拒绝 v3）。
 
 渠道会话映射至少保存 channel、内部 subject、受限 conversation/destination 引用、当前 session ID、generation、状态、创建/过期时间及 Web 凭证摘要。Web 只持有随机不可猜的 cookie，数据库只存其带服务端密钥摘要；飞书内部 subject/conversation 从 app、tenant、sender、chat 的可信事件字段生成。客户端不能提交任意 session ID。
 
@@ -439,7 +440,7 @@ Task 8 实施修订（不改变产品边界）：
 - **配置：** 一个 JSON 文件（`--config`），顶层模型 `ServeConfig` 在 `runtime.py`（放进 `config.py` 会与 `app`、`starrocks` 等形成循环导入）。不用 TOML：`ModelProfile.reasoning_effort`、`StarRocksTarget.tls_ca_file` 是必须显式写出的可空字段，TOML 无法表达 null，不为配置格式放宽已审查的契约。凭据只以 `env:NAME` 引用出现，在用到的装配步骤才解析；校验错误只报字段路径与固定说明。示例 `examples/xiaowei.example.json` 由测试保证可通过校验与投影容量检查。`.env.example` 是旧 M5 变量说明，未改。
 - **授权来源：** `StaticAccess` 读配置中的 subject → 工具授权表，`resolve` 与 `authorize` 同一实例（`ResultDelivery` 已核对绑定身份）；唯一目标取自 StarRocks 配置。配置校验：授权与模型工具只能是三个 StarRocks 工具；Web 操作者与飞书用户不能共用 subject；`consumer_count` 不超过全局并发；监听地址只允许 loopback，且 `web.allowed_origins` 必须字面包含 `http://{listen_host}:{listen_port}`（正式监听不配置 TLS，同址 HTTPS 不能代替）。
 - **启动失败：** 任一必要步骤失败时不对外服务，逆序关闭并以非零退出码结束（不是带着 `/readyz` 503 运行）；监听套接字先于数据库绑定。飞书长连接启动失败只让飞书不可用，`/readyz` 增加 `feishu: disabled | connected | unavailable`（`create_web_app` 新增可选 `components`）。
-- **单实例与日志（两轮审查修复）：** 持锁连接用 asyncpg 公开的连接终止通知立即锁低 readiness 并触发停止，注册后复核连接是否已关闭（已关闭即按丢锁拒绝启动），`lock_check_seconds` 的周期核对只作兜底；正常停止通知核对任务退出，不在查询中途取消。请求接收与接管恢复由数据库级屏障交接：开始新工作的写入（接收新请求与重复请求、创建第一代或轮换会话映射、取得投递权）在事务内持接收屏障的共享 advisory 事务锁，并在库内核对实例锁仍由本进程的持锁后端（pid + backend_start）持有；只有经恢复绑定实例锁的 serve 存储核对，显式重发等维护命令的存储不绑定；接管恢复在取得实例锁后、读取请求前取得同一屏障的排他事务锁。正式日志只输出 `xiaowei` logger（级别由 `--log-level` 决定），第三方日志在任何级别都不输出；飞书 SDK 导入时自装的 `Lark` stdout handler 在日志装配时移除。
+- **单实例与日志（两轮审查修复）：** 持锁连接用 asyncpg 公开的连接终止通知立即锁低 readiness 并触发停止，注册后复核连接是否已关闭（已关闭即按丢锁拒绝启动），`lock_check_seconds` 的周期核对只作兜底；正常停止通知核对任务退出，不在查询中途取消。请求接收与接管恢复由数据库级屏障交接：开始新工作的写入（接收新请求与重复请求、创建第一代或轮换会话映射、取得投递权）在事务内持接收屏障的共享 advisory 事务锁，并在库内核对实例锁仍由本进程的持锁后端（pid + backend_start）持有；只有经恢复绑定实例锁的 serve 存储核对，显式重发等维护命令的存储不绑定；接管恢复在取得实例锁后、读取请求前取得同一屏障的排他事务锁。启动恢复持久关闭被中断轮次的 Session：元数据尚未登记时写入已关闭的占位（与首次登记在同一主键上串行），已存在（含 active/writing）时直接关闭，closed 没有回到 active 的迁移；`accepted → running` 同样经所有权核对。投递每次取得都写入新的随机尝试标识，`finish_send` 只能落定同一标识的尝试；显式重发命令在发送期间占用一条数据库连接并把其 pid + backend_start 记入尝试，启动恢复只把没有存活所有者的 sending 记为 unknown 并作废其尝试（审查 N2、N3）。正式日志只输出 `xiaowei` logger（级别由 `--log-level` 决定），第三方日志在任何级别都不输出；飞书 SDK 导入时自装的 `Lark` stdout handler 在日志装配时移除。
 - **MCP：** 正式 `serve` 不装配 MCP。MCP 工具策略需要代码定义的参数与结果类型，P1-B 没有获准的 Server；“空配置可运行”的约定不变，接入具体 Server 时另行扩展配置。
 - **显式重发：** 只针对飞书（Web 结果经 GET 读取，从不发送）。chat_id 由操作者给出（G2 未决，目的地不持久化）；它参与会话语境摘要，换 chat 定位不到原记录。重发用未启动长连接的 SDK 通道单次发送，不装配模型、不连接 StarRocks。
 - **打包与 legacy：** console script 改为 `xiaowei.cli:main`，wheel 只含 `src/xiaowei`。旧包唯一的专用依赖 `alembic` 移入 dev（旧测试）与新增的 `legacy` extra（旧 M5 镜像）；`Dockerfile` 只服务 legacy CI 的 compose-smoke，从源码复制旧包；`scripts/compose_smoke.py` 改为经模块调用旧 CLI（`xiaowei` 命令已指向新包）。`tests/contract/test_wheel_runs_without_tests.py` 改为新打包契约。CI 新增 `product-entry` 作业：wheel 在只装锁定运行依赖的环境中安装并运行两个入口。旧测试继续在原有作业中运行。
@@ -483,7 +484,7 @@ Task 8 实施修订（不改变产品边界）：
 
 ## 6. 兼容、回退与恢复
 
-- **数据库升级：** v1→v2 前必须取得同一 PostgreSQL 的受限备份并记录 schema 版本。迁移失败由事务回滚；迁移成功后不能自动降级。代码回退到 P1-A 时须先恢复 v1 备份，不能让旧二进制读 v2。
+- **数据库升级：** v1→v2、v2→v3 前必须取得同一 PostgreSQL 的受限备份并记录 schema 版本。迁移失败由事务回滚；迁移成功后不能自动降级。代码回退时须先恢复对应版本的备份，不能让旧二进制读新版本。
 - **代码回退：** 每个任务独立提交。未变更数据库时回退到前一 reviewed SHA；Task 4 之后的代码回退必须与 schema 兼容性一起判断。不得用 `git reset` 覆盖用户工作。
 - **依赖回退：** driver/Feishu 探针失败时恢复该任务开始前的 `pyproject.toml` 与 `uv.lock`，不保留两个并行客户端或可选 fallback。
 - **请求恢复：** 只有取得单实例 advisory lock 的 `serve` 启动路径执行恢复：把 accepted/running 变为 interrupted 并关闭对应 Session，把遗留 sending 变为 unknown；用户用新请求/新会话继续，或对允许的投递状态显式重发。任何未知 StarRocks/模型/飞书结果都不自动重试。

@@ -75,10 +75,12 @@ from xiaowei.starrocks import (
 )
 from xiaowei.starrocks_tools import DIAGNOSE_TOOLS, QUERY_TOOLS, StarRocksTools, starrocks_tools
 from xiaowei.storage import (
+    Backend,
     InstanceLock,
     Readiness,
     StorageUnavailableError,
     check_storage,
+    hold_backend,
     hold_instance_lock,
     initialize_storage,
     open_engine,
@@ -286,8 +288,12 @@ def _delivery(
     adapter: StarRocksAdapter,
     readiness: Readiness,
     clock: Callable[[], datetime],
+    sender: Backend | None = None,
 ) -> _Delivery:
-    """请求存储、工具目录、唯一授权来源、Evidence 与交付；serve 与显式重发共用同一装配。"""
+    """请求存储、工具目录、唯一授权来源、Evidence 与交付；serve 与显式重发共用同一装配。
+
+    ``sender`` 只由显式重发传入：它占用的连接身份记入投递尝试（见 ``ChannelStore``）。
+    """
     storage = config.storage
     store = ChannelStore(
         engine,
@@ -298,6 +304,7 @@ def _delivery(
         session_retention_seconds=config.session_limits.retention_seconds,
         evidence_retention_seconds=storage.evidence_retention_seconds,
         max_answer_bytes=storage.max_answer_bytes,
+        sender=sender,
     )
     tools = starrocks_tools(adapter, config.projection_bytes)
     access = StaticAccess(config.access, config.starrocks.target_id)
@@ -580,10 +587,11 @@ async def resend(
     if feishu is None:
         raise ResendNotConfiguredError
     configure_runtime()
-    async with _engine(config) as engine:
+    async with _engine(config) as engine, hold_backend(engine) as sender:
+        # 发送期间占用一条连接：并发启动的 serve 据此知道这次重发仍在进行，不把它当作遗留发送。
         await check_storage(engine)
         adapter = StarRocksAdapter(config.starrocks, connect=_no_starrocks, clock=clock)
-        parts = _delivery(config, engine, adapter, Readiness(), clock)
+        parts = _delivery(config, engine, adapter, Readiness(), clock, sender)
         transport = LarkTransport(feishu_channel or lark_channel(feishu), feishu)
 
         async def transmit(delivery: Delivery) -> SendOutcome:

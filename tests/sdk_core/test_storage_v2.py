@@ -41,14 +41,16 @@ def _migration(name: str) -> str:
     return files("xiaowei").joinpath(f"migrations/{name}").read_text(encoding="utf-8")
 
 
-async def _install_v1(engine: AsyncEngine) -> None:
-    """模拟 P1-A 部署：SDK 表与只执行 001 的应用表。"""
+async def _install_v1(engine: AsyncEngine, *, through: str = "001_initial.sql") -> None:
+    """模拟旧部署：SDK 表与按顺序执行到 ``through`` 的应用表迁移（默认只有 001，即 P1-A）。"""
     probe = SQLAlchemySession("probe", engine=engine, create_tables=True)
     await probe.get_items(limit=0)
+    names = ["001_initial.sql", "002_p1b_channels.sql"]
     async with engine.begin() as conn:
-        for chunk in _migration("001_initial.sql").split(";\n"):
-            if chunk.strip():
-                await conn.execute(text(chunk.strip()))
+        for name in names[: names.index(through) + 1]:
+            for chunk in _migration(name).split(";\n"):
+                if chunk.strip():
+                    await conn.execute(text(chunk.strip()))
 
 
 async def _version(engine: AsyncEngine) -> int:
@@ -64,21 +66,21 @@ async def _tables(engine: AsyncEngine) -> set[str]:
 
 
 def test_v2_migration_only_touches_application_tables() -> None:
-    migration = _migration("002_p1b_channels.sql")
-    assert "agent_" not in migration
-    assert APP_SCHEMA_VERSION == 2
+    for name in ("002_p1b_channels.sql", "003_delivery_attempt.sql"):
+        assert "agent_" not in _migration(name)
+    assert APP_SCHEMA_VERSION == 3
     assert _V2_TABLES <= APP_TABLES
     assert all(name.startswith("xiaowei_") for name in APP_TABLES)
 
 
-async def test_fresh_initialization_installs_v2(postgres_url: URL) -> None:
+async def test_fresh_initialization_installs_the_current_version(postgres_url: URL) -> None:
     async with open_engine(secret(postgres_url)) as engine:
         await initialize_storage(engine)
         await initialize_storage(engine)  # 重复执行不重复建表
         await check_storage(engine)
-        assert await _version(engine) == 2
+        assert await _version(engine) == 3
         assert await _tables(engine) == {SDK_SESSIONS_TABLE, SDK_MESSAGES_TABLE, *APP_TABLES}
-        assert await upgrade_storage(engine) == 2  # 已是 v2：显式升级无变化
+        assert await upgrade_storage(engine) == 3  # 已是当前版本：显式升级无变化
 
 
 async def test_v1_is_rejected_until_explicit_upgrade(postgres_url: URL) -> None:
@@ -92,8 +94,8 @@ async def test_v1_is_rejected_until_explicit_upgrade(postgres_url: URL) -> None:
         assert await _version(engine) == 1
         assert not _V2_TABLES & await _tables(engine)
 
-        assert await upgrade_storage(engine) == 2
-        assert await upgrade_storage(engine) == 2  # 重复命令无变化
+        assert await upgrade_storage(engine) == 3
+        assert await upgrade_storage(engine) == 3  # 重复命令无变化
         await check_storage(engine)
         assert _V2_TABLES <= await _tables(engine)
 
@@ -112,10 +114,10 @@ async def test_unknown_or_missing_versions_are_never_upgraded(postgres_url: URL)
 
 
 async def test_initialization_advances_the_schema_version(postgres_url: URL) -> None:
-    """全新初始化把版本推进到 2。旧 v1 程序只接受版本 1 由基线源码保证，这里不复制旧实现。"""
+    """全新初始化把版本推进到 3。旧程序只接受各自的版本由基线源码保证，这里不复制旧实现。"""
     async with open_engine(secret(postgres_url)) as engine:
         await initialize_storage(engine)
-        assert await _version(engine) == APP_SCHEMA_VERSION == 2
+        assert await _version(engine) == APP_SCHEMA_VERSION == 3
 
 
 async def test_failed_upgrade_rolls_back_completely(postgres_url: URL) -> None:
@@ -139,10 +141,38 @@ async def test_concurrent_upgrades_run_the_migration_once(postgres_url: URL) -> 
         results = await asyncio.gather(
             upgrade_storage(first), upgrade_storage(second), return_exceptions=True
         )
-        # 实例锁只让一个进程执行；另一个要么看到已完成的 v2，要么因锁被占用而拒绝。
-        assert any(r == 2 for r in results)
-        assert all(r == 2 or isinstance(r, StorageBusyError) for r in results)
-        assert await _version(first) == 2
+        # 实例锁只让一个进程执行；另一个要么看到已完成的升级，要么因锁被占用而拒绝。
+        assert any(r == 3 for r in results)
+        assert all(r == 3 or isinstance(r, StorageBusyError) for r in results)
+        assert await _version(first) == 3
+
+
+async def test_v2_upgrade_keeps_requests_and_leaves_legacy_sending_to_recovery(
+    postgres_url: URL,
+) -> None:
+    """v2 → v3 只加投递尝试列与约束：已有请求不变；v2 遗留的 sending 没有尝试标识。"""
+    async with open_engine(secret(postgres_url)) as engine:
+        await _install_v1(engine, through="002_p1b_channels.sql")
+        async with engine.begin() as conn:
+            await conn.execute(
+                text(
+                    "INSERT INTO xiaowei_request VALUES ('web', 'k', 'alice', 'c', 's', 't',"
+                    " 'query', 'd', 'failed', NULL, 'busy', 'sending', now(), now(), now())"
+                )
+            )
+        with pytest.raises(StorageVersionMismatchError):
+            await check_storage(engine)
+        assert await upgrade_storage(engine) == 3
+        await check_storage(engine)
+        async with engine.connect() as conn:
+            row = (
+                await conn.execute(
+                    text(
+                        "SELECT delivery, delivery_attempt, delivery_owner_pid FROM xiaowei_request"
+                    )
+                )
+            ).one()
+        assert tuple(row) == ("sending", None, None)
 
 
 async def test_instance_lock_is_exclusive_with_serve_and_maintenance(postgres_url: URL) -> None:

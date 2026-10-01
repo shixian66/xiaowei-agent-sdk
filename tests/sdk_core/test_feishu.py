@@ -27,7 +27,7 @@ from tests.sdk_core.test_channel_service import env as env  # pytest fixture
 
 from xiaowei.app import Application
 from xiaowei.channel import ChannelService, InboundRequest, RequestReceipt, RequestRef
-from xiaowei.channel_store import ChannelSession, ChannelStore, RequestRecord
+from xiaowei.channel_store import ChannelSession, ChannelStore, DeliveryClaim, RequestRecord
 from xiaowei.config import FeishuConfig
 from xiaowei.evidence import EvidenceStoreError
 from xiaowei.feishu import (
@@ -551,7 +551,9 @@ class ClaimBarrierStore(ChannelStore):
     entered: asyncio.Event
     release: asyncio.Event
 
-    async def claim_send(self, record: RequestRecord, *, resend: bool = False) -> bool:
+    async def claim_send(
+        self, record: RequestRecord, *, resend: bool = False
+    ) -> DeliveryClaim | None:
         self.entered.set()
         await self.release.wait()
         return await super().claim_send(record, resend=resend)

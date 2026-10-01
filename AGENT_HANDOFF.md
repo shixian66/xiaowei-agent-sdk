@@ -12,7 +12,7 @@
 | 本地目录 / 分支 | `/Users/kloenguyen/Desktop/agent-SDK` / `claude/p1b-formal-entry`（从 `origin/main` 的 `0c3161c` 分出） |
 | M5 历史起点 | `372c381f44ecfa1fa53961f137d0058033cbd805`；不是远端当前 main 的核验结论 |
 | P1-A 代码基线 / 当前主线 | `148abaa4729ac6644c03056cf265a9dc18f1acd8` / `0c3161cd8100d177853185cafd1e22a828b0c3f5`（P1-B 计划、Gate 0 离线部分、SQLGuard Task 1 的 PR #10、StarRocks Adapter Task 2 的 PR #11、urllib3 修复的 PR #12、受治理工具 Task 3 的 PR #13、请求和渠道状态 Task 4 的 PR #14 、共享 ChannelService Task 5 的 PR #15、最小同源 Web Task 6 的 PR #16 与飞书单聊 Task 7 的 PR #17 已合入） |
-| 当前阶段 | **P1-B Task 1 SQLGuard 已随 PR #10 合入；Task 2 StarRocks Adapter 随 PR #11 合入（`dd24d8a`）。Gate 0 在主线 `6389d78` 上以 `glm-4.7-flash` Profile 真实运行通过；Task 3 受治理工具与结构化 Evidence 交付经复审通过，随 PR #13 合入（`5058ae3`）；Task 4 PostgreSQL v2 请求与渠道状态经两轮审查修复与复审通过，随 PR #14 合入（`e5e380c`）；Task 5 共享 ChannelService 经一轮审查修复（B1 授权来源对象身份）与复审通过，随 PR #15 合入（`98f4167`）；Task 6 最小同源 Web 经一轮审查修复（B1 不可用端口、B2 浏览器 smoke）与复审通过，随 PR #16 合入（`1d1aa01`）；Task 7 飞书单聊长连接（用户接受“先 ack、后落库”）经两轮审查修复（B1–B4、N1）与复审通过，随 PR #17 合入（`0c3161c`），真实飞书验证待授权；Task 8 正式装配、维护命令与打包切换已在本分支实现（PR #18），首轮审查 B1–B3、增量复审的 B2（接管交接竞态）与 B3（第三方 WARNING 与飞书 handler）、第三轮的 N1（会话创建/轮换、重复请求与投递权未进入所有权屏障）已修复，待复审。**P1-A 离线完成（Task 1–5 经 PR #2–#7 合入）。真实模型：Gate 0 通过的 Profile 只有 `bbtoken-glm-4.7-flash`；Gemini 只有 2026-09-30 的历史部分证据（未闭环）；同端点 DeepSeek V4 Flash 已实测不兼容 |
+| 当前阶段 | **P1-B Task 1 SQLGuard 已随 PR #10 合入；Task 2 StarRocks Adapter 随 PR #11 合入（`dd24d8a`）。Gate 0 在主线 `6389d78` 上以 `glm-4.7-flash` Profile 真实运行通过；Task 3 受治理工具与结构化 Evidence 交付经复审通过，随 PR #13 合入（`5058ae3`）；Task 4 PostgreSQL v2 请求与渠道状态经两轮审查修复与复审通过，随 PR #14 合入（`e5e380c`）；Task 5 共享 ChannelService 经一轮审查修复（B1 授权来源对象身份）与复审通过，随 PR #15 合入（`98f4167`）；Task 6 最小同源 Web 经一轮审查修复（B1 不可用端口、B2 浏览器 smoke）与复审通过，随 PR #16 合入（`1d1aa01`）；Task 7 飞书单聊长连接（用户接受“先 ack、后落库”）经两轮审查修复（B1–B4、N1）与复审通过，随 PR #17 合入（`0c3161c`），真实飞书验证待授权；Task 8 正式装配、维护命令与打包切换已在本分支实现（PR #18），首轮审查 B1–B3、增量复审的 B2（接管交接竞态）与 B3（第三方 WARNING 与飞书 handler）、第三轮的 N1（会话创建/轮换、重复请求与投递权未进入所有权屏障）、第四轮的 N2（请求启动与 Session 恢复边界）与 N3（投递尝试归属）已修复，待复审。**P1-A 离线完成（Task 1–5 经 PR #2–#7 合入）。真实模型：Gate 0 通过的 Profile 只有 `bbtoken-glm-4.7-flash`；Gemini 只有 2026-09-30 的历史部分证据（未闭环）；同端点 DeepSeek V4 Flash 已实测不兼容 |
 | 当前源码与依赖 | 新包 `src/xiaowei/` 含 `sqlguard.py`、`starrocks.py`、`starrocks_tools.py`、`channel_store.py`、`migrations/002_p1b_channels.sql`（应用表 v2）、`channel.py` 、`web.py` 与 `static/`，`feishu.py`，以及本分支新增的 `runtime.py`、`cli.py`、`__main__.py`；锁定 `asyncmy==0.2.15`、`lark-channel-sdk==1.4.0`（精确钉版，已加入依赖基线）。另锁定 `openai-agents[sqlalchemy]` 0.22.3、`mcp` 2.2.0、`openai` 3.20.0、SQLAlchemy 2.0.52、asyncpg 0.30.0，urllib3 2.8.0（间接依赖，修复 CVE-2026-97687/97688/97689），Python 3.11.16。本分支起 wheel 只含 `src/xiaowei`，`xiaowei` 命令指向 `xiaowei.cli:main`；旧包专用的 `alembic` 移出生产依赖（dev 与 `legacy` extra 保留），旧源码仍在工作树 |
 | 新产品入口 | 本分支：`xiaowei`（与 `python -m xiaowei` 相同）的 `serve`、`storage init/upgrade/cleanup`、`requests resend`，配置为 JSON 文件（示例 `examples/xiaowei.example.json`）。离线验证完成；真实模型、StarRocks 与飞书未参与。旧 CLI/Compose 不是产品入口 |
 | 本次工作范围 | [P1-B 计划](docs/superpowers/plans/2026-09-30-p1b-starrocks-dual-entry.md) Task 8：正式装配（`runtime.py`）、命令（`cli.py`、`__main__.py`）、打包切换（`pyproject.toml`、`uv.lock`、旧镜像 `Dockerfile`）、`/readyz` 组件状态、CI `product-entry` 作业与 README。未调用真实模型、StarRocks 或飞书，未部署 |
@@ -310,7 +310,38 @@ CI integration job 设置 `SDK_TEST_POSTGRES_URL`，启动 `compose.sdk-test.yml
 
 **Task 8 与计划的差异**（JSON 配置、启动失败即退出、`serve` 不装配 MCP、重发的 chat_id 由操作者给出、legacy 镜像与冒烟脚本、wheel 契约测试的调整、测试位置）记在计划 Task 8 的实施修订中。
 
-**Task 8 未覆盖：** 真实模型、真实 StarRocks、真实飞书长连接与发送（Task 9，需授权）；正式 `serve` 的成功轮次只在进程内替换模型后证明，子进程中的正式命令只证明到模型失败回执。丢锁检测依赖连接终止通知：服务端终止或本端收到断开时立即生效；网络中断而本端未收到断开时，仍要等周期核对（`lock_check_seconds`，默认 5 秒，加上命令超时）发现。丢锁时已在运行的轮次在停止期限内继续调用模型与 StarRocks，结果因数据库条件更新不能覆盖新实例的恢复结论，但这些调用发生在无锁状态（立即取消需改变取消契约，未做）。旧实例的接收事务若在提交前长时间卡住（如网络分区下未断开），新实例的恢复在接收屏障上等待，超过命令超时即启动失败、需重试；持有者核对依赖同一数据库角色能读到持锁后端的 `backend_start`，读不到时按丢锁拒绝接收（失败关闭）。“取得锁后、注册通知前断连”的交错无法在正式进程中确定性注入，由对 `watching` 的直接用例与终止通知端到端用例共同证明。第三方依赖的日志不再输出，其中可能有助排障的错误需靠小维自身的原因码与退出码定位。浏览器验收与 compose-smoke 的新镜像只在本机或 CI 运行过一次（浏览器用例未纳入 CI）。`.env.example` 仍是旧 M5 变量说明，未改。新产品 Compose、持久卷与备份恢复属 P3。
+**Task 8 第四轮审查修复 N2、N3**（审查针对 `49ed6df`；N1、B1、B2.1、B2.2、B3 保持闭合）：
+
+- N2 根因：接管边界只覆盖了请求状态，没有覆盖“开始运行”和 Session 生命周期。
+  - `start()` 不经所有权核对：新实例取得锁、尚未恢复时，旧实例仍能 `accepted → running` 并运行模型。
+  - 恢复的 `close_sessions` 只能更新已存在的元数据：旧 Runner 尚未或正在登记时更新 0 行，随后的首次登记写入 active 并提交历史，后续轮次回放了中断轮次。
+- N2 修复：
+  - `ChannelStore.start` 在同一事务内经 `_admit`。
+  - 恢复改用 `session.close_interrupted_sessions`：元数据不存在时写入已关闭的占位行（`INSERT … ON CONFLICT DO UPDATE SET state = 'closed'`，与首次登记的 `ON CONFLICT DO NOTHING` 在同一主键上串行）；已存在（含 active/writing）时直接关闭。
+  - closed 没有回到 active 的迁移，所以旧 Runner 的登记只能读到 closed，提交时 `active → writing` 失败。不依赖结果保存失败后的补偿关闭。
+  - `PolicySession._open` 先判断状态再判断指纹，占位行不会被报成“配置已变化”。
+- N3 根因：`sending` 没有尝试归属，`_FINISH_SEND` 只认当前状态，旧尝试返回可以落定新尝试；启动恢复又把仍在进行的独立重发当作遗留 sending。
+- N3 修复：
+  - 迁移 003（schema v3）给 `xiaowei_request` 增加 `delivery_attempt` 与 `delivery_owner_pid/started`。
+  - 每次取得写入新的随机尝试标识：`claim_send` 返回 `DeliveryClaim`，`finish_send(claim, outcome)` 只落定同一标识并清空它；落定失败时锁低该实例 readiness，不改写状态。
+  - `runtime.resend` 发送期间经 `storage.hold_backend` 占用一条连接，并把它的 pid + backend_start 记入尝试；`_RECOVER_SENDING` 只把没有存活所有者的 sending 记为 unknown 并作废其尝试。serve 的尝试不记所有者：旧实例失去锁即失去投递权。
+  - `ResultDelivery.send` 在发送本身抛错或被取消、而落定失败时，原样传播原异常（含取消）。
+  - 契约不变：首次发送只从 pending 取得，显式重发只从 completed + failed/unknown 取得；unknown 不自动重发；Agent、查询与 Evidence 不重跑；Evidence 重验、授权与目标绑定不变。
+- 修复前（`49ed6df`）新增 18 项中 14 项失败：
+  - start 在新实例持锁后仍运行（未抛 `NotReadyError`）；
+  - 恢复早于或并发于首次登记时，旧 Runner 仍完成（未抛 `TurnError`）；
+  - 首次发送与显式重发 × 旧尝试 sent/failed/unknown/异常/取消共 10 项，新尝试被改写；
+  - serve 启动恢复把进行中的独立重发改为 unknown。
+
+  另 4 项修复前已通过，作为对照与守护：持锁实例正常运行、active/writing 时恢复、并发重发只发一次。
+- 修复后：上述 18 项、存储层的尝试不可复用与单次 sent/failed/unknown 对照、v2→v3 升级保留请求均通过。恢复后同一会话语境的新轮次在模型前以 `session_failed` 失败；新建会话后的新轮次完成，模型输入不含中断轮次内容。
+- 既有用例调整：
+  - 投递接口改为尝试对象（`sum(claims) == 1` 改为“恰好一个取得”）；
+  - schema 版本断言 2 → 3；
+  - `test_cleanup_removes_retired_sessions_that_never_ran` 中被恢复的会话现在有已关闭占位，清理计数由 (0, 3) 变为 (1, 2)，三者仍全部删除。
+- 隔离变异 8 项全部被发现：start 不核对、恢复不写占位、占位遇到已有会话不关闭、落定不核对尝试、尝试标识可复用、恢复不区分存活的重发、重发不记录连接身份、发送异常/取消时落定失败覆盖原异常。N1/B2.1 的 7 项与 B2.2/B3 的 3 项复跑仍被发现。
+
+**Task 8 未覆盖：** 真实模型、真实 StarRocks、真实飞书长连接与发送（Task 9，需授权）；正式 `serve` 的成功轮次只在进程内替换模型后证明，子进程中的正式命令只证明到模型失败回执。丢锁检测依赖连接终止通知：服务端终止或本端收到断开时立即生效；网络中断而本端未收到断开时，仍要等周期核对（`lock_check_seconds`，默认 5 秒，加上命令超时）发现。丢锁时已在运行的轮次在停止期限内继续调用模型与 StarRocks，结果因数据库条件更新不能覆盖新实例的恢复结论，但这些调用发生在无锁状态（立即取消需改变取消契约，未做）。旧实例的接收事务若在提交前长时间卡住（如网络分区下未断开），新实例的恢复在接收屏障上等待，超过命令超时即启动失败、需重试；持有者核对依赖同一数据库角色能读到持锁后端的 `backend_start`，读不到时按丢锁拒绝接收（失败关闭）。“取得锁后、注册通知前断连”的交错无法在正式进程中确定性注入，由对 `watching` 的直接用例与终止通知端到端用例共同证明。第三方依赖的日志不再输出，其中可能有助排障的错误需靠小维自身的原因码与退出码定位。N2/N3 用例在存储与服务层模拟“错过终止通知”和跨进程交错，正式进程中无法确定性制造。旧实例在接管前已启动的轮次仍会调用模型与工具（不可撤回，取消契约未改），只是结果与历史都不能落定。独立重发进程若在发送中崩溃，它的 sending 要到下一次 serve 启动恢复才记为 unknown；重发占用的连接身份同样依赖同一数据库角色可读 `pg_stat_activity`，读不到时按无所有者处理（记为 unknown，保守）。旧实例在新实例恢复前把已接受请求记为 failed/busy（`reject_busy`）仍可能发生：请求终态为 failed 而非 interrupted，不运行，回执经所有权核对才能发送，未作为阻断处理。浏览器验收与 compose-smoke 的新镜像只在本机或 CI 运行过一次（浏览器用例未纳入 CI）。`.env.example` 仍是旧 M5 变量说明，未改。新产品 Compose、持久卷与备份恢复属 P3。
 
 **下一项：** Task 8 复审（精确 SHA 见 PR #18）。通过并经用户同意合入后进入 Task 9；Task 7 的真实飞书验证（长连接收发、重投、发送失败、断线）与 Task 9 一并在用户授权后进行。
 
@@ -546,6 +577,10 @@ Task 8 正式入口验证（锁文件只把 alembic 从生产依赖移到 dev/le
 | 第三轮 N1：`SDK_TEST_POSTGRES_URL=$SDK_PG uv run --locked --extra dev python -m pytest tests/sdk_core/test_channel_store.py tests/sdk_core/test_channel_service.py tests/sdk_core/test_runtime.py tests/sdk_core/test_storage_v2.py -q -W error`；另跑 `test_feishu.py`、`test_web.py`、`test_cli.py` | 126 passed；175 passed；接管与丢锁相关 14 项连续 3 次通过 |
 | 第三轮 N1：全量；`-m security`；浏览器；文档检查 | 2691 passed，152 skipped，15 deselected；927 passed，79 skipped；3 passed；8 passed |
 | 第三轮 N1：隔离变异 7 项 + B2.2/B3 复跑 3 项；ruff、format、mypy、`git diff --check`、`uv lock --check` | 全部使对应用例失败；检查通过，依赖与锁文件未变 |
+| 第四轮 N2/N3：修复前（`49ed6df`）运行新用例 | 18 项中 14 failed（start 未拒绝、恢复早于/并发于登记未拒绝、10 项旧尝试改写新尝试、serve 恢复改写进行中的重发），4 项对照与守护 passed |
+| 第四轮 N2/N3：`SDK_TEST_POSTGRES_URL=$SDK_PG uv run --locked --extra dev python -m pytest tests/sdk_core/test_channel_store.py tests/sdk_core/test_channel_service.py tests/sdk_core/test_runtime.py tests/sdk_core/test_storage_v2.py -q -W error`；另跑 feishu/web/cli/app/session_policy | 149 passed；240 passed；新竞态 26 项连续 3 次通过 |
+| 第四轮 N2/N3：全量；`-m security`；浏览器；文档检查；wheel 含迁移 003 | 2714 passed，152 skipped，15 deselected；927 passed，79 skipped；3 passed；8 passed；是 |
+| 第四轮 N2/N3：隔离变异 8 项 + N1/B2/B3 复跑 10 项；ruff、format、mypy、`git diff --check`、`uv lock --check` | 全部使对应用例失败；检查通过，依赖与锁文件未变 |
 | 增量复审修复：隔离变异 9 项；`ruff check .`、`ruff format --check src/xiaowei tests/sdk_core`、`mypy src`、`git diff --check`、`uv lock --check` | 变异全部使对应用例失败；检查通过，依赖与锁文件未变 |
 
 Task 4 请求与渠道状态验证（锁文件未变，测试 PostgreSQL 为本机容器）：

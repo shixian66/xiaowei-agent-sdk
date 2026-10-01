@@ -28,7 +28,7 @@ SDK_SESSIONS_TABLE = "agent_sessions"
 SDK_MESSAGES_TABLE = "agent_messages"
 _SDK_TABLES = frozenset({SDK_SESSIONS_TABLE, SDK_MESSAGES_TABLE})
 
-APP_SCHEMA_VERSION = 2
+APP_SCHEMA_VERSION = 3
 APP_TABLES = frozenset(
     {
         "xiaowei_schema_version",
@@ -39,7 +39,11 @@ APP_TABLES = frozenset(
     }
 )
 # 版本 n 由第 n 个迁移建立；升级只按顺序执行当前版本之后的迁移。
-_MIGRATIONS = ("migrations/001_initial.sql", "migrations/002_p1b_channels.sql")
+_MIGRATIONS = (
+    "migrations/001_initial.sql",
+    "migrations/002_p1b_channels.sql",
+    "migrations/003_delivery_attempt.sql",
+)
 # 实例锁：会话级（serve）与事务级（初始化、升级）共用同一个键，二者互斥。锁按数据库区分。
 _INSTANCE_LOCK_KEY = 0x7869_6177_6569_0001
 # 接收屏障：请求接收事务持共享锁，接管恢复持排他锁（见 ``InstanceLock.admits``）。
@@ -93,6 +97,39 @@ class Readiness:
     def lock(self, reason: str) -> None:
         if self._reason is None:
             self._reason = reason
+
+
+@dataclass(frozen=True)
+class Backend:
+    """一条数据库连接在服务端的身份：pid 与 backend_start（pid 复用时 backend_start 不同）。"""
+
+    pid: int
+    started: datetime
+
+
+_SELF = text("SELECT pid, backend_start FROM pg_stat_activity WHERE pid = pg_backend_pid()")
+
+
+@asynccontextmanager
+async def hold_backend(engine: AsyncEngine) -> AsyncIterator[Backend]:
+    """占用一条专用连接直到退出，返回它的身份。
+
+    用于标记不持实例锁的工作（显式重发）仍在进行：连接存活即工作仍有所有者，进程退出或连接
+    断开后身份随之消失。
+    """
+    try:
+        conn = await engine.connect()
+    except (OSError, SQLAlchemyError):
+        raise StorageUnavailableError("PostgreSQL 不可用") from None
+    try:
+        try:
+            row = (await conn.execute(_SELF)).one()
+            await conn.commit()
+        except (OSError, SQLAlchemyError):
+            raise StorageUnavailableError("PostgreSQL 不可用") from None
+        yield Backend(row.pid, row.backend_start)
+    finally:
+        await conn.close()
 
 
 @dataclass

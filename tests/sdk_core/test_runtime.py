@@ -12,6 +12,7 @@ SDK 公开面替身（``feishu_channel``）。
 import asyncio
 import json
 import socket
+import threading
 from collections.abc import AsyncIterator, Iterator
 from contextlib import asynccontextmanager, contextmanager
 from dataclasses import dataclass, field
@@ -617,6 +618,45 @@ async def test_resend_sends_a_failed_result_once_without_rerunning(env: Env) -> 
     assert len(env.drv.connections) == 1  # 原轮次的一次元数据查询；重发不连接 StarRocks
 
 
+@dataclass
+class GatedChannel(FakeChannel):
+    """发送进入后停住，直到测试放行；在 SDK 循环上等待，放行用线程安全事件。"""
+
+    entered: threading.Event = field(default_factory=threading.Event)
+    gate: threading.Event = field(default_factory=threading.Event)
+
+    async def send(self, to: str, message: Any, opts: Any = None) -> Any:
+        self.sends.append((to, message, opts))
+        self.entered.set()
+        while not self.gate.is_set():
+            await asyncio.sleep(0.01)
+        return self.result
+
+
+async def test_serve_recovery_leaves_a_running_resend_to_finish(env: Env) -> None:
+    """独立的 ``requests resend`` 正在发送时启动 serve：启动恢复不把它当作遗留 sending，
+    重发照常落定为 sent；它进行中时其他重发取不到投递权。"""
+    config = env.config(feishu=feishu_config())
+    await failed_feishu_result(env, config)
+    target = {"subject_id": "alice", "chat_id": "oc_alice", "message_id": "om_resend"}
+    channel = GatedChannel()
+    running = asyncio.create_task(
+        runtime.resend(config, clock=env.clock, feishu_channel=channel, **target)
+    )
+    await until(channel.entered.is_set)
+    async with env.running(config, feishu_channel=FakeChannel()) as served:
+        await served.ready()
+        assert await env.scalar("SELECT delivery FROM xiaowei_request") == "sending"
+        other = FakeChannel()
+        assert await runtime.resend(config, clock=env.clock, feishu_channel=other, **target) is None
+        assert other.sends == []
+        channel.gate.set()
+        assert await asyncio.wait_for(running, 30) == "sent"
+        assert await env.scalar("SELECT delivery FROM xiaowei_request") == "sent"
+        assert await served.finish() == 0
+    assert len(channel.sends) == 1
+
+
 async def test_resend_refuses_after_the_evidence_expired(env: Env) -> None:
     config = env.config(feishu=feishu_config())
     await failed_feishu_result(env, config)
@@ -645,7 +685,7 @@ async def test_resend_requires_feishu(env: Env) -> None:
 async def test_storage_commands_use_the_configured_database(env: Env) -> None:
     config = env.config()
     await runtime.initialize(config)  # 已初始化时幂等
-    assert await runtime.upgrade(config) == 2
+    assert await runtime.upgrade(config) == 3
     report = await runtime.cleanup(config, batch_size=10)
     assert (report.sessions, report.unregistered) == (0, 0)
 
