@@ -238,7 +238,7 @@ MCP Integration 的治理必须覆盖实际发送动作，不能只过滤 `list_
 
 “帮我诊断这条 SQL”不能自动转成执行该 SQL；先查元数据、执行计划和已有证据。优化后的 SQL 默认展示，用户明确要求执行时仍必须通过相同只读限制。
 
-普通 EXPLAIN 与 EXPLAIN ANALYZE 是不同能力。后者实际执行语句，首版不开放自动调用。Profile 依赖环境版本、权限、采集与保留状态，空结果不能解释为查询健康。[EXPLAIN](https://docs.starrocks.io/docs/sql-reference/sql-statements/cluster-management/plan_profile/EXPLAIN/)、[EXPLAIN ANALYZE](https://docs.starrocks.io/docs/sql-reference/sql-statements/cluster-management/plan_profile/EXPLAIN_ANALYZE/)、[Query Profile](https://docs.starrocks.io/docs/sql-reference/sql-functions/utility-functions/get_query_profile/)。
+`EXPLAIN LOGICAL` 与 `EXPLAIN ANALYZE` 是不同能力：前者只取估算计划，后者实际执行语句，首版不开放自动调用；裸 `EXPLAIN` 受 FE 配置影响，不使用。Profile 依赖环境版本、权限、采集与保留状态，空结果不能解释为查询健康。[EXPLAIN](https://docs.starrocks.io/docs/sql-reference/sql-statements/cluster-management/plan_profile/EXPLAIN/)、[EXPLAIN ANALYZE](https://docs.starrocks.io/docs/sql-reference/sql-statements/cluster-management/plan_profile/EXPLAIN_ANALYZE/)、[Query Profile](https://docs.starrocks.io/docs/sql-reference/sql-functions/utility-functions/get_query_profile/)。
 
 ## 6. 只读查询保护
 
@@ -362,7 +362,7 @@ Evidence 记录仅保存获准保留的最小事实、引用元数据与必要�
 
 - Web 与飞书都通过同一应用服务进入真 SDK Runner；工具返回后确有下一轮执行。
 - 模型 API 使用 SDK 原生接入，支持按可信 Profile 选择服务；每个声称可用的端点/模型有独立工具闭环、结构化输出与 Session 验证，供应商切换不外带旧会话，也不自动回退到其他端点。
-- 两端均能查结构、执行获准只读查询、解释结果、分析 SQL 的普通执行计划并连续追问。
+- 两端均能查结构、执行获准只读查询、解释结果、分析 SQL 的估算执行计划（`EXPLAIN LOGICAL`，不执行原查询）并连续追问。
 - SDK Session 隔离成立；SQLAlchemySession + 真实 PostgreSQL 验证写入/回放的数据策略、历史上限、过期与清理；飞书重复消息不会重复运行 Agent 或数据库查询。
 - 查询许可按每条消息明确取得且不继承；诊断轮实际查询工具不可见，强行调用时零执行；关键结果由获准证据生成，模型解释单列；业务时间/单位/指标不明时澄清。
 - 不可用/无权限工具不出现在本轮工具集合；权限撤销或参数越界即使发生在工具展示后，也在 Adapter I/O 前被治理层拒绝。
