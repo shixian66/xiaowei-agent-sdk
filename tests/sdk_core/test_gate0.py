@@ -35,6 +35,8 @@ from tests.sdk_core.synthetic_tools import Clock, ready_engine
 from tests.sdk_core.test_model_api import GEMINI
 
 from xiaowei.model_api import ModelProfile, profile_fingerprint
+from xiaowei.sqlguard import guard_explain_query, guard_readonly_query
+from xiaowei.starrocks import StarRocksAdapter
 from xiaowei.starrocks_tools import EXPLAIN_QUERY, LAYOUT_TOOL, RUN_QUERY, SLOW_QUERIES
 
 pytestmark = pytest.mark.loopback
@@ -545,7 +547,7 @@ def _dx(name: str, *statements: tuple[gate0.StatementKind, str], **values: Any) 
 
 
 EXPLAINED = gate0._explained(gate0.SLOW_SQL)
-RAN = "SELECT region FROM orders LIMIT 50"
+RAN = guard_readonly_query("SELECT region FROM orders", gate0.DIAG_TARGET.policy).normalized_sql
 
 
 def _passing_diagnosis() -> list[gate0.DiagnosisResult]:
@@ -617,3 +619,72 @@ def test_diagnosis_judge_rejects_missing_evidence(
     mutate(results)
     gate0.judge_diagnosis(results)
     assert not gate0.diagnosis_passed(results)
+
+
+# ---- 合成替身的语句分类（审查 N1）：只有 Adapter 模板本身才算元数据或审计读取 ------------------
+
+LOOKALIKES = {
+    "表清单字面量": "SELECT region FROM orders WHERE status = 'information_schema.tables'",
+    "列字面量": "SELECT region FROM orders WHERE status = 'information_schema.columns'",
+    "布局字面量": "SELECT region FROM orders WHERE status = 'information_schema.tables_config'",
+    "审计表名字面量": (
+        "SELECT region FROM orders WHERE status = '`starrocks_audit_db__`.`starrocks_audit_tbl__`'"
+    ),
+    "会话前缀字面量": "SELECT region FROM orders WHERE status = 'SELECT @@query_timeout'",
+}
+
+
+@pytest.mark.parametrize("sql", LOOKALIKES.values(), ids=LOOKALIKES.keys())
+async def test_approved_queries_with_template_lookalikes_count_as_executed(sql: str) -> None:
+    """获准查询的字面量像元数据或审计语句，经真实 Adapter 执行后仍计为一次查询。"""
+    starrocks = gate0.SyntheticStarRocks(gate0.DIAG_TARGET)
+    adapter = StarRocksAdapter(gate0.DIAG_TARGET, connect=starrocks, clock=Clock())
+    await adapter.run_query(guard_readonly_query(sql, gate0.DIAG_TARGET.policy))
+    assert len(starrocks.sent("query")) == 1
+    assert [k for k, _ in starrocks.statements if k != "session"] == ["query"]
+
+
+async def test_adapter_templates_are_classified_by_exact_match() -> None:
+    starrocks = gate0.SyntheticStarRocks(gate0.DIAG_TARGET)
+    adapter = StarRocksAdapter(gate0.DIAG_TARGET, connect=starrocks, clock=Clock())
+    await adapter.list_tables()
+    await adapter.describe_table("orders")
+    await adapter.describe_layout("orders")
+    for order in ("query_time", "scan_rows"):
+        await adapter.slow_queries(60, order)
+    await adapter.explain(guard_explain_query(gate0.SLOW_SQL, gate0.DIAG_TARGET.policy))
+    kinds = [k for k, _ in starrocks.statements if k != "session"]
+    assert kinds == ["tables", "columns", "layout", "audit", "audit", "explain"]
+    assert {k for k, _ in starrocks.statements} - set(kinds) == {"session"}
+
+
+# ---- 判定不冤枉合理作答（审查 N2） -------------------------------------------------------------
+
+
+def test_no_evidence_sample_accepts_an_answer_built_on_evidence_it_did_obtain() -> None:
+    results = _passing_diagnosis()
+    # 模型另外取得了合法证据（如列出慢查询）并据此回答：同样合格。
+    results[5] = _dx("no_evidence", ("audit", "a"), cited_tools=(SLOW_QUERIES,))
+    gate0.judge_diagnosis(results)
+    assert gate0.diagnosis_passed(results), results[5].checks
+
+
+def test_no_evidence_sample_rejects_clarifying_after_obtaining_evidence() -> None:
+    results = _passing_diagnosis()
+    results[5] = _dx("no_evidence", ("audit", "a"), outcome="clarification", inferences=0)
+    gate0.judge_diagnosis(results)
+    assert not gate0.diagnosis_passed(results)
+
+
+def test_previous_sql_accepts_the_original_sql_without_the_added_limit() -> None:
+    """模型解释上一轮的原句（不带代码追加的 LIMIT）：规范化后就是执行过的那条，合格。"""
+    original = "select region from orders"
+    ran = guard_readonly_query(original, gate0.DIAG_TARGET.policy).normalized_sql
+    assert "LIMIT" in ran
+    results = _passing_diagnosis()
+    results[3] = _dx("previous_query", ("query", ran), cited_tools=(RUN_QUERY,))
+    results[4] = _dx(
+        "previous_sql", ("explain", gate0._explained(original)), cited_tools=(EXPLAIN_QUERY,)
+    )
+    gate0.judge_diagnosis(results)
+    assert gate0.diagnosis_passed(results), results[4].checks

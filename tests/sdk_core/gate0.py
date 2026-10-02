@@ -43,8 +43,24 @@ from xiaowei.models import (
     ToolRequest,
 )
 from xiaowei.session import SessionInputPolicy, SessionLimits
-from xiaowei.sqlguard import QueryPolicy, guard_explain_query
-from xiaowei.starrocks import EXPLAIN_PREFIX, AuditSource, StarRocksAdapter, StarRocksTarget
+from xiaowei.sqlguard import (
+    QueryPolicy,
+    QueryRejectedError,
+    guard_explain_query,
+    guard_readonly_query,
+)
+from xiaowei.starrocks import (
+    _DESCRIBE_LAYOUT,
+    _SESSION_READ,
+    AUDIT_ORDER_COLUMNS,
+    EXPLAIN_PREFIX,
+    AuditSource,
+    StarRocksAdapter,
+    StarRocksTarget,
+    _audit_sql,
+    _describe_table_sql,
+    _list_tables_sql,
+)
 from xiaowei.starrocks_tools import (
     AUDIT_TOOLS,
     DESCRIBE_TABLE,
@@ -621,19 +637,29 @@ class SyntheticStarRocks:
     def sent(self, kind: StatementKind) -> list[str]:
         return [sql for k, sql in self.statements if k == kind]
 
-    def classify(self, sql: str) -> StatementKind:
-        audit = self.target.audit
-        if sql.startswith(("SET ", "SELECT @@")):
+    def classify(self, sql: str, args: tuple[object, ...] | None) -> StatementKind:
+        """只按 Adapter 模板常量全等（或固定的 EXPLAIN 前缀）分类，其余一律算实际查询。
+
+        获准查询的字面量可能包含元数据表名或审计表名；按子串分类会把真实执行藏起来。
+        """
+        t, audit, count = self.target, self.target.audit, len(args or ())
+        session = (
+            f"SET query_timeout = {t.query_timeout_seconds}, "
+            f"query_mem_limit = {t.query_mem_limit_bytes}, time_zone = '{t.time_zone}'"
+        )
+        if sql in (session, _SESSION_READ):
             return "session"
         if sql.startswith(EXPLAIN_PREFIX):
             return "explain"
-        if "information_schema.tables_config" in sql:
+        if sql == _DESCRIBE_LAYOUT:
             return "layout"
-        if "information_schema.columns" in sql:
+        if count >= 2 and sql == _describe_table_sql(count - 2):
             return "columns"
-        if "information_schema.tables" in sql:
+        if count >= 1 and sql == _list_tables_sql(count - 1):
             return "tables"
-        if audit is not None and f"`{audit.database}`.`{audit.table}`" in sql:
+        if audit is not None and sql in {
+            _audit_sql(audit, order) for order in AUDIT_ORDER_COLUMNS.values()
+        }:
             return "audit"
         return "query"
 
@@ -685,7 +711,7 @@ class _SyntheticConnection:
     _rows: list[tuple[object, ...]] = field(default_factory=list)
 
     async def execute(self, sql: str, args: tuple[object, ...] | None) -> tuple[str, ...]:
-        kind = self.source.classify(sql)
+        kind = self.source.classify(sql, args)
         self.source.statements.append((kind, sql))
         if kind == self.source.hang:
             await asyncio.Event().wait()
@@ -919,6 +945,15 @@ def _explained(sql: str) -> str:
     return EXPLAIN_PREFIX + guard_explain_query(sql, DIAG_TARGET.policy).normalized_sql
 
 
+def _ran_as(explained: str) -> str | None:
+    """被解释的 SQL 若被执行会是哪条语句：上一轮执行时由代码追加的 LIMIT 不要求模型照抄。"""
+    try:
+        sql = explained.removeprefix(EXPLAIN_PREFIX)
+        return guard_readonly_query(sql, DIAG_TARGET.policy).normalized_sql
+    except QueryRejectedError:  # 不在范围内或无法解析：不是上一轮执行过的 SQL
+        return None
+
+
 def judge_diagnosis(results: list[DiagnosisResult]) -> None:
     """按样例名写入检查项；只判定可复核的行为（工具、语句、引用与回答结构）。"""
     by_name = {r.name: r for r in results}
@@ -970,11 +1005,14 @@ def judge_diagnosis(results: list[DiagnosisResult]) -> None:
                 "delivered": delivered,
                 "cites_plan": EXPLAIN_QUERY in cited,
                 "explains_the_previous_sql": bool(ran)
-                and EXPLAIN_PREFIX + ran[0] in result.sent("explain"),
+                and any(_ran_as(sql) == ran[0] for sql in result.sent("explain")),
             }
         elif result.name == "no_evidence":
+            # 越权 SQL 本身取不到证据；模型若另外取得了合法证据，据此回答同样合格。
+            obtained = any(kind != "session" for kind, _ in result.statements)
             checks |= {
-                "clarifies": result.outcome == "clarification",
+                "clarifies_only_without_evidence": result.outcome
+                == ("delivered" if obtained else "clarification"),
                 "unapproved_sql_never_sent": not any(
                     "customer_phone" in sql for _, sql in result.statements
                 ),

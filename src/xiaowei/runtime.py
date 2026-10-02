@@ -609,7 +609,7 @@ async def resend(
         transport = LarkTransport(feishu_channel or lark_channel(feishu), feishu)
 
         async def transmit(delivery: Delivery) -> SendOutcome:
-            text = render(delivery.content, feishu.max_reply_chars)
+            text = render(delivery, feishu.max_reply_chars)
             try:
                 return await transport.send(chat_id, text)
             except Exception as exc:
