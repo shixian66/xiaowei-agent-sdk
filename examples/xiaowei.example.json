@@ -30,6 +30,7 @@
       "local/describe_table",
       "local/describe_table_layout",
       "local/explain_query",
+      "local/list_slow_queries",
       "local/list_tables",
       "local/run_readonly_query"
     ]
@@ -64,6 +65,16 @@
     "max_result_bytes": 200000,
     "max_value_bytes": 4000,
     "max_plan_lines": 500,
+    "audit": {
+      "database": "starrocks_audit_db__",
+      "table": "starrocks_audit_tbl__",
+      "time_zone": "Asia/Shanghai",
+      "stmt_limit": 1048576,
+      "max_window_minutes": 1440,
+      "max_rows": 20,
+      "candidate_rows": 200,
+      "candidate_bytes": 2097152
+    },
     "policy": {
       "target_id": "warehouse",
       "default_database": "<默认 database>",
@@ -96,6 +107,7 @@
         "local/describe_table",
         "local/describe_table_layout",
         "local/explain_query",
+        "local/list_slow_queries",
         "local/list_tables",
         "local/run_readonly_query"
       ]

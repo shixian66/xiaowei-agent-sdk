@@ -20,6 +20,12 @@ ANALYZE 而实际执行查询。显式级别 ``LOGICAL`` 由 P2 Task 0 在 StarR
 ``PROPERTIES``（存储卷、副本等部署信息）。键字段中的每个名字都须是该对象的获准列，否则整段
 替换为 ``LAYOUT_HIDDEN``：不显示未获准列名，也不留下获准的一部分让人误以为是完整的键。
 
+慢查询只读已有的 AuditLoader 审计表（``StarRocksTarget.audit``）：代码模板与绑定值按库、时间窗与
+``isQuery`` 取有界候选（独立的候选行数与字节上限），原文超过 ``max_sql_bytes`` 的不读出。每条候选
+原文在 Adapter 内经当前 SQLGuard 范围（``guard_explain_query``）检查，未通过、无法读出或放不下的
+行整行丢弃；其原文只在本函数的临时变量中，不进入结果、日志或错误。``max_sql_bytes`` 不超过
+``stmt_limit - 4``（配置校验），因此读出的原文不可能被 AuditLoader 截断。审计时间按审计源时区解释。
+
 驱动与网络错误映射为固定错误码；错误在下层 ``except`` 结束后才抛出，不带服务端原文、SQL、
 地址或凭据，``__cause__`` 与 ``__context__`` 为空。
 """
@@ -35,8 +41,8 @@ import ssl
 import time
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass
-from datetime import date, datetime
-from decimal import Decimal
+from datetime import date, datetime, timedelta
+from decimal import ROUND_HALF_UP, Decimal
 from typing import Annotated, Final, Protocol, cast
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
@@ -53,7 +59,7 @@ from pydantic import (
 )
 
 from xiaowei.config import is_secret_ref, resolve_secret_ref
-from xiaowei.sqlguard import ExplainQuery, GuardedQuery, QueryPolicy
+from xiaowei.sqlguard import ExplainQuery, GuardedQuery, QueryPolicy, guard_explain_query
 
 EXPLAIN_LEVEL: Final = "LOGICAL"
 """P2 Task 0 在 4.1.4 上选定：FE 默认级别为 ANALYZE 时仍零执行，且不输出列统计值或资源组。"""
@@ -73,10 +79,73 @@ _LAYOUT_KEYS: Final = frozenset({"partition_key", "distribute_key", "sort_key", 
 # 键字段中的一个名字：反引号引用（名字内不含反引号）或普通标识符。
 _KEY_NAME: Final = re.compile(r"`([^`]+)`|([A-Za-z_][A-Za-z0-9_]*)")
 
+AUDIT_ORDER_COLUMNS: Final[Mapping[str, str]] = {
+    "query_time": "queryTime",
+    "scan_bytes": "scanBytes",
+    "scan_rows": "scanRows",
+    "cpu": "cpuCostNs",
+    "memory": "memCostBytes",
+    "pending": "pendingTimeMs",
+}
+AUDIT_COLUMNS: Final = (
+    "query_id",
+    "started_at",
+    "query_time_ms",
+    "scan_bytes",
+    "scan_rows",
+    "return_rows",
+    "cpu_ms",
+    "mem_bytes",
+    "pending_ms",
+    "state",
+    "digest",
+    "sql",
+)
+# 审计表的列（AuditLoader 5.0.0，Task 0 实测）与输出列的对应；不读身份、地址与错误文本。
+_AUDIT_SOURCE: Final = (
+    "queryId",
+    "timestamp",
+    "queryTime",
+    "scanBytes",
+    "scanRows",
+    "returnRows",
+    "cpuCostNs",
+    "memCostBytes",
+    "pendingTimeMs",
+    "state",
+    "digest",
+    "stmt",
+)
+_AUDIT_METRICS: Final = {
+    "queryTime": "query_time_ms",
+    "scanBytes": "scan_bytes",
+    "scanRows": "scan_rows",
+    "returnRows": "return_rows",
+    "memCostBytes": "mem_bytes",
+    "pendingTimeMs": "pending_ms",
+}
+_AUDIT_TEXT: Final = {"queryId": "query_id", "state": "state", "digest": "digest"}
+# AuditLoader 截断后的长度落在 (stmt_limit - 4, stmt_limit]（Task 0 实测）。
+_TRUNCATION_MARGIN: Final = 4
+# JSON 转义膨胀最大的单字节字符（控制字符）写作 \u00XX：一个字节变六个。
+_JSON_WIDEST: Final = 6
+
 Scalar = None | bool | int | float | str
 
 _Name = Annotated[str, StringConstraints(min_length=1)]
+_Identifier = Annotated[str, StringConstraints(pattern=r"^[A-Za-z0-9_]+$", max_length=64)]
 _TIME_ZONE = re.compile(r"[A-Za-z0-9_+\-/]+")
+
+
+def _valid_zone(name: str) -> str:
+    # 会话设置语句内联目标时区，因此先限定字符集，再确认是可加载的时区名。
+    if not _TIME_ZONE.fullmatch(name):
+        raise ValueError("time_zone 不是合法的时区名")
+    try:
+        ZoneInfo(name)
+    except (ZoneInfoNotFoundError, ValueError):
+        raise ValueError("time_zone 不是合法的时区名") from None
+    return name
 
 
 class StarRocksErrorCode(enum.StrEnum):
@@ -91,6 +160,7 @@ class StarRocksErrorCode(enum.StrEnum):
     CONNECTION_LOST = "connection_lost"
     RESULT_CONTRACT = "result_contract"
     OBJECT_NOT_ALLOWED = "object_not_allowed"
+    OBJECT_MISSING = "object_missing"
 
 
 _Code = StarRocksErrorCode
@@ -107,6 +177,7 @@ ERROR_MESSAGES: Final[Mapping[StarRocksErrorCode, str]] = {
     _Code.CONNECTION_LOST: "与 StarRocks 的连接中断，结果未知",
     _Code.RESULT_CONTRACT: "StarRocks 返回的结果不符合契约",
     _Code.OBJECT_NOT_ALLOWED: "该对象不在查询目标的允许范围内",
+    _Code.OBJECT_MISSING: "StarRocks 中不存在该对象",
 }
 
 
@@ -116,6 +187,38 @@ class StarRocksError(Exception):
     def __init__(self, code: StarRocksErrorCode) -> None:
         super().__init__(ERROR_MESSAGES[code])
         self.code = code
+
+
+class AuditSource(BaseModel):
+    """已有 AuditLoader 审计表的只读来源；小维不安装插件、不改其配置。
+
+    ``time_zone`` 是审计 ``timestamp`` 的写入时区（FE 系统时区）；``stmt_limit`` 是插件的
+    ``max_stmt_length``（UTF-8 字节），必填：目标的 ``max_sql_bytes`` 不得超过 ``stmt_limit - 4``。
+    ``candidate_rows`` / ``candidate_bytes`` 约束一次取出并检查的候选，与输出的 ``max_rows``
+    及目标的结果上限相互独立。
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    database: _Identifier
+    table: _Identifier
+    time_zone: str
+    stmt_limit: int = Field(ge=1)
+    max_window_minutes: int = Field(default=1440, ge=1, le=43200)
+    max_rows: int = Field(default=20, ge=1, le=100)
+    candidate_rows: int = Field(default=200, ge=1, le=2000)
+    candidate_bytes: int = Field(default=2_097_152, ge=1, le=16_777_216)
+
+    @field_validator("time_zone")
+    @classmethod
+    def _zone(cls, name: str) -> str:
+        return _valid_zone(name)
+
+    @model_validator(mode="after")
+    def _enough_candidates(self) -> AuditSource:
+        if self.candidate_rows < self.max_rows:
+            raise ValueError("candidate_rows 不能少于 max_rows")
+        return self
 
 
 class StarRocksTarget(BaseModel):
@@ -146,6 +249,7 @@ class StarRocksTarget(BaseModel):
     max_value_bytes: int = Field(ge=1)
     max_plan_lines: int = Field(default=500, ge=1)
     policy: QueryPolicy
+    audit: AuditSource | None = None
 
     @field_validator("password_ref")
     @classmethod
@@ -157,14 +261,7 @@ class StarRocksTarget(BaseModel):
     @field_validator("time_zone")
     @classmethod
     def _zone(cls, name: str) -> str:
-        # 会话设置语句内联该值，因此先限定字符集，再确认是可加载的时区名。
-        if not _TIME_ZONE.fullmatch(name):
-            raise ValueError("time_zone 不是合法的时区名")
-        try:
-            ZoneInfo(name)
-        except (ZoneInfoNotFoundError, ValueError):
-            raise ValueError("time_zone 不是合法的时区名") from None
-        return name
+        return _valid_zone(name)
 
     @model_validator(mode="after")
     def _consistent(self) -> StarRocksTarget:
@@ -176,6 +273,12 @@ class StarRocksTarget(BaseModel):
             raise ValueError("client_timeout_seconds 不能早于服务端 query_timeout_seconds")
         if self.max_value_bytes > self.max_result_bytes:
             raise ValueError("max_value_bytes 不能大于 max_result_bytes")
+        audit = self.audit
+        if audit is not None:
+            if self.policy.max_sql_bytes > audit.stmt_limit - _TRUNCATION_MARGIN:
+                raise ValueError("policy.max_sql_bytes 不能超过 audit.stmt_limit - 4")
+            if audit.candidate_bytes < audit_candidate_bound(self):
+                raise ValueError("audit.candidate_bytes 容不下一条最长的候选记录")
         return self
 
 
@@ -219,6 +322,15 @@ class _ResultContractError(Exception):
     pass
 
 
+@dataclass(frozen=True)
+class _ReadLimits:
+    """调用方给出的读取上限与时区；审计候选用独立上限，并按审计时区解释无时区时间。"""
+
+    max_bytes: int
+    max_value: int
+    zone: ZoneInfo
+
+
 class _SessionMismatchError(Exception):
     pass
 
@@ -226,6 +338,8 @@ class _SessionMismatchError(Exception):
 _AUTH_ERRORS: Final = frozenset({1045})
 # MySQL 协议通用码，加上 StarRocks 4.1.4 实测：5203 拒绝访问，5024 超过 query_timeout。
 _PERMISSION_ERRORS: Final = frozenset({1044, 1142, 1143, 1227, 1370, 5203})
+# 4.1.4 实测：表不存在为 5502；1146 是 MySQL 协议通用码。
+_MISSING_ERRORS: Final = frozenset({1146, 5502})
 _SERVER_TIMEOUT_ERRORS: Final = frozenset({5024})
 _LOST_ERRORS: Final = frozenset({2006, 2013, 2055})
 
@@ -247,6 +361,16 @@ _DESCRIBE_LAYOUT: Final = (
     "WHERE TABLE_SCHEMA = %s AND TABLE_NAME = %s AND TABLE_ENGINE <> %s"
 )
 _SESSION_READ: Final = "SELECT @@query_timeout, @@query_mem_limit, @@time_zone"
+# 库表名来自配置并已按 [A-Za-z0-9_] 校验，排序列来自固定映射；其余全部绑定。
+_AUDIT_CANDIDATES: Final = (
+    "SELECT queryId, `timestamp`, queryTime, scanBytes, scanRows, returnRows, cpuCostNs, "
+    "memCostBytes, pendingTimeMs, state, digest, "
+    "CASE WHEN LENGTH(stmt) <= %s THEN stmt END AS stmt "
+    "FROM `{database}`.`{table}` "
+    "WHERE isQuery = 1 AND catalog = %s AND db = %s "
+    "AND `timestamp` >= %s AND `timestamp` < %s "
+    "ORDER BY {order} DESC LIMIT %s"
+)
 
 
 class StarRocksAdapter:
@@ -256,7 +380,12 @@ class StarRocksAdapter:
         self._target = target
         self._connect = connect
         self._clock = clock
-        self._zone = ZoneInfo(target.time_zone)
+        # 会话 time_zone 已设为目标时区，驱动返回的无时区值即目标时区的本地时间。
+        self._limits = _ReadLimits(
+            max_bytes=target.max_result_bytes,
+            max_value=target.max_value_bytes,
+            zone=ZoneInfo(target.time_zone),
+        )
         self._slots = asyncio.Semaphore(target.pool_size)
 
     def __repr__(self) -> str:
@@ -316,8 +445,90 @@ class StarRocksAdapter:
             raise StarRocksError(_Code.RESULT_CONTRACT)
         return result.model_copy(update={"rows": tuple(r for r in rows if r is not None)})
 
+    async def slow_queries(self, window_minutes: int, order_by: str) -> QueryResult:
+        """最近 ``window_minutes`` 分钟内本目标库的慢查询，按 ``order_by`` 降序，至多 ``max_rows``
+        行。
+
+        只返回原文通过当前 SQLGuard 范围的记录（见模块说明）；``truncated`` 表示候选读取达到
+        ``candidate_bytes`` 或输出达到结果字节上限，可能还有未检查的记录。
+        """
+        audit = self._target.audit
+        if audit is None:
+            raise ValueError("未配置审计源")
+        if not 1 <= window_minutes <= audit.max_window_minutes or order_by not in (
+            AUDIT_ORDER_COLUMNS
+        ):
+            raise ValueError("时间窗或排序方式不在允许范围内")
+        zone = ZoneInfo(audit.time_zone)
+        end = self._clock().astimezone(zone).replace(tzinfo=None)
+        start = end - timedelta(minutes=window_minutes)
+        sql = _audit_sql(audit, AUDIT_ORDER_COLUMNS[order_by])
+        args = (
+            self._target.policy.max_sql_bytes,
+            "default_catalog",
+            self._target.database,
+            start,
+            end,
+            audit.candidate_rows,
+        )
+        limits = _ReadLimits(
+            max_bytes=audit.candidate_bytes, max_value=_audit_value_bound(self._target), zone=zone
+        )
+        started = time.monotonic()
+        candidates = await self._run(sql, args, audit.candidate_rows, limits=limits)
+        if candidates.columns != _AUDIT_SOURCE:
+            raise StarRocksError(_Code.RESULT_CONTRACT)
+        code: StarRocksErrorCode | None = None
+        try:
+            # SQL 解析是同步 CPU 工作：放到线程中，计入客户端期限。
+            async with asyncio.timeout(self._target.client_timeout_seconds):
+                rows, over = await asyncio.to_thread(self._listed, candidates.rows, audit.max_rows)
+        except TimeoutError:
+            code = _Code.TIMEOUT
+        except _ResultContractError:
+            code = _Code.RESULT_CONTRACT
+        if code is not None:
+            raise StarRocksError(code)
+        return QueryResult(
+            target_id=self._target.target_id,
+            sql=sql,
+            columns=AUDIT_COLUMNS,
+            rows=tuple(rows),
+            row_count=len(rows),
+            truncated=candidates.truncated or over,
+            collected_at=candidates.collected_at,
+            elapsed_ms=candidates.elapsed_ms + round((time.monotonic() - started) * 1000),
+        )
+
+    def _listed(
+        self, candidates: tuple[dict[str, Scalar], ...], max_rows: int
+    ) -> tuple[list[dict[str, Scalar]], bool]:
+        """按原排序取通过检查的行；返回 (行, 是否因结果字节上限停止)。"""
+        rows: list[dict[str, Scalar]] = []
+        size = 2  # "[]"
+        for candidate in candidates:
+            if len(rows) == max_rows:
+                break
+            row = _audit_row(candidate)
+            if row is None or not _within_scope(row["sql"], self._target.policy):
+                continue
+            if any(_json_size(v) > self._target.max_value_bytes for v in row.values()):
+                continue
+            added = _json_size(row) + (2 if rows else 0)
+            if size + added > self._target.max_result_bytes:
+                return rows, True
+            rows.append(row)
+            size += added
+        return rows, False
+
     async def _run(
-        self, sql: str, args: tuple[object, ...] | None, max_rows: int, *, plan: bool = False
+        self,
+        sql: str,
+        args: tuple[object, ...] | None,
+        max_rows: int,
+        *,
+        plan: bool = False,
+        limits: _ReadLimits | None = None,
     ) -> QueryResult:
         started = time.monotonic()
         # 等待槽位与建立连接共用一个绝对期限；超期的阶段决定错误码。
@@ -334,7 +545,9 @@ class StarRocksAdapter:
             conn, code = await self._open(deadline)
             if conn is None:
                 raise StarRocksError(code or _Code.CONNECT_FAILED)
-            rows, truncated, columns, code = await self._query(conn, sql, args, max_rows, plan)
+            rows, truncated, columns, code = await self._query(
+                conn, sql, args, max_rows, plan, limits or self._limits
+            )
         finally:
             self._slots.release()
         if code is not None:
@@ -364,6 +577,7 @@ class StarRocksAdapter:
         args: tuple[object, ...] | None,
         max_rows: int,
         plan: bool,
+        limits: _ReadLimits,
     ) -> tuple[list[dict[str, Scalar]], bool, tuple[str, ...], StarRocksErrorCode | None]:
         """执行并读取；返回错误码而不是抛出，使错误在离开 ``except`` 后由调用方抛出。
 
@@ -382,7 +596,7 @@ class StarRocksAdapter:
                     if len(columns) != 1:
                         raise _ResultContractError
                     columns = (PLAN_COLUMN,)
-                rows, truncated = await self._read(conn, columns, max_rows, text_only=plan)
+                rows, truncated = await self._read(conn, columns, max_rows, plan, limits)
             complete = not truncated
             return rows, truncated, columns, None
         except TimeoutError:
@@ -413,7 +627,12 @@ class StarRocksAdapter:
             raise _SessionMismatchError
 
     async def _read(
-        self, conn: Connection, columns: tuple[str, ...], max_rows: int, *, text_only: bool
+        self,
+        conn: Connection,
+        columns: tuple[str, ...],
+        max_rows: int,
+        text_only: bool,
+        limits: _ReadLimits,
     ) -> tuple[list[dict[str, Scalar]], bool]:
         rows: list[dict[str, Scalar]] = []
         size = 2  # "[]"
@@ -422,34 +641,15 @@ class StarRocksAdapter:
                 raise _ResultContractError
             if len(rows) == max_rows:
                 return rows, True
-            row = {name: self._scalar(value) for name, value in zip(columns, raw, strict=True)}
-            if any(_json_size(v) > self._target.max_value_bytes for v in row.values()):
+            row = {name: _scalar(v, limits.zone) for name, v in zip(columns, raw, strict=True)}
+            if any(_json_size(v) > limits.max_value for v in row.values()):
                 return rows, True
             added = _json_size(row) + (2 if rows else 0)  # 行之间的 ", "
-            if size + added > self._target.max_result_bytes:
+            if size + added > limits.max_bytes:
                 return rows, True
             rows.append(row)
             size += added
         return rows, False
-
-    def _scalar(self, value: object) -> Scalar:
-        if value is None or isinstance(value, bool | int | str):
-            return value
-        if isinstance(value, float):
-            if not math.isfinite(value):
-                raise _ResultContractError
-            return value
-        if isinstance(value, Decimal):
-            if not value.is_finite():
-                raise _ResultContractError
-            return format(value, "f")
-        if isinstance(value, datetime):
-            # 会话 time_zone 已设为目标时区，驱动返回的无时区值即目标时区的本地时间。
-            aware = value.replace(tzinfo=self._zone) if value.tzinfo is None else value
-            return aware.astimezone(self._zone).isoformat()
-        if isinstance(value, date):
-            return value.isoformat()
-        raise _ResultContractError
 
     async def _release(self, conn: Connection, *, complete: bool) -> None:
         """完整读完才尝试正常关闭；关闭未完成（含失败、超时、取消）时一律同步断开。"""
@@ -464,6 +664,101 @@ class StarRocksAdapter:
         finally:
             if not closed:
                 conn.abort()
+
+
+def _scalar(value: object, zone: ZoneInfo) -> Scalar:
+    if value is None or isinstance(value, bool | int | str):
+        return value
+    if isinstance(value, float):
+        if not math.isfinite(value):
+            raise _ResultContractError
+        return value
+    if isinstance(value, Decimal):
+        if not value.is_finite():
+            raise _ResultContractError
+        return format(value, "f")
+    if isinstance(value, datetime):
+        aware = value.replace(tzinfo=zone) if value.tzinfo is None else value
+        return aware.astimezone(zone).isoformat()
+    if isinstance(value, date):
+        return value.isoformat()
+    raise _ResultContractError
+
+
+def _audit_sql(audit: AuditSource, order: str) -> str:
+    return _AUDIT_CANDIDATES.format(database=audit.database, table=audit.table, order=order)
+
+
+def audit_sql_bytes(target: StarRocksTarget) -> int:
+    """审计候选查询 ``sql``（模板，不含绑定值）的最大 UTF-8 字节数；未配置审计源为 0。"""
+    audit = target.audit
+    if audit is None:
+        return 0
+    return max(len(_audit_sql(audit, c).encode()) for c in AUDIT_ORDER_COLUMNS.values())
+
+
+def _audit_value_bound(target: StarRocksTarget) -> int:
+    """候选读取的单值上限：容得下一条 ``max_sql_bytes`` 的原文（按最宽转义计）。"""
+    return max(target.max_value_bytes, _JSON_WIDEST * target.policy.max_sql_bytes + 2)
+
+
+def audit_candidate_bound(target: StarRocksTarget) -> int:
+    """一条候选记录序列化后的最大字节数：每个值都按候选单值上限计，加上键与分隔符。"""
+    keys = sum(_json_size(name) + 2 for name in _AUDIT_SOURCE)  # "name": 与 ", "
+    return 2 + keys + len(_AUDIT_SOURCE) * _audit_value_bound(target)
+
+
+def _within_scope(sql: Scalar, policy: QueryPolicy) -> bool:
+    """原文能否通过当前 SQLGuard 范围；任何失败（含解析器意外异常）都按未通过处理。
+
+    审计原文来自全集群、不可信：检查失败的唯一后果是这一行不列出，异常与原文都不外传。
+    """
+    if not isinstance(sql, str):
+        return False
+    try:
+        guard_explain_query(sql, policy)
+    except Exception:  # 失败即丢弃该行，不传播可能含原文的异常
+        return False
+    return True
+
+
+def _audit_row(candidate: dict[str, Scalar]) -> dict[str, Scalar] | None:
+    """候选记录转为输出列；原文未读出时返回 ``None``（整行丢弃），类型不符时违反结果契约。"""
+    stmt = candidate["stmt"]
+    if stmt is not None and not isinstance(stmt, str):
+        raise _ResultContractError
+    started = candidate["timestamp"]
+    if not isinstance(started, str):
+        raise _ResultContractError
+    row: dict[str, Scalar] = {}
+    for source, name in _AUDIT_TEXT.items():
+        value = candidate[source]
+        if value is not None and not isinstance(value, str):
+            raise _ResultContractError
+        row[name] = value or None
+    row["started_at"] = started
+    for source, name in _AUDIT_METRICS.items():
+        row[name] = _metric(candidate[source])
+    cpu = _metric(candidate["cpuCostNs"])
+    row["cpu_ms"] = None if cpu is None else _milliseconds(cpu)
+    row["sql"] = stmt
+    if stmt is None:
+        return None
+    return {name: row[name] for name in AUDIT_COLUMNS}
+
+
+def _metric(value: Scalar) -> int | None:
+    """NULL、空串与负值表示未知，输出 ``None``；0 是实测值。其他文本或类型违反结果契约。"""
+    if value is None or value == "":
+        return None
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise _ResultContractError
+    return None if value < 0 else value
+
+
+def _milliseconds(nanoseconds: int) -> str:
+    exact = Decimal(nanoseconds) / Decimal(1_000_000)
+    return format(exact.quantize(Decimal("0.001"), rounding=ROUND_HALF_UP), "f")
 
 
 def _list_tables_sql(objects: int) -> str:
@@ -530,6 +825,8 @@ def _query_code(error: BaseException, stage: StarRocksErrorCode) -> StarRocksErr
         return _Code.PERMISSION_DENIED
     if number in _SERVER_TIMEOUT_ERRORS and stage is _Code.QUERY_FAILED:
         return _Code.SERVER_TIMEOUT
+    if number in _MISSING_ERRORS and stage is _Code.QUERY_FAILED:
+        return _Code.OBJECT_MISSING
     if number in _LOST_ERRORS or (number is None and isinstance(error, OSError)):
         return _Code.CONNECTION_LOST
     return stage
