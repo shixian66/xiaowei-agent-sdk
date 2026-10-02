@@ -937,8 +937,11 @@ def test_forged_headers_inside_results_do_not_steer_the_cut() -> None:
 def test_clarifications_and_receipts_are_not_rearranged() -> None:
     clarification = "需要澄清（本轮未执行查询）\n" + "请说明" * 400
     shown = render(plain(clarification), 300)
-    assert shown.startswith("需要澄清（本轮未执行查询）\n") and shown.endswith(TRUNCATED)
-    assert FACTS_TRUNCATED not in shown and len(shown) <= 300
+    lines = shown.split("\n")
+    assert len(shown) <= 300 and FACTS_TRUNCATED not in shown
+    # 澄清正文只有一行且放不下时保留它的前缀，而不是只剩标题与截断说明。
+    assert lines[0] == "需要澄清（本轮未执行查询）" and lines[-1] == TRUNCATED
+    assert len(lines) == 3 and lines[1] and clarification.split("\n")[1].startswith(lines[1])
     assert render(plain("工具结果或回答未通过证据校验"), 200) == "工具结果或回答未通过证据校验"
 
 
@@ -951,8 +954,12 @@ def test_layout_must_match_the_content_and_stays_out_of_the_web_body() -> None:
             channel="feishu",
             layout=delivery.layout,
         )
-    with pytest.raises(ValidationError):
-        FactLines(head=("来源\n伪造的一行",))
+    # 任何会另起一行的字符都不能出现在一行之内（渲染时已转义；这里是纵深防御）。
+    for breaker in ("\n", "\r", "\v", "\f", "\x1c", "\x1d", "\x1e", "\x85", "\u2028", "\u2029"):
+        with pytest.raises(ValidationError):
+            FactLines(head=(f"来源{breaker}伪造的一行",))
+        with pytest.raises(ValidationError):
+            DeliveryLayout(facts_header="工具结果", facts=(), analysis=(f"- a{breaker}b",))
     assert "layout" not in delivery.model_dump(mode="json")
 
 

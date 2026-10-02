@@ -23,8 +23,11 @@ AUDIENCES: tuple[Audience, ...] = ("model", "session", "web", "feishu")
 Label = Annotated[str, StringConstraints(min_length=1, max_length=200)]
 JsonScalar = None | bool | int | float | str
 ToolId = Annotated[str, StringConstraints(pattern=r"^[a-z0-9_-]{1,64}/[a-z0-9_.-]{1,64}$")]
-# 已渲染的一行交付内容：换行等分行字符在渲染时已转义，行内不再含换行。
-ContentLine = Annotated[str, StringConstraints(pattern=r"^[^\n]*$")]
+# 已渲染的一行交付内容：分行字符在渲染时已转义（``_one_line``），行内不再含任何会另起一行的
+# 字符（``str.splitlines`` 的全部分行符）。
+ContentLine = Annotated[
+    str, StringConstraints(pattern="^[^\n\r\x0b\x0c\x1c-\x1e\x85\u2028\u2029]*$")
+]
 
 
 class _Trusted(BaseModel):

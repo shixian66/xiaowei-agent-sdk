@@ -6,6 +6,8 @@
 
 # ruff: noqa: S608 —— 本文件的 SQL 是被检样本，拼接是有意的。
 
+import copy
+import dataclasses
 import logging
 
 import pytest
@@ -702,6 +704,19 @@ def test_explain_query_is_sealed_and_distinct() -> None:
     assert not issubclass(GuardedQuery, ExplainQuery)
     with pytest.raises(AttributeError):
         plan.normalized_sql = "SELECT 1"  # type: ignore[misc]
+
+
+@pytest.mark.parametrize("sealed", ["query", "plan"])
+def test_sealed_products_cannot_be_copied_with_other_sql(sealed: str) -> None:
+    """``dataclasses.replace`` 不能复制封存产物再换掉 SQL（原先会连同封存标记一起复制）。"""
+    product = (
+        guard("SELECT region FROM sales")
+        if sealed == "query"
+        else explain("SELECT region FROM sales")
+    )
+    with pytest.raises((TypeError, ValueError)):
+        dataclasses.replace(product, normalized_sql="DELETE FROM sales")
+    assert copy.copy(product) == product  # 原样复制不改变内容
 
 
 @pytest.mark.parametrize(

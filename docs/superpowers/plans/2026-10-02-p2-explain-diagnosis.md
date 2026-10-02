@@ -570,3 +570,18 @@ P3 的目标 StarRocks 版本可能不是 4.1.4：计划文本按行原样作为
 - [x] 限制说明由代码从当前策略生成；模型推断仍单列；`AgentAnswer` 结构与校验未变。
 - [x] 上一轮 SQL 依靠现有 Session 回放，没有新增历史机制。
 - [x] 每片有失败测试、变异检查、精确命令、独立审查 SHA 与独立提交；ScriptedModel 只证明调用链，真实模型与两端实战留到 P3 分别记录。
+
+## 9. 实施结果与偏差
+
+逐片证据与审查结论见 [AGENT_HANDOFF.md](../../../AGENT_HANDOFF.md)；这里只记录实施结果与上文计划不一致之处，供 P2.5 / P3 参照。
+
+| 位置 | 计划 | 实际 | 依据 |
+| --- | --- | --- | --- |
+| §2.5 / Task 5 | 视图“没有行”，或二选一 | 视图在 `tables_config` 中有一行；以 `TABLE_ENGINE <> 'VIEW'` 排除，返回空结果 | Task 0 实测；Task 5 审查通过 |
+| §2.3 | `DIAGNOSE_TOOLS` 只含三个工具 | 另含 `describe_table_layout`（Task 5）；审计源配置时两种用途都加入 `list_slow_queries`（Task 6） | 接口随切片增加 |
+| §2.7 / Task 6 | 审计记录按 `QueriedRelations` 过滤 | 该列在 AuditLoader 5.0.0 + 4.1.4 上全为 NULL；改为每条原文过 `guard_explain_query`（E3 方案 A），可能被插件截断的记录由 `stmt_limit` 装配校验排除（E4）；新错误码 `object_missing`（5502/1146）适用于所有查询路径 | Task 0 实测；用户 2026-10-02 决定 |
+| Task 6 | 解析计入客户端期限 | 解析线程另计一个客户端期限并逐行核对，到期即停（Task 8）；最坏总耗时约为 2 倍 `client_timeout_seconds` | Task 6 审查非阻断项 |
+| Task 7 | 诊断样例用“合成工具” | 样例使用产品 StarRocks 工具层 + 合成连接（`SyntheticStarRocks`，按 Adapter 模板全等分类），使 P3 评估真实工具说明与 SQLGuard；`scripts/gate0_real_model.py` 尚未接入诊断样例（P3） | Task 7 审查接受 |
+| Task 7 | 飞书沿用末尾截断 | 飞书超单条上限时先保留完整分析，工具结果按来源/说明行优先截断并注明；澄清保留正文前缀（Task 8） | 用户 2026-10-02 选 a |
+| §2.6 | 说明的澄清条件为“一个工具结果都没有” | 改为“没有可引用的 evidence_id”（被拒绝或失败的工具结果不算取得），与 `validate_answer` 一致 | Task 7 审查 F1 |
+| Task 3 技术债 | — | `GuardedQuery` / `ExplainQuery` 的封存标记改为 `InitVar`，`dataclasses.replace` 不能复制封存产物再换 SQL（Task 8） | Task 3 审查非阻断项 |

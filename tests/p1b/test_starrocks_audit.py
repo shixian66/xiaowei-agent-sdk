@@ -7,8 +7,10 @@
 
 # ruff: noqa: S608 —— 字符串拼接只用于构造测试中的审计原文与期望的模板文本。
 
+import asyncio
 import json
 import logging
+import time
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
@@ -27,6 +29,7 @@ from tests.p1b.test_starrocks_adapter import (
     only,
 )
 
+from xiaowei import starrocks
 from xiaowei.sqlguard import guard_explain_query
 from xiaowei.starrocks import (
     AUDIT_COLUMNS,
@@ -461,6 +464,28 @@ async def test_audit_failures_are_distinguished(error: BaseException, code: Code
     assert_safe(failed)
     conn = only(drv)
     assert conn.aborted
+
+
+async def test_parsing_stops_once_the_client_deadline_has_passed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """候选在线程中逐行检查；期限到达时本次调用按超时失败，线程也随即停止，不在后台检查完剩余候选。"""
+    checked: list[str] = []
+    real = starrocks._within_scope
+
+    def slow(sql: str, policy: Any) -> bool:
+        checked.append(sql)
+        time.sleep(0.05)
+        return bool(real(sql, policy))
+
+    monkeypatch.setattr(starrocks, "_within_scope", slow)
+    rows = [record("SELECT secret FROM sales", query_id=f"q{i}") for i in range(100)]
+    t = target(audit={"candidate_rows": 100})  # 客户端期限 1 秒，约可检查 20 行
+    failed = await failure(adapter(audit_driver(*rows), t).slow_queries(60, "query_time"))
+    assert failed.code is Code.TIMEOUT
+    at_deadline = len(checked)
+    await asyncio.sleep(0.5)
+    assert at_deadline < 100 and len(checked) <= at_deadline + 1  # 至多正在检查的那一行
 
 
 async def test_audit_client_deadline_disconnects_without_retry() -> None:
