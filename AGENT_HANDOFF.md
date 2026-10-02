@@ -345,7 +345,7 @@ CI integration job 设置 `SDK_TEST_POSTGRES_URL`，启动 `compose.sdk-test.yml
 
 **Task 9 离线部分（候选 `16f80d4`，干净工作树，2026-10-02）：** 完整测试、`-m security`、文档检查、正式 `serve` 浏览器 smoke、Ruff/format、mypy、锁文件一致性与 `pip-audit --strict` 均通过（数字见第 5 节）；主线 CI 在 `16f80d4` 上通过。
 
-**下一项：** 按用户 2026-10-02 的决定，Task 9 真实部分推迟到 P3 的 Docker Compose 部署完成后，在获准环境中与 P2、P3 实战一并验证；P1-B 只记为离线完成，真实退出证据保持打开（届时所需授权与环境事实仍为：真实模型 Profile 与预算（G4）、StarRocks 目标与只读账号（G1、G5）、四种投影与保留期（G2）、业务口径（G3）、Web 访问方式（G6）、飞书测试应用（G7））。当前下一项是 P2：[P2 诊断计划](docs/superpowers/plans/2026-10-02-p2-explain-diagnosis.md) 已写成：用户 2026-10-02 决定慢查询来源用审计表（`list_slow_queries` 与表布局元数据并入 P2 必交项，Query Profile 暂不实现）。待用户确认计划及 §7 的 D1（视图能否查看计划）、D3（本机可丢弃 StarRocks + AuditLoader）、D5/D6（计划信息与审计 SQL 原文的披露）后，从 Task 0 开始离线实现；生产审计源事实（G-A）在 P3 前提供。
+**下一项：** 按用户 2026-10-02 的决定，Task 9 真实部分推迟到 P3 的 Docker Compose 部署完成后，在获准环境中与 P2、P3 实战一并验证；P1-B 只记为离线完成，真实退出证据保持打开（届时所需授权与环境事实仍为：真实模型 Profile 与预算（G4）、StarRocks 目标与只读账号（G1、G5）、四种投影与保留期（G2）、业务口径（G3）、Web 访问方式（G6）、飞书测试应用（G7））。当前下一项是 P2：[P2 诊断计划](docs/superpowers/plans/2026-10-02-p2-explain-diagnosis.md) 已写成：用户 2026-10-02 决定慢查询来源用审计表（`list_slow_queries` 与表布局元数据并入 P2 必交项，Query Profile 暂不实现）。用户已确认：视图与表同等支持查看计划（D1）、可用本机可丢弃 StarRocks + AuditLoader 实测（D3）、接受计划信息披露（D5）、审计 SQL 原文可交给模型（D6）。下一步从 Task 0 实测开始离线实现；生产审计源事实（G-A）在 P3 前提供。
 
 P1-A 是内部核心。P1-B 才接真实查询与双入口并切换正式入口，P2 增加诊断，P3 做实际用户验收。Gate 0 是 Task 3 开工前例外；其他环境缺失不阻塞不依赖该环境的离线部分，但不能跳过对应实战退出条件。
 
