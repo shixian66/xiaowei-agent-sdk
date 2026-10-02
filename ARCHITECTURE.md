@@ -35,19 +35,19 @@ Agent 可以理解自然语言、生成 SQL、选择工具、根据工具结果�
 
 | 范围 | 首版做法 |
 | --- | --- |
-| 数据源 | 一个服务端配置的 StarRocks 连接，限定数据库、表或脱敏视图 |
+| 数据源 | P2 及之前为一个服务端配置的 StarRocks 连接，限定数据库、表或脱敏视图；P2 之后的数据库 MCP 阶段改为经外部 MCP Server 按目标接入多个集群（§5“数据库能力 MCP 化”） |
 | 查询 | 查元数据、生成或接收 SQL、校验后执行只读查询、解释有限结果 |
 | 诊断 | 分析用户 SQL 或上一轮 SQL、普通 EXPLAIN、给出有依据的建议 |
 | Web | 本机对话页；消息、执行提示、SQL、有限结果、诊断回答 |
 | 飞书 | 获准用户与企业自建机器人的单聊；文本输入与文本回复 |
 | 会话 | 同一入口可连续追问；Web 与飞书分别持有会话 |
-| 工具接入 | StarRocks 走薄 function tools；同时交付 SDK 原生的最小 MCP Client Integration |
+| 工具接入 | StarRocks 走薄 function tools；同时交付 SDK 原生的最小 MCP Client Integration。P2 之后数据库连接与执行改由外部 MCP Server 承担，治理仍在小维 |
 | 运行 | Docker Compose 管理一个小维应用容器和一个 PostgreSQL 容器；应用单进程，SDK Session 使用 SQLAlchemySession，应用记录独立存储；飞书优先长连接 |
-| 暂缓 | 数据修改、配置变更、自动执行优化 SQL、导出、文件上传、群聊、跨渠道账号绑定、复杂工作台、多租户、多 Agent、后台任务平台、自建业务 MCP Server |
+| 暂缓 | 数据修改、配置变更、自动执行优化 SQL、导出、文件上传、群聊、跨渠道账号绑定、复杂工作台、多租户、多 Agent、后台任务平台、在小维仓库内嵌业务 MCP Server（数据库 MCP Server 由外部独立维护） |
 
 双入口采用共享应用服务：比只交付一个入口多两端联调，但能在同一版本满足实际使用。各渠道维护独立 Agent 会造成工具、规则和结果分叉，因此不采用。复用旧 Runtime 会使设计依赖旧计划与调度机制，也不采用。
 
-Web 本机访问、飞书单聊、单连接是控制首版规模的设计默认值，不代表已经验证的部署能力。增加多人 Web 或公网服务时，必须先补适合该环境的身份与访问控制。
+Web 本机访问、飞书单聊、P2 及之前的单连接是控制首版规模的设计默认值，不代表已经验证的部署能力。增加多人 Web 或公网服务时，必须先补适合该环境的身份与访问控制。
 
 ## 3. 架构与请求路径
 
@@ -84,7 +84,7 @@ flowchart TD
     O --> C
 ```
 
-MCP Client Integration 与 Web/飞书共享同一个后端。图中外部 Server 是接入边界，首版不交付自建数据库、Jenkins 或 K8s MCP 服务；本地 StarRocks 路径不依赖 MCP 可用性。远端请求先经过小维治理，远端自身仍需鉴权并约束实际执行。
+MCP Client Integration 与 Web/飞书共享同一个后端。图中外部 Server 是接入边界，小维仓库不内嵌数据库、Jenkins 或 K8s MCP 服务；数据库 MCP Server 由外部独立维护（责任方待定，见 §5“数据库能力 MCP 化”）。P2 及之前的本地 StarRocks 路径不依赖 MCP 可用性。远端请求先经过小维治理，远端自身仍需鉴权并约束实际执行。
 
 SDK 负责模型与工具调用循环；应用负责接入、实际权限、领域工具和运行边界。首版直接调用非流式 `Runner.run`，不解析模型文本自行调用工具，不创建通用计划编译器，不在 SDK 外面再运行一套 Agent 引擎。渠道的“处理中”等状态提示由应用生成，不依赖模型文本流。
 
@@ -167,7 +167,7 @@ Action Binding 将批准绑定到代码生成的动作标识、申请人和审�
 
 本地路径是 **function tool → Governed Tool Service → StarRocks Adapter**；远端路径是 **MCP Integration → 小维调用前治理 → SDK MCP Client → 外部 MCP Server**。返回结果均先经小维过滤和 Evidence 绑定，再交给 SDK。共享的是身份/目标授权、预算、结果策略与证据验证；SQLGuard 只用于适用的 SQL 工具，不能声称客户端能约束未知远端实现内部的全部行为。
 
-本地治理服务使用稳定的类型化 request/response，SDK 装饰函数只转换参数和调用。领域逻辑不依赖 MCP 报文或 SDK context 类型。将来自建 MCP Server 可复用同一领域服务代码；第三方 Server 不假定能复用它，必须独立核查认证、目标绑定、执行限制与返回契约。Adapter 负责协议、连接生命周期和有界 I/O，不替模型作决策。
+本地治理服务使用稳定的类型化 request/response，SDK 装饰函数只转换参数和调用。领域逻辑不依赖 MCP 报文或 SDK context 类型。数据库能力改走外部 MCP Server 后，领域校验（SQLGuard、范围与上限）仍在小维执行；外部 Server 不假定复用小维代码，必须按接入约定独立核查认证、目标绑定、执行限制与返回契约。Adapter 负责协议、连接生命周期和有界 I/O，不替模型作决策。
 
 治理层首版是共享的少量函数或服务方法，工具只调用对应的受治理方法；不另建通用工作流、调度器或第二套 Agent Loop。凭据只在应用私有配置和 Adapter 生命周期内使用，错误及日志不得携出。最终 Evidence 发送验证是独立的输出关口，不能用执行成功替代。
 
@@ -191,6 +191,34 @@ MCP Integration 的治理必须覆盖实际发送动作，不能只过滤 `list_
 对已经支持的认证、参数与结果契约，增加 Server 应主要修改配置；新领域语义、风险或返回格式仍可能需要新的策略/转换代码。一个 Server 可以有多个连接实例，但共享缓存或连接不得串用不同用户的权限和凭据。远端可接收的输入也受限制，不能把本地身份、会话历史、预算对象整体序列化转发。
 
 配置为空时不建立连接、不增加产品启动依赖；启用后必须具备真实协议级验证。测试可启动只服务合成数据的临时 MCP fixture，它不属于产品部署或业务 MCP Server。未来服务按领域、权限、网络、凭据和部署生命周期拆分，当前不预设数量。
+
+### 数据库能力 MCP 化（已定方向，P2 之后实施）
+
+用户 2026-10-02 确认：数据库连接与执行以后由外部 MCP Server 承担，Server 独立部署与维护，不内嵌在小维中（外部 Server 责任方待定）；小维保留全部治理。P2 继续使用本地 asyncmy 直连完成，不为 MCP 重写；切换放在 P2 完成后、P3 之前的单独阶段（[DEVELOPMENT_PLAN.md](DEVELOPMENT_PLAN.md) §6）。接入要求见 [数据库 MCP Server 接入约定](docs/contracts/database-mcp-server.md)。
+
+| 职责 | 小维 | 外部数据库 MCP Server |
+| --- | --- | --- |
+| 授权与范围 | 身份、目标/集群授权、Tool Scope、对象/列/函数 allowlist、预算 | 只接受小维登记的调用方，按集群标识选连接，未知集群拒绝 |
+| SQL | SQLGuard 校验与规范化；决定执行的那一条语句与 EXPLAIN 级别 | 只执行收到的那一条语句，不改写、不追加 |
+| 执行约束 | 发出前复核权限、参数、目标与预算；对返回再做大小与契约检查 | 只读账号；每次执行前设置并回读会话限额；有界读取、截断标记；固定错误码 |
+| 结果与证据 | Evidence、四种投影、Session、最终回答验证、确认流程 | 返回约定 schema 的结果，不承担证据或展示判断 |
+
+**调用链：** Governed Tool（本地 function tool）→ SQLGuard / 治理（范围、参数、预算、当前授权）→ Adapter → SDK MCP Client → 外部 Server。Adapter 的接口与治理语义不变，只是把“连接数据库执行”换成“经 MCP Client 调用 Server”。不把 Server 的 MCP 工具直接交给 Agent，模型不能绕过 SQLGuard 把 SQL 发给 Server；这与上文通用 MCP 工具（经治理包装、但不经 SQLGuard）是两条不同路径。
+
+**读写分离：** 查询 Server 只连接数据库只读账号，不提供任何写能力。以后的 DDL 使用单独部署的写 Server 与受限写账号，只提供结构化动作，并按 §4“未来生产变更”的 Action 规则执行；首版仍只读，不预建写框架。
+
+**多集群：** 以后至少接入 3 个 StarRocks 集群，之后还会有 MySQL/TiDB 等。每个集群是一个独立目标（target），有自己的 allowlist、授权、业务口径与 Evidence 归属；授权由小维按目标判定，Server 只按调用携带的集群标识选择连接。新的数据库类型需要对应方言的 SQL 校验，不能沿用 StarRocks 的 SQLGuard 规则直接放行。
+
+**连接级保证不会自动继承。** 当前由本地 Adapter 落实的保证——只读账号、`query_timeout`/`query_mem_limit`/`time_zone` 的设置与回读、单语句原样执行、EXPLAIN 只用固定显式级别 `LOGICAL`、行数/字节/单值上限与截断标记、超时与中断时断开、错误不携带连接信息与原文、连接槽位与期限——切换后转由 Server 实现。它们必须写入接入约定、由 Server 实现，并经小维逐项验收后才能视为成立；小维对返回结果的大小与契约检查保留，但不能替代 Server 的执行约束。
+
+**当前缺口（`1b869a2` 源码事实）：**
+
+- 正式入口 `runtime.py` 没有装配 `MCPIntegration`，配置文件没有 `mcp` 段；
+- MCP 工具调用前只做权限、参数与预算检查，不经 SQLGuard；
+- 到 Server 的认证只支持静态 Bearer；远端工具只在启动时发现一次，Server 断开后不自动重连；
+- 没有写工具的开放路径；尚未接过任何真实外部 MCP Server；
+- 配置与装配只支持一个 StarRocks 目标（RunContext、Evidence 已按 `target_id` 区分）；
+- Evidence 的数据范围摘要（`data_scope_digest`）不含连接端点与账号（host/port/user）；切换后需改为绑定 Server 标识与集群标识，换 Server 或集群时旧证据失效。
 
 ### 首版 StarRocks 工具
 
