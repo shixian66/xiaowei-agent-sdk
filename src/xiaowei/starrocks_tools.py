@@ -201,7 +201,7 @@ def starrocks_tools(adapter: StarRocksAdapter, max_bytes: Mapping[Audience, int]
                 LAYOUT_TOOL,
                 layout_policy,
                 "查看一张允许查询的表的布局：表模型、分区键、分桶方式与键、桶数、排序键与主键。"
-                "含未获准列的键不显示；视图没有布局，返回空结果。",
+                "含未获准列的键不显示；视图或当前账号看不到的表返回空结果。",
             ),
             contract(
                 RUN_QUERY,

@@ -365,7 +365,13 @@ CI integration job 设置 `SDK_TEST_POSTGRES_URL`，启动 `compose.sdk-test.yml
   - **计划偏离（审查接受）：** 示例配置的 `starrocks.audit` 留到 Task 6（该字段届时才存在）；`test_facts_header_is_neutral` 未单独成用例，标题断言分散在多个测试中。
   - **Task 7 验收重点：** `PLAN_NOTE` 只出现在交付内容中，模型收到的工具结果不含它；模型能否写明“计划只是估算、未执行原查询”依赖工具说明与 Task 7 的诊断指令。
 - **Task 5（`1abaca0`，独立审查通过，无阻断）：** `StarRocksAdapter.describe_layout(name)` 与工具 `local/describe_table_layout`（与 `describe_table` 共用对象前置检查，Adapter 内再查一次）：代码模板 + 绑定参数读 `information_schema.tables_config` 的表模型、分区键、分桶方式与键、桶数、排序键、主键，不读 `PROPERTIES`/`TABLE_ID`；视图以 `TABLE_ENGINE <> 'VIEW'` 排除，返回空结果（计划 §2.5 二选一，选空结果）。键字段按逗号拆分、去反引号后每个名字都须是该对象的获准列（精确匹配），否则整段替换为“（含未获准列，未显示）”，不保留获准部分；无法拆成列名的表达式同样替换。多于一行、列不符、键非文本或被截断 → `result_contract`。诊断与查询用途都可见；策略共用同一 `data_scope`、无 `fact_note`；`metadata_sql_bytes` 计入新模板。离线 `tests/sdk_core tests/p1b -W error` 1219 passed；正式入口（`runtime.serve` + Web API）布局成功与越权零 I/O 通过；本机可丢弃 StarRocks 4.1.4（同一 digest）真实 17 passed：DUP/表达式分区（`date_trunc('day', ts)` 只显示 `ts`）/主键表含未获准列被整段隐藏/视图与无权限表无行；9 项隔离变异全部被发现。未覆盖：物化视图与外表的布局取值；生产版本的 `tables_config` 列（P3 复核）。
-- **下一步：** Task 6 → Task 5 → Task 6。E3 已决定（方案 A，用户 2026-10-02：审计原文由代码过 `guard_explain_query`），Task 6 解除暂停；E4 已决定（用户 2026-10-02：不列出可能被截断的审计记录，`stmt_limit` 必填并在装配时要求 `max_sql_bytes <= stmt_limit - 4`）。生产审计源事实（G-A）在 P3 前提供。
+- **Task 5 审查的非阻断项：**
+  - **升级影响：** 配置开放 `describe_table_layout` 后 `model_tools` 变化，已有会话按既有规则提示新建；数据范围摘要不变，已有证据不失效；最坏容量基本不变（新模板短于 `max_sql_bytes + 16`）。
+  - **已改：** 工具说明改为“视图或当前账号看不到的表返回空结果”，避免模型把空结果解读为视图（说明文字不进入指纹）。
+  - **P3 复核：** `model` 与 `distribute_type` 原样透传；测物化视图、外表时核对这两个字段的实际取值，必要时改为只接受已知枚举。
+  - **Task 7 诊断指令须写明：** 表达式分区只显示列名、不显示粒度（`date_trunc('day', ts)` 只显示 `ts`），分区裁剪效果须结合计划中的 `partitionRatio` 判断。
+  - **可选测试缺口：** 布局被拒后再调合法工具证明预算未占；单值超限截断的布局契约用例。两者走已有机制与同一路径。
+- **下一步：** Task 6。E3 已决定（方案 A，用户 2026-10-02：审计原文由代码过 `guard_explain_query`），Task 6 解除暂停；E4 已决定（用户 2026-10-02：不列出可能被截断的审计记录，`stmt_limit` 必填并在装配时要求 `max_sql_bytes <= stmt_limit - 4`）。生产审计源事实（G-A）在 P3 前提供。
 
 P1-A 是内部核心。P1-B 才接真实查询与双入口并切换正式入口，P2 增加诊断，P3 做实际用户验收。Gate 0 是 Task 3 开工前例外；其他环境缺失不阻塞不依赖该环境的离线部分，但不能跳过对应实战退出条件。
 
