@@ -352,7 +352,14 @@ CI integration job 设置 `SDK_TEST_POSTGRES_URL`，启动 `compose.sdk-test.yml
 - **方向已定（用户 2026-10-02 确认）：** 数据库能力以后走外部 MCP Server（责任方待定），治理留在小维；新增阶段“P2.5 数据库 MCP 接入与多集群”，位于 P2 完成后、P3 之前，见 [DEVELOPMENT_PLAN.md](DEVELOPMENT_PLAN.md) §6 与 [接入约定](docs/contracts/database-mcp-server.md)。P2 仍用本地 asyncmy 直连完成。
 - **Task 2（`20314cc`，独立审查通过，无阻断）：** `guard_explain_query` 与 `guard_readonly_query` 共用同一校验（`_guard`），唯一差别是不改写 LIMIT；产物 `ExplainQuery` 是独立封存类型，与 `GuardedQuery` 无继承关系、不可直接构造。离线证据：128 个查询拒绝样例在 explain 路径给出相同原因码与固定说明、异常链为空；`EXPLAIN`/`EXPLAIN ANALYZE`/`LOGICAL`/`DESC`/`TRACE`/`ANALYZE TABLE` 等前缀输入 `unsupported_syntax`；获准视图与表同等通过，未获准视图 `object_not_allowed`；规范化幂等，上一轮 `GuardedQuery.normalized_sql` 输入后不变。`tests/p1b tests/sdk_core -W error` 1146 passed（隔离 PostgreSQL），Ruff、format、`mypy src`、`git diff --check` 通过；3 项隔离变异（explain 改写 LIMIT、跳过对象/列校验、不封存）全部被发现。尚无调用方：Adapter 以固定级别执行与类型互斥属 Task 3。
 - **Task 3（`9a11b45`，独立审查通过，无阻断）：** `StarRocksAdapter.explain(ExplainQuery)` 只发出 `EXPLAIN LOGICAL ` + 规范化 SQL（级别为模块常量，调用方不可选择），复用查询路径的槽位、期限、会话限额设置与回读、非缓冲有界读取与截断即断开；结果须恰为一列文本，列名固定为 `plan`，否则 `result_contract`；计划行数上限为新配置 `max_plan_lines`（默认 500），不随查询 LIMIT 或 `max_rows`。`run_query`/`explain` 互拒对方产物且不建连接。`data_scope_digest` 加入 `host`/`port`/`user`/`max_plan_lines`（部署后已有 StarRocks 证据一次性失效）；`password_ref`、期限与时区不在摘要内。离线 `tests/p1b tests/sdk_core -W error` 1175 passed（隔离 PostgreSQL）；本机可丢弃 StarRocks 4.1.4 真实测试 16 passed：表/视图/CTE 计划不含列统计与资源组，未授权对象 `permission_denied`，紧会话限额下可用与 `max_plan_lines` 截断；FE `query_explain_level=ANALYZE` 时 Adapter 对 `ASSERT_TRUE` 与 `SLEEP(5)` 只返回计划、Profile 不增，阳性对照裸 `EXPLAIN` 确实执行，结束恢复 NORMAL。10 项隔离变异全部被发现。未覆盖：工具登记、带前缀 SQL 比 `max_sql_bytes` 多 16 字节与投影最坏容量（Task 4）；物化视图改写的计划输出未实测。
-- **下一步：** Task 4 → Task 5 → Task 6。E3 已决定（方案 A，用户 2026-10-02：审计原文由代码过 `guard_explain_query`），Task 6 解除暂停；E4 已决定（用户 2026-10-02：不列出可能被截断的审计记录，`stmt_limit` 必填并在装配时要求 `max_sql_bytes <= stmt_limit - 4`）。生产审计源事实（G-A）在 P3 前提供。
+- **Task 3 审查的非阻断项：**
+  - **Task 4 验收门槛：** 登记 `explain_query` 前须先让返回的 `sql`（带 16 字节前缀）不超过投影上限，并让启动时 `worst_case_observation` 按 `max_plan_lines` 与带前缀 SQL 计算最坏容量。
+  - **技术债：** `dataclasses.replace` 能绕过 `ExplainQuery` 与 `GuardedQuery` 的封存，仅进程内代码可为，风险低。复查条件：出现新的构造或复制这两个产物的代码时修复。
+  - **披露检查不完整：** 真实测试只断言计划不含 column statistics 与 `RESOURCE GROUP` 两个标记，能防选错级别，不是完整披露审查。StarRocks 升级版本时按 Task 0 方式重测零执行与披露范围。
+  - **未验证的低风险：** 客户端超时只断开连接、不发 `KILL QUERY`（与查询路径相同）；EXPLAIN 只在 FE 优化不执行，但断开后 FE 优化是否立即停止未实测。
+  - **缺口：** 物化视图改写时的计划输出未实测（Task 0 亦未测）；物化视图名在已批准披露范围内，输出是否带其他内容待测。
+  - **流程偏离（审查接受）：** 先实现后补测试，以 10 项变异全部被发现作补充证据。
+- **下一步：** Task 4（先满足上述两项门槛再登记工具）→ Task 5 → Task 6。E3 已决定（方案 A，用户 2026-10-02：审计原文由代码过 `guard_explain_query`），Task 6 解除暂停；E4 已决定（用户 2026-10-02：不列出可能被截断的审计记录，`stmt_limit` 必填并在装配时要求 `max_sql_bytes <= stmt_limit - 4`）。生产审计源事实（G-A）在 P3 前提供。
 
 P1-A 是内部核心。P1-B 才接真实查询与双入口并切换正式入口，P2 增加诊断，P3 做实际用户验收。Gate 0 是 Task 3 开工前例外；其他环境缺失不阻塞不依赖该环境的离线部分，但不能跳过对应实战退出条件。
 
