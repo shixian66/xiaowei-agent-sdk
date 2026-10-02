@@ -351,7 +351,8 @@ def _policy_fingerprint(contract: ToolContract, policy: ToolPolicy) -> str:
     """契约（参数 schema 与目标）、结果契约、四种投影的字段/上限、必需字段与投影规则的稳定摘要。
 
     结果契约决定远端数据如何成为事实，改变后旧证据不再可用；schema 的标题与说明文字、交给
-    模型的工具说明只影响阅读，不参与摘要。
+    模型的工具说明只影响阅读，不参与摘要。策略声明了数据范围时一并加入：范围变化后旧证据
+    失效；未声明时摘要与不含该项的公式相同，已保存的其他工具证据不受影响。
     """
     result = policy.result
     body = {
@@ -368,6 +369,8 @@ def _policy_fingerprint(contract: ToolContract, policy: ToolPolicy) -> str:
         # 只有集合语义：顺序不同的同一组必需字段得到相同摘要。
         "required": sorted(policy.required),
     }
+    if policy.data_scope is not None:
+        body["data_scope"] = policy.data_scope
     canonical = json.dumps(body, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
     return f"sha256:{hashlib.sha256(canonical.encode()).hexdigest()}"
 

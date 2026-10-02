@@ -108,6 +108,9 @@ class ToolPolicy:
 
     ``required`` 是每种用途都必须完整保留的字段：结果缺少它们，或任一投影放不下它们时，
     证据生成失败，结果不交给模型，而不是静默省略。
+
+    ``data_scope`` 是结果所依赖的当前数据范围（对象、列、函数与读取上限）的稳定摘要，进入
+    策略指纹：以改变了范围的配置装配后，旧证据不再可读。不依赖目标数据范围的工具为 ``None``。
     """
 
     policy_id: str
@@ -115,6 +118,7 @@ class ToolPolicy:
     projections: Mapping[str, Projection]
     result: type[BaseModel] | None = None
     required: tuple[str, ...] = ()
+    data_scope: str | None = None
 
 
 class ToolCatalog:

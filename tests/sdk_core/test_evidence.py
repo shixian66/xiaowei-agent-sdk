@@ -598,3 +598,17 @@ async def test_app_schema_version_is_checked(postgres_url: URL) -> None:
 
     migration = files("xiaowei").joinpath("migrations/001_initial.sql").read_text(encoding="utf-8")
     assert "agent_" not in migration
+
+
+async def test_non_starrocks_fingerprints_are_unchanged(postgres_url: URL) -> None:
+    """不依赖数据范围的工具（``data_scope=None``）保存的策略指纹与 P1-B 基线公式的值相同。
+
+    期望值在 ``949cb32`` 上由同一合成策略算出；改变它会使已保存的 MCP 与合成工具证据失效。
+    """
+    grants = Grants()
+    grants.grant("alice", TOTAL_TOOL)
+    async with ready_engine(postgres_url) as engine:
+        await _record(store(engine, grants, Clock()))
+        async with engine.connect() as conn:
+            saved = await conn.scalar(text("SELECT policy_fingerprint FROM xiaowei_evidence"))
+    assert saved == "sha256:634ef1d4f2174b006535f3d045742a9c8d9b1148fc5afc82fc54cba135be6750"

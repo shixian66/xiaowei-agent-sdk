@@ -9,10 +9,14 @@
 获准列与有限行，只有容量不同。装配时按声明上限构造序列化后最大的合成结果，直接交给证据的
 真实投影器检查 Web 与飞书两条路径，任一路径放不下即拒绝启动；运行时 ``EvidenceStore`` 仍会
 在必需字段放不下时中止本轮。
+
+三个策略共用 ``data_scope_digest``：证据只在装配时的数据范围下可读，以收窄（或任何改动）
+范围的配置启动后，已保存的 StarRocks 证据不再进入模型、Session 或渠道。
 """
 
 from __future__ import annotations
 
+import hashlib
 import json
 from collections.abc import Mapping
 from dataclasses import dataclass
@@ -36,6 +40,7 @@ from xiaowei.starrocks import (
     StarRocksAdapter,
     StarRocksError,
     StarRocksErrorCode,
+    StarRocksTarget,
     metadata_sql_bytes,
 )
 
@@ -90,12 +95,15 @@ def starrocks_tools(adapter: StarRocksAdapter, max_bytes: Mapping[Audience, int]
         a: Projection(fields=RESULT_FIELDS, max_bytes=max_bytes[a]) for a in AUDIENCES
     }
 
+    scope = data_scope_digest(target)
+
     def policy(name: str, arguments: type[BaseModel]) -> ToolPolicy:
         return ToolPolicy(
             policy_id=f"starrocks.{name}",
             arguments=arguments,
             projections=projections,
             required=RESULT_FIELDS,
+            data_scope=scope,
         )
 
     def contract(tool_id: str, tool_policy: ToolPolicy, description: str) -> ToolContract:
@@ -165,6 +173,28 @@ def starrocks_tools(adapter: StarRocksAdapter, max_bytes: Mapping[Audience, int]
             RUN_QUERY: Prechecked(check=check_query, run=run_query),
         },
     )
+
+
+def data_scope_digest(target: StarRocksTarget) -> str:
+    """目标数据范围的稳定摘要：允许的对象、列与函数，以及决定可读数据多少的上限。
+
+    集合排序、键排序后再序列化：与配置的书写顺序和进程的哈希种子无关，同一范围重启后摘要
+    不变。函数名已由 ``QueryPolicy`` 统一为大写。只决定连接、期限与时区表示的字段不进入摘要。
+    """
+    policy = target.policy
+    body = {
+        "target_id": target.target_id,
+        "default_database": policy.default_database,
+        "allowed_objects": sorted(policy.allowed_objects),
+        "allowed_columns": {name: sorted(cols) for name, cols in policy.allowed_columns.items()},
+        "allowed_functions": sorted(policy.allowed_functions),
+        "max_rows": policy.max_rows,
+        "max_sql_bytes": policy.max_sql_bytes,
+        "max_result_bytes": target.max_result_bytes,
+        "max_value_bytes": target.max_value_bytes,
+    }
+    canonical = json.dumps(body, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+    return f"sha256:{hashlib.sha256(canonical.encode()).hexdigest()}"
 
 
 def worst_case_observation(adapter: StarRocksAdapter) -> ToolObservation:

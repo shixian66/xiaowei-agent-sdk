@@ -7,6 +7,9 @@ Task 2 的 recording 驱动替身）+ ``EvidenceStore`` / ``PolicySession`` + �
 """
 
 import json
+import os
+import subprocess
+import sys
 from collections.abc import AsyncIterator
 from dataclasses import dataclass, field, replace
 from typing import Any
@@ -32,19 +35,34 @@ from tests.sdk_core.test_app import (
 )
 
 from xiaowei.app import AppConfig, Application, BusinessContext, DataPolicy, Mode, TurnError
-from xiaowei.evidence import AnswerRejectedError, EvidenceStore, EvidenceStoreError
+from xiaowei.evidence import (
+    AnswerRejectedError,
+    EvidenceStore,
+    EvidenceStoreError,
+    EvidenceUnavailableError,
+)
 from xiaowei.governance import GovernedTools, Prechecked, ToolCatalog, ToolRejectedError
 from xiaowei.model_api import ModelBinding, open_model
-from xiaowei.models import Budget, Channel, Delivery, Identity, RunContext, ToolRequest
+from xiaowei.models import (
+    AUDIENCES,
+    AgentAnswer,
+    Budget,
+    Channel,
+    Delivery,
+    Identity,
+    RunContext,
+    ToolRequest,
+)
 from xiaowei.session import SessionInputPolicy, SessionLimits
 from xiaowei.sqlguard import guard_readonly_query
-from xiaowei.starrocks import StarRocksAdapter
+from xiaowei.starrocks import StarRocksAdapter, StarRocksTarget
 from xiaowei.starrocks_tools import (
     DESCRIBE_TABLE,
     DIAGNOSE_TOOLS,
     LIST_TABLES,
     QUERY_TOOLS,
     RUN_QUERY,
+    data_scope_digest,
     starrocks_tools,
 )
 
@@ -590,3 +608,131 @@ async def test_an_unexpected_precheck_failure_is_a_fixed_rejection_without_io(en
     # 拒绝未占预算：上限为 1 时同一轮仍可执行一次。
     await env.governed.invoke(ctx, request, env.executes[RUN_QUERY])
     assert env.drv.attempts == 1
+
+
+# ---- 证据绑定当前数据范围（P2 Task 1）-----------------------------------------------------
+
+
+def scoped(**changes: Any) -> StarRocksTarget:
+    """以 SR 为基础的目标配置；``policy`` 中的键改写 SQLGuard allowlist，其余改写目标本身。"""
+    data = SR.model_dump(mode="json")
+    data["policy"].update(changes.pop("policy", {}))
+    data.update(changes)
+    return StarRocksTarget.model_validate(data)
+
+
+def reassembled(env: Env, target: StarRocksTarget) -> tuple[EvidenceStore, Application]:
+    """以另一份目标配置重新装配目录、证据与应用，共用同一 PostgreSQL：模拟改配置后重启。"""
+    tools = starrocks_tools(
+        StarRocksAdapter(target, connect=env.drv, clock=lambda: NOW),
+        dict.fromkeys(AUDIENCES, CAPACITY),
+    )
+    evidence = EvidenceStore(
+        env.engine,
+        ToolCatalog(tools.contracts, tools.policies),
+        authorize=env.grants,
+        clock=env.clock,
+        retention_seconds=3600,
+    )
+    app = Application(
+        app_config(),
+        model=env.binding,
+        engine=env.engine,
+        governance=GovernedTools(evidence),
+        local_tools=tools.executes,
+        clock=env.clock,
+    )
+    return evidence, app
+
+
+async def queried(env: Env) -> tuple[RunContext, AgentAnswer]:
+    message = env.scripts.add(
+        "东区", tool_call("run_readonly_query", sql="SELECT region FROM sales"), cite()
+    )
+    ctx = env.ctx()
+    return ctx, await env.app.run_turn(ctx, message)
+
+
+# 与 SR 相同的范围，只是集合的书写顺序、映射键顺序与函数名大小写不同。
+SAME_SCOPE = scoped(
+    policy={
+        "allowed_objects": ["sales", "regions"],
+        "allowed_columns": {"regions": ["region", "name"], "sales": ["total", "note", "region"]},
+        "allowed_functions": ["count", "Sum"],
+    }
+)
+NARROWED = {
+    "移除无关对象": scoped(
+        policy={
+            "allowed_objects": ["sales"],
+            "allowed_columns": {"sales": ["region", "total", "note"]},
+        }
+    ),
+    "移除证据所用对象": scoped(
+        policy={"allowed_objects": ["regions"], "allowed_columns": {"regions": ["name", "region"]}}
+    ),
+    "移除一列": scoped(
+        policy={"allowed_columns": {"sales": ["region", "total"], "regions": ["name", "region"]}}
+    ),
+    "移除一个函数": scoped(policy={"allowed_functions": ["SUM"]}),
+    "降低 max_rows": scoped(policy={"max_rows": 4}),
+    "降低 max_sql_bytes": scoped(policy={"max_sql_bytes": 3000}),
+    "降低 max_result_bytes": scoped(max_result_bytes=500),
+    "降低 max_value_bytes": scoped(max_value_bytes=100),
+}
+
+
+def test_scope_digest_is_stable_across_processes() -> None:
+    """集合的迭代顺序随进程哈希种子变化；摘要若依赖它，每次重启都会让全部证据失效。"""
+    script = (
+        "from tests.p1b.test_starrocks_adapter import TARGET\n"
+        "from xiaowei.starrocks_tools import data_scope_digest\n"
+        "print(data_scope_digest(TARGET))"
+    )
+    digests = {
+        subprocess.run(  # noqa: S603 - 固定参数：当前解释器与本文件内的脚本
+            [sys.executable, "-c", script],
+            env={**os.environ, "PYTHONHASHSEED": str(seed)},
+            capture_output=True,
+            text=True,
+            check=True,
+        ).stdout.strip()
+        for seed in range(6)
+    }
+    assert digests == {data_scope_digest(SR)}
+
+
+async def test_evidence_stays_readable_when_scope_is_unchanged(env: Env) -> None:
+    ctx, answer_ = await queried(env)
+    (evidence_id,) = answer_.evidence_ids
+    evidence, app = reassembled(env, SAME_SCOPE)
+    for audience in ("model", "session", "web"):
+        await evidence.project(evidence_id, ctx, audience)
+    await evidence.validate_answer(answer_, ctx)
+    # 同一会话继续：回放旧证据后模型正常续轮。
+    followup = env.scripts.add("再看一次", cite("仍然平稳"))
+    await app.run_turn(env.ctx(turn="t2"), followup)
+    assert len(env.scripts.calls[followup]) == 1
+
+
+@pytest.mark.parametrize("target", NARROWED.values(), ids=NARROWED.keys())
+async def test_scope_change_invalidates_old_evidence(env: Env, target: StarRocksTarget) -> None:
+    """授权表与工具契约都不变、只改数据范围或上限：以新配置装配后旧证据处处不可读。
+
+    粒度是整个目标的范围：移除与该证据无关的对象同样使它失效（计划 §2.0 的取舍）。
+    """
+    ctx, answer_ = await queried(env)
+    (evidence_id,) = answer_.evidence_ids
+    evidence, app = reassembled(env, target)
+    for audience in ("model", "session", "web"):
+        with pytest.raises(EvidenceUnavailableError):
+            await evidence.project(evidence_id, ctx, audience)
+    with pytest.raises(AnswerRejectedError):
+        await evidence.validate_answer(answer_, ctx)
+
+    followup = env.scripts.add("再看一次", cite())
+    with pytest.raises(TurnError) as refused:
+        await app.run_turn(env.ctx(turn="t2"), followup)
+    assert refused.value.reason == "session_unavailable"
+    assert followup not in env.scripts.calls  # 首个模型调用前拒绝
+    assert env.drv.attempts == 1  # 只有第一轮的查询
