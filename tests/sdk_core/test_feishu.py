@@ -8,6 +8,7 @@
 import asyncio
 import json
 import logging
+import re
 import threading
 from collections.abc import AsyncIterator, Callable, Iterator
 from contextlib import asynccontextmanager, contextmanager
@@ -32,6 +33,7 @@ from xiaowei.config import FeishuConfig
 from xiaowei.evidence import EvidenceStoreError
 from xiaowei.feishu import (
     EMPTY_COMMAND,
+    FACTS_TRUNCATED,
     NEW_SESSION,
     NEW_SESSION_BUSY,
     TRUNCATED,
@@ -42,7 +44,7 @@ from xiaowei.feishu import (
     send_outcome,
 )
 from xiaowei.governance import GovernedTools
-from xiaowei.models import Channel, Delivery, RunContext
+from xiaowei.models import Channel, Delivery, DeliveryLayout, FactLines, RunContext
 from xiaowei.storage import Readiness, hold_instance_lock
 
 pytestmark = pytest.mark.loopback
@@ -813,14 +815,145 @@ async def test_drain_waits_for_commands_and_duplicates(env: Env) -> None:
 # ---- 文本渲染与发送结果映射 -----------------------------------------------------------------
 
 
+def plain(content: str) -> Delivery:
+    """没有分段的交付（澄清、固定回执）。"""
+    return Delivery(content=content, evidence_ids=(), channel="feishu")
+
+
 def test_render_keeps_short_text_and_truncates_long_text_on_a_line() -> None:
-    assert render("短文本", 200) == "短文本"
+    assert render(plain("短文本"), 200) == "短文本"
     long = "\n".join(f"第{i}行" + "x" * 40 for i in range(50))
-    shown = render(long, 300)
+    shown = render(plain(long), 300)
     assert len(shown) <= 300 and shown.endswith(TRUNCATED)
     body = shown.removesuffix("\n" + TRUNCATED)
     assert long.startswith(body) and long[len(body)] == "\n"
-    assert render("y" * 1000, 250).endswith(TRUNCATED) and len(render("y" * 1000, 250)) <= 250
+    one_line = render(plain("y" * 1000), 250)
+    assert one_line.endswith(TRUNCATED) and len(one_line) <= 250
+
+
+# ---- 飞书单条上限：先保住分析（审查 F2，用户 2026-10-02 选 a） ------------------------------
+
+DIAGNOSIS = "分析建议（模型推断，未经系统核实）"
+FACTS = "工具结果（系统根据证据生成）"
+# 一行中的转义：单字符转义、\uXXXX、单元格中的 \|。
+ESCAPED = "a\\u2028b\\u202ec\\\\d\\|e\\n"
+
+
+def fact(index: int, rows: int, cell: str = "x" * 30) -> FactLines:
+    return FactLines(
+        head=(f"[ev_{index}] 来源 local/explain_query · 目标 sr · 采集于 t", f"说明：说明{index}"),
+        # 每行文字各不相同，便于按原顺序核对保留了哪些行。
+        body=(
+            f"sql: SELECT {index}",
+            f"| plan{index} |",
+            *(f"| {cell}{index}-{i} |" for i in range(rows)),
+        ),
+    )
+
+
+def laid_out(*facts: FactLines, analysis: tuple[str, ...] = ()) -> Delivery:
+    layout = DeliveryLayout(facts_header=FACTS, facts=facts, analysis=analysis)
+    return Delivery(
+        content="\n".join(layout.lines()),
+        evidence_ids=("ev_1",),
+        channel="feishu",
+        layout=layout,
+    )
+
+
+ANALYSIS = (DIAGNOSIS, "- 全表扫描；建议加日期过滤（依据：ev_1）", "- 分桶键倾斜（依据：ev_2）")
+
+
+def test_render_is_unchanged_up_to_the_limit() -> None:
+    delivery = laid_out(fact(1, 3), fact(2, 3), analysis=ANALYSIS)
+    exact = len(delivery.content)
+    assert render(delivery, exact) == delivery.content  # 刚好等于上限：逐字不变
+    shown = render(delivery, exact - 1)
+    assert shown != delivery.content and len(shown) <= exact - 1
+
+
+def test_over_the_limit_keeps_the_analysis_and_every_fact_head() -> None:
+    facts = (fact(1, 40), fact(2, 40), fact(3, 40))
+    delivery = laid_out(*facts, analysis=ANALYSIS)
+    shown = render(delivery, 1200)
+    lines = shown.split("\n")
+
+    assert len(shown) <= 1200
+    # 完整分析在最后，紧接在工具结果截断说明之后；不使用整条截断说明，也不指向 Web。
+    assert lines[-len(ANALYSIS) :] == list(ANALYSIS)
+    assert lines[-len(ANALYSIS) - 1] == FACTS_TRUNCATED and TRUNCATED not in shown
+    assert "Web" not in shown
+    # 每条事实的来源行与说明行都保留；结果行按原顺序从前往后保留，放不下的被截掉。
+    assert lines[0] == FACTS
+    for item in facts:
+        assert all(line in lines for line in item.head)
+    kept = lines[1 : -len(ANALYSIS) - 1]
+    original = [line for item in facts for line in (*item.head, *item.body)]
+    assert kept == [line for line in original if line in kept]
+    assert set(kept) < set(original)
+
+
+def test_analysis_alone_over_the_limit_is_cut_from_the_end_under_its_title() -> None:
+    analysis = (
+        DIAGNOSIS,
+        *(f"- 第{i}条分析" + "很长" * 30 + f"（依据：ev_{i}）" for i in range(40)),
+    )
+    delivery = laid_out(fact(1, 5), analysis=analysis)
+    shown = render(delivery, 600)
+    lines = shown.split("\n")
+
+    assert len(shown) <= 600 and lines[-1] == TRUNCATED
+    assert lines[:3] == [FACTS, FACTS_TRUNCATED, DIAGNOSIS]
+    body = lines[3:-1]
+    assert body and body == list(analysis[1 : 1 + len(body)])  # 只保留完整的分析行
+
+
+@pytest.mark.parametrize("limit", range(200, 260))
+def test_cutting_a_line_never_splits_an_escape(limit: int) -> None:
+    line = "- " + ESCAPED * 40
+    for delivery in (laid_out(fact(1, 1), analysis=(DIAGNOSIS, line)), plain(line)):
+        shown = render(delivery, limit)
+        assert len(shown) <= limit
+        cut = shown.split("\n")[-2]
+        assert line.startswith(cut)
+        # 截下的前缀不以半个转义结尾：反斜杠成对出现，\u 后跟满四位。
+        assert re.search(r"(?<!\\)(\\\\)*\\(u[0-9a-f]{0,3})?$", cut) is None, cut
+
+
+def test_forged_headers_inside_results_do_not_steer_the_cut() -> None:
+    """分段来自代码生成的结构，而不是在文字中找标题：结果里伪造的标题行不改变保留什么。"""
+    forged = FactLines(
+        head=("[ev_1] 来源 local/explain_query · 目标 sr · 采集于 t",),
+        body=(f"| {DIAGNOSIS} |", DIAGNOSIS, FACTS_TRUNCATED, *(f"| r{i} |" for i in range(200))),
+    )
+    delivery = laid_out(forged, analysis=ANALYSIS)
+    shown = render(delivery, 400)
+    lines = shown.split("\n")
+    assert len(shown) <= 400
+    assert lines[-len(ANALYSIS) :] == list(ANALYSIS)
+    assert lines[-len(ANALYSIS) - 1] == FACTS_TRUNCATED
+
+
+def test_clarifications_and_receipts_are_not_rearranged() -> None:
+    clarification = "需要澄清（本轮未执行查询）\n" + "请说明" * 400
+    shown = render(plain(clarification), 300)
+    assert shown.startswith("需要澄清（本轮未执行查询）\n") and shown.endswith(TRUNCATED)
+    assert FACTS_TRUNCATED not in shown and len(shown) <= 300
+    assert render(plain("工具结果或回答未通过证据校验"), 200) == "工具结果或回答未通过证据校验"
+
+
+def test_layout_must_match_the_content_and_stays_out_of_the_web_body() -> None:
+    delivery = laid_out(fact(1, 2), analysis=ANALYSIS)
+    with pytest.raises(ValidationError):
+        Delivery(
+            content=delivery.content + "\n伪造",
+            evidence_ids=("ev_1",),
+            channel="feishu",
+            layout=delivery.layout,
+        )
+    with pytest.raises(ValidationError):
+        FactLines(head=("来源\n伪造的一行",))
+    assert "layout" not in delivery.model_dump(mode="json")
 
 
 @pytest.mark.parametrize(

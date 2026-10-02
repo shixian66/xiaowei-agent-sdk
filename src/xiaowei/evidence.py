@@ -40,7 +40,9 @@ from xiaowei.models import (
     Channel,
     Delivery,
     DeliveryFact,
+    DeliveryLayout,
     EvidenceRecord,
+    FactLines,
     Identity,
     JsonScalar,
     RunContext,
@@ -251,16 +253,27 @@ class EvidenceStore:
             raise AnswerRejectedError("回答引用的证据不可用") from None
 
         shown = [_shown(r, channel, self._fact_note(r)) for r in records]
-        sections = [_FACTS_HEADER, *(_render_fact(item, channel) for item in shown)]
+        analysis: tuple[str, ...] = ()
         if answer.inferences:
-            sections.append(_ANALYSIS_HEADER)
-            sections.extend(
-                f"- {_one_line(i.text)}（依据：{', '.join(i.evidence_ids)}）"
-                for i in answer.inferences
+            analysis = (
+                _ANALYSIS_HEADER,
+                *(
+                    f"- {_one_line(i.text)}（依据：{', '.join(i.evidence_ids)}）"
+                    for i in answer.inferences
+                ),
             )
-        facts = tuple(_fact(item) for item in shown) if channel == "web" else ()
+        layout = DeliveryLayout(
+            facts_header=_FACTS_HEADER,
+            facts=tuple(_fact_lines(item, channel) for item in shown),
+            analysis=analysis,
+        )
         return Delivery(
-            content="\n".join(sections), evidence_ids=cited, channel=channel, facts=facts
+            content="\n".join(layout.lines()),
+            evidence_ids=cited,
+            channel=channel,
+            facts=tuple(_fact(item) for item in shown) if channel == "web" else (),
+            # 飞书有单条长度上限：给出分段，超限时由渠道先保住分析再截断工具结果。
+            layout=layout if channel == "feishu" else None,
         )
 
     async def _readable(
@@ -469,7 +482,8 @@ def _shown(record: EvidenceRecord, channel: Audience, note: str | None) -> _Show
     return _Shown(record=record, data=data, truncated=bool(envelope["truncated"]), note=note)
 
 
-def _render_fact(shown: _Shown, channel: Audience) -> str:
+def _fact_lines(shown: _Shown, channel: Audience) -> FactLines:
+    """一条事实的渲染行：来源与说明在 ``head``，结果在 ``body``；每行都已转义为单行。"""
     record, data = shown.record, shown.data
     meta = (
         f"[{record.evidence_id}] 来源 {record.tool_id} · 目标 {record.target_id}"
@@ -477,21 +491,21 @@ def _render_fact(shown: _Shown, channel: Audience) -> str:
     )
     if shown.truncated:
         meta += " · 结果已截断"
+    head = [meta]
     if shown.note is not None:
-        meta += f"\n说明：{_one_line(shown.note)}"
+        head.append(f"说明：{_one_line(shown.note)}")
     if data is None:
-        return f"{meta}\n（无结果）"
+        return FactLines(head=(*head, "（无结果）"))
     table = _table(data)
     if channel != "feishu" or table is None:
-        return f"{meta}\n{_one_line(json.dumps(data, ensure_ascii=False))}"
+        return FactLines(head=tuple(head), body=(_one_line(json.dumps(data, ensure_ascii=False)),))
     columns, rows = table
-    lines = [meta]
-    lines.extend(f"{name}: {_cell(value)}" for name, value in _scalars(data).items())
-    lines.append(_table_line(columns))
-    lines.extend(_table_line(row.get(name) for name in columns) for row in rows)
+    body = [f"{name}: {_cell(value)}" for name, value in _scalars(data).items()]
+    body.append(_table_line(columns))
+    body.extend(_table_line(row.get(name) for name in columns) for row in rows)
     if not rows:
-        lines.append("（无数据行）")
-    return "\n".join(lines)
+        body.append("（无数据行）")
+    return FactLines(head=tuple(head), body=tuple(body))
 
 
 def _fact(shown: _Shown) -> DeliveryFact:

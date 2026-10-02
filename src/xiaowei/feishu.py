@@ -25,6 +25,7 @@ import concurrent.futures
 import contextlib
 import json
 import logging
+import re
 import threading
 from collections import OrderedDict
 from collections.abc import Awaitable, Callable, Coroutine, Mapping
@@ -72,6 +73,9 @@ EMPTY_COMMAND = "命令后需要写明问题，例如：/查询 昨天各地区�
 NEW_SESSION = "已新建会话，之前的对话不再作为上下文"
 NEW_SESSION_BUSY = "当前会话正在处理消息，请稍后再新建会话"
 TRUNCATED = "（内容超过飞书单条消息上限，已截断）"
+FACTS_TRUNCATED = "（工具结果超过飞书单条上限，已截断）"
+# 渲染后的一个转义单位：\uXXXX、反斜杠加一个字符，或单个字符；截断不拆开它。
+_ESCAPE_UNIT = re.compile(r"\\u[0-9a-fA-F]{4}|\\.|.", re.DOTALL)
 
 _EVENT_TYPE = "im.message.receive_v1"
 _COMMANDS: Mapping[str, Mode | Literal["new"]] = {
@@ -204,14 +208,65 @@ def _command(text: str) -> tuple[Mode | Literal["new"], str]:
     return "diagnose", text
 
 
-def render(content: str, max_chars: int) -> str:
-    """飞书纯文本：超过上限时在最后一个完整行处截断并附固定说明，保证只发一条消息。"""
+def render(delivery: Delivery, max_chars: int) -> str:
+    """飞书纯文本，保证只发一条、不超过 ``max_chars``；不超限时与 ``content`` 逐字相同。
+
+    有分段（证据回答）时先放完整的分析，剩余字数按顺序给工具结果：先保留每条事实的来源与
+    说明行，再保留结果行，放不下的截掉并注明。分析本身超限时保留标题、从末尾截断。没有分段
+    （澄清、固定回执）时从末尾截断。分段由 ``EvidenceStore`` 生成，不在文字中查找标题。
+    """
+    content = delivery.content
     if len(content) <= max_chars:
         return content
+    layout = delivery.layout
+    if layout is None:
+        return _cut_tail(content.split("\n"), max_chars)
+    kept = [layout.facts_header, FACTS_TRUNCATED, *layout.analysis]
+    room = max_chars - _joined(kept)
+    if room < 0:
+        return _cut_tail(kept, max_chars, keep=2 + min(len(layout.analysis), 1))
+    heads: list[list[str]] = [[] for _ in layout.facts]
+    bodies: list[list[str]] = [[] for _ in layout.facts]
+    pending = [(heads[i], line) for i, f in enumerate(layout.facts) for line in f.head]
+    pending += [(bodies[i], line) for i, f in enumerate(layout.facts) for line in f.body]
+    for target, line in pending:
+        if len(line) + 1 > room:
+            break  # 不跳行：保留的结果行在每条事实内保持连续
+        target.append(line)
+        room -= len(line) + 1
+    facts = [line for head, body in zip(heads, bodies, strict=True) for line in (*head, *body)]
+    return "\n".join([layout.facts_header, *facts, FACTS_TRUNCATED, *layout.analysis])
+
+
+def _joined(lines: list[str]) -> int:
+    return sum(map(len, lines)) + len(lines) - 1
+
+
+def _cut_tail(lines: list[str], max_chars: int, *, keep: int = 0) -> str:
+    """保留能完整放下的前若干行并附截断说明；前 ``keep`` 行之后一行都放不下时截取下一行。"""
     budget = max_chars - len(TRUNCATED) - 1
-    cut = content.rfind("\n", 0, budget + 1)
-    body = content[: cut if cut > 0 else budget]
-    return f"{body}\n{TRUNCATED}"
+    shown: list[str] = []
+    used = -1
+    for line in lines:
+        if used + 1 + len(line) > budget:
+            break
+        shown.append(line)
+        used += 1 + len(line)
+    if len(shown) <= keep and len(shown) < len(lines):
+        prefix = _prefix(lines[len(shown)], budget - used - 1)
+        if prefix:
+            shown.append(prefix)
+    return "\n".join([*shown, TRUNCATED])
+
+
+def _prefix(line: str, limit: int) -> str:
+    """不超过 ``limit`` 个字符、且不拆开任何转义单位的最长前缀。"""
+    end = 0
+    for unit in _ESCAPE_UNIT.finditer(line):
+        if unit.end() > limit:
+            break
+        end = unit.end()
+    return line[:end]
 
 
 def send_outcome(result: object) -> SendOutcome:
@@ -376,7 +431,7 @@ class FeishuGateway:
 
         async def transmit(delivery: Delivery) -> SendOutcome:
             # 已取得投递权：发送异常按结果不明返回，由 ResultDelivery 记为 unknown。
-            text = render(delivery.content, self._config.max_reply_chars)
+            text = render(delivery, self._config.max_reply_chars)
             try:
                 return await self._send(job.chat_id, text)
             except Exception as exc:

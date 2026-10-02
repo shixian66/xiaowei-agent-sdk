@@ -595,6 +595,17 @@ async def test_session_is_bound_to_the_data_policy(env: Env) -> None:
     assert len(evidence_in(env.scripts.calls[same][0])) == 1
 
 
+async def test_changed_instructions_keep_the_session(env: Env) -> None:
+    """instructions 不进入会话绑定：更新默认说明（如 P2 诊断说明）后旧会话照常回放。"""
+    first = env.scripts.add("东区（旧说明）", tool_call("order_total", region="east"), cite())
+    old = env.application(app_config(instructions="旧版说明：只读数据助手。"))
+    await old.run_turn(env.ctx(turn="t1"), first)
+
+    followup = env.scripts.add("追问（新说明）", cite())
+    await env.application().run_turn(env.ctx(turn="t2"), followup)
+    assert len(evidence_in(env.scripts.calls[followup][0])) == 1
+
+
 async def test_query_permission_is_not_inherited(env: Env) -> None:
     assert QUERY_TOOL in env.scope("query")
     assert QUERY_TOOL not in env.scope("diagnose")

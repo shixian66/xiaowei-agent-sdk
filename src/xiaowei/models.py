@@ -7,7 +7,14 @@
 from datetime import datetime
 from typing import Annotated, Literal
 
-from pydantic import AwareDatetime, BaseModel, ConfigDict, Field, StringConstraints
+from pydantic import (
+    AwareDatetime,
+    BaseModel,
+    ConfigDict,
+    Field,
+    StringConstraints,
+    model_validator,
+)
 
 Channel = Literal["web", "feishu"]
 Audience = Literal["model", "session", "web", "feishu"]
@@ -16,6 +23,8 @@ AUDIENCES: tuple[Audience, ...] = ("model", "session", "web", "feishu")
 Label = Annotated[str, StringConstraints(min_length=1, max_length=200)]
 JsonScalar = None | bool | int | float | str
 ToolId = Annotated[str, StringConstraints(pattern=r"^[a-z0-9_-]{1,64}/[a-z0-9_.-]{1,64}$")]
+# 已渲染的一行交付内容：换行等分行字符在渲染时已转义，行内不再含换行。
+ContentLine = Annotated[str, StringConstraints(pattern=r"^[^\n]*$")]
 
 
 class _Trusted(BaseModel):
@@ -147,10 +156,43 @@ class DeliveryFact(_Trusted):
     note: str | None = None
 
 
+class FactLines(_Trusted):
+    """一条事实的渲染行：``head`` 是来源与说明，``body`` 是结果（标量与表格行）。"""
+
+    head: tuple[ContentLine, ...]
+    body: tuple[ContentLine, ...] = ()
+
+
+class DeliveryLayout(_Trusted):
+    """``content`` 的分段，供有单条长度上限的渠道按优先级截断。
+
+    只由 ``EvidenceStore`` 与 ``content`` 一同生成；截断方据此取分段，不在文字中查找标题。
+    """
+
+    facts_header: ContentLine
+    facts: tuple[FactLines, ...]
+    analysis: tuple[ContentLine, ...] = ()
+    """分析标题及各条分析；没有分析时为空。"""
+
+    def lines(self) -> tuple[str, ...]:
+        fact_lines = (line for f in self.facts for line in (*f.head, *f.body))
+        return (self.facts_header, *fact_lines, *self.analysis)
+
+
 class Delivery(_Trusted):
-    """通过验证、按接收渠道生成的输出；``facts`` 只在 Web 渠道给出。"""
+    """通过验证、按接收渠道生成的输出；``facts`` 只在 Web 渠道给出。
+
+    ``layout`` 只在飞书渠道给出，与 ``content`` 逐行一致，不进入序列化输出。
+    """
 
     content: str
     evidence_ids: tuple[str, ...]
     channel: Channel
     facts: tuple[DeliveryFact, ...] = ()
+    layout: DeliveryLayout | None = Field(default=None, exclude=True)
+
+    @model_validator(mode="after")
+    def _layout_matches_content(self) -> "Delivery":
+        if self.layout is not None and "\n".join(self.layout.lines()) != self.content:
+            raise ValueError("交付分段与内容不一致")
+        return self
