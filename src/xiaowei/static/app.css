@@ -6,6 +6,7 @@ header { display: flex; align-items: center; justify-content: space-between; }
 .question, .content { white-space: pre-wrap; overflow-wrap: anywhere; }
 .question { font-weight: 600; }
 .meta, .notice { color: #888; font-size: 0.85em; }
+.note { font-size: 0.85em; }
 .failed .content { color: #c33; }
 .table-wrap { overflow-x: auto; }
 table { border-collapse: collapse; margin: 8px 0; }

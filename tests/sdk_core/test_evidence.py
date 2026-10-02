@@ -61,7 +61,7 @@ from xiaowei.storage import (
 
 pytestmark = pytest.mark.loopback
 
-_FACTS_HEADER = "查询结果"
+_FACTS_HEADER = "工具结果"
 _ANALYSIS_HEADER = "分析建议"
 
 

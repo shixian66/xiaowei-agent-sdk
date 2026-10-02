@@ -133,7 +133,7 @@ class DeliveryFact(_Trusted):
     """一条证据的结构化事实：只由 ``EvidenceStore`` 从当前 Web 投影生成，模型不能提交。
 
     ``columns``/``rows`` 是投影中的表格数据；``metadata`` 是投影中其余的标量字段（如实际 SQL、
-    行数、耗时）。来源、目标、采集时间与截断来自证据记录。
+    行数、耗时）。来源、目标、采集时间与截断来自证据记录；``note`` 是当前登记策略的固定说明。
     """
 
     evidence_id: Label
@@ -144,6 +144,7 @@ class DeliveryFact(_Trusted):
     columns: tuple[str, ...]
     rows: tuple[dict[str, JsonScalar], ...]
     metadata: dict[str, JsonScalar]
+    note: str | None = None
 
 
 class Delivery(_Trusted):

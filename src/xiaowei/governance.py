@@ -111,6 +111,9 @@ class ToolPolicy:
 
     ``data_scope`` 是结果所依赖的当前数据范围（对象、列、函数与读取上限）的稳定摘要，进入
     策略指纹：以改变了范围的配置装配后，旧证据不再可读。不依赖目标数据范围的工具为 ``None``。
+
+    ``fact_note`` 是交付事实时由代码附加的固定说明（如执行计划未执行原查询）；只影响渲染，
+    不进入策略指纹，也不保存在证据记录中：渲染时总是取当前登记的说明。
     """
 
     policy_id: str
@@ -119,6 +122,7 @@ class ToolPolicy:
     result: type[BaseModel] | None = None
     required: tuple[str, ...] = ()
     data_scope: str | None = None
+    fact_note: str | None = None
 
 
 class ToolCatalog:

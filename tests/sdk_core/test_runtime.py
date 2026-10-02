@@ -29,7 +29,7 @@ from sqlalchemy.engine import URL
 from tests.p1b.test_starrocks_adapter import TARGET as SR
 from tests.p1b.test_starrocks_adapter import Result, driver
 from tests.sdk_core.synthetic_tools import Clock
-from tests.sdk_core.test_app import Scripts, after, cite, tool_call, upstream_error
+from tests.sdk_core.test_app import Scripts, after, cite, clarify, tool_call, upstream_error
 from tests.sdk_core.test_feishu import FakeChannel
 from tests.sdk_core.test_model_api import OPENAI as PROFILE
 
@@ -38,8 +38,8 @@ from xiaowei.channel import AccessDeniedError, ResultUnavailableError
 from xiaowei.channel_store import ChannelStore, RequestUnavailableError
 from xiaowei.config import SecretRefError
 from xiaowei.models import AUDIENCES, Identity
-from xiaowei.starrocks import StarRocksAdapter
-from xiaowei.starrocks_tools import QUERY_TOOLS, starrocks_tools
+from xiaowei.starrocks import EXPLAIN_PREFIX, StarRocksAdapter
+from xiaowei.starrocks_tools import PLAN_NOTE, QUERY_TOOLS, starrocks_tools
 from xiaowei.storage import (
     Readiness,
     StorageBusyError,
@@ -265,6 +265,60 @@ async def test_formal_assembly_answers_web_turns_and_stops_cleanly(env: Env) -> 
             assert await served.finish() == 0
     assert await lock_is_free(env)
     assert await env.scalar("SELECT count(*) FROM xiaowei_request WHERE state = 'completed'") == 2
+
+
+PLAN = Result(("Explain String",), [("- Output => [1:region]",), ("    - SCAN [sales]",)])
+
+
+def statements(drv: Any) -> list[str]:
+    """到达驱动的查询语句（不含会话设置与回读）。"""
+    return [
+        sql
+        for conn in drv.connections
+        for sql, _ in conn.executed
+        if not sql.startswith(("SET ", "SELECT @@"))
+    ]
+
+
+async def test_formal_assembly_diagnoses_with_a_plan_and_never_runs_the_query(env: Env) -> None:
+    env.drv = driver(PLAN)
+    async with env.running(env.config()) as served:
+        await served.page()
+        message = env.scripts.add(
+            "为什么按地区查询慢",
+            tool_call("explain_query", sql="SELECT region, total FROM sales"),
+            cite("扫描了整张表"),
+        )
+        body = (await served.turn(message)).json()
+        assert body["state"] == "completed"
+        (seen,) = env.scripts.tools_seen(message)[:1]
+        assert "explain_query" in seen and "run_readonly_query" not in seen
+
+        (sent,) = statements(env.drv)
+        assert sent.startswith(EXPLAIN_PREFIX) and "LIMIT" not in sent
+        (fact,) = body["delivery"]["facts"]
+        assert fact["tool_id"] == "local/explain_query" and fact["note"] == PLAN_NOTE
+        assert fact["rows"] == [{"plan": "- Output => [1:region]"}, {"plan": "    - SCAN [sales]"}]
+        assert f"说明：{PLAN_NOTE}" in body["delivery"]["content"]
+        assert await served.finish() == 0
+
+
+async def test_formal_assembly_rejects_out_of_scope_explain_without_io(env: Env) -> None:
+    env.drv = driver(PLAN)
+    async with env.running(env.config()) as served:
+        await served.page()
+        message = env.scripts.add(
+            "看看 secret 列的计划",
+            tool_call("explain_query", sql="SELECT secret FROM sales"),
+            clarify("secret 列不在可查看范围内"),
+        )
+        body = (await served.turn(message)).json()
+        # 越权 SQL 在任何连接之前被拒绝，拒绝原因交给模型；没有可用证据时只返回澄清。
+        assert body["state"] == "completed"
+        assert body["delivery"]["facts"] == [] and "需要澄清" in body["delivery"]["content"]
+        assert env.drv.attempts == 0
+        assert await served.finish() == 0
+    assert await env.scalar("SELECT count(*) FROM xiaowei_evidence") == 0
 
 
 async def test_model_failure_is_a_fixed_receipt_through_the_formal_assembly(env: Env) -> None:

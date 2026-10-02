@@ -143,7 +143,7 @@ async def test_page_issues_cookie_and_query_turn_round_trips(web: Web) -> None:
         (fact,) = body["delivery"]["facts"]
         assert fact["tool_id"] == "local/order_total" and fact["target_id"] == TARGET
         assert fact["rows"][0] == {"day": "2026-09-01", "orders": 50}
-        assert "查询结果（系统根据证据生成）" in body["delivery"]["content"]
+        assert "工具结果（系统根据证据生成）" in body["delivery"]["content"]
         # 刷新后 GET：重新验证得到同一交付，不再调用模型或工具。
         again = await client.get("/api/turns/r1")
         assert again.status_code == 200 and again.json() == body

@@ -14,9 +14,11 @@ from tests.p1b.test_starrocks_adapter import TARGET as SR
 
 from xiaowei.governance import Prechecked, Projection, ToolCatalog, ToolPolicy
 from xiaowei.models import ToolContract, ToolObservation, ToolRequest
-from xiaowei.starrocks import StarRocksAdapter, StarRocksError, StarRocksErrorCode
+from xiaowei.sqlguard import guard_explain_query
+from xiaowei.starrocks import EXPLAIN_PREFIX, StarRocksAdapter, StarRocksError, StarRocksErrorCode
 from xiaowei.starrocks_tools import (
     DESCRIBE_TABLE,
+    EXPLAIN_QUERY,
     LIST_TABLES,
     RESULT_FIELDS,
     RUN_QUERY,
@@ -38,21 +40,21 @@ def adapter(result: Result | None = None, **target: Any) -> StarRocksAdapter:
     )
 
 
-def request(sql: str) -> ToolRequest:
+def request(sql: str, tool_id: str = RUN_QUERY) -> ToolRequest:
     return ToolRequest(
-        tool_id=RUN_QUERY,
+        tool_id=tool_id,
         target_id=SR.target_id,
         call_id="c1",
-        tool_name="run_readonly_query",
+        tool_name=tool_id.removeprefix("local/"),
         arguments={"sql": sql},
     )
 
 
-async def run_query(ada: StarRocksAdapter, sql: str) -> ToolObservation:
+async def run_query(ada: StarRocksAdapter, sql: str, tool_id: str = RUN_QUERY) -> ToolObservation:
     tools = starrocks_tools(ada, dict.fromkeys(AUDIENCES, needed(ada)))
-    execute = tools.executes[RUN_QUERY]
+    execute = tools.executes[tool_id]
     assert isinstance(execute, Prechecked)
-    return await execute.run(execute.check(request(sql)))
+    return await execute.run(execute.check(request(sql, tool_id)))
 
 
 def envelope_size(observation: ToolObservation) -> int:
@@ -75,7 +77,12 @@ def test_every_audience_must_hold_the_worst_case_result() -> None:
     ada = adapter()
     threshold = needed(ada)
     tools = starrocks_tools(ada, dict.fromkeys(AUDIENCES, threshold))
-    assert {c.tool_id for c in tools.contracts} == {LIST_TABLES, DESCRIBE_TABLE, RUN_QUERY}
+    assert {c.tool_id for c in tools.contracts} == {
+        LIST_TABLES,
+        DESCRIBE_TABLE,
+        RUN_QUERY,
+        EXPLAIN_QUERY,
+    }
     assert all(p.required == RESULT_FIELDS for p in tools.policies)
     ToolCatalog(tools.contracts, tools.policies)  # 登记一致
 
@@ -93,8 +100,37 @@ def test_worst_case_grows_with_every_declared_limit() -> None:
     base = needed(adapter())
     assert needed(adapter(max_result_bytes=SR.max_result_bytes + 100)) == base + 100
     bigger_sql = SR.policy.model_copy(update={"max_sql_bytes": SR.policy.max_sql_bytes + 10})
+    assert needed(adapter(max_plan_lines=SR.max_plan_lines + 100)) == base
     # SQL 与列名各多 10 个字节，转义后各多 60 个字节。
     assert needed(adapter(policy=bigger_sql)) == base + 120
+
+
+def test_worst_case_sql_includes_the_explain_prefix() -> None:
+    """EXPLAIN 发出的语句是固定前缀加上不超过 ``max_sql_bytes`` 的规范化 SQL。"""
+    ada = adapter()
+    sql = worst_case_observation(ada).payload["sql"]
+    assert isinstance(sql, str)
+    assert len(sql.encode()) == SR.policy.max_sql_bytes + len(EXPLAIN_PREFIX)
+
+
+async def test_explain_at_the_sql_limit_fits_the_worst_case() -> None:
+    """规范化 SQL 恰好用满 ``max_sql_bytes``、字面量全是控制字符时，带前缀的计划结果仍在
+    装配时假定的上限内，不在 ``_observation`` 被判为结果契约不符。"""
+    policy = POLICY.model_copy(update={"max_sql_bytes": 400})
+    prefix, suffix = "SELECT region FROM sales WHERE note = '", "'"
+    # 规范化会补全库名等：按空字面量规范化后的长度反推，使规范化结果恰好等于上限。
+    overhead = len(guard_explain_query(prefix + suffix, policy).normalized_sql.encode())
+    sql = prefix + NASTY * (policy.max_sql_bytes - overhead) + suffix
+    assert len(guard_explain_query(sql, policy).normalized_sql.encode()) == policy.max_sql_bytes
+    plan = Result(("Explain String",), [(NASTY * 40,) for _ in range(10)])
+    ada = adapter(plan, policy=policy, max_result_bytes=900)
+
+    observation = await run_query(ada, sql, EXPLAIN_QUERY)
+
+    sent = observation.payload["sql"]
+    assert isinstance(sent, str) and sent.startswith(EXPLAIN_PREFIX)
+    assert len(sent.encode()) == policy.max_sql_bytes + len(EXPLAIN_PREFIX)
+    assert envelope_size(observation) <= needed(ada)
 
 
 async def test_worst_case_is_an_upper_bound_for_escape_heavy_results() -> None:
