@@ -458,6 +458,8 @@ Task 8 实施修订（不改变产品边界）：
 
 **Depends on:** Task 8 reviewed SHA and all correctness gates in section 7 resolved for the selected environment.
 
+**顺序调整（2026-10-02，用户决定）：** 第一步离线检查已在 `16f80d4` 上完成；其余真实步骤推迟到 P3 的 Docker Compose 部署完成后，在获准环境中执行（见 [DEVELOPMENT_PLAN.md](../../../DEVELOPMENT_PLAN.md) §4）。届时以当时的候选 SHA 重跑第一步。
+
 **Result:** 一个固定候选 SHA 同时具备离线、真实 PostgreSQL、一个真实模型、一个真实只读 StarRocks、正式浏览器和真实飞书单聊证据；仍不把它称为部署/UAT。
 
 **Files:** Modify `AGENT_HANDOFF.md`, `README.md`, this plan only for actual evidence and deviations; test fixture changes only when a real failure first becomes a separate repair task and commit.
