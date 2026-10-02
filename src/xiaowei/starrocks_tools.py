@@ -1,13 +1,14 @@
-"""StarRocks 受治理工具：四个工具的契约、参数与投影策略，以及绑定 Adapter 的执行函数。
+"""StarRocks 受治理工具：五个工具的契约、参数与投影策略，以及绑定 Adapter 的执行函数。
 
-``local/list_tables`` 与 ``local/describe_table`` 只执行代码生成、参数绑定的元数据查询；
+``local/list_tables``、``local/describe_table`` 与 ``local/describe_table_layout`` 只执行代码
+生成、参数绑定的元数据查询；
 ``local/run_readonly_query`` 只执行 SQLGuard 产生的 ``GuardedQuery``；``local/explain_query``
 只以 Adapter 的固定显式级别 EXPLAIN SQLGuard 产生的 ``ExplainQuery``，不执行被解释的查询。
-``describe_table`` 的对象核对与两种 SQL 的 SQLGuard 都是 ``Prechecked`` 的同步前置检查：在
+两个 ``describe`` 工具的对象核对与两种 SQL 的 SQLGuard 都是 ``Prechecked`` 的同步前置检查：在
 当前授权之后、预算预留与任何 StarRocks I/O 之前运行，拒绝时模型只收到固定原因码与说明，
 可在本轮剩余轮次内修正。
 
-诊断用途能看到元数据工具与 ``explain_query``，看不到 ``run_readonly_query``。计划证据的
+诊断用途能看到元数据工具（含表布局）与 ``explain_query``，看不到 ``run_readonly_query``。计划证据的
 固定说明（``PLAN_NOTE``）登记在策略上，由交付时的代码附加在事实区，不来自证据记录或模型。
 
 四种用途投影的字段相同且都必须完整保留（``required``）：模型、Session、Web 与飞书得到同一组
@@ -15,7 +16,7 @@
 真实投影器检查 Web 与飞书两条路径，任一路径放不下即拒绝启动；运行时 ``EvidenceStore`` 仍会
 在必需字段放不下时中止本轮。
 
-四个策略共用 ``data_scope_digest``：证据只在装配时的数据范围下可读，以收窄（或任何改动）
+五个策略共用 ``data_scope_digest``：证据只在装配时的数据范围下可读，以收窄（或任何改动）
 范围的配置启动后，已保存的 StarRocks 证据不再进入模型、Session 或渠道。
 """
 
@@ -56,7 +57,8 @@ LIST_TABLES: Final = "local/list_tables"
 DESCRIBE_TABLE: Final = "local/describe_table"
 RUN_QUERY: Final = "local/run_readonly_query"
 EXPLAIN_QUERY: Final = "local/explain_query"
-DIAGNOSE_TOOLS: Final = frozenset({LIST_TABLES, DESCRIBE_TABLE, EXPLAIN_QUERY})
+LAYOUT_TOOL: Final = "local/describe_table_layout"
+DIAGNOSE_TOOLS: Final = frozenset({LIST_TABLES, DESCRIBE_TABLE, LAYOUT_TOOL, EXPLAIN_QUERY})
 """诊断用途展示元数据与执行计划工具；实际查询工具不可见，强行调用仍由治理层拒绝。"""
 QUERY_TOOLS: Final = DIAGNOSE_TOOLS | {RUN_QUERY}
 PLAN_NOTE: Final = (
@@ -105,7 +107,7 @@ class StarRocksTools:
 
 
 def starrocks_tools(adapter: StarRocksAdapter, max_bytes: Mapping[Audience, int]) -> StarRocksTools:
-    """按目标配置与四种用途的容量装配四个工具；容量容不下最坏结果时拒绝装配。"""
+    """按目标配置与四种用途的容量装配五个工具；容量容不下最坏结果时拒绝装配。"""
     target = adapter.target
     if set(max_bytes) != set(AUDIENCES):
         raise ValueError("StarRocks 工具：必须且只能给出四种用途的容量")
@@ -137,9 +139,10 @@ def starrocks_tools(adapter: StarRocksAdapter, max_bytes: Mapping[Audience, int]
 
     list_policy = policy("list_tables", ListTablesArgs)
     describe_policy = policy("describe_table", DescribeTableArgs)
+    layout_policy = policy("describe_table_layout", DescribeTableArgs)
     query_policy = policy("run_readonly_query", RunQueryArgs)
     explain_policy = policy("explain_query", ExplainQueryArgs, PLAN_NOTE)
-    # 四个策略的投影相同：检查一次即覆盖全部工具。
+    # 五个策略的投影相同：检查一次即覆盖全部工具。
     try:
         check_projection_capacity(query_policy, worst)
     except ValueError as exc:
@@ -159,6 +162,9 @@ def starrocks_tools(adapter: StarRocksAdapter, max_bytes: Mapping[Audience, int]
 
     async def describe_table(name: str) -> ToolObservation:
         return _observation(await adapter.describe_table(name), bounds)
+
+    async def describe_layout(name: str) -> ToolObservation:
+        return _observation(await adapter.describe_layout(name), bounds)
 
     def check_query(request: ToolRequest) -> GuardedQuery:
         code: QueryRejectionCode | None = None
@@ -192,6 +198,12 @@ def starrocks_tools(adapter: StarRocksAdapter, max_bytes: Mapping[Audience, int]
                 "查看一张允许查询的表或视图的可用列、类型与是否可空。",
             ),
             contract(
+                LAYOUT_TOOL,
+                layout_policy,
+                "查看一张允许查询的表的布局：表模型、分区键、分桶方式与键、桶数、排序键与主键。"
+                "含未获准列的键不显示；视图没有布局，返回空结果。",
+            ),
+            contract(
                 RUN_QUERY,
                 query_policy,
                 "执行一条只读 SELECT。只能引用允许的表、列与函数，必须列出具体列；"
@@ -204,10 +216,11 @@ def starrocks_tools(adapter: StarRocksAdapter, max_bytes: Mapping[Audience, int]
                 "范围的表、视图、列与函数；结果不是实际运行数据。",
             ),
         ),
-        policies=(list_policy, describe_policy, query_policy, explain_policy),
+        policies=(list_policy, describe_policy, query_policy, explain_policy, layout_policy),
         executes={
             LIST_TABLES: list_tables,
             DESCRIBE_TABLE: Prechecked(check=check_table, run=describe_table),
+            LAYOUT_TOOL: Prechecked(check=check_table, run=describe_layout),
             RUN_QUERY: Prechecked(check=check_query, run=run_query),
             EXPLAIN_QUERY: Prechecked(check=check_explain, run=explain),
         },

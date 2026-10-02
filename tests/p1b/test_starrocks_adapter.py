@@ -34,12 +34,15 @@ from xiaowei.starrocks import (
     ERROR_MESSAGES,
     EXPLAIN_LEVEL,
     EXPLAIN_PREFIX,
+    LAYOUT_COLUMNS,
+    LAYOUT_HIDDEN,
     PLAN_COLUMN,
     QueryResult,
     StarRocksAdapter,
     StarRocksError,
     StarRocksErrorCode,
     StarRocksTarget,
+    metadata_sql_bytes,
     open_starrocks,
     tls_context,
 )
@@ -740,6 +743,118 @@ async def test_describe_table_rejects_objects_outside_the_allowlist_before_io(na
     error = await failure(adapter(drv).describe_table(name))
     assert error.code is Code.OBJECT_NOT_ALLOWED
     assert drv.attempts == 0
+
+
+# ---- 表布局（P2 Task 5）---------------------------------------------------------------------
+
+# Task 0 在 4.1.4 上实测：键字段带反引号、以 ", " 分隔，无值时为空串；桶数是 INT。
+LAYOUT_SQL = (
+    "SELECT TABLE_MODEL AS model, PARTITION_KEY AS partition_key, "
+    "DISTRIBUTE_TYPE AS distribute_type, DISTRIBUTE_KEY AS distribute_key, "
+    "DISTRIBUTE_BUCKET AS buckets, SORT_KEY AS sort_key, PRIMARY_KEY AS primary_key "
+    "FROM information_schema.tables_config "
+    "WHERE TABLE_SCHEMA = %s AND TABLE_NAME = %s AND TABLE_ENGINE <> %s"
+)
+SERVER_LAYOUT = (
+    "model",
+    "partition_key",
+    "distribute_type",
+    "distribute_key",
+    "buckets",
+    "sort_key",
+    "primary_key",
+)
+
+
+def layout(*rows: tuple[object, ...]) -> Result:
+    return Result(SERVER_LAYOUT, list(rows))
+
+
+async def test_describe_layout_is_code_generated_bound_and_has_no_properties() -> None:
+    drv = driver(layout(("DUP_KEYS", "`region`", "HASH", "`region`, `total`", 8, "`region`", "")))
+    result = await adapter(drv).describe_layout("sales")
+
+    sql, args = only(drv).executed[-1]
+    assert sql == LAYOUT_SQL
+    assert args == ("shop", "sales", "VIEW")  # 视图没有布局：不返回行
+    assert "PROPERTIES" not in sql and "TABLE_ID" not in sql
+    assert result.columns == LAYOUT_COLUMNS == SERVER_LAYOUT
+    assert result.rows == (
+        {
+            "model": "DUP_KEYS",
+            "partition_key": "region",
+            "distribute_type": "HASH",
+            "distribute_key": "region, total",
+            "buckets": 8,
+            "sort_key": "region",
+            "primary_key": "",
+        },
+    )
+    assert not result.truncated and result.sql == LAYOUT_SQL
+
+
+@pytest.mark.parametrize(
+    ("raw", "shown"),
+    [
+        ("`region`", "region"),
+        ("`region`, `note`", "region, note"),
+        ("region,total", "region, total"),
+        ("", ""),
+        (None, None),
+        ("`secret`", LAYOUT_HIDDEN),  # 未获准列
+        ("`region`, `secret`", LAYOUT_HIDDEN),  # 任一未获准即整段替换，不留下获准部分
+        ("`Region`", LAYOUT_HIDDEN),  # 与 allowlist 精确匹配
+        ("date_trunc('day', `region`)", LAYOUT_HIDDEN),  # 表达式不能拆成列名
+        ("`reg`ion`", LAYOUT_HIDDEN),
+        ("`region`,", LAYOUT_HIDDEN),
+        ("`name`", LAYOUT_HIDDEN),  # 其他对象的获准列
+    ],
+)
+async def test_layout_keys_show_only_allowed_columns(raw: object, shown: object) -> None:
+    keys = ("partition_key", "distribute_key", "sort_key", "primary_key")
+    for key in keys:
+        row = dict.fromkeys(SERVER_LAYOUT, "")
+        row.update(model="DUP_KEYS", distribute_type="HASH", buckets=1, **{key: raw})
+        drv = driver(layout(tuple(row.values())))
+        (result_row,) = (await adapter(drv).describe_layout("sales")).rows
+        assert result_row[key] == shown, key
+        assert all(result_row[k] == "" for k in keys if k != key)
+
+
+async def test_view_has_no_layout_rows() -> None:
+    drv = driver(layout())
+    result = await adapter(drv).describe_layout("regions")
+    assert result.rows == () and result.columns == LAYOUT_COLUMNS and not result.truncated
+
+
+@pytest.mark.parametrize(
+    "result",
+    [
+        Result(SERVER_LAYOUT, [("DUP_KEYS", "", "HASH", "`region`", 1, "", "")] * 2),
+        Result(SERVER_LAYOUT[:-1], [("DUP_KEYS", "", "HASH", "`region`", 1, "")]),
+        Result((*SERVER_LAYOUT[:-1], "PROPERTIES"), [("DUP_KEYS", "", "HASH", "", 1, "", "x")]),
+        layout(("DUP_KEYS", 5, "HASH", "`region`", 1, "", "")),
+        layout(("DUP_KEYS", "", "HASH", b"`region`", 1, "", "")),
+    ],
+    ids=["多于一行", "少一列", "列名不符", "键不是文本", "键是 bytes"],
+)
+async def test_layout_outside_the_contract_fails_closed(result: Result) -> None:
+    drv = driver(result)
+    error = await failure(adapter(drv).describe_layout("sales"))
+    assert error.code is Code.RESULT_CONTRACT
+    assert_safe(error)
+
+
+@pytest.mark.parametrize("name", ["customers", "Sales", "sales; DROP TABLE x", ""])
+async def test_describe_layout_rejects_objects_outside_the_allowlist_before_io(name: str) -> None:
+    drv = driver()
+    error = await failure(adapter(drv).describe_layout(name))
+    assert error.code is Code.OBJECT_NOT_ALLOWED
+    assert drv.attempts == 0
+
+
+def test_metadata_sql_bound_covers_the_layout_template() -> None:
+    assert metadata_sql_bytes(POLICY) >= len(LAYOUT_SQL.encode())
 
 
 # ---- 可信配置与装配 --------------------------------------------------------------------------

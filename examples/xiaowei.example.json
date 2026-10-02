@@ -28,6 +28,7 @@
     },
     "model_tools": [
       "local/describe_table",
+      "local/describe_table_layout",
       "local/explain_query",
       "local/list_tables",
       "local/run_readonly_query"
@@ -93,6 +94,7 @@
     "grants": {
       "local-operator": [
         "local/describe_table",
+        "local/describe_table_layout",
         "local/explain_query",
         "local/list_tables",
         "local/run_readonly_query"
