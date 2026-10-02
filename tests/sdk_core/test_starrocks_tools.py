@@ -679,6 +679,21 @@ NARROWED = {
     "降低 max_sql_bytes": scoped(policy={"max_sql_bytes": 3000}),
     "降低 max_result_bytes": scoped(max_result_bytes=500),
     "降低 max_value_bytes": scoped(max_value_bytes=100),
+    "降低 max_plan_lines": scoped(max_plan_lines=100),
+}
+# 同一份 allowlist 换集群或账号：可能对应另一套数据与权限（用户 2026-10-02 决定，P2 Task 3）。
+CONNECTION_CHANGED = {
+    "换 host": scoped(host="starrocks-b.internal"),
+    "换 port": scoped(port=9031),
+    "换 user": scoped(user="xiaowei_ro_b"),
+}
+# 不改变可读数据的字段：密码引用、期限与时区表示不进入摘要。
+OUTSIDE_SCOPE = {
+    "换 password_ref": scoped(password_ref="env:XW_TEST_SR_PASSWORD_B"),  # noqa: S106 —— 引用，不是凭据
+    "换期限": scoped(
+        connect_timeout_seconds=0.5, query_timeout_seconds=2, client_timeout_seconds=3
+    ),
+    "换时区": scoped(time_zone="UTC"),
 }
 
 
@@ -702,10 +717,18 @@ def test_scope_digest_is_stable_across_processes() -> None:
     assert digests == {data_scope_digest(SR)}
 
 
-async def test_evidence_stays_readable_when_scope_is_unchanged(env: Env) -> None:
+@pytest.mark.parametrize(
+    "target",
+    [SAME_SCOPE, *OUTSIDE_SCOPE.values()],
+    ids=["同一范围", *OUTSIDE_SCOPE.keys()],
+)
+async def test_evidence_stays_readable_when_scope_is_unchanged(
+    env: Env, target: StarRocksTarget
+) -> None:
+    assert data_scope_digest(target) == data_scope_digest(SR)
     ctx, answer_ = await queried(env)
     (evidence_id,) = answer_.evidence_ids
-    evidence, app = reassembled(env, SAME_SCOPE)
+    evidence, app = reassembled(env, target)
     for audience in ("model", "session", "web"):
         await evidence.project(evidence_id, ctx, audience)
     await evidence.validate_answer(answer_, ctx)
@@ -721,6 +744,20 @@ async def test_scope_change_invalidates_old_evidence(env: Env, target: StarRocks
 
     粒度是整个目标的范围：移除与该证据无关的对象同样使它失效（计划 §2.0 的取舍）。
     """
+    await assert_old_evidence_unreadable(env, target)
+
+
+@pytest.mark.parametrize("target", CONNECTION_CHANGED.values(), ids=CONNECTION_CHANGED.keys())
+async def test_connection_identity_change_invalidates_old_evidence(
+    env: Env, target: StarRocksTarget
+) -> None:
+    """allowlist 与上限都不变、只换连接端点或账号：旧证据同样处处不可读。"""
+    assert target.policy == SR.policy
+    await assert_old_evidence_unreadable(env, target)
+
+
+async def assert_old_evidence_unreadable(env: Env, target: StarRocksTarget) -> None:
+    assert data_scope_digest(target) != data_scope_digest(SR)
     ctx, answer_ = await queried(env)
     (evidence_id,) = answer_.evidence_ids
     evidence, app = reassembled(env, target)

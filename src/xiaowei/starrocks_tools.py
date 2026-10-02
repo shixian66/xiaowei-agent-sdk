@@ -179,11 +179,16 @@ def data_scope_digest(target: StarRocksTarget) -> str:
     """目标数据范围的稳定摘要：允许的对象、列与函数，以及决定可读数据多少的上限。
 
     集合排序、键排序后再序列化：与配置的书写顺序和进程的哈希种子无关，同一范围重启后摘要
-    不变。函数名已由 ``QueryPolicy`` 统一为大写。只决定连接、期限与时区表示的字段不进入摘要。
+    不变。函数名已由 ``QueryPolicy`` 统一为大写。连接端点与账号（``host``、``port``、``user``）
+    进入摘要：同一份 allowlist 换了集群或账号可能对应另一套数据与权限。只决定期限、时区表示
+    与密码引用的字段不进入摘要。
     """
     policy = target.policy
     body = {
         "target_id": target.target_id,
+        "host": target.host,
+        "port": target.port,
+        "user": target.user,
         "default_database": policy.default_database,
         "allowed_objects": sorted(policy.allowed_objects),
         "allowed_columns": {name: sorted(cols) for name, cols in policy.allowed_columns.items()},
@@ -192,6 +197,7 @@ def data_scope_digest(target: StarRocksTarget) -> str:
         "max_sql_bytes": policy.max_sql_bytes,
         "max_result_bytes": target.max_result_bytes,
         "max_value_bytes": target.max_value_bytes,
+        "max_plan_lines": target.max_plan_lines,
     }
     canonical = json.dumps(body, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
     return f"sha256:{hashlib.sha256(canonical.encode()).hexdigest()}"
