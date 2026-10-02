@@ -37,8 +37,9 @@ from tests.sdk_core.synthetic_tools import Clock, Grants, ready_engine
 from xiaowei.evidence import EvidenceStore
 from xiaowei.governance import GovernedTools, ToolCatalog, ToolRejectedError
 from xiaowei.models import AgentAnswer, AnswerInference, Budget, Identity, RunContext, ToolRequest
-from xiaowei.sqlguard import QueryPolicy, guard_readonly_query
+from xiaowei.sqlguard import QueryPolicy, guard_explain_query, guard_readonly_query
 from xiaowei.starrocks import (
+    EXPLAIN_PREFIX,
     StarRocksAdapter,
     StarRocksError,
     StarRocksErrorCode,
@@ -60,6 +61,16 @@ class Instance:
     port: int
     database: str
     ro_user: str
+
+
+async def admin_rows(host: str, port: int, user: str, sql: str) -> list[tuple[object, ...]]:
+    conn = await asyncmy.connect(host=host, port=port, user=user, password="", autocommit=True)
+    try:
+        async with conn.cursor() as cursor:
+            await cursor.execute(sql)
+            return list(await cursor.fetchall())
+    finally:
+        await conn.ensure_closed()
 
 
 async def admin(host: str, port: int, user: str, *statements: str) -> None:
@@ -348,3 +359,143 @@ async def test_governed_query_tool_end_to_end(instance: Instance) -> None:
     )
     assert fact.metadata["row_count"] == 2 and "`sales`" in str(fact.metadata["sql"])
     assert not fact.truncated
+
+
+# ---- 执行计划（P2 Task 3） -----------------------------------------------------------------
+
+
+def explained(inst: Instance, sql: str, t: StarRocksTarget | None = None):  # type: ignore[no-untyped-def]
+    return guard_explain_query(sql, (t or target(inst)).policy)
+
+
+def plan_text(result: object) -> str:
+    return "\n".join(str(row["plan"]) for row in result.rows)  # type: ignore[attr-defined]
+
+
+async def test_explain_table_view_and_cte(instance: Instance) -> None:
+    host, port, user = admin_address()
+    await admin(
+        host,
+        port,
+        user,
+        f"CREATE VIEW {instance.database}.sales_view AS "
+        f"SELECT id, region, total FROM {instance.database}.sales WHERE total > 10",
+        f"GRANT SELECT ON VIEW {instance.database}.sales_view TO USER '{instance.ro_user}'@'%'",
+    )
+    base = target(instance)
+    policy = base.policy.model_copy(
+        update={
+            "allowed_objects": base.policy.allowed_objects | {"sales_view"},
+            "allowed_columns": {
+                **base.policy.allowed_columns,
+                "sales_view": frozenset({"id", "region", "total"}),
+            },
+        }
+    )
+    t = base.model_copy(update={"policy": policy})
+    ada = open_starrocks(t, clock=lambda: datetime.now(UTC))
+
+    for sql in (
+        "SELECT region, SUM(total) AS s FROM sales WHERE id > 3 GROUP BY region",
+        "SELECT v.region FROM sales_view v JOIN sales s ON v.id = s.id",
+        "WITH t AS (SELECT region, total FROM sales) SELECT region FROM t WHERE total > 1",
+    ):
+        plan = explained(instance, sql, t)
+        result = await ada.explain(plan)
+        text = plan_text(result)
+        assert result.sql == EXPLAIN_PREFIX + plan.normalized_sql
+        assert result.columns == ("plan",) and result.row_count > 0 and not result.truncated
+        assert "SCAN [" in text and "sales" in text
+        # LOGICAL 不含列统计值（COSTS）与资源组（VERBOSE），Task 0 的披露结论在本环境复核。
+        assert "column statistics" not in text and "RESOURCE GROUP" not in text
+
+
+async def test_explain_ungranted_object_maps_to_permission_denied(instance: Instance) -> None:
+    with pytest.raises(StarRocksError) as info:
+        await adapter(instance).explain(explained(instance, "SELECT id FROM ungranted"))
+    assert info.value.code is Code.PERMISSION_DENIED
+    assert info.value.__context__ is None
+
+
+async def test_explain_under_tight_session_limits_and_plan_truncation(instance: Instance) -> None:
+    tight = target(
+        instance, query_timeout_seconds=1, client_timeout_seconds=10, query_mem_limit_bytes=2**20
+    )
+    ada = open_starrocks(tight, clock=lambda: datetime.now(UTC))
+    sql = "SELECT a.region FROM sales a JOIN sales b ON a.region = b.region"
+    full = await ada.explain(explained(instance, sql, tight))
+    assert full.row_count > 2 and not full.truncated
+
+    short = target(instance, max_plan_lines=2)
+    cut = await open_starrocks(short, clock=lambda: datetime.now(UTC)).explain(
+        explained(instance, sql, short)
+    )
+    assert (cut.row_count, cut.truncated) == (2, True)
+    assert [r["plan"] for r in cut.rows] == [r["plan"] for r in full.rows[:2]]
+
+
+async def _explain_level(host: str, port: int, user: str) -> str:
+    rows = await admin_rows(
+        host, port, user, "ADMIN SHOW FRONTEND CONFIG LIKE 'query_explain_level'"
+    )
+    (row,) = rows
+    return str(row[-1] if len(row) < 3 else row[2])
+
+
+async def _profiles(host: str, port: int, user: str) -> int:
+    return len(await admin_rows(host, port, user, "SHOW PROFILELIST"))
+
+
+async def test_explicit_level_does_not_execute_when_fe_default_is_analyze(
+    instance: Instance,
+) -> None:
+    """管理账号把 FE 默认级别改为 ANALYZE：Adapter 的显式 LOGICAL 仍只取计划。
+
+    反例：执行期必失败（``assert_true``）与必超时（``SLEEP``）的查询都正常返回计划，且不新增
+    Profile；同一配置下裸 ``EXPLAIN`` 确实执行（阳性对照），证明本环境的检测手段有效。
+    """
+    host, port, user = admin_address()
+    assert await _explain_level(host, port, user) == "NORMAL"
+    base = target(instance, query_timeout_seconds=1, client_timeout_seconds=10)
+    t = base.model_copy(
+        update={
+            "policy": base.policy.model_copy(
+                update={"allowed_functions": base.policy.allowed_functions | {"ASSERT_TRUE"}}
+            )
+        }
+    )
+    ada = open_starrocks(t, clock=lambda: datetime.now(UTC))
+    await admin(host, port, user, "ADMIN SET FRONTEND CONFIG ('query_explain_level' = 'ANALYZE')")
+    try:
+        assert await _explain_level(host, port, user) == "ANALYZE"
+        before = await _profiles(host, port, user)
+        started = time.monotonic()
+        failing = await ada.explain(
+            explained(instance, "SELECT ASSERT_TRUE(total < 0) AS a FROM sales", t)
+        )
+        sleeping = await ada.explain(explained(instance, "SELECT SLEEP(5) AS s FROM sales", t))
+        assert time.monotonic() - started < 5
+        assert failing.sql.startswith("EXPLAIN LOGICAL ") and sleeping.row_count > 0
+        assert "assert_true" in plan_text(failing).lower()
+        await asyncio.sleep(1)  # Profile 异步登记，留出与阳性对照相同的时间
+        assert await _profiles(host, port, user) == before
+
+        # 阳性对照：同一配置下裸 EXPLAIN 走 ANALYZE 执行路径。
+        with pytest.raises(MySQLError) as executed:
+            await admin(
+                host,
+                port,
+                user,
+                f"EXPLAIN SELECT assert_true(total < 0) FROM {instance.database}.sales",
+            )
+        assert "assert_true" in str(executed.value).lower()
+        await admin_rows(
+            host, port, user, f"EXPLAIN SELECT count(id) FROM {instance.database}.sales"
+        )
+        await asyncio.sleep(1)
+        assert await _profiles(host, port, user) > before
+    finally:
+        await admin(
+            host, port, user, "ADMIN SET FRONTEND CONFIG ('query_explain_level' = 'NORMAL')"
+        )
+        assert await _explain_level(host, port, user) == "NORMAL"

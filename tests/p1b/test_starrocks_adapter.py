@@ -1,4 +1,5 @@
-"""StarRocks Adapter 的离线契约（P1-B Task 2）：recording 驱动替身，不连接任何数据库。
+"""StarRocks Adapter 的离线契约（P1-B Task 2；执行计划为 P2 Task 3）：recording 驱动替身，
+不连接任何数据库。
 
 替身只替换最底层的连接对象（执行、逐行读取、正常关闭、中止）；Adapter 的并发槽位、期限、
 会话变量设置与回读、结果限量、类型规范化和错误映射都走真实代码。替身不能证明 asyncmy 与
@@ -6,6 +7,8 @@ StarRocks 的协议行为，那部分在 ``test_starrocks_real.py``。
 """
 
 import asyncio
+import dataclasses
+import inspect
 import json
 import math
 import ssl
@@ -20,9 +23,18 @@ from asyncmy.errors import OperationalError, ProgrammingError
 from pydantic import ValidationError
 
 from xiaowei.config import SecretRefError
-from xiaowei.sqlguard import QueryPolicy, QueryRejectedError, guard_readonly_query
+from xiaowei.sqlguard import (
+    ExplainQuery,
+    QueryPolicy,
+    QueryRejectedError,
+    guard_explain_query,
+    guard_readonly_query,
+)
 from xiaowei.starrocks import (
     ERROR_MESSAGES,
+    EXPLAIN_LEVEL,
+    EXPLAIN_PREFIX,
+    PLAN_COLUMN,
     QueryResult,
     StarRocksAdapter,
     StarRocksError,
@@ -781,3 +793,180 @@ def test_opening_does_no_io_and_keeps_the_password_out_of_repr(
 def test_every_code_has_a_fixed_message() -> None:
     assert set(ERROR_MESSAGES) == set(Code)
     assert all("{" not in m for m in ERROR_MESSAGES.values())
+
+
+# ---- 执行计划（P2 Task 3） -----------------------------------------------------------------
+
+SERVER_PLAN_COLUMN = "Explain String"  # Task 0 在 4.1.4 上实测的服务端列名
+
+
+def explained(sql: str = "SELECT region, total FROM sales"):  # type: ignore[no-untyped-def]
+    return guard_explain_query(sql, POLICY)
+
+
+def plan_result(*lines: object, columns: tuple[str, ...] = (SERVER_PLAN_COLUMN,)) -> Result:
+    return Result(columns, [(line,) if len(columns) == 1 else (line, line) for line in lines])
+
+
+async def test_explain_sends_exactly_the_explicit_level_and_normalized_sql() -> None:
+    plan = explained(
+        "SELECT region, SUM(total) AS s FROM sales WHERE region = 'a%b' GROUP BY region"
+    )
+    drv = driver(plan_result("- Output => [1:region]", "    - SCAN [sales]"))
+
+    result = await adapter(drv).explain(plan)
+
+    conn = only(drv)
+    assert EXPLAIN_LEVEL == "LOGICAL"  # Task 0 选定；不得是裸 EXPLAIN、ANALYZE 或 SCHEDULER
+    assert EXPLAIN_PREFIX == "EXPLAIN LOGICAL "
+    assert conn.executed == [
+        (SESSION_SET, None),
+        (SESSION_READ, None),
+        ("EXPLAIN LOGICAL " + plan.normalized_sql, None),  # 无参数：驱动不做 % 插值
+    ]
+    assert result.sql == "EXPLAIN LOGICAL " + plan.normalized_sql
+    assert (conn.closed, conn.aborted) == (True, False)
+
+
+def test_explain_level_cannot_be_chosen_by_the_caller() -> None:
+    """级别是代码常量：``explain`` 只接受 ``ExplainQuery``，没有级别或前缀参数。"""
+    assert list(inspect.signature(StarRocksAdapter.explain).parameters) == ["self", "query"]
+    assert not {"level", "prefix", "sql"} & {f.name for f in dataclasses.fields(ExplainQuery)}
+
+
+async def test_explain_result_is_renamed_to_a_single_plan_column() -> None:
+    drv = driver(plan_result("- Output => [1:region]", "", "    - SCAN [sales]"))
+
+    result = await adapter(drv).explain(explained())
+
+    assert PLAN_COLUMN == "plan"
+    assert result.columns == (PLAN_COLUMN,)
+    assert result.rows == (
+        {"plan": "- Output => [1:region]"},
+        {"plan": ""},
+        {"plan": "    - SCAN [sales]"},
+    )
+    assert (result.row_count, result.truncated, result.target_id) == (3, False, "sr-test")
+    assert SERVER_PLAN_COLUMN not in result.model_dump_json()
+
+
+@pytest.mark.parametrize(
+    "outcome",
+    [
+        plan_result("a", columns=("Explain String", "extra")),
+        Result((), []),
+        plan_result(1),
+        plan_result(None),
+        plan_result(b"bytes"),
+        plan_result(Decimal("1.5")),
+        plan_result("a", 2),  # 第二行才出现非文本
+    ],
+    ids=["two-columns", "no-columns", "int", "null", "bytes", "decimal", "late-non-text"],
+)
+async def test_explain_rejects_multi_column_or_non_text_plans(outcome: Result) -> None:
+    drv = driver(outcome)
+    error = await failure(adapter(drv).explain(explained()))
+    assert error.code is Code.RESULT_CONTRACT
+    assert_safe(error)
+    assert (only(drv).closed, only(drv).aborted) == (False, True)
+
+
+@pytest.mark.parametrize(
+    ("changes", "lines", "kept"),
+    [
+        ({"max_plan_lines": 3}, ["l0", "l1", "l2", "l3", "l4"], 3),
+        # 每行 {"plan": "xxxxxxxx"} 20 字节：2 + 20 + (2 + 20) = 44 <= 50，第三行超出
+        ({"max_result_bytes": 50, "max_value_bytes": 50}, ["x" * 8] * 5, 2),
+        ({"max_value_bytes": 10}, ["short", "x" * 20, "after"], 1),
+    ],
+    ids=["lines", "total-bytes", "single-value"],
+)
+async def test_explain_truncates_at_max_plan_lines_and_bytes(
+    changes: dict[str, int], lines: list[str], kept: int
+) -> None:
+    drv = driver(plan_result(*lines))
+    limited = StarRocksTarget.model_validate({**TARGET.model_dump(), **changes})
+    result = await adapter(drv, limited).explain(explained())
+
+    assert result.truncated and result.row_count == kept
+    assert [r["plan"] for r in result.rows] == lines[:kept]
+    assert (only(drv).closed, only(drv).aborted) == (False, True)  # 截断即断开，不 QUIT
+
+
+async def test_plan_limit_does_not_follow_the_query_row_limit() -> None:
+    """计划行数只受 ``max_plan_lines`` 约束；查询的 ``max_rows`` 与用户 LIMIT 不截断计划。"""
+    lines = [f"l{i}" for i in range(POLICY.max_rows + 3)]
+    drv = driver(plan_result(*lines))
+    result = await adapter(drv).explain(explained("SELECT region FROM sales LIMIT 1"))
+    assert (result.row_count, result.truncated) == (len(lines), False)
+
+
+async def test_explain_and_run_query_reject_each_others_products() -> None:
+    drv = driver()
+    ada = adapter(drv)
+    with pytest.raises(TypeError):
+        await ada.explain(guarded())  # type: ignore[arg-type]
+    with pytest.raises(TypeError):
+        await ada.run_query(explained())  # type: ignore[arg-type]
+    with pytest.raises(TypeError):
+        await ada.explain("SELECT region FROM sales")  # type: ignore[arg-type]
+    other = guard_explain_query(
+        "SELECT region FROM sales", POLICY.model_copy(update={"target_id": "sr-other"})
+    )
+    with pytest.raises(StarRocksError) as info:
+        await ada.explain(other)
+    assert info.value.code is Code.OBJECT_NOT_ALLOWED
+    assert drv.attempts == 0
+
+
+async def test_explain_session_readback_mismatch_never_sends_explain() -> None:
+    drv = driver(results={SESSION_READ: Result(("q", "m", "t"), [(1, 1, "UTC")])})
+    error = await failure(adapter(drv).explain(explained()))
+    assert error.code is Code.SESSION_SETUP_FAILED
+    conn = only(drv)
+    assert [sql for sql, _ in conn.executed] == [SESSION_SET, SESSION_READ]
+    assert conn.aborted
+
+
+@pytest.mark.parametrize(
+    ("error", "code"),
+    [
+        (OperationalError(5203, f"Access denied {CANARY}"), Code.PERMISSION_DENIED),
+        (OperationalError(5024, f"Query reached its timeout {CANARY}"), Code.SERVER_TIMEOUT),
+        (OperationalError(2013, f"Lost connection {CANARY}"), Code.CONNECTION_LOST),
+        (ProgrammingError(1064, f"syntax error near '{CANARY}'"), Code.QUERY_FAILED),
+    ],
+)
+async def test_explain_errors_map_like_queries(error: BaseException, code: Code) -> None:
+    drv = driver(error)
+    result = await failure(adapter(drv).explain(explained()))
+    assert result.code is code
+    assert_safe(result)
+    assert "EXPLAIN" not in repr(result) and "sales" not in str(result)
+    assert only(drv).aborted
+
+
+async def test_explain_client_deadline_and_cancellation_discard_the_connection() -> None:
+    drv = driver(plan_result("a", "b"), hang_on="fetch")
+    async with asyncio.timeout(5):
+        error = await failure(adapter(drv).explain(explained()))
+    assert error.code is Code.TIMEOUT
+    assert only(drv).aborted
+
+    drv = driver(plan_result("a", "b"), hang_on="fetch")
+    ada = adapter(drv, TARGET.model_copy(update={"pool_size": 1}))
+    task = asyncio.create_task(ada.explain(explained()))
+    while not drv.connections or drv.connections[0].rows_read < 1:
+        await asyncio.sleep(0)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert drv.connections[0].aborted and drv.attempts == 1
+    drv.make = driver(plan_result("a")).make
+    assert (await ada.explain(explained())).row_count == 1  # 槽位已释放，未自动重试
+
+
+def test_max_plan_lines_must_be_positive() -> None:
+    assert TARGET.max_plan_lines == 500
+    with pytest.raises(ValidationError):
+        StarRocksTarget.model_validate({**TARGET.model_dump(), "max_plan_lines": 0})

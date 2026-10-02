@@ -1,5 +1,9 @@
 """StarRocks 只读 Adapter：只执行 SQLGuard 产物与代码生成的元数据查询，结果有界。
 
+执行计划只以代码常量 ``EXPLAIN_PREFIX``（固定显式级别）加 ``ExplainQuery`` 的规范化 SQL
+发出，不使用裸 ``EXPLAIN``：其级别取自 FE 可变配置 ``query_explain_level``，可被改为
+ANALYZE 而实际执行查询。显式级别 ``LOGICAL`` 由 P2 Task 0 在 StarRocks 4.1.4 上实测选定。
+
 连接：每次请求一条新连接，用完即关，不复用。``pool_size`` 是并发槽位，等待槽位与建立连接
 共用 ``connect_timeout_seconds`` 期限。asyncmy 自带连接池没有获取期限，且按 ``connected``
 决定是否回收，``close()`` 后连接仍可能回到空闲队列；每次新建连接可以保证中断、截断或结果
@@ -45,7 +49,12 @@ from pydantic import (
 )
 
 from xiaowei.config import is_secret_ref, resolve_secret_ref
-from xiaowei.sqlguard import GuardedQuery, QueryPolicy
+from xiaowei.sqlguard import ExplainQuery, GuardedQuery, QueryPolicy
+
+EXPLAIN_LEVEL: Final = "LOGICAL"
+"""P2 Task 0 在 4.1.4 上选定：FE 默认级别为 ANALYZE 时仍零执行，且不输出列统计值或资源组。"""
+EXPLAIN_PREFIX: Final = f"EXPLAIN {EXPLAIN_LEVEL} "
+PLAN_COLUMN: Final = "plan"
 
 Scalar = None | bool | int | float | str
 
@@ -97,6 +106,7 @@ class StarRocksTarget(BaseModel):
 
     ``policy`` 是同一目标的 SQLGuard allowlist，目标 ID 与默认 database 必须一致。
     ``client_timeout_seconds`` 覆盖会话设置、执行与读取，不早于服务端 ``query_timeout``。
+    ``max_plan_lines`` 是执行计划最多返回的行数；字节与单值上限与查询共用。
     """
 
     model_config = ConfigDict(frozen=True, extra="forbid")
@@ -117,6 +127,7 @@ class StarRocksTarget(BaseModel):
     query_mem_limit_bytes: int = Field(ge=1)
     max_result_bytes: int = Field(ge=2)
     max_value_bytes: int = Field(ge=1)
+    max_plan_lines: int = Field(default=500, ge=1)
     policy: QueryPolicy
 
     @field_validator("password_ref")
@@ -238,6 +249,19 @@ class StarRocksAdapter:
             raise StarRocksError(_Code.OBJECT_NOT_ALLOWED)
         return await self._run(query.normalized_sql, None, query.max_returned_rows)
 
+    async def explain(self, query: ExplainQuery) -> QueryResult:
+        """以固定显式级别 EXPLAIN SQLGuard 产物；只接受本目标的 ``ExplainQuery``。
+
+        结果恰好一列文本，列名固定为 ``PLAN_COLUMN``，每行一行计划；``sql`` 是实际发出的完整
+        语句。多列或非文本值不符合契约，按 ``RESULT_CONTRACT`` 断开连接。
+        """
+        if not isinstance(query, ExplainQuery):
+            raise TypeError("只对 SQLGuard 产生的 ExplainQuery 取执行计划")
+        if query.target_id != self._target.target_id:
+            raise StarRocksError(_Code.OBJECT_NOT_ALLOWED)
+        sql = EXPLAIN_PREFIX + query.normalized_sql
+        return await self._run(sql, None, self._target.max_plan_lines, plan=True)
+
     async def list_tables(self) -> QueryResult:
         objects = tuple(sorted(self._target.policy.allowed_objects))
         sql = _list_tables_sql(len(objects))
@@ -251,7 +275,9 @@ class StarRocksAdapter:
         sql = _describe_table_sql(len(columns))
         return await self._run(sql, (self._target.database, name, *columns), len(columns))
 
-    async def _run(self, sql: str, args: tuple[object, ...] | None, max_rows: int) -> QueryResult:
+    async def _run(
+        self, sql: str, args: tuple[object, ...] | None, max_rows: int, *, plan: bool = False
+    ) -> QueryResult:
         started = time.monotonic()
         # 等待槽位与建立连接共用一个绝对期限；超期的阶段决定错误码。
         deadline = asyncio.get_running_loop().time() + self._target.connect_timeout_seconds
@@ -267,7 +293,7 @@ class StarRocksAdapter:
             conn, code = await self._open(deadline)
             if conn is None:
                 raise StarRocksError(code or _Code.CONNECT_FAILED)
-            rows, truncated, columns, code = await self._query(conn, sql, args, max_rows)
+            rows, truncated, columns, code = await self._query(conn, sql, args, max_rows, plan)
         finally:
             self._slots.release()
         if code is not None:
@@ -291,9 +317,17 @@ class StarRocksAdapter:
             return None, _connect_code(error)
 
     async def _query(
-        self, conn: Connection, sql: str, args: tuple[object, ...] | None, max_rows: int
+        self,
+        conn: Connection,
+        sql: str,
+        args: tuple[object, ...] | None,
+        max_rows: int,
+        plan: bool,
     ) -> tuple[list[dict[str, Scalar]], bool, tuple[str, ...], StarRocksErrorCode | None]:
-        """执行并读取；返回错误码而不是抛出，使错误在离开 ``except`` 后由调用方抛出。"""
+        """执行并读取；返回错误码而不是抛出，使错误在离开 ``except`` 后由调用方抛出。
+
+        ``plan`` 为真时结果必须恰好一列文本，列名换为 ``PLAN_COLUMN``；服务端列名不外传。
+        """
         complete = False
         stage = _Code.SESSION_SETUP_FAILED
         try:
@@ -303,7 +337,11 @@ class StarRocksAdapter:
                 columns = await conn.execute(sql, args)
                 if len(set(columns)) != len(columns):
                     raise _ResultContractError
-                rows, truncated = await self._read(conn, columns, max_rows)
+                if plan:
+                    if len(columns) != 1:
+                        raise _ResultContractError
+                    columns = (PLAN_COLUMN,)
+                rows, truncated = await self._read(conn, columns, max_rows, text_only=plan)
             complete = not truncated
             return rows, truncated, columns, None
         except TimeoutError:
@@ -334,12 +372,12 @@ class StarRocksAdapter:
             raise _SessionMismatchError
 
     async def _read(
-        self, conn: Connection, columns: tuple[str, ...], max_rows: int
+        self, conn: Connection, columns: tuple[str, ...], max_rows: int, *, text_only: bool
     ) -> tuple[list[dict[str, Scalar]], bool]:
         rows: list[dict[str, Scalar]] = []
         size = 2  # "[]"
         while (raw := await conn.fetch_row()) is not None:
-            if len(raw) != len(columns):
+            if len(raw) != len(columns) or (text_only and not all(isinstance(v, str) for v in raw)):
                 raise _ResultContractError
             if len(rows) == max_rows:
                 return rows, True
