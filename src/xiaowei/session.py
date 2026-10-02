@@ -14,7 +14,8 @@ Evidence 读取边界按当前权限、目标范围、策略与过期取回 Sess
 不自动重跑工具补偿。
 
 会话关闭与维护清理也只在本模块：``close_sessions`` 在调用方的应用表事务中把会话置为不可
-回放（不删历史）；``cleanup_expired`` 按显式批次、数据库过期与状态条件删除过期对象，历史经
+回放（不删历史）；``close_interrupted_sessions`` 供启动恢复持久关闭，元数据尚未登记时写入已关闭
+的占位；``cleanup_expired`` 按显式批次、数据库过期与状态条件删除过期对象，历史经
 SDK 公共 ``clear_session()`` 清除，任一步失败即停下。
 """
 
@@ -348,10 +349,11 @@ class PolicySession:
     async def _open(self) -> int:
         """返回可继续使用的会话已提交轮数；归属、Profile、状态或期限不符时拒绝。"""
         row = await self._claim()
-        if row["profile_fingerprint"] != self._profile:
-            raise SessionUnavailableError("模型配置或数据策略已变化，请新建会话")
+        # 先判断状态：恢复写入的已关闭占位没有指纹，不能被报成“配置已变化”。
         if row["state"] != "active" or self._clock() >= row["expires_at"]:
             raise SessionUnavailableError
+        if row["profile_fingerprint"] != self._profile:
+            raise SessionUnavailableError("模型配置或数据策略已变化，请新建会话")
         return cast(int, row["turns"])
 
     async def _claim(self) -> Mapping[str, Any]:
@@ -607,6 +609,50 @@ def _role(item: TResponseInputItem) -> object:
 
 def _size(items: list[TResponseInputItem]) -> int:
     return len(json.dumps(items, ensure_ascii=False).encode())
+
+
+# 恢复的持久关闭：元数据已存在时置为 closed；尚未登记时写入已关闭的占位行（指纹为空、零轮）。
+# 首次登记是 ON CONFLICT DO NOTHING，与这里在同一主键上串行：无论谁先提交，结果都是 closed，
+# 且没有任何迁移能把 closed 改回 active。同一会话只写一行。
+_CLOSE_OR_RESERVE = text(
+    """
+    INSERT INTO xiaowei_session (
+        session_id, subject_id, channel, profile_fingerprint, created_at, expires_at, turns, state
+    ) VALUES (:session_id, :subject_id, :channel, '', :now, :expires_at, 0, 'closed')
+    ON CONFLICT (session_id) DO UPDATE SET state = 'closed'
+    """
+)
+
+
+async def close_interrupted_sessions(
+    conn: AsyncConnection,
+    owners: Sequence[tuple[str, str, str]],
+    *,
+    now: datetime,
+    expires_at: datetime,
+) -> None:
+    """在启动恢复的事务中持久关闭被中断轮次的会话 ``(session_id, subject_id, channel)``。
+
+    旧进程的 Runner 可能尚未登记会话元数据、正在登记或正在写入：元数据不存在时写入已关闭的
+    占位，使之后的登记只能读到 closed；已存在（含 active/writing）时直接关闭。旧 Runner 之后的
+    提交因状态不是 active 被拒，底层可能已写入的历史永不回放。占位行按会话保留期过期，由维护
+    清理删除。
+    """
+    seen: set[str] = set()
+    for session_id, subject_id, channel in owners:
+        if session_id in seen:
+            continue
+        seen.add(session_id)
+        await conn.execute(
+            _CLOSE_OR_RESERVE,
+            {
+                "session_id": session_id,
+                "subject_id": subject_id,
+                "channel": channel,
+                "now": now,
+                "expires_at": expires_at,
+            },
+        )
 
 
 async def close_sessions(conn: AsyncConnection, session_ids: Sequence[str]) -> None:

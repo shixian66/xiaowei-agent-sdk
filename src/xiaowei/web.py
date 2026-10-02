@@ -15,7 +15,7 @@ POST 在本进程内等待本轮完成；客户端断开不取消处理，结果
 
 import re
 import secrets
-from collections.abc import Awaitable, Callable, MutableMapping
+from collections.abc import Awaitable, Callable, Mapping, MutableMapping
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Annotated, Any, TypeVar
@@ -213,8 +213,16 @@ async def _parse(model: type[_B], request: Request) -> _B:
         raise HTTPException(400, _INVALID_BODY) from None
 
 
-def create_web_app(service: ChannelService, config: WebConfig) -> FastAPI:
-    """装配 Web 入口；``service`` 已在启动时核验唯一授权来源与共享 ``EvidenceStore``。"""
+def create_web_app(
+    service: ChannelService,
+    config: WebConfig,
+    *,
+    components: Callable[[], Mapping[str, str]] | None = None,
+) -> FastAPI:
+    """装配 Web 入口；``service`` 已在启动时核验唯一授权来源与共享 ``EvidenceStore``。
+
+    ``components`` 给出可选能力（如飞书）的安全状态，只出现在 ``/readyz``，不影响 Web 自身是否就绪。
+    """
     page = (_STATIC / "index.html").read_bytes()
     assets = {name: (_STATIC / name).read_bytes() for name in _ASSETS}
     readiness = service.results.store.readiness
@@ -265,9 +273,10 @@ def create_web_app(service: ChannelService, config: WebConfig) -> FastAPI:
 
     @app.get("/readyz")
     async def readyz() -> JSONResponse:
+        extra = dict(components()) if components is not None else {}
         if not readiness.ok:
-            return JSONResponse({"status": "not_ready"}, status_code=503)
-        return JSONResponse({"status": "ready"})
+            return JSONResponse({**extra, "status": "not_ready"}, status_code=503)
+        return JSONResponse({**extra, "status": "ready"})
 
     @app.post("/api/turns")
     async def submit(request: Request) -> Response:

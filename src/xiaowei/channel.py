@@ -213,7 +213,8 @@ class ResultDelivery:
 
         首次发送与事件重投只竞争 pending；``resend=True`` 只供显式重发，只对 completed 结果竞争
         failed/unknown。completed 结果先按当前权限重新验证：不可交付时取得投递权并记为 failed，
-        不发送旧内容。发送抛出异常或被取消时记为 unknown 并原样传播。
+        不发送旧内容。发送抛出异常或被取消时记为 unknown 并原样传播。落定只针对本次取得的尝试：
+        尝试已被启动恢复作废或被更新的尝试取代时不改写状态，报错并锁低 readiness。
         """
         record, decision = await self._load(ref)
         if record.state == "completed":
@@ -225,17 +226,23 @@ class ResultDelivery:
             delivery = self._receipt(record)
         else:
             return None
-        if not await self._store.claim_send(record, resend=resend):
+        claim = await self._store.claim_send(record, resend=resend)
+        if claim is None:
             return None
         if delivery is None:
-            await self._store.finish_send(record, "failed")
+            await self._store.finish_send(claim, "failed")
             raise ResultUnavailableError
         try:
             outcome = await transmit(delivery)
-        except BaseException:
-            await self._store.finish_send(record, "unknown")
+        except BaseException as exc:
+            try:
+                await self._store.finish_send(claim, "unknown")
+            except ChannelStoreError as lost:
+                # 这次尝试已被启动恢复作废或被更新的尝试取代（readiness 已锁低）：不改写状态，
+                # 原样传播发送本身的异常或取消。
+                raise exc from lost
             raise
-        await self._store.finish_send(record, outcome)
+        await self._store.finish_send(claim, outcome)
         return outcome
 
     async def _load(self, ref: RequestRef) -> tuple[RequestRecord, AccessDecision]:

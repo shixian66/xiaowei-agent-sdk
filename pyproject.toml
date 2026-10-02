@@ -12,7 +12,6 @@ requires-python = ">=3.11,<3.12"
 #   sqlalchemy  —— TaskStore 的 Core 语句构造与连接管理（M4）。用 Core 不用 ORM：
 #                  ORM 的 identity map 与 flush 时机会让"必须采纳存储层 winner"
 #                  这条不变量更难断言，而并发语义正是 M4 的全部承重点。
-#   alembic     —— 迁移入口随应用发布，M5 的 Compose 要调用它，故不进 dev。
 #   asyncpg     —— SQLAlchemy 2.0 的 async PostgreSQL 驱动。
 #   fastapi     —— M5 薄 HTTP gateway。
 #   uvicorn     —— M5 容器内 ASGI 进程。
@@ -22,12 +21,12 @@ requires-python = ">=3.11,<3.12"
 #                  其 TLS 升级、非缓冲读取与关闭行为，升级须重新核对。
 #   lark-channel-sdk —— 飞书长连接与发送（P1-B Task 7）。精确钉版：入站 ack 时机、raw 事件字段、
 #                  发送重试与降级行为按 1.4.0 源码核对，升级须重新核对。
-#   新包另用 pydantic / sqlalchemy / asyncpg；其余仅旧包 src/xiaowei_agent 使用，P1-B 列明清理范围。
+#   新包另用 pydantic / sqlalchemy / asyncpg。旧包 src/xiaowei_agent 不再进入 wheel 与主命令
+#   （P1-B Task 8），它专用的 alembic 移到 dev（旧测试）与 legacy（旧 Compose 镜像）。
 dependencies = [
     "pydantic>=2.13,<3",
     "sqlglot>=27,<31",
     "sqlalchemy[asyncio]>=2.0.44,<2.1",
-    "alembic>=1.16,<2",
     "asyncpg>=0.30,<0.31",
     "fastapi>=0.115,<1",
     "uvicorn>=0.34,<1",
@@ -37,7 +36,7 @@ dependencies = [
 ]
 
 [project.scripts]
-xiaowei = "xiaowei_agent.interfaces.cli:main"
+xiaowei = "xiaowei.cli:main"
 
 [project.optional-dependencies]
 dev = [
@@ -51,10 +50,16 @@ dev = [
     "hatchling==1.28.0",
     "httpx>=0.28,<1",     # ASGITransport 契约测试；不进入运行镜像
     "PyYAML>=6,<7",       # Compose 静态契约测试；不进入运行镜像
+    "alembic>=1.16,<2",   # 仅旧包 xiaowei_agent 的迁移与旧测试使用
+]
+# 旧 M5 Compose 镜像（legacy CI 的 compose-smoke）专用：旧包的迁移入口仍需要 alembic。
+# 新产品不使用；旧源码物理清理时一并删除。
+legacy = [
+    "alembic>=1.16,<2",
 ]
 
 [tool.hatch.build.targets.wheel]
-packages = ["src/xiaowei_agent", "src/xiaowei"]
+packages = ["src/xiaowei"]
 
 [tool.pytest.ini_options]
 addopts = "--strict-markers --strict-config --disable-socket --allow-unix-socket"

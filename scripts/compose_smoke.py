@@ -29,6 +29,7 @@ _NON_SUCCESS_CODES = {
     "indeterminate": "SMOKE_TASK_INDETERMINATE",
 }
 _TEXT = "检查最近三十分钟慢查询"
+_LEGACY_CLI = "import sys; from xiaowei_agent.interfaces.cli import main; sys.exit(main())"
 _MIGRATION_FAILURE_CODES = (
     ("xiaowei-migrate: configuration_error", "SMOKE_MIGRATION_CONFIGURATION_FAILED"),
     ("xiaowei-migrate: database_unavailable", "SMOKE_MIGRATION_DATABASE_UNAVAILABLE"),
@@ -210,7 +211,10 @@ def _task(
         "exec",
         "-T",
         "api",
-        "xiaowei",
+        # 旧 M5 CLI：正式命令 ``xiaowei`` 已指向新包（P1-B Task 8），旧镜像只经模块调用旧入口。
+        "python",
+        "-c",
+        _LEGACY_CLI,
         *arguments,
         timeout=30.0,
         failure_code=failure_code,

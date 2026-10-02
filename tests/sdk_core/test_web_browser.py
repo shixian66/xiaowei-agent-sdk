@@ -62,10 +62,9 @@ def access_log() -> Iterator[list[str]]:
 
 @asynccontextmanager
 async def serving(app: Any) -> AsyncIterator[None]:
+    # 以“能否连上”判断是否有其他进程在监听；前一个用例留下的 TIME_WAIT 不影响 Uvicorn 绑定。
     with socket.socket() as probe:
-        try:
-            probe.bind((HOST, PORT))
-        except OSError:
+        if probe.connect_ex((HOST, PORT)) == 0:
             pytest.fail(f"{HOST}:{PORT} 已被占用：smoke 使用正式默认端口")
     server = uvicorn.Server(
         uvicorn.Config(

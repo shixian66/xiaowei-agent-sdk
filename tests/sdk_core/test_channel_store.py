@@ -24,6 +24,7 @@ from xiaowei.channel_store import (
     CallerFailureCode,
     ChannelStore,
     ChannelStoreUnavailableError,
+    DeliveryClaim,
     NotReadyError,
     RequestConflictError,
     RequestRecord,
@@ -33,7 +34,14 @@ from xiaowei.channel_store import (
 )
 from xiaowei.models import AgentAnswer, AnswerInference
 from xiaowei.session import SessionStoreError, cleanup_expired
-from xiaowei.storage import Readiness, hold_instance_lock, open_engine
+from xiaowei.storage import (
+    Backend,
+    Readiness,
+    _release,
+    hold_backend,
+    hold_instance_lock,
+    open_engine,
+)
 
 pytestmark = pytest.mark.loopback
 
@@ -91,6 +99,12 @@ class Env:
             message=message,
             policy_version="p1",
         )
+
+    async def settle(self, record: RequestRecord, outcome: str, *, resend: bool = False) -> None:
+        """取得投递权并落定一次发送（不实际发送）。"""
+        claim = await self.store.claim_send(record, resend=resend)
+        assert claim is not None
+        await self.store.finish_send(claim, outcome)  # type: ignore[arg-type]
 
     async def completed(self, request_id: str = "r1", **kwargs: Any) -> RequestRecord:
         record = (await self.accept(request_id, **kwargs)).record
@@ -286,8 +300,7 @@ async def test_two_processes_racing_on_one_key_create_one_request(postgres_url: 
 async def test_expired_requests_are_unreadable(env: Env) -> None:
     record = await env.completed()
     failed = await env.completed("r2")
-    assert await env.store.claim_send(failed)
-    await env.store.finish_send(failed, "failed")
+    await env.settle(failed, "failed")
     env.clock.advance(REQUEST_RETENTION)
     # 过期结果不能首次发送，也不能显式重发。
     assert not await env.store.claim_send(record)
@@ -326,20 +339,19 @@ async def test_first_send_and_resend_each_have_one_winner(postgres_url: URL) -> 
         record = await env.completed()
         # 首次发送与事件重投只竞争 pending → sending。
         claims = await asyncio.gather(*(s.claim_send(record) for s in (env.store, second) * 2))
-        assert sum(claims) == 1
+        (won,) = [c for c in claims if c is not None]
         assert not await env.store.claim_send(record, resend=True)  # sending 不能重发
-        await env.store.finish_send(record, "unknown")
+        await second.finish_send(won, "unknown")  # 落定只认尝试，不认取得它的存储对象
 
         # 重投遇到 unknown/failed：零发送。显式重发只有一个进程取得。
         assert not await env.store.claim_send(record)
         claims = await asyncio.gather(
             *(s.claim_send(record, resend=True) for s in (env.store, second) * 2)
         )
-        assert sum(claims) == 1
-        await second.finish_send(record, "failed")
+        (won,) = [c for c in claims if c is not None]
+        await second.finish_send(won, "failed")
         assert not await env.store.claim_send(record)
-        assert await env.store.claim_send(record, resend=True)
-        await env.store.finish_send(record, "sent")
+        await env.settle(record, "sent", resend=True)
         assert not await env.store.claim_send(record)
         assert not await env.store.claim_send(record, resend=True)
         assert (await env.row(record))["delivery"] == "sent"
@@ -352,13 +364,11 @@ async def test_resend_needs_a_completed_result_of_the_same_owner(env: Env) -> No
     failed = (await env.accept("r2")).record
     await env.store.fail(failed, "busy")
     # 固定回执走首次发送条件；它不是可重发的结果。
-    assert await env.store.claim_send(failed)
-    await env.store.finish_send(failed, "failed")
+    await env.settle(failed, "failed")
     assert not await env.store.claim_send(failed, resend=True)
 
     done = await env.completed("r3")
-    await env.store.claim_send(done)
-    await env.store.finish_send(done, "failed")
+    await env.settle(done, "failed")
     stranger = RequestRecord(**{**done.__dict__, "subject_id": "bob"})
     assert not await env.store.claim_send(stranger, resend=True)
 
@@ -366,8 +376,39 @@ async def test_resend_needs_a_completed_result_of_the_same_owner(env: Env) -> No
 async def test_finish_send_requires_the_sending_state(env: Env) -> None:
     record = await env.completed()
     with pytest.raises(ChannelStoreUnavailableError):
-        await env.store.finish_send(record, "sent")
+        await env.store.finish_send(DeliveryClaim(record, "never-claimed"), "sent")
     assert not env.readiness.ok
+
+
+async def test_finish_send_only_settles_its_own_attempt(env: Env) -> None:
+    """尝试标识不可复用：已落定的尝试、伪造的尝试都不能改写当前尝试。"""
+    record = await env.completed()
+    first = await env.store.claim_send(record)
+    assert first is not None
+    await env.store.finish_send(first, "unknown")
+    current = await env.store.claim_send(record, resend=True)
+    assert current is not None and current.attempt != first.attempt
+    for stale in (first, DeliveryClaim(record, "forged")):
+        with pytest.raises(ChannelStoreUnavailableError):
+            await env.store.finish_send(stale, "failed")
+    row = await env.row(record)
+    assert (row["delivery"], row["delivery_attempt"]) == ("sending", current.attempt)
+    await env.store.finish_send(current, "sent")
+    row = await env.row(record)
+    assert (row["delivery"], row["delivery_attempt"]) == ("sent", None)
+
+
+@pytest.mark.parametrize("outcome", ["sent", "failed", "unknown"])
+async def test_a_single_send_settles_each_outcome(env: Env, outcome: str) -> None:
+    record = await env.completed()
+    await env.settle(record, outcome)
+    row = await env.row(record)
+    assert (row["delivery"], row["delivery_attempt"], row["delivery_owner_pid"]) == (
+        outcome,
+        None,
+        None,
+    )
+    assert env.readiness.ok
 
 
 # ---- 双存储与关键状态失败 ------------------------------------------------------------------
@@ -411,10 +452,11 @@ async def test_key_transition_failures_lock_readiness(env: Env) -> None:
 
 async def test_send_outcome_failure_locks_readiness(env: Env) -> None:
     record = await env.completed()
-    assert await env.store.claim_send(record)
+    claim = await env.store.claim_send(record)
+    assert claim is not None
     await env.fail_writes("xiaowei_request")
     with pytest.raises(ChannelStoreUnavailableError):
-        await env.store.finish_send(record, "sent")
+        await env.store.finish_send(claim, "sent")
     assert not env.readiness.ok
     await env.heal("xiaowei_request")
     assert (await env.row(record))["delivery"] == "sending"
@@ -436,22 +478,98 @@ async def test_restart_recovery_interrupts_and_never_sends(postgres_url: URL) ->
 
     # 新进程：取得实例锁后恢复一次。
     async with environment(postgres_url) as env:
+        # 恢复后的投递在持锁期间进行（与 serve 相同）；绑定的锁释放后存储不再开始新工作。
         async with hold_instance_lock(env.engine, env.readiness) as lock:
             report = await env.store.recover(lock)
-        assert (report.interrupted, report.unknown) == (2, 1)
-        for record in (accepted, running):
-            row = await env.row(record)
-            assert (row["state"], row["failure_code"]) == ("interrupted", "interrupted")
-            assert await env.session_state(record.session_id) == "closed"
-        assert (await env.row(sending))["delivery"] == "unknown"
-        assert (await env.row(done))["delivery"] == "pending"
-        assert await env.session_state(sending.session_id) == "active"
+            assert (report.interrupted, report.unknown) == (2, 1)
+            for record in (accepted, running):
+                row = await env.row(record)
+                assert (row["state"], row["failure_code"]) == ("interrupted", "interrupted")
+                assert await env.session_state(record.session_id) == "closed"
+            assert (await env.row(sending))["delivery"] == "unknown"
+            assert (await env.row(done))["delivery"] == "pending"
+            assert await env.session_state(sending.session_id) == "active"
 
-        # 中断回执最多发送一次；遗留 sending 变为 unknown 后只能显式重发。
-        assert await env.store.claim_send(accepted)
-        assert not await env.store.claim_send(sending)
-        assert await env.store.claim_send(sending, resend=True)
-        assert (await env.accept("r2", conversation="c2")).record.state == "interrupted"
+            # 中断回执最多发送一次；遗留 sending 变为 unknown 后只能显式重发。
+            assert await env.store.claim_send(accepted)
+            assert not await env.store.claim_send(sending)
+            assert await env.store.claim_send(sending, resend=True)
+            assert (await env.accept("r2", conversation="c2")).record.state == "interrupted"
+
+
+class _SendAbortedError(Exception):
+    pass
+
+
+@pytest.mark.parametrize("exit_", ["return", "raise", "cancel"])
+async def test_a_released_resend_owner_no_longer_shields_its_sending(
+    postgres_url: URL, exit_: str
+) -> None:
+    """显式重发持有所有者连接时，启动恢复不动它的 sending；所有者以任何方式退出后（正常、
+    异常、取消），即使引擎仍打开，其后端身份也已消失，随后一次恢复把遗留 sending 记为 unknown。"""
+    async with environment(postgres_url) as env:
+        record = await env.completed()
+        await env.settle(record, "failed")
+        owners: list[Backend] = []
+        claimed, leave = asyncio.Event(), asyncio.Event()
+
+        async def resend() -> None:
+            # 模拟发送后落定未完成：取得投递权后就退出，记录仍是 sending。
+            async with hold_backend(env.engine) as sender:
+                owners.append(sender)
+                store = make_store(env.engine, env.clock, sender=sender)
+                assert await store.claim_send(record, resend=True)
+                claimed.set()
+                await leave.wait()
+                if exit_ == "raise":
+                    raise _SendAbortedError
+
+        task = asyncio.create_task(resend())
+        await asyncio.wait_for(claimed.wait(), 10)
+
+        async def recover() -> int:
+            async with environment(postgres_url) as other:
+                async with hold_instance_lock(other.engine, other.readiness) as lock:
+                    return (await other.store.recover(lock)).unknown
+
+        assert await recover() == 0  # 所有者仍在：不是遗留发送
+        assert (await env.row(record))["delivery"] == "sending"
+
+        if exit_ == "cancel":
+            task.cancel()
+        else:
+            leave.set()
+        if exit_ == "return":
+            await task
+        else:
+            with pytest.raises(_SendAbortedError if exit_ == "raise" else asyncio.CancelledError):
+                await task
+
+        (owner,) = owners
+        async with env.engine.connect() as conn:
+            alive = await conn.scalar(
+                text("SELECT count(*) FROM pg_stat_activity WHERE pid = :p AND backend_start = :s"),
+                {"p": owner.pid, "s": owner.started},
+            )
+        assert alive == 0
+        assert await recover() == 1
+        row = await env.row(record)
+        assert (row["delivery"], row["delivery_attempt"]) == ("unknown", None)
+        assert (row["delivery_owner_pid"], row["delivery_owner_started"]) == (None, None)
+
+
+async def test_an_owner_still_visible_after_discard_is_not_reported_released(env: Env) -> None:
+    """丢弃连接后若该身份仍在 ``pg_stat_activity``（强制断开后后端尚未退出），期限内确认不了
+    就不当作已释放。这里用另一条仍存活的连接充当该身份。"""
+    async with env.engine.connect() as survivor:
+        row = (
+            await survivor.execute(
+                text("SELECT pid, backend_start FROM pg_stat_activity WHERE pid = pg_backend_pid()")
+            )
+        ).one()
+        await survivor.commit()
+        discarded = await env.engine.connect()
+        assert not await _release(env.engine, discarded, Backend(row.pid, row.backend_start))
 
 
 async def test_recovery_failure_rolls_back_and_blocks_readiness(env: Env) -> None:
@@ -465,6 +583,197 @@ async def test_recovery_failure_rolls_back_and_blocks_readiness(env: Env) -> Non
     await env.heal("xiaowei_request")
     assert (await env.row(running))["state"] == "running"
     assert await env.session_state(running.session_id) == "active"
+
+
+# ---- 实例接管 ----------------------------------------------------------------------------
+
+# 只终止持有会话级实例锁的后端（排他）；接收事务的共享屏障锁不受影响。
+TERMINATE_INSTANCE_LOCK = text(
+    "SELECT count(pg_terminate_backend(pid)) FROM pg_locks"
+    " WHERE locktype = 'advisory' AND granted AND mode = 'ExclusiveLock'"
+)
+WAITING_ON_LOCK = text(
+    "SELECT count(*) FROM pg_stat_activity"
+    " WHERE wait_event_type = 'Lock' AND pid <> pg_backend_pid()"
+)
+
+
+async def waiting_on_locks(engine: AsyncEngine, count: int) -> bool:
+    """在期限内至少有 ``count`` 个后端在数据库锁上等待。"""
+    async with engine.connect() as conn:
+        for _ in range(100):
+            if await conn.scalar(WAITING_ON_LOCK) >= count:
+                return True
+            await conn.commit()
+            await asyncio.sleep(0.02)
+    return False
+
+
+async def test_takeover_recovery_waits_for_an_accept_still_committing(postgres_url: URL) -> None:
+    """旧实例的接收事务已通过检查、尚未提交时失去锁：新实例的恢复必须等它提交后再读取，
+    请求不能停在 accepted；重复请求得到已有终态。"""
+    async with environment(postgres_url) as old, environment(postgres_url) as new:
+        async with hold_instance_lock(old.engine, old.readiness) as old_lock:
+            await old.store.recover(old_lock)
+            await old.accept("r0")  # 建立 current 映射
+            # 暂停点：行锁挡住接收事务读取 current 映射（FOR SHARE），此时它已开始、未提交。
+            blocker = await new.engine.connect()
+            await blocker.begin()
+            await blocker.execute(text("SELECT 1 FROM xiaowei_channel_session FOR UPDATE"))
+            pending = asyncio.create_task(old.accept("r1", "接管时尚未提交"))
+            assert await waiting_on_locks(new.engine, 1)
+
+            async with new.engine.begin() as conn:
+                assert await conn.scalar(TERMINATE_INSTANCE_LOCK) == 1
+            await asyncio.wait_for(old_lock.lost.wait(), 2)
+
+            async with hold_instance_lock(new.engine, new.readiness) as new_lock:
+                recovery = asyncio.create_task(new.store.recover(new_lock))
+                await waiting_on_locks(new.engine, 2)  # 恢复在接收屏障上等待
+                await blocker.rollback()
+                await blocker.close()
+                late = await asyncio.wait_for(pending, 10)
+                report = await asyncio.wait_for(recovery, 10)
+                assert late.created and report.interrupted == 2
+                async with new.engine.connect() as conn:
+                    states = await conn.scalar(
+                        text("SELECT array_agg(DISTINCT state) FROM xiaowei_request")
+                    )
+                assert states == ["interrupted"]
+                again = await new.accept("r1", "接管时尚未提交")
+                assert not again.created and again.record.state == "interrupted"
+                with pytest.raises(NotReadyError):
+                    await old.store.start(late.record)
+
+
+async def test_accept_after_the_lock_moved_is_refused_without_the_notice(
+    postgres_url: URL,
+) -> None:
+    """终止通知被错过（锁的 readiness 与存储的不同）：数据库内的持有者核对仍拒绝写入新请求。"""
+    async with environment(postgres_url) as old, environment(postgres_url) as new:
+        async with hold_instance_lock(old.engine, Readiness()) as old_lock:
+            await old.store.recover(old_lock)
+            assert (await old.accept("r0")).created  # 对照：持锁时正常接收
+            async with new.engine.begin() as conn:
+                assert await conn.scalar(TERMINATE_INSTANCE_LOCK) == 1
+            async with hold_instance_lock(new.engine, new.readiness) as new_lock:
+                await new.store.recover(new_lock)
+                assert old.readiness.ok
+                with pytest.raises(NotReadyError):
+                    await old.accept("r1")
+                assert old.readiness.reason == "instance_lock_lost"
+                async with new.engine.connect() as conn:
+                    assert await conn.scalar(text("SELECT count(*) FROM xiaowei_request")) == 1
+                assert (await new.accept("r1")).created  # 新实例照常接收
+
+
+@asynccontextmanager
+async def missed_notice(old: Env) -> AsyncIterator[None]:
+    """旧实例持锁并完成恢复（绑定实例锁）；锁的 readiness 与存储的分开，模拟终止通知被错过。"""
+    async with hold_instance_lock(old.engine, Readiness()) as lock:
+        await old.store.recover(lock)
+        yield
+
+
+@asynccontextmanager
+async def taken_over(new: Env) -> AsyncIterator[None]:
+    """终止旧实例的锁连接，新实例取得锁并完成接管恢复。"""
+    async with new.engine.begin() as conn:
+        assert await conn.scalar(TERMINATE_INSTANCE_LOCK) == 1
+    async with hold_instance_lock(new.engine, new.readiness) as lock:
+        await new.store.recover(lock)
+        yield
+
+
+async def session_rows(env: Env) -> list[tuple[str, int, str]]:
+    async with env.engine.connect() as conn:
+        rows = await conn.execute(
+            text(
+                "SELECT session_id, generation, state FROM xiaowei_channel_session"
+                " ORDER BY generation"
+            )
+        )
+        return [tuple(row) for row in rows]
+
+
+async def test_rotation_after_takeover_is_refused_without_the_notice(postgres_url: URL) -> None:
+    async with environment(postgres_url) as old, environment(postgres_url) as new:
+        async with missed_notice(old):
+            first = await old.store.current_session("web", "alice", "cookie-1")
+            async with taken_over(new):
+                assert old.readiness.ok
+                with pytest.raises(NotReadyError):
+                    await old.store.new_session("web", "alice", "cookie-1")
+                assert old.readiness.reason == "instance_lock_lost"
+                assert await session_rows(new) == [(first.session_id, 1, "current")]
+                rotated = await new.store.new_session("web", "alice", "cookie-1")
+                assert rotated.generation == 2  # 新实例照常轮换
+
+
+async def test_first_session_after_takeover_is_not_created(postgres_url: URL) -> None:
+    async with environment(postgres_url) as old, environment(postgres_url) as new:
+        async with missed_notice(old), taken_over(new):
+            with pytest.raises(NotReadyError):
+                await old.store.current_session("feishu", "alice", "chat-1")
+            assert old.readiness.reason == "instance_lock_lost"
+            assert await session_rows(new) == []
+            assert (await new.store.current_session("feishu", "alice", "chat-1")).generation == 1
+
+
+async def test_duplicate_after_takeover_is_not_returned(postgres_url: URL) -> None:
+    """接管后旧实例收到重复事件：不返回记录（不去重投、不运行）；新实例按去重与投递契约处理一次。"""
+    async with environment(postgres_url) as old, environment(postgres_url) as new:
+        async with missed_notice(old):
+            record = (await old.accept("r1")).record
+            async with taken_over(new):
+                assert old.readiness.ok
+                with pytest.raises(NotReadyError):
+                    await old.accept("r1")
+                assert old.readiness.reason == "instance_lock_lost"
+                row = await new.row(record)
+                assert (row["state"], row["delivery"]) == ("interrupted", "pending")
+                again = await new.accept("r1")
+                assert not again.created and again.record.state == "interrupted"
+                assert await new.store.claim_send(again.record)
+                assert not await new.store.claim_send(again.record)
+
+
+async def test_delivery_claim_after_takeover_is_refused(postgres_url: URL) -> None:
+    """旧实例在接管后取得投递权：在数据库内拒绝，delivery 不变，新实例仍能取得一次。"""
+    async with environment(postgres_url) as old, environment(postgres_url) as new:
+        async with missed_notice(old):
+            record = (await old.accept("r1")).record
+            async with taken_over(new):
+                assert old.readiness.ok
+                with pytest.raises(NotReadyError):
+                    await old.store.claim_send(record)
+                assert old.readiness.reason == "instance_lock_lost"
+                assert (await new.row(record))["delivery"] == "pending"
+                assert await new.store.claim_send(record)
+
+
+async def test_a_bound_store_still_creates_rotates_accepts_and_delivers(postgres_url: URL) -> None:
+    """成功对照：持锁并已恢复的实例照常创建第一代、轮换、接收与投递；并发轮换只留一个 current。"""
+    async with (
+        environment(postgres_url) as env,
+        open_engine(secret(postgres_url)) as other,
+        hold_instance_lock(env.engine, env.readiness) as lock,
+    ):
+        second = make_store(other, env.clock, env.readiness)
+        await env.store.recover(lock)
+        await second.recover(lock)
+        assert (await env.store.current_session("web", "alice", "cookie-1")).generation == 1
+        results = await asyncio.gather(
+            env.store.new_session("web", "alice", "cookie-1"),
+            second.new_session("web", "alice", "cookie-1"),
+            return_exceptions=True,
+        )
+        assert any(not isinstance(r, BaseException) for r in results)
+        assert [state for *_, state in await session_rows(env)].count("current") == 1
+        done = await env.completed("r1")
+        assert not (await env.accept("r1")).created
+        assert await env.store.claim_send(done)
+        assert env.readiness.ok
 
 
 # ---- 会话映射 ----------------------------------------------------------------------------
@@ -578,8 +887,7 @@ async def test_cleanup_racing_with_resend_keeps_unexpired_requests(env: Env) -> 
     env.clock.advance(SESSION_RETENTION - 60)
     record = await env.completed()
     assert record.session_id == old.session_id
-    await env.store.claim_send(record)
-    await env.store.finish_send(record, "failed")
+    await env.settle(record, "failed")
     await env.store.new_session("web", "alice", "cookie-1")
     env.clock.advance(60)
 
@@ -587,13 +895,13 @@ async def test_cleanup_racing_with_resend_keeps_unexpired_requests(env: Env) -> 
         env.store.claim_send(record, resend=True),
         cleanup_expired(env.engine, now=env.clock(), batch_size=10),
     )
-    assert claimed and report.sessions == 0
+    assert claimed is not None and report.sessions == 0
     assert (await env.row(record))["delivery"] == "sending"
     sessions, requests, _, _ = await _counts(env, old.session_id)
     assert (sessions, requests) == (1, 1)
 
     # 请求过期并结束投递后，下一次清理完成。
-    await env.store.finish_send(record, "sent")
+    await env.store.finish_send(claimed, "sent")
     env.clock.advance(REQUEST_RETENTION)
     assert (await cleanup_expired(env.engine, now=env.clock(), batch_size=10)).sessions == 1
     assert await _counts(env, old.session_id) == (0, 0, 0, 0)
@@ -786,14 +1094,16 @@ async def test_cleanup_removes_retired_sessions_that_never_ran(postgres_url: URL
         # 接受后进程退出：恢复后的 interrupted。
         stranded = (await env.accept("r2", conversation="c-int")).record
     async with environment(postgres_url) as env:
+        # 恢复后的写入在持锁期间进行（与 serve 相同）；绑定的锁释放后存储不再开始新工作。
         async with hold_instance_lock(env.engine, env.readiness) as lock:
             await env.store.recover(lock)
-        await env.store.new_session("web", "alice", "c-int")
-        current = await env.store.current_session("web", "alice", "c-int")
+            await env.store.new_session("web", "alice", "c-int")
+            current = await env.store.current_session("web", "alice", "c-int")
 
         env.clock.advance(SESSION_RETENTION)
         report = await cleanup_expired(env.engine, now=env.clock(), batch_size=10)
-        assert (report.sessions, report.unregistered) == (0, 3)
+        # 恢复为被中断的会话写入已关闭的占位元数据，所以它按有元数据的会话清理；三者最终都被删除。
+        assert (report.sessions, report.unregistered) == (1, 2)
         for session_id in (empty.session_id, busy.session_id, stranded.session_id):
             assert await _unregistered_counts(env, session_id) == (0, 0)
         # 当前会话即使过期也保留。
@@ -825,8 +1135,7 @@ async def test_unregistered_cleanup_keeps_active_and_unexpired_state(env: Env) -
     await env.store.new_session("web", "alice", "c-unexpired")
     resend = await env.completed("r3", conversation="c-late")
     assert resend.session_id == late.session_id
-    await env.store.claim_send(resend)
-    await env.store.finish_send(resend, "failed")
+    await env.settle(resend, "failed")
     await env.store.new_session("web", "alice", "c-late")
     env.clock.advance(60)
 
@@ -834,14 +1143,14 @@ async def test_unregistered_cleanup_keeps_active_and_unexpired_state(env: Env) -
         env.store.claim_send(resend, resend=True),
         cleanup_expired(env.engine, now=env.clock(), batch_size=10),
     )
-    assert claimed and report.unregistered == 0
+    assert claimed is not None and report.unregistered == 0
     assert await _unregistered_counts(env, sending.session_id) == (1, 1)
     assert await _unregistered_counts(env, running.session_id) == (1, 1)
     assert await _unregistered_counts(env, late.session_id) == (1, 1)
     assert await _unregistered_counts(env, unexpired.session_id) == (1, 1)
 
     # 请求过期并结束投递后，下一次清理完成。
-    await env.store.finish_send(resend, "sent")
+    await env.store.finish_send(claimed, "sent")
     env.clock.advance(REQUEST_RETENTION)
     assert (await cleanup_expired(env.engine, now=env.clock(), batch_size=10)).unregistered == 2
     assert await _unregistered_counts(env, late.session_id) == (0, 0)

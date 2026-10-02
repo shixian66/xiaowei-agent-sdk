@@ -27,7 +27,7 @@ from tests.sdk_core.test_channel_service import env as env  # pytest fixture
 
 from xiaowei.app import Application
 from xiaowei.channel import ChannelService, InboundRequest, RequestReceipt, RequestRef
-from xiaowei.channel_store import ChannelSession, ChannelStore, RequestRecord
+from xiaowei.channel_store import ChannelSession, ChannelStore, DeliveryClaim, RequestRecord
 from xiaowei.config import FeishuConfig
 from xiaowei.evidence import EvidenceStoreError
 from xiaowei.feishu import (
@@ -417,15 +417,16 @@ async def test_interrupted_request_gets_one_notice_on_redelivery(env: Env) -> No
         assert inbound is not None
         await env.service.accept(inbound)  # 已接受，未运行即“重启”
     restarted = env.channel_store(readiness=Readiness())
+    # 恢复后的工作在持锁期间进行（与 serve 相同）；绑定的锁释放后存储不再开始新工作。
     async with hold_instance_lock(env.engine, restarted.readiness) as lock:
         await restarted.recover(lock)
-    service = ChannelService(env.app, env.results(restarted))
-    async with running(env, service=service) as fs:
-        await fs.gateway.receive(event)
-        await fs.gateway.receive(event)
-        await fs.drain()
-    assert fs.outbox.texts() == ["上次处理已中断，请重新发送"]
-    assert env.scripts.calls == {}
+        service = ChannelService(env.app, env.results(restarted))
+        async with running(env, service=service) as fs:
+            await fs.gateway.receive(event)
+            await fs.gateway.receive(event)
+            await fs.drain()
+        assert fs.outbox.texts() == ["上次处理已中断，请重新发送"]
+        assert env.scripts.calls == {}
 
 
 # ---- 队列、全局并发与会话 --------------------------------------------------------------------
@@ -550,7 +551,9 @@ class ClaimBarrierStore(ChannelStore):
     entered: asyncio.Event
     release: asyncio.Event
 
-    async def claim_send(self, record: RequestRecord, *, resend: bool = False) -> bool:
+    async def claim_send(
+        self, record: RequestRecord, *, resend: bool = False
+    ) -> DeliveryClaim | None:
         self.entered.set()
         await self.release.wait()
         return await super().claim_send(record, resend=resend)
@@ -589,20 +592,21 @@ async def test_cancel_after_completed_before_claim_is_settled_by_recovery(env: E
     assert not env.readiness.ok and outbox.sent == []
     # 停止并重启：持锁恢复把未发送的飞书结果记为 failed，之后只能显式重发，且不重跑。
     restarted = env.channel_store(readiness=Readiness())
+    # 恢复后的工作在持锁期间进行（与 serve 相同）；绑定的锁释放后存储不再开始新工作。
     async with hold_instance_lock(env.engine, restarted.readiness) as lock:
         report = await restarted.recover(lock)
-    assert report.unsent == 1
-    assert await request_row(env) == ("completed", "failed")
-    resend = Outbox()
-    message_id = event["event"]["message"]["message_id"]
+        assert report.unsent == 1
+        assert await request_row(env) == ("completed", "failed")
+        resend = Outbox()
+        message_id = event["event"]["message"]["message_id"]
 
-    async def transmit(delivery: Delivery) -> Any:
-        return await resend("oc_alice", delivery.content)
+        async def transmit(delivery: Delivery) -> Any:
+            return await resend("oc_alice", delivery.content)
 
-    results = env.results(restarted)
-    assert await results.send(feishu_ref(message_id), transmit) is None  # 首次发送路径不再发送
-    assert await results.send(feishu_ref(message_id), transmit, resend=True) == "sent"
-    assert len(resend.sent) == 1 and env.model_calls(message) == 2
+        results = env.results(restarted)
+        assert await results.send(feishu_ref(message_id), transmit) is None  # 首次发送路径不再发送
+        assert await results.send(feishu_ref(message_id), transmit, resend=True) == "sent"
+        assert len(resend.sent) == 1 and env.model_calls(message) == 2
 
 
 async def test_recovery_leaves_web_results_pending(env: Env) -> None:

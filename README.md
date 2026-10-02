@@ -50,7 +50,7 @@ MCP 负责标准化工具接入，不能替代业务授权。只有参数含义�
 
 ## 怎样开始
 
-新产品启动命令须在对应入口完成并验证后提供。P1-A 只交付可验证的内部核心，正式 Web/飞书入口在 P1-B 交付；旧 CLI、Worker 或 Compose 命令不能当成 SDK 产品入口。
+唯一正式命令是 `xiaowei`（`python -m xiaowei` 相同）。它已用测试 PostgreSQL、脚本模型与替身完成离线验证；真实模型、StarRocks 与飞书的实战验证尚未完成（见 handoff）。旧 CLI、Worker 或 Compose 命令不是产品入口。
 
 实施时需要：
 
@@ -61,14 +61,27 @@ MCP 负责标准化工具接入，不能替代业务授权。只有参数含义�
 
 凭据仅在本机或部署环境配置，不粘贴到对话、仓库、浏览器或日志。缺少真实环境时可以开发和离线验证，但不能标记对应实战验收完成。
 
-**P1-A 核心的开发验证**（不是产品入口；只用合成数据、脚本模型、loopback MCP fixture 与隔离的测试 PostgreSQL，不连接任何真实模型或外部服务）：
+**正式命令。** 复制 [examples/xiaowei.example.json](examples/xiaowei.example.json)，按获准环境填写模型 Profile、StarRocks 目标与 allowlist、授权表和 Web 地址；如需飞书，再加入 `feishu` 段。配置中的凭据只写 `env:NAME` 引用，变量在运行环境中设置：
+
+```bash
+uv sync --locked
+export XW_DATABASE_URL=...   # postgresql+asyncpg://...，以及 XW_DIGEST_KEY、XW_MODEL_API_KEY、XW_STARROCKS_PASSWORD
+uv run --locked xiaowei --config xiaowei.json storage init      # 全新数据库；已有 v1/v2 用 storage upgrade（先备份）
+uv run --locked xiaowei --config xiaowei.json serve             # Web 默认 http://127.0.0.1:8501，Ctrl-C 停止
+uv run --locked xiaowei --config xiaowei.json storage cleanup --batch-size 100
+uv run --locked xiaowei --config xiaowei.json requests resend --subject <subject> --chat <chat_id> --message <message_id>
+```
+
+`serve` 持有数据库实例锁并在启动时执行中断恢复，第二个实例会被拒绝；普通启动不建表、不升级。`requests resend` 只重发飞书中投递为 failed/unknown 的已保存结果，不重跑模型或查询。退出码：0 成功，1 运行失败或请求被拒，2 参数或配置错误。Web 只提供 HTTP，`web.allowed_origins` 必须包含 `http://<listen_host>:<listen_port>`；持锁的数据库连接一旦断开，进程立即停止接收并以 1 退出；新实例接管时会等待旧实例仍在提交的请求接收，再执行恢复。正式日志只输出小维自身日志（级别由 `--log-level` 决定），依赖库的日志在任何级别都不输出。
+
+**开发验证**（只用合成数据、脚本模型、替身与隔离的测试 PostgreSQL，不连接任何真实模型或外部服务）：
 
 ```bash
 uv sync --locked --extra dev
 docker compose -p xiaowei-sdk-test -f compose.sdk-test.yml up -d --wait   # 或独立的 docker-compose
 SDK_TEST_POSTGRES_URL=postgresql+asyncpg://postgres@127.0.0.1:55432/postgres \
-  uv run --locked --extra dev python -m pytest tests/sdk_core -q
-uv run --locked --extra dev ruff check src/xiaowei tests/sdk_core
+  uv run --locked --extra dev python -m pytest tests/sdk_core tests/p1b -q
+uv run --locked --extra dev ruff check src/xiaowei tests/sdk_core tests/p1b
 uv run --locked --extra dev mypy src/xiaowei
 docker compose -p xiaowei-sdk-test -f compose.sdk-test.yml down -v
 ```
@@ -88,7 +101,7 @@ docker compose -p xiaowei-sdk-test -f compose.sdk-test.yml down -v
 - [AGENT_HANDOFF.md](AGENT_HANDOFF.md)：当前代码与已经验证的事实。
 - [DEVELOPMENT_PLAN.md](DEVELOPMENT_PLAN.md)：逐步交付的顺序和验收目标。
 - [P1-A 实施计划](docs/superpowers/plans/2026-09-29-p1a-sdk-governed-core.md)：先验证 SDK、模型 API、治理与 MCP 核心，再接真实数据库和双入口；当前执行到哪一步以 handoff 为准。
-- [P1-B 实施计划](docs/superpowers/plans/2026-09-30-p1b-starrocks-dual-entry.md)：真实只读查询、请求状态、Web/飞书与正式入口的唯一详细切片计划；当前仍是计划，不代表产品入口已实现。
+- [P1-B 实施计划](docs/superpowers/plans/2026-09-30-p1b-starrocks-dual-entry.md)：真实只读查询、请求状态、Web/飞书与正式入口的唯一详细切片计划；各切片的完成与验证状态以 handoff 为准。
 
 设计直接使用 [OpenAI Agents SDK](https://developers.openai.com/api/docs/guides/agents/sdk) 原生能力。旧实现只在有明确价值时提取少量业务素材，兼容旧框架不是新产品目标。
 

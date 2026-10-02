@@ -6,6 +6,7 @@
 """
 
 import asyncio
+import json
 from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
@@ -30,7 +31,7 @@ from tests.sdk_core.synthetic_tools import (
 from tests.sdk_core.test_app import Scripts, after, answer, cite, tool_call, upstream_error
 from tests.sdk_core.test_model_api import OPENAI as PROFILE
 
-from xiaowei.app import AppConfig, Application, DataPolicy
+from xiaowei.app import AppConfig, Application, DataPolicy, TurnError
 from xiaowei.channel import (
     AccessDecision,
     AccessDeniedError,
@@ -42,6 +43,7 @@ from xiaowei.channel import (
 )
 from xiaowei.channel_store import (
     ChannelStore,
+    ChannelStoreUnavailableError,
     NotReadyError,
     RequestRecord,
     RequestUnavailableError,
@@ -457,16 +459,17 @@ async def test_cancelled_turn_locks_readiness_for_restart_recovery(
     assert record.state == "running"
     # 停止并重启：持锁恢复标为 interrupted 并关闭会话，中断回执最多发送一次。
     restarted = env.channel_store(readiness=Readiness())  # 新进程的 readiness
+    # 恢复后的工作在持锁期间进行（与 serve 相同）；绑定的锁释放后存储不再开始新工作。
     async with hold_instance_lock(env.engine, restarted.readiness) as lock:
         await restarted.recover(lock)
-    after_restart = await restarted.get("web", "alice", "cookie-1", "r1")
-    assert (after_restart.state, after_restart.failure_code) == ("interrupted", "interrupted")
-    assert await env.session_state(record.session_id) == "closed"
-    outbox = Outbox()
-    results = env.results(restarted)
-    assert await results.send(ref("r1"), outbox) == "sent"
-    assert await results.send(ref("r1"), outbox) is None
-    assert [d.content for d in outbox.sent] == ["上次处理已中断，请重新发送"]
+        after_restart = await restarted.get("web", "alice", "cookie-1", "r1")
+        assert (after_restart.state, after_restart.failure_code) == ("interrupted", "interrupted")
+        assert await env.session_state(record.session_id) == "closed"
+        outbox = Outbox()
+        results = env.results(restarted)
+        assert await results.send(ref("r1"), outbox) == "sent"
+        assert await results.send(ref("r1"), outbox) is None
+        assert [d.content for d in outbox.sent] == ["上次处理已中断，请重新发送"]
 
 
 async def test_new_session_rotates_without_copying_history(env: Env) -> None:
@@ -646,3 +649,286 @@ async def test_entry_and_evidence_authorization_share_one_access_policy(env: Env
     )
     with pytest.raises(ValueError, match="EvidenceStore"):
         ChannelService(env.app, ResultDelivery(env.store, separate, env.access, budget=BUDGET))
+
+
+# ---- 实例接管：请求启动与 Session 边界 ------------------------------------------------------
+
+# 只终止持有会话级实例锁（排他）的后端。
+TERMINATE_INSTANCE_LOCK = text(
+    "SELECT count(pg_terminate_backend(pid)) FROM pg_locks"
+    " WHERE locktype = 'advisory' AND granted AND mode = 'ExclusiveLock'"
+)
+WAITING_ON_LOCK = text(
+    "SELECT count(*) FROM pg_stat_activity"
+    " WHERE wait_event_type = 'Lock' AND pid <> pg_backend_pid()"
+)
+INTERRUPTED_TEXT = "接管时中断的轮次"
+
+
+async def terminate_instance_lock(env: Env) -> None:
+    async with env.engine.begin() as conn:
+        assert await conn.scalar(TERMINATE_INSTANCE_LOCK) == 1
+
+
+async def waiting_on_locks(env: Env, count: int, timeout: float = 5) -> bool:
+    async with env.engine.connect() as conn:
+        for _ in range(int(timeout / 0.02)):
+            if await conn.scalar(WAITING_ON_LOCK) >= count:
+                return True
+            await conn.commit()
+            await asyncio.sleep(0.02)
+    return False
+
+
+async def history_items(env: Env, session_id: str) -> int:
+    async with env.engine.connect() as conn:
+        count = await conn.scalar(
+            text("SELECT count(*) FROM agent_messages WHERE session_id = :s"), {"s": session_id}
+        )
+    return int(count or 0)
+
+
+async def test_start_after_the_lock_moved_is_refused_before_the_model(env: Env) -> None:
+    """旧实例已接受请求、错过终止通知；新实例已取得锁但尚未恢复：旧实例不能启动它。"""
+    message = env.scripts.add(INTERRUPTED_TEXT, tool_call("order_total", region="east"), cite())
+    async with hold_instance_lock(env.engine, Readiness()) as old_lock:
+        await env.store.recover(old_lock)
+        receipt = await env.service.accept(env.inbound(message))
+        await terminate_instance_lock(env)
+        async with hold_instance_lock(env.engine, Readiness()):
+            assert env.readiness.ok
+            with pytest.raises(NotReadyError):
+                await env.service.process(receipt)
+            assert env.readiness.reason == "instance_lock_lost"
+    assert env.model_calls(message) == 0 and env.adapter.calls == []
+    assert (await env.store.get("web", "alice", "cookie-1", "r1")).state == "accepted"
+
+
+async def test_a_bound_instance_still_runs_accepted_requests(env: Env) -> None:
+    """成功对照：持锁并已恢复的实例照常 accepted → running → completed。"""
+    message = env.scripts.add("持锁实例的轮次", tool_call("order_total", region="east"), cite())
+    async with hold_instance_lock(env.engine, env.readiness) as lock:
+        await env.store.recover(lock)
+        assert (await env.run(message)).state == "completed"
+    assert env.readiness.ok
+
+
+async def recover_elsewhere(env: Env) -> tuple[ChannelStore, int]:
+    """另一个进程持锁恢复；返回它的存储（锁已释放）与中断数。"""
+    restarted = env.channel_store(readiness=Readiness())
+    async with hold_instance_lock(env.engine, restarted.readiness) as lock:
+        report = await restarted.recover(lock)
+    return restarted, report.interrupted
+
+
+async def after_takeover_history_is_not_replayed(env: Env, session_id: str) -> None:
+    """恢复后：中断轮次所在会话不可回放，同一会话语境的新轮次在模型前失败；新建会话后
+    新轮次完成，模型输入不含中断轮次的内容。"""
+    assert await env.session_state(session_id) == "closed"
+    async with hold_instance_lock(env.engine, Readiness()) as lock:
+        restarted = env.channel_store(readiness=Readiness())
+        await restarted.recover(lock)
+        service = ChannelService(env.app, env.results(restarted))
+        same = env.scripts.add("同一会话的下一轮", cite())
+        record = await service.process(await service.accept(env.inbound(same, "r2")))
+        assert (record.state, record.failure_code) == ("failed", "session_failed")
+        assert env.model_calls(same) == 0
+        await service.new_session("web", "alice", "cookie-1")
+        fresh = env.scripts.add("新会话的下一轮", tool_call("order_total", region="west"), cite())
+        assert (await service.process(await service.accept(env.inbound(fresh, "r3")))).state == (
+            "completed"
+        )
+        for call in env.scripts.calls[fresh]:
+            assert INTERRUPTED_TEXT not in json.dumps(call.input, ensure_ascii=False)
+
+
+async def test_recovery_before_the_first_session_registration_closes_it_for_good(
+    env: Env,
+) -> None:
+    """请求已在旧实例 running、Session 元数据尚未登记时被恢复：旧 Runner 之后不能登记出可回放
+    的会话，也不调用模型。"""
+    message = env.scripts.add(INTERRUPTED_TEXT, tool_call("order_total", region="east"), cite())
+    receipt = await env.service.accept(env.inbound(message))
+    await env.store.start(receipt.record)
+    _, interrupted = await recover_elsewhere(env)
+    assert interrupted == 1
+    with pytest.raises(TurnError) as raised:
+        await env.app.run_turn(receipt.context, receipt.message)
+    assert raised.value.reason == "session_unavailable"
+    assert env.model_calls(message) == 0
+    assert await history_items(env, receipt.record.session_id) == 0
+    await after_takeover_history_is_not_replayed(env, receipt.record.session_id)
+
+
+async def test_recovery_racing_the_session_registration_closes_it_for_good(env: Env) -> None:
+    """恢复与旧 Runner 的首次登记并发：无论谁先提交，会话最终关闭、历史不提交。"""
+    message = env.scripts.add(INTERRUPTED_TEXT, tool_call("order_total", region="east"), cite())
+    receipt = await env.service.accept(env.inbound(message))
+    record = await env.store.start(receipt.record)
+    # 暂停点：同一 session_id 的未提交插入挡住 Runner 的首次登记。
+    blocker = await env.engine.connect()
+    await blocker.begin()
+    await blocker.execute(
+        text(
+            "INSERT INTO xiaowei_session VALUES (:s, 'alice', 'web', 'x', now(), now(), 0,"
+            " 'active')"
+        ),
+        {"s": record.session_id},
+    )
+    run = asyncio.create_task(env.app.run_turn(receipt.context, receipt.message))
+    assert await waiting_on_locks(env, 1)
+    recovery = asyncio.create_task(recover_elsewhere(env))
+    await waiting_on_locks(env, 2, timeout=2)  # 修复后恢复也在这一行上等待
+    await blocker.rollback()
+    await blocker.close()
+    _, interrupted = await asyncio.wait_for(recovery, 20)
+    assert interrupted == 1
+    with pytest.raises(TurnError):
+        await asyncio.wait_for(run, 30)
+    assert await history_items(env, record.session_id) == 0
+    await after_takeover_history_is_not_replayed(env, record.session_id)
+
+
+async def test_recovery_while_the_session_is_active_blocks_the_commit(env: Env) -> None:
+    gate, entered = asyncio.Event(), asyncio.Event()
+    message = env.scripts.add(
+        INTERRUPTED_TEXT,
+        after(gate, tool_call("order_total", region="east"), entered=entered),
+        cite(),
+    )
+    receipt = await env.service.accept(env.inbound(message))
+    record = await env.store.start(receipt.record)
+    run = asyncio.create_task(env.app.run_turn(receipt.context, receipt.message))
+    await asyncio.wait_for(entered.wait(), 20)
+    assert await env.session_state(record.session_id) == "active"
+    await recover_elsewhere(env)
+    gate.set()
+    with pytest.raises(TurnError):
+        await asyncio.wait_for(run, 30)
+    assert await history_items(env, record.session_id) == 0
+    await after_takeover_history_is_not_replayed(env, record.session_id)
+
+
+async def test_recovery_while_the_session_is_writing_keeps_it_closed(env: Env) -> None:
+    message = env.scripts.add(INTERRUPTED_TEXT, tool_call("order_total", region="east"), cite())
+    receipt = await env.service.accept(env.inbound(message))
+    record = await env.store.start(receipt.record)
+    async with env.engine.begin() as conn:
+        await conn.execute(
+            text(
+                "CREATE FUNCTION xw_slow() RETURNS trigger LANGUAGE plpgsql AS"
+                " $$ BEGIN PERFORM pg_sleep(1.5); RETURN NEW; END $$"
+            )
+        )
+        await conn.execute(
+            text(
+                "CREATE TRIGGER xw_slow BEFORE INSERT ON agent_messages"
+                " FOR EACH ROW EXECUTE FUNCTION xw_slow()"
+            )
+        )
+    try:
+        run = asyncio.create_task(env.app.run_turn(receipt.context, receipt.message))
+        async with asyncio.timeout(20):
+            while await env.session_state(record.session_id) != "writing":
+                await asyncio.sleep(0.02)
+        await recover_elsewhere(env)
+        with pytest.raises(TurnError):
+            await asyncio.wait_for(run, 30)
+    finally:
+        async with env.engine.begin() as conn:
+            await conn.execute(text("DROP TRIGGER xw_slow ON agent_messages"))
+            await conn.execute(text("DROP FUNCTION xw_slow()"))
+    # 底层历史可能已写入，但会话保持关闭，永不回放。
+    await after_takeover_history_is_not_replayed(env, record.session_id)
+
+
+# ---- 投递尝试归属 ----------------------------------------------------------------------------
+
+
+@dataclass
+class Gated:
+    """一次发送：进入后等待放行，再返回预设结果或抛出异常。"""
+
+    outcome: str = "sent"
+    sent: list[Delivery] = field(default_factory=list)
+    entered: asyncio.Event = field(default_factory=asyncio.Event)
+    release: asyncio.Event = field(default_factory=asyncio.Event)
+
+    async def __call__(self, delivery: Delivery) -> Any:
+        self.sent.append(delivery)
+        self.entered.set()
+        await self.release.wait()
+        if self.outcome == "raise":
+            raise RuntimeError("transport down")
+        return self.outcome
+
+
+async def delivery_of(env: Env) -> str:
+    async with env.engine.connect() as conn:
+        return str(await conn.scalar(text("SELECT delivery FROM xiaowei_request")))
+
+
+@pytest.mark.parametrize("old_outcome", ["sent", "failed", "unknown", "raise", "cancel"])
+@pytest.mark.parametrize("path", ["first", "resend"])
+async def test_a_stale_send_never_settles_a_newer_attempt(
+    env: Env, path: str, old_outcome: str
+) -> None:
+    """旧尝试在途时被启动恢复记为 unknown，显式重发取得新尝试；旧尝试返回（或异常、取消）
+    不能改写新尝试，新尝试进行中第三次取得失败且不发送，新尝试的结果照常落定。"""
+    message = env.scripts.add("投递尝试", tool_call("order_total", region="east"), cite())
+    await env.run(message)
+    if path == "resend":
+        await env.results().send(ref(), Outbox("failed"))
+    old = Gated("unknown" if old_outcome == "cancel" else old_outcome)
+    stale = asyncio.create_task(env.results().send(ref(), old, resend=path == "resend"))
+    await asyncio.wait_for(old.entered.wait(), 10)
+
+    restarted = env.channel_store(readiness=Readiness())
+    async with hold_instance_lock(env.engine, restarted.readiness) as lock:
+        assert (await restarted.recover(lock)).unknown == 1
+        results = env.results(restarted)
+        newer = Gated("sent")
+        current = asyncio.create_task(results.send(ref(), newer, resend=True))
+        await asyncio.wait_for(newer.entered.wait(), 10)
+
+        if old_outcome == "cancel":
+            stale.cancel()
+        else:
+            old.release.set()
+        # 旧尝试不能落定：结果正常返回时报存储错误；发送本身的异常或取消原样传播。
+        expected: type[BaseException] = {
+            "raise": RuntimeError,
+            "cancel": asyncio.CancelledError,
+        }.get(old_outcome, ChannelStoreUnavailableError)
+        with pytest.raises(expected):
+            await stale
+        assert env.readiness.reason == "delivery_state_lost"  # 锁低的是旧尝试所在的实例
+        assert restarted.readiness.ok
+        assert await delivery_of(env) == "sending"  # 新尝试仍在进行
+
+        third = Gated()
+        assert await results.send(ref(), third, resend=True) is None
+        assert third.sent == []
+
+        newer.release.set()
+        assert await current == "sent"
+        assert await delivery_of(env) == "sent"
+    assert len(old.sent) == len(newer.sent) == 1
+
+
+async def test_concurrent_resends_send_once(env: Env) -> None:
+    message = env.scripts.add("并发重发", tool_call("order_total", region="east"), cite())
+    await env.run(message)
+    await env.results().send(ref(), Outbox("failed"))
+    first, second = Gated(), Gated()
+    tasks = [
+        asyncio.create_task(env.results().send(ref(), gated, resend=True))
+        for gated in (first, second)
+    ]
+    await asyncio.sleep(0.3)
+    first.release.set()
+    second.release.set()
+    outcomes = await asyncio.gather(*tasks)
+    assert sorted(map(str, outcomes)) == ["None", "sent"]
+    assert len(first.sent) + len(second.sent) == 1
+    assert await delivery_of(env) == "sent"

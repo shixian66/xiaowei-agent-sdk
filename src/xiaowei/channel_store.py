@@ -8,11 +8,16 @@
 状态迁移都是带前置状态条件的单条更新，影响 0 行即表示被其他进程取得或状态已变化：
 
 - 请求：``accepted → running → completed``；``accepted/running → failed``；启动恢复把
-  ``accepted/running`` 标为 ``interrupted`` 并关闭关联 Session。
+  ``accepted/running`` 标为 ``interrupted`` 并持久关闭关联 Session（元数据尚未登记时写入已关闭
+  的占位，旧进程之后的首次登记不能让它变成可回放）。新请求的接收与接管恢复经数据库屏障交接：
+  恢复等待仍在提交的接收事务；恢复后，接收（含重复请求）、启动请求、创建或轮换会话与取得投递权
+  都须在同一事务内确认实例锁仍属本进程。
 - 投递：首次发送与事件重投只能竞争 ``pending → sending``；显式重发只对 completed 结果竞争
-  ``failed/unknown → sending``；发送结束只能从 ``sending`` 改为 ``sent/failed/unknown``；启动恢复
-  把遗留 ``sending`` 改为 ``unknown``，把飞书 completed 结果遗留的 ``pending`` 改为 ``failed``（回复
-  目的地只在进程内存在，重启后再无首次发送触发）。任何路径都不自动再次发送。
+  ``failed/unknown → sending``；每次取得写入新的尝试标识，发送结束只能由同一尝试把 ``sending``
+  改为 ``sent/failed/unknown``，旧尝试返回不能改写新尝试。启动恢复把没有存活所有者的遗留
+  ``sending`` 改为 ``unknown`` 并作废其尝试（仍在进行的显式重发保持不动），把飞书 completed
+  结果遗留的 ``pending`` 改为 ``failed``（回复目的地只在进程内存在，重启后再无首次发送触发）。
+  任何路径都不自动再次发送。
 
 关键状态无法持久化时锁低进程 readiness：此后拒绝新请求、新会话（含首次创建映射）与新发送，
 等待停止并重启后由持有实例锁的启动恢复处理。结果保存失败时先尝试把请求标为 failed 并关闭
@@ -40,8 +45,8 @@ from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine
 
 from xiaowei.app import Mode
 from xiaowei.models import AgentAnswer, Channel
-from xiaowei.session import close_sessions
-from xiaowei.storage import InstanceLock, Readiness
+from xiaowei.session import close_interrupted_sessions, close_sessions
+from xiaowei.storage import Backend, InstanceLock, Readiness
 
 RequestState = Literal["accepted", "running", "completed", "failed", "interrupted"]
 DeliveryState = Literal["pending", "sending", "sent", "failed", "unknown"]
@@ -58,6 +63,7 @@ INTERRUPTED: InternalFailureCode = "interrupted"
 _CALLER_FAILURE_CODES = frozenset(get_args(CallerFailureCode))
 _FAILURE_CODES = _CALLER_FAILURE_CODES | frozenset(get_args(InternalFailureCode))
 _SESSION_ID_BYTES = 24
+_ATTEMPT_BYTES = 24
 
 _SELECT_CURRENT = text(
     """
@@ -152,9 +158,11 @@ _FAIL = text(
     """
 )
 # 首次发送：completed 结果或 failed/interrupted 的固定回执，各最多一次。
+# 取得投递权时写入新的尝试标识（与可选的重发命令连接身份）；落定只认同一标识。
 _CLAIM_FIRST = text(
     """
-    UPDATE xiaowei_request SET delivery = 'sending', updated_at = :now
+    UPDATE xiaowei_request SET delivery = 'sending', delivery_attempt = :attempt,
+        delivery_owner_pid = :owner_pid, delivery_owner_started = :owner_started, updated_at = :now
     WHERE channel = :channel AND request_key = :request_key AND subject_id = :subject_id
       AND turn_id = :turn_id
       AND delivery = 'pending' AND expires_at > :now
@@ -163,7 +171,8 @@ _CLAIM_FIRST = text(
 )
 _CLAIM_RESEND = text(
     """
-    UPDATE xiaowei_request SET delivery = 'sending', updated_at = :now
+    UPDATE xiaowei_request SET delivery = 'sending', delivery_attempt = :attempt,
+        delivery_owner_pid = :owner_pid, delivery_owner_started = :owner_started, updated_at = :now
     WHERE channel = :channel AND request_key = :request_key AND subject_id = :subject_id
       AND turn_id = :turn_id
       AND delivery IN ('failed', 'unknown') AND expires_at > :now AND state = 'completed'
@@ -171,20 +180,30 @@ _CLAIM_RESEND = text(
 )
 _FINISH_SEND = text(
     """
-    UPDATE xiaowei_request SET delivery = :outcome, updated_at = :now
+    UPDATE xiaowei_request SET delivery = :outcome, delivery_attempt = NULL,
+        delivery_owner_pid = NULL, delivery_owner_started = NULL, updated_at = :now
     WHERE channel = :channel AND request_key = :request_key AND subject_id = :subject_id
       AND turn_id = :turn_id
-      AND delivery = 'sending'
+      AND delivery = 'sending' AND delivery_attempt = :attempt
     """
 )
 _RECOVER_RUNNING = text(
     """
     UPDATE xiaowei_request SET state = 'interrupted', failure_code = :code, updated_at = :now
-    WHERE state IN ('accepted', 'running') RETURNING session_id
+    WHERE state IN ('accepted', 'running') RETURNING session_id, subject_id, channel
     """
 )
+# 遗留发送：没有存活所有者的 sending 改为 unknown，并作废其尝试标识。serve 的尝试不记所有者（旧
+# 实例失去锁即失去投递权）；显式重发命令记录它占用的连接身份，连接仍在即仍在发送，保持不动。
 _RECOVER_SENDING = text(
-    "UPDATE xiaowei_request SET delivery = 'unknown', updated_at = :now WHERE delivery = 'sending'"
+    """
+    UPDATE xiaowei_request AS r SET delivery = 'unknown', delivery_attempt = NULL,
+        delivery_owner_pid = NULL, delivery_owner_started = NULL, updated_at = :now
+    WHERE r.delivery = 'sending' AND NOT EXISTS (
+        SELECT 1 FROM pg_stat_activity AS a
+        WHERE a.pid = r.delivery_owner_pid AND a.backend_start = r.delivery_owner_started
+    )
+    """
 )
 # 飞书结果只在进程内持有回复目的地：进程退出时已保存却未取得投递权的结果再无发送触发。它们确定
 # 没有发出，记为 failed，之后只能显式重发。Web 结果经 GET 读取、从不发送，不在此列。
@@ -267,6 +286,14 @@ class RequestRecord:
 
 
 @dataclass(frozen=True)
+class DeliveryClaim:
+    """一次已取得的投递权：``attempt`` 只属于这一次尝试，落定时必须交回。"""
+
+    record: RequestRecord
+    attempt: str
+
+
+@dataclass(frozen=True)
 class Acceptance:
     record: RequestRecord
     created: bool
@@ -308,7 +335,10 @@ class ChannelStore:
         session_retention_seconds: int,
         evidence_retention_seconds: int,
         max_answer_bytes: int,
+        sender: Backend | None = None,
     ) -> None:
+        """``sender`` 只供不持实例锁的显式重发命令：它在发送期间占用的连接身份，记入投递尝试，
+        使并发的启动恢复不把仍在进行的重发当作遗留发送。"""
         if min(request_retention_seconds, session_retention_seconds, max_answer_bytes) <= 0:
             raise ValueError("请求保留期、会话保留期与回答上限必须为正数")
         if request_retention_seconds > evidence_retention_seconds:
@@ -323,6 +353,8 @@ class ChannelStore:
         self._request_retention = timedelta(seconds=request_retention_seconds)
         self._session_retention = timedelta(seconds=session_retention_seconds)
         self._max_answer_bytes = max_answer_bytes
+        self._instance: InstanceLock | None = None
+        self._sender = sender
 
     @property
     def readiness(self) -> Readiness:
@@ -353,6 +385,7 @@ class ChannelStore:
         owner = self._owner(channel, subject_id, conversation)
         try:
             async with self._engine.begin() as conn:
+                await self._admit(conn)
                 current = await self._current(conn, owner, statement=_SELECT_CURRENT_FOR_UPDATE)
                 retired = await conn.execute(
                     _RETIRE_CURRENT, {**owner.params, "session_id": current.session_id}
@@ -373,10 +406,12 @@ class ChannelStore:
         *,
         statement: TextClause = _SELECT_CURRENT,
     ) -> ChannelSession:
-        """读取 current 映射；不存在时创建第一代（须 readiness 正常），并发创建时重新读取。"""
+        """读取 current 映射；不存在时创建第一代（须 readiness 正常且仍持有实例锁），并发创建时
+        重新读取。"""
         row = (await conn.execute(statement, owner.params)).mappings().one_or_none()
         if row is None:
             self._require_ready()
+            await self._admit(conn)
             created = await self._insert_current(conn, owner, 1)
             if created is not None:
                 return created
@@ -426,7 +461,8 @@ class ChannelStore:
     ) -> Acceptance:
         """持久接受请求，或返回同一请求已有的记录；同编号不同内容时拒绝冲突。
 
-        新请求绑定当前会话；与新建会话互斥（共享锁读取 current 映射）。
+        新请求绑定当前会话；与新建会话互斥（共享锁读取 current 映射）。新请求与重复请求都先经
+        ``_admit``：失去实例锁的进程不写入，也不返回记录去重投。
         """
         self._require_ready()
         owner = self._owner(channel, subject_id, conversation)
@@ -438,6 +474,7 @@ class ChannelStore:
         # 提交结果不明时请求可能已存在：锁低 readiness，交给重启恢复，不让它永久“处理中”。
         with self._critical("request_accept_failed", "请求状态存储不可用"):
             async with self._engine.begin() as conn:
+                await self._admit(conn)
                 existing = await self._select(conn, key)
                 created = False
                 if existing is None:
@@ -486,9 +523,17 @@ class ChannelStore:
         return self._record(row)
 
     async def start(self, record: RequestRecord) -> RequestRecord:
-        """``accepted → running``；只有一个进程成功，其余得到 ``ChannelStoreError``。"""
+        """``accepted → running``；只有一个进程成功，其余得到 ``ChannelStoreError``。
+
+        与接收一样经 ``_admit``：失去实例锁的进程不能再启动已接受的请求。
+        """
         self._require_ready()
-        if await self._update(_START, record, critical="request_start_failed") != 1:
+        params = {**_keys(record), "now": self._clock()}
+        with self._critical("request_start_failed", "请求状态无法保存"):
+            async with self._engine.begin() as conn:
+                await self._admit(conn)
+                started = (await conn.execute(_START, params)).rowcount
+        if started != 1:
             raise RequestUnavailableError
         return replace(record, state="running")
 
@@ -545,23 +590,42 @@ class ChannelStore:
 
     # ---- 投递 ------------------------------------------------------------------------
 
-    async def claim_send(self, record: RequestRecord, *, resend: bool = False) -> bool:
-        """紧邻发送前取得投递权；返回 False 表示不得发送。
+    async def claim_send(
+        self, record: RequestRecord, *, resend: bool = False
+    ) -> DeliveryClaim | None:
+        """紧邻发送前取得投递权；返回 None 表示不得发送。
 
         首次发送与事件重投只竞争 ``pending → sending``；``resend=True`` 只供显式重发命令使用，
-        只对 completed 结果竞争 ``failed/unknown → sending``。
+        只对 completed 结果竞争 ``failed/unknown → sending``。每次取得都写入新的尝试标识，只有
+        持有它的 ``finish_send`` 能落定这次尝试。
         """
         self._require_ready()
+        attempt = secrets.token_urlsafe(_ATTEMPT_BYTES)
+        sender = self._sender
+        params = {
+            **_keys(record),
+            "now": self._clock(),
+            "attempt": attempt,
+            "owner_pid": sender.pid if sender is not None else None,
+            "owner_started": sender.started if sender is not None else None,
+        }
         statement = _CLAIM_RESEND if resend else _CLAIM_FIRST
-        return await self._update(statement, record, critical="delivery_claim_failed") == 1
+        with self._critical("delivery_claim_failed", "请求状态无法保存"):
+            async with self._engine.begin() as conn:
+                await self._admit(conn)
+                claimed = (await conn.execute(statement, params)).rowcount == 1
+        return DeliveryClaim(record, attempt) if claimed else None
 
-    async def finish_send(self, record: RequestRecord, outcome: SendOutcome) -> None:
-        """``sending → sent/failed/unknown``；不在 sending 或无法写入时锁低 readiness。"""
-        params = {"outcome": outcome}
-        if (
-            await self._update(_FINISH_SEND, record, critical="delivery_state_failed", **params)
-            != 1
-        ):
+    async def finish_send(self, claim: DeliveryClaim, outcome: SendOutcome) -> None:
+        """落定自己取得的那次尝试：``sending → sent/failed/unknown``。
+
+        尝试已被启动恢复作废、或已被更新的尝试取代时不改写任何状态，锁低 readiness 并报错。
+        """
+        params = {"outcome": outcome, "attempt": claim.attempt}
+        updated = await self._update(
+            _FINISH_SEND, claim.record, critical="delivery_state_failed", **params
+        )
+        if updated != 1:
             self._readiness.lock("delivery_state_lost")
             raise ChannelStoreUnavailableError("投递状态无法保存")
 
@@ -571,21 +635,41 @@ class ChannelStore:
         """持有实例锁的启动一致性恢复：一个事务内中断未完成请求并关闭其会话，遗留发送改为未知，
         飞书已保存但未发送的结果记为发送失败。
 
-        不调用 Runner、不发送消息、不放回队列。失败整体回滚并锁低 readiness。
+        不调用 Runner、不发送消息、不放回队列。失败整体回滚并锁低 readiness。读取前先等待仍在提交的
+        接收事务（可能来自刚失去锁的旧实例）结束；恢复后本存储的接收都要经该锁核对。
         """
         await lock.verify()
         now = self._clock()
         conn = lock.connection
         with self._critical("recovery_failed", "启动恢复失败"):
             async with conn.begin():
-                rows = await conn.execute(_RECOVER_RUNNING, {"code": INTERRUPTED, "now": now})
-                sessions = [r[0] for r in rows]
-                await close_sessions(conn, sessions)
+                await lock.exclude_accepts()
+                rows = (
+                    await conn.execute(_RECOVER_RUNNING, {"code": INTERRUPTED, "now": now})
+                ).all()
+                await close_interrupted_sessions(
+                    conn,
+                    [(r.session_id, r.subject_id, r.channel) for r in rows],
+                    now=now,
+                    expires_at=now + self._session_retention,
+                )
                 unknown = (await conn.execute(_RECOVER_SENDING, {"now": now})).rowcount
                 unsent = (await conn.execute(_RECOVER_UNSENT, {"now": now})).rowcount
-        return RecoveryReport(interrupted=len(sessions), unknown=unknown, unsent=unsent)
+        self._instance = lock
+        return RecoveryReport(interrupted=len(rows), unknown=unknown, unsent=unsent)
 
     # ---- 内部 ------------------------------------------------------------------------
+
+    async def _admit(self, conn: AsyncConnection) -> None:
+        """开始新工作的写入（接收、创建或轮换会话、取得投递权）在本事务内的实例所有权核对。
+
+        本存储经 ``recover`` 绑定实例锁后，取得接收屏障共享锁并在数据库内确认实例锁仍属本进程，
+        保持到事务结束（``InstanceLock.admits``）；失败时锁低 readiness 并拒绝。未绑定的存储（显式
+        重发等维护命令）不核对，仍只靠数据库条件更新。
+        """
+        if self._instance is not None and not await self._instance.admits(conn):
+            self._readiness.lock("instance_lock_lost")
+            raise NotReadyError
 
     def _require_ready(self) -> None:
         if not self._readiness.ok:
