@@ -28,6 +28,7 @@
     },
     "model_tools": [
       "local/describe_table",
+      "local/explain_query",
       "local/list_tables",
       "local/run_readonly_query"
     ]
@@ -61,6 +62,7 @@
     "query_mem_limit_bytes": 1073741824,
     "max_result_bytes": 200000,
     "max_value_bytes": 4000,
+    "max_plan_lines": 500,
     "policy": {
       "target_id": "warehouse",
       "default_database": "<默认 database>",
@@ -91,6 +93,7 @@
     "grants": {
       "local-operator": [
         "local/describe_table",
+        "local/explain_query",
         "local/list_tables",
         "local/run_readonly_query"
       ]

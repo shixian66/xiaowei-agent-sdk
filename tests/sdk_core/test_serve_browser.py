@@ -21,13 +21,15 @@ from pathlib import Path
 
 import pytest
 from sqlalchemy.engine import URL
+from tests.p1b.test_starrocks_adapter import driver
 from tests.sdk_core.browser import Page, launch
 from tests.sdk_core.test_app import after, cite, tool_call
 from tests.sdk_core.test_cli import CANARY, Deployment, secrets_absent
-from tests.sdk_core.test_runtime import Env
+from tests.sdk_core.test_runtime import PLAN, Env
 from tests.sdk_core.test_runtime import env as env  # pytest fixture
 from tests.sdk_core.test_web_browser import item, js, send, settled, table_rows
 
+from xiaowei.starrocks_tools import PLAN_NOTE
 from xiaowei.web import COOKIE
 
 pytestmark = [pytest.mark.loopback, pytest.mark.browser]
@@ -132,6 +134,22 @@ async def test_formal_assembly_turns_in_chrome(env: Env, chrome_binary: str) -> 
         assert any("run_readonly_query" in seen for seen in env.scripts.tools_seen(query))
         assert 2 in await table_rows(page, 1)
 
+        env.drv.make = driver(PLAN).make
+        plan = env.scripts.add(
+            "浏览器查看执行计划",
+            tool_call("explain_query", sql="SELECT region, total FROM sales"),
+            cite(),
+        )
+        await send(page, plan, "diagnose")
+        await settled(page, 2, "completed")
+        # 本轮还引用了回放中的历史证据；只有计划事实带说明，说明与计划表格在同一个事实框中。
+        noted = await page.evaluate(
+            f"[...{item(2)}.querySelectorAll('.fact')].filter(f => f.querySelector('.note'))"
+            ".map(f => [f.querySelector('.note').textContent,"
+            " [...f.querySelectorAll('th')].map(th => th.textContent)])"
+        )
+        assert noted == [[f"说明：{PLAN_NOTE}", ["plan"]]]
+
         gate, entered = asyncio.Event(), asyncio.Event()
         slow = env.scripts.add(
             "浏览器慢轮", after(gate, tool_call("list_tables"), entered=entered), cite()
@@ -140,9 +158,9 @@ async def test_formal_assembly_turns_in_chrome(env: Env, chrome_binary: str) -> 
         await asyncio.wait_for(entered.wait(), 20)
         await page.reload()
         gate.set()
-        await settled(page, 2, "completed")
+        await settled(page, 3, "completed")
         states = await page.evaluate(
             "[...document.querySelectorAll('#turns > li')].map(li => li.className)"
         )
-        assert states == ["turn completed", "turn completed", "turn completed"]
+        assert states == ["turn completed"] * 4
         assert await served.finish() == 0

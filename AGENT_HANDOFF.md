@@ -359,7 +359,12 @@ CI integration job 设置 `SDK_TEST_POSTGRES_URL`，启动 `compose.sdk-test.yml
   - **未验证的低风险：** 客户端超时只断开连接、不发 `KILL QUERY`（与查询路径相同）；EXPLAIN 只在 FE 优化不执行，但断开后 FE 优化是否立即停止未实测。
   - **缺口：** 物化视图改写时的计划输出未实测（Task 0 亦未测）；物化视图名在已批准披露范围内，输出是否带其他内容待测。
   - **流程偏离（审查接受）：** 先实现后补测试，以 10 项变异全部被发现作补充证据。
-- **下一步：** Task 4（先满足上述两项门槛再登记工具）→ Task 5 → Task 6。E3 已决定（方案 A，用户 2026-10-02：审计原文由代码过 `guard_explain_query`），Task 6 解除暂停；E4 已决定（用户 2026-10-02：不列出可能被截断的审计记录，`stmt_limit` 必填并在装配时要求 `max_sql_bytes <= stmt_limit - 4`）。生产审计源事实（G-A）在 P3 前提供。
+- **Task 4（`078cc61`，独立审查通过，无阻断）：** 登记 `local/explain_query`（`Prechecked`：`guard_explain_query` 在授权后、预算与任何 I/O 前同步运行，拒绝为“执行计划未获取（原因码）”；执行只调 `adapter.explain`）。查询与诊断用途都可见，诊断用途仍不含 `run_readonly_query`。`ToolPolicy.fact_note`（不进指纹、不存证据）由交付代码取当前登记策略，附在来源行后（飞书经 `_one_line` 转义）并给出 `DeliveryFact.note`，Web 以 `textContent` 显示；事实区标题改为“工具结果（系统根据证据生成）”。Task 3 的两项门槛已满足：`worst_case_observation` 的 SQL 上限改为 `max(max_sql_bytes + len(EXPLAIN_PREFIX), 元数据模板)`；计划行受 `max_result_bytes` 约束，与查询共用同一最坏容量。示例配置开放 `explain_query` 并写出 `max_plan_lines`。离线 `tests/sdk_core tests/p1b -W error` 1190 passed、`-m browser` 3 passed（含正式入口 Chrome 中计划说明的显示）；正式入口（`runtime.serve` + Web API）成功与越权拒绝零 I/O 场景通过；8 项隔离变异全部被发现。未覆盖：真实 StarRocks 未重跑（Adapter 未改，沿用 Task 3 证据）；真实模型是否选择 `explain_query` 留到 Task 7 / P3。
+- **Task 4 审查的非阻断项：**
+  - **升级影响：** 配置开放 `explain_query` 后 `model_tools` 变化，已有会话按既有绑定规则拒绝并提示新建；最坏容量增加 192 字节（SQL 与列名各多 16 个最宽转义字符，各 96 字节），原本刚好卡在边界的 `projection_bytes` 启动时被拒绝，需要调大。
+  - **计划偏离（审查接受）：** 示例配置的 `starrocks.audit` 留到 Task 6（该字段届时才存在）；`test_facts_header_is_neutral` 未单独成用例，标题断言分散在多个测试中。
+  - **Task 7 验收重点：** `PLAN_NOTE` 只出现在交付内容中，模型收到的工具结果不含它；模型能否写明“计划只是估算、未执行原查询”依赖工具说明与 Task 7 的诊断指令。
+- **下一步：** Task 5 → Task 5 → Task 6。E3 已决定（方案 A，用户 2026-10-02：审计原文由代码过 `guard_explain_query`），Task 6 解除暂停；E4 已决定（用户 2026-10-02：不列出可能被截断的审计记录，`stmt_limit` 必填并在装配时要求 `max_sql_bytes <= stmt_limit - 4`）。生产审计源事实（G-A）在 P3 前提供。
 
 P1-A 是内部核心。P1-B 才接真实查询与双入口并切换正式入口，P2 增加诊断，P3 做实际用户验收。Gate 0 是 Task 3 开工前例外；其他环境缺失不阻塞不依赖该环境的离线部分，但不能跳过对应实战退出条件。
 

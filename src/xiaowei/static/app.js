@@ -41,6 +41,7 @@
     const meta = [`来源 ${fact.tool_id}`, `目标 ${fact.target_id}`, `采集于 ${fact.captured_at}`];
     if (fact.truncated) meta.push("结果已截断，只显示获准的前若干行");
     box.append(el("p", "meta", meta.join(" · ")));
+    if (fact.note) box.append(el("p", "note", `说明：${fact.note}`));
     for (const [key, value] of Object.entries(fact.metadata || {})) {
       box.append(el("p", "meta", `${key}: ${value}`));
     }

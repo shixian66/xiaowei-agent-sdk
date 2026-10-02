@@ -7,7 +7,8 @@
 
 所有出口（交给模型的工具结果、各用途读取、最终回答）都经同一个读取边界，复核归属、渠道、
 过期、目标范围、当前策略与当前授权；不同拒绝原因返回同一条信息，不暴露记录是否存在。
-事实区域由代码从获准投影生成，模型分析单独标注：Web 另得到从当前 Web 投影生成的结构化
+事实区域由代码从获准投影生成，模型分析单独标注；策略登记了固定说明的工具，说明由代码取自
+当前登记的策略，紧随来源行，不来自证据记录或模型。Web 另得到从当前 Web 投影生成的结构化
 ``DeliveryFact``；飞书只得到纯文本，表格数据逐行渲染，单元格内的换行等控制字符被转义，
 不能伪造其他段落。
 """
@@ -66,7 +67,7 @@ _EVIDENCE_ID_BYTES = 16
 # 与 ``record`` 生成的证据标识等长：容量检查用它投影最坏结果。
 _SAMPLE_EVIDENCE_ID = "ev_" + "0" * (2 * _EVIDENCE_ID_BYTES)
 _UNAVAILABLE = "证据不存在、已过期或当前无权读取"
-_FACTS_HEADER = "查询结果（系统根据证据生成）"
+_FACTS_HEADER = "工具结果（系统根据证据生成）"
 _ANALYSIS_HEADER = "分析建议（模型推断，未经系统核实）"
 _CLARIFICATION_HEADER = "需要澄清（本轮未执行查询）"
 
@@ -249,7 +250,7 @@ class EvidenceStore:
         except EvidenceUnavailableError:
             raise AnswerRejectedError("回答引用的证据不可用") from None
 
-        shown = [_shown(r, channel) for r in records]
+        shown = [_shown(r, channel, self._fact_note(r)) for r in records]
         sections = [_FACTS_HEADER, *(_render_fact(item, channel) for item in shown)]
         if answer.inferences:
             sections.append(_ANALYSIS_HEADER)
@@ -281,6 +282,11 @@ class EvidenceStore:
         ):
             raise EvidenceUnavailableError
         return record
+
+    def _fact_note(self, record: EvidenceRecord) -> str | None:
+        """当前登记策略的固定说明；记录已通过 ``_readable``，契约必然存在。"""
+        contract = self._catalog.contract(record.tool_id)
+        return None if contract is None else self._catalog.policy_for(contract).fact_note
 
     def _matches_current_policy(self, record: EvidenceRecord) -> bool:
         """保存内容须由当前登记的同一契约与投影策略生成；策略收窄、换版或移除后旧证据失效。"""
@@ -454,12 +460,13 @@ class _Shown:
     record: EvidenceRecord
     data: dict[str, object] | None
     truncated: bool
+    note: str | None
 
 
-def _shown(record: EvidenceRecord, channel: Audience) -> _Shown:
+def _shown(record: EvidenceRecord, channel: Audience, note: str | None) -> _Shown:
     envelope = json.loads(record.projections[channel])
     data = None if envelope["empty"] else envelope["data"]
-    return _Shown(record=record, data=data, truncated=bool(envelope["truncated"]))
+    return _Shown(record=record, data=data, truncated=bool(envelope["truncated"]), note=note)
 
 
 def _render_fact(shown: _Shown, channel: Audience) -> str:
@@ -470,6 +477,8 @@ def _render_fact(shown: _Shown, channel: Audience) -> str:
     )
     if shown.truncated:
         meta += " · 结果已截断"
+    if shown.note is not None:
+        meta += f"\n说明：{_one_line(shown.note)}"
     if data is None:
         return f"{meta}\n（无结果）"
     table = _table(data)
@@ -498,6 +507,7 @@ def _fact(shown: _Shown) -> DeliveryFact:
         columns=columns,
         rows=rows,
         metadata=_scalars(data) if data is not None else {},
+        note=shown.note,
     )
 
 
