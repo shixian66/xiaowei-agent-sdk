@@ -1,6 +1,6 @@
 # 小维：当前交接
 
-> 更新：2026-10-01，Asia/Shanghai。这里只记录当前事实、证据与下一项工作；设计见 [ARCHITECTURE.md](ARCHITECTURE.md)，路线见 [DEVELOPMENT_PLAN.md](DEVELOPMENT_PLAN.md)，协作规则见 [AGENTS.md](AGENTS.md)。
+> 更新：2026-10-02，Asia/Shanghai。这里只记录当前事实、证据与下一项工作；设计见 [ARCHITECTURE.md](ARCHITECTURE.md)，路线见 [DEVELOPMENT_PLAN.md](DEVELOPMENT_PLAN.md)，协作规则见 [AGENTS.md](AGENTS.md)。
 
 **OpenAI Agents SDK 负责 Agent Loop；小维负责权限、受治理工具执行、证据真实性和数据边界。**
 
@@ -9,13 +9,13 @@
 | 项目 | 已核对事实 |
 | --- | --- |
 | 仓库 | [shixian66/xiaowei-agent-sdk](https://github.com/shixian66/xiaowei-agent-sdk) |
-| 本地目录 / 分支 | `/Users/kloenguyen/Desktop/agent-SDK` / `claude/p1b-formal-entry`（从 `origin/main` 的 `0c3161c` 分出） |
+| 本地目录 / 分支 | `/Users/kloenguyen/Desktop/agent-SDK` / `claude/p1b-task8-handoff`（从 `origin/main` 的 `16f80d4` 分出，只更新本文件） |
 | M5 历史起点 | `372c381f44ecfa1fa53961f137d0058033cbd805`；不是远端当前 main 的核验结论 |
-| P1-A 代码基线 / 当前主线 | `148abaa4729ac6644c03056cf265a9dc18f1acd8` / `0c3161cd8100d177853185cafd1e22a828b0c3f5`（P1-B 计划、Gate 0 离线部分、SQLGuard Task 1 的 PR #10、StarRocks Adapter Task 2 的 PR #11、urllib3 修复的 PR #12、受治理工具 Task 3 的 PR #13、请求和渠道状态 Task 4 的 PR #14 、共享 ChannelService Task 5 的 PR #15、最小同源 Web Task 6 的 PR #16 与飞书单聊 Task 7 的 PR #17 已合入） |
-| 当前阶段 | **P1-B Task 1 SQLGuard 已随 PR #10 合入；Task 2 StarRocks Adapter 随 PR #11 合入（`dd24d8a`）。Gate 0 在主线 `6389d78` 上以 `glm-4.7-flash` Profile 真实运行通过；Task 3 受治理工具与结构化 Evidence 交付经复审通过，随 PR #13 合入（`5058ae3`）；Task 4 PostgreSQL v2 请求与渠道状态经两轮审查修复与复审通过，随 PR #14 合入（`e5e380c`）；Task 5 共享 ChannelService 经一轮审查修复（B1 授权来源对象身份）与复审通过，随 PR #15 合入（`98f4167`）；Task 6 最小同源 Web 经一轮审查修复（B1 不可用端口、B2 浏览器 smoke）与复审通过，随 PR #16 合入（`1d1aa01`）；Task 7 飞书单聊长连接（用户接受“先 ack、后落库”）经两轮审查修复（B1–B4、N1）与复审通过，随 PR #17 合入（`0c3161c`），真实飞书验证待授权；Task 8 正式装配、维护命令与打包切换已在本分支实现（PR #18），首轮审查 B1–B3、增量复审的 B2（接管交接竞态）与 B3（第三方 WARNING 与飞书 handler）、第三轮的 N1（会话创建/轮换、重复请求与投递权未进入所有权屏障）、第四轮的 N2（请求启动与 Session 恢复边界）与 N3（投递尝试归属）、第五轮的 N3.1（重发所有者连接退出后仍留在连接池）已修复，待复审。**P1-A 离线完成（Task 1–5 经 PR #2–#7 合入）。真实模型：Gate 0 通过的 Profile 只有 `bbtoken-glm-4.7-flash`；Gemini 只有 2026-09-30 的历史部分证据（未闭环）；同端点 DeepSeek V4 Flash 已实测不兼容 |
-| 当前源码与依赖 | 新包 `src/xiaowei/` 含 `sqlguard.py`、`starrocks.py`、`starrocks_tools.py`、`channel_store.py`、`migrations/002_p1b_channels.sql`、`migrations/003_delivery_attempt.sql`（应用表 v3）、`channel.py` 、`web.py` 与 `static/`，`feishu.py`，以及本分支新增的 `runtime.py`、`cli.py`、`__main__.py`；锁定 `asyncmy==0.2.15`、`lark-channel-sdk==1.4.0`（精确钉版，已加入依赖基线）。另锁定 `openai-agents[sqlalchemy]` 0.22.3、`mcp` 2.2.0、`openai` 3.20.0、SQLAlchemy 2.0.52、asyncpg 0.30.0，urllib3 2.8.0（间接依赖，修复 CVE-2026-97687/97688/97689），Python 3.11.16。本分支起 wheel 只含 `src/xiaowei`，`xiaowei` 命令指向 `xiaowei.cli:main`；旧包专用的 `alembic` 移出生产依赖（dev 与 `legacy` extra 保留），旧源码仍在工作树 |
-| 新产品入口 | 本分支：`xiaowei`（与 `python -m xiaowei` 相同）的 `serve`、`storage init/upgrade/cleanup`、`requests resend`，配置为 JSON 文件（示例 `examples/xiaowei.example.json`）。离线验证完成；真实模型、StarRocks 与飞书未参与。旧 CLI/Compose 不是产品入口 |
-| 本次工作范围 | [P1-B 计划](docs/superpowers/plans/2026-09-30-p1b-starrocks-dual-entry.md) Task 8：正式装配（`runtime.py`）、命令（`cli.py`、`__main__.py`）、打包切换（`pyproject.toml`、`uv.lock`、旧镜像 `Dockerfile`）、`/readyz` 组件状态、CI `product-entry` 作业与 README。未调用真实模型、StarRocks 或飞书，未部署 |
+| P1-A 代码基线 / 当前主线 | `148abaa4729ac6644c03056cf265a9dc18f1acd8` / `16f80d4a475c91f9e6793677cadc78782a6098e9`（P1-B 计划、Gate 0 离线部分、SQLGuard Task 1 的 PR #10、StarRocks Adapter Task 2 的 PR #11、urllib3 修复的 PR #12、受治理工具 Task 3 的 PR #13、请求和渠道状态 Task 4 的 PR #14 、共享 ChannelService Task 5 的 PR #15、最小同源 Web Task 6 的 PR #16 、飞书单聊 Task 7 的 PR #17 与正式入口 Task 8 的 PR #18 已合入） |
+| 当前阶段 | **P1-B Task 1 SQLGuard 已随 PR #10 合入；Task 2 StarRocks Adapter 随 PR #11 合入（`dd24d8a`）。Gate 0 在主线 `6389d78` 上以 `glm-4.7-flash` Profile 真实运行通过；Task 3 受治理工具与结构化 Evidence 交付经复审通过，随 PR #13 合入（`5058ae3`）；Task 4 PostgreSQL v2 请求与渠道状态经两轮审查修复与复审通过，随 PR #14 合入（`e5e380c`）；Task 5 共享 ChannelService 经一轮审查修复（B1 授权来源对象身份）与复审通过，随 PR #15 合入（`98f4167`）；Task 6 最小同源 Web 经一轮审查修复（B1 不可用端口、B2 浏览器 smoke）与复审通过，随 PR #16 合入（`1d1aa01`）；Task 7 飞书单聊长连接（用户接受“先 ack、后落库”）经两轮审查修复（B1–B4、N1）与复审通过，随 PR #17 合入（`0c3161c`），真实飞书验证待授权；Task 8 正式装配、维护命令与打包切换经五轮审查修复与复审通过，随 PR #18 合入（`16f80d4`）：首轮审查 B1–B3、增量复审的 B2（接管交接竞态）与 B3（第三方 WARNING 与飞书 handler）、第三轮的 N1（会话创建/轮换、重复请求与投递权未进入所有权屏障）、第四轮的 N2（请求启动与 Session 恢复边界）与 N3（投递尝试归属）、第五轮的 N3.1（重发所有者连接退出后仍留在连接池）均已修复。Task 9 离线部分已在 `16f80d4` 上完成，真实部分待授权。**P1-A 离线完成（Task 1–5 经 PR #2–#7 合入）。真实模型：Gate 0 通过的 Profile 只有 `bbtoken-glm-4.7-flash`；Gemini 只有 2026-09-30 的历史部分证据（未闭环）；同端点 DeepSeek V4 Flash 已实测不兼容 |
+| 当前源码与依赖 | 新包 `src/xiaowei/` 含 `sqlguard.py`、`starrocks.py`、`starrocks_tools.py`、`channel_store.py`、`migrations/002_p1b_channels.sql`、`migrations/003_delivery_attempt.sql`（应用表 v3）、`channel.py` 、`web.py` 与 `static/`，`feishu.py`，以及 Task 8 新增的 `runtime.py`、`cli.py`、`__main__.py`；锁定 `asyncmy==0.2.15`、`lark-channel-sdk==1.4.0`（精确钉版，已加入依赖基线）。另锁定 `openai-agents[sqlalchemy]` 0.22.3、`mcp` 2.2.0、`openai` 3.20.0、SQLAlchemy 2.0.52、asyncpg 0.30.0，urllib3 2.8.0（间接依赖，修复 CVE-2026-97687/97688/97689），Python 3.11.16。Task 8 起 wheel 只含 `src/xiaowei`，`xiaowei` 命令指向 `xiaowei.cli:main`；旧包专用的 `alembic` 移出生产依赖（dev 与 `legacy` extra 保留），旧源码仍在工作树 |
+| 新产品入口 | 主线：`xiaowei`（与 `python -m xiaowei` 相同）的 `serve`、`storage init/upgrade/cleanup`、`requests resend`，配置为 JSON 文件（示例 `examples/xiaowei.example.json`）。离线验证完成；真实模型、StarRocks 与飞书未参与。旧 CLI/Compose 不是产品入口 |
+| 本次工作范围 | [P1-B 计划](docs/superpowers/plans/2026-09-30-p1b-starrocks-dual-entry.md) Task 9 第一步（离线）：固定候选 `16f80d4` 并从干净工作树执行完整检查。未改源码，未调用真实模型、StarRocks 或飞书，未部署 |
 | 外部操作 | 主线曾获用户授权用合成数据调用 Gemini API（见第 3 节），验证后本机凭据文件已删除，用户负责作废该密钥；Gate 0 离线部分与 SQLGuard 没有调用真实模型；全部工作均未调用飞书或外部 MCP Server。Gate 0 真实运行经用户授权使用第三方中转端点 `bbtoken.boywe.cn`（OpenAI 兼容 Chat Completions）发送合成数据，共 22 次模型请求（含诊断探测），另有 1 次模型列表查询，串行、不重试；凭据只写入仓库外权限 600 的临时文件，运行后已删除，用户负责作废该密钥。Task 2 从 Docker Hub 拉取官方 `starrocks/allin1-ubuntu:latest`（digest `sha256:faf7ce9c…276b`，StarRocks 4.1.4）在本机 127.0.0.1:59030 运行可丢弃容器，只写入随机名合成库，用后删除；未连接用户的 StarRocks |
 
 表中分别列出 P1-B 所依据的 P1-A 代码基线与计划所依据的当前主线，不能混用。接手先用 `git rev-parse HEAD` 和 `git status --short` 取得实际版本；审查使用对应提交的精确 SHA，本文件的修改历史由 Git 保存。
@@ -343,7 +343,9 @@ CI integration job 设置 `SDK_TEST_POSTGRES_URL`，启动 `compose.sdk-test.yml
 
 **Task 8 未覆盖：** 真实模型、真实 StarRocks、真实飞书长连接与发送（Task 9，需授权）；正式 `serve` 的成功轮次只在进程内替换模型后证明，子进程中的正式命令只证明到模型失败回执。丢锁检测依赖连接终止通知：服务端终止或本端收到断开时立即生效；网络中断而本端未收到断开时，仍要等周期核对（`lock_check_seconds`，默认 5 秒，加上命令超时）发现。丢锁时已在运行的轮次在停止期限内继续调用模型与 StarRocks，结果因数据库条件更新不能覆盖新实例的恢复结论，但这些调用发生在无锁状态（立即取消需改变取消契约，未做）。旧实例的接收事务若在提交前长时间卡住（如网络分区下未断开），新实例的恢复在接收屏障上等待，超过命令超时即启动失败、需重试；持有者核对依赖同一数据库角色能读到持锁后端的 `backend_start`，读不到时按丢锁拒绝接收（失败关闭）。“取得锁后、注册通知前断连”的交错无法在正式进程中确定性注入，由对 `watching` 的直接用例与终止通知端到端用例共同证明。第三方依赖的日志不再输出，其中可能有助排障的错误需靠小维自身的原因码与退出码定位。N2/N3 用例在存储与服务层模拟“错过终止通知”和跨进程交错，正式进程中无法确定性制造。旧实例在接管前已启动的轮次仍会调用模型与工具（不可撤回，取消契约未改），只是结果与历史都不能落定。独立重发进程若在发送中崩溃，它的 sending 要到下一次 serve 启动恢复才记为 unknown；重发占用的连接身份同样依赖同一数据库角色可读 `pg_stat_activity`，读不到时按无所有者处理（记为 unknown，保守）。旧实例在新实例恢复前把已接受请求记为 failed/busy（`reject_busy`）仍可能发生：请求终态为 failed 而非 interrupted，不运行，回执经所有权核对才能发送，未作为阻断处理。浏览器验收与 compose-smoke 的新镜像只在本机或 CI 运行过一次（浏览器用例未纳入 CI）。`.env.example` 仍是旧 M5 变量说明，未改。新产品 Compose、持久卷与备份恢复属 P3。
 
-**下一项：** Task 8 复审（精确 SHA 见 PR #18）。通过并经用户同意合入后进入 Task 9；Task 7 的真实飞书验证（长连接收发、重投、发送失败、断线）与 Task 9 一并在用户授权后进行。
+**Task 9 离线部分（候选 `16f80d4`，干净工作树，2026-10-02）：** 完整测试、`-m security`、文档检查、正式 `serve` 浏览器 smoke、Ruff/format、mypy、锁文件一致性与 `pip-audit --strict` 均通过（数字见第 5 节）；主线 CI 在 `16f80d4` 上通过。
+
+**下一项：** Task 9 真实部分，须用户授权并补齐环境事实：真实模型沿用 Gate 0 的 `bbtoken-glm-4.7-flash` Profile 与调用预算（G4 已通过，需重新授权）；StarRocks 目标、只读账号与 allowlist（G1、G5）；四种投影字段、保留期与是否保存飞书 chat ID（G2）；首个目标的业务口径（G3）；操作者、访问方式与 cookie `Secure`（G6）；飞书测试应用、tenant/user allowlist 与 scopes（G7）。建议顺序：真实模型 + 本机可丢弃 StarRocks 容器跑固定样例集 → 获准 StarRocks → 正式浏览器 → 真实飞书（含 Task 7 的长连接收发、重投、发送失败、断线）。任何真实失败先回到对应任务形成独立修复提交，再对新 SHA 重跑证据。
 
 P1-A 是内部核心。P1-B 才接真实查询与双入口并切换正式入口，P2 增加诊断，P3 做实际用户验收。Gate 0 是 Task 3 开工前例外；其他环境缺失不阻塞不依赖该环境的离线部分，但不能跳过对应实战退出条件。
 
@@ -359,7 +361,7 @@ P1-A 是内部核心。P1-B 才接真实查询与双入口并切换正式入口�
 | PostgreSQL / SDK Session | 隔离测试库已验证 SDK 表与应用表 v1 初始化、版本检查、Evidence 读写，以及 Session 策略包装的暂存提交、回放复核、上限、过期与失败隔离 | 物理清理命令（P1-B）、正式部署的保留期配置与备份恢复验证（P3） |
 | StarRocks | 本机可丢弃的 StarRocks 4.1.4 容器上验证了 Adapter 协议（Task 2）与受治理工具端到端（Task 3）；用户环境未连接 | 目标版本、测试连接、只读账号、获准库表/视图（G1）、数据投影范围（G2）与简短业务口径（G3） |
 | 飞书 | 只有 Evidence 飞书投影与纯文本交付的离线/测试 PostgreSQL 验证；正式渠道未运行 | 应用与事件配置、获准租户/单聊用户、可信身份来源 |
-| 本机 Web | Task 6 组件 smoke；本分支正式 `xiaowei serve` 在 Chrome 中离线验收（模型为本机关闭端口或进程内脚本） | 真实模型下的正式验收（Task 9）；HTTPS/SSH、操作者与 `Secure`（G6） |
+| 本机 Web | Task 6 组件 smoke；正式 `xiaowei serve` 在 Chrome 中离线验收（模型为本机关闭端口或进程内脚本） | 真实模型下的正式验收（Task 9）；HTTPS/SSH、操作者与 `Secure`（G6） |
 | Docker Compose | 新产品双容器尚未交付 | 应用镜像、PG 持久卷、loopback/SSH 访问、启动检查与备份恢复实战 |
 
 凭据只在本机或获准部署环境安全配置，不粘贴到对话、仓库或日志。未提供的环境信息不是用户已授权向任意服务发数据。
@@ -580,6 +582,8 @@ Task 8 正式入口验证（锁文件只把 alembic 从生产依赖移到 dev/le
 | 第四轮 N2/N3：修复前（`49ed6df`）运行新用例 | 18 项中 14 failed（start 未拒绝、恢复早于/并发于登记未拒绝、10 项旧尝试改写新尝试、serve 恢复改写进行中的重发），4 项对照与守护 passed |
 | 第四轮 N2/N3：`SDK_TEST_POSTGRES_URL=$SDK_PG uv run --locked --extra dev python -m pytest tests/sdk_core/test_channel_store.py tests/sdk_core/test_channel_service.py tests/sdk_core/test_runtime.py tests/sdk_core/test_storage_v2.py -q -W error`；另跑 feishu/web/cli/app/session_policy | 149 passed；240 passed；新竞态 26 项连续 3 次通过 |
 | 第四轮 N2/N3：全量；`-m security`；浏览器；文档检查；wheel 含迁移 003 | 2714 passed，152 skipped，15 deselected；927 passed，79 skipped；3 passed；8 passed；是 |
+| Task 9 离线：候选 `16f80d4` 干净工作树，`SDK_TEST_POSTGRES_URL=$SDK_PG uv run --locked --extra dev python -m pytest -q`；`-m security`；文档检查（`test_doc_fact_binding`、`test_docs_command_consistency`、`test_capabilities_doc`）；`SDK_TEST_CHROME=… pytest tests/sdk_core/test_serve_browser.py -m browser -q -W error` | 2718 passed，152 skipped，15 deselected；927 passed，79 skipped；8 passed；2 passed（本机 Chrome） |
+| Task 9 离线：`ruff check .`、`ruff format --check src/xiaowei tests/sdk_core`、`mypy src`、`uv lock --check`、`git diff --check`、`uv export --frozen --no-emit-project --extra dev` + `pip-audit --strict`；主线 CI | 全部通过，无已知漏洞；`16f80d4` 的 CI 通过 |
 | 第五轮 N3.1：修复前（`deb7450`）运行新用例；修复后同四个文件 + feishu/web/cli/app/session_policy + wheel 契约 + 全量 | 修复前所有者退出 3 项（正常/异常/取消）均 failed（退出后身份仍在 `pg_stat_activity`）；修复后 153 passed；240 passed；1 passed；2718 passed，152 skipped，15 deselected |
 | 第五轮 N3.1：隔离变异 3 项（只关闭不作废、异常/取消路径归还连接池、不确认后端退出）；ruff、format、mypy、`git diff --check`、`uv lock --check` | 全部使对应用例失败；检查通过，依赖与锁文件未变 |
 | 第四轮 N2/N3：隔离变异 8 项 + N1/B2/B3 复跑 10 项；ruff、format、mypy、`git diff --check`、`uv lock --check` | 全部使对应用例失败；检查通过，依赖与锁文件未变 |
