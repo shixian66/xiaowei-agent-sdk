@@ -13,7 +13,7 @@
 - 继续追问“这条 SQL 为什么慢”，查看普通执行计划，得到有依据的优化建议与局限说明。
 - 在 Web 或飞书连续对话，查看实际 SQL、有限结果和诊断依据。
 
-查询与诊断共用一个 Agent。首版 StarRocks 使用本地 function tools，同时具备通用 MCP Client Integration，连接未来获准的外部工具服务；首版不自建业务 MCP Server。两条工具路径都在调用前复核权限、结果进入模型前过滤，最终发送前验证 Evidence。模型、会话、Web 与飞书分别接收各自允许的数据。
+查询与诊断共用一个 Agent。StarRocks 工具是小维的受治理 function tools：P1/P2 开发期由本地 Adapter 直连数据库，P2.5 起改经外部独立维护的数据库 MCP Server 执行，首版试用时经该路径访问多个获准的 StarRocks 集群；治理始终在小维，本仓库不内嵌业务 MCP Server。另具备通用 MCP Client Integration，连接获准的外部工具服务。两条工具路径都在调用前复核权限、结果进入模型前过滤，最终发送前验证 Evidence。模型、会话、Web 与飞书分别接收各自允许的数据。
 
 ## 最小产品形态
 
@@ -23,7 +23,7 @@
 | 模型 API | 计划接入 OpenAI、Gemini、DeepSeek；通过配置选择经过验证的端点和模型，一次运行使用一个模型 |
 | Web | 本机使用的简单对话页，显示文本、SQL、有限结果与执行提示 |
 | 飞书 | 获准用户与企业自建机器人的单聊文本消息 |
-| 数据源 | 一个服务端配置的 StarRocks 只读连接及明确授权范围 |
+| 数据源 | 多个获准的 StarRocks 集群，经外部只读数据库 MCP Server 访问，每个集群有独立授权范围（P2.5；P1/P2 开发期为一个本地直连的只读连接） |
 | MCP | 官方 SDK 接入能力 + 小维可信配置与治理；配置为空时，本地功能照常运行 |
 | 会话 | 两端分别保留上下文，共用业务逻辑；暂不跨渠道同步 |
 | 运行与存储 | Docker Compose 管理小维与 PostgreSQL 两个容器；小维单进程，SDK Session 首版使用 SQLAlchemySession + PostgreSQL；飞书优先长连接 |
