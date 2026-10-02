@@ -142,7 +142,7 @@ def guard_explain_query(sql: str, policy: QueryPolicy) -> ExplainQuery: ...
 ### 2.2 Adapter：`explain`
 
 ```python
-EXPLAIN_LEVEL: Final = "<Task 0 选定：LOGICAL | COSTS | VERBOSE 之一>"
+EXPLAIN_LEVEL: Final = "LOGICAL"   # Task 0 在 4.1.4 上选定（见下方实测结论）
 EXPLAIN_PREFIX: Final = f"EXPLAIN {EXPLAIN_LEVEL} "
 PLAN_COLUMN: Final = "plan"
 
@@ -156,6 +156,13 @@ class StarRocksAdapter:
 ```
 
 - **级别选择（Task 0）：** 候选只有语法允许、且 4.1.4 不进入执行路径的显式关键字 `LOGICAL`、`COSTS`、`VERBOSE`；裸 `EXPLAIN`（受 FE 配置控制）、`ANALYZE`、`SCHEDULER` 排除。合格条件同时满足：(a) FE `query_explain_level=ANALYZE` 时仍有服务端零执行证据；(b) 输出内容只落在已批准披露范围（估算行数、分区与 tablet 选择、物化视图名、谓词、视图展开的底表/列/表达式）；(c) 足以支持诊断（含扫描对象、分区裁剪、Join 方式与估算行数）。多个合格时取披露最少者。影响输出的会话变量（如 `enable_extended_explain`）若改变披露，由 Adapter 在会话设置中显式设定并回读，与现有限额同一路径。没有合格级别时停止并报告（§4 Task 0）。
+- **Task 0 实测结论（2026-10-02，本机可丢弃 `starrocks/allin1-ubuntu` 4.1.4-4a9848e，只读账号，合成数据）：** 选定 `LOGICAL`。
+  - 零执行（a）：管理账号把 `query_explain_level` 设为 ANALYZE 后，裸 `EXPLAIN SELECT assert_true(amount < 0) …` 在 BE 报 `assert_true failed`（1064），裸 `EXPLAIN SELECT count(order_id) …` 返回 Profile 文本、FE 审计 `ScanRows=30000`、`SHOW PROFILELIST` 新增 1 条（阳性对照）；同一配置下 `EXPLAIN LOGICAL/COSTS/VERBOSE` 均只返回计划，审计 `State=EOF`、`ScanRows=0`，无新 Profile。之后恢复为 `NORMAL` 并回读确认。
+  - 披露（b）：`COSTS` 每个节点输出 `column statistics`，含列的真实 min/max（如 `amount-->[1.5, 45000.0, …]`），不合格；`VERBOSE` 首行固定为 `RESOURCE GROUP: <名称>`，不合格。`LOGICAL` 只含输出列编号、算子、`Estimates: {row, cpu, memory, network, cost}`、`SCAN [对象]`、`partitionRatio`/`tabletRatio`、Join 方式（`HASH/INNER JOIN`、`EXCHANGE(BROADCAST|SHUFFLE)`）、谓词（含 SQL 字面量；视图展开出底表名与视图的过滤条件，例如对未授权底表 `hidden_t` 的视图显示 `SCAN [hidden_t]`，属 D1 已批准范围），未见资源组、排队信息或列统计值。未测试物化视图改写的输出。
+  - 诊断够用（c）：扫描对象、分区/tablet 裁剪比例、Join 方式与估算行数均在 `LOGICAL` 中。
+  - `enable_extended_explain=true` 只把 `LOGICAL` 的谓词改写为 `DictMapping(...)` 形式，不增加披露类别，因此 Adapter 不固定该变量。
+  - 结果契约：恰好一列，服务端列名 `Explain String`，类型 VAR_STRING（253），每行一行计划文本。
+  - 无 SELECT 权限 → 5203（已在 `_PERMISSION_ERRORS`）；CTE、子查询引用未授权表同为 5203，视图按视图权限通过，与查询一致。`query_timeout=1`、`query_mem_limit=1048576` 回读生效后 `EXPLAIN LOGICAL` 正常（同一 JOIN 实际执行时超出内存上限）。
 - `isinstance(query, ExplainQuery)` 否则 `TypeError`；目标不符时 `StarRocksError(OBJECT_NOT_ALLOWED)`。`run_query` 的现有 `isinstance(query, GuardedQuery)` 检查保证反向隔离。
 - 复用 `_run(EXPLAIN_PREFIX + query.normalized_sql, None, self._target.max_plan_lines)`：同一个槽位、期限、会话限额设置与回读、非缓冲读取、字节与单值上限、截断与断开语义。`args=None`，SQL 中的 `%` 不做格式化（与 `run_query` 相同）。
 - 结果契约：恰好一列且每个值都是字符串，否则 `RESULT_CONTRACT`。返回的 `QueryResult` 把列名固定为 `plan`，每行 `{"plan": line}`，`sql` 是实际发出的完整语句（含显式级别前缀）。服务端列名（Task 0 记录的实际名称）不进入投影。
@@ -202,8 +209,8 @@ class ToolPolicy:
 
 - 工具 `local/describe_table_layout(table)`，代码生成、参数绑定的单行查询；对象必须在 `allowed_objects` 中（与 `describe_table` 相同的同步前置检查）。
 - 键字段（分区、分桶、排序、主键）按逗号拆分并去掉反引号后，每个名字都必须是该对象的获准列，否则该字段替换为固定文字“（含未获准列，未显示）”。分区表达式（如 `date_trunc('day', dt)`）不能按上述规则拆成列名时也整段替换。
-- 不返回 `PROPERTIES`（存储卷、副本等部署信息）。视图在该表中没有行，返回空结果并由事实区显示“（无结果）”。
-- 列名与取值以 Task 0 在 4.1.4 上的实测为准；目标版本不同时在 P3 复核。
+- 不返回 `PROPERTIES`（存储卷、副本等部署信息）。
+- **Task 0 实测（4.1.4）：** 列为 `TABLE_SCHEMA, TABLE_NAME, TABLE_ENGINE, TABLE_MODEL, PRIMARY_KEY, PARTITION_KEY, DISTRIBUTE_KEY, DISTRIBUTE_TYPE, DISTRIBUTE_BUCKET(INT), SORT_KEY, PROPERTIES, TABLE_ID`。键字段带反引号、以 `, ` 分隔（如 `` `dt`, `region` ``），无值时为空串；`TABLE_MODEL` 取 `DUP_KEYS`、`PRIMARY_KEYS` 等。表达式分区 `date_trunc('day', ts)` 的 `PARTITION_KEY` 只显示 `` `ts` ``，不含表达式。**视图有一行**：`TABLE_ENGINE='VIEW'`、键字段为空、桶数 0（与原计划“没有行”不符）；Task 5 对视图返回空结果并显示“（无结果）”，或按行返回空字段，二者择一并测试。只读账号看不到无权限的表。目标版本不同时在 P3 复核。
 
 ### 2.6 诊断回答
 
@@ -258,6 +265,12 @@ AUDIT_NOTE: Final = (
 - **指标：** `columns` 为固定的 `query_id, started_at, query_time_ms, scan_bytes, scan_rows, return_rows, cpu_ms, mem_bytes, pending_ms, state, digest, sql, sql_status`。NULL、空串或负值一律输出 `null`（事实区显示为未知），不换成 0；`cpu_ms` 由 `cpuCostNs` 以 `Decimal` 除以 1,000,000，保留 3 位小数，输出字符串。投影字段与其他工具相同（`RESULT_FIELDS`），`fact_note=AUDIT_NOTE`，`data_scope` 包含审计源配置。
 - **用途与授权：** 查询与诊断用途都可见（读审计不执行被诊断 SQL），仍须在 `access.grants` 与 `data_policy.model_tools` 中显式开放；`audit` 未配置时不登记工具，配置一致性检查拒绝开放未登记工具。看全库慢查询是新的运维权限，授权表应只授予相应人员。
 - **数据库权限：** 只读账号需要审计表的 SELECT。审计表本身的大小与分区由 AuditLoader 管理，查询受窗口上限、分区裁剪、`query_timeout` 与行数上限共同约束。
+- **Task 0 实测（4.1.4 + 官方 AuditLoader 5.0.0，`max_stmt_length=200`）——触发停止条件 (2)，Task 6 暂停待用户决定：**
+  - **`QueriedRelations` 在审计表中全部为 NULL。** FE 自身的 `fe.audit.log` 有该字段（完全限定名、只含直接引用：`[default_catalog.<db>.orders]`；视图记为视图名本身不展开；CTE 记为底表；子查询与跨库对象都列出），但 AuditLoader 5.0.0 不写入审计表。因此 §2.7 依赖它的 SQL 过滤与代码复核在锁定组合上无法成立。
+  - `timestamp` 按 FE 系统时区写入（本实例 Etc/UTC）；会话 `time_zone='America/New_York'` 不影响它。
+  - SQL 超过 `max_stmt_length` 时按 UTF-8 **字节**在字符边界截断、无截断标记：283 字节 ASCII → 200 字节；270 字节含中文 → 198 字节（94 字符）。`LENGTH(stmt)` 返回字节数，只能判断“接近上限、可能已截断”。
+  - 非慢查询（低于插件 `qe_slow_log_ms`，默认 5000）的 `digest` 为空串；`pendingTimeMs` 为 -1；失败语句 `state=ERR`、指标为 0（`errorCode` 为 `RUNTIME_ERROR`、`INTERNAL_ERR` 等）。`EXPLAIN LOGICAL` 语句也记为 `isQuery=1`；小维自身的 `SELECT @@…` 回读同样会出现在审计中。
+  - 只读账号需要 `GRANT SELECT ON TABLE <审计库>.<审计表>`；无权限 → 5203，表不存在 → 5502（不在现有映射中），服务端超时 → 5024。导入延迟约为一个 `max_batch_interval_sec`（默认 60 秒）。
 - **降级语义（修正 DEVELOPMENT_PLAN §5 的承诺范围）：** 只有“审计源未配置”在 I/O 之前成立：工具不登记，模型看不到 `list_slow_queries`，诊断只走 SQL/执行计划路径，这一降级由装配层实现。审计查询运行失败（无 SELECT 权限 → `permission_denied`，审计表不存在 → Task 0 记录的错误码，服务端/客户端超时 → `server_timeout` / `timeout`）属于 I/O 已发生的执行失败：沿用现有 `ToolExecutionError` → 本轮 `tool_failed` 停止，不保存，不自动重试，不把错误交给模型继续；这些错误码在 Adapter 层可区分并由测试断言，用户看到固定的 `tool_failed` 说明，可改为粘贴 SQL 重新发起诊断。不改变治理层失败语义，不吞异常，不靠提示词假装已降级。
 - **最坏容量：** `sql` 字段按 `max(max_value_bytes 内的上限, len(SQL_OMITTED))`、其余按列类型上限计入 `worst_case_observation`，装配时与其他工具一同检查。
 
@@ -503,7 +516,7 @@ Task 0（实测）与 Task 1（Evidence 数据范围）互不依赖，可先后�
 | 本机可丢弃 StarRocks | `SDK_TEST_STARROCKS_ADMIN_URL=mysql://root@127.0.0.1:59030 uv run --locked --extra dev python -m pytest tests/p1b/test_starrocks_real.py -m starrocks_real -q`；用后删除合成库与容器 |
 | 静态 | `uv run --locked --extra dev ruff check src/xiaowei tests/sdk_core tests/p1b`；`ruff format --check src/xiaowei tests/sdk_core`；`mypy`；`uv lock --check`；`git diff --check` |
 
-Task 1、4、8 运行完整离线回归；Task 2、3、5、6、7 按改动运行各自列出的相关检查，权限、Evidence、Session 相关路径在对应任务内立即验证。不动本机已有的 `xiaowei-release-*` 容器。
+`-m security` 在 `tests/sdk_core` 与 `tests/p1b` 中选中 0 个用例（该标记只用于旧测试），运行它不构成证据；安全边界由各任务列出的用例覆盖。Task 1、4、8 运行完整离线回归；Task 2、3、5、6、7 按改动运行各自列出的相关检查，权限、Evidence、Session 相关路径在对应任务内立即验证。不动本机已有的 `xiaowei-release-*` 容器。
 
 ## 6. 兼容、回退与恢复
 
@@ -524,7 +537,8 @@ Task 1、4、8 运行完整离线回归；Task 2、3、5、6、7 按改动运行
 | D4 | 慢查询来源 | 用户决定使用审计表（Task 6）。`get_query_profile` 不实现：FE 内存只保留最近 `profile_info_reserved_num`（默认 500）个 Profile，重启丢失，按 FE 缓存，找不到与无权限都返回空，且默认不做访问检查；需要时另行评估 | 不阻塞本文 |
 | D5 | 开放 `explain_query` 时，计划中的估算行数、分区选择与物化视图名可交给模型、Session 与渠道 | 用户接受；作为该工具的已知披露写入 ARCHITECTURE，由授权配置控制谁能用 | 已决定 |
 | D6 | 审计 SQL 原文能否交给模型与渠道：字面量可能含业务值，且来自其他用户 | 用户决定可以；只受长度上限约束，记录仍须引用对象全部获准 | 已决定 |
-| E1 | 显式 EXPLAIN 级别 | Task 0 按 §2.2 (a)(b)(c) 选定；若唯一能用的级别还会输出资源组名、排队信息或列 min/max 等未批准内容，停止并请用户决定，不默认放宽 | Task 2–4 |
+| E1 | 显式 EXPLAIN 级别 | 已选定 `LOGICAL`（Task 0 实测，§2.2）；`COSTS` 与 `VERBOSE` 分别输出列 min/max 与资源组名，不合格 | 已解决 |
+| E3 | 审计表没有 `QueriedRelations`（AuditLoader 5.0.0 + 4.1.4 实测全为 NULL），§2.7 的对象过滤无法实现 | 建议：改为代码对每条审计 `stmt` 运行 `guard_explain_query`，只返回通过当前 SQLGuard 范围（对象、列、函数）且未被截断的记录；SQL 只按库、时间窗与 `isQuery` 过滤，按指标排序取有界候选（如 `max_rows` 的若干倍）后在代码中过滤，列表可能少于上限。其他选项：等待写入该列的插件版本，或把 `list_slow_queries` 移出 P2。需用户决定 | Task 6 |
 | E2 | Evidence 失效粒度 | 整个目标范围一个摘要（§2.0），任一变化全部失效；AI 按“可逆、fail closed、无迁移”决定 | 不阻塞 |
 | G-A | 生产审计源事实：StarRocks 版本、AuditLoader 版本与 `max_stmt_length`、审计库表名、`QueriedRelations` 等列是否存在、`timestamp` 时区、只读账号能否获 SELECT | P3 前由用户提供并在目标上复核 | P3 真实验证 |
 
