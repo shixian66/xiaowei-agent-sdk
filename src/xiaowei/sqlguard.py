@@ -1,5 +1,8 @@
 """SQLGuard：把模型给出的 SQL 收窄为一条可执行的只读 ``GuardedQuery``，或给出固定原因码。
 
+``guard_explain_query`` 用同一套校验产出 ``ExplainQuery``，供 Adapter 以固定显式级别取执行
+计划；两者是互不兼容的封存类型，唯一差别是执行计划不改写 LIMIT（第 5 步）。
+
 同步纯函数，不查询元数据、不取连接、不访问网络或凭据。只接受单条 ``SELECT``（可带非递归
 ``WITH``）；未列入闭集的语法、节点、函数和参数一律拒绝。顺序：
 
@@ -11,8 +14,9 @@
 4. 用 sqlglot ``qualify`` 按“只含获准列”的 schema 完整限定所有列，解析失败即列未获准；再逐
    scope 复核物理列归属、拒绝相关子查询。输出别名引用替换为别名所指表达式，执行的 SQL 中不留
    任何需要由数据库再解析的未限定名。
-5. 顶层 LIMIT 缺失或超过 ``max_rows`` 时改为 ``max_rows + 1``（供 Adapter 判定截断），再生成
-   规范化 SQL；规范化结果也要满足长度上限，且再过一次本函数结果不变。
+5. 查询：顶层 LIMIT 缺失或超过 ``max_rows`` 时改为 ``max_rows + 1``（供 Adapter 判定截断）；
+   执行计划：LIMIT 保持原样，因为 EXPLAIN 不返回数据行，改写会改变被解释的计划。再生成规范化
+   SQL；规范化结果也要满足长度上限，且再过一次同一函数结果不变。
 
 标识符按 sqlglot 的 StarRocks 方言语义（大小写敏感）与 allowlist 精确比较，大小写、全角或
 同形字差异只会使匹配失败。函数名按 sqlglot 规范名（大写）比较，例如 ``DATE_TRUNC`` 解析为
@@ -146,11 +150,60 @@ class GuardedQuery:
             raise TypeError("GuardedQuery 只能由 guard_readonly_query 构造")
 
 
+@dataclass(frozen=True, slots=True)
+class ExplainQuery:
+    """``guard_explain_query`` 的唯一产物；Adapter 只以固定显式级别 EXPLAIN ``normalized_sql``。
+
+    与 ``GuardedQuery`` 互不兼容：不能被当作查询执行，也没有返回行数。
+    """
+
+    target_id: str
+    normalized_sql: str
+    referenced_objects: frozenset[str]
+    referenced_columns: frozenset[tuple[str, str]]
+    _seal: object = field(default=None, repr=False, compare=False)
+
+    def __post_init__(self) -> None:
+        if self._seal is not _SEAL:
+            raise TypeError("ExplainQuery 只能由 guard_explain_query 构造")
+
+
 def guard_readonly_query(sql: str, policy: QueryPolicy) -> GuardedQuery:
     """校验并规范化一条只读查询。
 
     :raises QueryRejectedError: 任一规则不通过；只带原因码与固定说明。
     """
+    root, objects, columns = _guard(sql, policy)
+    returned = _cap_limit(root, policy.max_rows)
+    return GuardedQuery(
+        target_id=policy.target_id,
+        normalized_sql=_normalize(root, policy),
+        referenced_objects=objects,
+        referenced_columns=columns,
+        max_returned_rows=returned,
+        _seal=_SEAL,
+    )
+
+
+def guard_explain_query(sql: str, policy: QueryPolicy) -> ExplainQuery:
+    """按与查询相同的范围校验并规范化一条待取执行计划的 SQL；LIMIT 保持原样。
+
+    :raises QueryRejectedError: 任一规则不通过；只带原因码与固定说明。
+    """
+    root, objects, columns = _guard(sql, policy)
+    return ExplainQuery(
+        target_id=policy.target_id,
+        normalized_sql=_normalize(root, policy),
+        referenced_objects=objects,
+        referenced_columns=columns,
+        _seal=_SEAL,
+    )
+
+
+def _guard(
+    sql: str, policy: QueryPolicy
+) -> tuple[exp.Select, frozenset[str], frozenset[tuple[str, str]]]:
+    """两个公开函数共用的校验：返回完整限定后的语法树与引用的对象、列。"""
     if _utf8_size(sql) > policy.max_sql_bytes:
         _reject(_Code.INPUT_TOO_LARGE)
     root = _parse(sql)
@@ -158,21 +211,17 @@ def guard_readonly_query(sql: str, policy: QueryPolicy) -> GuardedQuery:
     _check_sources(root, policy)
     qualified = _qualify(root, policy)
     objects, columns = _resolve_columns(qualified, policy)
-    returned = _cap_limit(qualified, policy.max_rows)
+    return qualified, objects, columns
+
+
+def _normalize(root: exp.Select, policy: QueryPolicy) -> str:
     normalized = _attempt(
-        lambda: qualified.sql(dialect=DIALECT, unsupported_level=ErrorLevel.RAISE, comments=False),
+        lambda: root.sql(dialect=DIALECT, unsupported_level=ErrorLevel.RAISE, comments=False),
         _Code.UNSUPPORTED_SYNTAX,
     )
     if _utf8_size(normalized) > policy.max_sql_bytes:
         _reject(_Code.INPUT_TOO_LARGE)
-    return GuardedQuery(
-        target_id=policy.target_id,
-        normalized_sql=normalized,
-        referenced_objects=objects,
-        referenced_columns=columns,
-        max_returned_rows=returned,
-        _seal=_SEAL,
-    )
+    return normalized
 
 
 def _reject(code: QueryRejectionCode) -> NoReturn:
