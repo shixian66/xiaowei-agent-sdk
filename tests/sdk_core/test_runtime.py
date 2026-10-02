@@ -34,7 +34,7 @@ from tests.sdk_core.test_feishu import FakeChannel
 from tests.sdk_core.test_model_api import OPENAI as PROFILE
 
 from xiaowei import runtime
-from xiaowei.channel import AccessDeniedError
+from xiaowei.channel import AccessDeniedError, ResultUnavailableError
 from xiaowei.channel_store import ChannelStore, RequestUnavailableError
 from xiaowei.config import SecretRefError
 from xiaowei.models import AUDIENCES, Identity
@@ -811,3 +811,44 @@ async def test_static_access_is_the_single_source_for_entry_and_evidence() -> No
     assert not await access.authorize(who("alice"), "other-target", "local/list_tables")
     assert not await access.authorize(who("alice"), "sr-test", "local/run_readonly_query")
     assert not await access.authorize(who("mallory"), "sr-test", "local/list_tables")
+
+
+# ---- 证据绑定当前数据范围（P2 Task 1）-----------------------------------------------------
+
+
+def narrowed_starrocks() -> dict[str, Any]:
+    """只从 allowlist 移除一个函数：授权表、工具契约与会话绑定都不变。"""
+    starrocks = SR.model_dump(mode="json")
+    starrocks["policy"]["allowed_functions"] = ["SUM"]
+    return starrocks
+
+
+async def test_history_and_resend_reject_after_scope_narrowing(env: Env) -> None:
+    """以收窄数据范围的配置重启后，网页历史读取与飞书重发都不再交付旧事实。"""
+    config = env.config(feishu=feishu_config())
+    narrowed = env.config(feishu=feishu_config(), starrocks=narrowed_starrocks())
+    await failed_feishu_result(env, config)
+    async with env.running(config, feishu_channel=FakeChannel()) as served:
+        await served.page()
+        first = await served.turn(env.scripts.add("网页查表", tool_call("list_tables"), cite()))
+        assert first.status_code == 200 and first.json()["state"] == "completed"
+        assert (await served.client.get("/api/turns/r1")).status_code == 200  # 同一范围：可读
+        cookies = httpx.Cookies(served.client.cookies)
+        assert await served.finish() == 0
+
+    async with env.running(narrowed, feishu_channel=FakeChannel()) as served:
+        served.client.cookies.update(cookies)
+        assert (await served.client.get("/api/turns/r1")).status_code == 403
+        assert await served.finish() == 0
+
+    channel = FakeChannel()
+    with pytest.raises(ResultUnavailableError):
+        await runtime.resend(
+            narrowed,
+            subject_id="alice",
+            chat_id="oc_alice",
+            message_id="om_resend",
+            clock=env.clock,
+            feishu_channel=channel,
+        )
+    assert channel.sends == []
