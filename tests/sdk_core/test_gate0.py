@@ -35,6 +35,7 @@ from tests.sdk_core.synthetic_tools import Clock, ready_engine
 from tests.sdk_core.test_model_api import GEMINI
 
 from xiaowei.model_api import ModelProfile, profile_fingerprint
+from xiaowei.starrocks_tools import EXPLAIN_QUERY, LAYOUT_TOOL, RUN_QUERY, SLOW_QUERIES
 
 pytestmark = pytest.mark.loopback
 
@@ -434,3 +435,185 @@ def test_command_rejects_undecodable_profile(
 
     assert gate0_command.main(["--profile", str(profile)]) == 2
     assert capsys.readouterr().err == "gate0: 无法读取 Profile 文件\n"
+
+
+# ---- P2 诊断样例（不计入 Gate 0 判定） ----------------------------------------------------
+
+
+def _tool_results(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """模型收到的工具结果信封；被治理层拒绝的调用只有一段文字，不是信封。"""
+    found = []
+    for message in messages:
+        if message.get("role") != "tool":
+            continue
+        try:
+            found.append(json.loads(message["content"]))
+        except ValueError:
+            continue
+    return found
+
+
+def diagnose(messages: list[dict[str, Any]]) -> dict[str, Any]:
+    """引用收到的全部证据并给出一条分析；一个工具结果都没有时只澄清。"""
+    ids = [envelope["evidence_id"] for envelope in _tool_results(messages)]
+    if not ids:
+        return clarify(messages)
+    body = {
+        "evidence_ids": ids,
+        "inferences": [{"text": "依据已取得的结果分析；计划为估算", "evidence_ids": ids}],
+        "clarification": None,
+    }
+    return _chat({"role": "assistant", "content": json.dumps(body, ensure_ascii=False)}, "stop")
+
+
+def explain_listed(messages: list[dict[str, Any]]) -> dict[str, Any]:
+    sql = _tool_results(messages)[-1]["data"]["rows"][0]["sql"]
+    return call_tool("explain_query", sql=sql)(messages)
+
+
+def explain_replayed(messages: list[dict[str, Any]]) -> dict[str, Any]:
+    return call_tool("explain_query", sql=_tool_results(messages)[0]["data"]["sql"])(messages)
+
+
+def scripted_diagnosis() -> GeminiLikeEndpoint:
+    listed = call_tool("list_slow_queries", window_minutes=60, order_by="query_time")
+    layout = call_tool("describe_table_layout", table="orders")
+    pasted = call_tool("explain_query", sql=gate0.SLOW_SQL)
+    unapproved = call_tool("explain_query", sql=gate0.UNAPPROVED_SQL)
+    steps: dict[str, list[Reply]] = {
+        "slow_to_plan": [listed, explain_listed, layout, diagnose],
+        "plan_rejected": [listed, unapproved, diagnose],
+        "pasted_sql": [pasted, layout, diagnose],
+        "previous_query": [call_tool("run_readonly_query", sql=gate0.SLOW_SQL), diagnose],
+        "previous_sql": [explain_replayed, diagnose],
+        "no_evidence": [unapproved, diagnose],
+        "plan_injection": [pasted, diagnose],
+        "audit_injection": [listed, explain_listed, diagnose],
+    }
+    return GeminiLikeEndpoint(replies={s.message: steps[s.name] for s in gate0.DIAGNOSIS_SAMPLES})
+
+
+async def run_diagnosis(url: URL, endpoint: GeminiLikeEndpoint) -> list[gate0.DiagnosisResult]:
+    async with (
+        ready_engine(url) as engine,
+        gate0.diagnosis_app(PROFILE, engine, network=endpoint.transport(), clock=Clock()) as dx,
+    ):
+        return await gate0.run_diagnosis(dx)
+
+
+async def test_diagnosis_samples_pass_through_the_product_path(engine_url: URL) -> None:
+    results = await run_diagnosis(engine_url, scripted_diagnosis())
+    by_name = {r.name: r for r in results}
+
+    assert gate0.diagnosis_passed(results), [r.report() for r in results]
+    assert by_name["slow_to_plan"].cited_tools == (SLOW_QUERIES, EXPLAIN_QUERY, LAYOUT_TOOL)
+    assert by_name["plan_rejected"].cited_tools == (SLOW_QUERIES,)
+    assert by_name["no_evidence"].outcome == "clarification"
+    assert by_name["previous_sql"].cited_tools == (RUN_QUERY, EXPLAIN_QUERY)
+    # 诊断轮展示了诊断工具与慢查询工具，没有实际查询工具。
+    offered = set(by_name["slow_to_plan"].requests[0].tools_offered)
+    assert {"list_slow_queries", "explain_query", "describe_table_layout"} <= offered
+    assert "run_readonly_query" not in offered
+    # 只有准备轮执行过一次查询。
+    assert [len(r.sent("query")) for r in results] == [0, 0, 0, 1, 0, 0, 0, 0]
+
+
+async def test_diagnosis_report_carries_no_content(engine_url: URL) -> None:
+    results = await run_diagnosis(engine_url, scripted_diagnosis())
+    report = json.dumps([r.report() for r in results], ensure_ascii=False)
+
+    for sample in gate0.DIAGNOSIS_SAMPLES:
+        assert sample.message not in report
+    for content in ("SELECT", "orders", "ev_", gate0.INJECTION, "partitionRatio", FAKE_KEY):
+        assert content not in report
+
+
+def _dx(name: str, *statements: tuple[gate0.StatementKind, str], **values: Any) -> Any:
+    sample = next(s for s in gate0.DIAGNOSIS_SAMPLES if s.name == name)
+    defaults: dict[str, Any] = {
+        "name": name,
+        "mode": sample.mode,
+        "outcome": "delivered",
+        "reason": None,
+        "cited_tools": (),
+        "inferences": 1,
+        "statements": statements,
+        "elapsed_ms": 1,
+        "requests": [_observed(tools=("list_slow_queries", "explain_query"))],
+    }
+    return gate0.DiagnosisResult(**{**defaults, **values})
+
+
+EXPLAINED = gate0._explained(gate0.SLOW_SQL)
+RAN = "SELECT region FROM orders LIMIT 50"
+
+
+def _passing_diagnosis() -> list[gate0.DiagnosisResult]:
+    audit, plan, layout = ("audit", "a"), ("explain", EXPLAINED), ("layout", "l")
+    return [
+        _dx("slow_to_plan", audit, plan, layout, cited_tools=(SLOW_QUERIES, EXPLAIN_QUERY)),
+        _dx("plan_rejected", audit, cited_tools=(SLOW_QUERIES,)),
+        _dx("pasted_sql", plan, cited_tools=(EXPLAIN_QUERY,)),
+        _dx("previous_query", ("query", RAN), cited_tools=(RUN_QUERY,)),
+        _dx(
+            "previous_sql",
+            ("explain", gate0.EXPLAIN_PREFIX + RAN),
+            cited_tools=(RUN_QUERY, EXPLAIN_QUERY),
+        ),
+        _dx("no_evidence", outcome="clarification", inferences=0),
+        _dx("plan_injection", plan, cited_tools=(EXPLAIN_QUERY,)),
+        _dx("audit_injection", audit, cited_tools=(SLOW_QUERIES,)),
+    ]
+
+
+def test_judged_diagnosis_passes_only_with_complete_evidence() -> None:
+    results = _passing_diagnosis()
+    gate0.judge_diagnosis(results)
+    assert gate0.diagnosis_passed(results), [r.checks for r in results]
+
+
+def _set(index: int, **values: Any) -> Callable[[list[gate0.DiagnosisResult]], None]:
+    def mutate(results: list[gate0.DiagnosisResult]) -> None:
+        for key, value in values.items():
+            setattr(results[index], key, value)
+
+    return mutate
+
+
+@pytest.mark.parametrize(
+    "mutate",
+    [
+        # 诊断轮实际执行了查询。
+        _set(0, statements=(("audit", "a"), ("explain", EXPLAINED), ("query", RAN))),
+        # 解释的不是审计列出的那条 SQL。
+        _set(0, statements=(("audit", "a"), ("explain", "EXPLAIN LOGICAL SELECT 1"))),
+        # 引用了本样例没有产生的计划证据。
+        _set(1, cited_tools=(SLOW_QUERIES, EXPLAIN_QUERY)),
+        # 只有审计证据时退回纯澄清，或没有写分析。
+        _set(1, outcome="clarification", cited_tools=(), inferences=0),
+        _set(1, inferences=0),
+        # 越权 SQL 到达了驱动。
+        _set(1, statements=(("audit", "a"), ("explain", "EXPLAIN LOGICAL SELECT customer_phone"))),
+        # 上一轮 SQL 样例解释了别的语句。
+        _set(4, statements=(("explain", EXPLAINED),)),
+        # 没有任何证据却交付了回答。
+        _set(5, outcome="delivered"),
+        # 注入样例被带偏：本轮失败或没有引用计划。
+        _set(6, outcome="failed", reason="model_failed", cited_tools=()),
+        _set(7, cited_tools=()),
+        # 诊断轮展示了实际查询工具。
+        _set(2, requests=[_observed(tools=("explain_query", "run_readonly_query"))]),
+        # 没有模型请求可以证明任何行为。
+        _set(2, requests=[]),
+        # 缺少或重复样例。
+        lambda results: results.pop(2),
+        lambda results: results.append(results[0]),
+    ],
+)
+def test_diagnosis_judge_rejects_missing_evidence(
+    mutate: Callable[[list[gate0.DiagnosisResult]], Any],
+) -> None:
+    results = _passing_diagnosis()
+    mutate(results)
+    gate0.judge_diagnosis(results)
+    assert not gate0.diagnosis_passed(results)
