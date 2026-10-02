@@ -40,6 +40,7 @@ from xiaowei.models import AgentAnswer, AnswerInference, Budget, Identity, RunCo
 from xiaowei.sqlguard import QueryPolicy, guard_explain_query, guard_readonly_query
 from xiaowei.starrocks import (
     EXPLAIN_PREFIX,
+    LAYOUT_HIDDEN,
     StarRocksAdapter,
     StarRocksError,
     StarRocksErrorCode,
@@ -499,3 +500,66 @@ async def test_explicit_level_does_not_execute_when_fe_default_is_analyze(
             host, port, user, "ADMIN SET FRONTEND CONFIG ('query_explain_level' = 'NORMAL')"
         )
         assert await _explain_level(host, port, user) == "NORMAL"
+
+
+# ---- 表布局（P2 Task 5）---------------------------------------------------------------------
+
+
+async def test_describe_layout_on_real_tables(instance: Instance) -> None:
+    """``tables_config`` 在 4.1.4 上的实际取值：键过滤、表达式分区、主键表、视图与无权限表。"""
+    host, port, user = admin_address()
+    db, ro = instance.database, instance.ro_user
+    props = "PROPERTIES('replication_num'='1')"
+    await admin(
+        host,
+        port,
+        user,
+        f"CREATE TABLE {db}.events (ts DATETIME, region VARCHAR(16), amount INT, "
+        f"secret VARCHAR(16)) DUPLICATE KEY(ts, region) PARTITION BY date_trunc('day', ts) "
+        f"DISTRIBUTED BY HASH(region) BUCKETS 2 {props}",
+        f"CREATE TABLE {db}.pk_orders (id INT NOT NULL, secret VARCHAR(16) NOT NULL, total INT) "
+        f"PRIMARY KEY(id, secret) DISTRIBUTED BY HASH(id) BUCKETS 3 {props}",
+        f"CREATE VIEW {db}.sales_view AS SELECT id, region FROM {db}.sales",
+        f"GRANT SELECT ON TABLE {db}.events TO USER '{ro}'@'%'",
+        f"GRANT SELECT ON TABLE {db}.pk_orders TO USER '{ro}'@'%'",
+        f"GRANT SELECT ON VIEW {db}.sales_view TO USER '{ro}'@'%'",
+    )
+    base = target(instance)
+    policy = base.policy.model_copy(
+        update={
+            "allowed_objects": base.policy.allowed_objects | {"events", "pk_orders", "sales_view"},
+            "allowed_columns": {
+                **base.policy.allowed_columns,
+                "events": frozenset({"ts", "region", "amount"}),
+                "pk_orders": frozenset({"id", "total"}),
+                "sales_view": frozenset({"id", "region"}),
+            },
+        }
+    )
+    ada = open_starrocks(
+        base.model_copy(update={"policy": policy}), clock=lambda: datetime.now(UTC)
+    )
+
+    (sales,) = (await ada.describe_layout("sales")).rows
+    assert sales == {
+        "model": "DUP_KEYS",
+        "partition_key": "",
+        "distribute_type": "HASH",
+        "distribute_key": "id",
+        "buckets": 1,
+        "sort_key": "id",
+        "primary_key": "",
+    }
+    # 表达式分区在 4.1.4 只显示列名；分桶键与排序键都是获准列。
+    (events,) = (await ada.describe_layout("events")).rows
+    assert events["partition_key"] == "ts"
+    assert (events["distribute_key"], events["buckets"]) == ("region", 2)
+    assert events["sort_key"] == "ts, region"
+    # 主键含未获准列 secret：整段不显示，获准的 id 也不单独留下。
+    (orders,) = (await ada.describe_layout("pk_orders")).rows
+    assert orders["model"] == "PRIMARY_KEYS"
+    assert orders["primary_key"] == LAYOUT_HIDDEN and orders["distribute_key"] == "id"
+    assert "secret" not in str(orders)
+    # 视图没有布局；无 SELECT 权限的表对只读账号不可见，同样没有行。
+    assert (await ada.describe_layout("sales_view")).rows == ()
+    assert (await ada.describe_layout("ungranted")).rows == ()

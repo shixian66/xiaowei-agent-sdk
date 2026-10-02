@@ -19,6 +19,7 @@ from xiaowei.starrocks import EXPLAIN_PREFIX, StarRocksAdapter, StarRocksError, 
 from xiaowei.starrocks_tools import (
     DESCRIBE_TABLE,
     EXPLAIN_QUERY,
+    LAYOUT_TOOL,
     LIST_TABLES,
     RESULT_FIELDS,
     RUN_QUERY,
@@ -82,6 +83,7 @@ def test_every_audience_must_hold_the_worst_case_result() -> None:
         DESCRIBE_TABLE,
         RUN_QUERY,
         EXPLAIN_QUERY,
+        LAYOUT_TOOL,
     }
     assert all(p.required == RESULT_FIELDS for p in tools.policies)
     ToolCatalog(tools.contracts, tools.policies)  # 登记一致

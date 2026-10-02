@@ -16,6 +16,10 @@ ANALYZE 而实际执行查询。显式级别 ``LOGICAL`` 由 P2 Task 0 在 StarR
 才发送 ``QUIT`` 正常关闭；截断、错误、超时、取消一律直接断开，不重试。客户端取消或超时
 不代表服务端已停止，服务端由 ``query_timeout`` 兜底。
 
+表布局只读 ``information_schema.tables_config`` 的表模型、分区、分桶、排序与主键，不读
+``PROPERTIES``（存储卷、副本等部署信息）。键字段中的每个名字都须是该对象的获准列，否则整段
+替换为 ``LAYOUT_HIDDEN``：不显示未获准列名，也不留下获准的一部分让人误以为是完整的键。
+
 驱动与网络错误映射为固定错误码；错误在下层 ``except`` 结束后才抛出，不带服务端原文、SQL、
 地址或凭据，``__cause__`` 与 ``__context__`` 为空。
 """
@@ -55,6 +59,19 @@ EXPLAIN_LEVEL: Final = "LOGICAL"
 """P2 Task 0 在 4.1.4 上选定：FE 默认级别为 ANALYZE 时仍零执行，且不输出列统计值或资源组。"""
 EXPLAIN_PREFIX: Final = f"EXPLAIN {EXPLAIN_LEVEL} "
 PLAN_COLUMN: Final = "plan"
+LAYOUT_COLUMNS: Final = (
+    "model",
+    "partition_key",
+    "distribute_type",
+    "distribute_key",
+    "buckets",
+    "sort_key",
+    "primary_key",
+)
+LAYOUT_HIDDEN: Final = "（含未获准列，未显示）"
+_LAYOUT_KEYS: Final = frozenset({"partition_key", "distribute_key", "sort_key", "primary_key"})
+# 键字段中的一个名字：反引号引用（名字内不含反引号）或普通标识符。
+_KEY_NAME: Final = re.compile(r"`([^`]+)`|([A-Za-z_][A-Za-z0-9_]*)")
 
 Scalar = None | bool | int | float | str
 
@@ -221,6 +238,14 @@ _DESCRIBE_TABLE: Final = (
     "FROM information_schema.columns WHERE TABLE_SCHEMA = %s AND TABLE_NAME = %s "
     "AND COLUMN_NAME IN ({}) ORDER BY ORDINAL_POSITION"
 )
+# Task 0 在 4.1.4 上实测：视图也有一行（TABLE_ENGINE='VIEW'、键为空、桶数 0），这里排除。
+_DESCRIBE_LAYOUT: Final = (
+    "SELECT TABLE_MODEL AS model, PARTITION_KEY AS partition_key, "
+    "DISTRIBUTE_TYPE AS distribute_type, DISTRIBUTE_KEY AS distribute_key, "
+    "DISTRIBUTE_BUCKET AS buckets, SORT_KEY AS sort_key, PRIMARY_KEY AS primary_key "
+    "FROM information_schema.tables_config "
+    "WHERE TABLE_SCHEMA = %s AND TABLE_NAME = %s AND TABLE_ENGINE <> %s"
+)
 _SESSION_READ: Final = "SELECT @@query_timeout, @@query_mem_limit, @@time_zone"
 
 
@@ -274,6 +299,22 @@ class StarRocksAdapter:
         columns = tuple(sorted(policy.allowed_columns[name]))
         sql = _describe_table_sql(len(columns))
         return await self._run(sql, (self._target.database, name, *columns), len(columns))
+
+    async def describe_layout(self, name: str) -> QueryResult:
+        """一张获准表的布局：至多一行，列为 ``LAYOUT_COLUMNS``；视图没有行。
+
+        多于一行、列不符、键不是文本或结果被截断都按 ``RESULT_CONTRACT`` 失败：布局只有完整的
+        一行才有意义。键字段按获准列过滤（见模块说明）。
+        """
+        policy = self._target.policy
+        if name not in policy.allowed_objects:
+            raise StarRocksError(_Code.OBJECT_NOT_ALLOWED)
+        result = await self._run(_DESCRIBE_LAYOUT, (self._target.database, name, "VIEW"), 1)
+        allowed = policy.allowed_columns[name]
+        rows = [_layout_row(row, allowed) for row in result.rows]
+        if result.columns != LAYOUT_COLUMNS or result.truncated or None in rows:
+            raise StarRocksError(_Code.RESULT_CONTRACT)
+        return result.model_copy(update={"rows": tuple(r for r in rows if r is not None)})
 
     async def _run(
         self, sql: str, args: tuple[object, ...] | None, max_rows: int, *, plan: bool = False
@@ -433,12 +474,38 @@ def _describe_table_sql(columns: int) -> str:
     return _DESCRIBE_TABLE.format(", ".join(["%s"] * columns))
 
 
+def _layout_row(row: dict[str, Scalar], allowed: frozenset[str]) -> dict[str, Scalar] | None:
+    """按获准列过滤键字段；键不是文本或 NULL 时不符合契约，返回 ``None``。"""
+    shown = dict(row)
+    for key in _LAYOUT_KEYS:
+        value = row.get(key)
+        if value is not None and not isinstance(value, str):
+            return None
+        shown[key] = _shown_keys(value, allowed)
+    return shown
+
+
+def _shown_keys(value: str | None, allowed: frozenset[str]) -> str | None:
+    """键字段规范为 ``a, b``；任一部分不是获准列名（含表达式）时整段替换为 ``LAYOUT_HIDDEN``。"""
+    if not value:
+        return value
+    names: list[str] = []
+    for part in value.split(","):
+        match = _KEY_NAME.fullmatch(part.strip())
+        name = match and (match.group(1) or match.group(2))
+        if not name or name not in allowed:
+            return LAYOUT_HIDDEN
+        names.append(name)
+    return ", ".join(names)
+
+
 def metadata_sql_bytes(policy: QueryPolicy) -> int:
     """元数据查询结果中 ``sql``（代码生成的模板，不含绑定值）的最大 UTF-8 字节数。"""
     widest = max(len(columns) for columns in policy.allowed_columns.values())
     return max(
         len(_list_tables_sql(len(policy.allowed_objects)).encode()),
         len(_describe_table_sql(widest).encode()),
+        len(_DESCRIBE_LAYOUT.encode()),
     )
 
 

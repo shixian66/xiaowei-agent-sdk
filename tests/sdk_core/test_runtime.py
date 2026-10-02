@@ -321,6 +321,65 @@ async def test_formal_assembly_rejects_out_of_scope_explain_without_io(env: Env)
     assert await env.scalar("SELECT count(*) FROM xiaowei_evidence") == 0
 
 
+LAYOUT = Result(
+    (
+        "model",
+        "partition_key",
+        "distribute_type",
+        "distribute_key",
+        "buckets",
+        "sort_key",
+        "primary_key",
+    ),
+    [("DUP_KEYS", "`region`", "HASH", "`id`", 4, "`region`", "")],
+)
+
+
+async def test_formal_assembly_cites_table_layout_with_hidden_keys(env: Env) -> None:
+    env.drv = driver(LAYOUT)
+    async with env.running(env.config()) as served:
+        await served.page()
+        message = env.scripts.add(
+            "sales 表的分桶合理吗", tool_call("describe_table_layout", table="sales"), cite()
+        )
+        body = (await served.turn(message)).json()
+        assert body["state"] == "completed"
+        (fact,) = body["delivery"]["facts"]
+        assert fact["tool_id"] == "local/describe_table_layout"
+        # SR 的 sales 不开放 id 列：分桶键整段不显示。
+        assert fact["rows"] == [
+            {
+                "model": "DUP_KEYS",
+                "partition_key": "region",
+                "distribute_type": "HASH",
+                "distribute_key": "（含未获准列，未显示）",
+                "buckets": 4,
+                "sort_key": "region",
+                "primary_key": "",
+            }
+        ]
+        (sent,) = statements(env.drv)
+        assert "information_schema.tables_config" in sent and "PROPERTIES" not in sent
+        assert await served.finish() == 0
+
+
+async def test_formal_assembly_rejects_layout_of_unlisted_tables_without_io(env: Env) -> None:
+    env.drv = driver(LAYOUT)
+    async with env.running(env.config()) as served:
+        await served.page()
+        message = env.scripts.add(
+            "users 表的布局",
+            tool_call("describe_table_layout", table="users"),
+            clarify("users 不在可查看范围内"),
+        )
+        body = (await served.turn(message)).json()
+        assert body["state"] == "completed"
+        assert body["delivery"]["facts"] == [] and "需要澄清" in body["delivery"]["content"]
+        assert env.drv.attempts == 0
+        assert await served.finish() == 0
+    assert await env.scalar("SELECT count(*) FROM xiaowei_evidence") == 0
+
+
 async def test_model_failure_is_a_fixed_receipt_through_the_formal_assembly(env: Env) -> None:
     async with env.running(env.config()) as served:
         await served.page()

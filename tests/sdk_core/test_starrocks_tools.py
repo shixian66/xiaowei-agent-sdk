@@ -60,6 +60,7 @@ from xiaowei.starrocks_tools import (
     DESCRIBE_TABLE,
     DIAGNOSE_TOOLS,
     EXPLAIN_QUERY,
+    LAYOUT_TOOL,
     LIST_TABLES,
     PLAN_NOTE,
     QUERY_TOOLS,
@@ -77,6 +78,7 @@ SDK_NAMES = {
     DESCRIBE_TABLE: "describe_table",
     RUN_QUERY: "run_readonly_query",
     EXPLAIN_QUERY: "explain_query",
+    LAYOUT_TOOL: "describe_table_layout",
 }
 # Task 0 在 4.1.4 上实测：服务端返回单列 ``Explain String``，每行一行计划文本。
 PLAN = Result(("Explain String",), [("- Output => [1:region]",), ("    - SCAN [sales]",)])
@@ -226,8 +228,9 @@ async def test_purpose_decides_which_tools_the_model_sees(env: Env) -> None:
     await env.app.run_turn(env.ctx("query", turn="t3", authorized=DIAGNOSE_TOOLS), narrowed)
 
     assert env.scripts.tools_seen(query) == [set(SDK_NAMES.values())]
-    assert env.scripts.tools_seen(diagnose) == [{"list_tables", "describe_table", "explain_query"}]
-    assert env.scripts.tools_seen(narrowed) == [{"list_tables", "describe_table", "explain_query"}]
+    metadata = {"list_tables", "describe_table", "describe_table_layout", "explain_query"}
+    assert env.scripts.tools_seen(diagnose) == [metadata]
+    assert env.scripts.tools_seen(narrowed) == [metadata]
     assert env.drv.attempts == 0
 
 
@@ -961,3 +964,74 @@ async def test_explain_evidence_is_invalidated_by_scope_narrowing(
         await app.run_turn(env.ctx("diagnose", session="s-web", turn="t2"), followup)
     assert refused.value.reason == "session_unavailable"
     assert followup not in env.scripts.calls
+
+
+# ---- 表布局（P2 Task 5）---------------------------------------------------------------------
+
+LAYOUT_COLUMNS = (
+    "model",
+    "partition_key",
+    "distribute_type",
+    "distribute_key",
+    "buckets",
+    "sort_key",
+    "primary_key",
+)
+
+
+async def test_diagnose_turn_cites_layout_with_unapproved_keys_hidden(env: Env) -> None:
+    raw = ("DUP_KEYS", "`region`", "HASH", "`secret`", 8, "`region`, `total`", "")
+    env.drv.make = driver(Result(LAYOUT_COLUMNS, [raw])).make
+    web = env.scripts.add(
+        "sales 表的分区和分桶合理吗",
+        tool_call("describe_table_layout", table="sales"),
+        cite("按 region 分区"),
+    )
+    feishu = env.scripts.add(
+        "飞书：sales 表布局", tool_call("describe_table_layout", table="sales"), cite()
+    )
+    on_web = await env.deliver(env.ctx("diagnose", session="s-web"), web)
+    on_feishu = await env.deliver(env.ctx("diagnose", session="s-fs", channel="feishu"), feishu)
+
+    (output,) = tool_outputs(env.scripts.calls[web][1])
+    (row,) = json.loads(output)["data"]["rows"]
+    assert row == {
+        "model": "DUP_KEYS",
+        "partition_key": "region",
+        "distribute_type": "HASH",
+        "distribute_key": "（含未获准列，未显示）",
+        "buckets": 8,
+        "sort_key": "region, total",
+        "primary_key": "",
+    }
+    (fact,) = on_web.facts
+    assert fact.tool_id == LAYOUT_TOOL and fact.columns == LAYOUT_COLUMNS and fact.rows == (row,)
+    for delivered in (on_web, on_feishu):
+        assert "secret" not in delivered.content and "PROPERTIES" not in delivered.content
+    sent = executed_sql(env.drv)
+    assert len(sent) == 2 and all("information_schema.tables_config" in sql for sql in sent)
+
+
+async def test_layout_outside_the_allowlist_is_rejected_before_io(env: Env) -> None:
+    message = env.scripts.add(
+        "看看 users 表的布局",
+        tool_call("describe_table_layout", table="users"),
+        clarify("没有可查看的 users 表"),
+    )
+    await env.app.run_turn(env.ctx("diagnose", max_tool_calls=1), message)
+    (rejected,) = tool_outputs(env.scripts.calls[message][1])
+    assert "不在允许范围内" in rejected and "users" not in rejected
+    assert env.drv.attempts == 0 and await env.evidence_rows() == 0
+
+
+def test_layout_policy_shares_the_target_data_scope() -> None:
+    tools = starrocks_tools(
+        StarRocksAdapter(SR, connect=driver(), clock=lambda: NOW),
+        dict.fromkeys(AUDIENCES, CAPACITY),
+    )
+    assert {c.tool_id for c in tools.contracts} == set(SDK_NAMES)
+    assert {p.data_scope for p in tools.policies} == {data_scope_digest(SR)}
+    (layout_policy,) = [
+        p for p in tools.policies if p.policy_id == "starrocks.describe_table_layout"
+    ]
+    assert layout_policy.fact_note is None
