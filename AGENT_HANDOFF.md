@@ -349,6 +349,7 @@ CI integration job 设置 `SDK_TEST_POSTGRES_URL`，启动 `compose.sdk-test.yml
 
 - **Task 1（`8291631`，独立审查通过）：** `ToolPolicy.data_scope` 与 `data_scope_digest(target)`（目标、默认库、排序后的对象/列/函数、`max_rows`、`max_sql_bytes`、`max_result_bytes`、`max_value_bytes`）进入策略指纹；`data_scope=None` 时指纹与基线相同。离线证据：以收窄范围（移除对象——含与证据无关的对象、列、函数，或降低四项上限任一）重新装配后，`project(model/session/web)` → `EvidenceUnavailableError`、`validate_answer` → `answer_rejected`、同会话续轮在首个模型调用前 `session_unavailable`；正式装配重启后网页历史读取 403、飞书重发 `ResultUnavailableError` 且不发送；同一范围（顺序/大小写不同）照常可读与续轮；摘要在 6 个不同 `PYTHONHASHSEED` 的子进程中一致；MCP/合成工具的已保存指纹等于基线值。完整离线 `tests/sdk_core tests/p1b -W error` 1012 passed（隔离 PostgreSQL），Ruff、format、mypy、`uv lock --check`、`git diff --check` 通过；8 项隔离变异全部被发现（指纹不含范围、对象/列按集合迭代顺序、漏列、漏函数、漏 `max_result_bytes`、漏 `max_value_bytes`、`None` 时仍写键）。用例放在 `test_starrocks_tools.py`（Catalog/Session）与 `test_runtime.py`（历史/重发），而非计划所列的 `test_session_policy.py`/`test_channel_service.py`：前者才有真实 StarRocks 工具装配。`-m security` 在新测试目录选中 0 个用例，不计为证据。
 - **Task 0（已完成）：** `EXPLAIN_LEVEL = "LOGICAL"`。FE `query_explain_level=ANALYZE` 时裸 `EXPLAIN` 确实执行（BE 报 `assert_true` 失败；另一查询审计 `ScanRows=30000` 且新增 Profile），`EXPLAIN LOGICAL/COSTS/VERBOSE` 零执行；`COSTS` 输出列 min/max、`VERBOSE` 输出资源组名，均不合格。`tables_config` 中视图有一行（与计划原文不符，已更正）。**审计表的 `QueriedRelations` 在 AuditLoader 5.0.0 + 4.1.4 上全为 NULL，触发停止条件 (2)：Task 6 暂停，等待用户就计划 §7 E3 作出决定（已由 E3 方案 A 解除）。** 容器与合成数据已删除。
+- **方向已定（用户 2026-10-02 确认）：** 数据库能力以后走外部 MCP Server（责任方待定），治理留在小维；新增阶段“P2.5 数据库 MCP 接入与多集群”，位于 P2 完成后、P3 之前，见 [DEVELOPMENT_PLAN.md](DEVELOPMENT_PLAN.md) §6 与 [接入约定](docs/contracts/database-mcp-server.md)。P2 仍用本地 asyncmy 直连完成。
 - **下一步：** 开始 Task 2（SQLGuard `ExplainQuery`）→ Task 3（`data_scope_digest` 同时加入 `max_plan_lines` 与 `host`/`port`/`user`）→ Task 4 → Task 5 → Task 6。E3 已决定（方案 A，用户 2026-10-02：审计原文由代码过 `guard_explain_query`），Task 6 解除暂停；E4 已决定（用户 2026-10-02：不列出可能被截断的审计记录，`stmt_limit` 必填并在装配时要求 `max_sql_bytes <= stmt_limit - 4`）。生产审计源事实（G-A）在 P3 前提供。
 
 P1-A 是内部核心。P1-B 才接真实查询与双入口并切换正式入口，P2 增加诊断，P3 做实际用户验收。Gate 0 是 Task 3 开工前例外；其他环境缺失不阻塞不依赖该环境的离线部分，但不能跳过对应实战退出条件。
@@ -367,6 +368,8 @@ P1-A 是内部核心。P1-B 才接真实查询与双入口并切换正式入口�
 | 飞书 | 只有 Evidence 飞书投影与纯文本交付的离线/测试 PostgreSQL 验证；正式渠道未运行 | 应用与事件配置、获准租户/单聊用户、可信身份来源 |
 | 本机 Web | Task 6 组件 smoke；正式 `xiaowei serve` 在 Chrome 中离线验收（模型为本机关闭端口或进程内脚本） | 真实模型下的正式验收（Task 9）；HTTPS/SSH、操作者与 `Secure`（G6） |
 | Docker Compose | 新产品双容器尚未交付 | 应用镜像、PG 持久卷、loopback/SSH 访问、启动检查与备份恢复实战 |
+
+**CI 已知不稳定：** secret-scan 的“豁免窄度自检”每次用随机生成的值充当 secret，gitleaks 偶尔不把它判为泄露，该步骤随之失败（PR #22 首次运行，单独重跑后通过，全历史扫描无泄露）；与被测改动无关，修复待另开小任务。
 
 凭据只在本机或获准部署环境安全配置，不粘贴到对话、仓库或日志。未提供的环境信息不是用户已授权向任意服务发数据。
 
