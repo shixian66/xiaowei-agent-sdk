@@ -209,7 +209,7 @@ MCP Integration 的治理必须覆盖实际发送动作，不能只过滤 `list_
 
 **多集群：** 以后至少接入 3 个 StarRocks 集群，之后还会有 MySQL/TiDB 等。每个集群是一个独立目标（target），有自己的 allowlist、授权、业务口径与 Evidence 归属；授权由小维按目标判定，Server 只按调用携带的集群标识选择连接。新的数据库类型需要对应方言的 SQL 校验，不能沿用 StarRocks 的 SQLGuard 规则直接放行。
 
-**连接级保证不会自动继承。** 当前由本地 Adapter 落实的保证——只读账号、`query_timeout`/`query_mem_limit`/`time_zone` 的设置与回读、单语句原样执行（只接受查询与 `EXPLAIN LOGICAL` 语句）、EXPLAIN 只用固定显式级别 `LOGICAL`、行数/字节/单值上限与截断标记、值类型约定（DECIMAL 定点字符串、日期时间带时区偏移、NULL 保留、二进制与未知类型拒绝、列名不重复）、超时与中断（含取消与连接断开）时终止查询、错误不携带连接信息与原文、连接槽位与期限——切换后转由 Server 实现。它们必须写入接入约定、由 Server 实现，并经小维逐项验收后才能视为成立；小维对返回结果的大小与契约检查保留，但不能替代 Server 的执行约束。
+**连接级保证不会自动继承。** 当前由本地 Adapter 落实的保证——只读账号、`query_timeout`/`query_mem_limit`/`time_zone` 的设置与回读、单语句原样执行（只接受查询与 `EXPLAIN LOGICAL` 语句）、EXPLAIN 只用固定显式级别 `LOGICAL`、行数/字节/单值上限与截断标记、值类型约定（DECIMAL 定点字符串、日期时间带时区偏移、NULL 保留、二进制与未知类型拒绝、列名不重复）、超时与中断时断开连接（不发 `KILL QUERY`，数据库端靠 `query_timeout` 兜底）、错误不携带连接信息与原文、连接槽位与期限——切换后转由 Server 实现；接入约定对 Server 另有更严的要求（如中断时终止数据库查询）。它们必须写入接入约定、由 Server 实现，并经小维逐项验收后才能视为成立；小维对返回结果的大小与契约检查保留，但不能替代 Server 的执行约束。
 
 **当前缺口（`1b869a2` 源码事实）：**
 
