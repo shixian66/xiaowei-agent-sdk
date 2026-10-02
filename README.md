@@ -13,7 +13,9 @@
 - 继续追问“这条 SQL 为什么慢”，查看估算执行计划（不执行原查询），得到有依据的优化建议与局限说明。
 - 在 Web 或飞书连续对话，查看实际 SQL、有限结果和诊断依据。
 
-查询与诊断共用一个 Agent。StarRocks 工具是小维的受治理 function tools：P1/P2 开发期由本地 Adapter 直连数据库，P2.5 起改经外部独立维护的数据库 MCP Server 执行，首版试用时经该路径访问多个获准的 StarRocks 集群；治理始终在小维，本仓库不内嵌业务 MCP Server。另具备通用 MCP Client Integration，连接获准的外部工具服务。两条工具路径都在调用前复核权限、结果进入模型前过滤，最终发送前验证 Evidence。模型、会话、Web 与飞书分别接收各自允许的数据。
+查询与诊断共用一个业务 Agent。StarRocks 通过受治理 function tools 和本地 Adapter 直连；数据库 MCP 暂缓。通用 MCP Client Integration 保留用于将来其他能力；两条工具路径均复核权限、过滤结果并验证 Evidence。
+
+**已批准、尚未实现的增量：** P2.5 开放账号实际 SELECT 范围、复杂 SQL、多集群和自然语言用途识别，所有业务查询先做风险评估；随后增加指定飞书群共享与排队，均在 P3 前完成。产品边界见 [ARCHITECTURE](ARCHITECTURE.md#p25-scope)，实施顺序见 [DEVELOPMENT_PLAN](DEVELOPMENT_PLAN.md#6-p25-与飞书单群增量)。下文命令、配置和诊断用法仍描述当前 P1/P2 实现，不能直接用未来格式启动。
 
 ## 最小产品形态
 
@@ -22,15 +24,15 @@
 | Agent 核心 | OpenAI Agents SDK 的 Agent、Runner、function tools、Session |
 | 模型 API | 计划接入 OpenAI、Gemini、DeepSeek；通过配置选择经过验证的端点和模型，一次运行使用一个模型 |
 | Web | 本机使用的简单对话页，显示文本、SQL、有限结果与执行提示 |
-| 飞书 | 获准用户与企业自建机器人的单聊文本消息 |
-| 数据源 | 多个获准的 StarRocks 集群，经外部只读数据库 MCP Server 访问，每个集群有独立授权范围（P2.5；P1/P2 开发期为一个本地直连的只读连接） |
+| 飞书 | 当前获准单聊；P3 前增加一个指定群的 @、共享与有界排队 |
+| 数据源 | 本地 Adapter 直连 StarRocks；当前单目标和手写 allowlist，P2.5 扩展为多个目标与自动范围 |
 | MCP | 官方 SDK 接入能力 + 小维可信配置与治理；配置为空时，本地功能照常运行 |
 | 会话 | 两端分别保留上下文，共用业务逻辑；暂不跨渠道同步 |
 | 运行与存储 | Docker Compose 管理小维与 PostgreSQL 两个容器；小维单进程，SDK Session 首版使用 SQLAlchemySession + PostgreSQL；飞书优先长连接 |
 
 会话继续使用 SDK 公共 Session 接口；SDK 历史与应用记录各自管理表结构，共用 PostgreSQL 实例。数据保存在持久卷，并提供备份恢复办法。引入数据库不增加 Worker 或分布式调度。生产默认关闭 tracing 与外发；真实数据 trace 需要显式配置允许范围。
 
-首版按以下方式使用，功能随实施逐项交付：
+当前 P1/P2 按以下方式使用；P2.5 自然语言用途规则尚未启用：
 
 - Web 每条消息选择“查询/诊断”，默认诊断；飞书用 `/查询 内容` 或 `/诊断 内容`。普通消息用于解释和诊断，需要实际查询时再明确选择；上轮查过数据不代表本轮也允许执行。
 - 查询结果中的数字、实际 SQL、表格和时间由程序按真实证据生成，AI 分析建议单独展示；不清楚时区、金额单位或指标含义时先问清楚。
