@@ -1,7 +1,7 @@
 """正式运行装配：一份可信配置 → 单实例锁 → 启动恢复 → 运行对象 → Web 与可选飞书 → 有界停止。
 
 ``open_runtime`` 是唯一装配顺序：配置校验 → PostgreSQL 引擎 → 专用连接取得实例锁 → schema 检查与
-启动一致性恢复 → StarRocks Adapter 与三个受治理工具 → 唯一授权来源 → Evidence / Governance →
+启动一致性恢复 → StarRocks Adapter 与受治理工具 → 唯一授权来源 → Evidence / Governance →
 模型绑定 → Application → ``ChannelService``。任一步失败时按相反顺序关闭已创建的资源并释放锁；
 启动失败不对外服务，而不是带着未就绪状态继续运行。
 
@@ -73,7 +73,13 @@ from xiaowei.starrocks import (
     StarRocksTarget,
     open_starrocks,
 )
-from xiaowei.starrocks_tools import DIAGNOSE_TOOLS, QUERY_TOOLS, StarRocksTools, starrocks_tools
+from xiaowei.starrocks_tools import (
+    AUDIT_TOOLS,
+    DIAGNOSE_TOOLS,
+    QUERY_TOOLS,
+    StarRocksTools,
+    starrocks_tools,
+)
 from xiaowei.storage import (
     Backend,
     InstanceLock,
@@ -165,10 +171,11 @@ class ServeConfig(_Config):
 
     @model_validator(mode="after")
     def _consistent(self) -> "ServeConfig":
-        if not self.data_policy.model_tools <= QUERY_TOOLS:
+        registered = _registered_tools(self)
+        if not self.data_policy.model_tools <= registered:
             raise ValueError("data_policy.model_tools 只能包含已登记的 StarRocks 工具")
         for tools in self.access.grants.values():
-            if not tools <= QUERY_TOOLS:
+            if not tools <= registered:
                 raise ValueError("access.grants 只能授予已登记的 StarRocks 工具")
         storage = self.storage
         if storage.request_retention_seconds > storage.evidence_retention_seconds:
@@ -214,9 +221,16 @@ def _reason(error: Mapping[str, object]) -> str:
     return str(error.get("msg", "取值不符合要求"))
 
 
+def _registered_tools(config: ServeConfig) -> frozenset[str]:
+    """装配时会登记的 StarRocks 工具：审计源未配置时没有慢查询工具。"""
+    audit = AUDIT_TOOLS if config.starrocks.audit is not None else frozenset()
+    return QUERY_TOOLS | audit
+
+
 def _app_config(config: ServeConfig) -> AppConfig:
+    audit = _registered_tools(config) - QUERY_TOOLS
     return AppConfig(
-        purposes={"query": QUERY_TOOLS, "diagnose": DIAGNOSE_TOOLS},
+        purposes={"query": QUERY_TOOLS | audit, "diagnose": DIAGNOSE_TOOLS | audit},
         data_policies={config.model.data_policy_id: config.data_policy},
         session_limits=config.session_limits,
         max_concurrent_turns=config.max_concurrent_turns,

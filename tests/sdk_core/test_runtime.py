@@ -16,11 +16,13 @@ import threading
 from collections.abc import AsyncIterator, Iterator
 from contextlib import asynccontextmanager, contextmanager
 from dataclasses import dataclass, field
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
 import httpx
 import pytest
+from asyncmy.errors import ProgrammingError
 from lark_channel.channel.errors import FeishuChannelErrorCode, SendError
 from lark_channel.channel.types import SendResult
 from pydantic import SecretStr
@@ -39,7 +41,15 @@ from xiaowei.channel_store import ChannelStore, RequestUnavailableError
 from xiaowei.config import SecretRefError
 from xiaowei.models import AUDIENCES, Identity
 from xiaowei.starrocks import EXPLAIN_PREFIX, StarRocksAdapter
-from xiaowei.starrocks_tools import PLAN_NOTE, QUERY_TOOLS, starrocks_tools
+from xiaowei.starrocks_tools import (
+    AUDIT_NOTE,
+    AUDIT_TOOLS,
+    DIAGNOSE_TOOLS,
+    PLAN_NOTE,
+    QUERY_TOOLS,
+    SLOW_QUERIES,
+    starrocks_tools,
+)
 from xiaowei.storage import (
     Readiness,
     StorageBusyError,
@@ -376,6 +386,71 @@ async def test_formal_assembly_rejects_layout_of_unlisted_tables_without_io(env:
         assert body["state"] == "completed"
         assert body["delivery"]["facts"] == [] and "需要澄清" in body["delivery"]["content"]
         assert env.drv.attempts == 0
+        assert await served.finish() == 0
+    assert await env.scalar("SELECT count(*) FROM xiaowei_evidence") == 0
+
+
+AUDIT_SOURCE = (
+    "queryId",
+    "timestamp",
+    "queryTime",
+    "scanBytes",
+    "scanRows",
+    "returnRows",
+    "cpuCostNs",
+    "memCostBytes",
+    "pendingTimeMs",
+    "state",
+    "digest",
+    "stmt",
+)
+
+
+def audit_record(stmt: str, query_id: str) -> tuple[object, ...]:
+    started = datetime(2026, 9, 29, 23, 30)
+    return (query_id, started, 7000, 2048, 300, 2, 5_000_000, 8192, 0, "EOF", "d1", stmt)
+
+
+async def test_formal_assembly_lists_only_approved_slow_queries(env: Env) -> None:
+    env.drv = driver(
+        Result(
+            AUDIT_SOURCE,
+            [
+                audit_record("SELECT secret FROM sales", "q-hidden"),
+                audit_record("SELECT region, total FROM sales", "q-ok"),
+            ],
+        )
+    )
+    config = runtime.ServeConfig.model_validate(audit_config(env.port))
+    async with env.running(config) as served:
+        await served.page()
+        message = env.scripts.add(
+            "最近一小时的慢查询",
+            tool_call("list_slow_queries", window_minutes=60, order_by="query_time"),
+            cite(),
+        )
+        body = (await served.turn(message)).json()
+        assert body["state"] == "completed"
+        (fact,) = body["delivery"]["facts"]
+        assert fact["tool_id"] == SLOW_QUERIES and fact["note"] == AUDIT_NOTE
+        assert [row["query_id"] for row in fact["rows"]] == ["q-ok"]
+        assert "secret" not in json.dumps(body, ensure_ascii=False)
+        assert await served.finish() == 0
+
+
+async def test_formal_assembly_stops_the_turn_when_the_audit_table_is_missing(env: Env) -> None:
+    env.drv = driver(ProgrammingError(5502, "Unknown table canary"))
+    config = runtime.ServeConfig.model_validate(audit_config(env.port))
+    async with env.running(config) as served:
+        await served.page()
+        message = env.scripts.add(
+            "最近一小时的慢查询",
+            tool_call("list_slow_queries", window_minutes=60, order_by="query_time"),
+            cite(),
+        )
+        body = (await served.turn(message)).json()
+        assert body["state"] == "failed" and "canary" not in json.dumps(body)
+        assert env.drv.attempts == 1  # 不重试
         assert await served.finish() == 0
     assert await env.scalar("SELECT count(*) FROM xiaowei_evidence") == 0
 
@@ -844,6 +919,65 @@ def test_invalid_configuration_is_reported_without_values(
         runtime.load_config(file)
     assert path in str(raised.value)
     assert "plain-key" not in str(raised.value)
+
+
+AUDIT_CONFIG = {
+    "database": "starrocks_audit_db__",
+    "table": "starrocks_audit_tbl__",
+    "time_zone": "UTC",
+    "stmt_limit": SR.policy.max_sql_bytes + 4,
+}
+WITH_AUDIT = sorted(QUERY_TOOLS | AUDIT_TOOLS)
+
+
+def audit_config(port: int, **audit: object) -> dict[str, Any]:
+    return serve_config(
+        port,
+        starrocks={**SR.model_dump(mode="json"), "audit": {**AUDIT_CONFIG, **audit}},
+        data_policy={"input": {"max_bytes": 2000}, "model_tools": WITH_AUDIT},
+        access={"policy_version": "p1", "grants": {OPERATOR: WITH_AUDIT, "alice": WITH_AUDIT}},
+    )
+
+
+def test_slow_queries_can_only_be_opened_with_an_audit_source(tmp_path: Path) -> None:
+    file = tmp_path / "xiaowei.json"
+    for changes in (
+        {"data_policy": {"input": {"max_bytes": 2000}, "model_tools": WITH_AUDIT}},
+        {"access": {"policy_version": "p1", "grants": {OPERATOR: WITH_AUDIT}}},
+    ):
+        file.write_text(json.dumps(serve_config(8501, **changes)), encoding="utf-8")
+        with pytest.raises(runtime.ConfigError, match="已登记的 StarRocks 工具"):
+            runtime.load_config(file)
+
+    file.write_text(json.dumps(audit_config(8501)), encoding="utf-8")
+    config = runtime.load_config(file)
+    purposes = runtime._app_config(config).purposes
+    assert purposes["diagnose"] == DIAGNOSE_TOOLS | AUDIT_TOOLS
+    assert purposes["query"] == QUERY_TOOLS | AUDIT_TOOLS
+
+
+@pytest.mark.parametrize(
+    ("audit", "path"),
+    [
+        ({"stmt_limit": None}, "starrocks.audit.stmt_limit"),
+        ({"stmt_limit": SR.policy.max_sql_bytes + 3}, "starrocks"),
+        ({"table": "audit`canary"}, "starrocks.audit.table"),
+        ({"time_zone": "canary/Zone"}, "starrocks.audit.time_zone"),
+        ({"candidate_bytes": 10}, "starrocks"),
+    ],
+    ids=["缺少 stmt_limit", "stmt_limit 太小", "表名非法", "时区非法", "候选字节太小"],
+)
+def test_invalid_audit_source_is_reported_without_values(
+    tmp_path: Path, audit: dict[str, object], path: str
+) -> None:
+    values = audit_config(8501, **audit)
+    if audit.get("stmt_limit", 0) is None:
+        del values["starrocks"]["audit"]["stmt_limit"]
+    file = tmp_path / "xiaowei.json"
+    file.write_text(json.dumps(values), encoding="utf-8")
+    with pytest.raises(runtime.ConfigError) as raised:
+        runtime.load_config(file)
+    assert path in str(raised.value) and "canary" not in str(raised.value)
 
 
 def test_valid_configuration_round_trips_through_json(tmp_path: Path) -> None:
