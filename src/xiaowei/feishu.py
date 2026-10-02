@@ -220,7 +220,8 @@ def render(delivery: Delivery, max_chars: int) -> str:
         return content
     layout = delivery.layout
     if layout is None:
-        return _cut_tail(content.split("\n"), max_chars)
+        # 澄清是“标题 + 一行正文”：正文放不下时保留它的前缀，而不是只剩标题。
+        return _cut_tail(content.split("\n"), max_chars, keep=1)
     kept = [layout.facts_header, FACTS_TRUNCATED, *layout.analysis]
     room = max_chars - _joined(kept)
     if room < 0:

@@ -29,7 +29,7 @@
 
 Agent 可以理解自然语言、生成 SQL、选择工具、根据工具结果继续调查。用户通过本轮查询入口明确请求查询时，符合权限和查询限制的只读 SQL 可以直接执行；不能只生成建议，再要求用户到另一套产品完成所有操作。
 
-首版的“诊断”是基于 SQL、元数据和普通 EXPLAIN 的分析与建议，不承诺仅凭执行计划确认真实慢查询根因。已有审计记录、Query Profile 可以提高诊断质量，按目标环境的实际可用性接入。
+首版的“诊断”是基于 SQL、元数据、表布局、固定显式级别的执行计划（`EXPLAIN LOGICAL`，不执行原查询）与已有审计记录的分析与建议，不承诺仅凭执行计划确认真实慢查询根因。审计记录来自目标上已有的 AuditLoader 审计表（P2 已实现，审计源未配置时不提供）；Query Profile 暂不接入。
 
 ## 2. 最小范围与取舍
 
@@ -37,7 +37,7 @@ Agent 可以理解自然语言、生成 SQL、选择工具、根据工具结果�
 | --- | --- |
 | 数据源 | P2 及之前为一个服务端配置的 StarRocks 连接，限定数据库、表或脱敏视图；P2 之后的数据库 MCP 阶段改为经外部 MCP Server 按目标接入多个集群（§5“数据库能力 MCP 化”） |
 | 查询 | 查元数据、生成或接收 SQL、校验后执行只读查询、解释有限结果 |
-| 诊断 | 分析用户 SQL 或上一轮 SQL、普通 EXPLAIN、给出有依据的建议 |
+| 诊断 | 分析用户 SQL、上一轮 SQL 或审计表中的慢查询；取执行计划（`EXPLAIN LOGICAL`）与表布局，给出有依据的建议 |
 | Web | 本机对话页；消息、执行提示、SQL、有限结果、诊断回答 |
 | 飞书 | 获准用户与企业自建机器人的单聊；文本输入与文本回复 |
 | 会话 | 同一入口可连续追问；Web 与飞书分别持有会话 |
@@ -159,9 +159,9 @@ Action Binding 将批准绑定到代码生成的动作标识、申请人和审�
 
 ## 5. 动态工具与受治理执行
 
-每轮调用 SDK 前，应用按可信身份、Target Scope、Tool Scope 与已确认的环境能力构造本轮工具集合。例如审计源未接入不暴露 `list_slow_queries`，无 Query Profile 访问权限不暴露 `get_query_profile`。未确认可用的能力不默认开放；相关工具说明和动态 instructions 同步收窄。直接使用 SDK 的工具配置能力，不建设新 Resolver 或能力 DSL，不并发修改共享 Agent 的工具列表。
+每轮调用 SDK 前，应用按可信身份、Target Scope、Tool Scope 与已确认的环境能力构造本轮工具集合。例如审计源未配置时不登记、不暴露 `list_slow_queries`（配置开放它会在启动时被拒绝）。未确认可用的能力不默认开放；相关工具说明和动态 instructions 同步收窄。直接使用 SDK 的工具配置能力，不建设新 Resolver 或能力 DSL，不并发修改共享 Agent 的工具列表。
 
-首版用明确入口表达本轮用途：Web 每条消息选择“查询/诊断”，默认诊断，发送后重置；飞书支持 `/查询 内容`、`/诊断 内容`，无指令的普通消息按诊断/解释处理，需要实际查询时提示使用查询入口。认证后的入口只解析明确选择，再由共享应用代码与当前权限、目标能力取交集生成 Tool Scope；模型、历史消息和工具返回不能提升范围。诊断轮允许获准元数据、普通 EXPLAIN 和已有诊断证据工具，隐藏 `run_readonly_query` 及其他未获准执行原 SQL 的等效工具；治理层再次按范围检查。MCP 工具按已审查的实际行为映射允许用途，不能按工具名字或远端声明绕过。查询许可仅限本轮，不因为同一用户上一轮查过数据就自动延续。
+首版用明确入口表达本轮用途：Web 每条消息选择“查询/诊断”，默认诊断，发送后重置；飞书支持 `/查询 内容`、`/诊断 内容`，无指令的普通消息按诊断/解释处理，需要实际查询时提示使用查询入口。认证后的入口只解析明确选择，再由共享应用代码与当前权限、目标能力取交集生成 Tool Scope；模型、历史消息和工具返回不能提升范围。诊断轮允许获准元数据、表布局、固定级别的执行计划与审计慢查询工具，隐藏 `run_readonly_query` 及其他未获准执行原 SQL 的等效工具；治理层再次按范围检查。MCP 工具按已审查的实际行为映射允许用途，不能按工具名字或远端声明绕过。查询许可仅限本轮，不因为同一用户上一轮查过数据就自动延续。
 
 工具可见性只回答“这轮可以考虑什么”；调用时必须再回答“当前参数和具体资源是否仍获准”。权限撤销、环境变动或参数越界时，Governed Tool Layer 在 I/O 前拒绝。无法事先得知的临时故障仍需正常报告，不能承诺隐藏工具能消除所有运行错误。
 
@@ -209,33 +209,36 @@ MCP Integration 的治理必须覆盖实际发送动作，不能只过滤 `list_
 
 **多集群：** 以后至少接入 3 个 StarRocks 集群，之后还会有 MySQL/TiDB 等。每个集群是一个独立目标（target），有自己的 allowlist、授权、业务口径与 Evidence 归属；授权由小维按目标判定，Server 只按调用携带的集群标识选择连接。新的数据库类型需要对应方言的 SQL 校验，不能沿用 StarRocks 的 SQLGuard 规则直接放行。
 
-**连接级保证不会自动继承。** 当前由本地 Adapter 落实的保证——只读账号、`query_timeout`/`query_mem_limit`/`time_zone` 的设置与回读、单语句原样执行（只接受查询与 `EXPLAIN LOGICAL` 语句）、EXPLAIN 只用固定显式级别 `LOGICAL`、行数/字节/单值上限与截断标记、值类型约定（DECIMAL 定点字符串、日期时间带时区偏移、NULL 保留、二进制与未知类型拒绝、列名不重复）、超时与中断时断开连接（不发 `KILL QUERY`，数据库端靠 `query_timeout` 兜底）、错误不携带连接信息与原文、连接槽位与期限——切换后转由 Server 实现；接入约定对 Server 另有更严的要求（如中断时终止数据库查询）。它们必须写入接入约定、由 Server 实现，并经小维逐项验收后才能视为成立；小维对返回结果的大小与契约检查保留，但不能替代 Server 的执行约束。
+**连接级保证不会自动继承。** 当前由本地 Adapter 落实的保证——只读账号、审计候选读取的独立行数与字节上限、`query_timeout`/`query_mem_limit`/`time_zone` 的设置与回读、单语句原样执行（只接受查询与 `EXPLAIN LOGICAL` 语句）、EXPLAIN 只用固定显式级别 `LOGICAL`、行数/字节/单值上限与截断标记、值类型约定（DECIMAL 定点字符串、日期时间带时区偏移、NULL 保留、二进制与未知类型拒绝、列名不重复）、超时与中断时断开连接（不发 `KILL QUERY`，数据库端靠 `query_timeout` 兜底）、错误不携带连接信息与原文、连接槽位与期限——切换后转由 Server 实现；接入约定对 Server 另有更严的要求（如中断时终止数据库查询）。它们必须写入接入约定、由 Server 实现，并经小维逐项验收后才能视为成立；小维对返回结果的大小与契约检查保留，但不能替代 Server 的执行约束。审计查询的模板生成与每条审计原文的 SQLGuard 过滤属于小维治理，切换后仍由小维执行。
 
-**当前缺口（`1b869a2` 源码事实）：**
+**当前缺口（`bdbf533` 源码事实）：**
 
 - 正式入口 `runtime.py` 没有装配 `MCPIntegration`，配置文件没有 `mcp` 段；
 - MCP 工具调用前只做权限、参数与预算检查，不经 SQLGuard；
 - 到 Server 的认证只支持静态 Bearer；远端工具只在启动时发现一次，Server 断开后不自动重连；
 - 没有写工具的开放路径；尚未接过任何真实外部 MCP Server；
 - 配置与装配只支持一个 StarRocks 目标（RunContext、Evidence 已按 `target_id` 区分）；
-- Evidence 的数据范围摘要（`data_scope_digest`）尚不含连接端点与账号；host/port/user 已决定在 P2 Task 3 加入（用户 2026-10-02），P2.5 再在现有数据范围之外增加 Server 标识与集群标识，换 Server 或集群时旧证据失效。
+- Evidence 的数据范围摘要（`data_scope_digest`）已含目标、默认库、对象/列/函数、各项上限、连接身份（host/port/user，P2 Task 3）与审计源（P2 Task 6）；P2.5 再增加 Server 标识与集群标识，换 Server 或集群时旧证据失效。
 
 ### 首版 StarRocks 工具
 
-下列名称是设计接口，尚非已实现 API。先实现前四项；后两项按真实环境能力增加，不以开通审计或更改目标配置作为前提。
+下列工具已在 P1-B 与 P2 实现（`local/` 命名空间，本地 Adapter 直连），各工具的接口、失败语义与验证见 [P2 实施计划](docs/superpowers/plans/2026-10-02-p2-explain-diagnosis.md)。不以开通审计或更改目标配置作为前提。
 
 | 工具 | 行为与边界 |
 | --- | --- |
 | `list_tables` | 列出授权数据库内允许访问的表或视图，不暴露整个实例目录 |
-| `describe_table` | 读取获准对象的字段与相关结构；标识符由代码验证和安全引用 |
-| `run_readonly_query` | 执行经过校验和限额处理的一条只读 SQL，返回实际 SQL、有限结果与来源 |
-| `explain_query` | 对经过同等范围校验的只读 SQL 执行普通 EXPLAIN，不执行原始查询 |
-| `list_slow_queries`（可选） | 查询已存在且获准访问的审计源；字段映射、窗口与脱敏按目标验证 |
-| `get_query_profile`（可选） | 获取已有 query_id 的可用 Profile；不存在、已过期和无权限分别说明 |
+| `describe_table` | 读取获准对象的获准字段；标识符由代码验证和安全引用 |
+| `describe_table_layout` | 读取获准表的表模型、分区键、分桶方式与键、桶数、排序键与主键（`information_schema.tables_config`，不读 `PROPERTIES`）；键中含未获准列时整段不显示；视图与当前账号看不到的表返回空结果 |
+| `run_readonly_query` | 执行经过校验和限额处理的一条只读 SQL，返回实际 SQL、有限结果与来源；只在查询用途出现 |
+| `explain_query` | 对经过与查询同等范围校验的 SELECT/WITH 取执行计划，只发出代码常量 `EXPLAIN LOGICAL ` 加规范化 SQL，不执行原查询 |
+| `list_slow_queries` | 只读已有 AuditLoader 审计表：代码模板与绑定参数，只取本目标库、`isQuery=1`、时间窗内的有界候选；每条原文逐条经 SQLGuard（对象、列、函数）检查，未通过或可能被插件截断的记录整行不列出；不返回用户、客户端地址与错误原文。只在配置审计源时登记 |
+| `get_query_profile` | 暂不实现：FE 内存只保留有限数量的 Profile，重启丢失、按 FE 缓存，找不到与无权限都返回空且默认不做访问检查；需要时另行评估 |
+
+**执行计划的显式级别与零执行依据。** 裸 `EXPLAIN` 的级别取自 FE 可变配置 `query_explain_level`，可被设为 ANALYZE 而实际执行查询，因此不使用。P2 Task 0 在 StarRocks 4.1.4 上实测选定 `LOGICAL`：把 FE 级别改为 ANALYZE 后，`EXPLAIN LOGICAL` 对执行期必失败的查询不报错、审计扫描行数为 0、无新 Profile，而同一环境的裸 `EXPLAIN` 确实执行；`COSTS` 输出列的真实 min/max、`VERBOSE` 输出资源组名，均不合格。`LOGICAL` 输出估算行数、分区与 tablet 选择（`partitionRatio`/`tabletRatio`）、Join 方式与谓词；视图的计划可能展开出底表与视图表达式，属于已批准的披露（用户 2026-10-02）。目标版本不是 4.1.4 时须在该版本上复核零执行与输出内容。计划视为不可信数据，事实区由代码附“估算、未执行原查询”的固定说明。
 
 “帮我诊断这条 SQL”不能自动转成执行该 SQL；先查元数据、执行计划和已有证据。优化后的 SQL 默认展示，用户明确要求执行时仍必须通过相同只读限制。
 
-普通 EXPLAIN 与 EXPLAIN ANALYZE 是不同能力。后者实际执行语句，首版不开放自动调用。Profile 依赖环境版本、权限、采集与保留状态，空结果不能解释为查询健康。[EXPLAIN](https://docs.starrocks.io/docs/sql-reference/sql-statements/cluster-management/plan_profile/EXPLAIN/)、[EXPLAIN ANALYZE](https://docs.starrocks.io/docs/sql-reference/sql-statements/cluster-management/plan_profile/EXPLAIN_ANALYZE/)、[Query Profile](https://docs.starrocks.io/docs/sql-reference/sql-functions/utility-functions/get_query_profile/)。
+`EXPLAIN LOGICAL` 与 `EXPLAIN ANALYZE` 是不同能力：前者只取估算计划，后者实际执行语句，首版不开放自动调用；裸 `EXPLAIN` 受 FE 配置影响，不使用。Profile 依赖环境版本、权限、采集与保留状态，空结果不能解释为查询健康。[EXPLAIN](https://docs.starrocks.io/docs/sql-reference/sql-statements/cluster-management/plan_profile/EXPLAIN/)、[EXPLAIN ANALYZE](https://docs.starrocks.io/docs/sql-reference/sql-statements/cluster-management/plan_profile/EXPLAIN_ANALYZE/)、[Query Profile](https://docs.starrocks.io/docs/sql-reference/sql-functions/utility-functions/get_query_profile/)。
 
 ## 6. 只读查询保护
 
@@ -268,7 +271,7 @@ FastAPI 提供同源 API 和简单 HTML/CSS/JavaScript 对话页，避免首版�
 
 使用官方 Python 接入能力与企业自建机器人，优先长连接接收事件，不要求首版提供公网回调地址。先支持指定租户内获准用户单聊文本；其他用户、群聊、机器人自己的消息与不支持类型在入口处理，不交给模型决定是否允许。
 
-事件处理快速完成验证、去重和有界任务接收，再异步运行 Agent、发送回复；不能等待完整模型回答才完成事件回调。事件重投按应用和消息标识去重；回复失败只重试发送已有结果，不重新查询数据库。消息过长截断或分段并保留限制说明，不为首版建设卡片系统。
+事件处理快速完成验证、去重和有界任务接收，再异步运行 Agent、发送回复；不能等待完整模型回答才完成事件回调。事件重投按应用和消息标识去重；回复失败只重试发送已有结果，不重新查询数据库。回复只发一条且不超过配置的单条上限（`max_reply_chars`）：超限时先完整保留“分析建议”，剩余字数先给每条工具结果的来源与说明行，再按顺序给结果行，截掉的部分注明“工具结果超过飞书单条上限，已截断”；分析本身超限时保留标题、从末尾截断；澄清与固定回执从末尾截断（用户 2026-10-02 决定）。截断按 Evidence 生成的分段进行，不在文字中查找标题，且不拆开转义。不为首版建设卡片系统。
 
 官方接入文档存在包迁移，实施时以实际发布版本验证长连接、异步生命周期、去重和发送 API，再锁定依赖，不复制未经安装核对的旧 import。[飞书官方 Python SDK](https://github.com/larksuite/oapi-sdk-python/blob/v2_main/doc/channel.zh.md)。
 
@@ -327,6 +330,7 @@ Evidence 记录仅保存获准保留的最小事实、引用元数据与必要�
 2. 属于本轮，或属于当前会话中允许引用的历史轮次；不得引用其他用户/会话的记录。
 3. 当前身份仍可访问对应目标和数据，当前接收者及 Web/飞书渠道允许接收这份展示内容。
 4. 引用与所展示的结构化数值/SQL/来源一致；没有证据的业务结论不能通过空引用列表伪装为已取证。澄清或一般知识建议允许无 Evidence，但必须明确没有实际查询。
+5. 证据产生时的数据范围与当前一致：StarRocks 工具的策略指纹包含目标数据范围摘要（目标、默认库、对象/列/函数、行数与字节等上限、连接身份与审计源）；以新配置启动后，任一项变化（收紧或放宽）都使该目标已持久化的证据在 Session 回放、历史读取、首次发送和重发中一律不可读。配置变化前已启动的旧进程按启动时的范围完成在途轮次（接管残余风险，见 P2 计划 §6）。
 
 校验失败时阻断相关回答与数据，返回受控的证据不可用/权限不足说明，不静默删除引用却保留结论。相同验证器用于最终回答持久化、首次发送、历史读取和失败重发；发送前仍复核，不能只信任保存时的权限。流式过程只发送已过滤的状态提示，不提前发送未经验证的模型结论或原始工具事件。
 
@@ -358,7 +362,7 @@ Evidence 记录仅保存获准保留的最小事实、引用元数据与必要�
 
 - Web 与飞书都通过同一应用服务进入真 SDK Runner；工具返回后确有下一轮执行。
 - 模型 API 使用 SDK 原生接入，支持按可信 Profile 选择服务；每个声称可用的端点/模型有独立工具闭环、结构化输出与 Session 验证，供应商切换不外带旧会话，也不自动回退到其他端点。
-- 两端均能查结构、执行获准只读查询、解释结果、分析 SQL 的普通执行计划并连续追问。
+- 两端均能查结构、执行获准只读查询、解释结果、分析 SQL 的估算执行计划（`EXPLAIN LOGICAL`，不执行原查询）并连续追问。
 - SDK Session 隔离成立；SQLAlchemySession + 真实 PostgreSQL 验证写入/回放的数据策略、历史上限、过期与清理；飞书重复消息不会重复运行 Agent 或数据库查询。
 - 查询许可按每条消息明确取得且不继承；诊断轮实际查询工具不可见，强行调用时零执行；关键结果由获准证据生成，模型解释单列；业务时间/单位/指标不明时澄清。
 - 不可用/无权限工具不出现在本轮工具集合；权限撤销或参数越界即使发生在工具展示后，也在 Adapter I/O 前被治理层拒绝。

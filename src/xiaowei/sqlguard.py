@@ -33,7 +33,7 @@ from __future__ import annotations
 
 import enum
 from collections.abc import Callable, Mapping
-from dataclasses import dataclass, field
+from dataclasses import InitVar, dataclass
 from typing import Annotated, Final, NoReturn, TypeVar
 
 from pydantic import (
@@ -127,6 +127,7 @@ class QueryPolicy(BaseModel):
         return self
 
 
+# 封存标记是只在构造时传入的 InitVar：``dataclasses.replace`` 必须显式给出它，不能连同字段复制。
 _SEAL: Final = object()
 
 
@@ -143,10 +144,10 @@ class GuardedQuery:
     referenced_objects: frozenset[str]
     referenced_columns: frozenset[tuple[str, str]]
     max_returned_rows: int
-    _seal: object = field(default=None, repr=False, compare=False)
+    _seal: InitVar[object] = None
 
-    def __post_init__(self) -> None:
-        if self._seal is not _SEAL:
+    def __post_init__(self, _seal: object) -> None:
+        if _seal is not _SEAL:
             raise TypeError("GuardedQuery 只能由 guard_readonly_query 构造")
 
 
@@ -161,10 +162,10 @@ class ExplainQuery:
     normalized_sql: str
     referenced_objects: frozenset[str]
     referenced_columns: frozenset[tuple[str, str]]
-    _seal: object = field(default=None, repr=False, compare=False)
+    _seal: InitVar[object] = None
 
-    def __post_init__(self) -> None:
-        if self._seal is not _SEAL:
+    def __post_init__(self, _seal: object) -> None:
+        if _seal is not _SEAL:
             raise TypeError("ExplainQuery 只能由 guard_explain_query 构造")
 
 

@@ -480,9 +480,15 @@ class StarRocksAdapter:
             raise StarRocksError(_Code.RESULT_CONTRACT)
         code: StarRocksErrorCode | None = None
         try:
-            # SQL 解析是同步 CPU 工作：放到线程中，计入客户端期限。
-            async with asyncio.timeout(self._target.client_timeout_seconds):
-                rows, over = await asyncio.to_thread(self._listed, candidates.rows, audit.max_rows)
+            # SQL 解析是同步 CPU 工作：放到线程中，另计一个客户端期限（读取候选已用过一个，
+            # 最坏总耗时约为两倍 client_timeout_seconds）。线程逐行核对同一期限，到期即停，
+            # 不在本次调用失败后继续占用 CPU。
+            timeout = self._target.client_timeout_seconds
+            deadline = time.monotonic() + timeout
+            async with asyncio.timeout(timeout):
+                rows, over = await asyncio.to_thread(
+                    self._listed, candidates.rows, audit.max_rows, deadline
+                )
         except TimeoutError:
             code = _Code.TIMEOUT
         except _ResultContractError:
@@ -501,14 +507,19 @@ class StarRocksAdapter:
         )
 
     def _listed(
-        self, candidates: tuple[dict[str, Scalar], ...], max_rows: int
+        self, candidates: tuple[dict[str, Scalar], ...], max_rows: int, deadline: float
     ) -> tuple[list[dict[str, Scalar]], bool]:
-        """按原排序取通过检查的行；返回 (行, 是否因结果字节上限停止)。"""
+        """按原排序取通过检查的行；返回 (行, 是否因结果字节上限停止)。
+
+        ``deadline`` 为 ``time.monotonic()`` 时刻：每行检查前核对，到期抛出 ``TimeoutError``。
+        """
         rows: list[dict[str, Scalar]] = []
         size = 2  # "[]"
         for candidate in candidates:
             if len(rows) == max_rows:
                 break
+            if time.monotonic() >= deadline:
+                raise TimeoutError
             row = _audit_row(candidate)
             if row is None or not _within_scope(row["sql"], self._target.policy):
                 continue
