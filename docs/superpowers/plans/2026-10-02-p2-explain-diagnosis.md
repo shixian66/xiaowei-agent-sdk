@@ -30,7 +30,7 @@
 - **Task 0 选定显式级别并完成零执行反例之前，Task 2–4 不开工。** 锁定版本没有同时满足零执行与已批准披露范围（§7 D1、D5）的显式级别时，按停止条件报告，不放宽披露、不修改目标配置。
 - 诊断轮继续隐藏 `run_readonly_query`，强行调用仍由治理层零 I/O 拒绝；`explain_query` 不改变这一点。优化后的 SQL 只作为建议展示，不会被自动执行。
 - 范围校验与查询完全相同（对象、列、函数、星号、注释、hint、多语句、相关子查询等），在任何连接获取前完成；表与视图都可以查看计划（用户 2026-10-02 决定）。拒绝时不占预算，recording 连接计数为 0。
-- **证据可读性绑定当前数据范围。** 目标、`allowed_objects`、`allowed_columns`、`allowed_functions` 及会改变可读数据的策略（行数与 SQL 长度上限、审计源）进入策略指纹；范围变化后旧证据在模型、Session、历史与重发路径一律 fail closed。不放宽 `_currently_authorized`、不跳过策略检查、不建权限平台或第二套 Session/Evidence。
+- **证据可读性绑定当前数据范围。** 目标、`allowed_objects`、`allowed_columns`、`allowed_functions` 及会改变可读数据的策略（行数、SQL 长度、结果总字节、单值字节、计划行数上限与审计源）进入策略指纹；以新配置启动的运行时对已持久化证据的 Session 回放、历史读取、首次发送和重发一律 fail closed。配置变化前已启动、尚未退出的旧进程按其启动时的范围完成在途轮次（继承的接管残余风险，§6）。不放宽 `_currently_authorized`、不跳过策略检查、不建权限平台或第二套 Session/Evidence。
 - 执行计划视为不可信数据：其中的文字不能指挥 Agent；计划文本只经现有四种投影进入模型、Session 和渠道，不新增原始结果存储。
 - 开放 `explain_query` 等于向获授权者披露该对象的计划信息：估算行数、分区与 tablet 选择、物化视图改写和谓词。视图的计划还可能展开出底表、视图未暴露的列与视图表达式；用户已接受上述披露（用户 2026-10-02 决定）。是否开放由 `access.grants` 与 `data_policy.model_tools` 共同决定，代码不默认开放。
 - 回答契约不变：`clarification` 不能与证据或分析混用。已取得任何可用证据时正常引用并在分析中写明限制，`clarification=None`；完全没有可用证据时才返回纯澄清。
@@ -42,7 +42,7 @@
 1. **零执行：** 任何路径（粘贴 SQL、上一轮 SQL、模型改写的 SQL、带 `EXPLAIN ANALYZE` 前缀的输入）实际发出的语句都必须是 `EXPLAIN <EXPLAIN_LEVEL> ` + 规范化 SELECT/WITH；FE 的 `query_explain_level` 被改为 ANALYZE 时仍不执行（服务端证据）；无法构造出裸 EXPLAIN、ANALYZE/SCHEDULER 级别、多语句或写语句。
 2. **类型隔离：** `ExplainQuery` 不能被 `run_query` 执行，`GuardedQuery` 不能被 `explain` 执行；`ExplainQuery` 只能由 `guard_explain_query` 构造。
 3. **范围与零 I/O：** 越权对象/列/函数、无法解析的 SQL 都在连接获取前拒绝，预算不变。
-4. **证据随范围失效：** 收紧对象、列、函数或相关上限后，旧证据在工具返回、模型投影、Session 回放与写入、历史读取、首次发送和重发全部不可读；范围不变（含仅顺序或大小写规范化不同）时照常可读。
+4. **证据随范围失效：** 收紧对象、列、函数或相关上限并以新配置启动后，已持久化的旧证据在 Session 回放、历史读取、首次发送和重发全部不可读；范围不变（含仅顺序或大小写规范化不同）时照常可读。
 5. **数据边界（StarRocks 运维视角）：** 计划中可能出现估算行数、分区名、物化视图名，以及视图展开后的底表、列和表达式（已批准，§7 D1、D5）；资源组名、排队信息、列 min/max 等真实数据值不在已批准范围内，所选级别若输出这些内容即不合格。
 6. **事实与推断：** 计划文本、执行的语句、采集时间与固定限制说明由代码生成；模型的原因与建议只在“分析建议（模型推断）”区，不得声称已执行或已确认根因；只有审计证据时不得推断执行计划。
 7. **审计数据边界：** 审计查询由代码生成、参数绑定，表名来自可信配置并在启动时校验；过滤条件与代码复核保证不返回其他库、未获准对象或被排除字段；未知指标不伪造成 0；单个超长值不丢弃整行指标。
@@ -87,7 +87,7 @@ Web（选择“诊断”）/ 飞书普通文本或 /诊断
   历史读取、重发、Session 回放：EvidenceStore._readable → _matches_current_policy（含 data_scope）
 ```
 
-所有证据读取都经 `_readable`：`record` 返回前（模型）、`project`（Session 写入与回放，`session.py` 的 `_output`/`_replay_output`）、`validate_answer`（Session 最终回答、`channel.py` 历史读取与首次发送、`runtime.resend` 重发）。Task 1 只改指纹输入，不新增读取路径。
+所有证据读取都经 `_readable`：`record` 返回前（模型）、`project`（Session 写入与回放，`session.py` 的 `_output`/`_replay_output`）、`validate_answer`（Session 最终回答、`channel.py` 历史读取与首次发送、`runtime.resend` 重发）。Task 1 只改指纹输入，不新增读取路径。`ToolCatalog` 在进程启动时装配、运行中不变，同一进程内 `record` 写入与读回使用同一指纹，因此范围失效只在以新配置启动的运行时读取已持久化证据时生效。
 
 慢查询入口：`list_slow_queries(window_minutes, order_by)` → 审计证据（实测耗时、扫描、CPU、内存、排队、状态、digest、SQL 原文与 `sql_status`）→ 模型把 SQL 交给 `explain_query`，并对涉及的表调用 `describe_table_layout` → 回答引用审计证据（实际现象）、计划证据（优化器打算）与布局证据（表设计）。
 
@@ -112,10 +112,11 @@ def data_scope_digest(target: StarRocksTarget) -> str:   # starrocks_tools.py
     """目标的数据范围规范化摘要：集合排序、函数名已大写；与配置书写顺序无关。"""
 ```
 
-- 摘要内容（规范化 JSON 后 sha256）：`target_id`、`default_database`、排序后的 `allowed_objects`、每个对象排序后的 `allowed_columns`、排序后的 `allowed_functions`、`max_rows`、`max_sql_bytes`，以及审计源配置（Task 6 引入后加入；未配置为 `null`）。四个 StarRocks 工具共用同一摘要。
+- 摘要内容（规范化 JSON 后 sha256）：`target_id`、`default_database`、排序后的 `allowed_objects`、每个对象排序后的 `allowed_columns`、排序后的 `allowed_functions`、`max_rows`、`max_sql_bytes`、`max_result_bytes`、`max_value_bytes`（`starrocks.py` `_read` 的单值与总结果上限），Task 3 引入后加入 `max_plan_lines`，Task 6 引入后加入审计源配置（未配置为 `null`）。只决定连接、期限与时区表示的字段不进入。四个 StarRocks 工具共用同一摘要。
+- **生效边界：** 摘要固定在启动时装配的 `ToolPolicy` 中。以新配置启动的运行时读取已持久化证据（Session 回放、历史、首次发送、重发）按新范围失效；配置变化前已启动的旧进程在退出前仍以旧范围完成在途轮次，其写入与读回使用同一旧摘要，结果仍会交给旧 Runner 的模型。这是 P1-B 接管契约的继承残余风险：旧实例失锁后不再接收新请求，但已开始的轮次不被取消。若要求配置收紧立即阻止旧进程返回结果，需要共享的当前策略来源或取消在途轮次，属于接管契约变化，另行决策，不在 Task 1 实现。
 - `_policy_fingerprint` 仅在 `data_scope is not None` 时加入 `"data_scope"` 键：MCP 与其他本地工具的指纹不变。
 - **粒度取舍（AI 决定，可逆）：** 整个目标范围一个摘要，任一变化（含放宽或改动无关对象）都使该目标全部 StarRocks 证据失效。理由：无需 schema 迁移，也不必从计划文本、视图展开或审计记录中可靠提取每条证据依赖的对象；失效只需用户重新查询。复查触发：生产中范围变更频繁到影响使用时，再评估按证据记录依赖对象。
-- **迁移：** 不改 PostgreSQL schema（`policy_fingerprint` 列已存在）。部署本任务后，已有 StarRocks 证据因指纹公式变化统一失效一次；引用它们的会话在回放时按既有规则拒绝继续（`SessionUnavailableError`，提示新建），历史回答与重发按 `answer_rejected` 处理。
+- **迁移：** 不改 PostgreSQL schema（`policy_fingerprint` 列已存在）。部署本任务后，已有 StarRocks 证据因指纹公式变化统一失效一次；Task 3（加入 `max_plan_lines`）与 Task 6（加入审计源）部署时摘要内容再变，已有 StarRocks 证据各再统一失效一次；引用它们的会话在回放时按既有规则拒绝继续（`SessionUnavailableError`，提示新建），历史回答与重发按 `answer_rejected` 处理。
 - 不改 `_currently_authorized`、`StaticAccess.authorize`、会话绑定或读取路径。
 
 ### 2.1 SQLGuard：`ExplainQuery`
@@ -269,7 +270,8 @@ AUDIT_NOTE: Final = (
 | FE `query_explain_level` 被改为 ANALYZE | 服务端 | 显式级别不受影响，仍只取计划（Task 0、Task 3 实证） | 不执行原查询 |
 | 诊断轮强行调用 `run_readonly_query` | 工具集合 + 治理层 | 工具不可见；强行调用固定拒绝 | 连接 0 |
 | 撤权发生在工具展示后 | 治理层 | 固定拒绝 | 连接 0 |
-| 数据范围收紧（对象/列/函数/上限/审计源变化）后读取旧证据 | `_readable` → `_matches_current_policy` | 工具返回前拒绝（`EvidenceUnavailableError` → `tool_failed`）；Session 回放 `SessionUnavailableError`；回答、历史、重发 `answer_rejected` | 不重试 |
+| 以收紧后的配置（对象/列/函数/各项上限/审计源）启动，读取已持久化的旧证据 | `_readable` → `_matches_current_policy` | Session 回放 `SessionUnavailableError`；历史、首次发送、重发 `answer_rejected` | 不重试 |
+| 配置变化前已启动的旧进程完成在途轮次 | 进程内静态 `ToolCatalog` | 按旧范围完成（继承的接管残余风险） | — |
 | 槽位等待超时、连接失败、认证失败、会话限额未生效 | Adapter | `tool_failed`，本轮停止 | 不重试 |
 | 无 SELECT 权限（EXPLAIN 需要） | Adapter | `permission_denied` → `tool_failed` | 不重试 |
 | 服务端/客户端超时、取消、连接中断 | Adapter | 对应错误码；取消照常传播 | 断开，不重试 |
@@ -319,7 +321,7 @@ Task 0（实测）与 Task 1（Evidence 数据范围）互不依赖，可先后�
 
 **Depends on:** 无（基线 `949cb32`）。Task 2 及之后的任务依赖本任务的 reviewed SHA。
 
-**Result:** 真 PostgreSQL 上的 EvidenceStore、PolicySession、ChannelService 与重发路径证明：数据范围收紧后旧证据在全部读取路径 fail closed；范围不变或仅顺序/大小写不同时照常可读；非 StarRocks 工具的指纹不变。
+**Result:** 真 PostgreSQL 上的 EvidenceStore、PolicySession、ChannelService 与重发路径证明：以收紧后的配置重新装配后，已持久化的旧证据在 Session 回放、历史读取、首次发送与重发 fail closed；范围不变或仅顺序/大小写不同时照常可读；非 StarRocks 工具的指纹不变。
 
 **Files:** Modify `src/xiaowei/governance.py`（`ToolPolicy.data_scope`）, `src/xiaowei/evidence.py`（`_policy_fingerprint`）, `src/xiaowei/starrocks_tools.py`（`data_scope_digest` 与策略装配）; Test `tests/sdk_core/test_evidence.py`, `tests/sdk_core/test_starrocks_tools.py`, `tests/sdk_core/test_session_policy.py`, `tests/sdk_core/test_channel_service.py`, `tests/sdk_core/test_runtime.py`.
 
@@ -330,13 +332,13 @@ Task 0（实测）与 Task 1（Evidence 数据范围）互不依赖，可先后�
   - `test_removing_an_allowed_object_invalidates_old_evidence`：移除一个对象（另测移除的是与证据无关的对象，也失效——§2.0 粒度取舍）；`project(model/session)` → `EvidenceUnavailableError`，`validate_answer` → `answer_rejected`。
   - `test_removing_an_allowed_column_or_function_invalidates_old_evidence`：参数化列与函数。
   - `test_scope_narrowing_invalidates_even_when_the_tool_grant_is_kept`：`access.grants` 与契约不变、只收窄范围。
-  - `test_lowering_row_or_sql_limits_invalidates_old_evidence`：`max_rows`、`max_sql_bytes`。
+  - `test_lowering_data_limits_invalidates_old_evidence`：参数化 `max_rows`、`max_sql_bytes`、`max_result_bytes`、`max_value_bytes`，各自单独降低（如 `max_result_bytes` 1000→500、`max_value_bytes` 200→100）后旧证据不可读。
   - `test_non_starrocks_fingerprints_are_unchanged`：MCP 与合成工具在 `data_scope=None` 时指纹与基线公式一致。
-  - 调用链：`test_session_replay_after_scope_narrowing_is_unavailable`（PolicySession 回放 → `SessionUnavailableError`）、`test_session_write_rejects_evidence_invalidated_mid_turn`、`test_history_and_resend_reject_after_scope_narrowing`（ChannelService 历史读取与 `runtime.resend` 均不发送旧事实）、`test_record_rejects_when_scope_changes_before_return`（工具返回前读回失败 → `tool_failed`，结果不交给模型）。
+  - 调用链（均为两次装配：旧配置写入，新配置读取）：`test_session_replay_after_scope_narrowing_is_unavailable`（PolicySession 回放 → `SessionUnavailableError`）、`test_history_and_resend_reject_after_scope_narrowing`（ChannelService 历史读取与 `runtime.resend` 均不发送旧事实）。不写“同一进程内范围在工具返回前或 Session 写入前变化”的用例：生产路径中 Catalog 不会在运行中替换，修改私有 Catalog 得到的是假测试。
 - [ ] 运行上述测试确认失败。
 - [ ] 实现 §2.0：`ToolPolicy.data_scope`；`_policy_fingerprint` 在非 None 时加入；`starrocks_tools` 以 `data_scope_digest(adapter.target)` 装配三个现有策略。不改 `_currently_authorized`、`StaticAccess`、读取路径与 schema。
 - [ ] 运行 `SDK_TEST_POSTGRES_URL=postgresql+asyncpg://postgres@127.0.0.1:55432/postgres uv run --locked --extra dev python -m pytest tests/sdk_core tests/p1b -q -W error`（测试库按 §5 启动，用完 `down -v`）、`-m security`、Ruff、mypy。
-- [ ] 隔离变异至少四项须被发现：指纹不含 `data_scope`；摘要按配置书写顺序（不排序）；摘要漏掉列或函数；`data_scope=None` 时仍写入键（改变非 StarRocks 指纹）。
+- [ ] 隔离变异至少四项须被发现：指纹不含 `data_scope`；摘要按配置书写顺序（不排序）；摘要漏掉列或函数；摘要漏掉 `max_result_bytes` 或 `max_value_bytes`；`data_scope=None` 时仍写入键（改变非 StarRocks 指纹）。
 - [ ] 提交 `fix: bind evidence to the current StarRocks data scope`；独立审查精确 SHA，重点核对全部读取路径与失效粒度。
 
 ### Task 2：SQLGuard 的 `ExplainQuery`
@@ -368,9 +370,9 @@ Task 0（实测）与 Task 1（Evidence 数据范围）互不依赖，可先后�
 
 **Result:** recording 连接与本机可丢弃 StarRocks 分别证明：只发出 `EXPLAIN_PREFIX` + 规范化 SQL；FE 默认级别被改为 ANALYZE 时仍不执行原查询（服务端证据）；读取有界，类型隔离，错误不泄露且不重试。
 
-**Files:** Modify `src/xiaowei/starrocks.py`; Test `tests/p1b/test_starrocks_adapter.py`, `tests/p1b/test_starrocks_real.py`.
+**Files:** Modify `src/xiaowei/starrocks.py`, `src/xiaowei/starrocks_tools.py`（`data_scope_digest` 加入 `max_plan_lines`）; Test `tests/p1b/test_starrocks_adapter.py`, `tests/p1b/test_starrocks_real.py`, `tests/sdk_core/test_starrocks_tools.py`.
 
-**Interfaces:** Consumes `ExplainQuery`. Produces `StarRocksAdapter.explain(query: ExplainQuery) -> QueryResult`、`EXPLAIN_LEVEL`、`EXPLAIN_PREFIX`、`PLAN_COLUMN`、`StarRocksTarget.max_plan_lines`（§2.2）。
+**Interfaces:** Consumes `ExplainQuery`、`data_scope_digest`. Produces `StarRocksAdapter.explain(query: ExplainQuery) -> QueryResult`、`EXPLAIN_LEVEL`、`EXPLAIN_PREFIX`、`PLAN_COLUMN`、`StarRocksTarget.max_plan_lines`（§2.2）。
 
 - [ ] 先写 recording 测试：
   - `test_explain_sends_exactly_the_explicit_level_and_normalized_sql`：会话设置与回读之后，唯一的查询语句等于 `f"EXPLAIN {EXPLAIN_LEVEL} " + normalized_sql`，`EXPLAIN_LEVEL` 等于 Task 0 选定值且属于 `{"LOGICAL", "COSTS", "VERBOSE"}`，`args is None`。
@@ -378,6 +380,7 @@ Task 0（实测）与 Task 1（Evidence 数据范围）互不依赖，可先后�
   - `test_explain_and_run_query_reject_each_others_products`：`explain(GuardedQuery)`、`run_query(ExplainQuery)` → `TypeError`，连接 0。
   - `test_explain_result_is_renamed_to_a_single_plan_column`；`test_explain_rejects_multi_column_or_non_text_plans`（→ `result_contract`，连接断开）。
   - `test_explain_truncates_at_max_plan_lines_and_bytes`（行数、总字节、单值三种上限各一例，均断开不 QUIT）。
+  - `test_data_scope_digest_includes_max_plan_lines`：仅降低 `max_plan_lines` 时摘要改变（以新配置装配后旧证据不可读的端到端用例在 Task 4 计划证据上验证）。
   - `test_explain_errors_map_like_queries`：权限、服务端超时、连接中断、客户端期限、取消；错误无原因链、无 SQL。
 - [ ] 实现 `explain` 与配置字段；不改 `_run` 的既有行为。
 - [ ] 在 `test_starrocks_real.py` 增加（真实只读账号）：表、视图、CTE 的 EXPLAIN 成功；无 SELECT 权限 → `permission_denied`；`query_timeout`、`query_mem_limit` 生效时 EXPLAIN 正常；计划截断；`test_explicit_level_does_not_execute_when_fe_default_is_analyze`：管理账号把 `query_explain_level` 设为 ANALYZE，Adapter 对执行期必失败/必超时的查询取得计划，且无执行期错误、无新 Profile、审计（若装有 AuditLoader）不显示扫描；同一 fixture 中裸 `EXPLAIN` 的阳性对照确实执行；`finally` 恢复配置并回读；用后无残留合成库。运行 `SDK_TEST_STARROCKS_ADMIN_URL=mysql://root@127.0.0.1:59030 uv run --locked --extra dev python -m pytest tests/p1b/test_starrocks_real.py -m starrocks_real -q`。
@@ -400,7 +403,7 @@ Task 0（实测）与 Task 1（Evidence 数据范围）互不依赖，可先后�
   - `test_rejected_explain_uses_no_budget_and_no_connection`：越权列与越权对象各一例；预算上限为 1 时随后的合法 explain 仍能执行。
   - `test_previous_turn_sql_can_be_explained_in_the_next_turn`：第一轮 query 模式执行查询；第二轮 diagnose 模式下脚本化模型使用回放中的实际 SQL 调 `explain_query`；查询只执行过一次；回答可同时引用上一轮查询证据与本轮计划证据。
   - `test_fact_note_is_rendered_from_the_current_policy_not_the_record`：Web `DeliveryFact.note` 与飞书文本都含说明；`run_readonly_query` 证据没有说明；`fact_note` 变化不改变策略指纹。
-  - `test_explain_evidence_is_invalidated_by_scope_narrowing`：Task 1 的失效规则同样覆盖计划证据。
+  - `test_explain_evidence_is_invalidated_by_scope_narrowing`：以收窄对象或降低 `max_plan_lines` 的配置重新装配后，计划证据在回放、历史与重发中不可读。
   - `test_facts_header_is_neutral`：标题为“工具结果（系统根据证据生成）”。
   - `test_worst_case_capacity_includes_the_explain_prefix`：`max_sql_bytes` 恰好用满时合法 explain 不触发 `result_contract`；容量不足时装配失败。
   - Web/飞书渲染：计划行中的 `|`、换行与控制字符被转义，不能伪造段落；`static/app.js` 只以 `textContent` 显示 `note`。
@@ -505,7 +508,8 @@ Task 1、4、8 运行完整离线回归；Task 2、3、5、6、7 按改动运行
 ## 6. 兼容、回退与恢复
 
 - 不改 PostgreSQL schema（仍为 v3），不需要 `storage upgrade`；回退代码不需要恢复数据库。
-- Task 1 改变 StarRocks 工具的策略指纹：部署后已有 StarRocks 证据统一失效一次，此后任一数据范围变化（含放宽）都使该目标的全部 StarRocks 证据失效；引用它们的会话提示新建，历史回答与重发不再发送旧事实。MCP 与其他工具的指纹不变。回退到旧代码后，新指纹的证据同样不可读（fail closed）。
+- Task 1 改变 StarRocks 工具的策略指纹：部署后已有 StarRocks 证据统一失效一次（Task 3、Task 6 扩充摘要时各再一次），此后任一数据范围变化（含放宽）都使该目标的全部 StarRocks 证据失效；引用它们的会话提示新建，历史回答与重发不再发送旧事实。MCP 与其他工具的指纹不变。回退到旧代码后，新指纹的证据同样不可读（fail closed）。
+- **继承的接管残余风险：** 配置收紧后，以新配置启动的进程不再读出旧证据；但配置变化前已启动、尚未退出的旧进程会按旧范围完成在途轮次，结果仍交给它的模型并可能写入 Session/回答。持久化后的这些证据在新运行时读取时同样失效。复查触发：需要配置收紧即时生效时，单独决策共享当前策略来源或取消在途轮次（改变 P1-B 接管契约）。
 - 新增配置字段都有安全默认值（`max_plan_lines=500`、`audit` 未配置即无慢查询工具）：未开放 `explain_query` 的现有配置照常启动，行为只差事实区标题。
 - 开放 `explain_query` 会改变 `model_tools`，已有会话按既有绑定规则拒绝继续，用户新建会话即可。
 - 最坏情况 SQL 上限增加 `len(EXPLAIN_PREFIX)` 字节，容量刚好卡在边界的现有配置会在启动时报容量不足，需要调大对应投影上限。
@@ -530,7 +534,7 @@ P3 的目标 StarRocks 版本可能不是 4.1.4：计划文本按行原样作为
 
 - [x] 没有把 Query Profile、写操作、自动执行优化 SQL、Compose 部署或新 Agent 带入 P2 本文；审计表只读，不安装或修改目标配置（可丢弃实例内的临时配置修改仅用于反例并恢复）。
 - [x] 不再承诺“固定 `EXPLAIN ` 前缀即零执行”；执行语句只能是代码常量显式级别前缀加 SQLGuard 产物，裸 EXPLAIN、ANALYZE、SCHEDULER 没有构造路径；零执行以 FE 默认级别为 ANALYZE 的服务端反例证明；选型完成前 Task 2–4 不开工。
-- [x] 证据可读性绑定当前数据范围，覆盖工具返回、模型投影、Session 写入与回放、历史读取、首次发送和重发；有成功对照与收窄反例；不放宽 `_currently_authorized`，无 schema 迁移，失效影响已写明。
+- [x] 证据可读性绑定当前数据范围（含结果总字节、单值字节与计划行数上限），覆盖以新配置启动后的 Session 回放、历史读取、首次发送和重发；旧进程在途轮次列为继承的接管残余风险，不做无法由生产路径证明的承诺；有成功对照与收窄反例；不放宽 `_currently_authorized`，无 schema 迁移，失效影响已写明。
 - [x] 只有审计证据时正常引用并写明限制，`clarification=None`；纯澄清只用于无任何证据；混用仍被拒绝；`judge_diagnosis` 不要求所有结论都有计划证据。
 - [x] 审计记录只取本目标库、获准对象，排除用户与网络字段；时区、未知指标、CPU 换算、上游截断与单值上限都有确定行为与测试。
 - [x] 审计源未配置的降级在装配层成立；运行期失败为 `tool_failed` 且不重试，不以提示词假装降级。
