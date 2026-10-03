@@ -21,9 +21,11 @@
    存在时判为歧义。与输出别名同名的未限定列按 StarRocks 各子句的规则区分列与别名（见
    ``_bind_shadowed``）；CTE 与派生表的输出名保持原写法。
 4. 用 sqlglot ``qualify`` 按“只含被引用对象”的 schema 完整限定所有列、按快照列序展开星号，解析
-   失败即列不在范围内；再逐 scope 复核物理列归属（相关子查询沿外层 scope 查找）。ORDER BY 中的
-   输出别名替换为别名所指表达式，UNION 的排序名换为位置，执行的 SQL 中不留任何需要由数据库再
-   解析的未限定名。依赖是全部 scope（每个 UNION 分支、子查询、窗口与各子句）中的物理对象与列。
+   失败即列不在范围内；再逐 scope 复核物理列归属（相关子查询沿外层 scope 查找）。UNION 的排序名
+   换为位置。执行的 SQL 中唯一保留的未限定名是 SELECT 的 ORDER BY 对本层输出名的引用：数据库按
+   投影、分组与窗口决定它指向输出列还是同名物理列，原样保留才能得到与原文相同的绑定（内联输出
+   表达式会改变排序，内联标量子查询会被拒绝）；两种可能的列都计入依赖。依赖是全部 scope（每个
+   UNION 分支、子查询、窗口与各子句）中的物理对象与列。
 5. 查询：顶层 LIMIT 缺失或超过 ``max_rows`` 时改为 ``max_rows + 1``（供 Adapter 判定截断；UNION 的
    LIMIT 作用于整个集合）；执行计划：LIMIT 保持原样，因为 EXPLAIN 不返回数据行，改写会改变被解释
    的计划。再生成规范化 SQL；展开后的规范化结果也要满足长度上限，且再过一次同一函数结果不变。
@@ -525,7 +527,9 @@ def _bind_columns(root: exp.Query, policy: QueryPolicy) -> None:
             if _clause(column, scope.expression) == "order" and (
                 outputs := _outputs_named(scope.expression, column.name)
             ):
-                if _bind_order_output(column, scope, outputs, names):
+                if _bind_order_output(column, outputs):
+                    if column.table:
+                        _bind_qualified(column, scope, names)
                     continue
             shadowing = shadows.get(column.name.casefold())
             providers = [(n, s) for n, s in sources.items() if names.provides(s, column.name)]
@@ -571,45 +575,30 @@ def _outputs_named(select: exp.Expr, name: str) -> list[exp.Expr]:
     ]
 
 
-def _bind_order_output(
-    column: exp.Column, scope: Scope, outputs: list[exp.Expr], names: _Names
-) -> bool:
-    """ORDER BY 中与输出名同名的未限定名，按 StarRocks 4.1.4 实测规则绑定到该输出列。
+def _bind_order_output(column: exp.Column, outputs: list[exp.Expr]) -> bool:
+    """ORDER BY 中与本层输出名同名的未限定名：保留为对该输出名的引用，交给数据库绑定。
 
-    - 输出名唯一时按输出列排序，与是否有同名物理列、有几个无关；多个同名输出数据库报歧义。
-    - 例外：该输出本身是列 ``r.c``（括号不计）时，数据库把排序名当作 ``r.x`` 再与投影匹配；投影
-      另有来自同一来源的列 ``r.x``（括号、限定写法不计）时改按那一列排序（``SELECT a AS x, x
-      AS x2 ... ORDER BY x``）。这种交叉别名拒绝；来源不同（``t.a AS x, u.x AS ux``）或输出是
-      表达式（``a + 0 AS x``）时仍按输出列。来源无法唯一确定时同样拒绝，不猜。
+    StarRocks 4.1.4 的排序名先在输出名中解析，再按投影、分组与窗口中出现的列映射：可能落到输出
+    列，也可能落到同名物理列（``SELECT a AS x, x AS x2 ... ORDER BY x`` 按物理列 ``x``）。规范化
+    只限定其余部分、不改变这些结构，所以原样保留引用即得到与原文相同的绑定；依赖由
+    ``_order_output_columns`` 计入两种可能。多个同名输出时数据库报歧义，这里同样拒绝。
 
-    显式或补写的别名：名字改写为别名的写法，交给 ``qualify`` 按别名内联；未补写别名的限定裸列
-    （标量、IN、EXISTS 子查询中）改写为同一列。未限定的裸列与排序名同名，返回 ``False`` 交给
-    常规的来源绑定。
+    显式或补写的别名：名字改写为别名的写法（``qualify`` 视为别名引用，不再解析）。未补写别名的
+    裸列（标量、IN、EXISTS 子查询中）与排序名指向同一列：限定的改写为同一列，未限定的返回
+    ``False`` 交给常规的来源绑定。
     """
     if len(outputs) != 1:
         _reject(_Code.AMBIGUOUS_REFERENCE)
     (output,) = outputs
-    target = _unparen(output.this if isinstance(output, exp.Alias) else output)
-    if isinstance(target, exp.Column) and _is_named_column(target):
-        source = _column_source(target, scope, names)
-        folded = column.name.casefold()
-        for projection in scope.expression.expressions:
-            other = _unparen(projection.this if isinstance(projection, exp.Alias) else projection)
-            if projection is output or not isinstance(other, exp.Column):
-                continue
-            if _is_named_column(other) and other.name.casefold() == folded:
-                found = _column_source(other, scope, names)
-                if source is None or found is None or found is source:
-                    _reject(_Code.AMBIGUOUS_REFERENCE)
     if isinstance(output, exp.Alias):
         column.set("this", exp.to_identifier(output.alias, quoted=True))
         return True
+    target = _unparen(output)
     if not isinstance(target, exp.Column) or not target.table:
         return False
     for part in ("this", "table", "db"):
         if target.args.get(part) is not None:
             column.set(part, target.args[part].copy())
-    _bind_qualified(column, scope, names)
     return True
 
 
@@ -621,14 +610,6 @@ def _unparen(node: exp.Expr) -> exp.Expr:
 
 def _is_named_column(node: exp.Expr) -> bool:
     return isinstance(node, exp.Column) and not isinstance(node.this, exp.Star)
-
-
-def _column_source(column: exp.Column, scope: Scope, names: _Names) -> exp.Table | Scope | None:
-    """投影列的来源：限定列按表名查找；未限定列取本层唯一提供该列的来源，否则未知。"""
-    if column.table:
-        return _lookup(scope, column.table)
-    found = [s for _, s in _sources(scope) if names.provides(s, column.name)]
-    return found[0] if len(found) == 1 else None
 
 
 def _bind_shadowed(
@@ -798,13 +779,23 @@ def _qualify(root: exp.Query, policy: QueryPolicy) -> exp.Query:
     # qualify 会把 ORDER BY 序号换为输出名；重名时会丢失位置。保留每个 SELECT/UNION 的原序号，
     # 在它完成列限定后恢复。不能提前复制投影：未限定列可能被同名输出别名再次解释，
     # 常量投影也可能被误作新序号。Ordered 节点及方向由锁定版本原地保留。
+    # 有 GROUP BY 时，qualify 还会把与某个投影表达式相同的排序项改写为该投影的别名
+    # （``SELECT id AS region ... GROUP BY id, region ORDER BY region, id`` 的 ``id`` 变成
+    # ``region``），而别名在 StarRocks 的排序绑定可能指向同名物理列。先用括号隔开排序项（括号内的
+    # 输出名引用与列限定不受影响），完成后去掉括号，排序项保持原文。
     ordinals: list[tuple[exp.Query, exp.Ordered, exp.Literal]] = []
+    shielded: list[exp.Ordered] = []
     for query in root.find_all(exp.Select, exp.Union):
         order = query.args.get("order")
         for ordered in order.expressions if isinstance(order, exp.Order) else ():
             value = ordered.this
-            if isinstance(ordered, exp.Ordered) and isinstance(value, exp.Literal) and value.is_int:
+            if not isinstance(ordered, exp.Ordered):
+                continue
+            if isinstance(value, exp.Literal) and value.is_int:
                 ordinals.append((query, ordered, value.copy()))
+            elif query.args.get("group"):
+                ordered.set("this", exp.Paren(this=value))
+                shielded.append(ordered)
     schema: dict[str, object] = {}
     for table in root.find_all(exp.Table):
         database = table.text("db")
@@ -823,6 +814,11 @@ def _qualify(root: exp.Query, policy: QueryPolicy) -> exp.Query:
         _Code.COLUMN_NOT_ALLOWED,
     )
     qualified = _query_root(qualified)
+    for ordered in shielded:
+        shield = ordered.this
+        if not isinstance(shield, exp.Paren):
+            _reject(_Code.UNSUPPORTED_SYNTAX)  # 锁定版本应原地保留括号；不符时不猜
+        ordered.set("this", shield.this)
     for query, ordered, ordinal in ordinals:
         if not 1 <= int(ordinal.name) <= len(query.named_selects):
             _reject(_Code.COLUMN_NOT_ALLOWED)
@@ -845,6 +841,7 @@ def _order_unions(root: exp.Query) -> None:
             value = ordered.this
             if isinstance(value, exp.Literal) and value.is_int:
                 continue  # 序号已在 _qualify 中核对范围
+            value = _unparen(value)  # (x) 仍是名字；(1) 是常量，不是序号，不在此剥除
             if not isinstance(value, exp.Column) or value.table:
                 _reject(_Code.UNSUPPORTED_SYNTAX)
             positions = [i for i, name in enumerate(names, 1) if name == value.name.casefold()]
@@ -865,7 +862,7 @@ def _resolve_columns(root: exp.Query, policy: QueryPolicy) -> tuple[_Objects, _C
                 objects.add((source.text("db"), source.name))
         for column in _own_columns(scope):
             if not column.table:
-                _inline_alias_reference(column, scope)
+                columns |= _order_output_columns(column, scope, policy)
                 continue
             owner = _lookup(scope, column.table)
             if isinstance(owner, exp.Table):
@@ -890,26 +887,33 @@ def _check_derived(source: Scope, name: str) -> None:
         _reject(_Code.AMBIGUOUS_REFERENCE)
 
 
-def _inline_alias_reference(column: exp.Column, scope: Scope) -> None:
-    """``ORDER BY`` 中的输出别名替换为别名所指表达式。
+def _order_output_columns(
+    column: exp.Column, scope: Scope, policy: QueryPolicy
+) -> set[tuple[str, str, str]]:
+    """``qualify`` 后仍未限定的名字只能是 SELECT 的 ORDER BY 对本层唯一输出别名的引用（原样执行）。
 
-    数据库对未限定名的解析顺序因子句而异（WHERE/GROUP BY 可能优先匹配同名物理列），
-    因此执行的 SQL 中不保留任何未限定列；ORDER BY 以外的未限定名直接拒绝。
+    数据库可能把它绑定到输出表达式（其列已计入依赖），也可能绑定到本层来源中的同名物理列：后者
+    属于本层可读对象，一并计入依赖。CTE/派生表来源的同名列由其内层 scope 计入。``qualify`` 不校验
+    HAVING/ORDER BY 中的未限定名，其余位置的未限定名在这里拒绝。
     """
     select = scope.expression
-    aliased = [
-        p.this
+    outputs = [
+        p
         for p in (select.expressions if isinstance(select, exp.Select) else ())
         if isinstance(p, exp.Alias) and p.alias == column.name
     ]
-    if not aliased:
-        _reject(_Code.COLUMN_NOT_ALLOWED)  # qualify 不校验 HAVING/ORDER BY 中的未限定名
-    if len(aliased) != 1:
+    if not outputs:
+        _reject(_Code.COLUMN_NOT_ALLOWED)
+    if len(outputs) != 1 or _clause(column, select) != "order":
         _reject(_Code.AMBIGUOUS_REFERENCE)
-    order = column.find_ancestor(exp.Order, exp.Select)
-    if order is None or order.parent is not select:
-        _reject(_Code.AMBIGUOUS_REFERENCE)
-    column.replace(aliased[0].copy())
+    folded = column.name.casefold()
+    return {
+        (source.text("db"), source.name, name)
+        for _, source in _sources(scope)
+        if isinstance(source, exp.Table)
+        for name in _table_columns(source, policy)
+        if name.casefold() == folded
+    }
 
 
 # ---- 5. LIMIT --------------------------------------------------------------------------------

@@ -71,7 +71,7 @@ def test_single_table_query_is_fully_qualified_and_keeps_a_smaller_limit() -> No
         "SELECT `sales`.`region` AS `region`, SUM(`sales`.`total`) AS `s` "
         "FROM `shop`.`sales` AS `sales` WHERE `sales`.`dt` >= '2026-01-01' "
         "GROUP BY `sales`.`region` HAVING SUM(`sales`.`total`) > 1 "
-        "ORDER BY SUM(`sales`.`total`) DESC LIMIT 5"
+        "ORDER BY `s` DESC LIMIT 5"
     )
     assert query.target_id == "sr-test"
     assert query.referenced_objects == frozenset({("shop", "sales")})
@@ -154,9 +154,16 @@ def test_allowed_queries(sql: str, objects: set[str], columns: set[tuple[str, st
 
 
 def assert_every_column_is_qualified(query: GuardedQuery) -> None:
-    """执行的 SQL 不留任何需要数据库再解析的未限定列名。"""
+    """执行的 SQL 只有 ORDER BY 对本层输出别名的引用不限定（交给数据库按原文绑定）。"""
     tree = sqlglot.parse_one(query.normalized_sql, read="starrocks")
-    assert all(column.table for column in tree.find_all(exp.Column))
+    for column in tree.find_all(exp.Column):
+        if column.table:
+            continue
+        order = column.find_ancestor(exp.Order, exp.Select)
+        assert isinstance(order, exp.Order) and isinstance(order.parent, exp.Select)
+        assert column.name in {
+            p.alias for p in order.parent.expressions if isinstance(p, exp.Alias)
+        }
 
 
 @pytest.mark.parametrize(
@@ -320,13 +327,13 @@ def test_output_alias_outside_order_by_is_never_left_for_the_database(sql: str) 
         assert_every_column_is_qualified(query)
 
 
-def test_order_by_alias_is_inlined_as_the_aliased_expression() -> None:
+def test_order_by_alias_is_kept_as_an_output_reference() -> None:
+    """ORDER BY 的输出别名原样保留，由数据库按原文规则绑定；不在范围内的同名列不进入依赖。"""
     query = guard(
         "SELECT region AS secret, SUM(total) AS s FROM sales GROUP BY region ORDER BY s, secret"
     )
-    assert query.normalized_sql.split(" ORDER BY ", 1)[1] == (
-        f"SUM(`sales`.`total`), `sales`.`region` LIMIT {CAP}"
-    )
+    assert query.normalized_sql.split(" ORDER BY ", 1)[1] == f"`s`, `secret` LIMIT {CAP}"
+    assert query.referenced_columns == {("shop", "sales", "region"), ("shop", "sales", "total")}
 
 
 def test_unqualified_column_present_in_two_sources_is_ambiguous() -> None:

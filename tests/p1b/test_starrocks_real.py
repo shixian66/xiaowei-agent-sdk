@@ -36,7 +36,12 @@ from tests.sdk_core.postgres_harness import (
 from tests.sdk_core.synthetic_tools import Clock, Grants, ready_engine
 
 from xiaowei.evidence import EvidenceStore
-from xiaowei.governance import GovernedTools, ToolCatalog, ToolRejectedError
+from xiaowei.governance import (
+    GovernedTools,
+    ToolCatalog,
+    ToolExecutionError,
+    ToolRejectedError,
+)
 from xiaowei.models import AgentAnswer, AnswerInference, Budget, Identity, RunContext, ToolRequest
 from xiaowei.sqlguard import (
     QueryPolicy,
@@ -64,6 +69,7 @@ from xiaowei.starrocks_schema import (
 )
 from xiaowei.starrocks_tools import (
     DESCRIBE_TABLE,
+    EXPLAIN_QUERY,
     LAYOUT_TOOL,
     LIST_TABLES,
     QUERY_TOOLS,
@@ -627,6 +633,23 @@ R3_NAME_SAMPLES = {
     "ON a.id = b.id ORDER BY region DESC LIMIT 3",
     "order expression output": "SELECT id + 0 AS region, (region) AS r2 FROM sales "
     "ORDER BY region LIMIT 3",
+    # 排序名在投影表达式、分组与窗口中出现：服务器按物理列 region 排序（复审 N1，原先被改写为
+    # 按别名 id 排序后执行）；标量子查询别名（复审 N2，原先内联后被服务器拒绝）；同一 CTE 的两个
+    # 关系别名（原先误拒）。
+    "order expression match": "SELECT id AS region, TRIM(region) AS r2 FROM sales "
+    "ORDER BY TRIM(region), id LIMIT 3",
+    "order group match": "SELECT id AS region, COUNT(*) AS n FROM sales GROUP BY id, region "
+    "ORDER BY region, id LIMIT 3",
+    "order window match": "SELECT id, id AS region, ROW_NUMBER() OVER (PARTITION BY day "
+    "ORDER BY region) AS n FROM sales ORDER BY region, id LIMIT 3",
+    "order scalar correlated": "SELECT s.id, (SELECT MAX(b.amount) FROM {h}.bonus b "
+    "WHERE b.bid = s.id) AS z FROM sales s ORDER BY z DESC, s.id LIMIT 3",
+    "order scalar plain": "SELECT s.id, (SELECT COUNT(*) FROM {h}.bonus) AS z FROM sales s "
+    "ORDER BY z, s.id LIMIT 2",
+    "order scalar wrapped": "SELECT s.id, COALESCE((SELECT MAX(b.amount) FROM {h}.bonus b "
+    "WHERE b.bid = s.id), 0) AS z FROM sales s ORDER BY z + 0 DESC, s.id LIMIT 3",
+    "order cte self join": "WITH c AS (SELECT * FROM sales) SELECT a.id AS region, "
+    "b.region AS br FROM c a JOIN c b ON a.id = b.id ORDER BY region, a.id LIMIT 3",
     # 相关子查询：本层没有 id、WHERE 看不到本层别名，id 是外层 s.id（只匹配 bonus 中的 1、2、5）。
     "correlated outer": "SELECT s.id FROM sales s WHERE EXISTS "
     "(SELECT b.bid AS id FROM {h}.bonus b WHERE id = b.bid) ORDER BY 1",
@@ -696,7 +719,7 @@ async def test_r3_names_resolve_like_the_server(instance: Instance) -> None:
                     check(sql, scope)
                 assert refused.value.code is code, name
         # 交叉别名：输出是列、投影另有同一来源的同名列（括号、限定写法不计）时，服务器改按那一列
-        # 排序，与按别名排序截取的行不同；不猜，拒绝。
+        # 排序，与按别名排序截取的行不同。排序名原样保留，规范化后的结果与原文一致。
         for crossed, by_alias in (
             ("SELECT id AS region, region AS id FROM sales ORDER BY id", None),
             ("SELECT id AS total, total AS t2 FROM sales ORDER BY total", None),
@@ -719,10 +742,21 @@ async def test_r3_names_resolve_like_the_server(instance: Instance) -> None:
             assert server[1]
             if by_alias is not None:
                 assert server != await readonly_result(instance, by_alias), crossed
-            for check in (guard_readonly_query, guard_explain_query):
-                with pytest.raises(QueryRejectedError) as refused:
-                    check(crossed, scope)
-                assert refused.value.code is QueryRejectionCode.AMBIGUOUS_REFERENCE
+            normalized = guard_readonly_query(crossed, scope).normalized_sql
+            assert await readonly_result(instance, normalized) == server, crossed
+            plan = await ada.explain(guard_explain_query(crossed, scope))
+            expected = await readonly_rows(instance, "EXPLAIN LOGICAL " + crossed)
+            assert [row["plan"] for row in plan.rows] == [row[0] for row in expected], crossed
+        # 原文在服务器报错（排序名指向未分组的列）：规范化后同样报错，不被改写成功执行。
+        invalid = "SELECT id AS total, SUM(total) AS s FROM sales GROUP BY id ORDER BY total"
+        with pytest.raises(MySQLError):
+            await readonly_result(instance, invalid)
+        with pytest.raises(MySQLError):
+            await readonly_result(instance, guard_readonly_query(invalid, scope).normalized_sql)
+        with pytest.raises(MySQLError):
+            await readonly_rows(
+                instance, "EXPLAIN LOGICAL " + guard_explain_query(invalid, scope).normalized_sql
+            )
         # 相关子查询的依赖记入外层列。
         correlated = R3_NAME_SAMPLES["correlated outer"].format(h=hr)
         assert (instance.database, "sales", "id") in guard_readonly_query(
@@ -730,6 +764,124 @@ async def test_r3_names_resolve_like_the_server(instance: Instance) -> None:
         ).referenced_columns
     finally:
         await admin(host, port, user, f"DROP DATABASE {hr} FORCE")
+
+
+# ORDER BY 绑定的产品路径：数据使排序名指向别名与指向同名物理列时取到不同的行（复审 N1/N2）。
+ORDER_FACTS = {
+    "expression": "SELECT t.a AS x, t.x + 0 AS xx FROM {o}.t t ORDER BY x + 0, t.id LIMIT 1",
+    "group": "SELECT t.a AS x, COUNT(*) AS n FROM {o}.t t GROUP BY t.a, t.x ORDER BY x LIMIT 1",
+    "group order term": "SELECT t.a AS x, COUNT(*) AS n FROM {o}.t t GROUP BY t.a, t.x "
+    "ORDER BY t.x DESC, t.a LIMIT 1",
+    "window": "SELECT t.id, t.a AS x, ROW_NUMBER() OVER (PARTITION BY t.g ORDER BY t.x) AS n "
+    "FROM {o}.t t ORDER BY x, t.id LIMIT 1",
+    "crossed": "SELECT t.a AS x, (t.x) AS xx FROM {o}.t t ORDER BY x LIMIT 1",
+    "scalar": "SELECT t.id, (SELECT MAX(u.a) FROM {o}.u u WHERE u.id = t.id) AS z FROM {o}.t t "
+    "ORDER BY z, t.id LIMIT 1",
+    "scalar expression": "SELECT t.id, COALESCE((SELECT MAX(u.a) FROM {o}.u u "
+    "WHERE u.id = t.id), 0) AS z FROM {o}.t t ORDER BY z + 0 DESC, t.id LIMIT 1",
+    "cte self join": "WITH c AS (SELECT * FROM {o}.t) SELECT a.a AS x, b.x AS xx "
+    "FROM c a JOIN c b ON a.id = b.id ORDER BY x, a.id LIMIT 1",
+    "unique control": "SELECT t.a AS ax, t.x + 0 AS xx FROM {o}.t t ORDER BY ax, t.id LIMIT 1",
+}
+
+
+async def test_order_by_facts_keep_the_original_binding(instance: Instance) -> None:
+    """治理 → SQLGuard → 真实驱动 → 证据（真实 PostgreSQL）→ 最终事实：查询的行与原文一致，
+    计划与原文的 EXPLAIN LOGICAL 一致；原文报错的排序引用在两条路径都报错，不产生事实。"""
+    raw = os.environ.get("SDK_TEST_POSTGRES_URL")
+    if not raw:
+        pytest.fail("SDK_TEST_POSTGRES_URL 未设置：端到端用例需要测试 PostgreSQL 保存证据")
+    host, port, user = admin_address()
+    ob = f"{instance.database}_ob"
+    table = "DUPLICATE KEY(id) DISTRIBUTED BY HASH(id) BUCKETS 1 PROPERTIES('replication_num'='1')"
+    await admin(
+        host,
+        port,
+        user,
+        f"CREATE DATABASE {ob}",
+        f"CREATE TABLE {ob}.t (id INT, a INT, x INT, g INT) {table}",
+        f"CREATE TABLE {ob}.u (id INT, a INT, x INT, g INT) {table}",
+        f"INSERT INTO {ob}.t VALUES (1, 3, 10, 1), (2, 1, 30, 1), (3, 2, 20, 2)",
+        f"INSERT INTO {ob}.u VALUES (1, 30, 3, 1), (2, 10, 1, 2), (3, 20, 2, 2)",
+        f"GRANT SELECT ON ALL TABLES IN DATABASE {ob} TO USER '{instance.ro_user}'@'%'",
+    )
+    try:
+        policy = SqlPolicy(
+            allowed_functions=R3_FUNCTIONS, max_rows=50, max_sql_bytes=4000, max_result_columns=12
+        )
+        ada = adapter(instance, policy=policy)
+        schema = SchemaCache(ada, clock=lambda: datetime.now(UTC))
+        assert await schema.refresh()
+        tools = starrocks_tools(
+            ada, dict.fromkeys(("model", "session", "web", "feishu"), 200_000), schema=schema
+        )
+        grants = Grants()
+        grants.grant("alice", *QUERY_TOOLS, target="sr-real")
+        async with isolated_database() as url, ready_engine(url) as engine:
+            evidence = EvidenceStore(
+                engine,
+                ToolCatalog(tools.contracts, tools.policies),
+                authorize=grants,
+                clock=Clock(datetime.now(UTC)),
+                retention_seconds=600,
+                verify_dependencies=DependencyCheck({"sr-real": ada}),
+            )
+            governed = GovernedTools(evidence)
+            calls = 0
+
+            async def deliver(tool_id: str, sql: str) -> Any:
+                nonlocal calls
+                calls += 1
+                ctx = RunContext(
+                    identity=Identity(
+                        subject_id="alice", session_id=f"s{calls}", turn_id="t1", channel="web"
+                    ),
+                    target_scope=frozenset({"sr-real"}),
+                    tool_scope=QUERY_TOOLS,
+                    budget=Budget(max_turns=4, max_tool_calls=2, timeout_seconds=30.0),
+                )
+                request = ToolRequest(
+                    tool_id=tool_id,
+                    target_id="sr-real",
+                    call_id=secrets.token_hex(4),
+                    tool_name=tool_id.split("/")[1],
+                    arguments={"cluster": "sr-real", "sql": sql},
+                )
+                result = await governed.invoke(ctx, request, tools.executes[(tool_id, "sr-real")])
+                answer = AgentAnswer(
+                    evidence_ids=(result.evidence_id,),
+                    inferences=[
+                        AnswerInference(text="合成数据", evidence_ids=(result.evidence_id,))
+                    ],
+                    clarification=None,
+                )
+                (fact,) = (await evidence.validate_answer(answer, ctx)).facts
+                return fact
+
+            for name, template in ORDER_FACTS.items():
+                sql = template.format(o=ob)
+                headers, rows = await readonly_result(instance, sql)
+                assert rows, name
+                fact = await deliver(RUN_QUERY, sql)
+                assert list(fact.columns) == headers, name
+                assert [tuple(row.values()) for row in fact.rows] == rows, name
+                plan = await deliver(EXPLAIN_QUERY, sql)
+                expected = await readonly_rows(instance, "EXPLAIN LOGICAL " + sql)
+                assert [row["plan"] for row in plan.rows] == [row[0] for row in expected], name
+            # 排序数据确实能区分两种绑定：按别名排序会取到另一行。
+            by_alias = f"SELECT t.a AS x, t.x + 0 AS xx FROM {ob}.t t ORDER BY t.a, t.id LIMIT 1"
+            assert (await readonly_result(instance, by_alias))[1] != (
+                await readonly_result(instance, ORDER_FACTS["expression"].format(o=ob))
+            )[1]
+            # 原文报错（排序名指向未分组的 t.x）：两条路径都在数据库报错，不被改写成功。
+            invalid = f"SELECT t.a AS x, SUM(t.x) AS n FROM {ob}.t t GROUP BY t.a ORDER BY x"
+            with pytest.raises(MySQLError):
+                await readonly_result(instance, invalid)
+            for tool_id in (RUN_QUERY, EXPLAIN_QUERY):
+                with pytest.raises(ToolExecutionError):
+                    await deliver(tool_id, invalid)
+    finally:
+        await admin(host, port, user, f"DROP DATABASE {ob} FORCE")
 
 
 async def test_sql_mode_is_pinned_when_server_default_changes(instance: Instance) -> None:

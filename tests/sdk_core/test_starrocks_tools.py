@@ -666,15 +666,17 @@ async def test_ambiguous_correlated_name_goes_back_to_the_model_before_any_io(cr
     assert executed_sql(cross.drv) == []
 
 
-async def test_crossed_order_alias_goes_back_to_the_model_before_any_io(cross: Env) -> None:
-    """ORDER BY 的别名指向列、投影另有同一来源的同名列（括号不计）：StarRocks 改按那一列排序，
-    拒绝且不发送；隐式输出名唯一时（两个来源都有 region）按该输出排序并执行。"""
+async def test_order_by_output_reference_is_sent_as_written(cross: Env) -> None:
+    """ORDER BY 中的输出名引用原样交给数据库绑定（不内联别名表达式）；子查询中两个同名输出时
+    数据库会报歧义，退回模型且不发送。"""
     message = cross.scripts.add(
         "按地区排序看看",
         tool_call(
             "run_readonly_query",
             cluster=SR.target_id,
-            sql="SELECT note AS region, (region) AS r2 FROM shop.sales ORDER BY region LIMIT 1",
+            sql="SELECT s.region, t.name FROM shop.sales s JOIN hr.staff t ON s.region = t.region "
+            "WHERE EXISTS (SELECT s2.note AS region, s2.region FROM shop.sales s2 "
+            "ORDER BY region LIMIT 1)",
         ),
         tool_call("run_readonly_query", cluster=SR.target_id, sql=CROSS_SQL + " ORDER BY region"),
         cite(),
@@ -684,7 +686,7 @@ async def test_crossed_order_alias_goes_back_to_the_model_before_any_io(cross: E
     rejected = tool_outputs(cross.scripts.calls[message][2])[0]
     assert "ambiguous_reference" in rejected and "未执行" in rejected
     (sql,) = executed_sql(cross.drv)
-    assert sql.split(" ORDER BY ", 1)[1].startswith("`s`.`region`")
+    assert sql.split(" ORDER BY ", 1)[1].startswith("`region`")
     assert len(delivered.facts) == 1
 
 
