@@ -466,9 +466,15 @@ INSERT-only 表经 Adapter 映射为 `permission_denied`。`WHERE 1 = 0` 在 FE 
 ### 9.8 现有代码缺陷（只记录，不在 Task 0 修改）
 
 - **D1 输出名重复时，ORDER BY 序号被改写到同名的另一列（`src/xiaowei/sqlguard.py`，当前主线即有）。**
-  - **已验证（`guard_readonly_query` / `guard_explain_query` 加只读账号直接执行规范化 SQL）：** `SELECT t.id AS x, t.val AS x FROM t_sem t ORDER BY 1` 两种产物都改写为 `ORDER BY t.val`（序号 1 应为 `t.id`）。以 `max_rows=2`（LIMIT 3）执行，原 SQL 返回 `[(1,3),(2,None),(3,1)]`，规范化 SQL 返回 `[(2,None),(3,1),(5,2)]`。`… a.id, b.id … ORDER BY 1, 2` 改写为 `ORDER BY b.id, b.id`；`… GROUP BY 1, 2 ORDER BY 3 DESC, 1` 改写为 `ORDER BY COUNT(*) DESC, t.val`（序号 1 应为 `t.grp`），这两例在该数据上恰好返回相同行。
+  - **已验证（`guard_readonly_query` / `guard_explain_query` 产物，加只读账号绕过 Adapter 直接执行规范化 SQL）：** `SELECT t.id AS x, t.val AS x FROM t_sem t ORDER BY 1` 两种产物都改写为 `ORDER BY t.val`（序号 1 应为 `t.id`）。以 `max_rows=2`（LIMIT 3）执行，原 SQL 返回 `[(1,3),(2,None),(3,1)]`，规范化 SQL 返回 `[(2,None),(3,1),(5,2)]`。`… a.id, b.id … ORDER BY 1, 2` 改写为 `ORDER BY b.id, b.id`；`… GROUP BY 1, 2 ORDER BY 3 DESC, 1` 改写为 `ORDER BY COUNT(*) DESC, t.val`（序号 1 应为 `t.grp`），这两例在该数据上恰好返回相同行。
   - **不受影响（已验证）：** GROUP BY 序号按位置解析正确；输出名唯一时 ORDER BY 序号正确。
-  - **只读推理，未端到端验证：** `StarRocksAdapter.run_query` 原样执行 `normalized_sql`，因此受治理查询工具会返回按错误列排序后截取的行。展示的“实际 SQL”与真正执行的一致，偏差在于它不同于用户写的排序。`explain_query` 会诊断改写后的 SQL。没有经过工具、Evidence、Session 与渠道的端到端复现。不涉及权限越界或数据范围扩大。
+  - **经产品路径的实际影响（复审以真实 SQLGuard + 真实 Adapter + recording 连接核对；源码一致）：** 上一条的执行结果绕过了 Adapter，不代表工具会交付这些行。对上述顶层输出名重复的样例：
+    - 改写错误的 SQL **会发送到数据库**。
+    - Adapter 在 `execute` 返回列头后发现列名重复，按 `result_contract` 拒绝，**业务行读取数为 0**（`src/xiaowei/starrocks.py` `_query` 的重复列名检查；既有回归 `test_duplicate_column_names_are_rejected_before_reading_rows`）。
+    - 治理层把 Adapter 异常转为 `ToolExecutionError` 并停止本轮，不进入成功 Evidence 的记录路径（`src/xiaowei/governance.py`）。
+    - 唯一列名的对照正常返回结果。
+    - 诊断路径 `explain_query` 发送的是序号已被改写的 `EXPLAIN LOGICAL`：计划只有一列，不触发重复列名检查，因此分析的是错误的 SQL。
+  - **未验证：** 内层（CTE/子查询）输出名重复而外层输出唯一时，是否会产生可交付的错误排序结果，由 D1 小 PR 的回归用例确认。不涉及权限越界或数据范围扩大。
   - **最小修复：** 输出名重复时拒绝 ORDER BY 序号（或要求唯一的显式别名，§2.3 已有此方向），或按位置而非名字解析；回归用例覆盖查询与执行计划两种产物、GROUP BY 对照和唯一名对照。
 - **D2 `||` 被改写为 OR，且 Adapter 未固定 `sql_mode`。** 现有 SQLGuard 接受 `s || 'x'` 并输出 `s OR 'x'`。4.1.4 默认 `sql_mode=ONLY_FULL_GROUP_BY` 时 `||` 本就是 OR，结果相同；目标全局 `sql_mode` 含 `PIPES_AS_CONCAT` 时，用户的拼接被改为逻辑或（实测 `'ax'` 变 NULL）。影响：结果语义取决于目标未受控的服务端设置。最小修复：Adapter 在现有会话设置中固定并回读 `sql_mode`，或 SQLGuard 拒绝 `||`；补回归用例。
 
@@ -479,9 +485,9 @@ INSERT-only 表经 Adapter 映射为 `permission_denied`。`WHERE 1 = 0` 在 FE 
 | 计划条款 | Task 0 结论 | 最小调整（待复审） | 依赖状态 |
 | --- | --- | --- | --- |
 | §2.2 权限探测 | 成立 | 写明列级授权不可用（只到表/视图）；角色须是默认/已激活角色，否则账号视为无权 | Task 1 不受影响；Task 2 可按此实施 |
-| §2.2/§2.6 对象版本 | `information_schema` 不足；视图元组不能发现间接依赖变化（B1） | 直接查询的表用 9.2 的表版本元组。依赖视图的 Evidence 在跨轮回放、历史读取与重发时一律按确定失效拒绝，只允许本轮实时读取；视图元组只作直接定义变化的附加检测 | Task 2/5 的表版本部分按此实施；**视图历史回放保持关闭**，重开需另行设计并复审 |
+| §2.2/§2.6 对象版本 | `information_schema` 不足；视图元组不能发现间接依赖变化（B1） | 直接查询的表用 9.2 的表版本元组。依赖视图的 Evidence 在跨轮回放、历史读取与重发时一律按确定失效拒绝。本轮新取得的视图证据，其保存与首次交付照常按当前权限验证，不提前判失效；Task 5 必须区分这两类路径。视图元组只作直接定义变化的附加检测 | Task 2/5 的表版本部分按此实施；**视图历史回放保持关闭**，重开需另行设计并复审 |
 | §2.3 规范化 | 多数一致，有 9.4 差异 | 列名按快照不区分大小写解析（库/表/别名保持敏感）；无别名函数列与重复名按“要求显式别名”处理；`DIV`、`||` 保持拒绝或固定语义；qualify schema 只含被引用对象 | Task 3 |
-| §2.4 风险评估 | 估算行数不可作扫描量；分区/tablet 比例按个数计、不能乘总行数（B2）；缺统计无法只靠计划文本识别；行数元数据有上报滞后 | 每个 SCAN 的规模上界取“`partitions_meta` 中最大的 a 个分区 ROW_COUNT 之和”（a 为 partitionRatio 分子，忽略 tabletRatio）。以下任一情况为 unknown：对象元数据不可读（含账号无权的 MV 改写目标）、计数为 0、选中范围内任一分区 `VISIBLE_VERSION_TIME` 晚于“当前时间减去目标上验收的统计上报周期”。再加 `SHOW STATS META` 健康度；`SCHEMA-SCAN`、`TABLE FUNCTION`、未知算子一律 unknown；数据库资源组硬限额为启用前提。上界是行数，不是字节或代价 | **Task 4 继续暂停**，等审查者接受调整 |
+| §2.4 风险评估 | 估算行数不可作扫描量；分区/tablet 比例按个数计、不能乘总行数（B2）；缺统计无法只靠计划文本识别；行数元数据有上报滞后 | 每个 SCAN 的规模上界取“`partitions_meta` 中最大的 a 个分区 ROW_COUNT 之和”（a 为 partitionRatio 分子，忽略 tabletRatio）。以下任一情况为 unknown：对象元数据不可读（含账号无权的 MV 改写目标）、计数为 0、选中范围内任一分区 `VISIBLE_VERSION_TIME` 晚于“当前时间减去目标上验收的统计上报周期”。**该新鲜度条件只是必要条件，不是证明：** 上报失败时，过了一个周期仍可能留着旧的非零行数并通过上述规则。因此这条规则**不得直接用于放行**，新鲜度证明须在 Task 4 设计中解决并复审。再加 `SHOW STATS META` 健康度；`SCHEMA-SCAN`、`TABLE FUNCTION`、未知算子一律 unknown；数据库资源组硬限额为启用前提。上界是行数，不是字节或代价 | **Task 4 继续暂停**，等审查者接受调整 |
 | §2.5 可恢复错误 | 白名单已确定 | 采用 9.5 白名单；EXPLAIN 语法错误停止 | Task 4 |
 | R5 资源 | 只读账号只能观察单条语句当下命中的组（B3）；组内存限制已独立命中 | 不把启动/周期核对当作绑定证明。可选：评估阶段对最终 SQL 逐条 `EXPLAIN VERBOSE` 核对组名在允许集合内（多一次往返，仍有核对到执行的窗口）。否则只作为 DBA 验收与变更后复核项，残余风险如实披露 | Task 4 设计时决定（随 Task 4 暂停）；Task 8、P3 |
 | §2.7 审计 | 设计成立 | 无 | Task 6 |
