@@ -648,6 +648,24 @@ async def test_scope_errors_go_back_to_the_model_before_any_database_io(cross: E
     assert len(executed_sql(cross.drv)) == 1 and len(delivered.facts) == 1
 
 
+async def test_ambiguous_correlated_name_goes_back_to_the_model_before_any_io(cross: Env) -> None:
+    """相关子查询中 region 在两个外层来源都有：歧义，不按本层别名或任一来源猜。"""
+    message = cross.scripts.add(
+        "有员工的地区里，有没有 hr 销售记录",
+        tool_call(
+            "run_readonly_query",
+            cluster=SR.target_id,
+            sql="SELECT s.id FROM shop.sales s JOIN hr.staff t ON s.region = t.region "
+            "WHERE EXISTS (SELECT h.id AS region FROM hr.sales h WHERE region = 'east')",
+        ),
+        clarify("region 有歧义"),
+    )
+    await cross.app.run_turn(cross.ctx(), message)
+    (rejected,) = tool_outputs(cross.scripts.calls[message][1])
+    assert "ambiguous_reference" in rejected and "未执行" in rejected
+    assert executed_sql(cross.drv) == []
+
+
 async def test_describe_table_outside_the_allowlist_is_rejected_before_io(env: Env) -> None:
     message = env.scripts.add(
         "看看 users 表",

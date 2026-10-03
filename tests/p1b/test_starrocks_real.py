@@ -612,6 +612,14 @@ R3_NAME_SAMPLES = {
     "nested stars": "SELECT * FROM (SELECT * FROM (SELECT Total FROM sales) a) b "
     "ORDER BY 1 LIMIT 3",
     "database star": "SELECT {d}.sales.* FROM sales ORDER BY id LIMIT 2",
+    # 顶层 ORDER BY 的唯一输出别名：同名物理列存在（含两个来源都有）时仍按别名排序。
+    "order aggregate alias": "SELECT SUM(id) AS total FROM sales GROUP BY region ORDER BY total",
+    "order join alias": "SELECT s.id AS region FROM sales s JOIN {h}.staff t ON s.id = t.id "
+    "ORDER BY region",
+    "order alias case": "SELECT id AS Total FROM sales ORDER BY total DESC LIMIT 3",
+    # 相关子查询：本层没有 id、WHERE 看不到本层别名，id 是外层 s.id（只匹配 bonus 中的 1、2、5）。
+    "correlated outer": "SELECT s.id FROM sales s WHERE EXISTS "
+    "(SELECT b.bid AS id FROM {h}.bonus b WHERE id = b.bid) ORDER BY 1",
 }
 R3_NAME_REJECTED = {
     # 原 SQL 在服务器上报错：不能被规范化“修正”后执行。
@@ -626,6 +634,11 @@ R3_NAME_REJECTED = {
     ),
     "where ambiguous": (
         "SELECT s.id AS region FROM sales s JOIN {h}.staff t ON s.id = t.id WHERE region = 'r1'",
+        QueryRejectionCode.AMBIGUOUS_REFERENCE,
+    ),
+    "correlated two outer": (
+        "SELECT s.id FROM sales s JOIN {h}.staff t ON s.id = t.id WHERE EXISTS "
+        "(SELECT b.bid AS region FROM {h}.bonus b WHERE region = 'r1')",
         QueryRejectionCode.AMBIGUOUS_REFERENCE,
     ),
 }
@@ -672,12 +685,21 @@ async def test_r3_names_resolve_like_the_server(instance: Instance) -> None:
                 with pytest.raises(QueryRejectedError) as refused:
                     check(sql, scope)
                 assert refused.value.code is code, name
-        # 顶层 ORDER BY 中别名与物理列同名且所指不同：服务器按投影形态选择，不猜，拒绝。
-        swapped = "SELECT id AS region, region AS id FROM sales ORDER BY id"
-        assert await readonly_result(instance, swapped)
-        with pytest.raises(QueryRejectedError) as refused:
-            guard_readonly_query(swapped, scope)
-        assert refused.value.code is QueryRejectionCode.AMBIGUOUS_REFERENCE
+        # 交叉别名：投影中另有同名裸列时服务器改按那一列排序，不猜，拒绝。
+        for crossed in (
+            "SELECT id AS region, region AS id FROM sales ORDER BY id",
+            "SELECT id AS total, total AS t2 FROM sales ORDER BY total",
+        ):
+            assert await readonly_result(instance, crossed)
+            for check in (guard_readonly_query, guard_explain_query):
+                with pytest.raises(QueryRejectedError) as refused:
+                    check(crossed, scope)
+                assert refused.value.code is QueryRejectionCode.AMBIGUOUS_REFERENCE
+        # 相关子查询的依赖记入外层列。
+        correlated = R3_NAME_SAMPLES["correlated outer"].format(h=hr)
+        assert (instance.database, "sales", "id") in guard_readonly_query(
+            correlated, scope
+        ).referenced_columns
     finally:
         await admin(host, port, user, f"DROP DATABASE {hr} FORCE")
 

@@ -12,6 +12,7 @@ import pytest
 import sqlglot
 from sqlglot import exp
 
+from xiaowei import sqlguard
 from xiaowei.sqlguard import (
     REJECTION_MESSAGES,
     ExplainQuery,
@@ -451,9 +452,10 @@ def test_unnamed_expressions_are_fine_where_no_name_is_exposed(sql: str) -> None
 
 # ---- 名字解析保持 StarRocks 语义 ---------------------------------------------------------------
 # StarRocks 4.1.4 实测（可丢弃实例）：WHERE、JOIN ON 与窗口只解析物理列，看不到输出别名；投影、
-# GROUP BY 与 HAVING 先物理列、后输出别名；顶层 ORDER BY 先输出别名，但别名与物理列同名且
-# 所指不同时结果取决于投影形态（``SELECT a AS b, b AS a ... ORDER BY a`` 按物理列 ``a`` 排序），
-# 因此只在两种解释一致时接受。别名与列名都不区分大小写。
+# GROUP BY 与 HAVING 先物理列、后输出别名；顶层 ORDER BY 先输出别名，但投影中另有同名的裸列时
+# （``SELECT a AS b, b AS a ... ORDER BY a``、``SELECT a AS x, x AS z ... ORDER BY x``）改按那一列
+# 排序或报歧义，这种交叉别名拒绝。WHERE 中本层没有的名字按外层来源解析（相关子查询）。别名与
+# 列名都不区分大小写。
 
 BOTH = pytest.mark.parametrize("check", [guard_readonly_query, guard_explain_query])
 
@@ -528,9 +530,35 @@ def test_names_shadowed_by_an_output_alias_stay_physical_columns(check, sql, exp
             Code.COLUMN_NOT_ALLOWED,
         ),
         # 顶层 ORDER BY 中别名与物理列同名且所指不同：StarRocks 的选择随投影形态变化，拒绝。
-        ("SELECT total AS orders FROM shop.sales ORDER BY orders", Code.AMBIGUOUS_REFERENCE),
         ("SELECT id AS region, region AS id FROM shop.sales ORDER BY id", Code.AMBIGUOUS_REFERENCE),
-        ("SELECT total AS Orders FROM shop.sales ORDER BY orders + 0", Code.AMBIGUOUS_REFERENCE),
+        (
+            "SELECT total AS orders, orders AS o2 FROM shop.sales ORDER BY orders",
+            Code.AMBIGUOUS_REFERENCE,
+        ),
+        (
+            "SELECT total AS region, region FROM shop.sales ORDER BY region",
+            Code.AMBIGUOUS_REFERENCE,
+        ),
+        (
+            "SELECT s.id AS region, r.region AS rr FROM shop.sales s JOIN shop.regions r "
+            "ON s.region = r.region ORDER BY region",
+            Code.AMBIGUOUS_REFERENCE,
+        ),
+        (  # 相关子查询：两个外层来源都有 region
+            "SELECT s.id FROM shop.sales s JOIN shop.regions r ON s.region = r.region "
+            "WHERE EXISTS (SELECT h.id AS region FROM hr.sales h WHERE region = 'x')",
+            Code.AMBIGUOUS_REFERENCE,
+        ),
+        (  # 中间层的同名来源别名会截住外层的 s：不能按名字绑定
+            "SELECT s.id FROM shop.sales s WHERE EXISTS "
+            "(SELECT s.id AS orders FROM hr.staff s WHERE orders > 1)",
+            Code.AMBIGUOUS_REFERENCE,
+        ),
+        (  # 本层、外层都没有物理列：只有别名
+            "SELECT s.id FROM shop.sales s WHERE EXISTS "
+            "(SELECT h.id AS zz FROM hr.sales h WHERE zz = 1)",
+            Code.COLUMN_NOT_ALLOWED,
+        ),
         (  # 子查询的别名与外层物理列同名：不猜数据库在相关引用与别名之间的选择
             "SELECT s.id FROM shop.sales s WHERE EXISTS "
             "(SELECT t.id AS total FROM hr.staff t GROUP BY total)",
@@ -549,11 +577,88 @@ def test_alias_and_column_conflicts_are_not_resolved_by_guessing(check, sql, cod
         ("SELECT total AS x FROM shop.sales ORDER BY x DESC", "`sales`.`total` DESC"),
         ("SELECT region AS region FROM shop.sales ORDER BY region", "`sales`.`region`"),
         ("SELECT s.region AS REGION FROM shop.sales s ORDER BY region", "`s`.`region`"),
+        # 唯一输出别名与物理列同名，投影中没有同名裸列：数据库按别名排序。
+        ("SELECT total AS orders FROM shop.sales ORDER BY orders", "`sales`.`total`"),
+        ("SELECT SUM(total) AS orders FROM shop.sales ORDER BY orders", "SUM(`sales`.`total`)"),
+        ("SELECT total AS Orders FROM shop.sales ORDER BY orders + 0", "`sales`.`total` + 0"),
+        ("SELECT total AS X FROM shop.sales ORDER BY x DESC", "`sales`.`total` DESC"),
+        (
+            "SELECT total AS orders, orders + 0 AS o2 FROM shop.sales ORDER BY orders",
+            "`sales`.`total`",
+        ),
+        (  # 两个来源都有 region，输出别名唯一
+            "SELECT s.id AS region FROM shop.sales s JOIN shop.regions r "
+            "ON s.region = r.region ORDER BY region",
+            "`s`.`id`",
+        ),
         ("SELECT total AS x, COUNT(*) AS n FROM shop.sales GROUP BY x ORDER BY 1", "1"),
     ],
 )
 def test_order_by_and_group_by_aliases_without_a_conflict_keep_working(check, sql, order) -> None:  # type: ignore[no-untyped-def]
     assert normalized(check, sql).split(" ORDER BY ", 1)[1].split(" LIMIT ")[0] == order
+
+
+@BOTH
+@pytest.mark.parametrize(
+    ("sql", "expected", "outer"),
+    [
+        (  # 本层没有 orders、WHERE 看不到本层别名：按外层 s.orders 解析
+            "SELECT s.id FROM shop.sales s WHERE EXISTS "
+            "(SELECT t.id AS orders FROM hr.staff t WHERE orders > t.id)",
+            "WHERE `s`.`orders` > `t`.`id`",
+            ("shop", "sales", "orders"),
+        ),
+        (  # 显式外层限定列对照
+            "SELECT s.id FROM shop.sales s WHERE EXISTS "
+            "(SELECT t.id AS orders FROM hr.staff t WHERE s.orders > t.id)",
+            "WHERE `s`.`orders` > `t`.`id`",
+            ("shop", "sales", "orders"),
+        ),
+        (  # 本层物理列优先于外层
+            "SELECT s.id FROM shop.sales s WHERE EXISTS "
+            "(SELECT t.id AS region FROM hr.staff t WHERE region = 'x')",
+            "WHERE `t`.`region` = 'x'",
+            ("hr", "staff", "region"),
+        ),
+        (  # 隔两层的外层列
+            "SELECT s.id FROM shop.sales s WHERE EXISTS (SELECT 1 AS k FROM hr.staff t "
+            "WHERE EXISTS (SELECT h.id AS orders FROM hr.sales h WHERE orders > h.id))",
+            "WHERE `s`.`orders` > `h`.`id`",
+            ("shop", "sales", "orders"),
+        ),
+    ],
+)
+def test_correlated_names_shadowed_by_an_inner_alias_resolve_outward(  # type: ignore[no-untyped-def]
+    check, sql, expected, outer
+) -> None:
+    assert expected in normalized(check, sql)
+    assert outer in check(sql, POLICY).referenced_columns
+
+
+def test_deep_star_ctes_do_not_exhaust_the_stack() -> None:
+    """约 1,200 层星号 CTE（36 KB）：输出名按 scope 缓存、由内向外求得，不递归到栈深。"""
+    depth = 1200
+    ctes = ["c0 AS (SELECT * FROM shop.regions)"]
+    ctes += [f"c{i} AS (SELECT * FROM c{i - 1})" for i in range(1, depth)]
+    sql = f"WITH {', '.join(ctes)} SELECT * FROM c{depth - 1}"
+    policy = narrowed(max_sql_bytes=200_000)
+    for check in (guard_readonly_query, guard_explain_query):
+        tree = sqlglot.parse_one(check(sql, policy).normalized_sql, read="starrocks")
+        assert tree.named_selects == ["region", "name"]
+
+
+def test_recursion_while_binding_names_is_a_fixed_rejection(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """名字绑定中过深的递归是预期的输入失败：固定原因码，不挂下层异常。"""
+
+    def too_deep(*_: object) -> list[str]:
+        raise RecursionError
+
+    monkeypatch.setattr(sqlguard._Names, "_compute", too_deep)
+    for check in (guard_readonly_query, guard_explain_query):
+        sql = "SELECT * FROM (SELECT * FROM shop.regions) q"
+        assert refused(sql, check=check) is Code.UNSUPPORTED_SYNTAX
 
 
 @BOTH

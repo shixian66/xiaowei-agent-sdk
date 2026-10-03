@@ -252,7 +252,8 @@ def _guard(
     if delivered:
         _check_output_names(root)
     _bind_tables(root, policy)
-    _bind_columns(root, policy)
+    # 名字推导与 sqlglot 一样按作用域递归；过深的嵌套是预期的输入失败，映射为固定原因码。
+    _attempt(lambda: _bind_columns(root, policy), _Code.UNSUPPORTED_SYNTAX)
     qualified = _qualify(root, policy)
     _order_unions(qualified)
     objects, columns = _resolve_columns(qualified, policy)
@@ -500,18 +501,19 @@ def _bind_columns(root: exp.Query, policy: QueryPolicy) -> None:
     对外给出列名的查询体（最外层、CTE、派生表）中的裸列先显式写出原名作为别名：规范化会把
     列名改写为快照写法，别名使列头与外层按名引用保持用户的写法。
     """
-    aliases: dict[int, dict[str, list[exp.Expr]]] = {}
+    aliases: dict[int, dict[str, list[exp.Alias]]] = {}
     for select in root.find_all(exp.Select):
         named = aliases.setdefault(id(select), {})
         for p in select.expressions:
             if isinstance(p, exp.Alias):
-                named.setdefault(p.alias.casefold(), []).append(p.this)
+                named.setdefault(p.alias.casefold(), []).append(p)
     for select in _named_bodies(root):
         for projection in list(select.expressions):
             if isinstance(projection, exp.Column) and not isinstance(projection.this, exp.Star):
                 projection.replace(exp.alias_(projection.copy(), projection.name, quoted=True))
-    for scope in _scopes(root):
-        _check_star_sources(scope, policy)
+    names = _Names(policy)
+    for scope in _scopes(root):  # 内层 scope 先于外层：来源的输出名先于引用它的 scope 求得
+        _check_star_sources(scope, names)
         sources = {name: source for name, (_, source) in _named_sources(scope).items()}
         shadows = aliases.get(id(scope.expression), {})
         for column in _own_columns(scope):
@@ -524,55 +526,81 @@ def _bind_columns(root: exp.Query, policy: QueryPolicy) -> None:
                 if column.text("db"):
                     _check_column_db(column, owner)
                 if not isinstance(column.this, exp.Star) and isinstance(owner, exp.Table | Scope):
-                    _rename(column, owner, policy)
+                    _rename(column, owner, names)
                 continue
             if isinstance(column.this, exp.Star):
                 continue
-            providers = [(n, s) for n, s in sources.items() if _provides(s, column.name, policy)]
+            shadowing = shadows.get(column.name.casefold())
+            if shadowing is not None and _clause(column, scope.expression) == "order":
+                _bind_order_alias(column, scope.expression, shadowing)
+                continue
+            providers = [(n, s) for n, s in sources.items() if names.provides(s, column.name)]
             if len(providers) > 1:
                 _reject(_Code.AMBIGUOUS_REFERENCE)
-            shadowing = shadows.get(column.name.casefold())
             if shadowing is not None:
-                _bind_shadowed(column, scope, providers, shadowing, policy)
+                _bind_shadowed(column, scope, providers, names)
             elif providers:
-                _rename(column, providers[0][1], policy)
+                _rename(column, providers[0][1], names)
+        names.remember(scope)
 
 
 _PHYSICAL_FIRST: Final = frozenset({"expressions", "group", "having"})
+
+
+def _bind_order_alias(column: exp.Column, select: exp.Expr, shadowing: list[exp.Alias]) -> None:
+    """顶层 ORDER BY 中与输出别名同名（不区分大小写）的未限定名：StarRocks 4.1.4 先按别名解析，
+    与是否有同名物理列、有几个无关。但投影中另有同名的裸列时（``SELECT a AS b, b AS a ...
+    ORDER BY a``、``SELECT a AS x, x AS z ... ORDER BY x``）改按那一列排序或报歧义：这种交叉
+    别名拒绝。名字改写为别名的写法，交给 ``qualify`` 与 ``_inline_alias_reference`` 按别名内联。
+    """
+    if len(shadowing) != 1 or not isinstance(select, exp.Select):
+        _reject(_Code.AMBIGUOUS_REFERENCE)
+    (alias,) = shadowing
+    folded = column.name.casefold()
+    for projection in select.expressions:
+        expr = projection.this if isinstance(projection, exp.Alias) else projection
+        if (
+            projection is not alias
+            and isinstance(expr, exp.Column)
+            and not isinstance(expr.this, exp.Star)
+            and expr.name.casefold() == folded
+        ):
+            _reject(_Code.AMBIGUOUS_REFERENCE)
+    column.set("this", exp.to_identifier(alias.alias, quoted=True))
 
 
 def _bind_shadowed(
     column: exp.Column,
     scope: Scope,
     providers: list[tuple[str, exp.Table | Scope]],
-    shadowing: list[exp.Expr],
-    policy: QueryPolicy,
+    names: _Names,
 ) -> None:
-    """与本层输出别名同名（不区分大小写）的未限定列，按 StarRocks 4.1.4 实测的子句规则绑定。
+    """ORDER BY 以外与本层输出别名同名的未限定列，按 StarRocks 4.1.4 实测的子句规则绑定。
 
-    - WHERE、JOIN ON、窗口：只解析物理列，看不到别名；
-    - 投影、GROUP BY、HAVING：先物理列，没有才是别名（别名交给 ``qualify`` 展开）；
-    - 顶层 ORDER BY：先别名；但同名物理列存在且两者所指不同时，数据库的选择随投影形态变化
-      （``SELECT a AS b, b AS a ... ORDER BY a`` 按物理列排序），只在两种解释一致时接受。
+    - 本层有物理来源：一律是物理列（投影、GROUP BY、HAVING 也先物理列）；
+    - WHERE、JOIN ON、窗口：看不到本层别名，按词法作用域向外层查找（相关子查询）；恰好一个外层
+      来源时绑定，多个即歧义，都没有即列不存在；
+    - 投影、GROUP BY、HAVING：本层没有时是别名（交给 ``qualify`` 展开）；外层也有同名列时数据库
+      会取外层列（且多半不支持在这些位置相关引用），不猜，拒绝。
 
     物理列直接写上来源名，使 ``qualify`` 不再把它当作别名展开。
     """
-    clause = _clause(column, scope.expression)
-    if clause == "order":
-        if not providers:
-            return  # 别名：_inline_alias_reference 内联为别名所指表达式
-        name = providers[0][0]
-        if not all(_same_column(expr, column.name, name) for expr in shadowing):
-            _reject(_Code.AMBIGUOUS_REFERENCE)
-    elif not providers:
-        if clause not in _PHYSICAL_FIRST:
+    if not providers:
+        outer = _outer_providers(scope, column.name, names)
+        if _clause(column, scope.expression) in _PHYSICAL_FIRST:
+            if outer:
+                _reject(_Code.AMBIGUOUS_REFERENCE)
+            return
+        if not outer:
             _reject(_Code.COLUMN_NOT_ALLOWED)
-        if _outer_provides(scope, column.name, policy):
-            _reject(_Code.AMBIGUOUS_REFERENCE)  # 外层同名列与本层别名：不猜数据库的选择
-        return
+        if len(outer) > 1:
+            _reject(_Code.AMBIGUOUS_REFERENCE)
+        providers = outer
+        if _lookup(scope, providers[0][0]) is not providers[0][1]:
+            _reject(_Code.AMBIGUOUS_REFERENCE)  # 中间层同名的来源别名会截住按名字的引用
     name, source = providers[0]
     column.set("table", exp.to_identifier(name))
-    _rename(column, source, policy)
+    _rename(column, source, names)
 
 
 def _clause(column: exp.Column, select: exp.Expr) -> str:
@@ -586,24 +614,17 @@ def _clause(column: exp.Column, select: exp.Expr) -> str:
     return "window" if in_window else node.arg_key or ""
 
 
-def _same_column(expr: exp.Expr, name: str, source: str) -> bool:
-    return (
-        isinstance(expr, exp.Column)
-        and expr.name.casefold() == name.casefold()
-        and expr.table in ("", source)
-    )
-
-
-def _outer_provides(scope: Scope, name: str, policy: QueryPolicy) -> bool:
+def _outer_providers(scope: Scope, name: str, names: _Names) -> list[tuple[str, exp.Table | Scope]]:
+    """各外层 scope 中提供该列的来源；跨层合计，多于一个即视为歧义（保守，不按就近选择）。"""
+    found: list[tuple[str, exp.Table | Scope]] = []
     outer = scope.parent
     while outer is not None:
-        if any(_provides(s, name, policy) for _, (_, s) in _named_sources(outer).items()):
-            return True
+        found += [(n, s) for n, (_, s) in _named_sources(outer).items() if names.provides(s, name)]
         outer = outer.parent
-    return False
+    return found
 
 
-def _check_star_sources(scope: Scope, policy: QueryPolicy) -> None:
+def _check_star_sources(scope: Scope, names: _Names) -> None:
     """星号展开到的 CTE/派生表若有重名输出列，展开后无法唯一引用：要求先起唯一别名。
 
     按展开后的真实列名检查（星号先展开为来源的列），不把未展开的 ``*`` 当作列名。
@@ -621,31 +642,53 @@ def _check_star_sources(scope: Scope, policy: QueryPolicy) -> None:
             continue
         for source in targets:
             if isinstance(source, Scope):
-                names = [n.casefold() for n in _output_names(source, policy)]
-                if len(set(names)) != len(names):
+                folded = [n.casefold() for n in names.of(source)]
+                if len(set(folded)) != len(folded):
                     _reject(_Code.AMBIGUOUS_REFERENCE)
 
 
-def _output_names(source: exp.Table | Scope, policy: QueryPolicy) -> list[str]:
-    """来源展开星号后的输出列名（UNION 取最左分支）；与 ``qualify`` 的展开顺序一致。"""
-    if isinstance(source, exp.Table):
-        return list(_table_columns(source, policy))
-    scope = source
-    while scope.union_scopes:
-        scope = scope.union_scopes[0]
-    select = scope.expression
-    names: list[str] = []
-    for projection in select.expressions if isinstance(select, exp.Select) else ():
-        if isinstance(projection, exp.Star):
-            for _, inner in _sources(scope):
-                names += _output_names(inner, policy)
-        elif isinstance(projection, exp.Column) and isinstance(projection.this, exp.Star):
-            star_source = scope.sources.get(projection.table)
-            if isinstance(star_source, exp.Table | Scope):
-                names += _output_names(star_source, policy)
-        else:
-            names.append(projection.alias_or_name)
-    return names
+class _Names:
+    """来源展开星号后的输出列名（UNION 取最左分支），与 ``qualify`` 的展开顺序一致。
+
+    按 scope 缓存：``_bind_columns`` 由内向外遍历，每个 scope 处理完即记下，外层只读一层，深层
+    星号 CTE 链不递归。
+    """
+
+    def __init__(self, policy: QueryPolicy) -> None:
+        self._policy = policy
+        self._known: dict[int, list[str]] = {}
+
+    def remember(self, scope: Scope) -> None:
+        self._known[id(scope)] = self._compute(scope)
+
+    def of(self, source: exp.Table | Scope) -> list[str]:
+        if isinstance(source, exp.Table):
+            return list(_table_columns(source, self._policy))
+        known = self._known.get(id(source))
+        return known if known is not None else self._compute(source)
+
+    def provides(self, source: exp.Table | Scope, name: str) -> bool:
+        if isinstance(source, Scope) and not isinstance(source.expression, exp.Query):
+            return False
+        folded = name.casefold()
+        return any(n.casefold() == folded for n in self.of(source))
+
+    def _compute(self, scope: Scope) -> list[str]:
+        while scope.union_scopes:
+            scope = scope.union_scopes[0]
+        select = scope.expression
+        found: list[str] = []
+        for projection in select.expressions if isinstance(select, exp.Select) else ():
+            if isinstance(projection, exp.Star):
+                for _, inner in _sources(scope):
+                    found += self.of(inner)
+            elif isinstance(projection, exp.Column) and isinstance(projection.this, exp.Star):
+                star_source = scope.sources.get(projection.table)
+                if isinstance(star_source, exp.Table | Scope):
+                    found += self.of(star_source)
+            else:
+                found.append(projection.alias_or_name)
+        return found
 
 
 def _own_columns(scope: Scope) -> list[exp.Column]:
@@ -678,23 +721,12 @@ def _table_columns(table: exp.Table, policy: QueryPolicy) -> tuple[str, ...]:
     return columns
 
 
-def _rename(column: exp.Column, source: exp.Table | Scope, policy: QueryPolicy) -> None:
+def _rename(column: exp.Column, source: exp.Table | Scope, names: _Names) -> None:
     """改写为来源中的写法（物理表按快照，CTE/派生表按其输出名）；不唯一时留给后续检查。"""
     folded = column.name.casefold()
-    matches = [n for n in _output_names(source, policy) if n.casefold() == folded]
+    matches = [n for n in names.of(source) if n.casefold() == folded]
     if len(matches) == 1 and matches[0] != column.name:
         column.set("this", exp.to_identifier(matches[0], quoted=True))
-
-
-def _provides(source: exp.Table | Scope, name: str, policy: QueryPolicy) -> bool:
-    if isinstance(source, exp.Table):
-        folded = name.casefold()
-        return any(c.casefold() == folded for c in _table_columns(source, policy))
-    query = source.expression
-    if not isinstance(query, exp.Query):
-        return False
-    folded = name.casefold()
-    return any(n.casefold() == folded for n in _output_names(source, policy))
 
 
 # ---- 4. 限定列、展开星号并复核归属 -------------------------------------------------------------
