@@ -356,6 +356,7 @@ Task 0 的规模实验不进入日常 CI；后续每片只跑受影响命令和�
 - **账号与数据：** 管理员 root 只做建库/授权/插件/FE 设置与对照；结论均以随机口令只读账号 `xw_p25_ro` 实测（口令只存工作树外权限 600 的临时文件，结束删除）。合成库 `p25a`/`p25b`：直接授权、库级授权、角色授权、INSERT-only、无权限、视图（底表无权）、同名表跨库、大小写同名表；`p25a.big` 按天 30 分区 × 4 桶，`generate_series` 写入 1,000,000 行；`p25a.nostats` 在关闭 `enable_statistic_collect_on_first_load` 时写入 200,000 行后恢复开关；异步 MV `mv_daily`（只读账号无权）；规模库 `p25scale` 1,000 张 × 30 列（含中文注释，库级 SELECT）与 `p25scale_w` 100 张 × 30 列（只授 INSERT）。
 - **方法：** 实验脚本放工作树外（会话 scratchpad，不入库），每组先登记预期与成功/拒绝对照。asyncmy 取 errno 与消息，容器内 `mysql` CLI（只读账号）取 SQLSTATE；记录只保留去掉地址/账号的消息模板。规模与权限探测经真实 `guard_readonly_query` → `open_starrocks(...).run_query`（每次新连接、设置并回读会话限额），与产品路径相同。
 - **既有实测：** 开始与结束各跑一次 §5 SR 命令（`-m 'starrocks_real or starrocks_audit_real'`），均 19 passed、6 warnings，全部为已知 asyncmy `MySQLResult._finish_unbuffered_query was never awaited`，无新增类别；按 §5 不加 `-W error`、不加过滤器。
+- **审查轮补证（基于 `0978ade`）：** 为审查意见 B1–B3 与 D1 范围，用同一 digest 新建可丢弃容器（标签 `xiaowei.task=p25-task0-review`，只绑定 127.0.0.1:59030），另建合成库 `r1`（嵌套视图）、`r2.skew`（倾斜分区/分桶）与 `r4.t_sem`。临时把 FE `tablet_stat_update_interval_second` 改为 10（实测要等当前 300 s 周期结束才生效），之后恢复 300 并回读。本轮资源组 `rg_r3_*` 均已删除，只剩默认组；容器与只读口令文件已删除，59030 不再监听。
 - **恢复与清理：** FE `query_explain_level` 改 ANALYZE 后恢复 NORMAL 并回读；`enable_statistic_collect_on_first_load` 恢复 true 并回读；资源组 `rg_p25_ro` 删除后只剩 `default_wg`/`default_mv_wg`。容器（含一次为 §9.6 规模元数据补测重建的同名容器）与 `xiaowei-sdk-test` 均已删除，59030/55432 不再监听；镜像未声明卷，未留下本轮卷。
 
 ### 9.2 权限、元数据与对象版本（§2.2，Q1）
@@ -371,26 +372,30 @@ Task 0 的规模实验不进入日常 CI；后续每片只跑受影响命令和�
 | 撤权 | REVOKE 表/视图/库级/角色后，**同一已打开连接**的下一条语句即 5203，新连接相同；无缓存宽限 |
 | EXPLAIN 与 SELECT | 所有样本中 `EXPLAIN LOGICAL` 与实际 SELECT 的权限结果一致，但计划会把查询透明改写到只读账号**无权**的 MV（`SCAN [mv_daily]`，执行成功）；权限依赖必须取自 SQL 而非计划对象，EXPLAIN 不作为权限证明 |
 | 表版本 | DROP+CREATE 同名表：`TABLE_ID`（11214→11288）与 `CREATE_TIME` 变化，**原授权随旧对象消失**（新表 5203）。`ALTER TABLE ADD COLUMN`：`TABLE_ID`、`CREATE_TIME`、`UPDATE_TIME` 都不变，只有列集合变化 |
-| 视图版本 | DROP+CREATE 视图：`CREATE_TIME` 变化、授权消失。`ALTER VIEW` 保留授权与 `CREATE_TIME`，`tables` 无任何变化，但可让同一视图**暴露此前不可见的底表列**（实测改为暴露 `secret` 后只读账号可读）；唯一可靠的变化信号是 `SHOW CREATE VIEW` 文本与视图列集合 |
+| 视图版本 | DROP+CREATE 视图：`CREATE_TIME` 变化、授权消失。`ALTER VIEW` 保留授权与 `CREATE_TIME`，`tables` 无任何变化，但可让同一视图**暴露此前不可见的底表列**（实测改为暴露 `secret` 后只读账号可读）；视图**自身定义**的变化只能由 `SHOW CREATE VIEW` 文本与视图列集合发现，间接依赖的变化见本表最后一行 |
 | 标识符 | `lower_case_table_names=0`：库名、表名大小写敏感（`CaseT`/`caset`、`p25a`/`P25A` 可同时存在，错写为 5502/5501）；列名不敏感；表别名敏感（`X.id` 对别名 `x` 为 1064） |
+| 视图的间接依赖（审查 B1 补证） | 只读账号只有外层视图 `v_outer`（`SELECT id, a FROM v_inner`）的 SELECT，内层视图 `v_inner` 与底表无权。`ALTER VIEW v_inner AS SELECT id, secret AS a …` 后，`v_outer` 的 `a` 列返回原 `secret` 值，而 `v_outer` 的 `CREATE_TIME`、`SHOW CREATE VIEW` 摘要与列签名**逐字不变**；底表 DROP+CREATE 同名重建并换数据、底表加列，外层元组同样不变。只读账号对 `v_inner` 的 `SHOW CREATE VIEW` 为 5203，`information_schema` 中看不到内层视图与底表。`SELECT *` 视图在创建时展开，底表加列后视图列不变 |
 
-**结论：** 零行探测可作当前 SELECT 权限证明（不被优化消除、覆盖表/库/视图/已激活角色），§2.2 首选方案成立。对象版本**不能**只靠 `information_schema.tables`：最小可靠版本标识为“表 = (`TABLE_ID`, `CREATE_TIME`, 依赖列的名字/类型签名)；视图 = (`CREATE_TIME`, `SHOW CREATE VIEW` 文本摘要, 列签名)”。视图定义只能逐个 `SHOW CREATE VIEW`（代码模板 + 校验后的标识符），不能批量从 `information_schema.views` 取。
+**结论：** 零行探测可作当前 SELECT 权限证明（不被优化消除、覆盖表/库/视图/已激活角色），§2.2 首选方案成立。对象版本**不能**只靠 `information_schema.tables`。直接查询的表：最小版本标识为 (`TABLE_ID`, `CREATE_TIME`, 依赖列的名字/类型签名)，可发现重建与列变化。视图：(`CREATE_TIME`, `SHOW CREATE VIEW` 文本摘要, 列签名) **只覆盖视图自身定义**，不能发现内层视图或底表的变化；只读账号通常无权读取这些间接依赖，无法递归核对。因此依赖视图的历史 Evidence **不能证明版本未变**，按 §2.2“缺少可靠视图版本时历史重放保持关闭”处理：本轮新读取仍由数据库实时权限把关，跨轮回放、历史读取与重发对这类证据一律按确定失效拒绝。只有在 DBA 授予整条依赖链的读取权限并实现递归核对后才能重新评估，本阶段不做。视图定义只能逐个 `SHOW CREATE VIEW`（代码模板 + 校验后的标识符），不能批量从 `information_schema.views` 取。
 
 ### 9.3 规模：1,000 表 / 30,000 列（§2.2 设计值，Q3）
 
-只读账号、单 FE/BE 容器（宿主 2 vCPU、约 3 GB 给 Docker），每项至少 15 次（分页 3 次）：
+只读账号、单 FE/BE 容器（宿主 2 vCPU、约 3 GB 给 Docker）。**计时口径：** 客户端 `time.perf_counter()`，含执行与 `fetchall` 读完全部行，不含 JSON 序列化。p95 取升序第 ⌊0.95n⌋ 个样本（从 1 计；n=15 时为第 14 个，n=1,000 时为第 950 个）；n=3 的分页项只给中位数与最大值，不给 p95。
 
-| 操作 | 请求数 | p50 / p95 | 行 / 原始字节 / JSON 字节 |
-| --- | --- | --- | --- |
-| `information_schema.tables`（两库） | 1 | 16.9 / 57.6 ms | 1,100 / 58,190 / 82,390 |
-| `information_schema.columns` 一次读全 | 1 | 103.3 / 197.3 ms | 33,000 / 1,941,200 / 2,997,200 |
-| 列按每批 100 张表 | 10 | 整轮 794 ms（约 79 ms/次） | 30,000 |
-| 列 keyset 分页每页 2,000 行 | 16 | 整轮 1,501 ms | 30,000 |
-| 零行探测（同一连接连续） | 1,000 | 0.6 / 1.9 ms | 合计 0.82 s |
-| 零行探测，SQLGuard→Adapter 串行（每次新连接+设置回读） | 1,000 | 3.8 / 8.0 ms | 墙钟 4.51 s；前 128 次 0.59 s |
-| 同上，并发 4（`pool_size=4`） | 1,000 | 6.7 / 12.0 ms | 墙钟 1.85 s |
+| 操作 | 连接方式 | 请求数 / 样本数 | 耗时 | 行 / 原始字节 / JSON 字节 |
+| --- | --- | --- | --- | --- |
+| `information_schema.tables`（两库） | 同一长连接，不含建连与会话设置 | 1 / n=15 | p50 16.9、p95 57.6 ms | 1,100 / 58,190 / 82,390 |
+| `information_schema.columns` 一次读全 | 同上 | 1 / n=15 | p50 103.3、p95 197.3 ms | 33,000 / 1,941,200 / 2,997,200 |
+| 列按每批 100 张表 | 同上 | 10 / n=3 整轮 | 中位 794、最大 988 ms | 30,000 |
+| 列 keyset 分页每页 2,000 行 | 同上 | 16 / n=3 整轮 | 中位 1,501、最大 1,604 ms | 30,000 |
+| 零行探测，同一连接连续 | 同上 | 1,000 | 单次 p50 0.6、p95 1.9 ms；合计 0.82 s | — |
+| 零行探测，`Adapter.run_query` 串行 | 每次新连接 + 设置并回读会话变量 + 执行 + 关闭；**不含 SQLGuard**（封存产物预先生成） | 1,000 | 单次 p50 3.8、p95 8.0 ms；墙钟 4.51 s；前 128 次 0.59 s | — |
+| 同上，并发 4（`pool_size=4`） | 同上 | 1,000 | 单次 p50 6.7、p95 12.0 ms；墙钟 1.85 s | — |
+| SQLGuard 生成探测产物（30,000 列 allowlist） | 纯 CPU，同步 | 1,000 | 单次 p50 16.9、p95 18.1 ms | — |
 
-INSERT-only 表经 Adapter 映射为 `permission_denied`。`WHERE 1 = 0` 在 FE 折叠为 `EMPTY`（`EXECUTE IN FE`），探测成本与表数据量无关。SQLGuard 单次 CPU 随 allowlist 线性增长：30 / 3,000 / 30,000 列时 p50 0.40 / 2.03 / 16.55 ms，Task 3 应只用被引用对象的结构构造 qualify schema，而不是整个目标快照。**结论：** 此规模下单次完整刷新 <0.3 s、128 次检查约 0.6 s，60 s / 300 s / 10 s 与 `max_scope_checks_per_turn=128` 无需调整；不据此给生产通过线，P3 在目标上复测。
+INSERT-only 表经 Adapter 映射为 `permission_denied`。`WHERE 1 = 0` 在 FE 折叠为 `EMPTY`（`EXECUTE IN FE`），探测成本与表数据量无关。SQLGuard 单次 CPU 随 allowlist 线性增长：30 / 3,000 / 30,000 列时 p50 0.40 / 2.03 / 16.55 ms，Task 3 应只用被引用对象的结构构造 qualify schema，而不是整个目标快照。
+
+**结论（标明实测与推算）：** 实测只覆盖上表各单项，没有端到端刷新或整轮复核的计时。推算如下：一次结构刷新的两条元数据读取在长连接上 p95 之和约 0.26 s，产品若每条读取都新建连接并设置会话，再加约 2 × 3.8 ms。若刷新同时对 1,000 个对象做探测，再加 1.85 s（并发 4）到 4.51 s（串行）；按 §9.2 对视图逐个 `SHOW CREATE VIEW` 的成本未测。128 次检查在 Adapter 上实测 0.59 s；若每次再经 30,000 列的 SQLGuard，需另加约 128 × 16.9 ms ≈ 2.2 s 同步 CPU（推算）。§2.2 规定探测由代码模板生成，不必走 SQLGuard，但这条路径尚无公开实现，Task 2 必须实测并避免在事件循环中做这类 CPU 工作。在这些前提下，60 s / 300 s / 10 s 与 `max_scope_checks_per_turn=128` 暂不调整；Task 2 须以端到端计时复核，P3 在目标上复测，不据此给生产通过线。
 
 ### 9.4 sqlglot 规范化与 StarRocks 语义（§2.3，Q4）
 
@@ -429,6 +434,16 @@ INSERT-only 表经 Adapter 映射为 `permission_denied`。`WHERE 1 = 0` 在 FE 
 - **观察到的自动采集：** 小表首次导入后约 1 s 内 `FULL ONCE`；百万行 `big` 首次导入 `SAMPLE ONCE`，约 2.3 分钟后一次 `FULL SCHEDULE`。`s_new` 第二次导入 +400k 行后 60 s 内无新任务（随后做了人工 ANALYZE，未继续观察调度）；关闭 first-load 时导入的 `nostats` 十分钟后仍只有占位元数据（`init_stats_sample_job=true`、Healthy 0%），没有采集任务。**人工：** `DROP STATS` 后计划回退，`ANALYZE TABLE … WITH SYNC MODE` 后恢复。三者分开记录，人工结果不证明默认已生效。
 - **缺统计的表现不唯一：** `DROP STATS` 后扫描为 `row: 1` 且 `cpu/memory/network: ?`；从未采集的 `nostats` 显示 `row: 100000`（实际 200,000），**没有 `?`**；百万行表在列统计采集前，`v = 3` 估算为 499,995（50%），同样无 `?`。仅凭 LOGICAL 文本不能可靠识别缺统计。只读账号可读 `SHOW STATS META` / `SHOW ANALYZE STATUS`（只列有任一权限的表，含 Healthy 与采集时间），无权读 `_statistics_.column_statistics`。
 - **规模元数据：** 对有权表，只读账号可读 `information_schema.tables.TABLE_ROWS/DATA_LENGTH` 与 `information_schema.partitions_meta.ROW_COUNT/DATA_SIZE`（与管理员相同），但导入后约 5 分钟（一个 `tablet_stat_update_interval_second` 周期）内为 0；`SHOW PARTITIONS` 对无权表 5203。
+- **分区/tablet 比例不是行数比例（审查 B2 补证）：** 表 `r2.skew` 30 个日分区、4 桶，day1 970,000 行，其余每天 1,000 行；分桶键 97% 为同一值。实测：
+
+  | 查询 | 计划比例 | 实际匹配行 | 比例 × `TABLE_ROWS`(999,000) | 计划 SCAN 估算 | 前 a 大分区之和 |
+  | --- | --- | --- | --- | --- | --- |
+  | `dt = day1` | partition 1/30、tablet 4/4 | 970,000 | 33,300 | 33,300 | 970,000 |
+  | `dt = day2` | partition 1/30、tablet 4/4 | 1,000 | 33,300 | 33,300 | 970,000 |
+  | `k = 1 AND dt = day1` | partition 1/30、tablet 1/4 | 940,900 | 8,325 | 1,332 | 970,000 |
+  | `k = 1` | partition 30/30、tablet 30/120 | 940,929 | 249,750 | 39,960 | 999,000 |
+
+  比例按个数计，倾斜时可低估两个数量级，不能乘以总行数。LOGICAL 不给出选中的分区名（普通 EXPLAIN 也只有 `partitions=1/30`）。保守上界只能取“`partitions_meta` 中 ROW_COUNT 最大的 a 个分区之和，忽略 tabletRatio”，上表四例均不低于实际。**该上界依赖元数据新鲜度：** 向 day2 再写入 500,000 行后，`partitions_meta.ROW_COUNT` 仍为 1,000（实际 501,000），而 `VISIBLE_VERSION` 2→3、`VISIBLE_VERSION_TIME` 立即更新。行数要等下一次 tablet 统计上报（`tablet_stat_update_interval_second`，默认 300 s），上报前该分区的上界会低估。只读账号能看到版本时间，看不到行数对应的版本。
 - **估算不是扫描量（Review Focus 1 反例）：** `SELECT … FROM big WHERE id * 2 = 3 LIMIT 10` 计划扫描 `row: 2`、`partitionRatio: 30/30, tabletRatio: 120/120`，实际审计 `scanRows=1,000,000`。不带过滤的 `LIMIT 10` 扫描 40 行。审计 `scanRows` 本身也会因字典/zone map 过滤为 0（`txt = 'never'`），不能当真实读取量。
 - **LOGICAL 可解析内容：** 行首 `EXECUTE IN FE`（可选）、`- Output => […]`；算子 `SCAN`、`META-SCAN`、`SCHEMA-SCAN`、`EMPTY`、`VALUES`、`TABLE FUNCTION`、`AGGREGATE(GLOBAL|LOCAL|DISTINCT_GLOBAL|DISTINCT_LOCAL)`、`EXCHANGE(GATHER|SHUFFLE|BROADCAST|ROUND_ROBIN)`、`HASH/INNER JOIN`、`HASH/RIGHT SEMI JOIN`、`NESTLOOP/CROSS JOIN`、`SORT(FINAL|PARTIAL|GLOBAL)`、`TOP-N(FINAL|PARTIAL)`、`ANALYTIC`、`UNION`、`LIMIT`、`DECODE`、`CTEAnchor/CTEProduce/CTEConsume`；字段 `Estimates: {row, cpu, memory, network, cost}`（未知为 `?`）、`partitionRatio: a/b`、`tabletRatio: c/d`、`predicate`、`limit`、`MaterializedView: true`。`SCHEMA-SCAN` 与 `TABLE FUNCTION`（`generate_series(1, 1e9)` 估算 1 行）的估算无意义；MV 改写让计划对象不同于 SQL 对象。没有单位说明，不能把 cost/cpu 换算为时间或资源。
 - **大小：** 25 个样本计划 4–25 行、163–1,634 字节；200 分支 UNION 为 1,203 行 / 69,580 字节，超过默认 `max_plan_lines=500`，按截断处理。
@@ -436,31 +451,41 @@ INSERT-only 表经 Adapter 映射为 `permission_denied`。`WHERE 1 = 0` 在 FE 
 
 ### 9.7 资源限额、取消与多库审计（§2.4、§2.7，Q2）
 
-- **会话限额：** `query_mem_limit=1048576` 回读生效后大 JOIN 为 1064 内存超限（71 ms）；`query_timeout=1` 为 5024（约 1.0 s）。
+- **会话限额：** `query_mem_limit=1048576` 回读生效后大 JOIN 为 1064 内存超限（71 ms），消息模板 `Memory of Query… exceed limit`；`query_timeout=1` 为 5024（约 1.0 s）。
 - **资源组（极低阈值，只施加于合成负载）：** `CREATE RESOURCE GROUP rg_p25_ro TO (user='xw_p25_ro') WITH (cpu_weight=1, mem_limit=0.2, concurrency_limit=1, big_query_scan_rows_limit=100000, big_query_cpu_second_limit=2)` 按账号匹配：小查询成功；百万行扫描在运行中以 `exceed big query scan_rows limit: current is 125021 but limit is 100000` 失败（88 ms）；CPU 超限以 `exceed big query cpu limit` 失败；第二条并发查询**立即拒绝**（`Exceed concurrency limit`，不排队）；均为 1064。审计 `resourceGroup` 列记录命中的组。
-- **只读账号能否自证绑定：** 能。默认权限下 `EXPLAIN VERBOSE` 首行给出本会话命中的组名，`SHOW RESOURCE GROUPS` / `SHOW RESOURCE GROUP <名>` 可读全部组的阈值与分类器（含其他账号的分类器）。这能在启动或刷新时核对“命中且阈值不低于要求”，但不能证明阈值适合生产负载；阈值仍需 DBA 在 P3 确认，变更后复核。
+- **资源组内存限制（审查 B3 补证，与会话限额分开）：** 会话 `query_mem_limit=0` 且回读为 0，`EXPLAIN VERBOSE` 首行确认命中目标组后：
+  - `big_query_mem_limit=1048576`：百万行按 id 聚合失败，消息为 `Memory of Group=rg_r3_mem, Query… exceed limit`；小查询成功。
+  - 组池 `mem_limit=0.0001`（BE `MemLimit` 2.294 GB 的 0.01%，约 221,700 字节）：聚合与小查询都失败，消息为 `Memory of rg_r3_pool exceed limit … Limit: 221700`。
+  - 无资源组时同一聚合成功。
+
+  三种内存限制的消息模板可区分，均为 1064，且都含 BE 地址。
+- **只读账号能否证明资源组绑定（审查 B3 修正）：** 只能观察**某一条语句**在**观察时刻**命中的组，不能证明后续查询的绑定。默认权限下，`EXPLAIN VERBOSE <SQL>` 首行给出该 SQL 当前命中的组；`SHOW RESOURCE GROUPS` 可读全部组的阈值与分类器（含其他账号的）。反例（同一账号、同一会话）：分类器 `user`、`user + db='r1'`、`user + plan_cpu_cost_range='[1000000, 1e12)'` 并存时，便宜查询命中 `rg_r3_user`，高代价聚合命中 `rg_r3_cost`，`r1` 视图查询命中 `rg_r3_db`。DBA 随后 `ALTER RESOURCE GROUP rg_r3_user DROP ALL`，便宜查询改为 `default_wg`，其他两条不变。所以启动时或按周期的一次核对，不能覆盖不同库、不同计划代价的查询，也不能覆盖核对之后的分类器变更。逐条核对要在评估阶段对最终 SQL 再发一次 `EXPLAIN VERBOSE`（只在内部读首行，不外传其他内容）；这仍有“核对到执行”之间被 DBA 改动的窗口，并且多一次数据库往返。阈值是否适合生产负载，仍需 DBA 在 P3 确认，变更后复核。
 - **取消：** 一条单独运行 8.1 s 的 JOIN，在 2 s 时客户端断开，1 s 内从 FE `SHOW PROC '/current_queries'` 消失。只观察到 FE 视图，未观察 BE 片段或半开 TCP；`query_timeout` 仍是远端最终期限。
 - **多库审计：** `db` 列是语句执行时的会话当前库（连接默认库，`USE` 后改变），不是 SQL 引用的库；无默认库时为 `''`，此时未限定表名执行为 1046，因此成功的 `''` 记录不会依赖未限定名。Db=A 引用 B、A/B 跨库 JOIN、同名表按各自 Db 解析均与执行一致；原文按 `max_stmt_length` 截断到恰好 1,000 字节（Task 6 的 `max_sql_bytes ≤ stmt_limit - 4` 规则继续适用）。失败语句 `state=ERR`，分析错误 `errorCode=ANALYSIS_ERR`，权限错误 `INTERNAL_ERR`；`EXPLAIN` 语句也以 `isQuery=1` 进入审计。本实验两小时窗口内 `isQuery=1` 的记录多数 `db=''`：去掉库条件后候选来自所有库与无默认库会话，必须继续由候选行数/字节上限约束，候选耗尽时明确标记（§2.7 设计成立）。
 
 ### 9.8 现有代码缺陷（只记录，不在 Task 0 修改）
 
-- **D1 重复输出名时 ORDER BY 序号指向错误列（`src/xiaowei/sqlguard.py`，当前主线即有）。** 复现：只读账号、表 `t_sem(id, grp, val, …)`，`SELECT t.id AS x, t.val AS x FROM t_sem t ORDER BY 1` 规范化为 `ORDER BY t.val`；`SELECT a.id, b.id FROM t_sem a JOIN t_sem b ON a.grp = b.grp ORDER BY 1, 2` 规范化为 `ORDER BY b.id, b.id`。加 LIMIT 后 StarRocks 返回的前 N 行与原 SQL 不同（`[(1,3),(2,None),(3,1)]` 对 `[(2,None),(3,1),(5,2)]`）。影响：执行并展示的“实际 SQL”与用户意图不同，有限结果可能是错误事实；不涉及权限越界。最小修复：输出名重复时拒绝 ORDER BY/GROUP BY 序号（或直接要求显式唯一别名，§2.3 已要求），按位置而非名字解析序号；补回归用例。
+- **D1 输出名重复时，ORDER BY 序号被改写到同名的另一列（`src/xiaowei/sqlguard.py`，当前主线即有）。**
+  - **已验证（`guard_readonly_query` / `guard_explain_query` 加只读账号直接执行规范化 SQL）：** `SELECT t.id AS x, t.val AS x FROM t_sem t ORDER BY 1` 两种产物都改写为 `ORDER BY t.val`（序号 1 应为 `t.id`）。以 `max_rows=2`（LIMIT 3）执行，原 SQL 返回 `[(1,3),(2,None),(3,1)]`，规范化 SQL 返回 `[(2,None),(3,1),(5,2)]`。`… a.id, b.id … ORDER BY 1, 2` 改写为 `ORDER BY b.id, b.id`；`… GROUP BY 1, 2 ORDER BY 3 DESC, 1` 改写为 `ORDER BY COUNT(*) DESC, t.val`（序号 1 应为 `t.grp`），这两例在该数据上恰好返回相同行。
+  - **不受影响（已验证）：** GROUP BY 序号按位置解析正确；输出名唯一时 ORDER BY 序号正确。
+  - **只读推理，未端到端验证：** `StarRocksAdapter.run_query` 原样执行 `normalized_sql`，因此受治理查询工具会返回按错误列排序后截取的行。展示的“实际 SQL”与真正执行的一致，偏差在于它不同于用户写的排序。`explain_query` 会诊断改写后的 SQL。没有经过工具、Evidence、Session 与渠道的端到端复现。不涉及权限越界或数据范围扩大。
+  - **最小修复：** 输出名重复时拒绝 ORDER BY 序号（或要求唯一的显式别名，§2.3 已有此方向），或按位置而非名字解析；回归用例覆盖查询与执行计划两种产物、GROUP BY 对照和唯一名对照。
 - **D2 `||` 被改写为 OR，且 Adapter 未固定 `sql_mode`。** 现有 SQLGuard 接受 `s || 'x'` 并输出 `s OR 'x'`。4.1.4 默认 `sql_mode=ONLY_FULL_GROUP_BY` 时 `||` 本就是 OR，结果相同；目标全局 `sql_mode` 含 `PIPES_AS_CONCAT` 时，用户的拼接被改为逻辑或（实测 `'ax'` 变 NULL）。影响：结果语义取决于目标未受控的服务端设置。最小修复：Adapter 在现有会话设置中固定并回读 `sql_mode`，或 SQLGuard 拒绝 `||`；补回归用例。
 
-两项都不放宽权限。建议在 Task 3 开工前单独修复，或明确并入 Task 3 的验收，由审查者决定。
+两项都不放宽权限。**已决定（2026-10-03 审查轮）：** D1/D2 的产品代码修复另开小 PR，排在 Task 3 之前，不在 Task 0 文档 PR 中修改。
 
 ### 9.9 对计划的影响与暂停范围
 
 | 计划条款 | Task 0 结论 | 最小调整（待复审） | 依赖状态 |
 | --- | --- | --- | --- |
 | §2.2 权限探测 | 成立 | 写明列级授权不可用（只到表/视图）；角色须是默认/已激活角色，否则账号视为无权 | Task 1 不受影响；Task 2 可按此实施 |
-| §2.2/§2.6 对象版本 | `information_schema` 不足 | 采用 9.2 的版本元组；视图逐个 `SHOW CREATE VIEW`，计入刷新期限与容量 | Task 2/5 的版本部分按调整后的条款实施；未确认前不开放视图历史回放 |
+| §2.2/§2.6 对象版本 | `information_schema` 不足；视图元组不能发现间接依赖变化（B1） | 直接查询的表用 9.2 的表版本元组。依赖视图的 Evidence 在跨轮回放、历史读取与重发时一律按确定失效拒绝，只允许本轮实时读取；视图元组只作直接定义变化的附加检测 | Task 2/5 的表版本部分按此实施；**视图历史回放保持关闭**，重开需另行设计并复审 |
 | §2.3 规范化 | 多数一致，有 9.4 差异 | 列名按快照不区分大小写解析（库/表/别名保持敏感）；无别名函数列与重复名按“要求显式别名”处理；`DIV`、`||` 保持拒绝或固定语义；qualify schema 只含被引用对象 | Task 3 |
-| §2.4 风险评估 | 估算行数不可作扫描量；缺统计无法只靠计划文本识别 | 风险输入改为“结构扫描比例（partitionRatio/tabletRatio）× 元数据规模（`TABLE_ROWS`/`partitions_meta`，为 0 或未到报告周期即 unknown）”，加 `SHOW STATS META` 健康度；`SCHEMA-SCAN`、`TABLE FUNCTION`、未知算子一律 unknown；数据库资源组硬限额为启用前提 | **Task 4 暂停**，等审查者接受调整 |
+| §2.4 风险评估 | 估算行数不可作扫描量；分区/tablet 比例按个数计、不能乘总行数（B2）；缺统计无法只靠计划文本识别；行数元数据有上报滞后 | 每个 SCAN 的规模上界取“`partitions_meta` 中最大的 a 个分区 ROW_COUNT 之和”（a 为 partitionRatio 分子，忽略 tabletRatio）。以下任一情况为 unknown：对象元数据不可读（含账号无权的 MV 改写目标）、计数为 0、选中范围内任一分区 `VISIBLE_VERSION_TIME` 晚于“当前时间减去目标上验收的统计上报周期”。再加 `SHOW STATS META` 健康度；`SCHEMA-SCAN`、`TABLE FUNCTION`、未知算子一律 unknown；数据库资源组硬限额为启用前提。上界是行数，不是字节或代价 | **Task 4 继续暂停**，等审查者接受调整 |
 | §2.5 可恢复错误 | 白名单已确定 | 采用 9.5 白名单；EXPLAIN 语法错误停止 | Task 4 |
-| R5 资源 | 只读账号可自证命中的组与阈值 | 可加启动/刷新时的组核对；阈值 DBA 确认 | Task 4/8、P3 |
+| R5 资源 | 只读账号只能观察单条语句当下命中的组（B3）；组内存限制已独立命中 | 不把启动/周期核对当作绑定证明。可选：评估阶段对最终 SQL 逐条 `EXPLAIN VERBOSE` 核对组名在允许集合内（多一次往返，仍有核对到执行的窗口）。否则只作为 DBA 验收与变更后复核项，残余风险如实披露 | Task 4 设计时决定（随 Task 4 暂停）；Task 8、P3 |
 | §2.7 审计 | 设计成立 | 无 | Task 6 |
 
 Task 0 的十项实测已完成，最后一项（提交与独立审查）进行中。Task 1 依赖的多目标路由不受上述结论影响，但按 Task 0 依赖仍须等本节独立审查通过。
 
-**未覆盖：** 只验证单 FE/BE allin1 容器；没有 TLS 目标、存算分离、外表/外部 catalog、生产规模数据与并发；`statistic_collect_interval_sec` 调度对第二次导入的完整周期未观察完；BE 侧在取消后的残留与半开 TCP 未观察；`SHOW CREATE VIEW` 在千视图规模下的耗时未测；MV 布局取值与目标版本差异继续由 P3 复核。
+**未覆盖：** 只验证单 FE/BE allin1 容器；没有 TLS 目标、存算分离、外表/外部 catalog、生产规模数据与并发；`statistic_collect_interval_sec` 调度对第二次导入的完整周期未观察完；BE 侧在取消后的残留与半开 TCP 未观察；`SHOW CREATE VIEW` 在千视图规模下的耗时未测；视图依赖链的递归核对未设计也未测（本阶段关闭视图历史回放）；BE 统计上报超过一个周期仍未到达（上报失败）时的行为未测；结构刷新与整轮权限复核没有端到端计时；MV 布局取值与目标版本差异继续由 P3 复核。
