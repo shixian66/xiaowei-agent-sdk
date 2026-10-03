@@ -617,6 +617,16 @@ R3_NAME_SAMPLES = {
     "order join alias": "SELECT s.id AS region FROM sales s JOIN {h}.staff t ON s.id = t.id "
     "ORDER BY region",
     "order alias case": "SELECT id AS Total FROM sales ORDER BY total DESC LIMIT 3",
+    # 裸列的隐式输出名：两个来源都有 region，服务器按唯一输出 s.region 排序。
+    "order implicit output": "SELECT s.region FROM sales s JOIN {h}.staff t ON s.id = t.id "
+    "ORDER BY region DESC",
+    # 另一同名列来自其他来源，或输出是表达式：服务器仍按输出列排序（LIMIT 截取的行不同于物理列）。
+    "order other source": "SELECT s.id AS region, t.region AS tr FROM sales s "
+    "JOIN {h}.staff t ON s.id = t.id ORDER BY region DESC LIMIT 1",
+    "order self join": "SELECT a.id AS region, (b.region) AS br FROM sales a JOIN sales b "
+    "ON a.id = b.id ORDER BY region DESC LIMIT 3",
+    "order expression output": "SELECT id + 0 AS region, (region) AS r2 FROM sales "
+    "ORDER BY region LIMIT 3",
     # 相关子查询：本层没有 id、WHERE 看不到本层别名，id 是外层 s.id（只匹配 bonus 中的 1、2、5）。
     "correlated outer": "SELECT s.id FROM sales s WHERE EXISTS "
     "(SELECT b.bid AS id FROM {h}.bonus b WHERE id = b.bid) ORDER BY 1",
@@ -685,12 +695,30 @@ async def test_r3_names_resolve_like_the_server(instance: Instance) -> None:
                 with pytest.raises(QueryRejectedError) as refused:
                     check(sql, scope)
                 assert refused.value.code is code, name
-        # 交叉别名：投影中另有同名裸列时服务器改按那一列排序，不猜，拒绝。
-        for crossed in (
-            "SELECT id AS region, region AS id FROM sales ORDER BY id",
-            "SELECT id AS total, total AS t2 FROM sales ORDER BY total",
+        # 交叉别名：输出是列、投影另有同一来源的同名列（括号、限定写法不计）时，服务器改按那一列
+        # 排序，与按别名排序截取的行不同；不猜，拒绝。
+        for crossed, by_alias in (
+            ("SELECT id AS region, region AS id FROM sales ORDER BY id", None),
+            ("SELECT id AS total, total AS t2 FROM sales ORDER BY total", None),
+            (
+                "SELECT id AS region, (region) AS r2 FROM sales ORDER BY region LIMIT 3",
+                "SELECT id AS region, (region) AS r2 FROM sales ORDER BY id LIMIT 3",
+            ),
+            (
+                "SELECT id AS region, ((s.region)) AS r2 FROM sales s ORDER BY region LIMIT 3",
+                "SELECT id AS region, ((s.region)) AS r2 FROM sales s ORDER BY id LIMIT 3",
+            ),
+            (  # 同一来源 s；另一来源 b 也有 region
+                "SELECT s.id AS region, s.region AS sr FROM sales s JOIN sales b "
+                "ON s.id = b.id ORDER BY region LIMIT 3",
+                "SELECT s.id AS region, s.region AS sr FROM sales s JOIN sales b "
+                "ON s.id = b.id ORDER BY s.id LIMIT 3",
+            ),
         ):
-            assert await readonly_result(instance, crossed)
+            server = await readonly_result(instance, crossed)
+            assert server[1]
+            if by_alias is not None:
+                assert server != await readonly_result(instance, by_alias), crossed
             for check in (guard_readonly_query, guard_explain_query):
                 with pytest.raises(QueryRejectedError) as refused:
                     check(crossed, scope)

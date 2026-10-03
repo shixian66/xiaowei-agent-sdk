@@ -452,10 +452,10 @@ def test_unnamed_expressions_are_fine_where_no_name_is_exposed(sql: str) -> None
 
 # ---- 名字解析保持 StarRocks 语义 ---------------------------------------------------------------
 # StarRocks 4.1.4 实测（可丢弃实例）：WHERE、JOIN ON 与窗口只解析物理列，看不到输出别名；投影、
-# GROUP BY 与 HAVING 先物理列、后输出别名；顶层 ORDER BY 先输出别名，但投影中另有同名的裸列时
-# （``SELECT a AS b, b AS a ... ORDER BY a``、``SELECT a AS x, x AS z ... ORDER BY x``）改按那一列
-# 排序或报歧义，这种交叉别名拒绝。WHERE 中本层没有的名字按外层来源解析（相关子查询）。别名与
-# 列名都不区分大小写。
+# GROUP BY 与 HAVING 先物理列、后输出别名；ORDER BY 先输出名（显式别名与裸列的隐式列名），但该
+# 输出本身是列、投影另有来自同一来源的同名列时（括号与限定写法不计，``SELECT a AS x, (x) AS z
+# ... ORDER BY x``）改按那一列排序，这种交叉别名拒绝。WHERE 中本层没有的名字按外层来源解析
+# （相关子查询）。别名与列名都不区分大小写。
 
 BOTH = pytest.mark.parametrize("check", [guard_readonly_query, guard_explain_query])
 
@@ -539,9 +539,50 @@ def test_names_shadowed_by_an_output_alias_stay_physical_columns(check, sql, exp
             "SELECT total AS region, region FROM shop.sales ORDER BY region",
             Code.AMBIGUOUS_REFERENCE,
         ),
+        # 括号、限定写法不改变交叉：数据库仍按物理列排序（ORDER BY + LIMIT 时交付不同的行）。
         (
-            "SELECT s.id AS region, r.region AS rr FROM shop.sales s JOIN shop.regions r "
+            "SELECT total AS orders, (orders) AS o2 FROM shop.sales ORDER BY orders",
+            Code.AMBIGUOUS_REFERENCE,
+        ),
+        (
+            "SELECT total AS orders, ((orders)) AS o2 FROM shop.sales ORDER BY orders LIMIT 1",
+            Code.AMBIGUOUS_REFERENCE,
+        ),
+        (
+            "SELECT (total) AS orders, sales.orders AS o2 FROM shop.sales ORDER BY orders",
+            Code.AMBIGUOUS_REFERENCE,
+        ),
+        (
+            "SELECT s.total AS orders, (shop.s.orders) AS o2 FROM shop.sales s ORDER BY orders",
+            Code.COLUMN_NOT_ALLOWED,  # 库.表.列 的表名是别名：先按库名检查拒绝
+        ),
+        (
+            "SELECT total AS orders, (s.orders) AS o2 FROM shop.sales s ORDER BY -orders",
+            Code.AMBIGUOUS_REFERENCE,
+        ),
+        (  # 同一来源（JOIN 中的 s）
+            "SELECT s.total AS region, s.region AS sr FROM shop.sales s JOIN shop.regions r "
             "ON s.region = r.region ORDER BY region",
+            Code.AMBIGUOUS_REFERENCE,
+        ),
+        (  # 同一派生表来源
+            "SELECT c.total AS region, (c.region) AS r2 "
+            "FROM (SELECT total, region FROM shop.sales) c ORDER BY region",
+            Code.AMBIGUOUS_REFERENCE,
+        ),
+        (  # 派生表内的排序同样检查
+            "SELECT * FROM (SELECT total AS orders, (orders) AS o2 FROM shop.sales "
+            "ORDER BY orders LIMIT 1) d",
+            Code.AMBIGUOUS_REFERENCE,
+        ),
+        (  # 两个同名输出：数据库报歧义
+            "SELECT s.total AS region, r.region FROM shop.sales s JOIN shop.regions r "
+            "ON s.region = r.region ORDER BY region",
+            Code.AMBIGUOUS_REFERENCE,
+        ),
+        (  # 子查询中两个同名输出（不受结果列名检查约束）：同样报歧义
+            "SELECT name FROM shop.regions WHERE EXISTS (SELECT s.total AS region, t.region "
+            "FROM shop.sales s JOIN hr.staff t ON s.region = t.region ORDER BY region LIMIT 1)",
             Code.AMBIGUOUS_REFERENCE,
         ),
         (  # 相关子查询：两个外层来源都有 region
@@ -590,6 +631,41 @@ def test_alias_and_column_conflicts_are_not_resolved_by_guessing(check, sql, cod
             "SELECT s.id AS region FROM shop.sales s JOIN shop.regions r "
             "ON s.region = r.region ORDER BY region",
             "`s`.`id`",
+        ),
+        # 裸列的隐式输出名同样先于物理列：两个来源都有 region，按唯一输出 s.region 排序。
+        (
+            "SELECT s.region FROM shop.sales s JOIN shop.regions r "
+            "ON s.region = r.region ORDER BY region",
+            "`s`.`region`",
+        ),
+        (
+            "SELECT (s.region) AS region, r.name FROM shop.sales s JOIN shop.regions r "
+            "ON s.region = r.region ORDER BY region DESC",
+            "(`s`.`region`) DESC",
+        ),
+        # 另一同名列来自其他来源，或输出是表达式：数据库仍按输出列排序。
+        (
+            "SELECT s.id AS region, r.region AS rr FROM shop.sales s JOIN shop.regions r "
+            "ON s.region = r.region ORDER BY region",
+            "`s`.`id`",
+        ),
+        (
+            "SELECT (r.region) AS rr, s.id AS region FROM shop.sales s JOIN shop.regions r "
+            "ON s.region = r.region ORDER BY region",
+            "`s`.`id`",
+        ),
+        (
+            "SELECT a.total AS orders, b.orders AS o2 FROM shop.sales a JOIN shop.sales b "
+            "ON a.id = b.id ORDER BY orders",
+            "`a`.`total`",
+        ),
+        (
+            "SELECT total + 0 AS orders, (orders) AS o2 FROM shop.sales ORDER BY orders",
+            "`sales`.`total` + 0",
+        ),
+        (
+            "SELECT CAST(total AS INT) AS orders, orders AS o2 FROM shop.sales ORDER BY orders",
+            "CAST(`sales`.`total` AS INT)",
         ),
         ("SELECT total AS x, COUNT(*) AS n FROM shop.sales GROUP BY x ORDER BY 1", "1"),
     ],
@@ -779,3 +855,17 @@ def test_derived_output_names_keep_their_spelling_through_normalization(check, s
 )
 def test_dangerous_or_unsupported_syntax_stays_rejected(sql: str, code: Code) -> None:
     assert refused(sql) is code
+
+
+@BOTH
+def test_order_by_an_implicit_output_name_inside_a_subquery(check) -> None:  # type: ignore[no-untyped-def]
+    """标量子查询的裸列不补别名：ORDER BY 的名字改写为同一列，不按两个来源报歧义。"""
+    sql = (
+        "SELECT (SELECT s.region FROM shop.sales s JOIN shop.regions r "
+        "ON s.region = r.region ORDER BY region LIMIT 1) AS v"
+    )
+    assert "ORDER BY `s`.`region` LIMIT 1" in normalized(check, sql)
+    # 未起别名的括号列同样以列名作为输出名（4.1.4 实测）
+    assert "ORDER BY `s`.`region` LIMIT 1" in normalized(
+        check, sql.replace("s.region F", "((s.region)) F")
+    )

@@ -518,22 +518,16 @@ def _bind_columns(root: exp.Query, policy: QueryPolicy) -> None:
         shadows = aliases.get(id(scope.expression), {})
         for column in _own_columns(scope):
             if column.table:
-                owner = (
-                    scope.sources.get(column.table)
-                    if isinstance(column.this, exp.Star)  # 星号只展开本层来源
-                    else _lookup(scope, column.table)
-                )
-                if column.text("db"):
-                    _check_column_db(column, owner)
-                if not isinstance(column.this, exp.Star) and isinstance(owner, exp.Table | Scope):
-                    _rename(column, owner, names)
+                _bind_qualified(column, scope, names)
                 continue
             if isinstance(column.this, exp.Star):
                 continue
+            if _clause(column, scope.expression) == "order" and (
+                outputs := _outputs_named(scope.expression, column.name)
+            ):
+                if _bind_order_output(column, scope, outputs, names):
+                    continue
             shadowing = shadows.get(column.name.casefold())
-            if shadowing is not None and _clause(column, scope.expression) == "order":
-                _bind_order_alias(column, scope.expression, shadowing)
-                continue
             providers = [(n, s) for n, s in sources.items() if names.provides(s, column.name)]
             if len(providers) > 1:
                 _reject(_Code.AMBIGUOUS_REFERENCE)
@@ -547,26 +541,94 @@ def _bind_columns(root: exp.Query, policy: QueryPolicy) -> None:
 _PHYSICAL_FIRST: Final = frozenset({"expressions", "group", "having"})
 
 
-def _bind_order_alias(column: exp.Column, select: exp.Expr, shadowing: list[exp.Alias]) -> None:
-    """顶层 ORDER BY 中与输出别名同名（不区分大小写）的未限定名：StarRocks 4.1.4 先按别名解析，
-    与是否有同名物理列、有几个无关。但投影中另有同名的裸列时（``SELECT a AS b, b AS a ...
-    ORDER BY a``、``SELECT a AS x, x AS z ... ORDER BY x``）改按那一列排序或报歧义：这种交叉
-    别名拒绝。名字改写为别名的写法，交给 ``qualify`` 与 ``_inline_alias_reference`` 按别名内联。
+def _bind_qualified(column: exp.Column, scope: Scope, names: _Names) -> None:
+    owner = (
+        scope.sources.get(column.table)
+        if isinstance(column.this, exp.Star)  # 星号只展开本层来源
+        else _lookup(scope, column.table)
+    )
+    if column.text("db"):
+        _check_column_db(column, owner)
+    if not isinstance(column.this, exp.Star) and isinstance(owner, exp.Table | Scope):
+        _rename(column, owner, names)
+
+
+def _outputs_named(select: exp.Expr, name: str) -> list[exp.Expr]:
+    """本层 SELECT 中输出名与 ``name`` 相同（不区分大小写）的投影：显式别名，与裸列（括号不计）的
+    隐式列名。"""
+    if not isinstance(select, exp.Select):
+        return []
+    folded = name.casefold()
+    return [
+        p
+        for p in select.expressions
+        if (isinstance(p, exp.Alias) and p.alias.casefold() == folded)
+        or (
+            isinstance(c := _unparen(p), exp.Column)
+            and _is_named_column(c)
+            and c.name.casefold() == folded
+        )
+    ]
+
+
+def _bind_order_output(
+    column: exp.Column, scope: Scope, outputs: list[exp.Expr], names: _Names
+) -> bool:
+    """ORDER BY 中与输出名同名的未限定名，按 StarRocks 4.1.4 实测规则绑定到该输出列。
+
+    - 输出名唯一时按输出列排序，与是否有同名物理列、有几个无关；多个同名输出数据库报歧义。
+    - 例外：该输出本身是列 ``r.c``（括号不计）时，数据库把排序名当作 ``r.x`` 再与投影匹配；投影
+      另有来自同一来源的列 ``r.x``（括号、限定写法不计）时改按那一列排序（``SELECT a AS x, x
+      AS x2 ... ORDER BY x``）。这种交叉别名拒绝；来源不同（``t.a AS x, u.x AS ux``）或输出是
+      表达式（``a + 0 AS x``）时仍按输出列。来源无法唯一确定时同样拒绝，不猜。
+
+    显式或补写的别名：名字改写为别名的写法，交给 ``qualify`` 按别名内联；未补写别名的限定裸列
+    （标量、IN、EXISTS 子查询中）改写为同一列。未限定的裸列与排序名同名，返回 ``False`` 交给
+    常规的来源绑定。
     """
-    if len(shadowing) != 1 or not isinstance(select, exp.Select):
+    if len(outputs) != 1:
         _reject(_Code.AMBIGUOUS_REFERENCE)
-    (alias,) = shadowing
-    folded = column.name.casefold()
-    for projection in select.expressions:
-        expr = projection.this if isinstance(projection, exp.Alias) else projection
-        if (
-            projection is not alias
-            and isinstance(expr, exp.Column)
-            and not isinstance(expr.this, exp.Star)
-            and expr.name.casefold() == folded
-        ):
-            _reject(_Code.AMBIGUOUS_REFERENCE)
-    column.set("this", exp.to_identifier(alias.alias, quoted=True))
+    (output,) = outputs
+    target = _unparen(output.this if isinstance(output, exp.Alias) else output)
+    if isinstance(target, exp.Column) and _is_named_column(target):
+        source = _column_source(target, scope, names)
+        folded = column.name.casefold()
+        for projection in scope.expression.expressions:
+            other = _unparen(projection.this if isinstance(projection, exp.Alias) else projection)
+            if projection is output or not isinstance(other, exp.Column):
+                continue
+            if _is_named_column(other) and other.name.casefold() == folded:
+                found = _column_source(other, scope, names)
+                if source is None or found is None or found is source:
+                    _reject(_Code.AMBIGUOUS_REFERENCE)
+    if isinstance(output, exp.Alias):
+        column.set("this", exp.to_identifier(output.alias, quoted=True))
+        return True
+    if not isinstance(target, exp.Column) or not target.table:
+        return False
+    for part in ("this", "table", "db"):
+        if target.args.get(part) is not None:
+            column.set(part, target.args[part].copy())
+    _bind_qualified(column, scope, names)
+    return True
+
+
+def _unparen(node: exp.Expr) -> exp.Expr:
+    while isinstance(node, exp.Paren):
+        node = node.this
+    return node
+
+
+def _is_named_column(node: exp.Expr) -> bool:
+    return isinstance(node, exp.Column) and not isinstance(node.this, exp.Star)
+
+
+def _column_source(column: exp.Column, scope: Scope, names: _Names) -> exp.Table | Scope | None:
+    """投影列的来源：限定列按表名查找；未限定列取本层唯一提供该列的来源，否则未知。"""
+    if column.table:
+        return _lookup(scope, column.table)
+    found = [s for _, s in _sources(scope) if names.provides(s, column.name)]
+    return found[0] if len(found) == 1 else None
 
 
 def _bind_shadowed(
