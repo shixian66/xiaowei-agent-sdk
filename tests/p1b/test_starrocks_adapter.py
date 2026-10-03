@@ -100,9 +100,12 @@ TARGET = StarRocksTarget(
     policy=SQL_POLICY,
     schema_limits=LIMITS,
 )
-SESSION_SET = "SET query_timeout = 1, query_mem_limit = 1073741824, time_zone = 'Asia/Shanghai'"
-SESSION_READ = "SELECT @@query_timeout, @@query_mem_limit, @@time_zone"
-SESSION_VALUES: tuple[object, ...] = (1, 1073741824, "Asia/Shanghai")
+SESSION_SET = (
+    "SET query_timeout = 1, query_mem_limit = 1073741824, time_zone = 'Asia/Shanghai', "
+    "sql_mode = 'ONLY_FULL_GROUP_BY'"
+)
+SESSION_READ = "SELECT @@query_timeout, @@query_mem_limit, @@time_zone, @@sql_mode"
+SESSION_VALUES: tuple[object, ...] = (1, 1073741824, "Asia/Shanghai", "ONLY_FULL_GROUP_BY")
 
 
 # ---- recording 驱动替身 ---------------------------------------------------------------------
@@ -273,7 +276,7 @@ def driver(query: Result | BaseException | None = None, **conn: Any) -> Driver:
     def make() -> FakeConnection:
         results: dict[str, Any] = {
             SESSION_SET: Result(()),
-            SESSION_READ: Result(("q", "m", "t"), [SESSION_VALUES]),
+            SESSION_READ: Result(("q", "m", "t", "s"), [SESSION_VALUES]),
             **schema_results(),
             AUDIT_PROBE: Result(("1",)),
             "*": query if query is not None else Result(("region",), [("east",)]),
@@ -489,14 +492,14 @@ async def test_row_width_must_match_the_columns() -> None:
 @pytest.mark.parametrize(
     "values",
     [
-        (300, 1073741824, "Asia/Shanghai"),
-        (1, 0, "Asia/Shanghai"),
-        (1, 1073741824, "UTC"),
-        ("1", "1073741824", "Asia/Shanghai "),
+        (300, 1073741824, "Asia/Shanghai", "ONLY_FULL_GROUP_BY"),
+        (1, 0, "Asia/Shanghai", "ONLY_FULL_GROUP_BY"),
+        (1, 1073741824, "UTC", "ONLY_FULL_GROUP_BY"),
+        ("1", "1073741824", "Asia/Shanghai ", "ONLY_FULL_GROUP_BY"),
     ],
 )
 async def test_session_readback_mismatch_stops_before_the_query(values: tuple[object, ...]) -> None:
-    drv = driver(results={SESSION_READ: Result(("q", "m", "t"), [values])})
+    drv = driver(results={SESSION_READ: Result(("q", "m", "t", "s"), [values])})
     query = guarded()
 
     error = await failure(adapter(drv).run_query(query))
@@ -509,7 +512,11 @@ async def test_session_readback_mismatch_stops_before_the_query(values: tuple[ob
 
 async def test_readback_of_string_typed_values_is_accepted() -> None:
     drv = driver(
-        results={SESSION_READ: Result(("q", "m", "t"), [("1", "1073741824", "Asia/Shanghai")])}
+        results={
+            SESSION_READ: Result(
+                ("q", "m", "t", "s"), [("1", "1073741824", "Asia/Shanghai", "ONLY_FULL_GROUP_BY")]
+            )
+        }
     )
     assert (await adapter(drv).run_query(guarded())).row_count == 1
 
@@ -518,8 +525,8 @@ async def test_readback_of_string_typed_values_is_accepted() -> None:
     "results",
     [
         {SESSION_SET: OperationalError(1227, f"Access denied {CANARY}")},
-        {SESSION_READ: Result(("q", "m", "t"), [])},
-        {SESSION_READ: Result(("q", "m", "t"), [SESSION_VALUES, SESSION_VALUES])},
+        {SESSION_READ: Result(("q", "m", "t", "s"), [])},
+        {SESSION_READ: Result(("q", "m", "t", "s"), [SESSION_VALUES, SESSION_VALUES])},
         {SESSION_READ: Result(("q", "m"), [(1, 1073741824)])},
     ],
 )
@@ -538,6 +545,42 @@ async def test_session_setup_failures_never_run_the_query(
 
 
 # ---- 错误映射、期限、取消与并发 --------------------------------------------------------------
+
+
+@pytest.mark.parametrize("plan", [False, True], ids=["query", "explain"])
+async def test_sql_mode_is_set_and_verified_before_business_sql(plan: bool) -> None:
+    drv = driver(plan_result("plan") if plan else Result(("x",), [(1,)]))
+    ada = adapter(drv)
+    sql = "SELECT 0 || 1 AS x"
+    result = await ada.explain(explained(sql)) if plan else await ada.run_query(guarded(sql))
+    sent = [sql for sql, _ in only(drv).executed]
+    assert "sql_mode = 'ONLY_FULL_GROUP_BY'" in sent[0]
+    assert sent[1] == "SELECT @@query_timeout, @@query_mem_limit, @@time_zone, @@sql_mode"
+    assert sent[2] == result.sql and " OR " in result.sql
+
+
+@pytest.mark.parametrize("plan", [False, True], ids=["query", "explain"])
+@pytest.mark.parametrize("mode", ["", "PIPES_AS_CONCAT", "ONLY_FULL_GROUP_BY,PIPES_AS_CONCAT"])
+async def test_sql_mode_mismatch_never_sends_business_sql(plan: bool, mode: str) -> None:
+    drv = driver(
+        plan_result("plan") if plan else Result(("x",), [(1,)]),
+        results={
+            "SELECT @@query_timeout, @@query_mem_limit, @@time_zone, @@sql_mode": Result(
+                ("q", "m", "t", "s"), [(1, 1073741824, "Asia/Shanghai", mode)]
+            )
+        },
+    )
+    ada = adapter(drv)
+    call = (
+        ada.explain(explained("SELECT 0 || 1 AS x"))
+        if plan
+        else ada.run_query(guarded("SELECT 0 || 1 AS x"))
+    )
+    error = await failure(call)
+    conn = only(drv)
+    assert error.code is Code.SESSION_SETUP_FAILED
+    assert len(conn.executed) == 2 and conn.aborted
+    assert_safe(error)
 
 
 @pytest.mark.parametrize(

@@ -671,7 +671,8 @@ class SyntheticStarRocks:
         t, audit = self.target, self.target.audit
         session = (
             f"SET query_timeout = {t.query_timeout_seconds}, "
-            f"query_mem_limit = {t.query_mem_limit_bytes}, time_zone = '{t.time_zone}'"
+            f"query_mem_limit = {t.query_mem_limit_bytes}, time_zone = '{t.time_zone}', "
+            "sql_mode = 'ONLY_FULL_GROUP_BY'"
         )
         if sql in (session, _SESSION_READ):
             return "session"
@@ -699,8 +700,13 @@ class SyntheticStarRocks:
         if kind == "session":
             if sql.startswith("SET "):
                 return (), []
-            return ("q", "m", "t"), [
-                (t.query_timeout_seconds, t.query_mem_limit_bytes, t.time_zone)
+            return ("q", "m", "t", "s"), [
+                (
+                    t.query_timeout_seconds,
+                    t.query_mem_limit_bytes,
+                    t.time_zone,
+                    "ONLY_FULL_GROUP_BY",
+                )
             ]
         if kind == "probe":
             return ("1",), []

@@ -10,7 +10,7 @@
 
 **Spec:** [ARCHITECTURE §5 本轮意图](../../../ARCHITECTURE.md#turn-purpose)、[§6 R1–R6](../../../ARCHITECTURE.md#p25-scope)、§9 是产品/权限边界唯一来源；[DEVELOPMENT_PLAN §6](../../../DEVELOPMENT_PLAN.md) 只维护顺序和退出条件。本文维护本阶段的技术契约、依赖与验收。群聊单独见 [单群计划](2026-10-03-feishu-group.md)，不在这里复制其任务。
 
-**Baseline / 状态：** 规划源代码为 `7a715ff61d7a97457b03bb8b596ef4238c1049f2`，与本地 `origin/main` `0f831ebe070e7b11b1597fbdf59921b19981b129` 内容相同；P2 离线完成，P1/P2 实战缺口继承到 P3。文档候选 v2（2026-10-03，按用户对 aed344b 的六项决定修订）已在 `719c1c7` 通过复审；Task 0 实测证据、对计划的影响与暂停范围见 §9，经复审随 PR #32 合入（`29678006f380621dda5ddb772b7affa072a59776`）。Task 1 多目标路由经独立审查随 PR #33 合入（`6ccc7a4e6e5c8ec4bac5093d4300bda63ae88605`）；Task 2 自动结构快照已实现，首轮独立审查后按用户决定修订（前移 Evidence 当前权限闭环、摘要 v2、列表探测硬上限），待复审（实施说明见 Task 2 节末）；Task 3–8 未实施。
+**Baseline / 状态：** 规划源代码为 `7a715ff61d7a97457b03bb8b596ef4238c1049f2`，与本地 `origin/main` `0f831ebe070e7b11b1597fbdf59921b19981b129` 内容相同；P2 离线完成，P1/P2 实战缺口继承到 P3。文档候选 v2（2026-10-03，按用户对 aed344b 的六项决定修订）已在 `719c1c7` 通过复审；Task 0 实测证据、对计划的影响与暂停范围见 §9，经复审随 PR #32 合入（`29678006f380621dda5ddb772b7affa072a59776`）。Task 1 多目标路由经独立审查随 PR #33 合入（`6ccc7a4e6e5c8ec4bac5093d4300bda63ae88605`）；Task 2 自动结构快照及审查修订（前移 Evidence 当前权限闭环、摘要 v2、列表探测硬上限）经复审随 PR #34 合入（`d497a34e468eb0b9987a5e0eac1dea7a9fbf8a08`，实施说明见 Task 2 节末）；Task 3–8 未实施。
 
 ## Global Constraints
 
@@ -226,9 +226,9 @@ Web / 飞书单聊（群入口在后续独立计划）
 - [x] 时钟可控地测试首次失败、成功、刷新失败沿用、到期拒绝、并发刷新只一次、完整替换、取消/关闭、目标独立、超过对象/列/字节限额不能发布部分快照。
 - [x] 权限成功/拒绝/网络失败对照，覆盖视图、表/列/角色授权与变化；输出字段不能只按 information_schema 可见性放行。
 - [x] 接真实可丢弃 StarRocks 复核 Task 0 权限结果及新建/撤权；记录新授权可见时限和当前权限拒绝边界。
-- [ ] 运行 §5 C2 与 SR；变异跳过过期/权限检查或发布部分快照应失败。提交 `feat: discover bounded schemas under current database grants`，独立审查。
+- [x] 运行 §5 C2 与 SR；变异跳过过期/权限检查或发布部分快照应失败。提交 `feat: discover bounded schemas under current database grants`，独立审查。
 
-**Task 2 实施说明（首轮审查后修订，待复审）：**
+**Task 2 实施说明（已复审，随 PR #34 合入 `d497a34`）：**
 
 - **快照：** 新增 `starrocks_schema.SchemaCache`，每个目标一份。一次刷新在 `refresh_timeout_seconds` 内依次读取 `information_schema.tables` / `columns` / `tables_config`（排除 `information_schema`、`sys`、`_statistics_`），再在一条连接上对每个对象做零行 SELECT 探测，只保留确认可读的对象。读取超过 `max_objects` / `max_columns` / `max_bytes`、探测无法判定、结果不合契约或超时，都整份不发布；旧快照沿用到它自己的到期时间（从采集开始计），失败不延长期限。single-flight，等待者取消不中止共享刷新，`aclose` 取消进行中的刷新。启动时各目标并行刷新一次（失败只让该目标不可用），之后后台定时刷新。
 - **配置：** `policy` 只剩 `allowed_functions`、`max_rows`、`max_sql_bytes`，旧的 `allowed_objects` / `allowed_columns`（及 `target_id`、`default_database`）报迁移说明；新增必填的 `schema_limits`（刷新间隔、最大年龄、刷新期限有设计默认值 60 / 300 / 10 秒，容量必须配置）。
@@ -499,6 +499,8 @@ INSERT-only 表经 Adapter 映射为 `permission_denied`。`WHERE 1 = 0` 在 FE 
 
 ### 9.8 现有代码缺陷（只记录，不在 Task 0 修改）
 
+下文保留 Task 0 发现时的事实。D1/D2 后续独立修复（PR #35，基于 PR #34 合入的 `d497a34`）已在 `81cf4cc16981e74f2b2307f12127ff8d66309f83` 通过独立审查；实施证据见 [AGENT_HANDOFF](../../../AGENT_HANDOFF.md) 的“D1/D2 修复”。固定 SQL 模式的当前契约只在 [ARCHITECTURE §6](../../../ARCHITECTURE.md#6-只读查询保护) 维护。新增真实证据已确认：内层重名、外层唯一的 CTE/子查询在旧代码上可经治理与 Evidence 交付错误结果，修复后与原 SQL 一致。
+
 - **D1 输出名重复时，ORDER BY 序号被改写到同名的另一列（`src/xiaowei/sqlguard.py`，当前主线即有）。**
   - **已验证（`guard_readonly_query` / `guard_explain_query` 产物，加只读账号绕过 Adapter 直接执行规范化 SQL）：** `SELECT t.id AS x, t.val AS x FROM t_sem t ORDER BY 1` 两种产物都改写为 `ORDER BY t.val`（序号 1 应为 `t.id`）。以 `max_rows=2`（LIMIT 3）执行，原 SQL 返回 `[(1,3),(2,None),(3,1)]`，规范化 SQL 返回 `[(2,None),(3,1),(5,2)]`。`… a.id, b.id … ORDER BY 1, 2` 改写为 `ORDER BY b.id, b.id`；`… GROUP BY 1, 2 ORDER BY 3 DESC, 1` 改写为 `ORDER BY COUNT(*) DESC, t.val`（序号 1 应为 `t.grp`），这两例在该数据上恰好返回相同行。
   - **不受影响（已验证）：** GROUP BY 序号按位置解析正确；输出名唯一时 ORDER BY 序号正确。
@@ -508,7 +510,7 @@ INSERT-only 表经 Adapter 映射为 `permission_denied`。`WHERE 1 = 0` 在 FE 
     - 治理层把 Adapter 异常转为 `ToolExecutionError` 并停止本轮，不进入成功 Evidence 的记录路径（`src/xiaowei/governance.py`）。
     - 唯一列名的对照正常返回结果。
     - 诊断路径 `explain_query` 发送的是序号已被改写的 `EXPLAIN LOGICAL`：计划只有一列，不触发重复列名检查，因此分析的是错误的 SQL。
-  - **未验证：** 内层（CTE/子查询）输出名重复而外层输出唯一时，是否会产生可交付的错误排序结果，由 D1 小 PR 的回归用例确认。不涉及权限越界或数据范围扩大。
+  - **Task 0 当时未验证（后续 D1 修复已补证，见本节开头）：** 内层（CTE/子查询）输出名重复而外层输出唯一时，是否会产生可交付的错误排序结果。不涉及权限越界或数据范围扩大。
   - **最小修复：** 输出名重复时拒绝 ORDER BY 序号（或要求唯一的显式别名，§2.3 已有此方向），或按位置而非名字解析；回归用例覆盖查询与执行计划两种产物、GROUP BY 对照和唯一名对照。
 - **D2 `||` 被改写为 OR，且 Adapter 未固定 `sql_mode`。** 现有 SQLGuard 接受 `s || 'x'` 并输出 `s OR 'x'`。4.1.4 默认 `sql_mode=ONLY_FULL_GROUP_BY` 时 `||` 本就是 OR，结果相同；目标全局 `sql_mode` 含 `PIPES_AS_CONCAT` 时，用户的拼接被改为逻辑或（实测 `'ax'` 变 NULL）。影响：结果语义取决于目标未受控的服务端设置。最小修复：Adapter 在现有会话设置中固定并回读 `sql_mode`，或 SQLGuard 拒绝 `||`；补回归用例。
 

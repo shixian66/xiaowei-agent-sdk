@@ -9,8 +9,8 @@ ANALYZE 而实际执行查询。显式级别 ``LOGICAL`` 由 P2 Task 0 在 StarR
 决定是否回收，``close()`` 后连接仍可能回到空闲队列；每次新建连接可以保证中断、截断或结果
 不明的连接绝不被下一次请求使用，也不会让会话变量跨请求残留。
 
-每条连接先用可信值设置 ``query_timeout``、``query_mem_limit``、``time_zone`` 并回读核对，
-任一步失败都不执行查询。读取使用驱动的非缓冲游标，最多读 ``max_returned_rows + 1`` 行；
+每条连接先用可信值设置 ``query_timeout``、``query_mem_limit``、``time_zone``、``sql_mode``，
+并回读核对，任一步失败都不执行查询。非缓冲游标最多读 ``max_returned_rows + 1`` 行；
 总字节按生产 JSON 编码（``ensure_ascii=False``、默认分隔符）后的 UTF-8 大小计算，单值同样
 如此。超过行数、总字节或单值上限时不保留该行，标记截断并中止连接。只有完整读完的连接
 才发送 ``QUIT`` 正常关闭；截断、错误、超时、取消一律直接断开，不重试。客户端取消或超时
@@ -69,6 +69,9 @@ from xiaowei.sqlguard import ExplainQuery, GuardedQuery, QueryPolicy, guard_expl
 
 # 不进入数据范围的系统库（4.1.4）：元数据视图、系统表与统计信息库。
 SYSTEM_DATABASES: Final = ("information_schema", "sys", "_statistics_")
+
+SQL_MODE: Final = "ONLY_FULL_GROUP_BY"
+"""与 SQLGuard 的 StarRocks 方言一致：|| 为 OR；会话不继承全局 PIPES_AS_CONCAT 等模式。"""
 
 EXPLAIN_LEVEL: Final = "LOGICAL"
 """P2 Task 0 在 4.1.4 上选定：FE 默认级别为 ANALYZE 时仍零执行，且不输出列统计值或资源组。"""
@@ -482,7 +485,7 @@ _DESCRIBE_LAYOUT: Final = (
     "FROM information_schema.tables_config "
     "WHERE TABLE_SCHEMA = %s AND TABLE_NAME = %s AND TABLE_ENGINE <> %s"
 )
-_SESSION_READ: Final = "SELECT @@query_timeout, @@query_mem_limit, @@time_zone"
+_SESSION_READ: Final = "SELECT @@query_timeout, @@query_mem_limit, @@time_zone, @@sql_mode"
 # 库表名来自配置并已按 [A-Za-z0-9_] 校验，排序列来自固定映射；其余全部绑定。
 _AUDIT_CANDIDATES: Final = (
     "SELECT queryId, `timestamp`, queryTime, scanBytes, scanRows, returnRows, cpuCostNs, "
@@ -920,10 +923,15 @@ class StarRocksAdapter:
 
     async def _prepare_session(self, conn: Connection) -> None:
         t = self._target
-        expected = (str(t.query_timeout_seconds), str(t.query_mem_limit_bytes), t.time_zone)
+        expected = (
+            str(t.query_timeout_seconds),
+            str(t.query_mem_limit_bytes),
+            t.time_zone,
+            SQL_MODE,
+        )
         await conn.execute(
             f"SET query_timeout = {expected[0]}, query_mem_limit = {expected[1]}, "
-            f"time_zone = '{expected[2]}'",
+            f"time_zone = '{expected[2]}', sql_mode = '{expected[3]}'",
             None,
         )
         while await conn.fetch_row() is not None:
