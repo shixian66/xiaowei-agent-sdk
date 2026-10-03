@@ -29,7 +29,7 @@ import httpx2
 from pydantic import BaseModel, ConfigDict
 from sqlalchemy.ext.asyncio import AsyncEngine
 
-from xiaowei.app import AppConfig, Application, DataPolicy, Mode, TurnError
+from xiaowei.app import AppConfig, Application, DataPolicy, Mode, TargetInfo, TurnError
 from xiaowei.evidence import AnswerRejectedError, EvidenceStore
 from xiaowei.governance import GovernedTools, Projection, ToolCatalog, ToolPolicy
 from xiaowei.model_api import ModelProfile, open_model
@@ -345,7 +345,10 @@ async def gate0_app(
             model=binding,
             engine=engine,
             governance=governed,
-            local_tools={SALES_TOOL: adapter.execute, REGIONS_TOOL: adapter.execute},
+            local_tools={
+                (SALES_TOOL, TARGET): adapter.execute,
+                (REGIONS_TOOL, TARGET): adapter.execute,
+            },
             clock=clock,
         )
         yield Gate0(app=app, evidence=evidence, adapter=adapter, observer=observer)
@@ -872,6 +875,13 @@ async def diagnosis_app(
             max_history_turns=5, max_history_bytes=200_000, retention_seconds=RETENTION_SECONDS
         ),
         max_concurrent_turns=1,
+        targets=(
+            TargetInfo(
+                target_id=DIAG_TARGET.target_id,
+                description="合成订单库，用于诊断样例",
+                business_context=None,
+            ),
+        ),
     )
     async with open_model(profile, transport=observer) as binding:
         app = Application(

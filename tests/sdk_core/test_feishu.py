@@ -21,7 +21,7 @@ from lark_channel.channel.errors import FeishuChannelErrorCode, SendError
 from lark_channel.channel.types import SendResult
 from pydantic import ValidationError
 from sqlalchemy import text as text_sql
-from tests.sdk_core.synthetic_tools import QUERY_TOOL
+from tests.sdk_core.synthetic_tools import QUERY_TOOL, TARGET
 from tests.sdk_core.test_app import after, cite, tool_call
 from tests.sdk_core.test_channel_service import Env, app_config
 from tests.sdk_core.test_channel_service import env as env  # pytest fixture
@@ -463,7 +463,7 @@ async def test_web_and_feishu_share_the_global_turn_limit(env: Env) -> None:
         model=env.binding,
         engine=env.engine,
         governance=GovernedTools(env.evidence),
-        local_tools={t: env.adapter.execute for t in env.app.available_tools},
+        local_tools={(t, TARGET): env.adapter.execute for t in env.app.available_tools},
         clock=env.clock,
     )
     service = ChannelService(app, env.results())

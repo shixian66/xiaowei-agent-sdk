@@ -10,7 +10,7 @@
 
 **Spec:** [ARCHITECTURE §5 本轮意图](../../../ARCHITECTURE.md#turn-purpose)、[§6 R1–R6](../../../ARCHITECTURE.md#p25-scope)、§9 是产品/权限边界唯一来源；[DEVELOPMENT_PLAN §6](../../../DEVELOPMENT_PLAN.md) 只维护顺序和退出条件。本文维护本阶段的技术契约、依赖与验收。群聊单独见 [单群计划](2026-10-03-feishu-group.md)，不在这里复制其任务。
 
-**Baseline / 状态：** 规划源代码为 `7a715ff61d7a97457b03bb8b596ef4238c1049f2`，与本地 `origin/main` `0f831ebe070e7b11b1597fbdf59921b19981b129` 内容相同；P2 离线完成，P1/P2 实战缺口继承到 P3。文档候选 v2（2026-10-03，按用户对 aed344b 的六项决定修订）已在 `719c1c7` 通过复审；Task 0 实测证据、对计划的影响与暂停范围见 §9，待独立审查。Task 1–8 未实施。
+**Baseline / 状态：** 规划源代码为 `7a715ff61d7a97457b03bb8b596ef4238c1049f2`，与本地 `origin/main` `0f831ebe070e7b11b1597fbdf59921b19981b129` 内容相同；P2 离线完成，P1/P2 实战缺口继承到 P3。文档候选 v2（2026-10-03，按用户对 aed344b 的六项决定修订）已在 `719c1c7` 通过复审；Task 0 实测证据、对计划的影响与暂停范围见 §9，经复审随 PR #32 合入（`29678006f380621dda5ddb772b7affa072a59776`）。Task 1 多目标路由已实现、待独立审查（实施说明见 Task 1 节末）；Task 2–8 未实施。
 
 ## Global Constraints
 
@@ -196,7 +196,7 @@ Web / 飞书单聊（群入口在后续独立计划）
 - [x] 收集 LOGICAL 的小扫描、全分区、大 JOIN/排序/聚合、视图/MV、缺统计、未知节点及截断样本；确定可解析字段、估计的单位/限制，说明统计失真不能由预评估消除。不得发明 optimizer cost 到真实 CPU/内存的换算。
 - [x] 使用极低测试阈值验证 Resource Group 实际账号匹配、CPU/内存/每 BE 扫描限制、query_timeout/内存回读、并发/取消残余；只对合成负载施加限制，不造生产规模压力。确认普通只读账号能否证明资源组绑定，不能证明则将 DBA 验收列为启用前提。
 - [x] 审计记录覆盖 Db 为 A、SQL 显式引用 B、跨库 JOIN、Db 为空、原文截断与候选被过滤；确定移除单库过滤后的有界行为。
-- [ ] 提交 `docs: record p25 StarRocks prerequisite evidence`；给出镜像 digest、驱动/插件版本、命令、安全输出和未通过项，独立审查；任何必须条件失败不得进入依赖片。
+- [x] 提交 `docs: record p25 StarRocks prerequisite evidence`；给出镜像 digest、驱动/插件版本、命令、安全输出和未通过项，独立审查；任何必须条件失败不得进入依赖片。
 
 ### Task 1：多目标配置与一套工具的准确路由
 
@@ -204,10 +204,18 @@ Web / 飞书单聊（群入口在后续独立计划）
 
 **接口：** 消费可信 targets 配置；提供 `(tool_id, target_id)` 契约选择、目标集合与模型可见的安全能力说明（§2.1）。
 
-- [ ] 先测三个 recording Adapter 返回不同常量；未知/缺少 cluster、用户撤权、重复 ID、未知类型、单目标无 audit、并行不同目标都命中正确分支；拒绝时所有 Adapter/connector 调用为 0。
-- [ ] 一套 SDK 函数 schema 必须要求 cluster，模型参数不得覆盖 target/连接；MCP 单目标和非 StarRocks 契约成功对照保留。配置旧格式报可操作迁移错误。
-- [ ] 实现最小装配/路由，检查 Evidence、Session 和所有 catalog 调用者，无只有入口支持多目标的半成品。
+- [x] 先测三个 recording Adapter 返回不同常量；未知/缺少 cluster、用户撤权、重复 ID、未知类型、单目标无 audit、并行不同目标都命中正确分支；拒绝时所有 Adapter/connector 调用为 0。
+- [x] 一套 SDK 函数 schema 必须要求 cluster，模型参数不得覆盖 target/连接；MCP 单目标和非 StarRocks 契约成功对照保留。配置旧格式报可操作迁移错误。
+- [x] 实现最小装配/路由，检查 Evidence、Session 和所有 catalog 调用者，无只有入口支持多目标的半成品。
 - [ ] 运行 §5 C1；隔离变异删除目标校验、按 tool_id 单键查找，应分别导致用例失败。提交 `feat: route governed database tools to explicit targets`，独立审查。
+
+**Task 1 实施说明（待独立审查）：**
+
+- **配置：** `targets` 是列表而不是以 ID 为键的对象：JSON 解析对重复键静默取后者，列表才能拒绝重复 ID。每项为 `type`（仅 `starrocks`）、`description`、`business_context`（`version`/`text`，可为 null）与 `starrocks`（原单目标配置）；集群 ID 取 `starrocks.target_id`，限 1–32 位小写字母、数字、`_`、`-`。顶层出现旧 `starrocks`/`business_context` 时报迁移说明，不双读。
+- **手写表列字段暂留：** 每个目标仍带 SQLGuard allowlist（`policy`）。取消它依赖 Task 2 的自动 schema 与当前权限，本片只做路由，不提前删除。
+- **路由：** 工具目录按 `(tool_id, target_id)` 登记与查找；同一工具登记在多个目标上时，各目标的参数 schema 必须相同且声明 `cluster`。模型看到一个函数，包装层按 `cluster` 选择契约与执行函数，未知、缺失或非字符串的 `cluster` 在授权查询与 I/O 前拒绝；治理层再核对参数 `cluster` 等于契约目标。策略按目标登记（`starrocks.<集群>.<工具>`），数据范围摘要不变。
+- **兼容：** MCP 与合成工具不声明 `cluster`，仍各有唯一目标；`data_scope=None` 的指纹公式未改。StarRocks 策略 ID 与会话绑定（新增目标集合与各目标口径）变化，已有 StarRocks 证据与会话一次失效，与 §6 的配置一次迁移一致。
+- **说明交给模型：** instructions 列出每个集群的 ID、用途说明、可用工具与业务口径；连接地址、账号与凭据引用不进入 instructions 或工具定义（测试断言）。只配置了审计源的集群登记 `list_slow_queries`。
 
 ### Task 2：有界自动 schema 与账号权限验证
 
@@ -345,7 +353,7 @@ Task 0 的规模实验不进入日常 CI；后续每片只跑受影响命令和�
 - [x] 配置/迁移/SDK 表归属、恢复与旧进程风险明确；不把离线、隔离数据库、真实模型、部署和用户验收混为一谈。
 - [ ] 针对本轮最终文档提交的精确 SHA 独立审查；文档检查通过不代表此项已完成。
 
-## 9. Task 0 证据（2026-10-03，待独立审查）
+## 9. Task 0 证据（2026-10-03，已复审）
 
 基线 `719c1c70d8d790e2db38e8791aa3a2af34b1322c`，只改文档；`src/`、`tests/`、配置、依赖与 P2 计划无差异。下列结论只覆盖本机可丢弃 StarRocks 4.1.4 与锁定依赖，不代表 P3 目标集群（Q6）。
 

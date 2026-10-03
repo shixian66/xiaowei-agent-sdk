@@ -16,12 +16,14 @@ from typing import Any
 
 import httpx2
 import pytest
+from agents.testing import function_call
 from asyncmy.errors import OperationalError
 from sqlalchemy import text
 from sqlalchemy.engine import URL
 from sqlalchemy.ext.asyncio import AsyncEngine
 from tests.p1b.test_starrocks_adapter import NOW, POLICY, Driver, Result, driver
 from tests.p1b.test_starrocks_adapter import TARGET as SR
+from tests.p1b.test_starrocks_audit import AUDIT_TARGET
 from tests.sdk_core.synthetic_tools import Clock, Grants, ready_engine
 from tests.sdk_core.test_app import (
     PROFILE,
@@ -34,7 +36,15 @@ from tests.sdk_core.test_app import (
     tool_call,
 )
 
-from xiaowei.app import AppConfig, Application, BusinessContext, DataPolicy, Mode, TurnError
+from xiaowei.app import (
+    AppConfig,
+    Application,
+    BusinessContext,
+    DataPolicy,
+    Mode,
+    TargetInfo,
+    TurnError,
+)
 from xiaowei.evidence import (
     AnswerRejectedError,
     EvidenceStore,
@@ -57,6 +67,7 @@ from xiaowei.session import SessionInputPolicy, SessionLimits
 from xiaowei.sqlguard import guard_explain_query, guard_readonly_query
 from xiaowei.starrocks import EXPLAIN_PREFIX, StarRocksAdapter, StarRocksTarget
 from xiaowei.starrocks_tools import (
+    AUDIT_TOOLS,
     DESCRIBE_TABLE,
     DIAGNOSE_TOOLS,
     EXPLAIN_QUERY,
@@ -82,9 +93,8 @@ SDK_NAMES = {
 }
 # Task 0 在 4.1.4 上实测：服务端返回单列 ``Explain String``，每行一行计划文本。
 PLAN = Result(("Explain String",), [("- Output => [1:region]",), ("    - SCAN [sales]",)])
-CONTEXT = BusinessContext(
-    target_id=SR.target_id, version="v1", text="total 单位为元，时区为 Asia/Shanghai。"
-)
+CONTEXT = BusinessContext(version="v1", text="total 单位为元，时区为 Asia/Shanghai。")
+INFO = TargetInfo(target_id=SR.target_id, description="合成销售库", business_context=CONTEXT)
 
 
 def app_config(**overrides: Any) -> AppConfig:
@@ -99,7 +109,7 @@ def app_config(**overrides: Any) -> AppConfig:
             max_history_turns=5, max_history_bytes=400_000, retention_seconds=7200
         ),
         "max_concurrent_turns": 2,
-        "business_context": CONTEXT,
+        "targets": (INFO,),
     }
     values.update(overrides)
     return AppConfig(**values)
@@ -110,9 +120,12 @@ class RecordingScripts(Scripts):
     """另外记录每次模型请求的 instructions。"""
 
     instructions: list[str] = field(default_factory=list)
+    tool_specs: list[list[dict[str, Any]]] = field(default_factory=list)
 
     async def _handle(self, request: httpx2.Request) -> httpx2.Response:
-        self.instructions.append(json.loads(request.content).get("instructions", ""))
+        body = json.loads(request.content)
+        self.instructions.append(body.get("instructions", ""))
+        self.tool_specs.append(body.get("tools", []))
         return await super()._handle(request)
 
 
@@ -240,8 +253,9 @@ async def test_business_context_reaches_instructions_and_binds_the_session(env: 
     (instructions,) = env.scripts.instructions
     assert CONTEXT.text in instructions and "版本 v1" in instructions
 
+    v2 = CONTEXT.model_copy(update={"version": "v2"})
     changed = env.application(
-        app_config(business_context=CONTEXT.model_copy(update={"version": "v2"}))
+        app_config(targets=(INFO.model_copy(update={"business_context": v2}),))
     )
     later = env.scripts.add("口径变化后", clarify())
     with pytest.raises(TurnError) as refused:
@@ -251,9 +265,9 @@ async def test_business_context_reaches_instructions_and_binds_the_session(env: 
 
 
 async def test_business_context_must_belong_to_a_registered_target(env: Env) -> None:
-    stray = CONTEXT.model_copy(update={"target_id": "other-target"})
-    with pytest.raises(ValueError, match="业务口径"):
-        env.application(app_config(business_context=stray))
+    stray = INFO.model_copy(update={"target_id": "other-target"})
+    with pytest.raises(ValueError, match="目标 other-target 没有登记的工具"):
+        env.application(app_config(targets=(INFO, stray)))
 
 
 # ---- 成功路径：真 Runner → 治理 → SQLGuard → Adapter → Evidence → 交付 ----------------------
@@ -262,7 +276,9 @@ async def test_business_context_must_belong_to_a_registered_target(env: Env) -> 
 async def test_query_runs_guarded_sql_and_delivers_structured_facts(env: Env) -> None:
     message = env.scripts.add(
         "东区与西区的订单总额",
-        tool_call("run_readonly_query", sql="select region, total from sales"),
+        tool_call(
+            "run_readonly_query", cluster=SR.target_id, sql="select region, total from sales"
+        ),
         cite("东区高于西区"),
     )
     ctx = env.ctx(turn="t1")
@@ -324,9 +340,13 @@ async def test_feishu_gets_the_same_rows_as_plain_text_without_facts(env: Env) -
     env.drv.make = driver(HOSTILE).make
     sql = "SELECT region, note FROM sales WHERE note <> 'a\u2028b'"
     feishu = env.scripts.add(
-        "飞书：东区订单", tool_call("run_readonly_query", sql=sql), cite(FORGED_ANALYSIS)
+        "飞书：东区订单",
+        tool_call("run_readonly_query", cluster=SR.target_id, sql=sql),
+        cite(FORGED_ANALYSIS),
     )
-    web = env.scripts.add("网页：东区订单", tool_call("run_readonly_query", sql=sql), cite())
+    web = env.scripts.add(
+        "网页：东区订单", tool_call("run_readonly_query", cluster=SR.target_id, sql=sql), cite()
+    )
     delivered = await env.deliver(env.ctx(session="s-feishu", channel="feishu"), feishu)
     on_web = await env.deliver(env.ctx(session="s-web"), web)
 
@@ -367,7 +387,9 @@ async def test_clarification_cannot_forge_a_facts_section(env: Env) -> None:
 async def test_truncated_results_are_marked_in_every_delivery(env: Env) -> None:
     env.drv.make = driver(Result(("region",), [(f"r{i}",) for i in range(20)])).make
     message = env.scripts.add(
-        "全部地区", tool_call("run_readonly_query", sql="SELECT region FROM sales"), cite()
+        "全部地区",
+        tool_call("run_readonly_query", cluster=SR.target_id, sql="SELECT region FROM sales"),
+        cite(),
     )
     delivered = await env.deliver(env.ctx(), message)
     (fact,) = delivered.facts
@@ -380,8 +402,8 @@ async def test_metadata_tools_only_run_code_generated_queries(env: Env) -> None:
     env.drv.make = driver(Result(("name", "type", "nullable"), [("region", "varchar", "YES")])).make
     message = env.scripts.add(
         "诊断：sales 有哪些列",
-        tool_call("list_tables"),
-        tool_call("describe_table", table="sales"),
+        tool_call("list_tables", cluster=SR.target_id),
+        tool_call("describe_table", cluster=SR.target_id, table="sales"),
         cite(),
     )
     delivered = await env.deliver(env.ctx("diagnose"), message)
@@ -395,7 +417,11 @@ async def test_metadata_tools_only_run_code_generated_queries(env: Env) -> None:
 
 async def test_followup_replays_the_rows_without_rerunning_the_query(env: Env) -> None:
     first = env.scripts.add(
-        "东区订单", tool_call("run_readonly_query", sql="SELECT region, total FROM sales"), cite()
+        "东区订单",
+        tool_call(
+            "run_readonly_query", cluster=SR.target_id, sql="SELECT region, total FROM sales"
+        ),
+        cite(),
     )
     delivered = await env.deliver(env.ctx(turn="t1"), first)
     followup = env.scripts.add("刚才的结果再说一遍", cite("沿用上一轮"))
@@ -416,8 +442,12 @@ async def test_followup_replays_the_rows_without_rerunning_the_query(env: Env) -
 async def test_rejected_sql_is_returned_to_the_model_without_using_the_budget(env: Env) -> None:
     message = env.scripts.add(
         "先写错再改正",
-        tool_call("run_readonly_query", sql="SELECT secret FROM sales; DROP TABLE sales"),
-        tool_call("run_readonly_query", sql="SELECT region FROM sales"),
+        tool_call(
+            "run_readonly_query",
+            cluster=SR.target_id,
+            sql="SELECT secret FROM sales; DROP TABLE sales",
+        ),
+        tool_call("run_readonly_query", cluster=SR.target_id, sql="SELECT region FROM sales"),
         cite(),
     )
     delivered = await env.deliver(env.ctx(max_tool_calls=1), message)
@@ -445,10 +475,10 @@ async def test_sqlguard_rejections_never_reach_the_adapter(env: Env, sql: str, c
         target_id=SR.target_id,
         call_id="c1",
         tool_name="run_readonly_query",
-        arguments={"sql": sql},
+        arguments={"cluster": SR.target_id, "sql": sql},
     )
     with pytest.raises(ToolRejectedError) as refused:
-        await env.governed.invoke(ctx, request, env.executes[RUN_QUERY])
+        await env.governed.invoke(ctx, request, env.executes[(RUN_QUERY, SR.target_id)])
     assert code in str(refused.value)
     assert refused.value.__context__ is None
     assert env.drv.attempts == 0 and await env.evidence_rows() == 0
@@ -457,7 +487,7 @@ async def test_sqlguard_rejections_never_reach_the_adapter(env: Env, sql: str, c
 async def test_describe_table_outside_the_allowlist_is_rejected_before_io(env: Env) -> None:
     message = env.scripts.add(
         "看看 users 表",
-        tool_call("describe_table", table="users"),
+        tool_call("describe_table", cluster=SR.target_id, table="users"),
         clarify("没有可查看的 users 表"),
     )
     await env.app.run_turn(env.ctx("diagnose"), message)
@@ -469,7 +499,7 @@ async def test_describe_table_outside_the_allowlist_is_rejected_before_io(env: E
 async def test_forced_query_in_a_diagnose_turn_never_runs(env: Env) -> None:
     message = env.scripts.add(
         "诊断轮强行查询",
-        tool_call("run_readonly_query", sql="SELECT region FROM sales"),
+        tool_call("run_readonly_query", cluster=SR.target_id, sql="SELECT region FROM sales"),
         clarify(),
     )
     with pytest.raises(TurnError):
@@ -480,17 +510,21 @@ async def test_forced_query_in_a_diagnose_turn_never_runs(env: Env) -> None:
         target_id=SR.target_id,
         call_id="c1",
         tool_name="run_readonly_query",
-        arguments={"sql": "SELECT region FROM sales"},
+        arguments={"cluster": SR.target_id, "sql": "SELECT region FROM sales"},
     )
     with pytest.raises(ToolRejectedError):
-        await env.governed.invoke(env.ctx("diagnose"), request, env.executes[RUN_QUERY])
+        await env.governed.invoke(
+            env.ctx("diagnose"), request, env.executes[(RUN_QUERY, SR.target_id)]
+        )
     assert env.drv.attempts == 0
 
 
 async def test_revocation_after_the_tool_was_shown_blocks_io(env: Env) -> None:
     def revoke_then_call(call: ModelCall) -> Any:
         env.grants.revoke_all()
-        return tool_call("run_readonly_query", sql="SELECT region FROM sales")(call)
+        return tool_call(
+            "run_readonly_query", cluster=SR.target_id, sql="SELECT region FROM sales"
+        )(call)
 
     message = env.scripts.add("展示后撤权", revoke_then_call, clarify())
     await env.app.run_turn(env.ctx(), message)
@@ -502,8 +536,8 @@ async def test_revocation_after_the_tool_was_shown_blocks_io(env: Env) -> None:
 async def test_arguments_outside_the_contract_are_rejected(env: Env) -> None:
     message = env.scripts.add(
         "多给参数",
-        tool_call("list_tables", catalog="other"),
-        tool_call("run_readonly_query", sql=42),
+        tool_call("list_tables", cluster=SR.target_id, catalog="other"),
+        tool_call("run_readonly_query", cluster=SR.target_id, sql=42),
         clarify(),
     )
     await env.app.run_turn(env.ctx(), message)
@@ -518,7 +552,9 @@ async def test_arguments_outside_the_contract_are_rejected(env: Env) -> None:
 async def test_execution_failure_stops_the_turn_and_consumes_the_budget(env: Env) -> None:
     env.drv.make = driver(OperationalError(5203, "Access denied canary")).make
     message = env.scripts.add(
-        "无权限的表", tool_call("run_readonly_query", sql="SELECT region FROM sales"), cite()
+        "无权限的表",
+        tool_call("run_readonly_query", cluster=SR.target_id, sql="SELECT region FROM sales"),
+        cite(),
     )
     with pytest.raises(TurnError) as failed:
         await env.app.run_turn(env.ctx(), message)
@@ -550,10 +586,12 @@ async def test_rows_that_do_not_fit_a_projection_stop_the_turn(env: Env) -> None
         target_id=SR.target_id,
         call_id="c1",
         tool_name="run_readonly_query",
-        arguments={"sql": "SELECT region, total FROM sales"},
+        arguments={"cluster": SR.target_id, "sql": "SELECT region, total FROM sales"},
     )
     with pytest.raises(EvidenceStoreError, match="必需字段"):
-        await governed.invoke(env.ctx(channel="feishu"), request, tools.executes[RUN_QUERY])
+        await governed.invoke(
+            env.ctx(channel="feishu"), request, tools.executes[(RUN_QUERY, SR.target_id)]
+        )
     assert env.drv.attempts == 1 and await env.evidence_rows() == 0
 
 
@@ -562,7 +600,9 @@ async def test_rows_that_do_not_fit_a_projection_stop_the_turn(env: Env) -> None
 
 async def test_delivery_rejects_forged_cross_session_and_revoked_evidence(env: Env) -> None:
     message = env.scripts.add(
-        "东区", tool_call("run_readonly_query", sql="SELECT region FROM sales"), cite()
+        "东区",
+        tool_call("run_readonly_query", cluster=SR.target_id, sql="SELECT region FROM sales"),
+        cite(),
     )
     ctx = env.ctx(turn="t1")
     answer_ = await env.app.run_turn(ctx, message)
@@ -583,7 +623,7 @@ async def test_delivery_rejects_forged_cross_session_and_revoked_evidence(env: E
 async def test_model_cannot_submit_facts(env: Env) -> None:
     message = env.scripts.add(
         "东区",
-        tool_call("run_readonly_query", sql="SELECT region FROM sales"),
+        tool_call("run_readonly_query", cluster=SR.target_id, sql="SELECT region FROM sales"),
         lambda call: answer(evidence_in(call), facts=[{"rows": [{"region": "伪造"}]}]),
     )
     with pytest.raises(TurnError) as refused:
@@ -605,7 +645,7 @@ async def test_an_unexpected_precheck_failure_is_a_fixed_rejection_without_io(en
         target_id=SR.target_id,
         call_id="c1",
         tool_name="run_readonly_query",
-        arguments={"sql": "SELECT region FROM sales"},
+        arguments={"cluster": SR.target_id, "sql": "SELECT region FROM sales"},
     )
     ctx = env.ctx(max_tool_calls=1)
     with pytest.raises(ToolRejectedError) as refused:
@@ -614,7 +654,7 @@ async def test_an_unexpected_precheck_failure_is_a_fixed_rejection_without_io(en
     assert refused.value.__context__ is None and "canary" not in repr(refused.value)
     assert ran == []
     # 拒绝未占预算：上限为 1 时同一轮仍可执行一次。
-    await env.governed.invoke(ctx, request, env.executes[RUN_QUERY])
+    await env.governed.invoke(ctx, request, env.executes[(RUN_QUERY, SR.target_id)])
     assert env.drv.attempts == 1
 
 
@@ -655,7 +695,9 @@ def reassembled(env: Env, target: StarRocksTarget) -> tuple[EvidenceStore, Appli
 
 async def queried(env: Env) -> tuple[RunContext, AgentAnswer]:
     message = env.scripts.add(
-        "东区", tool_call("run_readonly_query", sql="SELECT region FROM sales"), cite()
+        "东区",
+        tool_call("run_readonly_query", cluster=SR.target_id, sql="SELECT region FROM sales"),
+        cite(),
     )
     ctx = env.ctx()
     return ctx, await env.app.run_turn(ctx, message)
@@ -792,7 +834,7 @@ def explain_request(sql: str, call_id: str = "c1") -> ToolRequest:
         target_id=SR.target_id,
         call_id=call_id,
         tool_name="explain_query",
-        arguments={"sql": sql},
+        arguments={"cluster": SR.target_id, "sql": sql},
     )
 
 
@@ -800,7 +842,9 @@ async def test_diagnose_turn_explains_without_running_the_query(env: Env) -> Non
     env.drv.make = driver(PLAN).make
     sql = "select region, sum(total) from sales group by region"
     message = env.scripts.add(
-        "为什么按地区汇总很慢", tool_call("explain_query", sql=sql), cite("扫描了整张表")
+        "为什么按地区汇总很慢",
+        tool_call("explain_query", cluster=SR.target_id, sql=sql),
+        cite("扫描了整张表"),
     )
     delivered = await env.deliver(env.ctx("diagnose"), message)
 
@@ -838,8 +882,8 @@ async def test_rejected_explain_uses_no_budget_and_no_connection(
     env.drv.make = driver(PLAN).make
     message = env.scripts.add(
         "先给越权 SQL 再改正",
-        tool_call("explain_query", sql=sql),
-        tool_call("explain_query", sql="SELECT region FROM sales"),
+        tool_call("explain_query", cluster=SR.target_id, sql=sql),
+        tool_call("explain_query", cluster=SR.target_id, sql="SELECT region FROM sales"),
         cite(),
     )
     delivered = await env.deliver(env.ctx("diagnose", max_tool_calls=1), message)
@@ -852,7 +896,7 @@ async def test_rejected_explain_uses_no_budget_and_no_connection(
 
     with pytest.raises(ToolRejectedError) as refused:
         await env.governed.invoke(
-            env.ctx("diagnose"), explain_request(sql), env.executes[EXPLAIN_QUERY]
+            env.ctx("diagnose"), explain_request(sql), env.executes[(EXPLAIN_QUERY, SR.target_id)]
         )
     assert code in str(refused.value) and refused.value.__context__ is None
     assert env.drv.attempts == 1
@@ -861,7 +905,9 @@ async def test_rejected_explain_uses_no_budget_and_no_connection(
 async def test_previous_turn_sql_can_be_explained_in_the_next_turn(env: Env) -> None:
     first = env.scripts.add(
         "东区与西区的订单总额",
-        tool_call("run_readonly_query", sql="select region, total from sales"),
+        tool_call(
+            "run_readonly_query", cluster=SR.target_id, sql="select region, total from sales"
+        ),
         cite("东区高于西区"),
     )
     await env.deliver(env.ctx("query", turn="t1"), first)
@@ -870,7 +916,9 @@ async def test_previous_turn_sql_can_be_explained_in_the_next_turn(env: Env) -> 
     def explain_replayed_sql(call: ModelCall) -> Any:
         # 模型从回放的上一轮工具结果中取实际执行的 SQL（含 SQLGuard 加的 LIMIT）。
         (replayed,) = tool_outputs(call)
-        return tool_call("explain_query", sql=json.loads(replayed)["data"]["sql"])(call)
+        return tool_call(
+            "explain_query", cluster=SR.target_id, sql=json.loads(replayed)["data"]["sql"]
+        )(call)
 
     env.drv.make = driver(PLAN).make
     second = env.scripts.add("刚才那条为什么慢", explain_replayed_sql, cite("走了全表扫描"))
@@ -886,7 +934,9 @@ async def test_previous_turn_sql_can_be_explained_in_the_next_turn(env: Env) -> 
 async def explained(env: Env, channel: Channel = "web") -> tuple[RunContext, AgentAnswer]:
     env.drv.make = driver(PLAN).make
     message = env.scripts.add(
-        f"{channel} 诊断", tool_call("explain_query", sql="SELECT region FROM sales"), cite()
+        f"{channel} 诊断",
+        tool_call("explain_query", cluster=SR.target_id, sql="SELECT region FROM sales"),
+        cite(),
     )
     ctx = env.ctx("diagnose", session=f"s-{channel}", channel=channel)
     return ctx, await env.app.run_turn(ctx, message)
@@ -920,7 +970,7 @@ async def test_fact_note_is_rendered_from_the_current_policy_not_the_record(env:
     assert PLAN_NOTE not in again.content
     # 只有 explain 工具带说明。
     assert [p.policy_id for p in tools.policies if p.fact_note is not None] == [
-        "starrocks.explain_query"
+        f"starrocks.{SR.target_id}.explain_query"
     ]
 
 
@@ -931,7 +981,9 @@ async def test_hostile_plan_lines_cannot_forge_sections(env: Env) -> None:
     )
     env.drv.make = driver(hostile).make
     message = env.scripts.add(
-        "飞书诊断", tool_call("explain_query", sql="SELECT region FROM sales"), cite()
+        "飞书诊断",
+        tool_call("explain_query", cluster=SR.target_id, sql="SELECT region FROM sales"),
+        cite(),
     )
     ctx = env.ctx("diagnose", channel="feishu")
     delivered = await env.deliver(ctx, message)
@@ -984,11 +1036,13 @@ async def test_diagnose_turn_cites_layout_with_unapproved_keys_hidden(env: Env) 
     env.drv.make = driver(Result(LAYOUT_COLUMNS, [raw])).make
     web = env.scripts.add(
         "sales 表的分区和分桶合理吗",
-        tool_call("describe_table_layout", table="sales"),
+        tool_call("describe_table_layout", cluster=SR.target_id, table="sales"),
         cite("按 region 分区"),
     )
     feishu = env.scripts.add(
-        "飞书：sales 表布局", tool_call("describe_table_layout", table="sales"), cite()
+        "飞书：sales 表布局",
+        tool_call("describe_table_layout", cluster=SR.target_id, table="sales"),
+        cite(),
     )
     on_web = await env.deliver(env.ctx("diagnose", session="s-web"), web)
     on_feishu = await env.deliver(env.ctx("diagnose", session="s-fs", channel="feishu"), feishu)
@@ -1015,7 +1069,7 @@ async def test_diagnose_turn_cites_layout_with_unapproved_keys_hidden(env: Env) 
 async def test_layout_outside_the_allowlist_is_rejected_before_io(env: Env) -> None:
     message = env.scripts.add(
         "看看 users 表的布局",
-        tool_call("describe_table_layout", table="users"),
+        tool_call("describe_table_layout", cluster=SR.target_id, table="users"),
         clarify("没有可查看的 users 表"),
     )
     await env.app.run_turn(env.ctx("diagnose", max_tool_calls=1), message)
@@ -1032,6 +1086,196 @@ def test_layout_policy_shares_the_target_data_scope() -> None:
     assert {c.tool_id for c in tools.contracts} == set(SDK_NAMES)
     assert {p.data_scope for p in tools.policies} == {data_scope_digest(SR)}
     (layout_policy,) = [
-        p for p in tools.policies if p.policy_id == "starrocks.describe_table_layout"
+        p
+        for p in tools.policies
+        if p.policy_id == f"starrocks.{SR.target_id}.describe_table_layout"
     ]
     assert layout_policy.fact_note is None
+
+
+# ---- 多目标路由（P2.5 Task 1）：三个目标同名库表，各自的 Adapter 返回不同常量 -------------------
+
+
+def _cluster(target_id: str, audit: bool = False) -> StarRocksTarget:
+    """与 SR 同一份 allowlist（同名库表）、不同集群 ID；只有 ``audit`` 的目标配置审计源。"""
+    base = AUDIT_TARGET if audit else SR
+    return base.model_copy(
+        update={
+            "target_id": target_id,
+            "policy": base.policy.model_copy(update={"target_id": target_id}),
+        }
+    )
+
+
+CLUSTERS = {
+    "sr-a": _cluster("sr-a", audit=True),
+    "sr-b": _cluster("sr-b"),
+    "sr-c": _cluster("sr-c"),
+}
+MULTI_TOOLS = QUERY_TOOLS | AUDIT_TOOLS
+
+
+@dataclass
+class Multi:
+    engine: AsyncEngine
+    grants: Grants
+    scripts: RecordingScripts
+    drivers: dict[str, Driver]
+    app: Application
+    evidence: EvidenceStore
+
+    def ctx(self, *, turn: str = "t1", session: str = "s1") -> RunContext:
+        return RunContext(
+            identity=Identity(subject_id="alice", session_id=session, turn_id=turn, channel="web"),
+            target_scope=frozenset(CLUSTERS),
+            tool_scope=self.app.scope_for_turn("query", MULTI_TOOLS, self.app.available_tools),
+            budget=Budget(max_turns=6, max_tool_calls=4, timeout_seconds=30.0),
+        )
+
+    def attempts(self) -> dict[str, int]:
+        return {t: d.attempts for t, d in self.drivers.items()}
+
+
+@pytest.fixture
+async def multi(postgres_url: URL, monkeypatch: pytest.MonkeyPatch) -> AsyncIterator[Multi]:
+    monkeypatch.setenv(PROFILE.api_key_ref.removeprefix("env:"), "sk-test-starrocks-tools")
+    async with ready_engine(postgres_url) as engine:
+        drivers = {
+            t: driver(Result(("region", "total"), [("east", 1000 + i)]))
+            for i, t in enumerate(CLUSTERS)
+        }
+        parts = [
+            starrocks_tools(
+                StarRocksAdapter(target, connect=drivers[t], clock=lambda: NOW),
+                dict.fromkeys(AUDIENCES, CAPACITY),
+            )
+            for t, target in CLUSTERS.items()
+        ]
+        tools = parts[0] + parts[1] + parts[2]
+        grants = Grants()
+        for t in CLUSTERS:
+            grants.grant("alice", *MULTI_TOOLS, target=t)
+        evidence = EvidenceStore(
+            engine,
+            ToolCatalog(tools.contracts, tools.policies),
+            authorize=grants,
+            clock=Clock(),
+            retention_seconds=3600,
+        )
+        governed = GovernedTools(evidence)
+        scripts = RecordingScripts()
+        targets = tuple(
+            TargetInfo(target_id=t, description=f"集群 {t} 的销售库", business_context=None)
+            for t in CLUSTERS
+        )
+        config = app_config(
+            purposes={"query": MULTI_TOOLS, "diagnose": DIAGNOSE_TOOLS | AUDIT_TOOLS},
+            data_policies={
+                PROFILE.data_policy_id: DataPolicy(
+                    input=SessionInputPolicy(max_bytes=2000), model_tools=MULTI_TOOLS
+                )
+            },
+            targets=targets,
+        )
+        async with open_model(PROFILE, transport=scripts.transport()) as bound:
+            app = Application(
+                config,
+                model=bound,
+                engine=engine,
+                governance=governed,
+                local_tools=tools.executes,
+                clock=Clock(),
+            )
+            yield Multi(engine, grants, scripts, drivers, app, evidence)
+
+
+def _call(name: str, arguments: dict[str, object]) -> Any:
+    """原样交出参数（含非法 cluster 或多余字段），不经 ``tool_call`` 的关键字参数。"""
+    return lambda call: [function_call(name, arguments, call_id="bad-1")]
+
+
+def _query_all(sql: str) -> Any:
+    """一步内对三个集群各发一次同一 SQL：SDK 并行执行。"""
+    return lambda call: [
+        function_call("run_readonly_query", {"cluster": t, "sql": sql}, call_id=f"q-{t}")
+        for t in CLUSTERS
+    ]
+
+
+async def test_one_query_tool_reaches_each_named_cluster_once(multi: Multi) -> None:
+    message = multi.scripts.add(
+        "三个集群各查一次", _query_all("SELECT region, total FROM sales"), cite()
+    )
+    answer = await multi.app.run_turn(multi.ctx(), message)
+    delivery = await multi.evidence.validate_answer(answer, multi.ctx())
+
+    # 同一个函数、cluster 必填；每个集群的驱动只收到一条查询，结果各自来自所指集群。
+    specs = {spec["name"]: spec for spec in multi.scripts.tool_specs[0]}
+    assert set(specs) == {*SDK_NAMES.values(), "list_slow_queries"}
+    for spec in specs.values():
+        assert "cluster" in spec["parameters"]["required"]
+    assert multi.attempts() == dict.fromkeys(CLUSTERS, 1)
+    for drv in multi.drivers.values():
+        (sql,) = executed_sql(drv)
+        assert "`shop`.`sales`" in sql and sql.endswith("LIMIT 6")
+    by_target = {f.target_id: f.rows for f in delivery.facts}
+    assert by_target == {
+        t: ({"region": "east", "total": 1000 + i},) for i, t in enumerate(CLUSTERS)
+    }
+
+    # 连接信息不交给模型：说明与工具定义中只有集群 ID 与用途。
+    seen = multi.scripts.instructions[0] + json.dumps(multi.scripts.tool_specs[0])
+    for t in CLUSTERS:
+        assert f"- {t}：集群 {t} 的销售库" in multi.scripts.instructions[0]
+    for secret in (SR.host, SR.user, SR.password_ref, str(SR.port)):
+        assert secret not in seen
+
+    # 下一轮回放历史：三条证据按各自目标复核后都可用。
+    later = multi.scripts.add("再看一眼", cite())
+    await multi.app.run_turn(multi.ctx(turn="t2"), later)
+    (call,) = multi.scripts.calls[later]
+    assert len(evidence_in(call)) == 3
+
+
+@pytest.mark.parametrize(
+    ("arguments", "reason"),
+    [
+        pytest.param({"sql": "SELECT region FROM sales"}, "集群", id="missing-cluster"),
+        pytest.param({"cluster": "sr-z", "sql": "SELECT region FROM sales"}, "集群", id="unknown"),
+        pytest.param(
+            {"cluster": "sr-b", "sql": "SELECT region FROM sales", "host": "10.0.0.1"},
+            "参数不符合工具契约",
+            id="connection-override",
+        ),
+        pytest.param(
+            {"cluster": "sr-b", "sql": "SELECT region FROM sales"}, "当前无权", id="revoked"
+        ),
+    ],
+)
+async def test_bad_cluster_never_reaches_any_starrocks(
+    multi: Multi, arguments: dict[str, object], reason: str
+) -> None:
+    multi.grants.allowed.discard(("alice", "sr-b", RUN_QUERY))
+    message = multi.scripts.add(
+        f"坏参数 {reason}", _call("run_readonly_query", arguments), clarify()
+    )
+    await multi.app.run_turn(multi.ctx(), message)
+    (output,) = tool_outputs(multi.scripts.calls[message][1])
+    assert reason in output
+    assert multi.attempts() == dict.fromkeys(CLUSTERS, 0)
+
+
+async def test_slow_queries_only_on_the_cluster_with_an_audit_source(multi: Multi) -> None:
+    arguments = {"cluster": "sr-b", "window_minutes": 60, "order_by": "query_time"}
+    message = multi.scripts.add(
+        "没有审计源的集群", _call("list_slow_queries", arguments), clarify()
+    )
+    await multi.app.run_turn(multi.ctx(), message)
+    (output,) = tool_outputs(multi.scripts.calls[message][1])
+    assert "集群" in output
+    assert multi.attempts() == dict.fromkeys(CLUSTERS, 0)
+    # 说明中逐个集群列出能力差异。
+    instructions = multi.scripts.instructions[0]
+    a_line = next(line for line in instructions.splitlines() if line.startswith("- sr-a："))
+    b_line = next(line for line in instructions.splitlines() if line.startswith("- sr-b："))
+    assert "list_slow_queries" in a_line and "list_slow_queries" not in b_line

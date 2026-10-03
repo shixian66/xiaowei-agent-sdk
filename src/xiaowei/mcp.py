@@ -201,7 +201,9 @@ def _bindings(
     bindings: dict[str, _Binding] = {}
     for config in configs:
         for remote_name, policy_id in config.allowed_tools.items():
-            contract = catalog.contract(config.tool_id(remote_name))
+            # MCP 工具只有一个目标：同一工具登记在多个目标上时不能确定发往哪个 Server。
+            registered = catalog.contracts_for(config.tool_id(remote_name))
+            contract = registered[0] if len(registered) == 1 else None
             if contract is None or contract.policy_id != policy_id:
                 raise ValueError(f"MCP 登记：{config.tool_id(remote_name)} 与工具目录不一致")
             result = catalog.policy_for(contract).result

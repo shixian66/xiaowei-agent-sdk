@@ -75,6 +75,9 @@ MIN_PROJECTION_BYTES = 256
 # JSON schema 中只供阅读的文字：不改变数据形状。
 _SCHEMA_TEXT = frozenset({"title", "description"})
 
+TARGET_ARGUMENT = "cluster"
+"""多目标工具的路由参数：参数模型声明它的工具按其取值选择目标，取值必须等于契约的目标。"""
+
 
 class ToolRejectedError(Exception):
     """调用前治理拒绝；未发生任何工具 I/O。"""
@@ -126,11 +129,16 @@ class ToolPolicy:
 
 
 class ToolCatalog:
-    """启动时获准的契约与策略；登记不完整或不一致时拒绝装配。"""
+    """启动时获准的契约与策略；登记不完整或不一致时拒绝装配。
+
+    契约按 ``(tool_id, target_id)`` 登记与查找。同一工具登记在多个目标上时，各目标的参数 schema
+    必须相同且声明路由参数 ``cluster``：模型看到一个工具，由 ``cluster`` 选择目标，策略（数据范围）
+    仍按目标各自登记。未声明 ``cluster`` 的工具只能有一个目标（如 MCP 与合成工具）。
+    """
 
     def __init__(self, contracts: Iterable[ToolContract], policies: Iterable[ToolPolicy]) -> None:
         self._policies = {p.policy_id: p for p in policies}
-        self._contracts: dict[str, ToolContract] = {}
+        self._contracts: dict[tuple[str, str], ToolContract] = {}
         for policy in self._policies.values():
             if set(policy.projections) != set(AUDIENCES):
                 raise ValueError(f"工具目录：策略 {policy.policy_id} 必须且只能定义四种用途投影")
@@ -165,16 +173,41 @@ class ToolCatalog:
                 raise ValueError(f"工具目录：{contract.tool_id} 引用了未登记的策略")
             if contract.input_schema != registered.arguments.model_json_schema():
                 raise ValueError(f"工具目录：{contract.tool_id} 的参数 schema 与策略不一致")
-            if contract.tool_id in self._contracts:
-                raise ValueError(f"工具目录：{contract.tool_id} 重复登记")
-            self._contracts[contract.tool_id] = contract
+            key = (contract.tool_id, contract.target_id)
+            if key in self._contracts:
+                raise ValueError(f"工具目录：{contract.tool_id} 在同一目标上重复登记")
+            self._contracts[key] = contract
+        for tool_id in {tool_id for tool_id, _ in self._contracts}:
+            shared = self.contracts_for(tool_id)
+            if len({json.dumps(c.input_schema, sort_keys=True) for c in shared}) != 1:
+                raise ValueError(f"工具目录：{tool_id} 在各目标上的参数 schema 不一致")
+            if len(shared) > 1 and not self.routed(tool_id):
+                raise ValueError(
+                    f"工具目录：{tool_id} 登记在多个目标上，参数必须声明 {TARGET_ARGUMENT}"
+                )
 
     @property
     def contracts(self) -> tuple[ToolContract, ...]:
         return tuple(self._contracts.values())
 
-    def contract(self, tool_id: str) -> ToolContract | None:
-        return self._contracts.get(tool_id)
+    def contract(self, tool_id: str, target_id: str) -> ToolContract | None:
+        return self._contracts.get((tool_id, target_id))
+
+    def contracts_for(self, tool_id: str) -> tuple[ToolContract, ...]:
+        """一个工具在各目标上的契约，按目标排序。"""
+        return tuple(
+            sorted(
+                (c for (t, _), c in self._contracts.items() if t == tool_id),
+                key=lambda c: c.target_id,
+            )
+        )
+
+    def routed(self, tool_id: str) -> bool:
+        """工具是否按参数 ``cluster`` 选择目标（同一工具各目标的参数模型字段相同）。"""
+        shared = self.contracts_for(tool_id)
+        return bool(shared) and all(
+            TARGET_ARGUMENT in self.policy_for(c).arguments.model_fields for c in shared
+        )
 
     def policy_for(self, contract: ToolContract) -> ToolPolicy:
         return self._policies[contract.policy_id]
@@ -211,13 +244,22 @@ class GovernedTools:
         request: ToolRequest,
         execute: Execute,
     ) -> ToolResult:
-        """治理通过后以规范化的有效参数执行，并按同一有效请求记录证据。"""
-        contract = self._catalog.contract(request.tool_id)
-        if contract is None or contract.target_id != request.target_id:
+        """治理通过后以规范化的有效参数执行，并按同一有效请求记录证据。
+
+        多目标工具的目标只能由参数 ``cluster`` 决定：请求目标与参数不一致时在 I/O 前拒绝，
+        执行与证据不会落到参数之外的目标。
+        """
+        contract = self._catalog.contract(request.tool_id, request.target_id)
+        if contract is None:
             raise ToolRejectedError("工具不可用")
         if not _in_scope(ctx, contract):
             raise ToolRejectedError("本轮不允许使用该工具")
-        arguments = normalize_arguments(self._catalog.policy_for(contract), request.arguments)
+        policy = self._catalog.policy_for(contract)
+        arguments = normalize_arguments(policy, request.arguments)
+        if TARGET_ARGUMENT in policy.arguments.model_fields and (
+            arguments.get(TARGET_ARGUMENT) != contract.target_id
+        ):
+            raise ToolRejectedError("参数不符合工具契约")
         effective = request.model_copy(update={"arguments": arguments})
         if not await self._currently_authorized(ctx.identity, contract):
             raise ToolRejectedError("当前无权调用该工具")

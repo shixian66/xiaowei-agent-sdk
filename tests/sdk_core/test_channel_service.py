@@ -80,7 +80,10 @@ class Access:
         if not tools:
             return None
         return AccessDecision(
-            subject_id=subject_id, target_id=TARGET, authorized_tools=tools, policy_version="p1"
+            subject_id=subject_id,
+            target_ids=frozenset({TARGET}),
+            authorized_tools=tools,
+            policy_version="p1",
         )
 
     async def authorize(self, identity: Identity, target_id: str, tool_id: str) -> bool:
@@ -252,7 +255,10 @@ async def env(postgres_url: URL, monkeypatch: pytest.MonkeyPatch) -> AsyncIterat
                 model=bound,
                 engine=engine,
                 governance=GovernedTools(evidence),
-                local_tools={TOTAL_TOOL: adapter.execute, QUERY_TOOL: adapter.execute},
+                local_tools={
+                    (TOTAL_TOOL, TARGET): adapter.execute,
+                    (QUERY_TOOL, TARGET): adapter.execute,
+                },
                 clock=clock,
             )
             yield Env(engine, clock, grants, access, adapter, scripts, bound, evidence, app)
@@ -375,7 +381,10 @@ async def test_global_concurrency_limit_marks_requests_busy(env: Env) -> None:
         model=env.binding,
         engine=env.engine,
         governance=GovernedTools(env.evidence),
-        local_tools={TOTAL_TOOL: env.adapter.execute, QUERY_TOOL: env.adapter.execute},
+        local_tools={
+            (TOTAL_TOOL, TARGET): env.adapter.execute,
+            (QUERY_TOOL, TARGET): env.adapter.execute,
+        },
         clock=env.clock,
     )
     env.service = ChannelService(env.app, env.results())

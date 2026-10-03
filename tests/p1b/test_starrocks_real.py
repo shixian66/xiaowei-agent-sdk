@@ -325,7 +325,7 @@ async def test_governed_query_tool_end_to_end(instance: Instance) -> None:
             target_id="sr-real",
             call_id=secrets.token_hex(4),
             tool_name="run_readonly_query",
-            arguments={"sql": sql},
+            arguments={"cluster": "sr-real", "sql": sql},
         )
 
     async with isolated_database() as url, ready_engine(url) as engine:
@@ -338,12 +338,14 @@ async def test_governed_query_tool_end_to_end(instance: Instance) -> None:
         )
         governed = GovernedTools(evidence)
         with pytest.raises(ToolRejectedError, match="column_not_allowed"):
-            await governed.invoke(ctx, call("SELECT secret FROM sales"), tools.executes[RUN_QUERY])
+            await governed.invoke(
+                ctx, call("SELECT secret FROM sales"), tools.executes[(RUN_QUERY, "sr-real")]
+            )
 
         result = await governed.invoke(
             ctx,
             call("SELECT id, total, at FROM sales WHERE id IN (3, 5) ORDER BY id"),
-            tools.executes[RUN_QUERY],
+            tools.executes[(RUN_QUERY, "sr-real")],
         )
         answer = AgentAnswer(
             evidence_ids=(result.evidence_id,),

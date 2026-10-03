@@ -46,54 +46,60 @@
     "timeout_seconds": 120
   },
   "max_concurrent_turns": 4,
-  "business_context": null,
-  "starrocks": {
-    "target_id": "warehouse",
-    "host": "<StarRocks FE 地址>",
-    "port": 9030,
-    "database": "<默认 database>",
-    "tls": true,
-    "tls_ca_file": null,
-    "user": "<只读账号>",
-    "password_ref": "env:XW_STARROCKS_PASSWORD",
-    "connect_timeout_seconds": 5,
-    "query_timeout_seconds": 30,
-    "client_timeout_seconds": 35,
-    "pool_size": 4,
-    "time_zone": "Asia/Shanghai",
-    "query_mem_limit_bytes": 1073741824,
-    "max_result_bytes": 200000,
-    "max_value_bytes": 4000,
-    "max_plan_lines": 500,
-    "audit": {
-      "database": "starrocks_audit_db__",
-      "table": "starrocks_audit_tbl__",
-      "time_zone": "Asia/Shanghai",
-      "stmt_limit": 1048576,
-      "max_window_minutes": 1440,
-      "max_rows": 20,
-      "candidate_rows": 200,
-      "candidate_bytes": 2097152
-    },
-    "policy": {
-      "target_id": "warehouse",
-      "default_database": "<默认 database>",
-      "allowed_objects": [
-        "<表或视图>"
-      ],
-      "allowed_columns": {
-        "<表或视图>": [
-          "<列>"
-        ]
-      },
-      "allowed_functions": [
-        "COUNT",
-        "SUM"
-      ],
-      "max_rows": 200,
-      "max_sql_bytes": 8000
+  "targets": [
+    {
+      "type": "starrocks",
+      "description": "<集群用途，交给模型选择集群>",
+      "business_context": null,
+      "starrocks": {
+        "target_id": "warehouse",
+        "host": "<StarRocks FE 地址>",
+        "port": 9030,
+        "database": "<默认 database>",
+        "tls": true,
+        "tls_ca_file": null,
+        "user": "<只读账号>",
+        "password_ref": "env:XW_STARROCKS_PASSWORD",
+        "connect_timeout_seconds": 5,
+        "query_timeout_seconds": 30,
+        "client_timeout_seconds": 35,
+        "pool_size": 4,
+        "time_zone": "Asia/Shanghai",
+        "query_mem_limit_bytes": 1073741824,
+        "max_result_bytes": 200000,
+        "max_value_bytes": 4000,
+        "max_plan_lines": 500,
+        "audit": {
+          "database": "starrocks_audit_db__",
+          "table": "starrocks_audit_tbl__",
+          "time_zone": "Asia/Shanghai",
+          "stmt_limit": 1048576,
+          "max_window_minutes": 1440,
+          "max_rows": 20,
+          "candidate_rows": 200,
+          "candidate_bytes": 2097152
+        },
+        "policy": {
+          "target_id": "warehouse",
+          "default_database": "<默认 database>",
+          "allowed_objects": [
+            "<表或视图>"
+          ],
+          "allowed_columns": {
+            "<表或视图>": [
+              "<列>"
+            ]
+          },
+          "allowed_functions": [
+            "COUNT",
+            "SUM"
+          ],
+          "max_rows": 200,
+          "max_sql_bytes": 8000
+        }
+      }
     }
-  },
+  ],
   "projection_bytes": {
     "model": 400000,
     "session": 400000,

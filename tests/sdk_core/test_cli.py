@@ -156,7 +156,8 @@ class Deployment:
             model={**model, "base_url": f"https://127.0.0.1:{closed}/{ENDPOINT}/v1"},
             lock_check_seconds=1,
         )
-        config["starrocks"] = {**config["starrocks"], "host": "127.0.0.1", "port": closed}
+        (target,) = config["targets"]
+        target["starrocks"] = {**target["starrocks"], "host": "127.0.0.1", "port": closed}
         tmp_path.mkdir(parents=True, exist_ok=True)
         self.file = tmp_path / "xiaowei.json"
         self.file.write_text(json.dumps(config), encoding="utf-8")

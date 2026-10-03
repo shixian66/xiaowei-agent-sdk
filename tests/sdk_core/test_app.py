@@ -228,7 +228,10 @@ class Env:
             engine=self.engine,
             governance=self.governed,
             local_tools=local_tools
-            or {TOTAL_TOOL: self.adapter.execute, QUERY_TOOL: self.adapter.execute},
+            or {
+                (TOTAL_TOOL, TARGET): self.adapter.execute,
+                (QUERY_TOOL, TARGET): self.adapter.execute,
+            },
             mcp=self.mcp,
             clock=self.clock,
         )
@@ -542,7 +545,7 @@ async def test_unknown_tool_result_stops_the_turn(env: Env) -> None:
         env.adapter.calls.append(request)
         raise RuntimeError("连接在返回结果前断开")
 
-    app = env.application(local_tools={TOTAL_TOOL: executed_then_failed})
+    app = env.application(local_tools={(TOTAL_TOOL, TARGET): executed_then_failed})
     message = env.scripts.add(
         "东区",
         tool_call("order_total", region="east"),
@@ -821,5 +824,5 @@ async def test_configuration_is_checked_at_startup(env: Env) -> None:
             app_config(purposes={"query": frozenset({"local/unknown"}), "diagnose": frozenset()})
         )
     with pytest.raises(ValueError, match="local/"):
-        env.application(local_tools={LOOKUP: env.adapter.execute})
+        env.application(local_tools={(LOOKUP, FIXTURE_TARGET): env.adapter.execute})
     assert env.scripts.calls == {}

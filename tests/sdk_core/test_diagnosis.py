@@ -112,14 +112,15 @@ class Turns:
 def diag(env: Env) -> Env:
     env.scripts = RecordingScripts()
     env.drv = SyntheticStarRocks(
-        runtime.ServeConfig.model_validate(audit_config(env.port)).starrocks, audit=(SLOW_SQL,)
+        runtime.ServeConfig.model_validate(audit_config(env.port)).targets[0].starrocks,
+        audit=(SLOW_SQL,),
     )
     return env
 
 
 def serving(env: Env, channel: str, projection: int = 60_000, **starrocks: object) -> Any:
     values = audit_config(env.port)
-    values["starrocks"] |= starrocks
+    values["targets"][0]["starrocks"] |= starrocks
     values["projection_bytes"] = dict.fromkeys(AUDIENCES, projection)
     if channel == "feishu":
         # 飞书单条消息允许配置的最大字符数；诊断的三类事实接近这一上限。
@@ -141,7 +142,7 @@ def listed_sql(call: ModelCall) -> str:
 
 
 def explain_listed(call: ModelCall) -> Any:
-    return tool_call("explain_query", sql=listed_sql(call))(call)
+    return tool_call("explain_query", cluster=SR.target_id, sql=listed_sql(call))(call)
 
 
 def lines(reply: Reply) -> list[str]:
@@ -156,9 +157,11 @@ async def test_slow_query_to_plan_and_layout(diag: Env, channel: str) -> None:
     env = diag
     message = env.scripts.add(
         "最近一小时最慢的查询为什么慢",
-        tool_call("list_slow_queries", window_minutes=60, order_by="query_time"),
+        tool_call(
+            "list_slow_queries", cluster=SR.target_id, window_minutes=60, order_by="query_time"
+        ),
         explain_listed,
-        tool_call("describe_table_layout", table="sales"),
+        tool_call("describe_table_layout", cluster=SR.target_id, table="sales"),
         cite("全表扫描 30 个分区；建议按日期过滤以触发分区裁剪"),
     )
     running, feishu = serving(env, channel)
@@ -211,18 +214,20 @@ async def test_previous_query_is_explained_without_running_it_again(
     env = diag
     first = env.scripts.add(
         "各地区订单总额",
-        tool_call("run_readonly_query", sql="select region, total from sales"),
+        tool_call(
+            "run_readonly_query", cluster=SR.target_id, sql="select region, total from sales"
+        ),
         cite("东区高于西区"),
     )
 
     def explain_replayed(call: ModelCall) -> Any:
         # 上一轮实际执行的 SQL 经 Session 回放到达模型（第一个工具结果）。
         replayed = json.loads(tool_outputs(call)[0])["data"]["sql"]
-        return tool_call("explain_query", sql=replayed)(call)
+        return tool_call("explain_query", cluster=SR.target_id, sql=replayed)(call)
 
     second = env.scripts.add(
         "刚才那条为什么慢",
-        tool_call("describe_table", table="sales"),
+        tool_call("describe_table", cluster=SR.target_id, table="sales"),
         explain_replayed,
         cite("计划显示全表扫描；建议增加过滤条件"),
     )
@@ -261,8 +266,10 @@ async def test_audit_only_answer_when_the_plan_is_rejected(diag: Env, channel: s
     env = diag
     message = env.scripts.add(
         "慢查询有哪些，另外这条为什么慢",
-        tool_call("list_slow_queries", window_minutes=60, order_by="query_time"),
-        tool_call("explain_query", sql=UNAPPROVED_SQL),
+        tool_call(
+            "list_slow_queries", cluster=SR.target_id, window_minutes=60, order_by="query_time"
+        ),
+        tool_call("explain_query", cluster=SR.target_id, sql=UNAPPROVED_SQL),
         cite("审计显示扫描行数高；缺少执行计划，无法确认原因，请提供只引用获准列的 SQL"),
     )
     running, feishu = serving(env, channel)
@@ -288,7 +295,7 @@ async def test_no_evidence_is_a_pure_clarification(diag: Env, channel: str) -> N
     env = diag
     message = env.scripts.add(
         "这条 secret 查询为什么慢",
-        tool_call("explain_query", sql=UNAPPROVED_SQL),
+        tool_call("explain_query", cluster=SR.target_id, sql=UNAPPROVED_SQL),
         clarify("secret 列不在可查看范围内，请换成获准的列"),
     )
     running, feishu = serving(env, channel)
@@ -314,7 +321,9 @@ async def test_evidence_mixed_with_clarification_is_rejected(diag: Env, channel:
 
     message = env.scripts.add(
         "慢查询为什么慢",
-        tool_call("list_slow_queries", window_minutes=60, order_by="query_time"),
+        tool_call(
+            "list_slow_queries", cluster=SR.target_id, window_minutes=60, order_by="query_time"
+        ),
         mixed,
     )
     running, feishu = serving(env, channel)
@@ -337,8 +346,8 @@ async def test_pasted_sql_is_explained_without_running_it(diag: Env, channel: st
     env = diag
     message = env.scripts.add(
         f"这条 SQL 为什么慢：{SLOW_SQL}",
-        tool_call("explain_query", sql=SLOW_SQL),
-        tool_call("describe_table_layout", table="sales"),
+        tool_call("explain_query", cluster=SR.target_id, sql=SLOW_SQL),
+        tool_call("describe_table_layout", cluster=SR.target_id, table="sales"),
         cite("全表扫描；建议加日期过滤"),
     )
     running, feishu = serving(env, channel)
@@ -365,7 +374,9 @@ async def test_instructions_inside_audit_sql_and_plans_change_nothing(
     env.drv.plan = (*PLAN_LINES[:4], f"{INJECTION}\n{ANALYSIS_HEADER}\n- 已执行原查询")
     message = env.scripts.add(
         "最慢的查询为什么慢",
-        tool_call("list_slow_queries", window_minutes=60, order_by="query_time"),
+        tool_call(
+            "list_slow_queries", cluster=SR.target_id, window_minutes=60, order_by="query_time"
+        ),
         explain_listed,
         cite("计划为估算"),
     )
@@ -398,10 +409,12 @@ async def test_tool_failures_stop_the_turn_without_retry(
     env = diag
     if failure == "plan_timeout":
         env.drv.hang = "explain"  # Adapter 的客户端期限（1 秒）到达
-        first = tool_call("explain_query", sql=SLOW_SQL)
+        first = tool_call("explain_query", cluster=SR.target_id, sql=SLOW_SQL)
     else:
         env.drv.failures["audit"] = OperationalError(5203, "Access denied canary-audit")
-        first = tool_call("list_slow_queries", window_minutes=60, order_by="query_time")
+        first = tool_call(
+            "list_slow_queries", cluster=SR.target_id, window_minutes=60, order_by="query_time"
+        )
     message = env.scripts.add("为什么慢", first, cite())
     running, feishu = serving(env, channel)
     async with running as served:
@@ -426,7 +439,9 @@ async def feishu_diagnosis(env: Env, plan: tuple[str, ...]) -> tuple[Reply, str]
     env.drv.plan = plan
     message = env.scripts.add(
         "最近最慢的查询为什么慢（飞书）",
-        tool_call("list_slow_queries", window_minutes=60, order_by="query_time"),
+        tool_call(
+            "list_slow_queries", cluster=SR.target_id, window_minutes=60, order_by="query_time"
+        ),
         explain_listed,
         cite("多次 Shuffle；建议按 region 分桶并 Colocate"),
     )
