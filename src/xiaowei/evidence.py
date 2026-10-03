@@ -154,8 +154,8 @@ class EvidenceStore:
         执行与写入都会等待，期间权限可能被撤销；返回前按当前权限与策略重新读取，拒绝时
         结果不交给模型（I/O 已发生，不退还预算、不重试）。
         """
-        contract = self._catalog.contract(request.tool_id)
-        if contract is None or contract.target_id != request.target_id:
+        contract = self._catalog.contract(request.tool_id, request.target_id)
+        if contract is None:
             raise EvidenceStoreError("未登记的工具结果不能生成证据")
         policy = self._catalog.policy_for(contract)
         evidence_id = f"ev_{secrets.token_hex(_EVIDENCE_ID_BYTES)}"
@@ -221,7 +221,7 @@ class EvidenceStore:
         return record.projections[audience]
 
     def _effective_digest(self, record: EvidenceRecord, arguments: dict[str, object]) -> str:
-        contract = self._catalog.contract(record.tool_id)
+        contract = self._catalog.contract(record.tool_id, record.target_id)
         if contract is None:
             raise EvidenceUnavailableError
         try:
@@ -298,13 +298,13 @@ class EvidenceStore:
 
     def _fact_note(self, record: EvidenceRecord) -> str | None:
         """当前登记策略的固定说明；记录已通过 ``_readable``，契约必然存在。"""
-        contract = self._catalog.contract(record.tool_id)
+        contract = self._catalog.contract(record.tool_id, record.target_id)
         return None if contract is None else self._catalog.policy_for(contract).fact_note
 
     def _matches_current_policy(self, record: EvidenceRecord) -> bool:
         """保存内容须由当前登记的同一契约与投影策略生成；策略收窄、换版或移除后旧证据失效。"""
-        contract = self._catalog.contract(record.tool_id)
-        if contract is None or contract.target_id != record.target_id:
+        contract = self._catalog.contract(record.tool_id, record.target_id)
+        if contract is None:
             return False
         current = _policy_fingerprint(contract, self._catalog.policy_for(contract))
         return current == record.policy_fingerprint

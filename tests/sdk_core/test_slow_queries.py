@@ -113,7 +113,12 @@ def audit_rows(*stmts: str) -> Result:
 
 
 def list_slow() -> Any:
-    return tool_call("list_slow_queries", window_minutes=60, order_by="query_time")
+    return tool_call(
+        "list_slow_queries",
+        cluster=AUDIT_TARGET.target_id,
+        window_minutes=60,
+        order_by="query_time",
+    )
 
 
 # ---- 成功路径：慢查询 → 计划 → 回答 ----------------------------------------------------------
@@ -127,7 +132,7 @@ async def test_diagnose_turn_lists_slow_queries_then_explains_one(env: Env) -> N
         (listed,) = tool_outputs(call)
         rows = json.loads(listed)["data"]["rows"]
         env.drv.make = driver(PLAN).make
-        return tool_call("explain_query", sql=rows[0]["sql"])(call)
+        return tool_call("explain_query", cluster=AUDIT_TARGET.target_id, sql=rows[0]["sql"])(call)
 
     message = env.scripts.add(
         "最近一小时最慢的查询为什么慢",
@@ -190,7 +195,7 @@ async def test_window_and_order_are_rejected_before_io(
     env.drv.make = driver(audit_rows(ACCEPTED[0])).make
     message = env.scripts.add(
         "越界参数",
-        tool_call("list_slow_queries", **arguments),
+        tool_call("list_slow_queries", cluster=AUDIT_TARGET.target_id, **arguments),
         list_slow(),
         cite(),
     )
@@ -248,10 +253,12 @@ async def test_forced_query_still_rejected_in_a_diagnose_turn(env: Env) -> None:
         target_id=AUDIT_TARGET.target_id,
         call_id="c1",
         tool_name="run_readonly_query",
-        arguments={"sql": "SELECT region FROM sales"},
+        arguments={"cluster": AUDIT_TARGET.target_id, "sql": "SELECT region FROM sales"},
     )
     with pytest.raises(ToolRejectedError):
-        await au.governed.invoke(au.ctx("diagnose"), request, au.executes[RUN_QUERY])
+        await au.governed.invoke(
+            au.ctx("diagnose"), request, au.executes[(RUN_QUERY, AUDIT_TARGET.target_id)]
+        )
     assert env.drv.attempts == 0
 
 
@@ -263,12 +270,16 @@ def test_slow_queries_tool_absent_without_audit_source() -> None:
         dict.fromkeys(AUDIENCES, CAPACITY),
     )
     assert SLOW_QUERIES not in {c.tool_id for c in plain.contracts}
-    assert SLOW_QUERIES not in plain.executes
+    assert (SLOW_QUERIES, AUDIT_TARGET.target_id) not in plain.executes
     with_audit = starrocks_tools(
         StarRocksAdapter(AUDIT_TARGET, connect=driver(), clock=lambda: NOW),
         dict.fromkeys(AUDIENCES, CAPACITY),
     )
-    (policy,) = [p for p in with_audit.policies if p.policy_id == "starrocks.list_slow_queries"]
+    (policy,) = [
+        p
+        for p in with_audit.policies
+        if p.policy_id == f"starrocks.{AUDIT_TARGET.target_id}.list_slow_queries"
+    ]
     assert policy.fact_note == AUDIT_NOTE and policy.data_scope == data_scope_digest(AUDIT_TARGET)
 
 

@@ -1,7 +1,7 @@
 """正式运行装配：一份可信配置 → 单实例锁 → 启动恢复 → 运行对象 → Web 与可选飞书 → 有界停止。
 
 ``open_runtime`` 是唯一装配顺序：配置校验 → PostgreSQL 引擎 → 专用连接取得实例锁 → schema 检查与
-启动一致性恢复 → StarRocks Adapter 与受治理工具 → 唯一授权来源 → Evidence / Governance →
+启动一致性恢复 → 每个目标的 StarRocks Adapter 与受治理工具 → 唯一授权来源 → Evidence / Governance →
 模型绑定 → Application → ``ChannelService``。任一步失败时按相反顺序关闭已创建的资源并释放锁；
 启动失败不对外服务，而不是带着未就绪状态继续运行。
 
@@ -17,8 +17,8 @@
 不连接 StarRocks，经同一 ``EvidenceStore`` 重验与投递 CAS 后发送一次。
 
 凭据只以 ``env:NAME`` 引用出现在配置中，在用到它的装配步骤才解析；错误信息不含凭据、连接串或
-上游原文。``model_transport``、``starrocks_connect``、``feishu_channel`` 只供测试替换最底层 I/O，
-治理、证据与状态路径不变。
+上游原文。``model_transport``、``starrocks_connect``（按目标 ID）、``feishu_channel`` 只供测试替换
+最底层 I/O，治理、证据与状态路径不变。
 """
 
 import asyncio
@@ -30,7 +30,7 @@ from contextlib import AsyncExitStack, asynccontextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Annotated, Any
+from typing import Annotated, Any, Literal
 
 import httpx2
 import uvicorn
@@ -39,13 +39,14 @@ from pydantic import (
     ConfigDict,
     Field,
     StringConstraints,
+    TypeAdapter,
     ValidationError,
     field_validator,
     model_validator,
 )
 from sqlalchemy.ext.asyncio import AsyncEngine
 
-from xiaowei.app import AppConfig, Application, BusinessContext, DataPolicy
+from xiaowei.app import AppConfig, Application, BusinessContext, DataPolicy, TargetInfo
 from xiaowei.channel import (
     AccessDecision,
     ChannelService,
@@ -64,7 +65,17 @@ from xiaowei.evidence import EvidenceStore
 from xiaowei.feishu import FeishuGateway, LarkChannel, LarkTransport, lark_channel, render
 from xiaowei.governance import GovernedTools, ToolCatalog
 from xiaowei.model_api import ModelProfile, open_model
-from xiaowei.models import AUDIENCES, Audience, Budget, Channel, Delivery, Identity, Label, ToolId
+from xiaowei.models import (
+    AUDIENCES,
+    Audience,
+    Budget,
+    Channel,
+    ClusterId,
+    Delivery,
+    Identity,
+    Label,
+    ToolId,
+)
 from xiaowei.session import CleanupReport, SessionLimits, cleanup_expired
 from xiaowei.starrocks import (
     Connection,
@@ -135,8 +146,46 @@ class AccessConfig(_Config):
     grants: dict[Label, frozenset[ToolId]] = Field(min_length=1)
 
 
+class TargetConfig(_Config):
+    """一个查询目标：类型（首版只有 ``starrocks``）、交给模型的用途说明与业务口径、连接与范围。
+
+    集群 ID 就是 ``starrocks.target_id``；连接地址、账号与凭据引用只用于装配，不交给模型。
+    """
+
+    type: Literal["starrocks"]
+    description: str = Field(min_length=1, max_length=500)
+    business_context: BusinessContext | None
+    starrocks: StarRocksTarget
+
+    @property
+    def target_id(self) -> str:
+        return self.starrocks.target_id
+
+    @field_validator("starrocks")
+    @classmethod
+    def _cluster_id(cls, value: StarRocksTarget) -> StarRocksTarget:
+        try:
+            _CLUSTER_ID.validate_python(value.target_id)
+        except ValidationError:
+            raise ValueError(
+                "target_id 必须是 1–32 位小写字母、数字、下划线或连字符，以字母或数字开头"
+            ) from None
+        return value
+
+
+_CLUSTER_ID: TypeAdapter[str] = TypeAdapter(ClusterId)
+
+# 旧单目标配置的顶层字段：不再双读，报告到 targets 的迁移方式。
+_LEGACY_KEYS = ("starrocks", "business_context")
+_LEGACY_HINT = (
+    "单目标配置已不再支持：把 starrocks 改写为 targets 中的一项"
+    '（{"type": "starrocks", "description": ..., "business_context": 原 business_context 去掉 '
+    'target_id 或 null, "starrocks": 原 starrocks}），集群 ID 取 starrocks.target_id'
+)
+
+
 class ServeConfig(_Config):
-    """一个部署的全部可信配置：单模型 Profile、单 StarRocks 目标、Web 与可选飞书。"""
+    """一个部署的全部可信配置：单模型 Profile、一个或多个查询目标、Web 与可选飞书。"""
 
     storage: StorageConfig
     model: ModelProfile
@@ -144,8 +193,7 @@ class ServeConfig(_Config):
     session_limits: SessionLimits
     budget: Budget
     max_concurrent_turns: int = Field(gt=0)
-    business_context: BusinessContext | None = None
-    starrocks: StarRocksTarget
+    targets: tuple[TargetConfig, ...] = Field(min_length=1)
     projection_bytes: dict[Audience, Annotated[int, Field(gt=0)]]
     access: AccessConfig
     web: WebConfig
@@ -154,6 +202,21 @@ class ServeConfig(_Config):
     feishu: FeishuConfig | None = None
     shutdown_timeout_seconds: float = Field(gt=0, le=300)
     lock_check_seconds: float = Field(default=5, gt=0, le=60)
+
+    @model_validator(mode="before")
+    @classmethod
+    def _not_legacy(cls, data: object) -> object:
+        if isinstance(data, Mapping) and any(key in data for key in _LEGACY_KEYS):
+            raise ValueError(_LEGACY_HINT)
+        return data
+
+    @field_validator("targets")
+    @classmethod
+    def _distinct_targets(cls, value: tuple[TargetConfig, ...]) -> tuple[TargetConfig, ...]:
+        ids = [t.target_id for t in value]
+        if len(set(ids)) != len(ids):
+            raise ValueError("targets 中的集群 ID 不能重复")
+        return value
 
     @field_validator("listen_host")
     @classmethod
@@ -222,9 +285,9 @@ def _reason(error: Mapping[str, object]) -> str:
 
 
 def _registered_tools(config: ServeConfig) -> frozenset[str]:
-    """装配时会登记的 StarRocks 工具：审计源未配置时没有慢查询工具。"""
-    audit = AUDIT_TOOLS if config.starrocks.audit is not None else frozenset()
-    return QUERY_TOOLS | audit
+    """装配时会登记的 StarRocks 工具：只有配置了审计源的目标登记慢查询工具。"""
+    audited = any(t.starrocks.audit is not None for t in config.targets)
+    return QUERY_TOOLS | (AUDIT_TOOLS if audited else frozenset())
 
 
 def _app_config(config: ServeConfig) -> AppConfig:
@@ -234,7 +297,14 @@ def _app_config(config: ServeConfig) -> AppConfig:
         data_policies={config.model.data_policy_id: config.data_policy},
         session_limits=config.session_limits,
         max_concurrent_turns=config.max_concurrent_turns,
-        business_context=config.business_context,
+        targets=tuple(
+            TargetInfo(
+                target_id=t.target_id,
+                description=t.description,
+                business_context=t.business_context,
+            )
+            for t in config.targets
+        ),
     )
 
 
@@ -245,13 +315,13 @@ class StaticAccess:
     """配置中的授权表：入口解析（``resolve``）与 Evidence 授权（``authorize``）读同一份表。
 
     subject 与渠道无关：Web 操作者与飞书用户由各自适配器映射为内部 subject，配置校验保证二者
-    不重名。唯一目标来自 StarRocks 配置。
+    不重名。获准用户得到全部已配置目标；某目标没有登记的工具由工具目录在调用前拒绝。
     """
 
-    def __init__(self, config: AccessConfig, target_id: str) -> None:
+    def __init__(self, config: AccessConfig, target_ids: frozenset[str]) -> None:
         self._grants: Mapping[str, frozenset[str]] = dict(config.grants)
         self._version = config.policy_version
-        self._target = target_id
+        self._targets = target_ids
 
     async def resolve(self, channel: Channel, subject_id: str) -> AccessDecision | None:
         tools = self._grants.get(subject_id)
@@ -259,13 +329,13 @@ class StaticAccess:
             return None
         return AccessDecision(
             subject_id=subject_id,
-            target_id=self._target,
+            target_ids=self._targets,
             authorized_tools=tools,
             policy_version=self._version,
         )
 
     async def authorize(self, identity: Identity, target_id: str, tool_id: str) -> bool:
-        return target_id == self._target and tool_id in self._grants.get(
+        return target_id in self._targets and tool_id in self._grants.get(
             identity.subject_id, frozenset()
         )
 
@@ -299,7 +369,7 @@ class _Delivery:
 def _delivery(
     config: ServeConfig,
     engine: AsyncEngine,
-    adapter: StarRocksAdapter,
+    adapters: Mapping[str, StarRocksAdapter],
     readiness: Readiness,
     clock: Callable[[], datetime],
     sender: Backend | None = None,
@@ -320,8 +390,13 @@ def _delivery(
         max_answer_bytes=storage.max_answer_bytes,
         sender=sender,
     )
-    tools = starrocks_tools(adapter, config.projection_bytes)
-    access = StaticAccess(config.access, config.starrocks.target_id)
+    first, *others = (
+        starrocks_tools(adapters[t.target_id], config.projection_bytes) for t in config.targets
+    )
+    tools = first
+    for other in others:
+        tools += other
+    access = StaticAccess(config.access, frozenset(adapters))
     evidence = EvidenceStore(
         engine,
         ToolCatalog(tools.contracts, tools.policies),
@@ -345,7 +420,7 @@ async def open_runtime(
     *,
     clock: Callable[[], datetime] = now,
     model_transport: httpx2.AsyncBaseTransport | None = None,
-    starrocks_connect: Connector | None = None,
+    starrocks_connect: Mapping[str, Connector] | None = None,
 ) -> AsyncIterator[Runtime]:
     """按唯一顺序装配；退出或任一步失败时逆序关闭并释放实例锁。"""
     configure_runtime()
@@ -354,13 +429,13 @@ async def open_runtime(
         engine = await stack.enter_async_context(_engine(config))
         lock = await stack.enter_async_context(hold_instance_lock(engine, readiness))
         await check_storage(engine)
-        target = config.starrocks
-        adapter = (
-            open_starrocks(target, clock=clock)
+        adapters = {
+            t.target_id: open_starrocks(t.starrocks, clock=clock)
             if starrocks_connect is None
-            else StarRocksAdapter(target, connect=starrocks_connect, clock=clock)
-        )
-        parts = _delivery(config, engine, adapter, readiness, clock)
+            else StarRocksAdapter(t.starrocks, connect=starrocks_connect[t.target_id], clock=clock)
+            for t in config.targets
+        }
+        parts = _delivery(config, engine, adapters, readiness, clock)
         recovery = await parts.store.recover(lock)
         logger.info(
             "启动恢复：interrupted=%d unknown=%d unsent=%d",
@@ -437,7 +512,7 @@ async def serve(
     stop: asyncio.Event,
     clock: Callable[[], datetime] = now,
     model_transport: httpx2.AsyncBaseTransport | None = None,
-    starrocks_connect: Connector | None = None,
+    starrocks_connect: Mapping[str, Connector] | None = None,
     feishu_channel: LarkChannel | None = None,
 ) -> int:
     """运行到 ``stop`` 被设置、持锁连接丢失或某个组件意外结束；返回进程退出码（0 为正常停止）。"""
@@ -604,8 +679,11 @@ async def resend(
     async with _engine(config) as engine, hold_backend(engine) as sender:
         # 发送期间占用一条连接：并发启动的 serve 据此知道这次重发仍在进行，不把它当作遗留发送。
         await check_storage(engine)
-        adapter = StarRocksAdapter(config.starrocks, connect=_no_starrocks, clock=clock)
-        parts = _delivery(config, engine, adapter, Readiness(), clock, sender)
+        adapters = {
+            t.target_id: StarRocksAdapter(t.starrocks, connect=_no_starrocks, clock=clock)
+            for t in config.targets
+        }
+        parts = _delivery(config, engine, adapters, Readiness(), clock, sender)
         transport = LarkTransport(feishu_channel or lark_channel(feishu), feishu)
 
         async def transmit(delivery: Delivery) -> SendOutcome:

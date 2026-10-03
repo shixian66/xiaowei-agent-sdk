@@ -166,7 +166,7 @@ def request(
 
 def sdk_tool(governed: GovernedTools, adapter: RecordingAdapter, tool_id: str) -> FunctionTool:
     """产品同一路径的受治理函数工具；execute 由这里绑定而非模型提供。"""
-    contract = governed.catalog.contract(tool_id)
+    contract = governed.catalog.contract(tool_id, TARGET)
     assert contract is not None
     return governed_function_tool(tool_id.split("/", 1)[1], contract, governed, adapter.execute)
 

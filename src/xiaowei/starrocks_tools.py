@@ -23,6 +23,10 @@ SQLGuard 范围的慢查询（见 ``StarRocksAdapter.slow_queries``），时间�
 
 全部策略共用 ``data_scope_digest``：证据只在装配时的数据范围下可读，以收窄（或任何改动）
 范围的配置启动后，已保存的 StarRocks 证据不再进入模型、Session 或渠道。
+
+多个目标各自装配一次：契约、策略（``starrocks.<目标>.<工具>``）与执行函数都按目标登记，执行函数
+以 ``(tool_id, target_id)`` 为键。每个参数模型都以必填的 ``cluster`` 选择目标，对模型只有一套
+同名工具（见 ``tools.routed_function_tool``）。
 """
 
 from __future__ import annotations
@@ -88,27 +92,37 @@ _WIDEST_CHAR: Final = "\x01"
 _WIDEST_INT: Final = -(2**63)
 
 
+# 交给模型的 schema 只限长度：受测模型端点是否接受正则 ``pattern`` 未经验证；集群 ID 的格式由配置
+# 校验，未登记的取值在路由时于 I/O 前拒绝。
+ClusterArg = Annotated[str, StringConstraints(min_length=1, max_length=32)]
+
+
 class ListTablesArgs(BaseModel):
-    """严格空对象：不接受过滤条件、catalog 或任何查询参数。"""
+    """只有目标集群：不接受过滤条件、catalog 或任何查询参数。"""
 
     model_config = ConfigDict(extra="forbid")
+
+    cluster: ClusterArg
 
 
 class DescribeTableArgs(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
+    cluster: ClusterArg
     table: Annotated[str, StringConstraints(min_length=1, max_length=256)]
 
 
 class RunQueryArgs(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
+    cluster: ClusterArg
     sql: Annotated[str, StringConstraints(min_length=1)]
 
 
 class ListSlowQueriesArgs(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
+    cluster: ClusterArg
     window_minutes: int
     order_by: Literal["query_time", "scan_bytes", "scan_rows", "cpu", "memory", "pending"]
 
@@ -116,6 +130,7 @@ class ListSlowQueriesArgs(BaseModel):
 class ExplainQueryArgs(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
+    cluster: ClusterArg
     sql: Annotated[str, StringConstraints(min_length=1)]
 
 
@@ -125,7 +140,17 @@ class StarRocksTools:
 
     contracts: tuple[ToolContract, ...]
     policies: tuple[ToolPolicy, ...]
-    executes: Mapping[str, Execute]
+    executes: Mapping[tuple[str, str], Execute]
+
+    def __add__(self, other: StarRocksTools) -> StarRocksTools:
+        """合并另一目标的装配结果；同一目标重复装配时拒绝。"""
+        if {t for _, t in self.executes} & {t for _, t in other.executes}:
+            raise ValueError("StarRocks 工具：同一目标重复装配")
+        return StarRocksTools(
+            contracts=self.contracts + other.contracts,
+            policies=self.policies + other.policies,
+            executes={**self.executes, **other.executes},
+        )
 
 
 def starrocks_tools(adapter: StarRocksAdapter, max_bytes: Mapping[Audience, int]) -> StarRocksTools:
@@ -142,7 +167,7 @@ def starrocks_tools(adapter: StarRocksAdapter, max_bytes: Mapping[Audience, int]
 
     def policy(name: str, arguments: type[BaseModel], fact_note: str | None = None) -> ToolPolicy:
         return ToolPolicy(
-            policy_id=f"starrocks.{name}",
+            policy_id=f"starrocks.{target.target_id}.{name}",
             arguments=arguments,
             projections=projections,
             required=RESULT_FIELDS,
@@ -212,7 +237,7 @@ def starrocks_tools(adapter: StarRocksAdapter, max_bytes: Mapping[Audience, int]
         return _observation(await adapter.explain(query), bounds)
 
     contracts = [
-        contract(LIST_TABLES, list_policy, "列出本目标允许查询的表与视图。"),
+        contract(LIST_TABLES, list_policy, "列出所选集群允许查询的表与视图。"),
         contract(
             DESCRIBE_TABLE,
             describe_policy,
@@ -238,12 +263,13 @@ def starrocks_tools(adapter: StarRocksAdapter, max_bytes: Mapping[Audience, int]
         ),
     ]
     policies = [list_policy, describe_policy, query_policy, explain_policy, layout_policy]
-    executes: dict[str, Execute] = {
-        LIST_TABLES: list_tables,
-        DESCRIBE_TABLE: Prechecked(check=check_table, run=describe_table),
-        LAYOUT_TOOL: Prechecked(check=check_table, run=describe_layout),
-        RUN_QUERY: Prechecked(check=check_query, run=run_query),
-        EXPLAIN_QUERY: Prechecked(check=check_explain, run=explain),
+    key = target.target_id
+    executes: dict[tuple[str, str], Execute] = {
+        (LIST_TABLES, key): list_tables,
+        (DESCRIBE_TABLE, key): Prechecked(check=check_table, run=describe_table),
+        (LAYOUT_TOOL, key): Prechecked(check=check_table, run=describe_layout),
+        (RUN_QUERY, key): Prechecked(check=check_query, run=run_query),
+        (EXPLAIN_QUERY, key): Prechecked(check=check_explain, run=explain),
     }
     if target.audit is not None:
         limit = target.audit.max_window_minutes
@@ -265,13 +291,13 @@ def starrocks_tools(adapter: StarRocksAdapter, max_bytes: Mapping[Audience, int]
             contract(
                 SLOW_QUERIES,
                 audit_policy,
-                "列出最近一段时间内本目标数据库实际运行过的慢查询（来自审计表），按所选指标"
+                "列出最近一段时间内所选集群默认数据库实际运行过的慢查询（来自审计表），按所选指标"
                 "降序；只列出引用对象全部获准的查询，给出实测耗时、扫描量、CPU、内存、排队"
                 f"时间与 SQL 原文。时间窗为 1 到 {limit} 分钟。",
             )
         )
         policies.append(audit_policy)
-        executes[SLOW_QUERIES] = Prechecked(check=check_window, run=slow_queries)
+        executes[(SLOW_QUERIES, key)] = Prechecked(check=check_window, run=slow_queries)
 
     return StarRocksTools(contracts=tuple(contracts), policies=tuple(policies), executes=executes)
 

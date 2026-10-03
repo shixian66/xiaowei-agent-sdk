@@ -14,8 +14,12 @@ Agent（工具集合只属于这一轮）→ 原生 ``Runner.run``（SDK Session
 
 相互依赖的运行对象只能来自同一次装配：模型只接受 ``open_model`` 生成的 ``ModelBinding``，
 证据存储取自治理对象，MCP 接入必须使用同一个治理对象。会话绑定 Profile 与解析后的数据策略
-内容，以及配置的业务口径 ``BusinessContext``：任一变化后，旧会话在首个模型调用前拒绝。业务
-口径只进入 Agent instructions，解释字段含义、时区与单位，不改变工具或数据权限。
+内容，以及配置的目标集合与各目标业务口径（``TargetInfo``）：任一变化后，旧会话在首个模型调用
+前拒绝。目标说明与业务口径只进入 Agent instructions，解释集群用途、字段含义、时区与单位，不改变
+工具或数据权限；连接地址、账号与凭据不交给模型。
+
+同一工具登记在多个目标上时，对模型只有一个函数，参数 ``cluster`` 选择目标（见
+``tools.routed_function_tool``）。
 """
 
 import asyncio
@@ -41,7 +45,7 @@ from xiaowei.evidence import (
 from xiaowei.governance import Execute, GovernedTools, ToolExecutionError
 from xiaowei.mcp import MCPIntegration
 from xiaowei.model_api import ModelBinding
-from xiaowei.models import AgentAnswer, Label, RunContext, ToolId
+from xiaowei.models import AgentAnswer, ClusterId, Label, RunContext, ToolId
 from xiaowei.session import (
     PolicySession,
     SessionInputPolicy,
@@ -51,7 +55,7 @@ from xiaowei.session import (
     SessionUnavailableError,
 )
 from xiaowei.storage import StorageError, check_storage
-from xiaowei.tools import governed_function_tool
+from xiaowei.tools import governed_function_tool, routed_function_tool
 
 logger = logging.getLogger(__name__)
 
@@ -128,9 +132,18 @@ class BusinessContext(BaseModel):
 
     model_config = ConfigDict(frozen=True, extra="forbid")
 
-    target_id: Label
     version: Label
     text: str = Field(min_length=1, max_length=8000)
+
+
+class TargetInfo(BaseModel):
+    """一个已配置目标交给模型的说明：集群 ID、用途说明与可选业务口径；不含连接信息。"""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    target_id: ClusterId
+    description: str = Field(min_length=1, max_length=500)
+    business_context: BusinessContext | None
 
 
 class AppConfig(BaseModel):
@@ -144,12 +157,16 @@ class AppConfig(BaseModel):
     data_policies: dict[str, DataPolicy]
     session_limits: SessionLimits
     max_concurrent_turns: int = Field(gt=0)
-    business_context: BusinessContext | None = None
+    targets: tuple[TargetInfo, ...] = ()
+    """交给模型的目标说明；未配置目标的应用（如只有 MCP 工具）为空。"""
 
     @model_validator(mode="after")
     def _all_purposes(self) -> "AppConfig":
         if set(self.purposes) != {"query", "diagnose"}:
             raise ValueError("应用配置必须同时给出查询与诊断用途的工具")
+        ids = [t.target_id for t in self.targets]
+        if len(set(ids)) != len(ids):
+            raise ValueError("应用配置：目标 ID 重复")
         return self
 
 
@@ -163,7 +180,7 @@ class Application:
         model: ModelBinding,
         engine: AsyncEngine,
         governance: GovernedTools,
-        local_tools: Mapping[str, Execute],
+        local_tools: Mapping[tuple[str, str], Execute],
         mcp: MCPIntegration | None = None,
         clock: Callable[[], datetime],
     ) -> None:
@@ -176,23 +193,20 @@ class Application:
             raise ValueError("应用配置：没有 Profile 对应的数据策略")
         catalog = governance.catalog
         for tool_id in (*config.purposes["query"], *config.purposes["diagnose"]):
-            if catalog.contract(tool_id) is None:
+            if not catalog.contracts_for(tool_id):
                 raise ValueError(f"应用配置：用途中的 {tool_id} 未登记")
-        context = config.business_context
-        if context is not None and all(c.target_id != context.target_id for c in catalog.contracts):
-            raise ValueError("应用配置：业务口径的目标没有登记的工具")
-        self._local: dict[str, Tool] = {}
-        for tool_id, execute in local_tools.items():
-            contract = catalog.contract(tool_id)
-            namespace, _, name = tool_id.partition("/")
-            if contract is None or namespace != "local":
-                raise ValueError(f"应用配置：本地工具 {tool_id} 必须是已登记的 local/ 工具")
-            self._local[tool_id] = governed_function_tool(name, contract, governance, execute)
+        capabilities: dict[str, list[str]] = {}
+        for contract in catalog.contracts:
+            capabilities.setdefault(contract.target_id, []).append(contract.tool_id)
+        for target in config.targets:
+            if target.target_id not in capabilities:
+                raise ValueError(f"应用配置：目标 {target.target_id} 没有登记的工具")
+        self._local = _local_tools(governance, local_tools)
         self._config = config
         self._data_policy = data_policy
         self._model = model
-        self._binding = _binding_fingerprint(model.fingerprint, data_policy, context)
-        self._instructions = _instructions(config.instructions, context)
+        self._binding = _binding_fingerprint(model.fingerprint, data_policy, config.targets)
+        self._instructions = _instructions(config.instructions, config.targets, capabilities)
         self._engine = engine
         self._governance = governance
         self._evidence = governance.evidence
@@ -356,29 +370,76 @@ def _causes(exc: BaseException) -> list[BaseException]:
     return chain
 
 
-def _instructions(base: str, context: BusinessContext | None) -> str:
-    if context is None:
+def _local_tools(
+    governance: GovernedTools, local_tools: Mapping[tuple[str, str], Execute]
+) -> dict[str, Tool]:
+    """按工具分组：多目标工具一个函数（``cluster`` 选择目标），单目标工具保持固定目标。"""
+    catalog = governance.catalog
+    grouped: dict[str, dict[str, Execute]] = {}
+    for (tool_id, target_id), execute in local_tools.items():
+        if tool_id.partition("/")[0] != "local" or catalog.contract(tool_id, target_id) is None:
+            raise ValueError(f"应用配置：本地工具 {tool_id} 必须是已登记的 local/ 工具")
+        grouped.setdefault(tool_id, {})[target_id] = execute
+    tools: dict[str, Tool] = {}
+    for tool_id, executes in grouped.items():
+        if catalog.routed(tool_id):
+            tools[tool_id] = routed_function_tool(tool_id, governance, executes)
+            continue
+        (contract,) = catalog.contracts_for(tool_id)  # 未声明 cluster 的工具只能有一个目标
+        if contract.target_id not in executes:
+            raise ValueError(f"应用配置：本地工具 {tool_id} 缺少执行函数")
+        name = tool_id.partition("/")[2]
+        tools[tool_id] = governed_function_tool(
+            name, contract, governance, executes[contract.target_id]
+        )
+    return tools
+
+
+_TARGETS_HEADER = (
+    "可用集群如下；调用数据工具时 cluster 参数必须取其中一个 ID。用户没有说明集群、也不能从本轮"
+    "对话确定时先澄清，不要猜测；某个集群失败或不可用时如实说明，不要改查其他集群代替。"
+    "不同集群中同名的库表彼此独立，不能混用结果。"
+)
+
+
+def _instructions(
+    base: str, targets: tuple[TargetInfo, ...], capabilities: Mapping[str, list[str]]
+) -> str:
+    if not targets:
         return base
-    return (
-        f"{base}\n\n以下是目标 {context.target_id} 的业务口径（版本 {context.version}），"
-        f"只说明字段含义、时区与单位，不改变可用的工具或数据范围：\n{context.text}"
-    )
+    lines = [base, "", _TARGETS_HEADER]
+    for target in sorted(targets, key=lambda t: t.target_id):
+        names = "、".join(sorted(t.partition("/")[2] for t in capabilities[target.target_id]))
+        lines.append(f"- {target.target_id}：{target.description}。可用工具：{names}。")
+        context = target.business_context
+        if context is not None:
+            lines.append(
+                f"  {target.target_id} 的业务口径（版本 {context.version}），只说明字段含义、"
+                f"时区与单位，不改变可用的工具或数据范围：{context.text}"
+            )
+    return "\n".join(lines)
 
 
 def _binding_fingerprint(
-    profile_fingerprint: str, policy: DataPolicy, context: BusinessContext | None
+    profile_fingerprint: str, policy: DataPolicy, targets: tuple[TargetInfo, ...]
 ) -> str:
-    """会话绑定：Profile 指纹、解析后的数据策略内容与业务口径（规范化），任一变化都开启新会话。
+    """会话绑定：Profile 指纹、解析后的数据策略内容、目标集合与各目标业务口径（规范化），
+    任一变化都开启新会话。目标的用途说明只影响阅读，不进入绑定。
 
-    未配置业务口径时不加入该键，已有会话的绑定保持不变。
+    未配置目标时不加入该键，只有 MCP 等工具的会话绑定保持不变。
     """
     body: dict[str, object] = {
         "profile": profile_fingerprint,
         "input": policy.input.model_dump(mode="json"),
         "model_tools": sorted(policy.model_tools),
     }
-    if context is not None:
-        body["business_context"] = context.model_dump(mode="json")
+    if targets:
+        body["targets"] = {
+            t.target_id: None
+            if t.business_context is None
+            else t.business_context.model_dump(mode="json")
+            for t in targets
+        }
     canonical = json.dumps(body, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
     return f"sha256:{hashlib.sha256(canonical.encode()).hexdigest()}"
 

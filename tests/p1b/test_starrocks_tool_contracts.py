@@ -47,13 +47,13 @@ def request(sql: str, tool_id: str = RUN_QUERY) -> ToolRequest:
         target_id=SR.target_id,
         call_id="c1",
         tool_name=tool_id.removeprefix("local/"),
-        arguments={"sql": sql},
+        arguments={"cluster": SR.target_id, "sql": sql},
     )
 
 
 async def run_query(ada: StarRocksAdapter, sql: str, tool_id: str = RUN_QUERY) -> ToolObservation:
     tools = starrocks_tools(ada, dict.fromkeys(AUDIENCES, needed(ada)))
-    execute = tools.executes[tool_id]
+    execute = tools.executes[(tool_id, SR.target_id)]
     assert isinstance(execute, Prechecked)
     return await execute.run(execute.check(request(sql, tool_id)))
 

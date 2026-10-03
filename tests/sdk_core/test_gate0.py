@@ -470,23 +470,39 @@ def diagnose(messages: list[dict[str, Any]]) -> dict[str, Any]:
 
 def explain_listed(messages: list[dict[str, Any]]) -> dict[str, Any]:
     sql = _tool_results(messages)[-1]["data"]["rows"][0]["sql"]
-    return call_tool("explain_query", sql=sql)(messages)
+    return call_tool("explain_query", cluster=gate0.DIAG_TARGET.target_id, sql=sql)(messages)
 
 
 def explain_replayed(messages: list[dict[str, Any]]) -> dict[str, Any]:
-    return call_tool("explain_query", sql=_tool_results(messages)[0]["data"]["sql"])(messages)
+    return call_tool(
+        "explain_query",
+        cluster=gate0.DIAG_TARGET.target_id,
+        sql=_tool_results(messages)[0]["data"]["sql"],
+    )(messages)
 
 
 def scripted_diagnosis() -> GeminiLikeEndpoint:
-    listed = call_tool("list_slow_queries", window_minutes=60, order_by="query_time")
-    layout = call_tool("describe_table_layout", table="orders")
-    pasted = call_tool("explain_query", sql=gate0.SLOW_SQL)
-    unapproved = call_tool("explain_query", sql=gate0.UNAPPROVED_SQL)
+    listed = call_tool(
+        "list_slow_queries",
+        cluster=gate0.DIAG_TARGET.target_id,
+        window_minutes=60,
+        order_by="query_time",
+    )
+    layout = call_tool("describe_table_layout", cluster=gate0.DIAG_TARGET.target_id, table="orders")
+    pasted = call_tool("explain_query", cluster=gate0.DIAG_TARGET.target_id, sql=gate0.SLOW_SQL)
+    unapproved = call_tool(
+        "explain_query", cluster=gate0.DIAG_TARGET.target_id, sql=gate0.UNAPPROVED_SQL
+    )
     steps: dict[str, list[Reply]] = {
         "slow_to_plan": [listed, explain_listed, layout, diagnose],
         "plan_rejected": [listed, unapproved, diagnose],
         "pasted_sql": [pasted, layout, diagnose],
-        "previous_query": [call_tool("run_readonly_query", sql=gate0.SLOW_SQL), diagnose],
+        "previous_query": [
+            call_tool(
+                "run_readonly_query", cluster=gate0.DIAG_TARGET.target_id, sql=gate0.SLOW_SQL
+            ),
+            diagnose,
+        ],
         "previous_sql": [explain_replayed, diagnose],
         "no_evidence": [unapproved, diagnose],
         "plan_injection": [pasted, diagnose],

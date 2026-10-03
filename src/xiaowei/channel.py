@@ -94,10 +94,10 @@ class RequestRef(_Trusted):
 
 
 class AccessDecision(_Trusted):
-    """当前授权：内部 subject、唯一目标、允许的工具与渠道数据策略版本。"""
+    """当前授权：内部 subject、可用目标集合、允许的工具与渠道数据策略版本。"""
 
     subject_id: Label
-    target_id: Label
+    target_ids: frozenset[Label] = Field(min_length=1)
     authorized_tools: frozenset[ToolId]
     policy_version: Label
 
@@ -263,7 +263,7 @@ class ResultDelivery:
             raise ResultUnavailableError from None
 
     def _context(self, record: RequestRecord, decision: AccessDecision) -> RunContext:
-        """交付用 context：结果所属会话与轮次、当前授权的目标；不授予任何工具。"""
+        """交付用 context：结果所属会话与轮次、当前授权的目标集合；不授予任何工具。"""
         return RunContext(
             identity=Identity(
                 subject_id=decision.subject_id,
@@ -271,7 +271,7 @@ class ResultDelivery:
                 turn_id=record.turn_id,
                 channel=record.channel,
             ),
-            target_scope=frozenset({decision.target_id}),
+            target_scope=decision.target_ids,
             tool_scope=frozenset(),
             budget=self._budget,
         )
@@ -329,7 +329,7 @@ class ChannelService:
                 turn_id=record.turn_id,
                 channel=inbound.channel,
             ),
-            target_scope=frozenset({decision.target_id}),
+            target_scope=decision.target_ids,
             tool_scope=scope,
             budget=self._results.budget,
         )

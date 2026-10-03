@@ -38,6 +38,7 @@ from tests.sdk_core.synthetic_tools import (
     RecordingAdapter,
     RegionArgs,
     context,
+    model_data,
     ready_engine,
     request,
     sdk_tool,
@@ -62,6 +63,7 @@ from xiaowei.models import (
     ToolObservation,
     ToolRequest,
 )
+from xiaowei.tools import routed_function_tool
 
 pytestmark = pytest.mark.loopback
 
@@ -1016,3 +1018,178 @@ def test_projection_limits_are_positive_and_fit_the_envelope() -> None:
         Projection(fields=("total",), max_bytes=16)
     with pytest.raises(ValueError):
         Projection(fields=(), max_bytes=1000)
+
+
+# ---- 多目标路由（P2.5 Task 1）：一套工具、cluster 必填、按 (tool_id, target_id) 查契约 ----------
+
+ROUTED_TOOL = "local/region_total"
+CLUSTERS = ("east-wh", "west-wh", "north-wh")
+
+
+class ClusterRegionArgs(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+    cluster: str
+    region: str
+
+
+def _routed_policy(cluster: str, arguments: type[BaseModel] = ClusterRegionArgs) -> ToolPolicy:
+    return ToolPolicy(
+        policy_id=f"synthetic.{cluster}", arguments=arguments, projections=PROJECTIONS
+    )
+
+
+def _routed_contract(cluster: str, arguments: type[BaseModel] = ClusterRegionArgs) -> ToolContract:
+    return ToolContract(
+        tool_id=ROUTED_TOOL,
+        target_id=cluster,
+        input_schema=arguments.model_json_schema(),
+        policy_id=f"synthetic.{cluster}",
+    )
+
+
+def _routed_catalog() -> ToolCatalog:
+    return ToolCatalog(
+        [_routed_contract(c) for c in CLUSTERS], [_routed_policy(c) for c in CLUSTERS]
+    )
+
+
+def _routed_ctx(targets: tuple[str, ...] = CLUSTERS, **kw: Any) -> RunContext:
+    return context(tools=frozenset({ROUTED_TOOL}), targets=frozenset(targets), **kw)
+
+
+def _routed_grants(*clusters: str) -> Grants:
+    grants = Grants()
+    for cluster in clusters:
+        grants.grant("alice", ROUTED_TOOL, target=cluster)
+    return grants
+
+
+def _three_adapters() -> dict[str, RecordingAdapter]:
+    """三个目标返回不同行数，串到别的目标就能被识别（模型投影只含 rows）。"""
+    return {c: RecordingAdapter(rows=i + 1) for i, c in enumerate(CLUSTERS)}
+
+
+async def test_one_tool_routes_each_call_to_the_named_target(postgres_url: URL) -> None:
+    adapters, grants = _three_adapters(), _routed_grants(*CLUSTERS)
+    async with ready_engine(postgres_url) as engine:
+        governed = GovernedTools(store(engine, grants, Clock(), _routed_catalog()))
+        tool = routed_function_tool(
+            ROUTED_TOOL, governed, {c: a.execute for c, a in adapters.items()}
+        )
+        assert tool.name == "region_total"
+        assert tool.params_json_schema["required"] == ["cluster", "region"]
+        # 一次返回三个调用：SDK 并行执行，各自只到达所指目标。
+        model = ScriptedModel(
+            [
+                [
+                    function_call("region_total", {"cluster": c, "region": "east"}, call_id=c)
+                    for c in reversed(CLUSTERS)
+                ],
+                _DONE,
+            ]
+        )
+        agent = Agent[RunContext](name="governed", model=model, tools=[tool])
+        await Runner.run(agent, "三个集群的东区订单？", context=_routed_ctx(), max_turns=3)
+
+        for cluster, adapter in adapters.items():
+            (req,) = adapter.calls
+            assert req.target_id == cluster and req.arguments["cluster"] == cluster
+        outputs = _outputs(model, 1)
+        assert len(outputs) == 3
+        for output, cluster in zip(outputs, reversed(CLUSTERS), strict=True):
+            rows = model_data(output)["data"]["rows"]  # type: ignore[index]
+            assert len(rows) == adapters[cluster].rows
+        # 证据按实际目标保存：只在含该目标的范围内可读。
+        evidence = governed.evidence
+        evidence_id = str(model_data(outputs[0])["evidence_id"])
+        await evidence.project(evidence_id, _routed_ctx(), "model")
+        with pytest.raises(EvidenceUnavailableError):
+            await evidence.project(evidence_id, _routed_ctx(("east-wh",)), "model")
+    # 调用前与读取证据时的授权都只针对实际目标。
+    assert set(grants.checks) == {("alice", c, ROUTED_TOOL) for c in CLUSTERS}
+
+
+@pytest.mark.parametrize(
+    ("arguments", "message"),
+    [
+        pytest.param({"region": "east"}, "集群", id="missing-cluster"),
+        pytest.param({"cluster": "south-wh", "region": "east"}, "集群", id="unknown-cluster"),
+        pytest.param({"cluster": 1, "region": "east"}, "集群", id="non-string-cluster"),
+        pytest.param({"cluster": "west-wh", "region": "east"}, "本轮不允许", id="out-of-scope"),
+        pytest.param({"cluster": "north-wh", "region": "east"}, "当前无权", id="not-authorized"),
+    ],
+)
+async def test_bad_cluster_is_rejected_before_any_target_io(
+    postgres_url: URL, arguments: dict[str, object], message: str
+) -> None:
+    adapters, grants = _three_adapters(), _routed_grants("east-wh", "west-wh")
+    async with ready_engine(postgres_url) as engine:
+        governed = GovernedTools(store(engine, grants, Clock(), _routed_catalog()))
+        tool = routed_function_tool(
+            ROUTED_TOOL, governed, {c: a.execute for c, a in adapters.items()}
+        )
+        model = ScriptedModel([[function_call("region_total", arguments, call_id="call-1")], _DONE])
+        agent = Agent[RunContext](name="governed", model=model, tools=[tool])
+        ctx = _routed_ctx(("east-wh", "north-wh"))
+        await Runner.run(agent, "东区订单？", context=ctx, max_turns=3)
+
+    (output,) = _outputs(model, 1)
+    assert message in output
+    assert all(a.calls == [] for a in adapters.values())
+    # 不回退到其他集群；结构性拒绝不触发授权查询，只有未授权目标查过一次授权。
+    assert grants.checks == ([("alice", "north-wh", ROUTED_TOOL)] if message == "当前无权" else [])
+
+
+async def test_model_arguments_cannot_override_the_routed_target(postgres_url: URL) -> None:
+    """请求目标与参数中的 cluster 不一致时拒绝：执行与证据都不能落到参数之外的目标。"""
+    adapters, grants = _three_adapters(), _routed_grants(*CLUSTERS)
+    async with ready_engine(postgres_url) as engine:
+        governed = GovernedTools(store(engine, grants, Clock(), _routed_catalog()))
+        forged = ToolRequest(
+            tool_id=ROUTED_TOOL,
+            target_id="east-wh",
+            call_id="call-1",
+            tool_name="region_total",
+            arguments={"cluster": "west-wh", "region": "east"},
+        )
+        for adapter in adapters.values():
+            with pytest.raises(ToolRejectedError):
+                await governed.invoke(_routed_ctx(), forged, adapter.execute)
+    assert all(a.calls == [] for a in adapters.values())
+    assert grants.checks == []
+
+
+def test_routed_catalog_looks_up_contracts_by_tool_and_target() -> None:
+    catalog = _routed_catalog()
+    for cluster in CLUSTERS:
+        contract = catalog.contract(ROUTED_TOOL, cluster)
+        assert contract is not None and contract.policy_id == f"synthetic.{cluster}"
+    assert catalog.contract(ROUTED_TOOL, "south-wh") is None
+    assert {c.target_id for c in catalog.contracts_for(ROUTED_TOOL)} == set(CLUSTERS)
+
+
+@pytest.mark.parametrize(
+    ("contracts", "policies"),
+    [
+        pytest.param(
+            [_routed_contract(c, RegionArgs) for c in CLUSTERS[:2]],
+            [_routed_policy(c, RegionArgs) for c in CLUSTERS[:2]],
+            id="shared-tool-without-cluster-argument",
+        ),
+        pytest.param(
+            [_routed_contract("east-wh"), _routed_contract("west-wh", RegionArgs)],
+            [_routed_policy("east-wh"), _routed_policy("west-wh", RegionArgs)],
+            id="different-schemas-per-target",
+        ),
+        pytest.param(
+            [_routed_contract("east-wh"), _routed_contract("east-wh")],
+            [_routed_policy("east-wh")],
+            id="duplicate-tool-and-target",
+        ),
+    ],
+)
+def test_catalog_rejects_ambiguous_routing(
+    contracts: list[ToolContract], policies: list[ToolPolicy]
+) -> None:
+    with pytest.raises(ValueError, match="工具目录"):
+        ToolCatalog(contracts, policies)

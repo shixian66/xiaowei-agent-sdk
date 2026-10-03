@@ -15,7 +15,7 @@
 
 查询与诊断共用一个业务 Agent。StarRocks 通过受治理 function tools 和本地 Adapter 直连；数据库 MCP 暂缓。通用 MCP Client Integration 保留用于将来其他能力；两条工具路径均复核权限、过滤结果并验证 Evidence。
 
-**已批准、尚未实现的增量：** P2.5 开放账号实际 SELECT 范围、复杂 SQL、多集群和单 Agent 自然语言工具选择，所有业务查询先做风险评估；随后增加指定飞书群共享与排队，均在 P3 前完成。产品边界见 [ARCHITECTURE](ARCHITECTURE.md#p25-scope)，实施顺序见 [DEVELOPMENT_PLAN](DEVELOPMENT_PLAN.md#6-p25-与飞书单群增量)。下文命令、配置和诊断用法仍描述当前 P1/P2 实现，不能直接用未来格式启动。
+**已批准、尚未实现的增量：** P2.5 开放账号实际 SELECT 范围、复杂 SQL、多集群和单 Agent 自然语言工具选择，所有业务查询先做风险评估；随后增加指定飞书群共享与排队，均在 P3 前完成。产品边界见 [ARCHITECTURE](ARCHITECTURE.md#p25-scope)，实施顺序见 [DEVELOPMENT_PLAN](DEVELOPMENT_PLAN.md#6-p25-与飞书单群增量)。下文命令、配置和诊断用法描述当前主线；配置已改为 `targets` 多目标格式（P2.5 Task 1），自动范围、复杂 SQL 与执行前评估仍未实现。
 
 ## 最小产品形态
 
@@ -25,7 +25,7 @@
 | 模型 API | 计划接入 OpenAI、Gemini、DeepSeek；通过配置选择经过验证的端点和模型，一次运行使用一个模型 |
 | Web | 本机使用的简单对话页，显示文本、SQL、有限结果与执行提示 |
 | 飞书 | 当前获准单聊；P3 前增加一个指定群的 @、共享与有界排队 |
-| 数据源 | 本地 Adapter 直连 StarRocks；当前单目标和手写 allowlist，P2.5 扩展为多个目标与自动范围 |
+| 数据源 | 本地 Adapter 直连一个或多个 StarRocks 目标，工具以 `cluster` 参数选择集群；每个目标当前仍用手写 allowlist，P2.5 后续改为自动范围 |
 | MCP | 官方 SDK 接入能力 + 小维可信配置与治理；配置为空时，本地功能照常运行 |
 | 会话 | 两端分别保留上下文，共用业务逻辑；暂不跨渠道同步 |
 | 运行与存储 | Docker Compose 管理小维与 PostgreSQL 两个容器；小维单进程，SDK Session 首版使用 SQLAlchemySession + PostgreSQL；飞书优先长连接 |
@@ -63,7 +63,7 @@ MCP 负责标准化工具接入，不能替代业务授权。只有参数含义�
 
 凭据仅在本机或部署环境配置，不粘贴到对话、仓库、浏览器或日志。缺少真实环境时可以开发和离线验证，但不能标记对应实战验收完成。
 
-**正式命令。** 复制 [examples/xiaowei.example.json](examples/xiaowei.example.json)，按获准环境填写模型 Profile、StarRocks 目标与 allowlist、授权表和 Web 地址；如需飞书，再加入 `feishu` 段。配置中的凭据只写 `env:NAME` 引用，变量在运行环境中设置：
+**正式命令。** 复制 [examples/xiaowei.example.json](examples/xiaowei.example.json)，按获准环境填写模型 Profile、`targets`（每个 StarRocks 集群一项）、授权表和 Web 地址；如需飞书，再加入 `feishu` 段。配置中的凭据只写 `env:NAME` 引用，变量在运行环境中设置：
 
 ```bash
 uv sync --locked
@@ -78,14 +78,16 @@ uv run --locked xiaowei --config xiaowei.json requests resend --subject <subject
 
 **诊断。** Web 选“诊断”或飞书直接发文字（不加 `/查询`）：可以粘贴 SQL、问“刚才那条为什么慢”，或在配置了审计源时问“最近一小时最慢的查询”。诊断轮只能查看表结构、表布局（表模型、分区、分桶、排序键）、执行计划与审计慢查询，看不到也不能调用实际查询工具。执行计划只用固定级别 `EXPLAIN LOGICAL` 获取，不执行原查询，不包含实际耗时；EXPLAIN ANALYZE 不开放。回答中的工具结果由程序生成并附固定说明（如“计划是估算”“审计有导入延迟”），分析建议单列为模型推断，优化后的 SQL 只是建议、不会被执行。飞书回复超过单条上限时先完整保留分析建议，工具结果截短并注明。
 
-**审计源（可选）。** `starrocks.audit` 指向目标上已有的 AuditLoader 审计表；小维不安装插件、不改其配置。各字段：
+**目标（`targets`）。** 每项为 `type`（目前只能是 `starrocks`）、`description`（集群用途，交给模型选择集群）、`business_context`（该集群的业务口径 `{"version", "text"}`，没有则写 `null`）与 `starrocks`（连接、限额与 allowlist）。集群 ID 就是 `starrocks.target_id`，只能用 1–32 位小写字母、数字、`_`、`-`，不能重复；连接地址、账号与凭据引用不交给模型。授权表按工具授予，获准用户可用全部已配置集群；模型每次调用数据工具都必须给出 `cluster`，未知集群在连接前拒绝，不会改查其他集群。旧版顶层 `starrocks`/`business_context` 会在启动时报错并给出迁移方式：把原 `starrocks` 放进 `targets` 的一项，原 `business_context` 去掉 `target_id` 后放到同一项。新增、删除集群或修改口径后，旧会话需要新建；已保存的 StarRocks 结果在本次升级后一次失效。
+
+**审计源（可选）。** `targets[].starrocks.audit` 指向该集群上已有的 AuditLoader 审计表；小维不安装插件、不改其配置。各字段：
 
 - `database` / `table`：审计库表名（官方默认 `starrocks_audit_db__` / `starrocks_audit_tbl__`），只读账号需要该表的 SELECT 权限。
 - `time_zone`：必须等于 FE 服务器的系统时区（审计时间按它写入）。配错不会报错，但时间窗会偏移，结果为空或错位；示例中的 `Asia/Shanghai` 部署时按实际核对。
 - `stmt_limit`：必填，填插件的 `max_stmt_length`，并要求 `policy.max_sql_bytes <= stmt_limit - 4`，保证读出的原文没有被插件截断。
 - `max_window_minutes` / `max_rows` / `candidate_rows` / `candidate_bytes`：可查的最长时间窗、最多列出的行数，以及一次取出并检查的候选行数与字节上限。
 
-不配置 `audit` 时不提供 `list_slow_queries`，配置开放或授予它会在启动时报错。只列出本目标库中、原文引用的对象、列与函数全部获准的查询，列表可能少于上限，为空也不代表没有慢查询。插件刚安装后首批记录可能缺失；审计表任一行格式异常（如时间为空、指标不是整数）时整个工具失败，而不是返回部分结果。候选读取与原文检查各有一个客户端期限，最坏总耗时约为 2 倍 `client_timeout_seconds`。
+没有任何集群配置 `audit` 时不提供 `list_slow_queries`，配置开放或授予它会在启动时报错；只给部分集群配置时，只有这些集群可以使用它，其他集群的调用在连接前拒绝。只列出该集群默认库中、原文引用的对象、列与函数全部获准的查询，列表可能少于上限，为空也不代表没有慢查询。插件刚安装后首批记录可能缺失；审计表任一行格式异常（如时间为空、指标不是整数）时整个工具失败，而不是返回部分结果。候选读取与原文检查各有一个客户端期限，最坏总耗时约为 2 倍 `client_timeout_seconds`。
 
 **开发验证**（只用合成数据、脚本模型、替身与隔离的测试 PostgreSQL，不连接任何真实模型或外部服务）：
 

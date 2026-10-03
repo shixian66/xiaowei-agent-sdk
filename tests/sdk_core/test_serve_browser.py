@@ -21,6 +21,7 @@ from pathlib import Path
 
 import pytest
 from sqlalchemy.engine import URL
+from tests.p1b.test_starrocks_adapter import TARGET as SR
 from tests.p1b.test_starrocks_adapter import driver
 from tests.sdk_core.browser import Page, launch
 from tests.sdk_core.test_app import after, cite, tool_call
@@ -119,14 +120,18 @@ async def test_formal_assembly_turns_in_chrome(env: Env, chrome_binary: str) -> 
         await page.navigate(f"{ORIGIN}/")
         await check_cookie(page)
 
-        diagnose = env.scripts.add("浏览器诊断表结构", tool_call("list_tables"), cite())
+        diagnose = env.scripts.add(
+            "浏览器诊断表结构", tool_call("list_tables", cluster=SR.target_id), cite()
+        )
         await send(page, diagnose)
         await settled(page, 0, "completed")
         assert all("run_readonly_query" not in seen for seen in env.scripts.tools_seen(diagnose))
 
         query = env.scripts.add(
             "浏览器查询销售额",
-            tool_call("run_readonly_query", sql="SELECT region, total FROM sales"),
+            tool_call(
+                "run_readonly_query", cluster=SR.target_id, sql="SELECT region, total FROM sales"
+            ),
             cite(),
         )
         await send(page, query, "query")
@@ -137,7 +142,7 @@ async def test_formal_assembly_turns_in_chrome(env: Env, chrome_binary: str) -> 
         env.drv.make = driver(PLAN).make
         plan = env.scripts.add(
             "浏览器查看执行计划",
-            tool_call("explain_query", sql="SELECT region, total FROM sales"),
+            tool_call("explain_query", cluster=SR.target_id, sql="SELECT region, total FROM sales"),
             cite(),
         )
         await send(page, plan, "diagnose")
@@ -152,7 +157,9 @@ async def test_formal_assembly_turns_in_chrome(env: Env, chrome_binary: str) -> 
 
         gate, entered = asyncio.Event(), asyncio.Event()
         slow = env.scripts.add(
-            "浏览器慢轮", after(gate, tool_call("list_tables"), entered=entered), cite()
+            "浏览器慢轮",
+            after(gate, tool_call("list_tables", cluster=SR.target_id), entered=entered),
+            cite(),
         )
         await send(page, slow)
         await asyncio.wait_for(entered.wait(), 20)

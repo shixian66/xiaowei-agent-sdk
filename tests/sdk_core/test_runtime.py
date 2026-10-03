@@ -76,8 +76,24 @@ def free_port() -> int:
     return port
 
 
+def target_config(
+    starrocks: dict[str, Any] | None = None, business_context: dict[str, Any] | None = None
+) -> dict[str, Any]:
+    """``targets`` 中的一项：默认是 Task 2 驱动替身对应的合成 StarRocks 目标。"""
+    return {
+        "type": "starrocks",
+        "description": "合成销售库",
+        "business_context": business_context,
+        "starrocks": starrocks or SR.model_dump(mode="json"),
+    }
+
+
 def serve_config(port: int, **overrides: Any) -> dict[str, Any]:
-    """与正式 JSON 配置同构的字典；凭据只以 env: 引用出现。"""
+    """与正式 JSON 配置同构的字典；凭据只以 env: 引用出现。
+
+    ``starrocks`` 覆盖唯一默认目标的连接配置；多目标用 ``targets`` 整体覆盖。
+    """
+    starrocks = overrides.pop("starrocks", None)
     values: dict[str, Any] = {
         "storage": {
             "database_url_ref": f"env:{DB_ENV}",
@@ -95,7 +111,7 @@ def serve_config(port: int, **overrides: Any) -> dict[str, Any]:
         },
         "budget": {"max_turns": 6, "max_tool_calls": 3, "timeout_seconds": 30},
         "max_concurrent_turns": 4,
-        "starrocks": SR.model_dump(mode="json"),
+        "targets": [target_config(starrocks)],
         "projection_bytes": dict.fromkeys(AUDIENCES, 60_000),
         "access": {
             "policy_version": "p1",
@@ -155,8 +171,7 @@ class Env:
             stop=stop,
             clock=self.clock,
             model_transport=self.scripts.transport(),
-            starrocks_connect=self.drv,
-            **kw,
+            **{"starrocks_connect": {t.target_id: self.drv for t in config.targets}, **kw},
         )
 
     @asynccontextmanager
@@ -251,7 +266,9 @@ async def test_formal_assembly_answers_web_turns_and_stops_cleanly(env: Env) -> 
         async with env.running(config) as served:
             assert await served.ready() == {"status": "ready", "feishu": "disabled"}
             await served.page()
-            diagnose = env.scripts.add("诊断表结构", tool_call("list_tables"), cite())
+            diagnose = env.scripts.add(
+                "诊断表结构", tool_call("list_tables", cluster=SR.target_id), cite()
+            )
             response = await served.turn(diagnose)
             assert response.status_code == 200 and response.json()["state"] == "completed"
             assert all(
@@ -260,7 +277,11 @@ async def test_formal_assembly_answers_web_turns_and_stops_cleanly(env: Env) -> 
 
             query = env.scripts.add(
                 "各地区销售额",
-                tool_call("run_readonly_query", sql="SELECT region, total FROM sales"),
+                tool_call(
+                    "run_readonly_query",
+                    cluster=SR.target_id,
+                    sql="SELECT region, total FROM sales",
+                ),
                 cite(),
             )
             body = (await served.turn(query, "query", "r2")).json()
@@ -296,7 +317,7 @@ async def test_formal_assembly_diagnoses_with_a_plan_and_never_runs_the_query(en
         await served.page()
         message = env.scripts.add(
             "为什么按地区查询慢",
-            tool_call("explain_query", sql="SELECT region, total FROM sales"),
+            tool_call("explain_query", cluster=SR.target_id, sql="SELECT region, total FROM sales"),
             cite("扫描了整张表"),
         )
         body = (await served.turn(message)).json()
@@ -319,7 +340,7 @@ async def test_formal_assembly_rejects_out_of_scope_explain_without_io(env: Env)
         await served.page()
         message = env.scripts.add(
             "看看 secret 列的计划",
-            tool_call("explain_query", sql="SELECT secret FROM sales"),
+            tool_call("explain_query", cluster=SR.target_id, sql="SELECT secret FROM sales"),
             clarify("secret 列不在可查看范围内"),
         )
         body = (await served.turn(message)).json()
@@ -350,7 +371,9 @@ async def test_formal_assembly_cites_table_layout_with_hidden_keys(env: Env) -> 
     async with env.running(env.config()) as served:
         await served.page()
         message = env.scripts.add(
-            "sales 表的分桶合理吗", tool_call("describe_table_layout", table="sales"), cite()
+            "sales 表的分桶合理吗",
+            tool_call("describe_table_layout", cluster=SR.target_id, table="sales"),
+            cite(),
         )
         body = (await served.turn(message)).json()
         assert body["state"] == "completed"
@@ -379,7 +402,7 @@ async def test_formal_assembly_rejects_layout_of_unlisted_tables_without_io(env:
         await served.page()
         message = env.scripts.add(
             "users 表的布局",
-            tool_call("describe_table_layout", table="users"),
+            tool_call("describe_table_layout", cluster=SR.target_id, table="users"),
             clarify("users 不在可查看范围内"),
         )
         body = (await served.turn(message)).json()
@@ -426,7 +449,9 @@ async def test_formal_assembly_lists_only_approved_slow_queries(env: Env) -> Non
         await served.page()
         message = env.scripts.add(
             "最近一小时的慢查询",
-            tool_call("list_slow_queries", window_minutes=60, order_by="query_time"),
+            tool_call(
+                "list_slow_queries", cluster=SR.target_id, window_minutes=60, order_by="query_time"
+            ),
             cite(),
         )
         body = (await served.turn(message)).json()
@@ -445,7 +470,9 @@ async def test_formal_assembly_stops_the_turn_when_the_audit_table_is_missing(en
         await served.page()
         message = env.scripts.add(
             "最近一小时的慢查询",
-            tool_call("list_slow_queries", window_minutes=60, order_by="query_time"),
+            tool_call(
+                "list_slow_queries", cluster=SR.target_id, window_minutes=60, order_by="query_time"
+            ),
             cite(),
         )
         body = (await served.turn(message)).json()
@@ -588,7 +615,9 @@ async def test_lock_loss_is_noticed_at_once_not_at_the_next_check(env: Env) -> N
         await served.page()
         assert await env.scalar(TERMINATE_LOCK) == 1
         await not_serving(served)
-        late = env.scripts.add("丢锁后的新请求", tool_call("list_tables"), cite())
+        late = env.scripts.add(
+            "丢锁后的新请求", tool_call("list_tables", cluster=SR.target_id), cite()
+        )
         try:
             response = await served.turn(late, request_id="late")
         except httpx.TransportError:
@@ -604,7 +633,9 @@ async def test_second_instance_after_lock_loss_never_runs_the_old_request(env: E
     """旧实例丢锁 → 第二实例取得锁并恢复 → 旧实例在途轮次的结果不能覆盖恢复结论。"""
     gate, entered = asyncio.Event(), asyncio.Event()
     slow = env.scripts.add(
-        "丢锁时在途", after(gate, tool_call("list_tables"), entered=entered), cite()
+        "丢锁时在途",
+        after(gate, tool_call("list_tables", cluster=SR.target_id), entered=entered),
+        cite(),
     )
     old = env.config(lock_check_seconds=60, shutdown_timeout_seconds=20)
     async with env.running(old) as served:
@@ -631,8 +662,8 @@ async def test_second_instance_after_lock_loss_never_runs_the_old_request(env: E
 async def test_accept_paused_across_a_takeover_ends_interrupted_not_stranded(env: Env) -> None:
     """旧实例的接收事务未提交时失去锁、新实例接管：恢复等它提交后再读取，请求不停在 accepted；
     重复请求在新实例得到已有终态，不运行模型或查询。"""
-    first = env.scripts.add("先建立会话", tool_call("list_tables"), cite())
-    late = env.scripts.add("接管时尚未提交", tool_call("list_tables"), cite())
+    first = env.scripts.add("先建立会话", tool_call("list_tables", cluster=SR.target_id), cite())
+    late = env.scripts.add("接管时尚未提交", tool_call("list_tables", cluster=SR.target_id), cite())
     old = env.config(lock_check_seconds=60)
     async with env.running(old) as served:
         await served.page()
@@ -732,7 +763,9 @@ async def test_feishu_turn_is_drained_before_the_long_connection_closes(env: Env
     channel = OrderedChannel()
     gate, entered = asyncio.Event(), asyncio.Event()
     message = env.scripts.add(
-        "飞书慢轮", after(gate, tool_call("list_tables"), entered=entered), cite()
+        "飞书慢轮",
+        after(gate, tool_call("list_tables", cluster=SR.target_id), entered=entered),
+        cite(),
     )
     async with env.running(config, feishu_channel=channel) as served:
         assert (await served.ready())["feishu"] == "connected"
@@ -766,7 +799,7 @@ async def failed_feishu_result(env: Env, config: runtime.ServeConfig) -> str:
         SendError(code=FeishuChannelErrorCode.PERMISSION_DENIED, retryable=False)
     )
     channel = FakeChannel(result=refused)
-    message = env.scripts.add("飞书待重发", tool_call("list_tables"), cite())
+    message = env.scripts.add("飞书待重发", tool_call("list_tables", cluster=SR.target_id), cite())
     async with env.running(config, feishu_channel=channel) as served:
         channel.emit_raw_from_sdk_thread(feishu_event(env, message, "om_resend"))
         await until(lambda: len(channel.sends) == 1)
@@ -959,11 +992,11 @@ def test_slow_queries_can_only_be_opened_with_an_audit_source(tmp_path: Path) ->
 @pytest.mark.parametrize(
     ("audit", "path"),
     [
-        ({"stmt_limit": None}, "starrocks.audit.stmt_limit"),
-        ({"stmt_limit": SR.policy.max_sql_bytes + 3}, "starrocks"),
-        ({"table": "audit`canary"}, "starrocks.audit.table"),
-        ({"time_zone": "canary/Zone"}, "starrocks.audit.time_zone"),
-        ({"candidate_bytes": 10}, "starrocks"),
+        ({"stmt_limit": None}, "targets.0.starrocks.audit.stmt_limit"),
+        ({"stmt_limit": SR.policy.max_sql_bytes + 3}, "targets.0.starrocks"),
+        ({"table": "audit`canary"}, "targets.0.starrocks.audit.table"),
+        ({"time_zone": "canary/Zone"}, "targets.0.starrocks.audit.time_zone"),
+        ({"candidate_bytes": 10}, "targets.0.starrocks"),
     ],
     ids=["缺少 stmt_limit", "stmt_limit 太小", "表名非法", "时区非法", "候选字节太小"],
 )
@@ -972,7 +1005,7 @@ def test_invalid_audit_source_is_reported_without_values(
 ) -> None:
     values = audit_config(8501, **audit)
     if audit.get("stmt_limit", 0) is None:
-        del values["starrocks"]["audit"]["stmt_limit"]
+        del values["targets"][0]["starrocks"]["audit"]["stmt_limit"]
     file = tmp_path / "xiaowei.json"
     file.write_text(json.dumps(values), encoding="utf-8")
     with pytest.raises(runtime.ConfigError) as raised:
@@ -985,7 +1018,8 @@ def test_valid_configuration_round_trips_through_json(tmp_path: Path) -> None:
     file.write_text(json.dumps(serve_config(8501, feishu=feishu_config())), encoding="utf-8")
     config = runtime.load_config(file)
     assert config.listen_port == 8501 and config.feishu is not None
-    assert config.starrocks == SR
+    (target,) = config.targets
+    assert target.starrocks == SR and target.description == "合成销售库"
 
 
 @pytest.mark.parametrize(
@@ -1034,8 +1068,9 @@ def test_example_configuration_is_valid_and_fits_the_projections() -> None:
     config = runtime.load_config(
         Path(__file__).resolve().parents[2] / "examples/xiaowei.example.json"
     )
-    adapter = StarRocksAdapter(config.starrocks, connect=driver(SALES), clock=Clock())
-    starrocks_tools(adapter, config.projection_bytes)
+    for target in config.targets:
+        adapter = StarRocksAdapter(target.starrocks, connect=driver(SALES), clock=Clock())
+        starrocks_tools(adapter, config.projection_bytes)
     assert config.listen_port == 8501 and config.feishu is None
 
 
@@ -1044,17 +1079,21 @@ async def test_static_access_is_the_single_source_for_entry_and_evidence() -> No
         runtime.AccessConfig(
             policy_version="p1", grants={"alice": frozenset({"local/list_tables"})}
         ),
-        "sr-test",
+        frozenset({"sr-test", "sr-other"}),
     )
     decision = await access.resolve("feishu", "alice")
     assert decision is not None
-    assert (decision.target_id, decision.authorized_tools) == ("sr-test", {"local/list_tables"})
+    assert (decision.target_ids, decision.authorized_tools) == (
+        {"sr-test", "sr-other"},
+        {"local/list_tables"},
+    )
     assert await access.resolve("web", "mallory") is None
 
     def who(subject: str) -> Identity:
         return Identity(subject_id=subject, session_id="s", turn_id="t", channel="web")
 
     assert await access.authorize(who("alice"), "sr-test", "local/list_tables")
+    assert await access.authorize(who("alice"), "sr-other", "local/list_tables")
     assert not await access.authorize(who("alice"), "other-target", "local/list_tables")
     assert not await access.authorize(who("alice"), "sr-test", "local/run_readonly_query")
     assert not await access.authorize(who("mallory"), "sr-test", "local/list_tables")
@@ -1077,7 +1116,9 @@ async def test_history_and_resend_reject_after_scope_narrowing(env: Env) -> None
     await failed_feishu_result(env, config)
     async with env.running(config, feishu_channel=FakeChannel()) as served:
         await served.page()
-        first = await served.turn(env.scripts.add("网页查表", tool_call("list_tables"), cite()))
+        first = await served.turn(
+            env.scripts.add("网页查表", tool_call("list_tables", cluster=SR.target_id), cite())
+        )
         assert first.status_code == 200 and first.json()["state"] == "completed"
         assert (await served.client.get("/api/turns/r1")).status_code == 200  # 同一范围：可读
         cookies = httpx.Cookies(served.client.cookies)
@@ -1099,3 +1140,80 @@ async def test_history_and_resend_reject_after_scope_narrowing(env: Env) -> None
             feishu_channel=channel,
         )
     assert channel.sends == []
+
+
+# ---- 多目标配置与路由（P2.5 Task 1）-------------------------------------------------------
+
+
+def cluster_config(target_id: str) -> dict[str, Any]:
+    """与 SR 同名库表、不同集群 ID 的目标配置。"""
+    starrocks = SR.model_dump(mode="json")
+    starrocks["target_id"] = starrocks["policy"]["target_id"] = target_id
+    return target_config(starrocks)
+
+
+async def test_formal_assembly_routes_each_turn_to_the_named_cluster(env: Env) -> None:
+    drivers = {
+        "sr-a": driver(Result(("region", "total"), [("east", 1)])),
+        "sr-b": driver(Result(("region", "total"), [("east", 2)])),
+    }
+    config = env.config(targets=[cluster_config("sr-a"), cluster_config("sr-b")])
+    async with env.running(config, starrocks_connect=drivers) as served:
+        await served.page()
+        query = env.scripts.add(
+            "看 sr-b 的东区",
+            tool_call("run_readonly_query", cluster="sr-b", sql="SELECT region, total FROM sales"),
+            cite(),
+        )
+        body = (await served.turn(query, "query", "r1")).json()
+        assert body["state"] == "completed"
+        (fact,) = body["delivery"]["facts"]
+        assert fact["target_id"] == "sr-b" and fact["rows"] == [{"region": "east", "total": 2}]
+        assert (drivers["sr-a"].attempts, drivers["sr-b"].attempts) == (0, 1)
+
+        # 未知集群在任何 StarRocks I/O 前拒绝，不回退到其他集群；模型只能澄清。
+        unknown = env.scripts.add(
+            "看 sr-z 的东区",
+            tool_call("run_readonly_query", cluster="sr-z", sql="SELECT region, total FROM sales"),
+            clarify("没有 sr-z 集群"),
+        )
+        body = (await served.turn(unknown, "query", "r2")).json()
+        assert body["state"] == "completed" and body["delivery"]["facts"] == []
+        assert "集群不存在" in json.dumps(env.scripts.calls[unknown][1].input, ensure_ascii=False)
+        assert (drivers["sr-a"].attempts, drivers["sr-b"].attempts) == (0, 1)
+        assert await served.finish() == 0
+
+
+def test_legacy_single_target_configuration_reports_the_migration(tmp_path: Path) -> None:
+    values = serve_config(8501)
+    (target,) = values.pop("targets")
+    values["starrocks"] = target["starrocks"]
+    values["business_context"] = None
+    file = tmp_path / "xiaowei.json"
+    file.write_text(json.dumps(values), encoding="utf-8")
+    with pytest.raises(runtime.ConfigError) as raised:
+        runtime.load_config(file)
+    message = str(raised.value)
+    assert "targets" in message and "starrocks.target_id" in message
+    assert SR.host not in message and SR.user not in message
+
+
+@pytest.mark.parametrize(
+    ("targets", "reason"),
+    [
+        ([], "targets"),
+        ([cluster_config("sr-a"), cluster_config("sr-a")], "集群 ID 不能重复"),
+        ([{**cluster_config("sr-a"), "type": "tidb"}], "targets.0.type"),
+        ([cluster_config("Sales DB")], "target_id 必须是"),
+        ([{**cluster_config("sr-a"), "host": "10.0.0.1"}], "targets.0.host"),
+    ],
+    ids=["空", "重复 ID", "未知类型", "非法 ID", "目标外的连接字段"],
+)
+def test_invalid_targets_are_reported_without_values(
+    tmp_path: Path, targets: list[dict[str, Any]], reason: str
+) -> None:
+    file = tmp_path / "xiaowei.json"
+    file.write_text(json.dumps(serve_config(8501, targets=targets)), encoding="utf-8")
+    with pytest.raises(runtime.ConfigError) as raised:
+        runtime.load_config(file)
+    assert reason in str(raised.value) and "10.0.0.1" not in str(raised.value)
