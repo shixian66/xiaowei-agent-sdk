@@ -1,6 +1,6 @@
 # 小维：当前交接
 
-> 更新：2026-10-02，Asia/Shanghai。这里只记录当前事实、证据与下一项工作；设计见 [ARCHITECTURE.md](ARCHITECTURE.md)，路线见 [DEVELOPMENT_PLAN.md](DEVELOPMENT_PLAN.md)，协作规则见 [AGENTS.md](AGENTS.md)。
+> 更新：2026-10-03，Asia/Shanghai。这里只记录当前事实、证据与下一项工作；设计见 [ARCHITECTURE.md](ARCHITECTURE.md)，路线见 [DEVELOPMENT_PLAN.md](DEVELOPMENT_PLAN.md)，协作规则见 [AGENTS.md](AGENTS.md)。
 
 **OpenAI Agents SDK 负责 Agent Loop；小维负责权限、受治理工具执行、证据真实性和数据边界。**
 
@@ -9,22 +9,22 @@
 | 项目 | 已核对事实 |
 | --- | --- |
 | 仓库 | [shixian66/xiaowei-agent-sdk](https://github.com/shixian66/xiaowei-agent-sdk) |
-| 本地目录 / 分支 | `/Users/kloenguyen/Desktop/agent-SDK`；P2 各 Task 在 `/private/tmp/xiaowei_p2_t*` 独立工作树中进行，Task 8 为 `claude/p2-task8-exit`（从主线 `bdbf533` 分出） |
+| 本地目录 / 分支 | 本轮独立工作树 `/private/tmp/xiaowei_p25_t0`，`claude/p25-task0-evidence`，自已复审的 `719c1c70d8d790e2db38e8791aa3a2af34b1322c` 建立；未切换或修改 `/Users/kloenguyen/Desktop/agent-SDK`、`codex/p25-plan` 及其他任务的工作区 |
 | M5 历史起点 | `372c381f44ecfa1fa53961f137d0058033cbd805`；不是远端当前 main 的核验结论 |
-| P1-A 代码基线 / 当前主线 | `148abaa4729ac6644c03056cf265a9dc18f1acd8` / `bdbf533b82727d61e56848562698e4f385281321`（P2 Task 0–7 经 PR #21、#24–#29 合入，决定与方向文档 #22、#23；此前 P1-B 计划、Gate 0 离线部分、SQLGuard Task 1 的 PR #10、StarRocks Adapter Task 2 的 PR #11、urllib3 修复的 PR #12、受治理工具 Task 3 的 PR #13、请求和渠道状态 Task 4 的 PR #14 、共享 ChannelService Task 5 的 PR #15、最小同源 Web Task 6 的 PR #16 、飞书单聊 Task 7 的 PR #17 与正式入口 Task 8 的 PR #18 已合入） |
-| 当前阶段 | **P2 离线完成（Task 0–8 经独立审查合入，Task 8 见第 3 节 P2 部分）：真实部分（两端实战、真实模型诊断质量、目标版本的计划与审计源事实）按顺序调整在 P3 获准环境补齐；下一阶段为 P2.5；三项新需求的阶段位置待用户决定（见第 3 节 P2 部分）。** **P1-B Task 1 SQLGuard 已随 PR #10 合入；Task 2 StarRocks Adapter 随 PR #11 合入（`dd24d8a`）。Gate 0 在主线 `6389d78` 上以 `glm-4.7-flash` Profile 真实运行通过；Task 3 受治理工具与结构化 Evidence 交付经复审通过，随 PR #13 合入（`5058ae3`）；Task 4 PostgreSQL v2 请求与渠道状态经两轮审查修复与复审通过，随 PR #14 合入（`e5e380c`）；Task 5 共享 ChannelService 经一轮审查修复（B1 授权来源对象身份）与复审通过，随 PR #15 合入（`98f4167`）；Task 6 最小同源 Web 经一轮审查修复（B1 不可用端口、B2 浏览器 smoke）与复审通过，随 PR #16 合入（`1d1aa01`）；Task 7 飞书单聊长连接（用户接受“先 ack、后落库”）经两轮审查修复（B1–B4、N1）与复审通过，随 PR #17 合入（`0c3161c`），真实飞书验证待授权；Task 8 正式装配、维护命令与打包切换经五轮审查修复与复审通过，随 PR #18 合入（`16f80d4`）：首轮审查 B1–B3、增量复审的 B2（接管交接竞态）与 B3（第三方 WARNING 与飞书 handler）、第三轮的 N1（会话创建/轮换、重复请求与投递权未进入所有权屏障）、第四轮的 N2（请求启动与 Session 恢复边界）与 N3（投递尝试归属）、第五轮的 N3.1（重发所有者连接退出后仍留在连接池）均已修复。Task 9 离线部分已在 `16f80d4` 上完成，真实部分按用户决定推迟到 P3 部署后。**P1-A 离线完成（Task 1–5 经 PR #2–#7 合入）。真实模型：Gate 0 通过的 Profile 只有 `bbtoken-glm-4.7-flash`；Gemini 只有 2026-09-30 的历史部分证据（未闭环）；同端点 DeepSeek V4 Flash 已实测不兼容 |
+| 规划基线 / 本地 main 引用 | `7a715ff61d7a97457b03bb8b596ef4238c1049f2` / `origin/main` `0f831ebe070e7b11b1597fbdf59921b19981b129`，树相同；包含 P2 离线退出（PR #30）与 Agent/SDK 优先开发规则（PR #31）。这是本轮本地 Git 核对，未重新获取远端；历史切片证据见第 3 节 |
+| 当前阶段 | **P2 离线完成（Task 0–8 经独立审查合入，Task 8 见第 3 节 P2 部分）：真实部分（两端实战、真实模型诊断质量、目标版本的计划与审计源事实）按顺序调整在 P3 获准环境补齐；下一阶段为 P2.5（直连、读取/SQL 放开与强制执行前评估），其后单群增量，再到 P3；两份计划 v2 已在 `719c1c7` 通过复审，P2.5 Task 0 实测证据已记录、待独立审查（见第 3 节下一步）。** **P1-B Task 1 SQLGuard 已随 PR #10 合入；Task 2 StarRocks Adapter 随 PR #11 合入（`dd24d8a`）。Gate 0 在主线 `6389d78` 上以 `glm-4.7-flash` Profile 真实运行通过；Task 3 受治理工具与结构化 Evidence 交付经复审通过，随 PR #13 合入（`5058ae3`）；Task 4 PostgreSQL v2 请求与渠道状态经两轮审查修复与复审通过，随 PR #14 合入（`e5e380c`）；Task 5 共享 ChannelService 经一轮审查修复（B1 授权来源对象身份）与复审通过，随 PR #15 合入（`98f4167`）；Task 6 最小同源 Web 经一轮审查修复（B1 不可用端口、B2 浏览器 smoke）与复审通过，随 PR #16 合入（`1d1aa01`）；Task 7 飞书单聊长连接（用户接受“先 ack、后落库”）经两轮审查修复（B1–B4、N1）与复审通过，随 PR #17 合入（`0c3161c`），真实飞书验证待授权；Task 8 正式装配、维护命令与打包切换经五轮审查修复与复审通过，随 PR #18 合入（`16f80d4`）：首轮审查 B1–B3、增量复审的 B2（接管交接竞态）与 B3（第三方 WARNING 与飞书 handler）、第三轮的 N1（会话创建/轮换、重复请求与投递权未进入所有权屏障）、第四轮的 N2（请求启动与 Session 恢复边界）与 N3（投递尝试归属）、第五轮的 N3.1（重发所有者连接退出后仍留在连接池）均已修复。Task 9 离线部分已在 `16f80d4` 上完成，真实部分按用户决定推迟到 P3 部署后。**P1-A 离线完成（Task 1–5 经 PR #2–#7 合入）。真实模型：Gate 0 通过的 Profile 只有 `bbtoken-glm-4.7-flash`；Gemini 只有 2026-09-30 的历史部分证据（未闭环）；同端点 DeepSeek V4 Flash 已实测不兼容 |
 | 当前源码与依赖 | 新包 `src/xiaowei/` 含 `sqlguard.py`、`starrocks.py`、`starrocks_tools.py`、`channel_store.py`、`migrations/002_p1b_channels.sql`、`migrations/003_delivery_attempt.sql`（应用表 v3）、`channel.py` 、`web.py` 与 `static/`，`feishu.py`，以及 Task 8 新增的 `runtime.py`、`cli.py`、`__main__.py`；锁定 `asyncmy==0.2.15`、`lark-channel-sdk==1.4.0`（精确钉版，已加入依赖基线）。另锁定 `openai-agents[sqlalchemy]` 0.22.3、`mcp` 2.2.0、`openai` 3.20.0、SQLAlchemy 2.0.52、asyncpg 0.30.0，urllib3 2.8.0（间接依赖，修复 CVE-2026-97687/97688/97689），Python 3.11.16。Task 8 起 wheel 只含 `src/xiaowei`，`xiaowei` 命令指向 `xiaowei.cli:main`；旧包专用的 `alembic` 移出生产依赖（dev 与 `legacy` extra 保留），旧源码仍在工作树 |
 | 新产品入口 | 主线：`xiaowei`（与 `python -m xiaowei` 相同）的 `serve`、`storage init/upgrade/cleanup`、`requests resend`，配置为 JSON 文件（示例 `examples/xiaowei.example.json`）。离线验证完成；真实模型、StarRocks 与飞书未参与。旧 CLI/Compose 不是产品入口 |
-| 本次工作范围 | P2 Task 8：离线退出与交接，并处理前序审查留下的积压（慢查询解析期限、封存产物 `replace` 绕过、飞书澄清截断与分行字符校验、文档同步）。用本机可丢弃 StarRocks 4.1.4 + 官方 AuditLoader 与测试 PostgreSQL；未调用真实模型、用户 StarRocks 或飞书，未部署 |
-| 外部操作 | 主线曾获用户授权用合成数据调用 Gemini API（见第 3 节），验证后本机凭据文件已删除，用户负责作废该密钥；Gate 0 离线部分与 SQLGuard 没有调用真实模型；全部工作均未调用飞书或外部 MCP Server。Gate 0 真实运行经用户授权使用第三方中转端点 `bbtoken.boywe.cn`（OpenAI 兼容 Chat Completions）发送合成数据，共 22 次模型请求（含诊断探测），另有 1 次模型列表查询，串行、不重试；凭据只写入仓库外权限 600 的临时文件，运行后已删除，用户负责作废该密钥。Task 2 从 Docker Hub 拉取官方 `starrocks/allin1-ubuntu:latest`（digest `sha256:faf7ce9c…276b`，StarRocks 4.1.4）在本机 127.0.0.1:59030 运行可丢弃容器，只写入随机名合成库，用后删除；未连接用户的 StarRocks。P2 Task 0 用同一本地镜像在 127.0.0.1:59030 运行可丢弃容器，从 `releases.starrocks.io/resources/auditloader.zip` 下载官方 AuditLoader 5.0.0（sha256 `cd2a8ace…8ea2`）只装入该容器，临时把 FE `query_explain_level` 改为 ANALYZE 后已恢复；容器与合成数据已删除 |
+| 本次工作范围 | P2.5 Task 0「锁定外部事实，不改产品代码」：只更新 P2.5 计划（Task 0 勾选、§9 证据）与本文；`src/`、`tests/`、产品配置、依赖和原 P2 计划无差异。实验脚本在工作树外，未入库 |
+| 外部操作 | 主线曾获用户授权用合成数据调用 Gemini API（见第 3 节），验证后本机凭据文件已删除，用户负责作废该密钥；Gate 0 离线部分与 SQLGuard 没有调用真实模型；全部工作均未调用飞书或外部 MCP Server。Gate 0 真实运行经用户授权使用第三方中转端点 `bbtoken.boywe.cn`（OpenAI 兼容 Chat Completions）发送合成数据，共 22 次模型请求（含诊断探测），另有 1 次模型列表查询，串行、不重试；凭据只写入仓库外权限 600 的临时文件，运行后已删除，用户负责作废该密钥。Task 2 从 Docker Hub 拉取官方 `starrocks/allin1-ubuntu:latest`（digest `sha256:faf7ce9c…276b`，StarRocks 4.1.4）在本机 127.0.0.1:59030 运行可丢弃容器，只写入随机名合成库，用后删除；未连接用户的 StarRocks。P2 Task 0 用同一本地镜像在 127.0.0.1:59030 运行可丢弃容器，从 `releases.starrocks.io/resources/auditloader.zip` 下载官方 AuditLoader 5.0.0（sha256 `cd2a8ace…8ea2`）只装入该容器，临时把 FE `query_explain_level` 改为 ANALYZE 后已恢复；容器与合成数据已删除。P2.5 Task 0 用同一 digest 新建可丢弃容器 `xw-p25-t0-sr`（只发布 127.0.0.1:59030/58030）与 `xiaowei-sdk-test` PostgreSQL，装入同一 AuditLoader 5.0.0；临时改 FE `query_explain_level`、`enable_statistic_collect_on_first_load` 并建极低阈值资源组，均已恢复/删除并回读；容器与测试库已删除，未触碰 `xiaowei-release-*` |
 
-表中分别列出 P1-B 所依据的 P1-A 代码基线与计划所依据的当前主线，不能混用。接手先用 `git rev-parse HEAD` 和 `git status --short` 取得实际版本；审查使用对应提交的精确 SHA，本文件的修改历史由 Git 保存。
+表中列出本轮规划基线与本地 main 引用，历史任务 SHA 只证明对应切片，不能混用。接手先用 `git rev-parse HEAD` 和 `git status --short` 取得实际版本；审查使用对应提交的精确 SHA，本文件的修改历史由 Git 保存。
 
 ## 2. 已确定的产品边界
 
 - 按 SDK 原生方式从产品需求设计，允许从零开始；旧代码只按当前价值复用，不保留旧 Runtime 作为前提。
-- 首版统一 StarRocks 查询与慢查询诊断，提供最小 Web 与飞书对话；单 Agent、单进程、一个连接，两端独立会话。
-- MCP 是最小通用客户端接入；StarRocks 先走本地受治理工具，不在首版自建业务 MCP Server。
+- 首版统一 StarRocks 查询与慢查询诊断；一个业务 Agent、单进程、Web/飞书渠道隔离。P2 当前单目标；后续多目标与单群范围只按 ARCHITECTURE §5–§7 的已确认增量推进。
+- 通用 MCP 客户端保留；StarRocks 继续本地 Adapter 直连，数据库 MCP 暂缓，不把外部 Server 作为当前前提。
 - 用户要求接入 Gemini、DeepSeek、OpenAI 等模型 API；运行核心仍固定为 SDK，具体模型与端点未选定。
 - SDK Session、严格 RunContext、调用前治理、四种数据投影、最终 Evidence 验证、动态工具集合与默认关闭 tracing 按架构落实。
 - 首版正式存储为 SQLAlchemySession + PostgreSQL，SDK 表与应用表独立归属；Docker Compose 部署小维与 PostgreSQL 两个常驻容器，数据使用持久卷，服务器 Web 通过 SSH 本地转发访问。
@@ -36,9 +36,9 @@
 
 ## 3. 当前计划与下一项工作
 
-**当前计划：** P2 由 [P2 诊断闭环计划](docs/superpowers/plans/2026-10-02-p2-explain-diagnosis.md) 实施，离线部分随 Task 8 收尾，进度与证据见本节末尾的 P2 部分；下一阶段为 P2.5（[DEVELOPMENT_PLAN.md](DEVELOPMENT_PLAN.md) §6），其后 P3。下文 P1-A/P1-B 的记录保留为已完成阶段的证据。
+**当前计划：** P2 由 [P2 诊断闭环计划](docs/superpowers/plans/2026-10-02-p2-explain-diagnosis.md) 实施，离线部分随 Task 8 收尾，进度与证据见本节末尾的 P2 部分；下一阶段为 [P2.5 直连实施计划](docs/superpowers/plans/2026-10-03-p25-open-read-multi-cluster.md)，再执行 [飞书单群计划](docs/superpowers/plans/2026-10-03-feishu-group.md)，其后 P3；新计划尚未实施。下文 P1-A/P1-B 的记录保留为已完成阶段的证据。
 
-P1-A 实施事实保留在 [P1-A：SDK 与治理执行核心](docs/superpowers/plans/2026-09-29-p1a-sdk-governed-core.md)。下一阶段唯一详细计划是 [P1-B：真实只读查询与双入口](docs/superpowers/plans/2026-09-30-p1b-starrocks-dual-entry.md)，顺序为 **SQLGuard → StarRocks Adapter →（真实模型 Gate 0 须已通过）受治理工具/Evidence → PostgreSQL v2 → 共享 ChannelService → Web → 飞书 → 正式入口 → P1 实战退出**。产品边界仍以 `ARCHITECTURE.md` 为唯一权威，当前证据仍以本文为准。
+P1-A 实施事实保留在 [P1-A：SDK 与治理执行核心](docs/superpowers/plans/2026-09-29-p1a-sdk-governed-core.md)。已完成的下一切片记录在 [P1-B：真实只读查询与双入口](docs/superpowers/plans/2026-09-30-p1b-starrocks-dual-entry.md)，顺序为 **SQLGuard → StarRocks Adapter →（真实模型 Gate 0 须已通过）受治理工具/Evidence → PostgreSQL v2 → 共享 ChannelService → Web → 飞书 → 正式入口 → P1 实战退出**。产品边界仍以 `ARCHITECTURE.md` 为唯一权威，当前证据仍以本文为准。
 
 **Task 1 已证明（离线、合成数据、scripted 模型）：**
 
@@ -397,16 +397,17 @@ CI integration job 设置 `SDK_TEST_POSTGRES_URL`，启动 `compose.sdk-test.yml
   - **慢查询解析期限（Task 6 技术债）：** `_listed` 接收与 `asyncio.timeout` 相同的 `time.monotonic()` 期限，逐行核对，到期抛出 `TimeoutError`，本次调用按 `timeout` 失败后线程不再检查剩余候选。修复前用例：期限到达后线程又检查了 9 行。最坏总耗时约为 2 倍 `client_timeout_seconds`（读取候选与解析各一个期限），已写入 README 与代码注释。
   - **封存产物 `replace` 绕过（Task 3 技术债）：** `GuardedQuery` / `ExplainQuery` 的封存标记改为 `InitVar`；`dataclasses.replace` 必须显式给出它，不能复制封存产物再换 SQL。`copy.copy` 原样复制不受影响。
   - **Task 7 复审非阻断 1、2：** 无分段的飞书交付以 `keep=1` 截断，澄清正文放不下时保留前缀而不是只剩标题；`ContentLine` 拒绝 `str.splitlines` 的全部分行字符（`\r`、`\v`、`\f`、`\x1c`–`\x1e`、`\x85`、U+2028/2029）。
-  - **文档：** ARCHITECTURE（诊断范围、§5 工具表含 `describe_table_layout`、`list_slow_queries` 必交且未配审计源不登记、`get_query_profile` 暂不实现、`EXPLAIN LOGICAL` 的选择与零执行依据、MCP 化后审计过滤仍在小维、数据范围摘要缺口更新、飞书截断规则、证据可读性绑定数据范围的第 5 条）；README（诊断用法、审计源各字段与限制）；DEVELOPMENT_PLAN（阶段表、P2 离线完成状态与 P2.5 前提）；P2 计划 §9 实施结果与偏差。“P2.6”是另一会话中对三项新需求所建议的阶段名，用户尚未决定（见下一步），本次不据此改阶段；DEVELOPMENT_PLAN §2 已有用户 2026-10-02 对 P2.5 顺序的确认，本次补 P2 状态与 P2.5 前提。计划 Task 8 原写“下一项为 P3 计划”，按该顺序改为 P2.5。
+  - **文档：** ARCHITECTURE（诊断范围、§5 工具表含 `describe_table_layout`、`list_slow_queries` 必交且未配审计源不登记、`get_query_profile` 暂不实现、`EXPLAIN LOGICAL` 的选择与零执行依据、MCP 化后审计过滤仍在小维、数据范围摘要缺口更新、飞书截断规则、证据可读性绑定数据范围的第 5 条）；README（诊断用法、审计源各字段与限制）；DEVELOPMENT_PLAN（阶段表、P2 离线完成状态与 P2.5 前提）；P2 计划 §9 实施结果与偏差。该历史提交当时未确定新增需求阶段名；当前顺序以本节“已决定与下一步”及 DEVELOPMENT_PLAN 为准。
   - **验证（`78e3f38` 干净工作树）：** `tests/sdk_core tests/p1b -W error` 1419 passed；整仓 `uv run --locked --extra dev python -m pytest -q` 3137 passed、152 skipped；`-m security` 927 passed、79 skipped；文档检查（`test_doc_fact_binding`、`test_docs_command_consistency`、`test_capabilities_doc`）8 passed；浏览器（本机 Chrome）3 passed；`ruff check .`、`ruff format --check src/xiaowei tests/sdk_core tests/p1b`、`mypy src`、`uv lock --check`、`git diff --check` 通过；`pip-audit --strict`（导出的 dev 依赖）无已知漏洞。本机可丢弃 StarRocks 4.1.4（同一 digest）+ 官方 AuditLoader（`max_stmt_length=1000`）：`-m starrocks_real` 17 passed（含 FE 级别为 ANALYZE 时 `EXPLAIN LOGICAL` 零执行的反例），`-m starrocks_audit_real` 连跑 3 次各 2 passed；加 `-W error` 时 4 例因已知的 asyncmy `_finish_unbuffered_query never awaited` 警告失败（截断与中止路径，计划命令不带 `-W error`）。插件刚安装后首批记录再次被中止，与 Task 6 一致。4 项隔离变异全部被发现（去掉逐行期限、封存标记改回普通字段、澄清不保留前缀、行校验只拦 `\n`）。容器与测试 PostgreSQL 用后删除。
   - **未覆盖：** 真实模型的诊断质量与 `scripts/gate0_real_model.py` 接入诊断样例；两端实战路径；目标版本的计划格式、披露与零执行复核；生产审计源事实（G-A）；物化视图改写的计划与布局取值。
 - **Task 8 审查结论：** 独立审查（`03f0721`）通过、无阻断：慢查询解析期限（变异确认）、封存产物 `replace` 一律 `TypeError`（pickle/deepcopy 照常）、飞书无分段截断 `keep=1`、`ContentLine` 拒绝 10 种分行字符均核对成立；离线 `tests/sdk_core tests/p1b -W error` 1419 passed、文档检查 8 passed、ruff/format/mypy/diff check 通过，其余证据引用未重跑。文档建议 D1（三项新需求未记录）与 D2（ARCHITECTURE §5 旧的“普通 EXPLAIN”说法）在合并前补齐，只改文档。
-- **待用户决定（开工前必须拍板，决定前不改 ARCHITECTURE 与 DEVELOPMENT_PLAN 的范围）：** 用户 2026-10-02 提出三项新需求，原文要点：
-  1. **SQL 能力放宽：** 支持真实生产 SQL（UNION / UNION ALL、窗口函数、多层 CTE、跨库 JOIN、常用只读函数、内部可解析 `*` 等）；原则是只读 + 权限明确 + 资源受控，合法 SELECT 尽量放开。
-  2. **飞书群聊：** 第一版只支持 1 个指定群；群内任何人 @小维 即可使用；从一开始保留 tenant_id / chat_id / sender_id；群决定 Session，发起人决定本轮权限。
-  3. **数据读取范围放开：** 不再手写 allowed_objects / allowed_columns，只读账号能 SELECT 什么就能查什么；自动读取/刷新表结构，搜表改关键词搜索；SQLGuard 支持多库；函数闭集保留；DBA 侧 Resource Group 与大查询限制、小维侧 timeout / memory / rows 限制保留。
-  待决定：(a) 阶段位置——建议 P2 之后、P3 之前单独成阶段（暂称 P2.6，顺序：读取范围与多库 → SQL 放宽；群聊独立），不与 P2.5 绑定；(b) 群内权限二选一：第一版群内所有人权限相同，或回放历史时按当前发起人权限过滤证据；(c) 群成员都能看到查询结果是否可以（扩大了展示范围）；(d) 外部 MCP Server 迟迟没有时，P3 是否先用本地直连。DEVELOPMENT_PLAN §8 仍写“群聊首版完成后再决定”，待上述决定后一并修订。
-- **下一步：** 合入后 P2 记为离线完成；先请用户对上述待决定事项拍板。下一阶段按现有计划为 P2.5（DEVELOPMENT_PLAN §6）：开工前另写实施计划；外部只读 Server 的责任方、测试环境、认证方式与工具 schema 版本未确定前只做不依赖 Server 的离线部分。P2 与 P1 的真实部分在 P3 获准环境补齐；生产审计源事实（G-A）在 P3 前提供。
+- **已决定与下一步：** 产品边界见 ARCHITECTURE §5–§7：单 Agent 自行判断自然语言，不增加前置分类；P2.5 不设查询前人工确认。计划 v2 已复审通过；下一项为 Task 0 修订（本分支）的复审；通过后先做 D1/D2 小修复 PR（Task 3 前），Task 1 在 Task 0 复审通过后开始，Task 4 另等 §9.9 调整被接受。群计划区分仅排队与已经开始的重启恢复；数据权限区分确定撤权与暂时无法验证。其余产品实施、真实模型/用户 StarRocks/飞书调用与部署仍未授权。
+- **规划验证：** 计划 v2 在 `719c1c7` 通过复审（文档检查 8 passed、相对链接有效、`git diff --check` 通过）。
+- **P2.5 Task 0（`claude/p25-task0-evidence`，首轮审查后修订，待复审）：** 本机可丢弃 StarRocks 4.1.4（同一 digest）+ AuditLoader 5.0.0、合成数据、只读账号实测；证据、复现方法、安全输出与清理见 [P2.5 计划 §9](docs/superpowers/plans/2026-10-03-p25-open-read-multi-cluster.md#9-task-0-证据2026-10-03待独立审查)。要点：零行 SELECT 探测可证明当前权限（不被优化消除，撤权对同一连接立即生效）；4.1.4 不支持列级授权，角色默认不激活；`information_schema` 可见不等于可 SELECT；表的版本元组可发现重建与列变化，**视图元组不能发现内层视图或底表变化（只读账号无权读取它们），依赖视图的历史回放保持关闭**；1,000 表 / 30,000 列单项计时与推算口径见 §9.3（Adapter 探测 128 次 0.59 s 不含 SQLGuard，无端到端刷新计时）；GROUP BY 漏列在 EXPLAIN 阶段为 1064 分析错误，`SUM(文本列)` 静默隐式转换；1064 同时用于语法/语义/执行期错误，可恢复白名单须按阶段与消息前缀判定；LIMIT 查询计划估算 2 行而实际扫描 1,000,000 行；分区/tablet 比例按个数计，倾斜时“比例 × 总行数”低估约 29–113 倍，保守上界须取最大的 a 个分区之和并处理元数据上报滞后；缺统计不能只靠计划文本识别；FE ANALYZE 级别下 LOGICAL 仍零执行；资源组的 scan/CPU/并发与三种内存限制均有独立命中，但只读账号只能观察单条语句当下命中的组，不能证明后续绑定。既有 SR 实测开始/结束各 19 passed（6 个已知 asyncmy 警告）。
+- **Task 0 发现的现有缺陷（未修改代码）：** D1 现有 SQLGuard 在输出名重复时把 `ORDER BY` 序号改写到同名的另一列（查询与执行计划产物相同；错误 SQL 会发送，但顶层重名样例在 Adapter 因重复列名按 `result_contract` 拒绝、业务行读取为 0，治理层停止本轮且不记录成功 Evidence；诊断路径分析的是改写错误的 SQL；GROUP BY 序号与唯一名正确；内层重名、外层唯一的可交付影响待 D1 小 PR 验证）；D2 `||` 被改写为 OR，而 Adapter 未固定 `sql_mode`，目标开启 `PIPES_AS_CONCAT` 时语义改变。复现与最小修复见计划 §9.8；**已决定另开小 PR 修复，排在 Task 3 之前。**
+- **缺口：** §2.4 风险评估按 §9.9 调整（最大 a 个分区上界 + 新鲜度 + 统计健康度 + 数据库硬限额），**Task 4 继续暂停到审查者接受调整**；资源组绑定的核对方式随 Task 4 决定；Task 2/5 只按表版本元组实施，视图历史回放保持关闭。未覆盖 TLS 目标、存算分离、外部 catalog、生产规模与并发、BE 侧取消残留、千视图 `SHOW CREATE VIEW` 耗时、端到端刷新计时与统计上报失败。
+- **仍待后续决定：** DDL 的实际执行路径与实施范围，TiDB/MySQL 在 StarRocks P2.5/P3 完成后再议。表结构权限可见性、风险计划解析和群协议等技术疑点在新计划 Task 0/F0 中设门槛，不以假设关闭。
+
 
 P1-A 是内部核心。P1-B 才接真实查询与双入口并切换正式入口，P2 增加诊断，P3 做实际用户验收。Gate 0 是 Task 3 开工前例外；其他环境缺失不阻塞不依赖该环境的离线部分，但不能跳过对应实战退出条件。
 

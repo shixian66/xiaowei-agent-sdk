@@ -41,12 +41,12 @@
 
 详细契约只在 [ARCHITECTURE.md](ARCHITECTURE.md) 维护；下面是改代码时必须核对的边界。
 
-1. **SDK 是唯一 Agent Loop。** 使用公开 Agent、Runner、Model、function tools、Session 等能力；不重建 Planner/Resolver、能力 DSL、通用调度或另一套模型工具循环。首版单 Agent、单进程。
+1. **SDK 是唯一 Agent Loop。** 使用公开 Agent、Runner、Model、function tools、Session 等能力；不重建 Planner/Resolver、能力 DSL、通用调度或另一套模型工具循环。首版单业务 Agent、单进程；自然语言意图由这个 Agent 判断，不增加无工具的前置用途识别或多 Agent 协作。
 2. **模型服务可选，授权来自配置。** OpenAI/Gemini/DeepSeek 通过可信 Model Profile 接入；每个端点/协议/模型组合单独验证，一轮一个模型，不自动跨厂商 fallback。换供应商、端点、协议或模型开新会话；不能为兼容 JSON mode 取消最终类型和 Evidence 验证。
 3. **Context 不携带依赖。** RunContext 只放可信身份、Target Scope、Tool Scope、预算及必要 Evidence 标识/元数据；禁止凭据、连接串、连接、客户端及可间接取得它们的服务引用。应用装配依赖，工具闭包只访问受治理服务。
 4. **先治理，再 I/O。** 本地 function tool 经 Governed Tool Layer 进入 Adapter；MCP 请求发出前复用治理核心。动态工具集合提前隐藏不支持/无权限能力，调用时仍复核当前权限、参数、目标和预算；禁止并发修改共享 Agent 的 tools。
-5. **MCP 只负责标准接入。** 直接使用 SDK 官方客户端能力，静态可信配置、空配置可运行；未知风险或契约不匹配的工具不开放。客户端治理不替代远端 Server 的执行约束，首版不自建业务 MCP Server。
-6. **首版只读。** SQL AST、真实只读账号、对象/函数范围和资源限额共同约束查询；入口按本轮明确的查询/诊断选择收窄 Tool Scope，不沿用上一轮查询许可。诊断轮隐藏实际查询工具，调用前仍拒绝，不执行被分析 SQL 或 EXPLAIN ANALYZE。模型意图不授予权限，工具 effect/risk 由可信代码定义。未来生产写按通用 Action 管理，明确展示并取得有权限用户确认，再复核 Policy / Approval / Action Binding；改动关键内容须重新确认，未知执行结果不自动重试。首版不预建写操作框架。
+5. **MCP 只负责标准接入。** 直接使用 SDK 官方客户端能力，静态可信配置、空配置可运行；未知风险或契约不匹配的工具不开放。客户端治理不替代远端 Server 的执行约束，小维仓库不内嵌业务 MCP Server，数据库 MCP 当前暂缓。
+6. **首版只读。** SQL AST、真实只读账号、对象/函数范围和资源限额共同约束查询。查询工具按当前授权开放；单个 Agent 根据本轮自然语言决定是否调用，解释、生成 SQL、禁止执行或意图不清时不执行查询，必要时澄清，不继承历史许可。显式诊断入口仍可收窄工具范围；自然语言意图不是确定性安全关卡，不以提示词声称已防住误执行。所有业务查询由执行链强制经过 EXPLAIN LOGICAL 评估，超限或无法评估拒绝，不开放 EXPLAIN ANALYZE；模型不授予权限，工具 effect/risk 由可信代码定义。未来生产写按通用 Action 管理，明确展示并取得有权限用户确认，再复核 Policy / Approval / Action Binding；改动关键内容须重新确认，未知执行结果不自动重试。首版不预建写操作框架。
 7. **四种数据边界独立。** 原始结果、模型、Session 和 Web/飞书展示各有字段、容量、保留与接收权限；不能把同一 payload 无条件传遍各层。Evidence 只保存获准的最小事实，不作原始数据仓库。
 8. **结构正确不等于证据真实。** 最终持久化、发送、历史读取和重发均验证 Evidence 存在、来源、归属及当前数据/接收权限；关键数值、实际 SQL 和结果表格由代码从获准证据生成，模型解释单列为推断。失败阻断相关回答，真实引用不替代对诊断推断的质量验证。
 9. **会话与执行有界。** SDK Session 为唯一会话接口，首版正式后端为 SQLAlchemySession + PostgreSQL；SDK 表与应用表独立归属，写入前和回放前过滤。同会话不并发运行；限制轮次、工具数、期限和输入输出，历史超限提示新建，过期数据禁止读取。取消不代表远端已停止，结果不明不自动重放；引入 PostgreSQL 不引入旧 TaskStore、Worker 或分布式调度。

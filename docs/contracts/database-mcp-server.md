@@ -1,6 +1,6 @@
 # 数据库 MCP Server 接入约定
 
-> 状态：草案 v0（2026-10-02），供外部 Server 责任方与小维双方确认；**外部 Server 责任方：待定**。本文只约定外部 Server 必须满足什么、小维接入时怎样验收；方向与分工见 [ARCHITECTURE.md](../../ARCHITECTURE.md) §5“数据库能力 MCP 化”，实施阶段见 [DEVELOPMENT_PLAN.md](../../DEVELOPMENT_PLAN.md) §6。当前小维尚未接入任何真实外部 Server，下述能力均为约定，不是已验证事实。
+> 状态：**暂缓**（用户 2026-10-02 决定数据库执行先用直连）；保留为将来启用数据库 MCP 时的约定草案 v0。外部 Server 责任方待定，本文正文不构成当前 P2.5/P3 的实施要求。重评条件见 [ARCHITECTURE.md](../../ARCHITECTURE.md) §5；尚未接入真实外部 Server，下述能力不是已验证事实。
 
 **OpenAI Agents SDK 负责 Agent Loop；小维负责权限、受治理工具执行、证据真实性和数据边界。** 外部 Server 只负责连接与执行，不承担授权、SQL 校验、证据与展示判断，也不能以自身检查替代小维治理；小维的检查同样不能替代 Server 的执行约束。
 
