@@ -9,13 +9,14 @@ import json
 from typing import Any
 
 import pytest
-from tests.p1b.test_starrocks_adapter import NOW, POLICY, Result, driver
+from tests.p1b.test_starrocks_adapter import NOW, POLICY, Result, driver, ready_schema
 from tests.p1b.test_starrocks_adapter import TARGET as SR
 
 from xiaowei.governance import Prechecked, Projection, ToolCatalog, ToolPolicy
 from xiaowei.models import ToolContract, ToolObservation, ToolRequest
 from xiaowei.sqlguard import guard_explain_query
 from xiaowei.starrocks import EXPLAIN_PREFIX, StarRocksAdapter, StarRocksError, StarRocksErrorCode
+from xiaowei.starrocks_schema import SchemaCache
 from xiaowei.starrocks_tools import (
     DESCRIBE_TABLE,
     EXPLAIN_QUERY,
@@ -51,8 +52,14 @@ def request(sql: str, tool_id: str = RUN_QUERY) -> ToolRequest:
     )
 
 
+def unrefreshed(ada: StarRocksAdapter) -> SchemaCache:
+    """装配期的容量检查不读快照：给一个从未刷新的缓存即可。"""
+    return SchemaCache(ada, clock=lambda: NOW)
+
+
 async def run_query(ada: StarRocksAdapter, sql: str, tool_id: str = RUN_QUERY) -> ToolObservation:
-    tools = starrocks_tools(ada, dict.fromkeys(AUDIENCES, needed(ada)))
+    schema = await ready_schema(ada)
+    tools = starrocks_tools(ada, dict.fromkeys(AUDIENCES, needed(ada)), schema=schema)
     execute = tools.executes[(tool_id, SR.target_id)]
     assert isinstance(execute, Prechecked)
     return await execute.run(execute.check(request(sql, tool_id)))
@@ -77,7 +84,7 @@ def needed(ada: StarRocksAdapter) -> int:
 def test_every_audience_must_hold_the_worst_case_result() -> None:
     ada = adapter()
     threshold = needed(ada)
-    tools = starrocks_tools(ada, dict.fromkeys(AUDIENCES, threshold))
+    tools = starrocks_tools(ada, dict.fromkeys(AUDIENCES, threshold), schema=unrefreshed(ada))
     assert {c.tool_id for c in tools.contracts} == {
         LIST_TABLES,
         DESCRIBE_TABLE,
@@ -93,9 +100,9 @@ def test_every_audience_must_hold_the_worst_case_result() -> None:
         limits[short] = threshold - 1
         # 模型与 Session 不足时两条渠道路径都放不下；渠道不足时报该渠道。
         with pytest.raises(ValueError, match="投影放不下"):
-            starrocks_tools(ada, limits)
+            starrocks_tools(ada, limits, schema=unrefreshed(ada))
     with pytest.raises(ValueError, match="四种用途"):
-        starrocks_tools(ada, dict.fromkeys(AUDIENCES[:3], threshold))
+        starrocks_tools(ada, dict.fromkeys(AUDIENCES[:3], threshold), schema=unrefreshed(ada))
 
 
 def test_worst_case_grows_with_every_declared_limit() -> None:

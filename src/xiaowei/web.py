@@ -33,6 +33,7 @@ from xiaowei.channel import (
     RequestRef,
     RequestView,
     ResultUnavailableError,
+    ResultUnverifiableError,
 )
 from xiaowei.channel_store import (
     ChannelStoreError,
@@ -68,6 +69,7 @@ _COMMON_HEADERS = (
 )
 _STATUS: tuple[tuple[type[ChannelStoreError], int], ...] = (
     (AccessDeniedError, 403),
+    (ResultUnverifiableError, 503),  # 子类在前：暂时无法复核，稍后可再读
     (ResultUnavailableError, 403),
     (RequestUnavailableError, 404),
     (RequestConflictError, 409),
@@ -298,7 +300,10 @@ def create_web_app(
                 await service.process(receipt)
             except ResultNotSavedError:
                 pass  # 请求已记为 failed/result_not_saved，下方读取得到固定回执
-        view = await service.results.view(ref(conversation, submission.request_id))
+        # 只有本次提交刚运行完的请求是首次交付；重复提交与之后的读取都是历史读取。
+        view = await service.results.view(
+            ref(conversation, submission.request_id), first=receipt.created
+        )
         return _view(submission.request_id, view, readiness)
 
     @app.get("/api/turns/{request_id}")

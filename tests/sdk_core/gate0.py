@@ -54,13 +54,21 @@ from xiaowei.starrocks import (
     _SESSION_READ,
     AUDIT_ORDER_COLUMNS,
     EXPLAIN_PREFIX,
+    OBJECT_COLUMNS_SQL,
+    OBJECT_ID_SQL,
+    OBJECT_TYPE_SQL,
+    SCHEMA_COLUMNS_SQL,
+    SCHEMA_IDS_SQL,
+    SCHEMA_OBJECTS_SQL,
     AuditSource,
+    SchemaLimits,
+    SqlPolicy,
     StarRocksAdapter,
     StarRocksTarget,
     _audit_sql,
-    _describe_table_sql,
-    _list_tables_sql,
+    probe_sql,
 )
+from xiaowei.starrocks_schema import DependencyCheck, SchemaCache
 from xiaowei.starrocks_tools import (
     AUDIT_TOOLS,
     DESCRIBE_TABLE,
@@ -552,14 +560,11 @@ DIAG_TARGET = StarRocksTarget(
     query_mem_limit_bytes=2**30,
     max_result_bytes=20_000,
     max_value_bytes=2_000,
-    policy=QueryPolicy(
-        target_id="gate0-starrocks",
-        default_database="shop",
-        allowed_objects=frozenset({"orders"}),
-        allowed_columns={"orders": frozenset({"region", "amount", "order_date", "status"})},
-        allowed_functions=frozenset({"SUM", "COUNT"}),
-        max_rows=50,
-        max_sql_bytes=4_000,
+    policy=SqlPolicy(
+        allowed_functions=frozenset({"SUM", "COUNT"}), max_rows=50, max_sql_bytes=4_000
+    ),
+    schema_limits=SchemaLimits(
+        max_objects=20, max_columns=200, max_bytes=100_000, max_comment_chars=100
     ),
     audit=AuditSource(
         database="starrocks_audit_db__",
@@ -569,6 +574,17 @@ DIAG_TARGET = StarRocksTarget(
     ),
 )
 DIAG_TOOLS = QUERY_TOOLS | AUDIT_TOOLS
+# 合成库中只读账号可读的唯一对象；结构快照经产品的刷新路径从替身读出。
+DIAG_COLUMNS = ("region", "amount", "order_date", "status")
+DIAG_POLICY = QueryPolicy(
+    target_id="gate0-starrocks",
+    default_database="shop",
+    allowed_objects=frozenset({"orders"}),
+    allowed_columns={"orders": frozenset(DIAG_COLUMNS)},
+    allowed_functions=frozenset({"SUM", "COUNT"}),
+    max_rows=50,
+    max_sql_bytes=4_000,
+)
 SLOW_SQL = (
     "SELECT region, SUM(amount) AS amount FROM orders "
     "WHERE order_date >= '2026-09-01' GROUP BY region"
@@ -604,15 +620,18 @@ AUDIT_SOURCE = (
     "stmt",
 )
 
-StatementKind = Literal["session", "audit", "explain", "layout", "columns", "tables", "query"]
-# 语句类别对应的工具：一条被引用的事实只能来自本样例实际到达驱动的同类语句。
-KIND_TOOLS: dict[StatementKind, str] = {
-    "audit": SLOW_QUERIES,
-    "explain": EXPLAIN_QUERY,
-    "layout": LAYOUT_TOOL,
-    "columns": DESCRIBE_TABLE,
-    "tables": LIST_TABLES,
-    "query": RUN_QUERY,
+StatementKind = Literal[
+    "session", "schema", "probe", "dependency", "audit", "explain", "layout", "query"
+]
+# 语句类别对应的工具：一条被引用的事实只能来自本样例实际到达驱动的同类语句。表结构取自快照，
+# 交付前的零行探测是列表与表结构共同的证据；快照刷新（schema）与证据依赖的版本读取
+# （dependency）不属于任何样例。证据依赖复核也发零行探测，与工具的探测语句相同。
+KIND_TOOLS: dict[StatementKind, frozenset[str]] = {
+    "audit": frozenset({SLOW_QUERIES}),
+    "explain": frozenset({EXPLAIN_QUERY}),
+    "layout": frozenset({LAYOUT_TOOL}),
+    "probe": frozenset({LIST_TABLES, DESCRIBE_TABLE}),
+    "query": frozenset({RUN_QUERY}),
 }
 
 
@@ -627,6 +646,10 @@ class SyntheticStarRocks:
 
     target: StarRocksTarget
     audit: tuple[str, ...] = (SLOW_SQL,)
+    tables: dict[tuple[str, str], tuple[str, ...]] = field(
+        default_factory=lambda: {("shop", "orders"): DIAG_COLUMNS}
+    )
+    """只读账号可读的对象与列：结构快照刷新读到它们，零行探测全部通过。"""
     plan: tuple[str, ...] = PLAN_LINES
     failures: dict[StatementKind, BaseException] = field(default_factory=dict)
     hang: StatementKind | None = None
@@ -645,7 +668,7 @@ class SyntheticStarRocks:
 
         获准查询的字面量可能包含元数据表名或审计表名；按子串分类会把真实执行藏起来。
         """
-        t, audit, count = self.target, self.target.audit, len(args or ())
+        t, audit = self.target, self.target.audit
         session = (
             f"SET query_timeout = {t.query_timeout_seconds}, "
             f"query_mem_limit = {t.query_mem_limit_bytes}, time_zone = '{t.time_zone}'"
@@ -656,10 +679,13 @@ class SyntheticStarRocks:
             return "explain"
         if sql == _DESCRIBE_LAYOUT:
             return "layout"
-        if count >= 2 and sql == _describe_table_sql(count - 2):
-            return "columns"
-        if count >= 1 and sql == _list_tables_sql(count - 1):
-            return "tables"
+        if sql in (SCHEMA_OBJECTS_SQL, SCHEMA_COLUMNS_SQL, SCHEMA_IDS_SQL):
+            return "schema"
+        if sql in (OBJECT_TYPE_SQL, OBJECT_ID_SQL, OBJECT_COLUMNS_SQL):
+            return "dependency"
+        probed = set(self.tables) | ({(audit.database, audit.table)} if audit else set())
+        if sql in {probe_sql(db, name) for db, name in probed}:
+            return "probe"
         if audit is not None and sql in {
             _audit_sql(audit, order) for order in AUDIT_ORDER_COLUMNS.values()
         }:
@@ -669,17 +695,31 @@ class SyntheticStarRocks:
     def result(
         self, kind: StatementKind, sql: str, args: tuple[object, ...] | None
     ) -> tuple[tuple[str, ...], list[tuple[object, ...]]]:
-        t, names = self.target, tuple(args or ())[1:]
+        t = self.target
         if kind == "session":
             if sql.startswith("SET "):
                 return (), []
             return ("q", "m", "t"), [
                 (t.query_timeout_seconds, t.query_mem_limit_bytes, t.time_zone)
             ]
-        if kind == "tables":
-            return ("name", "type"), [(name, "BASE TABLE") for name in names]
-        if kind == "columns":
-            return ("name", "type", "nullable"), [(c, "varchar", "YES") for c in names[1:]]
+        if kind == "probe":
+            return ("1",), []
+        if kind == "dependency":
+            return self._version(sql, args)
+        if kind == "schema" and sql == SCHEMA_OBJECTS_SQL:
+            return ("db", "name", "type", "comment", "created"), [
+                (db, name, "BASE TABLE", None, None) for db, name in sorted(self.tables)
+            ]
+        if kind == "schema" and sql == SCHEMA_COLUMNS_SQL:
+            return ("db", "name", "col", "type", "nullable", "comment"), [
+                (db, name, c, "varchar", "YES", None)
+                for (db, name), cols in sorted(self.tables.items())
+                for c in cols
+            ]
+        if kind == "schema":
+            return ("db", "name", "id"), [
+                (db, name, 1000 + i) for i, (db, name) in enumerate(sorted(self.tables))
+            ]
         if kind == "layout":
             columns = ("model", "partition_key", "distribute_type", "distribute_key")
             return (*columns, "buckets", "sort_key", "primary_key"), [LAYOUT_ROW]
@@ -706,6 +746,20 @@ class SyntheticStarRocks:
             ]
             return AUDIT_SOURCE, rows
         return ("region", "amount"), [("east", 600), ("west", 400)]
+
+    def _version(
+        self, sql: str, args: tuple[object, ...] | None
+    ) -> tuple[tuple[str, ...], list[tuple[object, ...]]]:
+        """证据依赖的版本读取：与结构快照的元数据一致（类型、表 ID、varchar 列）。"""
+        assert args is not None
+        key = (args[0], args[1])
+        ordered = sorted(self.tables)
+        if sql == OBJECT_TYPE_SQL:
+            return ("type",), [("BASE TABLE",)] if key in self.tables else []
+        if sql == OBJECT_ID_SQL:
+            found = [1000 + i for i, k in enumerate(ordered) if k == key]
+            return ("id",), [(i,) for i in found]
+        return ("col", "type"), [(c, "varchar") for c in self.tables.get(key, ())]  # type: ignore[call-overload]
 
 
 @dataclass
@@ -804,7 +858,7 @@ class DiagnosisResult:
 
     @property
     def produced(self) -> set[str]:
-        return {KIND_TOOLS[k] for k, _ in self.statements if k in KIND_TOOLS}
+        return {tool for k, _ in self.statements for tool in KIND_TOOLS.get(k, ())}
 
     @property
     def passed(self) -> bool:
@@ -854,13 +908,17 @@ async def diagnosis_app(
     """产品装配：StarRocks 工具来自 ``starrocks_tools``，只有最底层连接是合成替身。"""
     starrocks = SyntheticStarRocks(DIAG_TARGET)
     adapter = StarRocksAdapter(DIAG_TARGET, connect=starrocks, clock=clock)
-    tools = starrocks_tools(adapter, dict.fromkeys(AUDIENCES, 400_000))
+    schema = SchemaCache(adapter, clock=clock)
+    if not await schema.refresh():
+        raise RuntimeError("合成 StarRocks 的结构快照刷新失败")
+    tools = starrocks_tools(adapter, dict.fromkeys(AUDIENCES, 400_000), schema=schema)
     evidence = EvidenceStore(
         engine,
         ToolCatalog(tools.contracts, tools.policies),
         authorize=_authorize_diagnosis,
         clock=clock,
         retention_seconds=RETENTION_SECONDS,
+        verify_dependencies=DependencyCheck({DIAG_TARGET.target_id: adapter}),
     )
     governed = GovernedTools(evidence)
     observer = ObservingTransport(network)
@@ -952,14 +1010,14 @@ async def run_diagnosis(
 
 
 def _explained(sql: str) -> str:
-    return EXPLAIN_PREFIX + guard_explain_query(sql, DIAG_TARGET.policy).normalized_sql
+    return EXPLAIN_PREFIX + guard_explain_query(sql, DIAG_POLICY).normalized_sql
 
 
 def _ran_as(explained: str) -> str | None:
     """被解释的 SQL 若被执行会是哪条语句：上一轮执行时由代码追加的 LIMIT 不要求模型照抄。"""
     try:
         sql = explained.removeprefix(EXPLAIN_PREFIX)
-        return guard_readonly_query(sql, DIAG_TARGET.policy).normalized_sql
+        return guard_readonly_query(sql, DIAG_POLICY).normalized_sql
     except QueryRejectedError:  # 不在范围内或无法解析：不是上一轮执行过的 SQL
         return None
 

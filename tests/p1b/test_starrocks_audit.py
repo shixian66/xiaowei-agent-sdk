@@ -20,6 +20,7 @@ from pydantic import ValidationError
 from tests.p1b.test_starrocks_adapter import (
     NOW,
     POLICY,
+    SQL_POLICY,
     TARGET,
     Driver,
     Result,
@@ -70,10 +71,12 @@ AUDIT_TARGET = TARGET.model_copy(
     update={
         "max_result_bytes": 20_000,
         "max_value_bytes": 2000,
-        "policy": POLICY.model_copy(update={"max_sql_bytes": 1000}),
+        "policy": SQL_POLICY.model_copy(update={"max_sql_bytes": 1000}),
         "audit": AUDIT,
     }
 )
+# 结构快照给出的 SQLGuard 范围（与 POLICY 相同的对象与列）；审计原文按它检查。
+SCOPE = POLICY.model_copy(update={"max_sql_bytes": 1000})
 STARTED = datetime(2026, 9, 30, 7, 30)  # 审计表中的无时区 DATETIME（按审计时区写入）
 
 
@@ -115,7 +118,7 @@ def adapter(drv: Driver, t: StarRocksTarget = AUDIT_TARGET) -> StarRocksAdapter:
 
 async def listed(*stmts: object, t: StarRocksTarget = AUDIT_TARGET) -> list[object]:
     rows = [record(s, query_id=f"q{i}") for i, s in enumerate(stmts)]
-    result = await adapter(audit_driver(*rows), t).slow_queries(60, "query_time")
+    result = await adapter(audit_driver(*rows), t).slow_queries(60, "query_time", SCOPE)
     return [row["sql"] for row in result.rows]
 
 
@@ -125,7 +128,7 @@ async def listed(*stmts: object, t: StarRocksTarget = AUDIT_TARGET) -> list[obje
 @pytest.mark.parametrize("order_by", sorted(AUDIT_ORDER_COLUMNS))
 async def test_slow_query_sql_is_a_template_with_bound_values(order_by: str) -> None:
     drv = audit_driver()
-    result = await adapter(drv).slow_queries(90, order_by)
+    result = await adapter(drv).slow_queries(90, order_by, SCOPE)
 
     sql, args = only(drv).executed[-1]
     column = AUDIT_ORDER_COLUMNS[order_by]
@@ -199,11 +202,11 @@ async def test_slow_queries_require_a_configured_audit_source() -> None:
     drv = audit_driver()
     plain = AUDIT_TARGET.model_copy(update={"audit": None})
     with pytest.raises(ValueError, match="审计源"):
-        await adapter(drv, plain).slow_queries(60, "query_time")
+        await adapter(drv, plain).slow_queries(60, "query_time", SCOPE)
     with pytest.raises(ValueError, match=r"窗口|排序"):
-        await adapter(drv).slow_queries(AUDIT.max_window_minutes + 1, "query_time")
+        await adapter(drv).slow_queries(AUDIT.max_window_minutes + 1, "query_time", SCOPE)
     with pytest.raises(ValueError, match=r"窗口|排序"):
-        await adapter(drv).slow_queries(60, "user")
+        await adapter(drv).slow_queries(60, "user", SCOPE)
     assert drv.attempts == 0
 
 
@@ -259,14 +262,14 @@ async def test_rejected_statements_never_leave_the_adapter(
     caplog.set_level(logging.DEBUG)
     hostile = f"SELECT region FROM customers WHERE note = '{CANARY}'"
     drv = audit_driver(record(hostile, query_id="q-bad"), record(ACCEPTED[0], query_id="q-ok"))
-    result = await adapter(drv).slow_queries(60, "query_time")
+    result = await adapter(drv).slow_queries(60, "query_time", SCOPE)
 
     assert [row["query_id"] for row in result.rows] == ["q-ok"]
     assert CANARY not in result.model_dump_json() and CANARY not in repr(result)
     assert CANARY not in caplog.text
 
     broken = audit_driver(record(hostile), record(ACCEPTED[0], cpuCostNs="x"))
-    error = await failure(adapter(broken).slow_queries(60, "query_time"))
+    error = await failure(adapter(broken).slow_queries(60, "query_time", SCOPE))
     assert error.code is Code.RESULT_CONTRACT
     assert_safe(error)
     assert CANARY not in repr(error) and CANARY not in caplog.text
@@ -286,7 +289,7 @@ async def test_candidates_are_bounded_by_rows_and_bytes() -> None:
     t = target(audit={"candidate_rows": 100, "candidate_bytes": bound, "max_rows": 100})
     rows = [record(long_stmt(900, f"{i:03d}"), query_id=f"q{i}") for i in range(80)]
     drv = audit_driver(*rows)
-    result = await adapter(drv, t).slow_queries(60, "scan_rows")
+    result = await adapter(drv, t).slow_queries(60, "scan_rows", SCOPE)
 
     conn = only(drv)
     assert conn.executed[-1][1][-1] == 100  # LIMIT 绑定 candidate_rows
@@ -305,7 +308,7 @@ async def test_long_statement_does_not_crowd_out_other_metrics() -> None:
     drv = audit_driver(
         record(long, "q-long"), record(ACCEPTED[0], "q-a"), record(ACCEPTED[1], "q-b")
     )
-    result = await adapter(drv).slow_queries(60, "query_time")
+    result = await adapter(drv).slow_queries(60, "query_time", SCOPE)
     assert [row["query_id"] for row in result.rows] == ["q-long", "q-a", "q-b"]
     assert result.rows[0]["sql"] == long and not result.truncated
     conn = only(drv)
@@ -324,7 +327,7 @@ async def test_list_can_be_shorter_than_max_rows() -> None:
     t = target(audit={"candidate_rows": 10, "max_rows": 3})
     stmts = [*REJECTED[:9], ACCEPTED[0]]
     rows = [record(s, query_id=f"q{i}") for i, s in enumerate(stmts)]
-    result = await adapter(audit_driver(*rows), t).slow_queries(60, "query_time")
+    result = await adapter(audit_driver(*rows), t).slow_queries(60, "query_time", SCOPE)
     assert [row["sql"] for row in result.rows] == [ACCEPTED[0]]
     assert not result.truncated
 
@@ -332,7 +335,7 @@ async def test_list_can_be_shorter_than_max_rows() -> None:
 async def test_more_passing_rows_than_max_rows_keeps_the_order() -> None:
     stmts = [ACCEPTED[i % 3] for i in range(6)]
     rows = [record(s, query_id=f"q{i}") for i, s in enumerate(stmts)]
-    result = await adapter(audit_driver(*rows)).slow_queries(60, "query_time")
+    result = await adapter(audit_driver(*rows)).slow_queries(60, "query_time", SCOPE)
     assert [row["query_id"] for row in result.rows] == ["q0", "q1", "q2"]
     assert not result.truncated
 
@@ -345,7 +348,7 @@ async def test_audit_window_uses_the_audit_time_zone() -> None:
     late = datetime(2026, 9, 30, 23, 50, tzinfo=UTC)  # 上海已是 10-01
     drv = audit_driver(record(ACCEPTED[0], timestamp=datetime(2026, 9, 30, 23, 40)))
     ada = StarRocksAdapter(AUDIT_TARGET, connect=drv, clock=lambda: late)
-    result = await ada.slow_queries(30, "query_time")
+    result = await ada.slow_queries(30, "query_time", SCOPE)
 
     args = only(drv).executed[-1][1]
     assert args is not None
@@ -355,7 +358,7 @@ async def test_audit_window_uses_the_audit_time_zone() -> None:
     shanghai = target(audit={"time_zone": "Asia/Shanghai"})
     drv = audit_driver(record(ACCEPTED[0], timestamp=datetime(2026, 10, 1, 7, 40)))
     ada = StarRocksAdapter(shanghai, connect=drv, clock=lambda: late)
-    result = await ada.slow_queries(30, "query_time")
+    result = await ada.slow_queries(30, "query_time", SCOPE)
     args = only(drv).executed[-1][1]
     assert args is not None
     assert args[3:5] == (datetime(2026, 10, 1, 7, 20), datetime(2026, 10, 1, 7, 50))
@@ -376,7 +379,7 @@ async def test_unknown_metrics_are_null_not_zero(unknown: object) -> None:
         "digest": "" if unknown != -1 else "d",
     }
     drv = audit_driver(record(ACCEPTED[0], **metrics), record(ACCEPTED[1], pendingTimeMs=0))
-    first, second = (await adapter(drv).slow_queries(60, "query_time")).rows
+    first, second = (await adapter(drv).slow_queries(60, "query_time", SCOPE)).rows
     for name in ("query_time_ms", "scan_bytes", "scan_rows", "return_rows", "cpu_ms", "mem_bytes"):
         assert first[name] is None, name
     assert first["pending_ms"] is None
@@ -397,13 +400,13 @@ async def test_unknown_metrics_are_null_not_zero(unknown: object) -> None:
 )
 async def test_cpu_nanoseconds_are_converted_to_milliseconds_exactly(ns: int, ms: str) -> None:
     drv = audit_driver(record(ACCEPTED[0], cpuCostNs=ns))
-    (row,) = (await adapter(drv).slow_queries(60, "cpu")).rows
+    (row,) = (await adapter(drv).slow_queries(60, "cpu", SCOPE)).rows
     assert row["cpu_ms"] == ms
 
 
 async def test_output_columns_are_fixed_and_exclude_identity_fields() -> None:
     drv = audit_driver(record(ACCEPTED[0]))
-    (row,) = (await adapter(drv).slow_queries(60, "query_time")).rows
+    (row,) = (await adapter(drv).slow_queries(60, "query_time", SCOPE)).rows
     assert (
         tuple(row)
         == AUDIT_COLUMNS
@@ -438,7 +441,7 @@ async def test_output_columns_are_fixed_and_exclude_identity_fields() -> None:
 )
 async def test_audit_result_outside_the_contract_fails_closed(result: Result) -> None:
     drv = driver(result)
-    error = await failure(adapter(drv).slow_queries(60, "query_time"))
+    error = await failure(adapter(drv).slow_queries(60, "query_time", SCOPE))
     assert error.code is Code.RESULT_CONTRACT
     assert_safe(error)
     assert CANARY not in repr(error)
@@ -459,7 +462,7 @@ async def test_audit_result_outside_the_contract_fails_closed(result: Result) ->
 async def test_audit_failures_are_distinguished(error: BaseException, code: Code) -> None:
     drv = audit_driver()
     drv.make = driver(error).make
-    failed = await failure(adapter(drv).slow_queries(60, "query_time"))
+    failed = await failure(adapter(drv).slow_queries(60, "query_time", SCOPE))
     assert failed.code is code
     assert_safe(failed)
     conn = only(drv)
@@ -481,7 +484,7 @@ async def test_parsing_stops_once_the_client_deadline_has_passed(
     monkeypatch.setattr(starrocks, "_within_scope", slow)
     rows = [record("SELECT secret FROM sales", query_id=f"q{i}") for i in range(100)]
     t = target(audit={"candidate_rows": 100})  # 客户端期限 1 秒，约可检查 20 行
-    failed = await failure(adapter(audit_driver(*rows), t).slow_queries(60, "query_time"))
+    failed = await failure(adapter(audit_driver(*rows), t).slow_queries(60, "query_time", SCOPE))
     assert failed.code is Code.TIMEOUT
     at_deadline = len(checked)
     await asyncio.sleep(0.5)
@@ -490,6 +493,6 @@ async def test_parsing_stops_once_the_client_deadline_has_passed(
 
 async def test_audit_client_deadline_disconnects_without_retry() -> None:
     drv = audit_driver(record(ACCEPTED[0]), record(ACCEPTED[1]), hang_on="fetch")
-    failed = await failure(adapter(drv).slow_queries(60, "query_time"))
+    failed = await failure(adapter(drv).slow_queries(60, "query_time", SCOPE))
     assert failed.code is Code.TIMEOUT
     assert only(drv).aborted

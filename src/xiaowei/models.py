@@ -90,12 +90,45 @@ class ToolCall(_Trusted):
     arguments: dict[str, object]
 
 
+ObjectName = Annotated[str, StringConstraints(min_length=1, max_length=256)]
+
+
+class ObjectDependency(_Trusted):
+    """一条证据依赖的数据库对象；只由受治理工具的可信代码生成，不接受模型自报。
+
+    ``use`` 为 ``listed`` 时事实只说明对象存在且当前可读（列表、审计源），复核只证明当前 SELECT
+    权限；为 ``read`` 时事实来自对象的数据、计划或结构，另须当前对象类型、表 ID 与 ``columns``
+    （被读取或判断的列及其类型）一致。``replayable`` 为假（视图等无法证明间接依赖未变的对象）的
+    证据只在产生它的这一轮首次交付，跨轮回放、历史读取与重发一律按确定失效拒绝。
+    """
+
+    database: ObjectName
+    name: ObjectName
+    use: Literal["listed", "read"]
+    type: str | None
+    table_id: int | None
+    columns: tuple[tuple[str, str], ...]
+    replayable: bool
+
+    @model_validator(mode="after")
+    def _listed_has_no_version(self) -> "ObjectDependency":
+        if self.use == "listed" and (self.type is not None or self.table_id is not None):
+            raise ValueError("listed 依赖只证明当前权限，不携带对象版本")
+        if self.use == "listed" and (self.columns or not self.replayable):
+            raise ValueError("listed 依赖不携带列，也不限制回放")
+        return self
+
+
 class ToolObservation(_Trusted):
-    """Adapter 已限量读取的临时原始结果；只在内存中交给 Evidence 投影，不直接序列化给模型。"""
+    """Adapter 已限量读取的临时原始结果；只在内存中交给 Evidence 投影，不直接序列化给模型。
+
+    ``dependencies`` 由声明了数据范围的工具给出（可以为空元组）；其他工具为 ``None``。
+    """
 
     payload: dict[str, object]
     captured_at: AwareDatetime
     truncated: bool
+    dependencies: tuple[ObjectDependency, ...] | None = None
 
 
 class EvidenceRecord(_Trusted):
@@ -114,6 +147,7 @@ class EvidenceRecord(_Trusted):
     expires_at: datetime
     truncated: bool
     projections: dict[Audience, str]
+    dependencies: tuple[ObjectDependency, ...] | None = None
 
 
 class ToolResult(_Trusted):

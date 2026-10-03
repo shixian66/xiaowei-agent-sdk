@@ -221,7 +221,7 @@ def test_formal_serve_from_a_fresh_database(entry: str, postgres_url: URL, tmp_p
     init = deploy.run(entry, "storage", "init")
     assert init.returncode == 0 and init.stdout.strip() == "storage initialized"
     upgrade = deploy.run(entry, "storage", "upgrade")
-    assert upgrade.returncode == 0 and upgrade.stdout.strip() == "storage version 3"
+    assert upgrade.returncode == 0 and upgrade.stdout.strip() == "storage version 4"
 
     with deploy.serving(entry) as process:
         ready = httpx.get(f"{deploy.origin}/readyz").json()

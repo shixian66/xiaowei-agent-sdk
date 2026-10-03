@@ -1,7 +1,8 @@
 """正式运行装配：一份可信配置 → 单实例锁 → 启动恢复 → 运行对象 → Web 与可选飞书 → 有界停止。
 
 ``open_runtime`` 是唯一装配顺序：配置校验 → PostgreSQL 引擎 → 专用连接取得实例锁 → schema 检查与
-启动一致性恢复 → 每个目标的 StarRocks Adapter 与受治理工具 → 唯一授权来源 → Evidence / Governance →
+启动一致性恢复 → 每个目标的 StarRocks Adapter、结构快照与受治理工具 → 唯一授权来源 → Evidence /
+Governance → 各目标首次结构刷新（失败只让该目标暂不可用）与后台定时刷新 →
 模型绑定 → Application → ``ChannelService``。任一步失败时按相反顺序关闭已创建的资源并释放锁；
 启动失败不对外服务，而不是带着未就绪状态继续运行。
 
@@ -14,7 +15,8 @@
 
 维护命令：``initialize`` / ``upgrade`` 独占同一把实例锁；``cleanup`` 与 ``resend`` 不执行恢复，只靠
 数据库条件更新与在线 ``serve`` 并发。``resend`` 只重发飞书 failed/unknown 的已保存结果：不装配模型、
-不连接 StarRocks，经同一 ``EvidenceStore`` 重验与投递 CAS 后发送一次。
+不调用工具，经同一 ``EvidenceStore`` 重验（含按当前 StarRocks 权限与对象版本复核证据依赖：只有
+零行探测与元数据读取，不执行原业务 SQL）与投递 CAS 后发送一次。
 
 凭据只以 ``env:NAME`` 引用出现在配置中，在用到它的装配步骤才解析；错误信息不含凭据、连接串或
 上游原文。``model_transport``、``starrocks_connect``（按目标 ID）、``feishu_channel`` 只供测试替换
@@ -78,12 +80,12 @@ from xiaowei.models import (
 )
 from xiaowei.session import CleanupReport, SessionLimits, cleanup_expired
 from xiaowei.starrocks import (
-    Connection,
     Connector,
     StarRocksAdapter,
     StarRocksTarget,
     open_starrocks,
 )
+from xiaowei.starrocks_schema import DependencyCheck, SchemaCache
 from xiaowei.starrocks_tools import (
     AUDIT_TOOLS,
     DIAGNOSE_TOOLS,
@@ -369,7 +371,7 @@ class _Delivery:
 def _delivery(
     config: ServeConfig,
     engine: AsyncEngine,
-    adapters: Mapping[str, StarRocksAdapter],
+    schemas: Mapping[str, SchemaCache],
     readiness: Readiness,
     clock: Callable[[], datetime],
     sender: Backend | None = None,
@@ -391,18 +393,22 @@ def _delivery(
         sender=sender,
     )
     first, *others = (
-        starrocks_tools(adapters[t.target_id], config.projection_bytes) for t in config.targets
+        starrocks_tools(
+            schemas[t.target_id].adapter, config.projection_bytes, schema=schemas[t.target_id]
+        )
+        for t in config.targets
     )
     tools = first
     for other in others:
         tools += other
-    access = StaticAccess(config.access, frozenset(adapters))
+    access = StaticAccess(config.access, frozenset(schemas))
     evidence = EvidenceStore(
         engine,
         ToolCatalog(tools.contracts, tools.policies),
         authorize=access.authorize,
         clock=clock,
         retention_seconds=storage.evidence_retention_seconds,
+        verify_dependencies=DependencyCheck({t: s.adapter for t, s in schemas.items()}),
     )
     results = ResultDelivery(store, evidence, access, budget=config.budget)
     return _Delivery(store, evidence, results, tools)
@@ -412,6 +418,30 @@ def _delivery(
 async def _engine(config: ServeConfig) -> AsyncIterator[AsyncEngine]:
     async with open_engine(resolve_secret_ref(config.storage.database_url_ref)) as engine:
         yield engine
+
+
+@asynccontextmanager
+async def _refreshing(schemas: Mapping[str, SchemaCache]) -> AsyncIterator[None]:
+    """各目标先并行刷新一次结构快照（失败只让该目标暂不可用，不阻止启动），再后台定时刷新。
+
+    首次刷新受各目标 ``refresh_timeout_seconds`` 约束；退出时取消后台循环与进行中的刷新并等待。
+    """
+    loops: list[asyncio.Task[None]] = []
+    try:
+        await asyncio.gather(*(schema.refresh() for schema in schemas.values()))
+        loops = [
+            asyncio.create_task(schema.run(), name=f"xiaowei-schema-loop-{target}")
+            for target, schema in schemas.items()
+        ]
+        yield
+    finally:
+        # 启动中途被取消时，共享的刷新任务不随等待者取消：同样在这里取消并等待。
+        for task in loops:
+            task.cancel()
+        if loops:
+            await asyncio.wait(loops)
+        for schema in schemas.values():
+            await schema.aclose()
 
 
 @asynccontextmanager
@@ -429,13 +459,18 @@ async def open_runtime(
         engine = await stack.enter_async_context(_engine(config))
         lock = await stack.enter_async_context(hold_instance_lock(engine, readiness))
         await check_storage(engine)
-        adapters = {
-            t.target_id: open_starrocks(t.starrocks, clock=clock)
-            if starrocks_connect is None
-            else StarRocksAdapter(t.starrocks, connect=starrocks_connect[t.target_id], clock=clock)
+        schemas = {
+            t.target_id: SchemaCache(
+                open_starrocks(t.starrocks, clock=clock)
+                if starrocks_connect is None
+                else StarRocksAdapter(
+                    t.starrocks, connect=starrocks_connect[t.target_id], clock=clock
+                ),
+                clock=clock,
+            )
             for t in config.targets
         }
-        parts = _delivery(config, engine, adapters, readiness, clock)
+        parts = _delivery(config, engine, schemas, readiness, clock)
         recovery = await parts.store.recover(lock)
         logger.info(
             "启动恢复：interrupted=%d unknown=%d unsent=%d",
@@ -443,6 +478,7 @@ async def open_runtime(
             recovery.unknown,
             recovery.unsent,
         )
+        await stack.enter_async_context(_refreshing(schemas))
         model = await stack.enter_async_context(open_model(config.model, transport=model_transport))
         app = Application(
             _app_config(config),
@@ -654,10 +690,6 @@ class ResendNotConfiguredError(Exception):
         super().__init__("未配置飞书，没有可重发的渠道")
 
 
-async def _no_starrocks() -> Connection:
-    raise RuntimeError("显式重发不连接 StarRocks")
-
-
 async def resend(
     config: ServeConfig,
     *,
@@ -666,6 +698,7 @@ async def resend(
     message_id: str,
     clock: Callable[[], datetime] = now,
     feishu_channel: LarkChannel | None = None,
+    starrocks_connect: Mapping[str, Connector] | None = None,
 ) -> SendOutcome | None:
     """显式重发一条飞书结果：只接受当前 owner 下 completed 且投递为 failed/unknown 的记录。
 
@@ -679,11 +712,20 @@ async def resend(
     async with _engine(config) as engine, hold_backend(engine) as sender:
         # 发送期间占用一条连接：并发启动的 serve 据此知道这次重发仍在进行，不把它当作遗留发送。
         await check_storage(engine)
-        adapters = {
-            t.target_id: StarRocksAdapter(t.starrocks, connect=_no_starrocks, clock=clock)
+        # 重发只复核与发送已保存结果，不调用工具：结构快照从不刷新；StarRocks 只用于复核证据
+        # 依赖（零行探测与元数据读取），连接按需建立、用完即关。
+        schemas = {
+            t.target_id: SchemaCache(
+                open_starrocks(t.starrocks, clock=clock)
+                if starrocks_connect is None
+                else StarRocksAdapter(
+                    t.starrocks, connect=starrocks_connect[t.target_id], clock=clock
+                ),
+                clock=clock,
+            )
             for t in config.targets
         }
-        parts = _delivery(config, engine, adapters, Readiness(), clock, sender)
+        parts = _delivery(config, engine, schemas, Readiness(), clock, sender)
         transport = LarkTransport(feishu_channel or lark_channel(feishu), feishu)
 
         async def transmit(delivery: Delivery) -> SendOutcome:

@@ -7,6 +7,14 @@
 
 所有出口（交给模型的工具结果、各用途读取、最终回答）都经同一个读取边界，复核归属、渠道、
 过期、目标范围、当前策略与当前授权；不同拒绝原因返回同一条信息，不暴露记录是否存在。
+
+声明了数据范围的工具（StarRocks）另给出可信的对象依赖（``ObjectDependency``）。读取边界在上述
+检查之后、交付之前，把同一批记录的依赖按目标合并，交给应用装配的 ``DependencyVerifier`` 复核
+当前数据库权限与对象版本，结论三态：``valid`` 放行；``invalid``（确定撤权、对象重建或依赖变化）
+与其他拒绝一样按不可读处理；``unverifiable``（目标不可达、超时、无法识别的错误）只阻断这一次
+读取，抛出 ``EvidenceUnverifiableError``，不改动证据。复核只做探测与元数据读取，不调用模型、
+不执行原业务 SQL。依赖不可回放（视图）的证据只在产生它的这一轮、非历史读取时可读，在任何 I/O
+前判断。
 事实区域由代码从获准投影生成，模型分析单独标注；策略登记了固定说明的工具，说明由代码取自
 当前登记的策略，紧随来源行，不来自证据记录或模型。Web 另得到从当前 Web 投影生成的结构化
 ``DeliveryFact``；飞书只得到纯文本，表格数据逐行渲染，单元格内的换行等控制字符被转义，
@@ -15,13 +23,15 @@
 
 import hashlib
 import json
+import logging
 import secrets
 import unicodedata
-from collections.abc import Callable, Iterable, Mapping
+from collections.abc import Awaitable, Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime, timedelta
-from typing import TypeGuard
+from typing import Literal, TypeGuard
 
+from pydantic import ValidationError
 from sqlalchemy import text
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncEngine
@@ -45,6 +55,7 @@ from xiaowei.models import (
     FactLines,
     Identity,
     JsonScalar,
+    ObjectDependency,
     RunContext,
     ToolCall,
     ToolContract,
@@ -52,6 +63,12 @@ from xiaowei.models import (
     ToolRequest,
     ToolResult,
 )
+
+logger = logging.getLogger(__name__)
+
+DependencyVerdict = Literal["valid", "invalid", "unverifiable"]
+DependencyVerifier = Callable[[str, Sequence[ObjectDependency]], Awaitable[DependencyVerdict]]
+"""应用装配的依赖复核：``(target_id, 依赖) -> 三态结论``；只能探测权限与读取元数据。"""
 
 _COLUMNS: Mapping[Audience, str] = {
     "model": "model_content",
@@ -69,6 +86,9 @@ _EVIDENCE_ID_BYTES = 16
 # 与 ``record`` 生成的证据标识等长：容量检查用它投影最坏结果。
 _SAMPLE_EVIDENCE_ID = "ev_" + "0" * (2 * _EVIDENCE_ID_BYTES)
 _UNAVAILABLE = "证据不存在、已过期或当前无权读取"
+_UNVERIFIABLE = "暂时无法确认证据所依赖的数据当前仍可读，本次未交付"
+# 依赖的保存格式；格式改变时旧格式的记录不可读。
+_DEPENDENCY_FORMAT = 1
 _FACTS_HEADER = "工具结果（系统根据证据生成）"
 _ANALYSIS_HEADER = "分析建议（模型推断，未经系统核实）"
 _CLARIFICATION_HEADER = "需要澄清（本轮未执行查询）"
@@ -78,12 +98,13 @@ _INSERT = text(
     INSERT INTO xiaowei_evidence (
         evidence_id, subject_id, session_id, turn_id, channel, target_id, tool_id, call_id,
         tool_name, arguments_digest, policy_id, policy_fingerprint, captured_at, recorded_at,
-        expires_at, truncated, model_content, session_content, web_content, feishu_content
+        expires_at, truncated, model_content, session_content, web_content, feishu_content,
+        dependencies
     ) VALUES (
         :evidence_id, :subject_id, :session_id, :turn_id, :channel, :target_id, :tool_id, :call_id,
         :tool_name, :arguments_digest, :policy_id, :policy_fingerprint, :captured_at, :recorded_at,
         :expires_at, :truncated,
-        :model_content, :session_content, :web_content, :feishu_content
+        :model_content, :session_content, :web_content, :feishu_content, :dependencies
     )
     """
 )
@@ -93,7 +114,7 @@ _SELECT_OWNED = text(
     SELECT evidence_id, subject_id, session_id, turn_id, channel, target_id, tool_id, call_id,
            tool_name, arguments_digest, policy_id, policy_fingerprint, captured_at, expires_at,
            truncated,
-           model_content, session_content, web_content, feishu_content
+           model_content, session_content, web_content, feishu_content, dependencies
     FROM xiaowei_evidence
     WHERE evidence_id = :evidence_id AND subject_id = :subject_id
       AND session_id = :session_id AND channel = :channel
@@ -110,10 +131,17 @@ class EvidenceStoreError(EvidenceError):
 
 
 class EvidenceUnavailableError(EvidenceError):
-    """证据不存在、不属于当前身份/会话/渠道、已过期或当前无权读取。"""
+    """证据不存在、不属于当前身份/会话/渠道、已过期或当前无权读取（确定结论）。"""
 
     def __init__(self) -> None:
         super().__init__(_UNAVAILABLE)
+
+
+class EvidenceUnverifiableError(EvidenceError):
+    """暂时无法确认证据依赖的数据当前仍可读；只阻断这一次读取，证据与会话不变。"""
+
+    def __init__(self) -> None:
+        super().__init__(_UNVERIFIABLE)
 
 
 class AnswerRejectedError(EvidenceError):
@@ -129,6 +157,7 @@ class EvidenceStore:
         authorize: Authorizer,
         clock: Callable[[], datetime],
         retention_seconds: int,
+        verify_dependencies: DependencyVerifier | None = None,
     ) -> None:
         if retention_seconds <= 0:
             raise ValueError("证据保留期必须为正数")
@@ -137,6 +166,7 @@ class EvidenceStore:
         self._authorize = authorize
         self._clock = clock
         self._retention = timedelta(seconds=retention_seconds)
+        self._verify_dependencies = verify_dependencies
 
     @property
     def catalog(self) -> ToolCatalog:
@@ -158,6 +188,9 @@ class EvidenceStore:
         if contract is None:
             raise EvidenceStoreError("未登记的工具结果不能生成证据")
         policy = self._catalog.policy_for(contract)
+        if (policy.data_scope is None) != (observation.dependencies is None):
+            # 声明了数据范围的工具必须给出依赖（可以为空），其他工具不能给出。
+            raise EvidenceStoreError("工具结果的数据依赖与策略不符，结果未交给模型")
         evidence_id = f"ev_{secrets.token_hex(_EVIDENCE_ID_BYTES)}"
         identity = ctx.identity
         # 模型与 Session 复用同一份投影：模型看到的内容恰好是 Session 可保存、可回放的内容。
@@ -190,13 +223,14 @@ class EvidenceStore:
             "expires_at": recorded_at + self._retention,
             "truncated": observation.truncated,
             **{_COLUMNS[a]: content for a, (content, _) in projected.items()},
+            "dependencies": _dump_dependencies(observation.dependencies),
         }
         try:
             async with self._engine.begin() as conn:
                 await conn.execute(_INSERT, row)
         except (OSError, SQLAlchemyError):
             raise EvidenceStoreError("证据保存失败，工具结果未交给模型") from None
-        record = await self._readable(evidence_id, ctx, "model")
+        (record,) = await self._readable(ctx, "model", [evidence_id], history=False)
         _, truncated = projected["model"]
         return ToolResult(
             evidence_id=evidence_id, model_content=record.projections["model"], truncated=truncated
@@ -211,14 +245,25 @@ class EvidenceStore:
         当前策略规范化后就是证据记录的有效执行参数；Session 据此保证历史中的工具调用与其
         结果来源相符。
         """
-        record = await self._readable(evidence_id, ctx, audience)
-        if call is not None and (
-            record.call_id != call.call_id
-            or record.tool_name != call.tool_name
-            or record.arguments_digest != self._effective_digest(record, call.arguments)
-        ):
-            raise EvidenceUnavailableError
-        return record.projections[audience]
+        (content,) = await self.project_many([(evidence_id, call)], ctx, audience)
+        return content
+
+    async def project_many(
+        self,
+        references: Sequence[tuple[str, ToolCall | None]],
+        ctx: RunContext,
+        audience: Audience,
+    ) -> list[str]:
+        """一批读取：逐条按 ``project`` 的规则核对，依赖按目标合并后只复核一次。"""
+        records = await self._readable(ctx, audience, [e for e, _ in references], history=False)
+        for record, (_, call) in zip(records, references, strict=True):
+            if call is not None and (
+                record.call_id != call.call_id
+                or record.tool_name != call.tool_name
+                or record.arguments_digest != self._effective_digest(record, call.arguments)
+            ):
+                raise EvidenceUnavailableError
+        return [record.projections[audience] for record in records]
 
     def _effective_digest(self, record: EvidenceRecord, arguments: dict[str, object]) -> str:
         contract = self._catalog.contract(record.tool_id, record.target_id)
@@ -230,8 +275,15 @@ class EvidenceStore:
             raise EvidenceUnavailableError from None
         return _arguments_digest(effective)
 
-    async def validate_answer(self, answer: AgentAnswer, ctx: RunContext) -> Delivery:
-        """最终回答出口：核对引用关系与当前可读性，再为接收渠道生成内容。"""
+    async def validate_answer(
+        self, answer: AgentAnswer, ctx: RunContext, *, history: bool = False
+    ) -> Delivery:
+        """最终回答出口：核对引用关系与当前可读性，再为接收渠道生成内容。
+
+        ``history`` 为真表示历史读取或显式重发（不是本轮首次交付）：依赖不可回放的证据拒绝。
+        确定不可读抛出 ``AnswerRejectedError``；暂时无法复核时 ``EvidenceUnverifiableError`` 原样
+        传播。
+        """
         channel = ctx.identity.channel
         if answer.clarification is not None:
             if answer.evidence_ids or answer.inferences:
@@ -248,7 +300,7 @@ class EvidenceStore:
             if not inference.evidence_ids or not set(inference.evidence_ids) <= set(cited):
                 raise AnswerRejectedError("分析必须引用本回答选择的证据")
         try:
-            records = [await self._readable(e, ctx, channel) for e in cited]
+            records = await self._readable(ctx, channel, cited, history=history)
         except EvidenceUnavailableError:
             raise AnswerRejectedError("回答引用的证据不可用") from None
 
@@ -277,7 +329,15 @@ class EvidenceStore:
         )
 
     async def _readable(
-        self, evidence_id: str, ctx: RunContext, audience: Audience
+        self, ctx: RunContext, audience: Audience, evidence_ids: Sequence[str], *, history: bool
+    ) -> list[EvidenceRecord]:
+        """一批记录的读取边界：先逐条做不需要数据库 I/O 的检查，再合并依赖复核一次。"""
+        records = [await self._checked(e, ctx, audience, history=history) for e in evidence_ids]
+        await self._verify(records)
+        return records
+
+    async def _checked(
+        self, evidence_id: str, ctx: RunContext, audience: Audience, *, history: bool
     ) -> EvidenceRecord:
         identity = ctx.identity
         # 渠道内容只交给相同渠道；模型与 Session 投影属于记录所在会话本身。
@@ -291,10 +351,49 @@ class EvidenceStore:
             or not self._matches_current_policy(record)
             or self._clock() >= record.expires_at
             or record.target_id not in ctx.target_scope
+            or not self._dependencies_declared(record)
             or not await self._currently_authorized(identity, record)
         ):
             raise EvidenceUnavailableError
+        # 不可回放的依赖（视图）：只有产生它的这一轮、首次交付时可读。
+        later = history or record.identity.turn_id != identity.turn_id
+        if later and any(not d.replayable for d in record.dependencies or ()):
+            raise EvidenceUnavailableError
         return record
+
+    def _dependencies_declared(self, record: EvidenceRecord) -> bool:
+        """声明了数据范围的策略必须有依赖（旧格式或缺失的记录不可读）；其他策略不能有。"""
+        contract = self._catalog.contract(record.tool_id, record.target_id)
+        if contract is None:
+            return False
+        scoped = self._catalog.policy_for(contract).data_scope is not None
+        return scoped == (record.dependencies is not None)
+
+    async def _verify(self, records: Sequence[EvidenceRecord]) -> None:
+        """按目标合并依赖，各复核一次；任何确定失效即拒绝，否则有无法复核的目标则暂不可用。"""
+        merged: dict[str, list[ObjectDependency]] = {}
+        for record in records:
+            if record.dependencies:
+                merged.setdefault(record.target_id, []).extend(record.dependencies)
+        if not merged:
+            return
+        verify = self._verify_dependencies
+        if verify is None:  # 装配错误：有依赖却没有复核方式，不能放行
+            raise EvidenceUnavailableError
+        unverifiable = False
+        for target_id, dependencies in sorted(merged.items()):
+            try:
+                verdict = await verify(target_id, dependencies)
+            except Exception as exc:  # 复核本身的意外失败只说明这次无法确认
+                logger.warning(
+                    "证据依赖复核失败：target=%s error=%s", target_id, type(exc).__name__
+                )
+                verdict = "unverifiable"
+            if verdict == "invalid":
+                raise EvidenceUnavailableError
+            unverifiable = unverifiable or verdict != "valid"
+        if unverifiable:
+            raise EvidenceUnverifiableError
 
     def _fact_note(self, record: EvidenceRecord) -> str | None:
         """当前登记策略的固定说明；记录已通过 ``_readable``，契约必然存在。"""
@@ -349,7 +448,34 @@ class EvidenceStore:
             expires_at=row["expires_at"],
             truncated=row["truncated"],
             projections={a: row[column] for a, column in _COLUMNS.items()},
+            dependencies=_load_dependencies(row["dependencies"]),
         )
+
+
+def _dump_dependencies(dependencies: Sequence[ObjectDependency] | None) -> str | None:
+    if dependencies is None:
+        return None
+    body = {
+        "format": _DEPENDENCY_FORMAT,
+        "objects": [d.model_dump(mode="json") for d in dependencies],
+    }
+    return json.dumps(body, ensure_ascii=False, separators=(",", ":"))
+
+
+def _load_dependencies(raw: object) -> tuple[ObjectDependency, ...] | None:
+    """读取保存的依赖；格式不符或内容不合契约时按不可读处理。"""
+    if raw is None:
+        return None
+    try:
+        body = json.loads(raw) if isinstance(raw, str) else None
+        if not isinstance(body, dict) or body.get("format") != _DEPENDENCY_FORMAT:
+            raise EvidenceUnavailableError
+        objects = body.get("objects")
+        if not isinstance(objects, list):
+            raise EvidenceUnavailableError
+        return tuple(ObjectDependency.model_validate(o) for o in objects)
+    except (ValueError, ValidationError):
+        raise EvidenceUnavailableError from None
 
 
 def _reachable_limits(policy: ToolPolicy, channel: Channel) -> tuple[tuple[str, ...], int]:

@@ -16,6 +16,7 @@ from typing import Any
 
 import pytest
 from asyncmy.errors import OperationalError
+from tests.p1b.test_starrocks_adapter import POLICY
 from tests.p1b.test_starrocks_adapter import TARGET as SR
 from tests.sdk_core.gate0 import INJECTION, PLAN_LINES, SyntheticStarRocks
 from tests.sdk_core.test_app import ModelCall, answer, cite, clarify, evidence_in, tool_call
@@ -60,7 +61,7 @@ SR_TOOLS = {"list_slow_queries", "explain_query", "describe_table_layout", "desc
 
 
 def explained(sql: str) -> str:
-    return EXPLAIN_PREFIX + guard_explain_query(sql, SR.policy).normalized_sql
+    return EXPLAIN_PREFIX + guard_explain_query(sql, POLICY).normalized_sql
 
 
 @dataclass
@@ -114,6 +115,7 @@ def diag(env: Env) -> Env:
     env.drv = SyntheticStarRocks(
         runtime.ServeConfig.model_validate(audit_config(env.port)).targets[0].starrocks,
         audit=(SLOW_SQL,),
+        tables={("shop", "sales"): ("region", "total", "note"), ("shop", "regions"): ("name",)},
     )
     return env
 
@@ -161,7 +163,7 @@ async def test_slow_query_to_plan_and_layout(diag: Env, channel: str) -> None:
             "list_slow_queries", cluster=SR.target_id, window_minutes=60, order_by="query_time"
         ),
         explain_listed,
-        tool_call("describe_table_layout", cluster=SR.target_id, table="sales"),
+        tool_call("describe_table_layout", cluster=SR.target_id, database="shop", table="sales"),
         cite("全表扫描 30 个分区；建议按日期过滤以触发分区裁剪"),
     )
     running, feishu = serving(env, channel)
@@ -175,11 +177,11 @@ async def test_slow_query_to_plan_and_layout(diag: Env, channel: str) -> None:
     assert all("run_readonly_query" not in seen for seen in env.scripts.tools_seen(message))
     assert not env.drv.sent("query")
     assert env.drv.sent("explain") == [explained(SLOW_SQL)]
-    assert [kind for kind, _ in env.drv.statements if kind != "session"] == [
-        "audit",
-        "explain",
-        "layout",
-    ]
+    kinds = [kind for kind, _ in env.drv.statements if kind != "session"]
+    assert [k for k in kinds if k not in ("probe", "dependency")] == ["audit", "explain", "layout"]
+    assert kinds[kinds.index("layout") - 1] == "probe"  # 交付布局前确认当前仍可读
+    # 其余只是证据依赖复核（零行探测与版本读取），没有任何业务或元数据查询。
+    assert set(kinds) == {"audit", "explain", "layout", "probe", "dependency"}
     # 三类事实与各自的固定说明由代码生成，分析单列为模型推断。
     content = lines(reply)
     assert content.count(f"说明：{AUDIT_NOTE}") == 1 and content.count(f"说明：{PLAN_NOTE}") == 1
@@ -227,7 +229,7 @@ async def test_previous_query_is_explained_without_running_it_again(
 
     second = env.scripts.add(
         "刚才那条为什么慢",
-        tool_call("describe_table", cluster=SR.target_id, table="sales"),
+        tool_call("describe_table", cluster=SR.target_id, database="shop", table="sales"),
         explain_replayed,
         cite("计划显示全表扫描；建议增加过滤条件"),
     )
@@ -347,7 +349,7 @@ async def test_pasted_sql_is_explained_without_running_it(diag: Env, channel: st
     message = env.scripts.add(
         f"这条 SQL 为什么慢：{SLOW_SQL}",
         tool_call("explain_query", cluster=SR.target_id, sql=SLOW_SQL),
-        tool_call("describe_table_layout", cluster=SR.target_id, table="sales"),
+        tool_call("describe_table_layout", cluster=SR.target_id, database="shop", table="sales"),
         cite("全表扫描；建议加日期过滤"),
     )
     running, feishu = serving(env, channel)

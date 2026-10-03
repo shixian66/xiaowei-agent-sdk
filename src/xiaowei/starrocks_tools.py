@@ -1,16 +1,24 @@
 """StarRocks 受治理工具：五个（配置审计源时六个）工具的契约、参数与投影策略，以及绑定 Adapter
 的执行函数。
 
-``local/list_tables``、``local/describe_table`` 与 ``local/describe_table_layout`` 只执行代码
-生成、参数绑定的元数据查询；
-``local/run_readonly_query`` 只执行 SQLGuard 产生的 ``GuardedQuery``；``local/explain_query``
-只以 Adapter 的固定显式级别 EXPLAIN SQLGuard 产生的 ``ExplainQuery``，不执行被解释的查询。
-两个 ``describe`` 工具的对象核对与两种 SQL 的 SQLGuard 都是 ``Prechecked`` 的同步前置检查：在
-当前授权之后、预算预留与任何 StarRocks I/O 之前运行，拒绝时模型只收到固定原因码与说明，
-可在本轮剩余轮次内修正。
+数据范围来自每个目标的结构快照（``starrocks_schema.SchemaCache``），不来自配置的表列清单。
+所有工具的前置检查都先取当前快照：没有快照或已到期时在任何 I/O 前拒绝。
+
+``local/list_tables`` 与 ``local/describe_table`` 的结构取自快照，交付前对要列出的每个对象
+重新做零行权限探测（快照中的“可读”只是采集时的结论）：列表跳过已不可读的对象，表结构遇到
+已不可读的对象整体失败。列表按目录顺序分批探测，每次最多尝试 ``2 × max_rows`` 个对象（按
+已尝试的对象数计，与可读对象多少无关），还有未检查的候选时标记截断。
+``local/describe_table_layout`` 同样先探测，再读该表的布局；两个 ``describe`` 工具按
+``database`` 与 ``table`` 定位快照中的对象。``local/run_readonly_query`` 只执行 SQLGuard
+产生的 ``GuardedQuery``，``local/explain_query`` 只以 Adapter 的固定显式级别 EXPLAIN
+``ExplainQuery``，不执行被解释的查询；二者的 SQLGuard 范围是快照中默认库的可读对象与列，
+执行时由数据库自己的权限检查最终把关。对象核对与 SQLGuard 都是 ``Prechecked`` 的同步前置
+检查：在当前授权之后、预算预留与任何 StarRocks I/O 之前运行，拒绝时模型只收到固定原因码与
+说明，可在本轮剩余轮次内修正。
 
 ``local/list_slow_queries`` 只在目标配置了审计源时登记：读已有审计表中本目标库、原文通过当前
-SQLGuard 范围的慢查询（见 ``StarRocksAdapter.slow_queries``），时间窗与排序方式在 I/O 前检查。
+快照 SQLGuard 范围的慢查询（见 ``StarRocksAdapter.slow_queries``），时间窗与排序方式在 I/O 前检查。
+交付前再对各行原文引用的对象做一次零行探测，引用了已不可读对象的行不列出。
 
 诊断用途能看到元数据工具（含表布局）与 ``explain_query``，看不到 ``run_readonly_query``。计划证据的
 固定说明（``PLAN_NOTE``，审计为 ``AUDIT_NOTE``）登记在策略上，由交付时的代码附加在事实区，
@@ -21,8 +29,14 @@ SQLGuard 范围的慢查询（见 ``StarRocksAdapter.slow_queries``），时间�
 真实投影器检查 Web 与飞书两条路径，任一路径放不下即拒绝启动；运行时 ``EvidenceStore`` 仍会
 在必需字段放不下时中止本轮。
 
-全部策略共用 ``data_scope_digest``：证据只在装配时的数据范围下可读，以收窄（或任何改动）
-范围的配置启动后，已保存的 StarRocks 证据不再进入模型、Session 或渠道。
+全部策略共用 ``data_scope_digest``：证据只在装配时的配置范围（摘要格式版本、数据库类型、连接身份、
+函数、SQL/结果/计划上限、服务端时间与内存限额、客户端期限、时区、快照容量与审计源）下可读，改动
+这些配置后已保存的 StarRocks 证据不再进入模型、Session 或渠道。结构快照本身不进入摘要。
+
+每个观测都带可信的对象依赖（``starrocks_schema.read_dependency`` / ``listed_dependency``）：列表的
+每个对象、表结构与布局的对象（全部列）、查询与计划引用的对象与列（来自 SQLGuard 产物）、审计源
+与各行原文引用的对象与列。``EvidenceStore`` 在记录与每次交付时按当前权限与对象版本复核这些依赖
+（``starrocks_schema.DependencyCheck``）。
 
 多个目标各自装配一次：契约、策略（``starrocks.<目标>.<工具>``）与执行函数都按目标登记，执行函数
 以 ``(tool_id, target_id)`` 为键。每个参数模型都以必填的 ``cluster`` 选择目标，对模型只有一套
@@ -31,9 +45,11 @@ SQLGuard 范围的慢查询（见 ``StarRocksAdapter.slow_queries``），时间�
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
-from collections.abc import Mapping
+import time
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Annotated, Final, Literal
@@ -42,11 +58,19 @@ from pydantic import BaseModel, ConfigDict, StringConstraints
 
 from xiaowei.evidence import check_projection_capacity
 from xiaowei.governance import Execute, Prechecked, Projection, ToolPolicy, ToolRejectedError
-from xiaowei.models import AUDIENCES, Audience, ToolContract, ToolObservation, ToolRequest
+from xiaowei.models import (
+    AUDIENCES,
+    Audience,
+    ObjectDependency,
+    ToolContract,
+    ToolObservation,
+    ToolRequest,
+)
 from xiaowei.sqlguard import (
     REJECTION_MESSAGES,
     ExplainQuery,
     GuardedQuery,
+    QueryPolicy,
     QueryRejectedError,
     QueryRejectionCode,
     guard_explain_query,
@@ -55,13 +79,26 @@ from xiaowei.sqlguard import (
 from xiaowei.starrocks import (
     AUDIT_ORDER_COLUMNS,
     EXPLAIN_PREFIX,
+    SCHEMA_COLUMNS_SQL,
+    SCHEMA_OBJECTS_SQL,
     QueryResult,
+    Scalar,
     StarRocksAdapter,
     StarRocksError,
     StarRocksErrorCode,
     StarRocksTarget,
     audit_sql_bytes,
+    bounded_rows,
     metadata_sql_bytes,
+)
+from xiaowei.starrocks_schema import (
+    SCHEMA_UNAVAILABLE,
+    ObjectInfo,
+    SchemaCache,
+    SchemaSnapshot,
+    SchemaUnavailableError,
+    listed_dependency,
+    read_dependency,
 )
 
 LIST_TABLES: Final = "local/list_tables"
@@ -80,6 +117,12 @@ AUDIT_NOTE: Final = (
     "能确认引用对象全部获准的查询，列表可能少于上限，为空也不代表没有慢查询。"
     "指标为 StarRocks 实测值，空值表示未知。"
 )
+SCHEMA_NOTE: Final = (
+    "表结构来自定期采集的元数据快照（采集时间见来源），只含只读账号可 SELECT 的对象；"
+    "列出的对象已在交付前逐个确认当前仍可读。"
+)
+LIST_COLUMNS: Final = ("database", "name", "type", "comment")
+DESCRIBE_COLUMNS: Final = ("name", "type", "nullable", "comment")
 PLAN_NOTE: Final = (
     "执行计划是优化器按当前统计信息给出的估算；获取时未执行原查询，不包含实际耗时与资源消耗。"
     "没有对应审计记录时，不能确认实际运行慢的原因。"
@@ -109,6 +152,7 @@ class DescribeTableArgs(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     cluster: ClusterArg
+    database: Annotated[str, StringConstraints(min_length=1, max_length=256)]
     table: Annotated[str, StringConstraints(min_length=1, max_length=256)]
 
 
@@ -153,11 +197,18 @@ class StarRocksTools:
         )
 
 
-def starrocks_tools(adapter: StarRocksAdapter, max_bytes: Mapping[Audience, int]) -> StarRocksTools:
-    """按目标配置与四种用途的容量装配五个工具；容量容不下最坏结果时拒绝装配。"""
+def starrocks_tools(
+    adapter: StarRocksAdapter, max_bytes: Mapping[Audience, int], *, schema: SchemaCache
+) -> StarRocksTools:
+    """按目标配置与四种用途的容量装配五个工具；容量容不下最坏结果时拒绝装配。
+
+    ``schema`` 是同一目标的结构快照缓存；刷新由装配方负责，这里只读取当前快照。
+    """
     target = adapter.target
     if set(max_bytes) != set(AUDIENCES):
         raise ValueError("StarRocks 工具：必须且只能给出四种用途的容量")
+    if schema.target_id != target.target_id:
+        raise ValueError("StarRocks 工具：结构快照必须属于同一目标")
     worst = worst_case_observation(adapter)
     projections: dict[str, Projection] = {
         a: Projection(fields=RESULT_FIELDS, max_bytes=max_bytes[a]) for a in AUDIENCES
@@ -184,8 +235,8 @@ def starrocks_tools(adapter: StarRocksAdapter, max_bytes: Mapping[Audience, int]
             description=description,
         )
 
-    list_policy = policy("list_tables", ListTablesArgs)
-    describe_policy = policy("describe_table", DescribeTableArgs)
+    list_policy = policy("list_tables", ListTablesArgs, SCHEMA_NOTE)
+    describe_policy = policy("describe_table", DescribeTableArgs, SCHEMA_NOTE)
     layout_policy = policy("describe_table_layout", DescribeTableArgs)
     query_policy = policy("run_readonly_query", RunQueryArgs)
     explain_policy = policy("explain_query", ExplainQueryArgs, PLAN_NOTE)
@@ -198,50 +249,117 @@ def starrocks_tools(adapter: StarRocksAdapter, max_bytes: Mapping[Audience, int]
         sql=_json_size(worst.payload["sql"]), columns=_json_size(worst.payload["columns"])
     )
 
-    async def list_tables(request: ToolRequest) -> ToolObservation:
-        return _observation(await adapter.list_tables(), bounds)
-
-    def check_table(request: ToolRequest) -> str:
-        name = str(request.arguments["table"])
-        if name not in target.policy.allowed_objects:
-            raise ToolRejectedError("对象不在允许范围内，未执行；请先用 list_tables 查看可用对象")
-        return name
-
-    async def describe_table(name: str) -> ToolObservation:
-        return _observation(await adapter.describe_table(name), bounds)
-
-    async def describe_layout(name: str) -> ToolObservation:
-        return _observation(await adapter.describe_layout(name), bounds)
-
-    def check_query(request: ToolRequest) -> GuardedQuery:
-        code: QueryRejectionCode | None = None
+    def current() -> SchemaSnapshot:
         try:
-            return guard_readonly_query(str(request.arguments["sql"]), target.policy)
+            return schema.current()
+        except SchemaUnavailableError:
+            pass
+        raise ToolRejectedError(SCHEMA_UNAVAILABLE)
+
+    def check_snapshot(request: ToolRequest) -> SchemaSnapshot:
+        return current()
+
+    async def list_tables(snapshot: SchemaSnapshot) -> ToolObservation:
+        started = time.monotonic()
+        limit = target.policy.max_rows
+        cap = 2 * limit
+        pending = sorted(snapshot.objects)
+        readable: list[tuple[str, str]] = []
+        attempted = 0
+        # 按目录顺序分批探测：凑满一页再多一个即停，且按已尝试的对象数硬性封顶（与可读对象
+        # 多少无关）；未探测的对象不列出，只标记截断。
+        while pending and len(readable) <= limit and attempted < cap:
+            size = min(limit, cap - attempted)
+            batch, pending = pending[:size], pending[size:]
+            attempted += len(batch)
+            verdicts = await adapter.probe(batch)
+            readable += [key for key in batch if verdicts[key]]
+        rows = [_listed(snapshot.objects[key]) for key in readable]
+        kept, truncated = bounded_rows(rows, limit, target)
+        result = _from_snapshot(
+            snapshot, SCHEMA_OBJECTS_SQL, LIST_COLUMNS, kept, truncated or bool(pending), started
+        )
+        shown = readable[: len(kept)]
+        return _observation(result, bounds, [listed_dependency(*key) for key in shown])
+
+    def check_table(request: ToolRequest) -> tuple[SchemaSnapshot, ObjectInfo]:
+        snapshot = current()
+        found = snapshot.object(str(request.arguments["database"]), str(request.arguments["table"]))
+        if found is None:
+            raise ToolRejectedError(
+                "对象不在可读的表结构中，未执行；请先用 list_tables 查看可用的库与表"
+            )
+        return snapshot, found
+
+    async def readable(found: ObjectInfo) -> None:
+        verdicts = await adapter.probe([(found.database, found.name)])
+        if not verdicts[(found.database, found.name)]:
+            raise StarRocksError(StarRocksErrorCode.OBJECT_UNREADABLE)
+
+    async def describe_table(checked: tuple[SchemaSnapshot, ObjectInfo]) -> ToolObservation:
+        started = time.monotonic()
+        snapshot, found = checked
+        await readable(found)
+        rows: list[dict[str, Scalar]] = [
+            {"name": c.name, "type": c.type, "nullable": c.nullable, "comment": c.comment}
+            for c in found.columns
+        ]
+        kept, truncated = bounded_rows(rows, len(rows), target)
+        result = _from_snapshot(
+            snapshot, SCHEMA_COLUMNS_SQL, DESCRIBE_COLUMNS, kept, truncated, started
+        )
+        return _observation(result, bounds, [read_dependency(found)])
+
+    async def describe_layout(checked: tuple[SchemaSnapshot, ObjectInfo]) -> ToolObservation:
+        _, found = checked
+        await readable(found)
+        layout = await adapter.describe_layout(found.database, found.name, found.column_names)
+        return _observation(layout, bounds, [read_dependency(found)])
+
+    def check_query(request: ToolRequest) -> tuple[SchemaSnapshot, GuardedQuery]:
+        code: QueryRejectionCode | None = None
+        snapshot = current()
+        try:
+            return snapshot, guard_readonly_query(
+                str(request.arguments["sql"]), snapshot.query_policy
+            )
         except QueryRejectedError as exc:
             code = exc.code
         # 在 except 之外抛出：拒绝只带固定原因码与说明，不带 SQLGuard 异常的上下文。
         raise ToolRejectedError(f"查询未执行（{code}）：{REJECTION_MESSAGES[code]}")
 
-    async def run_query(query: GuardedQuery) -> ToolObservation:
-        return _observation(await adapter.run_query(query), bounds)
+    async def run_query(checked: tuple[SchemaSnapshot, GuardedQuery]) -> ToolObservation:
+        snapshot, query = checked
+        dependencies = _referenced(snapshot, target.database, query.referenced_columns, query)
+        return _observation(await adapter.run_query(query), bounds, dependencies)
 
-    def check_explain(request: ToolRequest) -> ExplainQuery:
+    def check_explain(request: ToolRequest) -> tuple[SchemaSnapshot, ExplainQuery]:
         code: QueryRejectionCode | None = None
+        snapshot = current()
         try:
-            return guard_explain_query(str(request.arguments["sql"]), target.policy)
+            return snapshot, guard_explain_query(
+                str(request.arguments["sql"]), snapshot.query_policy
+            )
         except QueryRejectedError as exc:
             code = exc.code
         raise ToolRejectedError(f"执行计划未获取（{code}）：{REJECTION_MESSAGES[code]}")
 
-    async def explain(query: ExplainQuery) -> ToolObservation:
-        return _observation(await adapter.explain(query), bounds)
+    async def explain(checked: tuple[SchemaSnapshot, ExplainQuery]) -> ToolObservation:
+        snapshot, query = checked
+        dependencies = _referenced(snapshot, target.database, query.referenced_columns, query)
+        return _observation(await adapter.explain(query), bounds, dependencies)
 
     contracts = [
-        contract(LIST_TABLES, list_policy, "列出所选集群允许查询的表与视图。"),
+        contract(
+            LIST_TABLES,
+            list_policy,
+            "列出所选集群中只读账号可查询的库、表与视图及其注释（按库表名排序，行数有上限）。",
+        ),
         contract(
             DESCRIBE_TABLE,
             describe_policy,
-            "查看一张允许查询的表或视图的可用列、类型与是否可空。",
+            "查看一张可查询的表或视图的列、类型、是否可空与注释；"
+            "database 与 table 取自 list_tables。",
         ),
         contract(
             LAYOUT_TOOL,
@@ -265,7 +383,7 @@ def starrocks_tools(adapter: StarRocksAdapter, max_bytes: Mapping[Audience, int]
     policies = [list_policy, describe_policy, query_policy, explain_policy, layout_policy]
     key = target.target_id
     executes: dict[tuple[str, str], Execute] = {
-        (LIST_TABLES, key): list_tables,
+        (LIST_TABLES, key): Prechecked(check=check_snapshot, run=list_tables),
         (DESCRIBE_TABLE, key): Prechecked(check=check_table, run=describe_table),
         (LAYOUT_TOOL, key): Prechecked(check=check_table, run=describe_layout),
         (RUN_QUERY, key): Prechecked(check=check_query, run=run_query),
@@ -274,17 +392,38 @@ def starrocks_tools(adapter: StarRocksAdapter, max_bytes: Mapping[Audience, int]
     if target.audit is not None:
         limit = target.audit.max_window_minutes
 
-        def check_window(request: ToolRequest) -> tuple[int, str]:
+        audit = target.audit
+
+        def check_window(request: ToolRequest) -> tuple[int, str, SchemaSnapshot]:
             window, order = request.arguments["window_minutes"], request.arguments["order_by"]
             if not isinstance(window, int) or isinstance(window, bool) or not 1 <= window <= limit:
                 raise ToolRejectedError(f"慢查询未读取：时间窗须在 1 到 {limit} 分钟之间")
             # 参数模型已把排序方式限定为枚举；这里再按 Adapter 的固定映射复核。
             if order not in AUDIT_ORDER_COLUMNS:
                 raise ToolRejectedError("慢查询未读取：排序方式不在允许范围内")
-            return window, str(order)
+            return window, str(order), current()
 
-        async def slow_queries(args: tuple[int, str]) -> ToolObservation:
-            return _observation(await adapter.slow_queries(*args), bounds)
+        async def slow_queries(args: tuple[int, str, SchemaSnapshot]) -> ToolObservation:
+            window, order, snapshot = args
+            policy = snapshot.query_policy
+            result = await adapter.slow_queries(window, order, policy)
+            # 原文已通过同一范围的 SQLGuard：在线程中重算各行引用（同步 CPU），按当前权限过滤。
+            references = await asyncio.to_thread(_audit_references, result.rows, policy)
+            objects = sorted({obj for refs in references for obj, _ in refs})
+            verdicts = await adapter.probe([(target.database, obj) for obj in objects])
+            kept = [
+                (row, refs)
+                for row, refs in zip(result.rows, references, strict=True)
+                if all(verdicts[(target.database, obj)] for obj, _ in refs)
+            ]
+            rows = tuple(row for row, _ in kept)
+            columns = frozenset(pair for _, refs in kept for pair in refs)
+            dependencies = [
+                listed_dependency(audit.database, audit.table),
+                *_referenced(snapshot, target.database, columns, None),
+            ]
+            filtered = result.model_copy(update={"rows": rows, "row_count": len(rows)})
+            return _observation(filtered, bounds, dependencies)
 
         audit_policy = policy("list_slow_queries", ListSlowQueriesArgs, AUDIT_NOTE)
         contracts.append(
@@ -302,33 +441,60 @@ def starrocks_tools(adapter: StarRocksAdapter, max_bytes: Mapping[Audience, int]
     return StarRocksTools(contracts=tuple(contracts), policies=tuple(policies), executes=executes)
 
 
-def data_scope_digest(target: StarRocksTarget) -> str:
-    """目标数据范围的稳定摘要：允许的对象、列与函数，以及决定可读数据多少的上限。
+DATA_SCOPE_FORMAT: Final = "xiaowei.data_scope.starrocks/2"
+"""摘要公式的显式版本：纳入或排除的字段改变时更新，使旧公式下保存的证据一次性失效。
 
-    集合排序、键排序后再序列化：与配置的书写顺序和进程的哈希种子无关，同一范围重启后摘要
-    不变。函数名已由 ``QueryPolicy`` 统一为大写。连接端点与账号（``host``、``port``、``user``）
-    进入摘要：同一份 allowlist 换了集群或账号可能对应另一套数据与权限。只决定期限、时区表示
-    与密码引用的字段不进入摘要。审计源配置（未配置为 ``null``）整体进入摘要。
+/2（P2.5 Task 2 审查）：加入数据库类型、TLS、服务端时间与内存限额、客户端期限与时区。
+"""
+
+
+def data_scope_digest(target: StarRocksTarget) -> str:
+    """目标配置范围的稳定摘要（``scope_canonical`` 的 SHA-256）。"""
+    return f"sha256:{hashlib.sha256(scope_canonical(target).encode()).hexdigest()}"
+
+
+def scope_canonical(target: StarRocksTarget) -> str:
+    """摘要的规范化内容：键排序、紧凑 JSON，集合先排序。
+
+    与配置的书写顺序和进程的哈希种子无关，同一范围重启后摘要不变；函数名已由 ``SqlPolicy`` 统一
+    为大写。纳入（计划 §2.6）：
+
+    - 来源身份：集群 ID、数据库类型、``host``/``port``/``user``、是否 TLS、默认库。换了集群、账号
+      或传输方式可能对应另一套数据与权限。
+    - 资源限额：函数集合、``max_rows``/``max_sql_bytes``、结果/单值/计划上限、服务端
+      ``query_timeout_seconds`` 与 ``query_mem_limit_bytes``、客户端 ``client_timeout_seconds``、
+      结构快照的容量与期限（``schema_limits``）。它们决定能读到多少数据、哪些查询能完成。
+    - 事实形态：``time_zone``（时间值按它转换）、审计源配置（未配置为 ``null``）。
+
+    不纳入：密码引用（凭据）、``tls_ca_file``（信任链文件位置，不改变数据）、
+    ``connect_timeout_seconds`` 与 ``pool_size``（只影响能否、何时取得连接，不影响一次读取的范围与
+    结果）。整轮期限、工具次数等预算属于应用的 ``Budget``，与目标无关，也不进入。可读对象与列来自
+    结构快照，随权限变化，不进入（由 Evidence 的对象依赖逐次复核）。风险策略在 Task 4 实施时加入。
     """
     policy = target.policy
     body = {
+        "format": DATA_SCOPE_FORMAT,
+        "database_type": "starrocks",
         "target_id": target.target_id,
         "host": target.host,
         "port": target.port,
         "user": target.user,
-        "default_database": policy.default_database,
-        "allowed_objects": sorted(policy.allowed_objects),
-        "allowed_columns": {name: sorted(cols) for name, cols in policy.allowed_columns.items()},
+        "tls": target.tls,
+        "default_database": target.database,
         "allowed_functions": sorted(policy.allowed_functions),
         "max_rows": policy.max_rows,
         "max_sql_bytes": policy.max_sql_bytes,
         "max_result_bytes": target.max_result_bytes,
         "max_value_bytes": target.max_value_bytes,
         "max_plan_lines": target.max_plan_lines,
+        "query_timeout_seconds": target.query_timeout_seconds,
+        "query_mem_limit_bytes": target.query_mem_limit_bytes,
+        "client_timeout_seconds": target.client_timeout_seconds,
+        "time_zone": target.time_zone,
+        "schema_limits": target.schema_limits.model_dump(mode="json"),
         "audit": None if target.audit is None else target.audit.model_dump(mode="json"),
     }
-    canonical = json.dumps(body, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
-    return f"sha256:{hashlib.sha256(canonical.encode()).hexdigest()}"
+    return json.dumps(body, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
 
 
 def worst_case_observation(adapter: StarRocksAdapter) -> ToolObservation:
@@ -343,7 +509,7 @@ def worst_case_observation(adapter: StarRocksAdapter) -> ToolObservation:
     target = adapter.target
     sql_bytes = max(
         target.policy.max_sql_bytes + len(EXPLAIN_PREFIX),
-        metadata_sql_bytes(target.policy),
+        metadata_sql_bytes(),
         audit_sql_bytes(target),
     )
     return ToolObservation(
@@ -365,7 +531,68 @@ class _Bounds:
     columns: int
 
 
-def _observation(result: QueryResult, bounds: _Bounds) -> ToolObservation:
+def _referenced(
+    snapshot: SchemaSnapshot,
+    database: str,
+    columns: Iterable[tuple[str, str]],
+    query: GuardedQuery | ExplainQuery | None,
+) -> list[ObjectDependency]:
+    """默认库中被引用对象的 ``read`` 依赖：版本取自快照，列为被引用的列（COUNT(*) 时为空）。"""
+    by_object: dict[str, set[str]] = {}
+    for obj, column in columns:
+        by_object.setdefault(obj, set()).add(column)
+    for obj in query.referenced_objects if query is not None else ():
+        by_object.setdefault(obj, set())
+    dependencies = []
+    for obj, used in sorted(by_object.items()):
+        found = snapshot.object(database, obj)
+        if found is None:  # SQLGuard 范围来自同一快照，不会发生；不能无依赖地交付
+            raise StarRocksError(StarRocksErrorCode.RESULT_CONTRACT)
+        dependencies.append(read_dependency(found, used))
+    return dependencies
+
+
+def _audit_references(
+    rows: Iterable[Mapping[str, Scalar]], policy: QueryPolicy
+) -> list[frozenset[tuple[str, str]]]:
+    """各行原文引用的 (对象, 列)；对象没有列引用（COUNT(*)）时以空列名记录对象本身。"""
+    references = []
+    for row in rows:
+        query = guard_explain_query(str(row["sql"]), policy)
+        refs = set(query.referenced_columns)
+        refs |= {(obj, "") for obj in query.referenced_objects}
+        references.append(frozenset(refs))
+    return references
+
+
+def _listed(obj: ObjectInfo) -> dict[str, Scalar]:
+    return {"database": obj.database, "name": obj.name, "type": obj.type, "comment": obj.comment}
+
+
+def _from_snapshot(
+    snapshot: SchemaSnapshot,
+    sql: str,
+    columns: tuple[str, ...],
+    rows: tuple[dict[str, Scalar], ...],
+    truncated: bool,
+    started: float,
+) -> QueryResult:
+    """快照中的结构：``sql`` 是采集它的元数据模板，采集时间是快照的采集时间。"""
+    return QueryResult(
+        target_id=snapshot.target_id,
+        sql=sql,
+        columns=columns,
+        rows=rows,
+        row_count=len(rows),
+        truncated=truncated,
+        collected_at=snapshot.collected_at,
+        elapsed_ms=round((time.monotonic() - started) * 1000),
+    )
+
+
+def _observation(
+    result: QueryResult, bounds: _Bounds, dependencies: Iterable[ObjectDependency]
+) -> ToolObservation:
     """Adapter 结果转为工具观测；列名或 SQL 超过装配时假定的上限时按结果契约失败。"""
     columns = list(result.columns)
     if _json_size(result.sql) > bounds.sql or _json_size(columns) > bounds.columns:
@@ -380,6 +607,7 @@ def _observation(result: QueryResult, bounds: _Bounds) -> ToolObservation:
         },
         captured_at=result.collected_at,
         truncated=result.truncated,
+        dependencies=tuple(dependencies),
     )
 
 

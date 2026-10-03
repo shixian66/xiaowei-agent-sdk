@@ -10,7 +10,10 @@
   结果不明：锁低 readiness 后原样传播，交给重启恢复标为 interrupted。
 - ``ResultDelivery``：读取与发送已保存的结果，只依赖请求存储、``EvidenceStore`` 与同一个
   ``AccessPolicy``，不持有 ``Application``、模型绑定或模型凭据。completed 结果每次都按当前身份、
-  目标与渠道经 ``EvidenceStore.validate_answer`` 重新生成 ``Delivery``；failed/interrupted 只给
+  目标、渠道与当前数据权限经 ``EvidenceStore.validate_answer`` 重新生成 ``Delivery``；首次交付
+  （Web 提交后的读取、飞书首次发送）之外的读取与显式重发是历史交付，依赖不可回放（视图）的事实
+  拒绝。确定不可交付抛出 ``ResultUnavailableError``，暂时无法复核抛出其子类
+  ``ResultUnverifiableError``（结果与会话保留，之后可再读取或显式重发）。failed/interrupted 只给
   固定回执。发送紧邻在取得投递权之后，只发送一次，结果按 sent/failed/unknown 记录，不自动重试。
 
 入口授权与 Evidence 授权必须是同一个 ``AccessPolicy`` 实例：装配时核对 ``EvidenceStore`` 的授权
@@ -37,7 +40,7 @@ from xiaowei.channel_store import (
     SendOutcome,
     SessionBusyError,
 )
-from xiaowei.evidence import AnswerRejectedError, EvidenceStore
+from xiaowei.evidence import AnswerRejectedError, EvidenceStore, EvidenceUnverifiableError
 from xiaowei.models import Budget, Channel, Delivery, Identity, Label, RunContext, ToolId
 
 # 应用层失败原因到存储失败码（闭集）的映射；存储只保存类别，渠道据此给固定回执。
@@ -50,6 +53,7 @@ _FAILURE_CODES: Mapping[TurnReason, CallerFailureCode] = {
     "answer_rejected": "evidence_failed",
     "tool_failed": "evidence_failed",
     "session_unavailable": "session_failed",
+    "scope_unverifiable": "scope_unverifiable",
     "content_rejected": "session_failed",
     "storage_failed": "session_failed",
     "storage_unavailable": "session_failed",
@@ -60,6 +64,9 @@ _RECEIPTS: Mapping[FailureCode, str] = {
     "model_failed": "模型未能完成本轮（调用失败、超时或次数达到上限）；已执行的工具不会自动重试",
     "evidence_failed": "工具结果或回答未通过证据校验，本轮未交付；不会自动重试",
     "session_failed": "本轮内容未被接受或会话不可继续，请调整后重试或新建会话",
+    "scope_unverifiable": (
+        "暂时无法确认数据当前权限（集群不可达或超时），本轮未交付；会话保留，请稍后重新发送"
+    ),
     "result_not_saved": "结果保存失败，请新建会话后重试",
     "interrupted": "上次处理已中断，请重新发送",
 }
@@ -119,8 +126,15 @@ class AccessDeniedError(ChannelStoreError):
 class ResultUnavailableError(ChannelStoreError):
     """已保存的结果按当前身份、权限、目标或证据期限不能交付。"""
 
+    def __init__(self, message: str = "结果当前不可用") -> None:
+        super().__init__(message)
+
+
+class ResultUnverifiableError(ResultUnavailableError):
+    """暂时无法确认结果引用的数据当前仍可读（目标不可达、超时等）；本次不交付，结果与会话保留。"""
+
     def __init__(self) -> None:
-        super().__init__("结果当前不可用")
+        super().__init__("暂时无法确认数据当前权限，结果本次未交付，请稍后重试")
 
 
 @dataclass(frozen=True)
@@ -197,11 +211,16 @@ class ResultDelivery:
     def budget(self) -> Budget:
         return self._budget
 
-    async def view(self, ref: RequestRef) -> RequestView:
-        """按当前身份读取请求；completed 结果重新验证，不可交付时拒绝。"""
+    async def view(self, ref: RequestRef, *, first: bool = False) -> RequestView:
+        """按当前身份读取请求；completed 结果重新验证，不可交付时拒绝。
+
+        ``first`` 只由渠道在本请求刚运行完时传入（首次交付）；其余读取都是历史读取。
+        """
         record, decision = await self._load(ref)
         if record.state == "completed":
-            return RequestView(record.state, await self._validated(record, decision))
+            return RequestView(
+                record.state, await self._validated(record, decision, history=not first)
+            )
         if record.state in ("failed", "interrupted"):
             return RequestView(record.state, self._receipt(record))
         return RequestView(record.state, None)
@@ -211,17 +230,20 @@ class ResultDelivery:
     ) -> SendOutcome | None:
         """取得投递权后发送一次；返回 None 表示不得发送（已发送、发送中、未结束或已被他人取得）。
 
-        首次发送与事件重投只竞争 pending；``resend=True`` 只供显式重发，只对 completed 结果竞争
-        failed/unknown。completed 结果先按当前权限重新验证：不可交付时取得投递权并记为 failed，
-        不发送旧内容。发送抛出异常或被取消时记为 unknown 并原样传播。落定只针对本次取得的尝试：
+        首次发送与事件重投只竞争 pending；``resend=True`` 只供显式重发（历史交付），只对 completed
+        结果竞争 failed/unknown。completed 结果先按当前权限重新验证：不可交付或暂时无法复核时取得
+        投递权并记为 failed（仍可显式重发），不发送旧内容，原样抛出拒绝。发送抛出异常或被取消时
+        记为 unknown 并原样传播。落定只针对本次取得的尝试：
         尝试已被启动恢复作废或被更新的尝试取代时不改写状态，报错并锁低 readiness。
         """
         record, decision = await self._load(ref)
+        refused: ResultUnavailableError | None = None
+        delivery: Delivery | None = None
         if record.state == "completed":
             try:
-                delivery: Delivery | None = await self._validated(record, decision)
-            except ResultUnavailableError:
-                delivery = None
+                delivery = await self._validated(record, decision, history=resend)
+            except ResultUnavailableError as exc:
+                refused = exc
         elif record.state in ("failed", "interrupted") and not resend:
             delivery = self._receipt(record)
         else:
@@ -231,7 +253,7 @@ class ResultDelivery:
             return None
         if delivery is None:
             await self._store.finish_send(claim, "failed")
-            raise ResultUnavailableError
+            raise refused or ResultUnavailableError()
         try:
             outcome = await transmit(delivery)
         except BaseException as exc:
@@ -252,15 +274,19 @@ class ResultDelivery:
         )
         return record, decision
 
-    async def _validated(self, record: RequestRecord, decision: AccessDecision) -> Delivery:
+    async def _validated(
+        self, record: RequestRecord, decision: AccessDecision, *, history: bool
+    ) -> Delivery:
         if record.answer is None:  # 数据库约束保证不会发生；不按“有回答”继续
             raise ResultUnavailableError
         try:
             return await self._evidence.validate_answer(
-                record.answer, self._context(record, decision)
+                record.answer, self._context(record, decision), history=history
             )
         except AnswerRejectedError:
             raise ResultUnavailableError from None
+        except EvidenceUnverifiableError:
+            raise ResultUnverifiableError from None
 
     def _context(self, record: RequestRecord, decision: AccessDecision) -> RunContext:
         """交付用 context：结果所属会话与轮次、当前授权的目标集合；不授予任何工具。"""

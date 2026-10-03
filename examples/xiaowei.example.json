@@ -80,22 +80,21 @@
           "candidate_bytes": 2097152
         },
         "policy": {
-          "target_id": "warehouse",
-          "default_database": "<默认 database>",
-          "allowed_objects": [
-            "<表或视图>"
-          ],
-          "allowed_columns": {
-            "<表或视图>": [
-              "<列>"
-            ]
-          },
           "allowed_functions": [
             "COUNT",
             "SUM"
           ],
           "max_rows": 200,
           "max_sql_bytes": 8000
+        },
+        "schema_limits": {
+          "refresh_seconds": 60,
+          "max_age_seconds": 300,
+          "refresh_timeout_seconds": 10,
+          "max_objects": 1000,
+          "max_columns": 30000,
+          "max_bytes": 4000000,
+          "max_comment_chars": 200
         }
       }
     }

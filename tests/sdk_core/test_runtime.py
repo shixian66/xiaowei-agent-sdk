@@ -29,7 +29,7 @@ from pydantic import SecretStr
 from sqlalchemy import text
 from sqlalchemy.engine import URL
 from tests.p1b.test_starrocks_adapter import TARGET as SR
-from tests.p1b.test_starrocks_adapter import Result, driver
+from tests.p1b.test_starrocks_adapter import Result, driver, schema_results
 from tests.sdk_core.synthetic_tools import Clock
 from tests.sdk_core.test_app import Scripts, after, cite, clarify, tool_call, upstream_error
 from tests.sdk_core.test_feishu import FakeChannel
@@ -41,6 +41,7 @@ from xiaowei.channel_store import ChannelStore, RequestUnavailableError
 from xiaowei.config import SecretRefError
 from xiaowei.models import AUDIENCES, Identity
 from xiaowei.starrocks import EXPLAIN_PREFIX, StarRocksAdapter
+from xiaowei.starrocks_schema import SchemaCache
 from xiaowei.starrocks_tools import (
     AUDIT_NOTE,
     AUDIT_TOOLS,
@@ -165,13 +166,17 @@ class Env:
     def config(self, **overrides: Any) -> runtime.ServeConfig:
         return runtime.ServeConfig.model_validate(serve_config(self.port, **overrides))
 
+    def connect(self, config: runtime.ServeConfig) -> dict[str, Any]:
+        """各目标都连到同一个驱动替身。"""
+        return {t.target_id: self.drv for t in config.targets}
+
     async def serve(self, config: runtime.ServeConfig, stop: asyncio.Event, **kw: Any) -> int:
         return await runtime.serve(
             config,
             stop=stop,
             clock=self.clock,
             model_transport=self.scripts.transport(),
-            **{"starrocks_connect": {t.target_id: self.drv for t in config.targets}, **kw},
+            **{"starrocks_connect": self.connect(config), **kw},
         )
 
     @asynccontextmanager
@@ -181,6 +186,9 @@ class Env:
         async with httpx.AsyncClient(base_url=self.origin, timeout=30) as client:
             served = Served(client, task, stop)
             await served.ready()
+            # 启动时各目标先刷新一次结构快照；用例只统计请求本身到达驱动的 I/O。
+            for drv in (kw.get("starrocks_connect") or {"default": self.drv}).values():
+                forget(drv)
             try:
                 yield served
             finally:
@@ -191,6 +199,14 @@ class Env:
         async with open_engine(SecretStr(self.url.render_as_string(hide_password=False))) as e:
             async with e.connect() as conn:
                 return await conn.scalar(text(sql))
+
+
+def forget(drv: Any) -> None:
+    """清掉驱动替身已有的连接与语句记录（启动时结构快照刷新留下的）。"""
+    drv.attempts = 0
+    for name in ("connections", "statements"):
+        if hasattr(drv, name):
+            getattr(drv, name).clear()
 
 
 @dataclass
@@ -302,13 +318,16 @@ PLAN = Result(("Explain String",), [("- Output => [1:region]",), ("    - SCAN [s
 
 
 def statements(drv: Any) -> list[str]:
-    """到达驱动的查询语句（不含会话设置与回读）。"""
+    """到达驱动的业务与元数据语句（不含会话设置与回读、结构快照读取与零行权限探测）。"""
     return [
         sql
         for conn in drv.connections
         for sql, _ in conn.executed
-        if not sql.startswith(("SET ", "SELECT @@"))
+        if not sql.startswith(("SET ", "SELECT @@", "SELECT 1 FROM `")) and sql not in SCHEMA_SQL
     ]
+
+
+SCHEMA_SQL = frozenset(schema_results()) - {"*"}
 
 
 async def test_formal_assembly_diagnoses_with_a_plan_and_never_runs_the_query(env: Env) -> None:
@@ -372,7 +391,9 @@ async def test_formal_assembly_cites_table_layout_with_hidden_keys(env: Env) -> 
         await served.page()
         message = env.scripts.add(
             "sales 表的分桶合理吗",
-            tool_call("describe_table_layout", cluster=SR.target_id, table="sales"),
+            tool_call(
+                "describe_table_layout", cluster=SR.target_id, database="shop", table="sales"
+            ),
             cite(),
         )
         body = (await served.turn(message)).json()
@@ -402,7 +423,9 @@ async def test_formal_assembly_rejects_layout_of_unlisted_tables_without_io(env:
         await served.page()
         message = env.scripts.add(
             "users 表的布局",
-            tool_call("describe_table_layout", cluster=SR.target_id, table="users"),
+            tool_call(
+                "describe_table_layout", cluster=SR.target_id, database="shop", table="users"
+            ),
             clarify("users 不在可查看范围内"),
         )
         body = (await served.turn(message)).json()
@@ -679,7 +702,8 @@ async def test_accept_paused_across_a_takeover_ends_interrupted_not_stranded(env
             assert await waiting_on_locks(env, 1)
             assert await env.scalar(TERMINATE_LOCK) == 1
 
-            second = Env(env.url, free_port(), env.scripts, env.clock, env.drv)
+            # 新实例用自己的驱动：它只做启动时的结构快照刷新，不能为任何请求运行查询。
+            second = Env(env.url, free_port(), env.scripts, env.clock, driver(SALES))
             stop = asyncio.Event()
             task = asyncio.create_task(second.serve(second.config(), stop))
             # 新实例的恢复应在接收屏障上等待；没有屏障时它直接完成，这里只是等到期限。
@@ -702,6 +726,11 @@ async def test_accept_paused_across_a_takeover_ends_interrupted_not_stranded(env
             assert await fresh.finish() == 0
     assert late not in env.scripts.calls  # 模型与查询都没有为它运行
     assert env.drv.attempts == attempts
+    assert statements(second.drv) == [] and all(  # 新实例只有结构刷新的读取与探测
+        sql.startswith(("SET ", "SELECT @@", "SELECT 1 FROM `")) or sql in SCHEMA_SQL
+        for conn in second.drv.connections
+        for sql, _ in conn.executed
+    )
 
 
 # ---- 飞书 ----------------------------------------------------------------------------
@@ -819,7 +848,11 @@ async def test_resend_sends_a_failed_result_once_without_rerunning(env: Env) -> 
         target = {"subject_id": "alice", "chat_id": "oc_alice", "message_id": "om_resend"}
         try:
             return await runtime.resend(
-                config, clock=env.clock, feishu_channel=channel, **{**target, **changes}
+                config,
+                clock=env.clock,
+                feishu_channel=channel,
+                starrocks_connect=env.connect(config),
+                **{**target, **changes},
             )
         finally:
             sends.extend(channel.sends)
@@ -836,7 +869,8 @@ async def test_resend_sends_a_failed_result_once_without_rerunning(env: Env) -> 
     assert await resend() is None  # 已 sent：不再发送
     assert len(sends) == 1 and sends[0][0] == "oc_alice"
     assert len(env.scripts.calls[message]) == 2  # 只有原轮次的两次模型调用
-    assert len(env.drv.connections) == 1  # 原轮次的一次元数据查询；重发不连接 StarRocks
+    # 重发不重跑工具：之后到达 StarRocks 的只有证据依赖复核（零行探测与版本读取）。
+    assert statements(env.drv) == []
 
 
 @dataclass
@@ -862,14 +896,29 @@ async def test_serve_recovery_leaves_a_running_resend_to_finish(env: Env) -> Non
     target = {"subject_id": "alice", "chat_id": "oc_alice", "message_id": "om_resend"}
     channel = GatedChannel()
     running = asyncio.create_task(
-        runtime.resend(config, clock=env.clock, feishu_channel=channel, **target)
+        runtime.resend(
+            config,
+            clock=env.clock,
+            feishu_channel=channel,
+            starrocks_connect=env.connect(config),
+            **target,
+        )
     )
     await until(channel.entered.is_set)
     async with env.running(config, feishu_channel=FakeChannel()) as served:
         await served.ready()
         assert await env.scalar("SELECT delivery FROM xiaowei_request") == "sending"
         other = FakeChannel()
-        assert await runtime.resend(config, clock=env.clock, feishu_channel=other, **target) is None
+        assert (
+            await runtime.resend(
+                config,
+                clock=env.clock,
+                feishu_channel=other,
+                starrocks_connect=env.connect(config),
+                **target,
+            )
+            is None
+        )
         assert other.sends == []
         channel.gate.set()
         assert await asyncio.wait_for(running, 30) == "sent"
@@ -891,6 +940,7 @@ async def test_resend_refuses_after_the_evidence_expired(env: Env) -> None:
             message_id="om_resend",
             clock=env.clock,
             feishu_channel=channel,
+            starrocks_connect=env.connect(config),
         )
     assert channel.sends == []
 
@@ -906,7 +956,7 @@ async def test_resend_requires_feishu(env: Env) -> None:
 async def test_storage_commands_use_the_configured_database(env: Env) -> None:
     config = env.config()
     await runtime.initialize(config)  # 已初始化时幂等
-    assert await runtime.upgrade(config) == 3
+    assert await runtime.upgrade(config) == 4
     report = await runtime.cleanup(config, batch_size=10)
     assert (report.sessions, report.unregistered) == (0, 0)
 
@@ -1059,7 +1109,12 @@ async def test_resend_refusal_with_the_real_sdk_makes_no_network_call(env: Env) 
     config = env.config(feishu=feishu_config())
     with pytest.raises(RequestUnavailableError):
         await runtime.resend(
-            config, subject_id="alice", chat_id="oc_alice", message_id="om_none", clock=env.clock
+            config,
+            subject_id="alice",
+            chat_id="oc_alice",
+            message_id="om_none",
+            clock=env.clock,
+            starrocks_connect=env.connect(config),
         )
 
 
@@ -1070,7 +1125,9 @@ def test_example_configuration_is_valid_and_fits_the_projections() -> None:
     )
     for target in config.targets:
         adapter = StarRocksAdapter(target.starrocks, connect=driver(SALES), clock=Clock())
-        starrocks_tools(adapter, config.projection_bytes)
+        starrocks_tools(
+            adapter, config.projection_bytes, schema=SchemaCache(adapter, clock=Clock())
+        )
     assert config.listen_port == 8501 and config.feishu is None
 
 
@@ -1138,6 +1195,7 @@ async def test_history_and_resend_reject_after_scope_narrowing(env: Env) -> None
             message_id="om_resend",
             clock=env.clock,
             feishu_channel=channel,
+            starrocks_connect=env.connect(narrowed),
         )
     assert channel.sends == []
 
@@ -1148,7 +1206,7 @@ async def test_history_and_resend_reject_after_scope_narrowing(env: Env) -> None
 def cluster_config(target_id: str) -> dict[str, Any]:
     """与 SR 同名库表、不同集群 ID 的目标配置。"""
     starrocks = SR.model_dump(mode="json")
-    starrocks["target_id"] = starrocks["policy"]["target_id"] = target_id
+    starrocks["target_id"] = target_id
     return target_config(starrocks)
 
 
@@ -1169,7 +1227,7 @@ async def test_formal_assembly_routes_each_turn_to_the_named_cluster(env: Env) -
         assert body["state"] == "completed"
         (fact,) = body["delivery"]["facts"]
         assert fact["target_id"] == "sr-b" and fact["rows"] == [{"region": "east", "total": 2}]
-        assert (drivers["sr-a"].attempts, drivers["sr-b"].attempts) == (0, 1)
+        assert drivers["sr-a"].attempts == 0 and len(statements(drivers["sr-b"])) == 1
 
         # 未知集群在任何 StarRocks I/O 前拒绝，不回退到其他集群；模型只能澄清。
         unknown = env.scripts.add(
@@ -1180,7 +1238,7 @@ async def test_formal_assembly_routes_each_turn_to_the_named_cluster(env: Env) -
         body = (await served.turn(unknown, "query", "r2")).json()
         assert body["state"] == "completed" and body["delivery"]["facts"] == []
         assert "集群不存在" in json.dumps(env.scripts.calls[unknown][1].input, ensure_ascii=False)
-        assert (drivers["sr-a"].attempts, drivers["sr-b"].attempts) == (0, 1)
+        assert drivers["sr-a"].attempts == 0 and len(statements(drivers["sr-b"])) == 1
         assert await served.finish() == 0
 
 
@@ -1217,3 +1275,38 @@ def test_invalid_targets_are_reported_without_values(
     with pytest.raises(runtime.ConfigError) as raised:
         runtime.load_config(file)
     assert reason in str(raised.value) and "10.0.0.1" not in str(raised.value)
+
+
+# ---- 自动结构快照（P2.5 Task 2）-----------------------------------------------------------
+
+
+async def test_a_cluster_without_a_schema_snapshot_is_unavailable_but_the_others_serve(
+    env: Env,
+) -> None:
+    """启动时 sr-b 的结构刷新失败：服务照常就绪，sr-a 正常查询；sr-b 的数据工具在任何 I/O 前
+    拒绝（只有被拒绝的那次刷新尝试到达过驱动），模型只能如实说明。"""
+    healthy = driver(Result(("region", "total"), [("east", 1)]))
+    down = driver()
+    down.connect_error = ProgrammingError(2003, "Can't connect canary-host")
+    config = env.config(targets=[cluster_config("sr-a"), cluster_config("sr-b")])
+    async with env.running(config, starrocks_connect={"sr-a": healthy, "sr-b": down}) as served:
+        await served.page()
+        ok = env.scripts.add(
+            "sr-a 东区",
+            tool_call("run_readonly_query", cluster="sr-a", sql="SELECT region, total FROM sales"),
+            cite(),
+        )
+        body = (await served.turn(ok, "query", "r1")).json()
+        assert body["state"] == "completed" and body["delivery"]["facts"][0]["target_id"] == "sr-a"
+
+        refused = env.scripts.add(
+            "sr-b 东区",
+            tool_call("run_readonly_query", cluster="sr-b", sql="SELECT region, total FROM sales"),
+            clarify("sr-b 暂不可用"),
+        )
+        body = (await served.turn(refused, "query", "r2")).json()
+        assert body["state"] == "completed" and body["delivery"]["facts"] == []
+        outputs = json.dumps(env.scripts.calls[refused][1].input, ensure_ascii=False)
+        assert "表结构暂不可用" in outputs and "canary" not in outputs
+        assert down.attempts == 0  # forget() 之后：拒绝路径没有任何连接
+        assert await served.finish() == 0

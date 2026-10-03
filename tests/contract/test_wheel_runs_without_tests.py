@@ -50,6 +50,7 @@ def test_wheel_contains_only_the_new_package_and_runs_without_sources(tmp_path: 
         "xiaowei/migrations/001_initial.sql",
         "xiaowei/migrations/002_p1b_channels.sql",
         "xiaowei/migrations/003_delivery_attempt.sql",
+        "xiaowei/migrations/004_evidence_dependencies.sql",
         "xiaowei/static/index.html",
         "xiaowei/static/app.js",
         "xiaowei/static/app.css",

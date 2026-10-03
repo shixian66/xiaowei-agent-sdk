@@ -12,7 +12,7 @@ from typing import Any
 import pytest
 from asyncmy.errors import OperationalError
 from sqlalchemy import text
-from tests.p1b.test_starrocks_adapter import NOW, Result, driver
+from tests.p1b.test_starrocks_adapter import NOW, Result, driver, ready_schema
 from tests.p1b.test_starrocks_audit import ACCEPTED, AUDIT_TARGET, CANARY, REJECTED, SOURCE, record
 from tests.p1b.test_starrocks_audit import target as audit_target
 from tests.sdk_core.test_app import PROFILE, ModelCall, cite, clarify, tool_call
@@ -32,6 +32,7 @@ from xiaowei.governance import GovernedTools, ToolCatalog, ToolRejectedError
 from xiaowei.models import AUDIENCES, AgentAnswer, Budget, Identity, RunContext, ToolRequest
 from xiaowei.session import SessionInputPolicy
 from xiaowei.starrocks import AUDIT_COLUMNS, EXPLAIN_PREFIX, StarRocksAdapter, StarRocksTarget
+from xiaowei.starrocks_schema import DependencyCheck, SchemaCache
 from xiaowei.starrocks_tools import (
     AUDIT_NOTE,
     AUDIT_TOOLS,
@@ -74,10 +75,11 @@ class Audited:
             return (await conn.execute(text("SELECT count(*) FROM xiaowei_evidence"))).scalar_one()
 
 
-def audited(env: Env, target: StarRocksTarget = AUDIT_TARGET) -> Audited:
+async def audited(env: Env, target: StarRocksTarget = AUDIT_TARGET) -> Audited:
+    """装配并刷新一次结构快照；刷新留下的连接记录清掉，用例只统计工具自己的 I/O。"""
+    adapter = StarRocksAdapter(target, connect=env.drv, clock=lambda: NOW)
     tools = starrocks_tools(
-        StarRocksAdapter(target, connect=env.drv, clock=lambda: NOW),
-        dict.fromkeys(AUDIENCES, CAPACITY),
+        adapter, dict.fromkeys(AUDIENCES, CAPACITY), schema=await ready_schema(adapter, env.drv)
     )
     env.grants.grant("alice", *ALL_TOOLS, target=target.target_id)
     evidence = EvidenceStore(
@@ -86,6 +88,7 @@ def audited(env: Env, target: StarRocksTarget = AUDIT_TARGET) -> Audited:
         authorize=env.grants,
         clock=env.clock,
         retention_seconds=3600,
+        verify_dependencies=DependencyCheck({target.target_id: adapter}),
     )
     governed = GovernedTools(evidence)
     audit = AUDIT_TOOLS if target.audit is not None else frozenset()
@@ -108,6 +111,16 @@ def audited(env: Env, target: StarRocksTarget = AUDIT_TARGET) -> Audited:
     return Audited(env, evidence, governed, app, tools.executes)
 
 
+def audit_reads(drv: Any) -> list[str]:
+    """到达驱动的审计候选读取。"""
+    return [
+        sql
+        for conn in drv.connections
+        for sql, _ in conn.executed
+        if "starrocks_audit_tbl__" in sql and not sql.startswith("SELECT 1 FROM `")
+    ]
+
+
 def audit_rows(*stmts: str) -> Result:
     return Result(SOURCE, [record(s, query_id=f"q{i}") for i, s in enumerate(stmts)])
 
@@ -125,7 +138,7 @@ def list_slow() -> Any:
 
 
 async def test_diagnose_turn_lists_slow_queries_then_explains_one(env: Env) -> None:
-    au = audited(env)
+    au = await audited(env)
     env.drv.make = driver(audit_rows(ACCEPTED[0], REJECTED[0], ACCEPTED[1])).make
 
     def explain_first_listed(call: ModelCall) -> Any:
@@ -158,14 +171,14 @@ async def test_diagnose_turn_lists_slow_queries_then_explains_one(env: Env) -> N
 
 
 async def test_query_purpose_also_sees_slow_queries(env: Env) -> None:
-    au = audited(env)
+    au = await audited(env)
     message = env.scripts.add("看看", clarify())
     await au.app.run_turn(au.ctx("query"), message)
     assert {"list_slow_queries", "run_readonly_query"} <= env.scripts.tools_seen(message)[0]
 
 
 async def test_list_can_be_shorter_than_max_rows_and_is_not_truncated(env: Env) -> None:
-    au = audited(env)
+    au = await audited(env)
     env.drv.make = driver(audit_rows(*REJECTED[:5], ACCEPTED[0])).make
     message = env.scripts.add("慢查询", list_slow(), cite())
     ctx = au.ctx()
@@ -191,7 +204,7 @@ async def test_list_can_be_shorter_than_max_rows_and_is_not_truncated(env: Env) 
 async def test_window_and_order_are_rejected_before_io(
     env: Env, arguments: dict[str, object]
 ) -> None:
-    au = audited(env)
+    au = await audited(env)
     env.drv.make = driver(audit_rows(ACCEPTED[0])).make
     message = env.scripts.add(
         "越界参数",
@@ -203,13 +216,15 @@ async def test_window_and_order_are_rejected_before_io(
     delivered = await au.evidence.validate_answer(await au.app.run_turn(ctx, message), ctx)
     (rejected,) = tool_outputs(env.scripts.calls[message][1])
     assert "DROP" not in rejected
-    # 被拒绝的调用不占预算、不建连接：上限为 1 时随后的合法调用仍执行，且只连接一次。
-    assert env.drv.attempts == 1 and [f.tool_id for f in delivered.facts] == [SLOW_QUERIES]
+    # 被拒绝的调用不占预算、不发 I/O：上限为 1 时随后的合法调用仍执行，审计表只读一次（其余
+    # 连接只是零行探测与依赖版本读取）。
+    assert len(audit_reads(env.drv)) == 1
+    assert [f.tool_id for f in delivered.facts] == [SLOW_QUERIES]
 
 
 async def test_excluded_audit_fields_never_reach_any_projection(env: Env) -> None:
     """审计表返回了身份列（替身模拟模板被改坏）：结果契约失败，本轮停止，什么都不保存。"""
-    au = audited(env)
+    au = await audited(env)
     env.drv.make = driver(Result((*SOURCE, "user"), [(*record(ACCEPTED[0]), CANARY)])).make
     message = env.scripts.add("慢查询", list_slow(), cite())
     with pytest.raises(TurnError) as failed:
@@ -236,7 +251,7 @@ async def test_excluded_audit_fields_never_reach_any_projection(env: Env) -> Non
 
 @pytest.mark.parametrize("number", [5203, 5502, 5024])
 async def test_audit_failures_stop_the_turn(env: Env, number: int) -> None:
-    au = audited(env)
+    au = await audited(env)
     env.drv.make = driver(OperationalError(number, f"audit failure {CANARY}")).make
     message = env.scripts.add("慢查询", list_slow(), cite())
     with pytest.raises(TurnError) as failed:
@@ -247,7 +262,7 @@ async def test_audit_failures_stop_the_turn(env: Env, number: int) -> None:
 
 
 async def test_forced_query_still_rejected_in_a_diagnose_turn(env: Env) -> None:
-    au = audited(env)
+    au = await audited(env)
     request = ToolRequest(
         tool_id=RUN_QUERY,
         target_id=AUDIT_TARGET.target_id,
@@ -262,19 +277,18 @@ async def test_forced_query_still_rejected_in_a_diagnose_turn(env: Env) -> None:
     assert env.drv.attempts == 0
 
 
+def assembled(target: StarRocksTarget) -> Any:
+    """只看登记结果：不刷新结构快照，不产生 I/O。"""
+    adapter = StarRocksAdapter(target, connect=driver(), clock=lambda: NOW)
+    schema = SchemaCache(adapter, clock=lambda: NOW)
+    return starrocks_tools(adapter, dict.fromkeys(AUDIENCES, CAPACITY), schema=schema)
+
+
 def test_slow_queries_tool_absent_without_audit_source() -> None:
-    plain = starrocks_tools(
-        StarRocksAdapter(
-            AUDIT_TARGET.model_copy(update={"audit": None}), connect=driver(), clock=lambda: NOW
-        ),
-        dict.fromkeys(AUDIENCES, CAPACITY),
-    )
+    plain = assembled(AUDIT_TARGET.model_copy(update={"audit": None}))
     assert SLOW_QUERIES not in {c.tool_id for c in plain.contracts}
     assert (SLOW_QUERIES, AUDIT_TARGET.target_id) not in plain.executes
-    with_audit = starrocks_tools(
-        StarRocksAdapter(AUDIT_TARGET, connect=driver(), clock=lambda: NOW),
-        dict.fromkeys(AUDIENCES, CAPACITY),
-    )
+    with_audit = assembled(AUDIT_TARGET)
     (policy,) = [
         p
         for p in with_audit.policies
@@ -299,14 +313,14 @@ async def test_audit_scope_change_invalidates_audit_evidence(
     env: Env, changed: StarRocksTarget
 ) -> None:
     assert data_scope_digest(changed) != data_scope_digest(AUDIT_TARGET)
-    au = audited(env)
+    au = await audited(env)
     env.drv.make = driver(audit_rows(ACCEPTED[0])).make
     message = env.scripts.add("慢查询", list_slow(), cite())
     ctx = au.ctx()
     answer: AgentAnswer = await au.app.run_turn(ctx, message)
     (evidence_id,) = answer.evidence_ids
 
-    later = audited(env, changed)
+    later = await audited(env, changed)
     for audience in ("model", "session", "web"):
         with pytest.raises(EvidenceUnavailableError):
             await later.evidence.project(evidence_id, ctx, audience)
