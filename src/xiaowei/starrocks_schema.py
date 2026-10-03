@@ -7,9 +7,9 @@
 延长。没有快照或快照已到期时，``current`` 拒绝，该目标的数据工具在任何 I/O 前不可用。
 
 快照记录采集时间、到期时间、对象类型、注释、``(TABLE_ID, CREATE_TIME)`` 版本标识与列（名字、类型、
-是否可空、注释），以及据此给出的 SQLGuard 范围（默认库中的可读对象与它们的全部列；4.1.4 不支持
-列级授权）。快照中的“可读”只是采集时的结论：交付表结构前仍须按当前权限重新探测，新查询由数据库
-自己的权限检查把关。
+是否可空、注释），以及据此给出的 SQLGuard 范围（全部用户库中的可读对象与它们按序的全部列；4.1.4
+不支持列级授权）。快照中的“可读”只是采集时的结论：交付表结构前仍须按当前权限重新探测，新查询由
+数据库自己的权限检查把关。
 
 审计源表即使可读也不进入快照：审计原文只经 ``list_slow_queries`` 按语句检查后交付，不能被业务
 查询直接读取。
@@ -224,7 +224,8 @@ class SchemaCache:
             key = (database, name)
             if key in self._excluded or not (safe_identifier(database) and safe_identifier(name)):
                 continue
-            if not columns.get(key):
+            names = [c.name.casefold() for c in columns.get(key, ())]
+            if not names or len(set(names)) != len(names):  # 无列，或列名只差大小写（无法唯一引用）
                 continue
             candidates[key] = ObjectInfo(
                 database=database,
@@ -239,15 +240,16 @@ class SchemaCache:
 
     def _query_policy(self, readable: Mapping[tuple[str, str], ObjectInfo]) -> QueryPolicy:
         target = self._adapter.target
-        local = {name: obj for (db, name), obj in readable.items() if db == target.database}
+        tables: dict[str, dict[str, tuple[str, ...]]] = {}
+        for (database, name), obj in sorted(readable.items()):
+            tables.setdefault(database, {})[name] = tuple(c.name for c in obj.columns)
         return QueryPolicy(
             target_id=target.target_id,
-            default_database=target.database,
-            allowed_objects=frozenset(local),
-            allowed_columns={name: obj.column_names for name, obj in local.items()},
+            tables=tables,
             allowed_functions=target.policy.allowed_functions,
             max_rows=target.policy.max_rows,
             max_sql_bytes=target.policy.max_sql_bytes,
+            max_result_columns=target.policy.max_result_columns,
         )
 
 

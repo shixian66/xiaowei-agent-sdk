@@ -135,11 +135,15 @@ async def test_refresh_keeps_only_objects_the_account_can_select() -> None:
     assert sales.columns[0].comment == "地区" and sales.table_id is not None
     assert sales.created_at == "2026-09-01T08:00:00+08:00"
     assert (snapshot.collected_at, snapshot.expires_at) == (NOW, NOW + timedelta(seconds=300))
-    # SQLGuard 范围只取默认库（跨库查询见 Task 3），列来自快照，函数与上限来自配置。
+    # SQLGuard 范围是全部库的可读对象（P2.5 Task 3），列按快照顺序，函数与上限来自配置。
     policy = snapshot.query_policy
-    assert policy.allowed_objects == {"sales"}
-    assert policy.allowed_columns == {"sales": frozenset({"region", "total", "note"})}
+    assert policy.tables == {
+        "shop": {"sales": ("region", "total", "note")},
+        "crm": {"customers": ("id", "tier")},
+    }
+    assert policy.default_database is None  # 业务 SQL 不继承连接的默认库
     assert policy.allowed_functions == TARGET.policy.allowed_functions
+    assert policy.max_result_columns == TARGET.policy.max_result_columns
     # 每个候选对象恰好探测一次，全部在同一条连接上。
     probes = [sql for sql in statements(drv) if sql.startswith("SELECT 1 FROM")]
     assert sorted(probes) == sorted(probe_sql(db, name) for db, name in WIDE)
@@ -198,7 +202,7 @@ async def test_a_new_snapshot_replaces_the_old_one_completely() -> None:
     clock.advance(60)
     assert await cache.refresh()
     assert set(cache.current().objects) == {("mkt", "leads")}
-    assert cache.current().query_policy.allowed_objects == frozenset()
+    assert cache.current().query_policy.tables == {"mkt": {"leads": ("id", "tier")}}
 
 
 # ---- 不发布半份快照 -----------------------------------------------------------------------
@@ -570,7 +574,8 @@ async def test_describe_serves_the_snapshot_columns_after_a_fresh_probe() -> Non
     [
         "SELECT name FROM regions",  # 可见但无 SELECT 权限：不在快照中
         "SELECT secret FROM sales",
-        "SELECT id FROM crm.customers",  # 其他库：Task 3 之前不开放跨库
+        "SELECT id FROM crm.payroll",  # 其他库中不在快照的对象
+        "SELECT id FROM customers c JOIN crm.customers d ON c.id = d.id",  # 两个来源都有 id
     ],
 )
 async def test_queries_outside_the_snapshot_scope_never_reach_the_database(sql: str) -> None:

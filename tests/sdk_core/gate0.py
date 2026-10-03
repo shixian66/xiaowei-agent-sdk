@@ -561,7 +561,10 @@ DIAG_TARGET = StarRocksTarget(
     max_result_bytes=20_000,
     max_value_bytes=2_000,
     policy=SqlPolicy(
-        allowed_functions=frozenset({"SUM", "COUNT"}), max_rows=50, max_sql_bytes=4_000
+        allowed_functions=frozenset({"SUM", "COUNT"}),
+        max_rows=50,
+        max_sql_bytes=4_000,
+        max_result_columns=20,
     ),
     schema_limits=SchemaLimits(
         max_objects=20, max_columns=200, max_bytes=100_000, max_comment_chars=100
@@ -578,12 +581,11 @@ DIAG_TOOLS = QUERY_TOOLS | AUDIT_TOOLS
 DIAG_COLUMNS = ("region", "amount", "order_date", "status")
 DIAG_POLICY = QueryPolicy(
     target_id="gate0-starrocks",
-    default_database="shop",
-    allowed_objects=frozenset({"orders"}),
-    allowed_columns={"orders": frozenset(DIAG_COLUMNS)},
+    tables={"shop": {"orders": DIAG_COLUMNS}},
     allowed_functions=frozenset({"SUM", "COUNT"}),
     max_rows=50,
     max_sql_bytes=4_000,
+    max_result_columns=20,
 )
 SLOW_SQL = (
     "SELECT region, SUM(amount) AS amount FROM orders "

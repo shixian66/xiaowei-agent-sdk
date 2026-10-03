@@ -12,6 +12,7 @@ import os
 import subprocess
 import sys
 from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from dataclasses import dataclass, field, replace
 from typing import Any
 
@@ -23,10 +24,15 @@ from sqlalchemy import text
 from sqlalchemy.engine import URL
 from sqlalchemy.ext.asyncio import AsyncEngine
 from tests.p1b.test_starrocks_adapter import (
+    AUDIT_PROBE,
     NOW,
     POLICY,
     SCHEMA_TABLES,
+    SESSION_READ,
+    SESSION_SET,
+    SESSION_VALUES,
     Driver,
+    FakeConnection,
     Result,
     driver,
     ready_schema,
@@ -197,10 +203,18 @@ class Env:
 
 @pytest.fixture
 async def env(postgres_url: URL, monkeypatch: pytest.MonkeyPatch) -> AsyncIterator[Env]:
+    async with assembled(postgres_url, monkeypatch, driver(SALES)) as opened:
+        yield opened
+
+
+@asynccontextmanager
+async def assembled(
+    postgres_url: URL, monkeypatch: pytest.MonkeyPatch, drv: Driver, target: StarRocksTarget = SR
+) -> AsyncIterator[Env]:
+    """正式装配：真 Runner、治理、Evidence（含当前权限复核）与隔离 PostgreSQL；驱动由调用方给出。"""
     monkeypatch.setenv(PROFILE.api_key_ref.removeprefix("env:"), "sk-test-starrocks-tools")
     async with ready_engine(postgres_url) as engine:
-        drv = driver(SALES)
-        adapter = StarRocksAdapter(SR, connect=drv, clock=lambda: NOW)
+        adapter = StarRocksAdapter(target, connect=drv, clock=lambda: NOW)
         tools = starrocks_tools(
             adapter,
             dict.fromkeys(("model", "session", "web", "feishu"), CAPACITY),
@@ -500,7 +514,8 @@ async def test_rejected_sql_is_returned_to_the_model_without_using_the_budget(en
     ("sql", "code"),
     [
         ("SELECT secret FROM sales", "column_not_allowed"),
-        ("SELECT * FROM sales", "star_projection"),
+        ("SELECT COUNT(sales.*) AS n FROM sales", "star_projection"),
+        ("SELECT SUM(total) FROM sales", "unnamed_column"),
         ("SELECT region FROM hidden_table", "object_not_allowed"),
         ("INSERT INTO sales VALUES (1)", "unsupported_syntax"),
     ],
@@ -519,6 +534,108 @@ async def test_sqlguard_rejections_never_reach_the_adapter(env: Env, sql: str, c
     assert code in str(refused.value)
     assert refused.value.__context__ is None
     assert env.drv.attempts == 0 and await env.evidence_rows() == 0
+
+
+# ---- P2.5 Task 3：跨库、星号展开与结果列上限（正式装配） -----------------------------------
+
+TWO_DATABASES = {
+    **SCHEMA_TABLES,
+    ("hr", "staff"): (
+        ("id", "bigint", "NO", None),
+        ("name", "varchar", "YES", None),
+        ("region", "varchar", "YES", None),
+    ),
+    ("hr", "sales"): (("id", "bigint", "NO", None), ("amount", "decimal", "YES", None)),
+}
+JOINED = Result(("region", "name"), [("east", "Ann")])
+CROSS_SQL = "SELECT s.region, t.name FROM shop.sales s JOIN hr.staff t ON s.region = t.region"
+
+
+def two_databases(query: Result = JOINED) -> Driver:
+    """两个库（shop、hr，各有一张 sales）的结构、版本与探测脚本；每条连接都相同。"""
+
+    def make() -> FakeConnection:
+        return FakeConnection(
+            results={
+                SESSION_SET: Result(()),
+                SESSION_READ: Result(("q", "m", "t", "s"), [SESSION_VALUES]),
+                **schema_results(TWO_DATABASES),
+                AUDIT_PROBE: Result(("1",)),
+                "*": query,
+            }
+        )
+
+    return Driver(make)
+
+
+@pytest.fixture
+async def cross(postgres_url: URL, monkeypatch: pytest.MonkeyPatch) -> AsyncIterator[Env]:
+    narrow = SR.model_copy(
+        update={"policy": SR.policy.model_copy(update={"max_result_columns": 4})}
+    )
+    async with assembled(postgres_url, monkeypatch, two_databases(), narrow) as opened:
+        yield opened
+
+
+def probed(drv: Driver) -> list[str]:
+    return [
+        sql for c in drv.connections for sql, _ in c.executed if sql.startswith("SELECT 1 FROM")
+    ]
+
+
+async def stored_dependencies(env: Env) -> list[tuple[str, str, str]]:
+    async with env.engine.connect() as conn:
+        (stored,) = (await conn.execute(text("SELECT dependencies FROM xiaowei_evidence"))).all()
+    return sorted((o["database"], o["name"], o["use"]) for o in json.loads(stored[0])["objects"])
+
+
+async def test_cross_database_query_is_delivered_and_replayed_against_both_objects(
+    cross: Env,
+) -> None:
+    message = cross.scripts.add(
+        "东区的销售与员工",
+        tool_call("run_readonly_query", cluster=SR.target_id, sql=CROSS_SQL),
+        cite("东区有 Ann"),
+    )
+    delivered = await cross.deliver(cross.ctx(turn="t1"), message)
+
+    (sql,) = executed_sql(cross.drv)
+    assert "FROM `shop`.`sales` AS `s` JOIN `hr`.`staff` AS `t`" in sql
+    (fact,) = delivered.facts
+    assert fact.rows == ({"region": "east", "name": "Ann"},) and fact.metadata["sql"] == sql
+    # 依赖由 SQLGuard 产物生成：两个库的对象各一条，供之后按当前权限复核。
+    assert await stored_dependencies(cross) == [("hr", "staff", "read"), ("shop", "sales", "read")]
+
+    # 下一轮回放：两个对象都按当前权限探测，原业务 SQL 不重跑。
+    cross.drv.connections.clear()
+    followup = cross.scripts.add("再说一遍", clarify())
+    await cross.app.run_turn(cross.ctx(turn="t2"), followup)
+    assert sorted(set(probed(cross.drv))) == [
+        "SELECT 1 FROM `hr`.`staff` WHERE 1 = 0",
+        "SELECT 1 FROM `shop`.`sales` WHERE 1 = 0",
+    ]
+    assert executed_sql(cross.drv) == []
+
+
+async def test_scope_errors_go_back_to_the_model_before_any_database_io(cross: Env) -> None:
+    message = cross.scripts.add(
+        "先展开过多的列、再用有歧义的表名，最后改正",
+        tool_call(
+            "run_readonly_query",
+            cluster=SR.target_id,
+            sql="SELECT s.*, t.id, t.name FROM shop.sales s JOIN hr.staff t ON s.region = t.region",
+        ),
+        tool_call("run_readonly_query", cluster=SR.target_id, sql="SELECT id FROM sales"),
+        tool_call("run_readonly_query", cluster=SR.target_id, sql=CROSS_SQL),
+        cite(),
+    )
+    delivered = await cross.deliver(cross.ctx(max_tool_calls=1), message)
+
+    first, second = tool_outputs(cross.scripts.calls[message][2])[:2]
+    assert "too_many_columns" in first and "未执行" in first
+    assert "ambiguous_object" in second and "库名.表名" in second
+    # 前两次在任何数据库 I/O 前拒绝且不占预算；改正后的跨库查询执行一次。
+    assert len(executed_sql(cross.drv)) == 1 and len(delivered.facts) == 1
 
 
 async def test_describe_table_outside_the_allowlist_is_rejected_before_io(env: Env) -> None:
@@ -760,6 +877,7 @@ NARROWED = {
     "缩短快照最大年龄": scoped(schema_limits={"max_age_seconds": 120}),
     "降低 max_rows": scoped(policy={"max_rows": 4}),
     "降低 max_sql_bytes": scoped(policy={"max_sql_bytes": 3000}),
+    "降低 max_result_columns": scoped(policy={"max_result_columns": 5}),
     "降低 max_result_bytes": scoped(max_result_bytes=500),
     "降低 max_value_bytes": scoped(max_value_bytes=100),
     "降低 max_plan_lines": scoped(max_plan_lines=100),
@@ -791,7 +909,8 @@ def scope_body(target: StarRocksTarget) -> dict[str, Any]:
 
 def test_scope_digest_is_versioned_and_names_the_database_type() -> None:
     body = scope_body(SR)
-    assert body["format"] == "xiaowei.data_scope.starrocks/3"
+    assert body["format"] == "xiaowei.data_scope.starrocks/4"
+    assert body["max_result_columns"] == SR.policy.max_result_columns
     assert body["database_type"] == "starrocks"
     assert body["sql_mode"] == "ONLY_FULL_GROUP_BY"
     assert (

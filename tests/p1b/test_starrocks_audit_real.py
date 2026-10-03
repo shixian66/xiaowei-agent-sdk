@@ -156,7 +156,10 @@ async def test_real_audit_rows_are_filtered_by_the_current_scope(audited: Instan
         t = audit_target(audited)
         ada = open_starrocks(t, clock=lambda: datetime.now(UTC))
         scope = await snapshot_scope(t)
-        assert scope.allowed_objects == {"sales", "sales_view"}
+        assert {(d, n) for d, objects in scope.tables.items() for n in objects} == {
+            (db, "sales"),
+            (db, "sales_view"),
+        }
         # 小维自身发出的语句：查询照常列出；EXPLAIN、元数据查询与会话回读都不列出。
         ran = await ada.run_query(
             guard_readonly_query(f"SELECT region FROM sales WHERE note <> '{mk}_12'", scope)

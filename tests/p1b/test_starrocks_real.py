@@ -38,7 +38,13 @@ from tests.sdk_core.synthetic_tools import Clock, Grants, ready_engine
 from xiaowei.evidence import EvidenceStore
 from xiaowei.governance import GovernedTools, ToolCatalog, ToolRejectedError
 from xiaowei.models import AgentAnswer, AnswerInference, Budget, Identity, RunContext, ToolRequest
-from xiaowei.sqlguard import QueryPolicy, guard_explain_query, guard_readonly_query
+from xiaowei.sqlguard import (
+    QueryPolicy,
+    QueryRejectedError,
+    QueryRejectionCode,
+    guard_explain_query,
+    guard_readonly_query,
+)
 from xiaowei.starrocks import (
     EXPLAIN_PREFIX,
     LAYOUT_HIDDEN,
@@ -135,7 +141,10 @@ async def instance(monkeypatch: pytest.MonkeyPatch) -> AsyncIterator[Instance]:
 
 def target(inst: Instance, **changes: object) -> StarRocksTarget:
     policy = SqlPolicy(
-        allowed_functions=frozenset({"SUM", "COUNT", "SLEEP"}), max_rows=5, max_sql_bytes=4000
+        allowed_functions=frozenset({"SUM", "COUNT", "SLEEP"}),
+        max_rows=5,
+        max_sql_bytes=4000,
+        max_result_columns=10,
     )
     base = StarRocksTarget(
         target_id="sr-real",
@@ -162,21 +171,22 @@ def target(inst: Instance, **changes: object) -> StarRocksTarget:
     return base.model_copy(update=changes) if changes else base
 
 
-def scope(inst: Instance, t: StarRocksTarget, **extra: frozenset[str]) -> QueryPolicy:
+def scope(inst: Instance, t: StarRocksTarget, **extra: tuple[str, ...]) -> QueryPolicy:
     """Adapter 用例的 SQLGuard 范围：固定对象与列（含无权的 ungranted，用来验证数据库自己的拒绝），
     函数与上限取自 ``t``。结构快照给出的范围另由“自动结构快照”一节的用例验证。"""
     return QueryPolicy(
         target_id="sr-real",
-        default_database=inst.database,
-        allowed_objects=frozenset({"sales", "ungranted", *extra}),
-        allowed_columns={
-            "sales": frozenset({"id", "region", "total", "day", "at", "note"}),
-            "ungranted": frozenset({"id"}),
-            **extra,
+        tables={
+            inst.database: {
+                "sales": ("id", "region", "total", "day", "at", "note"),
+                "ungranted": ("id",),
+                **extra,
+            }
         },
         allowed_functions=t.policy.allowed_functions,
         max_rows=t.policy.max_rows,
         max_sql_bytes=t.policy.max_sql_bytes,
+        max_result_columns=t.policy.max_result_columns,
     )
 
 
@@ -249,7 +259,9 @@ async def test_snapshot_holds_only_objects_the_account_can_select(instance: Inst
         "note",
         "secret",
     ]
-    assert snapshot.query_policy.allowed_objects == {"sales"}
+    assert snapshot.query_policy.tables == {
+        instance.database: {"sales": ("id", "region", "total", "day", "at", "note", "secret")}
+    }
 
 
 async def test_ungranted_object_maps_to_permission_denied(instance: Instance) -> None:
@@ -471,17 +483,113 @@ async def readonly_rows(
     ids=["duplicate", "cross-alias", "grouped", "nested", "unique-control"],
 )
 async def test_order_ordinals_match_original_rows_and_plan(instance: Instance, sql: str) -> None:
-    query = guarded(instance, sql)
+    duplicate = "AS x" in sql and "q.label" not in sql
+    query = explained(instance, sql) if duplicate else guarded(instance, sql)
     original = await readonly_rows(instance, sql)
     assert await readonly_rows(instance, query.normalized_sql) == original
     plan = await adapter(instance).explain(explained(instance, sql))
     expected = await readonly_rows(instance, "EXPLAIN LOGICAL " + sql)
     assert [row["plan"] for row in plan.rows] == [row[0] for row in expected]
     assert not plan.truncated
-    if "AS x" in sql and "q.label" not in sql:
-        with pytest.raises(StarRocksError) as refused:
-            await adapter(instance).run_query(query)
-        assert refused.value.code is Code.RESULT_CONTRACT
+    if duplicate:  # 结果列重名无法交付：查询路径在任何 I/O 前要求唯一别名（P2.5 Task 3）
+        with pytest.raises(QueryRejectedError) as refused:
+            guarded(instance, sql)
+        assert refused.value.code is QueryRejectionCode.AMBIGUOUS_REFERENCE
+
+
+# ---- P2.5 Task 3：复杂 SQL、跨库与星号展开的服务器语义 ---------------------------------------
+
+R3_FUNCTIONS = frozenset(
+    {"SUM", "COUNT", "MAX", "ROW_NUMBER", "RANK", "DENSE_RANK", "LAG", "LEAD"}
+    | {"TRIM", "CAST", "COALESCE"}
+)
+R3_SAMPLES = {
+    "union all": "SELECT region FROM {d}.sales WHERE id < 6 UNION ALL "
+    "SELECT region FROM {h}.staff ORDER BY 1 DESC LIMIT 7",
+    "union by name": "SELECT region AS r, id AS k FROM sales WHERE id < 5 UNION "
+    "SELECT name, id FROM {h}.staff ORDER BY k DESC, r",
+    "branch limits": "(SELECT id FROM sales ORDER BY id LIMIT 2) UNION ALL "
+    "(SELECT id FROM {h}.staff ORDER BY id DESC LIMIT 2) ORDER BY 1",
+    "windows": "SELECT id, region, ROW_NUMBER() OVER (PARTITION BY region ORDER BY id DESC) AS rn, "
+    "RANK() OVER (ORDER BY region) AS rk, DENSE_RANK() OVER (ORDER BY region) AS dr, "
+    "LAG(id, 1) OVER (PARTITION BY region ORDER BY id) AS prev, "
+    "LEAD(id) OVER (ORDER BY id) AS nxt, "
+    "SUM(total) OVER (PARTITION BY region) AS s FROM sales ORDER BY id LIMIT 12",
+    "nested ctes": "WITH a AS (SELECT region, total FROM sales WHERE id < 20), "
+    "b AS (SELECT region, SUM(total) AS s, COUNT(DISTINCT total) AS n FROM a GROUP BY region) "
+    "SELECT b.region, b.s, b.n, CASE WHEN b.n > 3 THEN 'many' ELSE 'few' END AS k "
+    "FROM b ORDER BY b.region",
+    "correlated exists": "SELECT s.id FROM sales s WHERE EXISTS (SELECT 1 FROM {h}.staff t "
+    "WHERE t.region = s.region AND t.id > s.id - 30) ORDER BY s.id LIMIT 8",
+    "correlated scalar": "SELECT s.id, (SELECT MAX(t.id) FROM {h}.staff t "
+    "WHERE t.region = s.region) AS m FROM sales s ORDER BY s.id LIMIT 8",
+    "cross database": "SELECT s.id, t.name FROM sales s JOIN {h}.staff t ON s.region = t.region "
+    "ORDER BY s.id, t.name LIMIT 9",
+    "star": "SELECT * FROM {h}.staff ORDER BY id",
+    "alias star": "SELECT s.*, t.name AS staff_name FROM sales s JOIN {h}.staff t "
+    "ON s.region = t.region ORDER BY s.id, t.name LIMIT 4",
+    "column case": "SELECT ID, Region FROM sales ORDER BY ID LIMIT 3",
+    "functions": "SELECT DISTINCT TRIM(note) AS n, CAST(total AS INT) AS t, "
+    "COALESCE(secret, '-') AS c FROM sales ORDER BY t LIMIT 3",
+}
+
+
+async def readonly_result(inst: Instance, sql: str) -> tuple[list[str], list[tuple[object, ...]]]:
+    """只读账号直接执行（固定与小维相同的 sql_mode）：列头与行。"""
+    conn = await asyncmy.connect(
+        host=inst.host,
+        port=inst.port,
+        user=inst.ro_user,
+        password=os.environ[PASSWORD_ENV],
+        db=inst.database,
+        autocommit=True,
+    )
+    try:
+        async with conn.cursor() as cursor:
+            await cursor.execute("SET sql_mode = 'ONLY_FULL_GROUP_BY'")
+            await cursor.execute(sql)
+            return [d[0] for d in cursor.description], list(await cursor.fetchall())
+    finally:
+        await conn.ensure_closed()
+
+
+async def test_r3_sql_keeps_server_rows_headers_and_order(instance: Instance) -> None:
+    """原 SQL 与规范化 SQL 在 4.1.4 上逐行（含顺序）与列头一致；范围来自真实结构快照。"""
+    host, port, user = admin_address()
+    hr = f"{instance.database}_hr"
+    table = "DUPLICATE KEY(id) DISTRIBUTED BY HASH(id) BUCKETS 1 PROPERTIES('replication_num'='1')"
+    await admin(
+        host,
+        port,
+        user,
+        f"CREATE DATABASE {hr}",
+        f"CREATE TABLE {hr}.staff (id INT, name VARCHAR(16), region VARCHAR(16)) {table}",
+        f"INSERT INTO {hr}.staff VALUES (1, 'Ann', 'r1'), (2, 'Bob', 'r2'), (3, 'Cy', 'r1'), "
+        "(4, 'Di', 'r9')",
+        f"GRANT SELECT ON TABLE {hr}.staff TO USER '{instance.ro_user}'@'%'",
+    )
+    try:
+        policy = SqlPolicy(
+            allowed_functions=R3_FUNCTIONS, max_rows=50, max_sql_bytes=4000, max_result_columns=12
+        )
+        ada = adapter(instance, policy=policy)
+        cache = SchemaCache(ada, clock=lambda: datetime.now(UTC))
+        assert await cache.refresh()
+        scope = cache.current().query_policy
+        assert set(scope.tables) == {instance.database, hr}
+        for name, template in R3_SAMPLES.items():
+            sql = template.format(d=instance.database, h=hr)
+            query = guard_readonly_query(sql, scope)
+            original = await readonly_result(instance, sql)
+            assert original[1], name  # 对照有数据，不是两个空结果相等
+            assert await readonly_result(instance, query.normalized_sql) == original, name
+        # 经 Adapter 的跨库查询：列头与行数与直接执行一致。
+        cross = R3_SAMPLES["cross database"].format(h=hr)
+        result = await ada.run_query(guard_readonly_query(cross, scope))
+        headers, rows = await readonly_result(instance, cross)
+        assert list(result.columns) == headers and result.row_count == len(rows)
+    finally:
+        await admin(host, port, user, f"DROP DATABASE {hr} FORCE")
 
 
 async def test_sql_mode_is_pinned_when_server_default_changes(instance: Instance) -> None:
@@ -519,7 +627,7 @@ async def test_sql_mode_is_pinned_when_server_default_changes(instance: Instance
 
 
 def explained(  # type: ignore[no-untyped-def]
-    inst: Instance, sql: str, t: StarRocksTarget | None = None, **extra: frozenset[str]
+    inst: Instance, sql: str, t: StarRocksTarget | None = None, **extra: tuple[str, ...]
 ):
     return guard_explain_query(sql, scope(inst, t or target(inst), **extra))
 
@@ -540,7 +648,7 @@ async def test_explain_table_view_and_cte(instance: Instance) -> None:
     )
     t = target(instance)
     ada = open_starrocks(t, clock=lambda: datetime.now(UTC))
-    view = {"sales_view": frozenset({"id", "region", "total"})}
+    view = {"sales_view": ("id", "region", "total")}
 
     for sql in (
         "SELECT region, SUM(total) AS s FROM sales WHERE id > 3 GROUP BY region",
@@ -751,7 +859,7 @@ async def test_snapshot_follows_views_roles_and_insert_only_grants(instance: Ins
         assert set(snapshot.objects) == {(db, "sales"), (db, "v_hidden")}
         view = snapshot.object(db, "v_hidden")
         assert view is not None and [c.name for c in view.columns] == ["id"]
-        assert snapshot.query_policy.allowed_objects == {"sales", "v_hidden"}
+        assert set(snapshot.query_policy.tables[db]) == {"sales", "v_hidden"}
     finally:
         await admin(host, port, user, f"DROP ROLE {role}")
 

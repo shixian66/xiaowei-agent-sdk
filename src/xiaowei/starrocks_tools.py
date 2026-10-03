@@ -73,6 +73,7 @@ from xiaowei.sqlguard import (
     QueryPolicy,
     QueryRejectedError,
     QueryRejectionCode,
+    audit_references,
     guard_explain_query,
     guard_readonly_query,
 )
@@ -331,7 +332,7 @@ def starrocks_tools(
 
     async def run_query(checked: tuple[SchemaSnapshot, GuardedQuery]) -> ToolObservation:
         snapshot, query = checked
-        dependencies = _referenced(snapshot, target.database, query.referenced_columns, query)
+        dependencies = _referenced(snapshot, query.referenced_objects, query.referenced_columns)
         return _observation(await adapter.run_query(query), bounds, dependencies)
 
     def check_explain(request: ToolRequest) -> tuple[SchemaSnapshot, ExplainQuery]:
@@ -347,7 +348,7 @@ def starrocks_tools(
 
     async def explain(checked: tuple[SchemaSnapshot, ExplainQuery]) -> ToolObservation:
         snapshot, query = checked
-        dependencies = _referenced(snapshot, target.database, query.referenced_columns, query)
+        dependencies = _referenced(snapshot, query.referenced_objects, query.referenced_columns)
         return _observation(await adapter.explain(query), bounds, dependencies)
 
     contracts = [
@@ -371,14 +372,16 @@ def starrocks_tools(
         contract(
             RUN_QUERY,
             query_policy,
-            "执行一条只读 SELECT。只能引用允许的表、列与函数，必须列出具体列；"
+            "执行一条只读 SELECT 或 UNION/UNION ALL（可带 WITH、子查询与窗口函数），可跨库 JOIN。"
+            "表名写成 库名.表名；只在一个库中存在的表可省略库名。只能引用可读的表、视图与获准"
+            "函数；* 按表结构展开，结果列数有上限。表达式列须用 AS 起别名，结果列名不能重复。"
             "结果行数有上限，超过时返回的结果标记为截断。",
         ),
         contract(
             EXPLAIN_QUERY,
             explain_policy,
-            "获取一条只读 SELECT 的执行计划（优化器估算），不执行该查询。只接受与查询相同"
-            "范围的表、视图、列与函数；结果不是实际运行数据。",
+            "获取一条只读 SELECT 或 UNION 的执行计划（优化器估算），不执行该查询。只接受与"
+            "查询相同的语法与范围（表名写法同 run_readonly_query）；结果不是实际运行数据。",
         ),
     ]
     policies = [list_policy, describe_policy, query_policy, explain_policy, layout_policy]
@@ -406,22 +409,26 @@ def starrocks_tools(
 
         async def slow_queries(args: tuple[int, str, SchemaSnapshot]) -> ToolObservation:
             window, order, snapshot = args
-            policy = snapshot.query_policy
+            # 审计只读取目标默认库的记录：原文中未限定的对象名按该库解析（Task 6 改为按每条
+            # 记录自身的库）；显式写出的其他库对象同样按快照与当前权限检查。
+            policy = snapshot.query_policy.model_copy(update={"default_database": target.database})
             result = await adapter.slow_queries(window, order, policy)
             # 原文已通过同一范围的 SQLGuard：在线程中重算各行引用（同步 CPU），按当前权限过滤。
             references = await asyncio.to_thread(_audit_references, result.rows, policy)
-            objects = sorted({obj for refs in references for obj, _ in refs})
-            verdicts = await adapter.probe([(target.database, obj) for obj in objects])
+            verdicts = await adapter.probe(sorted({o for found, _ in references for o in found}))
             kept = [
                 (row, refs)
                 for row, refs in zip(result.rows, references, strict=True)
-                if all(verdicts[(target.database, obj)] for obj, _ in refs)
+                if all(verdicts[obj] for obj in refs[0])
             ]
             rows = tuple(row for row, _ in kept)
-            columns = frozenset(pair for _, refs in kept for pair in refs)
             dependencies = [
                 listed_dependency(audit.database, audit.table),
-                *_referenced(snapshot, target.database, columns, None),
+                *_referenced(
+                    snapshot,
+                    frozenset(o for _, (objects, _) in kept for o in objects),
+                    frozenset(c for _, (_, columns) in kept for c in columns),
+                ),
             ]
             filtered = result.model_copy(update={"rows": rows, "row_count": len(rows)})
             return _observation(filtered, bounds, dependencies)
@@ -442,11 +449,12 @@ def starrocks_tools(
     return StarRocksTools(contracts=tuple(contracts), policies=tuple(policies), executes=executes)
 
 
-DATA_SCOPE_FORMAT: Final = "xiaowei.data_scope.starrocks/3"
+DATA_SCOPE_FORMAT: Final = "xiaowei.data_scope.starrocks/4"
 """摘要公式的显式版本：纳入或排除的字段改变时更新，使旧公式下保存的证据一次性失效。
 
 /2（P2.5 Task 2 审查）：加入数据库类型、TLS、服务端时间与内存限额、客户端期限与时区。
 /3（D1/D2）：固定 SQL 语义，纳入 sql_mode，并使修复前的 StarRocks 证据一次性失效。
+/4（P2.5 Task 3）：跨库、UNION/窗口/星号展开与列名大小写规则改变查询语义；纳入 max_result_columns。
 """
 
 
@@ -463,8 +471,9 @@ def scope_canonical(target: StarRocksTarget) -> str:
 
     - 来源身份：集群 ID、数据库类型、``host``/``port``/``user``、是否 TLS、默认库。换了集群、账号
       或传输方式可能对应另一套数据与权限。
-    - 资源限额：函数集合、``max_rows``/``max_sql_bytes``、结果/单值/计划上限、服务端
-      ``query_timeout_seconds`` 与 ``query_mem_limit_bytes``、客户端 ``client_timeout_seconds``、
+    - 资源限额：函数集合、``max_rows``/``max_sql_bytes``/``max_result_columns``、结果/单值/计划
+      上限、服务端 ``query_timeout_seconds`` 与 ``query_mem_limit_bytes``、客户端
+      ``client_timeout_seconds``、
       结构快照的容量与期限（``schema_limits``）。它们决定能读到多少数据、哪些查询能完成。
     - 事实形态：``time_zone``（时间值按它转换）、固定 ``sql_mode``、审计源（未配置为 ``null``）。
 
@@ -486,6 +495,7 @@ def scope_canonical(target: StarRocksTarget) -> str:
         "allowed_functions": sorted(policy.allowed_functions),
         "max_rows": policy.max_rows,
         "max_sql_bytes": policy.max_sql_bytes,
+        "max_result_columns": policy.max_result_columns,
         "max_result_bytes": target.max_result_bytes,
         "max_value_bytes": target.max_value_bytes,
         "max_plan_lines": target.max_plan_lines,
@@ -504,10 +514,12 @@ def worst_case_observation(adapter: StarRocksAdapter) -> ToolObservation:
     """按目标声明的上限构造序列化后最大的合成结果，供启动容量检查交给真实投影器。
 
     实际 SQL 不超过“EXPLAIN 前缀 + SQLGuard 字节上限”与元数据模板中的较大者（查询的 SQL
-    不带前缀，被前者覆盖）；列名来自服务端，按同一上限
-    约束（``_observation`` 在运行时执行）。两者都以 JSON 转义膨胀最大的字符填满。结果行的
-    序列化大小不超过 ``max_result_bytes``（Adapter 按同一编码计数）；投影只看序列化大小，
-    因此这里用同样大小的字符串代表行列表。
+    不带前缀，被前者覆盖；星号展开后的 SQL 同样受 SQLGuard 字节上限约束）。查询的列数不超过
+    ``max_result_columns``，每个列名都以别名出现在规范化 SQL 中，因此列名合计不超过同一字节数；
+    元数据、计划与审计的列头是固定的短名，也在此界内。最坏情形是列数取满、列名合计取满：除一列
+    外每列一个字符（每多一列多出引号与分隔符）。运行时 ``_observation`` 按同一上限复核。SQL 与
+    列名都以 JSON 转义膨胀最大的字符填满。结果行的序列化大小不超过 ``max_result_bytes``（Adapter
+    按同一编码计数）；投影只看序列化大小，因此这里用同样大小的字符串代表行列表。
     """
     target = adapter.target
     sql_bytes = max(
@@ -515,10 +527,12 @@ def worst_case_observation(adapter: StarRocksAdapter) -> ToolObservation:
         metadata_sql_bytes(),
         audit_sql_bytes(target),
     )
+    names = min(target.policy.max_result_columns, sql_bytes)
+    columns = [_WIDEST_CHAR] * (names - 1) + [_WIDEST_CHAR * (sql_bytes - names + 1)]
     return ToolObservation(
         payload={
             "sql": _WIDEST_CHAR * sql_bytes,
-            "columns": [_WIDEST_CHAR * sql_bytes],
+            "columns": columns,
             "rows": "x" * (target.max_result_bytes - 2),
             "row_count": _WIDEST_INT,
             "elapsed_ms": _WIDEST_INT,
@@ -536,36 +550,31 @@ class _Bounds:
 
 def _referenced(
     snapshot: SchemaSnapshot,
-    database: str,
-    columns: Iterable[tuple[str, str]],
-    query: GuardedQuery | ExplainQuery | None,
+    objects: Iterable[tuple[str, str]],
+    columns: Iterable[tuple[str, str, str]],
 ) -> list[ObjectDependency]:
-    """默认库中被引用对象的 ``read`` 依赖：版本取自快照，列为被引用的列（COUNT(*) 时为空）。"""
-    by_object: dict[str, set[str]] = {}
-    for obj, column in columns:
-        by_object.setdefault(obj, set()).add(column)
-    for obj in query.referenced_objects if query is not None else ():
-        by_object.setdefault(obj, set())
+    """被引用对象（``(库, 对象)``）的 ``read`` 依赖：版本取自快照，列为被引用的列（COUNT(*) 时
+    为空）。"""
+    by_object: dict[tuple[str, str], set[str]] = {key: set() for key in objects}
+    for database, name, column in columns:
+        by_object.setdefault((database, name), set()).add(column)
     dependencies = []
-    for obj, used in sorted(by_object.items()):
-        found = snapshot.object(database, obj)
+    for (database, name), used in sorted(by_object.items()):
+        found = snapshot.object(database, name)
         if found is None:  # SQLGuard 范围来自同一快照，不会发生；不能无依赖地交付
             raise StarRocksError(StarRocksErrorCode.RESULT_CONTRACT)
         dependencies.append(read_dependency(found, used))
     return dependencies
 
 
+_References = tuple[frozenset[tuple[str, str]], frozenset[tuple[str, str, str]]]
+
+
 def _audit_references(
     rows: Iterable[Mapping[str, Scalar]], policy: QueryPolicy
-) -> list[frozenset[tuple[str, str]]]:
-    """各行原文引用的 (对象, 列)；对象没有列引用（COUNT(*)）时以空列名记录对象本身。"""
-    references = []
-    for row in rows:
-        query = guard_explain_query(str(row["sql"]), policy)
-        refs = set(query.referenced_columns)
-        refs |= {(obj, "") for obj in query.referenced_objects}
-        references.append(frozenset(refs))
-    return references
+) -> list[_References]:
+    """各行原文引用的 ``(库, 对象)`` 与 ``(库, 对象, 列)``。"""
+    return [audit_references(str(row["sql"]), policy) for row in rows]
 
 
 def _listed(obj: ObjectInfo) -> dict[str, Scalar]:
