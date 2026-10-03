@@ -592,6 +592,96 @@ async def test_r3_sql_keeps_server_rows_headers_and_order(instance: Instance) ->
         await admin(host, port, user, f"DROP DATABASE {hr} FORCE")
 
 
+# 名字解析：WHERE/ON/窗口只认物理列，投影/GROUP BY/HAVING 先物理列，顶层 ORDER BY 先别名；
+# CTE/派生表的输出名沿用写法；星号按展开后的真实列名检查重名，库.表.* 检查库名。
+R3_NAME_SAMPLES = {
+    "window shadow": "SELECT id AS REGION, ROW_NUMBER() OVER (ORDER BY REGION, id DESC) AS n "
+    "FROM sales ORDER BY 1 LIMIT 8",
+    "where shadow": "SELECT id AS Region FROM sales WHERE Region = 'r1' ORDER BY 1 LIMIT 5",
+    "having shadow": "SELECT region AS total, COUNT(*) AS n FROM sales GROUP BY region, total "
+    "HAVING total > 10 ORDER BY 1, 2 LIMIT 5",
+    "projection shadow": "SELECT id AS total, total + 0 AS t2 FROM sales ORDER BY 1 LIMIT 3",
+    "order alias": "SELECT total AS x FROM sales ORDER BY x DESC LIMIT 3",
+    "order same column": "SELECT s.region AS REGION, s.id FROM sales s "
+    "ORDER BY region, s.id LIMIT 4",
+    "distinct stars": "SELECT * FROM (SELECT s.*, b.* FROM sales s JOIN {h}.bonus b "
+    "ON s.id = b.bid) q ORDER BY id",
+    "cte names": "WITH q AS (SELECT ID, Region FROM sales) "
+    "SELECT ID, region FROM q ORDER BY 1 LIMIT 3",
+    "cte star": "WITH q AS (SELECT ID FROM sales) SELECT * FROM q ORDER BY 1 LIMIT 3",
+    "nested stars": "SELECT * FROM (SELECT * FROM (SELECT Total FROM sales) a) b "
+    "ORDER BY 1 LIMIT 3",
+    "database star": "SELECT {d}.sales.* FROM sales ORDER BY id LIMIT 2",
+}
+R3_NAME_REJECTED = {
+    # 原 SQL 在服务器上报错：不能被规范化“修正”后执行。
+    "star wrong database": (
+        "SELECT nope.sales.* FROM sales",
+        QueryRejectionCode.COLUMN_NOT_ALLOWED,
+    ),
+    "where alias": ("SELECT id AS x FROM sales WHERE x > 1", QueryRejectionCode.COLUMN_NOT_ALLOWED),
+    "window alias": (
+        "SELECT id AS x, ROW_NUMBER() OVER (ORDER BY x) AS n FROM sales",
+        QueryRejectionCode.COLUMN_NOT_ALLOWED,
+    ),
+    "where ambiguous": (
+        "SELECT s.id AS region FROM sales s JOIN {h}.staff t ON s.id = t.id WHERE region = 'r1'",
+        QueryRejectionCode.AMBIGUOUS_REFERENCE,
+    ),
+}
+
+
+async def test_r3_names_resolve_like_the_server(instance: Instance) -> None:
+    """名字解析在 4.1.4 上与原 SQL 一致：查询路径比较列头、行与顺序，计划路径比较计划。"""
+    host, port, user = admin_address()
+    hr = f"{instance.database}_nm"
+    table = "DUPLICATE KEY({}) DISTRIBUTED BY HASH({}) BUCKETS 1 PROPERTIES('replication_num'='1')"
+    await admin(
+        host,
+        port,
+        user,
+        f"CREATE DATABASE {hr}",
+        f"CREATE TABLE {hr}.staff (id INT, region VARCHAR(16)) {table.format('id', 'id')}",
+        f"CREATE TABLE {hr}.bonus (bid INT, amount INT) {table.format('bid', 'bid')}",
+        f"INSERT INTO {hr}.staff VALUES (1, 'r1'), (2, 'r2')",
+        f"INSERT INTO {hr}.bonus VALUES (1, 10), (2, 20), (5, 50)",
+        f"GRANT SELECT ON ALL TABLES IN DATABASE {hr} TO USER '{instance.ro_user}'@'%'",
+    )
+    try:
+        policy = SqlPolicy(
+            allowed_functions=R3_FUNCTIONS, max_rows=50, max_sql_bytes=4000, max_result_columns=12
+        )
+        ada = adapter(instance, policy=policy)
+        cache = SchemaCache(ada, clock=lambda: datetime.now(UTC))
+        assert await cache.refresh()
+        scope = cache.current().query_policy
+        for name, template in R3_NAME_SAMPLES.items():
+            sql = template.format(d=instance.database, h=hr)
+            original = await readonly_result(instance, sql)
+            assert original[1], name
+            query = guard_readonly_query(sql, scope)
+            assert await readonly_result(instance, query.normalized_sql) == original, name
+            plan = await ada.explain(guard_explain_query(sql, scope))
+            expected = await readonly_rows(instance, "EXPLAIN LOGICAL " + sql)
+            assert [row["plan"] for row in plan.rows] == [row[0] for row in expected], name
+        for name, (template, code) in R3_NAME_REJECTED.items():
+            sql = template.format(h=hr)
+            with pytest.raises(MySQLError):
+                await readonly_result(instance, sql)
+            for check in (guard_readonly_query, guard_explain_query):
+                with pytest.raises(QueryRejectedError) as refused:
+                    check(sql, scope)
+                assert refused.value.code is code, name
+        # 顶层 ORDER BY 中别名与物理列同名且所指不同：服务器按投影形态选择，不猜，拒绝。
+        swapped = "SELECT id AS region, region AS id FROM sales ORDER BY id"
+        assert await readonly_result(instance, swapped)
+        with pytest.raises(QueryRejectedError) as refused:
+            guard_readonly_query(swapped, scope)
+        assert refused.value.code is QueryRejectionCode.AMBIGUOUS_REFERENCE
+    finally:
+        await admin(host, port, user, f"DROP DATABASE {hr} FORCE")
+
+
 async def test_sql_mode_is_pinned_when_server_default_changes(instance: Instance) -> None:
     host, port, user = admin_address()
     ((previous,),) = await admin_rows(host, port, user, "SELECT @@GLOBAL.sql_mode")

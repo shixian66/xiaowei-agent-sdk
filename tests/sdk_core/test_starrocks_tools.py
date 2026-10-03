@@ -619,22 +619,32 @@ async def test_cross_database_query_is_delivered_and_replayed_against_both_objec
 
 async def test_scope_errors_go_back_to_the_model_before_any_database_io(cross: Env) -> None:
     message = cross.scripts.add(
-        "先展开过多的列、再用有歧义的表名，最后改正",
+        "先展开过多的列、再用有歧义的表名、写错星号的库名、在 WHERE 中用别名，最后改正",
         tool_call(
             "run_readonly_query",
             cluster=SR.target_id,
             sql="SELECT s.*, t.id, t.name FROM shop.sales s JOIN hr.staff t ON s.region = t.region",
         ),
         tool_call("run_readonly_query", cluster=SR.target_id, sql="SELECT id FROM sales"),
+        tool_call(
+            "run_readonly_query", cluster=SR.target_id, sql="SELECT hr.sales.* FROM shop.sales"
+        ),
+        tool_call(
+            "run_readonly_query",
+            cluster=SR.target_id,
+            sql="SELECT t.name AS who FROM hr.staff t WHERE who = 'Ann'",
+        ),
         tool_call("run_readonly_query", cluster=SR.target_id, sql=CROSS_SQL),
         cite(),
     )
     delivered = await cross.deliver(cross.ctx(max_tool_calls=1), message)
 
-    first, second = tool_outputs(cross.scripts.calls[message][2])[:2]
+    first, second, third, fourth = tool_outputs(cross.scripts.calls[message][4])[:4]
     assert "too_many_columns" in first and "未执行" in first
     assert "ambiguous_object" in second and "库名.表名" in second
-    # 前两次在任何数据库 I/O 前拒绝且不占预算；改正后的跨库查询执行一次。
+    # 库名不符的 库.表.* 不能被悄悄改为本层的表；WHERE 看不到输出别名（StarRocks 同样报错）。
+    assert "column_not_allowed" in third and "column_not_allowed" in fourth
+    # 前四次在任何数据库 I/O 前拒绝且不占预算；改正后的跨库查询执行一次。
     assert len(executed_sql(cross.drv)) == 1 and len(delivered.facts) == 1
 
 

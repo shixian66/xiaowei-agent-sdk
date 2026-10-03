@@ -449,6 +449,211 @@ def test_unnamed_expressions_are_fine_where_no_name_is_exposed(sql: str) -> None
     assert query(sql)
 
 
+# ---- 名字解析保持 StarRocks 语义 ---------------------------------------------------------------
+# StarRocks 4.1.4 实测（可丢弃实例）：WHERE、JOIN ON 与窗口只解析物理列，看不到输出别名；投影、
+# GROUP BY 与 HAVING 先物理列、后输出别名；顶层 ORDER BY 先输出别名，但别名与物理列同名且
+# 所指不同时结果取决于投影形态（``SELECT a AS b, b AS a ... ORDER BY a`` 按物理列 ``a`` 排序），
+# 因此只在两种解释一致时接受。别名与列名都不区分大小写。
+
+BOTH = pytest.mark.parametrize("check", [guard_readonly_query, guard_explain_query])
+
+
+def normalized(check, sql: str, policy: QueryPolicy = POLICY) -> str:  # type: ignore[no-untyped-def]
+    guarded = check(sql, policy)
+    assert check(guarded.normalized_sql, policy) == guarded
+    assert_no_unqualified_column(guarded.normalized_sql)
+    return str(guarded.normalized_sql)
+
+
+@BOTH
+@pytest.mark.parametrize(
+    ("sql", "expected"),
+    [
+        (  # 窗口 ORDER BY 中与别名同名的名字是物理列，不是别名所指的 total
+            "SELECT total AS ORDERS, ROW_NUMBER() OVER (ORDER BY ORDERS) AS n FROM shop.sales",
+            "ROW_NUMBER() OVER (ORDER BY `sales`.`orders`) AS `n`",
+        ),
+        (
+            "SELECT total AS Orders, RANK() OVER (PARTITION BY orders ORDER BY id) AS n "
+            "FROM shop.sales",
+            "OVER (PARTITION BY `sales`.`orders` ORDER BY `sales`.`id`)",
+        ),
+        ("SELECT total AS Orders FROM shop.sales WHERE Orders > 1", "WHERE `sales`.`orders` > 1"),
+        (
+            "SELECT s.total AS region FROM shop.sales s JOIN cn.`订单` o "
+            "ON s.id = o.`金额` AND region = 'x'",
+            "AND `s`.`region` = 'x'",
+        ),
+        (
+            "SELECT total AS orders, COUNT(*) AS n FROM shop.sales GROUP BY orders",
+            "GROUP BY `sales`.`orders`",
+        ),
+        (
+            "SELECT region AS orders, COUNT(*) AS n FROM shop.sales GROUP BY region, orders "
+            "HAVING orders > 1",
+            "HAVING `sales`.`orders` > 1",
+        ),
+        ("SELECT total AS orders, orders + 0 AS y FROM shop.sales", "`sales`.`orders` + 0 AS `y`"),
+    ],
+)
+def test_names_shadowed_by_an_output_alias_stay_physical_columns(check, sql, expected) -> None:  # type: ignore[no-untyped-def]
+    normalized_sql = normalized(check, sql)
+    assert expected in normalized_sql
+    deps = check(sql, POLICY).referenced_columns
+    assert ("shop", "sales", "orders") in deps or ("shop", "sales", "region") in deps
+
+
+@BOTH
+@pytest.mark.parametrize(
+    ("sql", "code"),
+    [
+        (  # 两个来源都有 region：StarRocks 报歧义，不能改按别名执行
+            "SELECT s.id AS region FROM shop.sales s JOIN shop.regions r "
+            "ON s.region = r.region WHERE region = 'x'",
+            Code.AMBIGUOUS_REFERENCE,
+        ),
+        (
+            "SELECT s.id AS region, COUNT(*) AS n FROM shop.sales s JOIN shop.regions r "
+            "ON s.region = r.region GROUP BY region",
+            Code.AMBIGUOUS_REFERENCE,
+        ),
+        # WHERE、ON 与窗口看不到输出别名：StarRocks 报列不存在，不能悄悄展开为别名表达式。
+        ("SELECT total AS x FROM shop.sales WHERE x > 1", Code.COLUMN_NOT_ALLOWED),
+        (
+            "SELECT total AS x, ROW_NUMBER() OVER (ORDER BY x) AS n FROM shop.sales",
+            Code.COLUMN_NOT_ALLOWED,
+        ),
+        (
+            "SELECT s.total AS x FROM shop.sales s JOIN shop.regions r ON x = r.region",
+            Code.COLUMN_NOT_ALLOWED,
+        ),
+        # 顶层 ORDER BY 中别名与物理列同名且所指不同：StarRocks 的选择随投影形态变化，拒绝。
+        ("SELECT total AS orders FROM shop.sales ORDER BY orders", Code.AMBIGUOUS_REFERENCE),
+        ("SELECT id AS region, region AS id FROM shop.sales ORDER BY id", Code.AMBIGUOUS_REFERENCE),
+        ("SELECT total AS Orders FROM shop.sales ORDER BY orders + 0", Code.AMBIGUOUS_REFERENCE),
+        (  # 子查询的别名与外层物理列同名：不猜数据库在相关引用与别名之间的选择
+            "SELECT s.id FROM shop.sales s WHERE EXISTS "
+            "(SELECT t.id AS total FROM hr.staff t GROUP BY total)",
+            Code.AMBIGUOUS_REFERENCE,
+        ),
+    ],
+)
+def test_alias_and_column_conflicts_are_not_resolved_by_guessing(check, sql, code) -> None:  # type: ignore[no-untyped-def]
+    assert refused(sql, check=check) is code
+
+
+@BOTH
+@pytest.mark.parametrize(
+    ("sql", "order"),
+    [
+        ("SELECT total AS x FROM shop.sales ORDER BY x DESC", "`sales`.`total` DESC"),
+        ("SELECT region AS region FROM shop.sales ORDER BY region", "`sales`.`region`"),
+        ("SELECT s.region AS REGION FROM shop.sales s ORDER BY region", "`s`.`region`"),
+        ("SELECT total AS x, COUNT(*) AS n FROM shop.sales GROUP BY x ORDER BY 1", "1"),
+    ],
+)
+def test_order_by_and_group_by_aliases_without_a_conflict_keep_working(check, sql, order) -> None:  # type: ignore[no-untyped-def]
+    assert normalized(check, sql).split(" ORDER BY ", 1)[1].split(" LIMIT ")[0] == order
+
+
+@BOTH
+@pytest.mark.parametrize(
+    ("sql", "code"),
+    [
+        ("SELECT nope.sales.* FROM shop.sales", Code.COLUMN_NOT_ALLOWED),
+        ("SELECT hr.sales.* FROM shop.sales", Code.COLUMN_NOT_ALLOWED),
+        ("SELECT shop.s.* FROM shop.sales s", Code.COLUMN_NOT_ALLOWED),
+        (
+            "WITH q AS (SELECT region FROM shop.sales) SELECT shop.q.* FROM q",
+            Code.COLUMN_NOT_ALLOWED,
+        ),
+        ("SELECT shop.q.* FROM (SELECT region FROM shop.sales) q", Code.COLUMN_NOT_ALLOWED),
+        ("SELECT nope.sales.id FROM shop.sales", Code.COLUMN_NOT_ALLOWED),  # 普通列对照
+    ],
+)
+def test_qualified_star_checks_its_database_like_a_column(check, sql, code) -> None:  # type: ignore[no-untyped-def]
+    assert refused(sql, check=check) is code
+
+
+@BOTH
+@pytest.mark.parametrize(
+    ("sql", "names"),
+    [
+        ("SELECT shop.sales.* FROM shop.sales", ["id", "region", "total", "orders", "dt"]),
+        ("SELECT shop.regions.* FROM regions", ["region", "name"]),
+    ],
+)
+def test_qualified_star_with_the_right_database_expands(check, sql, names) -> None:  # type: ignore[no-untyped-def]
+    tree = sqlglot.parse_one(normalized(check, sql), read="starrocks")
+    assert tree.named_selects == names
+
+
+WIDE = narrowed(max_result_columns=7)
+
+
+@BOTH
+@pytest.mark.parametrize(
+    "sql",
+    [
+        "SELECT * FROM (SELECT s.*, o.* FROM shop.sales s JOIN cn.`订单` o "
+        "ON s.region = o.`地区`) q",
+        "SELECT * FROM (SELECT * FROM shop.sales s JOIN cn.`订单` o ON s.region = o.`地区`) q",
+        "WITH a AS (SELECT * FROM shop.sales), b AS (SELECT a.*, o.* FROM a JOIN cn.`订单` o "
+        "ON a.region = o.`地区`) SELECT * FROM b",
+    ],
+)
+def test_stars_over_sources_with_distinct_columns_expand_to_unique_names(check, sql) -> None:  # type: ignore[no-untyped-def]
+    tree = sqlglot.parse_one(normalized(check, sql, WIDE), read="starrocks")
+    assert tree.named_selects == ["id", "region", "total", "orders", "dt", "金额", "地区"]
+
+
+@BOTH
+@pytest.mark.parametrize(
+    "sql",
+    [
+        "SELECT * FROM (SELECT s.*, t.* FROM shop.sales s JOIN hr.staff t ON s.id = t.id) q",
+        "SELECT * FROM (SELECT * FROM shop.sales s JOIN hr.staff t ON s.id = t.id) q",
+        "WITH a AS (SELECT * FROM shop.sales) "
+        "SELECT * FROM (SELECT a.*, t.name AS ID FROM a JOIN hr.staff t ON a.id = t.id) q",
+    ],
+)
+def test_stars_that_expand_to_duplicate_names_stay_ambiguous(check, sql) -> None:  # type: ignore[no-untyped-def]
+    assert refused(sql, WIDE, check=check) is Code.AMBIGUOUS_REFERENCE
+
+
+def test_stars_over_distinct_sources_still_respect_the_column_cap() -> None:
+    sql = "SELECT * FROM (SELECT s.*, o.* FROM shop.sales s JOIN cn.`订单` o ON s.id = o.`金额`) q"
+    assert refused(sql) is Code.TOO_MANY_COLUMNS  # 7 列，上限 6
+
+
+@BOTH
+@pytest.mark.parametrize(
+    ("sql", "names"),
+    [
+        ("WITH q AS (SELECT REGION FROM shop.sales) SELECT REGION FROM q", ["REGION"]),
+        ("WITH q AS (SELECT REGION FROM shop.sales) SELECT region FROM q", ["region"]),
+        ("WITH q AS (SELECT REGION FROM shop.sales) SELECT q.Region FROM q", ["Region"]),
+        ("WITH q AS (SELECT REGION FROM shop.sales) SELECT * FROM q", ["REGION"]),
+        ("WITH q AS (SELECT REGION FROM shop.sales) SELECT q.* FROM q", ["REGION"]),
+        ("SELECT * FROM (SELECT * FROM (SELECT Total FROM shop.sales) a) b", ["Total"]),
+        (
+            "WITH q AS (SELECT Region FROM shop.sales UNION ALL SELECT name FROM hr.staff) "
+            "SELECT * FROM q",
+            ["Region"],
+        ),
+        (
+            "WITH q AS (SELECT s.REGION, t.Name FROM shop.sales s JOIN hr.staff t ON s.id = t.id) "
+            "SELECT region, NAME FROM q WHERE Region > 'a'",
+            ["region", "NAME"],
+        ),
+    ],
+)
+def test_derived_output_names_keep_their_spelling_through_normalization(check, sql, names) -> None:  # type: ignore[no-untyped-def]
+    """StarRocks 的 CTE/派生表输出名沿用写法，引用时不区分大小写；规范化不能改写它们。"""
+    tree = sqlglot.parse_one(normalized(check, sql), read="starrocks")
+    assert tree.named_selects == names
+
+
 # ---- 仍拒绝的语法 -----------------------------------------------------------------------------
 
 
