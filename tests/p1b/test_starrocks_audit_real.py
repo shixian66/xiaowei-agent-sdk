@@ -24,7 +24,7 @@ from tests.p1b.conftest import admin_address
 from tests.p1b.test_starrocks_real import Instance, admin, admin_rows, target
 from tests.p1b.test_starrocks_real import instance as instance  # pytest fixture
 
-from xiaowei.sqlguard import guard_explain_query, guard_readonly_query
+from xiaowei.sqlguard import QueryPolicy, guard_explain_query, guard_readonly_query
 from xiaowei.starrocks import (
     AUDIT_COLUMNS,
     AuditSource,
@@ -33,6 +33,7 @@ from xiaowei.starrocks import (
     StarRocksTarget,
     open_starrocks,
 )
+from xiaowei.starrocks_schema import SchemaCache
 
 pytestmark = pytest.mark.starrocks_audit_real
 
@@ -61,16 +62,7 @@ async def audited(instance: Instance) -> AsyncIterator[Instance]:
 
 def audit_target(inst: Instance, **audit: object) -> StarRocksTarget:
     base = target(inst)
-    policy = base.policy.model_copy(
-        update={
-            "allowed_objects": base.policy.allowed_objects | {"sales_view"},
-            "allowed_columns": {
-                **base.policy.allowed_columns,
-                "sales_view": frozenset({"id", "region", "note"}),
-            },
-            "max_sql_bytes": STMT_LIMIT - 4,
-        }
-    )
+    policy = base.policy.model_copy(update={"max_sql_bytes": STMT_LIMIT - 4})
     source = AuditSource.model_validate(
         {
             "database": AUDIT_DB,
@@ -90,6 +82,22 @@ def audit_target(inst: Instance, **audit: object) -> StarRocksTarget:
             "max_value_bytes": 8000,
         }
     )
+
+
+async def snapshot_scope(t: StarRocksTarget) -> QueryPolicy:
+    """产品路径的 SQLGuard 范围：在真实实例上刷新一次结构快照。审计表本身不进入快照。"""
+    cache = SchemaCache(
+        open_starrocks(t, clock=lambda: datetime.now(UTC)), clock=lambda: datetime.now(UTC)
+    )
+    assert await cache.refresh()
+    snapshot = cache.current()
+    # 只排除配置的审计源表；配置指向别的表时，真实审计表若可读就是普通可读对象。
+    configured = t.audit is not None and (t.audit.database, t.audit.table) == (
+        AUDIT_DB,
+        AUDIT_TABLE,
+    )
+    assert ((AUDIT_DB, AUDIT_TABLE) in snapshot.objects) is not configured
+    return snapshot.query_policy
 
 
 async def flushed(marker: str, expected: int) -> None:
@@ -121,10 +129,11 @@ async def test_real_audit_rows_are_filtered_by_the_current_scope(audited: Instan
         f"WITH t AS (SELECT region, note FROM sales) SELECT region FROM t WHERE note <> '{mk}_3'",
         f"SELECT region FROM sales WHERE note <> '{mk}_4' "
         "AND region IN (SELECT region FROM sales_view)",
+        # 4.1.4 不支持列级授权、配置也不再限列：可读表的任意列都在范围内（P2.5 R2）。
+        f"SELECT secret FROM sales WHERE note <> '{mk}_5'",
     ]
     rejected = [
-        f"SELECT secret FROM sales WHERE note <> '{mk}_5'",  # 未获准列
-        f"SELECT id FROM hidden WHERE v <> '{mk}_6'",  # 未获准对象
+        f"SELECT id FROM hidden WHERE v <> '{mk}_6'",  # 账号不可读的对象
         f"SELECT id FROM {other}.t WHERE v <> '{mk}_7'",  # 其他库
         f"SELECT region FROM sales WHERE note <> '{mk}_8' AND id IN (SELECT id FROM hidden)",
         f"SELECT /* {mk}_9 */ region FROM sales",  # 注释
@@ -146,18 +155,20 @@ async def test_real_audit_rows_are_filtered_by_the_current_scope(audited: Instan
         await admin(host, port, user, f"USE {db}", *statements)
         t = audit_target(audited)
         ada = open_starrocks(t, clock=lambda: datetime.now(UTC))
+        scope = await snapshot_scope(t)
+        assert scope.allowed_objects == {"sales", "sales_view"}
         # 小维自身发出的语句：查询照常列出；EXPLAIN、元数据查询与会话回读都不列出。
         ran = await ada.run_query(
-            guard_readonly_query(f"SELECT region FROM sales WHERE note <> '{mk}_12'", t.policy)
+            guard_readonly_query(f"SELECT region FROM sales WHERE note <> '{mk}_12'", scope)
         )
         await ada.explain(
-            guard_explain_query(f"SELECT region FROM sales WHERE note <> '{mk}_13'", t.policy)
+            guard_explain_query(f"SELECT region FROM sales WHERE note <> '{mk}_13'", scope)
         )
-        await ada.describe_table("sales")
+        await ada.probe([(db, "sales")])
         await flushed(mk, len(statements) + 2)
 
         started = time.monotonic()
-        result = await ada.slow_queries(60, "query_time")
+        result = await ada.slow_queries(60, "query_time", scope)
         assert time.monotonic() - started < 30
         assert result.columns == AUDIT_COLUMNS and not result.truncated
         shown = {row["sql"] for row in result.rows if mk in str(row["sql"])}
@@ -170,7 +181,7 @@ async def test_real_audit_rows_are_filtered_by_the_current_scope(audited: Instan
         # 审计时区配错（按上海解释 UTC 写入的时间）：窗口整体偏移 8 小时，刚才的记录不在窗口内。
         shifted = audit_target(audited, time_zone="Asia/Shanghai")
         wrong = await open_starrocks(shifted, clock=lambda: datetime.now(UTC)).slow_queries(
-            60, "query_time"
+            60, "query_time", scope
         )
         assert not any(mk in str(row["sql"]) for row in wrong.rows)
     finally:
@@ -180,10 +191,13 @@ async def test_real_audit_rows_are_filtered_by_the_current_scope(audited: Instan
 async def test_real_audit_failures_are_distinguished(audited: Instance) -> None:
     missing = audit_target(audited, table="no_such_tbl")
     with pytest.raises(StarRocksError) as info:
-        await open_starrocks(missing, clock=lambda: datetime.now(UTC)).slow_queries(60, "cpu")
+        await open_starrocks(missing, clock=lambda: datetime.now(UTC)).slow_queries(
+            60, "cpu", await snapshot_scope(missing)
+        )
     # 4.1.4 实测：只读账号查询不存在的审计表同样得到 5502，不先报无权限。
     assert info.value.code is StarRocksErrorCode.OBJECT_MISSING
 
+    scope = await snapshot_scope(audit_target(audited))
     host, port, user = admin_address()
     await admin(
         host,
@@ -193,6 +207,6 @@ async def test_real_audit_failures_are_distinguished(audited: Instance) -> None:
     )
     with pytest.raises(StarRocksError) as info:
         await open_starrocks(audit_target(audited), clock=lambda: datetime.now(UTC)).slow_queries(
-            60, "cpu"
+            60, "cpu", scope
         )
     assert info.value.code is StarRocksErrorCode.PERMISSION_DENIED

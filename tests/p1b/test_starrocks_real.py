@@ -21,6 +21,7 @@ import time
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from typing import Any
 
 import asyncmy
 import pytest
@@ -41,13 +42,23 @@ from xiaowei.sqlguard import QueryPolicy, guard_explain_query, guard_readonly_qu
 from xiaowei.starrocks import (
     EXPLAIN_PREFIX,
     LAYOUT_HIDDEN,
+    SchemaLimits,
+    SqlPolicy,
     StarRocksAdapter,
     StarRocksError,
     StarRocksErrorCode,
     StarRocksTarget,
     open_starrocks,
 )
-from xiaowei.starrocks_tools import QUERY_TOOLS, RUN_QUERY, starrocks_tools
+from xiaowei.starrocks_schema import SchemaCache
+from xiaowei.starrocks_tools import (
+    DESCRIBE_TABLE,
+    LAYOUT_TOOL,
+    LIST_TABLES,
+    QUERY_TOOLS,
+    RUN_QUERY,
+    starrocks_tools,
+)
 
 pytestmark = pytest.mark.starrocks_real
 
@@ -118,17 +129,8 @@ async def instance(monkeypatch: pytest.MonkeyPatch) -> AsyncIterator[Instance]:
 
 
 def target(inst: Instance, **changes: object) -> StarRocksTarget:
-    policy = QueryPolicy(
-        target_id="sr-real",
-        default_database=inst.database,
-        allowed_objects=frozenset({"sales", "ungranted"}),
-        allowed_columns={
-            "sales": frozenset({"id", "region", "total", "day", "at", "note"}),
-            "ungranted": frozenset({"id"}),
-        },
-        allowed_functions=frozenset({"SUM", "COUNT", "SLEEP"}),
-        max_rows=5,
-        max_sql_bytes=4000,
+    policy = SqlPolicy(
+        allowed_functions=frozenset({"SUM", "COUNT", "SLEEP"}), max_rows=5, max_sql_bytes=4000
     )
     base = StarRocksTarget(
         target_id="sr-real",
@@ -148,8 +150,29 @@ def target(inst: Instance, **changes: object) -> StarRocksTarget:
         max_result_bytes=4000,
         max_value_bytes=200,
         policy=policy,
+        schema_limits=SchemaLimits(
+            max_objects=200, max_columns=2000, max_bytes=500_000, max_comment_chars=100
+        ),
     )
     return base.model_copy(update=changes) if changes else base
+
+
+def scope(inst: Instance, t: StarRocksTarget, **extra: frozenset[str]) -> QueryPolicy:
+    """Adapter 用例的 SQLGuard 范围：固定对象与列（含无权的 ungranted，用来验证数据库自己的拒绝），
+    函数与上限取自 ``t``。结构快照给出的范围另由“自动结构快照”一节的用例验证。"""
+    return QueryPolicy(
+        target_id="sr-real",
+        default_database=inst.database,
+        allowed_objects=frozenset({"sales", "ungranted", *extra}),
+        allowed_columns={
+            "sales": frozenset({"id", "region", "total", "day", "at", "note"}),
+            "ungranted": frozenset({"id"}),
+            **extra,
+        },
+        allowed_functions=t.policy.allowed_functions,
+        max_rows=t.policy.max_rows,
+        max_sql_bytes=t.policy.max_sql_bytes,
+    )
 
 
 def adapter(inst: Instance, **changes: object) -> StarRocksAdapter:
@@ -157,7 +180,7 @@ def adapter(inst: Instance, **changes: object) -> StarRocksAdapter:
 
 
 def guarded(inst: Instance, sql: str, t: StarRocksTarget | None = None):  # type: ignore[no-untyped-def]
-    return guard_readonly_query(sql, (t or target(inst)).policy)
+    return guard_readonly_query(sql, scope(inst, t or target(inst)))
 
 
 async def test_types_and_session_limits(instance: Instance) -> None:
@@ -202,14 +225,26 @@ async def test_byte_limit_stops_reading_mid_stream(instance: Instance) -> None:
     ).row_count == 1
 
 
-async def test_metadata_only_lists_allowed_objects_and_columns(instance: Instance) -> None:
-    ada = adapter(instance)
-    tables = await ada.list_tables()
-    described = await ada.describe_table("sales")
+async def test_snapshot_holds_only_objects_the_account_can_select(instance: Instance) -> None:
+    cache = SchemaCache(adapter(instance), clock=lambda: datetime.now(UTC))
+    assert await cache.refresh()
+    snapshot = cache.current()
 
-    # 只读账号看不到未授权表；hidden 不在 allowlist，ungranted 在 allowlist 但无权限。
-    assert [r["name"] for r in tables.rows] == ["sales"]
-    assert {r["name"] for r in described.rows} == {"id", "region", "total", "day", "at", "note"}
+    # 只授 SELECT 的 sales 进入快照；hidden 与 ungranted 没有任何授权。4.1.4 不支持列级授权：
+    # 授权表的全部列（含 secret）都可读，列限制须由 DBA 用视图实现。
+    assert set(snapshot.objects) == {(instance.database, "sales")}
+    sales = snapshot.object(instance.database, "sales")
+    assert sales is not None and sales.table_id and sales.created_at
+    assert [c.name for c in sales.columns] == [
+        "id",
+        "region",
+        "total",
+        "day",
+        "at",
+        "note",
+        "secret",
+    ]
+    assert snapshot.query_policy.allowed_objects == {"sales"}
 
 
 async def test_ungranted_object_maps_to_permission_denied(instance: Instance) -> None:
@@ -309,7 +344,11 @@ async def test_governed_query_tool_end_to_end(instance: Instance) -> None:
         pytest.fail(f"SDK_TEST_POSTGRES_URL {exc}")
 
     ada = adapter(instance)
-    tools = starrocks_tools(ada, dict.fromkeys(("model", "session", "web", "feishu"), 200_000))
+    schema = SchemaCache(ada, clock=lambda: datetime.now(UTC))
+    assert await schema.refresh()
+    tools = starrocks_tools(
+        ada, dict.fromkeys(("model", "session", "web", "feishu"), 200_000), schema=schema
+    )
     grants = Grants()
     grants.grant("alice", *QUERY_TOOLS, target="sr-real")
     ctx = RunContext(
@@ -337,9 +376,10 @@ async def test_governed_query_tool_end_to_end(instance: Instance) -> None:
             retention_seconds=600,
         )
         governed = GovernedTools(evidence)
-        with pytest.raises(ToolRejectedError, match="column_not_allowed"):
+        # 不在快照中的对象（无权的 ungranted）在 I/O 前由 SQLGuard 拒绝。
+        with pytest.raises(ToolRejectedError, match="object_not_allowed"):
             await governed.invoke(
-                ctx, call("SELECT secret FROM sales"), tools.executes[(RUN_QUERY, "sr-real")]
+                ctx, call("SELECT id FROM ungranted"), tools.executes[(RUN_QUERY, "sr-real")]
             )
 
         result = await governed.invoke(
@@ -367,8 +407,10 @@ async def test_governed_query_tool_end_to_end(instance: Instance) -> None:
 # ---- 执行计划（P2 Task 3） -----------------------------------------------------------------
 
 
-def explained(inst: Instance, sql: str, t: StarRocksTarget | None = None):  # type: ignore[no-untyped-def]
-    return guard_explain_query(sql, (t or target(inst)).policy)
+def explained(  # type: ignore[no-untyped-def]
+    inst: Instance, sql: str, t: StarRocksTarget | None = None, **extra: frozenset[str]
+):
+    return guard_explain_query(sql, scope(inst, t or target(inst), **extra))
 
 
 def plan_text(result: object) -> str:
@@ -385,25 +427,16 @@ async def test_explain_table_view_and_cte(instance: Instance) -> None:
         f"SELECT id, region, total FROM {instance.database}.sales WHERE total > 10",
         f"GRANT SELECT ON VIEW {instance.database}.sales_view TO USER '{instance.ro_user}'@'%'",
     )
-    base = target(instance)
-    policy = base.policy.model_copy(
-        update={
-            "allowed_objects": base.policy.allowed_objects | {"sales_view"},
-            "allowed_columns": {
-                **base.policy.allowed_columns,
-                "sales_view": frozenset({"id", "region", "total"}),
-            },
-        }
-    )
-    t = base.model_copy(update={"policy": policy})
+    t = target(instance)
     ada = open_starrocks(t, clock=lambda: datetime.now(UTC))
+    view = {"sales_view": frozenset({"id", "region", "total"})}
 
     for sql in (
         "SELECT region, SUM(total) AS s FROM sales WHERE id > 3 GROUP BY region",
         "SELECT v.region FROM sales_view v JOIN sales s ON v.id = s.id",
         "WITH t AS (SELECT region, total FROM sales) SELECT region FROM t WHERE total > 1",
     ):
-        plan = explained(instance, sql, t)
+        plan = explained(instance, sql, t, **view)
         result = await ada.explain(plan)
         text = plan_text(result)
         assert result.sql == EXPLAIN_PREFIX + plan.normalized_sql
@@ -526,23 +559,10 @@ async def test_describe_layout_on_real_tables(instance: Instance) -> None:
         f"GRANT SELECT ON TABLE {db}.pk_orders TO USER '{ro}'@'%'",
         f"GRANT SELECT ON VIEW {db}.sales_view TO USER '{ro}'@'%'",
     )
-    base = target(instance)
-    policy = base.policy.model_copy(
-        update={
-            "allowed_objects": base.policy.allowed_objects | {"events", "pk_orders", "sales_view"},
-            "allowed_columns": {
-                **base.policy.allowed_columns,
-                "events": frozenset({"ts", "region", "amount"}),
-                "pk_orders": frozenset({"id", "total"}),
-                "sales_view": frozenset({"id", "region"}),
-            },
-        }
-    )
-    ada = open_starrocks(
-        base.model_copy(update={"policy": policy}), clock=lambda: datetime.now(UTC)
-    )
-
-    (sales,) = (await ada.describe_layout("sales")).rows
+    ada = adapter(instance)
+    # 键字段按给定的列过滤：这里故意不给 secret，验证含未给出列的键整段不显示。
+    sales_cols = frozenset({"id", "region", "total", "day", "at", "note"})
+    (sales,) = (await ada.describe_layout(db, "sales", sales_cols)).rows
     assert sales == {
         "model": "DUP_KEYS",
         "partition_key": "",
@@ -553,15 +573,120 @@ async def test_describe_layout_on_real_tables(instance: Instance) -> None:
         "primary_key": "",
     }
     # 表达式分区在 4.1.4 只显示列名；分桶键与排序键都是获准列。
-    (events,) = (await ada.describe_layout("events")).rows
+    (events,) = (
+        await ada.describe_layout(db, "events", frozenset({"ts", "region", "amount"}))
+    ).rows
     assert events["partition_key"] == "ts"
     assert (events["distribute_key"], events["buckets"]) == ("region", 2)
     assert events["sort_key"] == "ts, region"
     # 主键含未获准列 secret：整段不显示，获准的 id 也不单独留下。
-    (orders,) = (await ada.describe_layout("pk_orders")).rows
+    (orders,) = (await ada.describe_layout(db, "pk_orders", frozenset({"id", "total"}))).rows
     assert orders["model"] == "PRIMARY_KEYS"
     assert orders["primary_key"] == LAYOUT_HIDDEN and orders["distribute_key"] == "id"
     assert "secret" not in str(orders)
     # 视图没有布局；无 SELECT 权限的表对只读账号不可见，同样没有行。
-    assert (await ada.describe_layout("sales_view")).rows == ()
-    assert (await ada.describe_layout("ungranted")).rows == ()
+    assert (await ada.describe_layout(db, "sales_view", frozenset({"id", "region"}))).rows == ()
+    assert (await ada.describe_layout(db, "ungranted", frozenset({"id"}))).rows == ()
+
+
+# ---- 自动结构快照与当前权限（P2.5 Task 2）-------------------------------------------------------
+
+
+def schema_tools(inst: Instance) -> tuple[SchemaCache, Any]:
+    ada = adapter(inst)
+    cache = SchemaCache(ada, clock=lambda: datetime.now(UTC))
+    tools = starrocks_tools(
+        ada, dict.fromkeys(("model", "session", "web", "feishu"), 200_000), schema=cache
+    )
+    return cache, tools.executes
+
+
+async def call_tool(executes: Any, tool_id: str, **arguments: object) -> Any:
+    execute = executes[(tool_id, "sr-real")]
+    request = ToolRequest(
+        tool_id=tool_id,
+        target_id="sr-real",
+        call_id=secrets.token_hex(4),
+        tool_name=tool_id.removeprefix("local/"),
+        arguments={"cluster": "sr-real", **arguments},
+    )
+    return await execute.run(execute.check(request))
+
+
+async def test_snapshot_follows_views_roles_and_insert_only_grants(instance: Instance) -> None:
+    """可见不等于可读：只授 INSERT 的表、只经未激活角色授权的表都不进入快照；只授视图、不授
+    底表时视图进入快照、底表不进入（Task 0 §9.2 的结论在产品刷新路径上复核）。"""
+    host, port, user = admin_address()
+    db, ro = instance.database, instance.ro_user
+    role = f"xw_role_{secrets.token_hex(4)}"
+    props = "DUPLICATE KEY(id) DISTRIBUTED BY HASH(id) BUCKETS 1 PROPERTIES('replication_num'='1')"
+    await admin(
+        host,
+        port,
+        user,
+        f"CREATE VIEW {db}.v_hidden AS SELECT id FROM {db}.hidden",
+        f"GRANT SELECT ON VIEW {db}.v_hidden TO USER '{ro}'@'%'",
+        f"CREATE TABLE {db}.ins_only (id INT) {props}",
+        f"GRANT INSERT ON TABLE {db}.ins_only TO USER '{ro}'@'%'",
+        f"CREATE TABLE {db}.role_t (id INT) {props}",
+        f"CREATE ROLE {role}",
+        f"GRANT SELECT ON TABLE {db}.role_t TO ROLE {role}",
+        f"GRANT {role} TO USER '{ro}'@'%'",
+    )
+    try:
+        cache, _ = schema_tools(instance)
+        assert await cache.refresh()
+        snapshot = cache.current()
+        assert set(snapshot.objects) == {(db, "sales"), (db, "v_hidden")}
+        view = snapshot.object(db, "v_hidden")
+        assert view is not None and [c.name for c in view.columns] == ["id"]
+        assert snapshot.query_policy.allowed_objects == {"sales", "v_hidden"}
+    finally:
+        await admin(host, port, user, f"DROP ROLE {role}")
+
+
+async def test_grants_and_revocations_take_effect_at_the_next_boundary(instance: Instance) -> None:
+    """新授权在下一次成功刷新后可用；撤权后列表与表结构在交付前的探测即拒绝，新查询由数据库
+    拒绝，下一次刷新把它移出快照。"""
+    host, port, user = admin_address()
+    db, ro = instance.database, instance.ro_user
+    cache, executes = schema_tools(instance)
+    assert await cache.refresh()
+
+    await admin(host, port, user, f"GRANT SELECT ON TABLE {db}.hidden TO USER '{ro}'@'%'")
+    # 刷新之前：快照里还没有它，表结构在 I/O 前拒绝。
+    with pytest.raises(ToolRejectedError, match="不在可读的表结构中"):
+        await call_tool(executes, DESCRIBE_TABLE, database=db, table="hidden")
+    started = time.monotonic()
+    assert await cache.refresh()
+    refresh_seconds = time.monotonic() - started
+    assert refresh_seconds < target(instance).schema_limits.refresh_timeout_seconds
+    described = await call_tool(executes, DESCRIBE_TABLE, database=db, table="hidden")
+    assert [r["name"] for r in described.payload["rows"]] == ["id", "v"]
+
+    await admin(host, port, user, f"REVOKE SELECT ON TABLE {db}.hidden FROM USER '{ro}'@'%'")
+    # 快照尚未刷新：交付前的探测发现撤权。
+    listed = await call_tool(executes, LIST_TABLES)
+    assert [r["name"] for r in listed.payload["rows"]] == ["sales"]
+    with pytest.raises(StarRocksError) as unreadable:
+        await call_tool(executes, DESCRIBE_TABLE, database=db, table="hidden")
+    assert unreadable.value.code is Code.OBJECT_UNREADABLE
+    with pytest.raises(StarRocksError) as layout:
+        await call_tool(executes, LAYOUT_TOOL, database=db, table="hidden")
+    assert layout.value.code is Code.OBJECT_UNREADABLE
+    # 新查询：SQLGuard 仍按旧快照放行，数据库是最终防线。
+    with pytest.raises(StarRocksError) as denied:
+        await call_tool(executes, RUN_QUERY, sql="SELECT id FROM hidden")
+    assert denied.value.code is Code.PERMISSION_DENIED
+    assert await cache.refresh()
+    assert (db, "hidden") not in cache.current().objects
+
+    # 库级授权覆盖库中全部表；撤销后同样在下一边界失效。
+    await admin(host, port, user, f"GRANT SELECT ON ALL TABLES IN DATABASE {db} TO USER '{ro}'@'%'")
+    assert await cache.refresh()
+    assert {(db, "hidden"), (db, "ungranted")} <= set(cache.current().objects)
+    await admin(
+        host, port, user, f"REVOKE SELECT ON ALL TABLES IN DATABASE {db} FROM USER '{ro}'@'%'"
+    )
+    assert await cache.refresh()
+    assert not {(db, "hidden"), (db, "ungranted")} & set(cache.current().objects)

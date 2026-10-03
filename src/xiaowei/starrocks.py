@@ -16,6 +16,12 @@ ANALYZE 而实际执行查询。显式级别 ``LOGICAL`` 由 P2 Task 0 在 StarR
 才发送 ``QUIT`` 正常关闭；截断、错误、超时、取消一律直接断开，不重试。客户端取消或超时
 不代表服务端已停止，服务端由 ``query_timeout`` 兜底。
 
+数据范围不来自配置的表列清单：``read_schema`` 以代码模板读 ``information_schema`` 中全部用户库的
+对象、列与表 ID（有界，超限按截断报告，由调用方拒绝发布），``probe`` 在同一条连接上对每个对象
+执行零行 ``SELECT 1 FROM `库`.`表` WHERE 1 = 0``，按数据库的实际 SELECT 权限给出可读/确定不可读；
+P2.5 Task 0 在 4.1.4 上实测该探测不会被优化消除，撤权对同一连接立即生效。可见不等于可读，
+元数据可见性本身从不作为权限证明。
+
 表布局只读 ``information_schema.tables_config`` 的表模型、分区、分桶、排序与主键，不读
 ``PROPERTIES``（存储卷、副本等部署信息）。键字段中的每个名字都须是该对象的获准列，否则整段
 替换为 ``LAYOUT_HIDDEN``：不显示未获准列名，也不留下获准的一部分让人误以为是完整的键。
@@ -39,7 +45,7 @@ import math
 import re
 import ssl
 import time
-from collections.abc import Awaitable, Callable, Mapping
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 from decimal import ROUND_HALF_UP, Decimal
@@ -60,6 +66,9 @@ from pydantic import (
 
 from xiaowei.config import is_secret_ref, resolve_secret_ref
 from xiaowei.sqlguard import ExplainQuery, GuardedQuery, QueryPolicy, guard_explain_query
+
+# 不进入数据范围的系统库（4.1.4）：元数据视图、系统表与统计信息库。
+SYSTEM_DATABASES: Final = ("information_schema", "sys", "_statistics_")
 
 EXPLAIN_LEVEL: Final = "LOGICAL"
 """P2 Task 0 在 4.1.4 上选定：FE 默认级别为 ANALYZE 时仍零执行，且不输出列统计值或资源组。"""
@@ -161,6 +170,7 @@ class StarRocksErrorCode(enum.StrEnum):
     RESULT_CONTRACT = "result_contract"
     OBJECT_NOT_ALLOWED = "object_not_allowed"
     OBJECT_MISSING = "object_missing"
+    OBJECT_UNREADABLE = "object_unreadable"
 
 
 _Code = StarRocksErrorCode
@@ -178,6 +188,7 @@ ERROR_MESSAGES: Final[Mapping[StarRocksErrorCode, str]] = {
     _Code.RESULT_CONTRACT: "StarRocks 返回的结果不符合契约",
     _Code.OBJECT_NOT_ALLOWED: "该对象不在查询目标的允许范围内",
     _Code.OBJECT_MISSING: "StarRocks 中不存在该对象",
+    _Code.OBJECT_UNREADABLE: "该对象当前不存在或只读账号已无权读取",
 }
 
 
@@ -221,10 +232,69 @@ class AuditSource(BaseModel):
         return self
 
 
-class StarRocksTarget(BaseModel):
-    """唯一查询目标的可信静态配置；凭据只以 ``env:NAME`` 引用出现。
+class SqlPolicy(BaseModel):
+    """SQLGuard 的静态部分：函数闭集与行数/SQL 字节上限。
 
-    ``policy`` 是同一目标的 SQLGuard allowlist，目标 ID 与默认 database 必须一致。
+    对象与列不在配置中：它们来自结构快照中只读账号实际可 SELECT 的对象（``starrocks_schema``）。
+    函数名统一为大写。
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    allowed_functions: frozenset[_Name]
+    max_rows: int = Field(ge=1)
+    max_sql_bytes: int = Field(ge=1)
+
+    @model_validator(mode="before")
+    @classmethod
+    def _no_allowlist(cls, data: object) -> object:
+        if isinstance(data, Mapping) and ({"allowed_objects", "allowed_columns"} & set(data)):
+            raise ValueError(
+                "allowed_objects/allowed_columns 已取消：数据范围来自只读账号的实际 SELECT 权限，"
+                "请删除这两项（target_id、default_database 同样删除）"
+            )
+        return data
+
+    @field_validator("allowed_functions")
+    @classmethod
+    def _upper(cls, names: frozenset[str]) -> frozenset[str]:
+        return frozenset(name.upper() for name in names)
+
+
+class SchemaLimits(BaseModel):
+    """结构快照的刷新期限与容量上限。
+
+    ``refresh_seconds`` 是后台刷新间隔，``max_age_seconds`` 是快照可用的最长时间（自采集开始计），
+    ``refresh_timeout_seconds`` 是一次刷新（读取元数据与逐个探测）的总期限。三者都不能无限，且
+    刷新间隔不超过最大年龄。``max_objects``/``max_columns`` 是全部用户库的对象与列上限，
+    ``max_bytes`` 是每条元数据读取序列化后的字节上限，超过任一上限整份快照不发布。注释按
+    ``max_comment_chars`` 个字符截取。容量没有通用默认值，按目标规模配置。
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    refresh_seconds: float = Field(default=60, gt=0, le=3600)
+    max_age_seconds: float = Field(default=300, gt=0, le=86_400)
+    refresh_timeout_seconds: float = Field(default=10, gt=0, le=600)
+    max_objects: int = Field(ge=1)
+    max_columns: int = Field(ge=1)
+    max_bytes: int = Field(ge=2)
+    max_comment_chars: int = Field(ge=0, le=2000)
+
+    @model_validator(mode="after")
+    def _bounded(self) -> SchemaLimits:
+        if self.refresh_seconds > self.max_age_seconds:
+            raise ValueError("refresh_seconds 不能大于 max_age_seconds")
+        if self.refresh_timeout_seconds > self.refresh_seconds:
+            raise ValueError("refresh_timeout_seconds 不能大于 refresh_seconds")
+        return self
+
+
+class StarRocksTarget(BaseModel):
+    """一个查询目标的可信静态配置；凭据只以 ``env:NAME`` 引用出现。
+
+    ``policy`` 是 SQLGuard 的函数闭集与上限，``schema_limits`` 是结构快照的期限与容量；对象与列来自
+    快照。``database`` 是 SQLGuard 解析未限定对象名的库（跨库查询见 P2.5 Task 3）。
     ``client_timeout_seconds`` 覆盖会话设置、执行与读取，不早于服务端 ``query_timeout``。
     ``max_plan_lines`` 是执行计划最多返回的行数；字节与单值上限与查询共用。
     """
@@ -248,7 +318,8 @@ class StarRocksTarget(BaseModel):
     max_result_bytes: int = Field(ge=2)
     max_value_bytes: int = Field(ge=1)
     max_plan_lines: int = Field(default=500, ge=1)
-    policy: QueryPolicy
+    policy: SqlPolicy
+    schema_limits: SchemaLimits
     audit: AuditSource | None = None
 
     @field_validator("password_ref")
@@ -265,8 +336,6 @@ class StarRocksTarget(BaseModel):
 
     @model_validator(mode="after")
     def _consistent(self) -> StarRocksTarget:
-        if (self.policy.target_id, self.policy.default_database) != (self.target_id, self.database):
-            raise ValueError("policy 必须属于同一目标与默认 database")
         if self.tls_ca_file is not None and not self.tls:
             raise ValueError("tls_ca_file 只能在启用 TLS 时设置")
         if self.client_timeout_seconds < self.query_timeout_seconds:
@@ -306,6 +375,16 @@ class QueryResult(BaseModel):
         return self
 
 
+@dataclass(frozen=True)
+class SchemaRows:
+    """``read_schema`` 的原始结果（已转为 JSON 标量）；``truncated`` 表示任一读取超限。"""
+
+    objects: tuple[dict[str, Scalar], ...]
+    columns: tuple[dict[str, Scalar], ...]
+    ids: tuple[dict[str, Scalar], ...]
+    truncated: bool
+
+
 class Connection(Protocol):
     """Adapter 使用的最小驱动接口；``abort`` 同步断开，不再读写。"""
 
@@ -343,15 +422,31 @@ _MISSING_ERRORS: Final = frozenset({1146, 5502})
 _SERVER_TIMEOUT_ERRORS: Final = frozenset({5024})
 _LOST_ERRORS: Final = frozenset({2006, 2013, 2055})
 
-_LIST_TABLES: Final = (
-    "SELECT TABLE_NAME AS name, TABLE_TYPE AS type FROM information_schema.tables "
-    "WHERE TABLE_SCHEMA = %s AND TABLE_NAME IN ({}) ORDER BY TABLE_NAME"
+# 三个 NOT IN 占位符依次绑定 ``SYSTEM_DATABASES``。
+SCHEMA_OBJECTS_SQL: Final = (
+    "SELECT TABLE_SCHEMA AS db, TABLE_NAME AS name, TABLE_TYPE AS type, "
+    "LEFT(TABLE_COMMENT, %s) AS comment, CREATE_TIME AS created "
+    "FROM information_schema.tables WHERE TABLE_SCHEMA NOT IN (%s, %s, %s) "
+    "ORDER BY TABLE_SCHEMA, TABLE_NAME LIMIT %s"
 )
-_DESCRIBE_TABLE: Final = (
-    "SELECT COLUMN_NAME AS name, DATA_TYPE AS type, IS_NULLABLE AS nullable "
-    "FROM information_schema.columns WHERE TABLE_SCHEMA = %s AND TABLE_NAME = %s "
-    "AND COLUMN_NAME IN ({}) ORDER BY ORDINAL_POSITION"
+SCHEMA_COLUMNS_SQL: Final = (
+    "SELECT TABLE_SCHEMA AS db, TABLE_NAME AS name, COLUMN_NAME AS col, DATA_TYPE AS type, "
+    "IS_NULLABLE AS nullable, LEFT(COLUMN_COMMENT, %s) AS comment "
+    "FROM information_schema.columns WHERE TABLE_SCHEMA NOT IN (%s, %s, %s) "
+    "ORDER BY TABLE_SCHEMA, TABLE_NAME, ORDINAL_POSITION LIMIT %s"
 )
+SCHEMA_IDS_SQL: Final = (
+    "SELECT TABLE_SCHEMA AS db, TABLE_NAME AS name, TABLE_ID AS id "
+    "FROM information_schema.tables_config WHERE TABLE_SCHEMA NOT IN (%s, %s, %s) "
+    "ORDER BY TABLE_SCHEMA, TABLE_NAME LIMIT %s"
+)
+_SCHEMA_OBJECT_COLUMNS: Final = ("db", "name", "type", "comment", "created")
+_SCHEMA_COLUMN_COLUMNS: Final = ("db", "name", "col", "type", "nullable", "comment")
+_SCHEMA_ID_COLUMNS: Final = ("db", "name", "id")
+# 零行探测：Task 0 在 4.1.4 上实测不被优化消除；无权为权限错误，对象不存在为缺失错误。
+_PROBE: Final = "SELECT 1 FROM `{db}`.`{name}` WHERE 1 = 0"
+# 4.1.4 实测：库名错写为 5501；1049 是 MySQL 协议通用码。
+_PROBE_DENIED: Final = _PERMISSION_ERRORS | _MISSING_ERRORS | frozenset({1049, 5501})
 # Task 0 在 4.1.4 上实测：视图也有一行（TABLE_ENGINE='VIEW'、键为空、桶数 0），这里排除。
 _DESCRIBE_LAYOUT: Final = (
     "SELECT TABLE_MODEL AS model, PARTITION_KEY AS partition_key, "
@@ -381,10 +476,9 @@ class StarRocksAdapter:
         self._connect = connect
         self._clock = clock
         # 会话 time_zone 已设为目标时区，驱动返回的无时区值即目标时区的本地时间。
+        self._zone = ZoneInfo(target.time_zone)
         self._limits = _ReadLimits(
-            max_bytes=target.max_result_bytes,
-            max_value=target.max_value_bytes,
-            zone=ZoneInfo(target.time_zone),
+            max_bytes=target.max_result_bytes, max_value=target.max_value_bytes, zone=self._zone
         )
         self._slots = asyncio.Semaphore(target.pool_size)
 
@@ -416,41 +510,92 @@ class StarRocksAdapter:
         sql = EXPLAIN_PREFIX + query.normalized_sql
         return await self._run(sql, None, self._target.max_plan_lines, plan=True)
 
-    async def list_tables(self) -> QueryResult:
-        objects = tuple(sorted(self._target.policy.allowed_objects))
-        sql = _list_tables_sql(len(objects))
-        return await self._run(sql, (self._target.database, *objects), len(objects))
+    async def read_schema(self) -> SchemaRows:
+        """读取全部用户库的对象、列与表 ID（代码模板，绑定值只有上限与系统库名）。
 
-    async def describe_table(self, name: str) -> QueryResult:
-        policy = self._target.policy
-        if name not in policy.allowed_objects:
-            raise StarRocksError(_Code.OBJECT_NOT_ALLOWED)
-        columns = tuple(sorted(policy.allowed_columns[name]))
-        sql = _describe_table_sql(len(columns))
-        return await self._run(sql, (self._target.database, name, *columns), len(columns))
+        每条读取按 ``schema_limits`` 的行数与字节上限读取；``truncated`` 为真表示至少一项超限，
+        调用方不得据此发布快照。列名与类型不符按结果契约失败。
+        """
+        limits = self._target.schema_limits
+        read = _ReadLimits(max_bytes=limits.max_bytes, max_value=limits.max_bytes, zone=self._zone)
+        chars = limits.max_comment_chars
+        objects = await self._run(
+            SCHEMA_OBJECTS_SQL,
+            (chars, *SYSTEM_DATABASES, limits.max_objects + 1),
+            limits.max_objects,
+            limits=read,
+        )
+        columns = await self._run(
+            SCHEMA_COLUMNS_SQL,
+            (chars, *SYSTEM_DATABASES, limits.max_columns + 1),
+            limits.max_columns,
+            limits=read,
+        )
+        ids = await self._run(
+            SCHEMA_IDS_SQL,
+            (*SYSTEM_DATABASES, limits.max_objects + 1),
+            limits.max_objects,
+            limits=read,
+        )
+        if (objects.columns, columns.columns, ids.columns) != (
+            _SCHEMA_OBJECT_COLUMNS,
+            _SCHEMA_COLUMN_COLUMNS,
+            _SCHEMA_ID_COLUMNS,
+        ):
+            raise StarRocksError(_Code.RESULT_CONTRACT)
+        return SchemaRows(
+            objects=objects.rows,
+            columns=columns.rows,
+            ids=ids.rows,
+            truncated=objects.truncated or columns.truncated or ids.truncated,
+        )
 
-    async def describe_layout(self, name: str) -> QueryResult:
-        """一张获准表的布局：至多一行，列为 ``LAYOUT_COLUMNS``；视图没有行。
+    async def probe(self, objects: Sequence[tuple[str, str]]) -> dict[tuple[str, str], bool]:
+        """在同一条连接上逐个零行探测 ``(库, 对象)`` 的当前 SELECT 权限。
+
+        ``True`` 可读；``False`` 是数据库给出的确定结论（无权，或对象/库已不存在）。其他任何
+        失败（连接、会话设置、超时、未知错误、探测返回了行）整批抛出 ``StarRocksError``：权限
+        暂时无法验证，不返回部分结论。库表名含反引号或控制字符时按 ``OBJECT_NOT_ALLOWED`` 拒绝，
+        不拼入 SQL。整批共用一个客户端期限。
+        """
+        for database, name in objects:
+            if not (safe_identifier(database) and safe_identifier(name)):
+                raise StarRocksError(_Code.OBJECT_NOT_ALLOWED)
+        if not objects:
+            return {}
+        conn = await self._acquire()
+        try:
+            verdicts, code = await self._probe(conn, objects)
+        finally:
+            self._slots.release()
+        if code is not None:
+            raise StarRocksError(code)
+        return verdicts
+
+    async def describe_layout(
+        self, database: str, name: str, columns: frozenset[str]
+    ) -> QueryResult:
+        """一张表的布局：至多一行，列为 ``LAYOUT_COLUMNS``；视图没有行。
 
         多于一行、列不符、键不是文本或结果被截断都按 ``RESULT_CONTRACT`` 失败：布局只有完整的
-        一行才有意义。键字段按获准列过滤（见模块说明）。
+        一行才有意义。键字段按 ``columns``（该对象在快照中的可读列）过滤（见模块说明）。调用方
+        负责在交付前证明当前权限。
         """
-        policy = self._target.policy
-        if name not in policy.allowed_objects:
-            raise StarRocksError(_Code.OBJECT_NOT_ALLOWED)
-        result = await self._run(_DESCRIBE_LAYOUT, (self._target.database, name, "VIEW"), 1)
-        allowed = policy.allowed_columns[name]
-        rows = [_layout_row(row, allowed) for row in result.rows]
+        result = await self._run(_DESCRIBE_LAYOUT, (database, name, "VIEW"), 1)
+        rows = [_layout_row(row, columns) for row in result.rows]
         if result.columns != LAYOUT_COLUMNS or result.truncated or None in rows:
             raise StarRocksError(_Code.RESULT_CONTRACT)
         return result.model_copy(update={"rows": tuple(r for r in rows if r is not None)})
 
-    async def slow_queries(self, window_minutes: int, order_by: str) -> QueryResult:
+    async def slow_queries(
+        self, window_minutes: int, order_by: str, policy: QueryPolicy
+    ) -> QueryResult:
         """最近 ``window_minutes`` 分钟内本目标库的慢查询，按 ``order_by`` 降序，至多 ``max_rows``
         行。
 
-        只返回原文通过当前 SQLGuard 范围的记录（见模块说明）；``truncated`` 表示候选读取达到
-        ``candidate_bytes`` 或输出达到结果字节上限，可能还有未检查的记录。
+        只返回原文通过 ``policy``（当前结构快照给出的 SQLGuard 范围）的记录（见模块说明）；
+        ``truncated`` 表示候选读取达到 ``candidate_bytes`` 或输出达到结果字节上限，可能还有未检查
+        的记录。
         """
         audit = self._target.audit
         if audit is None:
@@ -487,7 +632,7 @@ class StarRocksAdapter:
             deadline = time.monotonic() + timeout
             async with asyncio.timeout(timeout):
                 rows, over = await asyncio.to_thread(
-                    self._listed, candidates.rows, audit.max_rows, deadline
+                    self._listed, candidates.rows, audit.max_rows, deadline, policy
                 )
         except TimeoutError:
             code = _Code.TIMEOUT
@@ -507,7 +652,11 @@ class StarRocksAdapter:
         )
 
     def _listed(
-        self, candidates: tuple[dict[str, Scalar], ...], max_rows: int, deadline: float
+        self,
+        candidates: tuple[dict[str, Scalar], ...],
+        max_rows: int,
+        deadline: float,
+        policy: QueryPolicy,
     ) -> tuple[list[dict[str, Scalar]], bool]:
         """按原排序取通过检查的行；返回 (行, 是否因结果字节上限停止)。
 
@@ -521,7 +670,7 @@ class StarRocksAdapter:
             if time.monotonic() >= deadline:
                 raise TimeoutError
             row = _audit_row(candidate)
-            if row is None or not _within_scope(row["sql"], self._target.policy):
+            if row is None or not _within_scope(row["sql"], policy):
                 continue
             if any(_json_size(v) > self._target.max_value_bytes for v in row.values()):
                 continue
@@ -542,20 +691,8 @@ class StarRocksAdapter:
         limits: _ReadLimits | None = None,
     ) -> QueryResult:
         started = time.monotonic()
-        # 等待槽位与建立连接共用一个绝对期限；超期的阶段决定错误码。
-        deadline = asyncio.get_running_loop().time() + self._target.connect_timeout_seconds
-        code: StarRocksErrorCode | None = None
+        conn = await self._acquire()
         try:
-            async with asyncio.timeout_at(deadline):
-                await self._slots.acquire()
-        except TimeoutError:
-            code = _Code.POOL_TIMEOUT
-        if code is not None:
-            raise StarRocksError(code)
-        try:
-            conn, code = await self._open(deadline)
-            if conn is None:
-                raise StarRocksError(code or _Code.CONNECT_FAILED)
             rows, truncated, columns, code = await self._query(
                 conn, sql, args, max_rows, plan, limits or self._limits
             )
@@ -573,6 +710,66 @@ class StarRocksAdapter:
             collected_at=self._clock(),
             elapsed_ms=round((time.monotonic() - started) * 1000),
         )
+
+    async def _acquire(self) -> Connection:
+        """占用一个并发槽位并建立连接；失败时释放槽位并抛出。成功后由调用方释放槽位。
+
+        等待槽位与建立连接共用一个绝对期限；超期的阶段决定错误码。
+        """
+        deadline = asyncio.get_running_loop().time() + self._target.connect_timeout_seconds
+        code: StarRocksErrorCode | None = None
+        try:
+            async with asyncio.timeout_at(deadline):
+                await self._slots.acquire()
+        except TimeoutError:
+            code = _Code.POOL_TIMEOUT
+        if code is not None:
+            raise StarRocksError(code)
+        try:
+            conn, code = await self._open(deadline)
+        except BaseException:
+            self._slots.release()
+            raise
+        if conn is None:
+            self._slots.release()
+            raise StarRocksError(code or _Code.CONNECT_FAILED)
+        return conn
+
+    async def _probe(
+        self, conn: Connection, objects: Sequence[tuple[str, str]]
+    ) -> tuple[dict[tuple[str, str], bool], StarRocksErrorCode | None]:
+        """会话设置后逐个探测；返回错误码而不是抛出（同 ``_query``）。"""
+        complete = False
+        stage = _Code.SESSION_SETUP_FAILED
+        try:
+            async with asyncio.timeout(self._target.client_timeout_seconds):
+                await self._prepare_session(conn)
+                stage = _Code.QUERY_FAILED
+                verdicts = {obj: await self._probe_one(conn, *obj) for obj in objects}
+            complete = True
+            return verdicts, None
+        except TimeoutError:
+            return {}, _Code.TIMEOUT
+        except _SessionMismatchError:
+            return {}, _Code.SESSION_SETUP_FAILED
+        except _ResultContractError:
+            return {}, _Code.RESULT_CONTRACT
+        except (MySQLError, OSError) as error:
+            return {}, _query_code(error, stage)
+        finally:
+            await self._release(conn, complete=complete)
+
+    @staticmethod
+    async def _probe_one(conn: Connection, database: str, name: str) -> bool:
+        try:
+            await conn.execute(_PROBE.format(db=database, name=name), None)
+        except MySQLError as error:
+            if _error_number(error) in _PROBE_DENIED:
+                return False
+            raise
+        if await conn.fetch_row() is not None:
+            raise _ResultContractError
+        return True
 
     async def _open(self, deadline: float) -> tuple[Connection | None, StarRocksErrorCode | None]:
         try:
@@ -772,12 +969,21 @@ def _milliseconds(nanoseconds: int) -> str:
     return format(exact.quantize(Decimal("0.001"), rounding=ROUND_HALF_UP), "f")
 
 
-def _list_tables_sql(objects: int) -> str:
-    return _LIST_TABLES.format(", ".join(["%s"] * objects))
+def probe_sql(database: str, name: str) -> str:
+    """零行权限探测语句；只接受 ``safe_identifier`` 通过的库表名。"""
+    if not (safe_identifier(database) and safe_identifier(name)):
+        raise ValueError("库表名不能含反引号或控制字符")
+    return _PROBE.format(db=database, name=name)
 
 
-def _describe_table_sql(columns: int) -> str:
-    return _DESCRIBE_TABLE.format(", ".join(["%s"] * columns))
+def safe_identifier(name: object) -> bool:
+    """可以放进反引号的库表名：1–256 个字符，不含反引号与控制字符。"""
+    return (
+        isinstance(name, str)
+        and 0 < len(name) <= 256
+        and "`" not in name
+        and all(ch.isprintable() for ch in name)
+    )
 
 
 def _layout_row(row: dict[str, Scalar], allowed: frozenset[str]) -> dict[str, Scalar] | None:
@@ -805,14 +1011,32 @@ def _shown_keys(value: str | None, allowed: frozenset[str]) -> str | None:
     return ", ".join(names)
 
 
-def metadata_sql_bytes(policy: QueryPolicy) -> int:
-    """元数据查询结果中 ``sql``（代码生成的模板，不含绑定值）的最大 UTF-8 字节数。"""
-    widest = max(len(columns) for columns in policy.allowed_columns.values())
+def metadata_sql_bytes() -> int:
+    """元数据结果中 ``sql``（代码模板，不含绑定值）的最大 UTF-8 字节数。"""
     return max(
-        len(_list_tables_sql(len(policy.allowed_objects)).encode()),
-        len(_describe_table_sql(widest).encode()),
+        len(SCHEMA_OBJECTS_SQL.encode()),
+        len(SCHEMA_COLUMNS_SQL.encode()),
         len(_DESCRIBE_LAYOUT.encode()),
     )
+
+
+def bounded_rows(
+    rows: Sequence[dict[str, Scalar]], max_rows: int, target: StarRocksTarget
+) -> tuple[tuple[dict[str, Scalar], ...], bool]:
+    """按与查询读取相同的规则取前若干行：行数、单值与总字节（生产 JSON 编码）任一超限即截断。"""
+    kept: list[dict[str, Scalar]] = []
+    size = 2  # "[]"
+    for row in rows:
+        if len(kept) == max_rows or any(
+            _json_size(v) > target.max_value_bytes for v in row.values()
+        ):
+            return tuple(kept), True
+        added = _json_size(row) + (2 if kept else 0)
+        if size + added > target.max_result_bytes:
+            return tuple(kept), True
+        kept.append(row)
+        size += added
+    return tuple(kept), False
 
 
 def _json_size(value: object) -> int:

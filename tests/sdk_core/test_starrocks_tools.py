@@ -21,7 +21,15 @@ from asyncmy.errors import OperationalError
 from sqlalchemy import text
 from sqlalchemy.engine import URL
 from sqlalchemy.ext.asyncio import AsyncEngine
-from tests.p1b.test_starrocks_adapter import NOW, POLICY, Driver, Result, driver
+from tests.p1b.test_starrocks_adapter import (
+    NOW,
+    POLICY,
+    Driver,
+    Result,
+    driver,
+    ready_schema,
+    schema_results,
+)
 from tests.p1b.test_starrocks_adapter import TARGET as SR
 from tests.p1b.test_starrocks_audit import AUDIT_TARGET
 from tests.sdk_core.synthetic_tools import Clock, Grants, ready_engine
@@ -66,6 +74,7 @@ from xiaowei.models import (
 from xiaowei.session import SessionInputPolicy, SessionLimits
 from xiaowei.sqlguard import guard_explain_query, guard_readonly_query
 from xiaowei.starrocks import EXPLAIN_PREFIX, StarRocksAdapter, StarRocksTarget
+from xiaowei.starrocks_schema import SchemaCache
 from xiaowei.starrocks_tools import (
     AUDIT_TOOLS,
     DESCRIBE_TABLE,
@@ -76,6 +85,7 @@ from xiaowei.starrocks_tools import (
     PLAN_NOTE,
     QUERY_TOOLS,
     RUN_QUERY,
+    SCHEMA_NOTE,
     data_scope_digest,
     starrocks_tools,
 )
@@ -189,7 +199,9 @@ async def env(postgres_url: URL, monkeypatch: pytest.MonkeyPatch) -> AsyncIterat
         drv = driver(SALES)
         adapter = StarRocksAdapter(SR, connect=drv, clock=lambda: NOW)
         tools = starrocks_tools(
-            adapter, dict.fromkeys(("model", "session", "web", "feishu"), CAPACITY)
+            adapter,
+            dict.fromkeys(("model", "session", "web", "feishu"), CAPACITY),
+            schema=await ready_schema(adapter, drv),
         )
         grants, clock = Grants(), Clock()
         grants.grant("alice", *QUERY_TOOLS, target=SR.target_id)
@@ -219,13 +231,16 @@ def tool_outputs(call: ModelCall) -> list[str]:
 
 
 def executed_sql(drv: Driver) -> list[str]:
-    """到达驱动的查询语句（不含会话设置与回读）。"""
+    """到达驱动的查询语句（不含会话设置与回读、结构快照读取与零行权限探测）。"""
     return [
         sql
         for conn in drv.connections
         for sql, _ in conn.executed
-        if not sql.startswith(("SET ", "SELECT @@"))
+        if not sql.startswith(("SET ", "SELECT @@", "SELECT 1 FROM `")) and sql not in SCHEMA_SQL
     ]
+
+
+SCHEMA_SQL = frozenset(schema_results()) - {"*"}
 
 
 # ---- 用途与可见性 -----------------------------------------------------------------------
@@ -398,21 +413,37 @@ async def test_truncated_results_are_marked_in_every_delivery(env: Env) -> None:
     assert "结果已截断" in delivered.content
 
 
-async def test_metadata_tools_only_run_code_generated_queries(env: Env) -> None:
-    env.drv.make = driver(Result(("name", "type", "nullable"), [("region", "varchar", "YES")])).make
+async def test_metadata_tools_serve_the_snapshot_after_probing_current_access(env: Env) -> None:
     message = env.scripts.add(
         "诊断：sales 有哪些列",
         tool_call("list_tables", cluster=SR.target_id),
-        tool_call("describe_table", cluster=SR.target_id, table="sales"),
+        tool_call("describe_table", cluster=SR.target_id, database="shop", table="sales"),
         cite(),
     )
     delivered = await env.deliver(env.ctx("diagnose"), message)
 
-    assert [c.executed[-1][1] for c in env.drv.connections] == [
-        ("shop", "regions", "sales"),
-        ("shop", "sales", "note", "region", "total"),
+    # 结构取自快照；交付前到达驱动的只有零行探测（列表探测全部对象，表结构探测这一个）。
+    assert [[sql for sql, _ in c.executed[2:]] for c in env.drv.connections] == [
+        [
+            "SELECT 1 FROM `shop`.`regions` WHERE 1 = 0",
+            "SELECT 1 FROM `shop`.`sales` WHERE 1 = 0",
+        ],
+        ["SELECT 1 FROM `shop`.`sales` WHERE 1 = 0"],
     ]
-    assert [f.tool_id for f in delivered.facts] == [LIST_TABLES, DESCRIBE_TABLE]
+    listed, described = delivered.facts
+    assert (listed.tool_id, described.tool_id) == (LIST_TABLES, DESCRIBE_TABLE)
+    assert listed.rows == (
+        {"database": "shop", "name": "regions", "type": "BASE TABLE", "comment": None},
+        {"database": "shop", "name": "sales", "type": "BASE TABLE", "comment": None},
+    )
+    assert described.rows[0] == {
+        "name": "region",
+        "type": "varchar",
+        "nullable": "YES",
+        "comment": "地区",
+    }
+    assert listed.note == described.note == SCHEMA_NOTE
+    assert listed.captured_at == NOW  # 快照的采集时间，不冒充交付时刻
 
 
 async def test_followup_replays_the_rows_without_rerunning_the_query(env: Env) -> None:
@@ -487,12 +518,12 @@ async def test_sqlguard_rejections_never_reach_the_adapter(env: Env, sql: str, c
 async def test_describe_table_outside_the_allowlist_is_rejected_before_io(env: Env) -> None:
     message = env.scripts.add(
         "看看 users 表",
-        tool_call("describe_table", cluster=SR.target_id, table="users"),
+        tool_call("describe_table", cluster=SR.target_id, database="shop", table="users"),
         clarify("没有可查看的 users 表"),
     )
     await env.app.run_turn(env.ctx("diagnose"), message)
     (rejected,) = tool_outputs(env.scripts.calls[message][1])
-    assert "不在允许范围内" in rejected and "users" not in rejected
+    assert "不在可读的表结构中" in rejected and "users" not in rejected
     assert env.drv.attempts == 0
 
 
@@ -565,9 +596,11 @@ async def test_execution_failure_stops_the_turn_and_consumes_the_budget(env: Env
 
 async def test_rows_that_do_not_fit_a_projection_stop_the_turn(env: Env) -> None:
     """绕过装配检查的错误配置：飞书投影放不下 rows 时证据生成失败，结果不交给模型。"""
+    adapter = StarRocksAdapter(SR, connect=env.drv, clock=lambda: NOW)
     tools = starrocks_tools(
-        StarRocksAdapter(SR, connect=env.drv, clock=lambda: NOW),
+        adapter,
         dict.fromkeys(("model", "session", "web", "feishu"), CAPACITY),
+        schema=await ready_schema(adapter, env.drv),
     )
     small = replace(tools.policies[2].projections["feishu"], max_bytes=300)
     policy = replace(
@@ -662,18 +695,23 @@ async def test_an_unexpected_precheck_failure_is_a_fixed_rejection_without_io(en
 
 
 def scoped(**changes: Any) -> StarRocksTarget:
-    """以 SR 为基础的目标配置；``policy`` 中的键改写 SQLGuard allowlist，其余改写目标本身。"""
+    """以 SR 为基础的目标配置；``policy`` 与 ``schema_limits`` 中的键分别改写这两段，其余改写
+    目标本身。"""
     data = SR.model_dump(mode="json")
     data["policy"].update(changes.pop("policy", {}))
+    data["schema_limits"].update(changes.pop("schema_limits", {}))
     data.update(changes)
     return StarRocksTarget.model_validate(data)
 
 
-def reassembled(env: Env, target: StarRocksTarget) -> tuple[EvidenceStore, Application]:
-    """以另一份目标配置重新装配目录、证据与应用，共用同一 PostgreSQL：模拟改配置后重启。"""
+async def reassembled(env: Env, target: StarRocksTarget) -> tuple[EvidenceStore, Application]:
+    """以另一份目标配置重新装配目录、证据与应用，共用同一 PostgreSQL：模拟改配置后重启。
+
+    这些用例只读取已保存的证据、不再调用工具，新装配的结构快照不刷新（不产生 I/O）。
+    """
+    adapter = StarRocksAdapter(target, connect=env.drv, clock=lambda: NOW)
     tools = starrocks_tools(
-        StarRocksAdapter(target, connect=env.drv, clock=lambda: NOW),
-        dict.fromkeys(AUDIENCES, CAPACITY),
+        adapter, dict.fromkeys(AUDIENCES, CAPACITY), schema=SchemaCache(adapter, clock=lambda: NOW)
     )
     evidence = EvidenceStore(
         env.engine,
@@ -704,27 +742,12 @@ async def queried(env: Env) -> tuple[RunContext, AgentAnswer]:
 
 
 # 与 SR 相同的范围，只是集合的书写顺序、映射键顺序与函数名大小写不同。
-SAME_SCOPE = scoped(
-    policy={
-        "allowed_objects": ["sales", "regions"],
-        "allowed_columns": {"regions": ["region", "name"], "sales": ["total", "note", "region"]},
-        "allowed_functions": ["count", "Sum"],
-    }
-)
+SAME_SCOPE = scoped(policy={"allowed_functions": ["count", "Sum"]})
+# 配置中仍决定可读数据的部分：函数、上限与结构快照容量。可读对象与列来自快照，随数据库权限
+# 变化，不进入摘要；撤权后旧证据的失效由 P2.5 Task 5 按当前权限复核实现。
 NARROWED = {
-    "移除无关对象": scoped(
-        policy={
-            "allowed_objects": ["sales"],
-            "allowed_columns": {"sales": ["region", "total", "note"]},
-        }
-    ),
-    "移除证据所用对象": scoped(
-        policy={"allowed_objects": ["regions"], "allowed_columns": {"regions": ["name", "region"]}}
-    ),
-    "移除一列": scoped(
-        policy={"allowed_columns": {"sales": ["region", "total"], "regions": ["name", "region"]}}
-    ),
     "移除一个函数": scoped(policy={"allowed_functions": ["SUM"]}),
+    "降低快照对象上限": scoped(schema_limits={"max_objects": 10}),
     "降低 max_rows": scoped(policy={"max_rows": 4}),
     "降低 max_sql_bytes": scoped(policy={"max_sql_bytes": 3000}),
     "降低 max_result_bytes": scoped(max_result_bytes=500),
@@ -778,7 +801,7 @@ async def test_evidence_stays_readable_when_scope_is_unchanged(
     assert data_scope_digest(target) == data_scope_digest(SR)
     ctx, answer_ = await queried(env)
     (evidence_id,) = answer_.evidence_ids
-    evidence, app = reassembled(env, target)
+    evidence, app = await reassembled(env, target)
     for audience in ("model", "session", "web"):
         await evidence.project(evidence_id, ctx, audience)
     await evidence.validate_answer(answer_, ctx)
@@ -810,7 +833,7 @@ async def assert_old_evidence_unreadable(env: Env, target: StarRocksTarget) -> N
     assert data_scope_digest(target) != data_scope_digest(SR)
     ctx, answer_ = await queried(env)
     (evidence_id,) = answer_.evidence_ids
-    evidence, app = reassembled(env, target)
+    evidence, app = await reassembled(env, target)
     for audience in ("model", "session", "web"):
         with pytest.raises(EvidenceUnavailableError):
             await evidence.project(evidence_id, ctx, audience)
@@ -949,8 +972,9 @@ async def test_fact_note_is_rendered_from_the_current_policy_not_the_record(env:
 
     # 证据记录不保存说明：以只改说明文字的策略重新装配，策略指纹不变、旧证据照常可读，
     # 渲染出的是当前登记的说明。
+    adapter = StarRocksAdapter(SR, connect=env.drv, clock=lambda: NOW)
     tools = starrocks_tools(
-        StarRocksAdapter(SR, connect=env.drv, clock=lambda: NOW), dict.fromkeys(AUDIENCES, CAPACITY)
+        adapter, dict.fromkeys(AUDIENCES, CAPACITY), schema=SchemaCache(adapter, clock=lambda: NOW)
     )
     changed = tuple(
         replace(p, fact_note=f"新的说明\n{ANALYSIS_HEADER}") if p.fact_note is not None else p
@@ -968,10 +992,11 @@ async def test_fact_note_is_rendered_from_the_current_policy_not_the_record(env:
     assert f"说明：新的说明\\n{ANALYSIS_HEADER}" in again.content.split("\n")
     assert again.content.split("\n").count(ANALYSIS_HEADER) == 1  # 只有代码生成的分析标题
     assert PLAN_NOTE not in again.content
-    # 只有 explain 工具带说明。
-    assert [p.policy_id for p in tools.policies if p.fact_note is not None] == [
-        f"starrocks.{SR.target_id}.explain_query"
-    ]
+    # 带说明的只有执行计划与两个表结构工具（快照说明）。
+    assert {p.policy_id for p in tools.policies if p.fact_note is not None} == {
+        f"starrocks.{SR.target_id}.{name}"
+        for name in ("explain_query", "list_tables", "describe_table")
+    }
 
 
 async def test_hostile_plan_lines_cannot_forge_sections(env: Env) -> None:
@@ -997,15 +1022,15 @@ async def test_hostile_plan_lines_cannot_forge_sections(env: Env) -> None:
 
 @pytest.mark.parametrize(
     "target",
-    [NARROWED["移除证据所用对象"], NARROWED["降低 max_plan_lines"], CONNECTION_CHANGED["换 user"]],
-    ids=["移除证据所用对象", "降低 max_plan_lines", "换 user"],
+    [NARROWED["移除一个函数"], NARROWED["降低 max_plan_lines"], CONNECTION_CHANGED["换 user"]],
+    ids=["移除一个函数", "降低 max_plan_lines", "换 user"],
 )
 async def test_explain_evidence_is_invalidated_by_scope_narrowing(
     env: Env, target: StarRocksTarget
 ) -> None:
     ctx, answer_ = await explained(env)
     (evidence_id,) = answer_.evidence_ids
-    evidence, app = reassembled(env, target)
+    evidence, app = await reassembled(env, target)
     for audience in ("model", "session", "web"):
         with pytest.raises(EvidenceUnavailableError):
             await evidence.project(evidence_id, ctx, audience)
@@ -1036,12 +1061,12 @@ async def test_diagnose_turn_cites_layout_with_unapproved_keys_hidden(env: Env) 
     env.drv.make = driver(Result(LAYOUT_COLUMNS, [raw])).make
     web = env.scripts.add(
         "sales 表的分区和分桶合理吗",
-        tool_call("describe_table_layout", cluster=SR.target_id, table="sales"),
+        tool_call("describe_table_layout", cluster=SR.target_id, database="shop", table="sales"),
         cite("按 region 分区"),
     )
     feishu = env.scripts.add(
         "飞书：sales 表布局",
-        tool_call("describe_table_layout", cluster=SR.target_id, table="sales"),
+        tool_call("describe_table_layout", cluster=SR.target_id, database="shop", table="sales"),
         cite(),
     )
     on_web = await env.deliver(env.ctx("diagnose", session="s-web"), web)
@@ -1069,19 +1094,19 @@ async def test_diagnose_turn_cites_layout_with_unapproved_keys_hidden(env: Env) 
 async def test_layout_outside_the_allowlist_is_rejected_before_io(env: Env) -> None:
     message = env.scripts.add(
         "看看 users 表的布局",
-        tool_call("describe_table_layout", cluster=SR.target_id, table="users"),
+        tool_call("describe_table_layout", cluster=SR.target_id, database="shop", table="users"),
         clarify("没有可查看的 users 表"),
     )
     await env.app.run_turn(env.ctx("diagnose", max_tool_calls=1), message)
     (rejected,) = tool_outputs(env.scripts.calls[message][1])
-    assert "不在允许范围内" in rejected and "users" not in rejected
+    assert "不在可读的表结构中" in rejected and "users" not in rejected
     assert env.drv.attempts == 0 and await env.evidence_rows() == 0
 
 
 def test_layout_policy_shares_the_target_data_scope() -> None:
+    adapter = StarRocksAdapter(SR, connect=driver(), clock=lambda: NOW)
     tools = starrocks_tools(
-        StarRocksAdapter(SR, connect=driver(), clock=lambda: NOW),
-        dict.fromkeys(AUDIENCES, CAPACITY),
+        adapter, dict.fromkeys(AUDIENCES, CAPACITY), schema=SchemaCache(adapter, clock=lambda: NOW)
     )
     assert {c.tool_id for c in tools.contracts} == set(SDK_NAMES)
     assert {p.data_scope for p in tools.policies} == {data_scope_digest(SR)}
@@ -1144,13 +1169,13 @@ async def multi(postgres_url: URL, monkeypatch: pytest.MonkeyPatch) -> AsyncIter
             t: driver(Result(("region", "total"), [("east", 1000 + i)]))
             for i, t in enumerate(CLUSTERS)
         }
-        parts = [
-            starrocks_tools(
-                StarRocksAdapter(target, connect=drivers[t], clock=lambda: NOW),
-                dict.fromkeys(AUDIENCES, CAPACITY),
+        parts = []
+        for t, target in CLUSTERS.items():
+            adapter = StarRocksAdapter(target, connect=drivers[t], clock=lambda: NOW)
+            schema = await ready_schema(adapter, drivers[t])
+            parts.append(
+                starrocks_tools(adapter, dict.fromkeys(AUDIENCES, CAPACITY), schema=schema)
             )
-            for t, target in CLUSTERS.items()
-        ]
         tools = parts[0] + parts[1] + parts[2]
         grants = Grants()
         for t in CLUSTERS:

@@ -488,7 +488,12 @@ def scripted_diagnosis() -> GeminiLikeEndpoint:
         window_minutes=60,
         order_by="query_time",
     )
-    layout = call_tool("describe_table_layout", cluster=gate0.DIAG_TARGET.target_id, table="orders")
+    layout = call_tool(
+        "describe_table_layout",
+        cluster=gate0.DIAG_TARGET.target_id,
+        database="shop",
+        table="orders",
+    )
     pasted = call_tool("explain_query", cluster=gate0.DIAG_TARGET.target_id, sql=gate0.SLOW_SQL)
     unapproved = call_tool(
         "explain_query", cluster=gate0.DIAG_TARGET.target_id, sql=gate0.UNAPPROVED_SQL
@@ -563,7 +568,7 @@ def _dx(name: str, *statements: tuple[gate0.StatementKind, str], **values: Any) 
 
 
 EXPLAINED = gate0._explained(gate0.SLOW_SQL)
-RAN = guard_readonly_query("SELECT region FROM orders", gate0.DIAG_TARGET.policy).normalized_sql
+RAN = guard_readonly_query("SELECT region FROM orders", gate0.DIAG_POLICY).normalized_sql
 
 
 def _passing_diagnosis() -> list[gate0.DiagnosisResult]:
@@ -655,7 +660,7 @@ async def test_approved_queries_with_template_lookalikes_count_as_executed(sql: 
     """获准查询的字面量像元数据或审计语句，经真实 Adapter 执行后仍计为一次查询。"""
     starrocks = gate0.SyntheticStarRocks(gate0.DIAG_TARGET)
     adapter = StarRocksAdapter(gate0.DIAG_TARGET, connect=starrocks, clock=Clock())
-    await adapter.run_query(guard_readonly_query(sql, gate0.DIAG_TARGET.policy))
+    await adapter.run_query(guard_readonly_query(sql, gate0.DIAG_POLICY))
     assert len(starrocks.sent("query")) == 1
     assert [k for k, _ in starrocks.statements if k != "session"] == ["query"]
 
@@ -663,14 +668,14 @@ async def test_approved_queries_with_template_lookalikes_count_as_executed(sql: 
 async def test_adapter_templates_are_classified_by_exact_match() -> None:
     starrocks = gate0.SyntheticStarRocks(gate0.DIAG_TARGET)
     adapter = StarRocksAdapter(gate0.DIAG_TARGET, connect=starrocks, clock=Clock())
-    await adapter.list_tables()
-    await adapter.describe_table("orders")
-    await adapter.describe_layout("orders")
+    await adapter.read_schema()
+    await adapter.probe([("shop", "orders")])
+    await adapter.describe_layout("shop", "orders", frozenset(gate0.DIAG_COLUMNS))
     for order in ("query_time", "scan_rows"):
-        await adapter.slow_queries(60, order)
-    await adapter.explain(guard_explain_query(gate0.SLOW_SQL, gate0.DIAG_TARGET.policy))
+        await adapter.slow_queries(60, order, gate0.DIAG_POLICY)
+    await adapter.explain(guard_explain_query(gate0.SLOW_SQL, gate0.DIAG_POLICY))
     kinds = [k for k, _ in starrocks.statements if k != "session"]
-    assert kinds == ["tables", "columns", "layout", "audit", "audit", "explain"]
+    assert kinds == ["schema", "schema", "schema", "probe", "layout", "audit", "audit", "explain"]
     assert {k for k, _ in starrocks.statements} - set(kinds) == {"session"}
 
 
@@ -695,7 +700,7 @@ def test_no_evidence_sample_rejects_clarifying_after_obtaining_evidence() -> Non
 def test_previous_sql_accepts_the_original_sql_without_the_added_limit() -> None:
     """模型解释上一轮的原句（不带代码追加的 LIMIT）：规范化后就是执行过的那条，合格。"""
     original = "select region from orders"
-    ran = guard_readonly_query(original, gate0.DIAG_TARGET.policy).normalized_sql
+    ran = guard_readonly_query(original, gate0.DIAG_POLICY).normalized_sql
     assert "LIMIT" in ran
     results = _passing_diagnosis()
     results[3] = _dx("previous_query", ("query", ran), cited_tools=(RUN_QUERY,))

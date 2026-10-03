@@ -29,7 +29,7 @@ from pydantic import SecretStr
 from sqlalchemy import text
 from sqlalchemy.engine import URL
 from tests.p1b.test_starrocks_adapter import TARGET as SR
-from tests.p1b.test_starrocks_adapter import Result, driver
+from tests.p1b.test_starrocks_adapter import Result, driver, schema_results
 from tests.sdk_core.synthetic_tools import Clock
 from tests.sdk_core.test_app import Scripts, after, cite, clarify, tool_call, upstream_error
 from tests.sdk_core.test_feishu import FakeChannel
@@ -41,6 +41,7 @@ from xiaowei.channel_store import ChannelStore, RequestUnavailableError
 from xiaowei.config import SecretRefError
 from xiaowei.models import AUDIENCES, Identity
 from xiaowei.starrocks import EXPLAIN_PREFIX, StarRocksAdapter
+from xiaowei.starrocks_schema import SchemaCache
 from xiaowei.starrocks_tools import (
     AUDIT_NOTE,
     AUDIT_TOOLS,
@@ -181,6 +182,9 @@ class Env:
         async with httpx.AsyncClient(base_url=self.origin, timeout=30) as client:
             served = Served(client, task, stop)
             await served.ready()
+            # 启动时各目标先刷新一次结构快照；用例只统计请求本身到达驱动的 I/O。
+            for drv in (kw.get("starrocks_connect") or {"default": self.drv}).values():
+                forget(drv)
             try:
                 yield served
             finally:
@@ -191,6 +195,14 @@ class Env:
         async with open_engine(SecretStr(self.url.render_as_string(hide_password=False))) as e:
             async with e.connect() as conn:
                 return await conn.scalar(text(sql))
+
+
+def forget(drv: Any) -> None:
+    """清掉驱动替身已有的连接与语句记录（启动时结构快照刷新留下的）。"""
+    drv.attempts = 0
+    for name in ("connections", "statements"):
+        if hasattr(drv, name):
+            getattr(drv, name).clear()
 
 
 @dataclass
@@ -302,13 +314,16 @@ PLAN = Result(("Explain String",), [("- Output => [1:region]",), ("    - SCAN [s
 
 
 def statements(drv: Any) -> list[str]:
-    """到达驱动的查询语句（不含会话设置与回读）。"""
+    """到达驱动的业务与元数据语句（不含会话设置与回读、结构快照读取与零行权限探测）。"""
     return [
         sql
         for conn in drv.connections
         for sql, _ in conn.executed
-        if not sql.startswith(("SET ", "SELECT @@"))
+        if not sql.startswith(("SET ", "SELECT @@", "SELECT 1 FROM `")) and sql not in SCHEMA_SQL
     ]
+
+
+SCHEMA_SQL = frozenset(schema_results()) - {"*"}
 
 
 async def test_formal_assembly_diagnoses_with_a_plan_and_never_runs_the_query(env: Env) -> None:
@@ -372,7 +387,9 @@ async def test_formal_assembly_cites_table_layout_with_hidden_keys(env: Env) -> 
         await served.page()
         message = env.scripts.add(
             "sales 表的分桶合理吗",
-            tool_call("describe_table_layout", cluster=SR.target_id, table="sales"),
+            tool_call(
+                "describe_table_layout", cluster=SR.target_id, database="shop", table="sales"
+            ),
             cite(),
         )
         body = (await served.turn(message)).json()
@@ -402,7 +419,9 @@ async def test_formal_assembly_rejects_layout_of_unlisted_tables_without_io(env:
         await served.page()
         message = env.scripts.add(
             "users 表的布局",
-            tool_call("describe_table_layout", cluster=SR.target_id, table="users"),
+            tool_call(
+                "describe_table_layout", cluster=SR.target_id, database="shop", table="users"
+            ),
             clarify("users 不在可查看范围内"),
         )
         body = (await served.turn(message)).json()
@@ -679,7 +698,8 @@ async def test_accept_paused_across_a_takeover_ends_interrupted_not_stranded(env
             assert await waiting_on_locks(env, 1)
             assert await env.scalar(TERMINATE_LOCK) == 1
 
-            second = Env(env.url, free_port(), env.scripts, env.clock, env.drv)
+            # 新实例用自己的驱动：它只做启动时的结构快照刷新，不能为任何请求运行查询。
+            second = Env(env.url, free_port(), env.scripts, env.clock, driver(SALES))
             stop = asyncio.Event()
             task = asyncio.create_task(second.serve(second.config(), stop))
             # 新实例的恢复应在接收屏障上等待；没有屏障时它直接完成，这里只是等到期限。
@@ -702,6 +722,11 @@ async def test_accept_paused_across_a_takeover_ends_interrupted_not_stranded(env
             assert await fresh.finish() == 0
     assert late not in env.scripts.calls  # 模型与查询都没有为它运行
     assert env.drv.attempts == attempts
+    assert statements(second.drv) == [] and all(  # 新实例只有结构刷新的读取与探测
+        sql.startswith(("SET ", "SELECT @@", "SELECT 1 FROM `")) or sql in SCHEMA_SQL
+        for conn in second.drv.connections
+        for sql, _ in conn.executed
+    )
 
 
 # ---- 飞书 ----------------------------------------------------------------------------
@@ -1070,7 +1095,9 @@ def test_example_configuration_is_valid_and_fits_the_projections() -> None:
     )
     for target in config.targets:
         adapter = StarRocksAdapter(target.starrocks, connect=driver(SALES), clock=Clock())
-        starrocks_tools(adapter, config.projection_bytes)
+        starrocks_tools(
+            adapter, config.projection_bytes, schema=SchemaCache(adapter, clock=Clock())
+        )
     assert config.listen_port == 8501 and config.feishu is None
 
 
@@ -1148,7 +1175,7 @@ async def test_history_and_resend_reject_after_scope_narrowing(env: Env) -> None
 def cluster_config(target_id: str) -> dict[str, Any]:
     """与 SR 同名库表、不同集群 ID 的目标配置。"""
     starrocks = SR.model_dump(mode="json")
-    starrocks["target_id"] = starrocks["policy"]["target_id"] = target_id
+    starrocks["target_id"] = target_id
     return target_config(starrocks)
 
 
@@ -1217,3 +1244,38 @@ def test_invalid_targets_are_reported_without_values(
     with pytest.raises(runtime.ConfigError) as raised:
         runtime.load_config(file)
     assert reason in str(raised.value) and "10.0.0.1" not in str(raised.value)
+
+
+# ---- 自动结构快照（P2.5 Task 2）-----------------------------------------------------------
+
+
+async def test_a_cluster_without_a_schema_snapshot_is_unavailable_but_the_others_serve(
+    env: Env,
+) -> None:
+    """启动时 sr-b 的结构刷新失败：服务照常就绪，sr-a 正常查询；sr-b 的数据工具在任何 I/O 前
+    拒绝（只有被拒绝的那次刷新尝试到达过驱动），模型只能如实说明。"""
+    healthy = driver(Result(("region", "total"), [("east", 1)]))
+    down = driver()
+    down.connect_error = ProgrammingError(2003, "Can't connect canary-host")
+    config = env.config(targets=[cluster_config("sr-a"), cluster_config("sr-b")])
+    async with env.running(config, starrocks_connect={"sr-a": healthy, "sr-b": down}) as served:
+        await served.page()
+        ok = env.scripts.add(
+            "sr-a 东区",
+            tool_call("run_readonly_query", cluster="sr-a", sql="SELECT region, total FROM sales"),
+            cite(),
+        )
+        body = (await served.turn(ok, "query", "r1")).json()
+        assert body["state"] == "completed" and body["delivery"]["facts"][0]["target_id"] == "sr-a"
+
+        refused = env.scripts.add(
+            "sr-b 东区",
+            tool_call("run_readonly_query", cluster="sr-b", sql="SELECT region, total FROM sales"),
+            clarify("sr-b 暂不可用"),
+        )
+        body = (await served.turn(refused, "query", "r2")).json()
+        assert body["state"] == "completed" and body["delivery"]["facts"] == []
+        outputs = json.dumps(env.scripts.calls[refused][1].input, ensure_ascii=False)
+        assert "表结构暂不可用" in outputs and "canary" not in outputs
+        assert down.attempts == 0  # forget() 之后：拒绝路径没有任何连接
+        assert await served.finish() == 0

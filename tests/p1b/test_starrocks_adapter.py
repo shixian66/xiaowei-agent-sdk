@@ -37,15 +37,24 @@ from xiaowei.starrocks import (
     LAYOUT_COLUMNS,
     LAYOUT_HIDDEN,
     PLAN_COLUMN,
+    SCHEMA_COLUMNS_SQL,
+    SCHEMA_IDS_SQL,
+    SCHEMA_OBJECTS_SQL,
+    SYSTEM_DATABASES,
     QueryResult,
+    SchemaLimits,
+    SqlPolicy,
     StarRocksAdapter,
     StarRocksError,
     StarRocksErrorCode,
     StarRocksTarget,
     metadata_sql_bytes,
     open_starrocks,
+    probe_sql,
+    safe_identifier,
     tls_context,
 )
+from xiaowei.starrocks_schema import SchemaCache
 
 Code = StarRocksErrorCode
 NOW = datetime(2026, 9, 30, 8, 0, tzinfo=UTC)
@@ -63,6 +72,11 @@ POLICY = QueryPolicy(
     max_rows=5,
     max_sql_bytes=4000,
 )
+# SQLGuard 范围与结构替身一致：shop.sales(region, total, note)、shop.regions(name, region)。
+SQL_POLICY = SqlPolicy(
+    allowed_functions=frozenset({"SUM", "COUNT"}), max_rows=5, max_sql_bytes=4000
+)
+LIMITS = SchemaLimits(max_objects=50, max_columns=500, max_bytes=100_000, max_comment_chars=100)
 TARGET = StarRocksTarget(
     target_id="sr-test",
     host="starrocks.internal",
@@ -80,7 +94,8 @@ TARGET = StarRocksTarget(
     query_mem_limit_bytes=2**30,
     max_result_bytes=1000,
     max_value_bytes=200,
-    policy=POLICY,
+    policy=SQL_POLICY,
+    schema_limits=LIMITS,
 )
 SESSION_SET = "SET query_timeout = 1, query_mem_limit = 1073741824, time_zone = 'Asia/Shanghai'"
 SESSION_READ = "SELECT @@query_timeout, @@query_mem_limit, @@time_zone"
@@ -170,11 +185,54 @@ class Driver:
         return conn
 
 
+# ---- 结构快照的替身数据（P2.5 Task 2）：与 POLICY 同样的两张表，另有一张无权表 -------------
+
+CREATED = datetime(2026, 9, 1, 8, 0)
+SCHEMA_TABLES: dict[tuple[str, str], tuple[tuple[str, str, str, str | None], ...]] = {
+    ("shop", "sales"): (
+        ("region", "varchar", "YES", "地区"),
+        ("total", "decimal", "YES", None),
+        ("note", "varchar", "YES", None),
+    ),
+    ("shop", "regions"): (("name", "varchar", "NO", None), ("region", "varchar", "YES", None)),
+}
+
+
+def schema_results(
+    tables: dict[tuple[str, str], tuple[tuple[str, str, str, str | None], ...]] | None = None,
+    denied: frozenset[tuple[str, str]] = frozenset(),
+) -> dict[str, Result | BaseException]:
+    """``read_schema`` 三条读取与每个对象零行探测的脚本结果；``denied`` 中的对象探测为 5203。"""
+    tables = SCHEMA_TABLES if tables is None else tables
+    objects = [(db, name, "BASE TABLE", None, CREATED) for db, name in sorted(tables)]
+    columns = [
+        (db, name, col, kind, nullable, comment)
+        for (db, name), cols in sorted(tables.items())
+        for col, kind, nullable, comment in cols
+    ]
+    ids = [(db, name, 100 + i) for i, (db, name) in enumerate(sorted(tables))]
+    results: dict[str, Result | BaseException] = {
+        SCHEMA_OBJECTS_SQL: Result(("db", "name", "type", "comment", "created"), objects),
+        SCHEMA_COLUMNS_SQL: Result(("db", "name", "col", "type", "nullable", "comment"), columns),
+        SCHEMA_IDS_SQL: Result(("db", "name", "id"), ids),
+    }
+    for db, name in tables:
+        if not (safe_identifier(db) and safe_identifier(name)):
+            continue  # 产品不会为这类名字生成探测语句
+        results[probe_sql(db, name)] = (
+            ProgrammingError(5203, f"Access denied {CANARY}")
+            if (db, name) in denied
+            else Result(("1",))
+        )
+    return results
+
+
 def driver(query: Result | BaseException | None = None, **conn: Any) -> Driver:
     def make() -> FakeConnection:
         results: dict[str, Result | BaseException] = {
             SESSION_SET: Result(()),
             SESSION_READ: Result(("q", "m", "t"), [SESSION_VALUES]),
+            **schema_results(),
             "*": query if query is not None else Result(("region",), [("east",)]),
         }
         results.update(conn.pop("results", {}))
@@ -185,6 +243,16 @@ def driver(query: Result | BaseException | None = None, **conn: Any) -> Driver:
 
 def adapter(drv: Driver, target: StarRocksTarget = TARGET) -> StarRocksAdapter:
     return StarRocksAdapter(target, connect=drv, clock=lambda: NOW)
+
+
+async def ready_schema(ada: StarRocksAdapter, drv: Driver | None = None) -> SchemaCache:
+    """刷新一次结构快照（时钟固定，不会到期）；给出 ``drv`` 时清掉刷新留下的连接记录。"""
+    cache = SchemaCache(ada, clock=lambda: NOW)
+    assert await cache.refresh()
+    if drv is not None:
+        drv.connections.clear()
+        drv.attempts = 0
+    return cache
 
 
 def guarded(sql: str = "SELECT region, total FROM sales"):  # type: ignore[no-untyped-def]
@@ -706,41 +774,81 @@ async def test_only_guarded_queries_for_this_target_are_executed() -> None:
     assert drv.attempts == 0
 
 
-async def test_list_tables_is_code_generated_and_bound() -> None:
-    drv = driver(Result(("name", "type"), [("regions", "VIEW"), ("sales", "BASE TABLE")]))
-    result = await adapter(drv).list_tables()
-
-    sql, args = only(drv).executed[-1]
-    assert sql == (
-        "SELECT TABLE_NAME AS name, TABLE_TYPE AS type FROM information_schema.tables "
-        "WHERE TABLE_SCHEMA = %s AND TABLE_NAME IN (%s, %s) ORDER BY TABLE_NAME"
-    )
-    assert args == ("shop", "regions", "sales")
-    assert result.rows == (
-        {"name": "regions", "type": "VIEW"},
-        {"name": "sales", "type": "BASE TABLE"},
-    )
-    assert not result.truncated
-
-
-async def test_describe_table_only_exposes_allowed_columns() -> None:
-    drv = driver(Result(("name", "type", "nullable"), [("region", "varchar", "YES")]))
-    result = await adapter(drv).describe_table("sales")
-
-    sql, args = only(drv).executed[-1]
-    assert sql == (
-        "SELECT COLUMN_NAME AS name, DATA_TYPE AS type, IS_NULLABLE AS nullable "
-        "FROM information_schema.columns WHERE TABLE_SCHEMA = %s AND TABLE_NAME = %s "
-        "AND COLUMN_NAME IN (%s, %s, %s) ORDER BY ORDINAL_POSITION"
-    )
-    assert args == ("shop", "sales", "note", "region", "total")
-    assert result.columns == ("name", "type", "nullable")
-
-
-@pytest.mark.parametrize("name", ["customers", "Sales", "sales; DROP TABLE x", ""])
-async def test_describe_table_rejects_objects_outside_the_allowlist_before_io(name: str) -> None:
+async def test_read_schema_is_code_generated_and_bound() -> None:
     drv = driver()
-    error = await failure(adapter(drv).describe_table(name))
+    rows = await adapter(drv).read_schema()
+
+    statements = [(sql, args) for conn in drv.connections for sql, args in conn.executed[2:]]
+    assert statements == [
+        (SCHEMA_OBJECTS_SQL, (100, *SYSTEM_DATABASES, 51)),
+        (SCHEMA_COLUMNS_SQL, (100, *SYSTEM_DATABASES, 501)),
+        (SCHEMA_IDS_SQL, (*SYSTEM_DATABASES, 51)),
+    ]
+    # 每条读取一条新连接、会话限额先设置并回读；模板没有可注入的字符串拼接。
+    assert all(
+        conn.executed[:2] == [(SESSION_SET, None), (SESSION_READ, None)] for conn in drv.connections
+    )
+    assert len(rows.objects) == 2 and len(rows.columns) == 5 and len(rows.ids) == 2
+    assert rows.objects[0]["created"] == "2026-09-01T08:00:00+08:00"
+    assert not rows.truncated
+
+
+async def test_read_schema_marks_any_overflow_as_truncated() -> None:
+    small = TARGET.model_copy(
+        update={"schema_limits": LIMITS.model_copy(update={"max_columns": 4})}
+    )
+    rows = await adapter(driver(), small).read_schema()
+    assert rows.truncated and len(rows.columns) == 4
+
+
+async def test_probe_runs_zero_row_selects_on_one_connection() -> None:
+    drv = driver(results=schema_results(denied=frozenset({("shop", "regions")})))
+    verdicts = await adapter(drv).probe([("shop", "regions"), ("shop", "sales")])
+
+    conn = only(drv)
+    assert [sql for sql, _ in conn.executed] == [
+        SESSION_SET,
+        SESSION_READ,
+        "SELECT 1 FROM `shop`.`regions` WHERE 1 = 0",
+        "SELECT 1 FROM `shop`.`sales` WHERE 1 = 0",
+    ]
+    # 拒绝之后同一连接继续探测下一个对象；完整读完才正常关闭。
+    assert verdicts == {("shop", "regions"): False, ("shop", "sales"): True}
+    assert conn.closed and not conn.aborted
+
+
+@pytest.mark.parametrize("number", [1142, 5203, 5502, 1146, 5501, 1049])
+async def test_probe_denied_or_missing_is_a_definite_no(number: int) -> None:
+    error = ProgrammingError(number, f"denied {CANARY}")
+    drv = driver(results={probe_sql("shop", "sales"): error})
+    assert await adapter(drv).probe([("shop", "sales")]) == {("shop", "sales"): False}
+
+
+@pytest.mark.parametrize(
+    ("outcome", "code"),
+    [
+        (OperationalError(1105, f"internal {CANARY}"), Code.QUERY_FAILED),
+        (OperationalError(2013, "lost"), Code.CONNECTION_LOST),
+        (Result(("1",), [(1,)]), Code.RESULT_CONTRACT),  # 零行探测返回了行
+    ],
+    ids=["unknown-error", "connection-lost", "returned-rows"],
+)
+async def test_probe_that_cannot_decide_fails_the_whole_batch(
+    outcome: Result | BaseException, code: StarRocksErrorCode
+) -> None:
+    drv = driver(results={probe_sql("shop", "regions"): outcome})
+    error = await failure(adapter(drv).probe([("shop", "sales"), ("shop", "regions")]))
+    assert error.code is code
+    assert_safe(error)
+    assert only(drv).aborted  # 未完成的连接直接断开
+
+
+@pytest.mark.parametrize(
+    "obj", [("shop", "sa`les"), ("sh`op", "sales"), ("shop", ""), ("shop", "a\nb")]
+)
+async def test_probe_rejects_unsafe_names_before_io(obj: tuple[str, str]) -> None:
+    drv = driver()
+    error = await failure(adapter(drv).probe([("shop", "sales"), obj]))
     assert error.code is Code.OBJECT_NOT_ALLOWED
     assert drv.attempts == 0
 
@@ -766,13 +874,16 @@ SERVER_LAYOUT = (
 )
 
 
+SALES_COLUMNS = frozenset({"region", "total", "note"})
+
+
 def layout(*rows: tuple[object, ...]) -> Result:
     return Result(SERVER_LAYOUT, list(rows))
 
 
 async def test_describe_layout_is_code_generated_bound_and_has_no_properties() -> None:
     drv = driver(layout(("DUP_KEYS", "`region`", "HASH", "`region`, `total`", 8, "`region`", "")))
-    result = await adapter(drv).describe_layout("sales")
+    result = await adapter(drv).describe_layout("shop", "sales", SALES_COLUMNS)
 
     sql, args = only(drv).executed[-1]
     assert sql == LAYOUT_SQL
@@ -816,14 +927,14 @@ async def test_layout_keys_show_only_allowed_columns(raw: object, shown: object)
         row = dict.fromkeys(SERVER_LAYOUT, "")
         row.update(model="DUP_KEYS", distribute_type="HASH", buckets=1, **{key: raw})
         drv = driver(layout(tuple(row.values())))
-        (result_row,) = (await adapter(drv).describe_layout("sales")).rows
+        (result_row,) = (await adapter(drv).describe_layout("shop", "sales", SALES_COLUMNS)).rows
         assert result_row[key] == shown, key
         assert all(result_row[k] == "" for k in keys if k != key)
 
 
 async def test_view_has_no_layout_rows() -> None:
     drv = driver(layout())
-    result = await adapter(drv).describe_layout("regions")
+    result = await adapter(drv).describe_layout("shop", "regions", frozenset({"name"}))
     assert result.rows == () and result.columns == LAYOUT_COLUMNS and not result.truncated
 
 
@@ -840,21 +951,13 @@ async def test_view_has_no_layout_rows() -> None:
 )
 async def test_layout_outside_the_contract_fails_closed(result: Result) -> None:
     drv = driver(result)
-    error = await failure(adapter(drv).describe_layout("sales"))
+    error = await failure(adapter(drv).describe_layout("shop", "sales", SALES_COLUMNS))
     assert error.code is Code.RESULT_CONTRACT
     assert_safe(error)
 
 
-@pytest.mark.parametrize("name", ["customers", "Sales", "sales; DROP TABLE x", ""])
-async def test_describe_layout_rejects_objects_outside_the_allowlist_before_io(name: str) -> None:
-    drv = driver()
-    error = await failure(adapter(drv).describe_layout(name))
-    assert error.code is Code.OBJECT_NOT_ALLOWED
-    assert drv.attempts == 0
-
-
 def test_metadata_sql_bound_covers_the_layout_template() -> None:
-    assert metadata_sql_bytes(POLICY) >= len(LAYOUT_SQL.encode())
+    assert metadata_sql_bytes() >= len(LAYOUT_SQL.encode())
 
 
 # ---- 可信配置与装配 --------------------------------------------------------------------------
@@ -863,8 +966,6 @@ def test_metadata_sql_bound_covers_the_layout_template() -> None:
 @pytest.mark.parametrize(
     "changes",
     [
-        {"target_id": "sr-other"},  # 与 QueryPolicy 不一致
-        {"database": "other"},
         {"time_zone": "Mars/Base"},
         {"time_zone": "Asia/Shanghai'; SET x = 1; --"},
         {"password_ref": "plain-password"},
@@ -880,6 +981,29 @@ def test_metadata_sql_bound_covers_the_layout_template() -> None:
 def test_target_rejects_inconsistent_configuration(changes: dict[str, object]) -> None:
     with pytest.raises(ValidationError):
         StarRocksTarget.model_validate({**TARGET.model_dump(), **changes})
+
+
+@pytest.mark.parametrize(
+    ("limits", "reason"),
+    [
+        ({"refresh_seconds": 400}, "refresh_seconds 不能大于 max_age_seconds"),
+        ({"refresh_timeout_seconds": 90}, "refresh_timeout_seconds 不能大于 refresh_seconds"),
+        ({"max_age_seconds": 0}, "greater than 0"),
+        ({"max_objects": None}, "max_objects"),
+    ],
+)
+def test_schema_limits_are_bounded(limits: dict[str, object], reason: str) -> None:
+    data = TARGET.model_dump()
+    data["schema_limits"] = {**data["schema_limits"], **limits}
+    with pytest.raises(ValidationError, match=reason):
+        StarRocksTarget.model_validate(data)
+
+
+def test_hand_written_allowlist_reports_the_migration() -> None:
+    data = TARGET.model_dump()
+    data["policy"] = {**data["policy"], "allowed_objects": ["sales"], "allowed_columns": {}}
+    with pytest.raises(ValidationError, match="实际 SELECT 权限"):
+        StarRocksTarget.model_validate(data)
 
 
 def test_tls_context_verifies_certificate_and_host() -> None:

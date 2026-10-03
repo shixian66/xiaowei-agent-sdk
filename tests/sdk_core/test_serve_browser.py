@@ -30,7 +30,7 @@ from tests.sdk_core.test_runtime import PLAN, Env
 from tests.sdk_core.test_runtime import env as env  # pytest fixture
 from tests.sdk_core.test_web_browser import item, js, send, settled, table_rows
 
-from xiaowei.starrocks_tools import PLAN_NOTE
+from xiaowei.starrocks_tools import PLAN_NOTE, SCHEMA_NOTE
 from xiaowei.web import COOKIE
 
 pytestmark = [pytest.mark.loopback, pytest.mark.browser]
@@ -147,13 +147,17 @@ async def test_formal_assembly_turns_in_chrome(env: Env, chrome_binary: str) -> 
         )
         await send(page, plan, "diagnose")
         await settled(page, 2, "completed")
-        # 本轮还引用了回放中的历史证据；只有计划事实带说明，说明与计划表格在同一个事实框中。
+        # 本轮还引用了回放中的历史证据：表清单带快照说明、查询结果没有说明、计划带计划说明；
+        # 每条说明与自己的表格在同一个事实框中。
         noted = await page.evaluate(
             f"[...{item(2)}.querySelectorAll('.fact')].filter(f => f.querySelector('.note'))"
             ".map(f => [f.querySelector('.note').textContent,"
             " [...f.querySelectorAll('th')].map(th => th.textContent)])"
         )
-        assert noted == [[f"说明：{PLAN_NOTE}", ["plan"]]]
+        assert noted == [
+            [f"说明：{SCHEMA_NOTE}", ["database", "name", "type", "comment"]],
+            [f"说明：{PLAN_NOTE}", ["plan"]],
+        ]
 
         gate, entered = asyncio.Event(), asyncio.Event()
         slow = env.scripts.add(
