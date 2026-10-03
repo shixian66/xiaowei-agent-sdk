@@ -15,7 +15,7 @@
 
 查询与诊断共用一个业务 Agent。StarRocks 通过受治理 function tools 和本地 Adapter 直连；数据库 MCP 暂缓。通用 MCP Client Integration 保留用于将来其他能力；两条工具路径均复核权限、过滤结果并验证 Evidence。
 
-**已批准、尚未实现的增量：** P2.5 开放账号实际 SELECT 范围、复杂 SQL、多集群和自然语言用途识别，所有业务查询先做风险评估；随后增加指定飞书群共享与排队，均在 P3 前完成。产品边界见 [ARCHITECTURE](ARCHITECTURE.md#p25-scope)，实施顺序见 [DEVELOPMENT_PLAN](DEVELOPMENT_PLAN.md#6-p25-与飞书单群增量)。下文命令、配置和诊断用法仍描述当前 P1/P2 实现，不能直接用未来格式启动。
+**已批准、尚未实现的增量：** P2.5 开放账号实际 SELECT 范围、复杂 SQL、多集群和单 Agent 自然语言工具选择，所有业务查询先做风险评估；随后增加指定飞书群共享与排队，均在 P3 前完成。产品边界见 [ARCHITECTURE](ARCHITECTURE.md#p25-scope)，实施顺序见 [DEVELOPMENT_PLAN](DEVELOPMENT_PLAN.md#6-p25-与飞书单群增量)。下文命令、配置和诊断用法仍描述当前 P1/P2 实现，不能直接用未来格式启动。
 
 ## 最小产品形态
 
