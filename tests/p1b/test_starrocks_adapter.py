@@ -36,6 +36,9 @@ from xiaowei.starrocks import (
     EXPLAIN_PREFIX,
     LAYOUT_COLUMNS,
     LAYOUT_HIDDEN,
+    OBJECT_COLUMNS_SQL,
+    OBJECT_ID_SQL,
+    OBJECT_TYPE_SQL,
     PLAN_COLUMN,
     SCHEMA_COLUMNS_SQL,
     SCHEMA_IDS_SQL,
@@ -118,7 +121,8 @@ class FakeConnection:
     读取失败与挂起只作用于会话设置之后的查询本身。
     """
 
-    results: dict[str, Result | BaseException]
+    results: dict[str, Any]
+    """语句全文到脚本结果；值也可以是按绑定参数给出结果的函数。"""
     fail_read_at: int | None = None
     read_error: BaseException | None = None
     hang_on: str | None = None
@@ -138,6 +142,8 @@ class FakeConnection:
         outcome = self.results.get(sql)
         if outcome is None:
             outcome = self.results["*"]
+        if callable(outcome) and not isinstance(outcome, BaseException):
+            outcome = outcome(args)
         if isinstance(outcome, BaseException):
             raise outcome
         self._rows = list(outcome.rows)
@@ -201,20 +207,52 @@ SCHEMA_TABLES: dict[tuple[str, str], tuple[tuple[str, str, str, str | None], ...
 def schema_results(
     tables: dict[tuple[str, str], tuple[tuple[str, str, str, str | None], ...]] | None = None,
     denied: frozenset[tuple[str, str]] = frozenset(),
-) -> dict[str, Result | BaseException]:
-    """``read_schema`` 三条读取与每个对象零行探测的脚本结果；``denied`` 中的对象探测为 5203。"""
+    *,
+    views: frozenset[tuple[str, str]] = frozenset(),
+) -> dict[str, Any]:
+    """``read_schema`` 三条读取、版本读取与每个对象零行探测的脚本结果；``denied`` 中的对象探测
+    为 5203。
+
+    ``views`` 中的对象类型为 ``VIEW``、表 ID 为 0（Task 0 在 4.1.4 上实测）。
+    """
     tables = SCHEMA_TABLES if tables is None else tables
-    objects = [(db, name, "BASE TABLE", None, CREATED) for db, name in sorted(tables)]
+
+    def kind(key: tuple[str, str]) -> str:
+        return "VIEW" if key in views else "BASE TABLE"
+
+    def table_id(i: int, key: tuple[str, str]) -> int:
+        return 0 if key in views else 100 + i
+
+    objects = [(db, name, kind((db, name)), None, CREATED) for db, name in sorted(tables)]
     columns = [
         (db, name, col, kind, nullable, comment)
         for (db, name), cols in sorted(tables.items())
         for col, kind, nullable, comment in cols
     ]
-    ids = [(db, name, 100 + i) for i, (db, name) in enumerate(sorted(tables))]
-    results: dict[str, Result | BaseException] = {
+    ids = [(db, name, table_id(i, (db, name))) for i, (db, name) in enumerate(sorted(tables))]
+    by_key = {(db, name): row for db, name, *row in objects}
+    id_of = {(db, name): table_id for db, name, table_id in ids}
+
+    def kind_of(args: tuple[object, ...]) -> Result:
+        found = by_key.get((args[0], args[1]))  # type: ignore[arg-type]
+        return Result(("type",), [] if found is None else [(found[0],)])
+
+    def id_for(args: tuple[object, ...]) -> Result:
+        found = id_of.get((args[0], args[1]))  # type: ignore[arg-type]
+        return Result(("id",), [] if found is None else [(found,)])
+
+    def columns_of(args: tuple[object, ...]) -> Result:
+        cols = tables.get((args[0], args[1]), ())  # type: ignore[arg-type]
+        return Result(("col", "type"), [(col, kind) for col, kind, _, _ in cols])
+
+    results: dict[str, Any] = {
         SCHEMA_OBJECTS_SQL: Result(("db", "name", "type", "comment", "created"), objects),
         SCHEMA_COLUMNS_SQL: Result(("db", "name", "col", "type", "nullable", "comment"), columns),
         SCHEMA_IDS_SQL: Result(("db", "name", "id"), ids),
+        # 证据依赖复核的版本读取：按绑定的库表名应答（与结构快照的元数据一致）。
+        OBJECT_TYPE_SQL: kind_of,
+        OBJECT_ID_SQL: id_for,
+        OBJECT_COLUMNS_SQL: columns_of,
     }
     for db, name in tables:
         if not (safe_identifier(db) and safe_identifier(name)):
@@ -227,12 +265,17 @@ def schema_results(
     return results
 
 
+# 测试中的审计源都是 AuditLoader 的默认库表；证据依赖复核会探测它。
+AUDIT_PROBE = "SELECT 1 FROM `starrocks_audit_db__`.`starrocks_audit_tbl__` WHERE 1 = 0"
+
+
 def driver(query: Result | BaseException | None = None, **conn: Any) -> Driver:
     def make() -> FakeConnection:
-        results: dict[str, Result | BaseException] = {
+        results: dict[str, Any] = {
             SESSION_SET: Result(()),
             SESSION_READ: Result(("q", "m", "t"), [SESSION_VALUES]),
             **schema_results(),
+            AUDIT_PROBE: Result(("1",)),
             "*": query if query is not None else Result(("region",), [("east",)]),
         }
         results.update(conn.pop("results", {}))

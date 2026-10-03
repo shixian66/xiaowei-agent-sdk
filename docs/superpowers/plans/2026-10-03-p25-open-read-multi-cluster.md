@@ -10,7 +10,7 @@
 
 **Spec:** [ARCHITECTURE §5 本轮意图](../../../ARCHITECTURE.md#turn-purpose)、[§6 R1–R6](../../../ARCHITECTURE.md#p25-scope)、§9 是产品/权限边界唯一来源；[DEVELOPMENT_PLAN §6](../../../DEVELOPMENT_PLAN.md) 只维护顺序和退出条件。本文维护本阶段的技术契约、依赖与验收。群聊单独见 [单群计划](2026-10-03-feishu-group.md)，不在这里复制其任务。
 
-**Baseline / 状态：** 规划源代码为 `7a715ff61d7a97457b03bb8b596ef4238c1049f2`，与本地 `origin/main` `0f831ebe070e7b11b1597fbdf59921b19981b129` 内容相同；P2 离线完成，P1/P2 实战缺口继承到 P3。文档候选 v2（2026-10-03，按用户对 aed344b 的六项决定修订）已在 `719c1c7` 通过复审；Task 0 实测证据、对计划的影响与暂停范围见 §9，经复审随 PR #32 合入（`29678006f380621dda5ddb772b7affa072a59776`）。Task 1 多目标路由经独立审查随 PR #33 合入（`6ccc7a4e6e5c8ec4bac5093d4300bda63ae88605`）；Task 2 自动结构快照已实现、待独立审查（实施说明见 Task 2 节末）；Task 3–8 未实施。
+**Baseline / 状态：** 规划源代码为 `7a715ff61d7a97457b03bb8b596ef4238c1049f2`，与本地 `origin/main` `0f831ebe070e7b11b1597fbdf59921b19981b129` 内容相同；P2 离线完成，P1/P2 实战缺口继承到 P3。文档候选 v2（2026-10-03，按用户对 aed344b 的六项决定修订）已在 `719c1c7` 通过复审；Task 0 实测证据、对计划的影响与暂停范围见 §9，经复审随 PR #32 合入（`29678006f380621dda5ddb772b7affa072a59776`）。Task 1 多目标路由经独立审查随 PR #33 合入（`6ccc7a4e6e5c8ec4bac5093d4300bda63ae88605`）；Task 2 自动结构快照已实现，首轮独立审查后按用户决定修订（前移 Evidence 当前权限闭环、摘要 v2、列表探测硬上限），待复审（实施说明见 Task 2 节末）；Task 3–8 未实施。
 
 ## Global Constraints
 
@@ -228,19 +228,29 @@ Web / 飞书单聊（群入口在后续独立计划）
 - [x] 接真实可丢弃 StarRocks 复核 Task 0 权限结果及新建/撤权；记录新授权可见时限和当前权限拒绝边界。
 - [ ] 运行 §5 C2 与 SR；变异跳过过期/权限检查或发布部分快照应失败。提交 `feat: discover bounded schemas under current database grants`，独立审查。
 
-**Task 2 实施说明（待独立审查）：**
+**Task 2 实施说明（首轮审查后修订，待复审）：**
 
 - **快照：** 新增 `starrocks_schema.SchemaCache`，每个目标一份。一次刷新在 `refresh_timeout_seconds` 内依次读取 `information_schema.tables` / `columns` / `tables_config`（排除 `information_schema`、`sys`、`_statistics_`），再在一条连接上对每个对象做零行 SELECT 探测，只保留确认可读的对象。读取超过 `max_objects` / `max_columns` / `max_bytes`、探测无法判定、结果不合契约或超时，都整份不发布；旧快照沿用到它自己的到期时间（从采集开始计），失败不延长期限。single-flight，等待者取消不中止共享刷新，`aclose` 取消进行中的刷新。启动时各目标并行刷新一次（失败只让该目标不可用），之后后台定时刷新。
 - **配置：** `policy` 只剩 `allowed_functions`、`max_rows`、`max_sql_bytes`，旧的 `allowed_objects` / `allowed_columns`（及 `target_id`、`default_database`）报迁移说明；新增必填的 `schema_limits`（刷新间隔、最大年龄、刷新期限有设计默认值 60 / 300 / 10 秒，容量必须配置）。
 - **工具：** 所有工具先取当前快照，没有或已到期时在任何 I/O 前拒绝。`list_tables` 与 `describe_table` 的结构取自快照，交付前对要列出的每个对象重新探测：列表跳过已不可读的对象，`describe_table` / `describe_table_layout` 遇到已不可读的对象以 `object_unreadable` 停止本轮；探测本身失败（连接、超时、未知错误）是“暂时无法验证”，不当作撤权。两个 describe 工具新增必填参数 `database`。`run_readonly_query` / `explain_query` 的 SQLGuard 范围是快照中**默认库**的可读对象与全部列（跨库见 Task 3），执行时由数据库权限最终把关。
-- **与原契约的差异：**
-  - **列范围：** 4.1.4 不支持列级授权，配置也不再限列，可读表的全部列都在范围内。列限制须由 DBA 用视图实现。
-  - **审计源表：** 配置的审计源表即使可读也不进入快照，原文只经 `list_slow_queries` 逐条检查后交付。若某目标未配置审计源，而账号能读审计表，它就是普通可读对象。这一点待审查者确认。
-  - **数据范围摘要：** 不再含对象与列，含 `schema_limits`。撤权后旧证据按当前权限失效属于 Task 5，**Task 2 合入到 Task 5 之间，数据库撤权不会使已保存证据失效**。
+- **与原契约的差异（用户 2026-10-03 决定）：**
+  - **列范围（接受）：** 4.1.4 不支持列级授权，配置也不再限列，可读表的全部列都在范围内。列限制须由 DBA 用视图实现。
+  - **审计源表（接受）：** 配置的审计源表即使可读也不进入快照，原文只经 `list_slow_queries` 逐条检查后交付；未配置审计源的目标，审计表是普通可读对象，不增加黑名单。
+  - **撤权与旧证据（不接受过渡状态）：** 不能等到 Task 5，Evidence 当前权限闭环前移到本 PR，见下一条。
+- **Evidence 当前权限闭环（审查修订，前移 Task 5 的必要部分）：**
+  - **依赖：** StarRocks 观测由可信代码给出对象依赖（`ObjectDependency`）：列表的每个对象（`listed`，只复核权限）；表结构与布局的对象（`read`，全部列）；查询与计划引用的对象与列（来自 SQLGuard 产物）；审计源（`listed`）与各行原文引用的对象与列。依赖以带格式版本的 JSON 存入新应用表迁移 v4 的 `xiaowei_evidence.dependencies`；声明了数据范围的策略缺依赖、格式不符一律不可读，v3 遗留的 StarRocks 证据因此（及摘要版本变化）一次性失效。
+  - **三态复核：** record、Session 回放（整段一批）、最终回答、Session 提交、首次发送、历史读取与 `requests resend` 共用 `EvidenceStore` 读取边界：同一批依赖按目标合并，每个目标一条连接，零行探测当前权限，`read` 依赖再用绑定库表名读当前 `TABLE_TYPE`、`TABLE_ID` 与列类型比较。确定撤权或版本变化为不可读（Session 整段拒绝、提示新建）；连接、超时或无法识别的错误为暂不可验证：本次不交付，Session 保持 active、Evidence 不变，轮次失败码 `scope_unverifiable`、Web 读取 503、飞书投递记为 failed 仍可重发，恢复后新请求重新复核。复核不调用模型、不执行原业务 SQL。
+  - **视图：** 依赖非 `BASE TABLE` 读取的证据只在产生它的这一轮首次交付（运行中的模型/最终校验/提交、Web 提交响应、飞书首次发送）；跨轮回放、历史读取与重发在任何 I/O 前拒绝，因此含视图事实的会话不能续轮，需新建会话。
+  - **执行计划与审计：** 计划证据在记录时即按当前权限与版本复核，快照之后撤权的对象不交付；审计行交付前对原文引用的对象零行探测，引用已不可读对象的行不列出。
+  - **对象版本不比较创建时间：** 4.1.4 实测 `information_schema.tables.CREATE_TIME` 全表读取时按会话时区、带 `TABLE_SCHEMA` 条件时按服务器时区给出，同一对象两种读法相差时区偏移；版本改用 `TABLE_TYPE` + `TABLE_ID`（全局分配、同名重建即变，Task 0 §9.2 与本轮 SR 复核）+ 被读取列类型。
+  - **`requests resend`：** 改为连接 StarRocks 做上述复核（只读探测与元数据），需要 StarRocks 密码环境变量。
+- **数据范围摘要 v2（审查修订）：** 显式 `format`（`xiaowei.data_scope.starrocks/2`）、`database_type`、集群 ID、host/port/user/TLS、默认库、函数、`max_rows`/`max_sql_bytes`、结果/单值/计划上限、`query_timeout_seconds`、`query_mem_limit_bytes`、`client_timeout_seconds`、`time_zone`、`schema_limits` 与审计源；不含密码引用、`tls_ca_file`、`connect_timeout_seconds`、`pool_size`（只影响能否取得连接）、整轮预算与结构快照。风险策略随 Task 4 加入。非 StarRocks 的 `data_scope=None` 指纹逐字不变。
+- **列表探测上限（审查修订）：** 按已尝试的对象数硬性封顶 `2 × max_rows`，与可读对象多少无关；还有未检查候选时标记截断。
 - **实测（本机可丢弃 4.1.4，同一 digest）：** 1,000 张可见表、其中 900 张可读，30,000 列。刷新 n=5，中位 1.67 s（1.29–2.36 s）。`list_tables` 一页 200 行（探测 400 个对象），中位 371 ms；`describe_table` 约 7 ms。全快照 27,000 列上 SQLGuard 单次 p50 16 ms，为同步 CPU，Task 3 应只用被引用对象构造 qualify schema。只授 INSERT 的表、只经未激活角色授权的表不进入快照；只授视图的视图进入快照，底表不进入。新授权在下一次成功刷新后可用（最迟一个 `refresh_seconds` 加一次刷新耗时；刷新失败时更晚）；撤权后交付前探测即拒绝，新查询由数据库以 `permission_denied` 拒绝，下一次刷新移出快照；库级授权与撤销同样生效。
 - **留给后续：**
-  - `list_tables` 仍是无关键词的有界列表，每次最多探测 2 × `max_rows` 个对象；关键词搜索与分页属于 Task 6，探测次数与每轮 128 次上限的计数属于 Task 5。
-  - 视图定义摘要（`SHOW CREATE VIEW`）未采集，视图历史回放按 §9.9 保持关闭。
+  - `list_tables` 仍是无关键词的有界列表；关键词搜索与分页属于 Task 6。
+  - 仍属 Task 5：每轮 128 次对象检查上限与计数（当前每次复核的对象数只受历史、证据与快照容量间接约束；一轮内运行前回放、每次工具记录、最终校验、提交时的校验与回放各复核一次，同一对象在不同批次重复探测）、跨目标历史的其余验收与 SR 权限子集回归。
+  - 视图定义摘要（`SHOW CREATE VIEW`）未采集；视图事实只交付一次（见上），递归核对依赖链按 §9.9 不做。
 
 ### Task 3：复杂 SQL、跨库与星号展开
 
@@ -266,6 +276,8 @@ Web / 飞书单聊（群入口在后续独立计划）
 - [ ] 运行 §5 C4；隔离变异去掉预评估、把 unknown 放行、复用旧评估、计划 SQL 与执行 SQL 不同、把预执行拒绝退还预算应失败。提交 `feat: enforce query risk assessment before execution`，独立审查。
 
 ### Task 5：当前权限下的 Evidence 与跨目标历史
+
+> 依赖、三态复核、resend 复核、视图只交付一次、v4 迁移与摘要 v2 已按用户决定前移到 Task 2 审查修订（见 Task 2 实施说明）；下列各项按实际覆盖在 Task 5 复核并补齐其余部分。
 
 **依赖：** Task 4；**结果：** 撤权后新查询与旧事实的再次交付都闭合，范围未变可追问/重发且不重跑业务 SQL。**文件：** models/evidence/session/storage/runtime/channel、下一应用迁移；`test_evidence`、`test_session_policy`、`test_channel_service`、`test_runtime`、`test_starrocks_tools`。
 

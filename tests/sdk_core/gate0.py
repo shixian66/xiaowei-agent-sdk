@@ -54,6 +54,9 @@ from xiaowei.starrocks import (
     _SESSION_READ,
     AUDIT_ORDER_COLUMNS,
     EXPLAIN_PREFIX,
+    OBJECT_COLUMNS_SQL,
+    OBJECT_ID_SQL,
+    OBJECT_TYPE_SQL,
     SCHEMA_COLUMNS_SQL,
     SCHEMA_IDS_SQL,
     SCHEMA_OBJECTS_SQL,
@@ -65,7 +68,7 @@ from xiaowei.starrocks import (
     _audit_sql,
     probe_sql,
 )
-from xiaowei.starrocks_schema import SchemaCache
+from xiaowei.starrocks_schema import DependencyCheck, SchemaCache
 from xiaowei.starrocks_tools import (
     AUDIT_TOOLS,
     DESCRIBE_TABLE,
@@ -617,9 +620,12 @@ AUDIT_SOURCE = (
     "stmt",
 )
 
-StatementKind = Literal["session", "schema", "probe", "audit", "explain", "layout", "query"]
+StatementKind = Literal[
+    "session", "schema", "probe", "dependency", "audit", "explain", "layout", "query"
+]
 # 语句类别对应的工具：一条被引用的事实只能来自本样例实际到达驱动的同类语句。表结构取自快照，
-# 交付前的零行探测是列表与表结构共同的证据；快照刷新（schema）不属于任何样例。
+# 交付前的零行探测是列表与表结构共同的证据；快照刷新（schema）与证据依赖的版本读取
+# （dependency）不属于任何样例。证据依赖复核也发零行探测，与工具的探测语句相同。
 KIND_TOOLS: dict[StatementKind, frozenset[str]] = {
     "audit": frozenset({SLOW_QUERIES}),
     "explain": frozenset({EXPLAIN_QUERY}),
@@ -675,7 +681,10 @@ class SyntheticStarRocks:
             return "layout"
         if sql in (SCHEMA_OBJECTS_SQL, SCHEMA_COLUMNS_SQL, SCHEMA_IDS_SQL):
             return "schema"
-        if sql in {probe_sql(db, name) for db, name in self.tables}:
+        if sql in (OBJECT_TYPE_SQL, OBJECT_ID_SQL, OBJECT_COLUMNS_SQL):
+            return "dependency"
+        probed = set(self.tables) | ({(audit.database, audit.table)} if audit else set())
+        if sql in {probe_sql(db, name) for db, name in probed}:
             return "probe"
         if audit is not None and sql in {
             _audit_sql(audit, order) for order in AUDIT_ORDER_COLUMNS.values()
@@ -695,6 +704,8 @@ class SyntheticStarRocks:
             ]
         if kind == "probe":
             return ("1",), []
+        if kind == "dependency":
+            return self._version(sql, args)
         if kind == "schema" and sql == SCHEMA_OBJECTS_SQL:
             return ("db", "name", "type", "comment", "created"), [
                 (db, name, "BASE TABLE", None, None) for db, name in sorted(self.tables)
@@ -735,6 +746,20 @@ class SyntheticStarRocks:
             ]
             return AUDIT_SOURCE, rows
         return ("region", "amount"), [("east", 600), ("west", 400)]
+
+    def _version(
+        self, sql: str, args: tuple[object, ...] | None
+    ) -> tuple[tuple[str, ...], list[tuple[object, ...]]]:
+        """证据依赖的版本读取：与结构快照的元数据一致（类型、表 ID、varchar 列）。"""
+        assert args is not None
+        key = (args[0], args[1])
+        ordered = sorted(self.tables)
+        if sql == OBJECT_TYPE_SQL:
+            return ("type",), [("BASE TABLE",)] if key in self.tables else []
+        if sql == OBJECT_ID_SQL:
+            found = [1000 + i for i, k in enumerate(ordered) if k == key]
+            return ("id",), [(i,) for i in found]
+        return ("col", "type"), [(c, "varchar") for c in self.tables.get(key, ())]  # type: ignore[call-overload]
 
 
 @dataclass
@@ -893,6 +918,7 @@ async def diagnosis_app(
         authorize=_authorize_diagnosis,
         clock=clock,
         retention_seconds=RETENTION_SECONDS,
+        verify_dependencies=DependencyCheck({DIAG_TARGET.target_id: adapter}),
     )
     governed = GovernedTools(evidence)
     observer = ObservingTransport(network)

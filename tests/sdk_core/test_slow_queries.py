@@ -32,7 +32,7 @@ from xiaowei.governance import GovernedTools, ToolCatalog, ToolRejectedError
 from xiaowei.models import AUDIENCES, AgentAnswer, Budget, Identity, RunContext, ToolRequest
 from xiaowei.session import SessionInputPolicy
 from xiaowei.starrocks import AUDIT_COLUMNS, EXPLAIN_PREFIX, StarRocksAdapter, StarRocksTarget
-from xiaowei.starrocks_schema import SchemaCache
+from xiaowei.starrocks_schema import DependencyCheck, SchemaCache
 from xiaowei.starrocks_tools import (
     AUDIT_NOTE,
     AUDIT_TOOLS,
@@ -88,6 +88,7 @@ async def audited(env: Env, target: StarRocksTarget = AUDIT_TARGET) -> Audited:
         authorize=env.grants,
         clock=env.clock,
         retention_seconds=3600,
+        verify_dependencies=DependencyCheck({target.target_id: adapter}),
     )
     governed = GovernedTools(evidence)
     audit = AUDIT_TOOLS if target.audit is not None else frozenset()
@@ -108,6 +109,16 @@ async def audited(env: Env, target: StarRocksTarget = AUDIT_TARGET) -> Audited:
         clock=env.clock,
     )
     return Audited(env, evidence, governed, app, tools.executes)
+
+
+def audit_reads(drv: Any) -> list[str]:
+    """到达驱动的审计候选读取。"""
+    return [
+        sql
+        for conn in drv.connections
+        for sql, _ in conn.executed
+        if "starrocks_audit_tbl__" in sql and not sql.startswith("SELECT 1 FROM `")
+    ]
 
 
 def audit_rows(*stmts: str) -> Result:
@@ -205,8 +216,10 @@ async def test_window_and_order_are_rejected_before_io(
     delivered = await au.evidence.validate_answer(await au.app.run_turn(ctx, message), ctx)
     (rejected,) = tool_outputs(env.scripts.calls[message][1])
     assert "DROP" not in rejected
-    # 被拒绝的调用不占预算、不建连接：上限为 1 时随后的合法调用仍执行，且只连接一次。
-    assert env.drv.attempts == 1 and [f.tool_id for f in delivered.facts] == [SLOW_QUERIES]
+    # 被拒绝的调用不占预算、不发 I/O：上限为 1 时随后的合法调用仍执行，审计表只读一次（其余
+    # 连接只是零行探测与依赖版本读取）。
+    assert len(audit_reads(env.drv)) == 1
+    assert [f.tool_id for f in delivered.facts] == [SLOW_QUERIES]
 
 
 async def test_excluded_audit_fields_never_reach_any_projection(env: Env) -> None:

@@ -6,6 +6,7 @@ Task 2 的 recording 驱动替身）+ ``EvidenceStore`` / ``PolicySession`` + �
 替身不能证明 asyncmy 与 StarRocks 的协议行为，也不能证明真实模型会这样选择工具。
 """
 
+import hashlib
 import json
 import os
 import subprocess
@@ -24,6 +25,7 @@ from sqlalchemy.ext.asyncio import AsyncEngine
 from tests.p1b.test_starrocks_adapter import (
     NOW,
     POLICY,
+    SCHEMA_TABLES,
     Driver,
     Result,
     driver,
@@ -74,7 +76,7 @@ from xiaowei.models import (
 from xiaowei.session import SessionInputPolicy, SessionLimits
 from xiaowei.sqlguard import guard_explain_query, guard_readonly_query
 from xiaowei.starrocks import EXPLAIN_PREFIX, StarRocksAdapter, StarRocksTarget
-from xiaowei.starrocks_schema import SchemaCache
+from xiaowei.starrocks_schema import DependencyCheck, SchemaCache
 from xiaowei.starrocks_tools import (
     AUDIT_TOOLS,
     DESCRIBE_TABLE,
@@ -87,6 +89,7 @@ from xiaowei.starrocks_tools import (
     RUN_QUERY,
     SCHEMA_NOTE,
     data_scope_digest,
+    scope_canonical,
     starrocks_tools,
 )
 
@@ -211,6 +214,7 @@ async def env(postgres_url: URL, monkeypatch: pytest.MonkeyPatch) -> AsyncIterat
             authorize=grants,
             clock=clock,
             retention_seconds=3600,
+            verify_dependencies=DependencyCheck({SR.target_id: adapter}),
         )
         governed = GovernedTools(evidence)
         scripts = RecordingScripts()
@@ -422,14 +426,15 @@ async def test_metadata_tools_serve_the_snapshot_after_probing_current_access(en
     )
     delivered = await env.deliver(env.ctx("diagnose"), message)
 
-    # 结构取自快照；交付前到达驱动的只有零行探测（列表探测全部对象，表结构探测这一个）。
-    assert [[sql for sql, _ in c.executed[2:]] for c in env.drv.connections] == [
-        [
-            "SELECT 1 FROM `shop`.`regions` WHERE 1 = 0",
-            "SELECT 1 FROM `shop`.`sales` WHERE 1 = 0",
-        ],
-        ["SELECT 1 FROM `shop`.`sales` WHERE 1 = 0"],
+    # 结构取自快照；到达驱动的只有零行探测与证据依赖的版本读取（列表探测全部对象，表结构探测
+    # 这一个；之后的连接是记录与交付时的依赖复核）。
+    connections = [[sql for sql, _ in c.executed[2:]] for c in env.drv.connections]
+    assert connections[0] == [
+        "SELECT 1 FROM `shop`.`regions` WHERE 1 = 0",
+        "SELECT 1 FROM `shop`.`sales` WHERE 1 = 0",
     ]
+    assert ["SELECT 1 FROM `shop`.`sales` WHERE 1 = 0"] in connections
+    assert executed_sql(env.drv) == []
     listed, described = delivered.facts
     assert (listed.tool_id, described.tool_id) == (LIST_TABLES, DESCRIBE_TABLE)
     assert listed.rows == (
@@ -464,7 +469,8 @@ async def test_followup_replays_the_rows_without_rerunning_the_query(env: Env) -
         {"region": "east", "total": 100},
         {"region": "west", "total": 50},
     ]
-    assert env.drv.attempts == 1
+    # 追问只复核依赖（探测与版本读取），不重跑查询。
+    assert len(executed_sql(env.drv)) == 1
 
 
 # ---- 拒绝路径：零 I/O ---------------------------------------------------------------------
@@ -487,7 +493,7 @@ async def test_rejected_sql_is_returned_to_the_model_without_using_the_budget(en
     assert "multiple_statements" in rejected and "未执行" in rejected
     assert "secret" not in rejected and "DROP" not in rejected
     # 被拒绝的调用不占预算：上限为 1 时改正后的查询仍执行。
-    assert env.drv.attempts == 1 and len(delivered.facts) == 1
+    assert len(executed_sql(env.drv)) == 1 and len(delivered.facts) == 1
 
 
 @pytest.mark.parametrize(
@@ -612,6 +618,7 @@ async def test_rows_that_do_not_fit_a_projection_stop_the_turn(env: Env) -> None
         authorize=env.grants,
         clock=env.clock,
         retention_seconds=3600,
+        verify_dependencies=DependencyCheck({SR.target_id: adapter}),
     )
     governed = GovernedTools(evidence)
     request = ToolRequest(
@@ -688,7 +695,7 @@ async def test_an_unexpected_precheck_failure_is_a_fixed_rejection_without_io(en
     assert ran == []
     # 拒绝未占预算：上限为 1 时同一轮仍可执行一次。
     await env.governed.invoke(ctx, request, env.executes[(RUN_QUERY, SR.target_id)])
-    assert env.drv.attempts == 1
+    assert len(executed_sql(env.drv)) == 1
 
 
 # ---- 证据绑定当前数据范围（P2 Task 1）-----------------------------------------------------
@@ -719,6 +726,7 @@ async def reassembled(env: Env, target: StarRocksTarget) -> tuple[EvidenceStore,
         authorize=env.grants,
         clock=env.clock,
         retention_seconds=3600,
+        verify_dependencies=DependencyCheck({target.target_id: adapter}),
     )
     app = Application(
         app_config(),
@@ -743,31 +751,88 @@ async def queried(env: Env) -> tuple[RunContext, AgentAnswer]:
 
 # 与 SR 相同的范围，只是集合的书写顺序、映射键顺序与函数名大小写不同。
 SAME_SCOPE = scoped(policy={"allowed_functions": ["count", "Sum"]})
-# 配置中仍决定可读数据的部分：函数、上限与结构快照容量。可读对象与列来自快照，随数据库权限
-# 变化，不进入摘要；撤权后旧证据的失效由 P2.5 Task 5 按当前权限复核实现。
+# 配置中决定可读数据与事实形态的部分（计划 §2.6）：函数、SQL/结果/计划上限、服务端时间与内存
+# 限额、客户端期限、时区表示与结构快照容量。可读对象与列来自快照，随数据库权限变化，不进入
+# 摘要；已保存证据按 Evidence 的对象依赖在每次交付时复核当前权限。
 NARROWED = {
     "移除一个函数": scoped(policy={"allowed_functions": ["SUM"]}),
     "降低快照对象上限": scoped(schema_limits={"max_objects": 10}),
+    "缩短快照最大年龄": scoped(schema_limits={"max_age_seconds": 120}),
     "降低 max_rows": scoped(policy={"max_rows": 4}),
     "降低 max_sql_bytes": scoped(policy={"max_sql_bytes": 3000}),
     "降低 max_result_bytes": scoped(max_result_bytes=500),
     "降低 max_value_bytes": scoped(max_value_bytes=100),
     "降低 max_plan_lines": scoped(max_plan_lines=100),
+    # 客户端期限不得早于服务端 query_timeout（配置校验）：两者同时调大；单独变化见下方摘要用例。
+    "换 query_timeout": scoped(query_timeout_seconds=2, client_timeout_seconds=2),
+    "换 query_mem_limit": scoped(query_mem_limit_bytes=536_870_912),
+    "换客户端期限": scoped(client_timeout_seconds=3),
+    "换时区": scoped(time_zone="UTC"),
 }
-# 同一份 allowlist 换集群或账号：可能对应另一套数据与权限（用户 2026-10-02 决定，P2 Task 3）。
+# 同一份配置换集群、账号或传输方式：可能对应另一套数据与权限（用户 2026-10-02 决定，P2 Task 3）。
 CONNECTION_CHANGED = {
     "换 host": scoped(host="starrocks-b.internal"),
     "换 port": scoped(port=9031),
     "换 user": scoped(user="xiaowei_ro_b"),
+    "换 TLS": scoped(tls=False),
 }
-# 不改变可读数据的字段：密码引用、期限与时区表示不进入摘要。
+# 不改变可读数据与事实形态的字段：密码引用、建连期限与连接池大小（只影响能否、何时取得连接）。
 OUTSIDE_SCOPE = {
     "换 password_ref": scoped(password_ref="env:XW_TEST_SR_PASSWORD_B"),  # noqa: S106 —— 引用，不是凭据
-    "换期限": scoped(
-        connect_timeout_seconds=0.5, query_timeout_seconds=2, client_timeout_seconds=3
-    ),
-    "换时区": scoped(time_zone="UTC"),
+    "换建连期限": scoped(connect_timeout_seconds=0.5),
+    "换连接池": scoped(pool_size=7),
 }
+
+
+def scope_body(target: StarRocksTarget) -> dict[str, Any]:
+    """按摘要的公开公式重算出的规范化内容（用于检查纳入与排除的字段）。"""
+    return json.loads(scope_canonical(target))
+
+
+def test_scope_digest_is_versioned_and_names_the_database_type() -> None:
+    body = scope_body(SR)
+    assert body["format"] == "xiaowei.data_scope.starrocks/2"
+    assert body["database_type"] == "starrocks"
+    assert (
+        data_scope_digest(SR)
+        == "sha256:" + hashlib.sha256(scope_canonical(SR).encode()).hexdigest()
+    )
+
+
+# 摘要纳入的每个字段单独变化（基线留出客户端期限余量，使 query_timeout 可以单独改变）。
+SLACK = scoped(client_timeout_seconds=5)
+SINGLE_FIELD = {
+    "query_timeout_seconds": {"query_timeout_seconds": 2},
+    "query_mem_limit_bytes": {"query_mem_limit_bytes": 536_870_912},
+    "client_timeout_seconds": {"client_timeout_seconds": 4},
+    "time_zone": {"time_zone": "UTC"},
+    "tls": {"tls": False},
+    "host": {"host": "starrocks-b.internal"},
+    "port": {"port": 9031},
+    "user": {"user": "xiaowei_ro_b"},
+    "database": {"database": "shop_b"},
+    "max_result_bytes": {"max_result_bytes": 500},
+    "max_value_bytes": {"max_value_bytes": 100},
+    "max_plan_lines": {"max_plan_lines": 100},
+}
+
+
+@pytest.mark.parametrize("changes", SINGLE_FIELD.values(), ids=SINGLE_FIELD.keys())
+def test_each_included_field_alone_changes_the_digest(changes: dict[str, Any]) -> None:
+    changed = SLACK.model_copy(update=changes)
+    StarRocksTarget.model_validate(changed.model_dump())  # 仍是合法配置
+    assert data_scope_digest(changed) != data_scope_digest(SLACK)
+
+
+def test_scope_digest_never_contains_secrets_or_the_schema() -> None:
+    canonical = scope_canonical(SR)
+    assert SR.password_ref not in canonical and "password" not in canonical
+    for (_database, table), columns in SCHEMA_TABLES.items():
+        assert f'"{table}"' not in canonical
+        for column, *_ in columns:
+            assert f'"{column}"' not in canonical
+    body = scope_body(SR)
+    assert not {"objects", "columns", "allowed_objects", "allowed_columns"} & set(body)
 
 
 def test_scope_digest_is_stable_across_processes() -> None:
@@ -845,7 +910,7 @@ async def assert_old_evidence_unreadable(env: Env, target: StarRocksTarget) -> N
         await app.run_turn(env.ctx(turn="t2"), followup)
     assert refused.value.reason == "session_unavailable"
     assert followup not in env.scripts.calls  # 首个模型调用前拒绝
-    assert env.drv.attempts == 1  # 只有第一轮的查询
+    assert len(executed_sql(env.drv)) == 1  # 只有第一轮的查询
 
 
 # ---- 执行计划（P2 Task 4）：诊断轮取得计划而不执行原查询 ---------------------------------------
@@ -914,15 +979,17 @@ async def test_rejected_explain_uses_no_budget_and_no_connection(
     (rejected,) = tool_outputs(env.scripts.calls[message][1])
     assert f"执行计划未获取（{code}）：" in rejected
     assert "secret" not in rejected and "hidden_table" not in rejected
-    # 被拒绝的调用不占预算、不建连接：上限为 1 时改正后的 explain 仍执行，且只连接一次。
-    assert env.drv.attempts == 1 and [f.tool_id for f in delivered.facts] == [EXPLAIN_QUERY]
+    # 被拒绝的调用不占预算、不建连接：上限为 1 时改正后的 explain 仍执行，且只取一次计划。
+    assert len(executed_sql(env.drv)) == 1
+    assert [f.tool_id for f in delivered.facts] == [EXPLAIN_QUERY]
 
+    connected = env.drv.attempts
     with pytest.raises(ToolRejectedError) as refused:
         await env.governed.invoke(
             env.ctx("diagnose"), explain_request(sql), env.executes[(EXPLAIN_QUERY, SR.target_id)]
         )
     assert code in str(refused.value) and refused.value.__context__ is None
-    assert env.drv.attempts == 1
+    assert env.drv.attempts == connected
 
 
 async def test_previous_turn_sql_can_be_explained_in_the_next_turn(env: Env) -> None:
@@ -986,6 +1053,7 @@ async def test_fact_note_is_rendered_from_the_current_policy_not_the_record(env:
         authorize=env.grants,
         clock=env.clock,
         retention_seconds=3600,
+        verify_dependencies=DependencyCheck({SR.target_id: adapter}),
     )
     again = await store.validate_answer(answer_, ctx)
     # 说明同样只占一行：其中的换行被转义，不能另起伪造的段落。
@@ -1170,8 +1238,9 @@ async def multi(postgres_url: URL, monkeypatch: pytest.MonkeyPatch) -> AsyncIter
             for i, t in enumerate(CLUSTERS)
         }
         parts = []
+        adapters = {}
         for t, target in CLUSTERS.items():
-            adapter = StarRocksAdapter(target, connect=drivers[t], clock=lambda: NOW)
+            adapter = adapters[t] = StarRocksAdapter(target, connect=drivers[t], clock=lambda: NOW)
             schema = await ready_schema(adapter, drivers[t])
             parts.append(
                 starrocks_tools(adapter, dict.fromkeys(AUDIENCES, CAPACITY), schema=schema)
@@ -1186,6 +1255,7 @@ async def multi(postgres_url: URL, monkeypatch: pytest.MonkeyPatch) -> AsyncIter
             authorize=grants,
             clock=Clock(),
             retention_seconds=3600,
+            verify_dependencies=DependencyCheck(adapters),
         )
         governed = GovernedTools(evidence)
         scripts = RecordingScripts()
@@ -1239,7 +1309,6 @@ async def test_one_query_tool_reaches_each_named_cluster_once(multi: Multi) -> N
     assert set(specs) == {*SDK_NAMES.values(), "list_slow_queries"}
     for spec in specs.values():
         assert "cluster" in spec["parameters"]["required"]
-    assert multi.attempts() == dict.fromkeys(CLUSTERS, 1)
     for drv in multi.drivers.values():
         (sql,) = executed_sql(drv)
         assert "`shop`.`sales`" in sql and sql.endswith("LIMIT 6")

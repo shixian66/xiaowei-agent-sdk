@@ -166,13 +166,17 @@ class Env:
     def config(self, **overrides: Any) -> runtime.ServeConfig:
         return runtime.ServeConfig.model_validate(serve_config(self.port, **overrides))
 
+    def connect(self, config: runtime.ServeConfig) -> dict[str, Any]:
+        """各目标都连到同一个驱动替身。"""
+        return {t.target_id: self.drv for t in config.targets}
+
     async def serve(self, config: runtime.ServeConfig, stop: asyncio.Event, **kw: Any) -> int:
         return await runtime.serve(
             config,
             stop=stop,
             clock=self.clock,
             model_transport=self.scripts.transport(),
-            **{"starrocks_connect": {t.target_id: self.drv for t in config.targets}, **kw},
+            **{"starrocks_connect": self.connect(config), **kw},
         )
 
     @asynccontextmanager
@@ -844,7 +848,11 @@ async def test_resend_sends_a_failed_result_once_without_rerunning(env: Env) -> 
         target = {"subject_id": "alice", "chat_id": "oc_alice", "message_id": "om_resend"}
         try:
             return await runtime.resend(
-                config, clock=env.clock, feishu_channel=channel, **{**target, **changes}
+                config,
+                clock=env.clock,
+                feishu_channel=channel,
+                starrocks_connect=env.connect(config),
+                **{**target, **changes},
             )
         finally:
             sends.extend(channel.sends)
@@ -861,7 +869,8 @@ async def test_resend_sends_a_failed_result_once_without_rerunning(env: Env) -> 
     assert await resend() is None  # 已 sent：不再发送
     assert len(sends) == 1 and sends[0][0] == "oc_alice"
     assert len(env.scripts.calls[message]) == 2  # 只有原轮次的两次模型调用
-    assert len(env.drv.connections) == 1  # 原轮次的一次元数据查询；重发不连接 StarRocks
+    # 重发不重跑工具：之后到达 StarRocks 的只有证据依赖复核（零行探测与版本读取）。
+    assert statements(env.drv) == []
 
 
 @dataclass
@@ -887,14 +896,29 @@ async def test_serve_recovery_leaves_a_running_resend_to_finish(env: Env) -> Non
     target = {"subject_id": "alice", "chat_id": "oc_alice", "message_id": "om_resend"}
     channel = GatedChannel()
     running = asyncio.create_task(
-        runtime.resend(config, clock=env.clock, feishu_channel=channel, **target)
+        runtime.resend(
+            config,
+            clock=env.clock,
+            feishu_channel=channel,
+            starrocks_connect=env.connect(config),
+            **target,
+        )
     )
     await until(channel.entered.is_set)
     async with env.running(config, feishu_channel=FakeChannel()) as served:
         await served.ready()
         assert await env.scalar("SELECT delivery FROM xiaowei_request") == "sending"
         other = FakeChannel()
-        assert await runtime.resend(config, clock=env.clock, feishu_channel=other, **target) is None
+        assert (
+            await runtime.resend(
+                config,
+                clock=env.clock,
+                feishu_channel=other,
+                starrocks_connect=env.connect(config),
+                **target,
+            )
+            is None
+        )
         assert other.sends == []
         channel.gate.set()
         assert await asyncio.wait_for(running, 30) == "sent"
@@ -916,6 +940,7 @@ async def test_resend_refuses_after_the_evidence_expired(env: Env) -> None:
             message_id="om_resend",
             clock=env.clock,
             feishu_channel=channel,
+            starrocks_connect=env.connect(config),
         )
     assert channel.sends == []
 
@@ -931,7 +956,7 @@ async def test_resend_requires_feishu(env: Env) -> None:
 async def test_storage_commands_use_the_configured_database(env: Env) -> None:
     config = env.config()
     await runtime.initialize(config)  # 已初始化时幂等
-    assert await runtime.upgrade(config) == 3
+    assert await runtime.upgrade(config) == 4
     report = await runtime.cleanup(config, batch_size=10)
     assert (report.sessions, report.unregistered) == (0, 0)
 
@@ -1084,7 +1109,12 @@ async def test_resend_refusal_with_the_real_sdk_makes_no_network_call(env: Env) 
     config = env.config(feishu=feishu_config())
     with pytest.raises(RequestUnavailableError):
         await runtime.resend(
-            config, subject_id="alice", chat_id="oc_alice", message_id="om_none", clock=env.clock
+            config,
+            subject_id="alice",
+            chat_id="oc_alice",
+            message_id="om_none",
+            clock=env.clock,
+            starrocks_connect=env.connect(config),
         )
 
 
@@ -1165,6 +1195,7 @@ async def test_history_and_resend_reject_after_scope_narrowing(env: Env) -> None
             message_id="om_resend",
             clock=env.clock,
             feishu_channel=channel,
+            starrocks_connect=env.connect(narrowed),
         )
     assert channel.sends == []
 
@@ -1196,7 +1227,7 @@ async def test_formal_assembly_routes_each_turn_to_the_named_cluster(env: Env) -
         assert body["state"] == "completed"
         (fact,) = body["delivery"]["facts"]
         assert fact["target_id"] == "sr-b" and fact["rows"] == [{"region": "east", "total": 2}]
-        assert (drivers["sr-a"].attempts, drivers["sr-b"].attempts) == (0, 1)
+        assert drivers["sr-a"].attempts == 0 and len(statements(drivers["sr-b"])) == 1
 
         # 未知集群在任何 StarRocks I/O 前拒绝，不回退到其他集群；模型只能澄清。
         unknown = env.scripts.add(
@@ -1207,7 +1238,7 @@ async def test_formal_assembly_routes_each_turn_to_the_named_cluster(env: Env) -
         body = (await served.turn(unknown, "query", "r2")).json()
         assert body["state"] == "completed" and body["delivery"]["facts"] == []
         assert "集群不存在" in json.dumps(env.scripts.calls[unknown][1].input, ensure_ascii=False)
-        assert (drivers["sr-a"].attempts, drivers["sr-b"].attempts) == (0, 1)
+        assert drivers["sr-a"].attempts == 0 and len(statements(drivers["sr-b"])) == 1
         assert await served.finish() == 0
 
 

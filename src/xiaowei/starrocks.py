@@ -385,6 +385,20 @@ class SchemaRows:
     truncated: bool
 
 
+@dataclass(frozen=True)
+class ObjectVersion:
+    """``verify_objects`` 读到的一个可读对象的当前版本：类型、表 ID 与列（名字 → 类型）。
+
+    视图的 ``table_id`` 为 0，``tables_config`` 中没有该对象时为 ``None``。不含创建时间：4.1.4 的
+    ``information_schema.tables.CREATE_TIME`` 在带 ``TABLE_SCHEMA`` 条件时按服务器时区、全表读取时
+    按会话时区给出（P2.5 Task 2 审查修订实测），同一对象的两种读法不可比较。
+    """
+
+    type: str
+    table_id: int | None
+    columns: Mapping[str, str]
+
+
 class Connection(Protocol):
     """Adapter 使用的最小驱动接口；``abort`` 同步断开，不再读写。"""
 
@@ -439,6 +453,19 @@ SCHEMA_IDS_SQL: Final = (
     "SELECT TABLE_SCHEMA AS db, TABLE_NAME AS name, TABLE_ID AS id "
     "FROM information_schema.tables_config WHERE TABLE_SCHEMA NOT IN (%s, %s, %s) "
     "ORDER BY TABLE_SCHEMA, TABLE_NAME LIMIT %s"
+)
+# 证据依赖复核：单个对象的当前类型、表 ID 与列，库表名全部绑定。
+OBJECT_TYPE_SQL: Final = (
+    "SELECT TABLE_TYPE AS type FROM information_schema.tables "
+    "WHERE TABLE_SCHEMA = %s AND TABLE_NAME = %s"
+)
+OBJECT_ID_SQL: Final = (
+    "SELECT TABLE_ID AS id FROM information_schema.tables_config "
+    "WHERE TABLE_SCHEMA = %s AND TABLE_NAME = %s"
+)
+OBJECT_COLUMNS_SQL: Final = (
+    "SELECT COLUMN_NAME AS col, DATA_TYPE AS type FROM information_schema.columns "
+    "WHERE TABLE_SCHEMA = %s AND TABLE_NAME = %s ORDER BY ORDINAL_POSITION LIMIT %s"
 )
 _SCHEMA_OBJECT_COLUMNS: Final = ("db", "name", "type", "comment", "created")
 _SCHEMA_COLUMN_COLUMNS: Final = ("db", "name", "col", "type", "nullable", "comment")
@@ -558,6 +585,19 @@ class StarRocksAdapter:
         暂时无法验证，不返回部分结论。库表名含反引号或控制字符时按 ``OBJECT_NOT_ALLOWED`` 拒绝，
         不拼入 SQL。整批共用一个客户端期限。
         """
+        verdicts = await self.verify_objects(objects, versioned=frozenset())
+        return {key: verdict is not False for key, verdict in verdicts.items()}
+
+    async def verify_objects(
+        self, objects: Sequence[tuple[str, str]], *, versioned: frozenset[tuple[str, str]]
+    ) -> dict[tuple[str, str], ObjectVersion | bool]:
+        """同 ``probe`` 逐个零行探测；``versioned`` 中可读的对象再读取当前版本。
+
+        结论：``False`` 确定不可读（无权、对象或库不存在，或可读却已不在元数据中）；``True`` 可读
+        （不在 ``versioned`` 中）；``ObjectVersion`` 可读及其当前版本。版本只经代码模板与绑定的
+        库表名读取，单个对象的列数按 ``schema_limits.max_columns`` 限量，超限、类型不符等按结果契约
+        失败。失败的含义与期限同 ``probe``。
+        """
         for database, name in objects:
             if not (safe_identifier(database) and safe_identifier(name)):
                 raise StarRocksError(_Code.OBJECT_NOT_ALLOWED)
@@ -565,7 +605,7 @@ class StarRocksAdapter:
             return {}
         conn = await self._acquire()
         try:
-            verdicts, code = await self._probe(conn, objects)
+            verdicts, code = await self._probe(conn, objects, versioned)
         finally:
             self._slots.release()
         if code is not None:
@@ -736,16 +776,25 @@ class StarRocksAdapter:
         return conn
 
     async def _probe(
-        self, conn: Connection, objects: Sequence[tuple[str, str]]
-    ) -> tuple[dict[tuple[str, str], bool], StarRocksErrorCode | None]:
-        """会话设置后逐个探测；返回错误码而不是抛出（同 ``_query``）。"""
+        self,
+        conn: Connection,
+        objects: Sequence[tuple[str, str]],
+        versioned: frozenset[tuple[str, str]],
+    ) -> tuple[dict[tuple[str, str], ObjectVersion | bool], StarRocksErrorCode | None]:
+        """会话设置后逐个探测（并按需读取版本）；返回错误码而不是抛出（同 ``_query``）。"""
         complete = False
         stage = _Code.SESSION_SETUP_FAILED
+        verdicts: dict[tuple[str, str], ObjectVersion | bool] = {}
         try:
             async with asyncio.timeout(self._target.client_timeout_seconds):
                 await self._prepare_session(conn)
                 stage = _Code.QUERY_FAILED
-                verdicts = {obj: await self._probe_one(conn, *obj) for obj in objects}
+                for key in objects:
+                    readable = await self._probe_one(conn, *key)
+                    if readable and key in versioned:
+                        verdicts[key] = await self._version(conn, *key) or False
+                    else:
+                        verdicts[key] = readable
             complete = True
             return verdicts, None
         except TimeoutError:
@@ -758,6 +807,57 @@ class StarRocksAdapter:
             return {}, _query_code(error, stage)
         finally:
             await self._release(conn, complete=complete)
+
+    async def _version(self, conn: Connection, database: str, name: str) -> ObjectVersion | None:
+        """一个对象的当前版本；元数据中已没有该对象时为 ``None``。结果不合契约时抛出。"""
+        limits = self._target.schema_limits
+        read = _ReadLimits(max_bytes=limits.max_bytes, max_value=limits.max_bytes, zone=self._zone)
+        kinds = await self._rows(conn, OBJECT_TYPE_SQL, (database, name), ("type",), read)
+        if not kinds:
+            return None
+        ids = await self._rows(conn, OBJECT_ID_SQL, (database, name), ("id",), read)
+        columns = await self._rows(
+            conn,
+            OBJECT_COLUMNS_SQL,
+            (database, name, limits.max_columns + 1),
+            ("col", "type"),
+            read,
+            max_rows=limits.max_columns,
+        )
+        # 每条模板至多一行（超出已按结果契约失败）。
+        (kind,) = kinds
+        table_id = ids[0]["id"] if ids else None
+        if (
+            not isinstance(kind["type"], str)
+            or isinstance(table_id, bool)
+            or not isinstance(table_id, int | None)
+            or not all(isinstance(c["col"], str) and isinstance(c["type"], str) for c in columns)
+        ):
+            raise _ResultContractError
+        return ObjectVersion(
+            type=kind["type"],
+            table_id=table_id,
+            columns={cast(str, c["col"]): cast(str, c["type"]) for c in columns},
+        )
+
+    async def _rows(
+        self,
+        conn: Connection,
+        sql: str,
+        args: tuple[object, ...],
+        expected: tuple[str, ...],
+        limits: _ReadLimits,
+        *,
+        max_rows: int = 1,
+    ) -> list[dict[str, Scalar]]:
+        """在已准备的连接上读取一条代码模板的完整结果；列不符或超过 ``max_rows`` 行时按结果契约
+        失败。"""
+        if await conn.execute(sql, args) != expected:
+            raise _ResultContractError
+        rows, truncated = await self._read(conn, expected, max_rows, False, limits)
+        if truncated:
+            raise _ResultContractError
+        return rows
 
     @staticmethod
     async def _probe_one(conn: Connection, database: str, name: str) -> bool:

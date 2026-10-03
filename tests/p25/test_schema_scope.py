@@ -436,13 +436,26 @@ async def test_list_skips_objects_revoked_since_the_refresh() -> None:
     assert observation.captured_at == NOW and not observation.truncated
 
 
-async def test_list_is_bounded_and_says_so() -> None:
-    world = World()
-    world.tables = {("shop", f"t{i:02d}"): (("id", "int", "NO", None),) for i in range(12)}
+def numbered(count: int) -> Tables:
+    """``count`` 张单列表 ``t00``…，按目录顺序排列。"""
+    return {("shop", f"t{i:02d}"): (("id", "int", "NO", None),) for i in range(count)}
+
+
+async def listed(
+    world: World,
+    revoked: set[tuple[str, str]] | None = None,
+    overrides: dict[str, Result | BaseException] | None = None,
+) -> tuple[ToolObservation, Driver]:
+    """按 ``world`` 刷新快照，再撤销 ``revoked``、换上 ``overrides`` 后列表一次。
+
+    返回结果与只含列表本身 I/O 的驱动记录。
+    """
     drv, clock = world.driver(), Clock()
     adapter, cache = cache_for(drv, clock)
     assert await cache.refresh()
     forget(drv)
+    world.denied = revoked or set()
+    world.overrides = overrides or {}
     executes = starrocks_tools(adapter, dict.fromkeys(AUDIENCES, 400_000), schema=cache).executes
     execute = executes[(LIST_TABLES, TARGET.target_id)]
     assert isinstance(execute, Prechecked)
@@ -453,11 +466,58 @@ async def test_list_is_bounded_and_says_so() -> None:
         tool_name="list_tables",
         arguments={"cluster": TARGET.target_id},
     )
-    observation = await execute.run(execute.check(request))
-    assert len(observation.payload["rows"]) == TARGET.policy.max_rows  # type: ignore[arg-type]
+    return await execute.run(execute.check(request)), drv
+
+
+def names(observation: ToolObservation) -> list[str]:
+    return [row["name"] for row in observation.payload["rows"]]  # type: ignore[index, union-attr]
+
+
+# 每次列表最多尝试探测的对象数（计划 Task 2 实施说明：2 × max_rows）。
+PROBE_CAP = 2 * TARGET.policy.max_rows
+
+
+async def test_list_is_bounded_and_says_so() -> None:
+    observation, drv = await listed(World(tables=numbered(12)))
+    assert names(observation) == [f"t{i:02d}" for i in range(TARGET.policy.max_rows)]
     assert observation.truncated
     # 只探测到凑满一页再多一个所需的批次，不探测整个目录。
-    assert len(statements(drv)) == 2 * TARGET.policy.max_rows
+    assert len(statements(drv)) == PROBE_CAP
+
+
+@pytest.mark.parametrize(
+    ("count", "denied", "shown", "truncated"),
+    [
+        # 第一批凑满一页，其后是很长的撤权尾部：按已尝试的对象数停下，不探测整个目录。
+        (30, range(5, 30), range(5), True),
+        # 前几批大多已撤权：尝试满上限即停，未检查的候选标记截断。
+        (30, [*range(0, 4), *range(5, 9)], [4, 9], True),
+        # 全部可读的成功对照。
+        (30, (), range(5), True),
+        # 恰好一页、全部可读：探测完整个目录，不截断。
+        (5, (), range(5), False),
+        # 上限内探测完整个目录，可读对象不足一页：不截断。
+        (PROBE_CAP, range(1, PROBE_CAP), [0], False),
+    ],
+    ids=["长撤权尾部", "前几批大多撤权", "全部可读", "恰好一页", "上限内探测完"],
+)
+async def test_list_probes_at_most_twice_a_page_of_objects(
+    count: int, denied: Any, shown: Any, truncated: bool
+) -> None:
+    revoked = {("shop", f"t{i:02d}") for i in denied}
+    observation, drv = await listed(World(tables=numbered(count)), revoked)
+    assert names(observation) == [f"t{i:02d}" for i in shown]
+    assert observation.truncated is truncated
+    probed = statements(drv)
+    assert len(probed) == min(count, PROBE_CAP)
+    assert probed == [probe_sql("shop", f"t{i:02d}") for i in range(len(probed))]  # 目录顺序
+
+
+async def test_a_probe_failure_while_listing_returns_nothing() -> None:
+    lost = {probe_sql("shop", "t07"): OperationalError(2013, "lost")}
+    with pytest.raises(StarRocksError) as raised:
+        await listed(World(tables=numbered(30)), overrides=lost)
+    assert raised.value.code is StarRocksErrorCode.CONNECTION_LOST
 
 
 @pytest.mark.parametrize("tool_id", [DESCRIBE_TABLE, LAYOUT_TOOL])

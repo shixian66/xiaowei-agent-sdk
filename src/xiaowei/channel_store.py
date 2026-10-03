@@ -54,7 +54,9 @@ SendOutcome = Literal["sent", "failed", "unknown"]
 # 安全失败码闭集（与迁移 002 的 CHECK 一致）：只表达失败类别，不携带异常文字。调用者经 ``fail()``
 # 只能写入 ``CallerFailureCode``；两个内部码各有唯一写入路径：``result_not_saved`` 由结果保存
 # 失败路径与关闭 Session 同一事务写入，``interrupted`` 由启动恢复写入。
-CallerFailureCode = Literal["busy", "model_failed", "evidence_failed", "session_failed"]
+CallerFailureCode = Literal[
+    "busy", "model_failed", "evidence_failed", "session_failed", "scope_unverifiable"
+]
 InternalFailureCode = Literal["result_not_saved", "interrupted"]
 FailureCode = CallerFailureCode | InternalFailureCode
 

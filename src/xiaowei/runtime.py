@@ -15,7 +15,8 @@ Governance → 各目标首次结构刷新（失败只让该目标暂不可用�
 
 维护命令：``initialize`` / ``upgrade`` 独占同一把实例锁；``cleanup`` 与 ``resend`` 不执行恢复，只靠
 数据库条件更新与在线 ``serve`` 并发。``resend`` 只重发飞书 failed/unknown 的已保存结果：不装配模型、
-不连接 StarRocks，经同一 ``EvidenceStore`` 重验与投递 CAS 后发送一次。
+不调用工具，经同一 ``EvidenceStore`` 重验（含按当前 StarRocks 权限与对象版本复核证据依赖：只有
+零行探测与元数据读取，不执行原业务 SQL）与投递 CAS 后发送一次。
 
 凭据只以 ``env:NAME`` 引用出现在配置中，在用到它的装配步骤才解析；错误信息不含凭据、连接串或
 上游原文。``model_transport``、``starrocks_connect``（按目标 ID）、``feishu_channel`` 只供测试替换
@@ -79,13 +80,12 @@ from xiaowei.models import (
 )
 from xiaowei.session import CleanupReport, SessionLimits, cleanup_expired
 from xiaowei.starrocks import (
-    Connection,
     Connector,
     StarRocksAdapter,
     StarRocksTarget,
     open_starrocks,
 )
-from xiaowei.starrocks_schema import SchemaCache
+from xiaowei.starrocks_schema import DependencyCheck, SchemaCache
 from xiaowei.starrocks_tools import (
     AUDIT_TOOLS,
     DIAGNOSE_TOOLS,
@@ -408,6 +408,7 @@ def _delivery(
         authorize=access.authorize,
         clock=clock,
         retention_seconds=storage.evidence_retention_seconds,
+        verify_dependencies=DependencyCheck({t: s.adapter for t, s in schemas.items()}),
     )
     results = ResultDelivery(store, evidence, access, budget=config.budget)
     return _Delivery(store, evidence, results, tools)
@@ -689,10 +690,6 @@ class ResendNotConfiguredError(Exception):
         super().__init__("未配置飞书，没有可重发的渠道")
 
 
-async def _no_starrocks() -> Connection:
-    raise RuntimeError("显式重发不连接 StarRocks")
-
-
 async def resend(
     config: ServeConfig,
     *,
@@ -701,6 +698,7 @@ async def resend(
     message_id: str,
     clock: Callable[[], datetime] = now,
     feishu_channel: LarkChannel | None = None,
+    starrocks_connect: Mapping[str, Connector] | None = None,
 ) -> SendOutcome | None:
     """显式重发一条飞书结果：只接受当前 owner 下 completed 且投递为 failed/unknown 的记录。
 
@@ -714,10 +712,16 @@ async def resend(
     async with _engine(config) as engine, hold_backend(engine) as sender:
         # 发送期间占用一条连接：并发启动的 serve 据此知道这次重发仍在进行，不把它当作遗留发送。
         await check_storage(engine)
-        # 重发只复核与发送已保存结果，不调用工具：结构快照从不刷新，StarRocks 从不连接。
+        # 重发只复核与发送已保存结果，不调用工具：结构快照从不刷新；StarRocks 只用于复核证据
+        # 依赖（零行探测与元数据读取），连接按需建立、用完即关。
         schemas = {
             t.target_id: SchemaCache(
-                StarRocksAdapter(t.starrocks, connect=_no_starrocks, clock=clock), clock=clock
+                open_starrocks(t.starrocks, clock=clock)
+                if starrocks_connect is None
+                else StarRocksAdapter(
+                    t.starrocks, connect=starrocks_connect[t.target_id], clock=clock
+                ),
+                clock=clock,
             )
             for t in config.targets
         }

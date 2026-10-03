@@ -3,8 +3,10 @@
 SDK 在一轮内把用户输入、工具调用/结果与最终消息写入 Session，早于应用校验最终回答；因此
 ``add_items`` 只把按 Session 策略转换后的副本暂存在内存，``commit_validated`` 重新校验最终
 回答后才委托底层写入，失败路径调用 ``discard_pending``。工具结果只保存证据引用，回放时经
-Evidence 读取边界按当前权限、目标范围、策略与过期取回 Session 投影；任一条历史不能安全
-回放时整段拒绝并提示新建会话，不裁掉半组工具项、不以无来源文字替代失效证据。证据须由历史
+Evidence 读取边界按当前权限、目标范围、策略与过期取回 Session 投影（整段历史作为一批，依赖
+按目标合并复核一次）；任一条历史确定不能安全回放时整段拒绝并提示新建会话，不裁掉半组工具项、
+不以无来源文字替代失效证据。只是暂时无法复核（目标不可达、超时）时抛出
+``SessionUnverifiableError``：本轮不运行或不提交，会话状态与历史不变，之后的新请求重新复核。证据须由历史
 中同一次调用（调用标识、函数名、参数）生成，暂存与回放都经 Evidence 读取边界核对。
 
 应用表 ``xiaowei_session`` 记录会话归属、运行绑定（应用传入 Profile 与数据策略的组合指纹，
@@ -39,6 +41,7 @@ from xiaowei.evidence import (
     EvidenceError,
     EvidenceStore,
     EvidenceUnavailableError,
+    EvidenceUnverifiableError,
 )
 from xiaowei.models import AgentAnswer, RunContext, ToolCall
 
@@ -185,6 +188,13 @@ class SessionUnavailableError(SessionError):
 
     def __init__(self, message: str = "会话历史不可继续使用，请新建会话") -> None:
         super().__init__(message)
+
+
+class SessionUnverifiableError(SessionError):
+    """暂时无法确认历史或本轮证据依赖的数据当前仍可读；会话保持可用，本轮不提交。"""
+
+    def __init__(self) -> None:
+        super().__init__("暂时无法确认数据当前权限，本轮未执行或未保存；会话保留，请稍后重试")
 
 
 class SessionLimitError(SessionUnavailableError):
@@ -345,6 +355,8 @@ class PolicySession:
             await self._evidence.validate_answer(answer, self._ctx)
         except (ValidationError, AnswerRejectedError):
             raise SessionItemRejectedError("最终回答未通过校验，本轮不保存") from None
+        except EvidenceUnverifiableError:
+            raise SessionUnverifiableError from None
 
     async def _open(self) -> int:
         """返回可继续使用的会话已提交轮数；归属、Profile、状态或期限不符时拒绝。"""
@@ -421,6 +433,8 @@ class PolicySession:
             except EvidenceUnavailableError:
                 # 模型已看到该结果，后续文字可能引用它；不能只丢掉这一项继续保存。
                 raise SessionItemRejectedError("本轮工具结果无法保存到会话") from None
+            except EvidenceUnverifiableError:
+                raise SessionUnverifiableError from None
             return _output(call_id, json.dumps({_EVIDENCE_REF: evidence_id}))
         raise SessionItemRejectedError("本轮包含不支持保存的会话内容")
 
@@ -432,8 +446,9 @@ class PolicySession:
         return None
 
     async def _replay(self, stored: list[TResponseInputItem]) -> list[TResponseInputItem]:
-        """把保存形式转换为回放形式：证据引用经读取边界换成当前 Session 投影。"""
+        """把保存形式转换为回放形式：证据引用经读取边界（一批）换成当前 Session 投影。"""
         replay: list[TResponseInputItem] = []
+        references: list[tuple[int, str, ToolCall]] = []
         open_calls: dict[str, dict[str, Any]] = {}
         closed_calls: set[str] = set()
         try:
@@ -452,29 +467,36 @@ class PolicySession:
                     call_id = _text(raw.get("call_id"))
                     if call_id not in open_calls:
                         raise SessionUnavailableError
-                    call = open_calls.pop(call_id)
+                    call = _tool_call(open_calls.pop(call_id))
                     closed_calls.add(call_id)
-                    output = await self._replay_output(_tool_call(call), raw)
-                    replay.append(_output(call_id, output))
+                    output = raw.get("output")
+                    if output != NO_EVIDENCE_OUTPUT:
+                        evidence_id = _reference(output)
+                        if evidence_id is None or call is None:
+                            raise SessionUnavailableError
+                        references.append((len(replay), evidence_id, call))
+                    replay.append(_output(call_id, NO_EVIDENCE_OUTPUT))
                 else:
                     raise SessionUnavailableError
         except SessionItemRejectedError:
             raise SessionUnavailableError from None
         if open_calls:
             raise SessionUnavailableError
+        for (index, _, _), content in zip(references, await self._project(references), strict=True):
+            replay[index] = _output(cast(dict[str, Any], replay[index])["call_id"], content)
         return replay
 
-    async def _replay_output(self, call: ToolCall | None, raw: dict[str, Any]) -> str:
-        output = raw.get("output")
-        if output == NO_EVIDENCE_OUTPUT:
-            return NO_EVIDENCE_OUTPUT
-        evidence_id = _reference(output)
-        if evidence_id is None or call is None:
-            raise SessionUnavailableError
+    async def _project(self, references: list[tuple[int, str, ToolCall]]) -> list[str]:
+        if not references:
+            return []
         try:
-            return await self._evidence.project(evidence_id, self._ctx, "session", call=call)
+            return await self._evidence.project_many(
+                [(evidence_id, call) for _, evidence_id, call in references], self._ctx, "session"
+            )
         except EvidenceUnavailableError:
             raise SessionUnavailableError from None
+        except EvidenceUnverifiableError:
+            raise SessionUnverifiableError from None
         except EvidenceError:
             raise SessionStoreError("会话存储不可用") from None
 

@@ -652,10 +652,10 @@ def failing_delivery_validation(env: Env, monkeypatch: pytest.MonkeyPatch) -> No
     预校验与 Session 提交照常。"""
     original = env.evidence.validate_answer
 
-    async def validate(answer: Any, context: RunContext) -> Delivery:
+    async def validate(answer: Any, context: RunContext, **kwargs: Any) -> Delivery:
         if not context.tool_scope:
             raise EvidenceStoreError("injected evidence read failure")
-        return await original(answer, context)
+        return await original(answer, context, **kwargs)
 
     monkeypatch.setattr(env.evidence, "validate_answer", validate)
 

@@ -50,7 +50,12 @@ from xiaowei.starrocks import (
     StarRocksTarget,
     open_starrocks,
 )
-from xiaowei.starrocks_schema import SchemaCache
+from xiaowei.starrocks_schema import (
+    DependencyCheck,
+    SchemaCache,
+    listed_dependency,
+    read_dependency,
+)
 from xiaowei.starrocks_tools import (
     DESCRIBE_TABLE,
     LAYOUT_TOOL,
@@ -374,6 +379,7 @@ async def test_governed_query_tool_end_to_end(instance: Instance) -> None:
             authorize=grants,
             clock=Clock(datetime.now(UTC)),
             retention_seconds=600,
+            verify_dependencies=DependencyCheck({"sr-real": ada}),
         )
         governed = GovernedTools(evidence)
         # 不在快照中的对象（无权的 ungranted）在 I/O 前由 SQLGuard 拒绝。
@@ -690,3 +696,99 @@ async def test_grants_and_revocations_take_effect_at_the_next_boundary(instance:
     )
     assert await cache.refresh()
     assert not {(db, "hidden"), (db, "ungranted")} & set(cache.current().objects)
+
+
+async def test_evidence_dependencies_follow_current_grants_and_object_versions(
+    instance: Instance,
+) -> None:
+    """证据依赖复核（P2.5 Task 2 审查修订）：只读账号读得到依赖的当前版本；未变化为 valid，撤权、
+    同名重建（重新授权后）为 invalid，别处加列仍 valid；视图依赖不可跨轮回放。
+
+    同时固定 4.1.4 的元数据事实：带 ``TABLE_SCHEMA`` 条件读取的 ``CREATE_TIME`` 不随会话时区，
+    与结构快照的全表读取不同，因此版本不比较创建时间。"""
+    host, port, user = admin_address()
+    db, ro = instance.database, instance.ro_user
+    props = "DUPLICATE KEY(id) DISTRIBUTED BY HASH(id) BUCKETS 1 PROPERTIES('replication_num'='1')"
+    await admin(
+        host,
+        port,
+        user,
+        f"CREATE VIEW {db}.v_sales AS SELECT id, region FROM {db}.sales",
+        f"GRANT SELECT ON VIEW {db}.v_sales TO USER '{ro}'@'%'",
+        f"GRANT SELECT ON TABLE {db}.hidden TO USER '{ro}'@'%'",
+    )
+    ada = adapter(instance)
+    cache = SchemaCache(ada, clock=lambda: datetime.now(UTC))
+    assert await cache.refresh()
+    snap = cache.current()
+    check = DependencyCheck({"sr-real": ada})
+    sales, hidden, view = (snap.object(db, n) for n in ("sales", "hidden", "v_sales"))
+    assert sales is not None and hidden is not None and view is not None
+    assert (sales.type, view.type, view.table_id) == ("BASE TABLE", "VIEW", 0)
+    assert isinstance(sales.table_id, int) and sales.table_id > 0
+
+    deps = [
+        read_dependency(sales, {"region", "total"}),
+        read_dependency(hidden),
+        read_dependency(view, {"region"}),
+        listed_dependency(db, "sales"),
+    ]
+    assert not deps[2].replayable and deps[0].replayable
+    assert await check("sr-real", deps) == "valid"
+
+    # 别处加列：被依赖列的名字与类型不变，仍然有效。
+    await admin(host, port, user, f"ALTER TABLE {db}.sales ADD COLUMN extra INT")
+    for _ in range(60):  # 加列是异步的轻量变更：等到列出现在元数据中
+        cols = await admin_rows(
+            host,
+            port,
+            user,
+            f"SELECT COLUMN_NAME FROM information_schema.columns WHERE TABLE_SCHEMA = '{db}' "
+            "AND TABLE_NAME = 'sales'",
+        )
+        if ("extra",) in cols:
+            break
+        await asyncio.sleep(0.5)
+    assert await check("sr-real", deps[:1]) == "valid"
+
+    # 撤权：确定失效。
+    await admin(host, port, user, f"REVOKE SELECT ON TABLE {db}.hidden FROM USER '{ro}'@'%'")
+    assert await check("sr-real", [deps[1]]) == "invalid"
+    assert await check("sr-real", [listed_dependency(db, "hidden")]) == "invalid"
+
+    # 同名重建并重新授权：权限探测通过，版本（TABLE_ID/CREATE_TIME）不同，确定失效。
+    await admin(
+        host,
+        port,
+        user,
+        f"DROP TABLE {db}.hidden FORCE",
+        f"CREATE TABLE {db}.hidden (id INT, v VARCHAR(8)) {props}",
+        f"GRANT SELECT ON TABLE {db}.hidden TO USER '{ro}'@'%'",
+    )
+    assert await check("sr-real", [listed_dependency(db, "hidden")]) == "valid"
+    assert await check("sr-real", [deps[1]]) == "invalid"
+
+
+async def test_create_time_zone_depends_on_the_metadata_predicate(instance: Instance) -> None:
+    """4.1.4 事实（P2.5 Task 2 审查修订）：同一会话、同一对象，``CREATE_TIME`` 在全表读取时按会话
+    时区、带 ``TABLE_SCHEMA = …`` 条件时按服务器时区给出。证据依赖因此不比较创建时间。"""
+    host, port, user = admin_address()
+    conn = await asyncmy.connect(host=host, port=port, user=user, password="", autocommit=True)
+    try:
+        async with conn.cursor() as cursor:
+            await cursor.execute("SET time_zone = 'Asia/Shanghai'")
+            await cursor.execute(
+                "SELECT CREATE_TIME FROM information_schema.tables WHERE TABLE_SCHEMA NOT IN "
+                "('information_schema', 'sys', '_statistics_') AND TABLE_NAME = 'sales' "
+                f"AND TABLE_SCHEMA LIKE '{instance.database}'"
+            )
+            ((scanned,),) = await cursor.fetchall()
+            await cursor.execute(
+                "SELECT CREATE_TIME FROM information_schema.tables "
+                f"WHERE TABLE_SCHEMA = '{instance.database}' AND TABLE_NAME = 'sales'"
+            )
+            ((filtered,),) = await cursor.fetchall()
+    finally:
+        await conn.ensure_closed()
+    assert scanned != filtered
+    assert (scanned - filtered).total_seconds() == 8 * 3600  # 会话时区 +08:00，服务器为 UTC

@@ -177,12 +177,11 @@ async def test_slow_query_to_plan_and_layout(diag: Env, channel: str) -> None:
     assert all("run_readonly_query" not in seen for seen in env.scripts.tools_seen(message))
     assert not env.drv.sent("query")
     assert env.drv.sent("explain") == [explained(SLOW_SQL)]
-    assert [kind for kind, _ in env.drv.statements if kind != "session"] == [
-        "audit",
-        "explain",
-        "probe",  # 交付布局前确认当前仍可读
-        "layout",
-    ]
+    kinds = [kind for kind, _ in env.drv.statements if kind != "session"]
+    assert [k for k in kinds if k not in ("probe", "dependency")] == ["audit", "explain", "layout"]
+    assert kinds[kinds.index("layout") - 1] == "probe"  # 交付布局前确认当前仍可读
+    # 其余只是证据依赖复核（零行探测与版本读取），没有任何业务或元数据查询。
+    assert set(kinds) == {"audit", "explain", "layout", "probe", "dependency"}
     # 三类事实与各自的固定说明由代码生成，分析单列为模型推断。
     content = lines(reply)
     assert content.count(f"说明：{AUDIT_NOTE}") == 1 and content.count(f"说明：{PLAN_NOTE}") == 1

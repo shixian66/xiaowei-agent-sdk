@@ -41,6 +41,7 @@ from xiaowei.evidence import (
     EvidenceError,
     EvidenceStore,
     EvidenceStoreError,
+    EvidenceUnverifiableError,
 )
 from xiaowei.governance import Execute, GovernedTools, ToolExecutionError
 from xiaowei.mcp import MCPIntegration
@@ -53,6 +54,7 @@ from xiaowei.session import (
     SessionLimits,
     SessionStoreError,
     SessionUnavailableError,
+    SessionUnverifiableError,
 )
 from xiaowei.storage import StorageError, check_storage
 from xiaowei.tools import governed_function_tool, routed_function_tool
@@ -84,6 +86,7 @@ TurnReason = Literal[
     "scope_rejected",
     "storage_unavailable",
     "session_unavailable",
+    "scope_unverifiable",
     "content_rejected",
     "storage_failed",
     "answer_rejected",
@@ -99,6 +102,7 @@ _MESSAGES: Mapping[TurnReason, str] = {
     "scope_rejected": "本轮工具范围超出模型数据策略，未执行",
     "storage_unavailable": "存储未就绪，本轮未执行",
     "answer_rejected": "回答未通过证据校验，本轮未保存也未发送",
+    "scope_unverifiable": "暂时无法确认数据当前权限，本轮未交付；会话保留，请稍后重试",
     "turn_limit": "本轮模型调用次数达到上限，未完成；已执行的工具不会自动重试",
     "tool_failed": "工具已执行但结果不可用，本轮已停止；不会自动重试",
     "timeout": "本轮超过期限已停止；已执行的工具不会自动重试",
@@ -344,6 +348,11 @@ def _turn_error(exc: Exception) -> TurnError:
     """下层错误映射为受控失败；本包错误的消息是固定文字，其余一律使用固定信息。"""
     if isinstance(exc, TimeoutError):
         return TurnError("timeout")
+    # 暂时无法复核数据权限：可能在回放、工具结果、最终回答或提交时发生，原异常可能在原因链上。
+    if any(
+        isinstance(e, (SessionUnverifiableError, EvidenceUnverifiableError)) for e in _causes(exc)
+    ):
+        return TurnError("scope_unverifiable")
     if isinstance(exc, SessionUnavailableError):
         return TurnError("session_unavailable", str(exc))
     if isinstance(exc, SessionItemRejectedError):

@@ -17,29 +17,43 @@
 每个目标一份缓存，各自刷新、互不影响；同一目标同时只有一次刷新在进行（single-flight），刷新任务
 不随某个等待者的取消而中止，``aclose`` 时取消。缓存只在应用进程内存中，不含凭据，不进入
 RunContext。
+
+证据依赖：工具用 ``listed_dependency`` / ``read_dependency`` 从快照对象生成 Evidence 的对象依赖
+（版本取自采集它的快照）；``DependencyCheck`` 是交给 ``EvidenceStore`` 的复核：每批依赖在一条
+连接上零行探测当前权限，``read`` 依赖另读当前版本（``StarRocksAdapter.verify_objects``），与依赖
+记录的类型、表 ID 及被读取列的类型逐项比较。表 ID 全局分配、同名重建即改变（Task 0 §9.2），
+因此不比较创建时间（4.1.4 的 ``CREATE_TIME`` 时区随读法不同，见 ``ObjectVersion``）。任一对象
+确定不可读或版本不同为 ``invalid``；连接、超时、无法识别的错误为 ``unverifiable``。复核不刷新、
+不读取快照，因此也用于不刷新快照的显式重发。只有 ``BASE TABLE`` 的读取可跨轮回放：视图（及其他
+类型）的版本不能证明内层视图与底表未变（Task 0 §9.2）。
 """
 
 from __future__ import annotations
 
 import asyncio
 import logging
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Collection, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import Final
 
+from xiaowei.evidence import DependencyVerdict
+from xiaowei.models import ObjectDependency
 from xiaowei.sqlguard import QueryPolicy
 from xiaowei.starrocks import (
+    ObjectVersion,
     Scalar,
     SchemaRows,
     StarRocksAdapter,
     StarRocksError,
+    StarRocksErrorCode,
     safe_identifier,
 )
 
 logger = logging.getLogger(__name__)
 
 SCHEMA_UNAVAILABLE: Final = "该集群的表结构暂不可用（尚未采集成功或已过期），未执行；请稍后重试"
+BASE_TABLE: Final = "BASE TABLE"
 
 
 class SchemaUnavailableError(Exception):
@@ -67,7 +81,8 @@ class ColumnInfo:
 
 @dataclass(frozen=True)
 class ObjectInfo:
-    """一个可读对象；``table_id`` 与 ``created_at`` 是对象版本标识（视图的 ``table_id`` 为 0）。"""
+    """一个可读对象；``table_id`` 是对象版本标识（视图为 0）。``created_at`` 是快照读到的创建时间
+    （按会话时区），只随快照记录，不作版本比较（见 ``ObjectVersion``）。"""
 
     database: str
     name: str
@@ -248,3 +263,71 @@ def _optional_text(value: Scalar) -> str | None:
     if not isinstance(value, str):
         raise _SchemaContractError
     return value
+
+
+# ---- 证据依赖 ------------------------------------------------------------------------------
+
+
+def listed_dependency(database: str, name: str) -> ObjectDependency:
+    """事实只说明对象存在且可读（列表、审计源）：复核当前 SELECT 权限。"""
+    return ObjectDependency(
+        database=database,
+        name=name,
+        use="listed",
+        type=None,
+        table_id=None,
+        columns=(),
+        replayable=True,
+    )
+
+
+def read_dependency(obj: ObjectInfo, columns: Collection[str] | None = None) -> ObjectDependency:
+    """事实来自对象的数据、计划或结构：复核当前权限与版本；``columns`` 为空表示全部列。"""
+    return ObjectDependency(
+        database=obj.database,
+        name=obj.name,
+        use="read",
+        type=obj.type,
+        table_id=obj.table_id,
+        columns=tuple(
+            sorted((c.name, c.type) for c in obj.columns if columns is None or c.name in columns)
+        ),
+        replayable=obj.type == BASE_TABLE,
+    )
+
+
+class DependencyCheck:
+    """``EvidenceStore`` 的依赖复核：按目标选择 Adapter，只探测权限与读取元数据。"""
+
+    def __init__(self, adapters: Mapping[str, StarRocksAdapter]) -> None:
+        self._adapters = dict(adapters)
+
+    async def __call__(
+        self, target_id: str, dependencies: Sequence[ObjectDependency]
+    ) -> DependencyVerdict:
+        adapter = self._adapters.get(target_id)
+        if adapter is None:
+            return "invalid"
+        objects = list(dict.fromkeys((d.database, d.name) for d in dependencies))
+        versioned = frozenset((d.database, d.name) for d in dependencies if d.use == "read")
+        try:
+            current = await adapter.verify_objects(objects, versioned=versioned)
+        except StarRocksError as exc:
+            if exc.code is StarRocksErrorCode.OBJECT_NOT_ALLOWED:
+                return "invalid"  # 依赖中的名字无法安全引用：不可能由当前代码生成
+            logger.warning("证据依赖暂时无法复核：target=%s reason=%s", target_id, exc.code.value)
+            return "unverifiable"
+        for dependency in dependencies:
+            state = current[(dependency.database, dependency.name)]
+            if state is False or (dependency.use == "read" and not _same(dependency, state)):
+                return "invalid"
+        return "valid"
+
+
+def _same(dependency: ObjectDependency, state: ObjectVersion | bool) -> bool:
+    return (
+        isinstance(state, ObjectVersion)
+        and state.type == dependency.type
+        and state.table_id == dependency.table_id
+        and all(state.columns.get(name) == kind for name, kind in dependency.columns)
+    )

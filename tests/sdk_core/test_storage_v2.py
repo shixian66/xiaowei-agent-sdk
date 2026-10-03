@@ -11,6 +11,7 @@ import pytest
 from agents.extensions.memory import SQLAlchemySession
 from sqlalchemy import inspect, text
 from sqlalchemy.engine import URL
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncEngine
 from tests.sdk_core.synthetic_tools import secret
 
@@ -45,7 +46,7 @@ async def _install_v1(engine: AsyncEngine, *, through: str = "001_initial.sql") 
     """模拟旧部署：SDK 表与按顺序执行到 ``through`` 的应用表迁移（默认只有 001，即 P1-A）。"""
     probe = SQLAlchemySession("probe", engine=engine, create_tables=True)
     await probe.get_items(limit=0)
-    names = ["001_initial.sql", "002_p1b_channels.sql"]
+    names = ["001_initial.sql", "002_p1b_channels.sql", "003_delivery_attempt.sql"]
     async with engine.begin() as conn:
         for name in names[: names.index(through) + 1]:
             for chunk in _migration(name).split(";\n"):
@@ -66,9 +67,13 @@ async def _tables(engine: AsyncEngine) -> set[str]:
 
 
 def test_v2_migration_only_touches_application_tables() -> None:
-    for name in ("002_p1b_channels.sql", "003_delivery_attempt.sql"):
+    for name in (
+        "002_p1b_channels.sql",
+        "003_delivery_attempt.sql",
+        "004_evidence_dependencies.sql",
+    ):
         assert "agent_" not in _migration(name)
-    assert APP_SCHEMA_VERSION == 3
+    assert APP_SCHEMA_VERSION == 4
     assert _V2_TABLES <= APP_TABLES
     assert all(name.startswith("xiaowei_") for name in APP_TABLES)
 
@@ -78,9 +83,9 @@ async def test_fresh_initialization_installs_the_current_version(postgres_url: U
         await initialize_storage(engine)
         await initialize_storage(engine)  # 重复执行不重复建表
         await check_storage(engine)
-        assert await _version(engine) == 3
+        assert await _version(engine) == 4
         assert await _tables(engine) == {SDK_SESSIONS_TABLE, SDK_MESSAGES_TABLE, *APP_TABLES}
-        assert await upgrade_storage(engine) == 3  # 已是当前版本：显式升级无变化
+        assert await upgrade_storage(engine) == 4  # 已是当前版本：显式升级无变化
 
 
 async def test_v1_is_rejected_until_explicit_upgrade(postgres_url: URL) -> None:
@@ -94,8 +99,8 @@ async def test_v1_is_rejected_until_explicit_upgrade(postgres_url: URL) -> None:
         assert await _version(engine) == 1
         assert not _V2_TABLES & await _tables(engine)
 
-        assert await upgrade_storage(engine) == 3
-        assert await upgrade_storage(engine) == 3  # 重复命令无变化
+        assert await upgrade_storage(engine) == 4
+        assert await upgrade_storage(engine) == 4  # 重复命令无变化
         await check_storage(engine)
         assert _V2_TABLES <= await _tables(engine)
 
@@ -114,10 +119,10 @@ async def test_unknown_or_missing_versions_are_never_upgraded(postgres_url: URL)
 
 
 async def test_initialization_advances_the_schema_version(postgres_url: URL) -> None:
-    """全新初始化把版本推进到 3。旧程序只接受各自的版本由基线源码保证，这里不复制旧实现。"""
+    """全新初始化把版本推进到 4。旧程序只接受各自的版本由基线源码保证，这里不复制旧实现。"""
     async with open_engine(secret(postgres_url)) as engine:
         await initialize_storage(engine)
-        assert await _version(engine) == APP_SCHEMA_VERSION == 3
+        assert await _version(engine) == APP_SCHEMA_VERSION == 4
 
 
 async def test_failed_upgrade_rolls_back_completely(postgres_url: URL) -> None:
@@ -142,9 +147,9 @@ async def test_concurrent_upgrades_run_the_migration_once(postgres_url: URL) -> 
             upgrade_storage(first), upgrade_storage(second), return_exceptions=True
         )
         # 实例锁只让一个进程执行；另一个要么看到已完成的升级，要么因锁被占用而拒绝。
-        assert any(r == 3 for r in results)
-        assert all(r == 3 or isinstance(r, StorageBusyError) for r in results)
-        assert await _version(first) == 3
+        assert any(r == 4 for r in results)
+        assert all(r == 4 or isinstance(r, StorageBusyError) for r in results)
+        assert await _version(first) == 4
 
 
 async def test_v2_upgrade_keeps_requests_and_leaves_legacy_sending_to_recovery(
@@ -162,7 +167,7 @@ async def test_v2_upgrade_keeps_requests_and_leaves_legacy_sending_to_recovery(
             )
         with pytest.raises(StorageVersionMismatchError):
             await check_storage(engine)
-        assert await upgrade_storage(engine) == 3
+        assert await upgrade_storage(engine) == 4
         await check_storage(engine)
         async with engine.connect() as conn:
             row = (
@@ -173,6 +178,36 @@ async def test_v2_upgrade_keeps_requests_and_leaves_legacy_sending_to_recovery(
                 )
             ).one()
         assert tuple(row) == ("sending", None, None)
+
+
+async def test_v3_upgrade_adds_evidence_dependencies_and_the_unverifiable_code(
+    postgres_url: URL,
+) -> None:
+    """v3 → v4：已有证据的依赖为 NULL（StarRocks 旧证据因此不可读）；新失败码可写，未知码仍拒绝。"""
+    async with open_engine(secret(postgres_url)) as engine:
+        await _install_v1(engine, through="003_delivery_attempt.sql")
+        async with engine.begin() as conn:
+            await conn.execute(
+                text(
+                    "INSERT INTO xiaowei_evidence VALUES ('ev_1', 'alice', 's', 't', 'web',"
+                    " 'sr-test', 'local/run_readonly_query', 'c', 'run_readonly_query', 'a', 'p',"
+                    " 'f', now(), now(), now(), false, 'm', 's', 'w', 'f')"
+                )
+            )
+        with pytest.raises(StorageVersionMismatchError):
+            await check_storage(engine)
+        assert await upgrade_storage(engine) == 4
+        await check_storage(engine)
+        insert = (
+            "INSERT INTO xiaowei_request VALUES ('web', :key, 'alice', 'c', 's', 't', 'query',"
+            " 'd', 'failed', NULL, :code, 'pending', now(), now(), now())"
+        )
+        async with engine.begin() as conn:
+            assert await conn.scalar(text("SELECT dependencies FROM xiaowei_evidence")) is None
+            await conn.execute(text(insert), {"key": "k1", "code": "scope_unverifiable"})
+        with pytest.raises(IntegrityError):
+            async with engine.begin() as conn:
+                await conn.execute(text(insert), {"key": "k2", "code": "made_up"})
 
 
 async def test_instance_lock_is_exclusive_with_serve_and_maintenance(postgres_url: URL) -> None:
