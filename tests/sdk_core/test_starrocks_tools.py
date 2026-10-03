@@ -791,8 +791,9 @@ def scope_body(target: StarRocksTarget) -> dict[str, Any]:
 
 def test_scope_digest_is_versioned_and_names_the_database_type() -> None:
     body = scope_body(SR)
-    assert body["format"] == "xiaowei.data_scope.starrocks/2"
+    assert body["format"] == "xiaowei.data_scope.starrocks/3"
     assert body["database_type"] == "starrocks"
+    assert body["sql_mode"] == "ONLY_FULL_GROUP_BY"
     assert (
         data_scope_digest(SR)
         == "sha256:" + hashlib.sha256(scope_canonical(SR).encode()).hexdigest()
@@ -883,6 +884,34 @@ async def test_scope_change_invalidates_old_evidence(env: Env, target: StarRocks
     粒度是整个目标的范围：移除与该证据无关的对象同样使它失效（计划 §2.0 的取舍）。
     """
     await assert_old_evidence_unreadable(env, target)
+
+
+async def test_pre_sql_mode_evidence_is_unreadable_after_upgrade(env: Env) -> None:
+    """d497a34 的实际查询策略指纹；升级后同一配置也不能复用旧 SQL 语义下的证据。"""
+    ctx, answer_ = await queried(env)
+    attempts = env.drv.attempts
+    (evidence_id,) = answer_.evidence_ids
+    async with env.engine.begin() as conn:
+        await conn.execute(
+            text("UPDATE xiaowei_evidence SET policy_fingerprint = :old WHERE evidence_id = :id"),
+            {
+                "old": "sha256:9894a14f2efccd8d996d7b6eff90559d494c18235c201b6d2279b51fa347231f",
+                "id": evidence_id,
+            },
+        )
+    evidence, app = await reassembled(env, SR)
+    for audience in AUDIENCES:
+        with pytest.raises(EvidenceUnavailableError):
+            await evidence.project(evidence_id, ctx, audience)
+    with pytest.raises(AnswerRejectedError):
+        await evidence.validate_answer(answer_, ctx)
+    followup = env.scripts.add("继续旧结果", cite())
+    with pytest.raises(TurnError) as refused:
+        await app.run_turn(env.ctx(turn="t2"), followup)
+    assert refused.value.reason == "session_unavailable"
+    assert followup not in env.scripts.calls
+    assert len(executed_sql(env.drv)) == 1
+    assert env.drv.attempts == attempts
 
 
 @pytest.mark.parametrize("target", CONNECTION_CHANGED.values(), ids=CONNECTION_CHANGED.keys())

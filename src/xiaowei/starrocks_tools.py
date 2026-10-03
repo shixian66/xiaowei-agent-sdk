@@ -81,6 +81,7 @@ from xiaowei.starrocks import (
     EXPLAIN_PREFIX,
     SCHEMA_COLUMNS_SQL,
     SCHEMA_OBJECTS_SQL,
+    SQL_MODE,
     QueryResult,
     Scalar,
     StarRocksAdapter,
@@ -441,10 +442,11 @@ def starrocks_tools(
     return StarRocksTools(contracts=tuple(contracts), policies=tuple(policies), executes=executes)
 
 
-DATA_SCOPE_FORMAT: Final = "xiaowei.data_scope.starrocks/2"
+DATA_SCOPE_FORMAT: Final = "xiaowei.data_scope.starrocks/3"
 """摘要公式的显式版本：纳入或排除的字段改变时更新，使旧公式下保存的证据一次性失效。
 
 /2（P2.5 Task 2 审查）：加入数据库类型、TLS、服务端时间与内存限额、客户端期限与时区。
+/3（D1/D2）：固定 SQL 语义，纳入 sql_mode，并使修复前的 StarRocks 证据一次性失效。
 """
 
 
@@ -464,7 +466,7 @@ def scope_canonical(target: StarRocksTarget) -> str:
     - 资源限额：函数集合、``max_rows``/``max_sql_bytes``、结果/单值/计划上限、服务端
       ``query_timeout_seconds`` 与 ``query_mem_limit_bytes``、客户端 ``client_timeout_seconds``、
       结构快照的容量与期限（``schema_limits``）。它们决定能读到多少数据、哪些查询能完成。
-    - 事实形态：``time_zone``（时间值按它转换）、审计源配置（未配置为 ``null``）。
+    - 事实形态：``time_zone``（时间值按它转换）、固定 ``sql_mode``、审计源（未配置为 ``null``）。
 
     不纳入：密码引用（凭据）、``tls_ca_file``（信任链文件位置，不改变数据）、
     ``connect_timeout_seconds`` 与 ``pool_size``（只影响能否、何时取得连接，不影响一次读取的范围与
@@ -491,6 +493,7 @@ def scope_canonical(target: StarRocksTarget) -> str:
         "query_mem_limit_bytes": target.query_mem_limit_bytes,
         "client_timeout_seconds": target.client_timeout_seconds,
         "time_zone": target.time_zone,
+        "sql_mode": SQL_MODE,
         "schema_limits": target.schema_limits.model_dump(mode="json"),
         "audit": None if target.audit is None else target.audit.model_dump(mode="json"),
     }

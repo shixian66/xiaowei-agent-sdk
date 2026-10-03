@@ -499,6 +499,8 @@ INSERT-only 表经 Adapter 映射为 `permission_denied`。`WHERE 1 = 0` 在 FE 
 
 ### 9.8 现有代码缺陷（只记录，不在 Task 0 修改）
 
+下文保留 Task 0 发现时的事实。D1/D2 后续独立修复（基于 PR #34 合入的 `d497a34`）已实现、待独立审查；实施证据见 [AGENT_HANDOFF](../../../AGENT_HANDOFF.md) 的“D1/D2 修复”。固定 SQL 模式的当前契约只在 [ARCHITECTURE §6](../../../ARCHITECTURE.md#6-只读查询保护) 维护。新增真实证据已确认：内层重名、外层唯一的 CTE/子查询在旧代码上可经治理与 Evidence 交付错误结果，修复后与原 SQL 一致。
+
 - **D1 输出名重复时，ORDER BY 序号被改写到同名的另一列（`src/xiaowei/sqlguard.py`，当前主线即有）。**
   - **已验证（`guard_readonly_query` / `guard_explain_query` 产物，加只读账号绕过 Adapter 直接执行规范化 SQL）：** `SELECT t.id AS x, t.val AS x FROM t_sem t ORDER BY 1` 两种产物都改写为 `ORDER BY t.val`（序号 1 应为 `t.id`）。以 `max_rows=2`（LIMIT 3）执行，原 SQL 返回 `[(1,3),(2,None),(3,1)]`，规范化 SQL 返回 `[(2,None),(3,1),(5,2)]`。`… a.id, b.id … ORDER BY 1, 2` 改写为 `ORDER BY b.id, b.id`；`… GROUP BY 1, 2 ORDER BY 3 DESC, 1` 改写为 `ORDER BY COUNT(*) DESC, t.val`（序号 1 应为 `t.grp`），这两例在该数据上恰好返回相同行。
   - **不受影响（已验证）：** GROUP BY 序号按位置解析正确；输出名唯一时 ORDER BY 序号正确。
@@ -508,7 +510,7 @@ INSERT-only 表经 Adapter 映射为 `permission_denied`。`WHERE 1 = 0` 在 FE 
     - 治理层把 Adapter 异常转为 `ToolExecutionError` 并停止本轮，不进入成功 Evidence 的记录路径（`src/xiaowei/governance.py`）。
     - 唯一列名的对照正常返回结果。
     - 诊断路径 `explain_query` 发送的是序号已被改写的 `EXPLAIN LOGICAL`：计划只有一列，不触发重复列名检查，因此分析的是错误的 SQL。
-  - **未验证：** 内层（CTE/子查询）输出名重复而外层输出唯一时，是否会产生可交付的错误排序结果，由 D1 小 PR 的回归用例确认。不涉及权限越界或数据范围扩大。
+  - **Task 0 当时未验证（后续 D1 修复已补证，见本节开头）：** 内层（CTE/子查询）输出名重复而外层输出唯一时，是否会产生可交付的错误排序结果。不涉及权限越界或数据范围扩大。
   - **最小修复：** 输出名重复时拒绝 ORDER BY 序号（或要求唯一的显式别名，§2.3 已有此方向），或按位置而非名字解析；回归用例覆盖查询与执行计划两种产物、GROUP BY 对照和唯一名对照。
 - **D2 `||` 被改写为 OR，且 Adapter 未固定 `sql_mode`。** 现有 SQLGuard 接受 `s || 'x'` 并输出 `s OR 'x'`。4.1.4 默认 `sql_mode=ONLY_FULL_GROUP_BY` 时 `||` 本就是 OR，结果相同；目标全局 `sql_mode` 含 `PIPES_AS_CONCAT` 时，用户的拼接被改为逻辑或（实测 `'ax'` 变 NULL）。影响：结果语义取决于目标未受控的服务端设置。最小修复：Adapter 在现有会话设置中固定并回读 `sql_mode`，或 SQLGuard 拒绝 `||`；补回归用例。
 

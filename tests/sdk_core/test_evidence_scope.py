@@ -94,7 +94,7 @@ class Database:
         def make() -> FakeConnection:
             results: dict[str, Any] = {
                 SESSION_SET: Result(()),
-                SESSION_READ: Result(("q", "m", "t"), [SESSION_VALUES]),
+                SESSION_READ: Result(("q", "m", "t", "s"), [SESSION_VALUES]),
                 **schema_results(TABLES, frozenset(self.revoked), views=frozenset({VIEW})),
                 **self.overrides,
                 "*": self.query,

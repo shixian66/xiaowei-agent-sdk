@@ -190,6 +190,64 @@ def test_with_query_limit_lands_on_the_final_body() -> None:
     assert guard(query.normalized_sql) == query
 
 
+@pytest.mark.parametrize("check", [guard_readonly_query, guard_explain_query])
+@pytest.mark.parametrize(
+    ("sql", "orders"),
+    [
+        ("SELECT region AS x, total AS x FROM sales ORDER BY 1", ["ORDER BY 1"]),
+        (
+            "SELECT s.region, r.region FROM sales s JOIN regions r ON s.region = r.region "
+            "ORDER BY 1, 2 DESC",
+            ["ORDER BY 1, 2 DESC"],
+        ),
+        (
+            "SELECT region AS x, total AS x, COUNT(*) AS n FROM sales "
+            "GROUP BY 1, 2 ORDER BY 3 DESC, 1",
+            ["ORDER BY 3 DESC, 1"],
+        ),
+        # 提前复制未限定的投影会被交叉别名重新解释；常量也不能变成另一个序号。
+        ("SELECT total AS orders, orders AS total FROM sales ORDER BY 1", ["ORDER BY 1"]),
+        ("SELECT 2 AS x, total AS y FROM sales ORDER BY 1", ["ORDER BY 1"]),
+        (
+            "WITH q AS (SELECT total AS x, orders AS x, region FROM sales ORDER BY 1 LIMIT 1) "
+            "SELECT q.region AS label FROM q ORDER BY 1 DESC",
+            ["ORDER BY 1 DESC", "ORDER BY 1"],
+        ),
+        (
+            "SELECT q.region FROM (SELECT total AS x, orders AS x, region FROM sales "
+            "ORDER BY 2 DESC LIMIT 1) q",
+            ["ORDER BY 2 DESC"],
+        ),
+        ("SELECT DISTINCT region FROM sales ORDER BY 1", ["ORDER BY 1"]),
+    ],
+)
+def test_order_ordinals_keep_their_projection_position(check, sql, orders) -> None:  # type: ignore[no-untyped-def]
+    query = check(sql, POLICY)
+    tree = sqlglot.parse_one(query.normalized_sql, read="starrocks")
+    assert [order.sql(dialect="starrocks") for order in tree.find_all(exp.Order)] == orders
+    assert check(query.normalized_sql, POLICY) == query
+    assert_every_column_is_qualified(query)
+    if "GROUP BY" in sql:
+        assert tree.args["group"].sql(dialect="starrocks") == (
+            "GROUP BY `sales`.`region`, `sales`.`total`"
+        )
+
+
+@pytest.mark.parametrize("check", [guard_readonly_query, guard_explain_query])
+@pytest.mark.parametrize("order", ["x", "x + 1"])
+def test_ambiguous_output_alias_is_not_silently_bound_to_the_last_column(check, order) -> None:  # type: ignore[no-untyped-def]
+    with pytest.raises(QueryRejectedError) as refused:
+        check(f"SELECT region AS x, total AS x FROM sales ORDER BY {order}", POLICY)
+    assert refused.value.code is Code.AMBIGUOUS_REFERENCE
+
+
+@pytest.mark.parametrize("check", [guard_readonly_query, guard_explain_query])
+@pytest.mark.parametrize("ordinal", [0, 3])
+def test_invalid_order_ordinal_is_rejected(check, ordinal) -> None:  # type: ignore[no-untyped-def]
+    with pytest.raises(QueryRejectedError):
+        check(f"SELECT region, total FROM sales ORDER BY {ordinal}", POLICY)
+
+
 def test_function_names_are_matched_case_insensitively() -> None:
     assert guard("SELECT Sum(total) AS s, max(total) AS m FROM sales").referenced_objects == {
         "sales"

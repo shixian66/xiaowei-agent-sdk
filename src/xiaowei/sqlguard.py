@@ -83,7 +83,7 @@ REJECTION_MESSAGES: Final[Mapping[QueryRejectionCode, str]] = {
     _Code.OBJECT_NOT_ALLOWED: "引用了未获准的表或视图",
     _Code.COLUMN_NOT_ALLOWED: "引用了未获准或不存在的列",
     _Code.FUNCTION_NOT_ALLOWED: "使用了未获准的函数",
-    _Code.AMBIGUOUS_REFERENCE: "列引用有歧义，请用表名或别名限定，排序时可直接引用输出别名",
+    _Code.AMBIGUOUS_REFERENCE: "列引用有歧义，请用表名限定列，或为输出列设置唯一别名",
     _Code.UNSUPPORTED_LIMIT: "LIMIT 只接受非负整数字面量，不支持 OFFSET",
 }
 
@@ -405,6 +405,20 @@ def _provides(source: exp.Table | Scope, name: str, policy: QueryPolicy) -> bool
 
 
 def _qualify(root: exp.Select, policy: QueryPolicy) -> exp.Select:
+    # qualify 会把 ORDER BY 序号换为输出名；重名时会丢失位置。保留每个 SELECT 的原序号，
+    # 在它完成列限定后恢复。不能提前复制投影：未限定列可能被同名输出别名再次解释，
+    # 常量投影也可能被误作新序号。Ordered 节点及方向由锁定版本原地保留。
+    ordinals: list[tuple[exp.Ordered, exp.Literal]] = []
+    for select in root.find_all(exp.Select):
+        order = select.args.get("order")
+        if not isinstance(order, exp.Order):
+            continue
+        for ordered in order.expressions:
+            value = ordered.this
+            if isinstance(ordered, exp.Ordered) and isinstance(value, exp.Literal) and value.is_int:
+                if not 1 <= int(value.name) <= len(select.expressions):
+                    _reject(_Code.COLUMN_NOT_ALLOWED)
+                ordinals.append((ordered, value.copy()))
     schema: dict[str, object] = {
         policy.default_database: {
             name: dict.fromkeys(sorted(columns), "VARCHAR")
@@ -424,6 +438,8 @@ def _qualify(root: exp.Select, policy: QueryPolicy) -> exp.Select:
     )
     if not isinstance(qualified, exp.Select):
         _reject(_Code.UNSUPPORTED_SYNTAX)
+    for ordered, ordinal in ordinals:
+        ordered.set("this", ordinal)
     return qualified
 
 
@@ -471,17 +487,19 @@ def _inline_alias_reference(column: exp.Column, scope: Scope) -> None:
     因此执行的 SQL 中不保留任何未限定列；ORDER BY 以外的未限定名直接拒绝。
     """
     select = scope.expression
-    aliased = {
-        p.alias: p.this
+    aliased = [
+        p.this
         for p in (select.expressions if isinstance(select, exp.Select) else ())
-        if isinstance(p, exp.Alias)
-    }
-    if column.name not in aliased:
+        if isinstance(p, exp.Alias) and p.alias == column.name
+    ]
+    if not aliased:
         _reject(_Code.COLUMN_NOT_ALLOWED)  # qualify 不校验 HAVING/ORDER BY 中的未限定名
+    if len(aliased) != 1:
+        _reject(_Code.AMBIGUOUS_REFERENCE)
     order = column.find_ancestor(exp.Order, exp.Select)
     if order is None or order.parent is not select:
         _reject(_Code.AMBIGUOUS_REFERENCE)
-    column.replace(aliased[column.name].copy())
+    column.replace(aliased[0].copy())
 
 
 # ---- 5. LIMIT --------------------------------------------------------------------------------

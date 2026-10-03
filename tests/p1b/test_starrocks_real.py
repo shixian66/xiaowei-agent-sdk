@@ -338,7 +338,35 @@ async def test_driver_cursor_is_unbuffered(instance: Instance) -> None:
     conn.close()
 
 
-async def test_governed_query_tool_end_to_end(instance: Instance) -> None:
+@pytest.mark.parametrize(
+    ("sql", "columns", "rows"),
+    [
+        (
+            "SELECT id, total, at FROM sales WHERE id IN (3, 5) ORDER BY id",
+            ("id", "total", "at"),
+            (
+                {"id": 3, "total": "3.75", "at": "2026-09-01T03:30:00+08:00"},
+                {"id": 5, "total": "6.25", "at": "2026-09-01T05:30:00+08:00"},
+            ),
+        ),
+        (
+            "WITH q AS (SELECT id AS x, -id AS x, region AS label FROM sales "
+            "ORDER BY 1 LIMIT 1) SELECT q.label FROM q",
+            ("label",),
+            ({"label": "r0"},),
+        ),
+        (
+            "SELECT q.label FROM (SELECT id AS x, -id AS x, region AS label FROM sales "
+            "ORDER BY 1 LIMIT 1) q",
+            ("label",),
+            ({"label": "r0"},),
+        ),
+    ],
+    ids=["unique-control", "duplicate-in-cte", "duplicate-in-subquery"],
+)
+async def test_governed_query_tool_end_to_end(
+    instance: Instance, sql: str, columns: tuple[str, ...], rows: tuple[dict[str, object], ...]
+) -> None:
     """只读账号 → 治理 → SQLGuard → 真实驱动 → 证据（真实 PostgreSQL）→ Web 结构化事实。"""
     raw = os.environ.get("SDK_TEST_POSTGRES_URL")
     if not raw:
@@ -390,24 +418,101 @@ async def test_governed_query_tool_end_to_end(instance: Instance) -> None:
 
         result = await governed.invoke(
             ctx,
-            call("SELECT id, total, at FROM sales WHERE id IN (3, 5) ORDER BY id"),
+            call(sql),
             tools.executes[(RUN_QUERY, "sr-real")],
         )
         answer = AgentAnswer(
             evidence_ids=(result.evidence_id,),
-            inferences=[AnswerInference(text="两行", evidence_ids=(result.evidence_id,))],
+            inferences=[AnswerInference(text="查询结果", evidence_ids=(result.evidence_id,))],
             clarification=None,
         )
         delivery = await evidence.validate_answer(answer, ctx)
 
     (fact,) = delivery.facts
-    assert fact.columns == ("id", "total", "at")
-    assert fact.rows == (
-        {"id": 3, "total": "3.75", "at": "2026-09-01T03:30:00+08:00"},
-        {"id": 5, "total": "6.25", "at": "2026-09-01T05:30:00+08:00"},
-    )
-    assert fact.metadata["row_count"] == 2 and "`sales`" in str(fact.metadata["sql"])
+    assert fact.columns == columns
+    assert fact.rows == rows
+    assert fact.metadata["row_count"] == len(rows) and "`sales`" in str(fact.metadata["sql"])
     assert not fact.truncated
+
+
+async def readonly_rows(
+    inst: Instance, sql: str, *, mode: str | None = "ONLY_FULL_GROUP_BY"
+) -> list[tuple[object, ...]]:
+    """合成只读账号直接执行对照 SQL；不经过 Adapter，用来对比原文的服务器语义。"""
+    conn = await asyncmy.connect(
+        host=inst.host,
+        port=inst.port,
+        user=inst.ro_user,
+        password=os.environ[PASSWORD_ENV],
+        db=inst.database,
+        autocommit=True,
+    )
+    try:
+        async with conn.cursor() as cursor:
+            if mode is not None:
+                await cursor.execute("SET sql_mode = %s", (mode,))
+            await cursor.execute(sql)
+            return list(await cursor.fetchall())
+    finally:
+        await conn.ensure_closed()
+
+
+@pytest.mark.parametrize(
+    "sql",
+    [
+        "SELECT id AS x, -id AS x FROM sales ORDER BY 1 LIMIT 3",
+        "SELECT id AS total, total AS id FROM sales ORDER BY 1 DESC LIMIT 3",
+        "SELECT region AS x, -id AS x, COUNT(*) AS n FROM sales "
+        "GROUP BY 1, 2 ORDER BY 3 DESC, 1, 2 LIMIT 3",
+        "SELECT q.label FROM (SELECT id AS x, -id AS x, region AS label FROM sales "
+        "ORDER BY 1 LIMIT 1) q",
+        "SELECT id, region FROM sales ORDER BY 1 LIMIT 3",
+    ],
+    ids=["duplicate", "cross-alias", "grouped", "nested", "unique-control"],
+)
+async def test_order_ordinals_match_original_rows_and_plan(instance: Instance, sql: str) -> None:
+    query = guarded(instance, sql)
+    original = await readonly_rows(instance, sql)
+    assert await readonly_rows(instance, query.normalized_sql) == original
+    plan = await adapter(instance).explain(explained(instance, sql))
+    expected = await readonly_rows(instance, "EXPLAIN LOGICAL " + sql)
+    assert [row["plan"] for row in plan.rows] == [row[0] for row in expected]
+    assert not plan.truncated
+    if "AS x" in sql and "q.label" not in sql:
+        with pytest.raises(StarRocksError) as refused:
+            await adapter(instance).run_query(query)
+        assert refused.value.code is Code.RESULT_CONTRACT
+
+
+async def test_sql_mode_is_pinned_when_server_default_changes(instance: Instance) -> None:
+    host, port, user = admin_address()
+    ((previous,),) = await admin_rows(host, port, user, "SELECT @@GLOBAL.sql_mode")
+    # 仅对本 fixture 的可丢弃实例临时设置全局值，并在 finally 恢复和回读。
+    assert isinstance(previous, str) and all(c.isupper() or c in "_," for c in previous)
+    await admin(host, port, user, "SET GLOBAL sql_mode = 'PIPES_AS_CONCAT'")
+    try:
+        assert await readonly_rows(instance, "SELECT 'a' || 'x'", mode=None) == [("ax",)]
+        ada = adapter(instance)
+        query = guarded(instance, "SELECT 'a' || 'x' AS value")
+        assert (await ada.run_query(query)).rows == ({"value": None},)
+        assert (await ada.explain(explained(instance, "SELECT 'a' || 'x' AS value"))).rows
+        # 不固定模式时，这个缺少 GROUP BY 的 SQL 在临时全局模式下会成功；固定后两条路径均拒绝。
+        bad = "SELECT region, COUNT(*) AS n FROM sales"
+        assert await readonly_rows(instance, bad, mode=None)
+        for plan in (False, True):
+            with pytest.raises(StarRocksError) as refused:
+                if plan:
+                    await ada.explain(explained(instance, bad))
+                else:
+                    await ada.run_query(guarded(instance, bad))
+            assert refused.value.code is Code.QUERY_FAILED
+        # SQLGuard/Adapter 的设置没有修改全局值。
+        assert await readonly_rows(instance, "SELECT @@sql_mode", mode=None) == [
+            ("PIPES_AS_CONCAT",)
+        ]
+    finally:
+        await admin(host, port, user, f"SET GLOBAL sql_mode = '{previous}'")
+        assert await admin_rows(host, port, user, "SELECT @@GLOBAL.sql_mode") == [(previous,)]
 
 
 # ---- 执行计划（P2 Task 3） -----------------------------------------------------------------

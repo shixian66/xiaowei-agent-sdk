@@ -235,7 +235,7 @@ REJECTED = [
 # 小维自身发出的语句：都不能出现在列表中。
 OWN = [
     "EXPLAIN LOGICAL SELECT `shop`.`sales`.`region` FROM `shop`.`sales`",
-    "SELECT @@query_timeout, @@query_mem_limit, @@time_zone",
+    "SELECT @@query_timeout, @@query_mem_limit, @@time_zone, @@sql_mode",
     "SELECT TABLE_NAME AS name, TABLE_TYPE AS type FROM information_schema.tables "
     "WHERE TABLE_SCHEMA = 'shop' AND TABLE_NAME IN ('regions', 'sales') ORDER BY TABLE_NAME",
     "SELECT queryId, `timestamp` FROM `starrocks_audit_db__`.`starrocks_audit_tbl__` LIMIT 10",

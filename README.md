@@ -80,7 +80,10 @@ uv run --locked xiaowei --config xiaowei.json requests resend --subject <subject
 
 **目标（`targets`）。** 每项为 `type`（目前只能是 `starrocks`）、`description`（集群用途，交给模型选择集群）、`business_context`（该集群的业务口径 `{"version", "text"}`，没有则写 `null`）与 `starrocks`（连接、限额、函数闭集与结构快照上限）。集群 ID 就是 `starrocks.target_id`，只能用 1–32 位小写字母、数字、`_`、`-`，不能重复；连接地址、账号与凭据引用不交给模型。授权表按工具授予，获准用户可用全部已配置集群；模型每次调用数据工具都必须给出 `cluster`，未知集群在连接前拒绝，不会改查其他集群。旧版顶层 `starrocks`/`business_context` 会在启动时报错并给出迁移方式：把原 `starrocks` 放进 `targets` 的一项，原 `business_context` 去掉 `target_id` 后放到同一项。新增、删除集群或修改口径后，旧会话需要新建；已保存的 StarRocks 结果在本次升级后一次失效。
 
+**SQL 语义与升级。** 小维连接固定 SQL 模式，`||` 表示逻辑 OR；完整约定见 [ARCHITECTURE §6](ARCHITECTURE.md#6-只读查询保护)。D1/D2 修复把 StarRocks 证据摘要升为 v3，升级前保存的 StarRocks 证据一次性失效；引用它们的旧会话须新建并重新查询，历史与重发也不能继续交付旧事实。其他工具的证据指纹不变。
+
 **数据范围（自动发现）。** 不再配置表与列：小维每隔 `schema_limits.refresh_seconds` 读取一次 `information_schema` 中全部用户库的表、视图与列，并对每个对象做一次不返回数据的 `SELECT 1 … WHERE 1 = 0` 探测，只有只读账号确实能 SELECT 的对象才进入范围。查询与执行计划当前只接受默认 `database` 中的对象（跨库在后续版本开放）；`list_tables`、`describe_table`、`describe_table_layout` 在返回前会再次确认对象仍可读。
+
 - `policy` 只保留 `allowed_functions`、`max_rows`、`max_sql_bytes`；旧版的 `allowed_objects`、`allowed_columns`、`target_id`、`default_database` 会在启动时报错，删除即可。
 - `schema_limits`：`refresh_seconds` / `max_age_seconds` / `refresh_timeout_seconds`（默认 60 / 300 / 10 秒，间隔不能大于最大年龄）；`max_objects`、`max_columns`、`max_bytes`（每条元数据读取序列化后的字节上限）与 `max_comment_chars` 必须按目标规模填写，超过任一上限时这次刷新不生效。
 - 刷新失败时沿用上一份结构，直到它超过 `max_age_seconds`；之后该集群的数据工具暂不可用，其他集群不受影响。新授予的表在下一次成功刷新后可用；撤权后列表与表结构在返回前即发现，新查询由 StarRocks 拒绝。
