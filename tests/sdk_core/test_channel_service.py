@@ -779,8 +779,9 @@ async def test_recovery_racing_the_session_registration_closes_it_for_good(env: 
     await blocker.begin()
     await blocker.execute(
         text(
-            "INSERT INTO xiaowei_session VALUES (:s, 'alice', 'web', 'x', now(), now(), 0,"
-            " 'active')"
+            "INSERT INTO xiaowei_session (session_id, owner_kind, owner_id, channel,"
+            " profile_fingerprint, created_at, expires_at, turns, state)"
+            " VALUES (:s, 'personal', 'alice', 'web', 'x', now(), now(), 0, 'active')"
         ),
         {"s": record.session_id},
     )

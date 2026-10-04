@@ -135,8 +135,10 @@ class Env:
         async with self.engine.begin() as conn:
             await conn.execute(
                 text(
-                    "INSERT INTO xiaowei_session VALUES (:s, 'alice', 'web', 'fp', :c, :e, 1,"
-                    " 'active') ON CONFLICT DO NOTHING"
+                    "INSERT INTO xiaowei_session (session_id, owner_kind, owner_id, channel,"
+                    " profile_fingerprint, created_at, expires_at, turns, state)"
+                    " VALUES (:s, 'personal', 'alice', 'web', 'fp', :c, :e, 1, 'active')"
+                    " ON CONFLICT DO NOTHING"
                 ),
                 {"s": session_id, "c": now, "e": now + timedelta(seconds=expires_in)},
             )
