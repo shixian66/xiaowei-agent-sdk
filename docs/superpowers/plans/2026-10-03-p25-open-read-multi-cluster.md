@@ -78,7 +78,7 @@ Web / 飞书单聊（群入口在后续独立计划）
 - 新配置使用 `targets`，由稳定集群 ID 映射至类型（仅 `starrocks`）、显示说明、业务口径、连接引用和限额；取消旧单目标 `starrocks`、顶层单份 business_context 及手写表列字段。旧格式明确报迁移错误，不猜默认集群、不双读格式；当前无生产部署，可以一次迁移。
 - AccessDecision 从一个目标变为目标集合；所有获准用户得到当前配置目标集合。RunContext 只保存身份、目标集合、工具范围和预算等值，无连接、目录服务或可取得它们的引用。模型只看到集群 ID、说明、业务口径与能力状态，不见 host/port/user/凭据。
 - Session 的 ModelBinding/数据策略绑定继续保留；原单份 BusinessContext 改为按目标 ID 排序的口径映射，任一已装配口径或目标集合变更后要求新建会话，首版接受这个保守粒度。不为每个集群另建 SDK Session，不因支持多目标丢掉现有口径变更检查。
-- 对模型保持一套 `list_tables`、`describe_table`、`describe_table_layout`、`run_readonly_query`、`explain_query`、`list_slow_queries`，每个工具 `cluster` 必填。描述/布局额外明确 database、table；查询/计划含 sql；搜表含非空 keyword、可空 database 过滤、page/page_size；审计含受限时间窗/排序与可空 database 过滤。参数无隐式默认，边界及空值由严格 schema 明确。
+- 对模型保持一套 `list_tables`、`describe_table`、`describe_table_layout`、`run_readonly_query`、`explain_query`、`list_slow_queries`，每个工具 `cluster` 必填。描述/布局额外明确 database、table，描述另含可空 cursor；查询/计划含 sql；搜表含非空 keyword、可空 database 过滤、page_size 与可空 cursor；搜表与描述的结果以 next_cursor 续取（null 表示已全部返回，契约细节见 Task 6 实施说明）；审计含受限时间窗/排序与可空 database 过滤。参数无隐式默认，边界及空值由严格 schema 明确。
 - `cluster` 解析后才查对应契约与 Adapter；未知值、未授权目标或能力未配置，在该调用任何 DB I/O 前拒绝，不回退到别的集群。不为每个集群复制一套模型工具名。catalog 的查找、policy fingerprint、允许工具、回放核验、重发全部改用实际目标，不能只改入口路由。
 - 某目标无审计源/无新鲜 schema，只让该目标相应能力不可用；共享工具可见时，其说明列出目标能力差异，调用时仍复核。配置结构/凭据引用/重复 ID 错误拒绝整个装配。
 
