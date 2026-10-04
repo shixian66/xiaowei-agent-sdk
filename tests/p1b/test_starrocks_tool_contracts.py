@@ -5,6 +5,8 @@
 真实 Adapter 结果，证明最坏结果确实不小于实际结果。
 """
 
+# ruff: noqa: S608 —— 本文件的 SQL 是被检样本，拼接是有意的。
+
 import json
 from typing import Any
 
@@ -12,9 +14,9 @@ import pytest
 from tests.p1b.test_starrocks_adapter import NOW, POLICY, Result, driver, ready_schema
 from tests.p1b.test_starrocks_adapter import TARGET as SR
 
-from xiaowei.governance import Prechecked, Projection, ToolCatalog, ToolPolicy
+from xiaowei.governance import Prechecked, Projection, ToolCatalog, ToolPolicy, ToolRejectedError
 from xiaowei.models import ToolContract, ToolObservation, ToolRequest
-from xiaowei.sqlguard import guard_explain_query
+from xiaowei.sqlguard import guard_explain_query, guard_readonly_query
 from xiaowei.starrocks import EXPLAIN_PREFIX, StarRocksAdapter, StarRocksError, StarRocksErrorCode
 from xiaowei.starrocks_schema import SchemaCache
 from xiaowei.starrocks_tools import (
@@ -180,3 +182,51 @@ def test_required_fields_must_belong_to_every_projection() -> None:
     )
     with pytest.raises(ValueError, match="必需字段"):
         ToolCatalog((contract,), (policy,))
+
+
+# ---- P2.5 Task 3：结果列数与列名的上界 -------------------------------------------------------
+
+
+def wider(columns: int, **policy: Any) -> StarRocksAdapter:
+    return adapter(policy=SR.policy.model_copy(update={"max_result_columns": columns, **policy}))
+
+
+def test_worst_case_grows_with_max_result_columns() -> None:
+    """每多一列，最坏列头多出一对引号与一个分隔符（列名合计字节不变）。"""
+    base = needed(wider(4))
+    assert needed(wider(5)) == base + 4
+    assert needed(wider(4, max_sql_bytes=SR.policy.max_sql_bytes + 1)) > base
+
+
+async def test_full_width_escape_heavy_headers_stay_within_the_worst_case() -> None:
+    """列数取满、别名全是控制字符且规范化 SQL 恰好用满字节上限：实际结果不超过启动时的最坏值。"""
+    columns, limit = 4, 400
+    labels = [NASTY * (i + 1) for i in range(columns)]
+    projections = ", ".join(f"region AS `{label}`" for label in labels)
+    sql = f"SELECT {projections} FROM sales LIMIT 1"
+    policy = POLICY.model_copy(update={"max_sql_bytes": limit, "max_result_columns": columns})
+    size = len(guard_readonly_query(sql, policy).normalized_sql.encode())
+    labels[-1] += NASTY * (limit - size)  # 最后一个别名补满，使规范化 SQL 恰好等于上限
+    sql = f"SELECT {', '.join(f'region AS `{label}`' for label in labels)} FROM sales LIMIT 1"
+    assert len(guard_readonly_query(sql, policy).normalized_sql.encode()) == limit
+
+    ada = StarRocksAdapter(
+        wider(columns, max_sql_bytes=limit).target,
+        connect=driver(Result(tuple(labels), [("x",) * columns])),
+        clock=lambda: NOW,
+    )
+    observation = await run_query(ada, sql)
+
+    assert observation.payload["columns"] == labels
+    assert envelope_size(observation) <= needed(ada)
+
+
+async def test_star_expansion_beyond_the_column_limit_never_reaches_the_driver() -> None:
+    ada = wider(2)
+    schema = await ready_schema(ada)
+    tools = starrocks_tools(ada, dict.fromkeys(AUDIENCES, needed(ada)), schema=schema)
+    execute = tools.executes[(RUN_QUERY, SR.target_id)]
+    assert isinstance(execute, Prechecked)
+    with pytest.raises(ToolRejectedError, match="too_many_columns"):
+        execute.check(request("SELECT * FROM sales"))  # shop.sales 有 3 列
+    assert execute.check(request("SELECT * FROM regions"))  # 恰好 2 列

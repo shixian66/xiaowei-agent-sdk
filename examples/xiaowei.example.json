@@ -85,7 +85,8 @@
             "SUM"
           ],
           "max_rows": 200,
-          "max_sql_bytes": 8000
+          "max_sql_bytes": 8000,
+          "max_result_columns": 50
         },
         "schema_limits": {
           "refresh_seconds": 60,

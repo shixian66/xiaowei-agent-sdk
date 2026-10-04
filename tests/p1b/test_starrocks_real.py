@@ -36,9 +36,20 @@ from tests.sdk_core.postgres_harness import (
 from tests.sdk_core.synthetic_tools import Clock, Grants, ready_engine
 
 from xiaowei.evidence import EvidenceStore
-from xiaowei.governance import GovernedTools, ToolCatalog, ToolRejectedError
+from xiaowei.governance import (
+    GovernedTools,
+    ToolCatalog,
+    ToolExecutionError,
+    ToolRejectedError,
+)
 from xiaowei.models import AgentAnswer, AnswerInference, Budget, Identity, RunContext, ToolRequest
-from xiaowei.sqlguard import QueryPolicy, guard_explain_query, guard_readonly_query
+from xiaowei.sqlguard import (
+    QueryPolicy,
+    QueryRejectedError,
+    QueryRejectionCode,
+    guard_explain_query,
+    guard_readonly_query,
+)
 from xiaowei.starrocks import (
     EXPLAIN_PREFIX,
     LAYOUT_HIDDEN,
@@ -58,6 +69,7 @@ from xiaowei.starrocks_schema import (
 )
 from xiaowei.starrocks_tools import (
     DESCRIBE_TABLE,
+    EXPLAIN_QUERY,
     LAYOUT_TOOL,
     LIST_TABLES,
     QUERY_TOOLS,
@@ -135,7 +147,10 @@ async def instance(monkeypatch: pytest.MonkeyPatch) -> AsyncIterator[Instance]:
 
 def target(inst: Instance, **changes: object) -> StarRocksTarget:
     policy = SqlPolicy(
-        allowed_functions=frozenset({"SUM", "COUNT", "SLEEP"}), max_rows=5, max_sql_bytes=4000
+        allowed_functions=frozenset({"SUM", "COUNT", "SLEEP"}),
+        max_rows=5,
+        max_sql_bytes=4000,
+        max_result_columns=10,
     )
     base = StarRocksTarget(
         target_id="sr-real",
@@ -162,21 +177,22 @@ def target(inst: Instance, **changes: object) -> StarRocksTarget:
     return base.model_copy(update=changes) if changes else base
 
 
-def scope(inst: Instance, t: StarRocksTarget, **extra: frozenset[str]) -> QueryPolicy:
+def scope(inst: Instance, t: StarRocksTarget, **extra: tuple[str, ...]) -> QueryPolicy:
     """Adapter 用例的 SQLGuard 范围：固定对象与列（含无权的 ungranted，用来验证数据库自己的拒绝），
     函数与上限取自 ``t``。结构快照给出的范围另由“自动结构快照”一节的用例验证。"""
     return QueryPolicy(
         target_id="sr-real",
-        default_database=inst.database,
-        allowed_objects=frozenset({"sales", "ungranted", *extra}),
-        allowed_columns={
-            "sales": frozenset({"id", "region", "total", "day", "at", "note"}),
-            "ungranted": frozenset({"id"}),
-            **extra,
+        tables={
+            inst.database: {
+                "sales": ("id", "region", "total", "day", "at", "note"),
+                "ungranted": ("id",),
+                **extra,
+            }
         },
         allowed_functions=t.policy.allowed_functions,
         max_rows=t.policy.max_rows,
         max_sql_bytes=t.policy.max_sql_bytes,
+        max_result_columns=t.policy.max_result_columns,
     )
 
 
@@ -249,7 +265,9 @@ async def test_snapshot_holds_only_objects_the_account_can_select(instance: Inst
         "note",
         "secret",
     ]
-    assert snapshot.query_policy.allowed_objects == {"sales"}
+    assert snapshot.query_policy.tables == {
+        instance.database: {"sales": ("id", "region", "total", "day", "at", "note", "secret")}
+    }
 
 
 async def test_ungranted_object_maps_to_permission_denied(instance: Instance) -> None:
@@ -471,17 +489,399 @@ async def readonly_rows(
     ids=["duplicate", "cross-alias", "grouped", "nested", "unique-control"],
 )
 async def test_order_ordinals_match_original_rows_and_plan(instance: Instance, sql: str) -> None:
-    query = guarded(instance, sql)
+    duplicate = "AS x" in sql and "q.label" not in sql
+    query = explained(instance, sql) if duplicate else guarded(instance, sql)
     original = await readonly_rows(instance, sql)
     assert await readonly_rows(instance, query.normalized_sql) == original
     plan = await adapter(instance).explain(explained(instance, sql))
     expected = await readonly_rows(instance, "EXPLAIN LOGICAL " + sql)
     assert [row["plan"] for row in plan.rows] == [row[0] for row in expected]
     assert not plan.truncated
-    if "AS x" in sql and "q.label" not in sql:
-        with pytest.raises(StarRocksError) as refused:
-            await adapter(instance).run_query(query)
-        assert refused.value.code is Code.RESULT_CONTRACT
+    if duplicate:  # 结果列重名无法交付：查询路径在任何 I/O 前要求唯一别名（P2.5 Task 3）
+        with pytest.raises(QueryRejectedError) as refused:
+            guarded(instance, sql)
+        assert refused.value.code is QueryRejectionCode.AMBIGUOUS_REFERENCE
+
+
+# ---- P2.5 Task 3：复杂 SQL、跨库与星号展开的服务器语义 ---------------------------------------
+
+R3_FUNCTIONS = frozenset(
+    {"SUM", "COUNT", "MAX", "ROW_NUMBER", "RANK", "DENSE_RANK", "LAG", "LEAD"}
+    | {"TRIM", "CAST", "COALESCE"}
+)
+R3_SAMPLES = {
+    "union all": "SELECT region FROM {d}.sales WHERE id < 6 UNION ALL "
+    "SELECT region FROM {h}.staff ORDER BY 1 DESC LIMIT 7",
+    "union by name": "SELECT region AS r, id AS k FROM sales WHERE id < 5 UNION "
+    "SELECT name, id FROM {h}.staff ORDER BY k DESC, r",
+    "branch limits": "(SELECT id FROM sales ORDER BY id LIMIT 2) UNION ALL "
+    "(SELECT id FROM {h}.staff ORDER BY id DESC LIMIT 2) ORDER BY 1",
+    "windows": "SELECT id, region, ROW_NUMBER() OVER (PARTITION BY region ORDER BY id DESC) AS rn, "
+    "RANK() OVER (ORDER BY region) AS rk, DENSE_RANK() OVER (ORDER BY region) AS dr, "
+    "LAG(id, 1) OVER (PARTITION BY region ORDER BY id) AS prev, "
+    "LEAD(id) OVER (ORDER BY id) AS nxt, "
+    "SUM(total) OVER (PARTITION BY region) AS s FROM sales ORDER BY id LIMIT 12",
+    "nested ctes": "WITH a AS (SELECT region, total FROM sales WHERE id < 20), "
+    "b AS (SELECT region, SUM(total) AS s, COUNT(DISTINCT total) AS n FROM a GROUP BY region) "
+    "SELECT b.region, b.s, b.n, CASE WHEN b.n > 3 THEN 'many' ELSE 'few' END AS k "
+    "FROM b ORDER BY b.region",
+    "correlated exists": "SELECT s.id FROM sales s WHERE EXISTS (SELECT 1 FROM {h}.staff t "
+    "WHERE t.region = s.region AND t.id > s.id - 30) ORDER BY s.id LIMIT 8",
+    "correlated scalar": "SELECT s.id, (SELECT MAX(t.id) FROM {h}.staff t "
+    "WHERE t.region = s.region) AS m FROM sales s ORDER BY s.id LIMIT 8",
+    "cross database": "SELECT s.id, t.name FROM sales s JOIN {h}.staff t ON s.region = t.region "
+    "ORDER BY s.id, t.name LIMIT 9",
+    "star": "SELECT * FROM {h}.staff ORDER BY id",
+    "alias star": "SELECT s.*, t.name AS staff_name FROM sales s JOIN {h}.staff t "
+    "ON s.region = t.region ORDER BY s.id, t.name LIMIT 4",
+    "column case": "SELECT ID, Region FROM sales ORDER BY ID LIMIT 3",
+    "functions": "SELECT DISTINCT TRIM(note) AS n, CAST(total AS INT) AS t, "
+    "COALESCE(secret, '-') AS c FROM sales ORDER BY t LIMIT 3",
+}
+
+
+async def readonly_result(inst: Instance, sql: str) -> tuple[list[str], list[tuple[object, ...]]]:
+    """只读账号直接执行（固定与小维相同的 sql_mode）：列头与行。"""
+    conn = await asyncmy.connect(
+        host=inst.host,
+        port=inst.port,
+        user=inst.ro_user,
+        password=os.environ[PASSWORD_ENV],
+        db=inst.database,
+        autocommit=True,
+    )
+    try:
+        async with conn.cursor() as cursor:
+            await cursor.execute("SET sql_mode = 'ONLY_FULL_GROUP_BY'")
+            await cursor.execute(sql)
+            return [d[0] for d in cursor.description], list(await cursor.fetchall())
+    finally:
+        await conn.ensure_closed()
+
+
+async def test_r3_sql_keeps_server_rows_headers_and_order(instance: Instance) -> None:
+    """原 SQL 与规范化 SQL 在 4.1.4 上逐行（含顺序）与列头一致；范围来自真实结构快照。"""
+    host, port, user = admin_address()
+    hr = f"{instance.database}_hr"
+    table = "DUPLICATE KEY(id) DISTRIBUTED BY HASH(id) BUCKETS 1 PROPERTIES('replication_num'='1')"
+    await admin(
+        host,
+        port,
+        user,
+        f"CREATE DATABASE {hr}",
+        f"CREATE TABLE {hr}.staff (id INT, name VARCHAR(16), region VARCHAR(16)) {table}",
+        f"INSERT INTO {hr}.staff VALUES (1, 'Ann', 'r1'), (2, 'Bob', 'r2'), (3, 'Cy', 'r1'), "
+        "(4, 'Di', 'r9')",
+        f"GRANT SELECT ON TABLE {hr}.staff TO USER '{instance.ro_user}'@'%'",
+    )
+    try:
+        policy = SqlPolicy(
+            allowed_functions=R3_FUNCTIONS, max_rows=50, max_sql_bytes=4000, max_result_columns=12
+        )
+        ada = adapter(instance, policy=policy)
+        cache = SchemaCache(ada, clock=lambda: datetime.now(UTC))
+        assert await cache.refresh()
+        scope = cache.current().query_policy
+        assert set(scope.tables) == {instance.database, hr}
+        for name, template in R3_SAMPLES.items():
+            sql = template.format(d=instance.database, h=hr)
+            query = guard_readonly_query(sql, scope)
+            original = await readonly_result(instance, sql)
+            assert original[1], name  # 对照有数据，不是两个空结果相等
+            assert await readonly_result(instance, query.normalized_sql) == original, name
+        # 经 Adapter 的跨库查询：列头与行数与直接执行一致。
+        cross = R3_SAMPLES["cross database"].format(h=hr)
+        result = await ada.run_query(guard_readonly_query(cross, scope))
+        headers, rows = await readonly_result(instance, cross)
+        assert list(result.columns) == headers and result.row_count == len(rows)
+    finally:
+        await admin(host, port, user, f"DROP DATABASE {hr} FORCE")
+
+
+# 名字解析：WHERE/ON/窗口只认物理列，投影/GROUP BY/HAVING 先物理列，顶层 ORDER BY 先别名；
+# CTE/派生表的输出名沿用写法；星号按展开后的真实列名检查重名，库.表.* 检查库名。
+R3_NAME_SAMPLES = {
+    "window shadow": "SELECT id AS REGION, ROW_NUMBER() OVER (ORDER BY REGION, id DESC) AS n "
+    "FROM sales ORDER BY 1 LIMIT 8",
+    "where shadow": "SELECT id AS Region FROM sales WHERE Region = 'r1' ORDER BY 1 LIMIT 5",
+    "having shadow": "SELECT region AS total, COUNT(*) AS n FROM sales GROUP BY region, total "
+    "HAVING total > 10 ORDER BY 1, 2 LIMIT 5",
+    "projection shadow": "SELECT id AS total, total + 0 AS t2 FROM sales ORDER BY 1 LIMIT 3",
+    "order alias": "SELECT total AS x FROM sales ORDER BY x DESC LIMIT 3",
+    "order same column": "SELECT s.region AS REGION, s.id FROM sales s "
+    "ORDER BY region, s.id LIMIT 4",
+    "distinct stars": "SELECT * FROM (SELECT s.*, b.* FROM sales s JOIN {h}.bonus b "
+    "ON s.id = b.bid) q ORDER BY id",
+    "cte names": "WITH q AS (SELECT ID, Region FROM sales) "
+    "SELECT ID, region FROM q ORDER BY 1 LIMIT 3",
+    "cte star": "WITH q AS (SELECT ID FROM sales) SELECT * FROM q ORDER BY 1 LIMIT 3",
+    "nested stars": "SELECT * FROM (SELECT * FROM (SELECT Total FROM sales) a) b "
+    "ORDER BY 1 LIMIT 3",
+    "database star": "SELECT {d}.sales.* FROM sales ORDER BY id LIMIT 2",
+    # 顶层 ORDER BY 的唯一输出别名：同名物理列存在（含两个来源都有）时仍按别名排序。
+    "order aggregate alias": "SELECT SUM(id) AS total FROM sales GROUP BY region ORDER BY total",
+    "order join alias": "SELECT s.id AS region FROM sales s JOIN {h}.staff t ON s.id = t.id "
+    "ORDER BY region",
+    "order alias case": "SELECT id AS Total FROM sales ORDER BY total DESC LIMIT 3",
+    # 裸列的隐式输出名：两个来源都有 region，服务器按唯一输出 s.region 排序。
+    "order implicit output": "SELECT s.region FROM sales s JOIN {h}.staff t ON s.id = t.id "
+    "ORDER BY region DESC",
+    # 另一同名列来自其他来源，或输出是表达式：服务器仍按输出列排序（LIMIT 截取的行不同于物理列）。
+    "order other source": "SELECT s.id AS region, t.region AS tr FROM sales s "
+    "JOIN {h}.staff t ON s.id = t.id ORDER BY region DESC LIMIT 1",
+    "order self join": "SELECT a.id AS region, (b.region) AS br FROM sales a JOIN sales b "
+    "ON a.id = b.id ORDER BY region DESC LIMIT 3",
+    "order expression output": "SELECT id + 0 AS region, (region) AS r2 FROM sales "
+    "ORDER BY region LIMIT 3",
+    # 排序名在投影表达式、分组与窗口中出现：服务器按物理列 region 排序（复审 N1，原先被改写为
+    # 按别名 id 排序后执行）；标量子查询别名（复审 N2，原先内联后被服务器拒绝）；同一 CTE 的两个
+    # 关系别名（原先误拒）。
+    "order expression match": "SELECT id AS region, TRIM(region) AS r2 FROM sales "
+    "ORDER BY TRIM(region), id LIMIT 3",
+    "order group match": "SELECT id AS region, COUNT(*) AS n FROM sales GROUP BY id, region "
+    "ORDER BY region, id LIMIT 3",
+    "order window match": "SELECT id, id AS region, ROW_NUMBER() OVER (PARTITION BY day "
+    "ORDER BY region) AS n FROM sales ORDER BY region, id LIMIT 3",
+    "order scalar correlated": "SELECT s.id, (SELECT MAX(b.amount) FROM {h}.bonus b "
+    "WHERE b.bid = s.id) AS z FROM sales s ORDER BY z DESC, s.id LIMIT 3",
+    "order scalar plain": "SELECT s.id, (SELECT COUNT(*) FROM {h}.bonus) AS z FROM sales s "
+    "ORDER BY z, s.id LIMIT 2",
+    "order scalar wrapped": "SELECT s.id, COALESCE((SELECT MAX(b.amount) FROM {h}.bonus b "
+    "WHERE b.bid = s.id), 0) AS z FROM sales s ORDER BY z + 0 DESC, s.id LIMIT 3",
+    "order cte self join": "WITH c AS (SELECT * FROM sales) SELECT a.id AS region, "
+    "b.region AS br FROM c a JOIN c b ON a.id = b.id ORDER BY region, a.id LIMIT 3",
+    # 相关子查询：本层没有 id、WHERE 看不到本层别名，id 是外层 s.id（只匹配 bonus 中的 1、2、5）。
+    "correlated outer": "SELECT s.id FROM sales s WHERE EXISTS "
+    "(SELECT b.bid AS id FROM {h}.bonus b WHERE id = b.bid) ORDER BY 1",
+}
+R3_NAME_REJECTED = {
+    # 原 SQL 在服务器上报错：不能被规范化“修正”后执行。
+    "star wrong database": (
+        "SELECT nope.sales.* FROM sales",
+        QueryRejectionCode.COLUMN_NOT_ALLOWED,
+    ),
+    "where alias": ("SELECT id AS x FROM sales WHERE x > 1", QueryRejectionCode.COLUMN_NOT_ALLOWED),
+    "window alias": (
+        "SELECT id AS x, ROW_NUMBER() OVER (ORDER BY x) AS n FROM sales",
+        QueryRejectionCode.COLUMN_NOT_ALLOWED,
+    ),
+    "where ambiguous": (
+        "SELECT s.id AS region FROM sales s JOIN {h}.staff t ON s.id = t.id WHERE region = 'r1'",
+        QueryRejectionCode.AMBIGUOUS_REFERENCE,
+    ),
+    "correlated two outer": (
+        "SELECT s.id FROM sales s JOIN {h}.staff t ON s.id = t.id WHERE EXISTS "
+        "(SELECT b.bid AS region FROM {h}.bonus b WHERE region = 'r1')",
+        QueryRejectionCode.AMBIGUOUS_REFERENCE,
+    ),
+}
+
+
+async def test_r3_names_resolve_like_the_server(instance: Instance) -> None:
+    """名字解析在 4.1.4 上与原 SQL 一致：查询路径比较列头、行与顺序，计划路径比较计划。"""
+    host, port, user = admin_address()
+    hr = f"{instance.database}_nm"
+    table = "DUPLICATE KEY({}) DISTRIBUTED BY HASH({}) BUCKETS 1 PROPERTIES('replication_num'='1')"
+    await admin(
+        host,
+        port,
+        user,
+        f"CREATE DATABASE {hr}",
+        f"CREATE TABLE {hr}.staff (id INT, region VARCHAR(16)) {table.format('id', 'id')}",
+        f"CREATE TABLE {hr}.bonus (bid INT, amount INT) {table.format('bid', 'bid')}",
+        f"INSERT INTO {hr}.staff VALUES (1, 'r1'), (2, 'r2')",
+        f"INSERT INTO {hr}.bonus VALUES (1, 10), (2, 20), (5, 50)",
+        f"GRANT SELECT ON ALL TABLES IN DATABASE {hr} TO USER '{instance.ro_user}'@'%'",
+    )
+    try:
+        policy = SqlPolicy(
+            allowed_functions=R3_FUNCTIONS, max_rows=50, max_sql_bytes=4000, max_result_columns=12
+        )
+        ada = adapter(instance, policy=policy)
+        cache = SchemaCache(ada, clock=lambda: datetime.now(UTC))
+        assert await cache.refresh()
+        scope = cache.current().query_policy
+        for name, template in R3_NAME_SAMPLES.items():
+            sql = template.format(d=instance.database, h=hr)
+            original = await readonly_result(instance, sql)
+            assert original[1], name
+            query = guard_readonly_query(sql, scope)
+            assert await readonly_result(instance, query.normalized_sql) == original, name
+            plan = await ada.explain(guard_explain_query(sql, scope))
+            expected = await readonly_rows(instance, "EXPLAIN LOGICAL " + sql)
+            assert [row["plan"] for row in plan.rows] == [row[0] for row in expected], name
+        for name, (template, code) in R3_NAME_REJECTED.items():
+            sql = template.format(h=hr)
+            with pytest.raises(MySQLError):
+                await readonly_result(instance, sql)
+            for check in (guard_readonly_query, guard_explain_query):
+                with pytest.raises(QueryRejectedError) as refused:
+                    check(sql, scope)
+                assert refused.value.code is code, name
+        # 交叉别名：输出是列、投影另有同一来源的同名列（括号、限定写法不计）时，服务器改按那一列
+        # 排序，与按别名排序截取的行不同。排序名原样保留，规范化后的结果与原文一致。
+        for crossed, by_alias in (
+            ("SELECT id AS region, region AS id FROM sales ORDER BY id", None),
+            ("SELECT id AS total, total AS t2 FROM sales ORDER BY total", None),
+            (
+                "SELECT id AS region, (region) AS r2 FROM sales ORDER BY region LIMIT 3",
+                "SELECT id AS region, (region) AS r2 FROM sales ORDER BY id LIMIT 3",
+            ),
+            (
+                "SELECT id AS region, ((s.region)) AS r2 FROM sales s ORDER BY region LIMIT 3",
+                "SELECT id AS region, ((s.region)) AS r2 FROM sales s ORDER BY id LIMIT 3",
+            ),
+            (  # 同一来源 s；另一来源 b 也有 region
+                "SELECT s.id AS region, s.region AS sr FROM sales s JOIN sales b "
+                "ON s.id = b.id ORDER BY region LIMIT 3",
+                "SELECT s.id AS region, s.region AS sr FROM sales s JOIN sales b "
+                "ON s.id = b.id ORDER BY s.id LIMIT 3",
+            ),
+        ):
+            server = await readonly_result(instance, crossed)
+            assert server[1]
+            if by_alias is not None:
+                assert server != await readonly_result(instance, by_alias), crossed
+            normalized = guard_readonly_query(crossed, scope).normalized_sql
+            assert await readonly_result(instance, normalized) == server, crossed
+            plan = await ada.explain(guard_explain_query(crossed, scope))
+            expected = await readonly_rows(instance, "EXPLAIN LOGICAL " + crossed)
+            assert [row["plan"] for row in plan.rows] == [row[0] for row in expected], crossed
+        # 原文在服务器报错（排序名指向未分组的列）：规范化后同样报错，不被改写成功执行。
+        invalid = "SELECT id AS total, SUM(total) AS s FROM sales GROUP BY id ORDER BY total"
+        with pytest.raises(MySQLError):
+            await readonly_result(instance, invalid)
+        with pytest.raises(MySQLError):
+            await readonly_result(instance, guard_readonly_query(invalid, scope).normalized_sql)
+        with pytest.raises(MySQLError):
+            await readonly_rows(
+                instance, "EXPLAIN LOGICAL " + guard_explain_query(invalid, scope).normalized_sql
+            )
+        # 相关子查询的依赖记入外层列。
+        correlated = R3_NAME_SAMPLES["correlated outer"].format(h=hr)
+        assert (instance.database, "sales", "id") in guard_readonly_query(
+            correlated, scope
+        ).referenced_columns
+    finally:
+        await admin(host, port, user, f"DROP DATABASE {hr} FORCE")
+
+
+# ORDER BY 绑定的产品路径：数据使排序名指向别名与指向同名物理列时取到不同的行（复审 N1/N2）。
+ORDER_FACTS = {
+    "expression": "SELECT t.a AS x, t.x + 0 AS xx FROM {o}.t t ORDER BY x + 0, t.id LIMIT 1",
+    "group": "SELECT t.a AS x, COUNT(*) AS n FROM {o}.t t GROUP BY t.a, t.x ORDER BY x LIMIT 1",
+    "group order term": "SELECT t.a AS x, COUNT(*) AS n FROM {o}.t t GROUP BY t.a, t.x "
+    "ORDER BY t.x DESC, t.a LIMIT 1",
+    "window": "SELECT t.id, t.a AS x, ROW_NUMBER() OVER (PARTITION BY t.g ORDER BY t.x) AS n "
+    "FROM {o}.t t ORDER BY x, t.id LIMIT 1",
+    "crossed": "SELECT t.a AS x, (t.x) AS xx FROM {o}.t t ORDER BY x LIMIT 1",
+    "scalar": "SELECT t.id, (SELECT MAX(u.a) FROM {o}.u u WHERE u.id = t.id) AS z FROM {o}.t t "
+    "ORDER BY z, t.id LIMIT 1",
+    "scalar expression": "SELECT t.id, COALESCE((SELECT MAX(u.a) FROM {o}.u u "
+    "WHERE u.id = t.id), 0) AS z FROM {o}.t t ORDER BY z + 0 DESC, t.id LIMIT 1",
+    "cte self join": "WITH c AS (SELECT * FROM {o}.t) SELECT a.a AS x, b.x AS xx "
+    "FROM c a JOIN c b ON a.id = b.id ORDER BY x, a.id LIMIT 1",
+    "unique control": "SELECT t.a AS ax, t.x + 0 AS xx FROM {o}.t t ORDER BY ax, t.id LIMIT 1",
+}
+
+
+async def test_order_by_facts_keep_the_original_binding(instance: Instance) -> None:
+    """治理 → SQLGuard → 真实驱动 → 证据（真实 PostgreSQL）→ 最终事实：查询的行与原文一致，
+    计划与原文的 EXPLAIN LOGICAL 一致；原文报错的排序引用在两条路径都报错，不产生事实。"""
+    raw = os.environ.get("SDK_TEST_POSTGRES_URL")
+    if not raw:
+        pytest.fail("SDK_TEST_POSTGRES_URL 未设置：端到端用例需要测试 PostgreSQL 保存证据")
+    host, port, user = admin_address()
+    ob = f"{instance.database}_ob"
+    table = "DUPLICATE KEY(id) DISTRIBUTED BY HASH(id) BUCKETS 1 PROPERTIES('replication_num'='1')"
+    await admin(
+        host,
+        port,
+        user,
+        f"CREATE DATABASE {ob}",
+        f"CREATE TABLE {ob}.t (id INT, a INT, x INT, g INT) {table}",
+        f"CREATE TABLE {ob}.u (id INT, a INT, x INT, g INT) {table}",
+        f"INSERT INTO {ob}.t VALUES (1, 3, 10, 1), (2, 1, 30, 1), (3, 2, 20, 2)",
+        f"INSERT INTO {ob}.u VALUES (1, 30, 3, 1), (2, 10, 1, 2), (3, 20, 2, 2)",
+        f"GRANT SELECT ON ALL TABLES IN DATABASE {ob} TO USER '{instance.ro_user}'@'%'",
+    )
+    try:
+        policy = SqlPolicy(
+            allowed_functions=R3_FUNCTIONS, max_rows=50, max_sql_bytes=4000, max_result_columns=12
+        )
+        ada = adapter(instance, policy=policy)
+        schema = SchemaCache(ada, clock=lambda: datetime.now(UTC))
+        assert await schema.refresh()
+        tools = starrocks_tools(
+            ada, dict.fromkeys(("model", "session", "web", "feishu"), 200_000), schema=schema
+        )
+        grants = Grants()
+        grants.grant("alice", *QUERY_TOOLS, target="sr-real")
+        async with isolated_database() as url, ready_engine(url) as engine:
+            evidence = EvidenceStore(
+                engine,
+                ToolCatalog(tools.contracts, tools.policies),
+                authorize=grants,
+                clock=Clock(datetime.now(UTC)),
+                retention_seconds=600,
+                verify_dependencies=DependencyCheck({"sr-real": ada}),
+            )
+            governed = GovernedTools(evidence)
+            calls = 0
+
+            async def deliver(tool_id: str, sql: str) -> Any:
+                nonlocal calls
+                calls += 1
+                ctx = RunContext(
+                    identity=Identity(
+                        subject_id="alice", session_id=f"s{calls}", turn_id="t1", channel="web"
+                    ),
+                    target_scope=frozenset({"sr-real"}),
+                    tool_scope=QUERY_TOOLS,
+                    budget=Budget(max_turns=4, max_tool_calls=2, timeout_seconds=30.0),
+                )
+                request = ToolRequest(
+                    tool_id=tool_id,
+                    target_id="sr-real",
+                    call_id=secrets.token_hex(4),
+                    tool_name=tool_id.split("/")[1],
+                    arguments={"cluster": "sr-real", "sql": sql},
+                )
+                result = await governed.invoke(ctx, request, tools.executes[(tool_id, "sr-real")])
+                answer = AgentAnswer(
+                    evidence_ids=(result.evidence_id,),
+                    inferences=[
+                        AnswerInference(text="合成数据", evidence_ids=(result.evidence_id,))
+                    ],
+                    clarification=None,
+                )
+                (fact,) = (await evidence.validate_answer(answer, ctx)).facts
+                return fact
+
+            for name, template in ORDER_FACTS.items():
+                sql = template.format(o=ob)
+                headers, rows = await readonly_result(instance, sql)
+                assert rows, name
+                fact = await deliver(RUN_QUERY, sql)
+                assert list(fact.columns) == headers, name
+                assert [tuple(row.values()) for row in fact.rows] == rows, name
+                plan = await deliver(EXPLAIN_QUERY, sql)
+                expected = await readonly_rows(instance, "EXPLAIN LOGICAL " + sql)
+                assert [row["plan"] for row in plan.rows] == [row[0] for row in expected], name
+            # 排序数据确实能区分两种绑定：按别名排序会取到另一行。
+            by_alias = f"SELECT t.a AS x, t.x + 0 AS xx FROM {ob}.t t ORDER BY t.a, t.id LIMIT 1"
+            assert (await readonly_result(instance, by_alias))[1] != (
+                await readonly_result(instance, ORDER_FACTS["expression"].format(o=ob))
+            )[1]
+            # 原文报错（排序名指向未分组的 t.x）：两条路径都在数据库报错，不被改写成功。
+            invalid = f"SELECT t.a AS x, SUM(t.x) AS n FROM {ob}.t t GROUP BY t.a ORDER BY x"
+            with pytest.raises(MySQLError):
+                await readonly_result(instance, invalid)
+            for tool_id in (RUN_QUERY, EXPLAIN_QUERY):
+                with pytest.raises(ToolExecutionError):
+                    await deliver(tool_id, invalid)
+    finally:
+        await admin(host, port, user, f"DROP DATABASE {ob} FORCE")
 
 
 async def test_sql_mode_is_pinned_when_server_default_changes(instance: Instance) -> None:
@@ -519,7 +919,7 @@ async def test_sql_mode_is_pinned_when_server_default_changes(instance: Instance
 
 
 def explained(  # type: ignore[no-untyped-def]
-    inst: Instance, sql: str, t: StarRocksTarget | None = None, **extra: frozenset[str]
+    inst: Instance, sql: str, t: StarRocksTarget | None = None, **extra: tuple[str, ...]
 ):
     return guard_explain_query(sql, scope(inst, t or target(inst), **extra))
 
@@ -540,7 +940,7 @@ async def test_explain_table_view_and_cte(instance: Instance) -> None:
     )
     t = target(instance)
     ada = open_starrocks(t, clock=lambda: datetime.now(UTC))
-    view = {"sales_view": frozenset({"id", "region", "total"})}
+    view = {"sales_view": ("id", "region", "total")}
 
     for sql in (
         "SELECT region, SUM(total) AS s FROM sales WHERE id > 3 GROUP BY region",
@@ -751,7 +1151,7 @@ async def test_snapshot_follows_views_roles_and_insert_only_grants(instance: Ins
         assert set(snapshot.objects) == {(db, "sales"), (db, "v_hidden")}
         view = snapshot.object(db, "v_hidden")
         assert view is not None and [c.name for c in view.columns] == ["id"]
-        assert snapshot.query_policy.allowed_objects == {"sales", "v_hidden"}
+        assert set(snapshot.query_policy.tables[db]) == {"sales", "v_hidden"}
     finally:
         await admin(host, port, user, f"DROP ROLE {role}")
 

@@ -28,7 +28,7 @@ P2.5 Task 0 在 4.1.4 上实测该探测不会被优化消除，撤权对同一�
 
 慢查询只读已有的 AuditLoader 审计表（``StarRocksTarget.audit``）：代码模板与绑定值按库、时间窗与
 ``isQuery`` 取有界候选（独立的候选行数与字节上限），原文超过 ``max_sql_bytes`` 的不读出。每条候选
-原文在 Adapter 内经当前 SQLGuard 范围（``guard_explain_query``）检查，未通过、无法读出或放不下的
+原文在 Adapter 内经当前 SQLGuard 范围（``audit_references``）检查，未通过、无法读出或放不下的
 行整行丢弃；其原文只在本函数的临时变量中，不进入结果、日志或错误。``max_sql_bytes`` 不超过
 ``stmt_limit - 4``（配置校验），因此读出的原文不可能被 AuditLoader 截断。审计时间按审计源时区解释。
 
@@ -65,7 +65,7 @@ from pydantic import (
 )
 
 from xiaowei.config import is_secret_ref, resolve_secret_ref
-from xiaowei.sqlguard import ExplainQuery, GuardedQuery, QueryPolicy, guard_explain_query
+from xiaowei.sqlguard import ExplainQuery, GuardedQuery, QueryPolicy, audit_references
 
 # 不进入数据范围的系统库（4.1.4）：元数据视图、系统表与统计信息库。
 SYSTEM_DATABASES: Final = ("information_schema", "sys", "_statistics_")
@@ -236,10 +236,11 @@ class AuditSource(BaseModel):
 
 
 class SqlPolicy(BaseModel):
-    """SQLGuard 的静态部分：函数闭集与行数/SQL 字节上限。
+    """SQLGuard 的静态部分：函数闭集与行数、SQL 字节（星号展开后同样计算）、结果列数上限。
 
     对象与列不在配置中：它们来自结构快照中只读账号实际可 SELECT 的对象（``starrocks_schema``）。
-    函数名统一为大写。
+    ``max_result_columns`` 约束查询结果的列数，与 schema 有多少列无关；列名总字节不超过展开后的
+    SQL 字节上限（每个结果列名都以别名出现在规范化 SQL 中）。函数名统一为大写。
     """
 
     model_config = ConfigDict(frozen=True, extra="forbid")
@@ -247,6 +248,7 @@ class SqlPolicy(BaseModel):
     allowed_functions: frozenset[_Name]
     max_rows: int = Field(ge=1)
     max_sql_bytes: int = Field(ge=1)
+    max_result_columns: int = Field(ge=1)
 
     @model_validator(mode="before")
     @classmethod
@@ -297,7 +299,8 @@ class StarRocksTarget(BaseModel):
     """一个查询目标的可信静态配置；凭据只以 ``env:NAME`` 引用出现。
 
     ``policy`` 是 SQLGuard 的函数闭集与上限，``schema_limits`` 是结构快照的期限与容量；对象与列来自
-    快照。``database`` 是 SQLGuard 解析未限定对象名的库（跨库查询见 P2.5 Task 3）。
+    快照。``database`` 是连接的默认库、表布局与审计原文的所在库；业务 SQL 不继承它：未限定
+    对象名只按快照中的唯一匹配补全（``sqlguard``）。
     ``client_timeout_seconds`` 覆盖会话设置、执行与读取，不早于服务端 ``query_timeout``。
     ``max_plan_lines`` 是执行计划最多返回的行数；字节与单值上限与查询共用。
     """
@@ -1032,7 +1035,7 @@ def _within_scope(sql: Scalar, policy: QueryPolicy) -> bool:
     if not isinstance(sql, str):
         return False
     try:
-        guard_explain_query(sql, policy)
+        audit_references(sql, policy)
     except Exception:  # 失败即丢弃该行，不传播可能含原文的异常
         return False
     return True

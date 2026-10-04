@@ -30,15 +30,16 @@ Code = QueryRejectionCode
 
 POLICY = QueryPolicy(
     target_id="sr-test",
-    default_database="shop",
-    allowed_objects=frozenset({"sales", "regions"}),
-    allowed_columns={
-        "sales": frozenset({"region", "total", "orders", "dt"}),
-        "regions": frozenset({"name", "region"}),
+    tables={
+        "shop": {
+            "sales": ("region", "total", "orders", "dt"),
+            "regions": ("name", "region"),
+        }
     },
     allowed_functions=frozenset({"sum", "COUNT", "Max", "CAST", "IF", "COALESCE"}),
     max_rows=100,
     max_sql_bytes=4000,
+    max_result_columns=20,
 )
 CAP = POLICY.max_rows + 1
 
@@ -70,12 +71,12 @@ def test_single_table_query_is_fully_qualified_and_keeps_a_smaller_limit() -> No
         "SELECT `sales`.`region` AS `region`, SUM(`sales`.`total`) AS `s` "
         "FROM `shop`.`sales` AS `sales` WHERE `sales`.`dt` >= '2026-01-01' "
         "GROUP BY `sales`.`region` HAVING SUM(`sales`.`total`) > 1 "
-        "ORDER BY SUM(`sales`.`total`) DESC LIMIT 5"
+        "ORDER BY `s` DESC LIMIT 5"
     )
     assert query.target_id == "sr-test"
-    assert query.referenced_objects == frozenset({"sales"})
+    assert query.referenced_objects == frozenset({("shop", "sales")})
     assert query.referenced_columns == frozenset(
-        {("sales", "region"), ("sales", "total"), ("sales", "dt")}
+        {("shop", "sales", "region"), ("shop", "sales", "total"), ("shop", "sales", "dt")}
     )
     assert query.max_returned_rows == 5
 
@@ -146,16 +147,23 @@ def test_single_table_query_is_fully_qualified_and_keeps_a_smaller_limit() -> No
 def test_allowed_queries(sql: str, objects: set[str], columns: set[tuple[str, str]]) -> None:
     query = guard(sql)
 
-    assert query.referenced_objects == objects
-    assert query.referenced_columns == columns
+    assert query.referenced_objects == {("shop", o) for o in objects}
+    assert query.referenced_columns == {("shop", t, c) for t, c in columns}
     assert guard(query.normalized_sql).normalized_sql == query.normalized_sql  # 往返幂等
     assert_every_column_is_qualified(query)
 
 
 def assert_every_column_is_qualified(query: GuardedQuery) -> None:
-    """执行的 SQL 不留任何需要数据库再解析的未限定列名。"""
+    """执行的 SQL 只有 ORDER BY 对本层输出别名的引用不限定（交给数据库按原文绑定）。"""
     tree = sqlglot.parse_one(query.normalized_sql, read="starrocks")
-    assert all(column.table for column in tree.find_all(exp.Column))
+    for column in tree.find_all(exp.Column):
+        if column.table:
+            continue
+        order = column.find_ancestor(exp.Order, exp.Select)
+        assert isinstance(order, exp.Order) and isinstance(order.parent, exp.Select)
+        assert column.name in {
+            p.alias for p in order.parent.expressions if isinstance(p, exp.Alias)
+        }
 
 
 @pytest.mark.parametrize(
@@ -222,6 +230,12 @@ def test_with_query_limit_lands_on_the_final_body() -> None:
     ],
 )
 def test_order_ordinals_keep_their_projection_position(check, sql, orders) -> None:  # type: ignore[no-untyped-def]
+    top = sqlglot.parse_one(sql, read="starrocks")
+    names = [p.alias_or_name for p in top.expressions]
+    if check is guard_readonly_query and len(set(names)) != len(names):
+        # 结果列重名无法交付（P2.5 Task 3）：查询路径在 I/O 前要求唯一别名；序号由计划路径证明。
+        assert rejection(sql).code is Code.AMBIGUOUS_REFERENCE
+        return
     query = check(sql, POLICY)
     tree = sqlglot.parse_one(query.normalized_sql, read="starrocks")
     assert [order.sql(dialect="starrocks") for order in tree.find_all(exp.Order)] == orders
@@ -250,7 +264,7 @@ def test_invalid_order_ordinal_is_rejected(check, ordinal) -> None:  # type: ign
 
 def test_function_names_are_matched_case_insensitively() -> None:
     assert guard("SELECT Sum(total) AS s, max(total) AS m FROM sales").referenced_objects == {
-        "sales"
+        ("shop", "sales")
     }
 
 
@@ -280,9 +294,8 @@ def test_columns_outside_the_allowlist_are_rejected_in_every_clause(sql: str) ->
 
 
 IDENTIFIER_REJECTED: list[tuple[str, Code]] = [
-    # 标识符按 StarRocks/sqlglot 语义（大小写敏感）比较；表示差异只会失败关闭。
-    ("SELECT Region FROM sales", Code.COLUMN_NOT_ALLOWED),
-    ("SELECT `REGION` FROM sales", Code.COLUMN_NOT_ALLOWED),
+    # 列名按快照不区分大小写（P2.5 Task 3，见 tests/p25/test_sql_scope.py）；库、表与别名区分
+    # 大小写。全角、同形字与不可见字符不是大小写差异，只会失败关闭。
     ("SELECT region FROM Sales", Code.OBJECT_NOT_ALLOWED),
     ("SELECT `ｒegion` FROM sales", Code.COLUMN_NOT_ALLOWED),  # 全角
     ("SELECT `rеgion` FROM sales", Code.COLUMN_NOT_ALLOWED),  # 西里尔 е
@@ -314,13 +327,13 @@ def test_output_alias_outside_order_by_is_never_left_for_the_database(sql: str) 
         assert_every_column_is_qualified(query)
 
 
-def test_order_by_alias_is_inlined_as_the_aliased_expression() -> None:
+def test_order_by_alias_is_kept_as_an_output_reference() -> None:
+    """ORDER BY 的输出别名原样保留，由数据库按原文规则绑定；不在范围内的同名列不进入依赖。"""
     query = guard(
         "SELECT region AS secret, SUM(total) AS s FROM sales GROUP BY region ORDER BY s, secret"
     )
-    assert query.normalized_sql.split(" ORDER BY ", 1)[1] == (
-        f"SUM(`sales`.`total`), `sales`.`region` LIMIT {CAP}"
-    )
+    assert query.normalized_sql.split(" ORDER BY ", 1)[1] == f"`s`, `secret` LIMIT {CAP}"
+    assert query.referenced_columns == {("shop", "sales", "region"), ("shop", "sales", "total")}
 
 
 def test_unqualified_column_present_in_two_sources_is_ambiguous() -> None:
@@ -382,23 +395,10 @@ REJECTED: list[tuple[str, Code]] = [
     ("SHOW TABLES", Code.UNSUPPORTED_SYNTAX),
     ("EXPLAIN SELECT region FROM sales", Code.UNSUPPORTED_SYNTAX),
     ("(SELECT region FROM sales)", Code.UNSUPPORTED_SYNTAX),
-    ("SELECT region FROM sales UNION SELECT region FROM regions", Code.UNSUPPORTED_SYNTAX),
-    ("SELECT region FROM sales UNION ALL SELECT region FROM regions", Code.UNSUPPORTED_SYNTAX),
+    # UNION、相关子查询、窗口与星号展开自 P2.5 Task 3 起支持，见 tests/p25/test_sql_scope.py。
     ("SELECT region FROM sales INTERSECT SELECT region FROM regions", Code.UNSUPPORTED_SYNTAX),
     ("SELECT region FROM sales EXCEPT SELECT region FROM regions", Code.UNSUPPORTED_SYNTAX),
     ("WITH RECURSIVE t AS (SELECT 1 AS n) SELECT n FROM t", Code.UNSUPPORTED_SYNTAX),
-    (
-        "SELECT region FROM sales s WHERE EXISTS "
-        "(SELECT 1 FROM regions r WHERE r.region = s.region)",
-        Code.UNSUPPORTED_SYNTAX,
-    ),
-    (
-        "SELECT s.region, (SELECT MAX(r.name) FROM regions r WHERE r.region = s.region) AS m "
-        "FROM sales s",
-        Code.UNSUPPORTED_SYNTAX,
-    ),
-    ("SELECT ROW_NUMBER() OVER (ORDER BY region) AS n FROM sales", Code.UNSUPPORTED_SYNTAX),
-    ("SELECT SUM(total) OVER () AS n FROM sales", Code.UNSUPPORTED_SYNTAX),
     ("SELECT region FROM sales -- note", Code.UNSUPPORTED_SYNTAX),
     ("SELECT region /* note */ FROM sales", Code.UNSUPPORTED_SYNTAX),
     ("SELECT region FROM sales # note", Code.UNSUPPORTED_SYNTAX),
@@ -422,7 +422,7 @@ REJECTED: list[tuple[str, Code]] = [
     ("SELECT q.x FROM (SELECT region FROM sales) AS q(x)", Code.UNSUPPORTED_SYNTAX),
     ("SELECT n FROM TABLE(GENERATE_SERIES(1, 3)) t", Code.UNSUPPORTED_SYNTAX),
     ("SELECT region FROM FILES('path' = 's3://bucket/x')", Code.UNSUPPORTED_SYNTAX),
-    ("SELECT other.sales.region FROM shop.sales", Code.UNSUPPORTED_SYNTAX),
+    ("SELECT other.sales.region FROM shop.sales", Code.COLUMN_NOT_ALLOWED),
     ("SELECT region FROM customers", Code.OBJECT_NOT_ALLOWED),
     ("SELECT region FROM other.sales", Code.OBJECT_NOT_ALLOWED),
     ("SELECT region FROM ext_catalog.shop.sales", Code.OBJECT_NOT_ALLOWED),
@@ -432,10 +432,7 @@ REJECTED: list[tuple[str, Code]] = [
         "SELECT region FROM sales WHERE region IN (SELECT region FROM other.x)",
         Code.OBJECT_NOT_ALLOWED,
     ),
-    ("SELECT * FROM sales", Code.STAR_PROJECTION),
-    ("SELECT sales.* FROM sales", Code.STAR_PROJECTION),
     ("SELECT COUNT(sales.*) AS n FROM sales", Code.STAR_PROJECTION),
-    ("SELECT q.region FROM (SELECT * FROM sales) q", Code.STAR_PROJECTION),
     ("SELECT region FROM sales LIMIT '5'", Code.UNSUPPORTED_LIMIT),
     ("SELECT region FROM sales LIMIT -1", Code.UNSUPPORTED_LIMIT),
     ("SELECT region FROM sales LIMIT 1 + 1", Code.UNSUPPORTED_LIMIT),
@@ -612,12 +609,14 @@ def test_guarded_query_is_immutable() -> None:
 @pytest.mark.parametrize(
     "changes",
     [
-        {"allowed_objects": frozenset({"sales", "regions", "customers"})},  # 对象无列清单
-        {"allowed_columns": {"sales": frozenset({"region"})}},  # 获准对象缺列清单
-        {"allowed_columns": {**POLICY.allowed_columns, "customers": frozenset({"id"})}},
-        {"allowed_columns": {"sales": frozenset(), "regions": frozenset({"name"})}},
+        {"tables": {"shop": {"sales": ()}}},  # 对象没有列
+        {"tables": {"shop": {"sales": ("region", "Region")}}},  # 列名不区分大小写重复
+        {"tables": {"": {"sales": ("region",)}}},
+        {"tables": {"shop": {"": ("region",)}}},
+        {"tables": {"shop": {"sales": ("",)}}},
         {"max_rows": 0},
         {"max_sql_bytes": 0},
+        {"max_result_columns": 0},
         {"default_database": ""},
         {"extra": 1},
     ],
@@ -692,11 +691,12 @@ def test_explain_rejects_everything_the_query_guard_rejects(sql: str, policy: Qu
 
 
 VIEW_POLICY = narrowed(
-    allowed_objects=frozenset({"sales", "v_region_totals"}),
-    allowed_columns={
-        "sales": POLICY.allowed_columns["sales"],
-        "v_region_totals": frozenset({"region", "amount"}),
-    },
+    tables={
+        "shop": {
+            "sales": POLICY.tables["shop"]["sales"],
+            "v_region_totals": ("region", "amount"),
+        }
+    }
 )
 
 
@@ -706,9 +706,13 @@ def test_explain_accepts_allowed_views_like_tables() -> None:
         VIEW_POLICY,
     )
 
-    assert plan.referenced_objects == frozenset({"sales", "v_region_totals"})
+    assert plan.referenced_objects == frozenset({("shop", "sales"), ("shop", "v_region_totals")})
     assert plan.referenced_columns == frozenset(
-        {("sales", "region"), ("v_region_totals", "region"), ("v_region_totals", "amount")}
+        {
+            ("shop", "sales", "region"),
+            ("shop", "v_region_totals", "region"),
+            ("shop", "v_region_totals", "amount"),
+        }
     )
     assert plan.target_id == POLICY.target_id
     for sql in (

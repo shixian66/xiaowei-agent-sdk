@@ -65,19 +65,18 @@ CANARY = "canary-5e1b"
 
 POLICY = QueryPolicy(
     target_id="sr-test",
-    default_database="shop",
-    allowed_objects=frozenset({"sales", "regions"}),
-    allowed_columns={
-        "sales": frozenset({"region", "total", "note"}),
-        "regions": frozenset({"name", "region"}),
-    },
+    tables={"shop": {"sales": ("region", "total", "note"), "regions": ("name", "region")}},
     allowed_functions=frozenset({"SUM", "COUNT"}),
     max_rows=5,
     max_sql_bytes=4000,
+    max_result_columns=10,
 )
 # SQLGuard 范围与结构替身一致：shop.sales(region, total, note)、shop.regions(name, region)。
 SQL_POLICY = SqlPolicy(
-    allowed_functions=frozenset({"SUM", "COUNT"}), max_rows=5, max_sql_bytes=4000
+    allowed_functions=frozenset({"SUM", "COUNT"}),
+    max_rows=5,
+    max_sql_bytes=4000,
+    max_result_columns=10,
 )
 LIMITS = SchemaLimits(max_objects=50, max_columns=500, max_bytes=100_000, max_comment_chars=100)
 TARGET = StarRocksTarget(
