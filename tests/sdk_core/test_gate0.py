@@ -37,7 +37,14 @@ from tests.sdk_core.test_model_api import GEMINI
 from xiaowei.model_api import ModelProfile, profile_fingerprint
 from xiaowei.sqlguard import guard_explain_query, guard_readonly_query
 from xiaowei.starrocks import StarRocksAdapter
-from xiaowei.starrocks_tools import EXPLAIN_QUERY, LAYOUT_TOOL, LIST_TABLES, RUN_QUERY, SLOW_QUERIES
+from xiaowei.starrocks_tools import (
+    DESCRIBE_TABLE,
+    EXPLAIN_QUERY,
+    LAYOUT_TOOL,
+    LIST_TABLES,
+    RUN_QUERY,
+    SLOW_QUERIES,
+)
 
 pytestmark = pytest.mark.loopback
 
@@ -828,13 +835,14 @@ async def test_a_query_choice_refused_before_io_still_fails_the_judge(engine_url
 def _intent(name: str, *statements: tuple[gate0.StatementKind, str], **values: Any) -> Any:
     sample = next(s for s in gate0.INTENT_SAMPLES if s.name == name)
     query = sample.expect == "query"
+    outcome = sample.outcomes[0]
     defaults: dict[str, Any] = {
         "name": name,
         "mode": sample.mode,
-        "outcome": "delivered" if query else "advice",
+        "outcome": outcome,
         "reason": None,
-        "cited_tools": (RUN_QUERY,) if query else (),
-        "inferences": 1 if query else 0,
+        "cited_tools": tuple(sorted(sample.sources)),
+        "inferences": 1 if outcome == "delivered" else 0,
         "statements": statements or ((("query", RAN),) if query else ()),
         "elapsed_ms": 1,
         "requests": [_observed(INTENT_TOOLS, turn_tools=(QUERY_NAME,) if query else ())],
@@ -900,6 +908,39 @@ def _named(name: str, **values: Any) -> Callable[[list[gate0.DiagnosisResult]], 
     return mutate
 
 
+def test_intent_samples_register_answers_sources_and_limits() -> None:
+    """每个样例登记可接受的回答形式与必须引用的来源；应查询的样例必须引用查询结果；限制说明
+    只登记文字，供 P3 人工核对（代码不判定模型的自然语言）。"""
+    for sample in gate0.INTENT_SAMPLES:
+        assert sample.outcomes and set(sample.outcomes) <= {"delivered", "clarification", "advice"}
+        assert ("delivered" in sample.outcomes) or not sample.sources, sample.name
+        assert (RUN_QUERY in sample.sources) == (sample.expect == "query"), sample.name
+    limits = {s.name for s in gate0.INTENT_SAMPLES if s.limit}
+    assert {"query_corrected", "mixed_speakers", "comment_injection"} <= limits
+    assert {s.name for s in gate0.INTENT_SAMPLES if s.outcomes == ("clarification",)} == {
+        "missing_details"
+    }
+
+
+@pytest.mark.parametrize(
+    "mutate",
+    [
+        # 登记的其他可接受形式：解释 SQL 时取了表结构并据此作答；裸 SQL 给出建议。
+        _named("explain_only", outcome="delivered", cited_tools=(DESCRIBE_TABLE,)),
+        _named("bare_sql", outcome="advice"),
+        # 来源之外另引用了别的证据（如回放的查询结果）。
+        _named("diagnose_after_query", cited_tools=(RUN_QUERY, EXPLAIN_QUERY)),
+    ],
+)
+def test_intent_judge_accepts_other_registered_answers(
+    mutate: Callable[[list[gate0.DiagnosisResult]], Any],
+) -> None:
+    results = _passing_intent()
+    mutate(results)
+    gate0.judge_intent(results)
+    assert gate0.intent_passed(results), [r.checks for r in results if not r.passed]
+
+
 @pytest.mark.parametrize(
     "mutate",
     [
@@ -921,6 +962,13 @@ def _named(name: str, **values: Any) -> Callable[[list[gate0.DiagnosisResult]], 
         _named("bare_sql", requests=[_observed(tools=("list_tables",))]),
         # 本轮失败不算作答。
         _named("missing_details", outcome="failed"),
+        # 回答形式不符合登记：信息不全应先澄清；裸 SQL 不应交付事实；注入样例应如实列出。
+        _named("missing_details", outcome="advice"),
+        _named("bare_sql", outcome="delivered", cited_tools=(LIST_TABLES,)),
+        _named("comment_injection", outcome="clarification", cited_tools=()),
+        # 缺少登记的来源：只回答自己要的列须引用表结构；随后诊断须引用上一轮 SQL 的计划。
+        _named("mixed_speakers", outcome="advice", cited_tools=()),
+        _named("diagnose_after_query", cited_tools=(RUN_QUERY,)),
         # 缺少或重复样例。
         lambda results: results.pop(3),
         lambda results: results.append(results[0]),

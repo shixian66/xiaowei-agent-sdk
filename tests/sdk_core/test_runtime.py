@@ -22,7 +22,7 @@ from typing import Any
 
 import httpx
 import pytest
-from asyncmy.errors import ProgrammingError
+from asyncmy.errors import OperationalError, ProgrammingError
 from lark_channel.channel.errors import FeishuChannelErrorCode, SendError
 from lark_channel.channel.types import SendResult
 from pydantic import SecretStr
@@ -1160,6 +1160,9 @@ def test_example_configuration_is_valid_and_fits_the_projections() -> None:
             adapter, config.projection_bytes, schema=SchemaCache(adapter, clock=Clock())
         )
     assert config.listen_port == 8501 and config.feishu is None
+    # 两个集群，只有一个配置审计源：示范多集群与“慢查询只在配置了审计源的集群”。
+    assert [t.target_id for t in config.targets] == ["warehouse", "archive"]
+    assert [t.starrocks.audit is not None for t in config.targets] == [True, False]
 
 
 async def test_static_access_is_the_single_source_for_entry_and_evidence() -> None:
@@ -1272,6 +1275,96 @@ async def test_formal_assembly_routes_each_turn_to_the_named_cluster(env: Env) -
         assert body["state"] == "completed" and body["delivery"]["facts"] == []
         assert "集群不存在" in json.dumps(env.scripts.calls[unknown][1].input, ensure_ascii=False)
         assert drivers["sr-a"].attempts == 0 and len(statements(drivers["sr-b"])) == 1
+        assert await served.finish() == 0
+
+
+# ---- 阶段任务链（P2.5 Task 8）：三个集群，其中一个在服务中途故障 -------------------------------
+
+
+async def test_a_cluster_failing_mid_task_changes_nothing_on_the_others(env: Env) -> None:
+    """正式装配 + 真实 HTTP（Web）+ 飞书替身：sr-a 搜表并查询；sr-b 随后连接失败，本轮停止且
+    不改查别的集群、不给模型第二次机会；sr-c 经飞书照常查询，sr-a 的历史照常读取，同会话随后只取
+    sr-a 上一轮实际 SQL 的计划。替身不能证明真实集群的故障形态与恢复，只证明路由与失败隔离。"""
+    drivers = {
+        t: driver(Result(("region", "total"), [("east", n)]))
+        for n, t in enumerate(("sr-a", "sr-b", "sr-c"), start=1)
+    }
+    config = env.config(targets=[cluster_config(t) for t in drivers], feishu=feishu_config())
+    channel = FakeChannel()
+    async with env.running(config, starrocks_connect=drivers, feishu_channel=channel) as served:
+        await served.page()
+        found = env.scripts.add(
+            "sr-a 东区销售额",
+            tool_call("list_tables", cluster="sr-a", **SEARCH_ALL),
+            tool_call("run_readonly_query", cluster="sr-a", sql="SELECT region, total FROM sales"),
+            cite(),
+        )
+        body = (await served.turn(found, "query", "r1")).json()
+        assert body["state"] == "completed"
+        assert [f["tool_id"] for f in body["delivery"]["facts"]] == [
+            "local/list_tables",
+            "local/run_readonly_query",
+        ]
+        assert body["delivery"]["facts"][1]["rows"] == [{"region": "east", "total": 1}]
+        (ran,) = statements(drivers["sr-a"])
+
+        # sr-b 中途故障：执行开始后失败，本轮停止，不重跑、不改查 sr-a/sr-c。
+        drivers["sr-b"].connect_error = OperationalError(2003, "Can't connect to canary-b")
+        before = {t: d.attempts for t, d in drivers.items()}
+        broken = env.scripts.add(
+            "sr-b 东区销售额",
+            tool_call("run_readonly_query", cluster="sr-b", sql="SELECT region, total FROM sales"),
+            tool_call("run_readonly_query", cluster="sr-a", sql="SELECT region, total FROM sales"),
+            cite(),
+        )
+        body = (await served.turn(broken, "query", "r2")).json()
+        assert body["state"] == "failed" and body["delivery"]["facts"] == []
+        assert "canary" not in json.dumps(body, ensure_ascii=False)
+        code = "SELECT failure_code FROM xiaowei_request WHERE state = 'failed'"
+        assert await env.scalar(code) == "evidence_failed"
+        assert len(env.scripts.calls[broken]) == 1
+        assert drivers["sr-b"].attempts > before["sr-b"]
+        # sr-a 只多了回放 r1 历史证据时的零行权限探测（不计入 ``statements``）；没有业务语句。
+        assert statements(drivers["sr-a"]) == [ran] and drivers["sr-c"].attempts == 0
+
+        # sr-c 经飞书照常查询；sr-b 不再被访问。
+        attempts_b = drivers["sr-b"].attempts
+        other = env.scripts.add(
+            "sr-c 东区销售额",
+            tool_call("run_readonly_query", cluster="sr-c", sql="SELECT region, total FROM sales"),
+            cite(),
+        )
+        channel.emit_raw_from_sdk_thread(feishu_event(env, other, "om_c"))
+        await until(lambda: len(channel.sends) == 1)
+        text = channel.sends[0][1]["text"]
+        assert "目标 sr-c" in text and "| east | 3 |" in text
+        assert len(statements(drivers["sr-c"])) == 1
+        assert drivers["sr-b"].attempts == attempts_b
+
+        # sr-a 的历史结果照常读取（按当前权限复核 sr-a，不触及故障的 sr-b）。
+        history = (await served.client.get("/api/turns/r1")).json()
+        assert history["state"] == "completed" and len(history["delivery"]["facts"]) == 2
+        assert drivers["sr-b"].attempts == attempts_b
+
+        # 同会话随后诊断：只取上一轮实际 SQL 的计划，不再执行业务 SQL。
+        explained = EXPLAIN_PREFIX + ran
+        # ``driver`` 的工厂只在第一条连接带上 ``results``：每条连接各建一次（含回放时的权限探测）。
+        drivers["sr-a"].make = lambda: driver(SALES, results={explained: PLAN}).make()
+        why = env.scripts.add(
+            "刚才 sr-a 那条为什么慢",
+            tool_call("explain_query", cluster="sr-a", sql=ran),
+            cite(),
+        )
+        body = (await served.turn(why, "diagnose", "r3")).json()
+        assert body["state"] == "completed"
+        # 脚本引用模型看到的全部证据：回放的 r1 两条与本轮的计划。
+        assert [f["tool_id"] for f in body["delivery"]["facts"]] == [
+            "local/list_tables",
+            "local/run_readonly_query",
+            "local/explain_query",
+        ]
+        assert statements(drivers["sr-a"]) == [ran, explained]
+        assert drivers["sr-b"].attempts == attempts_b
         assert await served.finish() == 0
 
 
