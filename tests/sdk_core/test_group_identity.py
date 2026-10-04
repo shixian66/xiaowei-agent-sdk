@@ -9,7 +9,7 @@ import hashlib
 import hmac
 import json
 from collections.abc import AsyncIterator
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from typing import Any
 
@@ -36,6 +36,7 @@ from tests.sdk_core.test_model_api import OPENAI as PROFILE
 
 from xiaowei.app import Application
 from xiaowei.channel import (
+    AccessDecision,
     AccessDeniedError,
     ChannelService,
     GroupScope,
@@ -526,6 +527,100 @@ async def test_membership_is_rechecked_before_the_final_send(env: Env) -> None:
     assert outbox.sent == []
     assert await env.rows("SELECT delivery FROM xiaowei_request") == [("pending",)]
     assert env.members.checks[-1] == (CHAT, A)
+
+
+async def test_persistently_unconfirmed_members_receive_nothing(env: Env) -> None:
+    """失败回执同样先查成员：离群或目录不可确认时不发送、不取得投递权，请求保持待投递。"""
+    message = env.scripts.add("东区？", tool_call("order_total", region="east"), cite())
+    receipt = await env.service.accept(env.group(message, "om_1"))
+    env.members.current.discard(A)
+    record = await env.service.process(receipt)
+    assert (record.state, record.failure_code) == ("failed", "access_denied")
+    outbox = Outbox()
+    for mode in ("ok", "error", "unknown"):
+        env.members.mode = mode
+        with pytest.raises(AccessDeniedError):
+            await env.results.send(group_ref("om_1"), outbox)
+        with pytest.raises(AccessDeniedError):
+            await env.results.view(group_ref("om_1"))
+    assert outbox.sent == []
+    assert await env.rows("SELECT state, delivery, delivery_attempt FROM xiaowei_request") == [
+        ("failed", "pending", None)
+    ]
+
+
+async def _turns(env: Env, session_id: str) -> int:
+    rows = await env.rows("SELECT count(*) FROM agent_messages WHERE session_id = :s", s=session_id)
+    return int(rows[0][0])
+
+
+@pytest.mark.parametrize("change", ["no_group", "other_group", "other_actor", "other_turn"])
+async def test_a_receipt_cannot_drop_or_swap_its_group_binding(env: Env, change: str) -> None:
+    """是否重验成员由持久记录的群 owner 决定；receipt 与记录不一致时在 Runner 前拒绝。"""
+    await a_then_b(env)
+    env.members.current = {A}  # B 已离群
+    message = env.scripts.add("B：东区？", tool_call("order_total", region="east"), cite())
+    receipt = await env.service.accept(env.group(message, "om_b2", B))
+    if change == "no_group":
+        receipt = replace(receipt, group=None)
+    elif change == "other_group":
+        other = GroupScope(app_id=APP, tenant_key=TENANT, chat_id="oc_other")
+        receipt = replace(receipt, group=other)
+    else:
+        update = {"subject_id": A} if change == "other_actor" else {"turn_id": "turn-x"}
+        swapped = receipt.context.identity.model_copy(update=update)
+        receipt = replace(receipt, context=receipt.context.model_copy(update={"identity": swapped}))
+    before = await _turns(env, receipt.record.session_id)
+    record = await env.service.process(receipt)
+    assert (record.state, record.failure_code) == ("failed", "access_denied")
+    assert env.model_calls(message) == 0 and len(env.adapter.calls) == 2  # 只有 a_then_b 的两次
+    assert await _turns(env, receipt.record.session_id) == before
+
+
+@pytest.mark.parametrize("change", ["group", "other_actor", "group_owner"])
+async def test_a_personal_receipt_cannot_claim_a_group_or_another_identity(
+    env: Env, change: str
+) -> None:
+    message = env.scripts.add("个人：东区？", tool_call("order_total", region="east"), cite())
+    receipt = await env.service.accept(env.personal(message, "p1", "alice", "web", "cookie-1"))
+    if change == "group":
+        receipt = replace(receipt, group=GROUP)
+    else:
+        update = {"subject_id": A} if change == "other_actor" else {"owner": GROUP.owner}
+        swapped = receipt.context.identity.model_copy(update=update)
+        receipt = replace(receipt, context=receipt.context.model_copy(update={"identity": swapped}))
+    record = await env.service.process(receipt)
+    assert (record.state, record.failure_code) == ("failed", "access_denied")
+    assert env.model_calls(message) == 0 and env.adapter.calls == []
+
+
+async def test_a_personal_decision_must_be_for_the_requesting_subject(
+    env: Env, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """授权来源把 mallory 解析成一份自洽的 alice 决策时，接受与结果读取都拒绝，不落库、不调用。"""
+    original = env.access.resolve
+
+    async def impersonate(channel: Any, subject_id: str) -> AccessDecision | None:
+        return await original(channel, "alice" if subject_id == "mallory" else subject_id)
+
+    monkeypatch.setattr(env.access, "resolve", impersonate)
+    message = env.scripts.add("冒充 alice", tool_call("order_total", region="east"), cite())
+    with pytest.raises(AccessDeniedError):
+        await env.service.accept(env.personal(message, "m1", "mallory", "web", "cookie-1"))
+    assert await env.rows("SELECT 1 FROM xiaowei_request") == []
+    assert env.model_calls(message) == 0 and env.adapter.calls == []
+    # alice 本人的请求照常；mallory 不能借解析结果读取或发送 alice 的结果。
+    own = env.scripts.add("alice：东区？", tool_call("order_total", region="east"), cite())
+    assert (await env.run(env.personal(own, "a1", "alice", "web", "cookie-1"))).state == "completed"
+    outbox = Outbox()
+    ref = RequestRef(
+        channel="web", subject_id="mallory", conversation_id="cookie-1", request_id="a1"
+    )
+    with pytest.raises(AccessDeniedError):
+        await env.results.send(ref, outbox)
+    with pytest.raises(AccessDeniedError):
+        await env.results.view(ref)
+    assert outbox.sent == []
 
 
 async def test_group_grants_do_not_open_private_chat_or_web(env: Env) -> None:

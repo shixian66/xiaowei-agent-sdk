@@ -125,7 +125,7 @@ async def test_unknown_or_missing_versions_are_never_upgraded(postgres_url: URL)
 
 
 async def test_initialization_advances_the_schema_version(postgres_url: URL) -> None:
-    """全新初始化把版本推进到 4。旧程序只接受各自的版本由基线源码保证，这里不复制旧实现。"""
+    """全新初始化把版本推进到 5。旧程序只接受各自的版本由基线源码保证，这里不复制旧实现。"""
     async with open_engine(secret(postgres_url)) as engine:
         await initialize_storage(engine)
         assert await _version(engine) == APP_SCHEMA_VERSION == 5

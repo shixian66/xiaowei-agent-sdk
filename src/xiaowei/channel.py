@@ -244,8 +244,9 @@ async def _decide(access: AccessPolicy, channel: Channel, subject_id: str) -> Ac
         raise AccessDeniedError from None
     if (
         not isinstance(decision, AccessDecision)
+        or decision.subject_id != subject_id
         or decision.owner.kind != "personal"
-        or decision.owner.id != decision.subject_id
+        or decision.owner.id != subject_id
     ):
         raise AccessDeniedError
     return decision
@@ -266,6 +267,29 @@ async def _decide_group(
     ):
         raise AccessDeniedError
     return decision
+
+
+def _bound(receipt: RequestReceipt) -> bool:
+    """receipt 与持久记录一致：本轮身份正是这条记录的 actor、owner、会话、轮次与渠道；群请求的
+    群范围正是记录的群 owner 与回复群，个人请求没有群范围。"""
+    record, group = receipt.record, receipt.group
+    expected = Identity(
+        subject_id=record.subject_id,
+        session_id=record.session_id,
+        turn_id=record.turn_id,
+        channel=record.channel,
+        owner=record.owner,
+    )
+    if receipt.context.identity != expected:
+        return False
+    if record.owner.kind == "personal":
+        return group is None
+    return (
+        group is not None
+        and record.channel == "feishu"
+        and group.owner == record.owner
+        and record.reply_chat_id == group.chat_id
+    )
 
 
 async def _decide_ref(access: AccessPolicy, ref: RequestRef) -> AccessDecision:
@@ -502,15 +526,19 @@ class ChannelService:
     async def process(self, receipt: RequestReceipt) -> RequestRecord:
         """运行新接受的请求并保存终态，返回保存后的记录；重复请求直接返回原记录。
 
-        群请求开始运行前重新确认发起人当前的成员资格与授权，并按此计算本轮工具范围；不能确认
-        时记为 failed/access_denied，模型与工具均不调用。同一会话已有请求在运行或等待保存时，
+        是否为群请求以持久记录的 owner 为准：receipt 的身份或群范围与记录不一致时记为
+        failed/access_denied。群请求开始运行前重新确认发起人当前的成员资格与授权，并按此计算
+        本轮工具范围；不能确认时同样记为 failed/access_denied。两种拒绝都发生在 Runner 之前，
+        模型与工具均不调用。同一会话已有请求在运行或等待保存时，
         本请求记为 failed/busy，模型与工具均不调用。
         """
         record = receipt.record
         if not receipt.created:
             return record
+        if not _bound(receipt):
+            return await self._store.fail(record, "access_denied")
         context = receipt.context
-        if receipt.group is not None:
+        if record.owner.kind == "group" and receipt.group is not None:  # _bound 已要求群范围
             try:
                 decision = await _decide_group(
                     self._access, receipt.group, record.subject_id, verify_member=True
