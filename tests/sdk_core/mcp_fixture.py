@@ -325,6 +325,8 @@ def serve(build: Callable[[Recorder], ASGIApp], path: str = "/mcp") -> Iterator[
         server.should_exit = True
         thread.join(timeout=5)
         sock.close()
+        if thread.is_alive():  # 残留的监听线程会让后续用例的请求打到旧服务
+            raise RuntimeError("loopback fixture 未能在 5 秒内停止")
 
 
 def mcp_app(

@@ -1063,6 +1063,72 @@ async def test_real_sdk_send_maps_http_outcomes_without_retry(
     assert json.loads(sends[0]["body"]["content"]) == {"text": "合成回复"}
 
 
+@pytest.mark.parametrize(
+    ("body", "expected"),
+    [
+        (b'{"code": 0, "msg": "success", "data": {"message_id": "om_reply"}}', "sent"),
+        # 官方：原消息已撤回 / 对操作者不可见；SDK 1.4.0 归为 unknown，平台已拒绝，未发出
+        (b'{"code": 230011, "msg": "The message is recalled."}', "failed"),
+        (b'{"code": 230050, "msg": "The message is invisible to the operator."}', "failed"),
+        # 官方：单群限频；SDK 1.4.0 归为 target_revoked，fresh 会改发新消息
+        (b'{"code": 230020, "msg": "This operation triggers the frequency limit."}', "failed"),
+    ],
+)
+async def test_real_sdk_reply_maps_target_codes_without_fresh_send(
+    monkeypatch: pytest.MonkeyPatch, body: bytes, expected: str
+) -> None:
+    """产品装配的真实 SDK 以 ``reply_target_gone="fail"`` 回复原消息：只发 1 次回复，不新建消息。"""
+    from starlette.applications import Starlette
+    from starlette.requests import Request
+    from starlette.responses import JSONResponse, Response
+    from starlette.routing import Route
+    from tests.sdk_core.mcp_fixture import serve
+
+    replies: list[tuple[str, dict[str, Any]]] = []
+    creates: list[dict[str, Any]] = []
+
+    async def token(request: Request) -> Response:
+        return JSONResponse({"code": 0, "tenant_access_token": "t-synthetic", "expire": 7200})
+
+    async def reply(request: Request) -> Response:
+        replies.append((request.path_params["message_id"], await request.json()))
+        return Response(body, media_type="application/json")
+
+    async def create(request: Request) -> Response:
+        creates.append(await request.json())
+        return JSONResponse({"code": 0, "data": {"message_id": "om_fresh"}})
+
+    def build(_: Any) -> Any:
+        return Starlette(
+            routes=[
+                Route("/open-apis/auth/v3/tenant_access_token/internal", token, methods=["POST"]),
+                Route("/open-apis/im/v1/messages/{message_id}/reply", reply, methods=["POST"]),
+                Route("/open-apis/im/v1/messages", create, methods=["POST"]),
+            ]
+        )
+
+    monkeypatch.setenv("XW_TEST_FEISHU_SECRET", "not-a-real-secret")
+    with serve(build, path="") as running:
+        product = lark_channel(config()).config
+        channel = FeishuChannel(config=dataclasses.replace(product, domain=running.url))
+        try:
+            future = channel.schedule(
+                channel.send(
+                    "oc_group",
+                    {"text": "合成回复"},
+                    {"reply_to": "om_origin", "reply_target_gone": "fail"},
+                )
+            )
+            async with asyncio.timeout(10):
+                outcome = send_outcome(await asyncio.wrap_future(future))
+        finally:
+            channel.stop(join_timeout=5)
+    assert outcome == expected
+    assert [message_id for message_id, _ in replies] == ["om_origin"]
+    assert json.loads(replies[0][1]["content"]) == {"text": "合成回复"}
+    assert creates == []
+
+
 def test_feishu_config_validation() -> None:
     bad_values: tuple[dict[str, Any], ...] = (
         {"app_secret_ref": "plain-secret"},
