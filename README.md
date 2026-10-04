@@ -80,9 +80,11 @@ uv run --locked xiaowei --config xiaowei.json requests resend --subject <subject
 
 **目标（`targets`）。** 每项为 `type`（目前只能是 `starrocks`）、`description`（集群用途，交给模型选择集群）、`business_context`（该集群的业务口径 `{"version", "text"}`，没有则写 `null`）与 `starrocks`（连接、限额、函数闭集与结构快照上限）。集群 ID 就是 `starrocks.target_id`，只能用 1–32 位小写字母、数字、`_`、`-`，不能重复；连接地址、账号与凭据引用不交给模型。授权表按工具授予，获准用户可用全部已配置集群；模型每次调用数据工具都必须给出 `cluster`，未知集群在连接前拒绝，不会改查其他集群。旧版顶层 `starrocks`/`business_context` 会在启动时报错并给出迁移方式：把原 `starrocks` 放进 `targets` 的一项，原 `business_context` 去掉 `target_id` 后放到同一项。新增、删除集群或修改口径后，旧会话需要新建；已保存的 StarRocks 结果在本次升级后一次失效。
 
-**SQL 语义与升级。** 小维连接固定 SQL 模式，`||` 表示逻辑 OR；完整约定见 [ARCHITECTURE §6](ARCHITECTURE.md#6-只读查询保护)。D1/D2 修复把 StarRocks 证据摘要升为 v3，P2.5 Task 3（跨库与复杂 SQL）再升为 v4；每次升级前保存的 StarRocks 证据一次性失效，引用它们的旧会话须新建并重新查询，历史与重发也不能继续交付旧事实。其他工具的证据指纹不变。
+**SQL 语义与升级。** 小维连接固定 SQL 模式，`||` 表示逻辑 OR；完整约定见 [ARCHITECTURE §6](ARCHITECTURE.md#6-只读查询保护)。D1/D2 修复把 StarRocks 证据摘要升为 v3，P2.5 Task 3（跨库与复杂 SQL）再升为 v4，Task 6（搜表分页与多库慢查询）升为 v5；每次升级前保存的 StarRocks 证据一次性失效，引用它们的旧会话须新建并重新查询，历史与重发也不能继续交付旧事实。其他工具的证据指纹不变。
 
 **数据范围（自动发现）。** 不再配置表与列：小维每隔 `schema_limits.refresh_seconds` 读取一次 `information_schema` 中全部用户库的表、视图与列，并对每个对象做一次不返回数据的 `SELECT 1 … WHERE 1 = 0` 探测，只有只读账号确实能 SELECT 的对象才进入范围。查询与执行计划可引用其中任何库的对象并跨库 JOIN：表名写成 `库名.表名`，只在一个库中存在的表可以省略库名（不使用连接的默认库猜测；多个库都有同名表时要求写明库名）。`list_tables`、`describe_table`、`describe_table_layout` 在返回前会再次确认对象仍可读。
+
+**搜表（`list_tables`）。** 按关键词搜索，不提供整份目录：关键词不区分大小写，匹配“库名.表名”、表注释（采集时按 `max_comment_chars` 截取后的内容）与列名；`database` 为 null 时搜索全部库。结果按库表名排序分页，`page_size` 为 1 到该集群的 `policy.max_rows`，每页只确认本页对象的当前权限；已撤权的对象不列出，但页的划分不变。结果带 `snapshot`（表结构版本），第 2 页起必须带上它；表结构刷新后旧版本失效，需要从第 1 页重新搜索。结果标记截断表示还有下一页。
 
 **SQL 写法（`run_readonly_query` / `explain_query`）。** 单条只读 SELECT 或 UNION/UNION ALL，可带非递归 WITH、子查询（含相关子查询）与窗口函数（PARTITION BY / ORDER BY，不支持窗口框架与命名窗口），函数须在 `allowed_functions` 中（窗口函数如 `ROW_NUMBER`、`RANK` 同样要列出）。`*` 与 `别名.*` 按表结构展开，展开后的 SQL 同样受 `max_sql_bytes` 限制；查询结果最多 `max_result_columns` 列，列名不能重复，表达式列须用 `AS` 起别名（执行计划不要求）。列名不区分大小写，库名、表名与别名区分。名字按 StarRocks 的规则解析：WHERE、JOIN ON 与窗口中不能引用输出别名；ORDER BY 中的输出列名原样交给 StarRocks 解析，结果与直接执行原 SQL 相同（包括原 SQL 会报的错）；相关子查询中本层没有的列按外层表解析，多个外层表都有时需写明表名。
 
@@ -100,7 +102,7 @@ uv run --locked xiaowei --config xiaowei.json requests resend --subject <subject
 - `stmt_limit`：必填，填插件的 `max_stmt_length`，并要求 `policy.max_sql_bytes <= stmt_limit - 4`，保证读出的原文没有被插件截断。
 - `max_window_minutes` / `max_rows` / `candidate_rows` / `candidate_bytes`：可查的最长时间窗、最多列出的行数，以及一次取出并检查的候选行数与字节上限。
 
-没有任何集群配置 `audit` 时不提供 `list_slow_queries`，配置开放或授予它会在启动时报错；只给部分集群配置时，只有这些集群可以使用它，其他集群的调用在连接前拒绝。只列出该集群默认库中、原文引用的对象、列与函数全部获准的查询，列表可能少于上限，为空也不代表没有慢查询。插件刚安装后首批记录可能缺失；审计表任一行格式异常（如时间为空、指标不是整数）时整个工具失败，而不是返回部分结果。候选读取与原文检查各有一个客户端期限，最坏总耗时约为 2 倍 `client_timeout_seconds`。
+没有任何集群配置 `audit` 时不提供 `list_slow_queries`，配置开放或授予它会在启动时报错；只给部分集群配置时，只有这些集群可以使用它，其他集群的调用在连接前拒绝。读取该集群所有库的审计记录，`database` 参数不为 null 时只读执行时当前库为它的记录。原文中未写库名的表按该记录执行时的当前库（结果中的 `database` 列）解析，与 StarRocks 执行时相同；当时没有当前库的记录只接受写明库名的原文。只列出原文引用的对象、列与函数全部获准的查询，列表可能少于上限，为空也不代表没有慢查询；候选读满 `candidate_rows` 仍有剩余时结果标记截断，说明可能还有未检查的记录。插件刚安装后首批记录可能缺失；审计表任一行格式异常（如时间为空、指标不是整数）时整个工具失败，而不是返回部分结果。候选读取与原文检查各有一个客户端期限，最坏总耗时约为 2 倍 `client_timeout_seconds`。
 
 **开发验证**（只用合成数据、脚本模型、替身与隔离的测试 PostgreSQL，不连接任何真实模型或外部服务）：
 

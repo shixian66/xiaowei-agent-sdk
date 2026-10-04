@@ -20,10 +20,12 @@ from collections.abc import AsyncIterator
 from datetime import UTC, datetime
 
 import pytest
+from asyncmy.errors import MySQLError
 from tests.p1b.conftest import admin_address
 from tests.p1b.test_starrocks_real import Instance, admin, admin_rows, target
 from tests.p1b.test_starrocks_real import instance as instance  # pytest fixture
 
+from xiaowei.models import AUDIENCES, ToolRequest
 from xiaowei.sqlguard import QueryPolicy, guard_explain_query, guard_readonly_query
 from xiaowei.starrocks import (
     AUDIT_COLUMNS,
@@ -34,6 +36,7 @@ from xiaowei.starrocks import (
     open_starrocks,
 )
 from xiaowei.starrocks_schema import SchemaCache
+from xiaowei.starrocks_tools import SLOW_QUERIES, starrocks_tools
 
 pytestmark = pytest.mark.starrocks_audit_real
 
@@ -171,7 +174,8 @@ async def test_real_audit_rows_are_filtered_by_the_current_scope(audited: Instan
         await flushed(mk, len(statements) + 2)
 
         started = time.monotonic()
-        result = await ada.slow_queries(60, "query_time", scope)
+        # 按会话当前库过滤：实例上其他用例的语句不挤占候选（跨库读取另见下一个用例）。
+        result = await ada.slow_queries(60, "query_time", scope, db)
         assert time.monotonic() - started < 30
         assert result.columns == AUDIT_COLUMNS and not result.truncated
         shown = {row["sql"] for row in result.rows if mk in str(row["sql"])}
@@ -184,11 +188,68 @@ async def test_real_audit_rows_are_filtered_by_the_current_scope(audited: Instan
         # 审计时区配错（按上海解释 UTC 写入的时间）：窗口整体偏移 8 小时，刚才的记录不在窗口内。
         shifted = audit_target(audited, time_zone="Asia/Shanghai")
         wrong = await open_starrocks(shifted, clock=lambda: datetime.now(UTC)).slow_queries(
-            60, "query_time", scope
+            60, "query_time", scope, db
         )
         assert not any(mk in str(row["sql"]) for row in wrong.rows)
     finally:
         await admin(host, port, user, f"DROP DATABASE {other} FORCE")
+
+
+async def test_real_audit_resolves_each_record_in_its_own_database(audited: Instance) -> None:
+    """P2.5 Task 6：不按库过滤时读取所有库的记录；同名表按每条记录执行时的当前库（审计 ``db``）
+    解析，显式写出的其他库按快照与当前权限检查；工具路径的依赖指向实际解析到的对象。"""
+    host, port, user = admin_address()
+    db, ro, mk = audited.database, audited.ro_user, f"mk{secrets.token_hex(3)}"
+    second = f"{db}_b"
+    props = "DUPLICATE KEY(id) DISTRIBUTED BY HASH(id) BUCKETS 1 PROPERTIES('replication_num'='1')"
+    in_first = f"SELECT region FROM sales WHERE region <> '{mk}_a'"
+    in_second = f"SELECT region FROM sales WHERE region <> '{mk}_b'"  # 同一原文，另一个库
+    qualified = f"SELECT region FROM {db}.sales WHERE region <> '{mk}_c'"
+    wrong_column = f"SELECT note FROM sales WHERE region <> '{mk}_d'"  # 第二个库的 sales 没有 note
+    await admin(
+        host,
+        port,
+        user,
+        f"CREATE DATABASE {second}",
+        f"CREATE TABLE {second}.sales (id INT, region VARCHAR(16)) {props}",
+        f"GRANT SELECT ON TABLE {second}.sales TO USER '{ro}'@'%'",
+    )
+    try:
+        await admin(host, port, user, f"USE {db}", in_first)
+        await admin(host, port, user, f"USE {second}", in_second, qualified)
+        with pytest.raises(MySQLError):  # 让数据库真实执行并审计这条失败语句
+            await admin(host, port, user, f"USE {second}", wrong_column)
+        await flushed(mk, 4)
+
+        t = audit_target(audited, candidate_rows=2000, max_rows=100)  # 配置允许的上限
+        ada = open_starrocks(t, clock=lambda: datetime.now(UTC))
+        cache = SchemaCache(ada, clock=lambda: datetime.now(UTC))
+        assert await cache.refresh()
+        # 不按库过滤时候选来自整个实例：只取最近 2 分钟（本次运行自己的语句），候选须能读完。
+        result = await ada.slow_queries(2, "query_time", cache.current().query_policy)
+        assert not result.truncated, "候选超过 candidate_rows：本用例需要读完窗口内全部记录"
+        shown = {str(row["sql"]): row["database"] for row in result.rows if mk in str(row["sql"])}
+        assert shown == {in_first: db, in_second: second, qualified: second}
+
+        tools = starrocks_tools(ada, dict.fromkeys(AUDIENCES, 400_000), schema=cache)
+        execute = tools.executes[(SLOW_QUERIES, "sr-real")]
+        request = ToolRequest(
+            tool_id=SLOW_QUERIES,
+            target_id="sr-real",
+            call_id="c1",
+            tool_name="list_slow_queries",
+            arguments={
+                "cluster": "sr-real",
+                "window_minutes": 2,
+                "order_by": "query_time",
+                "database": None,
+            },
+        )
+        observation = await execute.run(execute.check(request))
+        listed = {(d.database, d.name) for d in observation.dependencies if d.use == "read"}
+        assert {(db, "sales"), (second, "sales")} <= listed
+    finally:
+        await admin(host, port, user, f"DROP DATABASE {second} FORCE")
 
 
 async def test_real_audit_failures_are_distinguished(audited: Instance) -> None:

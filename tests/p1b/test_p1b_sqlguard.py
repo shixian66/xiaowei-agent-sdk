@@ -617,7 +617,6 @@ def test_guarded_query_is_immutable() -> None:
         {"max_rows": 0},
         {"max_sql_bytes": 0},
         {"max_result_columns": 0},
-        {"default_database": ""},
         {"extra": 1},
     ],
 )

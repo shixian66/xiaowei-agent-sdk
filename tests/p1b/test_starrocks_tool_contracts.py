@@ -26,6 +26,7 @@ from xiaowei.starrocks_tools import (
     LIST_TABLES,
     RESULT_FIELDS,
     RUN_QUERY,
+    SEARCH_FIELDS,
     RunQueryArgs,
     starrocks_tools,
     worst_case_observation,
@@ -94,7 +95,10 @@ def test_every_audience_must_hold_the_worst_case_result() -> None:
         EXPLAIN_QUERY,
         LAYOUT_TOOL,
     }
-    assert all(p.required == RESULT_FIELDS for p in tools.policies)
+    required = {p.policy_id.rsplit(".", 1)[1]: p.required for p in tools.policies}
+    # 搜表另带快照版本：SQL 与列头是固定模板，加上版本仍在查询的最坏结果之内（同一阈值通过）。
+    assert required.pop("list_tables") == SEARCH_FIELDS == (*RESULT_FIELDS, "snapshot")
+    assert set(required.values()) == {RESULT_FIELDS}
     ToolCatalog(tools.contracts, tools.policies)  # 登记一致
 
     for short in AUDIENCES:

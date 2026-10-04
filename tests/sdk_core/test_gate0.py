@@ -487,6 +487,7 @@ def scripted_diagnosis() -> GeminiLikeEndpoint:
         cluster=gate0.DIAG_TARGET.target_id,
         window_minutes=60,
         order_by="query_time",
+        database=None,
     )
     layout = call_tool(
         "describe_table_layout",

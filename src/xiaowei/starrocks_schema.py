@@ -32,8 +32,9 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import secrets
 from collections.abc import Callable, Collection, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from typing import Final
 
@@ -99,13 +100,17 @@ class ObjectInfo:
 
 @dataclass(frozen=True, eq=False)
 class SchemaSnapshot:
-    """一次成功刷新的完整结构；构造后不再修改，刷新时整体替换。"""
+    """一次成功刷新的完整结构；构造后不再修改，刷新时整体替换。
+
+    ``version`` 是每份快照各不相同的随机标识：搜表的后续页带上它，刷新后旧页码即失效。
+    """
 
     target_id: str
     collected_at: datetime
     expires_at: datetime
     objects: Mapping[tuple[str, str], ObjectInfo]
     query_policy: QueryPolicy
+    version: str = field(default_factory=lambda: secrets.token_hex(8))
 
     def object(self, database: str, name: str) -> ObjectInfo | None:
         return self.objects.get((database, name))

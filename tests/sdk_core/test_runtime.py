@@ -31,7 +31,15 @@ from sqlalchemy.engine import URL
 from tests.p1b.test_starrocks_adapter import TARGET as SR
 from tests.p1b.test_starrocks_adapter import Result, driver, schema_results
 from tests.sdk_core.synthetic_tools import Clock
-from tests.sdk_core.test_app import Scripts, after, cite, clarify, tool_call, upstream_error
+from tests.sdk_core.test_app import (
+    SEARCH_ALL,
+    Scripts,
+    after,
+    cite,
+    clarify,
+    tool_call,
+    upstream_error,
+)
 from tests.sdk_core.test_feishu import FakeChannel
 from tests.sdk_core.test_model_api import OPENAI as PROFILE
 
@@ -291,7 +299,7 @@ async def test_formal_assembly_answers_web_turns_and_stops_cleanly(env: Env) -> 
             assert await served.ready() == {"status": "ready", "feishu": "disabled"}
             await served.page()
             diagnose = env.scripts.add(
-                "诊断表结构", tool_call("list_tables", cluster=SR.target_id), cite()
+                "诊断表结构", tool_call("list_tables", cluster=SR.target_id, **SEARCH_ALL), cite()
             )
             response = await served.turn(diagnose)
             assert response.status_code == 200 and response.json()["state"] == "completed"
@@ -456,13 +464,14 @@ AUDIT_SOURCE = (
     "pendingTimeMs",
     "state",
     "digest",
+    "db",
     "stmt",
 )
 
 
-def audit_record(stmt: str, query_id: str) -> tuple[object, ...]:
+def audit_record(stmt: str, query_id: str, db: str = "shop") -> tuple[object, ...]:
     started = datetime(2026, 9, 29, 23, 30)
-    return (query_id, started, 7000, 2048, 300, 2, 5_000_000, 8192, 0, "EOF", "d1", stmt)
+    return (query_id, started, 7000, 2048, 300, 2, 5_000_000, 8192, 0, "EOF", "d1", db, stmt)
 
 
 async def test_formal_assembly_lists_only_approved_slow_queries(env: Env) -> None:
@@ -481,7 +490,11 @@ async def test_formal_assembly_lists_only_approved_slow_queries(env: Env) -> Non
         message = env.scripts.add(
             "最近一小时的慢查询",
             tool_call(
-                "list_slow_queries", cluster=SR.target_id, window_minutes=60, order_by="query_time"
+                "list_slow_queries",
+                cluster=SR.target_id,
+                window_minutes=60,
+                order_by="query_time",
+                database=None,
             ),
             cite(),
         )
@@ -502,7 +515,11 @@ async def test_formal_assembly_stops_the_turn_when_the_audit_table_is_missing(en
         message = env.scripts.add(
             "最近一小时的慢查询",
             tool_call(
-                "list_slow_queries", cluster=SR.target_id, window_minutes=60, order_by="query_time"
+                "list_slow_queries",
+                cluster=SR.target_id,
+                window_minutes=60,
+                order_by="query_time",
+                database=None,
             ),
             cite(),
         )
@@ -647,7 +664,7 @@ async def test_lock_loss_is_noticed_at_once_not_at_the_next_check(env: Env) -> N
         assert await env.scalar(TERMINATE_LOCK) == 1
         await not_serving(served)
         late = env.scripts.add(
-            "丢锁后的新请求", tool_call("list_tables", cluster=SR.target_id), cite()
+            "丢锁后的新请求", tool_call("list_tables", cluster=SR.target_id, **SEARCH_ALL), cite()
         )
         try:
             response = await served.turn(late, request_id="late")
@@ -665,7 +682,7 @@ async def test_second_instance_after_lock_loss_never_runs_the_old_request(env: E
     gate, entered = asyncio.Event(), asyncio.Event()
     slow = env.scripts.add(
         "丢锁时在途",
-        after(gate, tool_call("list_tables", cluster=SR.target_id), entered=entered),
+        after(gate, tool_call("list_tables", cluster=SR.target_id, **SEARCH_ALL), entered=entered),
         cite(),
     )
     old = env.config(lock_check_seconds=60, shutdown_timeout_seconds=20)
@@ -693,8 +710,12 @@ async def test_second_instance_after_lock_loss_never_runs_the_old_request(env: E
 async def test_accept_paused_across_a_takeover_ends_interrupted_not_stranded(env: Env) -> None:
     """旧实例的接收事务未提交时失去锁、新实例接管：恢复等它提交后再读取，请求不停在 accepted；
     重复请求在新实例得到已有终态，不运行模型或查询。"""
-    first = env.scripts.add("先建立会话", tool_call("list_tables", cluster=SR.target_id), cite())
-    late = env.scripts.add("接管时尚未提交", tool_call("list_tables", cluster=SR.target_id), cite())
+    first = env.scripts.add(
+        "先建立会话", tool_call("list_tables", cluster=SR.target_id, **SEARCH_ALL), cite()
+    )
+    late = env.scripts.add(
+        "接管时尚未提交", tool_call("list_tables", cluster=SR.target_id, **SEARCH_ALL), cite()
+    )
     old = env.config(lock_check_seconds=60)
     async with env.running(old) as served:
         await served.page()
@@ -801,7 +822,7 @@ async def test_feishu_turn_is_drained_before_the_long_connection_closes(env: Env
     gate, entered = asyncio.Event(), asyncio.Event()
     message = env.scripts.add(
         "飞书慢轮",
-        after(gate, tool_call("list_tables", cluster=SR.target_id), entered=entered),
+        after(gate, tool_call("list_tables", cluster=SR.target_id, **SEARCH_ALL), entered=entered),
         cite(),
     )
     async with env.running(config, feishu_channel=channel) as served:
@@ -836,7 +857,9 @@ async def failed_feishu_result(env: Env, config: runtime.ServeConfig) -> str:
         SendError(code=FeishuChannelErrorCode.PERMISSION_DENIED, retryable=False)
     )
     channel = FakeChannel(result=refused)
-    message = env.scripts.add("飞书待重发", tool_call("list_tables", cluster=SR.target_id), cite())
+    message = env.scripts.add(
+        "飞书待重发", tool_call("list_tables", cluster=SR.target_id, **SEARCH_ALL), cite()
+    )
     async with env.running(config, feishu_channel=channel) as served:
         channel.emit_raw_from_sdk_thread(feishu_event(env, message, "om_resend"))
         await until(lambda: len(channel.sends) == 1)
@@ -1182,7 +1205,9 @@ async def test_history_and_resend_reject_after_scope_narrowing(env: Env) -> None
     async with env.running(config, feishu_channel=FakeChannel()) as served:
         await served.page()
         first = await served.turn(
-            env.scripts.add("网页查表", tool_call("list_tables", cluster=SR.target_id), cite())
+            env.scripts.add(
+                "网页查表", tool_call("list_tables", cluster=SR.target_id, **SEARCH_ALL), cite()
+            )
         )
         assert first.status_code == 200 and first.json()["state"] == "completed"
         assert (await served.client.get("/api/turns/r1")).status_code == 200  # 同一范围：可读

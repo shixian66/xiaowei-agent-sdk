@@ -43,6 +43,7 @@ from tests.p1b.test_starrocks_audit import AUDIT_TARGET
 from tests.sdk_core.synthetic_tools import Clock, Grants, ready_engine
 from tests.sdk_core.test_app import (
     PROFILE,
+    SEARCH_ALL,
     ModelCall,
     Scripts,
     answer,
@@ -439,7 +440,7 @@ async def test_truncated_results_are_marked_in_every_delivery(env: Env) -> None:
 async def test_metadata_tools_serve_the_snapshot_after_probing_current_access(env: Env) -> None:
     message = env.scripts.add(
         "诊断：sales 有哪些列",
-        tool_call("list_tables", cluster=SR.target_id),
+        tool_call("list_tables", cluster=SR.target_id, **SEARCH_ALL),
         tool_call("describe_table", cluster=SR.target_id, database="shop", table="sales"),
         cite(),
     )
@@ -966,7 +967,7 @@ def scope_body(target: StarRocksTarget) -> dict[str, Any]:
 
 def test_scope_digest_is_versioned_and_names_the_database_type() -> None:
     body = scope_body(SR)
-    assert body["format"] == "xiaowei.data_scope.starrocks/4"
+    assert body["format"] == "xiaowei.data_scope.starrocks/5"
     assert body["max_result_columns"] == SR.policy.max_result_columns
     assert body["database_type"] == "starrocks"
     assert body["sql_mode"] == "ONLY_FULL_GROUP_BY"
@@ -1567,7 +1568,12 @@ async def test_bad_cluster_never_reaches_any_starrocks(
 
 
 async def test_slow_queries_only_on_the_cluster_with_an_audit_source(multi: Multi) -> None:
-    arguments = {"cluster": "sr-b", "window_minutes": 60, "order_by": "query_time"}
+    arguments = {
+        "cluster": "sr-b",
+        "window_minutes": 60,
+        "order_by": "query_time",
+        "database": None,
+    }
     message = multi.scripts.add(
         "没有审计源的集群", _call("list_slow_queries", arguments), clarify()
     )

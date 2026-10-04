@@ -619,6 +619,7 @@ AUDIT_SOURCE = (
     "pendingTimeMs",
     "state",
     "digest",
+    "db",
     "stmt",
 )
 
@@ -690,7 +691,9 @@ class SyntheticStarRocks:
         if sql in {probe_sql(db, name) for db, name in probed}:
             return "probe"
         if audit is not None and sql in {
-            _audit_sql(audit, order) for order in AUDIT_ORDER_COLUMNS.values()
+            _audit_sql(audit, order, filtered=filtered)
+            for order in AUDIT_ORDER_COLUMNS.values()
+            for filtered in (False, True)
         }:
             return "audit"
         return "query"
@@ -748,6 +751,7 @@ class SyntheticStarRocks:
                     0,
                     "EOF",
                     "d",
+                    "shop",  # 语句执行时的会话当前库
                     s,
                 )
                 for i, s in enumerate(self.audit, start=1)

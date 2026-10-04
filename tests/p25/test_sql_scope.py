@@ -138,13 +138,16 @@ def test_unqualified_table_is_completed_only_by_a_unique_match() -> None:
 
 
 def test_audit_context_resolves_unqualified_tables_in_its_own_database() -> None:
-    audit = narrowed(default_database="hr")
-    assert guard_explain_query("SELECT id FROM sales", audit).referenced_objects == {
-        ("hr", "sales")
-    }
-    assert refused("SELECT region FROM regions", audit, check=guard_explain_query) is (
+    def audited(sql: str, policy: QueryPolicy) -> object:
+        return audit_references(sql, policy, "hr")
+
+    assert audit_references("SELECT id FROM sales", POLICY, "hr")[0] == {("hr", "sales")}
+    assert refused("SELECT region FROM regions", check=audited) is Code.OBJECT_NOT_ALLOWED
+    # 没有当前库（''）：未限定名一律不在范围内；业务查询的唯一匹配补全不适用于审计原文。
+    assert refused("SELECT name FROM staff", check=lambda s, p: audit_references(s, p, "")) is (
         Code.OBJECT_NOT_ALLOWED
     )
+    assert audit_references("SELECT name FROM hr.staff", POLICY, "")[0] == {("hr", "staff")}
 
 
 @pytest.mark.parametrize(
@@ -443,7 +446,7 @@ def test_expression_outputs_need_an_explicit_alias(sql: str) -> None:
     与审计原文不交付列头，规范化 SQL 内部的名字前后一致，照常接受（诊断常见的无别名聚合）。"""
     assert refused(sql) is Code.UNNAMED_COLUMN
     assert plan(sql)
-    assert audit_references(sql, POLICY)
+    assert audit_references(sql, POLICY, "")
 
 
 @pytest.mark.parametrize(

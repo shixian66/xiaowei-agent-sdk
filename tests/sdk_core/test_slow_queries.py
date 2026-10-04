@@ -133,6 +133,7 @@ def list_slow() -> Any:
         cluster=AUDIT_TARGET.target_id,
         window_minutes=60,
         order_by="query_time",
+        database=None,
     )
 
 
@@ -187,7 +188,7 @@ async def test_list_can_be_shorter_than_max_rows_and_is_not_truncated(env: Env) 
     delivered = await au.evidence.validate_answer(await au.app.run_turn(ctx, message), ctx)
     (fact,) = delivered.facts
     assert len(fact.rows) == 1 and not fact.truncated
-    assert "只显示本目标数据库中能确认引用对象全部获准的查询" in (fact.note or "")
+    assert "只显示能确认引用对象全部获准的查询" in (fact.note or "")
 
 
 # ---- 拒绝与失败 -----------------------------------------------------------------------------
@@ -210,7 +211,7 @@ async def test_window_and_order_are_rejected_before_io(
     env.drv.make = driver(audit_rows(ACCEPTED[0])).make
     message = env.scripts.add(
         "越界参数",
-        tool_call("list_slow_queries", cluster=AUDIT_TARGET.target_id, **arguments),
+        tool_call("list_slow_queries", cluster=AUDIT_TARGET.target_id, database=None, **arguments),
         list_slow(),
         cite(),
     )
