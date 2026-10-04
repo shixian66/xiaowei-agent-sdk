@@ -91,7 +91,11 @@ class _Body(BaseModel):
 
 
 class TurnSubmission(_Body):
-    """浏览器只能提交的三项：客户端请求编号、显式用途与消息正文。"""
+    """浏览器只能提交的三项：客户端请求编号、显式用途与消息正文。
+
+    ``query`` 是默认用途（查询工具按授权可见，由单 Agent 判断是否查询），``diagnose`` 隐藏并
+    拒绝实际查询工具。API 调用方仍须显式给出用途，不设默认值。
+    """
 
     request_id: Annotated[str, StringConstraints(pattern=_REQUEST_ID)]
     mode: Mode

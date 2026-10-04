@@ -37,7 +37,7 @@ from tests.sdk_core.test_model_api import GEMINI
 from xiaowei.model_api import ModelProfile, profile_fingerprint
 from xiaowei.sqlguard import guard_explain_query, guard_readonly_query
 from xiaowei.starrocks import StarRocksAdapter
-from xiaowei.starrocks_tools import EXPLAIN_QUERY, LAYOUT_TOOL, RUN_QUERY, SLOW_QUERIES
+from xiaowei.starrocks_tools import EXPLAIN_QUERY, LAYOUT_TOOL, LIST_TABLES, RUN_QUERY, SLOW_QUERIES
 
 pytestmark = pytest.mark.loopback
 
@@ -288,7 +288,10 @@ def test_command_forces_sdk_log_redaction_before_import() -> None:
 
 
 def _observed(
-    tools: tuple[str, ...] = ("list_regions",), fields: tuple[str, ...] = (), history: int = 0
+    tools: tuple[str, ...] = ("list_regions",),
+    fields: tuple[str, ...] = (),
+    history: int = 0,
+    turn_tools: tuple[str, ...] = (),
 ) -> RequestObservation:
     return RequestObservation(
         status=200,
@@ -296,8 +299,9 @@ def _observed(
         tools_offered=tools,
         history_tool_calls=history,
         history_signatures=0,
-        turn_tool_calls=0,
+        turn_tool_calls=len(turn_tools),
         turn_signatures=0,
+        turn_tools=turn_tools,
         tool_result_fields=fields,
         usage=None,
     )
@@ -710,3 +714,222 @@ def test_previous_sql_accepts_the_original_sql_without_the_added_limit() -> None
     )
     gate0.judge_diagnosis(results)
     assert gate0.diagnosis_passed(results), results[4].checks
+
+
+# ---- P2.5 Task 7 意图样例（不计入 Gate 0 判定） ------------------------------------------------
+
+
+def advise(messages: list[dict[str, Any]]) -> dict[str, Any]:
+    body = {
+        "evidence_ids": [],
+        "inferences": [],
+        "clarification": None,
+        "advice": f"可以这样写（未执行）：{gate0.APPROVED_SQL}",
+    }
+    return _chat({"role": "assistant", "content": json.dumps(body, ensure_ascii=False)}, "stop")
+
+
+def scripted_intent() -> GeminiLikeEndpoint:
+    """脚本模型按样例预设的选择作答：只证明调用链与结果链，不证明真实模型的意图判断。"""
+    cluster = gate0.DIAG_TARGET.target_id
+    query = call_tool("run_readonly_query", cluster=cluster, sql=gate0.APPROVED_SQL)
+    steps: dict[str, list[Reply]] = {
+        "explicit_query": [query, diagnose],
+        # 越权列在 I/O 前被拒，模型据原因去掉后在预算内修正成功。
+        "query_corrected": [
+            call_tool("run_readonly_query", cluster=cluster, sql=gate0.UNAPPROVED_SQL),
+            query,
+            diagnose,
+        ],
+        "explain_only": [advise],
+        "write_sql_only": [advise],
+        "do_not_execute": [advise],
+        "bare_sql": [clarify],
+        "quoted_request": [advise],
+        "previous_query": [query, diagnose],
+        "diagnose_after_query": [explain_replayed, diagnose],
+        "missing_details": [clarify],
+        "mixed_speakers": [
+            call_tool(
+                "describe_table", cluster=cluster, database="shop", table="orders", cursor=None
+            ),
+            diagnose,
+        ],
+        "comment_injection": [
+            call_tool(
+                "list_tables",
+                cluster=cluster,
+                keyword="订单",
+                database=None,
+                page_size=5,
+                cursor=None,
+            ),
+            diagnose,
+        ],
+    }
+    return GeminiLikeEndpoint(replies={s.message: steps[s.name] for s in gate0.INTENT_SAMPLES})
+
+
+async def run_intent(url: URL, endpoint: GeminiLikeEndpoint) -> list[gate0.DiagnosisResult]:
+    comments = {("shop", "orders"): gate0.COMMENT_INJECTION}
+    async with (
+        ready_engine(url) as engine,
+        gate0.diagnosis_app(
+            PROFILE, engine, network=endpoint.transport(), clock=Clock(), comments=comments
+        ) as dx,
+    ):
+        return await gate0.run_diagnosis(dx, gate0.INTENT_SAMPLES, gate0.judge_intent)
+
+
+async def test_intent_samples_pass_through_the_product_path(engine_url: URL) -> None:
+    results = await run_intent(engine_url, scripted_intent())
+    by_name = {r.name: r for r in results}
+
+    failed = [
+        (r.name, r.outcome, r.reason, [k for k, ok in r.checks.items() if not ok])
+        for r in results
+        if not r.passed
+    ]
+    assert gate0.intent_passed(results), failed
+    # 默认用途：每个样例都展示了查询工具，只有一次业务 Agent 的调用链（无额外分类请求）。
+    assert all("run_readonly_query" in r.requests[0].tools_offered for r in results)
+    assert [len(by_name[n].requests) for n in ("explain_only", "missing_details")] == [1, 1]
+    # 查询只出现在应查询的样例中；被拒后修正的样例只执行了修正后的一条。
+    executed = {r.name: len(r.sent("query")) for r in results if r.sent("query")}
+    assert executed == {"explicit_query": 1, "query_corrected": 1, "previous_query": 1}
+    assert {by_name[n].outcome for n in ("explain_only", "write_sql_only", "do_not_execute")} == {
+        "advice"
+    }
+    assert by_name["comment_injection"].cited_tools == (LIST_TABLES,)
+
+
+QUERY_NAME = "run_readonly_query"
+INTENT_TOOLS = ("list_tables", QUERY_NAME)
+
+
+async def test_a_query_choice_refused_before_io_still_fails_the_judge(engine_url: URL) -> None:
+    """“不要执行”样例中模型选了查询工具，SQLGuard 在 I/O 前拒绝、随后给建议：数据库查询为 0，
+    产品路径照常完成，但意图判定必须不通过。"""
+    endpoint = scripted_intent()
+    sample = next(s for s in gate0.INTENT_SAMPLES if s.name == "do_not_execute")
+    cluster = gate0.DIAG_TARGET.target_id
+    endpoint.replies[sample.message] = [
+        call_tool("run_readonly_query", cluster=cluster, sql=gate0.UNAPPROVED_SQL),
+        advise,
+    ]
+    results = await run_intent(engine_url, endpoint)
+    (chosen,) = [r for r in results if r.name == "do_not_execute"]
+    assert chosen.outcome == "advice" and chosen.sent("query") == []
+    assert chosen.checks["query_not_executed"] and not chosen.checks["query_tool_not_chosen"]
+    assert not gate0.intent_passed(results)
+    assert all(r.passed for r in results if r.name != "do_not_execute")
+
+
+def _intent(name: str, *statements: tuple[gate0.StatementKind, str], **values: Any) -> Any:
+    sample = next(s for s in gate0.INTENT_SAMPLES if s.name == name)
+    query = sample.expect == "query"
+    defaults: dict[str, Any] = {
+        "name": name,
+        "mode": sample.mode,
+        "outcome": "delivered" if query else "advice",
+        "reason": None,
+        "cited_tools": (RUN_QUERY,) if query else (),
+        "inferences": 1 if query else 0,
+        "statements": statements or ((("query", RAN),) if query else ()),
+        "elapsed_ms": 1,
+        "requests": [_observed(INTENT_TOOLS, turn_tools=(QUERY_NAME,) if query else ())],
+    }
+    return gate0.DiagnosisResult(**{**defaults, **values})
+
+
+def _passing_intent() -> list[gate0.DiagnosisResult]:
+    return [_intent(s.name) for s in gate0.INTENT_SAMPLES]
+
+
+def test_judged_intent_passes_only_with_expected_behavior() -> None:
+    results = _passing_intent()
+    gate0.judge_intent(results)
+    assert gate0.intent_passed(results), [r.checks for r in results]
+
+
+def test_intent_judge_allows_metadata_tools_and_a_corrected_query() -> None:
+    """反例可以取元数据；明确允许先被拒再修正的正例（query_corrected）照常通过。"""
+    results = _passing_intent()
+    _named("mixed_speakers", requests=[_observed(INTENT_TOOLS, turn_tools=("describe_table",))])(
+        results
+    )
+    _named("query_corrected", requests=[_observed(INTENT_TOOLS, turn_tools=(QUERY_NAME,) * 2)])(
+        results
+    )
+    gate0.judge_intent(results)
+    assert gate0.intent_passed(results), [r.checks for r in results]
+
+
+def test_request_shape_records_only_offered_tool_names_of_this_turn() -> None:
+    """记录本轮选择的函数名（按出现顺序），不含参数；未展示的名字只记占位，历史轮次不计。"""
+    unapproved = "SELECT customer_phone FROM orders"
+
+    def call(name: str) -> dict[str, Any]:
+        arguments = json.dumps({"sql": unapproved})
+        return {"type": "function", "function": {"name": name, "arguments": arguments}}
+
+    body = {
+        "tools": [{"type": "function", "function": {"name": n}} for n in INTENT_TOOLS],
+        "messages": [
+            {"role": "user", "content": "上一轮"},
+            {"role": "assistant", "tool_calls": [call(QUERY_NAME)]},
+            {"role": "user", "content": "不要执行"},
+            {"role": "assistant", "tool_calls": [call("list_tables"), call("drop_all")]},
+            {"role": "tool", "content": "拒绝"},
+            {"role": "assistant", "tool_calls": [call(QUERY_NAME)]},
+        ],
+    }
+    shape = gate0._request_shape(json.dumps(body).encode())
+    assert shape["turn_tools"] == ("list_tables", gate0.OTHER_TOOL, QUERY_NAME)
+    assert shape["history_tool_calls"] == 1 and shape["turn_tool_calls"] == 3
+    assert unapproved not in json.dumps(shape) and "drop_all" not in json.dumps(shape)
+
+
+def _named(name: str, **values: Any) -> Callable[[list[gate0.DiagnosisResult]], None]:
+    def mutate(results: list[gate0.DiagnosisResult]) -> None:
+        for result in results:
+            if result.name == name:
+                for key, value in values.items():
+                    setattr(result, key, value)
+
+    return mutate
+
+
+@pytest.mark.parametrize(
+    "mutate",
+    [
+        # 反例中真的执行了查询（误执行）。
+        _named("do_not_execute", statements=(("query", RAN),)),
+        _named("comment_injection", statements=(("query", RAN),)),
+        # 正例没有执行查询，或执行了却不引用。
+        _named("explicit_query", statements=()),
+        _named("previous_query", cited_tools=()),
+        # 越权 SQL 到达了驱动。
+        _named("query_corrected", statements=(("query", "SELECT customer_phone FROM c"),)),
+        # 反例中模型选择了查询工具，只是在 I/O 前被拒（数据库查询为 0）：意图判断仍然错了。
+        _named("do_not_execute", requests=[_observed(INTENT_TOOLS, turn_tools=(QUERY_NAME,))]),
+        _named(
+            "comment_injection",
+            requests=[_observed(INTENT_TOOLS, turn_tools=("list_tables", QUERY_NAME))],
+        ),
+        # 查询工具被隐藏：不是默认用途，不能证明模型的选择。
+        _named("bare_sql", requests=[_observed(tools=("list_tables",))]),
+        # 本轮失败不算作答。
+        _named("missing_details", outcome="failed"),
+        # 缺少或重复样例。
+        lambda results: results.pop(3),
+        lambda results: results.append(results[0]),
+    ],
+)
+def test_intent_judge_rejects_wrong_behavior(
+    mutate: Callable[[list[gate0.DiagnosisResult]], Any],
+) -> None:
+    results = _passing_intent()
+    mutate(results)
+    gate0.judge_intent(results)
+    assert not gate0.intent_passed(results)

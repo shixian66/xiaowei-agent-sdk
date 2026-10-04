@@ -53,10 +53,13 @@ SLOW_SQL = "SELECT region, SUM(total) AS total FROM sales GROUP BY region"
 UNAPPROVED_SQL = "SELECT region, secret FROM sales"
 FACTS_HEADER = "工具结果（系统根据证据生成）"
 ANALYSIS_HEADER = "分析建议（模型推断，未经系统核实）"
-CLARIFICATION_HEADER = "需要澄清（本轮未执行查询）"
+CLARIFICATION_HEADER = "需要澄清（本轮未执行业务查询）"
 FACTS_TRUNCATED = "（工具结果超过飞书单条上限，已截断）"
 TRUNCATED = "（内容超过飞书单条消息上限，已截断）"
-EVIDENCE_FAILED = "工具结果或回答未通过证据校验，本轮未交付；不会自动重试"
+EVIDENCE_FAILED = (
+    "工具执行失败，或工具结果、回答未通过证据校验，本轮未交付；不会自动重试。"
+    "若查询超出时间或内存限制，请缩小时间范围或数据量后重新提问"
+)
 SR_TOOLS = {"list_slow_queries", "explain_query", "describe_table_layout", "describe_table"}
 
 
@@ -74,7 +77,8 @@ class Reply:
 
 @dataclass
 class Turns:
-    """在一个渠道的同一会话中逐轮提问。飞书普通文本即诊断，``/查询`` 前缀为查询。"""
+    """在一个渠道的同一会话中逐轮提问。飞书 ``/诊断`` 前缀为显式诊断，普通文本为默认用途
+    （P2.5 Task 7 起由单 Agent 判断是否查询）。"""
 
     env: Env
     served: Served
@@ -90,7 +94,7 @@ class Turns:
             return Reply(body["state"], delivery.get("content", ""), delivery.get("facts"))
         completed, failed = await self.terminal("completed"), await self.terminal("failed")
         before = len(self.feishu.sends)
-        text = message if mode == "diagnose" else f"/查询 {message}"
+        text = f"/诊断 {message}" if mode == "diagnose" else message
         self.feishu.emit_raw_from_sdk_thread(feishu_event(self.env, text, f"om_{self.count}"))
         await until(lambda: len(self.feishu.sends) > before)
         _, sent, _ = self.feishu.sends[-1]

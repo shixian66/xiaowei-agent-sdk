@@ -6,7 +6,9 @@
 
 - 入站只用 ``on("raw")``：SDK 已认证的完整事件字典含 app、tenant 与时间。这里逐字段核对事件类型、
   应用、唯一租户、用户发送者、获准 ``open_id``、单聊、纯文本、时效与长度，任一不符即在持久化与
-  模型之前丢弃。``/查询``、``/诊断`` 只作用于本条消息，普通文本为诊断；``/新建`` 不进入模型。
+  模型之前丢弃。普通文本是默认用途（``query``）：查询工具按授权可见，由单 Agent 按正文判断是否
+  查询；``/查询`` 与普通文本相同。``/诊断`` 只作用于本条消息，隐藏并拒绝实际查询工具；``/新建``
+  不进入模型。
 - 身份：``open_id`` 经配置映射为内部 subject，再由同一个 ``AccessPolicy`` 授权；会话语境是单聊
   ``chat_id``，请求编号是 ``message_id``。``chat_id`` 只在内存中用于本次回复，不持久化。
 - SDK 在自己的后台线程事件循环上调用处理器；``LarkTransport`` 只把事件转交给应用事件循环，
@@ -69,7 +71,7 @@ from xiaowei.models import Delivery
 
 logger = logging.getLogger(__name__)
 
-EMPTY_COMMAND = "命令后需要写明问题，例如：/查询 昨天各地区订单数"
+EMPTY_COMMAND = "命令后需要写明问题，例如：/查询 昨天各地区订单数，或 /诊断 这条 SQL 为什么慢"
 NEW_SESSION = "已新建会话，之前的对话不再作为上下文"
 NEW_SESSION_BUSY = "当前会话正在处理消息，请稍后再新建会话"
 TRUNCATED = "（内容超过飞书单条消息上限，已截断）"
@@ -201,11 +203,11 @@ def _parse(event: object, config: FeishuConfig, now: datetime) -> _Message:
 
 
 def _command(text: str) -> tuple[Mode | Literal["new"], str]:
-    """消息首部的命令与剥离后的正文；普通文本是诊断。"""
+    """消息首部的命令与剥离后的正文；普通文本是默认用途（由单 Agent 判断是否查询）。"""
     for name, kind in _COMMANDS.items():
         if text == name or (text.startswith(name) and text[len(name)].isspace()):
             return kind, text[len(name) :].strip()
-    return "diagnose", text
+    return "query", text
 
 
 def render(delivery: Delivery, max_chars: int) -> str:

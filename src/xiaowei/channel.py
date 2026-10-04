@@ -10,7 +10,8 @@
   结果不明：锁低 readiness 后原样传播，交给重启恢复标为 interrupted。
 - ``ResultDelivery``：读取与发送已保存的结果，只依赖请求存储、``EvidenceStore`` 与同一个
   ``AccessPolicy``，不持有 ``Application``、模型绑定或模型凭据。completed 结果每次都按当前身份、
-  目标、渠道与当前数据权限经 ``EvidenceStore.validate_answer`` 重新生成 ``Delivery``；首次交付
+  目标、渠道与当前数据权限经 ``EvidenceStore.validate_answer`` 重新生成 ``Delivery``（连同保存的
+  本轮模型可见证据一起复核；没有该记录的旧格式回答不交付）；首次交付
   （Web 提交后的读取、飞书首次发送）之外的读取与显式重发是历史交付，依赖不可回放（视图）的事实
   拒绝。确定不可交付抛出 ``ResultUnavailableError``，暂时无法复核抛出其子类
   ``ResultUnverifiableError``（结果与会话保留，之后可再读取或显式重发）。failed/interrupted 只给
@@ -41,7 +42,16 @@ from xiaowei.channel_store import (
     SessionBusyError,
 )
 from xiaowei.evidence import AnswerRejectedError, EvidenceStore, EvidenceUnverifiableError
-from xiaowei.models import Budget, Channel, Delivery, Identity, Label, RunContext, ToolId
+from xiaowei.models import (
+    Budget,
+    Channel,
+    Delivery,
+    Identity,
+    Label,
+    RunContext,
+    ToolId,
+    TurnAnswer,
+)
 
 # 应用层失败原因到存储失败码（闭集）的映射；存储只保存类别，渠道据此给固定回执。
 _FAILURE_CODES: Mapping[TurnReason, CallerFailureCode] = {
@@ -62,7 +72,10 @@ _FAILURE_CODES: Mapping[TurnReason, CallerFailureCode] = {
 _RECEIPTS: Mapping[FailureCode, str] = {
     "busy": "系统繁忙，本轮未执行，请稍后用新消息重试",
     "model_failed": "模型未能完成本轮（调用失败、超时或次数达到上限）；已执行的工具不会自动重试",
-    "evidence_failed": "工具结果或回答未通过证据校验，本轮未交付；不会自动重试",
+    "evidence_failed": (
+        "工具执行失败，或工具结果、回答未通过证据校验，本轮未交付；不会自动重试。"
+        "若查询超出时间或内存限制，请缩小时间范围或数据量后重新提问"
+    ),
     "session_failed": "本轮内容未被接受或会话不可继续，请调整后重试或新建会话",
     "scope_unverifiable": (
         "暂时无法确认数据当前权限（集群不可达或超时），本轮未交付；会话保留，请稍后重新发送"
@@ -279,9 +292,13 @@ class ResultDelivery:
     ) -> Delivery:
         if record.answer is None:  # 数据库约束保证不会发生；不按“有回答”继续
             raise ResultUnavailableError
+        if record.context_evidence is None:
+            # 此前格式保存的回答没有本轮模型可见证据的记录，无法确认它依赖的数据当前仍可读。
+            raise ResultUnavailableError
+        turn = TurnAnswer(answer=record.answer, context_evidence=record.context_evidence)
         try:
             return await self._evidence.validate_answer(
-                record.answer, self._context(record, decision), history=history
+                turn, self._context(record, decision), history=history
             )
         except AnswerRejectedError:
             raise ResultUnavailableError from None

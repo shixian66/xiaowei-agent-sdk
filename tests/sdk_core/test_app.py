@@ -425,9 +425,9 @@ async def test_same_session_reentry_is_rejected(env: Env) -> None:
     assert reentry not in env.scripts.calls and other not in env.scripts.calls
 
     release.set()
-    assert (await running).evidence_ids == ()
+    assert (await running).answer.evidence_ids == ()
     # 结束后释放：同一会话的下一轮照常。
-    assert (await app.run_turn(env.ctx(turn="t3"), reentry)).evidence_ids == ()
+    assert (await app.run_turn(env.ctx(turn="t3"), reentry)).answer.evidence_ids == ()
     assert await env.state("s1") == ("active", 2)
 
     # 同一会话同时到达的两条消息：只有一条进入。

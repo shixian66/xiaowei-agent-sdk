@@ -32,7 +32,7 @@ from xiaowei.channel_store import (
     ResultNotSavedError,
     SessionBusyError,
 )
-from xiaowei.models import AgentAnswer, AnswerInference
+from xiaowei.models import AgentAnswer, AnswerInference, TurnAnswer
 from xiaowei.session import SessionStoreError, cleanup_expired
 from xiaowei.storage import (
     Backend,
@@ -54,6 +54,8 @@ ANSWER = AgentAnswer(
     inferences=[AnswerInference(text="东区平稳", evidence_ids=("ev_1",))],
     clarification=None,
 )
+# 保存的是回答与本轮模型可见的证据（另含一条未引用的 ev_2）。
+TURN = TurnAnswer(answer=ANSWER, context_evidence=("ev_1", "ev_2"))
 
 
 def make_store(
@@ -109,7 +111,7 @@ class Env:
     async def completed(self, request_id: str = "r1", **kwargs: Any) -> RequestRecord:
         record = (await self.accept(request_id, **kwargs)).record
         record = await self.store.start(record)
-        return await self.store.complete(record, ANSWER)
+        return await self.store.complete(record, TURN)
 
     async def row(self, request: RequestRecord) -> dict[str, Any]:
         async with self.engine.connect() as conn:
@@ -245,10 +247,11 @@ async def test_same_key_returns_the_existing_request_in_every_state(env: Env) ->
     running = await env.store.start(record)
     assert (await env.accept()).record.state == "running"
 
-    done = await env.store.complete(running, ANSWER)
+    done = await env.store.complete(running, TURN)
     replay = await env.accept()
     assert not replay.created and replay.record.state == "completed"
     assert replay.record.answer == ANSWER and done.answer == ANSWER
+    assert replay.record.context_evidence == done.context_evidence == ("ev_1", "ev_2")
 
     failed = (await env.accept("r2")).record
     await env.store.fail(await env.store.start(failed), "model_failed")
@@ -315,7 +318,7 @@ async def test_saved_answers_are_bounded_and_validated(env: Env) -> None:
     small = make_store(env.engine, env.clock, env.readiness, max_answer_bytes=50)
     record = await small.start((await env.accept(store=small)).record)
     with pytest.raises(ResultNotSavedError):
-        await small.complete(record, ANSWER)
+        await small.complete(record, TURN)
     row = await env.row(record)
     assert row["state"] == "failed" and row["failure_code"] == "result_not_saved"
     assert env.readiness.ok  # 失败状态写入成功：不必锁低 readiness
@@ -419,7 +422,7 @@ async def test_result_save_failure_closes_the_session(env: Env) -> None:
     await env.register_session(record.session_id)
     await env.fail_writes("xiaowei_request", "NEW.state = 'completed'", "UPDATE")
     with pytest.raises(ResultNotSavedError):
-        await env.store.complete(record, ANSWER)
+        await env.store.complete(record, TURN)
     row = await env.row(record)
     assert (row["state"], row["failure_code"]) == ("failed", "result_not_saved")
     assert await env.session_state(record.session_id) == "closed"
@@ -431,7 +434,7 @@ async def test_unwritable_failure_state_locks_readiness(env: Env) -> None:
     await env.register_session(record.session_id)
     await env.fail_writes("xiaowei_request")
     with pytest.raises(ResultNotSavedError):
-        await env.store.complete(record, ANSWER)
+        await env.store.complete(record, TURN)
     assert not env.readiness.ok
     # 请求仍是 running，会话未关闭：拒绝新工作，等待重启后的持锁恢复。
     await env.heal("xiaowei_request")
@@ -798,7 +801,7 @@ async def test_new_session_rotates_and_refuses_while_running(env: Env) -> None:
     record = await env.store.start((await env.accept()).record)
     with pytest.raises(SessionBusyError):
         await env.store.new_session("web", "alice", "cookie-1")
-    await env.store.complete(record, ANSWER)
+    await env.store.complete(record, TURN)
 
     new = await env.store.new_session("web", "alice", "cookie-1")
     assert new.generation == 2 and new.session_id != old.session_id
@@ -978,7 +981,7 @@ async def _prepare_complete(env: Env) -> Callable[[], Awaitable[object]]:
     record = await env.store.start((await env.accept()).record)
     await env.register_session(record.session_id)
     await env.slow_writes("NEW.state = 'completed'")
-    return lambda: env.store.complete(record, ANSWER)
+    return lambda: env.store.complete(record, TURN)
 
 
 async def _prepare_fail_after_commit(env: Env) -> Callable[[], Awaitable[object]]:
@@ -986,7 +989,7 @@ async def _prepare_fail_after_commit(env: Env) -> Callable[[], Awaitable[object]
     record = await small.start((await env.accept(store=small)).record)
     await env.register_session(record.session_id)
     await env.slow_writes("NEW.state = 'failed'")
-    return lambda: small.complete(record, ANSWER)  # 回答超限，转入失败写入
+    return lambda: small.complete(record, TURN)  # 回答超限，转入失败写入
 
 
 @pytest.mark.parametrize(

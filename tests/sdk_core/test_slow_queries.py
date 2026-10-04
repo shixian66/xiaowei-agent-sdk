@@ -29,7 +29,7 @@ from tests.sdk_core.test_starrocks_tools import env as env  # pytest fixture
 from xiaowei.app import Application, DataPolicy, Mode, TurnError
 from xiaowei.evidence import AnswerRejectedError, EvidenceStore, EvidenceUnavailableError
 from xiaowei.governance import GovernedTools, ToolCatalog, ToolRejectedError
-from xiaowei.models import AUDIENCES, AgentAnswer, Budget, Identity, RunContext, ToolRequest
+from xiaowei.models import AUDIENCES, Budget, Identity, RunContext, ToolRequest, TurnAnswer
 from xiaowei.session import SessionInputPolicy
 from xiaowei.starrocks import AUDIT_COLUMNS, EXPLAIN_PREFIX, StarRocksAdapter, StarRocksTarget
 from xiaowei.starrocks_schema import DependencyCheck, SchemaCache
@@ -320,8 +320,8 @@ async def test_audit_scope_change_invalidates_audit_evidence(
     env.drv.make = driver(audit_rows(ACCEPTED[0])).make
     message = env.scripts.add("慢查询", list_slow(), cite())
     ctx = au.ctx()
-    answer: AgentAnswer = await au.app.run_turn(ctx, message)
-    (evidence_id,) = answer.evidence_ids
+    answer: TurnAnswer = await au.app.run_turn(ctx, message)
+    (evidence_id,) = answer.answer.evidence_ids
 
     later = await audited(env, changed)
     for audience in ("model", "session", "web"):

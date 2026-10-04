@@ -79,6 +79,7 @@ from xiaowei.models import (
     Identity,
     RunContext,
     ToolRequest,
+    TurnAnswer,
 )
 from xiaowei.session import SessionInputPolicy, SessionLimits
 from xiaowei.sqlguard import guard_explain_query, guard_readonly_query
@@ -826,8 +827,16 @@ async def test_delivery_rejects_forged_cross_session_and_revoked_evidence(env: E
     ctx = env.ctx(turn="t1")
     answer_ = await env.app.run_turn(ctx, message)
 
+    forged = ("ev_" + "0" * 32,)
     for bad, bad_ctx in (
-        (answer_.model_copy(update={"evidence_ids": ("ev_" + "0" * 32,)}), ctx),
+        # 伪造的标识同时放进引用与上下文：不经“只能引用可见证据”的检查，仍在读取边界拒绝。
+        (
+            TurnAnswer(
+                answer=answer_.answer.model_copy(update={"evidence_ids": forged}),
+                context_evidence=forged,
+            ),
+            ctx,
+        ),
         (answer_, env.ctx(session="s-other")),
         (answer_, env.ctx(channel="feishu")),
     ):
@@ -1047,7 +1056,7 @@ async def test_evidence_stays_readable_when_scope_is_unchanged(
 ) -> None:
     assert data_scope_digest(target) == data_scope_digest(SR)
     ctx, answer_ = await queried(env)
-    (evidence_id,) = answer_.evidence_ids
+    (evidence_id,) = answer_.answer.evidence_ids
     evidence, app = await reassembled(env, target)
     for audience in ("model", "session", "web"):
         await evidence.project(evidence_id, ctx, audience)
@@ -1071,7 +1080,7 @@ async def test_pre_sql_mode_evidence_is_unreadable_after_upgrade(env: Env) -> No
     """d497a34 的实际查询策略指纹；升级后同一配置也不能复用旧 SQL 语义下的证据。"""
     ctx, answer_ = await queried(env)
     attempts = env.drv.attempts
-    (evidence_id,) = answer_.evidence_ids
+    (evidence_id,) = answer_.answer.evidence_ids
     async with env.engine.begin() as conn:
         await conn.execute(
             text("UPDATE xiaowei_evidence SET policy_fingerprint = :old WHERE evidence_id = :id"),
@@ -1107,7 +1116,7 @@ async def test_connection_identity_change_invalidates_old_evidence(
 async def assert_old_evidence_unreadable(env: Env, target: StarRocksTarget) -> None:
     assert data_scope_digest(target) != data_scope_digest(SR)
     ctx, answer_ = await queried(env)
-    (evidence_id,) = answer_.evidence_ids
+    (evidence_id,) = answer_.answer.evidence_ids
     evidence, app = await reassembled(env, target)
     for audience in ("model", "session", "web"):
         with pytest.raises(EvidenceUnavailableError):
@@ -1307,7 +1316,7 @@ async def test_explain_evidence_is_invalidated_by_scope_narrowing(
     env: Env, target: StarRocksTarget
 ) -> None:
     ctx, answer_ = await explained(env)
-    (evidence_id,) = answer_.evidence_ids
+    (evidence_id,) = answer_.answer.evidence_ids
     evidence, app = await reassembled(env, target)
     for audience in ("model", "session", "web"):
         with pytest.raises(EvidenceUnavailableError):

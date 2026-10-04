@@ -174,11 +174,30 @@ class AnswerInference(_Answer):
 
 
 class AgentAnswer(_Answer):
-    """SDK ``output_type``：模型只选择引用并给出分析；事实区域由代码从 Evidence 生成。"""
+    """SDK ``output_type``：模型只选择引用并给出分析；事实区域由代码从 Evidence 生成。
+
+    三种回答互斥（见 ``EvidenceStore.validate_answer``）：引用证据的回答（可带分析）、澄清、
+    未执行建议（``advice``：只解释、只写 SQL、不要执行等场景的说明或 SQL 草稿，不含查询事实）。
+    ``advice`` 有默认值，只为解析此前保存、没有该字段的回答（它们没有可信的上下文证据记录，
+    不再交付，见 ``ChannelStore``）；SDK 严格模式下模型仍须显式给出它（可为 null）。
+    """
 
     evidence_ids: tuple[str, ...]
     inferences: list[AnswerInference]
     clarification: Annotated[str, Field(min_length=1, max_length=2000)] | None
+    advice: Annotated[str, Field(min_length=1, max_length=4000)] | None = None
+
+
+class TurnAnswer(_Trusted):
+    """一轮的最终回答与本轮模型可见的证据；后者由可信代码记录，不来自模型。
+
+    ``context_evidence`` 是本轮交给模型的全部工具证据：回放的会话历史与本轮工具结果。模型文字
+    （分析、澄清、建议）可能复述其中任何一条，因此回答只能引用其中的证据，每次交付都按当前权限
+    复核全部这些证据；只展示 ``answer`` 引用的事实，任一条确定不可读时整条回答不交付。
+    """
+
+    answer: AgentAnswer
+    context_evidence: tuple[Label, ...]
 
 
 class DeliveryFact(_Trusted):

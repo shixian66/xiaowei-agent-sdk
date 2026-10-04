@@ -17,6 +17,7 @@ from sqlalchemy.ext.asyncio import AsyncEngine
 from xiaowei.evidence import EvidenceStore
 from xiaowei.governance import GovernedTools, Projection, ToolCatalog, ToolPolicy
 from xiaowei.models import (
+    AgentAnswer,
     Budget,
     Channel,
     Identity,
@@ -24,6 +25,7 @@ from xiaowei.models import (
     ToolContract,
     ToolObservation,
     ToolRequest,
+    TurnAnswer,
 )
 from xiaowei.storage import initialize_storage, open_engine
 from xiaowei.tools import governed_function_tool
@@ -35,6 +37,11 @@ QUERY_TOOL = "local/run_query"
 PRIVATE_NOTE = "synthetic-private-note"
 START = datetime(2026, 9, 29, 8, 0, tzinfo=UTC)
 RETENTION_SECONDS = 3600
+
+
+def cited(answer: AgentAnswer) -> TurnAnswer:
+    """直接校验一个回答时的最小上下文：模型可见的证据恰好是它引用的证据。"""
+    return TurnAnswer(answer=answer, context_evidence=answer.evidence_ids)
 
 
 class RegionArgs(BaseModel):

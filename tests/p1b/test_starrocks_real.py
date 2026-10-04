@@ -42,7 +42,15 @@ from xiaowei.governance import (
     ToolExecutionError,
     ToolRejectedError,
 )
-from xiaowei.models import AgentAnswer, AnswerInference, Budget, Identity, RunContext, ToolRequest
+from xiaowei.models import (
+    AgentAnswer,
+    AnswerInference,
+    Budget,
+    Identity,
+    RunContext,
+    ToolRequest,
+    TurnAnswer,
+)
 from xiaowei.sqlguard import (
     QueryPolicy,
     QueryRejectedError,
@@ -444,7 +452,8 @@ async def test_governed_query_tool_end_to_end(
             inferences=[AnswerInference(text="查询结果", evidence_ids=(result.evidence_id,))],
             clarification=None,
         )
-        delivery = await evidence.validate_answer(answer, ctx)
+        turn = TurnAnswer(answer=answer, context_evidence=(result.evidence_id,))
+        delivery = await evidence.validate_answer(turn, ctx)
 
     (fact,) = delivery.facts
     assert fact.columns == columns
@@ -857,7 +866,8 @@ async def test_order_by_facts_keep_the_original_binding(instance: Instance) -> N
                     ],
                     clarification=None,
                 )
-                (fact,) = (await evidence.validate_answer(answer, ctx)).facts
+                turn = TurnAnswer(answer=answer, context_evidence=(result.evidence_id,))
+                (fact,) = (await evidence.validate_answer(turn, ctx)).facts
                 return fact
 
             for name, template in ORDER_FACTS.items():

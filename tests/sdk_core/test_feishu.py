@@ -187,12 +187,13 @@ def logs() -> Iterator[list[logging.LogRecord]]:
 # ---- 正常路径与用途 --------------------------------------------------------------------------
 
 
-async def test_plain_text_is_a_diagnose_turn_answered_once(env: Env) -> None:
+async def test_plain_text_is_a_default_turn_answered_once(env: Env) -> None:
+    """P2.5 Task 7：普通文本由单 Agent 判断，查询工具按授权可见（不再默认诊断）。"""
     async with running(env) as fs:
-        message = env.scripts.add("飞书诊断", tool_call("order_total", region="east"), cite())
+        message = env.scripts.add("飞书普通消息", tool_call("order_total", region="east"), cite())
         await fs.gateway.receive(fs.event(message))
         await fs.drain()
-    assert all(QUERY_NAME not in seen for seen in env.scripts.tools_seen(message))
+    assert all(QUERY_NAME in seen for seen in env.scripts.tools_seen(message))
     assert env.model_calls(message) == 2 and len(env.adapter.calls) == 1
     ((chat_id, text),) = fs.outbox.sent
     assert chat_id == "oc_alice" and "来源 local/order_total" in text
@@ -203,7 +204,7 @@ async def test_plain_text_is_a_diagnose_turn_answered_once(env: Env) -> None:
     assert tuple(row) == ("completed", "sent")
 
 
-async def test_query_command_applies_only_to_its_own_message(env: Env) -> None:
+async def test_diagnose_command_applies_only_to_its_own_message(env: Env) -> None:
     async with running(env) as fs:
         query = env.scripts.add("看看东区", tool_call("order_total", region="east"), cite())
         await fs.gateway.receive(fs.event(f"/查询  {query}"))
@@ -213,8 +214,9 @@ async def test_query_command_applies_only_to_its_own_message(env: Env) -> None:
         diagnose = env.scripts.add("显式诊断", tool_call("order_total", region="east"), cite())
         await fs.gateway.receive(fs.event(f"/诊断 {diagnose}"))
         await fs.drain()
+    # /查询 与普通文本相同（单 Agent 判断）；只有 /诊断 收窄本条消息，之后的普通文本恢复默认。
     assert all(QUERY_NAME in seen for seen in env.scripts.tools_seen(query))
-    assert all(QUERY_NAME not in seen for seen in env.scripts.tools_seen(follow))
+    assert all(QUERY_NAME in seen for seen in env.scripts.tools_seen(follow))
     assert all(QUERY_NAME not in seen for seen in env.scripts.tools_seen(diagnose))
     assert len(fs.outbox.sent) == 3
 
@@ -935,12 +937,12 @@ def test_forged_headers_inside_results_do_not_steer_the_cut() -> None:
 
 
 def test_clarifications_and_receipts_are_not_rearranged() -> None:
-    clarification = "需要澄清（本轮未执行查询）\n" + "请说明" * 400
+    clarification = "需要澄清（本轮未执行业务查询）\n" + "请说明" * 400
     shown = render(plain(clarification), 300)
     lines = shown.split("\n")
     assert len(shown) <= 300 and FACTS_TRUNCATED not in shown
     # 澄清正文只有一行且放不下时保留它的前缀，而不是只剩标题与截断说明。
-    assert lines[0] == "需要澄清（本轮未执行查询）" and lines[-1] == TRUNCATED
+    assert lines[0] == "需要澄清（本轮未执行业务查询）" and lines[-1] == TRUNCATED
     assert len(lines) == 3 and lines[1] and clarification.split("\n")[1].startswith(lines[1])
     assert render(plain("工具结果或回答未通过证据校验"), 200) == "工具结果或回答未通过证据校验"
 

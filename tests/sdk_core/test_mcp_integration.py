@@ -57,6 +57,7 @@ from tests.sdk_core.synthetic_tools import (
     Clock,
     Grants,
     RecordingAdapter,
+    cited,
     context,
     ready_engine,
     sdk_tool,
@@ -325,7 +326,7 @@ async def test_sdk_runner_calls_governed_mcp(postgres_url: URL) -> None:
 
             answer = c.last_output
             assert isinstance(answer, AgentAnswer)
-            delivery = await c.evidence.validate_answer(answer, ctx)
+            delivery = await c.evidence.validate_answer(cited(answer), ctx)
             assert "7" in delivery.content
 
             # 只有一段 JSON 文本、没有结构化内容的结果同样按登记契约接收。
@@ -724,7 +725,8 @@ async def test_mcp_payload_filtered_before_model(postgres_url: URL) -> None:
                 clock=c.clock,
             )
             model = await c.run(tools, [call("fixture__lookup"), cite()], ctx, session=session)
-            await session.commit_validated()
+            produced = c.governed.turn_runs(ctx.identity).produced
+            await session.commit_validated(tuple(e for _, e in produced))
             stored = await c.dump()
             for forbidden in (PRIVATE, FORGED_EVIDENCE):
                 assert forbidden not in seen(model)
