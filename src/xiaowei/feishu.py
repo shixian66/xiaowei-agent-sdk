@@ -273,11 +273,15 @@ def _prefix(line: str, limit: int) -> str:
 
 
 def send_outcome(result: object) -> SendOutcome:
-    """把 SDK 的 ``SendResult`` 映射为投递结果；只有已知未发出的错误类别才算明确失败。"""
+    """把 SDK 的 ``SendResult`` 映射为投递结果；只有已知未发出的错误类别才算明确失败。
+
+    成功必须带平台返回的 ``message_id``：SDK 1.4.0 把没有业务 ``code`` 的 HTTP 错误响应（如 500
+    ``{}``）当作成功返回，这时结果不明。
+    """
     if not isinstance(result, SendResult):
         return "unknown"
     if result.success:
-        return "sent"
+        return "sent" if result.message_id else "unknown"
     error = result.error
     if error is not None and error.code in _DEFINITE_FAILURES:
         return "failed"

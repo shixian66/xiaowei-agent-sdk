@@ -6,6 +6,7 @@
 """
 
 import asyncio
+import dataclasses
 import json
 import logging
 import re
@@ -17,6 +18,7 @@ from datetime import timedelta
 from typing import Any
 
 import pytest
+from lark_channel.channel import FeishuChannel
 from lark_channel.channel.errors import FeishuChannelErrorCode, SendError
 from lark_channel.channel.types import SendResult
 from pydantic import ValidationError
@@ -969,6 +971,7 @@ def test_layout_must_match_the_content_and_stays_out_of_the_web_body() -> None:
     ("result", "expected"),
     [
         (SendResult.ok(message_id="om_x"), "sent"),
+        (SendResult.ok(message_id=None), "unknown"),
         (
             SendResult.fail(SendError(code=FeishuChannelErrorCode.UNKNOWN, retryable=True)),
             "unknown",
@@ -1004,6 +1007,60 @@ def test_sdk_channel_is_configured_for_single_text_sends(monkeypatch: pytest.Mon
     assert not cfg.resolve_sender_names
     assert cfg.policy.dm_policy == "disabled" and cfg.policy.group_policy == "disabled"
     assert cfg.transport.kind == "ws" and cfg.app_id == APP_ID
+
+
+@pytest.mark.parametrize(
+    ("status", "body", "expected"),
+    [
+        (200, b'{"code": 0, "msg": "success", "data": {"message_id": "om_sent"}}', "sent"),
+        (200, b'{"code": 230002, "msg": "bot not in chat"}', "failed"),
+        (500, b"<html>bad gateway</html>", "unknown"),
+        # 没有业务 code 的 HTTP 错误：SDK 1.4.0 把它当作 code 0 的成功（没有 message_id）
+        (500, b"{}", "unknown"),
+        (502, b'{"msg": "bad gateway"}', "unknown"),
+        (404, b'{"msg": "not found"}', "unknown"),
+    ],
+)
+async def test_real_sdk_send_maps_http_outcomes_without_retry(
+    monkeypatch: pytest.MonkeyPatch, status: int, body: bytes, expected: str
+) -> None:
+    """产品装配的真实 SDK 对 loopback 合成 OpenAPI 单次发送；只有带 message_id 的成功才算已发出。"""
+    from starlette.applications import Starlette
+    from starlette.requests import Request
+    from starlette.responses import JSONResponse, Response
+    from starlette.routing import Route
+    from tests.sdk_core.mcp_fixture import serve
+
+    sends: list[dict[str, Any]] = []
+
+    async def token(request: Request) -> Response:
+        return JSONResponse({"code": 0, "tenant_access_token": "t-synthetic", "expire": 7200})
+
+    async def create(request: Request) -> Response:
+        sends.append({"query": dict(request.query_params), "body": await request.json()})
+        return Response(body, status_code=status, media_type="application/json")
+
+    def build(_: Any) -> Any:
+        return Starlette(
+            routes=[
+                Route("/open-apis/auth/v3/tenant_access_token/internal", token, methods=["POST"]),
+                Route("/open-apis/im/v1/messages", create, methods=["POST"]),
+            ]
+        )
+
+    monkeypatch.setenv("XW_TEST_FEISHU_SECRET", "not-a-real-secret")
+    with serve(build, path="") as running:
+        product = lark_channel(config()).config
+        channel = FeishuChannel(config=dataclasses.replace(product, domain=running.url))
+        try:
+            outcome = await LarkTransport(channel, config()).send("oc_alice", "合成回复")
+        finally:
+            channel.stop(join_timeout=5)
+    assert outcome == expected
+    assert len(sends) == 1  # 单次发送：不重试，也不换成其他请求
+    assert sends[0]["query"] == {"receive_id_type": "chat_id"}
+    assert sends[0]["body"]["receive_id"] == "oc_alice"
+    assert json.loads(sends[0]["body"]["content"]) == {"text": "合成回复"}
 
 
 def test_feishu_config_validation() -> None:
