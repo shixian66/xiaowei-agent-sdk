@@ -15,6 +15,11 @@
 读取，抛出 ``EvidenceUnverifiableError``，不改动证据。复核只做探测与元数据读取，不调用模型、
 不执行原业务 SQL。依赖不可回放（视图）的证据只在产生它的这一轮、非历史读取时可读，在任何 I/O
 前判断。
+
+复核次数有上限（``Budget.max_scope_checks``）：每次复核按目标去重后的对象数计数，在探测之前累加，
+失败不退还；超出时在任何探测前按 ``EvidenceUnverifiableError`` 拒绝。一轮的全部读取（回放、工具
+记录、写入 Session、最终校验与提交）在 ``scope_checks`` 中共用一个计数；不在其中的读取（首次
+发送、历史读取、重发）每次单独计数。
 事实区域由代码从获准投影生成，模型分析单独标注；策略登记了固定说明的工具，说明由代码取自
 当前登记的策略，紧随来源行，不来自证据记录或模型。Web 另得到从当前 Web 投影生成的结构化
 ``DeliveryFact``；飞书只得到纯文本，表格数据逐行渲染，单元格内的换行等控制字符被转义，
@@ -26,7 +31,9 @@ import json
 import logging
 import secrets
 import unicodedata
-from collections.abc import Awaitable, Callable, Iterable, Mapping, Sequence
+from collections.abc import Awaitable, Callable, Iterable, Iterator, Mapping, Sequence
+from contextlib import contextmanager
+from contextvars import ContextVar
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import Literal, TypeGuard
@@ -69,6 +76,28 @@ logger = logging.getLogger(__name__)
 DependencyVerdict = Literal["valid", "invalid", "unverifiable"]
 DependencyVerifier = Callable[[str, Sequence[ObjectDependency]], Awaitable[DependencyVerdict]]
 """应用装配的依赖复核：``(target_id, 依赖) -> 三态结论``；只能探测权限与读取元数据。"""
+
+
+@dataclass
+class _ScopeChecks:
+    used: int = 0
+
+
+_SCOPE_CHECKS: ContextVar[_ScopeChecks | None] = ContextVar("xiaowei_scope_checks", default=None)
+
+
+@contextmanager
+def scope_checks() -> Iterator[None]:
+    """一个请求共用的依赖复核计数，由应用在一轮的全部工作之外进入。
+
+    SDK 在其中派生的任务复制 context，仍引用同一个计数；离开后不再保留，没有跨请求的状态。
+    """
+    token = _SCOPE_CHECKS.set(_ScopeChecks())
+    try:
+        yield
+    finally:
+        _SCOPE_CHECKS.reset(token)
+
 
 _COLUMNS: Mapping[Audience, str] = {
     "model": "model_content",
@@ -333,7 +362,7 @@ class EvidenceStore:
     ) -> list[EvidenceRecord]:
         """一批记录的读取边界：先逐条做不需要数据库 I/O 的检查，再合并依赖复核一次。"""
         records = [await self._checked(e, ctx, audience, history=history) for e in evidence_ids]
-        await self._verify(records)
+        await self._verify(records, ctx.budget.max_scope_checks)
         return records
 
     async def _checked(
@@ -369,8 +398,11 @@ class EvidenceStore:
         scoped = self._catalog.policy_for(contract).data_scope is not None
         return scoped == (record.dependencies is not None)
 
-    async def _verify(self, records: Sequence[EvidenceRecord]) -> None:
-        """按目标合并依赖，各复核一次；任何确定失效即拒绝，否则有无法复核的目标则暂不可用。"""
+    async def _verify(self, records: Sequence[EvidenceRecord], limit: int) -> None:
+        """按目标合并依赖，各复核一次；任何确定失效即拒绝，否则有无法复核的目标则暂不可用。
+
+        探测之前按（目标, 对象）去重计数：同一批中同一对象只算一次，不同目标的同名对象各算一次。
+        """
         merged: dict[str, list[ObjectDependency]] = {}
         for record in records:
             if record.dependencies:
@@ -380,6 +412,12 @@ class EvidenceStore:
         verify = self._verify_dependencies
         if verify is None:  # 装配错误：有依赖却没有复核方式，不能放行
             raise EvidenceUnavailableError
+        checks = _SCOPE_CHECKS.get() or _ScopeChecks()
+        needed = sum(len({(d.database, d.name) for d in deps}) for deps in merged.values())
+        if checks.used + needed > limit:
+            logger.warning("证据依赖复核超过检查次数上限：used=%d needed=%d", checks.used, needed)
+            raise EvidenceUnverifiableError
+        checks.used += needed
         unverifiable = False
         for target_id, dependencies in sorted(merged.items()):
             try:

@@ -67,7 +67,9 @@ class Audited:
             identity=Identity(subject_id="alice", session_id=session, turn_id=turn, channel="web"),
             target_scope=frozenset({AUDIT_TARGET.target_id}),
             tool_scope=self.app.scope_for_turn(mode, ALL_TOOLS, self.app.available_tools),
-            budget=Budget(max_turns=6, max_tool_calls=calls, timeout_seconds=30.0),
+            budget=Budget(
+                max_turns=6, max_tool_calls=calls, timeout_seconds=30.0, max_scope_checks=1000
+            ),
         )
 
     async def evidence_rows(self) -> int:

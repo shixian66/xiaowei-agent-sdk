@@ -42,6 +42,7 @@ from xiaowei.evidence import (
     EvidenceStore,
     EvidenceStoreError,
     EvidenceUnverifiableError,
+    scope_checks,
 )
 from xiaowei.governance import Execute, GovernedTools, ToolExecutionError
 from xiaowei.mcp import MCPIntegration
@@ -268,8 +269,10 @@ class Application:
             raise self._refuse(turn, started, "busy")
         self._active.add(session_id)
         try:
-            async with asyncio.timeout(ctx.budget.timeout_seconds):
-                answer = await self._turn(ctx, message, started)
+            # 证据依赖的检查次数整轮共用一个计数（回放、工具记录、最终校验与提交）。
+            with scope_checks():
+                async with asyncio.timeout(ctx.budget.timeout_seconds):
+                    answer = await self._turn(ctx, message, started)
         except TurnError as exc:
             _stage(turn, "failed", started, exc.reason)
             raise

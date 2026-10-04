@@ -46,9 +46,13 @@ class Identity(_Trusted):
 
 
 class Budget(_Trusted):
+    """一轮的上限。``max_scope_checks`` 是证据依赖的对象检查次数：一轮（或一次单独的历史读取、
+    重发）内每次复核按批去重后的对象数累计，超出时在探测前按暂不可验证拒绝（见 ``evidence``）。"""
+
     max_turns: int = Field(gt=0)
     max_tool_calls: int = Field(gt=0)
     timeout_seconds: float = Field(gt=0)
+    max_scope_checks: int = Field(gt=0, le=100_000)
 
 
 class RunContext(_Trusted):

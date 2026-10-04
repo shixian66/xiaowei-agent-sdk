@@ -261,7 +261,12 @@ class Env:
             ),
             target_scope=frozenset({TARGET, FIXTURE_TARGET}),
             tool_scope=self.scope(mode),
-            budget=Budget(max_turns=6, max_tool_calls=max_tool_calls, timeout_seconds=timeout),
+            budget=Budget(
+                max_turns=6,
+                max_tool_calls=max_tool_calls,
+                timeout_seconds=timeout,
+                max_scope_checks=1000,
+            ),
         )
 
     async def stored(self, session_id: str = "s1") -> list[dict[str, Any]]:

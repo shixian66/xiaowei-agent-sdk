@@ -869,7 +869,7 @@ def test_context_rejects_dependencies(extra: dict[str, object]) -> None:
     with pytest.raises(ValidationError):
         Identity(subject_id="a", session_id="s", turn_id="t", channel="email")  # type: ignore[arg-type]
     with pytest.raises(ValidationError):
-        Budget(max_turns=0, max_tool_calls=1, timeout_seconds=1.0)
+        Budget(max_turns=0, max_tool_calls=1, timeout_seconds=1.0, max_scope_checks=1000)
     with pytest.raises(ValidationError):
         context().tool_scope = frozenset({QUERY_TOOL})  # type: ignore[misc]
 

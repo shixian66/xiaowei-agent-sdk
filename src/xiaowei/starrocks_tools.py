@@ -480,7 +480,7 @@ def scope_canonical(target: StarRocksTarget) -> str:
     不纳入：密码引用（凭据）、``tls_ca_file``（信任链文件位置，不改变数据）、
     ``connect_timeout_seconds`` 与 ``pool_size``（只影响能否、何时取得连接，不影响一次读取的范围与
     结果）。整轮期限、工具次数等预算属于应用的 ``Budget``，与目标无关，也不进入。可读对象与列来自
-    结构快照，随权限变化，不进入（由 Evidence 的对象依赖逐次复核）。风险策略在 Task 4 实施时加入。
+    结构快照，随权限变化，不进入（由 Evidence 的对象依赖逐次复核）。
     """
     policy = target.policy
     body = {
