@@ -18,8 +18,8 @@
 <form id="composer" method="post" action="/api/turns">
 <label>用途
 <select id="mode" name="mode">
-<option value="diagnose" selected>诊断</option>
-<option value="query">查询</option>
+<option value="query" selected>默认（由小维判断是否查询）</option>
+<option value="diagnose">仅诊断（不执行查询）</option>
 </select>
 </label>
 <textarea id="message" name="message" rows="3" required placeholder="输入问题"></textarea>

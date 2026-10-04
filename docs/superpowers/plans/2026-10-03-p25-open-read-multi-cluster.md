@@ -10,7 +10,7 @@
 
 **Spec:** [ARCHITECTURE §5 本轮意图](../../../ARCHITECTURE.md#turn-purpose)、[§6 R1–R6](../../../ARCHITECTURE.md#p25-scope)、§9 是产品/权限边界唯一来源；[DEVELOPMENT_PLAN §6](../../../DEVELOPMENT_PLAN.md) 只维护顺序和退出条件。本文维护本阶段的技术契约、依赖与验收。群聊单独见 [单群计划](2026-10-03-feishu-group.md)，不在这里复制其任务。
 
-**Baseline / 状态：** 规划源代码为 `7a715ff61d7a97457b03bb8b596ef4238c1049f2`，与本地 `origin/main` `0f831ebe070e7b11b1597fbdf59921b19981b129` 内容相同；P2 离线完成，P1/P2 实战缺口继承到 P3。文档候选 v2（2026-10-03，按用户对 aed344b 的六项决定修订）已在 `719c1c7` 通过复审；Task 0 实测证据、对计划的影响与当前范围见 §9，经复审随 PR #32 合入（`29678006f380621dda5ddb772b7affa072a59776`）。Task 1 多目标路由经独立审查随 PR #33 合入（`6ccc7a4e6e5c8ec4bac5093d4300bda63ae88605`）；Task 2 自动结构快照及审查修订（前移 Evidence 当前权限闭环、摘要 v2、列表探测硬上限）经复审随 PR #34 合入（`d497a34e468eb0b9987a5e0eac1dea7a9fbf8a08`，实施说明见 Task 2 节末）；§9.8 的 D1/D2 经独立审查随 PR #35 合入（`7523c74fcebc91718f0a7de4d10782c2a7214260`）。Task 3 复杂 SQL 与跨库经四轮独立审查随 PR #36 合入（`9ef4f3eaa9cb29d218313a3d010d84d1e937e4ca`，实施说明见 Task 3 节末）。原 Task 4 已按用户决定取消，决定见 ARCHITECTURE §6 R4–R5。Task 5 证据复核次数上限与跨目标历史验收经独立审查通过（PR #38，实施说明见 Task 5 节末）。Task 6 搜表分页与多库慢查询已实现，第一轮独立审查（head `78aa8c0`）的分页与截断意见已修订、待复审（实施说明见 Task 6 节末）；Task 7–8 未实施。
+**Baseline / 状态：** 规划源代码为 `7a715ff61d7a97457b03bb8b596ef4238c1049f2`，与本地 `origin/main` `0f831ebe070e7b11b1597fbdf59921b19981b129` 内容相同；P2 离线完成，P1/P2 实战缺口继承到 P3。文档候选 v2（2026-10-03，按用户对 aed344b 的六项决定修订）已在 `719c1c7` 通过复审；Task 0 实测证据、对计划的影响与当前范围见 §9，经复审随 PR #32 合入（`29678006f380621dda5ddb772b7affa072a59776`）。Task 1 多目标路由经独立审查随 PR #33 合入（`6ccc7a4e6e5c8ec4bac5093d4300bda63ae88605`）；Task 2 自动结构快照及审查修订（前移 Evidence 当前权限闭环、摘要 v2、列表探测硬上限）经复审随 PR #34 合入（`d497a34e468eb0b9987a5e0eac1dea7a9fbf8a08`，实施说明见 Task 2 节末）；§9.8 的 D1/D2 经独立审查随 PR #35 合入（`7523c74fcebc91718f0a7de4d10782c2a7214260`）。Task 3 复杂 SQL 与跨库经四轮独立审查随 PR #36 合入（`9ef4f3eaa9cb29d218313a3d010d84d1e937e4ca`，实施说明见 Task 3 节末）。原 Task 4 已按用户决定取消，决定见 ARCHITECTURE §6 R4–R5。Task 5 证据复核次数上限与跨目标历史验收经独立审查通过（PR #38，实施说明见 Task 5 节末）。Task 6 搜表分页与多库慢查询经两轮独立审查随 PR #39 合入（`21d06edff21871289703b0860a9d4fa8acb1a163`，实施说明见 Task 6 节末）。Task 7 单 Agent 自然语言工具选择已实现、待独立审查（实施说明见 Task 7 节末）；Task 8 未实施。
 
 ## Global Constraints
 
@@ -314,9 +314,9 @@ Task 5 改为依赖 Task 3。现有运行限额回归由 Task 8 核对，目标�
 - [x] 关键词/库过滤/分页/刷新后游标失效/注释截断/同名表成功对照；空关键词、过大页、不可读对象拒绝；分页输出受四种容量约束。
 - [x] 审计 Db 与显式引用库不同、跨库 SQL、原文未限定名、Db 为空/未知、无权限引用、可能截断原文、候选耗尽均有验收；审计表有权不代表原文可放行。
 - [x] 保留 P2 time_zone、stmt_limit、解析期限与错误整轮停止，不因移除单库过滤读取无界候选。
-- [ ] 运行 §5 C6 + SR 审计；变异使用默认库/不校验原文依赖/忽略候选上限应失败。提交 `feat: search schemas and diagnose slow queries across databases`，独立审查。（C6、SR 与变异已完成；第一轮审查意见已修订，待复审）
+- [x] 运行 §5 C6 + SR 审计；变异使用默认库/不校验原文依赖/忽略候选上限应失败。提交 `feat: search schemas and diagnose slow queries across databases`，独立审查。（经两轮独立审查随 PR #39 合入）
 
-**Task 6 实施说明（第一轮审查意见已修订，待复审）：**
+**Task 6 实施说明（经两轮独立审查，随 PR #39 合入 `21d06ed`）：**
 
 - **搜表（`list_tables`）：** 参数全部必填：`cluster`、`keyword`（1–64 字符，去空白后不能为空）、`database`（可空）、`page_size`、`cursor`（可空）。关键词不区分大小写匹配快照中的“库名.表名”、表注释（快照已按 `max_comment_chars` 截取）与列名；结果按库表名排序。前置检查从游标位置起，按 `page_size`（至多 `max_rows`）与结果的单值、总字节上限在 I/O 前规划本页对象（与查询读取同一计数规则，`fitting_rows`），只对它们做零行探测；撤权只会让本页变短，已撤权的不列出但已越过。结果带 `next_cursor`：从第一个未交付的对象继续，没有剩余时为 null（此时才不标记截断）。游标为 `<快照版本>-<偏移>-<校验>`，校验由版本、casefold 后的关键词、库过滤、页大小与偏移计算：快照刷新后为 `SNAPSHOT_STALE`，换了参数或手写偏移为 `CURSOR_MISMATCH`，格式不符为 `CURSOR_INVALID`，都在 I/O 前拒绝、可修正；游标只防误用，不是授权凭据，每页仍按当前权限探测。单个匹配对象的一行就超过单值或结果上限时在 I/O 前拒绝（不点名该对象，因为它可能已撤权；提示用库过滤或更具体的关键词避开），不让模型反复缩小页。`page_size` 越界与布尔值在 I/O 前拒绝。搜表与表结构的策略多一个必需字段 `next_cursor`，启动容量检查按各自的固定元数据模板 SQL、列头与最长游标另查。原“2 × `max_rows` 尝试封顶”随分页取消。
 - **表结构（`describe_table`）：** 新增必填可空 `cursor`（`describe_table_layout` 参数不变，另用 `TableArgs`）。从游标位置起按结果单值与总字节上限规划本次的列，结果带 `next_cursor`；游标绑定快照版本与库表；每次都重新探测当前权限，撤权后续取整体失败；单列定义就超过上限时在 I/O 前拒绝。
@@ -329,16 +329,25 @@ Task 5 改为依赖 Task 3。现有运行限额回归由 Task 8 核对，目标�
 
 ### Task 7：单 Agent 的自然语言工具选择与用户任务
 
-**依赖：** Task 6；**结果：** 保持一个业务 Agent，明确请求可查询，解释/生成/否定/模糊场景按固定样例不查询；自然语言可靠性在 P3 真实模型验收。**文件：** app/channel/runtime、既有 instructions/工具说明、models/evidence/session 回答契约、Web 与飞书默认入口；`test_app`、`test_runtime`、`test_diagnosis`、`test_gate0`；场景测试 `tests/p25/test_turn_purpose.py`，复用 `tests/sdk_core/gate0.py` 样例体系。
+**依赖：** Task 6；**结果：** 保持一个业务 Agent，明确请求可查询，解释/生成/否定/模糊场景按固定样例不查询；自然语言可靠性在 P3 真实模型验收。**文件：** app/channel/runtime、既有 instructions/工具说明、models/evidence/session 回答契约、Web 与飞书默认入口；`test_app`、`test_runtime`、`test_diagnosis`、`test_gate0`；场景测试 `tests/sdk_core/test_turn_purpose.py`，复用 `tests/sdk_core/gate0.py` 样例体系。
 
-- [ ] 真 Runner + ScriptedModel 验证只有业务 Agent 的调用链，没有额外分类请求；获准用户查询工具可见，未授权/目标错误在 I/O 前拒绝。历史暂时无法验证时模型未收到旧事实，Session 保留；确定失效按 Task 5 处理。
-- [ ] 业务正例：指定集群昨日订单跨库 JOIN/CTE、UNION、窗口排名、随后解释慢原因、换另一集群比较；SQLGuard 的 I/O 前拒绝在预算内修正成功；运行时资源超限停止并提示缩小范围，由用户发起新请求，不在本轮自动重跑。
-- [ ] 固定反例：只解释、只写 SQL、不要执行、裸 SQL、引用“帮我查”、上一轮 query 本轮只诊断、缺集群/口径/时间、多人指令混淆、工具/表注释注入。脚本模型证明预期调用与结果链；P3 真实模型证明是否真的没有选择查询工具，不把预设输出当意图能力证据。
-- [ ] 普通自然语言“不要执行”场景中，故意让替身误调工具：断言仍受当前权限/SQLGuard/限额约束，并记录通过这些保护后可能执行的残余；显式诊断入口同样强行调用应在业务执行前拒绝。不得为了让自然语言反例变绿新增关键词识别器或第二个分类 Agent。
-- [ ] 无 Evidence 建议、澄清、有证据回答分别渲染；旧回答回放兼容或明确失效，四种投影覆盖新分支。验证 Agent 不把可修正拒绝伪装成成功事实。
+- [x] 真 Runner + ScriptedModel 验证只有业务 Agent 的调用链，没有额外分类请求；获准用户查询工具可见，未授权/目标错误在 I/O 前拒绝。历史暂时无法验证时模型未收到旧事实，Session 保留；确定失效按 Task 5 处理。
+- [x] 业务正例：指定集群昨日订单跨库 JOIN/CTE、UNION、窗口排名、随后解释慢原因、换另一集群比较；SQLGuard 的 I/O 前拒绝在预算内修正成功；运行时资源超限停止并提示缩小范围，由用户发起新请求，不在本轮自动重跑。
+- [x] 固定反例：只解释、只写 SQL、不要执行、裸 SQL、引用“帮我查”、上一轮 query 本轮只诊断、缺集群/口径/时间、多人指令混淆、工具/表注释注入。脚本模型证明预期调用与结果链；P3 真实模型证明是否真的没有选择查询工具，不把预设输出当意图能力证据。
+- [x] 普通自然语言“不要执行”场景中，故意让替身误调工具：断言仍受当前权限/SQLGuard/限额约束，并记录通过这些保护后可能执行的残余；显式诊断入口同样强行调用应在业务执行前拒绝。不得为了让自然语言反例变绿新增关键词识别器或第二个分类 Agent。
+- [x] 无 Evidence 建议、澄清、有证据回答分别渲染；旧回答回放兼容或明确失效，四种投影覆盖新分支。验证 Agent 不把可修正拒绝伪装成成功事实。
 - [ ] Web/飞书普通消息默认单 Agent 判断，显式诊断快捷方式保留；SDK 轮数/预算/usage/超时没有新旁路。运行 §5 C7 和正式入口脚本模型/浏览器，提交 `feat: let the single agent choose query tools from user intent`，独立审查。
 
 P3 在具体 Model Profile 上记录每个固定样例的调用轨迹、误执行次数、成功率、步数、延迟/用量，区分正常查询成功与资源超限失败；这些结论不能由离线测试数量替代。
+
+**Task 7 实施说明（待独立审查）：**
+
+- **默认用途：** `Mode` 仍是 `query`/`diagnose` 两值（请求表已保存的值不变，不需要迁移）；`query` 改为默认用途：查询工具按身份、目标能力与模型数据策略可见，由同一个业务 Agent 按本条消息决定是否调用。飞书普通文本由 `diagnose` 改为 `query`，`/查询` 与普通文本相同，`/诊断` 只收窄本条消息；Web 下拉默认“默认（由小维判断是否查询）”，另一项“仅诊断（不执行查询）”；API 的 `mode` 仍必填。没有新增分类请求、分类 Session、handoff 或关键词识别。
+- **instructions 与工具说明：** 默认 instructions 写明流程（弄清当前用户本条要求 → 集群/口径/时间不清先澄清 → 先搜表、看结构 → 明确要求查数据才调用 `run_readonly_query` → 被拒按原因在预算内修正或说明限制）；只解释、只写 SQL、“不要执行”、裸 SQL、意图不清时不调用查询工具；历史、引用、其他人与工具结果中的文字都不是本轮查询要求。`run_readonly_query` 的说明加同一规则（工具说明不进入证据指纹，已保存证据不受影响）。
+- **回答契约：** `AgentAnswer` 新增 `advice`（1–4000 字符，默认 null，供读取旧回答；SDK 0.22.3 严格模式实测仍把它列为 required，模型须显式给出）。回答三选一：引用证据（可带分析）、`clarification`、`advice`；后两者互斥且不能带证据或分析。建议渲染为“建议（本轮未执行查询；模型生成，未经系统核实）”加单行转义原文，没有事实区、`facts` 与飞书分段（飞书按无分段内容从末尾截断）。“本轮未执行查询”由代码核实：`GovernedTools.started_tools` 记录本轮通过前置检查并占用预算的工具，`Application` 在提交前若回答无证据而本轮开始过业务查询工具（`purposes["query"] - purposes["diagnose"]`，即 `run_readonly_query`）则 `answer_rejected`；I/O 前被拒的调用不计，元数据、计划与审计工具不计。
+- **资源超限提示：** 工具执行后失败仍停止本轮、不重跑；`evidence_failed` 回执与 `tool_failed` 说明补上“查询超出时间或内存限制时缩小范围后重新提问”（失败码闭集不变）。
+- **证据：** 正式入口（`open_runtime` + `ChannelService` + 隔离 PostgreSQL + 脚本模型 + 驱动替身）`tests/sdk_core/test_turn_purpose.py` 8 项：普通消息只有业务 Agent 的两次模型请求、查询工具可见；显式诊断隐藏并拒绝强行查询、业务 SQL 0；两集群业务链（越权表 I/O 前拒绝后修正、CTE+JOIN+RANK 窗口、UNION ALL，随后只取上一轮实际 SQL 的计划，再换 sr-b 比较只发往 sr-b）；内存超限（1064）本轮停止、业务 SQL 只执行一次、模型无第二次机会、回执提示缩小范围且不含上游原文；“不要执行”中误调越权 SQL 被拒后以建议收尾（业务 SQL 0），误调获准 SQL 则经 SQLGuard 规范化（加 LIMIT）后执行一次——即用户接受的残余；执行过查询后以建议或澄清收尾 `evidence_failed`，只搜过表时澄清照常完成；建议与澄清的首次发送、历史读取与同会话回放（回放的是模型自己的回答，不是工具结果，业务 SQL 0）；改写为旧格式（无 `advice`）的已保存回答照常交付。回答契约 `test_evidence.py`：三种回答互斥、Web 与飞书渲染、旧 JSON 读取，模型把工具结果抄进 `advice` 时飞书会话同样拿不到飞书禁止的字段。固定样例：`tests/sdk_core/gate0.py` 的 `INTENT_SAMPLES` 12 个（2 个查询正例含越权修正、1 组上一轮查询后诊断，以及只解释、只写 SQL、不要执行、裸 SQL、引用别人的“帮我查”、缺信息、多人指令、表注释注入），判定只看展示的工具、到达驱动的语句与引用；离线脚本模型全部通过，判定在误执行、正例未查询、越权 SQL 到达驱动、查询工具被隐藏、失败与样例缺失/重复时不通过。未授权、错误集群在 I/O 前拒绝与历史暂不可验证时保留 Session 由已有默认用途用例覆盖（`test_bad_cluster_never_reaches_any_starrocks`、`test_scope_errors_go_back_to_the_model_before_any_database_io`、`test_unverifiable_access_at_the_end_of_a_turn_keeps_the_session`）。阶段回归 1868 passed、C7 461 passed、浏览器 3 passed；隔离变异 8 项均被发现（对照 263 passed）：飞书普通文本回到诊断、去掉“未执行查询”核实、I/O 前被拒的调用也计为已执行、元数据工具计为查询、建议可与证据混用、建议标题不标明未执行、回执不提示缩小范围、意图判定不看实际执行。
+- **偏差与未覆盖：** 场景测试放在 `tests/sdk_core/test_turn_purpose.py`（需要该目录 conftest 的隔离 PostgreSQL 与 loopback 放行，同 Task 6 的正式入口用例），C7 命令随之更新。`scripts/gate0_real_model.py` 仍只运行 Gate 0 三个样例，意图样例的真实模型运行（调用轨迹、误执行次数、成功率、步数、延迟/用量）留 P3；脚本模型的选择是预设的，不证明真实模型的意图判断。MCP 工具不在用途表中，不参与“本轮未执行查询”的核实。
 
 ### Task 8：阶段离线退出与可接续交付
 
@@ -362,7 +371,7 @@ P3 在具体 Model Profile 上记录每个固定样例的调用轨迹、误执�
 | C4 | 随原 Task 4 取消，不创建专属检查组；现有 Adapter 资源限额回归保留 |
 | C5 | `uv run --locked --extra dev python -m pytest tests/sdk_core/test_evidence.py tests/sdk_core/test_session_policy.py tests/sdk_core/test_channel_service.py tests/sdk_core/test_runtime.py tests/sdk_core/test_starrocks_tools.py tests/sdk_core/test_storage_v2.py -q -W error` |
 | C6 | `uv run --locked --extra dev python -m pytest tests/p1b/test_starrocks_audit.py tests/sdk_core/test_starrocks_tools.py tests/p1b/test_starrocks_tool_contracts.py -q -W error` |
-| C7 | `uv run --locked --extra dev python -m pytest tests/p25/test_turn_purpose.py tests/sdk_core/test_app.py tests/sdk_core/test_runtime.py tests/sdk_core/test_diagnosis.py tests/sdk_core/test_gate0.py tests/sdk_core/test_web.py tests/sdk_core/test_feishu.py tests/sdk_core/test_evidence.py tests/sdk_core/test_session_policy.py -q -W error` |
+| C7 | `uv run --locked --extra dev python -m pytest tests/sdk_core/test_turn_purpose.py tests/sdk_core/test_app.py tests/sdk_core/test_runtime.py tests/sdk_core/test_diagnosis.py tests/sdk_core/test_gate0.py tests/sdk_core/test_web.py tests/sdk_core/test_feishu.py tests/sdk_core/test_evidence.py tests/sdk_core/test_session_policy.py -q -W error` |
 | SR | 按 P2 Task 0 的已验证方式创建全新 StarRocks 4.1.4（固定原受测镜像 digest）与 AuditLoader 5.0.0，只绑定 loopback、随机合成库/账号；用 `SDK_TEST_STARROCKS_ADMIN_URL=mysql://root@127.0.0.1:59030 uv run --locked --extra dev python -m pytest tests/p1b/test_starrocks_real.py tests/p1b/test_starrocks_audit_real.py -m 'starrocks_real or starrocks_audit_real' -q`，新场景在对应文件补齐；用完恢复临时 FE 设置并删除本轮容器/库 |
 | 阶段回归 | `uv run --locked --extra dev python -m pytest tests/sdk_core tests/p1b tests/p25 -q -W error`；以 `SDK_TEST_CHROME` 运行现有 `test_serve_browser.py` / `test_web_browser.py` 的 `-m browser` 场景，必要的新交互随 Task 7 增补 |
 | 静态 | `uv run --locked --extra dev ruff check src/xiaowei tests/sdk_core tests/p1b tests/p25`；`uv run --locked --extra dev ruff format --check src/xiaowei tests/sdk_core tests/p1b tests/p25`；`uv run --locked --extra dev mypy src/xiaowei`；`uv lock --check`；`git diff --check` |

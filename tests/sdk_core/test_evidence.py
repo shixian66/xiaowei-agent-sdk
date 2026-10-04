@@ -63,6 +63,7 @@ pytestmark = pytest.mark.loopback
 
 _FACTS_HEADER = "工具结果"
 _ANALYSIS_HEADER = "分析建议"
+_ADVICE_HEADER = "建议（本轮未执行查询；模型生成，未经系统核实）"
 
 
 async def _record(
@@ -242,11 +243,13 @@ def _answer(
     inferences: tuple[tuple[str, tuple[str, ...]], ...] = (),
     *,
     clarification: str | None = None,
+    advice: str | None = None,
 ) -> AgentAnswer:
     return AgentAnswer(
         evidence_ids=ids,
         inferences=[AnswerInference(text=t, evidence_ids=refs) for t, refs in inferences],
         clarification=clarification,
+        advice=advice,
     )
 
 
@@ -276,6 +279,38 @@ async def test_query_claim_without_evidence_is_denied(postgres_url: URL) -> None
         assert delivery.evidence_ids == ()
         assert "请说明地区" in delivery.content
         assert _FACTS_HEADER not in delivery.content
+
+
+async def test_advice_is_a_separate_answer_without_facts(postgres_url: URL) -> None:
+    """未执行建议（P2.5 Task 7）：与澄清、证据回答互斥，单独标明未执行查询、未经核实。"""
+    grants, clock = Grants(), Clock()
+    grants.grant("alice", TOTAL_TOOL)
+    async with ready_engine(postgres_url) as engine:
+        evidence = store(engine, grants, clock)
+        real = await _record(evidence)
+        sql = "SELECT region, SUM(total) AS total\nFROM sales GROUP BY region"
+        for mixed in (
+            _answer((real,), advice=sql),
+            _answer(inferences=(("按地区汇总", ()),), advice=sql),
+            _answer(clarification="请说明地区", advice=sql),
+        ):
+            with pytest.raises(AnswerRejectedError):
+                await evidence.validate_answer(mixed, context())
+
+        for channel in ("web", "feishu"):
+            ctx = context(channel=channel, session=f"{channel}-advice")
+            delivery = await evidence.validate_answer(_answer(advice=sql), ctx)
+            first, *rest = delivery.content.split("\n")
+            assert first == _ADVICE_HEADER and "未执行查询" in first and "未经系统核实" in first
+            # 建议原文保持在一行内（换行写成转义），不能伪造标题或事实区。
+            assert rest == ["SELECT region, SUM(total) AS total\\nFROM sales GROUP BY region"]
+            assert (delivery.evidence_ids, delivery.facts, delivery.layout) == ((), (), None)
+            assert _FACTS_HEADER not in delivery.content
+
+
+def test_answers_saved_before_advice_existed_still_load() -> None:
+    old = '{"evidence_ids": [], "inferences": [], "clarification": "请说明地区"}'
+    assert AgentAnswer.model_validate_json(old).advice is None
 
 
 def _cite_evidence(inference: str, **extra: object) -> ModelStep:
@@ -357,13 +392,13 @@ def _copy_tool_output(into: str) -> ModelStep:
                 "clarification": None,
             }
         else:
-            answer = {"evidence_ids": [], "inferences": [], "clarification": raw}
+            answer = {"evidence_ids": [], "inferences": [], "clarification": None, into: raw}
         return [assistant_message(json.dumps(answer, ensure_ascii=False))]
 
     return ModelStep.respond(respond)
 
 
-@pytest.mark.parametrize("into", ["inference", "clarification"])
+@pytest.mark.parametrize("into", ["inference", "clarification", "advice"])
 async def test_model_text_cannot_carry_fields_the_channel_forbids(
     postgres_url: URL, into: str
 ) -> None:

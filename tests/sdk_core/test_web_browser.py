@@ -126,13 +126,13 @@ async def test_web_component_in_real_uvicorn_and_chrome(env: Env, chrome_binary:
 
 
 async def check_turns(env: Env, page: Page, log: list[str]) -> None:
-    # cookie 只经 HttpOnly 保存：脚本读不到；默认用途是诊断。
+    # cookie 只经 HttpOnly 保存：脚本读不到；默认用途由单 Agent 判断（P2.5 Task 7）。
     assert await page.evaluate("document.cookie") == ""
-    assert await page.evaluate("document.getElementById('mode').value") == "diagnose"
+    assert await page.evaluate("document.getElementById('mode').value") == "query"
 
-    # 1. 默认诊断：查询工具不展示。
+    # 1. 显式诊断：查询工具不展示。
     diagnose = env.scripts.add("浏览器诊断", tool_call("order_total", region="east"), cite())
-    await send(page, diagnose)
+    await send(page, diagnose, "diagnose")
     await settled(page, 0, "completed")
     assert all(QUERY_NAME not in seen for seen in env.scripts.tools_seen(diagnose))
 
@@ -144,7 +144,7 @@ async def check_turns(env: Env, page: Page, log: list[str]) -> None:
     await send(page, query, "query")
     text = await settled(page, 1, "completed")
     assert all(QUERY_NAME in seen for seen in env.scripts.tools_seen(query))
-    assert await page.evaluate("document.getElementById('mode').value") == "diagnose"  # 发送后重置
+    assert await page.evaluate("document.getElementById('mode').value") == "query"  # 发送后重置
     assert await table_rows(page, 1) == [2, 2]  # 本轮与回放的上一轮证据各一张有限表格
     assert "结果已截断" in text and "<script>alert(1)</script>" in text and "<b onmouseover" in text
     assert "\\u202e" in text and "‮" not in text

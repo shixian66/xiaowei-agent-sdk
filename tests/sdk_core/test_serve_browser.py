@@ -66,7 +66,7 @@ async def test_formal_command_in_chrome(
             page = await chrome.page()
             await page.navigate(f"{ORIGIN}/")
             await check_cookie(page)
-            assert await page.evaluate("document.getElementById('mode').value") == "diagnose"
+            assert await page.evaluate("document.getElementById('mode').value") == "query"
 
             # 正式装配的失败路径：固定回执与请求编号，刷新后经 GET 恢复。
             await send(page, f"正式入口 {CANARY}")
@@ -123,7 +123,7 @@ async def test_formal_assembly_turns_in_chrome(env: Env, chrome_binary: str) -> 
         diagnose = env.scripts.add(
             "浏览器诊断表结构", tool_call("list_tables", cluster=SR.target_id, **SEARCH_ALL), cite()
         )
-        await send(page, diagnose)
+        await send(page, diagnose, "diagnose")  # 显式诊断；默认用途由单 Agent 判断
         await settled(page, 0, "completed")
         assert all("run_readonly_query" not in seen for seen in env.scripts.tools_seen(diagnose))
 

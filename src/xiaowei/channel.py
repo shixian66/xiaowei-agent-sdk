@@ -62,7 +62,10 @@ _FAILURE_CODES: Mapping[TurnReason, CallerFailureCode] = {
 _RECEIPTS: Mapping[FailureCode, str] = {
     "busy": "系统繁忙，本轮未执行，请稍后用新消息重试",
     "model_failed": "模型未能完成本轮（调用失败、超时或次数达到上限）；已执行的工具不会自动重试",
-    "evidence_failed": "工具结果或回答未通过证据校验，本轮未交付；不会自动重试",
+    "evidence_failed": (
+        "工具执行失败，或工具结果、回答未通过证据校验，本轮未交付；不会自动重试。"
+        "若查询超出时间或内存限制，请缩小时间范围或数据量后重新提问"
+    ),
     "session_failed": "本轮内容未被接受或会话不可继续，请调整后重试或新建会话",
     "scope_unverifiable": (
         "暂时无法确认数据当前权限（集群不可达或超时），本轮未交付；会话保留，请稍后重新发送"

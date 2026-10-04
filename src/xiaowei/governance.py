@@ -225,6 +225,7 @@ class GovernedTools:
         self._catalog = evidence.catalog
         self._authorize = evidence.authorize
         self._used: dict[tuple[str, str, str], int] = {}
+        self._started: dict[tuple[str, str, str], set[str]] = {}
 
     @property
     def catalog(self) -> ToolCatalog:
@@ -267,6 +268,7 @@ class GovernedTools:
         # 上限；前置检查拒绝时尚未占用预算。
         run = _bind(execute, effective)
         self._reserve(ctx)
+        self._started.setdefault(_turn_key(ctx.identity), set()).add(contract.tool_id)
 
         try:
             observation = await run()
@@ -276,9 +278,14 @@ class GovernedTools:
             raise ToolExecutionError("工具执行失败")
         return await self._evidence.record(ctx, effective, observation)
 
+    def started_tools(self, identity: Identity) -> frozenset[str]:
+        """本轮已开始执行（通过前置检查、占用预算）的工具；I/O 前被拒绝的调用不在其中。"""
+        return frozenset(self._started.get(_turn_key(identity), ()))
+
     def end_turn(self, identity: Identity) -> None:
         """轮次结束时由应用调用，清理该轮计数。"""
         self._used.pop(_turn_key(identity), None)
+        self._started.pop(_turn_key(identity), None)
 
     async def _currently_authorized(self, identity: Identity, contract: ToolContract) -> bool:
         try:

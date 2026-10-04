@@ -121,6 +121,7 @@ _DEPENDENCY_FORMAT = 1
 _FACTS_HEADER = "工具结果（系统根据证据生成）"
 _ANALYSIS_HEADER = "分析建议（模型推断，未经系统核实）"
 _CLARIFICATION_HEADER = "需要澄清（本轮未执行查询）"
+_ADVICE_HEADER = "建议（本轮未执行查询；模型生成，未经系统核实）"
 
 _INSERT = text(
     """
@@ -314,10 +315,21 @@ class EvidenceStore:
         传播。
         """
         channel = ctx.identity.channel
-        if answer.clarification is not None:
-            if answer.evidence_ids or answer.inferences:
-                raise AnswerRejectedError("澄清不能与查询结果或分析混用")
-            content = f"{_CLARIFICATION_HEADER}\n{_one_line(answer.clarification)}"
+        unverified = [
+            (header, text)
+            for header, text in (
+                (_CLARIFICATION_HEADER, answer.clarification),
+                (_ADVICE_HEADER, answer.advice),
+            )
+            if text is not None
+        ]
+        if unverified:
+            # 澄清与未执行建议都没有证据：不能与证据、分析或彼此混用。“本轮未执行查询”由
+            # ``Application`` 在提交前核实（本轮开始过业务查询时拒绝这两种回答）。
+            if answer.evidence_ids or answer.inferences or len(unverified) > 1:
+                raise AnswerRejectedError("澄清或建议不能与查询结果、分析或彼此混用")
+            ((header, text),) = unverified
+            content = f"{header}\n{_one_line(text)}"
             return Delivery(content=content, evidence_ids=(), channel=channel)
 
         cited = answer.evidence_ids

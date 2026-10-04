@@ -174,11 +174,18 @@ class AnswerInference(_Answer):
 
 
 class AgentAnswer(_Answer):
-    """SDK ``output_type``：模型只选择引用并给出分析；事实区域由代码从 Evidence 生成。"""
+    """SDK ``output_type``：模型只选择引用并给出分析；事实区域由代码从 Evidence 生成。
+
+    三种回答互斥（见 ``EvidenceStore.validate_answer``）：引用证据的回答（可带分析）、澄清、
+    未执行建议（``advice``：只解释、只写 SQL、不要执行等场景的说明或 SQL 草稿，不含查询事实）。
+    ``advice`` 有默认值，只为读取此前保存、没有该字段的回答；SDK 严格模式下模型仍须显式给出
+    它（可为 null）。
+    """
 
     evidence_ids: tuple[str, ...]
     inferences: list[AnswerInference]
     clarification: Annotated[str, Field(min_length=1, max_length=2000)] | None
+    advice: Annotated[str, Field(min_length=1, max_length=4000)] | None = None
 
 
 class DeliveryFact(_Trusted):
