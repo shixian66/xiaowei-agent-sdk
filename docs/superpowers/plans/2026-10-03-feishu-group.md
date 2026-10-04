@@ -8,7 +8,7 @@
 
 **Tech Stack:** 沿用 P2.5 交付锁文件；本次规划核对的版本为 Python 3.11.16、openai-agents 0.22.3、lark-channel-sdk 1.4.0、SQLAlchemy 2.0.52、PostgreSQL 16。
 
-**Spec:** 产品唯一权威为 [ARCHITECTURE §7 G1–G4](../../../ARCHITECTURE.md#group-scope)，自然语言用途引用 [§5](../../../ARCHITECTURE.md#turn-purpose)，当前数据权限引用 §9。数据库能力、执行前评估、单 Agent 自然语言工具选择和数据权限验证由 [P2.5 计划](2026-10-03-p25-open-read-multi-cluster.md) 交付，此处只定义群边界。
+**Spec:** 产品唯一权威为 [ARCHITECTURE §7 G1–G4](../../../ARCHITECTURE.md#group-scope)，自然语言用途引用 [§5](../../../ARCHITECTURE.md#turn-purpose)，当前数据权限引用 §9。数据库能力、受限只读执行、单 Agent 自然语言工具选择和数据权限验证由 [P2.5 计划](2026-10-03-p25-open-read-multi-cluster.md) 交付，此处只定义群边界。
 
 **Baseline / 状态：** 文档候选 v2（2026-10-03，按用户对 aed344b 的决定修订）；规划时源码为 `7a715ff61d7a97457b03bb8b596ef4238c1049f2`（与本地 origin/main `0f831ebe070e7b11b1597fbdf59921b19981b129` 树相同）。实施起点必须换成 P2.5 Task 8 经审查的精确 SHA，复核其真实接口后再执行 F0。F0–F4 均未实施，当前无真实群验证证据。
 

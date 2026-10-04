@@ -2,15 +2,15 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use `superpowers:executing-plans` to implement this plan task-by-task. 按依赖串行交付；每片有独立提交与精确 SHA 审查，不凭计划批准自行合并或部署。
 
-**Goal:** Agent 能澄清集群和业务口径，搜索自动发现的表，完成复杂只读查询与诊断、跨集群追问；所有业务查询在执行前强制评估，事实始终受当前权限和容量约束。
+**Goal:** Agent 能澄清集群和业务口径，搜索自动发现的表，完成复杂只读查询与诊断、跨集群追问；查询与事实始终受当前权限、资源和容量约束。
 
-**Architecture:** 保留一个具备业务工具和 Session 的 Agent，由 SDK Runner 驱动；本地工具复用 GovernedTools、SQLGuard、StarRocksAdapter、EvidenceStore、PolicySession 与 ChannelService。新增工作限于多目标路由、自动 schema/权限复核、StarRocks 风险判断和单 Agent 的自然语言工具选择；不建设数据库 MCP、权限平台、CBO、调度平台或第二套 Agent Loop。
+**Architecture:** 保留一个具备业务工具和 Session 的 Agent，由 SDK Runner 驱动；本地工具复用 GovernedTools、SQLGuard、StarRocksAdapter、EvidenceStore、PolicySession 与 ChannelService。新增工作限于多目标路由、自动 schema/权限复核和单 Agent 的自然语言工具选择；不建设数据库 MCP、权限平台、CBO、调度平台或第二套 Agent Loop。
 
 **Tech Stack:** Python 3.11.16；openai-agents 0.22.3、sqlglot 30.17.0、asyncmy 0.2.15、SQLAlchemy 2.0.52、asyncpg 0.30.0、PostgreSQL 16；沿用 uv.lock，不先加依赖。
 
 **Spec:** [ARCHITECTURE §5 本轮意图](../../../ARCHITECTURE.md#turn-purpose)、[§6 R1–R6](../../../ARCHITECTURE.md#p25-scope)、§9 是产品/权限边界唯一来源；[DEVELOPMENT_PLAN §6](../../../DEVELOPMENT_PLAN.md) 只维护顺序和退出条件。本文维护本阶段的技术契约、依赖与验收。群聊单独见 [单群计划](2026-10-03-feishu-group.md)，不在这里复制其任务。
 
-**Baseline / 状态：** 规划源代码为 `7a715ff61d7a97457b03bb8b596ef4238c1049f2`，与本地 `origin/main` `0f831ebe070e7b11b1597fbdf59921b19981b129` 内容相同；P2 离线完成，P1/P2 实战缺口继承到 P3。文档候选 v2（2026-10-03，按用户对 aed344b 的六项决定修订）已在 `719c1c7` 通过复审；Task 0 实测证据、对计划的影响与暂停范围见 §9，经复审随 PR #32 合入（`29678006f380621dda5ddb772b7affa072a59776`）。Task 1 多目标路由经独立审查随 PR #33 合入（`6ccc7a4e6e5c8ec4bac5093d4300bda63ae88605`）；Task 2 自动结构快照及审查修订（前移 Evidence 当前权限闭环、摘要 v2、列表探测硬上限）经复审随 PR #34 合入（`d497a34e468eb0b9987a5e0eac1dea7a9fbf8a08`，实施说明见 Task 2 节末）；§9.8 的 D1/D2 经独立审查随 PR #35 合入（`7523c74fcebc91718f0a7de4d10782c2a7214260`）。Task 3 复杂 SQL 与跨库已实现，首轮独立审查的 B1–B4 已修复、待复审（实施说明见 Task 3 节末）；Task 4–8 未实施。
+**Baseline / 状态：** 规划源代码为 `7a715ff61d7a97457b03bb8b596ef4238c1049f2`，与本地 `origin/main` `0f831ebe070e7b11b1597fbdf59921b19981b129` 内容相同；P2 离线完成，P1/P2 实战缺口继承到 P3。文档候选 v2（2026-10-03，按用户对 aed344b 的六项决定修订）已在 `719c1c7` 通过复审；Task 0 实测证据、对计划的影响与当前范围见 §9，经复审随 PR #32 合入（`29678006f380621dda5ddb772b7affa072a59776`）。Task 1 多目标路由经独立审查随 PR #33 合入（`6ccc7a4e6e5c8ec4bac5093d4300bda63ae88605`）；Task 2 自动结构快照及审查修订（前移 Evidence 当前权限闭环、摘要 v2、列表探测硬上限）经复审随 PR #34 合入（`d497a34e468eb0b9987a5e0eac1dea7a9fbf8a08`，实施说明见 Task 2 节末）；§9.8 的 D1/D2 经独立审查随 PR #35 合入（`7523c74fcebc91718f0a7de4d10782c2a7214260`）。Task 3 复杂 SQL 与跨库经四轮独立审查随 PR #36 合入（`9ef4f3eaa9cb29d218313a3d010d84d1e937e4ca`，实施说明见 Task 3 节末）。原 Task 4 已按用户决定取消，决定见 ARCHITECTURE §6 R4–R5；Task 5–8 未实施。
 
 ## Global Constraints
 
@@ -22,7 +22,7 @@
 
 ## Review Focus
 
-1. 有 LIMIT、WHERE 或低估计行数但真实扫描仍很大的查询：成本判断不是实际扫描保证，数据库硬限额必须兜底（Task 0、4、8）。
+1. 有 LIMIT、WHERE 或低估计行数但真实扫描仍很大的查询：LIMIT 和计划估算不保证实际扫描量受控，沿用执行限额，目标资源组与大查询保护在 P3 验收（Task 0 历史证据、Task 8 回归）。
 2. 账号撤权但旧 schema、旧证据和自由文字仍在 Session：所有再次交付路径均拒绝，无删除引用后保留事实的旁路（Task 2、5）。
 3. 多目标同名库表、同一工具的目标切换：路由、指纹、历史、重发与原采集目标一致（Task 1、5）。
 4. 用户只要求写/解释 SQL，或其他用户/工具内容诱导执行：自然语言误判用真实模型评估；显式诊断入口和诊断工具的零执行业务 SQL 由代码验证，两者不混为一谈（Task 7）。
@@ -37,11 +37,11 @@
 | `runtime.py`、`config.py`、`app.py` | 配置装配、期限、模型绑定、每轮独立 Agent | 多目标配置/能力摘要；按可信授权和显式入口形成不可变范围 |
 | `models.py`、`tools.py`、`governance.py` | 可信身份、工具参数、调用前权限/预算 | 同一工具选择目标；契约按 `(tool_id, target_id)` 查找；保留单目标 MCP 兼容路径 |
 | `sqlguard.py` | StarRocks AST、规范化、封存产物与输入大小检查 | 自动 schema、多库、语法扩展、星号展开及依赖提取 |
-| `starrocks.py`、`starrocks_tools.py` | 连接变量设置/回读、有界读取、值转换、固定错误、工具投影 | 每目标独立 Adapter；schema/权限读取；查询内部的强制评估；多库审计 |
+| `starrocks.py`、`starrocks_tools.py` | 连接变量设置/回读、有界读取、值转换、固定错误、工具投影 | 每目标独立 Adapter；schema/权限读取；沿用查询运行限额；多库审计 |
 | `evidence.py`、`session.py`、`storage.py` | 最终验证、会话暂存/提交、失败封闭、迁移 | Evidence 依赖/当前权限复核；多目标回放；指纹升级 |
 | `channel.py`、`channel_store.py`、`web.py`、`feishu.py` | 可信入站、去重、结果状态、发送/重发 | 普通消息交由单 Agent 判断，支持多目标范围，保留显式诊断入口 |
 
-自动 schema 和计划文本解析可分别落在 `starrocks_schema.py`、`starrocks_risk.py`，前提是直接被上述调用链使用；它们是 StarRocks 业务模块，不设抽象数据库基类、驱动注册中心或未来 TiDB 文件。函数集合仍由 StarRocks 代码维护。自然语言工具选择写入既有 instructions 与工具说明，不增加用途识别模块。
+自动 schema 使用 `starrocks_schema.py`，数据库规则集中在被调用链实际使用的 StarRocks 业务模块，不设抽象数据库基类、驱动注册中心或未来 TiDB 文件。函数集合仍由 StarRocks 代码维护。自然语言工具选择写入既有 instructions 与工具说明，不增加用途识别模块。
 
 ### 1.2 真实请求链
 
@@ -54,13 +54,12 @@ Web / 飞书单聊（群入口在后续独立计划）
   → 统一 FunctionTool（cluster 必填）→ 校验目标 → GovernedTools
   → 有效 schema / 当前 SELECT 权限 → SQLGuard 封存最终 SQL 与依赖
   → 预留预算/连接槽 → Adapter 设置并回读会话限额
-  → 对最终 SQL 取 EXPLAIN LOGICAL → 代码判断风险
-  → 通过才执行同一 SQL 一次 → 限量读取 → 权限/版本复核
+  → 执行 SQLGuard 封存的最终 SQL 一次 → 限量读取 → 权限/版本复核
   → Evidence 四种投影 → validate_answer → Session 提交
   → ChannelService 再验证 → 首次发送 / 历史读取 / runtime.resend
 ```
 
-搜表、表结构、布局、权限探测与固定审计模板走各自受控分支，不接受任意内部 SQL；它们不递归做业务查询评估。诊断 `explain_query` 只取计划，不接上“通过即执行”的分支。
+搜表、表结构、布局、权限探测与固定审计模板走各自受控分支，不接受任意内部 SQL；诊断 `explain_query` 按需只取明确的 EXPLAIN LOGICAL 计划，不接上“通过即执行”的分支。
 
 ### 1.3 已做的有限规划验证与 SDK 取舍
 
@@ -69,7 +68,7 @@ Web / 飞书单聊（群入口在后续独立计划）
 - sqlglot 30.17.0 的公开 parse/qualify 对 UNION、UNION ALL、窗口+聚合 OVER、两层普通 CTE、跨库 JOIN、表别名星号六类合成样本可规范化并展开星号。它不是 StarRocks 语义检查器；用户复审指出 GROUP BY 漏列、SUM(文本列) 等可能通过，Task 0 复现并对照 4.1.4 的真实 EXPLAIN 结果，不预设服务器必拒绝或必隐式转换。
 - 原 SDK 0.22.3 探针观察到：阻塞式 input_guardrail 改变 is_enabled 状态，不能保证首请求工具列表同步改变。此历史事实保留，但**用户已取消前置用途识别**，不再据此设计两次 Runner 调用或分类模块。
 - 保留当前一个业务 Agent、一条 SDK Runner/PolicySession 路径。原生 FunctionTool、严格 output_type、工具错误回传、Session 和 usage 直接复用；工具按可信授权开放，模型在本轮决定是否调用，不加自定义识别循环。显式诊断入口可继续在装配前收窄工具。
-- 当前 PolicySession 不支持 RunState 恢复；澄清正常结束一轮等待新消息，本阶段不引入 interruptions/审批。未知或高风险查询按用户决定拒绝，P3 再根据无法评估比例决定是否需要确认。
+- 当前 PolicySession 不支持 RunState 恢复；澄清正常结束一轮等待新消息，本阶段不引入 interruptions/审批。查询执行与按需诊断按 ARCHITECTURE §6 R4–R5，不引入执行前人工确认。
 - lark-channel-sdk 1.4.0 的公开成员/回复能力已读源码；群协议继续由 F0 验证，无真实平台成功证据。Task 0 的新增实测单列 §9。
 
 ## 2. 跨边界契约
@@ -81,7 +80,7 @@ Web / 飞书单聊（群入口在后续独立计划）
 - Session 的 ModelBinding/数据策略绑定继续保留；原单份 BusinessContext 改为按目标 ID 排序的口径映射，任一已装配口径或目标集合变更后要求新建会话，首版接受这个保守粒度。不为每个集群另建 SDK Session，不因支持多目标丢掉现有口径变更检查。
 - 对模型保持一套 `list_tables`、`describe_table`、`describe_table_layout`、`run_readonly_query`、`explain_query`、`list_slow_queries`，每个工具 `cluster` 必填。描述/布局额外明确 database、table；查询/计划含 sql；搜表含非空 keyword、可空 database 过滤、page/page_size；审计含受限时间窗/排序与可空 database 过滤。参数无隐式默认，边界及空值由严格 schema 明确。
 - `cluster` 解析后才查对应契约与 Adapter；未知值、未授权目标或能力未配置，在该调用任何 DB I/O 前拒绝，不回退到别的集群。不为每个集群复制一套模型工具名。catalog 的查找、policy fingerprint、允许工具、回放核验、重发全部改用实际目标，不能只改入口路由。
-- 某目标无审计源/无新鲜 schema/风险策略不合格，只让该目标相应能力不可用；共享工具可见时，其说明列出目标能力差异，调用时仍复核。配置结构/凭据引用/重复 ID 错误拒绝整个装配。
+- 某目标无审计源/无新鲜 schema，只让该目标相应能力不可用；共享工具可见时，其说明列出目标能力差异，调用时仍复核。配置结构/凭据引用/重复 ID 错误拒绝整个装配。
 
 ### 2.2 自动 schema 与当前权限
 
@@ -105,34 +104,31 @@ Web / 飞书单聊（群入口在后续独立计划）
 
 - 用 sqlglot 公开 AST/作用域与 qualify 能力；结构节点仍闭集，按 R3 增补。区分物理对象、CTE、输出别名、窗口表达式及函数；依赖覆盖 SELECT、WHERE、JOIN、GROUP/HAVING、ORDER、窗口 PARTITION/ORDER、嵌套 CTE/子查询与 UNION 每个分支。
 - 业务 SQL 的物理表必须规范化为 database.table；未限定且只能唯一匹配快照可补全，多个匹配则返回歧义让 Agent 澄清，不能随便选库。审计原文的未限定对象使用审计记录自身的原始 Db 解析（§2.7）。不继承连接默认库，不猜大小写或跨 catalog 语义；Task 0 固定 StarRocks 标识符规则。
-- 星号必须完全展开；COUNT(*) 是聚合语义，保留但仍记录表依赖。重复输出列名要求显式别名，不悄悄改列名。输入与展开/规范化后的 SQL 都检查 UTF-8 字节上限；不截断 SQL、列集合、权限依赖或待评估的计划。
+- 星号必须完全展开；COUNT(*) 是聚合语义，保留但仍记录表依赖。重复输出列名要求显式别名，不悄悄改列名。输入与展开/规范化后的 SQL 都检查 UTF-8 字节上限；不截断 SQL、列集合或权限依赖。诊断计划继续按 P2 的有界读取与截断标记交付，不作为执行许可。
 - 保留顶层有限返回及 `max_rows+1` 截断判断；UNION 的 LIMIT 是整个集合的上限，不逐分支改写语义。固定样本比较结果与排序语义，不能只断言 parse 成功。
 - 增加显式 `max_result_columns`、列名总字节、schema 对象/列/字节、schema 工具每页行数/字节与注释单值上限。初始测试值刻意小；生产值在样本与容量核对后配置，不从“整个 schema 有多少列”推导无界最坏结果。
-- `worst_case_observation` 改用这些独立硬上限与 JSON 最坏转义膨胀，覆盖实际 SQL、cluster、列头、行、分页/截断/说明和 Evidence 包装；启动通过真实四种投影器校验可容纳必要字段，运行时同一计数规则复核。业务结果超限有截断标志；计划/权限依赖超限为拒绝，不能拿半份输入做放行判断。
+- `worst_case_observation` 改用这些独立硬上限与 JSON 最坏转义膨胀，覆盖实际 SQL、cluster、列头、行、分页/截断/说明和 Evidence 包装；启动通过真实四种投影器校验可容纳必要字段，运行时同一计数规则复核。业务结果超限有截断标志；权限依赖超限为拒绝，不能拿半份依赖做权限判断；诊断计划的截断须保留标志及未执行说明。
 
-### 2.4 强制业务查询评估
+### 2.4 业务查询执行与资源限额
 
-- 强制入口在 Adapter 的业务 `run_query` 路径内，所有调用者只能走它；封存的 SQLGuard 产物也不能绕过成本评估。`explain_query` 保持单独的诊断路径。用户/模型都不能传 `approved`、计划文本或跳过检查开关。
-- 获取同一目标的连接槽，设置并回读 query_timeout/query_mem_limit/time_zone；在同一连接和一份不可变上下文中，对**最终带限额、已展开的规范化 SQL**取 `EXPLAIN LOGICAL`，解析后通过才执行该 SQL 一次。诊断原 SQL 的计划与这里的限额后计划用途不同，不能拿旧 Evidence 的计划替代本次预评估。
-- 评估输入至少绑定集群、连接身份摘要、SQL 摘要、schema/依赖版本、风险策略版本、采集时间；结论只有 allow / reject / unknown 和有限原因。只在本次连接操作中有效，不持久保存可重用的执行许可。评估到执行之间再次核对当前授权、期限和引用对象版本；发生变化则拒绝，不自动重放。
-- 最小风险策略使用受测计划里的扫描/分区范围、估算规模、JOIN/排序/聚合风险信号。Task 0 固定支持的节点/字段及未知值规则，配置明确估算规模/分区等阈值，记录单位；不把 optimizer cost 当毫秒、把 Estimates.row 当真实扫描量，或因有 WHERE/LIMIT 就放行。统计缺失/不可解释、计划未知格式/算子、截断或超时一律 unknown。小表全扫可通过，大范围扫描可能拒绝，禁止按 SQL 复杂程度一刀切。
-- RiskPolicy 及目标版本验收信息是必填启动配置，缺失不开放该目标业务查询；生产阈值由 Task 0 合成边界与 P3 实际集群验证确定，不为未知容量提供“安全通用默认值”。DBA 资源组/扫描行数/CPU/内存限制及账号实际命中规则在目标上验收；若只能人工证明，明确记录证据与变更后的复验要求，不能把配置声明说成运行时证明。
-- 预评估也使用工具预算、连接/客户端/整轮期限；EXPLAIN 和真正执行共用整次操作的客户端截止时间，每条数据库语句另有服务端限额。没有 `EXPLAIN ANALYZE`、试跑原 SQL 或自动放宽限额的路径。
+产品决定以 [ARCHITECTURE §6 R4–R5](../../../ARCHITECTURE.md#p25-scope) 为准，原 Task 4 取消后复用现有执行路径：
+
+- GovernedTools 复核目标、权限与预算，SQLGuard 生成封存产物；Adapter 核对产物/目标、取得连接槽，设置并回读 query_timeout、query_mem_limit、time_zone 与固定 sql_mode，然后执行最终 SQL 一次并有界读取。不增加风险配置、计划解析器或额外 EXPLAIN 往返。
+- `explain_query` 保持独立的按需诊断路径，只取 EXPLAIN LOGICAL，不执行被诊断 SQL，也不产生可复用的执行许可。计划估算不可用不关闭正常查询能力；schema 与当前权限的失败行为仍按 §2.2/§2.6。
+- 沿用连接/客户端/整轮期限、资源限制、截断标记与安全错误；不能为执行成功自动提高限额或改变业务口径。LIMIT 不代表实际扫描量上限。
+- Task 8 复核已有运行限额的回归证据；实际目标上的资源组绑定、限制及代表性正常/超限 SQL 对照纳入既有 P3 验收。Task 0 的极低合成阈值不是生产值，一次查询命中某资源组也不证明所有后续查询绑定；DBA 验收记录适用规则和变更后的复核要求。
 
 ### 2.5 可修正错误与预算
 
-现有 ToolRejectedError 表示工具 I/O 前拒绝，ToolExecutionError 中止整轮。当前 StarRocksAdapter 的 `_query_code` 只映射有限权限/超时/丢失连接错误，其余归为当前失败阶段；没有可交回模型的 EXPLAIN 语义拒绝。本阶段新增窄的“预执行拒绝”，不能把已做 EXPLAIN 写成零 I/O。
+复用现有 ToolRejectedError 与 ToolExecutionError，不新增原 Task 4 的“EXPLAIN 预执行拒绝”类型或错误恢复白名单：
 
-- AST/参数/目标在 I/O 前拒绝：沿用安全错误回传，允许预算内修正；SDK 轮数和整轮期限仍约束尝试。
-- 计划完整且明确超阈值：业务 SQL 未发出，消耗本次工具预算，返回固定风险类别与收窄建议。没有人工确认放行或自动放宽限额；Agent 只有保持业务口径或获得用户补充后才能修改 SQL 并重新评估。
-- **EXPLAIN 阶段明确的 SQL 语义错误或 SELECT 无权限错误：** 业务 SQL 尚未执行，作为可修正拒绝交回同一个 Agent，消耗预算；无权限只能换到当前获准对象或澄清，不尝试提升权限。Task 0 固定 4.1.4 的错误码及必要的受测消息模板。不能仅因是 SQL 错误码就全部恢复，也不能把同一码下未知错误误分类。
-- 错误投影只有固定类别，以及能够与本轮已提交、通过标识符约束的 AST/当前获准 schema 对应的表名、列名；不复制数据库消息、字面量、SQL 片段、账号、host 或连接信息。无法可靠对应对象时仅返回类别；无法可靠判定类别则停止。列名/表名同样有数量、字节和转义上限。
-- 协议错误、连接中断、超时、无法识别的错误、计划格式未知/截断仍停止本轮，业务 SQL 为零且不自动重试。原业务 SQL 发出后的任何失败仍保持结果可能未知、停止、不重放；仅因为错误码相同不能套用 EXPLAIN 的可恢复语义。
-- 预执行拒绝没有成功查询 Evidence；使用现有受控无 Evidence 工具结果回传。测试分别统计连接/设置/权限探测/EXPLAIN/业务执行和预算。权限探测不能证明当前权限时按 §2.6 暂不可用，不能混入“已经确定撤权”。
+- AST/参数/目标在工具 I/O 前拒绝：沿用安全原因和错误回传，允许预算内修正；SDK 轮数、工具次数与整轮期限继续约束尝试。
+- 查询、诊断及其他数据库工具的执行异常沿用整轮停止规则；只给固定安全类别，不回显数据库原始消息、SQL 字面量、账号或连接信息。结果不明不自动重放，诊断失败不能转成执行原 SQL。
+- 拒绝或失败不记录成功查询 Evidence。权限探测仍按 §2.6 区分确定失效与暂不可验证；不能把连接失败当撤权。§9.5 保留当时的实测错误事实，白名单方案随 Task 4 取消。
 
 ### 2.6 Evidence、Session 与重发
 
-- 数据范围摘要升为显式版本：集群 ID、数据库类型、host/port/user 等来源身份、函数集合、SQL/结果/计划/内存/时间等资源限额、风险策略版本与阈值、审计源。规范化/排序稳定，密码及其引用不入摘要；完整 schema 不入摘要。StarRocks 旧证据一次性失效；`data_scope=None` 的 MCP/其他工具指纹必须逐字保持基线。
+- 数据范围摘要升为显式版本：集群 ID、数据库类型、host/port/user 等来源身份、函数集合、SQL/结果/计划/内存/时间等资源限额、审计源。规范化/排序稳定，密码及其引用不入摘要；完整 schema 不入摘要。StarRocks 旧证据一次性失效；`data_scope=None` 的 MCP/其他工具指纹必须逐字保持基线。
 - Evidence 新增可信的最小数据依赖（限定对象、被读取/判断的列、必要对象/视图版本与来源）；由 SQLGuard/内部模板生成，不接受模型自报。列表/描述/布局、计划与审计每条原文各有依赖，不能只覆盖 run_query。
 - Record、`_readable`/当前策略匹配、`validate_answer`、PolicySession 回放/最终提交、ChannelService 首次发送/历史、runtime.resend 共用三态复核。当前 `_currently_authorized` 把异常归为 EvidenceUnavailableError，Session 又映射为 SessionUnavailableError，必须在这些边界保留“确定失效”和“暂不可验证”的区别；不能只在工具层改错误文案。
 - 一个 Session 可保留 A/B 集群事实，记录按来源核验。**确定撤权/过期/来源或依赖身份变更：** 相关 Evidence 失效，混有它的历史整段拒绝并提示新建，不能删引用后保留旧事实。**仅临时无法验证：** 本轮/本次交付不返回旧事实，丢弃尚未提交的本轮暂存；不删除证据、不改变指纹、不把原 Session 置为 closed。恢复后用户的新请求重验通过可继续相同 Session，不自动重跑失败请求。
@@ -144,13 +140,13 @@ Web / 飞书单聊（群入口在后续独立计划）
 - `list_tables` 保留工具名、改成关键词搜索；精确计数不作为前提，分页绑定同一 schema 版本，刷新后旧游标拒绝并提示重新搜索。不提供无界空关键词导出整个目录。describe_table 按列分页/容量返回，标记还有内容；SQLGuard 用完整内部快照，模型输出分页不能改变权限。
 - 审计候选去掉固定 default_database 条件，仍按受限时间窗、isQuery 与可选 database 参数读取；参数绑定、候选行数/字节/原文长度、时区与截断拒绝继承 P2 §2.7。去掉库条件后不保证覆盖全部慢查询，候选耗尽/过滤后不足明确标记。
 - 每条候选保留其 Db 作为未限定名的解析上下文；SQL 显式跨库引用按当前 schema 与实际权限逐条验证。不能直接以当前任意库解析，不能只因审计表可 SELECT 就放出原文中未获准对象。审计 SQL 从不执行；权限不符/原文不完整整条不列出；依赖包括审计源和获准原文的引用对象。
-- 查询与诊断共用同一套规范化和依赖提取；审计验证不做业务成本准入（它在分析过去的 SQL），但仍有严格的解析 CPU/大小/期限。当前解析超时保护与 P2 的截断判定不能删除。
+- 查询与诊断共用同一套规范化和依赖提取；审计验证仍有严格的解析 CPU/大小/期限。当前解析超时保护与 P2 的截断判定不能删除。
 
 ### 2.8 单 Agent 的自然语言工具选择
 
 - 默认入口按当前身份、目标能力和模型数据策略开放工具，包括获准的查询工具；只构造一个业务 Agent、一条 SDK Runner/PolicySession 路径。删除前置分类请求、分类输出 schema、分类用 Session 和专用用途识别模块的任务。
 - instructions 与工具说明给出流程：明确当前人的要求 → 补齐集群/口径/时间 → 必要时搜表和查结构 → 明确要求查询才调用查询工具 → 按拒绝原因在预算内修正或解释限制。只解释、只写 SQL、“不要执行”、裸 SQL 或意图不清时不调用查询工具，信息不清先澄清；其他用户、历史或工具文本不授予本轮查询许可。
-- **证明边界：** 普通自然语言场景中查询工具仍可见，若模型误调用且通过权限/SQLGuard/风险与资源检查，执行链可能执行该只读 SQL。离线强行调用测试应验证这些实际保护，不能再断言“模糊意图必被代码拒绝”。真实模型任务样例必须单独检查误执行；未达到要求的 Model Profile 不开放试用。
+- **证明边界：** 普通自然语言场景中查询工具仍可见，若模型误调用且通过权限/SQLGuard/资源检查，执行链可能执行该只读 SQL。离线强行调用测试应验证这些实际保护，不能再断言“模糊意图必被代码拒绝”。真实模型任务样例必须单独检查误执行；未达到要求的 Model Profile 不开放试用。
 - Web 显式诊断与 `/诊断` 是可信入口约束，仍可隐藏并拒绝查询；普通消息默认用单 Agent 判断，`/查询` 不忽略正文的否定或缺失信息。API/CLI 保留当前用途。旧默认诊断切到新默认行为在本 Task 一次完成并更新说明，不静默留下双重语义。
 - 现有 AgentAnswer 无 Evidence 时只接受 clarification。按 ARCHITECTURE §9 的无取证建议做最小契约扩展：澄清和未执行建议分别展示，建议不能填实际查询事实/表格，代码标明未实际查询；有 Evidence 的回答继续原验证。自由文字真假不能靠 schema 全面识别，留真实模型验收。澄清提交后释放会话，下一消息重新按当前身份运行。
 - 模型与工具继续在同一轮数、次数、时间和投影限额内运行；不新增分类调用。API 失败/非法最终输出停止，不补跑模型或工具。
@@ -164,9 +160,8 @@ Web / 飞书单聊（群入口在后续独立计划）
 | schema 刷新失败但旧快照未过期 | 仅在期限内使用完整旧结构 | 当前权限仍单独核对；不延长年龄 |
 | 新授权/撤权 | 新表成功刷新后可搜索；撤权事实不可再读取 | 业务访问由 DB 拒绝；历史验证失败不发事实 |
 | AST/函数/歧义/展开超限 | 安全原因与可操作提示 | 该 SQL 尚未发送；可预算内修正 |
-| 预评估明确超限 | 未执行，提示收窄；不擅改口径 | EXPLAIN 已执行，业务 SQL 0；占预算 |
-| 计划缺失/截断/未知或协议失败 | 未执行，无法可靠评估；建议缩小范围，服务异常可稍后重提 | 停止，无确认绕过；业务 SQL 0 |
-| EXPLAIN 明确语义/SELECT 权限错误 | 固定类别和获准标识符，可修正 | 消耗预算，交回模型；业务 SQL 0 |
+| 数据库运行时资源超限 | 本轮停止，安全提示缩小范围；不擅改口径或限额 | 业务 SQL 可能已执行，不重放；后续由用户发起新请求 |
+| 按需 EXPLAIN 失败 | 本轮诊断失败，固定安全错误 | 停止；业务 SQL 0，不转为执行原查询 |
 | 会话变量回读不符/授权变化 | 固定拒绝 | 不发后续业务 SQL |
 | 业务 SQL 超时/取消/网络不明 | 本轮未完成，说明结果/终止状态限制 | 不重放；断开连接，DB 超时兜底 |
 | 结果超限 / 必需结构放不下 | 有界截断 / 整体受控失败 | 不能省略必须的来源、列头和限制说明 |
@@ -244,7 +239,7 @@ Web / 飞书单聊（群入口在后续独立计划）
   - **执行计划与审计：** 计划证据在记录时即按当前权限与版本复核，快照之后撤权的对象不交付；审计行交付前对原文引用的对象零行探测，引用已不可读对象的行不列出。
   - **对象版本不比较创建时间：** 4.1.4 实测 `information_schema.tables.CREATE_TIME` 全表读取时按会话时区、带 `TABLE_SCHEMA` 条件时按服务器时区给出，同一对象两种读法相差时区偏移；版本改用 `TABLE_TYPE` + `TABLE_ID`（全局分配、同名重建即变，Task 0 §9.2 与本轮 SR 复核）+ 被读取列类型。
   - **`requests resend`：** 改为连接 StarRocks 做上述复核（只读探测与元数据），需要 StarRocks 密码环境变量。
-- **数据范围摘要 v2（审查修订）：** 显式 `format`（`xiaowei.data_scope.starrocks/2`）、`database_type`、集群 ID、host/port/user/TLS、默认库、函数、`max_rows`/`max_sql_bytes`、结果/单值/计划上限、`query_timeout_seconds`、`query_mem_limit_bytes`、`client_timeout_seconds`、`time_zone`、`schema_limits` 与审计源；不含密码引用、`tls_ca_file`、`connect_timeout_seconds`、`pool_size`（只影响能否取得连接）、整轮预算与结构快照。风险策略随 Task 4 加入。非 StarRocks 的 `data_scope=None` 指纹逐字不变。
+- **数据范围摘要 v2（审查修订）：** 显式 `format`（`xiaowei.data_scope.starrocks/2`）、`database_type`、集群 ID、host/port/user/TLS、默认库、函数、`max_rows`/`max_sql_bytes`、结果/单值/计划上限、`query_timeout_seconds`、`query_mem_limit_bytes`、`client_timeout_seconds`、`time_zone`、`schema_limits` 与审计源；不含密码引用、`tls_ca_file`、`connect_timeout_seconds`、`pool_size`（只影响能否取得连接）、整轮预算与结构快照。非 StarRocks 的 `data_scope=None` 指纹逐字不变。
 - **列表探测上限（审查修订）：** 按已尝试的对象数硬性封顶 `2 × max_rows`，与可读对象多少无关；还有未检查候选时标记截断。
 - **实测（本机可丢弃 4.1.4，同一 digest）：** 1,000 张可见表、其中 900 张可读，30,000 列。刷新 n=5，中位 1.67 s（1.29–2.36 s）。`list_tables` 一页 200 行（探测 400 个对象），中位 371 ms；`describe_table` 约 7 ms。全快照 27,000 列上 SQLGuard 单次 p50 16 ms，为同步 CPU，Task 3 应只用被引用对象构造 qualify schema。只授 INSERT 的表、只经未激活角色授权的表不进入快照；只授视图的视图进入快照，底表不进入。新授权在下一次成功刷新后可用（最迟一个 `refresh_seconds` 加一次刷新耗时；刷新失败时更晚）；撤权后交付前探测即拒绝，新查询由数据库以 `permission_denied` 拒绝，下一次刷新移出快照；库级授权与撤销同样生效。
 - **留给后续：**
@@ -281,30 +276,24 @@ Web / 飞书单聊（群入口在后续独立计划）
 - **耗时：** 1,000 对象 / 30,000 列的范围上，构造 `QueryPolicy` 约 4 ms（每次刷新一次）；含 JOIN、窗口与 UNION 的查询 SQLGuard p50 约 1.6 ms，星号展开约 1.1 ms（qualify schema 只含被引用对象；Task 2 全快照时为 16 ms）。
 - **复审第 4 轮（扩大复审，`15d5651`）：** 在 4.1.4 上对 738 个组合形态与产品路径的复核发现，ORDER BY 名字绑定仍会被改写：表达式、分组与窗口组合下交付错误的 Top-N，原文报错的排序引用被修正为成功执行（N1）；标量子查询别名被内联进 ORDER BY，数据库拒绝（N2）；同一 CTE 的两个关系别名被当作同一来源而误拒。三者同根：规范化改写了 ORDER BY 的名字（内联输出表达式、按来源推断交叉别名），另有 sqlglot 在分组查询中把排序项改写为别名。修复见上节名字解析：输出名引用原样保留、分组排序项加括号隔开、去掉交叉别名推断（`_column_source`），UNION 的 `ORDER BY (x)` 剥括号后换为位置。验证：离线新增用例在 `15d5651` 上失败、修复后通过；SR 新增 `test_order_by_facts_keep_the_original_binding`（治理 → SQLGuard → 真实驱动 → PostgreSQL 证据 → 最终事实，查询行与原文一致、计划与原文 EXPLAIN LOGICAL 一致，原文报错时两条路径都报错不产生事实；在 `15d5651` 上交付 `(1, 30)` 而非原文 `(3, 10)`）；`test_r3_names_resolve_like_the_server` 增加表达式/分组/窗口匹配、三种标量子查询与 CTE 自连接样本，交叉别名由拒绝改为与原文对照。复审者的 738 个形态与本轮补充的 168 个形态（未限定投影、分组排序项、DISTINCT、HAVING、子查询内 ORDER BY + LIMIT）在 4.1.4 上逐条比较原文与规范化 SQL：除并列值顺序、N3 与下述既有限制外一致或同样报错。隔离变异：恢复内联、去掉括号隔离、保留括号、不计同名物理列依赖、UNION 不剥括号、忽略隐式输出名均被发现；两处重复的多输出检查同时去掉被发现（单独去掉互为兜底）；排序子句检查不可达（`qualify` 已展开 HAVING 中的别名，其余位置先被拒绝）。
 - **已知兼容性限制（N3，后续待办）：** 投影含星号且另有与星号列同名的输出、并按限定列排序时（`SELECT t.a AS x, u.* … ORDER BY t.x`），4.1.4 对展开前后的 SQL 行为不同：查询路径因结果列名重复已在 I/O 前拒绝；计划路径展开后的 EXPLAIN 在数据库端报内部错误（工具执行失败，不交付错误事实）。同类按输出名排序（`… ORDER BY x`）因展开后出现同名输出而 `ambiguous_reference`。需要先为冲突列起唯一别名。
-- **留给后续：** 风险评估（Task 4）；关键词搜表与审计按每条记录的库解析（Task 6）；生产 SQL 的函数与语法覆盖（Q4）由 P3 经批准样本验证；`SUM(文本列)` 等隐式转换不拦截（§9.5）。
+- **留给后续：** 关键词搜表与审计按每条记录的库解析（Task 6）；生产 SQL 的函数与语法覆盖（Q4）由 P3 经批准样本验证；`SUM(文本列)` 等隐式转换不拦截（§9.5）。
 
-### Task 4：每条业务查询强制风险准入
+### Task 4：每条业务查询强制风险准入（已取消）
 
-**依赖：** Task 3 与 Task 0 计划/资源限制结论；**结果：** 简单查询也先评估，通过才实际执行一次，任何入口不可绕过。**文件：** starrocks、StarRocks 风险解析模块、governance/tools、starrocks_tools；`test_starrocks_adapter`、`test_starrocks_tools`，新增 `tests/p25/test_query_preflight.py`。
+**状态：** 用户 2026-10-03 取消，决定见 [ARCHITECTURE §6 R4–R5](../../../ARCHITECTURE.md#p25-scope)。保留编号，不作为已实现任务；不实施本片的强制 EXPLAIN、风险准入与专属错误恢复。
 
-**接口：** §2.4 绑定的临时评估与 §2.5 可修正预执行拒绝；不对外暴露可伪造的“批准”参数。
-
-- [ ] recording 连接逐条断言顺序：设置/回读 → EXPLAIN 同一最终 SQL → 评估 → 执行；简单 SELECT、原始 SQL、AI SQL、修改后重试全覆盖；直接调 Adapter 也不能绕开。
-- [ ] 高估算/全分区超阈值、大 JOIN、缺统计、未知算子、计划过大/截断、EXPLAIN 失败、回读不符、评估后过期/撤权/版本变化均业务 SQL=0；不能错误宣称 DB 零 I/O。
-- [ ] 明确超限、EXPLAIN 语义或权限拒绝回给真 Runner 后可修正并重新评估，消耗预算；参数含敏感字面量、服务端错误含账号/地址或未知标识符时，模型/Session/日志只见固定类别与允许的对象列名；业务执行超时/异常后模型不续轮重试，资源/连接最终释放。风险修正不能偷偷改变口径。
-- [ ] SR 上验证服务端实际限额，比较带 LIMIT 的大扫描与小表全扫成功对照；禁止 EXPLAIN ANALYZE/裸 EXPLAIN。无重型生产压力测试。
-- [ ] 运行 §5 C4；隔离变异去掉预评估、把 unknown 放行、复用旧评估、计划 SQL 与执行 SQL 不同、把预执行拒绝退还预算应失败。提交 `feat: enforce query risk assessment before execution`，独立审查。
+Task 5 改为依赖 Task 3。现有运行限额回归由 Task 8 核对，目标资源组与大查询保护在既有 P3 验收，不另建替代任务。
 
 ### Task 5：当前权限下的 Evidence 与跨目标历史
 
 > 依赖、三态复核、resend 复核、视图只交付一次、v4 迁移与摘要 v2 已按用户决定前移到 Task 2 审查修订（见 Task 2 实施说明）；下列各项按实际覆盖在 Task 5 复核并补齐其余部分。
 
-**依赖：** Task 4；**结果：** 撤权后新查询与旧事实的再次交付都闭合，范围未变可追问/重发且不重跑业务 SQL。**文件：** models/evidence/session/storage/runtime/channel、下一应用迁移；`test_evidence`、`test_session_policy`、`test_channel_service`、`test_runtime`、`test_starrocks_tools`。
+**依赖：** Task 3；原 Task 4 已取消，不构成依赖。**结果：** 撤权后新查询与旧事实的再次交付都闭合，范围未变可追问/重发且不重跑业务 SQL。**文件：** models/evidence/session/storage/runtime/channel、下一应用迁移；`test_evidence`、`test_session_policy`、`test_channel_service`、`test_runtime`、`test_starrocks_tools`。
 
 **接口：** §2.6 新依赖、指纹版本、当前数据复核；存储升级与重发新依赖在同片交付。
 
 - [ ] PostgreSQL 先保存 A/B 目标的查询、计划、布局、表结构、审计事实；撤销依赖权限后逐个验证回放、首次发送、历史读取、延迟发送、runtime.resend 均不交付事实/混入旧事实的文字。无变化和无关目标成功对照；重发业务 SQL/模型调用均为 0。
-- [ ] 变更 host/账号/风险阈值/函数/资源/审计源使对应旧记录失效；输入顺序/允许的大小写规范化与 PYTHONHASHSEED 不影响稳定摘要；schema 本身不进入摘要；非 StarRocks `data_scope=None` 指纹与基线逐字相同。
+- [ ] 变更 host/账号/函数/资源/审计源使对应旧记录失效；输入顺序/允许的大小写规范化与 PYTHONHASHSEED 不影响稳定摘要；schema 本身不进入摘要；非 StarRocks `data_scope=None` 指纹与基线逐字相同。
 - [ ] PostgreSQL 保存有效历史后，让目标超时/断连/返回不可识别错误：本次无事实交付、回放前失败则模型与业务 SQL 为 0；Session 仍 active、原历史/证据不变，恢复后新请求可继续。确定撤权对照必须拒绝旧事实，混合目标一处临时不可用不作废整段历史；SDK 写入不明仍关闭。
 - [ ] 同批多个 Evidence 引用同一（集群, 对象）只探测一次，列依赖合并；同名跨集群查两次。真实计数断言达到 128 时成功/第 129 次前拒绝、失败不退款、新边界重查也计数、恢复后下一轮重新计数；容量拒绝不关闭 Session。
 - [ ] 完整来源依赖由代码构造，篡改/遗漏、视图变化、对象重建按确定失效处理；临时权限服务失败按暂不可用处理。验证源复核不能重新执行原 SQL。
@@ -325,19 +314,19 @@ Web / 飞书单聊（群入口在后续独立计划）
 **依赖：** Task 6；**结果：** 保持一个业务 Agent，明确请求可查询，解释/生成/否定/模糊场景按固定样例不查询；自然语言可靠性在 P3 真实模型验收。**文件：** app/channel/runtime、既有 instructions/工具说明、models/evidence/session 回答契约、Web 与飞书默认入口；`test_app`、`test_runtime`、`test_diagnosis`、`test_gate0`；场景测试 `tests/p25/test_turn_purpose.py`，复用 `tests/sdk_core/gate0.py` 样例体系。
 
 - [ ] 真 Runner + ScriptedModel 验证只有业务 Agent 的调用链，没有额外分类请求；获准用户查询工具可见，未授权/目标错误在 I/O 前拒绝。历史暂时无法验证时模型未收到旧事实，Session 保留；确定失效按 Task 5 处理。
-- [ ] 业务正例：指定集群昨日订单跨库 JOIN/CTE、UNION、窗口排名、随后解释慢原因、换另一集群比较；风险拒绝后按用户补充缩小范围；EXPLAIN 语义拒绝后修正成功。
+- [ ] 业务正例：指定集群昨日订单跨库 JOIN/CTE、UNION、窗口排名、随后解释慢原因、换另一集群比较；SQLGuard 的 I/O 前拒绝在预算内修正成功；运行时资源超限停止并提示缩小范围，由用户发起新请求，不在本轮自动重跑。
 - [ ] 固定反例：只解释、只写 SQL、不要执行、裸 SQL、引用“帮我查”、上一轮 query 本轮只诊断、缺集群/口径/时间、多人指令混淆、工具/表注释注入。脚本模型证明预期调用与结果链；P3 真实模型证明是否真的没有选择查询工具，不把预设输出当意图能力证据。
-- [ ] 普通自然语言“不要执行”场景中，故意让替身误调工具：断言仍受当前权限/SQLGuard/强制评估/限额约束，并记录通过这些保护后可能执行的残余；显式诊断入口同样强行调用应在业务执行前拒绝。不得为了让自然语言反例变绿新增关键词识别器或第二个分类 Agent。
+- [ ] 普通自然语言“不要执行”场景中，故意让替身误调工具：断言仍受当前权限/SQLGuard/限额约束，并记录通过这些保护后可能执行的残余；显式诊断入口同样强行调用应在业务执行前拒绝。不得为了让自然语言反例变绿新增关键词识别器或第二个分类 Agent。
 - [ ] 无 Evidence 建议、澄清、有证据回答分别渲染；旧回答回放兼容或明确失效，四种投影覆盖新分支。验证 Agent 不把可修正拒绝伪装成成功事实。
 - [ ] Web/飞书普通消息默认单 Agent 判断，显式诊断快捷方式保留；SDK 轮数/预算/usage/超时没有新旁路。运行 §5 C7 和正式入口脚本模型/浏览器，提交 `feat: let the single agent choose query tools from user intent`，独立审查。
 
-P3 在具体 Model Profile 上记录每个固定样例的调用轨迹、误执行次数、成功率、步数、延迟/用量和无法评估比例；这些结论不能由离线测试数量替代。
+P3 在具体 Model Profile 上记录每个固定样例的调用轨迹、误执行次数、成功率、步数、延迟/用量，区分正常查询成功与资源超限失败；这些结论不能由离线测试数量替代。
 
 ### Task 8：阶段离线退出与可接续交付
 
 **依赖：** Task 7；**结果：** 一个精确候选 SHA 具备完整离线/隔离服务证据、配置迁移与恢复说明，交给群聊阶段；不关闭 P3 实战。
 
-- [ ] 运行 §5 全阶段检查；正式 runtime + Web/飞书替身 + 测试 PostgreSQL 演示完整任务链，验证三目标中的一处故障不改查别处。
+- [ ] 运行 §5 全阶段检查（C4 随 Task 4 取消），核对既有限额的成功与超限失败回归；正式 runtime + Web/飞书替身 + 测试 PostgreSQL 演示完整任务链，验证三目标中的一处故障不改查别处。
 - [ ] 固定样例登记期望工具、事实/来源、限制和澄清；P3 记录真实模型成功率、误执行样本、步数、延迟/usage，不能用预设 ScriptedModel 输出声称已达标。
 - [ ] 更新 examples 配置、README 当前用法、handoff 证据和本文偏差；删除被替代的单库/手写表列分支，确认没有双权威配置和无消费者包装。
 - [ ] 核对升级/备份恢复/一次性失效与 §6；提交 `docs: record p25 offline exit and remaining live validation`；对候选 SHA 独立架构/安全/StarRocks 审查。下一项为群聊计划 F0。
@@ -352,7 +341,7 @@ P3 在具体 Model Profile 上记录每个固定样例的调用轨迹、误执�
 | C1 | `uv run --locked --extra dev python -m pytest tests/sdk_core/test_runtime.py tests/sdk_core/test_starrocks_tools.py tests/sdk_core/test_governance.py tests/sdk_core/test_app.py -q -W error` |
 | C2 | `uv run --locked --extra dev python -m pytest tests/p25/test_schema_scope.py tests/p1b/test_starrocks_adapter.py tests/sdk_core/test_starrocks_tools.py tests/sdk_core/test_runtime.py -q -W error` |
 | C3 | `uv run --locked --extra dev python -m pytest tests/p1b/test_p1b_sqlguard.py tests/p1b/test_starrocks_tool_contracts.py tests/p25/test_sql_scope.py tests/sdk_core/test_starrocks_tools.py -q -W error` |
-| C4 | `uv run --locked --extra dev python -m pytest tests/p25/test_query_preflight.py tests/p1b/test_starrocks_adapter.py tests/sdk_core/test_starrocks_tools.py -q -W error` |
+| C4 | 随原 Task 4 取消，不创建专属检查组；现有 Adapter 资源限额回归保留 |
 | C5 | `uv run --locked --extra dev python -m pytest tests/sdk_core/test_evidence.py tests/sdk_core/test_session_policy.py tests/sdk_core/test_channel_service.py tests/sdk_core/test_runtime.py tests/sdk_core/test_starrocks_tools.py tests/sdk_core/test_storage_v2.py -q -W error` |
 | C6 | `uv run --locked --extra dev python -m pytest tests/p1b/test_starrocks_audit.py tests/sdk_core/test_starrocks_tools.py tests/p1b/test_starrocks_tool_contracts.py -q -W error` |
 | C7 | `uv run --locked --extra dev python -m pytest tests/p25/test_turn_purpose.py tests/sdk_core/test_app.py tests/sdk_core/test_runtime.py tests/sdk_core/test_diagnosis.py tests/sdk_core/test_gate0.py tests/sdk_core/test_web.py tests/sdk_core/test_feishu.py tests/sdk_core/test_evidence.py tests/sdk_core/test_session_policy.py -q -W error` |
@@ -374,14 +363,14 @@ Task 0 的规模实验不进入日常 CI；后续每片只跑受影响命令和�
 - 回退必须同时恢复对应代码、配置与受限备份，或使用明确隔离的新库；旧二进制对新应用版本拒绝启动，禁止只切代码后继续读新表。备份恢复后仍按当前 DB 权限复核，不以备份时权限放行。
 - 停机先停止接收、有界排空/取消、关闭刷新任务和每目标连接。query_timeout 仍是远端最终期限，断开连接不是远端已停止证明；重启标中断，不重放模型/SQL。
 - **继承残余风险：** 静态配置变更前的旧进程可按旧配置完成在途轮次；没有共享动态权限源或分布式撤权屏障，不声称即时接管撤权。DB 权限探测和最终发送亦存在检查后变化窗口；下一边界重新验证，当前阶段不建设跨系统事务。
-- 不因计划/元数据缺失切回旧 allowlist 或绕过风险评估；单目标失败隔离，不自动换集群。缺新鲜结构/可靠权限证据时功能受控不可用，是明确的保守降级。
+- 不因元数据缺失切回旧 allowlist 或省略当前权限复核；单目标失败隔离，不自动换集群。缺新鲜结构/可靠权限证据时功能受控不可用，是明确的保守降级。
 
 ## 7. 尚未解决且影响正确性的疑点
 
 | 编号 | 必须取得的事实 / 最小处理 | 阻塞与关闭者 |
 | --- | --- | --- |
 | Q1 | 4.1.4 的元数据权限过滤、角色/列授权支持、零行 SELECT 权限检查、视图/对象版本可见性 | Task 0 执行者提供正反证据、独立审查；未闭合不启用 Task 2/5 相应范围 |
-| Q2 | LOGICAL 计划字段/未知算子/统计缺失可识别性、风险单位与有效阈值；普通账号的资源组绑定核验能力 | Task 0 固定版本契约；P3 DBA/使用者确认目标阈值和资源限制；无法可靠评估则拒绝，不能先放行 |
+| Q2 | 目标上只读账号实际命中的资源组与限额；正常 SQL 可用与超限查询受控失败 | Task 0 隔离事实保留；P3 按 ARCHITECTURE §6 R5 验证目标配置、实际行为和阈值，变更后复核；未满足不开放该目标试用 |
 | Q3 | 至少千表/三万列的 schema 和权限探测是否满足所选容量/期限 | Task 0 量测后修订 §2.2 配置设计；不以无限缓存或省权限检查解决 |
 | Q4 | 生产 SQL 的真实函数/语法覆盖与归一化结果正确性 | Task 3 合成反例 + P3 经批准样本；不自动放开未知函数/节点 |
 | Q5 | 单 Agent 的自然语言工具选择误判、修正能力、延迟/用量 | Task 7 离线只验调用链/可信授权与显式模式门控；P3 用固定正反样例和具体 Model Profile 验证，保留误判残余 |
@@ -392,10 +381,10 @@ Task 0 的规模实验不进入日常 CI；后续每片只跑受影响命令和�
 ## 8. 自审清单与审查交付
 
 - [x] Agent 任务、所需信息、工具组合、自我修正、澄清和用户限制说明有场景与对应任务；SDK 原生能力与本地探针限制单列。
-- [x] R1–R6 分别落到 Task 1/2/3/4/5/6/7/8；群聊只有依赖链接；旧 P2 计划不重写。
-- [x] 业务 SQL、EXPLAIN、权限探测/元数据的 I/O 证据分开；预评估不能通过旧工具或 sealed SQL 旁路。
+- [x] R1–R6 落到 Task 1/2/3/5/6/7/8 与 P3 既有验收；原 Task 4 标注取消并移除依赖；群聊只有依赖链接；旧 P2 计划不重写。
+- [x] 业务 SQL、EXPLAIN、权限探测/元数据的 I/O 证据分开；权限、SQLGuard 与运行限额不能通过旧工具或 sealed SQL 旁路。
 - [x] 数据范围由数据库权限决定，schema 不冒充权限；确定失效与暂不可验证分开，按对象去重及整轮检查上限明确；所有 Evidence 读取链、重发新增 I/O、混合 Session 和一次性失效明确。
-- [x] 容量上界独立于全库列数，未知/失败行为和小表/低风险成功对照齐全；没有只验证“全部拒绝”的空洞成功。
+- [x] 容量上界独立于全库列数，未知/失败行为和正常查询成功对照齐全；没有只验证“全部拒绝”的空洞成功。
 - [x] 配置/迁移/SDK 表归属、恢复与旧进程风险明确；不把离线、隔离数据库、真实模型、部署和用户验收混为一谈。
 - [ ] 针对本轮最终文档提交的精确 SHA 独立审查；文档检查通过不代表此项已完成。
 
@@ -468,6 +457,8 @@ INSERT-only 表经 Adapter 映射为 `permission_denied`。`WHERE 1 = 0` 在 FE 
 
 ### 9.5 EXPLAIN LOGICAL 阶段错误（§2.5）
 
+以下保留 Task 0 的实测事实与当时提出的白名单方案；原 Task 4 取消后，不实施该错误恢复方案，当前行为以 §2.5 为准。
+
 对同一 SQL 分别取 `EXPLAIN LOGICAL` 与实际执行，两者错误一致的不再分列：
 
 | 类别（受测模板） | errno / SQLSTATE | 例 |
@@ -480,7 +471,7 @@ INSERT-only 表经 Adapter 映射为 `permission_denied`。`WHERE 1 = 0` 在 FE 
 | 只在执行期出现 | 1064 / HY000 | 标量子查询多行 `Expected LE 1 …`、`assert_true` 失败、内存超限（消息含 **BE 地址**）、资源组 scan/CPU/并发超限；EXPLAIN LOGICAL 对这些都成功 |
 | 连接 / 中止 | 2006（服务端 KILL 连接后客户端）、1317（KILL QUERY）、5024（query_timeout） | — |
 
-**可恢复白名单（只用于 EXPLAIN 阶段，业务 SQL 未发出）：** 5203、5502、5501、5078，以及消息以 `Getting analyzing error` 开头的 1064。errno 1064 同时覆盖语法、语义与执行期错误，SQLSTATE 均为 HY000，**不能只按错误码判定**。规范化 SQL 由代码生成，EXPLAIN 出现语法错误说明规范化或方言与服务端不一致，应停止而不是交回模型修正。执行阶段的任何 1064/5024/1317/2006 都按“结果可能未知、停止、不重放”。服务端消息含对象名、字面量、角色名与 BE 地址，只能内部匹配，不能投影。`SUM(文本列)` 等隐式转换不能靠 EXPLAIN 发现；如需拦截，只能由 Task 3 按快照列类型限制聚合参数。
+**当时提出的可恢复白名单（已取消，只针对 EXPLAIN 阶段、业务 SQL 未发出）：** 5203、5502、5501、5078，以及消息以 `Getting analyzing error` 开头的 1064。errno 1064 同时覆盖语法、语义与执行期错误，SQLSTATE 均为 HY000，**不能只按错误码判定**。规范化 SQL 由代码生成，EXPLAIN 出现语法错误说明规范化或方言与服务端不一致，应停止而不是交回模型修正。执行阶段的任何 1064/5024/1317/2006 都按“结果可能未知、停止、不重放”。服务端消息含对象名、字面量、角色名与 BE 地址，只能内部匹配，不能投影。`SUM(文本列)` 等隐式转换不能靠 EXPLAIN 发现；如需拦截，只能由 Task 3 按快照列类型限制聚合参数。
 
 ### 9.6 统计信息与 LOGICAL 风险字段（§2.4，Q2）
 
@@ -513,7 +504,7 @@ INSERT-only 表经 Adapter 映射为 `permission_denied`。`WHERE 1 = 0` 在 FE 
   - 无资源组时同一聚合成功。
 
   三种内存限制的消息模板可区分，均为 1064，且都含 BE 地址。
-- **只读账号能否证明资源组绑定（审查 B3 修正）：** 只能观察**某一条语句**在**观察时刻**命中的组，不能证明后续查询的绑定。默认权限下，`EXPLAIN VERBOSE <SQL>` 首行给出该 SQL 当前命中的组；`SHOW RESOURCE GROUPS` 可读全部组的阈值与分类器（含其他账号的）。反例（同一账号、同一会话）：分类器 `user`、`user + db='r1'`、`user + plan_cpu_cost_range='[1000000, 1e12)'` 并存时，便宜查询命中 `rg_r3_user`，高代价聚合命中 `rg_r3_cost`，`r1` 视图查询命中 `rg_r3_db`。DBA 随后 `ALTER RESOURCE GROUP rg_r3_user DROP ALL`，便宜查询改为 `default_wg`，其他两条不变。所以启动时或按周期的一次核对，不能覆盖不同库、不同计划代价的查询，也不能覆盖核对之后的分类器变更。逐条核对要在评估阶段对最终 SQL 再发一次 `EXPLAIN VERBOSE`（只在内部读首行，不外传其他内容）；这仍有“核对到执行”之间被 DBA 改动的窗口，并且多一次数据库往返。阈值是否适合生产负载，仍需 DBA 在 P3 确认，变更后复核。
+- **只读账号能否证明资源组绑定（审查 B3 修正）：** 只能观察**某一条语句**在**观察时刻**命中的组，不能证明后续查询的绑定。默认权限下，`EXPLAIN VERBOSE <SQL>` 首行给出该 SQL 当前命中的组；`SHOW RESOURCE GROUPS` 可读全部组的阈值与分类器（含其他账号的）。反例（同一账号、同一会话）：分类器 `user`、`user + db='r1'`、`user + plan_cpu_cost_range='[1000000, 1e12)'` 并存时，便宜查询命中 `rg_r3_user`，高代价聚合命中 `rg_r3_cost`，`r1` 视图查询命中 `rg_r3_db`。DBA 随后 `ALTER RESOURCE GROUP rg_r3_user DROP ALL`，便宜查询改为 `default_wg`，其他两条不变。所以启动时或按周期的一次核对，不能覆盖不同库、不同计划代价的查询，也不能覆盖核对之后的分类器变更。当时讨论的逐条 `EXPLAIN VERBOSE` 核对也存在“核对到执行”之间被 DBA 改动的窗口，并且多一次数据库往返；该方案未实施，随原 Task 4 取消。资源组绑定、生产阈值和规则变更后的复核按 ARCHITECTURE §6 R5 纳入 P3 验收。
 - **取消：** 一条单独运行 8.1 s 的 JOIN，在 2 s 时客户端断开，1 s 内从 FE `SHOW PROC '/current_queries'` 消失。只观察到 FE 视图，未观察 BE 片段或半开 TCP；`query_timeout` 仍是远端最终期限。
 - **多库审计：** `db` 列是语句执行时的会话当前库（连接默认库，`USE` 后改变），不是 SQL 引用的库；无默认库时为 `''`，此时未限定表名执行为 1046，因此成功的 `''` 记录不会依赖未限定名。Db=A 引用 B、A/B 跨库 JOIN、同名表按各自 Db 解析均与执行一致；原文按 `max_stmt_length` 截断到恰好 1,000 字节（Task 6 的 `max_sql_bytes ≤ stmt_limit - 4` 规则继续适用）。失败语句 `state=ERR`，分析错误 `errorCode=ANALYSIS_ERR`，权限错误 `INTERNAL_ERR`；`EXPLAIN` 语句也以 `isQuery=1` 进入审计。本实验两小时窗口内 `isQuery=1` 的记录多数 `db=''`：去掉库条件后候选来自所有库与无默认库会话，必须继续由候选行数/字节上限约束，候选耗尽时明确标记（§2.7 设计成立）。
 
@@ -536,18 +527,18 @@ INSERT-only 表经 Adapter 映射为 `permission_denied`。`WHERE 1 = 0` 在 FE 
 
 两项都不放宽权限。**已决定（2026-10-03 审查轮）：** D1/D2 的产品代码修复另开小 PR，排在 Task 3 之前，不在 Task 0 文档 PR 中修改。
 
-### 9.9 对计划的影响与暂停范围
+### 9.9 对计划的影响与当前范围
 
-| 计划条款 | Task 0 结论 | 最小调整（待复审） | 依赖状态 |
+| 计划条款 | Task 0 结论 | 当前处理 | 依赖状态 |
 | --- | --- | --- | --- |
 | §2.2 权限探测 | 成立 | 写明列级授权不可用（只到表/视图）；角色须是默认/已激活角色，否则账号视为无权 | Task 1 不受影响；Task 2 可按此实施 |
 | §2.2/§2.6 对象版本 | `information_schema` 不足；视图元组不能发现间接依赖变化（B1） | 直接查询的表用 9.2 的表版本元组。依赖视图的 Evidence 在跨轮回放、历史读取与重发时一律按确定失效拒绝。本轮新取得的视图证据，其保存与首次交付照常按当前权限验证，不提前判失效；Task 5 必须区分这两类路径。视图元组只作直接定义变化的附加检测 | Task 2/5 的表版本部分按此实施；**视图历史回放保持关闭**，重开需另行设计并复审 |
 | §2.3 规范化 | 多数一致，有 9.4 差异 | 列名按快照不区分大小写解析（库/表/别名保持敏感）；无别名函数列与重复名按“要求显式别名”处理；`DIV`、`||` 保持拒绝或固定语义；qualify schema 只含被引用对象 | Task 3 |
-| §2.4 风险评估 | 估算行数不可作扫描量；分区/tablet 比例按个数计、不能乘总行数（B2）；缺统计无法只靠计划文本识别；行数元数据有上报滞后 | 每个 SCAN 的规模上界取“`partitions_meta` 中最大的 a 个分区 ROW_COUNT 之和”（a 为 partitionRatio 分子，忽略 tabletRatio）。以下任一情况为 unknown：对象元数据不可读（含账号无权的 MV 改写目标）、计数为 0、选中范围内任一分区 `VISIBLE_VERSION_TIME` 晚于“当前时间减去目标上验收的统计上报周期”。**该新鲜度条件只是必要条件，不是证明：** 上报失败时，过了一个周期仍可能留着旧的非零行数并通过上述规则。因此这条规则**不得直接用于放行**，新鲜度证明须在 Task 4 设计中解决并复审。再加 `SHOW STATS META` 健康度；`SCHEMA-SCAN`、`TABLE FUNCTION`、未知算子一律 unknown；数据库资源组硬限额为启用前提。上界是行数，不是字节或代价 | **Task 4 继续暂停**，等审查者接受调整 |
-| §2.5 可恢复错误 | 白名单已确定 | 采用 9.5 白名单；EXPLAIN 语法错误停止 | Task 4 |
-| R5 资源 | 只读账号只能观察单条语句当下命中的组（B3）；组内存限制已独立命中 | 不把启动/周期核对当作绑定证明。可选：评估阶段对最终 SQL 逐条 `EXPLAIN VERBOSE` 核对组名在允许集合内（多一次往返，仍有核对到执行的窗口）。否则只作为 DBA 验收与变更后复核项，残余风险如实披露 | Task 4 设计时决定（随 Task 4 暂停）；Task 8、P3 |
+| §2.4 原风险评估 | 估算不等于扫描量，分区/tablet 比例不是行数比例；元数据新鲜度不能靠等待一个上报周期证明（B2） | 历史反例保留；最大 a 个分区行数之和不能直接作为放行证明。查询执行与资源保护按 ARCHITECTURE §6 R4–R5 | **原 Task 4 已取消**，不再阻塞后续任务 |
+| §2.5 原可恢复错误 | §9.5 记录错误码与消息模板，同码可能处于不同执行阶段 | 白名单方案随 Task 4 取消；沿用 I/O 前可修正拒绝与执行异常停止 | 不新增恢复实现 |
+| R5 资源 | 只读账号只能观察单条语句当下命中的组（B3）；组内存限制已独立命中 | 不把一次核对当作后续绑定证明；由 DBA 核实目标规则，正常/超限 SQL 验收并记录变更后的复核要求，不增加逐条 EXPLAIN VERBOSE | Task 8 核对既有回归；P3 验证实际目标 |
 | §2.7 审计 | 设计成立 | 无 | Task 6 |
 
-Task 0 的十项实测已完成，最后一项（提交与独立审查）进行中。Task 1 依赖的多目标路由不受上述结论影响，但按 Task 0 依赖仍须等本节独立审查通过。
+Task 0 已经独立审查并随 PR #32 合入，历史实测证据保留。原 Task 4 取消后不再构成后续切片依赖；其他当前权限、容量和对象版本要求继续适用。
 
 **未覆盖：** 只验证单 FE/BE allin1 容器；没有 TLS 目标、存算分离、外表/外部 catalog、生产规模数据与并发；`statistic_collect_interval_sec` 调度对第二次导入的完整周期未观察完；BE 侧在取消后的残留与半开 TCP 未观察；`SHOW CREATE VIEW` 在千视图规模下的耗时未测；视图依赖链的递归核对未设计也未测（本阶段关闭视图历史回放）；BE 统计上报超过一个周期仍未到达（上报失败）时的行为未测；结构刷新与整轮权限复核没有端到端计时；MV 布局取值与目标版本差异继续由 P3 复核。
