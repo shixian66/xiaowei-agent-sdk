@@ -5,9 +5,14 @@
 所有工具的前置检查都先取当前快照：没有快照或已到期时在任何 I/O 前拒绝。
 
 ``local/list_tables`` 与 ``local/describe_table`` 的结构取自快照，交付前对要列出的每个对象
-重新做零行权限探测（快照中的“可读”只是采集时的结论）：列表跳过已不可读的对象，表结构遇到
-已不可读的对象整体失败。列表按目录顺序分批探测，每次最多尝试 ``2 × max_rows`` 个对象（按
-已尝试的对象数计，与可读对象多少无关），还有未检查的候选时标记截断。
+重新做零行权限探测（快照中的“可读”只是采集时的结论）：搜表跳过已不可读的对象，表结构遇到
+已不可读的对象整体失败。搜表按非空关键词（不区分大小写匹配“库名.表名”、表注释与列名）与可空
+的库过滤在快照中匹配，按库表名排序；表结构按快照中的列序。两者都分次交付：前置检查从游标位置起
+按 ``page_size``（表结构不限个数）与结果的单值、总字节上限在 I/O 前规划本次的对象或列，结果带
+``next_cursor``，从第一个未交付的位置继续，没有剩余时为 ``null``（此时才不标记截断）。搜表只
+探测本页对象，已撤权的不列出但已越过，不重复也不遗漏。游标绑定快照版本与参数（搜表为关键词、库
+过滤与页大小，表结构为库与表），快照刷新或参数改变后在 I/O 前拒绝；单个对象或单列就放不下一个
+结果时同样在 I/O 前拒绝，不让模型反复缩小页。
 ``local/describe_table_layout`` 同样先探测，再读该表的布局；两个 ``describe`` 工具按
 ``database`` 与 ``table`` 定位快照中的对象。``local/run_readonly_query`` 只执行 SQLGuard
 产生的 ``GuardedQuery``，``local/explain_query`` 只以 Adapter 的固定显式级别 EXPLAIN
@@ -16,9 +21,10 @@
 检查：在当前授权之后、预算预留与任何 StarRocks I/O 之前运行，拒绝时模型只收到固定原因码与
 说明，可在本轮剩余轮次内修正。
 
-``local/list_slow_queries`` 只在目标配置了审计源时登记：读已有审计表中本目标库、原文通过当前
-快照 SQLGuard 范围的慢查询（见 ``StarRocksAdapter.slow_queries``），时间窗与排序方式在 I/O 前检查。
-交付前再对各行原文引用的对象做一次零行探测，引用了已不可读对象的行不列出。
+``local/list_slow_queries`` 只在目标配置了审计源时登记：读已有审计表中所有库（或可选的一个会话
+当前库）、原文通过当前快照 SQLGuard 范围的慢查询（见 ``StarRocksAdapter.slow_queries``）；原文中
+未限定的对象名按该条记录自身的会话当前库解析。时间窗与排序方式在 I/O 前检查。交付前再对各行
+原文引用的对象做一次零行探测，引用了已不可读对象的行不列出。
 
 诊断用途能看到元数据工具（含表布局）与 ``explain_query``，看不到 ``run_readonly_query``。计划证据的
 固定说明（``PLAN_NOTE``，审计为 ``AUDIT_NOTE``）登记在策略上，由交付时的代码附加在事实区，
@@ -48,11 +54,12 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import re
 import time
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from typing import Annotated, Final, Literal
+from typing import Annotated, Final, Literal, TypeGuard
 
 from pydantic import BaseModel, ConfigDict, StringConstraints
 
@@ -90,7 +97,7 @@ from xiaowei.starrocks import (
     StarRocksErrorCode,
     StarRocksTarget,
     audit_sql_bytes,
-    bounded_rows,
+    fitting_rows,
     metadata_sql_bytes,
 )
 from xiaowei.starrocks_schema import (
@@ -115,13 +122,22 @@ SLOW_QUERIES: Final = "local/list_slow_queries"
 AUDIT_TOOLS: Final = frozenset({SLOW_QUERIES})
 """只在配置了审计源时登记；查询与诊断用途都可见（读审计不执行被诊断的 SQL）。"""
 AUDIT_NOTE: Final = (
-    "审计记录由 AuditLoader 批量导入，最近约一个导入周期内的查询可能尚未出现；只显示本目标数据库中"
-    "能确认引用对象全部获准的查询，列表可能少于上限，为空也不代表没有慢查询。"
-    "指标为 StarRocks 实测值，空值表示未知。"
+    "审计记录由 AuditLoader 批量导入，最近约一个导入周期内的查询可能尚未出现；SQL 中未写库名的表"
+    "按 database 列（语句执行时的当前库，空值为没有当前库）解析。只显示能确认引用对象全部获准的"
+    "查询，且每次只检查有限条候选记录：列表可能少于上限，为空也不代表没有慢查询；标记截断时列表"
+    "不完整，可能还有未检查或未列出的记录。指标为 StarRocks 实测值，空值表示未知。"
 )
 SCHEMA_NOTE: Final = (
     "表结构来自定期采集的元数据快照（采集时间见来源），只含只读账号可 SELECT 的对象；"
     "列出的对象已在交付前逐个确认当前仍可读。"
+)
+SNAPSHOT_STALE: Final = "表结构已刷新，旧的 cursor 已失效，未执行；请从头开始（cursor 传 null）"
+CURSOR_INVALID: Final = (
+    "cursor 无效，未执行；请原样传回上一次结果中的 next_cursor，或传 null 从头开始"
+)
+CURSOR_MISMATCH: Final = (
+    "cursor 与本次参数不符，未执行：续取须保持与开始时相同的参数（搜表为关键词、database 与 "
+    "page_size，表结构为库与表）；换参数请从头开始（cursor 传 null）"
 )
 LIST_COLUMNS: Final = ("database", "name", "type", "comment")
 DESCRIBE_COLUMNS: Final = ("name", "type", "nullable", "comment")
@@ -131,6 +147,8 @@ PLAN_NOTE: Final = (
 )
 
 RESULT_FIELDS: Final = ("sql", "columns", "rows", "row_count", "elapsed_ms")
+PAGED_FIELDS: Final = (*RESULT_FIELDS, "next_cursor")
+"""搜表与表结构另带续取游标：还有未交付的对象或列时非空（见 ``_cursor``）。"""
 # JSON 转义膨胀最大的单字节字符：控制字符写作 \u00XX，一个字节变六个。
 _WIDEST_CHAR: Final = "\x01"
 # 有符号 64 位整数中十进制写法最长的值。
@@ -142,20 +160,36 @@ _WIDEST_INT: Final = -(2**63)
 ClusterArg = Annotated[str, StringConstraints(min_length=1, max_length=32)]
 
 
+CursorArg = Annotated[str, StringConstraints(min_length=1, max_length=64)]
+
+
 class ListTablesArgs(BaseModel):
-    """只有目标集群：不接受过滤条件、catalog 或任何查询参数。"""
+    """按关键词搜表：参数全部必填，``database`` 与 ``cursor`` 不需要时显式写 ``null``。
+
+    页大小的范围随目标配置，在前置检查中复核（同 ``window_minutes``）。
+    """
 
     model_config = ConfigDict(extra="forbid")
 
     cluster: ClusterArg
+    keyword: Annotated[str, StringConstraints(min_length=1, max_length=64)]
+    database: Annotated[str, StringConstraints(min_length=1, max_length=256)] | None
+    page_size: int
+    cursor: CursorArg | None
 
 
-class DescribeTableArgs(BaseModel):
+class TableArgs(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     cluster: ClusterArg
     database: Annotated[str, StringConstraints(min_length=1, max_length=256)]
     table: Annotated[str, StringConstraints(min_length=1, max_length=256)]
+
+
+class DescribeTableArgs(TableArgs):
+    """表结构：列多时分次取得，``cursor`` 第一次传 ``null``，之后传上一次的 ``next_cursor``。"""
+
+    cursor: CursorArg | None
 
 
 class RunQueryArgs(BaseModel):
@@ -171,6 +205,7 @@ class ListSlowQueriesArgs(BaseModel):
     cluster: ClusterArg
     window_minutes: int
     order_by: Literal["query_time", "scan_bytes", "scan_rows", "cpu", "memory", "pending"]
+    database: Annotated[str, StringConstraints(min_length=1, max_length=256)] | None
 
 
 class ExplainQueryArgs(BaseModel):
@@ -212,18 +247,19 @@ def starrocks_tools(
     if schema.target_id != target.target_id:
         raise ValueError("StarRocks 工具：结构快照必须属于同一目标")
     worst = worst_case_observation(adapter)
-    projections: dict[str, Projection] = {
-        a: Projection(fields=RESULT_FIELDS, max_bytes=max_bytes[a]) for a in AUDIENCES
-    }
-
     scope = data_scope_digest(target)
 
-    def policy(name: str, arguments: type[BaseModel], fact_note: str | None = None) -> ToolPolicy:
+    def policy(
+        name: str,
+        arguments: type[BaseModel],
+        fact_note: str | None = None,
+        fields: tuple[str, ...] = RESULT_FIELDS,
+    ) -> ToolPolicy:
         return ToolPolicy(
             policy_id=f"starrocks.{target.target_id}.{name}",
             arguments=arguments,
-            projections=projections,
-            required=RESULT_FIELDS,
+            projections={a: Projection(fields=fields, max_bytes=max_bytes[a]) for a in AUDIENCES},
+            required=fields,
             data_scope=scope,
             fact_note=fact_note,
         )
@@ -237,14 +273,23 @@ def starrocks_tools(
             description=description,
         )
 
-    list_policy = policy("list_tables", ListTablesArgs, SCHEMA_NOTE)
-    describe_policy = policy("describe_table", DescribeTableArgs, SCHEMA_NOTE)
-    layout_policy = policy("describe_table_layout", DescribeTableArgs)
+    list_policy = policy("list_tables", ListTablesArgs, SCHEMA_NOTE, PAGED_FIELDS)
+    describe_policy = policy("describe_table", DescribeTableArgs, SCHEMA_NOTE, PAGED_FIELDS)
+    layout_policy = policy("describe_table_layout", TableArgs)
     query_policy = policy("run_readonly_query", RunQueryArgs)
     explain_policy = policy("explain_query", ExplainQueryArgs, PLAN_NOTE)
-    # 五个策略的投影相同：检查一次即覆盖全部工具。
+    # 其余策略的投影与查询相同，检查一次即覆盖；搜表与表结构多一个续取游标，按它们的实际形态
+    # 另查：SQL 与列头是固定的元数据模板，行与查询同受 ``max_result_bytes`` 约束，游标按最长的
+    # 偏移（不超过快照的对象或列上限）构造。
+    widest = _cursor("f" * _VERSION_CHARS, (), _max_offset(target))
     try:
         check_projection_capacity(query_policy, worst)
+        for paged, sql, columns in (
+            (list_policy, SCHEMA_OBJECTS_SQL, LIST_COLUMNS),
+            (describe_policy, SCHEMA_COLUMNS_SQL, DESCRIBE_COLUMNS),
+        ):
+            payload = {**worst.payload, "sql": sql, "columns": list(columns), "next_cursor": widest}
+            check_projection_capacity(paged, worst.model_copy(update={"payload": payload}))
     except ValueError as exc:
         raise ValueError(f"StarRocks 工具：{exc}") from None
     bounds = _Bounds(
@@ -258,31 +303,56 @@ def starrocks_tools(
             pass
         raise ToolRejectedError(SCHEMA_UNAVAILABLE)
 
-    def check_snapshot(request: ToolRequest) -> SchemaSnapshot:
-        return current()
+    page_rows = target.policy.max_rows
 
-    async def list_tables(snapshot: SchemaSnapshot) -> ToolObservation:
+    def check_search(request: ToolRequest) -> _Page:
+        snapshot = current()
+        args = request.arguments
+        keyword = str(args["keyword"]).strip()
+        if not keyword:
+            raise ToolRejectedError("搜表未执行：关键词不能为空")
+        size = args["page_size"]
+        if not _counting(size) or not 1 <= size <= page_rows:
+            raise ToolRejectedError(f"搜表未执行：page_size 须在 1 到 {page_rows} 之间")
+        database = None if args["database"] is None else str(args["database"])
+        needle = keyword.casefold()
+        scope = ("list_tables", needle, database, size)
+        start = _resume(args["cursor"], snapshot, scope)
+        matches = [
+            key
+            for key, obj in sorted(snapshot.objects.items())
+            if database in (None, key[0]) and _matches(obj, needle)
+        ]
+        if start and start >= len(matches):
+            raise ToolRejectedError(CURSOR_INVALID)  # 同快照同参数的游标不会越界
+        # 页在 I/O 前按快照中的行规划：撤权只会让本页变短，规划出的页一定放得下。
+        candidates = matches[start : start + size]
+        count = fitting_rows([_listed(snapshot.objects[k]) for k in candidates], size, target)
+        if candidates and count == 0:
+            raise ToolRejectedError(
+                "搜表未执行：下一个匹配对象的一行（含表注释）超过单值或结果字节上限，无法列出；"
+                "请用 database 过滤或更具体的关键词避开它"
+            )
+        end = start + count
+        following = _cursor(snapshot.version, scope, end) if end < len(matches) else None
+        return _Page(snapshot, tuple(candidates[:count]), following)
+
+    async def list_tables(page: _Page) -> ToolObservation:
         started = time.monotonic()
-        limit = target.policy.max_rows
-        cap = 2 * limit
-        pending = sorted(snapshot.objects)
-        readable: list[tuple[str, str]] = []
-        attempted = 0
-        # 按目录顺序分批探测：凑满一页再多一个即停，且按已尝试的对象数硬性封顶（与可读对象
-        # 多少无关）；未探测的对象不列出，只标记截断。
-        while pending and len(readable) <= limit and attempted < cap:
-            size = min(limit, cap - attempted)
-            batch, pending = pending[:size], pending[size:]
-            attempted += len(batch)
-            verdicts = await adapter.probe(batch)
-            readable += [key for key in batch if verdicts[key]]
-        rows = [_listed(snapshot.objects[key]) for key in readable]
-        kept, truncated = bounded_rows(rows, limit, target)
+        snapshot = page.snapshot
+        # 只探测本页对象；已不可读的不列出，但已越过，续页从本页之后开始，不重复也不遗漏。
+        verdicts = await adapter.probe(page.keys) if page.keys else {}
+        shown = [key for key in page.keys if verdicts[key]]
+        rows = tuple(_listed(snapshot.objects[key]) for key in shown)
         result = _from_snapshot(
-            snapshot, SCHEMA_OBJECTS_SQL, LIST_COLUMNS, kept, truncated or bool(pending), started
+            snapshot, SCHEMA_OBJECTS_SQL, LIST_COLUMNS, rows, page.following is not None, started
         )
-        shown = readable[: len(kept)]
-        return _observation(result, bounds, [listed_dependency(*key) for key in shown])
+        return _observation(
+            result,
+            bounds,
+            [listed_dependency(*key) for key in shown],
+            extra={"next_cursor": page.following},
+        )
 
     def check_table(request: ToolRequest) -> tuple[SchemaSnapshot, ObjectInfo]:
         snapshot = current()
@@ -293,24 +363,44 @@ def starrocks_tools(
             )
         return snapshot, found
 
+    def check_describe(request: ToolRequest) -> _Columns:
+        snapshot, found = check_table(request)
+        scope = ("describe_table", found.database, found.name)
+        start = _resume(request.arguments["cursor"], snapshot, scope)
+        if start and start >= len(found.columns):
+            raise ToolRejectedError(CURSOR_INVALID)
+        rows: list[dict[str, Scalar]] = [
+            {"name": c.name, "type": c.type, "nullable": c.nullable, "comment": c.comment}
+            for c in found.columns[start:]
+        ]
+        count = fitting_rows(rows, len(rows), target)
+        if rows and count == 0:
+            raise ToolRejectedError(
+                "表结构未获取：下一列的定义（含注释）超过单值或结果字节上限，无法显示"
+            )
+        end = start + count
+        following = _cursor(snapshot.version, scope, end) if end < len(found.columns) else None
+        return _Columns(snapshot, found, tuple(rows[:count]), following)
+
     async def readable(found: ObjectInfo) -> None:
         verdicts = await adapter.probe([(found.database, found.name)])
         if not verdicts[(found.database, found.name)]:
             raise StarRocksError(StarRocksErrorCode.OBJECT_UNREADABLE)
 
-    async def describe_table(checked: tuple[SchemaSnapshot, ObjectInfo]) -> ToolObservation:
+    async def describe_table(page: _Columns) -> ToolObservation:
         started = time.monotonic()
-        snapshot, found = checked
-        await readable(found)
-        rows: list[dict[str, Scalar]] = [
-            {"name": c.name, "type": c.type, "nullable": c.nullable, "comment": c.comment}
-            for c in found.columns
-        ]
-        kept, truncated = bounded_rows(rows, len(rows), target)
+        await readable(page.found)
         result = _from_snapshot(
-            snapshot, SCHEMA_COLUMNS_SQL, DESCRIBE_COLUMNS, kept, truncated, started
+            page.snapshot,
+            SCHEMA_COLUMNS_SQL,
+            DESCRIBE_COLUMNS,
+            page.rows,
+            page.following is not None,
+            started,
         )
-        return _observation(result, bounds, [read_dependency(found)])
+        return _observation(
+            result, bounds, [read_dependency(page.found)], extra={"next_cursor": page.following}
+        )
 
     async def describe_layout(checked: tuple[SchemaSnapshot, ObjectInfo]) -> ToolObservation:
         _, found = checked
@@ -355,13 +445,19 @@ def starrocks_tools(
         contract(
             LIST_TABLES,
             list_policy,
-            "列出所选集群中只读账号可查询的库、表与视图及其注释（按库表名排序，行数有上限）。",
+            "按关键词搜索所选集群中只读账号可查询的库、表与视图：不区分大小写匹配“库名.表名”、"
+            "表注释与列名，按库表名排序分页返回库、表、类型与注释。database 为 null 时搜索全部库；"
+            f"page_size 为 1 到 {page_rows}（结果字节放不下时一页会少于它）。第一页 cursor 传 "
+            "null；结果的 next_cursor 非空表示还有未返回的匹配，原样传回它并保持 keyword、"
+            "database 与 page_size 不变即可取得下一页，为 null 时已全部返回。表结构刷新后旧 "
+            "cursor 失效，须从头搜索。",
         ),
         contract(
             DESCRIBE_TABLE,
             describe_policy,
             "查看一张可查询的表或视图的列、类型、是否可空与注释；"
-            "database 与 table 取自 list_tables。",
+            "database 与 table 取自 list_tables 的搜索结果。列多时分次返回：第一次 cursor 传 "
+            "null，结果的 next_cursor 非空时原样传回它（库与表不变）取得后续列。",
         ),
         contract(
             LAYOUT_TOOL,
@@ -387,8 +483,8 @@ def starrocks_tools(
     policies = [list_policy, describe_policy, query_policy, explain_policy, layout_policy]
     key = target.target_id
     executes: dict[tuple[str, str], Execute] = {
-        (LIST_TABLES, key): Prechecked(check=check_snapshot, run=list_tables),
-        (DESCRIBE_TABLE, key): Prechecked(check=check_table, run=describe_table),
+        (LIST_TABLES, key): Prechecked(check=check_search, run=list_tables),
+        (DESCRIBE_TABLE, key): Prechecked(check=check_describe, run=describe_table),
         (LAYOUT_TOOL, key): Prechecked(check=check_table, run=describe_layout),
         (RUN_QUERY, key): Prechecked(check=check_query, run=run_query),
         (EXPLAIN_QUERY, key): Prechecked(check=check_explain, run=explain),
@@ -398,21 +494,28 @@ def starrocks_tools(
 
         audit = target.audit
 
-        def check_window(request: ToolRequest) -> tuple[int, str, SchemaSnapshot]:
-            window, order = request.arguments["window_minutes"], request.arguments["order_by"]
-            if not isinstance(window, int) or isinstance(window, bool) or not 1 <= window <= limit:
+        def check_window(request: ToolRequest) -> _SlowQueries:
+            args = request.arguments
+            window, order = args["window_minutes"], args["order_by"]
+            if not _counting(window) or not 1 <= window <= limit:
                 raise ToolRejectedError(f"慢查询未读取：时间窗须在 1 到 {limit} 分钟之间")
             # 参数模型已把排序方式限定为枚举；这里再按 Adapter 的固定映射复核。
             if order not in AUDIT_ORDER_COLUMNS:
                 raise ToolRejectedError("慢查询未读取：排序方式不在允许范围内")
-            return window, str(order), current()
+            database = args["database"]
+            return _SlowQueries(
+                window=window,
+                order=str(order),
+                database=None if database is None else str(database),
+                snapshot=current(),
+            )
 
-        async def slow_queries(args: tuple[int, str, SchemaSnapshot]) -> ToolObservation:
-            window, order, snapshot = args
-            # 审计只读取目标默认库的记录：原文中未限定的对象名按该库解析（Task 6 改为按每条
-            # 记录自身的库）；显式写出的其他库对象同样按快照与当前权限检查。
-            policy = snapshot.query_policy.model_copy(update={"default_database": target.database})
-            result = await adapter.slow_queries(window, order, policy)
+        async def slow_queries(args: _SlowQueries) -> ToolObservation:
+            snapshot = args.snapshot
+            # 原文中未限定的对象名按每条记录自身的会话当前库解析；显式写出的库对象同样按快照与
+            # 当前权限检查（Adapter 与下面的引用重算用同一规则）。
+            policy = snapshot.query_policy
+            result = await adapter.slow_queries(args.window, args.order, policy, args.database)
             # 原文已通过同一范围的 SQLGuard：在线程中重算各行引用（同步 CPU），按当前权限过滤。
             references = await asyncio.to_thread(_audit_references, result.rows, policy)
             verdicts = await adapter.probe(sorted({o for found, _ in references for o in found}))
@@ -438,9 +541,10 @@ def starrocks_tools(
             contract(
                 SLOW_QUERIES,
                 audit_policy,
-                "列出最近一段时间内所选集群默认数据库实际运行过的慢查询（来自审计表），按所选指标"
-                "降序；只列出引用对象全部获准的查询，给出实测耗时、扫描量、CPU、内存、排队"
-                f"时间与 SQL 原文。时间窗为 1 到 {limit} 分钟。",
+                "列出最近一段时间内所选集群实际运行过的慢查询（来自审计表），按所选指标降序；只列出"
+                "引用对象全部获准的查询，给出实测耗时、扫描量、CPU、内存、排队时间、执行时的当前库"
+                f"与 SQL 原文。时间窗为 1 到 {limit} 分钟；database 为 null 时读取所有库的记录，"
+                "否则只读执行时当前库为它的记录。",
             )
         )
         policies.append(audit_policy)
@@ -449,12 +553,13 @@ def starrocks_tools(
     return StarRocksTools(contracts=tuple(contracts), policies=tuple(policies), executes=executes)
 
 
-DATA_SCOPE_FORMAT: Final = "xiaowei.data_scope.starrocks/4"
+DATA_SCOPE_FORMAT: Final = "xiaowei.data_scope.starrocks/5"
 """摘要公式的显式版本：纳入或排除的字段改变时更新，使旧公式下保存的证据一次性失效。
 
 /2（P2.5 Task 2 审查）：加入数据库类型、TLS、服务端时间与内存限额、客户端期限与时区。
 /3（D1/D2）：固定 SQL 语义，纳入 sql_mode，并使修复前的 StarRocks 证据一次性失效。
 /4（P2.5 Task 3）：跨库、UNION/窗口/星号展开与列名大小写规则改变查询语义；纳入 max_result_columns。
+/5（P2.5 Task 6）：审计改为读取所有库、按每条记录的当前库解析原文并输出该库；列表改为关键词分页。
 """
 
 
@@ -548,6 +653,82 @@ class _Bounds:
     columns: int
 
 
+# 快照版本（``secrets.token_hex(8)``，十六进制无转义）的字符数；启动容量检查按它构造游标。
+_VERSION_CHARS: Final = 16
+_CURSOR_FORMAT: Final = re.compile(r"([0-9a-f]{16})-([1-9][0-9]*)-([0-9a-f]{16})")
+
+
+@dataclass(frozen=True)
+class _SlowQueries:
+    window: int
+    order: str
+    database: str | None
+    snapshot: SchemaSnapshot
+
+
+@dataclass(frozen=True)
+class _Page:
+    """前置检查规划好的一页搜表结果：要探测并列出的对象与续取游标。"""
+
+    snapshot: SchemaSnapshot
+    keys: tuple[tuple[str, str], ...]
+    following: str | None
+
+
+@dataclass(frozen=True)
+class _Columns:
+    """前置检查规划好的一段表结构：对象、要交付的列与续取游标。"""
+
+    snapshot: SchemaSnapshot
+    found: ObjectInfo
+    rows: tuple[dict[str, Scalar], ...]
+    following: str | None
+
+
+def _cursor(version: str, scope: tuple[object, ...], offset: int) -> str:
+    """续取游标：``<快照版本>-<偏移>-<校验>``，校验由版本、参数与偏移计算。
+
+    游标只防误用（换了参数、跨快照或手写偏移），不是授权凭据：每页仍按当前权限探测。
+    """
+    return f"{version}-{offset}-{_cursor_tag(version, scope, offset)}"
+
+
+def _cursor_tag(version: str, scope: tuple[object, ...], offset: int) -> str:
+    body = json.dumps([version, *scope, offset], ensure_ascii=False)
+    return hashlib.sha256(body.encode()).hexdigest()[:16]
+
+
+def _resume(cursor: object, snapshot: SchemaSnapshot, scope: tuple[object, ...]) -> int:
+    """游标对应的偏移；``None`` 为从头开始。格式不符、快照已刷新或参数不同时在 I/O 前拒绝。"""
+    if cursor is None:
+        return 0
+    found = _CURSOR_FORMAT.fullmatch(str(cursor))
+    if found is None:
+        raise ToolRejectedError(CURSOR_INVALID)
+    version, offset, tag = found[1], int(found[2]), found[3]
+    if version != snapshot.version:
+        raise ToolRejectedError(SNAPSHOT_STALE)
+    if tag != _cursor_tag(version, scope, offset):
+        raise ToolRejectedError(CURSOR_MISMATCH)
+    return offset
+
+
+def _max_offset(target: StarRocksTarget) -> int:
+    """游标偏移的上限：搜表不超过快照对象数，表结构不超过快照列数。"""
+    limits = target.schema_limits
+    return max(limits.max_objects, limits.max_columns)
+
+
+def _counting(value: object) -> TypeGuard[int]:
+    return isinstance(value, int) and not isinstance(value, bool)
+
+
+def _matches(obj: ObjectInfo, needle: str) -> bool:
+    """关键词（已 casefold）是否出现在“库名.表名”、表注释或任一列名中。"""
+    texts = (f"{obj.database}.{obj.name}", obj.comment or "", *(c.name for c in obj.columns))
+    return any(needle in text.casefold() for text in texts)
+
+
 def _referenced(
     snapshot: SchemaSnapshot,
     objects: Iterable[tuple[str, str]],
@@ -574,7 +755,7 @@ def _audit_references(
     rows: Iterable[Mapping[str, Scalar]], policy: QueryPolicy
 ) -> list[_References]:
     """各行原文引用的 ``(库, 对象)`` 与 ``(库, 对象, 列)``。"""
-    return [audit_references(str(row["sql"]), policy) for row in rows]
+    return [audit_references(str(row["sql"]), policy, str(row["database"] or "")) for row in rows]
 
 
 def _listed(obj: ObjectInfo) -> dict[str, Scalar]:
@@ -603,7 +784,11 @@ def _from_snapshot(
 
 
 def _observation(
-    result: QueryResult, bounds: _Bounds, dependencies: Iterable[ObjectDependency]
+    result: QueryResult,
+    bounds: _Bounds,
+    dependencies: Iterable[ObjectDependency],
+    *,
+    extra: Mapping[str, Scalar] | None = None,
 ) -> ToolObservation:
     """Adapter 结果转为工具观测；列名或 SQL 超过装配时假定的上限时按结果契约失败。"""
     columns = list(result.columns)
@@ -616,6 +801,7 @@ def _observation(
             "rows": [dict(row) for row in result.rows],
             "row_count": result.row_count,
             "elapsed_ms": result.elapsed_ms,
+            **(extra or {}),
         },
         captured_at=result.collected_at,
         truncated=result.truncated,

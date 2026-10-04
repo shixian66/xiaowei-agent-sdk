@@ -1126,6 +1126,56 @@ async def call_tool(executes: Any, tool_id: str, **arguments: object) -> Any:
     return await execute.run(execute.check(request))
 
 
+def search_page(database: str | None, keyword: str = ".", **changes: object) -> dict[str, object]:
+    """搜表参数（P2.5 Task 6）：默认第一页、页大小取 ``target`` 的 ``max_rows``。"""
+    return {"keyword": keyword, "database": database, "page_size": 5, "cursor": None, **changes}
+
+
+async def test_search_matches_real_comments_and_columns_and_pages_by_cursor(
+    instance: Instance,
+) -> None:
+    """搜表（P2.5 Task 6）：关键词匹配真实元数据中的表注释（按 ``max_comment_chars`` 截取后的
+    内容）与列名；按游标续页，刷新后旧游标在 I/O 前拒绝。"""
+    host, port, user = admin_address()
+    db, ro = instance.database, instance.ro_user
+    comment = "订单流水" + "x" * 120 + "tailword"  # 采集时截取前 100 个字符
+    await admin(
+        host,
+        port,
+        user,
+        f"CREATE TABLE {db}.orders_log (id INT, customer_ref VARCHAR(8)) DUPLICATE KEY(id) "
+        f"COMMENT '{comment}' DISTRIBUTED BY HASH(id) BUCKETS 1 "
+        "PROPERTIES('replication_num'='1')",
+        f"GRANT SELECT ON TABLE {db}.orders_log TO USER '{ro}'@'%'",
+    )
+    cache, executes = schema_tools(instance)
+    assert await cache.refresh()
+
+    def names(observation: Any) -> list[str]:
+        return [r["name"] for r in observation.payload["rows"]]
+
+    found = await call_tool(executes, LIST_TABLES, **search_page(None, "订单流水"))
+    assert names(found) == ["orders_log"]
+    assert found.payload["rows"][0]["comment"] == comment[:100]
+    # 截取之外的文字不在快照中，搜不到；列名不区分大小写匹配。
+    assert names(await call_tool(executes, LIST_TABLES, **search_page(None, "tailword"))) == []
+    by_column = await call_tool(executes, LIST_TABLES, **search_page(db, "CUSTOMER_REF"))
+    assert names(by_column) == ["orders_log"]
+
+    # 可读的两张表分两页；hidden、ungranted 不可读，不在快照中。
+    first = await call_tool(executes, LIST_TABLES, **search_page(db, page_size=1))
+    following = first.payload["next_cursor"]
+    second = await call_tool(
+        executes, LIST_TABLES, **search_page(db, page_size=1, cursor=following)
+    )
+    assert (names(first), names(second)) == (["orders_log"], ["sales"])
+    assert (first.truncated, second.truncated) == (True, False)
+    assert second.payload["next_cursor"] is None
+    assert await cache.refresh()
+    with pytest.raises(ToolRejectedError, match="表结构已刷新"):
+        await call_tool(executes, LIST_TABLES, **search_page(db, page_size=1, cursor=following))
+
+
 async def test_snapshot_follows_views_roles_and_insert_only_grants(instance: Instance) -> None:
     """可见不等于可读：只授 INSERT 的表、只经未激活角色授权的表都不进入快照；只授视图、不授
     底表时视图进入快照、底表不进入（Task 0 §9.2 的结论在产品刷新路径上复核）。"""
@@ -1169,20 +1219,20 @@ async def test_grants_and_revocations_take_effect_at_the_next_boundary(instance:
     await admin(host, port, user, f"GRANT SELECT ON TABLE {db}.hidden TO USER '{ro}'@'%'")
     # 刷新之前：快照里还没有它，表结构在 I/O 前拒绝。
     with pytest.raises(ToolRejectedError, match="不在可读的表结构中"):
-        await call_tool(executes, DESCRIBE_TABLE, database=db, table="hidden")
+        await call_tool(executes, DESCRIBE_TABLE, database=db, table="hidden", cursor=None)
     started = time.monotonic()
     assert await cache.refresh()
     refresh_seconds = time.monotonic() - started
     assert refresh_seconds < target(instance).schema_limits.refresh_timeout_seconds
-    described = await call_tool(executes, DESCRIBE_TABLE, database=db, table="hidden")
+    described = await call_tool(executes, DESCRIBE_TABLE, database=db, table="hidden", cursor=None)
     assert [r["name"] for r in described.payload["rows"]] == ["id", "v"]
 
     await admin(host, port, user, f"REVOKE SELECT ON TABLE {db}.hidden FROM USER '{ro}'@'%'")
     # 快照尚未刷新：交付前的探测发现撤权。
-    listed = await call_tool(executes, LIST_TABLES)
+    listed = await call_tool(executes, LIST_TABLES, **search_page(db))
     assert [r["name"] for r in listed.payload["rows"]] == ["sales"]
     with pytest.raises(StarRocksError) as unreadable:
-        await call_tool(executes, DESCRIBE_TABLE, database=db, table="hidden")
+        await call_tool(executes, DESCRIBE_TABLE, database=db, table="hidden", cursor=None)
     assert unreadable.value.code is Code.OBJECT_UNREADABLE
     with pytest.raises(StarRocksError) as layout:
         await call_tool(executes, LAYOUT_TOOL, database=db, table="hidden")

@@ -26,11 +26,13 @@ P2.5 Task 0 在 4.1.4 上实测该探测不会被优化消除，撤权对同一�
 ``PROPERTIES``（存储卷、副本等部署信息）。键字段中的每个名字都须是该对象的获准列，否则整段
 替换为 ``LAYOUT_HIDDEN``：不显示未获准列名，也不留下获准的一部分让人误以为是完整的键。
 
-慢查询只读已有的 AuditLoader 审计表（``StarRocksTarget.audit``）：代码模板与绑定值按库、时间窗与
-``isQuery`` 取有界候选（独立的候选行数与字节上限），原文超过 ``max_sql_bytes`` 的不读出。每条候选
-原文在 Adapter 内经当前 SQLGuard 范围（``audit_references``）检查，未通过、无法读出或放不下的
-行整行丢弃；其原文只在本函数的临时变量中，不进入结果、日志或错误。``max_sql_bytes`` 不超过
-``stmt_limit - 4``（配置校验），因此读出的原文不可能被 AuditLoader 截断。审计时间按审计源时区解释。
+慢查询只读已有的 AuditLoader 审计表（``StarRocksTarget.audit``）：代码模板与绑定值按时间窗、
+``isQuery`` 与可选的会话当前库（审计 ``db`` 列）取有界候选（独立的候选行数与字节上限，多读一条
+判断是否读完），原文超过 ``max_sql_bytes`` 的不读出。每条候选原文在 Adapter 内经当前 SQLGuard
+范围（``audit_references``）检查：未限定的对象名只在该条记录的会话当前库中解析（``''`` 为没有
+当前库，未限定名不在范围内），与数据库执行时相同；未通过、无法读出或放不下的行整行丢弃；其原文
+只在本函数的临时变量中，不进入结果、日志或错误。``max_sql_bytes`` 不超过 ``stmt_limit - 4``（配置
+校验），因此读出的原文不可能被 AuditLoader 截断。审计时间按审计源时区解释。
 
 驱动与网络错误映射为固定错误码；错误在下层 ``except`` 结束后才抛出，不带服务端原文、SQL、
 地址或凭据，``__cause__`` 与 ``__context__`` 为空。
@@ -111,6 +113,7 @@ AUDIT_COLUMNS: Final = (
     "pending_ms",
     "state",
     "digest",
+    "database",
     "sql",
 )
 # 审计表的列（AuditLoader 5.0.0，Task 0 实测）与输出列的对应；不读身份、地址与错误文本。
@@ -126,6 +129,7 @@ _AUDIT_SOURCE: Final = (
     "pendingTimeMs",
     "state",
     "digest",
+    "db",
     "stmt",
 )
 _AUDIT_METRICS: Final = {
@@ -299,8 +303,8 @@ class StarRocksTarget(BaseModel):
     """一个查询目标的可信静态配置；凭据只以 ``env:NAME`` 引用出现。
 
     ``policy`` 是 SQLGuard 的函数闭集与上限，``schema_limits`` 是结构快照的期限与容量；对象与列来自
-    快照。``database`` 是连接的默认库、表布局与审计原文的所在库；业务 SQL 不继承它：未限定
-    对象名只按快照中的唯一匹配补全（``sqlguard``）。
+    快照。``database`` 是连接的默认库；业务 SQL 不继承它：未限定对象名只按快照中的唯一匹配补全
+    （``sqlguard``），审计原文按每条记录自身的会话当前库解析。
     ``client_timeout_seconds`` 覆盖会话设置、执行与读取，不早于服务端 ``query_timeout``。
     ``max_plan_lines`` 是执行计划最多返回的行数；字节与单值上限与查询共用。
     """
@@ -489,16 +493,17 @@ _DESCRIBE_LAYOUT: Final = (
     "WHERE TABLE_SCHEMA = %s AND TABLE_NAME = %s AND TABLE_ENGINE <> %s"
 )
 _SESSION_READ: Final = "SELECT @@query_timeout, @@query_mem_limit, @@time_zone, @@sql_mode"
-# 库表名来自配置并已按 [A-Za-z0-9_] 校验，排序列来自固定映射；其余全部绑定。
+# 库表名来自配置并已按 [A-Za-z0-9_] 校验，排序列与库过滤条件来自固定文本；其余全部绑定。
 _AUDIT_CANDIDATES: Final = (
     "SELECT queryId, `timestamp`, queryTime, scanBytes, scanRows, returnRows, cpuCostNs, "
-    "memCostBytes, pendingTimeMs, state, digest, "
+    "memCostBytes, pendingTimeMs, state, digest, db, "
     "CASE WHEN LENGTH(stmt) <= %s THEN stmt END AS stmt "
     "FROM `{database}`.`{table}` "
-    "WHERE isQuery = 1 AND catalog = %s AND db = %s "
+    "WHERE isQuery = 1 AND catalog = %s{db_filter} "
     "AND `timestamp` >= %s AND `timestamp` < %s "
     "ORDER BY {order} DESC LIMIT %s"
 )
+_AUDIT_DB_FILTER: Final = " AND db = %s"
 
 
 class StarRocksAdapter:
@@ -634,14 +639,19 @@ class StarRocksAdapter:
         return result.model_copy(update={"rows": tuple(r for r in rows if r is not None)})
 
     async def slow_queries(
-        self, window_minutes: int, order_by: str, policy: QueryPolicy
+        self,
+        window_minutes: int,
+        order_by: str,
+        policy: QueryPolicy,
+        database: str | None = None,
     ) -> QueryResult:
-        """最近 ``window_minutes`` 分钟内本目标库的慢查询，按 ``order_by`` 降序，至多 ``max_rows``
-        行。
+        """最近 ``window_minutes`` 分钟内的慢查询，按 ``order_by`` 降序，至多 ``max_rows`` 行。
 
-        只返回原文通过 ``policy``（当前结构快照给出的 SQLGuard 范围）的记录（见模块说明）；
-        ``truncated`` 表示候选读取达到 ``candidate_bytes`` 或输出达到结果字节上限，可能还有未检查
-        的记录。
+        ``database`` 为 ``None`` 时读取所有库的记录，否则只读会话当前库（审计 ``db`` 列）为它的
+        记录。只返回原文通过 ``policy``（当前结构快照给出的 SQLGuard 范围）的记录：未限定的对象名
+        按该条记录自身的会话当前库解析（见模块说明）。``truncated`` 表示结果可能不完整：候选读满
+        ``candidate_rows`` 且还有下一条、候选读取达到 ``candidate_bytes``、已列满 ``max_rows`` 而
+        还有未检查的候选，或获准的行因单值或结果字节上限没有列出。
         """
         audit = self._target.audit
         if audit is None:
@@ -653,14 +663,15 @@ class StarRocksAdapter:
         zone = ZoneInfo(audit.time_zone)
         end = self._clock().astimezone(zone).replace(tzinfo=None)
         start = end - timedelta(minutes=window_minutes)
-        sql = _audit_sql(audit, AUDIT_ORDER_COLUMNS[order_by])
+        sql = _audit_sql(audit, AUDIT_ORDER_COLUMNS[order_by], filtered=database is not None)
+        # 多读一条：读到它说明候选还没有读完（``_run`` 据此标记截断）。
         args = (
             self._target.policy.max_sql_bytes,
             "default_catalog",
-            self._target.database,
+            *(() if database is None else (database,)),
             start,
             end,
-            audit.candidate_rows,
+            audit.candidate_rows + 1,
         )
         limits = _ReadLimits(
             max_bytes=audit.candidate_bytes, max_value=_audit_value_bound(self._target), zone=zone
@@ -704,28 +715,32 @@ class StarRocksAdapter:
         deadline: float,
         policy: QueryPolicy,
     ) -> tuple[list[dict[str, Scalar]], bool]:
-        """按原排序取通过检查的行；返回 (行, 是否因结果字节上限停止)。
+        """按原排序取通过检查的行；返回 (行, 是否可能不完整)。
 
-        ``deadline`` 为 ``time.monotonic()`` 时刻：每行检查前核对，到期抛出 ``TimeoutError``。
+        可能不完整：已有 ``max_rows`` 行而后面还有未检查的候选（不为确认它们是否获准而继续
+        解析），获准的行因单值或结果字节上限没有列出。``deadline`` 为 ``time.monotonic()`` 时刻：
+        每行检查前核对，到期抛出 ``TimeoutError``。
         """
         rows: list[dict[str, Scalar]] = []
         size = 2  # "[]"
+        dropped = False
         for candidate in candidates:
             if len(rows) == max_rows:
-                break
+                return rows, True
             if time.monotonic() >= deadline:
                 raise TimeoutError
             row = _audit_row(candidate)
-            if row is None or not _within_scope(row["sql"], policy):
+            if row is None or not _within_scope(row["sql"], policy, str(row["database"] or "")):
                 continue
             if any(_json_size(v) > self._target.max_value_bytes for v in row.values()):
+                dropped = True
                 continue
             added = _json_size(row) + (2 if rows else 0)
             if size + added > self._target.max_result_bytes:
                 return rows, True
             rows.append(row)
             size += added
-        return rows, False
+        return rows, dropped
 
     async def _run(
         self,
@@ -1004,8 +1019,13 @@ def _scalar(value: object, zone: ZoneInfo) -> Scalar:
     raise _ResultContractError
 
 
-def _audit_sql(audit: AuditSource, order: str) -> str:
-    return _AUDIT_CANDIDATES.format(database=audit.database, table=audit.table, order=order)
+def _audit_sql(audit: AuditSource, order: str, *, filtered: bool) -> str:
+    return _AUDIT_CANDIDATES.format(
+        database=audit.database,
+        table=audit.table,
+        order=order,
+        db_filter=_AUDIT_DB_FILTER if filtered else "",
+    )
 
 
 def audit_sql_bytes(target: StarRocksTarget) -> int:
@@ -1013,7 +1033,9 @@ def audit_sql_bytes(target: StarRocksTarget) -> int:
     audit = target.audit
     if audit is None:
         return 0
-    return max(len(_audit_sql(audit, c).encode()) for c in AUDIT_ORDER_COLUMNS.values())
+    return max(
+        len(_audit_sql(audit, c, filtered=True).encode()) for c in AUDIT_ORDER_COLUMNS.values()
+    )
 
 
 def _audit_value_bound(target: StarRocksTarget) -> int:
@@ -1027,15 +1049,16 @@ def audit_candidate_bound(target: StarRocksTarget) -> int:
     return 2 + keys + len(_AUDIT_SOURCE) * _audit_value_bound(target)
 
 
-def _within_scope(sql: Scalar, policy: QueryPolicy) -> bool:
-    """原文能否通过当前 SQLGuard 范围；任何失败（含解析器意外异常）都按未通过处理。
+def _within_scope(sql: Scalar, policy: QueryPolicy, database: str) -> bool:
+    """原文在会话当前库 ``database``（``''`` 为没有当前库）下能否通过当前 SQLGuard 范围；任何
+    失败（含解析器意外异常）都按未通过处理。
 
     审计原文来自全集群、不可信：检查失败的唯一后果是这一行不列出，异常与原文都不外传。
     """
     if not isinstance(sql, str):
         return False
     try:
-        audit_references(sql, policy)
+        audit_references(sql, policy, database)
     except Exception:  # 失败即丢弃该行，不传播可能含原文的异常
         return False
     return True
@@ -1055,6 +1078,10 @@ def _audit_row(candidate: dict[str, Scalar]) -> dict[str, Scalar] | None:
         if value is not None and not isinstance(value, str):
             raise _ResultContractError
         row[name] = value or None
+    database = candidate["db"]
+    if database is not None and not isinstance(database, str):
+        raise _ResultContractError
+    row["database"] = database or None  # '' 是没有当前库
     row["started_at"] = started
     for source, name in _AUDIT_METRICS.items():
         row[name] = _metric(candidate[source])
@@ -1131,23 +1158,19 @@ def metadata_sql_bytes() -> int:
     )
 
 
-def bounded_rows(
-    rows: Sequence[dict[str, Scalar]], max_rows: int, target: StarRocksTarget
-) -> tuple[tuple[dict[str, Scalar], ...], bool]:
-    """按与查询读取相同的规则取前若干行：行数、单值与总字节（生产 JSON 编码）任一超限即截断。"""
-    kept: list[dict[str, Scalar]] = []
-    size = 2  # "[]"
-    for row in rows:
-        if len(kept) == max_rows or any(
-            _json_size(v) > target.max_value_bytes for v in row.values()
-        ):
-            return tuple(kept), True
-        added = _json_size(row) + (2 if kept else 0)
+def fitting_rows(rows: Sequence[dict[str, Scalar]], max_rows: int, target: StarRocksTarget) -> int:
+    """开头有多少行能一起放进一个结果：规则与查询读取相同，行数、单值与总字节（生产 JSON 编码）
+    任一超限即停。"""
+    count, size = 0, 2  # "[]"
+    for row in rows[:max_rows]:
+        if any(_json_size(v) > target.max_value_bytes for v in row.values()):
+            break
+        added = _json_size(row) + (2 if count else 0)
         if size + added > target.max_result_bytes:
-            return tuple(kept), True
-        kept.append(row)
+            break
+        count += 1
         size += added
-    return tuple(kept), False
+    return count
 
 
 def _json_size(value: object) -> int:

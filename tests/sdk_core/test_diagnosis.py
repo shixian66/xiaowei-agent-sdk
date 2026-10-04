@@ -160,7 +160,11 @@ async def test_slow_query_to_plan_and_layout(diag: Env, channel: str) -> None:
     message = env.scripts.add(
         "最近一小时最慢的查询为什么慢",
         tool_call(
-            "list_slow_queries", cluster=SR.target_id, window_minutes=60, order_by="query_time"
+            "list_slow_queries",
+            cluster=SR.target_id,
+            window_minutes=60,
+            order_by="query_time",
+            database=None,
         ),
         explain_listed,
         tool_call("describe_table_layout", cluster=SR.target_id, database="shop", table="sales"),
@@ -229,7 +233,9 @@ async def test_previous_query_is_explained_without_running_it_again(
 
     second = env.scripts.add(
         "刚才那条为什么慢",
-        tool_call("describe_table", cluster=SR.target_id, database="shop", table="sales"),
+        tool_call(
+            "describe_table", cluster=SR.target_id, database="shop", table="sales", cursor=None
+        ),
         explain_replayed,
         cite("计划显示全表扫描；建议增加过滤条件"),
     )
@@ -269,7 +275,11 @@ async def test_audit_only_answer_when_the_plan_is_rejected(diag: Env, channel: s
     message = env.scripts.add(
         "慢查询有哪些，另外这条为什么慢",
         tool_call(
-            "list_slow_queries", cluster=SR.target_id, window_minutes=60, order_by="query_time"
+            "list_slow_queries",
+            cluster=SR.target_id,
+            window_minutes=60,
+            order_by="query_time",
+            database=None,
         ),
         tool_call("explain_query", cluster=SR.target_id, sql=UNAPPROVED_SQL),
         cite("审计显示扫描行数高；缺少执行计划，无法确认原因，请提供只引用获准列的 SQL"),
@@ -324,7 +334,11 @@ async def test_evidence_mixed_with_clarification_is_rejected(diag: Env, channel:
     message = env.scripts.add(
         "慢查询为什么慢",
         tool_call(
-            "list_slow_queries", cluster=SR.target_id, window_minutes=60, order_by="query_time"
+            "list_slow_queries",
+            cluster=SR.target_id,
+            window_minutes=60,
+            order_by="query_time",
+            database=None,
         ),
         mixed,
     )
@@ -377,7 +391,11 @@ async def test_instructions_inside_audit_sql_and_plans_change_nothing(
     message = env.scripts.add(
         "最慢的查询为什么慢",
         tool_call(
-            "list_slow_queries", cluster=SR.target_id, window_minutes=60, order_by="query_time"
+            "list_slow_queries",
+            cluster=SR.target_id,
+            window_minutes=60,
+            order_by="query_time",
+            database=None,
         ),
         explain_listed,
         cite("计划为估算"),
@@ -415,7 +433,11 @@ async def test_tool_failures_stop_the_turn_without_retry(
     else:
         env.drv.failures["audit"] = OperationalError(5203, "Access denied canary-audit")
         first = tool_call(
-            "list_slow_queries", cluster=SR.target_id, window_minutes=60, order_by="query_time"
+            "list_slow_queries",
+            cluster=SR.target_id,
+            window_minutes=60,
+            order_by="query_time",
+            database=None,
         )
     message = env.scripts.add("为什么慢", first, cite())
     running, feishu = serving(env, channel)
@@ -442,7 +464,11 @@ async def feishu_diagnosis(env: Env, plan: tuple[str, ...]) -> tuple[Reply, str]
     message = env.scripts.add(
         "最近最慢的查询为什么慢（飞书）",
         tool_call(
-            "list_slow_queries", cluster=SR.target_id, window_minutes=60, order_by="query_time"
+            "list_slow_queries",
+            cluster=SR.target_id,
+            window_minutes=60,
+            order_by="query_time",
+            database=None,
         ),
         explain_listed,
         cite("多次 Shuffle；建议按 region 分桶并 Colocate"),

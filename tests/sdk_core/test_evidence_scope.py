@@ -36,7 +36,7 @@ from tests.p1b.test_starrocks_adapter import (
 )
 from tests.p1b.test_starrocks_adapter import TARGET as SR
 from tests.sdk_core.synthetic_tools import Clock
-from tests.sdk_core.test_app import Scripts, cite, clarify, tool_call
+from tests.sdk_core.test_app import SEARCH_ALL, Scripts, cite, clarify, tool_call
 from tests.sdk_core.test_feishu import FakeChannel
 from tests.sdk_core.test_runtime import (
     AUDIT_CONFIG,
@@ -488,7 +488,11 @@ async def test_audit_rows_follow_current_access_of_their_objects(env: Env) -> No
         message = env.scripts.add(
             "慢查询",
             tool_call(
-                "list_slow_queries", cluster=SR.target_id, window_minutes=60, order_by="query_time"
+                "list_slow_queries",
+                cluster=SR.target_id,
+                window_minutes=60,
+                order_by="query_time",
+                database=None,
             ),
             cite(),
         )
@@ -659,8 +663,8 @@ LAYOUT_ROW = Result(
     LAYOUT_COLUMNS, [("DUP_KEYS", "`region`", "HASH", "`region`", 8, "`region`", "")]
 )
 METADATA_FACTS = {
-    "list_tables": ({}, SALES),
-    "describe_table": ({"database": "shop", "table": "sales"}, SALES),
+    "list_tables": (SEARCH_ALL, SALES),
+    "describe_table": ({"database": "shop", "table": "sales", "cursor": None}, SALES),
     "describe_table_layout": ({"database": "shop", "table": "sales"}, LAYOUT_ROW),
 }
 
@@ -843,10 +847,13 @@ async def test_the_same_object_on_two_clusters_is_checked_and_counted_on_each(en
 
 
 async def test_a_full_listing_page_fits_the_smallest_allowed_limit(env: Env) -> None:
-    """启动校验的下界（5 × 一页）足够一轮新会话列出满页：列表自身挑选可读对象的探测另受
-    ``2 × max_rows`` 封顶、不计入，证据依赖的 1 个对象在 5 次复核中各计一次。"""
+    """启动校验的下界（5 × 一页）足够一轮新会话搜出满页：搜表自身对本页对象的探测（至多一页）
+    不计入，证据依赖的 1 个对象在 5 次复核中各计一次。"""
     async with env.opened(capped(env, 5)) as rt:
-        message = env.scripts.add("列一页", tool_call("list_tables", cluster=SR.target_id), cite())
+        page = {**SEARCH_ALL, "page_size": 1}  # capped 把 max_rows 设为 1
+        message = env.scripts.add(
+            "列一页", tool_call("list_tables", cluster=SR.target_id, **page), cite()
+        )
         record = await env.turn(rt, message, "om_1")
         assert record.state == "completed", record.failure_code
         listed = [sql for sql in env.db.probes() if sql == probe_sql("shop", "regions")]

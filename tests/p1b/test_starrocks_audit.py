@@ -31,7 +31,7 @@ from tests.p1b.test_starrocks_adapter import (
 )
 
 from xiaowei import starrocks
-from xiaowei.sqlguard import guard_explain_query
+from xiaowei.sqlguard import QueryPolicy, guard_explain_query
 from xiaowei.starrocks import (
     AUDIT_COLUMNS,
     AUDIT_ORDER_COLUMNS,
@@ -57,6 +57,7 @@ SOURCE = (
     "pendingTimeMs",
     "state",
     "digest",
+    "db",
     "stmt",
 )
 AUDIT = AuditSource(
@@ -102,6 +103,7 @@ def record(stmt: object, query_id: str = "q1", **metrics: object) -> tuple[objec
         "pendingTimeMs": 0,
         "state": "EOF",
         "digest": "abc",
+        "db": "shop",  # 语句执行时的会话当前库
         "stmt": stmt,
     }
     values.update(metrics)
@@ -134,16 +136,17 @@ async def test_slow_query_sql_is_a_template_with_bound_values(order_by: str) -> 
     column = AUDIT_ORDER_COLUMNS[order_by]
     assert sql == (
         "SELECT queryId, `timestamp`, queryTime, scanBytes, scanRows, returnRows, cpuCostNs, "
-        "memCostBytes, pendingTimeMs, state, digest, "
+        "memCostBytes, pendingTimeMs, state, digest, db, "
         "CASE WHEN LENGTH(stmt) <= %s THEN stmt END AS stmt "
         "FROM `starrocks_audit_db__`.`starrocks_audit_tbl__` "
-        "WHERE isQuery = 1 AND catalog = %s AND db = %s "
+        "WHERE isQuery = 1 AND catalog = %s "
         "AND `timestamp` >= %s AND `timestamp` < %s "
         f"ORDER BY {column} DESC LIMIT %s"
     )
-    # NOW 是 08:00 UTC；审计时区为 UTC：窗口为 [06:30, 08:00)，以无时区值绑定。
+    # NOW 是 08:00 UTC；审计时区为 UTC：窗口为 [06:30, 08:00)，以无时区值绑定。不按库过滤（P2.5
+    # Task 6）；多读一条候选，用来判断候选是否已读完。
     end = datetime(2026, 9, 30, 8, 0)
-    assert args == (1000, "default_catalog", "shop", end - timedelta(minutes=90), end, 10)
+    assert args == (1000, "default_catalog", end - timedelta(minutes=90), end, 11)
     for excluded in (
         "QueriedRelations",
         "`user`",
@@ -275,6 +278,74 @@ async def test_rejected_statements_never_leave_the_adapter(
     assert CANARY not in repr(error) and CANARY not in caplog.text
 
 
+# ---- 跨库：未限定名按每条记录自身的会话当前库解析（P2.5 Task 6） --------------------------------
+
+# 三个库：shop 与 archive 都有 sales；crm 只有 customers。
+MULTI = QueryPolicy(
+    target_id="sr-test",
+    tables={
+        "shop": {"sales": ("region", "total", "note"), "regions": ("name", "region")},
+        "archive": {"sales": ("region", "total")},
+        "crm": {"customers": ("id", "tier")},
+    },
+    allowed_functions=frozenset({"SUM", "COUNT"}),
+    max_rows=5,
+    max_sql_bytes=1000,
+    max_result_columns=10,
+)
+
+
+async def by_database(*rows: tuple[str, str], database: str | None = None) -> list[Any]:
+    """每条 (会话当前库, 原文) 一条记录；返回列出的 (query_id, database)。"""
+    drv = audit_driver(*(record(sql, query_id=f"q{i}", db=db) for i, (db, sql) in enumerate(rows)))
+    t = target(audit={"max_rows": 10})
+    result = await adapter(drv, t).slow_queries(60, "query_time", MULTI, database=database)
+    return [(row["query_id"], row["database"]) for row in result.rows]
+
+
+async def test_unqualified_names_resolve_in_each_records_own_database() -> None:
+    assert await by_database(
+        ("shop", "SELECT region FROM sales"),
+        ("archive", "SELECT region FROM sales"),  # 同名表：按本条记录的库解析
+        ("crm", "SELECT region FROM sales"),  # crm 没有 sales：不改用别的库，不列出
+        ("crm", "SELECT region FROM shop.sales"),  # 显式写出其他库：按快照与权限检查
+        ("shop", "SELECT s.region FROM sales s JOIN archive.sales a ON s.region = a.region"),
+        ("shop", "SELECT region FROM crm.payroll"),  # 引用未获准对象
+        ("archive", "SELECT note FROM sales"),  # archive.sales 没有 note 列
+    ) == [("q0", "shop"), ("q1", "archive"), ("q3", "crm"), ("q4", "shop")]
+
+
+async def test_records_without_a_current_database_need_qualified_names() -> None:
+    # 无默认库的会话审计为 ''：未限定表名在数据库中执行即失败（Task 0 §9.7），这里同样不列出；
+    # 输出的库为 null。未知库（快照中没有）同样只接受限定名。
+    assert await by_database(
+        ("", "SELECT region FROM sales"),
+        ("", "SELECT region FROM shop.sales"),
+        ("nowhere", "SELECT region FROM sales"),
+        ("nowhere", "SELECT region FROM archive.sales"),
+    ) == [("q1", None), ("q3", "nowhere")]
+
+
+async def test_database_filter_is_a_bound_value() -> None:
+    drv = audit_driver(record("SELECT region FROM sales", db="archive"))
+    result = await adapter(drv).slow_queries(60, "query_time", MULTI, database="archive")
+    sql, args = only(drv).executed[-1]
+    assert "AND db = %s AND `timestamp`" in sql and "archive" not in sql
+    assert args is not None and args[2] == "archive"
+    assert [row["database"] for row in result.rows] == ["archive"]
+
+
+async def test_candidates_read_to_the_limit_are_marked_truncated() -> None:
+    # 候选恰好读满 candidate_rows 且还有下一条：可能还有未检查的记录，标记截断。
+    t = target(audit={"candidate_rows": 10, "max_rows": 3})
+    stmts = [*["SELECT secret FROM sales"] * 10, ACCEPTED[0]]
+    rows = [record(s, query_id=f"q{i}") for i, s in enumerate(stmts)]
+    drv = audit_driver(*rows)
+    result = await adapter(drv, t).slow_queries(60, "query_time", SCOPE)
+    assert result.rows == () and result.truncated
+    assert only(drv).rows_read == 11
+
+
 # ---- 有界读取 -------------------------------------------------------------------------------
 
 
@@ -292,7 +363,7 @@ async def test_candidates_are_bounded_by_rows_and_bytes() -> None:
     result = await adapter(drv, t).slow_queries(60, "scan_rows", SCOPE)
 
     conn = only(drv)
-    assert conn.executed[-1][1][-1] == 100  # LIMIT 绑定 candidate_rows
+    assert conn.executed[-1][1][-1] == 101  # LIMIT 绑定 candidate_rows + 1
     # 读到 candidate_bytes 即停止并断开；已读候选照常过滤，结果标记截断（可能还有未检查的候选）。
     assert result.truncated and (conn.aborted, conn.closed) == (True, False)
     assert 0 < conn.rows_read < len(rows)
@@ -323,6 +394,18 @@ async def test_unreadable_or_oversized_statements_drop_the_row() -> None:
     assert shown == [ACCEPTED[0]]
 
 
+async def test_a_permitted_row_too_large_to_show_marks_the_list_truncated() -> None:
+    small = target(max_value_bytes=300)
+    rows = [record(long_stmt(400), "q-long"), record(ACCEPTED[0], "q-a")]
+    result = await adapter(audit_driver(*rows), small).slow_queries(60, "query_time", SCOPE)
+    # 获准却放不下单值上限的行不列出，结果因此不完整：标记截断。
+    assert [row["query_id"] for row in result.rows] == ["q-a"] and result.truncated
+    # 原文不可读（NULL）只是无法确认获准，与上限无关：不标记截断。
+    rows = [record(None, "q-null"), record(ACCEPTED[0], "q-a")]
+    result = await adapter(audit_driver(*rows), small).slow_queries(60, "query_time", SCOPE)
+    assert [row["query_id"] for row in result.rows] == ["q-a"] and not result.truncated
+
+
 async def test_list_can_be_shorter_than_max_rows() -> None:
     t = target(audit={"candidate_rows": 10, "max_rows": 3})
     stmts = [*REJECTED[:9], ACCEPTED[0]]
@@ -332,12 +415,25 @@ async def test_list_can_be_shorter_than_max_rows() -> None:
     assert not result.truncated
 
 
-async def test_more_passing_rows_than_max_rows_keeps_the_order() -> None:
-    stmts = [ACCEPTED[i % 3] for i in range(6)]
+@pytest.mark.parametrize(
+    ("stmts", "truncated"),
+    [
+        # 合格行多于 max_rows：只列前 3 条，后面还有未检查的候选，结果不完整。
+        ([ACCEPTED[i % 3] for i in range(6)], True),
+        # 恰好 max_rows 条且候选已读完：完整。
+        (ACCEPTED[:3], False),
+        # 达到 max_rows 时仍有候选未检查（即使它们最终都不获准）：保守标记截断，不逐条解析到底。
+        ([*ACCEPTED[:3], *REJECTED[:4]], True),
+    ],
+    ids=["合格行超过上限", "恰好上限且读完", "上限之后仍有未检查候选"],
+)
+async def test_reaching_max_rows_with_candidates_left_is_truncated(
+    stmts: list[str], truncated: bool
+) -> None:
     rows = [record(s, query_id=f"q{i}") for i, s in enumerate(stmts)]
     result = await adapter(audit_driver(*rows)).slow_queries(60, "query_time", SCOPE)
     assert [row["query_id"] for row in result.rows] == ["q0", "q1", "q2"]
-    assert not result.truncated
+    assert result.truncated is truncated
 
 
 # ---- 时区与指标 -----------------------------------------------------------------------------
@@ -352,7 +448,7 @@ async def test_audit_window_uses_the_audit_time_zone() -> None:
 
     args = only(drv).executed[-1][1]
     assert args is not None
-    assert args[3:5] == (datetime(2026, 9, 30, 23, 20), datetime(2026, 9, 30, 23, 50))
+    assert args[2:4] == (datetime(2026, 9, 30, 23, 20), datetime(2026, 9, 30, 23, 50))
     assert result.rows[0]["started_at"] == "2026-09-30T23:40:00+00:00"
 
     shanghai = target(audit={"time_zone": "Asia/Shanghai"})
@@ -361,7 +457,7 @@ async def test_audit_window_uses_the_audit_time_zone() -> None:
     result = await ada.slow_queries(30, "query_time", SCOPE)
     args = only(drv).executed[-1][1]
     assert args is not None
-    assert args[3:5] == (datetime(2026, 10, 1, 7, 20), datetime(2026, 10, 1, 7, 50))
+    assert args[2:4] == (datetime(2026, 10, 1, 7, 20), datetime(2026, 10, 1, 7, 50))
     assert result.rows[0]["started_at"] == "2026-10-01T07:40:00+08:00"
 
 
@@ -422,6 +518,7 @@ async def test_output_columns_are_fixed_and_exclude_identity_fields() -> None:
             "pending_ms",
             "state",
             "digest",
+            "database",
             "sql",
         )
     )
@@ -476,10 +573,10 @@ async def test_parsing_stops_once_the_client_deadline_has_passed(
     checked: list[str] = []
     real = starrocks._within_scope
 
-    def slow(sql: str, policy: Any) -> bool:
+    def slow(sql: str, policy: Any, database: str) -> bool:
         checked.append(sql)
         time.sleep(0.05)
-        return bool(real(sql, policy))
+        return bool(real(sql, policy, database))
 
     monkeypatch.setattr(starrocks, "_within_scope", slow)
     rows = [record("SELECT secret FROM sales", query_id=f"q{i}") for i in range(100)]

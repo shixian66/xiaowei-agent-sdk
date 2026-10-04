@@ -24,7 +24,7 @@ from sqlalchemy.engine import URL
 from tests.p1b.test_starrocks_adapter import TARGET as SR
 from tests.p1b.test_starrocks_adapter import driver
 from tests.sdk_core.browser import Page, launch
-from tests.sdk_core.test_app import after, cite, tool_call
+from tests.sdk_core.test_app import SEARCH_ALL, after, cite, tool_call
 from tests.sdk_core.test_cli import CANARY, Deployment, secrets_absent
 from tests.sdk_core.test_runtime import PLAN, Env
 from tests.sdk_core.test_runtime import env as env  # pytest fixture
@@ -121,7 +121,7 @@ async def test_formal_assembly_turns_in_chrome(env: Env, chrome_binary: str) -> 
         await check_cookie(page)
 
         diagnose = env.scripts.add(
-            "浏览器诊断表结构", tool_call("list_tables", cluster=SR.target_id), cite()
+            "浏览器诊断表结构", tool_call("list_tables", cluster=SR.target_id, **SEARCH_ALL), cite()
         )
         await send(page, diagnose)
         await settled(page, 0, "completed")
@@ -162,7 +162,9 @@ async def test_formal_assembly_turns_in_chrome(env: Env, chrome_binary: str) -> 
         gate, entered = asyncio.Event(), asyncio.Event()
         slow = env.scripts.add(
             "浏览器慢轮",
-            after(gate, tool_call("list_tables", cluster=SR.target_id), entered=entered),
+            after(
+                gate, tool_call("list_tables", cluster=SR.target_id, **SEARCH_ALL), entered=entered
+            ),
             cite(),
         )
         await send(page, slow)

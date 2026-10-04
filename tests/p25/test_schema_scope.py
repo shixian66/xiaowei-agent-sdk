@@ -29,6 +29,7 @@ from tests.p1b.test_starrocks_adapter import (
 
 from xiaowei.governance import Prechecked, ToolRejectedError
 from xiaowei.models import AUDIENCES, ToolObservation, ToolRequest
+from xiaowei.sqlguard import QueryPolicy
 from xiaowei.starrocks import (
     SCHEMA_COLUMNS_SQL,
     SCHEMA_OBJECTS_SQL,
@@ -141,7 +142,7 @@ async def test_refresh_keeps_only_objects_the_account_can_select() -> None:
         "shop": {"sales": ("region", "total", "note")},
         "crm": {"customers": ("id", "tier")},
     }
-    assert policy.default_database is None  # 业务 SQL 不继承连接的默认库
+    assert "default_database" not in QueryPolicy.model_fields  # 业务 SQL 不继承连接的默认库
     assert policy.allowed_functions == TARGET.policy.allowed_functions
     assert policy.max_result_columns == TARGET.policy.max_result_columns
     # 每个候选对象恰好探测一次，全部在同一条连接上。
@@ -408,9 +409,16 @@ async def tools(refreshed: bool = True) -> Tools:
     return Tools(drv, clock, cache, assembled.executes, world)
 
 
+# “.” 出现在每个“库名.表名”中：第一页即目录的前 max_rows 个对象。
+SEARCH_ALL: dict[str, object] = {
+    "keyword": ".",
+    "database": None,
+    "page_size": TARGET.policy.max_rows,
+    "cursor": None,
+}
 ALL_CALLS: list[tuple[str, dict[str, object]]] = [
-    (LIST_TABLES, {}),
-    (DESCRIBE_TABLE, {"database": "shop", "table": "sales"}),
+    (LIST_TABLES, SEARCH_ALL),
+    (DESCRIBE_TABLE, {"database": "shop", "table": "sales", "cursor": None}),
     (LAYOUT_TOOL, {"database": "shop", "table": "sales"}),
     (RUN_QUERY, {"sql": "SELECT region FROM sales"}),
     (EXPLAIN_QUERY, {"sql": "SELECT region FROM sales"}),
@@ -432,7 +440,7 @@ async def test_every_tool_is_rejected_before_io_without_a_current_snapshot(
 async def test_list_skips_objects_revoked_since_the_refresh() -> None:
     t = await tools()
     t.world.denied = {("crm", "customers")}  # 刷新之后撤权：快照仍有它
-    observation = await t.call(LIST_TABLES)
+    observation = await t.call(LIST_TABLES, **SEARCH_ALL)
     rows = observation.payload["rows"]
     assert [(r["database"], r["name"]) for r in rows] == [("shop", "regions"), ("shop", "sales")]  # type: ignore[index, union-attr]
     # 列出前探测了快照中的每个对象（含刚撤权的那个），没有其他元数据读取。
@@ -450,9 +458,9 @@ async def listed(
     revoked: set[tuple[str, str]] | None = None,
     overrides: dict[str, Result | BaseException] | None = None,
 ) -> tuple[ToolObservation, Driver]:
-    """按 ``world`` 刷新快照，再撤销 ``revoked``、换上 ``overrides`` 后列表一次。
+    """按 ``world`` 刷新快照，再撤销 ``revoked``、换上 ``overrides`` 后搜索第 1 页。
 
-    返回结果与只含列表本身 I/O 的驱动记录。
+    返回结果与只含搜表本身 I/O 的驱动记录。
     """
     drv, clock = world.driver(), Clock()
     adapter, cache = cache_for(drv, clock)
@@ -468,7 +476,7 @@ async def listed(
         target_id=TARGET.target_id,
         call_id="c1",
         tool_name="list_tables",
-        arguments={"cluster": TARGET.target_id},
+        arguments={"cluster": TARGET.target_id, **SEARCH_ALL},
     )
     return await execute.run(execute.check(request)), drv
 
@@ -477,48 +485,31 @@ def names(observation: ToolObservation) -> list[str]:
     return [row["name"] for row in observation.payload["rows"]]  # type: ignore[index, union-attr]
 
 
-# 每次列表最多尝试探测的对象数（计划 Task 2 实施说明：2 × max_rows）。
-PROBE_CAP = 2 * TARGET.policy.max_rows
-
-
-async def test_list_is_bounded_and_says_so() -> None:
-    observation, drv = await listed(World(tables=numbered(12)))
-    assert names(observation) == [f"t{i:02d}" for i in range(TARGET.policy.max_rows)]
-    assert observation.truncated
-    # 只探测到凑满一页再多一个所需的批次，不探测整个目录。
-    assert len(statements(drv)) == PROBE_CAP
-
-
 @pytest.mark.parametrize(
     ("count", "denied", "shown", "truncated"),
     [
-        # 第一批凑满一页，其后是很长的撤权尾部：按已尝试的对象数停下，不探测整个目录。
-        (30, range(5, 30), range(5), True),
-        # 前几批大多已撤权：尝试满上限即停，未检查的候选标记截断。
-        (30, [*range(0, 4), *range(5, 9)], [4, 9], True),
+        # 本页大多已撤权：只列出仍可读的，页不前移，后面还有匹配即标记截断（P2.5 Task 6）。
+        (30, range(1, 5), [0], True),
         # 全部可读的成功对照。
         (30, (), range(5), True),
-        # 恰好一页、全部可读：探测完整个目录，不截断。
+        # 恰好一页、全部可读：不截断。
         (5, (), range(5), False),
-        # 上限内探测完整个目录，可读对象不足一页：不截断。
-        (PROBE_CAP, range(1, PROBE_CAP), [0], False),
     ],
-    ids=["长撤权尾部", "前几批大多撤权", "全部可读", "恰好一页", "上限内探测完"],
+    ids=["本页大多撤权", "全部可读", "恰好一页"],
 )
-async def test_list_probes_at_most_twice_a_page_of_objects(
+async def test_a_page_probes_only_its_own_objects(
     count: int, denied: Any, shown: Any, truncated: bool
 ) -> None:
     revoked = {("shop", f"t{i:02d}") for i in denied}
     observation, drv = await listed(World(tables=numbered(count)), revoked)
     assert names(observation) == [f"t{i:02d}" for i in shown]
     assert observation.truncated is truncated
-    probed = statements(drv)
-    assert len(probed) == min(count, PROBE_CAP)
-    assert probed == [probe_sql("shop", f"t{i:02d}") for i in range(len(probed))]  # 目录顺序
+    # 只探测本页（目录顺序），不探测整个目录。
+    assert statements(drv) == [probe_sql("shop", f"t{i:02d}") for i in range(min(count, 5))]
 
 
 async def test_a_probe_failure_while_listing_returns_nothing() -> None:
-    lost = {probe_sql("shop", "t07"): OperationalError(2013, "lost")}
+    lost = {probe_sql("shop", "t03"): OperationalError(2013, "lost")}  # 第 1 页中的对象
     with pytest.raises(StarRocksError) as raised:
         await listed(World(tables=numbered(30)), overrides=lost)
     assert raised.value.code is StarRocksErrorCode.CONNECTION_LOST
@@ -528,8 +519,9 @@ async def test_a_probe_failure_while_listing_returns_nothing() -> None:
 async def test_describing_an_object_revoked_since_the_refresh_fails(tool_id: str) -> None:
     t = await tools()
     t.world.denied = {("shop", "sales")}
+    paged = {"cursor": None} if tool_id == DESCRIBE_TABLE else {}
     with pytest.raises(StarRocksError) as raised:
-        await t.call(tool_id, database="shop", table="sales")
+        await t.call(tool_id, database="shop", table="sales", **paged)
     assert raised.value.code is StarRocksErrorCode.OBJECT_UNREADABLE
     # 只发出了探测：布局与表结构都没有读取或交付。
     assert statements(t.drv) == [probe_sql("shop", "sales")]
@@ -539,7 +531,8 @@ async def test_describing_an_object_revoked_since_the_refresh_fails(tool_id: str
 async def test_unverifiable_access_is_not_mistaken_for_revocation(tool_id: str) -> None:
     t = await tools()
     t.world.overrides = {probe_sql("shop", "sales"): OperationalError(2013, "lost")}
-    arguments = {"database": "shop", "table": "sales"} if tool_id == DESCRIBE_TABLE else {}
+    sales = {"database": "shop", "table": "sales", "cursor": None}
+    arguments = sales if tool_id == DESCRIBE_TABLE else SEARCH_ALL
     with pytest.raises(StarRocksError) as raised:
         await t.call(tool_id, **arguments)
     assert raised.value.code is StarRocksErrorCode.CONNECTION_LOST
@@ -554,13 +547,13 @@ async def test_describing_an_object_outside_the_snapshot_is_rejected_before_io(
 ) -> None:
     t = await tools()
     with pytest.raises(ToolRejectedError, match="不在可读的表结构中"):
-        await t.call(DESCRIBE_TABLE, database=database, table=table)
+        await t.call(DESCRIBE_TABLE, database=database, table=table, cursor=None)
     assert t.drv.attempts == 0
 
 
 async def test_describe_serves_the_snapshot_columns_after_a_fresh_probe() -> None:
     t = await tools()
-    observation = await t.call(DESCRIBE_TABLE, database="crm", table="customers")
+    observation = await t.call(DESCRIBE_TABLE, database="crm", table="customers", cursor=None)
     assert observation.payload["rows"] == [
         {"name": "id", "type": "bigint", "nullable": "NO", "comment": None},
         {"name": "tier", "type": "varchar", "nullable": "YES", "comment": None},

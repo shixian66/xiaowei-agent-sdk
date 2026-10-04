@@ -16,9 +16,9 @@
    别名：sqlglot 会把无别名的表达式改名为 ``_col_N``，在规范化 SQL 内部前后一致（计划不变），
    但交付的列头会与 StarRocks 不同。
 3. 按 sqlglot scope 区分 CTE 与物理表。物理表必须在范围内：写了库名就按库名，没写时只在恰好一个
-   库有同名对象时补全（审计原文按其所在库解析，见 ``default_database``），多个库都有即歧义。列名
-   按快照不区分大小写匹配并改写为快照中的写法（库、表与别名区分大小写）；未限定列在多个来源中都
-   存在时判为歧义。与输出别名同名的未限定列按 StarRocks 各子句的规则区分列与别名（见
+   库有同名对象时补全（审计原文按记录的会话当前库解析，见 ``audit_references``），多个库都有即
+   歧义。列名按快照不区分大小写匹配并改写为快照中的写法（库、表与别名区分大小写）；未限定列在
+   多个来源中都存在时判为歧义。与输出别名同名的未限定列按 StarRocks 各子句的规则区分列与别名（见
    ``_bind_shadowed``）；CTE 与派生表的输出名保持原写法。
 4. 用 sqlglot ``qualify`` 按“只含被引用对象”的 schema 完整限定所有列、按快照列序展开星号，解析
    失败即列不在范围内；再逐 scope 复核物理列归属（相关子查询沿外层 scope 查找）。UNION 的排序名
@@ -118,8 +118,9 @@ class QueryPolicy(BaseModel):
     """一个查询目标的可信范围；来自结构快照与静态配置，不来自模型或用户。
 
     ``tables`` 是 库 → 对象 → 按序的列（星号按此顺序展开）；每个对象至少一列，同一对象的列名
-    不区分大小写也不重复（StarRocks 列名不区分大小写）。``default_database`` 只用于审计原文：
-    未限定对象名在该库解析；业务查询不设，未限定名只按唯一匹配补全。函数名统一为大写。
+    不区分大小写也不重复（StarRocks 列名不区分大小写）。业务查询不继承连接的默认库：未限定
+    对象名只按唯一匹配补全（审计原文另按记录的会话当前库，见 ``audit_references``）。函数名统一
+    为大写。
     """
 
     model_config = ConfigDict(frozen=True, extra="forbid")
@@ -130,7 +131,6 @@ class QueryPolicy(BaseModel):
     max_rows: int = Field(ge=1)
     max_sql_bytes: int = Field(ge=1)
     max_result_columns: int = Field(ge=1)
-    default_database: _Name | None = None
 
     @field_validator("allowed_functions")
     @classmethod
@@ -230,22 +230,30 @@ _Objects = frozenset[tuple[str, str]]
 _Columns = frozenset[tuple[str, str, str]]
 
 
-def audit_references(sql: str, policy: QueryPolicy) -> tuple[_Objects, _Columns]:
+def audit_references(sql: str, policy: QueryPolicy, database: str) -> tuple[_Objects, _Columns]:
     """审计原文（只展示、从不执行）引用的 ``(库, 对象)`` 与 ``(库, 对象, 列)``。
+
+    ``database`` 是该条记录执行时的会话当前库（``''`` 为没有当前库）：未限定的对象名只在它之中
+    解析，与数据库执行这条语句时相同，不按唯一匹配改到别的库。
 
     :raises QueryRejectedError: 不在范围内或无法可靠判定；调用方据此不列出该条原文。
     """
-    root, objects, columns = _guard(sql, policy)
+    root, objects, columns = _guard(sql, policy, current_database=database)
     _normalize(root, policy)
     return objects, columns
 
 
 def _guard(
-    sql: str, policy: QueryPolicy, *, delivered: bool = False
+    sql: str,
+    policy: QueryPolicy,
+    *,
+    delivered: bool = False,
+    current_database: str | None = None,
 ) -> tuple[exp.Query, _Objects, _Columns]:
     """三个公开函数共用的校验：返回完整限定后的语法树与引用的对象、列。
 
     ``delivered`` 为真（查询）时结果列名会交付给用户，表达式列必须有显式别名。
+    ``current_database`` 只由审计原文给出（见 ``_bind_table``）。
     """
     if _utf8_size(sql) > policy.max_sql_bytes:
         _reject(_Code.INPUT_TOO_LARGE)
@@ -253,7 +261,7 @@ def _guard(
     _check_nodes(root, policy)
     if delivered:
         _check_output_names(root)
-    _bind_tables(root, policy)
+    _bind_tables(root, policy, current_database)
     # 名字推导与 sqlglot 一样按作用域递归；过深的嵌套是预期的输入失败，映射为固定原因码。
     _attempt(lambda: _bind_columns(root, policy), _Code.UNSUPPORTED_SYNTAX)
     qualified = _qualify(root, policy)
@@ -467,27 +475,29 @@ def _named_sources(scope: Scope) -> dict[str, tuple[exp.Expr, exp.Table | Scope]
     return _attempt(lambda: dict(scope.selected_sources), _Code.AMBIGUOUS_REFERENCE)
 
 
-def _bind_tables(root: exp.Query, policy: QueryPolicy) -> None:
+def _bind_tables(root: exp.Query, policy: QueryPolicy, current_database: str | None) -> None:
     """物理表写成 ``库.表``；没写库名时按唯一匹配补全（CTE 引用不是物理表，不补库名）。"""
     seen: set[int] = set()
     for scope in _scopes(root):
         for node, source in _sources(scope):
             seen.add(id(node))
             if isinstance(source, exp.Table):
-                _bind_table(source, policy)
+                _bind_table(source, policy, current_database)
     # 每个表节点都必须是某个 scope 的来源（物理表或 CTE 引用），不留未归属的表。
     if any(id(table) not in seen for table in root.find_all(exp.Table)):
         _reject(_Code.UNSUPPORTED_SYNTAX)
 
 
-def _bind_table(table: exp.Table, policy: QueryPolicy) -> None:
+def _bind_table(table: exp.Table, policy: QueryPolicy, current_database: str | None) -> None:
+    """``current_database`` 为 ``None``（业务查询）时未限定名按唯一匹配补全；审计原文给出记录的
+    会话当前库，未限定名只在它之中找（``''`` 为没有当前库，找不到任何对象）。"""
     name, database = table.name, table.text("db")
     if database:
         if policy.columns(database, name) is None:
             _reject(_Code.OBJECT_NOT_ALLOWED)
         return
-    if policy.default_database is not None:
-        found = [policy.default_database] if policy.columns(policy.default_database, name) else []
+    if current_database is not None:
+        found = [current_database] if policy.columns(current_database, name) else []
     else:
         found = [db for db, objects in policy.tables.items() if name in objects]
     if not found:
