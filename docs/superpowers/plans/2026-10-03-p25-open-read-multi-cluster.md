@@ -10,7 +10,7 @@
 
 **Spec:** [ARCHITECTURE §5 本轮意图](../../../ARCHITECTURE.md#turn-purpose)、[§6 R1–R6](../../../ARCHITECTURE.md#p25-scope)、§9 是产品/权限边界唯一来源；[DEVELOPMENT_PLAN §6](../../../DEVELOPMENT_PLAN.md) 只维护顺序和退出条件。本文维护本阶段的技术契约、依赖与验收。群聊单独见 [单群计划](2026-10-03-feishu-group.md)，不在这里复制其任务。
 
-**Baseline / 状态：** 规划源代码为 `7a715ff61d7a97457b03bb8b596ef4238c1049f2`，与本地 `origin/main` `0f831ebe070e7b11b1597fbdf59921b19981b129` 内容相同；P2 离线完成，P1/P2 实战缺口继承到 P3。文档候选 v2（2026-10-03，按用户对 aed344b 的六项决定修订）已在 `719c1c7` 通过复审；Task 0 实测证据、对计划的影响与当前范围见 §9，经复审随 PR #32 合入（`29678006f380621dda5ddb772b7affa072a59776`）。Task 1 多目标路由经独立审查随 PR #33 合入（`6ccc7a4e6e5c8ec4bac5093d4300bda63ae88605`）；Task 2 自动结构快照及审查修订（前移 Evidence 当前权限闭环、摘要 v2、列表探测硬上限）经复审随 PR #34 合入（`d497a34e468eb0b9987a5e0eac1dea7a9fbf8a08`，实施说明见 Task 2 节末）；§9.8 的 D1/D2 经独立审查随 PR #35 合入（`7523c74fcebc91718f0a7de4d10782c2a7214260`）。Task 3 复杂 SQL 与跨库经四轮独立审查随 PR #36 合入（`9ef4f3eaa9cb29d218313a3d010d84d1e937e4ca`，实施说明见 Task 3 节末）。原 Task 4 已按用户决定取消，决定见 ARCHITECTURE §6 R4–R5。Task 5 证据复核次数上限与跨目标历史验收经独立审查通过（PR #38，实施说明见 Task 5 节末）。Task 6 搜表分页与多库慢查询经两轮独立审查随 PR #39 合入（`21d06edff21871289703b0860a9d4fa8acb1a163`，实施说明见 Task 6 节末）。Task 7 单 Agent 自然语言工具选择经两轮独立审查随 PR #40 合入（`d76b25322de365292e3ba3b2cf859c092e32ee10`，实施说明见 Task 7 节末）。Task 8 阶段离线退出已完成、待对候选 SHA 独立审查（实施说明见 Task 8 节末）。
+**Baseline / 状态：** 规划源代码为 `7a715ff61d7a97457b03bb8b596ef4238c1049f2`，与本地 `origin/main` `0f831ebe070e7b11b1597fbdf59921b19981b129` 内容相同；P2 离线完成，P1/P2 实战缺口继承到 P3。文档候选 v2（2026-10-03，按用户对 aed344b 的六项决定修订）已在 `719c1c7` 通过复审；Task 0 实测证据、对计划的影响与当前范围见 §9，经复审随 PR #32 合入（`29678006f380621dda5ddb772b7affa072a59776`）。Task 1 多目标路由经独立审查随 PR #33 合入（`6ccc7a4e6e5c8ec4bac5093d4300bda63ae88605`）；Task 2 自动结构快照及审查修订（前移 Evidence 当前权限闭环、摘要 v2、列表探测硬上限）经复审随 PR #34 合入（`d497a34e468eb0b9987a5e0eac1dea7a9fbf8a08`，实施说明见 Task 2 节末）；§9.8 的 D1/D2 经独立审查随 PR #35 合入（`7523c74fcebc91718f0a7de4d10782c2a7214260`）。Task 3 复杂 SQL 与跨库经四轮独立审查随 PR #36 合入（`9ef4f3eaa9cb29d218313a3d010d84d1e937e4ca`，实施说明见 Task 3 节末）。原 Task 4 已按用户决定取消，决定见 ARCHITECTURE §6 R4–R5。Task 5 证据复核次数上限与跨目标历史验收经独立审查通过（PR #38，实施说明见 Task 5 节末）。Task 6 搜表分页与多库慢查询经两轮独立审查随 PR #39 合入（`21d06edff21871289703b0860a9d4fa8acb1a163`，实施说明见 Task 6 节末）。Task 7 单 Agent 自然语言工具选择经两轮独立审查随 PR #40 合入（`d76b25322de365292e3ba3b2cf859c092e32ee10`，实施说明见 Task 7 节末）。Task 8 阶段离线退出经两轮独立审查随 PR #41 合入（`a938a0f1b481f1cb23507dc170380c73028b8e54`，实施说明见 Task 8 节末）。P2.5 离线完成；真实模型、获准目标的资源组与限额、真实飞书与用户 StarRocks 在 P3 验收。下一项为飞书单群计划 F0。
 
 ## Global Constraints
 
@@ -256,9 +256,9 @@ Web / 飞书单聊（群入口在后续独立计划）
 - [x] 正例覆盖 R3 全集与组合，反例覆盖写/多语句/OUTFILE/LOCK/未知函数、危险表函数/外部访问、未知或歧义对象、CTE 遮蔽、子查询相关列、UNION 分支绕过、窗口引用受限列、重复结果名。
 - [x] 检查 AST/规范化前后语义，不用字符串包含替代作用域；星号展开后超过 SQL/列头/结果列上限在业务执行前拒绝；测试边界等于/多 1、UTF-8 和 JSON 转义。
 - [x] 更新最坏投影上界，完整/不足容量均有启动和运行对照。不可把整个 schema 拼入每次模型输入。
-- [ ] 运行 §5 C3 与 SR；变异忽略 UNION 第二分支、窗口依赖、展开后大小检查应失败。提交 `feat: support bounded complex readonly StarRocks SQL`，独立审查。（C3、SR 与变异已完成，待独立审查）
+- [x] 运行 §5 C3 与 SR；变异忽略 UNION 第二分支、窗口依赖、展开后大小检查应失败。提交 `feat: support bounded complex readonly StarRocks SQL`，独立审查。（经四轮独立审查随 PR #36 合入）
 
-**Task 3 实施说明（待独立审查）：**
+**Task 3 实施说明（经四轮独立审查随 PR #36 合入 `9ef4f3e`）：**
 
 - **范围：** `QueryPolicy.tables` 是结构快照全部库的可读对象与按 `ORDINAL_POSITION` 排序的列（快照中列名只差大小写的对象不进入）；不再有默认库。物理表一律规范化为 `` `库`.`表` ``；未限定表名只在恰好一个库有同名对象时补全，多个库都有时拒绝（新原因码 `ambiguous_object`，提示写成 `库名.表名`），CTE 名优先于同名物理表。`库.表.列` 只接受本层未起别名、库名一致的物理表。依赖改为 `(库, 对象)` 与 `(库, 对象, 列)`，工具按库从快照生成 `read` 依赖。
 - **语法：** 根节点可为 SELECT 或 UNION/UNION ALL（含括号分支）；INTERSECT/EXCEPT、`UNION BY NAME`、递归 CTE、窗口框架与命名窗口、`* EXCEPT` 仍拒绝。窗口函数按函数 allowlist（如 `ROW_NUMBER`、`RANK` 须在 `allowed_functions` 中）。相关子查询开放：外层列沿外层 scope 解析并记入依赖。UNION 的 ORDER BY 只接受序号或输出名，名字换为在最左分支中的位置；LIMIT 作用于整个集合，分支内 LIMIT 不改。D1 的序号恢复扩展到 UNION。
@@ -336,7 +336,7 @@ Task 5 改为依赖 Task 3。现有运行限额回归由 Task 8 核对，目标�
 - [x] 固定反例：只解释、只写 SQL、不要执行、裸 SQL、引用“帮我查”、上一轮 query 本轮只诊断、缺集群/口径/时间、多人指令混淆、工具/表注释注入。脚本模型证明预期调用与结果链；P3 真实模型证明是否真的没有选择查询工具，不把预设输出当意图能力证据。
 - [x] 普通自然语言“不要执行”场景中，故意让替身误调工具：断言仍受当前权限/SQLGuard/限额约束，并记录通过这些保护后可能执行的残余；显式诊断入口同样强行调用应在业务执行前拒绝。不得为了让自然语言反例变绿新增关键词识别器或第二个分类 Agent。
 - [x] 无 Evidence 建议、澄清、有证据回答分别渲染；旧回答回放兼容或明确失效，四种投影覆盖新分支。验证 Agent 不把可修正拒绝伪装成成功事实。
-- [ ] Web/飞书普通消息默认单 Agent 判断，显式诊断快捷方式保留；SDK 轮数/预算/usage/超时没有新旁路。运行 §5 C7 和正式入口脚本模型/浏览器，提交 `feat: let the single agent choose query tools from user intent`，独立审查。
+- [x] Web/飞书普通消息默认单 Agent 判断，显式诊断快捷方式保留；SDK 轮数/预算/usage/超时没有新旁路。运行 §5 C7 和正式入口脚本模型/浏览器，提交 `feat: let the single agent choose query tools from user intent`，独立审查。（经两轮独立审查随 PR #40 合入）
 
 P3 在具体 Model Profile 上记录每个固定样例的调用轨迹、误执行次数、成功率、步数、延迟/用量，区分正常查询成功与资源超限失败；这些结论不能由离线测试数量替代。
 
@@ -364,9 +364,9 @@ P3 在具体 Model Profile 上记录每个固定样例的调用轨迹、误执�
 - [x] 运行 §5 全阶段检查（C4 随 Task 4 取消），核对既有限额的成功与超限失败回归；正式 runtime + Web/飞书替身 + 测试 PostgreSQL 演示完整任务链，验证三目标中的一处故障不改查别处。
 - [x] 固定样例登记期望工具、事实/来源、限制和澄清；P3 记录真实模型成功率、误执行样本、步数、延迟/usage，不能用预设 ScriptedModel 输出声称已达标。
 - [x] 更新 examples 配置、README 当前用法、handoff 证据和本文偏差；删除被替代的单库/手写表列分支，确认没有双权威配置和无消费者包装。
-- [ ] 核对升级/备份恢复/一次性失效与 §6；提交 `docs: record p25 offline exit and remaining live validation`；对候选 SHA 独立架构/安全/StarRocks 审查。下一项为群聊计划 F0。
+- [x] 核对升级/备份恢复/一次性失效与 §6；提交 `docs: record p25 offline exit and remaining live validation`；对候选 SHA 独立架构/安全/StarRocks 审查。下一项为群聊计划 F0。（审查通过，随 PR #41 合入；备份恢复未演练，留 P3）
 
-**Task 8 实施说明（待对候选 SHA 独立审查）：** 基线 `d76b253`（PR #40 合入后的 main）。本任务不改 `src/`、依赖或存储迁移。
+**Task 8 实施说明（经两轮独立审查随 PR #41 合入 `a938a0f`；首轮阻断 B1 为 handoff 状态过时，已修正）：** 基线 `d76b253`（PR #40 合入后的 main）。本任务不改 `src/`、依赖或存储迁移。
 
 - **正式入口任务链：** `tests/sdk_core/test_runtime.py::test_a_cluster_failing_mid_task_changes_nothing_on_the_others`：正式装配 + 真实 Uvicorn（Web）+ 飞书替身 + 隔离 PostgreSQL，三个集群各有驱动替身。sr-a 先搜表再查询；随后 sr-b 连接失败，本轮 `evidence_failed`、回执不含上游原文，模型只被调用一次，sr-a/sr-c 没有业务语句（sr-a 只有回放 r1 历史证据时的零行权限探测）；sr-c 经飞书照常查询并发送；sr-a 的历史照常读取；同一 Web 会话随后诊断，只取 sr-a 上一轮实际 SQL 的计划，sr-b 不再被访问。同一会话跨目标追问成功（sr-test → sr-b）由 Task 7 的 `test_a_business_task_spans_turns_and_clusters` 覆盖，未知集群在 I/O 前拒绝由 `test_formal_assembly_routes_each_turn_to_the_named_cluster` 覆盖。替身不能证明真实集群的故障形态（半开连接、慢失败）与恢复时间。
 - **固定样例：** `IntentSample` 新增 `outcomes`（可接受的回答形式）、`sources`（必须引用其事实的工具，可另引用其他证据）与 `limit`（应说明的限制，只登记供 P3 人工核对，代码不判定自然语言）；`judge_intent` 新增 `expected_answer` 与 `cites_expected_sources`。登记：查询正例只接受引用查询结果的交付；信息不全只接受澄清；裸 SQL 接受澄清或建议；只解释/只写 SQL/不要执行接受建议或取元数据、计划后作答；随后诊断须引用计划；多人指令须引用表结构；注释注入须引用搜表结果。P3 运行时另记成功率、误执行样本、步数与延迟/usage（`RequestObservation` 已有），不以脚本模型结果宣称达标。
@@ -430,7 +430,7 @@ Task 0 的规模实验不进入日常 CI；后续每片只跑受影响命令和�
 - [x] 数据范围由数据库权限决定，schema 不冒充权限；确定失效与暂不可验证分开，按对象去重及整轮检查上限明确；所有 Evidence 读取链、重发新增 I/O、混合 Session 和一次性失效明确。
 - [x] 容量上界独立于全库列数，未知/失败行为和正常查询成功对照齐全；没有只验证“全部拒绝”的空洞成功。
 - [x] 配置/迁移/SDK 表归属、恢复与旧进程风险明确；不把离线、隔离数据库、真实模型、部署和用户验收混为一谈。
-- [ ] 针对本轮最终文档提交的精确 SHA 独立审查；文档检查通过不代表此项已完成。
+- [x] 针对本轮最终文档提交的精确 SHA 独立审查；文档检查通过不代表此项已完成。（计划 v2 已在 `719c1c7` 复审通过）
 
 ## 9. Task 0 证据（2026-10-03，已复审）
 
