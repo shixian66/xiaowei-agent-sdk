@@ -24,9 +24,9 @@ from xiaowei.starrocks_tools import (
     EXPLAIN_QUERY,
     LAYOUT_TOOL,
     LIST_TABLES,
+    PAGED_FIELDS,
     RESULT_FIELDS,
     RUN_QUERY,
-    SEARCH_FIELDS,
     RunQueryArgs,
     starrocks_tools,
     worst_case_observation,
@@ -96,8 +96,10 @@ def test_every_audience_must_hold_the_worst_case_result() -> None:
         LAYOUT_TOOL,
     }
     required = {p.policy_id.rsplit(".", 1)[1]: p.required for p in tools.policies}
-    # 搜表另带快照版本：SQL 与列头是固定模板，加上版本仍在查询的最坏结果之内（同一阈值通过）。
-    assert required.pop("list_tables") == SEARCH_FIELDS == (*RESULT_FIELDS, "snapshot")
+    # 搜表与表结构另带续取游标：SQL 与列头是固定模板，加上游标仍在查询的最坏结果之内（同一阈值
+    # 通过）。
+    assert required.pop("list_tables") == required.pop("describe_table") == PAGED_FIELDS
+    assert PAGED_FIELDS == (*RESULT_FIELDS, "next_cursor")
     assert set(required.values()) == {RESULT_FIELDS}
     ToolCatalog(tools.contracts, tools.policies)  # 登记一致
 

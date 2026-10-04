@@ -233,7 +233,9 @@ async def test_previous_query_is_explained_without_running_it_again(
 
     second = env.scripts.add(
         "刚才那条为什么慢",
-        tool_call("describe_table", cluster=SR.target_id, database="shop", table="sales"),
+        tool_call(
+            "describe_table", cluster=SR.target_id, database="shop", table="sales", cursor=None
+        ),
         explain_replayed,
         cite("计划显示全表扫描；建议增加过滤条件"),
     )

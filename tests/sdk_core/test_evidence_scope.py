@@ -664,7 +664,7 @@ LAYOUT_ROW = Result(
 )
 METADATA_FACTS = {
     "list_tables": (SEARCH_ALL, SALES),
-    "describe_table": ({"database": "shop", "table": "sales"}, SALES),
+    "describe_table": ({"database": "shop", "table": "sales", "cursor": None}, SALES),
     "describe_table_layout": ({"database": "shop", "table": "sales"}, LAYOUT_ROW),
 }
 

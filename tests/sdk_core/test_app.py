@@ -119,14 +119,8 @@ def evidence_in(call: ModelCall) -> list[str]:
     return found
 
 
-# 搜表（P2.5 Task 6）的第 1 页：“.” 出现在每个“库名.表名”中，即目录的前若干个对象。
-SEARCH_ALL: dict[str, object] = {
-    "keyword": ".",
-    "database": None,
-    "page": 1,
-    "page_size": 5,
-    "snapshot": None,
-}
+# 搜表（P2.5 Task 6）的第一页：“.” 出现在每个“库名.表名”中，即目录的前若干个对象。
+SEARCH_ALL: dict[str, object] = {"keyword": ".", "database": None, "page_size": 5, "cursor": None}
 
 
 def tool_call(name: str, **arguments: object) -> Step:

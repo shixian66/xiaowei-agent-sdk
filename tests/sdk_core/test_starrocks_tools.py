@@ -441,7 +441,9 @@ async def test_metadata_tools_serve_the_snapshot_after_probing_current_access(en
     message = env.scripts.add(
         "诊断：sales 有哪些列",
         tool_call("list_tables", cluster=SR.target_id, **SEARCH_ALL),
-        tool_call("describe_table", cluster=SR.target_id, database="shop", table="sales"),
+        tool_call(
+            "describe_table", cluster=SR.target_id, database="shop", table="sales", cursor=None
+        ),
         cite(),
     )
     delivered = await env.deliver(env.ctx("diagnose"), message)
@@ -699,7 +701,9 @@ async def test_order_by_output_reference_is_sent_as_written(cross: Env) -> None:
 async def test_describe_table_outside_the_allowlist_is_rejected_before_io(env: Env) -> None:
     message = env.scripts.add(
         "看看 users 表",
-        tool_call("describe_table", cluster=SR.target_id, database="shop", table="users"),
+        tool_call(
+            "describe_table", cluster=SR.target_id, database="shop", table="users", cursor=None
+        ),
         clarify("没有可查看的 users 表"),
     )
     await env.app.run_turn(env.ctx("diagnose"), message)

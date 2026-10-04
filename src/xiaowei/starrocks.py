@@ -649,9 +649,9 @@ class StarRocksAdapter:
 
         ``database`` 为 ``None`` 时读取所有库的记录，否则只读会话当前库（审计 ``db`` 列）为它的
         记录。只返回原文通过 ``policy``（当前结构快照给出的 SQLGuard 范围）的记录：未限定的对象名
-        按该条记录自身的会话当前库解析（见模块说明）。``truncated`` 表示候选读满
-        ``candidate_rows`` 且还有下一条、候选读取达到 ``candidate_bytes``，或输出达到结果字节上限：
-        可能还有未检查的记录。
+        按该条记录自身的会话当前库解析（见模块说明）。``truncated`` 表示结果可能不完整：候选读满
+        ``candidate_rows`` 且还有下一条、候选读取达到 ``candidate_bytes``、已列满 ``max_rows`` 而
+        还有未检查的候选，或获准的行因单值或结果字节上限没有列出。
         """
         audit = self._target.audit
         if audit is None:
@@ -715,28 +715,32 @@ class StarRocksAdapter:
         deadline: float,
         policy: QueryPolicy,
     ) -> tuple[list[dict[str, Scalar]], bool]:
-        """按原排序取通过检查的行；返回 (行, 是否因结果字节上限停止)。
+        """按原排序取通过检查的行；返回 (行, 是否可能不完整)。
 
-        ``deadline`` 为 ``time.monotonic()`` 时刻：每行检查前核对，到期抛出 ``TimeoutError``。
+        可能不完整：已有 ``max_rows`` 行而后面还有未检查的候选（不为确认它们是否获准而继续
+        解析），获准的行因单值或结果字节上限没有列出。``deadline`` 为 ``time.monotonic()`` 时刻：
+        每行检查前核对，到期抛出 ``TimeoutError``。
         """
         rows: list[dict[str, Scalar]] = []
         size = 2  # "[]"
+        dropped = False
         for candidate in candidates:
             if len(rows) == max_rows:
-                break
+                return rows, True
             if time.monotonic() >= deadline:
                 raise TimeoutError
             row = _audit_row(candidate)
             if row is None or not _within_scope(row["sql"], policy, str(row["database"] or "")):
                 continue
             if any(_json_size(v) > self._target.max_value_bytes for v in row.values()):
+                dropped = True
                 continue
             added = _json_size(row) + (2 if rows else 0)
             if size + added > self._target.max_result_bytes:
                 return rows, True
             rows.append(row)
             size += added
-        return rows, False
+        return rows, dropped
 
     async def _run(
         self,
@@ -1154,23 +1158,19 @@ def metadata_sql_bytes() -> int:
     )
 
 
-def bounded_rows(
-    rows: Sequence[dict[str, Scalar]], max_rows: int, target: StarRocksTarget
-) -> tuple[tuple[dict[str, Scalar], ...], bool]:
-    """按与查询读取相同的规则取前若干行：行数、单值与总字节（生产 JSON 编码）任一超限即截断。"""
-    kept: list[dict[str, Scalar]] = []
-    size = 2  # "[]"
-    for row in rows:
-        if len(kept) == max_rows or any(
-            _json_size(v) > target.max_value_bytes for v in row.values()
-        ):
-            return tuple(kept), True
-        added = _json_size(row) + (2 if kept else 0)
+def fitting_rows(rows: Sequence[dict[str, Scalar]], max_rows: int, target: StarRocksTarget) -> int:
+    """开头有多少行能一起放进一个结果：规则与查询读取相同，行数、单值与总字节（生产 JSON 编码）
+    任一超限即停。"""
+    count, size = 0, 2  # "[]"
+    for row in rows[:max_rows]:
+        if any(_json_size(v) > target.max_value_bytes for v in row.values()):
+            break
+        added = _json_size(row) + (2 if count else 0)
         if size + added > target.max_result_bytes:
-            return tuple(kept), True
-        kept.append(row)
+            break
+        count += 1
         size += added
-    return tuple(kept), False
+    return count
 
 
 def _json_size(value: object) -> int:

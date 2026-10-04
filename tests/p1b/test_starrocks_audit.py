@@ -394,6 +394,18 @@ async def test_unreadable_or_oversized_statements_drop_the_row() -> None:
     assert shown == [ACCEPTED[0]]
 
 
+async def test_a_permitted_row_too_large_to_show_marks_the_list_truncated() -> None:
+    small = target(max_value_bytes=300)
+    rows = [record(long_stmt(400), "q-long"), record(ACCEPTED[0], "q-a")]
+    result = await adapter(audit_driver(*rows), small).slow_queries(60, "query_time", SCOPE)
+    # 获准却放不下单值上限的行不列出，结果因此不完整：标记截断。
+    assert [row["query_id"] for row in result.rows] == ["q-a"] and result.truncated
+    # 原文不可读（NULL）只是无法确认获准，与上限无关：不标记截断。
+    rows = [record(None, "q-null"), record(ACCEPTED[0], "q-a")]
+    result = await adapter(audit_driver(*rows), small).slow_queries(60, "query_time", SCOPE)
+    assert [row["query_id"] for row in result.rows] == ["q-a"] and not result.truncated
+
+
 async def test_list_can_be_shorter_than_max_rows() -> None:
     t = target(audit={"candidate_rows": 10, "max_rows": 3})
     stmts = [*REJECTED[:9], ACCEPTED[0]]
@@ -403,12 +415,25 @@ async def test_list_can_be_shorter_than_max_rows() -> None:
     assert not result.truncated
 
 
-async def test_more_passing_rows_than_max_rows_keeps_the_order() -> None:
-    stmts = [ACCEPTED[i % 3] for i in range(6)]
+@pytest.mark.parametrize(
+    ("stmts", "truncated"),
+    [
+        # 合格行多于 max_rows：只列前 3 条，后面还有未检查的候选，结果不完整。
+        ([ACCEPTED[i % 3] for i in range(6)], True),
+        # 恰好 max_rows 条且候选已读完：完整。
+        (ACCEPTED[:3], False),
+        # 达到 max_rows 时仍有候选未检查（即使它们最终都不获准）：保守标记截断，不逐条解析到底。
+        ([*ACCEPTED[:3], *REJECTED[:4]], True),
+    ],
+    ids=["合格行超过上限", "恰好上限且读完", "上限之后仍有未检查候选"],
+)
+async def test_reaching_max_rows_with_candidates_left_is_truncated(
+    stmts: list[str], truncated: bool
+) -> None:
     rows = [record(s, query_id=f"q{i}") for i, s in enumerate(stmts)]
     result = await adapter(audit_driver(*rows)).slow_queries(60, "query_time", SCOPE)
     assert [row["query_id"] for row in result.rows] == ["q0", "q1", "q2"]
-    assert not result.truncated
+    assert result.truncated is truncated
 
 
 # ---- 时区与指标 -----------------------------------------------------------------------------

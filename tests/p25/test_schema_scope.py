@@ -409,17 +409,16 @@ async def tools(refreshed: bool = True) -> Tools:
     return Tools(drv, clock, cache, assembled.executes, world)
 
 
-# “.” 出现在每个“库名.表名”中：第 1 页即目录的前 max_rows 个对象。
+# “.” 出现在每个“库名.表名”中：第一页即目录的前 max_rows 个对象。
 SEARCH_ALL: dict[str, object] = {
     "keyword": ".",
     "database": None,
-    "page": 1,
     "page_size": TARGET.policy.max_rows,
-    "snapshot": None,
+    "cursor": None,
 }
 ALL_CALLS: list[tuple[str, dict[str, object]]] = [
     (LIST_TABLES, SEARCH_ALL),
-    (DESCRIBE_TABLE, {"database": "shop", "table": "sales"}),
+    (DESCRIBE_TABLE, {"database": "shop", "table": "sales", "cursor": None}),
     (LAYOUT_TOOL, {"database": "shop", "table": "sales"}),
     (RUN_QUERY, {"sql": "SELECT region FROM sales"}),
     (EXPLAIN_QUERY, {"sql": "SELECT region FROM sales"}),
@@ -520,8 +519,9 @@ async def test_a_probe_failure_while_listing_returns_nothing() -> None:
 async def test_describing_an_object_revoked_since_the_refresh_fails(tool_id: str) -> None:
     t = await tools()
     t.world.denied = {("shop", "sales")}
+    paged = {"cursor": None} if tool_id == DESCRIBE_TABLE else {}
     with pytest.raises(StarRocksError) as raised:
-        await t.call(tool_id, database="shop", table="sales")
+        await t.call(tool_id, database="shop", table="sales", **paged)
     assert raised.value.code is StarRocksErrorCode.OBJECT_UNREADABLE
     # 只发出了探测：布局与表结构都没有读取或交付。
     assert statements(t.drv) == [probe_sql("shop", "sales")]
@@ -531,7 +531,8 @@ async def test_describing_an_object_revoked_since_the_refresh_fails(tool_id: str
 async def test_unverifiable_access_is_not_mistaken_for_revocation(tool_id: str) -> None:
     t = await tools()
     t.world.overrides = {probe_sql("shop", "sales"): OperationalError(2013, "lost")}
-    arguments = {"database": "shop", "table": "sales"} if tool_id == DESCRIBE_TABLE else SEARCH_ALL
+    sales = {"database": "shop", "table": "sales", "cursor": None}
+    arguments = sales if tool_id == DESCRIBE_TABLE else SEARCH_ALL
     with pytest.raises(StarRocksError) as raised:
         await t.call(tool_id, **arguments)
     assert raised.value.code is StarRocksErrorCode.CONNECTION_LOST
@@ -546,13 +547,13 @@ async def test_describing_an_object_outside_the_snapshot_is_rejected_before_io(
 ) -> None:
     t = await tools()
     with pytest.raises(ToolRejectedError, match="不在可读的表结构中"):
-        await t.call(DESCRIBE_TABLE, database=database, table=table)
+        await t.call(DESCRIBE_TABLE, database=database, table=table, cursor=None)
     assert t.drv.attempts == 0
 
 
 async def test_describe_serves_the_snapshot_columns_after_a_fresh_probe() -> None:
     t = await tools()
-    observation = await t.call(DESCRIBE_TABLE, database="crm", table="customers")
+    observation = await t.call(DESCRIBE_TABLE, database="crm", table="customers", cursor=None)
     assert observation.payload["rows"] == [
         {"name": "id", "type": "bigint", "nullable": "NO", "comment": None},
         {"name": "tier", "type": "varchar", "nullable": "YES", "comment": None},
