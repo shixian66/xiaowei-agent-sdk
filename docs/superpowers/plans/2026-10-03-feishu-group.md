@@ -10,7 +10,7 @@
 
 **Spec:** 产品唯一权威为 [ARCHITECTURE §7 G1–G4](../../../ARCHITECTURE.md#group-scope)，自然语言用途引用 [§5](../../../ARCHITECTURE.md#turn-purpose)，当前数据权限引用 §9。数据库能力、受限只读执行、单 Agent 自然语言工具选择和数据权限验证由 [P2.5 计划](2026-10-03-p25-open-read-multi-cluster.md) 交付，此处只定义群边界。
 
-**Baseline / 状态：** 文档候选 v2（2026-10-03，按用户对 aed344b 的决定修订）；规划时源码为 `7a715ff61d7a97457b03bb8b596ef4238c1049f2`（与本地 origin/main `0f831ebe070e7b11b1597fbdf59921b19981b129` 树相同）。实施起点必须换成 P2.5 Task 8 经审查的精确 SHA（已确定为 PR #41 的合入提交 `a938a0f1b481f1cb23507dc170380c73028b8e54`），复核其真实接口后再执行 F0。F0–F4 均未实施，当前无真实群验证证据。
+**Baseline / 状态：** 文档候选 v2（2026-10-03，按用户对 aed344b 的决定修订）；P2.5 Task 8 经审查的阶段交付 SHA 为 PR #41 的合入提交 `a938a0f1b481f1cb23507dc170380c73028b8e54`，F0 起点为其后只改文档的 `origin/main` `e153cd9129fa1a39913cc6641dae68cd90637f19`（PR #42）。F0 已用锁定 SDK 与本机合成协议端点完成（证据见 F0 小节），待精确 SHA 独立审查后进入 F1；F1–F4 未实施，当前无真实群验证证据。
 
 ## Global Constraints
 
@@ -67,6 +67,7 @@ SDK 长连接 raw 事件（沿用先 ack 的已接受限制）
 - 公开 `send(..., opts)` 支持 `reply_to`、`reply_in_thread` 与 `reply_target_gone="fail"`。默认原消息消失会改发新消息；本计划显式选 fail，复用公开开关，不改私有 sender 或 monkey patch。
 - 当前产品通过 raw 事件自行治理，SDK 的 dm_policy/group_policy 都禁用；F0 要验证群 raw 事件仍到达、字段来源及线程桥，不能靠放开 SDK 默认策略绕过小维入口。
 - SDK 的传输 ack 先于小维落库是继承限制。没有可靠事件回放/至少一次处理保证；F0/F4 和 P3 分别证明可覆盖的边界，不把持久化后的去重宣称成端到端 exactly-once。
+- F0 修正与补充（锁版实测，详见 F0 小节）：raw 回调在 SDK 去重、规范化与 policy **之前**触发，重复事件同样到达；SDK 规范化阶段会为每条非重复消息的发送者调用通讯录接口（早于 policy 拒绝），公开构造参数 `name_lookup` 可关闭；不带 `force` 的成员查询会返回此前缓存的完整旧名单；没有业务 `code` 的 HTTP 错误被 SDK 当作成功（无 `message_id`），本次已在 `send_outcome` 修正为结果不明；官方撤回码 230011/230050 在 SDK 中不是 `target_revoked`，归为结果不明。
 
 ## 2. 跨边界契约
 
@@ -131,11 +132,21 @@ SDK 长连接 raw 事件（沿用先 ack 的已接受限制）
 
 **依赖：** P2.5 Task 8 与本计划经审查。**结果：** §1.3 的能力在离线协议边界可复现，指出真实平台待验证项。**文件：** 本文/handoff；临时探针在工作树外，不改产品代码。
 
-- [ ] 用锁定 SDK + 受控传输替身核实 raw 群消息在当前 policy 配置下的到达顺序、mentions 的 ID/key 与文本 token、sender/tenant 字段、bot 身份取得方式。正式事件类型与边界按锁定 SDK/官方契约核对，不能只调小维 parse helper。
-- [ ] 公共 get_chat_members 覆盖 force 缓存绕过、分页、部分列表中找到/未找到成员、权限失败、限流、超时；证明没有复用陈旧成功名单或访问私有辅助函数。
-- [ ] 公共发送路径验证 reply_to、reply_target_gone=fail、单次 retry、单条文本；原消息消失时不得触发 create-message fallback；结果失败/未知分类不靠捕获所有异常说成功。
-- [ ] 记录 P3 所需平台事件订阅、机器人入群和成员/回复 API 权限；没有真实平台不能宣称已可入群。若 public API 无法满足契约，先提出具体最小调整，不另写一套鉴权/传输 SDK。
-- [ ] 提交 `docs: record Feishu group SDK contract evidence`；以版本和安全输入/输出独立审查后进入 F1。
+- [x] 锁定 SDK + 本机合成协议端点核实 raw 群事件：到达顺序、ack 时机、字段来源、mention 与 bot 身份（F0 证据 1–3）。
+- [x] 公开 `get_chat_members` 的 force、分页、部分名单、权限/限流/超时与缓存行为（F0 证据 4）。
+- [x] 公开发送的 `reply_to`、`reply_target_gone="fail"`、单次尝试、单条文本与结果分类（F0 证据 5）；发现并修复无 `code` HTTP 错误被记为已发送的缺陷。
+- [x] 记录 P3 所需平台权限与入群前提（F0 证据 7）；公开接口均可满足契约，无需另写鉴权/传输 SDK。
+- [ ] 针对最终精确 SHA 独立审查；通过后进入 F1。F0 只证明锁版 SDK 在合成协议下的行为，不是平台验收。
+
+**F0 证据（2026-10-04，起点 `e153cd9`）。** 环境：`lark-channel-sdk==1.4.0`、`websockets` 15.0.1、`httpx` 0.28.1、Python 3.11.16。探针在工作树外（`probe.py` sha256 `4f532e61…7a2ada`、`fake_feishu.py` sha256 `296de823…ac6b`）：本机 127.0.0.1 上的合成 OpenAPI（HTTP）与长连接端点（SDK 自带 protobuf 帧）；产品 `lark_channel()` 装配的 `ChannelConfig` 原样复用，只把 `domain` 换成该端点；入站经产品 `LarkTransport` 桥。全部身份、事件与响应均为合成，没有连接真实飞书、模型、StarRocks 或外部 MCP。替身能证明“锁版 SDK 收到这些协议输入时怎样处理”，不能证明真实平台实际发送的字段、投递、限流、权限审批与关闭行为。
+
+1. **raw 到达与 ack。** 产品配置（`dm_policy/group_policy=disabled`、`emit_raw_events=True`、`include_raw=False`）下推送 9 帧：@本 bot、无 mention、@其他 bot、正文写“@小维”但无 mention、其他群、bot 发送者（`sender_type=app`）、其他租户、单聊对照、重复 `event_id`。9 帧全部到达产品 raw 桥，9 个 ack 均为 200，均在推送后约 1–6 ms 回写：分发器只排程处理就回 ack，群事件同样“先 ack、后处理”。锁版 `channel.py` 的 `_handle_message_event` 第一步即 `_emit_raw_event`，早于 SDK 去重与 policy，因此重复事件也会到达，去重只能由小维完成（官方说明重复推送应按 `message_id` 而非 `event_id` 去重）。
+2. **字段与 mention。** raw 字典来自 SDK 类型模型再序列化：header 有 `app_id/create_time/event_id/event_type/tenant_key/token`；sender 有 `sender_id.open_id/union_id`、`sender_type`、`tenant_key`；message 有 `chat_id/chat_type/content/message_id/message_type/create_time/mentions` 等；mention 只保留 `key`、`id.{open_id,union_id,user_id}`、`name`、`tenant_key`，官方的 `mentioned_type` 被模型丢弃。正文中的 `@_user_1` 与 `mentions[].key` 对应，因此只能按 `mentions[].id.open_id == 可信 bot open_id` 判断 @本 bot，再按其 `key` 删除正文 token；名称与纯文字“@小维”不可用。当前产品 `_parse` 对这些群事件一律拒绝（`chat_type`；bot 发送者为 `sender_type`；其他租户为 `tenant`），单聊对照被接受：现状不开放群入口。
+3. **bot 身份。** 启动时 SDK 用应用凭据取租户 token 后请求 `GET /open-apis/bot/v3/info`，`get_bot_identity()` 返回其 `open_id` 与 `app_id`。该接口返回权限错误时，SDK 改查 application 接口后放弃并转入后台重试，通道仍为 ready，但 `get_bot_identity()` 抛出 `not_connected`：群入口必须在身份未解析时整体拒绝（可再与可信配置核对），不能退回按名称识别。
+4. **成员目录。** `force=True` 每次访问 API（成员变化后 1 次请求取得新名单）；不带 force 时返回缓存（0 次请求，旧名单）。5 人、`page_size=2`、`max_pages=2`：2 次请求返回前 4 人，第 5 人不在结果中，返回值是普通 list、没有完整性标记；此后不带 force 的调用返回更早缓存的完整旧名单（0 次请求）。权限码 99991672 与 HTTP 403 → `permission_denied`，232011（bot 不在群）→ `unknown`，99991402 与 HTTP 429 → `rate_limited`，HTTP 500 非 JSON → `unknown`；全部抛出 `FeishuChannelError`，不回退缓存。SDK 期限取 `transport.http_timeout_seconds`（产品未设置，默认 30 s；调为 0.5 s 时 0.51 s 后 `send_timeout`），外层 `asyncio.timeout(0.5)` 也能按时结束等待。产品配置没有 `resolve_chat_members` hook。**F1/F2 约束：** 只用 `force=True`、固定页数与独立期限；找到 sender 才算成员证据，未找到、页数用尽、任何异常或超时都按“无法确认”拒绝；不得配置 hook。同群并发查询会合并为同一次在途请求（源码 singleflight），视为同一时刻的事实。
+5. **原消息回复。** `send(chat, {"text": …}, {"reply_to": …, "reply_target_gone": "fail"})` 发出 1 次 `POST /open-apis/im/v1/messages/{id}/reply`（body：`msg_type=text`、`content`、每次调用新生成的 `uuid`）。产品 `max_attempts=1`：5xx 业务码只发 1 次（结果不明），限流与 230003 为明确失败。SDK 的“原消息消失”码（如 230020）在 `fail` 下明确失败、0 次新建；默认 `fresh` 会再新建 1 条无关联消息，所以必须显式选 `fail`。官方撤回码 230011/230050 在 SDK 中不是 `target_revoked`，产品记为结果不明（同样不会改发新消息）。正文恰为 `text_chunk_limit` 字时 1 次请求；多 1 字时第二段以**新建消息**发出，群回复必须保持渲染结果不超过该值（现有 `render` 已保证）。**缺陷与修复：** HTTP 500 `{}`、502 `{"msg":…}`、404 `{"msg":…}` 被 SDK 当作 code 0 的成功（无 `message_id`），产品原记为 `sent`，现有单聊发送同样受影响；本次改为成功必须带 `message_id`，否则 `unknown`，并以真实 SDK + loopback 端点的回归用例覆盖（`test_real_sdk_send_maps_http_outcomes_without_retry`，修复前 3 例失败）。
+6. **入站附加 I/O 与生命周期。** SDK 规范化阶段会为每条非重复消息的发送者请求 `GET /open-apis/contact/v3/users/batch`（9 帧中 8 次，重复帧被 SDK 去重），发生在 policy 拒绝之前，单聊现状同样如此；公开构造参数 `FeishuChannel(name_lookup=...)` 传入不做 I/O 的函数后，3 条入站事件的附加请求为 0。**F2 约束：** 以该公开参数关闭姓名查询，避免任何群消息（含未 @、非指定群）消耗应用配额或依赖通讯录权限；本次不改单聊行为。一个进程只能运行一个长连接通道（WS 客户端绑定模块级事件循环）。SDK `stop()` 通常约 0.05 s；完整场景下 12 次中有 4 次卡在 SDK 固定 5+1 s 的后台任务清理等待（期限 30 s 时测得 6.0/6.01 s，期限 5 s 时 6 次中 2 次超时），短场景 7 次均正常，触发条件未定位。产品 `stop_timeout_seconds` 小于约 6 s 时停机可能被报告为未干净退出；群与 P3 配置建议不小于 7 s，P3 用真实连接复核。
+7. **P3 平台前提（官方文档核对，未在租户验证）。** 事件 `im.message.receive_v1` 收群内 @机器人消息需 `im:message.group_at_msg`（或其 readonly 变体），单聊为 `im:message.p2p_msg`；不需要“群内所有消息”。成员列表 `GET /open-apis/im/v1/chats/:chat_id/members` 需 `im:chat`、`im:chat:readonly`、`im:chat.members:read` 或 `im:chat.group_info:readonly` 之一，调用方必须在群内（否则 232011），`page_size` 至多 100，限频 50 次/秒；回复 `POST …/messages/:message_id/reply` 需 `im:message`、`im:message:send_as_bot` 或 `im:message:send` 之一，机器人须在群内且可发言，每群 5 QPS；关闭姓名查询后不需要通讯录权限。机器人入群、指定群规模（决定页数上限）、实际字段与限流在 P3 控制台与获准群中确认。
 
 ### F1：可信群身份、共享归属与存储闭环
 
@@ -205,8 +216,8 @@ F0 的替身必须位于公开 SDK 的外部 I/O 边界，以真实 SDK 把事�
 
 | 疑点 | 关闭方式 / 阻塞边界 |
 | --- | --- |
-| 当前 raw 模式的真实群事件/mention 形状、可信 bot ID 来源 | F0 官方/锁版协议核对 + P3 真实群；未确定不开放群入口 |
-| 指定群规模、成员 API 的权限/限流和可接受验证耗时 | F0 固定分页/异常行为，P3 真实账号；不能以旧缓存或静态 users 名单替代当前成员事实 |
+| 当前 raw 模式的真实群事件/mention 形状、可信 bot ID 来源 | F0 已核对锁版处理与官方字段（mention 按 `id.open_id`，bot ID 取自 `bot/v3/info`，未解析时拒绝）；真实平台投递留 P3，未确认前不开放群入口 |
+| 指定群规模、成员 API 的权限/限流和可接受验证耗时 | F0 已固定 force/分页/异常行为（部分名单无完整标记，按无法确认拒绝）；群规模、权限与耗时留 P3 真实账号，不能以旧缓存或静态 users 名单替代当前成员事实 |
 | 多人 SDK 历史如何保留作者而不破坏配对/容量 | F1 真 Runner + PostgreSQL 对照；不能仅靠 prompt 声称权限已隔离 |
 | P2.5 实际字段/迁移版本与本文规划形状不同 | F0 按经审查的 P2.5 SHA 核对消费者，修订本计划；普通签名调整无需改产品范围 |
 | 模型是否正确理解混合上下文、模糊回复和否定 | F4 离线门控 + P3 真实任务；语义误判残余明确，不保证所有自然语言零误判 |
@@ -220,4 +231,4 @@ F0 的替身必须位于公开 SDK 的外部 I/O 边界，以真实 SDK 把事�
 - [x] 真 SDK 的成员/回复能力优先，公开接口限制明确；无新的服务、聊天历史或调度平台。
 - [x] 排队、满/超时、澄清、新建、失败/取消/停机/恢复都有可观察验收；有同群成功和不同会话并行对照。
 - [x] 四种投影、渲染上限、发送状态与历史拒绝沿用；原有单条最终回答规则与新增状态回执的区别已说明。
-- [ ] 针对最终文档精确 SHA 独立审查；F0 和后续实施仍未开始。
+- [ ] 针对 F0 精确 SHA 独立审查；F1 及后续实施仍未开始。
