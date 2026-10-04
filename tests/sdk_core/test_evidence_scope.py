@@ -41,6 +41,7 @@ from tests.sdk_core.test_feishu import FakeChannel
 from tests.sdk_core.test_runtime import (
     AUDIT_CONFIG,
     AUDIT_SOURCE,
+    BUDGET_CONFIG,
     DB_ENV,
     FEISHU_ENV,
     KEY_ENV,
@@ -53,6 +54,7 @@ from tests.sdk_core.test_runtime import (
     serve_config,
 )
 from tests.sdk_core.test_runtime import Env as RuntimeEnv
+from tests.sdk_core.test_starrocks_tools import LAYOUT_COLUMNS
 
 from xiaowei import runtime
 from xiaowei.channel import (
@@ -86,6 +88,7 @@ class Database:
     """
 
     query: Result = field(default_factory=lambda: SALES)
+    tables: dict[tuple[str, str], Any] = field(default_factory=lambda: TABLES)
     revoked: set[tuple[str, str]] = field(default_factory=set)
     overrides: dict[str, Result | BaseException] = field(default_factory=dict)
     drv: Driver = field(init=False)
@@ -95,7 +98,7 @@ class Database:
             results: dict[str, Any] = {
                 SESSION_SET: Result(()),
                 SESSION_READ: Result(("q", "m", "t", "s"), [SESSION_VALUES]),
-                **schema_results(TABLES, frozenset(self.revoked), views=frozenset({VIEW})),
+                **schema_results(self.tables, frozenset(self.revoked), views=frozenset({VIEW})),
                 **self.overrides,
                 "*": self.query,
             }
@@ -119,7 +122,8 @@ class Database:
 
     def business(self) -> list[str]:
         """到达驱动的业务语句：不含会话设置与回读、结构快照读取、零行探测与依赖元数据读取。"""
-        internal = frozenset(schema_results(TABLES, views=frozenset({VIEW}))) | set(self.overrides)
+        internal = frozenset(schema_results(self.tables, views=frozenset({VIEW})))
+        internal |= set(self.overrides)
         return [
             sql
             for conn in self.drv.connections
@@ -192,10 +196,10 @@ class Env:
         )
         return result, channel.sends
 
-    async def scalar(self, sql: str) -> Any:
+    async def scalar(self, sql: str, **params: Any) -> Any:
         async with open_engine(SecretStr(self.url.render_as_string(hide_password=False))) as e:
             async with e.connect() as conn:
-                return await conn.scalar(text(sql))
+                return await conn.scalar(text(sql), params)
 
 
 @pytest.fixture
@@ -603,3 +607,247 @@ async def test_every_target_in_a_batch_is_verified(env: Env) -> None:
         with pytest.raises(ResultUnavailableError):
             await rt.service.results.view(ref("om_1"))
         assert probe_sql("shop", "sales") in env.db.probes()  # 第一个集群也照常复核
+
+
+async def test_one_unreachable_target_does_not_void_a_mixed_history(env: Env) -> None:
+    """A/B 两个集群的事实在同一段历史中：B 暂时不可达时只阻断本次交付，Session 与两条证据都保留；
+    恢复后同一会话继续，业务 SQL 不重跑。"""
+    second = Database()
+    config = env.config(targets=[cluster_config("sr-a"), cluster_config("sr-b")])
+    env.drivers = {"sr-b": second.drv}
+    async with env.opened(config) as rt:
+        second.forget()
+        await env.turn(rt, both_clusters(env, "两个集群 om_1"), "om_1")
+        second.down = True
+        record, message = await followup(env, rt, "om_2")
+        assert (record.state, record.failure_code) == ("failed", "scope_unverifiable")
+        assert message not in env.scripts.calls
+        assert await session_state(env) == "active"
+        assert await env.scalar("SELECT count(*) FROM xiaowei_evidence") == 2
+        with pytest.raises(ResultUnverifiableError):
+            await rt.service.results.view(ref("om_1"))
+
+        second.down = False
+        env.db.forget()
+        second.forget()
+        record, message = await followup(env, rt, "om_3")
+        assert record.state == "completed" and len(env.scripts.calls[message]) == 1
+        assert env.db.business() == [] and second.business() == []
+
+
+async def test_an_unrelated_target_does_not_affect_history(env: Env) -> None:
+    """历史只有 A 集群的事实：B 撤权或不可达都不影响追问与读取，B 不被复核。"""
+    second = Database(revoked={("shop", "sales")})
+    second.down = True
+    config = env.config(targets=[cluster_config("sr-a"), cluster_config("sr-b")])
+    env.drivers = {"sr-b": second.drv}
+    async with env.opened(config) as rt:
+        message = env.scripts.add(
+            "只看 sr-a",
+            tool_call("run_readonly_query", cluster="sr-a", sql="SELECT region, total FROM sales"),
+            cite(),
+        )
+        assert (await env.turn(rt, message, "om_1")).state == "completed"
+        second.forget()
+        record, _ = await followup(env, rt, "om_2")
+        assert record.state == "completed"
+        assert (await rt.service.results.view(ref("om_1"))).delivery is not None
+        assert second.drv.attempts == 0
+
+
+LAYOUT_ROW = Result(
+    LAYOUT_COLUMNS, [("DUP_KEYS", "`region`", "HASH", "`region`", 8, "`region`", "")]
+)
+METADATA_FACTS = {
+    "list_tables": ({}, SALES),
+    "describe_table": ({"database": "shop", "table": "sales"}, SALES),
+    "describe_table_layout": ({"database": "shop", "table": "sales"}, LAYOUT_ROW),
+}
+
+
+@pytest.mark.parametrize("tool", METADATA_FACTS)
+async def test_revoked_metadata_facts_are_never_delivered_again(env: Env, tool: str) -> None:
+    """列表、表结构与布局事实同查询事实一样：撤权后追问、历史读取与重发都拒绝，只做零行探测。"""
+    arguments, result = METADATA_FACTS[tool]
+    env.db.query = result
+    config = env.config()
+    async with env.opened(config) as rt:
+        message = env.scripts.add(
+            f"元数据 {tool}", tool_call(tool, cluster=SR.target_id, **arguments), cite()
+        )
+        assert (await env.turn(rt, message, "om_1")).state == "completed"
+        outbox = Outbox()  # 首次发送明确失败：之后可显式重发
+        assert await rt.service.results.send(ref("om_1"), outbox) == "failed"
+        assert outbox.sent and (await rt.service.results.view(ref("om_1"))).delivery is not None
+        env.db.revoked = {("shop", "sales")}
+        env.db.forget()
+        with pytest.raises(ResultUnavailableError) as refused:
+            await rt.service.results.view(ref("om_1"))
+        assert not isinstance(refused.value, ResultUnverifiableError)
+        record, followed = await followup(env, rt, "om_2")
+        assert (record.state, record.failure_code) == ("failed", "session_failed")
+        assert followed not in env.scripts.calls
+        assert env.db.business() == []
+    with pytest.raises(ResultUnavailableError):
+        await env.resend(config, "om_1")
+    assert env.db.business() == []
+
+
+# ---- 对象检查次数上限（计划 §2.2）：每次复核按批去重后计数，超限在 I/O 前暂不可用 -------------
+
+WIDE = {("shop", f"t{i}"): (("region", "varchar", "YES", None),) for i in range(6)}
+WIDE_SQL = (
+    "SELECT t0.region FROM t0 JOIN t1 ON t1.region = t0.region "
+    "JOIN t2 ON t2.region = t0.region JOIN t3 ON t3.region = t0.region "
+    "JOIN t4 ON t4.region = t0.region JOIN t5 ON t5.region = t0.region"
+)
+
+
+def capped(env: Env, checks: int, **overrides: Any) -> runtime.ServeConfig:
+    """每页列表 1 行（上限的下界因此为 5），对象检查上限为 ``checks``。"""
+    starrocks = SR.model_dump(mode="json")
+    starrocks["policy"]["max_rows"] = 1
+    budget = {**BUDGET_CONFIG, "max_scope_checks": checks}
+    if "targets" in overrides:
+        for target in overrides["targets"]:
+            target["starrocks"]["policy"]["max_rows"] = 1
+        return env.config(budget=budget, **overrides)
+    return env.config(starrocks=starrocks, budget=budget, **overrides)
+
+
+def wide(env: Env, message: str, *clusters: str) -> str:
+    """一轮在给定集群上各查一次 6 张表的 JOIN。"""
+    return env.scripts.add(
+        message,
+        lambda call: [
+            function_call("run_readonly_query", {"cluster": c, "sql": WIDE_SQL}, call_id=f"w-{c}")
+            for c in clusters
+        ],
+        cite(),
+    )
+
+
+def both_clusters(env: Env, message: str) -> str:
+    return env.scripts.add(
+        message,
+        lambda call: [
+            function_call(
+                "run_readonly_query",
+                {"cluster": t, "sql": "SELECT region FROM sales"},
+                call_id=f"q-{t}",
+            )
+            for t in ("sr-a", "sr-b")
+        ],
+        cite(),
+    )
+
+
+async def fresh_session(rt: runtime.Runtime) -> None:
+    await rt.service.new_session("feishu", "alice", CHAT)
+
+
+async def test_a_turn_succeeds_at_the_check_limit_and_stops_before_io_beyond_it(env: Env) -> None:
+    env.db.tables = {**TABLES, **WIDE}
+    env.db.query = Result(("region",), [("east",)])
+    async with env.opened(capped(env, 1000)) as rt:
+        assert (await env.turn(rt, wide(env, "量一轮", SR.target_id), "om_0")).state == "completed"
+        needed = len(env.db.probes())
+    # 每次复核这 6 个对象各探测一次：工具记录、写入 Session、最终校验、提交时的校验与提交前的
+    # 整段回放。
+    assert needed == 6 * 5
+
+    async with env.opened(capped(env, needed)) as rt:
+        await fresh_session(rt)
+        assert (
+            await env.turn(rt, wide(env, "恰好用完", SR.target_id), "om_1")
+        ).state == "completed"
+        assert len(env.db.probes()) == needed
+        # 计数只属于一轮：同一进程的下一轮重新计数。
+        await fresh_session(rt)
+        env.db.forget()
+        assert (await env.turn(rt, wide(env, "下一轮", SR.target_id), "om_2")).state == "completed"
+        assert len(env.db.probes()) == needed
+
+    async with env.opened(capped(env, needed - 1)) as rt:
+        await fresh_session(rt)
+        record = await env.turn(rt, wide(env, "超出一次", SR.target_id), "om_3")
+        assert (record.state, record.failure_code) == ("failed", "scope_unverifiable")
+        # 最后一次复核需要 6 次而只剩 5 次：在任何探测之前拒绝，已用的不退还。
+        assert len(env.db.probes()) == needed - 6
+        state = "SELECT state FROM xiaowei_session WHERE session_id = :s"
+        assert await env.scalar(state, s=record.session_id) == "active"
+
+
+async def test_history_reads_and_resends_have_their_own_limit(env: Env) -> None:
+    """单独的历史读取与重发每次各自计数；同一批中同一对象只探测、计数一次。"""
+    env.db.tables = {**TABLES, **WIDE}
+    env.db.query = Result(("region",), [("east",)])
+    async with env.opened(capped(env, 1000)) as rt:
+        message = env.scripts.add(
+            "两次同表",
+            lambda call: [
+                function_call(
+                    "run_readonly_query", {"cluster": SR.target_id, "sql": WIDE_SQL}, call_id=c
+                )
+                for c in ("w-1", "w-2")
+            ],
+            cite(),
+        )
+        record = await env.turn(rt, message, "om_1")
+        assert record.state == "completed" and record.answer is not None
+        assert len(record.answer.evidence_ids) == 2
+        assert await rt.service.results.send(ref("om_1"), Outbox()) == "failed"  # 之后可重发
+
+    config = capped(env, 5)
+    async with env.opened(config) as rt:
+        with pytest.raises(ResultUnverifiableError):
+            await rt.service.results.view(ref("om_1"))
+        assert env.db.probes() == []
+    with pytest.raises(ResultUnverifiableError):
+        await env.resend(config, "om_1")
+    assert env.db.probes() == []
+
+    config = capped(env, 6)
+    async with env.opened(config) as rt:
+        assert (await rt.service.results.view(ref("om_1"))).delivery is not None
+        assert sorted(env.db.probes()) == sorted(probe_sql("shop", f"t{i}") for i in range(6))
+        assert (await rt.service.results.view(ref("om_1"))).delivery is not None
+    env.db.forget()
+    result, sends = await env.resend(config, "om_1")
+    assert result == "sent" and len(sends) == 1
+    assert len(env.db.probes()) == 6
+
+
+async def test_the_same_object_on_two_clusters_is_checked_and_counted_on_each(env: Env) -> None:
+    second = Database(tables={**TABLES, **WIDE}, query=Result(("region",), [("east",)]))
+    env.db.tables = {**TABLES, **WIDE}
+    env.db.query = Result(("region",), [("east",)])
+    targets = [cluster_config("sr-a"), cluster_config("sr-b")]
+    env.drivers = {"sr-b": second.drv}
+    async with env.opened(capped(env, 1000, targets=targets)) as rt:
+        second.forget()
+        record = await env.turn(rt, wide(env, "两个集群同名表", "sr-a", "sr-b"), "om_1")
+        assert record.state == "completed"
+
+    targets = [cluster_config("sr-a"), cluster_config("sr-b")]
+    async with env.opened(capped(env, 11, targets=targets)) as rt:
+        second.forget()
+        with pytest.raises(ResultUnverifiableError):
+            await rt.service.results.view(ref("om_1"))
+        assert env.db.probes() == [] and second.probes() == []
+    targets = [cluster_config("sr-a"), cluster_config("sr-b")]
+    async with env.opened(capped(env, 12, targets=targets)) as rt:
+        second.forget()
+        assert (await rt.service.results.view(ref("om_1"))).delivery is not None
+        assert len(env.db.probes()) == 6 and len(second.probes()) == 6
+
+
+async def test_a_full_listing_page_fits_the_smallest_allowed_limit(env: Env) -> None:
+    """启动校验的下界（5 × 一页）足够一轮新会话列出满页：列表自身挑选可读对象的探测另受
+    ``2 × max_rows`` 封顶、不计入，证据依赖的 1 个对象在 5 次复核中各计一次。"""
+    async with env.opened(capped(env, 5)) as rt:
+        message = env.scripts.add("列一页", tool_call("list_tables", cluster=SR.target_id), cite())
+        record = await env.turn(rt, message, "om_1")
+        assert record.state == "completed", record.failure_code
+        listed = [sql for sql in env.db.probes() if sql == probe_sql("shop", "regions")]
+        assert len(listed) == 1 + 5

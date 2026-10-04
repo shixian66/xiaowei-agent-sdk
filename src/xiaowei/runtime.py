@@ -110,6 +110,7 @@ from xiaowei.web import create_web_app
 logger = logging.getLogger(__name__)
 
 _LOOPBACK = frozenset({"127.0.0.1", "::1"})
+_CHECKS_PER_LISTED_OBJECT = 5
 
 
 class ConfigError(Exception):
@@ -254,6 +255,14 @@ class ServeConfig(_Config):
                 raise ValueError("Web 操作者与飞书用户不能使用同一个内部 subject")
             if self.feishu.consumer_count > self.max_concurrent_turns:
                 raise ValueError("feishu.consumer_count 不得超过 max_concurrent_turns")
+        # 一轮新列表的每个对象在工具记录、写入 Session、最终校验、提交时的校验与提交前的整段回放
+        # 中各复核一次；上限容不下最大一页时，满页的列表必然在提交前因次数用完而失败。
+        page = max(t.starrocks.policy.max_rows for t in self.targets)
+        if self.budget.max_scope_checks < _CHECKS_PER_LISTED_OBJECT * page:
+            raise ValueError(
+                "budget.max_scope_checks 至少为最大 policy.max_rows 的 "
+                f"{_CHECKS_PER_LISTED_OBJECT} 倍"
+            )
         return self
 
 

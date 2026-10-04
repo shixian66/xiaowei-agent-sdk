@@ -43,7 +43,8 @@
   "budget": {
     "max_turns": 8,
     "max_tool_calls": 6,
-    "timeout_seconds": 120
+    "timeout_seconds": 120,
+    "max_scope_checks": 1024
   },
   "max_concurrent_turns": 4,
   "targets": [

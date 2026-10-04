@@ -77,6 +77,14 @@ def free_port() -> int:
     return port
 
 
+BUDGET_CONFIG: dict[str, Any] = {
+    "max_turns": 6,
+    "max_tool_calls": 3,
+    "timeout_seconds": 30,
+    "max_scope_checks": 1000,
+}
+
+
 def target_config(
     starrocks: dict[str, Any] | None = None, business_context: dict[str, Any] | None = None
 ) -> dict[str, Any]:
@@ -110,7 +118,7 @@ def serve_config(port: int, **overrides: Any) -> dict[str, Any]:
             "max_history_bytes": 200_000,
             "retention_seconds": 7200,
         },
-        "budget": {"max_turns": 6, "max_tool_calls": 3, "timeout_seconds": 30},
+        "budget": BUDGET_CONFIG,
         "max_concurrent_turns": 4,
         "targets": [target_config(starrocks)],
         "projection_bytes": dict.fromkeys(AUDIENCES, 60_000),
@@ -1254,6 +1262,35 @@ def test_legacy_single_target_configuration_reports_the_migration(tmp_path: Path
     message = str(raised.value)
     assert "targets" in message and "starrocks.target_id" in message
     assert SR.host not in message and SR.user not in message
+
+
+@pytest.mark.parametrize(
+    ("checks", "reason"),
+    [
+        (None, "budget.max_scope_checks"),
+        (0, "budget.max_scope_checks"),
+        (100_001, "budget.max_scope_checks"),
+        (5 * SR.policy.max_rows - 1, "max_scope_checks"),
+    ],
+    ids=["缺失", "零", "超过上界", "容不下一页列表"],
+)
+def test_scope_check_limit_is_required_and_fits_one_listing_turn(
+    tmp_path: Path, checks: int | None, reason: str
+) -> None:
+    """每次复核按批去重后的对象数计数；一轮新列表在记录、写入 Session、最终校验、提交时的校验
+    与提交前的整段回放中各复核一次，上限至少为最大一页（``policy.max_rows``）的 5 倍，否则任何
+    一页满的列表都必然失败。"""
+    budget = {k: v for k, v in BUDGET_CONFIG.items() if k != "max_scope_checks"}
+    if checks is not None:
+        budget["max_scope_checks"] = checks
+    file = tmp_path / "xiaowei.json"
+    file.write_text(json.dumps(serve_config(8501, budget=budget)), encoding="utf-8")
+    with pytest.raises(runtime.ConfigError) as raised:
+        runtime.load_config(file)
+    assert reason in str(raised.value)
+    budget["max_scope_checks"] = 5 * SR.policy.max_rows
+    file.write_text(json.dumps(serve_config(8501, budget=budget)), encoding="utf-8")
+    assert runtime.load_config(file).budget.max_scope_checks == 5 * SR.policy.max_rows
 
 
 @pytest.mark.parametrize(

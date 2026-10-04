@@ -406,7 +406,7 @@ async def test_governed_query_tool_end_to_end(
         identity=Identity(subject_id="alice", session_id="s1", turn_id="t1", channel="web"),
         target_scope=frozenset({"sr-real"}),
         tool_scope=QUERY_TOOLS,
-        budget=Budget(max_turns=4, max_tool_calls=2, timeout_seconds=30.0),
+        budget=Budget(max_turns=4, max_tool_calls=2, timeout_seconds=30.0, max_scope_checks=1000),
     )
 
     def call(sql: str) -> ToolRequest:
@@ -838,7 +838,9 @@ async def test_order_by_facts_keep_the_original_binding(instance: Instance) -> N
                     ),
                     target_scope=frozenset({"sr-real"}),
                     tool_scope=QUERY_TOOLS,
-                    budget=Budget(max_turns=4, max_tool_calls=2, timeout_seconds=30.0),
+                    budget=Budget(
+                        max_turns=4, max_tool_calls=2, timeout_seconds=30.0, max_scope_checks=1000
+                    ),
                 )
                 request = ToolRequest(
                     tool_id=tool_id,

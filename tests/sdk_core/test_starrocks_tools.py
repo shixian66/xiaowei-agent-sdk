@@ -190,7 +190,12 @@ class Env:
             ),
             target_scope=frozenset({SR.target_id}),
             tool_scope=self.app.scope_for_turn(mode, authorized, self.app.available_tools),
-            budget=Budget(max_turns=6, max_tool_calls=max_tool_calls, timeout_seconds=30.0),
+            budget=Budget(
+                max_turns=6,
+                max_tool_calls=max_tool_calls,
+                timeout_seconds=30.0,
+                max_scope_checks=1000,
+            ),
         )
 
     async def deliver(self, ctx: RunContext, message: str) -> Delivery:
@@ -1422,7 +1427,9 @@ class Multi:
             identity=Identity(subject_id="alice", session_id=session, turn_id=turn, channel="web"),
             target_scope=frozenset(CLUSTERS),
             tool_scope=self.app.scope_for_turn("query", MULTI_TOOLS, self.app.available_tools),
-            budget=Budget(max_turns=6, max_tool_calls=4, timeout_seconds=30.0),
+            budget=Budget(
+                max_turns=6, max_tool_calls=4, timeout_seconds=30.0, max_scope_checks=1000
+            ),
         )
 
     def attempts(self) -> dict[str, int]:

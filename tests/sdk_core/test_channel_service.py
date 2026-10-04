@@ -60,7 +60,7 @@ from xiaowei.storage import Readiness, hold_instance_lock
 pytestmark = pytest.mark.loopback
 
 FAKE_MODEL_KEY = "sk-test-channel-model"
-BUDGET = Budget(max_turns=6, max_tool_calls=5, timeout_seconds=30.0)
+BUDGET = Budget(max_turns=6, max_tool_calls=5, timeout_seconds=30.0, max_scope_checks=1000)
 TOOLS = frozenset({TOTAL_TOOL, QUERY_TOOL})
 
 

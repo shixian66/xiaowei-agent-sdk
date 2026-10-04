@@ -441,7 +441,7 @@ def _context(sample: Sample, app: Application, run: str) -> RunContext:
         tool_scope=app.scope_for_turn(
             sample.mode, frozenset({SALES_TOOL, REGIONS_TOOL}), app.available_tools
         ),
-        budget=Budget(max_turns=6, max_tool_calls=3, timeout_seconds=120.0),
+        budget=Budget(max_turns=6, max_tool_calls=3, timeout_seconds=120.0, max_scope_checks=1000),
     )
 
 
@@ -988,7 +988,9 @@ async def run_diagnosis(
             tool_scope=diagnosis.app.scope_for_turn(
                 sample.mode, DIAG_TOOLS, diagnosis.app.available_tools
             ),
-            budget=Budget(max_turns=8, max_tool_calls=5, timeout_seconds=180.0),
+            budget=Budget(
+                max_turns=8, max_tool_calls=5, timeout_seconds=180.0, max_scope_checks=1000
+            ),
         )
         try:
             answer = await diagnosis.app.run_turn(ctx, sample.message)

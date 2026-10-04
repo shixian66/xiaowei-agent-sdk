@@ -147,7 +147,9 @@ def context(
         identity=Identity(subject_id=subject, session_id=session, turn_id=turn, channel=channel),
         target_scope=targets,
         tool_scope=tools,
-        budget=Budget(max_turns=6, max_tool_calls=max_tool_calls, timeout_seconds=30.0),
+        budget=Budget(
+            max_turns=6, max_tool_calls=max_tool_calls, timeout_seconds=30.0, max_scope_checks=1000
+        ),
         evidence_ids=(),
     )
 
