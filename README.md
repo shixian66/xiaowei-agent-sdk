@@ -15,7 +15,7 @@
 
 查询与诊断共用一个业务 Agent。StarRocks 通过受治理 function tools 和本地 Adapter 直连；数据库 MCP 暂缓。通用 MCP Client Integration 保留用于将来其他能力；两条工具路径均复核权限、过滤结果并验证 Evidence。
 
-**P2.5 与后续增量：** P2.5 开放账号实际 SELECT 范围、复杂 SQL、多集群和单 Agent 自然语言工具选择；随后增加指定飞书群共享与排队，均在 P3 前完成。产品边界见 [ARCHITECTURE](ARCHITECTURE.md#p25-scope)，实施顺序见 [DEVELOPMENT_PLAN](DEVELOPMENT_PLAN.md#6-p25-与飞书单群增量)。下文命令、配置和诊断用法描述当前主线；配置已改为 `targets` 多目标格式（P2.5 Task 1），数据范围改为只读账号实际可 SELECT 的对象（P2.5 Task 2）；跨库与复杂 SQL 已实现（P2.5 Task 3）。原 P2.5 Task 4 已取消，查询沿用权限、SQLGuard 和运行限额，EXPLAIN LOGICAL 用于按需诊断（见上述产品边界）。
+**P2.5 与后续增量：** P2.5 开放账号实际 SELECT 范围、复杂 SQL、多集群和单 Agent 自然语言工具选择；随后增加指定飞书群共享与排队，均在 P3 前完成。产品边界见 [ARCHITECTURE](ARCHITECTURE.md#p25-scope)，实施顺序见 [DEVELOPMENT_PLAN](DEVELOPMENT_PLAN.md#6-p25-与飞书单群增量)。下文命令、配置和诊断用法描述当前主线；配置已改为 `targets` 多目标格式（P2.5 Task 1），数据范围改为只读账号实际可 SELECT 的对象（P2.5 Task 2）；跨库与复杂 SQL 已实现（P2.5 Task 3），搜表分页与多库慢查询（Task 6）、普通消息由单 Agent 判断是否查询（Task 7）均已合入。原 P2.5 Task 4 已取消，查询沿用权限、SQLGuard 和运行限额，EXPLAIN LOGICAL 用于按需诊断（见上述产品边界）。P2.5 的离线与隔离服务证据已齐（Task 8，见 AGENT_HANDOFF）；真实模型、用户 StarRocks 与飞书的实战验证在 P3。
 
 ## 最小产品形态
 
@@ -68,8 +68,8 @@ MCP 负责标准化工具接入，不能替代业务授权。只有参数含义�
 
 ```bash
 uv sync --locked
-export XW_DATABASE_URL=...   # postgresql+asyncpg://...，以及 XW_DIGEST_KEY、XW_MODEL_API_KEY、XW_STARROCKS_PASSWORD
-uv run --locked xiaowei --config xiaowei.json storage init      # 全新数据库；已有 v1/v2 用 storage upgrade（先备份）
+export XW_DATABASE_URL=...   # postgresql+asyncpg://...，以及 XW_DIGEST_KEY、XW_MODEL_API_KEY 和每个集群的 StarRocks 口令（示例为 XW_STARROCKS_PASSWORD、XW_ARCHIVE_STARROCKS_PASSWORD）
+uv run --locked xiaowei --config xiaowei.json storage init      # 全新数据库；已有 v1–v3 用 storage upgrade（先备份）
 uv run --locked xiaowei --config xiaowei.json serve             # Web 默认 http://127.0.0.1:8501，Ctrl-C 停止
 uv run --locked xiaowei --config xiaowei.json storage cleanup --batch-size 100
 uv run --locked xiaowei --config xiaowei.json requests resend --subject <subject> --chat <chat_id> --message <message_id>
@@ -81,7 +81,7 @@ uv run --locked xiaowei --config xiaowei.json requests resend --subject <subject
 
 **目标（`targets`）。** 每项为 `type`（目前只能是 `starrocks`）、`description`（集群用途，交给模型选择集群）、`business_context`（该集群的业务口径 `{"version", "text"}`，没有则写 `null`）与 `starrocks`（连接、限额、函数闭集与结构快照上限）。集群 ID 就是 `starrocks.target_id`，只能用 1–32 位小写字母、数字、`_`、`-`，不能重复；连接地址、账号与凭据引用不交给模型。授权表按工具授予，获准用户可用全部已配置集群；模型每次调用数据工具都必须给出 `cluster`，未知集群在连接前拒绝，不会改查其他集群。旧版顶层 `starrocks`/`business_context` 会在启动时报错并给出迁移方式：把原 `starrocks` 放进 `targets` 的一项，原 `business_context` 去掉 `target_id` 后放到同一项。新增、删除集群或修改口径后，旧会话需要新建；已保存的 StarRocks 结果在本次升级后一次失效。
 
-**SQL 语义与升级。** 小维连接固定 SQL 模式，`||` 表示逻辑 OR；完整约定见 [ARCHITECTURE §6](ARCHITECTURE.md#6-只读查询保护)。D1/D2 修复把 StarRocks 证据摘要升为 v3，P2.5 Task 3（跨库与复杂 SQL）再升为 v4，Task 6（搜表分页与多库慢查询）升为 v5；每次升级前保存的 StarRocks 证据一次性失效，引用它们的旧会话须新建并重新查询，历史与重发也不能继续交付旧事实。其他工具的证据指纹不变。
+**SQL 语义与升级。** 小维连接固定 SQL 模式，`||` 表示逻辑 OR；完整约定见 [ARCHITECTURE §6](ARCHITECTURE.md#6-只读查询保护)。D1/D2 修复把 StarRocks 证据摘要升为 v3，P2.5 Task 3（跨库与复杂 SQL）再升为 v4，Task 6（搜表分页与多库慢查询）升为 v5；每次升级前保存的 StarRocks 证据一次性失效，引用它们的旧会话须新建并重新查询，历史与重发也不能继续交付旧事实。其他工具的证据指纹不变。P2.5 Task 7 起，每条回答随结果保存模型本轮看过的证据，交付时一并按当前权限复核；升级前保存的回答没有这项记录，历史读取与 `requests resend` 不再交付（包括澄清与建议），不需要迁移表结构。
 
 **数据范围（自动发现）。** 不再配置表与列：小维每隔 `schema_limits.refresh_seconds` 读取一次 `information_schema` 中全部用户库的表、视图与列，并对每个对象做一次不返回数据的 `SELECT 1 … WHERE 1 = 0` 探测，只有只读账号确实能 SELECT 的对象才进入范围。查询与执行计划可引用其中任何库的对象并跨库 JOIN：表名写成 `库名.表名`，只在一个库中存在的表可以省略库名（不使用连接的默认库猜测；多个库都有同名表时要求写明库名）。`list_tables`、`describe_table`、`describe_table_layout` 在返回前会再次确认对象仍可读。
 
