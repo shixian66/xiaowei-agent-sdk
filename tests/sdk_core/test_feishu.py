@@ -937,12 +937,12 @@ def test_forged_headers_inside_results_do_not_steer_the_cut() -> None:
 
 
 def test_clarifications_and_receipts_are_not_rearranged() -> None:
-    clarification = "需要澄清（本轮未执行查询）\n" + "请说明" * 400
+    clarification = "需要澄清（本轮未执行业务查询）\n" + "请说明" * 400
     shown = render(plain(clarification), 300)
     lines = shown.split("\n")
     assert len(shown) <= 300 and FACTS_TRUNCATED not in shown
     # 澄清正文只有一行且放不下时保留它的前缀，而不是只剩标题与截断说明。
-    assert lines[0] == "需要澄清（本轮未执行查询）" and lines[-1] == TRUNCATED
+    assert lines[0] == "需要澄清（本轮未执行业务查询）" and lines[-1] == TRUNCATED
     assert len(lines) == 3 and lines[1] and clarification.split("\n")[1].startswith(lines[1])
     assert render(plain("工具结果或回答未通过证据校验"), 200) == "工具结果或回答未通过证据校验"
 

@@ -20,7 +20,7 @@ import json
 import math
 import types
 from collections.abc import Awaitable, Callable, Iterable, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import (
     TYPE_CHECKING,
     Annotated,
@@ -213,6 +213,19 @@ class ToolCatalog:
         return self._policies[contract.policy_id]
 
 
+@dataclass(frozen=True)
+class TurnRuns:
+    """一轮内经治理执行的工具调用，由可信代码记录（不来自模型）。
+
+    ``started`` 是通过前置检查、占用预算后开始执行的调用的工具 ID（每次调用一项）；``produced``
+    是其中结果已生成证据并交给模型的 ``(工具 ID, 证据标识)``。开始执行后失败的调用中止整轮，
+    因此能走到最终回答的轮次中两者一一对应。
+    """
+
+    started: tuple[str, ...] = ()
+    produced: tuple[tuple[str, str], ...] = ()
+
+
 class GovernedTools:
     """本地与 MCP 工具共用的治理入口；依赖由应用装配，``execute`` 只由应用绑定。
 
@@ -225,7 +238,7 @@ class GovernedTools:
         self._catalog = evidence.catalog
         self._authorize = evidence.authorize
         self._used: dict[tuple[str, str, str], int] = {}
-        self._started: dict[tuple[str, str, str], set[str]] = {}
+        self._runs: dict[tuple[str, str, str], TurnRuns] = {}
 
     @property
     def catalog(self) -> ToolCatalog:
@@ -268,7 +281,9 @@ class GovernedTools:
         # 上限；前置检查拒绝时尚未占用预算。
         run = _bind(execute, effective)
         self._reserve(ctx)
-        self._started.setdefault(_turn_key(ctx.identity), set()).add(contract.tool_id)
+        key = _turn_key(ctx.identity)
+        runs = self._runs.get(key, TurnRuns())
+        self._runs[key] = replace(runs, started=(*runs.started, contract.tool_id))
 
         try:
             observation = await run()
@@ -276,16 +291,21 @@ class GovernedTools:
             raise ToolExecutionError("工具执行失败") from None
         if not isinstance(observation, ToolObservation):
             raise ToolExecutionError("工具执行失败")
-        return await self._evidence.record(ctx, effective, observation)
+        result = await self._evidence.record(ctx, effective, observation)
+        # 同一轮的并行调用可能已更新记录：取当前值再追加（两步之间没有 await）。
+        runs = self._runs.get(key, TurnRuns())
+        produced = (*runs.produced, (contract.tool_id, result.evidence_id))
+        self._runs[key] = replace(runs, produced=produced)
+        return result
 
-    def started_tools(self, identity: Identity) -> frozenset[str]:
-        """本轮已开始执行（通过前置检查、占用预算）的工具；I/O 前被拒绝的调用不在其中。"""
-        return frozenset(self._started.get(_turn_key(identity), ()))
+    def turn_runs(self, identity: Identity) -> TurnRuns:
+        """本轮已开始执行的调用与已交给模型的证据；I/O 前被拒绝的调用不在其中。"""
+        return self._runs.get(_turn_key(identity), TurnRuns())
 
     def end_turn(self, identity: Identity) -> None:
-        """轮次结束时由应用调用，清理该轮计数。"""
+        """轮次结束时由应用调用，清理该轮计数与记录。"""
         self._used.pop(_turn_key(identity), None)
-        self._started.pop(_turn_key(identity), None)
+        self._runs.pop(_turn_key(identity), None)
 
     async def _currently_authorized(self, identity: Identity, contract: ToolContract) -> bool:
         try:

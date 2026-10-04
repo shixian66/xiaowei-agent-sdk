@@ -96,6 +96,8 @@ USAGE_KEYS = frozenset(
 )
 # 模型请求中工具结果信封的字段名只按此白名单记录（都是本文件策略声明的字段）。
 OBSERVED_FIELDS = frozenset({"region", "total", "orders", "rows", "regions"})
+OTHER_TOOL = "<未展示的工具>"
+"""模型选择了本请求没有展示的函数名时的记录值：不把模型生成的任意名字写入报告。"""
 # 计入 Gate 0 判定、必须各出现一次的样例。
 GATE_SAMPLES = frozenset({"query", "followup", "diagnose_hides_query"})
 
@@ -202,6 +204,9 @@ class RequestObservation:
     history_signatures: int
     turn_tool_calls: int
     turn_signatures: int
+    turn_tools: tuple[str, ...]
+    """本轮（最后一条用户消息之后）模型选择调用的函数名，按出现顺序；只取本请求展示的工具名，
+    其他名字记为 ``OTHER_TOOL``。不含参数、SQL、消息或结果。"""
     tool_result_fields: tuple[str, ...]
     """请求中（本轮与回放历史）工具结果信封 ``data`` 的字段名，只取 ``OBSERVED_FIELDS``。"""
     usage: dict[str, int] | None
@@ -280,22 +285,30 @@ def _request_shape(body: bytes) -> dict[str, Any]:
     last_user = max((i for i, m in enumerate(items) if m.get("role") == "user"), default=-1)
     counts = {"history": [0, 0], "turn": [0, 0]}
     fields: set[str] = set()
+    chosen: list[str] = []
     for index, message in enumerate(items):
         if message.get("role") == "tool" or message.get("type") == "function_call_output":
             fields |= _envelope_fields(message.get("content") or message.get("output"))
-        bucket = counts["turn" if index > last_user else "history"]
+        in_turn = index > last_user
+        bucket = counts["turn" if in_turn else "history"]
+        names: list[object] = []
         for call in message.get("tool_calls") or []:
             bucket[0] += 1
             google = (call.get("extra_content") or {}).get("google") or {}
             bucket[1] += 1 if google.get("thought_signature") else 0
+            names.append((call.get("function") or {}).get("name"))
         if message.get("type") == "function_call":
             bucket[0] += 1
+            names.append(message.get("name"))
+        if in_turn:
+            chosen.extend(str(n) if n in tools else OTHER_TOOL for n in names)
     return {
         "tools_offered": tools,
         "history_tool_calls": counts["history"][0],
         "history_signatures": counts["history"][1],
         "turn_tool_calls": counts["turn"][0],
         "turn_signatures": counts["turn"][1],
+        "turn_tools": tuple(chosen),
         "tool_result_fields": tuple(sorted(fields)),
     }
 
@@ -1009,8 +1022,9 @@ async def run_diagnosis(
             ),
         )
         try:
-            answer = await diagnosis.app.run_turn(ctx, sample.message)
-            delivery = await diagnosis.evidence.validate_answer(answer, ctx)
+            turn = await diagnosis.app.run_turn(ctx, sample.message)
+            delivery = await diagnosis.evidence.validate_answer(turn, ctx)
+            answer = turn.answer
             cited = tuple(fact.tool_id for fact in delivery.facts)
             inferences = len(answer.inferences)
             if delivery.evidence_ids:
@@ -1226,8 +1240,14 @@ def judge_intent(results: list[DiagnosisResult]) -> None:
                 "cites_query": RUN_QUERY in cited,
             }
         else:
-            # 本样例没有执行查询即可；引用同会话上一轮回放的查询证据（如随后诊断）是合理作答。
-            checks |= {"query_not_executed": not result.sent("query")}
+            # 模型不应选择查询工具：即使调用在 I/O 前被拒（如 SQLGuard），也说明意图判断错了。
+            # 元数据、计划与审计工具照常允许；引用同会话上一轮回放的查询证据（如随后诊断）
+            # 是合理作答。
+            checks |= {
+                "query_tool_not_chosen": bool(result.requests)
+                and all("run_readonly_query" not in r.turn_tools for r in result.requests),
+                "query_not_executed": not result.sent("query"),
+            }
         result.checks = checks
 
 

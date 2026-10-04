@@ -43,7 +43,7 @@ from xiaowei.evidence import (
     EvidenceUnavailableError,
     EvidenceUnverifiableError,
 )
-from xiaowei.models import AgentAnswer, RunContext, ToolCall
+from xiaowei.models import AgentAnswer, RunContext, ToolCall, TurnAnswer
 
 SessionState = Literal["active", "writing", "sealed", "closed"]
 
@@ -281,6 +281,12 @@ class PolicySession:
         self._engine = engine
         self._clock = clock
         self._pending: list[TResponseInputItem] = []
+        self._replayed: dict[str, None] = {}
+
+    @property
+    def replayed_evidence(self) -> tuple[str, ...]:
+        """本轮经 ``get_items`` 回放给模型的证据标识（按首次出现顺序），来自已保存的历史。"""
+        return tuple(self._replayed)
 
     async def get_items(self, limit: int | None = None) -> list[TResponseInputItem]:
         """回放：整段复核后返回已提交历史与本轮暂存项；达到上限或不可回放时拒绝。"""
@@ -290,7 +296,7 @@ class PolicySession:
         turns = await self._open()
         if turns >= self._limits.max_history_turns:
             raise SessionLimitError
-        replay = await self._replay([*await self._committed(), *self._pending])
+        replay = await self._replay([*await self._committed(), *self._pending], seen=self._replayed)
         if _size(replay) >= self._limits.max_history_bytes:
             raise SessionLimitError
         return replay
@@ -324,10 +330,13 @@ class PolicySession:
         """丢弃本轮暂存项；运行失败、取消或最终回答未通过校验时调用。"""
         self._pending.clear()
 
-    async def commit_validated(self) -> None:
-        """校验本轮最终回答与完整历史后写入底层 Session；任何失败都不保留本轮暂存项。"""
+    async def commit_validated(self, context_evidence: Sequence[str]) -> None:
+        """校验本轮最终回答与完整历史后写入底层 Session；任何失败都不保留本轮暂存项。
+
+        ``context_evidence`` 是应用记录的本轮模型可见证据（见 ``TurnAnswer``），与最终回答一起校验。
+        """
         pending, self._pending = self._pending, []
-        await self._validate_final_answer(pending)
+        await self._validate_final_answer(pending, context_evidence)
         turns = await self._open()
         if turns >= self._limits.max_history_turns:
             raise SessionLimitError
@@ -345,14 +354,17 @@ class PolicySession:
         if not await self._transition("writing", "active", add_turns=1):
             raise SessionStoreError("会话保存失败，该会话已停止使用，请新建会话")
 
-    async def _validate_final_answer(self, pending: list[TResponseInputItem]) -> None:
+    async def _validate_final_answer(
+        self, pending: list[TResponseInputItem], context_evidence: Sequence[str]
+    ) -> None:
         """最终持久化复用 Evidence 回答验证器：最后一项须是通过校验的 ``AgentAnswer``。"""
         final = pending[-1] if pending else None
         if final is None or _role(final) != "assistant":
             raise SessionItemRejectedError("本轮没有可提交的最终回答")
         try:
             answer = AgentAnswer.model_validate_json(cast(dict[str, str], final)["content"])
-            await self._evidence.validate_answer(answer, self._ctx)
+            turn = TurnAnswer(answer=answer, context_evidence=tuple(context_evidence))
+            await self._evidence.validate_answer(turn, self._ctx)
         except (ValidationError, AnswerRejectedError):
             raise SessionItemRejectedError("最终回答未通过校验，本轮不保存") from None
         except EvidenceUnverifiableError:
@@ -445,8 +457,13 @@ class PolicySession:
                 return raw
         return None
 
-    async def _replay(self, stored: list[TResponseInputItem]) -> list[TResponseInputItem]:
-        """把保存形式转换为回放形式：证据引用经读取边界（一批）换成当前 Session 投影。"""
+    async def _replay(
+        self, stored: list[TResponseInputItem], *, seen: dict[str, None] | None = None
+    ) -> list[TResponseInputItem]:
+        """把保存形式转换为回放形式：证据引用经读取边界（一批）换成当前 Session 投影。
+
+        给出 ``seen`` 时，回放成功后把其中的证据标识记入它（交给模型的历史证据）。
+        """
         replay: list[TResponseInputItem] = []
         references: list[tuple[int, str, ToolCall]] = []
         open_calls: dict[str, dict[str, Any]] = {}
@@ -484,6 +501,8 @@ class PolicySession:
             raise SessionUnavailableError
         for (index, _, _), content in zip(references, await self._project(references), strict=True):
             replay[index] = _output(cast(dict[str, Any], replay[index])["call_id"], content)
+        if seen is not None:
+            seen.update(dict.fromkeys(evidence_id for _, evidence_id, _ in references))
         return replay
 
     async def _project(self, references: list[tuple[int, str, ToolCall]]) -> list[str]:

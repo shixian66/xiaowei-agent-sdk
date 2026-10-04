@@ -71,7 +71,7 @@ from xiaowei.models import Delivery
 
 logger = logging.getLogger(__name__)
 
-EMPTY_COMMAND = "命令后需要写明问题，例如：/诊断 这条 SQL 为什么慢"
+EMPTY_COMMAND = "命令后需要写明问题，例如：/查询 昨天各地区订单数，或 /诊断 这条 SQL 为什么慢"
 NEW_SESSION = "已新建会话，之前的对话不再作为上下文"
 NEW_SESSION_BUSY = "当前会话正在处理消息，请稍后再新建会话"
 TRUNCATED = "（内容超过飞书单条消息上限，已截断）"

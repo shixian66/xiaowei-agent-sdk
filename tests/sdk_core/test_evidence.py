@@ -28,6 +28,7 @@ from tests.sdk_core.synthetic_tools import (
     RecordingAdapter,
     RegionArgs,
     catalog,
+    cited,
     context,
     model_data,
     ready_engine,
@@ -63,7 +64,7 @@ pytestmark = pytest.mark.loopback
 
 _FACTS_HEADER = "工具结果"
 _ANALYSIS_HEADER = "分析建议"
-_ADVICE_HEADER = "建议（本轮未执行查询；模型生成，未经系统核实）"
+_ADVICE_HEADER = "建议（本轮未执行业务查询；模型生成，未经系统核实）"
 
 
 async def _record(
@@ -223,7 +224,7 @@ async def test_forged_foreign_expired_evidence_is_denied(postgres_url: URL) -> N
         messages.add(str(excinfo.value))
         answer = AgentAnswer(evidence_ids=(evidence_id,), inferences=[], clarification=None)
         with pytest.raises(AnswerRejectedError):
-            await evidence.validate_answer(answer, owner)
+            await evidence.validate_answer(cited(answer), owner)
 
         # 过期：物理清理与否无关，读取时立即拒绝。
         grants.grant("alice", TOTAL_TOOL)
@@ -272,10 +273,12 @@ async def test_query_claim_without_evidence_is_denied(postgres_url: URL) -> None
         ]
         for answer in rejected:
             with pytest.raises(AnswerRejectedError):
-                await evidence.validate_answer(answer, context())
+                await evidence.validate_answer(cited(answer), context())
 
         # 澄清：没有实际查询，也不展示任何结果。
-        delivery = await evidence.validate_answer(_answer(clarification="请说明地区"), context())
+        delivery = await evidence.validate_answer(
+            cited(_answer(clarification="请说明地区")), context()
+        )
         assert delivery.evidence_ids == ()
         assert "请说明地区" in delivery.content
         assert _FACTS_HEADER not in delivery.content
@@ -295,13 +298,13 @@ async def test_advice_is_a_separate_answer_without_facts(postgres_url: URL) -> N
             _answer(clarification="请说明地区", advice=sql),
         ):
             with pytest.raises(AnswerRejectedError):
-                await evidence.validate_answer(mixed, context())
+                await evidence.validate_answer(cited(mixed), context())
 
         for channel in ("web", "feishu"):
             ctx = context(channel=channel, session=f"{channel}-advice")
-            delivery = await evidence.validate_answer(_answer(advice=sql), ctx)
+            delivery = await evidence.validate_answer(cited(_answer(advice=sql)), ctx)
             first, *rest = delivery.content.split("\n")
-            assert first == _ADVICE_HEADER and "未执行查询" in first and "未经系统核实" in first
+            assert first == _ADVICE_HEADER and "未执行业务查询" in first and "未经系统核实" in first
             # 建议原文保持在一行内（换行写成转义），不能伪造标题或事实区。
             assert rest == ["SELECT region, SUM(total) AS total\\nFROM sales GROUP BY region"]
             assert (delivery.evidence_ids, delivery.facts, delivery.layout) == ((), (), None)
@@ -353,7 +356,7 @@ async def test_facts_are_rendered_from_evidence(postgres_url: URL) -> None:
         result = await Runner.run(
             agent(ScriptedModel([call, _cite_evidence(inference)])), "东区？", context=ctx
         )
-        delivery = await evidence.validate_answer(result.final_output, ctx)
+        delivery = await evidence.validate_answer(cited(result.final_output), ctx)
 
         # 模型提交额外的“已核实数值”字段：最终类型校验即拒绝，不进入 Evidence 校验。
         with pytest.raises(ModelBehaviorError):
@@ -427,7 +430,9 @@ async def test_model_text_cannot_carry_fields_the_channel_forbids(
                 output_type=AgentAnswer,
             )
             result = await Runner.run(agent, "东区？", context=ctx)
-            deliveries[channel] = (await evidence.validate_answer(result.final_output, ctx)).content
+            deliveries[channel] = (
+                await evidence.validate_answer(cited(result.final_output), ctx)
+            ).content
             items = model.calls[1].input
             assert isinstance(items, list)
             (raw,) = [i["output"] for i in items if i.get("type") == "function_call_output"]
@@ -500,7 +505,7 @@ async def test_stored_evidence_follows_current_policy(
         )
         for ctx, eid, audience in cases:
             await same.project(eid, ctx, audience)
-        await same.validate_answer(answer["web"], web)
+        await same.validate_answer(cited(answer["web"]), web)
 
         changed = EvidenceStore(
             engine, current(), authorize=grants, clock=clock, retention_seconds=RETENTION_SECONDS
@@ -510,7 +515,7 @@ async def test_stored_evidence_follows_current_policy(
                 await changed.project(eid, ctx, audience)
         for ctx, ch in ((web, "web"), (feishu, "feishu")):
             with pytest.raises(AnswerRejectedError):
-                await changed.validate_answer(answer[ch], ctx)
+                await changed.validate_answer(cited(answer[ch]), ctx)
 
 
 class _TotalResult(BaseModel):

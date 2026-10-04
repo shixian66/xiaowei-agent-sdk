@@ -2,7 +2,8 @@
 
 ``Application.run_turn`` 是 Web 与飞书后续共用的入口：存储就绪检查 → 按本轮 context 装配 SDK
 Agent（工具集合只属于这一轮）→ 原生 ``Runner.run``（SDK Session 经 ``PolicySession`` 暂存）→
-最终回答校验后才提交 Session → 返回已校验的 ``AgentAnswer``。交付由调用方在发送前用同一
+最终回答校验后才提交 Session → 返回已校验的 ``TurnAnswer``（回答与本轮模型可见的证据）。
+本轮成功的业务查询证据都必须被回答引用。交付由调用方在发送前用同一
 ``EvidenceStore.validate_answer`` 按接收渠道与当前权限重新生成 ``Delivery``；提交之后撤权时，
 本轮已保存但不能交付。任一步失败都不提交，暂存项被丢弃，已执行的工具不补跑、不重试；错误
 是带固定信息与原因代码的 ``TurnError``，不携带模型输出、工具结果、连接信息或下层异常。
@@ -47,7 +48,7 @@ from xiaowei.evidence import (
 from xiaowei.governance import Execute, GovernedTools, ToolExecutionError
 from xiaowei.mcp import MCPIntegration
 from xiaowei.model_api import ModelBinding
-from xiaowei.models import AgentAnswer, ClusterId, Label, RunContext, ToolId
+from xiaowei.models import AgentAnswer, ClusterId, Label, RunContext, ToolId, TurnAnswer
 from xiaowei.session import (
     PolicySession,
     SessionInputPolicy,
@@ -92,7 +93,8 @@ DEFAULT_INSTRUCTIONS = (
     "分析写在 inferences 中并注明依据和限制；需要用户补充信息时只填写 clarification；"
     "没有查询、只给解释、建议或 SQL 草稿时只填写 advice，不要把它写成查询结果，也不要编造数值。"
     "工具被拒绝或失败的结果没有 evidence_id，不算取得。"
-    "本轮执行过 run_readonly_query 时必须引用它的结果作答，不能只给 clarification 或 advice。"
+    "本轮每次成功执行的 run_readonly_query 结果都必须列在 evidence_ids 中，不能只引用其他工具"
+    "或历史结果，也不能只给 clarification 或 advice。"
 )
 
 TurnReason = Literal[
@@ -271,11 +273,11 @@ class Application:
             & available_tools
         )
 
-    async def run_turn(self, ctx: RunContext, message: str) -> AgentAnswer:
+    async def run_turn(self, ctx: RunContext, message: str) -> TurnAnswer:
         """执行一轮，返回已校验并已提交 Session 的回答；失败抛出 ``TurnError``，取消照常传播。
 
-        回答不是可直接发送的内容：调用方在每次发送前用 ``EvidenceStore.validate_answer``
-        按接收渠道与当前权限生成 ``Delivery``。
+        回答连同本轮模型可见的证据返回，不是可直接发送的内容：调用方保存二者，在每次发送前用
+        ``EvidenceStore.validate_answer`` 按接收渠道与当前权限生成 ``Delivery``。
         """
         turn = ctx.identity.turn_id
         session_id = ctx.identity.session_id
@@ -308,7 +310,7 @@ class Application:
         _stage(turn, "completed", started)
         return answer
 
-    async def _turn(self, ctx: RunContext, message: str, started: float) -> AgentAnswer:
+    async def _turn(self, ctx: RunContext, message: str, started: float) -> TurnAnswer:
         turn = ctx.identity.turn_id
         if not ctx.tool_scope <= self._data_policy.model_tools:
             raise TurnError("scope_rejected")
@@ -347,14 +349,22 @@ class Application:
         )
         _stage(turn, "answered", started)
         answer = result.final_output_as(AgentAnswer, raise_if_incorrect_type=True)
-        # 澄清与未执行建议标明“本轮未执行查询”：本轮开始过业务查询时不能以它们收尾。
-        if not answer.evidence_ids and self._governance.started_tools(ctx.identity) & self._queries:
+        runs = self._governance.turn_runs(ctx.identity)
+        # 本轮成功的业务查询（可信记录）都必须被引用：其他工具或历史证据不能代替查询结果，
+        # 澄清与建议的“本轮未执行业务查询”因此属实。I/O 前被拒绝的调用不算执行。
+        queried = [e for tool_id, e in runs.produced if tool_id in self._queries]
+        unfinished = len(queried) != sum(t in self._queries for t in runs.started)
+        uncited = set(queried) - set(answer.evidence_ids)
+        if unfinished or uncited:
             raise TurnError("answer_rejected")
+        # 模型可见的证据：回放的历史与本轮工具结果，随回答保存，每次交付都复核。
+        context = (*session.replayed_evidence, *(e for _, e in runs.produced))
+        validated = TurnAnswer(answer=answer, context_evidence=tuple(dict.fromkeys(context)))
         # 先单独校验回答，使拒绝原因明确；提交时 Session 仍会用同一验证器再校验一次。
-        await self._evidence.validate_answer(answer, ctx)
-        await session.commit_validated()
+        await self._evidence.validate_answer(validated, ctx)
+        await session.commit_validated(validated.context_evidence)
         _stage(turn, "committed", started)
-        return answer
+        return validated
 
     def _tools_for(self, ctx: RunContext) -> list[Tool]:
         """本轮 Agent 的工具：可信范围内的本地工具与 MCP 工具，列表只属于这一轮。"""

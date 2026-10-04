@@ -32,6 +32,7 @@ from tests.sdk_core.synthetic_tools import (
     RecordingAdapter,
     RegionArgs,
     catalog,
+    cited,
     context,
     ready_engine,
     request,
@@ -168,11 +169,16 @@ class Harness:
         session = self.session(ctx, **session_args)
         try:
             result = await Runner.run(self.agent(model), message, context=ctx, session=session)
-            await session.commit_validated()
+            await session.commit_validated(self.seen(session, ctx))
         except BaseException:
             await session.discard_pending()
             raise
         return model, result
+
+    def seen(self, session: PolicySession, ctx: RunContext) -> tuple[str, ...]:
+        """同应用路径：本轮模型可见的证据是回放的历史与本轮工具结果。"""
+        produced = (e for _, e in self.governed.turn_runs(ctx.identity).produced)
+        return tuple(dict.fromkeys((*session.replayed_evidence, *produced)))
 
     async def refused(
         self, ctx: RunContext, error: type[SessionError] = SessionUnavailableError, **args: Any
@@ -235,7 +241,7 @@ async def test_runner_session_filters_before_write(postgres_url: URL) -> None:
         # 本轮模型看到的是模型可达投影：共有字段 rows，不含只允许给模型的 total。
         assert json.loads(_outputs(model.calls[1].input)[0])["data"].keys() == {"rows"}
 
-        await session.commit_validated()
+        await session.commit_validated(h.seen(session, ctx))
         stored = await h.stored()
 
     saved = json.dumps(stored, ensure_ascii=False)
@@ -307,7 +313,7 @@ async def test_evidence_from_older_data_rules_cannot_replay(
         with pytest.raises(EvidenceUnavailableError):
             await h.evidence.project(answer.evidence_ids[0], ctx, "model")
         with pytest.raises(AnswerRejectedError):
-            await h.evidence.validate_answer(answer, ctx)
+            await h.evidence.validate_answer(cited(answer), ctx)
         await h.refused(ctx)
         # 对照：当前规则写入的会话照常追问。
         await h.turn(context(session="s2"), [_call(), _cite()])
@@ -358,7 +364,7 @@ async def test_evidence_follows_newly_required_fields(
             if not required:  # 对照：完全相同的策略重建后照常可读、交付与追问
                 for audience in audiences:
                     await h.evidence.project(eid, later, audience)
-                await h.evidence.validate_answer(answer, later)
+                await h.evidence.validate_answer(cited(answer), later)
                 followup, _ = await h.turn(later, [_cite()])
                 assert len(followup.calls) == 1
                 continue
@@ -366,7 +372,7 @@ async def test_evidence_follows_newly_required_fields(
                 with pytest.raises(EvidenceUnavailableError):
                     await h.evidence.project(eid, later, audience)
             with pytest.raises(AnswerRejectedError):
-                await h.evidence.validate_answer(answer, later)
+                await h.evidence.validate_answer(cited(answer), later)
             await h.refused(later)
     assert len(h.adapter.calls) == 2  # 回放与交付都不重跑工具
 
@@ -393,7 +399,7 @@ async def test_commit_without_validated_final_is_rejected(postgres_url: URL) -> 
         session = h.session(context())
         await session.add_items([{"role": "user", "content": "东区？"}])
         with pytest.raises(SessionItemRejectedError):
-            await session.commit_validated()
+            await session.commit_validated(())
         assert await h.stored() == []
 
 

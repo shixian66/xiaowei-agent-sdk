@@ -20,6 +20,8 @@
 失败不退还；超出时在任何探测前按 ``EvidenceUnverifiableError`` 拒绝。一轮的全部读取（回放、工具
 记录、写入 Session、最终校验与提交）在 ``scope_checks`` 中共用一个计数；不在其中的读取（首次
 发送、历史读取、重发）每次单独计数。
+最终回答连同本轮模型可见的全部证据（可信代码记录的 ``TurnAnswer.context_evidence``）一起复核：
+模型文字可能复述其中任何一条，引用之外的证据只复核、不展示，澄清与建议也不例外。
 事实区域由代码从获准投影生成，模型分析单独标注；策略登记了固定说明的工具，说明由代码取自
 当前登记的策略，紧随来源行，不来自证据记录或模型。Web 另得到从当前 Web 投影生成的结构化
 ``DeliveryFact``；飞书只得到纯文本，表格数据逐行渲染，单元格内的换行等控制字符被转义，
@@ -52,7 +54,6 @@ from xiaowei.governance import (
     schema_shape,
 )
 from xiaowei.models import (
-    AgentAnswer,
     Audience,
     Channel,
     Delivery,
@@ -69,6 +70,7 @@ from xiaowei.models import (
     ToolObservation,
     ToolRequest,
     ToolResult,
+    TurnAnswer,
 )
 
 logger = logging.getLogger(__name__)
@@ -120,8 +122,8 @@ _UNVERIFIABLE = "暂时无法确认证据所依赖的数据当前仍可读，本
 _DEPENDENCY_FORMAT = 1
 _FACTS_HEADER = "工具结果（系统根据证据生成）"
 _ANALYSIS_HEADER = "分析建议（模型推断，未经系统核实）"
-_CLARIFICATION_HEADER = "需要澄清（本轮未执行查询）"
-_ADVICE_HEADER = "建议（本轮未执行查询；模型生成，未经系统核实）"
+_CLARIFICATION_HEADER = "需要澄清（本轮未执行业务查询）"
+_ADVICE_HEADER = "建议（本轮未执行业务查询；模型生成，未经系统核实）"
 
 _INSERT = text(
     """
@@ -306,14 +308,18 @@ class EvidenceStore:
         return _arguments_digest(effective)
 
     async def validate_answer(
-        self, answer: AgentAnswer, ctx: RunContext, *, history: bool = False
+        self, turn: TurnAnswer, ctx: RunContext, *, history: bool = False
     ) -> Delivery:
         """最终回答出口：核对引用关系与当前可读性，再为接收渠道生成内容。
 
+        回答只能引用本轮模型可见的证据（``turn.context_evidence``）；这些证据不论是否被引用、
+        回答是否只是澄清或建议，每次都与引用一起按当前权限复核（一批），只展示引用的事实。
         ``history`` 为真表示历史读取或显式重发（不是本轮首次交付）：依赖不可回放的证据拒绝。
         确定不可读抛出 ``AnswerRejectedError``；暂时无法复核时 ``EvidenceUnverifiableError`` 原样
         传播。
         """
+        answer = turn.answer
+        context = tuple(dict.fromkeys(turn.context_evidence))
         channel = ctx.identity.channel
         unverified = [
             (header, text)
@@ -324,10 +330,12 @@ class EvidenceStore:
             if text is not None
         ]
         if unverified:
-            # 澄清与未执行建议都没有证据：不能与证据、分析或彼此混用。“本轮未执行查询”由
-            # ``Application`` 在提交前核实（本轮开始过业务查询时拒绝这两种回答）。
+            # 澄清与未执行建议不引用证据：不能与证据、分析或彼此混用。“本轮未执行业务查询”由
+            # ``Application`` 在提交前核实（本轮取得业务查询证据时必须引用它）。模型可能复述了
+            # 可见的证据，因此照样复核它们。
             if answer.evidence_ids or answer.inferences or len(unverified) > 1:
                 raise AnswerRejectedError("澄清或建议不能与查询结果、分析或彼此混用")
+            await self._context_readable(ctx, channel, context, history=history)
             ((header, text),) = unverified
             content = f"{header}\n{_one_line(text)}"
             return Delivery(content=content, evidence_ids=(), channel=channel)
@@ -337,15 +345,15 @@ class EvidenceStore:
             raise AnswerRejectedError("回答缺少证据引用")
         if len(set(cited)) != len(cited):
             raise AnswerRejectedError("证据引用重复")
+        if not set(cited) <= set(context):
+            raise AnswerRejectedError("回答只能引用本轮模型可见的证据")
         for inference in answer.inferences:
             if not inference.evidence_ids or not set(inference.evidence_ids) <= set(cited):
                 raise AnswerRejectedError("分析必须引用本回答选择的证据")
-        try:
-            records = await self._readable(ctx, channel, cited, history=history)
-        except EvidenceUnavailableError:
-            raise AnswerRejectedError("回答引用的证据不可用") from None
+        unshown = tuple(e for e in context if e not in cited)
+        records = await self._context_readable(ctx, channel, (*cited, *unshown), history=history)
 
-        shown = [_shown(r, channel, self._fact_note(r)) for r in records]
+        shown = [_shown(r, channel, self._fact_note(r)) for r in records[: len(cited)]]
         analysis: tuple[str, ...] = ()
         if answer.inferences:
             analysis = (
@@ -368,6 +376,15 @@ class EvidenceStore:
             # 飞书有单条长度上限：给出分段，超限时由渠道先保住分析再截断工具结果。
             layout=layout if channel == "feishu" else None,
         )
+
+    async def _context_readable(
+        self, ctx: RunContext, channel: Channel, evidence_ids: Sequence[str], *, history: bool
+    ) -> list[EvidenceRecord]:
+        """回答引用或依赖的证据按渠道一批复核；确定不可读时拒绝整条回答。"""
+        try:
+            return await self._readable(ctx, channel, evidence_ids, history=history)
+        except EvidenceUnavailableError:
+            raise AnswerRejectedError("回答引用或依赖的证据不可用") from None
 
     async def _readable(
         self, ctx: RunContext, audience: Audience, evidence_ids: Sequence[str], *, history: bool

@@ -1,6 +1,8 @@
 """渠道会话映射与请求结果的 PostgreSQL 状态机：去重、可重发回答、投递状态与中断恢复。
 
-不运行 Agent、不发送消息，也不保存原消息、原始查询结果、原始异常或凭据。请求编号与会话语境
+不运行 Agent、不发送消息，也不保存原消息、原始查询结果、原始异常或凭据。completed 的 ``answer`` 列
+保存 ``TurnAnswer`` JSON（回答与本轮模型可见的证据标识）；此前只保存 ``AgentAnswer`` 的行仍可读出
+状态，但没有证据记录，交付方拒绝交付。请求编号与会话语境
 只以带服务端密钥的摘要保存：``request_key`` 绑定渠道、可信 owner、会话语境与原始请求编号，
 不同 owner 的同名编号互不冲突；``message_digest`` 另绑定用途、数据策略版本与正文，用于判断
 同一编号是否真是同一请求。
@@ -44,7 +46,7 @@ from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine
 
 from xiaowei.app import Mode
-from xiaowei.models import AgentAnswer, Channel
+from xiaowei.models import AgentAnswer, Channel, TurnAnswer
 from xiaowei.session import close_interrupted_sessions, close_sessions
 from xiaowei.storage import Backend, InstanceLock, Readiness
 
@@ -282,6 +284,8 @@ class RequestRecord:
     state: RequestState
     delivery: DeliveryState
     answer: AgentAnswer | None
+    context_evidence: tuple[str, ...] | None
+    """回答保存时记录的本轮模型可见证据（``TurnAnswer``）；此前格式保存的回答没有，为 ``None``。"""
     failure_code: FailureCode | None
     created_at: datetime
     expires_at: datetime
@@ -539,9 +543,12 @@ class ChannelStore:
             raise RequestUnavailableError
         return replace(record, state="running")
 
-    async def complete(self, record: RequestRecord, answer: AgentAnswer) -> RequestRecord:
-        """``running → completed`` 并保存受限回答；失败时标为 failed 并关闭会话，不交付。"""
-        content = answer.model_dump_json()
+    async def complete(self, record: RequestRecord, turn: TurnAnswer) -> RequestRecord:
+        """``running → completed`` 并保存受限回答；失败时标为 failed 并关闭会话，不交付。
+
+        回答与本轮模型可见的证据一起保存为 ``TurnAnswer`` JSON（同一列、同一次写入）。
+        """
+        content = turn.model_dump_json()
         if len(content.encode()) > self._max_answer_bytes:
             await self._fail_after_commit(record)
             raise ResultNotSavedError
@@ -560,7 +567,12 @@ class ChannelStore:
         if saved.rowcount != 1:
             await self._fail_after_commit(record)
             raise ResultNotSavedError
-        return replace(record, state="completed", answer=answer)
+        return replace(
+            record,
+            state="completed",
+            answer=turn.answer,
+            context_evidence=turn.context_evidence,
+        )
 
     async def fail(self, record: RequestRecord, code: CallerFailureCode) -> RequestRecord:
         """``accepted/running → failed``，保存安全失败码（如 Session 未提交的模型失败、繁忙）。
@@ -705,15 +717,12 @@ class ChannelStore:
         return None if row is None else dict(row)
 
     def _record(self, row: Mapping[str, Any]) -> RequestRecord:
-        answer = None
+        answer, context = None, None
         if row["answer"] is not None:
             raw = row["answer"]
             if len(raw.encode()) > self._max_answer_bytes:
                 raise RequestUnavailableError
-            try:
-                answer = AgentAnswer.model_validate_json(raw)
-            except ValidationError:
-                raise RequestUnavailableError from None
+            answer, context = _saved_answer(raw)
         if row["failure_code"] is not None and row["failure_code"] not in _FAILURE_CODES:
             raise RequestUnavailableError
         return RequestRecord(
@@ -727,6 +736,7 @@ class ChannelStore:
             state=row["state"],
             delivery=row["delivery"],
             answer=answer,
+            context_evidence=context,
             failure_code=row["failure_code"],
             created_at=row["created_at"],
             expires_at=row["expires_at"],
@@ -752,6 +762,19 @@ class ChannelStore:
         """带服务端密钥的摘要；各部分按 JSON 数组编码，边界不会混淆。"""
         body = json.dumps([purpose, *parts], ensure_ascii=False, separators=(",", ":"))
         return hmac.new(self._key, body.encode(), hashlib.sha256).hexdigest()
+
+
+def _saved_answer(raw: str) -> tuple[AgentAnswer, tuple[str, ...] | None]:
+    """读取保存的回答：``TurnAnswer`` JSON，或此前只保存 ``AgentAnswer`` 的格式（没有上下文证据
+    记录，交付方据此拒绝）。两者都不是时按不可用处理。"""
+    try:
+        turn = TurnAnswer.model_validate_json(raw)
+    except ValidationError:
+        try:
+            return AgentAnswer.model_validate_json(raw), None
+        except ValidationError:
+            raise RequestUnavailableError from None
+    return turn.answer, turn.context_evidence
 
 
 def _keys(record: RequestRecord) -> dict[str, object]:

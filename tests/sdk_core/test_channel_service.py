@@ -53,7 +53,7 @@ from xiaowei.channel_store import (
 from xiaowei.evidence import EvidenceStore
 from xiaowei.governance import GovernedTools
 from xiaowei.model_api import ModelBinding, open_model
-from xiaowei.models import AgentAnswer, Budget, Channel, Delivery, Identity
+from xiaowei.models import Budget, Channel, Delivery, Identity, TurnAnswer
 from xiaowei.session import SessionInputPolicy, SessionLimits
 from xiaowei.storage import Readiness, hold_instance_lock
 
@@ -96,7 +96,7 @@ class BarrierStore(ChannelStore):
     entered: asyncio.Event
     release: asyncio.Event
 
-    async def complete(self, record: RequestRecord, result: AgentAnswer) -> RequestRecord:
+    async def complete(self, record: RequestRecord, result: TurnAnswer) -> RequestRecord:
         self.entered.set()
         await self.release.wait()
         return await super().complete(record, result)
