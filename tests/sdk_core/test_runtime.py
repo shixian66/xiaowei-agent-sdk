@@ -62,6 +62,7 @@ from xiaowei.starrocks_tools import (
 from xiaowei.storage import (
     Readiness,
     StorageBusyError,
+    StorageDigestKeyMismatchError,
     StorageNotInitializedError,
     hold_instance_lock,
     initialize_storage,
@@ -267,7 +268,7 @@ async def env(postgres_url: URL, monkeypatch: pytest.MonkeyPatch) -> AsyncIterat
     monkeypatch.setenv(MODEL_ENV, "sk-test-runtime-model")
     monkeypatch.setenv(FEISHU_ENV, "feishu-test-secret")
     async with open_engine(SecretStr(postgres_url.render_as_string(hide_password=False))) as e:
-        await initialize_storage(e)
+        await initialize_storage(e, digest_key=SecretStr("runtime-test-digest-key"))
     yield Env(postgres_url, free_port())
 
 
@@ -328,6 +329,32 @@ async def test_formal_assembly_answers_web_turns_and_stops_cleanly(env: Env) -> 
             assert await served.finish() == 0
     assert await lock_is_free(env)
     assert await env.scalar("SELECT count(*) FROM xiaowei_request WHERE state = 'completed'") == 2
+
+
+async def test_container_entry_binds_inside_the_container_without_changing_json(
+    env: Env, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    requested: list[tuple[str, int]] = []
+    real_bind = runtime._bind
+
+    def bind_inside_container(host: str, port: int) -> socket.socket:
+        requested.append((host, port))
+        return real_bind("127.0.0.1", port)
+
+    monkeypatch.setattr(runtime, "_bind", bind_inside_container)
+    stop = asyncio.Event()
+    stop.set()
+    config = env.config()
+    result = await runtime._container_serve(
+        config,
+        stop=stop,
+        clock=env.clock,
+        model_transport=env.scripts.transport(),
+        starrocks_connect=env.connect(config),
+    )
+
+    assert result == 0 and config.listen_host == "127.0.0.1"
+    assert requested == [("0.0.0.0", env.port)]  # noqa: S104 - 断言容器专用绑定
 
 
 PLAN = Result(("Explain String",), [("- Output => [1:region]",), ("    - SCAN [sales]",)])
@@ -591,6 +618,42 @@ async def test_uninitialized_database_is_refused(
     assert await lock_is_free(env)
 
 
+async def test_digest_key_mismatch_is_refused_before_recovery_or_external_io(
+    env: Env, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    secret = SecretStr(env.url.render_as_string(hide_password=False))
+    async with open_engine(secret) as engine:
+        store = ChannelStore(
+            engine,
+            key=SecretStr("runtime-test-digest-key"),
+            clock=env.clock,
+            readiness=Readiness(),
+            request_retention_seconds=3600,
+            session_retention_seconds=7200,
+            evidence_retention_seconds=3600,
+            max_answer_bytes=20_000,
+        )
+        accepted = await store.accept(
+            channel="web",
+            subject_id=OPERATOR,
+            conversation="c" * 43,
+            request_id="must-not-recover",
+            mode="diagnose",
+            message="不能被恢复",
+            policy_version="p1",
+        )
+        await store.start(accepted.record, message="不能被恢复", policy_version="p1")
+
+    monkeypatch.setenv(KEY_ENV, "different-digest-key")
+    forget(env.drv)
+    with port_is_released(env.port), pytest.raises(StorageDigestKeyMismatchError):
+        await env.serve(env.config(), asyncio.Event())
+
+    assert await env.scalar("SELECT state FROM xiaowei_request") == "running"
+    assert env.drv.attempts == 0 and env.scripts.calls == {}
+    assert await lock_is_free(env)
+
+
 async def test_partial_startup_failure_releases_the_lock(
     env: Env, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -598,6 +661,88 @@ async def test_partial_startup_failure_releases_the_lock(
     with port_is_released(env.port), pytest.raises(SecretRefError):
         await env.serve(env.config(), asyncio.Event())
     assert await lock_is_free(env)
+
+
+async def test_stop_during_startup_recovery_cancels_before_external_io(
+    env: Env, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    entered = asyncio.Event()
+
+    async def hanging_recovery(self: ChannelStore, lock: object) -> None:
+        del self, lock
+        entered.set()
+        await asyncio.Event().wait()
+
+    monkeypatch.setattr(ChannelStore, "recover", hanging_recovery)
+    stop = asyncio.Event()
+    with port_is_released(env.port):
+        task = asyncio.create_task(env.serve(env.config(), stop))
+        await asyncio.wait_for(entered.wait(), 5)
+        stop.set()
+        assert await asyncio.wait_for(task, 3) == 0
+
+    assert env.drv.attempts == 0 and env.scripts.calls == {}
+    assert await lock_is_free(env)
+
+
+async def test_stop_during_initial_schema_refresh_cancels_startup(env: Env) -> None:
+    starrocks = SR.model_dump(mode="json")
+    starrocks["connect_timeout_seconds"] = 60
+    starrocks["schema_limits"] = {
+        **starrocks["schema_limits"],
+        "refresh_seconds": 60,
+        "refresh_timeout_seconds": 60,
+    }
+    config = env.config(starrocks=starrocks)
+    hanging = driver(SALES)
+    hanging.connect_hang = True
+    stop = asyncio.Event()
+    with port_is_released(env.port):
+        task = asyncio.create_task(
+            runtime.serve(
+                config,
+                stop=stop,
+                clock=env.clock,
+                model_transport=env.scripts.transport(),
+                starrocks_connect={SR.target_id: hanging},
+            )
+        )
+        await until(lambda: hanging.attempts > 0)
+        stop.set()
+        assert await asyncio.wait_for(task, 3) == 0
+    assert await lock_is_free(env)
+
+
+@dataclass
+class HangingStartChannel(FakeChannel):
+    """飞书启动永不完成；只用于证明启动阶段也响应停止信号。"""
+
+    entered: asyncio.Event = field(default_factory=asyncio.Event)
+
+    async def start_background(self, *, timeout: float) -> None:
+        self.entered.set()
+        await asyncio.Event().wait()
+
+
+async def test_stop_during_feishu_connection_start_closes_transport_and_runtime(env: Env) -> None:
+    channel = HangingStartChannel()
+    stop = asyncio.Event()
+    task: asyncio.Task[int] | None = None
+    try:
+        with port_is_released(env.port):
+            task = asyncio.create_task(
+                env.serve(env.config(feishu=feishu_config()), stop, feishu_channel=channel)
+            )
+            await asyncio.wait_for(channel.entered.wait(), 5)
+            stop.set()
+            assert await asyncio.wait_for(task, 3) == 0
+        assert channel.stops == 1
+        assert await lock_is_free(env)
+    finally:
+        if task is not None and not task.done():
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+        channel.close_loop()
 
 
 async def test_occupied_port_fails_before_touching_the_database(env: Env) -> None:
@@ -987,9 +1132,49 @@ async def test_resend_requires_feishu(env: Env) -> None:
 async def test_storage_commands_use_the_configured_database(env: Env) -> None:
     config = env.config()
     await runtime.initialize(config)  # 已初始化时幂等
-    assert await runtime.upgrade(config) == 5
+    assert await runtime.upgrade(config) == 6
     report = await runtime.cleanup(config, batch_size=10)
     assert (report.sessions, report.unregistered) == (0, 0)
+
+
+async def test_maintenance_commands_reject_a_digest_key_mismatch_before_business_io(
+    env: Env, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv(KEY_ENV, "different-digest-key")
+    config = env.config(feishu=feishu_config())
+    channel = FakeChannel()
+    forget(env.drv)
+
+    with pytest.raises(StorageDigestKeyMismatchError):
+        await runtime.upgrade(config)
+    with pytest.raises(StorageDigestKeyMismatchError):
+        await runtime.cleanup(config, batch_size=10)
+    with pytest.raises(StorageDigestKeyMismatchError):
+        await runtime.resend(
+            config,
+            subject_id="alice",
+            chat_id="oc_alice",
+            message_id="om_never_send",
+            clock=env.clock,
+            feishu_channel=channel,
+            starrocks_connect=env.connect(config),
+        )
+
+    assert await env.scalar("SELECT version FROM xiaowei_schema_version") == 6
+    assert env.drv.attempts == 0 and channel.sends == []
+
+
+async def test_container_config_check_rejects_port_and_stop_grace_mismatches(
+    env: Env, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv(SR_ENV, "sr-test-password")
+    config = env.config()
+    minimum = runtime.minimum_stop_grace_seconds(config)
+    runtime.validate_config(config, container_port=env.port, stop_grace_seconds=minimum)
+    with pytest.raises(runtime.ConfigError, match="listen_port"):
+        runtime.validate_config(config, container_port=env.port + 1, stop_grace_seconds=minimum)
+    with pytest.raises(runtime.ConfigError, match="停止宽限"):
+        runtime.validate_config(config, container_port=env.port, stop_grace_seconds=minimum - 1)
 
 
 # ---- 配置 ----------------------------------------------------------------------------

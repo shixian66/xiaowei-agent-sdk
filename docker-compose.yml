@@ -29,7 +29,7 @@ x-app-service: &app-service
 
 services:
   postgres:
-    image: postgres:16.15-bookworm@sha256:bb3e1a57e5407e0a5280b4211980a5e537f4abd234a87014ac979849a78dd825
+    image: postgres:16.15-bookworm@sha256:efedf3595f1d6f415c08568ba171029bf54052e754cc9f030e3f2412b21f3d67
     environment:
       POSTGRES_DB: xiaowei
       POSTGRES_USER: xiaowei

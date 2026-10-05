@@ -102,7 +102,7 @@ async def test_postgres_session_public_roundtrip(postgres_url: URL) -> None:
     executed: list[str] = []
 
     async with open_engine(_secret(postgres_url)) as engine:
-        await initialize_storage(engine)
+        await initialize_storage(engine, digest_key=SecretStr("sdk-contract-digest-key"))
         await check_storage(engine)
         first = ScriptedModel(
             [

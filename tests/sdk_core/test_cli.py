@@ -34,6 +34,9 @@ from tests.sdk_core.test_runtime import (
     serve_config,
 )
 
+from xiaowei import cli as cli_module
+from xiaowei import runtime
+
 pytestmark = pytest.mark.loopback
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -73,6 +76,16 @@ def test_both_entries_show_the_same_commands(entry: str) -> None:
 def test_console_script_points_at_the_new_cli() -> None:
     (script,) = entry_points(group="console_scripts", name="xiaowei")
     assert script.value == "xiaowei.cli:main"
+
+
+@pytest.mark.parametrize("entry", ENTRIES)
+def test_storage_upgrade_exposes_the_one_time_binding_confirmation(entry: str) -> None:
+    result = run(
+        [*ENTRIES[entry], "--config", "unused", "storage", "upgrade", "--help"],
+        child_env(),
+    )
+    assert result.returncode == 0
+    assert "--bind-existing-digest-key" in result.stdout
 
 
 def test_importing_the_package_has_no_side_effects() -> None:
@@ -139,6 +152,92 @@ def test_configuration_errors_exit_2_without_values(entry: str, tmp_path: Path) 
     assert "storage.digest_key_ref" in result.stderr and CANARY not in result.stderr
     missing = run([*ENTRIES[entry], "--config", str(tmp_path / "none.json"), "serve"], child_env())
     assert missing.returncode == 2 and "配置文件不可读" in missing.stderr
+
+
+@pytest.mark.parametrize("entry", ENTRIES)
+def test_config_check_is_offline_and_does_not_modify_the_config(entry: str, tmp_path: Path) -> None:
+    config = serve_config(18501)
+    ca = tmp_path / "ca.pem"
+    ca.write_text("synthetic-ca", encoding="utf-8")
+    target = config["targets"][0]["starrocks"]
+    target.update({"tls": True, "tls_ca_file": str(ca)})
+    file = tmp_path / "xiaowei.json"
+    file.write_text(json.dumps(config), encoding="utf-8")
+    before = (file.read_bytes(), file.stat().st_mtime_ns)
+    env = child_env(
+        **{
+            DB_ENV: "postgresql+asyncpg://offline.invalid/xiaowei",
+            KEY_ENV: f"digest $ # ' {CANARY}",
+            MODEL_ENV: f"model $ # ' {CANARY}",
+            SR_ENV: f"starrocks $ # ' {CANARY}",
+        }
+    )
+
+    result = run([*ENTRIES[entry], "--config", str(file), "config", "check"], env)
+
+    assert result.returncode == 0 and result.stdout.strip() == "configuration valid"
+    assert result.stderr == "" and CANARY not in result.stdout
+    assert (file.read_bytes(), file.stat().st_mtime_ns) == before
+
+
+@pytest.mark.parametrize("entry", ENTRIES)
+def test_config_check_rejects_missing_environment_and_unreadable_ca_without_values(
+    entry: str, tmp_path: Path
+) -> None:
+    config = serve_config(18501)
+    target = config["targets"][0]["starrocks"]
+    target.update({"tls": True, "tls_ca_file": str(tmp_path)})
+    file = tmp_path / "xiaowei.json"
+    file.write_text(json.dumps(config), encoding="utf-8")
+    env = child_env(
+        **{
+            DB_ENV: "postgresql+asyncpg://offline.invalid/xiaowei",
+            KEY_ENV: f"digest-{CANARY}",
+            MODEL_ENV: "",
+            SR_ENV: f"starrocks-{CANARY}",
+        }
+    )
+
+    missing = run([*ENTRIES[entry], "--config", str(file), "config", "check"], env)
+    assert missing.returncode == 2 and "model.api_key_ref" in missing.stderr
+    secrets_absent(missing.stdout + missing.stderr)
+
+    env[MODEL_ENV] = f"model-{CANARY}"
+    unreadable = run([*ENTRIES[entry], "--config", str(file), "config", "check"], env)
+    assert unreadable.returncode == 2 and "targets.0.starrocks.tls_ca_file" in unreadable.stderr
+    secrets_absent(unreadable.stdout + unreadable.stderr)
+
+
+def test_container_entry_is_the_only_cli_path_that_selects_container_binding(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    port = 18501
+    file = tmp_path / "xiaowei.json"
+    file.write_text(json.dumps(serve_config(port)), encoding="utf-8")
+    for name, value in {
+        DB_ENV: "postgresql+asyncpg://offline.invalid/xiaowei",
+        KEY_ENV: "digest-test",
+        MODEL_ENV: "model-test",
+        SR_ENV: "starrocks-test",
+        "XW_WEB_PORT": str(port),
+        "XW_STOP_GRACE_SECONDS": "60",
+    }.items():
+        monkeypatch.setenv(name, value)
+    called: list[runtime.ServeConfig] = []
+
+    async def fake_container_serve(config: runtime.ServeConfig, *, stop: object) -> int:
+        called.append(config)
+        return 0
+
+    monkeypatch.setattr(runtime, "_container_serve", fake_container_serve)
+
+    assert cli_module.container_main(["serve"], config_path=file) == 0
+    assert len(called) == 1 and called[0].listen_host == "127.0.0.1"
+    assert "container" not in _parser_help()
+
+
+def _parser_help() -> str:
+    return run([*ENTRIES["module"], "--help"], child_env()).stdout
 
 
 # ---- 存储命令与正式 serve ------------------------------------------------------------
@@ -221,7 +320,7 @@ def test_formal_serve_from_a_fresh_database(entry: str, postgres_url: URL, tmp_p
     init = deploy.run(entry, "storage", "init")
     assert init.returncode == 0 and init.stdout.strip() == "storage initialized"
     upgrade = deploy.run(entry, "storage", "upgrade")
-    assert upgrade.returncode == 0 and upgrade.stdout.strip() == "storage version 5"
+    assert upgrade.returncode == 0 and upgrade.stdout.strip() == "storage version 6"
 
     with deploy.serving(entry) as process:
         ready = httpx.get(f"{deploy.origin}/readyz").json()

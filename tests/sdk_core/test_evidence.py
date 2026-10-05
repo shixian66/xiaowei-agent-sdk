@@ -10,7 +10,7 @@ from agents import Agent, Runner
 from agents.exceptions import ModelBehaviorError
 from agents.extensions.memory import SQLAlchemySession
 from agents.testing import ModelCall, ModelStep, ScriptedModel, assistant_message, function_call
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, SecretStr, field_validator
 from sqlalchemy import inspect, text
 from sqlalchemy.engine import URL
 from sqlalchemy.ext.asyncio import AsyncEngine
@@ -610,8 +610,9 @@ async def test_app_schema_version_is_checked(postgres_url: URL) -> None:
         with pytest.raises(StorageNotInitializedError):
             await check_storage(engine)
 
-        await initialize_storage(engine)
-        await initialize_storage(engine)  # 显式初始化可重复执行，不重复建表
+        key = SecretStr("evidence-test-digest-key")
+        await initialize_storage(engine, digest_key=key)
+        await initialize_storage(engine, digest_key=key)  # 显式初始化可重复执行，不重复建表
         await check_storage(engine)
         async with engine.connect() as conn:
             tables = set(await conn.run_sync(lambda c: inspect(c).get_table_names()))
@@ -634,7 +635,7 @@ async def test_app_schema_version_is_checked(postgres_url: URL) -> None:
         with pytest.raises(StorageVersionMismatchError):
             await check_storage(engine)
         with pytest.raises(StorageVersionMismatchError):
-            await initialize_storage(engine)
+            await initialize_storage(engine, digest_key=key)
 
     migration = files("xiaowei").joinpath("migrations/001_initial.sql").read_text(encoding="utf-8")
     assert "agent_" not in migration

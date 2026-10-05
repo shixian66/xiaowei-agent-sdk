@@ -779,7 +779,14 @@ async def test_v4_personal_records_keep_their_keys_after_the_upgrade(env: Env) -
                 ),
                 {"k": request_key, "c": conversation, "d": digest},
             )
-        assert await upgrade_storage(legacy) == 5
+        assert (
+            await upgrade_storage(
+                legacy,
+                digest_key=SecretStr(KEY),
+                bind_existing_digest_key=True,
+            )
+            == 6
+        )
     env.clock.now = datetime.now(UTC)
     again = await env.service.accept(env.personal("旧问题", "r1", "alice", "web", "cookie-1"))
     assert not again.created

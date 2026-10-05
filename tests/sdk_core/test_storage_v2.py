@@ -1,4 +1,4 @@
-"""P1-B Task 4：应用表 v2 的显式初始化与升级、版本双向拒绝和单实例锁。真实 PostgreSQL。
+"""应用表的显式初始化与逐版升级、版本双向拒绝、密钥绑定和单实例锁。真实 PostgreSQL。
 
 普通初始化与就绪检查不升级 v1；只有显式 ``upgrade_storage`` 在实例锁与事务中把 v1 升到 v2，
 失败整体回滚。``serve`` 用专用连接持有会话级实例锁，初始化与升级必须独占同一把锁。
@@ -9,12 +9,14 @@ from importlib.resources import files
 
 import pytest
 from agents.extensions.memory import SQLAlchemySession
+from pydantic import SecretStr
 from sqlalchemy import inspect, text
 from sqlalchemy.engine import URL
 from sqlalchemy.exc import IntegrityError
-from sqlalchemy.ext.asyncio import AsyncEngine
+from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine
 from tests.sdk_core.synthetic_tools import secret
 
+from xiaowei import storage as storage_module
 from xiaowei.storage import (
     APP_SCHEMA_VERSION,
     APP_TABLES,
@@ -23,9 +25,12 @@ from xiaowei.storage import (
     InstanceLock,
     Readiness,
     StorageBusyError,
+    StorageDigestKeyMismatchError,
+    StorageError,
     StorageNotInitializedError,
     StorageUnavailableError,
     StorageVersionMismatchError,
+    check_digest_key,
     check_storage,
     hold_instance_lock,
     initialize_storage,
@@ -36,6 +41,7 @@ from xiaowei.storage import (
 pytestmark = pytest.mark.loopback
 
 _V2_TABLES = {"xiaowei_channel_session", "xiaowei_request"}
+_DIGEST_KEY = SecretStr("storage-test-digest-key")
 
 
 def _migration(name: str) -> str:
@@ -51,6 +57,7 @@ async def _install_v1(engine: AsyncEngine, *, through: str = "001_initial.sql") 
         "002_p1b_channels.sql",
         "003_delivery_attempt.sql",
         "004_evidence_dependencies.sql",
+        "005_group_ownership.sql",
     ]
     async with engine.begin() as conn:
         for name in names[: names.index(through) + 1]:
@@ -79,19 +86,79 @@ def test_v2_migration_only_touches_application_tables() -> None:
         "005_group_ownership.sql",
     ):
         assert "agent_" not in _migration(name)
-    assert APP_SCHEMA_VERSION == 5
+    assert APP_SCHEMA_VERSION == 6
     assert _V2_TABLES <= APP_TABLES
     assert all(name.startswith("xiaowei_") for name in APP_TABLES)
 
 
 async def test_fresh_initialization_installs_the_current_version(postgres_url: URL) -> None:
     async with open_engine(secret(postgres_url)) as engine:
-        await initialize_storage(engine)
-        await initialize_storage(engine)  # 重复执行不重复建表
+        await initialize_storage(engine, digest_key=_DIGEST_KEY)
+        await initialize_storage(engine, digest_key=_DIGEST_KEY)  # 重复执行不重复建表
         await check_storage(engine)
         assert await _version(engine) == APP_SCHEMA_VERSION
         assert await _tables(engine) == {SDK_SESSIONS_TABLE, SDK_MESSAGES_TABLE, *APP_TABLES}
-        assert await upgrade_storage(engine) == APP_SCHEMA_VERSION  # 已是当前版本：显式升级无变化
+        assert (
+            await upgrade_storage(engine, digest_key=_DIGEST_KEY) == APP_SCHEMA_VERSION
+        )  # 已是当前版本：显式升级无变化
+
+
+async def test_fresh_initialization_binds_the_digest_key(postgres_url: URL) -> None:
+    key = SecretStr("original-digest-key")
+    async with open_engine(secret(postgres_url)) as engine:
+        await initialize_storage(engine, digest_key=key)
+        await initialize_storage(engine, digest_key=key)
+
+        with pytest.raises(StorageError, match="摘要密钥与数据库不匹配"):
+            await initialize_storage(engine, digest_key=SecretStr("different-digest-key"))
+
+        # 错配只拒绝，不能覆盖首次绑定；原密钥仍可通过。
+        await initialize_storage(engine, digest_key=key)
+
+
+async def test_existing_v5_needs_an_explicit_first_digest_key_binding(postgres_url: URL) -> None:
+    key = SecretStr("legacy-digest-key")
+    async with open_engine(secret(postgres_url)) as engine:
+        await _install_v1(engine, through="005_group_ownership.sql")
+
+        with pytest.raises(StorageError, match="需要明确确认旧摘要密钥"):
+            await upgrade_storage(engine, digest_key=key)
+        assert await _version(engine) == 5
+
+        assert (
+            await upgrade_storage(engine, digest_key=key, bind_existing_digest_key=True)
+            == APP_SCHEMA_VERSION
+        )
+        with pytest.raises(StorageError, match="摘要密钥与数据库不匹配"):
+            await upgrade_storage(engine, digest_key=SecretStr("different-digest-key"))
+        assert await _version(engine) == APP_SCHEMA_VERSION
+
+
+@pytest.mark.parametrize("damage", ["missing", "different"])
+async def test_missing_or_changed_v6_binding_is_never_repaired(
+    postgres_url: URL, damage: str
+) -> None:
+    async with open_engine(secret(postgres_url)) as engine:
+        await initialize_storage(engine, digest_key=_DIGEST_KEY)
+        async with engine.begin() as conn:
+            if damage == "missing":
+                await conn.execute(text("DELETE FROM xiaowei_installation"))
+            else:
+                await conn.execute(
+                    text("UPDATE xiaowei_installation SET digest_key_fingerprint = repeat('0', 64)")
+                )
+
+        for operation in (initialize_storage, upgrade_storage):
+            with pytest.raises(StorageDigestKeyMismatchError):
+                await operation(engine, digest_key=_DIGEST_KEY)
+        with pytest.raises(StorageDigestKeyMismatchError):
+            await check_digest_key(engine, _DIGEST_KEY)
+
+        async with engine.connect() as conn:
+            rows = (
+                await conn.execute(text("SELECT digest_key_fingerprint FROM xiaowei_installation"))
+            ).all()
+        assert rows == ([] if damage == "missing" else [("0" * 64,)])
 
 
 async def test_v1_is_rejected_until_explicit_upgrade(postgres_url: URL) -> None:
@@ -101,12 +168,15 @@ async def test_v1_is_rejected_until_explicit_upgrade(postgres_url: URL) -> None:
             await check_storage(engine)
         # 普通初始化不把 v1 升级：版本与表都不变。
         with pytest.raises(StorageVersionMismatchError):
-            await initialize_storage(engine)
+            await initialize_storage(engine, digest_key=_DIGEST_KEY)
         assert await _version(engine) == 1
         assert not _V2_TABLES & await _tables(engine)
 
-        assert await upgrade_storage(engine) == APP_SCHEMA_VERSION
-        assert await upgrade_storage(engine) == APP_SCHEMA_VERSION  # 重复命令无变化
+        assert (
+            await upgrade_storage(engine, digest_key=_DIGEST_KEY, bind_existing_digest_key=True)
+            == APP_SCHEMA_VERSION
+        )
+        assert await upgrade_storage(engine, digest_key=_DIGEST_KEY) == APP_SCHEMA_VERSION
         await check_storage(engine)
         assert _V2_TABLES <= await _tables(engine)
 
@@ -114,21 +184,26 @@ async def test_v1_is_rejected_until_explicit_upgrade(postgres_url: URL) -> None:
 async def test_unknown_or_missing_versions_are_never_upgraded(postgres_url: URL) -> None:
     async with open_engine(secret(postgres_url)) as engine:
         with pytest.raises(StorageNotInitializedError):
-            await upgrade_storage(engine)
-        await initialize_storage(engine)
+            await upgrade_storage(engine, digest_key=_DIGEST_KEY)
+        await initialize_storage(engine, digest_key=_DIGEST_KEY)
         async with engine.begin() as conn:
             await conn.execute(text("UPDATE xiaowei_schema_version SET version = 99"))
         for operation in (check_storage, initialize_storage, upgrade_storage):
             with pytest.raises(StorageVersionMismatchError):
-                await operation(engine)
+                if operation is initialize_storage:
+                    await operation(engine, digest_key=_DIGEST_KEY)
+                elif operation is upgrade_storage:
+                    await operation(engine, digest_key=_DIGEST_KEY)
+                else:
+                    await operation(engine)
         assert await _version(engine) == 99
 
 
 async def test_initialization_advances_the_schema_version(postgres_url: URL) -> None:
-    """全新初始化把版本推进到 5。旧程序只接受各自的版本由基线源码保证，这里不复制旧实现。"""
+    """全新初始化推进到当前版本。旧程序只接受各自版本由基线源码保证，这里不复制旧实现。"""
     async with open_engine(secret(postgres_url)) as engine:
-        await initialize_storage(engine)
-        assert await _version(engine) == APP_SCHEMA_VERSION == 5
+        await initialize_storage(engine, digest_key=_DIGEST_KEY)
+        assert await _version(engine) == APP_SCHEMA_VERSION == 6
 
 
 async def test_failed_upgrade_rolls_back_completely(postgres_url: URL) -> None:
@@ -138,9 +213,40 @@ async def test_failed_upgrade_rolls_back_completely(postgres_url: URL) -> None:
         async with engine.begin() as conn:
             await conn.execute(text("CREATE TABLE xiaowei_request (x int)"))
         with pytest.raises(StorageUnavailableError):
-            await upgrade_storage(engine)
+            await upgrade_storage(engine, digest_key=_DIGEST_KEY, bind_existing_digest_key=True)
         assert await _version(engine) == 1
         assert "xiaowei_channel_session" not in await _tables(engine)
+
+
+async def test_cancelled_upgrade_rolls_back_and_releases_the_lock(
+    postgres_url: URL, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    async with open_engine(secret(postgres_url)) as engine:
+        await _install_v1(engine, through="005_group_ownership.sql")
+        entered = asyncio.Event()
+        apply = storage_module._apply_migrations
+
+        async def apply_then_wait(conn: AsyncConnection, *, after: int) -> None:
+            await apply(conn, after=after)
+            entered.set()
+            await asyncio.Event().wait()
+
+        monkeypatch.setattr(storage_module, "_apply_migrations", apply_then_wait)
+        upgrading = asyncio.create_task(
+            upgrade_storage(engine, digest_key=_DIGEST_KEY, bind_existing_digest_key=True)
+        )
+        await asyncio.wait_for(entered.wait(), 5)
+        upgrading.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await upgrading
+
+        assert await _version(engine) == 5
+        assert "xiaowei_installation" not in await _tables(engine)
+        monkeypatch.setattr(storage_module, "_apply_migrations", apply)
+        assert (
+            await upgrade_storage(engine, digest_key=_DIGEST_KEY, bind_existing_digest_key=True)
+            == APP_SCHEMA_VERSION
+        )
 
 
 async def test_concurrent_upgrades_run_the_migration_once(postgres_url: URL) -> None:
@@ -150,7 +256,9 @@ async def test_concurrent_upgrades_run_the_migration_once(postgres_url: URL) -> 
     ):
         await _install_v1(first)
         results = await asyncio.gather(
-            upgrade_storage(first), upgrade_storage(second), return_exceptions=True
+            upgrade_storage(first, digest_key=_DIGEST_KEY, bind_existing_digest_key=True),
+            upgrade_storage(second, digest_key=_DIGEST_KEY, bind_existing_digest_key=True),
+            return_exceptions=True,
         )
         # 实例锁只让一个进程执行；另一个要么看到已完成的升级，要么因锁被占用而拒绝。
         assert any(r == APP_SCHEMA_VERSION for r in results)
@@ -173,7 +281,10 @@ async def test_v2_upgrade_keeps_requests_and_leaves_legacy_sending_to_recovery(
             )
         with pytest.raises(StorageVersionMismatchError):
             await check_storage(engine)
-        assert await upgrade_storage(engine) == APP_SCHEMA_VERSION
+        assert (
+            await upgrade_storage(engine, digest_key=_DIGEST_KEY, bind_existing_digest_key=True)
+            == APP_SCHEMA_VERSION
+        )
         await check_storage(engine)
         async with engine.connect() as conn:
             row = (
@@ -202,7 +313,10 @@ async def test_v3_upgrade_adds_evidence_dependencies_and_the_unverifiable_code(
             )
         with pytest.raises(StorageVersionMismatchError):
             await check_storage(engine)
-        assert await upgrade_storage(engine) == APP_SCHEMA_VERSION
+        assert (
+            await upgrade_storage(engine, digest_key=_DIGEST_KEY, bind_existing_digest_key=True)
+            == APP_SCHEMA_VERSION
+        )
         await check_storage(engine)
         insert = (
             "INSERT INTO xiaowei_request (channel, request_key, owner_kind, owner_id, subject_id,"
@@ -224,7 +338,7 @@ async def test_instance_lock_is_exclusive_with_serve_and_maintenance(postgres_ur
         open_engine(secret(postgres_url)) as engine,
         open_engine(secret(postgres_url)) as other,
     ):
-        await initialize_storage(engine)
+        await initialize_storage(engine, digest_key=_DIGEST_KEY)
         readiness = Readiness()
         async with hold_instance_lock(engine, readiness) as lock:
             await lock.verify()
@@ -233,9 +347,9 @@ async def test_instance_lock_is_exclusive_with_serve_and_maintenance(postgres_ur
                 async with hold_instance_lock(other, Readiness()):
                     pass
             with pytest.raises(StorageBusyError):
-                await initialize_storage(other)
+                await initialize_storage(other, digest_key=_DIGEST_KEY)
             with pytest.raises(StorageBusyError):
-                await upgrade_storage(other)
+                await upgrade_storage(other, digest_key=_DIGEST_KEY)
         # 释放后可再次取得。
         async with hold_instance_lock(other, Readiness()):
             pass
@@ -249,10 +363,10 @@ async def test_busy_initialization_leaves_an_empty_database_untouched(postgres_u
     ):
         async with hold_instance_lock(engine, Readiness()):
             with pytest.raises(StorageBusyError):
-                await initialize_storage(other)
+                await initialize_storage(other, digest_key=_DIGEST_KEY)
             # 被拒绝的命令没有建立任何表（含 SDK 表）。
             assert await _tables(engine) == set()
-        await initialize_storage(other)
+        await initialize_storage(other, digest_key=_DIGEST_KEY)
         await check_storage(other)
 
 
@@ -264,7 +378,9 @@ async def test_concurrent_first_initializations_have_one_writer(postgres_url: UR
     ):
         for _ in range(3):
             results = await asyncio.gather(
-                initialize_storage(first), initialize_storage(second), return_exceptions=True
+                initialize_storage(first, digest_key=_DIGEST_KEY),
+                initialize_storage(second, digest_key=_DIGEST_KEY),
+                return_exceptions=True,
             )
             assert any(r is None for r in results)
             assert all(r is None or isinstance(r, StorageBusyError) for r in results)
@@ -277,7 +393,7 @@ async def test_losing_the_lock_connection_locks_readiness(postgres_url: URL) -> 
         open_engine(secret(postgres_url)) as engine,
         open_engine(secret(postgres_url)) as admin,
     ):
-        await initialize_storage(engine)
+        await initialize_storage(engine, digest_key=_DIGEST_KEY)
         readiness = Readiness()
         async with hold_instance_lock(engine, readiness) as lock:
             async with admin.begin() as conn:
@@ -302,7 +418,7 @@ async def test_lock_loss_is_signalled_without_a_check(postgres_url: URL) -> None
         open_engine(secret(postgres_url)) as engine,
         open_engine(secret(postgres_url)) as admin,
     ):
-        await initialize_storage(engine)
+        await initialize_storage(engine, digest_key=_DIGEST_KEY)
         readiness = Readiness()
         async with hold_instance_lock(engine, readiness) as lock:
             assert not lock.lost.is_set()
@@ -319,7 +435,7 @@ async def test_lock_loss_is_signalled_without_a_check(postgres_url: URL) -> None
 
 async def test_releasing_the_lock_is_not_a_loss(postgres_url: URL) -> None:
     async with open_engine(secret(postgres_url)) as engine:
-        await initialize_storage(engine)
+        await initialize_storage(engine, digest_key=_DIGEST_KEY)
         readiness = Readiness()
         async with hold_instance_lock(engine, readiness) as lock:
             await lock.verify()
@@ -334,7 +450,7 @@ async def test_a_lock_connection_closed_before_watching_is_a_lock_loss(postgres_
         open_engine(secret(postgres_url)) as engine,
         open_engine(secret(postgres_url)) as admin,
     ):
-        await initialize_storage(engine)
+        await initialize_storage(engine, digest_key=_DIGEST_KEY)
         readiness = Readiness()
         conn = await engine.connect()
         try:

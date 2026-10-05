@@ -209,7 +209,7 @@ async def env(postgres_url: URL, monkeypatch: pytest.MonkeyPatch) -> AsyncIterat
     monkeypatch.setenv(MODEL_ENV, "sk-test-evidence-scope")
     monkeypatch.setenv(FEISHU_ENV, "feishu-test-secret")
     async with open_engine(SecretStr(postgres_url.render_as_string(hide_password=False))) as e:
-        await initialize_storage(e)
+        await initialize_storage(e, digest_key=SecretStr("evidence-scope-digest-key"))
     yield Env(postgres_url)
 
 

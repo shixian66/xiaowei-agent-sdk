@@ -740,7 +740,7 @@ async def runtime_env(
     monkeypatch.setenv(MODEL_ENV, "sk-test-runtime-model")
     monkeypatch.setenv(FEISHU_ENV, "feishu-test-secret")
     async with open_engine(SecretStr(url)) as engine:
-        await initialize_storage(engine)
+        await initialize_storage(engine, digest_key=SecretStr("runtime-test-digest-key"))
     yield RuntimeEnv(postgres_url, free_port())
 
 
