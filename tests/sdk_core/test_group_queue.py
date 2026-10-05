@@ -398,7 +398,7 @@ async def test_a_full_group_queue_rejects_without_running(env: Env) -> None:
 
 
 async def test_a_waiting_turn_expires_within_the_check_interval(env: Env) -> None:
-    """等待恰好到期限不结束，超过后在检查间隔内记为 failed/busy 并回复，不等前一轮结束；
+    """等待恰好到期限不结束，超过后在检查间隔内记为 failed/busy，随后回复，不等前一轮结束；
     模型 0 次。"""
     async with queue(env) as (group, turns):
         env.scripts.add(attributed(A, "长任务"), clarify())
@@ -411,11 +411,9 @@ async def test_a_waiting_turn_expires_within_the_check_interval(env: Env) -> Non
         await asyncio.sleep(0.3)
         assert (await states(env))["om_wait"] == ("accepted", "pending")
         env.clock.advance(1)
+        await settled(env, {"om_wait": "failed"})  # 检查间隔（0.05 s）内结算
         await until(lambda: any(t.startswith(BUSY) for _, t in replies(group)), timeout=2)
-        assert (await states(env)) == {
-            "om_long": ("running", "pending"),
-            "om_wait": ("failed", "sent"),
-        }
+        await settled(env, {"om_long": ("running", "pending"), "om_wait": ("failed", "sent")})
         hold.set()
         await group.gateway.idle()
     assert env.model_calls(expired) == 0 and turns.started == ["长任务"]
