@@ -1165,6 +1165,19 @@ def test_example_configuration_is_valid_and_fits_the_projections() -> None:
     assert [t.starrocks.audit is not None for t in config.targets] == [True, False]
 
 
+def test_example_feishu_group_section_is_valid(tmp_path: Path) -> None:
+    """README 引用的飞书段示例（含指定群）放进示例配置后通过校验：群工具都已登记、停机期限满足
+    启用群的下限、等待期限短于请求保留期。"""
+    examples = Path(__file__).resolve().parents[2] / "examples"
+    values = json.loads((examples / "xiaowei.example.json").read_text())
+    values["feishu"] = json.loads((examples / "feishu-group.example.json").read_text())
+    path = tmp_path / "xiaowei.json"
+    path.write_text(json.dumps(values, ensure_ascii=False))
+    config = runtime.load_config(path)
+    assert config.feishu is not None and config.feishu.group is not None
+    assert config.feishu.group.chat_id.startswith("oc_")
+
+
 async def test_static_access_is_the_single_source_for_entry_and_evidence() -> None:
     access = runtime.StaticAccess(
         runtime.AccessConfig(
