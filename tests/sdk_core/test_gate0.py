@@ -36,6 +36,7 @@ from tests.sdk_core.test_model_api import GEMINI
 
 from xiaowei.feishu import attributed
 from xiaowei.model_api import ModelProfile, profile_fingerprint
+from xiaowei.models import Delivery, DeliveryFact
 from xiaowei.sqlguard import guard_explain_query, guard_readonly_query
 from xiaowei.starrocks import StarRocksAdapter
 from xiaowei.starrocks_tools import (
@@ -778,7 +779,23 @@ def scripted_intent() -> GeminiLikeEndpoint:
     return GeminiLikeEndpoint(replies={s.message: steps[s.name] for s in gate0.INTENT_SAMPLES})
 
 
-async def run_intent(url: URL, endpoint: GeminiLikeEndpoint) -> list[gate0.DiagnosisResult]:
+@dataclass
+class ReceivedFacts:
+    """在产品校验之后改动 Web 用户实际收到的 ``Delivery.facts``，其余照常转交。"""
+
+    store: Any
+    change: Callable[[tuple[DeliveryFact, ...]], tuple[DeliveryFact, ...]]
+
+    async def validate_answer(self, *args: Any, **kwargs: Any) -> Delivery:
+        delivery: Delivery = await self.store.validate_answer(*args, **kwargs)
+        return delivery.model_copy(update={"facts": self.change(delivery.facts)})
+
+
+async def run_intent(
+    url: URL,
+    endpoint: GeminiLikeEndpoint,
+    facts: Callable[[tuple[DeliveryFact, ...]], tuple[DeliveryFact, ...]] | None = None,
+) -> list[gate0.DiagnosisResult]:
     comments = {("shop", "orders"): gate0.COMMENT_INJECTION}
     async with (
         ready_engine(url) as engine,
@@ -786,6 +803,8 @@ async def run_intent(url: URL, endpoint: GeminiLikeEndpoint) -> list[gate0.Diagn
             PROFILE, engine, network=endpoint.transport(), clock=Clock(), comments=comments
         ) as dx,
     ):
+        if facts is not None:
+            dx = replace(dx, evidence=ReceivedFacts(dx.evidence, facts))
         return await gate0.run_diagnosis(dx, gate0.INTENT_SAMPLES, gate0.judge_intent)
 
 
@@ -809,6 +828,29 @@ async def test_intent_samples_pass_through_the_product_path(engine_url: URL) -> 
         "advice"
     }
     assert by_name["comment_injection"].cited_tools == (LIST_TABLES,)
+
+
+@pytest.mark.parametrize(
+    "facts",
+    [
+        pytest.param(lambda facts: (), id="facts_dropped"),
+        pytest.param(
+            lambda facts: tuple(f.model_copy(update={"tool_id": SLOW_QUERIES}) for f in facts),
+            id="wrong_source",
+        ),
+    ],
+)
+async def test_web_intent_sources_come_from_the_facts_the_user_received(
+    engine_url: URL, facts: Callable[[tuple[DeliveryFact, ...]], tuple[DeliveryFact, ...]]
+) -> None:
+    """个人/Web 样例的引用来源按用户实际收到的 ``Delivery.facts`` 判定：事实丢失或来源错误时，
+    即使证据记录完好，引用查询或元数据的样例也必须不通过。"""
+    results = await run_intent(engine_url, scripted_intent(), facts)
+    by_name = {r.name: r for r in results}
+    assert not gate0.intent_passed(results)
+    for name in ("explicit_query", "previous_query", "comment_injection"):
+        assert not by_name[name].checks["cites_expected_sources"], name
+    assert not by_name["explicit_query"].checks["cites_query"]
 
 
 QUERY_NAME = "run_readonly_query"
