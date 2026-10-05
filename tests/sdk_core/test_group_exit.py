@@ -41,6 +41,7 @@ QUERY_NAME = RUN_QUERY.split("/", 1)[1]
 BUSY = "系统繁忙，本轮未执行"
 # 两个集群同名库表、不同数据：回答中的数值能区分来源集群。
 CLUSTERS = {"sr-a": 1, "sr-b": 2}
+SEND_RETURNS_LATER = 0.3
 LONG_HISTORY = {"max_history_turns": 10, "max_history_bytes": 200_000, "retention_seconds": 7200}
 
 
@@ -101,7 +102,8 @@ async def test_members_share_one_task_across_clusters_diagnosis_clarification_an
         feishu=runtime_group(),
         session_limits=LONG_HISTORY,
     )
-    channel = GroupChannel(members=[A, B, C])
+    # 发送在替身记下之后再过一段时间才返回：请求此时仍是“发送中”，下一轮不能据此开始。
+    channel = GroupChannel(members=[A, B, C], delay=SEND_RETURNS_LATER)
 
     async def ask(text: str, message_id: str, sender: str, sends: int) -> None:
         channel.emit_raw_from_sdk_thread(raw_group_event(env, text, message_id, sender=sender))
@@ -165,6 +167,7 @@ async def test_members_share_one_task_across_clusters_diagnosis_clarification_an
         assert user_turns(env, answer)[-2:] == [vague, answer]
         assert statements(drivers["sr-a"]) == [ran_a, ran_a]
         assert len(channel.member_calls) == 10
+        assert all(text != QUEUED for _, text in replies(channel))  # 每轮都在上一轮落定后开始
         assert await served.finish() == 0
 
     assert await rows(env) == {f"om_{i}": ("completed", "sent", None) for i in range(1, 6)}
