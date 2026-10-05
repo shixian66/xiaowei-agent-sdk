@@ -13,14 +13,23 @@ import asyncio
 from typing import Any
 
 import pytest
+from tests.p1b.test_starrocks_adapter import TARGET as SR
 from tests.p1b.test_starrocks_adapter import Result, driver
 from tests.sdk_core.test_app import cite, clarify, tool_call
 from tests.sdk_core.test_group_gateway import GroupChannel, raw_group_event, runtime_group
 from tests.sdk_core.test_group_gateway import runtime_env as runtime_env  # pytest fixture
-from tests.sdk_core.test_group_identity import CHAT, A, B, C
-from tests.sdk_core.test_runtime import PLAN, cluster_config, statements, until
+from tests.sdk_core.test_group_identity import APP, CHAT, TENANT, A, B, C
+from tests.sdk_core.test_runtime import (
+    PLAN,
+    cluster_config,
+    feishu_config,
+    feishu_event,
+    statements,
+    until,
+)
 from tests.sdk_core.test_runtime import Env as RuntimeEnv
 
+from xiaowei import runtime
 from xiaowei.feishu import QUEUED, attributed
 from xiaowei.starrocks import EXPLAIN_PREFIX
 from xiaowei.starrocks_tools import RUN_QUERY
@@ -255,3 +264,53 @@ async def test_simultaneous_questions_overload_redelivery_and_revocation(
     assert len(statements(drivers["sr-a"])) == 1 and len(statements(drivers["sr-b"])) == 1
     # 成员目录：A 开始与发送前、C 的繁忙回执发送前、B 开始前与拒绝回执发送前各一次；提示与重投不查。
     assert len(channel.member_calls) == 5
+
+
+async def test_turning_the_group_off_and_on_keeps_its_history_and_personal_chat(
+    runtime_env: RuntimeEnv,
+) -> None:
+    """群配置移除后重启：群消息一律不处理（无请求、无成员查询、无模型、无回复），单聊照常；群会话与
+    记录原样保留，群结果不能经个人路径重发。重新配置后同群续问回放原来的一轮。"""
+    env = runtime_env
+    group_on = env.config(feishu=runtime_group())
+    group_off = env.config(feishu=feishu_config(app_id=APP, tenant_key=TENANT))
+    first = env.scripts.add(
+        attributed(A, "东区销售额"),
+        tool_call(QUERY_NAME, cluster=SR.target_id, sql=SALES_SQL),
+        cite(),
+    )
+    channel = GroupChannel(members=[A, B])
+    async with env.running(group_on, feishu_channel=channel) as served:
+        channel.emit_raw_from_sdk_thread(raw_group_event(env, "东区销售额", "om_1"))
+        await until(lambda: len(channel.sends) == 1)
+        assert await served.finish() == 0
+
+    ignored = env.scripts.add(attributed(B, "和西区比呢"), cite())
+    personal = env.scripts.add("单聊问题", clarify())
+    off = GroupChannel(members=[A, B])
+    async with env.running(group_off, feishu_channel=off) as served:
+        off.emit_raw_from_sdk_thread(raw_group_event(env, "和西区比呢", "om_2", sender=B))
+        dm = feishu_event(env, "单聊问题", "om_dm")
+        dm["header"]["app_id"] = APP
+        dm["header"]["tenant_key"] = dm["event"]["sender"]["tenant_key"] = TENANT
+        off.emit_raw_from_sdk_thread(dm)
+        await until(lambda: len(off.sends) == 1)
+        await asyncio.sleep(0.3)
+        assert await served.finish() == 0
+    assert off.sends[0][0] == "oc_alice" and off.member_calls == []
+    assert ignored not in env.scripts.calls and len(env.scripts.calls[personal]) == 1
+    assert await rows(env) == {"om_1": ("completed", "sent", None)}
+    sessions = "SELECT string_agg(owner_kind || '/' || state, ',') FROM xiaowei_session"
+    assert await env.scalar(sessions + " WHERE owner_kind = 'group'") == "group/active"
+    with pytest.raises(runtime.ResendTargetError):
+        await runtime.resend(group_off, subject_id=A, message_id="om_1", group=True)
+
+    resumed = env.scripts.add(attributed(B, "和西区比呢？"), cite("东区较高"))
+    again = GroupChannel(members=[A, B])
+    async with env.running(group_on, feishu_channel=again) as served:
+        again.emit_raw_from_sdk_thread(raw_group_event(env, "和西区比呢？", "om_3", sender=B))
+        await until(lambda: len(again.sends) == 1)
+        assert await served.finish() == 0
+    assert user_turns(env, resumed) == [first, resumed]
+    assert len(env.scripts.calls[first]) == 2 and statements(env.drv) == []
+    assert (await rows(env))["om_3"] == ("completed", "sent", None)
