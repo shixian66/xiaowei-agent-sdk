@@ -1048,7 +1048,10 @@ async def run_diagnosis(
             turn = await diagnosis.app.run_turn(ctx, message)
             delivery = await diagnosis.evidence.validate_answer(turn, ctx)
             answer = turn.answer
-            cited = await _cited_tools(diagnosis.engine, delivery.evidence_ids)
+            if delivery.channel == "web":  # 用户实际收到的结构化事实
+                cited = tuple(fact.tool_id for fact in delivery.facts)
+            else:
+                cited = await _cited_tools(diagnosis.engine, delivery.evidence_ids)
             inferences = len(answer.inferences)
             if delivery.evidence_ids:
                 outcome = "delivered"
@@ -1076,7 +1079,11 @@ async def run_diagnosis(
 
 
 async def _cited_tools(engine: AsyncEngine, evidence_ids: Sequence[str]) -> tuple[str, ...]:
-    """回答引用的证据各来自哪个工具（按引用顺序）。飞书投影不带结构化事实，统一从证据记录读取。"""
+    """飞书回答引用的证据各来自哪个工具（按引用顺序）。
+
+    飞书投影不带结构化事实；这里只读 ``validate_answer`` 已按归属与当前权限校验过的证据。Web 样例
+    不走这里，按用户实际收到的 ``Delivery.facts`` 判定。
+    """
     if not evidence_ids:
         return ()
     async with engine.connect() as conn:
