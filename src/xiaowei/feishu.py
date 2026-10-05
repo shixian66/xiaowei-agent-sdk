@@ -1,4 +1,5 @@
-"""飞书单聊入口：把获准的 p2p 文本交给共享 ``ChannelService``，并把保存的结果单次发送回去。
+"""飞书入口：把获准的单聊文本与指定群内 @本机器人 的文本交给共享 ``ChannelService``，并把保存的
+结果单次发送回去。
 
 接入 ``lark-channel-sdk`` 1.4.0 的长连接（``FeishuChannel``）。该 SDK 在应用处理前就 ack 事件，
 处理器失败也不能让平台重投；用户 2026-10-01 接受这一契约：落库失败时消息不处理、不回复，只记
@@ -11,6 +12,12 @@
   不进入模型。
 - 身份：``open_id`` 经配置映射为内部 subject，再由同一个 ``AccessPolicy`` 授权；会话语境是单聊
   ``chat_id``，请求编号是 ``message_id``。``chat_id`` 只在内存中用于本次回复，不持久化。
+- 指定群（可选配置 ``group``）：只接受该群、``chat_type=group``、平台 ``mentions`` 中含本机器人
+  ``open_id`` 的消息；本机器人身份只取 SDK 已解析且属于本应用的身份，未解析时群消息一律丢弃，
+  不按名称或正文识别。只删除本机器人 mention 对应的 token。发起人（actor）是发送者 ``open_id``，
+  会话归属是群；发送者不需要出现在 ``users`` 中。交给模型的正文首行是由发送者计算的有界作者
+  标识（不含 ``open_id``），使共享历史区分各轮作者；它不赋予任何权限。群内一切发送都以
+  ``reply_to`` 回复原消息、``reply_target_gone="fail"``：原消息不可回复时明确失败，不改发新消息。
 - SDK 在自己的后台线程事件循环上调用处理器；``LarkTransport`` 只把事件转交给应用事件循环，
   数据库、``ChannelService`` 与队列都只在应用循环上运行。发送经 SDK 的 ``schedule`` 回到其循环。
 - SDK 回调到应用循环的转交最多同时有 ``queue_size`` 个事件在途；超出时在持久化前丢弃并记
@@ -25,6 +32,7 @@
 import asyncio
 import concurrent.futures
 import contextlib
+import hashlib
 import json
 import logging
 import re
@@ -54,6 +62,7 @@ from xiaowei.app import Mode
 from xiaowei.channel import (
     AccessDeniedError,
     ChannelService,
+    GroupScope,
     InboundRequest,
     RequestReceipt,
     RequestRef,
@@ -71,9 +80,12 @@ from xiaowei.models import Delivery
 
 logger = logging.getLogger(__name__)
 
+_FINISHED = frozenset({"completed", "failed", "interrupted"})
+
 EMPTY_COMMAND = "命令后需要写明问题，例如：/查询 昨天各地区订单数，或 /诊断 这条 SQL 为什么慢"
 NEW_SESSION = "已新建会话，之前的对话不再作为上下文"
 NEW_SESSION_BUSY = "当前会话正在处理消息，请稍后再新建会话"
+NEW_GROUP_SESSION = "已为本群新建会话：群内之前的对话不再作为任何成员的上下文"
 TRUNCATED = "（内容超过飞书单条消息上限，已截断）"
 FACTS_TRUNCATED = "（工具结果超过飞书单条上限，已截断）"
 # 渲染后的一个转义单位：\uXXXX、反斜杠加一个字符，或单个字符；截断不拆开它。
@@ -87,6 +99,13 @@ _COMMANDS: Mapping[str, Mode | Literal["new"]] = {
 }
 _CLOCK_SKEW = timedelta(seconds=60)
 _MAX_ID_CHARS = 200  # 与 InboundRequest 的 Label 上限一致
+_OPEN_ID = re.compile(r"ou_[0-9A-Za-z_-]{1,64}")
+# 交给模型的群消息首行；正文中出现同样的开头时改写，使首行之外不能冒充作者标识。
+_AUTHOR = "【群成员 "
+_FORGED_AUTHOR = "[群成员 "
+# 飞书文本中的 ``<at ...>`` 会被平台渲染为 @（含 ``user_id="all"``）；发出的文本把它改成全角
+# 尖括号，使回答或工具结果中的文字不能 @ 任何人。字符数不变，渲染上限照常成立。
+_AT_TAG = re.compile(r"<(?=\s*at\b)", re.IGNORECASE)
 # 序列化正文的容器上限：JSON 转义最多把一个字符写成 12 个（代理对 ``\\ud83d\\ude00``），再留出
 # ``{"text": ""}`` 与空白的余量。超过时在解析前拒绝，解析后仍按实际文本长度做最终限制。
 _JSON_ESCAPE_FACTOR = 12
@@ -109,8 +128,18 @@ _DEFINITE_FAILURES = frozenset(
 # 对操作者不可见。
 _DEFINITE_FAILURE_CODES = frozenset({230011, 230050})
 
-Send = Callable[[str, str], Awaitable[SendOutcome]]
-"""单次文本发送：(chat_id, text) → 明确成功、明确失败或结果不明。"""
+
+class Send(Protocol):
+    """单次文本发送：(chat_id, text) → 明确成功、明确失败或结果不明。群消息另带 ``reply_to``
+    （原消息编号），只回复原消息。"""
+
+    def __call__(
+        self, chat_id: str, text: str, *, reply_to: str | None = ...
+    ) -> Awaitable[SendOutcome]: ...
+
+
+BotOpenId = Callable[[], str | None]
+"""本机器人的 ``open_id``；SDK 尚未解析或不属于本应用时为 None。"""
 
 
 class _RejectedError(Exception):
@@ -127,6 +156,7 @@ class _Message:
     subject_id: str
     chat_id: str
     text: str
+    group: GroupScope | None = None
 
 
 def _field(node: object, *path: str) -> object:
@@ -167,7 +197,7 @@ def _text(event: object, max_chars: int) -> str:
     return text.strip()
 
 
-def _parse(event: object, config: FeishuConfig, now: datetime) -> _Message:
+def _parse(event: object, config: FeishuConfig, now: datetime, bot: BotOpenId) -> _Message:
     """按可信配置逐字段核对事件；任何不符都以安全原因码拒绝。"""
     if _field(event, "header", "event_type") != _EVENT_TYPE:
         raise _RejectedError("event_type")
@@ -180,10 +210,22 @@ def _parse(event: object, config: FeishuConfig, now: datetime) -> _Message:
         raise _RejectedError("tenant")
     if _field(event, "event", "sender", "sender_type") != "user":
         raise _RejectedError("sender_type")
-    subject = config.users.get(_string(event, "event", "sender", "sender_id", "open_id"))
-    if subject is None:
-        raise _RejectedError("sender")
-    if _field(event, "event", "message", "chat_type") != "p2p":
+    open_id = _string(event, "event", "sender", "sender_id", "open_id")
+    chat_id = _string(event, "event", "message", "chat_id")
+    chat_type = _field(event, "event", "message", "chat_type")
+    group: GroupScope | None = None
+    if chat_type == "p2p":
+        subject = config.users.get(open_id)
+        if subject is None:
+            raise _RejectedError("sender")
+    elif chat_type == "group" and config.group is not None:
+        if chat_id != config.group.chat_id:
+            raise _RejectedError("chat")
+        if _OPEN_ID.fullmatch(open_id) is None:
+            raise _RejectedError("sender")
+        subject = open_id
+        group = GroupScope(app_id=config.app_id, tenant_key=config.tenant_key, chat_id=chat_id)
+    else:
         raise _RejectedError("chat_type")
     if _field(event, "event", "message", "message_type") != "text":
         raise _RejectedError("message_type")
@@ -197,12 +239,54 @@ def _parse(event: object, config: FeishuConfig, now: datetime) -> _Message:
     if now - created > max_age or created - now > _CLOCK_SKEW:
         raise _RejectedError("stale")
     text = _text(event, config.max_message_chars)
+    if group is not None:
+        text = _addressed(event, text, bot())
     return _Message(
         message_id=_string(event, "event", "message", "message_id"),
         subject_id=subject,
-        chat_id=_string(event, "event", "message", "chat_id"),
+        chat_id=chat_id,
         text=text,
+        group=group,
     )
+
+
+def _addressed(event: object, text: str, bot: str | None) -> str:
+    """群消息必须在平台 ``mentions`` 中 @本机器人；删除这些 mention 的 token 后返回正文。
+
+    只按 ``mentions[].id.open_id`` 与 SDK 已解析的本机器人身份比对：名称、正文里的“@小维”或
+    其他机器人都不算。其他成员的 mention token 原样保留（不可信正文的一部分）。
+    """
+    if bot is None:
+        raise _RejectedError("bot_identity")
+    mentions = _field(event, "event", "message", "mentions")
+    if not isinstance(mentions, list):
+        raise _RejectedError("mention")
+    keys = {
+        _string(mention, "key")
+        for mention in mentions
+        if isinstance(mention, Mapping) and _field(mention, "id", "open_id") == bot
+    }
+    if not keys:
+        raise _RejectedError("mention")
+    for key in keys:
+        # 只删除完整 token：``@_user_1`` 不能吃掉 ``@_user_10`` 的前缀。
+        text = re.sub(re.escape(key) + r"(?![0-9A-Za-z_])", "", text)
+    return text.strip()
+
+
+def attributed(open_id: str, text: str) -> str:
+    """群消息交给模型的形式：首行是由发送者 ``open_id`` 计算的有界作者标识，其后是正文。
+
+    标识只用于在共享历史中区分各轮作者，不含 ``open_id`` 本身，也不赋予任何权限；正文中冒充
+    首行格式的文字被改写。
+    """
+    alias = hashlib.sha256(open_id.encode()).hexdigest()[:8]
+    return f"{_AUTHOR}{alias}】\n{text.replace(_AUTHOR, _FORGED_AUTHOR)}"
+
+
+def mention_safe(text: str) -> str:
+    """发往飞书的文本：``<at`` 改为全角尖括号，回答与工具结果不能 @ 任何人。"""
+    return _AT_TAG.sub("＜", text)
 
 
 def _command(text: str) -> tuple[Mode | Literal["new"], str]:
@@ -298,10 +382,14 @@ class _Job:
     receipt: RequestReceipt
     ref: RequestRef
     chat_id: str
+    reply_to: str | None
 
 
 class FeishuGateway:
-    """飞书单聊渠道：在应用事件循环上接受事件、排队运行并单次发送。"""
+    """飞书渠道：在应用事件循环上接受事件、排队运行并单次发送。
+
+    ``bot_open_id`` 给出本机器人的可信身份，只用于识别群内 @本机器人；单聊不使用它。
+    """
 
     def __init__(
         self,
@@ -310,6 +398,7 @@ class FeishuGateway:
         send: Send,
         *,
         clock: Callable[[], datetime],
+        bot_open_id: BotOpenId = lambda: None,
     ) -> None:
         if config.consumer_count > service.max_concurrent_turns:
             raise ValueError("consumer_count 不得超过应用的全局并发上限")
@@ -317,6 +406,7 @@ class FeishuGateway:
         self._config = config
         self._send = send
         self._clock = clock
+        self._bot = bot_open_id
         self._readiness = service.results.store.readiness
         self._queue: asyncio.Queue[_Job] = asyncio.Queue(maxsize=config.queue_size)
         self._closing = False
@@ -330,7 +420,7 @@ class FeishuGateway:
     def inbound(self, event: object) -> InboundRequest | None:
         """可进入共享服务的请求；被拒绝的事件与不进入模型的命令返回 None。"""
         try:
-            message = _parse(event, self._config, self._clock())
+            message = _parse(event, self._config, self._clock(), self._bot)
         except _RejectedError:
             return None
         kind, body = _command(message.text)
@@ -354,7 +444,7 @@ class FeishuGateway:
 
     async def _receive(self, event: object) -> None:
         try:
-            message = _parse(event, self._config, self._clock())
+            message = _parse(event, self._config, self._clock(), self._bot)
         except _RejectedError as rejected:
             logger.info("飞书事件已丢弃：%s", rejected.code)
             return
@@ -406,10 +496,13 @@ class FeishuGateway:
 
     async def _accept(self, message: _Message, mode: Mode, body: str) -> None:
         receipt = await self._service.accept(self._request(message, mode, body))
-        job = _Job(receipt, self._ref(message), message.chat_id)
+        job = _Job(receipt, self._ref(message), message.chat_id, self._reply_to(message))
         if not receipt.created:
-            # 重投：只对已结束且投递仍为 pending 的记录尝试首次发送，不再运行。
-            await self._deliver(job)
+            # 重投不再运行。只有已结束且投递仍为 pending 的记录进入首次发送竞争（交付时复核当前权限
+            # 与成员资格）；排队、运行、发送中或投递已落定的记录直接返回，不产生目录查询或发送。
+            record = receipt.record
+            if record.state in _FINISHED and record.delivery == "pending":
+                await self._deliver(job)
             return
         try:
             self._queue.put_nowait(job)
@@ -445,7 +538,7 @@ class FeishuGateway:
             # 已取得投递权：发送异常按结果不明返回，由 ResultDelivery 记为 unknown。
             text = render(delivery, self._config.max_reply_chars)
             try:
-                return await self._send(job.chat_id, text)
+                return await self._send(job.chat_id, text, reply_to=job.reply_to)
             except Exception as exc:
                 logger.error("飞书发送异常，按结果不明记录：%s", type(exc).__name__)
                 return "unknown"
@@ -466,16 +559,18 @@ class FeishuGateway:
         if not self._first(message):
             return
         try:
-            await self._service.new_session("feishu", message.subject_id, message.chat_id)
+            await self._service.new_session(
+                "feishu", message.subject_id, message.chat_id, group=message.group
+            )
         except SessionBusyError:
             await self._notify(message, NEW_SESSION_BUSY)
             return
-        await self._notify(message, NEW_SESSION)
+        await self._notify(message, NEW_SESSION if message.group is None else NEW_GROUP_SESSION)
 
     async def _notify(self, message: _Message, text: str) -> None:
         """不写请求表的固定提示：只发一次，结果只记日志。"""
         try:
-            outcome = await self._send(message.chat_id, text)
+            outcome = await self._send(message.chat_id, text, reply_to=self._reply_to(message))
         except Exception as exc:
             logger.error("飞书提示发送异常，结果不明：%s", type(exc).__name__)
             return
@@ -498,8 +593,9 @@ class FeishuGateway:
             subject_id=message.subject_id,
             conversation_id=message.chat_id,
             mode=mode,
-            message=body,
+            message=body if message.group is None else attributed(message.subject_id, body),
             received_at=self._clock(),
+            group=message.group,
         )
 
     @staticmethod
@@ -509,7 +605,13 @@ class FeishuGateway:
             subject_id=message.subject_id,
             conversation_id=message.chat_id,
             request_id=message.message_id,
+            group=message.group,
         )
+
+    @staticmethod
+    def _reply_to(message: _Message) -> str | None:
+        """群内的一切发送都回复原消息；单聊直接发往会话。"""
+        return None if message.group is None else message.message_id
 
 
 class LarkChannel(Protocol):
@@ -527,13 +629,20 @@ class LarkChannel(Protocol):
         self, to: str, message: dict[str, str], opts: dict[str, str] | None = None
     ) -> object: ...
 
+    def get_bot_identity(self) -> object: ...
+
+    async def get_chat_members(
+        self, chat_id: str, *, page_size: int, max_pages: int, id_type: str, force: bool
+    ) -> list[object]: ...
+
 
 def lark_channel(config: FeishuConfig) -> FeishuChannel:
     """按单次文本发送装配 SDK：不重试、不分段、只用 raw 入站，关闭合并转发、卡片与媒体的附加拉取。
 
     SDK 自带的消息管线照常运行但没有消费者；策略设为 disabled，使其尽早丢弃。
     ``resolve_sender_names=False`` 只关闭事后的姓名回填：锁版 SDK 在规范化（早于 policy）时仍会
-    为每条非重复消息的发送者请求通讯录接口，只有构造参数 ``name_lookup`` 能关闭（单群计划 F2）。
+    为每条非重复消息的发送者请求通讯录接口，只有构造参数 ``name_lookup`` 能关闭：这里传入不做
+    I/O 的函数，任何入站消息（含未 @、非指定群）都不消耗通讯录配额或权限。
     """
     secret = resolve_secret_ref(config.app_secret_ref)
     return FeishuChannel(
@@ -556,8 +665,13 @@ def lark_channel(config: FeishuConfig) -> FeishuChannel:
                 text_chunk_limit=config.max_reply_chars, retry=RetryConfig(max_attempts=1)
             ),
             resolve_sender_names=False,
-        )
+        ),
+        name_lookup=_no_name_lookup,
     )
+
+
+def _no_name_lookup(open_ids: list[str]) -> dict[str, Any]:
+    return {}
 
 
 class LarkTransport:
@@ -623,9 +737,13 @@ class LarkTransport:
         if future is not None:
             _report(future)
 
-    async def send(self, chat_id: str, text: str) -> SendOutcome:
+    async def send(self, chat_id: str, text: str, *, reply_to: str | None = None) -> SendOutcome:
+        """单次发送；``reply_to`` 给出时只回复该原消息，原消息不可回复时明确失败、不改发新消息。"""
+        opts = {"receive_id_type": "chat_id"}
+        if reply_to is not None:
+            opts |= {"reply_to": reply_to, "reply_target_gone": "fail"}
         future = self._channel.schedule(
-            self._channel.send(chat_id, {"text": text}, {"receive_id_type": "chat_id"})
+            self._channel.send(chat_id, {"text": mention_safe(text)}, opts)
         )
         try:
             async with asyncio.timeout(self._config.send_timeout_seconds):
@@ -637,6 +755,49 @@ class LarkTransport:
             logger.warning("飞书发送异常，结果不明：%s", type(exc).__name__)
             return "unknown"
         return send_outcome(result)
+
+    def bot_open_id(self) -> str | None:
+        """SDK 已解析且属于本应用的机器人 ``open_id``；未解析、出错或应用不符时为 None。"""
+        try:
+            identity = self._channel.get_bot_identity()
+        except Exception:
+            return None
+        open_id = getattr(identity, "open_id", None)
+        if getattr(identity, "app_id", None) != self._config.app_id or not isinstance(open_id, str):
+            return None
+        return open_id if _OPEN_ID.fullmatch(open_id) else None
+
+    async def is_member(self, chat_id: str, open_id: str) -> bool:
+        """当前成员资格：SDK ``get_chat_members(force=True)`` 绕过缓存，按配置的页数与期限查询。
+
+        找到发送者才返回 True（部分名单中找到也是本次成员证据）；名单中没有返回 False，只表示无法
+        确认（群规模超过上界时的部分名单不证明其不在群）；查询失败或超时原样抛出（授权方按拒绝
+        处理）。超时会取消 SDK 循环上的查询。
+        """
+        group = self._config.group
+        if group is None or chat_id != group.chat_id:
+            return False
+        future = self._channel.schedule(
+            self._channel.get_chat_members(
+                chat_id,
+                page_size=group.member_page_size,
+                max_pages=group.member_max_pages,
+                id_type="open_id",
+                force=True,
+            )
+        )
+        try:
+            async with asyncio.timeout(group.member_timeout_seconds):
+                members = await asyncio.wrap_future(future)
+        except BaseException:
+            future.cancel()
+            raise
+        if not isinstance(members, list):
+            return False
+        return any(
+            getattr(member, "id", None) == open_id and getattr(member, "id_type", None) == "open_id"
+            for member in members
+        )
 
     async def stop(self) -> bool:
         """停止接收并关闭 SDK；在期限内完成返回 True。重复调用返回第一次的结果，不再关闭。

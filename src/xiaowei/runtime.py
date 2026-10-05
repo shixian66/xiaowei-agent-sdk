@@ -257,6 +257,9 @@ class ServeConfig(_Config):
                 raise ValueError("Web 操作者与飞书用户不能使用同一个内部 subject")
             if self.feishu.consumer_count > self.max_concurrent_turns:
                 raise ValueError("feishu.consumer_count 不得超过 max_concurrent_turns")
+            group = self.feishu.group
+            if group is not None and not group.tools <= registered:
+                raise ValueError("feishu.group.tools 只能包含已登记的 StarRocks 工具")
         # 一轮新列表的每个对象在工具记录、写入 Session、最终校验、提交时的校验与提交前的整段回放
         # 中各复核一次；上限容不下最大一页时，满页的列表必然在提交前因次数用完而失败。
         page = max(t.starrocks.policy.max_rows for t in self.targets)
@@ -325,8 +328,9 @@ def _app_config(config: ServeConfig) -> AppConfig:
 
 
 MemberCheck = Callable[[str, str], Awaitable[bool]]
-"""``(chat_id, open_id) -> 是否当前成员``：只有找到发送者才返回 True；未找到、名单不完整、
-失败或超时都不能返回 True（调用方把异常也当作拒绝）。"""
+"""``(chat_id, open_id) -> 是否当前成员``：在取到的名单（可能因页数上限只是部分名单）中找到
+发送者才返回 True，这是本次成员证据；未找到只表示无法确认、不证明其不在群，与失败、超时
+一样不能返回 True（调用方把异常也当作拒绝）。"""
 
 
 @dataclass(frozen=True)
@@ -425,6 +429,17 @@ class _Delivery:
     tools: StarRocksTools
 
 
+def _group_access(config: ServeConfig, members: MemberCheck | None) -> GroupAccess | None:
+    """配置了指定群且有成员目录时的群共享策略；缺少成员目录时群授权一律不成立。"""
+    feishu = config.feishu
+    if feishu is None or feishu.group is None or members is None:
+        return None
+    scope = GroupScope(
+        app_id=feishu.app_id, tenant_key=feishu.tenant_key, chat_id=feishu.group.chat_id
+    )
+    return GroupAccess(scope=scope, tools=feishu.group.tools, members=members)
+
+
 def _delivery(
     config: ServeConfig,
     engine: AsyncEngine,
@@ -432,10 +447,12 @@ def _delivery(
     readiness: Readiness,
     clock: Callable[[], datetime],
     sender: Backend | None = None,
+    members: MemberCheck | None = None,
 ) -> _Delivery:
     """请求存储、工具目录、唯一授权来源、Evidence 与交付；serve 与显式重发共用同一装配。
 
     ``sender`` 只由显式重发传入：它占用的连接身份记入投递尝试（见 ``ChannelStore``）。
+    ``members`` 是指定群的成员目录（飞书 SDK 的成员查询），只在配置了群时使用。
     """
     storage = config.storage
     store = ChannelStore(
@@ -458,7 +475,7 @@ def _delivery(
     tools = first
     for other in others:
         tools += other
-    access = StaticAccess(config.access, frozenset(schemas))
+    access = StaticAccess(config.access, frozenset(schemas), _group_access(config, members))
     evidence = EvidenceStore(
         engine,
         ToolCatalog(tools.contracts, tools.policies),
@@ -508,8 +525,12 @@ async def open_runtime(
     clock: Callable[[], datetime] = now,
     model_transport: httpx2.AsyncBaseTransport | None = None,
     starrocks_connect: Mapping[str, Connector] | None = None,
+    members: MemberCheck | None = None,
 ) -> AsyncIterator[Runtime]:
-    """按唯一顺序装配；退出或任一步失败时逆序关闭并释放实例锁。"""
+    """按唯一顺序装配；退出或任一步失败时逆序关闭并释放实例锁。
+
+    ``members`` 是指定群的成员目录；未给出时群授权一律不成立（群请求开始与交付前都被拒绝）。
+    """
     configure_runtime()
     readiness = Readiness()
     async with AsyncExitStack() as stack:
@@ -527,7 +548,7 @@ async def open_runtime(
             )
             for t in config.targets
         }
-        parts = _delivery(config, engine, schemas, readiness, clock)
+        parts = _delivery(config, engine, schemas, readiness, clock, members=members)
         recovery = await parts.store.recover(lock)
         logger.info(
             "启动恢复：interrupted=%d unknown=%d unsent=%d",
@@ -608,16 +629,24 @@ async def serve(
     starrocks_connect: Mapping[str, Connector] | None = None,
     feishu_channel: LarkChannel | None = None,
 ) -> int:
-    """运行到 ``stop`` 被设置、持锁连接丢失或某个组件意外结束；返回进程退出码（0 为正常停止）。"""
+    """运行到 ``stop`` 被设置、持锁连接丢失或某个组件意外结束；返回进程退出码（0 为正常停止）。
+
+    配置了飞书时先装配 SDK 通道（凭据错误使启动失败）：指定群的成员目录经它查询，授权来源因此
+    在运行对象装配前就绑定到这一个通道。
+    """
     sock = _bind(config.listen_host, config.listen_port)
     try:
+        transport = None
+        if config.feishu is not None:
+            transport = LarkTransport(feishu_channel or lark_channel(config.feishu), config.feishu)
         async with open_runtime(
             config,
             clock=clock,
             model_transport=model_transport,
             starrocks_connect=starrocks_connect,
+            members=None if transport is None else transport.is_member,
         ) as runtime:
-            return await _serve(config, runtime, sock, stop, clock, feishu_channel)
+            return await _serve(config, runtime, sock, stop, clock, transport)
     finally:
         sock.close()
 
@@ -628,10 +657,10 @@ async def _serve(
     sock: socket.socket,
     stop: asyncio.Event,
     clock: Callable[[], datetime],
-    feishu_channel: LarkChannel | None,
+    transport: LarkTransport | None,
 ) -> int:
     components: dict[str, str] = {"feishu": "disabled"}
-    feishu = await _start_feishu(config, runtime, clock, feishu_channel, components)
+    feishu = await _start_feishu(config, runtime, clock, transport, components)
     app = create_web_app(runtime.service, config.web, components=lambda: components)
     server = uvicorn.Server(
         uvicorn.Config(
@@ -681,15 +710,16 @@ async def _start_feishu(
     config: ServeConfig,
     runtime: Runtime,
     clock: Callable[[], datetime],
-    channel: LarkChannel | None,
+    transport: LarkTransport | None,
     components: dict[str, str],
 ) -> _Feishu | None:
-    """装配飞书；凭据或配置错误使启动失败，长连接连不上只让飞书不可用。"""
+    """启动飞书；长连接连不上只让飞书不可用（群入口同时因机器人身份未解析而拒绝群消息）。"""
     feishu = config.feishu
-    if feishu is None:
+    if feishu is None or transport is None:
         return None
-    transport = LarkTransport(channel or lark_channel(feishu), feishu)
-    gateway = FeishuGateway(runtime.service, feishu, transport.send, clock=clock)
+    gateway = FeishuGateway(
+        runtime.service, feishu, transport.send, clock=clock, bot_open_id=transport.bot_open_id
+    )
     consumers = asyncio.create_task(gateway.run(), name="xiaowei-feishu")
     try:
         await transport.start(gateway.receive)
@@ -747,24 +777,34 @@ class ResendNotConfiguredError(Exception):
         super().__init__("未配置飞书，没有可重发的渠道")
 
 
+class ResendTargetError(Exception):
+    def __init__(self) -> None:
+        super().__init__("单聊重发需要 chat_id；群重发不接受 chat_id，且须已配置指定群")
+
+
 async def resend(
     config: ServeConfig,
     *,
     subject_id: str,
-    chat_id: str,
     message_id: str,
+    chat_id: str | None = None,
+    group: bool = False,
     clock: Callable[[], datetime] = now,
     feishu_channel: LarkChannel | None = None,
     starrocks_connect: Mapping[str, Connector] | None = None,
 ) -> SendOutcome | None:
     """显式重发一条飞书结果：只接受当前 owner 下 completed 且投递为 failed/unknown 的记录。
 
-    ``chat_id`` 由操作者给出（G2 未决，目的地不持久化）；它参与会话语境摘要，因此不同的 chat
-    定位不到原记录，不能把结果改投到别处。返回 None 表示该记录当前不可重发。
+    单聊：``chat_id`` 由操作者给出（目的地不持久化）；它参与会话语境摘要，因此不同的 chat 定位
+    不到原记录，不能把结果改投到别处。群（``group=True``）：``subject_id`` 是原发起人的
+    ``open_id``，群取自配置，只回复接受时保存的原消息；发送前经 SDK 成员目录重新确认发起人
+    当前仍是群成员，不能确认时拒绝。返回 None 表示该记录当前不可重发。
     """
     feishu = config.feishu
     if feishu is None:
         raise ResendNotConfiguredError
+    if group != (chat_id is None) or (group and feishu.group is None):
+        raise ResendTargetError
     configure_runtime()
     async with _engine(config) as engine, hold_backend(engine) as sender:
         # 发送期间占用一条连接：并发启动的 serve 据此知道这次重发仍在进行，不把它当作遗留发送。
@@ -782,22 +822,55 @@ async def resend(
             )
             for t in config.targets
         }
-        parts = _delivery(config, engine, schemas, Readiness(), clock, sender)
         transport = LarkTransport(feishu_channel or lark_channel(feishu), feishu)
-
-        async def transmit(delivery: Delivery) -> SendOutcome:
-            text = render(delivery, feishu.max_reply_chars)
-            try:
-                return await transport.send(chat_id, text)
-            except Exception as exc:
-                logger.error("飞书发送异常，按结果不明记录：%s", type(exc).__name__)
-                return "unknown"
-
-        ref = RequestRef(
-            channel="feishu", subject_id=subject_id, conversation_id=chat_id, request_id=message_id
-        )
         try:
-            return await parts.results.send(ref, transmit, resend=True)
+            return await _resend(
+                config, engine, schemas, clock, sender, transport, subject_id, message_id, chat_id
+            )
         finally:
             if not await transport.stop():
                 logger.error("飞书发送通道关闭超时")
+
+
+async def _resend(
+    config: ServeConfig,
+    engine: AsyncEngine,
+    schemas: Mapping[str, SchemaCache],
+    clock: Callable[[], datetime],
+    sender: Backend,
+    transport: LarkTransport,
+    subject_id: str,
+    message_id: str,
+    chat_id: str | None,
+) -> SendOutcome | None:
+    """单聊发往操作者给出的 ``chat_id``；群（``chat_id`` 为 None）只回复配置群中的原消息。"""
+    feishu = config.feishu
+    if feishu is None:
+        raise ResendNotConfiguredError
+    parts = _delivery(
+        config, engine, schemas, Readiness(), clock, sender, members=transport.is_member
+    )
+    group = _group_access(config, transport.is_member) if chat_id is None else None
+    if group is not None:
+        conversation, reply_to = group.scope.chat_id, message_id
+    elif chat_id is not None:
+        conversation, reply_to = chat_id, None
+    else:
+        raise ResendTargetError
+
+    async def transmit(delivery: Delivery) -> SendOutcome:
+        text = render(delivery, feishu.max_reply_chars)
+        try:
+            return await transport.send(conversation, text, reply_to=reply_to)
+        except Exception as exc:
+            logger.error("飞书发送异常，按结果不明记录：%s", type(exc).__name__)
+            return "unknown"
+
+    ref = RequestRef(
+        channel="feishu",
+        subject_id=subject_id,
+        conversation_id=conversation,
+        request_id=message_id,
+        group=None if group is None else group.scope,
+    )
+    return await parts.results.send(ref, transmit, resend=True)

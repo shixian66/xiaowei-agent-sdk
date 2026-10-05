@@ -23,7 +23,6 @@ HTTP、飞书 SDK、数据库客户端与凭据都不进入 RunContext。
 """
 
 import asyncio
-import json
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass
 from typing import Protocol
@@ -39,6 +38,7 @@ from xiaowei.channel_store import (
     FailureCode,
     NotReadyError,
     RequestRecord,
+    RequestUnavailableError,
     SendOutcome,
     SessionBusyError,
 )
@@ -53,6 +53,7 @@ from xiaowei.models import (
     RunContext,
     ToolId,
     TurnAnswer,
+    group_owner,
 )
 
 # 应用层失败原因到存储失败码（闭集）的映射；存储只保存类别，渠道据此给固定回执。
@@ -104,10 +105,7 @@ class GroupScope(_Trusted):
 
     @property
     def owner(self) -> Owner:
-        return Owner(
-            kind="group",
-            id=json.dumps([self.app_id, self.tenant_key, self.chat_id], separators=(",", ":")),
-        )
+        return group_owner(self.app_id, self.tenant_key, self.chat_id)
 
 
 def _group_conversation(channel: Channel, conversation_id: str, group: GroupScope | None) -> None:
@@ -338,13 +336,19 @@ class ResultDelivery:
     ) -> SendOutcome | None:
         """取得投递权后发送一次；返回 None 表示不得发送（已发送、发送中、未结束或已被他人取得）。
 
-        首次发送与事件重投只竞争 pending；``resend=True`` 只供显式重发（历史交付），只对 completed
+        群结果的目的地是接受时保存的群与原消息：``ref`` 与它不一致时不发送。首次发送与事件重投只
+        竞争 pending；``resend=True`` 只供显式重发（历史交付），只对 completed
         结果竞争 failed/unknown。completed 结果先按当前权限重新验证：不可交付或暂时无法复核时取得
         投递权并记为 failed（仍可显式重发），不发送旧内容，原样抛出拒绝。发送抛出异常或被取消时
         记为 unknown 并原样传播。落定只针对本次取得的尝试：
         尝试已被启动恢复作废或被更新的尝试取代时不改写状态，报错并锁低 readiness。
         """
         record, decision = await self._load(ref)
+        if ref.group is not None and (
+            record.reply_chat_id != ref.group.chat_id or record.reply_message_id != ref.request_id
+        ):
+            # 群结果只能发往接受时保存的群与原消息；调用方的目的地必须与之一致。
+            raise RequestUnavailableError
         refused: ResultUnavailableError | None = None
         delivery: Delivery | None = None
         if record.state == "completed":
