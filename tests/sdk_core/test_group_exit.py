@@ -299,11 +299,14 @@ async def test_simultaneous_questions_overload_redelivery_and_revocation(
 
 
 async def requests(env: RuntimeEnv) -> list[tuple[str, str, str | None, str, str]]:
-    """全部请求行（含单聊，按接受顺序）：(owner_kind, owner_id, 原消息, state, delivery)。"""
+    """全部请求行（含单聊）：(owner_kind, owner_id, 原消息, state, delivery)。
+
+    测试时钟不前进，各请求的 ``created_at`` 相同，行序不确定：调用方只比较条数与集合。
+    """
     async with asyncio.timeout(5):
         body = await env.scalar(
             "SELECT string_agg(owner_kind || '|' || owner_id || '|' || coalesce(reply_message_id,"
-            " '-') || '|' || state || '|' || delivery, ';' ORDER BY created_at)"
+            " '-') || '|' || state || '|' || delivery, ';')"
             " FROM xiaowei_request"
         )
     result = []
@@ -351,14 +354,16 @@ async def test_turning_the_group_off_and_on_keeps_its_history_and_personal_chat(
         dm["header"]["app_id"] = APP
         dm["header"]["tenant_key"] = dm["event"]["sender"]["tenant_key"] = TENANT
         off.emit_raw_from_sdk_thread(dm)
+        # A 的单聊准入映射到个人用户 alice（``feishu_config`` 的默认用户表）。
+        dm_row = ("personal", "alice", None, "completed", "sent")
         async with asyncio.timeout(20):
-            while (await requests(env))[-1][3:] != ("completed", "sent"):
+            while dm_row not in await requests(env):
                 await asyncio.sleep(0.02)
         assert await served.finish() == 0
     assert [to for to, _, _ in off.sends] == ["oc_alice"] and off.member_calls == []
     assert set(env.scripts.calls) == {first, personal} and len(env.scripts.calls[personal]) == 1
-    # A 的单聊准入映射到个人用户 alice（``feishu_config`` 的默认用户表）。
-    assert await requests(env) == [group_row, ("personal", "alice", None, "completed", "sent")]
+    final = await requests(env)
+    assert len(final) == 2 and set(final) == {group_row, dm_row}
     sessions = "SELECT string_agg(owner_kind || '/' || state, ',') FROM xiaowei_session"
     assert await env.scalar(sessions + " WHERE owner_kind = 'group'") == "group/active"
     with pytest.raises(runtime.ResendTargetError):
