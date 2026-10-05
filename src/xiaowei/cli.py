@@ -50,8 +50,10 @@ def _parser() -> argparse.ArgumentParser:
         dest="action", required=True
     )
     resend = requests.add_parser("resend", help="重发一条飞书 failed/unknown 结果（只发送一次）")
-    resend.add_argument("--subject", required=True, help="内部 subject")
-    resend.add_argument("--chat", required=True, help="飞书单聊 chat_id")
+    resend.add_argument("--subject", required=True, help="单聊为内部 subject；群为发起人 open_id")
+    target = resend.add_mutually_exclusive_group(required=True)
+    target.add_argument("--chat", help="飞书单聊 chat_id")
+    target.add_argument("--group", action="store_true", help="配置的指定群（只回复原消息）")
     resend.add_argument("--message", required=True, help="原消息的 message_id")
     return parser
 
@@ -93,7 +95,11 @@ async def _run(config: "ServeConfig", args: argparse.Namespace) -> int:
             print(f"cleaned sessions={report.sessions} unregistered={report.unregistered}")
         return 0
     outcome = await rt.resend(
-        config, subject_id=args.subject, chat_id=args.chat, message_id=args.message
+        config,
+        subject_id=args.subject,
+        chat_id=args.chat,
+        group=args.group,
+        message_id=args.message,
     )
     if outcome is None:
         print(f"{args.message} not_resendable", file=sys.stderr)

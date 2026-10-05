@@ -24,7 +24,7 @@
 | Agent 核心 | OpenAI Agents SDK 的 Agent、Runner、function tools、Session |
 | 模型 API | 计划接入 OpenAI、Gemini、DeepSeek；通过配置选择经过验证的端点和模型，一次运行使用一个模型 |
 | Web | 本机使用的简单对话页，显示文本、SQL、有限结果与执行提示 |
-| 飞书 | 当前获准单聊；P3 前增加一个指定群的 @、共享与有界排队 |
+| 飞书 | 获准单聊；可选一个指定群：群内 @小维 提问、全员共享会话并回复原消息（离线实现）。同群有界排队在 P3 前补齐 |
 | 数据源 | 本地 Adapter 直连一个或多个 StarRocks 目标，工具以 `cluster` 参数选择集群；表与列自动发现，范围是只读账号实际可 SELECT 的对象，不再手写 allowlist |
 | MCP | 官方 SDK 接入能力 + 小维可信配置与治理；配置为空时，本地功能照常运行 |
 | 会话 | 两端分别保留上下文，共用业务逻辑；暂不跨渠道同步 |
@@ -60,7 +60,7 @@ MCP 负责标准化工具接入，不能替代业务授权。只有参数含义�
 1. 开发使用 Python 3.11 与 uv，部署使用 Docker 和 Docker Compose；新依赖和镜像版本验证后锁定。P1-A 的存储验证也使用隔离的真实 PostgreSQL。
 2. 一家获准的模型服务（OpenAI、Gemini、DeepSeek 或兼容网关），明确 API 地址、协议、模型 ID，以及对应 API key 的本机安全引用。
 3. 获准的 StarRocks 测试连接、真实只读账号、数据库/视图范围、简短业务口径说明，以及允许向模型与渠道展示的数据。
-4. 飞书企业自建机器人、消息权限、事件订阅及获准单聊用户。
+4. 飞书企业自建机器人、消息权限、事件订阅及获准单聊用户；启用指定群时另需机器人入群，以及群内 @ 消息事件、获取群成员与回复消息的权限（见[单群计划 F0 证据 7](docs/superpowers/plans/2026-10-03-feishu-group.md)）。
 
 凭据仅在本机或部署环境配置，不粘贴到对话、仓库、浏览器或日志。缺少真实环境时可以开发和离线验证，但不能标记对应实战验收完成。
 
@@ -73,9 +73,12 @@ uv run --locked xiaowei --config xiaowei.json storage init      # 全新数据�
 uv run --locked xiaowei --config xiaowei.json serve             # Web 默认 http://127.0.0.1:8501，Ctrl-C 停止
 uv run --locked xiaowei --config xiaowei.json storage cleanup --batch-size 100
 uv run --locked xiaowei --config xiaowei.json requests resend --subject <subject> --chat <chat_id> --message <message_id>
+uv run --locked xiaowei --config xiaowei.json requests resend --subject <发起人 open_id> --group --message <message_id>
 ```
 
 `serve` 持有数据库实例锁并在启动时执行中断恢复，第二个实例会被拒绝；普通启动不建表、不升级。`requests resend` 只重发飞书中投递为 failed/unknown 的已保存结果，不重跑模型或查询；发送前按当前数据库权限与对象版本复核结果引用的 StarRocks 对象（只做零行探测与元数据读取），因此需要与 `serve` 相同的 StarRocks 密码环境变量和网络可达。目标暂时连不上时不发送、记录保持可再次重发；确定撤权或对象已变化时拒绝。退出码：0 成功，1 运行失败或请求被拒，2 参数或配置错误。Web 只提供 HTTP，`web.allowed_origins` 必须包含 `http://<listen_host>:<listen_port>`；持锁的数据库连接一旦断开，进程立即停止接收并以 1 退出；新实例接管时会等待旧实例仍在提交的请求接收，再执行恢复。正式日志只输出小维自身日志（级别由 `--log-level` 决定），依赖库的日志在任何级别都不输出。
+
+**飞书指定群（可选）。** 在 `feishu` 段加入 `group`：`chat_id`（`oc_` 开头）、`tools`（全员同权共享的工具，只能是已登记的 StarRocks 工具）、`member_page_size`（≤100）、`member_max_pages`（≤20）与 `member_timeout_seconds`（≤30）。只处理这个群里 @小维 的文字消息：按平台 mention 中机器人的 `open_id` 识别（启动时由 SDK 取得，取不到时群消息一律不处理）；只写“@小维”文字、@其他机器人、其他群或机器人发的消息都不处理。群成员不需要出现在单聊 `users` 中，在群里能用也不代表能用单聊或 Web。群内成员共享一个会话：B 可以追问 A 刚才的结果，`/新建` 对全群生效；交给模型的每条消息首行带一个由发送者算出的短标识（不含 `open_id`），用于区分谁问的，不赋予任何权限。每轮开始运行前和每次发送前都经飞书接口重新确认发起人仍在群里；成员超过页数上限、接口失败或超时都按无法确认处理，本轮不执行或不发送。回复一律回复原消息；原消息已撤回或不可见时记为发送失败，不会改发新消息或发到别处。发出的文字中的 `<at …>` 改为全角，回答不能 @ 任何人。群结果重发用 `--group` 并给出原发起人的 `open_id`，只回复原消息，发送前同样重新确认成员身份。同群多人同时提问的有界排队尚未实现（F3）：当前同群已有一轮在运行时，新提问按全局队列等待，或在多个消费者时记为“系统繁忙”。飞书入站不再请求通讯录接口（单聊同样）。
 
 **诊断。** 普通消息即可提问诊断；想确保不执行查询时 Web 选“仅诊断”或飞书用 `/诊断`：可以粘贴 SQL、问“刚才那条为什么慢”，或在配置了审计源时问“最近一小时最慢的查询”。显式诊断轮只能查看表结构、表布局（表模型、分区、分桶、排序键）、执行计划与审计慢查询，看不到也不能调用实际查询工具。执行计划只用固定级别 `EXPLAIN LOGICAL` 获取，不执行原查询，不包含实际耗时；EXPLAIN ANALYZE 不开放。回答中的工具结果由程序生成并附固定说明（如“计划是估算”“审计有导入延迟”），分析建议单列为模型推断，优化后的 SQL 只是建议、不会被执行。飞书回复超过单条上限时先完整保留分析建议，工具结果截短并注明。
 

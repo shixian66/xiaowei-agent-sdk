@@ -169,13 +169,32 @@ _Identifier = Annotated[str, StringConstraints(min_length=1, max_length=200)]
 _OpenId = Annotated[str, StringConstraints(pattern=r"^ou_[0-9A-Za-z_-]{1,64}$")]
 
 
-class FeishuConfig(BaseModel):
-    """飞书单聊入口：应用、唯一租户、获准用户、事件时效、文本上限、队列与期限。
+class FeishuGroupConfig(BaseModel):
+    """可选的指定群：群标识、全员同权的共享工具与成员目录查询的上界。
 
-    ``users`` 把发送者 ``open_id`` 映射为内部 subject（再交给 ``AccessPolicy``），不在映射中的
-    发送者在持久化与模型前丢弃。``consumer_count`` 不得超过应用的全局并发上限，由
-    ``FeishuGateway`` 装配时核对。``queue_size`` 同时是 SDK 回调转交给应用循环的在途事件上限。
-    凭据只以 ``env:NAME`` 引用出现。
+    群内只处理 @本机器人 的消息；发送者不需要出现在单聊 ``users`` 中，群授权也不赋予单聊或 Web
+    访问。成员资格在开始运行与每次交付前各查一次（SDK ``get_chat_members(force=True)``），最多
+    ``member_max_pages`` 页、每页 ``member_page_size`` 人、整次不超过 ``member_timeout_seconds``；
+    名单中找不到发送者（含群规模超过上界、只取到部分名单）、失败或超时都按无法确认拒绝。
+    ``tools`` 只能是已登记的 StarRocks 工具，由运行配置核对。
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    chat_id: Annotated[str, StringConstraints(pattern=r"^oc_[0-9A-Za-z_-]{1,64}$")]
+    tools: frozenset[_Identifier] = Field(min_length=1)
+    member_page_size: int = Field(gt=0, le=100)
+    member_max_pages: int = Field(gt=0, le=20)
+    member_timeout_seconds: float = Field(gt=0, le=30)
+
+
+class FeishuConfig(BaseModel):
+    """飞书入口：应用、唯一租户、获准单聊用户、可选指定群、事件时效、文本上限、队列与期限。
+
+    ``users`` 把单聊发送者 ``open_id`` 映射为内部 subject（再交给 ``AccessPolicy``），不在映射中
+    的单聊发送者在持久化与模型前丢弃。``group`` 为空时群消息一律丢弃。``consumer_count`` 不得
+    超过应用的全局并发上限，由 ``FeishuGateway`` 装配时核对。``queue_size`` 同时是 SDK 回调转交给
+    应用循环的在途事件上限。凭据只以 ``env:NAME`` 引用出现。
     """
 
     model_config = ConfigDict(frozen=True, extra="forbid")
@@ -192,6 +211,7 @@ class FeishuConfig(BaseModel):
     send_timeout_seconds: float = Field(gt=0, le=120)
     connect_timeout_seconds: float = Field(gt=0, le=300)
     stop_timeout_seconds: float = Field(gt=0, le=60)
+    group: FeishuGroupConfig | None = None
 
     @field_validator("app_secret_ref")
     @classmethod

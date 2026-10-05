@@ -10,7 +10,7 @@
 
 **Spec:** 产品唯一权威为 [ARCHITECTURE §7 G1–G4](../../../ARCHITECTURE.md#group-scope)，自然语言用途引用 [§5](../../../ARCHITECTURE.md#turn-purpose)，当前数据权限引用 §9。数据库能力、受限只读执行、单 Agent 自然语言工具选择和数据权限验证由 [P2.5 计划](2026-10-03-p25-open-read-multi-cluster.md) 交付，此处只定义群边界。
 
-**Baseline / 状态：** 文档候选 v2（2026-10-03，按用户对 aed344b 的决定修订）；P2.5 Task 8 经审查的阶段交付 SHA 为 PR #41 的合入提交 `a938a0f1b481f1cb23507dc170380c73028b8e54`，F0 起点为其后只改文档的 `origin/main` `e153cd9129fa1a39913cc6641dae68cd90637f19`（PR #42）。F0 已用锁定 SDK 与本机合成协议端点完成（证据见 F0 小节），独立复审针对 `f6875f9ccc44dabaa84607eb33644c61a0162d3e` 通过、无阻断。F1 已离线实施（`e844554`，见 F1 实施说明）；首轮独立审查针对 `16a1b08` 提出 3 组阻断，第二轮针对 `8698d37` 提出执行输入未绑定数据库中的真实请求，均已修复，待复审，通过后进入 F2；F2–F4 未实施，当前无真实群验证证据。
+**Baseline / 状态：** 文档候选 v2（2026-10-03，按用户对 aed344b 的决定修订）；P2.5 Task 8 经审查的阶段交付 SHA 为 PR #41 的合入提交 `a938a0f1b481f1cb23507dc170380c73028b8e54`，F0 起点为其后只改文档的 `origin/main` `e153cd9129fa1a39913cc6641dae68cd90637f19`（PR #42）。F0 已用锁定 SDK 与本机合成协议端点完成（证据见 F0 小节），独立复审针对 `f6875f9ccc44dabaa84607eb33644c61a0162d3e` 通过、无阻断。F1 经两轮审查修复后复审针对 `3140b76501418266c5c7afd43ccbb54b54954e1f` 通过、无阻断，F0/F1 分别随 PR #43、#44 合入 main（`ac2d32a`、`0b1bdee`）。F2 已离线实施（见 F2 实施说明），待独立审查；F3–F4 未实施，当前无真实群验证证据。
 
 ## Global Constraints
 
@@ -157,7 +157,7 @@ SDK 长连接 raw 事件（沿用先 ack 的已接受限制）
 - [x] 检查 ownership/fingerprint 的全部调用者，包括 RequestStore 条件更新、Evidence record/read、最终提交、读取、resend、恢复/清理。添加最少的应用迁移与回复目的地字段，SDK 表不改。
 - [x] 当前成员成功/失败/未知，排队后撤权与最终交付前撤权均覆盖；新配置不能把群权限赋予私聊。个人授权/历史/重发成功对照保留。
 - [x] 运行 §5 G1；隔离变异去掉群隔离、沿用原采集者授权、抹去当前 actor、替换保存目的地分别应失败。提交 `feat: separate group conversation ownership from turn actors`（`e844554`）。
-- [ ] 针对精确 SHA 独立审查；通过后进入 F2。首轮针对 `16a1b08` 提出 3 组阻断（receipt 与授权结果未完整绑定原身份、失败回执的成员语义冲突、状态文档未同步），已修复；第二轮针对 `8698d37` 指出执行输入（正文、用途、会话、Context）未绑定数据库中的真实请求，已修复，待复审。
+- [x] 针对精确 SHA 独立审查；通过后进入 F2。首轮针对 `16a1b08` 提出 3 组阻断（receipt 与授权结果未完整绑定原身份、失败回执的成员语义冲突、状态文档未同步），第二轮针对 `8698d37` 指出执行输入（正文、用途、会话、Context）未绑定数据库中的真实请求，均已修复；复审 `3140b76` 通过、无阻断，随 PR #44 合入 `0b1bdee`。
 
 **F1 实施说明（2026-10-05，起点 `9495db6`，即 PR #43 的 F0 复审记录）。**
 
@@ -172,13 +172,28 @@ SDK 长连接 raw 事件（沿用先 ack 的已接受限制）
 
 ### F2：指定群 @ 入口与原消息交付
 
-**依赖：** F1。**结果：** 一个指定群可经正式链路进入 P2.5 Agent，严格按原消息交付，Web/单聊语义保留。**文件：** feishu/config/runtime/channel；`test_feishu`、`test_runtime`、`test_channel_service`、新增 `tests/p25/test_group_gateway.py`。
+**依赖：** F1。**结果：** 一个指定群可经正式链路进入 P2.5 Agent，严格按原消息交付，Web/单聊语义保留。**文件：** feishu/config/runtime/channel/cli；`test_feishu`、新增 `tests/sdk_core/test_group_gateway.py`（需要 `tests/sdk_core` 的隔离 PostgreSQL fixture，理由同 F1，因此不放在 `tests/p25`）。
 
-- [ ] raw 事件 → LarkTransport → Gateway → ChannelService → 真 Runner/测试存储 → ResultDelivery → SDK 协议替身的成功链，不能只测试构造 InboundRequest。
-- [ ] 未 @、@其他 bot、仅正文伪造 @、非指定群/tenant、机器人、附件/超长/超龄事件均无 Agent/模型/DB；保留四项身份，body 不能覆盖它们。群成员未配单聊 users 仍可在指定群使用。
-- [ ] 沿用 P2.5 自然语言及快捷命令；固定样例中的诊断/生成/模糊请求应由 Agent 不调用查询工具；显式诊断入口确定性拒绝查询，当前 actor 与有界作者标识进入正确的历史/模型位置。`/新建` 的群语义有提示。
-- [ ] 同 message_id 重投、并发重投、发送失败/未知/原消息删除、目的地篡改与显式重发均验证；排队通知不能占最终投递权，事实/分析/来源截断保持 P2 规则。
-- [ ] 运行 §5 G2；变异跳过 mention/当前身份/原消息绑定、允许 SDK fallback 或重复执行应失败。提交 `feat: admit mentioned group messages and bind replies to their origin`，独立审查。
+- [x] raw 事件 → LarkTransport → Gateway → ChannelService → 真 Runner/测试存储 → ResultDelivery → SDK 协议替身的成功链，不能只测试构造 InboundRequest。
+- [x] 未 @、@其他 bot、仅正文伪造 @、非指定群/tenant、机器人、附件/超长/超龄事件均无 Agent/模型/DB；保留四项身份，body 不能覆盖它们。群成员未配单聊 users 仍可在指定群使用。
+- [x] 沿用 P2.5 自然语言及快捷命令；固定样例中的诊断/生成/模糊请求应由 Agent 不调用查询工具；显式诊断入口确定性拒绝查询，当前 actor 与有界作者标识进入正确的历史/模型位置。`/新建` 的群语义有提示。（离线只证明工具集合与门控；Agent 对群内自然语言的判断沿用 P2.5 样例，真实模型在 P3。）
+- [x] 同 message_id 重投、并发重投、发送失败/未知/原消息删除、目的地篡改与显式重发均验证；事实/分析/来源截断保持 P2 规则。排队通知属于 F3（F2 不发排队通知），该项随 F3 验证。
+- [x] 运行 §5 G2；变异跳过 mention/当前身份/原消息绑定、允许 SDK fallback 或重复执行应失败。提交 `feat: admit mentioned group messages and bind replies to their origin`，独立审查（待）。
+
+**F2 实施说明（2026-10-05，起点 `0b1bdee`，即 PR #44 合入后的 main）。**
+
+- **配置。** `feishu.group`：`chat_id`（`oc_` 开头）、`tools`（全员同权，须为已登记的 StarRocks 工具，由运行配置核对）、`member_page_size`（≤100）、`member_max_pages`（≤20）、`member_timeout_seconds`（≤30）。未配置时群消息一律按 `chat_type` 丢弃，单聊不变。
+- **入口。** `_parse` 先核对事件类型、应用、租户与 `sender_type`，再按 `chat_type` 分支：单聊照旧经 `users` 映射；`group` 须是配置群、发送者 `open_id` 合法，actor 是该 `open_id`、owner 是群，不查 `users`。随后核对消息类型、时效与正文，最后要求平台 `mentions[].id.open_id` 等于本机器人：身份来自 `LarkTransport.bot_open_id()`（SDK `get_bot_identity()`，`app_id` 须等于配置、`open_id` 须合法，否则为 None，群消息以 `bot_identity` 丢弃）。只删除本机器人 mention 的 key（按词边界，`@_user_1` 不吃掉 `@_user_10`），其他 mention token 原样保留。原因码：`chat`、`mention`、`bot_identity`、`sender`、`chat_type` 等，日志不含正文与标识。
+- **作者标识。** 交给 `ChannelService` 的群消息为 `【群成员 <sha256(open_id) 前 8 位>】\n正文`，正文中同样的开头改写为 `[群成员 `，首行之外不能冒充；标识进入请求摘要（重投得到相同摘要）、SDK Session（历史中每轮保留作者）与输入上限，不含 `open_id`，不赋予权限。没有另建历史表或改 SDK 输入格式。
+- **交付。** 群内一切发送（最终结果、固定回执、空命令提示、`/新建` 提示）都以 `reply_to=原消息`、`reply_target_gone="fail"` 单次发送；`ResultDelivery.send` 对群请求另核对调用方的群与原消息等于接受时保存的回复目的地（按键构造本应一致，作为纵深防线）。`LarkTransport.send` 把 `<at` 改为全角（单聊同样），回答与工具结果不能 @ 任何人（含 `user_id="all"`），字符数不变。
+- **成员目录。** `LarkTransport.is_member` 调 SDK `get_chat_members(chat_id, page_size, max_pages, id_type="open_id", force=True)`，外层期限 `member_timeout_seconds`，超时取消 SDK 循环上的查询；找到发送者才为 True，未找到、返回非列表为 False，异常与超时原样抛出（授权方拒绝）。`serve` 先装配 SDK 通道再装配运行对象，`StaticAccess` 的群策略绑定这一个通道；`open_runtime` 未给 `members` 时群授权一律不成立。F1 的调用时机不变：开始运行一次、每次发送前一次，同轮工具复核不查。
+- **入站附加 I/O。** `lark_channel` 以公开参数 `name_lookup` 传入不做 I/O 的函数，任何入站消息都不再请求通讯录（单聊同样，F0 证据 6）。
+- **`/新建`。** 群内按群轮换（F1 的 `new_session(group=…)`，须当前成员），提示“已为本群新建会话”；非成员不轮换、不提示。运行中拒绝沿用现有规则，排队中拒绝属于 F3。
+- **显式重发。** `runtime.resend(..., group=True, subject_id=<发起人 open_id>, message_id=…)`，CLI `requests resend --group` 与 `--chat` 互斥：群取自配置，只回复保存的原消息，发送前经 SDK 查一次成员；同时给 `chat_id`、未配置群或单聊缺 `chat_id` 均为 `ResendTargetError`；单聊路径定位不到群请求，他人（即使是成员）定位不到 A 的请求。
+- **行为变化（单聊）。** 入站不再请求通讯录；发出文本中的 `<at` 改为全角；`resend` 的 `chat_id` 改为关键字可选参数。其余单聊、Web 语义不变（既有用例原断言通过；`test_feishu` 的发送替身只增加 `reply_to` 参数）。
+- **留给 F3。** 群 FIFO、排队提示、排队中 `/新建` 拒绝与 `stop_timeout_seconds ≥ 7`。F2 中同群并发：`consumer_count=1` 时第二条排在全局队列等待，大于 1 时同会话的第二条记为 `failed/busy`。
+
+**F2 证据（离线；隔离 PostgreSQL、真 Runner + 脚本模型、真 PolicySession/SQLAlchemySession、产品 `StaticAccess`）。** `tests/sdk_core/test_group_gateway.py` 44 项：未在单聊名单中的成员 @小维 → 一轮查询、一条回复原消息（`reply_to` 为原消息）、成员目录恰好查 2 次（开始、发送前）；A 问、B 追问时 B 的模型输入回放 A 带标识的提问，两人标识不同且不含 `open_id`；正文伪造首行被改写、身份仍为 A；只删本机器人 token；`@小维 /诊断` 隐藏查询工具并记为 diagnose；只 @ 无正文时一条提示、重投不重复、无请求行；`/新建` 由成员 B 轮换全群、非成员 C 不轮换，之后 A 的提问不带历史；14 类入站拒绝（无 mention、mentions 缺失、@其他 bot、只写“@小维”、其他群/租户/应用、发送者租户不同、bot 发送者、非法发送者、话题群、图片、超龄、超长）以及机器人身份未解析、未配置群，均无请求行、模型、工具、成员查询与发送；A 的单聊消息仍被丢弃；三路并发重投加一次顺序重投只运行一次、回复一次；同消息换发送者冲突；回复 failed/unknown/异常各记一次且重投不重发；非成员 → 模型 0、`failed/pending` 且不发送；运行中离群 → 不发送。传输：群回复参数为 `reply_to`+`fail`、`<at`（含大小写与空白变体）改为全角且长度不变、单聊参数不变；机器人身份只接受本应用且格式合法；成员查询 5 次调用参数全部为 `force=True`、配置页数与 `open_id`，未找到/非列表为 False、权限错误抛出、超时在期限内抛出并取消 SDK 上的查询；群配置上下界。正式入口：`runtime.serve` + SDK 公开面替身中 A 得到原消息回复（回答里的 `<at user_id="all">` 已中和）、C 的请求 `failed/pending` 且不发送，成员查询共 4 次；群工具未登记时配置拒绝；`runtime.resend` 群路径在发起人离群、走单聊路径时拒绝且零发送，成功一次后不再发送，回复参数为原消息、无业务 SQL；B 定位不到 A 的请求；目标参数与配置不符时拒绝。真实 SDK：`runtime.serve` 用产品 `lark_channel` 装配的真实 `FeishuChannel`（只把域名换成本机合成 OpenAPI、传输改为 webhook），机器人身份由 SDK 启动时的 `bot/v3/info` 取得；@ 事件经 SDK 分发器进入正式装配，成员接口恰好请求 2 次，回复发往 `/im/v1/messages/om_real/reply`，未 @ 的事件不运行，没有通讯录请求、没有新建消息请求。隔离变异 16 项（跳过 mention、丢失群身份、不回复原消息、允许 SDK 改发、入站姓名查询未关闭、机器人身份不核对应用、成员查询走缓存、不中和 `<at`、正文可冒充作者行、删除 token 不看边界、机器人身份未解析时放行、群重发按个人路径、群发送者须在单聊名单、群消息不加作者标识、不核对指定群）中 15 项被捕获；“网关对重投也入队”存活，是等价变异：重复执行另由 `ChannelService.process`（非新建直接返回）与存储 `start` 的条件更新（`WHERE state='accepted'`）拦截，三处同时去掉状态核对仍不重跑，由 SQL 条件兜底（F1 已有用例）。回归：`tests/sdk_core tests/p1b tests/p25 -W error` 1986 passed、39 deselected；G2 311 passed；Web 浏览器场景 3 passed；文档检查 8 passed；ruff、mypy、`uv lock --check`、`git diff --check` 通过；原有用例的断言未改动。
 
 ### F3：同群有界串行与不同会话并发
 
@@ -210,7 +225,7 @@ F0 修改了 `src/xiaowei/feishu.py` 的投递分类并新增 `tests/sdk_core/te
 | 编号 | 检查 |
 | --- | --- |
 | G1 | `uv run --locked --extra dev python -m pytest tests/sdk_core/test_group_identity.py tests/sdk_core/test_channel_store.py tests/sdk_core/test_channel_service.py tests/sdk_core/test_session_policy.py tests/sdk_core/test_evidence.py tests/sdk_core/test_storage_v2.py tests/sdk_core/test_runtime.py -q -W error` |
-| G2 | `uv run --locked --extra dev python -m pytest tests/p25/test_group_gateway.py tests/sdk_core/test_feishu.py tests/sdk_core/test_runtime.py tests/sdk_core/test_channel_service.py -q -W error` |
+| G2 | `uv run --locked --extra dev python -m pytest tests/sdk_core/test_group_gateway.py tests/sdk_core/test_feishu.py tests/sdk_core/test_runtime.py tests/sdk_core/test_channel_service.py -q -W error` |
 | G3 | `uv run --locked --extra dev python -m pytest tests/p25/test_group_queue.py tests/sdk_core/test_feishu.py tests/sdk_core/test_channel_service.py tests/sdk_core/test_runtime.py -q -W error` |
 | 阶段 | `uv run --locked --extra dev python -m pytest tests/sdk_core tests/p1b tests/p25 -q -W error`；沿用 `SDK_TEST_CHROME` 的正式 Web browser 场景，证明 Web 无回归；不连接真实飞书/模型/用户 DB |
 | 静态/文档 | P2.5 §5 的静态与文档命令；差异/链接检查，确认本文未来命令没有写成当前验证事实 |
@@ -244,4 +259,4 @@ F0 的替身必须位于公开 SDK 的外部 I/O 边界，以真实 SDK 把事�
 - [x] 真 SDK 的成员/回复能力优先，公开接口限制明确；无新的服务、聊天历史或调度平台。
 - [x] 排队、满/超时、澄清、新建、失败/取消/停机/恢复都有可观察验收；有同群成功和不同会话并行对照。
 - [x] 四种投影、渲染上限、发送状态与历史拒绝沿用；原有单条最终回答规则与新增状态回执的区别已说明。
-- [x] F0 精确 SHA `f6875f9` 独立复审通过；F1 已实施，第二轮复审阻断已修复，待复审；通过后进入 F2。
+- [x] F0 精确 SHA `f6875f9`、F1 精确 SHA `3140b76` 独立复审通过并已合入；F2 已离线实施，待独立审查，通过后进入 F3。

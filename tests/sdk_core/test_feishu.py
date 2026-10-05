@@ -78,13 +78,15 @@ def config(**overrides: Any) -> FeishuConfig:
 
 @dataclass
 class Outbox:
-    """单次文本发送的替身：记录 (chat_id, text)，按顺序返回预设结果或抛出。"""
+    """单次文本发送的替身：记录 (chat_id, text) 与回复的原消息，按顺序返回预设结果或抛出。"""
 
     outcomes: list[Any] = field(default_factory=list)
     sent: list[tuple[str, str]] = field(default_factory=list)
+    replies: list[str | None] = field(default_factory=list)
 
-    async def __call__(self, chat_id: str, text: str) -> Any:
+    async def __call__(self, chat_id: str, text: str, *, reply_to: str | None = None) -> Any:
         self.sent.append((chat_id, text))
+        self.replies.append(reply_to)
         outcome = self.outcomes.pop(0) if self.outcomes else "sent"
         if isinstance(outcome, BaseException):
             raise outcome
@@ -629,7 +631,7 @@ async def test_cancel_during_send_records_unknown(env: Env) -> None:
     hold = asyncio.Event()
 
     class Hanging(Outbox):
-        async def __call__(self, chat_id: str, text: str) -> Any:
+        async def __call__(self, chat_id: str, text: str, *, reply_to: str | None = None) -> Any:
             self.sent.append((chat_id, text))
             await hold.wait()
             return "sent"
@@ -736,10 +738,10 @@ class GatedService(ChannelService):
         return await super().accept(inbound)
 
     async def new_session(
-        self, channel: Channel, subject_id: str, conversation_id: str
+        self, channel: Channel, subject_id: str, conversation_id: str, **kwargs: Any
     ) -> ChannelSession:
         await self._hold()
-        return await super().new_session(channel, subject_id, conversation_id)
+        return await super().new_session(channel, subject_id, conversation_id, **kwargs)
 
 
 def gated(env: Env) -> GatedService:
@@ -782,7 +784,7 @@ async def test_drain_waits_for_commands_and_duplicates(env: Env) -> None:
     hold = asyncio.Event()
 
     class Held(Outbox):
-        async def __call__(self, chat_id: str, text: str) -> Any:
+        async def __call__(self, chat_id: str, text: str, *, reply_to: str | None = None) -> Any:
             await hold.wait()
             return await super().__call__(chat_id, text)
 
