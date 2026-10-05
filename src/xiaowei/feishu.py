@@ -105,6 +105,9 @@ _DEFINITE_FAILURES = frozenset(
         FeishuChannelErrorCode.SSRF_BLOCKED,
     }
 )
+# 平台已拒绝、但锁版 SDK 归为 unknown 的业务码（官方回复接口）：230011 原消息已撤回，230050 原消息
+# 对操作者不可见。
+_DEFINITE_FAILURE_CODES = frozenset({230011, 230050})
 
 Send = Callable[[str, str], Awaitable[SendOutcome]]
 """单次文本发送：(chat_id, text) → 明确成功、明确失败或结果不明。"""
@@ -273,13 +276,19 @@ def _prefix(line: str, limit: int) -> str:
 
 
 def send_outcome(result: object) -> SendOutcome:
-    """把 SDK 的 ``SendResult`` 映射为投递结果；只有已知未发出的错误类别才算明确失败。"""
+    """把 SDK 的 ``SendResult`` 映射为投递结果；只有已知未发出的错误类别或业务码才算明确失败。
+
+    成功必须带平台返回的 ``message_id``：SDK 1.4.0 把没有业务 ``code`` 的 HTTP 错误响应（如 500
+    ``{}``）当作成功返回，这时结果不明。
+    """
     if not isinstance(result, SendResult):
         return "unknown"
     if result.success:
-        return "sent"
+        return "sent" if result.message_id else "unknown"
     error = result.error
-    if error is not None and error.code in _DEFINITE_FAILURES:
+    if error is not None and (
+        error.code in _DEFINITE_FAILURES or error.raw_code in _DEFINITE_FAILURE_CODES
+    ):
         return "failed"
     return "unknown"
 
@@ -520,9 +529,11 @@ class LarkChannel(Protocol):
 
 
 def lark_channel(config: FeishuConfig) -> FeishuChannel:
-    """按单次文本发送装配 SDK：不重试、不分段、只用 raw 入站，关闭入站附加 API 调用。
+    """按单次文本发送装配 SDK：不重试、不分段、只用 raw 入站，关闭合并转发、卡片与媒体的附加拉取。
 
     SDK 自带的消息管线照常运行但没有消费者；策略设为 disabled，使其尽早丢弃。
+    ``resolve_sender_names=False`` 只关闭事后的姓名回填：锁版 SDK 在规范化（早于 policy）时仍会
+    为每条非重复消息的发送者请求通讯录接口，只有构造参数 ``name_lookup`` 能关闭（单群计划 F2）。
     """
     secret = resolve_secret_ref(config.app_secret_ref)
     return FeishuChannel(
