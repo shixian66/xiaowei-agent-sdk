@@ -162,6 +162,62 @@ async def send(group: Group, question: str, message_id: str, sender: str = A) ->
     return event
 
 
+ANY = "*"
+
+
+@dataclass
+class GatedOutbox(Outbox):
+    """按（原消息编号，文本前缀）挂起发送，直到对应事件被设置；``ANY`` 匹配任意原消息。
+
+    ``sent`` 按挂起结束的先后记录，即平台可见的顺序。另记录到达过挂起点的发送，以及同时在途的
+    繁忙回执数与峰值。
+    """
+
+    gates: dict[tuple[str, str], asyncio.Event] = field(default_factory=dict)
+    reached: set[tuple[str, str]] = field(default_factory=set)
+    busy_active: int = 0
+    busy_peak: int = 0
+
+    def gate(self, reply_to: str, prefix: str) -> asyncio.Event:
+        return self.gates.setdefault((reply_to, prefix), asyncio.Event())
+
+    async def __call__(self, chat_id: str, text: str, *, reply_to: str | None = None) -> Any:
+        key = next(
+            (
+                k
+                for k in self.gates
+                if k[0] in (ANY, reply_to) and text.startswith(k[1]) and not self.gates[k].is_set()
+            ),
+            None,
+        )
+        busy = text.startswith(BUSY)
+        if busy:
+            self.busy_active += 1
+            self.busy_peak = max(self.busy_peak, self.busy_active)
+        try:
+            if key is not None:
+                self.reached.add((reply_to or "", key[1]))
+                await self.gates[key].wait()
+            return await super().__call__(chat_id, text, reply_to=reply_to)
+        finally:
+            if busy:
+                self.busy_active -= 1
+
+
+async def settled(env: Env, expected: dict[str, tuple[str, str]], timeout: float = 1) -> None:
+    """在 ``timeout`` 内等到这些请求的状态与投递符合预期（只看给出的键）。"""
+    async with asyncio.timeout(timeout):
+        while True:
+            current = await states(env)
+            if all(current.get(key) == value for key, value in expected.items()):
+                return
+            await asyncio.sleep(0.02)
+
+
+def texts_for(group: Group, reply_to: str) -> list[str]:
+    return [t for r, t in replies(group) if r == reply_to]
+
+
 # ---- 按接受顺序串行 ------------------------------------------------------------------------
 
 
@@ -207,6 +263,103 @@ async def test_group_turns_run_one_at_a_time_in_acceptance_order(env: Env) -> No
     users = [item for item in call.input if item.get("role") == "user"]
     assert len(users) == 2 and env.model_calls(first) == 2 and env.model_calls(third) == 1
     assert env.members.checks == [(CHAT, A), (CHAT, A), (CHAT, B), (CHAT, B), (CHAT, C), (CHAT, C)]
+
+
+# ---- 排队提示与推进 ------------------------------------------------------------------------
+
+
+async def held_notice(
+    group: Group, turns: Turns, outbox: GatedOutbox, env: Env
+) -> tuple[asyncio.Event, asyncio.Event, asyncio.Task[Any]]:
+    """A 运行中（挂起），B 进入等待且其排队提示挂在发送中。返回 A 的放行、提示的放行与 B 的
+    ``receive`` 任务。"""
+    env.scripts.add(attributed(A, "一"), clarify())
+    hold = turns.hold("一")
+    release = outbox.gate("om_2", QUEUED)
+    await send(group, "一", "om_1")
+    await turns.wait_entered("一")
+    receiving = asyncio.create_task(send(group, "二", "om_2", B))
+    await until(lambda: ("om_2", QUEUED) in outbox.reached, timeout=5)
+    return hold, release, receiving
+
+
+async def test_a_waiter_does_not_start_before_its_queue_notice_attempt_ends(env: Env) -> None:
+    """B 的排队提示仍在发送时 A 结束：B 不进入 Runner、保持 accepted；提示结束后才运行，
+    平台上 B 的提示先于最终回答。"""
+    outbox = GatedOutbox()
+    async with queue(env, outbox) as (group, turns):
+        hold, release, receiving = await held_notice(group, turns, outbox, env)
+        env.scripts.add(attributed(B, "二"), clarify())
+        hold.set()
+        await until(lambda: "om_1" in group.outbox.replies)
+        await asyncio.sleep(0.3)
+        assert turns.started == ["一"]
+        assert (await states(env))["om_2"] == ("accepted", "pending")
+        release.set()
+        await receiving
+        await until(lambda: len(turns.started) == 2)
+        await group.gateway.idle()
+    assert texts_for(group, "om_2")[0] == QUEUED and len(texts_for(group, "om_2")) == 2
+    assert await states(env) == {"om_1": ("completed", "sent"), "om_2": ("completed", "sent")}
+
+
+@pytest.mark.parametrize(
+    "outcome",
+    ["failed", "unknown", RuntimeError("notice lost")],
+    ids=["failed", "unknown", "raise"],
+)
+async def test_a_waiter_runs_after_its_queue_notice_fails(env: Env, outcome: Any) -> None:
+    """提示挂起后明确失败、结果不明或抛出：不重发提示，B 在提示尝试结束后照常运行并得到回答。"""
+    outbox = GatedOutbox(outcomes=["sent", outcome])  # A 的最终回答先于挂起的提示完成
+    async with queue(env, outbox) as (group, turns):
+        hold, release, receiving = await held_notice(group, turns, outbox, env)
+        waiting = env.scripts.add(attributed(B, "二"), clarify())
+        hold.set()
+        await until(lambda: "om_1" in group.outbox.replies)
+        release.set()
+        await receiving
+        await until(lambda: len(turns.started) == 2)
+        await group.gateway.idle()
+    assert env.model_calls(waiting) == 1 and texts_for(group, "om_2")[0] == QUEUED
+    assert await states(env) == {"om_1": ("completed", "sent"), "om_2": ("completed", "sent")}
+
+
+async def test_a_wait_that_expires_during_the_queue_notice_replies_after_it(env: Env) -> None:
+    """提示仍在发送时等待到期：检查间隔内结算为 failed/busy，但繁忙回执等提示尝试结束后才发，
+    平台上不会出现回执之后的迟到提示；模型 0 次。"""
+    outbox = GatedOutbox()
+    async with queue(env, outbox) as (group, turns):
+        hold, release, receiving = await held_notice(group, turns, outbox, env)
+        expired = env.scripts.add(attributed(B, "二"), clarify())
+        env.clock.advance(61)
+        await settled(env, {"om_2": ("failed", "pending")})
+        await asyncio.sleep(0.3)
+        assert texts_for(group, "om_2") == []
+        release.set()
+        await receiving
+        await until(lambda: len(texts_for(group, "om_2")) == 2)
+        hold.set()
+        await group.gateway.idle()
+    assert texts_for(group, "om_2")[0] == QUEUED and texts_for(group, "om_2")[1].startswith(BUSY)
+    assert env.model_calls(expired) == 0 and turns.started == ["一"]
+    assert (await states(env))["om_2"] == ("failed", "sent")
+
+
+async def test_drain_waits_for_a_queue_notice_attempt(env: Env) -> None:
+    outbox = GatedOutbox()
+    async with queue(env, outbox) as (group, turns):
+        hold, release, receiving = await held_notice(group, turns, outbox, env)
+        env.scripts.add(attributed(B, "二"), clarify())
+        hold.set()
+        await until(lambda: "om_1" in group.outbox.replies)
+        draining = asyncio.create_task(group.gateway.drain(10))
+        await asyncio.sleep(0.2)
+        assert not draining.done()
+        release.set()
+        assert await asyncio.wait_for(draining, 10)
+        await receiving
+    assert await states(env) == {"om_1": ("completed", "sent"), "om_2": ("completed", "sent")}
+    assert env.store.readiness.ok
 
 
 # ---- 容量与期限 ----------------------------------------------------------------------------
@@ -286,6 +439,79 @@ async def test_an_expired_turn_is_skipped_when_dequeued(env: Env) -> None:
         "om_late": ("failed", "sent"),
         "om_fresh": ("completed", "sent"),
     }
+
+
+@pytest.mark.parametrize("blocker", ["send_hangs", "member_hangs", "member_fails"])
+async def test_expired_waiters_settle_while_one_receipt_is_blocked(env: Env, blocker: str) -> None:
+    """B、C、D 同时到期，B 的回执发送挂起、成员查询挂起或抛出：三条都在检查间隔内结算为
+    failed/busy，C、D 照常收到回执；B 解除阻塞后按当前成员资格交付（抛出时不发送）。
+    三条的模型、Runner 与业务查询调用均为 0。"""
+    outbox = GatedOutbox()
+    unblock = asyncio.Event()
+    if blocker == "send_hangs":
+        unblock = outbox.gate("om_b", BUSY)
+    elif blocker == "member_hangs":
+        env.members.holds[B] = unblock
+    async with queue(env, outbox, group={"max_waiting": 3}) as (group, turns):
+        env.scripts.add(attributed(A, "一"), clarify())
+        expired = [env.scripts.add(attributed(who, "等待"), clarify()) for who in (B, C)]
+        hold = turns.hold("一")
+        await send(group, "一", "om_1")
+        await turns.wait_entered("一")
+        for who, message_id in ((B, "om_b"), (C, "om_c"), (C, "om_d")):
+            await send(group, "等待", message_id, who)
+        if blocker == "member_fails":
+            env.members.failing.add(B)
+        env.clock.advance(61)
+        await settled(
+            env,
+            {
+                "om_b": ("failed", "pending"),
+                "om_c": ("failed", "sent"),
+                "om_d": ("failed", "sent"),
+            },
+        )
+        unblock.set()
+        if blocker != "member_fails":
+            await settled(env, {"om_b": ("failed", "sent")})
+        hold.set()
+        await group.gateway.idle()
+        assert await group.gateway.drain(5)
+    assert turns.started == ["一"] and env.adapter.calls == []
+    assert all(env.model_calls(script) == 0 for script in expired)
+    assert [r for r, t in replies(group) if t.startswith(BUSY)] == (
+        ["om_c", "om_d"] if blocker == "member_fails" else ["om_c", "om_d", "om_b"]
+    )
+
+
+async def test_expiry_receipts_have_bounded_tasks_and_concurrency(env: Env) -> None:
+    """6 条等待同时到期、回执全部挂起：都在检查间隔内结算，同时在途的回执最多 4 条；回执未落定前
+    它们仍占群等待容量，新到的请求记为繁忙、不进入等待也不提示。"""
+    outbox = GatedOutbox()
+    release = outbox.gate(ANY, BUSY)
+    waiting = [f"om_w{i}" for i in range(6)]
+    async with queue(env, outbox, queue_size=8, group={"max_waiting": 6}) as (group, turns):
+        env.scripts.add(attributed(A, "一"), clarify())
+        hold = turns.hold("一")
+        await send(group, "一", "om_1")
+        await turns.wait_entered("一")
+        for message_id in waiting:
+            await send(group, "等待", message_id, B)
+        env.clock.advance(61)
+        await settled(env, dict.fromkeys(waiting, ("failed", "pending")))
+        await until(lambda: outbox.busy_active == 4, timeout=5)
+        await asyncio.sleep(0.3)
+        assert outbox.busy_peak == 4
+        late = asyncio.create_task(send(group, "新来", "om_late", C))
+        await settled(env, {"om_late": ("failed", "pending")})
+        release.set()
+        await late
+        await settled(env, dict.fromkeys([*waiting, "om_late"], ("failed", "sent")))
+        hold.set()
+        await group.gateway.idle()
+        assert await group.gateway.drain(5)
+    assert turns.started == ["一"] and "om_late" not in notices(group)
+    assert notices(group) == waiting
 
 
 # ---- 队头结束与失败 ------------------------------------------------------------------------
@@ -476,41 +702,31 @@ async def test_drain_waits_for_the_group_queue(env: Env) -> None:
     assert env.store.readiness.ok
 
 
-@dataclass
-class HeldBusyOutbox(Outbox):
-    """繁忙回执在 ``release`` 之前挂起；其他发送照常。"""
-
-    holding: asyncio.Event = field(default_factory=asyncio.Event)
-    release: asyncio.Event = field(default_factory=asyncio.Event)
-
-    async def __call__(self, chat_id: str, text: str, *, reply_to: str | None = None) -> Any:
-        if text.startswith(BUSY):
-            self.holding.set()
-            await self.release.wait()
-        return await super().__call__(chat_id, text, reply_to=reply_to)
-
-
-async def test_drain_waits_for_an_expiry_receipt_in_flight(env: Env) -> None:
-    """队列与群 FIFO 都已空，但到期检查发出的繁忙回执仍在发送：drain 等它落定。"""
-    outbox = HeldBusyOutbox()
+async def test_drain_waits_for_every_expiry_receipt_in_flight(env: Env) -> None:
+    """队列与群 FIFO 都已空，但两条到期回执仍在发送：drain 等它们全部落定。"""
+    outbox = GatedOutbox()
+    release = outbox.gate(ANY, BUSY)
     async with queue(env, outbox) as (group, turns):
         env.scripts.add(attributed(A, "一"), clarify())
-        env.scripts.add(attributed(B, "二"), clarify())
         hold = turns.hold("一")
         await send(group, "一", "om_1")
         await turns.wait_entered("一")
         await send(group, "二", "om_2", B)
+        await send(group, "三", "om_3", C)
         env.clock.advance(61)
-        async with asyncio.timeout(5):
-            await outbox.holding.wait()
+        await until(lambda: outbox.busy_active == 2, timeout=5)
         hold.set()
-        await group.gateway.idle()  # 队头已完成，队列为空
+        await group.gateway.idle()  # 队头已完成，队列与群 FIFO 为空
         draining = asyncio.create_task(group.gateway.drain(10))
         await asyncio.sleep(0.2)
         assert not draining.done()
-        outbox.release.set()
+        release.set()
         assert await asyncio.wait_for(draining, 10)
-    assert await states(env) == {"om_1": ("completed", "sent"), "om_2": ("failed", "sent")}
+    assert await states(env) == {
+        "om_1": ("completed", "sent"),
+        "om_2": ("failed", "sent"),
+        "om_3": ("failed", "sent"),
+    }
 
 
 async def test_drain_timeout_with_a_waiting_group_turn_blocks_readiness(env: Env) -> None:
