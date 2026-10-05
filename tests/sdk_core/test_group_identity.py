@@ -121,28 +121,41 @@ class Env:
         return Readiness()
 
     def group(
-        self, message: str, request_id: str, actor: str = A, *, group: GroupScope = GROUP
+        self,
+        message: str,
+        request_id: str,
+        actor: str = A,
+        *,
+        group: GroupScope = GROUP,
+        mode: str = "query",
     ) -> InboundRequest:
         return InboundRequest(
             channel="feishu",
             channel_request_id=request_id,
             subject_id=actor,
             conversation_id=group.chat_id,
-            mode="query",
+            mode=mode,  # type: ignore[arg-type]
             message=message,
             received_at=WHEN,
             group=group,
         )
 
     def personal(
-        self, message: str, request_id: str, subject: str, channel: str, conversation: str
+        self,
+        message: str,
+        request_id: str,
+        subject: str,
+        channel: str,
+        conversation: str,
+        *,
+        mode: str = "query",
     ) -> InboundRequest:
         return InboundRequest(
             channel=channel,  # type: ignore[arg-type]
             channel_request_id=request_id,
             subject_id=subject,
             conversation_id=conversation,
-            mode="query",
+            mode=mode,  # type: ignore[arg-type]
             message=message,
             received_at=WHEN,
         )
@@ -493,7 +506,7 @@ async def test_accepting_does_not_query_the_member_directory(env: Env) -> None:
     message = env.scripts.add("东区？", tool_call("order_total", region="east"), cite())
     receipt = await env.service.accept(env.group(message, "om_1"))
     assert env.members.checks == []
-    assert receipt.context.tool_scope == frozenset()  # 接受不赋予查询权
+    assert not hasattr(receipt, "context")  # 接受不产生执行 context，也就不赋予查询权
     record = await env.service.process(receipt)
     assert record.state == "completed"
     assert env.members.checks == [(CHAT, A)]  # 开始运行时查一次；同轮工具复核不再查
@@ -554,44 +567,117 @@ async def _turns(env: Env, session_id: str) -> int:
     return int(rows[0][0])
 
 
-@pytest.mark.parametrize("change", ["no_group", "other_group", "other_actor", "other_turn"])
-async def test_a_receipt_cannot_drop_or_swap_its_group_binding(env: Env, change: str) -> None:
-    """是否重验成员由持久记录的群 owner 决定；receipt 与记录不一致时在 Runner 前拒绝。"""
+async def _request_state(env: Env, record: RequestRecord) -> tuple[Any, ...]:
+    (row,) = await env.rows(
+        "SELECT state, failure_code, session_id, mode FROM xiaowei_request WHERE request_key = :k",
+        k=record.request_key,
+    )
+    return row
+
+
+_GROUP_TAMPERING = {
+    "message": lambda r, other: replace(r, message=other),
+    "mode": lambda r, other: replace(r, record=replace(r.record, mode="query")),
+    "session": lambda r, other: replace(r, record=replace(r.record, session_id="s-elsewhere")),
+    "reply_message": lambda r, other: replace(
+        r, record=replace(r.record, reply_message_id="om_elsewhere")
+    ),
+    "reply_chat": lambda r, other: replace(r, record=replace(r.record, reply_chat_id="oc_other")),
+    "no_group": lambda r, other: replace(r, group=None),
+    "other_group": lambda r, other: replace(
+        r, group=GroupScope(app_id=APP, tenant_key=TENANT, chat_id="oc_other")
+    ),
+    "combined": lambda r, other: replace(
+        r,
+        message=other,
+        record=replace(r.record, mode="query", session_id="s-elsewhere"),
+    ),
+}
+
+
+@pytest.mark.parametrize("change", sorted(_GROUP_TAMPERING))
+async def test_a_group_run_is_bound_to_the_stored_request(env: Env, change: str) -> None:
+    """执行输入以数据库中的请求为准：正文、用途、会话、回复目的地或群范围不符都在 Runner 前
+    记为 access_denied，模型、Adapter 与 SDK Session 均不增加；请求行保持原会话与用途。"""
     await a_then_b(env)
-    env.members.current = {A}  # B 已离群
-    message = env.scripts.add("B：东区？", tool_call("order_total", region="east"), cite())
-    receipt = await env.service.accept(env.group(message, "om_b2", B))
-    if change == "no_group":
-        receipt = replace(receipt, group=None)
-    elif change == "other_group":
-        other = GroupScope(app_id=APP, tenant_key=TENANT, chat_id="oc_other")
-        receipt = replace(receipt, group=other)
-    else:
-        update = {"subject_id": A} if change == "other_actor" else {"turn_id": "turn-x"}
-        swapped = receipt.context.identity.model_copy(update=update)
-        receipt = replace(receipt, context=receipt.context.model_copy(update={"identity": swapped}))
-    before = await _turns(env, receipt.record.session_id)
-    record = await env.service.process(receipt)
+    diagnose = env.scripts.add("B：诊断东区", tool_call("run_query", region="east"), cite())
+    other = env.scripts.add("B：换个问题", tool_call("run_query", region="west"), cite())
+    receipt = await env.service.accept(env.group(diagnose, "om_b2", B, mode="diagnose"))
+    session = receipt.record.session_id
+    before = await _turns(env, session)
+    record = await env.service.process(_GROUP_TAMPERING[change](receipt, other))
     assert (record.state, record.failure_code) == ("failed", "access_denied")
-    assert env.model_calls(message) == 0 and len(env.adapter.calls) == 2  # 只有 a_then_b 的两次
-    assert await _turns(env, receipt.record.session_id) == before
+    assert record.session_id == session and record.mode == "diagnose"  # 返回数据库中的记录
+    assert env.model_calls(diagnose) == env.model_calls(other) == 0
+    assert len(env.adapter.calls) == 2  # 只有 a_then_b 的两次
+    assert await _turns(env, session) == before and await _turns(env, "s-elsewhere") == 0
+    assert await _request_state(env, receipt.record) == (
+        "failed",
+        "access_denied",
+        session,
+        "diagnose",
+    )
 
 
-@pytest.mark.parametrize("change", ["group", "other_actor", "group_owner"])
-async def test_a_personal_receipt_cannot_claim_a_group_or_another_identity(
-    env: Env, change: str
-) -> None:
-    message = env.scripts.add("个人：东区？", tool_call("order_total", region="east"), cite())
-    receipt = await env.service.accept(env.personal(message, "p1", "alice", "web", "cookie-1"))
-    if change == "group":
-        receipt = replace(receipt, group=GROUP)
-    else:
-        update = {"subject_id": A} if change == "other_actor" else {"owner": GROUP.owner}
-        swapped = receipt.context.identity.model_copy(update=update)
-        receipt = replace(receipt, context=receipt.context.model_copy(update={"identity": swapped}))
-    record = await env.service.process(receipt)
+async def test_a_group_request_is_never_run_under_a_personal_grant(env: Env) -> None:
+    """A 同时有个人授权：去掉群范围的群请求也不能改按个人授权运行（群请求以记录的 owner 判断）。"""
+    message = env.scripts.add("A：东区？", tool_call("order_total", region="east"), cite())
+    receipt = await env.service.accept(env.group(message, "om_a"))
+    env.members.current = set()  # A 已离群，个人授权仍在
+    record = await env.service.process(replace(receipt, group=None))
     assert (record.state, record.failure_code) == ("failed", "access_denied")
     assert env.model_calls(message) == 0 and env.adapter.calls == []
+    assert await _turns(env, receipt.record.session_id) == 0
+
+
+@pytest.mark.parametrize("change", ["actor", "turn"])
+async def test_a_receipt_for_another_identity_changes_no_request(env: Env, change: str) -> None:
+    """记录的身份（发起人、轮次）与数据库中的请求不符：不运行，也不改动任何请求。"""
+    message = env.scripts.add("B：东区？", tool_call("order_total", region="east"), cite())
+    receipt = await env.service.accept(env.group(message, "om_b", B))
+    update = {"subject_id": A} if change == "actor" else {"turn_id": "turn-x"}
+    with pytest.raises(RequestUnavailableError):
+        await env.service.process(replace(receipt, record=replace(receipt.record, **update)))
+    assert env.model_calls(message) == 0 and env.adapter.calls == []
+    assert (await _request_state(env, receipt.record))[:2] == ("accepted", None)
+    # 原样的 receipt 照常运行一次；重复事件不再运行。
+    assert (await env.service.process(receipt)).state == "completed"
+    again = await env.service.accept(env.group(message, "om_b", B))
+    assert not again.created and (await env.service.process(again)).state == "completed"
+    assert len(env.adapter.calls) == 1
+
+
+@pytest.mark.parametrize("change", ["mode", "message", "session", "group", "policy"])
+async def test_a_personal_run_is_bound_to_the_stored_request(
+    env: Env, change: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    diagnose = env.scripts.add("个人：诊断东区", tool_call("run_query", region="east"), cite())
+    other = env.scripts.add("个人：换个问题", tool_call("run_query", region="west"), cite())
+    inbound = env.personal(diagnose, "p1", "alice", "web", "cookie-1", mode="diagnose")
+    receipt = await env.service.accept(inbound)
+    session = receipt.record.session_id
+    if change == "mode":
+        receipt = replace(receipt, record=replace(receipt.record, mode="query"))
+    elif change == "message":
+        receipt = replace(receipt, message=other)
+    elif change == "session":
+        receipt = replace(receipt, record=replace(receipt.record, session_id="s-elsewhere"))
+    elif change == "group":
+        receipt = replace(receipt, group=GROUP)
+    else:  # 接受后数据策略已变化：按新策略不能证明这是同一请求
+        original = env.access.resolve
+
+        async def changed(channel: Any, subject_id: str) -> AccessDecision | None:
+            decision = await original(channel, subject_id)
+            assert decision is not None
+            return decision.model_copy(update={"policy_version": "p2"})
+
+        monkeypatch.setattr(env.access, "resolve", changed)
+    record = await env.service.process(receipt)
+    assert (record.state, record.failure_code) == ("failed", "access_denied")
+    assert env.model_calls(diagnose) == env.model_calls(other) == 0 and env.adapter.calls == []
+    assert await _turns(env, session) == 0 and await _turns(env, "s-elsewhere") == 0
+    assert (record.session_id, record.mode) == (session, "diagnose")
 
 
 async def test_a_personal_decision_must_be_for_the_requesting_subject(
@@ -641,7 +727,7 @@ async def test_group_grants_do_not_open_private_chat_or_web(env: Env) -> None:
 async def test_recovery_interrupts_group_requests_and_closes_the_group_session(env: Env) -> None:
     message = env.scripts.add("东区？", tool_call("order_total", region="east"), cite())
     receipt = await env.service.accept(env.group(message, "om_1"))
-    await env.store.start(receipt.record)
+    await env.store.start(receipt.record, message=receipt.message, policy_version="p1")
     async with hold_instance_lock(env.engine, env.store.readiness) as lock:
         report = await env.store.recover(lock)
     assert report.interrupted == 1

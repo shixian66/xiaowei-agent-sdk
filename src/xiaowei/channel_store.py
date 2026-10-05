@@ -144,6 +144,15 @@ _SELECT_REQUEST = text(
     FROM xiaowei_request WHERE channel = :channel AND request_key = :request_key
     """
 )
+_SELECT_REQUEST_FOR_UPDATE = text(
+    """
+    SELECT channel, request_key, owner_kind, owner_id, subject_id, conversation_key, session_id,
+           turn_id, mode, message_digest, state, answer, failure_code, delivery, reply_chat_id,
+           reply_message_id, created_at, expires_at
+    FROM xiaowei_request WHERE channel = :channel AND request_key = :request_key
+    FOR UPDATE
+    """
+)
 # 所有请求更新都带归属（渠道、请求键、owner、发起人、轮次）与前置状态条件。
 _START = text(
     """
@@ -501,28 +510,15 @@ class ChannelStore:
         owner_ = self._owner(channel, subject_id, conversation, owner)
         group = owner_.owner.kind == "group"
         key = {"channel": channel, "request_key": self._request_key(owner_, request_id)}
-        if group:
-            digest = self._digest(
-                "message",
-                channel,
-                "group",
-                owner_.owner.id,
-                subject_id,
-                owner_.conversation_key,
-                mode,
-                policy_version,
-                message,
-            )
-        else:  # 个人请求的摘要保持 v4 的原值
-            digest = self._digest(
-                "message",
-                channel,
-                subject_id,
-                owner_.conversation_key,
-                mode,
-                policy_version,
-                message,
-            )
+        digest = self._message_digest(
+            channel,
+            owner_.owner,
+            subject_id,
+            owner_.conversation_key,
+            mode,
+            policy_version,
+            message,
+        )
         now = self._clock()
         # 提交结果不明时请求可能已存在：锁低 readiness，交给重启恢复，不让它永久“处理中”。
         with self._critical("request_accept_failed", "请求状态存储不可用"):
@@ -593,20 +589,66 @@ class ChannelStore:
             raise RequestUnavailableError
         return self._record(row)
 
-    async def start(self, record: RequestRecord) -> RequestRecord:
-        """``accepted → running``；只有一个进程成功，其余得到 ``ChannelStoreError``。
+    async def start(
+        self, record: RequestRecord, *, message: str, policy_version: str
+    ) -> RequestRecord:
+        """按数据库中的真实请求 ``accepted → running``，返回数据库中的记录；只有一个进程成功。
+
+        调用方给出的记录、正文与当前数据策略版本只是待核对的声明：在同一事务内锁定请求行，核对
+        归属、发起人、会话语境、会话、轮次、用途与回复目的地都与该行一致，并按该行重算
+        ``message_digest`` 与正文比对。都一致才启动，执行只用返回的记录；内容不一致（换正文、
+        用途、会话或回复目的地，或数据策略已变化）时同一事务把该请求记为 ``failed/access_denied``
+        并返回失败记录，不运行。请求不存在、不属于调用方给出的身份（渠道、请求键、owner、发起人、
+        轮次）或已不在 ``accepted`` 时得到 ``RequestUnavailableError``，不改动任何请求。
 
         与接收一样经 ``_admit``：失去实例锁的进程不能再启动已接受的请求。
         """
         self._require_ready()
-        params = {**_keys(record), "now": self._clock()}
+        key = {"channel": record.channel, "request_key": record.request_key}
         with self._critical("request_start_failed", "请求状态无法保存"):
             async with self._engine.begin() as conn:
                 await self._admit(conn)
-                started = (await conn.execute(_START, params)).rowcount
-        if started != 1:
-            raise RequestUnavailableError
-        return replace(record, state="running")
+                found = (await conn.execute(_SELECT_REQUEST_FOR_UPDATE, key)).mappings()
+                one = found.one_or_none()
+                row: Mapping[str, Any] | None = None if one is None else dict(one)
+                if row is None or row["state"] != "accepted" or _keys_of(row) != _keys(record):
+                    raise RequestUnavailableError
+                stored = self._record(row)
+                params = {**_keys(stored), "now": self._clock()}
+                if self._binds(row, record, message, policy_version):
+                    if (await conn.execute(_START, params)).rowcount != 1:
+                        raise RequestUnavailableError
+                    return replace(stored, state="running")
+                await conn.execute(_FAIL, {**params, "code": "access_denied"})
+                return replace(stored, state="failed", failure_code="access_denied")
+
+    def _binds(
+        self, row: Mapping[str, Any], record: RequestRecord, message: str, policy_version: str
+    ) -> bool:
+        claimed = (
+            record.conversation_key,
+            record.session_id,
+            record.mode,
+            record.reply_chat_id,
+            record.reply_message_id,
+        )
+        stored = (
+            row["conversation_key"],
+            row["session_id"],
+            row["mode"],
+            row["reply_chat_id"],
+            row["reply_message_id"],
+        )
+        digest = self._message_digest(
+            row["channel"],
+            Owner(kind=row["owner_kind"], id=row["owner_id"]),
+            row["subject_id"],
+            row["conversation_key"],
+            row["mode"],
+            policy_version,
+            message,
+        )
+        return claimed == stored and hmac.compare_digest(row["message_digest"], digest)
 
     async def complete(self, record: RequestRecord, turn: TurnAnswer) -> RequestRecord:
         """``running → completed`` 并保存受限回答；失败时标为 failed 并关闭会话，不交付。
@@ -848,6 +890,33 @@ class ChannelStore:
             "request", owner.channel, owner.owner.id, owner.conversation_key, request_id
         )
 
+    def _message_digest(
+        self,
+        channel: str,
+        owner: Owner,
+        subject_id: str,
+        conversation_key: str,
+        mode: str,
+        policy_version: str,
+        message: str,
+    ) -> str:
+        """请求内容摘要：个人请求保持 v4 的原值；群请求另带群 owner，并含发起人。"""
+        if owner.kind == "group":
+            return self._digest(
+                "message",
+                channel,
+                "group",
+                owner.id,
+                subject_id,
+                conversation_key,
+                mode,
+                policy_version,
+                message,
+            )
+        return self._digest(
+            "message", channel, subject_id, conversation_key, mode, policy_version, message
+        )
+
     def _digest(self, purpose: str, *parts: str) -> str:
         """带服务端密钥的摘要；各部分按 JSON 数组编码，边界不会混淆。"""
         body = json.dumps([purpose, *parts], ensure_ascii=False, separators=(",", ":"))
@@ -875,6 +944,17 @@ def _keys(record: RequestRecord) -> dict[str, object]:
         "owner_id": record.owner.id,
         "subject_id": record.subject_id,
         "turn_id": record.turn_id,
+    }
+
+
+def _keys_of(row: Mapping[str, Any]) -> dict[str, object]:
+    return {
+        "channel": row["channel"],
+        "request_key": row["request_key"],
+        "owner_kind": row["owner_kind"],
+        "owner_id": row["owner_id"],
+        "subject_id": row["subject_id"],
+        "turn_id": row["turn_id"],
     }
 
 

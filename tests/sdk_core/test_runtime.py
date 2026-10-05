@@ -561,7 +561,7 @@ async def test_startup_recovers_interrupted_requests_before_serving(env: Env) ->
             message="上次进程崩溃时的请求",
             policy_version="p1",
         )
-        await store.start(acceptance.record)
+        await store.start(acceptance.record, message="上次进程崩溃时的请求", policy_version="p1")
     async with env.running(env.config()) as served:
         await served.ready()
         state = await env.scalar("SELECT state FROM xiaowei_request")

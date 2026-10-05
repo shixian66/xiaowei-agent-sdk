@@ -58,6 +58,16 @@ ANSWER = AgentAnswer(
 TURN = TurnAnswer(answer=ANSWER, context_evidence=("ev_1", "ev_2"))
 
 
+MESSAGE = "东区订单"
+
+
+def started(
+    store: ChannelStore, record: RequestRecord, message: str = MESSAGE
+) -> Awaitable[RequestRecord]:
+    """按接受时的正文与策略版本启动请求（``Env.accept`` 的默认值）。"""
+    return store.start(record, message=message, policy_version="p1")
+
+
 def make_store(
     engine: AsyncEngine, clock: Clock, readiness: Readiness | None = None, **overrides: Any
 ) -> ChannelStore:
@@ -84,7 +94,7 @@ class Env:
     async def accept(
         self,
         request_id: str = "r1",
-        message: str = "东区订单",
+        message: str = MESSAGE,
         *,
         mode: str = "query",
         subject: str = "alice",
@@ -110,7 +120,7 @@ class Env:
 
     async def completed(self, request_id: str = "r1", **kwargs: Any) -> RequestRecord:
         record = (await self.accept(request_id, **kwargs)).record
-        record = await self.store.start(record)
+        record = await started(self.store, record, kwargs.get("message", MESSAGE))
         return await self.store.complete(record, TURN)
 
     async def row(self, request: RequestRecord) -> dict[str, Any]:
@@ -246,7 +256,7 @@ async def test_same_key_returns_the_existing_request_in_every_state(env: Env) ->
     again = await env.accept()
     assert not again.created and again.record.state == "accepted"
 
-    running = await env.store.start(record)
+    running = await started(env.store, record)
     assert (await env.accept()).record.state == "running"
 
     done = await env.store.complete(running, TURN)
@@ -256,7 +266,7 @@ async def test_same_key_returns_the_existing_request_in_every_state(env: Env) ->
     assert replay.record.context_evidence == done.context_evidence == ("ev_1", "ev_2")
 
     failed = (await env.accept("r2")).record
-    await env.store.fail(await env.store.start(failed), "model_failed")
+    await env.store.fail(await started(env.store, failed), "model_failed")
     seen = (await env.accept("r2")).record
     assert seen.state == "failed" and seen.failure_code == "model_failed"
 
@@ -296,10 +306,10 @@ async def test_two_processes_racing_on_one_key_create_one_request(postgres_url: 
         assert len({r.record.turn_id for r in results}) == 1
         # 状态迁移同样只有一个进程成功。
         record = results[0].record
-        started = await asyncio.gather(
-            env.store.start(record), second.start(record), return_exceptions=True
+        outcomes = await asyncio.gather(
+            started(env.store, record), started(second, record), return_exceptions=True
         )
-        assert sum(isinstance(s, RequestRecord) for s in started) == 1
+        assert sum(isinstance(s, RequestRecord) for s in outcomes) == 1
 
 
 async def test_expired_requests_are_unreadable(env: Env) -> None:
@@ -318,7 +328,7 @@ async def test_expired_requests_are_unreadable(env: Env) -> None:
 
 async def test_saved_answers_are_bounded_and_validated(env: Env) -> None:
     small = make_store(env.engine, env.clock, env.readiness, max_answer_bytes=50)
-    record = await small.start((await env.accept(store=small)).record)
+    record = await started(small, (await env.accept(store=small)).record)
     with pytest.raises(ResultNotSavedError):
         await small.complete(record, TURN)
     row = await env.row(record)
@@ -420,7 +430,7 @@ async def test_a_single_send_settles_each_outcome(env: Env, outcome: str) -> Non
 
 
 async def test_result_save_failure_closes_the_session(env: Env) -> None:
-    record = await env.store.start((await env.accept()).record)
+    record = await started(env.store, (await env.accept()).record)
     await env.register_session(record.session_id)
     await env.fail_writes("xiaowei_request", "NEW.state = 'completed'", "UPDATE")
     with pytest.raises(ResultNotSavedError):
@@ -432,7 +442,7 @@ async def test_result_save_failure_closes_the_session(env: Env) -> None:
 
 
 async def test_unwritable_failure_state_locks_readiness(env: Env) -> None:
-    record = await env.store.start((await env.accept()).record)
+    record = await started(env.store, (await env.accept()).record)
     await env.register_session(record.session_id)
     await env.fail_writes("xiaowei_request")
     with pytest.raises(ResultNotSavedError):
@@ -451,7 +461,7 @@ async def test_key_transition_failures_lock_readiness(env: Env) -> None:
     record = (await env.accept()).record
     await env.fail_writes("xiaowei_request")
     with pytest.raises(ChannelStoreUnavailableError):
-        await env.store.start(record)
+        await started(env.store, record)
     assert not env.readiness.ok
 
 
@@ -474,7 +484,7 @@ async def test_restart_recovery_interrupts_and_never_sends(postgres_url: URL) ->
     async with environment(postgres_url) as env:
         # 每个请求在各自的会话语境中，便于分别核对会话是否被关闭。
         accepted = (await env.accept("r1", conversation="c1")).record
-        running = await env.store.start((await env.accept("r2", conversation="c2")).record)
+        running = await started(env.store, (await env.accept("r2", conversation="c2")).record)
         sending = await env.completed("r3", conversation="c3")
         assert await env.store.claim_send(sending)
         done = await env.completed("r4", conversation="c4")
@@ -578,7 +588,7 @@ async def test_an_owner_still_visible_after_discard_is_not_reported_released(env
 
 
 async def test_recovery_failure_rolls_back_and_blocks_readiness(env: Env) -> None:
-    running = await env.store.start((await env.accept()).record)
+    running = await started(env.store, (await env.accept()).record)
     await env.register_session(running.session_id)
     await env.fail_writes("xiaowei_request")
     async with hold_instance_lock(env.engine, env.readiness) as lock:
@@ -648,7 +658,7 @@ async def test_takeover_recovery_waits_for_an_accept_still_committing(postgres_u
                 again = await new.accept("r1", "接管时尚未提交")
                 assert not again.created and again.record.state == "interrupted"
                 with pytest.raises(NotReadyError):
-                    await old.store.start(late.record)
+                    await started(old.store, late.record)
 
 
 async def test_accept_after_the_lock_moved_is_refused_without_the_notice(
@@ -800,7 +810,7 @@ async def test_channel_sessions_are_owner_scoped_and_stable(env: Env) -> None:
 
 async def test_new_session_rotates_and_refuses_while_running(env: Env) -> None:
     old = await env.store.current_session("web", "alice", "cookie-1")
-    record = await env.store.start((await env.accept()).record)
+    record = await started(env.store, (await env.accept()).record)
     with pytest.raises(SessionBusyError):
         await env.store.new_session("web", "alice", "cookie-1")
     await env.store.complete(record, TURN)
@@ -976,11 +986,11 @@ async def _prepare_accept(env: Env) -> Callable[[], Awaitable[object]]:
 async def _prepare_start(env: Env) -> Callable[[], Awaitable[object]]:
     record = (await env.accept()).record
     await env.slow_writes("NEW.state = 'running'")
-    return lambda: env.store.start(record)
+    return lambda: started(env.store, record)
 
 
 async def _prepare_complete(env: Env) -> Callable[[], Awaitable[object]]:
-    record = await env.store.start((await env.accept()).record)
+    record = await started(env.store, (await env.accept()).record)
     await env.register_session(record.session_id)
     await env.slow_writes("NEW.state = 'completed'")
     return lambda: env.store.complete(record, TURN)
@@ -988,7 +998,7 @@ async def _prepare_complete(env: Env) -> Callable[[], Awaitable[object]]:
 
 async def _prepare_fail_after_commit(env: Env) -> Callable[[], Awaitable[object]]:
     small = make_store(env.engine, env.clock, env.readiness, max_answer_bytes=50)
-    record = await small.start((await env.accept(store=small)).record)
+    record = await started(small, (await env.accept(store=small)).record)
     await env.register_session(record.session_id)
     await env.slow_writes("NEW.state = 'failed'")
     return lambda: small.complete(record, TURN)  # 回答超限，转入失败写入
@@ -1014,7 +1024,7 @@ async def test_cancelled_critical_writes_lock_readiness(
 
 async def test_cancelled_recovery_locks_readiness(postgres_url: URL) -> None:
     async with environment(postgres_url) as env:
-        running = await env.store.start((await env.accept()).record)
+        running = await started(env.store, (await env.accept()).record)
         await env.register_session(running.session_id)
         await env.slow_writes("NEW.state = 'interrupted'")
         async with hold_instance_lock(env.engine, env.readiness) as lock:
@@ -1045,7 +1055,7 @@ async def test_allowed_failure_codes_round_trip(env: Env, code: CallerFailureCod
     ids=["interrupted", "result-not-saved", "exception-canary", "long", "empty"],
 )
 async def test_internal_and_unknown_failure_codes_are_never_written(env: Env, code: str) -> None:
-    record = await env.store.start((await env.accept()).record)
+    record = await started(env.store, (await env.accept()).record)
     await env.register_session(record.session_id)
     with pytest.raises(ValueError):
         await env.store.fail(record, code)  # type: ignore[arg-type]

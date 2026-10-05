@@ -82,7 +82,7 @@ _RECEIPTS: Mapping[FailureCode, str] = {
     "scope_unverifiable": (
         "暂时无法确认数据当前权限（集群不可达或超时），本轮未交付；会话保留，请稍后重新发送"
     ),
-    "access_denied": "未能确认你当前的群成员身份或使用权限，本轮未执行",
+    "access_denied": "未能确认你当前的使用权限或群成员身份，本轮未执行",
     "result_not_saved": "结果保存失败，请新建会话后重试",
     "interrupted": "上次处理已中断，请重新发送",
 }
@@ -218,14 +218,15 @@ class ResultUnverifiableError(ResultUnavailableError):
 class RequestReceipt:
     """接受结果：``record`` 为持久记录；只有 ``created`` 的请求会被运行。
 
-    ``message`` 与 ``context`` 只在本进程内存中交给 ``process``，不持久化。群请求接受时尚未确认
-    成员资格：``context`` 不授予任何工具，``process`` 开始运行前按 ``group`` 重新解析。
+    ``message`` 只在本进程内存中交给 ``process``，不持久化。receipt 不携带执行 context：``process``
+    开始运行前按当前授权重新解析，并以数据库中的真实请求核对 receipt 的记录与正文，执行身份、
+    用途与工具范围都由可信授权、持久记录与配置预算生成。群请求另带 ``group``，须与记录的群
+    owner 与回复群一致。
     """
 
     record: RequestRecord
     created: bool
     message: str
-    context: RunContext
     group: GroupScope | None = None
 
 
@@ -267,29 +268,6 @@ async def _decide_group(
     ):
         raise AccessDeniedError
     return decision
-
-
-def _bound(receipt: RequestReceipt) -> bool:
-    """receipt 与持久记录一致：本轮身份正是这条记录的 actor、owner、会话、轮次与渠道；群请求的
-    群范围正是记录的群 owner 与回复群，个人请求没有群范围。"""
-    record, group = receipt.record, receipt.group
-    expected = Identity(
-        subject_id=record.subject_id,
-        session_id=record.session_id,
-        turn_id=record.turn_id,
-        channel=record.channel,
-        owner=record.owner,
-    )
-    if receipt.context.identity != expected:
-        return False
-    if record.owner.kind == "personal":
-        return group is None
-    return (
-        group is not None
-        and record.channel == "feishu"
-        and group.owner == record.owner
-        and record.reply_chat_id == group.chat_id
-    )
 
 
 async def _decide_ref(access: AccessPolicy, ref: RequestRef) -> AccessDecision:
@@ -475,8 +453,8 @@ class ChannelService:
     async def accept(self, inbound: InboundRequest) -> RequestReceipt:
         """当前授权通过后持久接受请求；同一请求编号返回已有记录，不再运行。
 
-        群请求只核对可信事件与指定群配置（不查成员目录），按群 owner 接受；本轮工具范围留到
-        ``process`` 确认成员资格后再计算。
+        群请求只核对可信事件与指定群配置（不查成员目录），按群 owner 接受；接受不计算工具范围，
+        ``process`` 开始运行前重新授权后再计算。
         """
         group = inbound.group
         if group is None:
@@ -495,20 +473,29 @@ class ChannelService:
             policy_version=decision.policy_version,
             owner=decision.owner,
         )
-        record = acceptance.record
-        context = self._context(record, decision, grant=group is None)
-        return RequestReceipt(record, acceptance.created, inbound.message, context, group)
+        return RequestReceipt(acceptance.record, acceptance.created, inbound.message, group)
 
-    def _context(
-        self, record: RequestRecord, decision: AccessDecision, *, grant: bool
-    ) -> RunContext:
-        """本轮 context：用途与当前授权决定工具范围；``grant`` 为假时不授予任何工具。"""
-        scope = (
-            self._app.scope_for_turn(
-                record.mode, decision.authorized_tools, self._app.available_tools
-            )
-            if grant
-            else frozenset()
+    async def _authorize_start(
+        self, record: RequestRecord, group: GroupScope | None
+    ) -> AccessDecision:
+        """开始运行前的当前授权；是否为群请求以记录的 owner 为准，群范围须与记录一致。"""
+        if record.owner.kind == "personal":
+            if group is not None:
+                raise AccessDeniedError
+            return await _decide(self._access, record.channel, record.subject_id)
+        if (
+            group is None
+            or record.channel != "feishu"
+            or group.owner != record.owner
+            or record.reply_chat_id != group.chat_id
+        ):
+            raise AccessDeniedError
+        return await _decide_group(self._access, group, record.subject_id, verify_member=True)
+
+    def _context(self, record: RequestRecord, decision: AccessDecision) -> RunContext:
+        """本轮 context：数据库中的请求（身份、会话、轮次、用途）、当前授权与配置预算。"""
+        scope = self._app.scope_for_turn(
+            record.mode, decision.authorized_tools, self._app.available_tools
         )
         return RunContext(
             identity=Identity(
@@ -526,37 +513,33 @@ class ChannelService:
     async def process(self, receipt: RequestReceipt) -> RequestRecord:
         """运行新接受的请求并保存终态，返回保存后的记录；重复请求直接返回原记录。
 
-        是否为群请求以持久记录的 owner 为准：receipt 的身份或群范围与记录不一致时记为
-        failed/access_denied。群请求开始运行前重新确认发起人当前的成员资格与授权，并按此计算
-        本轮工具范围；不能确认时同样记为 failed/access_denied。两种拒绝都发生在 Runner 之前，
-        模型与工具均不调用。同一会话已有请求在运行或等待保存时，
-        本请求记为 failed/busy，模型与工具均不调用。
+        开始运行前按当前授权重新解析（群请求以记录的 owner 判断，并重新确认成员资格），再由
+        ``ChannelStore.start`` 以数据库中的真实请求核对记录、用途、会话、回复目的地与正文摘要并
+        原子启动；执行 context 只由数据库记录、当前授权与配置预算生成，receipt 不能扩大工具或
+        预算。不能确认授权或绑定不一致时记为 failed/access_denied；身份与数据库请求不符时得到
+        ``RequestUnavailableError``，不改动任何请求。这些拒绝都发生在 Runner 之前，模型与工具
+        均不调用。同一会话已有请求在运行或等待保存时，本请求记为 failed/busy，同样不调用。
         """
         record = receipt.record
         if not receipt.created:
             return record
-        if not _bound(receipt):
+        try:
+            decision = await self._authorize_start(record, receipt.group)
+        except AccessDeniedError:
             return await self._store.fail(record, "access_denied")
-        context = receipt.context
-        if record.owner.kind == "group" and receipt.group is not None:  # _bound 已要求群范围
-            try:
-                decision = await _decide_group(
-                    self._access, receipt.group, record.subject_id, verify_member=True
-                )
-            except AccessDeniedError:
-                return await self._store.fail(record, "access_denied")
-            if decision.owner != record.owner:  # _decide_group 已核对；不按另一个群运行
-                return await self._store.fail(record, "access_denied")
-            context = self._context(record, decision, grant=True)
         session_id = record.session_id
         # 检查与登记之间没有 await：同会话的并发请求不能同时通过。
         if session_id in self._running:
             return await self._store.fail(record, "busy")
         self._running.add(session_id)
         try:
-            record = await self._store.start(record)
+            record = await self._store.start(
+                record, message=receipt.message, policy_version=decision.policy_version
+            )
+            if record.state != "running":
+                return record
             try:
-                answer = await self._app.run_turn(context, receipt.message)
+                answer = await self._app.run_turn(self._context(record, decision), receipt.message)
             except TurnError as exc:
                 return await self._store.fail(record, _FAILURE_CODES[exc.reason])
             except asyncio.CancelledError:
