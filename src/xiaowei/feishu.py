@@ -23,17 +23,20 @@
 - SDK 回调到应用循环的转交最多同时有 ``queue_size`` 个事件在途；超出时在持久化前丢弃并记
   ``intake_full``（与落库失败同属已接受的先 ack 契约），不创建协程。
 - 新接受的请求进入有界队列，由固定数量的消费者运行；队列满时记为 failed/busy 并发送一次固定
-  回执。指定群同一时刻只有一条在队列中或运行（队头，另占一个保留槽），其余按持久接受的顺序在
-  有界的群 FIFO 中等待，不占消费者；新进入等待的请求得到一次无数据的排队提示（不查成员目录）。
-  队头的结果保存且一次投递落定后才交接下一条；等待项的排队提示尝试结束前不交给 Runner。等待
-  超过上限或期限的请求记为 failed/busy 并回复固定回执，不运行：定时检查每个配置间隔取出全部
-  到期项并持久化，回执在有界并发内另行发送（等提示尝试结束，仍按当前成员资格复核），平台实际
-  收到的时间另受成员查询与发送期限影响；出队时再核对一次。发送只取得一次投递权：结果明确
-  成功、明确失败或不明分别记录，任何路径都不自动重发。
+  回执。指定群同一时刻只运行一条；尚未开始的群请求（含下一条将运行的队头）都按持久接受的顺序
+  留在有界的群 FIFO 中，不占消费者；新进入等待的请求得到一次无数据的排队提示（不查成员目录）。
+  群空闲且队头的排队提示尝试已结束时，共享队列中才放入一个“群可运行”标记（另占一个保留槽），
+  消费者取到标记时在同一步内取出队头开始运行；上一条的结果保存且一次投递落定后才放下一条的标记。
+  等待超过上限或期限的请求记为 failed/busy 并回复固定回执，不运行：定时检查每个配置间隔取出
+  全部到期、尚未开始的请求，消费者开始前再核对一次；所有到期项按 turn_id 登记，经同一条路径先
+  持久化，再等提示尝试结束，最后在有界并发内经 ``ResultDelivery`` 回执（仍按当前成员资格复核），
+  登记期间同一请求的重投不查成员目录、不发送。检查间隔只约束发现与状态结算；先后只就本地发送
+  尝试而言，平台实际收到的时间与先后另受成员查询、网络、发送期限与不明结果影响。发送只取得一次
+  投递权：结果明确成功、明确失败或不明分别记录，任何路径都不自动重发。
 - 结果保存后到投递状态落定之间被取消或出现意外异常时锁低 readiness，交给重启恢复：已保存但
   未发送的飞书结果在恢复中记为 failed，只能显式重发。正常停止先 ``drain``：停止接收，在同一期限
   内等待已进入 ``receive`` 的调用（含落库前的与排队提示）、队列与群 FIFO、到期项的结算与回执都
-  结束；长连接关闭有绝对期限。
+  结束；长连接关闭有绝对期限。停机取消到达后不再交接下一条、不再创建到期任务。
 """
 
 import asyncio
@@ -394,8 +397,9 @@ class _Job:
     ref: RequestRef
     chat_id: str
     reply_to: str | None
-    # 进入群等待时的排队提示：发送尝试结束（成功、失败、不明或异常）时设置。提示尝试结束前，
-    # 这条请求不交给 Runner，它的繁忙回执也不发送，平台上提示不会晚于本条的最终回复。
+    # 进入群等待时的排队提示：发送尝试结束（成功、失败、不明或异常）时设置。尝试结束前这条请求
+    # 不交给消费者，它的繁忙回执也不发送：本地的发送尝试中提示在前（平台收到的先后另受发送期限与
+    # 不明结果影响）。
     notice: asyncio.Event | None = None
 
 
@@ -422,17 +426,23 @@ class FeishuGateway:
         self._clock = clock
         self._bot = bot_open_id
         self._readiness = service.results.store.readiness
-        # 指定群另占一个保留槽：同群同一时刻最多一条在队列中或运行（队头），其余在群 FIFO 中等待，
-        # 队头交接因此不会因其他会话占满队列而失败。其他请求仍以 queue_size 为上限。
+        # 尚未开始的群请求（含下一条将运行的队头）都留在群 FIFO 中，始终受等待期限管理。群空闲且
+        # 队头的排队提示尝试已结束时，共享队列中放入一个“群可运行”标记（None，另占一个保留槽，
+        # 同一时刻最多一个）；消费者取到标记时才在同一步内取出队头并标记运行中。等待提示不占消费者，
+        # 其他请求仍以 queue_size 为上限。
         reserved = 0 if config.group is None else 1
-        self._queue: asyncio.Queue[_Job] = asyncio.Queue(maxsize=config.queue_size + reserved)
+        self._queue: asyncio.Queue[_Job | None] = asyncio.Queue(
+            maxsize=config.queue_size + reserved
+        )
         self._plain = 0
         self._group_lock = asyncio.Lock()
-        self._group_head = False
+        self._group_running = False
+        self._group_signalled = False
         self._group_waiting: deque[_Job] = deque()
-        # 已从群 FIFO 取出的到期项：结算与回执都在 run 的任务组中进行，回执落定前仍占等待容量。
+        # 已从群 FIFO 取出的到期项按 turn_id 登记：结算、等提示与回执都在 run 的任务组中进行。登记
+        # 期间同一请求的重投不查成员目录、不发送；回执落定前仍占等待容量。
         self._tasks: asyncio.TaskGroup | None = None
-        self._expiring = 0
+        self._expiring: set[str] = set()
         self._expired_settled = asyncio.Event()
         self._expired_settled.set()
         self._receipt_slots = asyncio.Semaphore(_EXPIRY_RECEIPTS)
@@ -501,7 +511,13 @@ class FeishuGateway:
                 if self._config.group is not None:
                     group.create_task(self._sweep(self._config.group.wait_check_seconds))
         finally:
-            if not self._queue.empty() or self._group_waiting or self._expiring:
+            self._tasks = None
+            if (
+                not self._queue.empty()
+                or self._group_waiting
+                or self._group_running
+                or self._expiring
+            ):
                 self._readiness.lock("feishu_queue_abandoned")
 
     async def idle(self) -> None:
@@ -510,8 +526,9 @@ class FeishuGateway:
 
     async def drain(self, timeout: float) -> bool:
         """正常停止的第一步：停止接收新事件，在同一期限内先等已进入 ``receive`` 的调用结束（它们
-        可能仍在落库、新建会话或发送提示），再等队列与群 FIFO 中的请求处理并投递完毕（群队头结束时
-        先交接下一条再计为完成），以及到期项的结算与回执。
+        可能仍在落库、新建会话或发送提示），再等队列与群 FIFO 中的请求处理并投递完毕，以及到期项的
+        结算与回执。``receive`` 都结束后排队提示也都已结束；群空闲且队头可运行时必有标记在队列中，
+        群队头结束时先放下一条的标记再计为完成，``join`` 因此也等待群 FIFO。
 
         超时返回 False 并锁低 readiness：剩余工作随后被取消，由重启恢复处理。
         """
@@ -547,7 +564,11 @@ class FeishuGateway:
         if placement is None:
             # 重投不再运行。只有已结束且投递仍为 pending 的记录进入首次发送竞争（交付时复核当前权限
             # 与成员资格）；排队、运行、发送中或投递已落定的记录直接返回，不产生目录查询或发送。
+            # 到期任务仍在进行时同样返回：回执只由它在提示门与回执上限内发送一次；它结束后仍为
+            # pending（例如成员资格暂时无法确认）的，重投照常进入首次发送竞争。
             record = receipt.record
+            if record.turn_id in self._expiring:
+                return
             if record.state in _FINISHED and record.delivery == "pending":
                 await self._deliver(job)
         elif placement == "waiting" and job.notice is not None:
@@ -557,6 +578,7 @@ class FeishuGateway:
                 await self._notify(message, QUEUED)
             finally:
                 job.notice.set()
+                self._signal()
         elif placement == "full":
             await self._service.reject_busy(receipt)
             await self._deliver(job)
@@ -565,18 +587,52 @@ class FeishuGateway:
         return _Job(receipt, self._ref(message), message.chat_id, self._reply_to(message))
 
     def _place(self, job: _Job) -> tuple[str, _Job]:
-        """新接受的群请求：群空闲时成为队头入队，否则在上限内带着排队提示的完成标记排在群 FIFO
-        末尾，超出上限为 full。回执尚未落定的到期项仍计入上限，使到期回执任务数不超过它。"""
+        """新接受的群请求：群空闲时成为队头（无排队提示），否则在上限内带着排队提示的完成标记排在
+        群 FIFO 末尾，超出上限为 full。
+
+        运行中的一条或尚未开始的队头占一个位置，其余等待项与回执尚未落定的到期项共同受
+        ``max_waiting`` 约束，使到期任务数也不超过它。
+        """
         group = self._group_settings()
-        if not self._group_head:
-            self._group_head = True
-            self._queue.put_nowait(job)
-            return "running", job
-        if len(self._group_waiting) + self._expiring < group.max_waiting:
+        if not self._group_running and not self._group_waiting:
+            self._group_waiting.append(job)
+            self._signal()
+            return "head", job
+        occupied = len(self._group_waiting) + self._group_running + len(self._expiring)
+        if occupied <= group.max_waiting:
             job = replace(job, notice=asyncio.Event())
             self._group_waiting.append(job)
             return "waiting", job
         return "full", job
+
+    def _signal(self) -> None:
+        """群空闲、队头存在且其排队提示尝试已结束时，在共享队列中放入一个标记（最多一个）。"""
+        if self._group_running or self._group_signalled or not self._group_waiting:
+            return
+        notice = self._group_waiting[0].notice
+        if notice is None or notice.is_set():
+            self._group_signalled = True
+            self._queue.put_nowait(None)
+
+    def _start_group(self) -> _Job | None:
+        """消费者取到标记：在同一步内取出可运行的队头并标记运行中，之前已到期的转交结算。
+
+        与定时检查、提示放行之间没有 await：同一请求要么开始运行（此后不再受期限管理），要么被
+        结算为到期，不会两者都发生。标记已无可运行的队头时什么也不做（提示尝试结束时再放标记）。
+        """
+        self._group_signalled = False
+        while self._group_waiting:
+            job = self._group_waiting[0]
+            if self._expired(job):
+                self._group_waiting.popleft()
+                self._retire(job)
+                continue
+            if job.notice is not None and not job.notice.is_set():
+                return None
+            self._group_waiting.popleft()
+            self._group_running = True
+            return job
+        return None
 
     def _expired(self, job: _Job) -> bool:
         waited = self._clock() - job.receipt.record.created_at
@@ -588,27 +644,21 @@ class FeishuGateway:
             raise RuntimeError("未配置指定群")
         return group
 
-    async def _expire(self, job: _Job) -> None:
-        """出队时到期：记为 failed/busy 并按原消息发送固定回执；不运行、不调用模型或业务数据库。"""
-        try:
-            await self._service.reject_busy(job.receipt)
-            await self._deliver(job)
-        except ChannelStoreError as exc:
-            logger.warning("飞书排队请求到期未处理：%s", type(exc).__name__)
-
     def _retire(self, job: _Job) -> None:
-        """已从群 FIFO 取出的到期项交给独立任务结算与回复；调用方不等待任何外部 I/O。"""
+        """已从群 FIFO 取出的到期项（定时检查或消费者开始前发现）按 turn_id 登记，交给独立任务结算
+        与回复；调用方不等待任何外部 I/O。只在 run 的消费者与定时检查中调用，取消到达后不再调用。"""
         if self._tasks is None:  # 群 FIFO 只在 run 中推进
             raise RuntimeError("飞书渠道未运行")
-        self._expiring += 1
+        self._expiring.add(job.receipt.record.turn_id)
         self._expired_settled.clear()
         self._tasks.create_task(self._settle_expired(job))
 
     async def _settle_expired(self, job: _Job) -> None:
-        """先把到期项持久化为 failed/busy（只写本地存储），再在有界并发内发送回执。
+        """到期项唯一的结算与回执路径：先持久化为 failed/busy（只写本地存储），再等这条的排队提示
+        尝试结束，最后在有界并发内发送回执；不运行、不调用模型或业务数据库。
 
-        回执等这条的排队提示尝试结束后才发；发送仍经 ``ResultDelivery``，按当前成员资格、接收权限、
-        Evidence 与回复目的地复核。一条的成员查询或发送阻塞、失败只影响它自己。
+        发送仍经 ``ResultDelivery``，按当前成员资格、接收权限、Evidence 与回复目的地复核，投递权在
+        提示结束后才取得。一条的成员查询或发送阻塞、失败只影响它自己。
         """
         try:
             await self._service.reject_busy(job.receipt)
@@ -626,27 +676,13 @@ class FeishuGateway:
             self._readiness.lock("feishu_expiry_failed")
             raise
         finally:
-            self._expiring -= 1
+            self._expiring.discard(job.receipt.record.turn_id)
             if not self._expiring:
                 self._expired_settled.set()
 
-    def _advance(self) -> None:
-        """群队头结束（结果已保存且一次投递已落定）：交出下一条未到期的等待项，过期项转交结算。
-
-        交出的等待项若排队提示仍在发送，由消费者等提示尝试结束后再运行。
-        """
-        while self._group_waiting:
-            job = self._group_waiting.popleft()
-            if self._expired(job):
-                self._retire(job)
-                continue
-            self._queue.put_nowait(job)
-            return
-        self._group_head = False
-
     async def _sweep(self, interval: float) -> None:
-        """到期检查：每 ``interval`` 取出群 FIFO 中全部已到期的等待项并转交结算，不等队头结束，
-        也不等任何回执发送。"""
+        """到期检查：每 ``interval`` 取出群 FIFO 中全部已到期、尚未开始的请求（含等消费者的队头与
+        提示仍在发送的等待项）并转交结算，不等队头结束，也不等任何回执发送。"""
         while True:
             await asyncio.sleep(interval)
             kept: deque[_Job] = deque()
@@ -656,30 +692,24 @@ class FeishuGateway:
             self._group_waiting = kept
             for job in expired:
                 self._retire(job)
+            self._signal()
 
     async def _consume(self) -> None:
         task = asyncio.current_task()
         while True:
-            if task is not None and task.cancelling():
-                # 取消请求已到达，却被下层转换成了普通失败（本条已按失败处理）：不再取下一项。
-                self._readiness.lock("feishu_consumer_cancelled")
-                raise asyncio.CancelledError
-            job = await self._queue.get()
-            grouped = job.receipt.group is not None
-            if not grouped:
-                self._plain -= 1
+            item = await self._queue.get()
             try:
+                job = item if item is not None else self._start_group()
+                if job is None:
+                    continue  # 标记已无可运行的队头
+                if item is not None:
+                    self._plain -= 1
                 try:
-                    if job.notice is not None:
-                        await job.notice.wait()  # 排队提示尝试结束前不交给 Runner
-                    if grouped and self._expired(job):
-                        await self._expire(job)  # 出队时到期：不运行
-                    else:
-                        try:
-                            await self._service.process(job.receipt)
-                        except ResultNotSavedError:
-                            pass  # 已记为 failed/result_not_saved，下面发送固定回执
-                        await self._deliver(job)
+                    try:
+                        await self._service.process(job.receipt)
+                    except ResultNotSavedError:
+                        pass  # 已记为 failed/result_not_saved，下面发送固定回执
+                    await self._deliver(job)
                 except asyncio.CancelledError:
                     # 本条可能已保存却未落定投递：不再开放新工作，交给重启恢复。
                     self._readiness.lock("feishu_consumer_cancelled")
@@ -689,10 +719,16 @@ class FeishuGateway:
                 except Exception:
                     self._readiness.lock("feishu_consumer_failed")
                     raise
-                if grouped:
-                    # 队头已结束（失败也算）：先交接下一条再计为完成，drain 的 join 因此也等待
-                    # 群 FIFO。
-                    self._advance()
+                if task is not None and task.cancelling():
+                    # 取消已到达，却被下层转换成了普通失败（本条已按失败处理）：不交接下一条、不创建
+                    # 到期任务（任务组正在关闭），也不再取下一项；剩余请求交给重启恢复。
+                    self._readiness.lock("feishu_consumer_cancelled")
+                    raise asyncio.CancelledError
+                if item is None:
+                    # 群队头已结束（失败也算）：先放下一条的标记再计为完成，drain 的 join 因此也
+                    # 等待群 FIFO。
+                    self._group_running = False
+                    self._signal()
             finally:
                 self._queue.task_done()
 

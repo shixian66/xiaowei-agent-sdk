@@ -184,7 +184,9 @@ class FeishuGroupConfig(BaseModel):
     ``tools`` 只能是已登记的 StarRocks 工具，由运行配置核对。
 
     同群同一时刻只运行一轮，其余按接受顺序等待：最多 ``max_waiting`` 条（不计正在运行的一条），
-    每条从接受起最多等待 ``max_wait_seconds``，到期项最迟在 ``wait_check_seconds`` 内结束并回复。
+    每条从接受起最多等待 ``max_wait_seconds``；尚未开始运行的请求每 ``wait_check_seconds`` 检查
+    一次，到期即记为 failed/busy，固定回执另行有界发送，平台何时收到还受成员查询、网络与发送期限
+    影响。
     """
 
     model_config = ConfigDict(frozen=True, extra="forbid")
