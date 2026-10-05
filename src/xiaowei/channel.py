@@ -23,11 +23,12 @@ HTTP、飞书 SDK、数据库客户端与凭据都不进入 RunContext。
 """
 
 import asyncio
+import json
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass
 from typing import Protocol
 
-from pydantic import AwareDatetime, BaseModel, ConfigDict, Field
+from pydantic import AwareDatetime, BaseModel, ConfigDict, Field, model_validator
 
 from xiaowei.app import Application, Mode, TurnError, TurnReason
 from xiaowei.channel_store import (
@@ -48,6 +49,7 @@ from xiaowei.models import (
     Delivery,
     Identity,
     Label,
+    Owner,
     RunContext,
     ToolId,
     TurnAnswer,
@@ -80,6 +82,7 @@ _RECEIPTS: Mapping[FailureCode, str] = {
     "scope_unverifiable": (
         "暂时无法确认数据当前权限（集群不可达或超时），本轮未交付；会话保留，请稍后重新发送"
     ),
+    "access_denied": "未能确认你当前的使用权限或群成员身份，本轮未执行",
     "result_not_saved": "结果保存失败，请新建会话后重试",
     "interrupted": "上次处理已中断，请重新发送",
 }
@@ -92,8 +95,32 @@ class _Trusted(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid")
 
 
+class GroupScope(_Trusted):
+    """指定群：由渠道适配器从已验证的平台事件与可信配置建立，决定共享会话的群 owner。"""
+
+    app_id: Label
+    tenant_key: Label
+    chat_id: Label
+
+    @property
+    def owner(self) -> Owner:
+        return Owner(
+            kind="group",
+            id=json.dumps([self.app_id, self.tenant_key, self.chat_id], separators=(",", ":")),
+        )
+
+
+def _group_conversation(channel: Channel, conversation_id: str, group: GroupScope | None) -> None:
+    if group is not None and (channel != "feishu" or conversation_id != group.chat_id):
+        raise ValueError("群请求只属于飞书渠道，会话语境就是该群")
+
+
 class InboundRequest(_Trusted):
-    """渠道适配器生成的可信信封。身份、会话语境与用途来自适配器；``message`` 仍是不可信内容。"""
+    """渠道适配器生成的可信信封。身份、会话语境与用途来自适配器；``message`` 仍是不可信内容。
+
+    群请求另带 ``group``：``subject_id`` 是本条消息的发送者（actor），会话归属是群；
+    ``channel_request_id`` 是原消息编号，也是回复目的地。
+    """
 
     channel: Channel
     channel_request_id: Label
@@ -102,31 +129,68 @@ class InboundRequest(_Trusted):
     mode: Mode
     message: str = Field(min_length=1)
     received_at: AwareDatetime
+    group: GroupScope | None = None
+
+    @model_validator(mode="after")
+    def _group_conversation(self) -> "InboundRequest":
+        _group_conversation(self.channel, self.conversation_id, self.group)
+        return self
 
 
 class RequestRef(_Trusted):
-    """按可信身份定位一条请求：读取、发送与重发都以此为准，不接受会话或轮次标识。"""
+    """按可信身份定位一条请求：读取、发送与重发都以此为准，不接受会话或轮次标识。
+
+    群请求以群 owner 与原消息编号定位，并且只属于它的发起人。
+    """
 
     channel: Channel
     subject_id: Label
     conversation_id: Label
     request_id: Label
+    group: GroupScope | None = None
+
+    @model_validator(mode="after")
+    def _group_conversation(self) -> "RequestRef":
+        _group_conversation(self.channel, self.conversation_id, self.group)
+        return self
 
 
 class AccessDecision(_Trusted):
-    """当前授权：内部 subject、可用目标集合、允许的工具与渠道数据策略版本。"""
+    """当前授权：发起人（actor）、会话归属、可用目标集合、允许的工具与渠道数据策略版本。
+
+    省略 ``owner`` 时为发起人本人的个人归属。
+    """
 
     subject_id: Label
     target_ids: frozenset[Label] = Field(min_length=1)
     authorized_tools: frozenset[ToolId]
     policy_version: Label
+    owner: Owner
+
+    @model_validator(mode="before")
+    @classmethod
+    def _personal_by_default(cls, data: object) -> object:
+        if isinstance(data, dict) and "owner" not in data and "subject_id" in data:
+            return {**data, "owner": Owner(kind="personal", id=data["subject_id"])}
+        return data
 
 
 class AccessPolicy(Protocol):
-    """启动时装配的唯一授权来源：``resolve`` 供入口计算本轮范围，``authorize`` 同时交给
-    ``EvidenceStore``。``resolve`` 返回 ``None`` 或抛出任何异常都按拒绝处理。"""
+    """启动时装配的唯一授权来源：``resolve`` / ``resolve_group`` 供入口计算本轮范围，``authorize``
+    同时交给 ``EvidenceStore``。解析返回 ``None`` 或抛出任何异常都按拒绝处理。
+
+    ``resolve_group`` 解析指定群内的发起人：``verify_member=False`` 只供接受请求，只核对可信
+    事件与指定群配置，不查成员目录、不赋予查询权；开始运行、最终发送、历史读取与重发都以
+    ``verify_member=True`` 各查一次当前成员资格，找不到或无法确认都拒绝。群授权不使发起人获得
+    私聊或 Web 访问。``authorize`` 复核工具与目标，不再查成员目录：同一轮内沿用本轮已确认的
+    成员资格。
+    """
 
     async def resolve(self, channel: Channel, subject_id: str) -> AccessDecision | None: ...
+
+    async def resolve_group(
+        self, group: GroupScope, subject_id: str, *, verify_member: bool
+    ) -> AccessDecision | None: ...
 
     async def authorize(self, identity: Identity, target_id: str, tool_id: str) -> bool: ...
 
@@ -154,13 +218,16 @@ class ResultUnverifiableError(ResultUnavailableError):
 class RequestReceipt:
     """接受结果：``record`` 为持久记录；只有 ``created`` 的请求会被运行。
 
-    ``message`` 与 ``context`` 只在本进程内存中交给 ``process``，不持久化。
+    ``message`` 只在本进程内存中交给 ``process``，不持久化。receipt 不携带执行 context：``process``
+    开始运行前按当前授权重新解析，并以数据库中的真实请求核对 receipt 的记录与正文，执行身份、
+    用途与工具范围都由可信授权、持久记录与配置预算生成。群请求另带 ``group``，须与记录的群
+    owner 与回复群一致。
     """
 
     record: RequestRecord
     created: bool
     message: str
-    context: RunContext
+    group: GroupScope | None = None
 
 
 @dataclass(frozen=True)
@@ -176,9 +243,37 @@ async def _decide(access: AccessPolicy, channel: Channel, subject_id: str) -> Ac
         decision = await access.resolve(channel, subject_id)
     except Exception:
         raise AccessDeniedError from None
-    if not isinstance(decision, AccessDecision):
+    if (
+        not isinstance(decision, AccessDecision)
+        or decision.subject_id != subject_id
+        or decision.owner.kind != "personal"
+        or decision.owner.id != subject_id
+    ):
         raise AccessDeniedError
     return decision
+
+
+async def _decide_group(
+    access: AccessPolicy, group: GroupScope, subject_id: str, *, verify_member: bool
+) -> AccessDecision:
+    """群内发起人的当前授权：结果必须正是这个群、这个发起人，否则按拒绝处理。"""
+    try:
+        decision = await access.resolve_group(group, subject_id, verify_member=verify_member)
+    except Exception:
+        raise AccessDeniedError from None
+    if (
+        not isinstance(decision, AccessDecision)
+        or decision.owner != group.owner
+        or decision.subject_id != subject_id
+    ):
+        raise AccessDeniedError
+    return decision
+
+
+async def _decide_ref(access: AccessPolicy, ref: RequestRef) -> AccessDecision:
+    if ref.group is None:
+        return await _decide(access, ref.channel, ref.subject_id)
+    return await _decide_group(access, ref.group, ref.subject_id, verify_member=True)
 
 
 def _bound_to(authorize: object, access: AccessPolicy) -> bool:
@@ -281,9 +376,14 @@ class ResultDelivery:
         return outcome
 
     async def _load(self, ref: RequestRef) -> tuple[RequestRecord, AccessDecision]:
-        decision = await _decide(self._access, ref.channel, ref.subject_id)
+        """先按当前授权解析（群请求在这里查一次当前成员资格），再按同一身份读取请求。"""
+        decision = await _decide_ref(self._access, ref)
         record = await self._store.get(
-            ref.channel, decision.subject_id, ref.conversation_id, ref.request_id
+            ref.channel,
+            decision.subject_id,
+            ref.conversation_id,
+            ref.request_id,
+            owner=decision.owner,
         )
         return record, decision
 
@@ -313,6 +413,7 @@ class ResultDelivery:
                 session_id=record.session_id,
                 turn_id=record.turn_id,
                 channel=record.channel,
+                owner=record.owner,
             ),
             target_scope=decision.target_ids,
             tool_scope=frozenset(),
@@ -350,8 +451,18 @@ class ChannelService:
         return self._app.max_concurrent_turns
 
     async def accept(self, inbound: InboundRequest) -> RequestReceipt:
-        """当前授权通过后持久接受请求；同一请求编号返回已有记录，不再运行。"""
-        decision = await _decide(self._access, inbound.channel, inbound.subject_id)
+        """当前授权通过后持久接受请求；同一请求编号返回已有记录，不再运行。
+
+        群请求只核对可信事件与指定群配置（不查成员目录），按群 owner 接受；接受不计算工具范围，
+        ``process`` 开始运行前重新授权后再计算。
+        """
+        group = inbound.group
+        if group is None:
+            decision = await _decide(self._access, inbound.channel, inbound.subject_id)
+        else:
+            decision = await _decide_group(
+                self._access, group, inbound.subject_id, verify_member=False
+            )
         acceptance = await self._store.accept(
             channel=inbound.channel,
             subject_id=decision.subject_id,
@@ -360,41 +471,75 @@ class ChannelService:
             mode=inbound.mode,
             message=inbound.message,
             policy_version=decision.policy_version,
+            owner=decision.owner,
         )
-        record = acceptance.record
+        return RequestReceipt(acceptance.record, acceptance.created, inbound.message, group)
+
+    async def _authorize_start(
+        self, record: RequestRecord, group: GroupScope | None
+    ) -> AccessDecision:
+        """开始运行前的当前授权；是否为群请求以记录的 owner 为准，群范围须与记录一致。"""
+        if record.owner.kind == "personal":
+            if group is not None:
+                raise AccessDeniedError
+            return await _decide(self._access, record.channel, record.subject_id)
+        if (
+            group is None
+            or record.channel != "feishu"
+            or group.owner != record.owner
+            or record.reply_chat_id != group.chat_id
+        ):
+            raise AccessDeniedError
+        return await _decide_group(self._access, group, record.subject_id, verify_member=True)
+
+    def _context(self, record: RequestRecord, decision: AccessDecision) -> RunContext:
+        """本轮 context：数据库中的请求（身份、会话、轮次、用途）、当前授权与配置预算。"""
         scope = self._app.scope_for_turn(
-            inbound.mode, decision.authorized_tools, self._app.available_tools
+            record.mode, decision.authorized_tools, self._app.available_tools
         )
-        context = RunContext(
+        return RunContext(
             identity=Identity(
                 subject_id=decision.subject_id,
                 session_id=record.session_id,
                 turn_id=record.turn_id,
-                channel=inbound.channel,
+                channel=record.channel,
+                owner=record.owner,
             ),
             target_scope=decision.target_ids,
             tool_scope=scope,
             budget=self._results.budget,
         )
-        return RequestReceipt(record, acceptance.created, inbound.message, context)
 
     async def process(self, receipt: RequestReceipt) -> RequestRecord:
         """运行新接受的请求并保存终态，返回保存后的记录；重复请求直接返回原记录。
 
-        同一会话已有请求在运行或等待保存时，本请求记为 failed/busy，模型与工具均不调用。
+        开始运行前按当前授权重新解析（群请求以记录的 owner 判断，并重新确认成员资格），再由
+        ``ChannelStore.start`` 以数据库中的真实请求核对记录、用途、会话、回复目的地与正文摘要并
+        原子启动；执行 context 只由数据库记录、当前授权与配置预算生成，receipt 不能扩大工具或
+        预算。不能确认授权或绑定不一致时记为 failed/access_denied；身份与数据库请求不符时得到
+        ``RequestUnavailableError``，不改动任何请求。这些拒绝都发生在 Runner 之前，模型与工具
+        均不调用。同一会话已有请求在运行或等待保存时，本请求记为 failed/busy，同样不调用。
         """
         record = receipt.record
         if not receipt.created:
             return record
+        try:
+            decision = await self._authorize_start(record, receipt.group)
+        except AccessDeniedError:
+            return await self._store.fail(record, "access_denied")
         session_id = record.session_id
         # 检查与登记之间没有 await：同会话的并发请求不能同时通过。
         if session_id in self._running:
             return await self._store.fail(record, "busy")
         self._running.add(session_id)
         try:
-            record = await self._store.start(record)
+            record = await self._store.start(
+                record, message=receipt.message, policy_version=decision.policy_version
+            )
+            if record.state != "running":
+                return record
             try:
-                answer = await self._app.run_turn(receipt.context, receipt.message)
+                answer = await self._app.run_turn(self._context(record, decision), receipt.message)
             except TurnError as exc:
                 return await self._store.fail(record, _FAILURE_CODES[exc.reason])
             except asyncio.CancelledError:
@@ -414,13 +559,32 @@ class ChannelService:
         return await self._store.fail(receipt.record, "busy")
 
     async def new_session(
-        self, channel: Channel, subject_id: str, conversation_id: str
+        self,
+        channel: Channel,
+        subject_id: str,
+        conversation_id: str,
+        *,
+        group: GroupScope | None = None,
     ) -> ChannelSession:
-        """新建会话：当前会话有请求在运行或等待保存时拒绝；不复制历史或查询许可。"""
+        """新建会话：当前会话有请求在运行或等待保存时拒绝；不复制历史或查询许可。
+
+        群会话轮换整个群：须确认发起人当前是群成员。
+        """
         if not self._store.readiness.ok:
             raise NotReadyError
-        decision = await _decide(self._access, channel, subject_id)
-        current = await self._store.current_session(channel, decision.subject_id, conversation_id)
+        ref = RequestRef(
+            channel=channel,
+            subject_id=subject_id,
+            conversation_id=conversation_id,
+            request_id="new-session",
+            group=group,
+        )
+        decision = await _decide_ref(self._access, ref)
+        current = await self._store.current_session(
+            channel, decision.subject_id, conversation_id, owner=decision.owner
+        )
         if current.session_id in self._running:
             raise SessionBusyError
-        return await self._store.new_session(channel, decision.subject_id, conversation_id)
+        return await self._store.new_session(
+            channel, decision.subject_id, conversation_id, owner=decision.owner
+        )

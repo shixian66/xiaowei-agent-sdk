@@ -53,7 +53,7 @@ from xiaowei.channel_store import (
 from xiaowei.evidence import EvidenceStore
 from xiaowei.governance import GovernedTools
 from xiaowei.model_api import ModelBinding, open_model
-from xiaowei.models import Budget, Channel, Delivery, Identity, TurnAnswer
+from xiaowei.models import Budget, Channel, Delivery, Identity, RunContext, TurnAnswer
 from xiaowei.session import SessionInputPolicy, SessionLimits
 from xiaowei.storage import Readiness, hold_instance_lock
 
@@ -314,16 +314,17 @@ async def test_runs_bind_trusted_identity_and_server_session(env: Env) -> None:
     message = env.scripts.add("东区订单？", tool_call("order_total", region="east"), cite())
     receipt = await env.service.accept(env.inbound(message))
     current = await env.store.current_session("web", "alice", "cookie-1")
-    identity = receipt.context.identity
-    assert (identity.subject_id, identity.session_id, identity.channel) == (
+    accepted = receipt.record
+    assert (accepted.subject_id, accepted.session_id, accepted.channel) == (
         "alice",
         current.session_id,
         "web",
     )
-    assert identity.turn_id == receipt.record.turn_id
-    assert receipt.context.target_scope == frozenset({TARGET})
     record = await env.service.process(receipt)
     assert record.state == "completed" and record.answer is not None
+    # 执行身份取自数据库中的请求：同一会话与轮次，历史写入该会话。
+    assert (record.session_id, record.turn_id) == (current.session_id, accepted.turn_id)
+    assert await history_items(env, current.session_id) > 0
     assert [c.tool_id for c in env.adapter.calls] == [TOTAL_TOOL]
 
 
@@ -689,6 +690,21 @@ async def waiting_on_locks(env: Env, count: int, timeout: float = 5) -> bool:
     return False
 
 
+def turn_context(record: RequestRecord) -> RunContext:
+    """直接驱动 Runner 的用例所用的 context：与 ``process`` 为该查询请求生成的相同。"""
+    return RunContext(
+        identity=Identity(
+            subject_id=record.subject_id,
+            session_id=record.session_id,
+            turn_id=record.turn_id,
+            channel=record.channel,
+        ),
+        target_scope=frozenset({TARGET}),
+        tool_scope=TOOLS,
+        budget=BUDGET,
+    )
+
+
 async def history_items(env: Env, session_id: str) -> int:
     async with env.engine.connect() as conn:
         count = await conn.scalar(
@@ -758,11 +774,11 @@ async def test_recovery_before_the_first_session_registration_closes_it_for_good
     的会话，也不调用模型。"""
     message = env.scripts.add(INTERRUPTED_TEXT, tool_call("order_total", region="east"), cite())
     receipt = await env.service.accept(env.inbound(message))
-    await env.store.start(receipt.record)
+    await env.store.start(receipt.record, message=receipt.message, policy_version="p1")
     _, interrupted = await recover_elsewhere(env)
     assert interrupted == 1
     with pytest.raises(TurnError) as raised:
-        await env.app.run_turn(receipt.context, receipt.message)
+        await env.app.run_turn(turn_context(receipt.record), receipt.message)
     assert raised.value.reason == "session_unavailable"
     assert env.model_calls(message) == 0
     assert await history_items(env, receipt.record.session_id) == 0
@@ -773,18 +789,19 @@ async def test_recovery_racing_the_session_registration_closes_it_for_good(env: 
     """恢复与旧 Runner 的首次登记并发：无论谁先提交，会话最终关闭、历史不提交。"""
     message = env.scripts.add(INTERRUPTED_TEXT, tool_call("order_total", region="east"), cite())
     receipt = await env.service.accept(env.inbound(message))
-    record = await env.store.start(receipt.record)
+    record = await env.store.start(receipt.record, message=receipt.message, policy_version="p1")
     # 暂停点：同一 session_id 的未提交插入挡住 Runner 的首次登记。
     blocker = await env.engine.connect()
     await blocker.begin()
     await blocker.execute(
         text(
-            "INSERT INTO xiaowei_session VALUES (:s, 'alice', 'web', 'x', now(), now(), 0,"
-            " 'active')"
+            "INSERT INTO xiaowei_session (session_id, owner_kind, owner_id, channel,"
+            " profile_fingerprint, created_at, expires_at, turns, state)"
+            " VALUES (:s, 'personal', 'alice', 'web', 'x', now(), now(), 0, 'active')"
         ),
         {"s": record.session_id},
     )
-    run = asyncio.create_task(env.app.run_turn(receipt.context, receipt.message))
+    run = asyncio.create_task(env.app.run_turn(turn_context(receipt.record), receipt.message))
     assert await waiting_on_locks(env, 1)
     recovery = asyncio.create_task(recover_elsewhere(env))
     await waiting_on_locks(env, 2, timeout=2)  # 修复后恢复也在这一行上等待
@@ -806,8 +823,8 @@ async def test_recovery_while_the_session_is_active_blocks_the_commit(env: Env) 
         cite(),
     )
     receipt = await env.service.accept(env.inbound(message))
-    record = await env.store.start(receipt.record)
-    run = asyncio.create_task(env.app.run_turn(receipt.context, receipt.message))
+    record = await env.store.start(receipt.record, message=receipt.message, policy_version="p1")
+    run = asyncio.create_task(env.app.run_turn(turn_context(receipt.record), receipt.message))
     await asyncio.wait_for(entered.wait(), 20)
     assert await env.session_state(record.session_id) == "active"
     await recover_elsewhere(env)
@@ -821,7 +838,7 @@ async def test_recovery_while_the_session_is_active_blocks_the_commit(env: Env) 
 async def test_recovery_while_the_session_is_writing_keeps_it_closed(env: Env) -> None:
     message = env.scripts.add(INTERRUPTED_TEXT, tool_call("order_total", region="east"), cite())
     receipt = await env.service.accept(env.inbound(message))
-    record = await env.store.start(receipt.record)
+    record = await env.store.start(receipt.record, message=receipt.message, policy_version="p1")
     async with env.engine.begin() as conn:
         await conn.execute(
             text(
@@ -836,7 +853,7 @@ async def test_recovery_while_the_session_is_writing_keeps_it_closed(env: Env) -
             )
         )
     try:
-        run = asyncio.create_task(env.app.run_turn(receipt.context, receipt.message))
+        run = asyncio.create_task(env.app.run_turn(turn_context(receipt.record), receipt.message))
         async with asyncio.timeout(20):
             while await env.session_state(record.session_id) != "writing":
                 await asyncio.sleep(0.02)

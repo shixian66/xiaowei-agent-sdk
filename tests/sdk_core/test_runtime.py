@@ -561,7 +561,7 @@ async def test_startup_recovers_interrupted_requests_before_serving(env: Env) ->
             message="上次进程崩溃时的请求",
             policy_version="p1",
         )
-        await store.start(acceptance.record)
+        await store.start(acceptance.record, message="上次进程崩溃时的请求", policy_version="p1")
     async with env.running(env.config()) as served:
         await served.ready()
         state = await env.scalar("SELECT state FROM xiaowei_request")
@@ -987,7 +987,7 @@ async def test_resend_requires_feishu(env: Env) -> None:
 async def test_storage_commands_use_the_configured_database(env: Env) -> None:
     config = env.config()
     await runtime.initialize(config)  # 已初始化时幂等
-    assert await runtime.upgrade(config) == 4
+    assert await runtime.upgrade(config) == 5
     report = await runtime.cleanup(config, batch_size=10)
     assert (report.sessions, report.unregistered) == (0, 0)
 

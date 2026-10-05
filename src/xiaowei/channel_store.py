@@ -46,7 +46,7 @@ from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine
 
 from xiaowei.app import Mode
-from xiaowei.models import AgentAnswer, Channel, TurnAnswer
+from xiaowei.models import AgentAnswer, Channel, Owner, TurnAnswer
 from xiaowei.session import close_interrupted_sessions, close_sessions
 from xiaowei.storage import Backend, InstanceLock, Readiness
 
@@ -57,7 +57,12 @@ SendOutcome = Literal["sent", "failed", "unknown"]
 # 只能写入 ``CallerFailureCode``；两个内部码各有唯一写入路径：``result_not_saved`` 由结果保存
 # 失败路径与关闭 Session 同一事务写入，``interrupted`` 由启动恢复写入。
 CallerFailureCode = Literal[
-    "busy", "model_failed", "evidence_failed", "session_failed", "scope_unverifiable"
+    "busy",
+    "model_failed",
+    "evidence_failed",
+    "session_failed",
+    "scope_unverifiable",
+    "access_denied",
 ]
 InternalFailureCode = Literal["result_not_saved", "interrupted"]
 FailureCode = CallerFailureCode | InternalFailureCode
@@ -72,8 +77,8 @@ _ATTEMPT_BYTES = 24
 _SELECT_CURRENT = text(
     """
     SELECT session_id, generation, created_at, expires_at FROM xiaowei_channel_session
-    WHERE channel = :channel AND subject_id = :subject_id AND conversation_key = :conversation_key
-      AND state = 'current'
+    WHERE channel = :channel AND owner_kind = :owner_kind AND owner_id = :owner_id
+      AND conversation_key = :conversation_key AND state = 'current'
     """
 )
 # 新建会话以 FOR UPDATE、接受请求以 FOR SHARE 读取 current 映射：二者互斥，新请求不会绑定到
@@ -81,27 +86,27 @@ _SELECT_CURRENT = text(
 _SELECT_CURRENT_FOR_UPDATE = text(
     """
     SELECT session_id, generation, created_at, expires_at FROM xiaowei_channel_session
-    WHERE channel = :channel AND subject_id = :subject_id AND conversation_key = :conversation_key
-      AND state = 'current'
+    WHERE channel = :channel AND owner_kind = :owner_kind AND owner_id = :owner_id
+      AND conversation_key = :conversation_key AND state = 'current'
     FOR UPDATE
     """
 )
 _SELECT_CURRENT_FOR_SHARE = text(
     """
     SELECT session_id, generation, created_at, expires_at FROM xiaowei_channel_session
-    WHERE channel = :channel AND subject_id = :subject_id AND conversation_key = :conversation_key
-      AND state = 'current'
+    WHERE channel = :channel AND owner_kind = :owner_kind AND owner_id = :owner_id
+      AND conversation_key = :conversation_key AND state = 'current'
     FOR SHARE
     """
 )
 _INSERT_CURRENT = text(
     """
     INSERT INTO xiaowei_channel_session (
-        channel, subject_id, conversation_key, generation, session_id, state, created_at,
-        expires_at
+        channel, owner_kind, owner_id, conversation_key, generation, session_id, state,
+        created_at, expires_at
     ) VALUES (
-        :channel, :subject_id, :conversation_key, :generation, :session_id, 'current', :now,
-        :expires_at
+        :channel, :owner_kind, :owner_id, :conversation_key, :generation, :session_id, 'current',
+        :now, :expires_at
     )
     ON CONFLICT DO NOTHING
     """
@@ -109,8 +114,8 @@ _INSERT_CURRENT = text(
 _RETIRE_CURRENT = text(
     """
     UPDATE xiaowei_channel_session SET state = 'retired'
-    WHERE channel = :channel AND subject_id = :subject_id AND conversation_key = :conversation_key
-      AND state = 'current' AND session_id = :session_id
+    WHERE channel = :channel AND owner_kind = :owner_kind AND owner_id = :owner_id
+      AND conversation_key = :conversation_key AND state = 'current' AND session_id = :session_id
       AND NOT EXISTS (
           SELECT 1 FROM xiaowei_request r
           WHERE r.session_id = :session_id AND r.state IN ('accepted', 'running')
@@ -120,27 +125,40 @@ _RETIRE_CURRENT = text(
 _INSERT_REQUEST = text(
     """
     INSERT INTO xiaowei_request (
-        channel, request_key, subject_id, conversation_key, session_id, turn_id, mode,
-        message_digest, state, delivery, created_at, updated_at, expires_at
+        channel, request_key, owner_kind, owner_id, subject_id, conversation_key, session_id,
+        turn_id, mode, message_digest, state, delivery, reply_chat_id, reply_message_id,
+        created_at, updated_at, expires_at
     ) VALUES (
-        :channel, :request_key, :subject_id, :conversation_key, :session_id, :turn_id, :mode,
-        :message_digest, 'accepted', 'pending', :now, :now, :expires_at
+        :channel, :request_key, :owner_kind, :owner_id, :subject_id, :conversation_key,
+        :session_id, :turn_id, :mode, :message_digest, 'accepted', 'pending', :reply_chat_id,
+        :reply_message_id, :now, :now, :expires_at
     )
     ON CONFLICT (channel, request_key) DO NOTHING
     """
 )
 _SELECT_REQUEST = text(
     """
-    SELECT channel, request_key, subject_id, conversation_key, session_id, turn_id, mode,
-           message_digest, state, answer, failure_code, delivery, created_at, expires_at
+    SELECT channel, request_key, owner_kind, owner_id, subject_id, conversation_key, session_id,
+           turn_id, mode, message_digest, state, answer, failure_code, delivery, reply_chat_id,
+           reply_message_id, created_at, expires_at
     FROM xiaowei_request WHERE channel = :channel AND request_key = :request_key
     """
 )
-# 所有请求更新都带归属（渠道、请求键、owner、轮次）与前置状态条件。
+_SELECT_REQUEST_FOR_UPDATE = text(
+    """
+    SELECT channel, request_key, owner_kind, owner_id, subject_id, conversation_key, session_id,
+           turn_id, mode, message_digest, state, answer, failure_code, delivery, reply_chat_id,
+           reply_message_id, created_at, expires_at
+    FROM xiaowei_request WHERE channel = :channel AND request_key = :request_key
+    FOR UPDATE
+    """
+)
+# 所有请求更新都带归属（渠道、请求键、owner、发起人、轮次）与前置状态条件。
 _START = text(
     """
     UPDATE xiaowei_request SET state = 'running', updated_at = :now
-    WHERE channel = :channel AND request_key = :request_key AND subject_id = :subject_id
+    WHERE channel = :channel AND request_key = :request_key AND owner_kind = :owner_kind
+      AND owner_id = :owner_id AND subject_id = :subject_id
       AND turn_id = :turn_id
       AND state = 'accepted'
     """
@@ -148,7 +166,8 @@ _START = text(
 _COMPLETE = text(
     """
     UPDATE xiaowei_request SET state = 'completed', answer = :answer, updated_at = :now
-    WHERE channel = :channel AND request_key = :request_key AND subject_id = :subject_id
+    WHERE channel = :channel AND request_key = :request_key AND owner_kind = :owner_kind
+      AND owner_id = :owner_id AND subject_id = :subject_id
       AND turn_id = :turn_id
       AND state = 'running'
     """
@@ -156,7 +175,8 @@ _COMPLETE = text(
 _FAIL = text(
     """
     UPDATE xiaowei_request SET state = 'failed', failure_code = :code, updated_at = :now
-    WHERE channel = :channel AND request_key = :request_key AND subject_id = :subject_id
+    WHERE channel = :channel AND request_key = :request_key AND owner_kind = :owner_kind
+      AND owner_id = :owner_id AND subject_id = :subject_id
       AND turn_id = :turn_id
       AND state IN ('accepted', 'running')
     """
@@ -167,7 +187,8 @@ _CLAIM_FIRST = text(
     """
     UPDATE xiaowei_request SET delivery = 'sending', delivery_attempt = :attempt,
         delivery_owner_pid = :owner_pid, delivery_owner_started = :owner_started, updated_at = :now
-    WHERE channel = :channel AND request_key = :request_key AND subject_id = :subject_id
+    WHERE channel = :channel AND request_key = :request_key AND owner_kind = :owner_kind
+      AND owner_id = :owner_id AND subject_id = :subject_id
       AND turn_id = :turn_id
       AND delivery = 'pending' AND expires_at > :now
       AND state IN ('completed', 'failed', 'interrupted')
@@ -177,7 +198,8 @@ _CLAIM_RESEND = text(
     """
     UPDATE xiaowei_request SET delivery = 'sending', delivery_attempt = :attempt,
         delivery_owner_pid = :owner_pid, delivery_owner_started = :owner_started, updated_at = :now
-    WHERE channel = :channel AND request_key = :request_key AND subject_id = :subject_id
+    WHERE channel = :channel AND request_key = :request_key AND owner_kind = :owner_kind
+      AND owner_id = :owner_id AND subject_id = :subject_id
       AND turn_id = :turn_id
       AND delivery IN ('failed', 'unknown') AND expires_at > :now AND state = 'completed'
     """
@@ -186,7 +208,8 @@ _FINISH_SEND = text(
     """
     UPDATE xiaowei_request SET delivery = :outcome, delivery_attempt = NULL,
         delivery_owner_pid = NULL, delivery_owner_started = NULL, updated_at = :now
-    WHERE channel = :channel AND request_key = :request_key AND subject_id = :subject_id
+    WHERE channel = :channel AND request_key = :request_key AND owner_kind = :owner_kind
+      AND owner_id = :owner_id AND subject_id = :subject_id
       AND turn_id = :turn_id
       AND delivery = 'sending' AND delivery_attempt = :attempt
     """
@@ -194,7 +217,7 @@ _FINISH_SEND = text(
 _RECOVER_RUNNING = text(
     """
     UPDATE xiaowei_request SET state = 'interrupted', failure_code = :code, updated_at = :now
-    WHERE state IN ('accepted', 'running') RETURNING session_id, subject_id, channel
+    WHERE state IN ('accepted', 'running') RETURNING session_id, owner_kind, owner_id, channel
     """
 )
 # 遗留发送：没有存活所有者的 sending 改为 unknown，并作废其尝试标识。serve 的尝试不记所有者（旧
@@ -264,7 +287,7 @@ class ResultNotSavedError(ChannelStoreError):
 @dataclass(frozen=True)
 class ChannelSession:
     channel: Channel
-    subject_id: str
+    owner: Owner
     conversation_key: str
     session_id: str
     generation: int
@@ -274,8 +297,12 @@ class ChannelSession:
 
 @dataclass(frozen=True)
 class RequestRecord:
+    """一条请求：``owner`` 是会话归属，``subject_id`` 是发起这条请求的 actor；群请求另有取自已验证
+    入站事件的回复目的地（群与原消息），个人请求没有。"""
+
     channel: Channel
     request_key: str
+    owner: Owner
     subject_id: str
     conversation_key: str
     session_id: str
@@ -289,6 +316,8 @@ class RequestRecord:
     failure_code: FailureCode | None
     created_at: datetime
     expires_at: datetime
+    reply_chat_id: str | None = None
+    reply_message_id: str | None = None
 
 
 @dataclass(frozen=True)
@@ -317,14 +346,15 @@ class _Owner:
     """可信 owner 与会话语境摘要；``params`` 用作 SQL 绑定参数。"""
 
     channel: Channel
-    subject_id: str
+    owner: Owner
     conversation_key: str
 
     @property
     def params(self) -> dict[str, str]:
         return {
             "channel": self.channel,
-            "subject_id": self.subject_id,
+            "owner_kind": self.owner.kind,
+            "owner_id": self.owner.id,
             "conversation_key": self.conversation_key,
         }
 
@@ -370,35 +400,36 @@ class ChannelStore:
     # ---- 会话映射 --------------------------------------------------------------------
 
     async def current_session(
-        self, channel: Channel, subject_id: str, conversation: str
+        self, channel: Channel, subject_id: str, conversation: str, *, owner: Owner | None = None
     ) -> ChannelSession:
         """取得会话语境的 current 会话；不存在时创建第一代。客户端不能指定会话标识。
 
+        ``owner`` 省略时为 ``subject_id`` 的个人归属；群会话按群 owner 共享，与发起人无关。
         readiness 锁低后仍可读取已有映射，但不再创建。
         """
-        owner = self._owner(channel, subject_id, conversation)
+        owner_ = self._owner(channel, subject_id, conversation, owner)
         try:
             async with self._engine.begin() as conn:
-                return await self._current(conn, owner)
+                return await self._current(conn, owner_)
         except (OSError, SQLAlchemyError):
             raise ChannelStoreUnavailableError from None
 
     async def new_session(
-        self, channel: Channel, subject_id: str, conversation: str
+        self, channel: Channel, subject_id: str, conversation: str, *, owner: Owner | None = None
     ) -> ChannelSession:
         """退役 current 会话并创建下一代；当前会话有未结束请求时拒绝。不复制历史或许可。"""
         self._require_ready()
-        owner = self._owner(channel, subject_id, conversation)
+        owner_ = self._owner(channel, subject_id, conversation, owner)
         try:
             async with self._engine.begin() as conn:
                 await self._admit(conn)
-                current = await self._current(conn, owner, statement=_SELECT_CURRENT_FOR_UPDATE)
+                current = await self._current(conn, owner_, statement=_SELECT_CURRENT_FOR_UPDATE)
                 retired = await conn.execute(
-                    _RETIRE_CURRENT, {**owner.params, "session_id": current.session_id}
+                    _RETIRE_CURRENT, {**owner_.params, "session_id": current.session_id}
                 )
                 if retired.rowcount != 1:
                     raise SessionBusyError
-                created = await self._insert_current(conn, owner, current.generation + 1)
+                created = await self._insert_current(conn, owner_, current.generation + 1)
                 if created is None:
                     raise SessionBusyError
                 return created
@@ -444,7 +475,7 @@ class ChannelStore:
     def _session(owner: _Owner, row: Mapping[str, Any]) -> ChannelSession:
         return ChannelSession(
             channel=owner.channel,
-            subject_id=owner.subject_id,
+            owner=owner.owner,
             conversation_key=owner.conversation_key,
             session_id=row["session_id"],
             generation=row["generation"],
@@ -464,17 +495,29 @@ class ChannelStore:
         mode: Mode,
         message: str,
         policy_version: str,
+        owner: Owner | None = None,
     ) -> Acceptance:
         """持久接受请求，或返回同一请求已有的记录；同编号不同内容时拒绝冲突。
 
         新请求绑定当前会话；与新建会话互斥（共享锁读取 current 映射）。新请求与重复请求都先经
         ``_admit``：失去实例锁的进程不写入，也不返回记录去重投。
+
+        群请求（``owner`` 为群）的请求键只绑定群 owner、会话语境与原消息编号，不含发起人：同一
+        消息换一个发起人、换正文或用途都是冲突，不能借不同发起人的键空间运行两次。回复目的地
+        取自同一入站事件：会话语境（群）与请求编号（原消息），之后的发送只能发往这里。
         """
         self._require_ready()
-        owner = self._owner(channel, subject_id, conversation)
-        key = {"channel": channel, "request_key": self._request_key(owner, request_id)}
-        digest = self._digest(
-            "message", channel, subject_id, owner.conversation_key, mode, policy_version, message
+        owner_ = self._owner(channel, subject_id, conversation, owner)
+        group = owner_.owner.kind == "group"
+        key = {"channel": channel, "request_key": self._request_key(owner_, request_id)}
+        digest = self._message_digest(
+            channel,
+            owner_.owner,
+            subject_id,
+            owner_.conversation_key,
+            mode,
+            policy_version,
+            message,
         )
         now = self._clock()
         # 提交结果不明时请求可能已存在：锁低 readiness，交给重启恢复，不让它永久“处理中”。
@@ -484,12 +527,15 @@ class ChannelStore:
                 existing = await self._select(conn, key)
                 created = False
                 if existing is None:
-                    session = await self._current(conn, owner, statement=_SELECT_CURRENT_FOR_SHARE)
+                    session = await self._current(conn, owner_, statement=_SELECT_CURRENT_FOR_SHARE)
                     inserted = await conn.execute(
                         _INSERT_REQUEST,
                         {
-                            **owner.params,
+                            **owner_.params,
                             **key,
+                            "subject_id": subject_id,
+                            "reply_chat_id": conversation if group else None,
+                            "reply_message_id": request_id if group else None,
                             "session_id": session.session_id,
                             "turn_id": secrets.token_urlsafe(_SESSION_ID_BYTES),
                             "mode": mode,
@@ -503,8 +549,9 @@ class ChannelStore:
         if existing is None:
             raise ChannelStoreUnavailableError
         if (
-            existing["subject_id"] != subject_id
-            or existing["conversation_key"] != owner.conversation_key
+            not _owned_by(existing, owner_.owner)
+            or existing["subject_id"] != subject_id
+            or existing["conversation_key"] != owner_.conversation_key
             or existing["mode"] != mode
             or not hmac.compare_digest(existing["message_digest"], digest)
         ):
@@ -514,34 +561,94 @@ class ChannelStore:
         return Acceptance(record=self._record(existing), created=created)
 
     async def get(
-        self, channel: Channel, subject_id: str, conversation: str, request_id: str
+        self,
+        channel: Channel,
+        subject_id: str,
+        conversation: str,
+        request_id: str,
+        *,
+        owner: Owner | None = None,
     ) -> RequestRecord:
-        """按当前身份读取请求；不存在、不属于该身份、已过期或内容不符合契约时统一拒绝。"""
-        owner = self._owner(channel, subject_id, conversation)
-        key = {"channel": channel, "request_key": self._request_key(owner, request_id)}
+        """按当前身份读取请求；不存在、不属于该身份、已过期或内容不符合契约时统一拒绝。
+
+        群请求同样只交给它的发起人：发送状态绑定原请求，同群其他成员不能借用别人的请求。
+        """
+        owner_ = self._owner(channel, subject_id, conversation, owner)
+        key = {"channel": channel, "request_key": self._request_key(owner_, request_id)}
         try:
             async with self._engine.connect() as conn:
                 row = await self._select(conn, key)
         except (OSError, SQLAlchemyError):
             raise ChannelStoreUnavailableError from None
-        if row is None or row["subject_id"] != subject_id or row["expires_at"] <= self._clock():
+        if (
+            row is None
+            or not _owned_by(row, owner_.owner)
+            or row["subject_id"] != subject_id
+            or row["expires_at"] <= self._clock()
+        ):
             raise RequestUnavailableError
         return self._record(row)
 
-    async def start(self, record: RequestRecord) -> RequestRecord:
-        """``accepted → running``；只有一个进程成功，其余得到 ``ChannelStoreError``。
+    async def start(
+        self, record: RequestRecord, *, message: str, policy_version: str
+    ) -> RequestRecord:
+        """按数据库中的真实请求 ``accepted → running``，返回数据库中的记录；只有一个进程成功。
+
+        调用方给出的记录、正文与当前数据策略版本只是待核对的声明：在同一事务内锁定请求行，核对
+        归属、发起人、会话语境、会话、轮次、用途与回复目的地都与该行一致，并按该行重算
+        ``message_digest`` 与正文比对。都一致才启动，执行只用返回的记录；内容不一致（换正文、
+        用途、会话或回复目的地，或数据策略已变化）时同一事务把该请求记为 ``failed/access_denied``
+        并返回失败记录，不运行。请求不存在、不属于调用方给出的身份（渠道、请求键、owner、发起人、
+        轮次）或已不在 ``accepted`` 时得到 ``RequestUnavailableError``，不改动任何请求。
 
         与接收一样经 ``_admit``：失去实例锁的进程不能再启动已接受的请求。
         """
         self._require_ready()
-        params = {**_keys(record), "now": self._clock()}
+        key = {"channel": record.channel, "request_key": record.request_key}
         with self._critical("request_start_failed", "请求状态无法保存"):
             async with self._engine.begin() as conn:
                 await self._admit(conn)
-                started = (await conn.execute(_START, params)).rowcount
-        if started != 1:
-            raise RequestUnavailableError
-        return replace(record, state="running")
+                found = (await conn.execute(_SELECT_REQUEST_FOR_UPDATE, key)).mappings()
+                one = found.one_or_none()
+                row: Mapping[str, Any] | None = None if one is None else dict(one)
+                if row is None or row["state"] != "accepted" or _keys_of(row) != _keys(record):
+                    raise RequestUnavailableError
+                stored = self._record(row)
+                params = {**_keys(stored), "now": self._clock()}
+                if self._binds(row, record, message, policy_version):
+                    if (await conn.execute(_START, params)).rowcount != 1:
+                        raise RequestUnavailableError
+                    return replace(stored, state="running")
+                await conn.execute(_FAIL, {**params, "code": "access_denied"})
+                return replace(stored, state="failed", failure_code="access_denied")
+
+    def _binds(
+        self, row: Mapping[str, Any], record: RequestRecord, message: str, policy_version: str
+    ) -> bool:
+        claimed = (
+            record.conversation_key,
+            record.session_id,
+            record.mode,
+            record.reply_chat_id,
+            record.reply_message_id,
+        )
+        stored = (
+            row["conversation_key"],
+            row["session_id"],
+            row["mode"],
+            row["reply_chat_id"],
+            row["reply_message_id"],
+        )
+        digest = self._message_digest(
+            row["channel"],
+            Owner(kind=row["owner_kind"], id=row["owner_id"]),
+            row["subject_id"],
+            row["conversation_key"],
+            row["mode"],
+            policy_version,
+            message,
+        )
+        return claimed == stored and hmac.compare_digest(row["message_digest"], digest)
 
     async def complete(self, record: RequestRecord, turn: TurnAnswer) -> RequestRecord:
         """``running → completed`` 并保存受限回答；失败时标为 failed 并关闭会话，不交付。
@@ -663,7 +770,10 @@ class ChannelStore:
                 ).all()
                 await close_interrupted_sessions(
                     conn,
-                    [(r.session_id, r.subject_id, r.channel) for r in rows],
+                    [
+                        (r.session_id, Owner(kind=r.owner_kind, id=r.owner_id), r.channel)
+                        for r in rows
+                    ],
                     now=now,
                     expires_at=now + self._session_retention,
                 )
@@ -728,6 +838,7 @@ class ChannelStore:
         return RequestRecord(
             channel=row["channel"],
             request_key=row["request_key"],
+            owner=Owner(kind=row["owner_kind"], id=row["owner_id"]),
             subject_id=row["subject_id"],
             conversation_key=row["conversation_key"],
             session_id=row["session_id"],
@@ -740,22 +851,70 @@ class ChannelStore:
             failure_code=row["failure_code"],
             created_at=row["created_at"],
             expires_at=row["expires_at"],
+            reply_chat_id=row["reply_chat_id"],
+            reply_message_id=row["reply_message_id"],
         )
 
-    def _owner(self, channel: Channel, subject_id: str, conversation: str) -> _Owner:
+    def _owner(
+        self, channel: Channel, subject_id: str, conversation: str, owner: Owner | None
+    ) -> _Owner:
+        """会话归属与会话语境摘要。个人归属的摘要与 v4 相同（不含 owner 种类），群归属另带
+        种类与群 owner，二者的编码长度不同，不会相互碰撞。"""
         if not subject_id or not conversation:
             raise ValueError("可信身份与会话语境不能为空")
-        return _Owner(
-            channel=channel,
-            subject_id=subject_id,
-            conversation_key=self._digest("conversation", channel, subject_id, conversation),
-        )
+        if owner is None:
+            owner = Owner(kind="personal", id=subject_id)
+        if owner.kind == "personal":
+            if owner.id != subject_id:
+                raise ValueError("个人会话只属于发起人本人")
+            key = self._digest("conversation", channel, subject_id, conversation)
+        else:
+            if channel != "feishu":
+                raise ValueError("群会话只属于飞书渠道")
+            key = self._digest("conversation", channel, "group", owner.id, conversation)
+        return _Owner(channel=channel, owner=owner, conversation_key=key)
 
     def _request_key(self, owner: _Owner, request_id: str) -> str:
         if not request_id:
             raise ValueError("请求编号不能为空")
+        if owner.owner.kind == "group":
+            return self._digest(
+                "request",
+                owner.channel,
+                "group",
+                owner.owner.id,
+                owner.conversation_key,
+                request_id,
+            )
         return self._digest(
-            "request", owner.channel, owner.subject_id, owner.conversation_key, request_id
+            "request", owner.channel, owner.owner.id, owner.conversation_key, request_id
+        )
+
+    def _message_digest(
+        self,
+        channel: str,
+        owner: Owner,
+        subject_id: str,
+        conversation_key: str,
+        mode: str,
+        policy_version: str,
+        message: str,
+    ) -> str:
+        """请求内容摘要：个人请求保持 v4 的原值；群请求另带群 owner，并含发起人。"""
+        if owner.kind == "group":
+            return self._digest(
+                "message",
+                channel,
+                "group",
+                owner.id,
+                subject_id,
+                conversation_key,
+                mode,
+                policy_version,
+                message,
+            )
+        return self._digest(
+            "message", channel, subject_id, conversation_key, mode, policy_version, message
         )
 
     def _digest(self, purpose: str, *parts: str) -> str:
@@ -781,6 +940,23 @@ def _keys(record: RequestRecord) -> dict[str, object]:
     return {
         "channel": record.channel,
         "request_key": record.request_key,
+        "owner_kind": record.owner.kind,
+        "owner_id": record.owner.id,
         "subject_id": record.subject_id,
         "turn_id": record.turn_id,
     }
+
+
+def _keys_of(row: Mapping[str, Any]) -> dict[str, object]:
+    return {
+        "channel": row["channel"],
+        "request_key": row["request_key"],
+        "owner_kind": row["owner_kind"],
+        "owner_id": row["owner_id"],
+        "subject_id": row["subject_id"],
+        "turn_id": row["turn_id"],
+    }
+
+
+def _owned_by(row: Mapping[str, Any], owner: Owner) -> bool:
+    return bool(row["owner_kind"] == owner.kind and row["owner_id"] == owner.id)

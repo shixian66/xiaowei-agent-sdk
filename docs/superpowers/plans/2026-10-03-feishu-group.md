@@ -10,7 +10,7 @@
 
 **Spec:** 产品唯一权威为 [ARCHITECTURE §7 G1–G4](../../../ARCHITECTURE.md#group-scope)，自然语言用途引用 [§5](../../../ARCHITECTURE.md#turn-purpose)，当前数据权限引用 §9。数据库能力、受限只读执行、单 Agent 自然语言工具选择和数据权限验证由 [P2.5 计划](2026-10-03-p25-open-read-multi-cluster.md) 交付，此处只定义群边界。
 
-**Baseline / 状态：** 文档候选 v2（2026-10-03，按用户对 aed344b 的决定修订）；P2.5 Task 8 经审查的阶段交付 SHA 为 PR #41 的合入提交 `a938a0f1b481f1cb23507dc170380c73028b8e54`，F0 起点为其后只改文档的 `origin/main` `e153cd9129fa1a39913cc6641dae68cd90637f19`（PR #42）。F0 已用锁定 SDK 与本机合成协议端点完成（证据见 F0 小节），独立复审针对 `f6875f9ccc44dabaa84607eb33644c61a0162d3e` 通过、无阻断，可进入 F1；F1–F4 未实施，当前无真实群验证证据。
+**Baseline / 状态：** 文档候选 v2（2026-10-03，按用户对 aed344b 的决定修订）；P2.5 Task 8 经审查的阶段交付 SHA 为 PR #41 的合入提交 `a938a0f1b481f1cb23507dc170380c73028b8e54`，F0 起点为其后只改文档的 `origin/main` `e153cd9129fa1a39913cc6641dae68cd90637f19`（PR #42）。F0 已用锁定 SDK 与本机合成协议端点完成（证据见 F0 小节），独立复审针对 `f6875f9ccc44dabaa84607eb33644c61a0162d3e` 通过、无阻断。F1 已离线实施（`e844554`，见 F1 实施说明）；首轮独立审查针对 `16a1b08` 提出 3 组阻断，第二轮针对 `8698d37` 提出执行输入未绑定数据库中的真实请求，均已修复，待复审，通过后进入 F2；F2–F4 未实施，当前无真实群验证证据。
 
 ## Global Constraints
 
@@ -76,7 +76,7 @@ SDK 长连接 raw 事件（沿用先 ack 的已接受限制）
 - 可选配置只允许一组 app/tenant/chat 与明确的共享查询策略，空配置仍是当前单聊。bot 的 open_id 来源须与 app 匹配、由可信配置或受测的 SDK 身份接口取得；不得用显示名称识别本机器人。
 - 入口逐项检查消息类型、sender_type=user、app/tenant/chat、平台 mentions 中本 bot ID、时间与正文大小。只删除与平台 mention 对应的 token，再处理命令/自然语言。纯文字 `@小维`、@其他 bot、缺失/伪造 mention、其他租户/群、机器人和超龄事件均不进入 Agent、模型或数据库；不向非指定群回复。
 - 保留 tenant_id（映射平台 tenant_key）、chat_id、sender_id（open_id）、message_id，并连同 app 与入口种类形成可信身份。群用户不需要出现在单聊 users 中，群授权不得使该用户自动获得单聊/Web 访问。
-- AccessPolicy 接受可信群上下文。采用用户认可的最小方案：**成员目录只在出队开始执行和最终发送前各查一次**，公开 SDK force=True、固定页数与期限，未找到/失败均不放行；同一轮内部工具复核沿用本轮已确认的 actor 成员证据，仍独立检查目标/工具/数据库权限。接受排队仅校验可信平台事件与指定群配置，不赋予查询权；无数据回执不查目录。独立历史读取/显式重发各自在该次访问前查一次，不沿用上轮名单。
+- AccessPolicy 接受可信群上下文。采用用户认可的最小方案：**成员目录只在出队开始执行和最终发送前各查一次**，公开 SDK force=True、固定页数与期限，未找到/失败均不放行；同一轮内部工具复核沿用本轮已确认的 actor 成员证据，仍独立检查目标/工具/数据库权限。接受排队仅校验可信平台事件与指定群配置，不赋予查询权。经 ResultDelivery 的每次读取与发送（含 `access_denied` 等无数据失败回执）前都查一次成员，持续无法确认时不发送、不取得投递权，请求保持待投递；不经 ResultDelivery、不含任何数据的排队状态提示（F3）不查目录。独立历史读取/显式重发各自在该次访问前查一次，不沿用上轮名单。
 - 成员目录只给治理使用，不把全群名单交给模型/Session；不配置可替换成员真实性的 resolver hook。页数/期限在配置中有有限上界，F0/P3 确认指定群规模能覆盖，超出上界提示能力不可用，不悄悄把新成员当白名单拒绝。
 - 两次成员检查之间有明确窗口：执行中离群不保证立即终止已获准的本轮只读调用，最终发送前必须重新确认；不能把每次工具复核说成每次都查过成员 API。已发消息不自动撤回，配置移除群则拒绝新接受及后续执行。
 
@@ -113,7 +113,7 @@ SDK 长连接 raw 事件（沿用先 ack 的已接受限制）
 | 场景 | 对用户的行为 | 需要证明的边界 |
 | --- | --- | --- |
 | 无 @ / 非指定群 / bot / 伪造身份 | 不回复 | 无 Agent、模型、业务 DB；不触发无关成员查询 |
-| 当前成员或共享策略无法确认 | 指定群内仅安全拒绝提示 | 无旧事实/名单泄露；无 Agent、业务 DB |
+| 当前成员或共享策略无法确认 | 开始前不能确认记 `access_denied`；固定拒绝回执发送前同样查成员，确认后才发送，持续不能确认则不回复 | 无旧事实/名单泄露；无 Agent、业务 DB |
 | 同群已有一轮 | 有界排队，必要时固定提示 | 新任务未提前读取历史/调用模型；其他会话有槽可运行 |
 | 队列满/等待到期 | 明确未运行，可稍后重新发问 | 记录失败；模型与 DB 调用为 0；重投不刷新期限 |
 | 排队中成员离群或群配置撤销 | 未获准执行 | 出队重验失败，无历史回放/模型/DB |
@@ -150,13 +150,25 @@ SDK 长连接 raw 事件（沿用先 ack 的已接受限制）
 
 ### F1：可信群身份、共享归属与存储闭环
 
-**依赖：** F0。**结果：** 同群 A/B 共享会话和获准事实，所有入口仍按当前 actor 与 owner 复核。**文件：** models/channel/channel_store/session/evidence/runtime、下一应用迁移；对应现有测试及 `tests/p25/test_group_identity.py`。
+**依赖：** F0。**结果：** 同群 A/B 共享会话和获准事实，所有入口仍按当前 actor 与 owner 复核。**文件：** models/channel/channel_store/session/evidence/runtime、下一应用迁移；对应现有测试及 `tests/sdk_core/test_group_identity.py`（需要 `tests/sdk_core` 的隔离 PostgreSQL fixture，因此不放在 `tests/p25`）。
 
-- [ ] 先在测试 PostgreSQL 保存 A 的请求/查询 Evidence，让 B 在同群回放/验证/读取；验证新查询保留 B 为 actor、旧事实保留 A 为采集者。无变化成功对照必须经过真 PolicySession/SQLAlchemySession。
-- [ ] 同一 actor 的私聊、Web、其他群/租户、不同 generation/ModelBinding 全部不能读群事实。伪造 owner、receipt、request_ref、同 ID 改 sender/chat/正文、旧个人记录混入群都拒绝；拒绝时模型/业务 SQL 为 0。
-- [ ] 检查 ownership/fingerprint 的全部调用者，包括 RequestStore 条件更新、Evidence record/read、最终提交、读取、resend、恢复/清理。添加最少的应用迁移与回复目的地字段，SDK 表不改。
-- [ ] 当前成员成功/失败/未知，排队后撤权与最终交付前撤权均覆盖；新配置不能把群权限赋予私聊。个人授权/历史/重发成功对照保留。
-- [ ] 运行 §5 G1；隔离变异去掉群隔离、沿用原采集者授权、抹去当前 actor、替换保存目的地分别应失败。提交 `feat: separate group conversation ownership from turn actors`，独立审查。
+- [x] 先在测试 PostgreSQL 保存 A 的请求/查询 Evidence，让 B 在同群回放/验证/读取；验证新查询保留 B 为 actor、旧事实保留 A 为采集者。无变化成功对照必须经过真 PolicySession/SQLAlchemySession。
+- [x] 同一 actor 的私聊、Web、其他群/租户、不同 generation/ModelBinding 全部不能读群事实。伪造 owner、receipt、request_ref、同 ID 改 sender/chat/正文、旧个人记录混入群都拒绝；拒绝时模型/业务 SQL 为 0。
+- [x] 检查 ownership/fingerprint 的全部调用者，包括 RequestStore 条件更新、Evidence record/read、最终提交、读取、resend、恢复/清理。添加最少的应用迁移与回复目的地字段，SDK 表不改。
+- [x] 当前成员成功/失败/未知，排队后撤权与最终交付前撤权均覆盖；新配置不能把群权限赋予私聊。个人授权/历史/重发成功对照保留。
+- [x] 运行 §5 G1；隔离变异去掉群隔离、沿用原采集者授权、抹去当前 actor、替换保存目的地分别应失败。提交 `feat: separate group conversation ownership from turn actors`（`e844554`）。
+- [ ] 针对精确 SHA 独立审查；通过后进入 F2。首轮针对 `16a1b08` 提出 3 组阻断（receipt 与授权结果未完整绑定原身份、失败回执的成员语义冲突、状态文档未同步），已修复；第二轮针对 `8698d37` 指出执行输入（正文、用途、会话、Context）未绑定数据库中的真实请求，已修复，待复审。
+
+**F1 实施说明（2026-10-05，起点 `9495db6`，即 PR #43 的 F0 复审记录）。**
+
+- **owner 与 actor。** `Owner(kind=personal|group, id)` 是会话、历史与证据的归属；`Identity.subject_id` 仍是本轮发起人，授权按它复核。个人身份省略 owner 时补为本人，个人路径的类型与行为不变。群 owner 的 `id` 是 `[app_id, tenant_key, chat_id]` 的 JSON 编码，换应用、租户或群即是另一个 owner。
+- **存储 v5（`migrations/005_group_ownership.sql`）。** 会话与渠道映射的 `subject_id` 改名为 `owner_id` 并加 `owner_kind`；请求与证据加 `owner_kind/owner_id`，`subject_id` 保留为发起人/采集者；旧行全部回填为个人归属。`owner_kind` 不设默认值，写入必须显式给出。请求加 `reply_chat_id/reply_message_id`，约束保证群请求必有、个人请求必无；新增失败码 `access_denied`。SDK 表不改。
+- **键与摘要。** 个人的会话语境、请求键与正文摘要保持 v4 的编码（升级后同一请求仍是重复请求，有测试证明）；群的编码另带 `"group"` 与群 owner，长度不同，不会与个人碰撞。群请求键只含群 owner、会话语境与原消息编号，**不含发起人**；正文摘要另含发起人，因此同一消息换人、换正文都是冲突。所有条件更新同时绑定 owner、发起人与轮次。
+- **授权时机。** `AccessPolicy` 新增 `resolve_group(group, actor, verify_member=…)`：接受时 `verify_member=False`，只核对可信事件与指定群配置，不计算工具范围（`RequestReceipt` 不再携带执行 context）；`process` 开始运行前、`ResultDelivery` 每次读取与发送前各以 `verify_member=True` 查一次当前成员资格。**执行绑定数据库中的真实请求：** `process` 开始前按当前授权重新解析（个人与群都是；是否为群请求以记录的 owner 判断，群范围须与记录的群 owner、回复群一致，个人请求不得带群范围）；随后 `ChannelStore.start(record, message=, policy_version=)` 在同一事务内锁定请求行，核对身份键（渠道、请求键、owner、发起人、轮次）、会话语境、会话、用途、回复目的地，并按该行重算 `message_digest` 与正文比对，一致才 `accepted → running` 并返回数据库中的记录。内容不符（含接受后数据策略版本已变化）在同一事务记 `failed/access_denied`；身份键不符得到 `RequestUnavailableError`，不改动任何请求。执行 context 只由数据库记录、当前授权与配置预算生成，receipt 不能扩大工具或预算。个人请求因此也在开始时按当前授权重算工具范围（此前沿用接受时的 context）。个人授权结果的 subject 必须等于请求的 subject。开始时不能确认记为 `failed/access_denied`（模型与工具均为 0；固定回执同样在发送前查成员，确认后才发送）；交付前不能确认时不发送、不取得投递权，与个人路径交付前撤权的既有残留一致（请求保持 `completed+pending`，重启恢复记为 failed，显式重发重新授权）。`authorize` 不查成员目录：同一轮内的工具与证据复核沿用本轮已确认的成员资格，只核对群 owner、群工具与目标。读取共享事实按当前读者授权，不按采集者。
+- **产品 `StaticAccess`。** 可选 `GroupAccess(scope, tools, members)`：全员同权、可用全部已配置目标；`members(chat_id, open_id)` 只有返回 `True` 才算成员，异常、`None`、未找到都拒绝。群授权不进入个人 `resolve`/`authorize`，个人授权也不进入群。
+- **留给 F2。** 配置项（指定群、群工具、成员查询页数与期限）、用 SDK `get_chat_members(force=True)` 实现 `members`、群入口解析与原消息发送、群请求的显式重发（当前个人 `requests resend` 定位不到群请求，失败方向安全）。F1 的成员目录只是测试替身。
+
+**F1 证据（离线；隔离 PostgreSQL、真 Runner + 脚本模型、真 PolicySession/SQLAlchemySession、产品 `StaticAccess`）。** `tests/sdk_core/test_group_identity.py` 38 项（第二轮复审修复后）：A 查询 → B 同群追问并新查（同一 Session，B 的回答引用 A 的事实；证据分别记 A、B 为采集者，Session 与映射只记群 owner）；读取按当前读者授权（撤下群工具后 B 读不到）；A 离群后 B 仍可追问、B 离群后被拒（按当前 actor，不按采集者）；同名个人身份的私聊/Web、其他群/租户/应用读不到群证据，个人渠道引用群证据的回答不交付；新 generation 读不到上一代；纯澄清历史的群 Session 不能被个人/其他群身份打开，换运行绑定也拒绝；同聊天同消息编号的私聊记录与群互不混用；群请求保存回复目的地，同消息换人/换正文冲突，重复请求不再运行；群信封不能指向其他会话或渠道；他人、个人身份或省略群都不能借用 A 的请求；未配置的群/租户/应用在任何状态前拒绝；接受不查成员目录、开始时查一次、同轮工具不再查；排队后离群/目录异常/结果不明均 `access_denied` 且模型与工具为 0；交付前离群不发送，开始前被拒的请求在成员持续离群或目录异常/结果不明时同样不发送回执、不取得投递权（保持 `failed+pending`）；群诊断请求的 receipt 单独或组合换正文、把用途改为查询、换会话、换回复消息或回复群、去掉或换掉群，都在 Runner 前记 `access_denied`（模型、Adapter 与原会话/目标会话的 SDK Session 条目均不增加，请求行保持原会话与用途）；记录换发起人或轮次时不运行、请求保持 accepted，原样 receipt 随后照常运行一次、重复事件不再运行；同时有个人授权的 A 去掉群范围也不能改按个人授权运行；个人诊断请求换用途、正文、会话、加群范围或接受后数据策略变化同样在 Runner 前拒绝；授权来源把 mallory 解析为自洽的 alice 决策时接受即拒绝（无请求行、模型与 Adapter 为 0），mallory 也不能读取或发送 alice 的结果；群授权不开放私聊/Web，个人授权照常；恢复中断群请求并以群 owner 关闭会话；v4 个人请求升级后键与会话不变。隔离变异 12 项（证据忽略 owner、开始时沿用接受时 context、抹去采集者、替换回复目的地、群请求键含发起人、个人摘要改编码、`authorize` 不核对群、Session 认领不核对 owner、读取不核对发起人、交付前不查成员、接受时查目录、群工具泄入个人授权）均使对应用例失败；第二轮修复后另加 7 项，均被捕获：`start` 不核对绑定、只核对字段不核对正文摘要、只核对正文摘要不核对会话/用途/回复目的地、`start` 不核对身份键、个人请求不拒绝群范围、个人决策恢复为只核对自洽、以 receipt 的群范围（而非记录的 owner）判断是否为群请求。原 12 项中“开始时沿用接受时 context”所针对的代码已删除。回归：`tests/sdk_core tests/p1b tests/p25 -W error` 1924 passed、39 deselected（首轮复审修复后 1933 passed，第二轮修复后 1942 passed，均 39 deselected）；为适配新列，原有用例只改了版本号与按位置插入的 SQL（改为列名），断言未放宽。
 
 ### F2：指定群 @ 入口与原消息交付
 
@@ -197,7 +209,7 @@ F0 修改了 `src/xiaowei/feishu.py` 的投递分类并新增 `tests/sdk_core/te
 
 | 编号 | 检查 |
 | --- | --- |
-| G1 | `uv run --locked --extra dev python -m pytest tests/p25/test_group_identity.py tests/sdk_core/test_channel_store.py tests/sdk_core/test_channel_service.py tests/sdk_core/test_session_policy.py tests/sdk_core/test_evidence.py tests/sdk_core/test_storage_v2.py tests/sdk_core/test_runtime.py -q -W error` |
+| G1 | `uv run --locked --extra dev python -m pytest tests/sdk_core/test_group_identity.py tests/sdk_core/test_channel_store.py tests/sdk_core/test_channel_service.py tests/sdk_core/test_session_policy.py tests/sdk_core/test_evidence.py tests/sdk_core/test_storage_v2.py tests/sdk_core/test_runtime.py -q -W error` |
 | G2 | `uv run --locked --extra dev python -m pytest tests/p25/test_group_gateway.py tests/sdk_core/test_feishu.py tests/sdk_core/test_runtime.py tests/sdk_core/test_channel_service.py -q -W error` |
 | G3 | `uv run --locked --extra dev python -m pytest tests/p25/test_group_queue.py tests/sdk_core/test_feishu.py tests/sdk_core/test_channel_service.py tests/sdk_core/test_runtime.py -q -W error` |
 | 阶段 | `uv run --locked --extra dev python -m pytest tests/sdk_core tests/p1b tests/p25 -q -W error`；沿用 `SDK_TEST_CHROME` 的正式 Web browser 场景，证明 Web 无回归；不连接真实飞书/模型/用户 DB |
@@ -232,4 +244,4 @@ F0 的替身必须位于公开 SDK 的外部 I/O 边界，以真实 SDK 把事�
 - [x] 真 SDK 的成员/回复能力优先，公开接口限制明确；无新的服务、聊天历史或调度平台。
 - [x] 排队、满/超时、澄清、新建、失败/取消/停机/恢复都有可观察验收；有同群成功和不同会话并行对照。
 - [x] 四种投影、渲染上限、发送状态与历史拒绝沿用；原有单条最终回答规则与新增状态回执的区别已说明。
-- [x] F0 精确 SHA `f6875f9` 独立复审通过；F1 及后续实施仍未开始。
+- [x] F0 精确 SHA `f6875f9` 独立复审通过；F1 已实施，第二轮复审阻断已修复，待复审；通过后进入 F2。

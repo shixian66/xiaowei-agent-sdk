@@ -27,7 +27,7 @@ import asyncio
 import logging
 import math
 import socket
-from collections.abc import AsyncIterator, Callable, Mapping
+from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
 from contextlib import AsyncExitStack, asynccontextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -52,6 +52,7 @@ from xiaowei.app import AppConfig, Application, BusinessContext, DataPolicy, Tar
 from xiaowei.channel import (
     AccessDecision,
     ChannelService,
+    GroupScope,
     RequestRef,
     ResultDelivery,
 )
@@ -76,6 +77,7 @@ from xiaowei.models import (
     Delivery,
     Identity,
     Label,
+    Owner,
     ToolId,
 )
 from xiaowei.session import CleanupReport, SessionLimits, cleanup_expired
@@ -322,17 +324,39 @@ def _app_config(config: ServeConfig) -> AppConfig:
 # ---- 唯一授权来源 ----------------------------------------------------------------------
 
 
-class StaticAccess:
-    """配置中的授权表：入口解析（``resolve``）与 Evidence 授权（``authorize``）读同一份表。
+MemberCheck = Callable[[str, str], Awaitable[bool]]
+"""``(chat_id, open_id) -> 是否当前成员``：只有找到发送者才返回 True；未找到、名单不完整、
+失败或超时都不能返回 True（调用方把异常也当作拒绝）。"""
 
-    subject 与渠道无关：Web 操作者与飞书用户由各自适配器映射为内部 subject，配置校验保证二者
-    不重名。获准用户得到全部已配置目标；某目标没有登记的工具由工具目录在调用前拒绝。
+
+@dataclass(frozen=True)
+class GroupAccess:
+    """指定群的共享策略：全员同权，可用全部已配置目标与 ``tools``；成员资格只来自 ``members``。"""
+
+    scope: GroupScope
+    tools: frozenset[str]
+    members: MemberCheck
+
+
+class StaticAccess:
+    """配置中的授权表：入口解析（``resolve`` / ``resolve_group``）与 Evidence 授权
+    （``authorize``）读同一份表。
+
+    个人 subject 与渠道无关：Web 操作者与飞书用户由各自适配器映射为内部 subject，配置校验保证
+    二者不重名。获准用户得到全部已配置目标；某目标没有登记的工具由工具目录在调用前拒绝。
+    指定群（可选）另有一份共享策略：群内发起人不需要也不使用个人授权，群授权也不进入个人路径。
     """
 
-    def __init__(self, config: AccessConfig, target_ids: frozenset[str]) -> None:
+    def __init__(
+        self,
+        config: AccessConfig,
+        target_ids: frozenset[str],
+        group: GroupAccess | None = None,
+    ) -> None:
         self._grants: Mapping[str, frozenset[str]] = dict(config.grants)
         self._version = config.policy_version
         self._targets = target_ids
+        self._group = group
 
     async def resolve(self, channel: Channel, subject_id: str) -> AccessDecision | None:
         tools = self._grants.get(subject_id)
@@ -340,13 +364,37 @@ class StaticAccess:
             return None
         return AccessDecision(
             subject_id=subject_id,
+            owner=Owner(kind="personal", id=subject_id),
             target_ids=self._targets,
             authorized_tools=tools,
             policy_version=self._version,
         )
 
+    async def resolve_group(
+        self, group: GroupScope, subject_id: str, *, verify_member: bool
+    ) -> AccessDecision | None:
+        shared = self._group
+        if shared is None or group != shared.scope or not shared.tools:
+            return None
+        if verify_member and await shared.members(group.chat_id, subject_id) is not True:
+            return None
+        return AccessDecision(
+            subject_id=subject_id,
+            owner=group.owner,
+            target_ids=self._targets,
+            authorized_tools=shared.tools,
+            policy_version=self._version,
+        )
+
     async def authorize(self, identity: Identity, target_id: str, tool_id: str) -> bool:
-        return target_id in self._targets and tool_id in self._grants.get(
+        """同一轮内的工具与证据复核：不查成员目录，沿用本轮开始时已确认的成员资格。"""
+        if target_id not in self._targets:
+            return False
+        owner = identity.owner
+        if owner.kind == "group":
+            shared = self._group
+            return shared is not None and owner == shared.scope.owner and tool_id in shared.tools
+        return owner.id == identity.subject_id and tool_id in self._grants.get(
             identity.subject_id, frozenset()
         )
 

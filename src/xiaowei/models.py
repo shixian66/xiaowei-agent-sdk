@@ -38,11 +38,33 @@ class _Trusted(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid")
 
 
+OwnerKind = Literal["personal", "group"]
+
+
+class Owner(_Trusted):
+    """会话、历史与证据的共享归属：个人（``id`` 为内部 subject）或指定群（``id`` 由应用、租户与
+    群标识组成）。与本轮发起人分开：群内不同成员共享同一 owner，各自仍是独立的 actor。"""
+
+    kind: OwnerKind
+    id: Label
+
+
 class Identity(_Trusted):
+    """一轮的可信身份：``subject_id`` 是本轮发起人（actor，授权按它复核），``owner`` 是会话与证据的
+    归属。个人会话的 owner 就是发起人本人；省略 ``owner`` 时按个人归属补齐。"""
+
     subject_id: Label
     session_id: Label
     turn_id: Label
     channel: Channel
+    owner: Owner
+
+    @model_validator(mode="before")
+    @classmethod
+    def _personal_by_default(cls, data: object) -> object:
+        if isinstance(data, dict) and "owner" not in data and "subject_id" in data:
+            return {**data, "owner": Owner(kind="personal", id=data["subject_id"])}
+        return data
 
 
 class Budget(_Trusted):

@@ -9,11 +9,11 @@ Evidence 读取边界按当前权限、目标范围、策略与过期取回 Sess
 ``SessionUnverifiableError``：本轮不运行或不提交，会话状态与历史不变，之后的新请求重新复核。证据须由历史
 中同一次调用（调用标识、函数名、参数）生成，暂存与回放都经 Evidence 读取边界核对。
 
-应用表 ``xiaowei_session`` 记录会话归属、运行绑定（应用传入 Profile 与数据策略的组合指纹，
-列名沿用 ``profile_fingerprint``）、失效时间、已提交轮数与状态；只有底层 Session 为空时才登记
-新会话，缺少元数据的已有历史不被任何身份认领。SDK 表与应用表不共事务：提交前先把状态置为
-``writing``，底层写入与元数据更新都成功后才回到 ``active``；任一步失败会话保持不可回放，
-不自动重跑工具补偿。
+应用表 ``xiaowei_session`` 记录会话归属（owner：个人或指定群，与本轮发起人分开）、运行绑定
+（应用传入 Profile 与数据策略的组合指纹，列名沿用 ``profile_fingerprint``）、失效时间、
+已提交轮数与状态；只有底层 Session 为空时才登记新会话，缺少元数据的已有历史不被任何身份
+认领。SDK 表与应用表不共事务：提交前先把状态置为 ``writing``，底层写入与元数据更新都成功后
+才回到 ``active``；任一步失败会话保持不可回放，不自动重跑工具补偿。
 
 会话关闭与维护清理也只在本模块：``close_sessions`` 在调用方的应用表事务中把会话置为不可
 回放（不删历史）；``close_interrupted_sessions`` 供启动恢复持久关闭，元数据尚未登记时写入已关闭
@@ -43,7 +43,7 @@ from xiaowei.evidence import (
     EvidenceUnavailableError,
     EvidenceUnverifiableError,
 )
-from xiaowei.models import AgentAnswer, RunContext, ToolCall, TurnAnswer
+from xiaowei.models import AgentAnswer, Owner, RunContext, ToolCall, TurnAnswer
 
 SessionState = Literal["active", "writing", "sealed", "closed"]
 
@@ -55,17 +55,18 @@ _DROPPED_TYPES = frozenset({"reasoning"})
 _INSERT_IF_ABSENT = text(
     """
     INSERT INTO xiaowei_session (
-        session_id, subject_id, channel, profile_fingerprint, created_at, expires_at, turns, state
+        session_id, owner_kind, owner_id, channel, profile_fingerprint, created_at, expires_at,
+        turns, state
     ) VALUES (
-        :session_id, :subject_id, :channel, :profile_fingerprint, :created_at, :expires_at, 0,
-        'active'
+        :session_id, :owner_kind, :owner_id, :channel, :profile_fingerprint, :created_at,
+        :expires_at, 0, 'active'
     )
     ON CONFLICT (session_id) DO NOTHING
     """
 )
 _SELECT = text(
     """
-    SELECT subject_id, channel, profile_fingerprint, expires_at, turns, state
+    SELECT owner_kind, owner_id, channel, profile_fingerprint, expires_at, turns, state
     FROM xiaowei_session WHERE session_id = :session_id
     """
 )
@@ -73,14 +74,16 @@ _SELECT = text(
 _TRANSITION = text(
     """
     UPDATE xiaowei_session SET state = :to_state, turns = turns + :add_turns
-    WHERE session_id = :session_id AND subject_id = :subject_id AND channel = :channel
+    WHERE session_id = :session_id AND owner_kind = :owner_kind AND owner_id = :owner_id
+      AND channel = :channel
       AND state = :from_state
     """
 )
 _CLOSE = text(
     """
     UPDATE xiaowei_session SET state = 'closed'
-    WHERE session_id = :session_id AND subject_id = :subject_id AND channel = :channel
+    WHERE session_id = :session_id AND owner_kind = :owner_kind AND owner_id = :owner_id
+      AND channel = :channel
     """
 )
 
@@ -399,7 +402,8 @@ class PolicySession:
         identity = self._ctx.identity
         if (
             row is None
-            or row["subject_id"] != identity.subject_id
+            or row["owner_kind"] != identity.owner.kind
+            or row["owner_id"] != identity.owner.id
             or row["channel"] != identity.channel
         ):
             raise SessionUnavailableError
@@ -539,10 +543,12 @@ class PolicySession:
         return result.rowcount
 
     def _owner(self) -> dict[str, object]:
+        """会话按 owner 归属：群会话由同群各发起人共享，个人会话的 owner 是本人。"""
         identity = self._ctx.identity
         return {
             "session_id": self.session_id,
-            "subject_id": identity.subject_id,
+            "owner_kind": identity.owner.kind,
+            "owner_id": identity.owner.id,
             "channel": identity.channel,
         }
 
@@ -658,8 +664,9 @@ def _size(items: list[TResponseInputItem]) -> int:
 _CLOSE_OR_RESERVE = text(
     """
     INSERT INTO xiaowei_session (
-        session_id, subject_id, channel, profile_fingerprint, created_at, expires_at, turns, state
-    ) VALUES (:session_id, :subject_id, :channel, '', :now, :expires_at, 0, 'closed')
+        session_id, owner_kind, owner_id, channel, profile_fingerprint, created_at, expires_at,
+        turns, state
+    ) VALUES (:session_id, :owner_kind, :owner_id, :channel, '', :now, :expires_at, 0, 'closed')
     ON CONFLICT (session_id) DO UPDATE SET state = 'closed'
     """
 )
@@ -667,12 +674,12 @@ _CLOSE_OR_RESERVE = text(
 
 async def close_interrupted_sessions(
     conn: AsyncConnection,
-    owners: Sequence[tuple[str, str, str]],
+    owners: Sequence[tuple[str, Owner, str]],
     *,
     now: datetime,
     expires_at: datetime,
 ) -> None:
-    """在启动恢复的事务中持久关闭被中断轮次的会话 ``(session_id, subject_id, channel)``。
+    """在启动恢复的事务中持久关闭被中断轮次的会话 ``(session_id, owner, channel)``。
 
     旧进程的 Runner 可能尚未登记会话元数据、正在登记或正在写入：元数据不存在时写入已关闭的
     占位，使之后的登记只能读到 closed；已存在（含 active/writing）时直接关闭。旧 Runner 之后的
@@ -680,7 +687,7 @@ async def close_interrupted_sessions(
     清理删除。
     """
     seen: set[str] = set()
-    for session_id, subject_id, channel in owners:
+    for session_id, owner, channel in owners:
         if session_id in seen:
             continue
         seen.add(session_id)
@@ -688,7 +695,8 @@ async def close_interrupted_sessions(
             _CLOSE_OR_RESERVE,
             {
                 "session_id": session_id,
-                "subject_id": subject_id,
+                "owner_kind": owner.kind,
+                "owner_id": owner.id,
                 "channel": channel,
                 "now": now,
                 "expires_at": expires_at,

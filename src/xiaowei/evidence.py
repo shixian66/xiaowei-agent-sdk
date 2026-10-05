@@ -6,7 +6,9 @@
 字段优先级，只取模型、Session 与记录所在渠道都允许的字段，受三者中最小的容量约束。
 
 所有出口（交给模型的工具结果、各用途读取、最终回答）都经同一个读取边界，复核归属、渠道、
-过期、目标范围、当前策略与当前授权；不同拒绝原因返回同一条信息，不暴露记录是否存在。
+过期、目标范围、当前策略与当前授权；不同拒绝原因返回同一条信息，不暴露记录是否存在。归属按
+会话 owner（个人或指定群）判断：同群成员可读其他成员在同一群会话中采集的证据，记录仍保留原
+采集者；当前授权按读取时的发起人复核，不沿用采集者的授权。
 
 声明了数据范围的工具（StarRocks）另给出可信的对象依赖（``ObjectDependency``）。读取边界在上述
 检查之后、交付之前，把同一批记录的依赖按目标合并，交给应用装配的 ``DependencyVerifier`` 复核
@@ -64,6 +66,7 @@ from xiaowei.models import (
     Identity,
     JsonScalar,
     ObjectDependency,
+    Owner,
     RunContext,
     ToolCall,
     ToolContract,
@@ -128,27 +131,31 @@ _ADVICE_HEADER = "建议（本轮未执行业务查询；模型生成，未经�
 _INSERT = text(
     """
     INSERT INTO xiaowei_evidence (
-        evidence_id, subject_id, session_id, turn_id, channel, target_id, tool_id, call_id,
+        evidence_id, owner_kind, owner_id, subject_id, session_id, turn_id, channel, target_id,
+        tool_id, call_id,
         tool_name, arguments_digest, policy_id, policy_fingerprint, captured_at, recorded_at,
         expires_at, truncated, model_content, session_content, web_content, feishu_content,
         dependencies
     ) VALUES (
-        :evidence_id, :subject_id, :session_id, :turn_id, :channel, :target_id, :tool_id, :call_id,
+        :evidence_id, :owner_kind, :owner_id, :subject_id, :session_id, :turn_id, :channel,
+        :target_id, :tool_id, :call_id,
         :tool_name, :arguments_digest, :policy_id, :policy_fingerprint, :captured_at, :recorded_at,
         :expires_at, :truncated,
         :model_content, :session_content, :web_content, :feishu_content, :dependencies
     )
     """
 )
-# 归属条件写在查询里：他人、其他会话或其他渠道的记录与不存在的记录不可区分。
+# 归属条件写在查询里：其他 owner（他人、其他群）、其他会话或其他渠道的记录与不存在的记录不可
+# 区分。同一 owner 内由谁采集（``subject_id``）不影响可读性，读取仍按当前读者的授权复核。
 _SELECT_OWNED = text(
     """
-    SELECT evidence_id, subject_id, session_id, turn_id, channel, target_id, tool_id, call_id,
+    SELECT evidence_id, owner_kind, owner_id, subject_id, session_id, turn_id, channel,
+           target_id, tool_id, call_id,
            tool_name, arguments_digest, policy_id, policy_fingerprint, captured_at, expires_at,
            truncated,
            model_content, session_content, web_content, feishu_content, dependencies
     FROM xiaowei_evidence
-    WHERE evidence_id = :evidence_id AND subject_id = :subject_id
+    WHERE evidence_id = :evidence_id AND owner_kind = :owner_kind AND owner_id = :owner_id
       AND session_id = :session_id AND channel = :channel
     """
 )
@@ -239,7 +246,9 @@ class EvidenceStore:
         recorded_at = self._clock()
         row = {
             "evidence_id": evidence_id,
-            "subject_id": identity.subject_id,
+            "owner_kind": identity.owner.kind,
+            "owner_id": identity.owner.id,
+            "subject_id": identity.subject_id,  # 采集者：本轮发起人
             "session_id": identity.session_id,
             "turn_id": identity.turn_id,
             "channel": identity.channel,
@@ -485,7 +494,8 @@ class EvidenceStore:
     async def _load(self, evidence_id: str, identity: Identity) -> EvidenceRecord | None:
         params = {
             "evidence_id": evidence_id,
-            "subject_id": identity.subject_id,
+            "owner_kind": identity.owner.kind,
+            "owner_id": identity.owner.id,
             "session_id": identity.session_id,
             "channel": identity.channel,
         }
@@ -503,6 +513,7 @@ class EvidenceStore:
                 session_id=row["session_id"],
                 turn_id=row["turn_id"],
                 channel=row["channel"],
+                owner=Owner(kind=row["owner_kind"], id=row["owner_id"]),
             ),
             target_id=row["target_id"],
             tool_id=row["tool_id"],
