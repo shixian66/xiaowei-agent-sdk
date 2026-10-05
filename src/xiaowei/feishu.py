@@ -587,23 +587,21 @@ class FeishuGateway:
         return _Job(receipt, self._ref(message), message.chat_id, self._reply_to(message))
 
     def _place(self, job: _Job) -> tuple[str, _Job]:
-        """新接受的群请求：群空闲时成为队头（无排队提示），否则在上限内带着排队提示的完成标记排在
-        群 FIFO 末尾，超出上限为 full。
+        """新接受的群请求：超出等待上限为 full；否则群空闲时成为队头（无排队提示），群忙时带着排队
+        提示的完成标记排在群 FIFO 末尾。
 
-        运行中的一条或尚未开始的队头占一个位置，其余等待项与回执尚未落定的到期项共同受
-        ``max_waiting`` 约束，使到期任务数也不超过它。
+        只有正在运行的一条不计入 ``max_waiting``：尚未开始的请求（含等消费者的队头）与回执尚未
+        落定的到期项都计入，因此到期任务数也不超过它。
         """
-        group = self._group_settings()
+        if len(self._group_waiting) + len(self._expiring) >= self._group_settings().max_waiting:
+            return "full", job
         if not self._group_running and not self._group_waiting:
             self._group_waiting.append(job)
             self._signal()
             return "head", job
-        occupied = len(self._group_waiting) + self._group_running + len(self._expiring)
-        if occupied <= group.max_waiting:
-            job = replace(job, notice=asyncio.Event())
-            self._group_waiting.append(job)
-            return "waiting", job
-        return "full", job
+        job = replace(job, notice=asyncio.Event())
+        self._group_waiting.append(job)
+        return "waiting", job
 
     def _signal(self) -> None:
         """群空闲、队头存在且其排队提示尝试已结束时，在共享队列中放入一个标记（最多一个）。"""
