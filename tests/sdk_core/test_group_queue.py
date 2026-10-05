@@ -623,17 +623,17 @@ async def test_redeliveries_keep_the_expiry_receipt_bound(env: Env) -> None:
 
 
 async def test_a_head_expiring_before_dequeue_shares_the_receipt_bound(env: Env) -> None:
-    """唯一的消费者被单聊占用：群队头与 4 条等待都仍在群 FIFO 中按期限结算；5 条回执同时在途
-    最多 4 条，单聊结束后消费者不运行任何过期项。"""
+    """唯一的消费者被单聊占用：群队头与 5 条等待（共 6 条尚未开始，恰好到等待上限）都仍在群 FIFO
+    中按期限结算；6 条回执同时在途最多 4 条，单聊结束后消费者不运行任何过期项。"""
     outbox = GatedOutbox()
     release = outbox.gate(ANY, BUSY)
-    waiting = ["om_head", *(f"om_w{i}" for i in range(4))]
+    waiting = ["om_head", *(f"om_w{i}" for i in range(5))]
     async with queue(
         env,
         outbox,
         consumer_count=1,
         queue_size=8,
-        group={"max_wait_seconds": 1, "max_waiting": 4},
+        group={"max_wait_seconds": 1, "max_waiting": 6},
     ) as (group, turns):
         env.scripts.add("私聊长任务", clarify())
         hold = turns.hold("私聊长任务")
@@ -787,25 +787,59 @@ async def test_the_next_waiter_runs_once_an_unready_head_expires(env: Env) -> No
     assert texts_for(group, "om_2") == [QUEUED, BUSY_REPLY]
 
 
-async def test_a_head_waiting_for_a_consumer_takes_the_running_slot(env: Env) -> None:
-    """唯一的消费者被单聊占用：尚未开始的群队头占“正在运行的一条”的位置，等待上限 1 时 B 仍可
-    等待（收到提示），C 才记为繁忙；单聊结束后队头与 B 依次运行。"""
+async def test_a_head_waiting_for_a_consumer_counts_toward_max_waiting(env: Env) -> None:
+    """唯一的消费者被单聊占用：尚未开始的群队头计入等待上限，只有正在运行的一条不计。等待上限 1
+    时 B 记为繁忙、不提示、模型 0 次；单聊结束后只有队头运行。"""
     async with queue(env, consumer_count=1, group={"max_waiting": 1}) as (group, turns):
         env.scripts.add("私聊长任务", clarify())
         env.scripts.add(attributed(A, "一"), clarify())
-        env.scripts.add(attributed(B, "二"), clarify())
-        refused = env.scripts.add(attributed(C, "三"), clarify())
+        refused = env.scripts.add(attributed(B, "二"), clarify())
         hold = turns.hold("私聊长任务")
         await dm(group, "私聊长任务", "om_dm")
         await turns.wait_entered("私聊长任务")
         await send(group, "一", "om_1")
         await send(group, "二", "om_2", B)
-        await send(group, "三", "om_3", C)
+        assert await states(env) == {
+            None: ("running", "pending"),  # 单聊不回复原消息
+            "om_1": ("accepted", "pending"),
+            "om_2": ("failed", "sent"),
+        }
         hold.set()
-        await settled(env, {"om_1": ("completed", "sent"), "om_2": ("completed", "sent")})
+        await settled(env, {"om_1": ("completed", "sent")})
         await group.gateway.idle()
-    assert turns.started == ["私聊长任务", "一", "二"] and notices(group) == ["om_2"]
-    assert texts_for(group, "om_3") == [BUSY_REPLY] and env.model_calls(refused) == 0
+    assert turns.started == ["私聊长任务", "一"] and notices(group) == []
+    assert texts_for(group, "om_2") == [BUSY_REPLY] and env.model_calls(refused) == 0
+
+
+async def test_unsettled_expiry_receipts_fill_the_queue_until_they_settle(env: Env) -> None:
+    """等待上限 1：B 到期、回执挂起时，即使 A 已结束、群已空闲，B 仍占等待名额，C 记为繁忙且
+    不运行；B 的回执落定后恢复接收，D 成为队头并运行。"""
+    outbox = GatedOutbox()
+    release = outbox.gate("om_2", BUSY)
+    limits = {"max_waiting": 1, "max_wait_seconds": 1}
+    async with queue(env, outbox, group=limits) as (group, turns):
+        env.scripts.add(attributed(A, "一"), clarify())
+        expired = env.scripts.add(attributed(B, "二"), clarify())
+        refused = env.scripts.add(attributed(C, "三"), clarify())
+        env.scripts.add(attributed(A, "四"), clarify())
+        hold = turns.hold("一")
+        await send(group, "一", "om_1")
+        await turns.wait_entered("一")
+        await send(group, "二", "om_2", B)
+        env.clock.advance(2)
+        await until(lambda: outbox.busy_active == 1)
+        hold.set()
+        await settled(env, {"om_1": ("completed", "sent"), "om_2": ("failed", "sending")})
+        await send(group, "三", "om_3", C)
+        assert (await states(env))["om_3"] == ("failed", "sent")
+        release.set()
+        await settled(env, {"om_2": ("failed", "sent")})
+        await send(group, "四", "om_4")
+        await settled(env, {"om_4": ("completed", "sent")})
+        await group.gateway.idle()
+    assert turns.started == ["一", "四"] and notices(group) == ["om_2"]
+    assert env.model_calls(expired) == 0 and env.model_calls(refused) == 0
+    assert texts_for(group, "om_3") == [BUSY_REPLY]
 
 
 # ---- 尚未开始的群请求：期限管理与消费者占用 ------------------------------------------------
