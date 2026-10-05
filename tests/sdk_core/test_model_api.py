@@ -4,6 +4,7 @@
 ``httpx2.MockTransport`` 模拟，不建立任何网络连接。HTTP mock 通过不等于供应商真实验证通过。
 """
 
+import asyncio
 import gzip
 import inspect
 import json
@@ -18,8 +19,10 @@ from agents.exceptions import MaxTurnsExceeded, ModelBehaviorError
 from openai import APIStatusError, APITimeoutError
 from pydantic import BaseModel, ValidationError
 
+from xiaowei import model_api as model_api_module
 from xiaowei.config import SecretRefError, resolve_secret_ref
 from xiaowei.model_api import (
+    ModelAPIRejectedError,
     ModelProfile,
     ModelRequestRejectedError,
     ModelResponseRejectedError,
@@ -504,6 +507,28 @@ async def test_successful_response_must_be_json(
 
 
 # ---- 凭据与端点隔离 ---------------------------------------------------------------------
+
+
+async def test_model_client_close_timeout_is_reported(monkeypatch: pytest.MonkeyPatch) -> None:
+    original_close = model_api_module.AsyncOpenAI.close
+
+    async def hanging_close(client: Any) -> None:
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            await original_close(client)
+            raise
+
+    monkeypatch.setattr(model_api_module, "_CLIENT_CLOSE_TIMEOUT_SECONDS", 0.01)
+    monkeypatch.setattr(model_api_module.AsyncOpenAI, "close", hanging_close)
+    transport = httpx2.MockTransport(lambda request: httpx2.Response(500, request=request))
+
+    async def close_model() -> None:
+        with pytest.raises(ModelAPIRejectedError, match="模型客户端关闭超时"):
+            async with open_model(OPENAI, transport=transport):
+                pass
+
+    await asyncio.wait_for(close_model(), 0.2)
 
 
 async def test_credential_comes_from_the_profile_reference(

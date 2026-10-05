@@ -236,6 +236,24 @@ def test_container_entry_is_the_only_cli_path_that_selects_container_binding(
     assert "container" not in _parser_help()
 
 
+def test_native_cli_requests_only_the_configured_loopback_binding(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    port = 18501
+    file = tmp_path / "xiaowei.json"
+    file.write_text(json.dumps(serve_config(port)), encoding="utf-8")
+    requested: list[tuple[str, int]] = []
+
+    def reject_after_recording(host: str, requested_port: int) -> object:
+        requested.append((host, requested_port))
+        raise runtime.ListenError(host, requested_port)
+
+    monkeypatch.setattr(runtime, "_bind", reject_after_recording)
+
+    assert cli_module.main(["--config", str(file), "serve"]) == 1
+    assert requested == [("127.0.0.1", port)]
+
+
 def _parser_help() -> str:
     return run([*ENTRIES["module"], "--help"], child_env()).stdout
 

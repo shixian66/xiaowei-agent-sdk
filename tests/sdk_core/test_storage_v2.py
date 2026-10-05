@@ -356,6 +356,84 @@ async def test_instance_lock_is_exclusive_with_serve_and_maintenance(postgres_ur
         assert readiness.ok
 
 
+async def test_instance_lock_close_timeout_is_reported(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class Driver:
+        def add_termination_listener(self, listener: object) -> None:
+            del listener
+
+        def remove_termination_listener(self, listener: object) -> None:
+            del listener
+
+        def is_closed(self) -> bool:
+            return False
+
+    class Raw:
+        driver_connection = Driver()
+
+    class Result:
+        def mappings(self) -> "Result":
+            return self
+
+        def one(self) -> dict[str, object]:
+            return {"acquired": True, "pid": 1, "started": object()}
+
+    class Connection:
+        invalidated = False
+
+        async def execute(self, *args: object, **kwargs: object) -> Result:
+            del args, kwargs
+            return Result()
+
+        async def commit(self) -> None:
+            return None
+
+        async def get_raw_connection(self) -> Raw:
+            return Raw()
+
+        async def invalidate(self) -> None:
+            self.invalidated = True
+
+        async def close(self) -> None:
+            await asyncio.Event().wait()
+
+    connection = Connection()
+
+    class Engine:
+        async def connect(self) -> Connection:
+            return connection
+
+    monkeypatch.setattr(storage_module, "_LOCK_CLOSE_TIMEOUT_SECONDS", 0.01)
+
+    async def close_lock() -> None:
+        with pytest.raises(StorageUnavailableError, match="实例锁连接关闭超时"):
+            async with hold_instance_lock(Engine(), Readiness()):  # type: ignore[arg-type]
+                pass
+
+    await asyncio.wait_for(close_lock(), 0.2)
+    assert connection.invalidated
+
+
+async def test_engine_dispose_timeout_is_reported(monkeypatch: pytest.MonkeyPatch) -> None:
+    class Engine:
+        async def dispose(self) -> None:
+            await asyncio.Event().wait()
+
+    engine = Engine()
+    monkeypatch.setattr(storage_module, "_ENGINE_DISPOSE_TIMEOUT_SECONDS", 0.01)
+    monkeypatch.setattr(storage_module, "create_async_engine", lambda *args, **kwargs: engine)
+
+    async def close_engine() -> None:
+        with pytest.raises(StorageUnavailableError, match="PostgreSQL 连接池关闭超时"):
+            async with open_engine(
+                SecretStr("postgresql+asyncpg://test.invalid/xiaowei")
+            ) as opened:
+                assert opened is engine
+
+    await asyncio.wait_for(close_engine(), 0.2)
+
+
 async def test_busy_initialization_leaves_an_empty_database_untouched(postgres_url: URL) -> None:
     async with (
         open_engine(secret(postgres_url)) as engine,

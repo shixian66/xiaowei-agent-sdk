@@ -12,7 +12,7 @@
 | 本地目录 / 分支 | `/Users/kloenguyen/.codex/worktrees/1f5b/agent-SDK` / `codex/p3-deployment-plan`；独立任务工作树，P3-A 实现候选 |
 | M5 历史起点 | `372c381f44ecfa1fa53961f137d0058033cbd805`；不是远端当前 main 的核验结论 |
 | 规划基线 / `origin/main` | `fb67cd243ed3ab2beebae3970b909535042259f6`（2026-10-05 已重新 fetch 核对，含 PR #48 的 F4 非阻断修订）。历史切片版本与证据见第 3 节 |
-| 当前阶段 | **P3-A 实现候选已完成本机验证，待精确 SHA 独立审查。** 计划 v0.2 已复审通过；P1/P2/P2.5 与飞书单群离线交付已合入。P3-B 的不同镜像升级、回退和备份恢复，以及 P3-C 的公司服务器、真实模型、用户 StarRocks、Web/飞书实战与用户接受均未开始 |
+| 当前阶段 | **P3-A 首次独立审查在 `4867801` 提出一项测试覆盖阻断；修订候选已补停止上界和原生绑定回归，待新 head 独立复审。** 计划 v0.2 已复审通过；P1/P2/P2.5 与飞书单群离线交付已合入。P3-B 的不同镜像升级、回退和备份恢复，以及 P3-C 的公司服务器、真实模型、用户 StarRocks、Web/飞书实战与用户接受均未开始 |
 | 当前源码与依赖 | 新包 `src/xiaowei/` 现为应用表 v6，新增数据库摘要密钥指纹；正式 CLI 增加离线 `config check` 与旧库首次绑定确认。P3-A 新增精简运行镜像、双容器 Compose、固定白名单发行脚本和唯一运维说明；运行依赖版本未变。Task 8 起 wheel 只含 `src/xiaowei`，旧包 `xiaowei_agent` 与开发工具不进运行镜像，旧源码仍在工作树 |
 | 新产品入口 | 原生主线仍为 `xiaowei`（与 `python -m xiaowei` 相同）的 `serve`、`config check`、`storage init/upgrade/cleanup`、`requests resend`；JSON 仍只接受 loopback。镜像固定入口复用同一 CLI，仅在容器内绑定 `0.0.0.0`。真实模型、用户 StarRocks 与真实飞书未参与 P3-A 验证；旧 CLI/Compose 不是产品入口 |
 | 本次工作范围 | 已实现 P3-A：镜像专用绑定、外置操作者参数、schema v6 密钥绑定、离线预检、停止上界、精简镜像/发行包、正式两容器成功与关键失败路径及独立 CI job。未发布镜像、未操作公司服务器、未执行 P3-B/C；用户优先保留配置、简化维护的取舍不变，规范只在 ARCHITECTURE §10 维护 |
@@ -38,7 +38,7 @@
 
 **当前计划：** [P3：Compose 部署与实战验收](docs/superpowers/plans/2026-10-05-p3-compose-deployment.md) v0.2 已复审通过。P3-A 已按批准范围形成实现候选；下一项是对提交后的精确 SHA 独立审查，审查通过也不等于镜像发布或部署授权。之后才进入 P3-B，不用首次安装或同镜像重建代替不同 digest 的升级/回退与恢复证据。P3-C 仍需逐项取得真实环境授权。已完成的 [P2.5 计划](docs/superpowers/plans/2026-10-03-p25-open-read-multi-cluster.md)、[单群计划](docs/superpowers/plans/2026-10-03-feishu-group.md) 及下文 P1/P2 记录继续作为前置离线证据，不复制任务。
 
-**P3-A 当前证据：** 基线为 `fb67cd243ed3ab2beebae3970b909535042259f6`。本机 Docker Engine 29.5.2、Colima Linux/arm64、独立 Compose 5.5.1 上已实际构建运行镜像并启动隔离的应用 + PostgreSQL 16.15 两容器；发行白名单/镜像逐层审计、非默认参数、特殊字符、缺挂载、配置预检、v6 初始化/指纹拒绝、HTTP/loopback/PG 零发布、正常 SIGTERM、迁移中断回滚与有限重启均有自动化用例。模型/StarRocks 未真实调用，飞书只用渠道替身；没有另一台同二层主机、公司目标平台、仓库 manifest digest、远端 CI、P3-B 恢复或 P3-C 证据。完整命令与最终计数在本提交验证及 PR 记录，不把作者自测称为独立审查。
+**P3-A 当前证据：** 基线为 `fb67cd243ed3ab2beebae3970b909535042259f6`。本机 Docker Engine 29.5.2、Colima Linux/arm64、独立 Compose 5.5.1 上已实际构建运行镜像并启动隔离的应用 + PostgreSQL 16.15 两容器；发行白名单/镜像逐层审计、非默认参数、特殊字符、缺挂载、配置预检、v6 初始化/指纹拒绝、HTTP/loopback/PG 零发布、正常 SIGTERM、迁移中断回滚与有限重启均有自动化用例。首次独立审查确认三项核心实现成立，但发现停止上界漏算消费者取消、原生 runtime/CLI 绑定缺直接断言；修订已加入 12 秒有界取消、长请求及六类关闭故障注入，并确认 m10 与七个停止超时变异均快速失败。模型/StarRocks 未真实调用，飞书只用渠道替身；`4867801` 的 CI 曾 10/10 通过，修订 head 仍需 CI 与独立复审；没有另一台同二层主机、公司目标平台、仓库 manifest digest、P3-B 恢复或 P3-C 证据。完整命令与最终计数在本提交验证及 PR 记录，不把作者自测称为独立审查。
 
 P1-A 实施事实保留在 [P1-A：SDK 与治理执行核心](docs/superpowers/plans/2026-09-29-p1a-sdk-governed-core.md)。已完成的下一切片记录在 [P1-B：真实只读查询与双入口](docs/superpowers/plans/2026-09-30-p1b-starrocks-dual-entry.md)，顺序为 **SQLGuard → StarRocks Adapter →（真实模型 Gate 0 须已通过）受治理工具/Evidence → PostgreSQL v2 → 共享 ChannelService → Web → 飞书 → 正式入口 → P1 实战退出**。产品边界仍以 `ARCHITECTURE.md` 为唯一权威，当前证据仍以本文为准。
 

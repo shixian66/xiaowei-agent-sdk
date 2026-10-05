@@ -357,6 +357,69 @@ async def test_container_entry_binds_inside_the_container_without_changing_json(
     assert requested == [("0.0.0.0", env.port)]  # noqa: S104 - 断言容器专用绑定
 
 
+async def test_native_runtime_requests_only_the_configured_loopback_binding(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    port = 18501
+    config = runtime.ServeConfig.model_validate(serve_config(port))
+    requested: list[tuple[str, int]] = []
+
+    def reject_after_recording(host: str, port: int) -> socket.socket:
+        requested.append((host, port))
+        raise runtime.ListenError(host, port)
+
+    monkeypatch.setattr(runtime, "_bind", reject_after_recording)
+    with pytest.raises(runtime.ListenError, match="无法监听"):
+        await runtime.serve(config, stop=asyncio.Event())
+
+    assert requested == [("127.0.0.1", port)]
+
+
+async def test_feishu_consumer_cancellation_is_bounded_and_marks_stop_failed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    entered = asyncio.Event()
+    release = asyncio.Event()
+
+    async def resistant_consumer() -> None:
+        entered.set()
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            await release.wait()
+
+    class Gateway:
+        async def drain(self, timeout: float) -> bool:
+            del timeout
+            return True
+
+    class Transport:
+        stops = 0
+
+        async def stop(self) -> bool:
+            self.stops += 1
+            return True
+
+    monkeypatch.setattr(runtime, "_FEISHU_CONSUMER_CANCEL_TIMEOUT_SECONDS", 0.01, raising=False)
+    consumers = asyncio.create_task(resistant_consumer())
+    await entered.wait()
+    transport = Transport()
+    stopping = asyncio.create_task(
+        runtime._stop_feishu(
+            runtime.ServeConfig.model_validate(serve_config(18502, feishu=feishu_config())),
+            runtime._Feishu(Gateway(), transport, consumers),  # type: ignore[arg-type]
+        )
+    )
+    try:
+        assert await asyncio.wait_for(asyncio.shield(stopping), 0.2) is False
+        assert transport.stops == 1
+    finally:
+        release.set()
+        if not stopping.done():
+            stopping.cancel()
+        await asyncio.gather(stopping, consumers, return_exceptions=True)
+
+
 PLAN = Result(("Explain String",), [("- Output => [1:region]",), ("    - SCAN [sales]",)])
 
 
@@ -713,6 +776,31 @@ async def test_stop_during_initial_schema_refresh_cancels_startup(env: Env) -> N
     assert await lock_is_free(env)
 
 
+async def test_schema_close_timeout_is_reported(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class HangingCloseSchema:
+        async def refresh(self) -> None:
+            return None
+
+        async def run(self) -> None:
+            await asyncio.Event().wait()
+
+        async def aclose(self) -> None:
+            await asyncio.Event().wait()
+
+    monkeypatch.setattr(runtime, "_SCHEMA_CLOSE_TIMEOUT_SECONDS", 0.01)
+
+    async def close_schema() -> None:
+        with pytest.raises(runtime.RuntimeCloseError, match="结构刷新关闭超时"):
+            async with runtime._refreshing(  # type: ignore[dict-item]
+                {"synthetic": HangingCloseSchema()}
+            ):
+                pass
+
+    await asyncio.wait_for(close_schema(), 0.2)
+
+
 @dataclass
 class HangingStartChannel(FakeChannel):
     """飞书启动永不完成；只用于证明启动阶段也响应停止信号。"""
@@ -984,6 +1072,30 @@ async def test_feishu_turn_is_drained_before_the_long_connection_closes(env: Env
     assert sent[0] == "oc_alice" and sent[2] == {"receive_id_type": "chat_id"}
 
 
+async def test_stop_during_a_long_feishu_turn_is_bounded_and_fails_closed(env: Env) -> None:
+    config = env.config(
+        shutdown_timeout_seconds=0.05,
+        feishu=feishu_config(stop_timeout_seconds=0.2),
+    )
+    channel = OrderedChannel()
+    gate, entered = asyncio.Event(), asyncio.Event()
+    message = env.scripts.add(
+        "停止时仍在运行",
+        after(gate, tool_call("list_tables", cluster=SR.target_id, **SEARCH_ALL), entered=entered),
+        cite(),
+    )
+
+    async with env.running(config, feishu_channel=channel) as served:
+        assert (await served.ready())["feishu"] == "connected"
+        channel.emit_raw_from_sdk_thread(feishu_event(env, message, "om_stop"))
+        await asyncio.wait_for(entered.wait(), 20)
+        served.stop.set()
+        assert await asyncio.wait_for(served.task, 5) == 1
+
+    assert channel.stops == 1 and channel.sends == []
+    assert await env.scalar("SELECT state FROM xiaowei_request") == "running"
+
+
 async def test_feishu_unavailable_at_startup_leaves_web_serving(env: Env) -> None:
     channel = FakeChannel(start_error=TimeoutError())
     async with env.running(env.config(feishu=feishu_config()), feishu_channel=channel) as served:
@@ -1175,6 +1287,126 @@ async def test_container_config_check_rejects_port_and_stop_grace_mismatches(
         runtime.validate_config(config, container_port=env.port + 1, stop_grace_seconds=minimum)
     with pytest.raises(runtime.ConfigError, match="停止宽限"):
         runtime.validate_config(config, container_port=env.port, stop_grace_seconds=minimum - 1)
+
+
+def test_stop_upper_bound_includes_feishu_consumer_cancellation() -> None:
+    config = runtime.ServeConfig.model_validate(
+        serve_config(
+            18503,
+            shutdown_timeout_seconds=1,
+            feishu=feishu_config(stop_timeout_seconds=7),
+        )
+    )
+
+    assert runtime.stop_upper_bound_seconds(config) == 57
+    assert runtime.minimum_stop_grace_seconds(config) == 62
+
+
+def _runtime_without_dependencies() -> runtime.Runtime:
+    return runtime.Runtime(  # type: ignore[arg-type]
+        engine=None,
+        lock=None,
+        readiness=Readiness(),
+        recovery=None,
+        service=None,
+    )
+
+
+async def test_web_exit_timeout_returns_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class StuckServer:
+        should_exit = False
+
+        def __init__(self, config: object) -> None:
+            del config
+
+        async def serve(self, *, sockets: list[object]) -> None:
+            del sockets
+            await asyncio.Event().wait()
+
+    async def no_feishu(*args: object) -> None:
+        del args
+        return None
+
+    async def cooperative_watch(lock: object, interval: float, stopping: asyncio.Event) -> None:
+        del lock, interval
+        await stopping.wait()
+
+    monkeypatch.setattr(runtime.uvicorn, "Server", StuckServer)
+    monkeypatch.setattr(runtime, "create_web_app", lambda *args, **kwargs: object())
+    monkeypatch.setattr(runtime, "_start_feishu", no_feishu)
+    monkeypatch.setattr(runtime, "_watch", cooperative_watch)
+    monkeypatch.setattr(runtime, "_WEB_EXIT_OVERHEAD_SECONDS", -1)
+    stop = asyncio.Event()
+    stop.set()
+
+    result = await asyncio.wait_for(
+        runtime._serve(
+            runtime.ServeConfig.model_validate(serve_config(18504, shutdown_timeout_seconds=0.1)),
+            _runtime_without_dependencies(),
+            None,  # type: ignore[arg-type]
+            stop,
+            runtime.now,
+            None,
+        ),
+        0.2,
+    )
+
+    assert result == 1
+
+
+async def test_lock_watch_stop_timeout_returns_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    watch_started = asyncio.Event()
+    release_watch = asyncio.Event()
+    watch_finished = asyncio.Event()
+
+    class CooperativeServer:
+        should_exit = False
+
+        def __init__(self, config: object) -> None:
+            del config
+
+        async def serve(self, *, sockets: list[object]) -> None:
+            del sockets
+            while not self.should_exit:
+                await asyncio.sleep(0)
+
+    async def no_feishu(*args: object) -> None:
+        del args
+        return None
+
+    async def stuck_watch(lock: object, interval: float, stopping: asyncio.Event) -> None:
+        del lock, interval, stopping
+        watch_started.set()
+        await release_watch.wait()
+        watch_finished.set()
+
+    monkeypatch.setattr(runtime.uvicorn, "Server", CooperativeServer)
+    monkeypatch.setattr(runtime, "create_web_app", lambda *args, **kwargs: object())
+    monkeypatch.setattr(runtime, "_start_feishu", no_feishu)
+    monkeypatch.setattr(runtime, "_watch", stuck_watch)
+    monkeypatch.setattr(runtime, "_WATCH_STOP_TIMEOUT_SECONDS", 0.01)
+    stop = asyncio.Event()
+    stop.set()
+    try:
+        result = await asyncio.wait_for(
+            runtime._serve(
+                runtime.ServeConfig.model_validate(serve_config(18505)),
+                _runtime_without_dependencies(),
+                None,  # type: ignore[arg-type]
+                stop,
+                runtime.now,
+                None,
+            ),
+            0.2,
+        )
+        assert result == 1 and watch_started.is_set()
+    finally:
+        release_watch.set()
+        await asyncio.wait_for(watch_finished.wait(), 1)
 
 
 # ---- 配置 ----------------------------------------------------------------------------

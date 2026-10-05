@@ -56,6 +56,10 @@ docker compose --env-file .env down
 `down` 不加 `-v`，命名卷会保留。持久卷不是备份。P3-A 尚未完成 A→B 不同镜像升级、回退与
 `pg_dump`/`pg_restore` 恢复演练；在 P3-B 验证前，不把重建同一镜像称为已验证升级。
 
+小维容器当前使用有限的 `on-failure:3`，PostgreSQL 使用 `unless-stopped`。P3-A 尚未验证宿主机或
+Docker 重启后小维是否自动启动；发生这类重启后，操作者须执行 `docker compose --env-file .env up -d`
+并检查 `ps`/就绪状态。P3-B 会实测并确定最终维护步骤，在此之前不承诺自动恢复服务。
+
 ## 摘要密钥与旧库
 
 数据库保存摘要密钥的不可逆指纹，不保存密钥。密钥错配、指纹缺失或损坏时，启动和维护命令都会

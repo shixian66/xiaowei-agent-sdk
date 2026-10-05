@@ -120,6 +120,7 @@ _RUNTIME_CLOSE_BOUND_SECONDS = 25
 _STOP_MARGIN_SECONDS = 5
 _SCHEMA_CLOSE_TIMEOUT_SECONDS = 5
 _FEISHU_START_CANCEL_TIMEOUT_SECONDS = 5
+_FEISHU_CONSUMER_CANCEL_TIMEOUT_SECONDS = 12
 _WEB_EXIT_OVERHEAD_SECONDS = 2
 _WATCH_STOP_TIMEOUT_SECONDS = 12
 
@@ -358,10 +359,16 @@ def validate_config(
 def stop_upper_bound_seconds(config: ServeConfig) -> int:
     """当前停止顺序的保守上界，不含要求操作者额外保留的安全余量。"""
     feishu_stop = 0 if config.feishu is None else math.ceil(config.feishu.stop_timeout_seconds)
+    consumer_cancel = 0 if config.feishu is None else _FEISHU_CONSUMER_CANCEL_TIMEOUT_SECONDS
     channel_and_web = math.ceil(config.shutdown_timeout_seconds) + max(
         feishu_stop, _WEB_EXIT_OVERHEAD_SECONDS
     )
-    return channel_and_web + _WATCH_STOP_TIMEOUT_SECONDS + _RUNTIME_CLOSE_BOUND_SECONDS
+    return (
+        channel_and_web
+        + consumer_cancel
+        + _WATCH_STOP_TIMEOUT_SECONDS
+        + _RUNTIME_CLOSE_BOUND_SECONDS
+    )
 
 
 def minimum_stop_grace_seconds(config: ServeConfig) -> int:
@@ -938,8 +945,11 @@ async def _stop_feishu(config: ServeConfig, feishu: _Feishu) -> bool:
     if not consumers.done():
         drained = await feishu.gateway.drain(config.shutdown_timeout_seconds)
     consumers.cancel()
-    await asyncio.wait({consumers})
-    if not consumers.cancelled() and consumers.exception() is not None:
+    done, _ = await asyncio.wait({consumers}, timeout=_FEISHU_CONSUMER_CANCEL_TIMEOUT_SECONDS)
+    if not done:
+        logger.error("飞书消费者取消超时")
+        drained = False
+    elif not consumers.cancelled() and consumers.exception() is not None:
         logger.error("飞书消费者异常结束：%s", type(consumers.exception()).__name__)
         drained = False
     try:
