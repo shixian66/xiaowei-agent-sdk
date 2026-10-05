@@ -206,7 +206,9 @@ class GatedOutbox(Outbox):
                 self.busy_active -= 1
 
 
-async def settled(env: Env, expected: dict[str, str | tuple[str, str]], timeout: float = 1) -> None:
+async def settled(
+    env: Env, expected: dict[str | None, str | tuple[str, str]], timeout: float = 1
+) -> None:
     """在 ``timeout`` 内等到这些请求符合预期（只看给出的键）：值为 (state, delivery)，或只给
     state（投递状态正在变化时）。"""
     current: dict[str | None, tuple[str, str]] = {}
@@ -274,6 +276,8 @@ async def test_group_turns_run_one_at_a_time_in_acceptance_order(env: Env) -> No
         dm["event"]["message"]["content"] = '{"text": "单聊问题"}'
         await group.gateway.receive(dm)
         await until(lambda: any(r is None for r in group.outbox.replies))
+        # 发送返回后投递状态才落定为 sent：等存储结果，不以替身记下发送为准。
+        await settled(env, {None: ("completed", "sent")})
         assert turns.started == ["东区订单？", "单聊问题"] and env.model_calls(personal) == 1
         assert await states(env) == {
             "om_a": ("running", "pending"),
@@ -407,7 +411,7 @@ async def test_a_full_group_queue_rejects_without_running(env: Env) -> None:
         await send(group, "问二", "om_2", B)
         await send(group, "问三", "om_3", C)
         await until(lambda: any(t.startswith(BUSY) for _, t in replies(group)))
-        assert (await states(env))["om_3"] == ("failed", "sent")
+        await settled(env, {"om_3": ("failed", "sent")})  # 发送返回后才落定为 sent
         hold.set()
         await until(lambda: len(turns.started) == 2)
         await group.gateway.idle()
