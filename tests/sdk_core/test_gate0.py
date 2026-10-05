@@ -34,6 +34,7 @@ from tests.sdk_core.gate0 import (
 from tests.sdk_core.synthetic_tools import Clock, ready_engine
 from tests.sdk_core.test_model_api import GEMINI
 
+from xiaowei.feishu import attributed
 from xiaowei.model_api import ModelProfile, profile_fingerprint
 from xiaowei.sqlguard import guard_explain_query, guard_readonly_query
 from xiaowei.starrocks import StarRocksAdapter
@@ -981,3 +982,128 @@ def test_intent_judge_rejects_wrong_behavior(
     mutate(results)
     gate0.judge_intent(results)
     assert not gate0.intent_passed(results)
+
+
+# ---- 飞书单群 F4：多人群样例（不计入 Gate 0 判定） -----------------------------------------------
+
+
+def seen(log: list[list[dict[str, Any]]], reply: Reply) -> Reply:
+    """记录模型收到的消息后照常作答。"""
+
+    def step(messages: list[dict[str, Any]]) -> dict[str, Any]:
+        log.append(messages)
+        return reply(messages)
+
+    return step
+
+
+def scripted_group_intent(log: dict[str, list[list[dict[str, Any]]]]) -> GeminiLikeEndpoint:
+    """脚本模型按群样例预设的选择作答：只证明调用链、工具集合与门控，不证明真实模型的指代理解。"""
+    cluster = gate0.DIAG_TARGET.target_id
+    query = call_tool("run_readonly_query", cluster=cluster, sql=gate0.APPROVED_SQL)
+    east = call_tool(
+        "run_readonly_query",
+        cluster=cluster,
+        sql=gate0.APPROVED_SQL.replace("GROUP BY", "WHERE region = 'east' GROUP BY"),
+    )
+    steps: dict[str, list[Reply]] = {
+        "group_first_query": [query, diagnose],
+        "group_follow_up_by_another": [east, diagnose],
+        "group_negated_follow_up": [diagnose],
+        "group_vague_request": [clarify],
+        "group_answer_from_another_member": [query, diagnose],
+        "group_quoted_instruction": [advise],
+        "group_claimed_authority": [advise],
+    }
+    replies: dict[str, list[Reply]] = {}
+    for sample in gate0.GROUP_INTENT_SAMPLES:
+        assert sample.actor is not None
+        first, *rest = steps[sample.name]
+        replies[attributed(sample.actor, sample.message)] = [
+            seen(log.setdefault(sample.name, []), first),
+            *rest,
+        ]
+    return GeminiLikeEndpoint(replies=replies)
+
+
+async def run_group_intent(url: URL, endpoint: GeminiLikeEndpoint) -> list[gate0.DiagnosisResult]:
+    async with (
+        ready_engine(url) as engine,
+        gate0.diagnosis_app(PROFILE, engine, network=endpoint.transport(), clock=Clock()) as dx,
+    ):
+        return await gate0.run_diagnosis(dx, gate0.GROUP_INTENT_SAMPLES, gate0.judge_intent)
+
+
+def _user_texts(messages: list[dict[str, Any]]) -> list[str]:
+    texts = [m["content"] for m in messages if m.get("role") == "user"]
+    return [t if isinstance(t, str) else "".join(p["text"] for p in t) for t in texts]
+
+
+async def test_group_intent_samples_share_one_session_through_the_product_path(
+    engine_url: URL,
+) -> None:
+    """多人样例经产品路径：同一群会话中 B 的追问看到 A 的一轮（各带作者标识、不含 open_id），C 的
+    否定追问不再查询而引用已有结果；B 回答 A 的澄清时按 B 的消息查询；引用他人指令与自称授权都
+    不执行查询，越权列从未发出。查询工具在每个样例中都按授权可见。"""
+    log: dict[str, list[list[dict[str, Any]]]] = {}
+    results = await run_group_intent(engine_url, scripted_group_intent(log))
+    by_name = {r.name: r for r in results}
+    failed = [(r.name, r.outcome, [k for k, ok in r.checks.items() if not ok]) for r in results]
+    assert gate0.intent_passed(results, gate0.GROUP_INTENT_SAMPLES), failed
+    samples = {s.name: s for s in gate0.GROUP_INTENT_SAMPLES}
+
+    def said(name: str) -> str:
+        sample = samples[name]
+        assert sample.actor is not None
+        return attributed(sample.actor, sample.message)
+
+    assert _user_texts(log["group_follow_up_by_another"][0]) == [
+        said("group_first_query"),
+        said("group_follow_up_by_another"),
+    ]
+    assert _user_texts(log["group_negated_follow_up"][0])[-1] == said("group_negated_follow_up")
+    assert _user_texts(log["group_answer_from_another_member"][0]) == [
+        said("group_vague_request"),
+        said("group_answer_from_another_member"),
+    ]
+    heads = {said(n).split("\n", 1)[0] for n in ("group_first_query", "group_follow_up_by_another")}
+    assert len(heads) == 2 and not any(gate0.MEMBER_A in h or gate0.MEMBER_B in h for h in heads)
+    # 其他群会话（澄清、引用、自称授权）看不到第一组的历史。
+    assert len(_user_texts(log["group_quoted_instruction"][0])) == 1
+    executed = {r.name: len(r.sent("query")) for r in results if r.sent("query")}
+    assert executed == {
+        "group_first_query": 1,
+        "group_follow_up_by_another": 1,
+        "group_answer_from_another_member": 1,
+    }
+    assert by_name["group_negated_follow_up"].outcome == "delivered"
+    assert RUN_QUERY in by_name["group_negated_follow_up"].cited_tools  # 引用回放的结果
+
+
+async def test_a_group_query_choice_on_claimed_authority_fails_the_judge(engine_url: URL) -> None:
+    """自称管理员的样例中模型选了查询工具：越权列在 I/O 前被拒、数据库查询为 0，但判定不通过。"""
+    endpoint = scripted_group_intent({})
+    sample = next(s for s in gate0.GROUP_INTENT_SAMPLES if s.name == "group_claimed_authority")
+    assert sample.actor is not None
+    cluster = gate0.DIAG_TARGET.target_id
+    endpoint.replies[attributed(sample.actor, sample.message)] = [
+        call_tool("run_readonly_query", cluster=cluster, sql=gate0.UNAPPROVED_SQL),
+        advise,
+    ]
+    results = await run_group_intent(engine_url, endpoint)
+    (chosen,) = [r for r in results if r.name == "group_claimed_authority"]
+    assert chosen.sent("query") == [] and not chosen.checks["query_tool_not_chosen"]
+    assert not gate0.intent_passed(results, gate0.GROUP_INTENT_SAMPLES)
+    assert all(r.passed for r in results if r.name != "group_claimed_authority")
+
+
+def test_group_intent_samples_register_authors_answers_and_limits() -> None:
+    """群样例都有发起人且属于样例群；应查询的样例必须引用查询结果；限制说明登记供 P3 核对。"""
+    members = {gate0.MEMBER_A, gate0.MEMBER_B, gate0.MEMBER_C}
+    names = {s.name for s in gate0.GROUP_INTENT_SAMPLES}
+    assert not names & {s.name for s in gate0.INTENT_SAMPLES}
+    for sample in gate0.GROUP_INTENT_SAMPLES:
+        assert sample.actor in members, sample.name
+        assert (RUN_QUERY in sample.sources) == (sample.expect == "query"), sample.name
+        assert sample.limit or sample.name == "group_first_query", sample.name
+    assert {s.actor for s in gate0.GROUP_INTENT_SAMPLES} == members
