@@ -5,6 +5,7 @@ SQLAlchemySession + 隔离的真实 PostgreSQL；授权用产品的 ``StaticAcce
 是可控替身（F2 才接入 SDK 的成员接口）。不涉及群入口协议、排队与原消息发送（F2/F3）。
 """
 
+import asyncio
 import hashlib
 import hmac
 import json
@@ -72,15 +73,21 @@ WHEN = datetime(2026, 10, 5, tzinfo=UTC)
 
 @dataclass
 class Members:
-    """成员目录替身：``mode`` 为 ok（按 ``current``）、error（抛出）或 unknown（不返回 True）。"""
+    """成员目录替身：``mode`` 为 ok（按 ``current``）、error（抛出）或 unknown（不返回 True）。
+    ``failing`` 中的成员查询抛出，``holds`` 中的成员查询挂起到对应事件被设置。"""
 
     current: set[str] = field(default_factory=lambda: {A, B})
     mode: str = "ok"
     checks: list[tuple[str, str]] = field(default_factory=list)
+    failing: set[str] = field(default_factory=set)
+    holds: dict[str, asyncio.Event] = field(default_factory=dict)
 
     async def __call__(self, chat_id: str, open_id: str) -> bool:
         self.checks.append((chat_id, open_id))
-        if self.mode == "error":
+        hold = self.holds.get(open_id)
+        if hold is not None:
+            await hold.wait()
+        if self.mode == "error" or open_id in self.failing:
             raise RuntimeError("directory unavailable")
         if self.mode == "unknown":
             return None  # type: ignore[return-value]
