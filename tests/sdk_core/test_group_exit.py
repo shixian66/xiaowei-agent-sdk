@@ -198,8 +198,9 @@ async def test_members_share_one_task_across_clusters_diagnosis_clarification_an
     assert await rows(env) == {f"om_{i}": ("completed", "sent", None) for i in range(1, 6)}
     assert [to for to, _ in replies(channel)] == [f"om_{i}" for i in range(1, 6)]
 
-    # 5. 重启：新进程、新长连接；C 续问回放全部五轮（各带作者标识），只引用历史，不执行任何业务
-    # SQL，也不重跑之前的轮次。启动时的结构快照刷新不计入 ``statements``。
+    # 5. 重启：同一测试进程内新建 runtime 实例与长连接替身。C 续问回放全部五轮（各带作者标识），
+    # 只引用历史，不执行任何业务 SQL，也不重跑之前的轮次。
+    # 启动时的结构快照刷新不计入 ``statements``。
     resumed = env.scripts.add(attributed(C, "汇总刚才两个集群的结果"), cite("sr-a 较低"))
     restarted = GroupChannel(members=[A, B, C])
     calls_before = {m: len(c) for m, c in env.scripts.calls.items()}
