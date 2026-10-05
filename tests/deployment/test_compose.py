@@ -6,7 +6,6 @@ import json
 import os
 import shutil
 import socket
-import ssl
 import subprocess
 import tarfile
 import time
@@ -17,6 +16,7 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import quote
 
+import certifi
 import pytest
 import yaml
 from tests.deployment.conftest import docker
@@ -146,9 +146,7 @@ def _runtime_config(directory: Path, port: int) -> None:
     (directory / "xiaowei.json").write_text(
         json.dumps(config, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
     )
-    default_ca = ssl.get_default_verify_paths().cafile
-    assert default_ca is not None
-    shutil.copyfile(default_ca, directory / "certs/ca.pem")
+    shutil.copyfile(certifi.where(), directory / "certs/ca.pem")
 
 
 def _container_state(container_id: str) -> dict[str, Any]:
