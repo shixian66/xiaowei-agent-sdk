@@ -43,6 +43,7 @@ from tests.sdk_core.test_runtime import (
     MODEL_ENV,
     feishu_config,
     free_port,
+    serve_config,
     statements,
     until,
 )
@@ -50,7 +51,7 @@ from tests.sdk_core.test_runtime import Env as RuntimeEnv
 
 from xiaowei import feishu as feishu_module
 from xiaowei import runtime
-from xiaowei.channel import AccessDeniedError
+from xiaowei.channel import AccessDeniedError, GroupScope
 from xiaowei.channel_store import RequestUnavailableError
 from xiaowei.config import FeishuConfig, FeishuGroupConfig
 from xiaowei.feishu import (
@@ -188,6 +189,12 @@ async def request_rows(env: Env) -> list[tuple[Any, ...]]:
         "SELECT request_key IS NOT NULL, owner_kind, subject_id, mode, state, delivery,"
         " reply_chat_id, reply_message_id FROM xiaowei_request ORDER BY created_at"
     )
+
+
+async def states(env: Env) -> dict[str, tuple[str, str]]:
+    """原消息编号 → (state, delivery)；同一时刻接受的请求不能按 created_at 排序区分。"""
+    rows = await env.rows("SELECT reply_message_id, state, delivery FROM xiaowei_request")
+    return {row[0]: (row[1], row[2]) for row in rows}
 
 
 # ---- 成功链与作者标识 ------------------------------------------------------------------------
@@ -373,6 +380,104 @@ async def test_redelivered_events_run_and_reply_once(env: Env) -> None:
         await group.gateway.receive(event)
         await group.gateway.idle()
     assert env.model_calls(asked) == 2 and len(group.outbox.sent) == 1
+    assert len(env.adapter.calls) == 1
+    # 重投不放大成员目录 I/O：仍只有开始前与发送前两次。
+    assert env.members.checks == [(CHAT, A), (CHAT, A)]
+
+
+@dataclass
+class HeldOutbox(Outbox):
+    """第一条发送在 ``release`` 之前挂起：此时投递状态为 sending。"""
+
+    sending: asyncio.Event = field(default_factory=asyncio.Event)
+    release: asyncio.Event = field(default_factory=asyncio.Event)
+
+    async def __call__(self, chat_id: str, text: str, *, reply_to: str | None = None) -> Any:
+        if not self.sending.is_set():
+            self.sending.set()
+            await self.release.wait()
+        return await super().__call__(chat_id, text, reply_to=reply_to)
+
+
+async def test_redelivery_while_queued_running_or_sending_never_touches_the_directory(
+    env: Env,
+) -> None:
+    """accepted（排队）、running（运行中）与 sending（发送中）的重投直接返回：
+    不查目录、不发送。"""
+    turn_entered, turn_release = asyncio.Event(), asyncio.Event()
+    run_turn = env.app.run_turn
+
+    async def held(*args: Any) -> Any:
+        if not turn_entered.is_set():
+            turn_entered.set()
+            await turn_release.wait()
+        return await run_turn(*args)
+
+    env.app.run_turn = held  # type: ignore[method-assign]
+    outbox = HeldOutbox()
+    async with running(env, outbox) as group:
+        env.scripts.add(
+            attributed(A, "东区订单？"), tool_call("order_total", region="east"), cite()
+        )
+        env.scripts.add(attributed(B, "西区呢？"), clarify())
+        first = group.event("东区订单？", message_id="om_run")
+        second = group.event("西区呢？", sender=B, message_id="om_wait")
+        await group.gateway.receive(first)
+        async with asyncio.timeout(5):
+            await turn_entered.wait()
+        await group.gateway.receive(second)  # consumer_count=1：在队列中等待
+        assert await states(env) == {
+            "om_run": ("running", "pending"),
+            "om_wait": ("accepted", "pending"),
+        }
+        await group.gateway.receive(first)
+        await group.gateway.receive(second)
+        assert env.members.checks == [(CHAT, A)] and outbox.sent == []
+        turn_release.set()
+        async with asyncio.timeout(5):
+            await outbox.sending.wait()
+        assert (await states(env))["om_run"] == ("completed", "sending")
+        await group.gateway.receive(first)
+        assert env.members.checks == [(CHAT, A), (CHAT, A)] and outbox.sent == []
+        outbox.release.set()
+        await group.gateway.idle()
+    assert await states(env) == {"om_run": ("completed", "sent"), "om_wait": ("completed", "sent")}
+    assert len(outbox.sent) == 2 and len(env.adapter.calls) == 1
+    assert env.members.checks == [(CHAT, A), (CHAT, A), (CHAT, B), (CHAT, B)]
+
+
+async def test_a_pending_result_is_delivered_once_on_redelivery_after_a_membership_check(
+    env: Env,
+) -> None:
+    """completed/pending（发送前离群）与 failed/pending（开始前不是成员）：成员复核通过后，重投各
+    竞争一次首次发送，回复原消息；之后的重投不再查目录。"""
+    env.members.current = {B}
+    async with running(env) as group:
+
+        def leave(call: Any) -> Any:
+            env.members.current.discard(B)
+            return cite()(call)
+
+        env.scripts.add(attributed(B, "东区订单？"), tool_call("order_total", region="east"), leave)
+        answered = await group.ask("东区订单？", sender=B, message_id="om_left")
+        refused = await group.ask("西区订单？", sender=A, message_id="om_outsider")
+        assert await states(env) == {
+            "om_left": ("completed", "pending"),
+            "om_outsider": ("failed", "pending"),
+        }
+        assert group.outbox.sent == [] and len(env.members.checks) == 4
+        env.members.current = {A, B}
+        for event in (answered, refused, answered, refused):
+            await group.gateway.receive(event)
+            await group.gateway.idle()
+    assert group.outbox.replies == ["om_left", "om_outsider"]
+    assert "来源 local/order_total" in group.outbox.sent[0][1]
+    assert "未能确认你当前的使用权限或群成员身份" in group.outbox.sent[1][1]
+    assert await states(env) == {
+        "om_left": ("completed", "sent"),
+        "om_outsider": ("failed", "sent"),
+    }
+    assert len(env.members.checks) == 6 and len(env.adapter.calls) == 1
 
 
 async def test_the_same_message_from_another_sender_is_a_conflict(env: Env) -> None:
@@ -398,9 +503,10 @@ async def test_unsuccessful_replies_are_recorded_and_never_retried(
             attributed(A, "东区订单？"), tool_call("order_total", region="east"), cite()
         )
         event = await group.ask("东区订单？", message_id="om_fail")
-        await group.gateway.receive(event)  # 重投不重发、不重跑
+        await group.gateway.receive(event)  # 重投不重发、不重跑，也不查成员目录
         await group.gateway.idle()
     assert len(group.outbox.sent) == 1 and env.model_calls(asked) == 2
+    assert len(env.members.checks) == 2
     assert (await request_rows(env))[0][5] == expected
 
 
@@ -549,6 +655,60 @@ def test_group_configuration_is_bounded() -> None:
     ):
         with pytest.raises(ValidationError):
             FeishuGroupConfig(**{**good, **bad})
+
+
+LONG_APP = "cli_" + "a" * 64  # app_id 的最大合法长度 68
+LONG_CHAT = "oc_" + "c" * 64  # chat_id 的最大合法长度 67
+# 规范群 owner 是 JSON 数组 ["app","tenant","chat"]：除三个值外另有 10 个字符。
+FITTING_TENANT = "t" * (200 - 10 - len(LONG_APP) - len(LONG_CHAT))
+
+
+def owner_config(tenant: str) -> dict[str, Any]:
+    group = {
+        "chat_id": LONG_CHAT,
+        "tools": sorted(QUERY_TOOLS),
+        "member_page_size": 50,
+        "member_max_pages": 2,
+        "member_timeout_seconds": 2,
+    }
+    return serve_config(8501, feishu=feishu_config(app_id=LONG_APP, tenant_key=tenant, group=group))
+
+
+def test_the_group_owner_must_fit_its_stored_key() -> None:
+    """群 owner 的规范编码不超过 Owner.id 上限：恰好 200 时成功，超出（含转义后变长）时配置失败。"""
+    config = runtime.ServeConfig.model_validate(owner_config(FITTING_TENANT))
+    feishu = config.feishu
+    assert feishu is not None and feishu.group is not None
+    scope = GroupScope(app_id=feishu.app_id, tenant_key=feishu.tenant_key, chat_id=LONG_CHAT)
+    assert len(scope.owner.id) == 200
+    for tenant in (FITTING_TENANT + "t", "租" * 24):
+        with pytest.raises(ValidationError):
+            runtime.ServeConfig.model_validate(owner_config(tenant))
+        with pytest.raises(ValidationError):
+            group_config(
+                app_id=LONG_APP,
+                tenant_key=tenant,
+                group={
+                    "chat_id": LONG_CHAT,
+                    "tools": sorted(TOOLS),
+                    "member_page_size": 50,
+                    "member_max_pages": 2,
+                    "member_timeout_seconds": 2,
+                },
+            )
+
+
+def test_an_unencodable_group_owner_fails_at_config_load(tmp_path: Any) -> None:
+    """群入口（serve）与群重发（requests resend --group）都只接受 ``load_config`` 的结果：超限在
+    加载时以固定说明失败，不回显应用、租户或群标识。"""
+    path = tmp_path / "xiaowei.json"
+    path.write_text(json.dumps(owner_config(FITTING_TENANT + "t")), encoding="utf-8")
+    with pytest.raises(runtime.ConfigError) as caught:
+        runtime.load_config(path)
+    message = str(caught.value)
+    assert message.startswith("配置不符合要求：feishu")
+    for value in (LONG_APP, FITTING_TENANT, LONG_CHAT):
+        assert value not in message
 
 
 # ---- 正式入口：runtime.serve / runtime.resend ----------------------------------------------

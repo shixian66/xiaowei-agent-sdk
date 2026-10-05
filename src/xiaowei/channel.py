@@ -23,7 +23,6 @@ HTTP、飞书 SDK、数据库客户端与凭据都不进入 RunContext。
 """
 
 import asyncio
-import json
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass
 from typing import Protocol
@@ -54,6 +53,7 @@ from xiaowei.models import (
     RunContext,
     ToolId,
     TurnAnswer,
+    group_owner,
 )
 
 # 应用层失败原因到存储失败码（闭集）的映射；存储只保存类别，渠道据此给固定回执。
@@ -105,10 +105,7 @@ class GroupScope(_Trusted):
 
     @property
     def owner(self) -> Owner:
-        return Owner(
-            kind="group",
-            id=json.dumps([self.app_id, self.tenant_key, self.chat_id], separators=(",", ":")),
-        )
+        return group_owner(self.app_id, self.tenant_key, self.chat_id)
 
 
 def _group_conversation(channel: Channel, conversation_id: str, group: GroupScope | None) -> None:

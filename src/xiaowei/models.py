@@ -4,6 +4,7 @@
 额外字段或字段类型放入客户端、连接或凭据；模型可提交的只有 ``AgentAnswer``。
 """
 
+import json
 from datetime import datetime
 from typing import Annotated, Literal
 
@@ -47,6 +48,12 @@ class Owner(_Trusted):
 
     kind: OwnerKind
     id: Label
+
+
+def group_owner(app_id: str, tenant_key: str, chat_id: str) -> Owner:
+    """指定群的规范 owner：``[app_id, tenant_key, chat_id]`` 的紧凑 JSON（已落库的归属键，不可改动
+    编码）。编码超过 ``Owner.id`` 上限时抛出 ``ValidationError``；配置加载时即据此拒绝。"""
+    return Owner(kind="group", id=json.dumps([app_id, tenant_key, chat_id], separators=(",", ":")))
 
 
 class Identity(_Trusted):

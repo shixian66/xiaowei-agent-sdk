@@ -80,6 +80,8 @@ from xiaowei.models import Delivery
 
 logger = logging.getLogger(__name__)
 
+_FINISHED = frozenset({"completed", "failed", "interrupted"})
+
 EMPTY_COMMAND = "命令后需要写明问题，例如：/查询 昨天各地区订单数，或 /诊断 这条 SQL 为什么慢"
 NEW_SESSION = "已新建会话，之前的对话不再作为上下文"
 NEW_SESSION_BUSY = "当前会话正在处理消息，请稍后再新建会话"
@@ -496,8 +498,11 @@ class FeishuGateway:
         receipt = await self._service.accept(self._request(message, mode, body))
         job = _Job(receipt, self._ref(message), message.chat_id, self._reply_to(message))
         if not receipt.created:
-            # 重投：只对已结束且投递仍为 pending 的记录尝试首次发送，不再运行。
-            await self._deliver(job)
+            # 重投不再运行。只有已结束且投递仍为 pending 的记录进入首次发送竞争（交付时复核当前权限
+            # 与成员资格）；排队、运行、发送中或投递已落定的记录直接返回，不产生目录查询或发送。
+            record = receipt.record
+            if record.state in _FINISHED and record.delivery == "pending":
+                await self._deliver(job)
             return
         try:
             self._queue.put_nowait(job)
@@ -765,8 +770,9 @@ class LarkTransport:
     async def is_member(self, chat_id: str, open_id: str) -> bool:
         """当前成员资格：SDK ``get_chat_members(force=True)`` 绕过缓存，按配置的页数与期限查询。
 
-        找到发送者才返回 True；名单中没有（含群规模超过上界时的部分名单）返回 False；查询失败
-        或超时原样抛出（授权方按拒绝处理）。超时会取消 SDK 循环上的查询。
+        找到发送者才返回 True（部分名单中找到也是本次成员证据）；名单中没有返回 False，只表示无法
+        确认（群规模超过上界时的部分名单不证明其不在群）；查询失败或超时原样抛出（授权方按拒绝
+        处理）。超时会取消 SDK 循环上的查询。
         """
         group = self._config.group
         if group is None or chat_id != group.chat_id:

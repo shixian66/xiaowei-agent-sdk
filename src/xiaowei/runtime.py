@@ -328,8 +328,9 @@ def _app_config(config: ServeConfig) -> AppConfig:
 
 
 MemberCheck = Callable[[str, str], Awaitable[bool]]
-"""``(chat_id, open_id) -> 是否当前成员``：只有找到发送者才返回 True；未找到、名单不完整、
-失败或超时都不能返回 True（调用方把异常也当作拒绝）。"""
+"""``(chat_id, open_id) -> 是否当前成员``：在取到的名单（可能因页数上限只是部分名单）中找到
+发送者才返回 True，这是本次成员证据；未找到只表示无法确认、不证明其不在群，与失败、超时
+一样不能返回 True（调用方把异常也当作拒绝）。"""
 
 
 @dataclass(frozen=True)
