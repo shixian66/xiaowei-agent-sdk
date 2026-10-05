@@ -12,6 +12,7 @@
 """
 
 import asyncio
+import json
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
@@ -45,6 +46,7 @@ from xiaowei.storage import hold_instance_lock
 pytestmark = pytest.mark.loopback
 
 BUSY = "系统繁忙，本轮未执行"
+BUSY_REPLY = "系统繁忙，本轮未执行，请稍后用新消息重试"
 DENIED = "未能确认你当前的使用权限或群成员身份"
 
 
@@ -207,20 +209,42 @@ class GatedOutbox(Outbox):
 async def settled(env: Env, expected: dict[str, str | tuple[str, str]], timeout: float = 1) -> None:
     """在 ``timeout`` 内等到这些请求符合预期（只看给出的键）：值为 (state, delivery)，或只给
     state（投递状态正在变化时）。"""
-    async with asyncio.timeout(timeout):
-        while True:
-            current = await states(env)
-            if all(
-                current.get(key) == value
-                or (isinstance(value, str) and current.get(key, ("",))[0] == value)
-                for key, value in expected.items()
-            ):
-                return
-            await asyncio.sleep(0.02)
+    current: dict[str | None, tuple[str, str]] = {}
+    try:
+        async with asyncio.timeout(timeout):
+            while True:
+                current = await states(env)
+                if all(
+                    current.get(key) == value
+                    or (isinstance(value, str) and current.get(key, ("",))[0] == value)
+                    for key, value in expected.items()
+                ):
+                    return
+                await asyncio.sleep(0.02)
+    except TimeoutError:
+        raise AssertionError(f"期望 {expected}，实际 {current}") from None
 
 
 def texts_for(group: Group, reply_to: str) -> list[str]:
     return [t for r, t in replies(group) if r == reply_to]
+
+
+async def dm(group: Group, question: str, message_id: str) -> None:
+    """单聊用户 ``ou_alice_dm`` 的一条私聊（另一会话）。"""
+    event = group.event(question, sender="ou_alice_dm", message_id=message_id)
+    event["event"]["message"].update(
+        chat_type="p2p", chat_id="oc_dm", content=json.dumps({"text": question})
+    )
+    await group.gateway.receive(event)
+
+
+async def sdk_items(env: Env) -> int:
+    rows = await env.rows("SELECT count(*) FROM agent_messages")
+    return int(rows[0][0])
+
+
+def member_checks(env: Env, who: str) -> int:
+    return sum(actor == who for _, actor in env.members.checks)
 
 
 # ---- 按接受顺序串行 ------------------------------------------------------------------------
@@ -515,6 +539,258 @@ async def test_expiry_receipts_have_bounded_tasks_and_concurrency(env: Env) -> N
     assert notices(group) == waiting
 
 
+# ---- 到期项：按请求去重、统一提示门与回执上限 ------------------------------------------------
+
+
+async def test_a_redelivered_expired_request_still_waits_for_its_notice(env: Env) -> None:
+    """B 的排队提示仍在发送时到期并已结算，此时平台重投 B：重投不发送回执、不查成员目录；提示
+    尝试结束后原到期任务只回复一次，本地发送顺序为提示在前。"""
+    outbox = GatedOutbox()
+    async with queue(env, outbox, group={"max_wait_seconds": 1}) as (group, turns):
+        hold, release, receiving = await held_notice(group, turns, outbox, env)
+        env.clock.advance(2)
+        await settled(env, {"om_2": ("failed", "pending")})
+        await group.gateway.receive(group.event("二", sender=B, message_id="om_2"))
+        await asyncio.sleep(0.3)
+        assert texts_for(group, "om_2") == [] and member_checks(env, B) == 0
+        release.set()
+        await receiving
+        await settled(env, {"om_2": ("failed", "sent")})
+        hold.set()
+        await group.gateway.idle()
+    assert texts_for(group, "om_2")[0] == QUEUED and len(texts_for(group, "om_2")) == 2
+    assert texts_for(group, "om_2")[1].startswith(BUSY) and member_checks(env, B) == 1
+    assert turns.started == ["一"] and env.adapter.calls == []
+
+
+async def test_redeliveries_during_an_expiry_do_not_check_membership_or_send_again(
+    env: Env,
+) -> None:
+    """原到期任务的成员查询挂起时 B 被重投 3 次：成员目录仍只查 1 次，回执只发 1 次。"""
+    release = asyncio.Event()
+    async with queue(env, group={"max_wait_seconds": 1}) as (group, turns):
+        env.scripts.add(attributed(A, "一"), clarify())
+        expired = env.scripts.add(attributed(B, "二"), clarify())
+        hold = turns.hold("一")
+        await send(group, "一", "om_1")
+        await turns.wait_entered("一")
+        event = await send(group, "二", "om_2", B)
+        env.members.holds[B] = release
+        env.clock.advance(2)
+        await until(lambda: member_checks(env, B) == 1)
+        redeliveries = [asyncio.create_task(group.gateway.receive(event)) for _ in range(3)]
+        await asyncio.sleep(0.3)
+        observed = member_checks(env, B)
+        release.set()
+        await asyncio.gather(*redeliveries)
+        assert observed == 1 and await sdk_items(env) == 0
+        await settled(env, {"om_2": ("failed", "sent")})
+        hold.set()
+        await group.gateway.idle()
+    assert [t for t in texts_for(group, "om_2") if t.startswith(BUSY)] == [BUSY_REPLY]
+    assert member_checks(env, B) == 1 and env.model_calls(expired) == 0
+    assert env.adapter.calls == []
+
+
+async def test_redeliveries_keep_the_expiry_receipt_bound(env: Env) -> None:
+    """6 条到期回执中 4 条在发送、2 条等名额时，6 条全部被重投：同时在途的回执仍最多 4 条，
+    重投不查成员目录；放行后每条只回复一次。"""
+    outbox = GatedOutbox()
+    release = outbox.gate(ANY, BUSY)
+    waiting = [f"om_w{i}" for i in range(6)]
+    async with queue(
+        env, outbox, queue_size=8, group={"max_waiting": 6, "max_wait_seconds": 1}
+    ) as (group, turns):
+        env.scripts.add(attributed(A, "一"), clarify())
+        hold = turns.hold("一")
+        await send(group, "一", "om_1")
+        await turns.wait_entered("一")
+        events = [await send(group, "等待", message_id, B) for message_id in waiting]
+        env.clock.advance(2)
+        await until(lambda: outbox.busy_active == 4)
+        checks = member_checks(env, B)
+        redeliveries = [asyncio.create_task(group.gateway.receive(event)) for event in events]
+        await asyncio.sleep(0.3)
+        observed = (outbox.busy_peak, member_checks(env, B) - checks)
+        release.set()
+        await asyncio.gather(*redeliveries)
+        assert observed == (4, 0)
+        await settled(env, dict.fromkeys(waiting, ("failed", "sent")))
+        hold.set()
+        await group.gateway.idle()
+    assert sorted(r for r, t in replies(group) if t.startswith(BUSY)) == waiting
+    assert outbox.busy_peak == 4 and member_checks(env, B) == 6
+
+
+async def test_a_head_expiring_before_dequeue_shares_the_receipt_bound(env: Env) -> None:
+    """唯一的消费者被单聊占用：群队头与 4 条等待都在共享队列之外按期限结算；5 条回执同时在途
+    最多 4 条，单聊结束后消费者不运行任何过期项。"""
+    outbox = GatedOutbox()
+    release = outbox.gate(ANY, BUSY)
+    waiting = ["om_head", *(f"om_w{i}" for i in range(4))]
+    async with queue(
+        env,
+        outbox,
+        consumer_count=1,
+        queue_size=8,
+        group={"max_wait_seconds": 1, "max_waiting": 4},
+    ) as (group, turns):
+        env.scripts.add("私聊长任务", clarify())
+        hold = turns.hold("私聊长任务")
+        await dm(group, "私聊长任务", "om_dm")
+        await turns.wait_entered("私聊长任务")
+        for message_id in waiting:
+            await send(group, "群请求", message_id, B)
+        env.clock.advance(2)
+        await settled(env, dict.fromkeys(waiting, "failed"))
+        await until(lambda: outbox.busy_active == 4)
+        hold.set()
+        await settled(env, {None: ("completed", "sent")})
+        await asyncio.sleep(0.3)
+        assert outbox.busy_peak == 4
+        release.set()
+        await settled(env, dict.fromkeys(waiting, ("failed", "sent")))
+        await group.gateway.idle()
+    assert turns.started == ["私聊长任务"] and env.adapter.calls == []
+    assert sorted(r for r, t in replies(group) if t.startswith(BUSY)) == sorted(waiting)
+
+
+async def test_an_expiry_withheld_for_membership_can_be_redelivered_once_after_recovery(
+    env: Env,
+) -> None:
+    """到期回执发送前无法确认 B 的成员资格：记为 failed/pending、不发送。原到期任务结束后成员
+    恢复，平台重投 B：按 F2 的首次发送竞争复核成员并回复一次；之后的重投不查目录、不发送。"""
+    async with queue(env, group={"max_wait_seconds": 1}) as (group, turns):
+        env.scripts.add(attributed(A, "一"), clarify())
+        hold = turns.hold("一")
+        await send(group, "一", "om_1")
+        await turns.wait_entered("一")
+        event = await send(group, "二", "om_2", B)
+        env.members.failing.add(B)
+        env.clock.advance(2)
+        await until(lambda: member_checks(env, B) == 1)
+        hold.set()
+        await group.gateway.idle()  # 队头与原到期任务都已结束
+        assert (await states(env))["om_2"] == ("failed", "pending")
+        env.members.failing.discard(B)
+        await group.gateway.receive(event)
+        assert (await states(env))["om_2"] == ("failed", "sent")
+        await group.gateway.receive(event)
+    assert texts_for(group, "om_2")[0] == QUEUED
+    assert [t for t in texts_for(group, "om_2") if t.startswith(BUSY)] == [BUSY_REPLY]
+    assert member_checks(env, B) == 2 and turns.started == ["一"]
+
+
+@pytest.mark.parametrize("check", [60, 0.05], ids=["at_start", "by_sweep"])
+async def test_a_notice_ending_as_the_wait_expires_runs_or_settles_only_once(
+    env: Env, check: float
+) -> None:
+    """A 已结束，B 的提示挂起期间等待到期，然后提示尝试结束：提示的放行、到期检查与消费者开始
+    运行之间只有一个结果。检查间隔很长时由消费者开始前的核对结算，很短时与定时检查竞争；
+    两种情况 B 都不运行、只结算并回复一次。"""
+    outbox = GatedOutbox()
+    async with queue(env, outbox, group={"wait_check_seconds": check}) as (group, turns):
+        hold, release, receiving = await held_notice(group, turns, outbox, env)
+        expired = env.scripts.add(attributed(B, "二"), clarify())
+        hold.set()
+        await until(lambda: "om_1" in outbox.replies)
+        env.clock.advance(61)
+        release.set()
+        await receiving
+        await settled(env, {"om_2": ("failed", "sent")})
+        await asyncio.sleep(0.2)
+        await group.gateway.idle()
+    assert turns.started == ["一"] and env.model_calls(expired) == 0
+    assert texts_for(group, "om_2") == [QUEUED, BUSY_REPLY] and member_checks(env, B) == 1
+
+
+async def test_a_started_waiter_is_not_settled_when_its_wait_runs_out(env: Env) -> None:
+    """B 已开始运行后超过等待期限：定时检查不再管理它，不结算为繁忙、不发回执，B 正常完成。"""
+    async with queue(env) as (group, turns):
+        env.scripts.add(attributed(A, "一"), clarify())
+        env.scripts.add(attributed(B, "二"), clarify())
+        await send(group, "一", "om_1")
+        hold = turns.hold("二")
+        await send(group, "二", "om_2", B)
+        await turns.wait_entered("二")
+        env.clock.advance(61)
+        await asyncio.sleep(0.3)
+        assert (await states(env))["om_2"] == ("running", "pending")
+        hold.set()
+        await settled(env, {"om_2": ("completed", "sent")})
+        await group.gateway.idle()
+    assert not any(t.startswith(BUSY) for t in texts_for(group, "om_2"))
+
+
+# ---- 尚未开始的群请求：期限管理与消费者占用 ------------------------------------------------
+
+
+async def test_a_waiter_whose_notice_is_sending_still_expires_after_the_head_ends(
+    env: Env,
+) -> None:
+    """A 结束时 B 的提示仍在发送：B 仍受期限管理，到期后在检查间隔内结算为 failed/busy，
+    回执等提示尝试结束；B 不运行，模型、SDK Session 与业务 Adapter 均无调用。"""
+    outbox = GatedOutbox()
+    async with queue(env, outbox, group={"max_wait_seconds": 1}) as (group, turns):
+        hold, release, receiving = await held_notice(group, turns, outbox, env)
+        expired = env.scripts.add(attributed(B, "二"), clarify())
+        hold.set()
+        await until(lambda: "om_1" in outbox.replies)
+        items = await sdk_items(env)  # A 的一轮
+        env.clock.advance(2)
+        await settled(env, {"om_2": ("failed", "pending")})
+        assert texts_for(group, "om_2") == []
+        release.set()
+        await receiving
+        await settled(env, {"om_2": ("failed", "sent")})
+        await group.gateway.idle()
+    assert texts_for(group, "om_2") == [QUEUED, BUSY_REPLY]
+    assert turns.started == ["一"] and env.model_calls(expired) == 0
+    assert env.adapter.calls == [] and await sdk_items(env) == items
+
+
+async def test_a_notice_wait_does_not_occupy_the_only_consumer(env: Env) -> None:
+    """``consumer_count=1``：A 结束后 B 的提示仍在发送，此时到达的单聊照常运行；提示尝试结束后
+    B 才运行。"""
+    outbox = GatedOutbox()
+    async with queue(env, outbox, consumer_count=1) as (group, turns):
+        hold, release, receiving = await held_notice(group, turns, outbox, env)
+        env.scripts.add(attributed(B, "二"), clarify())
+        env.scripts.add("私聊", clarify())
+        hold.set()
+        await until(lambda: "om_1" in outbox.replies)
+        await dm(group, "私聊", "om_dm")
+        await settled(env, {None: ("completed", "sent")})
+        assert turns.started == ["一", "私聊"]
+        release.set()
+        await receiving
+        await settled(env, {"om_2": ("completed", "sent")})
+        await group.gateway.idle()
+    assert turns.started == ["一", "私聊", "二"] and texts_for(group, "om_2")[0] == QUEUED
+
+
+async def test_a_group_head_waiting_for_a_consumer_expires_and_never_runs(env: Env) -> None:
+    """唯一的消费者被单聊占用：群队头等不到消费者，到期后在检查间隔内结算并回复一次；之后新到的
+    群请求成为队头，单聊结束后只运行它，过期的队头既不运行也不再回复。"""
+    async with queue(env, consumer_count=1, group={"max_wait_seconds": 1}) as (group, turns):
+        env.scripts.add("私聊长任务", clarify())
+        expired = env.scripts.add(attributed(A, "群请求"), clarify())
+        env.scripts.add(attributed(B, "下一条"), clarify())
+        hold = turns.hold("私聊长任务")
+        await dm(group, "私聊长任务", "om_dm")
+        await turns.wait_entered("私聊长任务")
+        await send(group, "群请求", "om_group")
+        env.clock.advance(2)
+        await settled(env, {"om_group": ("failed", "sent")})
+        await send(group, "下一条", "om_next", B)
+        hold.set()
+        await settled(env, {"om_next": ("completed", "sent")})
+        await asyncio.sleep(0.2)
+        await group.gateway.idle()
+    assert turns.started == ["私聊长任务", "下一条"] and env.model_calls(expired) == 0
+    assert texts_for(group, "om_group") == [BUSY_REPLY] and notices(group) == []
+
+
 # ---- 队头结束与失败 ------------------------------------------------------------------------
 
 
@@ -769,6 +1045,42 @@ async def test_a_consumer_stops_when_a_lower_layer_converts_its_cancellation(env
         await asyncio.wait({task}, timeout=5)
     assert done and task.cancelled(), "run 在取消后没有结束"
     assert (await states(env))["om_1"] == ("failed", "sent")
+    assert not env.store.readiness.ok
+
+
+async def test_a_converted_cancellation_hands_over_nothing_during_shutdown(env: Env) -> None:
+    """停机取消被下层转换成普通失败时，下一等待项已经到期：消费者不交接、不创建到期任务（任务组
+    正在关闭），``run`` 以取消结束并锁低 readiness；B 留给重启恢复。"""
+    entered = asyncio.Event()
+
+    async def converting(context: Any, message: str) -> Any:
+        entered.set()
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            raise TurnError("model_failed") from None
+
+    env.members.current = {A, B, C}
+    env.app.run_turn = converting  # type: ignore[method-assign]
+    outbox = Outbox()
+    gateway = FeishuGateway(
+        env.service,
+        config(group={"wait_check_seconds": 60}),
+        outbox,
+        clock=env.clock,
+        bot_open_id=lambda: BOT,
+    )
+    task = asyncio.create_task(gateway.run())
+    group = Group(env, gateway, outbox)
+    await send(group, "运行中", "om_1")
+    async with asyncio.timeout(5):
+        await entered.wait()
+    await send(group, "排队中", "om_2", B)
+    env.clock.advance(61)
+    task.cancel()
+    done, _ = await asyncio.wait({task}, timeout=5)
+    assert done and task.cancelled(), repr(task.exception() if done else "run 没有结束")
+    assert (await states(env))["om_2"] == ("accepted", "pending")
     assert not env.store.readiness.ok
 
 
