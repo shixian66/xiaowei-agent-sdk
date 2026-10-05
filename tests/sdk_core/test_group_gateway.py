@@ -57,6 +57,7 @@ from xiaowei.config import FeishuConfig, FeishuGroupConfig
 from xiaowei.feishu import (
     EMPTY_COMMAND,
     NEW_GROUP_SESSION,
+    QUEUED,
     FeishuGateway,
     LarkTransport,
     attributed,
@@ -85,13 +86,16 @@ def group_config(**overrides: Any) -> FeishuConfig:
         "consumer_count": 1,
         "send_timeout_seconds": 5,
         "connect_timeout_seconds": 5,
-        "stop_timeout_seconds": 5,
+        "stop_timeout_seconds": 7,
         "group": {
             "chat_id": CHAT,
             "tools": sorted(TOOLS),
             "member_page_size": 50,
             "member_max_pages": 2,
             "member_timeout_seconds": 2,
+            "max_waiting": 2,
+            "max_wait_seconds": 60,
+            "wait_check_seconds": 1,
         },
     }
     values.update(overrides)
@@ -387,13 +391,13 @@ async def test_redelivered_events_run_and_reply_once(env: Env) -> None:
 
 @dataclass
 class HeldOutbox(Outbox):
-    """第一条发送在 ``release`` 之前挂起：此时投递状态为 sending。"""
+    """第一条结果发送在 ``release`` 之前挂起：此时投递状态为 sending。排队提示（F3）不挂起。"""
 
     sending: asyncio.Event = field(default_factory=asyncio.Event)
     release: asyncio.Event = field(default_factory=asyncio.Event)
 
     async def __call__(self, chat_id: str, text: str, *, reply_to: str | None = None) -> Any:
-        if not self.sending.is_set():
+        if text != QUEUED and not self.sending.is_set():
             self.sending.set()
             await self.release.wait()
         return await super().__call__(chat_id, text, reply_to=reply_to)
@@ -425,24 +429,24 @@ async def test_redelivery_while_queued_running_or_sending_never_touches_the_dire
         await group.gateway.receive(first)
         async with asyncio.timeout(5):
             await turn_entered.wait()
-        await group.gateway.receive(second)  # consumer_count=1：在队列中等待
+        await group.gateway.receive(second)  # 同群已有一轮在运行：在群队列中等待（一次排队提示）
         assert await states(env) == {
             "om_run": ("running", "pending"),
             "om_wait": ("accepted", "pending"),
         }
         await group.gateway.receive(first)
         await group.gateway.receive(second)
-        assert env.members.checks == [(CHAT, A)] and outbox.sent == []
+        assert env.members.checks == [(CHAT, A)] and outbox.texts() == [QUEUED]
         turn_release.set()
         async with asyncio.timeout(5):
             await outbox.sending.wait()
         assert (await states(env))["om_run"] == ("completed", "sending")
         await group.gateway.receive(first)
-        assert env.members.checks == [(CHAT, A), (CHAT, A)] and outbox.sent == []
+        assert env.members.checks == [(CHAT, A), (CHAT, A)] and outbox.texts() == [QUEUED]
         outbox.release.set()
         await group.gateway.idle()
     assert await states(env) == {"om_run": ("completed", "sent"), "om_wait": ("completed", "sent")}
-    assert len(outbox.sent) == 2 and len(env.adapter.calls) == 1
+    assert len(outbox.sent) == 3 and len(env.adapter.calls) == 1
     assert env.members.checks == [(CHAT, A), (CHAT, A), (CHAT, B), (CHAT, B)]
 
 
@@ -670,8 +674,16 @@ def owner_config(tenant: str) -> dict[str, Any]:
         "member_page_size": 50,
         "member_max_pages": 2,
         "member_timeout_seconds": 2,
+        "max_waiting": 2,
+        "max_wait_seconds": 60,
+        "wait_check_seconds": 1,
     }
-    return serve_config(8501, feishu=feishu_config(app_id=LONG_APP, tenant_key=tenant, group=group))
+    return serve_config(
+        8501,
+        feishu=feishu_config(
+            app_id=LONG_APP, tenant_key=tenant, group=group, stop_timeout_seconds=7
+        ),
+    )
 
 
 def test_the_group_owner_must_fit_its_stored_key() -> None:
@@ -694,6 +706,9 @@ def test_the_group_owner_must_fit_its_stored_key() -> None:
                     "member_page_size": 50,
                     "member_max_pages": 2,
                     "member_timeout_seconds": 2,
+                    "max_waiting": 2,
+                    "max_wait_seconds": 60,
+                    "wait_check_seconds": 1,
                 },
             )
 
@@ -736,10 +751,19 @@ def runtime_group(**overrides: Any) -> dict[str, Any]:
         "member_page_size": 50,
         "member_max_pages": 2,
         "member_timeout_seconds": 2,
+        "max_waiting": 2,
+        "max_wait_seconds": 60,
+        "wait_check_seconds": 1,
     }
     group.update(overrides)
     # A 不在单聊名单中：群内的身份只来自群事件。
-    return feishu_config(app_id=APP, tenant_key=TENANT, users={"ou_dave": "dave"}, group=group)
+    return feishu_config(
+        app_id=APP,
+        tenant_key=TENANT,
+        users={"ou_dave": "dave"},
+        group=group,
+        stop_timeout_seconds=7,
+    )
 
 
 def raw_group_event(

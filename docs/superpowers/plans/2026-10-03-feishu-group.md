@@ -178,7 +178,7 @@ SDK 长连接 raw 事件（沿用先 ack 的已接受限制）
 - [x] 未 @、@其他 bot、仅正文伪造 @、非指定群/tenant、机器人、附件/超长/超龄事件均无 Agent/模型/DB；保留四项身份，body 不能覆盖它们。群成员未配单聊 users 仍可在指定群使用。
 - [x] 沿用 P2.5 自然语言及快捷命令；固定样例中的诊断/生成/模糊请求应由 Agent 不调用查询工具；显式诊断入口确定性拒绝查询，当前 actor 与有界作者标识进入正确的历史/模型位置。`/新建` 的群语义有提示。（离线只证明工具集合与门控；Agent 对群内自然语言的判断沿用 P2.5 样例，真实模型在 P3。）
 - [x] 同 message_id 重投、并发重投、发送失败/未知/原消息删除、目的地篡改与显式重发均验证；事实/分析/来源截断保持 P2 规则。排队通知属于 F3（F2 不发排队通知），该项随 F3 验证。
-- [x] 运行 §5 G2；变异跳过 mention/当前身份/原消息绑定、允许 SDK fallback 或重复执行应失败。提交 `feat: admit mentioned group messages and bind replies to their origin`；首轮独立审查（`69e6a02`）的阻断已修复，待复审。
+- [x] 运行 §5 G2；变异跳过 mention/当前身份/原消息绑定、允许 SDK fallback 或重复执行应失败。提交 `feat: admit mentioned group messages and bind replies to their origin`；首轮独立审查（`69e6a02`）的阻断已修复，复审 `200acd3` 通过，随 PR #45 合入 `6168c97`。
 
 **F2 实施说明（2026-10-05，起点 `0b1bdee`，即 PR #44 合入后的 main）。**
 
@@ -205,16 +205,31 @@ SDK 长连接 raw 事件（沿用先 ack 的已接受限制）
 
 ### F3：同群有界串行与不同会话并发
 
-**依赖：** F2。**结果：** 同时 @ 有可观察的先后和限额，队列不会变成无界积压或阻塞全部会话。**文件：** feishu/channel/config/runtime；现有生命周期用例及 `tests/p25/test_group_queue.py`。
+**依赖：** F2。**结果：** 同时 @ 有可观察的先后和限额，队列不会变成无界积压或阻塞全部会话。**文件：** feishu/channel_store/config/runtime；现有生命周期用例及 `tests/sdk_core/test_group_queue.py`（与 F1/F2 同理放在 sdk_core，需要其隔离 PostgreSQL fixture）。
 
-- [ ] 用事件屏障控制 A/B/C 接受/开始/结束，断言按接受顺序、同群最大 active=1；B 开始时可见 A 已提交的历史。另一个单聊/Web 同时能运行，总 active 不超过原全局上限。
-- [ ] 队列长度等于/超过上限、等待刚好/超过期限、前一轮超时/异常、通知失败、重复事件、排队中 actor 离群、存储失败和实例锁丢失均有成功/拒绝对照；到期失败无需等待整个长任务结束。
-- [ ] 澄清释放队头、后续成员可问新问题；`/新建` 在运行/排队时拒绝、空闲可轮换。群跨目标也不并发读写一个 Session。
-- [ ] 启用群入口时 `stop_timeout_seconds` 小于 7 s 的配置被拒绝（F0 证据 6：SDK 关闭可能固定等待 5+1 s），7 s 及以上通过；单聊配置的现有取值保持不变。
-- [ ] drain 包含落库前 receive、群 FIFO、普通队列和在途发送；停机期限、取消、重启恢复不重放 SQL。真实 PostgreSQL 对照：只有 accepted 的群请求 → 请求 interrupted、原 Session 保持可用；有 running 或 Session writing/提交不明 → 原规则关闭。同群一个 running 加多个 accepted 仍关闭，不能因存在排队项就重新开放。旧单聊/Web 恢复保持原行为。
-- [ ] 对接受→入队、出队→持久 start、start→SDK 首调用及实例接管逐点设屏障；只有持久化 start 成功后才允许 Runner/Session 写入，恢复读取中断前状态与更新/关闭必须在同一所有权事务内完成。取消/存储不明不得归为“仅排队”。
-- [ ] 成员目录调用计数：正常轮仅出队开始一次、发送前一次；同轮多工具不会增加目录查询，单独重发发送前重新查一次。未 @/其他群无目录 I/O；只有一次无数据排队提示不查询成员目录。
-- [ ] 运行 §5 G3；隔离变异去掉同群串行、容量/期限、出队重验、把 accepted 一律关闭群 Session、把 running 误当仅排队，或让等待者占 worker 槽应失败。提交 `feat: queue group turns within bounded channel concurrency`，独立审查。
+- [x] 用事件屏障控制 A/B/C 接受/开始/结束，断言按接受顺序、同群最大 active=1；B 开始时可见 A 已提交的历史。另一个单聊/Web 同时能运行，总 active 不超过原全局上限。
+- [x] 队列长度等于/超过上限、等待刚好/超过期限、前一轮超时/异常、通知失败、重复事件、排队中 actor 离群、存储失败和实例锁丢失均有成功/拒绝对照；到期失败无需等待整个长任务结束。
+- [x] 澄清释放队头、后续成员可问新问题；`/新建` 在运行/排队时拒绝、空闲可轮换。群跨目标也不并发读写一个 Session。
+- [x] 启用群入口时 `stop_timeout_seconds` 小于 7 s 的配置被拒绝（F0 证据 6：SDK 关闭可能固定等待 5+1 s），7 s 及以上通过；单聊配置的现有取值保持不变。
+- [x] drain 包含落库前 receive、群 FIFO、普通队列和在途发送；停机期限、取消、重启恢复不重放 SQL。真实 PostgreSQL 对照：只有 accepted 的群请求 → 请求 interrupted、原 Session 保持可用；有 running 或 Session writing/提交不明 → 原规则关闭。同群一个 running 加多个 accepted 仍关闭，不能因存在排队项就重新开放。旧单聊/Web 恢复保持原行为。
+- [x] 对接受→入队、出队→持久 start、start→SDK 首调用及实例接管逐点设屏障；只有持久化 start 成功后才允许 Runner/Session 写入，恢复读取中断前状态与更新/关闭必须在同一所有权事务内完成。取消/存储不明不得归为“仅排队”。
+- [x] 成员目录调用计数：正常轮仅出队开始一次、发送前一次；同轮多工具不会增加目录查询，单独重发发送前重新查一次。未 @/其他群无目录 I/O；只有一次无数据排队提示不查询成员目录。
+- [x] 运行 §5 G3；隔离变异去掉同群串行、容量/期限、出队重验、把 accepted 一律关闭群 Session、把 running 误当仅排队，或让等待者占 worker 槽应失败。提交 `feat: queue group turns within bounded channel concurrency`，独立审查（待）。
+
+**F3 实施说明（2026-10-05，起点 `6168c97`，即 PR #45 合入后的 main）。**
+
+- **群 FIFO。** 复用网关现有的有界队列与固定消费者：指定群同一时刻只有一条在全局队列中或运行（队头），队列为它另留一个保留槽（`maxsize = queue_size + 1`，其他请求按计数仍以 `queue_size` 为上限），交接不会因其他会话占满队列而失败；其余新接受的群请求进入进程内有界 `deque`，不占消费者、不创建等待协程。群请求的持久接受与入队在同一个 `asyncio.Lock` 临界区内完成，接受之后到入队之间没有 `await`，运行顺序就是持久接受的顺序（不按飞书 `create_time`）。队头的 `process` 与一次投递落定后（失败、澄清、模型失败都算结束）才交接下一条，并在 `task_done` 之前完成，`drain` 的 `join` 因此覆盖整个群 FIFO。`consumer_count>1` 时 F2 的“同群竞争、可能后到先跑”由此消除。
+- **排队提示。** 只有新接受并进入等待的请求发一次无数据提示“已收到，前面还有问题在处理，将按顺序回复”（回复原消息），不经 `ResultDelivery`、不查成员目录、不占最终结果的投递状态；失败或结果不明只记日志，不重试、不影响后续运行。重投经 F2 的预筛直接返回，不重复提示、不重新排队。
+- **上限与期限。** 新增必填 `group.max_waiting`（≤100 且不超过 `queue_size`）、`group.max_wait_seconds`（须短于请求保留期）与 `group.wait_check_seconds`（≤60 且不超过 `max_wait_seconds`）。等待超过上限、或从接受（`created_at`，重投不刷新）起等待超过期限的请求记为 `failed/busy`，按原消息发送固定回执（发送前照常复核成员），不运行、不调用模型或业务数据库。到期由 `run()` 内的定时检查最迟在 `wait_check_seconds` 内结束，交接与出队时再核对一次。**契约差异：** 满与到期沿用现有失败码 `busy`（回执“系统繁忙，本轮未执行，请稍后用新消息重试”），不新增失败码，因而不改存储约束。
+- **出队重验。** 沿用 F1/F2：`ChannelService.process` 在开始前按记录的 owner 复核当前成员与授权，排队中离群 → `failed/access_denied`、模型 0 次。存储或实例所有权故障锁低 readiness 后，队头会话保持封闭，后续出队项记为 `failed/busy`、不运行，发送因 readiness 锁低不取得投递权。
+- **`/新建`。** 无需新代码：存储的轮换条件已拒绝会话中仍有 `accepted/running` 请求的轮换，排队项属于该会话，因此排队与运行中都拒绝，空闲时轮换。
+- **停机。** 启用群时 `stop_timeout_seconds < 7` 在配置加载时拒绝（F0 证据 6），单聊取值不变。`drain` 依次等待已进入 `receive` 的调用、全局队列（含群 FIFO 交接）与到期检查正在发送的回执；超时或 `run()` 被取消时仍有排队项则锁低 readiness。
+- **恢复。** `recover` 在持有实例锁的同一事务内以 CTE 取得中断前状态：群会话中被中断的请求全部只是 `accepted`（从未持久启动），且会话元数据不在 `writing` 时，会话保持原状态；同会话有 `running`、会话处于 `writing`，或个人会话（单聊/Web），照原规则关闭。只有持久化 `start` 成功后才有 Runner/Session 写入（F1 的 `start` 绑定），所以“只在排队”不会把已开始的轮次误判为安全。
+- **未新增的屏障。** 接受→入队之间没有 `await`，不存在可取消的中间点；出队→持久 `start`、`start`→SDK 首调用与实例接管沿用 F1 已有的绑定与屏障用例，本切片没有逐点新增屏障测试。群跨两个集群仍是同一个群会话，由同一 FIFO 串行，没有单独的跨目标并发用例。
+
+**F3 证据（离线；隔离 PostgreSQL、真 Runner + 脚本模型、真 PolicySession/SQLAlchemySession、产品 `StaticAccess`；`run_turn` 外只包一层挂起与计数）。** `tests/sdk_core/test_group_queue.py` 21 项：A 运行中 B、C 先后到达 → 各一次排队提示，按接受顺序运行，同群同时最多 1 轮，B 的模型输入回放 A 的一轮；同时另一单聊会话照常运行（两个消费者，总并发 2）；成员目录每轮恰好 2 次、提示 0 次。等待上限 1：B 等待（恰好到上限），C → `failed/busy` 并回复原消息、模型 0 次。等待恰好 60 s 不结束、61 s 在检查间隔内结束并回复，不等长任务；检查间隔很长时过期项在出队时结束，下一条照常运行，重投不刷新期限、不再提示。队头 `TurnError` → failed 并回执，下一条继续；澄清释放队头；排队中离群 → `failed/access_denied`、模型 0 次、回执不发送，下一条继续；排队提示发送异常不影响后续交付；等待中的事件并发重投 3 次不重复入队或提示；存储故障时等待项不运行。`/新建` 在运行与排队时拒绝，空闲后轮换到第 2 代，排队项留在原会话。配置：上限与期限的上下界、`max_waiting ≤ queue_size`、`wait_check_seconds ≤ max_wait_seconds`、`max_wait_seconds` 短于请求保留期、启用群时 `stop_timeout_seconds` 6.9 拒绝 7 通过、单聊 5 仍通过。停机：drain 等待群 FIFO 跑完；队列已空但到期回执仍在发送时 drain 等它落定；有等待项时 drain 超时锁低 readiness。恢复（真实 PostgreSQL）：只有排队项 → 请求 interrupted、群会话仍 `active` 且续问回放上一轮；同会话另有 running、会话处于 writing、个人会话只有 accepted → 照原规则关闭。正式入口：`runtime.serve` + SDK 公开面替身中 A 被接受后 B 排队（一次提示、随后按序回答），等待上限 1 时 C 记为繁忙、模型 0 次，成员查询共 5 次。F2 的 `test_group_gateway.py` 群配置辅助补新字段与 7 s 停机期限；一处 F2 用例因 F3 新增排队提示，把“第一条发送挂起”改为“第一条结果发送挂起”，并在断言中计入这条提示。
+
+**隔离变异 14 项全部捕获：** 去掉同群串行、去掉等待上限、去掉等待期限、不做定时到期检查、出队不重验成员、队头结束不交接、排队不发提示、`accepted` 一律关闭群会话、`running` 误当仅排队、写入中会话不关闭、个人会话也保留、drain 不等到期回执（首轮存活，补“到期回执在途时 drain”用例后捕获）、去掉群停机下限、让等待项占用消费者。回归：`tests/sdk_core tests/p1b tests/p25 -W error` 2011 passed、39 deselected；G3 336 passed；Web 浏览器场景 3 passed；文档检查 8 passed；ruff、mypy、`uv lock --check`、`git diff --check` 通过。
 
 ### F4：离线退出、兼容恢复与 P3 任务样例
 
@@ -234,7 +249,7 @@ F0 修改了 `src/xiaowei/feishu.py` 的投递分类并新增 `tests/sdk_core/te
 | --- | --- |
 | G1 | `uv run --locked --extra dev python -m pytest tests/sdk_core/test_group_identity.py tests/sdk_core/test_channel_store.py tests/sdk_core/test_channel_service.py tests/sdk_core/test_session_policy.py tests/sdk_core/test_evidence.py tests/sdk_core/test_storage_v2.py tests/sdk_core/test_runtime.py -q -W error` |
 | G2 | `uv run --locked --extra dev python -m pytest tests/sdk_core/test_group_gateway.py tests/sdk_core/test_feishu.py tests/sdk_core/test_runtime.py tests/sdk_core/test_channel_service.py -q -W error` |
-| G3 | `uv run --locked --extra dev python -m pytest tests/p25/test_group_queue.py tests/sdk_core/test_feishu.py tests/sdk_core/test_channel_service.py tests/sdk_core/test_runtime.py -q -W error` |
+| G3 | `uv run --locked --extra dev python -m pytest tests/sdk_core/test_group_queue.py tests/sdk_core/test_group_gateway.py tests/sdk_core/test_feishu.py tests/sdk_core/test_channel_service.py tests/sdk_core/test_runtime.py -q -W error` |
 | 阶段 | `uv run --locked --extra dev python -m pytest tests/sdk_core tests/p1b tests/p25 -q -W error`；沿用 `SDK_TEST_CHROME` 的正式 Web browser 场景，证明 Web 无回归；不连接真实飞书/模型/用户 DB |
 | 静态/文档 | P2.5 §5 的静态与文档命令；差异/链接检查，确认本文未来命令没有写成当前验证事实 |
 
@@ -267,4 +282,4 @@ F0 的替身必须位于公开 SDK 的外部 I/O 边界，以真实 SDK 把事�
 - [x] 真 SDK 的成员/回复能力优先，公开接口限制明确；无新的服务、聊天历史或调度平台。
 - [x] 排队、满/超时、澄清、新建、失败/取消/停机/恢复都有可观察验收；有同群成功和不同会话并行对照。
 - [x] 四种投影、渲染上限、发送状态与历史拒绝沿用；原有单条最终回答规则与新增状态回执的区别已说明。
-- [x] F0 精确 SHA `f6875f9`、F1 精确 SHA `3140b76` 独立复审通过并已合入；F2 已离线实施，待独立审查，通过后进入 F3。
+- [x] F0 精确 SHA `f6875f9`、F1 精确 SHA `3140b76` 独立复审通过并已合入；F2 经两轮独立审查（首轮修复后复审 `200acd3`）通过并随 PR #45 合入；F3 已离线实施，待独立审查，通过后进入 F4。

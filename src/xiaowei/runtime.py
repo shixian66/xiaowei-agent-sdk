@@ -260,6 +260,8 @@ class ServeConfig(_Config):
             group = self.feishu.group
             if group is not None and not group.tools <= registered:
                 raise ValueError("feishu.group.tools 只能包含已登记的 StarRocks 工具")
+            if group is not None and group.max_wait_seconds >= storage.request_retention_seconds:
+                raise ValueError("feishu.group.max_wait_seconds 必须短于请求保留期")
         # 一轮新列表的每个对象在工具记录、写入 Session、最终校验、提交时的校验与提交前的整段回放
         # 中各复核一次；上限容不下最大一页时，满页的列表必然在提交前因次数用完而失败。
         page = max(t.starrocks.policy.max_rows for t in self.targets)

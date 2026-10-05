@@ -34,7 +34,7 @@ import hashlib
 import hmac
 import json
 import secrets
-from collections.abc import Callable, Iterator, Mapping
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass, replace
 from datetime import datetime, timedelta
@@ -214,11 +214,21 @@ _FINISH_SEND = text(
       AND delivery = 'sending' AND delivery_attempt = :attempt
     """
 )
+# 返回中断前的状态：恢复据此区分只在排队、从未开始的群请求（见 ``recover``）。
 _RECOVER_RUNNING = text(
     """
-    UPDATE xiaowei_request SET state = 'interrupted', failure_code = :code, updated_at = :now
-    WHERE state IN ('accepted', 'running') RETURNING session_id, owner_kind, owner_id, channel
+    WITH prior AS (
+        SELECT channel, request_key, state FROM xiaowei_request
+        WHERE state IN ('accepted', 'running') FOR UPDATE
+    )
+    UPDATE xiaowei_request AS r SET state = 'interrupted', failure_code = :code, updated_at = :now
+    FROM prior WHERE r.channel = prior.channel AND r.request_key = prior.request_key
+    RETURNING r.session_id, r.owner_kind, r.owner_id, r.channel, prior.state AS prior_state
     """
+)
+_SESSIONS_WRITING = text(
+    "SELECT session_id FROM xiaowei_session WHERE session_id = ANY(:ids) AND state = 'writing'"
+    " FOR UPDATE"
 )
 # 遗留发送：没有存活所有者的 sending 改为 unknown，并作废其尝试标识。serve 的尝试不记所有者（旧
 # 实例失去锁即失去投递权）；显式重发命令记录它占用的连接身份，连接仍在即仍在发送，保持不动。
@@ -756,6 +766,10 @@ class ChannelStore:
         """持有实例锁的启动一致性恢复：一个事务内中断未完成请求并关闭其会话，遗留发送改为未知，
         飞书已保存但未发送的结果记为发送失败。
 
+        例外：群会话中被中断的请求全部只是排队（``accepted``，从未取得启动）、且会话不在写入中时，
+        会话保持原状态——没有 Runner 碰过它。同会话有 ``running``、会话处于 ``writing``，或个人会话，
+        都照原规则关闭。中断前状态、会话状态与关闭在同一个持有实例锁的事务内读取与写入。
+
         不调用 Runner、不发送消息、不放回队列。失败整体回滚并锁低 readiness。读取前先等待仍在提交的
         接收事务（可能来自刚失去锁的旧实例）结束；恢复后本存储的接收都要经该锁核对。
         """
@@ -768,11 +782,13 @@ class ChannelStore:
                 rows = (
                     await conn.execute(_RECOVER_RUNNING, {"code": INTERRUPTED, "now": now})
                 ).all()
+                kept = await _queued_group_sessions(conn, rows)
                 await close_interrupted_sessions(
                     conn,
                     [
                         (r.session_id, Owner(kind=r.owner_kind, id=r.owner_id), r.channel)
                         for r in rows
+                        if r.session_id not in kept
                     ],
                     now=now,
                     expires_at=now + self._session_retention,
@@ -960,3 +976,13 @@ def _keys_of(row: Mapping[str, Any]) -> dict[str, object]:
 
 def _owned_by(row: Mapping[str, Any], owner: Owner) -> bool:
     return bool(row["owner_kind"] == owner.kind and row["owner_id"] == owner.id)
+
+
+async def _queued_group_sessions(conn: AsyncConnection, rows: Sequence[Any]) -> frozenset[str]:
+    """启动恢复中可以保持原状态的群会话：其中断请求全部只在排队，且会话不在写入中。"""
+    started = {r.session_id for r in rows if r.prior_state != "accepted"}
+    queued = {r.session_id for r in rows if r.owner_kind == "group" and r.session_id not in started}
+    if not queued:
+        return frozenset()
+    writing = await conn.execute(_SESSIONS_WRITING, {"ids": sorted(queued)})
+    return frozenset(queued - {row.session_id for row in writing})

@@ -168,6 +168,7 @@ class WebConfig(BaseModel):
         return value
 
 
+_GROUP_MIN_STOP_SECONDS = 7
 _Identifier = Annotated[str, StringConstraints(min_length=1, max_length=200)]
 _OpenId = Annotated[str, StringConstraints(pattern=r"^ou_[0-9A-Za-z_-]{1,64}$")]
 
@@ -181,6 +182,9 @@ class FeishuGroupConfig(BaseModel):
     取到的名单中找到发送者即为本次成员证据（群规模超过上界时只是部分名单，其中找到也算）；找不到、
     失败或超时都按无法确认拒绝，不执行、不回复。
     ``tools`` 只能是已登记的 StarRocks 工具，由运行配置核对。
+
+    同群同一时刻只运行一轮，其余按接受顺序等待：最多 ``max_waiting`` 条（不计正在运行的一条），
+    每条从接受起最多等待 ``max_wait_seconds``，到期项最迟在 ``wait_check_seconds`` 内结束并回复。
     """
 
     model_config = ConfigDict(frozen=True, extra="forbid")
@@ -190,6 +194,15 @@ class FeishuGroupConfig(BaseModel):
     member_page_size: int = Field(gt=0, le=100)
     member_max_pages: int = Field(gt=0, le=20)
     member_timeout_seconds: float = Field(gt=0, le=30)
+    max_waiting: int = Field(gt=0, le=100)
+    max_wait_seconds: float = Field(gt=0, le=86_400)
+    wait_check_seconds: float = Field(gt=0, le=60)
+
+    @model_validator(mode="after")
+    def _check_within_wait(self) -> "FeishuGroupConfig":
+        if self.wait_check_seconds > self.max_wait_seconds:
+            raise ValueError("wait_check_seconds 不得超过 max_wait_seconds")
+        return self
 
 
 class FeishuConfig(BaseModel):
@@ -232,13 +245,19 @@ class FeishuConfig(BaseModel):
         return value
 
     @model_validator(mode="after")
-    def _group_owner(self) -> "FeishuConfig":
+    def _group(self) -> "FeishuConfig":
+        if self.group is None:
+            return self
+        # 锁版 SDK 关闭时可能固定等待 5 s + 1 s 清理后台任务（单群计划 F0 证据 6）。
+        if self.stop_timeout_seconds < _GROUP_MIN_STOP_SECONDS:
+            raise ValueError("启用指定群时 stop_timeout_seconds 不得小于 7")
+        if self.group.max_waiting > self.queue_size:
+            raise ValueError("group.max_waiting 不得超过 queue_size")
         # 群 owner 是应用、租户与群标识的规范编码；超过归属键上限时群请求必然无法授权，启动时拒绝。
-        if self.group is not None:
-            try:
-                group_owner(self.app_id, self.tenant_key, self.group.chat_id)
-            except ValidationError:
-                raise ValueError(
-                    "app_id、tenant_key 与 group.chat_id 组成的群归属超过 200 字符上限"
-                ) from None
+        try:
+            group_owner(self.app_id, self.tenant_key, self.group.chat_id)
+        except ValidationError:
+            raise ValueError(
+                "app_id、tenant_key 与 group.chat_id 组成的群归属超过 200 字符上限"
+            ) from None
         return self
