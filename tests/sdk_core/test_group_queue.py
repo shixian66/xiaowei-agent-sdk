@@ -204,12 +204,17 @@ class GatedOutbox(Outbox):
                 self.busy_active -= 1
 
 
-async def settled(env: Env, expected: dict[str, tuple[str, str]], timeout: float = 1) -> None:
-    """在 ``timeout`` 内等到这些请求的状态与投递符合预期（只看给出的键）。"""
+async def settled(env: Env, expected: dict[str, str | tuple[str, str]], timeout: float = 1) -> None:
+    """在 ``timeout`` 内等到这些请求符合预期（只看给出的键）：值为 (state, delivery)，或只给
+    state（投递状态正在变化时）。"""
     async with asyncio.timeout(timeout):
         while True:
             current = await states(env)
-            if all(current.get(key) == value for key, value in expected.items()):
+            if all(
+                current.get(key) == value
+                or (isinstance(value, str) and current.get(key, ("",))[0] == value)
+                for key, value in expected.items()
+            ):
                 return
             await asyncio.sleep(0.02)
 
@@ -444,7 +449,7 @@ async def test_an_expired_turn_is_skipped_when_dequeued(env: Env) -> None:
 @pytest.mark.parametrize("blocker", ["send_hangs", "member_hangs", "member_fails"])
 async def test_expired_waiters_settle_while_one_receipt_is_blocked(env: Env, blocker: str) -> None:
     """B、C、D 同时到期，B 的回执发送挂起、成员查询挂起或抛出：三条都在检查间隔内结算为
-    failed/busy，C、D 照常收到回执；B 解除阻塞后按当前成员资格交付（抛出时不发送）。
+    failed（busy），C、D 照常收到回执；B 解除阻塞后按当前成员资格交付（抛出时不发送）。
     三条的模型、Runner 与业务查询调用均为 0。"""
     outbox = GatedOutbox()
     unblock = asyncio.Event()
@@ -463,13 +468,10 @@ async def test_expired_waiters_settle_while_one_receipt_is_blocked(env: Env, blo
         if blocker == "member_fails":
             env.members.failing.add(B)
         env.clock.advance(61)
+        # 发送挂起时 B 已取得投递权（sending）；成员查询挂起或抛出时尚未取得（pending）。
+        blocked = ("failed", "sending" if blocker == "send_hangs" else "pending")
         await settled(
-            env,
-            {
-                "om_b": ("failed", "pending"),
-                "om_c": ("failed", "sent"),
-                "om_d": ("failed", "sent"),
-            },
+            env, {"om_b": blocked, "om_c": ("failed", "sent"), "om_d": ("failed", "sent")}
         )
         unblock.set()
         if blocker != "member_fails":
@@ -479,8 +481,9 @@ async def test_expired_waiters_settle_while_one_receipt_is_blocked(env: Env, blo
         assert await group.gateway.drain(5)
     assert turns.started == ["一"] and env.adapter.calls == []
     assert all(env.model_calls(script) == 0 for script in expired)
-    assert [r for r, t in replies(group) if t.startswith(BUSY)] == (
-        ["om_c", "om_d"] if blocker == "member_fails" else ["om_c", "om_d", "om_b"]
+    # 各条回执并发发送、各自回复原消息，不同请求之间的先后不作保证。
+    assert sorted(r for r, t in replies(group) if t.startswith(BUSY)) == (
+        ["om_c", "om_d"] if blocker == "member_fails" else ["om_b", "om_c", "om_d"]
     )
 
 
@@ -498,12 +501,12 @@ async def test_expiry_receipts_have_bounded_tasks_and_concurrency(env: Env) -> N
         for message_id in waiting:
             await send(group, "等待", message_id, B)
         env.clock.advance(61)
-        await settled(env, dict.fromkeys(waiting, ("failed", "pending")))
+        await settled(env, dict.fromkeys(waiting, "failed"))
         await until(lambda: outbox.busy_active == 4, timeout=5)
         await asyncio.sleep(0.3)
         assert outbox.busy_peak == 4
         late = asyncio.create_task(send(group, "新来", "om_late", C))
-        await settled(env, {"om_late": ("failed", "pending")})
+        await settled(env, {"om_late": "failed"})
         release.set()
         await late
         await settled(env, dict.fromkeys([*waiting, "om_late"], ("failed", "sent")))
@@ -739,6 +742,36 @@ async def test_drain_timeout_with_a_waiting_group_turn_blocks_readiness(env: Env
         await send(group, "二", "om_2", B)
         assert not await group.gateway.drain(0.2)
         assert not env.store.readiness.ok
+
+
+async def test_a_consumer_stops_when_a_lower_layer_converts_its_cancellation(env: Env) -> None:
+    """停机取消到达时队头正在运行，而下层把取消转换成了普通失败（本条按失败处理并回执）：消费者
+    不能吞掉取消、继续等下一项；``run`` 在期限内结束并锁低 readiness。"""
+    entered = asyncio.Event()
+
+    async def converting(context: Any, message: str) -> Any:
+        entered.set()
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            raise TurnError("model_failed") from None
+
+    env.members.current = {A, B, C}
+    env.app.run_turn = converting  # type: ignore[method-assign]
+    outbox = Outbox()
+    gateway = FeishuGateway(env.service, config(), outbox, clock=env.clock, bot_open_id=lambda: BOT)
+    task = asyncio.create_task(gateway.run())
+    await send(Group(env, gateway, outbox), "一", "om_1")
+    async with asyncio.timeout(5):
+        await entered.wait()
+    task.cancel()
+    done, _ = await asyncio.wait({task}, timeout=5)
+    if not done:  # 吞掉了取消：再取消一次（此时停在取下一项上）以便清理，然后判失败
+        task.cancel()
+        await asyncio.wait({task}, timeout=5)
+    assert done and task.cancelled(), "run 在取消后没有结束"
+    assert (await states(env))["om_1"] == ("failed", "sent")
+    assert not env.store.readiness.ok
 
 
 async def session_state(env: Env, session_id: str) -> str | None:
