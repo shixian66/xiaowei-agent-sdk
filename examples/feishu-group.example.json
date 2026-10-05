@@ -1,0 +1,32 @@
+{
+  "app_id": "cli_replacewithappid",
+  "app_secret_ref": "env:XW_FEISHU_APP_SECRET",
+  "tenant_key": "<飞书 tenant_key>",
+  "users": {
+    "ou_replace_with_open_id": "feishu-user"
+  },
+  "max_event_age_seconds": 300,
+  "max_message_chars": 2000,
+  "max_reply_chars": 3500,
+  "queue_size": 8,
+  "consumer_count": 2,
+  "send_timeout_seconds": 10,
+  "connect_timeout_seconds": 30,
+  "stop_timeout_seconds": 10,
+  "group": {
+    "chat_id": "oc_replace_with_chat_id",
+    "tools": [
+      "local/describe_table",
+      "local/describe_table_layout",
+      "local/explain_query",
+      "local/list_tables",
+      "local/run_readonly_query"
+    ],
+    "member_page_size": 100,
+    "member_max_pages": 5,
+    "member_timeout_seconds": 10,
+    "max_waiting": 4,
+    "max_wait_seconds": 600,
+    "wait_check_seconds": 5
+  }
+}
