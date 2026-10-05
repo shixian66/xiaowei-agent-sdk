@@ -10,6 +10,7 @@ StarRocks 的权限与资源行为（这些在 P3 获准环境验收）。
 from __future__ import annotations
 
 import asyncio
+import logging
 from typing import Any
 
 import pytest
@@ -89,6 +90,28 @@ async def rows(env: RuntimeEnv) -> dict[str, tuple[str, str, str | None]]:
     return result
 
 
+DONE = ("completed", "sent", None)
+
+
+async def settled(
+    env: RuntimeEnv, message_id: str, expected: tuple[str, str, str | None] = DONE
+) -> None:
+    """等到该原消息对应的请求在存储中落定为 ``expected``（替身记下发送不等于请求处理完成）。"""
+    current = None
+    try:
+        async with asyncio.timeout(20):
+            while (current := (await rows(env)).get(message_id)) != expected:
+                await asyncio.sleep(0.02)
+    except TimeoutError:
+        raise AssertionError(f"{message_id}: 期望 {expected}，实际 {current}") from None
+
+
+def reply_to(channel: GroupChannel, message_id: str) -> str:
+    """该原消息收到的唯一回复。"""
+    (text,) = [text for to, text in replies(channel) if to == message_id]
+    return text
+
+
 async def test_members_share_one_task_across_clusters_diagnosis_clarification_and_restart(
     runtime_env: RuntimeEnv,
 ) -> None:
@@ -106,8 +129,10 @@ async def test_members_share_one_task_across_clusters_diagnosis_clarification_an
     channel = GroupChannel(members=[A, B, C], delay=SEND_RETURNS_LATER)
 
     async def ask(text: str, message_id: str, sender: str, sends: int) -> None:
+        """等到这一轮落定为 ``completed/sent`` 且原消息收到回复，下一轮才发出。"""
         channel.emit_raw_from_sdk_thread(raw_group_event(env, text, message_id, sender=sender))
-        await until(lambda: len(channel.sends) == sends)
+        await settled(env, message_id)
+        assert len(channel.sends) == sends and reply_to(channel, message_id) != QUEUED
 
     first = env.scripts.add(
         attributed(A, "sr-a 东区销售额"),
@@ -182,15 +207,18 @@ async def test_members_share_one_task_across_clusters_diagnosis_clarification_an
         restarted.emit_raw_from_sdk_thread(
             raw_group_event(env, "汇总刚才两个集群的结果", "om_6", sender=C)
         )
-        await until(lambda: len(restarted.sends) == 1)
+        await settled(env, "om_6")
         assert await served.finish() == 0
     assert user_turns(env, resumed) == [first, follow, why, vague, answer, resumed]
     assert len(env.scripts.calls[resumed]) == 1
     assert {m: len(env.scripts.calls[m]) for m in calls_before} == calls_before
     assert {t: statements(d) for t, d in drivers.items()} == {t: [] for t in drivers}
-    assert replies(restarted) == [("om_6", replies(restarted)[0][1])]
+    # 唯一回复：脚本模型的分析，以及由代码从回放证据生成的两个集群的事实。
+    ((to, text),) = replies(restarted)
+    assert to == "om_6"
+    assert "sr-a 较低" in text and "目标 sr-a" in text and "目标 sr-b" in text
     assert len(restarted.member_calls) == 2
-    assert (await rows(env))["om_6"] == ("completed", "sent", None)
+    assert (await rows(env))["om_6"] == DONE
 
 
 class SlowFirstCheck(GroupChannel):
@@ -269,8 +297,24 @@ async def test_simultaneous_questions_overload_redelivery_and_revocation(
     assert len(channel.member_calls) == 5
 
 
+async def requests(env: RuntimeEnv) -> list[tuple[str, str, str | None, str, str]]:
+    """全部请求行（含单聊，按接受顺序）：(owner_kind, owner_id, 原消息, state, delivery)。"""
+    async with asyncio.timeout(5):
+        body = await env.scalar(
+            "SELECT string_agg(owner_kind || '|' || owner_id || '|' || coalesce(reply_message_id,"
+            " '-') || '|' || state || '|' || delivery, ';' ORDER BY created_at)"
+            " FROM xiaowei_request"
+        )
+    result = []
+    for item in (body or "").split(";"):
+        if item:
+            kind, owner, message, state, delivery = item.split("|")
+            result.append((kind, owner, None if message == "-" else message, state, delivery))
+    return result
+
+
 async def test_turning_the_group_off_and_on_keeps_its_history_and_personal_chat(
-    runtime_env: RuntimeEnv,
+    runtime_env: RuntimeEnv, caplog: pytest.LogCaptureFixture
 ) -> None:
     """群配置移除后重启：群消息一律不处理（无请求、无成员查询、无模型、无回复），单聊照常；群会话与
     记录原样保留，群结果不能经个人路径重发。重新配置后同群续问回放原来的一轮。"""
@@ -285,24 +329,35 @@ async def test_turning_the_group_off_and_on_keeps_its_history_and_personal_chat(
     channel = GroupChannel(members=[A, B])
     async with env.running(group_on, feishu_channel=channel) as served:
         channel.emit_raw_from_sdk_thread(raw_group_event(env, "东区销售额", "om_1"))
-        await until(lambda: len(channel.sends) == 1)
+        await settled(env, "om_1")
         assert await served.finish() == 0
+    group_row = ("group", (await requests(env))[0][1], "om_1", "completed", "sent")
+    assert await requests(env) == [group_row]
 
-    ignored = env.scripts.add(attributed(B, "和西区比呢"), cite())
+    # 关闭群配置后由 A 发群消息：A 有单聊准入，若群事件误走单聊入口会被接受，这里必须被丢弃。
     personal = env.scripts.add("单聊问题", clarify())
     off = GroupChannel(members=[A, B])
+    caplog.set_level(logging.INFO, logger="xiaowei.feishu")
     async with env.running(group_off, feishu_channel=off) as served:
-        off.emit_raw_from_sdk_thread(raw_group_event(env, "和西区比呢", "om_2", sender=B))
+        off.emit_raw_from_sdk_thread(raw_group_event(env, "和西区比呢", "om_2", sender=A))
+        await until(lambda: "飞书事件已丢弃：chat_type" in caplog.text)  # 群事件处理完毕
+        assert await requests(env) == [group_row]
+        assert off.sends == [] and off.member_calls == []
+        assert set(env.scripts.calls) == {first}
+
+        # 同一进程的单聊照常回答。
         dm = feishu_event(env, "单聊问题", "om_dm")
         dm["header"]["app_id"] = APP
         dm["header"]["tenant_key"] = dm["event"]["sender"]["tenant_key"] = TENANT
         off.emit_raw_from_sdk_thread(dm)
-        await until(lambda: len(off.sends) == 1)
-        await asyncio.sleep(0.3)
+        async with asyncio.timeout(20):
+            while (await requests(env))[-1][3:] != ("completed", "sent"):
+                await asyncio.sleep(0.02)
         assert await served.finish() == 0
-    assert off.sends[0][0] == "oc_alice" and off.member_calls == []
-    assert ignored not in env.scripts.calls and len(env.scripts.calls[personal]) == 1
-    assert await rows(env) == {"om_1": ("completed", "sent", None)}
+    assert [to for to, _, _ in off.sends] == ["oc_alice"] and off.member_calls == []
+    assert set(env.scripts.calls) == {first, personal} and len(env.scripts.calls[personal]) == 1
+    # A 的单聊准入映射到个人用户 alice（``feishu_config`` 的默认用户表）。
+    assert await requests(env) == [group_row, ("personal", "alice", None, "completed", "sent")]
     sessions = "SELECT string_agg(owner_kind || '/' || state, ',') FROM xiaowei_session"
     assert await env.scalar(sessions + " WHERE owner_kind = 'group'") == "group/active"
     with pytest.raises(runtime.ResendTargetError):
@@ -312,8 +367,8 @@ async def test_turning_the_group_off_and_on_keeps_its_history_and_personal_chat(
     again = GroupChannel(members=[A, B])
     async with env.running(group_on, feishu_channel=again) as served:
         again.emit_raw_from_sdk_thread(raw_group_event(env, "和西区比呢？", "om_3", sender=B))
-        await until(lambda: len(again.sends) == 1)
+        await settled(env, "om_3")
         assert await served.finish() == 0
     assert user_turns(env, resumed) == [first, resumed]
     assert len(env.scripts.calls[first]) == 2 and statements(env.drv) == []
-    assert (await rows(env))["om_3"] == ("completed", "sent", None)
+    assert "东区较高" in reply_to(again, "om_3") and len(again.sends) == 1
