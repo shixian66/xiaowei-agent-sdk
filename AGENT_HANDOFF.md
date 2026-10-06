@@ -12,7 +12,7 @@
 | 本地目录 / 分支 | `/Users/kloenguyen/.codex/worktrees/1f5b/agent-SDK` / `codex/p3b-upgrade-recovery`；独立任务工作树，P3-B 实现候选 |
 | M5 历史起点 | `372c381f44ecfa1fa53961f137d0058033cbd805`；不是远端当前 main 的核验结论 |
 | 规划基线 / `origin/main` | `9c386689ade1fa1e057fdcf7c3956280381c5d71`（PR #49 的 P3-A 合并提交，2026-10-06 已 fetch 核对）。历史切片版本与证据见第 3 节 |
-| 当前阶段 | **P3-A 修订 `9f69beba19736d293c22d50a59b50c90ac7f0d4e` 已复审通过并随 PR #49 合入；P3-B 的不同镜像升级/回退、v4→v5→v6 和配套备份恢复候选已提交到 PR #50，待精确 head 独立复审。** P3-C 的公司服务器、真实模型、用户 StarRocks、Web/飞书实战与用户接受均未开始 |
+| 当前阶段 | **P3-A 修订 `9f69beba19736d293c22d50a59b50c90ac7f0d4e` 已复审通过并随 PR #49 合入；P3-B 候选在 PR #50。首次独立审查发现恢复说明用替代 `--env-file` 无法切换应用数据库，修订已改为替换当前 `.env` 并增加可区分数据库的运行断言，待新 head 复审。** P3-C 的公司服务器、真实模型、用户 StarRocks、Web/飞书实战与用户接受均未开始 |
 | 当前源码与依赖 | 新包 `src/xiaowei/` 仍为应用表 v6，本轮不改产品 schema、运行模块或依赖。P3-B 复用 P3-A 的运行镜像、Compose、发行元数据、CLI 密钥门禁和 PostgreSQL 工具；新增部署验收夹具、完整运维步骤与 CI 历史版本迁移检查。运行镜像和发行归档仍不包含根文档、源码测试、旧包或开发工具 |
 | 新产品入口 | 原生主线仍为 `xiaowei`（与 `python -m xiaowei` 相同）的 `serve`、`config check`、`storage init/upgrade/cleanup`、`requests resend`；JSON 仍只接受 loopback。镜像固定入口复用同一 CLI，仅在容器内绑定 `0.0.0.0`。真实模型、用户 StarRocks 与真实飞书未参与 P3-A 验证；旧 CLI/Compose 不是产品入口 |
 | 本次工作范围 | P3-B 候选实现：不同镜像 A→B 只重建应用、预检/拉取失败保留旧服务、启动失败按旧控制文件回退、v4→v5→v6 显式迁移、迁移前备份供旧程序回退、成对 `pg_dump`/隔离 `pg_restore`、错密钥拒绝与运维说明。未发布镜像、未操作公司服务器、未调用真实模型/StarRocks/飞书；实际主机重启、同二层网络和获准仓库仍留 P3-C |
@@ -36,11 +36,11 @@
 
 ## 3. 当前计划与下一项工作
 
-**当前计划：** [P3：Compose 部署与实战验收](docs/superpowers/plans/2026-10-05-p3-compose-deployment.md) v0.2 已复审通过。P3-A 已随 PR #49 合入；当前 P3-B 候选在 PR #50，精确 head 与 CI 结果以该 PR 为准，下一门槛是独立复审。审查通过也不等于镜像已发布或公司服务器已部署；之后才进入 P3-C 获准环境实战。已完成的 [P2.5 计划](docs/superpowers/plans/2026-10-03-p25-open-read-multi-cluster.md)、[单群计划](docs/superpowers/plans/2026-10-03-feishu-group.md) 及下文 P1/P2 记录继续作为前置离线证据，不复制任务。
+**当前计划：** [P3：Compose 部署与实战验收](docs/superpowers/plans/2026-10-05-p3-compose-deployment.md) v0.2 已复审通过。P3-A 已随 PR #49 合入；当前 P3-B 候选在 PR #50，首次复审的恢复换库阻断已修订，精确 head 与 CI 结果以该 PR 为准，下一门槛是对新 head 独立复审。审查通过也不等于镜像已发布或公司服务器已部署；之后才进入 P3-C 获准环境实战。已完成的 [P2.5 计划](docs/superpowers/plans/2026-10-03-p25-open-read-multi-cluster.md)、[单群计划](docs/superpowers/plans/2026-10-03-feishu-group.md) 及下文 P1/P2 记录继续作为前置离线证据，不复制任务。
 
 **P3-A 当前证据：** 基线为 `fb67cd243ed3ab2beebae3970b909535042259f6`，修订 head 为 `9f69beba19736d293c22d50a59b50c90ac7f0d4e`，合并提交为 `9c386689ade1fa1e057fdcf7c3956280381c5d71`。本机 Docker Engine 29.5.2、Colima Linux/arm64、独立 Compose 5.5.1 上实际构建运行镜像并启动隔离的应用 + PostgreSQL 16.15 两容器；发行白名单/镜像逐层审计、非默认参数、特殊字符、缺挂载、配置预检、v6 初始化/指纹拒绝、HTTP/loopback/PG 零发布、正常 SIGTERM、迁移中断回滚与有限重启均有自动化用例。首次独立审查发现的停止上界与原生绑定测试阻断已修复，复审通过后 PR #49 的 10 项 CI 全绿并合入。没有另一台同二层主机、公司目标平台或获准仓库 manifest digest。
 
-**P3-B 当前证据：** 当前工作树从 P3-A 精确提交与当前候选分别独立构建不同镜像，正式 Compose/HTTP 实跑 A→B、保存结果重投、旧会话继续、配置预检与拉取失败不影响 A、错密钥有限重启、A 回退和操作者文件哈希不变；`pg_dump -Fc` 原子落盘后用 `pg_restore --exit-on-error` 恢复到隔离库，配套密钥正确时 SDK/应用表、个人/群归属、过期 Evidence 与去重保持，错密钥拒绝。另从 `a938a0f1b481f1cb23507dc170380c73028b8e54`（v4）和 `fb67cd243ed3ab2beebae3970b909535042259f6`（v5）构造只用于测试的历史镜像，实跑 v4→v5→v6、误走普通启动、缺首次绑定确认、未知高版本、旧程序拒绝 v6，以及旧镜像使用迁移前备份。外部模型、StarRocks、飞书均未调用，合成 Evidence 不证明真实权限；实际主机重启、公司网络与获准仓库仍未覆盖。提交后的 SHA、镜像 ID、完整命令和结果写入 PR，不把作者自测称为独立审查。
+**P3-B 当前证据：** 当前工作树从 P3-A 精确提交与当前候选分别独立构建不同镜像，正式 Compose/HTTP 实跑 A→B、保存结果重投、旧会话继续、配置预检与拉取失败不影响 A、错密钥有限重启、A 回退和操作者文件哈希不变；`pg_dump -Fc` 原子落盘后用 `pg_restore --exit-on-error` 恢复到隔离库。首次复审指出替代 `--env-file` 不能改变服务固定读取的 `./.env`，且两库内容相同让测试产生假阳性。修订实际备份和替换当前 `.env`，在 dump 后给原库增加恢复库没有的标记，并核对 Compose 合成 URL、探针的数据库名及 `pg_stat_activity` 中运行中 serve 的 TCP 会话数据库；恢复时为 `xiaowei_restore`，回切时为 `xiaowei`，错误 URL 变异明确失败。配套密钥正确时 SDK/应用表、个人/群归属、过期 Evidence 与去重保持，错密钥拒绝。另从 `a938a0f1b481f1cb23507dc170380c73028b8e54`（v4）和 `fb67cd243ed3ab2beebae3970b909535042259f6`（v5）构造只用于测试的历史镜像，实跑 v4→v5→v6、误走普通启动、缺首次绑定确认、未知高版本、旧程序拒绝 v6，以及旧镜像使用迁移前备份。外部模型、StarRocks、飞书均未调用，合成 Evidence 不证明真实权限；全栈/真实主机重启、公司网络与获准仓库仍未覆盖。提交后的 SHA、镜像 ID、完整命令和结果写入 PR，不把作者自测称为独立审查。
 
 P1-A 实施事实保留在 [P1-A：SDK 与治理执行核心](docs/superpowers/plans/2026-09-29-p1a-sdk-governed-core.md)。已完成的下一切片记录在 [P1-B：真实只读查询与双入口](docs/superpowers/plans/2026-09-30-p1b-starrocks-dual-entry.md)，顺序为 **SQLGuard → StarRocks Adapter →（真实模型 Gate 0 须已通过）受治理工具/Evidence → PostgreSQL v2 → 共享 ChannelService → Web → 飞书 → 正式入口 → P1 实战退出**。产品边界仍以 `ARCHITECTURE.md` 为唯一权威，当前证据仍以本文为准。
 
@@ -435,7 +435,7 @@ P1-A 是内部核心。P1-B 才接真实查询与双入口并切换正式入口�
 | StarRocks | 本机可丢弃的 StarRocks 4.1.4 容器上验证了 Adapter 协议（Task 2）与受治理工具端到端（Task 3）；用户环境未连接 | 目标版本、测试连接、只读账号、获准库表/视图（G1）、数据投影范围（G2）与简短业务口径（G3） |
 | 飞书 | 只有 Evidence 飞书投影与纯文本交付的离线/测试 PostgreSQL 验证；正式渠道未运行 | 应用与事件配置、获准租户/单聊用户、可信身份来源 |
 | 本机 Web | Task 6 组件 smoke；正式 `xiaowei serve` 在 Chrome 中离线验收（模型为本机关闭端口或进程内脚本） | 真实模型下的正式验收（Task 9）；HTTPS/SSH、操作者与 `Secure`（G6） |
-| Docker Compose | P3-A 已合入；P3-B 候选已在本机 Linux/arm64 容器环境完成不同镜像升级/回退、预检与拉取失败保留旧服务、迁移和成对恢复 | 公司目标 CPU/Docker/Compose、获准仓库 manifest digest、真实主机重启、另一台同二层主机不可达及 P3-C SSH/用户实战 |
+| Docker Compose | P3-A 已合入；P3-B 候选已在本机 Linux/arm64 容器环境完成不同镜像升级/回退、预检与拉取失败保留旧服务、迁移和成对恢复；恢复换库核对 Compose 环境、探针数据库名和 serve 的 PostgreSQL TCP 会话数据库 | 公司目标 CPU/Docker/Compose、获准仓库 manifest digest、全栈/真实主机重启、另一台同二层主机不可达及 P3-C SSH/用户实战 |
 
 **CI 已知不稳定：** secret-scan 的“豁免窄度自检”每次用随机生成的值充当 secret，gitleaks 偶尔不把它判为泄露，该步骤随之失败（PR #22 首次运行，单独重跑后通过，全历史扫描无泄露）；与被测改动无关，修复待另开小任务。
 
@@ -447,10 +447,11 @@ P3-B 候选验证环境：本机 Docker Engine 29.5.2、Colima Linux/arm64、独
 
 | 命令 | 结果 |
 | --- | --- |
-| `.venv/bin/python -m pytest tests/deployment/test_release.py tests/deployment/test_compose.py tests/deployment/test_maintenance.py -q` | 10 passed（219.05 s）；含发行/镜像审计、首次安装、A→B/回退/成对恢复与 v4→v5→v6 |
+| `.venv/bin/python -m pytest tests/deployment/test_release.py tests/deployment/test_compose.py tests/deployment/test_maintenance.py -q` | 10 passed（232.62 s）；含发行/镜像审计、首次安装、A→B/回退、可区分原库/恢复库的成对恢复与 v4→v5→v6 |
+| `.venv/bin/python -m pytest tests/deployment/test_maintenance.py::test_different_image_upgrade_rollback_and_paired_restore -q`；把恢复 URL 变异为原库后重跑 | 当前树 1 passed（131.14 s）；变异在 `pg_stat_activity` 显示 serve 仍连 `xiaowei` 时按预期失败（79.60 s），随后还原 |
 | `SDK_TEST_POSTGRES_URL=... .venv/bin/python -m pytest tests/sdk_core/test_channel_store.py tests/sdk_core/test_runtime.py tests/sdk_core/test_cli.py -q` | 163 passed（82.37 s）；测试 PostgreSQL 容器与卷随后删除 |
 | `SDK_TEST_POSTGRES_URL=... .venv/bin/python -m pytest -q --ignore=tests/deployment` | 3796 passed、152 skipped、39 deselected（282.27 s）；6 个警告均来自网络阻断自测，测试 PostgreSQL 随后 `down -v` |
-| `.venv/bin/python -m pytest -m security -q`；三项文档契约检查 | 927 passed、79 skipped、2991 deselected；8 passed |
+| `.venv/bin/python -m pytest -m security -q` | 928 passed、79 skipped、2991 deselected；5 个警告来自网络阻断自测 |
 | `.venv/bin/ruff check .`；`.venv/bin/mypy src`；`uv lock --check`；YAML 解析；`git diff --check` | 通过；`uv` 使用 `/tmp` 缓存规避本机默认缓存目录权限限制 |
 | 干净 venv 安装 wheel 并运行 `xiaowei --help` / `python -m xiaowei --help`；`pip-audit --strict` | 两个正式入口通过，旧包与 Alembic 不在运行环境；无已知漏洞 |
 | `.venv/bin/python -m scripts.compose_smoke` | 本机在构建前失败为 `SMOKE_BUILD_COMMAND_FAILED`：旧 M5 脚本固定调用 `docker compose`，本机只有独立 `docker-compose` 5.5.1；不改旧路径，交由有 Compose 插件的 CI runner 验证 |

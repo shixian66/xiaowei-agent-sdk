@@ -242,6 +242,10 @@ async def _verify() -> dict[str, Any]:
 
 async def _snapshot(engine: AsyncEngine) -> dict[str, Any]:
     async with engine.connect() as conn:
+        database = await conn.scalar(text("SELECT current_database()"))
+        post_backup_marker = await conn.scalar(
+            text("SELECT to_regclass('public.p3_post_backup_marker') IS NOT NULL")
+        )
         version = await conn.scalar(text("SELECT version FROM xiaowei_schema_version"))
         binding = (
             await conn.execute(
@@ -278,6 +282,8 @@ async def _snapshot(engine: AsyncEngine) -> dict[str, Any]:
             )
         )
     return {
+        "database": database,
+        "post_backup_marker": bool(post_backup_marker),
         "schema_version": version,
         "binding_rows": binding.rows,
         "binding_length": binding.length,

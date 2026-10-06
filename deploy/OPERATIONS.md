@@ -59,8 +59,8 @@ docker compose --env-file .env up -d
 docker compose --env-file .env ps
 ```
 
-然后经 SSH 转发检查 `/readyz`。本机 P3-B 已验证受控停止后执行上述命令能恢复服务；公司服务器
-的真实主机重启仍须在 P3-C 实测。
+然后经 SSH 转发检查 `/readyz`。本机 P3-B 只验证了停止小维服务后用指定服务名执行
+`up -d xiaowei`；全栈停止后执行上面的 `up -d`、真实宿主机或 Docker 重启仍须在 P3-C 实测。
 
 ## 普通升级与回退（schema 不变）
 
@@ -121,7 +121,7 @@ docker compose --env-file .env up -d --no-deps --force-recreate xiaowei --wait
 cd /opt/xiaowei/current
 pair=/opt/xiaowei/backups/<日期时间>
 install -d -m 700 "$pair"
-cp --preserve=mode .env "$pair/xiaowei.env"
+cp -p .env "$pair/xiaowei.env"
 tmp="$pair/.xiaowei.dump.tmp"
 if docker compose --env-file .env exec -T postgres sh -c \
   'exec pg_dump -Fc -U "$POSTGRES_USER" -d "$POSTGRES_DB"' >"$tmp"; then
@@ -150,21 +150,36 @@ docker compose --env-file .env exec -T postgres sh -c \
   -d xiaowei_restore_20261006' <"$pair/xiaowei.dump"
 ```
 
-复制配套环境文件为 `.env.restore`，只把 `XW_DATABASE_URL` 的数据库名改成新库；保留其中原有的
-`XW_DIGEST_KEY`，不要从模板重建。先停止小维，再用新引用启动：
+Compose 中小维固定从当前目录的 `.env` 读取应用环境；命令行的 `--env-file` 只控制 Compose
+变量插值，不能用另一个文件替换小维的应用环境。先停止小维，把当前引用保存为
+`.env.before-restore`，再用配套备份的环境文件替换 `.env`。只把新 `.env` 中
+`XW_DATABASE_URL` 的数据库名改成新库；保留其中原有的 `XW_DIGEST_KEY`，不要从模板重建：
 
 ```sh
 cd /opt/xiaowei/current
-cp --preserve=mode "$pair/xiaowei.env" .env.restore
-# 用安全编辑器把 .env.restore 的数据库名改为 xiaowei_restore_20261006
-docker compose --env-file .env.restore run --rm --no-deps xiaowei config check
+pair=/opt/xiaowei/backups/<日期时间>
 docker compose --env-file .env stop xiaowei
-docker compose --env-file .env.restore up -d --no-deps --force-recreate xiaowei --wait
+cp -p .env .env.before-restore
+cp -p "$pair/xiaowei.env" .env
+# 用安全编辑器只把 .env 的数据库名改为 xiaowei_restore_20261006
+docker compose --env-file .env config --quiet
+docker compose --env-file .env run --rm --no-deps xiaowei config check
+docker compose --env-file .env up -d --no-deps --force-recreate xiaowei --wait
 ```
 
-检查历史、请求编号和受控查询后再把 `.env.restore` 改为正式 `.env`。若启动或检查失败，保留两个
-数据库，继续使用原 `.env` 启动旧引用；不要清空卷、重新生成密钥或自动重跑未完成请求。恢复点
-之后的新记录不会出现在备份中。
+检查 `/readyz`、历史、请求编号和受控查询，并确认服务实际连接的新数据库；当前 `.env` 就是恢复
+后的正式引用。若配置检查、启动或验收失败，保留两个数据库并恢复原引用：
+
+```sh
+cd /opt/xiaowei/current
+cp -p .env.before-restore .env
+docker compose --env-file .env config --quiet
+docker compose --env-file .env run --rm --no-deps xiaowei config check
+docker compose --env-file .env up -d --no-deps --force-recreate xiaowei --wait
+```
+
+不要清空卷、重新生成密钥或自动重跑未完成请求。恢复点之后的新记录不会出现在备份中；验收完成
+前保留 `.env.before-restore`，并继续限制为仅部署管理员可读。
 
 ## 含迁移的升级
 

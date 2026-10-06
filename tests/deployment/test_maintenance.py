@@ -6,6 +6,7 @@ import hashlib
 import json
 import os
 import shutil
+import stat
 import subprocess
 import sys
 import tarfile
@@ -20,6 +21,7 @@ from tests.deployment.conftest import docker
 from tests.deployment.test_compose import (
     POSTGRES_RUNTIME_IMAGE,
     _compose,
+    _compose_command,
     _free_port,
     _http,
     _pg,
@@ -210,6 +212,62 @@ def _sha256(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
+def _install_private_directory(directory: Path) -> None:
+    binary = shutil.which("install")
+    assert binary is not None
+    result = subprocess.run(  # noqa: S603 - 固定系统工具与测试目录
+        [binary, "-d", "-m", "700", str(directory)],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+    assert stat.S_IMODE(directory.stat().st_mode) == 0o700
+
+
+def _copy_preserving_mode(source: Path, destination: Path) -> None:
+    binary = shutil.which("cp")
+    assert binary is not None
+    result = subprocess.run(  # noqa: S603 - 固定系统工具与测试文件
+        [binary, "-p", str(source), str(destination)],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+
+
+def _replace_env_value(path: Path, name: str, value: str) -> None:
+    prefix = f"{name}="
+    lines = path.read_text(encoding="utf-8").splitlines()
+    escaped = value.replace("\\", "\\\\").replace("'", "\\'")
+    replacement = f"{name}='{escaped}'"
+    matches = [index for index, line in enumerate(lines) if line.startswith(prefix)]
+    assert len(matches) == 1
+    lines[matches[0]] = replacement
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
+def _compose_app_database_url(directory: Path) -> str:
+    rendered = _compose(directory, "config", "--format", "json")
+    assert rendered.returncode == 0, rendered.stderr
+    environment = json.loads(rendered.stdout)["services"]["xiaowei"]["environment"]
+    assert isinstance(environment, dict)
+    value = environment["XW_DATABASE_URL"]
+    assert isinstance(value, str)
+    return value
+
+
+def _serve_databases(container_id: str) -> list[str]:
+    result = _pg(
+        container_id,
+        "SELECT DISTINCT datname FROM pg_stat_activity "
+        "WHERE usename = 'xiaowei' AND client_addr IS NOT NULL ORDER BY 1",
+    )
+    assert result.returncode == 0, result.stderr
+    return result.stdout.splitlines()
+
+
 def _probe(directory: Path, action: str) -> dict[str, Any]:
     result = _compose(
         directory,
@@ -254,29 +312,35 @@ def _post_saved_turn(port: int) -> dict[str, Any]:
 
 
 def _safe_dump(
-    container_id: str, database: str, destination: Path
+    directory: Path, destination: Path, *, database: str | None = None
 ) -> subprocess.CompletedProcess[bytes]:
     temporary = destination.with_name(f".{destination.name}.tmp")
     temporary.unlink(missing_ok=True)
     destination.unlink(missing_ok=True)
-    binary = shutil.which("docker")
-    assert binary is not None
+    command = 'exec pg_dump -Fc -U "$POSTGRES_USER" -d "$POSTGRES_DB"'
+    if database is not None:
+        assert database.isidentifier()
+        command = f'exec pg_dump -Fc -U "$POSTGRES_USER" -d {database}'
+    environment = {key: value for key, value in os.environ.items() if not key.startswith("XW_")}
     with temporary.open("wb") as output:
         result = subprocess.run(  # noqa: S603 - 参数只由本测试构造
             [
-                binary,
+                *_compose_command(),
+                "--env-file",
+                ".env",
                 "exec",
-                container_id,
-                "pg_dump",
-                "-Fc",
-                "-U",
-                "xiaowei",
-                "-d",
-                database,
+                "-T",
+                "postgres",
+                "sh",
+                "-c",
+                command,
             ],
+            cwd=directory,
+            env=environment,
             stdout=output,
             stderr=subprocess.PIPE,
             check=False,
+            timeout=120,
         )
     if result.returncode == 0:
         os.replace(temporary, destination)
@@ -285,38 +349,38 @@ def _safe_dump(
     return result
 
 
-def _restore(container_id: str, archive: Path, database: str) -> subprocess.CompletedProcess[bytes]:
-    created = docker(
+def _restore(directory: Path, archive: Path, database: str) -> subprocess.CompletedProcess[bytes]:
+    assert database.isidentifier()
+    created = _compose(
+        directory,
         "exec",
-        container_id,
-        "createdb",
-        "-U",
-        "xiaowei",
-        "-O",
-        "xiaowei",
-        database,
+        "-T",
+        "postgres",
+        "sh",
+        "-c",
+        f'exec createdb -U "$POSTGRES_USER" -O "$POSTGRES_USER" {database}',
     )
     assert created.returncode == 0, created.stderr
-    binary = shutil.which("docker")
-    assert binary is not None
+    environment = {key: value for key, value in os.environ.items() if not key.startswith("XW_")}
     with archive.open("rb") as source:
         return subprocess.run(  # noqa: S603 - 参数只由本测试构造
             [
-                binary,
+                *_compose_command(),
+                "--env-file",
+                ".env",
                 "exec",
-                "-i",
-                container_id,
-                "pg_restore",
-                "--exit-on-error",
-                "--no-owner",
-                "-U",
-                "xiaowei",
-                "-d",
-                database,
+                "-T",
+                "postgres",
+                "sh",
+                "-c",
+                f'exec pg_restore --exit-on-error --no-owner -U "$POSTGRES_USER" -d {database}',
             ],
+            cwd=directory,
+            env=environment,
             stdin=source,
             capture_output=True,
             check=False,
+            timeout=120,
         )
 
 
@@ -331,11 +395,12 @@ def test_operations_use_staged_upgrade_and_atomic_paired_backup() -> None:
         'tmp="$pair/.xiaowei.dump.tmp"',
         'mv "$tmp" "$pair/xiaowei.dump"',
         "pg_restore --exit-on-error",
-        ".env.restore",
+        ".env.before-restore",
         "storage upgrade --bind-existing-digest-key",
         "on-failure:3",
     ):
         assert required in operations
+    assert ".env.restore" not in operations
     assert "P3-A 尚未完成" not in operations
     assert "docker compose --env-file .env down -v" not in operations
 
@@ -479,38 +544,46 @@ def test_different_image_upgrade_rollback_and_paired_restore(
             "personal:local-operator",
         ]
 
-        backup = host_tmp / "xiaowei.dump"
-        assert _safe_dump(pg_id, "missing_database", backup).returncode != 0
-        assert not backup.exists() and not (host_tmp / ".xiaowei.dump.tmp").exists()
-        assert _safe_dump(pg_id, "xiaowei", backup).returncode == 0
+        pair = host_tmp / "backup-pair"
+        _install_private_directory(pair)
+        _copy_preserving_mode(active / ".env", pair / "xiaowei.env")
+        assert stat.S_IMODE((pair / "xiaowei.env").stat().st_mode) == 0o600
+        backup = pair / "xiaowei.dump"
+        assert _safe_dump(active, backup, database="missing_database").returncode != 0
+        assert not backup.exists() and not (pair / ".xiaowei.dump.tmp").exists()
+        assert _safe_dump(active, backup).returncode == 0
         assert backup.is_file() and backup.stat().st_size > 0
-        restored = _restore(pg_id, backup, "xiaowei_restore")
+        marker = _pg(
+            pg_id,
+            "CREATE TABLE p3_post_backup_marker (id integer PRIMARY KEY); "
+            "INSERT INTO p3_post_backup_marker VALUES (1)",
+        )
+        assert marker.returncode == 0, marker.stderr
+        restored = _restore(active, backup, "xiaowei_restore")
         assert restored.returncode == 0, restored.stderr.decode(errors="replace")
 
         restored_url = values["XW_DATABASE_URL"].rsplit("/", 1)[0] + "/xiaowei_restore"
-        _write_env(
-            active,
-            XW_WEB_PORT=str(port),
-            XW_STOP_GRACE_SECONDS="60",
-            XW_PROJECT_NAME=project,
-            XW_PG_VOLUME=volume,
-            XW_DATABASE_URL=restored_url,
-        )
+        before_restore = active / ".env.before-restore"
+        _copy_preserving_mode(active / ".env", before_restore)
+        _copy_preserving_mode(pair / "xiaowei.env", active / ".env")
+        _replace_env_value(active / ".env", "XW_DATABASE_URL", restored_url)
         restored_env = (active / ".env").read_bytes()
+        assert _compose_app_database_url(active) == restored_url
+        restore_check = _compose(
+            active, "run", "--rm", "--no-deps", "xiaowei", "config", "check"
+        )
+        assert restore_check.returncode == 0 and restore_check.stdout == "configuration valid\n"
         assert _compose(active, "up", "-d", "xiaowei", "--wait").returncode == 0
         assert _http(port, "/readyz")[0] == 200
+        assert _serve_databases(pg_id) == ["xiaowei_restore"]
         assert _compose(active, "stop", "xiaowei").returncode == 0
-        assert _probe(active, "snapshot") == verified
+        assert _probe(active, "snapshot") == {
+            **verified,
+            "database": "xiaowei_restore",
+            "post_backup_marker": False,
+        }
 
-        _write_env(
-            active,
-            XW_WEB_PORT=str(port),
-            XW_STOP_GRACE_SECONDS="60",
-            XW_PROJECT_NAME=project,
-            XW_PG_VOLUME=volume,
-            XW_DATABASE_URL=restored_url,
-            XW_DIGEST_KEY="wrong-p3-restore-key",
-        )
+        _replace_env_value(active / ".env", "XW_DIGEST_KEY", "wrong-p3-restore-key")
         assert _compose(active, "up", "-d", "--force-recreate", "xiaowei").returncode == 0
         failed_id = _compose(active, "ps", "-a", "-q", "xiaowei").stdout.strip()
         failed_state = _wait_stopped(failed_id)
@@ -523,9 +596,25 @@ def test_different_image_upgrade_rollback_and_paired_restore(
         assert _http(port, "/readyz")[0] == 200
         assert _compose(active, "stop", "xiaowei").returncode == 0
 
+        _copy_preserving_mode(before_restore, active / ".env")
+        assert (active / ".env").read_bytes() == original_env
+        assert _compose_app_database_url(active) == values["XW_DATABASE_URL"]
+        original_check = _compose(
+            active, "run", "--rm", "--no-deps", "xiaowei", "config", "check"
+        )
+        assert original_check.returncode == 0 and original_check.stdout == "configuration valid\n"
+        assert _compose(active, "up", "-d", "--force-recreate", "xiaowei", "--wait").returncode == 0
+        assert _serve_databases(pg_id) == ["xiaowei"]
+        assert _compose(active, "stop", "xiaowei").returncode == 0
+        original_snapshot = _probe(active, "snapshot")
+        assert original_snapshot == {
+            **verified,
+            "database": "xiaowei",
+            "post_backup_marker": True,
+        }
+
         for name in ("compose.yaml", "release.json"):
             shutil.copyfile(rollback / name, active / name)
-        (active / ".env").write_bytes(original_env)
         rolled_back = _compose(
             active,
             "up",
@@ -543,7 +632,7 @@ def test_different_image_upgrade_rollback_and_paired_restore(
         assert _http(port, "/readyz")[0] == 200
         assert _compose(active, "stop", "xiaowei").returncode == 0
         rolled_back_snapshot = _probe(active, "snapshot")
-        assert rolled_back_snapshot == verified
+        assert rolled_back_snapshot == original_snapshot
         assert {
             name: _sha256(active / name) for name in (".env", "xiaowei.json", "certs/ca.pem")
         } == operator_hashes
@@ -670,7 +759,7 @@ def test_container_migration_v4_to_v5_to_v6_and_old_program_refusal(
         )
         assert group.returncode == 0, group.stderr
         pre_v6 = host_tmp / "pre-v6.dump"
-        assert _safe_dump(pg_id, "xiaowei", pre_v6).returncode == 0
+        assert _safe_dump(directory, pre_v6).returncode == 0
 
         _replace_app_image(directory, v5_image, runtime_image)
         wrong_route = _compose(directory, "up", "-d", "--no-deps", "--force-recreate", "xiaowei")
@@ -714,7 +803,7 @@ def test_container_migration_v4_to_v5_to_v6_and_old_program_refusal(
         assert old_upgrade.returncode == old_serve.returncode == 1
         assert _pg(pg_id, "SELECT version FROM xiaowei_schema_version").stdout.strip() == "6"
 
-        restored = _restore(pg_id, pre_v6, "xiaowei_v5_rollback")
+        restored = _restore(directory, pre_v6, "xiaowei_v5_rollback")
         assert restored.returncode == 0, restored.stderr.decode(errors="replace")
         rollback_url = values["XW_DATABASE_URL"].rsplit("/", 1)[0] + "/xiaowei_v5_rollback"
         _write_env(
