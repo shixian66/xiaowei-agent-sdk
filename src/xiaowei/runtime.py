@@ -330,12 +330,17 @@ def _is_template_value(value: str) -> bool:
     return value in _TEMPLATE_SENTINELS or _TEMPLATE_MARKER.fullmatch(value) is not None
 
 
+# 键本身是身份标识的字典：错误只报告到字典这一层，不把键（飞书 open_id）写进路径。
+_IDENTITY_KEYED = frozenset({"feishu.users"})
+
+
 def _template_paths(value: object, path: str) -> list[str]:
     if isinstance(value, Mapping):
         found = [path] if any(_is_template_value(str(key)) for key in value) else []
         for key, item in value.items():
-            found += _template_paths(item, f"{path}.{key}" if path else str(key))
-        return found
+            child = path if path in _IDENTITY_KEYED else f"{path}.{key}" if path else str(key)
+            found += _template_paths(item, child)
+        return list(dict.fromkeys(found))
     if isinstance(value, list):
         return [
             found
@@ -352,7 +357,6 @@ def validate_placeholders(config: ServeConfig) -> None:
     """
     paths = _template_paths(config.model_dump(mode="json"), "")
     if paths:
-        # 字典键（如飞书 open_id）只报告所在字典，不把键本身写进路径。
         raise ConfigError("以下字段仍是模板占位符，请替换为实际值：" + "、".join(paths))
 
 

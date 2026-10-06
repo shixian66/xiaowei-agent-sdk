@@ -1701,6 +1701,16 @@ def test_repository_templates_name_every_placeholder_without_values(tmp_path: Pa
     assert "<" not in message and "replace" not in message
 
 
+def test_placeholder_errors_never_name_a_feishu_open_id(tmp_path: Path) -> None:
+    """单聊名单的键是 open_id：名单里的占位符只报告到 ``feishu.users``，不把键写进路径。"""
+    values = serve_config(8501, feishu=feishu_config(users={"ou_canary_open_id": "<内部 subject>"}))
+    values["access"]["grants"]["<内部 subject>"] = sorted(QUERY_TOOLS)
+    with pytest.raises(runtime.ConfigError) as raised:
+        runtime.validate_placeholders(_load(tmp_path, values))
+    assert "feishu.users" in str(raised.value)
+    assert "ou_canary_open_id" not in str(raised.value)
+
+
 def test_filled_templates_pass_the_placeholder_check(tmp_path: Path) -> None:
     config = _load(tmp_path, filled(example_with_feishu()))
     runtime.validate_placeholders(config)
