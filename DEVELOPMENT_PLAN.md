@@ -136,7 +136,7 @@ P1 分为两个顺序实施的小切片：
 
 ## 7. P3：获准环境实战
 
-详细任务见 [P3：Compose 部署与实战验收实施计划](docs/superpowers/plans/2026-10-05-p3-compose-deployment.md)；部署包与保留配置的维护约定只在 [ARCHITECTURE §10](ARCHITECTURE.md#deployment-package) 维护。P3-A 实现候选已完成本机容器验证，仍待精确 SHA 独立审查；P3-B 升级/恢复和 P3-C 获准环境实战尚未开始，证据与下一项以 handoff 为准。
+详细任务见 [P3：Compose 部署与实战验收实施计划](docs/superpowers/plans/2026-10-05-p3-compose-deployment.md)；部署包与保留配置的维护约定只在 [ARCHITECTURE §10](ARCHITECTURE.md#deployment-package) 维护。P3-A 已经独立复审并随 PR #49 合入；P3-B 的不同镜像升级/回退、v4→v5→v6 迁移和配套备份恢复已形成本机容器验证候选，仍须针对提交后的精确 SHA 独立复审。P3-C 获准环境实战尚未开始，证据与下一项以 handoff 为准。
 
 交付正式 Docker Compose：一个小维应用容器、一个 PostgreSQL 容器及持久卷。提供经验证的安装、配置、初始化/升级、启动、停机、按保留期清理和备份恢复说明。锁定受测镜像版本；更新应用镜像保留数据，持久卷不代替备份；不附加 Redis、Worker 或常驻迁移服务。
 

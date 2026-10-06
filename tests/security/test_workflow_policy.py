@@ -42,7 +42,7 @@ _EXPECTED_JOBS = (
 # 「多出的东西」，挡不住删除必需命令、重复摘要顶替、把配置挪到无关 action 下、
 # 或加 `continue-on-error` 让 gate 形同虚设。整文件摘要是唯一能覆盖全部
 # 增/删/改/移位的锚点；合法修改 workflow 时必须显式更新此常量。
-_WORKFLOW_SHA256 = "141ede3b2efb28c9e5b10aaa13f19223362a22d9c6fe2fc081bdac790d5a84e3"
+_WORKFLOW_SHA256 = "0474df6531eef4105939cd3af3560f8ebc1b61eb84e2a2968009d59230ca07f9"
 
 # ---- 闭集白名单：改动 ci.yml 必须同步更新此处，否则测试变红 ----------------
 _ALLOWED_EXPRESSIONS = {"github.ref"}
@@ -155,7 +155,7 @@ def test_single_line_run_commands_match_exactly() -> None:
             "python -m pytest -q --ignore=tests/sdk_core --ignore=tests/deployment": 1,
             (
                 "python -m pytest tests/deployment/test_release.py "
-                "tests/deployment/test_compose.py -q"
+                "tests/deployment/test_compose.py tests/deployment/test_maintenance.py -q"
             ): 1,
             "python -m pytest -m security -q": 1,
             "python -m scripts.compose_smoke": 1,

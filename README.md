@@ -53,7 +53,7 @@ MCP 负责标准化工具接入，不能替代业务授权。只有参数含义�
 
 ## 怎样开始
 
-唯一正式命令是 `xiaowei`（`python -m xiaowei` 相同）。它已用测试 PostgreSQL、脚本模型与替身完成离线验证；P3-A 双容器候选也已在本机 Linux/arm64 容器环境验证。真实模型、用户 StarRocks、真实飞书与公司服务器实战仍未完成（见 handoff）。旧 CLI、Worker 或旧 Compose 命令不是产品入口。
+唯一正式命令是 `xiaowei`（`python -m xiaowei` 相同）。它已用测试 PostgreSQL、脚本模型与替身完成离线验证；P3-A 双容器已合入，P3-B 的不同镜像升级、回退和隔离恢复候选已在本机 Linux/arm64 容器环境验证。真实模型、用户 StarRocks、真实飞书与公司服务器实战仍未完成（见 handoff）。旧 CLI、Worker 或旧 Compose 命令不是产品入口。
 
 实施时需要：
 
@@ -88,7 +88,7 @@ uv run --locked xiaowei --config xiaowei.json requests resend --subject <发起�
 
 **SQL 语义与升级。** 小维连接固定 SQL 模式，`||` 表示逻辑 OR；完整约定见 [ARCHITECTURE §6](ARCHITECTURE.md#6-只读查询保护)。D1/D2 修复把 StarRocks 证据摘要升为 v3，P2.5 Task 3（跨库与复杂 SQL）再升为 v4，Task 6（搜表分页与多库慢查询）升为 v5；每次升级前保存的 StarRocks 证据一次性失效，引用它们的旧会话须新建并重新查询，历史与重发也不能继续交付旧事实。其他工具的证据指纹不变。P2.5 Task 7 起，每条回答随结果保存模型本轮看过的证据，交付时一并按当前权限复核；升级前保存的回答没有这项记录，历史读取与 `requests resend` 不再交付（包括澄清与建议），不需要迁移表结构。
 
-**应用表版本 5、备份与回退。** 飞书单群把应用表的结构版本（`xiaowei_schema_version`，与上文的证据摘要版本无关）升为 5：会话、请求与证据增加归属 owner，请求增加回复目的地。已有版本 4 的数据库应停服、先备份，再执行 `storage upgrade`。升级只改应用表，原有个人请求、会话与 SDK 历史都保留：升级后同一用户可以继续追问，重投的旧消息仍按重复请求处理，不会重新运行。新版本的 `serve`、`storage init`/`cleanup` 遇到版本 4 的库会拒绝，必须先显式升级；旧版本程序遇到版本 5 的库同样拒绝启动、初始化、升级与清理，不会改动数据。因此回退到旧版本只能停服后恢复升级前的备份，并换回对应的代码与配置，或者改用新的空库。备份使用 PostgreSQL 自带工具，例如 `pg_dump -Fc -f xiaowei.dump <数据库>`；恢复到新库用 `createdb <新库> && pg_restore --exit-on-error -d <新库> xiaowei.dump`。备份包含应用表与 SDK 会话表；恢复后把 `XW_DATABASE_URL` 指向新库再启动，交付与重发照常按当前成员资格与数据权限复核。
+**应用表版本 6、升级与恢复。** 版本 5 保存个人/群 owner 与群回复目的地；版本 6 再把数据库与 `XW_DIGEST_KEY` 的不可逆指纹绑定。`serve`、升级、清理和重发遇到错密钥都会在业务 I/O 前拒绝。v1–v5 只有在操作者确认 `.env` 仍是原部署密钥并已完成配套备份后，才可执行 `storage upgrade --bind-existing-digest-key`；程序不能替操作者证明旧密钥来源。普通启动不建表、不迁移，旧程序也拒绝新 schema。回退到不认识新 schema 的旧程序时，须使用旧镜像、旧配置和迁移前备份恢复出的隔离数据库，不在原库降级。容器首次安装、普通升级/回退、原子 `pg_dump`、隔离 `pg_restore`、主机重启后的启动和排障命令统一见 [容器运维说明](deploy/OPERATIONS.md)。运行镜像与发行归档不包含根文档、源码测试或开发工具。
 
 **数据范围（自动发现）。** 不再配置表与列：小维每隔 `schema_limits.refresh_seconds` 读取一次 `information_schema` 中全部用户库的表、视图与列，并对每个对象做一次不返回数据的 `SELECT 1 … WHERE 1 = 0` 探测，只有只读账号确实能 SELECT 的对象才进入范围。查询与执行计划可引用其中任何库的对象并跨库 JOIN：表名写成 `库名.表名`，只在一个库中存在的表可以省略库名（不使用连接的默认库猜测；多个库都有同名表时要求写明库名）。`list_tables`、`describe_table`、`describe_table_layout` 在返回前会再次确认对象仍可读。
 
