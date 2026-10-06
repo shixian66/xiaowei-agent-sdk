@@ -7,6 +7,53 @@ Web 端口只发布到宿主机 `127.0.0.1`，PostgreSQL 不发布端口。Host/
 建议使用固定目录 `/opt/xiaowei/current`。`.env`、`xiaowei.json` 与 `certs/` 由操作者持有，升级
 只替换 `compose.yaml` 和 `release.json`。旧发行包及旧应用镜像保留到新版验收完成。
 
+## 获取 amd64 发行包与镜像权限
+
+正式发行由 GitHub Actions 中的 `publish-amd64` 手动触发，且只接受 `main`。操作方法见
+[GitHub 手动运行 workflow 说明](https://docs.github.com/en/actions/how-tos/manage-workflow-runs/manually-run-a-workflow)。它会从当前提交构建
+`linux/amd64` 应用镜像，按镜像 digest 生成发行包，并附到同一提交的 GitHub Release。首次发布前，
+仓库管理员需要设置 Repository variable `GHCR_USERNAME`（PAT 所属 GitHub 用户名）和 secret
+`GHCR_WRITE_TOKEN`（classic PAT，仅勾选 `write:packages`；创建时若自动勾选 `repo`，请取消）。
+GitHub Release 的写入使用 workflow 的 `GITHUB_TOKEN`。不要把 PAT 写入仓库文件或聊天。
+镜像通过独立 PAT 发布且不自动关联源码仓库，首次发布默认应为 Private。
+
+首次发布后，先在 GitHub Packages 页面确认 `xiaowei-agent-sdk` 包的可见性为 **Private**，再分发。
+从有权读取仓库的电脑下载 Release 中的
+`xiaowei-<完整代码 SHA>-linux-amd64.tar.gz`，再传到服务器；服务器不需要 Git、Python 或 GitHub CLI。
+
+先在服务器创建安装目录：
+
+```sh
+mkdir -p /opt/xiaowei/current
+```
+
+在有仓库读取权限的电脑上下载 Release 归档后，用 SSH/SCP 传到服务器：
+
+```sh
+release_sha=PUT_40_CHAR_CODE_SHA_HERE
+server=SERVER_HOST_OR_IP
+scp "xiaowei-${release_sha}-linux-amd64.tar.gz" "root@${server}:/opt/xiaowei/"
+```
+
+服务器需要单独的 classic PAT，权限为 `read:packages`，且 PAT 所属账号必须能读取该私有包。
+GitHub Packages [要求使用 classic PAT](https://docs.github.com/en/packages/working-with-a-github-packages-registry/working-with-the-container-registry#authenticating-with-a-personal-access-token-classic)。首次在服务器登录时，Docker 会隐藏输入 token；后续
+`compose pull` 会复用 Docker 凭据：
+
+```sh
+docker login ghcr.io --username <PAT所属GitHub用户名>
+```
+
+仅首次安装时展开到 `/opt/xiaowei/current`：
+
+```sh
+release_sha=PUT_40_CHAR_CODE_SHA_HERE
+tar -xzf "/opt/xiaowei/xiaowei-${release_sha}-linux-amd64.tar.gz" \
+  -C /opt/xiaowei/current
+```
+
+升级时把新归档展开到独立的 `/opt/xiaowei/releases/<完整代码SHA>`，再按下文普通升级步骤替换控制文件。
+不要把未核验的归档或镜像标成已验收版本。
+
 ## 首次安装
 
 1. 把发行包展开到固定目录，核对 `release.json` 的平台、代码 SHA 与两个镜像 digest。

@@ -24,7 +24,9 @@ MEMBERS = {
 }
 
 
-def package(output: Path) -> subprocess.CompletedProcess[str]:
+def package(
+    output: Path, platform: str = "linux/arm64"
+) -> subprocess.CompletedProcess[str]:
     return subprocess.run(  # noqa: S603 - 固定 Python 与仓库脚本
         [
             sys.executable,
@@ -38,7 +40,7 @@ def package(output: Path) -> subprocess.CompletedProcess[str]:
             "--code-sha",
             CODE_SHA,
             "--platform",
-            "linux/arm64",
+            platform,
         ],
         cwd=ROOT,
         capture_output=True,
@@ -92,6 +94,15 @@ def test_release_archive_has_only_the_deployment_contract(tmp_path: Path) -> Non
     )
     assert not any(name in extracted for name in forbidden)
     assert "p3-release-sentinel.tmp" not in extracted
+
+
+def test_release_archive_records_linux_amd64(tmp_path: Path) -> None:
+    output = tmp_path / "amd64.tar.gz"
+    assert package(output, "linux/amd64").returncode == 0
+
+    with tarfile.open(output, "r:gz") as archive:
+        metadata = json.load(archive.extractfile("release.json"))
+    assert metadata["platform"] == "linux/amd64"
 
 
 def test_release_rejects_mutable_image_references(tmp_path: Path) -> None:
