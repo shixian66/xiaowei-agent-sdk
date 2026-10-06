@@ -64,6 +64,28 @@ tar -xzf "/opt/xiaowei/xiaowei-${release_sha}-linux-amd64.tar.gz" \
    JSON 写容器路径 `/etc/xiaowei/certs/<文件>`。
 4. `.env` 只允许部署管理员读取；配置和 CA 须允许容器 UID 65532 只读。
 
+两份配置的分工：`.env` 只放秘密和部署参数，可以用 `#` 写注释；`xiaowei.json` 放模型、StarRocks
+地址、权限等非秘密内容，是标准 JSON，不能写 `#` 或 `//` 注释。两份模板里的 `<……>` 以及
+`cli_replacewithappid`、`oc_replace_with_chat_id` 都是待填写标记，没替换时 `config check` 和
+`serve` 都会按字段路径拒绝，不会启动。
+
+| 位置 | 是否必填 | 填什么 | 从哪里拿 | 以后能否改 |
+| --- | --- | --- | --- | --- |
+| `.env` 的 `XW_POSTGRES_PASSWORD` 与 `XW_DATABASE_URL` | 必填 | 自己生成的数据库密码；URL 里的密码与它一致，特殊字符按 URI 编码 | `openssl rand -hex 24` | 初始化后不改 |
+| `.env` 的 `XW_DIGEST_KEY` | 必填 | 自己生成的摘要密钥 | `openssl rand -hex 32` | 永不重新生成；与数据库成对备份 |
+| `.env` 的 `XW_MODEL_API_KEY` | 必填 | 模型服务的 API Key | 模型服务管理员 | 可轮换，改后重启 |
+| `.env` 的 `XW_STARROCKS_PASSWORD` | 必填 | 第一个目标只读账号的**密码** | StarRocks 管理员 | 可轮换，改后重启 |
+| `.env` 的 `XW_ARCHIVE_STARROCKS_PASSWORD` | 按需 | 第二个目标的只读密码；不用该目标时连同 JSON 里的目标一起删 | StarRocks 管理员 | 可轮换 |
+| `.env` 的 `XW_FEISHU_APP_SECRET` | 按需 | 启用飞书时填应用 App Secret | 飞书开放平台 | 可轮换 |
+| JSON 的 `model.model` | 必填 | 获准的模型 ID | 模型服务管理员 | 换模型后须新建会话 |
+| JSON 的 `targets[].description`、`starrocks.host`、`database`、`user` | 必填 | 集群用途说明、FE 地址、默认库、只读账号名 | StarRocks 管理员 | 可改，改后重启 |
+| JSON 的 `access.grants` 与 `web.operator_id` | 必填 | Web 操作者的内部 subject 及其工具 | 部署管理员决定 | 可改，改后重启 |
+| JSON 的 `feishu` | 按需 | `null` 表示不启用；启用方式见下文“启用飞书” | 飞书开放平台 | 可改，改后重启 |
+
+常见错误：`config check` 输出“仍是模板占位符”时按列出的字段替换；“引用的环境变量未设置或为空”
+时补 `.env` 对应行；“飞书用户 subject … 缺少有效授权”时在 `access.grants` 给该 subject 至少一个
+工具，或从 `feishu.users` 删掉该用户。
+
 ```sh
 cd /opt/xiaowei/current
 chmod 600 .env
@@ -86,6 +108,25 @@ ssh -N -L 127.0.0.1:8501:127.0.0.1:8501 <获准服务器>
 ```
 
 不得把 Compose 发布行改成省略 host IP 的 `8501:8501`，也不得使用 host network。
+
+## 启用飞书
+
+把 `xiaowei.json` 的 `feishu` 从 `null` 换成飞书段，并在 `.env` 填 `XW_FEISHU_APP_SECRET`。源码
+仓库的 `examples/feishu-group.example.json` 是含指定群的完整飞书段；不启用指定群时删掉其中的
+`group`。
+
+`feishu.users` 是允许单聊的名单，键是用户的 `open_id`，值是内部 subject。名单可以为空：为空时
+单聊没有任何人获得权限；配置了指定群时，群成员仍按 `group.tools` 在群里使用，与单聊名单无关。
+
+给一个人开通单聊时，两处必须同时改：
+
+```text
+feishu.users["<该用户的 open_id>"] = "<内部 subject>"
+access.grants["<内部 subject>"] = [该用户获准的工具]
+```
+
+subject 不能和 `web.operator_id` 相同；工具列表不能为空。改完先运行 `config check`，通过后重启
+小维才生效。
 
 ## 状态、停止与重启
 

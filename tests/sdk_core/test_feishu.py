@@ -1134,7 +1134,6 @@ async def test_real_sdk_reply_maps_target_codes_without_fresh_send(
 def test_feishu_config_validation() -> None:
     bad_values: tuple[dict[str, Any], ...] = (
         {"app_secret_ref": "plain-secret"},
-        {"users": {}},
         {"users": {"ou_a": "same", "ou_b": "same"}},
         {"users": {"user-1": "alice"}},
         {"max_reply_chars": 100},
@@ -1143,6 +1142,8 @@ def test_feishu_config_validation() -> None:
     for bad in bad_values:
         with pytest.raises(ValidationError):
             config(**bad)
+    # 单聊名单可以为空（首次部署取得 open_id 前）；为空时单聊无人获权。
+    assert config(users={}).users == {}
 
 
 @dataclass

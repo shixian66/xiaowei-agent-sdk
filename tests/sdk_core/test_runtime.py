@@ -1595,6 +1595,166 @@ def test_example_feishu_group_section_is_valid(tmp_path: Path) -> None:
     assert config.feishu.group.chat_id.startswith("oc_")
 
 
+GROUP_SECTION = {
+    "chat_id": "oc_group",
+    "tools": sorted(QUERY_TOOLS),
+    "member_page_size": 100,
+    "member_max_pages": 1,
+    "member_timeout_seconds": 5,
+    "max_waiting": 2,
+    "max_wait_seconds": 60,
+    "wait_check_seconds": 5,
+}
+
+
+def _load(tmp_path: Path, values: dict[str, Any]) -> runtime.ServeConfig:
+    path = tmp_path / "xiaowei.json"
+    path.write_text(json.dumps(values, ensure_ascii=False), encoding="utf-8")
+    return runtime.load_config(path)
+
+
+def test_empty_feishu_users_without_group_is_valid(tmp_path: Path) -> None:
+    """首次部署可以先不登记任何单聊用户：服务能启动，单聊没有人获得授权。"""
+    config = _load(tmp_path, serve_config(8501, feishu=feishu_config(users={})))
+    assert config.feishu is not None and config.feishu.users == {}
+
+
+def test_empty_feishu_users_with_group_keeps_group_tools_valid(tmp_path: Path) -> None:
+    """空单聊名单不影响既有指定群授权：群成员仍按 ``group.tools`` 使用。"""
+    feishu = feishu_config(users={}, stop_timeout_seconds=7, group=GROUP_SECTION)
+    config = _load(tmp_path, serve_config(8501, feishu=feishu))
+    assert config.feishu is not None and config.feishu.users == {}
+    assert config.feishu.group is not None
+    assert config.feishu.group.tools == QUERY_TOOLS
+
+
+@pytest.mark.parametrize(
+    "grants",
+    [
+        {OPERATOR: sorted(QUERY_TOOLS)},
+        {OPERATOR: sorted(QUERY_TOOLS), "alice": []},
+    ],
+    ids=["subject 不在 grants", "grant 为空"],
+)
+def test_registered_feishu_subject_requires_nonempty_grant(
+    tmp_path: Path, grants: dict[str, list[str]]
+) -> None:
+    """已登记的单聊用户必须同时有非空授权；否则在启动前离线拒绝，而不是运行时静默无权限。"""
+    values = serve_config(
+        8501,
+        feishu=feishu_config(users={"ou_canary_open_id": "alice"}),
+        access={"policy_version": "p1", "grants": grants},
+    )
+    with pytest.raises(runtime.ConfigError) as raised:
+        _load(tmp_path, values)
+    message = str(raised.value)
+    assert "alice" in message and "有效授权" in message
+    assert "ou_canary_open_id" not in message
+
+
+EXAMPLES = Path(__file__).resolve().parents[2] / "examples"
+FILLED = {
+    "cli_replacewithappid": "cli_filledapp",
+    "ou_replace_with_open_id": "ou_filled_user",
+    "oc_replace_with_chat_id": "oc_filled_group",
+}
+
+
+def filled(value: Any) -> Any:
+    """把模板占位符换成合成的实际值：需要“有效运行配置”的测试用它，不放宽正式预检。"""
+    if isinstance(value, dict):
+        return {filled(k): filled(v) for k, v in value.items()}
+    if isinstance(value, list):
+        return [filled(v) for v in value]
+    if isinstance(value, str):
+        if value in FILLED:
+            return FILLED[value]
+        if value.startswith("<") and value.endswith(">"):
+            return "filled-value"
+    return value
+
+
+def example_with_feishu() -> dict[str, Any]:
+    values = json.loads((EXAMPLES / "xiaowei.example.json").read_text(encoding="utf-8"))
+    values["feishu"] = json.loads((EXAMPLES / "feishu-group.example.json").read_text("utf-8"))
+    return values
+
+
+def test_repository_templates_name_every_placeholder_without_values(tmp_path: Path) -> None:
+    """未替换的仓库模板语法上可读，但预检按字段路径拒绝，且不回显模板文字。"""
+    config = _load(tmp_path, example_with_feishu())
+    with pytest.raises(runtime.ConfigError) as raised:
+        runtime.validate_placeholders(config)
+    message = str(raised.value)
+    for path in (
+        "model.model",
+        "targets.0.description",
+        "targets.0.starrocks.host",
+        "targets.0.starrocks.database",
+        "targets.0.starrocks.user",
+        "targets.1.starrocks.host",
+        "feishu.app_id",
+        "feishu.tenant_key",
+        "feishu.group.chat_id",
+    ):
+        assert path in message
+    assert "<" not in message and "replace" not in message
+
+
+def test_filled_templates_pass_the_placeholder_check(tmp_path: Path) -> None:
+    config = _load(tmp_path, filled(example_with_feishu()))
+    runtime.validate_placeholders(config)
+    # 普通配置（各 Provider 的既有格式）不含模板 marker，照常通过。
+    runtime.validate_placeholders(_load(tmp_path, serve_config(8501, feishu=feishu_config())))
+
+
+def test_angle_brackets_in_real_values_are_not_mistaken_for_placeholders(tmp_path: Path) -> None:
+    """只识别模板 marker（尖括号包住的中文说明），不猜测“看起来不像真实值”的内容。"""
+    values = serve_config(8501)
+    values["targets"][0]["description"] = "销售库 <sales> 汇总"
+    runtime.validate_placeholders(_load(tmp_path, values))
+
+
+def env_template_values() -> dict[str, str]:
+    """deploy/.env.example 中仍需操作者填写的秘密：值里含模板 marker 的行。"""
+    text = (EXAMPLES.parent / "deploy/.env.example").read_text(encoding="utf-8")
+    values: dict[str, str] = {}
+    for line in text.splitlines():
+        name, sep, raw = line.partition("=")
+        if sep and not line.lstrip().startswith("#") and "<" in raw:
+            values[name.strip()] = raw.strip().strip("'")
+    return values
+
+
+def test_env_template_secrets_are_rejected_without_echoing_them(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """环境变量已设置但仍是 .env 模板值时，完整预检按字段路径拒绝，不输出该值。"""
+    template = env_template_values()
+    assert {"XW_DATABASE_URL", "XW_DIGEST_KEY", "XW_MODEL_API_KEY", "XW_STARROCKS_PASSWORD"} <= set(
+        template
+    )
+    config = _load(tmp_path, serve_config(8501))
+    fields = {
+        DB_ENV: ("XW_DATABASE_URL", "storage.database_url_ref"),
+        KEY_ENV: ("XW_DIGEST_KEY", "storage.digest_key_ref"),
+        MODEL_ENV: ("XW_MODEL_API_KEY", "model.api_key_ref"),
+        SR_ENV: ("XW_STARROCKS_PASSWORD", "targets.0.starrocks.password_ref"),
+    }
+    real = {name: f"real-{name.lower()}" for name in fields}
+    for name, (template_name, path) in fields.items():
+        for other, value in real.items():
+            monkeypatch.setenv(other, value)
+        monkeypatch.setenv(name, template[template_name])
+        with pytest.raises(runtime.ConfigError) as raised:
+            runtime.validate_config(config)
+        assert path in str(raised.value)
+        assert template[template_name] not in str(raised.value)
+    for other, value in real.items():
+        monkeypatch.setenv(other, value)
+    runtime.validate_config(config)
+
+
 async def test_static_access_is_the_single_source_for_entry_and_evidence() -> None:
     access = runtime.StaticAccess(
         runtime.AccessConfig(

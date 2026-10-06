@@ -30,6 +30,8 @@ from tests.sdk_core.test_runtime import (
     KEY_ENV,
     MODEL_ENV,
     SR_ENV,
+    env_template_values,
+    example_with_feishu,
     free_port,
     serve_config,
 )
@@ -234,6 +236,79 @@ def test_container_entry_is_the_only_cli_path_that_selects_container_binding(
     assert cli_module.container_main(["serve"], config_path=file) == 0
     assert len(called) == 1 and called[0].listen_host == "127.0.0.1"
     assert "container" not in _parser_help()
+
+
+def _template_file(tmp_path: Path) -> Path:
+    """未替换的发行模板（含飞书片段），环境变量全部已设置：只有模板占位符这一个问题。"""
+    file = tmp_path / "xiaowei.json"
+    file.write_text(json.dumps(example_with_feishu(), ensure_ascii=False), encoding="utf-8")
+    return file
+
+
+def _no_runtime(monkeypatch: pytest.MonkeyPatch) -> list[str]:
+    started: list[str] = []
+
+    async def record(*args: object, **kwargs: object) -> int:
+        started.append("runtime")
+        return 0
+
+    monkeypatch.setattr(cli_module, "_run", record)
+    monkeypatch.setattr(runtime, "_container_serve", record)
+    return started
+
+
+@pytest.mark.parametrize("container", [False, True], ids=["native", "container"])
+def test_serve_rejects_an_unreplaced_template_before_any_runtime_io(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    container: bool,
+) -> None:
+    for name in (
+        "XW_DATABASE_URL",
+        "XW_DIGEST_KEY",
+        "XW_MODEL_API_KEY",
+        "XW_STARROCKS_PASSWORD",
+        "XW_ARCHIVE_STARROCKS_PASSWORD",
+        "XW_FEISHU_APP_SECRET",
+    ):
+        monkeypatch.setenv(name, f"real-{name.lower()}")
+    monkeypatch.setenv("XW_WEB_PORT", "8501")
+    monkeypatch.setenv("XW_STOP_GRACE_SECONDS", "600")
+    started = _no_runtime(monkeypatch)
+    file = _template_file(tmp_path)
+    before = (file.read_bytes(), file.stat().st_mtime_ns)
+
+    if container:
+        code = cli_module.container_main(["serve"], config_path=file)
+    else:
+        code = cli_module.main(["--config", str(file), "serve"])
+
+    assert code == 2 and started == []
+    err = capsys.readouterr().err
+    assert "model.model" in err and "feishu.app_id" in err and "<" not in err
+    assert (file.read_bytes(), file.stat().st_mtime_ns) == before
+
+
+@pytest.mark.parametrize("entry", ENTRIES)
+def test_config_check_rejects_template_values_in_the_environment(
+    entry: str, tmp_path: Path
+) -> None:
+    file = tmp_path / "xiaowei.json"
+    file.write_text(json.dumps(serve_config(18501)), encoding="utf-8")
+    template = env_template_values()["XW_MODEL_API_KEY"]
+    env = child_env(
+        **{
+            DB_ENV: "postgresql+asyncpg://offline.invalid/xiaowei",
+            KEY_ENV: f"digest-{CANARY}",
+            MODEL_ENV: template,
+            SR_ENV: f"starrocks-{CANARY}",
+        }
+    )
+    result = run([*ENTRIES[entry], "--config", str(file), "config", "check"], env)
+    assert result.returncode == 2 and "model.api_key_ref" in result.stderr
+    assert template not in result.stdout + result.stderr
+    secrets_absent(result.stdout + result.stderr)
 
 
 def test_native_cli_requests_only_the_configured_loopback_binding(

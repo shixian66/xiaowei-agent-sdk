@@ -102,6 +102,9 @@ def _main(argv: Sequence[str] | None, *, container: bool) -> int:
             runtime.validate_config(config, container_port=port, stop_grace_seconds=stop_grace)
         elif args.command == "config":
             runtime.validate_config(config)
+        elif args.command == "serve":
+            # 原生 serve 不要求预先 config check，但未替换的模板必须在任何外部 I/O 前拒绝。
+            runtime.validate_placeholders(config)
     except runtime.ConfigError as exc:
         print(str(exc), file=sys.stderr)
         return 2

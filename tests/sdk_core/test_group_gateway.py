@@ -756,11 +756,11 @@ def runtime_group(**overrides: Any) -> dict[str, Any]:
         "wait_check_seconds": 1,
     }
     group.update(overrides)
-    # A 不在单聊名单中：群内的身份只来自群事件。
+    # 单聊名单为空：群内的身份只来自群事件，群授权不依赖 users。
     return feishu_config(
         app_id=APP,
         tenant_key=TENANT,
-        users={"ou_dave": "dave"},
+        users={},
         group=group,
         stop_timeout_seconds=7,
     )
