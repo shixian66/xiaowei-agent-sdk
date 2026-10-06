@@ -1,6 +1,7 @@
 # Vertex、配置维护与飞书首次授权设计
 
-- 状态：设计 v3；`98e2280` 独立复审结论为“修正 R1 后通过”，R1 文字修正提交为 `2adfede`，现进入详细实施计划
+- 状态：设计 v4；`98e2280` 独立复审结论为“修正 R1 后通过”，R1 文字修正提交为 `2adfede`；
+  本版同步详细实施计划审查中发现的 Session 与容器 CLI 契约，不代表产品已实现
 - 设计基线：`64180239549d43a8c16994babc3ad794b1d0511a`
 - 批准范围：Vertex API Key 原生接入、`.env`/`xiaowei.json` 维护优化、飞书未登记用户返回本人 `open_id`
 - 本阶段授权：设计、实施计划和文档；可做有边界的离线验证；不写产品功能代码
@@ -36,8 +37,9 @@ Web 访问边界。
 
 证据边界：2026-10-06 操作者在公司环境使用 `gemini-3-flash-preview` 和 Vertex 原生 API Key 路径
 报告 `VERTEX_NATIVE_OK`，只证明基础文本调用；此前把同一类 Key 放入现有 OpenAI 协议连接器时报告
-403。这两项是用户报告的部署现象，不是本候选提交的复现实验，也不证明函数调用、强制结构化输出、
-Session 追问或小维正式入口可用；凭据值不进入仓库。
+403。这两项是用户报告的部署现象，不是本候选提交的复现实验；当时没有记录 API 版本和请求路径，
+也不证明函数调用、强制结构化输出、Session 追问或小维正式入口可用。I-V 第一次真实调用必须先确认
+固定的 v1beta1 路径；凭据值不进入仓库。
 
 ## 2. 当前实现事实与复用范围
 
@@ -163,6 +165,10 @@ Vertex 的官方端点、原生协议和结构化输出方式由受信代码固�
 - 凭据、原始错误体、请求正文和模型正文不进入日志或 CLI 输出；
 - 适配器不得访问 RunContext 中不存在的凭据、连接或服务。
 
+首版 `reasoning_effort` 只能为 `null`：适配器不发送自定义 thinking 配置，由锁定 Gemini 3 模型使用
+默认思考级别。真实验收必须记录可得的 `thoughtsTokenCount`、耗时和请求期限命中情况；期限不足时
+调整 Profile 并重跑固定样本，不能把超时归为结构化输出或工具协议失败。
+
 生产 Profile 必须证明同一个 Vertex 请求可以同时携带函数声明与供应商原生的强制结构化输出约束，
 并在工具结果回传后生成可由当前 `AgentAnswer` schema 验证的最终对象。允许把 `AgentAnswer` schema
 机械转换为 Vertex 支持的等价子集，最终仍由原 Pydantic 类型和 Evidence 规则复核；不允许退回
@@ -172,6 +178,10 @@ Vertex 的官方端点、原生协议和结构化输出方式由受信代码固�
 Vertex 成功响应只有完整 `STOP` 终态可以交给 Runner；`MAX_TOKENS`、`SAFETY`、`RECITATION`、
 `MALFORMED_FUNCTION_CALL`、缺失或未知终态都受控失败。函数调用没有供应商 ID 时生成 ID 的路径、
 同名连续调用和回放关联都必须验证。
+
+包含 `text + thoughtSignature` 的 Part 仍是合法文本 Part；文本上的 signature 可以忽略，不进入 Session。
+只有 signature 而没有受支持内容的 Part 仍受控拒绝。文本和 `functionCall` 混合属于协议失败，真实样本
+必须单独计数。
 
 若 Vertex 一次返回多个函数调用，适配器在任何工具 I/O 前受控拒绝。V1 记录锁定真实模型中该情况的
 出现频率；若频繁出现，保持 Vertex 未开放并另行决定所有 Provider 的多调用契约，不在本次只给
@@ -187,11 +197,16 @@ Gemini/Vertex 的函数调用可能携带下一次请求必须原样返回的 op
 
 锁定 SDK 已使用函数调用项的 `provider_data.thought_signature` 保存 Gemini signature；同一 Runner
 轮内会直接回传。现有 `PolicySession` 重建函数调用时只保留 `call_id`、`name` 和 `arguments`，因此
-跨轮会丢失。若真实 Vertex 要求跨轮回传，Session 白名单只保留
-`provider_data.thought_signature`，并校验来源、字符串类型和长度；不另造 Vertex 专用字段，不保存
+跨轮会丢失。若真实 Vertex 要求跨轮回传，Session 只从 function call 的 `provider_data` 提取
+`thought_signature`，并校验字符串类型、非空和长度；`model`、`response_id` 与其他 key 继续丢弃，
+不能因锁定 SDK 自动附带这些字段而拒绝现有 Provider 的工具调用。不另造 Vertex 专用字段，不保存
 思维文本、其他 provider payload 或凭据。该字段只供模型适配器回传，不进入模型可见工具结果、
 Evidence、Web/飞书展示或日志。公开 replay 路径不能安全保留它时，Vertex Profile 不得开放，不能
 改用私有 API 或 monkey patch。
+
+`PolicySession` 当前没有历史项完整性摘要，本次不新增数据库完整性组件。持久化签名被改动时，能够
+验证的契约是：上游拒绝后适配器返回固定错误，不自动重试或重跑工具；不能声称 Session 在模型 I/O
+之前发现篡改。数据库信任边界继续沿用现有架构。
 
 ### 5.3 显式模型检查
 
@@ -199,7 +214,8 @@ Evidence、Web/飞书展示或日志。公开 replay 路径不能安全保留它
 是本次必须通过的目标。它：
 
 - 读取同一 `xiaowei.json`，只解析活动 Profile 的模型凭据，不要求 PostgreSQL、StarRocks 或飞书
-  环境变量存在；
+  环境变量存在；容器入口必须在通用容器预检之前分派本命令，不读取 Web 端口、停止宽限或 CA，
+  不调用完整 `validate_config`；其他容器命令的完整预检保持不变；
 - 与 `serve` 走同一个 `open_model` 装配、模型设置和 `RunConfig`，显式关闭 tracing；
 - 只发送固定合成数据，提供一个进程内、无外部 I/O 的固定工具；
 - 要求模型恰好调用该工具一次、收到固定结果并生成有效的 `AgentAnswer`；结果使用无 Evidence 的
@@ -475,8 +491,9 @@ PostgreSQL 测试实例和现有 lint/type/test 命令。设计不新增 Vertex 
 
 以下问题不交给普通实现细节决定，必须在对应切片关闭：
 
-1. **Vertex REST 与 transport 契约**：固定端点和请求形状、`x-goog-api-key` 头、`STOP` 终态、响应
-   字节流和取消/关闭能否在复用现有受控 transport 时同时成立。任一限制无法满足时，先修订设计，
+1. **Vertex REST 与 transport 契约**：用户报告未记录实际 API 版本与路径；固定 v1beta1 端点和请求
+   形状、`x-goog-api-key` 头、`STOP` 终态、响应字节流和取消/关闭能否在复用现有受控 transport 时
+   同时成立。任一限制无法满足时，先修订设计，
    不能把 Key 放进 URL、关闭限额或增加自动重试。
 2. **工具与强制结构化输出组合**：锁定模型必须在同一个请求中接受函数声明和供应商结构化输出约束，
    工具结果返回后稳定生成通过 `AgentAnswer` 校验的对象。协议 fixture 与真实模型均须通过；真实样本
@@ -488,7 +505,8 @@ PostgreSQL 测试实例和现有 lint/type/test 命令。设计不新增 Vertex 
    锁定模型单次返回多个函数调用的频率是否会让前置拒绝导致不可用。调用 ID 不成立或多调用频繁时
    Profile 保持未开放；后者另行决定统一的供应商契约，不在本次单独开放并行执行。
 5. **真实模型完整组合**：已有用户报告只证明基础文本请求；工具声明、工具结果回传、强制结构化最终
-   输出、signature、结束原因和 usage 字段仍缺真实证据。预览模型变化后原证据不自动适用于新模型。
+   输出、signature、结束原因、默认思考级别下的耗时与 usage/`thoughtsTokenCount` 字段仍缺真实证据。
+   预览模型变化后原证据不自动适用于新模型。
 6. **真实飞书发送**：现有 SDK 代码证明事件含发送者 `open_id`，但当前项目尚未用真实未登记账号验证
    “接收已 ack 后回复固定提示”的权限与发送结果。
 
@@ -497,13 +515,14 @@ Session/Evidence 校验来解决。
 
 ## 11. 文档与审查版本
 
-本文通过用户审阅后再编写独立实施计划；实施计划引用本文，不复制产品背景。开工前独立审查至少核对：
+详细实施计划引用本文，不复制产品背景；实施计划修订后仍需针对精确 SHA 独立复审。开工前至少核对：
 
 - 本文提交 SHA 和基线 `64180239549d43a8c16994babc3ad794b1d0511a`；
 - `ARCHITECTURE.md` 的唯一 Agent Loop、静态 Profile、Session、权限和数据边界；
 - `model_api.py`、`runtime.py`、`app.py`、`feishu.py`、`config.py`、`cli.py` 的真实调用链；
 - 计划是否为第 10 节问题设置了阻断性证据，尤其是真实 Vertex 固定样本数、成功门槛和失败分布；
-- handoff 是否只把 2026-10-06 的 `VERTEX_NATIVE_OK` 记为用户报告的基础文本证据，并写明
-  `gemini-3-flash-preview`、Vertex 原生 API Key 端点类别和未覆盖范围，不记录 Key。
+- handoff 是否只把 2026-10-06 的 `VERTEX_NATIVE_OK` 记为用户报告的基础文本证据，并写明当时没有
+  记录 API 版本/路径；I-V 实测后才补实际版本与路径模板、`gemini-3-flash-preview` 和未覆盖范围，
+  不记录 Key。
 
 审查通过只批准按计划开工，不代表 Vertex、真实飞书、公司 StarRocks、镜像发布或公司服务器部署已完成。

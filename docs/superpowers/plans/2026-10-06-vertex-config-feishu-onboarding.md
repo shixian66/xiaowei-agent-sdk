@@ -8,7 +8,7 @@
 
 **Tech Stack:** Python 3.11、openai-agents 0.22.3、Pydantic 2、现有 `httpx2` 受控传输、SQLAlchemy/asyncpg、PostgreSQL 16、lark-channel-sdk 1.4.0；不新增 `google-genai` 生产依赖。
 
-**Plan status:** 候选 v1；本提交只包含设计状态与详细计划，产品源码和测试未修改。
+**Plan status:** 候选 v2；根据锁定 SDK 0.22.3 与候选源码复核结果修订。本文仍只规划产品源码和测试，未把任何待实施项写成已通过。
 
 **Spec:** 唯一详细设计为 [`2026-10-06-vertex-config-feishu-onboarding-design.md`](../specs/2026-10-06-vertex-config-feishu-onboarding-design.md)，经条件复审后文字修正版为 `2adfedef508de9c7b6cfe539744e50eb8531467b`；设计基线为 `64180239549d43a8c16994babc3ad794b1d0511a`。产品边界继续引用 [`ARCHITECTURE.md`](../../../ARCHITECTURE.md)，本文只把设计拆成可执行、可验证的任务，不重写产品背景。
 
@@ -133,7 +133,10 @@ uv run --locked --extra dev python -m pytest \
 - 原生与容器 `serve` 在异步运行前执行 `validate_placeholders`；容器仍执行完整 `validate_config`。
 - `config check` 继续执行完整 `validate_config`。
 - `storage` / `requests` 不新增与其任务无关的模型、目标占位符依赖；其既有秘密解析和安全门禁保持原状。
-- V2 的 `model check` 后续只复用 `validate_placeholders` 和“解析模型 Key”，绝不调用完整 `validate_config`。
+- C1 只提供共享窄校验，不为尚不存在的命令预留死分支。V2 增加 `model check` 时，必须在
+  `container` 通用分支之前分派它：原生和容器入口都只调用 `validate_placeholders` 与
+  `validate_model_config`，并跳过 `_container_deployment_values` 和完整 `validate_config`。
+  端口与停止宽限不参与模型检查；其他容器命令继续执行原有完整预检。
 
 重跑 Step 3；预期通过，socket/文件写入计数为零。
 
@@ -318,6 +321,9 @@ git diff --check
 - Create: `tests/sdk_core/test_vertex_model.py`
 - Modify: `src/xiaowei/model_api.py`
 - Modify: `tests/sdk_core/test_model_api.py`
+- Modify: `pyproject.toml`
+- Modify: `uv.lock`
+- Modify: `tests/security/test_dependency_baseline.py`
 
 ### Step 1：锁定 Profile 与固定协议身份
 
@@ -328,6 +334,9 @@ git diff --check
 - Vertex 模型 ID 只允许安全路径段；空值、斜杠、查询串、片段拒绝。
 - Vertex `reasoning_effort` 首版必须为 `null`，避免未经验证的 thinking 参数映射。
 - 指纹包含固定 endpoint、`v1beta1-generateContent` 协议身份、模型和数据策略，不含 Key 值。
+- `src/xiaowei` 已直接导入的 `httpx2` 必须成为显式生产依赖；声明与 SDK 0.22.3 兼容的
+  `httpx2>=2.12,<3`，更新依赖集合测试，并由 `uv.lock` 锁到实际解析版本。不能继续依赖
+  `openai-agents` 的传递依赖恰好存在。
 
 实现最小变化：
 
@@ -340,7 +349,9 @@ git diff --check
 
 ```bash
 uv run --locked --extra dev python -m pytest \
-  tests/sdk_core/test_model_api.py -k 'vertex or fingerprint' -q
+  tests/sdk_core/test_model_api.py tests/security/test_dependency_baseline.py \
+  -k 'vertex or fingerprint or runtime_dependency' -q
+uv lock --check
 ```
 
 ### Step 2：先写请求映射契约测试
@@ -371,7 +382,8 @@ uv run --locked --extra dev python -m pytest tests/sdk_core/test_vertex_model.py
 
 测试至少覆盖：
 
-- 单一文本 Part → SDK output message；usage 只取已知整数计数。
+- 单一文本 Part → SDK output message；只带 `text + thoughtSignature` 的 Part 仍按合法文本处理，
+  文本上的 signature 不进入 Session；usage 只取已知整数计数。
 - 单一 functionCall → 非空唯一 UUID call ID、函数名/JSON 参数、`provider_data.thought_signature`。
 - 后续 functionCall output 依据 input 中同一 call ID 还原正确函数名；相邻两个并发 Runner 使用相同工具名时不串线。
 - 未知工具、非对象参数、缺/错 signature、多个 candidates、一个 candidate 多个 functionCall、文本和 functionCall 混合、未知 Part、缺失/未知 finishReason、非 `STOP` 均拒绝。
@@ -384,6 +396,8 @@ uv run --locked --extra dev python -m pytest tests/sdk_core/test_vertex_model.py
 - 只接受一个 candidate 和完整 `STOP`。
 - functionCall 必须带非空 thought signature；作为原调用 Part 的 opaque 数据返回 SDK。
 - 一次多调用直接失败，不部分执行。
+- 只有 signature、没有 `text` 或 `functionCall` 的 Part 仍是不支持的 Part；把任何含
+  `thoughtSignature` 的文本 Part 误判为未知 Part 的隔离变异必须被文本成功用例抓到。
 
 ### Step 4：Runner 工具往返与强制结构化最终回答
 
@@ -416,6 +430,12 @@ uv run --locked --extra dev mypy src/xiaowei
 **依赖：** V1-A。
 **可独立验证的结果：** Vertex function call 的 thought signature 在同轮和跨用户轮回放中原样保留，其他 provider payload 不持久化；Profile 不一致时在模型 I/O 前拒绝。
 
+**锁定事实：** Agents SDK 0.22.3 的 `openai_chatcompletions.py:349-351` 为每次 Chat Completions
+响应建立 `provider_data.model`，并在响应有 ID 时加入 `response_id`；`chatcmpl_converter.py:254-268`
+把这些字段复制到每个函数调用并追加 Gemini signature；`:849` 依据回放时传入的当前模型名决定是否
+恢复 signature，不读取已保存的 `provider_data.model`。候选源码 `session.py` 的 `_function_call`
+当前丢弃整个 `provider_data`。
+
 **Files:**
 
 - Modify: `src/xiaowei/session.py`
@@ -425,16 +445,26 @@ uv run --locked --extra dev mypy src/xiaowei
 - Modify: `tests/sdk_core/test_runtime.py`
 - Modify: `src/xiaowei/app.py`（只抽取共享安全 RunConfig 工厂）
 
-### Step 1：先写 Session 签名保存与拒绝测试
+### Step 1：先写 Session 签名提取、保存与失败测试
 
 在 `test_session_policy.py` 增加：
 
 - `provider_data={"thought_signature": "..."}` 随 function call 保存并原样回放。
-- `provider_data` 非字典、缺字段、多字段、空字符串、非字符串、非法 UTF-8 或 UTF-8 超过 65,536 字节时拒绝整轮，不截断、不静默删除。
-- 以现有 Gemini Profile 指纹保存带 `provider_data.thought_signature` 的调用时同样原样回放；没有该字段的 Gemini/DeepSeek/OpenAI 既有回放保持不变。
+- 用锁定 SDK 0.22.3 的真实 `Converter.message_to_output_items` 生成两个测试输入，再完整走
+  `PolicySession` 保存与回放：DeepSeek 风格输入带 SDK 自动添加的 `model/response_id`；Gemini 风格
+  输入除这两个字段外还从 `extra_content.google.thought_signature` 得到签名。前者必须成功且回放时
+  不保留 `provider_data`，后者必须成功且只保留签名。该 Converter 只用于锁定 SDK 输出形状的测试，
+  产品代码不得导入 SDK 私有转换器。
+- `provider_data` 不存在、不是映射、缺少签名或同时含其他字段时，只丢弃非白名单内容，不拒绝整轮；
+  映射中一旦存在 `thought_signature`，空字符串、非字符串、非法 UTF-8 或 UTF-8 超过 65,536 字节
+  必须拒绝整轮，不截断、不静默删除签名。
+- 以现有 Gemini Profile 指纹保存带 `provider_data.thought_signature` 的调用时原样回放；没有该字段的
+  Gemini/DeepSeek/OpenAI 既有回放保持不变。
 - 签名字节计入 `_size` 和 `max_history_bytes`；仅因加入签名越界时返回现有“历史过大”行为。
 - Profile 指纹不一致时不回放签名，且模型调用次数为 0。
-- 篡改持久化签名后回放失败；不把签名放进 Evidence、工具结果、Web/飞书投影或日志。
+- `PolicySession` 没有记录完整性摘要，不能声称本地发现签名被篡改。测试直接修改已保存签名，令协议
+  替身对不匹配签名返回 400，断言适配器映射为固定模型错误、0 次自动重试、0 次工具重跑，且错误、
+  Evidence、工具结果、Web/飞书投影和日志均不包含签名。
 
 先运行：
 
@@ -443,14 +473,18 @@ uv run --locked --extra dev python -m pytest \
   tests/sdk_core/test_session_policy.py -k 'signature or provider_data or profile' -q
 ```
 
-预期：当前 `_function_call` 丢弃额外字段，保存/回放用例先失败。
+预期：当前 `_function_call` 丢弃额外字段，Gemini 签名保存/回放用例先失败；DeepSeek 风格输入是
+成功对照，证明修复没有把 SDK 自动字段变成回归。
 
-### Step 2：实现单字段白名单
+### Step 2：实现单字段提取白名单
 
-- `_function_call` 仅接受可选的 `provider_data.thought_signature`；存在时进行类型、非空、UTF-8 和 65,536 字节检查。
-- 未知 provider_data key 直接拒绝，避免供应商 payload 随历史扩张。
+- `_function_call` 只在 `provider_data` 为映射且含 `thought_signature` 时提取该字段；存在时进行类型、
+  非空、UTF-8 和 65,536 字节检查。
+- `model`、`response_id` 和所有其他 key 继续像当前实现一样丢弃，不保存也不因其存在而拒绝；重建后的
+  `provider_data` 最多只有 `thought_signature`。非映射值视为没有可保存的白名单字段。
 - 回放仍使用公开 SDK function call item；`_size` 对序列化后的完整项目计数，不另建计数器。
-- 规则不按 Provider 分支，因此任何现有 Provider 产出同名字段都会受同一约束；Profile 指纹仍决定会话能否回放。
+- 规则不按 Provider 分支；锁定 SDK 回放时是否恢复 Gemini signature 由**当前模型名**决定，不依赖已
+  丢弃的 `provider_data.model`。Profile 指纹仍决定会话能否回放。
 
 重跑 Step 1 和整个 `test_session_policy.py`。
 
@@ -474,14 +508,20 @@ uv run --locked --extra dev python -m pytest \
 ### V1-B 成功、关键失败与审查 Gate
 
 - **成功：** 真实 SDK/Runner/PolicySession/隔离 PG 跑通两轮，签名与 call ID 关联正确，工具和 Evidence 行为不变。
-- **关键失败：** 超长/篡改/未知 provider payload、Profile 改变、回放缺签名均在未授权 I/O 前拒绝。
-- **审查：** 做“从 `_function_call` 删除 provider_data”“容量不计签名”“Profile 不同仍回放”三个变异，测试必须失败。
+- **关键失败：** 非法/超长签名、Profile 改变或回放缺签名按各自边界拒绝；已保存签名与上游不匹配时
+  400 映射为固定错误且不重试、不重跑工具。未知 provider 字段只丢弃，不作为失败。
+- **审查：** 做“拒绝任何未知 provider key”“把所有 provider key 写入历史”“从 `_function_call`
+  删除签名”“容量不计签名”“Profile 不同仍回放”“吞掉 signature 400 或自动重试”六个隔离变异；
+  对应成功、精确回放、容量、Profile 和失败测试必须明确转红，不能只表现为卡住。
 - **建议提交：** `feat: preserve bounded model call signatures in sessions`
 
 ## 7. V2：正式 `xiaowei model check`
 
 **依赖：** V1-B。
 **可独立验证的结果：** 操作者只提供一份完整结构的 JSON 和模型 Key，就能验证当前 Profile 的真实模型协议、一次合成工具调用和最终类型；无需数据库、StarRocks、飞书变量或 CA。
+
+**锁定事实：** 候选 `cli.py:99-102` 在 `load_config` 后先进入通用 `container` 分支并调用完整
+`validate_config`，然后才会分派具体命令；只给原生入口补测试无法证明容器正式入口满足本节契约。
 
 **Files:**
 
@@ -497,11 +537,18 @@ uv run --locked --extra dev python -m pytest \
 增加测试：
 
 - `xiaowei --config ... model check` 出现在 console/module 两个正式入口帮助中。
-- 缺少 `XW_DATABASE_URL`、`XW_DIGEST_KEY`、所有 StarRocks 密码和飞书 Secret 时仍能进入模型替身；不可读 StarRocks CA 也不影响此命令。
+- 对 `main([... "model", "check"])` 与 `container_main(["model", "check"])` 重复同一组断言：缺少
+  `XW_DATABASE_URL`、`XW_DIGEST_KEY`、所有 StarRocks 密码和飞书 Secret 时仍能进入模型替身；
+  StarRocks CA 不可读也不影响此命令。
 - 缺/空/模板值的模型 Key 退出 2；JSON 结构或固定占位符错误退出 2。
-- 测试把 `validate_config` 替换成“被调用就失败”，证明 `model check` 不调用它。
+- 两个入口都把 `validate_config` 替换成“被调用就失败”；容器用例同时不提供或故意提供非法
+  `XW_WEB_PORT` / `XW_STOP_GRACE_SECONDS`，证明模型检查既不调用完整预检，也不读取无关部署参数。
+- 成功对照：容器 `serve` 和 `config check` 仍调用完整 `validate_config` 并继续拒绝缺少的秘密、不可读
+  CA 或非法端口/停止宽限。本次不能为通过模型检查而削弱其他命令。
 - socket 守卫只允许注入的模型 `MockTransport`；数据库 engine、StarRocks、飞书和文件写入函数调用数为 0。
 - 成功输出只含 profile/model/`valid`；失败只含固定类别，无提示、响应、工具结果或 Key。
+- 隔离变异：把容器完整预检重新挪到 `model` 分派之前，容器用例必须因 `validate_config` 被调用而
+  明确失败；原生成功对照仍通过，避免只覆盖一个入口。
 
 先运行：
 
@@ -514,14 +561,19 @@ uv run --locked --extra dev python -m pytest \
 
 ### Step 2：实现窄模型检查装配
 
-新增窄入口，例如 `runtime.check_model(config, *, transport=None) -> None`，只执行：
+`_main` 的分派顺序固定为：
 
-1. `load_config` 已完成的 Pydantic 结构检查；
-2. `validate_placeholders(config)`；
-3. 只解析 `model.api_key_ref` 的 `validate_model_config(config)`；
-4. 同一个 `open_model`、`settings_for` 与 `safe_run_config()`；
-5. 一个进程内无 I/O function tool 和固定合成输入；
-6. `Runner.run`，无 Session、Evidence、Application、数据库或渠道。
+1. 所有命令先 `load_config`，保留 Pydantic 结构检查；
+2. `args.command == "model"` 时先于通用 `container` 分支，只执行 `validate_placeholders` 和
+   `validate_model_config`；
+3. 其他容器命令继续读取端口/停止宽限并调用完整 `validate_config`；
+4. 原生 `config check` 继续调用完整 `validate_config`，其余现有命令行为不变。
+
+随后新增窄入口，例如 `runtime.check_model(config, *, transport=None) -> None`，只执行：
+
+1. 同一个 `open_model`、`settings_for` 与 `safe_run_config()`；
+2. 一个进程内无 I/O function tool 和固定合成输入；
+3. `Runner.run`，无 Session、Evidence、Application、数据库或渠道。
 
 工具必须恰好调用一次。最终结果除了 Pydantic 类型正确，还要直接断言 advice 分支：
 
@@ -606,19 +658,33 @@ git diff --check
 
 **A. `model check` 协议组：**
 
+- 计数前先用首个获准请求确认实际方法、主机和路径确为
+  `POST /v1beta1/publishers/google/models/{model}:generateContent`，且 Key 只在请求头；证据只记 API
+  版本与去掉模型内容的路径模板。此前用户报告的 `VERTEX_NATIVE_OK` 没有记录版本和路径，不能代替
+  此检查。不一致时立即停止 I-V、修订设计和 fixture，不把该次调用计入 5 个样本。
 - 连续运行 5 次，要求 5/5 退出 0。
 - 每次恰好执行一次合成工具，最终 advice 分支有效。
-- 记录 profile ID、模型 ID、代码 SHA、镜像 digest、开始时间、耗时与可得 usage；不记录 Key、提示、响应正文或工具结果。
+- `reasoning_effort=null` 必须表现为不发送自定义 thinking 配置，使用 Gemini 3 默认思考级别。记录
+  profile ID、模型 ID、代码 SHA、镜像 digest、开始时间、耗时、可得 usage 和
+  `thoughtsTokenCount`；不记录 Key、提示、响应正文或工具结果。
 
 **B. 正式 Application 组：**
 
-复用 `scripts/gate0_real_model.py` 与 `tests/sdk_core/gate0.py`，使用生产 `_instructions`、真实 Runner、GovernedTools、隔离 PostgreSQL 和合成数据：
+复用 `scripts/gate0_real_model.py` 与 `tests/sdk_core/gate0.py`，使用生产 `_instructions`、真实 Runner、GovernedTools、隔离 PostgreSQL 和合成数据。20 次的组成在运行前固定，不能根据结果换题：
 
-- 20 次独立单轮样本，至少 19/20 完整成功。
+- 10 次固定查询意图：每次预期恰好执行 1 次获准合成查询工具并产生可验证 Evidence；另 10 次固定
+  无查询意图：每次预期 0 次工具执行并返回有效 advice/clarification。每次使用独立新会话，合计至少
+  19/20 完整成功。
 - 结构化输出、signature、call ID、工具结果关联、未知工具、非 `STOP` 等**协议/安全失败必须为 0**。
 - 多函数调用出现次数上限为 **0/20**；出现一次即保持 Vertex 未开放，并单独评估统一多调用契约。
-- 允许最多 1/20 为明确的瞬时 429/5xx/timeout；必须按固定错误失败、0 次自动重试、0 次工具重放，并原样计入报告，不能补跑替换该样本。
-- 每个成功样本恰好执行一个获准合成工具并产生可验证 Evidence；无查询意图样本的工具执行必须为 0。
+- “文本 + functionCall 混合响应”单列计数，属于协议失败且必须为 **0/20**；不能并入普通模型失败。
+- 允许最多 1/20 为明确的瞬时 429/5xx；必须按固定错误失败、0 次自动重试、0 次工具重放，并原样
+  计入报告，不能补跑替换该样本。客户端请求期限命中单列为 `deadline_exceeded`，不算可接受瞬时失败：
+  先调整已批准 Profile 的期限，再从头运行同一批 20 次。
+- 每次记录耗时、可得 `thoughtsTokenCount` 和预期/实际工具次数。通过批次中最慢成功样本必须不超过
+  Profile 请求期限的 80%；否则仍视为期限余量不足，调整期限后整批重跑。
+- 报告必须说明：即使多函数调用为 0/20，也只得到该批观测为零；按单侧 95% 零事件上界，真实发生率
+  仍可能约为 13.9%。以后更换正式模型或需要更强置信度时扩大样本，不能把 0/20 写成“不可能发生”。
 
 **C. 跨轮 Session 组：**
 
@@ -681,8 +747,9 @@ git diff --check
 
 | 疑点 | 关闭切片 | 未关闭时的行为 |
 | --- | --- | --- |
-| Express Mode endpoint、`x-goog-api-key`、工具 + `responseJsonSchema` 的真实组合 | V1-A fixture + I-V A/B | Vertex Profile 不开放 |
+| 用户报告的 `VERTEX_NATIVE_OK` 未记录 API 版本与路径；固定 v1beta1 endpoint、`x-goog-api-key`、工具 + `responseJsonSchema` 的真实组合尚未确认 | V1-A fixture + I-V A/B 首次请求检查点 | Vertex Profile 不开放 |
 | Gemini 3 thought signature 是否跨轮强制、大小是否落在 65,536 字节内 | V1-B + I-V C | Vertex 会话追问不开放；若真实签名超限，先修订边界 |
+| `reasoning_effort=null` 使用默认思考级别后的耗时、`thoughtsTokenCount` 与请求期限余量 | I-V A/B | 期限命中或余量不足时调整 Profile 并整批重验 |
 | 锁定模型的单响应多函数调用频率 | I-V B，0/20 | 出现即不开放，不部分执行 |
 | 正式提示词下工具选择和最终 Evidence 质量 | I-V B | `model check` 通过也不代表产品可用 |
 | 未登记账号的真实飞书接收/回复权限与送达 | I-F 真实 Gate | 只标离线候选，不宣称用户已可取得编号 |
@@ -701,4 +768,6 @@ git diff --check
 - 没有覆盖的环境和原因；
 - 回退步骤和会使旧会话失效的 Profile 变化。
 
-`AGENT_HANDOFF.md` 最终只更新当前状态、有效证据、既有 Chat Completions 多调用缺口和下一项工作；Git 保存过程，不复制本计划。独立审查必须针对精确 SHA。计划、测试全绿或审查通过均不等于获得发布、真实服务调用或公司服务器操作授权。
+`AGENT_HANDOFF.md` 最终只更新当前状态、有效证据、I-V 首次确认的 API 版本/路径、0/20 的统计含义、
+既有 Chat Completions 多调用缺口和下一项工作；Git 保存过程，不复制本计划。独立审查必须针对精确
+SHA。计划、测试全绿或审查通过均不等于获得发布、真实服务调用或公司服务器操作授权。
