@@ -27,8 +27,9 @@ import asyncio
 import logging
 import math
 import socket
+import sys
 from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
-from contextlib import AsyncExitStack, asynccontextmanager
+from contextlib import AbstractAsyncContextManager, AsyncExitStack, asynccontextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -59,6 +60,7 @@ from xiaowei.channel import (
 from xiaowei.channel_store import ChannelStore, RecoveryReport, SendOutcome
 from xiaowei.config import (
     FeishuConfig,
+    SecretRefError,
     WebConfig,
     configure_runtime,
     is_secret_ref,
@@ -100,6 +102,7 @@ from xiaowei.storage import (
     InstanceLock,
     Readiness,
     StorageUnavailableError,
+    check_digest_key,
     check_storage,
     hold_backend,
     hold_instance_lock,
@@ -113,10 +116,25 @@ logger = logging.getLogger(__name__)
 
 _LOOPBACK = frozenset({"127.0.0.1", "::1"})
 _CHECKS_PER_LISTED_OBJECT = 5
+_RUNTIME_CLOSE_BOUND_SECONDS = 25
+_STOP_MARGIN_SECONDS = 5
+_SCHEMA_CLOSE_TIMEOUT_SECONDS = 5
+_FEISHU_START_CANCEL_TIMEOUT_SECONDS = 5
+_FEISHU_CONSUMER_CANCEL_TIMEOUT_SECONDS = 12
+_WEB_EXIT_OVERHEAD_SECONDS = 2
+_WATCH_STOP_TIMEOUT_SECONDS = 12
 
 
 class ConfigError(Exception):
     """配置文件不可读或不符合契约；消息只含字段路径与固定说明，不含配置值。"""
+
+
+class RuntimeCloseError(Exception):
+    """运行资源无法在部署停止上界内关闭。"""
+
+
+class _StartupStoppedError(Exception):
+    pass
 
 
 # ---- 配置 ----------------------------------------------------------------------------
@@ -291,6 +309,70 @@ def load_config(path: Path) -> ServeConfig:
             for error in exc.errors(include_url=False, include_input=False)
         ]
         raise ConfigError("配置不符合要求：" + "；".join(problems)) from None
+
+
+def validate_config(
+    config: ServeConfig,
+    *,
+    container_port: int | None = None,
+    stop_grace_seconds: float | None = None,
+) -> None:
+    """离线解析全部凭据引用、CA 与可选容器参数；不连接外部服务或写文件。"""
+    refs = [
+        ("storage.database_url_ref", config.storage.database_url_ref),
+        ("storage.digest_key_ref", config.storage.digest_key_ref),
+        ("model.api_key_ref", config.model.api_key_ref),
+    ]
+    refs.extend(
+        (f"targets.{index}.starrocks.password_ref", target.starrocks.password_ref)
+        for index, target in enumerate(config.targets)
+    )
+    if config.feishu is not None:
+        refs.append(("feishu.app_secret_ref", config.feishu.app_secret_ref))
+    for field, ref in refs:
+        try:
+            resolve_secret_ref(ref)
+        except SecretRefError:
+            raise ConfigError(f"{field}: 引用的环境变量未设置或为空") from None
+
+    for index, target in enumerate(config.targets):
+        ca_file = target.starrocks.tls_ca_file
+        if ca_file is None:
+            continue
+        try:
+            with Path(ca_file).open("rb") as stream:
+                stream.read(1)
+        except OSError:
+            raise ConfigError(f"targets.{index}.starrocks.tls_ca_file: CA 文件不可读") from None
+
+    if container_port is not None:
+        if not 1 <= container_port <= 65535 or container_port != config.listen_port:
+            raise ConfigError("listen_port: 与容器发布端口不一致")
+        origin = f"http://127.0.0.1:{container_port}"
+        if config.listen_host != "127.0.0.1" or origin not in config.web.allowed_origins:
+            raise ConfigError("web.allowed_origins: 容器部署必须包含对应的 HTTP loopback 来源")
+    if stop_grace_seconds is not None:
+        if stop_grace_seconds < minimum_stop_grace_seconds(config):
+            raise ConfigError("shutdown_timeout_seconds: 容器停止宽限不足")
+
+
+def stop_upper_bound_seconds(config: ServeConfig) -> int:
+    """当前停止顺序的保守上界，不含要求操作者额外保留的安全余量。"""
+    feishu_stop = 0 if config.feishu is None else math.ceil(config.feishu.stop_timeout_seconds)
+    consumer_cancel = 0 if config.feishu is None else _FEISHU_CONSUMER_CANCEL_TIMEOUT_SECONDS
+    channel_and_web = math.ceil(config.shutdown_timeout_seconds) + max(
+        feishu_stop, _WEB_EXIT_OVERHEAD_SECONDS
+    )
+    return (
+        channel_and_web
+        + consumer_cancel
+        + _WATCH_STOP_TIMEOUT_SECONDS
+        + _RUNTIME_CLOSE_BOUND_SECONDS
+    )
+
+
+def minimum_stop_grace_seconds(config: ServeConfig) -> int:
+    return stop_upper_bound_seconds(config) + _STOP_MARGIN_SECONDS
 
 
 def _reason(error: Mapping[str, object]) -> str:
@@ -511,13 +593,16 @@ async def _refreshing(schemas: Mapping[str, SchemaCache]) -> AsyncIterator[None]
         ]
         yield
     finally:
-        # 启动中途被取消时，共享的刷新任务不随等待者取消：同样在这里取消并等待。
-        for task in loops:
-            task.cancel()
-        if loops:
-            await asyncio.wait(loops)
-        for schema in schemas.values():
-            await schema.aclose()
+        try:
+            async with asyncio.timeout(_SCHEMA_CLOSE_TIMEOUT_SECONDS):
+                # 启动中途被取消时，共享的刷新任务不随等待者取消：同样在这里取消并等待。
+                for task in loops:
+                    task.cancel()
+                if loops:
+                    await asyncio.wait(loops)
+                await asyncio.gather(*(schema.aclose() for schema in schemas.values()))
+        except TimeoutError:
+            raise RuntimeCloseError("结构刷新关闭超时") from None
 
 
 @asynccontextmanager
@@ -539,6 +624,7 @@ async def open_runtime(
         engine = await stack.enter_async_context(_engine(config))
         lock = await stack.enter_async_context(hold_instance_lock(engine, readiness))
         await check_storage(engine)
+        await check_digest_key(engine, resolve_secret_ref(config.storage.digest_key_ref))
         schemas = {
             t.target_id: SchemaCache(
                 open_starrocks(t.starrocks, clock=clock)
@@ -636,21 +722,103 @@ async def serve(
     配置了飞书时先装配 SDK 通道（凭据错误使启动失败）：指定群的成员目录经它查询，授权来源因此
     在运行对象装配前就绑定到这一个通道。
     """
-    sock = _bind(config.listen_host, config.listen_port)
+    return await _serve_bound(
+        config,
+        bind_host=config.listen_host,
+        stop=stop,
+        clock=clock,
+        model_transport=model_transport,
+        starrocks_connect=starrocks_connect,
+        feishu_channel=feishu_channel,
+    )
+
+
+async def _container_serve(
+    config: ServeConfig,
+    *,
+    stop: asyncio.Event,
+    clock: Callable[[], datetime] = now,
+    model_transport: httpx2.AsyncBaseTransport | None = None,
+    starrocks_connect: Mapping[str, Connector] | None = None,
+    feishu_channel: LarkChannel | None = None,
+) -> int:
+    """仅供镜像固定入口调用；JSON 与公开 CLI 都不能选择容器监听模式。"""
+    return await _serve_bound(
+        config,
+        bind_host="0.0.0.0",  # noqa: S104 - 只在容器网络内监听，宿主固定发布到 loopback
+        stop=stop,
+        clock=clock,
+        model_transport=model_transport,
+        starrocks_connect=starrocks_connect,
+        feishu_channel=feishu_channel,
+    )
+
+
+async def _serve_bound(
+    config: ServeConfig,
+    *,
+    bind_host: str,
+    stop: asyncio.Event,
+    clock: Callable[[], datetime],
+    model_transport: httpx2.AsyncBaseTransport | None,
+    starrocks_connect: Mapping[str, Connector] | None,
+    feishu_channel: LarkChannel | None,
+) -> int:
+    sock = _bind(bind_host, config.listen_port)
     try:
         transport = None
         if config.feishu is not None:
             transport = LarkTransport(feishu_channel or lark_channel(config.feishu), config.feishu)
-        async with open_runtime(
+        context = open_runtime(
             config,
             clock=clock,
             model_transport=model_transport,
             starrocks_connect=starrocks_connect,
             members=None if transport is None else transport.is_member,
-        ) as runtime:
-            return await _serve(config, runtime, sock, stop, clock, transport)
+        )
+        try:
+            async with _open_runtime_until_stop(context, stop) as runtime:
+                return await _serve(config, runtime, sock, stop, clock, transport)
+        except _StartupStoppedError:
+            return 0
     finally:
         sock.close()
+
+
+@asynccontextmanager
+async def _open_runtime_until_stop(
+    context: AbstractAsyncContextManager[Runtime], stop: asyncio.Event
+) -> AsyncIterator[Runtime]:
+    """装配期间响应停止信号；取消后等逆序清理完成，再报告为正常停止。"""
+    opening = asyncio.create_task(context.__aenter__(), name="xiaowei-runtime-open")
+    stopping = asyncio.create_task(stop.wait(), name="xiaowei-runtime-startup-stop")
+    entered = False
+    try:
+        done, _ = await asyncio.wait({opening, stopping}, return_when=asyncio.FIRST_COMPLETED)
+        if opening not in done:
+            opening.cancel()
+            try:
+                async with asyncio.timeout(_RUNTIME_CLOSE_BOUND_SECONDS + _STOP_MARGIN_SECONDS):
+                    await opening
+            except asyncio.CancelledError:
+                pass
+            except TimeoutError:
+                raise RuntimeCloseError("启动取消后的资源关闭超时") from None
+            raise _StartupStoppedError
+        runtime = opening.result()
+        entered = True
+        if stop.is_set():
+            raise _StartupStoppedError
+        yield runtime
+    finally:
+        stopping.cancel()
+        await asyncio.gather(stopping, return_exceptions=True)
+        if entered:
+            try:
+                async with asyncio.timeout(_RUNTIME_CLOSE_BOUND_SECONDS + _STOP_MARGIN_SECONDS):
+                    await context.__aexit__(*sys.exc_info())
+            except TimeoutError:
+                raise RuntimeCloseError("运行资源关闭超时") from None
 
 
 async def _serve(
@@ -662,7 +830,7 @@ async def _serve(
     transport: LarkTransport | None,
 ) -> int:
     components: dict[str, str] = {"feishu": "disabled"}
-    feishu = await _start_feishu(config, runtime, clock, transport, components)
+    feishu = await _start_feishu(config, runtime, clock, transport, components, stop)
     app = create_web_app(runtime.service, config.web, components=lambda: components)
     server = uvicorn.Server(
         uvicorn.Config(
@@ -691,13 +859,25 @@ async def _serve(
     server.should_exit = True
     if feishu is not None:
         healthy = await _stop_feishu(config, feishu) and healthy
-    await asyncio.wait({web})
+    done, pending = await asyncio.wait(
+        {web}, timeout=math.ceil(config.shutdown_timeout_seconds) + _WEB_EXIT_OVERHEAD_SECONDS
+    )
+    if pending:
+        web.cancel()
+        await asyncio.wait({web})
+        logger.error("Web 服务关闭超时")
+        healthy = False
     if not _finished_cleanly(web):
         logger.error("Web 服务异常结束")
         healthy = False
     stopping.set()
     stopped.cancel()
-    await asyncio.wait({watch, stopped})
+    try:
+        async with asyncio.timeout(_WATCH_STOP_TIMEOUT_SECONDS):
+            await asyncio.wait({watch, stopped})
+    except TimeoutError:
+        logger.error("实例锁监视任务关闭超时")
+        healthy = False
     if not runtime.readiness.ok:
         logger.error("readiness 已锁低（%s），需重启后由启动恢复处理", runtime.readiness.reason)
         healthy = False
@@ -714,6 +894,7 @@ async def _start_feishu(
     clock: Callable[[], datetime],
     transport: LarkTransport | None,
     components: dict[str, str],
+    stop: asyncio.Event,
 ) -> _Feishu | None:
     """启动飞书；长连接连不上只让飞书不可用（群入口同时因机器人身份未解析而拒绝群消息）。"""
     feishu = config.feishu
@@ -723,13 +904,34 @@ async def _start_feishu(
         runtime.service, feishu, transport.send, clock=clock, bot_open_id=transport.bot_open_id
     )
     consumers = asyncio.create_task(gateway.run(), name="xiaowei-feishu")
+    starting = asyncio.create_task(transport.start(gateway.receive), name="xiaowei-feishu-start")
+    stopping = asyncio.create_task(stop.wait(), name="xiaowei-feishu-start-stop")
     try:
-        await transport.start(gateway.receive)
+        done, _ = await asyncio.wait({starting, stopping}, return_when=asyncio.FIRST_COMPLETED)
+        if starting not in done:
+            starting.cancel()
+            try:
+                async with asyncio.timeout(_FEISHU_START_CANCEL_TIMEOUT_SECONDS):
+                    await starting
+            except asyncio.CancelledError:
+                pass
+            except TimeoutError:
+                raise RuntimeCloseError("飞书启动取消超时") from None
+            partial = _Feishu(gateway, transport, consumers)
+            if not await _stop_feishu(config, partial):
+                raise RuntimeCloseError("飞书启动取消后的关闭失败")
+            raise _StartupStoppedError
+        starting.result()
+    except (_StartupStoppedError, RuntimeCloseError):
+        raise
     except Exception as exc:
         logger.error("飞书长连接未能启动，飞书不可用：%s", type(exc).__name__)
         components["feishu"] = "unavailable"
     else:
         components["feishu"] = "connected"
+    finally:
+        stopping.cancel()
+        await asyncio.gather(stopping, return_exceptions=True)
     return _Feishu(gateway, transport, consumers)
 
 
@@ -743,8 +945,11 @@ async def _stop_feishu(config: ServeConfig, feishu: _Feishu) -> bool:
     if not consumers.done():
         drained = await feishu.gateway.drain(config.shutdown_timeout_seconds)
     consumers.cancel()
-    await asyncio.wait({consumers})
-    if not consumers.cancelled() and consumers.exception() is not None:
+    done, _ = await asyncio.wait({consumers}, timeout=_FEISHU_CONSUMER_CANCEL_TIMEOUT_SECONDS)
+    if not done:
+        logger.error("飞书消费者取消超时")
+        drained = False
+    elif not consumers.cancelled() and consumers.exception() is not None:
         logger.error("飞书消费者异常结束：%s", type(consumers.exception()).__name__)
         drained = False
     try:
@@ -760,17 +965,24 @@ async def _stop_feishu(config: ServeConfig, feishu: _Feishu) -> bool:
 
 async def initialize(config: ServeConfig) -> None:
     async with _engine(config) as engine:
-        await initialize_storage(engine)
+        await initialize_storage(
+            engine, digest_key=resolve_secret_ref(config.storage.digest_key_ref)
+        )
 
 
-async def upgrade(config: ServeConfig) -> int:
+async def upgrade(config: ServeConfig, *, bind_existing_digest_key: bool = False) -> int:
     async with _engine(config) as engine:
-        return await upgrade_storage(engine)
+        return await upgrade_storage(
+            engine,
+            digest_key=resolve_secret_ref(config.storage.digest_key_ref),
+            bind_existing_digest_key=bind_existing_digest_key,
+        )
 
 
 async def cleanup(config: ServeConfig, *, batch_size: int) -> CleanupReport:
     async with _engine(config) as engine:
         await check_storage(engine)
+        await check_digest_key(engine, resolve_secret_ref(config.storage.digest_key_ref))
         return await cleanup_expired(engine, now=now(), batch_size=batch_size)
 
 
@@ -811,6 +1023,7 @@ async def resend(
     async with _engine(config) as engine, hold_backend(engine) as sender:
         # 发送期间占用一条连接：并发启动的 serve 据此知道这次重发仍在进行，不把它当作遗留发送。
         await check_storage(engine)
+        await check_digest_key(engine, resolve_secret_ref(config.storage.digest_key_ref))
         # 重发只复核与发送已保存结果，不调用工具：结构快照从不刷新；StarRocks 只用于复核证据
         # 依赖（零行探测与元数据读取），连接按需建立、用完即关。
         schemas = {

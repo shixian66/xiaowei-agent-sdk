@@ -136,6 +136,8 @@ P1 分为两个顺序实施的小切片：
 
 ## 7. P3：获准环境实战
 
+详细任务见 [P3：Compose 部署与实战验收实施计划](docs/superpowers/plans/2026-10-05-p3-compose-deployment.md)；部署包与保留配置的维护约定只在 [ARCHITECTURE §10](ARCHITECTURE.md#deployment-package) 维护。P3-A 实现候选已完成本机容器验证，仍待精确 SHA 独立审查；P3-B 升级/恢复和 P3-C 获准环境实战尚未开始，证据与下一项以 handoff 为准。
+
 交付正式 Docker Compose：一个小维应用容器、一个 PostgreSQL 容器及持久卷。提供经验证的安装、配置、初始化/升级、启动、停机、按保留期清理和备份恢复说明。锁定受测镜像版本；更新应用镜像保留数据，持久卷不代替备份；不附加 Redis、Worker 或常驻迁移服务。
 
 核对宿主机 Web 端口只绑定 loopback，服务器通过 SSH 本地转发实际访问，PostgreSQL 不发布公共端口；验证飞书长连接与断线行为、模型及数据库连通性、只读权限、数据外发范围、会话与请求记录保留。运行说明明确：无高可用、无中途任务自动恢复、无公网多用户 Web。

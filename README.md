@@ -53,7 +53,7 @@ MCP 负责标准化工具接入，不能替代业务授权。只有参数含义�
 
 ## 怎样开始
 
-唯一正式命令是 `xiaowei`（`python -m xiaowei` 相同）。它已用测试 PostgreSQL、脚本模型与替身完成离线验证；真实模型、StarRocks 与飞书的实战验证尚未完成（见 handoff）。旧 CLI、Worker 或 Compose 命令不是产品入口。
+唯一正式命令是 `xiaowei`（`python -m xiaowei` 相同）。它已用测试 PostgreSQL、脚本模型与替身完成离线验证；P3-A 双容器候选也已在本机 Linux/arm64 容器环境验证。真实模型、用户 StarRocks、真实飞书与公司服务器实战仍未完成（见 handoff）。旧 CLI、Worker 或旧 Compose 命令不是产品入口。
 
 实施时需要：
 
@@ -69,7 +69,9 @@ MCP 负责标准化工具接入，不能替代业务授权。只有参数含义�
 ```bash
 uv sync --locked
 export XW_DATABASE_URL=...   # postgresql+asyncpg://...，以及 XW_DIGEST_KEY、XW_MODEL_API_KEY 和每个集群的 StarRocks 口令（示例为 XW_STARROCKS_PASSWORD、XW_ARCHIVE_STARROCKS_PASSWORD）
-uv run --locked xiaowei --config xiaowei.json storage init      # 全新数据库；已有 v1–v4 用 storage upgrade（先备份）
+uv run --locked xiaowei --config xiaowei.json config check      # 离线核对配置、环境引用和本地 CA
+uv run --locked xiaowei --config xiaowei.json storage init      # 全新数据库
+uv run --locked xiaowei --config xiaowei.json storage upgrade --bind-existing-digest-key  # v1–v5；仅确认原密钥并备份后
 uv run --locked xiaowei --config xiaowei.json serve             # Web 默认 http://127.0.0.1:8501，Ctrl-C 停止
 uv run --locked xiaowei --config xiaowei.json storage cleanup --batch-size 100
 uv run --locked xiaowei --config xiaowei.json requests resend --subject <subject> --chat <chat_id> --message <message_id>
@@ -126,7 +128,7 @@ docker compose -p xiaowei-sdk-test -f compose.sdk-test.yml down -v
 
 `SDK_TEST_POSTGRES_URL` 只能是上面这一个测试地址；未设置时数据库用例明确失败而不是跳过。CI 的 integration job 以同样方式运行完整测试。
 
-正式交付提供两容器的配置、启动、停机、升级、清理及备份恢复说明。小维连接已有 StarRocks 和模型 API，不要求在本机部署模型；更新应用镜像时保留 PostgreSQL 数据卷。当前旧 Compose 文件仍属于历史实现，不代表上述部署方案已经落地。
+P3-A 的精简发行包、两容器 Compose、配置预检、首次初始化与停止步骤见 [deploy/OPERATIONS.md](deploy/OPERATIONS.md)。小维连接已有 StarRocks 和模型 API，不要求在服务器部署模型；应用配置、`.env`、CA 与 PostgreSQL 命名卷由操作者保留。P3-B 的不同 digest 升级/回退和备份恢复、P3-C 的公司服务器与真实服务验收尚未完成；旧根目录 Compose 文件仍属于历史实现。
 
 ## 设计与开发
 

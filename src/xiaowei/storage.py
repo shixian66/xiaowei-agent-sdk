@@ -11,6 +11,8 @@ SDK 表由 ``SQLAlchemySession`` 的公开建表路径管理；应用表以 ``xi
 """
 
 import asyncio
+import hashlib
+import hmac
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
@@ -28,10 +30,11 @@ SDK_SESSIONS_TABLE = "agent_sessions"
 SDK_MESSAGES_TABLE = "agent_messages"
 _SDK_TABLES = frozenset({SDK_SESSIONS_TABLE, SDK_MESSAGES_TABLE})
 
-APP_SCHEMA_VERSION = 5
+APP_SCHEMA_VERSION = 6
 APP_TABLES = frozenset(
     {
         "xiaowei_schema_version",
+        "xiaowei_installation",
         "xiaowei_evidence",
         "xiaowei_session",
         "xiaowei_channel_session",
@@ -45,6 +48,7 @@ _MIGRATIONS = (
     "migrations/003_delivery_attempt.sql",
     "migrations/004_evidence_dependencies.sql",
     "migrations/005_group_ownership.sql",
+    "migrations/006_digest_key_binding.sql",
 )
 # 实例锁：会话级（serve）与事务级（初始化、升级）共用同一个键，二者互斥。锁按数据库区分。
 _INSTANCE_LOCK_KEY = 0x7869_6177_6569_0001
@@ -57,6 +61,10 @@ _COMMAND_TIMEOUT_SECONDS = 10.0
 _POOL_SIZE = 5
 _POOL_TIMEOUT_SECONDS = 5.0
 _INIT_PROBE_SESSION_ID = "__xiaowei_storage_init__"
+_DIGEST_KEY_BINDING_LABEL = b"xiaowei:storage:digest-key:v1"
+_DIGEST_KEY_BINDING_FORMAT = 1
+_LOCK_CLOSE_TIMEOUT_SECONDS = 5.0
+_ENGINE_DISPOSE_TIMEOUT_SECONDS = 10.0
 
 
 class StorageError(Exception):
@@ -73,6 +81,20 @@ class StorageNotInitializedError(StorageError):
 
 class StorageVersionMismatchError(StorageError):
     """应用表版本与本程序不符；不在请求路径或初始化中自动升级、降级。"""
+
+
+class StorageDigestKeyMismatchError(StorageError):
+    """数据库绑定的摘要密钥与当前配置不一致，或绑定记录已损坏。"""
+
+    def __init__(self) -> None:
+        super().__init__("摘要密钥与数据库不匹配")
+
+
+class StorageDigestKeyBindingRequiredError(StorageError):
+    """旧 schema 尚无可验证的摘要密钥绑定，需要操作者明确确认。"""
+
+    def __init__(self) -> None:
+        super().__init__("旧数据库需要明确确认旧摘要密钥后才能升级")
 
 
 class StorageBusyError(StorageError):
@@ -309,10 +331,14 @@ async def hold_instance_lock(
     finally:
         # 关闭连接即释放会话级锁；连接已断开时关闭也不会再持有它。
         try:
-            await conn.invalidate()
-        except (OSError, SQLAlchemyError):
-            pass
-        await conn.close()
+            async with asyncio.timeout(_LOCK_CLOSE_TIMEOUT_SECONDS):
+                try:
+                    await conn.invalidate()
+                except (OSError, SQLAlchemyError):
+                    pass
+                await conn.close()
+        except TimeoutError:
+            raise StorageUnavailableError("实例锁连接关闭超时") from None
 
 
 @asynccontextmanager
@@ -340,10 +366,14 @@ async def open_engine(database_url: SecretStr) -> AsyncIterator[AsyncEngine]:
     try:
         yield engine
     finally:
-        await engine.dispose()
+        try:
+            async with asyncio.timeout(_ENGINE_DISPOSE_TIMEOUT_SECONDS):
+                await engine.dispose()
+        except TimeoutError:
+            raise StorageUnavailableError("PostgreSQL 连接池关闭超时") from None
 
 
-async def initialize_storage(engine: AsyncEngine) -> None:
+async def initialize_storage(engine: AsyncEngine, *, digest_key: SecretStr) -> None:
     """显式部署入口：取得实例锁后建立 SDK Session 表与应用表，再做就绪检查。
 
     任何建表前先在专用连接上取得会话级实例锁并持有到建表结束：锁被在线实例或另一个维护命令
@@ -362,13 +392,19 @@ async def initialize_storage(engine: AsyncEngine) -> None:
     async with hold_instance_lock(engine, Readiness()) as lock:
         try:
             await probe.get_items(limit=0)
-            await _install_app_schema(lock.connection)
+            await _install_app_schema(lock.connection, digest_key=digest_key)
         except (OSError, SQLAlchemyError):
             raise StorageUnavailableError("PostgreSQL 不可用，初始化未完成") from None
     await check_storage(engine)
+    await check_digest_key(engine, digest_key)
 
 
-async def upgrade_storage(engine: AsyncEngine) -> int:
+async def upgrade_storage(
+    engine: AsyncEngine,
+    *,
+    digest_key: SecretStr,
+    bind_existing_digest_key: bool = False,
+) -> int:
     """显式升级入口：在实例锁与一个事务内把应用表从旧版本升到当前版本，返回升级后的版本。
 
     已是当前版本时不做任何修改；未初始化或版本未知（含高于本程序）时拒绝。任一语句失败整体
@@ -382,19 +418,32 @@ async def upgrade_storage(engine: AsyncEngine) -> int:
             version = await conn.scalar(text("SELECT version FROM xiaowei_schema_version"))
             if not isinstance(version, int) or not 1 <= version <= APP_SCHEMA_VERSION:
                 raise StorageVersionMismatchError("应用表版本未知，不能升级")
-            await _apply_migrations(conn, after=version)
+            if version < APP_SCHEMA_VERSION:
+                if not bind_existing_digest_key:
+                    raise StorageDigestKeyBindingRequiredError
+                await _apply_migrations(conn, after=version)
+                await _write_digest_key_binding(conn, digest_key)
+            else:
+                await _check_digest_key_binding(conn, digest_key)
     except (OSError, SQLAlchemyError):
         raise StorageUnavailableError("PostgreSQL 不可用或升级失败，已回滚") from None
     await check_storage(engine)
+    await check_digest_key(engine, digest_key)
     return APP_SCHEMA_VERSION
 
 
-async def _install_app_schema(conn: AsyncConnection) -> None:
+async def _install_app_schema(conn: AsyncConnection, *, digest_key: SecretStr) -> None:
     """在已持有会话级实例锁的连接上用一个事务顺序执行全部迁移；已安装则不做任何修改。"""
     async with conn.begin():
         installed = await conn.scalar(text("SELECT to_regclass('xiaowei_schema_version')"))
         if installed is None:
             await _apply_migrations(conn, after=0)
+            await _write_digest_key_binding(conn, digest_key)
+            return
+        version = await conn.scalar(text("SELECT version FROM xiaowei_schema_version"))
+        if version != APP_SCHEMA_VERSION:
+            raise StorageVersionMismatchError("应用表版本与程序不符，需按升级说明处理")
+        await _check_digest_key_binding(conn, digest_key)
 
 
 async def _lock_for_maintenance(conn: AsyncConnection) -> None:
@@ -438,6 +487,55 @@ async def check_storage(engine: AsyncEngine) -> None:
         raise StorageVersionMismatchError("应用表版本与程序不符，需按升级说明处理")
     if not (_SDK_TABLES | APP_TABLES) <= present or version is None:
         raise StorageNotInitializedError("PostgreSQL 未初始化 SDK Session 表或应用表")
+
+
+async def check_digest_key(engine: AsyncEngine, digest_key: SecretStr) -> None:
+    """核对数据库的摘要密钥绑定；只读取固定指纹，不读取或保存密钥。"""
+    try:
+        async with engine.connect() as conn:
+            await _check_digest_key_binding(conn, digest_key)
+    except (OSError, SQLAlchemyError):
+        raise StorageUnavailableError("PostgreSQL 不可用") from None
+
+
+async def _write_digest_key_binding(conn: AsyncConnection, digest_key: SecretStr) -> None:
+    await conn.execute(
+        text(
+            "INSERT INTO xiaowei_installation (format_version, digest_key_fingerprint) "
+            "VALUES (:format_version, :fingerprint)"
+        ),
+        {
+            "format_version": _DIGEST_KEY_BINDING_FORMAT,
+            "fingerprint": _digest_key_fingerprint(digest_key),
+        },
+    )
+
+
+async def _check_digest_key_binding(conn: AsyncConnection, digest_key: SecretStr) -> None:
+    installed = await conn.scalar(text("SELECT to_regclass('xiaowei_installation')"))
+    if installed is None:
+        raise StorageDigestKeyMismatchError
+    rows = (
+        await conn.execute(
+            text("SELECT format_version, digest_key_fingerprint FROM xiaowei_installation")
+        )
+    ).all()
+    expected = _digest_key_fingerprint(digest_key)
+    if (
+        len(rows) != 1
+        or rows[0].format_version != _DIGEST_KEY_BINDING_FORMAT
+        or not isinstance(rows[0].digest_key_fingerprint, str)
+        or not hmac.compare_digest(rows[0].digest_key_fingerprint, expected)
+    ):
+        raise StorageDigestKeyMismatchError
+
+
+def _digest_key_fingerprint(digest_key: SecretStr) -> str:
+    return hmac.new(
+        digest_key.get_secret_value().encode("utf-8"),
+        _DIGEST_KEY_BINDING_LABEL,
+        hashlib.sha256,
+    ).hexdigest()
 
 
 def _table_names(conn: Connection) -> frozenset[str]:

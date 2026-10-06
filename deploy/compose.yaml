@@ -1,0 +1,80 @@
+name: "${XW_PROJECT_NAME:-xiaowei}"
+
+services:
+  postgres:
+    image: "@XW_POSTGRES_IMAGE@"
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: "${XW_POSTGRES_DB:-xiaowei}"
+      POSTGRES_USER: "${XW_POSTGRES_USER:-xiaowei}"
+      POSTGRES_PASSWORD: "${XW_POSTGRES_PASSWORD:?set XW_POSTGRES_PASSWORD in .env}"
+    volumes:
+      - type: volume
+        source: pgdata
+        target: /var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U \"$$POSTGRES_USER\" -d \"$$POSTGRES_DB\""]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+    logging:
+      driver: json-file
+      options:
+        max-size: "${XW_LOG_MAX_SIZE:-10m}"
+        max-file: "${XW_LOG_MAX_FILES:-3}"
+
+  xiaowei:
+    image: "@XW_APP_IMAGE@"
+    init: true
+    restart: "on-failure:3"
+    read_only: true
+    user: "65532:65532"
+    cap_drop: ["ALL"]
+    security_opt: ["no-new-privileges:true"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+    env_file:
+      - path: ./.env
+        required: true
+    environment:
+      XW_WEB_PORT: "${XW_WEB_PORT:-8501}"
+      XW_STOP_GRACE_SECONDS: "${XW_STOP_GRACE_SECONDS:-120}"
+      PYTHONDONTWRITEBYTECODE: "1"
+    command: ["serve"]
+    ports:
+      - target: "${XW_WEB_PORT:-8501}"
+        published: "${XW_WEB_PORT:-8501}"
+        host_ip: 127.0.0.1
+        protocol: tcp
+    volumes:
+      - type: bind
+        source: "${XW_CONFIG_FILE:-./xiaowei.json}"
+        target: /etc/xiaowei/xiaowei.json
+        read_only: true
+        bind:
+          create_host_path: false
+      - type: bind
+        source: "${XW_CERTS_DIR:-./certs}"
+        target: /etc/xiaowei/certs
+        read_only: true
+        bind:
+          create_host_path: false
+    tmpfs:
+      - /tmp:size=64m,mode=1777
+    stop_grace_period: "${XW_STOP_GRACE_SECONDS:-120}s"
+    healthcheck:
+      test: ["CMD", "python", "/opt/xiaowei/container_entrypoint.py", "healthcheck"]
+      interval: 10s
+      timeout: 6s
+      retries: 6
+      start_period: 10s
+    logging:
+      driver: json-file
+      options:
+        max-size: "${XW_LOG_MAX_SIZE:-10m}"
+        max-file: "${XW_LOG_MAX_FILES:-3}"
+
+volumes:
+  pgdata:
+    name: "${XW_PG_VOLUME:-xiaowei-pgdata}"

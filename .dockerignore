@@ -1,10 +1,17 @@
 .git
 .github
+.superpowers
 .venv
 venv
 env
 tests
 docs
+xiaowei_agent
+AGENTS.md
+ARCHITECTURE.md
+AGENT_HANDOFF.md
+README.md
+DEVELOPMENT_PLAN.md
 .env
 .env.*
 !.env.example

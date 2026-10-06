@@ -37,6 +37,7 @@ QUERY_TOOL = "local/run_query"
 PRIVATE_NOTE = "synthetic-private-note"
 START = datetime(2026, 9, 29, 8, 0, tzinfo=UTC)
 RETENTION_SECONDS = 3600
+TEST_DIGEST_KEY = SecretStr("sdk-core-test-digest-key")
 
 
 def cited(answer: AgentAnswer) -> TurnAnswer:
@@ -187,7 +188,7 @@ def secret(url: URL) -> SecretStr:
 @asynccontextmanager
 async def ready_engine(url: URL) -> AsyncIterator[AsyncEngine]:
     async with open_engine(secret(url)) as engine:
-        await initialize_storage(engine)
+        await initialize_storage(engine, digest_key=TEST_DIGEST_KEY)
         yield engine
 
 

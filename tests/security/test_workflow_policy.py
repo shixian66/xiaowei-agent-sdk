@@ -27,6 +27,7 @@ _EXPECTED_JOBS = (
     "tests",
     "integration",
     "compose-smoke",
+    "p3-release",
     "security-gate",
     "lint",
     "types",
@@ -41,7 +42,7 @@ _EXPECTED_JOBS = (
 # 「多出的东西」，挡不住删除必需命令、重复摘要顶替、把配置挪到无关 action 下、
 # 或加 `continue-on-error` 让 gate 形同虚设。整文件摘要是唯一能覆盖全部
 # 增/删/改/移位的锚点；合法修改 workflow 时必须显式更新此常量。
-_WORKFLOW_SHA256 = "c42a00c27bddb447a838e1d7df91799b339faa321b1a5d34b72a8a9d56a9f425"
+_WORKFLOW_SHA256 = "141ede3b2efb28c9e5b10aaa13f19223362a22d9c6fe2fc081bdac790d5a84e3"
 
 # ---- 闭集白名单：改动 ci.yml 必须同步更新此处，否则测试变红 ----------------
 _ALLOWED_EXPRESSIONS = {"github.ref"}
@@ -149,9 +150,13 @@ def test_single_line_run_commands_match_exactly() -> None:
     single, _ = _run_commands_and_block_digests()
     expected = Counter(
         {
-            "uv sync --extra dev --frozen": 7,
+            "uv sync --extra dev --frozen": 8,
             # 旧套件维持默认跳过；SDK PostgreSQL 全套在 integration 的 digest-pinned block 中运行。
-            "python -m pytest -q --ignore=tests/sdk_core": 1,
+            "python -m pytest -q --ignore=tests/sdk_core --ignore=tests/deployment": 1,
+            (
+                "python -m pytest tests/deployment/test_release.py "
+                "tests/deployment/test_compose.py -q"
+            ): 1,
             "python -m pytest -m security -q": 1,
             "python -m scripts.compose_smoke": 1,
             "ruff check .": 1,
@@ -265,13 +270,15 @@ def test_sdk_postgres_compose_image_is_digest_pinned() -> None:
     images = re.findall(r"(?m)^\s+image:\s*(\S+)$", _SDK_COMPOSE_TEXT)
     assert images == [
         "postgres:16.15-bookworm@sha256:"
-        "bb3e1a57e5407e0a5280b4211980a5e537f4abd234a87014ac979849a78dd825"
+        "efedf3595f1d6f415c08568ba171029bf54052e754cc9f030e3f2412b21f3d67"
     ]
 
 
 def test_the_integration_job_runs_no_extra_command() -> None:
     """unit 与全套路径各有一条精确 pytest 命令；integration 包含全套路径。"""
-    assert _TEXT.count("- run: python -m pytest -q --ignore=tests/sdk_core\n") == 1
+    assert _TEXT.count(
+        "- run: python -m pytest -q --ignore=tests/sdk_core --ignore=tests/deployment\n"
+    ) == 1
     assert _job_text("integration").count("python -m pytest -q\n") == 1
     assert "compose.sdk-test.yml up -d --wait" in _job_text("integration")
     assert "compose.sdk-test.yml down -v" in _job_text("integration")

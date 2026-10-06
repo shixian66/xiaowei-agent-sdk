@@ -19,6 +19,7 @@ os.environ["OPENAI_AGENTS_DONT_LOG_TOOL_DATA"] = "1"
 import argparse
 import asyncio
 import logging
+import math
 import signal
 import sys
 from collections.abc import Sequence
@@ -29,6 +30,9 @@ if TYPE_CHECKING:
     from xiaowei.runtime import ServeConfig
 
 _LOG_LEVELS = ("DEBUG", "INFO", "WARNING", "ERROR")
+_CONTAINER_CONFIG = Path("/etc/xiaowei/xiaowei.json")
+_CONTAINER_PORT_ENV = "XW_WEB_PORT"
+_CONTAINER_STOP_GRACE_ENV = "XW_STOP_GRACE_SECONDS"
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -38,11 +42,21 @@ def _parser() -> argparse.ArgumentParser:
     commands = parser.add_subparsers(dest="command", required=True)
     commands.add_parser("serve", help="启动 Web 与可选飞书入口（持有实例锁并执行启动恢复）")
 
+    config = commands.add_parser("config", help="离线检查配置、环境引用与本地 CA").add_subparsers(
+        dest="action", required=True
+    )
+    config.add_parser("check", help="不连接数据库或外部服务地检查配置")
+
     storage = commands.add_parser("storage", help="PostgreSQL 显式维护").add_subparsers(
         dest="action", required=True
     )
     storage.add_parser("init", help="初始化全新数据库（独占实例锁）")
-    storage.add_parser("upgrade", help="把应用表升级到当前版本（独占实例锁）")
+    upgrade = storage.add_parser("upgrade", help="把应用表升级到当前版本（独占实例锁）")
+    upgrade.add_argument(
+        "--bind-existing-digest-key",
+        action="store_true",
+        help="仅迁移旧库时使用：确认当前配置仍是原部署的摘要密钥",
+    )
     cleanup = storage.add_parser("cleanup", help="清理一批已过期的会话、请求与证据")
     cleanup.add_argument("--batch-size", type=int, default=100)
 
@@ -59,6 +73,20 @@ def _parser() -> argparse.ArgumentParser:
 
 
 def main(argv: Sequence[str] | None = None) -> int:
+    return _main(argv, container=False)
+
+
+def container_main(
+    argv: Sequence[str] | None = None, *, config_path: Path = _CONTAINER_CONFIG
+) -> int:
+    """镜像固定入口；模式不接受 JSON、环境变量或公开 CLI 开关选择。"""
+    command = list(sys.argv[1:] if argv is None else argv)
+    if not command:
+        command = ["serve"]
+    return _main(["--config", str(config_path), *command], container=True)
+
+
+def _main(argv: Sequence[str] | None, *, container: bool) -> int:
     args = _parser().parse_args(argv)
     if args.command == "storage" and args.action == "cleanup" and not 0 < args.batch_size <= 10_000:
         print("--batch-size 必须在 1 到 10000 之间", file=sys.stderr)
@@ -69,27 +97,54 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     try:
         config = runtime.load_config(args.config)
+        if container:
+            port, stop_grace = _container_deployment_values()
+            runtime.validate_config(config, container_port=port, stop_grace_seconds=stop_grace)
+        elif args.command == "config":
+            runtime.validate_config(config)
     except runtime.ConfigError as exc:
         print(str(exc), file=sys.stderr)
         return 2
+    if args.command == "config":
+        print("configuration valid")
+        return 0
     try:
-        return asyncio.run(_run(config, args))
+        return asyncio.run(_run(config, args, container=container))
     except Exception as exc:
         print(_failure(exc), file=sys.stderr)
         return 1
 
 
-async def _run(config: "ServeConfig", args: argparse.Namespace) -> int:
+def _container_deployment_values() -> tuple[int, float]:
+    from xiaowei.runtime import ConfigError
+
+    try:
+        port = int(os.environ[_CONTAINER_PORT_ENV])
+    except (KeyError, ValueError):
+        raise ConfigError(f"{_CONTAINER_PORT_ENV}: 必须是有效端口") from None
+    try:
+        stop_grace = float(os.environ[_CONTAINER_STOP_GRACE_ENV])
+    except (KeyError, ValueError):
+        raise ConfigError(f"{_CONTAINER_STOP_GRACE_ENV}: 必须是有限正数") from None
+    if not math.isfinite(stop_grace) or stop_grace <= 0:
+        raise ConfigError(f"{_CONTAINER_STOP_GRACE_ENV}: 必须是有限正数")
+    return port, stop_grace
+
+
+async def _run(config: "ServeConfig", args: argparse.Namespace, *, container: bool = False) -> int:
     from xiaowei import runtime as rt
 
     if args.command == "serve":
-        return await _serve(config)
+        return await _serve(config, container=container)
     if args.command == "storage":
         if args.action == "init":
             await rt.initialize(config)
             print("storage initialized")
         elif args.action == "upgrade":
-            print(f"storage version {await rt.upgrade(config)}")
+            version = await rt.upgrade(
+                config, bind_existing_digest_key=args.bind_existing_digest_key
+            )
+            print(f"storage version {version}")
         else:
             report = await rt.cleanup(config, batch_size=args.batch_size)
             print(f"cleaned sessions={report.sessions} unregistered={report.unregistered}")
@@ -108,7 +163,7 @@ async def _run(config: "ServeConfig", args: argparse.Namespace) -> int:
     return 0 if outcome == "sent" else 1
 
 
-async def _serve(config: "ServeConfig") -> int:
+async def _serve(config: "ServeConfig", *, container: bool = False) -> int:
     from xiaowei import runtime as rt
 
     stop = asyncio.Event()
@@ -116,6 +171,8 @@ async def _serve(config: "ServeConfig") -> int:
     for sig in (signal.SIGINT, signal.SIGTERM):
         loop.add_signal_handler(sig, stop.set)
     try:
+        if container:
+            return await rt._container_serve(config, stop=stop)
         return await rt.serve(config, stop=stop)
     finally:
         for sig in (signal.SIGINT, signal.SIGTERM):

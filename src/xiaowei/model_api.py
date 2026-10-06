@@ -9,6 +9,7 @@ Agent Loop、工具续轮与最终输出校验全部由 SDK ``Runner`` 完成；
 - ``json_object`` 模式用薄 ``Model`` 委托改写请求编码，外层 ``output_type`` 校验保持不变。
 """
 
+import asyncio
 import hashlib
 import json
 from collections.abc import AsyncIterator
@@ -49,6 +50,7 @@ _REASONING_EFFORTS: dict[Provider, frozenset[str]] = {
 }
 
 _JSON = "application/json"
+_CLIENT_CLOSE_TIMEOUT_SECONDS = 5.0
 
 # Chat Completions 中表示“正常完成”的终态；截断（length）、过滤（content_filter）、缺失或
 # 供应商私有值都不交给 SDK，因为 SDK 转换为 ModelResponse 后会丢失该终态。
@@ -229,7 +231,11 @@ async def open_model(
             model = _JsonObjectModel(model)
         yield ModelBinding(profile, model, opened_by=_OPENED_BY)
     finally:
-        await client.close()
+        try:
+            async with asyncio.timeout(_CLIENT_CLOSE_TIMEOUT_SECONDS):
+                await client.close()
+        except TimeoutError:
+            raise ModelAPIRejectedError("模型客户端关闭超时") from None
 
 
 class _GuardedTransport(httpx2.AsyncBaseTransport):

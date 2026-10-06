@@ -28,7 +28,7 @@ jobs:
           enable-cache: false
           activate-environment: true
       - run: uv sync --extra dev --frozen
-      - run: python -m pytest -q --ignore=tests/sdk_core
+      - run: python -m pytest -q --ignore=tests/sdk_core --ignore=tests/deployment
 
   integration:
     name: integration
@@ -73,6 +73,22 @@ jobs:
           activate-environment: true
       - run: uv sync --extra dev --frozen
       - run: python -m scripts.compose_smoke
+
+  p3-release:
+    name: p3-release
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9
+        with:
+          version: "0.12.8"
+          python-version: "3.11"
+          enable-cache: false
+          activate-environment: true
+      - run: uv sync --extra dev --frozen
+      - run: python -m pytest tests/deployment/test_release.py tests/deployment/test_compose.py -q
 
   # 正式入口：wheel 在不含 dev 依赖的干净环境中安装，两个入口都只指向新包（P1-B Task 8）。
   product-entry:
