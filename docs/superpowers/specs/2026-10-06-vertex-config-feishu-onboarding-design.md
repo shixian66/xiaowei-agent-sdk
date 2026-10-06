@@ -1,6 +1,6 @@
 # Vertex、配置维护与飞书首次授权设计
 
-- 状态：候选设计 v1，待用户按本文审阅
+- 状态：候选设计 v2，已按 `c3c75cf` 独立审查的 B1/B2 与验收项修订，待复审
 - 设计基线：`64180239549d43a8c16994babc3ad794b1d0511a`
 - 批准范围：Vertex API Key 原生接入、`.env`/`xiaowei.json` 维护优化、飞书未登记用户返回本人 `open_id`
 - 本阶段授权：设计、实施计划和文档；可做有边界的离线验证；不写产品功能代码
@@ -14,7 +14,7 @@
 
 本次解决三个已经在真实安装过程中出现的问题：
 
-1. 公司模型服务使用 Vertex 原生 API Key，当前 OpenAI 协议连接器返回 403。
+1. 公司模型服务使用 Vertex 原生 API Key，当前 OpenAI 协议连接器不能调用该原生协议。
 2. 首次部署者难以判断 `.env` 和 `xiaowei.json` 哪些字段必须填写、填什么、哪些不能在升级时重建。
 3. 飞书单聊必须预先登记 `open_id`，但未登记用户当前无法从机器人取得自己的 `open_id`。
 
@@ -34,6 +34,11 @@
 不支持 Vertex 服务账号、ADC、项目/区域认证；不改变 StarRocks 只读、Evidence、Session、渠道投影或
 Web 访问边界。
 
+证据边界：2026-10-06 操作者在公司环境使用 `gemini-3-flash-preview` 和 Vertex 原生 API Key 路径
+报告 `VERTEX_NATIVE_OK`，只证明基础文本调用；此前把同一类 Key 放入现有 OpenAI 协议连接器时报告
+403。这两项是用户报告的部署现象，不是本候选提交的复现实验，也不证明函数调用、强制结构化输出、
+Session 追问或小维正式入口可用；凭据值不进入仓库。
+
 ## 2. 当前实现事实与复用范围
 
 ### 2.1 模型路径
@@ -51,6 +56,10 @@ Web 访问边界。
 当前连接器最终都使用 `AsyncOpenAI`，认证固定为 `Authorization: Bearer`，不能直接调用已经由公司
 环境验证过的 Vertex 原生 API Key 路径。新增能力必须实现 Agents SDK 的公开 `Model` 接口，不能在
 适配器中运行第二套工具循环。
+
+现有 Chat Completions 路径虽发送 `parallel_tool_calls=false`，锁定 SDK 仍可能处理供应商违反该参数
+返回的多个调用；这与架构中“并行工具调用验证后再开”存在基线不一致。本次不顺手改变其他 Provider，
+Vertex 先采用失败方向安全的前置拒绝，并以真实出现频率决定是否另开统一修复。
 
 ### 2.2 配置路径
 
@@ -86,6 +95,11 @@ Web 访问边界。
 1. Agents SDK 公开 `Model` 接口的 Vertex 原生适配器；
 2. 保持配置格式不变，通过最小模板、操作说明、占位符检查和显式模型检查降低维护成本；
 3. 未登记单聊用户收到自己的 `open_id`，管理员仍通过静态配置授予权限。
+
+Vertex 协议直接复用现有 `httpx2` 与受控模型 transport，只实现已批准的非流式 `generateContent`
+请求/响应映射；认证头和成功终态校验成为该 transport 的受限参数。不新增 `google-genai` 生产依赖，
+也不接受 URL 查询参数携带 Key。若协议 fixture 证明直接 REST 无法满足公开契约，再修订本文，不在
+实现中临时换客户端。
 
 不采用以下方案：
 
@@ -139,16 +153,29 @@ Vertex 的官方端点、原生协议和结构化输出方式由受信代码固�
 
 - 使用锁定版 Agents SDK 的公开 `Model` 接口；
 - 非流式运行；流式接口不得伪装为已支持；
-- Google 客户端自动函数调用关闭；
-- 客户端自动重试关闭，不跨供应商 fallback；
+- 复用现有受控 HTTP transport：`trust_env=false`、不重试、不跟随重定向、拒绝压缩响应，并按实际
+  读取字节实施请求/响应上限；
+- Key 只放入 `x-goog-api-key` 请求头，不进入 URL、日志、异常或请求模型；
 - 只发送本轮 SDK 暴露的工具；模型返回未暴露工具时由现有 SDK/治理拒绝；
-- 函数名、参数、调用 ID 和工具结果保持一一对应；
+- Vertex 函数调用没有 ID 时，由适配器生成在整个 Runner 运行及其回放谱系中非空且唯一的调用 ID；
+  适配器保存本轮 `call_id → 函数名` 关联，把 SDK 工具结果转换为对应的 Vertex function response；
 - 最终输出继续经过现有 Pydantic 类型和 Evidence 校验；
 - 凭据、原始错误体、请求正文和模型正文不进入日志或 CLI 输出；
 - 适配器不得访问 RunContext 中不存在的凭据、连接或服务。
 
-若 Vertex 一次返回多个函数调用，不能并行执行；实现必须在任何工具 I/O 前受控拒绝该模型响应，
-除非实施时先证明锁定 SDK 会按现有预算与同会话互斥串行、原子地处理它们并由独立审查接受。
+生产 Profile 必须证明同一个 Vertex 请求可以同时携带函数声明与供应商原生的强制结构化输出约束，
+并在工具结果回传后生成可由当前 `AgentAnswer` schema 验证的最终对象。允许把 `AgentAnswer` schema
+机械转换为 Vertex 支持的等价子集，最终仍由原 Pydantic 类型和 Evidence 规则复核；不允许退回
+“只靠提示词要求 JSON”、不带供应商结构化约束的模式。锁定模型不支持该组合时，Vertex Profile 不
+开放，不能以偶发解析成功代替契约。
+
+Vertex 成功响应只有完整 `STOP` 终态可以交给 Runner；`MAX_TOKENS`、`SAFETY`、`RECITATION`、
+`MALFORMED_FUNCTION_CALL`、缺失或未知终态都受控失败。函数调用没有供应商 ID 时生成 ID 的路径、
+同名连续调用和回放关联都必须验证。
+
+若 Vertex 一次返回多个函数调用，适配器在任何工具 I/O 前受控拒绝。V1 记录锁定真实模型中该情况的
+出现频率；若频繁出现，保持 Vertex 未开放并另行决定所有 Provider 的多调用契约，不在本次只给
+Vertex 增加并行执行。
 
 ### 5.2 Vertex 供应商状态与 Session
 
@@ -158,19 +185,25 @@ Gemini/Vertex 的函数调用可能携带下一次请求必须原样返回的 op
 1. 只要求同一 Runner 轮内回传；
 2. 后续用户轮次回放历史函数调用时也要求回传。
 
-若需要保存，Session 只允许保存一个有类型、长度上限和来源校验的 Vertex signature 字段；不得
-保存思维文本、任意 provider payload 或凭据。该字段只供 Vertex 适配器回传，不进入模型可见工具
-结果、Evidence、Web/飞书展示或日志。锁定 SDK 的公开 replay 路径不能安全保留它时，Vertex Profile
-不得开放为完成状态，必须先修订设计，不能改用私有 API 或 monkey patch。
+锁定 SDK 已使用函数调用项的 `provider_data.thought_signature` 保存 Gemini signature；同一 Runner
+轮内会直接回传。现有 `PolicySession` 重建函数调用时只保留 `call_id`、`name` 和 `arguments`，因此
+跨轮会丢失。若真实 Vertex 要求跨轮回传，Session 白名单只保留
+`provider_data.thought_signature`，并校验来源、字符串类型和长度；不另造 Vertex 专用字段，不保存
+思维文本、其他 provider payload 或凭据。该字段只供模型适配器回传，不进入模型可见工具结果、
+Evidence、Web/飞书展示或日志。公开 replay 路径不能安全保留它时，Vertex Profile 不得开放，不能
+改用私有 API 或 monkey patch。
 
 ### 5.3 显式模型检查
 
-新增操作者主动执行的 `xiaowei model check` 正式入口。它：
+新增操作者主动执行的 `xiaowei model check` 正式入口。命令适用于配置中的任何活动 Profile，Vertex
+是本次必须通过的目标。它：
 
-- 读取同一 `xiaowei.json` 和 `XW_MODEL_API_KEY`；
-- 使用同一个 Vertex 适配器、SDK Runner 和最终类型校验；
+- 读取同一 `xiaowei.json`，只解析活动 Profile 的模型凭据，不要求 PostgreSQL、StarRocks 或飞书
+  环境变量存在；
+- 与 `serve` 走同一个 `open_model` 装配、模型设置和 `RunConfig`，显式关闭 tracing；
 - 只发送固定合成数据，提供一个进程内、无外部 I/O 的固定工具；
-- 要求模型恰好调用该工具一次、收到固定结果并生成有效的结构化最终回答；
+- 要求模型恰好调用该工具一次、收到固定结果并生成有效的 `AgentAnswer`；结果使用无 Evidence 的
+  `advice` 分支，因此不伪造 evidence_id，也不运行 Evidence 校验；
 - 不连接 PostgreSQL、StarRocks 或飞书，不写 Session、请求或 Evidence；
 - 明确产生一次或少量 Vertex 请求及模型用量；
 - 成功只输出 Profile/模型和通过状态，失败输出固定错误类别；不输出提示、模型正文、工具结果或凭据。
@@ -195,8 +228,14 @@ Gemini/Vertex 的函数调用可能携带下一次请求必须原样返回的 op
 StarRocks 目标、Web 和 `feishu: null` 的最小有效结构；第二个目标和飞书启用方式放在运维说明的局部
 片段，不维护第二份会漂移的完整配置。安全相关上限继续显式保留，不为了缩短文件隐藏边界。
 
-模板中的待填值使用固定占位符。未经替换的仓库模板必须在 `config check` 中以字段路径和大白话原因
-失败；检查只判断已知占位符，不把真实值写入错误信息。可选功能未启用时，其环境变量不得成为必填项。
+现有 [`examples/feishu-group.example.json`](../../../examples/feishu-group.example.json) 继续作为 README
+引用的有效 `feishu` 片段，避免维护第二份完整主配置；其 `users` 改为空对象，示范首次启动后由未知
+单聊用户取得本人编号。片段中的 App、tenant 和群 ID 占位符仍必须替换。
+
+模板中的待填值使用固定占位符。未经替换的仓库模板必须在 `serve` 和 `config check` 共用的配置预检
+中以字段路径和大白话原因失败，不能只有手动检查拒绝而正式启动继续；容器与原生入口使用同一规则。
+语法解析仍可读取模板，仓库中需要“有效运行配置”的测试改用填好占位符的夹具。检查只判断已知
+占位符，不把真实值写入错误信息。可选功能未启用时，其环境变量不得成为必填项。
 
 [`deploy/OPERATIONS.md`](../../../deploy/OPERATIONS.md) 增加一张紧邻首次安装命令的字段表，只列：
 
@@ -214,7 +253,8 @@ StarRocks 目标、Web 和 `feishu: null` 的最小有效结构；第二个目�
 `feishu.users` 允许为空。启用飞书但名单为空时，服务可启动并接收事件，但没有用户获得模型或工具
 权限。
 
-对通过 app、tenant、真实用户、`open_id` 格式、单聊、纯文本、时效和大小校验的未登记发送者，回复：
+入站顺序固定为：先校验 app、tenant、真实用户、`open_id` 格式、单聊、纯文本、时效、文本格式和
+大小，再查 `feishu.users`。只有全部事件校验通过的未登记发送者才回复：
 
 > 你还没有获得授权。你的编号是 ou_xxx，请把它发给管理员。
 
@@ -232,9 +272,15 @@ StarRocks 目标、Web 和 `feishu: null` 的最小有效结构；第二个目�
 越过授权。
 
 提示使用现有发送超时和固定提示路径；发送异常或结果未知只记固定错误类型，不持久化、不自动重发。
-同一 `message_id` 在进程内最多处理一次；同一 `open_id` 每 10 分钟最多成功发送一次身份提示。限频
-状态有固定容量、仅在内存中存在、重启后清空，不新增数据库表或操作者配置。限频检查不得记录或输出
-原始 `open_id`。
+限频在任何发送 `await` 前以一个不可分割的“检查并占位”完成：同一 `message_id` 在进程内最多尝试
+一次；同一 `open_id` 每 10 分钟最多尝试发送一次身份提示。发送失败或结果未知也消耗本窗口，避免
+网络结果不明时被连续消息放大。限频状态有固定容量、仅在内存中存在、重启后清空，不新增数据库表
+或操作者配置；重启后用户最多会额外收到一次。缓存满时淘汰最旧记录，被淘汰用户可能提前再收到一次，
+这是本次接受的有界退化。去重键使用 `open_id + message_id`，缓存与日志均不得输出原始 `open_id`。
+
+身份提示发送计入现有 gateway 的接收中计数，`drain` 必须等待发送落定。日志只写固定原因码
+`unregistered` 或固定发送异常类型，不写 `open_id`。未登记用户发送 `/新建`、`/查询`、`/诊断` 等
+任意命令时，Session、`ChannelService.accept`、模型、PostgreSQL 和 StarRocks 的调用次数都为零。
 
 管理员授权仍需同时完成：
 
@@ -243,8 +289,9 @@ feishu.users[open_id] = subject
 access.grants[subject] = 该用户获准的工具集合
 ```
 
-配置检查必须保证每个 `feishu.users` 的 subject 都存在于 `access.grants`。工具集合允许为空，以保留
-只使用模型解释、不能访问 StarRocks 的最低权限用户。Web 操作者与飞书 subject 不得相同的现有规则
+配置检查必须保证每个 `feishu.users` 的 subject 都存在于 `access.grants`，且对应工具集合非空。
+当前 `StaticAccess` 把空集合视为完全无权限；本次不把它改成模型权限。空 grant 在离线检查中退出 2，
+错误只指出 subject 缺少有效授权，不输出 `open_id`。Web 操作者与飞书 subject 不得相同的现有规则
 继续生效。修改后通过离线检查并重启服务才生效，不增加热加载。
 
 ### 5.6 统一失败契约
@@ -254,8 +301,10 @@ access.grants[subject] = 该用户获准的工具集合
 | Vertex Key 无效或无权限 | 不 fallback、不重跑整轮 | 固定 `model_failed`；`model check` 退出 1 |
 | Vertex 429、超时、5xx | 不自动重试；已执行工具不重放 | 固定模型失败，不显示上游正文 |
 | Vertex 响应超限、截断、非法结构或签名缺失 | 不交给 Runner 继续；必要时本轮失败 | 固定模型失败；无伪造成功 |
+| 锁定 Vertex 不支持“工具 + 强制结构化输出” | Profile 不开放，不退回提示词 JSON | 操作者得到不兼容结论，不部署该 Profile |
+| Vertex 返回多个函数调用或非 `STOP` 终态 | 工具 I/O 前拒绝 | 固定模型失败；不执行部分调用 |
 | 模板字段未填写或秘密引用缺失 | 离线拒绝，不访问外部服务 | 字段路径、大白话动作和退出 2 |
-| 飞书用户已登记但无 grant | 离线拒绝启动 | 指出 subject 缺少授权，不显示 `open_id` 或秘密 |
+| 飞书用户已登记但无 grant 或 grant 为空 | 离线拒绝启动 | 指出 subject 缺少有效授权，不显示 `open_id` 或秘密 |
 | 未登记用户身份提示发送失败 | 不保存、不重试、不进入模型 | 用户可能收不到；日志只有固定异常类型 |
 | 未登记用户短时间反复发送 | 丢弃限频窗口内后续提示 | 最多每 10 分钟收到一次 |
 
@@ -267,7 +316,7 @@ access.grants[subject] = 该用户获准的工具集合
 | 管理员运行 `model check` | 经正式 SDK/Vertex 适配器完成合成工具往返 | 固定通过信息或安全失败类别 |
 | 已授权用户提问 | 复用现有 Runner、治理、StarRocks 和 Evidence 链 | 正常的有证据回答 |
 | 未登记用户私聊任意合法文本 | 不持久化、不调用模型或数据库；按限频回复身份 | 本人的 `open_id` 和联系管理员提示 |
-| 管理员写入用户映射但漏写 grant | 配置检查在重启前拒绝 | 明确提示缺少 subject 授权 |
+| 管理员写入用户映射但漏写 grant 或工具集合为空 | 配置检查在重启前拒绝 | 明确提示缺少 subject 有效授权 |
 | 管理员补齐映射与 grant 并重启 | 用户进入现有受治理入口 | 后续私聊按获准工具范围处理 |
 
 ## 7. 实施切片与依赖顺序
@@ -275,52 +324,75 @@ access.grants[subject] = 该用户获准的工具集合
 ```mermaid
 flowchart LR
     V1[切片 V1\nVertex 协议与 SDK Model 闭环] --> V2[切片 V2\n正式 model check]
-    V1 --> C[切片 C\n配置模板与离线检查]
-    C --> F[切片 F\n飞书首次授权提示]
-    V2 --> I[切片 I\n正式入口与发行验收]
-    F --> I
+    C1[切片 C1\n通用配置预检与说明] --> F[切片 F\n飞书首次授权提示]
+    V1 --> C2[切片 C2\nVertex 最小主模板]
+    C1 --> C2
+    V2 --> IV[切片 I-V\nVertex 发行验收]
+    C2 --> IV
+    F --> IF[切片 I-F\n配置 / 飞书发行验收]
 ```
+
+`C1 → F → I-F` 可独立于 Vertex 发布；`V1 → V2 → C2 → I-V` 是 Vertex 路径。两条路径可以进入
+同一最终版本，但任何一条不因另一条待验证问题被迫延期，也不把独立通过写成组合功能已通过。
 
 ### 切片 V1：Vertex 协议与 SDK Model 闭环
 
-结果：锁定 Vertex API Key 协议和客户端依赖，新增公开 SDK `Model` 适配器，通过真 Runner 的合成工具
-闭环；既有 Provider 不回归。
+结果：锁定 Vertex API Key REST 协议，复用受控 transport，新增公开 SDK `Model` 适配器，通过真
+Runner 的合成工具闭环；既有 Provider 不回归。
 
-成功场景：普通结构化回答；一次函数调用、工具结果回传、最终结构化回答；同一会话追问。
+成功场景：普通结构化回答；同一请求配置函数声明与强制结构化输出；一次函数调用、工具结果回传、
+`AgentAnswer` 最终回答；同一会话追问。
 
 关键失败：401/403、429、超时、5xx、响应超限、非法 JSON/schema、未知工具、多个函数调用、缺失或
-错误 signature、取消和关闭超时。每项验证无自动重试、无 fallback、无秘密/正文日志；模型失败前
-没有工具 I/O，工具已经执行后的模型失败不重放工具。
+错误 signature、缺少调用 ID、非 `STOP` 终态、取消和关闭超时。每项验证无自动重试、无 fallback、
+无秘密/正文日志；模型失败前没有工具 I/O，工具已经执行后的模型失败不重放工具。
 
 验收：协议级 mock、真 Runner、真实 `PolicySession` 与隔离 PostgreSQL；锁定 SDK 公共接口；验证
-signature 同轮和 Session 回放。公司真实 Vertex 工具闭环证据在获得相应运行授权后补，当前离线通过
-不能替代它。
+signature 在同轮和 Session 回放中的固定白名单；验证缺 ID 时生成唯一 ID、单次工具结果正确关联，
+以及两个同名调用按多调用规则在 I/O 前拒绝；
+验证 `x-goog-api-key` 只在请求头、Profile 指纹含固定端点与协议契约版本，切换 Vertex 后旧会话在
+模型调用前拒绝。公司真实 Vertex 验收必须同时证明“函数调用 + 强制结构化最终回答”，记录多个调用
+的出现频率，并按实施计划规定的样本数、成功门槛和失败分布留证；做不到时 Profile 不开放。当前离线
+通过不能替代它。
 
 ### 切片 V2：正式 `model check`
 
-结果：操作者无需数据库、飞书或 StarRocks 即可验证配置中的 Vertex 模型能完成工具往返。
+结果：操作者无需数据库、飞书或 StarRocks 即可验证配置中的任一活动 Profile 能完成工具往返；
+Vertex 是本次必验组合。
 
 成功场景：固定工具恰好调用一次，最终类型有效，CLI 退出 0 且输出无模型正文。
 
 关键失败：未替换 Key/缺少 Key 退出 2；鉴权、限流、超时、模型未调用工具、重复调用工具或最终类型
 错误退出 1；所有失败均无持久化和业务外部 I/O。
 
-验收：CLI 级测试使用协议替身证明正式入口；真实环境只用固定合成数据运行一次，记录模型/Profile、
-镜像 digest、退出码和耗时，不记录正文或 Key。
+验收：CLI 级测试使用协议替身证明与 `serve` 共用 `open_model`、模型设置和关闭 tracing 的 RunConfig；
+socket 守卫证明唯一网络目标是模型端点，不打开 PostgreSQL、不访问 StarRocks/飞书、不写文件。真实
+环境按 V1 规定样本运行固定合成数据，记录模型/Profile、镜像 digest、退出码和耗时，不记录正文或 Key。
 
-### 切片 C：配置模板与离线检查
+### 切片 C1：通用配置预检与说明
 
-结果：首次操作者只面对一个 Vertex、一个 StarRocks 的主模板；大白话区分必填、按需、只生成一次和
-只填密码；未改模板不能误报有效。
+结果：大白话区分必填、按需、只生成一次和只填密码；`serve` 与 `config check` 共用占位符和飞书
+授权预检；未改模板不能误报可启动。
 
 成功场景：填好一个目标且不启用飞书/Archive 时通过；启用飞书且 `users={}` 时通过；已登记用户与
-grant 成对时通过；原有合法 Provider 配置继续通过。
+非空 grant 成对时通过；原有合法 Provider 配置继续通过。群配置片段保留且使用空 `users`。
 
-关键失败：模板占位符、空引用、不可读 CA、端口不一致、飞书 subject 无 grant、启用可选目标却缺少
-其秘密，均在零外部 I/O 下退出 2，且不回显值。
+关键失败：模板占位符、空引用、不可读 CA、端口不一致、飞书 subject 无 grant 或 grant 为空、启用
+可选目标却缺少其秘密，均在零外部 I/O 下退出 2，且不回显值或 `open_id`；正式 `serve` 同样拒绝。
 
 验收：示例文件加载测试、Compose 静态检查、配置 check 无 socket/无写文件测试、发行归档白名单与
-反向哨兵检查、命令和说明一致性检查。
+反向哨兵检查、命令和说明一致性检查。需要有效配置的测试先替换占位符，不能放宽生产检查。
+
+### 切片 C2：Vertex 最小主模板
+
+结果：在 V1 Profile 契约锁定后，主模板收敛为一个 Vertex、一个 StarRocks、Web 和 `feishu: null`；
+第二目标与飞书只保留局部启用片段，不维护第二份完整主配置。
+
+成功场景：只填写文档标为必填的 Vertex 和单目标字段即可通过共用预检；未启用功能不要求其秘密。
+
+关键失败：Vertex 固定字段被覆盖、模板值未替换、模型或目标秘密缺失时退出 2，无外部 I/O。
+
+验收：模板经过填值夹具后走正式 load/validate；README、OPERATIONS、模板和 Compose 命令一致。
 
 ### 切片 F：飞书首次授权提示
 
@@ -330,30 +402,44 @@ grant 成对时通过；原有合法 Provider 配置继续通过。
 受治理查询路径。
 
 关键失败：重复 message、10 分钟内重复发送、群聊、错 app/tenant、bot、非法 ID、非文本、过期、
-超限、关闭中事件和发送异常。断言请求表、Session、Evidence、模型和 StarRocks 均无调用；限频缓存
-有界且不记录原始 ID。
+超限、关闭中事件和发送异常。两条同一用户消息并发进入时，发送 `await` 前只有一个取得限频占位；
+发送失败也消耗窗口。断言 `ChannelService.accept`、请求表、Session、Evidence、模型、PostgreSQL 和
+StarRocks 均无调用；限频缓存有界且不记录原始 ID，`drain` 等待提示发送落定。
 
 验收：现有飞书 raw event 和发送替身的行为测试；一次真实飞书同租户私聊验证需要单独运行授权，且
 只能证明身份提示与发送链，不能证明 StarRocks 查询。
 
-### 切片 I：正式入口与发行验收
+### 切片 I-V：Vertex 正式入口与发行验收
 
-结果：同一个候选镜像中，离线配置检查、Vertex 模型检查、飞书首次授权和已授权查询路径按文档连接；
-发行包不带内部文档、源码或项目测试。
+结果：候选镜像中，离线配置检查、Vertex 模型检查和已有 Web/已授权飞书查询路径按文档连接；发行包
+不带内部文档、源码或项目测试。
 
-成功场景：x86_64 候选镜像按最小模板部署；模型检查通过；空飞书名单启动；取得 `open_id`、登记、
-检查、重启后正常进入已授权入口。
+成功场景：x86_64 候选镜像按 Vertex 最小模板部署；模型检查通过；切换 Profile 后使用新会话进入
+已有受治理入口。
 
-关键失败：错误 Key、未填占位符、漏 grant 和回退旧镜像分别按本文契约处理。
+关键失败：错误 Key、未填占位符、模型下线及回退旧镜像分别按本文契约处理。
 
-验收：仓库必需检查、amd64 构建与镜像内容检查、Compose 正式命令；公司 Vertex、真实飞书和真实
-StarRocks 的证据分开记录，任何一项替身通过都不能代替另一项。
+验收：仓库必需检查、amd64 构建与镜像内容检查、Compose 正式命令；公司 Vertex、正式用户入口和
+真实 StarRocks 的证据分开记录。I-V 至少验证一个已有正式入口；飞书首次授权提示由 I-F 单独验收，
+任何一项替身通过都不能代替另一项。
+
+### 切片 I-F：配置与飞书正式入口验收
+
+结果：候选镜像可用空飞书名单启动；未知用户取得编号，管理员登记非空权限、检查并重启后进入原有
+已授权路径，不依赖 Vertex 切片完成。
+
+成功场景：取得 `open_id`、登记、检查、重启；现有非 Vertex Profile 下正常进入受治理入口。
+
+关键失败：空 grant、提示限频、发送结果不明以及恢复旧 JSON/旧镜像分别按本文契约处理。
+
+验收：真实飞书身份提示与一次升级前新镜像预检；实测旧配置备份、升级配置和旧镜像/旧 JSON 回退。
 
 ## 8. 环境与必要检查
 
-实施环境继续使用仓库 Python 3.11、锁定的 `openai-agents` 0.22.x、真实 PostgreSQL 测试实例和
-现有 lint/type/test 命令。新增 Vertex 客户端必须进入生产依赖和锁文件，核对许可证、依赖审计及
-linux/amd64 和 linux/arm64 安装；不得借用仓库外 Python 环境宣称通过。
+实施环境继续使用仓库 Python 3.11、锁定的 `openai-agents` 0.22.x、已有 `httpx2` 传输能力、真实
+PostgreSQL 测试实例和现有 lint/type/test 命令。设计不新增 Vertex 客户端依赖；若协议证据迫使修订
+此决定，必须先重新审查生产依赖、许可证、依赖审计及 linux/amd64 和 linux/arm64 安装。不得借用
+仓库外 Python 环境宣称通过。
 
 最低验证层级：
 
@@ -377,22 +463,31 @@ linux/amd64 和 linux/arm64 安装；不得借用仓库外 Python 环境宣称�
   模型接收方。
 - 升级前保留旧镜像、旧 `compose.yaml`、`release.json` 和配置副本。回退旧镜像时恢复旧 JSON；旧版
   可能不认识 `provider: vertex` 或空 `feishu.users`。新增 `.env` 变量可保留，但不应依赖旧版忽略未知
-  配置的行为来替代回退验证。
+  配置的行为来替代回退验证。I-F 必须实际演练“新镜像预检拒绝旧错误配置 → 保持旧服务 → 修正并
+  升级 → 恢复旧 JSON 与旧镜像”的可逆路径。
 - Vertex 或飞书失败不影响 PostgreSQL 备份格式；现有 `XW_DIGEST_KEY` 与数据库成对恢复规则不变。
+- `gemini-3-flash-preview` 是可失效的预览模型；下线、改名或能力变化时 `model check` 失败且服务不
+  自动 fallback。管理员选择另一个获准模型并通过 V1/V2 同级验证后更新 Profile，必须新建会话。
 
 ## 10. 影响正确性的待验证问题
 
 以下问题不交给普通实现细节决定，必须在对应切片关闭：
 
-1. **Vertex 客户端控制能力**：选定的 Google 官方客户端版本能否通过公开 API 同时固定 Vertex API
-   Key 模式、关闭自动工具循环/重试/环境代理、实施请求期限与请求/响应字节上限。若不能，须在 V1
-   开工前决定使用受控的现有 HTTP transport 还是修订设计，不能静默放宽。
-2. **Vertex signature 回放**：`gemini-3-flash-preview` 是否要求函数调用 signature 跨用户轮次保存；
-   锁定 Agents SDK 和现有 `PolicySession` 是否能通过公开 replay 项安全保留固定字段。该问题未关闭
-   前不能宣称会话追问可用。
-3. **真实模型组合**：已有 `VERTEX_NATIVE_OK` 只证明基础文本请求；工具声明、工具结果回传、结构化
-   最终输出和用量字段仍缺真实证据。
-4. **真实飞书发送**：现有 SDK 代码证明事件含发送者 `open_id`，但当前项目尚未用真实未登记账号验证
+1. **Vertex REST 与 transport 契约**：固定端点和请求形状、`x-goog-api-key` 头、`STOP` 终态、响应
+   字节流和取消/关闭能否在复用现有受控 transport 时同时成立。任一限制无法满足时，先修订设计，
+   不能把 Key 放进 URL、关闭限额或增加自动重试。
+2. **工具与强制结构化输出组合**：锁定模型必须在同一个请求中接受函数声明和供应商结构化输出约束，
+   工具结果返回后稳定生成通过 `AgentAnswer` 校验的对象。协议 fixture 与真实模型均须通过；真实样本
+   数、成功门槛和失败分布在实施计划锁定。不能满足时 Vertex Profile 不开放，不退回提示词 JSON。
+3. **Vertex signature 回放**：`gemini-3-flash-preview` 是否要求函数调用 signature 跨用户轮次保存；
+   若需要，现有 `PolicySession` 必须通过公开 replay 项只白名单
+   `provider_data.thought_signature`。该问题未关闭前不能宣称会话追问可用。
+4. **调用 ID 与多调用频率**：Vertex 缺少调用 ID 时生成 ID 能否在同轮和 Session 回放中稳定关联；
+   锁定模型单次返回多个函数调用的频率是否会让前置拒绝导致不可用。调用 ID 不成立或多调用频繁时
+   Profile 保持未开放；后者另行决定统一的供应商契约，不在本次单独开放并行执行。
+5. **真实模型完整组合**：已有用户报告只证明基础文本请求；工具声明、工具结果回传、强制结构化最终
+   输出、signature、结束原因和 usage 字段仍缺真实证据。预览模型变化后原证据不自动适用于新模型。
+6. **真实飞书发送**：现有 SDK 代码证明事件含发送者 `open_id`，但当前项目尚未用真实未登记账号验证
    “接收已 ack 后回复固定提示”的权限与发送结果。
 
 这些问题的失败方向都是保持功能未开放或受控失败，不通过增加权限、自动 fallback、吞异常或跳过
@@ -405,6 +500,8 @@ Session/Evidence 校验来解决。
 - 本文提交 SHA 和基线 `64180239549d43a8c16994babc3ad794b1d0511a`；
 - `ARCHITECTURE.md` 的唯一 Agent Loop、静态 Profile、Session、权限和数据边界；
 - `model_api.py`、`runtime.py`、`app.py`、`feishu.py`、`config.py`、`cli.py` 的真实调用链；
-- 计划是否为第 10 节问题设置了阻断性证据。
+- 计划是否为第 10 节问题设置了阻断性证据，尤其是真实 Vertex 固定样本数、成功门槛和失败分布；
+- handoff 是否只把 2026-10-06 的 `VERTEX_NATIVE_OK` 记为用户报告的基础文本证据，并写明
+  `gemini-3-flash-preview`、Vertex 原生 API Key 端点类别和未覆盖范围，不记录 Key。
 
 审查通过只批准按计划开工，不代表 Vertex、真实飞书、公司 StarRocks、镜像发布或公司服务器部署已完成。
