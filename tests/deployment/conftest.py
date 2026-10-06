@@ -24,11 +24,20 @@ def docker(*args: str, cwd: Path = ROOT) -> subprocess.CompletedProcess[str]:
 @pytest.fixture(scope="session")
 def runtime_image() -> Iterator[str]:
     tag = f"xiaowei-p3-a-test:{os.getpid()}"
+    git = shutil.which("git")
+    assert git is not None
+    head = subprocess.run(  # noqa: S603 - 固定 Git 与当前受审工作树
+        [git, "rev-parse", "HEAD"],
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout.strip()
     result = docker(
         "build",
         "--pull=false",
         "--build-arg",
-        "XW_CODE_SHA=" + "d" * 40,
+        f"XW_CODE_SHA={head}",
         "-t",
         tag,
         "-f",
