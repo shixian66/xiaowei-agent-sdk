@@ -90,7 +90,7 @@ jobs:
           enable-cache: false
           activate-environment: true
       - run: uv sync --extra dev --frozen
-      - run: python -m pytest tests/deployment/test_release.py tests/deployment/test_compose.py tests/deployment/test_maintenance.py -q
+      - run: python -m pytest tests/deployment/test_release.py tests/deployment/test_compose.py tests/deployment/test_maintenance.py tests/deployment/test_release_workflow.py -q
 
   # 正式入口：wheel 在不含 dev 依赖的干净环境中安装，两个入口都只指向新包（P1-B Task 8）。
   product-entry:

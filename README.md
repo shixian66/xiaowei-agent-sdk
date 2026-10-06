@@ -53,7 +53,7 @@ MCP 负责标准化工具接入，不能替代业务授权。只有参数含义�
 
 ## 怎样开始
 
-唯一正式命令是 `xiaowei`（`python -m xiaowei` 相同）。它已用测试 PostgreSQL、脚本模型与替身完成离线验证；P3-A 双容器已合入，P3-B 的不同镜像升级、回退和隔离恢复候选已在本机 Linux/arm64 容器环境验证。真实模型、用户 StarRocks、真实飞书与公司服务器实战仍未完成（见 handoff）。旧 CLI、Worker 或旧 Compose 命令不是产品入口。
+唯一正式命令是 `xiaowei`（`python -m xiaowei` 相同）。它已用测试 PostgreSQL、脚本模型与替身完成离线验证；P3-A 和 P3-B 已通过独立审查并合入，升级、回退和隔离恢复在本机 Linux/arm64 容器环境验证。GHCR amd64 发布流程正在准备，镜像尚未发布；真实模型、用户 StarRocks、真实飞书与公司服务器实战仍未完成（见 handoff）。旧 CLI、Worker 或旧 Compose 命令不是产品入口。
 
 实施时需要：
 
@@ -128,7 +128,7 @@ docker compose -p xiaowei-sdk-test -f compose.sdk-test.yml down -v
 
 `SDK_TEST_POSTGRES_URL` 只能是上面这一个测试地址；未设置时数据库用例明确失败而不是跳过。CI 的 integration job 以同样方式运行完整测试。
 
-P3-A 的精简发行包、两容器 Compose、配置预检、首次初始化与停止步骤见 [deploy/OPERATIONS.md](deploy/OPERATIONS.md)。小维连接已有 StarRocks 和模型 API，不要求在服务器部署模型；应用配置、`.env`、CA 与 PostgreSQL 命名卷由操作者保留。P3-B 的不同 digest 升级/回退和备份恢复、P3-C 的公司服务器与真实服务验收尚未完成；旧根目录 Compose 文件仍属于历史实现。
+P3-A 与 P3-B 已经独立审查并合入；精简发行包、两容器 Compose、配置预检、首次初始化与停止步骤见 [deploy/OPERATIONS.md](deploy/OPERATIONS.md)。小维连接已有 StarRocks 和模型 API，不要求在服务器部署模型；应用配置、`.env`、CA 与 PostgreSQL 命名卷由操作者保留。当前在准备私有 GHCR amd64 发布流程，镜像和发行归档尚未实际发布；公司服务器与真实服务验收仍待 P3-C。旧根目录 Compose 文件仍属于历史实现。
 
 ## 设计与开发
 
