@@ -12,6 +12,10 @@
   不进入模型。
 - 身份：``open_id`` 经配置映射为内部 subject，再由同一个 ``AccessPolicy`` 授权；会话语境是单聊
   ``chat_id``，请求编号是 ``message_id``。``chat_id`` 只在内存中用于本次回复，不持久化。
+- 未登记的单聊发送者：全部事件校验通过后，只回复一条固定身份提示，内容是该事件发送者自己的
+  ``open_id``，供管理员登记；任何文本或命令都不进入 ``ChannelService``、存储、模型或工具。提示在
+  发送前于同一步内按消息去重并按 ``open_id`` 限频（固定窗口与容量，只在内存中，重启清空）；发送
+  失败或结果不明也占用窗口，不重发。日志只有原因码，不含 ``open_id``。
 - 指定群（可选配置 ``group``）：只接受该群、``chat_type=group``、平台 ``mentions`` 中含本机器人
   ``open_id`` 的消息；本机器人身份只取 SDK 已解析且属于本应用的身份，未解析时群消息一律丢弃，
   不按名称或正文识别。只删除本机器人 mention 对应的 token。发起人（actor）是发送者 ``open_id``，
@@ -100,6 +104,8 @@ EMPTY_COMMAND = "命令后需要写明问题，例如：/查询 昨天各地区�
 NEW_SESSION = "已新建会话，之前的对话不再作为上下文"
 NEW_SESSION_BUSY = "当前会话正在处理消息，请稍后再新建会话"
 NEW_GROUP_SESSION = "已为本群新建会话：群内之前的对话不再作为任何成员的上下文"
+IDENTITY_NOTICE = "你还没有获得授权。你的编号是 {open_id}，请把它发给管理员。"
+IDENTITY_NOTICE_WINDOW = timedelta(minutes=10)
 TRUNCATED = "（内容超过飞书单条消息上限，已截断）"
 FACTS_TRUNCATED = "（工具结果超过飞书单条上限，已截断）"
 # 渲染后的一个转义单位：\uXXXX、反斜杠加一个字符，或单个字符；截断不拆开它。
@@ -128,6 +134,8 @@ _CONTENT_OVERHEAD = 64
 # 由这个身份读取，不需要锁低 readiness。
 _WITHHELD = (ResultUnavailableError, AccessDeniedError, RequestUnavailableError)
 _SEEN_COMMANDS = 1024
+# 身份提示的两个内存索引（消息去重、按 open_id 的最近尝试时间）各自的容量；满时淘汰最旧记录。
+_NOTICE_CAPACITY = 1024
 # SDK 已确定未发出的错误类别；其余（含 unknown、超时、未连接）按结果不明处理。
 _DEFINITE_FAILURES = frozenset(
     {
@@ -173,6 +181,15 @@ class _Message:
     group: GroupScope | None = None
 
 
+@dataclass(frozen=True)
+class _Unregistered:
+    """全部事件校验已通过、但发送者不在单聊名单中的单聊消息：只能得到身份提示。"""
+
+    message_id: str
+    open_id: str
+    chat_id: str
+
+
 def _field(node: object, *path: str) -> object:
     for name in path:
         if not isinstance(node, Mapping):
@@ -211,8 +228,13 @@ def _text(event: object, max_chars: int) -> str:
     return text.strip()
 
 
-def _parse(event: object, config: FeishuConfig, now: datetime, bot: BotOpenId) -> _Message:
-    """按可信配置逐字段核对事件；任何不符都以安全原因码拒绝。"""
+def _parse(
+    event: object, config: FeishuConfig, now: datetime, bot: BotOpenId
+) -> _Message | _Unregistered:
+    """按可信配置逐字段核对事件；任何不符都以安全原因码拒绝。
+
+    单聊名单在全部事件校验之后才查：未登记的发送者只有在事件本身完全合规时才得到身份提示。
+    """
     if _field(event, "header", "event_type") != _EVENT_TYPE:
         raise _RejectedError("event_type")
     if _field(event, "header", "app_id") != config.app_id:
@@ -228,19 +250,14 @@ def _parse(event: object, config: FeishuConfig, now: datetime, bot: BotOpenId) -
     chat_id = _string(event, "event", "message", "chat_id")
     chat_type = _field(event, "event", "message", "chat_type")
     group: GroupScope | None = None
-    if chat_type == "p2p":
-        subject = config.users.get(open_id)
-        if subject is None:
-            raise _RejectedError("sender")
-    elif chat_type == "group" and config.group is not None:
+    if chat_type == "group" and config.group is not None:
         if chat_id != config.group.chat_id:
             raise _RejectedError("chat")
-        if _OPEN_ID.fullmatch(open_id) is None:
-            raise _RejectedError("sender")
-        subject = open_id
         group = GroupScope(app_id=config.app_id, tenant_key=config.tenant_key, chat_id=chat_id)
-    else:
+    elif chat_type != "p2p":
         raise _RejectedError("chat_type")
+    if _OPEN_ID.fullmatch(open_id) is None:
+        raise _RejectedError("sender")
     if _field(event, "event", "message", "message_type") != "text":
         raise _RejectedError("message_type")
     try:
@@ -253,10 +270,16 @@ def _parse(event: object, config: FeishuConfig, now: datetime, bot: BotOpenId) -
     if now - created > max_age or created - now > _CLOCK_SKEW:
         raise _RejectedError("stale")
     text = _text(event, config.max_message_chars)
+    message_id = _string(event, "event", "message", "message_id")
     if group is not None:
         text = _addressed(event, text, bot())
+        subject: str | None = open_id
+    else:
+        subject = config.users.get(open_id)
+    if subject is None:
+        return _Unregistered(message_id=message_id, open_id=open_id, chat_id=chat_id)
     return _Message(
-        message_id=_string(event, "event", "message", "message_id"),
+        message_id=message_id,
         subject_id=subject,
         chat_id=chat_id,
         text=text,
@@ -453,12 +476,17 @@ class FeishuGateway:
         self._received.set()
         # 不写请求表的命令（/新建、空命令提示）只在进程内按消息编号去重。
         self._seen: OrderedDict[tuple[str, str], None] = OrderedDict()
+        # 未登记用户的身份提示：已尝试的 (open_id, message_id) 与每个 open_id 最近一次尝试的时间。
+        self._noticed_messages: OrderedDict[tuple[str, str], None] = OrderedDict()
+        self._noticed_users: OrderedDict[str, datetime] = OrderedDict()
 
     def inbound(self, event: object) -> InboundRequest | None:
         """可进入共享服务的请求；被拒绝的事件与不进入模型的命令返回 None。"""
         try:
             message = _parse(event, self._config, self._clock(), self._bot)
         except _RejectedError:
+            return None
+        if isinstance(message, _Unregistered):
             return None
         kind, body = _command(message.text)
         if kind == "new" or not body:
@@ -484,6 +512,12 @@ class FeishuGateway:
             message = _parse(event, self._config, self._clock(), self._bot)
         except _RejectedError as rejected:
             logger.info("飞书事件已丢弃：%s", rejected.code)
+            return
+        if isinstance(message, _Unregistered):
+            # 命令解析之前分流：未登记用户的任何文本或命令都只得到身份提示。
+            logger.info("飞书事件已丢弃：%s", "unregistered")
+            if self._reserve_notice(message):
+                await self._send_notice(message)
             return
         kind, body = _command(message.text)
         try:
@@ -776,6 +810,33 @@ class FeishuGateway:
         if outcome != "sent":
             logger.warning("飞书提示发送未成功：%s", outcome)
 
+    def _reserve_notice(self, message: _Unregistered) -> bool:
+        """在任何发送 await 之前同步完成“检查并占位”：同一消息只尝试一次，同一用户每个窗口一次。"""
+        key = (message.open_id, message.message_id)
+        if key in self._noticed_messages:
+            return False
+        self._noticed_messages[key] = None
+        _trim(self._noticed_messages)
+        now = self._clock()
+        last = self._noticed_users.get(message.open_id)
+        if last is not None and now - last < IDENTITY_NOTICE_WINDOW:
+            return False
+        self._noticed_users[message.open_id] = now
+        self._noticed_users.move_to_end(message.open_id)
+        _trim(self._noticed_users)
+        return True
+
+    async def _send_notice(self, message: _Unregistered) -> None:
+        """固定身份提示：只发一次，任何结果都不释放占位、不重发，日志只有结果类别。"""
+        text = IDENTITY_NOTICE.format(open_id=message.open_id)
+        try:
+            outcome = await self._send(message.chat_id, text, reply_to=None)
+        except Exception as exc:
+            logger.error("飞书身份提示发送异常，结果不明：%s", type(exc).__name__)
+            return
+        if outcome != "sent":
+            logger.warning("飞书身份提示发送未成功：%s", outcome)
+
     def _first(self, message: _Message) -> bool:
         key = (message.subject_id, message.message_id)
         if key in self._seen:
@@ -811,6 +872,11 @@ class FeishuGateway:
     def _reply_to(message: _Message) -> str | None:
         """群内的一切发送都回复原消息；单聊直接发往会话。"""
         return None if message.group is None else message.message_id
+
+
+def _trim(index: OrderedDict[Any, Any]) -> None:
+    while len(index) > _NOTICE_CAPACITY:
+        index.popitem(last=False)
 
 
 class LarkChannel(Protocol):

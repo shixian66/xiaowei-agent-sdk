@@ -56,6 +56,7 @@ from xiaowei.channel_store import RequestUnavailableError
 from xiaowei.config import FeishuConfig, FeishuGroupConfig
 from xiaowei.feishu import (
     EMPTY_COMMAND,
+    IDENTITY_NOTICE,
     NEW_GROUP_SESSION,
     QUEUED,
     FeishuGateway,
@@ -358,16 +359,29 @@ async def test_without_a_trusted_bot_or_group_every_group_message_is_dropped(
     assert await request_rows(env) == [] and env.members.checks == [] and group.outbox.sent == []
 
 
-async def test_a_group_member_gets_no_personal_access(env: Env) -> None:
-    """A 在群里可用，但不在单聊名单中：A 的单聊消息在持久化前丢弃。"""
-    async with running(env) as group:
+@pytest.mark.parametrize("users", [{"ou_dave": "dave"}, {}], ids=["others listed", "empty"])
+async def test_a_group_member_gets_no_personal_access(env: Env, users: dict[str, str]) -> None:
+    """A 在群里可用，但不在单聊名单中：A 的单聊只得到本人编号的身份提示，在持久化前结束；
+    单聊名单为空时群路径照常运行（群授权不依赖 ``users``）。"""
+    async with running(env, users=users) as group:
         with logs() as records:
             await group.ask(
                 "东区订单？",
                 event__message__chat_type="p2p",
                 event__message__chat_id="oc_alice_p2p",
             )
-    assert dropped(records) == ["sender"] and await request_rows(env) == []
+        assert dropped(records) == ["unregistered"] and await request_rows(env) == []
+        assert group.outbox.sent == [("oc_alice_p2p", IDENTITY_NOTICE.format(open_id=A))]
+        assert env.members.checks == []
+
+        asked = env.scripts.add(
+            attributed(A, "东区订单？"), tool_call("order_total", region="east"), cite()
+        )
+        await group.ask("东区订单？", message_id="om_group")
+    assert env.model_calls(asked) == 2
+    assert await request_rows(env) == [
+        (True, "group", A, "query", "completed", "sent", CHAT, "om_group")
+    ]
 
 
 # ---- 去重、成员与发送结果 --------------------------------------------------------------------
