@@ -107,14 +107,21 @@ def test_packaged_operations_only_reference_packaged_files() -> None:
 
 
 def test_operations_rollback_restores_the_previous_config() -> None:
-    """升级前以受限权限留存旧 JSON，回退旧镜像时一并恢复（新版可能已改成旧版读不了的 users={}）。"""
+    """升级前以受限权限留存实际配置路径上的旧 JSON；回退先停候选应用，再恢复到同一路径。
+
+    新版可能已改成旧版读不了的 ``users={}``；路径取自 ``.env`` 的 ``XW_CONFIG_FILE``。
+    """
     operations = (ROOT / "deploy/OPERATIONS.md").read_text(encoding="utf-8")
     upgrade = operations.split("## 普通升级与回退", 1)[1].split("\n## ", 1)[0]
-    assert 'install -m 600 xiaowei.json "$previous/xiaowei.json"' in upgrade
-    assert upgrade.index("install -m 600 xiaowei.json") < upgrade.index("config check")
+    backup = 'install -m 600 "$config_file" "$previous/xiaowei.json"'
+    assert backup in upgrade
+    assert upgrade.index(backup) < upgrade.index("config check")
     rollback = upgrade.split("如果新版启动失败", 1)[1]
-    assert 'cp "$previous/xiaowei.json" xiaowei.json' in rollback
-    assert rollback.index("xiaowei.json") < rollback.index("--force-recreate")
+    restore = 'cp "$previous/xiaowei.json" "$config_file"'
+    stop = "docker compose --env-file .env stop xiaowei &&"
+    assert restore in rollback
+    assert rollback.index(stop) < rollback.index('cp "$previous/')
+    assert rollback.index(restore) < rollback.index("--force-recreate")
 
 
 def test_release_archive_records_linux_amd64(tmp_path: Path) -> None:

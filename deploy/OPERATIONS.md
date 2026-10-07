@@ -5,8 +5,8 @@ Web 端口只发布到宿主机 `127.0.0.1`，PostgreSQL 不发布端口。Host/
 和 DNS rebinding，访问范围仍由端口发布与服务器网络保证。
 
 建议使用固定目录 `/opt/xiaowei/current`。`.env`、`xiaowei.json` 与 `certs/` 由操作者持有，升级
-只替换 `compose.yaml` 和 `release.json`；升级前留存的旧 `xiaowei.json` 用于回退。旧发行包及旧应用
-镜像保留到新版验收完成。
+只替换 `compose.yaml` 和 `release.json`；升级前留存的旧 JSON 配置（`.env` 的 `XW_CONFIG_FILE`
+指向的文件，默认 `./xiaowei.json`）用于回退。旧发行包及旧应用镜像保留到新版验收完成。
 
 ## 获取 amd64 发行包与镜像权限
 
@@ -176,15 +176,22 @@ docker compose --env-file .env exec -T postgres sh -c \
 ```
 
 只有数据库版本列在新版 `direct_start_schema_versions` 时才走普通升级。先留存旧控制文件和当前
-`xiaowei.json`（JSON 含单聊用户的 open_id，只允许部署管理员读取），再拉取并预检新版；这些命令
-失败不会停止旧服务：
+使用的 JSON 配置（JSON 含单聊用户的 open_id，只允许部署管理员读取），再拉取并预检新版；这些命令
+失败不会停止旧服务。下面每个命令块里的 `config_file` 必须与 `.env` 的 `XW_CONFIG_FILE` 相同
+（默认 `./xiaowei.json`；改过路径时按实际值填写，例如 `./config/prod.json`），每个块单独复制执行
+时都要先确认这一行：
 
 ```sh
 cd /opt/xiaowei/current
+config_file='./xiaowei.json'  # 与 .env 的 XW_CONFIG_FILE 相同
 previous=/opt/xiaowei/releases/<旧 SHA>
 mkdir -p "$previous"
 cp compose.yaml release.json "$previous"/
-install -m 600 xiaowei.json "$previous/xiaowei.json"
+install -m 600 "$config_file" "$previous/xiaowei.json"
+```
+
+```sh
+cd /opt/xiaowei/current
 cp /opt/xiaowei/releases/<新 SHA>/compose.yaml compose.next.yaml
 cp /opt/xiaowei/releases/<新 SHA>/release.json release.next.json
 docker compose --env-file .env -f compose.next.yaml pull xiaowei
@@ -192,8 +199,8 @@ docker compose --env-file .env -f compose.next.yaml config --quiet
 docker compose --env-file .env -f compose.next.yaml run --rm --no-deps xiaowei config check
 ```
 
-预检失败时按提示修改 `xiaowei.json` 后重新预检，旧服务继续运行（它只在启动时读取配置）。预检
-通过后只重建小维；PostgreSQL 容器和命名卷不重建：
+预检失败时按提示修改 `XW_CONFIG_FILE` 指向的 JSON 后重新预检，旧服务继续运行（它只在启动时读取
+配置）。预检通过后只重建小维；PostgreSQL 容器和命名卷不重建：
 
 ```sh
 cd /opt/xiaowei/current
@@ -203,22 +210,25 @@ docker compose --env-file .env up -d --no-deps --force-recreate xiaowei --wait
 docker compose --env-file .env ps
 ```
 
-如果新版启动失败或需要回退，恢复旧控制文件、旧 digest 和升级前的 `xiaowei.json`。新版接受的配置
-旧版不一定能读，例如旧版要求 `feishu.users` 至少一人，新版允许 `{}`；升级后在 JSON 里做的修改
-会随回退撤销，需要时按旧版规则重新填写。`.env`、CA 与数据库不改（本次升级没有新增 `.env` 项，
+如果新版启动失败或需要回退，先用当前（候选）Compose 停止小维，停止成功后才恢复旧控制文件、旧
+digest 和升级前的 JSON 配置，再按旧镜像预检并启动；停止失败时命令链中止，不覆盖任何文件。停止后
+到旧版就绪前服务不可用。新版接受的配置旧版不一定能读，例如旧版要求 `feishu.users` 至少一人，
+新版允许 `{}`；升级后在 JSON 里做的修改会随回退撤销，需要时按旧版规则重新填写。`.env`、CA 与数据库不改（本次升级没有新增 `.env` 项，
 不要用新包模板覆盖 `.env`）：
 
 ```sh
 cd /opt/xiaowei/current
+config_file='./xiaowei.json'  # 与 .env 的 XW_CONFIG_FILE 相同
 previous=/opt/xiaowei/releases/<旧 SHA>
-cp "$previous/compose.yaml" compose.yaml
-cp "$previous/release.json" release.json
-cp "$previous/xiaowei.json" xiaowei.json
-docker compose --env-file .env run --rm --no-deps xiaowei config check
-docker compose --env-file .env up -d --no-deps --force-recreate xiaowei --wait
+docker compose --env-file .env stop xiaowei &&
+  cp "$previous/compose.yaml" compose.yaml &&
+  cp "$previous/release.json" release.json &&
+  cp "$previous/xiaowei.json" "$config_file" &&
+  docker compose --env-file .env run --rm --no-deps xiaowei config check &&
+  docker compose --env-file .env up -d --no-deps --force-recreate xiaowei --wait
 ```
 
-`cp` 覆盖已有文件时保留 `xiaowei.json` 原有的权限，容器 UID 65532 仍可读取。
+`cp` 覆盖已有文件时保留实际配置文件原有的权限，容器 UID 65532 仍可读取；留存副本保持 600。
 
 不要在新版验收前删除旧发行目录、旧镜像或执行镜像清理。普通升级不运行 `storage upgrade`。
 
