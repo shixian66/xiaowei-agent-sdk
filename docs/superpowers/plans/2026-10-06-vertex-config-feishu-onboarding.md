@@ -674,6 +674,15 @@ git diff --check
 
 **建议提交：** `docs: provide minimal Vertex operator configuration`
 
+**C2 实施记录（2026-10-07，分支 `claude/vertex-c2`，离线）：** 实施裁定：模型 ID 标记用
+`replace-with-approved-vertex-model` 而不是 `<……>`，因为 Vertex Profile 的模型 ID 必须是单个 URL 路径段，
+尖括号标记会先被结构校验拒绝、报不出“仍是模板占位符”；C2 前模板的 `<获准的模型 ID>` 与 archive 两个标记
+作为历史值保留在占位符清单。第二目标在 OPERATIONS 中写成“复制已有一项后改五个字段”的步骤而非 JSON 片段，
+避免再维护一份会漂移的完整目标；飞书继续使用 `feishu-group.example.json`。模板 Profile 沿用原有期限与输出
+上限，是否够用由 I-V 记录后调整。升级/回退演练会运行不认识 `provider: vertex` 的旧镜像，这些演练改用 C2 前格式的 OpenAI
+Profile 代表操作者保留的旧配置；当前镜像的 Compose 测试仍使用 Vertex 主模板。成功与失败场景经原生两个入口的正式 `config check` 验证；离线证据与未覆盖项
+记录在对应 PR。
+
 ## 9. I-V：真实 Vertex、正式提示词与发行 Gate
 
 **依赖：** V1-A、V1-B、V2、C2 的候选 SHA 全部通过独立审查；另需真实 Vertex 调用和镜像构建授权。

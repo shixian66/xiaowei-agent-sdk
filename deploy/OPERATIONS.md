@@ -66,7 +66,13 @@ tar -xzf "/opt/xiaowei/xiaowei-${release_sha}-linux-amd64.tar.gz" \
 4. `.env` 只允许部署管理员读取；配置和 CA 须允许容器 UID 65532 只读。
 
 两份配置的分工：`.env` 只放秘密和部署参数，可以用 `#` 写注释；`xiaowei.json` 放模型、StarRocks
-地址、权限等非秘密内容，是标准 JSON，不能写 `#` 或 `//` 注释。两份模板里的 `<……>` 以及
+地址、权限等非秘密内容，是标准 JSON，不能写 `#` 或 `//` 注释。
+
+`xiaowei.example.json` 是最小配置：一个 Vertex 模型、一个 StarRocks 目标 `warehouse`、Web，飞书关闭
+（`null`）。第二个目标和飞书需要时再按下文“增加第二个 StarRocks 目标”“启用飞书”加入。模型段里的
+`vertex-main` 不需要填 API 地址、协议或输出方式，这些由程序固定，写了反而会被拒绝。
+
+两份模板里的 `<……>` 以及 `replace-with-approved-vertex-model`、
 `cli_replacewithappid`、`oc_replace_with_chat_id` 都是待填写标记，没替换时 `config check` 和
 `serve` 都会按字段路径拒绝，不会启动。只有与模板原文完全相同的值才算没替换，真实值里含尖括号
 不受影响；`.env` 的 `XW_POSTGRES_PASSWORD` 仍是模板原文时同样拒绝。
@@ -75,17 +81,18 @@ tar -xzf "/opt/xiaowei/xiaowei-${release_sha}-linux-amd64.tar.gz" \
 | --- | --- | --- | --- | --- |
 | `.env` 的 `XW_POSTGRES_PASSWORD` 与 `XW_DATABASE_URL` | 必填 | 自己生成的数据库密码；URL 里的密码与它一致，特殊字符按 URI 编码 | `openssl rand -hex 24` | 初始化后不改 |
 | `.env` 的 `XW_DIGEST_KEY` | 必填 | 自己生成的摘要密钥 | `openssl rand -hex 32` | 永不重新生成；与数据库成对备份 |
-| `.env` 的 `XW_MODEL_API_KEY` | 必填 | 模型服务的 API Key | 模型服务管理员 | 可轮换，改后重启 |
+| `.env` 的 `XW_MODEL_API_KEY` | 必填 | Vertex AI 的 API Key 本身（Express Mode），不是服务账号 JSON 文件或项目号 | Google Cloud 管理员 | 可轮换，改后重启 |
 | `.env` 的 `XW_STARROCKS_PASSWORD` | 必填 | 第一个目标只读账号的**密码** | StarRocks 管理员 | 可轮换，改后重启 |
-| `.env` 的 `XW_ARCHIVE_STARROCKS_PASSWORD` | 按需 | 第二个目标的只读密码；不用该目标时连同 JSON 里的目标一起删 | StarRocks 管理员 | 可轮换 |
-| `.env` 的 `XW_FEISHU_APP_SECRET` | 按需 | 启用飞书时填应用 App Secret | 飞书开放平台 | 可轮换 |
-| JSON 的 `model.model` | 必填 | 获准的模型 ID | 模型服务管理员 | 换模型后须新建会话 |
+| `.env` 的 `XW_ARCHIVE_STARROCKS_PASSWORD` | 按需 | 加了第二个目标时去掉行首 `#`，填它的只读密码 | StarRocks 管理员 | 可轮换 |
+| `.env` 的 `XW_FEISHU_APP_SECRET` | 按需 | 启用飞书时去掉行首 `#`，填应用 App Secret | 飞书开放平台 | 可轮换 |
+| JSON 的 `model.model` | 必填 | 获准的 Vertex 模型 ID，只含字母、数字、`.`、`_`、`-`，例如计划验收的 `gemini-3-flash-preview`（真实验收尚未完成） | 模型服务管理员 | 换模型后须新建会话，并重新运行 `model check` |
 | JSON 的 `targets[].description`、`starrocks.host`、`database`、`user` | 必填 | 集群用途说明、FE 地址、默认库、只读账号名 | StarRocks 管理员 | 可改，改后重启 |
 | JSON 的 `access.grants` 与 `web.operator_id` | 必填 | Web 操作者的内部 subject 及其工具 | 部署管理员决定 | 可改，改后重启 |
 | JSON 的 `feishu` | 按需 | `null` 表示不启用；启用方式见下文“启用飞书” | 飞书开放平台 | 可改，改后重启 |
 
 常见错误：`config check` 输出“仍是模板占位符”时按列出的字段替换；“引用的环境变量未设置或为空”
-时补 `.env` 对应行；“飞书用户 subject … 缺少有效授权”时在 `access.grants` 给该 subject 至少一个
+时补 `.env` 对应行；“vertex 的端点与协议由程序固定”时删掉 `model` 段里的 `base_url`、`api_mode`、
+`output_mode`；“飞书用户 subject … 缺少有效授权”时在 `access.grants` 给该 subject 至少一个
 工具，或从 `feishu.users` 删掉该用户。
 
 ```sh
@@ -94,13 +101,15 @@ chmod 600 .env
 mkdir -p certs
 docker compose --env-file .env config --quiet
 docker compose --env-file .env run --rm --no-deps xiaowei config check
+docker compose --env-file .env run --rm --no-deps xiaowei model check
 docker compose --env-file .env up -d postgres --wait
 docker compose --env-file .env run --rm --no-deps xiaowei storage init
 docker compose --env-file .env up -d xiaowei --wait
 docker compose --env-file .env ps
 ```
 
-`config check` 不连接 PostgreSQL、模型、StarRocks 或飞书，也不写文件。它返回 2 时先修配置，
+顺序是：填好两份配置 → `config check` → `model check` → 初始化数据库并启动。前一步没通过就不要
+往下走。`config check` 不连接 PostgreSQL、模型、StarRocks 或飞书，也不写文件。它返回 2 时先修配置，
 不要停止或替换正在运行的旧服务。`storage init` 只对全新、专用于小维的数据库执行一次。
 
 `model check` 单独确认模型 Profile 和 Key 可用：它只读取 JSON 和 `model.api_key_ref` 指向的那一个
@@ -130,6 +139,22 @@ ssh -N -L 127.0.0.1:8501:127.0.0.1:8501 <获准服务器>
 ```
 
 不得把 Compose 发布行改成省略 host IP 的 `8501:8501`，也不得使用 host network。
+
+## 增加第二个 StarRocks 目标
+
+`targets` 里每个 StarRocks 集群一项。要加第二个集群时，把已有的那一项（从 `{` 到对应的 `}`）整段
+复制一份，接在它后面并用逗号隔开，然后只改下面这些字段：
+
+| 字段 | 改成 |
+| --- | --- |
+| `starrocks.target_id` | 新名字，例如 `archive`；1–32 位小写字母、数字、`_`、`-`，不能和已有目标重复 |
+| `description` | 这个集群的用途，模型靠它选集群 |
+| `starrocks.host`、`database`、`user` | 新集群的 FE 地址、默认库和只读账号名 |
+| `starrocks.password_ref` | `env:XW_ARCHIVE_STARROCKS_PASSWORD`，并在 `.env` 去掉这一行开头的 `#`、填密码 |
+| `starrocks.audit` | 新集群没有审计表时改成 `null`；这时在该集群上不能查慢查询 |
+
+不再需要第二个集群时，把这一项和 `.env` 的对应行一起删掉。改完先运行 `config check`，通过后重启；
+已有会话需要新建。
 
 ## 启用飞书
 

@@ -10,6 +10,7 @@ SDK 公开面替身（``feishu_channel``）。
 """
 
 import asyncio
+import copy
 import json
 import socket
 import threading
@@ -1718,9 +1719,14 @@ def test_example_configuration_is_valid_and_fits_the_projections() -> None:
             adapter, config.projection_bytes, schema=SchemaCache(adapter, clock=Clock())
         )
     assert config.listen_port == 8501 and config.feishu is None
-    # 两个集群，只有一个配置审计源：示范多集群与“慢查询只在配置了审计源的集群”。
-    assert [t.target_id for t in config.targets] == ["warehouse", "archive"]
-    assert [t.starrocks.audit is not None for t in config.targets] == [True, False]
+    # 主模板是最小结构：一个 Vertex Profile、一个配置了审计源的目标、Web、飞书关闭。第二个目标与
+    # 飞书只在 OPERATIONS / 飞书片段里说明，不维护第二份完整主配置。
+    assert [t.target_id for t in config.targets] == ["warehouse"]
+    assert config.targets[0].starrocks.audit is not None
+    model = config.model
+    assert model.provider == "vertex" and model.reasoning_effort is None
+    assert (model.base_url, model.api_mode, model.output_mode) == (None, None, None)
+    assert model.api_key_ref == "env:XW_MODEL_API_KEY"
 
 
 def test_example_feishu_group_section_is_valid(tmp_path: Path) -> None:
@@ -1831,6 +1837,7 @@ def test_ordinary_config_errors_keep_precise_field_paths(tmp_path: Path) -> None
 
 EXAMPLES = Path(__file__).resolve().parents[2] / "examples"
 FILLED = {
+    "replace-with-approved-vertex-model": "filled-vertex-model",
     "cli_replacewithappid": "cli_filledapp",
     "ou_replace_with_open_id": "ou_filled_user",
     "oc_replace_with_chat_id": "oc_filled_group",
@@ -1879,7 +1886,7 @@ def test_repository_templates_name_every_placeholder_without_values(tmp_path: Pa
     """未替换的仓库模板语法上可读，但预检按字段路径拒绝模板里的每一个标记，且不回显模板文字。"""
     template = example_with_feishu()
     expected = template_paths(template)
-    assert {"model.model", "targets.1.starrocks.user", "feishu.group.chat_id"} <= set(expected)
+    assert {"model.model", "targets.0.starrocks.user", "feishu.group.chat_id"} <= set(expected)
     with pytest.raises(runtime.ConfigError) as raised:
         runtime.validate_placeholders(_load(tmp_path, template))
     message = str(raised.value)
@@ -1898,6 +1905,22 @@ def test_operations_subject_marker_is_a_placeholder(tmp_path: Path) -> None:
     with pytest.raises(runtime.ConfigError) as raised:
         runtime.validate_placeholders(_load(tmp_path, values))
     assert "web.operator_id" in str(raised.value) and "<" not in str(raised.value)
+
+
+def test_operations_install_path_matches_the_minimal_template() -> None:
+    """首次安装按 config check → model check → 初始化 → 启动；主模板的非尖括号标记都写明。"""
+    operations = (EXAMPLES.parent / "deploy/OPERATIONS.md").read_text(encoding="utf-8")
+    install = operations.split("## 首次安装", 1)[1].split("\n## ", 1)[0]
+    steps = [
+        "xiaowei config check",
+        "xiaowei model check",
+        "xiaowei storage init",
+        "up -d xiaowei --wait",
+    ]
+    assert [install.index(step) for step in steps] == sorted(install.index(s) for s in steps)
+    for marker in template_paths(example_with_feishu()).values():
+        if not marker.startswith("<"):
+            assert f"`{marker}`" in install
 
 
 def test_placeholder_errors_never_name_a_feishu_open_id(tmp_path: Path) -> None:
@@ -1922,6 +1945,22 @@ def test_historical_open_id_marker_is_still_a_placeholder(tmp_path: Path) -> Non
         runtime.validate_placeholders(_load(tmp_path, values))
     assert "feishu.users" in str(raised.value)
     assert "ou_replace_with_open_id" not in str(raised.value)
+
+
+def test_pre_vertex_template_markers_are_still_placeholders(tmp_path: Path) -> None:
+    """C2 前的主模板是 OpenAI Profile 加第二个目标 archive；沿用旧副本未替换时仍按路径拒绝。"""
+    values = serve_config(8501)
+    values["model"]["model"] = "<获准的模型 ID>"
+    target = copy.deepcopy(values["targets"][0])
+    target["description"] = "<另一个集群的用途；未配置审计源，不能列慢查询>"
+    target["starrocks"] |= {"target_id": "archive", "host": "<另一个 StarRocks FE 地址>"}
+    values["targets"].append(target)
+    with pytest.raises(runtime.ConfigError) as raised:
+        runtime.validate_placeholders(_load(tmp_path, values))
+    message = str(raised.value)
+    for path in ("model.model", "targets.1.description", "targets.1.starrocks.host"):
+        assert path in message
+    assert "<" not in message
 
 
 def test_filled_templates_pass_the_placeholder_check(tmp_path: Path) -> None:
@@ -2027,13 +2066,28 @@ def test_postgres_password_template_is_rejected_only_when_present(
     assert template not in str(raised.value)
 
 
-def test_optional_target_and_disabled_feishu_need_no_variables(
+def test_env_template_activates_only_the_required_secrets() -> None:
+    """.env 模板默认只启用主模板实际引用的秘密；第二个目标与飞书的秘密注释为按需。"""
+    active = {
+        name
+        for line in ENV_TEMPLATE.read_text(encoding="utf-8").splitlines()
+        if (name := line.partition("=")[0]).startswith("XW_") and "<" in line
+    }
+    assert active == {
+        "XW_POSTGRES_PASSWORD",
+        "XW_DATABASE_URL",
+        "XW_DIGEST_KEY",
+        "XW_MODEL_API_KEY",
+        "XW_STARROCKS_PASSWORD",
+    }
+
+
+def test_minimal_template_needs_only_the_required_variables(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    """删掉模板里的第二个目标、飞书保持 null 时，不要求 archive 与飞书秘密。"""
+    """主模板填好后，只设必填秘密即通过完整预检：未启用的第二目标与飞书不要求其秘密。"""
     values = filled(json.loads((EXAMPLES / "xiaowei.example.json").read_text(encoding="utf-8")))
-    del values["targets"][1]
-    assert values["feishu"] is None
+    assert values["feishu"] is None and len(values["targets"]) == 1
     for name in ("XW_ARCHIVE_STARROCKS_PASSWORD", "XW_FEISHU_APP_SECRET", "XW_POSTGRES_PASSWORD"):
         monkeypatch.delenv(name, raising=False)
     for name in ("XW_DATABASE_URL", "XW_DIGEST_KEY", "XW_MODEL_API_KEY", "XW_STARROCKS_PASSWORD"):

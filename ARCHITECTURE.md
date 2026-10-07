@@ -96,7 +96,7 @@ SDK 负责模型与工具调用循环；应用负责接入、实际权限、领�
 | --- | --- |
 | `Agent` / instructions | 定义数据库助手、澄清条件、工具选择与回答规范 |
 | `Runner` | 唯一 Agent 循环；工具返回后继续推理或回答 |
-| SDK `Model` / provider | 接入明确配置的 OpenAI、Gemini、DeepSeek 或经验证的兼容端点；不改变运行引擎 |
+| SDK `Model` / provider | 接入明确配置的 OpenAI、Gemini、DeepSeek、Vertex AI 或经验证的兼容端点；不改变运行引擎 |
 | function tools | 本地业务的薄入口；转换参数并调用 Governed Tool Service |
 | SDK MCP integration | 复用官方连接、发现与调用能力；小维装配可信配置、工具过滤、调用前治理与结果过滤 |
 | `RunContextWrapper` | 只承载可信身份、Target Scope、Tool Scope、预算及 Evidence 标识/元数据 |
@@ -115,18 +115,19 @@ SDK Session 继续使用 SDK 公共 Session 接口；首版正式持久化后端
 
 ### 模型 API：多服务配置，单模型运行
 
-**以 OpenAI Agents SDK 为核心，不等于只使用 OpenAI 模型。** 首版接入目标包含 OpenAI、Gemini、DeepSeek，使用 SDK 公开 `Model` / provider 接口装配实际模型调用。应用维护少量可信配置与必要协议适配，不自建 LLM Gateway、模型路由框架或另一套 Agent Loop；Gemini/DeepSeek 的自动工具执行循环不进入本产品。[SDK 模型与 provider](https://developers.openai.com/api/docs/guides/agents/models)。
+**以 OpenAI Agents SDK 为核心，不等于只使用 OpenAI 模型。** 首版接入目标包含 OpenAI、Gemini、DeepSeek 与 Vertex AI（API Key 模式），使用 SDK 公开 `Model` / provider 接口装配实际模型调用；Vertex 原生协议由本仓库对公开 `Model` 的薄适配接入，不引入供应商 SDK 的工具循环。应用维护少量可信配置与必要协议适配，不自建 LLM Gateway、模型路由框架或另一套 Agent Loop；Gemini/DeepSeek 的自动工具执行循环不进入本产品。[SDK 模型与 provider](https://developers.openai.com/api/docs/guides/agents/models)。
 
 | 接入目标 | 首条验证路径 | 开放条件 |
 | --- | --- | --- |
 | OpenAI | SDK 原生 Responses 模型接入 | 明确模型 ID，并验证工具调用、结构化输出与本地 Session |
 | Gemini | SDK Chat Completions 模型接入 Google 的 OpenAI 兼容端点 | 按具体模型验证 tools、输出 schema、后续轮次及所需协议字段 |
 | DeepSeek | SDK Chat Completions 模型接入其兼容端点 | 核对工具参数、JSON 输出与推理模式的组合；其他协议另行验证 |
+| Vertex AI（API Key 模式） | 本仓库对 SDK 公开 `Model` 的非流式适配，固定 `v1beta1` `generateContent` 端点与协议；同一请求携带函数声明与供应商结构化输出约束 | 已有协议替身下的离线验证；锁定模型上的真实工具往返、结构化输出与跨轮签名回放验证前不开放 |
 | 第三方/企业网关 | 上述协议中网关实际支持的一种 | 单独验证该端点、模型和参数组合；不能继承直连厂商的通过结论 |
 
 Google 与 DeepSeek 均提供 OpenAI 兼容调用方式；这只说明存在接入路径，不代表与 SDK 的全部功能等价。Google 的兼容文档仍标示 beta；DeepSeek 的 JSON Output 使用 `json_object`，不能将合法 JSON 等同于严格满足最终回答 schema。[Gemini 兼容接口](https://ai.google.dev/gemini-api/docs/openai)、[DeepSeek 接入](https://api-docs.deepseek.com/)、[DeepSeek JSON Output](https://api-docs.deepseek.com/guides/json_mode/)。
 
-首版用静态 Model Profile 保存 `profile_id`、供应商标识、固定 `base_url`、API 协议、明确模型 ID、凭据安全引用、输出模式、请求期限、输出 token/请求与响应字节上限、数据接收策略标识及获准模型参数。配置项服务于已验证组合，不提供任意 `extra_body`/headers 透传。凭据只在应用装配时解析；每个客户端独立绑定端点和凭据，不进入 RunContext、Session、浏览器、日志或 trace。端点和模型不能由对话内容改写，不通过修改全局客户端在用户间切换。
+首版用静态 Model Profile 保存 `profile_id`、供应商标识、明确模型 ID、凭据安全引用、请求期限、输出 token/请求与响应字节上限、数据接收策略标识及获准模型参数。OpenAI 协议族（OpenAI、Gemini、DeepSeek 与兼容端点）另由配置保存固定 `base_url`、API 协议和输出模式；Vertex 必须省略这三项，端点、协议与结构化输出方式由可信代码固定，固定身份计入 Profile 指纹，填写即拒绝。配置项服务于已验证组合，不提供任意 `extra_body`/headers 透传。凭据只在应用装配时解析；每个客户端独立绑定端点和凭据，不进入 RunContext、Session、浏览器、日志或 trace。端点和模型不能由对话内容改写，不通过修改全局客户端在用户间切换。
 
 配置可以登记多家服务，部署时选择一个活动 Profile；一次运行只用这一个模型。首版更换供应商、端点、协议或模型时开启新会话，不迁移旧历史，不自动跨厂商 fallback。会话元数据绑定不含凭据的 Profile 版本；旧 Session 的数据授权不会因配置切换自动扩展到新接收方。模型数据外发权限绑定实际端点与接收方，使用第三方网关也须明确其接收权限。关闭 tracing 不等于模型 API 不接收请求，也不代替供应商存储/保留策略的确认。
 
@@ -136,7 +137,7 @@ Google 与 DeepSeek 均提供 OpenAI 兼容调用方式；这只说明存在接�
 
 调用具备请求超时、整轮期限、并发和输入输出上限。首版显式关闭模型 HTTP 客户端自动重试，401/403、429、超时和服务端错误返回受控失败；不因模型失败重跑整个 Runner 或重复已执行工具。后续确需重试时只在模型请求层增加经测试的有限策略。记录 Profile/模型、状态、耗时和可取得的 usage；用量缺失标为未知，费用估算不冒充硬费用上限。
 
-验收按“SDK 版本 + 端点 + 协议 + 模型 + 参数配置”留证：真 Runner 完成工具调用、结果回传、结构化最终回答、Evidence 校验与 Session 追问；验证鉴权/限流/超时、非法输出、凭据隔离和默认无 trace 外发。OpenAI、Gemini、DeepSeek 分别记录未验证/通过/不兼容，至少先完成一个实际可用 Profile；只通过某家不能宣称三家全部可用。首个实测模型和端点在实施联调时根据获准配置确定。
+验收按“SDK 版本 + 端点 + 协议 + 模型 + 参数配置”留证：真 Runner 完成工具调用、结果回传、结构化最终回答、Evidence 校验与 Session 追问；验证鉴权/限流/超时、非法输出、凭据隔离和默认无 trace 外发。OpenAI、Gemini、DeepSeek、Vertex 分别记录未验证/通过/不兼容，至少先完成一个实际可用 Profile；只通过某家不能宣称其他几家可用。Vertex 目前只有协议替身下的离线证据，锁定模型上的真实验证通过前不开放。首个实测模型和端点在实施联调时根据获准配置确定。
 
 ### 未来生产变更：Action 与用户确认
 
