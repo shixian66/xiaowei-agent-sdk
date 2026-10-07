@@ -721,6 +721,7 @@ def model_check(
     monkeypatch.setenv(VERTEX_KEY_ENV, f"vertex-key-{CHECK_LEAK}")
     # 容器部署参数缺失或非法：模型检查不得读取它们。
     monkeypatch.setenv("XW_WEB_PORT", "not-a-port")
+    monkeypatch.setenv("XW_WEB_BIND_ADDRESS", "intranet-host.example")
     monkeypatch.delenv("XW_STOP_GRACE_SECONDS", raising=False)
     config = serve_config(18501, model=VERTEX.model_dump(mode="json"))
     config["targets"][0]["starrocks"].update({"tls": True, "tls_ca_file": str(tmp_path / "no-ca")})
