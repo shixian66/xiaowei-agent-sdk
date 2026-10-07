@@ -712,3 +712,160 @@ def test_settings_use_the_profile_limits() -> None:
     assert settings.max_tokens == 256
     assert settings.store is None
     assert settings.reasoning is None
+
+
+# ---- 协议边界：严格 JSON、Base64 结构与字段运行时类型（PR #53 审查） ----------------------------
+
+
+def _raw(body: dict[str, Any], literal: str) -> httpx2.Response:
+    """把占位值替换为 JSON 字面量，模拟供应商返回的原始字节。"""
+    text = json.dumps(body).replace('"__NONFINITE__"', literal)
+    assert literal in text
+    return httpx2.Response(200, headers={"content-type": _JSON}, content=text.encode())
+
+
+_NONFINITE = [
+    pytest.param("NaN", id="nan"),
+    pytest.param("Infinity", id="infinity"),
+    pytest.param("-Infinity", id="negative-infinity"),
+    pytest.param("1e999", id="overflowing-number"),
+]
+
+
+@pytest.mark.parametrize("literal", _NONFINITE)
+async def test_nonfinite_number_in_response_args_is_rejected_before_any_tool_runs(
+    literal: str, caplog: pytest.LogCaptureFixture
+) -> None:
+    caplog.set_level(logging.DEBUG)
+    args = {"region": "east", "nested": {"values": [1, "__NONFINITE__"]}}
+    endpoint = Endpoint([_raw(_call(args=args), literal)])
+    executed: list[str] = []
+
+    with pytest.raises(ModelResponseRejectedError) as excinfo:
+        await _run(endpoint, executed)
+
+    assert executed == []
+    assert len(endpoint.requests) == 1
+    error = excinfo.value
+    for text in (str(error), repr(error), caplog.text):
+        for secret in (literal, SIG_A, KEY, "nested"):
+            assert secret not in text
+    assert error.__cause__ is None
+    assert error.__context__ is None or error.__suppress_context__
+
+
+def _history(arguments: str, **extra: Any) -> list[dict[str, Any]]:
+    call = {
+        "type": "function_call",
+        "call_id": "vertex-call-1",
+        "name": "synthetic_total",
+        "arguments": arguments,
+        **extra,
+    }
+    return [
+        {"role": "user", "content": "东区订单总数？"},
+        call,
+        {"type": "function_call_output", "call_id": "vertex-call-1", "output": "{}"},
+    ]
+
+
+async def _run_input(endpoint: Endpoint, items: list[Any]) -> Any:
+    async with open_model(VERTEX, transport=endpoint.transport) as binding:
+        return await Runner.run(_agent(binding, []), items)
+
+
+@pytest.mark.parametrize("literal", _NONFINITE)
+async def test_nonfinite_number_in_history_args_is_rejected_before_sending(literal: str) -> None:
+    endpoint = Endpoint([_answer()])
+    arguments = f'{{"region": "east", "nested": [{literal}]}}'
+
+    with pytest.raises(ModelRequestRejectedError) as excinfo:
+        await _run_input(endpoint, _history(arguments, provider_data={"thought_signature": SIG_A}))
+
+    assert endpoint.requests == []
+    assert literal not in str(excinfo.value)
+    assert excinfo.value.__cause__ is None
+    assert excinfo.value.__context__ is None or excinfo.value.__suppress_context__
+
+
+_BAD_SIGNATURES = [
+    pytest.param("A", id="one-char"),
+    pytest.param("A=", id="one-char-padded"),
+    pytest.param("AA", id="missing-padding"),
+    pytest.param("AA=A", id="padding-in-the-middle"),
+    pytest.param("AAAA====", id="excess-padding"),
+    pytest.param("AB+_", id="mixed-alphabets"),
+]
+
+
+@pytest.mark.parametrize("signature", _BAD_SIGNATURES)
+async def test_structurally_invalid_response_signature_is_rejected(signature: str) -> None:
+    endpoint = Endpoint([_call(signature=signature)])
+    executed: list[str] = []
+    with pytest.raises(ModelResponseRejectedError) as excinfo:
+        await _run(endpoint, executed)
+    assert executed == []
+    assert len(endpoint.requests) == 1
+    assert signature not in str(excinfo.value)
+
+
+@pytest.mark.parametrize("signature", _BAD_SIGNATURES)
+async def test_structurally_invalid_history_signature_is_rejected_before_sending(
+    signature: str,
+) -> None:
+    endpoint = Endpoint([_answer()])
+    with pytest.raises(ModelRequestRejectedError):
+        await _run_input(
+            endpoint, _history('{"region": "east"}', provider_data={"thought_signature": signature})
+        )
+    assert endpoint.requests == []
+
+
+@pytest.mark.parametrize(
+    "signature",
+    [
+        pytest.param(SIG_A, id="standard"),
+        # 末位填充比特非零：解码后再编码会变成 "QQ=="，必须原样回传。
+        pytest.param("QR==", id="non-canonical-trailing-bits"),
+        pytest.param("-_-_", id="url-safe"),
+    ],
+)
+async def test_valid_signature_is_echoed_byte_for_byte(signature: str) -> None:
+    endpoint = Endpoint([_call(signature=signature), _answer()])
+    executed: list[str] = []
+
+    await _run(endpoint, executed)
+
+    assert executed == ["east"]
+    assert endpoint.bodies()[1]["contents"][1]["parts"] == [_call_part(signature=signature)]
+
+
+@pytest.mark.parametrize("name", [pytest.param([], id="list"), pytest.param({}, id="dict")])
+async def test_unhashable_function_name_is_a_fixed_rejection(name: Any) -> None:
+    endpoint = Endpoint([_call(name=name)])
+    executed: list[str] = []
+    with pytest.raises(ModelResponseRejectedError):
+        await _run(endpoint, executed)
+    assert executed == []
+    assert len(endpoint.requests) == 1
+
+
+@pytest.mark.parametrize("role", [pytest.param([], id="list"), pytest.param({}, id="dict")])
+async def test_unhashable_input_role_is_rejected_before_sending(role: object) -> None:
+    endpoint = Endpoint([_answer()])
+    with pytest.raises(ModelRequestRejectedError):
+        await _run_input(endpoint, [{"role": role, "content": "hi"}])
+    assert endpoint.requests == []
+
+
+async def test_response_without_role_is_accepted() -> None:
+    """官方契约中 ``Content.role`` 可省略；只拒绝显式写错的 role。"""
+    body = _call()
+    del body["candidates"][0]["content"]["role"]
+    endpoint = Endpoint([body, _answer()])
+    executed: list[str] = []
+
+    result = await _run(endpoint, executed)
+
+    assert result.final_output == TotalAnswer(total=100, note="合成数据")
+    assert executed == ["east"]

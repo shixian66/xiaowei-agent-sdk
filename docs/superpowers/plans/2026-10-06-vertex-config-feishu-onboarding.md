@@ -429,7 +429,7 @@ uv run --locked --extra dev mypy src/xiaowei
 `POST https://aiplatform.googleapis.com/v1beta1/publishers/google/models/{model}:generateContent`；signature
 只在当前轮校验（V1-B 仍须判定会话追问）；函数结果按文档放在 `functionResponse.response.output`；函数声明用
 `parametersJsonSchema`（与 OpenAPI `parameters` 互斥）。单候选与 `STOP` 终态只在受控 transport 检查一次。
-实际文件与计划一致；新增两处 §11 疑点。离线证据、变异与未覆盖项记录在对应 PR，不在这里复制。
+实际文件与计划一致；新增两处 §11 疑点。独立审查后补齐协议边界：响应与历史函数参数按严格 JSON 解析（`NaN`、`±Infinity` 与溢出为无穷的数字分别在工具执行前、请求发出前拒绝），signature 用标准库按带填充 Base64 结构校验并原样回传，函数名与消息 role 先检查类型再查找；响应缺省 `role` 按官方契约接受，只拒绝显式错误的 role。离线证据、变异与未覆盖项记录在对应 PR，不在这里复制。
 
 ## 6. V1-B：PolicySession 的最小签名白名单与正式应用闭环
 

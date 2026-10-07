@@ -5,11 +5,13 @@
 候选、完整 ``STOP``、纯文本或恰好一个带 thought signature 的函数调用，其余在交给 Runner 之前拒绝。
 
 传输层（期限、字节上限、无重定向、无压缩、API Key 请求头）由 ``model_api`` 的受控 transport 负责，
-这里得到的成功响应已是合法 JSON 且是单候选 ``STOP`` 终态。
+这里得到的成功响应已是合法 JSON 且是单候选 ``STOP`` 终态。适配器再按严格 JSON 解析一次（拒绝
+``NaN``/``Infinity`` 与溢出为无穷的数字），并在任何集合或字典查找前检查字段的运行时类型。
 """
 
+import binascii
 import json
-import re
+import math
 import uuid
 from collections.abc import AsyncIterator, Mapping
 from typing import Any, NoReturn
@@ -44,8 +46,9 @@ from xiaowei.model_api import (
 
 # Vertex 不返回调用 ID 时由适配器生成；带此前缀的 ID 从未发给 Vertex，回放时也不发送。
 _GENERATED_CALL_ID_PREFIX = "xw-vertex-"
-# signature 是 base64 编码的 opaque 字符串；长度上限防止单个字段占满会话历史。
-_SIGNATURE = re.compile(r"[A-Za-z0-9+/_-]+={0,2}")
+# signature 是带填充的 base64 opaque 字符串（标准或 URL 安全字母表，不混用），只校验、原样回传；
+# 长度上限防止单个字段占满会话历史。
+_URL_SAFE = str.maketrans("-_", "+/")
 _MAX_SIGNATURE_CHARS = 65_536
 _MAX_CALL_ID_CHARS = 128
 _FAKE_ID = "__fake_id__"
@@ -133,8 +136,11 @@ class VertexModel(Model):
             raise ModelAPITransportError("模型服务连接失败") from None
         if not httpx2.codes.is_success(response.status_code):
             raise ModelAPIStatusError(response.status_code) from None
-        # 受控 transport 已确认成功响应是合法 JSON。
-        return json.loads(response.content)
+        # 受控 transport 已确认是 JSON；这里再拒绝非有限数字，避免它们进入工具参数或下一步请求。
+        payload = _strict_json(response.content)
+        if payload is None:
+            _reject_response("模型成功响应不是严格 JSON")
+        return payload
 
     async def stream_response(
         self,
@@ -234,7 +240,8 @@ _ROLES: dict[object, str] = {"user": "user", "assistant": "model"}
 
 
 def _message(raw: Mapping[str, Any]) -> dict[str, Any]:
-    role = _ROLES.get(raw.get("role"))
+    raw_role = raw.get("role")
+    role = _ROLES.get(raw_role) if isinstance(raw_role, str) else None
     if role is None:
         _reject_request("Vertex 适配器只映射用户与助手消息")
     content = raw.get("content")
@@ -255,10 +262,7 @@ def _text_content(role: str, text: str) -> dict[str, Any]:
 
 
 def _function_call_part(raw: Mapping[str, Any], call_id: str, name: str) -> dict[str, Any]:
-    try:
-        args = json.loads(_string(raw.get("arguments"), allow_empty=True) or "{}")
-    except ValueError:
-        _reject_request("函数调用参数不是 JSON 对象")
+    args = _strict_json(_string(raw.get("arguments"), allow_empty=True) or "{}")
     if not isinstance(args, dict):
         _reject_request("函数调用参数不是 JSON 对象")
     call: dict[str, Any] = {"name": name, "args": args}
@@ -281,11 +285,36 @@ def _string(value: object, *, allow_empty: bool = False) -> str:
 
 
 def _valid_signature(value: object) -> bool:
-    return (
-        isinstance(value, str)
-        and 0 < len(value) <= _MAX_SIGNATURE_CHARS
-        and _SIGNATURE.fullmatch(value) is not None
-    )
+    if not isinstance(value, str) or not 0 < len(value) <= _MAX_SIGNATURE_CHARS:
+        return False
+    if any(c in value for c in "+/") and any(c in value for c in "-_"):
+        return False  # 混用两种字母表
+    try:
+        decoded = binascii.a2b_base64(value.translate(_URL_SAFE), strict_mode=True)
+    except binascii.Error:
+        return False
+    # strict_mode 不拒绝多余的 "="；带填充的编码长度只能是 4 * ceil(字节数 / 3)。
+    return len(value) == 4 * -(-len(decoded) // 3)
+
+
+def _reject_constant(literal: str) -> NoReturn:
+    raise ValueError("non-finite JSON number")
+
+
+def _finite_float(literal: str) -> float:
+    value = float(literal)
+    if not math.isfinite(value):
+        raise ValueError("non-finite JSON number")
+    return value
+
+
+def _strict_json(text: str | bytes) -> object | None:
+    """严格解析 JSON；不合法或含非有限数字时返回 ``None``，由调用方给出固定错误。"""
+    try:
+        value: object = json.loads(text, parse_constant=_reject_constant, parse_float=_finite_float)
+    except ValueError:
+        return None
+    return value
 
 
 # ---- 响应映射 ---------------------------------------------------------------------------------
@@ -349,7 +378,7 @@ def _function_call_item(part: dict[str, Any], tool_names: set[str]) -> ResponseF
     if not isinstance(call, dict):
         _reject_response("模型返回的函数调用无效")
     name = call.get("name")
-    if name not in tool_names:
+    if not isinstance(name, str) or name not in tool_names:
         _reject_response("模型调用了本轮未提供的工具")
     args = call.get("args", {})
     if not isinstance(args, dict):
