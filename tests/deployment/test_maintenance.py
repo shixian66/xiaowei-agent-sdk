@@ -20,6 +20,7 @@ from typing import Any
 import pytest
 from tests.deployment.conftest import docker
 from tests.deployment.test_compose import (
+    LEGACY_MODEL,
     POSTGRES_RUNTIME_IMAGE,
     _compose,
     _compose_command,
@@ -456,7 +457,7 @@ def test_different_image_upgrade_rollback_and_paired_restore(
         XW_PROJECT_NAME=project,
         XW_PG_VOLUME=volume,
     )
-    _runtime_config(active, port)
+    _runtime_config(active, port, model=LEGACY_MODEL)
     (active / ".env").chmod(0o600)
     _copy_operator(active, candidate)
     operator_hashes = {
@@ -681,7 +682,7 @@ def test_container_migration_v4_to_v5_to_v6_and_old_program_refusal(
         XW_PROJECT_NAME=project,
         XW_PG_VOLUME=volume,
     )
-    _runtime_config(directory, port)
+    _runtime_config(directory, port, model=LEGACY_MODEL)
     original_env = (directory / ".env").read_bytes()
 
     try:
@@ -910,7 +911,7 @@ def test_feishu_users_upgrade_rollback_restores_the_config_the_old_image_reads(
         XW_FEISHU_APP_SECRET="feishu $ # space ' quote",  # noqa: S106 - 合成值
     )
     (active / ".env").chmod(0o600)
-    _runtime_config(active, port)
+    _runtime_config(active, port, model=LEGACY_MODEL)
     config = json.loads((active / "xiaowei.json").read_text(encoding="utf-8"))
     # 旧版合法、新版拒绝：已登记用户的 subject 没有授权。
     config["feishu"] = _feishu_section(candidate, {"ou_drill_user": "drill-user"})

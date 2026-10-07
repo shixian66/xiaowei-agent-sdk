@@ -113,7 +113,27 @@ def _free_port() -> int:
         return int(server.getsockname()[1])
 
 
-def _runtime_config(directory: Path, port: int) -> None:
+# C2 之前发行模板的模型段（OpenAI Responses）。旧镜像不认识 ``provider: vertex``；升级与回退演练中
+# 操作者保留的是旧版本发行的这种配置，新旧镜像都能读取。
+LEGACY_MODEL = {
+    "profile_id": "example-openai",
+    "provider": "openai",
+    "base_url": "https://api.openai.com/v1",
+    "api_mode": "responses",
+    "model": "synthetic-model",
+    "api_key_ref": "env:XW_MODEL_API_KEY",
+    "output_mode": "json_schema",
+    "request_timeout_seconds": 60,
+    "max_output_tokens": 4096,
+    "max_request_bytes": 1000000,
+    "max_response_bytes": 1000000,
+    "data_policy_id": "example-policy",
+    "reasoning_effort": None,
+}
+
+
+def _runtime_config(directory: Path, port: int, *, model: dict[str, Any] | None = None) -> None:
+    """按当前发行模板写出可运行配置；``model`` 给出时替换整个模型段（旧镜像演练用）。"""
     config = json.loads(
         (Path(__file__).resolve().parents[2] / "examples/xiaowei.example.json").read_text(
             encoding="utf-8"
@@ -122,6 +142,8 @@ def _runtime_config(directory: Path, port: int) -> None:
     config["targets"] = config["targets"][:1]
     # 模板占位符必须替换；正式预检会拒绝未填写的模板。
     config["model"]["model"] = "synthetic-model"
+    if model is not None:
+        config["model"] = model
     config["targets"][0]["description"] = "合成集群"
     target = config["targets"][0]["starrocks"]
     target.update(
