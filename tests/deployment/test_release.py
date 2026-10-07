@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import hashlib
+import io
 import json
 import re
 import subprocess
@@ -9,34 +11,62 @@ import sys
 import tarfile
 from pathlib import Path
 
+import pytest
+import yaml
 from tests.deployment.conftest import docker
 
 ROOT = Path(__file__).resolve().parents[2]
 SCRIPT = ROOT / "scripts/package_release.py"
-APP_IMAGE = "registry.example/xiaowei@sha256:" + "a" * 64
 POSTGRES_IMAGE = "postgres:16.15-bookworm@sha256:" + "b" * 64
 CODE_SHA = "c" * 40
+APP_IMAGE = f"xiaowei:{CODE_SHA}"
+IMAGE_FILE = "xiaowei-image.tar"
 MEMBERS = {
     ".env.example",
     "OPERATIONS.md",
     "compose.yaml",
     "feishu-group.example.json",
     "release.json",
+    IMAGE_FILE,
     "xiaowei.example.json",
 }
+# 发行包里操作者看得到的内容不出现代码托管平台或开发框架的名字。
+FORBIDDEN_NAMES = ("github", "ghcr", "sdk")
+
+
+def image_archive(path: Path, tags: list[str] | None = None) -> Path:
+    """最小的 ``docker save`` 格式归档：只有 manifest 与一个占位配置，足以检查标签。"""
+    manifest = [
+        {
+            "Config": "blobs/sha256/" + "d" * 64,
+            "RepoTags": [APP_IMAGE] if tags is None else tags,
+            "Layers": [],
+        }
+    ]
+    with tarfile.open(path, "w") as archive:
+        for name, payload in (
+            ("manifest.json", json.dumps(manifest).encode()),
+            ("blobs/sha256/" + "d" * 64, b"{}"),
+        ):
+            info = tarfile.TarInfo(name)
+            info.size = len(payload)
+            archive.addfile(info, io.BytesIO(payload))
+    return path
 
 
 def package(
-    output: Path, platform: str = "linux/arm64"
+    output: Path, platform: str = "linux/arm64", *, image: Path | None = None
 ) -> subprocess.CompletedProcess[str]:
+    if image is None:
+        image = image_archive(output.with_name(f"{output.name}.image.tar"))
     return subprocess.run(  # noqa: S603 - 固定 Python 与仓库脚本
         [
             sys.executable,
             str(SCRIPT),
             "--output",
             str(output),
-            "--app-image",
-            APP_IMAGE,
+            "--image-archive",
+            str(image),
             "--postgres-image",
             POSTGRES_IMAGE,
             "--code-sha",
@@ -54,11 +84,12 @@ def package(
 def test_release_archive_has_only_the_deployment_contract(tmp_path: Path) -> None:
     sentinel = ROOT / "p3-release-sentinel.tmp"
     sentinel.write_text("must not be packaged", encoding="utf-8")
+    image = image_archive(tmp_path / "image.tar")
     first = tmp_path / "first.tar.gz"
     second = tmp_path / "second.tar.gz"
     try:
-        assert package(first).returncode == 0
-        assert package(second).returncode == 0
+        assert package(first, image=image).returncode == 0
+        assert package(second, image=image).returncode == 0
     finally:
         sentinel.unlink(missing_ok=True)
 
@@ -73,11 +104,14 @@ def test_release_archive_has_only_the_deployment_contract(tmp_path: Path) -> Non
 
     for example in ("xiaowei.example.json", "feishu-group.example.json"):
         assert extracted[example] == (ROOT / "examples" / example).read_bytes()
-    compose = extracted["compose.yaml"].decode()
-    assert APP_IMAGE in compose and POSTGRES_IMAGE in compose
+    assert extracted[IMAGE_FILE] == image.read_bytes()
+    compose = yaml.safe_load(extracted["compose.yaml"])
+    app = compose["services"]["xiaowei"]
+    assert app["image"] == APP_IMAGE and app["pull_policy"] == "never"
+    assert compose["services"]["postgres"]["image"] == POSTGRES_IMAGE
     metadata = json.loads(extracted["release.json"])
     assert metadata == {
-        "format_version": 1,
+        "format_version": 2,
         "code_sha": CODE_SHA,
         "platform": "linux/arm64",
         "schema_version": 6,
@@ -85,6 +119,8 @@ def test_release_archive_has_only_the_deployment_contract(tmp_path: Path) -> Non
         "upgrade_schema_versions": [1, 2, 3, 4, 5],
         "config_migration": "none",
         "images": {"xiaowei": APP_IMAGE, "postgres": POSTGRES_IMAGE},
+        "image_file": IMAGE_FILE,
+        "image_file_sha256": hashlib.sha256(image.read_bytes()).hexdigest(),
     }
     forbidden = (
         "AGENTS.md",
@@ -95,6 +131,37 @@ def test_release_archive_has_only_the_deployment_contract(tmp_path: Path) -> Non
     )
     assert not any(name in extracted for name in forbidden)
     assert "p3-release-sentinel.tmp" not in extracted
+
+
+def test_operator_visible_files_name_no_hosting_platform_or_framework(tmp_path: Path) -> None:
+    output = tmp_path / "release.tar.gz"
+    assert package(output).returncode == 0
+    with tarfile.open(output, "r:gz") as archive:
+        for member in archive.getmembers():
+            if member.name == IMAGE_FILE:
+                continue
+            text = archive.extractfile(member).read().decode("utf-8").lower()
+            assert not [word for word in FORBIDDEN_NAMES if word in text], member.name
+    assert not [word for word in FORBIDDEN_NAMES if word in output.name.lower()]
+
+
+@pytest.mark.parametrize(
+    "tags",
+    [[], ["xiaowei:latest"], [APP_IMAGE, "xiaowei:latest"], ["other/xiaowei:" + CODE_SHA]],
+)
+def test_release_rejects_an_image_archive_with_other_tags(tmp_path: Path, tags: list[str]) -> None:
+    output = tmp_path / "bad.tar.gz"
+    result = package(output, image=image_archive(tmp_path / "image.tar", tags))
+    assert result.returncode == 2 and not output.exists()
+
+
+def test_release_rejects_a_missing_or_malformed_image_archive(tmp_path: Path) -> None:
+    output = tmp_path / "bad.tar.gz"
+    assert package(output, image=tmp_path / "missing.tar").returncode == 2
+    broken = tmp_path / "broken.tar"
+    broken.write_bytes(b"not a tar")
+    assert package(output, image=broken).returncode == 2
+    assert not output.exists()
 
 
 def test_packaged_operations_only_reference_packaged_files() -> None:
@@ -133,7 +200,7 @@ def test_release_archive_records_linux_amd64(tmp_path: Path) -> None:
     assert metadata["platform"] == "linux/amd64"
 
 
-def test_release_rejects_mutable_image_references(tmp_path: Path) -> None:
+def test_release_rejects_a_mutable_postgres_reference(tmp_path: Path) -> None:
     output = tmp_path / "bad.tar.gz"
     result = subprocess.run(  # noqa: S603 - 固定 Python 与仓库脚本
         [
@@ -141,10 +208,10 @@ def test_release_rejects_mutable_image_references(tmp_path: Path) -> None:
             str(SCRIPT),
             "--output",
             str(output),
-            "--app-image",
-            "registry.example/xiaowei:latest",
+            "--image-archive",
+            str(image_archive(tmp_path / "image.tar")),
             "--postgres-image",
-            POSTGRES_IMAGE,
+            "postgres:latest",
             "--code-sha",
             CODE_SHA,
             "--platform",

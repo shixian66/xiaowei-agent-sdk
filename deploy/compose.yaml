@@ -25,6 +25,8 @@ services:
 
   xiaowei:
     image: "@XW_APP_IMAGE@"
+    # 镜像随发行包以离线文件交付（docker load），不从任何镜像仓库拉取。
+    pull_policy: never
     init: true
     restart: "on-failure:3"
     read_only: true

@@ -9,27 +9,18 @@ Web 端口默认对服务器所有网卡开放，内网电脑用 `http://服务�
 只替换 `compose.yaml` 和 `release.json`；升级前留存的旧 JSON 配置（`.env` 的 `XW_CONFIG_FILE`
 指向的文件，默认 `./xiaowei.json`）用于回退。旧发行包及旧应用镜像保留到新版验收完成。
 
-## 获取 amd64 发行包与镜像权限
+## 获取 amd64 发行包
 
-正式发行由 GitHub Actions 中的 `publish-amd64` 手动触发，且只接受 `main`。操作方法见
-[GitHub 手动运行 workflow 说明](https://docs.github.com/en/actions/how-tos/manage-workflow-runs/manually-run-a-workflow)。它会从当前提交构建
-`linux/amd64` 应用镜像，按镜像 digest 生成发行包，并附到同一提交的 GitHub Release。首次发布前，
-仓库管理员需要设置 Repository variable `GHCR_USERNAME`（PAT 所属 GitHub 用户名）和 secret
-`GHCR_WRITE_TOKEN`（classic PAT，仅勾选 `write:packages`；创建时若自动勾选 `repo`，请取消）。
-GitHub Release 的写入使用 workflow 的 `GITHUB_TOKEN`。不要把 PAT 写入仓库文件或聊天。
-镜像通过独立 PAT 发布且不自动关联源码仓库，首次发布默认应为 Private。
+发行包是一个文件 `xiaowei-<完整代码 SHA>-linux-amd64.tar.gz`，向发布方索取。它已经带着应用镜像
+（`xiaowei-image.tar`），服务器不需要登录任何镜像仓库，也不需要 Git 或 Python。PostgreSQL 镜像
+按 `release.json` 里的固定 digest 从 Docker Hub 拉取；服务器访问不了 Docker Hub 时，在能访问的
+电脑上 `docker pull` 后 `docker save`，再传到服务器 `docker load`。
 
-首次发布后，先在 GitHub Packages 页面确认 `xiaowei-agent-sdk` 包的可见性为 **Private**，再分发。
-从有权读取仓库的电脑下载 Release 中的
-`xiaowei-<完整代码 SHA>-linux-amd64.tar.gz`，再传到服务器；服务器不需要 Git、Python 或 GitHub CLI。
-
-先在服务器创建安装目录：
+先在服务器创建安装目录，再把发行包传过去：
 
 ```sh
 mkdir -p /opt/xiaowei/current
 ```
-
-在有仓库读取权限的电脑上下载 Release 归档后，用 SSH/SCP 传到服务器：
 
 ```sh
 release_sha=PUT_40_CHAR_CODE_SHA_HERE
@@ -37,28 +28,28 @@ server=SERVER_HOST_OR_IP
 scp "xiaowei-${release_sha}-linux-amd64.tar.gz" "root@${server}:/opt/xiaowei/"
 ```
 
-服务器需要单独的 classic PAT，权限为 `read:packages`，且 PAT 所属账号必须能读取该私有包。
-GitHub Packages [要求使用 classic PAT](https://docs.github.com/en/packages/working-with-a-github-packages-registry/working-with-the-container-registry#authenticating-with-a-personal-access-token-classic)。首次在服务器登录时，Docker 会隐藏输入 token；后续
-`compose pull` 会复用 Docker 凭据：
-
-```sh
-docker login ghcr.io --username <PAT所属GitHub用户名>
-```
-
-仅首次安装时展开到 `/opt/xiaowei/current`：
+仅首次安装时展开到 `/opt/xiaowei/current`，核对镜像文件后导入：
 
 ```sh
 release_sha=PUT_40_CHAR_CODE_SHA_HERE
 tar -xzf "/opt/xiaowei/xiaowei-${release_sha}-linux-amd64.tar.gz" \
   -C /opt/xiaowei/current
+cd /opt/xiaowei/current
+grep image_file_sha256 release.json
+sha256sum xiaowei-image.tar        # 必须与上一行的值相同
+docker load --input xiaowei-image.tar
+docker image inspect "xiaowei:${release_sha}" --format '{{.Os}}/{{.Architecture}}'   # linux/amd64
 ```
 
-升级时把新归档展开到独立的 `/opt/xiaowei/releases/<完整代码SHA>`，再按下文普通升级步骤替换控制文件。
-不要把未核验的归档或镜像标成已验收版本。
+`docker load` 后镜像名是 `xiaowei:<完整代码 SHA>`，`compose.yaml` 已写好这个名字，并设为不从网络
+拉取：没导入就启动会直接报找不到镜像。导入后可以删除 `xiaowei-image.tar`。
+
+升级时把新归档展开到独立的 `/opt/xiaowei/releases/<完整代码SHA>`，在那里同样核对并
+`docker load`，再按下文普通升级步骤替换控制文件。不要把未核验的归档或镜像标成已验收版本。
 
 ## 首次安装
 
-1. 把发行包展开到固定目录，核对 `release.json` 的平台、代码 SHA 与两个镜像 digest。
+1. 把发行包展开到固定目录，按上一节核对并导入应用镜像，确认 `release.json` 的平台与代码 SHA。
 2. 仅首次复制 `.env.example` 为 `.env`、`xiaowei.example.json` 为 `xiaowei.json`，并创建
    `certs/`。以后不能用新包里的模板覆盖它们。
 3. JSON 的 `listen_port` 与 `.env` 的 `XW_WEB_PORT` 使用同一端口。旧配置里的
@@ -224,7 +215,8 @@ docker compose --env-file .env exec -T postgres sh -c \
 ```
 
 只有数据库版本列在新版 `direct_start_schema_versions` 时才走普通升级。先留存旧控制文件和当前
-使用的 JSON 配置（JSON 含单聊用户的 open_id，只允许部署管理员读取），再拉取并预检新版；这些命令
+使用的 JSON 配置（JSON 含单聊用户的 open_id，只允许部署管理员读取），再预检新版（新版镜像须已按
+“获取 amd64 发行包”导入）；这些命令
 失败不会停止旧服务。下面每个命令块里的 `config_file` 必须与 `.env` 的 `XW_CONFIG_FILE` 相同
 （默认 `./xiaowei.json`；改过路径时按实际值填写，例如 `./config/prod.json`），每个块单独复制执行
 时都要先确认这一行：
@@ -242,7 +234,6 @@ install -m 600 "$config_file" "$previous/xiaowei.json"
 cd /opt/xiaowei/current
 cp /opt/xiaowei/releases/<新 SHA>/compose.yaml compose.next.yaml
 cp /opt/xiaowei/releases/<新 SHA>/release.json release.next.json
-docker compose --env-file .env -f compose.next.yaml pull xiaowei
 docker compose --env-file .env -f compose.next.yaml config --quiet
 docker compose --env-file .env -f compose.next.yaml run --rm --no-deps xiaowei config check
 docker compose --env-file .env -f compose.next.yaml run --rm --no-deps xiaowei model check
@@ -260,8 +251,8 @@ docker compose --env-file .env up -d --no-deps --force-recreate xiaowei --wait
 docker compose --env-file .env ps
 ```
 
-如果新版启动失败或需要回退，先用当前（候选）Compose 停止小维，停止成功后才恢复旧控制文件、旧
-digest 和升级前的 JSON 配置，再按旧镜像预检并启动；停止失败时命令链中止，不覆盖任何文件。停止后
+如果新版启动失败或需要回退，先用当前（候选）Compose 停止小维，停止成功后才恢复旧控制文件（含旧
+镜像引用）和升级前的 JSON 配置，再按旧镜像预检并启动；停止失败时命令链中止，不覆盖任何文件。停止后
 到旧版就绪前服务不可用。新版接受的配置旧版不一定能读，例如旧版要求 `feishu.users` 至少一人，
 新版允许 `{}`；升级后在 JSON 里做的修改会随回退撤销，需要时按旧版规则重新填写。`.env`、CA 与数据库不改（本次升级没有新增 `.env` 项，
 不要用新包模板覆盖 `.env`）：
@@ -304,7 +295,7 @@ fi
 test -s "$pair/xiaowei.dump"
 ```
 
-备份会同时包含 SDK Session 表和 `xiaowei_*` 应用表。把备份复制到其他受控存储；仅保留本机卷
+备份会同时包含会话历史表和 `xiaowei_*` 应用表。把备份复制到其他受控存储；仅保留本机卷
 不能抵御主机或卷损坏。
 
 ## 恢复到隔离数据库

@@ -1,4 +1,4 @@
-"""手动 amd64 发布必须使用固定输入，并把精确镜像 digest 放入发行包。"""
+"""手动 amd64 发布：从固定输入构建镜像，以离线文件放进发行包，不推送任何镜像仓库。"""
 
 from __future__ import annotations
 
@@ -35,8 +35,7 @@ def test_release_is_manual_main_only_and_uses_least_github_permissions() -> None
     assert job["permissions"] == {"contents": "write"}
     assert [step.get("name", step.get("uses")) for step in job["steps"]] == [
         "actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1",
-        "Authenticate to GHCR",
-        "Build, publish and smoke-check the amd64 image",
+        "Build, smoke-check and package the amd64 image",
         "Publish the versioned release archive",
     ]
     checkout = next(step for step in job["steps"] if "uses" in step)
@@ -44,12 +43,11 @@ def test_release_is_manual_main_only_and_uses_least_github_permissions() -> None
     assert checkout["with"] == {"persist-credentials": "false", "fetch-depth": "0"}
 
 
-def test_release_builds_and_smoke_checks_the_amd64_image_by_digest() -> None:
+def test_release_builds_the_image_into_an_offline_file() -> None:
     workflow = load_workflow()
     job = workflow["jobs"]["release"]
     build = next(step for step in job["steps"] if step.get("name", "").startswith("Build,"))
     assert build["env"]["XW_PLATFORM"] == "linux/amd64"
-    assert build["env"]["XW_APP_IMAGE"] == "ghcr.io/shixian66/xiaowei-agent-sdk"
     assert build["env"]["XW_POSTGRES_IMAGE"] == (
         "postgres:16.15-bookworm@sha256:"
         "efedf3595f1d6f415c08568ba171029bf54052e754cc9f030e3f2412b21f3d67"
@@ -57,43 +55,29 @@ def test_release_builds_and_smoke_checks_the_amd64_image_by_digest() -> None:
 
     commands = "\n".join(step.get("run", "") for step in job["steps"])
     assert "Dockerfile.runtime" in commands
-    assert "--platform \"$XW_PLATFORM\"" in commands
-    assert '--tag "$XW_APP_IMAGE:sha-$GITHUB_SHA"' in commands
-    assert "--metadata-file" in commands
-    assert "--push" in commands
-    assert "containerimage.digest" in commands
-    assert "docker pull \"$app_image\"" in commands
-    assert "docker run --rm \"$app_image\" --help" in commands
+    assert '--platform "$XW_PLATFORM"' in commands
+    assert 'image="xiaowei:$GITHUB_SHA"' in commands
+    assert '--tag "$image"' in commands
+    assert "--load" in commands
+    assert 'docker run --rm "$image" --help' in commands
+    assert 'docker save --output "$image_file" "$image"' in commands
     assert "scripts/package_release.py" in commands
+    assert '--image-archive "$image_file"' in commands
     assert 'archive="$RUNNER_TEMP/xiaowei-$GITHUB_SHA-linux-amd64.tar.gz"' in commands
-    assert '--app-image "$app_image"' in commands
     assert '"$XW_POSTGRES_IMAGE"' in commands
-    assert '"$GITHUB_SHA"' in commands
 
 
-def test_release_uses_a_separate_registry_token_and_uploads_the_archive() -> None:
+def test_release_pushes_to_no_registry_and_uploads_only_the_archive() -> None:
     workflow = load_workflow()
     job = workflow["jobs"]["release"]
-    login = next(step for step in job["steps"] if step.get("name") == "Authenticate to GHCR")
-    commands = "\n".join(step.get("run", "") for step in job["steps"])
-
-    secret_reference = "${{ secrets." + "GHCR_WRITE_TOKEN }}"
-    assert login["env"]["GHCR_WRITE_TOKEN"] == secret_reference
-    assert login["env"]["GHCR_USERNAME"] == "${{ vars.GHCR_USERNAME }}"
-    assert 'printf \'%s\' "$GHCR_WRITE_TOKEN" | docker login ghcr.io' in login["run"]
-    assert "--password-stdin" in login["run"]
-    assert "GHCR_WRITE_TOKEN" not in next(
-        step for step in job["steps"] if step.get("name", "").startswith("Build,")
-    ).get("env", {})
+    text = WORKFLOW.read_text(encoding="utf-8")
+    for word in ("--push", "docker login", "ghcr.io", "GHCR_", "packages:"):
+        assert word not in text
     publish = next(step for step in job["steps"] if step.get("name", "").startswith("Publish"))
     github_token_reference = "${{ github." + "token }}"
     assert publish["env"]["GH_TOKEN"] == github_token_reference
     assert 'tag="sha-$GITHUB_SHA"' in publish["run"]
-    assert "--password-stdin" in commands
-    assert "--password \"$GHCR_WRITE_TOKEN\"" not in commands
-    assert "gh release create" in commands
-    assert "gh release upload" in commands
-    assert "--clobber" in commands
-    assert "org.opencontainers.image.source" not in commands
+    for command in ("gh release create", "gh release upload", "--clobber"):
+        assert command in publish["run"]
     dockerfile = (ROOT / "Dockerfile.runtime").read_text(encoding="utf-8")
     assert "org.opencontainers.image.source" not in dockerfile

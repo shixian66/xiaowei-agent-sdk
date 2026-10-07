@@ -31,6 +31,7 @@ from tests.deployment.test_compose import (
     _wait_stopped,
     _write_env,
 )
+from tests.deployment.test_release import image_archive
 
 ROOT = Path(__file__).resolve().parents[2]
 PROBE = Path(__file__).with_name("maintenance_probe.py")
@@ -156,20 +157,31 @@ def _image_platform(image: str) -> str:
 
 
 def _release_from_tree(source: Path, destination: Path, image: str, sha: str) -> dict[str, Any]:
-    app_ref = f"test.invalid/xiaowei@{_image_id(image)}"
+    """按该版本自己的发行脚本打包；本树把镜像作为离线文件打入，旧版本引用 digest。
+
+    打包后把 Compose 的镜像改成本机已有的 ``image``，演练不导入或拉取发行包里的镜像。
+    """
     postgres_ref = (
         "postgres:16.15-bookworm@sha256:"
         "efedf3595f1d6f415c08568ba171029bf54052e754cc9f030e3f2412b21f3d67"
     )
     archive = destination.with_suffix(".tar.gz")
+    if source == ROOT:
+        app_ref = f"xiaowei:{sha}"
+        image_args = [
+            "--image-archive",
+            str(image_archive(destination.with_suffix(".image.tar"), [app_ref])),
+        ]
+    else:
+        app_ref = f"test.invalid/xiaowei@{_image_id(image)}"
+        image_args = ["--app-image", app_ref]
     packaged = subprocess.run(  # noqa: S603 - 固定 Python 与受审发行脚本
         [
             sys.executable,
             str(source / "scripts/package_release.py"),
             "--output",
             str(archive),
-            "--app-image",
-            app_ref,
+            *image_args,
             "--postgres-image",
             postgres_ref,
             "--code-sha",
