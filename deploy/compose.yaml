@@ -68,7 +68,8 @@ services:
     healthcheck:
       test: ["CMD", "python", "/opt/xiaowei/container_entrypoint.py", "healthcheck"]
       interval: 10s
-      timeout: 6s
+      # 每次检查都要冷启动 Python 并读取配置；公司服务器实测约 10 秒，6 秒会被误判为不健康。
+      timeout: 20s
       retries: 6
       start_period: 10s
     logging:

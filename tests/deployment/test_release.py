@@ -34,23 +34,62 @@ MEMBERS = {
 FORBIDDEN_NAMES = ("github", "ghcr", "sdk")
 
 
-def image_archive(path: Path, tags: list[str] | None = None) -> Path:
-    """最小的 ``docker save`` 格式归档：只有 manifest 与一个占位配置，足以检查标签。"""
-    manifest = [
-        {
-            "Config": "blobs/sha256/" + "d" * 64,
-            "RepoTags": [APP_IMAGE] if tags is None else tags,
-            "Layers": [],
-        }
-    ]
-    with tarfile.open(path, "w") as archive:
-        for name, payload in (
-            ("manifest.json", json.dumps(manifest).encode()),
-            ("blobs/sha256/" + "d" * 64, b"{}"),
-        ):
+def _tar_bytes(files: dict[str, bytes]) -> bytes:
+    buffer = io.BytesIO()
+    with tarfile.open(fileobj=buffer, mode="w") as archive:
+        for name, payload in files.items():
             info = tarfile.TarInfo(name)
             info.size = len(payload)
             archive.addfile(info, io.BytesIO(payload))
+    return buffer.getvalue()
+
+
+def image_archive(
+    path: Path,
+    tags: list[str] | None = None,
+    *,
+    platform: str = "linux/arm64",
+    drop: tuple[str, ...] = (),
+    corrupt: tuple[str, ...] = (),
+    layers: list[str] | None = None,
+) -> Path:
+    """与 ``docker save`` 同构的最小镜像归档：内容寻址的配置与一层，摘要都真实可校验。
+
+    ``drop`` / ``corrupt`` 取 ``"config"``、``"layer"``，用来构造缺失或内容被改的归档；被改的配置
+    仍是同平台的合法 JSON，只有摘要能发现它。``layers`` 覆盖 manifest 中的层列表。
+    """
+    layer = _tar_bytes({"etc/xiaowei-marker": b"layer"})
+    layer_hex = hashlib.sha256(layer).hexdigest()
+    os_name, architecture = platform.split("/")
+    config = json.dumps(
+        {
+            "architecture": architecture,
+            "os": os_name,
+            "rootfs": {"type": "layers", "diff_ids": [f"sha256:{layer_hex}"]},
+        }
+    ).encode()
+    config_hex = hashlib.sha256(config).hexdigest()
+    blobs = {f"blobs/sha256/{config_hex}": config, f"blobs/sha256/{layer_hex}": layer}
+    for kind, name in (
+        ("config", f"blobs/sha256/{config_hex}"),
+        ("layer", f"blobs/sha256/{layer_hex}"),
+    ):
+        if kind in corrupt:
+            blobs[name] = (
+                config.replace(b"{", b'{"tampered": true, ', 1)
+                if kind == "config"
+                else layer + b"x"
+            )
+        if kind in drop:
+            del blobs[name]
+    manifest = [
+        {
+            "Config": f"blobs/sha256/{config_hex}",
+            "RepoTags": [APP_IMAGE] if tags is None else tags,
+            "Layers": [f"blobs/sha256/{layer_hex}"] if layers is None else layers,
+        }
+    ]
+    path.write_bytes(_tar_bytes({"manifest.json": json.dumps(manifest).encode(), **blobs}))
     return path
 
 
@@ -155,6 +194,45 @@ def test_release_rejects_an_image_archive_with_other_tags(tmp_path: Path, tags: 
     assert result.returncode == 2 and not output.exists()
 
 
+@pytest.mark.parametrize(
+    ("drop", "corrupt"),
+    [(("config",), ()), (("layer",), ()), ((), ("config",)), ((), ("layer",))],
+    ids=["missing config", "missing layer", "corrupt config", "corrupt layer"],
+)
+def test_release_rejects_an_image_archive_with_missing_or_corrupt_content(
+    tmp_path: Path, drop: tuple[str, ...], corrupt: tuple[str, ...]
+) -> None:
+    """标签正确但内容缺失或被改：``docker load`` 会失败，发行包不能生成。"""
+    output = tmp_path / "bad.tar.gz"
+    image = image_archive(tmp_path / "image.tar", drop=drop, corrupt=corrupt)
+    result = package(output, image=image)
+    assert result.returncode == 2 and not output.exists()
+
+
+@pytest.mark.parametrize("layers", [[], ["blobs/sha256/" + "e" * 64] * 2])
+def test_release_rejects_layers_that_do_not_match_the_config(
+    tmp_path: Path, layers: list[str]
+) -> None:
+    output = tmp_path / "bad.tar.gz"
+    image = image_archive(tmp_path / "image.tar", layers=layers)
+    assert package(output, image=image).returncode == 2 and not output.exists()
+
+
+def test_release_rejects_an_image_built_for_another_platform(tmp_path: Path) -> None:
+    output = tmp_path / "bad.tar.gz"
+    image = image_archive(tmp_path / "image.tar", platform="linux/arm64")
+    assert package(output, "linux/amd64", image=image).returncode == 2
+    assert not output.exists()
+
+
+def test_failed_packaging_keeps_an_existing_release_archive(tmp_path: Path) -> None:
+    output = tmp_path / "release.tar.gz"
+    output.write_bytes(b"previous release")
+    image = image_archive(tmp_path / "image.tar", drop=("layer",))
+    assert package(output, image=image).returncode == 2
+    assert output.read_bytes() == b"previous release"
+
+
 def test_release_rejects_a_missing_or_malformed_image_archive(tmp_path: Path) -> None:
     output = tmp_path / "bad.tar.gz"
     assert package(output, image=tmp_path / "missing.tar").returncode == 2
@@ -193,7 +271,8 @@ def test_operations_rollback_restores_the_previous_config() -> None:
 
 def test_release_archive_records_linux_amd64(tmp_path: Path) -> None:
     output = tmp_path / "amd64.tar.gz"
-    assert package(output, "linux/amd64").returncode == 0
+    image = image_archive(tmp_path / "amd64.tar", platform="linux/amd64")
+    assert package(output, "linux/amd64", image=image).returncode == 0
 
     with tarfile.open(output, "r:gz") as archive:
         metadata = json.load(archive.extractfile("release.json"))
@@ -281,3 +360,37 @@ def test_runtime_image_layers_exclude_project_and_development_assets(
         ),
     )
     assert probe.returncode == 0, "运行镜像缺少资源或夹带开发依赖"
+
+
+def test_real_docker_save_packages_and_loads_back(runtime_image: str, tmp_path: Path) -> None:
+    """真实 ``docker save → 打包 → 解出 → docker load``：导入后的标签与平台和 release.json 一致。"""
+    platform = docker(
+        "image", "inspect", runtime_image, "--format", "{{.Os}}/{{.Architecture}}"
+    ).stdout.strip()
+    assert docker("tag", runtime_image, APP_IMAGE).returncode == 0
+    saved = tmp_path / "saved.tar"
+    try:
+        assert docker("save", "--output", str(saved), APP_IMAGE).returncode == 0
+        assert docker("image", "rm", APP_IMAGE).returncode == 0
+        output = tmp_path / "release.tar.gz"
+        wrong = "linux/amd64" if platform == "linux/arm64" else "linux/arm64"
+        assert package(output, wrong, image=saved).returncode == 2 and not output.exists()
+        assert package(output, platform, image=saved).returncode == 0
+        directory = tmp_path / "release"
+        with tarfile.open(output, "r:gz") as bundle:
+            bundle.extractall(directory, filter="data")
+        metadata = json.loads((directory / "release.json").read_text(encoding="utf-8"))
+        image_file = directory / metadata["image_file"]
+        digest = hashlib.sha256(image_file.read_bytes()).hexdigest()
+        assert digest == metadata["image_file_sha256"]
+        assert docker("load", "--input", str(image_file)).returncode == 0
+        loaded = docker(
+            "image",
+            "inspect",
+            metadata["images"]["xiaowei"],
+            "--format",
+            "{{.Os}}/{{.Architecture}}",
+        )
+        assert loaded.returncode == 0 and loaded.stdout.strip() == metadata["platform"] == platform
+    finally:
+        docker("image", "rm", "-f", APP_IMAGE)

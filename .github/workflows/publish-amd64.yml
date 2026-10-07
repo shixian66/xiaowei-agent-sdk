@@ -48,6 +48,11 @@ jobs:
             --postgres-image "$XW_POSTGRES_IMAGE" \
             --code-sha "$GITHUB_SHA" \
             --platform "$XW_PLATFORM"
+          # 用 Docker 自身再验一遍包内文件：删掉本地镜像后从文件导入，平台与入口都须正常。
+          docker image rm "$image"
+          docker load --input "$image_file"
+          test "$(docker image inspect "$image" --format '{{.Os}}/{{.Architecture}}')" = "$XW_PLATFORM"
+          docker run --rm "$image" --help >/dev/null
           printf 'APP_IMAGE=%s\nRELEASE_ARCHIVE=%s\n' "$image" "$archive" >> "$GITHUB_ENV"
 
       - name: Publish the versioned release archive

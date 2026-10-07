@@ -50,17 +50,55 @@ def app_image(code_sha: str) -> str:
     return f"xiaowei:{code_sha}"
 
 
-def _check_image_archive(path: Path, expected_tag: str) -> None:
-    """归档必须恰好含一个镜像，标签恰好是本次版本；否则服务器 load 后 Compose 找不到它。"""
+_BLOB = re.compile(r"^blobs/sha256/([0-9a-f]{64})$")
+_LEGACY_CONFIG = re.compile(r"^([0-9a-f]{64})\.json$")
+
+
+def _member_sha256(archive: tarfile.TarFile, name: str) -> str:
+    try:
+        stream = archive.extractfile(name)
+    except KeyError:
+        stream = None
+    if stream is None:
+        raise ValueError("镜像归档缺少 manifest 引用的内容")
+    digest = hashlib.sha256()
+    for chunk in iter(lambda: stream.read(1 << 20), b""):
+        digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _check_image_archive(path: Path, expected_tag: str, platform: str) -> None:
+    """``docker save`` 归档：恰好一个镜像、标签为本次版本、引用内容齐全且摘要相符、平台与声明一致。
+
+    内容寻址的文件（``blobs/sha256/<摘要>``、旧格式 ``<摘要>.json``）按文件名核对；其他层按配置
+    ``rootfs.diff_ids`` 核对。任一不符则服务器 ``docker load`` 会失败或装上错误平台的镜像。
+    """
     with tarfile.open(path, "r:") as archive:
         member = archive.extractfile("manifest.json")
         if member is None:
             raise ValueError("镜像归档缺少 manifest.json")
         manifest = json.load(member)
-    if not (isinstance(manifest, list) and len(manifest) == 1):
-        raise ValueError("镜像归档必须恰好含一个镜像")
-    if manifest[0].get("RepoTags") != [expected_tag]:
-        raise ValueError("镜像归档的标签与版本不符")
+        if not (isinstance(manifest, list) and len(manifest) == 1):
+            raise ValueError("镜像归档必须恰好含一个镜像")
+        entry = manifest[0]
+        if entry.get("RepoTags") != [expected_tag]:
+            raise ValueError("镜像归档的标签与版本不符")
+        config_name, layers = entry["Config"], entry["Layers"]
+        named = _BLOB.fullmatch(config_name) or _LEGACY_CONFIG.fullmatch(config_name)
+        if named is None or _member_sha256(archive, config_name) != named.group(1):
+            raise ValueError("镜像配置缺失或摘要不符")
+        config_stream = archive.extractfile(config_name)
+        if config_stream is None:
+            raise ValueError("镜像配置缺失或摘要不符")
+        config = json.load(config_stream)
+        if f"{config.get('os')}/{config.get('architecture')}" != platform:
+            raise ValueError("镜像平台与声明不符")
+        # 层数与配置不符时 strict zip 抛 ValueError，同样拒绝。
+        for layer, diff_id in zip(layers, config["rootfs"]["diff_ids"], strict=True):
+            blob = _BLOB.fullmatch(layer)
+            expected = blob.group(1) if blob else str(diff_id).removeprefix("sha256:")
+            if _member_sha256(archive, layer) != expected:
+                raise ValueError("镜像层缺失或摘要不符")
 
 
 def _image_sha256(path: Path) -> str:
@@ -73,7 +111,7 @@ def _image_sha256(path: Path) -> str:
 
 def _members(args: argparse.Namespace) -> dict[str, bytes | Path]:
     image = app_image(args.code_sha)
-    _check_image_archive(args.image_archive, image)
+    _check_image_archive(args.image_archive, image, args.platform)
     compose = (ROOT / "deploy/compose.yaml").read_text(encoding="utf-8")
     if compose.count(_APP_TOKEN) != 1 or compose.count(_POSTGRES_TOKEN) != 1:
         raise ValueError("Compose 镜像占位符不唯一")
@@ -134,7 +172,7 @@ def main() -> int:
     _validate(parser, args)
     try:
         _write(args.output, _members(args))
-    except (OSError, ValueError, tarfile.TarError, json.JSONDecodeError, AttributeError, KeyError):
+    except (OSError, ValueError, tarfile.TarError, AttributeError, KeyError, TypeError):
         parser.error("发行归档生成失败")
     return 0
 

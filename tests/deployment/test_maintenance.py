@@ -170,7 +170,13 @@ def _release_from_tree(source: Path, destination: Path, image: str, sha: str) ->
         app_ref = f"xiaowei:{sha}"
         image_args = [
             "--image-archive",
-            str(image_archive(destination.with_suffix(".image.tar"), [app_ref])),
+            str(
+                image_archive(
+                    destination.with_suffix(".image.tar"),
+                    [app_ref],
+                    platform=_image_platform(image),
+                )
+            ),
         ]
     else:
         app_ref = f"test.invalid/xiaowei@{_image_id(image)}"

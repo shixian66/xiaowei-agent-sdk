@@ -250,6 +250,8 @@ def test_compose_has_two_services_and_keeps_operator_settings_external(tmp_path:
             "protocol": "tcp",
         }
     ]
+    # 健康检查每次冷启动 Python；公司服务器约 10 秒，超时须留余量。
+    assert app["healthcheck"]["timeout"] == "20s"
     mounts = {mount["target"]: mount for mount in app["volumes"]}
     for target in ("/etc/xiaowei/xiaowei.json", "/etc/xiaowei/certs"):
         assert mounts[target]["read_only"] is True
