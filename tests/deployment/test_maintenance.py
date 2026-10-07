@@ -35,6 +35,8 @@ PROBE = Path(__file__).with_name("maintenance_probe.py")
 P3_A_SHA = "9f69beba19736d293c22d50a59b50c90ac7f0d4e"
 V4_SHA = "a938a0f1b481f1cb23507dc170380c73028b8e54"
 V5_SHA = "fb67cd243ed3ab2beebae3970b909535042259f6"
+# 允许 ``feishu.users={}`` 之前的最后一个 main：它要求单聊名单至少一人。
+USERS_REQUIRED_SHA = "6d7c6af0a5688ba14c6c7a86a59a6d2f7c3f1369"
 _UV_IMAGE = (
     "ghcr.io/astral-sh/uv@sha256:4f5d923c9dcea037f57bda425dd209f3ec643da2f0b74227f68d09dab0b3bb36"
 )
@@ -104,6 +106,17 @@ def _build_tree_image(sha: str, tag: str, *, historical: bool = False) -> tuple[
 def p3_a_image() -> Iterator[str]:
     tag = f"xiaowei-p3-a-history:{os.getpid()}"
     image, context = _build_tree_image(P3_A_SHA, tag)
+    try:
+        yield image
+    finally:
+        docker("image", "rm", "-f", image)
+        shutil.rmtree(context, ignore_errors=True)
+
+
+@pytest.fixture(scope="session")
+def users_required_image() -> Iterator[str]:
+    tag = f"xiaowei-users-required-history:{os.getpid()}"
+    image, context = _build_tree_image(USERS_REQUIRED_SHA, tag)
     try:
         yield image
     finally:
@@ -837,3 +850,163 @@ def test_container_migration_v4_to_v5_to_v6_and_old_program_refusal(
         _compose(directory, "down", "-v", "--remove-orphans", timeout=60)
         docker("volume", "rm", "-f", volume)
         shutil.rmtree(host_tmp, ignore_errors=True)
+
+
+# 演练里启用飞书：默认网络设为 internal，容器无外网也无外部 DNS；飞书连接在本机失败，
+# 不触达真实服务。
+_ISOLATION = "networks:\n  default:\n    internal: true\n"
+
+
+def _isolated(directory: Path, compose_file: str, *args: str) -> subprocess.CompletedProcess[str]:
+    return _compose(directory, "-f", compose_file, "-f", "isolation.yaml", *args, timeout=240)
+
+
+def _feishu_section(package: Path, users: dict[str, str]) -> dict[str, Any]:
+    """只用发行包里的飞书模板，按 OPERATIONS 替换待填写标记。"""
+    section = json.loads((package / "feishu-group.example.json").read_text(encoding="utf-8"))
+    section.update(
+        app_id="cli_drillapp",
+        tenant_key="drill-tenant",
+        users=users,
+        connect_timeout_seconds=1,
+        stop_timeout_seconds=1,
+    )
+    section["group"]["chat_id"] = "oc_drill_group"
+    return section
+
+
+def test_feishu_users_upgrade_rollback_restores_the_config_the_old_image_reads(
+    users_required_image: str, runtime_image: str
+) -> None:
+    """旧版要求单聊名单非空，新版允许 ``{}``。
+
+    按 OPERATIONS：留存旧 JSON → 新镜像预检（失败不停旧服务）→ 升级 → 改成 ``users={}`` →
+    回退时恢复旧 JSON 与旧镜像，旧入口重新读取配置并就绪。
+    """
+    host_tmp = ROOT / ".pytest_cache" / f"p3-users-rollback-{uuid.uuid4().hex}"
+    host_tmp.mkdir(parents=True)
+    active = host_tmp / "active"
+    candidate = host_tmp / "candidate"
+    previous = host_tmp / "previous"
+    old_source = host_tmp / "old-source"
+    _extract_tree(USERS_REQUIRED_SHA, old_source)
+    _release_from_tree(old_source, active, users_required_image, USERS_REQUIRED_SHA)
+    git = shutil.which("git")
+    assert git is not None
+    head = subprocess.run(  # noqa: S603 - 固定 Git 与当前受审工作树
+        [git, "rev-parse", "HEAD"], cwd=ROOT, capture_output=True, text=True, check=True
+    ).stdout.strip()
+    _release_from_tree(ROOT, candidate, runtime_image, head)
+    assert not (active / "feishu-group.example.json").exists()
+
+    port = _free_port()
+    suffix = uuid.uuid4().hex[:10]
+    _write_env(
+        active,
+        XW_WEB_PORT=str(port),
+        XW_STOP_GRACE_SECONDS="60",
+        XW_PROJECT_NAME=f"xiaowei-users-{suffix}",
+        XW_PG_VOLUME=f"xiaowei-users-{suffix}-pg",
+        XW_FEISHU_APP_SECRET="feishu $ # space ' quote",  # noqa: S106 - 合成值
+    )
+    (active / ".env").chmod(0o600)
+    _runtime_config(active, port)
+    config = json.loads((active / "xiaowei.json").read_text(encoding="utf-8"))
+    # 旧版合法、新版拒绝：已登记用户的 subject 没有授权。
+    config["feishu"] = _feishu_section(candidate, {"ou_drill_user": "drill-user"})
+    (active / "xiaowei.json").write_text(json.dumps(config, ensure_ascii=False), encoding="utf-8")
+    (active / "isolation.yaml").write_text(_ISOLATION, encoding="utf-8")
+    old_json = (active / "xiaowei.json").read_bytes()
+    old_mode = stat.S_IMODE((active / "xiaowei.json").stat().st_mode)
+
+    try:
+        assert _isolated(active, "compose.yaml", "up", "-d", "postgres", "--wait").returncode == 0
+        init = _isolated(
+            active, "compose.yaml", "run", "--rm", "--no-deps", "xiaowei", "storage", "init"
+        )
+        assert init.returncode == 0, init.stderr
+        started = _isolated(active, "compose.yaml", "up", "-d", "xiaowei", "--wait")
+        assert started.returncode == 0, started.stderr
+        old_id = _isolated(active, "compose.yaml", "ps", "-q", "xiaowei").stdout.strip()
+
+        # 留存旧控制文件与旧 JSON（600），再预检新版。
+        previous.mkdir()
+        for name in ("compose.yaml", "release.json"):
+            shutil.copyfile(active / name, previous / name)
+        _install_file(active / "xiaowei.json", previous / "xiaowei.json")
+        assert stat.S_IMODE((previous / "xiaowei.json").stat().st_mode) == 0o600
+        shutil.copyfile(candidate / "compose.yaml", active / "compose.next.yaml")
+        shutil.copyfile(candidate / "release.json", active / "release.next.json")
+        check = ("run", "--rm", "--no-deps", "xiaowei", "config", "check")
+        failed = _isolated(active, "compose.next.yaml", *check)
+        assert failed.returncode == 2 and "drill-user" in failed.stderr
+        assert "ou_drill_user" not in failed.stdout + failed.stderr
+        assert _isolated(active, "compose.yaml", "ps", "-q", "xiaowei").stdout.strip() == old_id
+        assert _health(old_id) == "healthy"
+
+        config["access"]["grants"]["drill-user"] = ["local/list_tables"]
+        (active / "xiaowei.json").write_text(json.dumps(config, ensure_ascii=False), "utf-8")
+        passed = _isolated(active, "compose.next.yaml", *check)
+        assert passed.returncode == 0, passed.stderr
+
+        (active / "compose.next.yaml").replace(active / "compose.yaml")
+        (active / "release.next.json").replace(active / "release.json")
+        recreate = ("up", "-d", "--no-deps", "--force-recreate", "xiaowei", "--wait")
+        upgraded = _isolated(active, "compose.yaml", *recreate)
+        assert upgraded.returncode == 0, upgraded.stderr
+
+        # 新版允许空单聊名单（群仍可用）；旧镜像读不了这份配置，所以回退必须恢复旧 JSON。
+        del config["access"]["grants"]["drill-user"]
+        config["feishu"]["users"] = {}
+        (active / "xiaowei.json").write_text(json.dumps(config, ensure_ascii=False), "utf-8")
+        assert _isolated(active, "compose.yaml", *check).returncode == 0
+        assert _isolated(active, "compose.yaml", *recreate).returncode == 0
+        new_id = _isolated(active, "compose.yaml", "ps", "-q", "xiaowei").stdout.strip()
+        new_image = docker("inspect", new_id, "--format", "{{.Image}}").stdout
+        assert _image_id(runtime_image) in new_image
+        old_compose = str(previous / "compose.yaml")
+        unreadable = _isolated(active, old_compose, "--project-directory", str(active), *check)
+        assert unreadable.returncode == 2 and "feishu.users" in unreadable.stderr
+
+        for name in ("compose.yaml", "release.json", "xiaowei.json"):
+            _copy_into(previous / name, active / name)
+        assert (active / "xiaowei.json").read_bytes() == old_json
+        assert stat.S_IMODE((active / "xiaowei.json").stat().st_mode) == old_mode
+        restored = _isolated(active, "compose.yaml", *check)
+        assert restored.returncode == 0, restored.stderr
+        rolled_back = _isolated(active, "compose.yaml", *recreate)
+        assert rolled_back.returncode == 0, rolled_back.stderr
+        rollback_id = _isolated(active, "compose.yaml", "ps", "-q", "xiaowei").stdout.strip()
+        image = docker("inspect", rollback_id, "--format", "{{.Image}}").stdout
+        assert _image_id(users_required_image) in image
+        assert _health(rollback_id) == "healthy"
+    finally:
+        _isolated(active, "compose.yaml", "down", "-v", "--remove-orphans")
+        shutil.rmtree(host_tmp, ignore_errors=True)
+
+
+def _health(container_id: str) -> str:
+    return docker("inspect", container_id, "--format", "{{.State.Health.Status}}").stdout.strip()
+
+
+def _install_file(source: Path, destination: Path) -> None:
+    """``install -m 600``：留存的 JSON 只允许部署管理员读取。"""
+    binary = shutil.which("install")
+    assert binary is not None
+    result = subprocess.run(  # noqa: S603 - 固定系统工具与测试文件
+        [binary, "-m", "600", str(source), str(destination)],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+
+
+def _copy_into(source: Path, destination: Path) -> None:
+    """``cp`` 覆盖已有文件：内容换成留存版本，目标文件原有权限不变。"""
+    binary = shutil.which("cp")
+    assert binary is not None
+    result = subprocess.run(  # noqa: S603 - 固定系统工具与测试文件
+        [binary, str(source), str(destination)], capture_output=True, text=True, check=False
+    )
+    assert result.returncode == 0, result.stderr

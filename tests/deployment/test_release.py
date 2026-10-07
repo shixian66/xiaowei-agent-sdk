@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 import subprocess
 import sys
 import tarfile
@@ -19,6 +20,7 @@ MEMBERS = {
     ".env.example",
     "OPERATIONS.md",
     "compose.yaml",
+    "feishu-group.example.json",
     "release.json",
     "xiaowei.example.json",
 }
@@ -69,9 +71,8 @@ def test_release_archive_has_only_the_deployment_contract(tmp_path: Path) -> Non
             if member.isfile()
         }
 
-    assert (
-        extracted["xiaowei.example.json"] == (ROOT / "examples/xiaowei.example.json").read_bytes()
-    )
+    for example in ("xiaowei.example.json", "feishu-group.example.json"):
+        assert extracted[example] == (ROOT / "examples" / example).read_bytes()
     compose = extracted["compose.yaml"].decode()
     assert APP_IMAGE in compose and POSTGRES_IMAGE in compose
     metadata = json.loads(extracted["release.json"])
@@ -94,6 +95,26 @@ def test_release_archive_has_only_the_deployment_contract(tmp_path: Path) -> Non
     )
     assert not any(name in extracted for name in forbidden)
     assert "p3-release-sentinel.tmp" not in extracted
+
+
+def test_packaged_operations_only_reference_packaged_files() -> None:
+    """公司服务器只拿到发行包：OPERATIONS 不能要求源码仓库、README 或 Git 里的文件。"""
+    operations = (ROOT / "deploy/OPERATIONS.md").read_text(encoding="utf-8")
+    named = set(re.findall(r"[\w.-]+\.example\.json|\.env\.example", operations))
+    assert "feishu-group.example.json" in named
+    assert named <= MEMBERS
+    assert "examples/" not in operations and "README" not in operations
+
+
+def test_operations_rollback_restores_the_previous_config() -> None:
+    """升级前以受限权限留存旧 JSON，回退旧镜像时一并恢复（新版可能已改成旧版读不了的 users={}）。"""
+    operations = (ROOT / "deploy/OPERATIONS.md").read_text(encoding="utf-8")
+    upgrade = operations.split("## 普通升级与回退", 1)[1].split("\n## ", 1)[0]
+    assert 'install -m 600 xiaowei.json "$previous/xiaowei.json"' in upgrade
+    assert upgrade.index("install -m 600 xiaowei.json") < upgrade.index("config check")
+    rollback = upgrade.split("如果新版启动失败", 1)[1]
+    assert 'cp "$previous/xiaowei.json" xiaowei.json' in rollback
+    assert rollback.index("xiaowei.json") < rollback.index("--force-recreate")
 
 
 def test_release_archive_records_linux_amd64(tmp_path: Path) -> None:
