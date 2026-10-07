@@ -17,8 +17,9 @@ import os
 import re
 import tarfile
 import zlib
+from collections.abc import Collection
 from pathlib import Path
-from typing import IO
+from typing import IO, Any, TypeGuard, cast
 
 ROOT = Path(__file__).resolve().parents[1]
 _APP_TOKEN = "@XW_APP_IMAGE@"  # noqa: S105 - image placeholder, not a secret
@@ -53,8 +54,37 @@ def app_image(code_sha: str) -> str:
 
 
 _BLOB = re.compile(r"^blobs/sha256/([0-9a-f]{64})$")
+_DIGEST = re.compile(r"^sha256:([0-9a-f]{64})$")
 _GZIP_MAGIC = b"\x1f\x8b"
 _LEGACY_CONFIG = re.compile(r"^([0-9a-f]{64})\.json$")
+_LEGACY_LAYER = re.compile(r"^[0-9a-f]{64}/layer\.tar$")
+_IMAGE_NAME = "io.containerd.image.name"
+_REF_NAME = "org.opencontainers.image.ref.name"
+_MANIFEST_TYPES = frozenset(
+    {
+        "application/vnd.oci.image.manifest.v1+json",
+        "application/vnd.docker.distribution.manifest.v2+json",
+    }
+)
+_CONFIG_TYPES = frozenset(
+    {"application/vnd.oci.image.config.v1+json", "application/vnd.docker.container.image.v1+json"}
+)
+# 层的媒体类型 → 是否 gzip。zstd 等其他压缩不在 docker save 的输出里，明确拒绝。
+_LAYER_TYPES = {
+    "application/vnd.oci.image.layer.v1.tar": False,
+    "application/vnd.oci.image.layer.v1.tar+gzip": True,
+    "application/vnd.docker.image.rootfs.diff.tar": False,
+    "application/vnd.docker.image.rootfs.diff.tar.gzip": True,
+}
+
+
+def _require(condition: bool, message: str) -> None:
+    if not condition:
+        raise ValueError(message)
+
+
+def _is_str_list(value: object) -> TypeGuard[list[str]]:
+    return isinstance(value, list) and all(isinstance(item, str) for item in value)
 
 
 def _open_member(archive: tarfile.TarFile, name: str) -> IO[bytes]:
@@ -63,8 +93,18 @@ def _open_member(archive: tarfile.TarFile, name: str) -> IO[bytes]:
     except KeyError:
         stream = None
     if stream is None:
-        raise ValueError("镜像归档缺少 manifest 引用的内容")
+        raise ValueError(f"镜像归档缺少 {name}")
     return stream
+
+
+def _load_json(archive: tarfile.TarFile, name: str) -> object:
+    return json.load(_open_member(archive, name))
+
+
+def _single(value: object, name: str) -> dict[str, Any]:
+    if not (isinstance(value, list) and len(value) == 1 and isinstance(value[0], dict)):
+        raise ValueError(f"{name} 必须恰好描述一个镜像")
+    return value[0]
 
 
 def _sha256(stream: IO[bytes]) -> str:
@@ -78,51 +118,170 @@ def _member_sha256(archive: tarfile.TarFile, name: str) -> str:
     return _sha256(_open_member(archive, name))
 
 
-def _layer_diff_id(archive: tarfile.TarFile, name: str) -> str:
-    """层解压后的摘要（OCI DiffID）；``docker save`` 的层可能未压缩，也可能是 gzip。"""
+class _Hashing:
+    """边读边算 SHA-256，让 tar 校验与 DiffID 只读一遍层内容。"""
+
+    def __init__(self, stream: IO[bytes] | io.BufferedIOBase) -> None:
+        self._stream = stream
+        self.digest = hashlib.sha256()
+
+    def read(self, size: int = -1) -> bytes:
+        data = self._stream.read(size)
+        self.digest.update(data)
+        return data
+
+
+def _layer_diff_id(archive: tarfile.TarFile, name: str, compressed: bool | None) -> str:
+    """层解压后的摘要（OCI DiffID），同时确认它是完整的 tar；Docker 解不开的层导入后不可用。
+
+    ``compressed`` 为 OCI 媒体类型声明的压缩方式，须与内容一致；旧格式没有声明，按内容判断。
+    """
     stream = _open_member(archive, name)
-    if stream.read(2) == _GZIP_MAGIC:
-        stream.seek(0)
-        with gzip.GzipFile(fileobj=stream) as unpacked:
-            return _sha256(unpacked)
+    gzipped = stream.read(2) == _GZIP_MAGIC
     stream.seek(0)
-    return _sha256(stream)
+    _require(compressed is None or compressed == gzipped, "镜像层的压缩方式与媒体类型不符")
+    reader = _Hashing(gzip.GzipFile(fileobj=stream) if gzipped else stream)
+    # 流式读取逐个跳过成员：头部损坏或内容被截断时 tarfile 报 ReadError。
+    with tarfile.open(fileobj=cast("IO[bytes]", reader), mode="r|") as layer:
+        for _ in layer:
+            pass
+    while reader.read(1 << 20):
+        pass
+    return reader.digest.hexdigest()
+
+
+def _descriptor(value: object, types: Collection[str], archive: tarfile.TarFile) -> str:
+    """OCI 描述符：媒体类型受支持、摘要格式正确、对应 blob 存在且大小相符；返回 blob 路径。"""
+    _require(isinstance(value, dict), "OCI 描述符格式不符")
+    descriptor = cast("dict[str, Any]", value)
+    media_type = descriptor.get("mediaType")
+    _require(isinstance(media_type, str) and media_type in types, "不支持的 OCI 媒体类型")
+    digest = descriptor.get("digest")
+    matched = _DIGEST.fullmatch(digest) if isinstance(digest, str) else None
+    _require(matched is not None, "OCI 描述符的摘要格式不符")
+    path = f"blobs/sha256/{cast('re.Match[str]', matched).group(1)}"
+    try:
+        member = archive.getmember(path)
+    except KeyError:
+        raise ValueError(f"镜像归档缺少 {path}") from None
+    size = descriptor.get("size")
+    _require(type(size) is int and member.isfile() and member.size == size, "OCI 描述符的大小不符")
+    return path
+
+
+def _check_oci_index(
+    archive: tarfile.TarFile, expected_tag: str, platform: str, config_name: str, layers: list[str]
+) -> list[bool]:
+    """Docker 25 起的归档另有 OCI 布局，containerd 镜像存储按它导入：标签、配置与层须和
+    manifest.json 完全一致。只支持 index.json 直接指向单个镜像 manifest（docker save 的输出）；
+    嵌套索引、多平台等其他布局明确拒绝。返回各层媒体类型声明的压缩方式。
+    """
+    _require(
+        _load_json(archive, "oci-layout") == {"imageLayoutVersion": "1.0.0"},
+        "oci-layout 版本不受支持",
+    )
+    index = _load_json(archive, "index.json")
+    _require(isinstance(index, dict) and index.get("schemaVersion") == 2, "index.json 格式不符")
+    entry = _single(cast("dict[str, Any]", index).get("manifests"), "index.json")
+    name, reference = expected_tag.rsplit(":", 1)
+    annotations = entry.get("annotations")
+    _require(
+        isinstance(annotations, dict)
+        and annotations.get(_IMAGE_NAME) == f"docker.io/library/{name}:{reference}"
+        and annotations.get(_REF_NAME) == reference,
+        "镜像归档的标签与版本不符",
+    )
+    declared = entry.get("platform")
+    if declared is not None:
+        _require(
+            isinstance(declared, dict)
+            and f"{declared.get('os')}/{declared.get('architecture')}" == platform,
+            "镜像平台与声明不符",
+        )
+    manifest_path = _descriptor(entry, _MANIFEST_TYPES, archive)
+    _require(
+        _member_sha256(archive, manifest_path) == manifest_path.rsplit("/", 1)[1],
+        "OCI manifest 摘要不符",
+    )
+    manifest = _load_json(archive, manifest_path)
+    _require(
+        isinstance(manifest, dict)
+        and manifest.get("schemaVersion") == 2
+        and manifest.get("mediaType", entry["mediaType"]) == entry["mediaType"],
+        "OCI manifest 格式不符",
+    )
+    manifest = cast("dict[str, Any]", manifest)
+    _require(
+        _descriptor(manifest.get("config"), _CONFIG_TYPES, archive) == config_name,
+        "index.json 与 manifest.json 指向的镜像配置不同",
+    )
+    descriptors = manifest.get("layers")
+    if not isinstance(descriptors, list):
+        raise ValueError("OCI manifest 的 layers 格式不符")
+    paths = [_descriptor(layer, _LAYER_TYPES, archive) for layer in descriptors]
+    _require(paths == layers, "index.json 与 manifest.json 指向的镜像层不同")
+    return [_LAYER_TYPES[layer["mediaType"]] for layer in descriptors]
 
 
 def _check_image_archive(path: Path, expected_tag: str, platform: str) -> None:
     """``docker save`` 归档：恰好一个镜像、标签为本次版本、引用内容齐全且摘要相符、平台与声明一致。
 
-    内容寻址的文件（``blobs/sha256/<摘要>``、旧格式 ``<摘要>.json``）按文件名核对；每一层再按位置
-    与配置 ``rootfs.diff_ids`` 核对解压后的摘要，层的顺序或对应关系错了也拒绝。任一不符则服务器
-    ``docker load`` 会失败、解出错误内容或装上错误平台的镜像。
+    支持两种格式：旧格式只有 ``manifest.json``；Docker 25 起另有 OCI 布局，按
+    ``_check_oci_index`` 核对它与 ``manifest.json`` 一致，避免两种镜像存储导入出不同结果。
+    内容寻址的文件按文件名核对摘要；每一层再按位置与配置 ``rootfs.diff_ids`` 核对解压后的摘要，
+    并确认是完整的 tar。任一不符则服务器 ``docker load`` 会失败、解出错误内容或装上错误平台的
+    镜像（解层失败时 ``docker load`` 仍可能退出 0）。
     """
     with tarfile.open(path, "r:") as archive:
-        member = archive.extractfile("manifest.json")
-        if member is None:
-            raise ValueError("镜像归档缺少 manifest.json")
-        manifest = json.load(member)
-        if not (isinstance(manifest, list) and len(manifest) == 1):
-            raise ValueError("镜像归档必须恰好含一个镜像")
-        entry = manifest[0]
-        if entry.get("RepoTags") != [expected_tag]:
-            raise ValueError("镜像归档的标签与版本不符")
-        config_name, layers = entry["Config"], entry["Layers"]
+        entry = _single(_load_json(archive, "manifest.json"), "manifest.json")
+        _require(entry.get("RepoTags") == [expected_tag], "镜像归档的标签与版本不符")
+        config_name, layers = entry.get("Config"), entry.get("Layers")
+        _require(
+            isinstance(config_name, str) and _is_str_list(layers),
+            "manifest.json 的 Config/Layers 格式不符",
+        )
+        config_name, layers = cast("str", config_name), cast("list[str]", layers)
+        names = archive.getnames()
+        if "index.json" in names:
+            compressed: list[bool | None] = list(
+                _check_oci_index(archive, expected_tag, platform, config_name, layers)
+            )
+        else:
+            _require(
+                "oci-layout" not in names and all(_LEGACY_LAYER.fullmatch(n) for n in layers),
+                "不支持的镜像归档格式",
+            )
+            compressed = [None] * len(layers)
         named = _BLOB.fullmatch(config_name) or _LEGACY_CONFIG.fullmatch(config_name)
-        if named is None or _member_sha256(archive, config_name) != named.group(1):
-            raise ValueError("镜像配置缺失或摘要不符")
-        config_stream = archive.extractfile(config_name)
-        if config_stream is None:
-            raise ValueError("镜像配置缺失或摘要不符")
-        config = json.load(config_stream)
-        if f"{config.get('os')}/{config.get('architecture')}" != platform:
-            raise ValueError("镜像平台与声明不符")
-        # 层数与配置不符时 strict zip 抛 ValueError，同样拒绝。
-        for layer, diff_id in zip(layers, config["rootfs"]["diff_ids"], strict=True):
+        _require(
+            named is not None and _member_sha256(archive, config_name) == named.group(1),
+            "镜像配置缺失或摘要不符",
+        )
+        config = _load_json(archive, config_name)
+        _require(isinstance(config, dict), "镜像配置格式不符")
+        config = cast("dict[str, Any]", config)
+        _require(
+            f"{config.get('os')}/{config.get('architecture')}" == platform, "镜像平台与声明不符"
+        )
+        rootfs = config.get("rootfs")
+        _require(
+            isinstance(rootfs, dict)
+            and rootfs.get("type") == "layers"
+            and _is_str_list(rootfs.get("diff_ids")),
+            "镜像配置的 rootfs 格式不符",
+        )
+        diff_ids = cast("dict[str, Any]", rootfs)["diff_ids"]
+        _require(len(layers) == len(diff_ids), "镜像层数与配置不符")
+        for layer, diff_id, gzipped in zip(layers, diff_ids, compressed, strict=True):
             blob = _BLOB.fullmatch(layer)
-            if blob is not None and _member_sha256(archive, layer) != blob.group(1):
-                raise ValueError("镜像层缺失或摘要不符")
-            if f"sha256:{_layer_diff_id(archive, layer)}" != diff_id:
-                raise ValueError("镜像层与配置的 diff_ids 不符")
+            _require(
+                blob is None or _member_sha256(archive, layer) == blob.group(1),
+                "镜像层缺失或摘要不符",
+            )
+            _require(
+                f"sha256:{_layer_diff_id(archive, layer, gzipped)}" == diff_id,
+                "镜像层与配置的 diff_ids 不符",
+            )
 
 
 def _image_sha256(path: Path) -> str:
@@ -196,17 +355,10 @@ def main() -> int:
     _validate(parser, args)
     try:
         _write(args.output, _members(args))
-    except (
-        OSError,
-        ValueError,
-        EOFError,
-        zlib.error,
-        tarfile.TarError,
-        AttributeError,
-        KeyError,
-        TypeError,
-    ):
-        parser.error("发行归档生成失败")
+    except ValueError as exc:
+        parser.error(f"发行归档生成失败：{exc}")
+    except (OSError, EOFError, zlib.error, tarfile.TarError):
+        parser.error("发行归档生成失败：镜像归档无法读取或不是完整的 tar/gzip")
     return 0
 
 

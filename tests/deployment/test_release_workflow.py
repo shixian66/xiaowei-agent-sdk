@@ -63,10 +63,21 @@ def test_release_builds_the_image_into_an_offline_file() -> None:
     assert 'docker save --output "$image_file" "$image"' in commands
     assert "scripts/package_release.py" in commands
     assert '--image-archive "$image_file"' in commands
-    # 打包后从文件重新导入并核对平台：Docker 自身确认这份文件能用。
-    reload = commands.index('docker image rm "$image"')
-    assert commands.index("scripts/package_release.py") < reload
-    assert reload < commands.index('docker load --input "$image_file"')
+    # attestation 会让 docker save 输出嵌套索引，打包脚本不支持：发布时关闭。
+    assert "--provenance=false" in commands and "--sbom=false" in commands
+    # 打包后从最终发行包解出镜像、按 release.json 核对摘要再导入：验证的是交付的那份文件。
+    steps = [
+        "scripts/package_release.py",
+        'docker image rm "$image"',
+        'tar -xzf "$archive" -C "$unpacked" release.json xiaowei-image.tar',
+        '"image_file_sha256"',
+        "sha256sum --check --strict -",
+        'docker load --input "$unpacked/xiaowei-image.tar"',
+        "{{.Os}}/{{.Architecture}}",
+    ]
+    positions = [commands.index(step) for step in steps]
+    assert positions == sorted(positions)
+    assert 'docker load --input "$image_file"' not in commands
     assert '{{.Os}}/{{.Architecture}}\')" = "$XW_PLATFORM"' in commands
     assert 'archive="$RUNNER_TEMP/xiaowei-$GITHUB_SHA-linux-amd64.tar.gz"' in commands
     assert '"$XW_POSTGRES_IMAGE"' in commands

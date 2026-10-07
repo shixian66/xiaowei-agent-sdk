@@ -13,8 +13,19 @@ Web 端口默认对服务器所有网卡开放，内网电脑用 `http://服务�
 
 发行包是一个文件 `xiaowei-<完整代码 SHA>-linux-amd64.tar.gz`，向发布方索取。它已经带着应用镜像
 （`xiaowei-image.tar`），服务器不需要登录任何镜像仓库，也不需要 Git 或 Python。PostgreSQL 镜像
-按 `release.json` 里的固定 digest 从 Docker Hub 拉取；服务器访问不了 Docker Hub 时，在能访问的
-电脑上 `docker pull` 后 `docker save`，再传到服务器 `docker load`。
+按 `release.json` 里的固定 digest 从 Docker Hub 拉取。服务器访问不了 Docker Hub 时，在能访问的
+电脑上准备。这个 digest 同时对应多个平台，ARM 的 Mac 不带 `--platform` 会拿到 arm64 镜像，所以
+两条命令都要写 `linux/amd64`（`docker save --platform` 需要 Docker 28 或更新版本）：
+
+```sh
+pg_image='把 release.json 里 images.postgres 的值粘贴到这里'
+docker pull --platform linux/amd64 "$pg_image"
+docker save --platform linux/amd64 --output postgres-image.tar "$pg_image"
+```
+
+把 `postgres-image.tar` 传到服务器，`docker load --input postgres-image.tar` 后用同样的
+`pg_image` 运行 `docker image inspect "$pg_image" --format '{{.Os}}/{{.Architecture}}'`，必须输出
+`linux/amd64`；报找不到镜像时 Compose 仍会尝试联网拉取，不要继续启动。
 
 先在服务器创建安装目录，再把发行包传过去：
 

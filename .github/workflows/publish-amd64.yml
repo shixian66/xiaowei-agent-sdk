@@ -36,6 +36,8 @@ jobs:
             --platform "$XW_PLATFORM" \
             --build-arg "XW_CODE_SHA=$GITHUB_SHA" \
             --tag "$image" \
+            --provenance=false \
+            --sbom=false \
             --load \
             --file Dockerfile.runtime \
             .
@@ -48,9 +50,15 @@ jobs:
             --postgres-image "$XW_POSTGRES_IMAGE" \
             --code-sha "$GITHUB_SHA" \
             --platform "$XW_PLATFORM"
-          # 用 Docker 自身再验一遍包内文件：删掉本地镜像后从文件导入，平台与入口都须正常。
+          # 用 Docker 自身验证最终发行包里的那份镜像：删掉本地镜像，从发行包解出、按 release.json
+          # 核对摘要后导入，平台与入口都须正常。
           docker image rm "$image"
-          docker load --input "$image_file"
+          unpacked="$RUNNER_TEMP/unpacked"
+          mkdir -p "$unpacked"
+          tar -xzf "$archive" -C "$unpacked" release.json xiaowei-image.tar
+          expected="$(python3 -c 'import json, sys; print(json.load(open(sys.argv[1]))["image_file_sha256"])' "$unpacked/release.json")"
+          printf '%s  %s\n' "$expected" "$unpacked/xiaowei-image.tar" | sha256sum --check --strict -
+          docker load --input "$unpacked/xiaowei-image.tar"
           test "$(docker image inspect "$image" --format '{{.Os}}/{{.Architecture}}')" = "$XW_PLATFORM"
           docker run --rm "$image" --help >/dev/null
           printf 'APP_IMAGE=%s\nRELEASE_ARCHIVE=%s\n' "$image" "$archive" >> "$GITHUB_ENV"
