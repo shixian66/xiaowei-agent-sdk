@@ -230,8 +230,11 @@ def _contents(input: str | list[TResponseInputItem]) -> list[dict[str, Any]]:
     return contents
 
 
+_ROLES: dict[object, str] = {"user": "user", "assistant": "model"}
+
+
 def _message(raw: Mapping[str, Any]) -> dict[str, Any]:
-    role = {"user": "user", "assistant": "model"}.get(raw.get("role"))  # type: ignore[arg-type]
+    role = _ROLES.get(raw.get("role"))
     if role is None:
         _reject_request("Vertex 适配器只映射用户与助手消息")
     content = raw.get("content")
@@ -363,14 +366,17 @@ def _function_call_item(part: dict[str, Any], tool_names: set[str]) -> ResponseF
         or call_id.startswith(_GENERATED_CALL_ID_PREFIX)
     ):
         _reject_response("模型返回的函数调用 ID 无效")
-    return ResponseFunctionToolCall(
-        id=_FAKE_ID,
-        type="function_call",
-        call_id=call_id,
-        name=name,
-        arguments=json.dumps(args, ensure_ascii=False),
-        provider_data={"thought_signature": signature},  # type: ignore[call-arg]
-    )
+    # ``provider_data`` 是 SDK 在调用项上保存供应商附加字段的约定（同 SDK 的 Chat 转换器），
+    # 不是 OpenAI 类型声明的字段，因此按关键字字典传入。
+    fields: dict[str, Any] = {
+        "id": _FAKE_ID,
+        "type": "function_call",
+        "call_id": call_id,
+        "name": name,
+        "arguments": json.dumps(args, ensure_ascii=False),
+        "provider_data": {"thought_signature": signature},
+    }
+    return ResponseFunctionToolCall(**fields)
 
 
 def _usage(metadata: object) -> tuple[Usage, dict[str, Any] | None]:
