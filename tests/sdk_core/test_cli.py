@@ -11,22 +11,29 @@ console script ``xiaowei`` 与 ``python -m xiaowei`` 各自在独立进程中运
 Task 9。成功轮次与飞书路径在 ``test_runtime.py`` 中经同一装配（替换最底层 I/O）验证。
 """
 
+import asyncio
 import json
 import os
 import signal
+import socket
 import subprocess
 import sys
 import time
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from contextlib import contextmanager
+from dataclasses import dataclass
 from importlib.metadata import entry_points
 from pathlib import Path
+from typing import Any
 
 import httpx
+import httpx2
 import pytest
+from pytest_socket import SocketBlockedError
 from sqlalchemy.engine import URL
 from tests.sdk_core.test_runtime import (
     DB_ENV,
+    FEISHU_ENV,
     KEY_ENV,
     MODEL_ENV,
     SR_ENV,
@@ -36,9 +43,10 @@ from tests.sdk_core.test_runtime import (
     free_port,
     serve_config,
 )
+from tests.sdk_core.test_vertex_model import VERTEX, Endpoint, _body, _call
 
 from xiaowei import cli as cli_module
-from xiaowei import runtime
+from xiaowei import model_api, runtime
 
 pytestmark = pytest.mark.loopback
 
@@ -568,3 +576,297 @@ def test_cleanup_rejects_an_out_of_range_batch(postgres_url: URL, tmp_path: Path
     deploy = Deployment(postgres_url, tmp_path)
     result = deploy.run("module", "storage", "cleanup", "--batch-size", "0")
     assert result.returncode == 2
+
+
+# ---- model check ---------------------------------------------------------------------
+
+CHECK_TOOL = "model_check_lookup"  # 固定合成工具名：命令与模型之间的唯一契约
+CHECK_LEAK = "xw-check-canary-5d1a"  # 只出现在模型返回的正文与工具参数中
+VERTEX_KEY_ENV = VERTEX.api_key_ref.removeprefix("env:")
+UNRELATED_ENV = (DB_ENV, KEY_ENV, SR_ENV, FEISHU_ENV, *TEMPLATE_ENV, "XW_POSTGRES_PASSWORD")
+ADVICE = {"evidence_ids": [], "inferences": [], "clarification": None}
+
+
+def _check_answer(**overrides: Any) -> dict[str, Any]:
+    body = {**ADVICE, "advice": f"合成数值为 42 {CHECK_LEAK}", **overrides}
+    return _body([{"text": json.dumps(body, ensure_ascii=False)}])
+
+
+def _check_call(name: str = CHECK_TOOL) -> dict[str, Any]:
+    return _call(name=name, args={"region": CHECK_LEAK})
+
+
+def _check_entry(container: bool, argv: list[str], file: Path) -> int:
+    if container:
+        return cli_module.container_main(argv, config_path=file)
+    return cli_module.main(["--config", str(file), *argv])
+
+
+@dataclass
+class ModelCheck:
+    """只含模型 Key 的环境、一份 CA 不可读的 Vertex 配置，以及记录装配调用的替身。"""
+
+    file: Path
+    endpoint: Endpoint
+    calls: list[str]
+
+    def run(self, container: bool, *replies: Any) -> int:
+        self.endpoint.replies.extend(replies)
+        return _check_entry(container, ["model", "check"], self.file)
+
+
+@pytest.fixture
+def model_check(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, socket_disabled: None
+) -> ModelCheck:
+    for name in UNRELATED_ENV:
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setenv(VERTEX_KEY_ENV, f"vertex-key-{CHECK_LEAK}")
+    # 容器部署参数缺失或非法：模型检查不得读取它们。
+    monkeypatch.setenv("XW_WEB_PORT", "not-a-port")
+    monkeypatch.delenv("XW_STOP_GRACE_SECONDS", raising=False)
+    config = serve_config(18501, model=VERTEX.model_dump(mode="json"))
+    config["targets"][0]["starrocks"].update({"tls": True, "tls_ca_file": str(tmp_path / "no-ca")})
+    work = tmp_path / "work"
+    work.mkdir()
+    file = work / "xiaowei.json"
+    file.write_text(json.dumps(config), encoding="utf-8")
+    monkeypatch.chdir(work)
+    endpoint = Endpoint([])
+    calls: list[str] = []
+
+    def forbidden(name: str) -> Any:
+        def call(*args: object, **kwargs: object) -> Any:
+            calls.append(name)
+            raise AssertionError(f"model check 不得调用 {name}")
+
+        return call
+
+    monkeypatch.setattr(runtime, "validate_config", forbidden("validate_config"))
+    for name in ("open_engine", "open_starrocks", "lark_channel", "_container_serve"):
+        monkeypatch.setattr(runtime, name, forbidden(name))
+
+    real_open, real_run_config = runtime.open_model, runtime.safe_run_config
+
+    def open_model(profile: Any, *, transport: Any = None) -> Any:
+        calls.append("open_model")
+        assert transport is None  # 正式命令不能另配 transport；替身只替换最底层网络发送
+        return real_open(profile, transport=endpoint.transport)
+
+    def safe_run_config() -> Any:
+        calls.append("safe_run_config")
+        return real_run_config()
+
+    monkeypatch.setattr(runtime, "open_model", open_model)
+    monkeypatch.setattr(runtime, "safe_run_config", safe_run_config)
+    return ModelCheck(file, endpoint, calls)
+
+
+def _no_leak(text: str) -> None:
+    assert CHECK_LEAK not in text and "合成数值" not in text and CHECK_TOOL not in text
+
+
+@pytest.mark.parametrize("entry", ENTRIES)
+def test_model_check_is_listed_by_both_entries(entry: str) -> None:
+    assert "model" in run([*ENTRIES[entry], "--help"], child_env()).stdout
+    result = run([*ENTRIES[entry], "--config", "unused", "model", "--help"], child_env())
+    assert result.returncode == 0 and "check" in result.stdout
+
+
+@pytest.mark.filterwarnings("ignore:A test tried to use socket:UserWarning")
+@pytest.mark.parametrize("container", [False, True], ids=["native", "container"])
+def test_model_check_needs_only_the_model_key(
+    model_check: ModelCheck, capsys: pytest.CaptureFixture[str], container: bool
+) -> None:
+    """缺少数据库、摘要、StarRocks、飞书秘密，CA 不可读，容器端口非法：模型检查仍成功。"""
+    before = sorted(p.name for p in model_check.file.parent.iterdir())
+    with pytest.raises(SocketBlockedError):  # 本用例连 loopback 也不放行：模型替身不经网络
+        socket.socket()
+
+    code = model_check.run(container, _check_call(), _check_answer())
+
+    out, err = capsys.readouterr()
+    assert code == 0, err
+    assert out.strip() == f"model check valid profile={VERTEX.profile_id} model={VERTEX.model}"
+    assert err == ""
+    _no_leak(out + err)
+    assert model_check.calls == ["open_model", "safe_run_config"]
+    assert sorted(p.name for p in model_check.file.parent.iterdir()) == before
+    first, second = model_check.endpoint.bodies()
+    (declared,) = first["tools"][0]["functionDeclarations"]
+    assert declared["name"] == CHECK_TOOL
+    assert first["generationConfig"]["maxOutputTokens"] == VERTEX.max_output_tokens
+    assert "responseJsonSchema" in first["generationConfig"]
+    (result,) = [
+        part["functionResponse"]
+        for content in second["contents"]
+        for part in content["parts"]
+        if "functionResponse" in part
+    ]
+    assert result["name"] == CHECK_TOOL
+    for request in model_check.endpoint.requests:
+        assert request.headers["x-goog-api-key"] == f"vertex-key-{CHECK_LEAK}"
+
+
+@pytest.mark.parametrize("container", [False, True], ids=["native", "container"])
+@pytest.mark.parametrize(
+    "key", [None, "", "<获准 Model Profile 的密钥>"], ids=["unset", "empty", "template"]
+)
+def test_model_check_rejects_a_missing_or_template_key_before_any_request(
+    model_check: ModelCheck,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    container: bool,
+    key: str | None,
+) -> None:
+    if key is None:
+        monkeypatch.delenv(VERTEX_KEY_ENV)
+    else:
+        monkeypatch.setenv(VERTEX_KEY_ENV, key)
+
+    assert model_check.run(container) == 2
+
+    err = capsys.readouterr().err
+    assert "model.api_key_ref" in err and "<" not in err
+    assert model_check.calls == [] and model_check.endpoint.requests == []
+
+
+@pytest.mark.parametrize("container", [False, True], ids=["native", "container"])
+def test_model_check_rejects_template_and_invalid_json_before_any_request(
+    model_check: ModelCheck, capsys: pytest.CaptureFixture[str], container: bool
+) -> None:
+    config = json.loads(model_check.file.read_text(encoding="utf-8"))
+    original = config["targets"][0]["description"]
+    config["targets"][0]["description"] = "<集群用途，交给模型选择集群>"
+    model_check.file.write_text(json.dumps(config, ensure_ascii=False), encoding="utf-8")
+    assert model_check.run(container) == 2
+    err = capsys.readouterr().err
+    assert "targets.0.description" in err and "<" not in err
+
+    config["targets"][0]["description"] = original
+    config["model"]["unexpected"] = True
+    model_check.file.write_text(json.dumps(config), encoding="utf-8")
+    assert model_check.run(container) == 2
+    assert "model.unexpected" in capsys.readouterr().err
+    assert model_check.calls == [] and model_check.endpoint.requests == []
+
+
+def _status(code: int) -> httpx2.Response:
+    return httpx2.Response(code, json={"error": {"message": f"upstream {CHECK_LEAK}"}})
+
+
+async def _timeout(request: httpx2.Request) -> httpx2.Response:
+    raise httpx2.ReadTimeout("synthetic timeout", request=request)
+
+
+@pytest.mark.parametrize(
+    ("replies", "reason"),
+    [
+        pytest.param([_status(401)], "auth_failed", id="401"),
+        pytest.param([_status(403)], "auth_failed", id="403"),
+        pytest.param([_status(429)], "rate_limited", id="429"),
+        pytest.param([_status(503)], "upstream_error", id="5xx"),
+        pytest.param([_timeout], "unreachable", id="timeout"),
+        pytest.param([_check_answer()], "tool_not_called", id="no-tool"),
+        pytest.param(
+            [_check_call(), _check_call(), _check_answer()], "tool_repeated", id="tool-twice"
+        ),
+        pytest.param(
+            [_check_call(), _check_call(), _check_call()], "tool_repeated", id="tool-loop"
+        ),
+        pytest.param([_check_call(name="run_readonly_query")], "model_failed", id="wrong-tool"),
+        pytest.param([_check_call(), _body([{"text": "not json"}])], "model_failed", id="not-json"),
+        pytest.param([_check_call(), _check_answer(advice=None)], "answer_invalid", id="no-advice"),
+        pytest.param(
+            [_check_call(), _check_answer(evidence_ids=["ev-1"])],
+            "answer_invalid",
+            id="evidence",
+        ),
+        pytest.param(
+            [_check_call(), _check_answer(inferences=[{"text": "推断", "evidence_ids": []}])],
+            "answer_invalid",
+            id="inference",
+        ),
+        pytest.param(
+            [_check_call(), _check_answer(clarification="请说明")],
+            "answer_invalid",
+            id="clarification",
+        ),
+    ],
+)
+def test_model_check_failures_exit_1_with_a_fixed_reason(
+    model_check: ModelCheck,
+    capsys: pytest.CaptureFixture[str],
+    replies: list[Any],
+    reason: str,
+) -> None:
+    assert model_check.run(False, *replies) == 1
+
+    out, err = capsys.readouterr()
+    assert out == "" and err.strip() == f"model check failed: {reason}"
+    _no_leak(err)
+    assert model_check.endpoint.replies == []  # 没有额外请求：不重试
+    assert model_check.calls == ["open_model", "safe_run_config"]
+
+
+def test_model_check_close_failure_is_not_reported_as_success(
+    model_check: ModelCheck,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    async def hang() -> None:
+        await asyncio.sleep(60)
+
+    monkeypatch.setattr(model_api, "_CLIENT_CLOSE_TIMEOUT_SECONDS", 0.05)
+    monkeypatch.setattr(httpx2.MockTransport, "aclose", lambda self: hang())
+
+    assert model_check.run(False, _check_call(), _check_answer()) == 1
+
+    out, err = capsys.readouterr()
+    assert "valid" not in out and "模型客户端关闭超时" in err
+
+
+def _break_ca(monkeypatch: pytest.MonkeyPatch, file: Path) -> None:
+    config = json.loads(file.read_text(encoding="utf-8"))
+    config["targets"][0]["starrocks"].update({"tls": True, "tls_ca_file": str(file.parent)})
+    file.write_text(json.dumps(config, ensure_ascii=False), encoding="utf-8")
+
+
+@pytest.mark.parametrize(
+    "breaks",
+    [
+        pytest.param(lambda mp, file: mp.delenv("XW_DIGEST_KEY"), id="missing-secret"),
+        pytest.param(lambda mp, file: mp.delenv("XW_FEISHU_APP_SECRET"), id="missing-feishu"),
+        pytest.param(_break_ca, id="unreadable-ca"),
+        pytest.param(lambda mp, file: mp.setenv("XW_WEB_PORT", "not-a-port"), id="port"),
+        pytest.param(lambda mp, file: mp.setenv("XW_STOP_GRACE_SECONDS", "1"), id="stop-grace"),
+    ],
+)
+@pytest.mark.parametrize("argv", [["serve"], ["config", "check"]], ids=["serve", "config-check"])
+def test_other_container_commands_keep_the_full_precheck(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    argv: list[str],
+    breaks: Callable[[pytest.MonkeyPatch, Path], None],
+) -> None:
+    """对照：容器 serve / config check 仍调用完整预检；缺秘密、CA 不可读、端口或宽限非法时拒绝。"""
+    _deploy_env(monkeypatch)
+    started = _no_runtime(monkeypatch)
+    file = tmp_path / "xiaowei.json"
+    file.write_text(json.dumps(filled(example_with_feishu()), ensure_ascii=False), "utf-8")
+    checked: list[str] = []
+    real = runtime.validate_config
+
+    def spy(config: runtime.ServeConfig, **kwargs: Any) -> None:
+        checked.append("validate_config")
+        real(config, **kwargs)
+
+    monkeypatch.setattr(runtime, "validate_config", spy)
+    assert cli_module.container_main(argv, config_path=file) == 0  # 成功对照
+    assert checked == ["validate_config"]
+    started.clear()
+
+    breaks(monkeypatch, file)
+
+    assert cli_module.container_main(argv, config_path=file) == 2
+    assert started == []

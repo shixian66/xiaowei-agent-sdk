@@ -103,6 +103,26 @@ docker compose --env-file .env ps
 `config check` 不连接 PostgreSQL、模型、StarRocks 或飞书，也不写文件。它返回 2 时先修配置，
 不要停止或替换正在运行的旧服务。`storage init` 只对全新、专用于小维的数据库执行一次。
 
+`model check` 单独确认模型 Profile 和 Key 可用：它只读取 JSON 和 `model.api_key_ref` 指向的那一个
+变量，不需要数据库、StarRocks、飞书秘密或 CA，也不连接它们、不写文件；但会向配置的模型发送一次
+固定的合成提问并调用一个内置的假工具，**会产生模型调用和用量**。输出只有 Profile、模型名和
+`valid`，失败只给类别，不显示提问、模型回答或 Key：
+
+```sh
+docker compose --env-file .env run --rm --no-deps xiaowei model check
+```
+
+| 退出码与输出 | 含义与处理 |
+| --- | --- |
+| 0，`model check valid profile=… model=…` | 模型完成了一次工具调用并给出合规的最终回答 |
+| 2，字段路径与说明 | 配置或 Key 问题（未设置、为空、仍是模板），按提示修改后重试，没有发出模型请求 |
+| 1，`model check failed: auth_failed` | Key 无效或无权使用该模型 |
+| 1，`model check failed: rate_limited` / `upstream_error` / `unreachable` | 限流、模型服务错误、超时或连不上；稍后重试，不会自动重试 |
+| 1，`model check failed: tool_not_called` / `tool_repeated` / `answer_invalid` / `model_failed` | 模型没按要求调用工具、重复调用、最终回答不合规或响应不符合协议；该 Profile 不应投入使用 |
+
+通过只说明这个 Profile 能完成合成数据上的工具往返和结构化回答，不代表正式提示词下的工具选择
+与回答质量合格。
+
 操作者电脑通过 SSH 转发访问；调整端口时同时调整 `.env`、JSON 和转发命令：
 
 ```sh
@@ -197,9 +217,11 @@ cp /opt/xiaowei/releases/<新 SHA>/release.json release.next.json
 docker compose --env-file .env -f compose.next.yaml pull xiaowei
 docker compose --env-file .env -f compose.next.yaml config --quiet
 docker compose --env-file .env -f compose.next.yaml run --rm --no-deps xiaowei config check
+docker compose --env-file .env -f compose.next.yaml run --rm --no-deps xiaowei model check
 ```
 
-预检失败时按提示修改 `XW_CONFIG_FILE` 指向的 JSON 后重新预检，旧服务继续运行（它只在启动时读取
+`model check` 会产生一次模型调用；模型配置没有变化且不想产生用量时可以省略。预检失败时按提示
+修改 `XW_CONFIG_FILE` 指向的 JSON 后重新预检，旧服务继续运行（它只在启动时读取
 配置）。预检通过后只重建小维；PostgreSQL 容器和命名卷不重建：
 
 ```sh
