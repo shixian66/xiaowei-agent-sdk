@@ -23,7 +23,7 @@
 | --- | --- |
 | Agent 核心 | OpenAI Agents SDK 的 Agent、Runner、function tools、Session |
 | 模型 API | 计划接入 OpenAI、Gemini、DeepSeek 与 Vertex AI（API Key 模式）；通过配置选择经过验证的端点和模型，一次运行使用一个模型 |
-| Web | 默认本机使用的简单对话页；公司内网可按部署说明显式开放给单操作者 |
+| Web | 简单对话页：原生启动默认只监听本机（`listen_host` 可改）；Compose 部署默认发布到宿主机所有地址（`XW_WEB_BIND_ADDRESS=0.0.0.0`），供公司内网访问；无登录，访问者共用一个操作者身份 |
 | 飞书 | 获准单聊；可选一个指定群：群内 @小维 提问、全员共享会话、同群有界排队并回复原消息（离线实现，真实群在 P3 验证） |
 | 数据源 | 本地 Adapter 直连一个或多个 StarRocks 目标，工具以 `cluster` 参数选择集群；表与列自动发现，范围是只读账号实际可 SELECT 的对象，不再手写 allowlist |
 | MCP | 官方 SDK 接入能力 + 小维可信配置与治理；配置为空时，本地功能照常运行 |

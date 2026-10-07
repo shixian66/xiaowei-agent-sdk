@@ -169,6 +169,12 @@ def _descriptor(value: object, types: Collection[str], archive: tarfile.TarFile)
     return path
 
 
+def _is_schema_v2(document: dict[str, Any]) -> bool:
+    """Docker 把 ``schemaVersion`` 解码为整数：``2.0`` 在 Python 里与 2 相等，导入时却报错。"""
+    version = document.get("schemaVersion")
+    return type(version) is int and version == 2
+
+
 def _check_oci_index(
     archive: tarfile.TarFile, expected_tag: str, platform: str, config_name: str, layers: list[str]
 ) -> list[bool]:
@@ -181,7 +187,7 @@ def _check_oci_index(
         "oci-layout 版本不受支持",
     )
     index = _load_json(archive, "index.json")
-    _require(isinstance(index, dict) and index.get("schemaVersion") == 2, "index.json 格式不符")
+    _require(isinstance(index, dict) and _is_schema_v2(index), "index.json 格式不符")
     entry = _single(cast("dict[str, Any]", index).get("manifests"), "index.json")
     name, reference = expected_tag.rsplit(":", 1)
     annotations = entry.get("annotations")
@@ -206,7 +212,7 @@ def _check_oci_index(
     manifest = _load_json(archive, manifest_path)
     _require(
         isinstance(manifest, dict)
-        and manifest.get("schemaVersion") == 2
+        and _is_schema_v2(manifest)
         and manifest.get("mediaType", entry["mediaType"]) == entry["mediaType"],
         "OCI manifest 格式不符",
     )

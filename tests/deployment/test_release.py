@@ -324,18 +324,26 @@ def test_release_checks_the_blob_name_of_a_compressed_layer(tmp_path: Path) -> N
 
 
 def test_release_rejects_a_truncated_gzip_layer(tmp_path: Path) -> None:
+    """gzip 层去掉末尾校验段，manifest.json 与 OCI manifest 都改指向截断后的 blob：
+    文件名、大小与引用全部自洽，只有解压才能发现。"""
     output = tmp_path / "bad.tar.gz"
     image = image_archive(tmp_path / "image.tar", gzip_layers=True)
-    with tarfile.open(image) as archive:
-        members = {m.name: archive.extractfile(m).read() for m in archive.getmembers()}
-    manifest = json.loads(members["manifest.json"])
-    first = manifest[0]["Layers"][0]
-    members[first] = members[first][:-8]
-    manifest[0]["Layers"][0] = f"blobs/sha256/{hashlib.sha256(members[first]).hexdigest()}"
-    members[manifest[0]["Layers"][0]] = members.pop(first)
-    members["manifest.json"] = json.dumps(manifest).encode()
-    image.write_bytes(_tar_bytes(members))
-    assert package(output, image=image).returncode == 2 and not output.exists()
+
+    def truncate(files: dict[str, bytes]) -> None:
+        manifest = json.loads(files["manifest.json"])
+        first = manifest[0]["Layers"][0]
+        blob = files.pop(first)[:-8]
+        digest = hashlib.sha256(blob).hexdigest()
+        manifest[0]["Layers"][0] = f"blobs/sha256/{digest}"
+        files[manifest[0]["Layers"][0]] = blob
+        files["manifest.json"] = json.dumps(manifest).encode()
+        index, oci_manifest = _oci(files)
+        oci_manifest["layers"][0].update(digest=f"sha256:{digest}", size=len(blob))
+        _repoint(files, index, oci_manifest)
+
+    result = package(output, image=_rewrite(image, truncate))
+    assert result.returncode == 2 and not output.exists()
+    assert "不是完整的 tar/gzip" in result.stderr
 
 
 def _rewrite(path: Path, change: Callable[[dict[str, bytes]], None]) -> Path:
@@ -503,6 +511,30 @@ def test_release_rejects_an_oci_manifest_that_disagrees_with_its_layers(
     output = tmp_path / "bad.tar.gz"
     image = _rewrite(image_archive(tmp_path / "image.tar"), _manifest(change))
     assert package(output, image=image).returncode == 2 and not output.exists()
+
+
+INTEGER_SCHEMA = {
+    "index": _index(lambda index: index.__setitem__("schemaVersion", 2.0)),
+    "manifest": _manifest(lambda manifest: manifest.__setitem__("schemaVersion", 2.0)),
+}
+
+
+@pytest.mark.parametrize("change", INTEGER_SCHEMA.values(), ids=INTEGER_SCHEMA.keys())
+def test_release_requires_an_integer_schema_version(
+    tmp_path: Path, change: Callable[[dict[str, bytes]], None]
+) -> None:
+    """Docker 按整数解析 ``schemaVersion``：``2.0`` 在 Python 里等于 2，docker load 却拒绝。
+
+    其余摘要、大小与引用保持自洽；整数 2 是成功对照，失败既不生成新包也不覆盖旧包。
+    """
+    previous = tmp_path / "release.tar.gz"
+    assert package(previous, image=image_archive(tmp_path / "good.tar")).returncode == 0
+    kept = previous.read_bytes()
+    image = _rewrite(image_archive(tmp_path / "image.tar"), change)
+    assert package(previous, image=image).returncode == 2
+    assert previous.read_bytes() == kept
+    fresh = tmp_path / "fresh.tar.gz"
+    assert package(fresh, image=image).returncode == 2 and not fresh.exists()
 
 
 def _manifest_json(edit: Callable[[dict[str, Any]], None]) -> Callable[[dict[str, bytes]], None]:
