@@ -662,6 +662,98 @@ def test_profile_fingerprint_is_stable_and_has_no_secret() -> None:
     assert OPENAI_KEY not in profile_fingerprint(OPENAI)
 
 
+# 加入 Vertex 前（04637cf）由同一 Profile 算出的值：既有四种 Provider 的指纹必须逐字不变，
+# 否则已绑定的会话会被误判为换了模型。
+_PINNED_FINGERPRINTS = {
+    "openai": "sha256:2a771199f07839cc024fce1311f0ff26a8b21b9f45848ce25ba5295402a1e3c3",
+    "gemini": "sha256:683fed884f717313a79babd222f7da45f0265ddabd426868fe96947fa5233958",
+    "deepseek": "sha256:900406a742a3d06f79af1810d320201c3144a1a22edcf20e22f7e231821a65ba",
+    "openai_compatible": (
+        "sha256:ecd976fc9e0b6b8ad87a41308cce96ff0ac873cac71fc9186ef4234f4f9347db"
+    ),
+}
+
+
+def test_existing_provider_fingerprints_are_unchanged() -> None:
+    compatible = _profile(provider="openai_compatible", base_url="https://compat.test/v1")
+    actual = {p.provider: profile_fingerprint(p) for p in (OPENAI, GEMINI, DEEPSEEK, compatible)}
+    assert actual == _PINNED_FINGERPRINTS
+
+
+def _vertex(**overrides: Any) -> ModelProfile:
+    values: dict[str, Any] = {
+        "profile_id": "vertex-main",
+        "provider": "vertex",
+        "model": "gemini-3-flash-preview",
+        "api_key_ref": "env:XIAOWEI_TEST_VERTEX_KEY",
+        "request_timeout_seconds": 30,
+        "max_output_tokens": 256,
+        "max_request_bytes": 64_000,
+        "max_response_bytes": 64_000,
+        "data_policy_id": "synthetic-only",
+        "reasoning_effort": None,
+    }
+    values.update(overrides)
+    return ModelProfile(**values)
+
+
+def test_vertex_profile_needs_only_common_fields() -> None:
+    profile = _vertex()
+    assert profile.provider == "vertex"
+    assert (profile.base_url, profile.api_mode, profile.output_mode) == (None, None, None)
+
+
+@pytest.mark.parametrize(
+    "change",
+    [
+        pytest.param({"base_url": "https://aiplatform.googleapis.com/v1beta1"}, id="base-url"),
+        pytest.param({"api_mode": "chat_completions"}, id="api-mode"),
+        pytest.param({"output_mode": "json_schema"}, id="output-mode"),
+        pytest.param({"reasoning_effort": "low"}, id="reasoning-effort"),
+        pytest.param({"model": ""}, id="empty-model"),
+        pytest.param({"model": "publishers/google/models/x"}, id="slash"),
+        pytest.param({"model": "gemini?alt=sse"}, id="query"),
+        pytest.param({"model": "gemini#frag"}, id="fragment"),
+        pytest.param({"model": ".."}, id="dot-dot"),
+        pytest.param({"model": "gemini:generateContent"}, id="colon"),
+        pytest.param({"model": "gemini 3"}, id="space"),
+    ],
+)
+def test_vertex_profile_rejects_operator_protocol_fields(change: dict[str, Any]) -> None:
+    with pytest.raises(ValidationError):
+        _vertex(**change)
+
+
+@pytest.mark.parametrize("field", ["base_url", "api_mode", "output_mode"])
+def test_existing_providers_still_require_protocol_fields(field: str) -> None:
+    values = OPENAI.model_dump()
+    del values[field]
+    with pytest.raises(ValidationError):
+        ModelProfile(**values)
+
+
+def test_vertex_fingerprint_names_the_fixed_endpoint_and_protocol(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    profile = _vertex()
+    fingerprint = profile_fingerprint(profile)
+    assert fingerprint == profile_fingerprint(_vertex())
+    assert fingerprint not in {profile_fingerprint(p) for p in (OPENAI, GEMINI, DEEPSEEK)}
+    for change in ({"model": "gemini-3-pro-preview"}, {"data_policy_id": "other-policy"}):
+        assert profile_fingerprint(_vertex(**change)) != fingerprint
+    # 固定端点与协议身份属于指纹：改变任一常量都必须得到新的配置版本。
+    monkeypatch.setattr(model_api_module, "VERTEX_PROTOCOL", "v1-generateContent")
+    assert profile_fingerprint(profile) != fingerprint
+    monkeypatch.undo()
+    monkeypatch.setattr(
+        model_api_module, "VERTEX_ENDPOINT", "https://other.googleapis.com/v1beta1/{model}"
+    )
+    assert profile_fingerprint(profile) != fingerprint
+    monkeypatch.undo()
+    monkeypatch.setenv("XIAOWEI_TEST_VERTEX_KEY", "fake-vertex-key")
+    assert "fake-vertex-key" not in fingerprint
+
+
 async def test_model_client_is_closed_on_exit(no_ambient_openai_env: None) -> None:
     endpoint = Endpoint([_chat_text(FINAL), _chat_text(FINAL)])
     async with open_model(GEMINI, transport=endpoint.transport) as opened:

@@ -425,6 +425,12 @@ uv run --locked --extra dev mypy src/xiaowei
 - **审查：** 重点检查是否只用公开 Model 接口、transport 泛化是否改变旧 Provider、并发时是否共享调用映射。
 - **建议提交：** `feat: add guarded Vertex express model adapter`
 
+**V1-A 实施记录（2026-10-07，分支 `claude/vertex-v1a`，只用协议替身）：** 实施前重新核对官方资料，固定入口为
+`POST https://aiplatform.googleapis.com/v1beta1/publishers/google/models/{model}:generateContent`；signature
+只在当前轮校验（V1-B 仍须判定会话追问）；函数结果按文档放在 `functionResponse.response.output`；函数声明用
+`parametersJsonSchema`（与 OpenAPI `parameters` 互斥）。单候选与 `STOP` 终态只在受控 transport 检查一次。
+实际文件与计划一致；新增两处 §11 疑点。独立审查后补齐协议边界：响应与历史函数参数按严格 JSON 解析（`NaN`、`±Infinity` 与溢出为无穷的数字分别在工具执行前、请求发出前拒绝），signature 用标准库按带填充 Base64 结构校验并原样回传，函数名与消息 role 先检查类型再查找；响应缺省 `role` 按官方契约接受，只拒绝显式错误的 role。离线证据、变异与未覆盖项记录在对应 PR，不在这里复制。
+
 ## 6. V1-B：PolicySession 的最小签名白名单与正式应用闭环
 
 **依赖：** V1-A。
@@ -748,6 +754,8 @@ git diff --check
 | 疑点 | 关闭切片 | 未关闭时的行为 |
 | --- | --- | --- |
 | 用户报告的 `VERTEX_NATIVE_OK` 未记录 API 版本与路径；固定 v1beta1 endpoint、`x-goog-api-key`、工具 + `responseJsonSchema` 的真实组合尚未确认 | V1-A fixture + I-V A/B 首次请求检查点 | Vertex Profile 不开放 |
+| 2026-10-07 核对的 GenerationConfig 文档把 `responseMimeType`、`responseJsonSchema` 标为 deprecated，推荐的 `responseFormat` 结构未给全；V1-A 仍按本计划发送前两者 | I-V A/B 首次请求检查点 | 上游拒绝即 Vertex Profile 不开放；改用 `responseFormat` 须先修订设计与 fixture |
+| `FunctionCall.id` 为可选字段：V1-A 有值时作为 `call_id` 并在 functionCall/functionResponse 中原样回传，无值时生成带 `xw-vertex-` 前缀的 ID 且不回传；真实响应是否带 id、是否跨轮唯一未知 | I-V B | 重复 id 在请求前拒绝，不猜测关联 |
 | Gemini 3 thought signature 是否跨轮强制、大小是否落在 65,536 字节内 | V1-B + I-V C | Vertex 会话追问不开放；若真实签名超限，先修订边界 |
 | `reasoning_effort=null` 使用默认思考级别后的耗时、`thoughtsTokenCount` 与请求期限余量 | I-V A/B | 期限命中或余量不足时调整 Profile 并整批重验 |
 | 锁定模型的单响应多函数调用频率 | I-V B，0/20 | 出现即不开放，不部分执行 |
