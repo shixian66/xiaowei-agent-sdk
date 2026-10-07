@@ -16,7 +16,9 @@ import json
 import os
 import re
 import tarfile
+import zlib
 from pathlib import Path
+from typing import IO
 
 ROOT = Path(__file__).resolve().parents[1]
 _APP_TOKEN = "@XW_APP_IMAGE@"  # noqa: S105 - image placeholder, not a secret
@@ -51,27 +53,48 @@ def app_image(code_sha: str) -> str:
 
 
 _BLOB = re.compile(r"^blobs/sha256/([0-9a-f]{64})$")
+_GZIP_MAGIC = b"\x1f\x8b"
 _LEGACY_CONFIG = re.compile(r"^([0-9a-f]{64})\.json$")
 
 
-def _member_sha256(archive: tarfile.TarFile, name: str) -> str:
+def _open_member(archive: tarfile.TarFile, name: str) -> IO[bytes]:
     try:
         stream = archive.extractfile(name)
     except KeyError:
         stream = None
     if stream is None:
         raise ValueError("镜像归档缺少 manifest 引用的内容")
+    return stream
+
+
+def _sha256(stream: IO[bytes]) -> str:
     digest = hashlib.sha256()
     for chunk in iter(lambda: stream.read(1 << 20), b""):
         digest.update(chunk)
     return digest.hexdigest()
 
 
+def _member_sha256(archive: tarfile.TarFile, name: str) -> str:
+    return _sha256(_open_member(archive, name))
+
+
+def _layer_diff_id(archive: tarfile.TarFile, name: str) -> str:
+    """层解压后的摘要（OCI DiffID）；``docker save`` 的层可能未压缩，也可能是 gzip。"""
+    stream = _open_member(archive, name)
+    if stream.read(2) == _GZIP_MAGIC:
+        stream.seek(0)
+        with gzip.GzipFile(fileobj=stream) as unpacked:
+            return _sha256(unpacked)
+    stream.seek(0)
+    return _sha256(stream)
+
+
 def _check_image_archive(path: Path, expected_tag: str, platform: str) -> None:
     """``docker save`` 归档：恰好一个镜像、标签为本次版本、引用内容齐全且摘要相符、平台与声明一致。
 
-    内容寻址的文件（``blobs/sha256/<摘要>``、旧格式 ``<摘要>.json``）按文件名核对；其他层按配置
-    ``rootfs.diff_ids`` 核对。任一不符则服务器 ``docker load`` 会失败或装上错误平台的镜像。
+    内容寻址的文件（``blobs/sha256/<摘要>``、旧格式 ``<摘要>.json``）按文件名核对；每一层再按位置
+    与配置 ``rootfs.diff_ids`` 核对解压后的摘要，层的顺序或对应关系错了也拒绝。任一不符则服务器
+    ``docker load`` 会失败、解出错误内容或装上错误平台的镜像。
     """
     with tarfile.open(path, "r:") as archive:
         member = archive.extractfile("manifest.json")
@@ -96,9 +119,10 @@ def _check_image_archive(path: Path, expected_tag: str, platform: str) -> None:
         # 层数与配置不符时 strict zip 抛 ValueError，同样拒绝。
         for layer, diff_id in zip(layers, config["rootfs"]["diff_ids"], strict=True):
             blob = _BLOB.fullmatch(layer)
-            expected = blob.group(1) if blob else str(diff_id).removeprefix("sha256:")
-            if _member_sha256(archive, layer) != expected:
+            if blob is not None and _member_sha256(archive, layer) != blob.group(1):
                 raise ValueError("镜像层缺失或摘要不符")
+            if f"sha256:{_layer_diff_id(archive, layer)}" != diff_id:
+                raise ValueError("镜像层与配置的 diff_ids 不符")
 
 
 def _image_sha256(path: Path) -> str:
@@ -172,7 +196,16 @@ def main() -> int:
     _validate(parser, args)
     try:
         _write(args.output, _members(args))
-    except (OSError, ValueError, tarfile.TarError, AttributeError, KeyError, TypeError):
+    except (
+        OSError,
+        ValueError,
+        EOFError,
+        zlib.error,
+        tarfile.TarError,
+        AttributeError,
+        KeyError,
+        TypeError,
+    ):
         parser.error("发行归档生成失败")
     return 0
 

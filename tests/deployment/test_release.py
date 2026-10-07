@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import gzip
 import hashlib
 import io
 import json
@@ -52,41 +53,51 @@ def image_archive(
     drop: tuple[str, ...] = (),
     corrupt: tuple[str, ...] = (),
     layers: list[str] | None = None,
+    gzip_layers: bool = False,
+    swap_layers: bool = False,
+    recompress: bool = False,
 ) -> Path:
-    """与 ``docker save`` 同构的最小镜像归档：内容寻址的配置与一层，摘要都真实可校验。
+    """与 ``docker save`` 同构的最小镜像归档：内容寻址的配置与两层，摘要都真实可校验。
 
-    ``drop`` / ``corrupt`` 取 ``"config"``、``"layer"``，用来构造缺失或内容被改的归档；被改的配置
-    仍是同平台的合法 JSON，只有摘要能发现它。``layers`` 覆盖 manifest 中的层列表。
+    ``drop`` / ``corrupt`` 取 ``"config"``、``"layer"``（第一层），构造缺失或内容被改的归档；被改的
+    配置仍是同平台的合法 JSON，只有摘要能发现它。``layers`` 覆盖 manifest 中的层列表。
+    ``gzip_layers`` 以 gzip 存层（文件名是压缩后摘要，``diff_ids`` 是解压后摘要）；``swap_layers``
+    只交换 manifest 中两层的顺序，层文件与配置不变；``recompress`` 把第一层换成同内容、不同压缩
+    级别的 gzip（``diff_ids`` 仍对，只有文件名摘要不符）。
     """
-    layer = _tar_bytes({"etc/xiaowei-marker": b"layer"})
-    layer_hex = hashlib.sha256(layer).hexdigest()
+    raw = [_tar_bytes({f"etc/xiaowei-{name}": name.encode()}) for name in ("a", "b")]
+    stored = [gzip.compress(layer, mtime=0) if gzip_layers else layer for layer in raw]
+    names = [f"blobs/sha256/{hashlib.sha256(blob).hexdigest()}" for blob in stored]
     os_name, architecture = platform.split("/")
     config = json.dumps(
         {
             "architecture": architecture,
             "os": os_name,
-            "rootfs": {"type": "layers", "diff_ids": [f"sha256:{layer_hex}"]},
+            "rootfs": {
+                "type": "layers",
+                "diff_ids": [f"sha256:{hashlib.sha256(layer).hexdigest()}" for layer in raw],
+            },
         }
     ).encode()
-    config_hex = hashlib.sha256(config).hexdigest()
-    blobs = {f"blobs/sha256/{config_hex}": config, f"blobs/sha256/{layer_hex}": layer}
-    for kind, name in (
-        ("config", f"blobs/sha256/{config_hex}"),
-        ("layer", f"blobs/sha256/{layer_hex}"),
-    ):
+    config_name = f"blobs/sha256/{hashlib.sha256(config).hexdigest()}"
+    blobs = {config_name: config, **dict(zip(names, stored, strict=True))}
+    if recompress:
+        blobs[names[0]] = gzip.compress(raw[0], compresslevel=1, mtime=0)
+        assert blobs[names[0]] != stored[0]
+    for kind, name in (("config", config_name), ("layer", names[0])):
         if kind in corrupt:
             blobs[name] = (
                 config.replace(b"{", b'{"tampered": true, ', 1)
                 if kind == "config"
-                else layer + b"x"
+                else blobs[name] + b"x"
             )
         if kind in drop:
             del blobs[name]
     manifest = [
         {
-            "Config": f"blobs/sha256/{config_hex}",
+            "Config": config_name,
             "RepoTags": [APP_IMAGE] if tags is None else tags,
-            "Layers": [f"blobs/sha256/{layer_hex}"] if layers is None else layers,
+            "Layers": layers if layers is not None else names[::-1] if swap_layers else names,
         }
     ]
     path.write_bytes(_tar_bytes({"manifest.json": json.dumps(manifest).encode(), **blobs}))
@@ -209,7 +220,43 @@ def test_release_rejects_an_image_archive_with_missing_or_corrupt_content(
     assert result.returncode == 2 and not output.exists()
 
 
-@pytest.mark.parametrize("layers", [[], ["blobs/sha256/" + "e" * 64] * 2])
+@pytest.mark.parametrize("gzip_layers", [False, True], ids=["plain", "gzip"])
+def test_release_checks_each_layer_against_its_diff_id(tmp_path: Path, gzip_layers: bool) -> None:
+    """两层都完整、各自摘要正确、数量相同，只交换顺序：配置里的 ``diff_ids`` 对不上，必须拒绝。
+
+    gzip 层按解压后的摘要比对（OCI DiffID 的定义）；正确顺序是成功对照。
+    """
+    good = tmp_path / "good.tar.gz"
+    image = image_archive(tmp_path / "good.tar", gzip_layers=gzip_layers)
+    assert package(good, image=image).returncode == 0
+    swapped = tmp_path / "swapped.tar.gz"
+    image = image_archive(tmp_path / "swapped.tar", gzip_layers=gzip_layers, swap_layers=True)
+    assert package(swapped, image=image).returncode == 2 and not swapped.exists()
+
+
+def test_release_checks_the_blob_name_of_a_compressed_layer(tmp_path: Path) -> None:
+    """同内容换了压缩方式：DiffID 不变，但文件不再是 manifest 指向的那个 blob。"""
+    output = tmp_path / "bad.tar.gz"
+    image = image_archive(tmp_path / "image.tar", gzip_layers=True, recompress=True)
+    assert package(output, image=image).returncode == 2 and not output.exists()
+
+
+def test_release_rejects_a_truncated_gzip_layer(tmp_path: Path) -> None:
+    output = tmp_path / "bad.tar.gz"
+    image = image_archive(tmp_path / "image.tar", gzip_layers=True)
+    with tarfile.open(image) as archive:
+        members = {m.name: archive.extractfile(m).read() for m in archive.getmembers()}
+    manifest = json.loads(members["manifest.json"])
+    first = manifest[0]["Layers"][0]
+    members[first] = members[first][:-8]
+    manifest[0]["Layers"][0] = f"blobs/sha256/{hashlib.sha256(members[first]).hexdigest()}"
+    members[manifest[0]["Layers"][0]] = members.pop(first)
+    members["manifest.json"] = json.dumps(manifest).encode()
+    image.write_bytes(_tar_bytes(members))
+    assert package(output, image=image).returncode == 2 and not output.exists()
+
+
+@pytest.mark.parametrize("layers", [[], ["blobs/sha256/" + "e" * 64] * 3])
 def test_release_rejects_layers_that_do_not_match_the_config(
     tmp_path: Path, layers: list[str]
 ) -> None:
@@ -392,5 +439,7 @@ def test_real_docker_save_packages_and_loads_back(runtime_image: str, tmp_path: 
             "{{.Os}}/{{.Architecture}}",
         )
         assert loaded.returncode == 0 and loaded.stdout.strip() == metadata["platform"] == platform
+        # docker load 解包失败时仍可能退出 0：再运行一次入口，与发布流程一致。
+        assert docker("run", "--rm", metadata["images"]["xiaowei"], "--help").returncode == 0
     finally:
         docker("image", "rm", "-f", APP_IMAGE)
