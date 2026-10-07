@@ -1557,26 +1557,16 @@ async def test_lock_watch_stop_timeout_returns_failure(
 @pytest.mark.parametrize(
     ("changes", "path"),
     [
-        ({"listen_host": "0.0.0.0"}, "listen_host"),  # noqa: S104 - 断言被拒绝
         ({"projection_bytes": {"model": 1}}, "projection_bytes"),
         ({"access": {"policy_version": "p1", "grants": {"a": ["local/drop_table"]}}}, "<root>"),
-        ({"web": {**serve_config(1)["web"], "allowed_origins": ["http://127.0.0.1:9"]}}, "<root>"),
-        # 正式监听只有 HTTP：同一地址的 HTTPS Origin 不能代替它（浏览器实际发送 http://）。
-        (
-            {"web": {**serve_config(1)["web"], "allowed_origins": ["https://127.0.0.1:8501"]}},
-            "<root>",
-        ),
         ({"storage": {**serve_config(1)["storage"], "request_retention_seconds": 7200}}, "<root>"),
         ({"feishu": feishu_config(users={"ou_op": OPERATOR})}, "<root>"),
         ({"storage": {**serve_config(1)["storage"], "digest_key_ref": "plain-key"}}, "storage"),
         ({"unexpected": 1}, "unexpected"),
     ],
     ids=[
-        "public listen",
         "missing audiences",
         "unknown tool",
-        "listen not allowed",
-        "https listen origin",
         "retention",
         "shared subject",
         "secret not ref",
@@ -1665,22 +1655,21 @@ def test_valid_configuration_round_trips_through_json(tmp_path: Path) -> None:
 @pytest.mark.parametrize(
     ("host", "origins"),
     [
-        ("127.0.0.1", ["http://127.0.0.1:8501"]),
-        ("127.0.0.1", ["http://127.0.0.1:8501", "https://127.0.0.1:8443"]),
-        ("::1", ["http://[::1]:8501"]),
+        ("0.0.0.0", None),  # noqa: S104 - 内网访问：允许监听所有地址
+        ("172.20.0.8", ["http://127.0.0.1:9"]),
+        ("127.0.0.1", ["https://127.0.0.1:8501"]),
     ],
 )
-def test_listen_origin_must_be_the_actual_http_address(
-    tmp_path: Path, host: str, origins: list[str]
+def test_any_listen_host_and_legacy_origins_are_accepted(
+    tmp_path: Path, host: str, origins: list[str] | None
 ) -> None:
-    web = {**serve_config(1)["web"], "allowed_origins": origins}
+    web = {**serve_config(1)["web"]}
+    web.pop("allowed_origins", None)
+    if origins is not None:
+        web["allowed_origins"] = origins
     file = tmp_path / "xiaowei.json"
     file.write_text(json.dumps(serve_config(8501, listen_host=host, web=web)), encoding="utf-8")
-    assert runtime.load_config(file).web.allowed_origins == frozenset(origins)
-    only_https = {**web, "allowed_origins": [o.replace("http://", "https://") for o in origins]}
-    file.write_text(json.dumps(serve_config(8501, listen_host=host, web=only_https)), "utf-8")
-    with pytest.raises(runtime.ConfigError, match="http://"):
-        runtime.load_config(file)
+    assert runtime.load_config(file).listen_host == host
 
 
 def test_unreadable_configuration(tmp_path: Path) -> None:

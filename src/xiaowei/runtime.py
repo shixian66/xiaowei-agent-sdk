@@ -127,7 +127,6 @@ from xiaowei.web import create_web_app
 
 logger = logging.getLogger(__name__)
 
-_LOOPBACK = frozenset({"127.0.0.1", "::1"})
 _CHECKS_PER_LISTED_OBJECT = 5
 _RUNTIME_CLOSE_BOUND_SECONDS = 25
 _STOP_MARGIN_SECONDS = 5
@@ -254,13 +253,6 @@ class ServeConfig(_Config):
             raise ValueError("targets 中的集群 ID 不能重复")
         return value
 
-    @field_validator("listen_host")
-    @classmethod
-    def _loopback(cls, value: str) -> str:
-        if value not in _LOOPBACK:
-            raise ValueError("首版只监听 loopback 地址")
-        return value
-
     @field_validator("projection_bytes")
     @classmethod
     def _all_audiences(cls, value: dict[Audience, int]) -> dict[Audience, int]:
@@ -279,10 +271,6 @@ class ServeConfig(_Config):
         storage = self.storage
         if storage.request_retention_seconds > storage.evidence_retention_seconds:
             raise ValueError("可重发结果的保留期不得长于证据保留期")
-        # 正式监听不配置 TLS，浏览器发送的 Origin 必然是 http://；同址 HTTPS 不能代替它。
-        netloc = f"[{self.listen_host}]" if ":" in self.listen_host else self.listen_host
-        if f"http://{netloc}:{self.listen_port}" not in self.web.allowed_origins:
-            raise ValueError("web.allowed_origins 必须包含本进程实际监听的 http://host:port")
         if self.feishu is not None:
             if self.web.operator_id in self.feishu.users.values():
                 raise ValueError("Web 操作者与飞书用户不能使用同一个内部 subject")
@@ -455,9 +443,6 @@ def validate_config(
     if container_port is not None:
         if not 1 <= container_port <= 65535 or container_port != config.listen_port:
             raise ConfigError("listen_port: 与容器发布端口不一致")
-        origin = f"http://127.0.0.1:{container_port}"
-        if config.listen_host != "127.0.0.1" or origin not in config.web.allowed_origins:
-            raise ConfigError("web.allowed_origins: 容器部署必须包含对应的 HTTP loopback 来源")
     if stop_grace_seconds is not None:
         if stop_grace_seconds < minimum_stop_grace_seconds(config):
             raise ConfigError("shutdown_timeout_seconds: 容器停止宽限不足")

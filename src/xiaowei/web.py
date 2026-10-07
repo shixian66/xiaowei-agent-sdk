@@ -1,10 +1,10 @@
-"""本机同源 Web 入口：一个静态页面与四个 JSON API，业务全部经共享 ``ChannelService``。
+"""Web 入口：一个静态页面与四个 JSON API，业务全部经共享 ``ChannelService``。
 
 - 身份：固定操作者（``WebConfig.operator_id``）；会话语境是随机、``HttpOnly``、``SameSite=Strict``
   的 cookie，只由页面换发，数据库只存其带密钥摘要；API 写操作缺少 cookie 时拒绝，不在失败响应里
   换发。客户端不能提交 session、subject 或 target。
-- 同源：每个请求的 Host 必须与允许地址逐字相同（不做 DNS 解析或别名归一），非 GET 请求还必须带
-  同一来源的 Origin 与 JSON 正文；不开放 CORS。
+- 地址：内网可用任意 IP、域名或经代理访问，不校验 Host/Origin；非 GET 请求必须是 JSON 正文，
+  不开放 CORS，其他网站的脚本读不到响应。
 - 正文：先核对 ``Content-Length``，超限在读取前拒绝；读取时按块累计，伪造长度、缺少长度或分块
   传输在越过上限时停止，不缓冲完整正文。
 - 显示：API 只返回 JSON；页面脚本只用 ``textContent`` 与 DOM API，表格只由受信 ``DeliveryFact``
@@ -115,12 +115,10 @@ class _BodyTooLargeError(HTTPException):
 
 
 class _Guard:
-    """Host/Origin/JSON 与正文上限检查；在路由与正文解析之前执行。"""
+    """JSON 与正文上限检查；在路由与正文解析之前执行。"""
 
-    def __init__(self, app: ASGIApp, *, origins: frozenset[str], max_body_bytes: int) -> None:
+    def __init__(self, app: ASGIApp, *, max_body_bytes: int) -> None:
         self._app = app
-        # Host 头的允许值就是允许地址的 netloc；同源要求 Origin 的 netloc 与本次 Host 相同。
-        self._origin_for_host = {origin.split("://", 1)[1]: origin for origin in origins}
         self._limit = max_body_bytes
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
@@ -147,18 +145,8 @@ class _Guard:
 
     def _reject(self, scope: Scope) -> tuple[int, str] | None:
         headers: list[tuple[bytes, bytes]] = scope["headers"]
-        hosts = [value for name, value in headers if name == b"host"]
-        host = hosts[0].decode("latin-1") if len(hosts) == 1 else None
-        if host is None or host not in self._origin_for_host:
-            return 400, "Host 不被允许"
-        origins = [value.decode("latin-1") for name, value in headers if name == b"origin"]
-        same_origin = origins == [self._origin_for_host[host]]
         if scope["method"] in _SAFE_METHODS:
-            if origins and not same_origin:
-                return 403, "只接受同源请求"
             return None
-        if not same_origin:
-            return 403, "只接受同源请求"
         types = [value for name, value in headers if name == b"content-type"]
         if len(types) != 1 or types[0].split(b";", 1)[0].strip().lower() != b"application/json":
             return 415, "请求正文必须是 JSON"
@@ -233,7 +221,7 @@ def create_web_app(
     assets = {name: (_STATIC / name).read_bytes() for name in _ASSETS}
     readiness = service.results.store.readiness
     app = FastAPI(docs_url=None, redoc_url=None, openapi_url=None)
-    app.add_middleware(_Guard, origins=config.allowed_origins, max_body_bytes=config.max_body_bytes)
+    app.add_middleware(_Guard, max_body_bytes=config.max_body_bytes)
 
     def ref(conversation: str, request_id: str) -> RequestRef:
         return RequestRef(

@@ -2,7 +2,7 @@
 
 - ``test_formal_command_in_chrome``：子进程运行正式命令 ``xiaowei serve``（配置文件 + 环境变量
   引用）。模型端点是本机已关闭的 HTTPS 端口，验证页面、脚本、cookie、模型失败固定回执、刷新恢复、
-  新建会话、脚本未加载时的提交与 Host 拒绝。不能证明成功轮次（需要真实模型，Task 9）。
+  新建会话、脚本未加载时的提交与其他地址访问。不能证明成功轮次（需要真实模型，Task 9）。
 - ``test_formal_assembly_turns_in_chrome``：同一正式装配 ``runtime.serve``（实例锁、启动恢复、真实
   Uvicorn、StarRocks 工具与治理）在进程内运行，只把模型换成 HTTP mock 脚本、StarRocks 换成驱动替身，
   验证诊断、查询表格与模型调用中刷新。CLI 参数、环境变量强制与信号由前一个用例覆盖。
@@ -95,13 +95,12 @@ async def test_formal_command_in_chrome(
             history = await blank.send("Page.getNavigationHistory")
             assert all(CANARY not in entry["url"] for entry in history["entries"])
 
-            # 其他 Host（localhost 别名不放行）：在路由前拒绝，不换发 cookie。
+            # 其他地址（这里用 localhost 代表内网 IP/域名）同样能打开页面并换发 cookie。
             alias = await chrome.page()
             await alias.navigate(f"http://localhost:{PORT}/")
-            body = await alias.evaluate("document.body.textContent")
-            assert "Host 不被允许" in body
+            assert await alias.evaluate("document.getElementById('send') !== null")
             cookies = await alias.send("Network.getCookies", {"urls": [f"http://localhost:{PORT}"]})
-            assert cookies["cookies"] == []
+            assert [c["name"] for c in cookies["cookies"]] == [COOKIE]
         process.terminate()
         out, err = process.communicate(timeout=60)
     assert process.returncode == 0

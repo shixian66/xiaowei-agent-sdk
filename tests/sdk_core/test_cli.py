@@ -579,10 +579,11 @@ def test_formal_serve_from_a_fresh_database(entry: str, postgres_url: URL, tmp_p
             assert "模型未能完成本轮" in body["delivery"]["content"]
             assert client.get("/api/turns/r1").json()["state"] == "failed"
             assert client.post("/api/sessions", json={}, headers=origin).status_code == 200
-            # 保护性失败：其他 Host 与跨源写入在路由前拒绝。
-            assert client.get("/", headers={"host": "evil.test"}).status_code == 400
-            hostile = client.post("/api/sessions", json={}, headers={"origin": "http://evil.test"})
-            assert hostile.status_code == 403
+            # 内网访问：其他 Host 与 Origin 照常服务；非 JSON 写入仍在路由前拒绝。
+            assert client.get("/", headers={"host": "172.20.0.8"}).status_code == 200
+            other = client.post("/api/sessions", json={}, headers={"origin": "http://172.20.0.8"})
+            assert other.status_code == 200
+            assert client.post("/api/sessions", content=b"{}").status_code == 415
 
         # 第二个实例：另一端口、同一数据库，被实例锁拒绝。
         other = Deployment(postgres_url, tmp_path / "second")

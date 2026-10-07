@@ -55,6 +55,8 @@ def _write_env(directory: Path, **overrides: str) -> dict[str, str]:
     postgres_password = "pg $ # space ' quote"  # noqa: S105 - 合成特殊字符测试值
     values = {
         "XW_WEB_PORT": "18501",
+        # 本机测试只绑 loopback；发行默认 0.0.0.0 由静态与渲染用例分别验证。
+        "XW_WEB_BIND_HOST": "127.0.0.1",
         "XW_STOP_GRACE_SECONDS": "90",
         "XW_CONFIG_FILE": "./xiaowei.json",
         "XW_CERTS_DIR": "./certs",
@@ -244,7 +246,7 @@ def test_compose_has_two_services_and_keeps_operator_settings_external(tmp_path:
         {
             "target": "${XW_WEB_PORT:-8501}",
             "published": "${XW_WEB_PORT:-8501}",
-            "host_ip": "127.0.0.1",
+            "host_ip": "${XW_WEB_BIND_HOST:-0.0.0.0}",
             "protocol": "tcp",
         }
     ]
@@ -271,7 +273,7 @@ def test_compose_resolves_non_default_parameters_and_literal_secrets(tmp_path: P
     app = rendered["services"]["xiaowei"]
     postgres = rendered["services"]["postgres"]
     assert rendered["name"] == expected["XW_PROJECT_NAME"]
-    assert app["ports"][0]["host_ip"] == "127.0.0.1"
+    assert app["ports"][0]["host_ip"] == expected["XW_WEB_BIND_HOST"]
     assert app["ports"][0]["published"] == expected["XW_WEB_PORT"]
     assert app["stop_grace_period"] == "1m30s"
     for name in ("XW_DIGEST_KEY", "XW_MODEL_API_KEY", "XW_STARROCKS_PASSWORD"):
@@ -285,6 +287,28 @@ def test_compose_resolves_non_default_parameters_and_literal_secrets(tmp_path: P
     assert postgres["environment"]["POSTGRES_PASSWORD"] == expected["XW_POSTGRES_PASSWORD"].replace(
         "$", "$$"
     )
+
+
+def test_compose_publishes_the_web_port_to_all_addresses_by_default(tmp_path: Path) -> None:
+    """不设 ``XW_WEB_BIND_HOST`` 时内网其他机器可以访问；设成 127.0.0.1 可收回到本机。"""
+    directory, _ = _release(tmp_path)
+    _write_env(directory)
+    env_file = directory / ".env"
+    lines = env_file.read_text(encoding="utf-8").splitlines()
+    env_file.write_text(
+        "\n".join(line for line in lines if not line.startswith("XW_WEB_BIND_HOST=")) + "\n",
+        encoding="utf-8",
+    )
+    result = subprocess.run(  # noqa: S603 - 只执行探测后的 Compose CLI
+        [*_compose_command(), "config", "--format", "json"],
+        cwd=directory,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode == 0, "docker compose config failed"
+    ports = json.loads(result.stdout)["services"]["xiaowei"]["ports"]
+    assert ports[0]["host_ip"] == "0.0.0.0"  # noqa: S104 - 内网访问的发行默认值
 
 
 def test_missing_config_bind_fails_without_creating_a_host_directory(
@@ -356,8 +380,9 @@ def test_formal_compose_entry_success_failure_network_and_signal(
             "feishu": "disabled",
             "status": "ready",
         }
-        assert _http(port, Host="invalid.example")[0] == 400
-        assert _http(port, Origin="http://invalid.example")[0] == 403
+        # 内网访问：其他 Host / Origin 不再拒绝。
+        assert _http(port, Host="172.20.0.8")[0] == 200
+        assert _http(port, Origin="http://172.20.0.8")[0] == 200
 
         app_inspect = json.loads(docker("inspect", app_id).stdout)[0]
         pg_inspect = json.loads(docker("inspect", pg_id).stdout)[0]

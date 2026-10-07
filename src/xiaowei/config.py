@@ -122,50 +122,20 @@ class MCPServerConfig(BaseModel):
         return f"{self.server_id}/{remote_name}"
 
 
-_WEB_LOOPBACK_HOSTS = frozenset({"127.0.0.1", "::1", "localhost"})
-# 浏览器在 Host 与 Origin 中省略 scheme 的默认端口，按字面匹配时这样的地址永远对不上。
-_WEB_DEFAULT_PORTS = {"http": 80, "https": 443}
-
-
 class WebConfig(BaseModel):
-    """本机 Web 入口：固定操作者、允许的同源地址、cookie ``Secure`` 与请求体上限。
+    """Web 入口：固定操作者、cookie ``Secure`` 与请求体上限。
 
-    ``allowed_origins`` 写成规范形式 ``scheme://host:port``（端口必须显式）；请求的 Host 与 Origin
-    按字面精确匹配，不做 DNS 解析或别名归一，尾点、大小写变体、其他 IP 写法都不放行。端口不能是
-    0 或该 scheme 的默认端口（浏览器会省略后者），否则没有请求能匹配。首版只允许 loopback 地址；
-    经 HTTPS/SSH 入口使用时由 G6 决定是否扩展并打开 ``secure_cookie``。
+    内网可用 IP、域名或经代理访问，不按 Host/Origin 限制来源；所有访问者共用 ``operator_id`` 的
+    身份与授权（已接受的风险，见 ARCHITECTURE）。``allowed_origins`` 已不使用，保留只为旧配置
+    不必修改。
     """
 
     model_config = ConfigDict(frozen=True, extra="forbid")
 
     operator_id: Annotated[str, StringConstraints(min_length=1, max_length=200)]
-    allowed_origins: frozenset[str] = Field(min_length=1)
+    allowed_origins: frozenset[str] = frozenset()
     secure_cookie: bool
     max_body_bytes: int = Field(gt=0, le=1_048_576)
-
-    @field_validator("allowed_origins")
-    @classmethod
-    def _canonical_loopback(cls, value: frozenset[str]) -> frozenset[str]:
-        for origin in value:
-            parts = urlsplit(origin)
-            try:
-                port = parts.port
-            except ValueError:
-                port = None
-            host = parts.hostname
-            netloc = f"[{host}]" if host == "::1" else host
-            if (
-                parts.scheme not in ("http", "https")
-                or host not in _WEB_LOOPBACK_HOSTS
-                or port is None
-                or origin != f"{parts.scheme}://{netloc}:{port}"
-            ):
-                raise ValueError("允许的地址必须是 loopback 的规范 scheme://host:port")
-            if port == 0 or port == _WEB_DEFAULT_PORTS[parts.scheme]:
-                raise ValueError("允许的地址端口不能为 0 或 scheme 的默认端口")
-        if len({origin.split("://", 1)[1] for origin in value}) != len(value):
-            raise ValueError("同一 host:port 只能对应一个 scheme")
-        return value
 
 
 _GROUP_MIN_STOP_SECONDS = 7

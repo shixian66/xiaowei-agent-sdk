@@ -45,7 +45,7 @@ services:
     ports:
       - target: "${XW_WEB_PORT:-8501}"
         published: "${XW_WEB_PORT:-8501}"
-        host_ip: 127.0.0.1
+        host_ip: "${XW_WEB_BIND_HOST:-0.0.0.0}"
         protocol: tcp
     volumes:
       - type: bind

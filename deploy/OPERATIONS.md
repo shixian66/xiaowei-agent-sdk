@@ -1,8 +1,9 @@
 # 小维容器运维
 
 本说明适用于发行包里的 `compose.yaml` 与 `release.json`。部署只有小维和 PostgreSQL 两个容器；
-Web 端口只发布到宿主机 `127.0.0.1`，PostgreSQL 不发布端口。Host/Origin 校验只防浏览器跨站
-和 DNS rebinding，访问范围仍由端口发布与服务器网络保证。
+Web 端口默认对服务器所有网卡开放，内网电脑用 `http://服务器IP:8501` 直接访问；PostgreSQL 不发布
+端口。**Web 没有登录：能访问这个端口的人都以 `web.operator_id` 的身份和权限查询。** 访问范围由
+服务器网络和防火墙决定；只想本机访问时在 `.env` 设 `XW_WEB_BIND_HOST=127.0.0.1`。
 
 建议使用固定目录 `/opt/xiaowei/current`。`.env`、`xiaowei.json` 与 `certs/` 由操作者持有，升级
 只替换 `compose.yaml` 和 `release.json`；升级前留存的旧 JSON 配置（`.env` 的 `XW_CONFIG_FILE`
@@ -60,8 +61,8 @@ tar -xzf "/opt/xiaowei/xiaowei-${release_sha}-linux-amd64.tar.gz" \
 1. 把发行包展开到固定目录，核对 `release.json` 的平台、代码 SHA 与两个镜像 digest。
 2. 仅首次复制 `.env.example` 为 `.env`、`xiaowei.example.json` 为 `xiaowei.json`，并创建
    `certs/`。以后不能用新包里的模板覆盖它们。
-3. JSON 中的 `listen_host` 保持 `127.0.0.1`；`listen_port`、
-   `web.allowed_origins` 与 `.env` 的 `XW_WEB_PORT` 使用同一端口。自定义 CA 放在 `certs/`，
+3. JSON 的 `listen_port` 与 `.env` 的 `XW_WEB_PORT` 使用同一端口。旧配置里的
+   `web.allowed_origins` 已不使用，可以保留也可以删掉。自定义 CA 放在 `certs/`，
    JSON 写容器路径 `/etc/xiaowei/certs/<文件>`。
 4. `.env` 只允许部署管理员读取；配置和 CA 须允许容器 UID 65532 只读。
 
@@ -132,13 +133,15 @@ docker compose --env-file .env run --rm --no-deps xiaowei model check
 通过只说明这个 Profile 能完成合成数据上的工具往返和结构化回答，不代表正式提示词下的工具选择
 与回答质量合格。
 
-操作者电脑通过 SSH 转发访问；调整端口时同时调整 `.env`、JSON 和转发命令：
+启动后在内网电脑的浏览器打开 `http://服务器IP:8501`（端口按 `XW_WEB_PORT`）。用 IP、域名或经
+公司反向代理访问都可以，不需要在配置里登记地址。如果设了 `XW_WEB_BIND_HOST=127.0.0.1`，改用 SSH
+转发：
 
 ```sh
-ssh -N -L 127.0.0.1:8501:127.0.0.1:8501 <获准服务器>
+ssh -N -L 127.0.0.1:8501:127.0.0.1:8501 <服务器>
 ```
 
-不得把 Compose 发布行改成省略 host IP 的 `8501:8501`，也不得使用 host network。
+不要使用 host network。
 
 ## 增加第二个 StarRocks 目标
 
@@ -204,7 +207,7 @@ docker compose --env-file .env up -d
 docker compose --env-file .env ps
 ```
 
-然后经 SSH 转发检查 `/readyz`。本机 P3-B 只验证了停止小维服务后用指定服务名执行
+然后打开 `http://服务器IP:8501/readyz` 检查。本机 P3-B 只验证了停止小维服务后用指定服务名执行
 `up -d xiaowei`；全栈停止后执行上面的 `up -d`、真实宿主机或 Docker 重启仍须在 P3-C 实测。
 
 ## 普通升级与回退（schema 不变）
