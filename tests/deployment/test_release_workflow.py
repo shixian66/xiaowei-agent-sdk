@@ -67,7 +67,7 @@ def test_release_builds_the_image_into_an_offline_file() -> None:
     reload = commands.index('docker image rm "$image"')
     assert commands.index("scripts/package_release.py") < reload
     assert reload < commands.index('docker load --input "$image_file"')
-    assert "{{.Os}}/{{.Architecture}}')\" = \"$XW_PLATFORM\"" in commands
+    assert '{{.Os}}/{{.Architecture}}\')" = "$XW_PLATFORM"' in commands
     assert 'archive="$RUNNER_TEMP/xiaowei-$GITHUB_SHA-linux-amd64.tar.gz"' in commands
     assert '"$XW_POSTGRES_IMAGE"' in commands
 
