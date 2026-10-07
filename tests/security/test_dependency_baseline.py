@@ -32,8 +32,10 @@ _SRC = _ROOT / "src"
 # （``openai-agents[sqlalchemy]``）；P1-B Task 2 按计划加入 StarRocks 驱动 ``asyncmy``（精确钉版）；
 # P1-B Task 7 加入飞书 ``lark-channel-sdk``（精确钉版）。P1-B Task 8 切换正式入口：wheel 只含新包，
 # 旧包专用的 ``alembic`` 移出生产依赖，只留在 dev（旧测试）与 legacy（旧 Compose 镜像）。
+# Vertex V1-A 把 ``src/xiaowei`` 已直接导入的 ``httpx2`` 显式声明，不再依赖 SDK 的传递依赖。
 _EXPECTED_RUNTIME_DEPENDENCIES = frozenset(
     {
+        "httpx2",
         "pydantic",
         "sqlglot",
         "sqlalchemy",

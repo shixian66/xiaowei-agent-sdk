@@ -12,7 +12,8 @@ Agent Loop、工具续轮与最终输出校验全部由 SDK ``Runner`` 完成；
 import asyncio
 import hashlib
 import json
-from collections.abc import AsyncIterator
+import re
+from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
 from dataclasses import replace
 from typing import Annotated, Literal, cast
@@ -39,7 +40,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 
 from xiaowei.config import is_secret_ref, resolve_secret_ref
 
-Provider = Literal["openai", "gemini", "deepseek", "openai_compatible"]
+Provider = Literal["openai", "gemini", "deepseek", "openai_compatible", "vertex"]
 
 # 推理强度只接受各供应商公开文档列出的值；真实 API 尚未逐一验证，未列出的供应商不开放。
 _REASONING_EFFORTS: dict[Provider, frozenset[str]] = {
@@ -47,7 +48,17 @@ _REASONING_EFFORTS: dict[Provider, frozenset[str]] = {
     "gemini": frozenset({"low", "medium", "high"}),
     "deepseek": frozenset(),
     "openai_compatible": frozenset(),
+    # 首版不发送 thinking 配置，使用锁定模型的默认思考级别。
+    "vertex": frozenset(),
 }
+
+# Vertex 原生 API Key 模式的固定入口与协议身份由受信代码给出，操作者不能改写；二者进入指纹。
+VERTEX_ENDPOINT = (
+    "https://aiplatform.googleapis.com/v1beta1/publishers/google/models/{model}:generateContent"
+)
+VERTEX_PROTOCOL = "v1beta1-generateContent"
+# 模型 ID 只作为一个 URL 路径段：不含斜杠、冒号、查询、片段或空白，也不是 ``.``/``..``。
+_VERTEX_MODEL_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}")
 
 _JSON = "application/json"
 _CLIENT_CLOSE_TIMEOUT_SECONDS = 5.0
@@ -68,11 +79,12 @@ class ModelProfile(BaseModel):
 
     profile_id: str = Field(min_length=1)
     provider: Provider
-    base_url: str
-    api_mode: Literal["responses", "chat_completions"]
+    # 以下三项只用于 OpenAI 协议族的 Provider；Vertex 的端点与协议固定，必须省略。
+    base_url: str | None = None
+    api_mode: Literal["responses", "chat_completions"] | None = None
     model: str = Field(min_length=1)
     api_key_ref: str
-    output_mode: Literal["json_schema", "json_object"]
+    output_mode: Literal["json_schema", "json_object"] | None = None
     request_timeout_seconds: float = Field(gt=0, allow_inf_nan=False)
     max_output_tokens: PositiveInt
     max_request_bytes: PositiveInt
@@ -82,7 +94,9 @@ class ModelProfile(BaseModel):
 
     @field_validator("base_url")
     @classmethod
-    def _trusted_https_endpoint(cls, value: str) -> str:
+    def _trusted_https_endpoint(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
         try:
             url = httpx2.URL(value)
         except httpx2.InvalidURL:
@@ -102,6 +116,16 @@ class ModelProfile(BaseModel):
 
     @model_validator(mode="after")
     def _supported_combination(self) -> "ModelProfile":
+        protocol_fields = (self.base_url, self.api_mode, self.output_mode)
+        if self.provider == "vertex":
+            if any(value is not None for value in protocol_fields):
+                raise ValueError(
+                    "vertex 的端点与协议由程序固定，不能填写 base_url/api_mode/output_mode"
+                )
+            if not _VERTEX_MODEL_ID.fullmatch(self.model):
+                raise ValueError("vertex 模型 ID 只能包含字母、数字、点、下划线和连字符")
+        elif any(value is None for value in protocol_fields):
+            raise ValueError(f"{self.provider} 必须填写 base_url、api_mode 与 output_mode")
         if self.api_mode == "responses" and self.provider not in ("openai", "openai_compatible"):
             raise ValueError(f"{self.provider} 不提供 Responses 协议")
         if self.output_mode == "json_object" and self.api_mode != "chat_completions":
@@ -128,7 +152,11 @@ class ModelResponseRejectedError(ModelAPIRejectedError):
 
 def profile_fingerprint(profile: ModelProfile) -> str:
     """Profile 的稳定配置版本，用于把会话绑定到“端点 + 协议 + 模型”组合。"""
-    canonical = json.dumps(profile.model_dump(mode="json"), sort_keys=True, ensure_ascii=False)
+    identity = profile.model_dump(mode="json")
+    if profile.provider == "vertex":
+        # 端点与协议不在 Profile 中，由固定常量补入；既有 Provider 的指纹保持原样。
+        identity |= {"vertex_endpoint": VERTEX_ENDPOINT, "vertex_protocol": VERTEX_PROTOCOL}
+    canonical = json.dumps(identity, sort_keys=True, ensure_ascii=False)
     return "sha256:" + hashlib.sha256(canonical.encode()).hexdigest()
 
 
@@ -202,18 +230,44 @@ async def open_model(
     transport）；限额与请求头约束始终生效。
     """
     api_key = resolve_secret_ref(profile.api_key_ref)
+    vertex = profile.provider == "vertex"
     guarded = _GuardedTransport(
         # 证书与代理不从环境读取；外层 AsyncClient 的 trust_env 不作用于这里创建的 transport。
         transport or httpx2.AsyncHTTPTransport(retries=0, trust_env=False),
-        authorization=f"Bearer {api_key.get_secret_value()}",
+        # Vertex 的 Key 只放在专用请求头，不进入 URL 或请求正文。
+        auth_header=(
+            ("x-goog-api-key", api_key.get_secret_value())
+            if vertex
+            else ("authorization", f"Bearer {api_key.get_secret_value()}")
+        ),
         max_request_bytes=profile.max_request_bytes,
         max_response_bytes=profile.max_response_bytes,
-        require_complete_chat=profile.api_mode == "chat_completions",
+        check_success=(
+            _require_complete_vertex
+            if vertex
+            else _require_complete_chat
+            if profile.api_mode == "chat_completions"
+            else None
+        ),
     )
     timeout = httpx2.Timeout(profile.request_timeout_seconds)
     http_client = httpx2.AsyncClient(
         transport=guarded, timeout=timeout, follow_redirects=False, trust_env=False
     )
+    if vertex:
+        from xiaowei.vertex_model import VertexModel  # 避免两个模块在导入期互相依赖
+
+        try:
+            yield ModelBinding(
+                profile,
+                VertexModel(http_client, VERTEX_ENDPOINT.format(model=profile.model)),
+                opened_by=_OPENED_BY,
+            )
+        finally:
+            await _close(http_client.aclose())
+        return
+    if profile.base_url is None:  # Profile 校验已保证；这里只为类型收窄
+        raise ModelRequestRejectedError("模型 Profile 缺少 base_url")
     client = AsyncOpenAI(
         api_key=api_key.get_secret_value(),
         base_url=profile.base_url,
@@ -231,11 +285,15 @@ async def open_model(
             model = _JsonObjectModel(model)
         yield ModelBinding(profile, model, opened_by=_OPENED_BY)
     finally:
-        try:
-            async with asyncio.timeout(_CLIENT_CLOSE_TIMEOUT_SECONDS):
-                await client.close()
-        except TimeoutError:
-            raise ModelAPIRejectedError("模型客户端关闭超时") from None
+        await _close(client.close())
+
+
+async def _close(closing: Awaitable[None]) -> None:
+    try:
+        async with asyncio.timeout(_CLIENT_CLOSE_TIMEOUT_SECONDS):
+            await closing
+    except TimeoutError:
+        raise ModelAPIRejectedError("模型客户端关闭超时") from None
 
 
 class _GuardedTransport(httpx2.AsyncBaseTransport):
@@ -245,16 +303,16 @@ class _GuardedTransport(httpx2.AsyncBaseTransport):
         self,
         inner: httpx2.AsyncBaseTransport,
         *,
-        authorization: str,
+        auth_header: tuple[str, str],
         max_request_bytes: int,
         max_response_bytes: int,
-        require_complete_chat: bool,
+        check_success: Callable[[object], None] | None,
     ) -> None:
         self._inner = inner
-        self._authorization = authorization
+        self._auth_header = auth_header
         self._max_request_bytes = max_request_bytes
         self._max_response_bytes = max_response_bytes
-        self._require_complete_chat = require_complete_chat
+        self._check_success = check_success
 
     async def handle_async_request(self, request: httpx2.Request) -> httpx2.Response:
         body = await request.aread()
@@ -266,7 +324,7 @@ class _GuardedTransport(httpx2.AsyncBaseTransport):
             request.method,
             request.url,
             headers={
-                "authorization": self._authorization,
+                self._auth_header[0]: self._auth_header[1],
                 "accept": _JSON,
                 "content-type": _JSON,
                 # 压缩内容无法在读取阶段按实际字节限额，只接受未压缩响应。
@@ -317,8 +375,8 @@ class _GuardedTransport(httpx2.AsyncBaseTransport):
             payload = json.loads(content)
         except ValueError:
             raise ModelResponseRejectedError("模型成功响应不是合法 JSON") from None
-        if self._require_complete_chat:
-            _require_complete_chat(payload)
+        if self._check_success is not None:
+            self._check_success(payload)
 
     async def aclose(self) -> None:
         await self._inner.aclose()
@@ -332,6 +390,16 @@ def _require_complete_chat(payload: object) -> None:
         reason = choice.get("finish_reason") if isinstance(choice, dict) else None
         if reason not in _COMPLETE_CHAT_FINISH_REASONS:
             raise ModelResponseRejectedError("模型响应没有完整的 Chat Completions 终态")
+
+
+def _require_complete_vertex(payload: object) -> None:
+    """Vertex 只有单候选、完整 ``STOP`` 终态交给适配器；截断、过滤、缺失或未知终态都拒绝。"""
+    candidates = payload.get("candidates") if isinstance(payload, dict) else None
+    if not isinstance(candidates, list) or len(candidates) != 1:
+        raise ModelResponseRejectedError("模型响应不是单个候选")
+    (candidate,) = candidates
+    if not isinstance(candidate, dict) or candidate.get("finishReason") != "STOP":
+        raise ModelResponseRejectedError("模型响应没有完整的 STOP 终态")
 
 
 class _JsonObjectModel(Model):

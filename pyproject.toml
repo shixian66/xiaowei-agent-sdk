@@ -21,6 +21,8 @@ requires-python = ">=3.11,<3.12"
 #                  其 TLS 升级、非缓冲读取与关闭行为，升级须重新核对。
 #   lark-channel-sdk —— 飞书长连接与发送（P1-B Task 7）。精确钉版：入站 ack 时机、raw 事件字段、
 #                  发送重试与降级行为按 1.4.0 源码核对，升级须重新核对。
+#   httpx2      —— 模型 HTTP 受控 transport 与 Vertex 适配器直接使用（Vertex V1-A 显式声明）；范围与
+#                  openai-agents 0.22.3 / openai 3.x 的要求一致。
 #   新包另用 pydantic / sqlalchemy / asyncpg。旧包 src/xiaowei_agent 不再进入 wheel 与主命令
 #   （P1-B Task 8），它专用的 alembic 移到 dev（旧测试）与 legacy（旧 Compose 镜像）。
 dependencies = [
@@ -31,6 +33,7 @@ dependencies = [
     "fastapi>=0.115,<1",
     "uvicorn>=0.34,<1",
     "openai-agents[sqlalchemy]>=0.22.3,<0.23",
+    "httpx2>=2.12,<3",
     "asyncmy==0.2.15",
     "lark-channel-sdk==1.4.0",
 ]
