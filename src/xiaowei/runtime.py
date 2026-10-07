@@ -74,6 +74,7 @@ from xiaowei.config import (
     SecretRefError,
     WebConfig,
     configure_runtime,
+    is_allowed_web_bind_address,
     is_secret_ref,
     resolve_secret_ref,
 )
@@ -422,9 +423,10 @@ def validate_config(
     config: ServeConfig,
     *,
     container_port: int | None = None,
+    container_bind_address: str | None = None,
     stop_grace_seconds: float | None = None,
 ) -> None:
-    """离线检查模板占位符、全部凭据引用、CA 与可选容器参数；不连接外部服务或写文件。"""
+    """离线检查模板占位符、凭据、CA 与可选容器绑定参数；不连接外部服务或写文件。"""
     validate_placeholders(config)
     refs = [
         ("storage.database_url_ref", config.storage.database_url_ref),
@@ -455,9 +457,16 @@ def validate_config(
     if container_port is not None:
         if not 1 <= container_port <= 65535 or container_port != config.listen_port:
             raise ConfigError("listen_port: 与容器发布端口不一致")
+        if container_bind_address is None:
+            container_bind_address = "127.0.0.1"
+        if not is_allowed_web_bind_address(container_bind_address):
+            raise ConfigError("XW_WEB_BIND_ADDRESS: 必须是 127.0.0.1 或 RFC1918 IPv4 地址")
         origin = f"http://127.0.0.1:{container_port}"
         if config.listen_host != "127.0.0.1" or origin not in config.web.allowed_origins:
             raise ConfigError("web.allowed_origins: 容器部署必须包含对应的 HTTP loopback 来源")
+        bind_origin = f"http://{container_bind_address}:{container_port}"
+        if bind_origin not in config.web.allowed_origins:
+            raise ConfigError("web.allowed_origins: 必须包含 XW_WEB_BIND_ADDRESS 对应的 HTTP 来源")
     if stop_grace_seconds is not None:
         if stop_grace_seconds < minimum_stop_grace_seconds(config):
             raise ConfigError("shutdown_timeout_seconds: 容器停止宽限不足")

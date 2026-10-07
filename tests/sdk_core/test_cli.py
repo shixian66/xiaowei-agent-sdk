@@ -300,6 +300,7 @@ def test_container_entry_is_the_only_cli_path_that_selects_container_binding(
         MODEL_ENV: "model-test",
         SR_ENV: "starrocks-test",
         "XW_WEB_PORT": str(port),
+        "XW_WEB_BIND_ADDRESS": "127.0.0.1",
         "XW_STOP_GRACE_SECONDS": "60",
     }.items():
         monkeypatch.setenv(name, value)
@@ -314,6 +315,26 @@ def test_container_entry_is_the_only_cli_path_that_selects_container_binding(
     assert cli_module.container_main(["serve"], config_path=file) == 0
     assert len(called) == 1 and called[0].listen_host == "127.0.0.1"
     assert "container" not in _parser_help()
+
+
+def test_container_config_check_accepts_a_private_bind_only_with_matching_origin(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    address = "172.20.0.8"
+    _deploy_env(monkeypatch, XW_WEB_BIND_ADDRESS=address)
+    values = filled(example_with_feishu())
+    values["web"]["allowed_origins"].append(f"http://{address}:8501")
+    file = tmp_path / "xiaowei.json"
+    file.write_text(json.dumps(values, ensure_ascii=False), encoding="utf-8")
+
+    assert cli_module.container_main(["config", "check"], config_path=file) == 0
+    assert capsys.readouterr().out.strip() == "configuration valid"
+
+    values["web"]["allowed_origins"].remove(f"http://{address}:8501")
+    file.write_text(json.dumps(values, ensure_ascii=False), encoding="utf-8")
+    assert cli_module.container_main(["config", "check"], config_path=file) == 2
+    error = capsys.readouterr().err
+    assert "web.allowed_origins" in error and address not in error
 
 
 def _template_file(tmp_path: Path) -> Path:
@@ -370,6 +391,7 @@ def _deploy_env(monkeypatch: pytest.MonkeyPatch, **overrides: str) -> None:
     for name in TEMPLATE_ENV:
         monkeypatch.setenv(name, f"real-{name.lower()}")
     monkeypatch.setenv("XW_WEB_PORT", "8501")
+    monkeypatch.setenv("XW_WEB_BIND_ADDRESS", "127.0.0.1")
     monkeypatch.setenv("XW_STOP_GRACE_SECONDS", "600")
     monkeypatch.delenv("XW_POSTGRES_PASSWORD", raising=False)
     for name, value in overrides.items():
@@ -941,6 +963,10 @@ def _break_ca(monkeypatch: pytest.MonkeyPatch, file: Path) -> None:
         pytest.param(lambda mp, file: mp.delenv("XW_FEISHU_APP_SECRET"), id="missing-feishu"),
         pytest.param(_break_ca, id="unreadable-ca"),
         pytest.param(lambda mp, file: mp.setenv("XW_WEB_PORT", "not-a-port"), id="port"),
+        pytest.param(
+            lambda mp, file: mp.setenv("XW_WEB_BIND_ADDRESS", "0.0.0.0"),  # noqa: S104 - 拒绝全接口监听
+            id="bind-address",
+        ),
         pytest.param(lambda mp, file: mp.setenv("XW_STOP_GRACE_SECONDS", "1"), id="stop-grace"),
     ],
 )
