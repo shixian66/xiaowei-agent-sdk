@@ -628,10 +628,12 @@ uv run --locked --extra dev mypy src/xiaowei
 **V2 实施记录（2026-10-07，分支 `claude/vertex-v2`，只用协议替身）：** 按 Step 1–3 实施。实施裁定：
 `runtime.check_model` 的失败类别固定为 `auth_failed`（401/403）、`rate_limited`（429）、`upstream_error`（其他
 HTTP 状态）、`unreachable`（超时或连接失败）、`tool_not_called`、`tool_repeated`、`answer_invalid` 与兜底
-`model_failed`（含错误工具名、非 JSON 最终输出和其他协议拒绝），全部退出 1；`max_turns=3`，使重复调用可被识别
+`model_failed`（含错误工具名、非 JSON 最终输出、其他协议拒绝，以及模型客户端打开或关闭失败），全部退出 1；分类
+覆盖 `open_model` 的进入、运行与退出三个阶段；`max_turns=3`，使重复调用可被识别
 为 `tool_repeated` 而不是无界循环。CLI 用例只替换 `runtime.open_model` 的最底层 transport（并断言正式命令本身
-不传 transport），`check_model(transport=...)` 只供既有 Provider 的直接回归使用。“不写文件”以工作目录清单与
-配置文件不变核对，不逐个统计写函数。除计划所列文件外，README 命令清单增加一行；`deploy/OPERATIONS.md` 只增加
+不传 transport），`check_model(transport=...)` 只供既有 Provider 的直接回归使用。“不写文件”以工作目录中每个文件
+（含配置文件）的内容与 `st_mtime_ns` 在成功和失败场景前后不变核对，不逐个统计写函数；工作目录外的写入不在
+该检查范围内。除计划所列文件外，README 命令清单增加一行；`deploy/OPERATIONS.md` 只增加
 通用 `model check` 说明与普通升级中的可选一步，Vertex 模板与 Key 说明仍属 C2。离线证据、变异与未覆盖项记录在
 对应 PR，不在这里复制。
 

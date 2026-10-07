@@ -503,7 +503,8 @@ async def check_model(
 
     不连接 PostgreSQL、StarRocks 或飞书，不写 Session、请求或 Evidence；会产生真实模型请求与用量。
     最终回答必须是无证据的 ``advice`` 分支：本命令没有 Evidence，所以不运行 Evidence 校验，也不接受
-    形状正确但混用分支的回答。模型客户端关闭失败照常抛出，不报告为通过。
+    形状正确但混用分支的回答。模型客户端打开或关闭失败同样只报告固定类别（``model_failed``），
+    不报告为通过。
     """
     configure_runtime()
     calls = 0
@@ -515,34 +516,40 @@ async def check_model(
         calls += 1
         return {"value": 42}
 
-    async with open_model(config.model, transport=transport) as binding:
-        agent = Agent[None](
-            name="xiaowei-model-check",
-            instructions=_CHECK_INSTRUCTIONS,
-            model=binding.model,
-            model_settings=binding.settings,
-            tools=[lookup],
-            output_type=AgentAnswer,
-        )
-        try:
+    # 分类覆盖模型客户端的进入、运行与关闭：任何阶段的失败都只报告固定类别。
+    try:
+        async with open_model(config.model, transport=transport) as binding:
+            agent = Agent[None](
+                name="xiaowei-model-check",
+                instructions=_CHECK_INSTRUCTIONS,
+                model=binding.model,
+                model_settings=binding.settings,
+                tools=[lookup],
+                output_type=AgentAnswer,
+            )
             result = await Runner.run(
                 agent, _CHECK_INPUT, max_turns=_CHECK_MAX_TURNS, run_config=safe_run_config()
             )
-        except Exception as exc:
-            raise ModelCheckError(_check_reason(exc)) from None
-        if calls == 0:
-            raise ModelCheckError("tool_not_called")
-        if calls > 1:
-            raise ModelCheckError("tool_repeated")
-        answer = result.final_output
-        if not (
-            isinstance(answer, AgentAnswer)
-            and answer.evidence_ids == ()
-            and answer.inferences == []
-            and answer.clarification is None
-            and answer.advice
-        ):
-            raise ModelCheckError("answer_invalid")
+            _check_result(calls, result.final_output)
+    except ModelCheckError:
+        raise
+    except Exception as exc:
+        raise ModelCheckError(_check_reason(exc)) from None
+
+
+def _check_result(calls: int, answer: object) -> None:
+    if calls == 0:
+        raise ModelCheckError("tool_not_called")
+    if calls > 1:
+        raise ModelCheckError("tool_repeated")
+    if not (
+        isinstance(answer, AgentAnswer)
+        and answer.evidence_ids == ()
+        and answer.inferences == []
+        and answer.clarification is None
+        and answer.advice
+    ):
+        raise ModelCheckError("answer_invalid")
 
 
 def _check_reason(exc: Exception) -> CheckReason:

@@ -614,6 +614,10 @@ class ModelCheck:
         self.endpoint.replies.extend(replies)
         return _check_entry(container, ["model", "check"], self.file)
 
+    def files(self) -> dict[str, tuple[bytes, int]]:
+        """工作目录（含配置文件）每个文件的内容与 mtime：改写已有文件也会被发现。"""
+        return {p.name: (p.read_bytes(), p.stat().st_mtime_ns) for p in self.file.parent.iterdir()}
+
 
 @pytest.fixture
 def model_check(
@@ -679,7 +683,7 @@ def test_model_check_needs_only_the_model_key(
     model_check: ModelCheck, capsys: pytest.CaptureFixture[str], container: bool
 ) -> None:
     """缺少数据库、摘要、StarRocks、飞书秘密，CA 不可读，容器端口非法：模型检查仍成功。"""
-    before = sorted(p.name for p in model_check.file.parent.iterdir())
+    before = model_check.files()
     with pytest.raises(SocketBlockedError):  # 本用例连 loopback 也不放行：模型替身不经网络
         socket.socket()
 
@@ -691,7 +695,7 @@ def test_model_check_needs_only_the_model_key(
     assert err == ""
     _no_leak(out + err)
     assert model_check.calls == ["open_model", "safe_run_config"]
-    assert sorted(p.name for p in model_check.file.parent.iterdir()) == before
+    assert model_check.files() == before
     first, second = model_check.endpoint.bodies()
     (declared,) = first["tools"][0]["functionDeclarations"]
     assert declared["name"] == CHECK_TOOL
@@ -800,6 +804,8 @@ def test_model_check_failures_exit_1_with_a_fixed_reason(
     replies: list[Any],
     reason: str,
 ) -> None:
+    before = model_check.files()
+
     assert model_check.run(False, *replies) == 1
 
     out, err = capsys.readouterr()
@@ -807,23 +813,50 @@ def test_model_check_failures_exit_1_with_a_fixed_reason(
     _no_leak(err)
     assert model_check.endpoint.replies == []  # 没有额外请求：不重试
     assert model_check.calls == ["open_model", "safe_run_config"]
+    assert model_check.files() == before
 
 
-def test_model_check_close_failure_is_not_reported_as_success(
+@pytest.mark.parametrize("container", [False, True], ids=["native", "container"])
+def test_model_check_close_failure_is_a_fixed_reason(
     model_check: ModelCheck,
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
+    container: bool,
 ) -> None:
+    """模型客户端关闭超时：不报告通过，按固定类别失败，不输出模型客户端的说明。"""
+
     async def hang() -> None:
         await asyncio.sleep(60)
 
     monkeypatch.setattr(model_api, "_CLIENT_CLOSE_TIMEOUT_SECONDS", 0.05)
     monkeypatch.setattr(httpx2.MockTransport, "aclose", lambda self: hang())
 
-    assert model_check.run(False, _check_call(), _check_answer()) == 1
+    assert model_check.run(container, _check_call(), _check_answer()) == 1
 
     out, err = capsys.readouterr()
-    assert "valid" not in out and "模型客户端关闭超时" in err
+    assert out == "" and err == "model check failed: model_failed\n"
+
+
+@pytest.mark.parametrize("container", [False, True], ids=["native", "container"])
+def test_model_check_open_failure_is_a_fixed_reason(
+    model_check: ModelCheck,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    container: bool,
+) -> None:
+    """模型客户端在进入阶段失败（真实 open_model 内部）：固定类别，不含异常原文，无请求。"""
+
+    def broken(ref: str) -> Any:
+        raise RuntimeError(f"open failed {CHECK_LEAK}")
+
+    monkeypatch.setattr(model_api, "resolve_secret_ref", broken)
+    before = model_check.files()
+
+    assert model_check.run(container) == 1
+
+    out, err = capsys.readouterr()
+    assert out == "" and err == "model check failed: model_failed\n"
+    assert model_check.endpoint.requests == [] and model_check.files() == before
 
 
 def _break_ca(monkeypatch: pytest.MonkeyPatch, file: Path) -> None:
