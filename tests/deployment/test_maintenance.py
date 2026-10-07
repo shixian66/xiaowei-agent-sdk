@@ -869,12 +869,12 @@ def _feishu_section(package: Path, users: dict[str, str]) -> dict[str, Any]:
         tenant_key="drill-tenant",
         users=users,
         connect_timeout_seconds=1,
-        stop_timeout_seconds=1,
     )
     section["group"]["chat_id"] = "oc_drill_group"
     return section
 
 
+@pytest.mark.allow_hosts(["127.0.0.1"])
 def test_feishu_users_upgrade_rollback_restores_the_config_the_old_image_reads(
     users_required_image: str, runtime_image: str
 ) -> None:
@@ -904,7 +904,7 @@ def test_feishu_users_upgrade_rollback_restores_the_config_the_old_image_reads(
     _write_env(
         active,
         XW_WEB_PORT=str(port),
-        XW_STOP_GRACE_SECONDS="60",
+        XW_STOP_GRACE_SECONDS="120",  # 启用飞书与指定群后停止上界更长
         XW_PROJECT_NAME=f"xiaowei-users-{suffix}",
         XW_PG_VOLUME=f"xiaowei-users-{suffix}-pg",
         XW_FEISHU_APP_SECRET="feishu $ # space ' quote",  # noqa: S106 - 合成值
