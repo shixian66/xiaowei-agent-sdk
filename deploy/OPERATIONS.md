@@ -3,7 +3,7 @@
 本说明适用于发行包里的 `compose.yaml` 与 `release.json`。部署只有小维和 PostgreSQL 两个容器；
 Web 端口默认对服务器所有网卡开放，内网电脑用 `http://服务器IP:8501` 直接访问；PostgreSQL 不发布
 端口。**Web 没有登录：能访问这个端口的人都以 `web.operator_id` 的身份和权限查询。** 访问范围由
-服务器网络和防火墙决定；只想本机访问时在 `.env` 设 `XW_WEB_BIND_HOST=127.0.0.1`。
+服务器网络和防火墙决定；只想本机访问时在 `.env` 设 `XW_WEB_BIND_ADDRESS=127.0.0.1`。
 
 建议使用固定目录 `/opt/xiaowei/current`。`.env`、`xiaowei.json` 与 `certs/` 由操作者持有，升级
 只替换 `compose.yaml` 和 `release.json`；升级前留存的旧 JSON 配置（`.env` 的 `XW_CONFIG_FILE`
@@ -75,6 +75,7 @@ docker image inspect "xiaowei:${release_sha}" --format '{{.Os}}/{{.Architecture}
 | `.env` 的 `XW_DIGEST_KEY` | 必填 | 自己生成的摘要密钥 | `openssl rand -hex 32` | 永不重新生成；与数据库成对备份 |
 | `.env` 的 `XW_MODEL_API_KEY` | 必填 | Vertex AI 的 API Key 本身（Express Mode），不是服务账号 JSON 文件或项目号 | Google Cloud 管理员 | 可轮换，改后重启 |
 | `.env` 的 `XW_STARROCKS_PASSWORD` | 必填 | 第一个目标只读账号的**密码** | StarRocks 管理员 | 可轮换，改后重启 |
+| `.env` 的 `XW_WEB_BIND_ADDRESS` | 可选 | Web 发布到服务器的哪个 IP：`0.0.0.0`（缺省，内网都能访问）、`127.0.0.1`（只本机）或服务器某个内网 IP；不能写域名 | 服务器管理员 | 可改，改后预检并重建小维 |
 | `.env` 的 `XW_ARCHIVE_STARROCKS_PASSWORD` | 按需 | 加了第二个目标时去掉行首 `#`，填它的只读密码 | StarRocks 管理员 | 可轮换 |
 | `.env` 的 `XW_FEISHU_APP_SECRET` | 按需 | 启用飞书时去掉行首 `#`，填应用 App Secret | 飞书开放平台 | 可轮换 |
 | JSON 的 `model.model` | 必填 | 获准的 Vertex 模型 ID，只含字母、数字、`.`、`_`、`-`，例如计划验收的 `gemini-3-flash-preview`（真实验收尚未完成） | 模型服务管理员 | 换模型后须新建会话，并重新运行 `model check` |
@@ -125,7 +126,7 @@ docker compose --env-file .env run --rm --no-deps xiaowei model check
 与回答质量合格。
 
 启动后在内网电脑的浏览器打开 `http://服务器IP:8501`（端口按 `XW_WEB_PORT`）。用 IP、域名或经
-公司反向代理访问都可以，不需要在配置里登记地址。如果设了 `XW_WEB_BIND_HOST=127.0.0.1`，改用 SSH
+公司反向代理访问都可以，不需要在配置里登记地址。如果设了 `XW_WEB_BIND_ADDRESS=127.0.0.1`，改用 SSH
 转发：
 
 ```sh
@@ -214,6 +215,10 @@ docker compose --env-file .env exec -T postgres sh -c \
   'exec psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" -Atqc "SELECT version FROM xiaowei_schema_version"'
 ```
 
+升级不改 `.env` 里已有的 `XW_WEB_BIND_ADDRESS`：旧 `.env` 没有这一行时新版发布到 `0.0.0.0`；
+从 `51622b1` 的模板复制来、写着 `127.0.0.1` 的仍只本机可访问，要让内网电脑直接打开就改成
+`0.0.0.0`（或服务器内网 IP），旧版要求的 `web.allowed_origins` 可以保留。
+
 只有数据库版本列在新版 `direct_start_schema_versions` 时才走普通升级。先留存旧控制文件和当前
 使用的 JSON 配置（JSON 含单聊用户的 open_id，只允许部署管理员读取），再预检新版（新版镜像须已按
 “获取 amd64 发行包”导入）；这些命令
@@ -254,8 +259,10 @@ docker compose --env-file .env ps
 如果新版启动失败或需要回退，先用当前（候选）Compose 停止小维，停止成功后才恢复旧控制文件（含旧
 镜像引用）和升级前的 JSON 配置，再按旧镜像预检并启动；停止失败时命令链中止，不覆盖任何文件。停止后
 到旧版就绪前服务不可用。新版接受的配置旧版不一定能读，例如旧版要求 `feishu.users` 至少一人，
-新版允许 `{}`；升级后在 JSON 里做的修改会随回退撤销，需要时按旧版规则重新填写。`.env`、CA 与数据库不改（新增的 `.env` 项都是可选的，不需要补填；
-不要用新包模板覆盖 `.env`）：
+新版允许 `{}`；升级后在 JSON 里做的修改会随回退撤销，需要时按旧版规则重新填写。`.env`、CA 与数据库
+不改（新增的 `.env` 项都是可选的，不需要补填；不要用新包模板覆盖 `.env`）。例外：回退到只接受
+loopback/RFC1918 发布地址的旧版（如 `51622b1`）前，如果升级后把 `XW_WEB_BIND_ADDRESS` 改成了
+`0.0.0.0` 或其他地址，先改回旧版接受的值，旧版的 `config check` 才能通过：
 
 ```sh
 cd /opt/xiaowei/current

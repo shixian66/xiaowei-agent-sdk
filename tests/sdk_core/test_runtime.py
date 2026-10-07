@@ -1431,6 +1431,32 @@ async def test_container_config_check_rejects_port_and_stop_grace_mismatches(
         runtime.validate_config(config, container_port=env.port, stop_grace_seconds=minimum - 1)
 
 
+def test_container_bind_address_must_be_an_ip_but_needs_no_matching_origin(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Compose 的 ``host_ip`` 只接受 IP；地址范围不限制，``allowed_origins`` 也不必包含它。"""
+    for name in (DB_ENV, KEY_ENV, MODEL_ENV, SR_ENV):
+        monkeypatch.setenv(name, "offline-test-value")
+    port = 18501
+    config = runtime.ServeConfig.model_validate(serve_config(port))
+    minimum = runtime.minimum_stop_grace_seconds(config)
+    for address in (None, "0.0.0.0", "127.0.0.1", "172.20.0.8", "8.8.8.8", "::"):  # noqa: S104
+        runtime.validate_config(
+            config,
+            container_port=port,
+            container_bind_address=address,
+            stop_grace_seconds=minimum,
+        )
+    for address in ("", "172.20.0.08", "host.example", "172.20.0.8:8501"):
+        with pytest.raises(runtime.ConfigError, match="XW_WEB_BIND_ADDRESS"):
+            runtime.validate_config(
+                config,
+                container_port=port,
+                container_bind_address=address,
+                stop_grace_seconds=minimum,
+            )
+
+
 def test_stop_upper_bound_includes_feishu_consumer_cancellation() -> None:
     config = runtime.ServeConfig.model_validate(
         serve_config(

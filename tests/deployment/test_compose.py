@@ -56,7 +56,7 @@ def _write_env(directory: Path, **overrides: str) -> dict[str, str]:
     values = {
         "XW_WEB_PORT": "18501",
         # 本机测试只绑 loopback；发行默认 0.0.0.0 由静态与渲染用例分别验证。
-        "XW_WEB_BIND_HOST": "127.0.0.1",
+        "XW_WEB_BIND_ADDRESS": "127.0.0.1",
         "XW_STOP_GRACE_SECONDS": "90",
         "XW_CONFIG_FILE": "./xiaowei.json",
         "XW_CERTS_DIR": "./certs",
@@ -236,6 +236,7 @@ def test_compose_has_two_services_and_keeps_operator_settings_external(tmp_path:
 
     assert app["image"] == APP_IMAGE and postgres["image"] == POSTGRES_IMAGE
     assert app["init"] is True and app["restart"] == "on-failure:3"
+    assert app["healthcheck"]["timeout"] == "20s"
     assert postgres.get("ports") is None
     assert set(postgres["environment"]) == {
         "POSTGRES_DB",
@@ -246,7 +247,7 @@ def test_compose_has_two_services_and_keeps_operator_settings_external(tmp_path:
         {
             "target": "${XW_WEB_PORT:-8501}",
             "published": "${XW_WEB_PORT:-8501}",
-            "host_ip": "${XW_WEB_BIND_HOST:-0.0.0.0}",
+            "host_ip": "${XW_WEB_BIND_ADDRESS:-0.0.0.0}",
             "protocol": "tcp",
         }
     ]
@@ -262,7 +263,7 @@ def test_compose_has_two_services_and_keeps_operator_settings_external(tmp_path:
 
 def test_compose_resolves_non_default_parameters_and_literal_secrets(tmp_path: Path) -> None:
     directory, _ = _release(tmp_path)
-    expected = _write_env(directory)
+    expected = _write_env(directory, XW_WEB_BIND_ADDRESS="172.20.0.8")
     result = subprocess.run(  # noqa: S603 - 只执行探测后的 Compose CLI
         [*_compose_command(), "config", "--format", "json"],
         cwd=directory,
@@ -275,8 +276,9 @@ def test_compose_resolves_non_default_parameters_and_literal_secrets(tmp_path: P
     app = rendered["services"]["xiaowei"]
     postgres = rendered["services"]["postgres"]
     assert rendered["name"] == expected["XW_PROJECT_NAME"]
-    assert app["ports"][0]["host_ip"] == expected["XW_WEB_BIND_HOST"]
+    assert app["ports"][0]["host_ip"] == expected["XW_WEB_BIND_ADDRESS"]
     assert app["ports"][0]["published"] == expected["XW_WEB_PORT"]
+    assert app["environment"]["XW_WEB_BIND_ADDRESS"] == expected["XW_WEB_BIND_ADDRESS"]
     assert app["stop_grace_period"] == "1m30s"
     for name in ("XW_DIGEST_KEY", "XW_MODEL_API_KEY", "XW_STARROCKS_PASSWORD"):
         # Compose config 用 $$ 表示传给容器的字面 $；容器实值由正式启动用例另验。
@@ -292,13 +294,13 @@ def test_compose_resolves_non_default_parameters_and_literal_secrets(tmp_path: P
 
 
 def test_compose_publishes_the_web_port_to_all_addresses_by_default(tmp_path: Path) -> None:
-    """不设 ``XW_WEB_BIND_HOST`` 时内网其他机器可以访问；设成 127.0.0.1 可收回到本机。"""
+    """不设 ``XW_WEB_BIND_ADDRESS`` 时内网其他机器可以访问；设成 127.0.0.1 可收回到本机。"""
     directory, _ = _release(tmp_path)
     _write_env(directory)
     env_file = directory / ".env"
     lines = env_file.read_text(encoding="utf-8").splitlines()
     env_file.write_text(
-        "\n".join(line for line in lines if not line.startswith("XW_WEB_BIND_HOST=")) + "\n",
+        "\n".join(line for line in lines if not line.startswith("XW_WEB_BIND_ADDRESS=")) + "\n",
         encoding="utf-8",
     )
     result = subprocess.run(  # noqa: S603 - 只执行探测后的 Compose CLI
@@ -309,8 +311,9 @@ def test_compose_publishes_the_web_port_to_all_addresses_by_default(tmp_path: Pa
         check=False,
     )
     assert result.returncode == 0, "docker compose config failed"
-    ports = json.loads(result.stdout)["services"]["xiaowei"]["ports"]
-    assert ports[0]["host_ip"] == "0.0.0.0"  # noqa: S104 - 内网访问的发行默认值
+    app = json.loads(result.stdout)["services"]["xiaowei"]
+    assert app["ports"][0]["host_ip"] == "0.0.0.0"  # noqa: S104 - 内网访问的发行默认值
+    assert app["environment"]["XW_WEB_BIND_ADDRESS"] == "0.0.0.0"  # noqa: S104
 
 
 def test_missing_config_bind_fails_without_creating_a_host_directory(

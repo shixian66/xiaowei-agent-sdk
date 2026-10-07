@@ -1,6 +1,6 @@
 # P3：Compose 部署与实战验收实施计划
 
-> 版本 **v0.3（2026-10-06，记录 P3-B 合入及用户批准的 GHCR amd64 发布路径）**。P3-A 与 P3-B 已分别经独立审查随 PR #49、#50 合入；P3-B 恢复换库修复提交为 `6418023`，当前基线合入提交为 `9a1f5d522ea985eb1a21de812019717a0680cad3`。用户确认公司服务器为 x86 并可从 `ghcr.io` 下载，授权准备私有 GHCR 的 `linux/amd64` 发布流程。本版加入手动发布工作流与运维步骤；尚未运行发布工作流、生成真实镜像 digest 或在公司服务器部署。真实模型/StarRocks/飞书及 P3-C 验收仍未执行。
+> 版本 **v0.4（2026-10-07，记录已发布 amd64 版本及公司云桌面内网直连选择）**。P3-A 与 P3-B 已分别经独立审查随 PR #49、#50 合入，amd64 发布流程随 PR #51 合入。用户已在公司服务器拉取 PR #56 对应镜像并完成配置检查、Vertex `model check` 和首次空库初始化；当前 Web 仅在服务器本机可访问。用户选择由公司内网直接访问服务器 RFC1918 地址，不增加应用层来源 IP 白名单。本文的原 P3-A loopback 证据保留为旧发行版本的验证记录；当前直连路径须由本次变更和公司云桌面实测单独验收。
 
 **Goal：** 把已实现的小维交付到公司 Linux 服务器，升级时复用原配置，提供简单维护与恢复方式，并补齐真实用户路径证据。
 
@@ -14,7 +14,7 @@
 
 ## 1. 最小范围与复用
 
-用户确认公司服务器是 x86，且可从 `ghcr.io` 下载镜像；本轮发行目标据此定为 `linux/amd64`。公司服务器的 `uname -m`、Docker Engine/Compose 版本、端口和网络隔离仍须在实机核对。服务器只运行发行包，不要求 Git、Python、uv、测试工具或构建工具；不建设多架构发布或离线镜像分发。
+用户确认公司服务器是 x86，且可从 `ghcr.io` 下载镜像；本轮发行目标据此定为 `linux/amd64`。公司服务器的 `uname -m`、Docker Engine/Compose 版本与端口仍须在实机核对；公司内网访问控制由公司环境负责，本项目不加来源 IP 白名单。服务器只运行发行包，不要求 Git、Python、uv、测试工具或构建工具；不建设多架构发布或离线镜像分发。
 
 | 已有能力 | 复用位置 | P3 工作 |
 | --- | --- | --- |
@@ -49,13 +49,14 @@
 
 | `.env` 参数及默认值 | 消费者与一致性要求 |
 | --- | --- |
-| `XW_WEB_PORT=8501` | 宿主发布、容器目标和 SSH 本地端口使用同一个端口；`config check` 核对 JSON `listen_port` 相等及对应 HTTP loopback 来源，避免静默覆盖 JSON |
+| `XW_WEB_PORT=8501` | 宿主发布、容器目标和 SSH 本地端口使用同一个端口；`config check` 核对 JSON `listen_port` 相等及 loopback 来源，避免静默覆盖 JSON |
+| `XW_WEB_BIND_ADDRESS=0.0.0.0` | 宿主发布地址（IP）；缺省 `0.0.0.0` 供内网直连，`127.0.0.1` 收回本机；容器预检只核对它是 IP，不要求 `allowed_origins` 登记（2026-10-07 起由 PR #58 改为此契约） |
 | `XW_STOP_GRACE_SECONDS=120` | 应用 `stop_grace_period`；模板值须通过 §2.2 的停止上界检查，调大 JSON 停机/飞书期限后不满足上界则预检拒绝 |
 | `XW_CONFIG_FILE=./xiaowei.json`、`XW_CERTS_DIR=./certs` | 只读挂到 `/etc/xiaowei/xiaowei.json`、`/etc/xiaowei/certs/`；相对路径以固定部署目录解析，宿主路径不存在即失败 |
 | `XW_LOG_MAX_SIZE=10m`、`XW_LOG_MAX_FILES=3` | 两个服务的日志轮转上限；只允许有效的有限正值 |
 | `XW_PROJECT_NAME=xiaowei`、`XW_PG_VOLUME=xiaowei-pgdata` | 分别用于顶层 `name:` 和卷的显式 `name:`，首次配置后保存；不得随发行目录或版本改变，演练用独立名字 |
 
-宿主发布地址固定 `127.0.0.1`，不提供公网开关。镜像固定入口复用同一 CLI，配置路径固定为 `/etc/xiaowei/xiaowei.json`，默认 `serve`；维护仍用 `docker compose run --rm --no-deps xiaowei config check` 或 `storage upgrade`。首次初始化先启动 PG 并确认就绪；离线预检不启动 PG，迁移前停止应用并取得现有实例锁。绑定挂载用长语法、`read_only: true`、`bind.create_host_path: false`，配置缺失不能变成 root 目录。Compose 采用 `init: true`；应用与 PG 分别有健康检查，应用用 Python 标准库探针，不要求 curl。探针从 JSON 读取与服务一致的端口及允许来源，不能另存一份 Host。相关字段以 [Compose services](https://docs.docker.com/reference/compose-file/services/)、[项目名](https://docs.docker.com/reference/compose-file/version-and-name/) 和 [卷名](https://docs.docker.com/reference/compose-file/volumes/#name) 的契约为准。
+宿主发布地址由 `XW_WEB_BIND_ADDRESS` 决定，缺省 `0.0.0.0`（内网直连），可设 `127.0.0.1` 或服务器某个 IP。此设置只控制应用容器的宿主端口绑定，不新增来源 IP 白名单或应用登录；PostgreSQL 仍无宿主发布端口。镜像固定入口复用同一 CLI，配置路径固定为 `/etc/xiaowei/xiaowei.json`，默认 `serve`；维护仍用 `docker compose run --rm --no-deps xiaowei config check` 或 `storage upgrade`。首次初始化先启动 PG 并确认就绪；离线预检不启动 PG，迁移前停止应用并取得现有实例锁。绑定挂载用长语法、`read_only: true`、`bind.create_host_path: false`，配置缺失不能变成 root 目录。Compose 采用 `init: true`；应用与 PG 分别有健康检查，应用用 Python 标准库探针，不要求 curl。健康探针始终走 loopback；容器预检只核对 `XW_WEB_BIND_ADDRESS` 是 IP，服务端不校验浏览器的 Host/Origin。相关字段以 [Compose services](https://docs.docker.com/reference/compose-file/services/)、[项目名](https://docs.docker.com/reference/compose-file/version-and-name/) 和 [卷名](https://docs.docker.com/reference/compose-file/volumes/#name) 的契约为准。
 
 `.env` 由 Compose 读取，文件权限限制访问；应用的 `env_file` 承接配置引用的环境值，PostgreSQL 通过显式 `environment:` 只映射自己的初始化变量，不能对两者共用 `env_file`。端口与停机宽限还通过显式 `environment:` 把 Compose 实际插值结果传给应用，预检必须核对实际值，不能重新读取 `.env` 猜测它们；合成用例覆盖 shell 同名变量覆盖造成的不一致。镜像模式开关不从 `.env` 读取。JSON/CA 要能被镜像非 root 用户读取。模板说明 PostgreSQL 密码与 `XW_DATABASE_URL` 的一致性及 URI 编码；升级不轮换 `XW_DIGEST_KEY`。核验不输出 `.env`、完整 `docker inspect` 或展开凭据后的 Compose 配置；仅从合成配置或内存中的解析结果提取键名及非敏感结构。检查 `$`、`#`、空格和引号的合成值传递，遵守 [Compose 变量规则](https://docs.docker.com/compose/how-tos/environment-variables/variable-interpolation/)。
 
@@ -63,9 +64,9 @@
 
 基线 `ServeConfig.listen_host` 只接受 `127.0.0.1`/`::1`。**保留此限制**，JSON 写 `0.0.0.0` 在原生与容器预检中都拒绝。A 仅添加镜像内固定入口的薄封装，向共享 CLI/运行装配传递可信容器模式，只有此路径在创建 socket 时使用 `0.0.0.0`。原生公开 CLI 无该开关，JSON、`.env` 不能选择模式；把容器配置复制到宿主机运行仍只监听 loopback。封装不重做参数解析、配置加载、Agent Loop 或维护逻辑；镜像运行模式不是 Docker 网络隔离的证明。
 
-监听接口与浏览器来源分开：原生 `_consistent` 保持既有同址 HTTP 检查；容器路径只核对配置的 loopback 来源与端口（首版部署为 `http://127.0.0.1:<XW_WEB_PORT>`，并要求 JSON `listen_port` 相同），不要求实际绑定的 `0.0.0.0` 出现在 `allowed_origins`。`secure_cookie=false` 配合同一 SSH HTTP 入口。Compose 长语法固定 `host_ip: 127.0.0.1`，`published` 与 `target` 都引用 `XW_WEB_PORT`；调整端口只改操作者 `.env` 和 JSON，预检不一致即拒绝，健康探针从同一 JSON 取 Host。
+监听接口与浏览器来源分开：容器路径要求 JSON `listen_port` 与发布端口相同；`web.allowed_origins` 不再使用（旧 JSON 保留也照常接受）。`XW_WEB_BIND_ADDRESS` 缺省 `0.0.0.0`，必须是 IP。原生 `listen_host` 可为任意地址，容器内监听与宿主端口映射是两层设置。`secure_cookie=false` 配合当前 HTTP 入口。Compose 长语法的 `host_ip` 使用 `XW_WEB_BIND_ADDRESS`，`published` 与 `target` 都引用 `XW_WEB_PORT`；预检不一致即拒绝，健康探针仍使用 loopback。
 
-**Host/Origin 不做身份认证。** 同网络可达者能伪造 Host/Origin 并取得固定 Web 操作者身份；仅伪造 Host 的 POST 仍被当前 Origin 检查拒绝，但这不能证明访问控制成立。隔离必须由实际端口发布、专用网络与同二层主机不可达验证保证；不得发布成 `8501:8501`、使用 host network，或让不可信容器接入该网络。PostgreSQL 无任何宿主发布端口。原生默认行为不变，仍不支持公网多用户 Web。
+**没有 Host/Origin 校验，也没有登录。** 2026-10-07 用户决定“完全不校验地址”，并把“访问者共用 `operator_id` 授权”记为已接受风险；能访问发布地址的人可使用固定 Web 操作者身份，访问范围由公司网络控制。写请求仍只接受 JSON 正文、不返回 CORS 头，cookie 为 `HttpOnly`、`SameSite=Strict`。不使用 host network；PostgreSQL 无任何宿主发布端口。
 
 运行单应用进程，非 root、只读配置、受限日志，复用实例锁。应用重启策略固定有限 `on-failure:3`，维护容器用 `run --rm` 不自动重试；schema/密钥不匹配的启动失败不得无限循环或把日志刷满。`init: true` 负责转发信号与回收子进程，不能代替应用停止协议。基线 CLI 已在调用 `runtime.serve` 前注册 SIGTERM；但设置 stop 不等于装配/恢复已立即停止，迁移也没有这条 serve handler。
 
@@ -109,15 +110,17 @@ B3 采用数据库指纹校验方案（设计权威见架构 §10），不只依
 - [x] 落实 §2.1–§2.3 的最小 Compose 与预检。用非默认端口、CA 路径、日志上限与较长停止期限验证不用改 `compose.yaml`；探针与服务使用同一 JSON。挂载源缺失时失败且宿主不产生同名目录；合成特殊字符凭据原样传递；解析 Compose 仅核对键名/结构，PG 无模型、飞书、摘要密钥等应用变量。
 - [x] 配置预检验证零外部 I/O、文件内容不变，缺/空环境值、不可读 CA、端口或停机宽限不一致均退出 2，输出无任何配置值。普通 `serve` 在空库、schema 错配、密钥错配时退出 1；按实际 restart 策略确认有限失败而非无限刷日志。缺配置应在绑定挂载或配置校验阶段失败，不生成默认文件。
 - [x] 用真实隔离 PG 验证全新 v6 初始化、重复 init、已有 v6 指纹缺失/损坏/错配，以及 v4/v5 首次绑定的默认拒绝与显式事务路径。逐一覆盖 serve、upgrade、cleanup、resend；拒绝不恢复/删除/写业务记录、不更新指纹且无外部服务调用。SDK 表仍由原公共接口建立。
-- [ ] 正式 HTTP 验证首页、就绪、Cookie/Host/Origin；实查宿主只在 `127.0.0.1` 发布，PG 无发布，从隔离测试环境同二层另一主机（含伪造 Host/Origin）访问不通；没有该主机则保留网络验收缺口，不能把 Compose 文本或本机 curl 当成证明。C 还要在公司网络重复检查。
+- [ ] 正式 HTTP 验证首页、就绪、Cookie/Host/Origin；实查宿主发布地址与所选 `.env` 一致，PG 无宿主发布端口。默认 loopback 路径用 SSH 转发；公司云桌面直连路径须在云桌面实际打开服务器内网地址并完成浏览器流程。公司网络访问控制由公司环境负责，本项目不测试或配置来源 IP 白名单。
 - [x] 根据源码与故障注入记录完整停止上界，核对 §2.2 的宽限校验；正常负载、长请求、飞书关闭慢、锁后端释放慢均在期限内结束或受控失败。验证 `init: true` 转发 SIGTERM，覆盖 Uvicorn 启动前的恢复及 `storage upgrade` 中途停止：事务全有或全无、锁释放可确认、下一次启动不重放，不能仅测服务空闲停机。
 - [ ] 在 CI 添加新产品发行检查，与旧 `compose-smoke` 分开记录；交付打包清单、镜像平台与 digest、候选 SHA 及命令结果，接受独立审查后交接 B。
 
-**成功判据：** 不依赖源码仓库安装；发行物及最终镜像层符合白名单，资源齐全；实际网络仅经宿主 loopback 可达；原生边界不变；部署参数不用改发行文件，错密钥在业务前拒绝。保留 A 镜像 digest/归档作为 B 的真实升级输入，不将首次部署或同版本重建称为版本升级。
+**成功判据：** 不依赖源码仓库安装；发行物及最终镜像层符合白名单，资源齐全；宿主发布地址与 `.env` 的 `XW_WEB_BIND_ADDRESS` 一致（缺省 `0.0.0.0`）；部署参数不用改发行文件，错密钥在业务前拒绝。保留 A 镜像 digest/归档作为 B 的真实升级输入，不将首次部署或同版本重建称为版本升级。
 
 **关键失败：** 挂载权限错误或路径不存在不能静默创建默认配置；凭据特殊字符不能被改写；HTTP 来源错误被拒；健康探针不能因为 Host 写错永远失败；同库第二实例被拒；坏包或坏镜像不覆盖用户配置。
 
-**P3-A 实施证据（修订 head `9f69beba19736d293c22d50a59b50c90ac7f0d4e`，已复审并随 PR #49 合入）：** 本机 Docker Engine 29.5.2、Colima Linux/arm64 与独立 `docker-compose` 5.5.1 上，发行归档白名单和哨兵反例、镜像逐层审计、正式两容器入口、非默认参数、特殊字符环境值、loopback 发布、PG 零宿主端口、HTTP 成功/拒绝、正常 SIGTERM、有限重启、v6 密钥绑定和迁移中断回滚均已实际运行。首次独立审查在 `4867801` 发现停止上界漏算消费者取消期限、原生绑定缺少直接回归；修订加入 12 秒有界取消并计入宽限，直接断言 runtime/CLI 原生绑定，覆盖长请求停机及结构刷新、模型客户端、实例锁、连接池、Web 和锁监视关闭超时，相关超时与 m10 变异均被用例快速抓住。模型与 StarRocks 使用不可达本机地址或既有驱动替身，飞书使用真实产品路径下的渠道替身；这些结果不证明真实外部服务。未关闭项是公司目标 CPU/Docker/Compose 与仓库地址、获准仓库中的应用 manifest digest、另一台同二层主机不可达；P3-B 已形成本机候选，P3-C 仍未开始。
+**P3-A 实施证据（修订 head `9f69beba19736d293c22d50a59b50c90ac7f0d4e`，已复审并随 PR #49 合入）：** 本机 Docker Engine 29.5.2、Colima Linux/arm64 与独立 `docker-compose` 5.5.1 上，发行归档白名单和哨兵反例、镜像逐层审计、正式两容器入口、非默认参数、特殊字符环境值、loopback 发布、PG 零宿主端口、HTTP 成功/拒绝、正常 SIGTERM、有限重启、v6 密钥绑定和迁移中断回滚均已实际运行。首次独立审查在 `4867801` 发现停止上界漏算消费者取消期限、原生绑定缺少直接回归；修订加入 12 秒有界取消并计入宽限，直接断言 runtime/CLI 原生绑定，覆盖长请求停机及结构刷新、模型客户端、实例锁、连接池、Web 和锁监视关闭超时，相关超时与 m10 变异均被用例快速抓住。模型与 StarRocks 使用不可达本机地址或既有驱动替身，飞书使用真实产品路径下的渠道替身；这些结果不证明真实外部服务。该段记录完成时，P3-C 尚未开始；现行发布和公司服务器状态见下方补充及 [AGENT_HANDOFF](../../../AGENT_HANDOFF.md)。
+
+**2026-10-07 访问路径决策补充：** 用户在公司云桌面用 `http://172.20.0.8:18501/` 访问时收到连接拒绝；服务器本机 `/readyz` 为 200，而 Compose 仍将端口发布到 `127.0.0.1`。用户明确选择直接访问服务器内网地址，并由公司现有网络控制访问范围。PR #57 增加 `XW_WEB_BIND_ADDRESS`（默认 loopback）、RFC1918 地址与精确来源的一致性预检；随后用户要求“都放开吧”，PR #58 取消地址范围与来源校验、缺省改为 `0.0.0.0`，并将应用健康探针超时调整为 20 秒（服务器实测探针约 10.6 秒，原 6 秒超时；用户手工改为 20 秒后健康）。原记录中的“另一台同二层主机不可达”属于旧 loopback-only 验收门槛；按用户当前选择，不再作为本项目的验收项，改为在公司云桌面验证直连成功。新路径尚无公司云桌面实测；默认 loopback、原生绑定和 PostgreSQL 不发布的旧证据仍适用于默认路径。
 
 ### P3-B：保留配置的升级与基本恢复
 
@@ -143,7 +146,7 @@ B3 采用数据库指纹校验方案（设计权威见架构 §10），不只依
 
 ### P3-C 前置：私有 GHCR 的 amd64 发行流程
 
-**批准依据：** 用户确认公司服务器为 x86、允许从 `ghcr.io` 拉镜像，并授权准备发布流程。此项只解决获取可安装版本的路径，不代表已发布、已安装或获得真实服务验收结论。
+**批准依据：** 用户确认公司服务器为 x86、允许从 `ghcr.io` 拉镜像，并授权准备发布流程。此项只解决获取可安装版本的路径，不代表真实服务验收完成。
 
 **结果：** 管理员可从 `main` 手动启动单一 `linux/amd64` 发布。流程使用现有 `Dockerfile.runtime` 构建应用镜像，以 Buildx 返回的 digest 调用 `scripts/package_release.py`，将五项白名单部署文件附加到同一代码 SHA 的 GitHub Release。PostgreSQL 继续使用 P3 已验证的 16.15 镜像 digest。服务器通过单独的 `read:packages` 凭据拉取私有应用镜像；不克隆代码或在服务器构建。
 
@@ -151,9 +154,9 @@ B3 采用数据库指纹校验方案（设计权威见架构 §10），不只依
 
 - [x] 定义仅 `workflow_dispatch` 且只接受 `main` 的发布流程；`contents:write` 只在发布 job，GHCR 写令牌只传给登录步骤。流程设计为构建、拉取精确 digest 并以正式镜像入口运行 `xiaowei --help` 后才生成归档和 GitHub Release 资产。
 - [x] 为发布触发、主线保护、amd64 平台、锁定 PG digest、独立 GHCR 凭据和精确 digest 发行包增加静态契约回归，并纳入 CI 的 P3 部署检查。
-- [ ] PR 合入后设置 `GHCR_USERNAME` 与 `GHCR_WRITE_TOKEN`，手动运行 workflow；核对真实 amd64 构建/入口冒烟、`release.json` 中的镜像 digest、GitHub Release 资产和 GHCR 包可见性确为 Private。公司服务器的镜像拉取与 Compose 实际启动仍在 P3-C 留证。
+- [x] 仓库管理员设置 GHCR 发布凭据并手动运行 workflow；`publish-amd64` run `37605907034` 成功，镜像 digest 为 `sha256:6a65880394c24e31061cf5b0dd10ea38019611ba0a7c3e675cd014546165acc9`，发行包 SHA256 为 `dbc2d0e879b9e5f5ab7aa10e00bbeeabf8d7db8e5125be5d01684595ed9dfda9`。用户已在公司服务器成功拉取该应用镜像；是否在 GitHub 页面核实 Package 为 Private 尚无记录。
 
-**尚未验证：** 此工作树运行于 Mac ARM，本机 Docker Engine 不可用；没有实际构建或推送 amd64 镜像。静态测试与 GitHub CI 不能证明 GHCR 凭据有效、包权限/可见性、GitHub Release 资产可下载、公司服务器网络可达或 x86 主机运行通过。
+**尚未验证：** 本工作树是 Mac ARM，不能复现 amd64 主机运行；GHCR Package 的 Private 可见性没有核实。新版本在公司云桌面的 Web 直连与真实查询流程仍待验证。
 
 ### P3-C：获准环境实战与用户接受
 
@@ -162,7 +165,7 @@ B3 采用数据库指纹校验方案（设计权威见架构 §10），不只依
 **Files：** 使用 `tests/sdk_core/gate0.py` 的既有固定样例及 `scripts/gate0_real_model.py`；需要扩展样例运行时只补该现有脚本，不建评测平台。正式入口实战证据单独记录在 `docs/acceptance/p3-live.md`，完成后 handoff 仅保留状态与链接；详细任务仍只在本文。此证据文件不进入发行物。
 
 - [ ] 固定代码 SHA、镜像 digest/平台、配置非敏感摘要、目标版本及 Model Profile；C 每项证据绑定同一候选镜像 digest，若候选变更须重验受影响项并核对其余证据适用性。首次部署只算首次安装，不关闭 B 的版本升级。先核实授权、只读账号实际权限/默认角色、资源组与大查询限额，再开放相应目标；不能用本机 4.1.4 实验代替公司目标版本。
-- [ ] 按 A/B 的说明部署，实际检查容器、挂载、PG 无发布、主机网络隔离及 SSH 转发。默认端口下从操作者电脑执行 `ssh -N -L 127.0.0.1:8501:127.0.0.1:8501 <获准服务器>`，在浏览器完成首次消息、结果展示、追问与新建会话；不从 helper 直接调用成功推断浏览器成功。
+- [ ] 按 A/B 的说明部署，检查容器、挂载与 PG 无宿主发布端口。默认选择 SSH 转发，或在公司云桌面直连服务器内网地址；当前待验收路径为浏览器访问 `http://172.20.0.8:8501/`。在真实浏览器完成首次消息、结果展示、追问与新建会话；不从 helper 直接调用成功推断浏览器成功。公司网络访问控制不由本项目配置或验证。
 - [ ] 先以一个获准 Profile 运行既有任务正反例，记录工具选择、实际业务查询次数、结果事实、依据、误执行样例、步数、耗时及可得用量。自然语言“不执行/只解释/只写 SQL/裸 SQL/指代不清/多人历史/注释注入”不得因历史或注入自动查询；必交正例可完成，反例中的错误查询必须修复或重新明确产品边界后再接受，不能用平均成功率掩盖。
 - [ ] Web 与真实飞书单聊均完成查结构、查询、连续追问、SQL/计划/表布局诊断；配置已有审计源的目标验证慢查询列表，无审计源的目标正确隐藏工具。按拟开放目标逐一验证路由、当前权限和来源；至少两个不同的获准目标证明真实跨目标追问，三目标容量继续引用既有离线证据，环境不足则相应实战项保持打开。
 - [ ] 用真实指定群的两名成员验证 @准入、A 问 B 追问、同群串行、等待提示、原消息回复、满队列/等待超时、成员退出、原消息撤回、重投与重启；与 Web/单聊交叉检查数据归属。对发送结果不明如实记录，不重跑 Agent 或 SQL。
@@ -177,22 +180,22 @@ B3 采用数据库指纹校验方案（设计权威见架构 §10），不只依
 
 | 切片 | 最少检查与成功输出 |
 | --- | --- |
-| A | `uv run --locked --extra dev python -m pytest tests/deployment/test_release.py tests/deployment/test_compose.py -q`；受影响的 `test_runtime.py`、`test_cli.py`、`test_storage_v2.py`、Web/正式启动及存储初始化调用检查；发行镜像内 `xiaowei --help` 与资源加载；`docker compose config --quiet`、最终镜像逐层检查及同二层主机探测。须实际构建/启动/检查，环境缺失报缺口，不 skip 成全绿 |
+| A | `uv run --locked --extra dev python -m pytest tests/deployment/test_release.py tests/deployment/test_compose.py -q`；受影响的 `test_runtime.py`、`test_cli.py`、`test_storage_v2.py`、Web/正式启动及存储初始化调用检查；发行镜像内 `xiaowei --help` 与资源加载；`docker compose config --quiet`、最终镜像逐层检查和发布地址核对。直连路径在 P3-C 由公司云桌面浏览器实测；不测试同二层其他客户端或配置来源 IP 白名单 |
 | B | `uv run --locked --extra dev python -m pytest tests/deployment/test_maintenance.py -q`；同候选镜像执行现有 CLI 与真实 PG 备份恢复。只允许临时独立项目/库/卷；检查配置不变及外部执行次数，退出无残留测试资源 |
 | 源码受影响时 | `uv run --locked --extra dev ruff check src/xiaowei tests/deployment tests/sdk_core/test_runtime.py`、`uv run --locked --extra dev mypy src/xiaowei`，再运行受改动影响的现有检查；不反复扩大到旧系统全量测试 |
 | C | 获准模型固定样例、正式 SSH/浏览器与飞书路径、目标权限/资源对照、真实部署恢复与用户接受；每项有实际证据，无环境则待验证 |
 
-**Review Focus：** (1) 镜像专用绑定、原生 loopback 与真实网络隔离同时成立，Host/Origin 不被当成认证；(2) 操作者参数在 A→B 后保留，最终镜像各层不夹带开发资产/实际配置；(3) v6 密钥绑定覆盖所有运行/维护入口，旧库首次绑定的人工前提不被隐藏，失败不重放请求；(4) 目标权限/资源与版本差异；(5) 群投递/自然语言反例不被离线通过数量代替。分别在 A、A/B、A/B、C、C 验收；独立审查按确切提交给出触发、影响和依据。
+**Review Focus：** (1) 镜像专用绑定与配置的宿主发布地址一致，已接受的“无登录、共用操作者”风险在文档中如实标注；内网直连由公司云桌面实测，公司网络策略不纳入应用实现；(2) 操作者参数在 A→B 后保留，最终镜像各层不夹带开发资产/实际配置；(3) v6 密钥绑定覆盖所有运行/维护入口，旧库首次绑定的人工前提不被隐藏，失败不重放请求；(4) 目标权限/资源与版本差异；(5) 群投递/自然语言反例不被离线通过数量代替。分别在 A、A/B、A/B、C、C 验收；独立审查按确切提交给出触发、影响和依据。
 
 ## 5. 环境与尚未关闭的事实
 
 | 必须确定的事实 | 何时关闭；缺失的影响 |
 | --- | --- |
-| Linux CPU 架构、Docker Engine/Compose 版本、端口及目标目录 | A 构建前用只读系统信息确认。默认按 Docker Engine ≥28 与 Compose 插件的单一受测组合交付；旧 Engine 存在 localhost 发布端口被同二层主机访问的已知情况（[Docker 官方说明](https://docs.docker.com/engine/network/port-publishing/)）。旧环境需运维先确认隔离措施并实测，不能只凭 Compose 文本判安全；不自动升级公司的 Docker |
-| 获准镜像仓库地址、拉取权限、构建/发布责任方 | 用户已确认公司服务器可联网访问 `ghcr.io`，本轮按私有 `ghcr.io/shixian66/xiaowei-agent-sdk`、`linux/amd64` 与手动 GitHub Actions 发布流程准备；PR 合入后仍需管理员设置发布变量/令牌、实际运行 workflow，并确认 package 为 Private、服务器只读 token 能拉取。缺少这些实测前不能声称已具备可安装发行包 |
-| 首个部署的配置文件、所需安全引用、现有卷/目录是否冲突 | 初次配置前确认；不能使用旧 M5 库或其他服务的卷。格式与挂载问题不靠覆盖配置解决。现有 `load_config` 可复用，容器绑定变更尚未实现 |
+| Linux CPU 架构、Docker Engine/Compose 版本、端口及目标目录 | 首次部署前用只读系统信息确认；用户已确认 x86，且当前服务器 Compose 可拉取并运行该发行。新发行仍须在目标主机核对具体版本与端口；不自动升级公司的 Docker |
+| 获准镜像仓库地址、拉取权限、构建/发布责任方 | 用户已确认服务器可访问 `ghcr.io`；`linux/amd64` 发布成功且服务器已拉取精确 digest。GHCR Package 是否标记为 Private 尚无记录，但不阻断已经验证的拉取路径 |
+| 首个部署的配置文件、所需安全引用、现有卷/目录是否冲突 | 初次配置前确认；不能使用旧 M5 库或其他服务的卷。格式与挂载问题不靠覆盖配置解决。当前分支已实现容器宿主绑定地址配置，须合入并发布后才可用；旧发行不支持该设置 |
 | 若接入旧 v4/v5 库，原密钥与数据库备份是否确实配套 | 仅旧库迁移前要求；新指纹无法反向证明旧密钥正确，需操作者从原部署核对。无法确认则不执行首次绑定、不动旧库；不阻塞全新 v6 安装 |
-| 停止链路实测上界、同二层网络验证条件 | A 在隔离环境确认，C 在公司环境重复网络验证；上界未知不能声称 120 秒足够，缺独立主机不能仅凭本机访问关闭网络项 |
+| 停止链路上界、公司云桌面的 Web 实际入口 | 停止上界已在 A 的离线与容器故障注入中验证；本次新增的内网绑定须在发布后从公司云桌面浏览器验证。按用户决定，本项目不测同二层其他主机的可达性，也不配置来源 IP 白名单 |
 | Model Profile 的端点/模型/协议、数据接收范围与预算 | C 外发前明确；历史合成 Gate 0 成功不授予公司数据外发许可，不要求三家都通过后才能试用一个已获准组合 |
 | StarRocks 版本、只读账号实际 SELECT 权限、默认角色、资源组/限额与业务口径 | C 开放每个目标前逐项核实；目标不满足时保持不可用。记录保留优先级低不改变 Evidence、权限与执行限制 |
 | 飞书租户、测试单聊、指定群、两名成员及平台权限 | C 飞书验证前明确；沿用单群计划的真实平台缺口。群共享意味着当前群成员可见群内结果，不能用单聊授权推断群数据接收许可 |

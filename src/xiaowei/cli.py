@@ -32,6 +32,7 @@ if TYPE_CHECKING:
 _LOG_LEVELS = ("DEBUG", "INFO", "WARNING", "ERROR")
 _CONTAINER_CONFIG = Path("/etc/xiaowei/xiaowei.json")
 _CONTAINER_PORT_ENV = "XW_WEB_PORT"
+_CONTAINER_BIND_ADDRESS_ENV = "XW_WEB_BIND_ADDRESS"
 _CONTAINER_STOP_GRACE_ENV = "XW_STOP_GRACE_SECONDS"
 
 
@@ -109,8 +110,13 @@ def _main(argv: Sequence[str] | None, *, container: bool) -> int:
             runtime.validate_placeholders(config)
             runtime.validate_model_config(config)
         elif container:
-            port, stop_grace = _container_deployment_values()
-            runtime.validate_config(config, container_port=port, stop_grace_seconds=stop_grace)
+            port, bind_address, stop_grace = _container_deployment_values()
+            runtime.validate_config(
+                config,
+                container_port=port,
+                container_bind_address=bind_address,
+                stop_grace_seconds=stop_grace,
+            )
         elif args.command == "config":
             runtime.validate_config(config)
         elif args.command == "serve":
@@ -129,7 +135,7 @@ def _main(argv: Sequence[str] | None, *, container: bool) -> int:
         return 1
 
 
-def _container_deployment_values() -> tuple[int, float]:
+def _container_deployment_values() -> tuple[int, str | None, float]:
     from xiaowei.runtime import ConfigError
 
     try:
@@ -142,7 +148,8 @@ def _container_deployment_values() -> tuple[int, float]:
         raise ConfigError(f"{_CONTAINER_STOP_GRACE_ENV}: 必须是有限正数") from None
     if not math.isfinite(stop_grace) or stop_grace <= 0:
         raise ConfigError(f"{_CONTAINER_STOP_GRACE_ENV}: 必须是有限正数")
-    return port, stop_grace
+    bind_address = os.environ.get(_CONTAINER_BIND_ADDRESS_ENV)
+    return port, bind_address, stop_grace
 
 
 async def _run(config: "ServeConfig", args: argparse.Namespace, *, container: bool = False) -> int:

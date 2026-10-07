@@ -24,6 +24,7 @@ Governance → 各目标首次结构刷新（失败只让该目标暂不可用�
 """
 
 import asyncio
+import ipaddress
 import logging
 import math
 import os
@@ -406,13 +407,22 @@ def _resolve_checked(field: str, ref: str) -> None:
         raise ConfigError(f"{field}: 引用的环境变量仍是 .env 模板占位符，请替换为实际值")
 
 
+def _is_ip_literal(value: str) -> bool:
+    try:
+        ipaddress.ip_address(value)
+    except ValueError:
+        return False
+    return True
+
+
 def validate_config(
     config: ServeConfig,
     *,
     container_port: int | None = None,
+    container_bind_address: str | None = None,
     stop_grace_seconds: float | None = None,
 ) -> None:
-    """离线检查模板占位符、全部凭据引用、CA 与可选容器参数；不连接外部服务或写文件。"""
+    """离线检查模板占位符、凭据、CA 与可选容器绑定参数；不连接外部服务或写文件。"""
     validate_placeholders(config)
     refs = [
         ("storage.database_url_ref", config.storage.database_url_ref),
@@ -443,6 +453,8 @@ def validate_config(
     if container_port is not None:
         if not 1 <= container_port <= 65535 or container_port != config.listen_port:
             raise ConfigError("listen_port: 与容器发布端口不一致")
+        if container_bind_address is not None and not _is_ip_literal(container_bind_address):
+            raise ConfigError("XW_WEB_BIND_ADDRESS: 必须是 IP 地址，例如 0.0.0.0 或 127.0.0.1")
     if stop_grace_seconds is not None:
         if stop_grace_seconds < minimum_stop_grace_seconds(config):
             raise ConfigError("shutdown_timeout_seconds: 容器停止宽限不足")
@@ -943,7 +955,7 @@ async def _container_serve(
     """仅供镜像固定入口调用；JSON 与公开 CLI 都不能选择容器监听模式。"""
     return await _serve_bound(
         config,
-        bind_host="0.0.0.0",  # noqa: S104 - 只在容器网络内监听，宿主固定发布到 loopback
+        bind_host="0.0.0.0",  # noqa: S104 - 容器网络内监听；宿主发布地址由 XW_WEB_BIND_ADDRESS 决定
         stop=stop,
         clock=clock,
         model_transport=model_transport,

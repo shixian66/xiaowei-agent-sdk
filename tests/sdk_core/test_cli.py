@@ -300,6 +300,7 @@ def test_container_entry_is_the_only_cli_path_that_selects_container_binding(
         MODEL_ENV: "model-test",
         SR_ENV: "starrocks-test",
         "XW_WEB_PORT": str(port),
+        "XW_WEB_BIND_ADDRESS": "127.0.0.1",
         "XW_STOP_GRACE_SECONDS": "60",
     }.items():
         monkeypatch.setenv(name, value)
@@ -314,6 +315,27 @@ def test_container_entry_is_the_only_cli_path_that_selects_container_binding(
     assert cli_module.container_main(["serve"], config_path=file) == 0
     assert len(called) == 1 and called[0].listen_host == "127.0.0.1"
     assert "container" not in _parser_help()
+
+
+def test_container_config_check_accepts_any_ip_bind_without_listing_origins(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """发布地址只要是 IP 就接受，不要求 ``allowed_origins`` 跟着改；不是 IP 退出 2 且不回显值。"""
+    file = tmp_path / "xiaowei.json"
+    file.write_text(json.dumps(filled(example_with_feishu()), ensure_ascii=False), encoding="utf-8")
+    for address in ("0.0.0.0", "127.0.0.1", "172.20.0.8", "::"):  # noqa: S104 - 内网访问的发行默认值
+        _deploy_env(monkeypatch, XW_WEB_BIND_ADDRESS=address)
+        assert cli_module.container_main(["config", "check"], config_path=file) == 0
+        assert capsys.readouterr().out.strip() == "configuration valid"
+    monkeypatch.delenv("XW_WEB_BIND_ADDRESS")
+    assert cli_module.container_main(["config", "check"], config_path=file) == 0
+    capsys.readouterr()
+
+    _deploy_env(monkeypatch, XW_WEB_BIND_ADDRESS="intranet-host.example")
+    assert cli_module.container_main(["config", "check"], config_path=file) == 2
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert "XW_WEB_BIND_ADDRESS" in captured.err and "intranet-host" not in captured.err
 
 
 def _template_file(tmp_path: Path) -> Path:
@@ -370,6 +392,7 @@ def _deploy_env(monkeypatch: pytest.MonkeyPatch, **overrides: str) -> None:
     for name in TEMPLATE_ENV:
         monkeypatch.setenv(name, f"real-{name.lower()}")
     monkeypatch.setenv("XW_WEB_PORT", "8501")
+    monkeypatch.setenv("XW_WEB_BIND_ADDRESS", "127.0.0.1")
     monkeypatch.setenv("XW_STOP_GRACE_SECONDS", "600")
     monkeypatch.delenv("XW_POSTGRES_PASSWORD", raising=False)
     for name, value in overrides.items():
@@ -942,6 +965,10 @@ def _break_ca(monkeypatch: pytest.MonkeyPatch, file: Path) -> None:
         pytest.param(lambda mp, file: mp.delenv("XW_FEISHU_APP_SECRET"), id="missing-feishu"),
         pytest.param(_break_ca, id="unreadable-ca"),
         pytest.param(lambda mp, file: mp.setenv("XW_WEB_PORT", "not-a-port"), id="port"),
+        pytest.param(
+            lambda mp, file: mp.setenv("XW_WEB_BIND_ADDRESS", "intranet-host.example"),
+            id="bind-address",
+        ),
         pytest.param(lambda mp, file: mp.setenv("XW_STOP_GRACE_SECONDS", "1"), id="stop-grace"),
     ],
 )
