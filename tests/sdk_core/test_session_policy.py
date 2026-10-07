@@ -14,7 +14,10 @@ import pytest
 from agents import Agent, Runner, RunResult, TResponseInputItem
 from agents.exceptions import ModelBehaviorError
 from agents.extensions.memory import SQLAlchemySession
+from agents.models.chatcmpl_converter import Converter
 from agents.testing import ModelCall, ModelStep, ScriptedModel, assistant_message, function_call
+from openai.types.chat import ChatCompletionMessage
+from openai.types.responses import ResponseFunctionToolCall
 from sqlalchemy import text
 from sqlalchemy.engine import URL
 from sqlalchemy.exc import SQLAlchemyError
@@ -853,3 +856,201 @@ async def test_replay_rechecks_user_input_policy(postgres_url: URL) -> None:
         await h.refused(context(turn="t2"), input_policy=SECRET_POLICY)
         followup, _ = await h.turn(context(turn="t3"), [_cite()])
     assert len(followup.calls) == 1
+
+
+# ---- V1-B：函数调用的 thought signature（单字段白名单） -----------------------------------------
+
+SIG = "c2lnbmF0dXJlLUE="
+
+
+def _signed(provider_data: object, call_id: str = "c1") -> list[Any]:
+    """带 ``provider_data`` 的函数调用；字段按 SDK 的约定作为附加字段传入。"""
+    fields: dict[str, Any] = {
+        "id": call_id,
+        "type": "function_call",
+        "call_id": call_id,
+        "name": "order_total",
+        "arguments": json.dumps({"region": "east"}),
+        "provider_data": provider_data,
+    }
+    return [ResponseFunctionToolCall(**fields)]
+
+
+def _stored_call(stored: list[dict[str, Any]], call_id: str = "c1") -> dict[str, Any]:
+    return _of(stored, "function_call", call_id)
+
+
+def _replayed_call(model: ScriptedModel, call_id: str = "c1") -> dict[str, Any]:
+    replayed = model.calls[0].input
+    assert isinstance(replayed, list)
+    return _of(replayed, "function_call", call_id)
+
+
+async def test_signature_is_saved_and_replayed_exactly(postgres_url: URL) -> None:
+    async with harness(postgres_url) as h:
+        await h.turn(context(), [_signed({"thought_signature": SIG}), _cite()])
+        stored = await h.stored()
+        followup, _ = await h.turn(context(turn="t2"), [_cite()], "刚才的结果？")
+
+    assert _stored_call(stored) == {
+        "type": "function_call",
+        "call_id": "c1",
+        "name": "order_total",
+        "arguments": json.dumps({"region": "east"}),
+        "provider_data": {"thought_signature": SIG},
+    }
+    assert _replayed_call(followup)["provider_data"] == {"thought_signature": SIG}
+    assert len(h.adapter.calls) == 1
+
+
+def _converted(*, gemini: bool) -> list[Any]:
+    """用锁定 SDK 的 Chat Completions 转换器生成函数调用项（只用于锁定 SDK 输出形状）。"""
+    tool_call: dict[str, Any] = {
+        "id": "c1",
+        "type": "function",
+        "function": {"name": "order_total", "arguments": json.dumps({"region": "east"})},
+    }
+    if gemini:
+        tool_call["extra_content"] = {"google": {"thought_signature": SIG}}
+    message = ChatCompletionMessage.model_validate(
+        {"role": "assistant", "content": None, "tool_calls": [tool_call]}
+    )
+    model = "gemini-3-flash-preview" if gemini else "deepseek-chat"
+    items = Converter.message_to_output_items(
+        message, provider_data={"model": model, "response_id": "resp-1"}
+    )
+    (item,) = items
+    assert isinstance(item, ResponseFunctionToolCall)
+    expected = {"model": model, "response_id": "resp-1"}
+    if gemini:
+        expected["thought_signature"] = SIG
+    assert getattr(item, "provider_data", None) == expected  # SDK 输出形状
+    return items
+
+
+@pytest.mark.parametrize(
+    ("gemini", "kept"),
+    [
+        pytest.param(False, None, id="deepseek-model-and-response-id"),
+        pytest.param(True, {"thought_signature": SIG}, id="gemini-signature"),
+    ],
+)
+async def test_sdk_chat_completions_items_keep_only_the_signature(
+    postgres_url: URL, gemini: bool, kept: dict[str, str] | None
+) -> None:
+    async with harness(postgres_url) as h:
+        await h.turn(context(), [_converted(gemini=gemini), _cite()])
+        stored = await h.stored()
+        followup, _ = await h.turn(context(turn="t2"), [_cite()], "刚才的结果？")
+
+    assert _stored_call(stored).get("provider_data") == kept
+    assert _replayed_call(followup).get("provider_data") == kept
+    saved = json.dumps(stored)
+    assert "response_id" not in saved and "resp-1" not in saved
+
+
+@pytest.mark.parametrize(
+    "provider_data",
+    [
+        pytest.param(None, id="null"),
+        pytest.param("thought_signature", id="string"),
+        pytest.param(["thought_signature", SIG], id="list"),
+        pytest.param({}, id="empty-mapping"),
+        pytest.param({"model": "m", "other": {"nested": 1}}, id="no-signature"),
+    ],
+)
+async def test_provider_data_without_signature_is_dropped(
+    postgres_url: URL, provider_data: object
+) -> None:
+    async with harness(postgres_url) as h:
+        await h.turn(context(), [_signed(provider_data), _cite()])
+        stored = await h.stored()
+        followup, _ = await h.turn(context(turn="t2"), [_cite()], "刚才的结果？")
+    assert "provider_data" not in _stored_call(stored)
+    assert "provider_data" not in _replayed_call(followup)
+
+
+async def test_other_provider_keys_are_dropped_next_to_a_signature(postgres_url: URL) -> None:
+    provider_data = {"thought_signature": SIG, "model": "m", "response_id": "r", "x": [1]}
+    async with harness(postgres_url) as h:
+        await h.turn(context(), [_signed(provider_data), _cite()])
+        stored = await h.stored()
+    assert _stored_call(stored)["provider_data"] == {"thought_signature": SIG}
+
+
+@pytest.mark.parametrize(
+    "signature",
+    [
+        pytest.param("", id="empty"),
+        pytest.param(None, id="null"),
+        pytest.param(123, id="number"),
+        pytest.param({"v": SIG}, id="mapping"),
+        pytest.param("\ud800", id="invalid-utf8"),
+        pytest.param("A" * 65_537, id="too-many-bytes"),
+        # 字符数在上限内，UTF-8 字节数超出：按字节计。
+        pytest.param("é" * 32_769, id="too-many-utf8-bytes"),
+    ],
+)
+async def test_invalid_signature_rejects_the_whole_turn(
+    postgres_url: URL, signature: object
+) -> None:
+    async with harness(postgres_url) as h:
+        with pytest.raises(SessionItemRejectedError) as excinfo:
+            await h.turn(context(), [_signed({"thought_signature": signature}), _cite()])
+        assert await h.stored() == []
+        assert await h.state() == ("active", 0)
+    assert len(h.adapter.calls) == 1  # 工具已执行；不重跑、不截断签名凑数
+    assert str(signature)[:16] not in str(excinfo.value) or not str(signature)
+
+
+async def test_signature_at_the_byte_limit_is_kept(postgres_url: URL) -> None:
+    signature = "A" * 65_536
+    roomy = LIMITS.model_copy(update={"max_history_bytes": 200_000})
+    async with harness(postgres_url) as h:
+        await h.turn(context(), [_signed({"thought_signature": signature}), _cite()], limits=roomy)
+        followup, _ = await h.turn(context(turn="t2"), [_cite()], limits=roomy)
+    assert _replayed_call(followup)["provider_data"] == {"thought_signature": signature}
+
+
+async def test_signature_counts_toward_the_history_limit(postgres_url: URL) -> None:
+    """同一轮只因签名变大而越界时，走现有“历史过大”行为：封存、不保存、不重跑工具。"""
+    async with harness(postgres_url) as h:
+        await h.turn(context(), [_signed({"thought_signature": SIG}), _cite()])
+        small_size = sum(len(json.dumps(i, ensure_ascii=False).encode()) for i in await h.stored())
+        # 上限足以容纳一轮带短签名的历史，但容纳不下同一轮带 4 倍大小签名的历史。
+        limits = LIMITS.model_copy(update={"max_history_bytes": small_size * 2})
+        large = "A" * (small_size * 4)
+        with pytest.raises(SessionLimitError):
+            await h.turn(
+                context(session="s2"),
+                [_signed({"thought_signature": large}), _cite()],
+                limits=limits,
+            )
+        assert await h.stored("s2") == []
+        assert await h.state("s2") == ("sealed", 0)
+        # 对照：同一上限下短签名的一轮可以保存。
+        await h.turn(
+            context(session="s3"), [_signed({"thought_signature": SIG}), _cite()], limits=limits
+        )
+        assert await h.state("s3") == ("active", 1)
+    assert len(h.adapter.calls) == 3
+
+
+async def test_signed_history_under_existing_gemini_profile_replays(postgres_url: URL) -> None:
+    gemini = profile_fingerprint(
+        _profile(
+            profile_id="gemini-main",
+            provider="gemini",
+            base_url="https://generativelanguage.googleapis.com/v1beta/openai",
+            api_mode="chat_completions",
+            model="gemini-3-flash-preview",
+            api_key_ref="env:XIAOWEI_TEST_GEMINI_KEY",
+        )
+    )
+    async with harness(postgres_url) as h:
+        await h.turn(context(), [_signed({"thought_signature": SIG}), _cite()], profile=gemini)
+        followup, _ = await h.turn(context(turn="t2"), [_cite()], profile=gemini)
+        other = profile_fingerprint(_profile(model="another-model"))
+        refused = await h.refused(context(turn="t3"), profile=other)
+    assert _replayed_call(followup)["provider_data"] == {"thought_signature": SIG}
+    assert refused.calls == ()

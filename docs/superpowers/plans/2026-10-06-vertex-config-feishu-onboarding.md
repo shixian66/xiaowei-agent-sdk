@@ -521,6 +521,13 @@ uv run --locked --extra dev python -m pytest \
   对应成功、精确回放、容量、Profile 和失败测试必须明确转红，不能只表现为卡住。
 - **建议提交：** `feat: preserve bounded model call signatures in sessions`
 
+**V1-B 实施记录（2026-10-07，分支 `claude/vertex-v1b`，只用协议替身）：** 按 Step 1–3 实施。偏离或补足计划之处：
+`safe_run_config()` 的测试放在 `test_app.py`（工厂与 Application 同在 `app.py`）；`test_runtime.py` 增加经
+`runtime.serve` + Web 的 Vertex 两轮成功与签名 400 固定回执，作为正式入口证据；`gate0.py` 的请求观测增加
+Vertex `contents`/`usageMetadata` 形状；`scripts/gate0_real_model.py` 的 Profile 摘要改为从固定端点取 Vertex
+主机（I-V 复用该命令）。Vertex 协议替身比官方文档更严格（回放历史中的签名也逐个核对），只证明本仓库会带回
+签名；真实 Vertex 的校验范围仍由 I-V 判定。离线证据、变异与未覆盖项记录在对应 PR，不在这里复制。
+
 ## 7. V2：正式 `xiaowei model check`
 
 **依赖：** V1-B。

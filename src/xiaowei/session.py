@@ -47,6 +47,10 @@ from xiaowei.models import AgentAnswer, Owner, RunContext, ToolCall, TurnAnswer
 
 SessionState = Literal["active", "writing", "sealed", "closed"]
 
+# 供应商附加字段中唯一保存的 key；上限与 Vertex 适配器的 signature 上限一致（UTF-8 字节）。
+_SIGNATURE = "thought_signature"
+_MAX_SIGNATURE_BYTES = 65_536
+
 # 不含可回放证据的工具输出（治理拒绝、执行失败等）以固定文字保存，不保留原始错误文本。
 NO_EVIDENCE_OUTPUT = "工具未返回可回放的证据"
 _EVIDENCE_REF = "xiaowei_evidence_ref"
@@ -587,15 +591,32 @@ def _message(raw: dict[str, Any], input_policy: SessionInputPolicy) -> TResponse
 
 
 def _function_call(raw: dict[str, Any]) -> TResponseInputItem:
-    return cast(
-        TResponseInputItem,
-        {
-            "type": "function_call",
-            "call_id": _text(raw.get("call_id")),
-            "name": _text(raw.get("name")),
-            "arguments": _text(raw.get("arguments"), allow_empty=True),
-        },
-    )
+    """调用项只保存标识、函数名、参数，以及供应商 ``provider_data`` 中的 thought signature。
+
+    规则不按 Provider 分支：``model``、``response_id`` 等其他字段一律丢弃，非映射视为没有可保存的
+    字段；签名一旦出现就必须是非空、可编码为 UTF-8 且不超过上限的字符串，否则整轮拒绝，不截断、
+    不静默删除（同轮回放需要它原样回到模型）。
+    """
+    call: dict[str, Any] = {
+        "type": "function_call",
+        "call_id": _text(raw.get("call_id")),
+        "name": _text(raw.get("name")),
+        "arguments": _text(raw.get("arguments"), allow_empty=True),
+    }
+    provider_data = raw.get("provider_data")
+    if isinstance(provider_data, Mapping) and _SIGNATURE in provider_data:
+        call["provider_data"] = {_SIGNATURE: _signature(provider_data[_SIGNATURE])}
+    return cast(TResponseInputItem, call)
+
+
+def _signature(value: object) -> str:
+    try:
+        size = len(value.encode()) if isinstance(value, str) else 0
+    except UnicodeEncodeError:
+        size = 0
+    if not 0 < size <= _MAX_SIGNATURE_BYTES:
+        raise SessionItemRejectedError("本轮模型调用的签名无法保存到会话")
+    return cast(str, value)
 
 
 def _tool_call(raw: dict[str, Any] | None) -> ToolCall | None:
