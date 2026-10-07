@@ -238,7 +238,7 @@ class Application:
         self._evidence = governance.evidence
         self._mcp = mcp
         self._clock = clock
-        self._run_config = RunConfig(tracing_disabled=True, trace_include_sensitive_data=False)
+        self._run_config = safe_run_config()
         self._active: set[str] = set()
 
     @property
@@ -377,6 +377,11 @@ class Application:
     def _refuse(turn: str, started: float, reason: TurnReason) -> TurnError:
         _stage(turn, "refused", started, reason)
         return TurnError(reason)
+
+
+def safe_run_config() -> RunConfig:
+    """每次运行使用的 SDK 配置：关闭 tracing，且 trace 不含敏感数据。应用与模型检查共用。"""
+    return RunConfig(tracing_disabled=True, trace_include_sensitive_data=False)
 
 
 def _turn_error(exc: Exception) -> TurnError:

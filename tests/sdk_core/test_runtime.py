@@ -21,6 +21,7 @@ from pathlib import Path
 from typing import Any
 
 import httpx
+import httpx2
 import pytest
 from asyncmy.errors import OperationalError, ProgrammingError
 from lark_channel.channel.errors import FeishuChannelErrorCode, SendError
@@ -41,7 +42,9 @@ from tests.sdk_core.test_app import (
     upstream_error,
 )
 from tests.sdk_core.test_feishu import FakeChannel
+from tests.sdk_core.test_gate0 import VertexLikeEndpoint, _vertex_body, vertex_call
 from tests.sdk_core.test_model_api import OPENAI as PROFILE
+from tests.sdk_core.test_vertex_model import VERTEX
 
 from xiaowei import runtime
 from xiaowei.channel import AccessDeniedError, ResultUnavailableError
@@ -192,8 +195,11 @@ class Env:
             config,
             stop=stop,
             clock=self.clock,
-            model_transport=self.scripts.transport(),
-            **{"starrocks_connect": self.connect(config), **kw},
+            **{
+                "model_transport": self.scripts.transport(),
+                "starrocks_connect": self.connect(config),
+                **kw,
+            },
         )
 
     @asynccontextmanager
@@ -627,6 +633,83 @@ async def test_model_failure_is_a_fixed_receipt_through_the_formal_assembly(env:
         body = response.json()
         assert body["state"] == "failed" and "模型未能完成本轮" in body["delivery"]["content"]
         assert await served.finish() == 0
+
+
+def _vertex_cite_seen(contents: list[dict[str, Any]]) -> dict[str, Any]:
+    """引用 Vertex 请求中（本轮与回放历史）全部工具结果的证据。"""
+    ids = [
+        json.loads(part["functionResponse"]["response"]["output"])["evidence_id"]
+        for content in contents
+        for part in content["parts"]
+        if "functionResponse" in part
+    ]
+    body = {
+        "evidence_ids": ids,
+        "inferences": [{"text": "数据平稳", "evidence_ids": ids}],
+        "clarification": None,
+    }
+    return _vertex_body([{"text": json.dumps(body, ensure_ascii=False)}])
+
+
+async def test_formal_assembly_replays_vertex_signatures_across_web_turns(
+    env: Env, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """正式入口用 Vertex Profile：第一轮工具往返，追问时端点核对上一轮调用的签名。"""
+    monkeypatch.setenv(VERTEX.api_key_ref.removeprefix("env:"), "fake-runtime-vertex-key")
+    query, followup = "各地区销售额", "刚才的结果？"
+    sql = "SELECT region, total FROM sales"
+    endpoint = VertexLikeEndpoint(
+        replies={
+            query: [
+                vertex_call("run_readonly_query", cluster=SR.target_id, sql=sql),
+                _vertex_cite_seen,
+            ],
+            followup: [_vertex_cite_seen],
+        }
+    )
+    config = env.config(model=VERTEX.model_dump(mode="json"))
+    async with env.running(config, model_transport=endpoint.transport()) as served:
+        await served.page()
+        first = (await served.turn(query, "query", "r1")).json()
+        assert first["state"] == "completed", first
+        ran = statements(env.drv)
+        assert len(ran) == 1
+        second = (await served.turn(followup, "query", "r2")).json()
+        assert second["state"] == "completed", second
+        assert statements(env.drv) == ran  # 追问不重跑查询
+        assert await served.finish() == 0
+    (signature,) = endpoint.issued.values()
+    assert signature not in json.dumps([first, second], ensure_ascii=False)
+
+
+async def test_vertex_signature_rejection_is_a_fixed_receipt(
+    env: Env, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """上游拒绝签名（400）：正式入口给出固定回执，不含签名或上游信息，工具不重跑。"""
+    monkeypatch.setenv(VERTEX.api_key_ref.removeprefix("env:"), "fake-runtime-vertex-key")
+    query = "各地区销售额"
+    sql = "SELECT region, total FROM sales"
+    endpoint = VertexLikeEndpoint(
+        replies={query: [vertex_call("run_readonly_query", cluster=SR.target_id, sql=sql)]}
+    )
+
+    async def reject_replayed_signature(request: httpx2.Request) -> httpx2.Response:
+        if len(json.loads(request.content)["contents"]) > 1:
+            error = {"code": 400, "message": "upstream-signature-detail", "status": "X"}
+            return httpx2.Response(400, json={"error": error})
+        return await endpoint.transport().handle_async_request(request)
+
+    config = env.config(model=VERTEX.model_dump(mode="json"))
+    transport = httpx2.MockTransport(reject_replayed_signature)
+    async with env.running(config, model_transport=transport) as served:
+        await served.page()
+        body = (await served.turn(query, "query", "r1")).json()
+        assert body["state"] == "failed" and "模型未能完成本轮" in body["delivery"]["content"]
+        assert len(statements(env.drv)) == 1  # 工具执行一次，不重跑
+        assert await served.finish() == 0
+    (signature,) = endpoint.issued.values()
+    exposed = json.dumps(body, ensure_ascii=False)
+    assert signature not in exposed and "upstream-signature-detail" not in exposed
 
 
 async def test_startup_recovers_interrupted_requests_before_serving(env: Env) -> None:

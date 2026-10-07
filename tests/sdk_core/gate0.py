@@ -96,7 +96,18 @@ RETENTION_SECONDS = 3600
 _USAGE_BODY_LIMIT = 1 << 20
 # 只记录这些 token 计数；供应商返回的其他键（可能夹带内容）一律丢弃。
 USAGE_KEYS = frozenset(
-    {"prompt_tokens", "completion_tokens", "input_tokens", "output_tokens", "total_tokens"}
+    {
+        "prompt_tokens",
+        "completion_tokens",
+        "input_tokens",
+        "output_tokens",
+        "total_tokens",
+        # Vertex ``usageMetadata``
+        "promptTokenCount",
+        "candidatesTokenCount",
+        "thoughtsTokenCount",
+        "totalTokenCount",
+    }
 )
 # 模型请求中工具结果信封的字段名只按此白名单记录（都是本文件策略声明的字段）。
 OBSERVED_FIELDS = frozenset({"region", "total", "orders", "rows", "regions"})
@@ -199,7 +210,7 @@ def app_config(profile: ModelProfile) -> AppConfig:
 
 @dataclass(frozen=True)
 class RequestObservation:
-    """一次模型 HTTP 请求的元数据；不含正文。签名计数只对 Chat Completions 有意义。"""
+    """一次模型 HTTP 请求的元数据；不含正文。签名计数只对 Chat Completions 与 Vertex 有意义。"""
 
     status: int
     elapsed_ms: int
@@ -280,6 +291,8 @@ def _request_shape(body: bytes) -> dict[str, Any]:
         data = json.loads(body)
     except ValueError:
         data = {}
+    if "contents" in data:
+        return _vertex_shape(data)
     tools = tuple(
         str(t.get("name") or t.get("function", {}).get("name"))
         for t in data.get("tools", [])
@@ -317,6 +330,49 @@ def _request_shape(body: bytes) -> dict[str, Any]:
     }
 
 
+def _vertex_shape(data: dict[str, Any]) -> dict[str, Any]:
+    """Vertex ``generateContent``：本轮从最后一条含文字的用户内容之后开始（工具结果也是 user）。"""
+    tools = tuple(
+        str(declaration.get("name"))
+        for group in data.get("tools", [])
+        for declaration in group.get("functionDeclarations", [])
+    )
+    contents = data.get("contents", [])
+    last_user = max(
+        (
+            i
+            for i, c in enumerate(contents)
+            if c.get("role") == "user" and any("text" in p for p in c.get("parts", []))
+        ),
+        default=-1,
+    )
+    counts = {"history": [0, 0], "turn": [0, 0]}
+    fields: set[str] = set()
+    chosen: list[str] = []
+    for index, content in enumerate(contents):
+        in_turn = index > last_user
+        bucket = counts["turn" if in_turn else "history"]
+        for part in content.get("parts", []):
+            if "functionResponse" in part:
+                output = (part["functionResponse"].get("response") or {}).get("output")
+                fields |= _envelope_fields(output)
+            if "functionCall" in part:
+                bucket[0] += 1
+                bucket[1] += 1 if part.get("thoughtSignature") else 0
+                name = part["functionCall"].get("name")
+                if in_turn:
+                    chosen.append(str(name) if name in tools else OTHER_TOOL)
+    return {
+        "tools_offered": tools,
+        "history_tool_calls": counts["history"][0],
+        "history_signatures": counts["history"][1],
+        "turn_tool_calls": counts["turn"][0],
+        "turn_signatures": counts["turn"][1],
+        "turn_tools": tuple(chosen),
+        "tool_result_fields": tuple(sorted(fields)),
+    }
+
+
 def _envelope_fields(output: object) -> set[str]:
     try:
         envelope = json.loads(output) if isinstance(output, str) else None
@@ -329,7 +385,8 @@ def _envelope_fields(output: object) -> set[str]:
 def usage_counts(body: bytes) -> dict[str, int] | None:
     """只取 ``USAGE_KEYS`` 中的整数计数；未知键、嵌套结构与布尔值丢弃。"""
     try:
-        usage = json.loads(body).get("usage")
+        parsed = json.loads(body)
+        usage = parsed.get("usage") or parsed.get("usageMetadata")
     except (ValueError, AttributeError):
         return None
     if not isinstance(usage, dict):

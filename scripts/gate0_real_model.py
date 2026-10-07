@@ -40,7 +40,7 @@ from tests.sdk_core.postgres_harness import (
 from tests.sdk_core.synthetic_tools import ready_engine
 
 from xiaowei.config import SecretRefError, configure_runtime, resolve_secret_ref
-from xiaowei.model_api import ModelProfile, profile_fingerprint
+from xiaowei.model_api import VERTEX_ENDPOINT, ModelProfile, profile_fingerprint
 
 POSTGRES_URL_ENV = "SDK_TEST_POSTGRES_URL"
 EXIT_FAILED, EXIT_MISCONFIGURED = 1, 2
@@ -94,7 +94,7 @@ async def run(
         "profile": {
             "profile_id": profile.profile_id,
             "provider": profile.provider,
-            "host": httpx2.URL(profile.base_url).host,
+            "host": httpx2.URL(_endpoint(profile)).host,
             "api_mode": profile.api_mode,
             "model": profile.model,
             "output_mode": profile.output_mode,
@@ -103,6 +103,11 @@ async def run(
         "passed": gate_passed(results),
         "samples": [r.report() for r in results],
     }
+
+
+def _endpoint(profile: ModelProfile) -> str:
+    """Vertex 的端点由程序固定，Profile 中没有 ``base_url``。"""
+    return profile.base_url or VERTEX_ENDPOINT.format(model=profile.model)
 
 
 def main(argv: Sequence[str] | None = None) -> int:

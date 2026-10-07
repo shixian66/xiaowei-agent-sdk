@@ -6,8 +6,10 @@
 回放历史中不带签名的工具调用，只能由 ``scripts/gate0_real_model.py`` 对获准 Profile 实测。
 """
 
+import base64
 import itertools
 import json
+import logging
 import os
 import subprocess
 import sys
@@ -19,6 +21,7 @@ from typing import Any
 import httpx2
 import pytest
 import scripts.gate0_real_model as gate0_command
+from sqlalchemy import text
 from sqlalchemy.engine import URL
 from tests.sdk_core import gate0
 from tests.sdk_core.gate0 import (
@@ -33,8 +36,10 @@ from tests.sdk_core.gate0 import (
 )
 from tests.sdk_core.synthetic_tools import Clock, ready_engine
 from tests.sdk_core.test_model_api import GEMINI
+from tests.sdk_core.test_vertex_model import VERTEX
 
-from xiaowei.feishu import attributed
+from xiaowei.app import TurnError
+from xiaowei.feishu import attributed, render
 from xiaowei.model_api import ModelProfile, profile_fingerprint
 from xiaowei.models import Delivery, DeliveryFact
 from xiaowei.sqlguard import guard_explain_query, guard_readonly_query
@@ -189,9 +194,9 @@ async def test_fixed_samples_pass_through_the_product_path(engine_url: URL) -> N
         "completion_tokens": 7,
         "total_tokens": 18,
     }
-    # 追问：回放了上一轮的工具调用，但当前 Session 保存形式不含供应商签名。
+    # 追问：Session 保存了调用的签名，回放时 SDK 按当前 Gemini 模型名把它放回 extra_content。
     followup = by_name["followup"].requests[0]
-    assert (followup.history_tool_calls, followup.history_signatures) == (1, 0)
+    assert (followup.history_tool_calls, followup.history_signatures) == (1, 1)
     # 诊断轮：展示了元数据工具、没有查询工具；强行调用使本轮失败，查询零执行。
     diagnose = by_name["diagnose_hides_query"]
     assert diagnose.requests[0].tools_offered == ("list_regions",)
@@ -211,20 +216,15 @@ async def test_report_carries_no_content(engine_url: URL) -> None:
     assert FAKE_KEY not in report
 
 
-async def test_history_signature_requirement_would_break_followup(engine_url: URL) -> None:
-    """若供应商也校验回放历史中的签名，追问在首个模型请求即失败，且不重跑工具。
-
-    这是 Gate 0 真实运行要判定的问题：失败时按计划先做 Session 保存形式的前置修复。
-    """
+async def test_history_signature_requirement_is_met_by_the_session(engine_url: URL) -> None:
+    """供应商也校验回放历史中的签名时，追问照常完成：Session 原样保存并回放了签名（V1-B）。"""
     _, results = await run(engine_url, scripted(strict_history=True))
     by_name = {r.name: r for r in results}
 
-    assert by_name["query"].passed
+    assert gate_passed(results), [r.report() for r in results]
     followup = by_name["followup"]
-    assert (followup.outcome, followup.reason) == ("failed", "model_failed")
-    assert [r.status for r in followup.requests] == [400]
+    assert [r.status for r in followup.requests] == [200]
     assert followup.sales_calls == 0
-    assert not gate_passed(results)
 
 
 # ---- 真实模型命令（离线部分） ----------------------------------------------------------
@@ -450,6 +450,240 @@ def test_command_rejects_undecodable_profile(
 
     assert gate0_command.main(["--profile", str(profile)]) == 2
     assert capsys.readouterr().err == "gate0: 无法读取 Profile 文件\n"
+
+
+# ---- V1-B：Vertex 协议替身经正式 Application 跑两轮 -------------------------------------------
+#
+# 端点按 Vertex ``generateContent`` 形状编写，并比真实文档更严格：所有函数调用（含回放历史）
+# 都必须带回发出时的 thought signature，否则返回 400。它只证明本应用、锁定 SDK 与适配器在这种
+# 协议形状下的行为；真实 Vertex 的校验范围由 I-V 实测。
+
+VERTEX_PROFILE: ModelProfile = VERTEX
+VERTEX_KEY = "fake-gate0-vertex-key"
+VertexReply = Callable[[list[dict[str, Any]]], dict[str, Any]]
+
+
+def _vertex_body(parts: list[dict[str, Any]]) -> dict[str, Any]:
+    return {
+        "candidates": [
+            {"index": 0, "content": {"role": "model", "parts": parts}, "finishReason": "STOP"}
+        ],
+        "usageMetadata": {"promptTokenCount": 11, "candidatesTokenCount": 7, "totalTokenCount": 18},
+    }
+
+
+def vertex_call(name: str, **arguments: object) -> VertexReply:
+    def reply(contents: list[dict[str, Any]]) -> dict[str, Any]:
+        n = next(_signatures)
+        signature = base64.b64encode(f"vertex-signature-{n}".encode()).decode()
+        call = {"id": f"vx-call-{n}", "name": name, "args": arguments}
+        return _vertex_body([{"functionCall": call, "thoughtSignature": signature}])
+
+    return reply
+
+
+def _vertex_envelopes(contents: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    found = []
+    for content in contents:
+        for part in content["parts"]:
+            if "functionResponse" in part:
+                try:
+                    found.append(json.loads(part["functionResponse"]["response"]["output"]))
+                except ValueError:
+                    continue  # 治理拒绝等固定文字
+    return found
+
+
+def vertex_clarify(contents: list[dict[str, Any]]) -> dict[str, Any]:
+    body = {"evidence_ids": [], "inferences": [], "clarification": "请说明指哪个数字"}
+    return _vertex_body([{"text": json.dumps(body, ensure_ascii=False)}])
+
+
+def vertex_cite_all(contents: list[dict[str, Any]]) -> dict[str, Any]:
+    envelopes = _vertex_envelopes(contents)
+    totals = [e["data"]["total"] for e in envelopes if "total" in e["data"]]
+    if not totals:
+        return vertex_clarify(contents)
+    ids = [e["evidence_id"] for e in envelopes]
+    body = {
+        "evidence_ids": ids,
+        "inferences": [{"text": f"总额为 {totals[-1]}", "evidence_ids": ids}],
+        "clarification": None,
+    }
+    return _vertex_body([{"text": json.dumps(body, ensure_ascii=False)}])
+
+
+@dataclass
+class VertexLikeEndpoint:
+    """按最后一条用户文字分派脚本；每个请求中的全部函数调用都须带回发出时的签名。"""
+
+    replies: dict[str, list[VertexReply]]
+    issued: dict[str, str] = field(default_factory=dict)
+
+    def transport(self) -> httpx2.MockTransport:
+        return httpx2.MockTransport(self._handle)
+
+    async def _handle(self, request: httpx2.Request) -> httpx2.Response:
+        contents: list[dict[str, Any]] = json.loads(request.content)["contents"]
+        for content in contents:
+            for part in content["parts"]:
+                call = part.get("functionCall")
+                if call is not None and part.get("thoughtSignature") != self.issued.get(
+                    call.get("id")
+                ):
+                    error = {"code": 400, "message": "invalid thought signature", "status": "X"}
+                    return httpx2.Response(400, json={"error": error})
+        texts = [
+            p["text"] for c in contents if c["role"] == "user" for p in c["parts"] if "text" in p
+        ]
+        body = self.replies[texts[-1]].pop(0)(contents)
+        for part in body["candidates"][0]["content"]["parts"]:
+            if "functionCall" in part:
+                self.issued[part["functionCall"]["id"]] = part["thoughtSignature"]
+        return httpx2.Response(200, json=body)
+
+
+def vertex_scripted() -> VertexLikeEndpoint:
+    query, followup, diagnose, vague = (s.message for s in SAMPLES)
+    return VertexLikeEndpoint(
+        replies={
+            query: [vertex_call("sales_total", region="east"), vertex_cite_all],
+            followup: [vertex_cite_all],
+            # 诊断轮不展示查询工具；模型仍强行调用时由适配器在工具 I/O 前拒绝。
+            diagnose: [vertex_call("sales_total", region="east")],
+            vague: [vertex_clarify],
+        }
+    )
+
+
+@pytest.fixture
+async def vertex_url(postgres_url: URL, monkeypatch: pytest.MonkeyPatch) -> AsyncIterator[URL]:
+    monkeypatch.setenv(VERTEX_PROFILE.api_key_ref.removeprefix("env:"), VERTEX_KEY)
+    yield postgres_url
+
+
+async def test_vertex_samples_pass_through_the_product_path(vertex_url: URL) -> None:
+    async with (
+        ready_engine(vertex_url) as engine,
+        gate0_app(
+            VERTEX_PROFILE, engine, network=vertex_scripted().transport(), clock=Clock()
+        ) as gate,
+    ):
+        results = await run_samples(gate)
+    by_name = {r.name: r for r in results}
+
+    assert gate_passed(results), [r.report() for r in results]
+    assert all(r.passed for r in results)
+    query = by_name["query"]
+    assert [r.turn_signatures for r in query.requests] == [0, 1]
+    assert [r.status for r in query.requests] == [200, 200]
+    assert query.requests[0].usage == {
+        "promptTokenCount": 11,
+        "candidatesTokenCount": 7,
+        "totalTokenCount": 18,
+    }
+    # 第二轮第一个请求带着上一轮函数调用的签名（端点逐个核对），工具不重跑。
+    followup = by_name["followup"]
+    first = followup.requests[0]
+    assert (first.history_tool_calls, first.history_signatures, first.status) == (1, 1, 200)
+    assert followup.sales_calls == 0
+    diagnose = by_name["diagnose_hides_query"]
+    assert diagnose.requests[0].tools_offered == ("list_regions",)
+    assert (diagnose.outcome, diagnose.reason) == ("failed", "model_failed")
+    assert len(gate.adapter.calls) == 1
+
+
+async def test_command_runs_vertex_samples_offline(vertex_url: URL) -> None:
+    """I-V 复用同一命令：Vertex Profile 没有 base_url/api_mode，摘要取固定端点的主机。"""
+    report = await gate0_command.run(VERTEX_PROFILE, network=vertex_scripted().transport())
+
+    assert report["passed"] is True
+    assert report["profile"] == {
+        "profile_id": VERTEX_PROFILE.profile_id,
+        "provider": "vertex",
+        "host": "aiplatform.googleapis.com",
+        "api_mode": None,
+        "model": VERTEX_PROFILE.model,
+        "output_mode": None,
+        "fingerprint": profile_fingerprint(VERTEX_PROFILE),
+    }
+    assert VERTEX_KEY not in json.dumps(report, ensure_ascii=False)
+
+
+TAMPERED = base64.b64encode(b"not-the-issued-signature").decode()
+
+
+def _replace_signature(item: dict[str, Any]) -> None:
+    item["provider_data"] = {"thought_signature": TAMPERED}
+
+
+def _remove_signature(item: dict[str, Any]) -> None:
+    del item["provider_data"]
+
+
+def _corrupt_signature(item: dict[str, Any]) -> None:
+    item["provider_data"] = {"thought_signature": "not base64!"}
+
+
+@pytest.mark.parametrize(
+    ("tamper", "statuses"),
+    [
+        # Session 没有完整性摘要，本地发现不了替换；上游以 400 拒绝。
+        pytest.param(_replace_signature, [400], id="replaced"),
+        pytest.param(_remove_signature, [400], id="removed"),
+        # 结构非法的签名由适配器在发送前拒绝，零请求。
+        pytest.param(_corrupt_signature, [], id="not-base64"),
+    ],
+)
+async def test_tampered_signature_fails_the_followup_without_retry(
+    vertex_url: URL,
+    caplog: pytest.LogCaptureFixture,
+    tamper: Callable[[dict[str, Any]], None],
+    statuses: list[int],
+) -> None:
+    caplog.set_level(logging.DEBUG)
+    query, followup = SAMPLES[0], SAMPLES[1]
+    endpoint = vertex_scripted()
+    async with (
+        ready_engine(vertex_url) as engine,
+        gate0_app(VERTEX_PROFILE, engine, network=endpoint.transport(), clock=Clock()) as gate,
+    ):
+        ctx = gate0._context(query, gate.app, "tamper")
+        answer = await gate.app.run_turn(ctx, query.message)
+        delivery = await gate.evidence.validate_answer(answer, ctx)
+        (issued,) = endpoint.issued.values()
+
+        async with engine.begin() as conn:
+            rows = (await conn.execute(text("SELECT id, message_data FROM agent_messages"))).all()
+            (row_id, data) = next(
+                (r[0], json.loads(r[1])) for r in rows if '"function_call"' in r[1]
+            )
+            assert data["provider_data"] == {"thought_signature": issued}
+            tamper(data)
+            await conn.execute(
+                text("UPDATE agent_messages SET message_data = :d WHERE id = :id"),
+                {"d": json.dumps(data), "id": row_id},
+            )
+        before = len(gate.observer.observations)
+        with pytest.raises(TurnError) as excinfo:
+            await gate.app.run_turn(gate0._context(followup, gate.app, "tamper"), followup.message)
+        async with engine.connect() as conn:
+            evidence_rows = (await conn.execute(text("SELECT * FROM xiaowei_evidence"))).all()
+
+    assert excinfo.value.reason == "model_failed"
+    assert [r.status for r in gate.observer.observations[before:]] == statuses  # 不自动重试
+    assert len(gate.adapter.calls) == 1  # 工具不重跑
+    projections = (
+        str(excinfo.value),
+        repr(excinfo.value),
+        caplog.text,
+        delivery.model_dump_json(),
+        render(delivery, 4000),
+        json.dumps([[str(v) for v in row] for row in evidence_rows], ensure_ascii=False),
+    )
+    for exposed in projections:
+        for signature in (issued, TAMPERED, VERTEX_KEY):
+            assert signature not in exposed
 
 
 # ---- P2 诊断样例（不计入 Gate 0 判定） ----------------------------------------------------

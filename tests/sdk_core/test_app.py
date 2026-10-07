@@ -20,7 +20,7 @@ from typing import Any
 
 import httpx2
 import pytest
-from agents import set_tracing_disabled
+from agents import RunConfig, Runner, set_tracing_disabled
 from agents.testing import assistant_message, function_call
 from agents.tracing import flush_traces, set_trace_processors
 from pydantic import ValidationError
@@ -45,7 +45,8 @@ from tests.sdk_core.test_model_api import OPENAI as PROFILE
 from tests.sdk_core.test_model_api import _responses_body
 from tests.sdk_core.test_sdk_contract import _RecordingProcessor
 
-from xiaowei.app import AppConfig, Application, DataPolicy, TurnError
+from xiaowei import app as app_module
+from xiaowei.app import AppConfig, Application, DataPolicy, TurnError, safe_run_config
 from xiaowei.config import configure_runtime
 from xiaowei.evidence import AnswerRejectedError
 from xiaowei.governance import GovernedTools
@@ -545,6 +546,38 @@ async def test_turn_is_not_traced_even_if_tracing_is_reenabled(env: Env) -> None
     finally:
         configure_runtime()
     assert recorder.events == []
+
+
+def test_safe_run_config_disables_tracing_and_sensitive_trace_data() -> None:
+    first, second = safe_run_config(), safe_run_config()
+    for config in (first, second):
+        assert config.tracing_disabled is True
+        assert config.trace_include_sensitive_data is False
+    assert first is not second  # 每个调用方一份，互不共享可变对象
+
+
+async def test_application_runs_with_the_shared_safe_run_config(
+    env: Env, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    built: list[RunConfig] = []
+
+    def recording() -> RunConfig:
+        built.append(safe_run_config())
+        return built[-1]
+
+    monkeypatch.setattr(app_module, "safe_run_config", recording)
+    seen: list[RunConfig] = []
+    original = Runner.run
+
+    async def run(*args: Any, **kwargs: Any) -> Any:
+        seen.append(kwargs["run_config"])
+        return await original(*args, **kwargs)
+
+    monkeypatch.setattr(Runner, "run", run)
+    app = env.application()
+    message = env.scripts.add("东区", tool_call("order_total", region="east"), cite())
+    await app.run_turn(env.ctx(), message)
+    assert len(built) == 1 and seen == built
 
 
 async def test_unknown_tool_result_stops_the_turn(env: Env) -> None:
