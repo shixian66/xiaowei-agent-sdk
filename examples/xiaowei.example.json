@@ -7,13 +7,10 @@
     "max_answer_bytes": 65536
   },
   "model": {
-    "profile_id": "example-openai",
-    "provider": "openai",
-    "base_url": "https://api.openai.com/v1",
-    "api_mode": "responses",
-    "model": "<获准的模型 ID>",
+    "profile_id": "vertex-main",
+    "provider": "vertex",
+    "model": "replace-with-approved-vertex-model",
     "api_key_ref": "env:XW_MODEL_API_KEY",
-    "output_mode": "json_schema",
     "request_timeout_seconds": 60,
     "max_output_tokens": 4096,
     "max_request_bytes": 1000000,
@@ -80,49 +77,6 @@
           "candidate_rows": 200,
           "candidate_bytes": 2097152
         },
-        "policy": {
-          "allowed_functions": [
-            "COUNT",
-            "SUM"
-          ],
-          "max_rows": 200,
-          "max_sql_bytes": 8000,
-          "max_result_columns": 50
-        },
-        "schema_limits": {
-          "refresh_seconds": 60,
-          "max_age_seconds": 300,
-          "refresh_timeout_seconds": 10,
-          "max_objects": 1000,
-          "max_columns": 30000,
-          "max_bytes": 4000000,
-          "max_comment_chars": 200
-        }
-      }
-    },
-    {
-      "type": "starrocks",
-      "description": "<另一个集群的用途；未配置审计源，不能列慢查询>",
-      "business_context": null,
-      "starrocks": {
-        "target_id": "archive",
-        "host": "<另一个 StarRocks FE 地址>",
-        "port": 9030,
-        "database": "<默认 database>",
-        "tls": true,
-        "tls_ca_file": null,
-        "user": "<只读账号>",
-        "password_ref": "env:XW_ARCHIVE_STARROCKS_PASSWORD",
-        "connect_timeout_seconds": 5,
-        "query_timeout_seconds": 30,
-        "client_timeout_seconds": 35,
-        "pool_size": 4,
-        "time_zone": "Asia/Shanghai",
-        "query_mem_limit_bytes": 1073741824,
-        "max_result_bytes": 200000,
-        "max_value_bytes": 4000,
-        "max_plan_lines": 500,
-        "audit": null,
         "policy": {
           "allowed_functions": [
             "COUNT",

@@ -122,6 +122,7 @@ SDK Session 继续使用 SDK 公共 Session 接口；首版正式持久化后端
 | OpenAI | SDK 原生 Responses 模型接入 | 明确模型 ID，并验证工具调用、结构化输出与本地 Session |
 | Gemini | SDK Chat Completions 模型接入 Google 的 OpenAI 兼容端点 | 按具体模型验证 tools、输出 schema、后续轮次及所需协议字段 |
 | DeepSeek | SDK Chat Completions 模型接入其兼容端点 | 核对工具参数、JSON 输出与推理模式的组合；其他协议另行验证 |
+| Vertex AI（API Key 模式） | 本仓库对 SDK 公开 `Model` 的非流式适配，固定 `v1beta1` `generateContent` 端点与协议；同一请求携带函数声明与供应商结构化输出约束 | 已有协议替身下的离线验证；锁定模型上的真实工具往返、结构化输出与跨轮签名回放验证前不开放 |
 | 第三方/企业网关 | 上述协议中网关实际支持的一种 | 单独验证该端点、模型和参数组合；不能继承直连厂商的通过结论 |
 
 Google 与 DeepSeek 均提供 OpenAI 兼容调用方式；这只说明存在接入路径，不代表与 SDK 的全部功能等价。Google 的兼容文档仍标示 beta；DeepSeek 的 JSON Output 使用 `json_object`，不能将合法 JSON 等同于严格满足最终回答 schema。[Gemini 兼容接口](https://ai.google.dev/gemini-api/docs/openai)、[DeepSeek 接入](https://api-docs.deepseek.com/)、[DeepSeek JSON Output](https://api-docs.deepseek.com/guides/json_mode/)。

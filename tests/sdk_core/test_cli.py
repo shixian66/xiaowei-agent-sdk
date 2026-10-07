@@ -219,6 +219,75 @@ def test_config_check_rejects_missing_environment_and_unreadable_ca_without_valu
     secrets_absent(unreadable.stdout + unreadable.stderr)
 
 
+MAIN_TEMPLATE = ROOT / "examples/xiaowei.example.json"
+FIXED = "vertex 的端点与协议由程序固定"
+REQUIRED_ENV = ("XW_DATABASE_URL", "XW_DIGEST_KEY", "XW_MODEL_API_KEY", "XW_STARROCKS_PASSWORD")
+
+
+def _main_template(tmp_path: Path, *, fill: bool = True, **model: object) -> Path:
+    values = json.loads(MAIN_TEMPLATE.read_text(encoding="utf-8"))
+    values = filled(values) if fill else values
+    values["model"] |= model
+    file = tmp_path / "xiaowei.json"
+    file.write_text(json.dumps(values, ensure_ascii=False), encoding="utf-8")
+    return file
+
+
+def _required_env(**overrides: str) -> dict[str, str]:
+    """只设主模板的必填秘密：不设第二目标、飞书与 PostgreSQL 初始化密码。"""
+    values = {name: f"real-{name.lower()}-{CANARY}" for name in REQUIRED_ENV}
+    return child_env(**(values | overrides))
+
+
+@pytest.mark.parametrize("entry", ENTRIES)
+def test_filled_minimal_template_passes_config_check(entry: str, tmp_path: Path) -> None:
+    """C2 成功场景：主模板只替换文档标为必填的标记、只设必填秘密，正式 config check 即通过。"""
+    file = _main_template(tmp_path)
+    before = (file.read_bytes(), file.stat().st_mtime_ns)
+
+    result = run([*ENTRIES[entry], "--config", str(file), "config", "check"], _required_env())
+
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.strip() == "configuration valid" and result.stderr == ""
+    assert (file.read_bytes(), file.stat().st_mtime_ns) == before
+
+
+@pytest.mark.parametrize(
+    ("fill", "model", "env", "field"),
+    [
+        pytest.param(False, {}, {}, "model.model", id="unreplaced-template"),
+        pytest.param(
+            True, {"base_url": "https://evil.invalid/v1"}, {}, FIXED, id="vertex-endpoint"
+        ),
+        pytest.param(True, {"api_mode": "responses"}, {}, FIXED, id="vertex-protocol"),
+        pytest.param(True, {"output_mode": "json_object"}, {}, FIXED, id="vertex-output"),
+        pytest.param(True, {}, {"XW_MODEL_API_KEY": ""}, "model.api_key_ref", id="model-key"),
+        pytest.param(
+            True, {}, {"XW_STARROCKS_PASSWORD": ""}, "targets.0.starrocks.password_ref", id="sr-key"
+        ),
+    ],
+)
+@pytest.mark.parametrize("entry", ENTRIES)
+def test_minimal_template_failures_exit_2(
+    entry: str,
+    tmp_path: Path,
+    fill: bool,
+    model: dict[str, str],
+    env: dict[str, str],
+    field: str,
+) -> None:
+    """C2 关键失败：模板未替换、Vertex 固定字段被覆盖、模型或目标秘密缺失时退出 2，不回显值。"""
+    file = _main_template(tmp_path, fill=fill, **model)
+    argv = [*ENTRIES[entry], "--config", str(file), "config", "check"]
+
+    result = run(argv, _required_env(**env))
+
+    assert result.returncode == 2 and result.stdout == ""
+    assert field in result.stderr
+    assert CANARY not in result.stderr and "evil.invalid" not in result.stderr
+    assert "replace-with" not in result.stderr and "<" not in result.stderr
+
+
 def test_container_entry_is_the_only_cli_path_that_selects_container_binding(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
@@ -322,7 +391,7 @@ def test_serve_accepts_real_values_that_contain_angle_brackets(
     started = _no_runtime(monkeypatch)
     values = filled(example_with_feishu())
     values["targets"][0]["description"] = "业务 <生产> 集群"
-    values["targets"][1]["description"] = "<生产>"
+    values["targets"][0]["starrocks"]["database"] = "<生产>"
     file = tmp_path / "xiaowei.json"
     file.write_text(json.dumps(values, ensure_ascii=False), encoding="utf-8")
 

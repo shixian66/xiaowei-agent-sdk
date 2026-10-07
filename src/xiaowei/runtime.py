@@ -345,18 +345,21 @@ def _error_path(loc: tuple[int | str, ...]) -> str:
 # 形状猜测，真实值里出现尖括号也照常通过。模板增删标记时同步这里（测试逐项核对仓库模板）。
 _JSON_TEMPLATE_VALUES = frozenset(
     {
-        "<获准的模型 ID>",
+        # Vertex 模型 ID 只能是一个 URL 路径段：标记不用尖括号，才能先通过结构检查、再按占位符报告。
+        "replace-with-approved-vertex-model",
         "<集群用途，交给模型选择集群>",
-        "<另一个集群的用途；未配置审计源，不能列慢查询>",
         "<StarRocks FE 地址>",
-        "<另一个 StarRocks FE 地址>",
         "<默认 database>",
         "<只读账号>",
         "<飞书 tenant_key>",
         "<内部 subject>",
         "cli_replacewithappid",
         "oc_replace_with_chat_id",
-        # 历史升级标记：6d7c6af 发行的模板单聊名单键，当前模板改为 ``users={}``，旧片段仍拒绝。
+        # 历史升级标记：C2 之前发行的模板（OpenAI Profile 与第二个目标 archive）和 6d7c6af 的单聊
+        # 名单键。当前模板已不含这些值，沿用旧副本未替换时仍拒绝。
+        "<获准的模型 ID>",
+        "<另一个集群的用途；未配置审计源，不能列慢查询>",
+        "<另一个 StarRocks FE 地址>",
         "ou_replace_with_open_id",
     }
 )

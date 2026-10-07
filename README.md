@@ -22,7 +22,7 @@
 | 项目 | 首版设计 |
 | --- | --- |
 | Agent 核心 | OpenAI Agents SDK 的 Agent、Runner、function tools、Session |
-| 模型 API | 计划接入 OpenAI、Gemini、DeepSeek；通过配置选择经过验证的端点和模型，一次运行使用一个模型 |
+| 模型 API | 计划接入 OpenAI、Gemini、DeepSeek 与 Vertex AI（API Key 模式）；通过配置选择经过验证的端点和模型，一次运行使用一个模型 |
 | Web | 本机使用的简单对话页，显示文本、SQL、有限结果与执行提示 |
 | 飞书 | 获准单聊；可选一个指定群：群内 @小维 提问、全员共享会话、同群有界排队并回复原消息（离线实现，真实群在 P3 验证） |
 | 数据源 | 本地 Adapter 直连一个或多个 StarRocks 目标，工具以 `cluster` 参数选择集群；表与列自动发现，范围是只读账号实际可 SELECT 的对象，不再手写 allowlist |
@@ -58,17 +58,17 @@ MCP 负责标准化工具接入，不能替代业务授权。只有参数含义�
 实施时需要：
 
 1. 开发使用 Python 3.11 与 uv，部署使用 Docker 和 Docker Compose；新依赖和镜像版本验证后锁定。P1-A 的存储验证也使用隔离的真实 PostgreSQL。
-2. 一家获准的模型服务（OpenAI、Gemini、DeepSeek 或兼容网关），明确 API 地址、协议、模型 ID，以及对应 API key 的本机安全引用。
+2. 一家获准的模型服务：模板默认 Vertex AI（API Key 模式，只需模型 ID 和 Key，地址与协议由程序固定）；也可用 OpenAI、Gemini、DeepSeek 或兼容网关，此时须明确 API 地址、协议和模型 ID。Key 都只写本机安全引用。
 3. 获准的 StarRocks 测试连接、真实只读账号、数据库/视图范围、简短业务口径说明，以及允许向模型与渠道展示的数据。
 4. 飞书企业自建机器人、消息权限、事件订阅及获准单聊用户；启用指定群时另需机器人入群，以及群内 @ 消息事件、获取群成员与回复消息的权限（见[单群计划 F0 证据 7](docs/superpowers/plans/2026-10-03-feishu-group.md)）。
 
 凭据仅在本机或部署环境配置，不粘贴到对话、仓库、浏览器或日志。缺少真实环境时可以开发和离线验证，但不能标记对应实战验收完成。
 
-**正式命令。** 复制 [examples/xiaowei.example.json](examples/xiaowei.example.json)，按获准环境填写模型 Profile、`targets`（每个 StarRocks 集群一项）、授权表和 Web 地址；如需飞书，再加入 `feishu` 段。配置中的凭据只写 `env:NAME` 引用，变量在运行环境中设置：
+**正式命令。** 服务器首次安装按 [运维说明的“首次安装”](deploy/OPERATIONS.md#首次安装)：复制两份模板，只填其中标为必填的项，依次 `config check` → `model check` → 初始化 → 启动；字段说明、第二个目标和飞书的加法都在那里。原生运行同样从 [examples/xiaowei.example.json](examples/xiaowei.example.json) 开始：它是最小配置（一个 Vertex 模型、一个 StarRocks 目标、Web、飞书关闭），替换其中的待填写标记即可；改用其他供应商时 `model` 段另填 `base_url`、`api_mode` 与 `output_mode`。配置中的凭据只写 `env:NAME` 引用，变量在运行环境中设置：
 
 ```bash
 uv sync --locked
-export XW_DATABASE_URL=...   # postgresql+asyncpg://...，以及 XW_DIGEST_KEY、XW_MODEL_API_KEY 和每个集群的 StarRocks 口令（示例为 XW_STARROCKS_PASSWORD、XW_ARCHIVE_STARROCKS_PASSWORD）
+export XW_DATABASE_URL=...   # postgresql+asyncpg://...，以及 XW_DIGEST_KEY、XW_MODEL_API_KEY 和每个集群的 StarRocks 口令（模板只有 XW_STARROCKS_PASSWORD）
 uv run --locked xiaowei --config xiaowei.json config check      # 离线核对配置、环境引用和本地 CA
 uv run --locked xiaowei --config xiaowei.json model check       # 只需模型 Key；向模型发一次合成工具往返，产生用量
 uv run --locked xiaowei --config xiaowei.json storage init      # 全新数据库
