@@ -1154,26 +1154,3 @@ def _run_block(
 
 def _health(container_id: str) -> str:
     return docker("inspect", container_id, "--format", "{{.State.Health.Status}}").stdout.strip()
-
-
-def _install_file(source: Path, destination: Path) -> None:
-    """``install -m 600``：留存的 JSON 只允许部署管理员读取。"""
-    binary = shutil.which("install")
-    assert binary is not None
-    result = subprocess.run(  # noqa: S603 - 固定系统工具与测试文件
-        [binary, "-m", "600", str(source), str(destination)],
-        capture_output=True,
-        text=True,
-        check=False,
-    )
-    assert result.returncode == 0, result.stderr
-
-
-def _copy_into(source: Path, destination: Path) -> None:
-    """``cp`` 覆盖已有文件：内容换成留存版本，目标文件原有权限不变。"""
-    binary = shutil.which("cp")
-    assert binary is not None
-    result = subprocess.run(  # noqa: S603 - 固定系统工具与测试文件
-        [binary, str(source), str(destination)], capture_output=True, text=True, check=False
-    )
-    assert result.returncode == 0, result.stderr
