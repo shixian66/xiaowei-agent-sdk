@@ -30,6 +30,9 @@ from tests.sdk_core.test_runtime import (
     KEY_ENV,
     MODEL_ENV,
     SR_ENV,
+    env_template_values,
+    example_with_feishu,
+    filled,
     free_port,
     serve_config,
 )
@@ -234,6 +237,147 @@ def test_container_entry_is_the_only_cli_path_that_selects_container_binding(
     assert cli_module.container_main(["serve"], config_path=file) == 0
     assert len(called) == 1 and called[0].listen_host == "127.0.0.1"
     assert "container" not in _parser_help()
+
+
+def _template_file(tmp_path: Path) -> Path:
+    """未替换的发行模板（含飞书片段），环境变量全部已设置：只有模板占位符这一个问题。"""
+    file = tmp_path / "xiaowei.json"
+    file.write_text(json.dumps(example_with_feishu(), ensure_ascii=False), encoding="utf-8")
+    return file
+
+
+def _no_runtime(monkeypatch: pytest.MonkeyPatch) -> list[str]:
+    started: list[str] = []
+
+    async def record(*args: object, **kwargs: object) -> int:
+        started.append("runtime")
+        return 0
+
+    monkeypatch.setattr(cli_module, "_run", record)
+    monkeypatch.setattr(runtime, "_container_serve", record)
+    return started
+
+
+@pytest.mark.parametrize("container", [False, True], ids=["native", "container"])
+def test_serve_rejects_an_unreplaced_template_before_any_runtime_io(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    container: bool,
+) -> None:
+    _deploy_env(monkeypatch)
+    started = _no_runtime(monkeypatch)
+    file = _template_file(tmp_path)
+    before = (file.read_bytes(), file.stat().st_mtime_ns)
+
+    code = _serve(file, container)
+
+    assert code == 2 and started == []
+    err = capsys.readouterr().err
+    assert "model.model" in err and "feishu.app_id" in err and "<" not in err
+    assert (file.read_bytes(), file.stat().st_mtime_ns) == before
+
+
+TEMPLATE_ENV = (
+    "XW_DATABASE_URL",
+    "XW_DIGEST_KEY",
+    "XW_MODEL_API_KEY",
+    "XW_STARROCKS_PASSWORD",
+    "XW_ARCHIVE_STARROCKS_PASSWORD",
+    "XW_FEISHU_APP_SECRET",
+)
+
+
+def _deploy_env(monkeypatch: pytest.MonkeyPatch, **overrides: str) -> None:
+    """发行模板引用的变量全部填成真实值（容器入口还需要端口与停止宽限）。"""
+    for name in TEMPLATE_ENV:
+        monkeypatch.setenv(name, f"real-{name.lower()}")
+    monkeypatch.setenv("XW_WEB_PORT", "8501")
+    monkeypatch.setenv("XW_STOP_GRACE_SECONDS", "600")
+    monkeypatch.delenv("XW_POSTGRES_PASSWORD", raising=False)
+    for name, value in overrides.items():
+        monkeypatch.setenv(name, value)
+
+
+def _serve(file: Path, container: bool) -> int:
+    if container:
+        return cli_module.container_main(["serve"], config_path=file)
+    return cli_module.main(["--config", str(file), "serve"])
+
+
+@pytest.mark.parametrize("container", [False, True], ids=["native", "container"])
+def test_serve_accepts_real_values_that_contain_angle_brackets(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, container: bool
+) -> None:
+    """真实值里出现尖括号不是模板：预检通过并进入运行时（运行时本身被替换，不做外部 I/O）。"""
+    _deploy_env(monkeypatch, XW_MODEL_API_KEY="real<中文>secret", XW_POSTGRES_PASSWORD="a<b>c")  # noqa: S106 - 合成值
+    started = _no_runtime(monkeypatch)
+    values = filled(example_with_feishu())
+    values["targets"][0]["description"] = "业务 <生产> 集群"
+    values["targets"][1]["description"] = "<生产>"
+    file = tmp_path / "xiaowei.json"
+    file.write_text(json.dumps(values, ensure_ascii=False), encoding="utf-8")
+
+    assert _serve(file, container) == 0 and started == ["runtime"]
+
+
+def test_container_serve_rejects_a_template_postgres_password(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    template = env_template_values()["XW_POSTGRES_PASSWORD"]
+    _deploy_env(monkeypatch, XW_POSTGRES_PASSWORD=template)
+    started = _no_runtime(monkeypatch)
+    file = tmp_path / "xiaowei.json"
+    file.write_text(json.dumps(filled(example_with_feishu()), ensure_ascii=False), "utf-8")
+
+    assert _serve(file, container=True) == 2 and started == []
+    err = capsys.readouterr().err
+    assert "XW_POSTGRES_PASSWORD" in err and template not in err
+
+
+@pytest.mark.parametrize("entry", ENTRIES)
+def test_config_check_rejects_a_template_postgres_password(entry: str, tmp_path: Path) -> None:
+    file = tmp_path / "xiaowei.json"
+    file.write_text(json.dumps(serve_config(18501)), encoding="utf-8")
+    template = env_template_values()["XW_POSTGRES_PASSWORD"]
+    env = child_env(
+        **{
+            DB_ENV: "postgresql+asyncpg://offline.invalid/xiaowei",
+            KEY_ENV: f"digest-{CANARY}",
+            MODEL_ENV: f"model-{CANARY}",
+            SR_ENV: f"starrocks-{CANARY}",
+            "XW_POSTGRES_PASSWORD": template,
+        }
+    )
+    result = run([*ENTRIES[entry], "--config", str(file), "config", "check"], env)
+    assert result.returncode == 2 and "XW_POSTGRES_PASSWORD" in result.stderr
+    assert template not in result.stdout + result.stderr
+    secrets_absent(result.stdout + result.stderr)
+
+    argv = [*ENTRIES[entry], "--config", str(file), "config", "check"]
+    ok = run(argv, {**env, "XW_POSTGRES_PASSWORD": "a<b>c"})
+    assert ok.returncode == 0, ok.stderr
+
+
+@pytest.mark.parametrize("entry", ENTRIES)
+def test_config_check_rejects_template_values_in_the_environment(
+    entry: str, tmp_path: Path
+) -> None:
+    file = tmp_path / "xiaowei.json"
+    file.write_text(json.dumps(serve_config(18501)), encoding="utf-8")
+    template = env_template_values()["XW_MODEL_API_KEY"]
+    env = child_env(
+        **{
+            DB_ENV: "postgresql+asyncpg://offline.invalid/xiaowei",
+            KEY_ENV: f"digest-{CANARY}",
+            MODEL_ENV: template,
+            SR_ENV: f"starrocks-{CANARY}",
+        }
+    )
+    result = run([*ENTRIES[entry], "--config", str(file), "config", "check"], env)
+    assert result.returncode == 2 and "model.api_key_ref" in result.stderr
+    assert template not in result.stdout + result.stderr
+    secrets_absent(result.stdout + result.stderr)
 
 
 def test_native_cli_requests_only_the_configured_loopback_binding(

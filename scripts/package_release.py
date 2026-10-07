@@ -62,6 +62,7 @@ def _members(args: argparse.Namespace) -> dict[str, bytes]:
         ".env.example": (ROOT / "deploy/.env.example").read_bytes(),
         "OPERATIONS.md": (ROOT / "deploy/OPERATIONS.md").read_bytes(),
         "compose.yaml": compose.encode(),
+        "feishu-group.example.json": (ROOT / "examples/feishu-group.example.json").read_bytes(),
         "release.json": (json.dumps(release, ensure_ascii=False, indent=2) + "\n").encode(),
         "xiaowei.example.json": (ROOT / "examples/xiaowei.example.json").read_bytes(),
     }

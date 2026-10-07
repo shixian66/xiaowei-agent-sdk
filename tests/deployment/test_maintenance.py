@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import shutil
 import stat
 import subprocess
@@ -35,6 +36,8 @@ PROBE = Path(__file__).with_name("maintenance_probe.py")
 P3_A_SHA = "9f69beba19736d293c22d50a59b50c90ac7f0d4e"
 V4_SHA = "a938a0f1b481f1cb23507dc170380c73028b8e54"
 V5_SHA = "fb67cd243ed3ab2beebae3970b909535042259f6"
+# 允许 ``feishu.users={}`` 之前的最后一个 main：它要求单聊名单至少一人。
+USERS_REQUIRED_SHA = "6d7c6af0a5688ba14c6c7a86a59a6d2f7c3f1369"
 _UV_IMAGE = (
     "ghcr.io/astral-sh/uv@sha256:4f5d923c9dcea037f57bda425dd209f3ec643da2f0b74227f68d09dab0b3bb36"
 )
@@ -104,6 +107,17 @@ def _build_tree_image(sha: str, tag: str, *, historical: bool = False) -> tuple[
 def p3_a_image() -> Iterator[str]:
     tag = f"xiaowei-p3-a-history:{os.getpid()}"
     image, context = _build_tree_image(P3_A_SHA, tag)
+    try:
+        yield image
+    finally:
+        docker("image", "rm", "-f", image)
+        shutil.rmtree(context, ignore_errors=True)
+
+
+@pytest.fixture(scope="session")
+def users_required_image() -> Iterator[str]:
+    tag = f"xiaowei-users-required-history:{os.getpid()}"
+    image, context = _build_tree_image(USERS_REQUIRED_SHA, tag)
     try:
         yield image
     finally:
@@ -569,9 +583,7 @@ def test_different_image_upgrade_rollback_and_paired_restore(
         _replace_env_value(active / ".env", "XW_DATABASE_URL", restored_url)
         restored_env = (active / ".env").read_bytes()
         assert _compose_app_database_url(active) == restored_url
-        restore_check = _compose(
-            active, "run", "--rm", "--no-deps", "xiaowei", "config", "check"
-        )
+        restore_check = _compose(active, "run", "--rm", "--no-deps", "xiaowei", "config", "check")
         assert restore_check.returncode == 0 and restore_check.stdout == "configuration valid\n"
         assert _compose(active, "up", "-d", "xiaowei", "--wait").returncode == 0
         assert _http(port, "/readyz")[0] == 200
@@ -599,9 +611,7 @@ def test_different_image_upgrade_rollback_and_paired_restore(
         _copy_preserving_mode(before_restore, active / ".env")
         assert (active / ".env").read_bytes() == original_env
         assert _compose_app_database_url(active) == values["XW_DATABASE_URL"]
-        original_check = _compose(
-            active, "run", "--rm", "--no-deps", "xiaowei", "config", "check"
-        )
+        original_check = _compose(active, "run", "--rm", "--no-deps", "xiaowei", "config", "check")
         assert original_check.returncode == 0 and original_check.stdout == "configuration valid\n"
         assert _compose(active, "up", "-d", "--force-recreate", "xiaowei", "--wait").returncode == 0
         assert _serve_databases(pg_id) == ["xiaowei"]
@@ -837,3 +847,310 @@ def test_container_migration_v4_to_v5_to_v6_and_old_program_refusal(
         _compose(directory, "down", "-v", "--remove-orphans", timeout=60)
         docker("volume", "rm", "-f", volume)
         shutil.rmtree(host_tmp, ignore_errors=True)
+
+
+# 演练里启用飞书：默认网络设为 internal，容器无外网也无外部 DNS；飞书连接在本机失败，
+# 不触达真实服务。
+_ISOLATION = "networks:\n  default:\n    internal: true\n"
+
+
+def _isolated(directory: Path, compose_file: str, *args: str) -> subprocess.CompletedProcess[str]:
+    return _compose(directory, "-f", compose_file, "-f", "isolation.yaml", *args, timeout=240)
+
+
+def _feishu_section(package: Path, users: dict[str, str]) -> dict[str, Any]:
+    """只用发行包里的飞书模板，按 OPERATIONS 替换待填写标记。"""
+    section = json.loads((package / "feishu-group.example.json").read_text(encoding="utf-8"))
+    section.update(
+        app_id="cli_drillapp",
+        tenant_key="drill-tenant",
+        users=users,
+        connect_timeout_seconds=1,
+    )
+    section["group"]["chat_id"] = "oc_drill_group"
+    return section
+
+
+@pytest.mark.allow_hosts(["127.0.0.1"])
+def test_feishu_users_upgrade_rollback_restores_the_config_the_old_image_reads(
+    users_required_image: str, runtime_image: str
+) -> None:
+    """旧版要求单聊名单非空，新版允许 ``{}``。
+
+    逐字执行 OPERATIONS 的留存、切换与回退命令块，只替换目录和 ``config_file``：配置放在非默认的
+    嵌套路径，默认位置的 ``xiaowei.json`` 是内容不同的诱饵。预检失败不停旧服务；回退先停止候选
+    应用，再把升级前的 JSON 恢复到同一路径，旧镜像重新读取配置并就绪。
+    """
+    host_tmp = ROOT / ".pytest_cache" / f"p3-users-rollback-{uuid.uuid4().hex}"
+    host_tmp.mkdir(parents=True)
+    active = host_tmp / "active"
+    candidate = host_tmp / "candidate"
+    previous = host_tmp / "previous"
+    old_source = host_tmp / "old-source"
+    _extract_tree(USERS_REQUIRED_SHA, old_source)
+    _release_from_tree(old_source, active, users_required_image, USERS_REQUIRED_SHA)
+    git = shutil.which("git")
+    assert git is not None
+    head = subprocess.run(  # noqa: S603 - 固定 Git 与当前受审工作树
+        [git, "rev-parse", "HEAD"], cwd=ROOT, capture_output=True, text=True, check=True
+    ).stdout.strip()
+    _release_from_tree(ROOT, candidate, runtime_image, head)
+    assert not (active / "feishu-group.example.json").exists()
+
+    port = _free_port()
+    suffix = uuid.uuid4().hex[:10]
+    volume = f"xiaowei-users-{suffix}-pg"
+    _write_env(
+        active,
+        XW_WEB_PORT=str(port),
+        XW_STOP_GRACE_SECONDS="120",  # 启用飞书与指定群后停止上界更长
+        XW_CONFIG_FILE=_DRILL_CONFIG_FILE,
+        XW_PROJECT_NAME=f"xiaowei-users-{suffix}",
+        XW_PG_VOLUME=volume,
+        XW_FEISHU_APP_SECRET="feishu $ # space ' quote",  # noqa: S106 - 合成值
+    )
+    (active / ".env").chmod(0o600)
+    _runtime_config(active, port)
+    config = json.loads((active / "xiaowei.json").read_text(encoding="utf-8"))
+    # 旧版合法、新版拒绝：已登记用户的 subject 没有授权。
+    config["feishu"] = _feishu_section(candidate, {"ou_drill_user": "drill-user"})
+    custom = active / _DRILL_CONFIG_FILE
+    custom.parent.mkdir()
+    custom.write_text(json.dumps(config, ensure_ascii=False), encoding="utf-8")
+    decoy = active / "xiaowei.json"
+    decoy.write_text('{"decoy": "默认位置的诱饵，不应被预检、留存或恢复"}', encoding="utf-8")
+    (active / "isolation.yaml").write_text(_ISOLATION, encoding="utf-8")
+    old_json = custom.read_bytes()
+    old_mode = stat.S_IMODE(custom.stat().st_mode)
+    decoy_json = decoy.read_bytes()
+    env_before = (active / ".env").read_bytes()
+    blocks = {
+        name: _localize_block(block, active, previous, candidate)
+        for name, block in _upgrade_blocks().items()
+    }
+    shims = host_tmp / "bin"
+    _install_drill_shims(shims)
+    log = host_tmp / "drill.log"
+
+    try:
+        assert _isolated(active, "compose.yaml", "up", "-d", "postgres", "--wait").returncode == 0
+        init = _isolated(
+            active, "compose.yaml", "run", "--rm", "--no-deps", "xiaowei", "storage", "init"
+        )
+        assert init.returncode == 0, init.stderr
+        started = _isolated(active, "compose.yaml", "up", "-d", "xiaowei", "--wait")
+        assert started.returncode == 0, started.stderr
+        old_id = _isolated(active, "compose.yaml", "ps", "-q", "xiaowei").stdout.strip()
+        postgres_id = _isolated(active, "compose.yaml", "ps", "-q", "postgres").stdout.strip()
+        volume_created = docker("volume", "inspect", volume, "--format", "{{.CreatedAt}}").stdout
+
+        # 留存旧控制文件与实际配置路径上的旧 JSON（600），再预检新版。
+        backup = _run_block(blocks["backup"], shims, log)
+        assert backup.returncode == 0, backup.stderr
+        assert (previous / "xiaowei.json").read_bytes() == old_json
+        assert stat.S_IMODE((previous / "xiaowei.json").stat().st_mode) == 0o600
+        for name in ("compose.yaml", "release.json"):
+            assert (previous / name).read_bytes() == (active / name).read_bytes()
+        shutil.copyfile(candidate / "compose.yaml", active / "compose.next.yaml")
+        shutil.copyfile(candidate / "release.json", active / "release.next.json")
+        check = ("run", "--rm", "--no-deps", "xiaowei", "config", "check")
+        failed = _isolated(active, "compose.next.yaml", *check)
+        assert failed.returncode == 2 and "drill-user" in failed.stderr  # 读的是自定义路径
+        assert "ou_drill_user" not in failed.stdout + failed.stderr
+        assert _isolated(active, "compose.yaml", "ps", "-q", "xiaowei").stdout.strip() == old_id
+        assert _health(old_id) == "healthy"
+
+        config["access"]["grants"]["drill-user"] = ["local/list_tables"]
+        custom.write_text(json.dumps(config, ensure_ascii=False), encoding="utf-8")
+        passed = _isolated(active, "compose.next.yaml", *check)
+        assert passed.returncode == 0, passed.stderr
+
+        switched = _run_block(blocks["switch"], shims, log)
+        assert switched.returncode == 0, switched.stderr
+
+        # 新版允许空单聊名单（群仍可用）；旧镜像读不了这份配置，所以回退必须恢复旧 JSON。
+        del config["access"]["grants"]["drill-user"]
+        config["feishu"]["users"] = {}
+        custom.write_text(json.dumps(config, ensure_ascii=False), encoding="utf-8")
+        recreate = ("up", "-d", "--no-deps", "--force-recreate", "xiaowei", "--wait")
+        assert _isolated(active, "compose.yaml", *check).returncode == 0
+        assert _isolated(active, "compose.yaml", *recreate).returncode == 0
+        new_id = _isolated(active, "compose.yaml", "ps", "-q", "xiaowei").stdout.strip()
+        new_image = docker("inspect", new_id, "--format", "{{.Image}}").stdout
+        assert _image_id(runtime_image) in new_image
+        assert _health(new_id) == "healthy"
+        old_compose = str(previous / "compose.yaml")
+        unreadable = _isolated(active, old_compose, "--project-directory", str(active), *check)
+        assert unreadable.returncode == 2 and "feishu.users" in unreadable.stderr
+
+        log.write_text("", encoding="utf-8")
+        rolled_back = _run_block(blocks["rollback"], shims, log, candidate=new_id)
+        assert rolled_back.returncode == 0, rolled_back.stderr
+        steps = log.read_text(encoding="utf-8").splitlines()
+        copies = [index for index, step in enumerate(steps) if step.startswith("cp ")]
+        assert steps[0] == "compose stop xiaowei", steps
+        assert len(copies) == 3 and copies[0] > 0, steps
+        assert all(steps[index].endswith(" candidate=exited") for index in copies), steps
+        assert custom.read_bytes() == old_json
+        assert stat.S_IMODE(custom.stat().st_mode) == old_mode
+        assert decoy.read_bytes() == decoy_json
+        rollback_id = _isolated(active, "compose.yaml", "ps", "-q", "xiaowei").stdout.strip()
+        image = docker("inspect", rollback_id, "--format", "{{.Image}}").stdout
+        assert _image_id(users_required_image) in image
+        assert _health(rollback_id) == "healthy"
+        # 回退只换应用：PostgreSQL 容器、卷、.env 与摘要密钥原样保留。
+        assert _isolated(active, "compose.yaml", "ps", "-q", "postgres").stdout.strip() == (
+            postgres_id
+        )
+        assert docker("volume", "inspect", volume, "--format", "{{.CreatedAt}}").stdout == (
+            volume_created
+        )
+        assert (active / ".env").read_bytes() == env_before
+    finally:
+        _isolated(active, "compose.yaml", "down", "-v", "--remove-orphans")
+        shutil.rmtree(host_tmp, ignore_errors=True)
+
+
+def test_rollback_overwrites_nothing_when_the_candidate_does_not_stop(tmp_path: Path) -> None:
+    """停止候选应用失败时，回退命令块不得继续覆盖控制文件或配置。"""
+    active = tmp_path / "active"
+    previous = tmp_path / "previous"
+    for directory, label in ((active, "candidate"), (previous, "previous")):
+        directory.mkdir()
+        for name in ("compose.yaml", "release.json"):
+            (directory / name).write_text(f"{label} {name}\n", encoding="utf-8")
+    (active / "config").mkdir()
+    (active / _DRILL_CONFIG_FILE).write_text("candidate config\n", encoding="utf-8")
+    (previous / "xiaowei.json").write_text("previous config\n", encoding="utf-8")
+    before = {path: path.read_bytes() for path in active.rglob("*") if path.is_file()}
+    shims = tmp_path / "bin"
+    shims.mkdir()
+    failing = shims / "docker"
+    failing.write_text('#!/bin/sh\necho "docker $*" >> "$DRILL_LOG"\nexit 1\n', encoding="utf-8")
+    failing.chmod(0o755)
+    log = tmp_path / "drill.log"
+    script = _localize_block(_upgrade_blocks()["rollback"], active, previous, tmp_path / "new")
+
+    result = _run_block(script, shims, log)
+
+    assert result.returncode != 0
+    assert log.read_text(encoding="utf-8") == "docker compose --env-file .env stop xiaowei\n"
+    assert {path: path.read_bytes() for path in active.rglob("*") if path.is_file()} == before
+
+
+def test_upgrade_blocks_name_the_operator_config_file_in_every_block() -> None:
+    """每个可单独复制的命令块都自己定义 ``config_file``，默认值与 .env 模板一致。"""
+    env_example = (ROOT / "deploy/.env.example").read_text(encoding="utf-8")
+    assert f"XW_CONFIG_FILE={_DEFAULT_CONFIG_FILE}\n" in env_example
+    blocks = _upgrade_blocks()
+    for name in ("backup", "rollback"):
+        assert '"$config_file"' in blocks[name], name
+    for block in blocks.values():
+        if "$config_file" in block:
+            definition = f"config_file='{_DEFAULT_CONFIG_FILE}'  # 与 .env 的 XW_CONFIG_FILE 相同"
+            assert definition in block.splitlines(), block
+
+
+_DEFAULT_CONFIG_FILE = "./xiaowei.json"
+_DRILL_CONFIG_FILE = "config/prod.json"
+_UPGRADE_SECTION = "## 普通升级与回退（schema 不变）"
+_BLOCK_MARKERS = {
+    "backup": "install -m 600",
+    "switch": "mv compose.next.yaml compose.yaml",
+    "rollback": '"$previous/compose.yaml"',
+}
+
+
+def _upgrade_blocks() -> dict[str, str]:
+    """OPERATIONS 普通升级一节的可复制命令块，按内容认出留存、切换与回退三块。"""
+    operations = (ROOT / "deploy/OPERATIONS.md").read_text(encoding="utf-8")
+    section = operations.split(_UPGRADE_SECTION, 1)[1].split("\n## ", 1)[0]
+    blocks = re.findall(r"```sh\n(.*?)```", section, flags=re.DOTALL)
+    found = {}
+    for name, marker in _BLOCK_MARKERS.items():
+        matches = [block for block in blocks if marker in block]
+        assert len(matches) == 1, name
+        found[name] = matches[0]
+    return found
+
+
+def _localize_block(block: str, active: Path, previous: Path, candidate: Path) -> str:
+    """只替换文档里的目录与 ``config_file`` 取值，命令本身逐字执行。"""
+    script = block.replace("/opt/xiaowei/releases/<旧 SHA>", str(previous))
+    script = script.replace("/opt/xiaowei/releases/<新 SHA>", str(candidate))
+    script = script.replace("/opt/xiaowei/current", str(active))
+    script = script.replace(
+        f"config_file='{_DEFAULT_CONFIG_FILE}'", f"config_file='./{_DRILL_CONFIG_FILE}'"
+    )
+    assert "<" not in script, script
+    return script
+
+
+# 演练替身：文档写 ``docker compose --env-file .env [-f 文件] …``，交给本机 Compose 并叠加
+# internal 网络覆盖文件；其他 docker 命令原样执行。cp 先记下候选容器当时的状态再复制。
+_DOCKER_SHIM = """#!@PYTHON@
+import os, sys
+args = sys.argv[1:]
+if args[:1] != ["compose"]:
+    os.execv(@DOCKER@, [@DOCKER@, *args])
+args = args[1:]
+assert args[:2] == ["--env-file", ".env"], args
+args, compose_file = args[2:], "compose.yaml"
+if args[:1] == ["-f"]:
+    compose_file, args = args[1], args[2:]
+with open(os.environ["DRILL_LOG"], "a", encoding="utf-8") as log:
+    log.write("compose " + " ".join(args) + "\\n")
+command = [*@COMPOSE@, "--env-file", ".env", "-f", compose_file, "-f", "isolation.yaml", *args]
+os.execv(command[0], command)
+"""
+_CP_SHIM = """#!@PYTHON@
+import os, subprocess, sys
+state = subprocess.run(
+    [@DOCKER@, "inspect", "--format", "{{.State.Status}}", os.environ["DRILL_CANDIDATE"]],
+    capture_output=True, text=True, check=False,
+).stdout.strip() or "none"
+with open(os.environ["DRILL_LOG"], "a", encoding="utf-8") as log:
+    log.write("cp " + " ".join(sys.argv[1:]) + " candidate=" + state + "\\n")
+os.execv(@CP@, [@CP@, *sys.argv[1:]])
+"""
+
+
+def _install_drill_shims(directory: Path) -> None:
+    real_docker, real_cp = shutil.which("docker"), shutil.which("cp")
+    assert real_docker is not None and real_cp is not None
+    directory.mkdir()
+    for name, template in (("docker", _DOCKER_SHIM), ("cp", _CP_SHIM)):
+        shim = directory / name
+        shim.write_text(
+            template.replace("@PYTHON@", sys.executable)
+            .replace("@DOCKER@", repr(real_docker))
+            .replace("@CP@", repr(real_cp))
+            .replace("@COMPOSE@", repr(_compose_command())),
+            encoding="utf-8",
+        )
+        shim.chmod(0o755)
+
+
+def _run_block(
+    script: str, shims: Path, log: Path, *, candidate: str = "none"
+) -> subprocess.CompletedProcess[str]:
+    shell = shutil.which("sh")
+    assert shell is not None
+    environment = {key: value for key, value in os.environ.items() if not key.startswith("XW_")}
+    environment.update(
+        PATH=f"{shims}{os.pathsep}{environment['PATH']}",
+        DRILL_LOG=str(log),
+        DRILL_CANDIDATE=candidate,
+    )
+    return subprocess.run(  # noqa: S603 - 只执行仓库文档里的命令块与测试替身
+        [shell, "-c", script],
+        env=environment,
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=600,
+    )
+
+
+def _health(container_id: str) -> str:
+    return docker("inspect", container_id, "--format", "{{.State.Health.Status}}").stdout.strip()

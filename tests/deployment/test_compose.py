@@ -120,6 +120,9 @@ def _runtime_config(directory: Path, port: int) -> None:
         )
     )
     config["targets"] = config["targets"][:1]
+    # 模板占位符必须替换；正式预检会拒绝未填写的模板。
+    config["model"]["model"] = "synthetic-model"
+    config["targets"][0]["description"] = "合成集群"
     target = config["targets"][0]["starrocks"]
     target.update(
         {

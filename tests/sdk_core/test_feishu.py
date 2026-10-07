@@ -34,8 +34,10 @@ from xiaowei.channel_store import ChannelSession, ChannelStore, DeliveryClaim, R
 from xiaowei.config import FeishuConfig
 from xiaowei.evidence import EvidenceStoreError
 from xiaowei.feishu import (
+    _NOTICE_CAPACITY,
     EMPTY_COMMAND,
     FACTS_TRUNCATED,
+    IDENTITY_NOTICE_WINDOW,
     NEW_SESSION,
     NEW_SESSION_BUSY,
     TRUNCATED,
@@ -246,7 +248,6 @@ REJECTED: dict[str, tuple[dict[str, Any], str]] = {
     "sender tenant differs": ({"event__sender__tenant_key": "tenant-2"}, "tenant"),
     "bot sender": ({"event__sender__sender_type": "bot"}, "sender_type"),
     "app sender": ({"event__sender__sender_type": "app"}, "sender_type"),
-    "unknown sender": ({"sender": "ou_mallory"}, "sender"),
     "group chat": ({"event__message__chat_type": "group"}, "chat_type"),
     "image": ({"event__message__message_type": "image"}, "message_type"),
     "post": ({"event__message__message_type": "post"}, "message_type"),
@@ -285,6 +286,236 @@ async def test_unacceptable_events_never_reach_storage_or_the_model(env: Env, na
     assert env.adapter.calls == []
     assert dropped(records) == [code]
     assert all(message not in r.getMessage() for r in records)
+
+
+# ---- 未登记单聊用户：返回本人 open_id，不进入渠道服务 ----------------------------------------
+
+
+STRANGER = "ou_mallory"
+
+
+def notice(open_id: str) -> str:
+    return f"你还没有获得授权。你的编号是 {open_id}，请把它发给管理员。"
+
+
+@dataclass
+class Spy:
+    """记录 ChannelService 的入口调用：未登记用户的任何消息都不应到达这里。"""
+
+    calls: list[str] = field(default_factory=list)
+
+
+def spy_on(env: Env, monkeypatch: pytest.MonkeyPatch) -> Spy:
+    spy = Spy()
+    for name in ("accept", "new_session"):
+        original = getattr(env.service, name)
+
+        async def record(
+            *args: Any, _name: str = name, _original: Any = original, **kw: Any
+        ) -> Any:
+            spy.calls.append(_name)
+            return await _original(*args, **kw)
+
+        monkeypatch.setattr(env.service, name, record)
+    return spy
+
+
+async def test_unregistered_private_user_receives_own_open_id_without_accepting_request(
+    env: Env, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    spy = spy_on(env, monkeypatch)
+    async with running(env) as fs:
+        message = env.scripts.add("不应运行", tool_call("order_total", region="east"), cite())
+        with logs() as records:
+            event = fs.event(message, sender=STRANGER)
+            assert fs.gateway.inbound(event) is None
+            await fs.gateway.receive(event)
+            await fs.drain()
+    assert fs.outbox.sent == [("oc_other", notice(STRANGER))]
+    assert fs.outbox.replies == [None]
+    assert spy.calls == [] and await env.requests() == 0
+    assert env.scripts.calls == {} and env.adapter.calls == []
+    assert dropped(records) == ["unregistered"]
+    assert all(STRANGER not in r.getMessage() and message not in r.getMessage() for r in records)
+
+
+@pytest.mark.parametrize("text", ["/新建", "/查询 东区销售额", "/诊断 慢查询", "/查询", "你好"])
+async def test_unregistered_command_uses_same_identity_notice_path(
+    env: Env, monkeypatch: pytest.MonkeyPatch, text: str
+) -> None:
+    """命令不能越过授权：未登记用户的 /新建、/查询、/诊断 与普通文本都只得到身份提示。"""
+    spy = spy_on(env, monkeypatch)
+    async with running(env) as fs:
+        await fs.gateway.receive(fs.event(text, sender=STRANGER))
+        await fs.drain()
+    assert fs.outbox.texts() == [notice(STRANGER)]
+    assert spy.calls == [] and await env.requests() == 0 and env.scripts.calls == {}
+
+
+async def test_empty_users_without_group_never_calls_channel_service(
+    env: Env, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    spy = spy_on(env, monkeypatch)
+    async with running(env, users={}) as fs:
+        for sender in ("ou_alice", "ou_bob"):
+            await fs.gateway.receive(fs.event("/查询 东区", sender=sender))
+        await fs.gateway.receive(fs.event("群里的消息", event__message__chat_type="group"))
+        await fs.drain()
+    assert fs.outbox.texts() == [notice("ou_alice"), notice("ou_bob")]
+    assert spy.calls == [] and await env.requests() == 0 and env.scripts.calls == {}
+
+
+UNREGISTERED_REJECTED = {
+    **REJECTED,
+    "illegal open_id": ({"sender": "user-1"}, "sender"),
+    "missing open_id": ({"sender": ""}, "malformed"),
+}
+
+
+@pytest.mark.parametrize("name", UNREGISTERED_REJECTED)
+async def test_unregistered_sender_is_silent_unless_every_event_check_passes(
+    env: Env, monkeypatch: pytest.MonkeyPatch, name: str
+) -> None:
+    """身份提示只在全部可信事件校验通过之后：错应用、错租户、机器人、群聊、非文本、过期、超长、
+    格式错误都和已登记用户一样静默丢弃，不发送任何内容。"""
+    changes, code = UNREGISTERED_REJECTED[name]
+    spy = spy_on(env, monkeypatch)
+    changes = {"sender": STRANGER, **changes}
+    async with running(env) as fs:
+        with logs() as records:
+            await fs.gateway.receive(fs.event("你好", **changes))
+            await fs.drain()
+    assert fs.outbox.sent == [] and spy.calls == [] and await env.requests() == 0
+    assert dropped(records) == [code]
+    assert all(STRANGER not in r.getMessage() for r in records)
+
+
+async def test_unregistered_notice_is_limited_per_message_and_per_user_window(env: Env) -> None:
+    async with running(env) as fs:
+        first = fs.event("你好", sender=STRANGER)
+        await fs.gateway.receive(first)
+        await fs.gateway.receive(first)  # 同一消息重投
+        await fs.gateway.receive(fs.event("在吗", sender=STRANGER))  # 窗口内的新消息
+        await fs.gateway.receive(fs.event("你好", sender="ou_other_stranger"))  # 其他用户不受影响
+        env.clock.advance(IDENTITY_NOTICE_WINDOW.total_seconds() - 1)
+        await fs.gateway.receive(fs.event("还在吗", sender=STRANGER))
+        env.clock.advance(1)
+        await fs.gateway.receive(fs.event("过了十分钟", sender=STRANGER))
+        await fs.gateway.receive(first)  # 窗口过后，已尝试过的消息仍不再发送
+        await fs.drain()
+    assert fs.outbox.texts() == [notice(STRANGER), notice("ou_other_stranger"), notice(STRANGER)]
+
+
+@dataclass
+class BlockingOutbox(Outbox):
+    """发送在 ``release`` 之前一直挂起：用来让并发的事件在发送 await 处交错。"""
+
+    release: asyncio.Event = field(default_factory=asyncio.Event)
+    entered: asyncio.Event = field(default_factory=asyncio.Event)
+
+    async def __call__(self, chat_id: str, text: str, *, reply_to: str | None = None) -> Any:
+        self.entered.set()
+        await self.release.wait()
+        return await super().__call__(chat_id, text, reply_to=reply_to)
+
+
+async def test_concurrent_messages_from_one_user_reserve_a_single_notice(env: Env) -> None:
+    outbox = BlockingOutbox()
+    async with running(env, outbox) as fs:
+        first = asyncio.create_task(fs.gateway.receive(fs.event("一", sender=STRANGER)))
+        await asyncio.wait_for(outbox.entered.wait(), 5)
+        second = asyncio.create_task(fs.gateway.receive(fs.event("二", sender=STRANGER)))
+        await asyncio.sleep(0)
+        await asyncio.sleep(0)
+        assert second.done()  # 第二条在发送前就因占位而结束，没有等待第一条
+        outbox.release.set()
+        await asyncio.wait_for(asyncio.gather(first, second), 5)
+    assert outbox.texts() == [notice(STRANGER)]
+
+
+@pytest.mark.parametrize(
+    "outcome", ["failed", "unknown", RuntimeError("boom")], ids=["failed", "unknown", "raised"]
+)
+async def test_failed_or_unknown_notice_still_consumes_the_window(env: Env, outcome: Any) -> None:
+    outbox = Outbox(outcomes=[outcome])
+    async with running(env, outbox) as fs:
+        with logs() as records:
+            await fs.gateway.receive(fs.event("一", sender=STRANGER))
+            await fs.gateway.receive(fs.event("二", sender=STRANGER))
+            await fs.drain()
+    assert outbox.texts() == [notice(STRANGER)]  # 不重试，也不因失败释放窗口
+    assert all(STRANGER not in r.getMessage() and "boom" not in r.getMessage() for r in records)
+
+
+async def test_notice_index_is_bounded_and_evicts_the_oldest_user(env: Env) -> None:
+    async with running(env) as fs:
+        users = [f"ou_stranger_{index}" for index in range(1025)]
+        for user in users:
+            await fs.gateway.receive(fs.event("你好", sender=user))
+        assert len(fs.outbox.sent) == 1025
+        await fs.gateway.receive(fs.event("再问", sender=users[0]))  # 最旧记录已被淘汰
+        await fs.gateway.receive(fs.event("再问", sender=users[-1]))  # 仍在窗口内
+        await fs.drain()
+    assert fs.outbox.texts()[-1] == notice(users[0]) and len(fs.outbox.sent) == 1026
+
+
+async def test_both_notice_indexes_stay_within_capacity(env: Env) -> None:
+    """两个限频索引各自有界：一个人连发很多条只撑大消息索引，很多人各发一条撑大用户索引。"""
+    async with running(env) as fs:
+        for index in range(1100):
+            await fs.gateway.receive(fs.event(f"第 {index} 条", sender=STRANGER))
+        for index in range(1100):
+            await fs.gateway.receive(fs.event("你好", sender=f"ou_crowd_{index}"))
+        await fs.drain()
+        assert len(fs.gateway._noticed_messages) == _NOTICE_CAPACITY
+        assert len(fs.gateway._noticed_users) == _NOTICE_CAPACITY
+    assert fs.outbox.texts().count(notice(STRANGER)) == 1
+
+
+async def table_counts(env: Env) -> dict[str, int]:
+    async with env.engine.connect() as conn:
+        tables = (
+            await conn.scalars(
+                text_sql(
+                    "SELECT table_name FROM information_schema.tables "
+                    "WHERE table_schema = current_schema() AND table_type = 'BASE TABLE'"
+                )
+            )
+        ).all()
+        return {
+            name: int(await conn.scalar(text_sql(f'SELECT count(*) FROM "{name}"')) or 0)  # noqa: S608
+            for name in tables
+        }
+
+
+async def test_a_new_gateway_starts_with_empty_notice_limits_and_writes_nothing(
+    env: Env,
+) -> None:
+    """限频只在进程内存：重启（新建网关）后同一个人可以再收到一次；提示不写任何数据库记录。"""
+    before = await table_counts(env)
+    assert before
+    async with running(env) as fs:
+        await fs.gateway.receive(fs.event("你好", sender=STRANGER))
+        await fs.gateway.receive(fs.event("再问", sender=STRANGER))
+        await fs.drain()
+    assert fs.outbox.texts() == [notice(STRANGER)]
+    async with running(env) as restarted:
+        await restarted.gateway.receive(restarted.event("重启后", sender=STRANGER))
+        await restarted.drain()
+    assert restarted.outbox.texts() == [notice(STRANGER)]
+    assert await table_counts(env) == before
+
+
+async def test_drain_waits_for_an_inflight_notice_and_closing_drops_new_ones(env: Env) -> None:
+    outbox = BlockingOutbox()
+    async with running(env, outbox) as fs:
+        sending = asyncio.create_task(fs.gateway.receive(fs.event("一", sender=STRANGER)))
+        await asyncio.wait_for(outbox.entered.wait(), 5)
+        assert not await fs.gateway.drain(timeout=0.05)  # 提示仍在发送：drain 不能提前完成
+        await fs.gateway.receive(fs.event("你好", sender="ou_late_stranger"))  # 已在关闭
+        outbox.release.set()
+        await asyncio.wait_for(sending, 5)
+    assert outbox.texts() == [notice(STRANGER)]
 
 
 # 上限 1000 字符内的各种正文：序列化后远超 200 字符，JSON 转义最多膨胀 12 倍（代理对 emoji）。
@@ -1134,7 +1365,6 @@ async def test_real_sdk_reply_maps_target_codes_without_fresh_send(
 def test_feishu_config_validation() -> None:
     bad_values: tuple[dict[str, Any], ...] = (
         {"app_secret_ref": "plain-secret"},
-        {"users": {}},
         {"users": {"ou_a": "same", "ou_b": "same"}},
         {"users": {"user-1": "alice"}},
         {"max_reply_chars": 100},
@@ -1143,6 +1373,8 @@ def test_feishu_config_validation() -> None:
     for bad in bad_values:
         with pytest.raises(ValidationError):
             config(**bad)
+    # 单聊名单可以为空（首次部署取得 open_id 前）；为空时单聊无人获权。
+    assert config(users={}).users == {}
 
 
 @dataclass

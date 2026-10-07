@@ -211,10 +211,10 @@ class FeishuGroupConfig(BaseModel):
 class FeishuConfig(BaseModel):
     """飞书入口：应用、唯一租户、获准单聊用户、可选指定群、事件时效、文本上限、队列与期限。
 
-    ``users`` 把单聊发送者 ``open_id`` 映射为内部 subject（再交给 ``AccessPolicy``），不在映射中
-    的单聊发送者在持久化与模型前丢弃。``group`` 为空时群消息一律丢弃。``consumer_count`` 不得
-    超过应用的全局并发上限，由 ``FeishuGateway`` 装配时核对。``queue_size`` 同时是 SDK 回调转交给
-    应用循环的在途事件上限。凭据只以 ``env:NAME`` 引用出现。
+    ``users`` 把单聊发送者 ``open_id`` 映射为内部 subject（再交给 ``AccessPolicy``），可以为空；
+    不在映射中的单聊发送者在持久化与模型前处理，不获得任何授权。``group`` 为空时群消息一律
+    丢弃。``consumer_count`` 不得超过应用的全局并发上限，由 ``FeishuGateway`` 装配时核对。
+    ``queue_size`` 同时是 SDK 回调转交给应用循环的在途事件上限。凭据只以 ``env:NAME`` 引用出现。
     """
 
     model_config = ConfigDict(frozen=True, extra="forbid")
@@ -222,7 +222,7 @@ class FeishuConfig(BaseModel):
     app_id: Annotated[str, StringConstraints(pattern=r"^cli_[0-9A-Za-z]{1,64}$")]
     app_secret_ref: str
     tenant_key: _Identifier
-    users: dict[_OpenId, _Identifier] = Field(min_length=1)
+    users: dict[_OpenId, _Identifier]
     max_event_age_seconds: int = Field(gt=0, le=86_400)
     max_message_chars: int = Field(gt=0, le=10_000)
     max_reply_chars: int = Field(ge=200, le=3_500)

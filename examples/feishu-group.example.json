@@ -2,9 +2,7 @@
   "app_id": "cli_replacewithappid",
   "app_secret_ref": "env:XW_FEISHU_APP_SECRET",
   "tenant_key": "<飞书 tenant_key>",
-  "users": {
-    "ou_replace_with_open_id": "feishu-user"
-  },
+  "users": {},
   "max_event_age_seconds": 300,
   "max_message_chars": 2000,
   "max_reply_chars": 3500,

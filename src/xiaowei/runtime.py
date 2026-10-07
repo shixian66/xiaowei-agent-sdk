@@ -26,6 +26,7 @@ Governance → 各目标首次结构刷新（失败只让该目标暂不可用�
 import asyncio
 import logging
 import math
+import os
 import socket
 import sys
 from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
@@ -273,6 +274,12 @@ class ServeConfig(_Config):
         if self.feishu is not None:
             if self.web.operator_id in self.feishu.users.values():
                 raise ValueError("Web 操作者与飞书用户不能使用同一个内部 subject")
+            # 空 grant 在 StaticAccess 中等于无权限；已登记却无权限的用户在启动前拒绝，不静默失效。
+            for subject in sorted(set(self.feishu.users.values())):
+                if not self.access.grants.get(subject):
+                    raise ValueError(
+                        f"飞书用户 subject {subject} 缺少有效授权（access.grants 非空）"
+                    )
             if self.feishu.consumer_count > self.max_concurrent_turns:
                 raise ValueError("feishu.consumer_count 不得超过 max_concurrent_turns")
             group = self.feishu.group
@@ -305,10 +312,95 @@ def load_config(path: Path) -> ServeConfig:
         return ServeConfig.model_validate_json(raw)
     except ValidationError as exc:
         problems = [
-            f"{'.'.join(str(part) for part in error['loc']) or '<root>'}: {_reason(error)}"
+            f"{_error_path(error['loc'])}: {_reason(error)}"
             for error in exc.errors(include_url=False, include_input=False)
         ]
-        raise ConfigError("配置不符合要求：" + "；".join(problems)) from None
+        raise ConfigError("配置不符合要求：" + "；".join(dict.fromkeys(problems))) from None
+
+
+# 键本身是身份标识的字典：错误只报告到字典这一层，不把键（飞书 open_id）写进路径。
+_IDENTITY_KEYED = frozenset({("feishu", "users")})
+
+
+def _error_path(loc: tuple[int | str, ...]) -> str:
+    for keyed in _IDENTITY_KEYED:
+        if loc[: len(keyed)] == keyed:
+            loc = keyed
+    return ".".join(str(part) for part in loc) or "<root>"
+
+
+# 发行包模板与 OPERATIONS 示例里列出的固定待填写值：只按完整值识别，不按“尖括号里有中文”之类的
+# 形状猜测，真实值里出现尖括号也照常通过。模板增删标记时同步这里（测试逐项核对仓库模板）。
+_JSON_TEMPLATE_VALUES = frozenset(
+    {
+        "<获准的模型 ID>",
+        "<集群用途，交给模型选择集群>",
+        "<另一个集群的用途；未配置审计源，不能列慢查询>",
+        "<StarRocks FE 地址>",
+        "<另一个 StarRocks FE 地址>",
+        "<默认 database>",
+        "<只读账号>",
+        "<飞书 tenant_key>",
+        "<内部 subject>",
+        "cli_replacewithappid",
+        "oc_replace_with_chat_id",
+        # 历史升级标记：6d7c6af 发行的模板单聊名单键，当前模板改为 ``users={}``，旧片段仍拒绝。
+        "ou_replace_with_open_id",
+    }
+)
+_ENV_TEMPLATE_VALUES = frozenset(
+    {
+        "<生成并安全保存的 PostgreSQL 密码>",
+        "postgresql+asyncpg://xiaowei:<URI 编码后的密码>@postgres:5432/xiaowei",
+        "<生成并安全保存的摘要密钥>",
+        "<获准 Model Profile 的密钥>",
+        "<warehouse 只读账号密码>",
+        "<archive 只读账号密码>",
+        "<飞书应用 App Secret>",
+    }
+)
+# Compose 用它初始化 PostgreSQL，并经 env_file 交给小维容器；原生部署使用外部库时不设置。
+_POSTGRES_PASSWORD_ENV = "XW_POSTGRES_PASSWORD"  # noqa: S105 - 变量名，不是秘密
+
+
+def _is_template_value(value: str) -> bool:
+    return value in _JSON_TEMPLATE_VALUES
+
+
+def _template_paths(value: object, path: str) -> list[str]:
+    if isinstance(value, Mapping):
+        found = [path] if any(_is_template_value(str(key)) for key in value) else []
+        keyed = tuple(path.split(".")) in _IDENTITY_KEYED
+        for key, item in value.items():
+            child = path if keyed else f"{path}.{key}" if path else str(key)
+            found += _template_paths(item, child)
+        return list(dict.fromkeys(found))
+    if isinstance(value, list):
+        return [
+            found
+            for index, item in enumerate(value)
+            for found in _template_paths(item, f"{path}.{index}")
+        ]
+    return [path] if isinstance(value, str) and _is_template_value(value) else []
+
+
+def validate_placeholders(config: ServeConfig) -> None:
+    """拒绝仍是发行模板占位符的 JSON 字段；只报告字段路径，不读环境、不读文件、不联网。
+
+    ``serve`` 与 ``config check`` 在任何外部 I/O 前共用；模板语法上可读，替换后才能运行。
+    """
+    paths = _template_paths(config.model_dump(mode="json"), "")
+    if paths:
+        raise ConfigError("以下字段仍是模板占位符，请替换为实际值：" + "、".join(paths))
+
+
+def _resolve_checked(field: str, ref: str) -> None:
+    try:
+        value = resolve_secret_ref(ref).get_secret_value()
+    except SecretRefError:
+        raise ConfigError(f"{field}: 引用的环境变量未设置或为空") from None
+    if value in _ENV_TEMPLATE_VALUES:
+        raise ConfigError(f"{field}: 引用的环境变量仍是 .env 模板占位符，请替换为实际值")
 
 
 def validate_config(
@@ -317,7 +409,8 @@ def validate_config(
     container_port: int | None = None,
     stop_grace_seconds: float | None = None,
 ) -> None:
-    """离线解析全部凭据引用、CA 与可选容器参数；不连接外部服务或写文件。"""
+    """离线检查模板占位符、全部凭据引用、CA 与可选容器参数；不连接外部服务或写文件。"""
+    validate_placeholders(config)
     refs = [
         ("storage.database_url_ref", config.storage.database_url_ref),
         ("storage.digest_key_ref", config.storage.digest_key_ref),
@@ -330,10 +423,9 @@ def validate_config(
     if config.feishu is not None:
         refs.append(("feishu.app_secret_ref", config.feishu.app_secret_ref))
     for field, ref in refs:
-        try:
-            resolve_secret_ref(ref)
-        except SecretRefError:
-            raise ConfigError(f"{field}: 引用的环境变量未设置或为空") from None
+        _resolve_checked(field, ref)
+    if os.environ.get(_POSTGRES_PASSWORD_ENV) in _ENV_TEMPLATE_VALUES:
+        raise ConfigError(f"{_POSTGRES_PASSWORD_ENV}: 仍是 .env 模板占位符，请替换为实际值")
 
     for index, target in enumerate(config.targets):
         ca_file = target.starrocks.tls_ca_file
