@@ -317,24 +317,25 @@ def test_container_entry_is_the_only_cli_path_that_selects_container_binding(
     assert "container" not in _parser_help()
 
 
-def test_container_config_check_accepts_a_private_bind_only_with_matching_origin(
+def test_container_config_check_accepts_any_ip_bind_without_listing_origins(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    address = "172.20.0.8"
-    _deploy_env(monkeypatch, XW_WEB_BIND_ADDRESS=address)
-    values = filled(example_with_feishu())
-    values["web"]["allowed_origins"].append(f"http://{address}:8501")
+    """发布地址只要是 IP 就接受，不要求 ``allowed_origins`` 跟着改；不是 IP 退出 2 且不回显值。"""
     file = tmp_path / "xiaowei.json"
-    file.write_text(json.dumps(values, ensure_ascii=False), encoding="utf-8")
-
+    file.write_text(json.dumps(filled(example_with_feishu()), ensure_ascii=False), encoding="utf-8")
+    for address in ("0.0.0.0", "127.0.0.1", "172.20.0.8", "::"):  # noqa: S104 - 内网访问的发行默认值
+        _deploy_env(monkeypatch, XW_WEB_BIND_ADDRESS=address)
+        assert cli_module.container_main(["config", "check"], config_path=file) == 0
+        assert capsys.readouterr().out.strip() == "configuration valid"
+    monkeypatch.delenv("XW_WEB_BIND_ADDRESS")
     assert cli_module.container_main(["config", "check"], config_path=file) == 0
-    assert capsys.readouterr().out.strip() == "configuration valid"
+    capsys.readouterr()
 
-    values["web"]["allowed_origins"].remove(f"http://{address}:8501")
-    file.write_text(json.dumps(values, ensure_ascii=False), encoding="utf-8")
+    _deploy_env(monkeypatch, XW_WEB_BIND_ADDRESS="intranet-host.example")
     assert cli_module.container_main(["config", "check"], config_path=file) == 2
-    error = capsys.readouterr().err
-    assert "web.allowed_origins" in error and address not in error
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert "XW_WEB_BIND_ADDRESS" in captured.err and "intranet-host" not in captured.err
 
 
 def _template_file(tmp_path: Path) -> Path:
@@ -601,10 +602,11 @@ def test_formal_serve_from_a_fresh_database(entry: str, postgres_url: URL, tmp_p
             assert "模型未能完成本轮" in body["delivery"]["content"]
             assert client.get("/api/turns/r1").json()["state"] == "failed"
             assert client.post("/api/sessions", json={}, headers=origin).status_code == 200
-            # 保护性失败：其他 Host 与跨源写入在路由前拒绝。
-            assert client.get("/", headers={"host": "evil.test"}).status_code == 400
-            hostile = client.post("/api/sessions", json={}, headers={"origin": "http://evil.test"})
-            assert hostile.status_code == 403
+            # 内网访问：其他 Host 与 Origin 照常服务；非 JSON 写入仍在路由前拒绝。
+            assert client.get("/", headers={"host": "172.20.0.8"}).status_code == 200
+            other = client.post("/api/sessions", json={}, headers={"origin": "http://172.20.0.8"})
+            assert other.status_code == 200
+            assert client.post("/api/sessions", content=b"{}").status_code == 415
 
         # 第二个实例：另一端口、同一数据库，被实例锁拒绝。
         other = Deployment(postgres_url, tmp_path / "second")
@@ -719,6 +721,7 @@ def model_check(
     monkeypatch.setenv(VERTEX_KEY_ENV, f"vertex-key-{CHECK_LEAK}")
     # 容器部署参数缺失或非法：模型检查不得读取它们。
     monkeypatch.setenv("XW_WEB_PORT", "not-a-port")
+    monkeypatch.setenv("XW_WEB_BIND_ADDRESS", "intranet-host.example")
     monkeypatch.delenv("XW_STOP_GRACE_SECONDS", raising=False)
     config = serve_config(18501, model=VERTEX.model_dump(mode="json"))
     config["targets"][0]["starrocks"].update({"tls": True, "tls_ca_file": str(tmp_path / "no-ca")})
@@ -964,7 +967,7 @@ def _break_ca(monkeypatch: pytest.MonkeyPatch, file: Path) -> None:
         pytest.param(_break_ca, id="unreadable-ca"),
         pytest.param(lambda mp, file: mp.setenv("XW_WEB_PORT", "not-a-port"), id="port"),
         pytest.param(
-            lambda mp, file: mp.setenv("XW_WEB_BIND_ADDRESS", "0.0.0.0"),  # noqa: S104 - 拒绝全接口监听
+            lambda mp, file: mp.setenv("XW_WEB_BIND_ADDRESS", "intranet-host.example"),
             id="bind-address",
         ),
         pytest.param(lambda mp, file: mp.setenv("XW_STOP_GRACE_SECONDS", "1"), id="stop-grace"),

@@ -135,7 +135,7 @@ def _main(argv: Sequence[str] | None, *, container: bool) -> int:
         return 1
 
 
-def _container_deployment_values() -> tuple[int, str, float]:
+def _container_deployment_values() -> tuple[int, str | None, float]:
     from xiaowei.runtime import ConfigError
 
     try:
@@ -148,7 +148,7 @@ def _container_deployment_values() -> tuple[int, str, float]:
         raise ConfigError(f"{_CONTAINER_STOP_GRACE_ENV}: 必须是有限正数") from None
     if not math.isfinite(stop_grace) or stop_grace <= 0:
         raise ConfigError(f"{_CONTAINER_STOP_GRACE_ENV}: 必须是有限正数")
-    bind_address = os.environ.get(_CONTAINER_BIND_ADDRESS_ENV, "127.0.0.1")
+    bind_address = os.environ.get(_CONTAINER_BIND_ADDRESS_ENV)
     return port, bind_address, stop_grace
 
 

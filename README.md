@@ -23,7 +23,7 @@
 | --- | --- |
 | Agent 核心 | OpenAI Agents SDK 的 Agent、Runner、function tools、Session |
 | 模型 API | 计划接入 OpenAI、Gemini、DeepSeek 与 Vertex AI（API Key 模式）；通过配置选择经过验证的端点和模型，一次运行使用一个模型 |
-| Web | 默认本机使用的简单对话页；公司内网可按部署说明显式开放给单操作者 |
+| Web | 简单对话页：原生启动默认只监听本机（`listen_host` 可改）；Compose 部署默认发布到宿主机所有地址（`XW_WEB_BIND_ADDRESS=0.0.0.0`），供公司内网访问；无登录，访问者共用一个操作者身份 |
 | 飞书 | 获准单聊；可选一个指定群：群内 @小维 提问、全员共享会话、同群有界排队并回复原消息（离线实现，真实群在 P3 验证） |
 | 数据源 | 本地 Adapter 直连一个或多个 StarRocks 目标，工具以 `cluster` 参数选择集群；表与列自动发现，范围是只读账号实际可 SELECT 的对象，不再手写 allowlist |
 | MCP | 官方 SDK 接入能力 + 小维可信配置与治理；配置为空时，本地功能照常运行 |
@@ -39,7 +39,7 @@
 - 查询结果中的数字、实际 SQL、表格和时间由程序按真实证据生成，AI 分析建议单独展示；不清楚时区、金额单位或指标含义时先问清楚。
 - Web 点“新建会话”，飞书发 `/新建`；对话过长会提示新建，旧记录按保留期失效和清理。
 - 请求失败时提供排障编号，用于区分模型、数据库、保存或飞书发送问题，日志不记录原始查询数据。
-- 本机默认打开 Web；服务器默认经 SSH 转发访问。确需从公司云桌面直连时，可在 `.env` 设置服务器内网绑定地址，并在 JSON 增加对应来源；详细步骤见运维说明。内网直连仍使用固定 Web 操作者身份，不提供登录认证。PostgreSQL 不发布宿主机端口。
+- 本机打开 Web；部署在服务器时内网电脑直接访问 `http://服务器IP:8501`（Web 没有登录，访问者共用配置中的操作者身份与权限）。PostgreSQL 不开放公共端口。
 
 OpenAI Agents SDK 负责 Agent 运行，实际推理可由不同厂商提供。接入方案优先使用 SDK 原生 Responses / Chat Completions 模型能力；是否能完成工具调用、结构化回答和连续追问，按具体端点与模型实测，兼容性记录见 handoff。首版通过服务端配置切换，换模型开启新会话，不自动把旧对话发送到另一家；不用先建设模型管理后台。
 
@@ -53,7 +53,7 @@ MCP 负责标准化工具接入，不能替代业务授权。只有参数含义�
 
 ## 怎样开始
 
-唯一正式命令是 `xiaowei`（`python -m xiaowei` 相同）。它已用测试 PostgreSQL、脚本模型与替身完成离线验证；P3-A 和 P3-B 已通过独立审查并合入，升级、回退和隔离恢复在本机 Linux/arm64 容器环境验证。GHCR amd64 发布流程正在准备，镜像尚未发布；真实模型、用户 StarRocks、真实飞书与公司服务器实战仍未完成（见 handoff）。旧 CLI、Worker 或旧 Compose 命令不是产品入口。
+唯一正式命令是 `xiaowei`（`python -m xiaowei` 相同）。它已用测试 PostgreSQL、脚本模型与替身完成离线验证；P3-A 和 P3-B 已通过独立审查并合入，升级、回退和隔离恢复在本机 Linux/arm64 容器环境验证。amd64 发行包由手动发布流程生成，应用镜像以离线文件随包交付；真实模型、用户 StarRocks、真实飞书与公司服务器实战仍未完成（见 handoff）。旧 CLI、Worker 或旧 Compose 命令不是产品入口。
 
 实施时需要：
 
@@ -129,7 +129,7 @@ docker compose -p xiaowei-sdk-test -f compose.sdk-test.yml down -v
 
 `SDK_TEST_POSTGRES_URL` 只能是上面这一个测试地址；未设置时数据库用例明确失败而不是跳过。CI 的 integration job 以同样方式运行完整测试。
 
-P3-A 与 P3-B 已经独立审查并合入；精简发行包、两容器 Compose、配置预检、首次初始化与停止步骤见 [deploy/OPERATIONS.md](deploy/OPERATIONS.md)。小维连接已有 StarRocks 和模型 API，不要求在服务器部署模型；应用配置、`.env`、CA 与 PostgreSQL 命名卷由操作者保留。当前在准备私有 GHCR amd64 发布流程，镜像和发行归档尚未实际发布；公司服务器与真实服务验收仍待 P3-C。旧根目录 Compose 文件仍属于历史实现。
+P3-A 与 P3-B 已经独立审查并合入；精简发行包、两容器 Compose、配置预检、首次初始化与停止步骤见 [deploy/OPERATIONS.md](deploy/OPERATIONS.md)。小维连接已有 StarRocks 和模型 API，不要求在服务器部署模型；应用配置、`.env`、CA 与 PostgreSQL 命名卷由操作者保留。amd64 发行包自带应用镜像文件（`docker load` 导入，不需要镜像仓库）；公司服务器与真实服务验收仍待 P3-C。旧根目录 Compose 文件仍属于历史实现。
 
 ## 设计与开发
 

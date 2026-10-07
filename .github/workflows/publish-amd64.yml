@@ -23,55 +23,45 @@ jobs:
           persist-credentials: false
           fetch-depth: 0
 
-      - name: Authenticate to GHCR
+      - name: Build, smoke-check and package the amd64 image
         env:
-          GHCR_USERNAME: ${{ vars.GHCR_USERNAME }}
-          GHCR_WRITE_TOKEN: ${{ secrets.GHCR_WRITE_TOKEN }}
-        run: |
-          set -euo pipefail
-          test -n "$GHCR_USERNAME"
-          test -n "$GHCR_WRITE_TOKEN"
-          printf '%s' "$GHCR_WRITE_TOKEN" | docker login ghcr.io --username "$GHCR_USERNAME" --password-stdin
-
-      - name: Build, publish and smoke-check the amd64 image
-        env:
-          XW_APP_IMAGE: ghcr.io/shixian66/xiaowei-agent-sdk
           XW_POSTGRES_IMAGE: postgres:16.15-bookworm@sha256:efedf3595f1d6f415c08568ba171029bf54052e754cc9f030e3f2412b21f3d67
           XW_PLATFORM: linux/amd64
         run: |
           set -euo pipefail
           docker buildx version
-          metadata="$RUNNER_TEMP/xiaowei-image-metadata.json"
+          image="xiaowei:$GITHUB_SHA"
+          image_file="$RUNNER_TEMP/xiaowei-image.tar"
           docker buildx build \
             --platform "$XW_PLATFORM" \
             --build-arg "XW_CODE_SHA=$GITHUB_SHA" \
-            --tag "$XW_APP_IMAGE:sha-$GITHUB_SHA" \
-            --metadata-file "$metadata" \
-            --push \
+            --tag "$image" \
+            --provenance=false \
+            --sbom=false \
+            --load \
             --file Dockerfile.runtime \
             .
-          app_digest="$(python3 - "$metadata" <<'PY'
-          import json
-          import re
-          import sys
-
-          digest = json.load(open(sys.argv[1], encoding="utf-8"))["containerimage.digest"]
-          if re.fullmatch(r"sha256:[0-9a-f]{64}", digest) is None:
-              raise SystemExit("Buildx did not return a valid image digest")
-          print(digest)
-          PY
-          )"
-          app_image="$XW_APP_IMAGE@$app_digest"
-          docker pull "$app_image"
-          docker run --rm "$app_image" --help >/dev/null
+          docker run --rm "$image" --help >/dev/null
+          docker save --output "$image_file" "$image"
           archive="$RUNNER_TEMP/xiaowei-$GITHUB_SHA-linux-amd64.tar.gz"
           python3 scripts/package_release.py \
             --output "$archive" \
-            --app-image "$app_image" \
+            --image-archive "$image_file" \
             --postgres-image "$XW_POSTGRES_IMAGE" \
             --code-sha "$GITHUB_SHA" \
             --platform "$XW_PLATFORM"
-          printf 'APP_IMAGE=%s\nRELEASE_ARCHIVE=%s\n' "$app_image" "$archive" >> "$GITHUB_ENV"
+          # 用 Docker 自身验证最终发行包里的那份镜像：删掉本地镜像，从发行包解出、按 release.json
+          # 核对摘要后导入，平台与入口都须正常。
+          docker image rm "$image"
+          unpacked="$RUNNER_TEMP/unpacked"
+          mkdir -p "$unpacked"
+          tar -xzf "$archive" -C "$unpacked" release.json xiaowei-image.tar
+          expected="$(python3 -c 'import json, sys; print(json.load(open(sys.argv[1]))["image_file_sha256"])' "$unpacked/release.json")"
+          printf '%s  %s\n' "$expected" "$unpacked/xiaowei-image.tar" | sha256sum --check --strict -
+          docker load --input "$unpacked/xiaowei-image.tar"
+          test "$(docker image inspect "$image" --format '{{.Os}}/{{.Architecture}}')" = "$XW_PLATFORM"
+          docker run --rm "$image" --help >/dev/null
+          printf 'APP_IMAGE=%s\nRELEASE_ARCHIVE=%s\n' "$image" "$archive" >> "$GITHUB_ENV"
 
       - name: Publish the versioned release archive
         env:

@@ -14,6 +14,7 @@
 import asyncio
 import json
 import logging
+import re
 import socket
 from collections.abc import AsyncIterator, Iterator
 from contextlib import asynccontextmanager, contextmanager
@@ -115,7 +116,7 @@ async def settled(page: Page, index: int, state: str) -> str:
 
 
 async def test_web_component_in_real_uvicorn_and_chrome(env: Env, chrome_binary: str) -> None:
-    app = create_web_app(env.service, config(allowed_origins=frozenset({ORIGIN})))
+    app = create_web_app(env.service, config())
     with access_log() as log:
         async with serving(app), launch(chrome_binary) as chrome:
             page = await chrome.page()
@@ -123,6 +124,26 @@ async def test_web_component_in_real_uvicorn_and_chrome(env: Env, chrome_binary:
             await check_turns(env, page, log)
             await check_without_script(env, await chrome.page(), log)
     assert not any("javascriptDialogOpening" in e["method"] for e in chrome.events)
+
+
+async def test_send_works_without_secure_context_apis(env: Env, chrome_binary: str) -> None:
+    """用 http://内网IP 打开时浏览器不提供 ``crypto.randomUUID``：发送仍须生成编号并完成。"""
+    app = create_web_app(env.service, config())
+    message = env.scripts.add("内网发送", tool_call("order_total", region="east"), cite())
+    async with serving(app), launch(chrome_binary) as chrome:
+        page = await chrome.page()
+        await page.send(
+            "Page.addScriptToEvaluateOnNewDocument",
+            {"source": "delete Crypto.prototype.randomUUID;"},
+        )
+        await page.navigate(f"{ORIGIN}/")
+        assert await page.evaluate("typeof crypto.randomUUID") == "undefined"
+        await send(page, message)
+        await settled(page, 0, "completed")
+        request_id = await page.evaluate(f"{item(0)}.dataset.requestId")
+        assert await page.evaluate("document.getElementById('message').value") == ""
+    assert re.fullmatch(r"[A-Za-z0-9_-]{1,64}", request_id)
+    assert env.model_calls(message) == 2
 
 
 async def check_turns(env: Env, page: Page, log: list[str]) -> None:

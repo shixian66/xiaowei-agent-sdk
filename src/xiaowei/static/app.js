@@ -97,6 +97,10 @@
     }
   };
 
+  // http://内网IP 不是安全上下文，浏览器不提供 crypto.randomUUID；getRandomValues 在任何页面可用。
+  const newRequestId = () =>
+    Array.from(crypto.getRandomValues(new Uint8Array(16)), (b) => b.toString(16).padStart(2, "0")).join("");
+
   const addTurn = (requestId, question) => {
     const item = el("li", "turn");
     item.dataset.requestId = requestId;
@@ -111,7 +115,7 @@
     const message = document.getElementById("message").value;
     const mode = document.getElementById("mode").value;
     if (!message.trim()) return;
-    const requestId = crypto.randomUUID();
+    const requestId = newRequestId();
     const item = addTurn(requestId, message);
     remember([...remembered(), { requestId, question: message }]);
     form.reset();

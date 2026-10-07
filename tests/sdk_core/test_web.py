@@ -21,12 +21,11 @@ from tests.sdk_core.test_channel_service import Env
 from tests.sdk_core.test_channel_service import env as env  # pytest fixture
 
 from xiaowei.config import WebConfig
-from xiaowei.web import COOKIE, _Guard, create_web_app
+from xiaowei.web import COOKIE, create_web_app
 
 pytestmark = pytest.mark.loopback
 
 ORIGIN = "http://127.0.0.1:8501"
-OTHER_ALLOWED = "http://localhost:8501"
 LIMIT = 4096
 STATIC = Path(__file__).resolve().parents[2] / "src" / "xiaowei" / "static"
 
@@ -34,7 +33,6 @@ STATIC = Path(__file__).resolve().parents[2] / "src" / "xiaowei" / "static"
 def config(**overrides: Any) -> WebConfig:
     values: dict[str, Any] = {
         "operator_id": "alice",
-        "allowed_origins": frozenset({ORIGIN, OTHER_ALLOWED}),
         "secure_cookie": False,
         "max_body_bytes": LIMIT,
     }
@@ -207,92 +205,55 @@ async def test_turn_body_must_be_strict_json(
     assert await web.env.requests() == 0 and web.env.adapter.calls == []
 
 
-# ---- Host / Origin ---------------------------------------------------------------------------
+# ---- 地址：内网访问，不校验 Host / Origin --------------------------------------------------
+
+INTRANET = [
+    (b"172.20.0.8", "http://172.20.0.8"),
+    (b"172.20.0.8:8501", "http://172.20.0.8:8501"),
+    (b"xiaowei.corp.example", "https://xiaowei.corp.example"),
+    (b"127.0.0.1:8501", ORIGIN),
+]
 
 
-@pytest.mark.parametrize(
-    "host",
-    [
-        "rebind.example:8501",  # 外部域名解析到 loopback
-        "localhost.evil:8501",
-        "127.0.0.1:9999",
-        "127.0.0.1",
-        "127.0.0.1.:8501",
-        "localhost.:8501",
-        "LOCALHOST:8501",
-        "user@127.0.0.1:8501",
-        "[::ffff:127.0.0.1]:8501",
-        "[0:0:0:0:0:0:0:1]:8501",
-        "127.1:8501",
-        "2130706433:8501",
-        "",
-    ],
-)
-async def test_host_must_match_allowlist_literally(web: Web, host: str) -> None:
-    for method, path in (("GET", "/healthz"), ("GET", "/"), ("POST", "/api/turns")):
-        headers = [(b"host", host.encode()), (b"origin", ORIGIN.encode())]
-        status, _, calls = await raw(web.app, method, path, headers)
-        assert (status, calls) == (400, 0)
-    assert await web.env.requests() == 0
-
-
-async def test_duplicate_or_missing_host_is_rejected(web: Web) -> None:
-    for headers in ([], [(b"host", b"127.0.0.1:8501"), (b"host", b"127.0.0.1:8501")]):
-        status, _, _ = await raw(web.app, "GET", "/healthz", headers)
-        assert status == 400
-
-
-async def test_allowed_hosts_include_ipv6_and_named_loopback(env: Env) -> None:
-    app = create_web_app(
-        env.service, config(allowed_origins=frozenset({"http://[::1]:8501", OTHER_ALLOWED}))
-    )
-    for host in (b"[::1]:8501", b"localhost:8501"):
-        status, _, _ = await raw(app, "GET", "/healthz", [(b"host", host)])
-        assert status == 200
-
-
-@pytest.mark.parametrize(
-    "origin",
-    [
-        None,
-        "null",
-        "http://rebind.example:8501",
-        "http://127.0.0.1:9999",
-        "https://127.0.0.1:8501",
-        "http://127.0.0.1:8501/",
-        "http://127.0.0.1.:8501",
-        OTHER_ALLOWED,  # 允许的地址，但与本次请求的 Host 不同源
-    ],
-)
-async def test_post_requires_same_origin(web: Web, origin: str | None) -> None:
-    message = web.env.scripts.add("跨站提交", tool_call("order_total", region="east"), cite())
+@pytest.mark.parametrize(("host", "origin"), INTRANET)
+async def test_any_host_and_origin_serve_a_turn(env: Env, host: bytes, origin: str) -> None:
+    """用内网 IP、域名或经代理访问都能打开页面并完成一轮，不需要在配置里登记地址。"""
+    message = env.scripts.add("内网访问", tool_call("order_total", region="east"), cite())
+    app = create_web_app(env.service, config())
+    status, page, _ = await raw(app, "GET", "/", [(b"host", host)])
+    assert status == 200 and b"<form" in page
     body = json.dumps({"request_id": "r1", "mode": "query", "message": message}).encode()
-    # 带有效 cookie：拒绝只能来自来源检查。
-    headers = [h for h in same_origin() if h[0] != b"origin"]
-    if origin is not None:
-        headers.append((b"origin", origin.encode()))
-    for path in ("/api/turns", "/api/sessions"):
-        status, _, calls = await raw(web.app, "POST", path, headers, (body,))
-        assert (status, calls) == (403, 0)
-    assert await web.env.requests() == 0
-    assert web.env.model_calls(message) == 0 and web.env.adapter.calls == []
-    # 对照：同一请求换成同源 Origin 后被接受并运行。
-    status, _, _ = await raw(web.app, "POST", "/api/turns", same_origin(), (body,))
+    post = [
+        (b"host", host),
+        (b"origin", origin.encode()),
+        (b"content-type", b"application/json"),
+        (b"cookie", f"{COOKIE}={'c' * 43}".encode()),
+    ]
+    status, response, _ = await raw(app, "POST", "/api/turns", post, (body,))
+    assert status == 200 and json.loads(response)["state"] == "completed"
+    assert env.model_calls(message) == 2 and len(env.adapter.calls) == 1
+
+
+async def test_post_without_origin_or_host_is_accepted(web: Web) -> None:
+    message = web.env.scripts.add("无来源头", tool_call("order_total", region="east"), cite())
+    body = json.dumps({"request_id": "r1", "mode": "query", "message": message}).encode()
+    headers = [h for h in same_origin() if h[0] not in (b"origin", b"host")]
+    status, _, _ = await raw(web.app, "POST", "/api/turns", headers, (body,))
     assert status == 200 and len(web.env.adapter.calls) == 1
 
 
-async def test_cross_origin_read_is_rejected_and_no_cors_headers(web: Web) -> None:
+async def test_responses_carry_no_cors_headers(web: Web) -> None:
+    """不放开跨站读取：其他网站的脚本仍读不到响应。"""
     async with web.client() as client:
-        hostile = await client.get("/api/turns/r1", headers={"Origin": "http://rebind.example"})
+        foreign = await client.get("/api/turns/r1", headers={"Origin": "http://other.example"})
         preflight = await client.options(
             "/api/turns",
             headers={
-                "Origin": "http://rebind.example",
+                "Origin": "http://other.example",
                 "Access-Control-Request-Method": "POST",
             },
         )
-    assert hostile.status_code == 403
-    for response in (hostile, preflight):
+    for response in (foreign, preflight):
         assert not any(h.startswith("access-control-") for h in response.headers)
 
 
@@ -549,134 +510,11 @@ async def test_page_is_static_and_script_never_parses_html(web: Web) -> None:
     assert script.text == (STATIC / "app.js").read_text(encoding="utf-8")
 
 
-def test_web_config_accepts_canonical_loopback_and_private_ipv4_origins() -> None:
-    for origin in (
-        "http://127.0.0.1:8501",
-        "http://[::1]:8501",
-        "http://localhost:8501",
-        "https://localhost:8443",
-        "http://127.0.0.1:443",  # 不是 http 的默认端口，浏览器保留它
-        "https://127.0.0.1:80",
-        "http://172.20.0.8:8501",
-    ):
-        config(allowed_origins=frozenset({origin}))
-    for origin in (
-        "http://127.0.0.1",
-        "http://LOCALHOST:8501",
-        "http://localhost.:8501",
-        "http://u@127.0.0.1:8501",
-        "http://127.0.0.1:08501",
-        "http://127.0.0.1:8501/",
-        "http://rebind.example:8501",
-        "http://[0:0:0:0:0:0:0:1]:8501",
-        "http://127.1:8501",
-        "http://8.8.8.8:8501",
-        "http://0.0.0.0:8501",
-        "http://172.20.0.8:08501",
-        "http://172.020.0.8:8501",
-        "ftp://127.0.0.1:8501",
-    ):
-        with pytest.raises(ValueError):
-            config(allowed_origins=frozenset({origin}))
-    with pytest.raises(ValueError):
-        config(allowed_origins=frozenset({ORIGIN, "https://127.0.0.1:8501"}))
-
-
-async def test_private_origin_guard_accepts_only_configured_same_origin_requests() -> None:
-    accepted: list[str] = []
-
-    async def endpoint(scope: Any, receive: Any, send: Any) -> None:
-        del receive
-        accepted.append(scope["path"])
-        await send({"type": "http.response.start", "status": 200, "headers": []})
-        await send({"type": "http.response.body", "body": b"ok"})
-
-    private_origin = "http://172.20.0.8:8501"
-    guard = _Guard(
-        endpoint,
-        origins=frozenset({ORIGIN, private_origin}),
-        max_body_bytes=LIMIT,
-    )
-    private_host = b"172.20.0.8:8501"
-
-    status, _, _ = await raw(guard, "GET", "/", [(b"host", private_host)])
-    assert status == 200
-    status, _, _ = await raw(
-        guard,
-        "POST",
-        "/api/turns",
-        [
-            (b"host", private_host),
-            (b"origin", private_origin.encode()),
-            (b"content-type", b"application/json"),
-        ],
-        (b"{}",),
-    )
-    assert status == 200 and accepted == ["/", "/api/turns"]
-
-    status, _, _ = await raw(
-        guard,
-        "POST",
-        "/api/turns",
-        [
-            (b"host", private_host),
-            (b"origin", ORIGIN.encode()),
-            (b"content-type", b"application/json"),
-        ],
-        (b"{}",),
-    )
-    assert status == 403 and accepted == ["/", "/api/turns"]
-    status, _, _ = await raw(
-        guard,
-        "GET",
-        "/",
-        [(b"host", b"8.8.8.8:8501"), (b"origin", b"http://8.8.8.8:8501")],
-    )
-    assert status == 400 and accepted == ["/", "/api/turns"]
-
-
-# 浏览器在 Host 与 Origin 中省略 scheme 的默认端口，端口 0 没有稳定的 origin：按字面匹配时
-# 这些配置下的每个请求都会被拒绝，因此在配置阶段失败。
-UNUSABLE_ORIGINS = ("http://127.0.0.1:0", "http://127.0.0.1:80", "https://localhost:443")
-
-
-@pytest.mark.parametrize("origin", UNUSABLE_ORIGINS)
-async def test_web_config_rejects_ports_a_browser_cannot_send(env: Env, origin: str) -> None:
-    message = env.scripts.add("端口配置", tool_call("order_total", region="east"), cite())
-    with pytest.raises(ValueError, match="端口"):
-        config(allowed_origins=frozenset({origin}))
-    # 同一组里混入可用地址也不放行。
-    with pytest.raises(ValueError, match="端口"):
-        config(allowed_origins=frozenset({ORIGIN, origin}))
-    assert await env.requests() == 0 and env.model_calls(message) == 0
-    assert env.adapter.calls == []
-
-
-@pytest.mark.parametrize(
-    ("origin", "host"),
-    [
-        (ORIGIN, b"127.0.0.1:8501"),
-        ("http://[::1]:8501", b"[::1]:8501"),
-        (OTHER_ALLOWED, b"localhost:8501"),
-        ("http://172.20.0.8:8501", b"172.20.0.8:8501"),
-    ],
-)
-async def test_allowed_origin_serves_a_same_origin_turn(env: Env, origin: str, host: bytes) -> None:
-    message = env.scripts.add("同源对照", tool_call("order_total", region="east"), cite())
-    app = create_web_app(env.service, config(allowed_origins=frozenset({origin})))
-    headers = [(b"host", host)]
-    status, page, _ = await raw(app, "GET", "/", headers)
-    assert status == 200 and b"<form" in page
-    body = json.dumps({"request_id": "r1", "mode": "query", "message": message}).encode()
-    post = [
-        (b"host", host),
-        (b"origin", origin.encode()),
-        (b"content-type", b"application/json"),
-        (b"cookie", f"{COOKIE}={'c' * 43}".encode()),
-    ]
-    status, response, _ = await raw(app, "POST", "/api/turns", post, (body,))
-    assert status == 200 and json.loads(response)["state"] == "completed"
-    assert env.model_calls(message) == 2 and len(env.adapter.calls) == 1
+def test_web_config_ignores_legacy_allowed_origins() -> None:
+    """旧配置里的 ``allowed_origins`` 不再使用，任何写法都照常接受，升级不必改 JSON。"""
+    for origins in (frozenset(), frozenset({ORIGIN}), frozenset({"http://172.20.0.8"})):
+        config(allowed_origins=origins)
+    assert "allowed_origins" not in WebConfig.model_json_schema()["required"]
 
 
 async def test_secure_cookie_setting_marks_the_cookie_secure(env: Env) -> None:
