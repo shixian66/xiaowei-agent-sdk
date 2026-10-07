@@ -34,6 +34,7 @@ from xiaowei.channel_store import ChannelSession, ChannelStore, DeliveryClaim, R
 from xiaowei.config import FeishuConfig
 from xiaowei.evidence import EvidenceStoreError
 from xiaowei.feishu import (
+    _NOTICE_CAPACITY,
     EMPTY_COMMAND,
     FACTS_TRUNCATED,
     IDENTITY_NOTICE_WINDOW,
@@ -456,6 +457,53 @@ async def test_notice_index_is_bounded_and_evicts_the_oldest_user(env: Env) -> N
         await fs.gateway.receive(fs.event("再问", sender=users[-1]))  # 仍在窗口内
         await fs.drain()
     assert fs.outbox.texts()[-1] == notice(users[0]) and len(fs.outbox.sent) == 1026
+
+
+async def test_both_notice_indexes_stay_within_capacity(env: Env) -> None:
+    """两个限频索引各自有界：一个人连发很多条只撑大消息索引，很多人各发一条撑大用户索引。"""
+    async with running(env) as fs:
+        for index in range(1100):
+            await fs.gateway.receive(fs.event(f"第 {index} 条", sender=STRANGER))
+        for index in range(1100):
+            await fs.gateway.receive(fs.event("你好", sender=f"ou_crowd_{index}"))
+        await fs.drain()
+        assert len(fs.gateway._noticed_messages) == _NOTICE_CAPACITY
+        assert len(fs.gateway._noticed_users) == _NOTICE_CAPACITY
+    assert fs.outbox.texts().count(notice(STRANGER)) == 1
+
+
+async def table_counts(env: Env) -> dict[str, int]:
+    async with env.engine.connect() as conn:
+        tables = (
+            await conn.scalars(
+                text_sql(
+                    "SELECT table_name FROM information_schema.tables "
+                    "WHERE table_schema = current_schema() AND table_type = 'BASE TABLE'"
+                )
+            )
+        ).all()
+        return {
+            name: int(await conn.scalar(text_sql(f'SELECT count(*) FROM "{name}"')) or 0)  # noqa: S608
+            for name in tables
+        }
+
+
+async def test_a_new_gateway_starts_with_empty_notice_limits_and_writes_nothing(
+    env: Env,
+) -> None:
+    """限频只在进程内存：重启（新建网关）后同一个人可以再收到一次；提示不写任何数据库记录。"""
+    before = await table_counts(env)
+    assert before
+    async with running(env) as fs:
+        await fs.gateway.receive(fs.event("你好", sender=STRANGER))
+        await fs.gateway.receive(fs.event("再问", sender=STRANGER))
+        await fs.drain()
+    assert fs.outbox.texts() == [notice(STRANGER)]
+    async with running(env) as restarted:
+        await restarted.gateway.receive(restarted.event("重启后", sender=STRANGER))
+        await restarted.drain()
+    assert restarted.outbox.texts() == [notice(STRANGER)]
+    assert await table_counts(env) == before
 
 
 async def test_drain_waits_for_an_inflight_notice_and_closing_drops_new_ones(env: Env) -> None:
