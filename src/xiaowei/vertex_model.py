@@ -285,7 +285,12 @@ def _string(value: object, *, allow_empty: bool = False) -> str:
 
 
 def _valid_signature(value: object) -> bool:
-    if not isinstance(value, str) or not 0 < len(value) <= _MAX_SIGNATURE_CHARS:
+    # 非 ASCII 字符会让 a2b_base64 抛普通 ValueError，先在这里拒绝。
+    if (
+        not isinstance(value, str)
+        or not 0 < len(value) <= _MAX_SIGNATURE_CHARS
+        or not value.isascii()
+    ):
         return False
     if any(c in value for c in "+/") and any(c in value for c in "-_"):
         return False  # 混用两种字母表

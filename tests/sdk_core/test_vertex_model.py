@@ -821,6 +821,51 @@ async def test_structurally_invalid_history_signature_is_rejected_before_sending
     assert endpoint.requests == []
 
 
+_NON_ASCII_SIGNATURES = [
+    pytest.param("é===", id="latin"),
+    # 全角字符看起来像合法 Base64，但不是 ASCII。
+    pytest.param("ＱＵＪＤ", id="fullwidth"),
+]
+
+
+@pytest.mark.parametrize("signature", _NON_ASCII_SIGNATURES)
+async def test_non_ascii_response_signature_is_a_fixed_rejection(
+    signature: str, caplog: pytest.LogCaptureFixture
+) -> None:
+    caplog.set_level(logging.DEBUG)
+    endpoint = Endpoint([_call(signature=signature)])
+    executed: list[str] = []
+
+    with pytest.raises(ModelResponseRejectedError) as excinfo:
+        await _run(endpoint, executed)
+
+    assert executed == []
+    assert len(endpoint.requests) == 1
+    for text in (str(excinfo.value), repr(excinfo.value), caplog.text):
+        assert signature not in text
+        assert KEY not in text
+    assert excinfo.value.__cause__ is None
+
+
+@pytest.mark.parametrize("signature", _NON_ASCII_SIGNATURES)
+async def test_non_ascii_history_signature_is_rejected_before_sending(
+    signature: str, caplog: pytest.LogCaptureFixture
+) -> None:
+    caplog.set_level(logging.DEBUG)
+    endpoint = Endpoint([_answer()])
+
+    with pytest.raises(ModelRequestRejectedError) as excinfo:
+        await _run_input(
+            endpoint, _history('{"region": "east"}', provider_data={"thought_signature": signature})
+        )
+
+    assert endpoint.requests == []
+    for text in (str(excinfo.value), repr(excinfo.value), caplog.text):
+        assert signature not in text
+        assert KEY not in text
+    assert excinfo.value.__cause__ is None
+
+
 @pytest.mark.parametrize(
     "signature",
     [
