@@ -1769,6 +1769,20 @@ def test_placeholder_errors_never_name_a_feishu_open_id(tmp_path: Path) -> None:
     assert "ou_canary_open_id" not in str(raised.value)
 
 
+def test_historical_open_id_marker_is_still_a_placeholder(tmp_path: Path) -> None:
+    """6d7c6af 发行的模板单聊名单是 ``{"ou_replace_with_open_id": "feishu-user"}``。
+
+    升级时沿用旧片段并给 ``feishu-user`` 补了 grant，配置一致性能过；仍须按占位符拒绝。
+    """
+    users = {"ou_replace_with_open_id": "feishu-user"}
+    values = serve_config(8501, feishu=feishu_config(users=users))
+    values["access"]["grants"]["feishu-user"] = sorted(QUERY_TOOLS)
+    with pytest.raises(runtime.ConfigError) as raised:
+        runtime.validate_placeholders(_load(tmp_path, values))
+    assert "feishu.users" in str(raised.value)
+    assert "ou_replace_with_open_id" not in str(raised.value)
+
+
 def test_filled_templates_pass_the_placeholder_check(tmp_path: Path) -> None:
     config = _load(tmp_path, filled(example_with_feishu()))
     runtime.validate_placeholders(config)

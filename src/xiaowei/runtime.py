@@ -344,6 +344,8 @@ _JSON_TEMPLATE_VALUES = frozenset(
         "<内部 subject>",
         "cli_replacewithappid",
         "oc_replace_with_chat_id",
+        # 历史升级标记：6d7c6af 发行的模板单聊名单键，当前模板改为 ``users={}``，旧片段仍拒绝。
+        "ou_replace_with_open_id",
     }
 )
 _ENV_TEMPLATE_VALUES = frozenset(
