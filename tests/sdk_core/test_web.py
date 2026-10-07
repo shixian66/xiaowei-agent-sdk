@@ -21,7 +21,7 @@ from tests.sdk_core.test_channel_service import Env
 from tests.sdk_core.test_channel_service import env as env  # pytest fixture
 
 from xiaowei.config import WebConfig
-from xiaowei.web import COOKIE, create_web_app
+from xiaowei.web import COOKIE, _Guard, create_web_app
 
 pytestmark = pytest.mark.loopback
 
@@ -549,7 +549,7 @@ async def test_page_is_static_and_script_never_parses_html(web: Web) -> None:
     assert script.text == (STATIC / "app.js").read_text(encoding="utf-8")
 
 
-def test_web_config_accepts_only_canonical_loopback_origins() -> None:
+def test_web_config_accepts_canonical_loopback_and_private_ipv4_origins() -> None:
     for origin in (
         "http://127.0.0.1:8501",
         "http://[::1]:8501",
@@ -557,6 +557,7 @@ def test_web_config_accepts_only_canonical_loopback_origins() -> None:
         "https://localhost:8443",
         "http://127.0.0.1:443",  # 不是 http 的默认端口，浏览器保留它
         "https://127.0.0.1:80",
+        "http://172.20.0.8:8501",
     ):
         config(allowed_origins=frozenset({origin}))
     for origin in (
@@ -569,12 +570,69 @@ def test_web_config_accepts_only_canonical_loopback_origins() -> None:
         "http://rebind.example:8501",
         "http://[0:0:0:0:0:0:0:1]:8501",
         "http://127.1:8501",
+        "http://8.8.8.8:8501",
+        "http://0.0.0.0:8501",
+        "http://172.20.0.8:08501",
+        "http://172.020.0.8:8501",
         "ftp://127.0.0.1:8501",
     ):
         with pytest.raises(ValueError):
             config(allowed_origins=frozenset({origin}))
     with pytest.raises(ValueError):
         config(allowed_origins=frozenset({ORIGIN, "https://127.0.0.1:8501"}))
+
+
+async def test_private_origin_guard_accepts_only_configured_same_origin_requests() -> None:
+    accepted: list[str] = []
+
+    async def endpoint(scope: Any, receive: Any, send: Any) -> None:
+        del receive
+        accepted.append(scope["path"])
+        await send({"type": "http.response.start", "status": 200, "headers": []})
+        await send({"type": "http.response.body", "body": b"ok"})
+
+    private_origin = "http://172.20.0.8:8501"
+    guard = _Guard(
+        endpoint,
+        origins=frozenset({ORIGIN, private_origin}),
+        max_body_bytes=LIMIT,
+    )
+    private_host = b"172.20.0.8:8501"
+
+    status, _, _ = await raw(guard, "GET", "/", [(b"host", private_host)])
+    assert status == 200
+    status, _, _ = await raw(
+        guard,
+        "POST",
+        "/api/turns",
+        [
+            (b"host", private_host),
+            (b"origin", private_origin.encode()),
+            (b"content-type", b"application/json"),
+        ],
+        (b"{}",),
+    )
+    assert status == 200 and accepted == ["/", "/api/turns"]
+
+    status, _, _ = await raw(
+        guard,
+        "POST",
+        "/api/turns",
+        [
+            (b"host", private_host),
+            (b"origin", ORIGIN.encode()),
+            (b"content-type", b"application/json"),
+        ],
+        (b"{}",),
+    )
+    assert status == 403 and accepted == ["/", "/api/turns"]
+    status, _, _ = await raw(
+        guard,
+        "GET",
+        "/",
+        [(b"host", b"8.8.8.8:8501"), (b"origin", b"http://8.8.8.8:8501")],
+    )
+    assert status == 400 and accepted == ["/", "/api/turns"]
 
 
 # 浏览器在 Host 与 Origin 中省略 scheme 的默认端口，端口 0 没有稳定的 origin：按字面匹配时
@@ -600,6 +658,7 @@ async def test_web_config_rejects_ports_a_browser_cannot_send(env: Env, origin: 
         (ORIGIN, b"127.0.0.1:8501"),
         ("http://[::1]:8501", b"[::1]:8501"),
         (OTHER_ALLOWED, b"localhost:8501"),
+        ("http://172.20.0.8:8501", b"172.20.0.8:8501"),
     ],
 )
 async def test_allowed_origin_serves_a_same_origin_turn(env: Env, origin: str, host: bytes) -> None:

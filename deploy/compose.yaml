@@ -39,13 +39,14 @@ services:
         required: true
     environment:
       XW_WEB_PORT: "${XW_WEB_PORT:-8501}"
+      XW_WEB_BIND_ADDRESS: "${XW_WEB_BIND_ADDRESS:-127.0.0.1}"
       XW_STOP_GRACE_SECONDS: "${XW_STOP_GRACE_SECONDS:-120}"
       PYTHONDONTWRITEBYTECODE: "1"
     command: ["serve"]
     ports:
       - target: "${XW_WEB_PORT:-8501}"
         published: "${XW_WEB_PORT:-8501}"
-        host_ip: 127.0.0.1
+        host_ip: "${XW_WEB_BIND_ADDRESS:-127.0.0.1}"
         protocol: tcp
     volumes:
       - type: bind
@@ -66,7 +67,7 @@ services:
     healthcheck:
       test: ["CMD", "python", "/opt/xiaowei/container_entrypoint.py", "healthcheck"]
       interval: 10s
-      timeout: 6s
+      timeout: 20s
       retries: 6
       start_period: 10s
     logging:

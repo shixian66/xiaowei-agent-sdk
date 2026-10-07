@@ -1,8 +1,8 @@
 # 小维容器运维
 
 本说明适用于发行包里的 `compose.yaml` 与 `release.json`。部署只有小维和 PostgreSQL 两个容器；
-Web 端口只发布到宿主机 `127.0.0.1`，PostgreSQL 不发布端口。Host/Origin 校验只防浏览器跨站
-和 DNS rebinding，访问范围仍由端口发布与服务器网络保证。
+Web 默认只发布到宿主机 `127.0.0.1`，也可显式发布到服务器的一个 RFC1918 IPv4 地址；PostgreSQL
+始终不发布端口。Host/Origin 校验只防浏览器跨站和 DNS rebinding，不提供登录认证。
 
 建议使用固定目录 `/opt/xiaowei/current`。`.env`、`xiaowei.json` 与 `certs/` 由操作者持有，升级
 只替换 `compose.yaml` 和 `release.json`；升级前留存的旧 JSON 配置（`.env` 的 `XW_CONFIG_FILE`
@@ -60,9 +60,12 @@ tar -xzf "/opt/xiaowei/xiaowei-${release_sha}-linux-amd64.tar.gz" \
 1. 把发行包展开到固定目录，核对 `release.json` 的平台、代码 SHA 与两个镜像 digest。
 2. 仅首次复制 `.env.example` 为 `.env`、`xiaowei.example.json` 为 `xiaowei.json`，并创建
    `certs/`。以后不能用新包里的模板覆盖它们。
-3. JSON 中的 `listen_host` 保持 `127.0.0.1`；`listen_port`、
-   `web.allowed_origins` 与 `.env` 的 `XW_WEB_PORT` 使用同一端口。自定义 CA 放在 `certs/`，
-   JSON 写容器路径 `/etc/xiaowei/certs/<文件>`。
+3. JSON 中的 `listen_host` 保持 `127.0.0.1`；`listen_port` 与 `.env` 的 `XW_WEB_PORT` 使用同一端口。
+   默认只保留 loopback 来源。云桌面需内网直连时，在 `.env` 把 `XW_WEB_BIND_ADDRESS` 设为服务器
+   网卡已配置的 RFC1918 IPv4（可用 `ip -4 addr show` 确认，不填容器 IP），并在 `web.allowed_origins`
+   追加 `http://服务器IP:端口`，保留原有 loopback 项；
+   `config check` 会核对两处一致。自定义 CA 放在 `certs/`，JSON 写容器路径
+   `/etc/xiaowei/certs/<文件>`。
 4. `.env` 只允许部署管理员读取；配置和 CA 须允许容器 UID 65532 只读。
 
 两份配置的分工：`.env` 只放秘密和部署参数，可以用 `#` 写注释；`xiaowei.json` 放模型、StarRocks
@@ -83,6 +86,7 @@ tar -xzf "/opt/xiaowei/xiaowei-${release_sha}-linux-amd64.tar.gz" \
 | `.env` 的 `XW_DIGEST_KEY` | 必填 | 自己生成的摘要密钥 | `openssl rand -hex 32` | 永不重新生成；与数据库成对备份 |
 | `.env` 的 `XW_MODEL_API_KEY` | 必填 | Vertex AI 的 API Key 本身（Express Mode），不是服务账号 JSON 文件或项目号 | Google Cloud 管理员 | 可轮换，改后重启 |
 | `.env` 的 `XW_STARROCKS_PASSWORD` | 必填 | 第一个目标只读账号的**密码** | StarRocks 管理员 | 可轮换，改后重启 |
+| `.env` 的 `XW_WEB_BIND_ADDRESS` | 可选 | 默认 `127.0.0.1`；内网直连时填服务器的 RFC1918 IPv4 地址 | 服务器管理员 | 可改，改后预检并重建小维 |
 | `.env` 的 `XW_ARCHIVE_STARROCKS_PASSWORD` | 按需 | 加了第二个目标时去掉行首 `#`，填它的只读密码 | StarRocks 管理员 | 可轮换 |
 | `.env` 的 `XW_FEISHU_APP_SECRET` | 按需 | 启用飞书时去掉行首 `#`，填应用 App Secret | 飞书开放平台 | 可轮换 |
 | JSON 的 `model.model` | 必填 | 获准的 Vertex 模型 ID，只含字母、数字、`.`、`_`、`-`，例如计划验收的 `gemini-3-flash-preview`（真实验收尚未完成） | 模型服务管理员 | 换模型后须新建会话，并重新运行 `model check` |
@@ -132,13 +136,25 @@ docker compose --env-file .env run --rm --no-deps xiaowei model check
 通过只说明这个 Profile 能完成合成数据上的工具往返和结构化回答，不代表正式提示词下的工具选择
 与回答质量合格。
 
-操作者电脑通过 SSH 转发访问；调整端口时同时调整 `.env`、JSON 和转发命令：
+默认从操作者电脑通过 SSH 转发访问；调整端口时同时调整 `.env`、JSON 和转发命令：
 
 ```sh
 ssh -N -L 127.0.0.1:8501:127.0.0.1:8501 <获准服务器>
 ```
 
-不得把 Compose 发布行改成省略 host IP 的 `8501:8501`，也不得使用 host network。
+公司云桌面确需直连时，使用支持 `XW_WEB_BIND_ADDRESS` 的发行版本，设置服务器内网 IP 和 JSON 来源后运行：
+
+```sh
+docker compose --env-file .env config --quiet
+docker compose --env-file .env run --rm --no-deps xiaowei config check
+docker compose --env-file .env up -d --no-deps --force-recreate xiaowei --wait
+docker compose --env-file .env ps
+```
+
+然后在云桌面浏览器打开 `http://服务器内网IP:端口/`。JSON 的 `listen_host` 仍写
+`127.0.0.1`，端口仍使用 `XW_WEB_PORT`。该入口没有登录认证；任何能访问该地址的人都能以配置的 Web
+操作者身份使用小维，访问范围由公司网络管理。不要把 Compose 发布地址设成 `0.0.0.0`，也不要使用
+host network。
 
 ## 增加第二个 StarRocks 目标
 
@@ -260,8 +276,8 @@ docker compose --env-file .env ps
 如果新版启动失败或需要回退，先用当前（候选）Compose 停止小维，停止成功后才恢复旧控制文件、旧
 digest 和升级前的 JSON 配置，再按旧镜像预检并启动；停止失败时命令链中止，不覆盖任何文件。停止后
 到旧版就绪前服务不可用。新版接受的配置旧版不一定能读，例如旧版要求 `feishu.users` 至少一人，
-新版允许 `{}`；升级后在 JSON 里做的修改会随回退撤销，需要时按旧版规则重新填写。`.env`、CA 与数据库不改（本次升级没有新增 `.env` 项，
-不要用新包模板覆盖 `.env`）：
+新版允许 `{}`；升级后在 JSON 里做的修改会随回退撤销，需要时按旧版规则重新填写。`.env`、CA 与数据库
+不改；新增的 `XW_WEB_BIND_ADDRESS` 在旧 `.env` 中缺失时会默认 loopback。不要用新包模板覆盖 `.env`：
 
 ```sh
 cd /opt/xiaowei/current

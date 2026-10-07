@@ -1431,6 +1431,48 @@ async def test_container_config_check_rejects_port_and_stop_grace_mismatches(
         runtime.validate_config(config, container_port=env.port, stop_grace_seconds=minimum - 1)
 
 
+def test_container_private_bind_requires_matching_origin_and_rejects_public_addresses(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    for name in (DB_ENV, KEY_ENV, MODEL_ENV, SR_ENV):
+        monkeypatch.setenv(name, "offline-test-value")
+    port = 18501
+    base = runtime.ServeConfig.model_validate(serve_config(port))
+    minimum = runtime.minimum_stop_grace_seconds(base)
+    private_origin = f"http://172.20.0.8:{port}"
+    private = runtime.ServeConfig.model_validate(
+        serve_config(
+            port,
+            web={
+                **base.web.model_dump(mode="json"),
+                "allowed_origins": [f"http://127.0.0.1:{port}", private_origin],
+            },
+        )
+    )
+
+    runtime.validate_config(
+        private,
+        container_port=port,
+        container_bind_address="172.20.0.8",
+        stop_grace_seconds=minimum,
+    )
+    with pytest.raises(runtime.ConfigError, match=r"web\.allowed_origins"):
+        runtime.validate_config(
+            base,
+            container_port=port,
+            container_bind_address="172.20.0.8",
+            stop_grace_seconds=minimum,
+        )
+    for address in ("0.0.0.0", "8.8.8.8", "172.20.0.08", "host.example"):  # noqa: S104 - 拒绝全接口绑定
+        with pytest.raises(runtime.ConfigError, match="XW_WEB_BIND_ADDRESS"):
+            runtime.validate_config(
+                private,
+                container_port=port,
+                container_bind_address=address,
+                stop_grace_seconds=minimum,
+            )
+
+
 def test_stop_upper_bound_includes_feishu_consumer_cancellation() -> None:
     config = runtime.ServeConfig.model_validate(
         serve_config(
