@@ -37,7 +37,9 @@ from pathlib import Path
 from typing import Annotated, Any, Literal
 
 import httpx2
+import openai
 import uvicorn
+from agents import Agent, MaxTurnsExceeded, Runner, function_tool
 from pydantic import (
     BaseModel,
     ConfigDict,
@@ -50,7 +52,15 @@ from pydantic import (
 )
 from sqlalchemy.ext.asyncio import AsyncEngine
 
-from xiaowei.app import AppConfig, Application, BusinessContext, DataPolicy, TargetInfo
+from xiaowei.app import (
+    AppConfig,
+    Application,
+    BusinessContext,
+    DataPolicy,
+    TargetInfo,
+    _causes,
+    safe_run_config,
+)
 from xiaowei.channel import (
     AccessDecision,
     ChannelService,
@@ -73,6 +83,7 @@ from xiaowei.governance import GovernedTools, ToolCatalog
 from xiaowei.model_api import ModelProfile, open_model
 from xiaowei.models import (
     AUDIENCES,
+    AgentAnswer,
     Audience,
     Budget,
     Channel,
@@ -111,6 +122,7 @@ from xiaowei.storage import (
     open_engine,
     upgrade_storage,
 )
+from xiaowei.vertex_model import ModelAPIStatusError, ModelAPITransportError
 from xiaowei.web import create_web_app
 
 logger = logging.getLogger(__name__)
@@ -446,6 +458,112 @@ def validate_config(
     if stop_grace_seconds is not None:
         if stop_grace_seconds < minimum_stop_grace_seconds(config):
             raise ConfigError("shutdown_timeout_seconds: 容器停止宽限不足")
+
+
+def validate_model_config(config: ServeConfig) -> None:
+    """``model check`` 的离线预检：只解析活动 Profile 的模型凭据，不读其他秘密、CA 或部署参数。"""
+    _resolve_checked("model.api_key_ref", config.model.api_key_ref)
+
+
+# ---- model check ---------------------------------------------------------------------
+
+_CHECK_TOOL = "model_check_lookup"
+_CHECK_MAX_TURNS = 3  # 调用工具、收到结果后作答只需 2 步；多出的一步用于识别重复调用
+_CHECK_INSTRUCTIONS = (
+    "这是模型配置检查。先调用一次 model_check_lookup 工具（region 填 east），只调用一次；"
+    "然后给出最终回答：evidence_ids 为空列表，inferences 为空列表，clarification 为 null，"
+    "advice 用一句话说明工具返回的数值。"
+)
+_CHECK_INPUT = "请完成模型配置检查。"
+
+CheckReason = Literal[
+    "auth_failed",
+    "rate_limited",
+    "upstream_error",
+    "unreachable",
+    "model_failed",
+    "tool_not_called",
+    "tool_repeated",
+    "answer_invalid",
+]
+
+
+class ModelCheckError(Exception):
+    """模型检查未通过；只携带固定类别，不含提示、模型正文、工具结果或上游原文。"""
+
+    def __init__(self, reason: CheckReason) -> None:
+        super().__init__(reason)
+        self.reason: CheckReason = reason
+
+
+async def check_model(
+    config: ServeConfig, *, transport: httpx2.AsyncBaseTransport | None = None
+) -> None:
+    """用固定合成指令与一个进程内无 I/O 工具，经与 ``serve`` 相同的模型装配完成一次工具往返。
+
+    不连接 PostgreSQL、StarRocks 或飞书，不写 Session、请求或 Evidence；会产生真实模型请求与用量。
+    最终回答必须是无证据的 ``advice`` 分支：本命令没有 Evidence，所以不运行 Evidence 校验，也不接受
+    形状正确但混用分支的回答。模型客户端打开或关闭失败同样只报告固定类别（``model_failed``），
+    不报告为通过。
+    """
+    configure_runtime()
+    calls = 0
+
+    @function_tool(name_override=_CHECK_TOOL)
+    def lookup(region: str) -> dict[str, object]:
+        """返回固定的合成数值。"""
+        nonlocal calls
+        calls += 1
+        return {"value": 42}
+
+    # 分类覆盖模型客户端的进入、运行与关闭：任何阶段的失败都只报告固定类别。
+    try:
+        async with open_model(config.model, transport=transport) as binding:
+            agent = Agent[None](
+                name="xiaowei-model-check",
+                instructions=_CHECK_INSTRUCTIONS,
+                model=binding.model,
+                model_settings=binding.settings,
+                tools=[lookup],
+                output_type=AgentAnswer,
+            )
+            result = await Runner.run(
+                agent, _CHECK_INPUT, max_turns=_CHECK_MAX_TURNS, run_config=safe_run_config()
+            )
+            _check_result(calls, result.final_output)
+    except ModelCheckError:
+        raise
+    except Exception as exc:
+        raise ModelCheckError(_check_reason(exc)) from None
+
+
+def _check_result(calls: int, answer: object) -> None:
+    if calls == 0:
+        raise ModelCheckError("tool_not_called")
+    if calls > 1:
+        raise ModelCheckError("tool_repeated")
+    if not (
+        isinstance(answer, AgentAnswer)
+        and answer.evidence_ids == ()
+        and answer.inferences == []
+        and answer.clarification is None
+        and answer.advice
+    ):
+        raise ModelCheckError("answer_invalid")
+
+
+def _check_reason(exc: Exception) -> CheckReason:
+    if isinstance(exc, MaxTurnsExceeded):
+        return "tool_repeated"
+    for cause in _causes(exc):
+        if isinstance(cause, (ModelAPIStatusError, openai.APIStatusError)):
+            status = cause.status_code
+            if status in (401, 403):
+                return "auth_failed"
+            return "rate_limited" if status == 429 else "upstream_error"
+        if isinstance(cause, (ModelAPITransportError, openai.APIConnectionError, TimeoutError)):
+            return "unreachable"
+    return "model_failed"
 
 
 def stop_upper_bound_seconds(config: ServeConfig) -> int:

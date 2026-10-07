@@ -70,6 +70,7 @@ MCP 负责标准化工具接入，不能替代业务授权。只有参数含义�
 uv sync --locked
 export XW_DATABASE_URL=...   # postgresql+asyncpg://...，以及 XW_DIGEST_KEY、XW_MODEL_API_KEY 和每个集群的 StarRocks 口令（示例为 XW_STARROCKS_PASSWORD、XW_ARCHIVE_STARROCKS_PASSWORD）
 uv run --locked xiaowei --config xiaowei.json config check      # 离线核对配置、环境引用和本地 CA
+uv run --locked xiaowei --config xiaowei.json model check       # 只需模型 Key；向模型发一次合成工具往返，产生用量
 uv run --locked xiaowei --config xiaowei.json storage init      # 全新数据库
 uv run --locked xiaowei --config xiaowei.json storage upgrade --bind-existing-digest-key  # v1–v5；仅确认原密钥并备份后
 uv run --locked xiaowei --config xiaowei.json serve             # Web 默认 http://127.0.0.1:8501，Ctrl-C 停止

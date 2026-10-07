@@ -1,5 +1,5 @@
-"""唯一正式命令 ``xiaowei``（``python -m xiaowei`` 同此入口）：serve、storage init/upgrade/cleanup、
-requests resend。
+"""唯一正式命令 ``xiaowei``（``python -m xiaowei`` 同此入口）：serve、config check、model check、
+storage init/upgrade/cleanup、requests resend。
 
 本模块在导入任何可能加载 ``agents`` 的模块之前，强制关闭 SDK 的模型与工具数据日志
 （``OPENAI_AGENTS_DONT_LOG_MODEL_DATA`` / ``OPENAI_AGENTS_DONT_LOG_TOOL_DATA``）：SDK 在导入时读取
@@ -46,6 +46,13 @@ def _parser() -> argparse.ArgumentParser:
         dest="action", required=True
     )
     config.add_parser("check", help="不连接数据库或外部服务地检查配置")
+
+    model = commands.add_parser("model", help="模型 Profile 的显式检查").add_subparsers(
+        dest="action", required=True
+    )
+    model.add_parser(
+        "check", help="用合成数据向模型发一次工具往返（产生模型调用与用量；只需模型 Key）"
+    )
 
     storage = commands.add_parser("storage", help="PostgreSQL 显式维护").add_subparsers(
         dest="action", required=True
@@ -97,7 +104,11 @@ def _main(argv: Sequence[str] | None, *, container: bool) -> int:
 
     try:
         config = runtime.load_config(args.config)
-        if container:
+        if args.command == "model":
+            # 先于容器分支：只需模型 Key，不读其他秘密、CA、端口或停止宽限。
+            runtime.validate_placeholders(config)
+            runtime.validate_model_config(config)
+        elif container:
             port, stop_grace = _container_deployment_values()
             runtime.validate_config(config, container_port=port, stop_grace_seconds=stop_grace)
         elif args.command == "config":
@@ -139,6 +150,14 @@ async def _run(config: "ServeConfig", args: argparse.Namespace, *, container: bo
 
     if args.command == "serve":
         return await _serve(config, container=container)
+    if args.command == "model":
+        try:
+            await rt.check_model(config)
+        except rt.ModelCheckError as exc:
+            print(f"model check failed: {exc.reason}", file=sys.stderr)
+            return 1
+        print(f"model check valid profile={config.model.profile_id} model={config.model.model}")
+        return 0
     if args.command == "storage":
         if args.action == "init":
             await rt.initialize(config)

@@ -43,13 +43,22 @@ from tests.sdk_core.test_app import (
 )
 from tests.sdk_core.test_feishu import FakeChannel
 from tests.sdk_core.test_gate0 import VertexLikeEndpoint, _vertex_body, vertex_call
+from tests.sdk_core.test_model_api import (
+    DEEPSEEK,
+    GEMINI,
+    _chat_tool_call,
+    _responses_tool_call,
+    _text,
+)
 from tests.sdk_core.test_model_api import OPENAI as PROFILE
+from tests.sdk_core.test_model_api import Endpoint as ChatEndpoint
 from tests.sdk_core.test_vertex_model import VERTEX
 
 from xiaowei import runtime
 from xiaowei.channel import AccessDeniedError, ResultUnavailableError
 from xiaowei.channel_store import ChannelStore, RequestUnavailableError
 from xiaowei.config import SecretRefError
+from xiaowei.model_api import ModelProfile
 from xiaowei.models import AUDIENCES, Identity
 from xiaowei.starrocks import EXPLAIN_PREFIX, StarRocksAdapter
 from xiaowei.starrocks_schema import SchemaCache
@@ -741,6 +750,55 @@ async def test_startup_recovers_interrupted_requests_before_serving(env: Env) ->
         assert state == "interrupted"
         assert await served.finish() == 0
     assert env.scripts.calls == {}  # 恢复不重跑
+
+
+# ---- model check：既有 Provider 走同一条窄装配 -------------------------------------------
+
+CHECK_ADVICE = {"evidence_ids": [], "inferences": [], "clarification": None, "advice": "数值为 42"}
+
+
+def _check_config(profile: ModelProfile) -> runtime.ServeConfig:
+    values = serve_config(18501, model=profile.model_dump(mode="json"))
+    return runtime.ServeConfig.model_validate(values)
+
+
+def _check_call(profile: ModelProfile) -> dict[str, Any]:
+    build = _responses_tool_call if profile.api_mode == "responses" else _chat_tool_call
+    return build("model_check_lookup", {"region": "east"}, "call-1")
+
+
+@pytest.mark.parametrize("profile", [PROFILE, GEMINI, DEEPSEEK], ids=["responses", "chat", "json"])
+async def test_model_check_runs_on_existing_providers(
+    profile: ModelProfile, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """数据库、摘要与 StarRocks 环境均未设置：检查只用模型 Key 与一次工具往返。"""
+    for name in (DB_ENV, KEY_ENV, SR_ENV):
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setenv(profile.api_key_ref.removeprefix("env:"), "fake-check-key")
+    endpoint = ChatEndpoint(
+        [_check_call(profile), _text(profile, json.dumps(CHECK_ADVICE, ensure_ascii=False))]
+    )
+
+    await runtime.check_model(_check_config(profile), transport=endpoint.transport)
+
+    assert len(endpoint.requests) == 2
+    assert endpoint.requests[0].headers["authorization"] == "Bearer fake-check-key"
+
+
+@pytest.mark.parametrize(
+    ("status", "reason"), [(401, "auth_failed"), (429, "rate_limited"), (500, "upstream_error")]
+)
+async def test_model_check_classifies_openai_client_status_errors(
+    monkeypatch: pytest.MonkeyPatch, status: int, reason: str
+) -> None:
+    monkeypatch.setenv(GEMINI.api_key_ref.removeprefix("env:"), "fake-check-key")
+    endpoint = ChatEndpoint([httpx2.Response(status, json={"error": {"message": "upstream"}})])
+
+    with pytest.raises(runtime.ModelCheckError) as raised:
+        await runtime.check_model(_check_config(GEMINI), transport=endpoint.transport)
+
+    assert raised.value.reason == reason and str(raised.value) == reason
+    assert len(endpoint.requests) == 1  # 不重试
 
 
 # ---- 启动失败：不对外服务，逆序释放 ----------------------------------------------------
