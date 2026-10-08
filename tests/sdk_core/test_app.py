@@ -750,8 +750,9 @@ def all_logs() -> Iterator[list[logging.LogRecord]]:
 _STAGE = re.compile(
     r"turn=(\S+) stage=(\w+) reason=([\w-]+) elapsed_ms=\d+"
     r"(?: error_kind=[a-z_]+ http_status=[\d-]+(?: reject_reason=[a-z_]+)?)?"
-    r"(?: tool_calls=\d+ executed=\d+ truncated=\d+ rejected=\d+)?"
     r"(?: tool_error=[a-z_]+)?(?: answer_reject=[a-z_]+)?"
+    r"(?: tool_calls=\d+ executed=\d+ truncated=\d+ rejected=\d+)?"
+    r"(?: limit_rescue=failed)?"
 )
 
 
@@ -1359,6 +1360,88 @@ async def test_max_turns_gets_one_tool_free_final_answer_from_visible_evidence(e
     assert env.tool_ids() == [TOTAL_TOOL, TOTAL_TOOL]
     assert len(env.scripts.calls[message]) == 3
     assert await env.state() == ("active", 1)
+
+
+async def test_max_turns_final_prompt_lists_all_current_query_evidence(env: Env) -> None:
+    final_instructions: list[str] = []
+
+    def finish(call: ModelCall) -> list[Any]:
+        final_instructions.append(call.instructions)
+        return answer(evidence_in(call), "只根据已有查询结果回答")
+
+    message = env.scripts.add(
+        "先汇总再做两次查询后收尾",
+        tool_call("order_total", region="east"),
+        tool_call("run_query", region="east"),
+        tool_call("run_query", region="west"),
+        finish,
+    )
+    ctx = _with_turns(env.ctx(turn="query-prompt", max_tool_calls=3), 3)
+    result = await env.app.run_turn(ctx, message)
+    ids = result.answer.evidence_ids
+    assert len(ids) == 3 and len(set(ids)) == 3
+    assert len(final_instructions) == 1
+    assert "本轮查询证据编号" in final_instructions[0]
+    assert "、".join(ids[1:]) in final_instructions[0]
+    assert ids[0] not in final_instructions[0]
+    assert env.tool_ids() == [TOTAL_TOOL, QUERY_TOOL, QUERY_TOOL]
+
+
+async def test_max_turns_partial_query_citation_keeps_rejection_and_rescue_counts(
+    env: Env,
+) -> None:
+    env.adapter.truncated = True
+
+    def finish(call: ModelCall) -> list[Any]:
+        ids = evidence_in(call)
+        assert len(ids) == 2
+        return answer(ids[:1], MODEL_SECRET)
+
+    message = env.scripts.add(
+        "部分引用 " + SYNTHETIC_SQL,
+        tool_call("run_query", region="east"),
+        tool_call("run_query", region="west"),
+        finish,
+    )
+    ctx = _with_turns(env.ctx(turn="rescue-partial", max_tool_calls=2), 2)
+    with all_logs() as records, pytest.raises(TurnError) as failed:
+        await env.app.run_turn(ctx, message)
+
+    output = "\n".join(r.getMessage() for r in records if r.name == "xiaowei.app")
+    assert failed.value.reason == "answer_rejected"
+    assert "reason=answer_rejected" in output and "answer_reject=uncited_query" in output
+    assert "limit_rescue=failed" in output
+    assert "tool_calls=2 executed=2 truncated=2 rejected=0" in output
+    assert all(_STAGE.fullmatch(r.getMessage()) for r in records if r.name == "xiaowei.app")
+    assert MODEL_SECRET not in "\n".join(r.getMessage() for r in records)
+    assert SYNTHETIC_SQL not in "\n".join(r.getMessage() for r in records)
+    assert env.tool_ids() == [QUERY_TOOL, QUERY_TOOL] and await env.stored() == []
+
+
+async def test_max_turns_tool_call_during_final_keeps_model_error_and_rescue_counts(
+    env: Env,
+) -> None:
+    env.adapter.truncated = True
+    message = env.scripts.add(
+        "收尾时仍调工具 " + SYNTHETIC_SQL,
+        tool_call("run_query", region="east"),
+        lambda call: [
+            function_call("run_query", {"region": MODEL_SECRET}, call_id="final-unavailable")
+        ],
+    )
+    ctx = _with_turns(env.ctx(turn="rescue-extra-tool", max_tool_calls=1), 1)
+    with all_logs() as records, pytest.raises(TurnError) as failed:
+        await env.app.run_turn(ctx, message)
+
+    output = "\n".join(r.getMessage() for r in records if r.name == "xiaowei.app")
+    assert failed.value.reason == "model_failed"
+    assert "reason=model_failed" in output and "error_kind=invalid_output" in output
+    assert "limit_rescue=failed" in output
+    assert "tool_calls=1 executed=1 truncated=1 rejected=0" in output
+    assert all(_STAGE.fullmatch(r.getMessage()) for r in records if r.name == "xiaowei.app")
+    assert MODEL_SECRET not in "\n".join(r.getMessage() for r in records)
+    assert SYNTHETIC_SQL not in "\n".join(r.getMessage() for r in records)
+    assert env.tool_ids() == [QUERY_TOOL] and await env.stored() == []
 
 
 async def test_max_turns_final_answer_still_rejects_forged_evidence(env: Env) -> None:

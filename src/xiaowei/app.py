@@ -424,8 +424,16 @@ class Application:
         ) -> RunErrorHandlerResult | None:
             # SDK 的公开错误处理器只接收最终值；另用一次无工具的 SDK Runner 调用让模型
             # 根据已获准的模型历史收尾。两次运行都受外层整轮期限约束，工具与证据不会重放。
-            if not self._governance.turn_runs(ctx.identity).produced:
+            runs = self._governance.turn_runs(ctx.identity)
+            if not runs.produced:
                 return None
+            self._governance.note_limit_rescue(ctx.identity)
+            query_ids = [e for tool_id, e in runs.produced if tool_id in self._queries]
+            query_instruction = (
+                f"本轮查询证据编号：{'、'.join(query_ids)}。最终回答必须引用全部这些编号。"
+                if query_ids
+                else ""
+            )
             final_agent = agent.clone(
                 tools=[],
                 mcp_servers=[],
@@ -433,7 +441,7 @@ class Application:
                 instructions=(
                     f"{agent.instructions}\n本轮步骤已用完；只基于上面已有的证据，"
                     "现在给出最终回答，不再调用工具。必须引用实际可见的 evidence_id，"
-                    "并说明结果可能不完整。"
+                    f"并说明结果可能不完整。{query_instruction}"
                 ),
             )
             final = await Runner.run(
@@ -670,15 +678,6 @@ def _stage(
                 if isinstance(reject_reason, ResponseRejectReason)
                 else ResponseRejectReason.OTHER.value,
             )
-    elif reason == "turn_limit":
-        recorded = runs or TurnRuns()
-        message += " tool_calls=%d executed=%d truncated=%d rejected=%d"
-        fields += (
-            len(recorded.started) + recorded.rejected,
-            len(recorded.produced),
-            recorded.truncated,
-            recorded.rejected,
-        )
     elif reason == "tool_failed":
         tool_code = detail.tool_error if detail is not None else None
         allowed = {item.value for item in StarRocksErrorCode} | {"mcp_error", "other"}
@@ -688,4 +687,15 @@ def _stage(
         answer_code = detail.answer_reject if detail is not None else None
         message += " answer_reject=%s"
         fields += (answer_code.value if isinstance(answer_code, AnswerRejectCode) else "other",)
+    recorded = runs or TurnRuns()
+    if reason == "turn_limit" or (stage == "failed" and recorded.limit_rescue_started):
+        message += " tool_calls=%d executed=%d truncated=%d rejected=%d"
+        fields += (
+            len(recorded.started) + recorded.rejected,
+            len(recorded.produced),
+            recorded.truncated,
+            recorded.rejected,
+        )
+    if stage == "failed" and recorded.limit_rescue_started:
+        message += " limit_rescue=failed"
     logger.info(message, *fields)
