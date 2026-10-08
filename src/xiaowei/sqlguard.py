@@ -36,9 +36,10 @@
 ``QueryRejectionCode`` 与固定说明，不含 SQL、标识符、字面量或解析器原文。
 
 拒绝边界：sqlglot 的输入错误（``SqlglotError``）与过深嵌套（``RecursionError``）是预期的输入
-失败，映射为固定原因码；拒绝总在下层 ``except`` 块结束后才抛出，``__cause__`` 与
-``__context__`` 都为空，不挂带输入片段的下层异常。其余异常是程序缺陷，照常传播。原始 SQL 只
-交给分词器，不交给解析器：解析器用它生成诊断和 ``Command`` 回退日志。
+失败；解析器对畸形函数抛出的其他 ``Exception`` 同样映射为不可解析。拒绝总在下层 ``except``
+块结束后才抛出，``__cause__`` 与 ``__context__`` 都为空，不挂带输入片段的下层异常。解析
+以外的程序缺陷照常传播。原始 SQL 只交给分词器，不交给解析器：解析器用它生成诊断和
+``Command`` 回退日志。
 """
 
 from __future__ import annotations
@@ -324,6 +325,11 @@ def _utf8_size(sql: str) -> int:
 
 # ---- 1. 词元与解析 ---------------------------------------------------------------------------
 
+_DATE_CALLS: Final = frozenset(
+    {"DATE_ADD", "DATE_SUB", "ADDDATE", "SUBDATE", "DATE_TRUNC", "DATEDIFF"}
+)
+_FUNCTION_NAME_TOKENS: Final = frozenset({TokenType.VAR, TokenType.IDENTIFIER})
+
 
 def _parse(sql: str) -> exp.Query:
     tokens: list[Token] = _attempt(lambda: _DIALECT.tokenize(sql), _Code.UNPARSABLE)
@@ -340,17 +346,48 @@ def _parse(sql: str) -> exp.Query:
         _reject(_Code.UNSUPPORTED_SYNTAX)
     # sqlglot 把 DATE_DIFF('DAY', ...) 与 DATEDIFF(...) 合成同一种节点；只开放后者。
     if any(
-        token.token_type is TokenType.VAR
+        token.token_type in _FUNCTION_NAME_TOKENS
         and token.text.upper() == "DATE_DIFF"
         and next_token.token_type is TokenType.L_PAREN
         for token, next_token in pairwise(tokens)
     ):
         _reject(_Code.FUNCTION_NOT_ALLOWED)
+    _check_date_arity(tokens)
     parser = _DIALECT.parser(error_level=ErrorLevel.RAISE)
-    statements = _attempt(lambda: parser.parse(tokens, ""), _Code.UNPARSABLE)
+    parse_error: QueryRejectionCode | None = None
+    try:
+        statements = parser.parse(tokens, "")
+    except RecursionError:
+        parse_error = _Code.UNSUPPORTED_SYNTAX
+    except Exception:
+        # 锁定版 sqlglot 对部分不完整函数会抛 AttributeError；解析器内部错误也不得越过输入边界。
+        parse_error = _Code.UNPARSABLE
+    if parse_error is not None:
+        _reject(parse_error)
     if len(statements) != 1 or statements[0] is None:
         _reject(_Code.MULTIPLE_STATEMENTS)
     return _query_root(statements[0])
+
+
+def _check_date_arity(tokens: list[Token]) -> None:
+    """在 sqlglot 丢弃多余实参前，数指定日期函数最外层的实参。"""
+    counts: list[int | None] = []
+    for index, token in enumerate(tokens):
+        if token.token_type is TokenType.L_PAREN:
+            previous = tokens[index - 1] if index else None
+            date_call = (
+                previous is not None
+                and previous.token_type in _FUNCTION_NAME_TOKENS
+                and previous.text.upper() in _DATE_CALLS
+            )
+            counts.append(1 if date_call else None)
+        elif token.token_type is TokenType.COMMA:
+            if counts and counts[-1] is not None:
+                counts[-1] += 1
+        elif token.token_type is TokenType.R_PAREN and counts:
+            count = counts.pop()
+            if count is not None and count != 2:
+                _reject(_Code.UNSUPPORTED_SYNTAX)
 
 
 def _query_root(root: object) -> exp.Query:

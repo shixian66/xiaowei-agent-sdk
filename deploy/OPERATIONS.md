@@ -238,6 +238,11 @@ docker compose --env-file .env ps
 `query_mem_limit_bytes`、`max_rows`、`max_value_bytes` 保持原值：前者保护公司集群，后两者控制单次
 回答的体量。
 
+同一目标的后台结构刷新由 `SchemaCache` 合并为一次；对象、列、ID 读取和权限探测串行进行，
+任何时刻最多占用该目标的 1 个连接槽位。刷新与前台查询共用 `pool_size` 个槽位，按进入
+信号量等待队列的顺序竞争，没有为前台预留槽位；等槽位超过 `connect_timeout_seconds`
+且本次工具调用尚未发出 SQL 时，前台会收到固定的“系统繁忙，可稍后再试”。
+
 **函数名单按解析后的内部名填写。** SQLGuard 先把 SQL 解析再检查函数名，部分常用写法会被归一：
 
 | 写法 | 名单中需要的名字 |
@@ -256,6 +261,8 @@ docker compose --env-file .env ps
 只写成平时习惯的名字（如 `IFNULL`、`DATE_FORMAT`）不会放行。模板名单经测试覆盖常用聚合、数值、
 条件、日期、字符串和窗口函数。日期加减只接受整数常量区间，单位限 `SECOND`、`MINUTE`、
 `HOUR`、`DAY`、`WEEK`、`MONTH`、`YEAR`；动态区间、未知单位和子查询在 I/O 前拒绝。
+`DATE_ADD`、`DATE_SUB`、`ADDDATE`、`SUBDATE`、`DATE_TRUNC`、`DATEDIFF` 都只接受两个
+顶层实参，缺少或多出实参会在执行前拒绝，不会静默丢弃。
 `DATE_DIFF` 不因允许 `DATEDIFF` 而自动放行；两种写法须分别验证其语义。
 
 ## 普通升级与回退（schema 不变）

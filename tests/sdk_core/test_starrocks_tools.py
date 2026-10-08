@@ -635,6 +635,37 @@ async def test_rejected_date_intervals_never_reach_starrocks(
 @pytest.mark.parametrize(
     ("sql", "code"),
     [
+        ("SELECT DATE_ADD(region, INTERVAL 1 DAY, 5) AS d FROM sales", "unsupported_syntax"),
+        ("SELECT DATEDIFF('day', region, '2026-01-01') AS d FROM sales", "unsupported_syntax"),
+        ("SELECT DATE_ADD(region) AS d FROM sales", "unsupported_syntax"),
+        ("SELECT DATE_SUB(region, ) AS d FROM sales", "unparsable"),
+    ],
+)
+async def test_invalid_date_call_is_rejected_before_starrocks_connection(
+    postgres_url: URL, monkeypatch: pytest.MonkeyPatch, sql: str, code: str
+) -> None:
+    policy = SR.policy.model_copy(
+        update={
+            "allowed_functions": SR.policy.allowed_functions | {"DATE_ADD", "DATE_SUB", "DATEDIFF"}
+        }
+    )
+    target = SR.model_copy(update={"policy": policy})
+    async with assembled(postgres_url, monkeypatch, driver(SALES), target=target) as env:
+        message = env.scripts.add(
+            "日期查询",
+            tool_call("run_readonly_query", cluster=SR.target_id, sql=sql),
+            clarify(),
+        )
+        await env.app.run_turn(env.ctx(), message)
+        (rejected,) = tool_outputs(env.scripts.calls[message][1])
+        assert code in rejected and "未执行" in rejected
+        assert sql not in rejected
+        assert env.drv.attempts == 0
+
+
+@pytest.mark.parametrize(
+    ("sql", "code"),
+    [
         ("SELECT secret FROM sales", "column_not_allowed"),
         ("SELECT COUNT(sales.*) AS n FROM sales", "star_projection"),
         ("SELECT SUM(total) FROM sales", "unnamed_column"),

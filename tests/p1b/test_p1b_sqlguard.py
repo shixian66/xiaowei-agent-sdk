@@ -22,6 +22,7 @@ from xiaowei.sqlguard import (
     QueryPolicy,
     QueryRejectedError,
     QueryRejectionCode,
+    audit_references,
     guard_explain_query,
     guard_readonly_query,
 )
@@ -71,6 +72,8 @@ DATE_POLICY = narrowed(
         ("DATE_ADD(dt, INTERVAL 1 MONTH)", "DATE_ADD(`sales`.`dt`, INTERVAL 1 MONTH)"),
         ("DATE_ADD(dt, INTERVAL 1 WEEK)", "DATE_ADD(`sales`.`dt`, INTERVAL 7 DAY)"),
         ("DATE_SUB(dt, INTERVAL -2 WEEK)", "DATE_SUB(`sales`.`dt`, INTERVAL -14 DAY)"),
+        ("ADDDATE(dt, 1)", "DATE_ADD(`sales`.`dt`, INTERVAL 1 DAY)"),
+        ("SUBDATE(dt, 1)", "DATE_SUB(`sales`.`dt`, INTERVAL 1 DAY)"),
         ("DATEDIFF(dt, '2026-01-01')", "DATEDIFF(`sales`.`dt`, '2026-01-01')"),
         ("DATE_TRUNC('day', dt)", "DATE_TRUNC('DAY', `sales`.`dt`)"),
     ],
@@ -111,14 +114,81 @@ def test_date_function_still_requires_explicit_allowlist() -> None:
 
 
 def test_date_diff_spelling_is_not_implicitly_allowed_as_datediff() -> None:
-    assert (
-        rejection("SELECT DATE_DIFF('DAY', dt, dt) AS d FROM sales", DATE_POLICY).code
-        == Code.FUNCTION_NOT_ALLOWED
-    )
+    for spelling in ("DATE_DIFF", "`DATE_DIFF`"):
+        assert (
+            rejection(f"SELECT {spelling}('DAY', dt, dt) AS d FROM sales", DATE_POLICY).code
+            == Code.FUNCTION_NOT_ALLOWED
+        )
     assert (
         "DATE_DIFF(x)"
         in guard("SELECT 'DATE_DIFF(x)' AS literal FROM sales", DATE_POLICY).normalized_sql
     )
+
+
+@pytest.mark.parametrize(
+    "expression",
+    [
+        "DATEDIFF('day', dt, '2026-01-01')",
+        "DATEDIFF(dt, '2026-01-01', dt)",
+        "DATEDIFF('day', dt, '2026-01-01', 4)",
+        "DATE_ADD(dt, INTERVAL 1 DAY, 5)",
+        "`DATE_ADD`(dt, INTERVAL 1 DAY, 5)",
+        "DATE_SUB(dt, INTERVAL 1 DAY, dt)",
+        "ADDDATE(dt, 1, 2)",
+        "SUBDATE(dt, 1, 2)",
+        "DATE_TRUNC('day', dt, 'x')",
+        "DATE_ADD(dt)",
+        "DATE_SUB(dt)",
+    ],
+)
+def test_date_functions_reject_wrong_top_level_arity(expression: str) -> None:
+    error = rejection(f"SELECT {expression} AS d FROM sales", DATE_POLICY)
+    assert error.code == Code.UNSUPPORTED_SYNTAX
+    assert error.__cause__ is None and error.__context__ is None
+
+
+@pytest.mark.parametrize("expression", ["DATE_ADD(dt, )", "DATE_SUB(dt, )"])
+def test_date_parser_unexpected_errors_become_unparsable(expression: str) -> None:
+    error = rejection(f"SELECT {expression} AS d FROM sales", DATE_POLICY)
+    assert error.code == Code.UNPARSABLE
+    assert error.__cause__ is None and error.__context__ is None
+
+
+def test_date_arity_ignores_nested_function_and_subquery_commas() -> None:
+    for expression in (
+        "DATE_ADD(COALESCE(dt, dt), INTERVAL 1 DAY)",
+        "DATE_ADD(DATE_SUB(dt, INTERVAL 1 DAY), INTERVAL 2 DAY)",
+        "DATEDIFF(COALESCE(dt, dt), dt)",
+    ):
+        assert "AS `d`" in guard(f"SELECT {expression} AS d FROM sales", DATE_POLICY).normalized_sql
+
+    policy = DATE_POLICY.model_copy(
+        update={"allowed_functions": DATE_POLICY.allowed_functions | {"MIN"}}
+    )
+    subquery = (
+        "SELECT DATE_ADD((SELECT COALESCE(MAX(dt), MIN(dt)) FROM sales), "
+        "INTERVAL 1 DAY) AS d FROM sales"
+    )
+    assert "DATE_ADD((SELECT" in guard(subquery, policy).normalized_sql
+    assert (
+        "DATE_ADD(1, 2, 3)"
+        in guard("SELECT 'DATE_ADD(1, 2, 3)' AS text FROM sales", DATE_POLICY).normalized_sql
+    )
+
+
+def test_date_arity_applies_to_explain_and_audit_paths() -> None:
+    invalid = "SELECT DATE_ADD(dt, INTERVAL 1 DAY, 5) AS d FROM sales"
+    with pytest.raises(QueryRejectedError) as explain:
+        guard_explain_query(invalid, DATE_POLICY)
+    with pytest.raises(QueryRejectedError) as audit:
+        audit_references(invalid, DATE_POLICY, "shop")
+    assert explain.value.code == audit.value.code == Code.UNSUPPORTED_SYNTAX
+
+    valid = "SELECT DATE_ADD(dt, INTERVAL 1 DAY) AS d FROM sales"
+    assert "DATE_ADD" in guard_explain_query(valid, DATE_POLICY).normalized_sql
+    objects, columns = audit_references(valid, DATE_POLICY, "shop")
+    assert objects == {("shop", "sales")}
+    assert columns == {("shop", "sales", "dt")}
 
 
 # ---- 正例 ----------------------------------------------------------------------------------
