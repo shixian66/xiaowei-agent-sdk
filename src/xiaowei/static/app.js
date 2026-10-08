@@ -42,10 +42,11 @@
     const box = el("div", "fact");
     const details = el("details", "evidence");
     details.append(el("summary", "", "查看依据与查询信息"));
-    const meta = [`来源 ${fact.tool_id}`, `目标 ${fact.target_id}`, `采集于 ${fact.captured_at}`];
+    box.append(el("p", "meta", `采集于 ${fact.captured_at}`));
+    const meta = [`来源 ${fact.tool_id}`, `目标 ${fact.target_id}`];
     details.append(el("p", "meta", `[${fact.evidence_id}] ${meta.join(" · ")}`));
     if (fact.truncated) box.append(el("p", "note", "结果已截断，当前显示的不是全部结果"));
-    if (fact.note) details.append(el("p", "note", `说明：${fact.note}`));
+    if (fact.note) box.append(el("p", "note", `说明：${fact.note}`));
     for (const [key, value] of Object.entries(fact.metadata || {})) {
       // 查询/续取信息折叠；其余获准字段完整显示，嵌套值由服务端编码为 JSON 文本。
       const technical = ["sql", "next_cursor", "row_count", "elapsed_ms"].includes(key);

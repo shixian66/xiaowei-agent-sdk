@@ -39,6 +39,8 @@ from tests.sdk_core.test_channel_service import Env
 from tests.sdk_core.test_channel_service import env as env  # pytest fixture
 from tests.sdk_core.test_web import HOSTILE, ORIGIN, config
 
+from xiaowei.governance import Projection
+from xiaowei.starrocks_tools import DATABASE_NOTE, DDL_NOTE, LAYOUT_NOTE
 from xiaowei.web import COOKIE, create_web_app
 
 pytestmark = [pytest.mark.loopback, pytest.mark.browser]
@@ -176,7 +178,8 @@ async def test_compact_facts_and_multiline_analysis(
         await settled(page, 0, "completed")
         rendered = await page.evaluate(f"{item(0)}.innerText")
         assert "已回复" in rendered and "已完成" not in rendered
-        assert "第一行" not in rendered and "长期重复的固定说明" not in rendered
+        assert "第一行" not in rendered and "长期重复的固定说明" in rendered
+        assert "采集于 2026-09-29T08:00:00" in rendered
         assert '"rows":' not in rendered
         assert await table_rows(page, 0) == [2]
         assert (
@@ -191,6 +194,123 @@ async def test_compact_facts_and_multiline_analysis(
         expanded = await page.evaluate(f"{item(0)}.innerText")
         assert "第一行" in expanded and expanded.count("第二行") == 1
         assert await page.evaluate("document.scripts.length") == 1
+
+
+async def test_historical_ddl_keeps_capture_time_and_warning_visible(
+    env: Env, chrome_binary: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from tests.p1b.test_starrocks_ddl import DDL
+
+    catalog = env.evidence._catalog
+    policy = catalog._policies["synthetic.region"]
+    web = policy.projections["web"]
+    monkeypatch.setitem(
+        catalog._policies,
+        "synthetic.region",
+        replace(
+            policy,
+            fact_note=DDL_NOTE,
+            projections={
+                **policy.projections,
+                "web": Projection((*web.fields, "sql", "row_count", "elapsed_ms"), web.max_bytes),
+            },
+        ),
+    )
+    sql = "SHOW CREATE TABLE `shop`.`orders`"
+    monkeypatch.setattr(
+        synthetic_tools,
+        "payload",
+        lambda *args: {
+            "region": "shop.orders",
+            "total": 1,
+            "rows": [{"ddl": DDL}],
+            "sql": sql,
+            "row_count": 1,
+            "elapsed_ms": 17,
+        },
+    )
+    first = env.scripts.add("查 orders 的 DDL", tool_call("order_total", region="east"), cite(""))
+    middle = env.scripts.add("先等等", clarify("请继续"))
+    third = env.scripts.add("刚才那张表的 DDL 再发一下", cite(""))
+    app = create_web_app(env.service, config())
+    async with serving(app, port=18501), launch(chrome_binary) as chrome:
+        page = await chrome.page()
+        await page.navigate("http://127.0.0.1:18501/")
+        for index, message in enumerate((first, middle, third)):
+            await send(page, message)
+            await settled(page, index, "completed")
+        assert len(env.adapter.calls) == 1  # 第三轮只引用历史证据，没有重新读取表。
+        assert await table_rows(page, 2) == [1]
+        assert await page.evaluate(f"{item(2)}.querySelector('td').textContent") == DDL
+        assert await page.evaluate(f"{item(2)}.querySelector('details.evidence').open") is False
+        rendered = await page.evaluate(f"{item(2)}.innerText")
+        assert "采集于 2026-09-29T08:00:00" in rendered
+        assert "历史回放核对采集时的列仍存在且类型不变" in rendered
+        assert sql not in rendered and "row_count: 1" not in rendered
+        assert "elapsed_ms: 17" not in rendered and '"rows":' not in rendered
+        await page.evaluate(f"{item(2)}.querySelector('details.evidence summary').click()")
+        expanded = await page.evaluate(f"{item(2)}.innerText")
+        assert sql in expanded and "row_count: 1" in expanded
+        assert "elapsed_ms: 17" in expanded and '"rows":' in expanded
+
+
+@pytest.mark.parametrize(
+    ("note", "row", "warning"),
+    [
+        (DATABASE_NOTE, {"database": "shop"}, "不等同于管理员看到的全部数据库"),
+        (LAYOUT_NOTE, {"buckets": 0}, "不能据此确认实际桶数"),
+    ],
+    ids=["database", "layout"],
+)
+async def test_database_and_layout_warnings_are_visible_by_default(
+    env: Env,
+    chrome_binary: str,
+    monkeypatch: pytest.MonkeyPatch,
+    note: str,
+    row: dict[str, object],
+    warning: str,
+) -> None:
+    catalog = env.evidence._catalog
+    policy = catalog._policies["synthetic.region"]
+    web = policy.projections["web"]
+    monkeypatch.setitem(
+        catalog._policies,
+        "synthetic.region",
+        replace(
+            policy,
+            fact_note=note,
+            projections={
+                **policy.projections,
+                "web": Projection((*web.fields, "sql", "next_cursor"), web.max_bytes),
+            },
+        ),
+    )
+    sql, cursor = "SELECT catalog_marker", "opaque-page-token"
+    monkeypatch.setattr(
+        synthetic_tools,
+        "payload",
+        lambda *args: {
+            "region": "shop",
+            "total": 1,
+            "rows": [row],
+            "sql": sql,
+            "next_cursor": cursor,
+        },
+    )
+    app = create_web_app(env.service, config())
+    message = env.scripts.add("看目录或布局", tool_call("order_total", region="east"), cite(""))
+    async with serving(app, port=18501), launch(chrome_binary) as chrome:
+        page = await chrome.page()
+        await page.navigate("http://127.0.0.1:18501/")
+        await send(page, message)
+        await settled(page, 0, "completed")
+        assert await page.evaluate(f"{item(0)}.querySelector('details.evidence').open") is False
+        rendered = await page.evaluate(f"{item(0)}.innerText")
+        assert warning in rendered and "采集于 2026-09-29T08:00:00" in rendered
+        assert sql not in rendered and cursor not in rendered and '"rows":' not in rendered
+        await page.evaluate(f"{item(0)}.querySelector('details.evidence summary').click()")
+        expanded = await page.evaluate(f"{item(0)}.innerText")
+        assert sql in expanded and cursor in expanded and '"rows":' in expanded
 
 
 async def test_multiline_clarification_and_sql_advice_are_readable_in_web(
@@ -221,7 +341,11 @@ async def test_compact_preserves_exact_values(
 ) -> None:
     big = 9007199254740993
     values = {
-        "id": big, "negative": -big, "missing": None, "empty": "", "active": True,
+        "id": big,
+        "negative": -big,
+        "missing": None,
+        "empty": "",
+        "active": True,
         "literal_null": "NULL",
     }
     payload = {
