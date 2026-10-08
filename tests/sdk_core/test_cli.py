@@ -345,9 +345,11 @@ def test_container_config_check_accepts_any_ip_bind_without_listing_origins(
 
 
 def _template_file(tmp_path: Path) -> Path:
-    """未替换的发行模板（含飞书片段），环境变量全部已设置：只有模板占位符这一个问题。"""
+    """带旧模型与飞书占位符的配置，环境变量全部已设置。"""
     file = tmp_path / "xiaowei.json"
-    file.write_text(json.dumps(example_with_feishu(), ensure_ascii=False), encoding="utf-8")
+    values = example_with_feishu()
+    values["model"]["model"] = "replace-with-approved-vertex-model"
+    file.write_text(json.dumps(values, ensure_ascii=False), encoding="utf-8")
     return file
 
 
