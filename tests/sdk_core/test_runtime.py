@@ -1793,6 +1793,10 @@ COMMON_EXPRESSIONS = (
     "WEEK(c)",
     "NOW()",
     "CURDATE()",
+    "DATE_SUB(CURDATE(), INTERVAL 7 DAY)",
+    "DATE_ADD(NOW(), INTERVAL 1 DAY)",
+    "DATEDIFF(c, b)",
+    "DATE_TRUNC('day', c)",
     "UNIX_TIMESTAMP(c)",
     "FROM_UNIXTIME(a)",
     "CONCAT(a, b)",
@@ -1832,25 +1836,14 @@ def test_template_functions_accept_common_starrocks_spellings(expression: str) -
     guard_readonly_query(f"SELECT {expression} AS x FROM shop.t", _template_policy())  # noqa: S608
 
 
-@pytest.mark.parametrize(
-    ("expression", "name"),
-    [
-        ("DATE_SUB(CURDATE(), INTERVAL 7 DAY)", "DATE_SUB"),
-        ("DATE_ADD(NOW(), INTERVAL 1 DAY)", "DATE_ADD"),
-        ("DATEDIFF(c, b)", "DATEDIFF"),
-        ("DATE_TRUNC('day', c)", "TIMESTAMP_TRUNC"),
-    ],
-)
-def test_interval_date_functions_cannot_be_opened_by_configuration(
-    expression: str, name: str
-) -> None:
-    """OPERATIONS 写明的已知限制：即使把函数名加进名单，日期加减、相差天数与截断仍由 SQLGuard
-    按不支持的语法拒绝。放开后须同步修改文档中的说明。"""
+def test_template_date_functions_remain_governed_by_allowlist() -> None:
     policy = _template_policy()
-    widened = policy.model_copy(update={"allowed_functions": policy.allowed_functions | {name}})
+    narrowed = policy.model_copy(
+        update={"allowed_functions": policy.allowed_functions - {"DATE_SUB"}}
+    )
     with pytest.raises(QueryRejectedError) as raised:
-        guard_readonly_query(f"SELECT {expression} AS x FROM shop.t", widened)  # noqa: S608
-    assert raised.value.code == QueryRejectionCode.UNSUPPORTED_SYNTAX
+        guard_readonly_query("SELECT DATE_SUB(c, INTERVAL 7 DAY) AS x FROM shop.t", narrowed)
+    assert raised.value.code == QueryRejectionCode.FUNCTION_NOT_ALLOWED
 
 
 def test_example_feishu_group_section_is_valid(tmp_path: Path) -> None:

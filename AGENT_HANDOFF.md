@@ -1,6 +1,6 @@
 # 小维：当前交接
 
-> 更新：2026-10-08，Asia/Shanghai。这里只记录当前事实、证据与下一项工作；设计见 [ARCHITECTURE.md](ARCHITECTURE.md)，路线见 [DEVELOPMENT_PLAN.md](DEVELOPMENT_PLAN.md)，协作规则见 [AGENTS.md](AGENTS.md)。
+> 更新：2026-10-09，Asia/Shanghai。这里只记录当前事实、证据与下一项工作；设计见 [ARCHITECTURE.md](ARCHITECTURE.md)，路线见 [DEVELOPMENT_PLAN.md](DEVELOPMENT_PLAN.md)，协作规则见 [AGENTS.md](AGENTS.md)。
 
 **OpenAI Agents SDK 负责 Agent Loop；小维负责权限、受治理工具执行、证据真实性和数据边界。**
 
@@ -9,13 +9,13 @@
 | 项目 | 已核对事实 |
 | --- | --- |
 | 仓库 | [shixian66/xiaowei-agent-sdk](https://github.com/shixian66/xiaowei-agent-sdk) |
-| 本地目录 / 分支 | `/Users/kloenguyen/.codex/worktrees/gemini-vertex-normal-output/agent-SDK` / `codex/runtime-failure-recovery`；从 `origin/main` 的 `d708d1ac6de68336420ec7cc8b710a94d3d79ed6` 建立，接手先核对 HEAD 与未提交差异 |
+| 本地目录 / 分支 | `/Users/kloenguyen/.codex/worktrees/pr-b-sql-starrocks/agent-SDK` / `codex/pr-b-sql-starrocks`；从 `origin/main` 的 `517ee4944a81db421bc77d553ddc3f10a3cf42ef` 建立，接手先核对 HEAD 与未提交差异 |
 | M5 历史起点 | `372c381f44ecfa1fa53961f137d0058033cbd805`；不是远端当前 main 的核验结论 |
-| 本轮审查版本 | PR A 基线为 `d708d1ac6de68336420ec7cc8b710a94d3d79ed6`；源码修复 `7d46d2292b93c2cf405e35d17b47163d9f1a5c45` 已按用户提供的独立复审结论通过。后续配置样例差异须单独核对，旧审查不覆盖它 |
-| 当前阶段 | PR A 源码修复已获复审通过；随后按用户提供的公司 `xiaowei.json` 同步发行样例的非密钥值，用户确认公开仓库可原样发布这些值。该配置的发行镜像与公司环境验收尚未完成 |
+| 本轮审查版本 | PR B 基线为 `517ee4944a81db421bc77d553ddc3f10a3cf42ef`；首个提交 `eea04b16f2fd14f104554701f1ab8a09d27acb8b` 的独立复审指出日期函数多余实参被解析器丢弃，本分支已修订，待新 SHA 复审 |
+| 当前阶段 | PR A 已合入 main；用户报告公司环境运行 `517ee4944a81db421bc77d553ddc3f10a3cf42ef` 镜像且容器健康。PR B 复审修订已完成本地离线验证，未推送、发布或部署 |
 | 当前源码与依赖 | 新包 `src/xiaowei/` 仍为应用表 v6。V1-A 新增 `vertex_model.py`（SDK 公开 `Model` 的非流式 Vertex 适配器），`model_api` 增加 `provider="vertex"` 与受控 transport 的认证头/成功校验参数；显式声明已直接导入的 `httpx2>=2.12,<3`（锁定 2.13.1 不变）。V1-B 使 `PolicySession` 随函数调用保存并回放 `provider_data.thought_signature`（单字段白名单，其余供应商字段丢弃），`app.safe_run_config()` 成为应用与 `model check` 共用的运行配置。V2 新增 `runtime.check_model` / `validate_model_config` 与 CLI `model check`。C2 把主模板改为一个 Vertex Profile、一个目标；占位符清单新增 Vertex 模型标记，C2 前模板的标记作为历史值继续拒绝。发布归档仍只含白名单文件 |
 | 新产品入口 | 原生主线仍为 `xiaowei`（与 `python -m xiaowei` 相同）的 `serve`、`config check`、`model check`、`storage init/upgrade/cleanup`、`requests resend`；`listen_host` 可为任意地址（默认 `127.0.0.1`）。镜像固定入口复用同一 CLI，在容器内绑定 `0.0.0.0`，宿主机发布地址由 `XW_WEB_BIND_ADDRESS`（默认 `0.0.0.0`）决定。真实模型、用户 StarRocks 与真实飞书未参与 P3-A 验证；旧 CLI/Compose 不是产品入口 |
-| 本次工作范围 | PR A：失败日志补固定原因码与治理计数；提示词限制截断重查、优先慢查询工具、单集群直接使用与追问证据；已有证据且步数耗尽时一次无工具收尾。追加同步公司配置样例及其使用说明，环境变量仍只作凭据引用。Evidence 拒收后自动改写本轮不实现；PR B 的 SQL 日期区间、超长值和连接槽位改动留到 A 线上观察后。不调用真实 Vertex、飞书或公司 StarRocks，不部署 |
+| 本次工作范围 | PR B：支持获准的常量日期区间写法；普通查询超长单值保留有界前缀、截短标记与后续行，证据范围摘要升 v7；等 StarRocks 连接槽位超时且本次调用零 SQL 时给模型固定繁忙提示并退还执行预算。权限、Evidence、DDL 完整性及已发 SQL 后失败规则不放宽；不调用真实 Vertex、飞书或公司 StarRocks，不部署 |
 | 外部操作 | 主线曾获用户授权用合成数据调用 Gemini API（见第 3 节），验证后本机凭据文件已删除，用户负责作废该密钥；Gate 0 离线部分与 SQLGuard 没有调用真实模型；全部工作均未调用飞书或外部 MCP Server。Gate 0 真实运行经用户授权使用第三方中转端点 `bbtoken.boywe.cn`（OpenAI 兼容 Chat Completions）发送合成数据，共 22 次模型请求（含诊断探测），另有 1 次模型列表查询，串行、不重试；凭据只写入仓库外权限 600 的临时文件，运行后已删除，用户负责作废该密钥。Task 2 从 Docker Hub 拉取官方 `starrocks/allin1-ubuntu:latest`（digest `sha256:faf7ce9c…276b`，StarRocks 4.1.4）在本机 127.0.0.1:59030 运行可丢弃容器，只写入随机名合成库，用后删除；未连接用户的 StarRocks。P2 Task 0 用同一本地镜像在 127.0.0.1:59030 运行可丢弃容器，从 `releases.starrocks.io/resources/auditloader.zip` 下载官方 AuditLoader 5.0.0（sha256 `cd2a8ace…8ea2`）只装入该容器，临时把 FE `query_explain_level` 改为 ANALYZE 后已恢复；容器与合成数据已删除。P2.5 Task 0 用同一 digest 新建可丢弃容器 `xw-p25-t0-sr`（只发布 127.0.0.1:59030/58030）与 `xiaowei-sdk-test` PostgreSQL，装入同一 AuditLoader 5.0.0；临时改 FE `query_explain_level`、`enable_statistic_collect_on_first_load` 并建极低阈值资源组，均已恢复/删除并回读；容器与测试库已删除，未触碰 `xiaowei-release-*`。P2.5 Task 1 只用本机 `xiaowei-sdk-test` PostgreSQL 与 StarRocks 驱动替身，未连接任何 StarRocks、模型 API、飞书或外部 MCP。P2.5 Task 2 用同一 digest 新建可丢弃容器 `xw-p25-t2-sr`（只发布 127.0.0.1:59030），装入同一 AuditLoader 5.0.0（`max_stmt_length=1000`），运行 SR 用例与工作树外的 1,000 表规模实验；规模实验前两次（每批 50 条建表）期间单容器 FE 多次重启、实验失败，`docker restart` 后改为每批 20 条完成；合成库、账号与角色均已删除，容器与测试 PostgreSQL 已删除，未触碰 `xiaowei-release-*`。Task 2 审查修订用同一 digest 新建可丢弃容器 `xw-p25-t2r-sr`（标签 `xiaowei.task=p25-task2-review`，只发布 127.0.0.1:59030/58030），装入同一 AuditLoader 5.0.0，只运行 §5 SR 用例；未改 FE 设置。P2.5 Task 3 用同一 digest 新建可丢弃容器 `xw-p25-t3-sr`（标签 `xiaowei.task=p25-task3`，只发布 127.0.0.1:59030/58030），装入同一 AuditLoader 5.0.0，运行 §5 SR 用例（含新增的复杂 SQL 对照，临时建库 `<随机库>_hr` 用后删除）；审查修复另建同 digest 可丢弃容器 `xw-p25-t3r-sr`（只发布 127.0.0.1:59030/58030），以 root 在合成库 `p` 中探测名字解析规则后删除该库（复审第 2 轮另建同 digest 容器 `xw-p25-t3r2-sr` 重复同样流程），装入同一 AuditLoader 5.0.0 运行 §5 SR 用例；未改 FE 设置，未连接用户的 StarRocks、模型 API、飞书或外部 MCP。P2.5 Task 5 用同一 digest 新建可丢弃容器 `xw-p25-t5-sr`（标签 `xiaowei.task=p25-task5`，只发布 127.0.0.1:59030/58030），装入同一 AuditLoader 5.0.0（官方包 sha256 `cd2a8ace…8ea2`，只把 `max_stmt_length` 改为 1000），运行 §5 SR 用例，另起 `xiaowei-sdk-test` PostgreSQL；未改 FE 设置，用后删除，未触碰 `xiaowei-release-*`。P2.5 Task 6 同样新建可丢弃容器 `xw-p25-t6-sr`（标签 `xiaowei.task=p25-task6`，只发布 127.0.0.1:59030/58030）与 `xiaowei-sdk-test` PostgreSQL，装入同一 AuditLoader 5.0.0（先误用 Task 5 的包，`max_batch_interval_sec` 为默认 60，卸载后按 P2.5 §9.1 改为 10 重装），运行 §5 SR 用例（含新增的搜表与跨库审计用例，临时库 `<随机库>_b` 用后删除）；未改 FE 设置，用后删除 P2.5 Task 7 的实现与第一轮审查修订只用隔离的 `xiaowei-sdk-test` PostgreSQL 与本机 Chrome（脚本模型、驱动与合成 StarRocks 替身）；复审修订用同一 digest 新建可丢弃容器 `xw-p25-t7r-sr`（标签 `xiaowei.task=p25-task7-review`，只发布 127.0.0.1:59030/58030）与 `xiaowei-sdk-test` PostgreSQL，装入同一 AuditLoader 5.0.0（§9.1 的包），只运行 §5 SR 用例；未改 FE 设置，用后删除，未触碰 `xiaowei-release-*`；没有调用真实模型、用户的 StarRocks、飞书或外部 MCP。P2.5 Task 8 只用 `xiaowei-sdk-test` PostgreSQL 与本机 Chrome（脚本模型、驱动替身与飞书替身），没有新建 StarRocks 容器（SR 结果沿用 PR #40 复审修订的运行，理由见计划 Task 8 实施说明），没有调用真实模型、用户的 StarRocks、飞书或外部 MCP。飞书单群 F2、F3 只用 `xiaowei-sdk-test` PostgreSQL 与本机 127.0.0.1 上的合成飞书 OpenAPI（真实 SDK 用例），没有调用真实飞书、模型、用户 StarRocks 或外部 MCP，未触碰 `xiaowei-release-*`。飞书单群 F0 只在本机 127.0.0.1 运行合成飞书 HTTP/长连接端点与 `xiaowei-sdk-test` PostgreSQL；为核对权限名称只读查阅了飞书开放平台公开文档；没有调用真实飞书、模型、用户 StarRocks 或外部 MCP，未触碰 `xiaowei-release-*`。 |
 
 表中列出本轮规划基线与本地 main 引用，历史任务 SHA 只证明对应切片，不能混用。接手先用 `git rev-parse HEAD` 和 `git status --short` 取得实际版本；审查使用对应提交的精确 SHA，本文件的修改历史由 Git 保存。
@@ -35,6 +35,8 @@
 详细规则不在本文重复展开，以架构及开发规则为准。M5、旧 ADR 与旧验收仅是历史材料，不作为新产品已经可用的证据。
 
 ## 3. 当前计划与下一项工作
+
+**当前下一步：PR B 新 SHA 独立复审。** 首轮复审指出锁定版 sqlglot 会丢弃日期函数多余实参；修订在解析前按括号层级检查六种日期函数的两个顶层实参，覆盖反引号函数名，并把解析器对畸形输入的意外异常转成固定拒绝。查询、执行计划、审计引用共用此入口。离线产品测试 2247 passed、53 deselected（排除浏览器与真实 StarRocks 集成）；新增的参数个数检查和解析异常映射隔离变异分别使 11、2 个目标用例失败。Ruff、格式、mypy 与 `git diff --check` 通过。前一提交的本机 StarRocks 4.1.4 常量 SQL 对照仍适用于未改变的合法两参数规范化路径；没有连接公司集群。全量测试有一条既有飞书 SDK 用例的网络尝试被测试环境拦截的警告，未外发。复审还须覆盖 PR B 原有的超长值证据与展示、槽位超时预算退还；公司环境的真实日期查询、超长值展示和连接竞争仍未验证，离线通过不代表部署验收。
 
 **Vertex 正常输出修复（PR #61 已合入 main `8fcb097`；新镜像发布与公司部署尚未完成）：** 基于 `40e5983` 修复用户报告的 Vertex `response_rejected`，按锁定 SDK 0.22.3 的公开 `ToolExecutionConfig` 限制同轮函数工具并发为 4，适配器把合法多调用交给 Runner，并按 Vertex 规则回传函数调用/结果与首个调用的签名。阶段日志只写白名单 `reject_reason`；提示词要求分析不重画事实表格。协议替身、真 SDK Runner、隔离 PostgreSQL 与 recording Adapter 的回归只证明离线行为。提交须按精确 SHA 独立复审；复审通过后，真实 Vertex 上不带库名的 `desc`、拒收原因码和分析质量仍须由获准公司环境验证，不在本任务执行。
 

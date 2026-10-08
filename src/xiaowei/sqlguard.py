@@ -36,9 +36,10 @@
 ``QueryRejectionCode`` 与固定说明，不含 SQL、标识符、字面量或解析器原文。
 
 拒绝边界：sqlglot 的输入错误（``SqlglotError``）与过深嵌套（``RecursionError``）是预期的输入
-失败，映射为固定原因码；拒绝总在下层 ``except`` 块结束后才抛出，``__cause__`` 与
-``__context__`` 都为空，不挂带输入片段的下层异常。其余异常是程序缺陷，照常传播。原始 SQL 只
-交给分词器，不交给解析器：解析器用它生成诊断和 ``Command`` 回退日志。
+失败；解析器对畸形函数抛出的其他 ``Exception`` 同样映射为不可解析。拒绝总在下层 ``except``
+块结束后才抛出，``__cause__`` 与 ``__context__`` 都为空，不挂带输入片段的下层异常。解析
+以外的程序缺陷照常传播。原始 SQL 只交给分词器，不交给解析器：解析器用它生成诊断和
+``Command`` 回退日志。
 """
 
 from __future__ import annotations
@@ -46,6 +47,7 @@ from __future__ import annotations
 import enum
 from collections.abc import Callable, Mapping
 from dataclasses import InitVar, dataclass
+from itertools import pairwise
 from typing import Annotated, Final, NoReturn, TypeVar
 
 from pydantic import (
@@ -271,8 +273,22 @@ def _guard(
 
 
 def _normalize(root: exp.Query, policy: QueryPolicy) -> str:
+    # sqlglot 的 StarRocks 生成器会把 DATEDIFF 改写成 DATE_DIFF('DAY', ...)，
+    # 后者的返回类型和跨日边界语义不能代替前者。日期加减的数值区间也要保持 INT。
+    def canonical_date(node: exp.Expr) -> exp.Expr:
+        if isinstance(node, exp.DateDiff):
+            return exp.Anonymous(this="DATEDIFF", expressions=[node.this, node.expression])
+        if isinstance(node, exp.DateAdd | exp.DateSub):
+            number = int(node.expression.this)
+            if node.args["unit"].name.upper() == "WEEK":
+                number *= 7  # StarRocks DATE_ADD/SUB 不接受 WEEK；常量周等价于七倍 DAY
+                node.set("unit", exp.Var(this="DAY"))
+            node.set("expression", exp.Literal.number(number))
+        return node
+
+    printable = root.transform(canonical_date, copy=True)
     normalized = _attempt(
-        lambda: root.sql(dialect=DIALECT, unsupported_level=ErrorLevel.RAISE, comments=False),
+        lambda: printable.sql(dialect=DIALECT, unsupported_level=ErrorLevel.RAISE, comments=False),
         _Code.UNSUPPORTED_SYNTAX,
     )
     if _utf8_size(normalized) > policy.max_sql_bytes:
@@ -309,6 +325,11 @@ def _utf8_size(sql: str) -> int:
 
 # ---- 1. 词元与解析 ---------------------------------------------------------------------------
 
+_DATE_CALLS: Final = frozenset(
+    {"DATE_ADD", "DATE_SUB", "ADDDATE", "SUBDATE", "DATE_TRUNC", "DATEDIFF"}
+)
+_FUNCTION_NAME_TOKENS: Final = frozenset({TokenType.VAR, TokenType.IDENTIFIER})
+
 
 def _parse(sql: str) -> exp.Query:
     tokens: list[Token] = _attempt(lambda: _DIALECT.tokenize(sql), _Code.UNPARSABLE)
@@ -323,11 +344,50 @@ def _parse(sql: str) -> exp.Query:
         _reject(_Code.MULTIPLE_STATEMENTS)
     if tokens[0].token_type not in {TokenType.SELECT, TokenType.WITH, TokenType.L_PAREN}:
         _reject(_Code.UNSUPPORTED_SYNTAX)
+    # sqlglot 把 DATE_DIFF('DAY', ...) 与 DATEDIFF(...) 合成同一种节点；只开放后者。
+    if any(
+        token.token_type in _FUNCTION_NAME_TOKENS
+        and token.text.upper() == "DATE_DIFF"
+        and next_token.token_type is TokenType.L_PAREN
+        for token, next_token in pairwise(tokens)
+    ):
+        _reject(_Code.FUNCTION_NOT_ALLOWED)
+    _check_date_arity(tokens)
     parser = _DIALECT.parser(error_level=ErrorLevel.RAISE)
-    statements = _attempt(lambda: parser.parse(tokens, ""), _Code.UNPARSABLE)
+    parse_error: QueryRejectionCode | None = None
+    try:
+        statements = parser.parse(tokens, "")
+    except RecursionError:
+        parse_error = _Code.UNSUPPORTED_SYNTAX
+    except Exception:
+        # 锁定版 sqlglot 对部分不完整函数会抛 AttributeError；解析器内部错误也不得越过输入边界。
+        parse_error = _Code.UNPARSABLE
+    if parse_error is not None:
+        _reject(parse_error)
     if len(statements) != 1 or statements[0] is None:
         _reject(_Code.MULTIPLE_STATEMENTS)
     return _query_root(statements[0])
+
+
+def _check_date_arity(tokens: list[Token]) -> None:
+    """在 sqlglot 丢弃多余实参前，数指定日期函数最外层的实参。"""
+    counts: list[int | None] = []
+    for index, token in enumerate(tokens):
+        if token.token_type is TokenType.L_PAREN:
+            previous = tokens[index - 1] if index else None
+            date_call = (
+                previous is not None
+                and previous.token_type in _FUNCTION_NAME_TOKENS
+                and previous.text.upper() in _DATE_CALLS
+            )
+            counts.append(1 if date_call else None)
+        elif token.token_type is TokenType.COMMA:
+            if counts and counts[-1] is not None:
+                counts[-1] += 1
+        elif token.token_type is TokenType.R_PAREN and counts:
+            count = counts.pop()
+            if count is not None and count != 2:
+                _reject(_Code.UNSUPPORTED_SYNTAX)
 
 
 def _query_root(root: object) -> exp.Query:
@@ -353,6 +413,8 @@ _STRUCTURAL: Final[frozenset[type[exp.Expr]]] = frozenset(
 """不是函数调用的语法节点；``Case``/``Exists`` 虽是 sqlglot ``Func`` 子类，但属表达式语法。
 窗口函数本身（``ROW_NUMBER``、``SUM`` 等）仍按函数 allowlist 检查。"""
 
+_DATE_UNITS: Final = frozenset({"SECOND", "MINUTE", "HOUR", "DAY", "WEEK", "MONTH", "YEAR"})
+
 _ALLOWED_ARGS: Final[Mapping[type[exp.Expr], frozenset[str]]] = {
     exp.Select: frozenset(
         {"expressions", "from_", "joins", "where", "group", "having", "order", "limit",
@@ -371,6 +433,10 @@ _ALLOWED_ARGS: Final[Mapping[type[exp.Expr], frozenset[str]]] = {
     exp.Limit: frozenset({"expression"}),
     exp.Distinct: frozenset({"expressions"}),
     exp.Cast: frozenset({"this", "to"}),
+    exp.DateAdd: frozenset({"this", "expression", "unit"}),
+    exp.DateSub: frozenset({"this", "expression", "unit"}),
+    exp.DateDiff: frozenset({"this", "expression", "unit"}),
+    exp.TimestampTrunc: frozenset({"this", "unit"}),
 }  # fmt: skip
 """节点允许出现的参数位置；其余位置（``NATURAL``/``USING``、``RECURSIVE``、表 hint、分区、
 时间旅行、列别名列表、``DISTINCT ON``、``CAST ... FORMAT``、``UNION BY NAME``、窗口框架与命名
@@ -395,8 +461,18 @@ def _check_nodes(root: exp.Query, policy: QueryPolicy) -> None:
             if node.args.get("catalog"):
                 _reject(_Code.OBJECT_NOT_ALLOWED)
         elif isinstance(node, exp.Var):
-            if not isinstance(node.parent, exp.Interval | exp.Extract):
+            if not (
+                isinstance(node.parent, exp.Interval | exp.Extract)
+                or (
+                    isinstance(
+                        node.parent, exp.DateAdd | exp.DateSub | exp.DateDiff | exp.TimestampTrunc
+                    )
+                    and node.arg_key == "unit"
+                )
+            ):
                 _reject(_Code.UNSUPPORTED_SYNTAX)
+        elif isinstance(node, exp.DateAdd | exp.DateSub | exp.DateDiff | exp.TimestampTrunc):
+            _check_date_function(node, policy)
         elif isinstance(node, exp.If) and node.arg_key == "ifs":
             pass  # CASE WHEN 分支，不是 IF() 函数
         elif type(node) in _STRUCTURAL:
@@ -420,6 +496,31 @@ def _function_name(node: exp.Func) -> str:
     if isinstance(node, exp.Anonymous):
         return node.name.upper()
     return node.sql_name()
+
+
+def _check_date_function(
+    node: exp.DateAdd | exp.DateSub | exp.DateDiff | exp.TimestampTrunc,
+    policy: QueryPolicy,
+) -> None:
+    if _function_name(node) not in policy.allowed_functions:
+        _reject(_Code.FUNCTION_NOT_ALLOWED)
+    unit = node.args.get("unit")
+    if not isinstance(unit, exp.Var) or unit.name.upper() not in _DATE_UNITS:
+        _reject(_Code.UNSUPPORTED_SYNTAX)
+    if isinstance(node, exp.DateDiff) and unit.name.upper() != "DAY":
+        _reject(_Code.UNSUPPORTED_SYNTAX)
+    if isinstance(node, exp.DateAdd | exp.DateSub):
+        value = node.expression
+        if not isinstance(value, exp.Literal):
+            _reject(_Code.UNSUPPORTED_SYNTAX)
+        digits = value.this.removeprefix("-")
+        if not digits.isascii() or not digits.isdigit() or len(digits) > 10:
+            _reject(_Code.UNSUPPORTED_SYNTAX)
+        number = int(value.this)
+        if not -(2**31) <= number <= 2**31 - 1 or (
+            unit.name.upper() == "WEEK" and not -(2**31) <= number * 7 <= 2**31 - 1
+        ):
+            _reject(_Code.UNSUPPORTED_SYNTAX)
 
 
 def _limit_value(limit: exp.Limit) -> int:

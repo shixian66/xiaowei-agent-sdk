@@ -12,7 +12,8 @@ ANALYZE 而实际执行查询。显式级别 ``LOGICAL`` 由 P2 Task 0 在 StarR
 每条连接先用可信值设置 ``query_timeout``、``query_mem_limit``、``time_zone``、``sql_mode``，
 并回读核对，任一步失败都不执行查询。非缓冲游标最多读 ``max_returned_rows + 1`` 行；
 总字节按生产 JSON 编码（``ensure_ascii=False``、默认分隔符）后的 UTF-8 大小计算，单值同样
-如此。超过行数、总字节或单值上限时不保留该行，标记截断并中止连接。只有完整读完的连接
+如此。普通查询的单值超限时保留有界前缀和截短标记，并继续读取后续行；其他读取仍整行
+拒绝。超过行数或总字节上限时不保留该行，标记截断并中止连接。只有完整读完的连接
 才发送 ``QUIT`` 正常关闭；截断、错误、超时、取消一律直接断开，不重试。客户端取消或超时
 不代表服务端已停止，服务端由 ``query_timeout`` 兜底。
 
@@ -49,7 +50,9 @@ import math
 import re
 import ssl
 import time
-from collections.abc import Awaitable, Callable, Mapping, Sequence
+from collections.abc import Awaitable, Callable, Iterator, Mapping, Sequence
+from contextlib import contextmanager
+from contextvars import ContextVar
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 from decimal import ROUND_HALF_UP, Decimal
@@ -81,6 +84,7 @@ EXPLAIN_LEVEL: Final = "LOGICAL"
 """P2 Task 0 在 4.1.4 上选定：FE 默认级别为 ANALYZE 时仍零执行，且不输出列统计值或资源组。"""
 EXPLAIN_PREFIX: Final = f"EXPLAIN {EXPLAIN_LEVEL} "
 PLAN_COLUMN: Final = "plan"
+TRUNCATED_VALUE_MARKER: Final = "…（原值已截短）"
 LAYOUT_COLUMNS: Final = (
     "model",
     "partition_key",
@@ -204,9 +208,30 @@ ERROR_MESSAGES: Final[Mapping[StarRocksErrorCode, str]] = {
 class StarRocksError(Exception):
     """StarRocks 访问失败；消息只有固定说明。"""
 
-    def __init__(self, code: StarRocksErrorCode) -> None:
+    def __init__(self, code: StarRocksErrorCode, *, slot_wait: bool = False) -> None:
         super().__init__(ERROR_MESSAGES[code])
         self.code = code
+        self.slot_wait = slot_wait and code is _Code.POOL_TIMEOUT
+
+
+@dataclass
+class SqlIOTrace:
+    """一个受治理工具调用是否已向 StarRocks 发出 SQL；并行调用按 task 隔离。"""
+
+    started: bool = False
+
+
+_SQL_IO_TRACE: ContextVar[SqlIOTrace | None] = ContextVar("starrocks_sql_io", default=None)
+
+
+@contextmanager
+def trace_sql_io() -> Iterator[SqlIOTrace]:
+    trace = SqlIOTrace()
+    token = _SQL_IO_TRACE.set(trace)
+    try:
+        yield trace
+    finally:
+        _SQL_IO_TRACE.reset(token)
 
 
 class AuditSource(BaseModel):
@@ -547,7 +572,9 @@ class StarRocksAdapter:
             raise TypeError("只执行 SQLGuard 产生的 GuardedQuery")
         if query.target_id != self._target.target_id:
             raise StarRocksError(_Code.OBJECT_NOT_ALLOWED)
-        return await self._run(query.normalized_sql, None, query.max_returned_rows)
+        return await self._run(
+            query.normalized_sql, None, query.max_returned_rows, clip_values=True
+        )
 
     async def explain(self, query: ExplainQuery) -> QueryResult:
         """以固定显式级别 EXPLAIN SQLGuard 产物；只接受本目标的 ``ExplainQuery``。
@@ -831,12 +858,13 @@ class StarRocksAdapter:
         *,
         plan: bool = False,
         limits: _ReadLimits | None = None,
+        clip_values: bool = False,
     ) -> QueryResult:
         started = time.monotonic()
         conn = await self._acquire()
         try:
             rows, truncated, columns, code = await self._query(
-                conn, sql, args, max_rows, plan, limits or self._limits
+                conn, sql, args, max_rows, plan, limits or self._limits, clip_values
             )
         finally:
             self._slots.release()
@@ -866,7 +894,7 @@ class StarRocksAdapter:
         except TimeoutError:
             code = _Code.POOL_TIMEOUT
         if code is not None:
-            raise StarRocksError(code)
+            raise StarRocksError(code, slot_wait=True)
         try:
             conn, code = await self._open(deadline)
         except BaseException:
@@ -988,6 +1016,7 @@ class StarRocksAdapter:
         max_rows: int,
         plan: bool,
         limits: _ReadLimits,
+        clip_values: bool,
     ) -> tuple[list[dict[str, Scalar]], bool, tuple[str, ...], StarRocksErrorCode | None]:
         """执行并读取；返回错误码而不是抛出，使错误在离开 ``except`` 后由调用方抛出。
 
@@ -1006,7 +1035,9 @@ class StarRocksAdapter:
                     if len(columns) != 1:
                         raise _ResultContractError
                     columns = (PLAN_COLUMN,)
-                rows, truncated = await self._read(conn, columns, max_rows, plan, limits)
+                rows, truncated = await self._read(
+                    conn, columns, max_rows, plan, limits, clip_values=clip_values
+                )
             complete = not truncated
             return rows, truncated, columns, None
         except TimeoutError:
@@ -1028,6 +1059,9 @@ class StarRocksAdapter:
             t.time_zone,
             SQL_MODE,
         )
+        trace = _SQL_IO_TRACE.get()
+        if trace is not None:
+            trace.started = True  # 第一条 SET 也已是 SQL；之后的槽位超时不可作为 I/O 前拒绝
         await conn.execute(
             f"SET query_timeout = {expected[0]}, query_mem_limit = {expected[1]}, "
             f"time_zone = '{expected[2]}', sql_mode = '{expected[3]}'",
@@ -1048,23 +1082,32 @@ class StarRocksAdapter:
         max_rows: int,
         text_only: bool,
         limits: _ReadLimits,
+        *,
+        clip_values: bool = False,
     ) -> tuple[list[dict[str, Scalar]], bool]:
         rows: list[dict[str, Scalar]] = []
         size = 2  # "[]"
+        clipped = False
         while (raw := await conn.fetch_row()) is not None:
             if len(raw) != len(columns) or (text_only and not all(isinstance(v, str) for v in raw)):
                 raise _ResultContractError
             if len(rows) == max_rows:
                 return rows, True
             row = {name: _scalar(v, limits.zone) for name, v in zip(columns, raw, strict=True)}
-            if any(_json_size(v) > limits.max_value for v in row.values()):
-                return rows, True
+            for name, value in row.items():
+                if _json_size(value) <= limits.max_value:
+                    continue
+                replacement = _clip_value(value, limits.max_value) if clip_values else None
+                if replacement is None:
+                    return rows, True
+                row[name] = replacement
+                clipped = True
             added = _json_size(row) + (2 if rows else 0)  # 行之间的 ", "
             if size + added > limits.max_bytes:
                 return rows, True
             rows.append(row)
             size += added
-        return rows, False
+        return rows, clipped
 
     async def _release(self, conn: Connection, *, complete: bool) -> None:
         """完整读完才尝试正常关闭；关闭未完成（含失败、超时、取消）时一律同步断开。"""
@@ -1098,6 +1141,21 @@ def _scalar(value: object, zone: ZoneInfo) -> Scalar:
     if isinstance(value, date):
         return value.isoformat()
     raise _ResultContractError
+
+
+def _clip_value(value: Scalar, max_bytes: int) -> str | None:
+    """按真实 JSON 字节边界截字符；标记放不下时保持原有的整行截断行为。"""
+    if _json_size(TRUNCATED_VALUE_MARKER) > max_bytes:
+        return None
+    original = value if isinstance(value, str) else str(value)
+    low, high = 0, len(original)
+    while low < high:
+        mid = (low + high + 1) // 2
+        if _json_size(original[:mid] + TRUNCATED_VALUE_MARKER) <= max_bytes:
+            low = mid
+        else:
+            high = mid - 1
+    return original[:low] + TRUNCATED_VALUE_MARKER
 
 
 def _audit_sql(audit: AuditSource, order: str, *, filtered: bool) -> str:
