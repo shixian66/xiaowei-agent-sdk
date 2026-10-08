@@ -90,6 +90,7 @@ def test_every_audience_must_hold_the_worst_case_result() -> None:
     tools = starrocks_tools(ada, dict.fromkeys(AUDIENCES, threshold), schema=unrefreshed(ada))
     assert {c.tool_id for c in tools.contracts} == {
         "local/list_databases",
+        "local/show_create_table",
         LIST_TABLES,
         DESCRIBE_TABLE,
         RUN_QUERY,
@@ -102,6 +103,7 @@ def test_every_audience_must_hold_the_worst_case_result() -> None:
     assert required.pop("list_tables") == required.pop("describe_table") == PAGED_FIELDS
     assert required.pop("list_databases") == PAGED_FIELDS
     assert PAGED_FIELDS == (*RESULT_FIELDS, "next_cursor")
+    assert required.pop("show_create_table") == (*RESULT_FIELDS, "message")
     assert set(required.values()) == {RESULT_FIELDS}
     ToolCatalog(tools.contracts, tools.policies)  # 登记一致
 
