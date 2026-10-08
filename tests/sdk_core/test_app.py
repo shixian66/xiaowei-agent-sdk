@@ -744,7 +744,60 @@ def all_logs() -> Iterator[list[logging.LogRecord]]:
         root.setLevel(level)
 
 
-_STAGE = re.compile(r"turn=(\S+) stage=(\w+) reason=([\w-]+) elapsed_ms=\d+")
+_STAGE = re.compile(
+    r"turn=(\S+) stage=(\w+) reason=([\w-]+) elapsed_ms=\d+"
+    r"(?: error_kind=[a-z_]+ http_status=[\d-]+)?"
+)
+
+
+@pytest.mark.parametrize(
+    ("case", "kind", "status"),
+    [
+        ("http_400", "provider_http", "400"),
+        ("http_429", "provider_http", "429"),
+        ("http_503", "provider_http", "503"),
+        ("invalid_output", "invalid_output", "-"),
+        ("non_json", "response_rejected", "-"),
+        ("connection", "connection", "-"),
+        ("timeout", "model_timeout", "-"),
+    ],
+)
+async def test_model_failure_logs_safe_category_and_http_status(
+    env: Env, case: str, kind: str, status: str
+) -> None:
+    def respond(call: ModelCall) -> Any:
+        if case.startswith("http_"):
+            return httpx2.Response(
+                int(status), json={"error": {"message": MODEL_SECRET, "type": "upstream"}}
+            )
+        if case == "invalid_output":
+            return [assistant_message(MODEL_SECRET)]
+        if case == "non_json":
+            return httpx2.Response(200, text=MODEL_SECRET)
+        if case == "connection":
+            raise httpx2.ConnectError(MODEL_SECRET)
+        raise httpx2.ReadTimeout(MODEL_SECRET)
+
+    message = env.scripts.add("失败分类 " + SYNTHETIC_SQL, respond)
+    with all_logs() as records, pytest.raises(TurnError) as failed:
+        await env.app.run_turn(env.ctx(turn="failure-kind"), message)
+    assert failed.value.reason == "model_failed"
+    output = "\n".join(record.getMessage() for record in records)
+    assert f"error_kind={kind} http_status={status}" in output
+    assert MODEL_SECRET not in output and SYNTHETIC_SQL not in output
+    assert all(record.exc_info is None for record in records if record.name == "xiaowei.app")
+    assert len(env.scripts.calls[message]) == 1  # 分类不引入请求重试。
+
+
+def test_unclassified_failure_does_not_log_exception_details() -> None:
+    error = RuntimeError(f"{MODEL_SECRET}\n{SYNTHETIC_SQL}\nforged-stage=completed")
+    with all_logs() as records:
+        app_module._stage("unclassified", "failed", time.monotonic(), "model_failed", cause=error)
+    assert len(records) == 1
+    record = records[0]
+    assert record.getMessage().endswith("error_kind=unexpected_error http_status=-")
+    assert _STAGE.fullmatch(record.getMessage()) is not None and record.exc_info is None
+    assert MODEL_SECRET not in record.getMessage() and "forged-stage" not in record.getMessage()
 
 
 async def test_stage_logs_contain_only_safe_metadata(env: Env) -> None:

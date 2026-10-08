@@ -406,5 +406,10 @@ Compose 的 `XW_LOG_MAX_SIZE`/`XW_LOG_MAX_FILES` 限制本地日志轮转。Web 
 `channel=web request="页面编号" turn=内部编号`；先按页面编号找到 turn，再看该 turn 的
 `stage=failed reason=...`（例如 `timeout`、`turn_limit`、`answer_rejected`、`tool_failed` 或
 `model_failed`）。日志不含问题正文或模型错误原文；旧版本没有该关联行时，不能从通用回执猜原因。
+`model_failed` 还会记录固定分类 `error_kind` 和可用的 `http_status`：`provider_http` 是模型服务
+HTTP 错误，`connection`/`model_timeout` 是连接/模型调用超时，`invalid_output` 是模型返回不符合
+SDK 契约，`request_rejected`/`response_rejected` 是模型请求/响应边界拒绝，`model_refusal` 是模型
+拒答，`sdk_configuration` 是 SDK 使用配置错误；`unexpected_error` 仍是未分类异常，不能据此认定
+模型服务故障。状态码缺失记 `-`。这些分类只改善排查，不引入自动重试，也不记录异常正文。
 
 PostgreSQL 16 同一大版本内更换镜像 digest 不在本轮验证范围，须另做备份、兼容和回退演练。

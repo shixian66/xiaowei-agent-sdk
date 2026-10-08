@@ -33,7 +33,9 @@ from datetime import UTC, datetime
 from typing import Literal
 
 from agents import Agent, MaxTurnsExceeded, RunConfig, Runner, Tool
+from agents.exceptions import ModelBehaviorError, ModelRefusalError, ModelTimeoutError, UserError
 from agents.extensions.memory import SQLAlchemySession
+from openai import APIConnectionError, APIStatusError, APITimeoutError
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 from sqlalchemy.ext.asyncio import AsyncEngine
 
@@ -47,7 +49,7 @@ from xiaowei.evidence import (
 )
 from xiaowei.governance import Execute, GovernedTools, ToolExecutionError
 from xiaowei.mcp import MCPIntegration
-from xiaowei.model_api import ModelBinding
+from xiaowei.model_api import ModelBinding, ModelRequestRejectedError, ModelResponseRejectedError
 from xiaowei.models import AgentAnswer, ClusterId, Label, RunContext, ToolId, TurnAnswer
 from xiaowei.session import (
     PolicySession,
@@ -311,7 +313,7 @@ class Application:
             raise
         except Exception as exc:
             error = _turn_error(exc)
-            _stage(turn, "failed", started, error.reason)
+            _stage(turn, "failed", started, error.reason, cause=exc)
             raise error from None
         except asyncio.CancelledError:
             _stage(turn, "cancelled", started)
@@ -508,6 +510,37 @@ def _binding_fingerprint(
     return f"sha256:{hashlib.sha256(canonical.encode()).hexdigest()}"
 
 
-def _stage(turn: str, stage: str, started: float, reason: str = "-") -> None:
+def _model_failure_details(exc: Exception) -> tuple[str, int | None]:
+    """只取公开异常类型和受限 HTTP 状态码，不读取消息、响应体、请求或异常类名。"""
+    for error in reversed(_causes(exc)):
+        if isinstance(error, ModelRequestRejectedError):
+            return "request_rejected", None
+        if isinstance(error, ModelResponseRejectedError):
+            return "response_rejected", None
+        if isinstance(error, (APITimeoutError, ModelTimeoutError)):
+            return "model_timeout", None
+        if isinstance(error, APIStatusError):
+            status = error.status_code
+            return "provider_http", status if type(status) is int and 100 <= status <= 599 else None
+        if isinstance(error, APIConnectionError):
+            return "connection", None
+        if isinstance(error, ModelBehaviorError):
+            return "invalid_output", None
+        if isinstance(error, ModelRefusalError):
+            return "model_refusal", None
+        if isinstance(error, UserError):
+            return "sdk_configuration", None
+    return "unexpected_error", None
+
+
+def _stage(
+    turn: str, stage: str, started: float, reason: str = "-", *, cause: Exception | None = None
+) -> None:
     elapsed_ms = int((time.monotonic() - started) * 1000)
-    logger.info("turn=%s stage=%s reason=%s elapsed_ms=%d", turn, stage, reason, elapsed_ms)
+    fields: tuple[object, ...] = (turn, stage, reason, elapsed_ms)
+    message = "turn=%s stage=%s reason=%s elapsed_ms=%d"
+    if reason == "model_failed" and cause is not None:
+        kind, status = _model_failure_details(cause)
+        message += " error_kind=%s http_status=%s"
+        fields += (kind, status if status is not None else "-")
+    logger.info(message, *fields)
