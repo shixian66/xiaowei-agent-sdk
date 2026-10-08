@@ -55,6 +55,7 @@ from xiaowei.mcp import MCPIntegration
 from xiaowei.model_api import ModelBinding, open_model
 from xiaowei.models import Budget, Channel, Delivery, Identity, RunContext
 from xiaowei.session import SessionInputPolicy, SessionLimits
+from xiaowei.starrocks import StarRocksError, StarRocksErrorCode
 
 pytestmark = pytest.mark.loopback
 
@@ -749,6 +750,9 @@ def all_logs() -> Iterator[list[logging.LogRecord]]:
 _STAGE = re.compile(
     r"turn=(\S+) stage=(\w+) reason=([\w-]+) elapsed_ms=\d+"
     r"(?: error_kind=[a-z_]+ http_status=[\d-]+(?: reject_reason=[a-z_]+)?)?"
+    r"(?: tool_error=[a-z_]+)?(?: answer_reject=[a-z_]+)?"
+    r"(?: tool_calls=\d+ executed=\d+ truncated=\d+ rejected=\d+)?"
+    r"(?: limit_rescue=failed)?"
 )
 
 
@@ -1188,3 +1192,325 @@ async def test_configuration_is_checked_at_startup(env: Env) -> None:
     with pytest.raises(ValueError, match="local/"):
         env.application(local_tools={(LOOKUP, FIXTURE_TARGET): env.adapter.execute})
     assert env.scripts.calls == {}
+
+
+def _with_turns(ctx: RunContext, limit: int) -> RunContext:
+    return ctx.model_copy(update={"budget": ctx.budget.model_copy(update={"max_turns": limit})})
+
+
+async def test_turn_limit_logs_governed_counts_and_no_content(
+    env: Env, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    env.adapter.truncated = True
+    message = env.scripts.add(
+        "计数 " + SYNTHETIC_SQL,
+        lambda call: [function_call("order_total", {"region": 1}, call_id="bad")],
+        tool_call("order_total", region="east"),
+    )
+    original = Runner.run
+
+    async def run_without_recovery(*args: Any, **kwargs: Any) -> Any:
+        kwargs.pop("error_handlers", None)
+        return await original(*args, **kwargs)
+
+    monkeypatch.setattr(Runner, "run", run_without_recovery)
+    ctx = _with_turns(env.ctx(turn="counted", max_tool_calls=1), 2)
+    with all_logs() as records, pytest.raises(TurnError) as failed:
+        await env.app.run_turn(ctx, message)
+    assert failed.value.reason == "turn_limit"
+    output = "\n".join(r.getMessage() for r in records)
+    assert "tool_calls=2 executed=1 truncated=1 rejected=1" in output
+    assert SYNTHETIC_SQL not in output and MODEL_SECRET not in output
+    assert env.tool_ids() == [TOTAL_TOOL]
+    assert await env.stored() == []
+
+
+@pytest.mark.parametrize("code", list(StarRocksErrorCode))
+async def test_starrocks_tool_failure_logs_only_fixed_error_code(
+    env: Env, code: StarRocksErrorCode
+) -> None:
+    calls: list[object] = []
+
+    async def fail(request: Any) -> Any:
+        calls.append(request)
+        raise StarRocksError(code)
+
+    app = env.application(local_tools={(TOTAL_TOOL, TARGET): fail})
+    message = env.scripts.add("工具失败 " + SYNTHETIC_SQL, tool_call("order_total", region="east"))
+    with all_logs() as records, pytest.raises(TurnError) as failed:
+        await app.run_turn(env.ctx(turn="tool-code"), message)
+    output = "\n".join(r.getMessage() for r in records)
+    assert failed.value.reason == "tool_failed"
+    assert f"tool_error={code.value}" in output
+    assert SYNTHETIC_SQL not in output and MODEL_SECRET not in output
+    assert len(calls) == 1 and await env.stored() == []
+
+
+async def test_unknown_tool_failure_logs_other_without_exception_text(env: Env) -> None:
+    async def fail(request: Any) -> Any:
+        raise RuntimeError(MODEL_SECRET)
+
+    app = env.application(local_tools={(TOTAL_TOOL, TARGET): fail})
+    message = env.scripts.add(
+        "未知工具失败 " + SYNTHETIC_SQL, tool_call("order_total", region="east")
+    )
+    with all_logs() as records, pytest.raises(TurnError) as failed:
+        await app.run_turn(env.ctx(turn="tool-other"), message)
+    output = "\n".join(r.getMessage() for r in records)
+    assert failed.value.reason == "tool_failed"
+    assert "tool_error=other" in output
+    assert MODEL_SECRET not in output and SYNTHETIC_SQL not in output
+
+
+async def test_mcp_failure_logs_fixed_category_without_remote_text(
+    env: Env, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    server = next(iter(env.mcp._servers.values()))
+    calls = 0
+
+    async def fail(*args: Any, **kwargs: Any) -> Any:
+        nonlocal calls
+        calls += 1
+        raise RuntimeError(MODEL_SECRET)
+
+    monkeypatch.setattr(server, "call_tool", fail)
+    message = env.scripts.add("远端失败 " + SYNTHETIC_SQL, tool_call("fixture__lookup", key="k1"))
+    with all_logs() as records, pytest.raises(TurnError) as failed:
+        await env.app.run_turn(env.ctx(turn="mcp-code"), message)
+    output = "\n".join(r.getMessage() for r in records)
+    assert failed.value.reason == "tool_failed"
+    assert "tool_error=mcp_error" in output
+    assert MODEL_SECRET not in output and SYNTHETIC_SQL not in output
+    assert calls == 1 and await env.stored() == []
+
+
+@pytest.mark.parametrize(
+    ("case", "code"),
+    [
+        ("mixed", "mixed_kinds"),
+        ("missing", "missing_evidence"),
+        ("duplicate", "duplicate_evidence"),
+        ("unknown", "unknown_evidence"),
+        ("inference", "inference_unlinked"),
+        ("unavailable", "evidence_unavailable"),
+    ],
+)
+async def test_answer_rejection_logs_exact_fixed_code(env: Env, case: str, code: str) -> None:
+    seed = env.scripts.add("取得依据", tool_call("order_total", region="east"), cite())
+    evidence_id = (await env.app.run_turn(env.ctx(turn="seed"), seed)).answer.evidence_ids[0]
+
+    def invalid(call: ModelCall) -> list[Any]:
+        if case == "unavailable":
+            env.grants.revoke_all()
+        if case == "mixed":
+            return answer([evidence_id], "", clarification=MODEL_SECRET)
+        if case == "missing":
+            return answer([], "")
+        if case == "duplicate":
+            return answer([evidence_id, evidence_id], "")
+        if case == "unknown":
+            return answer(["ev_" + "0" * 32], "")
+        if case == "inference":
+            return answer(
+                [evidence_id], "", inferences=[{"text": MODEL_SECRET, "evidence_ids": ["ev_bad"]}]
+            )
+        return answer([evidence_id], "")
+
+    message = env.scripts.add("追问 " + SYNTHETIC_SQL, invalid)
+    with all_logs() as records, pytest.raises(TurnError) as failed:
+        await env.app.run_turn(env.ctx(turn="rejected"), message)
+    output = "\n".join(r.getMessage() for r in records)
+    assert failed.value.reason == "answer_rejected"
+    assert f"answer_reject={code}" in output
+    assert MODEL_SECRET not in output and SYNTHETIC_SQL not in output
+    assert await env.state() == ("active", 1)
+
+
+async def test_uncited_query_logs_own_rejection_code(env: Env) -> None:
+    message = env.scripts.add(
+        "未引用查询 " + SYNTHETIC_SQL,
+        tool_call("run_query", region="east"),
+        clarify(MODEL_SECRET),
+    )
+    with all_logs() as records, pytest.raises(TurnError) as failed:
+        await env.app.run_turn(env.ctx(turn="uncited"), message)
+    output = "\n".join(r.getMessage() for r in records)
+    assert failed.value.reason == "answer_rejected"
+    assert "answer_reject=uncited_query" in output
+    assert MODEL_SECRET not in output and SYNTHETIC_SQL not in output
+    assert env.tool_ids() == [QUERY_TOOL] and await env.stored() == []
+
+
+async def test_max_turns_gets_one_tool_free_final_answer_from_visible_evidence(env: Env) -> None:
+    def finish(call: ModelCall) -> list[Any]:
+        assert call.tools == []
+        assert len(evidence_in(call)) == 2
+        return answer(evidence_in(call), "步骤已用完，以下基于已有结果")
+
+    message = env.scripts.add(
+        "查询后收尾",
+        tool_call("order_total", region="east"),
+        tool_call("order_total", region="west"),
+        finish,
+    )
+    ctx = _with_turns(env.ctx(turn="rescued", max_tool_calls=2), 2)
+    result = await env.app.run_turn(ctx, message)
+    assert len(result.answer.evidence_ids) == 2
+    assert "步骤已用完" in (await env.governed.evidence.validate_answer(result, ctx)).content
+    assert env.tool_ids() == [TOTAL_TOOL, TOTAL_TOOL]
+    assert len(env.scripts.calls[message]) == 3
+    assert await env.state() == ("active", 1)
+
+
+async def test_max_turns_final_prompt_lists_all_current_query_evidence(env: Env) -> None:
+    final_instructions: list[str] = []
+
+    def finish(call: ModelCall) -> list[Any]:
+        final_instructions.append(call.instructions)
+        return answer(evidence_in(call), "只根据已有查询结果回答")
+
+    message = env.scripts.add(
+        "先汇总再做两次查询后收尾",
+        tool_call("order_total", region="east"),
+        tool_call("run_query", region="east"),
+        tool_call("run_query", region="west"),
+        finish,
+    )
+    ctx = _with_turns(env.ctx(turn="query-prompt", max_tool_calls=3), 3)
+    result = await env.app.run_turn(ctx, message)
+    ids = result.answer.evidence_ids
+    assert len(ids) == 3 and len(set(ids)) == 3
+    assert len(final_instructions) == 1
+    assert "本轮查询证据编号" in final_instructions[0]
+    assert "、".join(ids[1:]) in final_instructions[0]
+    assert ids[0] not in final_instructions[0]
+    assert env.tool_ids() == [TOTAL_TOOL, QUERY_TOOL, QUERY_TOOL]
+
+
+async def test_max_turns_partial_query_citation_keeps_rejection_and_rescue_counts(
+    env: Env,
+) -> None:
+    env.adapter.truncated = True
+
+    def finish(call: ModelCall) -> list[Any]:
+        ids = evidence_in(call)
+        assert len(ids) == 2
+        return answer(ids[:1], MODEL_SECRET)
+
+    message = env.scripts.add(
+        "部分引用 " + SYNTHETIC_SQL,
+        tool_call("run_query", region="east"),
+        tool_call("run_query", region="west"),
+        finish,
+    )
+    ctx = _with_turns(env.ctx(turn="rescue-partial", max_tool_calls=2), 2)
+    with all_logs() as records, pytest.raises(TurnError) as failed:
+        await env.app.run_turn(ctx, message)
+
+    output = "\n".join(r.getMessage() for r in records if r.name == "xiaowei.app")
+    assert failed.value.reason == "answer_rejected"
+    assert "reason=answer_rejected" in output and "answer_reject=uncited_query" in output
+    assert "limit_rescue=failed" in output
+    assert "tool_calls=2 executed=2 truncated=2 rejected=0" in output
+    assert all(_STAGE.fullmatch(r.getMessage()) for r in records if r.name == "xiaowei.app")
+    assert MODEL_SECRET not in "\n".join(r.getMessage() for r in records)
+    assert SYNTHETIC_SQL not in "\n".join(r.getMessage() for r in records)
+    assert env.tool_ids() == [QUERY_TOOL, QUERY_TOOL] and await env.stored() == []
+
+
+async def test_max_turns_tool_call_during_final_keeps_model_error_and_rescue_counts(
+    env: Env,
+) -> None:
+    env.adapter.truncated = True
+    message = env.scripts.add(
+        "收尾时仍调工具 " + SYNTHETIC_SQL,
+        tool_call("run_query", region="east"),
+        lambda call: [
+            function_call("run_query", {"region": MODEL_SECRET}, call_id="final-unavailable")
+        ],
+    )
+    ctx = _with_turns(env.ctx(turn="rescue-extra-tool", max_tool_calls=1), 1)
+    with all_logs() as records, pytest.raises(TurnError) as failed:
+        await env.app.run_turn(ctx, message)
+
+    output = "\n".join(r.getMessage() for r in records if r.name == "xiaowei.app")
+    assert failed.value.reason == "model_failed"
+    assert "reason=model_failed" in output and "error_kind=invalid_output" in output
+    assert "limit_rescue=failed" in output
+    assert "tool_calls=1 executed=1 truncated=1 rejected=0" in output
+    assert all(_STAGE.fullmatch(r.getMessage()) for r in records if r.name == "xiaowei.app")
+    assert MODEL_SECRET not in "\n".join(r.getMessage() for r in records)
+    assert SYNTHETIC_SQL not in "\n".join(r.getMessage() for r in records)
+    assert env.tool_ids() == [QUERY_TOOL] and await env.stored() == []
+
+
+async def test_max_turns_final_answer_still_rejects_forged_evidence(env: Env) -> None:
+    message = env.scripts.add(
+        "收尾伪造",
+        tool_call("order_total", region="east"),
+        lambda call: answer(["ev_forged"], MODEL_SECRET),
+    )
+    ctx = _with_turns(env.ctx(turn="rescue-rejected", max_tool_calls=1), 1)
+    with all_logs() as records, pytest.raises(TurnError) as failed:
+        await env.app.run_turn(ctx, message)
+    assert failed.value.reason == "answer_rejected"
+    assert env.tool_ids() == [TOTAL_TOOL]
+    assert len(env.scripts.calls[message]) == 2
+    assert await env.stored() == []
+    assert MODEL_SECRET not in "\n".join(r.getMessage() for r in records)
+
+
+async def test_max_turns_without_evidence_stays_a_failure(env: Env) -> None:
+    message = env.scripts.add(
+        "没有证据 " + SYNTHETIC_SQL,
+        lambda call: [function_call("order_total", {"region": 1}, call_id="bad")],
+    )
+    ctx = _with_turns(env.ctx(turn="no-evidence"), 1)
+    with all_logs() as records, pytest.raises(TurnError) as failed:
+        await env.app.run_turn(ctx, message)
+    output = "\n".join(r.getMessage() for r in records)
+    assert failed.value.reason == "turn_limit"
+    assert "tool_calls=1 executed=0 truncated=0 rejected=1" in output
+    assert len(env.scripts.calls[message]) == 1
+    assert env.adapter.calls == [] and await env.stored() == []
+    assert SYNTHETIC_SQL not in output
+
+
+async def test_vertex_limit_rescue_replays_signed_call_without_offering_tools(
+    env: Env, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    requests: list[dict[str, Any]] = []
+
+    def respond(request: httpx2.Request) -> httpx2.Response:
+        body = json.loads(request.content)
+        requests.append(body)
+        if len(requests) == 1:
+            return httpx2.Response(200, json=_body([_call_part(name="order_total")]))
+        assert all(not tool.get("functionDeclarations") for tool in body.get("tools", []))
+        evidence_ids = [
+            json.loads(part["functionResponse"]["response"]["output"])["evidence_id"]
+            for content in body["contents"]
+            for part in content["parts"]
+            if "functionResponse" in part
+        ]
+        assert len(evidence_ids) == 1
+        final = {
+            "evidence_ids": evidence_ids,
+            "inferences": [],
+            "clarification": None,
+            "advice": None,
+        }
+        return httpx2.Response(200, json=_body([{"text": json.dumps(final)}]))
+
+    monkeypatch.setenv(VERTEX.api_key_ref.removeprefix("env:"), FAKE_MODEL_KEY)
+    profile = VERTEX.model_copy(update={"data_policy_id": PROFILE.data_policy_id})
+    async with open_model(profile, transport=httpx2.MockTransport(respond)) as binding:
+        vertex_env = replace(env, binding=binding)
+        ctx = _with_turns(vertex_env.ctx(turn="vertex-rescue", max_tool_calls=1), 1)
+        result = await vertex_env.app.run_turn(ctx, "查合成总数")
+        delivery = await vertex_env.app.evidence.validate_answer(result, ctx)
+
+    assert len(requests) == 2 and env.tool_ids() == [TOTAL_TOOL]
+    assert len(result.answer.evidence_ids) == 1
+    assert "步骤已用完" in delivery.content
+    assert await env.state() == ("active", 1)

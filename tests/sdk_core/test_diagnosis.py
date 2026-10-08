@@ -567,3 +567,18 @@ def test_analysis_instructions_do_not_repeat_program_rendered_facts() -> None:
     assert "inferences 不要重画表格" in DEFAULT_INSTRUCTIONS
     assert "不要逐行或逐列复述结果" in DEFAULT_INSTRUCTIONS
     assert "只写结论、口径说明、限制和建议" in DEFAULT_INSTRUCTIONS
+
+
+def test_default_instructions_bound_retries_and_followup_evidence() -> None:
+    for required in (
+        "结果被截断时最多缩小范围重查一次",
+        "仍被截断就基于已有结果回答并说明限制",
+        "SUBSTRING",
+        "长文本列",
+        "找实际运行慢的查询优先使用 list_slow_queries",
+        "只有一个可用集群时直接使用它",
+        "本轮可见证据",
+        "证据编号照原样引用",
+        "澄清或建议不要与证据、分析混用",
+    ):
+        assert required in DEFAULT_INSTRUCTIONS

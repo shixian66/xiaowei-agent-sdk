@@ -9,7 +9,7 @@
   "model": {
     "profile_id": "vertex-main",
     "provider": "vertex",
-    "model": "replace-with-approved-vertex-model",
+    "model": "gemini-3-flash-preview",
     "api_key_ref": "env:XW_MODEL_API_KEY",
     "request_timeout_seconds": 120,
     "max_output_tokens": 16384,
@@ -49,16 +49,16 @@
   "targets": [
     {
       "type": "starrocks",
-      "description": "<集群用途，交给模型选择集群>",
+      "description": "公司 fat StarRocks 报表集群",
       "business_context": null,
       "starrocks": {
-        "target_id": "warehouse",
-        "host": "<StarRocks FE 地址>",
+        "target_id": "fat",
+        "host": "172.31.255.56",
         "port": 9030,
-        "database": "<默认 database>",
-        "tls": true,
+        "database": "data_center",
+        "tls": false,
         "tls_ca_file": null,
-        "user": "<只读账号>",
+        "user": "xiaowei_ro",
         "password_ref": "env:XW_STARROCKS_PASSWORD",
         "connect_timeout_seconds": 5,
         "query_timeout_seconds": 60,
@@ -75,10 +75,10 @@
           "table": "starrocks_audit_tbl__",
           "time_zone": "Asia/Shanghai",
           "stmt_limit": 1048576,
-          "max_window_minutes": 1440,
+          "max_window_minutes": 10080,
           "max_rows": 20,
           "candidate_rows": 200,
-          "candidate_bytes": 2097152
+          "candidate_bytes": 8388608
         },
         "policy": {
           "allowed_functions": [
@@ -163,6 +163,10 @@
   },
   "web": {
     "operator_id": "local-operator",
+    "allowed_origins": [
+      "http://127.0.0.1:8501",
+      "http://172.20.0.8:8501"
+    ],
     "secure_cookie": false,
     "max_body_bytes": 65536
   },

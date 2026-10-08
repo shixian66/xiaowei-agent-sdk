@@ -255,7 +255,13 @@ def test_filled_minimal_template_passes_config_check(entry: str, tmp_path: Path)
 @pytest.mark.parametrize(
     ("fill", "model", "env", "field"),
     [
-        pytest.param(False, {}, {}, "model.model", id="unreplaced-template"),
+        pytest.param(
+            True,
+            {"model": "replace-with-approved-vertex-model"},
+            {},
+            "model.model",
+            id="legacy-unreplaced-model",
+        ),
         pytest.param(
             True, {"base_url": "https://evil.invalid/v1"}, {}, FIXED, id="vertex-endpoint"
         ),
@@ -276,7 +282,7 @@ def test_minimal_template_failures_exit_2(
     env: dict[str, str],
     field: str,
 ) -> None:
-    """C2 关键失败：模板未替换、Vertex 固定字段被覆盖、模型或目标秘密缺失时退出 2，不回显值。"""
+    """旧标记、Vertex 固定字段被覆盖、模型或目标秘密缺失时退出 2，不回显值。"""
     file = _main_template(tmp_path, fill=fill, **model)
     argv = [*ENTRIES[entry], "--config", str(file), "config", "check"]
 
@@ -339,9 +345,11 @@ def test_container_config_check_accepts_any_ip_bind_without_listing_origins(
 
 
 def _template_file(tmp_path: Path) -> Path:
-    """未替换的发行模板（含飞书片段），环境变量全部已设置：只有模板占位符这一个问题。"""
+    """带旧模型与飞书占位符的配置，环境变量全部已设置。"""
     file = tmp_path / "xiaowei.json"
-    file.write_text(json.dumps(example_with_feishu(), ensure_ascii=False), encoding="utf-8")
+    values = example_with_feishu()
+    values["model"]["model"] = "replace-with-approved-vertex-model"
+    file.write_text(json.dumps(values, ensure_ascii=False), encoding="utf-8")
     return file
 
 

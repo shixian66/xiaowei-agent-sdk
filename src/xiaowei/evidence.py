@@ -30,6 +30,7 @@
 不能伪造其他段落。
 """
 
+import enum
 import hashlib
 import json
 import logging
@@ -183,8 +184,22 @@ class EvidenceUnverifiableError(EvidenceError):
         super().__init__(_UNVERIFIABLE)
 
 
+class AnswerRejectCode(enum.StrEnum):
+    MIXED_KINDS = "mixed_kinds"
+    MISSING_EVIDENCE = "missing_evidence"
+    DUPLICATE_EVIDENCE = "duplicate_evidence"
+    UNKNOWN_EVIDENCE = "unknown_evidence"
+    INFERENCE_UNLINKED = "inference_unlinked"
+    EVIDENCE_UNAVAILABLE = "evidence_unavailable"
+    UNCITED_QUERY = "uncited_query"
+
+
 class AnswerRejectedError(EvidenceError):
-    """最终回答未通过结构与证据校验，不得发送或持久化。"""
+    """最终回答未通过结构与证据校验；只向阶段日志提供固定原因码。"""
+
+    def __init__(self, code: AnswerRejectCode, message: str) -> None:
+        super().__init__(message)
+        self.code = code
 
 
 class EvidenceStore:
@@ -343,7 +358,9 @@ class EvidenceStore:
             # ``Application`` 在提交前核实（本轮取得业务查询证据时必须引用它）。模型可能复述了
             # 可见的证据，因此照样复核它们。
             if answer.evidence_ids or answer.inferences or len(unverified) > 1:
-                raise AnswerRejectedError("澄清或建议不能与查询结果、分析或彼此混用")
+                raise AnswerRejectedError(
+                    AnswerRejectCode.MIXED_KINDS, "澄清或建议不能与查询结果、分析或彼此混用"
+                )
             await self._context_readable(ctx, channel, context, history=history)
             ((header, text),) = unverified
             content = f"{header}\n{_one_line(text)}"
@@ -356,14 +373,18 @@ class EvidenceStore:
 
         cited = answer.evidence_ids
         if not cited:
-            raise AnswerRejectedError("回答缺少证据引用")
+            raise AnswerRejectedError(AnswerRejectCode.MISSING_EVIDENCE, "回答缺少证据引用")
         if len(set(cited)) != len(cited):
-            raise AnswerRejectedError("证据引用重复")
+            raise AnswerRejectedError(AnswerRejectCode.DUPLICATE_EVIDENCE, "证据引用重复")
         if not set(cited) <= set(context):
-            raise AnswerRejectedError("回答只能引用本轮模型可见的证据")
+            raise AnswerRejectedError(
+                AnswerRejectCode.UNKNOWN_EVIDENCE, "回答只能引用本轮模型可见的证据"
+            )
         for inference in answer.inferences:
             if not inference.evidence_ids or not set(inference.evidence_ids) <= set(cited):
-                raise AnswerRejectedError("分析必须引用本回答选择的证据")
+                raise AnswerRejectedError(
+                    AnswerRejectCode.INFERENCE_UNLINKED, "分析必须引用本回答选择的证据"
+                )
         unshown = tuple(e for e in context if e not in cited)
         records = await self._context_readable(ctx, channel, (*cited, *unshown), history=history)
 
@@ -399,7 +420,9 @@ class EvidenceStore:
         try:
             return await self._readable(ctx, channel, evidence_ids, history=history)
         except EvidenceUnavailableError:
-            raise AnswerRejectedError("回答引用或依赖的证据不可用") from None
+            raise AnswerRejectedError(
+                AnswerRejectCode.EVIDENCE_UNAVAILABLE, "回答引用或依赖的证据不可用"
+            ) from None
 
     async def _readable(
         self, ctx: RunContext, audience: Audience, evidence_ids: Sequence[str], *, history: bool

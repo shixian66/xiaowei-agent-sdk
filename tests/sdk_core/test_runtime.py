@@ -1730,7 +1730,7 @@ async def test_resend_refusal_with_the_real_sdk_makes_no_network_call(env: Env) 
 
 
 def test_example_configuration_is_valid_and_fits_the_projections() -> None:
-    """README 引用的示例配置：通过校验，且声明的结果上限装得进四种投影（启动时同样检查）。"""
+    """发行样例与用户批准的公司配置一致，且结果上限装得进四种投影。"""
     config = runtime.load_config(
         Path(__file__).resolve().parents[2] / "examples/xiaowei.example.json"
     )
@@ -1740,14 +1740,28 @@ def test_example_configuration_is_valid_and_fits_the_projections() -> None:
             adapter, config.projection_bytes, schema=SchemaCache(adapter, clock=Clock())
         )
     assert config.listen_port == 8501 and config.feishu is None
-    # 主模板是最小结构：一个 Vertex Profile、一个配置了审计源的目标、Web、飞书关闭。第二个目标与
-    # 飞书只在 OPERATIONS / 飞书片段里说明，不维护第二份完整主配置。
-    assert [t.target_id for t in config.targets] == ["warehouse"]
-    assert config.targets[0].starrocks.audit is not None
+    # 主样例仍只有一个 Vertex Profile、一个配置了审计源的目标、Web、飞书关闭。
+    assert [t.target_id for t in config.targets] == ["fat"]
+    target = config.targets[0]
+    assert target.description == "公司 fat StarRocks 报表集群"
+    assert (target.starrocks.host, target.starrocks.database, target.starrocks.user) == (
+        "172.31.255.56",
+        "data_center",
+        "xiaowei_ro",
+    )
+    assert target.starrocks.tls is False
+    assert target.starrocks.audit is not None
+    assert target.starrocks.audit.max_window_minutes == 10080
+    assert target.starrocks.audit.candidate_bytes == 8388608
     model = config.model
     assert model.provider == "vertex" and model.reasoning_effort is None
+    assert model.model == "gemini-3-flash-preview"
     assert (model.base_url, model.api_mode, model.output_mode) == (None, None, None)
     assert model.api_key_ref == "env:XW_MODEL_API_KEY"
+    assert config.web.allowed_origins == {
+        "http://127.0.0.1:8501",
+        "http://172.20.0.8:8501",
+    }
 
 
 # 解析器把常用写法归一成内部函数名（DATE_FORMAT → TIME_TO_STR 等），模板名单按内部名填写。
@@ -1803,7 +1817,7 @@ COMMON_EXPRESSIONS = (
 def _template_policy() -> QueryPolicy:
     policy = runtime.load_config(EXAMPLES / "xiaowei.example.json").targets[0].starrocks.policy
     return QueryPolicy(
-        target_id="warehouse",
+        target_id="fat",
         tables={"shop": {"t": ("a", "b", "c")}},
         allowed_functions=policy.allowed_functions,
         max_rows=policy.max_rows,
@@ -1993,10 +2007,11 @@ def template_paths(value: Any, path: str = "") -> dict[str, str]:
 
 
 def test_repository_templates_name_every_placeholder_without_values(tmp_path: Path) -> None:
-    """未替换的仓库模板语法上可读，但预检按字段路径拒绝模板里的每一个标记，且不回显模板文字。"""
+    """主样例的公司值已填写；启用飞书时，其占位符仍按字段路径拒绝且不回显。"""
     template = example_with_feishu()
     expected = template_paths(template)
-    assert {"model.model", "targets.0.starrocks.user", "feishu.group.chat_id"} <= set(expected)
+    assert {"feishu.app_id", "feishu.group.chat_id"} <= set(expected)
+    assert "model.model" not in expected and "targets.0.starrocks.user" not in expected
     with pytest.raises(runtime.ConfigError) as raised:
         runtime.validate_placeholders(_load(tmp_path, template))
     message = str(raised.value)
@@ -2071,6 +2086,32 @@ def test_pre_vertex_template_markers_are_still_placeholders(tmp_path: Path) -> N
     for path in ("model.model", "targets.1.description", "targets.1.starrocks.host"):
         assert path in message
     assert "<" not in message
+
+
+def test_previous_main_template_markers_are_still_rejected(tmp_path: Path) -> None:
+    values = json.loads((EXAMPLES / "xiaowei.example.json").read_text(encoding="utf-8"))
+    values["model"]["model"] = "replace-with-approved-vertex-model"
+    target = values["targets"][0]
+    target["description"] = "<集群用途，交给模型选择集群>"
+    target["starrocks"].update(
+        {
+            "host": "<StarRocks FE 地址>",
+            "database": "<默认 database>",
+            "user": "<只读账号>",
+        }
+    )
+    with pytest.raises(runtime.ConfigError) as raised:
+        runtime.validate_placeholders(_load(tmp_path, values))
+    message = str(raised.value)
+    for path in (
+        "model.model",
+        "targets.0.description",
+        "targets.0.starrocks.host",
+        "targets.0.starrocks.database",
+        "targets.0.starrocks.user",
+    ):
+        assert path in message
+    assert "replace-with" not in message and "<" not in message
 
 
 def test_filled_templates_pass_the_placeholder_check(tmp_path: Path) -> None:

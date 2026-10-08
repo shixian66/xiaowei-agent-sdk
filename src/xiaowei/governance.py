@@ -44,6 +44,7 @@ from xiaowei.models import (
     ToolRequest,
     ToolResult,
 )
+from xiaowei.starrocks import StarRocksError, StarRocksErrorCode
 
 if TYPE_CHECKING:
     from xiaowei.evidence import EvidenceStore
@@ -85,6 +86,10 @@ class ToolRejectedError(Exception):
 
 class ToolExecutionError(Exception):
     """工具已开始执行但失败；结果未知，不自动重试。"""
+
+    def __init__(self, code: StarRocksErrorCode | Literal["mcp_error", "other"] = "other") -> None:
+        super().__init__("工具执行失败")
+        self.code = code
 
 
 @dataclass(frozen=True)
@@ -218,12 +223,17 @@ class TurnRuns:
     """一轮内经治理执行的工具调用，由可信代码记录（不来自模型）。
 
     ``started`` 是通过前置检查、占用预算后开始执行的调用的工具 ID（每次调用一项）；``produced``
-    是其中结果已生成证据并交给模型的 ``(工具 ID, 证据标识)``。开始执行后失败的调用中止整轮，
-    因此能走到最终回答的轮次中两者一一对应。
+    是其中结果已生成证据并交给模型的 ``(工具 ID, 证据标识)``；``truncated`` 计模型可见
+    结果的截断次数，``rejected`` 计 SDK 包装层确认的 I/O 前拒绝次数。开始执行后失败的调用
+    中止整轮，因此能走到最终回答的轮次中 ``started`` 与 ``produced`` 一一对应。
+    ``limit_rescue_started`` 标记 SDK 步数用完后已进入无工具收尾，供失败日志保留上下文。
     """
 
     started: tuple[str, ...] = ()
     produced: tuple[tuple[str, str], ...] = ()
+    truncated: int = 0
+    rejected: int = 0
+    limit_rescue_started: bool = False
 
 
 class GovernedTools:
@@ -287,16 +297,35 @@ class GovernedTools:
 
         try:
             observation = await run()
-        except Exception:
-            raise ToolExecutionError("工具执行失败") from None
+        except Exception as exc:
+            if isinstance(exc, StarRocksError):
+                code: StarRocksErrorCode | Literal["mcp_error", "other"] = exc.code
+            elif request.tool_id.partition("/")[0] != "local":
+                code = "mcp_error"
+            else:
+                code = "other"
+            raise ToolExecutionError(code) from None
         if not isinstance(observation, ToolObservation):
-            raise ToolExecutionError("工具执行失败")
+            raise ToolExecutionError()
         result = await self._evidence.record(ctx, effective, observation)
         # 同一轮的并行调用可能已更新记录：取当前值再追加（两步之间没有 await）。
         runs = self._runs.get(key, TurnRuns())
         produced = (*runs.produced, (contract.tool_id, result.evidence_id))
-        self._runs[key] = replace(runs, produced=produced)
+        self._runs[key] = replace(
+            runs, produced=produced, truncated=runs.truncated + int(result.truncated)
+        )
         return result
+
+    def note_rejected(self, identity: Identity) -> None:
+        """SDK 包装层报告一次 I/O 前拒绝；不占工具执行预算。"""
+        key = _turn_key(identity)
+        runs = self._runs.get(key, TurnRuns())
+        self._runs[key] = replace(runs, rejected=runs.rejected + 1)
+
+    def note_limit_rescue(self, identity: Identity) -> None:
+        """已有证据且开始无工具收尾；失败阶段仍可取得整轮治理计数。"""
+        key = _turn_key(identity)
+        self._runs[key] = replace(self._runs.get(key, TurnRuns()), limit_rescue_started=True)
 
     def turn_runs(self, identity: Identity) -> TurnRuns:
         """本轮已开始执行的调用与已交给模型的证据；I/O 前被拒绝的调用不在其中。"""
