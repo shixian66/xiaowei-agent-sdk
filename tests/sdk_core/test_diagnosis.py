@@ -560,3 +560,10 @@ async def test_diagnosis_instructions_reach_the_model(diag: Env) -> None:
 )
 def test_default_instructions_state_the_diagnosis_rules(required: str) -> None:
     assert required in DEFAULT_INSTRUCTIONS
+
+
+def test_analysis_instructions_do_not_repeat_program_rendered_facts() -> None:
+    assert "事实区会由系统完整展示工具结果" in DEFAULT_INSTRUCTIONS
+    assert "inferences 不要重画表格" in DEFAULT_INSTRUCTIONS
+    assert "不要逐行或逐列复述结果" in DEFAULT_INSTRUCTIONS
+    assert "只写结论、口径说明、限制和建议" in DEFAULT_INSTRUCTIONS
