@@ -71,14 +71,16 @@ docker image inspect "xiaowei:${release_sha}" --format '{{.Os}}/{{.Architecture}
 两份配置的分工：`.env` 只放秘密和部署参数，可以用 `#` 写注释；`xiaowei.json` 放模型、StarRocks
 地址、权限等非秘密内容，是标准 JSON，不能写 `#` 或 `//` 注释。
 
-`xiaowei.example.json` 是最小配置：一个 Vertex 模型、一个 StarRocks 目标 `warehouse`、Web，飞书关闭
-（`null`）。第二个目标和飞书需要时再按下文“增加第二个 StarRocks 目标”“启用飞书”加入。模型段里的
-`vertex-main` 不需要填 API 地址、协议或输出方式，这些由程序固定，写了反而会被拒绝。
+`xiaowei.example.json` 只有一个 Vertex 模型、一个 StarRocks 目标 `fat`、Web，飞书关闭（`null`）。
+用户已批准将公司环境的非密钥配置值放进公开发行样例；复制到别的环境时先核对并修改模型 ID、
+集群说明与 ID、FE 地址、默认库、只读账号、TLS 和审计源，再运行预检。样例的
+`web.allowed_origins` 是旧版遗留字段，当前不限制来源。第二个目标和飞书需要时再按下文添加。
+模型段里的 `vertex-main` 不需要填 API 地址、协议或输出方式，这些由程序固定，写了反而会被拒绝。
 
-两份模板里的 `<……>` 以及 `replace-with-approved-vertex-model`、
-`cli_replacewithappid`、`oc_replace_with_chat_id` 都是待填写标记，没替换时 `config check` 和
-`serve` 都会按字段路径拒绝，不会启动。只有与模板原文完全相同的值才算没替换，真实值里含尖括号
-不受影响；`.env` 的 `XW_POSTGRES_PASSWORD` 仍是模板原文时同样拒绝。
+`.env` 和飞书片段里的 `<……>`、`cli_replacewithappid`、`oc_replace_with_chat_id` 是待填写标记；
+旧版主模板的 `replace-with-approved-vertex-model` 与 `<……>` 也继续被预检拒绝。没替换的标记
+会按字段路径报错，不会启动，且不回显原值；真实值里含尖括号不受影响。
+`.env` 的 `XW_POSTGRES_PASSWORD` 仍是模板原文时同样拒绝。
 
 | 位置 | 是否必填 | 填什么 | 从哪里拿 | 以后能否改 |
 | --- | --- | --- | --- | --- |
@@ -89,8 +91,8 @@ docker image inspect "xiaowei:${release_sha}" --format '{{.Os}}/{{.Architecture}
 | `.env` 的 `XW_WEB_BIND_ADDRESS` | 可选 | Web 发布到服务器的哪个 IP：`0.0.0.0`（缺省，内网都能访问）、`127.0.0.1`（只本机）或服务器某个内网 IP；不能写域名 | 服务器管理员 | 可改，改后预检并重建小维 |
 | `.env` 的 `XW_ARCHIVE_STARROCKS_PASSWORD` | 按需 | 加了第二个目标时去掉行首 `#`，填它的只读密码 | StarRocks 管理员 | 可轮换 |
 | `.env` 的 `XW_FEISHU_APP_SECRET` | 按需 | 启用飞书时去掉行首 `#`，填应用 App Secret | 飞书开放平台 | 可轮换 |
-| JSON 的 `model.model` | 必填 | 获准的 Vertex 模型 ID，只含字母、数字、`.`、`_`、`-`，例如计划验收的 `gemini-3-flash-preview`（真实验收尚未完成） | 模型服务管理员 | 换模型后须新建会话，并重新运行 `model check` |
-| JSON 的 `targets[].description`、`starrocks.host`、`database`、`user` | 必填 | 集群用途说明、FE 地址、默认库、只读账号名 | StarRocks 管理员 | 可改，改后重启 |
+| JSON 的 `model.model` | 已填公司值；其他环境必改 | 获准的 Vertex 模型 ID，只含字母、数字、`.`、`_`、`-`；样例中的模型尚未在本次改动中实测 | 模型服务管理员 | 换模型后须新建会话，并重新运行 `model check` |
+| JSON 的 `targets[].description`、`starrocks.target_id`、`host`、`database`、`user`、`tls` | 已填公司值；其他环境必改 | 集群用途与 ID、FE 地址、默认库、只读账号名及 TLS 设置 | StarRocks 管理员 | 可改，改后重启并按会话绑定规则新建会话 |
 | JSON 的 `access.grants` 与 `web.operator_id` | 必填 | Web 操作者的内部 subject 及其工具 | 部署管理员决定 | 可改，改后重启 |
 | JSON 的 `feishu` | 按需 | `null` 表示不启用；启用方式见下文“启用飞书” | 飞书开放平台 | 可改，改后重启 |
 
@@ -230,6 +232,8 @@ docker compose --env-file .env ps
 | `starrocks.query_timeout_seconds` / `client_timeout_seconds` | 60 / 65 | 大表查询超时；客户端期限不能早于服务端 |
 | `policy.max_sql_bytes` | 16000 | 较长 SQL 被拒绝 |
 | `schema_limits` 三个期限 | 300 / 900 / 120 | 日志出现“结构快照刷新失败 reason=timeout” |
+| `audit.max_window_minutes` | 10080（7 天） | 更早的审计记录不在可查询窗口内 |
+| `audit.candidate_bytes` | 8388608（8 MiB） | 一次候选读取达到字节上限时结果截断；调大也会增加内存占用 |
 
 `query_mem_limit_bytes`、`max_rows`、`max_value_bytes` 保持原值：前者保护公司集群，后两者控制单次
 回答的体量。

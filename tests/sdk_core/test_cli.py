@@ -255,7 +255,13 @@ def test_filled_minimal_template_passes_config_check(entry: str, tmp_path: Path)
 @pytest.mark.parametrize(
     ("fill", "model", "env", "field"),
     [
-        pytest.param(False, {}, {}, "model.model", id="unreplaced-template"),
+        pytest.param(
+            True,
+            {"model": "replace-with-approved-vertex-model"},
+            {},
+            "model.model",
+            id="legacy-unreplaced-model",
+        ),
         pytest.param(
             True, {"base_url": "https://evil.invalid/v1"}, {}, FIXED, id="vertex-endpoint"
         ),
@@ -276,7 +282,7 @@ def test_minimal_template_failures_exit_2(
     env: dict[str, str],
     field: str,
 ) -> None:
-    """C2 关键失败：模板未替换、Vertex 固定字段被覆盖、模型或目标秘密缺失时退出 2，不回显值。"""
+    """旧标记、Vertex 固定字段被覆盖、模型或目标秘密缺失时退出 2，不回显值。"""
     file = _main_template(tmp_path, fill=fill, **model)
     argv = [*ENTRIES[entry], "--config", str(file), "config", "check"]
 
