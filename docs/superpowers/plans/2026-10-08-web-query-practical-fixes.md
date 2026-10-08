@@ -33,7 +33,7 @@
 ## 内部表原始 DDL 增量（用户已确认）
 
 用户已明确选择“本轮补齐内部表原始 DDL”。新增独立授权的 `local/show_create_table`，参数只有集群、
-库和表；只支持当前可 SELECT 的普通内部 OLAP 表。快照先拒绝视图/非普通表；读取原文前后以固定
+库和表；只支持当前可 SELECT 的普通内部表（本地 `OLAP` 或存算分离 `CLOUD_NATIVE`）。快照先拒绝视图/非普通表；读取原文前后以固定
 元数据模板确认对象 ID、类型、引擎未变，再经现有 Evidence 权限与版本重验。外表、外部 catalog、
 视图和物化视图不开放。实际执行固定 `SHOW CREATE TABLE`，不执行返回的 CREATE 语句，不从字段拼接。
 
@@ -58,6 +58,18 @@ DDL 当作当前分区状态列表。新增可选 `max_ddl_bytes`，未配置时
 - DDL/容量受影响的 Adapter、真 SDK 与隔离 PostgreSQL 回归 **133 passed**。覆盖原文交给模型/Session/Web、超限固定说明、grant/tool scope/target scope/对象不存在/无快照/SQL 限额的 I/O 前拒绝、撤权历史、读取中换表不入 Evidence，以及外表拒绝前零 probe/零 SHOW。外表使用 recording 驱动，不记外部系统实测。固定模型样例覆盖列库、按库遍历、键依据、内部表原始 DDL 与视图定义未开放；脚本模型只证明调用链与契约。
 - DDL 独立审查：`e33279c → c905838` 的 Adapter/SDK/存储检查 **42 passed**，发现容量兼容性 P2。`c905838 → 986f842` 复审通过：独立对三个精确快照验证最低投影容量为 **49437 / 49648 / 49437**；旧 49500 配置恢复通过，model/session/web/feishu 各自单独 49000 仍全部拒绝，独立容量回归 **5 passed**。成功原文与超限说明分开检查，四种投影边界保持严格；该发现已关闭。
 - 实验环境：专用 `xw-web-query-practical-sr` 仅 loopback 59030、临时内存盘，无持久数据卷；最终实测和审查结束后已删除。未改已有 StarRocks 容器、公司数据库或现有应用。
+
+## `50f4e7e` 审查修订（2026-10-08）
+
+审查针对 `db773eea44e7f3720bbe66808c792aaaa75b08c2..50f4e7ec9954ffbfd48ae1d8ede7dfdc0cdcedfe`；下面是对审查意见的核实与修订，不把先前 `986f842` 的独立审查当作新差异的结论。
+
+- **列库连接放大，已复现并修复。** 原实现逐对象调用 `probe([key])`，一次探测建一条连接。现在每页首轮跨库合并探测，未确认的库按批继续；一页最多探测 32 个对象，游标可停在同一库的对象之间。仅输出已确认可读的库；后来库即使提前探测成功，也不会越过未确认库输出，续页重新复核。回归覆盖 4 个可读库加 40 张全部撤权的表、可读表排在第 40 位、探测中失败不返回部分结果；隔离变异将批量探测强行拆回逐对象时，连接数断言以 `32 > 5` 失败，原实现也先失败；恢复正常后通过。此为驱动替身证据，未在公司 StarRocks 测时延。
+- **Web 展示，同根因一起处理。** 无事实回复的 `content` 为飞书保留单行转义，Web 独立传原文并用 `textContent`、`pre-wrap` 展示多行澄清与 SQL 草稿；双向控制符仍转成可见转义。真正的 NULL 显示 `NULL（空值）` 并带样式类，字面字符串 `"NULL"` 保持原样。固定证据说明放入展开区，普通查询的模型分析默认收起，诊断轮仍显示分析；结构化事实、SQL、来源和本次获准原文仍可展开。真实 Uvicorn + Chrome 相关 5 项通过；旧 2 项默认占用 8501，当时该端口已有服务，使用临时进程内钩子改在空闲的 18502 运行，2 项通过，未改测试源码或干扰既有服务。
+- **不稳定测试，根因已确认。** `"200" not in facts` 会误匹配随机 Evidence ID。固定生成含 `200` 的 ID 能稳定复现失败；现断言只针对事实字段的值，且单独核对 `result_json.total == 100`，原保护保留。
+- **DDL 引擎。** StarRocks [4.1.4 源码](https://github.com/StarRocks/starrocks/blob/4.1.4/fe/fe-core/src/main/java/com/starrocks/catalog/Table.java) 将云原生表与外表分开；[StarRocks 项目问题中的存算分离实例](https://github.com/StarRocks/starrocks/issues/39698) 显示 `tables_config.TABLE_ENGINE=CLOUD_NATIVE`，SHOW CREATE 文本仍可为 `ENGINE=OLAP`。Adapter 仅增加 `CLOUD_NATIVE` 的 `BASE TABLE`，读前后核对 ID、类型、引擎，外表/视图/物化视图仍拒绝。离线成功和拒绝路径已验证，目标版本的存算分离实测未完成。
+- **容量与历史边界。** 64,000 字节只是示例 DDL 上限；合成 1,500 条显式分区的 JSON DDL 约 78,055 字节，整条拒绝仍正确，公司表的实际长度未知。Evidence 复核看当前权限、对象 ID、采集时列及类型；新增列、属性和分区变化可使历史展示采集时的旧 DDL，带采集时间，需重新查询现状。完整 `COLUMN_TYPE` 会增加元数据字节，超 `schema_limits.max_bytes` 时新快照不发布，旧快照过期后该目标不可用；公司 310 对象的字段规模和容量未测。Web 保留既有 `content`、结构化行和 `result_json`，以保持诊断/API 契约与原始值类型；64 KiB 合成 DDL 的响应约 193 KiB、原始结果约 64 KiB，即约 3.01 倍，属有界开销，公司代理与浏览器容量仍须按目标最大结果核对。使用与升级说明已更新。
+
+验证层级：受影响的 Adapter/结构/列库/DDL 离线 **278 passed**；SDK、Evidence、Channel、Web、飞书和诊断 **588 passed**（1 项既有非 loopback socket 阻断告警）；真实 Chrome **5 + 2 passed**（旧 2 项换空闲端口）。DDL 说明修订后又有相关离线 **74 passed**、PostgreSQL **84 passed**、Chrome **5 passed**。首次较大全量运行的 Web 诊断 5 个失败来自尝试省略 Web `content`，该尝试已撤销，对应诊断文件 **29 passed**；第二次全量运行至 **311 passed、49 deselected** 后中止，未宣称全量通过。Ruff、mypy（23 个源文件）与差异空白检查通过。修复后仍需新的精确 SHA 独立审查、真实模型和公司入口验收。
 
 ## 用户补充运行日志的结论
 

@@ -668,18 +668,25 @@ class StarRocksAdapter:
             raise StarRocksError(_Code.OBJECT_NOT_ALLOWED)
         started = time.monotonic()
 
-        async def verify_identity() -> None:
+        async def verify_identity() -> str:
             identity = await self._run(DDL_IDENTITY_SQL, (database, name), 1)
-            expected = {"id": table_id, "engine": "OLAP", "type": "BASE TABLE"}
             if (
                 identity.columns != ("id", "engine", "type")
                 or identity.truncated
-                or identity.rows != (expected,)
+                or len(identity.rows) != 1
                 or type(identity.rows[0]["id"]) is not int
             ):
                 raise StarRocksError(_Code.OBJECT_NOT_ALLOWED)
+            engine = identity.rows[0]["engine"]
+            if (
+                not isinstance(engine, str)
+                or engine not in ("OLAP", "CLOUD_NATIVE")
+                or identity.rows != ({"id": table_id, "engine": engine, "type": "BASE TABLE"},)
+            ):
+                raise StarRocksError(_Code.OBJECT_NOT_ALLOWED)
+            return engine
 
-        await verify_identity()
+        engine = await verify_identity()
         limits = _ReadLimits(
             max_bytes=self._target.max_result_bytes,
             max_value=self._target.max_ddl_bytes or self._target.max_value_bytes,
@@ -687,7 +694,8 @@ class StarRocksAdapter:
         )
         result = await self._run(sql, None, 1, limits=limits)
         # 即使内容超限也复核对象，不能把对象替换伪装成容量不足。
-        await verify_identity()
+        if await verify_identity() != engine:
+            raise StarRocksError(_Code.OBJECT_NOT_ALLOWED)
         if result.columns != ("Table", "Create Table"):
             raise StarRocksError(_Code.RESULT_CONTRACT)
         rows: tuple[dict[str, Scalar], ...] = ()

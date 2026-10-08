@@ -12,7 +12,7 @@
   const BIDI = /[\u061c\u200e\u200f\u202a-\u202e\u2066-\u2069]/g;
   const visible = (value) =>
     String(value).replace(BIDI, (c) => `\\u${c.charCodeAt(0).toString(16).padStart(4, "0")}`);
-  const cellText = (value) => value === null ? "NULL" :
+  const cellText = (value) => value === null ? "NULL（空值）" :
     value === undefined ? "（未提供）" : value === "" ? "（空字符串）" : value;
 
   const el = (tag, className, text) => {
@@ -45,7 +45,7 @@
     const meta = [`来源 ${fact.tool_id}`, `目标 ${fact.target_id}`, `采集于 ${fact.captured_at}`];
     details.append(el("p", "meta", `[${fact.evidence_id}] ${meta.join(" · ")}`));
     if (fact.truncated) box.append(el("p", "note", "结果已截断，当前显示的不是全部结果"));
-    if (fact.note) box.append(el("p", "note", `说明：${fact.note}`));
+    if (fact.note) details.append(el("p", "note", `说明：${fact.note}`));
     for (const [key, value] of Object.entries(fact.metadata || {})) {
       // 查询/续取信息折叠；其余获准字段完整显示，嵌套值由服务端编码为 JSON 文本。
       const technical = ["sql", "next_cursor", "row_count", "elapsed_ms"].includes(key);
@@ -60,7 +60,7 @@
         const tr = body.insertRow();
         for (const column of fact.columns) {
           const value = row[column];
-          tr.append(el("td", "", cellText(value)));
+          tr.append(el("td", value === null ? "null-value" : "", cellText(value)));
         }
       }
       const wrap = el("div", "table-wrap");
@@ -87,14 +87,18 @@
       if (data.delivery.facts.length) {
         for (const fact of data.delivery.facts) item.append(factTable(fact));
         if (data.delivery.analysis.length) {
-          const analysis = el("section", "analysis");
-          analysis.append(el("p", "meta", "分析与建议（模型推断，需结合依据判断）"));
+          const diagnose = item.dataset.mode === "diagnose";
+          const analysis = el(diagnose ? "section" : "details", "analysis");
+          analysis.append(el(diagnose ? "p" : "summary", "meta", "查看分析与建议（模型推断）"));
           for (const inference of data.delivery.analysis) {
             analysis.append(el("p", "content", inference.text));
             analysis.append(el("p", "meta", `依据：${inference.evidence_ids.join(", ")}`));
           }
           item.append(analysis);
         }
+      } else if (data.delivery.web_text !== null && data.delivery.web_text !== undefined) {
+        item.append(el("p", "meta", data.delivery.content.split("\n", 1)[0]));
+        item.append(el("p", "content reply-text", data.delivery.web_text));
       } else {
         item.append(el("p", "content", data.delivery.content));
       }
@@ -125,10 +129,11 @@
   const newRequestId = () =>
     Array.from(crypto.getRandomValues(new Uint8Array(16)), (b) => b.toString(16).padStart(2, "0")).join("");
 
-  const addTurn = (requestId, question) => {
+  const addTurn = (requestId, question, mode = "query") => {
     const item = el("li", "turn");
     item.dataset.requestId = requestId;
     item.dataset.question = question;
+    item.dataset.mode = mode;
     item.append(el("p", "question", question), el("p", "meta", `处理中 · 编号 ${requestId}`));
     turns.append(item);
     return item;
@@ -140,8 +145,8 @@
     const mode = document.getElementById("mode").value;
     if (!message.trim()) return;
     const requestId = newRequestId();
-    const item = addTurn(requestId, message);
-    remember([...remembered(), { requestId, question: message }]);
+    const item = addTurn(requestId, message, mode);
+    remember([...remembered(), { requestId, question: message, mode }]);
     form.reset();
     const { status, data } = await fetchJson("/api/turns", {
       method: "POST",
@@ -167,9 +172,9 @@
     }
   });
 
-  for (const { requestId, question } of remembered()) {
+  for (const { requestId, question, mode } of remembered()) {
     if (typeof requestId === "string" && typeof question === "string") {
-      poll(addTurn(requestId, question));
+      poll(addTurn(requestId, question, mode === "diagnose" ? mode : "query"));
     }
   }
 })();

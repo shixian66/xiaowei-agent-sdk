@@ -284,6 +284,8 @@ class Delivery(_Trusted):
     facts: tuple[DeliveryFact, ...] = ()
     analysis: tuple[AnswerInference, ...] = ()
     """Web 独立渲染的模型分析；仅由证据验证后的回答生成，不在事实表格中混排。"""
+    web_text: str | None = None
+    """Web 澄清或未执行建议的原文；飞书仍使用单行转义的 ``content``。"""
     layout: DeliveryLayout | None = Field(default=None, exclude=True)
 
     @model_validator(mode="after")

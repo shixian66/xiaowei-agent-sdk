@@ -18,6 +18,7 @@ import re
 import socket
 from collections.abc import AsyncIterator, Iterator
 from contextlib import asynccontextmanager, contextmanager
+from dataclasses import replace
 from typing import Any
 
 import pytest
@@ -25,7 +26,15 @@ import uvicorn
 from tests.sdk_core import synthetic_tools
 from tests.sdk_core.browser import Page, launch
 from tests.sdk_core.synthetic_tools import QUERY_TOOL
-from tests.sdk_core.test_app import MODEL_SECRET, after, cite, tool_call, upstream_error
+from tests.sdk_core.test_app import (
+    MODEL_SECRET,
+    after,
+    answer,
+    cite,
+    clarify,
+    tool_call,
+    upstream_error,
+)
 from tests.sdk_core.test_channel_service import Env
 from tests.sdk_core.test_channel_service import env as env  # pytest fixture
 from tests.sdk_core.test_web import HOSTILE, ORIGIN, config
@@ -147,9 +156,16 @@ async def test_send_works_without_secure_context_apis(env: Env, chrome_binary: s
     assert env.model_calls(message) == 2
 
 
-async def test_compact_facts_and_multiline_analysis(env: Env, chrome_binary: str) -> None:
+async def test_compact_facts_and_multiline_analysis(
+    env: Env, chrome_binary: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
     app = create_web_app(env.service, config())
     inference = "第一行\n第二行 <script>alert(1)</script>"
+    catalog = env.evidence._catalog
+    policy = catalog._policies["synthetic.region"]
+    monkeypatch.setitem(
+        catalog._policies, "synthetic.region", replace(policy, fact_note="长期重复的固定说明")
+    )
     message = env.scripts.add(
         "只看查询结果", tool_call("order_total", region="east"), cite(inference)
     )
@@ -160,17 +176,43 @@ async def test_compact_facts_and_multiline_analysis(env: Env, chrome_binary: str
         await settled(page, 0, "completed")
         rendered = await page.evaluate(f"{item(0)}.innerText")
         assert "已回复" in rendered and "已完成" not in rendered
-        assert "第一行" in rendered and rendered.count("第二行") == 1
+        assert "第一行" not in rendered and "长期重复的固定说明" not in rendered
         assert '"rows":' not in rendered
         assert await table_rows(page, 0) == [2]
         assert (
             await page.evaluate(f"{item(0)}.querySelector('.analysis .content').textContent")
             == inference
         )
-        assert await page.evaluate(f"{item(0)}.querySelector('details').open") is False
-        await page.evaluate(f"{item(0)}.querySelector('summary').click()")
-        assert "来源 local/order_total" in await page.evaluate(f"{item(0)}.innerText")
+        assert await page.evaluate(f"{item(0)}.querySelector('details.evidence').open") is False
+        await page.evaluate(f"{item(0)}.querySelector('details.evidence summary').click()")
+        expanded = await page.evaluate(f"{item(0)}.innerText")
+        assert "来源 local/order_total" in expanded and "长期重复的固定说明" in expanded
+        await page.evaluate(f"{item(0)}.querySelector('details.analysis summary').click()")
+        expanded = await page.evaluate(f"{item(0)}.innerText")
+        assert "第一行" in expanded and expanded.count("第二行") == 1
         assert await page.evaluate("document.scripts.length") == 1
+
+
+async def test_multiline_clarification_and_sql_advice_are_readable_in_web(
+    env: Env, chrome_binary: str
+) -> None:
+    app = create_web_app(env.service, config())
+    clarification = "请补充条件：\n\n日期与地区\u202e"
+    sql = "SELECT 1\nFROM t\nWHERE id = 2\u202e"
+    ask = env.scripts.add("请澄清", clarify(clarification))
+    draft = env.scripts.add("只写 SQL", lambda call: answer([], "", advice=sql))
+    async with serving(app, port=18501), launch(chrome_binary) as chrome:
+        page = await chrome.page()
+        await page.navigate("http://127.0.0.1:18501/")
+        for index, (message, expected) in enumerate(((ask, clarification), (draft, sql))):
+            await send(page, message)
+            await settled(page, index, "completed")
+            selector = f"{item(index)}.querySelector('.reply-text')"
+            shown = await page.evaluate(f"{selector}.textContent")
+            assert shown == expected.replace("\u202e", r"\u202e")
+            assert r"\n" not in shown and "\u202e" not in shown
+            assert await page.evaluate(f"getComputedStyle({selector}).whiteSpace") == "pre-wrap"
+            assert await table_rows(page, index) == []
 
 
 @pytest.mark.parametrize("nested_rows", [False, True])
@@ -178,7 +220,10 @@ async def test_compact_preserves_exact_values(
     env: Env, chrome_binary: str, monkeypatch: pytest.MonkeyPatch, nested_rows: bool
 ) -> None:
     big = 9007199254740993
-    values = {"id": big, "negative": -big, "missing": None, "empty": "", "active": True}
+    values = {
+        "id": big, "negative": -big, "missing": None, "empty": "", "active": True,
+        "literal_null": "NULL",
+    }
     payload = {
         "region": {"ids": [big], "note": "<script>alert(1)</script>"},
         "total": big,
@@ -205,7 +250,8 @@ async def test_compact_preserves_exact_values(
             cells = await page.evaluate(
                 f"[...{item(0)}.querySelectorAll('td')].map(cell => cell.textContent)"
             )
-            assert cells == [str(big), str(-big), "NULL", "（空字符串）", "true"]
+            assert cells == [str(big), str(-big), "NULL（空值）", "（空字符串）", "true", "NULL"]
+            assert await page.evaluate(f"{item(0)}.querySelectorAll('td.null-value').length") == 1
         original = await page.evaluate(f"{item(0)}.querySelector('pre.original').textContent")
         assert json.loads(original) == {k: v for k, v in payload.items() if k != "private_note"}
 

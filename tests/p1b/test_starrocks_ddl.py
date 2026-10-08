@@ -86,6 +86,24 @@ async def test_internal_ddl_is_exact_and_uses_bound_identity_checks() -> None:
     assert target.max_value_bytes == TARGET.max_value_bytes
 
 
+async def test_cloud_native_internal_table_is_allowed_but_engine_change_is_not() -> None:
+    cloud = Result(("id", "engine", "type"), [(101, "CLOUD_NATIVE", "BASE TABLE")])
+    drv = ddl_driver(before=cloud, after=cloud)
+    result = await adapter(drv, configured(max_ddl_bytes=800)).show_create_table(
+        "shop", "sales", 101
+    )
+    assert result.rows == ({"ddl": DDL},)
+    assert statements(drv) == [IDENTITY_SQL, SHOW_SQL, IDENTITY_SQL]
+
+    changed = ddl_driver(before=cloud)
+    with pytest.raises(StarRocksError) as raised:
+        await adapter(changed, configured(max_ddl_bytes=800)).show_create_table(
+            "shop", "sales", 101
+        )
+    assert raised.value.code == StarRocksErrorCode.OBJECT_NOT_ALLOWED
+    assert statements(changed) == [IDENTITY_SQL, SHOW_SQL, IDENTITY_SQL]
+
+
 @pytest.mark.parametrize(
     "row",
     [
@@ -93,6 +111,8 @@ async def test_internal_ddl_is_exact_and_uses_bound_identity_checks() -> None:
         (101, "HIVE", "BASE TABLE"),
         (101, "VIEW", "VIEW"),
         (101, "OLAP", "MATERIALIZED VIEW"),
+        (101, "CLOUD_NATIVE", "MATERIALIZED VIEW"),
+        (101, 1, "BASE TABLE"),
         (102, "OLAP", "BASE TABLE"),
         ("101", "OLAP", "BASE TABLE"),
         (True, "OLAP", "BASE TABLE"),

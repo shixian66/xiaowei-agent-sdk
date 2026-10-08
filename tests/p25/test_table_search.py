@@ -10,6 +10,7 @@ import json
 from typing import Any
 
 import pytest
+from asyncmy.errors import OperationalError
 from tests.p1b.test_starrocks_adapter import TARGET, Result
 from tests.p25.test_schema_scope import Clock, Tables, Tools, World, cache_for, forget, statements
 
@@ -150,6 +151,58 @@ async def test_database_names_are_complete_paginated_and_currently_readable() ->
     assert all(p.payload["columns"] == ["database"] for p in pages)
     assert [d.database for p in pages for d in p.dependencies] == ["crm", "hr", "shop"]
     assert all(fits(p) for p in pages)
+
+
+async def test_database_listing_batches_probes_and_resumes_a_revoked_large_database() -> None:
+    tables = {
+        **{(db, "visible"): (("id", "int", "NO", None),) for db in "abcd"},
+        **{("z", f"t{i:02d}"): (("id", "int", "NO", None),) for i in range(40)},
+    }
+    t = await search_tools(tables, {})
+    t.world.denied = {key for key in tables if key[0] == "z"}
+    first = await t.call("local/list_databases", page_size=5, cursor=None)
+    assert first.payload["rows"] == [{"database": db} for db in "abcd"]
+    assert [d.database for d in first.dependencies] == list("abcd")
+    assert first.truncated and first.payload["next_cursor"] is not None
+    assert t.drv.attempts <= 5  # 首批四库一连接，撤权库分批探测；逐对象连接会超出。
+    assert len([s for s in statements(t.drv) if s.startswith("SELECT 1 FROM")]) <= 32
+
+    forget(t.drv)
+    second = await t.call(
+        "local/list_databases", page_size=5, cursor=first.payload["next_cursor"]
+    )
+    assert second.payload["rows"] == [] and second.payload["next_cursor"] is None
+    assert not second.truncated and t.drv.attempts <= 3
+    assert len([s for s in statements(t.drv) if s.startswith("SELECT 1 FROM")]) == 12
+
+
+async def test_database_listing_does_not_skip_a_late_readable_object() -> None:
+    tables = {
+        **{("a", f"t{i:02d}"): (("id", "int", "NO", None),) for i in range(40)},
+        ("b", "visible"): (("id", "int", "NO", None),),
+    }
+    t = await search_tools(tables, {})
+    t.world.denied = {key for key in tables if key[0] == "a" and key[1] != "t39"}
+    pages = await walk(t, "local/list_databases", page_size=5)
+    assert [p.payload["rows"] for p in pages] == [[], [{"database": "a"}, {"database": "b"}]]
+    assert [[(d.database, d.name) for d in p.dependencies] for p in pages] == [
+        [], [("a", "t39"), ("b", "visible")]
+    ]
+    assert sum(1 for s in statements(t.drv) if s.startswith("SELECT 1 FROM")) <= 42
+
+
+async def test_database_listing_probe_failure_does_not_return_partial_page() -> None:
+    tables = {
+        ("a", "visible"): (("id", "int", "NO", None),),
+        **{("z", f"t{i:02d}"): (("id", "int", "NO", None),) for i in range(12)},
+    }
+    t = await search_tools(tables, {})
+    t.world.denied = {key for key in tables if key[0] == "z"}
+    t.world.overrides[probe_sql("z", "t04")] = OperationalError(1105, "connection failed")
+    with pytest.raises(StarRocksError) as error:
+        await t.call("local/list_databases", page_size=2, cursor=None)
+    assert error.value.code == StarRocksErrorCode.QUERY_FAILED
+    assert t.drv.attempts == 2
 
 
 @pytest.mark.parametrize("tool", [LIST_TABLES, DESCRIBE_TABLE])

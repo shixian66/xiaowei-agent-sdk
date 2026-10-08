@@ -15,6 +15,7 @@
 过滤与页大小，表结构为库与表），快照内容或参数改变后在 I/O 前拒绝；单个对象或单列就放不下一个
 结果时同样在 I/O 前拒绝，不让模型反复缩小页。
 ``local/list_databases`` 只列有可读对象的库；每库重新探测至少一个可读对象作为证据依赖。
+每页最多探测 32 个对象，批量复用连接；游标可停在一个库的对象之间，直到确认可读或查完才越过该库。
 ``local/describe_table_layout`` 同样先探测，再读该表的布局；两个 ``describe`` 工具按
 ``database`` 与 ``table`` 定位快照中的对象。``local/run_readonly_query`` 只执行 SQLGuard
 产生的 ``GuardedQuery``，``local/explain_query`` 只以 Adapter 的固定显式级别 EXPLAIN
@@ -151,9 +152,11 @@ LAYOUT_NOTE: Final = (
     "buckets 是元数据原值，值为 0 时不能据此确认实际桶数或自动扩缩容。"
 )
 DDL_NOTE: Final = (
-    "这是服务器 SHOW CREATE TABLE 返回的普通内部表当前定义，包含默认值与表属性；"
+    "这是采集时服务器 SHOW CREATE TABLE 返回的普通内部表定义，包含默认值与表属性；"
     "服务器可能规范化语句或补充默认属性，不保证等于最初提交的 SQL。"
-    "分区定义不等于当前分区状态列表；标记截断时原文未返回。"
+    "历史回放核对采集时的列仍存在且类型不变，不因新增列、属性或分区变化而失效；"
+    "分区定义不等于当前分区状态列表。"
+    "标记截断时原文未返回。"
 )
 DDL_TOO_LARGE: Final = (
     "内部表 DDL 超过 max_ddl_bytes（未配置时为 max_value_bytes）或 max_result_bytes 限额，"
@@ -177,6 +180,8 @@ PLAN_NOTE: Final = (
 RESULT_FIELDS: Final = ("sql", "columns", "rows", "row_count", "elapsed_ms")
 PAGED_FIELDS: Final = (*RESULT_FIELDS, "next_cursor")
 """搜表与表结构另带续取游标：还有未交付的对象或列时非空（见 ``_cursor``）。"""
+_DATABASE_PROBE_LIMIT: Final = 32
+_DATABASE_FALLBACK_BATCH: Final = 8
 DDL_FIELDS: Final = (*RESULT_FIELDS, "message")
 # JSON 转义膨胀最大的单字节字符：控制字符写作 \u00XX，一个字节变六个。
 _WIDEST_CHAR: Final = "\x01"
@@ -364,39 +369,82 @@ def starrocks_tools(
             raise ToolRejectedError(f"列库未执行：page_size 须在 1 到 {page_rows} 之间")
         scope = ("list_databases", size)
         start = _resume(request.arguments["cursor"], snapshot, scope)
-        databases = sorted({key[0] for key in snapshot.objects})
-        if start and start >= len(databases):
+        objects = sorted(snapshot.objects)
+        if start and start >= len(objects):
             raise ToolRejectedError(CURSOR_INVALID)
-        candidates = databases[start : start + size]
+        candidates = list(dict.fromkeys(key[0] for key in objects[start:]))[:size]
         count = fitting_rows([{"database": name} for name in candidates], size, target)
         if candidates and count == 0:
             raise ToolRejectedError("列库未执行：下一个库名超过结果容量，无法列出")
-        end = start + count
-        following = _cursor(snapshot.version, scope, end) if end < len(databases) else None
-        return _DatabasePage(snapshot, tuple(candidates[:count]), following)
+        selected = set(candidates[:count])
+        end = start
+        for database, _ in objects[start:]:
+            if database not in selected:
+                break
+            end += 1
+        return _DatabasePage(snapshot, tuple(objects[start:end]), start, scope)
 
     async def list_databases(page: _DatabasePage) -> ToolObservation:
         started = time.monotonic()
-        shown: list[tuple[str, str]] = []
-        # 每个库找到一个当前可读的对象作证据依赖；整个库撤权时不列出它。
-        for database in page.databases:
-            for key in sorted(k for k in page.snapshot.objects if k[0] == database):
-                if (await adapter.probe([key]))[key]:
-                    shown.append(key)
+        groups: dict[str, list[tuple[str, str]]] = {}
+        for key in page.keys:
+            groups.setdefault(key[0], []).append(key)
+        positions = {database: 0 for database in groups}
+        found: dict[str, tuple[str, str]] = {}
+        used = 0
+        first_batch = True
+        while used < _DATABASE_PROBE_LIMIT:
+            batch: list[tuple[str, str]] = []
+            for database, keys in groups.items():
+                if database in found or positions[database] == len(keys):
+                    continue
+                room = _DATABASE_PROBE_LIMIT - used - len(batch)
+                if room == 0:
                     break
+                take = min(
+                    1 if first_batch else _DATABASE_FALLBACK_BATCH,
+                    room,
+                    len(keys) - positions[database],
+                )
+                batch.extend(keys[positions[database] : positions[database] + take])
+            if not batch:
+                break
+            verdicts = await adapter.probe(batch)
+            for key in batch:
+                database = key[0]
+                positions[database] += 1
+                if verdicts[key] and database not in found:
+                    found[database] = key
+            used += len(batch)
+            first_batch = False
+
+        shown: list[tuple[str, str]] = []
+        end = page.start
+        for database, keys in groups.items():
+            if database not in found and positions[database] < len(keys):
+                end += positions[database]
+                break  # 后面的库即使已探测成功，也须下一页重验，避免重复或漏库。
+            if database in found:
+                shown.append(found[database])
+            end += len(keys)
+        following = (
+            _cursor(page.snapshot.version, page.scope, end)
+            if end < len(page.snapshot.objects)
+            else None
+        )
         result = _from_snapshot(
             page.snapshot,
             SCHEMA_OBJECTS_SQL,
             ("database",),
             tuple({"database": db} for db, _ in shown),
-            page.following is not None,
+            following is not None,
             started,
         )
         return _observation(
             result,
             bounds,
             [listed_dependency(*key) for key in shown],
-            extra={"next_cursor": page.following},
+            extra={"next_cursor": following},
         )
 
     def check_search(request: ToolRequest) -> _Page:
@@ -515,7 +563,7 @@ def starrocks_tools(
 
     async def show_create_table(checked: tuple[ObjectInfo, int]) -> ToolObservation:
         found, table_id = checked
-        # check_ddl 已拒绝缺失 ID；Adapter 再核对当前 ID、类型和 OLAP 引擎，且在返回前复核。
+        # check_ddl 已拒绝缺失 ID；Adapter 再核对当前 ID、类型和内部表引擎，且在返回前复核。
         # 不先探测外表；SHOW CREATE 自身要求 SELECT，记录/交付时仍复核当前权限与版本。
         result = await adapter.show_create_table(found.database, found.name, table_id)
         return _observation(
@@ -818,8 +866,9 @@ class _SlowQueries:
 @dataclass(frozen=True)
 class _DatabasePage:
     snapshot: SchemaSnapshot
-    databases: tuple[str, ...]
-    following: str | None
+    keys: tuple[tuple[str, str], ...]
+    start: int
+    scope: tuple[object, ...]
 
 
 @dataclass(frozen=True)

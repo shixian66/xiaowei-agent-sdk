@@ -347,7 +347,12 @@ class EvidenceStore:
             await self._context_readable(ctx, channel, context, history=history)
             ((header, text),) = unverified
             content = f"{header}\n{_one_line(text)}"
-            return Delivery(content=content, evidence_ids=(), channel=channel)
+            return Delivery(
+                content=content,
+                evidence_ids=(),
+                channel=channel,
+                web_text=text if channel == "web" else None,
+            )
 
         cited = answer.evidence_ids
         if not cited:

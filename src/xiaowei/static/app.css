@@ -7,6 +7,7 @@ header { display: flex; align-items: center; justify-content: space-between; }
 .question { font-weight: 600; }
 .meta, .notice { color: #888; font-size: 0.85em; }
 .note { font-size: 0.85em; }
+.null-value { font-style: italic; background: #8882; }
 .failed .content { color: #c33; }
 .table-wrap { overflow-x: auto; }
 table { border-collapse: collapse; margin: 8px 0; }
