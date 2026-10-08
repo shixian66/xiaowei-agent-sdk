@@ -16,6 +16,7 @@ import re
 from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
 from dataclasses import replace
+from enum import StrEnum
 from typing import Annotated, Literal, cast
 
 import httpx2
@@ -146,8 +147,70 @@ class ModelRequestRejectedError(ModelAPIRejectedError):
     """请求在发出前被拒绝。"""
 
 
+class ResponseRejectReason(StrEnum):
+    """阶段日志可用的固定拒收码；不从响应正文或异常消息拼接。"""
+
+    OTHER = "other"
+    TOO_LARGE = "too_large"
+    INVALID_JSON = "invalid_json"
+    UNSUPPORTED_ENCODING = "unsupported_encoding"
+    UNSUPPORTED_STREAM = "unsupported_stream"
+    INCOMPLETE_CHAT = "incomplete_chat"
+    NOT_SINGLE_CANDIDATE = "not_single_candidate"
+    FINISH_REASON_UNSPECIFIED = "finish_reason_unspecified"
+    FINISH_REASON_MAX_TOKENS = "finish_reason_max_tokens"
+    FINISH_REASON_SAFETY = "finish_reason_safety"
+    FINISH_REASON_RECITATION = "finish_reason_recitation"
+    FINISH_REASON_OTHER = "finish_reason_other"
+    FINISH_REASON_BLOCKLIST = "finish_reason_blocklist"
+    FINISH_REASON_PROHIBITED_CONTENT = "finish_reason_prohibited_content"
+    FINISH_REASON_SPII = "finish_reason_spii"
+    FINISH_REASON_MALFORMED_FUNCTION_CALL = "finish_reason_malformed_function_call"
+    FINISH_REASON_MODEL_ARMOR = "finish_reason_model_armor"
+    FINISH_REASON_IMAGE_SAFETY = "finish_reason_image_safety"
+    FINISH_REASON_IMAGE_PROHIBITED_CONTENT = "finish_reason_image_prohibited_content"
+    FINISH_REASON_IMAGE_RECITATION = "finish_reason_image_recitation"
+    FINISH_REASON_IMAGE_OTHER = "finish_reason_image_other"
+    FINISH_REASON_UNEXPECTED_TOOL_CALL = "finish_reason_unexpected_tool_call"
+    FINISH_REASON_NO_IMAGE = "finish_reason_no_image"
+    INVALID_CONTENT = "invalid_content"
+    UNSUPPORTED_PART = "unsupported_part"
+    UNKNOWN_TOOL = "unknown_tool"
+    INVALID_ARGS = "invalid_args"
+    INVALID_SIGNATURE = "invalid_signature"
+    INVALID_CALL_ID = "invalid_call_id"
+
+
+# Vertex v1beta1 GenerateContentResponse.FinishReason 的公开枚举。未知值一律归为 other，
+# 不把供应商提供的字符串写入日志。
+_VERTEX_FINISH_REASONS = {
+    "FINISH_REASON_UNSPECIFIED": ResponseRejectReason.FINISH_REASON_UNSPECIFIED,
+    "MAX_TOKENS": ResponseRejectReason.FINISH_REASON_MAX_TOKENS,
+    "SAFETY": ResponseRejectReason.FINISH_REASON_SAFETY,
+    "RECITATION": ResponseRejectReason.FINISH_REASON_RECITATION,
+    "OTHER": ResponseRejectReason.FINISH_REASON_OTHER,
+    "BLOCKLIST": ResponseRejectReason.FINISH_REASON_BLOCKLIST,
+    "PROHIBITED_CONTENT": ResponseRejectReason.FINISH_REASON_PROHIBITED_CONTENT,
+    "SPII": ResponseRejectReason.FINISH_REASON_SPII,
+    "MALFORMED_FUNCTION_CALL": ResponseRejectReason.FINISH_REASON_MALFORMED_FUNCTION_CALL,
+    "MODEL_ARMOR": ResponseRejectReason.FINISH_REASON_MODEL_ARMOR,
+    "IMAGE_SAFETY": ResponseRejectReason.FINISH_REASON_IMAGE_SAFETY,
+    "IMAGE_PROHIBITED_CONTENT": ResponseRejectReason.FINISH_REASON_IMAGE_PROHIBITED_CONTENT,
+    "IMAGE_RECITATION": ResponseRejectReason.FINISH_REASON_IMAGE_RECITATION,
+    "IMAGE_OTHER": ResponseRejectReason.FINISH_REASON_IMAGE_OTHER,
+    "UNEXPECTED_TOOL_CALL": ResponseRejectReason.FINISH_REASON_UNEXPECTED_TOOL_CALL,
+    "NO_IMAGE": ResponseRejectReason.FINISH_REASON_NO_IMAGE,
+}
+
+
 class ModelResponseRejectedError(ModelAPIRejectedError):
     """响应在交给 SDK 解析前被拒绝：超限、压缩、非 JSON 或非完整终态。"""
+
+    def __init__(
+        self, message: str, reason: ResponseRejectReason = ResponseRejectReason.OTHER
+    ) -> None:
+        super().__init__(message)
+        self.reject_reason = reason
 
 
 def profile_fingerprint(profile: ModelProfile) -> str:
@@ -171,7 +234,7 @@ def settings_for(profile: ModelProfile) -> ModelSettings:
         ),
         # Responses 默认在服务端保存对话；Chat Completions 不发送该字段。
         store=False if profile.api_mode == "responses" else None,
-        # 并行工具调用未经验证，不使用供应商默认值（通常为开启）。
+        # OpenAI 协议族仍请求串行；Vertex 不映射此参数，但会接收合法的多调用响应。
         parallel_tool_calls=False,
         retry=ModelRetrySettings(max_retries=0),
         timeout=profile.request_timeout_seconds,
@@ -356,16 +419,23 @@ class _GuardedTransport(httpx2.AsyncBaseTransport):
     async def _read_bounded(self, response: httpx2.Response) -> bytes:
         """按实际读取的字节计数；不依赖可伪造的 Content-Length。"""
         if response.headers.get("content-encoding", "identity").lower() != "identity":
-            raise ModelResponseRejectedError("模型响应使用了压缩编码，无法按字节上限读取")
+            raise ModelResponseRejectedError(
+                "模型响应使用了压缩编码，无法按字节上限读取",
+                ResponseRejectReason.UNSUPPORTED_ENCODING,
+            )
         stream = response.stream
         if not isinstance(stream, httpx2.AsyncByteStream):
-            raise ModelResponseRejectedError("模型响应不是异步字节流")
+            raise ModelResponseRejectedError(
+                "模型响应不是异步字节流", ResponseRejectReason.UNSUPPORTED_STREAM
+            )
         chunks: list[bytes] = []
         received = 0
         async for chunk in stream:
             received += len(chunk)
             if received > self._max_response_bytes:
-                raise ModelResponseRejectedError("模型响应超过 Profile 的响应字节上限")
+                raise ModelResponseRejectedError(
+                    "模型响应超过 Profile 的响应字节上限", ResponseRejectReason.TOO_LARGE
+                )
             chunks.append(chunk)
         return b"".join(chunks)
 
@@ -373,8 +443,10 @@ class _GuardedTransport(httpx2.AsyncBaseTransport):
         # 流式（SSE）与非 JSON 成功响应未经验证，不交给 SDK 解析。
         try:
             payload = json.loads(content)
-        except ValueError:
-            raise ModelResponseRejectedError("模型成功响应不是合法 JSON") from None
+        except (ValueError, RecursionError):
+            raise ModelResponseRejectedError(
+                "模型成功响应不是合法 JSON", ResponseRejectReason.INVALID_JSON
+            ) from None
         if self._check_success is not None:
             self._check_success(payload)
 
@@ -385,21 +457,33 @@ class _GuardedTransport(httpx2.AsyncBaseTransport):
 def _require_complete_chat(payload: object) -> None:
     choices = payload.get("choices") if isinstance(payload, dict) else None
     if not isinstance(choices, list) or not choices:
-        raise ModelResponseRejectedError("模型响应没有完整的 Chat Completions 终态")
+        raise ModelResponseRejectedError(
+            "模型响应没有完整的 Chat Completions 终态", ResponseRejectReason.INCOMPLETE_CHAT
+        )
     for choice in choices:
         reason = choice.get("finish_reason") if isinstance(choice, dict) else None
         if reason not in _COMPLETE_CHAT_FINISH_REASONS:
-            raise ModelResponseRejectedError("模型响应没有完整的 Chat Completions 终态")
+            raise ModelResponseRejectedError(
+                "模型响应没有完整的 Chat Completions 终态", ResponseRejectReason.INCOMPLETE_CHAT
+            )
 
 
 def _require_complete_vertex(payload: object) -> None:
     """Vertex 只有单候选、完整 ``STOP`` 终态交给适配器；截断、过滤、缺失或未知终态都拒绝。"""
     candidates = payload.get("candidates") if isinstance(payload, dict) else None
     if not isinstance(candidates, list) or len(candidates) != 1:
-        raise ModelResponseRejectedError("模型响应不是单个候选")
+        raise ModelResponseRejectedError(
+            "模型响应不是单个候选", ResponseRejectReason.NOT_SINGLE_CANDIDATE
+        )
     (candidate,) = candidates
     if not isinstance(candidate, dict) or candidate.get("finishReason") != "STOP":
-        raise ModelResponseRejectedError("模型响应没有完整的 STOP 终态")
+        reason = candidate.get("finishReason") if isinstance(candidate, dict) else None
+        raise ModelResponseRejectedError(
+            "模型响应没有完整的 STOP 终态",
+            _VERTEX_FINISH_REASONS.get(reason, ResponseRejectReason.FINISH_REASON_OTHER)
+            if isinstance(reason, str)
+            else ResponseRejectReason.FINISH_REASON_OTHER,
+        )
 
 
 class _JsonObjectModel(Model):

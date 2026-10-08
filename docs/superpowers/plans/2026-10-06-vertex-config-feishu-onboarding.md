@@ -386,18 +386,17 @@ uv run --locked --extra dev python -m pytest tests/sdk_core/test_vertex_model.py
   文本上的 signature 不进入 Session；usage 只取已知整数计数。
 - 单一 functionCall → 非空唯一 UUID call ID、函数名/JSON 参数、`provider_data.thought_signature`。
 - 后续 functionCall output 依据 input 中同一 call ID 还原正确函数名；相邻两个并发 Runner 使用相同工具名时不串线。
-- 未知工具、非对象参数、缺/错 signature、多个 candidates、一个 candidate 多个 functionCall、文本和 functionCall 混合、未知 Part、缺失/未知 finishReason、非 `STOP` 均拒绝。
+- 未知工具、非对象参数、首个 functionCall 缺/错 signature、多个 candidates、未知内容 Part、缺失/未知 finishReason、非 `STOP` 均拒绝；同一步多个 functionCall、文本和 functionCall 混合、空文本 Part 为正常形态，按下述线上反馈修订处理。
 - 401/403、429、5xx、超时、取消、非法 JSON、压缩、响应超限为固定异常；0 次自动重试。
-- 多函数调用在生成任何 SDK tool output item前失败，因此工具执行列表为空。
+- 单候选里有未知工具或非法参数时，在把工具调用交给 SDK Runner 前失败，因此工具执行列表为空；合法多调用由 Runner 执行，每次分别受治理。
 
 实现时：
 
 - Vertex 没有稳定 call ID 时用 `uuid.uuid4()`；唯一性由每次响应生成，不依赖全局递增状态。
 - 只接受一个 candidate 和完整 `STOP`。
-- functionCall 必须带非空 thought signature；作为原调用 Part 的 opaque 数据返回 SDK。
-- 一次多调用直接失败，不部分执行。
-- 只有 signature、没有 `text` 或 `functionCall` 的 Part 仍是不支持的 Part；把任何含
-  `thoughtSignature` 的文本 Part 误判为未知 Part 的隔离变异必须被文本成功用例抓到。
+- Gemini 3 同一步多个 functionCall 只要求首个带非空 thought signature；已有签名在回放时留在原调用 Part，后续无签名调用保持无签名。一次多调用全部交给 SDK Runner，各自经治理层核权并占预算。
+- 同时返回文本与调用时只用调用；该文本不进入 Session 或交付。`thought=true` 的文本、只有 signature 或其他公开元数据的空 Part、空文本 Part 不作为最终回答；已识别 Part 上公开的无关元数据字段不阻断。未知内容字段、混合多种内容类型和 `thought=true` 的函数调用在工具 I/O 前拒绝；只有思考或空 Part 而无有效回答时拒绝。
+- 同批调用与结果分别组成连续 Parts 再发回 Vertex，不交错调用与结果；锁定 SDK 的公开 `ToolExecutionConfig` 限制本地函数工具并发为 4。
 
 ### Step 4：Runner 工具往返与强制结构化最终回答
 
@@ -406,7 +405,7 @@ uv run --locked --extra dev python -m pytest tests/sdk_core/test_vertex_model.py
 1. 第一次返回单一 functionCall；
 2. 第二次在看见原 functionCall + signature + functionResponse 后返回符合 `AgentAnswer` 的 JSON。
 
-断言同一请求形状持续包含工具声明和 `responseJsonSchema`，工具恰好执行一次，最终 `AgentAnswer` 类型有效。删除工具声明、删除 schema、删除 signature、改成多调用等变异必须失败。
+断言同一请求形状持续包含工具声明和 `responseJsonSchema`，该单调用样例的工具恰好执行一次，最终 `AgentAnswer` 类型有效。删除工具声明、删除 schema 或首个调用的 signature 等变异必须失败；多调用另用专门用例覆盖。
 
 运行：
 
@@ -421,7 +420,7 @@ uv run --locked --extra dev mypy src/xiaowei
 ### V1-A 成功、关键失败与审查 Gate
 
 - **成功：** 真 Runner 在协议替身上完成一次工具往返和强制类型化回答；现有 Provider 回归通过。
-- **关键失败：** 非完整终态、多个调用、签名/关联异常在工具 I/O 前失败；已执行工具后的第二次模型失败不重跑工具。
+- **关键失败：** 非完整终态、首个调用缺签名、未知工具或参数异常在工具 I/O 前失败；已执行工具后的第二次模型失败不重跑工具。
 - **审查：** 重点检查是否只用公开 Model 接口、transport 泛化是否改变旧 Provider、并发时是否共享调用映射。
 - **建议提交：** `feat: add guarded Vertex express model adapter`
 
@@ -710,15 +709,13 @@ Profile 代表操作者保留的旧配置；当前镜像的 Compose 测试仍使
   无查询意图：每次预期 0 次工具执行并返回有效 advice/clarification。每次使用独立新会话，合计至少
   19/20 完整成功。
 - 结构化输出、signature、call ID、工具结果关联、未知工具、非 `STOP` 等**协议/安全失败必须为 0**。
-- 多函数调用出现次数上限为 **0/20**；出现一次即保持 Vertex 未开放，并单独评估统一多调用契约。
-- “文本 + functionCall 混合响应”单列计数，属于协议失败且必须为 **0/20**；不能并入普通模型失败。
+- 多函数调用及“文本 + functionCall 混合响应”单列计数；这些正常形态应成功走完治理、Evidence 与 Session。拒收或错误回放计入协议失败，不以出现次数为阻断条件。
 - 允许最多 1/20 为明确的瞬时 429/5xx；必须按固定错误失败、0 次自动重试、0 次工具重放，并原样
   计入报告，不能补跑替换该样本。客户端请求期限命中单列为 `deadline_exceeded`，不算可接受瞬时失败：
   先调整已批准 Profile 的期限，再从头运行同一批 20 次。
 - 每次记录耗时、可得 `thoughtsTokenCount` 和预期/实际工具次数。通过批次中最慢成功样本必须不超过
   Profile 请求期限的 80%；否则仍视为期限余量不足，调整期限后整批重跑。
-- 报告必须说明：即使多函数调用为 0/20，也只得到该批观测为零；按单侧 95% 零事件上界，真实发生率
-  仍可能约为 13.9%。以后更换正式模型或需要更强置信度时扩大样本，不能把 0/20 写成“不可能发生”。
+- 报告必须说明实际观察到的多调用和混合响应次数；样本中没出现，只能说明本批次未覆盖该形态，不能用零出现证明真实模型不会产生。
 
 **C. 跨轮 Session 组：**
 
@@ -733,7 +730,7 @@ Profile 代表操作者保留的旧配置；当前镜像的 Compose 测试仍使
 - Express Mode API Key 不能通过固定 `x-goog-api-key` 头调用既定 `generateContent`；
 - 工具声明与 `responseJsonSchema` 不能在同一请求稳定工作；
 - function call signature 无法通过公开 SDK item 在同轮或跨轮保存/回传；
-- 模型经常产生多函数调用，超过 0/20；
+- 多函数调用无法经过受治理工具、Evidence 与 Session 正确完成；
 - 最终 `AgentAnswer` 只能靠提示词 JSON、放宽 schema 或绕过 Evidence 才能成功。
 
 ### 9.3 候选镜像与正式入口
@@ -761,7 +758,7 @@ git diff --check
 
 ### I-V 成功与证据边界
 
-- **开放门槛：** A 5/5；B 至少 19/20 且协议/安全失败 0、多调用 0/20；C 5/5；同一候选正式入口成功一次。
+- **开放门槛：** A 5/5；B 至少 19/20 且协议/安全失败 0，多调用或混合响应出现时须正确完成；C 5/5；同一候选正式入口成功一次。
 - **替身能证明：** 请求/响应映射、错误分类、限额、Runner/Session/Evidence 调用链。
 - **替身不能证明：** 公司 Key 权限、预览模型稳定性、真实飞书送达、真实 StarRocks 权限与公司网络。
 - **预览模型变化：** 换模型 ID、协议或结构化输出能力时 Profile 指纹变化，必须新建会话并重新执行 A/B/C；不沿用旧样本。
@@ -786,11 +783,12 @@ git diff --check
 | `FunctionCall.id` 为可选字段：V1-A 有值时作为 `call_id` 并在 functionCall/functionResponse 中原样回传，无值时生成带 `xw-vertex-` 前缀的 ID 且不回传；真实响应是否带 id、是否跨轮唯一未知 | I-V B | 重复 id 在请求前拒绝，不猜测关联 |
 | Gemini 3 thought signature 是否跨轮强制、大小是否落在 65,536 字节内 | V1-B + I-V C | Vertex 会话追问不开放；若真实签名超限，先修订边界 |
 | `reasoning_effort=null` 使用默认思考级别后的耗时、`thoughtsTokenCount` 与请求期限余量 | I-V A/B | 期限命中或余量不足时调整 Profile 并整批重验 |
-| 锁定模型的单响应多函数调用频率 | I-V B，0/20 | 出现即不开放，不部分执行 |
+| 锁定模型的单响应多函数调用与混合响应在真实 Vertex 上的频率及回放效果 | I-V B | 出现后必须完整经过治理与回放；缺少真实样本时只标记未覆盖 |
+| Google 文档要求函数调用 Part 原样回传；当前 Session 只保存函数调用与签名，获准的附加 Part 元数据会被忽略，真实 Vertex 是否因此拒绝尚无证据 | I-V B/C | 只声称签名留在原调用位置，不声称完整原 Part 回放；如真实请求返回协议 400，再按数据边界评估最小可保存字段，不直接持久化任意元数据 |
 | 正式提示词下工具选择和最终 Evidence 质量 | I-V B | `model check` 通过也不代表产品可用 |
 | 未登记账号的真实飞书接收/回复权限与送达 | I-F 真实 Gate | 只标离线候选，不宣称用户已可取得编号 |
 | `gemini-3-flash-preview` 的名称和能力可能变化 | 每次发布前 A/B/C | 失败即不 fallback，管理员选择新获准模型后重验 |
-| 现有 Chat Completions 路径可处理多个调用，与“未验证并行”边界不完全一致 | handoff 记录，另行任务 | 本次只让 Vertex 前置拒绝，不顺手改变其他 Provider |
+| 现有 Chat Completions 路径可处理多个调用，其真实供应商行为仍需单独验证 | handoff 记录，另行任务 | 不把 Vertex 的离线结论推广到其他 Provider |
 
 ## 12. 最终交付与 PR 记录
 

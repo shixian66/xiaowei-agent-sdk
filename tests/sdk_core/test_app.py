@@ -44,7 +44,7 @@ from tests.sdk_core.test_mcp_integration import config as mcp_config
 from tests.sdk_core.test_model_api import OPENAI as PROFILE
 from tests.sdk_core.test_model_api import _responses_body
 from tests.sdk_core.test_sdk_contract import _RecordingProcessor
-from tests.sdk_core.test_vertex_model import VERTEX
+from tests.sdk_core.test_vertex_model import VERTEX, _body, _call_part
 
 from xiaowei import app as app_module
 from xiaowei.app import AppConfig, Application, DataPolicy, TurnError, safe_run_config
@@ -559,6 +559,7 @@ def test_safe_run_config_disables_tracing_and_sensitive_trace_data() -> None:
     for config in (first, second):
         assert config.tracing_disabled is True
         assert config.trace_include_sensitive_data is False
+        assert config.tool_execution.max_function_tool_concurrency == 4
     assert first is not second  # 每个调用方一份，互不共享可变对象
 
 
@@ -747,7 +748,7 @@ def all_logs() -> Iterator[list[logging.LogRecord]]:
 
 _STAGE = re.compile(
     r"turn=(\S+) stage=(\w+) reason=([\w-]+) elapsed_ms=\d+"
-    r"(?: error_kind=[a-z_]+ http_status=[\d-]+)?"
+    r"(?: error_kind=[a-z_]+ http_status=[\d-]+(?: reject_reason=[a-z_]+)?)?"
 )
 
 
@@ -834,6 +835,219 @@ async def test_vertex_failure_uses_the_same_safe_log_categories(
     assert failed.value.reason == "model_failed" and calls == 1
     assert f"error_kind={kind} http_status={status}" in output
     assert all(value not in output for value in (MODEL_SECRET, SYNTHETIC_SQL, FAKE_MODEL_KEY))
+
+
+@pytest.mark.parametrize(
+    ("case", "reason"),
+    [
+        ("max_tokens", "finish_reason_max_tokens"),
+        ("safety", "finish_reason_safety"),
+        ("malformed", "finish_reason_malformed_function_call"),
+        ("recitation", "finish_reason_recitation"),
+        ("unknown_finish", "finish_reason_other"),
+        ("missing_finish", "finish_reason_other"),
+        ("no_candidate", "not_single_candidate"),
+        ("two_candidates", "not_single_candidate"),
+        ("unknown_tool", "unknown_tool"),
+        ("invalid_args", "invalid_args"),
+        ("missing_signature", "invalid_signature"),
+        ("duplicate_call_id", "invalid_call_id"),
+        ("missing_content", "invalid_content"),
+        ("unsupported_part", "unsupported_part"),
+        ("too_large", "too_large"),
+        ("invalid_json", "invalid_json"),
+        ("deep_json", "invalid_json"),
+    ],
+)
+async def test_vertex_rejection_logs_only_fixed_reason(
+    env: Env,
+    monkeypatch: pytest.MonkeyPatch,
+    case: str,
+    reason: str,
+) -> None:
+    if case == "too_large":
+        reply: httpx2.Response = httpx2.Response(200, content=b"x" * 70_000)
+    elif case == "invalid_json":
+        reply = httpx2.Response(200, content=("{" + MODEL_SECRET).encode())
+    elif case == "deep_json":
+        reply = httpx2.Response(200, content=b"[" * 1500 + b"0" + b"]" * 1500)
+    else:
+        parts = [_call_part()]
+        if case == "unknown_tool":
+            parts = [_call_part(name="unoffered_" + MODEL_SECRET)]
+        elif case == "invalid_args":
+            parts = [_call_part(name="order_total", args=[MODEL_SECRET])]
+        elif case == "missing_signature":
+            parts = [_call_part(name="order_total", signature=None)]
+        elif case == "duplicate_call_id":
+            parts = [
+                _call_part(name="order_total", call_id="same-id"),
+                _call_part(name="order_total", call_id="same-id", signature=None),
+            ]
+        elif case == "unsupported_part":
+            parts = [{"inlineData": {"data": MODEL_SECRET}}]
+        body = _body(parts)
+        candidate = body["candidates"][0]
+        if case == "max_tokens":
+            candidate["finishReason"] = "MAX_TOKENS"
+        elif case == "safety":
+            candidate["finishReason"] = "SAFETY"
+        elif case == "malformed":
+            candidate["finishReason"] = "MALFORMED_FUNCTION_CALL"
+        elif case == "recitation":
+            candidate["finishReason"] = "RECITATION"
+        elif case == "unknown_finish":
+            candidate["finishReason"] = "UNPUBLISHED_" + MODEL_SECRET
+        elif case == "missing_finish":
+            candidate.pop("finishReason")
+        elif case == "no_candidate":
+            body["candidates"] = []
+        elif case == "two_candidates":
+            body["candidates"].append(candidate.copy())
+        elif case == "missing_content":
+            candidate.pop("content")
+        reply = httpx2.Response(200, json=body)
+
+    calls = 0
+
+    def respond(request: httpx2.Request) -> httpx2.Response:
+        nonlocal calls
+        calls += 1
+        return reply
+
+    monkeypatch.setenv(VERTEX.api_key_ref.removeprefix("env:"), FAKE_MODEL_KEY)
+    profile = VERTEX.model_copy(update={"data_policy_id": PROFILE.data_policy_id})
+    async with open_model(profile, transport=httpx2.MockTransport(respond)) as binding:
+        vertex_env = replace(env, binding=binding)
+        with all_logs() as records, pytest.raises(TurnError) as failed:
+            await vertex_env.app.run_turn(vertex_env.ctx(turn="vertex-reject"), SYNTHETIC_SQL)
+
+    output = "\n".join(record.getMessage() for record in records)
+    assert failed.value.reason == "model_failed" and calls == 1
+    assert f"error_kind=response_rejected http_status=- reject_reason={reason}" in output
+    assert MODEL_SECRET not in output and SYNTHETIC_SQL not in output
+    assert env.adapter.calls == []
+    assert all(
+        _STAGE.fullmatch(record.getMessage()) is not None
+        for record in records
+        if record.name == "xiaowei.app"
+    )
+
+
+@pytest.mark.parametrize("case", ["all_allowed", "budget", "revoked", "diagnose"])
+async def test_vertex_parallel_calls_keep_each_tool_governed(
+    env: Env, monkeypatch: pytest.MonkeyPatch, case: str
+) -> None:
+    first = _call_part(name="order_total", args={"region": "east"})
+    second_name = "order_total" if case in ("all_allowed", "budget") else "run_query"
+    second = _call_part(name=second_name, args={"region": "west"}, signature=None)
+    requests: list[dict[str, Any]] = []
+
+    def respond(request: httpx2.Request) -> httpx2.Response:
+        body = json.loads(request.content)
+        requests.append(body)
+        if len(requests) == 1:
+            return httpx2.Response(200, json=_body([first, second]))
+        evidence_ids = []
+        for content in body["contents"]:
+            for part in content["parts"]:
+                if "functionResponse" not in part:
+                    continue
+                output = part["functionResponse"]["response"]["output"]
+                try:
+                    parsed = json.loads(output)
+                except ValueError:
+                    continue  # SDK 对 I/O 前拒绝的调用返回固定纯文本
+                if isinstance(parsed, dict) and "evidence_id" in parsed:
+                    evidence_ids.append(parsed["evidence_id"])
+        answer = {
+            "evidence_ids": evidence_ids,
+            "inferences": [],
+            "clarification": None if evidence_ids else "本轮没有可用结果",
+            "advice": None,
+        }
+        return httpx2.Response(200, json=_body([{"text": json.dumps(answer)}]))
+
+    if case == "revoked":
+        env.grants.allowed.discard(("alice", TARGET, QUERY_TOOL))
+    monkeypatch.setenv(VERTEX.api_key_ref.removeprefix("env:"), FAKE_MODEL_KEY)
+    profile = VERTEX.model_copy(update={"data_policy_id": PROFILE.data_policy_id})
+    async with open_model(profile, transport=httpx2.MockTransport(respond)) as binding:
+        vertex_env = replace(env, binding=binding)
+        ctx = vertex_env.ctx(
+            turn="parallel-" + case,
+            mode="diagnose" if case == "diagnose" else "query",
+            max_tool_calls=1 if case == "budget" else 5,
+        )
+        if case == "diagnose":
+            with pytest.raises(TurnError) as failed:
+                await vertex_env.app.run_turn(ctx, "仅诊断")
+            assert failed.value.reason == "model_failed"
+        else:
+            result = await vertex_env.app.run_turn(ctx, "查两个合成地区")
+            assert len(result.answer.evidence_ids) == (2 if case == "all_allowed" else 1)
+            if case == "all_allowed":
+                followup = await vertex_env.app.run_turn(
+                    vertex_env.ctx(turn="parallel-followup"), "继续引用这两项"
+                )
+                assert set(followup.answer.evidence_ids) == set(result.answer.evidence_ids)
+
+    assert len(env.adapter.calls) == (
+        0 if case == "diagnose" else 2 if case == "all_allowed" else 1
+    )
+    if case == "revoked":
+        assert env.tool_ids() == [TOTAL_TOOL]
+    if case == "diagnose":
+        assert "run_query" not in [
+            t["name"] for t in requests[0]["tools"][0]["functionDeclarations"]
+        ]
+        assert len(requests) == 1
+    else:
+        assert len(requests) == (3 if case == "all_allowed" else 2)
+    if case == "all_allowed":
+        for body in requests[1:]:
+            calls = [
+                part
+                for content in body["contents"]
+                for part in content["parts"]
+                if "functionCall" in part
+            ]
+            assert calls == [first, second]
+
+
+async def test_vertex_text_before_tool_never_enters_session_or_delivery(
+    env: Env, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    marker = "ignored-vertex-preface-7f2c"
+    requests: list[dict[str, Any]] = []
+
+    def respond(request: httpx2.Request) -> httpx2.Response:
+        body = json.loads(request.content)
+        requests.append(body)
+        if len(requests) == 1:
+            return httpx2.Response(
+                200, json=_body([{"text": marker}, _call_part(name="order_total")])
+            )
+        output = body["contents"][-1]["parts"][0]["functionResponse"]["response"]["output"]
+        evidence_id = json.loads(output)["evidence_id"]
+        answer = {
+            "evidence_ids": [evidence_id],
+            "inferences": [],
+            "clarification": None,
+            "advice": None,
+        }
+        return httpx2.Response(200, json=_body([{"text": json.dumps(answer)}]))
+
+    monkeypatch.setenv(VERTEX.api_key_ref.removeprefix("env:"), FAKE_MODEL_KEY)
+    profile = VERTEX.model_copy(update={"data_policy_id": PROFILE.data_policy_id})
+    async with open_model(profile, transport=httpx2.MockTransport(respond)) as binding:
+        vertex_env = replace(env, binding=binding)
+        delivered = await vertex_env.deliver(vertex_env.ctx(turn="mixed-text"), "查合成总数")
+
+    assert len(requests) == 2 and env.tool_ids() == [TOTAL_TOOL]
+    assert marker not in json.dumps(requests[1], ensure_ascii=False)
+    assert marker not in json.dumps(await env.stored(), ensure_ascii=False)
+    assert marker not in delivered.content
 
 
 async def test_stage_logs_contain_only_safe_metadata(env: Env) -> None:

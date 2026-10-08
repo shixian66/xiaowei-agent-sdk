@@ -35,9 +35,11 @@ from xiaowei.model_api import (
     ModelProfile,
     ModelRequestRejectedError,
     ModelResponseRejectedError,
+    ResponseRejectReason,
     open_model,
     settings_for,
 )
+from xiaowei.vertex_model import _strict_json
 
 KEY = "fake-vertex-key"
 VERTEX = ModelProfile(
@@ -287,6 +289,127 @@ async def test_function_call_carries_signature_and_a_fresh_call_id() -> None:
         assert set(part["functionResponse"]) == {"name", "response"}
 
 
+@pytest.mark.parametrize(
+    "parts",
+    [
+        pytest.param(
+            [_call_part(), _call_part(args={"region": "west"}, signature=None)],
+            id="parallel-calls-first-signature-only",
+        ),
+        pytest.param([{"text": "ignored model preamble"}, _call_part()], id="text-and-call"),
+        pytest.param(
+            [{"text": "", "thoughtSignature": SIG_B}, _call_part()],
+            id="empty-text-and-call",
+        ),
+    ],
+)
+async def test_normal_gemini_tool_shapes_complete_roundtrip(parts: list[dict[str, Any]]) -> None:
+    endpoint = Endpoint([_body(parts), _answer()])
+    executed: list[str] = []
+
+    result = await _run(endpoint, executed)
+
+    expected = ["east", "west"] if len(parts) == 2 and "functionCall" in parts[0] else ["east"]
+    assert result.final_output == TotalAnswer(total=100, note="合成数据")
+    assert sorted(executed) == sorted(expected)
+    assert len(endpoint.requests) == 2
+    followup = endpoint.bodies()[1]["contents"]
+    assert followup[1]["role"] == "model"
+    assert followup[1]["parts"] == [part for part in parts if "functionCall" in part]
+    assert followup[2]["role"] == "user"
+    assert len(followup[2]["parts"]) == len(expected)
+    assert "ignored model preamble" not in json.dumps(followup)
+    assert not any(
+        getattr(item.raw_item, "content", None) == "ignored model preamble"
+        for item in result.new_items
+    )
+
+
+async def test_signature_only_part_and_harmless_metadata_do_not_block_tool() -> None:
+    call = _call_part()
+    call["thought"] = False
+    endpoint = Endpoint([_body([{"thoughtSignature": SIG_B, "partMetadata": {}}, call]), _answer()])
+
+    result = await _run(endpoint, [])
+
+    assert result.final_output == TotalAnswer(total=100, note="合成数据")
+    followup = endpoint.bodies()[1]["contents"]
+    assert followup[1]["parts"] == [_call_part()]
+
+
+async def test_signature_does_not_hide_unknown_part_content() -> None:
+    endpoint = Endpoint(
+        [_body([{"thoughtSignature": SIG_B, "videoData": {"data": "unexpected"}}, _call_part()])]
+    )
+    executed: list[str] = []
+
+    with pytest.raises(ModelResponseRejectedError) as failed:
+        await _run(endpoint, executed)
+
+    assert failed.value.reject_reason == ResponseRejectReason.UNSUPPORTED_PART
+    assert executed == []
+
+
+async def test_thought_text_is_ignored_when_final_text_exists() -> None:
+    endpoint = Endpoint(
+        [_body([{"text": '{"total": 999, "note": "private"}', "thought": True}, {"text": FINAL}])]
+    )
+
+    result = await _run(endpoint, [])
+
+    assert result.final_output == TotalAnswer(total=100, note="合成数据")
+
+
+async def test_thought_text_alone_cannot_be_final_answer() -> None:
+    endpoint = Endpoint([_body([{"text": FINAL, "thought": True}])])
+
+    with pytest.raises(ModelResponseRejectedError) as failed:
+        await _run(endpoint, [])
+
+    assert failed.value.reject_reason == ResponseRejectReason.INVALID_CONTENT
+
+
+@pytest.mark.parametrize("extra", ["toolCall", "toolResponse", "unexpectedData"])
+async def test_text_part_cannot_hide_other_content(extra: str) -> None:
+    endpoint = Endpoint([_body([{"text": FINAL, extra: {"value": "unexpected"}}])])
+
+    with pytest.raises(ModelResponseRejectedError) as failed:
+        await _run(endpoint, [])
+
+    assert failed.value.reject_reason == ResponseRejectReason.UNSUPPORTED_PART
+
+
+async def test_known_part_metadata_does_not_block_final_text() -> None:
+    endpoint = Endpoint([_body([{"text": FINAL, "partMetadata": {"source": "fixture"}}])])
+
+    result = await _run(endpoint, [])
+
+    assert result.final_output == TotalAnswer(total=100, note="合成数据")
+
+
+async def test_thought_only_function_call_is_not_executed() -> None:
+    call = _call_part()
+    call["thought"] = True
+    endpoint = Endpoint([_body([call])])
+    executed: list[str] = []
+
+    with pytest.raises(ModelResponseRejectedError) as failed:
+        await _run(endpoint, executed)
+
+    assert failed.value.reject_reason == ResponseRejectReason.UNSUPPORTED_PART
+    assert executed == []
+
+
+@pytest.mark.parametrize("value", ["true", 1, {"value": True}])
+async def test_thought_flag_must_be_boolean(value: object) -> None:
+    endpoint = Endpoint([_body([{"text": FINAL, "thought": value}])])
+
+    with pytest.raises(ModelResponseRejectedError) as failed:
+        await _run(endpoint, [])
+
+    assert failed.value.reject_reason == ResponseRejectReason.UNSUPPORTED_PART
+
+
 async def test_vertex_supplied_call_id_is_used_and_echoed() -> None:
     endpoint = Endpoint([_call(call_id="vertex-call-7"), _answer()])
 
@@ -511,7 +634,12 @@ async def test_tool_outputs_keep_the_name_of_their_own_call() -> None:
             ],
         )
     contents = endpoint.bodies()[0]["contents"]
-    responses = [c["parts"][0]["functionResponse"] for c in contents[2:]]
+    assert [c["role"] for c in contents] == ["model", "user"]
+    assert [part["functionCall"]["name"] for part in contents[0]["parts"]] == [
+        "first_tool",
+        "second_tool",
+    ]
+    responses = [part["functionResponse"] for part in contents[1]["parts"]]
     assert responses == [
         {"name": "first_tool", "response": {"output": "xw-vertex-a"}},
         {"id": "vertex-b", "name": "second_tool", "response": {"output": "vertex-b"}},
@@ -580,15 +708,11 @@ def _role(role: str) -> dict[str, Any]:
         pytest.param(_two_candidates(), id="two-candidates"),
         pytest.param({"candidates": []}, id="no-candidates"),
         pytest.param({"promptFeedback": {"blockReason": "SAFETY"}}, id="blocked-prompt"),
-        pytest.param(_body([_call_part(), _call_part(signature=None)]), id="two-calls-same-name"),
-        pytest.param(_body([{"text": "先查一下"}, _call_part()]), id="text-and-call"),
         pytest.param(_call(name="unknown_tool"), id="unknown-tool"),
         pytest.param(_call(args=["east"]), id="non-object-args"),
         pytest.param(_call(call_id=""), id="empty-call-id"),
-        pytest.param(_body([{"thoughtSignature": SIG_A}]), id="signature-only-part"),
         pytest.param(_body([{"inlineData": {"mimeType": "x", "data": "AA=="}}]), id="unknown-part"),
         pytest.param(_body([]), id="no-parts"),
-        pytest.param(_body([{"text": FINAL, "thought": True}]), id="thought-part"),
         pytest.param(_drop("content"), id="no-content"),
         pytest.param(_role("user"), id="wrong-role"),
         pytest.param(_body([_call_part()], finish=None), id="missing-finish"),
@@ -609,6 +733,12 @@ async def test_protocol_violations_fail_before_any_tool_runs(reply: dict[str, An
     assert len(endpoint.requests) == 1
     assert SIG_A not in str(excinfo.value)
     assert "unknown_tool" not in str(excinfo.value)
+
+
+def test_strict_json_treats_parser_recursion_as_unusable() -> None:
+    deep_json = b"[" * 1500 + b"0" + b"]" * 1500
+
+    assert _strict_json(deep_json) is None
 
 
 # ---- 失败：不重试、不 fallback、已执行的工具不重放 ---------------------------------------------
