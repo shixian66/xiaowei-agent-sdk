@@ -414,15 +414,71 @@ async def test_total_bytes_use_the_production_json_encoding() -> None:
     assert only(drv).aborted
 
 
-async def test_an_oversized_value_stops_reading_without_a_partial_row() -> None:
+async def test_an_oversized_query_value_is_marked_without_losing_other_rows() -> None:
     big = "x" * (TARGET.max_value_bytes - 1)  # 加上引号即超过单值上限
     drv = driver(Result(("region", "note"), [("a", "ok"), ("b", big), ("c", "ok")]))
 
     result = await adapter(drv).run_query(guarded("SELECT region, note FROM sales"))
 
-    assert result.rows == ({"region": "a", "note": "ok"},)
+    assert result.rows[0] == {"region": "a", "note": "ok"}
+    assert result.rows[1]["region"] == "b"
+    assert str(result.rows[1]["note"]).endswith("…（原值已截短）")
+    assert result.rows[2] == {"region": "c", "note": "ok"}
     assert result.truncated
     assert only(drv).aborted
+
+
+@pytest.mark.parametrize("position", [0, 1, 2])
+async def test_oversized_query_cell_keeps_its_row_and_later_rows(position: int) -> None:
+    original = "区" * 120 + "SECRET-END"
+    source = [("a", "ok"), ("b", "ok"), ("c", "ok")]
+    source[position] = (source[position][0], original)
+    drv = driver(Result(("region", "note"), source))
+
+    result = await adapter(drv).run_query(guarded("SELECT region, note FROM sales"))
+
+    assert [row["region"] for row in result.rows] == ["a", "b", "c"]
+    clipped = result.rows[position]["note"]
+    assert isinstance(clipped, str) and clipped.endswith("…（原值已截短）")
+    assert original.startswith(clipped.removesuffix("…（原值已截短）"))
+    assert "SECRET-END" not in clipped
+    assert rows_size(result.rows) <= TARGET.max_result_bytes
+    assert result.truncated
+
+
+async def test_multiple_oversized_cells_and_total_byte_limit_remain_bounded() -> None:
+    target = TARGET.model_copy(update={"max_result_bytes": 450, "max_value_bytes": 90})
+    raw = [("a", "甲" * 90), ("b", "乙" * 90), ("c", "ok")]
+    drv = driver(Result(("region", "note"), raw))
+    result = await adapter(drv, target).run_query(guarded("SELECT region, note FROM sales"))
+    assert len(result.rows) == 3
+    assert all(str(row["note"]).endswith("…（原值已截短）") for row in result.rows[:2])
+    assert result.rows[2]["note"] == "ok"
+    assert rows_size(result.rows) <= target.max_result_bytes
+    assert result.truncated
+
+    tighter = target.model_copy(update={"max_result_bytes": 125})
+    short = await adapter(driver(Result(("region", "note"), raw)), tighter).run_query(
+        guarded("SELECT region, note FROM sales")
+    )
+    assert short.truncated and 0 < short.row_count < 3
+    assert rows_size(short.rows) <= tighter.max_result_bytes
+
+
+async def test_two_large_values_in_one_row_are_marked_independently() -> None:
+    drv = driver(Result(("region", "note"), [("东" * 100, "西" * 100), ("next", "ok")]))
+    result = await adapter(drv).run_query(guarded("SELECT region, note FROM sales"))
+    assert result.row_count == 2 and result.truncated
+    assert all(str(value).endswith("…（原值已截短）") for value in result.rows[0].values())
+    assert result.rows[1] == {"region": "next", "note": "ok"}
+
+
+async def test_query_keeps_whole_row_truncation_when_even_marker_cannot_fit() -> None:
+    tiny = TARGET.model_copy(update={"max_value_bytes": 4})
+    result = await adapter(driver(Result(("note",), [("x" * 20,)])), tiny).run_query(
+        guarded("SELECT note FROM sales")
+    )
+    assert result.rows == () and result.truncated
 
 
 @pytest.mark.parametrize(

@@ -6,6 +6,7 @@ Task 2 的 recording 驱动替身）+ ``EvidenceStore`` / ``PolicySession`` + �
 替身不能证明 asyncmy 与 StarRocks 的协议行为，也不能证明真实模型会这样选择工具。
 """
 
+import asyncio
 import hashlib
 import json
 import os
@@ -68,7 +69,13 @@ from xiaowei.evidence import (
     EvidenceStoreError,
     EvidenceUnavailableError,
 )
-from xiaowei.governance import GovernedTools, Prechecked, ToolCatalog, ToolRejectedError
+from xiaowei.governance import (
+    GovernedTools,
+    Prechecked,
+    ToolCatalog,
+    ToolExecutionError,
+    ToolRejectedError,
+)
 from xiaowei.model_api import ModelBinding, open_model
 from xiaowei.models import (
     AUDIENCES,
@@ -83,7 +90,12 @@ from xiaowei.models import (
 )
 from xiaowei.session import SessionInputPolicy, SessionLimits
 from xiaowei.sqlguard import guard_explain_query, guard_readonly_query
-from xiaowei.starrocks import EXPLAIN_PREFIX, StarRocksAdapter, StarRocksTarget
+from xiaowei.starrocks import (
+    EXPLAIN_PREFIX,
+    StarRocksAdapter,
+    StarRocksErrorCode,
+    StarRocksTarget,
+)
 from xiaowei.starrocks_schema import DependencyCheck, SchemaCache
 from xiaowei.starrocks_tools import (
     AUDIT_TOOLS,
@@ -164,6 +176,7 @@ class Env:
     governed: GovernedTools
     app: Application
     executes: Any
+    adapter: StarRocksAdapter
 
     @property
     def evidence(self) -> EvidenceStore:
@@ -251,7 +264,9 @@ async def assembled(
                 local_tools=tools.executes,
                 clock=clock,
             )
-            yield Env(engine, grants, clock, scripts, drv, bound, governed, app, tools.executes)
+            yield Env(
+                engine, grants, clock, scripts, drv, bound, governed, app, tools.executes, adapter
+            )
 
 
 def tool_outputs(call: ModelCall) -> list[str]:
@@ -467,6 +482,43 @@ async def test_truncated_results_are_marked_in_every_delivery(env: Env) -> None:
     assert "结果已截断" in delivered.content
 
 
+async def test_clipped_query_cell_is_visible_in_live_and_replayed_web_and_feishu(env: Env) -> None:
+    original = "中" * 120 + "HIDDEN-TAIL"
+    env.drv.make = driver(Result(("region", "note"), [("east", original), ("west", "ok")])).make
+    marker = "…（原值已截短）"
+    for channel in ("web", "feishu"):
+        session = f"clip-{channel}"
+        question = f"{channel} 查备注"
+        first = env.scripts.add(
+            question,
+            tool_call(
+                "run_readonly_query", cluster=SR.target_id, sql="SELECT region, note FROM sales"
+            ),
+            cite(),
+        )
+        shown = await env.deliver(env.ctx(channel=channel, session=session, turn="t1"), first)
+        assert marker in tool_outputs(env.scripts.calls[first][1])[0]
+        assert "HIDDEN-TAIL" not in tool_outputs(env.scripts.calls[first][1])[0]
+        if channel == "web":
+            (fact,) = shown.facts
+            assert fact.truncated and len(fact.rows) == 2
+            assert str(fact.rows[0]["note"]).endswith(marker)
+            assert fact.rows[1]["note"] == "ok"
+            assert marker in (fact.result_json or "")
+            assert "HIDDEN-TAIL" not in (fact.result_json or "")
+        if channel == "feishu":
+            assert marker in shown.content
+
+        followup = env.scripts.add(f"{channel} 再看", cite("沿用上一轮"))
+        replayed = await env.deliver(env.ctx(channel=channel, session=session, turn="t2"), followup)
+        if channel == "web":
+            assert replayed.facts[0].rows == shown.facts[0].rows
+            assert marker in (replayed.facts[0].result_json or "")
+        if channel == "feishu":
+            assert marker in replayed.content
+    assert len(executed_sql(env.drv)) == 2  # 两个首轮查询；追问只复核，不重查
+
+
 async def test_metadata_tools_serve_the_snapshot_after_probing_current_access(env: Env) -> None:
     message = env.scripts.add(
         "诊断：sales 有哪些列",
@@ -546,6 +598,38 @@ async def test_rejected_sql_is_returned_to_the_model_without_using_the_budget(en
     assert "secret" not in rejected and "DROP" not in rejected
     # 被拒绝的调用不占预算：上限为 1 时改正后的查询仍执行。
     assert len(executed_sql(env.drv)) == 1 and len(delivered.facts) == 1
+
+
+@pytest.mark.parametrize(
+    "sql",
+    [
+        "SELECT DATE_ADD(region, INTERVAL total DAY) AS d FROM sales",
+        "SELECT DATE_SUB(region, INTERVAL (SELECT 1) DAY) AS d FROM sales",
+        "SELECT DATE_ADD(region, INTERVAL ABS(-1) DAY) AS d FROM sales",
+        "SELECT DATE_ADD(region, INTERVAL 1 FORTNIGHT) AS d FROM sales",
+    ],
+)
+async def test_rejected_date_intervals_never_reach_starrocks(
+    postgres_url: URL, monkeypatch: pytest.MonkeyPatch, sql: str
+) -> None:
+    policy = SR.policy.model_copy(
+        update={"allowed_functions": SR.policy.allowed_functions | {"DATE_ADD", "DATE_SUB"}}
+    )
+    target = SR.model_copy(update={"policy": policy})
+    async with assembled(postgres_url, monkeypatch, driver(SALES), target=target) as env:
+        message = env.scripts.add(
+            sql,
+            tool_call(
+                "run_readonly_query",
+                cluster=SR.target_id,
+                sql=sql,
+            ),
+            clarify(),
+        )
+        await env.app.run_turn(env.ctx(), message)
+        (rejected,) = tool_outputs(env.scripts.calls[message][1])
+        assert "unsupported_syntax" in rejected and "未执行" in rejected
+        assert env.drv.attempts == 0
 
 
 @pytest.mark.parametrize(
@@ -809,6 +893,74 @@ async def test_execution_failure_stops_the_turn_and_consumes_the_budget(env: Env
     assert env.drv.attempts == 1 and await env.evidence_rows() == 0
 
 
+async def test_schema_refresh_holds_only_slot_and_model_receives_busy_rejection(
+    postgres_url: URL, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    one_slot = SR.model_copy(update={"pool_size": 1, "connect_timeout_seconds": 0.05})
+    async with assembled(postgres_url, monkeypatch, driver(SALES), target=one_slot) as env:
+        env.drv.make = driver(hang_on="fetch").make
+        refresh = asyncio.create_task(env.adapter.read_schema())
+        while not env.drv.connections or env.drv.connections[0].rows_read == 0:
+            await asyncio.sleep(0)
+        message = env.scripts.add(
+            "查销售区域",
+            tool_call("run_readonly_query", cluster=SR.target_id, sql="SELECT region FROM sales"),
+            clarify(),
+        )
+        try:
+            await env.app.run_turn(env.ctx(max_tool_calls=1), message)
+            (rejected,) = tool_outputs(env.scripts.calls[message][1])
+            assert "系统繁忙，可稍后再试" in rejected
+            assert env.drv.attempts == 1  # 刷新占用的连接；前台没有连接或 SQL
+            assert executed_sql(env.drv) == []
+            assert await env.evidence_rows() == 0
+        finally:
+            refresh.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await refresh
+
+
+async def test_pool_timeout_before_sql_refunds_budget_but_after_sql_stops_turn(env: Env) -> None:
+    request = ToolRequest(
+        tool_id=RUN_QUERY,
+        target_id=SR.target_id,
+        call_id="busy-1",
+        tool_name="run_readonly_query",
+        arguments={"cluster": SR.target_id, "sql": "SELECT region FROM sales"},
+    )
+    ctx = env.ctx(max_tool_calls=1)
+    for _ in range(SR.pool_size):
+        await env.adapter._slots.acquire()
+    try:
+        with pytest.raises(ToolRejectedError, match="系统繁忙，可稍后再试"):
+            await env.governed.invoke(ctx, request, env.executes[(RUN_QUERY, SR.target_id)])
+        assert env.governed.turn_runs(ctx.identity).started == ()
+        assert env.drv.attempts == 0
+    finally:
+        for _ in range(SR.pool_size):
+            env.adapter._slots.release()
+
+    result = await env.governed.invoke(ctx, request, env.executes[(RUN_QUERY, SR.target_id)])
+    assert result.evidence_id and len(env.governed.turn_runs(ctx.identity).started) == 1
+
+    next_ctx = env.ctx(turn="t-post-sql", max_tool_calls=1)
+
+    async def first_sql_then_pool_timeout(_: ToolRequest) -> Any:
+        await env.adapter.run_query(guard_readonly_query("SELECT region FROM sales", POLICY))
+        for _ in range(SR.pool_size):
+            await env.adapter._slots.acquire()
+        try:
+            await env.adapter.run_query(guard_readonly_query("SELECT region FROM sales", POLICY))
+        finally:
+            for _ in range(SR.pool_size):
+                env.adapter._slots.release()
+
+    with pytest.raises(ToolExecutionError) as raised:
+        await env.governed.invoke(next_ctx, request, first_sql_then_pool_timeout)
+    assert raised.value.code is StarRocksErrorCode.POOL_TIMEOUT
+    assert env.governed.turn_runs(next_ctx.identity).started == (RUN_QUERY,)
+
+
 async def test_rows_that_do_not_fit_a_projection_stop_the_turn(env: Env) -> None:
     """绕过装配检查的错误配置：飞书投影放不下 rows 时证据生成失败，结果不交给模型。"""
     adapter = StarRocksAdapter(SR, connect=env.drv, clock=lambda: NOW)
@@ -1009,7 +1161,7 @@ def scope_body(target: StarRocksTarget) -> dict[str, Any]:
 
 def test_scope_digest_is_versioned_and_names_the_database_type() -> None:
     body = scope_body(SR)
-    assert body["format"] == "xiaowei.data_scope.starrocks/6"
+    assert body["format"] == "xiaowei.data_scope.starrocks/7"
     assert body["max_result_columns"] == SR.policy.max_result_columns
     assert body["database_type"] == "starrocks"
     assert body["sql_mode"] == "ONLY_FULL_GROUP_BY"

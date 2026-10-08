@@ -58,6 +58,69 @@ def narrowed(**changes: object) -> QueryPolicy:
     return POLICY.model_copy(update=changes)
 
 
+DATE_POLICY = narrowed(
+    allowed_functions=POLICY.allowed_functions
+    | {"ABS", "DATE_ADD", "DATE_SUB", "DATEDIFF", "TIMESTAMP_TRUNC", "CURRENT_DATE"}
+)
+
+
+@pytest.mark.parametrize(
+    ("expression", "normalized"),
+    [
+        ("DATE_SUB(dt, INTERVAL 7 DAY)", "DATE_SUB(`sales`.`dt`, INTERVAL 7 DAY)"),
+        ("DATE_ADD(dt, INTERVAL 1 MONTH)", "DATE_ADD(`sales`.`dt`, INTERVAL 1 MONTH)"),
+        ("DATE_ADD(dt, INTERVAL 1 WEEK)", "DATE_ADD(`sales`.`dt`, INTERVAL 7 DAY)"),
+        ("DATE_SUB(dt, INTERVAL -2 WEEK)", "DATE_SUB(`sales`.`dt`, INTERVAL -14 DAY)"),
+        ("DATEDIFF(dt, '2026-01-01')", "DATEDIFF(`sales`.`dt`, '2026-01-01')"),
+        ("DATE_TRUNC('day', dt)", "DATE_TRUNC('DAY', `sales`.`dt`)"),
+    ],
+)
+def test_configured_date_functions_preserve_starrocks_spelling(
+    expression: str, normalized: str
+) -> None:
+    query = guard(f"SELECT {expression} AS d FROM sales", DATE_POLICY)
+    assert normalized in query.normalized_sql
+    assert guard(query.normalized_sql, DATE_POLICY).normalized_sql == query.normalized_sql
+    assert query.referenced_columns == {("shop", "sales", "dt")}
+
+
+@pytest.mark.parametrize(
+    "expression",
+    [
+        "DATE_SUB(dt, INTERVAL orders DAY)",
+        "DATE_ADD(dt, INTERVAL (SELECT 1) DAY)",
+        "DATE_ADD(dt, INTERVAL ABS(-1) DAY)",
+        "DATE_ADD(dt, INTERVAL 1 FORTNIGHT)",
+        "DATE_ADD(dt, INTERVAL 2147483648 DAY)",
+        "DATE_ADD(dt, INTERVAL 306783379 WEEK)",
+        "DATE_TRUNC('fortnight', dt)",
+    ],
+)
+def test_date_interval_rejects_dynamic_or_unknown_units(expression: str) -> None:
+    assert rejection(f"SELECT {expression} AS d FROM sales", DATE_POLICY).code in {
+        Code.UNSUPPORTED_SYNTAX,
+        Code.FUNCTION_NOT_ALLOWED,
+    }
+
+
+def test_date_function_still_requires_explicit_allowlist() -> None:
+    assert (
+        rejection("SELECT DATE_SUB(dt, INTERVAL 7 DAY) AS d FROM sales").code
+        == Code.FUNCTION_NOT_ALLOWED
+    )
+
+
+def test_date_diff_spelling_is_not_implicitly_allowed_as_datediff() -> None:
+    assert (
+        rejection("SELECT DATE_DIFF('DAY', dt, dt) AS d FROM sales", DATE_POLICY).code
+        == Code.FUNCTION_NOT_ALLOWED
+    )
+    assert (
+        "DATE_DIFF(x)"
+        in guard("SELECT 'DATE_DIFF(x)' AS literal FROM sales", DATE_POLICY).normalized_sql
+    )
+
+
 # ---- 正例 ----------------------------------------------------------------------------------
 
 

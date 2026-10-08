@@ -248,12 +248,15 @@ docker compose --env-file .env ps
 | `DATE_FORMAT(...)` | `TIME_TO_STR`、`TS_OR_DS_TO_TIMESTAMP` |
 | `CURDATE()` | `CURRENT_DATE` |
 | `FROM_UNIXTIME(...)` | `UNIX_TO_TIME` |
+| `DATE_ADD(..., INTERVAL n unit)`、`DATE_SUB(..., INTERVAL n unit)` | `DATE_ADD`、`DATE_SUB` |
+| `DATEDIFF(a, b)` | `DATEDIFF`（规范化后仍为 `DATEDIFF`） |
+| `DATE_TRUNC('day', a)` | `TIMESTAMP_TRUNC` |
 | `APPROX_COUNT_DISTINCT(...)` | `APPROX_DISTINCT` |
 
 只写成平时习惯的名字（如 `IFNULL`、`DATE_FORMAT`）不会放行。模板名单经测试覆盖常用聚合、数值、
-条件、日期、字符串和窗口函数。已知限制：`DATE_SUB/DATE_ADD(..., INTERVAL ...)`、`DATEDIFF`、
-`DATE_TRUNC` 即使加入名单也会按不支持的语法拒绝；时间范围请写成具体日期，例如
-`c >= '2026-10-01' AND c < '2026-10-08'`。
+条件、日期、字符串和窗口函数。日期加减只接受整数常量区间，单位限 `SECOND`、`MINUTE`、
+`HOUR`、`DAY`、`WEEK`、`MONTH`、`YEAR`；动态区间、未知单位和子查询在 I/O 前拒绝。
+`DATE_DIFF` 不因允许 `DATEDIFF` 而自动放行；两种写法须分别验证其语义。
 
 ## 普通升级与回退（schema 不变）
 
@@ -274,10 +277,14 @@ docker compose --env-file .env ps
 新快照超限时旧快照只保留到 `max_age_seconds`，到期后该目标的数据工具不可用。
 存算分离集群的内部表可能报告 `CLOUD_NATIVE`；当前代码仅接受 `OLAP` / `CLOUD_NATIVE` 的
 `BASE TABLE`，不放行外表。此分支只用离线契约验证了该路径，仍需在目标版本和账号上实测。
-Web 有事实响应同时携带 `content`、结构化行与可展开的 `result_json`，维持现有 API 与原值类型。
+Web 有事实响应同时携带 `content`、结构化行与可展开的 `result_json`，维持现有 API；
+未截短的值保留类型，截短值以带标记的字符串表示，无法从展示恢复原值或原类型。
 用 64 KiB 合成 DDL 测得响应体约 193 KiB，约为原始结果 JSON 的 3 倍；这是有界容量开销，
 不是公司负载的测量值。接入代理与浏览器的响应容量应按获准最大结果核对。页面只渲染一次事实表格。
-该版使用 StarRocks 证据范围摘要 v6，旧相关结果和历史不能继续交付，升级后新建会话再查。
+PR B 使用 StarRocks 证据范围摘要 v7：普通查询的超长单值现在以有界前缀和
+`…（原值已截短）` 标记显示，保留该行与后续行；总字节上限仍可能截断后续行。
+内部表 DDL、结构快照和审计原文仍要求完整值。v6 及更早的 StarRocks 证据不能继续交付，
+升级后新建会话再查。
 此摘要与 PostgreSQL 应用表版本 6 无关，本次不新增存储迁移。
 
 先把新包展开到 `/opt/xiaowei/releases/<新 SHA>`。查看当前和新版 `release.json`，并从当前

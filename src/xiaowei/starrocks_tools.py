@@ -748,7 +748,7 @@ def starrocks_tools(
     return StarRocksTools(contracts=tuple(contracts), policies=tuple(policies), executes=executes)
 
 
-DATA_SCOPE_FORMAT: Final = "xiaowei.data_scope.starrocks/6"
+DATA_SCOPE_FORMAT: Final = "xiaowei.data_scope.starrocks/7"
 """摘要公式的显式版本：纳入或排除的字段改变时更新，使旧公式下保存的证据一次性失效。
 
 /2（P2.5 Task 2 审查）：加入数据库类型、TLS、服务端时间与内存限额、客户端期限与时区。
@@ -756,6 +756,7 @@ DATA_SCOPE_FORMAT: Final = "xiaowei.data_scope.starrocks/6"
 /4（P2.5 Task 3）：跨库、UNION/窗口/星号展开与列名大小写规则改变查询语义；纳入 max_result_columns。
 /5（P2.5 Task 6）：审计改为读取所有库、按每条记录的当前库解析原文并输出该库；列表改为关键词分页。
 /6（Web 实战修复）：列库、按库遍历、完整类型与内部表原始 DDL；纳入独立 max_ddl_bytes 限额。
+/7（PR B）：普通查询的超长单值改为有界前缀和明确截短标记，行可继续返回；旧查询证据失效。
 """
 
 

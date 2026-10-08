@@ -44,7 +44,7 @@ from xiaowei.models import (
     ToolRequest,
     ToolResult,
 )
-from xiaowei.starrocks import StarRocksError, StarRocksErrorCode
+from xiaowei.starrocks import StarRocksError, StarRocksErrorCode, trace_sql_io
 
 if TYPE_CHECKING:
     from xiaowei.evidence import EvidenceStore
@@ -295,16 +295,30 @@ class GovernedTools:
         runs = self._runs.get(key, TurnRuns())
         self._runs[key] = replace(runs, started=(*runs.started, contract.tool_id))
 
-        try:
-            observation = await run()
-        except Exception as exc:
-            if isinstance(exc, StarRocksError):
-                code: StarRocksErrorCode | Literal["mcp_error", "other"] = exc.code
-            elif request.tool_id.partition("/")[0] != "local":
-                code = "mcp_error"
-            else:
-                code = "other"
-            raise ToolExecutionError(code) from None
+        observation: ToolObservation | None = None
+        busy_before_sql = False
+        with trace_sql_io() as trace:
+            try:
+                observation = await run()
+            except Exception as exc:
+                if (
+                    isinstance(exc, StarRocksError)
+                    and exc.code is StarRocksErrorCode.POOL_TIMEOUT
+                    and exc.slot_wait
+                    and not trace.started
+                ):
+                    busy_before_sql = True
+                else:
+                    if isinstance(exc, StarRocksError):
+                        code: StarRocksErrorCode | Literal["mcp_error", "other"] = exc.code
+                    elif request.tool_id.partition("/")[0] != "local":
+                        code = "mcp_error"
+                    else:
+                        code = "other"
+                    raise ToolExecutionError(code) from None
+        if busy_before_sql:
+            self._refund_before_io(key, contract.tool_id)
+            raise ToolRejectedError("系统繁忙，可稍后再试")
         if not isinstance(observation, ToolObservation):
             raise ToolExecutionError()
         result = await self._evidence.record(ctx, effective, observation)
@@ -349,6 +363,13 @@ class GovernedTools:
         if used >= ctx.budget.max_tool_calls:
             raise ToolRejectedError("本轮工具调用次数已用完")
         self._used[key] = used + 1
+
+    def _refund_before_io(self, key: tuple[str, str, str], tool_id: str) -> None:
+        """只撤销确认零 SQL 的槽位超时；并行调用中不影响其他工具的记录。"""
+        started = list(self._runs[key].started)
+        started.pop(len(started) - 1 - started[::-1].index(tool_id))
+        self._runs[key] = replace(self._runs[key], started=tuple(started))
+        self._used[key] -= 1
 
 
 def _bind(execute: Execute, request: ToolRequest) -> Callable[[], Awaitable[ToolObservation]]:
