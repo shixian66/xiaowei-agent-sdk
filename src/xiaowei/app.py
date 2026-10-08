@@ -62,6 +62,7 @@ from xiaowei.session import (
 )
 from xiaowei.storage import StorageError, check_storage
 from xiaowei.tools import governed_function_tool, routed_function_tool
+from xiaowei.vertex_model import ModelAPIStatusError, ModelAPITimeoutError, ModelAPITransportError
 
 logger = logging.getLogger(__name__)
 
@@ -517,12 +518,12 @@ def _model_failure_details(exc: Exception) -> tuple[str, int | None]:
             return "request_rejected", None
         if isinstance(error, ModelResponseRejectedError):
             return "response_rejected", None
-        if isinstance(error, (APITimeoutError, ModelTimeoutError)):
+        if isinstance(error, (APITimeoutError, ModelTimeoutError, ModelAPITimeoutError)):
             return "model_timeout", None
-        if isinstance(error, APIStatusError):
+        if isinstance(error, (APIStatusError, ModelAPIStatusError)):
             status = error.status_code
             return "provider_http", status if type(status) is int and 100 <= status <= 599 else None
-        if isinstance(error, APIConnectionError):
+        if isinstance(error, (APIConnectionError, ModelAPITransportError)):
             return "connection", None
         if isinstance(error, ModelBehaviorError):
             return "invalid_output", None

@@ -76,6 +76,10 @@ class ModelAPITransportError(ModelAPIRejectedError):
     """连接、超时或读取失败；不含地址、凭据或上游信息。"""
 
 
+class ModelAPITimeoutError(ModelAPITransportError):
+    """模型请求超时；用类型区分，日志不解析异常文字。"""
+
+
 class VertexModel(Model):
     """非流式 Vertex 适配器；HTTP 客户端由 ``open_model`` 装配并负责关闭。"""
 
@@ -131,7 +135,7 @@ class VertexModel(Model):
         try:
             response = await self._client.post(self._endpoint, json=body)
         except httpx2.TimeoutException:
-            raise ModelAPITransportError("模型请求超时") from None
+            raise ModelAPITimeoutError("模型请求超时") from None
         except httpx2.TransportError:
             raise ModelAPITransportError("模型服务连接失败") from None
         if not httpx2.codes.is_success(response.status_code):

@@ -15,7 +15,7 @@ import re
 import time
 from collections.abc import AsyncIterator, Callable, Iterator, Sequence
 from contextlib import contextmanager
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any
 
 import httpx2
@@ -44,6 +44,7 @@ from tests.sdk_core.test_mcp_integration import config as mcp_config
 from tests.sdk_core.test_model_api import OPENAI as PROFILE
 from tests.sdk_core.test_model_api import _responses_body
 from tests.sdk_core.test_sdk_contract import _RecordingProcessor
+from tests.sdk_core.test_vertex_model import VERTEX
 
 from xiaowei import app as app_module
 from xiaowei.app import AppConfig, Application, DataPolicy, TurnError, safe_run_config
@@ -798,6 +799,41 @@ def test_unclassified_failure_does_not_log_exception_details() -> None:
     assert record.getMessage().endswith("error_kind=unexpected_error http_status=-")
     assert _STAGE.fullmatch(record.getMessage()) is not None and record.exc_info is None
     assert MODEL_SECRET not in record.getMessage() and "forged-stage" not in record.getMessage()
+
+
+@pytest.mark.parametrize(
+    ("case", "kind", "status"),
+    [
+        ("429", "provider_http", "429"),
+        ("503", "provider_http", "503"),
+        ("connection", "connection", "-"),
+        ("timeout", "model_timeout", "-"),
+    ],
+)
+async def test_vertex_failure_uses_the_same_safe_log_categories(
+    env: Env, monkeypatch: pytest.MonkeyPatch, case: str, kind: str, status: str
+) -> None:
+    calls = 0
+
+    def respond(request: httpx2.Request) -> httpx2.Response:
+        nonlocal calls
+        calls += 1
+        if case == "connection":
+            raise httpx2.ConnectError(MODEL_SECRET, request=request)
+        if case == "timeout":
+            raise httpx2.ReadTimeout(MODEL_SECRET, request=request)
+        return httpx2.Response(int(status), json={"error": {"message": MODEL_SECRET}})
+
+    monkeypatch.setenv(VERTEX.api_key_ref.removeprefix("env:"), FAKE_MODEL_KEY)
+    profile = VERTEX.model_copy(update={"data_policy_id": PROFILE.data_policy_id})
+    async with open_model(profile, transport=httpx2.MockTransport(respond)) as binding:
+        vertex_env = replace(env, binding=binding)
+        with all_logs() as records, pytest.raises(TurnError) as failed:
+            await vertex_env.app.run_turn(vertex_env.ctx(turn="vertex-failure"), SYNTHETIC_SQL)
+    output = "\n".join(record.getMessage() for record in records)
+    assert failed.value.reason == "model_failed" and calls == 1
+    assert f"error_kind={kind} http_status={status}" in output
+    assert all(value not in output for value in (MODEL_SECRET, SYNTHETIC_SQL, FAKE_MODEL_KEY))
 
 
 async def test_stage_logs_contain_only_safe_metadata(env: Env) -> None:
