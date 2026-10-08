@@ -1139,7 +1139,9 @@ async def call_tool(executes: Any, tool_id: str, **arguments: object) -> Any:
     return await execute.run(execute.check(request))
 
 
-def search_page(database: str | None, keyword: str | None = ".", **changes: object) -> dict[str, object]:
+def search_page(
+    database: str | None, keyword: str | None = ".", **changes: object
+) -> dict[str, object]:
     """搜表参数（P2.5 Task 6）：默认第一页、页大小取 ``target`` 的 ``max_rows``。"""
     return {"keyword": keyword, "database": database, "page_size": 5, "cursor": None, **changes}
 

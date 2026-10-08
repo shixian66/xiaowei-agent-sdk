@@ -22,6 +22,7 @@ from typing import Any
 
 import pytest
 import uvicorn
+from tests.sdk_core import synthetic_tools
 from tests.sdk_core.browser import Page, launch
 from tests.sdk_core.synthetic_tools import QUERY_TOOL
 from tests.sdk_core.test_app import MODEL_SECRET, after, cite, tool_call, upstream_error
@@ -170,6 +171,43 @@ async def test_compact_facts_and_multiline_analysis(env: Env, chrome_binary: str
         await page.evaluate(f"{item(0)}.querySelector('summary').click()")
         assert "来源 local/order_total" in await page.evaluate(f"{item(0)}.innerText")
         assert await page.evaluate("document.scripts.length") == 1
+
+
+@pytest.mark.parametrize("nested_rows", [False, True])
+async def test_compact_preserves_exact_values(
+    env: Env, chrome_binary: str, monkeypatch: pytest.MonkeyPatch, nested_rows: bool
+) -> None:
+    big = 9007199254740993
+    values = {"id": big, "negative": -big, "missing": None, "empty": "", "active": True}
+    payload = {
+        "region": {"ids": [big], "note": "<script>alert(1)</script>"},
+        "total": big,
+        "rows": [{"nested": values}] if nested_rows else [values],
+        "private_note": "forbidden-value",
+    }
+    monkeypatch.setattr(synthetic_tools, "payload", lambda *args: payload)
+    app = create_web_app(env.service, config())
+    message = env.scripts.add("订单号与空值", tool_call("order_total", region="east"), cite(""))
+    async with serving(app, port=18501), launch(chrome_binary) as chrome:
+        page = await chrome.page()
+        await page.navigate("http://127.0.0.1:18501/")
+        await send(page, message)
+        await settled(page, 0, "completed")
+        rendered = await page.evaluate(f"{item(0)}.innerText")
+        assert f"total: {big}" in rendered
+        assert f'"ids": [{big}]' in rendered
+        assert "forbidden-value" not in rendered
+        assert await page.evaluate("document.scripts.length") == 1
+        if nested_rows:
+            assert f'"id": {big}' in rendered and '"missing": null' in rendered
+            assert '"empty": ""' in rendered
+        else:
+            cells = await page.evaluate(
+                f"[...{item(0)}.querySelectorAll('td')].map(cell => cell.textContent)"
+            )
+            assert cells == [str(big), str(-big), "NULL", "（空字符串）", "true"]
+        original = await page.evaluate(f"{item(0)}.querySelector('pre.original').textContent")
+        assert json.loads(original) == {k: v for k, v in payload.items() if k != "private_note"}
 
 
 async def check_turns(env: Env, page: Page, log: list[str]) -> None:

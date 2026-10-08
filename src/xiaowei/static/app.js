@@ -12,6 +12,8 @@
   const BIDI = /[\u061c\u200e\u200f\u202a-\u202e\u2066-\u2069]/g;
   const visible = (value) =>
     String(value).replace(BIDI, (c) => `\\u${c.charCodeAt(0).toString(16).padStart(4, "0")}`);
+  const cellText = (value) => value === null ? "NULL" :
+    value === undefined ? "（未提供）" : value === "" ? "（空字符串）" : value;
 
   const el = (tag, className, text) => {
     const node = document.createElement(tag);
@@ -45,9 +47,9 @@
     if (fact.truncated) box.append(el("p", "note", "结果已截断，当前显示的不是全部结果"));
     if (fact.note) box.append(el("p", "note", `说明：${fact.note}`));
     for (const [key, value] of Object.entries(fact.metadata || {})) {
-      // 查询/续取信息折叠；非查询工具的标量事实仍直接显示，避免丢掉数值。
+      // 查询/续取信息折叠；其余获准字段完整显示，嵌套值由服务端编码为 JSON 文本。
       const technical = ["sql", "next_cursor", "row_count", "elapsed_ms"].includes(key);
-      (technical ? details : box).append(el("p", "content", `${key}: ${value}`));
+      (technical ? details : box).append(el("p", "content", `${key}: ${cellText(value)}`));
     }
     if (fact.columns.length) {
       const table = el("table");
@@ -58,13 +60,17 @@
         const tr = body.insertRow();
         for (const column of fact.columns) {
           const value = row[column];
-          tr.append(el("td", "", value === null || value === undefined ? "" : value));
+          tr.append(el("td", "", cellText(value)));
         }
       }
       const wrap = el("div", "table-wrap");
       wrap.append(table);
       box.append(wrap);
       if (!fact.rows.length) box.append(el("p", "content", "未返回数据行"));
+    }
+    if (fact.result_json !== null && fact.result_json !== undefined) {
+      details.append(el("p", "meta", "本次结果原文（仅含获准展示字段；分页或截断范围见上方提示）"));
+      details.append(el("pre", "content original", fact.result_json));
     }
     box.append(details);
     return box;

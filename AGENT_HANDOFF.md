@@ -37,9 +37,9 @@
 ## 3. 当前计划与下一项工作
 
 **本工作树的 Web 实战修复（尚未合入/发布）：** 以 `db773ee` 为基线，按用户提供的 Web 对话扩展
-[实战查询修复计划](docs/superpowers/plans/2026-10-08-web-query-practical-fixes.md)：补列库与按库遍历、稳定分页、完整字段类型、事实/推断说明、Web 单次渲染、本轮时间与请求日志关联；原始 DDL 仍未开放。
+[实战查询修复计划](docs/superpowers/plans/2026-10-08-web-query-practical-fixes.md)：补列库与按库遍历、稳定分页、完整字段类型、事实/推断说明、Web 单次渲染与可展开原文、大整数保真/空值区分/嵌套字段保留、本轮时间与请求日志关联；原始 DDL 仍未开放。
 新的 `list_databases` 必须显式配置授权；StarRocks 证据摘要 v6 使旧相关证据失效，应用表版本不变。
-真实模型、公司运行镜像对齐与部署验收仍未完成；本次检查和下一项见该计划的交付记录。
+用户确认公司镜像由最新 main 构建；未独立读取公司镜像 digest，真实模型新增问法与部署验收仍未完成；本次检查和下一项见该计划的交付记录。
 
 **当前计划：** [Vertex、配置维护与飞书首次授权](docs/superpowers/plans/2026-10-06-vertex-config-feishu-onboarding.md)：`C1 → F` 与 `V1-A → V1-B → V2 → C2` 已合入；I-F 真实飞书 Gate 与 I-V 未完成（用户决定直接在公司服务器部署，I-V B/C 未运行，Vertex 真实证据只来自用户在服务器上的结果）。
 
