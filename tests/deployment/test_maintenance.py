@@ -700,7 +700,14 @@ def test_container_migration_v4_to_v5_to_v6_and_old_program_refusal(
         XW_PROJECT_NAME=project,
         XW_PG_VOLUME=volume,
     )
-    _runtime_config(directory, port, model=LEGACY_MODEL)
+    v4_source = host_tmp / "v4-source"
+    _extract_tree(V4_SHA, v4_source)
+    _runtime_config(
+        directory,
+        port,
+        model=LEGACY_MODEL,
+        template=v4_source / "examples/xiaowei.example.json",
+    )
     original_env = (directory / ".env").read_bytes()
 
     try:
@@ -932,7 +939,7 @@ def test_feishu_users_upgrade_rollback_restores_the_config_the_old_image_reads(
     _runtime_config(active, port, model=LEGACY_MODEL)
     config = json.loads((active / "xiaowei.json").read_text(encoding="utf-8"))
     # 旧版合法、新版拒绝：已登记用户的 subject 没有授权。
-    config["feishu"] = _feishu_section(candidate, {"ou_drill_user": "drill-user"})
+    config["feishu"] = _feishu_section(active, {"ou_drill_user": "drill-user"})
     custom = active / _DRILL_CONFIG_FILE
     custom.parent.mkdir()
     custom.write_text(json.dumps(config, ensure_ascii=False), encoding="utf-8")

@@ -11,8 +11,8 @@
 | 仓库 | [shixian66/xiaowei-agent-sdk](https://github.com/shixian66/xiaowei-agent-sdk) |
 | 本地目录 / 分支 | `/Users/kloenguyen/.codex/worktrees/web-query-practical-fixes/agent-SDK` / `codex/web-query-practical-fixes`；独立工作树，接手先核对 HEAD 与未提交差异 |
 | M5 历史起点 | `372c381f44ecfa1fa53961f137d0058033cbd805`；不是远端当前 main 的核验结论 |
-| 本轮审查版本 | 用户提供的独立复审基线为 `4331cd4725119fcda35f35bc9d94681e677ef32a`；普通查询分析默认展开的修订版本以 Git 实际提交为准，仍需针对新差异独立复审。更早的 `db773ee..50f4e7e` 审查只证明对应历史差异 |
-| 当前阶段 | Web 实战查询修复分支尚未创建 PR、合入或部署。用户提供的 `4331cd4` 独立复审已关闭采集时间/固定说明的 P3；本轮按用户决定把普通查询的模型分析改为默认可见。已有公司镜像由用户称为最新 main 构建，未独立核对其 digest；当前修复没有公司入口验收。 |
+| 本轮审查版本 | 用户确认 `8d953c36a162f3a57a7b89d5f99ce337f3226d22` 独立复审通过；后续 CI 修订的精确 SHA 和审查结论以 PR #59 为准。更早的 `db773ee..50f4e7e` 审查只证明对应历史差异 |
+| 当前阶段 | Web 实战查询修复对应 [PR #59](https://github.com/shixian66/xiaowei-agent-sdk/pull/59)；合入状态以 GitHub 为准，未部署。采集时间、固定说明和普通查询的模型分析均按用户决定默认可见。已有公司镜像由用户称为最新 main 构建，未独立核对其 digest；当前修复没有公司入口验收。 |
 | 当前源码与依赖 | 新包 `src/xiaowei/` 仍为应用表 v6。V1-A 新增 `vertex_model.py`（SDK 公开 `Model` 的非流式 Vertex 适配器），`model_api` 增加 `provider="vertex"` 与受控 transport 的认证头/成功校验参数；显式声明已直接导入的 `httpx2>=2.12,<3`（锁定 2.13.1 不变）。V1-B 使 `PolicySession` 随函数调用保存并回放 `provider_data.thought_signature`（单字段白名单，其余供应商字段丢弃），`app.safe_run_config()` 成为应用与 `model check` 共用的运行配置。V2 新增 `runtime.check_model` / `validate_model_config` 与 CLI `model check`。C2 把主模板改为一个 Vertex Profile、一个目标；占位符清单新增 Vertex 模型标记，C2 前模板的标记作为历史值继续拒绝。发布归档仍只含白名单文件 |
 | 新产品入口 | 原生主线仍为 `xiaowei`（与 `python -m xiaowei` 相同）的 `serve`、`config check`、`model check`、`storage init/upgrade/cleanup`、`requests resend`；`listen_host` 可为任意地址（默认 `127.0.0.1`）。镜像固定入口复用同一 CLI，在容器内绑定 `0.0.0.0`，宿主机发布地址由 `XW_WEB_BIND_ADDRESS`（默认 `0.0.0.0`）决定。真实模型、用户 StarRocks 与真实飞书未参与 P3-A 验证；旧 CLI/Compose 不是产品入口 |
 | 本次工作范围 | 列库每页批量且有界地复核对象；Web 保留多行澄清/建议、区分空值，并默认显示采集时间、固定说明和模型分析，技术字段及原文仍可展开；DDL 只增加对普通内部 `CLOUD_NATIVE` 表的支持，拒绝规则不放宽到外表。修复范围只在当前分支；未操作公司服务器、真实模型或飞书。 |

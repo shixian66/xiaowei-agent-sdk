@@ -134,12 +134,16 @@ LEGACY_MODEL = {
 }
 
 
-def _runtime_config(directory: Path, port: int, *, model: dict[str, Any] | None = None) -> None:
-    """按当前发行模板写出可运行配置；``model`` 给出时替换整个模型段（旧镜像演练用）。"""
+def _runtime_config(
+    directory: Path,
+    port: int,
+    *,
+    model: dict[str, Any] | None = None,
+    template: Path | None = None,
+) -> None:
+    """按该发行版本的模板写出可运行配置；旧镜像演练可指定历史模板。"""
     config = json.loads(
-        (Path(__file__).resolve().parents[2] / "examples/xiaowei.example.json").read_text(
-            encoding="utf-8"
-        )
+        (template or directory / "xiaowei.example.json").read_text(encoding="utf-8")
     )
     config["targets"] = config["targets"][:1]
     # 模板占位符必须替换；正式预检会拒绝未填写的模板。
