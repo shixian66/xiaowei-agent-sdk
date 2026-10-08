@@ -15,7 +15,7 @@ import re
 import time
 from collections.abc import AsyncIterator, Callable, Iterator, Sequence
 from contextlib import contextmanager
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any
 
 import httpx2
@@ -44,6 +44,7 @@ from tests.sdk_core.test_mcp_integration import config as mcp_config
 from tests.sdk_core.test_model_api import OPENAI as PROFILE
 from tests.sdk_core.test_model_api import _responses_body
 from tests.sdk_core.test_sdk_contract import _RecordingProcessor
+from tests.sdk_core.test_vertex_model import VERTEX
 
 from xiaowei import app as app_module
 from xiaowei.app import AppConfig, Application, DataPolicy, TurnError, safe_run_config
@@ -95,6 +96,7 @@ class ModelCall:
 
     input: list[dict[str, Any]]
     tools: list[str]
+    instructions: str = ""
 
 
 Step = Callable[[ModelCall], Any]
@@ -193,7 +195,11 @@ class Scripts:
 
     async def _handle(self, request: httpx2.Request) -> httpx2.Response:
         body = json.loads(request.content)
-        call = ModelCall(body["input"], [tool["name"] for tool in body.get("tools", [])])
+        call = ModelCall(
+            body["input"],
+            [tool["name"] for tool in body.get("tools", [])],
+            body.get("instructions", ""),
+        )
         message = _user_text(call)
         self.calls.setdefault(message, []).append(call)
         result = self.by_message[message].pop(0)(call)
@@ -651,6 +657,18 @@ async def test_changed_instructions_keep_the_session(env: Env) -> None:
     assert len(evidence_in(env.scripts.calls[followup][0])) == 1
 
 
+async def test_each_turn_tells_the_model_the_current_time(env: Env) -> None:
+    first = env.scripts.add("昨天是何时", clarify())
+    await env.app.run_turn(env.ctx(turn="clock-1"), first)
+    initial = env.clock().isoformat()
+    assert initial in env.scripts.calls[first][0].instructions
+    env.clock.advance(60)
+    followup = env.scripts.add("现在呢", clarify())
+    await env.app.run_turn(env.ctx(turn="clock-2"), followup)
+    instructions = env.scripts.calls[followup][0].instructions
+    assert env.clock().isoformat() in instructions and initial not in instructions
+
+
 async def test_query_permission_is_not_inherited(env: Env) -> None:
     assert QUERY_TOOL in env.scope("query")
     assert QUERY_TOOL not in env.scope("diagnose")
@@ -727,7 +745,95 @@ def all_logs() -> Iterator[list[logging.LogRecord]]:
         root.setLevel(level)
 
 
-_STAGE = re.compile(r"turn=(\S+) stage=(\w+) reason=([\w-]+) elapsed_ms=\d+")
+_STAGE = re.compile(
+    r"turn=(\S+) stage=(\w+) reason=([\w-]+) elapsed_ms=\d+"
+    r"(?: error_kind=[a-z_]+ http_status=[\d-]+)?"
+)
+
+
+@pytest.mark.parametrize(
+    ("case", "kind", "status"),
+    [
+        ("http_400", "provider_http", "400"),
+        ("http_429", "provider_http", "429"),
+        ("http_503", "provider_http", "503"),
+        ("invalid_output", "invalid_output", "-"),
+        ("non_json", "response_rejected", "-"),
+        ("connection", "connection", "-"),
+        ("timeout", "model_timeout", "-"),
+    ],
+)
+async def test_model_failure_logs_safe_category_and_http_status(
+    env: Env, case: str, kind: str, status: str
+) -> None:
+    def respond(call: ModelCall) -> Any:
+        if case.startswith("http_"):
+            return httpx2.Response(
+                int(status), json={"error": {"message": MODEL_SECRET, "type": "upstream"}}
+            )
+        if case == "invalid_output":
+            return [assistant_message(MODEL_SECRET)]
+        if case == "non_json":
+            return httpx2.Response(200, text=MODEL_SECRET)
+        if case == "connection":
+            raise httpx2.ConnectError(MODEL_SECRET)
+        raise httpx2.ReadTimeout(MODEL_SECRET)
+
+    message = env.scripts.add("失败分类 " + SYNTHETIC_SQL, respond)
+    with all_logs() as records, pytest.raises(TurnError) as failed:
+        await env.app.run_turn(env.ctx(turn="failure-kind"), message)
+    assert failed.value.reason == "model_failed"
+    output = "\n".join(record.getMessage() for record in records)
+    assert f"error_kind={kind} http_status={status}" in output
+    assert MODEL_SECRET not in output and SYNTHETIC_SQL not in output
+    assert all(record.exc_info is None for record in records if record.name == "xiaowei.app")
+    assert len(env.scripts.calls[message]) == 1  # 分类不引入请求重试。
+
+
+def test_unclassified_failure_does_not_log_exception_details() -> None:
+    error = RuntimeError(f"{MODEL_SECRET}\n{SYNTHETIC_SQL}\nforged-stage=completed")
+    with all_logs() as records:
+        app_module._stage("unclassified", "failed", time.monotonic(), "model_failed", cause=error)
+    assert len(records) == 1
+    record = records[0]
+    assert record.getMessage().endswith("error_kind=unexpected_error http_status=-")
+    assert _STAGE.fullmatch(record.getMessage()) is not None and record.exc_info is None
+    assert MODEL_SECRET not in record.getMessage() and "forged-stage" not in record.getMessage()
+
+
+@pytest.mark.parametrize(
+    ("case", "kind", "status"),
+    [
+        ("429", "provider_http", "429"),
+        ("503", "provider_http", "503"),
+        ("connection", "connection", "-"),
+        ("timeout", "model_timeout", "-"),
+    ],
+)
+async def test_vertex_failure_uses_the_same_safe_log_categories(
+    env: Env, monkeypatch: pytest.MonkeyPatch, case: str, kind: str, status: str
+) -> None:
+    calls = 0
+
+    def respond(request: httpx2.Request) -> httpx2.Response:
+        nonlocal calls
+        calls += 1
+        if case == "connection":
+            raise httpx2.ConnectError(MODEL_SECRET, request=request)
+        if case == "timeout":
+            raise httpx2.ReadTimeout(MODEL_SECRET, request=request)
+        return httpx2.Response(int(status), json={"error": {"message": MODEL_SECRET}})
+
+    monkeypatch.setenv(VERTEX.api_key_ref.removeprefix("env:"), FAKE_MODEL_KEY)
+    profile = VERTEX.model_copy(update={"data_policy_id": PROFILE.data_policy_id})
+    async with open_model(profile, transport=httpx2.MockTransport(respond)) as binding:
+        vertex_env = replace(env, binding=binding)
+        with all_logs() as records, pytest.raises(TurnError) as failed:
+            await vertex_env.app.run_turn(vertex_env.ctx(turn="vertex-failure"), SYNTHETIC_SQL)
+    output = "\n".join(record.getMessage() for record in records)
+    assert failed.value.reason == "model_failed" and calls == 1
+    assert f"error_kind={kind} http_status={status}" in output
+    assert all(value not in output for value in (MODEL_SECRET, SYNTHETIC_SQL, FAKE_MODEL_KEY))
 
 
 async def test_stage_logs_contain_only_safe_metadata(env: Env) -> None:

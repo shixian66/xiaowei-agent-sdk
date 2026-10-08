@@ -347,7 +347,12 @@ class EvidenceStore:
             await self._context_readable(ctx, channel, context, history=history)
             ((header, text),) = unverified
             content = f"{header}\n{_one_line(text)}"
-            return Delivery(content=content, evidence_ids=(), channel=channel)
+            return Delivery(
+                content=content,
+                evidence_ids=(),
+                channel=channel,
+                web_text=text if channel == "web" else None,
+            )
 
         cited = answer.evidence_ids
         if not cited:
@@ -382,6 +387,7 @@ class EvidenceStore:
             evidence_ids=cited,
             channel=channel,
             facts=tuple(_fact(item) for item in shown) if channel == "web" else (),
+            analysis=tuple(answer.inferences) if channel == "web" else (),
             # 飞书有单条长度上限：给出分段，超限时由渠道先保住分析再截断工具结果。
             layout=layout if channel == "feishu" else None,
         )
@@ -716,6 +722,13 @@ def _fact(shown: _Shown) -> DeliveryFact:
     record, data = shown.record, shown.data
     table = _table(data) if data is not None else None
     columns, rows = table if table is not None else ((), ())
+    # 声明列之外的获准行字段也必须可见；JSON 文本保留未经展示转换的完整值与类型。
+    columns = tuple(dict.fromkeys((*columns, *(name for row in rows for name in row))))
+    metadata = {
+        name: _web_value(value)
+        for name, value in (data or {}).items()
+        if table is None or name not in ("rows", "columns")
+    }
     return DeliveryFact(
         evidence_id=record.evidence_id,
         tool_id=record.tool_id,
@@ -723,10 +736,20 @@ def _fact(shown: _Shown) -> DeliveryFact:
         captured_at=record.captured_at,
         truncated=shown.truncated,
         columns=columns,
-        rows=rows,
-        metadata=_scalars(data) if data is not None else {},
+        rows=tuple({name: _web_value(value) for name, value in row.items()} for row in rows),
+        metadata=metadata,
         note=shown.note,
+        result_json=json.dumps(data, ensure_ascii=False) if data is not None else None,
     )
+
+
+def _web_value(value: object) -> JsonScalar:
+    """仅调整 Web 展示编码：大整数先转文本，避免浏览器 JSON.parse 不可逆地舍入。"""
+    if isinstance(value, int) and not -(2**53 - 1) <= value <= 2**53 - 1:
+        return str(value)
+    if _is_scalar(value):
+        return value
+    return json.dumps(value, ensure_ascii=False)
 
 
 def _is_scalar(value: object) -> TypeGuard[JsonScalar]:

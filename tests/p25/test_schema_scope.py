@@ -417,6 +417,7 @@ SEARCH_ALL: dict[str, object] = {
     "cursor": None,
 }
 ALL_CALLS: list[tuple[str, dict[str, object]]] = [
+    ("local/list_databases", {"page_size": TARGET.policy.max_rows, "cursor": None}),
     (LIST_TABLES, SEARCH_ALL),
     (DESCRIBE_TABLE, {"database": "shop", "table": "sales", "cursor": None}),
     (LAYOUT_TOOL, {"database": "shop", "table": "sales"}),

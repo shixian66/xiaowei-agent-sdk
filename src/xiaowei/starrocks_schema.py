@@ -102,7 +102,7 @@ class ObjectInfo:
 class SchemaSnapshot:
     """一次成功刷新的完整结构；构造后不再修改，刷新时整体替换。
 
-    ``version`` 是每份快照各不相同的随机标识：搜表与表结构的续取游标带上它，刷新后旧游标即失效。
+    ``version`` 绑定目录内容；相同内容的定时刷新沿用版本，内容变化后旧游标失效。
     """
 
     target_id: str
@@ -189,12 +189,18 @@ class SchemaCache:
             logger.warning("结构快照刷新失败：target=%s reason=%s", self.target_id, reason)
             return False
         readable = {key: obj for key, obj in candidates.items() if verdicts.get(key) is True}
+        previous = self._snapshot
         self._snapshot = SchemaSnapshot(
             target_id=self.target_id,
             collected_at=started,
             expires_at=started + timedelta(seconds=self._limits.max_age_seconds),
             objects=readable,
             query_policy=self._query_policy(readable),
+            version=(
+                previous.version
+                if previous is not None and previous.objects == readable
+                else secrets.token_hex(8)
+            ),
         )
         logger.info(
             "结构快照已刷新：target=%s objects=%d readable=%d",

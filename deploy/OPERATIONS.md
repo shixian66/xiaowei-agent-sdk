@@ -215,6 +215,29 @@ docker compose --env-file .env ps
 
 ## 普通升级与回退（schema 不变）
 
+**升级到 Web 实战查询修复版：** 在自己的配置中给需要列库的身份显式添加
+`local/list_databases`：加入 `data_policy.model_tools` 和该身份的 `access.grants`；指定群使用时
+还要加入 `feishu.group.tools`。不需要该能力的身份维持原授权；不要用新模板覆盖自己的配置。
+内部表原始 DDL 为另一项独立授权 `local/show_create_table`：按需加入 Web 使用者的
+`data_policy.model_tools` 和 `access.grants`；飞书群示例没有自动加入这项授权。它会返回内部表
+默认值和完整表属性，接收范围应与使用者权限一致。目标的 `starrocks.max_ddl_bytes` 仅控制 DDL
+单值容量（JSON 编码字节），未配置时沿用 `max_value_bytes`；示例为 64000，普通单值仍为 4000。
+它不能大于 `max_result_bytes`，模型、Session、Web、飞书四种投影也须装得下配置的最大结果。
+容量不足时整条 DDL 不返回并说明原因；按需调好容量、新建会话后重新读取，不重放旧结果。
+显式日分区较多的表可能超过示例上限；升级前用目标集群的代表性 SHOW CREATE 原文测量 JSON 编码
+字节数，再设定 DDL、结果及投影容量。历史 DDL 只保证采集时原文；当前复核要求采集时的列仍存在且
+类型相同，不因新增列、属性或分区变化而失效，旧原文仍带采集时间显示；要看现状需重新查询。
+本版字段类型由 `DATA_TYPE` 改为完整 `COLUMN_TYPE`，列元数据会变长；升级前按目标集群实际规模
+核对 `schema_limits.max_bytes`（每条元数据读取的字节上限）和 `refresh_timeout_seconds`。
+新快照超限时旧快照只保留到 `max_age_seconds`，到期后该目标的数据工具不可用。
+存算分离集群的内部表可能报告 `CLOUD_NATIVE`；当前代码仅接受 `OLAP` / `CLOUD_NATIVE` 的
+`BASE TABLE`，不放行外表。此分支只用离线契约验证了该路径，仍需在目标版本和账号上实测。
+Web 有事实响应同时携带 `content`、结构化行与可展开的 `result_json`，维持现有 API 与原值类型。
+用 64 KiB 合成 DDL 测得响应体约 193 KiB，约为原始结果 JSON 的 3 倍；这是有界容量开销，
+不是公司负载的测量值。接入代理与浏览器的响应容量应按获准最大结果核对。页面只渲染一次事实表格。
+该版使用 StarRocks 证据范围摘要 v6，旧相关结果和历史不能继续交付，升级后新建会话再查。
+此摘要与 PostgreSQL 应用表版本 6 无关，本次不新增存储迁移。
+
 先把新包展开到 `/opt/xiaowei/releases/<新 SHA>`。查看当前和新版 `release.json`，并从当前
 PostgreSQL 读取 schema：
 
@@ -396,6 +419,14 @@ docker compose --env-file .env run --rm --no-deps xiaowei requests resend \
 
 重发只处理已保存的 failed/unknown 结果，重新检查当前权限和群成员资格，不重跑模型或原业务
 SQL。未完成请求在启动恢复时记为中断，同样不自动重跑。日志只记录安全状态、原因码和请求编号；
-Compose 的 `XW_LOG_MAX_SIZE`/`XW_LOG_MAX_FILES` 限制本地日志轮转。
+Compose 的 `XW_LOG_MAX_SIZE`/`XW_LOG_MAX_FILES` 限制本地日志轮转。Web 实战修复版接受请求时记录
+`channel=web request="页面编号" turn=内部编号`；先按页面编号找到 turn，再看该 turn 的
+`stage=failed reason=...`（例如 `timeout`、`turn_limit`、`answer_rejected`、`tool_failed` 或
+`model_failed`）。日志不含问题正文或模型错误原文；旧版本没有该关联行时，不能从通用回执猜原因。
+`model_failed` 还会记录固定分类 `error_kind` 和可用的 `http_status`：`provider_http` 是模型服务
+HTTP 错误，`connection`/`model_timeout` 是连接/模型调用超时，`invalid_output` 是模型返回不符合
+最终输出契约，`request_rejected`/`response_rejected` 是模型请求/响应边界拒绝，`model_refusal` 是模型
+拒答；运行配置错误另有固定分类，`unexpected_error` 仍是未分类异常，不能据此认定
+模型服务故障。状态码缺失记 `-`。这些分类只改善排查，不引入自动重试，也不记录异常正文。
 
 PostgreSQL 16 同一大版本内更换镜像 digest 不在本轮验证范围，须另做备份、兼容和回退演练。

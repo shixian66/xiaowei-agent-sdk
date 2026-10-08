@@ -40,6 +40,7 @@ from xiaowei.starrocks import EXPLAIN_PREFIX
 from xiaowei.starrocks_tools import (
     AUDIT_NOTE,
     EXPLAIN_QUERY,
+    LAYOUT_NOTE,
     LAYOUT_TOOL,
     PLAN_NOTE,
     RUN_QUERY,
@@ -209,7 +210,7 @@ async def test_slow_query_to_plan_and_layout(diag: Env, channel: str) -> None:
         assert plan["metadata"]["sql"] == explained(SLOW_SQL)
         assert [row["plan"] for row in plan["rows"]] == list(PLAN_LINES)
         assert audit["note"] == AUDIT_NOTE and plan["note"] == PLAN_NOTE
-        assert layout["note"] is None
+        assert layout["note"] == LAYOUT_NOTE
     else:
         assert "q1" in reply.content and FACTS_HEADER in content
 

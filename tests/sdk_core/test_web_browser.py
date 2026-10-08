@@ -18,17 +18,29 @@ import re
 import socket
 from collections.abc import AsyncIterator, Iterator
 from contextlib import asynccontextmanager, contextmanager
+from dataclasses import replace
 from typing import Any
 
 import pytest
 import uvicorn
+from tests.sdk_core import synthetic_tools
 from tests.sdk_core.browser import Page, launch
 from tests.sdk_core.synthetic_tools import QUERY_TOOL
-from tests.sdk_core.test_app import MODEL_SECRET, after, cite, tool_call, upstream_error
+from tests.sdk_core.test_app import (
+    MODEL_SECRET,
+    after,
+    answer,
+    cite,
+    clarify,
+    tool_call,
+    upstream_error,
+)
 from tests.sdk_core.test_channel_service import Env
 from tests.sdk_core.test_channel_service import env as env  # pytest fixture
 from tests.sdk_core.test_web import HOSTILE, ORIGIN, config
 
+from xiaowei.governance import Projection
+from xiaowei.starrocks_tools import DATABASE_NOTE, DDL_NOTE, LAYOUT_NOTE
 from xiaowei.web import COOKIE, create_web_app
 
 pytestmark = [pytest.mark.loopback, pytest.mark.browser]
@@ -62,14 +74,14 @@ def access_log() -> Iterator[list[str]]:
 
 
 @asynccontextmanager
-async def serving(app: Any) -> AsyncIterator[None]:
+async def serving(app: Any, *, port: int = PORT) -> AsyncIterator[None]:
     # 以“能否连上”判断是否有其他进程在监听；前一个用例留下的 TIME_WAIT 不影响 Uvicorn 绑定。
     with socket.socket() as probe:
-        if probe.connect_ex((HOST, PORT)) == 0:
-            pytest.fail(f"{HOST}:{PORT} 已被占用：smoke 使用正式默认端口")
+        if probe.connect_ex((HOST, port)) == 0:
+            pytest.fail(f"{HOST}:{port} 已被占用：不能干扰既有服务")
     server = uvicorn.Server(
         uvicorn.Config(
-            app, host=HOST, port=PORT, http="h11", lifespan="off", log_config=None, access_log=True
+            app, host=HOST, port=port, http="h11", lifespan="off", log_config=None, access_log=True
         )
     )
     task = asyncio.create_task(server.serve())
@@ -144,6 +156,283 @@ async def test_send_works_without_secure_context_apis(env: Env, chrome_binary: s
         assert await page.evaluate("document.getElementById('message').value") == ""
     assert re.fullmatch(r"[A-Za-z0-9_-]{1,64}", request_id)
     assert env.model_calls(message) == 2
+
+
+@pytest.mark.parametrize("mode", ["query", "diagnose"])
+async def test_compact_facts_and_multiline_analysis(
+    env: Env, chrome_binary: str, monkeypatch: pytest.MonkeyPatch, mode: str
+) -> None:
+    app = create_web_app(env.service, config())
+    inference = "第一行\n第二行 <script>alert(1)</script>"
+    catalog = env.evidence._catalog
+    policy = catalog._policies["synthetic.region"]
+    monkeypatch.setitem(
+        catalog._policies, "synthetic.region", replace(policy, fact_note="长期重复的固定说明")
+    )
+    message = env.scripts.add(
+        "只看查询结果", tool_call("order_total", region="east"), cite(inference)
+    )
+    async with serving(app, port=18501), launch(chrome_binary) as chrome:
+        page = await chrome.page()
+        await page.navigate("http://127.0.0.1:18501/")
+        await send(page, message, None if mode == "query" else mode)
+        await settled(page, 0, "completed")
+        rendered = await page.evaluate(f"{item(0)}.innerText")
+        assert "已回复" in rendered and "已完成" not in rendered
+        assert "第一行" in rendered and "第二行 <script>alert(1)</script>" in rendered
+        assert "长期重复的固定说明" in rendered
+        assert "采集于 2026-09-29T08:00:00" in rendered
+        assert '"rows":' not in rendered and "查看分析与建议" not in rendered
+        assert await table_rows(page, 0) == [2]
+        assert await page.evaluate(f"{item(0)}.dataset.mode") == mode
+        assert await page.evaluate(f"{item(0)}.querySelector('.analysis').tagName") == "SECTION"
+        assert (
+            await page.evaluate(f"{item(0)}.querySelector('.analysis > p.meta').textContent")
+            == "分析与建议（模型推断）"
+        )
+        assert await page.evaluate(
+            f"{item(0)}.querySelector('.fact').nextElementSibling === "
+            f"{item(0)}.querySelector('.analysis')"
+        )
+        assert (
+            await page.evaluate(f"{item(0)}.querySelector('.analysis .content').textContent")
+            == inference
+        )
+        assert (
+            await page.evaluate(
+                f"getComputedStyle({item(0)}.querySelector('.analysis .content')).whiteSpace"
+            )
+            == "pre-wrap"
+        )
+        source = await page.evaluate(
+            f"{item(0)}.querySelector('details.evidence p.meta').textContent"
+        )
+        evidence_id = re.search(r"\[(ev_[^\]]+)\]", source)
+        assert evidence_id is not None
+        assert (
+            await page.evaluate(
+                f"{item(0)}.querySelector('.analysis > p.meta:last-child').textContent"
+            )
+            == f"依据：{evidence_id.group(1)}"
+        )
+        assert await page.evaluate(f"{item(0)}.querySelector('details.evidence').open") is False
+        await page.evaluate(f"{item(0)}.querySelector('details.evidence summary').click()")
+        expanded = await page.evaluate(f"{item(0)}.innerText")
+        assert "来源 local/order_total" in expanded and "长期重复的固定说明" in expanded
+        assert expanded.count("第二行") == 1
+        await page.reload()
+        await settled(page, 0, "completed")
+        assert await page.evaluate(f"{item(0)}.dataset.mode") == mode
+        assert "第一行" in await page.evaluate(f"{item(0)}.innerText")
+        assert await page.evaluate(f"{item(0)}.querySelector('details.evidence').open") is False
+        assert await page.evaluate("document.scripts.length") == 1
+
+
+async def test_historical_ddl_keeps_capture_time_and_warning_visible(
+    env: Env, chrome_binary: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from tests.p1b.test_starrocks_ddl import DDL
+
+    catalog = env.evidence._catalog
+    policy = catalog._policies["synthetic.region"]
+    web = policy.projections["web"]
+    monkeypatch.setitem(
+        catalog._policies,
+        "synthetic.region",
+        replace(
+            policy,
+            fact_note=DDL_NOTE,
+            projections={
+                **policy.projections,
+                "web": Projection((*web.fields, "sql", "row_count", "elapsed_ms"), web.max_bytes),
+            },
+        ),
+    )
+    sql = "SHOW CREATE TABLE `shop`.`orders`"
+    monkeypatch.setattr(
+        synthetic_tools,
+        "payload",
+        lambda *args: {
+            "region": "shop.orders",
+            "total": 1,
+            "rows": [{"ddl": DDL}],
+            "sql": sql,
+            "row_count": 1,
+            "elapsed_ms": 17,
+        },
+    )
+    first = env.scripts.add("查 orders 的 DDL", tool_call("order_total", region="east"), cite(""))
+    middle = env.scripts.add("先等等", clarify("请继续"))
+    third = env.scripts.add("刚才那张表的 DDL 再发一下", cite(""))
+    app = create_web_app(env.service, config())
+    async with serving(app, port=18501), launch(chrome_binary) as chrome:
+        page = await chrome.page()
+        await page.navigate("http://127.0.0.1:18501/")
+        for index, message in enumerate((first, middle, third)):
+            await send(page, message)
+            await settled(page, index, "completed")
+        assert len(env.adapter.calls) == 1  # 第三轮只引用历史证据，没有重新读取表。
+        assert await table_rows(page, 2) == [1]
+        assert await page.evaluate(f"{item(2)}.querySelector('td').textContent") == DDL
+        assert await page.evaluate(f"{item(2)}.querySelector('details.evidence').open") is False
+        rendered = await page.evaluate(f"{item(2)}.innerText")
+        assert "采集于 2026-09-29T08:00:00" in rendered
+        assert "历史回放核对采集时的列仍存在且类型不变" in rendered
+        assert sql not in rendered and "row_count: 1" not in rendered
+        assert "elapsed_ms: 17" not in rendered and '"rows":' not in rendered
+        await page.evaluate(f"{item(2)}.querySelector('details.evidence summary').click()")
+        expanded = await page.evaluate(f"{item(2)}.innerText")
+        assert sql in expanded and "row_count: 1" in expanded
+        assert "elapsed_ms: 17" in expanded and '"rows":' in expanded
+
+
+@pytest.mark.parametrize(
+    ("note", "row", "warning"),
+    [
+        (DATABASE_NOTE, {"database": "shop"}, "不等同于管理员看到的全部数据库"),
+        (LAYOUT_NOTE, {"buckets": 0}, "不能据此确认实际桶数"),
+    ],
+    ids=["database", "layout"],
+)
+async def test_database_and_layout_warnings_are_visible_by_default(
+    env: Env,
+    chrome_binary: str,
+    monkeypatch: pytest.MonkeyPatch,
+    note: str,
+    row: dict[str, object],
+    warning: str,
+) -> None:
+    catalog = env.evidence._catalog
+    policy = catalog._policies["synthetic.region"]
+    web = policy.projections["web"]
+    monkeypatch.setitem(
+        catalog._policies,
+        "synthetic.region",
+        replace(
+            policy,
+            fact_note=note,
+            projections={
+                **policy.projections,
+                "web": Projection((*web.fields, "sql", "next_cursor"), web.max_bytes),
+            },
+        ),
+    )
+    sql, cursor = "SELECT catalog_marker", "opaque-page-token"
+    monkeypatch.setattr(
+        synthetic_tools,
+        "payload",
+        lambda *args: {
+            "region": "shop",
+            "total": 1,
+            "rows": [row],
+            "sql": sql,
+            "next_cursor": cursor,
+        },
+    )
+    app = create_web_app(env.service, config())
+    message = env.scripts.add("看目录或布局", tool_call("order_total", region="east"), cite(""))
+    async with serving(app, port=18501), launch(chrome_binary) as chrome:
+        page = await chrome.page()
+        await page.navigate("http://127.0.0.1:18501/")
+        await send(page, message)
+        await settled(page, 0, "completed")
+        assert await page.evaluate(f"{item(0)}.querySelector('details.evidence').open") is False
+        rendered = await page.evaluate(f"{item(0)}.innerText")
+        assert warning in rendered and "采集于 2026-09-29T08:00:00" in rendered
+        assert sql not in rendered and cursor not in rendered and '"rows":' not in rendered
+        await page.evaluate(f"{item(0)}.querySelector('details.evidence summary').click()")
+        expanded = await page.evaluate(f"{item(0)}.innerText")
+        assert sql in expanded and cursor in expanded and '"rows":' in expanded
+
+
+async def test_multiline_clarification_and_sql_advice_are_readable_in_web(
+    env: Env, chrome_binary: str
+) -> None:
+    app = create_web_app(env.service, config())
+    clarification = "请补充条件：\n\n日期与地区\u202e"
+    sql = "SELECT 1\nFROM t\nWHERE id = 2\u202e"
+    ask = env.scripts.add("请澄清", clarify(clarification))
+    draft = env.scripts.add("只写 SQL", lambda call: answer([], "", advice=sql))
+    async with serving(app, port=18501), launch(chrome_binary) as chrome:
+        page = await chrome.page()
+        await page.navigate("http://127.0.0.1:18501/")
+        for index, (message, expected) in enumerate(((ask, clarification), (draft, sql))):
+            await send(page, message)
+            await settled(page, index, "completed")
+            selector = f"{item(index)}.querySelector('.reply-text')"
+            shown = await page.evaluate(f"{selector}.textContent")
+            assert shown == expected.replace("\u202e", r"\u202e")
+            assert r"\n" not in shown and "\u202e" not in shown
+            assert await page.evaluate(f"getComputedStyle({selector}).whiteSpace") == "pre-wrap"
+            assert await table_rows(page, index) == []
+
+
+@pytest.mark.parametrize("nested_rows", [False, True])
+async def test_compact_preserves_exact_values(
+    env: Env, chrome_binary: str, monkeypatch: pytest.MonkeyPatch, nested_rows: bool
+) -> None:
+    big = 9007199254740993
+    values = {
+        "id": big,
+        "negative": -big,
+        "missing": None,
+        "empty": "",
+        "active": True,
+        "literal_null": "NULL",
+    }
+    payload = {
+        "region": {"ids": [big], "note": "<script>alert(1)</script>"},
+        "total": big,
+        "rows": [{"nested": values}] if nested_rows else [values],
+        "private_note": "forbidden-value",
+    }
+    monkeypatch.setattr(synthetic_tools, "payload", lambda *args: payload)
+    app = create_web_app(env.service, config())
+    message = env.scripts.add("订单号与空值", tool_call("order_total", region="east"), cite(""))
+    async with serving(app, port=18501), launch(chrome_binary) as chrome:
+        page = await chrome.page()
+        await page.navigate("http://127.0.0.1:18501/")
+        await send(page, message)
+        await settled(page, 0, "completed")
+        rendered = await page.evaluate(f"{item(0)}.innerText")
+        assert f"total: {big}" in rendered
+        assert f'"ids": [{big}]' in rendered
+        assert "forbidden-value" not in rendered
+        assert await page.evaluate("document.scripts.length") == 1
+        if nested_rows:
+            assert f'"id": {big}' in rendered and '"missing": null' in rendered
+            assert '"empty": ""' in rendered
+        else:
+            cells = await page.evaluate(
+                f"[...{item(0)}.querySelectorAll('td')].map(cell => cell.textContent)"
+            )
+            assert cells == [str(big), str(-big), "NULL（空值）", "（空字符串）", "true", "NULL"]
+            assert await page.evaluate(f"{item(0)}.querySelectorAll('td.null-value').length") == 1
+        original = await page.evaluate(f"{item(0)}.querySelector('pre.original').textContent")
+        assert json.loads(original) == {k: v for k, v in payload.items() if k != "private_note"}
+
+
+async def test_compact_preserves_multiline_ddl_original(
+    env: Env, chrome_binary: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from tests.p1b.test_starrocks_ddl import DDL
+
+    payload = {"region": "shop.sales", "total": 1, "rows": [{"ddl": DDL}]}
+    monkeypatch.setattr(synthetic_tools, "payload", lambda *args: payload)
+    app = create_web_app(env.service, config())
+    message = env.scripts.add("建表原文换行", tool_call("order_total", region="east"), cite(""))
+    async with serving(app, port=18501), launch(chrome_binary) as chrome:
+        page = await chrome.page()
+        await page.navigate("http://127.0.0.1:18501/")
+        await send(page, message)
+        await settled(page, 0, "completed")
+        assert await page.evaluate(f"{item(0)}.querySelector('td').textContent") == DDL
+        assert (
+            await page.evaluate(f"getComputedStyle({item(0)}.querySelector('td')).whiteSpace")
+            == "pre-wrap"
+        )
+        original = await page.evaluate(f"{item(0)}.querySelector('pre.original').textContent")
+        assert json.loads(original)["rows"] == [{"ddl": DDL}]
 
 
 async def check_turns(env: Env, page: Page, log: list[str]) -> None:

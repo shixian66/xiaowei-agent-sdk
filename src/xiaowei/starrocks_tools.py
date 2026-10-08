@@ -1,4 +1,4 @@
-"""StarRocks 受治理工具：五个（配置审计源时六个）工具的契约、参数与投影策略，以及绑定 Adapter
+"""StarRocks 受治理工具：七个（配置审计源时八个）工具的契约、参数与投影策略，以及绑定 Adapter
 的执行函数。
 
 数据范围来自每个目标的结构快照（``starrocks_schema.SchemaCache``），不来自配置的表列清单。
@@ -7,12 +7,15 @@
 ``local/list_tables`` 与 ``local/describe_table`` 的结构取自快照，交付前对要列出的每个对象
 重新做零行权限探测（快照中的“可读”只是采集时的结论）：搜表跳过已不可读的对象，表结构遇到
 已不可读的对象整体失败。搜表按非空关键词（不区分大小写匹配“库名.表名”、表注释与列名）与可空
-的库过滤在快照中匹配，按库表名排序；表结构按快照中的列序。两者都分次交付：前置检查从游标位置起
+的库过滤在快照中匹配；明确指定库时也可省略关键词遍历。列表按库表名排序；表结构按快照中的列序。
+两者都分次交付：前置检查从游标位置起
 按 ``page_size``（表结构不限个数）与结果的单值、总字节上限在 I/O 前规划本次的对象或列，结果带
 ``next_cursor``，从第一个未交付的位置继续，没有剩余时为 ``null``（此时才不标记截断）。搜表只
 探测本页对象，已撤权的不列出但已越过，不重复也不遗漏。游标绑定快照版本与参数（搜表为关键词、库
-过滤与页大小，表结构为库与表），快照刷新或参数改变后在 I/O 前拒绝；单个对象或单列就放不下一个
+过滤与页大小，表结构为库与表），快照内容或参数改变后在 I/O 前拒绝；单个对象或单列就放不下一个
 结果时同样在 I/O 前拒绝，不让模型反复缩小页。
+``local/list_databases`` 只列有可读对象的库；每库重新探测至少一个可读对象作为证据依赖。
+每页最多探测 32 个对象，批量复用连接；游标可停在一个库的对象之间，直到确认可读或查完才越过该库。
 ``local/describe_table_layout`` 同样先探测，再读该表的布局；两个 ``describe`` 工具按
 ``database`` 与 ``table`` 定位快照中的对象。``local/run_readonly_query`` 只执行 SQLGuard
 产生的 ``GuardedQuery``，``local/explain_query`` 只以 Adapter 的固定显式级别 EXPLAIN
@@ -99,8 +102,10 @@ from xiaowei.starrocks import (
     audit_sql_bytes,
     fitting_rows,
     metadata_sql_bytes,
+    show_create_sql,
 )
 from xiaowei.starrocks_schema import (
+    BASE_TABLE,
     SCHEMA_UNAVAILABLE,
     ObjectInfo,
     SchemaCache,
@@ -111,11 +116,15 @@ from xiaowei.starrocks_schema import (
 )
 
 LIST_TABLES: Final = "local/list_tables"
+LIST_DATABASES: Final = "local/list_databases"
 DESCRIBE_TABLE: Final = "local/describe_table"
 RUN_QUERY: Final = "local/run_readonly_query"
 EXPLAIN_QUERY: Final = "local/explain_query"
 LAYOUT_TOOL: Final = "local/describe_table_layout"
-DIAGNOSE_TOOLS: Final = frozenset({LIST_TABLES, DESCRIBE_TABLE, LAYOUT_TOOL, EXPLAIN_QUERY})
+SHOW_CREATE_TABLE: Final = "local/show_create_table"
+DIAGNOSE_TOOLS: Final = frozenset(
+    {LIST_DATABASES, LIST_TABLES, DESCRIBE_TABLE, LAYOUT_TOOL, SHOW_CREATE_TABLE, EXPLAIN_QUERY}
+)
 """诊断用途展示元数据与执行计划工具；实际查询工具不可见，强行调用仍由治理层拒绝。"""
 QUERY_TOOLS: Final = DIAGNOSE_TOOLS | {RUN_QUERY}
 SLOW_QUERIES: Final = "local/list_slow_queries"
@@ -130,6 +139,28 @@ AUDIT_NOTE: Final = (
 SCHEMA_NOTE: Final = (
     "表结构来自定期采集的元数据快照（采集时间见来源），只含只读账号可 SELECT 的对象；"
     "列出的对象已在交付前逐个确认当前仍可读。"
+)
+DATABASE_NOTE: Final = (
+    SCHEMA_NOTE + "库列表只包含快照中至少有一个当前可查询表或视图的库；"
+    "不含空库、系统库或没有可读对象的库，不等同于管理员看到的全部数据库。"
+)
+DESCRIBE_NOTE: Final = (
+    SCHEMA_NOTE + "这是字段结构，不包含主键、默认值或完整建表语句；主键须以表布局证据为准。"
+)
+LAYOUT_NOTE: Final = (
+    "这是表布局摘要，不是完整建表语句；分区键不表示分区粒度或当前分区列表。"
+    "buckets 是元数据原值，值为 0 时不能据此确认实际桶数或自动扩缩容。"
+)
+DDL_NOTE: Final = (
+    "这是采集时服务器 SHOW CREATE TABLE 返回的普通内部表定义，包含默认值与表属性；"
+    "服务器可能规范化语句或补充默认属性，不保证等于最初提交的 SQL。"
+    "历史回放核对采集时的列仍存在且类型不变，不因新增列、属性或分区变化而失效；"
+    "分区定义不等于当前分区状态列表。"
+    "标记截断时原文未返回。"
+)
+DDL_TOO_LARGE: Final = (
+    "内部表 DDL 超过 max_ddl_bytes（未配置时为 max_value_bytes）或 max_result_bytes 限额，"
+    "原文未返回；需调整该目标的 DDL/结果容量及四种投影容量后重新读取。"
 )
 SNAPSHOT_STALE: Final = "表结构已刷新，旧的 cursor 已失效，未执行；请从头开始（cursor 传 null）"
 CURSOR_INVALID: Final = (
@@ -149,6 +180,9 @@ PLAN_NOTE: Final = (
 RESULT_FIELDS: Final = ("sql", "columns", "rows", "row_count", "elapsed_ms")
 PAGED_FIELDS: Final = (*RESULT_FIELDS, "next_cursor")
 """搜表与表结构另带续取游标：还有未交付的对象或列时非空（见 ``_cursor``）。"""
+_DATABASE_PROBE_LIMIT: Final = 32
+_DATABASE_FALLBACK_BATCH: Final = 8
+DDL_FIELDS: Final = (*RESULT_FIELDS, "message")
 # JSON 转义膨胀最大的单字节字符：控制字符写作 \u00XX，一个字节变六个。
 _WIDEST_CHAR: Final = "\x01"
 # 有符号 64 位整数中十进制写法最长的值。
@@ -172,8 +206,16 @@ class ListTablesArgs(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     cluster: ClusterArg
-    keyword: Annotated[str, StringConstraints(min_length=1, max_length=64)]
+    keyword: Annotated[str, StringConstraints(min_length=1, max_length=64)] | None
     database: Annotated[str, StringConstraints(min_length=1, max_length=256)] | None
+    page_size: int
+    cursor: CursorArg | None
+
+
+class ListDatabasesArgs(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    cluster: ClusterArg
     page_size: int
     cursor: CursorArg | None
 
@@ -237,7 +279,7 @@ class StarRocksTools:
 def starrocks_tools(
     adapter: StarRocksAdapter, max_bytes: Mapping[Audience, int], *, schema: SchemaCache
 ) -> StarRocksTools:
-    """按目标配置与四种用途的容量装配五个工具；容量容不下最坏结果时拒绝装配。
+    """按目标配置与四种用途的容量装配工具；容量容不下最坏结果时拒绝装配。
 
     ``schema`` 是同一目标的结构快照缓存；刷新由装配方负责，这里只读取当前快照。
     """
@@ -273,9 +315,11 @@ def starrocks_tools(
             description=description,
         )
 
+    databases_policy = policy("list_databases", ListDatabasesArgs, DATABASE_NOTE, PAGED_FIELDS)
     list_policy = policy("list_tables", ListTablesArgs, SCHEMA_NOTE, PAGED_FIELDS)
-    describe_policy = policy("describe_table", DescribeTableArgs, SCHEMA_NOTE, PAGED_FIELDS)
-    layout_policy = policy("describe_table_layout", TableArgs)
+    describe_policy = policy("describe_table", DescribeTableArgs, DESCRIBE_NOTE, PAGED_FIELDS)
+    layout_policy = policy("describe_table_layout", TableArgs, LAYOUT_NOTE)
+    ddl_policy = policy("show_create_table", TableArgs, DDL_NOTE, DDL_FIELDS)
     query_policy = policy("run_readonly_query", RunQueryArgs)
     explain_policy = policy("explain_query", ExplainQueryArgs, PLAN_NOTE)
     # 其余策略的投影与查询相同，检查一次即覆盖；搜表与表结构多一个续取游标，按它们的实际形态
@@ -284,7 +328,20 @@ def starrocks_tools(
     widest = _cursor("f" * _VERSION_CHARS, (), _max_offset(target))
     try:
         check_projection_capacity(query_policy, worst)
+        # DDL 成功返回一列原文；超限只返回说明。两种结果互斥，不能叠加其容量要求。
+        # SHOW 语句在前置检查中受 max_sql_bytes 约束，列头固定，行仍受结果总字节约束。
+        for rows, message in ((worst.payload["rows"], None), ([], DDL_TOO_LARGE)):
+            payload = {
+                **worst.payload,
+                "sql": _WIDEST_CHAR * target.policy.max_sql_bytes,
+                "columns": ["ddl"],
+                "rows": rows,
+                "row_count": 1 if message is None else 0,
+                "message": message,
+            }
+            check_projection_capacity(ddl_policy, worst.model_copy(update={"payload": payload}))
         for paged, sql, columns in (
+            (databases_policy, SCHEMA_OBJECTS_SQL, ("database",)),
             (list_policy, SCHEMA_OBJECTS_SQL, LIST_COLUMNS),
             (describe_policy, SCHEMA_COLUMNS_SQL, DESCRIBE_COLUMNS),
         ):
@@ -305,23 +362,110 @@ def starrocks_tools(
 
     page_rows = target.policy.max_rows
 
+    def check_databases(request: ToolRequest) -> _DatabasePage:
+        snapshot = current()
+        size = request.arguments["page_size"]
+        if not _counting(size) or not 1 <= size <= page_rows:
+            raise ToolRejectedError(f"列库未执行：page_size 须在 1 到 {page_rows} 之间")
+        scope = ("list_databases", size)
+        start = _resume(request.arguments["cursor"], snapshot, scope)
+        objects = sorted(snapshot.objects)
+        if start and start >= len(objects):
+            raise ToolRejectedError(CURSOR_INVALID)
+        candidates = list(dict.fromkeys(key[0] for key in objects[start:]))[:size]
+        count = fitting_rows([{"database": name} for name in candidates], size, target)
+        if candidates and count == 0:
+            raise ToolRejectedError("列库未执行：下一个库名超过结果容量，无法列出")
+        selected = set(candidates[:count])
+        end = start
+        for database, _ in objects[start:]:
+            if database not in selected:
+                break
+            end += 1
+        return _DatabasePage(snapshot, tuple(objects[start:end]), start, scope)
+
+    async def list_databases(page: _DatabasePage) -> ToolObservation:
+        started = time.monotonic()
+        groups: dict[str, list[tuple[str, str]]] = {}
+        for key in page.keys:
+            groups.setdefault(key[0], []).append(key)
+        positions = {database: 0 for database in groups}
+        found: dict[str, tuple[str, str]] = {}
+        used = 0
+        first_batch = True
+        while used < _DATABASE_PROBE_LIMIT:
+            batch: list[tuple[str, str]] = []
+            for database, keys in groups.items():
+                if database in found or positions[database] == len(keys):
+                    continue
+                room = _DATABASE_PROBE_LIMIT - used - len(batch)
+                if room == 0:
+                    break
+                take = min(
+                    1 if first_batch else _DATABASE_FALLBACK_BATCH,
+                    room,
+                    len(keys) - positions[database],
+                )
+                batch.extend(keys[positions[database] : positions[database] + take])
+            if not batch:
+                break
+            verdicts = await adapter.probe(batch)
+            for key in batch:
+                database = key[0]
+                positions[database] += 1
+                if verdicts[key] and database not in found:
+                    found[database] = key
+            used += len(batch)
+            first_batch = False
+
+        shown: list[tuple[str, str]] = []
+        end = page.start
+        for database, keys in groups.items():
+            if database not in found and positions[database] < len(keys):
+                end += positions[database]
+                break  # 后面的库即使已探测成功，也须下一页重验，避免重复或漏库。
+            if database in found:
+                shown.append(found[database])
+            end += len(keys)
+        following = (
+            _cursor(page.snapshot.version, page.scope, end)
+            if end < len(page.snapshot.objects)
+            else None
+        )
+        result = _from_snapshot(
+            page.snapshot,
+            SCHEMA_OBJECTS_SQL,
+            ("database",),
+            tuple({"database": db} for db, _ in shown),
+            following is not None,
+            started,
+        )
+        return _observation(
+            result,
+            bounds,
+            [listed_dependency(*key) for key in shown],
+            extra={"next_cursor": following},
+        )
+
     def check_search(request: ToolRequest) -> _Page:
         snapshot = current()
         args = request.arguments
-        keyword = str(args["keyword"]).strip()
-        if not keyword:
+        keyword = None if args["keyword"] is None else str(args["keyword"]).strip()
+        if keyword == "":
             raise ToolRejectedError("搜表未执行：关键词不能为空")
         size = args["page_size"]
         if not _counting(size) or not 1 <= size <= page_rows:
             raise ToolRejectedError(f"搜表未执行：page_size 须在 1 到 {page_rows} 之间")
         database = None if args["database"] is None else str(args["database"])
-        needle = keyword.casefold()
+        if keyword is None and not database:
+            raise ToolRejectedError("列出全部表须指定 database；列库请用 list_databases")
+        needle = keyword.casefold() if keyword is not None else None
         scope = ("list_tables", needle, database, size)
         start = _resume(args["cursor"], snapshot, scope)
         matches = [
             key
             for key, obj in sorted(snapshot.objects.items())
-            if database in (None, key[0]) and _matches(obj, needle)
+            if database in (None, key[0]) and (needle is None or _matches(obj, needle))
         ]
         if start and start >= len(matches):
             raise ToolRejectedError(CURSOR_INVALID)  # 同快照同参数的游标不会越界
@@ -408,6 +552,27 @@ def starrocks_tools(
         layout = await adapter.describe_layout(found.database, found.name, found.column_names)
         return _observation(layout, bounds, [read_dependency(found)])
 
+    def check_ddl(request: ToolRequest) -> tuple[ObjectInfo, int]:
+        _, found = check_table(request)
+        if found.type != BASE_TABLE or found.table_id is None or found.table_id <= 0:
+            raise ToolRejectedError("原始 DDL 未读取：只支持普通内部表，视图和物化视图尚未开放")
+        sql = show_create_sql(found.database, found.name)
+        if len(sql.encode()) > target.policy.max_sql_bytes:
+            raise ToolRejectedError("原始 DDL 未读取：生成的 SHOW CREATE TABLE 超过 SQL 字节限额")
+        return found, found.table_id
+
+    async def show_create_table(checked: tuple[ObjectInfo, int]) -> ToolObservation:
+        found, table_id = checked
+        # check_ddl 已拒绝缺失 ID；Adapter 再核对当前 ID、类型和内部表引擎，且在返回前复核。
+        # 不先探测外表；SHOW CREATE 自身要求 SELECT，记录/交付时仍复核当前权限与版本。
+        result = await adapter.show_create_table(found.database, found.name, table_id)
+        return _observation(
+            result,
+            bounds,
+            [read_dependency(found)],
+            extra={"message": DDL_TOO_LARGE if result.truncated else None},
+        )
+
     def check_query(request: ToolRequest) -> tuple[SchemaSnapshot, GuardedQuery]:
         code: QueryRejectionCode | None = None
         snapshot = current()
@@ -443,27 +608,46 @@ def starrocks_tools(
 
     contracts = [
         contract(
+            LIST_DATABASES,
+            databases_policy,
+            "列出所选集群中当前账号可以查询的数据库名称；用于‘有哪些库’和 SHOW DATABASES。"
+            "只含至少有一个可读表或视图的库，不含空库、系统库或没有可读对象的库。"
+            f"page_size 为 1 到 {page_rows}，首次 cursor 传 null；next_cursor 非空须原样续取，"
+            "保持 page_size 不变，取到 null 才列完。结构内容变化后旧 cursor 失效。",
+        ),
+        contract(
             LIST_TABLES,
             list_policy,
-            "按关键词搜索所选集群中只读账号可查询的库、表与视图：不区分大小写匹配“库名.表名”、"
+            "列出指定库的表与视图，或按关键词搜表；列库请用 list_databases。"
+            "完整列出某库时指定 database、keyword 传 null。搜索时不区分大小写匹配“库名.表名”、"
             "表注释与列名，按库表名排序分页返回库、表、类型与注释。database 为 null 时搜索全部库；"
             f"page_size 为 1 到 {page_rows}（结果字节放不下时一页会少于它）。第一页 cursor 传 "
             "null；结果的 next_cursor 非空表示还有未返回的匹配，原样传回它并保持 keyword、"
-            "database 与 page_size 不变即可取得下一页，为 null 时已全部返回。表结构刷新后旧 "
-            "cursor 失效，须从头搜索。",
+            "database 与 page_size 不变即可取得下一页，为 null 时已全部返回。"
+            "表结构内容变化时 cursor 失效，须从头搜索。",
         ),
         contract(
             DESCRIBE_TABLE,
             describe_policy,
             "查看一张可查询的表或视图的列、类型、是否可空与注释；"
             "database 与 table 取自 list_tables 的搜索结果。列多时分次返回：第一次 cursor 传 "
-            "null，结果的 next_cursor 非空时原样传回它（库与表不变）取得后续列。",
+            "null，结果的 next_cursor 非空时原样传回它（库与表不变）取得后续列。"
+            "不包含主键、默认值或原始 DDL；不能根据 id 等字段名猜测主键。",
         ),
         contract(
             LAYOUT_TOOL,
             layout_policy,
             "查看一张允许查询的表的布局：表模型、分区键、分桶方式与键、桶数、排序键与主键。"
-            "含未获准列的键不显示；视图或当前账号看不到的表返回空结果。",
+            "含未获准列的键不显示；视图或当前账号看不到的表返回空结果。"
+            "不是完整 DDL；分区键不表示分区粒度，buckets=0 不证明实际桶数或自动扩缩容。",
+        ),
+        contract(
+            SHOW_CREATE_TABLE,
+            ddl_policy,
+            "读取一张普通内部 OLAP 表的完整 SHOW CREATE TABLE 原文，含默认值、键、分区定义和"
+            "表属性；不执行 CREATE。database 与 table 须来自可读表结构；不支持视图、物化视图、"
+            "外表或外部 catalog。容量超限时原文整条不返回，不拼接或裁剪；服务器返回的是当前定义，"
+            "不保证等于最初输入的 SQL，也不是当前分区状态列表。",
         ),
         contract(
             RUN_QUERY,
@@ -481,12 +665,22 @@ def starrocks_tools(
             "查询相同的语法与范围（表名写法同 run_readonly_query）；结果不是实际运行数据。",
         ),
     ]
-    policies = [list_policy, describe_policy, query_policy, explain_policy, layout_policy]
+    policies = [
+        list_policy,
+        describe_policy,
+        query_policy,
+        explain_policy,
+        layout_policy,
+        databases_policy,
+        ddl_policy,
+    ]
     key = target.target_id
     executes: dict[tuple[str, str], Execute] = {
+        (LIST_DATABASES, key): Prechecked(check=check_databases, run=list_databases),
         (LIST_TABLES, key): Prechecked(check=check_search, run=list_tables),
         (DESCRIBE_TABLE, key): Prechecked(check=check_describe, run=describe_table),
         (LAYOUT_TOOL, key): Prechecked(check=check_table, run=describe_layout),
+        (SHOW_CREATE_TABLE, key): Prechecked(check=check_ddl, run=show_create_table),
         (RUN_QUERY, key): Prechecked(check=check_query, run=run_query),
         (EXPLAIN_QUERY, key): Prechecked(check=check_explain, run=explain),
     }
@@ -554,13 +748,14 @@ def starrocks_tools(
     return StarRocksTools(contracts=tuple(contracts), policies=tuple(policies), executes=executes)
 
 
-DATA_SCOPE_FORMAT: Final = "xiaowei.data_scope.starrocks/5"
+DATA_SCOPE_FORMAT: Final = "xiaowei.data_scope.starrocks/6"
 """摘要公式的显式版本：纳入或排除的字段改变时更新，使旧公式下保存的证据一次性失效。
 
 /2（P2.5 Task 2 审查）：加入数据库类型、TLS、服务端时间与内存限额、客户端期限与时区。
 /3（D1/D2）：固定 SQL 语义，纳入 sql_mode，并使修复前的 StarRocks 证据一次性失效。
 /4（P2.5 Task 3）：跨库、UNION/窗口/星号展开与列名大小写规则改变查询语义；纳入 max_result_columns。
 /5（P2.5 Task 6）：审计改为读取所有库、按每条记录的当前库解析原文并输出该库；列表改为关键词分页。
+/6（Web 实战修复）：列库、按库遍历、完整类型与内部表原始 DDL；纳入独立 max_ddl_bytes 限额。
 """
 
 
@@ -604,6 +799,7 @@ def scope_canonical(target: StarRocksTarget) -> str:
         "max_result_columns": policy.max_result_columns,
         "max_result_bytes": target.max_result_bytes,
         "max_value_bytes": target.max_value_bytes,
+        "max_ddl_bytes": target.max_ddl_bytes,
         "max_plan_lines": target.max_plan_lines,
         "query_timeout_seconds": target.query_timeout_seconds,
         "query_mem_limit_bytes": target.query_mem_limit_bytes,
@@ -665,6 +861,14 @@ class _SlowQueries:
     order: str
     database: str | None
     snapshot: SchemaSnapshot
+
+
+@dataclass(frozen=True)
+class _DatabasePage:
+    snapshot: SchemaSnapshot
+    keys: tuple[tuple[str, str], ...]
+    start: int
+    scope: tuple[object, ...]
 
 
 @dataclass(frozen=True)

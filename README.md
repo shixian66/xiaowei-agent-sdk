@@ -93,14 +93,22 @@ uv run --locked xiaowei --config xiaowei.json requests resend --subject <发起�
 
 **数据范围（自动发现）。** 不再配置表与列：小维每隔 `schema_limits.refresh_seconds` 读取一次 `information_schema` 中全部用户库的表、视图与列，并对每个对象做一次不返回数据的 `SELECT 1 … WHERE 1 = 0` 探测，只有只读账号确实能 SELECT 的对象才进入范围。查询与执行计划可引用其中任何库的对象并跨库 JOIN：表名写成 `库名.表名`，只在一个库中存在的表可以省略库名（不使用连接的默认库猜测；多个库都有同名表时要求写明库名）。`list_tables`、`describe_table`、`describe_table_layout` 在返回前会再次确认对象仍可读。
 
-**搜表（`list_tables`）。** 按关键词搜索，不提供整份目录：关键词不区分大小写，匹配“库名.表名”、表注释（采集时按 `max_comment_chars` 截取后的内容）与列名；`database` 为 null 时搜索全部库。结果按库表名排序分页，`page_size` 为 1 到该集群的 `policy.max_rows`，一页放不下结果字节上限时会少于它；每页只确认本页对象的当前权限，已撤权的对象不列出。第一页 `cursor` 传 null；结果的 `next_cursor` 不为 null（同时标记截断）表示还有未返回的匹配，原样传回它、并保持 `keyword`、`database`、`page_size` 不变即可从第一个未返回的对象继续，不重复也不遗漏；为 null 时已全部返回。表结构刷新或参数改变后旧游标在连接前拒绝，需要从头搜索。某个匹配对象单独一行（多为过长的表注释）就超过单值或结果上限时，搜到它所在的位置会被拒绝，可用 `database` 或更具体的关键词避开。
+**列库（`list_databases`）。** 分页列出当前账号有可查询表或视图的数据库，只返回库名；不含空库、系统库或没有可读对象的库。每库确认至少一个对象当前可读，交付与历史读取仍复核该对象权限。每页最多探测 32 个候选对象；撤权库对象较多时可能出现空页但 `next_cursor` 非空，须继续取到 null 才算列完。页大小为 1 到 `policy.max_rows`。新工具需同时加入 `data_policy.model_tools` 和对应 `access.grants`（群还需加入 `feishu.group.tools`），现有部署不会自动获得该权限；示例配置已列出。
 
-**表结构（`describe_table`）。** 列多到一次放不下结果字节上限时分次返回：第一次 `cursor` 传 null，`next_cursor` 不为 null 时原样传回它（库与表不变）取得后续列，每次都重新确认当前权限。游标同样在表结构刷新后失效；单列定义就超过上限时拒绝并说明。
+**搜表与列某库全部表（`list_tables`）。** 有关键词时，不区分大小写匹配“库名.表名”、表注释（按 `max_comment_chars` 截取）与列名，`database=null` 搜索全部库；要列出指定库的所有表，传 `database` 和 `keyword=null`。按库表名排序分页，`page_size` 为 1 到 `policy.max_rows`，结果字节上限可能令一页少于它；每页只确认本页对象的当前权限，撤权对象不列出。第一页 `cursor=null`，之后原样回传 `next_cursor` 并保持其他参数不变；取到 null 才列完，预算不够时须说明仍有未列出的结果。目录内容不变的定时刷新可以继续翻页；内容或参数改变后旧游标在 I/O 前拒绝。单个对象（含表注释）超过容量时拒绝，不能静默跳过。
+
+**表结构（`describe_table`）。** 返回字段、完整类型（保留长度与精度）、是否可空和注释。列多时通过 `next_cursor` 分次取得，每次重验权限，目录内容改变后旧游标失效；单列超过容量时拒绝。主键与排序键须另查布局，不能凭字段名猜测；布局不等于原始 SHOW CREATE TABLE。桶数为 0 只报告元数据原值，不据此确认实际桶数或自动扩缩容。
+
+**内部表原始 DDL（`show_create_table`）。** 直接返回普通内部表的 SHOW CREATE TABLE 原文，支持本地 `OLAP` 与存算分离 `CLOUD_NATIVE` 引擎，保留默认值、完整键、分区定义与表属性，不执行 CREATE。读取前后核对对象 ID、类型、引擎；记录、发送和历史读取仍复核当前 SELECT 权限、对象 ID 及采集时列的类型。视图、物化视图、外表和外部 catalog 尚未开放。服务器可能规范化语句并补默认属性，因此原文不保证等于最初输入；分区定义也不等于当前分区状态列表。历史 DDL 是采集时的定义：新增列、表属性或分区变化不会自动使旧原文失效，旧原文会带采集时间显示；要看现状请重新查询。
+
+该工具需独立加入 `data_policy.model_tools` 与使用者的 `access.grants`，已有授权不会自动扩大。示例仅给 Web 使用者配置此能力，飞书群示例未加入。每个目标可配置 `starrocks.max_ddl_bytes`（JSON 编码字节数），未配置时沿用 `max_value_bytes`；仍须满足 `max_result_bytes` 与四种投影容量。示例 DDL 上限 64000 不是所有表通用的值；显式日分区很多的表可能超过，升级前须用目标集群的代表性 SHOW CREATE 原文测量 JSON 编码字节数，并核对结果及四种投影容量。普通单值上限仍为 4000。超限整条原文不返回，明确显示容量限制；不会裁成半段后声称完整。
+
+**Web 实战修复升级。** StarRocks 证据范围摘要升至 v6（与应用表版本 6 是两回事），旧 StarRocks 证据一次性失效，相关旧会话须新建；不迁移应用表。Web 主回复中的事实表格只显示一次，SQL、游标、来源与本次获准结果原文可展开；重复的固定说明和普通查询的模型分析默认收起。澄清和未执行的 SQL 建议保留原换行。表格保留大整数精度，区分真正的 NULL、字符串 `"NULL"`、空字符串与未提供字段；嵌套字段完整保留，原文保留值与类型。原文仅包含本次获准展示的数据，分页或截断不等于已取全。“已回复”表示已交付，不代表每项业务需求均已满足。每轮向模型提供当前 UTC 时间，相对日期仍须结合明确的业务时区。
 
 **SQL 写法（`run_readonly_query` / `explain_query`）。** 单条只读 SELECT 或 UNION/UNION ALL，可带非递归 WITH、子查询（含相关子查询）与窗口函数（PARTITION BY / ORDER BY，不支持窗口框架与命名窗口），函数须在 `allowed_functions` 中（窗口函数如 `ROW_NUMBER`、`RANK` 同样要列出）。`*` 与 `别名.*` 按表结构展开，展开后的 SQL 同样受 `max_sql_bytes` 限制；查询结果最多 `max_result_columns` 列，列名不能重复，表达式列须用 `AS` 起别名（执行计划不要求）。列名不区分大小写，库名、表名与别名区分。名字按 StarRocks 的规则解析：WHERE、JOIN ON 与窗口中不能引用输出别名；ORDER BY 中的输出列名原样交给 StarRocks 解析，结果与直接执行原 SQL 相同（包括原 SQL 会报的错）；相关子查询中本层没有的列按外层表解析，多个外层表都有时需写明表名。
 
 - `policy` 为 `allowed_functions`、`max_rows`、`max_sql_bytes` 与必填的 `max_result_columns`（P2.5 Task 3 新增，旧配置需补上）；旧版的 `allowed_objects`、`allowed_columns`、`target_id`、`default_database` 会在启动时报错，删除即可。
-- `schema_limits`：`refresh_seconds` / `max_age_seconds` / `refresh_timeout_seconds`（默认 60 / 300 / 10 秒，间隔不能大于最大年龄）；`max_objects`、`max_columns`、`max_bytes`（每条元数据读取序列化后的字节上限）与 `max_comment_chars` 必须按目标规模填写，超过任一上限时这次刷新不生效。
+- `schema_limits`：`refresh_seconds` / `max_age_seconds` / `refresh_timeout_seconds`（默认 60 / 300 / 10 秒，间隔不能大于最大年龄）；`max_objects`、`max_columns`、`max_bytes`（每条元数据读取序列化后的字节上限）与 `max_comment_chars` 必须按目标规模填写，超过任一上限时这次刷新不生效。字段类型改为完整的 `COLUMN_TYPE` 后，长度和精度会增加列元数据字节数；升级前按目标集群的真实字段规模核对 `max_bytes` 和刷新期限。新快照超限时保留旧快照直到过期，随后该目标的数据工具不可用。
 - 刷新失败时沿用上一份结构，直到它超过 `max_age_seconds`；之后该集群的数据工具暂不可用，其他集群不受影响。新授予的表在下一次成功刷新后可用；撤权后列表与表结构在返回前即发现，新查询由 StarRocks 拒绝。
 - StarRocks 4.1.4 不支持列级授权：能读的表，其全部列都可能进入查询结果。需要隐藏列时，请 DBA 只授予只含允许列的视图。账号只靠未激活的角色获得权限时视为无权，需 DBA 设置默认角色或直接授权。
 - 配置的审计源表不会进入查询范围，审计原文只通过 `list_slow_queries` 逐条检查后展示。

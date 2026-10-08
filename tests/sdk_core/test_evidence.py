@@ -1,6 +1,7 @@
 """Task 2：Evidence 记录、四种数据投影、最终回答校验与应用表版本。真实 PostgreSQL + 真 Runner。"""
 
 import json
+import secrets
 from collections.abc import Callable
 from importlib.resources import files
 from typing import Any
@@ -281,6 +282,7 @@ async def test_query_claim_without_evidence_is_denied(postgres_url: URL) -> None
         )
         assert delivery.evidence_ids == ()
         assert "请说明地区" in delivery.content
+        assert delivery.web_text == "请说明地区"
         assert _FACTS_HEADER not in delivery.content
 
 
@@ -307,6 +309,7 @@ async def test_advice_is_a_separate_answer_without_facts(postgres_url: URL) -> N
             assert first == _ADVICE_HEADER and "未执行业务查询" in first and "未经系统核实" in first
             # 建议原文保持在一行内（换行写成转义），不能伪造标题或事实区。
             assert rest == ["SELECT region, SUM(total) AS total\\nFROM sales GROUP BY region"]
+            assert delivery.web_text == (sql if channel == "web" else None)
             assert (delivery.evidence_ids, delivery.facts, delivery.layout) == ((), (), None)
             assert _FACTS_HEADER not in delivery.content
 
@@ -335,10 +338,21 @@ def _cite_evidence(inference: str, **extra: object) -> ModelStep:
     return ModelStep.respond(respond)
 
 
-async def test_facts_are_rendered_from_evidence(postgres_url: URL) -> None:
+async def test_facts_are_rendered_from_evidence(
+    postgres_url: URL, monkeypatch: pytest.MonkeyPatch
+) -> None:
     grants, clock, adapter = Grants(), Clock(), RecordingAdapter(total=100)
     grants.grant("alice", TOTAL_TOOL)
     inference = "推测真实值应为 200，可能存在重复计数"
+    original_hex = secrets.token_hex
+    calls = 0
+
+    def evidence_hex(size: int) -> str:
+        nonlocal calls
+        calls += 1
+        return "200" + "a" * 29 if calls == 1 else original_hex(size)
+
+    monkeypatch.setattr("xiaowei.evidence.secrets.token_hex", evidence_hex)
     ctx = context()
     async with ready_engine(postgres_url) as engine:
         evidence = store(engine, grants, clock)
@@ -369,8 +383,12 @@ async def test_facts_are_rendered_from_evidence(postgres_url: URL) -> None:
     facts, analysis = delivery.content.split(_ANALYSIS_HEADER)
     assert facts.startswith(_FACTS_HEADER)
     assert '"total": 100' in facts
-    assert "200" not in facts and "重复计数" not in facts
+    assert '"total": 200' not in facts and "重复计数" not in facts
+    assert delivery.facts[0].result_json is not None
+    assert json.loads(delivery.facts[0].result_json)["total"] == 100
     assert inference in analysis and "推断" in analysis
+    assert len(delivery.analysis) == 1 and delivery.analysis[0].text == inference
+    assert delivery.analysis[0].evidence_ids == result.final_output.evidence_ids
     assert result.final_output.evidence_ids[0] in analysis
     assert delivery.channel == "web"
     assert delivery.evidence_ids == result.final_output.evidence_ids

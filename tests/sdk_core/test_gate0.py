@@ -1009,6 +1009,48 @@ def scripted_intent() -> GeminiLikeEndpoint:
             ),
             diagnose,
         ],
+        "list_database_names": [
+            call_tool("list_databases", cluster=cluster, page_size=5, cursor=None),
+            diagnose,
+        ],
+        "browse_database_tables": [
+            call_tool(
+                "list_tables",
+                cluster=cluster,
+                keyword=None,
+                database="shop",
+                page_size=5,
+                cursor=None,
+            ),
+            diagnose,
+        ],
+        "primary_key_evidence": [
+            call_tool("describe_table_layout", cluster=cluster, database="shop", table="orders"),
+            diagnose,
+        ],
+        "raw_internal_ddl": [
+            call_tool("show_create_table", cluster=cluster, database="shop", table="orders"),
+            diagnose,
+        ],
+        "view_ddl_unavailable": [
+            lambda messages: _chat(
+                {
+                    "role": "assistant",
+                    "content": json.dumps(
+                        {
+                            "evidence_ids": [],
+                            "inferences": [],
+                            "clarification": None,
+                            "advice": (
+                                "当前工具只支持普通内部表，视图的 SHOW CREATE VIEW 原文尚未开放。"
+                            ),
+                        },
+                        ensure_ascii=False,
+                    ),
+                },
+                "stop",
+            ),
+        ],
     }
     return GeminiLikeEndpoint(replies={s.message: steps[s.name] for s in gate0.INTENT_SAMPLES})
 

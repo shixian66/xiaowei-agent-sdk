@@ -23,6 +23,8 @@ HTTP、飞书 SDK、数据库客户端与凭据都不进入 RunContext。
 """
 
 import asyncio
+import json
+import logging
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass
 from typing import Protocol
@@ -55,6 +57,8 @@ from xiaowei.models import (
     TurnAnswer,
     group_owner,
 )
+
+logger = logging.getLogger(__name__)
 
 # 应用层失败原因到存储失败码（闭集）的映射；存储只保存类别，渠道据此给固定回执。
 _FAILURE_CODES: Mapping[TurnReason, CallerFailureCode] = {
@@ -476,6 +480,12 @@ class ChannelService:
             message=inbound.message,
             policy_version=decision.policy_version,
             owner=decision.owner,
+        )
+        logger.info(
+            "channel=%s request=%s turn=%s",
+            inbound.channel,
+            json.dumps(inbound.channel_request_id, ensure_ascii=True),
+            acceptance.record.turn_id,
         )
         return RequestReceipt(acceptance.record, acceptance.created, inbound.message, group)
 
