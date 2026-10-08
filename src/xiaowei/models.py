@@ -280,6 +280,8 @@ class Delivery(_Trusted):
     evidence_ids: tuple[str, ...]
     channel: Channel
     facts: tuple[DeliveryFact, ...] = ()
+    analysis: tuple[AnswerInference, ...] = ()
+    """Web 独立渲染的模型分析；仅由证据验证后的回答生成，不在事实表格中混排。"""
     layout: DeliveryLayout | None = Field(default=None, exclude=True)
 
     @model_validator(mode="after")

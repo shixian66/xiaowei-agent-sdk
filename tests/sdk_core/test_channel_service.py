@@ -420,6 +420,27 @@ async def test_turn_failures_persist_safe_codes_and_fixed_receipts(env: Env) -> 
     assert "invalid request" not in view.delivery.content
 
 
+async def test_request_number_links_to_failure_stage_without_message(
+    env: Env, caplog: pytest.LogCaptureFixture
+) -> None:
+    caplog.set_level("INFO")
+    message = env.scripts.add("private-question-canary", upstream_error)
+    record = await env.run(message, "web-troubleshoot-1")
+    assert f'request="web-troubleshoot-1" turn={record.turn_id}' in caplog.text
+    assert f"turn={record.turn_id} stage=failed reason=model_failed" in caplog.text
+    assert message not in caplog.text and "invalid request" not in caplog.text
+
+
+async def test_request_number_cannot_inject_log_lines(
+    env: Env, caplog: pytest.LogCaptureFixture
+) -> None:
+    caplog.set_level("INFO", logger="xiaowei.channel")
+    await env.service.accept(env.inbound("private-body", "r1\nforged\u202e"))
+    entry = next(r.getMessage() for r in caplog.records if r.name == "xiaowei.channel")
+    assert "\n" not in entry and "\u202e" not in entry
+    assert 'request="r1\\nforged\\u202e"' in entry and "private-body" not in entry
+
+
 async def test_result_save_failure_closes_the_session(env: Env) -> None:
     message = env.scripts.add("结果保存失败", tool_call("order_total", region="east"), cite())
     receipt = await env.service.accept(env.inbound(message))

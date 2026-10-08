@@ -87,6 +87,7 @@ from xiaowei.starrocks import EXPLAIN_PREFIX, StarRocksAdapter, StarRocksTarget
 from xiaowei.starrocks_schema import DependencyCheck, SchemaCache
 from xiaowei.starrocks_tools import (
     AUDIT_TOOLS,
+    DESCRIBE_NOTE,
     DESCRIBE_TABLE,
     DIAGNOSE_TOOLS,
     EXPLAIN_QUERY,
@@ -106,6 +107,7 @@ pytestmark = pytest.mark.loopback
 CAPACITY = 60_000
 SALES = Result(("region", "total"), [("east", 100), ("west", 50)])
 SDK_NAMES = {
+    "local/list_databases": "list_databases",
     LIST_TABLES: "list_tables",
     DESCRIBE_TABLE: "describe_table",
     RUN_QUERY: "run_readonly_query",
@@ -281,7 +283,13 @@ async def test_purpose_decides_which_tools_the_model_sees(env: Env) -> None:
     await env.app.run_turn(env.ctx("query", turn="t3", authorized=DIAGNOSE_TOOLS), narrowed)
 
     assert env.scripts.tools_seen(query) == [set(SDK_NAMES.values())]
-    metadata = {"list_tables", "describe_table", "describe_table_layout", "explain_query"}
+    metadata = {
+        "list_databases",
+        "list_tables",
+        "describe_table",
+        "describe_table_layout",
+        "explain_query",
+    }
     assert env.scripts.tools_seen(diagnose) == [metadata]
     assert env.scripts.tools_seen(narrowed) == [metadata]
     assert env.drv.attempts == 0
@@ -311,6 +319,25 @@ async def test_business_context_must_belong_to_a_registered_target(env: Env) -> 
 
 
 # ---- 成功路径：真 Runner → 治理 → SQLGuard → Adapter → Evidence → 交付 ----------------------
+
+
+async def test_database_listing_uses_governed_evidence_and_explicit_authorization(env: Env) -> None:
+    tool = "local/list_databases"
+    message = env.scripts.add(
+        "只列库名",
+        tool_call("list_databases", cluster=SR.target_id, page_size=5, cursor=None),
+        cite(),
+    )
+    delivered = await env.deliver(env.ctx(), message)
+    (fact,) = delivered.facts
+    assert fact.tool_id == tool and fact.columns == ("database",)
+    assert fact.rows == ({"database": "shop"},) and not fact.truncated
+    assert fact.note is not None and "空库" in fact.note
+    assert executed_sql(env.drv) == []  # 目录只探测可读性，不执行用户数据查询。
+
+    narrowed = env.scripts.add("无列库授权", clarify())
+    await env.app.run_turn(env.ctx(turn="t2", authorized=QUERY_TOOLS - {tool}), narrowed)
+    assert all("list_databases" not in names for names in env.scripts.tools_seen(narrowed))
 
 
 async def test_query_runs_guarded_sql_and_delivers_structured_facts(env: Env) -> None:
@@ -470,7 +497,7 @@ async def test_metadata_tools_serve_the_snapshot_after_probing_current_access(en
         "nullable": "YES",
         "comment": "地区",
     }
-    assert listed.note == described.note == SCHEMA_NOTE
+    assert listed.note == SCHEMA_NOTE and described.note == DESCRIBE_NOTE
     assert listed.captured_at == NOW  # 快照的采集时间，不冒充交付时刻
 
 
@@ -980,7 +1007,7 @@ def scope_body(target: StarRocksTarget) -> dict[str, Any]:
 
 def test_scope_digest_is_versioned_and_names_the_database_type() -> None:
     body = scope_body(SR)
-    assert body["format"] == "xiaowei.data_scope.starrocks/5"
+    assert body["format"] == "xiaowei.data_scope.starrocks/6"
     assert body["max_result_columns"] == SR.policy.max_result_columns
     assert body["database_type"] == "starrocks"
     assert body["sql_mode"] == "ONLY_FULL_GROUP_BY"
@@ -1282,7 +1309,13 @@ async def test_fact_note_is_rendered_from_the_current_policy_not_the_record(env:
     # 带说明的只有执行计划与两个表结构工具（快照说明）。
     assert {p.policy_id for p in tools.policies if p.fact_note is not None} == {
         f"starrocks.{SR.target_id}.{name}"
-        for name in ("explain_query", "list_tables", "describe_table")
+        for name in (
+            "explain_query",
+            "list_databases",
+            "list_tables",
+            "describe_table",
+            "describe_table_layout",
+        )
     }
 
 
@@ -1402,7 +1435,7 @@ def test_layout_policy_shares_the_target_data_scope() -> None:
         for p in tools.policies
         if p.policy_id == f"starrocks.{SR.target_id}.describe_table_layout"
     ]
-    assert layout_policy.fact_note is None
+    assert layout_policy.fact_note is not None and "不是完整建表语句" in layout_policy.fact_note
 
 
 # ---- 多目标路由（P2.5 Task 1）：三个目标同名库表，各自的 Adapter 返回不同常量 -------------------

@@ -382,6 +382,7 @@ class EvidenceStore:
             evidence_ids=cited,
             channel=channel,
             facts=tuple(_fact(item) for item in shown) if channel == "web" else (),
+            analysis=tuple(answer.inferences) if channel == "web" else (),
             # 飞书有单条长度上限：给出分段，超限时由渠道先保住分析再截断工具结果。
             layout=layout if channel == "feishu" else None,
         )

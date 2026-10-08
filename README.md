@@ -93,9 +93,13 @@ uv run --locked xiaowei --config xiaowei.json requests resend --subject <发起�
 
 **数据范围（自动发现）。** 不再配置表与列：小维每隔 `schema_limits.refresh_seconds` 读取一次 `information_schema` 中全部用户库的表、视图与列，并对每个对象做一次不返回数据的 `SELECT 1 … WHERE 1 = 0` 探测，只有只读账号确实能 SELECT 的对象才进入范围。查询与执行计划可引用其中任何库的对象并跨库 JOIN：表名写成 `库名.表名`，只在一个库中存在的表可以省略库名（不使用连接的默认库猜测；多个库都有同名表时要求写明库名）。`list_tables`、`describe_table`、`describe_table_layout` 在返回前会再次确认对象仍可读。
 
-**搜表（`list_tables`）。** 按关键词搜索，不提供整份目录：关键词不区分大小写，匹配“库名.表名”、表注释（采集时按 `max_comment_chars` 截取后的内容）与列名；`database` 为 null 时搜索全部库。结果按库表名排序分页，`page_size` 为 1 到该集群的 `policy.max_rows`，一页放不下结果字节上限时会少于它；每页只确认本页对象的当前权限，已撤权的对象不列出。第一页 `cursor` 传 null；结果的 `next_cursor` 不为 null（同时标记截断）表示还有未返回的匹配，原样传回它、并保持 `keyword`、`database`、`page_size` 不变即可从第一个未返回的对象继续，不重复也不遗漏；为 null 时已全部返回。表结构刷新或参数改变后旧游标在连接前拒绝，需要从头搜索。某个匹配对象单独一行（多为过长的表注释）就超过单值或结果上限时，搜到它所在的位置会被拒绝，可用 `database` 或更具体的关键词避开。
+**列库（`list_databases`）。** 分页列出当前账号有可查询表或视图的数据库，只返回库名；不含空库、系统库或没有可读对象的库。每库确认至少一个对象当前可读，交付与历史读取仍复核该对象权限。页大小为 1 到 `policy.max_rows`，`next_cursor` 为 null 才列完。新工具需同时加入 `data_policy.model_tools` 和对应 `access.grants`（群还需加入 `feishu.group.tools`），现有部署不会自动获得该权限；示例配置已列出。
 
-**表结构（`describe_table`）。** 列多到一次放不下结果字节上限时分次返回：第一次 `cursor` 传 null，`next_cursor` 不为 null 时原样传回它（库与表不变）取得后续列，每次都重新确认当前权限。游标同样在表结构刷新后失效；单列定义就超过上限时拒绝并说明。
+**搜表与列某库全部表（`list_tables`）。** 有关键词时，不区分大小写匹配“库名.表名”、表注释（按 `max_comment_chars` 截取）与列名，`database=null` 搜索全部库；要列出指定库的所有表，传 `database` 和 `keyword=null`。按库表名排序分页，`page_size` 为 1 到 `policy.max_rows`，结果字节上限可能令一页少于它；每页只确认本页对象的当前权限，撤权对象不列出。第一页 `cursor=null`，之后原样回传 `next_cursor` 并保持其他参数不变；取到 null 才列完，预算不够时须说明仍有未列出的结果。目录内容不变的定时刷新可以继续翻页；内容或参数改变后旧游标在 I/O 前拒绝。单个对象（含表注释）超过容量时拒绝，不能静默跳过。
+
+**表结构（`describe_table`）。** 返回字段、完整类型（保留长度与精度）、是否可空和注释。列多时通过 `next_cursor` 分次取得，每次重验权限，目录内容改变后旧游标失效；单列超过容量时拒绝。主键与排序键须另查布局，不能凭字段名猜测；布局不等于原始 SHOW CREATE TABLE，当前不提供完整 DDL、默认值、PROPERTIES 或分区列表。桶数为 0 只报告元数据原值，不据此确认实际桶数或自动扩缩容。
+
+**Web 实战修复升级。** StarRocks 证据范围摘要升至 v6（与应用表版本 6 是两回事），旧 StarRocks 证据一次性失效，相关旧会话须新建；不迁移应用表。Web 事实表格只显示一次，SQL、游标与来源可展开，模型分析独立显示；“已回复”表示已交付，不代表每项业务需求均已满足。每轮向模型提供当前 UTC 时间，相对日期仍须结合明确的业务时区。
 
 **SQL 写法（`run_readonly_query` / `explain_query`）。** 单条只读 SELECT 或 UNION/UNION ALL，可带非递归 WITH、子查询（含相关子查询）与窗口函数（PARTITION BY / ORDER BY，不支持窗口框架与命名窗口），函数须在 `allowed_functions` 中（窗口函数如 `ROW_NUMBER`、`RANK` 同样要列出）。`*` 与 `别名.*` 按表结构展开，展开后的 SQL 同样受 `max_sql_bytes` 限制；查询结果最多 `max_result_columns` 列，列名不能重复，表达式列须用 `AS` 起别名（执行计划不要求）。列名不区分大小写，库名、表名与别名区分。名字按 StarRocks 的规则解析：WHERE、JOIN ON 与窗口中不能引用输出别名；ORDER BY 中的输出列名原样交给 StarRocks 解析，结果与直接执行原 SQL 相同（包括原 SQL 会报的错）；相关子查询中本层没有的列按外层表解析，多个外层表都有时需写明表名。
 

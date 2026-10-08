@@ -123,6 +123,53 @@ async def test_no_match_is_an_empty_untruncated_page() -> None:
     assert observation.payload["next_cursor"] is None and statements(t.drv) == []
 
 
+async def test_browse_a_database_without_guessing_a_keyword() -> None:
+    arguments = search(keyword=None, database="shop", page_size=2)
+    ListTablesArgs.model_validate({"cluster": TARGET.target_id, **arguments})
+    t = await search_tools()
+    pages = await walk(t, LIST_TABLES, keyword=None, database="shop", page_size=2)
+    assert [key for p in pages for key in shown(p)] == [
+        ("shop", "order_items"),
+        ("shop", "orders"),
+        ("shop", "regions"),
+    ]
+
+
+async def test_database_names_are_complete_paginated_and_currently_readable() -> None:
+    t = await search_tools()
+    tool = "local/list_databases"
+    assert (tool, TARGET.target_id) in t.executes
+    # 一个库全撤权不展示；另一个库首表撤权仍须寻找同库的其他可读表。
+    t.world.denied = {("ads", "clicks"), ("crm", "customers")}
+    pages = await walk(t, tool, page_size=2)
+    assert [row for p in pages for row in p.payload["rows"]] == [
+        {"database": "crm"},
+        {"database": "hr"},
+        {"database": "shop"},
+    ]
+    assert all(p.payload["columns"] == ["database"] for p in pages)
+    assert [d.database for p in pages for d in p.dependencies] == ["crm", "hr", "shop"]
+    assert all(fits(p) for p in pages)
+
+
+@pytest.mark.parametrize("tool", [LIST_TABLES, DESCRIBE_TABLE])
+async def test_unchanged_refresh_does_not_interrupt_continuation(tool: str) -> None:
+    catalog = numbered(7) if tool == LIST_TABLES else {("shop", "wide"): WIDE_COLUMNS}
+    t = await search_tools(catalog, {})
+    args = (
+        search(keyword="t0", page_size=3)
+        if tool == LIST_TABLES
+        else {"database": "shop", "table": "wide", "cursor": None}
+    )
+    first = await t.call(tool, **args)
+    cursor = first.payload["next_cursor"]
+    assert cursor is not None
+    assert await t.cache.refresh()
+    following = await t.call(tool, **(args | {"cursor": cursor}))
+    first_names = {r["name"] for r in first.payload["rows"]}
+    assert first_names.isdisjoint(r["name"] for r in following.payload["rows"])
+
+
 # ---- 续取游标 -----------------------------------------------------------------------------------
 
 
@@ -170,7 +217,8 @@ async def test_a_cursor_after_a_refresh_is_rejected_before_io() -> None:
     t = await search_tools(numbered(7), {})
     first = await t.call(LIST_TABLES, **search(keyword="t0", page_size=3))
     t.clock.advance(1)
-    assert await t.cache.refresh()  # 新快照：旧游标对应的匹配可能已变化
+    t.world.tables[("shop", "added")] = (("id", "int", "NO", None),)
+    assert await t.cache.refresh()  # 内容确有变化，旧游标不再可用。
     forget(t.drv)
     with pytest.raises(ToolRejectedError) as stale:
         await t.call(
@@ -255,6 +303,7 @@ async def test_a_column_cursor_is_bound_to_its_table_and_snapshot() -> None:
     with pytest.raises(ToolRejectedError) as junk:
         await t.call(DESCRIBE_TABLE, database="shop", table="wide", cursor="page-2")
     t.clock.advance(1)
+    t.world.tables[("shop", "wide")] = (*WIDE_COLUMNS, ("new_col", "int", "YES", None))
     assert await t.cache.refresh()
     forget(t.drv)
     with pytest.raises(ToolRejectedError) as stale:

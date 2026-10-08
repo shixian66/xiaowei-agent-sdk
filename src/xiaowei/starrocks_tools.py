@@ -111,11 +111,14 @@ from xiaowei.starrocks_schema import (
 )
 
 LIST_TABLES: Final = "local/list_tables"
+LIST_DATABASES: Final = "local/list_databases"
 DESCRIBE_TABLE: Final = "local/describe_table"
 RUN_QUERY: Final = "local/run_readonly_query"
 EXPLAIN_QUERY: Final = "local/explain_query"
 LAYOUT_TOOL: Final = "local/describe_table_layout"
-DIAGNOSE_TOOLS: Final = frozenset({LIST_TABLES, DESCRIBE_TABLE, LAYOUT_TOOL, EXPLAIN_QUERY})
+DIAGNOSE_TOOLS: Final = frozenset(
+    {LIST_DATABASES, LIST_TABLES, DESCRIBE_TABLE, LAYOUT_TOOL, EXPLAIN_QUERY}
+)
 """诊断用途展示元数据与执行计划工具；实际查询工具不可见，强行调用仍由治理层拒绝。"""
 QUERY_TOOLS: Final = DIAGNOSE_TOOLS | {RUN_QUERY}
 SLOW_QUERIES: Final = "local/list_slow_queries"
@@ -130,6 +133,17 @@ AUDIT_NOTE: Final = (
 SCHEMA_NOTE: Final = (
     "表结构来自定期采集的元数据快照（采集时间见来源），只含只读账号可 SELECT 的对象；"
     "列出的对象已在交付前逐个确认当前仍可读。"
+)
+DATABASE_NOTE: Final = (
+    SCHEMA_NOTE + "库列表只包含快照中至少有一个当前可查询表或视图的库；"
+    "不含空库、系统库或没有可读对象的库，不等同于管理员看到的全部数据库。"
+)
+DESCRIBE_NOTE: Final = (
+    SCHEMA_NOTE + "这是字段结构，不包含主键、默认值或完整建表语句；主键须以表布局证据为准。"
+)
+LAYOUT_NOTE: Final = (
+    "这是表布局摘要，不是完整建表语句；分区键不表示分区粒度或当前分区列表。"
+    "buckets 是元数据原值，值为 0 时不能据此确认实际桶数或自动扩缩容。"
 )
 SNAPSHOT_STALE: Final = "表结构已刷新，旧的 cursor 已失效，未执行；请从头开始（cursor 传 null）"
 CURSOR_INVALID: Final = (
@@ -172,8 +186,16 @@ class ListTablesArgs(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     cluster: ClusterArg
-    keyword: Annotated[str, StringConstraints(min_length=1, max_length=64)]
+    keyword: Annotated[str, StringConstraints(min_length=1, max_length=64)] | None
     database: Annotated[str, StringConstraints(min_length=1, max_length=256)] | None
+    page_size: int
+    cursor: CursorArg | None
+
+
+class ListDatabasesArgs(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    cluster: ClusterArg
     page_size: int
     cursor: CursorArg | None
 
@@ -273,9 +295,10 @@ def starrocks_tools(
             description=description,
         )
 
+    databases_policy = policy("list_databases", ListDatabasesArgs, DATABASE_NOTE, PAGED_FIELDS)
     list_policy = policy("list_tables", ListTablesArgs, SCHEMA_NOTE, PAGED_FIELDS)
-    describe_policy = policy("describe_table", DescribeTableArgs, SCHEMA_NOTE, PAGED_FIELDS)
-    layout_policy = policy("describe_table_layout", TableArgs)
+    describe_policy = policy("describe_table", DescribeTableArgs, DESCRIBE_NOTE, PAGED_FIELDS)
+    layout_policy = policy("describe_table_layout", TableArgs, LAYOUT_NOTE)
     query_policy = policy("run_readonly_query", RunQueryArgs)
     explain_policy = policy("explain_query", ExplainQueryArgs, PLAN_NOTE)
     # 其余策略的投影与查询相同，检查一次即覆盖；搜表与表结构多一个续取游标，按它们的实际形态
@@ -285,6 +308,7 @@ def starrocks_tools(
     try:
         check_projection_capacity(query_policy, worst)
         for paged, sql, columns in (
+            (databases_policy, SCHEMA_OBJECTS_SQL, ("database",)),
             (list_policy, SCHEMA_OBJECTS_SQL, LIST_COLUMNS),
             (describe_policy, SCHEMA_COLUMNS_SQL, DESCRIBE_COLUMNS),
         ):
@@ -305,23 +329,67 @@ def starrocks_tools(
 
     page_rows = target.policy.max_rows
 
+    def check_databases(request: ToolRequest) -> _DatabasePage:
+        snapshot = current()
+        size = request.arguments["page_size"]
+        if not _counting(size) or not 1 <= size <= page_rows:
+            raise ToolRejectedError(f"列库未执行：page_size 须在 1 到 {page_rows} 之间")
+        scope = ("list_databases", size)
+        start = _resume(request.arguments["cursor"], snapshot, scope)
+        databases = sorted({key[0] for key in snapshot.objects})
+        if start and start >= len(databases):
+            raise ToolRejectedError(CURSOR_INVALID)
+        candidates = databases[start : start + size]
+        count = fitting_rows([{"database": name} for name in candidates], size, target)
+        if candidates and count == 0:
+            raise ToolRejectedError("列库未执行：下一个库名超过结果容量，无法列出")
+        end = start + count
+        following = _cursor(snapshot.version, scope, end) if end < len(databases) else None
+        return _DatabasePage(snapshot, tuple(candidates[:count]), following)
+
+    async def list_databases(page: _DatabasePage) -> ToolObservation:
+        started = time.monotonic()
+        shown: list[tuple[str, str]] = []
+        # 每个库找到一个当前可读的对象作证据依赖；整个库撤权时不列出它。
+        for database in page.databases:
+            for key in sorted(k for k in page.snapshot.objects if k[0] == database):
+                if (await adapter.probe([key]))[key]:
+                    shown.append(key)
+                    break
+        result = _from_snapshot(
+            page.snapshot,
+            SCHEMA_OBJECTS_SQL,
+            ("database",),
+            tuple({"database": db} for db, _ in shown),
+            page.following is not None,
+            started,
+        )
+        return _observation(
+            result,
+            bounds,
+            [listed_dependency(*key) for key in shown],
+            extra={"next_cursor": page.following},
+        )
+
     def check_search(request: ToolRequest) -> _Page:
         snapshot = current()
         args = request.arguments
-        keyword = str(args["keyword"]).strip()
-        if not keyword:
+        keyword = None if args["keyword"] is None else str(args["keyword"]).strip()
+        if keyword == "":
             raise ToolRejectedError("搜表未执行：关键词不能为空")
         size = args["page_size"]
         if not _counting(size) or not 1 <= size <= page_rows:
             raise ToolRejectedError(f"搜表未执行：page_size 须在 1 到 {page_rows} 之间")
         database = None if args["database"] is None else str(args["database"])
-        needle = keyword.casefold()
+        if keyword is None and not database:
+            raise ToolRejectedError("列出全部表须指定 database；列库请用 list_databases")
+        needle = keyword.casefold() if keyword is not None else None
         scope = ("list_tables", needle, database, size)
         start = _resume(args["cursor"], snapshot, scope)
         matches = [
             key
             for key, obj in sorted(snapshot.objects.items())
-            if database in (None, key[0]) and _matches(obj, needle)
+            if database in (None, key[0]) and (needle is None or _matches(obj, needle))
         ]
         if start and start >= len(matches):
             raise ToolRejectedError(CURSOR_INVALID)  # 同快照同参数的游标不会越界
@@ -443,27 +511,38 @@ def starrocks_tools(
 
     contracts = [
         contract(
+            LIST_DATABASES,
+            databases_policy,
+            "列出所选集群中当前账号可以查询的数据库名称；用于‘有哪些库’和 SHOW DATABASES。"
+            "只含至少有一个可读表或视图的库，不含空库、系统库或没有可读对象的库。"
+            f"page_size 为 1 到 {page_rows}，首次 cursor 传 null；next_cursor 非空须原样续取，"
+            "保持 page_size 不变，取到 null 才列完。结构内容变化后旧 cursor 失效。",
+        ),
+        contract(
             LIST_TABLES,
             list_policy,
-            "按关键词搜索所选集群中只读账号可查询的库、表与视图：不区分大小写匹配“库名.表名”、"
+            "列出指定库的表与视图，或按关键词搜表；列库请用 list_databases。"
+            "完整列出某库时指定 database、keyword 传 null。搜索时不区分大小写匹配“库名.表名”、"
             "表注释与列名，按库表名排序分页返回库、表、类型与注释。database 为 null 时搜索全部库；"
             f"page_size 为 1 到 {page_rows}（结果字节放不下时一页会少于它）。第一页 cursor 传 "
             "null；结果的 next_cursor 非空表示还有未返回的匹配，原样传回它并保持 keyword、"
-            "database 与 page_size 不变即可取得下一页，为 null 时已全部返回。表结构刷新后旧 "
-            "cursor 失效，须从头搜索。",
+            "database 与 page_size 不变即可取得下一页，为 null 时已全部返回。"
+            "表结构内容变化时 cursor 失效，须从头搜索。",
         ),
         contract(
             DESCRIBE_TABLE,
             describe_policy,
             "查看一张可查询的表或视图的列、类型、是否可空与注释；"
             "database 与 table 取自 list_tables 的搜索结果。列多时分次返回：第一次 cursor 传 "
-            "null，结果的 next_cursor 非空时原样传回它（库与表不变）取得后续列。",
+            "null，结果的 next_cursor 非空时原样传回它（库与表不变）取得后续列。"
+            "不包含主键、默认值或原始 DDL；不能根据 id 等字段名猜测主键。",
         ),
         contract(
             LAYOUT_TOOL,
             layout_policy,
             "查看一张允许查询的表的布局：表模型、分区键、分桶方式与键、桶数、排序键与主键。"
-            "含未获准列的键不显示；视图或当前账号看不到的表返回空结果。",
+            "含未获准列的键不显示；视图或当前账号看不到的表返回空结果。"
+            "不是完整 DDL；分区键不表示分区粒度，buckets=0 不证明实际桶数或自动扩缩容。",
         ),
         contract(
             RUN_QUERY,
@@ -481,9 +560,17 @@ def starrocks_tools(
             "查询相同的语法与范围（表名写法同 run_readonly_query）；结果不是实际运行数据。",
         ),
     ]
-    policies = [list_policy, describe_policy, query_policy, explain_policy, layout_policy]
+    policies = [
+        list_policy,
+        describe_policy,
+        query_policy,
+        explain_policy,
+        layout_policy,
+        databases_policy,
+    ]
     key = target.target_id
     executes: dict[tuple[str, str], Execute] = {
+        (LIST_DATABASES, key): Prechecked(check=check_databases, run=list_databases),
         (LIST_TABLES, key): Prechecked(check=check_search, run=list_tables),
         (DESCRIBE_TABLE, key): Prechecked(check=check_describe, run=describe_table),
         (LAYOUT_TOOL, key): Prechecked(check=check_table, run=describe_layout),
@@ -554,7 +641,7 @@ def starrocks_tools(
     return StarRocksTools(contracts=tuple(contracts), policies=tuple(policies), executes=executes)
 
 
-DATA_SCOPE_FORMAT: Final = "xiaowei.data_scope.starrocks/5"
+DATA_SCOPE_FORMAT: Final = "xiaowei.data_scope.starrocks/6"
 """摘要公式的显式版本：纳入或排除的字段改变时更新，使旧公式下保存的证据一次性失效。
 
 /2（P2.5 Task 2 审查）：加入数据库类型、TLS、服务端时间与内存限额、客户端期限与时区。
@@ -665,6 +752,13 @@ class _SlowQueries:
     order: str
     database: str | None
     snapshot: SchemaSnapshot
+
+
+@dataclass(frozen=True)
+class _DatabasePage:
+    snapshot: SchemaSnapshot
+    databases: tuple[str, ...]
+    following: str | None
 
 
 @dataclass(frozen=True)

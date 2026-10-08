@@ -38,12 +38,16 @@
 
   const factTable = (fact) => {
     const box = el("div", "fact");
+    const details = el("details", "evidence");
+    details.append(el("summary", "", "查看依据与查询信息"));
     const meta = [`来源 ${fact.tool_id}`, `目标 ${fact.target_id}`, `采集于 ${fact.captured_at}`];
-    if (fact.truncated) meta.push("结果已截断，只显示获准的前若干行");
-    box.append(el("p", "meta", meta.join(" · ")));
+    details.append(el("p", "meta", `[${fact.evidence_id}] ${meta.join(" · ")}`));
+    if (fact.truncated) box.append(el("p", "note", "结果已截断，当前显示的不是全部结果"));
     if (fact.note) box.append(el("p", "note", `说明：${fact.note}`));
     for (const [key, value] of Object.entries(fact.metadata || {})) {
-      box.append(el("p", "meta", `${key}: ${value}`));
+      // 查询/续取信息折叠；非查询工具的标量事实仍直接显示，避免丢掉数值。
+      const technical = ["sql", "next_cursor", "row_count", "elapsed_ms"].includes(key);
+      (technical ? details : box).append(el("p", "content", `${key}: ${value}`));
     }
     if (fact.columns.length) {
       const table = el("table");
@@ -60,20 +64,34 @@
       const wrap = el("div", "table-wrap");
       wrap.append(table);
       box.append(wrap);
+      if (!fact.rows.length) box.append(el("p", "content", "未返回数据行"));
     }
+    box.append(details);
     return box;
   };
 
   const render = (item, data) => {
     item.replaceChildren(el("p", "question", item.dataset.question || ""));
     item.className = `turn ${data.state || ""}`;
-    const label = { accepted: "已接收", running: "处理中", completed: "已完成", failed: "失败",
+    const label = { accepted: "已接收", running: "处理中", completed: "已回复", failed: "失败",
       interrupted: "已中断" }[data.state] || "错误";
     item.append(el("p", "meta", `${label} · 编号 ${item.dataset.requestId}`));
     if (data.error) item.append(el("p", "content", data.error));
     if (data.delivery) {
-      item.append(el("p", "content", data.delivery.content));
-      for (const fact of data.delivery.facts) item.append(factTable(fact));
+      if (data.delivery.facts.length) {
+        for (const fact of data.delivery.facts) item.append(factTable(fact));
+        if (data.delivery.analysis.length) {
+          const analysis = el("section", "analysis");
+          analysis.append(el("p", "meta", "分析与建议（模型推断，需结合依据判断）"));
+          for (const inference of data.delivery.analysis) {
+            analysis.append(el("p", "content", inference.text));
+            analysis.append(el("p", "meta", `依据：${inference.evidence_ids.join(", ")}`));
+          }
+          item.append(analysis);
+        }
+      } else {
+        item.append(el("p", "content", data.delivery.content));
+      }
     }
   };
 

@@ -62,14 +62,14 @@ def access_log() -> Iterator[list[str]]:
 
 
 @asynccontextmanager
-async def serving(app: Any) -> AsyncIterator[None]:
+async def serving(app: Any, *, port: int = PORT) -> AsyncIterator[None]:
     # 以“能否连上”判断是否有其他进程在监听；前一个用例留下的 TIME_WAIT 不影响 Uvicorn 绑定。
     with socket.socket() as probe:
-        if probe.connect_ex((HOST, PORT)) == 0:
-            pytest.fail(f"{HOST}:{PORT} 已被占用：smoke 使用正式默认端口")
+        if probe.connect_ex((HOST, port)) == 0:
+            pytest.fail(f"{HOST}:{port} 已被占用：不能干扰既有服务")
     server = uvicorn.Server(
         uvicorn.Config(
-            app, host=HOST, port=PORT, http="h11", lifespan="off", log_config=None, access_log=True
+            app, host=HOST, port=port, http="h11", lifespan="off", log_config=None, access_log=True
         )
     )
     task = asyncio.create_task(server.serve())
@@ -144,6 +144,32 @@ async def test_send_works_without_secure_context_apis(env: Env, chrome_binary: s
         assert await page.evaluate("document.getElementById('message').value") == ""
     assert re.fullmatch(r"[A-Za-z0-9_-]{1,64}", request_id)
     assert env.model_calls(message) == 2
+
+
+async def test_compact_facts_and_multiline_analysis(env: Env, chrome_binary: str) -> None:
+    app = create_web_app(env.service, config())
+    inference = "第一行\n第二行 <script>alert(1)</script>"
+    message = env.scripts.add(
+        "只看查询结果", tool_call("order_total", region="east"), cite(inference)
+    )
+    async with serving(app, port=18501), launch(chrome_binary) as chrome:
+        page = await chrome.page()
+        await page.navigate("http://127.0.0.1:18501/")
+        await send(page, message)
+        await settled(page, 0, "completed")
+        rendered = await page.evaluate(f"{item(0)}.innerText")
+        assert "已回复" in rendered and "已完成" not in rendered
+        assert "第一行" in rendered and rendered.count("第二行") == 1
+        assert '"rows":' not in rendered
+        assert await table_rows(page, 0) == [2]
+        assert (
+            await page.evaluate(f"{item(0)}.querySelector('.analysis .content').textContent")
+            == inference
+        )
+        assert await page.evaluate(f"{item(0)}.querySelector('details').open") is False
+        await page.evaluate(f"{item(0)}.querySelector('summary').click()")
+        assert "来源 local/order_total" in await page.evaluate(f"{item(0)}.innerText")
+        assert await page.evaluate("document.scripts.length") == 1
 
 
 async def check_turns(env: Env, page: Page, log: list[str]) -> None:

@@ -215,6 +215,12 @@ docker compose --env-file .env ps
 
 ## 普通升级与回退（schema 不变）
 
+**升级到 Web 实战查询修复版：** 在自己的配置中给需要列库的身份显式添加
+`local/list_databases`：加入 `data_policy.model_tools` 和该身份的 `access.grants`；指定群使用时
+还要加入 `feishu.group.tools`。不需要该能力的身份维持原授权；不要用新模板覆盖自己的配置。
+该版使用 StarRocks 证据范围摘要 v6，旧相关结果和历史不能继续交付，升级后新建会话再查。
+此摘要与 PostgreSQL 应用表版本 6 无关，本次不新增存储迁移。
+
 先把新包展开到 `/opt/xiaowei/releases/<新 SHA>`。查看当前和新版 `release.json`，并从当前
 PostgreSQL 读取 schema：
 
@@ -396,6 +402,9 @@ docker compose --env-file .env run --rm --no-deps xiaowei requests resend \
 
 重发只处理已保存的 failed/unknown 结果，重新检查当前权限和群成员资格，不重跑模型或原业务
 SQL。未完成请求在启动恢复时记为中断，同样不自动重跑。日志只记录安全状态、原因码和请求编号；
-Compose 的 `XW_LOG_MAX_SIZE`/`XW_LOG_MAX_FILES` 限制本地日志轮转。
+Compose 的 `XW_LOG_MAX_SIZE`/`XW_LOG_MAX_FILES` 限制本地日志轮转。Web 实战修复版接受请求时记录
+`channel=web request="页面编号" turn=内部编号`；先按页面编号找到 turn，再看该 turn 的
+`stage=failed reason=...`（例如 `timeout`、`turn_limit`、`answer_rejected`、`tool_failed` 或
+`model_failed`）。日志不含问题正文或模型错误原文；旧版本没有该关联行时，不能从通用回执猜原因。
 
 PostgreSQL 16 同一大版本内更换镜像 digest 不在本轮验证范围，须另做备份、兼容和回退演练。

@@ -95,6 +95,7 @@ class ModelCall:
 
     input: list[dict[str, Any]]
     tools: list[str]
+    instructions: str = ""
 
 
 Step = Callable[[ModelCall], Any]
@@ -193,7 +194,11 @@ class Scripts:
 
     async def _handle(self, request: httpx2.Request) -> httpx2.Response:
         body = json.loads(request.content)
-        call = ModelCall(body["input"], [tool["name"] for tool in body.get("tools", [])])
+        call = ModelCall(
+            body["input"],
+            [tool["name"] for tool in body.get("tools", [])],
+            body.get("instructions", ""),
+        )
         message = _user_text(call)
         self.calls.setdefault(message, []).append(call)
         result = self.by_message[message].pop(0)(call)
@@ -649,6 +654,18 @@ async def test_changed_instructions_keep_the_session(env: Env) -> None:
     followup = env.scripts.add("追问（新说明）", cite())
     await env.application().run_turn(env.ctx(turn="t2"), followup)
     assert len(evidence_in(env.scripts.calls[followup][0])) == 1
+
+
+async def test_each_turn_tells_the_model_the_current_time(env: Env) -> None:
+    first = env.scripts.add("昨天是何时", clarify())
+    await env.app.run_turn(env.ctx(turn="clock-1"), first)
+    initial = env.clock().isoformat()
+    assert initial in env.scripts.calls[first][0].instructions
+    env.clock.advance(60)
+    followup = env.scripts.add("现在呢", clarify())
+    await env.app.run_turn(env.ctx(turn="clock-2"), followup)
+    instructions = env.scripts.calls[followup][0].instructions
+    assert env.clock().isoformat() in instructions and initial not in instructions
 
 
 async def test_query_permission_is_not_inherited(env: Env) -> None:

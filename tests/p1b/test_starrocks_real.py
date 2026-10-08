@@ -264,6 +264,9 @@ async def test_snapshot_holds_only_objects_the_account_can_select(instance: Inst
     assert set(snapshot.objects) == {(instance.database, "sales")}
     sales = snapshot.object(instance.database, "sales")
     assert sales is not None and sales.table_id and sales.created_at
+    types = {c.name: c.type.lower().replace(" ", "") for c in sales.columns}
+    assert types["region"] == "varchar(16)"
+    assert types["total"] == "decimal(10,2)"
     assert [c.name for c in sales.columns] == [
         "id",
         "region",
@@ -1136,7 +1139,7 @@ async def call_tool(executes: Any, tool_id: str, **arguments: object) -> Any:
     return await execute.run(execute.check(request))
 
 
-def search_page(database: str | None, keyword: str = ".", **changes: object) -> dict[str, object]:
+def search_page(database: str | None, keyword: str | None = ".", **changes: object) -> dict[str, object]:
     """搜表参数（P2.5 Task 6）：默认第一页、页大小取 ``target`` 的 ``max_rows``。"""
     return {"keyword": keyword, "database": database, "page_size": 5, "cursor": None, **changes}
 
@@ -1181,6 +1184,17 @@ async def test_search_matches_real_comments_and_columns_and_pages_by_cursor(
     assert (names(first), names(second)) == (["orders_log"], ["sales"])
     assert (first.truncated, second.truncated) == (True, False)
     assert second.payload["next_cursor"] is None
+    assert await cache.refresh()
+    # 相同内容刷新仍可续取；真实撤权使目录变化后旧游标失效。
+    resumed = await call_tool(
+        executes, LIST_TABLES, **search_page(db, page_size=1, cursor=following)
+    )
+    assert names(resumed) == ["sales"]
+    databases = await call_tool(executes, "local/list_databases", page_size=5, cursor=None)
+    assert databases.payload["rows"] == [{"database": db}]
+    browsed = await call_tool(executes, LIST_TABLES, **search_page(db, keyword=None))
+    assert names(browsed) == ["orders_log", "sales"]
+    await admin(host, port, user, f"REVOKE SELECT ON TABLE {db}.orders_log FROM USER '{ro}'@'%'")
     assert await cache.refresh()
     with pytest.raises(ToolRejectedError, match="表结构已刷新"):
         await call_tool(executes, LIST_TABLES, **search_page(db, page_size=1, cursor=following))

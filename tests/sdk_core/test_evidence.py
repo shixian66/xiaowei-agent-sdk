@@ -371,6 +371,8 @@ async def test_facts_are_rendered_from_evidence(postgres_url: URL) -> None:
     assert '"total": 100' in facts
     assert "200" not in facts and "重复计数" not in facts
     assert inference in analysis and "推断" in analysis
+    assert len(delivery.analysis) == 1 and delivery.analysis[0].text == inference
+    assert delivery.analysis[0].evidence_ids == result.final_output.evidence_ids
     assert result.final_output.evidence_ids[0] in analysis
     assert delivery.channel == "web"
     assert delivery.evidence_ids == result.final_output.evidence_ids

@@ -454,7 +454,7 @@ SCHEMA_OBJECTS_SQL: Final = (
     "ORDER BY TABLE_SCHEMA, TABLE_NAME LIMIT %s"
 )
 SCHEMA_COLUMNS_SQL: Final = (
-    "SELECT TABLE_SCHEMA AS db, TABLE_NAME AS name, COLUMN_NAME AS col, DATA_TYPE AS type, "
+    "SELECT TABLE_SCHEMA AS db, TABLE_NAME AS name, COLUMN_NAME AS col, COLUMN_TYPE AS type, "
     "IS_NULLABLE AS nullable, LEFT(COLUMN_COMMENT, %s) AS comment "
     "FROM information_schema.columns WHERE TABLE_SCHEMA NOT IN (%s, %s, %s) "
     "ORDER BY TABLE_SCHEMA, TABLE_NAME, ORDINAL_POSITION LIMIT %s"
@@ -474,7 +474,7 @@ OBJECT_ID_SQL: Final = (
     "WHERE TABLE_SCHEMA = %s AND TABLE_NAME = %s"
 )
 OBJECT_COLUMNS_SQL: Final = (
-    "SELECT COLUMN_NAME AS col, DATA_TYPE AS type FROM information_schema.columns "
+    "SELECT COLUMN_NAME AS col, COLUMN_TYPE AS type FROM information_schema.columns "
     "WHERE TABLE_SCHEMA = %s AND TABLE_NAME = %s ORDER BY ORDINAL_POSITION LIMIT %s"
 )
 _SCHEMA_OBJECT_COLUMNS: Final = ("db", "name", "type", "comment", "created")
