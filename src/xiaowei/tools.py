@@ -81,11 +81,13 @@ def _function_tool(
         except ValueError:
             arguments = None
         if not isinstance(arguments, dict):
+            governance.note_rejected(tool_ctx.context.identity)
             return default_tool_error_function(tool_ctx, ToolRejectedError("参数不符合工具契约"))
         try:
             contract, execute = route(arguments)
             result = await _governed(tool_ctx, contract, arguments, governance, execute)
         except ToolRejectedError as exc:
+            governance.note_rejected(tool_ctx.context.identity)
             return default_tool_error_function(tool_ctx, exc)
         return result.model_content
 
