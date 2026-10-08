@@ -21,7 +21,7 @@ from tests.sdk_core.test_starrocks_tools import CAPACITY, assembled, tool_output
 
 from xiaowei.evidence import EvidenceUnavailableError
 from xiaowei.governance import ToolExecutionError, ToolRejectedError
-from xiaowei.models import AUDIENCES, ToolRequest
+from xiaowei.models import AUDIENCES, Audience, ToolRequest
 from xiaowei.starrocks_schema import SchemaCache
 from xiaowei.starrocks_tools import QUERY_TOOLS, data_scope_digest, starrocks_tools
 
@@ -187,3 +187,22 @@ async def test_external_ddl_is_rejected_without_probing_the_external_table(
 
 def test_ddl_capacity_changes_evidence_scope() -> None:
     assert data_scope_digest(SR) != data_scope_digest(SR.model_copy(update={"max_ddl_bytes": 800}))
+
+
+def test_existing_projection_capacity_still_assembles_with_ddl_registered() -> None:
+    # 原目标（未配置 max_ddl_bytes）在 e33279c 的容量门槛为 49437；新工具的实际两种结果
+    # 均更小，不能因虚构“最大查询行 + DDL 超限说明”的组合拒绝旧配置。
+    ada = adapter(driver())
+    tools = starrocks_tools(
+        ada, dict.fromkeys(AUDIENCES, 49_500), schema=SchemaCache(ada, clock=lambda: NOW)
+    )
+    assert any(contract.tool_id == SHOW_CREATE for contract in tools.contracts)
+
+
+@pytest.mark.parametrize("audience", AUDIENCES)
+def test_insufficient_projection_capacity_still_rejects_each_boundary(audience: Audience) -> None:
+    ada = adapter(driver())
+    capacities = dict.fromkeys(AUDIENCES, CAPACITY)
+    capacities[audience] = 49_000
+    with pytest.raises(ValueError, match="投影放不下"):
+        starrocks_tools(ada, capacities, schema=SchemaCache(ada, clock=lambda: NOW))

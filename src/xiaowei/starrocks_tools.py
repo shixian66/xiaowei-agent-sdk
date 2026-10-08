@@ -274,7 +274,7 @@ class StarRocksTools:
 def starrocks_tools(
     adapter: StarRocksAdapter, max_bytes: Mapping[Audience, int], *, schema: SchemaCache
 ) -> StarRocksTools:
-    """按目标配置与四种用途的容量装配五个工具；容量容不下最坏结果时拒绝装配。
+    """按目标配置与四种用途的容量装配工具；容量容不下最坏结果时拒绝装配。
 
     ``schema`` 是同一目标的结构快照缓存；刷新由装配方负责，这里只读取当前快照。
     """
@@ -323,10 +323,18 @@ def starrocks_tools(
     widest = _cursor("f" * _VERSION_CHARS, (), _max_offset(target))
     try:
         check_projection_capacity(query_policy, worst)
-        check_projection_capacity(
-            ddl_policy,
-            worst.model_copy(update={"payload": {**worst.payload, "message": DDL_TOO_LARGE}}),
-        )
+        # DDL 成功返回一列原文；超限只返回说明。两种结果互斥，不能叠加其容量要求。
+        # SHOW 语句在前置检查中受 max_sql_bytes 约束，列头固定，行仍受结果总字节约束。
+        for rows, message in ((worst.payload["rows"], None), ([], DDL_TOO_LARGE)):
+            payload = {
+                **worst.payload,
+                "sql": _WIDEST_CHAR * target.policy.max_sql_bytes,
+                "columns": ["ddl"],
+                "rows": rows,
+                "row_count": 1 if message is None else 0,
+                "message": message,
+            }
+            check_projection_capacity(ddl_policy, worst.model_copy(update={"payload": payload}))
         for paged, sql, columns in (
             (databases_policy, SCHEMA_OBJECTS_SQL, ("database",)),
             (list_policy, SCHEMA_OBJECTS_SQL, LIST_COLUMNS),
