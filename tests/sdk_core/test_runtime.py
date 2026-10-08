@@ -61,6 +61,12 @@ from xiaowei.channel_store import ChannelStore, RequestUnavailableError
 from xiaowei.config import SecretRefError
 from xiaowei.model_api import ModelProfile
 from xiaowei.models import AUDIENCES, Identity
+from xiaowei.sqlguard import (
+    QueryPolicy,
+    QueryRejectedError,
+    QueryRejectionCode,
+    guard_readonly_query,
+)
 from xiaowei.starrocks import EXPLAIN_PREFIX, StarRocksAdapter
 from xiaowei.starrocks_schema import SchemaCache
 from xiaowei.starrocks_tools import (
@@ -1742,6 +1748,95 @@ def test_example_configuration_is_valid_and_fits_the_projections() -> None:
     assert model.provider == "vertex" and model.reasoning_effort is None
     assert (model.base_url, model.api_mode, model.output_mode) == (None, None, None)
     assert model.api_key_ref == "env:XW_MODEL_API_KEY"
+
+
+# 解析器把常用写法归一成内部函数名（DATE_FORMAT → TIME_TO_STR 等），模板名单按内部名填写。
+# 下面拼接的 SQL 是被检样本，不会执行。
+COMMON_EXPRESSIONS = (
+    "COUNT(*)",
+    "COUNT(DISTINCT a)",
+    "SUM(b)",
+    "AVG(b)",
+    "MAX(c)",
+    "MIN(c)",
+    "ROUND(AVG(b), 2)",
+    "ABS(b)",
+    "FLOOR(b)",
+    "CEIL(b)",
+    "IFNULL(a, 0)",
+    "COALESCE(a, 0)",
+    "NULLIF(a, 0)",
+    "IF(a > 1, 1, 0)",
+    "CASE WHEN a > 1 THEN 'x' ELSE 'y' END",
+    "CAST(a AS INT)",
+    "DATE(c)",
+    "DATE_FORMAT(c, '%Y-%m')",
+    "TO_DATE(c)",
+    "YEAR(c)",
+    "MONTH(c)",
+    "DAY(c)",
+    "HOUR(c)",
+    "WEEK(c)",
+    "NOW()",
+    "CURDATE()",
+    "UNIX_TIMESTAMP(c)",
+    "FROM_UNIXTIME(a)",
+    "CONCAT(a, b)",
+    "SUBSTR(a, 1, 2)",
+    "LOWER(a)",
+    "UPPER(a)",
+    "LENGTH(a)",
+    "TRIM(a)",
+    "REPLACE(a, 'x', 'y')",
+    "APPROX_COUNT_DISTINCT(a)",
+    "GROUP_CONCAT(a)",
+    "PERCENTILE_APPROX(b, 0.5)",
+    "ROW_NUMBER() OVER (ORDER BY b)",
+    "RANK() OVER (ORDER BY b)",
+    "DENSE_RANK() OVER (ORDER BY b)",
+    "LAG(b) OVER (ORDER BY b)",
+    "LEAD(b) OVER (ORDER BY b)",
+    "SUM(b) OVER (PARTITION BY a)",
+)
+
+
+def _template_policy() -> QueryPolicy:
+    policy = runtime.load_config(EXAMPLES / "xiaowei.example.json").targets[0].starrocks.policy
+    return QueryPolicy(
+        target_id="warehouse",
+        tables={"shop": {"t": ("a", "b", "c")}},
+        allowed_functions=policy.allowed_functions,
+        max_rows=policy.max_rows,
+        max_sql_bytes=policy.max_sql_bytes,
+        max_result_columns=policy.max_result_columns,
+    )
+
+
+@pytest.mark.parametrize("expression", COMMON_EXPRESSIONS)
+def test_template_functions_accept_common_starrocks_spellings(expression: str) -> None:
+    """OPERATIONS 列出的常用写法都能被模板的函数名单放行；解析器改名时这里先失败。"""
+    guard_readonly_query(f"SELECT {expression} AS x FROM shop.t", _template_policy())  # noqa: S608
+
+
+@pytest.mark.parametrize(
+    ("expression", "name"),
+    [
+        ("DATE_SUB(CURDATE(), INTERVAL 7 DAY)", "DATE_SUB"),
+        ("DATE_ADD(NOW(), INTERVAL 1 DAY)", "DATE_ADD"),
+        ("DATEDIFF(c, b)", "DATEDIFF"),
+        ("DATE_TRUNC('day', c)", "TIMESTAMP_TRUNC"),
+    ],
+)
+def test_interval_date_functions_cannot_be_opened_by_configuration(
+    expression: str, name: str
+) -> None:
+    """OPERATIONS 写明的已知限制：即使把函数名加进名单，日期加减、相差天数与截断仍由 SQLGuard
+    按不支持的语法拒绝。放开后须同步修改文档中的说明。"""
+    policy = _template_policy()
+    widened = policy.model_copy(update={"allowed_functions": policy.allowed_functions | {name}})
+    with pytest.raises(QueryRejectedError) as raised:
+        guard_readonly_query(f"SELECT {expression} AS x FROM shop.t", widened)  # noqa: S608
+    assert raised.value.code == QueryRejectionCode.UNSUPPORTED_SYNTAX
 
 
 def test_example_feishu_group_section_is_valid(tmp_path: Path) -> None:

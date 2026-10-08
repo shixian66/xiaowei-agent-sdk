@@ -213,9 +213,47 @@ docker compose --env-file .env ps
 然后打开 `http://服务器IP:8501/readyz` 检查。本机 P3-B 只验证了停止小维服务后用指定服务名执行
 `up -d xiaowei`；全栈停止后执行上面的 `up -d`、真实宿主机或 Docker 重启仍须在 P3-C 实测。
 
+## 常用上限与函数名单
+
+主模板按实际使用调过以下上限。它们不放宽只读账号、对象权限、证据复核或公司集群的内存限额，
+只避免正常问题因为预算或期限过小而失败。已部署的配置不会随升级改变，需要时按此表手动调整，
+不要用新模板覆盖自己的配置。
+
+| 字段 | 模板值 | 过小时的现象 |
+| --- | --- | --- |
+| `model.request_timeout_seconds` | 120 | 模型思考较久时单次请求超时 |
+| `model.max_output_tokens` | 16384 | Gemini 3 的思考也计入输出额度，过小会截断回答 |
+| `data_policy.input.max_bytes` | 16000 | 贴一段长 SQL 或问题就被拒绝 |
+| `budget.max_turns` / `max_tool_calls` | 16 / 16 | 列库翻页、查结构再查数时预算用完 |
+| `budget.timeout_seconds` | 300 | 多步问题整轮超时 |
+| `budget.max_scope_checks` | 2048 | 须不少于最大 `policy.max_rows` 的 5 倍 |
+| `starrocks.query_timeout_seconds` / `client_timeout_seconds` | 60 / 65 | 大表查询超时；客户端期限不能早于服务端 |
+| `policy.max_sql_bytes` | 16000 | 较长 SQL 被拒绝 |
+| `schema_limits` 三个期限 | 300 / 900 / 120 | 日志出现“结构快照刷新失败 reason=timeout” |
+
+`query_mem_limit_bytes`、`max_rows`、`max_value_bytes` 保持原值：前者保护公司集群，后两者控制单次
+回答的体量。
+
+**函数名单按解析后的内部名填写。** SQLGuard 先把 SQL 解析再检查函数名，部分常用写法会被归一：
+
+| 写法 | 名单中需要的名字 |
+| --- | --- |
+| `IFNULL(...)` | `COALESCE` |
+| `SUBSTR(...)` | `SUBSTRING` |
+| `DATE(...)`、`YEAR/MONTH/DAY/WEEK(...)` | `TS_OR_DS_TO_DATE`，以及对应的 `YEAR` 等 |
+| `DATE_FORMAT(...)` | `TIME_TO_STR`、`TS_OR_DS_TO_TIMESTAMP` |
+| `CURDATE()` | `CURRENT_DATE` |
+| `FROM_UNIXTIME(...)` | `UNIX_TO_TIME` |
+| `APPROX_COUNT_DISTINCT(...)` | `APPROX_DISTINCT` |
+
+只写成平时习惯的名字（如 `IFNULL`、`DATE_FORMAT`）不会放行。模板名单经测试覆盖常用聚合、数值、
+条件、日期、字符串和窗口函数。已知限制：`DATE_SUB/DATE_ADD(..., INTERVAL ...)`、`DATEDIFF`、
+`DATE_TRUNC` 即使加入名单也会按不支持的语法拒绝；时间范围请写成具体日期，例如
+`c >= '2026-10-01' AND c < '2026-10-08'`。
+
 ## 普通升级与回退（schema 不变）
 
-**升级到 Web 实战查询修复版：** 在自己的配置中给需要列库的身份显式添加
+**升级到 Web 实战查询修复版：** 先按[常用上限与函数名单](#常用上限与函数名单)核对预算与名单，再在自己的配置中给需要列库的身份显式添加
 `local/list_databases`：加入 `data_policy.model_tools` 和该身份的 `access.grants`；指定群使用时
 还要加入 `feishu.group.tools`。不需要该能力的身份维持原授权；不要用新模板覆盖自己的配置。
 内部表原始 DDL 为另一项独立授权 `local/show_create_table`：按需加入 Web 使用者的

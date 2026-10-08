@@ -36,12 +36,12 @@
 
 ## 3. 当前计划与下一项工作
 
-**本分支当前任务：** 基于 `40e5983` 修复用户报告的 Vertex `response_rejected`，按锁定 SDK 0.22.3 的公开 `ToolExecutionConfig` 限制同轮函数工具并发为 4，适配器把合法多调用交给 Runner，并按 Vertex 规则回传函数调用/结果与首个调用的签名。阶段日志只写白名单 `reject_reason`；提示词要求分析不重画事实表格。协议替身、真 SDK Runner、隔离 PostgreSQL 与 recording Adapter 的回归只证明离线行为。提交须按精确 SHA 独立复审；复审通过后，真实 Vertex 上不带库名的 `desc`、拒收原因码和分析质量仍须由获准公司环境验证，不在本任务执行。
+**Vertex 正常输出修复（PR #61 已合入 main `8fcb097`；新镜像发布与公司部署尚未完成）：** 基于 `40e5983` 修复用户报告的 Vertex `response_rejected`，按锁定 SDK 0.22.3 的公开 `ToolExecutionConfig` 限制同轮函数工具并发为 4，适配器把合法多调用交给 Runner，并按 Vertex 规则回传函数调用/结果与首个调用的签名。阶段日志只写白名单 `reject_reason`；提示词要求分析不重画事实表格。协议替身、真 SDK Runner、隔离 PostgreSQL 与 recording Adapter 的回归只证明离线行为。提交须按精确 SHA 独立复审；复审通过后，真实 Vertex 上不带库名的 `desc`、拒收原因码和分析质量仍须由获准公司环境验证，不在本任务执行。
 
 **既往 Web 实战修复（PR #59 已合入本地 `origin/main`）：** 以 `db773ee` 为基线，按用户提供的 Web 对话扩展
 [实战查询修复计划](docs/superpowers/plans/2026-10-08-web-query-practical-fixes.md)：补列库与按库遍历、稳定分页、完整字段类型、事实/推断说明、Web 单次渲染与可展开原文、大整数保真/空值区分/嵌套字段保留、本轮时间、请求日志关联与模型失败安全分类。用户已批准普通内部表原始 DDL，本工作树新增直接读取工具，超限整条不返回并说明；不开放视图/物化视图/外表定义与当前分区状态列表。
 新的 `list_databases`、`show_create_table` 必须显式配置授权；DDL 单独配置 `max_ddl_bytes`，示例只给 Web 使用者加入 DDL 授权。StarRocks 证据摘要 v6 使旧相关证据失效，应用表版本不变。
-用户确认公司镜像由最新 main 构建；未独立读取公司镜像 digest，真实模型新增问法与部署验收仍未完成；本次检查和下一项见该计划的交付记录。
+主模板随后按公司服务器上的实际使用放宽了模型期限与输出额度、输入长度、每轮预算、查询期限、SQL 长度和结构刷新期限，并补全常用函数名单（按解析后的内部名）；已部署配置不随升级改变，调整方法与日期加减等已知限制见 [OPERATIONS 的常用上限与函数名单](deploy/OPERATIONS.md#常用上限与函数名单)。用户确认公司镜像由最新 main 构建；未独立读取公司镜像 digest，真实模型新增问法与部署验收仍未完成；本次检查和下一项见该计划的交付记录。
 先前 `986f842` 的审查与验证只覆盖旧差异。`58619ef` 独立复审确认 P2 列库连接放大、P3 Web 字面换行与 NULL 展示及不稳定测试已关闭，又指出历史 DDL 的采集时间和固定说明被 Web 默认收起；`4331cd4` 的独立复审确认该 P3 已关闭且无阻断。用户随后决定普通查询的模型“分析与建议”与诊断模式一致默认展开，相关 Web 变更已随 PR #59 合入；Chrome、离线验证与残余风险见[实战查询修复计划](docs/superpowers/plans/2026-10-08-web-query-practical-fixes.md)。真实模型与公司入口的这些 Web 行为仍未验收。
 
 **当前计划：** [Vertex、配置维护与飞书首次授权](docs/superpowers/plans/2026-10-06-vertex-config-feishu-onboarding.md)：`C1 → F` 与 `V1-A → V1-B → V2 → C2` 已合入；I-F 真实飞书 Gate 与 I-V 未完成（用户决定直接在公司服务器部署，I-V B/C 未运行，Vertex 真实证据只来自用户在服务器上的结果）。
