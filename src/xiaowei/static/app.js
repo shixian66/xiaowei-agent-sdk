@@ -88,9 +88,8 @@
       if (data.delivery.facts.length) {
         for (const fact of data.delivery.facts) item.append(factTable(fact));
         if (data.delivery.analysis.length) {
-          const diagnose = item.dataset.mode === "diagnose";
-          const analysis = el(diagnose ? "section" : "details", "analysis");
-          analysis.append(el(diagnose ? "p" : "summary", "meta", "查看分析与建议（模型推断）"));
+          const analysis = el("section", "analysis");
+          analysis.append(el("p", "meta", "分析与建议（模型推断）"));
           for (const inference of data.delivery.analysis) {
             analysis.append(el("p", "content", inference.text));
             analysis.append(el("p", "meta", `依据：${inference.evidence_ids.join(", ")}`));

@@ -158,8 +158,9 @@ async def test_send_works_without_secure_context_apis(env: Env, chrome_binary: s
     assert env.model_calls(message) == 2
 
 
+@pytest.mark.parametrize("mode", ["query", "diagnose"])
 async def test_compact_facts_and_multiline_analysis(
-    env: Env, chrome_binary: str, monkeypatch: pytest.MonkeyPatch
+    env: Env, chrome_binary: str, monkeypatch: pytest.MonkeyPatch, mode: str
 ) -> None:
     app = create_web_app(env.service, config())
     inference = "第一行\n第二行 <script>alert(1)</script>"
@@ -174,25 +175,56 @@ async def test_compact_facts_and_multiline_analysis(
     async with serving(app, port=18501), launch(chrome_binary) as chrome:
         page = await chrome.page()
         await page.navigate("http://127.0.0.1:18501/")
-        await send(page, message)
+        await send(page, message, None if mode == "query" else mode)
         await settled(page, 0, "completed")
         rendered = await page.evaluate(f"{item(0)}.innerText")
         assert "已回复" in rendered and "已完成" not in rendered
-        assert "第一行" not in rendered and "长期重复的固定说明" in rendered
+        assert "第一行" in rendered and "第二行 <script>alert(1)</script>" in rendered
+        assert "长期重复的固定说明" in rendered
         assert "采集于 2026-09-29T08:00:00" in rendered
-        assert '"rows":' not in rendered
+        assert '"rows":' not in rendered and "查看分析与建议" not in rendered
         assert await table_rows(page, 0) == [2]
+        assert await page.evaluate(f"{item(0)}.dataset.mode") == mode
+        assert await page.evaluate(f"{item(0)}.querySelector('.analysis').tagName") == "SECTION"
+        assert (
+            await page.evaluate(f"{item(0)}.querySelector('.analysis > p.meta').textContent")
+            == "分析与建议（模型推断）"
+        )
+        assert await page.evaluate(
+            f"{item(0)}.querySelector('.fact').nextElementSibling === "
+            f"{item(0)}.querySelector('.analysis')"
+        )
         assert (
             await page.evaluate(f"{item(0)}.querySelector('.analysis .content').textContent")
             == inference
+        )
+        assert (
+            await page.evaluate(
+                f"getComputedStyle({item(0)}.querySelector('.analysis .content')).whiteSpace"
+            )
+            == "pre-wrap"
+        )
+        source = await page.evaluate(
+            f"{item(0)}.querySelector('details.evidence p.meta').textContent"
+        )
+        evidence_id = re.search(r"\[(ev_[^\]]+)\]", source)
+        assert evidence_id is not None
+        assert (
+            await page.evaluate(
+                f"{item(0)}.querySelector('.analysis > p.meta:last-child').textContent"
+            )
+            == f"依据：{evidence_id.group(1)}"
         )
         assert await page.evaluate(f"{item(0)}.querySelector('details.evidence').open") is False
         await page.evaluate(f"{item(0)}.querySelector('details.evidence summary').click()")
         expanded = await page.evaluate(f"{item(0)}.innerText")
         assert "来源 local/order_total" in expanded and "长期重复的固定说明" in expanded
-        await page.evaluate(f"{item(0)}.querySelector('details.analysis summary').click()")
-        expanded = await page.evaluate(f"{item(0)}.innerText")
-        assert "第一行" in expanded and expanded.count("第二行") == 1
+        assert expanded.count("第二行") == 1
+        await page.reload()
+        await settled(page, 0, "completed")
+        assert await page.evaluate(f"{item(0)}.dataset.mode") == mode
+        assert "第一行" in await page.evaluate(f"{item(0)}.innerText")
+        assert await page.evaluate(f"{item(0)}.querySelector('details.evidence').open") is False
         assert await page.evaluate("document.scripts.length") == 1
 
 
