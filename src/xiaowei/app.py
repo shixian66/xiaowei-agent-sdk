@@ -32,7 +32,7 @@ from collections.abc import Callable, Mapping
 from datetime import UTC, datetime
 from typing import Literal
 
-from agents import Agent, MaxTurnsExceeded, RunConfig, Runner, Tool
+from agents import Agent, MaxTurnsExceeded, RunConfig, Runner, Tool, ToolExecutionConfig
 from agents.exceptions import ModelBehaviorError, ModelRefusalError, ModelTimeoutError, UserError
 from agents.extensions.memory import SQLAlchemySession
 from openai import APIConnectionError, APIStatusError, APITimeoutError
@@ -49,7 +49,12 @@ from xiaowei.evidence import (
 )
 from xiaowei.governance import Execute, GovernedTools, ToolExecutionError
 from xiaowei.mcp import MCPIntegration
-from xiaowei.model_api import ModelBinding, ModelRequestRejectedError, ModelResponseRejectedError
+from xiaowei.model_api import (
+    ModelBinding,
+    ModelRequestRejectedError,
+    ModelResponseRejectedError,
+    ResponseRejectReason,
+)
 from xiaowei.models import AgentAnswer, ClusterId, Label, RunContext, ToolId, TurnAnswer
 from xiaowei.session import (
     PolicySession,
@@ -91,7 +96,9 @@ DEFAULT_INSTRUCTIONS = (
     "拼接 SQL 冒充；容量超限且原文未返回时明确告知。视图、物化视图、外表的原始 DDL 和当前"
     "分区状态列表尚未开放，不把内部表 DDL 的分区定义当成当前分区状态。"
     "布局桶数为 0 时只报告元数据值与无法确认实际桶数，不断言自动扩缩容。"
-    "简单列名或数值回答直接引用所需证据，inferences 可为空，不重复抄写整张结果表。"
+    "事实区会由系统完整展示工具结果，inferences 不要重画表格，不要逐行或逐列复述结果；"
+    "只写结论、口径说明、限制和建议，需要时点名个别关键字段或数值。"
+    "简单列名或数值回答直接引用所需证据，inferences 可为空。"
     "总数、金额和去重数要在数据库中聚合，不能对截断后的明细求总数；最近记录要有明确排序。"
     "昨天等相对时间依据本轮时间与业务时区，金额单位、状态口径不明时先澄清。"
     "追问保持原集群与限定表名；多个候选不猜。明确要求重新查询时不要把历史结果当本轮新结果。"
@@ -400,8 +407,12 @@ class Application:
 
 
 def safe_run_config() -> RunConfig:
-    """每次运行使用的 SDK 配置：关闭 tracing，且 trace 不含敏感数据。应用与模型检查共用。"""
-    return RunConfig(tracing_disabled=True, trace_include_sensitive_data=False)
+    """关闭敏感 trace；本地函数工具并发上限为 4，数据库仍按目标连接槽位限流。"""
+    return RunConfig(
+        tracing_disabled=True,
+        trace_include_sensitive_data=False,
+        tool_execution=ToolExecutionConfig(max_function_tool_concurrency=4),
+    )
 
 
 def _turn_error(exc: Exception) -> TurnError:
@@ -513,27 +524,33 @@ def _binding_fingerprint(
     return f"sha256:{hashlib.sha256(canonical.encode()).hexdigest()}"
 
 
-def _model_failure_details(exc: Exception) -> tuple[str, int | None]:
+def _model_failure_details(
+    exc: Exception,
+) -> tuple[str, int | None, ResponseRejectReason | None]:
     """只取公开异常类型和受限 HTTP 状态码，不读取消息、响应体、请求或异常类名。"""
     for error in reversed(_causes(exc)):
         if isinstance(error, ModelRequestRejectedError):
-            return "request_rejected", None
+            return "request_rejected", None, None
         if isinstance(error, ModelResponseRejectedError):
-            return "response_rejected", None
+            return "response_rejected", None, error.reject_reason
         if isinstance(error, (APITimeoutError, ModelTimeoutError, ModelAPITimeoutError)):
-            return "model_timeout", None
+            return "model_timeout", None, None
         if isinstance(error, (APIStatusError, ModelAPIStatusError)):
             status = error.status_code
-            return "provider_http", status if type(status) is int and 100 <= status <= 599 else None
+            return (
+                "provider_http",
+                status if type(status) is int and 100 <= status <= 599 else None,
+                None,
+            )
         if isinstance(error, (APIConnectionError, ModelAPITransportError)):
-            return "connection", None
+            return "connection", None, None
         if isinstance(error, ModelBehaviorError):
-            return "invalid_output", None
+            return "invalid_output", None, None
         if isinstance(error, ModelRefusalError):
-            return "model_refusal", None
+            return "model_refusal", None, None
         if isinstance(error, UserError):
-            return "sdk_configuration", None
-    return "unexpected_error", None
+            return "sdk_configuration", None, None
+    return "unexpected_error", None, None
 
 
 def _stage(
@@ -543,7 +560,14 @@ def _stage(
     fields: tuple[object, ...] = (turn, stage, reason, elapsed_ms)
     message = "turn=%s stage=%s reason=%s elapsed_ms=%d"
     if reason == "model_failed" and cause is not None:
-        kind, status = _model_failure_details(cause)
+        kind, status, reject_reason = _model_failure_details(cause)
         message += " error_kind=%s http_status=%s"
         fields += (kind, status if status is not None else "-")
+        if kind == "response_rejected":
+            message += " reject_reason=%s"
+            fields += (
+                reject_reason.value
+                if isinstance(reject_reason, ResponseRejectReason)
+                else ResponseRejectReason.OTHER.value,
+            )
     logger.info(message, *fields)
