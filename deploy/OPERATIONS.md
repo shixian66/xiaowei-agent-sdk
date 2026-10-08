@@ -218,6 +218,12 @@ docker compose --env-file .env ps
 **升级到 Web 实战查询修复版：** 在自己的配置中给需要列库的身份显式添加
 `local/list_databases`：加入 `data_policy.model_tools` 和该身份的 `access.grants`；指定群使用时
 还要加入 `feishu.group.tools`。不需要该能力的身份维持原授权；不要用新模板覆盖自己的配置。
+内部表原始 DDL 为另一项独立授权 `local/show_create_table`：按需加入 Web 使用者的
+`data_policy.model_tools` 和 `access.grants`；飞书群示例没有自动加入这项授权。它会返回内部表
+默认值和完整表属性，接收范围应与使用者权限一致。目标的 `starrocks.max_ddl_bytes` 仅控制 DDL
+单值容量（JSON 编码字节），未配置时沿用 `max_value_bytes`；示例为 64000，普通单值仍为 4000。
+它不能大于 `max_result_bytes`，模型、Session、Web、飞书四种投影也须装得下配置的最大结果。
+容量不足时整条 DDL 不返回并说明原因；按需调好容量、新建会话后重新读取，不重放旧结果。
 该版使用 StarRocks 证据范围摘要 v6，旧相关结果和历史不能继续交付，升级后新建会话再查。
 此摘要与 PostgreSQL 应用表版本 6 无关，本次不新增存储迁移。
 

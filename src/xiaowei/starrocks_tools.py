@@ -1,4 +1,4 @@
-"""StarRocks 受治理工具：六个（配置审计源时七个）工具的契约、参数与投影策略，以及绑定 Adapter
+"""StarRocks 受治理工具：七个（配置审计源时八个）工具的契约、参数与投影策略，以及绑定 Adapter
 的执行函数。
 
 数据范围来自每个目标的结构快照（``starrocks_schema.SchemaCache``），不来自配置的表列清单。
@@ -101,8 +101,10 @@ from xiaowei.starrocks import (
     audit_sql_bytes,
     fitting_rows,
     metadata_sql_bytes,
+    show_create_sql,
 )
 from xiaowei.starrocks_schema import (
+    BASE_TABLE,
     SCHEMA_UNAVAILABLE,
     ObjectInfo,
     SchemaCache,
@@ -118,8 +120,9 @@ DESCRIBE_TABLE: Final = "local/describe_table"
 RUN_QUERY: Final = "local/run_readonly_query"
 EXPLAIN_QUERY: Final = "local/explain_query"
 LAYOUT_TOOL: Final = "local/describe_table_layout"
+SHOW_CREATE_TABLE: Final = "local/show_create_table"
 DIAGNOSE_TOOLS: Final = frozenset(
-    {LIST_DATABASES, LIST_TABLES, DESCRIBE_TABLE, LAYOUT_TOOL, EXPLAIN_QUERY}
+    {LIST_DATABASES, LIST_TABLES, DESCRIBE_TABLE, LAYOUT_TOOL, SHOW_CREATE_TABLE, EXPLAIN_QUERY}
 )
 """诊断用途展示元数据与执行计划工具；实际查询工具不可见，强行调用仍由治理层拒绝。"""
 QUERY_TOOLS: Final = DIAGNOSE_TOOLS | {RUN_QUERY}
@@ -147,6 +150,15 @@ LAYOUT_NOTE: Final = (
     "这是表布局摘要，不是完整建表语句；分区键不表示分区粒度或当前分区列表。"
     "buckets 是元数据原值，值为 0 时不能据此确认实际桶数或自动扩缩容。"
 )
+DDL_NOTE: Final = (
+    "这是服务器 SHOW CREATE TABLE 返回的普通内部表当前定义，包含默认值与表属性；"
+    "服务器可能规范化语句或补充默认属性，不保证等于最初提交的 SQL。"
+    "分区定义不等于当前分区状态列表；标记截断时原文未返回。"
+)
+DDL_TOO_LARGE: Final = (
+    "内部表 DDL 超过 max_ddl_bytes（未配置时为 max_value_bytes）或 max_result_bytes 限额，"
+    "原文未返回；需调整该目标的 DDL/结果容量及四种投影容量后重新读取。"
+)
 SNAPSHOT_STALE: Final = "表结构已刷新，旧的 cursor 已失效，未执行；请从头开始（cursor 传 null）"
 CURSOR_INVALID: Final = (
     "cursor 无效，未执行；请原样传回上一次结果中的 next_cursor，或传 null 从头开始"
@@ -165,6 +177,7 @@ PLAN_NOTE: Final = (
 RESULT_FIELDS: Final = ("sql", "columns", "rows", "row_count", "elapsed_ms")
 PAGED_FIELDS: Final = (*RESULT_FIELDS, "next_cursor")
 """搜表与表结构另带续取游标：还有未交付的对象或列时非空（见 ``_cursor``）。"""
+DDL_FIELDS: Final = (*RESULT_FIELDS, "message")
 # JSON 转义膨胀最大的单字节字符：控制字符写作 \u00XX，一个字节变六个。
 _WIDEST_CHAR: Final = "\x01"
 # 有符号 64 位整数中十进制写法最长的值。
@@ -301,6 +314,7 @@ def starrocks_tools(
     list_policy = policy("list_tables", ListTablesArgs, SCHEMA_NOTE, PAGED_FIELDS)
     describe_policy = policy("describe_table", DescribeTableArgs, DESCRIBE_NOTE, PAGED_FIELDS)
     layout_policy = policy("describe_table_layout", TableArgs, LAYOUT_NOTE)
+    ddl_policy = policy("show_create_table", TableArgs, DDL_NOTE, DDL_FIELDS)
     query_policy = policy("run_readonly_query", RunQueryArgs)
     explain_policy = policy("explain_query", ExplainQueryArgs, PLAN_NOTE)
     # 其余策略的投影与查询相同，检查一次即覆盖；搜表与表结构多一个续取游标，按它们的实际形态
@@ -309,6 +323,10 @@ def starrocks_tools(
     widest = _cursor("f" * _VERSION_CHARS, (), _max_offset(target))
     try:
         check_projection_capacity(query_policy, worst)
+        check_projection_capacity(
+            ddl_policy,
+            worst.model_copy(update={"payload": {**worst.payload, "message": DDL_TOO_LARGE}}),
+        )
         for paged, sql, columns in (
             (databases_policy, SCHEMA_OBJECTS_SQL, ("database",)),
             (list_policy, SCHEMA_OBJECTS_SQL, LIST_COLUMNS),
@@ -478,6 +496,27 @@ def starrocks_tools(
         layout = await adapter.describe_layout(found.database, found.name, found.column_names)
         return _observation(layout, bounds, [read_dependency(found)])
 
+    def check_ddl(request: ToolRequest) -> tuple[ObjectInfo, int]:
+        _, found = check_table(request)
+        if found.type != BASE_TABLE or found.table_id is None or found.table_id <= 0:
+            raise ToolRejectedError("原始 DDL 未读取：只支持普通内部表，视图和物化视图尚未开放")
+        sql = show_create_sql(found.database, found.name)
+        if len(sql.encode()) > target.policy.max_sql_bytes:
+            raise ToolRejectedError("原始 DDL 未读取：生成的 SHOW CREATE TABLE 超过 SQL 字节限额")
+        return found, found.table_id
+
+    async def show_create_table(checked: tuple[ObjectInfo, int]) -> ToolObservation:
+        found, table_id = checked
+        # check_ddl 已拒绝缺失 ID；Adapter 再核对当前 ID、类型和 OLAP 引擎，且在返回前复核。
+        # 不先探测外表；SHOW CREATE 自身要求 SELECT，记录/交付时仍复核当前权限与版本。
+        result = await adapter.show_create_table(found.database, found.name, table_id)
+        return _observation(
+            result,
+            bounds,
+            [read_dependency(found)],
+            extra={"message": DDL_TOO_LARGE if result.truncated else None},
+        )
+
     def check_query(request: ToolRequest) -> tuple[SchemaSnapshot, GuardedQuery]:
         code: QueryRejectionCode | None = None
         snapshot = current()
@@ -547,6 +586,14 @@ def starrocks_tools(
             "不是完整 DDL；分区键不表示分区粒度，buckets=0 不证明实际桶数或自动扩缩容。",
         ),
         contract(
+            SHOW_CREATE_TABLE,
+            ddl_policy,
+            "读取一张普通内部 OLAP 表的完整 SHOW CREATE TABLE 原文，含默认值、键、分区定义和"
+            "表属性；不执行 CREATE。database 与 table 须来自可读表结构；不支持视图、物化视图、"
+            "外表或外部 catalog。容量超限时原文整条不返回，不拼接或裁剪；服务器返回的是当前定义，"
+            "不保证等于最初输入的 SQL，也不是当前分区状态列表。",
+        ),
+        contract(
             RUN_QUERY,
             query_policy,
             "执行一条只读 SELECT 或 UNION/UNION ALL（可带 WITH、子查询与窗口函数），可跨库 JOIN。"
@@ -569,6 +616,7 @@ def starrocks_tools(
         explain_policy,
         layout_policy,
         databases_policy,
+        ddl_policy,
     ]
     key = target.target_id
     executes: dict[tuple[str, str], Execute] = {
@@ -576,6 +624,7 @@ def starrocks_tools(
         (LIST_TABLES, key): Prechecked(check=check_search, run=list_tables),
         (DESCRIBE_TABLE, key): Prechecked(check=check_describe, run=describe_table),
         (LAYOUT_TOOL, key): Prechecked(check=check_table, run=describe_layout),
+        (SHOW_CREATE_TABLE, key): Prechecked(check=check_ddl, run=show_create_table),
         (RUN_QUERY, key): Prechecked(check=check_query, run=run_query),
         (EXPLAIN_QUERY, key): Prechecked(check=check_explain, run=explain),
     }
@@ -650,6 +699,7 @@ DATA_SCOPE_FORMAT: Final = "xiaowei.data_scope.starrocks/6"
 /3（D1/D2）：固定 SQL 语义，纳入 sql_mode，并使修复前的 StarRocks 证据一次性失效。
 /4（P2.5 Task 3）：跨库、UNION/窗口/星号展开与列名大小写规则改变查询语义；纳入 max_result_columns。
 /5（P2.5 Task 6）：审计改为读取所有库、按每条记录的当前库解析原文并输出该库；列表改为关键词分页。
+/6（Web 实战修复）：列库、按库遍历、完整类型与内部表原始 DDL；纳入独立 max_ddl_bytes 限额。
 """
 
 
@@ -693,6 +743,7 @@ def scope_canonical(target: StarRocksTarget) -> str:
         "max_result_columns": policy.max_result_columns,
         "max_result_bytes": target.max_result_bytes,
         "max_value_bytes": target.max_value_bytes,
+        "max_ddl_bytes": target.max_ddl_bytes,
         "max_plan_lines": target.max_plan_lines,
         "query_timeout_seconds": target.query_timeout_seconds,
         "query_mem_limit_bytes": target.query_mem_limit_bytes,

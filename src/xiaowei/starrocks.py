@@ -25,6 +25,8 @@ P2.5 Task 0 在 4.1.4 上实测该探测不会被优化消除，撤权对同一�
 表布局只读 ``information_schema.tables_config`` 的表模型、分区、分桶、排序与主键，不读
 ``PROPERTIES``（存储卷、副本等部署信息）。键字段中的每个名字都须是该对象的获准列，否则整段
 替换为 ``LAYOUT_HIDDEN``：不显示未获准列名，也不留下获准的一部分让人误以为是完整的键。
+独立授权的 ``show_create_table`` 读取普通内部 OLAP 表的完整建表原文（含默认值与属性），
+读取前后核对对象 ID、类型和引擎。原文整条保留或因容量不足整条省略，不交付半段 DDL。
 
 慢查询只读已有的 AuditLoader 审计表（``StarRocksTarget.audit``）：代码模板与绑定值按时间窗、
 ``isQuery`` 与可选的会话当前库（审计 ``db`` 列）取有界候选（独立的候选行数与字节上限，多读一条
@@ -307,6 +309,8 @@ class StarRocksTarget(BaseModel):
     （``sqlguard``），审计原文按每条记录自身的会话当前库解析。
     ``client_timeout_seconds`` 覆盖会话设置、执行与读取，不早于服务端 ``query_timeout``。
     ``max_plan_lines`` 是执行计划最多返回的行数；字节与单值上限与查询共用。
+    ``max_ddl_bytes`` 只覆盖内部表原始 DDL 的单值上限，按 JSON 编码字节计；未配置时沿用
+    ``max_value_bytes``，且仍受 ``max_result_bytes`` 约束。
     """
 
     model_config = ConfigDict(frozen=True, extra="forbid")
@@ -327,6 +331,7 @@ class StarRocksTarget(BaseModel):
     query_mem_limit_bytes: int = Field(ge=1)
     max_result_bytes: int = Field(ge=2)
     max_value_bytes: int = Field(ge=1)
+    max_ddl_bytes: int | None = Field(default=None, ge=1)
     max_plan_lines: int = Field(default=500, ge=1)
     policy: SqlPolicy
     schema_limits: SchemaLimits
@@ -352,6 +357,8 @@ class StarRocksTarget(BaseModel):
             raise ValueError("client_timeout_seconds 不能早于服务端 query_timeout_seconds")
         if self.max_value_bytes > self.max_result_bytes:
             raise ValueError("max_value_bytes 不能大于 max_result_bytes")
+        if self.max_ddl_bytes is not None and self.max_ddl_bytes > self.max_result_bytes:
+            raise ValueError("max_ddl_bytes 不能大于 max_result_bytes")
         audit = self.audit
         if audit is not None:
             if self.policy.max_sql_bytes > audit.stmt_limit - _TRUNCATION_MARGIN:
@@ -476,6 +483,13 @@ OBJECT_ID_SQL: Final = (
 OBJECT_COLUMNS_SQL: Final = (
     "SELECT COLUMN_NAME AS col, COLUMN_TYPE AS type FROM information_schema.columns "
     "WHERE TABLE_SCHEMA = %s AND TABLE_NAME = %s ORDER BY ORDINAL_POSITION LIMIT %s"
+)
+# 原始 DDL 只开放普通内部表；元数据可见性不替代 SHOW CREATE 自身和交付前的 SELECT 权限复核。
+DDL_IDENTITY_SQL: Final = (
+    "SELECT c.TABLE_ID AS id, c.TABLE_ENGINE AS engine, t.TABLE_TYPE AS type "
+    "FROM information_schema.tables_config c JOIN information_schema.tables t "
+    "ON c.TABLE_SCHEMA = t.TABLE_SCHEMA AND c.TABLE_NAME = t.TABLE_NAME "
+    "WHERE c.TABLE_SCHEMA = %s AND c.TABLE_NAME = %s"
 )
 _SCHEMA_OBJECT_COLUMNS: Final = ("db", "name", "type", "comment", "created")
 _SCHEMA_COLUMN_COLUMNS: Final = ("db", "name", "col", "type", "nullable", "comment")
@@ -637,6 +651,65 @@ class StarRocksAdapter:
         if result.columns != LAYOUT_COLUMNS or result.truncated or None in rows:
             raise StarRocksError(_Code.RESULT_CONTRACT)
         return result.model_copy(update={"rows": tuple(r for r in rows if r is not None)})
+
+    async def show_create_table(self, database: str, name: str, table_id: int) -> QueryResult:
+        """只读普通内部表的服务器建表原文；调用方提供当前快照中的表 ID。
+
+        固定语句，不接受用户 SQL。前后身份不一致、非内部表或返回契约异常均失败；超出
+        ``max_ddl_bytes``（未配置时沿用单值限额）或结果总限额则不保留任何 DDL，标记截断。
+        文本不裁剪、不重新拼接；它是服务器当前定义，不保证等于历史 CREATE 输入。
+        """
+        sql = show_create_sql(database, name)
+        if (
+            type(table_id) is not int
+            or table_id <= 0
+            or len(sql.encode()) > self._target.policy.max_sql_bytes
+        ):
+            raise StarRocksError(_Code.OBJECT_NOT_ALLOWED)
+        started = time.monotonic()
+
+        async def verify_identity() -> None:
+            identity = await self._run(DDL_IDENTITY_SQL, (database, name), 1)
+            expected = {"id": table_id, "engine": "OLAP", "type": "BASE TABLE"}
+            if (
+                identity.columns != ("id", "engine", "type")
+                or identity.truncated
+                or identity.rows != (expected,)
+                or type(identity.rows[0]["id"]) is not int
+            ):
+                raise StarRocksError(_Code.OBJECT_NOT_ALLOWED)
+
+        await verify_identity()
+        limits = _ReadLimits(
+            max_bytes=self._target.max_result_bytes,
+            max_value=self._target.max_ddl_bytes or self._target.max_value_bytes,
+            zone=self._zone,
+        )
+        result = await self._run(sql, None, 1, limits=limits)
+        # 即使内容超限也复核对象，不能把对象替换伪装成容量不足。
+        await verify_identity()
+        if result.columns != ("Table", "Create Table"):
+            raise StarRocksError(_Code.RESULT_CONTRACT)
+        rows: tuple[dict[str, Scalar], ...] = ()
+        if not result.truncated:
+            if len(result.rows) != 1:
+                raise StarRocksError(_Code.RESULT_CONTRACT)
+            row = result.rows[0]
+            ddl = row["Create Table"]
+            if row["Table"] != name or not isinstance(ddl, str) or not ddl.strip():
+                raise StarRocksError(_Code.RESULT_CONTRACT)
+            rows = ({"ddl": ddl},)
+        elif result.rows:
+            # 单条原文只有整行丢弃的容量截断；已读到一行还未结束代表服务端返回了多行。
+            raise StarRocksError(_Code.RESULT_CONTRACT)
+        return result.model_copy(
+            update={
+                "columns": ("ddl",),
+                "rows": rows,
+                "row_count": len(rows),
+                "elapsed_ms": int((time.monotonic() - started) * 1000),
+            }
+        )
 
     async def slow_queries(
         self,
@@ -1112,6 +1185,13 @@ def probe_sql(database: str, name: str) -> str:
     if not (safe_identifier(database) and safe_identifier(name)):
         raise ValueError("库表名不能含反引号或控制字符")
     return _PROBE.format(db=database, name=name)
+
+
+def show_create_sql(database: str, name: str) -> str:
+    """用已验证的标识符生成一条只读 SHOW CREATE TABLE。"""
+    if not (safe_identifier(database) and safe_identifier(name)):
+        raise StarRocksError(_Code.OBJECT_NOT_ALLOWED)
+    return f"SHOW CREATE TABLE `{database}`.`{name}`"
 
 
 def safe_identifier(name: object) -> bool:

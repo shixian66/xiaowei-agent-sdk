@@ -15,6 +15,7 @@ fixture 以管理账号建一个随机名的合成数据库与只读账号（只
 # ruff: noqa: S608 —— 合成库名由 fixture 随机生成，建表与插数语句是测试数据。
 
 import asyncio
+import json
 import os
 import secrets
 import time
@@ -35,7 +36,7 @@ from tests.sdk_core.postgres_harness import (
 )
 from tests.sdk_core.synthetic_tools import Clock, Grants, ready_engine
 
-from xiaowei.evidence import EvidenceStore
+from xiaowei.evidence import EvidenceStore, EvidenceUnavailableError
 from xiaowei.governance import (
     GovernedTools,
     ToolCatalog,
@@ -82,6 +83,7 @@ from xiaowei.starrocks_tools import (
     LIST_TABLES,
     QUERY_TOOLS,
     RUN_QUERY,
+    SHOW_CREATE_TABLE,
     starrocks_tools,
 )
 
@@ -210,6 +212,140 @@ def adapter(inst: Instance, **changes: object) -> StarRocksAdapter:
 
 def guarded(inst: Instance, sql: str, t: StarRocksTarget | None = None):  # type: ignore[no-untyped-def]
     return guard_readonly_query(sql, scope(inst, t or target(inst)))
+
+
+async def test_long_internal_ddl_matches_server_original(instance: Instance) -> None:
+    host, port, user = admin_address()
+    db = instance.database
+    fields = ", ".join(
+        f'`field_{i}` VARCHAR(100) NULL DEFAULT "value_{i}" COMMENT "原始注释 {i}"'
+        for i in range(80)
+    )
+    await admin(
+        host,
+        port,
+        user,
+        f"CREATE TABLE {db}.wide_ddl (id BIGINT NOT NULL, day DATE NOT NULL, {fields}) "
+        "ENGINE=OLAP PRIMARY KEY(id, day) PARTITION BY RANGE(day) "
+        "(PARTITION p202610 VALUES LESS THAN ('2026-11-01')) "
+        'DISTRIBUTED BY HASH(id) BUCKETS 1 PROPERTIES("replication_num"="1")',
+        f"GRANT SELECT ON TABLE {db}.wide_ddl TO USER '{instance.ro_user}'@'%'",
+    )
+    sql = f"SHOW CREATE TABLE `{db}`.`wide_ddl`"
+    [(name, expected)] = await readonly_rows(instance, sql)
+    assert name == "wide_ddl" and isinstance(expected, str) and len(expected.encode()) > 4000
+    ada = adapter(instance, max_ddl_bytes=24_000, max_result_bytes=40_000)
+    schema = SchemaCache(ada, clock=lambda: datetime.now(UTC))
+    assert await schema.refresh()
+    found = schema.current().object(db, "wide_ddl")
+    assert found is not None and found.table_id is not None
+    result = await ada.show_create_table(db, "wide_ddl", found.table_id)
+    assert not result.truncated and result.rows == ({"ddl": expected},)
+    assert 'DEFAULT "value_79"' in expected and "PRIMARY KEY" in expected
+    assert "p202610" in expected and "PROPERTIES" in expected
+    small = await adapter(instance).show_create_table(db, "wide_ddl", found.table_id)
+    assert small.truncated and small.rows == ()
+
+
+async def test_raw_ddl_governed_delivery_and_real_revocation(instance: Instance) -> None:
+    ada = adapter(instance, max_ddl_bytes=3000)
+    schema = SchemaCache(ada, clock=lambda: datetime.now(UTC))
+    assert await schema.refresh()
+    tools = starrocks_tools(
+        ada, dict.fromkeys(("model", "session", "web", "feishu"), 200_000), schema=schema
+    )
+    grants = Grants()
+    grants.grant("alice", SHOW_CREATE_TABLE, target="sr-real")
+    ctx = RunContext(
+        identity=Identity(subject_id="alice", session_id="ddl-real", turn_id="t1", channel="web"),
+        target_scope=frozenset({"sr-real"}),
+        tool_scope=frozenset({SHOW_CREATE_TABLE}),
+        budget=Budget(max_turns=4, max_tool_calls=3, timeout_seconds=30.0, max_scope_checks=1000),
+    )
+    request = ToolRequest(
+        tool_id=SHOW_CREATE_TABLE,
+        target_id="sr-real",
+        call_id="ddl",
+        tool_name="show_create_table",
+        arguments={"cluster": "sr-real", "database": instance.database, "table": "sales"},
+    )
+    [(_, expected)] = await readonly_rows(
+        instance, f"SHOW CREATE TABLE `{instance.database}`.`sales`"
+    )
+    async with isolated_database() as url, ready_engine(url) as engine:
+        evidence = EvidenceStore(
+            engine,
+            ToolCatalog(tools.contracts, tools.policies),
+            authorize=grants,
+            clock=Clock(datetime.now(UTC)),
+            retention_seconds=600,
+            verify_dependencies=DependencyCheck({"sr-real": ada}),
+        )
+        governed = GovernedTools(evidence)
+        execute = tools.executes[(SHOW_CREATE_TABLE, "sr-real")]
+        result = await governed.invoke(ctx, request, execute)
+        answer = TurnAnswer(
+            answer=AgentAnswer(
+                evidence_ids=(result.evidence_id,), inferences=(), clarification=None
+            ),
+            context_evidence=(result.evidence_id,),
+        )
+        (fact,) = (await evidence.validate_answer(answer, ctx)).facts
+        assert fact.rows == ({"ddl": expected},) and not fact.truncated
+        assert json.loads(fact.result_json)["rows"] == [{"ddl": expected}]
+        host, port, user = admin_address()
+        # 留下同库另一张表的权限，确保连接能选择默认库，从而实测 sales 的零行权限探测拒绝。
+        await admin(
+            host,
+            port,
+            user,
+            f"GRANT SELECT ON TABLE {instance.database}.hidden TO USER '{instance.ro_user}'@'%'",
+            f"REVOKE SELECT ON TABLE {instance.database}.sales FROM USER '{instance.ro_user}'@'%'",
+        )
+        with pytest.raises(EvidenceUnavailableError):
+            await evidence.project(result.evidence_id, ctx, "web")
+        with pytest.raises(ToolExecutionError):
+            await governed.invoke(
+                ctx, request.model_copy(update={"call_id": "after-revoke"}), execute
+            )
+
+
+async def test_view_cannot_be_read_as_internal_ddl(instance: Instance) -> None:
+    host, port, user = admin_address()
+    db = instance.database
+    await admin(
+        host,
+        port,
+        user,
+        f"CREATE VIEW {db}.sales_view AS SELECT id FROM {db}.sales",
+        f"GRANT SELECT ON VIEW {db}.sales_view TO USER '{instance.ro_user}'@'%'",
+    )
+    with pytest.raises(StarRocksError) as error:
+        await adapter(instance, max_ddl_bytes=3000).show_create_table(db, "sales_view", 1)
+    assert error.value.code == Code.OBJECT_NOT_ALLOWED
+
+
+async def test_materialized_view_cannot_be_read_as_internal_ddl(instance: Instance) -> None:
+    host, port, user = admin_address()
+    db = instance.database
+    await admin(
+        host,
+        port,
+        user,
+        f"CREATE MATERIALIZED VIEW {db}.sales_mv DISTRIBUTED BY HASH(id) BUCKETS 1 "
+        'REFRESH DEFERRED MANUAL PROPERTIES("replication_num"="1") '
+        f"AS SELECT id, region FROM {db}.sales",
+        f"GRANT SELECT ON MATERIALIZED VIEW {db}.sales_mv TO USER '{instance.ro_user}'@'%'",
+    )
+    [(table_id,)] = await readonly_rows(
+        instance,
+        f"SELECT TABLE_ID FROM information_schema.tables_config WHERE TABLE_SCHEMA='{db}' "
+        "AND TABLE_NAME='sales_mv'",
+    )
+    assert isinstance(table_id, int)
+    with pytest.raises(StarRocksError) as error:
+        await adapter(instance, max_ddl_bytes=3000).show_create_table(db, "sales_mv", table_id)
+    assert error.value.code == Code.OBJECT_NOT_ALLOWED
 
 
 async def test_types_and_session_limits(instance: Instance) -> None:

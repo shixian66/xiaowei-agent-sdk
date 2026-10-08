@@ -210,6 +210,29 @@ async def test_compact_preserves_exact_values(
         assert json.loads(original) == {k: v for k, v in payload.items() if k != "private_note"}
 
 
+async def test_compact_preserves_multiline_ddl_original(
+    env: Env, chrome_binary: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from tests.p1b.test_starrocks_ddl import DDL
+
+    payload = {"region": "shop.sales", "total": 1, "rows": [{"ddl": DDL}]}
+    monkeypatch.setattr(synthetic_tools, "payload", lambda *args: payload)
+    app = create_web_app(env.service, config())
+    message = env.scripts.add("建表原文换行", tool_call("order_total", region="east"), cite(""))
+    async with serving(app, port=18501), launch(chrome_binary) as chrome:
+        page = await chrome.page()
+        await page.navigate("http://127.0.0.1:18501/")
+        await send(page, message)
+        await settled(page, 0, "completed")
+        assert await page.evaluate(f"{item(0)}.querySelector('td').textContent") == DDL
+        assert (
+            await page.evaluate(f"getComputedStyle({item(0)}.querySelector('td')).whiteSpace")
+            == "pre-wrap"
+        )
+        original = await page.evaluate(f"{item(0)}.querySelector('pre.original').textContent")
+        assert json.loads(original)["rows"] == [{"ddl": DDL}]
+
+
 async def check_turns(env: Env, page: Page, log: list[str]) -> None:
     # cookie 只经 HttpOnly 保存：脚本读不到；默认用途由单 Agent 判断（P2.5 Task 7）。
     assert await page.evaluate("document.cookie") == ""

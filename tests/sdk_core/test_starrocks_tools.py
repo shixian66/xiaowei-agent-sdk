@@ -107,6 +107,7 @@ pytestmark = pytest.mark.loopback
 CAPACITY = 60_000
 SALES = Result(("region", "total"), [("east", 100), ("west", 50)])
 SDK_NAMES = {
+    "local/show_create_table": "show_create_table",
     "local/list_databases": "list_databases",
     LIST_TABLES: "list_tables",
     DESCRIBE_TABLE: "describe_table",
@@ -284,6 +285,7 @@ async def test_purpose_decides_which_tools_the_model_sees(env: Env) -> None:
 
     assert env.scripts.tools_seen(query) == [set(SDK_NAMES.values())]
     metadata = {
+        "show_create_table",
         "list_databases",
         "list_tables",
         "describe_table",
@@ -1306,7 +1308,7 @@ async def test_fact_note_is_rendered_from_the_current_policy_not_the_record(env:
     assert f"说明：新的说明\\n{ANALYSIS_HEADER}" in again.content.split("\n")
     assert again.content.split("\n").count(ANALYSIS_HEADER) == 1  # 只有代码生成的分析标题
     assert PLAN_NOTE not in again.content
-    # 带说明的只有执行计划与两个表结构工具（快照说明）。
+    # 说明由当前策略给出：目录、表结构、布局、原始 DDL 与执行计划。
     assert {p.policy_id for p in tools.policies if p.fact_note is not None} == {
         f"starrocks.{SR.target_id}.{name}"
         for name in (
@@ -1315,6 +1317,7 @@ async def test_fact_note_is_rendered_from_the_current_policy_not_the_record(env:
             "list_tables",
             "describe_table",
             "describe_table_layout",
+            "show_create_table",
         )
     }
 

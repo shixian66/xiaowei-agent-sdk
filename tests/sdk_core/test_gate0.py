@@ -1028,7 +1028,11 @@ def scripted_intent() -> GeminiLikeEndpoint:
             call_tool("describe_table_layout", cluster=cluster, database="shop", table="orders"),
             diagnose,
         ],
-        "raw_ddl_unavailable": [
+        "raw_internal_ddl": [
+            call_tool("show_create_table", cluster=cluster, database="shop", table="orders"),
+            diagnose,
+        ],
+        "view_ddl_unavailable": [
             lambda messages: _chat(
                 {
                     "role": "assistant",
@@ -1038,8 +1042,7 @@ def scripted_intent() -> GeminiLikeEndpoint:
                             "inferences": [],
                             "clarification": None,
                             "advice": (
-                                "当前工具不能返回完整 SHOW CREATE TABLE 原文，"
-                                "字段和布局摘要不能代替它。"
+                                "当前工具只支持普通内部表，视图的 SHOW CREATE VIEW 原文尚未开放。"
                             ),
                         },
                         ensure_ascii=False,
