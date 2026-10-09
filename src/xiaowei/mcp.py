@@ -248,7 +248,11 @@ def _verified(
 
 
 def _accepts_input(local: dict[str, object], remote: dict[str, object]) -> bool:
-    """远端须接收本地会发送的全部字段；省略远端额外的可选字段是安全的。"""
+    """远端须接收本地字段；简单对象可多出本地不发送的可选字段。
+
+    不校验这些额外字段的 schema（即使含无效 ``$ref``）：本地契约不向模型展示它们，
+    严格参数校验也不允许发送它们。远端默认值仍可能改变行为，写工具启用前须另行核对。
+    """
     expected = schema_shape(local, ignore_extra_flags=True)
     offered = schema_shape(remote, ignore_extra_flags=True)
     if expected == offered:

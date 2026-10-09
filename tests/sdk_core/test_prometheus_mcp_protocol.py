@@ -82,6 +82,21 @@ def test_selected_query_can_omit_upstream_optional_arguments() -> None:
     assert _verified(listed, planned, config) == ["prometheus__query"]
 
 
+def test_unexposed_optional_schema_is_not_parsed() -> None:
+    config, planned = binding()
+    schema = {
+        **QUERY_SCHEMA,
+        "properties": {
+            **QUERY_SCHEMA["properties"],
+            "truncation_limit": {"$ref": "#/$defs/missing"},
+        },
+    }
+
+    assert _verified([MCPTool(name="query", input_schema=schema)], planned, config) == [
+        "prometheus__query"
+    ]
+
+
 @pytest.mark.parametrize(
     "drift",
     [
@@ -89,6 +104,7 @@ def test_selected_query_can_omit_upstream_optional_arguments() -> None:
         {"required": ["query", "timestamp"]},
         {"required": [["query"]]},
         {"oneOf": [{"required": ["timestamp"]}]},
+        {"$schema": "https://json-schema.org/draft/2020-12/schema"},
     ],
 )
 def test_query_schema_drift_hides_tool(drift: dict[str, object]) -> None:
@@ -257,6 +273,7 @@ async def test_official_query_through_runner_and_governance(postgres_url: URL) -
                                 ModelStep.respond(answer_from_tool),
                             ]
                         )
+                        before = len(requests)
                         result = await Runner.run(
                             Agent(
                                 name="prometheus", model=model, tools=tools, output_type=AgentAnswer
@@ -264,6 +281,7 @@ async def test_official_query_through_runner_and_governance(postgres_url: URL) -
                             "查合成指标",
                             context=ctx,
                         )
+                        assert len(requests) == before + 1
                         assert requests[-1] == ("up", expected_auth)
                         assert isinstance(result.final_output, AgentAnswer)
                         delivery = await governed.evidence.validate_answer(
@@ -286,6 +304,7 @@ async def test_official_query_through_runner_and_governance(postgres_url: URL) -
                                     ]
                                 ]
                             )
+                            before = len(requests)
                             with pytest.raises(UserError) as error:
                                 await Runner.run(
                                     Agent(
@@ -297,6 +316,8 @@ async def test_official_query_through_runner_and_governance(postgres_url: URL) -
                                     "查错误表达式",
                                     context=failed,
                                 )
+                            assert len(requests) == before + 1
+                            assert requests[-1] == ("bad(", None)
                             assert isinstance(error.value.__cause__, ToolExecutionError)
                             assert governed.turn_runs(failed.identity).produced == ()
     finally:
