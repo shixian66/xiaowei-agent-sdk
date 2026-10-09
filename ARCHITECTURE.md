@@ -203,7 +203,9 @@ MCP Integration 的治理必须覆盖实际发送动作，不能只过滤 `list_
 
 ### 监控接入：Prometheus、Grafana 与独立 Alertmanager（已批准设计，尚未实现）
 
-**范围与部署。** 沿用一个 SDK Agent、Web/飞书薄入口、静态 MCP 连接、受治理工具与 Evidence。监控 MCP Server 在小维服务器节点之外独立部署和维护；小维只配置固定远端 HTTPS 地址、认证引用、获准工具及监控源权限，不在本机 Compose 中增设 MCP 容器或代管其生命周期。Prometheus 和 Grafana 优先使用各自官方 MCP Server；独立 Prometheus Alertmanager 先验证社区 MCP Server，若其协议、安全或维护条件不满足，只为外部 Alertmanager API v2 实现薄本地 Adapter，不自建业务 MCP Server。Server 版本、所选工具的真实输入/输出、认证与部署方式须先锁版验证；远端工具目录不能直接整体交给模型。StarRocks 路径及 P3 验收范围不因监控规划自动改变。
+**范围与部署。** 沿用一个 SDK Agent、Web/飞书薄入口、静态 MCP 连接、受治理工具与 Evidence。监控 MCP Server 在小维服务器节点之外独立部署和维护；小维只配置固定远端地址、认证引用、获准工具及监控源权限，不在本机 Compose 中增设 MCP 容器或代管其生命周期。Prometheus 和 Grafana 优先使用各自官方 MCP Server；独立 Prometheus Alertmanager 先验证社区 MCP Server，若其协议、安全或维护条件不满足，只为外部 Alertmanager API v2 实现薄本地 Adapter，不自建业务 MCP Server。Server 版本、所选工具的真实输入/输出、认证与部署方式须先锁版验证；远端工具目录不能直接整体交给模型。StarRocks 路径及 P3 验收范围不因监控规划自动改变。
+
+**内网传输取舍。** 外部 MCP 位于公司可信内网时，允许操作者在静态配置中填固定 `http://` 地址，不强制 TLS、私有 CA 或单独证书维护；已有 HTTPS 时可直接使用。模型和用户消息不能指定或改写端点，外部节点由现有内网访问控制限制可达范围；代码不能仅凭 URL 判断是否属于可信内网。HTTP 传输的工具参数、结果和可能的认证头为明文，这是选择简化运维后的边界，不宣称与 HTTPS 等价；跨公网或不受控网络不沿用此取舍。当前 `MCPServerConfig` 仍拒绝非 loopback HTTP，R1 实施时只需按这一可信配置边界做最小调整并验证固定端点与调用前治理，不增设 CA 管理或通用代理。
 
 **Agent 自主调查。** 用户提出问题后，同一个 Agent 自行决定是否查、先查哪一源、如何发现指标/标签、怎样组合 PromQL、是否根据中途证据继续查其他源或向用户澄清；没有规定的“Prometheus → Grafana → Alertmanager”步骤，也不按预置指标模板或固定诊断工作流运行。确定性治理只在工具可见性、每次 I/O 前的源/参数/预算边界、结果/Evidence 和生产写批准处生效，不替 Agent 编排调查。实施切片的先后是开发依赖，不是用户请求的运行顺序。
 
