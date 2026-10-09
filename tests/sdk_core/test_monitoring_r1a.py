@@ -513,6 +513,39 @@ async def test_disconnect_fails_current_turn_without_replaying_or_blocking_starr
             assert upstream.recorder.tool_calls == []
 
 
+async def test_successful_call_restores_source_status_after_timeout(env: Env) -> None:
+    def slow_once_server(recorder: Recorder) -> ASGIApp:
+        server = MCPServer("prometheus-r1a-transient-timeout")
+
+        @server.tool(structured_output=False)
+        async def query(query: str) -> str:
+            recorder.tool_calls.append(("query", {"query": query}))
+            if len(recorder.tool_calls) == 1:
+                await asyncio.sleep(3)
+            return json.dumps({"result": "up => 1", "warnings": []})
+
+        return recording(server.streamable_http_app(host=LOOPBACK), recorder, token=None)
+
+    with serve(slow_once_server) as upstream:
+        config = env.config(**monitoring_config(upstream.url))
+        async with env.running(config) as served:
+            assert (await served.ready())[f"mcp.{SOURCE}"] == "available"
+            await served.page()
+            first = env.scripts.add("首次超时", tool_call(f"{SOURCE}__query", query="up"))
+            assert (await served.turn(first, "query", "r1")).json()["state"] == "failed"
+            assert (await served.ready())[f"mcp.{SOURCE}"] == "unavailable"
+
+            second = env.scripts.add(
+                "再次查询成功", tool_call(f"{SOURCE}__query", query="up"), cite()
+            )
+            assert (await served.turn(second, "query", "r2")).json()["state"] == "completed"
+            assert (await served.ready())[f"mcp.{SOURCE}"] == "available"
+        assert upstream.recorder.tool_calls == [
+            ("query", {"query": "up"}),
+            ("query", {"query": "up"}),
+        ]
+
+
 async def test_is_error_does_not_create_success_evidence(env: Env) -> None:
     with serve(failing_server) as upstream:
         config = env.config(**monitoring_config(upstream.url))

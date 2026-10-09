@@ -196,6 +196,7 @@ class MCPIntegration:
             if binding.contract.policy_id == "prometheus.query":
                 # 只记录治理层规范化后实际发出的表达式；远端返回中的同名字段不能冒充它。
                 payload["query"] = request.arguments["query"]
+            self._status[binding.config.server_id] = "available"
             return ToolObservation(
                 payload=payload,
                 captured_at=self._clock(),

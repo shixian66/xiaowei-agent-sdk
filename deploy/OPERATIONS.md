@@ -242,11 +242,12 @@ Bearer `Authorization` 原样转发到 Prometheus，它不是与上游隔离的�
 
 修改后运行 `config check`：它核对结构、工具 ID 和已填写的认证引用，不连接外部 MCP，也不能
 证明容器网络可达。重启小维后看 `/readyz` 的 `mcp.prometheus-prod`：`available` 表示启动发现
-并核约成功，`unavailable` 表示启动时不可达或一次调用异常，`contract_mismatch` 表示选中工具
-契约不符；这些状态均不回显端点或凭据，单个监控源不可用时 Web 和 StarRocks 仍可用。R1a 不自动
-重连：外部 Server 恢复后须重启小维，R1b 再实现有界重连。撤权时先停止旧小维进程、更新配置、
-通过 `config check` 后重启；旧监控事实的历史读取和重发会按当前授权拒绝。回退到旧镜像前，先
-删除 `mcp_servers` 及其工具授权，再用旧镜像 `config check`，避免旧版拒绝新字段。
+并核约成功或后续有效调用成功，`unavailable` 表示启动时不可达或最近一次调用异常（后续成功会恢复），
+`contract_mismatch` 表示选中工具契约不符；这些状态均不回显端点或凭据，单个监控源不可用时 Web 和
+StarRocks 仍可用。R1a 不自动重连：连接断开后，即使外部 Server 恢复仍须重启小维，R1b 再实现
+有界重连。撤权时先停止旧小维进程、更新配置、通过 `config check` 后重启；旧监控事实的历史
+读取和重发会按当前授权拒绝。回退到旧镜像前，先删除 `mcp_servers` 及其工具授权，再用旧镜像
+`config check`，避免旧版拒绝新字段。
 
 ## 状态、停止与重启
 
