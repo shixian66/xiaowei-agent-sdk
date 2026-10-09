@@ -305,10 +305,13 @@ class Running:
 
 
 @contextmanager
-def serve(build: Callable[[Recorder], ASGIApp], path: str = "/mcp") -> Iterator[Running]:
+def serve(
+    build: Callable[[Recorder], ASGIApp], path: str = "/mcp", *, port: int = 0
+) -> Iterator[Running]:
     """在 loopback 的随机端口上运行一个 ASGI 应用，退出时停止。"""
     sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    sock.bind((LOOPBACK, 0))
+    sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    sock.bind((LOOPBACK, port))
     recorder = Recorder(url=f"http://{LOOPBACK}:{sock.getsockname()[1]}{path}")
     server = uvicorn.Server(uvicorn.Config(build(recorder), log_level="warning", lifespan="on"))
     thread = threading.Thread(target=server.run, kwargs={"sockets": [sock]}, daemon=True)

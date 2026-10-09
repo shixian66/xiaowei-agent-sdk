@@ -1265,7 +1265,9 @@ async def test_unknown_tool_failure_logs_other_without_exception_text(env: Env) 
 async def test_mcp_failure_logs_fixed_category_without_remote_text(
     env: Env, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    server = next(iter(env.mcp._servers.values()))
+    source = next(iter(env.mcp._sources.values()))
+    assert source.snapshot is not None
+    server = source.snapshot.server
     calls = 0
 
     async def fail(*args: Any, **kwargs: Any) -> Any:

@@ -122,10 +122,11 @@ def test_query_json_text_keeps_result_and_warnings() -> None:
 
 
 @contextmanager
-def official_server(binary: Path, backend_port: int) -> Iterator[str]:
-    with socket.socket() as probe:
-        probe.bind(("127.0.0.1", 0))
-        port = probe.getsockname()[1]
+def official_server(binary: Path, backend_port: int, *, port: int | None = None) -> Iterator[str]:
+    if port is None:
+        with socket.socket() as probe:
+            probe.bind(("127.0.0.1", 0))
+            port = probe.getsockname()[1]
     process = subprocess.Popen(  # noqa: S603 - opt-in local protocol test binary
         [
             str(binary),
