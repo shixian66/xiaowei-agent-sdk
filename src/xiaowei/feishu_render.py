@@ -118,6 +118,8 @@ def _card(
     sqls: set[int],
     analysis: Sequence[AnswerInference],
     technical: set[int],
+    *,
+    omissions: bool = True,
 ) -> Message:
     elements: list[Message] = []
     tables = 0
@@ -140,7 +142,10 @@ def _card(
         if fact.tool_id == "local/run_readonly_query" and index not in sqls:
             elements.append(_div("SQL 未展示。"))
         if not rows:
-            elements.append(_div("结果行未展示。" if all_rows else "（无数据行）"))
+            if not all_rows:
+                elements.append(_div("（无数据行）"))
+            elif omissions:
+                elements.append(_div("结果行未展示。"))
         elif fact.tool_id == "local/show_create_table":
             for row in rows:
                 for name in columns:
@@ -169,12 +174,12 @@ def _card(
             elements.extend(
                 _div("\n".join(f"{name}: {_cell(row, name)}" for name in columns)) for row in rows
             )
-    if any(n < len(_data(f)[1]) for f, n in zip(delivery.facts, counts, strict=True)):
+    if omissions and any(n < len(_data(f)[1]) for f, n in zip(delivery.facts, counts, strict=True)):
         elements.append(_div(FACTS_CLIPPED))
     if analysis:
         elements.append(_div("分析与建议（模型推断）"))
         elements.extend(_div(f"- {a.text}（依据：{', '.join(a.evidence_ids)}）") for a in analysis)
-    if tuple(analysis) != delivery.analysis:
+    if omissions and tuple(analysis) != delivery.analysis:
         elements.append(_div(ANALYSIS_CLIPPED))
     for index, fact in enumerate(delivery.facts):
         details: list[Message] = []
@@ -182,7 +187,9 @@ def _card(
             details.append(_div(f"实际 SQL:\n{fact.metadata['sql']}"))
         if index in technical:
             for key, value in fact.metadata.items():
-                if key in _TECHNICAL and not (key == "sql" and index in sqls):
+                if key in _TECHNICAL and not (
+                    key == "sql" and fact.tool_id == "local/run_readonly_query"
+                ):
                     label = "结构采集 SQL 模板" if key == "sql" and fact.tool_id in _PAGED else key
                     details.append(_div(f"{label}: {_cell({key: value}, key)}"))
             if fact.result_json is not None:
@@ -268,28 +275,35 @@ def build_feishu_message(
     full = _card(delivery, totals, all_sql, delivery.analysis, all_technical)
     if fits(full):
         return full
-    counts = [0] * len(totals)
-    sqls: set[int] = set()
     analysis: list[AnswerInference] = []
     technical: set[int] = set()
-    message = _card(delivery, counts, sqls, analysis, technical)
-    if not fits(message):
+
+    def fitting_prefix(sqls: set[int]) -> list[int] | None:
+        counts = [0] * len(totals)
+        best = counts.copy() if fits(_card(delivery, counts, sqls, analysis, technical)) else None
+        # 零行占位与截断提示可能比完整短结果更大；只用不含这些提示的下界提前结束搜索。
+        # 下界永不交付，实际候选必须包含所有必要的未展示/截断说明。
+        if not fits(_card(delivery, counts, sqls, analysis, technical, omissions=False)):
+            return best
+        for index, total in enumerate(totals):
+            for _ in range(total):
+                counts[index] += 1
+                if fits(_card(delivery, counts, sqls, analysis, technical)):
+                    best = counts.copy()
+                elif not fits(_card(delivery, counts, sqls, analysis, technical, omissions=False)):
+                    return best
+        return best
+
+    sqls: set[int] = set()
+    counts = fitting_prefix(sqls)
+    if counts is None:
         return notice
     # SQL 每条完整保留或明示未展示；放不下不阻止展示已有结果行。
     for index in sorted(all_sql):
-        candidate = _card(delivery, counts, sqls | {index}, analysis, technical)
-        if fits(candidate):
+        selected_counts = fitting_prefix(sqls | {index})
+        if selected_counts is not None:
             sqls.add(index)
-    stopped = False
-    for index, total in enumerate(totals):
-        for _ in range(total):
-            counts[index] += 1
-            if not fits(_card(delivery, counts, sqls, analysis, technical)):
-                counts[index] -= 1
-                stopped = True
-                break
-        if stopped:
-            break
+            counts = selected_counts
     for item in delivery.analysis:
         candidate = _card(delivery, counts, sqls, [*analysis, item], technical)
         if fits(candidate):

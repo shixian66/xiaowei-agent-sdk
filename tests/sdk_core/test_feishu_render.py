@@ -14,6 +14,7 @@ from xiaowei.feishu_render import (
     request_bytes,
 )
 from xiaowei.models import AnswerInference, Delivery, DeliveryFact
+from xiaowei.starrocks_tools import PLAN_NOTE
 
 AT = datetime(2026, 10, 9, 11, 47, 56, tzinfo=UTC)
 
@@ -343,3 +344,73 @@ def test_empty_result_is_visible_without_a_fake_row_or_loss_marker() -> None:
     message = build_feishu_message(delivery(source), 3500, "oc_test")
     assert "（无数据行）" in text_parts(message, folded=False)
     assert tables(message) == [] and FACTS_CLIPPED not in text_parts(message)
+
+
+def test_short_fact_fits_when_zero_row_placeholders_would_not() -> None:
+    source = fact(
+        evidence_id="ev_123456789012345678901234",
+        tool_id="local/explain_query",
+        target_id="cluster_name_with_32_characters_",
+        columns=("plan",),
+        rows=({"plan": "SCAN"},),
+        metadata={"sql": "EXPLAIN SELECT region FROM shop.orders"},
+        result_json='{"plan":"SCAN"}',
+        note=PLAN_NOTE,
+    )
+    complete = build_feishu_message(delivery(source), 3500, "oc_test")
+    primary = {
+        "card": {
+            **complete["card"],
+            "body": {
+                "elements": [
+                    e
+                    for e in complete["card"]["body"]["elements"]
+                    if e["tag"] != "collapsible_panel"
+                ]
+            },
+        }
+    }
+    needed = sum(map(len, text_parts(primary)))
+    for budget in (needed, needed + 1, needed + 12):
+        shown = build_feishu_message(delivery(source), budget, "oc_test")
+        assert "card" in shown
+        assert tables(shown)[0]["rows"] == [{"c0": '"SCAN"'}]
+        assert FACTS_CLIPPED not in text_parts(shown)
+        assert sum(map(len, text_parts(shown))) <= budget and size(shown) <= 30_000
+    assert build_feishu_message(delivery(source), needed, "oc_test") == primary
+    needed_bytes = size(primary)
+    for budget in (needed_bytes, needed_bytes + 1):
+        byte_limited = build_feishu_message(delivery(source), 3500, "oc_test", max_bytes=budget)
+        assert tables(byte_limited)[0]["rows"] == [{"c0": '"SCAN"'}]
+        assert size(byte_limited) <= budget
+    below = build_feishu_message(delivery(source), needed - 1, "oc_test")
+    assert '"SCAN"' not in text_parts(below)
+    assert sum(map(len, text_parts(below))) <= needed - 1 and size(below) <= 30_000
+
+
+def test_short_prefix_survives_larger_zero_row_placeholders() -> None:
+    short = fact(evidence_id="ev_short", columns=("a",), rows=({"a": 1},), metadata={})
+    long = fact(evidence_id="ev_long", columns=("a",), rows=({"a": "x" * 1500},), metadata={})
+    complete = build_feishu_message(delivery(short, long), 3500, "oc_test")
+    elements = complete["card"]["body"]["elements"]
+    second_table = tables(complete)[1]
+    expected = {
+        "card": {
+            **complete["card"],
+            "body": {
+                "elements": [
+                    {"tag": "div", "text": {"tag": "plain_text", "content": "结果行未展示。"}}
+                    if e is second_table
+                    else e
+                    for e in elements
+                ]
+                + [{"tag": "div", "text": {"tag": "plain_text", "content": FACTS_CLIPPED}}]
+            },
+        }
+    }
+    needed = sum(map(len, text_parts(expected)))
+    shown = build_feishu_message(delivery(short, long), needed, "oc_test")
+    assert "card" in shown
+    assert [t["rows"] for t in tables(shown)] == [[{"c0": "1"}]]
+    assert FACTS_CLIPPED in text_parts(shown)
+    assert sum(map(len, text_parts(shown))) <= needed and size(shown) <= 30_000

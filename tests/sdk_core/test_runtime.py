@@ -1465,6 +1465,49 @@ async def test_capacity_notice_is_sent_once_and_cannot_resend_full_result(
     assert resend.sends == [] and len(env.scripts.calls[message]) == 2
 
 
+async def test_small_capacity_sends_short_plan_once_instead_of_false_notice(env: Env) -> None:
+    from tests.p1b.test_starrocks_adapter import plan_result
+    from tests.sdk_core.test_feishu_render import tables, text_parts
+
+    from xiaowei.feishu_render import CAPACITY_NOTICE, request_bytes
+
+    target = "cluster_name_with_32_characters_"
+    env.drv = driver(plan_result("SCAN"))
+    values = env.config(feishu=feishu_config(max_reply_chars=225)).model_dump()
+    values["targets"][0]["starrocks"]["target_id"] = target
+    config = runtime.ServeConfig.model_validate(values)
+    channel = FakeChannel()
+    message = env.scripts.add(
+        "短计划",
+        tool_call("explain_query", cluster=target, sql="SELECT region FROM shop.sales"),
+        cite(""),
+    )
+    async with env.running(config, feishu_channel=channel) as served:
+        channel.emit_raw_from_sdk_thread(feishu_event(env, message, "om_short_plan"))
+        await until(lambda: len(channel.sends) == 1)
+        assert await served.finish() == 0
+    shown = channel.sends[0][1]
+    assert shown != {"text": CAPACITY_NOTICE}
+    assert tables(shown)[0]["rows"] == [{"c0": '"SCAN"'}]
+    assert sum(map(len, text_parts(shown))) <= 225
+    assert request_bytes(shown, "oc_alice", reply_to="om_short_plan") <= 30_000
+    assert await env.scalar("SELECT delivery FROM xiaowei_request") == "sent"
+    resend = FakeChannel()
+    assert (
+        await runtime.resend(
+            config,
+            clock=env.clock,
+            feishu_channel=resend,
+            starrocks_connect=env.connect(config),
+            subject_id="alice",
+            chat_id="oc_alice",
+            message_id="om_short_plan",
+        )
+        is None
+    )
+    assert resend.sends == [] and len(env.scripts.calls[message]) == 2
+
+
 @dataclass
 class GatedChannel(FakeChannel):
     """发送进入后停住，直到测试放行；在 SDK 循环上等待，放行用线程安全事件。"""

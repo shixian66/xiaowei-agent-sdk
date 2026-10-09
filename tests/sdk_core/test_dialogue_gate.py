@@ -3,11 +3,15 @@
 import json
 
 import pytest
+from pydantic import SecretStr
+from sqlalchemy import text
 from sqlalchemy.engine import URL
 from tests.sdk_core.dialogue_gate import SCENARIOS, Scenario, configuration, run_dialogue
 from tests.sdk_core.test_app import Scripts, cite, tool_call
 from tests.sdk_core.test_model_api import OPENAI as PROFILE
 from tests.sdk_core.test_starrocks_tools import tool_outputs
+
+from xiaowei.storage import open_engine
 
 pytestmark = pytest.mark.loopback
 
@@ -117,3 +121,121 @@ async def test_raw_over_limit_does_not_require_another_query(postgres_url: URL) 
     )
     assert result["state"] == "completed" and result["facts"][0]["truncated"]
     assert result["io_counts"]["query"] == 1 and result["raw_not_pretrimmed"]
+
+
+def test_matrix_covers_ambiguous_database_natural_diagnosis_and_raw_formats() -> None:
+    assert any(getattr(s, "ambiguous_database", False) for s in SCENARIOS)
+    natural = next(s for s in SCENARIOS if s.name == "previous_diagnosis_natural")
+    assert natural.messages[1][0] == "query"
+    for field in ("raw", "sql_text", "result_json"):
+        for length in (3900, 4100):
+            assert any(
+                getattr(s, "raw_field", None) == field and s.raw_chars == length for s in SCENARIOS
+            )
+
+
+async def test_manual_review_reads_validated_turn_before_cleanup_without_leaking_report(
+    postgres_url: URL,
+) -> None:
+    scripts = Scripts()
+    message = scripts.add(
+        "REVIEW_REQUEST_SENTINEL",
+        tool_call(
+            "run_readonly_query",
+            cluster="fat",
+            sql="SELECT region, amount FROM data_center.quota_virtual_account_quasi_rt LIMIT 5",
+        ),
+        cite("REVIEW_ANSWER_SENTINEL"),
+    )
+    case = Scenario("offline_review", (("query", message),), multi=True)
+    seen = []
+
+    async def review(sample):
+        # 人工拿到的是真正交付前验证过的当前轮结果，且数据库尚未退出/清理。
+        from tests.sdk_core.dialogue_gate import ReviewVerdict
+
+        async with open_engine(SecretStr(postgres_url.render_as_string(hide_password=False))) as e:
+            async with e.connect() as conn:
+                assert await conn.scalar(text("SELECT count(*) FROM xiaowei_request")) == 1
+        assert sample.delivery is not None and len(sample.delivery.facts[0].rows) == 5
+        assert sample.delivery.analysis[0].text == "REVIEW_ANSWER_SENTINEL"
+        assert sample.message == message
+        assert [(target, kind) for target, kind, _ in sample.statements if kind == "query"] == [
+            ("fat", "query")
+        ]
+        seen.append(sample)
+        return ReviewVerdict(intent_preserved=True, execution_allowed=True)
+
+    (result,) = await run_dialogue(
+        PROFILE, postgres_url, scripts.transport, scenarios=(case,), repeats=1, manual_review=review
+    )
+    assert len(seen) == 1 and not result["manual_review_required"]
+    assert result["review"]["intent_preserved"] is True
+    assert result["review"]["execution_allowed"] is True
+    assert result["review"]["object_selection_correct"] is None
+    assert result["io_by_target"]["fat"]["query"] == 1
+    assert result["facts"][0]["target"] == "fat"
+    encoded = json.dumps(result, ensure_ascii=False)
+    assert all(s not in encoded for s in (message, "REVIEW_ANSWER_SENTINEL", "SELECT", "ev_"))
+
+
+@pytest.mark.parametrize("field", ["sql_text", "result_json"])
+@pytest.mark.parametrize("length", [3900, 4100])
+async def test_raw_format_samples_reach_real_value_boundary(
+    postgres_url: URL,
+    field: str,
+    length: int,
+) -> None:
+    scripts = Scripts()
+    message = scripts.add(
+        "原文格式边界",
+        tool_call(
+            "run_readonly_query",
+            cluster="pre",
+            sql={
+                "sql_text": (
+                    "SELECT sql_text FROM data_center.quota_virtual_account_quasi_rt LIMIT 1"
+                ),
+                "result_json": (
+                    "SELECT result_json FROM data_center.quota_virtual_account_quasi_rt LIMIT 1"
+                ),
+            }[field],
+        ),
+        cite("原文或已标注的截断结果"),
+    )
+    seen = []
+
+    async def review(sample):
+        from tests.sdk_core.dialogue_gate import ReviewVerdict
+
+        assert sample.delivery is not None
+        fact = sample.delivery.facts[0]
+        assert fact.columns == (field,) and len(fact.rows) == 1
+        assert fact.truncated == (length > 4000)
+        if length <= 4000:
+            assert len(fact.rows[0][field]) == length
+        seen.append(sample)
+        return ReviewVerdict(evidence_consistent=True)
+
+    (result,) = await run_dialogue(
+        PROFILE,
+        postgres_url,
+        scripts.transport,
+        repeats=1,
+        manual_review=review,
+        scenarios=(
+            Scenario("offline_format", (("query", message),), raw_field=field, raw_chars=length),
+        ),
+    )
+    assert len(seen) == 1 and result["io_counts"]["query"] == 1
+    assert result["raw_not_pretrimmed"]
+
+
+def test_manual_verdict_rejects_free_text_or_unknown_fields() -> None:
+    from pydantic import ValidationError
+    from tests.sdk_core.dialogue_gate import ReviewVerdict
+
+    with pytest.raises(ValidationError):
+        ReviewVerdict(intent_preserved="REVIEW_TEXT_SENTINEL")
+    with pytest.raises(ValidationError):
+        ReviewVerdict(comment="REVIEW_TEXT_SENTINEL")

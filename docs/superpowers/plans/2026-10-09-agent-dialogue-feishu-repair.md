@@ -12,7 +12,7 @@
 
 ## 1. 状态、基线与排期
 
-- 状态：**本地候选已实现，正在验证，独立代码复审待进行**。U1 的真实模型合入门槛必须执行；用户 2026-10-09 已分别批准 U2 静态卡片、事实优先及分析可能截断的取舍。没有真实模型授权时先完成本地候选，不把离线检查写成合入门槛通过。
+- 状态：**本地候选已实现，首次独立代码审查的两项阻断已补回归并修复，正在验证并待复审**。U1 的真实模型合入门槛必须执行；用户 2026-10-09 已分别批准 U2 静态卡片、事实优先及分析可能截断的取舍。没有真实模型授权时先完成本地候选，不把离线检查写成合入门槛通过。
 - 实施基线：`origin/main`，`8503099fb403afb2cc5bc4da0eab3b22618606f2`，含 R1b PR #68。原计划核实基线为 `8f766f15816a58b23669b5432608d1472f8b5b32`（PR #67）。
 - 实施分支：`codex/agent-dialogue-feishu-repair`，复用干净的隔离计划工作树；原计划审查版本为 `abab9921d58ff5a521cc5b6bb8931267f11cd397`，获准修订版为 `e33f8ab7281c84d1018502b26355afdaae47e9a7`。R1b 与 `codex/monitoring-g0` 工作树保持独立。
 - **建议顺序：R1b 独立复审与合入 → U1 对话行为与说明 → U2 飞书卡片 → 监控 P2。** 每片完成后再进入下一片，不同时改三个分支。
@@ -214,6 +214,10 @@ git diff --check
 
 必须记录每次工具选择、实际查询是否执行、结果与 Evidence 一致性、必要澄清、步骤/工具数、耗时和 usage；只输出有界计数、判定与样例标识，不保存真实数据或凭据。包括时区/口径已知与缺失、多集群歧义、原文正常大小与超限、分页预算不足的对照。自然语言“不要执行”和显式诊断均不得执行业务查询，权限/目标/预算的反例仍零未授权 I/O；日期或候选仍有关键歧义时不能盲查。每次失败都保留，不能只选成功样例。
 
+`scripts.dialogue_real_model` 要求交互终端：每轮在隔离库清理前，向 stderr 即时展示合成请求、按目标记录的实际 I/O 和已校验 Delivery，人工逐项输入 `y/n/a`（是/否/不适用）。stdout 只输出固定判定、计数、耗时/用量、工作树 SHA、harness 哈希与 Profile 指纹；不含模型正文、SQL、证据编号或地址，耗时不包含人工输入等待。相同脚本在两个工作树分别运行，核对 Profile 指纹和 harness 哈希一致；人工判断失败照常保留，命令成功不自动通过合入门槛。仅可将 stdout 重定向为统计 JSON，不要合并或保存 stderr 中的即时内容；实际模型调用仍需事先授权。
+
+固定样例包括单目标跨库同名表、多目标歧义、普通 query 模式的自然语言“分析刚才 SQL”和显式诊断，以及 raw/SQL 文本/JSON 原文的正常与超限两组。`history_claim_and_five_rows` 只检查 Web 历史中的送达措辞及五行追问，`delivery_failure_simulated=false`；它没有模拟飞书真实发送失败。失败/unknown/sent 的状态机由离线正式入口回归覆盖，真实模型在飞书发送失败后的措辞仍需另行实测，不能把 Web 历史样例记成那项已验收。
+
 合入判据：新方案的样例满足相应行为要求，不出现禁止执行、错误对象或伪称完整；原文超限应如实说明，而不是为了成功偷偷改写 SQL。新旧对照要呈现正确率、澄清、超限、步数与用量的变化，出现新的失败或退化须定位并复审，不能只凭平均步数下降通过。该证据证明固定样例上的行为，不能证明所有用户输入。若没有获准环境，只能完成本地实施/离线验证并保留候选，**U1 合入保持阻塞**；本轮不选择“离线合入后再补实测”的例外。
 
 U2 的真实 Lark 客户端及公司 StarRocks 验收仍需另获授权；本机卡片预览与协议替身不代替。以下是两片共用的任务表：
@@ -257,7 +261,7 @@ U2 的真实 Lark 客户端及公司 StarRocks 验收仍需另获授权；本机
 - `models.py` / `evidence.py` 按接收渠道生成结构化事实、分析和未执行建议原文；新 `feishu_text` 排除序列化，Web 键集合保持。移除无实际消费者的飞书 `DeliveryLayout`、`FactLines` 和 Markdown 表格渲染；`_fact_lines` 仅保留 Web content 的真实消费者。
 - `feishu_render.py` 用纯文本组件生成静态 JSON 2.0，默认可见来源、采集时间、固定说明、事实和分析。容量先留限制与标记，再留整条实际业务 SQL、整行事实、分析、可选详情；SDK 最终请求体的字节预算包括两层 JSON 编码。
 - `feishu.py` 的 `send_delivery` 由网关和 `runtime.py` CLI 重发共用。构造失败固定 `render_failed`、零发送、failed，readiness 不锁；容量不足说明成功记 sent 并记录 `reply_capacity_notice`。进入 SDK 后的超时、取消、未知结果仍沿用原保护，未新增重试。
-- `tests/sdk_core/dialogue_gate.py` / `scripts/dialogue_real_model.py` 准备了固定合成任务，复用 Gate 0 驱动与观测器，在正式 runtime/治理/Evidence/存储路径运行；配置采用部署单值 4000、结果 200000 字节。准备的脚本尚未调用真实模型，自动计数与 `manual_review_required` 不是自然语言判定，也不能证明必要澄清、完整性声明或新旧质量对照通过。获准运行时仍须逐项观察回答并记录有界人工判定。
+- `tests/sdk_core/dialogue_gate.py` / `scripts/dialogue_real_model.py` 准备了固定合成任务，复用 Gate 0 驱动与观测器，在正式 runtime/治理/Evidence/存储路径运行；配置采用部署单值 4000、结果 200000 字节。每轮支持清理前的即时人工核对，报告只保存严格的固定布尔/不适用判定，并保留目标标识及 Profile 指纹供对照。准备的脚本尚未调用真实模型，自动计数、人工入口的离线检查或 `manual_review_required` 都不能证明必要澄清、完整性声明或新旧质量对照通过。
 
 ### 先失败再实现与正式入口
 
@@ -265,6 +269,7 @@ U2 的真实 Lark 客户端及公司 StarRocks 验收仍需另获授权；本机
 - 旧飞书 Delivery 没有自身结构化事实与原文；旧 SDK 发送装配只接受字符串。新回归确认这些目标失败后才实现。旧“分析优先”、Markdown 表格和文本 payload 断言按用户批准的卡片/事实优先契约改成实际组件、原始行和发送请求断言，不删除失败或安全用例。
 - 真 Runner、隔离 PostgreSQL 与驱动替身走正式入口，验证直接结构查询→列证据追问查询的成功，以及下一轮显式诊断强调查询的零新增业务 I/O。网关/CLI 经过真实投递状态机验证渲染失败、unknown、取消、撤权、重发与重复事件。
 - CLI 在测试进程重复装配日志会遗留指向已关闭 capsys 的 handler；新增测试 fixture 恢复调用前 handler/level，隔离其副作用，不改产品日志过滤或被测期间断言。一个 SDK 入站用例改用本机机器人身份端点，消除原外网连接被 socket 限制拦截的警告。
+- 独立审查 `791efbe6b8b628e44dedc96363f049eead81358d` 复现两项阻断：零行临时占位可能比完整短结果更大，导致错误容量回执；模型评估原报告只留计数，缺少可观察实际回答的人工核对入口及部分样例。新增回归在旧实现分别因错误容量回执、缺少回调/样例而失败；修复后保留完整短结果或可行整行前缀，容量下界永不交付、真正省略仍明示；正式 Gateway 在合法目标配置下发出短计划并记 sent。评估用例确认人工能在库清理前看到当前已校验结果、正确目标 I/O，而保存报告不含哨兵正文；未完整核对时明确失败，不生成判定。
 
 ### 检查结果
 
@@ -272,15 +277,18 @@ U2 的真实 Lark 客户端及公司 StarRocks 验收仍需另获授权；本机
 
 | 检查 | 命令/范围 | 结果 |
 | --- | --- | --- |
-| 新产品离线全量 | `XW_TEST_PROMETHEUS_MCP_BIN=/private/tmp/xw-prometheus-mcp-v018/prometheus-mcp-server SDK_TEST_POSTGRES_URL=postgresql+asyncpg://postgres@127.0.0.1:55432/postgres .venv/bin/python -m pytest tests/sdk_core tests/p1b -q -W error --tb=short --show-capture=no` | **2341 passed, 54 deselected，393.31 秒**；54 项为仓库默认未收集的浏览器/真实 StarRocks 类，不是为本轮跳过失败 |
+| 新产品离线全量 | `XW_TEST_PROMETHEUS_MCP_BIN=/private/tmp/xw-prometheus-mcp-v018/prometheus-mcp-server SDK_TEST_POSTGRES_URL=postgresql+asyncpg://postgres@127.0.0.1:55432/postgres .venv/bin/python -m pytest tests/sdk_core tests/p1b -q -W error --tb=short --show-capture=no` | 修复两项审查阻断后 **2355 passed, 54 deselected，400.48 秒**；54 项为仓库默认未收集的浏览器/真实 StarRocks 类，不是为本轮跳过失败 |
 | 真 Chrome Web 兼容 | 显式 `-m browser` 选择 `test_web_browser.py` 的 compact、历史 DDL、库/布局 note、多行建议、精确值及原始 DDL 六个用例（含参数化） | **9 passed，8.83 秒**；仅使用 18501；使用 8501 的两项未运行 |
+| 审查修复的最终相关回归 | `test_dialogue_real_model.py test_feishu_render.py -q -W error` | **28 passed**；全量之后移除评估脚本对候选专用卡片模块的依赖，相关回归及静态检查再次通过；产品 Web 路径未变，沿用上项 Chrome 证据 |
 | Ruff | `.venv/bin/ruff check --cache-dir /private/tmp/xw-u12-ruff src/xiaowei tests/sdk_core tests/p1b scripts/dialogue_real_model.py` | 通过 |
-| 格式 | `.venv/bin/ruff format --check src/xiaowei tests/sdk_core tests/p1b scripts/dialogue_real_model.py` | 78 个文件已符合格式 |
+| 格式 | `.venv/bin/ruff format --check src/xiaowei tests/sdk_core tests/p1b scripts/dialogue_real_model.py` | 79 个文件已符合格式 |
 | 类型 | `.venv/bin/mypy --cache-dir /private/tmp/xw-u12-mypy src/xiaowei` | 24 个源文件无问题 |
 | 锁文件 | `UV_CACHE_DIR=/private/tmp/xw-dialogue-uv-cache uv lock --check --offline` | 通过，92 个依赖包；无新增依赖 |
 | 差异 | `git diff --check` | 通过 |
 
 隔离变异在临时产品副本中运行，核对实际导入路径，不改工作树：恢复固定步骤、借 Web 投影、渲染失败记 unknown、note 移入折叠、移除采集时间、只算内层卡片字节、恢复字面换行七组，目标回归均按预期失败。规则文字变异仅证明契约测试敏感，不证明真实模型执行策略。
+
+审查修复新增四组隔离变异也被发现：恢复 `791efbe` 的零行容量判断（两项反例失败）、移除即时人工核对（正式路径用例失败）、允许报告保存任意字段（校验反例失败）、移除 Profile 指纹（采集身份用例失败）。原七组证据对应未改变的保护路径；每组均核对临时副本实际导入来源，不在工作分支做破坏性改写。
 
 ### 预览与残余边界
 
@@ -290,5 +298,6 @@ U2 的真实 Lark 客户端及公司 StarRocks 验收仍需另获授权；本机
 - 真实 Lark 桌面/移动端版本、长连接、单聊/指定群发送和客户端渲染、公司 StarRocks、部署及用户接受 **未验收**。
 - 单消息不能保证全部结果展示；事实优先可能裁掉整个模型结论。容量说明送出即 sent，操作者 `requests resend` 不能补发完整结果。
 - 表格内本地翻页不产生查询；技术详情折叠不减少消息大小。不可见控制符显示为转义，原值仍在 Evidence/获准 JSON。
+- JSON 2.0 表格使用自动行高，但客户端的默认最大行高（官方说明为 124px）可能让长单元格的可视区域受限；原值仍在获准卡片/JSON，DDL 使用纯文本块。真实桌面/移动端长值展示及展开体验未验收。
 - Web 未改分页文案，仍显示“结果已截断”；飞书用游标区分后续页，保留真实值丢失标记。
 - 本轮没有权限、最终 schema、数据库或模型协议变更；无外部调用、推送、PR、合并、发布或部署。精确版本提交后交独立代码复审，按最新用户授权保留本地候选。
