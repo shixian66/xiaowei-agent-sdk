@@ -41,6 +41,8 @@ import httpx2
 import openai
 import uvicorn
 from agents import Agent, MaxTurnsExceeded, Runner, function_tool
+from lark_channel.channel.errors import FeishuChannelError, FeishuChannelErrorCode
+from lark_channel.ws.exception import ClientException
 from pydantic import (
     BaseModel,
     ConfigDict,
@@ -1135,7 +1137,13 @@ async def _start_feishu(
     except (_StartupStoppedError, RuntimeCloseError):
         raise
     except Exception as exc:
-        logger.error("飞书长连接未能启动，飞书不可用：%s", type(exc).__name__)
+        detail = ""
+        if isinstance(exc, FeishuChannelError) and isinstance(exc.code, FeishuChannelErrorCode):
+            detail = f" error_code={exc.code.value}"
+            cause = exc.__cause__
+            if isinstance(cause, ClientException) and type(cause.code) is int:
+                detail += f" client_code={cause.code}"
+        logger.error("飞书长连接未能启动，飞书不可用：%s%s", type(exc).__name__, detail)
         components["feishu"] = "unavailable"
     else:
         components["feishu"] = "connected"

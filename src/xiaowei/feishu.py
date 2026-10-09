@@ -69,6 +69,7 @@ from lark_channel.channel import (
 from lark_channel.channel.config import TransportConfig
 from lark_channel.channel.errors import FeishuChannelErrorCode
 from lark_channel.channel.types import SendResult
+from lark_channel.core.const import FEISHU_DOMAIN, LARK_DOMAIN
 from lark_channel.core.enum import LogLevel
 from lark_channel.ws import client as ws_client
 
@@ -914,6 +915,7 @@ def lark_channel(config: FeishuConfig) -> FeishuChannel:
         config=ChannelConfig(
             app_id=config.app_id,
             app_secret=secret.get_secret_value(),
+            domain=FEISHU_DOMAIN if config.domain == "feishu" else LARK_DOMAIN,
             log_level=LogLevel.WARNING,
             transport=TransportConfig(handshake_timeout_seconds=config.connect_timeout_seconds),
             policy=PolicyConfig(dm_policy="disabled", group_policy="disabled"),

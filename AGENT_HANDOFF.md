@@ -48,7 +48,7 @@
 
 **R1、G3 与写切片后续验收：** R1 仍需产品内 Prometheus 契约/策略、固定非 loopback 内网 HTTP、`serve` 装配、`StaticAccess` 源授权、投影上限、按源重连和 `/readyz` 状态，并从 Web、飞书各测一条成功与一条拒绝路径；Lark 修复上线前飞书只用替身。Prometheus MCP 会把小维 `auth_ref` 的 Bearer 原样转发给上游，不能视为另一层身份隔离；R1 用固定内网 HTTP 复测，并仅使用 Prometheus 侧只读凭据。`_accepts_input` 通用于所有 MCP 工具：S6/D7/C8 分别列出选中写工具省略的可选参数及默认行为；会改变覆盖、移动或授权范围的默认值须在本地契约显式声明并发送，否则不开放。远端根 schema 多出 `$schema` 会保守隐藏工具；G3 核对 Grafana 时先识别这类不匹配，不误判为整体 Server 不兼容。
 
-**飞书 Lark 线上缺口（用户报告，非 G0 修复）：** 用户报告 Lark 应用的长连接失败 `1000040351: Incorrect domain name`。当前 `FeishuConfig` 无域名项，`lark_channel()` 未传 `domain`；锁定 `lark_channel` SDK 的 `ChannelConfig.domain` 默认 `https://open.feishu.cn`，Lark 域名为 `https://open.larksuite.com`，其配置不从环境变量取值。这些源码事实支持域名不匹配，但本工作树未连接线上 Lark 复现该错误码。G0 合并后另开分支，拟给 `FeishuConfig` 加 `domain: Literal["feishu", "lark"]` 并映射 SDK 固定域名；启动失败日志只在异常确为 `FeishuChannelError` 时记录 `exc.code.value`，其他异常仍记录类型，避免泄漏原始异常内容。分别验两个域名的装配、失败码日志和真实入口恢复。
+**飞书 Lark 线上缺口（本分支源码已处理，线上未验收）：** 用户报告 Lark 应用的长连接失败 `1000040351: Incorrect domain name`。PR #65 合入的 `origin/main`（`1f05a3bc`）仍让锁版 SDK 使用默认国内域名；本独立分支 `codex/feishu-lark-domain` 增加 `feishu.domain` 的 `"feishu"`/`"lark"` 白名单，分别映射 SDK 常量 `FEISHU_DOMAIN`/`LARK_DOMAIN`，省略字段沿用国内域名。锁版 SDK 的 REST 与 WebSocket 共用该值。启动失败仅对 `FeishuChannelError` 记录固定枚举码，并在直接原因为 SDK `ClientException` 且 `code` 确为整数时记录该整数；其他异常仅记录类型，不写 SDK 原文。已用离线配置、装配和日志回归验证；真实 Lark 长连接、消息收发及部署由用户在新镜像上线后验收。
 
 **Vertex 正常输出修复（PR #61 已合入 main `8fcb097`；新镜像发布与公司部署尚未完成）：** 基于 `40e5983` 修复用户报告的 Vertex `response_rejected`，按锁定 SDK 0.22.3 的公开 `ToolExecutionConfig` 限制同轮函数工具并发为 4，适配器把合法多调用交给 Runner，并按 Vertex 规则回传函数调用/结果与首个调用的签名。阶段日志只写白名单 `reject_reason`；提示词要求分析不重画事实表格。协议替身、真 SDK Runner、隔离 PostgreSQL 与 recording Adapter 的回归只证明离线行为。提交须按精确 SHA 独立复审；复审通过后，真实 Vertex 上不带库名的 `desc`、拒收原因码和分析质量仍须由获准公司环境验证，不在本任务执行。
 

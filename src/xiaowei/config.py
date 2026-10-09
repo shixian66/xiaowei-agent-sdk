@@ -2,7 +2,7 @@
 
 import os
 import re
-from typing import Annotated
+from typing import Annotated, Literal
 from urllib.parse import urlsplit
 
 from agents import set_trace_processors, set_tracing_disabled
@@ -191,6 +191,7 @@ class FeishuConfig(BaseModel):
 
     app_id: Annotated[str, StringConstraints(pattern=r"^cli_[0-9A-Za-z]{1,64}$")]
     app_secret_ref: str
+    domain: Literal["feishu", "lark"] = "feishu"
     tenant_key: _Identifier
     users: dict[_OpenId, _Identifier]
     max_event_age_seconds: int = Field(gt=0, le=86_400)

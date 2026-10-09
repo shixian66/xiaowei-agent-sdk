@@ -1,6 +1,7 @@
 {
   "app_id": "cli_replacewithappid",
   "app_secret_ref": "env:XW_FEISHU_APP_SECRET",
+  "domain": "feishu",
   "tenant_key": "<飞书 tenant_key>",
   "users": {},
   "max_event_age_seconds": 300,
