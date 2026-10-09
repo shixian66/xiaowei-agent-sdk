@@ -51,7 +51,7 @@ from tests.sdk_core.test_prometheus_mcp_protocol import official_server
 from tests.sdk_core.test_runtime import Env, free_port
 from tests.sdk_core.test_runtime import env as env  # pytest fixture
 
-from xiaowei.mcp import _connection_lost
+from xiaowei.mcp import _connection_lost, _Source
 
 pytestmark = pytest.mark.loopback
 
@@ -72,6 +72,17 @@ def test_only_typed_connection_failures_mark_source_disconnected(
     error: Exception, expected: bool
 ) -> None:
     assert _connection_lost(error) is expected
+
+
+def test_reconnect_backoff_caps_at_sixty_seconds_and_resets() -> None:
+    source = _Source(config("http://127.0.0.1:1/mcp", tools=("lookup",)))
+    for seconds in (2, 4, 8, 16, 32, 60, 60):
+        source.back_off()
+        assert source.retry_at - time.monotonic() == pytest.approx(seconds, abs=0.1)
+    source.recovered()
+    assert source.retry_at == 0
+    source.back_off()
+    assert source.retry_at - time.monotonic() == pytest.approx(2, abs=0.1)
 
 
 class Restartable:
@@ -288,17 +299,101 @@ async def test_formal_web_reconnect_failure_hides_source_but_keeps_starrocks(env
         source.stop()
 
 
-def hanging_server(recorder: Recorder) -> ASGIApp:
+def hanging_server(recorder: Recorder, *, delay: float = 2) -> ASGIApp:
     normal = query_server(recorder)
 
     async def app(scope: Any, receive: Any, send: Any) -> None:
         if scope["type"] == "http":
             recorder.requests.append((scope["method"], scope["path"], None))
-            await asyncio.sleep(2)
+            await asyncio.sleep(delay)
             return
         await normal(scope, receive, send)
 
     return app
+
+
+async def test_formal_web_starrocks_turns_back_off_and_recovery_resets_delay(env: Env) -> None:
+    source = Restartable()
+    first = source.start()
+    try:
+        values = monitoring_config(first.url)
+        values["mcp_servers"][0]["timeout_seconds"] = 5
+        async with env.running(env.config(**values)) as served:
+            await served.page()
+            source.stop()
+            failed = env.scripts.add("断线查询", tool_call(f"{SOURCE}__query", query="up"))
+            assert (await served.turn(failed, "query", "backoff-disconnect")).json()[
+                "state"
+            ] == "failed"
+            assert (await served.ready())[f"mcp.{SOURCE}"] == "disconnected"
+            hanging = source.start(lambda recorder: hanging_server(recorder, delay=6))
+
+            async def local_turn(label: str) -> float:
+                message = env.scripts.add(
+                    label,
+                    tool_call(
+                        "list_tables",
+                        cluster="sr-test",
+                        keyword=".",
+                        database=None,
+                        page_size=5,
+                        cursor=None,
+                    ),
+                    cite(),
+                )
+                started = time.monotonic()
+                response = await served.turn(message, "query", label)
+                assert response.json()["state"] == "completed", response.json()
+                return time.monotonic() - started
+
+            def attempts() -> int:
+                return len(
+                    [request for request in hanging.recorder.requests if request[0] == "POST"]
+                )
+
+            first_delay = await local_turn("backoff-first")
+            assert attempts() == 1
+            assert await local_turn("backoff-within-two-seconds") < 2
+            assert attempts() == 1
+
+            await asyncio.sleep(2.1)
+            second_delay = await local_turn("backoff-second")
+            assert attempts() == 2
+            await asyncio.sleep(2.1)
+            assert (await served.ready())[f"mcp.{SOURCE}"] == "cooldown"
+            assert await local_turn("backoff-within-four-seconds") < 2
+            assert attempts() == 2
+            assert 2.5 < first_delay < 5
+            assert 2.5 < second_delay < 5
+
+            await asyncio.sleep(2.1)
+            assert (await served.ready())[f"mcp.{SOURCE}"] == "unavailable"
+            source.stop()
+            source.start()
+            await local_turn("backoff-recovered")
+            assert (await served.ready())[f"mcp.{SOURCE}"] == "available"
+            # 正式入口的会话历史上限为 5 轮；续验恢复后的新故障从新会话开始。
+            assert (
+                await served.client.post(
+                    "/api/sessions",
+                    json={},
+                    headers={"origin": str(served.client.base_url).rstrip("/")},
+                )
+            ).status_code == 200
+
+            source.stop()
+            failed_again = env.scripts.add("再次断线", tool_call(f"{SOURCE}__query", query="up"))
+            assert (await served.turn(failed_again, "query", "backoff-disconnect-again")).json()[
+                "state"
+            ] == "failed"
+            await local_turn("backoff-reset-failure")
+            assert (await served.ready())[f"mcp.{SOURCE}"] == "cooldown"
+            await asyncio.sleep(2.1)
+            source.start()
+            await local_turn("backoff-reset-recovery")
+            assert (await served.ready())[f"mcp.{SOURCE}"] == "available"
+    finally:
+        source.stop()
 
 
 async def test_concurrent_reconnect_is_single_flight_bounded_and_cools_down(
@@ -546,8 +641,9 @@ def drifted_lookup(recorder: Recorder) -> ASGIApp:
     return recording(server.streamable_http_app(host=LOOPBACK), recorder, token=None)
 
 
-async def test_old_runner_tool_stays_on_old_connection_after_schema_drift(
-    postgres_url: URL,
+@pytest.mark.parametrize("schema_drift", [False, True], ids=["compatible", "schema-drift"])
+async def test_old_runner_tool_stays_on_old_connection_after_reconnect(
+    postgres_url: URL, schema_drift: bool
 ) -> None:
     source = Restartable()
     first = source.start(mcp_app())
@@ -584,20 +680,27 @@ async def test_old_runner_tool_stays_on_old_connection_after_schema_drift(
                 await c.aborted(old_tools, "fixture__lookup", failed_ctx)
                 assert integration.source_status == {"fixture": "disconnected"}
 
-                changed = source.start(drifted_lookup)
+                changed = source.start(drifted_lookup if schema_drift else mcp_app())
                 await integration.reconnect_for(
                     frozenset({"fixture/lookup"}),
                     target_scope=frozenset({FIXTURE_TARGET}),
                     turn_timeout_seconds=30,
                 )
-                assert integration.source_status == {"fixture": "contract_mismatch"}
-                assert integration.tools_for(first_ctx) == []
+                assert integration.source_status == {
+                    "fixture": "contract_mismatch" if schema_drift else "available"
+                }
+                assert names(integration.tools_for(first_ctx)) == (
+                    set() if schema_drift else {"fixture__lookup"}
+                )
                 assert names(old_tools) == {"fixture__lookup"}
                 continue_turn.set()
                 with pytest.raises(UserError):
                     await turn
                 assert len(model.calls) == 2
                 assert changed.recorder.tool_calls == []
+                assert integration.source_status == {
+                    "fixture": "contract_mismatch" if schema_drift else "available"
+                }
             finally:
                 continue_turn.set()
                 if not turn.done():
@@ -605,15 +708,16 @@ async def test_old_runner_tool_stays_on_old_connection_after_schema_drift(
                     with pytest.raises(asyncio.CancelledError):
                         await turn
 
-            source.stop()
-            fixed = source.start(mcp_app())
-            await asyncio.sleep(2.1)
-            await integration.reconnect_for(
-                frozenset({"fixture/lookup"}),
-                target_scope=frozenset({FIXTURE_TARGET}),
-                turn_timeout_seconds=30,
-            )
-            assert names(integration.tools_for(first_ctx)) == {"fixture__lookup"}
-            assert fixed.recorder.tool_calls == []
+            if schema_drift:
+                source.stop()
+                fixed = source.start(mcp_app())
+                await asyncio.sleep(2.1)
+                await integration.reconnect_for(
+                    frozenset({"fixture/lookup"}),
+                    target_scope=frozenset({FIXTURE_TARGET}),
+                    turn_timeout_seconds=30,
+                )
+                assert names(integration.tools_for(first_ctx)) == {"fixture__lookup"}
+                assert fixed.recorder.tool_calls == []
     finally:
         source.stop()

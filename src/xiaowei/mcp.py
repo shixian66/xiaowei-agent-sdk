@@ -43,8 +43,9 @@ from xiaowei.tools import governed_function_tool
 logger = logging.getLogger(__name__)
 
 _READ_TIMEOUT_FACTOR = 2
-_RECONNECT_MAX_SECONDS = 5.0
+_RECONNECT_MAX_SECONDS = 3.0
 _RECONNECT_COOLDOWN_SECONDS = 2.0
+_RECONNECT_MAX_COOLDOWN_SECONDS = 60.0
 
 # MCP 库的源码目录：源自这里的日志记录可能含协议原文，生成时即换成固定信息。
 _WIRE_SOURCE = os.path.join(os.path.dirname(mcp.__file__), "")
@@ -81,6 +82,15 @@ class _Source:
     snapshot: _Snapshot | None = None
     status: str = "unavailable"
     retry_at: float = 0.0
+    next_retry_seconds: float = _RECONNECT_COOLDOWN_SECONDS
+
+    def back_off(self) -> None:
+        self.retry_at = time.monotonic() + self.next_retry_seconds
+        self.next_retry_seconds = min(self.next_retry_seconds * 2, _RECONNECT_MAX_COOLDOWN_SECONDS)
+
+    def recovered(self) -> None:
+        self.retry_at = 0.0
+        self.next_retry_seconds = _RECONNECT_COOLDOWN_SECONDS
 
 
 class MCPIntegration:
@@ -162,7 +172,15 @@ class MCPIntegration:
     @property
     def source_status(self) -> dict[str, str]:
         """供就绪检查读取的安全源状态；不含地址、认证或上游内容。"""
-        return {name: source.status for name, source in self._sources.items()}
+        now = time.monotonic()
+        return {
+            name: (
+                "unavailable"
+                if source.status == "cooldown" and now >= source.retry_at
+                else source.status
+            )
+            for name, source in self._sources.items()
+        }
 
     def tools_for(self, ctx: RunContext) -> list[Tool]:
         """本轮可展示的 MCP 工具：已核对的远端工具与本轮治理范围的交集；调用时仍复核。"""
@@ -202,7 +220,7 @@ class MCPIntegration:
         try:
             snapshot = await self._connect(source, source.config.timeout_seconds)
         except Exception as exc:
-            source.retry_at = time.monotonic() + _RECONNECT_COOLDOWN_SECONDS
+            source.back_off()
             logger.warning(
                 "MCP Server %s 不可用（%s），已隐藏其工具",
                 source.config.server_id,
@@ -212,9 +230,10 @@ class MCPIntegration:
         if snapshot.tools:
             source.snapshot = snapshot
             source.status = "available"
+            source.recovered()
         else:
             source.status = "contract_mismatch"
-            source.retry_at = time.monotonic() + _RECONNECT_COOLDOWN_SECONDS
+            source.back_off()
             await self._close(snapshot.connection)
 
     async def _reconnect(self, source: _Source, turn_timeout_seconds: float) -> None:
@@ -229,7 +248,7 @@ class MCPIntegration:
                 snapshot = await self._connect(source, limit)
             except Exception as exc:
                 source.status = "cooldown"
-                source.retry_at = time.monotonic() + _RECONNECT_COOLDOWN_SECONDS
+                source.back_off()
                 logger.warning(
                     "MCP Server %s 重连失败（%s），进入冷却",
                     source.config.server_id,
@@ -244,8 +263,10 @@ class MCPIntegration:
                 return
             source.snapshot = snapshot if snapshot.tools else None
             source.status = "available" if snapshot.tools else "contract_mismatch"
-            if not snapshot.tools:
-                source.retry_at = time.monotonic() + _RECONNECT_COOLDOWN_SECONDS
+            if snapshot.tools:
+                source.recovered()
+            else:
+                source.back_off()
                 await self._close(snapshot.connection)
             if old is not None:
                 await self._close(old.connection)
