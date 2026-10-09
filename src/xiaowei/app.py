@@ -334,6 +334,23 @@ class Application:
             & available_tools
         )
 
+    async def prepare_tools(
+        self,
+        mode: Mode,
+        authorized_tools: frozenset[str],
+        target_scope: frozenset[str],
+        *,
+        timeout_seconds: float,
+    ) -> None:
+        """定本轮 Tool Scope 前，按当前许可恢复已断开的 MCP 源。"""
+        if self._mcp is not None:
+            eligible = (
+                self._config.purposes[mode] & self._data_policy.model_tools & authorized_tools
+            )
+            await self._mcp.reconnect_for(
+                eligible, target_scope=target_scope, turn_timeout_seconds=timeout_seconds
+            )
+
     async def run_turn(self, ctx: RunContext, message: str) -> TurnAnswer:
         """执行一轮，返回已校验并已提交 Session 的回答；失败抛出 ``TurnError``，取消照常传播。
 

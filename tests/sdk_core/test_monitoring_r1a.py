@@ -509,11 +509,11 @@ async def test_disconnect_fails_current_turn_without_replaying_or_blocking_starr
             message = env.scripts.add("断线查询", tool_call(f"{SOURCE}__query", query="up"))
             assert (await served.turn(message, "query")).json()["state"] == "failed"
             ready = await served.ready()
-            assert ready["status"] == "ready" and ready[f"mcp.{SOURCE}"] == "unavailable"
+            assert ready["status"] == "ready" and ready[f"mcp.{SOURCE}"] == "disconnected"
             assert upstream.recorder.tool_calls == []
 
 
-async def test_successful_call_restores_source_status_after_timeout(env: Env) -> None:
+async def test_timeout_result_is_unknown_and_does_not_mark_source_disconnected(env: Env) -> None:
     def slow_once_server(recorder: Recorder) -> ASGIApp:
         server = MCPServer("prometheus-r1a-transient-timeout")
 
@@ -533,7 +533,7 @@ async def test_successful_call_restores_source_status_after_timeout(env: Env) ->
             await served.page()
             first = env.scripts.add("首次超时", tool_call(f"{SOURCE}__query", query="up"))
             assert (await served.turn(first, "query", "r1")).json()["state"] == "failed"
-            assert (await served.ready())[f"mcp.{SOURCE}"] == "unavailable"
+            assert (await served.ready())[f"mcp.{SOURCE}"] == "available"
 
             second = env.scripts.add(
                 "再次查询成功", tool_call(f"{SOURCE}__query", query="up"), cite()

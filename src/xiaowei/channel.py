@@ -553,6 +553,12 @@ class ChannelService:
             if record.state != "running":
                 return record
             try:
+                await self._app.prepare_tools(
+                    record.mode,
+                    decision.authorized_tools,
+                    decision.target_ids,
+                    timeout_seconds=self._results.budget.timeout_seconds,
+                )
                 answer = await self._app.run_turn(self._context(record, decision), receipt.message)
             except TurnError as exc:
                 return await self._store.fail(record, _FAILURE_CODES[exc.reason])

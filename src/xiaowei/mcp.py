@@ -15,12 +15,14 @@ MCP 库会在本地过滤之前把完整的 JSON-RPC 消息（工具参数与远
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import os
+import time
 from collections.abc import AsyncIterator, Callable, Iterable
 from contextlib import AsyncExitStack
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from types import TracebackType
 
@@ -28,6 +30,7 @@ import httpx2
 import mcp
 from agents import FunctionTool, Tool
 from agents.mcp import MCPServerStreamableHttp
+from mcp.shared.exceptions import MCPError
 from mcp.types import CallToolResult, TextContent
 from mcp.types import Tool as MCPTool
 from pydantic import BaseModel, SecretStr
@@ -40,6 +43,8 @@ from xiaowei.tools import governed_function_tool
 logger = logging.getLogger(__name__)
 
 _READ_TIMEOUT_FACTOR = 2
+_RECONNECT_MAX_SECONDS = 5.0
+_RECONNECT_COOLDOWN_SECONDS = 2.0
 
 # MCP 库的源码目录：源自这里的日志记录可能含协议原文，生成时即换成固定信息。
 _WIRE_SOURCE = os.path.join(os.path.dirname(mcp.__file__), "")
@@ -58,6 +63,24 @@ class _Binding:
     remote_name: str
     contract: ToolContract
     result: type[BaseModel]
+
+
+@dataclass(frozen=True)
+class _Snapshot:
+    """一次已核约连接；工具闭包只引用此连接，不查询当前源状态。"""
+
+    server: MCPServerStreamableHttp
+    connection: AsyncExitStack
+    tools: tuple[tuple[str, FunctionTool], ...]
+
+
+@dataclass
+class _Source:
+    config: MCPServerConfig
+    lock: asyncio.Lock = field(default_factory=asyncio.Lock)
+    snapshot: _Snapshot | None = None
+    status: str = "unavailable"
+    retry_at: float = 0.0
 
 
 class MCPIntegration:
@@ -80,29 +103,25 @@ class MCPIntegration:
         self._resolve_secret = resolve_secret
         self._clock = clock
         self._planned = _bindings(self._configs, governance)
+        self._sources = {config.server_id: _Source(config) for config in self._configs}
         # 连接之前构造全部工具：SDK 在构造时做严格 schema 转换，不支持的参数形状在这里作为
         # 登记错误拒绝，而不是在某个 Server 连上之后中止整个接入。
-        self._prepared = {
-            name: self._function_tool(name, binding) for name, binding in self._planned.items()
-        }
-        self._servers: dict[str, MCPServerStreamableHttp] = {}
-        self._tools: dict[str, FunctionTool] = {}
-        self._status: dict[str, str] = {config.server_id: "unavailable" for config in self._configs}
-        self._stack: AsyncExitStack | None = None
+        for name, binding in self._planned.items():
+            self._function_tool(name, binding, None, self._sources[binding.config.server_id])
+        self._connections: set[AsyncExitStack] = set()
+        self._entered = False
+        self._closing = False
 
     async def __aenter__(self) -> MCPIntegration:
-        if self._stack is not None:
+        if self._entered:
             raise RuntimeError("MCPIntegration 不能重复进入")
-        stack = AsyncExitStack()
+        self._entered = True
         try:
             for config in self._configs:
-                await self._start(config, stack)
+                await self._start(self._sources[config.server_id])
         except BaseException:
-            self._tools.clear()
-            self._servers.clear()
-            await stack.aclose()
+            await self._close_all()
             raise
-        self._stack = stack
         return self
 
     async def __aexit__(
@@ -111,11 +130,20 @@ class MCPIntegration:
         exc: BaseException | None,
         tb: TracebackType | None,
     ) -> None:
-        self._tools.clear()
-        self._servers.clear()
-        stack, self._stack = self._stack, None
-        if stack is not None:
-            await stack.aclose()
+        self._closing = True
+        for source in self._sources.values():
+            async with source.lock:
+                source.snapshot = None
+        await self._close_all()
+        self._entered = False
+
+    async def _close_all(self) -> None:
+        for connection in tuple(self._connections):
+            await self._close(connection)
+
+    async def _close(self, connection: AsyncExitStack) -> None:
+        await connection.aclose()
+        self._connections.discard(connection)
 
     @property
     def governance(self) -> GovernedTools:
@@ -124,24 +152,107 @@ class MCPIntegration:
     @property
     def available_tool_ids(self) -> frozenset[str]:
         """已连接并核对通过的远端工具的 ``tool_id``。"""
-        return frozenset(self._planned[name].contract.tool_id for name in self._tools)
+        return frozenset(
+            self._planned[name].contract.tool_id
+            for source in self._sources.values()
+            if source.status == "available" and source.snapshot is not None
+            for name, _ in source.snapshot.tools
+        )
 
     @property
     def source_status(self) -> dict[str, str]:
         """供就绪检查读取的安全源状态；不含地址、认证或上游内容。"""
-        return dict(self._status)
+        return {name: source.status for name, source in self._sources.items()}
 
     def tools_for(self, ctx: RunContext) -> list[Tool]:
         """本轮可展示的 MCP 工具：已核对的远端工具与本轮治理范围的交集；调用时仍复核。"""
         allowed = {contract.tool_id for contract in self._governance.allowed_contracts(ctx)}
         return [
             tool
-            for name, tool in self._tools.items()
+            for source in self._sources.values()
+            if source.status == "available" and source.snapshot is not None
+            for name, tool in source.snapshot.tools
             if self._planned[name].contract.tool_id in allowed
         ]
 
-    async def _start(self, config: MCPServerConfig, stack: AsyncExitStack) -> None:
+    async def reconnect_for(
+        self,
+        allowed_tools: frozenset[str],
+        *,
+        target_scope: frozenset[str],
+        turn_timeout_seconds: float,
+    ) -> None:
+        """本轮定范围前，只对当前获准且断开的源按需重连；不重放失败调用。"""
+        if self._closing or not self._entered:
+            return
+        sources = [
+            source
+            for source in self._sources.values()
+            if source.status != "available"
+            and any(
+                binding.config is source.config
+                and binding.contract.tool_id in allowed_tools
+                and binding.contract.target_id in target_scope
+                for binding in self._planned.values()
+            )
+        ]
+        await asyncio.gather(*(self._reconnect(source, turn_timeout_seconds) for source in sources))
+
+    async def _start(self, source: _Source) -> None:
+        try:
+            snapshot = await self._connect(source, source.config.timeout_seconds)
+        except Exception as exc:
+            source.retry_at = time.monotonic() + _RECONNECT_COOLDOWN_SECONDS
+            logger.warning(
+                "MCP Server %s 不可用（%s），已隐藏其工具",
+                source.config.server_id,
+                type(exc).__name__,
+            )
+            return
+        if snapshot.tools:
+            source.snapshot = snapshot
+            source.status = "available"
+        else:
+            source.status = "contract_mismatch"
+            source.retry_at = time.monotonic() + _RECONNECT_COOLDOWN_SECONDS
+            await self._close(snapshot.connection)
+
+    async def _reconnect(self, source: _Source, turn_timeout_seconds: float) -> None:
+        async with source.lock:
+            if self._closing or source.status == "available" or time.monotonic() < source.retry_at:
+                return
+            old = source.snapshot
+            limit = min(
+                _RECONNECT_MAX_SECONDS, source.config.timeout_seconds, turn_timeout_seconds / 2
+            )
+            try:
+                snapshot = await self._connect(source, limit)
+            except Exception as exc:
+                source.status = "cooldown"
+                source.retry_at = time.monotonic() + _RECONNECT_COOLDOWN_SECONDS
+                logger.warning(
+                    "MCP Server %s 重连失败（%s），进入冷却",
+                    source.config.server_id,
+                    type(exc).__name__,
+                )
+                if old is not None:
+                    source.snapshot = None
+                    await self._close(old.connection)
+                return
+            if self._closing:
+                await self._close(snapshot.connection)
+                return
+            source.snapshot = snapshot if snapshot.tools else None
+            source.status = "available" if snapshot.tools else "contract_mismatch"
+            if not snapshot.tools:
+                source.retry_at = time.monotonic() + _RECONNECT_COOLDOWN_SECONDS
+                await self._close(snapshot.connection)
+            if old is not None:
+                await self._close(old.connection)
+
+    async def _connect(self, source: _Source, limit: float) -> _Snapshot:
         _contain_wire_logs()
+        config = source.config
         try:
             authorization = (
                 None
@@ -150,7 +261,7 @@ class MCPIntegration:
             )
         except Exception:
             logger.warning("MCP Server %s 的认证引用无法解析，已隐藏其工具", config.server_id)
-            return
+            raise
         server = MCPServerStreamableHttp(
             params={
                 "url": config.url,
@@ -164,39 +275,46 @@ class MCPIntegration:
             client_session_timeout_seconds=config.timeout_seconds,
             max_retry_attempts=0,
         )
-        # 远端相关的处理都在本 Server 的边界内：SDK 在连接失败时自行清理；之后的失败由本
-        # Server 自己的栈关闭连接，只隐藏它的工具。
         connection = AsyncExitStack()
+        self._connections.add(connection)
         try:
-            await connection.enter_async_context(server)
-            verified = _verified(await server.list_tools(), self._planned, config)
-        except Exception as exc:
-            await connection.aclose()
-            # 只记录类型：下层异常消息可能包含远端返回的内容。
-            logger.warning(
-                "MCP Server %s 不可用（%s），已隐藏其工具", config.server_id, type(exc).__name__
-            )
-            return
-        stack.push_async_callback(connection.aclose)
-        self._servers[config.server_id] = server
-        self._status[config.server_id] = "available" if verified else "contract_mismatch"
-        for name in verified:
-            self._tools[name] = self._prepared[name]
+            async with asyncio.timeout(limit):
+                await connection.enter_async_context(server)
+                # 新对象的工具缓存为空；每次都从新会话重新 list_tools 核约。
+                verified = _verified(await server.list_tools(), self._planned, config)
+                tools = tuple(
+                    (name, self._function_tool(name, self._planned[name], server, source))
+                    for name in verified
+                )
+        except BaseException:
+            await self._close(connection)
+            raise
+        return _Snapshot(server, connection, tools)
 
-    def _function_tool(self, name: str, binding: _Binding) -> FunctionTool:
+    def _function_tool(
+        self,
+        name: str,
+        binding: _Binding,
+        server: MCPServerStreamableHttp | None,
+        source: _Source,
+    ) -> FunctionTool:
         async def execute(request: ToolRequest) -> ToolObservation:
-            # 只有已连接并核对过的 Server 的工具会展示；关闭之后的调用按执行失败处理。
-            server = self._servers[binding.config.server_id]
+            if server is None:  # 构造期只验证 SDK schema，不展示此工具
+                raise RuntimeError("MCP 工具尚未绑定连接")
             try:
                 result = await server.call_tool(binding.remote_name, request.arguments)
-            except Exception:
-                self._status[binding.config.server_id] = "unavailable"
+            except Exception as exc:
+                if (
+                    _connection_lost(exc)
+                    and source.snapshot is not None
+                    and source.snapshot.server is server
+                ):
+                    source.status = "disconnected"
                 raise
             payload = _payload(result, binding.result)
             if binding.contract.policy_id == "prometheus.query":
                 # 只记录治理层规范化后实际发出的表达式；远端返回中的同名字段不能冒充它。
                 payload["query"] = request.arguments["query"]
-            self._status[binding.config.server_id] = "available"
             return ToolObservation(
                 payload=payload,
                 captured_at=self._clock(),
@@ -204,6 +322,17 @@ class MCPIntegration:
             )
 
         return governed_function_tool(name, binding.contract, self._governance, execute)
+
+
+def _connection_lost(exc: BaseException) -> bool:
+    """只按锁版异常类型与 MCP 错误码判定断线；超时与远端错误不是断线证据。"""
+    if isinstance(exc, MCPError):
+        return exc.code in {-32000, -32600}
+    if isinstance(exc, httpx2.NetworkError):
+        return True
+    if isinstance(exc, BaseExceptionGroup):
+        return any(_connection_lost(item) for item in exc.exceptions)
+    return exc.__cause__ is not None and _connection_lost(exc.__cause__)
 
 
 def _bindings(
