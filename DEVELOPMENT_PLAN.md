@@ -153,6 +153,8 @@ Web 宿主发布地址由 `.env` 的 `XW_WEB_BIND_ADDRESS` 决定，缺省 `0.0.
 
 ## 8. P4 监控增量与之后的扩展
 
+实战对话与飞书展示的已核实问题另见[修复实施计划](docs/superpowers/plans/2026-10-09-agent-dialogue-feishu-repair.md)（待审阅，尚未实施）。建议在 R1b 独立复审、合入后先完成 U1 对话行为与说明、U2 飞书卡片，再继续监控 P2；不等待全部监控源或写能力完成。这是开发排期建议，不改变监控协议、授权或开放能力的前置门槛；性能优化先测量再决定，监控有限纠错/续查沿用原计划。
+
 P4 的已批准范围只在 [ARCHITECTURE §5「监控接入」](ARCHITECTURE.md#monitoring-mcp) 定义；任务、门槛与验收见 [监控 MCP 增量实施计划](docs/superpowers/plans/2026-10-09-monitoring-mcp.md)。共用协议验证可在 P3 真实环境验收期间独立推进；每项生产写开放须先完成对应源的读取、群 Action 批准闭环与该源真实环境验证，不要求其他监控源先完成。P4 不回写 P1–P3 的 StarRocks 只读验收结论，监控代码/离线检查、真实三源、公司部署与用户接受分别记证。
 
 P4 之外再根据实际使用决定：多群管理、跨渠道身份与会话、正式多人 Web、导出、后台长任务、新 transport/认证方式、多 Agent、TiDB/MySQL 或数据库 MCP。多个 StarRocks 集群已在 P2.5，单群在其后、P3 前；审计慢查询已在 P2，不能重复列为未来交付。数据库 MCP 的重评条件见 ARCHITECTURE §5。其他生产写动作（含原生 Prometheus 规则文件、Grafana 托管规则、StarRocks DDL/DML、重启与发布）不因 P4 的审批能力自动获准，逐项按 §4 的 Action 契约另行决定。
