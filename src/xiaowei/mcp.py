@@ -87,6 +87,7 @@ class MCPIntegration:
         }
         self._servers: dict[str, MCPServerStreamableHttp] = {}
         self._tools: dict[str, FunctionTool] = {}
+        self._status: dict[str, str] = {config.server_id: "unavailable" for config in self._configs}
         self._stack: AsyncExitStack | None = None
 
     async def __aenter__(self) -> MCPIntegration:
@@ -124,6 +125,11 @@ class MCPIntegration:
     def available_tool_ids(self) -> frozenset[str]:
         """已连接并核对通过的远端工具的 ``tool_id``。"""
         return frozenset(self._planned[name].contract.tool_id for name in self._tools)
+
+    @property
+    def source_status(self) -> dict[str, str]:
+        """供就绪检查读取的安全源状态；不含地址、认证或上游内容。"""
+        return dict(self._status)
 
     def tools_for(self, ctx: RunContext) -> list[Tool]:
         """本轮可展示的 MCP 工具：已核对的远端工具与本轮治理范围的交集；调用时仍复核。"""
@@ -173,6 +179,7 @@ class MCPIntegration:
             return
         stack.push_async_callback(connection.aclose)
         self._servers[config.server_id] = server
+        self._status[config.server_id] = "available" if verified else "contract_mismatch"
         for name in verified:
             self._tools[name] = self._prepared[name]
 
@@ -180,9 +187,17 @@ class MCPIntegration:
         async def execute(request: ToolRequest) -> ToolObservation:
             # 只有已连接并核对过的 Server 的工具会展示；关闭之后的调用按执行失败处理。
             server = self._servers[binding.config.server_id]
-            result = await server.call_tool(binding.remote_name, request.arguments)
+            try:
+                result = await server.call_tool(binding.remote_name, request.arguments)
+            except Exception:
+                self._status[binding.config.server_id] = "unavailable"
+                raise
+            payload = _payload(result, binding.result)
+            if binding.contract.policy_id == "prometheus.query":
+                # 只记录治理层规范化后实际发出的表达式；远端返回中的同名字段不能冒充它。
+                payload["query"] = request.arguments["query"]
             return ToolObservation(
-                payload=_payload(result, binding.result),
+                payload=payload,
                 captured_at=self._clock(),
                 truncated=False,
             )

@@ -1717,7 +1717,7 @@ def test_slow_queries_can_only_be_opened_with_an_audit_source(tmp_path: Path) ->
         {"access": {"policy_version": "p1", "grants": {OPERATOR: WITH_AUDIT}}},
     ):
         file.write_text(json.dumps(serve_config(8501, **changes)), encoding="utf-8")
-        with pytest.raises(runtime.ConfigError, match="已登记的 StarRocks 工具"):
+        with pytest.raises(runtime.ConfigError, match="已登记的工具"):
             runtime.load_config(file)
 
     file.write_text(json.dumps(audit_config(8501)), encoding="utf-8")

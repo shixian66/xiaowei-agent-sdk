@@ -91,6 +91,7 @@ docker image inspect "xiaowei:${release_sha}" --format '{{.Os}}/{{.Architecture}
 | `.env` 的 `XW_WEB_BIND_ADDRESS` | 可选 | Web 发布到服务器的哪个 IP：`0.0.0.0`（缺省，内网都能访问）、`127.0.0.1`（只本机）或服务器某个内网 IP；不能写域名 | 服务器管理员 | 可改，改后预检并重建小维 |
 | `.env` 的 `XW_ARCHIVE_STARROCKS_PASSWORD` | 按需 | 加了第二个目标时去掉行首 `#`，填它的只读密码 | StarRocks 管理员 | 可轮换 |
 | `.env` 的 `XW_FEISHU_APP_SECRET` | 按需 | 启用飞书时去掉行首 `#`，填应用 App Secret | 飞书开放平台 | 可轮换 |
+| `.env` 的 `XW_PROMETHEUS_READ_TOKEN` | 按需 | 选配需认证的 Prometheus MCP 时填写只读身份令牌 | 监控管理员 | 可轮换，改后重启 |
 | JSON 的 `model.model` | 已填公司值；其他环境必改 | 获准的 Vertex 模型 ID，只含字母、数字、`.`、`_`、`-`；样例中的模型尚未在本次改动中实测 | 模型服务管理员 | 换模型后须新建会话，并重新运行 `model check` |
 | JSON 的 `targets[].description`、`starrocks.target_id`、`host`、`database`、`user`、`tls` | 已填公司值；其他环境必改 | 集群用途与 ID、FE 地址、默认库、只读账号名及 TLS 设置 | StarRocks 管理员 | 可改，改后重启并按会话绑定规则新建会话 |
 | JSON 的 `access.grants` 与 `web.operator_id` | 必填 | Web 操作者的内部 subject 及其工具 | 部署管理员决定 | 可改，改后重启 |
@@ -204,6 +205,48 @@ access.grants["<内部 subject>"] = [该用户获准的工具]
 
 subject 不能和 `web.operator_id` 相同；工具列表不能为空。改完先运行 `config check`，通过后重启
 小维才生效。
+
+## 选配 Prometheus 监控源
+
+R1a 只开放官方 Prometheus MCP 的即时 `query`。MCP Server 单独部署在外部节点，Compose 不新增
+容器；小维只连固定地址。外部锁版 Server 也只启用已核对的只读工具集（v0.18.0 的
+`--mcp.tools=core` 包含 `query`，不含 TSDB 管理工具），不要仅靠小维隐藏未选工具。
+保持现有 `xiaowei.json` 的其他字段，在顶层加入：
+
+```json
+"mcp_servers": [
+  {
+    "server_id": "prometheus-prod",
+    "url": "http://prometheus-mcp.internal:8080/mcp",
+    "auth_ref": "env:XW_PROMETHEUS_READ_TOKEN",
+    "timeout_seconds": 5,
+    "max_response_bytes": 64000,
+    "allowed_tools": {"query": "prometheus.query"}
+  }
+]
+```
+
+这是现有 JSON 对象中的一个顶层字段片段，不要在对象外单独粘贴；地址只是示例，须换成实际固定端点。
+若监控入口仅由已受限的内网访问且不需认证，可将 `auth_ref` 设为 `null`；若使用认证，令 `.env` 中的
+`XW_PROMETHEUS_READ_TOKEN` 保存只读身份的令牌，JSON 仅留引用。官方 Prometheus MCP 会把小维的
+Bearer `Authorization` 原样转发到 Prometheus，它不是与上游隔离的第二重身份。内网 HTTP 无须
+配置 CA，但请求、结果与认证头以明文传输；只在可信内网和现有网络限制内使用。地址不能含用户名、
+密码、查询串或片段，也不会跟随跳转。外部部署须维持 `--prometheus.truncation-limit=0`，直到 P2
+完成截断识别的验收。
+
+在 `data_policy.model_tools` 加入 `"prometheus-prod/query"`，再只给获准的
+`access.grants["<内部 subject>"]` 加入同一工具 ID；Web 使用 `web.operator_id` 对应的 subject，
+飞书单聊使用 `feishu.users` 映射的 subject，指定群使用 `feishu.group.tools`。不要因为配置了源就给
+所有人加权限。空 `mcp_servers` 或不填该字段时，现有 StarRocks 行为保持不变。
+`server_id` 代表一个稳定的监控源；改指向另一套监控数据时用新 ID，并重新核对授权。
+
+修改后运行 `config check`：它核对结构、工具 ID 和已填写的认证引用，不连接外部 MCP，也不能
+证明容器网络可达。重启小维后看 `/readyz` 的 `mcp.prometheus-prod`：`available` 表示启动发现
+并核约成功，`unavailable` 表示启动时不可达或一次调用异常，`contract_mismatch` 表示选中工具
+契约不符；这些状态均不回显端点或凭据，单个监控源不可用时 Web 和 StarRocks 仍可用。R1a 不自动
+重连：外部 Server 恢复后须重启小维，R1b 再实现有界重连。撤权时先停止旧小维进程、更新配置、
+通过 `config check` 后重启；旧监控事实的历史读取和重发会按当前授权拒绝。回退到旧镜像前，先
+删除 `mcp_servers` 及其工具授权，再用旧镜像 `config check`，避免旧版拒绝新字段。
 
 ## 状态、停止与重启
 

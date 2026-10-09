@@ -53,7 +53,6 @@ def resolve_secret_ref(ref: str) -> SecretStr:
     return SecretStr(value)
 
 
-_LOOPBACK_HOSTS = frozenset({"127.0.0.1", "::1"})
 _MCP_TOOL_NAME = re.compile(r"[a-z0-9_-]{1,64}")
 _SDK_TOOL_NAME_MAX = 64
 
@@ -62,7 +61,8 @@ class MCPServerConfig(BaseModel):
     """静态可信的 MCP Server 登记：端点、认证引用、期限、接收上限与获准工具。
 
     ``allowed_tools`` 把远端工具名映射到已登记的 ``policy_id``；端点只来自这里，不来自用户或
-    模型参数。远端须 HTTPS，明文 HTTP 只允许 loopback 测试地址；地址不能携带用户信息。
+    模型参数。可信操作者可配置固定的 HTTPS 或内网 HTTP 地址；HTTP 的网络可达范围由部署
+    环境保证，客户端无法从 URL 判断内网归属。地址不能携带用户信息。
     """
 
     model_config = ConfigDict(frozen=True, extra="forbid")
@@ -90,11 +90,9 @@ class MCPServerConfig(BaseModel):
             raise ValueError("MCP 地址不能携带用户信息")
         if parts.query or parts.fragment or not parts.hostname:
             raise ValueError("MCP 地址必须是不含查询与片段的完整地址")
-        if parts.scheme == "https" or (
-            parts.scheme == "http" and parts.hostname in _LOOPBACK_HOSTS
-        ):
+        if parts.scheme in {"https", "http"}:
             return value
-        raise ValueError("MCP 地址必须使用 HTTPS；HTTP 只允许 loopback 测试地址")
+        raise ValueError("MCP 地址必须使用 HTTP 或 HTTPS")
 
     @field_validator("auth_ref")
     @classmethod

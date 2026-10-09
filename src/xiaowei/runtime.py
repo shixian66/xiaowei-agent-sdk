@@ -74,6 +74,7 @@ from xiaowei.channel import (
 from xiaowei.channel_store import ChannelStore, RecoveryReport, SendOutcome
 from xiaowei.config import (
     FeishuConfig,
+    MCPServerConfig,
     SecretRefError,
     WebConfig,
     configure_runtime,
@@ -82,7 +83,8 @@ from xiaowei.config import (
 )
 from xiaowei.evidence import EvidenceStore
 from xiaowei.feishu import FeishuGateway, LarkChannel, LarkTransport, lark_channel, render
-from xiaowei.governance import GovernedTools, ToolCatalog
+from xiaowei.governance import GovernedTools, Projection, ToolCatalog, ToolPolicy
+from xiaowei.mcp import MCPIntegration
 from xiaowei.model_api import ModelProfile, open_model
 from xiaowei.models import (
     AUDIENCES,
@@ -95,6 +97,7 @@ from xiaowei.models import (
     Identity,
     Label,
     Owner,
+    ToolContract,
     ToolId,
 )
 from xiaowei.session import CleanupReport, SessionLimits, cleanup_expired
@@ -232,6 +235,7 @@ class ServeConfig(_Config):
     budget: Budget
     max_concurrent_turns: int = Field(gt=0)
     targets: tuple[TargetConfig, ...] = Field(min_length=1)
+    mcp_servers: tuple[MCPServerConfig, ...] = ()
     projection_bytes: dict[Audience, Annotated[int, Field(gt=0)]]
     access: AccessConfig
     web: WebConfig
@@ -256,6 +260,18 @@ class ServeConfig(_Config):
             raise ValueError("targets 中的集群 ID 不能重复")
         return value
 
+    @field_validator("mcp_servers")
+    @classmethod
+    def _selected_monitoring_sources(
+        cls, value: tuple[MCPServerConfig, ...]
+    ) -> tuple[MCPServerConfig, ...]:
+        ids = [server.server_id for server in value]
+        if len(set(ids)) != len(ids):
+            raise ValueError("mcp_servers 中的 server_id 不能重复")
+        if any(server.allowed_tools != {"query": "prometheus.query"} for server in value):
+            raise ValueError("R1a 只允许 Prometheus query 工具")
+        return value
+
     @field_validator("projection_bytes")
     @classmethod
     def _all_audiences(cls, value: dict[Audience, int]) -> dict[Audience, int]:
@@ -266,11 +282,15 @@ class ServeConfig(_Config):
     @model_validator(mode="after")
     def _consistent(self) -> "ServeConfig":
         registered = _registered_tools(self)
+        if {server.server_id for server in self.mcp_servers} & {
+            target.target_id for target in self.targets
+        }:
+            raise ValueError("监控源 ID 不能与 StarRocks 目标 ID 重复")
         if not self.data_policy.model_tools <= registered:
-            raise ValueError("data_policy.model_tools 只能包含已登记的 StarRocks 工具")
+            raise ValueError("data_policy.model_tools 只能包含已登记的工具")
         for tools in self.access.grants.values():
             if not tools <= registered:
-                raise ValueError("access.grants 只能授予已登记的 StarRocks 工具")
+                raise ValueError("access.grants 只能授予已登记的工具")
         storage = self.storage
         if storage.request_retention_seconds > storage.evidence_retention_seconds:
             raise ValueError("可重发结果的保留期不得长于证据保留期")
@@ -287,7 +307,7 @@ class ServeConfig(_Config):
                 raise ValueError("feishu.consumer_count 不得超过 max_concurrent_turns")
             group = self.feishu.group
             if group is not None and not group.tools <= registered:
-                raise ValueError("feishu.group.tools 只能包含已登记的 StarRocks 工具")
+                raise ValueError("feishu.group.tools 只能包含已登记的工具")
             if group is not None and group.max_wait_seconds >= storage.request_retention_seconds:
                 raise ValueError("feishu.group.max_wait_seconds 必须短于请求保留期")
         # 一轮新列表的每个对象在工具记录、写入 Session、最终校验、提交时的校验与提交前的整段回放
@@ -434,6 +454,11 @@ def validate_config(
     refs.extend(
         (f"targets.{index}.starrocks.password_ref", target.starrocks.password_ref)
         for index, target in enumerate(config.targets)
+    )
+    refs.extend(
+        (f"mcp_servers.{index}.auth_ref", server.auth_ref)
+        for index, server in enumerate(config.mcp_servers)
+        if server.auth_ref is not None
     )
     if config.feishu is not None:
         refs.append(("feishu.app_secret_ref", config.feishu.app_secret_ref))
@@ -597,15 +622,67 @@ def _reason(error: Mapping[str, object]) -> str:
 
 
 def _registered_tools(config: ServeConfig) -> frozenset[str]:
-    """装配时会登记的 StarRocks 工具：只有配置了审计源的目标登记慢查询工具。"""
+    """装配时会登记的工具；监控只登记当前切片已验证的 query。"""
     audited = any(t.starrocks.audit is not None for t in config.targets)
-    return QUERY_TOOLS | (AUDIT_TOOLS if audited else frozenset())
+    monitoring = {server.tool_id("query") for server in config.mcp_servers}
+    return QUERY_TOOLS | (AUDIT_TOOLS if audited else frozenset()) | monitoring
+
+
+class _PrometheusQueryArgs(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    query: str
+
+
+class _PrometheusQueryResult(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    result: str
+    warnings: list[str] | None
+    # 远端不返回表达式；MCPIntegration 从已治理的实际请求补入该字段。
+    query: str | None = None
+
+
+def _monitoring_catalog(
+    config: ServeConfig,
+) -> tuple[tuple[ToolContract, ...], tuple[ToolPolicy, ...]]:
+    if not config.mcp_servers:
+        return (), ()
+    policy = ToolPolicy(
+        policy_id="prometheus.query",
+        arguments=_PrometheusQueryArgs,
+        result=_PrometheusQueryResult,
+        projections={
+            audience: Projection(
+                fields=("query", "result", "warnings"),
+                max_bytes=config.projection_bytes[audience],
+            )
+            for audience in AUDIENCES
+        },
+        required=("query", "result", "warnings"),
+        fact_note="Prometheus MCP 返回的结果为服务端排版文本；采集时间不是指标求值时间。",
+    )
+    contracts = tuple(
+        ToolContract(
+            tool_id=server.tool_id("query"),
+            target_id=server.server_id,
+            input_schema=policy.arguments.model_json_schema(),
+            policy_id=policy.policy_id,
+            description=f"在监控源 {server.server_id} 执行只读 PromQL 即时查询",
+        )
+        for server in config.mcp_servers
+    )
+    return contracts, (policy,)
 
 
 def _app_config(config: ServeConfig) -> AppConfig:
-    audit = _registered_tools(config) - QUERY_TOOLS
+    monitoring = frozenset(server.tool_id("query") for server in config.mcp_servers)
+    audit = _registered_tools(config) - QUERY_TOOLS - monitoring
     return AppConfig(
-        purposes={"query": QUERY_TOOLS | audit, "diagnose": DIAGNOSE_TOOLS | audit},
+        purposes={
+            "query": QUERY_TOOLS | audit | monitoring,
+            "diagnose": DIAGNOSE_TOOLS | audit,
+        },
         data_policies={config.model.data_policy_id: config.data_policy},
         session_limits=config.session_limits,
         max_concurrent_turns=config.max_concurrent_turns,
@@ -715,6 +792,7 @@ class Runtime:
     readiness: Readiness
     recovery: RecoveryReport
     service: ChannelService
+    mcp: MCPIntegration | None = None
 
 
 @dataclass(frozen=True)
@@ -771,10 +849,14 @@ def _delivery(
     tools = first
     for other in others:
         tools += other
-    access = StaticAccess(config.access, frozenset(schemas), _group_access(config, members))
+    monitoring_contracts, monitoring_policies = _monitoring_catalog(config)
+    targets = frozenset(schemas) | {server.server_id for server in config.mcp_servers}
+    access = StaticAccess(config.access, frozenset(targets), _group_access(config, members))
     evidence = EvidenceStore(
         engine,
-        ToolCatalog(tools.contracts, tools.policies),
+        ToolCatalog(
+            (*tools.contracts, *monitoring_contracts), (*tools.policies, *monitoring_policies)
+        ),
         authorize=access.authorize,
         clock=clock,
         retention_seconds=storage.evidence_retention_seconds,
@@ -858,16 +940,25 @@ async def open_runtime(
         )
         await stack.enter_async_context(_refreshing(schemas))
         model = await stack.enter_async_context(open_model(config.model, transport=model_transport))
+        governance = GovernedTools(parts.evidence)
+        mcp = (
+            await stack.enter_async_context(
+                MCPIntegration(config.mcp_servers, governance, clock=clock)
+            )
+            if config.mcp_servers
+            else None
+        )
         app = Application(
             _app_config(config),
             model=model,
             engine=engine,
-            governance=GovernedTools(parts.evidence),
+            governance=governance,
             local_tools=parts.tools.executes,
+            mcp=mcp,
             clock=clock,
         )
         service = ChannelService(app, parts.results)
-        yield Runtime(engine, lock, readiness, recovery, service)
+        yield Runtime(engine, lock, readiness, recovery, service, mcp)
 
 
 # ---- serve ---------------------------------------------------------------------------
@@ -1043,7 +1134,18 @@ async def _serve(
 ) -> int:
     components: dict[str, str] = {"feishu": "disabled"}
     feishu = await _start_feishu(config, runtime, clock, transport, components, stop)
-    app = create_web_app(runtime.service, config.web, components=lambda: components)
+    app = create_web_app(
+        runtime.service,
+        config.web,
+        components=lambda: {
+            **components,
+            **(
+                {f"mcp.{source}": status for source, status in runtime.mcp.source_status.items()}
+                if runtime.mcp is not None
+                else {}
+            ),
+        },
+    )
     server = uvicorn.Server(
         uvicorn.Config(
             app,

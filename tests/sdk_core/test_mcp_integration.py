@@ -1023,8 +1023,8 @@ async def _until(condition: Callable[[], bool], timeout: float = 3.0) -> None:
 @pytest.mark.parametrize(
     "overrides",
     [
-        {"url": "http://example.com/mcp"},
-        {"url": "http://localhost/mcp"},
+        {"url": "ftp://example.com/mcp"},
+        {"url": "http://example.com/mcp#fragment"},
         {"url": "https://user:pw@example.com/mcp"},
         {"url": "https://example.com/mcp?token=x"},
         {"auth_ref": "raw-token-value"},
