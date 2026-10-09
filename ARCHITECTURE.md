@@ -84,7 +84,7 @@ flowchart TD
     O --> C
 ```
 
-图为含已批准增量的设计路径，当前实现进度见 handoff。MCP Client Integration 与 Web/飞书共享同一个后端；正式 `serve` 目前尚未装配外部 MCP Server，监控增量将按 §5 接入。小维仓库不内嵌业务 Server，数据库 MCP 暂缓，StarRocks 的本地路径继续不依赖 MCP 可用性。启用远端工具时，请求先经过小维治理，远端自身仍须鉴权并约束实际执行。
+图为含已批准增量的设计路径，当前实现进度见 handoff。MCP Client Integration 与 Web/飞书共享同一个后端；R1a 已将可选 Prometheus `query` 装入正式 `serve`，其他监控工具仍按 §5 分片接入。小维仓库不内嵌业务 Server，数据库 MCP 暂缓，StarRocks 的本地路径继续不依赖 MCP 可用性。启用远端工具时，请求先经过小维治理，远端自身仍须鉴权并约束实际执行。
 
 SDK 负责模型与工具调用循环；应用负责接入、实际权限、领域工具和运行边界。首版直接调用非流式 `Runner.run`，不解析模型文本自行调用工具，不创建通用计划编译器，不在 SDK 外面再运行一套 Agent 引擎。渠道的“处理中”等状态提示由应用生成，不依赖模型文本流。
 
@@ -205,7 +205,7 @@ MCP Integration 的治理必须覆盖实际发送动作，不能只过滤 `list_
 
 **范围与部署。** 沿用一个 SDK Agent、Web/飞书薄入口、静态 MCP 连接、受治理工具与 Evidence。监控 MCP Server 在小维服务器节点之外独立部署和维护；小维只配置固定远端地址、必要的认证引用、获准工具及监控源权限，不在本机 Compose 中增设 MCP 容器或代管其生命周期。Prometheus 和 Grafana 优先使用各自官方 MCP Server；独立 Prometheus Alertmanager 先验证社区 MCP Server，若其协议、安全或维护条件不满足，只为外部 Alertmanager API v2 实现薄本地 Adapter，不自建业务 MCP Server。每个源及选中动作开放前，分别锁版验证 Server、工具真实输入/输出、认证与部署方式；远端工具目录不能直接整体交给模型。StarRocks 路径及 P3 验收范围不因监控规划自动改变。
 
-**内网传输与认证取舍。** 外部 MCP 位于公司可信内网时，允许操作者在静态配置中填固定 `http://` 地址，不强制 TLS、私有 CA 或单独证书维护；已有 HTTPS 时可直接使用。模型和用户消息不能指定或改写端点，外部节点由现有内网访问控制限制可达范围；代码不能仅凭 URL 判断是否属于可信内网。仅只读的 MCP 入口在网络已限定可达范围时可不另配调用者认证；**可执行写动作的远端入口必须认证调用者**，未配置或未验证认证时不开放对应写动作。Grafana MCP 使用其 `--server-auth-token` 与小维现有 Bearer `auth_ref`；优先以锁版服务端的 `--disable-write` / `--enable-write-tools` 仅注册选中写工具，并关闭通用 API 工具等旁路，但要实测这些开关是否覆盖数据源写工具及其他未选动作，不能只靠小维隐藏；若仍可直调，相关写能力不开放。Alertmanager 社区 MCP 若不能同时提供调用者认证与选中工具约束，不开放它的写工具，改走经认证的 Alertmanager API v2 薄 Adapter；后者在目标 API 上验证认证。Prometheus 不开放任何写工具，以锁版 `--mcp.tools` 仅加选中只读工具、不开 TSDB 管理；核对其始终加载的核心工具并确认 `reload`、`quit` 不可直调。其官方 HTTP MCP 会将收到的 `Authorization` 转发给 Prometheus，也支持可选 Web 认证，但 Basic Auth 与该转发共用同一头；必须分别实测带头和不带头时的上游身份，不能误以为 MCP 与上游账号已隔离。远端服务账号若仍有未选动作权限，工具过滤失效时可被滥用，作为残余风险记录。HTTP 传输的工具参数、结果和可能的认证头为明文，这是选择简化运维后的边界，不宣称与 HTTPS 等价；跨公网或不受控网络不沿用此取舍。当前 `MCPServerConfig` 仍拒绝非 loopback HTTP，R1 实施时只需按这一可信配置边界做最小调整并验证固定端点与调用前治理，不增设 CA 管理或通用代理。[Prometheus MCP 认证说明](https://github.com/prometheus/prometheus-mcp#security-and-authentication)、[Grafana MCP 调用者认证与工具选择](https://github.com/grafana/mcp-grafana)。
+**内网传输与认证取舍。** 外部 MCP 位于公司可信内网时，允许操作者在静态配置中填固定 `http://` 地址，不强制 TLS、私有 CA 或单独证书维护；已有 HTTPS 时可直接使用。模型和用户消息不能指定或改写端点，外部节点由现有内网访问控制限制可达范围；代码不能仅凭 URL 判断是否属于可信内网。仅只读的 MCP 入口在网络已限定可达范围时可不另配调用者认证；**可执行写动作的远端入口必须认证调用者**，未配置或未验证认证时不开放对应写动作。Grafana MCP 使用其 `--server-auth-token` 与小维现有 Bearer `auth_ref`；优先以锁版服务端的 `--disable-write` / `--enable-write-tools` 仅注册选中写工具，并关闭通用 API 工具等旁路，但要实测这些开关是否覆盖数据源写工具及其他未选动作，不能只靠小维隐藏；若仍可直调，相关写能力不开放。Alertmanager 社区 MCP 若不能同时提供调用者认证与选中工具约束，不开放它的写工具，改走经认证的 Alertmanager API v2 薄 Adapter；后者在目标 API 上验证认证。Prometheus 不开放任何写工具，以锁版 `--mcp.tools` 仅加选中只读工具、不开 TSDB 管理；核对其始终加载的核心工具并确认 `reload`、`quit` 不可直调。其官方 HTTP MCP 会将收到的 `Authorization` 转发给 Prometheus，也支持可选 Web 认证，但 Basic Auth 与该转发共用同一头；必须分别实测带头和不带头时的上游身份，不能误以为 MCP 与上游账号已隔离。远端服务账号若仍有未选动作权限，工具过滤失效时可被滥用，作为残余风险记录。HTTP 传输的工具参数、结果和可能的认证头为明文，这是选择简化运维后的边界，不宣称与 HTTPS 等价；跨公网或不受控网络不沿用此取舍。R1a 的 `MCPServerConfig` 已允许可信操作者配置固定 HTTP 地址；端点和调用前治理仍受现有约束，不增设 CA 管理或通用代理。[Prometheus MCP 认证说明](https://github.com/prometheus/prometheus-mcp#security-and-authentication)、[Grafana MCP 调用者认证与工具选择](https://github.com/grafana/mcp-grafana)。
 
 Alertmanager 原生 API v2 若由薄 Adapter 直连，须支持其 Web 配置可启用的 HTTP Basic：用户名、密码只由运行环境安全引用装配，不复用 MCP `auth_ref` 的 Bearer 语义，也不进入模型、群消息或 Action。写动作启用前在目标配置上验证无凭据及错误凭据均被拒绝、零写入；若上游实际采用其他认证方式，先核对目标机制再决定最小适配。[Alertmanager Web 认证说明](https://prometheus.io/docs/alerting/latest/https/)。
 
@@ -237,7 +237,7 @@ Alertmanager 原生 API v2 若由薄 Adapter 直连，须支持其 Web 配置可
 
 保留“治理在小维、执行端可替换”：`SDK FunctionTool → GovernedTools / SQLGuard → 本地 Adapter（设置并回读会话限额，有界执行）→ StarRocks`。只读账号、会话限额设置与回读、有界读取、固定 EXPLAIN、错误过滤和连接关闭仍由 Adapter 实施。小维仓库不内嵌数据库 Server；将来启用 MCP 时由外部独立维护，连接级保证须由 Server 实现并重新验收，不能自动继承。[接入约定](docs/contracts/database-mcp-server.md) 保留为暂缓草案。
 
-重新评估条件：出现可验证的独立部署/多客户端共享需求、成熟 Server 明确减少维护成本，且有责任方、版本与验收证据；届时单独决策。通用 MCP Client Integration 保留，监控增量按上节单独接入。当前正式入口无 `mcp` 段、静态 Bearer/启动发现/不自动重连等限制仍是通用 MCP 接入事实，不构成数据库阶段前提。
+重新评估条件：出现可验证的独立部署/多客户端共享需求、成熟 Server 明确减少维护成本，且有责任方、版本与验收证据；届时单独决策。通用 MCP Client Integration 保留，监控增量按上节单独接入。正式入口已可选配 Prometheus `query`；静态 Bearer、启动发现和不自动重连等限制仍是当前 MCP 接入事实，不构成数据库阶段前提。
 
 ### 首版 StarRocks 工具
 
