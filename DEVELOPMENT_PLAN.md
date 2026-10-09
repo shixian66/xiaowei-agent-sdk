@@ -6,7 +6,7 @@
 
 ## 1. 交付目标
 
-从零设计并逐步交付基于 OpenAI Agents SDK 的 StarRocks 数据库助手。首版同时具备 Web 对话与飞书单聊，支持查结构、受控只读查询、结果解释和慢查询分析，并具备最小 MCP Client Integration。小维仓库不内嵌业务 MCP Server；数据库继续本地 Adapter 直连，数据库 MCP 暂缓。P2.5 与单群增量都在 P3 前交付，范围以 ARCHITECTURE 为准。旧代码按价值选用，不设置兼容迁移目标。
+从零设计并逐步交付基于 OpenAI Agents SDK 的 StarRocks 数据库助手。P1–P3 首版同时具备 Web 对话与飞书单聊，支持查结构、受控只读查询、结果解释和慢查询分析，并具备最小 MCP Client Integration。随后按单独的 P4 监控增量接入 Prometheus、Grafana 与独立 Alertmanager。小维仓库不内嵌业务 MCP Server；数据库继续本地 Adapter 直连，数据库 MCP 暂缓。P2.5 与单群增量都在 P3 前交付，范围以 ARCHITECTURE 为准。旧代码按价值选用，不设置兼容迁移目标。
 
 按用户可见的产品阶段推进；其中 P1-A 是可独立验证的内部核心，P1-B 才交付实际用户入口。先做一个单进程应用、一个业务 Agent、一套工具，正式部署使用小维与 PostgreSQL 两个 Docker Compose 容器；不先建设 Worker、分布式任务、通用审批和多 Agent 平台。
 
@@ -29,6 +29,7 @@
 | P2.5 读取放开、SQL 放宽与多集群（直连） | 自动读取范围、多库复杂 SQL、单 Agent 自然语言工具选择 | 权限与历史证据重验、跨目标隔离、容量与资源约束 |
 | 飞书单群增量 | 一个指定群 @ 触发，全员同权共享历史，同群排队 | 当前发起人授权、群归属、去重、有界串行与交付 |
 | P3 实战试用 | 在一个获准环境中通过两端完成查询与诊断 | 真实目标、失败路径、启动说明、运行限制和用户接受 |
+| P4 监控调查与群内受控写 | Web/飞书调查三种监控源；指定飞书群审批选中静默、Dashboard、数据源与 Annotation 动作 | 锁版协议、源级授权、实际 PromQL 与历史 Evidence、逐次审批、回读/未知状态及真实入口验收 |
 
 P1 是开发切片，不冒充已经完成首版全部功能；首版在 P1–P3（含 P2.5）通过后才称为可试用。实施顺序为 P2 离线完成 → P2.5 → 飞书单群增量 → P3（用户 2026-10-03 确认）；此前“数据库 MCP 为 P2.5”和“新增需求放到 P3 后”的安排不再适用。P2 的必交项是 SQL/执行计划诊断、表布局元数据与基于已有审计表的慢查询列表；Query Profile 暂不实现。
 
@@ -136,7 +137,7 @@ P1 分为两个顺序实施的小切片：
 
 ## 7. P3：获准环境实战
 
-详细任务见 [P3：Compose 部署与实战验收实施计划](docs/superpowers/plans/2026-10-05-p3-compose-deployment.md)；部署包与保留配置的维护约定只在 [ARCHITECTURE §10](ARCHITECTURE.md#deployment-package) 维护。P3-A 和 P3-B 均已独立复审并分别随 PR #49、#50 合入（当前基线 `9a1f5d522ea985eb1a21de812019717a0680cad3`）。用户确认公司服务器为 x86 且可从 `ghcr.io` 下载；当前切片准备仅从 `main` 手动触发的私有 GHCR `linux/amd64` 发布流程，尚未设置发布凭据、构建/发布镜像或生成发行归档。之后须先核实 GHCR 包为 Private，再在公司服务器实际拉取、部署和验收。真实模型、用户 StarRocks、飞书、Web/飞书路径、恢复和用户接受仍留在 P3-C；证据与下一项以 handoff 为准。
+详细任务见 [P3：Compose 部署与实战验收实施计划](docs/superpowers/plans/2026-10-05-p3-compose-deployment.md)；部署包与保留配置的维护约定只在 [ARCHITECTURE §10](ARCHITECTURE.md#deployment-package) 维护。P3-A 和 P3-B 已分别随 PR #49、#50 合入。当前发布方式是从 `main` 手动构建 `linux/amd64` 镜像、`docker save` 到发行包，不向 GHCR 推送；此前 GHCR 设想已被后续发行修订取代（见 handoff）。真实模型、用户 StarRocks、飞书、Web/飞书路径、恢复和用户接受仍须按 P3-C 分别留证；证据与下一项以 handoff 为准。
 
 交付正式 Docker Compose：一个小维应用容器、一个 PostgreSQL 容器及持久卷。提供经验证的安装、配置、初始化/升级、启动、停机、按保留期清理和备份恢复说明。锁定受测镜像版本；更新应用镜像保留数据，持久卷不代替备份；不附加 Redis、Worker 或常驻迁移服务。
 
@@ -150,16 +151,12 @@ Web 宿主发布地址由 `.env` 的 `XW_WEB_BIND_ADDRESS` 决定，缺省 `0.0.
 
 退出：负责人在实际 Web 与飞书入口使用并接受结果。代码完成、测试通过、环境部署和用户接受分别记录，不提前归档。
 
-## 8. 之后按需求扩展
+## 8. P4 监控增量与之后的扩展
 
-首版完成后再根据实际使用决定：多群管理、跨渠道身份与会话、正式多人 Web、导出、后台长任务、新 transport/认证方式或多 Agent。多个 StarRocks 集群已列入 P2.5，单群在其后、P3 前；审计慢查询已在 P2，不能重复列为未来交付。TiDB/MySQL 等在 StarRocks 的 P2.5 与 P3 完成后再考虑；数据库 MCP 的重评条件见 ARCHITECTURE §5。通用 MCP Client Integration 保留，本阶段不增加监控 MCP 实施。
+P4 的已批准范围只在 [ARCHITECTURE §5「监控接入」](ARCHITECTURE.md#monitoring-mcp) 定义；任务、门槛与验收见 [监控 MCP 增量实施计划](docs/superpowers/plans/2026-10-09-monitoring-mcp.md)。共用协议验证可在 P3 真实环境验收期间独立推进；每项生产写开放须先完成对应源的读取、群 Action 批准闭环与该源真实环境验证，不要求其他监控源先完成。P4 不回写 P1–P3 的 StarRocks 只读验收结论，监控代码/离线检查、真实三源、公司部署与用户接受分别记证。
 
-未来生产写操作按通用 Action 契约扩展，包含 DDL/DML、配置变更、取消查询、重启与发布，具体实现由首个真实需求驱动。模型意图不授予执行权，effect/risk 由可信代码定义，诊断/读取不能自动升级为写。所有生产写操作必须先展示具体目标、改动与影响，取得有审批权限的用户明确确认，再重新通过 Policy / Approval / Action Binding；采用 SDK 原生审批，执行后回读并记录 Evidence。
+P4 之外再根据实际使用决定：多群管理、跨渠道身份与会话、正式多人 Web、导出、后台长任务、新 transport/认证方式、多 Agent、TiDB/MySQL 或数据库 MCP。多个 StarRocks 集群已在 P2.5，单群在其后、P3 前；审计慢查询已在 P2，不能重复列为未来交付。数据库 MCP 的重评条件见 ARCHITECTURE §5。其他生产写动作（含原生 Prometheus 规则文件、Grafana 托管规则、StarRocks DDL/DML、重启与发布）不因 P4 的审批能力自动获准，逐项按 §4 的 Action 契约另行决定。
 
-**DDL 的执行路径仍待后续决定；按用户要求保留下段旧方向，写 MCP Server 不构成当前批准范围或前提。**
-
-**DDL 是首个写场景。** 第一批只考虑加分区、加列等结构化动作：由代码按模板生成 DDL，不接受任意 DDL 文本；经单独部署的写 MCP Server 与受限写账号执行（接入约定 g）；先在测试环境验证，再到生产。前置技术验证：SDK interruptions / RunState 经 PostgreSQL 持久化后能在新进程中恢复并继续——当前 `PolicySession` 不支持 RunState 恢复路径（`get_items(limit)`，见 handoff Task 3 缺口），确认流程依赖它，须先验证再规划写场景。
-
-首个写场景的计划必须验证：无确认不能执行、确认绑定具体动作且不能跨动作复用、关键参数/目标/前提变化或批准过期须重新确认、权限撤销时即使已确认仍拒绝、结果不明不自动重试。该未来规则不扩大 P1–P3 的只读范围，不在当前阶段预建通用 Action 执行框架或审批平台。
+此前“DDL 是首个写场景、通过独立写 MCP Server 执行”的预想已被本次真实监控写需求取代；DDL 路径仍待后续独立决定，不以旧接入约定作为 P4 前提。群批准采用持久 Action 与确定性执行，不跨消息恢复 SDK RunState；Action 绑定、一次执行机会、调用前复核和未知结果处置未验证通过前，不开放对应监控写动作。
 
 旧代码复用是每个切片的局部判断。没有直接消费者或依赖过重的旧资产不移植；不再单列“保留整个 M5 底座”的迁移阶段。
