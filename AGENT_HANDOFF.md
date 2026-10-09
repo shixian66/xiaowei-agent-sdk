@@ -11,7 +11,7 @@
 | 仓库 | [shixian66/xiaowei-agent-sdk](https://github.com/shixian66/xiaowei-agent-sdk) |
 | 本地目录 / 分支 | `/Users/kloenguyen/.codex/worktrees/monitoring-plan/agent-SDK` / `codex/monitoring-plan`；从 `origin/main` 的 `5b36375e6cf8f68d02125677e174122df6775277` 建立，原 `/Users/kloenguyen/Desktop/agent-SDK` 的旧分支及已有修改未动；接手先核对 HEAD 与未提交差异 |
 | M5 历史起点 | `372c381f44ecfa1fa53961f137d0058033cbd805`；不是远端当前 main 的核验结论 |
-| 本轮审查版本 | 监控文档以 `5b36375e6cf8f68d02125677e174122df6775277` 为源码基线；具体文档改动以本分支提交 SHA 审查。PR B 已随 PR #63 合入该基线，旧“待复审”记录仅属历史 |
+| 本轮审查版本 | 监控文档以 `5b36375e6cf8f68d02125677e174122df6775277` 为源码基线；独立审查覆盖 `b280eeae701ba6837b33cca25a3e5de250f7369f`，结论为有条件通过。四项开工前文档问题已在后续修订中处理，修订的精确版本以 Git HEAD 为准，尚待针对该版本复核；PR B 已随 PR #63 合入源码基线 |
 | 当前阶段 | P4 监控增量只编写设计与实施计划，未写产品功能代码，未部署监控 MCP；用户决定外部 MCP 在其他内网节点部署，可用固定内网 HTTP，不强制 CA。当前 `MCPServerConfig` 仍拒绝非 loopback HTTP，正式 `serve` 仍未装配监控 MCP。用户报告公司环境运行过旧版镜像且容器健康，当前部署版本未在本工作树独立核实。P3 的真实模型/飞书/StarRocks 验收仍独立开放 |
 | 当前源码与依赖 | 新包 `src/xiaowei/` 仍为应用表 v6。V1-A 新增 `vertex_model.py`（SDK 公开 `Model` 的非流式 Vertex 适配器），`model_api` 增加 `provider="vertex"` 与受控 transport 的认证头/成功校验参数；显式声明已直接导入的 `httpx2>=2.12,<3`（锁定 2.13.1 不变）。V1-B 使 `PolicySession` 随函数调用保存并回放 `provider_data.thought_signature`（单字段白名单，其余供应商字段丢弃），`app.safe_run_config()` 成为应用与 `model check` 共用的运行配置。V2 新增 `runtime.check_model` / `validate_model_config` 与 CLI `model check`。C2 把主模板改为一个 Vertex Profile、一个目标；占位符清单新增 Vertex 模型标记，C2 前模板的标记作为历史值继续拒绝。发布归档仍只含白名单文件 |
 | 新产品入口 | 原生主线仍为 `xiaowei`（与 `python -m xiaowei` 相同）的 `serve`、`config check`、`model check`、`storage init/upgrade/cleanup`、`requests resend`；`listen_host` 可为任意地址（默认 `127.0.0.1`）。镜像固定入口复用同一 CLI，在容器内绑定 `0.0.0.0`，宿主机发布地址由 `XW_WEB_BIND_ADDRESS`（默认 `0.0.0.0`）决定。真实模型、用户 StarRocks 与真实飞书未参与 P3-A 验证；旧 CLI/Compose 不是产品入口 |
@@ -36,7 +36,7 @@
 
 ## 3. 当前计划与下一项工作
 
-**当前下一步：** 对本次 P4 文档修订作精确 SHA 独立审查；通过后按 [P4 计划 G0](docs/superpowers/plans/2026-10-09-monitoring-mcp.md#3-实施切片与验收) 先验证 Prometheus 代表工具与共用 MCP 协议，再由 R1 做现有 MCP 地址校验的最小修改和正式装配。Grafana/Alertmanager 及写工具协议在各自切片启用前核对；W5 验证群 Action 持久化、批准后经治理层执行，不做 SDK RunState 跨消息恢复。P3 的真实 Vertex/飞书/StarRocks 验收另按既有计划接续，不能被 P4 协议检查替代。PR B 的日期函数、超长值和槽位超时修订已随 PR #63 合入主线 `5b36375`；其真实公司环境结果仍没有本工作树证据。
+**当前下一步：** 将本次 P4 文档修订以精确 SHA 再做独立复核；通过后按 [P4 计划 G0](docs/superpowers/plans/2026-10-09-monitoring-mcp.md#3-实施切片与验收) 先验证 Prometheus 代表工具、带/不带认证头及共用 MCP 协议，再由 R1 做远端 HTTP、按源有界重连和正式装配。Grafana/Alertmanager 的认证与远端工具选择在各自写切片启用前核对；W5 验证提议 Evidence、群 `sent` 批准、现有治理层执行及群 Session 结果，不做 SDK RunState 跨消息恢复。P3 的真实 Vertex/飞书/StarRocks 验收另按既有计划接续，不能被 P4 协议检查替代。PR B 的日期函数、超长值和槽位超时修订已随 PR #63 合入主线 `5b36375`；其真实公司环境结果仍没有本工作树证据。
 
 **Vertex 正常输出修复（PR #61 已合入 main `8fcb097`；新镜像发布与公司部署尚未完成）：** 基于 `40e5983` 修复用户报告的 Vertex `response_rejected`，按锁定 SDK 0.22.3 的公开 `ToolExecutionConfig` 限制同轮函数工具并发为 4，适配器把合法多调用交给 Runner，并按 Vertex 规则回传函数调用/结果与首个调用的签名。阶段日志只写白名单 `reject_reason`；提示词要求分析不重画事实表格。协议替身、真 SDK Runner、隔离 PostgreSQL 与 recording Adapter 的回归只证明离线行为。提交须按精确 SHA 独立复审；复审通过后，真实 Vertex 上不带库名的 `desc`、拒收原因码和分析质量仍须由获准公司环境验证，不在本任务执行。
 
