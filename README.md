@@ -17,7 +17,7 @@
 
 **P2.5 与后续增量：** P2.5 开放账号实际 SELECT 范围、复杂 SQL、多集群和单 Agent 自然语言工具选择；随后增加指定飞书群共享与排队，均在 P3 前完成。产品边界见 [ARCHITECTURE](ARCHITECTURE.md#p25-scope)，实施顺序见 [DEVELOPMENT_PLAN](DEVELOPMENT_PLAN.md#6-p25-与飞书单群增量)。下文命令、配置和诊断用法描述当前主线；配置已改为 `targets` 多目标格式（P2.5 Task 1），数据范围改为只读账号实际可 SELECT 的对象（P2.5 Task 2）；跨库与复杂 SQL 已实现（P2.5 Task 3），搜表分页与多库慢查询（Task 6）、普通消息由单 Agent 判断是否查询（Task 7）均已合入。原 P2.5 Task 4 已取消，查询沿用权限、SQLGuard 和运行限额，EXPLAIN LOGICAL 用于按需诊断（见上述产品边界）。P2.5 的离线与隔离服务证据已齐（Task 8，见 AGENT_HANDOFF）；真实模型、用户 StarRocks 与飞书的实战验证在 P3。
 
-**P4 监控增量（仅规划）：** 已确定用同一 Agent 调查获准 Prometheus、Grafana 与独立 Alertmanager，并在指定飞书群对首批监控写动作逐次审批。Web 和飞书单聊仍只调查；当前主线尚未把这些外部 Server 装入 `serve`，也没有监控写入口。产品与权限边界见 [监控接入设计](ARCHITECTURE.md#monitoring-mcp)，切片与门槛见 [实施计划](docs/superpowers/plans/2026-10-09-monitoring-mcp.md)。下文正式命令和配置示例不包含尚未实现的监控配置。
+**P4 监控增量（分片开发中）：** 已确定用同一 Agent 调查获准 Prometheus、Grafana 与独立 Alertmanager，并在指定飞书群对首批监控写动作逐次审批。Web 和飞书单聊仍只调查；G0 仅验证 Prometheus MCP 代表读工具的协议，尚未把监控源装入 `serve`，也没有监控写入口。产品与权限边界见 [监控接入设计](ARCHITECTURE.md#monitoring-mcp)，切片与门槛见 [实施计划](docs/superpowers/plans/2026-10-09-monitoring-mcp.md)，当前证据见 [handoff](AGENT_HANDOFF.md)。下文正式命令和配置示例不包含尚未实现的监控配置。
 
 ## 最小产品形态
 

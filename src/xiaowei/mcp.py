@@ -227,23 +227,55 @@ def _bindings(
 def _verified(
     listed: list[MCPTool], planned: dict[str, _Binding], config: MCPServerConfig
 ) -> list[str]:
-    """本 Server 上与登记一致的工具：远端恰有一个同名工具，参数 schema 的形状相同。
+    """本 Server 上与登记一致的工具：远端恰有一个同名工具，且接受本地的参数形状。
 
     远端生成的标题/说明各不相同；远端对象是否接受额外字段也不影响调用，因为发出的参数总是
-    先经策略参数模型（禁止额外字段）校验。映射的值类型等其他差异一律视为不符。
+    先经策略参数模型（禁止额外字段）校验。远端可多出本地不开放的可选字段；新增必填
+    字段、映射的值类型等其他差异一律视为不符。
     """
     verified = []
     for name, binding in planned.items():
         if binding.config is not config:
             continue
         matches = [tool for tool in listed if tool.name == binding.remote_name]
-        if len(matches) == 1 and schema_shape(
-            matches[0].input_schema, ignore_extra_flags=True
-        ) == schema_shape(binding.contract.input_schema, ignore_extra_flags=True):
+        if len(matches) == 1 and _accepts_input(
+            binding.contract.input_schema, matches[0].input_schema
+        ):
             verified.append(name)
         else:
             logger.warning("MCP 工具 %s 未发现或契约不符，已隐藏", binding.contract.tool_id)
     return verified
+
+
+def _accepts_input(local: dict[str, object], remote: dict[str, object]) -> bool:
+    """远端须接收本地会发送的全部字段；省略远端额外的可选字段是安全的。"""
+    expected = schema_shape(local, ignore_extra_flags=True)
+    offered = schema_shape(remote, ignore_extra_flags=True)
+    if expected == offered:
+        return True
+    if not isinstance(expected, dict) or not isinstance(offered, dict):
+        return False
+    simple_object = {"type", "properties", "required"}
+    if set(expected) != simple_object or set(offered) != simple_object:
+        return False
+    if expected["type"] != "object" or offered["type"] != "object":
+        return False
+    local_fields, remote_fields = expected["properties"], offered["properties"]
+    local_required, remote_required = expected["required"], offered["required"]
+    if (
+        not isinstance(local_fields, dict)
+        or not isinstance(remote_fields, dict)
+        or not isinstance(local_required, list)
+        or not isinstance(remote_required, list)
+        or not all(isinstance(name, str) for name in local_required)
+        or not all(isinstance(name, str) for name in remote_required)
+        or len(set(local_required)) != len(local_required)
+        or len(set(remote_required)) != len(remote_required)
+        or set(local_required) != set(local_fields)
+        or not set(remote_required) <= set(local_fields) <= set(remote_fields)
+    ):
+        return False
+    return all(local_fields[name] == remote_fields[name] for name in local_fields)
 
 
 def _client_factory(
