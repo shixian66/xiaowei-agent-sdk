@@ -153,10 +153,10 @@ Web 宿主发布地址由 `.env` 的 `XW_WEB_BIND_ADDRESS` 决定，缺省 `0.0.
 
 ## 8. P4 监控增量与之后的扩展
 
-P4 的已批准范围只在 [ARCHITECTURE §5「监控接入」](ARCHITECTURE.md#monitoring-mcp) 定义；任务、门槛与验收见 [监控 MCP 增量实施计划](docs/superpowers/plans/2026-10-09-monitoring-mcp.md)。协议验证可在 P3 真实环境验收期间独立推进；生产写开放须先完成三源相关读取、群审批恢复与对应目标环境验证。P4 不回写 P1–P3 的 StarRocks 只读验收结论，监控代码/离线检查、真实三源、公司部署与用户接受分别记证。
+P4 的已批准范围只在 [ARCHITECTURE §5「监控接入」](ARCHITECTURE.md#monitoring-mcp) 定义；任务、门槛与验收见 [监控 MCP 增量实施计划](docs/superpowers/plans/2026-10-09-monitoring-mcp.md)。共用协议验证可在 P3 真实环境验收期间独立推进；每项生产写开放须先完成对应源的读取、群 Action 批准闭环与该源真实环境验证，不要求其他监控源先完成。P4 不回写 P1–P3 的 StarRocks 只读验收结论，监控代码/离线检查、真实三源、公司部署与用户接受分别记证。
 
 P4 之外再根据实际使用决定：多群管理、跨渠道身份与会话、正式多人 Web、导出、后台长任务、新 transport/认证方式、多 Agent、TiDB/MySQL 或数据库 MCP。多个 StarRocks 集群已在 P2.5，单群在其后、P3 前；审计慢查询已在 P2，不能重复列为未来交付。数据库 MCP 的重评条件见 ARCHITECTURE §5。其他生产写动作（含原生 Prometheus 规则文件、Grafana 托管规则、StarRocks DDL/DML、重启与发布）不因 P4 的审批能力自动获准，逐项按 §4 的 Action 契约另行决定。
 
-此前“DDL 是首个写场景、通过独立写 MCP Server 执行”的预想已被本次真实监控写需求取代；DDL 路径仍待后续独立决定，不以旧接入约定作为 P4 前提。P4 的 SDK interruptions / RunState 恢复缺口列为协议门槛，未通过前不开放任何监控写动作。
+此前“DDL 是首个写场景、通过独立写 MCP Server 执行”的预想已被本次真实监控写需求取代；DDL 路径仍待后续独立决定，不以旧接入约定作为 P4 前提。群批准采用持久 Action 与确定性执行，不跨消息恢复 SDK RunState；Action 绑定、一次执行机会、调用前复核和未知结果处置未验证通过前，不开放对应监控写动作。
 
 旧代码复用是每个切片的局部判断。没有直接消费者或依赖过重的旧资产不移植；不再单列“保留整个 M5 底座”的迁移阶段。

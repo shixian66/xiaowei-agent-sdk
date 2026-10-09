@@ -36,7 +36,7 @@
 
 ## 3. 当前计划与下一项工作
 
-**当前下一步：** 对本次 P4 文档修订作精确 SHA 独立审查；通过后按 [P4 计划 G0](docs/superpowers/plans/2026-10-09-monitoring-mcp.md#3-实施切片与验收) 验证三种 Server 的选中工具协议、外部内网连接与上游凭据隔离，以及 SDK 群审批跨进程恢复。R1 再做现有 MCP 地址校验的最小修改和正式装配；G0 不成立时不进入写功能。P3 的真实 Vertex/飞书/StarRocks 验收另按既有计划接续，不能被 P4 协议检查替代。PR B 的日期函数、超长值和槽位超时修订已随 PR #63 合入主线 `5b36375`；其真实公司环境结果仍没有本工作树证据。
+**当前下一步：** 对本次 P4 文档修订作精确 SHA 独立审查；通过后按 [P4 计划 G0](docs/superpowers/plans/2026-10-09-monitoring-mcp.md#3-实施切片与验收) 先验证 Prometheus 代表工具与共用 MCP 协议，再由 R1 做现有 MCP 地址校验的最小修改和正式装配。Grafana/Alertmanager 及写工具协议在各自切片启用前核对；W5 验证群 Action 持久化、批准后经治理层执行，不做 SDK RunState 跨消息恢复。P3 的真实 Vertex/飞书/StarRocks 验收另按既有计划接续，不能被 P4 协议检查替代。PR B 的日期函数、超长值和槽位超时修订已随 PR #63 合入主线 `5b36375`；其真实公司环境结果仍没有本工作树证据。
 
 **Vertex 正常输出修复（PR #61 已合入 main `8fcb097`；新镜像发布与公司部署尚未完成）：** 基于 `40e5983` 修复用户报告的 Vertex `response_rejected`，按锁定 SDK 0.22.3 的公开 `ToolExecutionConfig` 限制同轮函数工具并发为 4，适配器把合法多调用交给 Runner，并按 Vertex 规则回传函数调用/结果与首个调用的签名。阶段日志只写白名单 `reject_reason`；提示词要求分析不重画事实表格。协议替身、真 SDK Runner、隔离 PostgreSQL 与 recording Adapter 的回归只证明离线行为。提交须按精确 SHA 独立复审；复审通过后，真实 Vertex 上不带库名的 `desc`、拒收原因码和分析质量仍须由获准公司环境验证，不在本任务执行。
 
