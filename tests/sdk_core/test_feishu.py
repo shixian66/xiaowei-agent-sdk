@@ -21,6 +21,7 @@ import pytest
 from lark_channel.channel import FeishuChannel
 from lark_channel.channel.errors import FeishuChannelErrorCode, SendError
 from lark_channel.channel.types import SendResult
+from lark_channel.core.const import FEISHU_DOMAIN, LARK_DOMAIN
 from pydantic import ValidationError
 from sqlalchemy import text as text_sql
 from tests.sdk_core.synthetic_tools import QUERY_TOOL, TARGET
@@ -1229,10 +1230,18 @@ def test_send_result_mapping(result: Any, expected: str) -> None:
 # ---- SDK 装配（不连网） ----------------------------------------------------------------------
 
 
-def test_sdk_channel_is_configured_for_single_text_sends(monkeypatch: pytest.MonkeyPatch) -> None:
+@pytest.mark.parametrize(
+    ("domain", "expected"),
+    [(None, FEISHU_DOMAIN), ("feishu", FEISHU_DOMAIN), ("lark", LARK_DOMAIN)],
+)
+def test_sdk_channel_is_configured_for_single_text_sends(
+    monkeypatch: pytest.MonkeyPatch, domain: str | None, expected: str
+) -> None:
     monkeypatch.setenv("XW_TEST_FEISHU_SECRET", "not-a-real-secret")
-    channel = lark_channel(config(max_reply_chars=1500))
+    options = {} if domain is None else {"domain": domain}
+    channel = lark_channel(config(max_reply_chars=1500, **options))
     cfg = channel.config
+    assert cfg.domain == expected
     assert cfg.outbound.retry.max_attempts == 1 and cfg.outbound.text_chunk_limit == 1500
     assert cfg.inbound.emit_raw_events and not cfg.inbound.include_raw
     assert not cfg.inbound.expand_merge_forward and not cfg.inbound.fetch_interactive_card
@@ -1243,19 +1252,25 @@ def test_sdk_channel_is_configured_for_single_text_sends(monkeypatch: pytest.Mon
 
 
 @pytest.mark.parametrize(
-    ("status", "body", "expected"),
+    ("status", "body", "expected", "domain"),
     [
-        (200, b'{"code": 0, "msg": "success", "data": {"message_id": "om_sent"}}', "sent"),
-        (200, b'{"code": 230002, "msg": "bot not in chat"}', "failed"),
-        (500, b"<html>bad gateway</html>", "unknown"),
+        (
+            200,
+            b'{"code": 0, "msg": "success", "data": {"message_id": "om_sent"}}',
+            "sent",
+            "feishu",
+        ),
+        (200, b'{"code": 0, "msg": "success", "data": {"message_id": "om_sent"}}', "sent", "lark"),
+        (200, b'{"code": 230002, "msg": "bot not in chat"}', "failed", "feishu"),
+        (500, b"<html>bad gateway</html>", "unknown", "feishu"),
         # 没有业务 code 的 HTTP 错误：SDK 1.4.0 把它当作 code 0 的成功（没有 message_id）
-        (500, b"{}", "unknown"),
-        (502, b'{"msg": "bad gateway"}', "unknown"),
-        (404, b'{"msg": "not found"}', "unknown"),
+        (500, b"{}", "unknown", "feishu"),
+        (502, b'{"msg": "bad gateway"}', "unknown", "feishu"),
+        (404, b'{"msg": "not found"}', "unknown", "feishu"),
     ],
 )
 async def test_real_sdk_send_maps_http_outcomes_without_retry(
-    monkeypatch: pytest.MonkeyPatch, status: int, body: bytes, expected: str
+    monkeypatch: pytest.MonkeyPatch, status: int, body: bytes, expected: str, domain: str
 ) -> None:
     """产品装配的真实 SDK 对 loopback 合成 OpenAPI 单次发送；只有带 message_id 的成功才算已发出。"""
     from starlette.applications import Starlette
@@ -1283,7 +1298,8 @@ async def test_real_sdk_send_maps_http_outcomes_without_retry(
 
     monkeypatch.setenv("XW_TEST_FEISHU_SECRET", "not-a-real-secret")
     with serve(build, path="") as running:
-        product = lark_channel(config()).config
+        product = lark_channel(config(domain=domain)).config
+        assert product.domain == (LARK_DOMAIN if domain == "lark" else FEISHU_DOMAIN)
         channel = FeishuChannel(config=dataclasses.replace(product, domain=running.url))
         try:
             outcome = await LarkTransport(channel, config()).send("oc_alice", "合成回复")

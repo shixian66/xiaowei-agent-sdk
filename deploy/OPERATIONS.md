@@ -171,6 +171,18 @@ ssh -N -L 127.0.0.1:8501:127.0.0.1:8501 <服务器>
 升级时在 `/opt/xiaowei/releases/<新 SHA>`）：把它的全部内容作为 `feishu` 的值粘贴进去，替换其中的
 待填写标记；不启用指定群时把 `group` 改成 `null`。
 
+`feishu.domain` 只能填 `"feishu"` 或 `"lark"`，省略时沿用原来的 `"feishu"`。看应用后台网址：
+`open.feishu.cn` 对应 `"feishu"`，`open.larksuite.com` 对应 `"lark"`。这个字段同时决定
+消息 API 和长连接端点。编辑后运行 `docker compose --env-file .env run --rm --no-deps xiaowei config check`，
+再重建小维容器使配置生效。
+
+如果 `/readyz` 显示 `"feishu":"unavailable"`，且启动日志为 `error_code=not_connected`，先只读核对
+启动日志中的固定错误码、`xiaowei.json` 的 `feishu.domain`（不要输出其他配置字段）和应用后台网址。
+`client_code=1000040351` 曾对应 Lark 应用使用飞书国内域名的报错；该整数码不能单独证明所有失败
+都由域名导致。两处域名一致仍连不上时，保留错误码再排查，不在日志里打印第三方异常正文或凭据。
+回退到不认识 `feishu.domain` 的旧镜像前，先从 `xiaowei.json` 删除此字段，再运行旧镜像的
+`config check`；旧版的配置校验会拒绝新字段。
+
 `feishu.users` 是允许单聊的名单，键是用户的 `open_id`，值是内部 subject。名单可以为空：为空时
 单聊没有任何人获得权限；配置了指定群时，群成员仍按 `group.tools` 在群里使用，与单聊名单无关。
 

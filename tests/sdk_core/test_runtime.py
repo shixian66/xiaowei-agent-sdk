@@ -12,6 +12,7 @@ SDK 公开面替身（``feishu_channel``）。
 import asyncio
 import copy
 import json
+import logging
 import socket
 import threading
 from collections.abc import AsyncIterator, Iterator
@@ -19,14 +20,16 @@ from contextlib import asynccontextmanager, contextmanager
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import httpx
 import httpx2
 import pytest
 from asyncmy.errors import OperationalError, ProgrammingError
-from lark_channel.channel.errors import FeishuChannelErrorCode, SendError
+from lark_channel.channel.errors import FeishuChannelError, FeishuChannelErrorCode, SendError
 from lark_channel.channel.types import SendResult
+from lark_channel.ws.exception import ClientException
 from pydantic import SecretStr
 from sqlalchemy import text
 from sqlalchemy.engine import URL
@@ -1253,6 +1256,79 @@ async def test_feishu_unavailable_at_startup_leaves_web_serving(env: Env) -> Non
         assert await served.finish() == 0
 
 
+@pytest.mark.parametrize(
+    ("case", "expected"),
+    [
+        (
+            "sdk_client",
+            "飞书长连接未能启动，飞书不可用：FeishuChannelError "
+            "error_code=not_connected client_code=1000040351",
+        ),
+        (
+            "sdk_no_client",
+            "飞书长连接未能启动，飞书不可用：FeishuChannelError error_code=not_connected",
+        ),
+        (
+            "sdk_invalid_client_code",
+            "飞书长连接未能启动，飞书不可用：FeishuChannelError error_code=not_connected",
+        ),
+        ("other", "飞书长连接未能启动，飞书不可用：RuntimeError"),
+    ],
+)
+async def test_feishu_start_failure_logs_only_safe_codes(
+    case: str, expected: str, caplog: pytest.LogCaptureFixture
+) -> None:
+    sentinel = "https://secret-host.example.invalid/private"
+    client_error = ClientException(1000040351, sentinel)
+    if case == "sdk_invalid_client_code":
+        client_error.code = sentinel  # type: ignore[assignment]
+    if case == "other":
+        failure: Exception = RuntimeError(sentinel)
+        failure.__cause__ = client_error
+    else:
+        cause = client_error if case != "sdk_no_client" else None
+        failure = FeishuChannelError(FeishuChannelErrorCode.NOT_CONNECTED, sentinel, cause=cause)
+
+    class FailedTransport:
+        def bot_open_id(self) -> None:
+            return None
+
+        async def start(self, receive: object) -> None:
+            del receive
+            raise failure
+
+        async def send(self, *args: Any, **kwargs: Any) -> str:
+            del args, kwargs
+            return "sent"
+
+    config = runtime.ServeConfig.model_validate(serve_config(18501, feishu=feishu_config()))
+    service = SimpleNamespace(
+        max_concurrent_turns=4,
+        results=SimpleNamespace(store=SimpleNamespace(readiness=Readiness())),
+    )
+    components: dict[str, str] = {}
+    with caplog.at_level(logging.ERROR, logger="xiaowei.runtime"):
+        started = await runtime._start_feishu(
+            config,
+            SimpleNamespace(service=service),
+            Clock(),
+            FailedTransport(),  # type: ignore[arg-type]
+            components,
+            asyncio.Event(),
+        )
+
+    assert started is not None and components == {"feishu": "unavailable"}
+    records = [
+        record.getMessage()
+        for record in caplog.records
+        if record.name == "xiaowei.runtime" and record.levelno == logging.ERROR
+    ]
+    assert records == [expected]
+    assert sentinel not in caplog.text
+    started.consumers.cancel()
+    await asyncio.gather(started.consumers, return_exceptions=True)
+
+
 # ---- 显式重发 ------------------------------------------------------------------------
 
 
@@ -1875,6 +1951,23 @@ def _load(tmp_path: Path, values: dict[str, Any]) -> runtime.ServeConfig:
     path = tmp_path / "xiaowei.json"
     path.write_text(json.dumps(values, ensure_ascii=False), encoding="utf-8")
     return runtime.load_config(path)
+
+
+@pytest.mark.parametrize("domain", ["feishu", "lark"])
+def test_feishu_domain_is_accepted_by_full_config(tmp_path: Path, domain: str) -> None:
+    config = _load(tmp_path, serve_config(18501, feishu=feishu_config(domain=domain)))
+    assert config.feishu is not None and config.feishu.domain == domain
+
+
+@pytest.mark.parametrize("domain", ["https://secret.example.invalid", "LARK", ""])
+def test_invalid_feishu_domain_is_rejected_without_echo(tmp_path: Path, domain: str) -> None:
+    with pytest.raises(runtime.ConfigError) as raised:
+        _load(tmp_path, serve_config(18501, feishu=feishu_config(domain=domain)))
+    message = str(raised.value)
+    assert "feishu.domain" in message
+    assert "input_value" not in message
+    if domain:
+        assert domain not in message
 
 
 def test_empty_feishu_users_without_group_is_valid(tmp_path: Path) -> None:
