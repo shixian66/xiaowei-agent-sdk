@@ -203,11 +203,10 @@ MCP Integration 的治理必须覆盖实际发送动作，不能只过滤 `list_
 
 ### 监控接入：Prometheus、Grafana 与独立 Alertmanager（已批准设计，尚未实现）
 
-**范围。** 沿用一个 SDK Agent、Web/飞书薄入口、静态 MCP 连接、受治理工具与 Evidence。Prometheus 和 Grafana 优先使用各自官方 MCP Server；独立 Prometheus Alertmanager 先验证社区 MCP Server，若其协议、安全或维护条件不满足，只为 Alertmanager API v2 实现薄本地 Adapter，不自建业务 MCP Server。Server 版本、所选工具的真实输入/输出、认证与部署方式须先锁版验证；远端工具目录不能直接整体交给模型。StarRocks 路径及 P3 验收范围不因监控规划自动改变。
+**范围与部署。** 沿用一个 SDK Agent、Web/飞书薄入口、静态 MCP 连接、受治理工具与 Evidence。监控 MCP Server 在小维服务器节点之外独立部署和维护；小维只配置固定远端 HTTPS 地址、认证引用、获准工具及监控源权限，不在本机 Compose 中增设 MCP 容器或代管其生命周期。Prometheus 和 Grafana 优先使用各自官方 MCP Server；独立 Prometheus Alertmanager 先验证社区 MCP Server，若其协议、安全或维护条件不满足，只为外部 Alertmanager API v2 实现薄本地 Adapter，不自建业务 MCP Server。Server 版本、所选工具的真实输入/输出、认证与部署方式须先锁版验证；远端工具目录不能直接整体交给模型。StarRocks 路径及 P3 验收范围不因监控规划自动改变。
 
 **Agent 自主调查。** 用户提出问题后，同一个 Agent 自行决定是否查、先查哪一源、如何发现指标/标签、怎样组合 PromQL、是否根据中途证据继续查其他源或向用户澄清；没有规定的“Prometheus → Grafana → Alertmanager”步骤，也不按预置指标模板或固定诊断工作流运行。确定性治理只在工具可见性、每次 I/O 前的源/参数/预算边界、结果/Evidence 和生产写批准处生效，不替 Agent 编排调查。实施切片的先后是开发依赖，不是用户请求的运行顺序。
 
-**监控源权限。** Prometheus、Grafana、Alertmanager 分别有可信目标 ID、固定端点及独立的读/写授权；授权按监控源共享，获准者可调查该源可见的全部主机、指标、告警和 Grafana 对象，不另设主机名、指标/PromQL 模板、Dashboard UID、文件夹或数据源对象白名单。Web 的共用 `operator_id` 与飞书单聊仅用于已授权的读取/调查；指定飞书群按真实 `chat_id`、成员 `open_id` 和每个监控源的群读授权接入。服务账号在远端能访问的范围、Grafana 组织权限与网络出口必须与这份共享授权相符；不能把共享凭据当作飞书用户身份。Grafana 读取 Dashboard/Panel 定义不自动允许查询其引用的其他数据源：实时数据走已授权的 Prometheus 源，Grafana 代理查询只有能绑定到已授权源并满足同等资源限制时才开放；否则只展示定义并标明未核实实时状态。首次发送、历史、重发及会话回放均重新检查当前源与接收权限；无法可靠验证的历史内容拒绝交付，历史快照不冒充现状。
 **监控源权限。** Prometheus、Grafana、Alertmanager 分别有可信目标 ID、固定端点及独立的读/写授权；组织/租户也由可信配置固定，模型参数或请求头不能切换。授权按监控源共享，获准者可调查该源可见的全部主机、指标、告警和 Grafana 对象，不另设主机名、指标/PromQL 模板、Dashboard UID、文件夹或数据源对象白名单。Web 的共用 `operator_id` 与飞书单聊仅用于已授权的读取/调查；指定飞书群按真实 `chat_id`、成员 `open_id` 和每个监控源的群读授权接入。服务账号在远端能访问的范围、Grafana 组织权限与网络出口必须与这份共享授权相符；不能把共享凭据当作飞书用户身份。Grafana 读取 Dashboard/Panel 定义不自动允许查询其引用的其他数据源：实时数据走已授权的 Prometheus 源，Grafana 代理查询只有能绑定到已授权源并满足同等资源限制时才开放；否则只展示定义并标明未核实实时状态。首次发送、历史、重发及会话回放均重新检查当前源与接收权限；无法可靠验证的历史内容拒绝交付，历史快照不冒充现状。
 
 静态配置改权须先停止或排空旧进程、再以新配置启动；既有 §9 对旧进程已开始轮次的残余窗口仍适用，不能把“每次调用复核”写成跨进程即时撤权。审批等待期间若要撤权，应先停用相应写源或进程，再变更配置；恢复后的执行前必须按新配置重新检查。

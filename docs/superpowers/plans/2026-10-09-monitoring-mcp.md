@@ -19,7 +19,7 @@
 ## 2. 开发前必须定实的契约
 
 1. **工具与源。** 每项工具固定 `server_id / tool_name / target_id / effect / 风险 / 输入输出版本`，启动发现必须与锁版契约相符；调用时再核对源、参数、预算及当前身份。Prometheus 的 `reload`、`quit`、TSDB 管理和 Grafana/Alertmanager 未选写工具不入目录。Grafana Dashboard 内的数据源引用不能借共享 Grafana 凭据绕过 Prometheus/其他源授权。若上游一个工具同时可创建/覆盖，或先返回字段 schema、再执行创建，必须按实际参数分支确认副作用并绑定准确的 Action；不能以工具名推断安全。
-2. **认证与网络。** 每个 MCP Server 与上游系统分别固定身份和秘密引用。Prometheus 官方 HTTP MCP 会转发调用方的 `Authorization` 到 Prometheus，不能把 MCP Bearer 与上游认证假定为可共用；选择经隔离验证的部署/认证拓扑。当前客户端只接受 HTTPS 或 loopback HTTP；Compose 服务名上的普通 HTTP 不能直接填入配置。Grafana MCP 的使用统计在部署参数中显式关闭。版本、TLS、服务账号实际作用域和远端资源保护需要目标环境核对。
+2. **认证与网络。** 监控 MCP Server 部署在小维节点之外，小维只建立固定出站连接，不在本机 Compose 中启动或维护 MCP 进程。每个 MCP Server 与上游系统分别固定身份和秘密引用。Prometheus 官方 HTTP MCP 会转发调用方的 `Authorization` 到 Prometheus，不能把 MCP Bearer 与上游认证假定为可共用；选择经隔离验证的部署/认证拓扑。当前客户端对外只接受 HTTPS，须从小维容器验证 DNS、端口、防火墙、证书信任与服务端身份；私有 CA 若不在当前客户端信任链中，G0 决定最小可信 CA 接入，不关闭证书校验。Grafana MCP 的使用统计在外部部署参数中显式关闭。版本、TLS、服务账号实际作用域和远端资源保护需要目标环境核对。
 3. **读结果。** PromQL、时刻/范围/步长、源与采集时间由可信代码记录；成功证据只对应真实成功调用。Prometheus `warnings`、部分数据与截断须显式传给回答；Dashboard 定义不能冒充实时数据。语法错误可修正仅限可分类的 PromQL 错误、有限次数且计预算；权限、超时、未知结果、协议/投影错误中止本轮。表达式内部窗口和高基数由 Prometheus 服务器限额兜底。
 4. **写状态。** 待审批、拒绝/过期、获准、已占用执行机会、已执行待回读、成功、结果未知、需人工恢复有明确持久状态和唯一动作标识。飞书重投、多人同时批准、进程重启和网络断开不能导致二次写。每个动作的确认材料、回读与补偿按架构 §4/§5；无权审批、关键条件变动、冲突、未知结果在写请求前或执行后按相应状态终止。群确认只准对应本次 Action，不准“以后都同意”。
 5. **数据与权限。** 源级共享许可不等于无边界：监控源由配置授权给人/群，写另需批准名单；远端服务账号必须限制到同一 Grafana 组织和获准上游。四种投影、Evidence 保留/历史复核、Session/模型外发照现有 §9。数据源创建/修改不得接收或展示密码、Token、`secureJsonData`；创建后“待配置凭据”，由用户去 Grafana UI 填写。对 Grafana 数据源 URL/插件连接能力，必须核实远端网络出口，不能靠群确认代替服务端隔离。
@@ -46,9 +46,9 @@
 ## 4. 环境、兼容与恢复
 
 - **开发/协议：** 锁定 `uv.lock` 中 SDK 0.22.3；隔离 PostgreSQL、真 SDK Runner、loopback MCP fixture 和可丢弃的 Prometheus/Grafana/Alertmanager 实例。G0 以所选 Server 的**具体发布版本/镜像 digest**做工具清单与响应样例，不从当前 `main` 文档推断未来固定镜像的行为。社区 Alertmanager Server 若传输、鉴权或返回契约不合适，选 API v2 薄 Adapter，决定与证据写在 G0 的审查记录，不引入第四个常驻服务。官方来源：[Prometheus MCP](https://github.com/prometheus/prometheus-mcp)、[Grafana MCP](https://github.com/grafana/mcp-grafana)、[Alertmanager API v2](https://github.com/prometheus/alertmanager/blob/main/api/v2/openapi.yaml)、[社区候选](https://github.com/ntk148v/alertmanager-mcp-server)。
-- **目标环境：** 先拿到三源及 Grafana 组织的可达地址、服务账号真实权限、网络/TLS 拓扑、Prometheus 生效查询限额、Grafana 出口控制、飞书指定群/审批人 `open_id` 配置和监控数据可发模型/群的范围。只在本地安全引用配置凭据，不在计划、群消息、日志或测试快照写值。Grafana MCP 关闭默认匿名使用统计；不靠小维客户端限时来声称 Prometheus 服务端扫描已受控。[Prometheus 资源参数](https://prometheus.io/docs/prometheus/latest/command-line/prometheus/)、[Grafana MCP 部署说明](https://github.com/grafana/mcp-grafana/blob/main/README.md)。
+- **目标环境：** 外部节点负责所选 MCP Server 的安装、版本、上游连接、TLS 和生命周期；可按实际运维安排共用外部节点，但不进入小维的两容器 Compose。Alertmanager 若走薄 API v2 Adapter，小维直接连接外部 Alertmanager API，不在本机运行替代 Server。先取得从小维应用容器可达的 HTTPS MCP 端点、上游监控源及 Grafana 组织地址、各层服务账号真实权限、网络/证书拓扑、Prometheus 生效查询限额、Grafana 出口控制、飞书指定群/审批人 `open_id` 配置和监控数据可发模型/群的范围。只在对应运行环境的安全引用中配置凭据，不在计划、群消息、日志或测试快照写值。Grafana MCP 关闭默认匿名使用统计；不靠小维客户端限时来声称 Prometheus 服务端扫描已受控。[Prometheus 资源参数](https://prometheus.io/docs/prometheus/latest/command-line/prometheus/)、[Grafana MCP 部署说明](https://github.com/grafana/mcp-grafana/blob/main/README.md)。
 - **兼容：** 保留监控配置为空时的旧启动行为；旧 StarRocks 工具/证据不随新监控目标自动授权。新证据与 Action 用版本化契约和数据库迁移；旧进程不识别新版本应用表时拒绝启动。Server 版本或 schema 改动先在隔离环境重验，未通过时只关闭相应工具/源，不扩大默认权限。Grafana 的 provisioned Dashboard/数据源若目标 API 不允许修改，作为能力不可用明确报告，不绕过 provisioning。
-- **恢复：** 上线前按现有 P3 运维流程备份 PostgreSQL 和操作者配置，保留旧镜像/三种 MCP Server 版本；先读再逐项开放写。升级失败停候选、恢复旧程序所需的数据库备份及原配置，待审批/结果未知 Action 先做只读核实，不自动补跑。监控单源故障不阻断 StarRocks，写工具失联则关闭该动作并留可诊断状态；更换源凭据、撤权或回退后复核旧 Evidence。每种已执行动作的补偿见架构 §5，人工恢复的 ID/操作者/结果必须记录，不能把恢复计划写成已回滚。
+- **恢复：** 上线前按现有 P3 运维流程备份 PostgreSQL 和操作者配置；小维保留旧镜像，外部节点各自保留受测 MCP Server 版本与回退办法，先读再逐项开放写。升级失败停候选、恢复旧程序所需的数据库备份及原配置，待审批/结果未知 Action 先做只读核实，不自动补跑。外部 MCP 故障只关闭受影响监控源/工具，不阻断 StarRocks；写工具失联则关闭该动作并留可诊断状态；更换源凭据、撤权或回退后复核旧 Evidence。每种已执行动作的补偿见架构 §5，人工恢复的 ID/操作者/结果必须记录，不能把恢复计划写成已回滚。
 
 ## 5. 尚未解决的正确性门槛
 
@@ -57,7 +57,7 @@
 | 锁定 SDK `RunState` 能否和 `PolicySession` 的 `get_items(limit)`、现有数据过滤及群中跨消息/跨进程恢复安全组合？ | G0 实验。若不能，W5 阻断；需先以具体证据修订 §4 的审批机制（例如只在 Runner 提案后由应用确定性执行已批准 Action，仍不新增 Agent Loop），再独立审查，不能边做边换语义 |
 | 官方/社区 MCP 的选中工具实际 schema、错误载荷、写幂等性、回读字段与 `is_error` 是否满足严格 JSON 对象契约？ | G0 逐项验证，转换只做获准工具；社区 Alertmanager 不合格则选择薄 API v2 Adapter。未知结果不自动重试 |
 | Grafana `create_datasource` 的建前 schema 查询、Dashboard 创建/覆盖，以及 Alertmanager `post_silence` 的更新能力，能否与选中 Action 明确分开？ | G0 按锁定版本实测参数分支；无法在网络前证明某次调用是只读或批准的准确动作，就不开放该调用，不靠 MCP 的 `readOnlyHint` 判断 |
-| 现有部署是否已有可用 HTTPS MCP 入口，并能隔离 Prometheus 的转发 `Authorization` 和上游账号？ | G0/真实环境确认；没有合格链路则该源不启用，不把 Compose 普通 HTTP 名称当作有效配置 |
+| 外部节点能否提供小维容器可达、证书可信的 HTTPS MCP 入口，并隔离 Prometheus 转发的 `Authorization` 与上游账号？ | G0/真实环境确认；没有合格链路则该源不启用。私有 CA 需验证当前客户端信任方式或做最小受控配置支持，不把普通 HTTP 服务名或跳过证书校验当作完成 |
 | Grafana 的共享服务账号、组织 ACL 与新数据源可连到哪些内网地址，是否与源级共享授权相符？ | R1/C8 以真实环境核实；不满足则不开放相应源或数据源写，不建立对象白名单来掩盖出网越界 |
 | Prometheus 当前生效的 timeout/max-samples/max-concurrency、可接受的查询时间窗与点数是多少？ | P2 前由监控环境负责人提供并验证生效值，据容量在可信配置中定阈值；无服务端边界则不能开放自由 PromQL |
 | 目标 Grafana 版本的 Dashboard API 是否支持所需版本冲突拒绝、历史回读与按组织权限控制？ | G0/D7 实测；不能证明不覆盖他人版本则不启用修改动作 |
