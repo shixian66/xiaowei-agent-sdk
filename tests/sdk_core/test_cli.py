@@ -13,6 +13,7 @@ Task 9。成功轮次与飞书路径在 ``test_runtime.py`` 中经同一装配�
 
 import asyncio
 import json
+import logging
 import os
 import signal
 import socket
@@ -58,6 +59,29 @@ ENTRIES = {
 CANARY = "xw-cli-canary-41f9"
 ENDPOINT = "xw-endpoint-canary-7c2e"  # 只出现在模型端点路径中
 PRESET = {"OPENAI_AGENTS_DONT_LOG_MODEL_DATA": "0", "OPENAI_AGENTS_DONT_LOG_TOOL_DATA": "false"}
+
+
+@pytest.fixture(autouse=True)
+def restore_process_logging() -> Iterator[None]:
+    """进程内调用 CLI 后恢复日志输出，避免后续测试写入已关闭的 capsys stream。
+
+    正式 CLI 每次只运行一次；测试会在同一进程反复调用 main，须隔离其日志装配副作用。
+    不改变被测调用期间的过滤、级别或断言。
+    """
+    root, own, lark = (logging.getLogger(n) for n in ("", "xiaowei", "Lark"))
+    handlers, lark_handlers = list(root.handlers), list(lark.handlers)
+    root_level, own_level = root.level, own.level
+    try:
+        yield
+    finally:
+        for handler in list(root.handlers):
+            if handler not in handlers:
+                root.removeHandler(handler)
+                handler.close()
+        root.handlers[:] = handlers
+        lark.handlers[:] = lark_handlers
+        root.setLevel(root_level)
+        own.setLevel(own_level)
 
 
 def child_env(**extra: str) -> dict[str, str]:

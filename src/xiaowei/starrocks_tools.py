@@ -613,7 +613,8 @@ def starrocks_tools(
             "列出所选集群中当前账号可以查询的数据库名称；用于‘有哪些库’和 SHOW DATABASES。"
             "只含至少有一个可读表或视图的库，不含空库、系统库或没有可读对象的库。"
             f"page_size 为 1 到 {page_rows}，首次 cursor 传 null；next_cursor 非空须原样续取，"
-            "保持 page_size 不变，取到 null 才列完。结构内容变化后旧 cursor 失效。",
+            "保持 page_size 不变，取到 null 才列完。结构内容变化后旧 cursor 失效。"
+            "sql 为结构采集 SQL 模板；elapsed_ms 为本次处理与可读性确认耗时，不是采集 SQL 耗时。",
         ),
         contract(
             LIST_TABLES,
@@ -624,13 +625,16 @@ def starrocks_tools(
             f"page_size 为 1 到 {page_rows}（结果字节放不下时一页会少于它）。第一页 cursor 传 "
             "null；结果的 next_cursor 非空表示还有未返回的匹配，原样传回它并保持 keyword、"
             "database 与 page_size 不变即可取得下一页，为 null 时已全部返回。"
-            "表结构内容变化时 cursor 失效，须从头搜索。",
+            "表结构内容变化时 cursor 失效，须从头搜索。"
+            "sql 为结构采集 SQL 模板；elapsed_ms 为本次处理与可读性确认耗时，不是采集 SQL 耗时。",
         ),
         contract(
             DESCRIBE_TABLE,
             describe_policy,
             "查看一张可查询的表或视图的列、类型、是否可空与注释；"
-            "database 与 table 取自 list_tables 的搜索结果。列多时分次返回：第一次 cursor 传 "
+            "database 与 table 可用用户提供的准确库表名或已有可信证据；不确定时用 list_tables "
+            "搜索。结构取自定期快照，sql 为结构采集 SQL 模板，elapsed_ms 是本次处理耗时"
+            "（含当前可读性确认），不是执行该采集 SQL 的耗时。列多时分次返回：第一次 cursor 传 "
             "null，结果的 next_cursor 非空时原样传回它（库与表不变）取得后续列。"
             "不包含主键、默认值或原始 DDL；不能根据 id 等字段名猜测主键。",
         ),

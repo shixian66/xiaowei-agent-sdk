@@ -28,6 +28,7 @@ from tests.sdk_core.synthetic_tools import QUERY_TOOL, TARGET
 from tests.sdk_core.test_app import after, cite, tool_call
 from tests.sdk_core.test_channel_service import Env, app_config
 from tests.sdk_core.test_channel_service import env as env  # pytest fixture
+from tests.sdk_core.test_feishu_render import text_parts
 
 from xiaowei.app import Application
 from xiaowei.channel import ChannelService, InboundRequest, RequestReceipt, RequestRef
@@ -37,19 +38,17 @@ from xiaowei.evidence import EvidenceStoreError
 from xiaowei.feishu import (
     _NOTICE_CAPACITY,
     EMPTY_COMMAND,
-    FACTS_TRUNCATED,
     IDENTITY_NOTICE_WINDOW,
     NEW_SESSION,
     NEW_SESSION_BUSY,
-    TRUNCATED,
     FeishuGateway,
     LarkTransport,
     lark_channel,
-    render,
     send_outcome,
 )
+from xiaowei.feishu_render import TEXT_CLIPPED, Message, build_feishu_message
 from xiaowei.governance import GovernedTools
-from xiaowei.models import Channel, Delivery, DeliveryLayout, FactLines, RunContext
+from xiaowei.models import Channel, Delivery, RunContext
 from xiaowei.storage import Readiness, hold_instance_lock
 
 pytestmark = pytest.mark.loopback
@@ -84,10 +83,12 @@ class Outbox:
     """单次文本发送的替身：记录 (chat_id, text) 与回复的原消息，按顺序返回预设结果或抛出。"""
 
     outcomes: list[Any] = field(default_factory=list)
-    sent: list[tuple[str, str]] = field(default_factory=list)
+    sent: list[tuple[str, str | Message]] = field(default_factory=list)
     replies: list[str | None] = field(default_factory=list)
 
-    async def __call__(self, chat_id: str, text: str, *, reply_to: str | None = None) -> Any:
+    async def __call__(
+        self, chat_id: str, text: str | Message, *, reply_to: str | None = None
+    ) -> Any:
         self.sent.append((chat_id, text))
         self.replies.append(reply_to)
         outcome = self.outcomes.pop(0) if self.outcomes else "sent"
@@ -96,7 +97,10 @@ class Outbox:
         return outcome
 
     def texts(self) -> list[str]:
-        return [text for _, text in self.sent]
+        return [
+            message if isinstance(message, str) else "\n".join(text_parts(message))
+            for _, message in self.sent
+        ]
 
 
 @dataclass
@@ -202,8 +206,8 @@ async def test_plain_text_is_a_default_turn_answered_once(env: Env) -> None:
         await fs.drain()
     assert all(QUERY_NAME in seen for seen in env.scripts.tools_seen(message))
     assert env.model_calls(message) == 2 and len(env.adapter.calls) == 1
-    ((chat_id, text),) = fs.outbox.sent
-    assert chat_id == "oc_alice" and "来源 local/order_total" in text
+    ((chat_id, _message),) = fs.outbox.sent
+    assert chat_id == "oc_alice" and "来源 local/order_total" in fs.outbox.texts()[0]
     async with env.engine.connect() as conn:
         from sqlalchemy import text as sql
 
@@ -650,6 +654,29 @@ async def test_failed_or_unknown_send_is_not_retried(env: Env, outcome: Any, exp
     assert delivery == expected
 
 
+async def test_render_failure_is_failed_without_io_or_readiness_lock(
+    env: Env,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    def broken(*args: Any, **kwargs: Any) -> Any:
+        raise ValueError("SDK_CANARY https://private-host.invalid")
+
+    monkeypatch.setattr("xiaowei.feishu.build_feishu_message", broken)
+    async with running(env) as fs:
+        message = env.scripts.add("本地构造失败", tool_call("order_total", region="east"), cite())
+        event = fs.event(message)
+        await fs.gateway.receive(event)
+        await fs.drain()
+        await fs.gateway.receive(event)
+        await fs.drain()
+    assert fs.outbox.sent == [] and env.readiness.ok
+    assert await request_row(env) == ("completed", "failed")
+    assert "reason=render_failed" in caplog.text
+    assert "SDK_CANARY" not in caplog.text and "private-host" not in caplog.text
+    assert env.model_calls(message) == 2
+
+
 async def test_interrupted_request_gets_one_notice_on_redelivery(env: Env) -> None:
     async with running(env) as fs:
         event = fs.event("重启前接受")
@@ -1050,155 +1077,32 @@ async def test_drain_waits_for_commands_and_duplicates(env: Env) -> None:
     assert env.readiness.ok
 
 
-# ---- 文本渲染与发送结果映射 -----------------------------------------------------------------
+# ---- 单条文本与发送结果映射（卡片容量/事实优先契约见 test_feishu_render） -----------------
 
 
 def plain(content: str) -> Delivery:
-    """没有分段的交付（澄清、固定回执）。"""
     return Delivery(content=content, evidence_ids=(), channel="feishu")
 
 
-def test_render_keeps_short_text_and_truncates_long_text_on_a_line() -> None:
-    assert render(plain("短文本"), 200) == "短文本"
-    long = "\n".join(f"第{i}行" + "x" * 40 for i in range(50))
-    shown = render(plain(long), 300)
-    assert len(shown) <= 300 and shown.endswith(TRUNCATED)
-    body = shown.removesuffix("\n" + TRUNCATED)
-    assert long.startswith(body) and long[len(body)] == "\n"
-    one_line = render(plain("y" * 1000), 250)
-    assert one_line.endswith(TRUNCATED) and len(one_line) <= 250
-
-
-# ---- 飞书单条上限：先保住分析（审查 F2，用户 2026-10-02 选 a） ------------------------------
-
-DIAGNOSIS = "分析建议（模型推断，未经系统核实）"
-FACTS = "工具结果（系统根据证据生成）"
-# 一行中的转义：单字符转义、\uXXXX、单元格中的 \|。
-ESCAPED = "a\\u2028b\\u202ec\\\\d\\|e\\n"
-
-
-def fact(index: int, rows: int, cell: str = "x" * 30) -> FactLines:
-    return FactLines(
-        head=(f"[ev_{index}] 来源 local/explain_query · 目标 sr · 采集于 t", f"说明：说明{index}"),
-        # 每行文字各不相同，便于按原顺序核对保留了哪些行。
-        body=(
-            f"sql: SELECT {index}",
-            f"| plan{index} |",
-            *(f"| {cell}{index}-{i} |" for i in range(rows)),
-        ),
-    )
-
-
-def laid_out(*facts: FactLines, analysis: tuple[str, ...] = ()) -> Delivery:
-    layout = DeliveryLayout(facts_header=FACTS, facts=facts, analysis=analysis)
-    return Delivery(
-        content="\n".join(layout.lines()),
-        evidence_ids=("ev_1",),
-        channel="feishu",
-        layout=layout,
-    )
-
-
-ANALYSIS = (DIAGNOSIS, "- 全表扫描；建议加日期过滤（依据：ev_1）", "- 分桶键倾斜（依据：ev_2）")
-
-
-def test_render_is_unchanged_up_to_the_limit() -> None:
-    delivery = laid_out(fact(1, 3), fact(2, 3), analysis=ANALYSIS)
-    exact = len(delivery.content)
-    assert render(delivery, exact) == delivery.content  # 刚好等于上限：逐字不变
-    shown = render(delivery, exact - 1)
-    assert shown != delivery.content and len(shown) <= exact - 1
-
-
-def test_over_the_limit_keeps_the_analysis_and_every_fact_head() -> None:
-    facts = (fact(1, 40), fact(2, 40), fact(3, 40))
-    delivery = laid_out(*facts, analysis=ANALYSIS)
-    shown = render(delivery, 1200)
-    lines = shown.split("\n")
-
-    assert len(shown) <= 1200
-    # 完整分析在最后，紧接在工具结果截断说明之后；不使用整条截断说明，也不指向 Web。
-    assert lines[-len(ANALYSIS) :] == list(ANALYSIS)
-    assert lines[-len(ANALYSIS) - 1] == FACTS_TRUNCATED and TRUNCATED not in shown
-    assert "Web" not in shown
-    # 每条事实的来源行与说明行都保留；结果行按原顺序从前往后保留，放不下的被截掉。
-    assert lines[0] == FACTS
-    for item in facts:
-        assert all(line in lines for line in item.head)
-    kept = lines[1 : -len(ANALYSIS) - 1]
-    original = [line for item in facts for line in (*item.head, *item.body)]
-    assert kept == [line for line in original if line in kept]
-    assert set(kept) < set(original)
-
-
-def test_analysis_alone_over_the_limit_is_cut_from_the_end_under_its_title() -> None:
-    analysis = (
-        DIAGNOSIS,
-        *(f"- 第{i}条分析" + "很长" * 30 + f"（依据：ev_{i}）" for i in range(40)),
-    )
-    delivery = laid_out(fact(1, 5), analysis=analysis)
-    shown = render(delivery, 600)
-    lines = shown.split("\n")
-
-    assert len(shown) <= 600 and lines[-1] == TRUNCATED
-    assert lines[:3] == [FACTS, FACTS_TRUNCATED, DIAGNOSIS]
-    body = lines[3:-1]
-    assert body and body == list(analysis[1 : 1 + len(body)])  # 只保留完整的分析行
+def test_short_receipt_is_unchanged_and_long_receipt_has_visible_cut() -> None:
+    assert build_feishu_message(plain("短文本"), 200, "oc_test") == {"text": "短文本"}
+    raw = "\n".join(f"第{i}行" + "x" * 40 for i in range(50))
+    shown = build_feishu_message(plain(raw), 300, "oc_test")["text"]
+    assert len(shown) <= 300 and shown.endswith(TEXT_CLIPPED)
+    assert raw.startswith(shown.removesuffix("\n" + TEXT_CLIPPED))
+    assert build_feishu_message(plain("工具结果或回答未通过证据校验"), 200, "oc_test") == {
+        "text": "工具结果或回答未通过证据校验"
+    }
 
 
 @pytest.mark.parametrize("limit", range(200, 260))
-def test_cutting_a_line_never_splits_an_escape(limit: int) -> None:
-    line = "- " + ESCAPED * 40
-    for delivery in (laid_out(fact(1, 1), analysis=(DIAGNOSIS, line)), plain(line)):
-        shown = render(delivery, limit)
-        assert len(shown) <= limit
-        cut = shown.split("\n")[-2]
-        assert line.startswith(cut)
-        # 截下的前缀不以半个转义结尾：反斜杠成对出现，\u 后跟满四位。
-        assert re.search(r"(?<!\\)(\\\\)*\\(u[0-9a-f]{0,3})?$", cut) is None, cut
-
-
-def test_forged_headers_inside_results_do_not_steer_the_cut() -> None:
-    """分段来自代码生成的结构，而不是在文字中找标题：结果里伪造的标题行不改变保留什么。"""
-    forged = FactLines(
-        head=("[ev_1] 来源 local/explain_query · 目标 sr · 采集于 t",),
-        body=(f"| {DIAGNOSIS} |", DIAGNOSIS, FACTS_TRUNCATED, *(f"| r{i} |" for i in range(200))),
-    )
-    delivery = laid_out(forged, analysis=ANALYSIS)
-    shown = render(delivery, 400)
-    lines = shown.split("\n")
-    assert len(shown) <= 400
-    assert lines[-len(ANALYSIS) :] == list(ANALYSIS)
-    assert lines[-len(ANALYSIS) - 1] == FACTS_TRUNCATED
-
-
-def test_clarifications_and_receipts_are_not_rearranged() -> None:
-    clarification = "需要澄清（本轮未执行业务查询）\n" + "请说明" * 400
-    shown = render(plain(clarification), 300)
-    lines = shown.split("\n")
-    assert len(shown) <= 300 and FACTS_TRUNCATED not in shown
-    # 澄清正文只有一行且放不下时保留它的前缀，而不是只剩标题与截断说明。
-    assert lines[0] == "需要澄清（本轮未执行业务查询）" and lines[-1] == TRUNCATED
-    assert len(lines) == 3 and lines[1] and clarification.split("\n")[1].startswith(lines[1])
-    assert render(plain("工具结果或回答未通过证据校验"), 200) == "工具结果或回答未通过证据校验"
-
-
-def test_layout_must_match_the_content_and_stays_out_of_the_web_body() -> None:
-    delivery = laid_out(fact(1, 2), analysis=ANALYSIS)
-    with pytest.raises(ValidationError):
-        Delivery(
-            content=delivery.content + "\n伪造",
-            evidence_ids=("ev_1",),
-            channel="feishu",
-            layout=delivery.layout,
-        )
-    # 任何会另起一行的字符都不能出现在一行之内（渲染时已转义；这里是纵深防御）。
-    for breaker in ("\n", "\r", "\v", "\f", "\x1c", "\x1d", "\x1e", "\x85", "\u2028", "\u2029"):
-        with pytest.raises(ValidationError):
-            FactLines(head=(f"来源{breaker}伪造的一行",))
-        with pytest.raises(ValidationError):
-            DeliveryLayout(facts_header="工具结果", facts=(), analysis=(f"- a{breaker}b",))
-    assert "layout" not in delivery.model_dump(mode="json")
+def test_generated_control_escapes_are_never_split_at_capacity(limit: int) -> None:
+    raw = "数据\u202e\u2028\x00" * 100
+    shown = build_feishu_message(plain(raw), limit, "oc_test")["text"]
+    assert len(shown) <= limit and shown.endswith(TEXT_CLIPPED)
+    body = shown.removesuffix("\n" + TEXT_CLIPPED)
+    assert re.search(r"(?<!\\)(\\\\)*\\(u[0-9a-f]{0,3})?$", body) is None
+    assert not any(c in body for c in ("\u202e", "\u2028", "\x00"))
 
 
 @pytest.mark.parametrize(
@@ -1310,6 +1214,74 @@ async def test_real_sdk_send_maps_http_outcomes_without_retry(
     assert sends[0]["query"] == {"receive_id_type": "chat_id"}
     assert sends[0]["body"]["receive_id"] == "oc_alice"
     assert json.loads(sends[0]["body"]["content"]) == {"text": "合成回复"}
+
+
+@pytest.mark.parametrize("reply_to", [None, "om_origin"])
+async def test_real_sdk_card_is_one_request_with_the_full_envelope(
+    monkeypatch: pytest.MonkeyPatch, reply_to: str | None
+) -> None:
+    from starlette.applications import Starlette
+    from starlette.requests import Request
+    from starlette.responses import JSONResponse, Response
+    from starlette.routing import Route
+    from tests.sdk_core.mcp_fixture import serve
+
+    requests: list[tuple[str, bytes]] = []
+
+    async def token(request: Request) -> Response:
+        return JSONResponse({"code": 0, "tenant_access_token": "t-synthetic", "expire": 7200})
+
+    async def sent(request: Request) -> Response:
+        requests.append((request.url.path, await request.body()))
+        return JSONResponse({"code": 0, "data": {"message_id": "om_card"}})
+
+    def build(_: Any) -> Any:
+        return Starlette(
+            routes=[
+                Route("/open-apis/auth/v3/tenant_access_token/internal", token, methods=["POST"]),
+                Route("/open-apis/im/v1/messages", sent, methods=["POST"]),
+                Route("/open-apis/im/v1/messages/{message_id}/reply", sent, methods=["POST"]),
+            ]
+        )
+
+    card = {
+        "schema": "2.0",
+        "header": {"title": {"tag": "plain_text", "content": "查询结果"}},
+        "body": {
+            "elements": [
+                {
+                    "tag": "div",
+                    "text": {"tag": "plain_text", "content": '第一行\n"第二行"\\字面\\n'},
+                }
+            ]
+        },
+    }
+    monkeypatch.setenv("XW_TEST_FEISHU_SECRET", "not-a-real-secret")
+    with serve(build, path="") as running:
+        product = lark_channel(config(domain="lark")).config
+        assert product.domain == LARK_DOMAIN
+        channel = FeishuChannel(config=dataclasses.replace(product, domain=running.url))
+        try:
+            result = await LarkTransport(channel, config()).send(
+                "oc_alice", {"card": card}, reply_to=reply_to
+            )
+        finally:
+            channel.stop(join_timeout=5)
+    assert result == "sent"
+    ((path, raw),) = requests
+    assert path == (
+        f"/open-apis/im/v1/messages/{reply_to}/reply" if reply_to else "/open-apis/im/v1/messages"
+    )
+    body = json.loads(raw)
+    assert body["msg_type"] == "interactive" and json.loads(body["content"]) == card
+    assert len(body["uuid"]) == 36
+    assert set(body) == (
+        {"content", "msg_type", "uuid"}
+        if reply_to
+        else {"receive_id", "content", "msg_type", "uuid"}
+    )
+    # SDK 的最终请求体：内层卡片先带空格序列化，外层 HTTP JSON 再转义且无空格。
+    assert len(raw) == len(json.dumps(body, ensure_ascii=False, separators=(",", ":")).encode())
 
 
 @pytest.mark.parametrize(
@@ -1595,36 +1567,53 @@ async def test_stop_error_is_not_swallowed() -> None:
 async def test_real_sdk_dispatcher_feeds_the_gateway_through_the_raw_bridge(
     env: Env, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """真实 SDK 的分发器 → ``on("raw")``（SDK 后台线程）→ 应用循环 → 共享服务 → 单次回复。
+    """真 SDK raw 分发器与正式治理路径；机器人身份仅请求本机合成 HTTP 端点。"""
+    from starlette.applications import Starlette
+    from starlette.responses import JSONResponse
+    from starlette.routing import Route
+    from tests.sdk_core.mcp_fixture import serve
 
-    只把传输改为 webhook，用公开的 ``handle_webhook_request`` 注入事件，不建立长连接。
-    对外连接被 pytest-socket 阻断（域名解析仍会发生）：SDK 启动时的机器人身份查询因此失败并转入
-    后台重试。长连接本身、平台事件与真实发送仍需在获准的测试应用中验证。
-    """
+    async def response(request: Any) -> Any:
+        return JSONResponse(
+            {
+                "code": 0,
+                "tenant_access_token": "synthetic",
+                "expire": 7200,
+                "bot": {"open_id": "ou_bot"},
+            }
+        )
+
+    def build(_: Any) -> Any:
+        return Starlette(routes=[Route("/{path:path}", response, methods=["GET", "POST"])])
+
     monkeypatch.setenv("XW_TEST_FEISHU_SECRET", "not-a-real-secret")
-    channel = lark_channel(config())
-    channel.config.transport.kind = "webhook"
-    outbox = Outbox()
-    gateway = FeishuGateway(env.service, config(), outbox, clock=env.clock)
-    transport = LarkTransport(channel, config())
-    fs = Feishu(env, gateway, outbox)
-    consumers = asyncio.create_task(gateway.run())
-    await transport.start(gateway.receive)
-    try:
-        message = env.scripts.add("经真实分发器", tool_call("order_total", region="east"), cite())
-        ignored = env.scripts.add("群聊消息", tool_call("order_total", region="east"), cite())
-        for event in (fs.event(message), fs.event(ignored, event__message__chat_type="group")):
-            status, _ = await channel.handle_webhook_request({}, json.dumps(event).encode())
-            assert status == 200  # SDK 在处理前就应答成功
-        async with asyncio.timeout(10):
-            while not outbox.sent:
-                await asyncio.sleep(0.02)
-        await gateway.idle()
-    finally:
-        assert await transport.stop() is True
-        consumers.cancel()
-        with pytest.raises(asyncio.CancelledError):
-            await consumers
+    with serve(build, path="") as endpoint:
+        cfg = dataclasses.replace(lark_channel(config()).config, domain=endpoint.url)
+        cfg.transport.kind = "webhook"
+        channel = FeishuChannel(config=cfg, name_lookup=lambda _: {})
+        outbox = Outbox()
+        gateway = FeishuGateway(env.service, config(), outbox, clock=env.clock)
+        transport = LarkTransport(channel, config())
+        fs = Feishu(env, gateway, outbox)
+        consumers = asyncio.create_task(gateway.run())
+        await transport.start(gateway.receive)
+        try:
+            message = env.scripts.add(
+                "经真实分发器", tool_call("order_total", region="east"), cite()
+            )
+            ignored = env.scripts.add("群聊消息", tool_call("order_total", region="east"), cite())
+            for event in (fs.event(message), fs.event(ignored, event__message__chat_type="group")):
+                status, _ = await channel.handle_webhook_request({}, json.dumps(event).encode())
+                assert status == 200
+            async with asyncio.timeout(10):
+                while not outbox.sent:
+                    await asyncio.sleep(0.02)
+            await gateway.idle()
+        finally:
+            assert await transport.stop() is True
+            consumers.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await consumers
     assert env.model_calls(message) == 2 and env.model_calls(ignored) == 0
-    ((chat_id, text),) = outbox.sent
-    assert chat_id == "oc_alice" and "来源 local/order_total" in text
+    ((chat_id, _message),) = outbox.sent
+    assert chat_id == "oc_alice" and "来源 local/order_total" in outbox.texts()[0]

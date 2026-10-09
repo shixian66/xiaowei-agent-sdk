@@ -386,7 +386,9 @@ async def test_uncited_current_evidence_still_follows_current_access(env: Env) -
             cite_only(lambda seen: seen[-1]),
         )
         assert (await turn(env, rt, message, "om_1")).state == "completed"
-        assert "| east | 100 |" in await delivered(rt, "om_1")
+        view = await rt.service.results.view(ref("om_1"))
+        assert view.delivery is not None
+        assert view.delivery.facts[0].rows[0] == {"region": "east", "total": 100}
         env.db.revoked = {("shop", "regions")}
         env.db.forget()
         with pytest.raises(ResultUnavailableError) as refused:

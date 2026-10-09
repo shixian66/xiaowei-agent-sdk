@@ -23,6 +23,7 @@ from pydantic import ValidationError
 from sqlalchemy import text
 from tests.sdk_core.test_app import cite, clarify, tool_call
 from tests.sdk_core.test_feishu import Outbox
+from tests.sdk_core.test_feishu_render import message_text
 from tests.sdk_core.test_group_gateway import (
     BOT,
     Group,
@@ -149,7 +150,7 @@ async def queue(
 
 def replies(group: Group) -> list[tuple[str | None, str]]:
     return [
-        (reply_to, text)
+        (reply_to, message_text(text))
         for reply_to, (_, text) in zip(group.outbox.replies, group.outbox.sent, strict=True)
     ]
 
@@ -183,16 +184,19 @@ class GatedOutbox(Outbox):
     def gate(self, reply_to: str, prefix: str) -> asyncio.Event:
         return self.gates.setdefault((reply_to, prefix), asyncio.Event())
 
-    async def __call__(self, chat_id: str, text: str, *, reply_to: str | None = None) -> Any:
+    async def __call__(
+        self, chat_id: str, text: str | dict[str, Any], *, reply_to: str | None = None
+    ) -> Any:
+        shown = message_text(text)
         key = next(
             (
                 k
                 for k in self.gates
-                if k[0] in (ANY, reply_to) and text.startswith(k[1]) and not self.gates[k].is_set()
+                if k[0] in (ANY, reply_to) and shown.startswith(k[1]) and not self.gates[k].is_set()
             ),
             None,
         )
-        busy = text.startswith(BUSY)
+        busy = shown.startswith(BUSY)
         if busy:
             self.busy_active += 1
             self.busy_peak = max(self.busy_peak, self.busy_active)
@@ -1304,7 +1308,7 @@ async def test_formal_runtime_queues_a_second_member_and_refuses_beyond_the_limi
         channel.emit_raw_from_sdk_thread(raw_group_event(env, "三", "om_3", sender=C))
         await until(lambda: len(channel.sends) == 4)
         assert await served.finish() == 0
-    sent = [(opts["reply_to"], message["text"]) for _, message, opts in channel.sends]
+    sent = [(opts["reply_to"], message_text(message)) for _, message, opts in channel.sends]
     assert sent[0] == ("om_2", QUEUED)
     assert [r for r, t in sent if t != QUEUED] == ["om_3", "om_1", "om_2"]
     assert BUSY in dict(sent[1:])["om_3"]

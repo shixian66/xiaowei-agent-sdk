@@ -26,11 +26,6 @@ JsonScalar = None | bool | int | float | str
 ToolId = Annotated[str, StringConstraints(pattern=r"^[a-z0-9_-]{1,64}/[a-z0-9_.-]{1,64}$")]
 ClusterId = Annotated[str, StringConstraints(pattern=r"^[a-z0-9][a-z0-9_-]{0,31}$")]
 """配置中的稳定集群 ID：模型以它作为工具参数 ``cluster`` 选择目标。"""
-# 已渲染的一行交付内容：分行字符在渲染时已转义（``_one_line``），行内不再含任何会另起一行的
-# 字符（``str.splitlines`` 的全部分行符）。
-ContentLine = Annotated[
-    str, StringConstraints(pattern="^[^\n\r\x0b\x0c\x1c-\x1e\x85\u2028\u2029]*$")
-]
 
 
 class _Trusted(BaseModel):
@@ -230,10 +225,10 @@ class TurnAnswer(_Trusted):
 
 
 class DeliveryFact(_Trusted):
-    """一条证据的结构化事实：只由 ``EvidenceStore`` 从当前 Web 投影生成，模型不能提交。
+    """一条证据的结构化事实：只由 ``EvidenceStore`` 从接收渠道的获准投影生成，模型不能提交。
 
     ``columns``/``rows`` 是投影中的表格数据；``metadata`` 保留其余字段，嵌套值为 JSON 文本。
-    超出 JavaScript 安全整数范围的值以字符串展示；``result_json`` 保留获准 Web 数据的原值与类型，
+    超出 JavaScript 安全整数范围的值以字符串展示；``result_json`` 保留当前渠道获准数据的原值与类型，
     不增加读取范围。来源、目标、采集时间与截断来自证据记录；``note`` 是当前策略的固定说明。
     """
 
@@ -249,47 +244,16 @@ class DeliveryFact(_Trusted):
     result_json: str | None = None
 
 
-class FactLines(_Trusted):
-    """一条事实的渲染行：``head`` 是来源与说明，``body`` 是结果（标量与表格行）。"""
-
-    head: tuple[ContentLine, ...]
-    body: tuple[ContentLine, ...] = ()
-
-
-class DeliveryLayout(_Trusted):
-    """``content`` 的分段，供有单条长度上限的渠道按优先级截断。
-
-    只由 ``EvidenceStore`` 与 ``content`` 一同生成；截断方据此取分段，不在文字中查找标题。
-    """
-
-    facts_header: ContentLine
-    facts: tuple[FactLines, ...]
-    analysis: tuple[ContentLine, ...] = ()
-    """分析标题及各条分析；没有分析时为空。"""
-
-    def lines(self) -> tuple[str, ...]:
-        fact_lines = (line for f in self.facts for line in (*f.head, *f.body))
-        return (self.facts_header, *fact_lines, *self.analysis)
-
-
 class Delivery(_Trusted):
-    """通过验证、按接收渠道生成的输出；``facts`` 只在 Web 渠道给出。
-
-    ``layout`` 只在飞书渠道给出，与 ``content`` 逐行一致，不进入序列化输出。
-    """
+    """通过验证、按接收渠道自身投影生成的输出。"""
 
     content: str
     evidence_ids: tuple[str, ...]
     channel: Channel
     facts: tuple[DeliveryFact, ...] = ()
     analysis: tuple[AnswerInference, ...] = ()
-    """Web 独立渲染的模型分析；仅由证据验证后的回答生成，不在事实表格中混排。"""
+    """独立渲染的模型分析；仅由证据验证后的回答生成，不在事实表格中混排。"""
     web_text: str | None = None
-    """Web 澄清或未执行建议的原文；飞书仍使用单行转义的 ``content``。"""
-    layout: DeliveryLayout | None = Field(default=None, exclude=True)
-
-    @model_validator(mode="after")
-    def _layout_matches_content(self) -> "Delivery":
-        if self.layout is not None and "\n".join(self.layout.lines()) != self.content:
-            raise ValueError("交付分段与内容不一致")
-        return self
+    """Web 澄清或未执行建议的原文。"""
+    feishu_text: str | None = Field(default=None, exclude=True)
+    """飞书澄清或建议的原文；不进入 Web 序列化，不能从转义 content 反解。"""

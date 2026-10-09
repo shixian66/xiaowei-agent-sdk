@@ -39,7 +39,7 @@ from tests.sdk_core.test_model_api import GEMINI
 from tests.sdk_core.test_vertex_model import VERTEX
 
 from xiaowei.app import TurnError
-from xiaowei.feishu import attributed, render
+from xiaowei.feishu import attributed
 from xiaowei.model_api import ModelProfile, profile_fingerprint
 from xiaowei.models import Delivery, DeliveryFact
 from xiaowei.sqlguard import guard_explain_query, guard_readonly_query
@@ -678,7 +678,7 @@ async def test_tampered_signature_fails_the_followup_without_retry(
         repr(excinfo.value),
         caplog.text,
         delivery.model_dump_json(),
-        render(delivery, 4000),
+        delivery.content,
         json.dumps([[str(v) for v in row] for row in evidence_rows], ensure_ascii=False),
     )
     for exposed in projections:

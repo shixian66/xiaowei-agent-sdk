@@ -36,7 +36,7 @@ import json
 import logging
 import secrets
 import unicodedata
-from collections.abc import Awaitable, Callable, Iterable, Iterator, Mapping, Sequence
+from collections.abc import Awaitable, Callable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass
@@ -61,9 +61,7 @@ from xiaowei.models import (
     Channel,
     Delivery,
     DeliveryFact,
-    DeliveryLayout,
     EvidenceRecord,
-    FactLines,
     Identity,
     JsonScalar,
     ObjectDependency,
@@ -369,6 +367,7 @@ class EvidenceStore:
                 evidence_ids=(),
                 channel=channel,
                 web_text=text if channel == "web" else None,
+                feishu_text=text if channel == "feishu" else None,
             )
 
         cited = answer.evidence_ids
@@ -398,19 +397,13 @@ class EvidenceStore:
                     for i in answer.inferences
                 ),
             )
-        layout = DeliveryLayout(
-            facts_header=_FACTS_HEADER,
-            facts=tuple(_fact_lines(item, channel) for item in shown),
-            analysis=analysis,
-        )
+        lines = (_FACTS_HEADER, *(line for item in shown for line in _fact_lines(item)), *analysis)
         return Delivery(
-            content="\n".join(layout.lines()),
+            content="\n".join(lines),
             evidence_ids=cited,
             channel=channel,
-            facts=tuple(_fact(item) for item in shown) if channel == "web" else (),
-            analysis=tuple(answer.inferences) if channel == "web" else (),
-            # 飞书有单条长度上限：给出分段，超限时由渠道先保住分析再截断工具结果。
-            layout=layout if channel == "feishu" else None,
+            facts=tuple(_fact(item, channel) for item in shown),
+            analysis=tuple(answer.inferences),
         )
 
     async def _context_readable(
@@ -715,8 +708,8 @@ def _shown(record: EvidenceRecord, channel: Audience, note: str | None) -> _Show
     return _Shown(record=record, data=data, truncated=bool(envelope["truncated"]), note=note)
 
 
-def _fact_lines(shown: _Shown, channel: Audience) -> FactLines:
-    """一条事实的渲染行：来源与说明在 ``head``，结果在 ``body``；每行都已转义为单行。"""
+def _fact_lines(shown: _Shown) -> tuple[str, ...]:
+    """保留 Web content 的既有文本契约；结构化渠道展示不从这些文字恢复原值。"""
     record, data = shown.record, shown.data
     meta = (
         f"[{record.evidence_id}] 来源 {record.tool_id} · 目标 {record.target_id}"
@@ -728,22 +721,13 @@ def _fact_lines(shown: _Shown, channel: Audience) -> FactLines:
     if shown.note is not None:
         head.append(f"说明：{_one_line(shown.note)}")
     if data is None:
-        return FactLines(head=(*head, "（无结果）"))
-    table = _table(data)
-    if channel != "feishu" or table is None:
-        return FactLines(head=tuple(head), body=(_one_line(json.dumps(data, ensure_ascii=False)),))
-    columns, rows = table
-    body = [f"{name}: {_cell(value)}" for name, value in _scalars(data).items()]
-    body.append(_table_line(columns))
-    body.extend(_table_line(row.get(name) for name in columns) for row in rows)
-    if not rows:
-        body.append("（无数据行）")
-    return FactLines(head=tuple(head), body=tuple(body))
+        return (*head, "（无结果）")
+    return (*head, _one_line(json.dumps(data, ensure_ascii=False)))
 
 
-def _fact(shown: _Shown) -> DeliveryFact:
+def _fact(shown: _Shown, channel: Channel) -> DeliveryFact:
     record, data = shown.record, shown.data
-    table = _table(data) if data is not None else None
+    table = _table(data, complex_values=channel == "feishu") if data is not None else None
     columns, rows = table if table is not None else ((), ())
     # 声明列之外的获准行字段也必须可见；JSON 文本保留未经展示转换的完整值与类型。
     columns = tuple(dict.fromkeys((*columns, *(name for row in rows for name in row))))
@@ -767,7 +751,7 @@ def _fact(shown: _Shown) -> DeliveryFact:
 
 
 def _web_value(value: object) -> JsonScalar:
-    """仅调整 Web 展示编码：大整数先转文本，避免浏览器 JSON.parse 不可逆地舍入。"""
+    """渠道展示编码：大整数转文本避免客户端舍入；原值/类型仍在本渠道 result_json。"""
     if isinstance(value, int) and not -(2**53 - 1) <= value <= 2**53 - 1:
         return str(value)
     if _is_scalar(value):
@@ -781,6 +765,8 @@ def _is_scalar(value: object) -> TypeGuard[JsonScalar]:
 
 def _table(
     data: Mapping[str, object],
+    *,
+    complex_values: bool = False,
 ) -> tuple[tuple[str, ...], tuple[dict[str, JsonScalar], ...]] | None:
     """``rows`` 是由标量组成的行对象列表时给出 (列, 行)；列取 ``columns``，否则按行键出现顺序。"""
     raw = data.get("rows")
@@ -790,7 +776,11 @@ def _table(
     for row in raw:
         if not isinstance(row, dict):
             return None
-        cells = {str(name): value for name, value in row.items() if _is_scalar(value)}
+        cells = {
+            str(name): _web_value(value)
+            for name, value in row.items()
+            if _is_scalar(value) or complex_values
+        }
         if len(cells) != len(row):
             return None
         rows.append(cells)
@@ -800,30 +790,6 @@ def _table(
     else:
         columns = tuple(dict.fromkeys(name for row in rows for name in row))
     return columns, tuple(rows)
-
-
-def _scalars(data: Mapping[str, object]) -> dict[str, JsonScalar]:
-    return {
-        name: value
-        for name, value in data.items()
-        if name not in ("rows", "columns") and _is_scalar(value)
-    }
-
-
-def _table_line(cells: Iterable[object]) -> str:
-    """飞书表格行：以 ``| `` 开头、`` |`` 结尾，单元格之间是 `` | ``；数据行不会与标题行相同。"""
-    return "| " + " | ".join(_cell(value) for value in cells) + " |"
-
-
-def _cell(value: object) -> str:
-    """纯文本单元格：字符串去掉引号但保留 JSON 转义，只占一行。
-
-    JSON 已把反斜杠写作 ``\\\\``，因此单元格中的竖线写作 ``\\|`` 后，没有转义的 `` | `` 只能是
-    分隔符。
-    """
-    encoded = json.dumps(value, ensure_ascii=False)
-    body = encoded[1:-1] if isinstance(value, str) else encoded
-    return _one_line(body).replace("|", "\\|")
 
 
 # JSON 在 ``ensure_ascii=False`` 时仍原样输出的分行与不可见字符：C1 控制字符（含 U+0085）、

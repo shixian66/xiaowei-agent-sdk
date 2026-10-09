@@ -55,6 +55,7 @@ from collections import OrderedDict, deque
 from collections.abc import Awaitable, Callable, Coroutine, Mapping
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
+from functools import partial
 from typing import Any, Literal, Protocol
 
 from lark_channel.channel import (
@@ -91,6 +92,7 @@ from xiaowei.channel_store import (
     SessionBusyError,
 )
 from xiaowei.config import FeishuConfig, FeishuGroupConfig, resolve_secret_ref
+from xiaowei.feishu_render import CAPACITY_NOTICE, Message, build_feishu_message, mention_safe
 from xiaowei.models import Delivery
 
 logger = logging.getLogger(__name__)
@@ -107,10 +109,6 @@ NEW_SESSION_BUSY = "当前会话正在处理消息，请稍后再新建会话"
 NEW_GROUP_SESSION = "已为本群新建会话：群内之前的对话不再作为任何成员的上下文"
 IDENTITY_NOTICE = "你还没有获得授权。你的编号是 {open_id}，请把它发给管理员。"
 IDENTITY_NOTICE_WINDOW = timedelta(minutes=10)
-TRUNCATED = "（内容超过飞书单条消息上限，已截断）"
-FACTS_TRUNCATED = "（工具结果超过飞书单条上限，已截断）"
-# 渲染后的一个转义单位：\uXXXX、反斜杠加一个字符，或单个字符；截断不拆开它。
-_ESCAPE_UNIT = re.compile(r"\\u[0-9a-fA-F]{4}|\\.|.", re.DOTALL)
 
 _EVENT_TYPE = "im.message.receive_v1"
 _COMMANDS: Mapping[str, Mode | Literal["new"]] = {
@@ -126,7 +124,6 @@ _AUTHOR = "【群成员 "
 _FORGED_AUTHOR = "[群成员 "
 # 飞书文本中的 ``<at ...>`` 会被平台渲染为 @（含 ``user_id="all"``）；发出的文本把它改成全角
 # 尖括号，使回答或工具结果中的文字不能 @ 任何人。字符数不变，渲染上限照常成立。
-_AT_TAG = re.compile(r"<(?=\s*at\b)", re.IGNORECASE)
 # 序列化正文的容器上限：JSON 转义最多把一个字符写成 12 个（代理对 ``\\ud83d\\ude00``），再留出
 # ``{"text": ""}`` 与空白的余量。超过时在解析前拒绝，解析后仍按实际文本长度做最终限制。
 _JSON_ESCAPE_FACTOR = 12
@@ -153,11 +150,11 @@ _DEFINITE_FAILURE_CODES = frozenset({230011, 230050})
 
 
 class Send(Protocol):
-    """单次文本发送：(chat_id, text) → 明确成功、明确失败或结果不明。群消息另带 ``reply_to``
+    """单次消息发送：(chat_id, text/card) → 明确成功、明确失败或结果不明。群消息另带 ``reply_to``
     （原消息编号），只回复原消息。"""
 
     def __call__(
-        self, chat_id: str, text: str, *, reply_to: str | None = ...
+        self, chat_id: str, text: str | Message, *, reply_to: str | None = ...
     ) -> Awaitable[SendOutcome]: ...
 
 
@@ -322,11 +319,6 @@ def attributed(open_id: str, text: str) -> str:
     return f"{_AUTHOR}{alias}】\n{text.replace(_AUTHOR, _FORGED_AUTHOR)}"
 
 
-def mention_safe(text: str) -> str:
-    """发往飞书的文本：``<at`` 改为全角尖括号，回答与工具结果不能 @ 任何人。"""
-    return _AT_TAG.sub("＜", text)
-
-
 def _command(text: str) -> tuple[Mode | Literal["new"], str]:
     """消息首部的命令与剥离后的正文；普通文本是默认用途（由单 Agent 判断是否查询）。"""
     for name, kind in _COMMANDS.items():
@@ -335,66 +327,27 @@ def _command(text: str) -> tuple[Mode | Literal["new"], str]:
     return "query", text
 
 
-def render(delivery: Delivery, max_chars: int) -> str:
-    """飞书纯文本，保证只发一条、不超过 ``max_chars``；不超限时与 ``content`` 逐字相同。
-
-    有分段（证据回答）时先放完整的分析，剩余字数按顺序给工具结果：先保留每条事实的来源与
-    说明行，再保留结果行，放不下的截掉并注明。分析本身超限时保留标题、从末尾截断。没有分段
-    （澄清、固定回执）时从末尾截断。分段由 ``EvidenceStore`` 生成，不在文字中查找标题。
-    """
-    content = delivery.content
-    if len(content) <= max_chars:
-        return content
-    layout = delivery.layout
-    if layout is None:
-        # 澄清是“标题 + 一行正文”：正文放不下时保留它的前缀，而不是只剩标题。
-        return _cut_tail(content.split("\n"), max_chars, keep=1)
-    kept = [layout.facts_header, FACTS_TRUNCATED, *layout.analysis]
-    room = max_chars - _joined(kept)
-    if room < 0:
-        return _cut_tail(kept, max_chars, keep=2 + min(len(layout.analysis), 1))
-    heads: list[list[str]] = [[] for _ in layout.facts]
-    bodies: list[list[str]] = [[] for _ in layout.facts]
-    pending = [(heads[i], line) for i, f in enumerate(layout.facts) for line in f.head]
-    pending += [(bodies[i], line) for i, f in enumerate(layout.facts) for line in f.body]
-    for target, line in pending:
-        if len(line) + 1 > room:
-            break  # 不跳行：保留的结果行在每条事实内保持连续
-        target.append(line)
-        room -= len(line) + 1
-    facts = [line for head, body in zip(heads, bodies, strict=True) for line in (*head, *body)]
-    return "\n".join([layout.facts_header, *facts, FACTS_TRUNCATED, *layout.analysis])
-
-
-def _joined(lines: list[str]) -> int:
-    return sum(map(len, lines)) + len(lines) - 1
-
-
-def _cut_tail(lines: list[str], max_chars: int, *, keep: int = 0) -> str:
-    """保留能完整放下的前若干行并附截断说明；前 ``keep`` 行之后一行都放不下时截取下一行。"""
-    budget = max_chars - len(TRUNCATED) - 1
-    shown: list[str] = []
-    used = -1
-    for line in lines:
-        if used + 1 + len(line) > budget:
-            break
-        shown.append(line)
-        used += 1 + len(line)
-    if len(shown) <= keep and len(shown) < len(lines):
-        prefix = _prefix(lines[len(shown)], budget - used - 1)
-        if prefix:
-            shown.append(prefix)
-    return "\n".join([*shown, TRUNCATED])
-
-
-def _prefix(line: str, limit: int) -> str:
-    """不超过 ``limit`` 个字符、且不拆开任何转义单位的最长前缀。"""
-    end = 0
-    for unit in _ESCAPE_UNIT.finditer(line):
-        if unit.end() > limit:
-            break
-        end = unit.end()
-    return line[:end]
+async def send_delivery(
+    delivery: Delivery,
+    *,
+    send: Send,
+    chat_id: str,
+    max_chars: int,
+    reply_to: str | None = None,
+) -> SendOutcome:
+    """Gateway 与 CLI 共用：本地构造失败明确未发送，SDK 开始后的异常保留 unknown。"""
+    try:
+        message = build_feishu_message(delivery, max_chars, chat_id, reply_to=reply_to)
+    except Exception:
+        logger.error("飞书结果未发送：reason=render_failed")
+        return "failed"
+    if message == {"text": CAPACITY_NOTICE}:
+        logger.warning("飞书仅发送容量说明：reason=reply_capacity_notice")
+    try:
+        return await send(chat_id, message, reply_to=reply_to)
+    except Exception as exc:
+        logger.error("飞书发送异常，按结果不明记录：%s", type(exc).__name__)
+        return "unknown"
 
 
 def send_outcome(result: object) -> SendOutcome:
@@ -768,15 +721,13 @@ class FeishuGateway:
     async def _deliver(self, job: _Job) -> None:
         """首次发送：结果已决定不交付时只记录；投递状态未能落定时锁低 readiness 并原样传播。"""
 
-        async def transmit(delivery: Delivery) -> SendOutcome:
-            # 已取得投递权：发送异常按结果不明返回，由 ResultDelivery 记为 unknown。
-            text = render(delivery, self._config.max_reply_chars)
-            try:
-                return await self._send(job.chat_id, text, reply_to=job.reply_to)
-            except Exception as exc:
-                logger.error("飞书发送异常，按结果不明记录：%s", type(exc).__name__)
-                return "unknown"
-
+        transmit = partial(
+            send_delivery,
+            send=self._send,
+            chat_id=job.chat_id,
+            max_chars=self._config.max_reply_chars,
+            reply_to=job.reply_to,
+        )
         try:
             outcome = await self._service.results.send(job.ref, transmit)
         except _WITHHELD as exc:
@@ -892,7 +843,7 @@ class LarkChannel(Protocol):
     def schedule(self, coro: Coroutine[Any, Any, object]) -> concurrent.futures.Future[object]: ...
 
     async def send(
-        self, to: str, message: dict[str, str], opts: dict[str, str] | None = None
+        self, to: str, message: Message, opts: dict[str, str] | None = None
     ) -> object: ...
 
     def get_bot_identity(self) -> object: ...
@@ -903,7 +854,7 @@ class LarkChannel(Protocol):
 
 
 def lark_channel(config: FeishuConfig) -> FeishuChannel:
-    """按单次文本发送装配 SDK：不重试、不分段、只用 raw 入站，关闭合并转发、卡片与媒体的附加拉取。
+    """按单次文本/卡片发送装配 SDK：不重试、不分段、只用 raw 入站，关闭入站附加拉取。
 
     SDK 自带的消息管线照常运行但没有消费者；策略设为 disabled，使其尽早丢弃。
     ``resolve_sender_names=False`` 只关闭事后的姓名回填：锁版 SDK 在规范化（早于 policy）时仍会
@@ -1004,14 +955,17 @@ class LarkTransport:
         if future is not None:
             _report(future)
 
-    async def send(self, chat_id: str, text: str, *, reply_to: str | None = None) -> SendOutcome:
+    async def send(
+        self, chat_id: str, text: str | Message, *, reply_to: str | None = None
+    ) -> SendOutcome:
         """单次发送；``reply_to`` 给出时只回复该原消息，原消息不可回复时明确失败、不改发新消息。"""
         opts = {"receive_id_type": "chat_id"}
         if reply_to is not None:
             opts |= {"reply_to": reply_to, "reply_target_gone": "fail"}
-        future = self._channel.schedule(
-            self._channel.send(chat_id, {"text": mention_safe(text)}, opts)
-        )
+        message = {"text": mention_safe(text)} if isinstance(text, str) else text
+        if "text" in message:
+            message = {"text": mention_safe(message["text"])}
+        future = self._channel.schedule(self._channel.send(chat_id, message, opts))
         try:
             async with asyncio.timeout(self._config.send_timeout_seconds):
                 result = await asyncio.wrap_future(future)

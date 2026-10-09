@@ -1385,6 +1385,86 @@ async def test_resend_sends_a_failed_result_once_without_rerunning(env: Env) -> 
     assert statements(env.drv) == []
 
 
+async def test_resend_render_failure_does_not_send_and_remains_retryable(
+    env: Env,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    config = env.config(feishu=feishu_config())
+    message = await failed_feishu_result(env, config)
+    target = {"subject_id": "alice", "chat_id": "oc_alice", "message_id": "om_resend"}
+
+    def broken(*args: Any, **kwargs: Any) -> Any:
+        raise RuntimeError("RENDER_CANARY https://internal.invalid")
+
+    failed = FakeChannel()
+    with monkeypatch.context() as patch:
+        patch.setattr("xiaowei.feishu.build_feishu_message", broken)
+        assert (
+            await runtime.resend(
+                config,
+                clock=env.clock,
+                feishu_channel=failed,
+                starrocks_connect=env.connect(config),
+                **target,
+            )
+            == "failed"
+        )
+    assert failed.sends == [] and failed.stops == 1
+    assert await env.scalar("SELECT delivery FROM xiaowei_request") == "failed"
+    assert "reason=render_failed" in caplog.text
+    assert "RENDER_CANARY" not in caplog.text and "internal.invalid" not in caplog.text
+    success = FakeChannel()
+    assert (
+        await runtime.resend(
+            config,
+            clock=env.clock,
+            feishu_channel=success,
+            starrocks_connect=env.connect(config),
+            **target,
+        )
+        == "sent"
+    )
+    assert len(success.sends) == 1 and "card" in success.sends[0][1]
+    assert len(env.scripts.calls[message]) == 2 and statements(env.drv) == []
+
+
+async def test_capacity_notice_is_sent_once_and_cannot_resend_full_result(
+    env: Env,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    from xiaowei.feishu_render import CAPACITY_NOTICE
+
+    config = env.config(feishu=feishu_config(max_reply_chars=200))
+    channel = FakeChannel()
+    message = env.scripts.add(
+        "容量不足",
+        tool_call("list_tables", cluster=SR.target_id, **SEARCH_ALL),
+        cite(),
+    )
+    async with env.running(config, feishu_channel=channel) as served:
+        channel.emit_raw_from_sdk_thread(feishu_event(env, message, "om_capacity"))
+        await until(lambda: len(channel.sends) == 1)
+        assert await served.finish() == 0
+    assert channel.sends[0][1] == {"text": CAPACITY_NOTICE}
+    assert await env.scalar("SELECT delivery FROM xiaowei_request") == "sent"
+    assert "reason=reply_capacity_notice" in caplog.text
+    resend = FakeChannel()
+    assert (
+        await runtime.resend(
+            config,
+            clock=env.clock,
+            feishu_channel=resend,
+            starrocks_connect=env.connect(config),
+            subject_id="alice",
+            chat_id="oc_alice",
+            message_id="om_capacity",
+        )
+        is None
+    )
+    assert resend.sends == [] and len(env.scripts.calls[message]) == 2
+
+
 @dataclass
 class GatedChannel(FakeChannel):
     """发送进入后停住，直到测试放行；在 SDK 循环上等待，放行用线程安全事件。"""
@@ -2503,8 +2583,13 @@ async def test_a_cluster_failing_mid_task_changes_nothing_on_the_others(env: Env
         )
         channel.emit_raw_from_sdk_thread(feishu_event(env, other, "om_c"))
         await until(lambda: len(channel.sends) == 1)
-        text = channel.sends[0][1]["text"]
-        assert "目标 sr-c" in text and "| east | 3 |" in text
+        from tests.sdk_core.test_feishu_render import text_parts
+
+        text = "\n".join(text_parts(channel.sends[0][1]))
+        assert "目标 sr-c" in text
+        from tests.sdk_core.test_feishu_render import tables
+
+        assert tables(channel.sends[0][1])[0]["rows"] == [{"c0": '"east"', "c1": "3"}]
         assert len(statements(drivers["sr-c"])) == 1
         assert drivers["sr-b"].attempts == attempts_b
 
