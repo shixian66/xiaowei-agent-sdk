@@ -32,7 +32,7 @@ import socket
 import sys
 from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
 from contextlib import AbstractAsyncContextManager, AsyncExitStack, asynccontextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from functools import partial
 from pathlib import Path
@@ -57,6 +57,7 @@ from pydantic import (
 )
 from sqlalchemy.ext.asyncio import AsyncEngine
 
+from xiaowei.alertmanager import AlertmanagerAdapter, AlertmanagerConfig, alertmanager_catalog
 from xiaowei.app import (
     AppConfig,
     Application,
@@ -90,7 +91,8 @@ from xiaowei.mcp import MCPIntegration
 from xiaowei.model_api import ModelProfile, open_model
 from xiaowei.models import (
     AUDIENCES,
-    MONITORING_READ_POLICIES,
+    GRAFANA_READ_POLICIES,
+    PROMETHEUS_READ_POLICIES,
     AgentAnswer,
     Audience,
     Budget,
@@ -238,6 +240,7 @@ class ServeConfig(_Config):
     max_concurrent_turns: int = Field(gt=0)
     targets: tuple[TargetConfig, ...] = Field(min_length=1)
     mcp_servers: tuple[MCPServerConfig, ...] = ()
+    alertmanager_sources: tuple[AlertmanagerConfig, ...] = ()
     projection_bytes: dict[Audience, Annotated[int, Field(gt=0)]]
     access: AccessConfig
     web: WebConfig
@@ -271,7 +274,8 @@ class ServeConfig(_Config):
         if len(set(ids)) != len(ids):
             raise ValueError("mcp_servers 中的 server_id 不能重复")
         if any(
-            policy_id not in MONITORING_READ_POLICIES or policy_id.rsplit(".", 1)[-1] != remote_name
+            policy_id not in PROMETHEUS_READ_POLICIES | GRAFANA_READ_POLICIES
+            or policy_id.rsplit(".", 1)[-1] != remote_name
             for server in value
             for remote_name, policy_id in server.allowed_tools.items()
         ):
@@ -290,9 +294,12 @@ class ServeConfig(_Config):
     @model_validator(mode="after")
     def _consistent(self) -> "ServeConfig":
         registered = _registered_tools(self)
-        if {server.server_id for server in self.mcp_servers} & {
-            target.target_id for target in self.targets
-        }:
+        source_ids = [s.server_id for s in self.mcp_servers] + [
+            s.server_id for s in self.alertmanager_sources
+        ]
+        if len(set(source_ids)) != len(source_ids):
+            raise ValueError("监控源 ID 不能重复")
+        if set(source_ids) & {target.target_id for target in self.targets}:
             raise ValueError("监控源 ID 不能与 StarRocks 目标 ID 重复")
         if not self.data_policy.model_tools <= registered:
             raise ValueError("data_policy.model_tools 只能包含已登记的工具")
@@ -468,10 +475,19 @@ def validate_config(
         for index, server in enumerate(config.mcp_servers)
         if server.auth_ref is not None
     )
+    refs.extend(
+        (f"alertmanager_sources.{index}.{field}", ref)
+        for index, source in enumerate(config.alertmanager_sources)
+        for field, ref in (
+            ("username_ref", source.username_ref),
+            ("password_ref", source.password_ref),
+        )
+        if ref is not None
+    )
     if config.feishu is not None:
         refs.append(("feishu.app_secret_ref", config.feishu.app_secret_ref))
-    for field, ref in refs:
-        _resolve_checked(field, ref)
+    for path, ref in refs:
+        _resolve_checked(path, ref)
     if os.environ.get(_POSTGRES_PASSWORD_ENV) in _ENV_TEMPLATE_VALUES:
         raise ConfigError(f"{_POSTGRES_PASSWORD_ENV}: 仍是 .env 模板占位符，请替换为实际值")
 
@@ -634,7 +650,7 @@ def _registered_tools(config: ServeConfig) -> frozenset[str]:
     audited = any(t.starrocks.audit is not None for t in config.targets)
     monitoring = {
         server.tool_id(name) for server in config.mcp_servers for name in server.allowed_tools
-    }
+    } | {source.tool_id(name) for source in config.alertmanager_sources for name in source.tools}
     return QUERY_TOOLS | (AUDIT_TOOLS if audited else frozenset()) | monitoring
 
 
@@ -1083,7 +1099,7 @@ def _monitoring_catalog(
 def _app_config(config: ServeConfig) -> AppConfig:
     monitoring = frozenset(
         server.tool_id(name) for server in config.mcp_servers for name in server.allowed_tools
-    )
+    ) | {source.tool_id(name) for source in config.alertmanager_sources for name in source.tools}
     audit = _registered_tools(config) - QUERY_TOOLS - monitoring
     return AppConfig(
         purposes={
@@ -1200,6 +1216,7 @@ class Runtime:
     recovery: RecoveryReport
     service: ChannelService
     mcp: MCPIntegration | None = None
+    alertmanagers: Mapping[str, AlertmanagerAdapter] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -1257,12 +1274,20 @@ def _delivery(
     for other in others:
         tools += other
     monitoring_contracts, monitoring_policies = _monitoring_catalog(config)
-    targets = frozenset(schemas) | {server.server_id for server in config.mcp_servers}
+    api_contracts, api_policies = alertmanager_catalog(
+        config.alertmanager_sources, config.projection_bytes
+    )
+    targets = (
+        frozenset(schemas)
+        | {server.server_id for server in config.mcp_servers}
+        | {source.server_id for source in config.alertmanager_sources}
+    )
     access = StaticAccess(config.access, frozenset(targets), _group_access(config, members))
     evidence = EvidenceStore(
         engine,
         ToolCatalog(
-            (*tools.contracts, *monitoring_contracts), (*tools.policies, *monitoring_policies)
+            (*tools.contracts, *monitoring_contracts, *api_contracts),
+            (*tools.policies, *monitoring_policies, *api_policies),
         ),
         authorize=access.authorize,
         clock=clock,
@@ -1355,17 +1380,26 @@ async def open_runtime(
             if config.mcp_servers
             else None
         )
+        alertmanagers = {
+            source.server_id: await stack.enter_async_context(
+                AlertmanagerAdapter(source, clock=clock)
+            )
+            for source in config.alertmanager_sources
+        }
+        executes = dict(parts.tools.executes)
+        for adapter in alertmanagers.values():
+            executes.update(adapter.executes)
         app = Application(
             _app_config(config),
             model=model,
             engine=engine,
             governance=governance,
-            local_tools=parts.tools.executes,
+            local_tools=executes,
             mcp=mcp,
             clock=clock,
         )
         service = ChannelService(app, parts.results)
-        yield Runtime(engine, lock, readiness, recovery, service, mcp)
+        yield Runtime(engine, lock, readiness, recovery, service, mcp, alertmanagers)
 
 
 # ---- serve ---------------------------------------------------------------------------
@@ -1551,6 +1585,10 @@ async def _serve(
                 if runtime.mcp is not None
                 else {}
             ),
+            **{
+                f"alertmanager.{source}": adapter.status
+                for source, adapter in runtime.alertmanagers.items()
+            },
         },
     )
     server = uvicorn.Server(

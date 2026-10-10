@@ -42,7 +42,19 @@ GRAFANA_READ_POLICIES = frozenset(
         "grafana.get_annotations",
     }
 )
-MONITORING_READ_POLICIES = PROMETHEUS_READ_POLICIES | GRAFANA_READ_POLICIES
+ALERTMANAGER_READ_POLICIES = frozenset(
+    {
+        "alertmanager.get_alerts",
+        "alertmanager.get_alert_groups",
+        "alertmanager.get_silences",
+        "alertmanager.get_silence",
+        "alertmanager.get_receivers",
+        "alertmanager.get_status",
+    }
+)
+MONITORING_READ_POLICIES = (
+    PROMETHEUS_READ_POLICIES | GRAFANA_READ_POLICIES | ALERTMANAGER_READ_POLICIES
+)
 
 Label = Annotated[str, StringConstraints(min_length=1, max_length=200)]
 JsonScalar = None | bool | int | float | str

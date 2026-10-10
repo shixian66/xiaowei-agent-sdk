@@ -36,6 +36,7 @@ from typing import (
 from pydantic import BaseModel
 
 from xiaowei.models import (
+    ALERTMANAGER_READ_POLICIES,
     AUDIENCES,
     MONITORING_READ_POLICIES,
     PROMETHEUS_QUERY_POLICIES,
@@ -385,7 +386,10 @@ class GovernedTools:
                 else:
                     if isinstance(exc, StarRocksError):
                         code: StarRocksErrorCode | Literal["mcp_error", "other"] = exc.code
-                    elif request.tool_id.partition("/")[0] != "local":
+                    elif (
+                        request.tool_id.partition("/")[0] != "local"
+                        and contract.policy_id not in ALERTMANAGER_READ_POLICIES
+                    ):
                         code = "mcp_error"
                     else:
                         code = "other"

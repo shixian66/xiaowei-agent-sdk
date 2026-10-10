@@ -67,6 +67,7 @@ from xiaowei.model_api import (
     ResponseRejectReason,
 )
 from xiaowei.models import (
+    ALERTMANAGER_READ_POLICIES,
     GRAFANA_READ_POLICIES,
     MONITORING_READ_POLICIES,
     PROMETHEUS_DISCOVERY_POLICIES,
@@ -190,6 +191,11 @@ MONITORING_INSTRUCTIONS = (
     "数据源 UID/名称/类型不能证明它对应哪个 Prometheus 源；没有可信对应关系时只报告定义，"
     "说明实时状态未核实，不猜配源。可独立调查其他获准源并按来源分列，不能声称是该面板"
     "执行得到的结果。面板读取 panelId=0 表示全部，结果没有逐行面板 ID。"
+    "Alertmanager 读取的是采集快照，silencedBy 的 ID 才能关联确实静默该告警的静默；"
+    "inhibitedBy/mutedBy 分列，不把静默存在、接收器名或服务状态当作已通知/主机健康。"
+    "布尔值为包含开关，receiver 为正则；自主选择匹配器与分页，无需固定读取顺序。"
+    "has_more 仅描述本地分页，truncated 或组内省略仍表示不完整；历史时间不代表当前状态。"
+    "成功的 Alertmanager 读取均须引用对应 Evidence。"
 )
 
 TurnReason = Literal[
@@ -641,8 +647,18 @@ def _local_tools(
     catalog = governance.catalog
     grouped: dict[str, dict[str, Execute]] = {}
     for (tool_id, target_id), execute in local_tools.items():
-        if tool_id.partition("/")[0] != "local" or catalog.contract(tool_id, target_id) is None:
-            raise ValueError(f"应用配置：本地工具 {tool_id} 必须是已登记的 local/ 工具")
+        contract = catalog.contract(tool_id, target_id)
+        namespace, _, suffix = tool_id.partition("/")
+        api_read = (
+            contract is not None
+            and contract.policy_id in ALERTMANAGER_READ_POLICIES
+            and namespace == target_id
+            and suffix == contract.policy_id.partition(".")[2]
+        )
+        if contract is None or (namespace != "local" and not api_read):
+            raise ValueError(
+                f"应用配置：本地工具 {tool_id} 必须是已登记的 local/ 或 Alertmanager 工具"
+            )
         grouped.setdefault(tool_id, {})[target_id] = execute
     tools: dict[str, Tool] = {}
     for tool_id, executes in grouped.items():
@@ -652,7 +668,8 @@ def _local_tools(
         (contract,) = catalog.contracts_for(tool_id)  # 未声明 cluster 的工具只能有一个目标
         if contract.target_id not in executes:
             raise ValueError(f"应用配置：本地工具 {tool_id} 缺少执行函数")
-        name = tool_id.partition("/")[2]
+        namespace, _, suffix = tool_id.partition("/")
+        name = suffix if namespace == "local" else f"{namespace}__{suffix}"
         tools[tool_id] = governed_function_tool(
             name, contract, governance, executes[contract.target_id]
         )

@@ -96,6 +96,7 @@ class State:
     requests: list[tuple[str, str, str | None]] = field(default_factory=list)
     status: int = 200
     delay: float = 0
+    body_delay: float = 0
     raw: bytes | None = None
     headers: dict[str, str] = field(default_factory=dict)
     require_auth: bool = True
@@ -125,6 +126,7 @@ def backend() -> Iterator[tuple[str, State]]:
             for name, value in state.headers.items():
                 self.send_header(name, value)
             self.end_headers()
+            time.sleep(state.body_delay)
             try:
                 self.wfile.write(body)
             except (BrokenPipeError, ConnectionResetError):
