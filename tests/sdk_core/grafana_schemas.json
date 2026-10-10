@@ -1,0 +1,147 @@
+{
+  "search_dashboards": {
+    "type": "object",
+    "properties": {
+      "folderUid": {
+        "type": "string",
+        "description": "Optional immediate folder UID (not nested)"
+      },
+      "limit": {
+        "type": "integer",
+        "description": "Maximum number of results to return (max 100)",
+        "default": 50
+      },
+      "page": {
+        "type": "integer",
+        "description": "Page number for pagination (1-indexed)",
+        "default": 1
+      },
+      "query": {
+        "type": "string",
+        "description": "Optional query. Omit to filter by folderUid, tag, or starred"
+      },
+      "starred": {
+        "type": "boolean",
+        "description": "If true, only starred dashboards"
+      },
+      "tag": {
+        "items": {
+          "type": "string"
+        },
+        "type": "array",
+        "description": "Optional tags to match (AND)"
+      }
+    },
+    "additionalProperties": false
+  },
+  "get_dashboard_summary": {
+    "type": "object",
+    "properties": {
+      "uid": {
+        "type": "string",
+        "description": "The UID of the dashboard"
+      }
+    },
+    "required": [
+      "uid"
+    ],
+    "additionalProperties": false
+  },
+  "get_dashboard_panel_queries": {
+    "type": "object",
+    "properties": {
+      "panelId": {
+        "type": "integer",
+        "description": "Optional panel ID to filter to a specific panel"
+      },
+      "uid": {
+        "type": "string",
+        "description": "The UID of the dashboard"
+      },
+      "variables": {
+        "additionalProperties": {
+          "type": "string"
+        },
+        "type": "object",
+        "description": "Optional variable substitutions (e.g., {\"job\": \"api-server\"})"
+      }
+    },
+    "required": [
+      "uid"
+    ],
+    "additionalProperties": false
+  },
+  "list_datasources": {
+    "type": "object",
+    "properties": {
+      "limit": {
+        "type": "integer",
+        "description": "Maximum number of datasources to return (max 100)",
+        "default": 50
+      },
+      "name": {
+        "type": "string",
+        "description": "Case-insensitive substring match on the datasource name. For example, 'prod' matches datasources named 'prometheus-prod-eu' and 'loki-prod-us'. Useful on instances with many datasources where filtering by type alone returns too many results."
+      },
+      "offset": {
+        "type": "integer",
+        "description": "Number of datasources to skip for pagination",
+        "default": 0
+      },
+      "type": {
+        "type": "string",
+        "description": "The type of datasources to search for. For example, 'prometheus', 'loki', 'tempo', etc..."
+      }
+    },
+    "additionalProperties": false
+  },
+  "get_annotations": {
+    "type": "object",
+    "properties": {
+      "alertUid": {
+        "type": "string",
+        "description": "Filter by alert UID"
+      },
+      "dashboardUid": {
+        "type": "string",
+        "description": "Filter by dashboard UID"
+      },
+      "from": {
+        "type": "integer",
+        "description": "Epoch ms start time"
+      },
+      "limit": {
+        "type": "integer",
+        "description": "Max results default 100"
+      },
+      "matchAny": {
+        "type": "boolean",
+        "description": "If true, match any tag (OR). If false, match all tags (AND). Default: false"
+      },
+      "panelId": {
+        "type": "integer",
+        "description": "Filter by panel ID"
+      },
+      "tags": {
+        "items": {
+          "type": "string"
+        },
+        "type": "array",
+        "description": "Filter by tags. Multiple tags allowed; use matchAny to control AND/OR logic"
+      },
+      "to": {
+        "type": "integer",
+        "description": "Epoch ms end time"
+      },
+      "type": {
+        "type": "string",
+        "description": "annotation or alert"
+      },
+      "userId": {
+        "type": "integer",
+        "description": "Filter by creator user ID"
+      }
+    },
+    "additionalProperties": false
+  }
+}

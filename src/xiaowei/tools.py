@@ -5,7 +5,7 @@
 不能提供执行路径。
 
 只有确定发生在 I/O 之前的治理拒绝（``ToolRejectedError``）按 SDK 公开的
-``default_tool_error_function`` 以固定信息交给模型。已分类的 Prometheus 只读源失败由治理层
+``default_tool_error_function`` 以固定信息交给模型。已分类的监控只读源失败由治理层
 记录后交回固定类别，本源本轮不再调用；其他执行后失败（结果不合约、证据无法保存、执行期间
 撤权或写动作结果不明）继续抛出并中止整轮，不自动重试。
 

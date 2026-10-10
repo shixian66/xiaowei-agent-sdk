@@ -67,8 +67,9 @@ from xiaowei.model_api import (
     ResponseRejectReason,
 )
 from xiaowei.models import (
+    GRAFANA_READ_POLICIES,
+    MONITORING_READ_POLICIES,
     PROMETHEUS_DISCOVERY_POLICIES,
-    PROMETHEUS_READ_POLICIES,
     AgentAnswer,
     AnswerInference,
     ClusterId,
@@ -115,7 +116,7 @@ DEFAULT_INSTRUCTIONS = (
     "找实际运行慢的查询优先使用 list_slow_queries。读取审计 stmt、SQL 原文、JSON 等长文本列时，"
     "只选任务需要的列；用户请求原文时不要主动截短，不用 SUBSTRING、摘要或拼接代替原文。"
     "只有用户要摘要时才选择性截取长文本，并说明；容量限制仍适用，超限不能声称取全。"
-    "非分页结果被截断时最多缩小范围重查一次，且不能违背用户要原文或完整结果的要求；"
+    "StarRocks非分页结果被截断时最多缩小范围重查一次，且不能违背用户要原文或完整结果的要求；"
     "仍被截断就基于已有结果回答并说明限制，不要反复重查。"
     "列库用 list_databases（如本轮没有该工具则说明能力未开放，不用猜关键词冒充列全）；"
     "列某库所有表用 list_tables 指定 database、keyword=null。列全须跟随 next_cursor 直到 null，"
@@ -183,6 +184,12 @@ MONITORING_INSTRUCTIONS = (
     "可在 correction_allowed 和本轮预算内自主修改表达式，不重发同一失败表达式。"
     "成功 query/range_query 的全部证据都要引用；排版文本、warnings/截断、元数据/规则的"
     "完整性限制须如实说明，空结果不能解释为健康。"
+    "Grafana 工具读取仪表盘定义、数据源目录和标记，不执行面板查询、不证明实时健康；"
+    "自主选择需要的定义和证据，不要求先搜索再读取。"
+    "面板原始表达式可能含变量或 Grafana 宏，缺必要值时澄清，不直接当作已执行的 PromQL。"
+    "数据源 UID/名称/类型不能证明它对应哪个 Prometheus 源；没有可信对应关系时只报告定义，"
+    "说明实时状态未核实，不猜配源。可独立调查其他获准源并按来源分列，不能声称是该面板"
+    "执行得到的结果。面板读取 panelId=0 表示全部，结果没有逐行面板 ID。"
 )
 
 TurnReason = Literal[
@@ -328,14 +335,14 @@ class Application:
         discovery = frozenset(
             contract.tool_id
             for contract in catalog.contracts
-            if contract.policy_id in PROMETHEUS_DISCOVERY_POLICIES
+            if contract.policy_id in PROMETHEUS_DISCOVERY_POLICIES | GRAFANA_READ_POLICIES
         )
         self._queries = config.purposes["query"] - config.purposes["diagnose"] - discovery
         self._data_policy = data_policy
         self._model = model
         self._binding = _binding_fingerprint(model.fingerprint, data_policy, config.targets)
         self._instructions = _instructions(config.instructions, config.targets, capabilities)
-        if any(contract.policy_id in PROMETHEUS_READ_POLICIES for contract in catalog.contracts):
+        if any(contract.policy_id in MONITORING_READ_POLICIES for contract in catalog.contracts):
             self._instructions += "\n" + MONITORING_INSTRUCTIONS
         self._engine = engine
         self._governance = governance

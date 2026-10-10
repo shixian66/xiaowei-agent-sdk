@@ -32,8 +32,8 @@
 | --- | --- | --- |
 | **G0 共用协议门槛**：用一项 Prometheus 只读工具核对锁定 Server、SDK 与小维的最小接入契约 | 开发者对合成目标调用代表工具 → 真 SDK 客户端发现、调用并做必要的薄转换 → 看见符合 JSON 对象契约的结果 | 核对输入 schema、`is_error`、文本/structuredContent、错误与返回上限，以及固定端点、所选 HTTP/HTTPS、关闭、超时和实际认证传递；分别记录不带 `Authorization` 与带 `Authorization` 时 Prometheus MCP 的行为及上游身份。不兼容则先修正映射；Grafana、Alertmanager 与写工具各在对应切片核对 |
 | **R1 源级装配/授权/Evidence**：R1a 已随 PR #67 合入；R1b 重连已合入主线，真实外部节点待验证。正式 `serve` 能选配已映射的监控源，空配置继续启动 | 获准用户在 Web/飞书问已接入源的内容 → 本轮只显示对应读工具、调用前复核、结果进入 Evidence → 看见来源/时间；外部 Server 重启 → 后续轮次按源有界重连并重新核约 → 恢复后可继续查询，无须重启小维 | 未授权源、按架构 §5 停旧进程后配置撤权、跨源引用、MCP 断开、schema 漂移：零未授权 I/O、无越权历史/重发；重连失败按源指数退避、不变更进行中工具集合、不自动重放调用；`/readyz` 列出源状态且 StarRocks 可用。真实 PostgreSQL + 真 SDK + loopback 与固定内网 HTTP 合成 MCP 检查启动不可达、运行中断开与恢复、读取投影、会话、证据、端点/认证头；源级历史本地复核在 Grafana 不可达时仍可回放获准群 Session；旧配置和旧证据兼容按 §4 验证 |
-| **P2 Prometheus 自主调查**：当前候选实现发现/规则/instant/range 与有限修正，协议/计划 `1414ec2` 已独立审查；实现复审及真实模型/源门槛开放，详见 §3.1 与 handoff | 用户在 Web 或群问主机 CPU/内存/Kafka 状态 → Agent 自主发现并生成 PromQL，按源/时间查询 → 显示实际表达式、采集/求值时间、有限数值和推断 | 先核对选中工具的真实 schema、Prometheus `errorType`/错误内容与结果；仅可确定的语法/表达式错误允许有限修正，错误计预算无成功 Evidence，修正后真实成功才生成 Evidence。超时/不可达/上游 5xx/401/403 可标明该源未核实并续查其他已授权源；本源本轮不重试。未知/协议错误中止，本地无权调用零 I/O；全部读取失败可给明确未验证的排查建议，不报“健康”。warnings/截断及预算耗尽不报“健康”，越界时间/点数/长度零网络请求。真 SDK + 协议替身、获准真实 Prometheus 验服务端 timeout/max-samples/max-concurrency 与高基数失败；三源联合问题样例校准 `max_tool_calls/max_turns`，固定模型任务样例覆盖不同指标，不建指标白名单 |
-| **G3 Grafana 只读调查**：Dashboard/Panel/数据源元数据与历史权限 | 用户在飞书问 Dashboard 面板含义 → Agent 按问题选工具，可读定义并关联获准 Prometheus 实时结果 → 分列显示定义和实时证据 | 首批只核约所需只读工具（Dashboard 搜索/读取、数据源元数据、Annotation 读取），这不是固定调用顺序或永久对象白名单；逐项核对 schema/结果。无源权限、当前读取失败、面板引用未授权数据源、版本/内容过大：拒绝读取或只报告定义且标明未查实时；历史回放/重发按当前源和接收权限本地复核，不为每个对象远端查 ACL。锁版真 Server + 合成/获准 Grafana 核对响应，禁止未授权代理查询 |
+| **P2 Prometheus 自主调查**：离线部分经独立复审随 PR #71 合入 `4cbb27a2`；真实模型/源门槛开放，详见 §3.1 与 handoff | 用户在 Web 或群问主机 CPU/内存/Kafka 状态 → Agent 自主发现并生成 PromQL，按源/时间查询 → 显示实际表达式、采集/求值时间、有限数值和推断 | 先核对选中工具的真实 schema、Prometheus `errorType`/错误内容与结果；仅可确定的语法/表达式错误允许有限修正，错误计预算无成功 Evidence，修正后真实成功才生成 Evidence。超时/不可达/上游 5xx/401/403 可标明该源未核实并续查其他已授权源；本源本轮不重试。未知/协议错误中止，本地无权调用零 I/O；全部读取失败可给明确未验证的排查建议，不报“健康”。warnings/截断及预算耗尽不报“健康”，越界时间/点数/长度零网络请求。真 SDK + 协议替身、获准真实 Prometheus 验服务端 timeout/max-samples/max-concurrency 与高基数失败；三源联合问题样例校准 `max_tool_calls/max_turns`，固定模型任务样例覆盖不同指标，不建指标白名单 |
+| **G3 Grafana 只读调查**：当前离线候选，首批五项与限制见 §3.2；真实模型/公司源门槛开放 | 用户在飞书问 Dashboard 面板含义 → Agent 按问题选工具，可读定义并独立调查获准 Prometheus → 分列显示定义和实时证据，只有可信对应关系才声称同源 | 首批只核约所需只读工具（Dashboard 搜索/读取、数据源元数据、Annotation 读取），这不是固定调用顺序或永久对象白名单；逐项核对 schema/结果。无源权限、当前读取失败、面板引用未授权数据源、版本/内容过大：拒绝读取或只报告定义且标明未查实时；历史回放/重发按当前源和接收权限本地复核，不为每个对象远端查 ACL。锁版真 Server + 合成/获准 Grafana 核对响应，禁止未授权代理查询 |
 | **A4 Alertmanager 只读调查**：告警/静默/接收器和状态，确定社区 Server 或薄 API v2 Adapter | 群员问某告警是否被静默 → Agent 读独立 Alertmanager → 展示匹配依据、静默 ID/起止时间和采集时间 | 先核对候选 Server 的所选只读工具和 API v2；写入口若缺认证或远端工具限制，S6 改用经认证的薄 API v2 Adapter。目标不可达、分页未取完、静默已到期、权限撤销：不称“无告警/未静默”；只读调用不暴露写工具。取消静默的实际 API 行为留在 S6 验证 |
 | **W5 群审批底座**：仅为已选监控动作持久化候选 Action 与批准状态 | 当前群成员申请具体动作 → Runner 调用受治理“提出”工具，可信代码回读对象/版本、规范化参数、生成差异与 Action/提议 Evidence，Runner 正常结束并引用证据；应用按已存内容交付群且记录 `sent` → 仍在群内的名单成员 @ 机器人逐次批准 → 应用绑定批准并进入可执行状态；批准后群收到代码生成的执行反馈，追问时 Agent 用只读工具查询 Action 状态 | 提议 Evidence/最终校验/群发送失败、Web/单聊/其他群、退群/非名单、伪造 open_id、过期、撤权、参数/目标变更、重复或并发事件：远端写 I/O 为零；审批入口确定性解析并去重，不进模型。真实 PostgreSQL + 真 SDK + 飞书事件替身验证提议工具调用/结果成对进入 Session，旧实例失锁后不能抢执行机会、同群执行与 Agent 轮次串行、重启后不自动补写；审批人身份的仅此写工具 Tool Scope 经 GovernedTools 和已有 MCPIntegration/Adapter 执行，结果以应用 Action 表为准。状态只读工具验证群/源/Action 归属与当前权限，生成 Evidence 并由下一轮正常提交；Session 已满、关闭或保存失败时执行事实仍保留、不重复写，用户新建会话凭 Action ID 仍可获准查询；群队列不因等待审批而阻塞 |
 | **S6 Alertmanager 静默写闭环**：创建与取消静默 | 群员申请覆盖某告警 1 年/3 年/明确到期的自定义时长 → 应用在群审批材料中列出匹配器当前命中的告警数量和有界样例（无法完整计数则明示） → 有权成员批准 → 创建并回读，群显示实际起止时间；取消某静默 ID 经另一次批准后回读提前结束状态 | 先核对所选 Server/API 的创建、更新和按 ID 取消分支。匹配器意外扩大、结束早于开始、取消了错误 ID、审批失效、重复回调、上游超时/结果未知：拒绝或待核实，不自动重发；取消前展示并核对 ID、当前匹配器与影响，已到期不谎报“刚取消”。走薄 API v2 Adapter 时按目标 Web 配置验证 Basic 用户名/密码的安全引用、无/错凭据零写入及正确凭据仅执行批准动作；现有 MCP `auth_ref` 只发 Bearer，不当作 Basic。社区 MCP 若不能隔离选中工具则用经认证的 API v2 Adapter。隔离 Alertmanager 实跑创建/取消、读回状态及告警抑制；路由与时间决定是否发后续通知 |
@@ -45,7 +45,7 @@
 
 ### 3.1 P2 当前切片（基线 `4c5b89495fdf57bfd6d18bb4483d5682e56cce59`）
 
-PR #70 的只读故障续查已合入。本片只扩展 Prometheus 读取，不改写能力。先用官方 v0.18.0 核约，再沿 `serve → Web/飞书 → Runner → GovernedTools → MCP → Evidence/PolicySession → 交付` 实现。协议/计划的独立审查已覆盖 `1414ec2690123c60a3ca42b8a627ea1681ae2ede`，没有架构阻断；`dd9007a` 复审确认发现/query/range/metadata 的接收超限 B1 修复成立，但发现 list_rules 不受截断值约束的同根因缺口。当前补规则读取的容量核对说明与正式入口超限回归，不改产品代码或失败契约，新差异仍须精确 SHA 复审。按最新安排先本地测试与审查，审核通过后再开 PR；真实模型和真实源门槛保持开放。候选的当前验证证据只记 handoff；不合入实验分支。
+PR #70 的只读故障续查已合入。本片只扩展 Prometheus 读取，不改写能力，已随 PR #71 合入。官方 v0.18.0 核约后沿 `serve → Web/飞书 → Runner → GovernedTools → MCP → Evidence/PolicySession → 交付` 实现。协议/计划的独立审查覆盖 `1414ec2690123c60a3ca42b8a627ea1681ae2ede`，没有架构阻断；`dd9007a` 复审确认发现/query/range/metadata 的接收超限 B1 修复，后续同根因的 list_rules 容量核对说明与正式入口超限回归也已复审合入，未放宽失败契约。真实模型和真实源门槛保持开放；当前验证证据只记 handoff，不合入实验分支。
 
 **Agent 的任务和选择。** 用户问“host1 最近为什么 CPU 告警”“这台主机叫什么、监控里能看到多少 CPU/内存”“Kafka 积压是否和已加载规则有关”：Agent 自选获准源、指标/标签、发现方式、表达式、时间窗、步长和调查顺序；可直接查已知指标，缺关键业务含义时才澄清。主机配置仅报告指标实际提供的事实，不推断未采集的硬件配置。失败或信息不足时可换已授权源、补证据或结束；不要求每次先发现、先读规则或固定工具顺序。代码管授权、资源、真实证据和分类边界。
 
@@ -74,6 +74,34 @@ PR #70 的三个非阻断项在本片同一失败契约中落实：并行成功/
 | P2.2 正式装配与最小用户闭环 | 先补失败测试，再用正式 serve/Web 查 range 或发现，真实 PostgreSQL/SDK/Evidence/Session；先跑一成功、一越界零 I/O 拒绝。至少3000项标签/指标/序列、query 与31天 range 在推荐配套上限下截断成功；空/空白 metric 零 I/O 拒绝后可改为具体指标。官方 list_rules 在全局200下仍完整返回300条规则、无 Server 截断标记；超出64000字节时正式 Web 中止、零 Evidence/Session 写入、不重试。启用规则读取前另测目标源完整响应容量；其他实际超限仍中止。子集授权、固定端点、schema 漂移、跨源引用、旧配置/旧证据兼容；query 与发现输出不混称数值 |
 | P2.3 自主修正与失败收尾 | 真 Server + 正式治理链验证坏表达式→模型改写→成功证据，重复表达式/次数/预算上限、四并行初次失败和修正最多两次 I/O、错误隔离变异；故障换源、全失败无证据建议、并行成功/失败、提交时撤权；正常/拒绝均覆盖历史和重发 |
 | P2.4 能力评估与交付 | 正式浏览器与群事件替身展示来源、实际表达式/冻结时间、warnings/截断和推断；R1/MCP/G0/SDK 相关回归、Ruff/type 检查。获准真实模型上评估上述三业务问题及一次语法修正，不固定顺序，记录答案/取证/澄清/调用次数/耗时/用量；真实 Prometheus 验扫描限额。缺模型或真实源继续离线并留下能力/环境验收门槛，不用脚本模型豁免；提交、推送并开 PR，不合并/部署 |
+
+### 3.2 G3 当前切片（基线 `4cbb27a2b6e54050fc350fcd62a1a9e5cf123eae`）
+
+**任务与复用。** PR #71 的 P2 已合入。用户问“Host CPU 的面板怎么算、引用什么数据源”“近期有没有部署标记” → Agent 自选获准源与读取顺序，按需关联获准 Prometheus → 分列展示定义与实时证据。直接复用 runtime、MCPIntegration 快照/核约/重连、Grants、GovernedTools、Evidence/PolicySession 与渠道，不增加客户端、授权表或工作流。真实模型仍按用户选择暂缺，离线不能关闭能力验收。
+
+**锁版。** 官方 Grafana MCP `v2.0.2`（源码 tag `0eb7e0a`），Darwin arm64 发布包 SHA-256 `33161366ddc5eb3cfca288d9d1badd2aaa7d3f1d3a7090a2bde367fc51f45a0f`，二进制 `480c23f5f0c80e7819fa060e12d4faf471732b63bd05a2023e45f868a7f33baf`。SDK 0.22.3 / mcp 2.2.0 实测五项 schema 为简单对象、无 `$schema`，复用现有核约，不扩大通用 schema 兼容范围。成功结果为完整单段 JSON 文本；panel queries 是数组，annotations 是 `{"Payload": [...]}`，仅对此锁版形态薄转换。
+
+| 远端名 / `grafana.` 策略后缀 | 本地必填输入与最小投影 |
+| --- | --- |
+| `search_dashboards` | `query, folderUid, tag, starred, limit, page`；空过滤允许源内搜索，limit 1–100、page≥1。UID/标题/文件夹/标签、当前页 total 与 hasMore；total 不是全源总数 |
+| `get_dashboard_summary` | `uid`；UID/标题/说明、面板概要、变量名/类型、默认时间窗、meta.version/folderUid；不留作者、编辑权限或插件配置。工具未提供单位/阈值时不得推断配置 |
+| `get_dashboard_panel_queries` | `uid, panelId`；0 表示全部，网络前省略 panelId，正数精确选择。原始 query/refId/数据源 UID与类型，代码补请求 UID 和面板选择值；0 不是真实面板 ID，远端没有逐行面板 ID，不按标题/顺序/refId 伪造。不发送 variables，不执行变量查询，不暴露 visual-editor 任意 target |
+| `list_datasources` | `type, name, limit, offset`；空 type/name 可发现全部，limit 1–100、offset≥0。ID/UID/名称/类型/默认标志、筛选后总数与 hasMore；不留 URL、账户、jsonData/secureJsonData。UID/名称/type 不证明对应哪个 Prometheus 源；没有可信对应关系时只报告定义和“实时状态未核实”，不猜配 |
+| `get_annotations` | `from, to, limit, dashboardUid, tags, matchAny`；有序 Unix 毫秒窗口≤31天、limit 1–100。空 dashboardUid 网络前省略表示源内读取；ID/Dashboard/Panel、起止毫秒、文本/标签，代码补实际窗口；不留作者/email。数量达到 limit 标可能不完整 |
+
+字符串/UID/标签数量在 I/O 前检查，不设对象白名单。省略参数默认行为：search 空过滤不限制对象；panel queries 无 panelId 取全部、无 variables 保留原表达式；annotations 不发送 alertUid/panelId/userId/type，不限定这些维度，matchAny 显式传值。其余表内参数显式发送。不开放 full dashboard/JSONPath/代理查询/通用 API/写工具；这是首批核约范围，不是固定步骤或永久限制。
+
+**数据、失败与权限。** 五项固定登记为监控只读语义，同一 Grants 授权源/工具；定义/目录/标记不是实时健康证据，各次是独立采集快照，不承诺跨工具原子版本。分页与截断保留；集合字段允许现有投影省略并标截断，必要来源/对象/窗口字段必须保留，不裁 JSON 冒充完整。历史/重发本地复核当前源/工具/接收权限，源离线不发远端 ACL；旧 P2 指纹不变。
+
+网络故障/超时复用已批准固定分类。远端 is_error 仅完整单文本、固定工具/GET 路径/锁版错误结构且可确认 401/403/5xx 时记源级失败，不输出原文，该源本轮不再读，Agent 可查其他获准源。Dashboard 同时核对 legacy、capability discovery、命名空间 settings 和原生 v1beta1/v2 读取的实际格式；锁版 Server 将 storedVersion 动态写入错误格式，原生版本字段只接受 v2 或 v2alphaN/v2betaN（N 为正整数），实测 v2、v2alpha1、v2beta1 和 v2beta2。Kubernetes 错误的两处状态码与标准状态名称须一致，不按文本包含 HTTP 码判断。原生对象或 settings 的404、未知错误、畸形/非完整结果、接收超限与存储失败仍中止；capability 的404由官方 Server 确定旧 API 分支，不当作对象不存在。不改变 MCP 同码错误分类、不增加自动重试。
+
+**外部部署。** 固定 Grafana URL/组织及共享只读账号；不启用 dynamic-multi-org、URL override、跨源重定向。选 `--enabled-tools=search,dashboard,datasource,annotations --disable-write --disable-query --usage-stats=disabled`，小维仅映射五项。MCP Bearer 与 Grafana Service Account Token 独立，实测无/错 token 零上游 I/O及正确身份。原生 Dashboard 由官方 Server 读取 discovery、同源 settings 的 namespace，必要时按 storedVersion 再读原生对象；不由 Agent 猜 namespace，不自行回退有损旧格式。接收上限同时容纳 tools/list 与代表性最大定义；list_datasources 分页仍先读取上游全目录，摘要/面板工具也先读完整 Dashboard，不能把分页当成服务端开销上限。公司启用前按对象规模确定接收/投影配套值；超限失败关闭。内网 HTTP 沿用架构，不增证书管理。
+
+**可验证实施顺序。**
+1. 官方二进制 + 合成 API 核对五项 schema、成功/错误/分页/认证和禁用写/代理；精确计划提交独立审查后实现。
+2. 先补失败测试，再装配策略/薄投影；尽早走正式 serve/Web + 真 Runner/治理/PostgreSQL 的定义成功路径及未授权强行调用零业务 I/O路径。
+3. 补分页/大目录/空结果、秘密与作者字段过滤、参数越界零 I/O、schema 漂移、401/403/5xx 续查其他源、未知错误/超限零成功 Evidence；群替身共享追问、历史/重发撤权与源离线回放、跨源/会话伪造引用；回归 MCP/P2/重连及 Ruff/mypy/doc checks。
+4. Chrome 正式 Web 验收；模型任务样例含直接 UID、标题发现、变量/数据源含糊时澄清和部分故障，合理不同顺序都可通过。真实模型的选择/取证/澄清/答案/调用数/耗时/用量、实际 Grafana 版本/组织权限与公司双入口仍待获准环境，不部署。
 
 ## 4. 环境、兼容与恢复
 

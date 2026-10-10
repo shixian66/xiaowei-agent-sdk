@@ -248,7 +248,7 @@ Agent 在预算内完成。Web 本片保持原样，仍把有后续页标为“�
 可选配官方 Prometheus MCP v0.18.0 的七项只读工具；旧的仅 `query` 配置继续可用。
 MCP Server 单独部署在外部节点，Compose 不新增容器；小维只连固定地址。外部 Server 使用已核对的
 只读工具集，不启用 TSDB 删除、reload、quit；需要规则读取时，锁版用例的 `--mcp.tools=list_rules`
-已实测能开放规则与 core 读取。当前 P2 为离线候选，真实模型和目标 Prometheus 限额尚未验收。
+已实测能开放规则与 core 读取。P2 离线实现已合入 PR #71，真实模型和目标 Prometheus 限额尚未验收。
 保持现有 `xiaowei.json` 的其他字段，在顶层加入：
 
 ```json
@@ -328,6 +328,63 @@ metadata/rules 的官方返回会丢弃上游 warnings，页面保留固定限�
 事实的历史读取不重新调用远端。回退到 R1 镜像须去掉它不识别的新工具映射和授权；回退到更早镜像前，
 删除 `mcp_servers` 及其工具授权，再用旧镜像
 `config check`，避免旧版拒绝新字段。
+
+## 选配 Grafana 监控源
+
+G3 候选仅接入官方 Grafana MCP **v2.0.2** 的五项只读定义工具；实际公司 Grafana 版本/组织权限、
+真实模型和双入口仍需验收。外部节点运行 MCP，小维 Compose 不新增服务。
+固定 Grafana URL/组织和共享只读 Service Account；不启用通用 API、写工具或代理指标查询。
+本机协议用例使用的开关为：
+
+```text
+--transport=streamable-http --enabled-tools=search,dashboard,datasource,annotations
+--disable-write --disable-query --usage-stats=disabled
+--allow-grafana-url-override=false --dynamic-multi-org=false
+--server-auth-token=<从外部节点的安全运行配置提供，不写进群消息>
+```
+
+外部 Server 的 `GRAFANA_URL`、`GRAFANA_SERVICE_ACCOUNT_TOKEN` 属于 Grafana 连接；MCP 调用方
+Bearer 是另一项凭据，不转发给 Grafana。内网 HTTP 沿用上节的运维取舍，无须增加 CA 管理。
+在现有 `mcp_servers` 列表追加下面这一项，不覆盖原 Prometheus 配置：
+
+```json
+{
+  "server_id": "grafana-prod",
+  "url": "http://grafana-mcp.internal:8000/mcp",
+  "auth_ref": "env:XW_GRAFANA_MCP_TOKEN",
+  "timeout_seconds": 5,
+  "max_response_bytes": 128000,
+  "allowed_tools": {
+    "search_dashboards": "grafana.search_dashboards",
+    "get_dashboard_summary": "grafana.get_dashboard_summary",
+    "get_dashboard_panel_queries": "grafana.get_dashboard_panel_queries",
+    "list_datasources": "grafana.list_datasources",
+    "get_annotations": "grafana.get_annotations"
+  }
+}
+```
+
+128000 是本机合成场景的起点，**不是全部实例的容量保证**。启用前测 `tools/list`、最大摘要及全部
+面板表达式的实际响应大小；配套调整接收上限和现有四用途投影，过大时只选配已验证能读取的工具。
+摘要/面板没有分页，超出接收上限仍中止本轮，不伪装成断线。
+搜索与数据源目录的 limit≤100；搜索 page 从1开始，数据源 offset 从0开始，达到边界可按需续页。
+搜索 total 是当前页数量；数据源 total 是筛选后总数；hasMore/投影省略都标明部分结果。
+标记使用 Unix 毫秒、最多31天窗口和100条；这是本地容量边界，达到 limit 视为可能未完整，可分窗。
+分页不等于服务端开销受限：数据源每次先读取全目录，摘要与表达式先读取完整 Dashboard。
+初始化会读 `/api/frontend/settings`；首次 Dashboard 读取有 capability discovery。原生 API 按同源
+settings 的 namespace 读取，未缓存 namespace 时还会读 settings；v2 对象可能先读 v1beta1 再读
+storedVersion 的原生对象。数据源目录失败也可能读取同源 settings。这些是官方实现行为，不是小维重放调用。
+
+按上节方式给 `data_policy.model_tools` 和获准用户/群加入 `grafana-prod/<工具名>`；群成员共享获准
+源内的定义，不做对象白名单。仅填源地址不会授权。`config check` 后停止旧进程并重启生效；
+`/readyz` 的 `mcp.grafana-prod` 复用同一源状态和重连机制，不代表 Grafana 上游权限或健康已核实。
+历史与重发只做本地当前源/工具/接收权限复核；MCP 不可达不妨碍仍获准的历史，撤权则拒绝。
+回退到不支持 Grafana 的镜像前，移除该源及其工具授权，用旧镜像运行 `config check`。
+
+结果仅是定义/目录/标记，未执行面板查询。原始表达式中的变量/宏保持原样；panelId=0 表示读取全部，
+官方结果没有逐条面板 ID。摘要未返回单位/阈值，visual-editor 的任意 target 不保留。
+数据源 UID/名称/type 不证明它对应某个 Prometheus 源；没有可信对应关系时，实时指标按独立来源
+报告，不声称来自这个面板。工具接口、失败分类与验收的唯一细则见[计划 §3.2](../docs/superpowers/plans/2026-10-09-monitoring-mcp.md#32-g3-当前切片基线-4cbb27a2b6e54050fc350fcd62a1a9e5cf123eae)。
 
 ## 状态、停止与重启
 
