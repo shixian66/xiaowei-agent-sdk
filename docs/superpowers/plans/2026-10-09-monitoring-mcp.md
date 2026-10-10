@@ -103,6 +103,35 @@ PR #70 的三个非阻断项在本片同一失败契约中落实：并行成功/
 3. 补分页/大目录/空结果、秘密与作者字段过滤、参数越界零 I/O、schema 漂移、401/403/5xx 续查其他源、未知错误/超限零成功 Evidence；群替身共享追问、历史/重发撤权与源离线回放、跨源/会话伪造引用；回归 MCP/P2/重连及 Ruff/mypy/doc checks。
 4. Chrome 正式 Web 验收；模型任务样例含直接 UID、标题发现、变量/数据源含糊时澄清和部分故障，合理不同顺序都可通过。真实模型的选择/取证/澄清/答案/调用数/耗时/用量、实际 Grafana 版本/组织权限与公司双入口仍待获准环境，不部署。
 
+### 3.3 A4 当前切片（基线 `8a7072d86abf6e93e0fb5e4be8e84f61308feb80`）
+
+**用户任务。** 用户问“host1 的 CPU 告警有没有被静默、到什么时候”“现在有哪些告警、怎样分组、交给哪个接收器”“Alertmanager 自身是什么状态” → 同一 Agent 按缺失信息自主选择读取、标签匹配器与分页，按需结合获准 Prometheus/Grafana → 代码展示各源采集快照、告警状态/抑制 ID、静默匹配器/起止时间与限制。静默存在不等于它确实抑制了某条告警；按告警的 `silencedBy` 关联 ID，`inhibitedBy` 和 `mutedBy` 分列，不称已通知或主机健康。已知 ID 可直接读取，没有固定调查顺序。
+
+**接入选择与证据。** 社区 `ntk148v/alertmanager-mcp-server` 固定 `4a653a7d53504f0bec216fe9aadc63184c3098b9`。按其 uv.lock 的 Python 3.12 / mcp 1.8.1 / Pydantic 2.11.4 实跑：无/错 Bearer 被拒、零上游 I/O；正确 Bearer 的 Streamable HTTP 握手在 SDK 0.22.3 / mcp 2.2.0 下抛 `ExceptionGroup`，叶异常为 `MCPError(-32000, "SSE stream ended without a response")`。另在候选原环境调用未修改的公开读取函数：401/500 的 get_alerts 均抛 `KeyError(slice(0,1,None))`；get_status 返回含原始错误的普通字典。源码还显示没有只注册选中写工具的开关、异步工具内同步请求且上游超时固定60秒。前两项有可复现测试，后两项仅源码核对。按架构已批准的备选路径，A4 使用外部原生 API v2 的薄 Adapter，不改 SDK/社区 Server，不在仓库内嵌业务 MCP Server。
+
+官方 Alertmanager `v0.34.1` API v2/OpenAPI 锁版验证：Darwin arm64 发布包 SHA-256 `a3941879f340ef12a4cc1a479c82bd8520611265ea8d1ee25c88bd5f944d8293`、二进制 `c09fe5d0e479e44a39e8501e5ab6b6a16b19370bf51ce8433b92406ba6368cac`。仅 loopback、无外部通知接收器；测试预置合成告警/静默不属于产品写能力。API 无服务端分页；`filter` 可重复，布尔参数控制哪些状态包含在结果中。Basic 无/错凭据401，正确凭据读取；静默 UUID 格式错误422、未知 UUID404、非法 matcher400。旧版目标的兼容性须按公司实际版本复验，不能从同名 API 推定。
+
+**装配与接口。** 可选 `alertmanager_sources`，每源仅 `server_id`、固定根 URL（可有部署子路径）、Basic `username_ref/password_ref`（成对安全引用或均为空）、期限、原始响应字节上限和选中只读 `tools`。ID 与 StarRocks/MCP 源唯一，沿现有 Grants 授权 `server_id/tool_name`，模型函数名 `server_id__tool_name`。本地 function tools 仍经 GovernedTools；应用只扩展已有本地函数装配以接纳这些已登记 API 工具。Adapter 的客户端由 runtime 进入/退出，不进 context；没有新注册平台、依赖、后台任务、预连接/探测或 MCP 重连包装。四种投影/Evidence/PolicySession/历史和重发复用同一目录与授权。空配置保持旧行为。
+
+| 本地工具 / 固定 GET 路径 | 全部必填输入 / 最小事实 |
+| --- | --- |
+| `get_alerts` / `/api/v2/alerts` | `filters, active, silenced, inhibited, unprocessed, receiver, limit, offset`；标签、summary/description、fingerprint、状态与抑制 ID、接收器名、起止/更新时间；不保留 generatorURL、其他 annotation 或地址 |
+| `get_alert_groups` / `/api/v2/alerts/groups` | `filters, active, silenced, inhibited, muted, receiver, limit, offset`；分组标签、接收器名与同样的告警事实；每组至多100条告警，保留该组原数量，省略时标截断 |
+| `get_silences` / `/api/v2/silences` | `filters, limit, offset`；ID、matchers（name/value/isRegex/isEqual）、起止/更新时间、active/pending/expired、comment；不留 createdBy/annotations。状态过滤不发送，包含三种状态 |
+| `get_silence` / `/api/v2/silence/{id}` | `silence_id`；UUID 在网络前规范化，仅构造固定路径段；同上静默事实 |
+| `get_receivers` / `/api/v2/receivers` | `limit, offset`；仅接收器名称，不读取通知目的地或路由配置 |
+| `get_status` / `/api/v2/status` | 空对象；cluster.status、版本、uptime；不保存原配置、peer 地址、构建用户或路由秘密 |
+
+`filters` 为最多32个非空 matcher，每项≤8192字符；不建 matcher/主机白名单或 RE2 解析器。`receiver` 空串表示不限制、长度≤256。limit 1–100、offset≥0（groups 同样按原始大小受限）。I/O 前检查并保留实际输入；列表先完整接收过滤后 API 响应、再本地分页，保存 total/offset/limit/has_more，不是游标或跨页一致快照。提示按已知标签收窄范围；API 本身没有分页，接收上限须容纳代表性最大过滤结果，源内全量读取可能超限，不能以 limit 承诺上游负荷有界。空页与截断只证明本次参数/状态范围，不能称源内无告警。
+
+**失败与生命周期。** 只发送可信固定端点的 GET；拒绝跳转、压缩、畸形/不合约 JSON 与响应超限；关闭环境代理和自动重试，连接/完整读取共用一项总时限。HTTP 401/403→auth、5xx→upstream_5xx、网络不可达→unavailable、超时→timeout，按已批准的本源本轮停用/计预算/无成功证据契约回给 Agent，其他获准源可继续。400/404/422、其他状态、未知协议、投影/Evidence 错误仍中止；不新增执行后 matcher 自动修正机制。下轮如用户再查询，是新的受治理 GET，不是重放或 MCP 会话恢复。`/readyz` 使用独立的 `alertmanager.<ID>` 安全状态：configured 表示已装配、尚未实读；available/unavailable 仅是最后一次读取观察，不做健康探测、不过期保证，不影响 Web/StarRocks 就绪。取消与关闭必须释放响应/客户端，不重发。
+
+**实施/验收。**
+1. 官方 API 与候选实验、上述契约精确提交独立审查；产品代码尚未改。用例 `test_alertmanager_protocol.py`，分别以 `XW_TEST_ALERTMANAGER_BIN`、`XW_TEST_ALERTMANAGER_COMMUNITY_PYTHON/ROOT` 指向仓库外固定包/环境复现；没有变量时跳过，CI 不能替代本机官方证据。
+2. 先让正式 serve/Web 的成功读取与无权强行调用零 I/O 测试在旧代码失败，再实现配置/目录/Adapter 装配。真实 PostgreSQL、SDK Runner/治理、Evidence/Session；API/模型替身仅提供合成数据。
+3. 验各项输入、状态语义、空页/多页/大量分组、过期静默与同源 ID；Basic、固定端点/跳转、总时限/超限/协议漂移、局部故障换源与本源零重试、正常关闭/取消；历史/重发/回放撤权零业务 I/O、跨源/会话引用拒绝，旧配置/证据兼容。官方 API 经正式工具链读取，不只 HTTP helper；Chrome Web 与指定群事件替身各验成功/拒绝。
+4. MCP/P2/G3/治理/Session 回归与 Ruff/mypy/doc checks，具体差异独立复审后提交/推送/开 PR，不合并、不部署。真实模型业务样例至少包括上述三问、含糊告警/多源的必要澄清及源部分故障，评估选择/取证/事实/调用数/耗时/用量，不固定顺序。当前用户批准暂只离线，真实模型、公司 Alertmanager 版本/认证/容量/HA与双入口通知行为仍开放；写审批、创建/取消静默归 W5/S6。
+
 ## 4. 环境、兼容与恢复
 
 - **开发/协议：** 锁定 `uv.lock` 中 SDK 0.22.3；隔离 PostgreSQL、真 SDK Runner、loopback MCP fixture。每个源的切片才准备对应的可丢弃 Prometheus/Grafana/Alertmanager 实例，并以所选 Server 的**具体发布版本/镜像 digest**核对其工具清单与响应，不从当前 `main` 文档推断未来固定镜像的行为。社区 Alertmanager Server 若传输、鉴权或返回契约不合适，A4 选择 API v2 薄 Adapter 并记录证据，不引入第四个常驻服务。官方来源：[Prometheus MCP](https://github.com/prometheus/prometheus-mcp)、[Grafana MCP](https://github.com/grafana/mcp-grafana)、[Alertmanager API v2](https://github.com/prometheus/alertmanager/blob/main/api/v2/openapi.yaml)、[社区候选](https://github.com/ntk148v/alertmanager-mcp-server)。
