@@ -56,7 +56,7 @@ from xiaowei.governance import (
     schema_shape,
 )
 from xiaowei.models import (
-    PROMETHEUS_READ_POLICIES,
+    MONITORING_READ_POLICIES,
     Audience,
     Channel,
     Delivery,
@@ -439,7 +439,7 @@ class EvidenceStore:
             contract = self._catalog.contract(failure.tool_id, failure.target_id)
             if (
                 contract is None
-                or contract.policy_id not in PROMETHEUS_READ_POLICIES
+                or contract.policy_id not in MONITORING_READ_POLICIES
                 or failure.target_id not in ctx.target_scope
             ):
                 raise AnswerRejectedError(

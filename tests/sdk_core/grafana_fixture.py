@@ -53,6 +53,8 @@ class BackendState:
     status: int = 200
     dashboard: dict[str, Any] = field(default_factory=lambda: json.loads(json.dumps(DASHBOARD)))
     count: int = 1
+    public_url: str = ""
+    version: str = ""
 
 
 @contextmanager
@@ -100,7 +102,11 @@ def grafana_backend() -> Iterator[tuple[int, BackendState]]:
                 body = (
                     items
                     if parsed.path == "/api/datasources"
-                    else {"datasources": {d["uid"]: d for d in items}}
+                    else {
+                        "datasources": {d["uid"]: d for d in items},
+                        "appUrl": state.public_url,
+                        "buildInfo": {"version": state.version},
+                    }
                 )
             elif parsed.path == "/api/annotations":
                 body = [
@@ -159,6 +165,8 @@ def official_grafana(
             "--disable-write",
             "--disable-query",
             "--usage-stats=disabled",
+            "--allow-grafana-url-override=false",
+            "--dynamic-multi-org=false",
             "--grafana-timeout=1s",
             "--log-level=error",
             f"--server-auth-token={token}",

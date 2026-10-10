@@ -37,8 +37,8 @@ from pydantic import BaseModel
 
 from xiaowei.models import (
     AUDIENCES,
+    MONITORING_READ_POLICIES,
     PROMETHEUS_QUERY_POLICIES,
-    PROMETHEUS_READ_POLICIES,
     Identity,
     MonitoringFailure,
     MonitoringFailureReason,
@@ -350,7 +350,7 @@ class GovernedTools:
             try:
                 observation = await run()
             except MonitoringReadError as exc:
-                if contract.policy_id not in PROMETHEUS_READ_POLICIES:
+                if contract.policy_id not in MONITORING_READ_POLICIES:
                     raise ToolExecutionError() from None
                 current = self._runs.get(key, TurnRuns())
                 if isinstance(exc, PromQLExpressionError):

@@ -33,6 +33,16 @@ PROMETHEUS_DISCOVERY_POLICIES = frozenset(
     }
 )
 PROMETHEUS_READ_POLICIES = PROMETHEUS_QUERY_POLICIES | PROMETHEUS_DISCOVERY_POLICIES
+GRAFANA_READ_POLICIES = frozenset(
+    {
+        "grafana.search_dashboards",
+        "grafana.get_dashboard_summary",
+        "grafana.get_dashboard_panel_queries",
+        "grafana.list_datasources",
+        "grafana.get_annotations",
+    }
+)
+MONITORING_READ_POLICIES = PROMETHEUS_READ_POLICIES | GRAFANA_READ_POLICIES
 
 Label = Annotated[str, StringConstraints(min_length=1, max_length=200)]
 JsonScalar = None | bool | int | float | str

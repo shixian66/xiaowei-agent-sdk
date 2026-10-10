@@ -127,7 +127,7 @@ def evidence_in(call: ModelCall) -> list[str]:
 SEARCH_ALL: dict[str, object] = {"keyword": ".", "database": None, "page_size": 5, "cursor": None}
 
 
-def tool_call(name: str, **arguments: object) -> Step:
+def tool_call(name: str, /, **arguments: object) -> Step:
     return lambda call: [function_call(name, arguments, call_id=f"call-{next(_call_ids)}")]
 
 

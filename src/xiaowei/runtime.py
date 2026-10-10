@@ -36,7 +36,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from functools import partial
 from pathlib import Path
-from typing import Annotated, Any, Literal
+from typing import Annotated, Any, Literal, cast
 
 import httpx2
 import openai
@@ -51,6 +51,7 @@ from pydantic import (
     StringConstraints,
     TypeAdapter,
     ValidationError,
+    create_model,
     field_validator,
     model_validator,
 )
@@ -89,7 +90,7 @@ from xiaowei.mcp import MCPIntegration
 from xiaowei.model_api import ModelProfile, open_model
 from xiaowei.models import (
     AUDIENCES,
-    PROMETHEUS_READ_POLICIES,
+    MONITORING_READ_POLICIES,
     AgentAnswer,
     Audience,
     Budget,
@@ -270,11 +271,13 @@ class ServeConfig(_Config):
         if len(set(ids)) != len(ids):
             raise ValueError("mcp_servers 中的 server_id 不能重复")
         if any(
-            policy_id not in PROMETHEUS_READ_POLICIES or policy_id != f"prometheus.{remote_name}"
+            policy_id not in MONITORING_READ_POLICIES or policy_id.rsplit(".", 1)[-1] != remote_name
             for server in value
             for remote_name, policy_id in server.allowed_tools.items()
         ):
-            raise ValueError("只允许已核约的 Prometheus 只读工具及其准确映射")
+            raise ValueError(
+                "只允许已核约的 Prometheus 只读工具及其准确映射；Grafana 同样按已核约映射"
+            )
         return value
 
     @field_validator("projection_bytes")
@@ -728,6 +731,162 @@ class _PrometheusRulesResult(BaseModel):
     groups: list[_RuleGroup]
 
 
+class _GrafanaModel(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+
+class _GrafanaSearchArgs(_GrafanaModel):
+    query: str
+    folderUid: str  # noqa: N815 - 锁版 MCP JSON 字段名
+    tag: list[str]
+    starred: bool
+    limit: int = Field(json_schema_extra={"default": 50})
+    page: int = Field(json_schema_extra={"default": 1})
+
+
+class _GrafanaUIDArgs(_GrafanaModel):
+    uid: str
+
+
+class _GrafanaPanelArgs(_GrafanaUIDArgs):
+    panelId: int  # noqa: N815 - 锁版 MCP JSON 字段名
+
+
+class _GrafanaDatasourceArgs(_GrafanaModel):
+    type: str
+    name: str
+    limit: int = Field(json_schema_extra={"default": 50})
+    offset: int = Field(json_schema_extra={"default": 0})
+
+
+# from 是 Python 关键字；直接声明 JSON 字段，保持 contract_dump 的字段名契约，不改通用序列化。
+_GrafanaAnnotationArgs = create_model(
+    "_GrafanaAnnotationArgs",
+    __base__=_GrafanaModel,
+    **cast(
+        dict[str, Any],
+        {
+            "from": (int, ...),
+            "to": (int, ...),
+            "limit": (int, ...),
+            "dashboardUid": (str, ...),
+            "tags": (list[str], ...),
+            "matchAny": (bool, ...),
+        },
+    ),
+)
+
+
+class _DashboardHit(_GrafanaModel):
+    uid: str
+    title: str
+    folderUid: str | None = None  # noqa: N815 - 锁版 MCP JSON 字段名
+    folderTitle: str | None = None  # noqa: N815 - 锁版 MCP JSON 字段名
+    tags: list[str] = Field(default_factory=list)
+
+
+class _GrafanaSearchResult(_GrafanaModel):
+    dashboards: list[_DashboardHit]
+    total: int
+    hasMore: bool  # noqa: N815 - 锁版 MCP JSON 字段名
+    limit: int
+    page: int
+
+
+class _PanelSummary(_GrafanaModel):
+    id: int
+    title: str
+    type: str
+    description: str | None = None
+    queryCount: int  # noqa: N815 - 锁版 MCP JSON 字段名
+
+
+class _VariableSummary(_GrafanaModel):
+    name: str
+    type: str
+
+
+class _GrafanaTimeRange(_GrafanaModel):
+    start: str = Field(alias="from")
+    end: str = Field(alias="to")
+
+
+class _DashboardMeta(_GrafanaModel):
+    version: int | None = None
+    folderUid: str | None = None  # noqa: N815 - 锁版 MCP JSON 字段名
+
+
+class _GrafanaSummaryResult(_GrafanaModel):
+    uid: str
+    title: str
+    description: str | None = None
+    tags: list[str] = Field(default_factory=list)
+    panelCount: int  # noqa: N815 - 锁版 MCP JSON 字段名
+    panels: list[_PanelSummary] | None
+    variables: list[_VariableSummary] = Field(default_factory=list)
+    timeRange: _GrafanaTimeRange  # noqa: N815 - 锁版 MCP JSON 字段名
+    meta: _DashboardMeta | None = None
+
+
+class _PanelDatasource(_GrafanaModel):
+    uid: str
+    type: str
+
+
+class _PanelQuery(_GrafanaModel):
+    title: str
+    query: str
+    datasource: _PanelDatasource
+    refId: str | None = None  # noqa: N815 - 锁版 MCP JSON 字段名
+
+
+class _GrafanaPanelResult(_GrafanaModel):
+    uid: str
+    panelId: int  # noqa: N815 - 锁版 MCP JSON 字段名
+    panels: list[_PanelQuery]
+
+
+class _DatasourceSummary(_GrafanaModel):
+    id: int
+    uid: str
+    name: str
+    type: str
+    isDefault: bool  # noqa: N815 - 锁版 MCP JSON 字段名
+
+
+class _GrafanaDatasourceResult(_GrafanaModel):
+    datasources: list[_DatasourceSummary]
+    total: int
+    hasMore: bool  # noqa: N815 - 锁版 MCP JSON 字段名
+    limit: int
+    offset: int
+
+
+class _Annotation(_GrafanaModel):
+    id: int
+    dashboardUID: str | None = None  # noqa: N815 - 锁版 MCP JSON 字段名
+    panelId: int | None = None  # noqa: N815 - 锁版 MCP JSON 字段名
+    time: int
+    timeEnd: int | None = None  # noqa: N815 - 锁版 MCP JSON 字段名
+    text: str
+    tags: list[str] | None = None
+
+
+_GrafanaAnnotationResult = create_model(
+    "_GrafanaAnnotationResult",
+    __base__=_GrafanaModel,
+    **cast(
+        dict[str, Any],
+        {
+            "from": (int, ...),
+            "to": (int, ...),
+            "dashboardUid": (str, ...),
+            "annotations": (list[_Annotation] | None, ...),
+        },
+    ),
+)
+
+
 def _monitoring_catalog(
     config: ServeConfig,
 ) -> tuple[tuple[ToolContract, ...], tuple[ToolPolicy, ...]]:
@@ -824,6 +983,85 @@ def _monitoring_catalog(
                 for audience in AUDIENCES
             },
             required=fields,
+            fact_note=note,
+        )
+        descriptions[name] = description
+    grafana = (
+        (
+            "search_dashboards",
+            _GrafanaSearchArgs,
+            _GrafanaSearchResult,
+            ("limit", "page", "total", "hasMore", "dashboards"),
+            ("limit", "page", "total", "hasMore"),
+            "搜索仪表盘定义；空 query/folderUid/tag 与 false starred 表示源内搜索。"
+            "limit 1–100，page 从1开始；已知 UID 可直接读取，无需先搜索。",
+            "定义目录；total 是当前页数量，hasMore 表示可能还有结果，不是全源计数。",
+        ),
+        (
+            "get_dashboard_summary",
+            _GrafanaUIDArgs,
+            _GrafanaSummaryResult,
+            (
+                "uid",
+                "title",
+                "panelCount",
+                "meta",
+                "timeRange",
+                "description",
+                "tags",
+                "panels",
+                "variables",
+            ),
+            ("uid", "title"),
+            "读取已知 UID 的仪表盘摘要：面板 ID/类型、变量名、默认时间窗及版本。"
+            "不返回单位/阈值等完整配置，缺失字段不能猜。",
+            "仪表盘定义；采集时间是读取时刻，默认时间窗不是已执行的指标查询。未返回单位/阈值。",
+        ),
+        (
+            "get_dashboard_panel_queries",
+            _GrafanaPanelArgs,
+            _GrafanaPanelResult,
+            ("uid", "panelId", "panels"),
+            ("uid", "panelId"),
+            "读取面板原始表达式/refId/数据源 UID与类型；panelId=0 表示全部，正数选择一个面板。"
+            "不执行、不替换变量；变量/宏未确定时澄清。visual-editor 空表达式不代表没有查询。",
+            "面板查询定义，未执行。panelId 是请求选择，0 表示全部；结果没有逐行面板 ID。"
+            "未返回 visual-editor target；数据源 UID 不证明对应哪个 Prometheus 源。",
+        ),
+        (
+            "list_datasources",
+            _GrafanaDatasourceArgs,
+            _GrafanaDatasourceResult,
+            ("limit", "offset", "total", "hasMore", "datasources"),
+            ("limit", "offset", "total", "hasMore"),
+            "发现数据源 ID/UID/名称/类型；空 type/name 表示不过滤，limit 1–100、offset 从0开始。"
+            "不返回连接地址或凭据，UID/名称不能证明它对应哪个 Prometheus 源。",
+            "数据源目录；total 是筛选后总数。目录不证明连接可用或对应外部 Prometheus 源。",
+        ),
+        (
+            "get_annotations",
+            _GrafanaAnnotationArgs,
+            _GrafanaAnnotationResult,
+            ("from", "to", "dashboardUid", "annotations"),
+            ("from", "to", "dashboardUid"),
+            "读取时间窗口内的标记；from/to 为有序 Unix 毫秒，窗口最多31天，limit 1–100。"
+            "空 dashboardUid 表示源内读取，tags 空表示不过滤；matchAny 控制 OR/AND。"
+            "不按告警/用户/面板/类型过滤。达到 limit 视为可能未完整，按需要收窄或分窗。",
+            "Grafana 标记记录，不证明变更因果或主机健康；达到 limit 时可能还有记录。",
+        ),
+    )
+    for name, graf_args, graf_result, graf_fields, required, description, note in grafana:
+        policies[name] = ToolPolicy(
+            policy_id=f"grafana.{name}",
+            arguments=graf_args,
+            result=graf_result,
+            projections={
+                audience: Projection(
+                    fields=graf_fields, max_bytes=config.projection_bytes[audience]
+                )
+                for audience in AUDIENCES
+            },
+            required=required,
             fact_note=note,
         )
         descriptions[name] = description

@@ -39,6 +39,7 @@ from pydantic import BaseModel, SecretStr
 
 from xiaowei.config import MCPServerConfig, resolve_secret_ref
 from xiaowei.governance import (
+    Execute,
     GovernedTools,
     MonitoringReadError,
     Prechecked,
@@ -48,6 +49,8 @@ from xiaowei.governance import (
     schema_shape,
 )
 from xiaowei.models import (
+    GRAFANA_READ_POLICIES,
+    MONITORING_READ_POLICIES,
     PROMETHEUS_QUERY_POLICIES,
     PROMETHEUS_READ_POLICIES,
     MonitoringFailureReason,
@@ -393,7 +396,7 @@ class MCPIntegration:
                     and source.snapshot.server is server
                 ):
                     source.status = "disconnected"
-                if binding.contract.policy_id in PROMETHEUS_READ_POLICIES:
+                if binding.contract.policy_id in MONITORING_READ_POLICIES:
                     reason = _read_transport_failure(exc)
                     if reason is not None:
                         raise MonitoringReadError(reason) from None
@@ -406,6 +409,10 @@ class MCPIntegration:
                 reason = _prometheus_query_failure(result, binding.remote_name)
                 if reason is not None:
                     raise MonitoringReadError(reason)
+            if binding.contract.policy_id in GRAFANA_READ_POLICIES and result.is_error:
+                reason = _grafana_read_failure(result, binding.remote_name, request.arguments)
+                if reason is not None:
+                    raise MonitoringReadError(reason)
             if binding.contract.policy_id in PROMETHEUS_READ_POLICIES:
                 payload, truncated = _prometheus_payload(
                     result, binding.result, binding.remote_name
@@ -416,6 +423,10 @@ class MCPIntegration:
                         payload[key] = request.arguments[key]
                 if "step" in request.arguments:
                     payload["step"] = _seconds_text(_seconds(request.arguments["step"]))
+            elif binding.contract.policy_id in GRAFANA_READ_POLICIES:
+                payload, truncated = _grafana_payload(
+                    result, binding.result, binding.remote_name, request.arguments
+                )
             else:
                 payload, truncated = _payload(result, binding.result), False
             if binding.contract.policy_id in PROMETHEUS_QUERY_POLICIES:
@@ -427,17 +438,60 @@ class MCPIntegration:
                 truncated=truncated,
             )
 
-        checked = (
-            Prechecked(
+        if binding.contract.policy_id in PROMETHEUS_READ_POLICIES:
+            checked: Execute = Prechecked(
                 lambda request: _prepare_prometheus(
                     request, binding.contract.policy_id, self._clock()
                 ),
                 execute,
             )
-            if binding.contract.policy_id in PROMETHEUS_READ_POLICIES
-            else execute
-        )
+        elif binding.contract.policy_id in GRAFANA_READ_POLICIES:
+            checked = Prechecked(_prepare_grafana, execute)
+        else:
+            checked = execute
         return governed_function_tool(name, binding.contract, self._governance, checked)
+
+
+def _prepare_grafana(request: ToolRequest) -> ToolRequest:
+    """治理授权后检查单次读取资源；出站省略可选过滤，不改 Session 的原参数摘要。"""
+    arguments = dict(request.arguments)
+    for key, value in arguments.items():
+        if isinstance(value, str):
+            bound = 2000 if key == "query" else 256
+            if len(value) > bound or (key == "uid" and not value.strip()):
+                raise ToolRejectedError("查询文本最多2000字符，其他文本最多256字符，uid 不能为空")
+        if key in {"tag", "tags"} and (
+            not isinstance(value, list)
+            or len(value) > 32
+            or any(not isinstance(tag, str) or not tag or len(tag) > 256 for tag in value)
+        ):
+            raise ToolRejectedError("标签最多32个，每个1–256字符")
+    for key, lower, upper in (
+        ("limit", 1, 100),
+        ("page", 1, 2147483647),
+        ("offset", 0, 2147483647),
+        ("panelId", 0, 2147483647),
+    ):
+        if key in arguments:
+            value = arguments[key]
+            if not isinstance(value, int) or not lower <= value <= upper:
+                raise ToolRejectedError(
+                    "limit 须为1–100；page 从1开始，offset/panelId 从0开始，不超过32位整数"
+                )
+    if "from" in arguments:
+        start, end = arguments["from"], arguments["to"]
+        if (
+            not isinstance(start, int)
+            or not isinstance(end, int)
+            or not 0 <= start <= end <= 253402300799000
+            or end - start > 31 * 86400 * 1000
+        ):
+            raise ToolRejectedError("from/to 须为有序 Unix 毫秒，窗口不超过31天")
+    if arguments.get("panelId") == 0:
+        del arguments["panelId"]
+    if arguments.get("dashboardUid") == "":
+        del arguments["dashboardUid"]
+    return request.model_copy(update={"arguments": arguments})
 
 
 def _prepare_prometheus(request: ToolRequest, policy_id: str, now: datetime) -> ToolRequest:
@@ -583,6 +637,66 @@ def _prometheus_query_failure(
     if matched is None:
         return None
     return "auth" if matched.group(1) is not None else "upstream_5xx"
+
+
+def _grafana_text(result: CallToolResult) -> str | None:
+    if (
+        result.result_type == "complete"
+        and result.structured_content is None
+        and len(result.content) == 1
+        and isinstance(result.content[0], TextContent)
+    ):
+        return result.content[0].text
+    return None
+
+
+def _grafana_read_failure(
+    result: CallToolResult, tool_name: str, arguments: dict[str, object]
+) -> MonitoringFailureReason | None:
+    """只认 v2.0.2 选中工具的完整 HTTP 错误格式，不按任意文本里的状态码猜类别。"""
+    text = _grafana_text(result)
+    if not result.is_error or text is None:
+        return None
+    if tool_name == "search_dashboards":
+        prefix = (
+            r"search dashboards for &\{GrafanaHTTPAPI:0x[0-9a-f]+ "
+            r"PublicURL:[^\s{}]* Version:[^\s{}]*\}: "
+        )
+        path, operation, typed = "/search", "search", "search"
+    elif tool_name in {"get_dashboard_summary", "get_dashboard_panel_queries"}:
+        prefix = re.escape(f"get dashboard by uid: get dashboard by uid {arguments['uid']}: ")
+        path, operation, typed = "/dashboards/uid/{uid}", "getDashboardByUID", "getDashboardByUid"
+    elif tool_name == "list_datasources":
+        prefix = re.escape("list datasources: ")
+        path, operation, typed = "/datasources", "getDataSources", "getDataSources"
+    elif tool_name == "get_annotations":
+        prefix = re.escape("get annotations: ")
+        path, operation, typed = "/annotations", "getAnnotations", "getAnnotations"
+    else:
+        return None
+    matched = re.fullmatch(prefix + r"(?P<error>[^\r\n]+)", text)
+    if matched is None:
+        return None
+    error = matched["error"]
+    endpoint = f"[GET {path}]"
+    for status, suffix in ((401, "Unauthorized"), (403, "Forbidden"), (500, "InternalServerError")):
+        start = f"{endpoint}[{status}] {typed}{suffix} "
+        if error.startswith(start):
+            try:
+                body = json.loads(error[len(start) :])
+            except ValueError:
+                return None
+            return (
+                ("auth" if status in {401, 403} else "upstream_5xx")
+                if isinstance(body, dict)
+                else None
+            )
+    generic = re.fullmatch(
+        re.escape(f"{endpoint} {operation} (status ") + r"(401|403|5[0-9][0-9])\): \{\}", error
+    )
+    if generic is None:
+        return None
+    return "auth" if generic[1] in {"401", "403"} else "upstream_5xx"
 
 
 def _promql_error_position(result: CallToolResult, tool_name: str) -> tuple[int, int] | None:
@@ -854,6 +968,47 @@ def _prometheus_payload(
     payload = _payload(result, model)
     text = payload.get("result")
     return payload, isinstance(text, str) and _TRUNCATION.search(text) is not None
+
+
+def _grafana_payload(
+    result: CallToolResult, model: type[BaseModel], tool_name: str, arguments: dict[str, object]
+) -> tuple[dict[str, object], bool]:
+    """锁版只读结果的薄投影；身份/查询范围由实际请求提供，不接受远端同名字段覆盖。"""
+    text = _grafana_text(result)
+    if result.is_error or text is None:
+        raise ValueError("Grafana MCP 结果不符合锁版契约")
+    data = json.loads(text)
+    if tool_name == "get_dashboard_panel_queries":
+        if not isinstance(data, list):
+            raise ValueError("Grafana 面板查询不是数组")
+        data = {"uid": arguments["uid"], "panelId": arguments.get("panelId", 0), "panels": data}
+    elif tool_name == "get_annotations":
+        if not isinstance(data, dict) or "Payload" not in data:
+            raise ValueError("Grafana 标记结果缺少 Payload")
+        data = {
+            "from": arguments["from"],
+            "to": arguments["to"],
+            "dashboardUid": arguments.get("dashboardUid", ""),
+            "annotations": data["Payload"],
+        }
+    elif not isinstance(data, dict):
+        raise ValueError("Grafana MCP 结果不是对象")
+    if tool_name == "get_dashboard_summary" and data.get("uid") != arguments["uid"]:
+        raise ValueError("Grafana 仪表盘 UID 与请求不符")
+    for key in ("limit", "page", "offset"):
+        if key in arguments and tool_name in {"search_dashboards", "list_datasources"}:
+            data[key] = arguments[key]
+    payload = contract_dump(
+        model, model.model_validate_json(json.dumps(data), strict=True, extra="ignore")
+    )
+    truncated = payload.get("hasMore") is True
+    if tool_name == "get_annotations":
+        annotations = payload["annotations"]
+        limit = arguments["limit"]
+        if not isinstance(limit, int):
+            raise ValueError("Grafana 标记 limit 不符合契约")
+        truncated = isinstance(annotations, list) and len(annotations) >= limit
+    return payload, truncated
 
 
 class _WireSafeFactory:
