@@ -59,7 +59,11 @@ pytestmark = pytest.mark.loopback
 @pytest.mark.parametrize(
     ("error", "expected"),
     [
-        (MCPError(-32000, "synthetic closed"), True),
+        (MCPError(-32000, "Connection closed"), True),
+        (MCPError(-32000, "synthetic closed"), False),
+        (MCPError(-32000, "Connection closed extra"), False),
+        (MCPError(-32000, " Connection closed"), False),
+        (MCPError(-32000, "Connection closed", data={}), False),
         (MCPError(-32600, "Session terminated"), True),
         (MCPError(-32600, "synthetic session ended"), False),
         (MCPError(-32600, "Session terminated extra"), False),

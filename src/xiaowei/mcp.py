@@ -527,10 +527,11 @@ def _seconds_text(value: Decimal) -> str:
 
 
 def _connection_lost(exc: BaseException) -> bool:
-    """会话终止只认锁版完整固定信号；超时与远端错误不是断线证据。"""
+    """MCP 断线只认锁版完整固定信号；超时与远端错误不是断线证据。"""
     if isinstance(exc, MCPError):
-        return exc.code == -32000 or (
-            exc.code == -32600 and exc.message == "Session terminated" and exc.data is None
+        return exc.data is None and (exc.code, exc.message) in (
+            (-32000, "Connection closed"),
+            (-32600, "Session terminated"),
         )
     if isinstance(exc, httpx2.NetworkError):
         return True
@@ -540,7 +541,7 @@ def _connection_lost(exc: BaseException) -> bool:
 
 
 def _read_transport_failure(exc: BaseException) -> MonitoringFailureReason | None:
-    """只识别锁版连接码与网络异常；端点/协议/投影异常保持整轮失败。"""
+    """只识别锁版固定关闭信号与网络异常；端点/协议/投影异常保持整轮失败。"""
     if isinstance(exc, MCPError):
         if exc.code == -32001:
             return "timeout"
