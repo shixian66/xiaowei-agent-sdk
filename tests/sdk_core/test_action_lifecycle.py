@@ -14,6 +14,7 @@ from tests.sdk_core.test_group_gateway import running
 from tests.sdk_core.test_group_identity import GROUP, A, Env
 
 from xiaowei.actions import ActionService
+from xiaowei.channel import ChannelService, ResultDelivery
 from xiaowei.channel_store import NotReadyError
 from xiaowei.feishu import attributed
 from xiaowei.models import Identity
@@ -154,6 +155,69 @@ async def test_cancelled_execution_recovers_unknown_and_is_never_replayed(
         async with running(new, max_reply_chars=3500) as group:
             await group.ask(f"/批准 {action_id}", message_id="om_again")
     assert len(adapter.calls) == (0 if when == "read" else 1)
+
+
+@pytest.mark.parametrize("stage", ["preclaim", "feedback"])
+async def test_cancelled_timeout_readback_keeps_instance_fenced(
+    actions: Actions, monkeypatch: pytest.MonkeyPatch, stage: str
+) -> None:
+    action_id = await propose(actions)
+    env = actions.env
+    env.results = ResultDelivery(
+        env.store,
+        env.evidence,
+        env.access,
+        budget=env.results.budget.model_copy(update={"timeout_seconds": 1}),
+    )
+    env.service = ChannelService(env.app, env.results)
+    assert env.app.actions is not None
+    if stage == "feedback":
+        status = env.app.actions.status
+
+        async def delay_status(ctx, request):
+            await asyncio.sleep(2)
+            return await status(ctx, request)
+
+        monkeypatch.setattr(env.app.actions, "status", delay_status)
+    else:
+        validate = env.evidence.validate_answer
+
+        async def delay_validation(turn, ctx, *, history=False):
+            await asyncio.sleep(2)
+            return await validate(turn, ctx, history=history)
+
+        monkeypatch.setattr(env.evidence, "validate_answer", delay_validation)
+    get_action = env.store.get_action
+    readback = asyncio.Event()
+    release = asyncio.Event()
+    reads = 0
+
+    async def pause_timeout_readback(action_id: str, identity: Identity):
+        nonlocal reads
+        reads += 1
+        if reads == 2:
+            readback.set()
+            await release.wait()
+        return await get_action(action_id, identity)
+
+    monkeypatch.setattr(env.store, "get_action", pause_timeout_readback)
+    receipt = await env.service.accept(env.group(attributed(A, f"/批准 {action_id}"), "om_a"))
+    task = asyncio.create_task(env.service.approve(receipt, action_id))
+    await asyncio.wait_for(readback.wait(), 5)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert reads == 2
+    assert not env.store.readiness.ok
+    assert len(actions.adapter.calls) == (1 if stage == "feedback" else 0)
+    assert await env.rows("SELECT state FROM xiaowei_action") == [
+        ("succeeded" if stage == "feedback" else "pending",)
+    ]
+    assert await env.rows(
+        "SELECT state, answer FROM xiaowei_request WHERE reply_message_id='om_a'"
+    ) == [("running", None)]
+    with pytest.raises(NotReadyError):
+        await env.service.accept(env.group(attributed(A, "再次提问"), "om_next"))
 
 
 async def test_loss_of_instance_lock_during_recheck_prevents_write(actions: Actions) -> None:

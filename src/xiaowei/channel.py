@@ -662,6 +662,9 @@ class ChannelService:
                     action = await self._store.get_action(
                         action_id, self._context(record, decision).identity
                     )
+                except asyncio.CancelledError:
+                    self._store.readiness.lock("action_cancelled")
+                    raise
                 except RequestUnavailableError:
                     failure_code = "action_not_approvable"
                 except Exception:
