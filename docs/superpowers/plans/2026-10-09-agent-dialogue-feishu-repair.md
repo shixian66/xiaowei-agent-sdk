@@ -152,7 +152,7 @@
 - [x] **Step 7：容量、失败语义与统一发送。** 按下文两项完整预算分配；字符或请求体字节任一先到就保留完整事实行的前缀并标明展示截断。若必要来源/限制放不下，发送前选一条固定“结果未展示：单消息容量不足”说明，并记安全日志原因码 `reply_capacity_notice`；成功只代表说明已发送，记录为 `sent`，CLI `requests resend` 因而不能补发完整结果，OPERATIONS 必须说明这一限制。所有文本建议/澄清先按真实换行和显示转义后的字符裁剪，连标题/截断标记一起计数，不能沿用转义文本的 `_prefix`，断言 SDK 不拆成多条。Gateway 与 CLI 共用构造/发送路径；构造或渲染抛异常时零 SDK 发送、投递为 `failed`、readiness 不锁，不改成 `unknown`。进入 SDK 调度后才沿用未知结果语义，存储异常保护不变；发送开始后不改发文本。
 - [x] **Step 8：验证成功、失败、取消与恢复。** 通过真 SDK/本机合成端点验证单聊、指定群回复原消息、明确失败、超时/取消 unknown、重复事件一次发送；撤权在发送前零 I/O；旧投递尝试不能落定新尝试。Gateway 首次发送和 CLI 重发各测渲染异常，断言保存为 `failed`、零 SDK/发送 I/O、readiness 保持可用、日志不含内容哨兵；另测存储失败仍阻断、SDK 请求后不确定仍 unknown。固定容量说明成功时记录 sent 及独立日志原因码，显式重发不会把它当完整结果重新发送。`feishu/lark` 两域名装配保持，真实收发另列未验收。
 - [x] **Step 9：隔离变异与上下游回归。** 把时间或 note 移入折叠区、改读 Web 投影、恢复字面换行、把渲染移出发送前异常分类或把请求预算改为只量内层卡片，对应回归必须失败。核对 Web、Session 回放、CLI 显式重发、MCP/StarRocks 事实和固定回执兼容；只改受批准契约影响的断言，不放宽安全断言。
-- [ ] **Step 10：记录版本、独立复审与本地交付。** 展示契约与 `Delivery` 渠道结构变化、代码 SHA、离线证据、预览、容量限制与真实 Lark 未验收项见 §10；Claude 对 `7f6d8d8` 的 B1 须修复、验证并对新 SHA 复审。按用户最新指令保留本地，不推送或开 PR；U1 的真实模型门槛未通过，仍不能将两片合入。
+- [ ] **Step 10：记录版本、独立复审与本地交付。** 展示契约与 `Delivery` 渠道结构变化、代码 SHA、离线证据、预览、容量限制与真实 Lark 未验收项见 §10；B1/G1（含独立复审的请求漏报）已修复并完成离线检查，仍须对新 SHA 复审。按用户最新指令保留本地，不推送或开 PR；U1 的真实模型门槛未通过，仍不能将两片合入。
 
 ### 两个容量预算的定义
 
@@ -216,7 +216,7 @@ git diff --check
 
 `scripts.dialogue_real_model` 要求交互终端：每轮在隔离库清理前，向 stderr 即时展示合成请求、按目标记录的实际 I/O 和已校验 Delivery，人工逐项输入 `y/n/a`（是/否/不适用）。stdout 只输出固定判定、计数、耗时/用量、工作树 SHA、harness 哈希与 Profile 指纹；不含模型正文、SQL、证据编号或地址，耗时不包含人工输入等待。相同脚本在两个工作树分别运行，核对 Profile 指纹和 harness 哈希一致；人工判断失败照常保留，命令成功不自动通过合入门槛。仅可将 stdout 重定向为统计 JSON，不要合并或保存 stderr 中的即时内容；实际模型调用仍需事先授权。
 
-版本绑定取实际导入的 `xiaowei.__file__` 所在 Git 源码树的 HEAD，与脚本目录或当前目录无关。模型/配置读取前要求该树干净，结束时再次检查版本及框架哈希；脏树、无 Git 的导出副本或运行期间变化均不生成报告。每次实际 HTTP 请求还记录 `instructions_sha256` 和 `tool_descriptions_sha256`，分别来自发送的指令及工具名/说明，不保存它们的正文。旧/新报告应有不同 `source_sha`，相同 harness/Profile 指纹；按相同样例、轮次、模式对照请求哈希，不能用单一哈希代替行为核对。
+版本绑定取实际导入的 `xiaowei.__file__` 所在 Git 源码树的 HEAD，与脚本目录或当前目录无关。模型/配置读取前要求该树干净，结束时再次检查版本及框架哈希；脏树、无 Git 的导出副本或运行期间变化均不生成报告。每次实际 HTTP 请求还记录 `instructions_sha256` 和 `tool_descriptions_sha256`，分别来自发送的指令及工具名/说明，不保存它们的正文。请求进入网络 transport 时登记，成功再补状态/用量；未收到 HTTP 响应的超时、连接错误或取消保留同一记录，`status=null`、`usage=null`，异常原样传播。响应关闭异常也不能删掉请求或其已取得的元数据；并发请求按进入顺序记录，不按完成顺序错配。旧/新报告应有不同 `source_sha`，相同 harness/Profile 指纹；按相同样例、轮次、模式对照请求哈希，不能用单一哈希代替行为核对。
 
 **获准真实模型后**使用以下两次命令；本轮没有执行它们。`U1_APPROVED_PROFILE` 指向仓库外不含明文凭据的已批准 ModelProfile JSON，`U1_REPORT_DIR` 指向仓库外报告目录。基线没有此脚本，所以两次都使用候选工作树的同一框架和 Python，通过 `PYTHONPATH` 选择实际产品：
 
@@ -270,7 +270,7 @@ U2 的真实 Lark 客户端及公司 StarRocks 验收仍需另获授权；本机
 - 合入、构建镜像、公司部署与实际服务调用按用户当时授权进行；本计划不是自动批准这些操作。
 - 本轮保留：超容量结果不能保证全部展示，事实优先可能截掉模型结论，投递 `sent` 不等于用户已读；容量说明被记为 sent 后不支持 CLI 重发完整结果。上述限制须写入交付和 OPERATIONS。Web 本片不改，仍将分页显示为“结果已截断”，这是已知展示差异，不能称两端已完全一致。
 - “需要你确认”卡片标签是非阻断建议；本片不解析模型问句或新增 schema 来分类。导出、多消息完整结果、历史摘要与性能优化另行决定。
-- R1b 已合入，U1/U2 已完成本地实现。`7f6d8d8` 的外部复审发现 B1 容量搜索与 G1 版本绑定问题，须修复、验证并对新 SHA 复审；不能沿用前次“无新阻断”作为当前结论。真实模型门槛随后另行授权，通过后再按授权处理 PR/合入，并回到监控 P2。O1 与暂缓项按新增实战证据安排。
+- R1b 已合入，U1/U2 已完成本地实现。`7f6d8d8` 的外部复审发现 B1 容量搜索与 G1 版本绑定问题，`9b721c1` 的本地复审发现失败请求漏报；已修复并完成离线验证，仍须对新 SHA 复审，不能沿用前次“无新阻断”作为当前结论。真实模型门槛随后另行授权，通过后再按授权处理 PR/合入，并回到监控 P2。O1 与暂缓项按新增实战证据安排。
 
 
 ## 10. 本地实施证据与未验收范围（2026-10-10）
@@ -283,7 +283,7 @@ U2 的真实 Lark 客户端及公司 StarRocks 验收仍需另获授权；本机
 - B1 修复：行数 1 到 total−1 在同一事实内二分，零行与完整端点单独检查；必要说明下界只用于停止搜索，从不交付。SQL 容量尝试复用此算法。计数回归的 5×400 合成样本从 **8644 次构造降为 102 次**，约束上界为 349 次，不使用计时断言。默认显示表格附带的非技术元数据（含 DDL 超限原因）；投影为空显示“无结果”，建议补回“未经系统核实”。嵌套值额外类型标签本轮不做。
 - `feishu.py` 的 `send_delivery` 由网关和 `runtime.py` CLI 重发共用。构造失败固定 `render_failed`、零发送、failed，readiness 不锁；容量不足说明成功记 sent 并记录 `reply_capacity_notice`。进入 SDK 后的超时、取消、未知结果仍沿用原保护，未新增重试。
 - `tests/sdk_core/dialogue_gate.py` / `scripts/dialogue_real_model.py` 准备了固定合成任务，复用 Gate 0 驱动与观测器，在正式 runtime/治理/Evidence/存储路径运行；配置采用部署单值 4000、结果 200000 字节。每轮支持清理前的即时人工核对，报告只保存严格的固定布尔/不适用判定，并保留目标标识及 Profile 指纹供对照。准备的脚本尚未调用真实模型，自动计数、人工入口的离线检查或 `manual_review_required` 都不能证明必要澄清、完整性声明或新旧质量对照通过。
-- G1 修复：运行前/后绑定实际导入产品树的干净 HEAD，记录真实请求的指令与工具说明哈希，框架变化也拒绝报告。两个临时 Git 源码树（基线 `8503099f` 的源码与候选源码）经相同 harness、正式 runtime/Runner/治理/测试库与脚本模型运行，报告分别匹配各树 SHA、harness/Profile 相同而指令/工具说明哈希不同。它证明绑定与路径，不证明真实模型行为。
+- G1 修复：运行前/后绑定实际导入产品树的干净 HEAD，记录真实请求的指令与工具说明哈希，框架变化也拒绝报告。两个临时 Git 源码树（基线 `8503099f` 的源码与候选源码）经相同 harness、正式 runtime/Runner/治理/测试库与脚本模型运行，报告分别匹配各树 SHA、harness/Profile 相同而指令/工具说明哈希不同。观测在请求进入 transport 时登记，超时/连接错误/取消及响应关闭失败都保留请求计数与哈希，保持原异常和本轮失败判定；成功补状态和用量，并发完成顺序不影响归属。它证明绑定与路径，不证明真实模型行为。
 
 ### 先失败再实现与正式入口
 
@@ -293,6 +293,8 @@ U2 的真实 Lark 客户端及公司 StarRocks 验收仍需另获授权；本机
 - CLI 在测试进程重复装配日志会遗留指向已关闭 capsys 的 handler；新增测试 fixture 恢复调用前 handler/level，隔离其副作用，不改产品日志过滤或被测期间断言。一个 SDK 入站用例改用本机机器人身份端点，消除原外网连接被 socket 限制拦截的警告。
 - 独立审查 `791efbe6b8b628e44dedc96363f049eead81358d` 复现两项阻断：零行临时占位可能比完整短结果更大，导致错误容量回执；模型评估原报告只留计数，缺少可观察实际回答的人工核对入口及部分样例。新增回归在旧实现分别因错误容量回执、缺少回调/样例而失败；修复后保留完整短结果或可行整行前缀，容量下界永不交付、真正省略仍明示；正式 Gateway 在合法目标配置下发出短计划并记 sent。评估用例确认人工能在库清理前看到当前已校验结果、正确目标 I/O，而保存报告不含哨兵正文；未完整核对时明确失败，不生成判定。
 - Claude 修复先失败：B1 计数用例在 `7f6d8d8` 构造 8644 次、超过对数上界而失败；G1 四项因旧报告记录脚本树 SHA、脏树/无 Git 未提前拒绝而失败，三协议请求哈希用例因缺少字段失败。修复后通过；新增收集期间源码/框架变化的反例，不生成报告。三项展示建议也先复现“原因隐藏/空结果标签/未核实标签”失败后修复。
+- 新 SHA 独立复审又复现 G1 请求漏报：`9b721c1` 的正式 runtime/Runner 超时轮为 model_failed，但实际请求 1 次、报告 requests 为空。五个观测回归在旧代码分别因超时/连接错误/取消漏报、完成顺序替代请求顺序及关闭异常漏报而失败；另一个正式 runtime 回归确认失败轮保留 1 次请求、两项哈希、零业务查询且无正文哨兵，原失败判定不改变。红灯日志在 `/private/tmp/xw-u12-observer-red.log` 和 `/private/tmp/xw-u12-observer-runtime-red.log`。
+- 无关的基线测试同步问题另列：请求漏报修复后的首次全量为 **1 failed, 2373 passed, 54 deselected**，`test_formal_runtime_answers_a_member_and_refuses_an_outsider` 收到一条结果和一条合法排队提示。测试把替身的“开始发送”误作群队头完成，在基线 `8503099f` 临时副本加 0.1 秒发送延迟也稳定复现。仅修改测试：等待真实 `FeishuGateway.idle()`，覆盖零延迟/延迟两项，保留原一次发送、回复目标、成员复核次数、模型次数及 completed/sent、failed/pending 断言，不改群产品逻辑。首次日志 `/private/tmp/xw-u12-observer-full.log`，基线证据 `/private/tmp/xw-u12-group-baseline-red.log`，新用例红灯 `/private/tmp/xw-u12-group-race-red.log`。
 
 ### 检查结果
 
@@ -300,9 +302,9 @@ U2 的真实 Lark 客户端及公司 StarRocks 验收仍需另获授权；本机
 
 | 检查 | 命令/范围 | 结果 |
 | --- | --- | --- |
-| 新产品离线全量 | `XW_TEST_PROMETHEUS_MCP_BIN=/private/tmp/xw-prometheus-mcp-v018/prometheus-mcp-server SDK_TEST_POSTGRES_URL=postgresql+asyncpg://postgres@127.0.0.1:55432/postgres .venv/bin/python -m pytest tests/sdk_core tests/p1b -q -W error --tb=short --show-capture=no` | 本轮 B1/G1 与展示修复后的最终代码 **2368 passed, 54 deselected，411.80 秒**；54 项为仓库默认未收集的浏览器/真实 StarRocks 类，不是为本轮跳过失败；日志 `/private/tmp/xw-u12-claude-fixes-full.log` |
+| 新产品离线全量 | `XW_TEST_PROMETHEUS_MCP_BIN=/private/tmp/xw-prometheus-mcp-v018/prometheus-mcp-server SDK_TEST_POSTGRES_URL=postgresql+asyncpg://postgres@127.0.0.1:55432/postgres .venv/bin/python -m pytest tests/sdk_core tests/p1b -q -W error --tb=short --show-capture=no` | 最终 B1/G1、展示及测试同步修复后 **2375 passed, 54 deselected，409.97 秒**；54 项为仓库默认未收集的浏览器/真实 StarRocks 类，不是为本轮跳过失败；日志 `/private/tmp/xw-u12-final-full.log`。之前的 **2368 passed** 基础证据和请求漏报修复后首次全量的一项失败均保留，见上下文 |
 | 真 Chrome Web 兼容 | 显式 `-m browser` 选择 `test_web_browser.py` 的 compact、历史 DDL、库/布局 note、多行建议、精确值及原始 DDL 六个用例（含参数化） | 前次有效证据 **9 passed，8.83 秒**；本轮只改飞书 builder、评估与文档，Web 渲染/投影代码未变，因此沿用而不重跑。仅使用 18501；使用 8501 的两项未运行 |
-| 相关调用链回归 | `SDK_TEST_POSTGRES_URL=postgresql+asyncpg://postgres@127.0.0.1:55432/postgres .venv/bin/python -m pytest tests/sdk_core/test_feishu_render.py tests/sdk_core/test_feishu.py tests/sdk_core/test_evidence.py tests/sdk_core/test_channel_service.py tests/sdk_core/test_channel_store.py tests/sdk_core/test_runtime.py tests/sdk_core/test_dialogue_gate.py tests/sdk_core/test_dialogue_real_model.py tests/sdk_core/test_gate0.py -q -W error --tb=short --show-capture=no` | **631 passed，98.78 秒**；日志 `/private/tmp/xw-u12-claude-fixes-related.log` |
+| 相关调用链回归 | `SDK_TEST_POSTGRES_URL=postgresql+asyncpg://postgres@127.0.0.1:55432/postgres .venv/bin/python -m pytest tests/sdk_core/test_group_gateway.py tests/sdk_core/test_gate0.py tests/sdk_core/test_dialogue_gate.py tests/sdk_core/test_dialogue_real_model.py -q -W error --tb=short --show-capture=no` | 最后增量的群聊/观测/版本绑定 **160 passed，37.55 秒**，日志 `/private/tmp/xw-u12-final-related.log`；此前 B1/G1/展示的九文件调用链 **631 passed，98.78 秒**，日志 `/private/tmp/xw-u12-claude-fixes-related.log`。最终全量含两组用例，不相加宣称新增覆盖 |
 | 两源码树/版本绑定 | `test_dialogue_real_model.py` 的实际 PYTHONPATH 子进程、脏树/无 Git/运行中变化回归及三种协议请求哈希回归，含于上项及全量 | 两棵真正的临时 Git 树成功；未提交/无版本/中途变化拒绝；源码 SHA 与实际指令/工具说明哈希符合独立预期。旧的无 Git 导出 smoke 仅证明旧路径兼容，不能再用于采集合入证据 |
 | Ruff | `.venv/bin/ruff check --cache-dir /private/tmp/xw-u12-ruff src/xiaowei tests/sdk_core tests/p1b scripts/dialogue_real_model.py` | 通过 |
 | 格式 | `.venv/bin/ruff format --check src/xiaowei tests/sdk_core tests/p1b scripts/dialogue_real_model.py` | 79 个文件已符合格式 |
@@ -316,11 +318,15 @@ U2 的真实 Lark 客户端及公司 StarRocks 验收仍需另获授权；本机
 
 B1/G1 本轮五组隔离变异全部被发现：恢复逐行扫描（计数失败）、报告改写为脚本树 SHA（实际源码绑定失败）、放行脏源码（两项前置拒绝失败）、不取实际请求指令（Responses/Chat/Vertex 三项哈希失败）、移除结束版本复核（源码/框架两项失败）。脚本和逐组日志在 `/private/tmp/xw-u12-claude-fix-mutations.py`、`/private/tmp/xw-u12-claude-fix-mutations.log` 与同前缀的逐组 `.log`；核对实际导入来源，未修改工作分支做变异。
 
+G1 请求漏报修复的两组隔离变异也被发现：恢复关闭响应后才登记（含正式 runtime 超时的五项断言失败）、去掉关闭异常的 finally 记录（已取得用量遗漏的断言失败）。脚本和日志在 `/private/tmp/xw-u12-observer-mutations.py`、`/private/tmp/xw-u12-observer-mutations.log` 与同前缀逐组日志；只修改临时副本并核对导入来源。
+
+基线群聊测试的隔离变异删除首次发送后的网关完成等待，延迟发送用例再次触发原严格一次发送断言。脚本和日志在 `/private/tmp/xw-u12-group-wait-mutation.py`、`/private/tmp/xw-u12-group-wait-mutation.log`；不以放宽结果断言解决时序问题。
+
 ### 独立复审结论
 
 前次本地独立审查在 `4cbfdc5` 关闭短结果容量误判和人工核对缺失两项问题。用户提供的 Claude 复审针对 `7f6d8d8a1ddf709bd6803eb979a08996c1b4084b`，另确认 B1 逐行容量搜索阻塞事件循环、G1 报告 SHA 未绑定实际导入代码；该结论取代前次“无新阻断”的当前状态。前次已验证的字节预算、安全、渠道隔离、失败语义与短结果端点不无依据重复开启。
 
-本轮修复后仍须对新 SHA 独立复审。真实模型旧/新各至少三次门槛未执行，合入保持阻塞。没有真实 Lark、公司 StarRocks、部署或用户接受的通过结论。
+对 `9b721c1e61cac2e02cfbfacec849efc2075d35fa` 的本地独立复审确认 B1 已关闭、G1 成功版本绑定成立，但请求超时的计数/哈希漏报仍阻断本地交付；独立定向验证 15 passed，正式 Runner 反例确认漏报。该问题修复后仍须对新 SHA 复审。真实模型旧/新各至少三次门槛未执行，合入保持阻塞。没有真实 Lark、公司 StarRocks、部署或用户接受的通过结论。
 
 ### 预览与残余边界
 

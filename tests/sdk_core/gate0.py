@@ -22,7 +22,7 @@ import secrets
 import time
 from collections.abc import AsyncIterator, Callable, Sequence
 from contextlib import asynccontextmanager
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime
 from typing import Any, Literal
 
@@ -216,7 +216,8 @@ def app_config(profile: ModelProfile) -> AppConfig:
 class RequestObservation:
     """一次模型 HTTP 请求的元数据；不含正文。签名计数只对 Chat Completions 与 Vertex 有意义。"""
 
-    status: int
+    status: int | None
+    """HTTP 状态；尚未收到响应（包括超时、连接错误或取消）时为 None。"""
     elapsed_ms: int
     tools_offered: tuple[str, ...]
     history_tool_calls: int
@@ -247,20 +248,28 @@ class ObservingTransport(httpx2.AsyncBaseTransport):
     async def handle_async_request(self, request: httpx2.Request) -> httpx2.Response:
         shape = _request_shape(await request.aread())
         started = time.monotonic()
-        response = await self._inner.handle_async_request(request)
-        stream = response.stream
-        if not isinstance(stream, httpx2.AsyncByteStream):
-            return response
+        index = len(self.observations)
+        self.observations.append(RequestObservation(status=None, elapsed_ms=0, usage=None, **shape))
+        try:
+            response = await self._inner.handle_async_request(request)
+        finally:
+            # 请求一进入 transport 就登记；异常/取消照常传播，不丢失版本哈希或请求计数。
+            self.observations[index] = replace(
+                self.observations[index], elapsed_ms=int((time.monotonic() - started) * 1000)
+            )
+        self.observations[index] = replace(self.observations[index], status=response.status_code)
 
         def record(body: bytes) -> None:
-            self.observations.append(
-                RequestObservation(
-                    status=response.status_code,
-                    elapsed_ms=int((time.monotonic() - started) * 1000),
-                    usage=usage_counts(body),
-                    **shape,
-                )
+            self.observations[index] = replace(
+                self.observations[index],
+                elapsed_ms=int((time.monotonic() - started) * 1000),
+                usage=usage_counts(body),
             )
+
+        stream = response.stream
+        if not isinstance(stream, httpx2.AsyncByteStream):
+            record(b"")
+            return response
 
         return httpx2.Response(
             response.status_code,
@@ -287,10 +296,12 @@ class _Tee(httpx2.AsyncByteStream):
             yield chunk
 
     async def aclose(self) -> None:
-        await self._inner.aclose()
-        if not self._closed:
-            self._closed = True
-            self._done(bytes(self._body))
+        try:
+            await self._inner.aclose()
+        finally:
+            if not self._closed:
+                self._closed = True
+                self._done(bytes(self._body))
 
 
 def _request_shape(body: bytes) -> dict[str, Any]:

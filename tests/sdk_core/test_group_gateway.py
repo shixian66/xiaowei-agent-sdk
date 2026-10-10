@@ -827,12 +827,23 @@ def test_group_tools_must_be_registered(runtime_env: RuntimeEnv) -> None:
         runtime_env.config(feishu=runtime_group(tools=["local/order_total"]))
 
 
+@pytest.mark.parametrize("send_delay", [0.0, 0.1])
 async def test_formal_runtime_answers_a_member_and_refuses_an_outsider(
     runtime_env: RuntimeEnv,
+    send_delay: float,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     env = runtime_env
     config = env.config(feishu=runtime_group())
-    channel = GroupChannel()
+    channel = GroupChannel(delay=send_delay)
+    gateways: list[FeishuGateway] = []
+
+    def observe_gateway(*args: Any, **kwargs: Any) -> FeishuGateway:
+        gateway = FeishuGateway(*args, **kwargs)
+        gateways.append(gateway)
+        return gateway
+
+    monkeypatch.setattr(runtime, "FeishuGateway", observe_gateway)
     asked = env.scripts.add(
         attributed(A, "有哪些表"),
         tool_call("list_tables", cluster=SR.target_id, **SEARCH),
@@ -842,9 +853,12 @@ async def test_formal_runtime_answers_a_member_and_refuses_an_outsider(
         assert (await served.ready())["feishu"] == "connected"
         channel.emit_raw_from_sdk_thread(raw_group_event(env, "有哪些表", "om_ok"))
         await until(lambda: len(channel.sends) == 1)
+        # sends 记录发送开始，不代表投递/群队头已结束；等待真实网关，避免第二条收到排队提示。
+        assert len(gateways) == 1
+        await asyncio.wait_for(gateways[0].idle(), 20)
         channel.emit_raw_from_sdk_thread(raw_group_event(env, "有哪些表", "om_out", sender=C))
         await until(lambda: len(channel.member_calls) == 4)
-        await asyncio.sleep(0.2)
+        await asyncio.wait_for(gateways[0].idle(), 20)
         assert await served.finish() == 0
     ((to, message, opts),) = channel.sends
     assert to == CHAT and opts["reply_to"] == "om_ok" and opts["reply_target_gone"] == "fail"

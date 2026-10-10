@@ -2,6 +2,7 @@
 
 import json
 
+import httpx2
 import pytest
 from pydantic import SecretStr
 from sqlalchemy import text
@@ -63,6 +64,38 @@ async def test_dialogue_harness_runs_success_and_hidden_tool_failure(postgres_ur
     assert described not in encoded and forbidden not in encoded and "ev_" not in encoded
     assert "SELECT" not in encoded and "synthetic.invalid" not in encoded
     assert all(r["manual_review_required"] for r in reports)
+
+
+async def test_dialogue_harness_keeps_timed_out_request_hashes_and_failed_verdict(
+    postgres_url: URL,
+) -> None:
+    requests = []
+
+    async def timeout(request: httpx2.Request) -> httpx2.Response:
+        requests.append(json.loads(request.content))
+        raise httpx2.ReadTimeout("TIMEOUT_CONTENT_SENTINEL", request=request)
+
+    case = Scenario("offline_timeout", (("query", "REQUEST_CONTENT_SENTINEL"),))
+    (result,) = await run_dialogue(
+        PROFILE,
+        postgres_url,
+        lambda: httpx2.MockTransport(timeout),
+        scenarios=(case,),
+        repeats=1,
+    )
+
+    assert len(requests) == 1  # 产品未重试，也没有请求计数漏报。
+    assert result["state"] == "failed" and result["failure"] == "model_failed"
+    assert "query" not in result["io_counts"] and result["facts"] == []
+    assert result["manual_review_required"] and result["review"] is None
+    assert len(result["requests"]) == 1
+    request = result["requests"][0]
+    assert request["status"] is None and request["usage"] is None
+    assert len(request["instructions_sha256"]) == len(request["tool_descriptions_sha256"]) == 64
+    assert all(
+        s not in json.dumps(result)
+        for s in ("TIMEOUT_CONTENT_SENTINEL", "REQUEST_CONTENT_SENTINEL")
+    )
 
 
 async def test_empty_middle_page_is_observed_on_real_governance_path(postgres_url: URL) -> None:

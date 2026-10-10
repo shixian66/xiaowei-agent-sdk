@@ -6,6 +6,7 @@
 回放历史中不带签名的工具调用，只能由 ``scripts/gate0_real_model.py`` 对获准 Profile 实测。
 """
 
+import asyncio
 import base64
 import hashlib
 import itertools
@@ -72,6 +73,116 @@ def _chat(message: dict[str, Any], finish: str) -> dict[str, Any]:
         "choices": [{"index": 0, "finish_reason": finish, "message": message}],
         "usage": {"prompt_tokens": 11, "completion_tokens": 7, "total_tokens": 18},
     }
+
+
+@pytest.mark.parametrize(
+    "error_type", [httpx2.ReadTimeout, httpx2.ConnectError, asyncio.CancelledError]
+)
+async def test_request_observation_survives_transport_failure(
+    error_type: type[BaseException],
+) -> None:
+    request = httpx2.Request(
+        "POST",
+        "https://synthetic.invalid/responses",
+        json={
+            "instructions": "REQUEST_INSTRUCTION_SENTINEL",
+            "input": [],
+            "tools": [{"type": "function", "name": "probe", "description": "TOOL_SENTINEL"}],
+        },
+    )
+    error = error_type("TRANSPORT_ERROR_SENTINEL")
+    attempted = 0
+
+    async def fail(_: httpx2.Request) -> httpx2.Response:
+        nonlocal attempted
+        attempted += 1
+        raise error
+
+    observer = gate0.ObservingTransport(httpx2.MockTransport(fail))
+    with pytest.raises(error_type) as caught:
+        await observer.handle_async_request(request)
+
+    assert caught.value is error and attempted == 1
+    assert len(observer.observations) == 1
+    observation = observer.observations[0]
+    assert observation.status is None and observation.usage is None
+    assert observation.elapsed_ms >= 0 and observation.tools_offered == ("probe",)
+    assert (
+        observation.instructions_sha256
+        == hashlib.sha256(json.dumps("REQUEST_INSTRUCTION_SENTINEL").encode()).hexdigest()
+    )
+    assert (
+        observation.tool_descriptions_sha256
+        == hashlib.sha256(b'[{"description":"TOOL_SENTINEL","name":"probe"}]').hexdigest()
+    )
+    report = json.dumps(vars(observation))
+    assert all(
+        value not in report
+        for value in (
+            "REQUEST_INSTRUCTION_SENTINEL",
+            "TOOL_SENTINEL",
+            "TRANSPORT_ERROR_SENTINEL",
+            "synthetic.invalid",
+        )
+    )
+
+
+async def test_request_observations_register_before_response_and_finish_in_request_order() -> None:
+    entered = [asyncio.Event(), asyncio.Event()]
+    release = [asyncio.Event(), asyncio.Event()]
+    completed = [asyncio.Event(), asyncio.Event()]
+
+    async def respond(request: httpx2.Request) -> httpx2.Response:
+        index = int(request.url.path.removeprefix("/"))
+        entered[index].set()
+        await release[index].wait()
+        return httpx2.Response(200 + index, json={"usage": {"total_tokens": index + 1}})
+
+    observer = gate0.ObservingTransport(httpx2.MockTransport(respond))
+
+    async def send(index: int) -> None:
+        async with httpx2.AsyncClient(transport=observer) as client:
+            await client.post(f"https://synthetic.invalid/{index}", json={"input": []})
+        completed[index].set()
+
+    tasks = [asyncio.create_task(send(index)) for index in range(2)]
+    try:
+        await asyncio.wait_for(asyncio.gather(*(event.wait() for event in entered)), 5)
+        assert [r.status for r in observer.observations] == [None, None]
+        release[1].set()
+        await asyncio.wait_for(completed[1].wait(), 5)
+        assert [r.status for r in observer.observations] == [None, 201]
+    finally:
+        for event in release:
+            event.set()
+        await asyncio.wait_for(asyncio.gather(*tasks), 5)
+    assert [r.status for r in observer.observations] == [200, 201]
+    assert [r.usage for r in observer.observations] == [{"total_tokens": 1}, {"total_tokens": 2}]
+
+
+async def test_request_observation_survives_response_close_failure() -> None:
+    error = RuntimeError("CLOSE_ERROR_SENTINEL")
+
+    class ClosingFailure(httpx2.AsyncByteStream):
+        async def __aiter__(self) -> AsyncIterator[bytes]:
+            yield b'{"usage":{"total_tokens":3}}'
+
+        async def aclose(self) -> None:
+            raise error
+
+    observer = gate0.ObservingTransport(
+        httpx2.MockTransport(lambda _: httpx2.Response(200, stream=ClosingFailure()))
+    )
+    response = await observer.handle_async_request(
+        httpx2.Request("POST", "https://synthetic.invalid/responses", json={"input": []})
+    )
+    with pytest.raises(RuntimeError) as caught:
+        await response.aread()
+    assert caught.value is error
+    assert len(observer.observations) == 1
+    assert observer.observations[0].status == 200
+    assert observer.observations[0].usage == {"total_tokens": 3}
+    assert "CLOSE_ERROR_SENTINEL" not in json.dumps(vars(observer.observations[0]))
 
 
 def _envelopes(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
