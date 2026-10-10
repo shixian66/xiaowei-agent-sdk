@@ -749,7 +749,8 @@ def _monitoring_catalog(
     )
     windows = (
         "时间为 Unix 秒、含时区 RFC3339，或 now/-15m/-1h/-7d；窗宽最多31天。"
-        "自主选择时间范围，不必先发现或读规则。"
+        "自主选择时间范围；截断只表示部分结果，可收窄选择器、聚合或缩小窗口。"
+        "不必先发现或读规则。"
     )
     specifications = (
         (
@@ -766,7 +767,8 @@ def _monitoring_catalog(
             _PrometheusLabelsArgs,
             _PrometheusWindowResult,
             ("start_time", "end_time", "result", "warnings"),
-            "发现标签名称；matches 为选择器列表，空列表表示源内发现。" + windows,
+            "发现标签名称；matches 为选择器列表，优先用已知主机/job/指标收窄范围；"
+            "未知范围时可用空列表发现。" + windows,
             "结果是该窗口发现的标签名称，不是实时健康检查。",
         ),
         (
@@ -775,7 +777,8 @@ def _monitoring_catalog(
             _PrometheusWindowResult,
             ("start_time", "end_time", "result", "warnings"),
             "发现指定 label 的值；__name__ 可发现指标，instance/nodename 可寻找主机。"
-            "matches 空列表表示源内发现。" + windows,
+            "优先用 matches 的已知主机/job/指标选择器收窄范围；未知范围时可用空列表发现。"
+            + windows,
             "标签值只证明窗口内存在相应序列，不证明当前主机健康或配置。",
         ),
         (
@@ -783,7 +786,8 @@ def _monitoring_catalog(
             _PrometheusLabelsArgs,
             _PrometheusWindowResult,
             ("start_time", "end_time", "result", "warnings"),
-            "按至少一个选择器读取序列标签集，可定位主机；不返回指标数值。" + windows,
+            "按至少一个选择器读取序列标签集，可定位主机；优先按已知主机/job/指标收窄范围，"
+            "不返回指标数值。" + windows,
             "标签集为发现事实；主机配置仅限实际采集的标签/指标，不是资产清单。",
         ),
         (
@@ -791,7 +795,8 @@ def _monitoring_catalog(
             _PrometheusMetadataArgs,
             _PrometheusMetadataResult,
             ("metadata",),
-            "读取指标的类型/help/unit；metric 空串可发现全部元数据。"
+            "读取一个非空具体指标名的类型/help/unit；已知指标可直接读取，"
+            "未知名称可用 label_values 的 __name__ 按需发现。"
             "官方 Server 不传回上游 warnings，结果不证明查询完整性或健康。",
             "仅指标元数据；官方 Server 不传回上游 warnings，不能据此判定健康或完整。",
         ),

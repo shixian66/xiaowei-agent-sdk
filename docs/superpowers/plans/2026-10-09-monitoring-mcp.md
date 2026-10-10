@@ -45,7 +45,7 @@
 
 ### 3.1 P2 当前切片（基线 `4c5b89495fdf57bfd6d18bb4483d5682e56cce59`）
 
-PR #70 的只读故障续查已合入。本片只扩展 Prometheus 读取，不改写能力。先用官方 v0.18.0 核约，再沿 `serve → Web/飞书 → Runner → GovernedTools → MCP → Evidence/PolicySession → 交付` 实现。协议/计划的独立审查已覆盖 `1414ec2690123c60a3ca42b8a627ea1681ae2ede`，没有架构阻断；后续实现的独立审查发现 SDK 同码歧义导致协议错误续查，现已按用户批准的固定信号契约修复并通过本地回归，最终差异仍须复审。按最新安排先本地测试与审查，审核通过后再开 PR；真实模型和真实源门槛保持开放。候选的当前验证证据只记 handoff；不合入实验分支。
+PR #70 的只读故障续查已合入。本片只扩展 Prometheus 读取，不改写能力。先用官方 v0.18.0 核约，再沿 `serve → Web/飞书 → Runner → GovernedTools → MCP → Evidence/PolicySession → 交付` 实现。协议/计划的独立审查已覆盖 `1414ec2690123c60a3ca42b8a627ea1681ae2ede`，没有架构阻断；`e3724ea` 独立审查确认失败分类等边界，但发现高基数全源发现的接收超限 B1；当前按本节限定 metadata 输入、配套正数截断并补正式入口回归，新差异仍须精确 SHA 复审。按最新安排先本地测试与审查，审核通过后再开 PR；真实模型和真实源门槛保持开放。候选的当前验证证据只记 handoff；不合入实验分支。
 
 **Agent 的任务和选择。** 用户问“host1 最近为什么 CPU 告警”“这台主机叫什么、监控里能看到多少 CPU/内存”“Kafka 积压是否和已加载规则有关”：Agent 自选获准源、指标/标签、发现方式、表达式、时间窗、步长和调查顺序；可直接查已知指标，缺关键业务含义时才澄清。主机配置仅报告指标实际提供的事实，不推断未采集的硬件配置。失败或信息不足时可换已授权源、补证据或结束；不要求每次先发现、先读规则或固定工具顺序。代码管授权、资源、真实证据和分类边界。
 
@@ -53,14 +53,14 @@ PR #70 的只读故障续查已合入。本片只扩展 Prometheus 读取，不�
 | --- | --- |
 | `query` / `query` | 保持 R1 的 `{query}` 输入和结果契约/指纹，兼容旧证据；服务端即时求值。实际表达式由代码补入，排版文本中的样本时间原样展示；采集时钟不冒充求值时间 |
 | `range_query` / `range_query` | `query, start_time, end_time, step`；时间可为 Unix 秒、含时区的 RFC3339，或 `now` / `-15m` 等单单位相对时间。调用前按 Server 毫秒精度冻结为实际 Unix 秒和秒步长，按冻结值检查点数并记录；回放摘要不按新时钟重新解析相对时间。起止相同时可查明确时刻；返回排版文本与 warnings，不解析数值或 PromQL |
-| `label_names` / `label_names`；`label_values` / `label_values` | 均含 `matches, start_time, end_time`；后者另有 `label`。空 matches 表示源内发现；返回排版文本/warnings 与实际时间窗 |
+| `label_names` / `label_names`；`label_values` / `label_values` | 均含 `matches, start_time, end_time`；后者另有 `label`。优先按已知主机/job/指标收窄 matches，未知范围时仍可用空列表源内发现；返回排版文本/warnings 与实际时间窗 |
 | `series` / `series` | `matches, start_time, end_time`；至少一个选择器。返回标签集排版文本/warnings 与实际时间窗；不称为主机资产清单 |
-| `metric_metadata` / `metric_metadata` | `metric`（空串表示发现全部元数据）；不发送可选 limit，沿用 Server 默认。元数据 JSON 包为固定 `metadata` 字段，类型/help/unit 做声明式投影 |
+| `metric_metadata` / `metric_metadata` | `metric` 为具体非空指标名，空白也在 Prechecked 中零 I/O 拒绝并给修正原因；指标名可用 label_values 的 __name__ 按需发现，已知指标可直接读取。不发送可选 limit，沿用 Server 默认。元数据 JSON 包为固定 `metadata` 字段，类型/help/unit 做声明式投影 |
 | `list_rules` / `list_rules` | 无参数；只读当前已加载规则，投影 group/name/query/duration/labels/annotations/state/health/lastEvaluation 等必要事实。duration 是告警 `for` 持续秒数，未返回时为 null，不补零。Server 不返回 type；不以猜测补上。health 是规则求值状态，不是主机健康 |
 
 策略 ID 均为 `prometheus.<后缀>`，工具/目标 ID 沿用源的静态映射和 Grants。只可配置本表的准确映射与子集；空配置、旧 query 配置和旧 query/StarRocks Evidence 不变。SDK 严格输入的字段均必填。只对本地非 nullable 数组、远端 `type:[null,array]` 且其余约束相同的情况接受类型子集；反方向、元素/约束漂移仍隐藏工具。其余未暴露可选参数不发送，默认行为见锁版用例，不引入 schema 通用转换器。
 
-**实际协议依据。** `tests/sdk_core/test_prometheus_p2_protocol.py` 使用官方 v0.18.0（源码 `924e43dbea816b92c3e79e73c1568af417e8e30e`）、真 SDK 和 loopback API，逐项断言 schema、结果及每次上游请求数加 1。本机 darwin/arm64 二进制 SHA-256 为 `6272e0d8fbc8af341d1e93fdc6aa130f7086b7a993faedb015966c2ace5e3a82`，不同于发布压缩包校验值。query/range/标签/series 返回 JSON 包裹排版文本；metadata/rules 丢弃上游 warnings，固定说明这项完整性限制。已核实 truncation 标记：文本工具标记在 result 内，metadata 标记可能追加在 JSON 之后；只接受锁版完整标记，其余尾随内容拒绝。标记或投影截断设置 truncated，空结果不声称健康；未知结果形状仍中止。正常部署继续推荐 `--prometheus.truncation-limit=0`。官方 range 不接受裸数字 step，本地按秒检查后发整数毫秒时长（如 `30000ms`）；记录秒值。锁版 SDK 的 Streamable HTTP 同连接请求实际串行，FunctionTool 治理仍可并行；额度在网络前预留，不依赖远端并发顺序。
+**实际协议依据。** `tests/sdk_core/test_prometheus_p2_protocol.py` 使用官方 v0.18.0（源码 `924e43dbea816b92c3e79e73c1568af417e8e30e`）、真 SDK 和 loopback API，逐项断言 schema、结果及每次上游请求数加 1。本机 darwin/arm64 二进制 SHA-256 为 `6272e0d8fbc8af341d1e93fdc6aa130f7086b7a993faedb015966c2ace5e3a82`，不同于发布压缩包校验值。query/range/标签/series 返回 JSON 包裹排版文本；metadata/rules 丢弃上游 warnings，固定说明这项完整性限制。已核实 truncation 标记：文本工具标记在 result 内，metadata 标记可能追加在 JSON 之后；只接受锁版完整标记，其余尾随内容拒绝。标记或投影截断设置 truncated，空结果不声称健康；未知结果形状仍中止。正常部署以正数 `--prometheus.truncation-limit=200` 配合 `max_response_bytes=64000` 起步，并用目标源实测；按行/条目与按字节的上限不可换算，长标签/help 须调整配套值，超限仍中止。metadata 的全局值转成上游 limit，并不在 MCP 本地裁剪；本片按审查 B1 将全量元数据发现收窄为具体非空指标读取，指标名仍可自由发现，不设白名单或固定顺序。官方 range 不接受裸数字 step，本地按秒检查后发整数毫秒时长（如 `30000ms`）；记录秒值。锁版 SDK 的 Streamable HTTP 同连接请求实际串行，FunctionTool 治理仍可并行；额度在网络前预留，不依赖远端并发顺序。
 
 **失败与资源契约。** 所有本表只读工具沿用已批准的源级 auth/timeout/unavailable/upstream_5xx 续查，不自动重放；当轮停用失败源，可继续其他获准源。仅 query/range 的锁版单段错误，完整匹配工具前缀、`bad_data: invalid parameter "query": 行:列: parse error: …`，才交回可信的解析失败类别与位置；不透传原始错误。每源整轮累计最多两次已观测失败后的修正调用，治理在 I/O 前同步占用机会，成功不重置额度；只由占用机会的成功调用结束待修正状态，较早/其他并行成功不得清除它。同一已失败表达式跨 query/range 零 I/O 拒绝；已开始的并行首次调用仍各计总预算、started 和分类失败，不承诺最多三次错误响应。失败无成功 Evidence，成功后才生成证据。bad_data 的 step/标签错误、422 execution、未知文本、多段/结构化错误、协议/投影/存储失败仍中止。最终校验分别统计成功查询、分类的源故障和语法失败，不能靠忽略失败调用通过；发现事实由 Agent 按需要引用，已成功执行的 query/range 仍全部引用。
 
@@ -70,8 +70,8 @@ PR #70 的三个非阻断项在本片同一失败契约中落实：并行成功/
 
 | 顺序与可独立验证的结果 | 成功/关键失败验收 |
 | --- | --- |
-| P2.1 锁版协议与本节审查 | 真 Server 覆盖七工具、带/不带认证、毫秒时间、metadata 空 metric/省略 limit、warnings 缺失及完整截断标记/篡改尾部；400 query 与 step 反例、422/401/403/500/503 分开断言；调用恰一次，无重试。审查通过后再改产品代码 |
-| P2.2 正式装配与最小用户闭环 | 先补失败测试，再用正式 serve/Web 查 range 或发现，真实 PostgreSQL/SDK/Evidence/Session；先跑一成功、一越界零 I/O 拒绝。子集授权、固定端点、schema 漂移、跨源引用、旧配置/旧证据兼容；query 与发现输出不混称数值 |
+| P2.1 锁版协议与本节审查 | 真 Server 覆盖七工具、带/不带认证、毫秒时间、metadata 具体指标/省略 limit 及全局值转上游 limit、warnings 缺失及完整截断标记/篡改尾部；400 query 与 step 反例、422/401/403/500/503 分开断言；调用恰一次，无重试。审查通过后再改产品代码 |
+| P2.2 正式装配与最小用户闭环 | 先补失败测试，再用正式 serve/Web 查 range 或发现，真实 PostgreSQL/SDK/Evidence/Session；先跑一成功、一越界零 I/O 拒绝。至少3000项标签/指标/序列、query 与31天 range 在推荐配套上限下截断成功；空/空白 metric 零 I/O 拒绝后可改为具体指标，实际超限仍中止。子集授权、固定端点、schema 漂移、跨源引用、旧配置/旧证据兼容；query 与发现输出不混称数值 |
 | P2.3 自主修正与失败收尾 | 真 Server + 正式治理链验证坏表达式→模型改写→成功证据，重复表达式/次数/预算上限、四并行初次失败和修正最多两次 I/O、错误隔离变异；故障换源、全失败无证据建议、并行成功/失败、提交时撤权；正常/拒绝均覆盖历史和重发 |
 | P2.4 能力评估与交付 | 正式浏览器与群事件替身展示来源、实际表达式/冻结时间、warnings/截断和推断；R1/MCP/G0/SDK 相关回归、Ruff/type 检查。获准真实模型上评估上述三业务问题及一次语法修正，不固定顺序，记录答案/取证/澄清/调用次数/耗时/用量；真实 Prometheus 验扫描限额。缺模型或真实源继续离线并留下能力/环境验收门槛，不用脚本模型豁免；提交、推送并开 PR，不合并/部署 |
 

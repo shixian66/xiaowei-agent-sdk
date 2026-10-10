@@ -269,8 +269,14 @@ MCP Server 单独部署在外部节点，Compose 不新增容器；小维只连�
 `XW_PROMETHEUS_READ_TOKEN` 保存只读身份的令牌，JSON 仅留引用。官方 Prometheus MCP 会把小维的
 Bearer `Authorization` 原样转发到 Prometheus，它不是与上游隔离的第二重身份。内网 HTTP 无须
 配置 CA，但请求、结果与认证头以明文传输；只在可信内网和现有网络限制内使用。地址不能含用户名、
-密码、查询串或片段，也不会跟随跳转。推荐维持 `--prometheus.truncation-limit=0`；P2 已用开启截断的
-真 Server 验证文本/metadata 的锁版完整标记，结果会标为 `truncated`。投影截断也会标记，均不代表完整。
+密码、查询串或片段，也不会跟随跳转。首选以外部 Server 的 `--prometheus.truncation-limit=200`
+配合上例的 `max_response_bytes: 64000` 作为起点；P2 已用 3000 项合成数据和正式 Web 验证
+标签发现、序列与 query/range 在这组值下返回部分结果并生成 Evidence。截断按行/条目计数，
+接收上限按字节计数，两者不能相互换算；长标签或长 help 的源须按实际返回调小截断值或调整
+接收上限后实测。不要直接关闭截断做全源发现。锁版完整截断标记和投影截断都会标为
+`truncated`，Agent 可按需要收窄选择器、聚合或缩小窗口；部分结果不证明全量健康。
+metadata 的全局值会作为上游 `limit` 发送，并非 MCP 本地按行裁剪；小维只开放非空具体指标名。
+实际响应仍超过接收上限时整轮中止，不能将这类协议异常伪装为正常部分结果。
 
 如需发现或历史窗口，在同一 `allowed_tools` 中按需加入下面的准确映射；也可以只选其中几项：
 
@@ -280,13 +286,15 @@ Bearer `Authorization` 原样转发到 Prometheus，它不是与上游隔离的�
 | `label_names` | `prometheus.label_names` | 发现标签名称 |
 | `label_values` | `prometheus.label_values` | 发现指标名、主机等标签值 |
 | `series` | `prometheus.series` | 选择器匹配的序列标签 |
-| `metric_metadata` | `prometheus.metric_metadata` | 类型/help/unit；空 metric 可发现全部 |
+| `metric_metadata` | `prometheus.metric_metadata` | 指定非空指标名的类型/help/unit |
 | `list_rules` | `prometheus.list_rules` | 当前已加载规则及求值状态 |
 
 时间窗由 Agent 按问题选择；实际时间在调用前冻结，客户端边界与接口见 [P2 契约](../docs/superpowers/plans/2026-10-09-monitoring-mcp.md#31-p2-当前切片基线-4c5b89495fdf57bfd6d18bb4483d5682e56cce59)。
 启用前核对 Prometheus **实际生效**的 timeout/max-samples/max-concurrency；客户端窗宽/点数不能限制
 表达式内部扫描。即时 query 保留 Server 自己取当前求值时间的行为，采集时钟不是求值时钟。
 metadata/rules 的官方返回会丢弃上游 warnings，页面保留固定限制说明，不能据此判定整体健康。
+发现时优先用已知主机、job 或指标选择器收窄 `matches`；未知范围仍可做有限的源内发现。
+已知指标可直接查询或读元数据，不要求固定先发现、再查询。
 
 把每个选中工具的 `"<server_id>/<tool_name>"`（如 `"prometheus-prod/query"`）加入
 `data_policy.model_tools`，再只给获准的

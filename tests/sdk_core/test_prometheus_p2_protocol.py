@@ -113,7 +113,9 @@ class BackendState:
 
 
 @contextmanager
-def prometheus_backend() -> Iterator[tuple[ThreadingHTTPServer, BackendState]]:
+def prometheus_backend(
+    *, samples: dict[str, Any] | None = None
+) -> Iterator[tuple[ThreadingHTTPServer, BackendState]]:
     """替换远端 Prometheus HTTP API；保留官方 MCP 与客户端的真实序列化路径。"""
     state = BackendState()
 
@@ -126,9 +128,17 @@ def prometheus_backend() -> Iterator[tuple[ThreadingHTTPServer, BackendState]]:
                 arguments.get("query", [""])[0], (state.status, state.error_type, state.detail)
             )
             if status == 200:
+                data = (SAMPLES if samples is None else samples)[parsed.path]
+                if parsed.path == "/api/v1/metadata":
+                    metric = arguments.get("metric", [""])[0]
+                    if metric:
+                        data = {metric: data[metric]} if metric in data else {}
+                    limit = int(arguments.get("limit", ["0"])[0])
+                    if limit > 0:
+                        data = dict(list(data.items())[:limit])
                 body = {
                     "status": "success",
-                    "data": SAMPLES[parsed.path],
+                    "data": data,
                     "warnings": ["synthetic partial data"],
                 }
             else:

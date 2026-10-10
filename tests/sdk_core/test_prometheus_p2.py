@@ -19,7 +19,13 @@ from tests.sdk_core.test_group_gateway import GroupChannel, raw_group_event, run
 from tests.sdk_core.test_group_identity import CHAT, A
 from tests.sdk_core.test_monitoring_r1a import SOURCE, monitoring_config
 from tests.sdk_core.test_prometheus_mcp_protocol import official_server
-from tests.sdk_core.test_prometheus_p2_protocol import PREFIXES, RULES, WINDOW, prometheus_backend
+from tests.sdk_core.test_prometheus_p2_protocol import (
+    PREFIXES,
+    RULES,
+    SAMPLES,
+    WINDOW,
+    prometheus_backend,
+)
 from tests.sdk_core.test_prometheus_p2_protocol import official_binary as official_binary
 from tests.sdk_core.test_runtime import Env, serve_config, until
 from tests.sdk_core.test_runtime import env as env  # pytest fixture
@@ -279,7 +285,7 @@ def test_query_policy_preserves_merged_r1_evidence_fingerprint() -> None:
         ("label_names", {"matches": [], **WINDOW}, "instance"),
         ("label_values", {"label": "__name__", "matches": [], **WINDOW}, "node_cpu"),
         ("series", {"matches": ["node_uname_info"], **WINDOW}, "nodename"),
-        ("metric_metadata", {"metric": ""}, "Target scrape status"),
+        ("metric_metadata", {"metric": "up"}, "Target scrape status"),
         ("list_rules", {}, "HostCPUHigh"),
     ],
 )
@@ -306,7 +312,7 @@ async def test_official_seven_tools_reach_formal_web_and_evidence(
                     )
                     assert "warnings" in body["delivery"]["content"]
                 if name == "metric_metadata":
-                    assert state.requests[0][1] == {}  # metric 空串，limit 省略，默认不限制。
+                    assert state.requests[0][1] == {"metric": ["up"]}  # limit 省略。
             assert await env.scalar("SELECT count(*) FROM xiaowei_evidence") == 1
 
 
@@ -684,7 +690,7 @@ async def test_official_truncated_results_are_marked_through_all_projections(
         "query": {"query": "up"},
         "range_query": RANGE,
         "label_names": {"matches": [], **WINDOW},
-        "metric_metadata": {"metric": ""},
+        "metric_metadata": {"metric": "up"},
     }[name]
     with prometheus_backend() as (backend, state):
         with official_server(
@@ -912,3 +918,207 @@ async def test_official_500_stays_source_local_and_does_not_enable_repair(
                 assert (await served.turn(message, "query")).json()["state"] == "completed"
                 assert len(state.requests) == 1
             assert await env.scalar("SELECT count(*) FROM xiaowei_evidence") == 0
+
+
+def high_cardinality_samples() -> dict[str, Any]:
+    names = [f"node_cpu_seconds_total_synthetic_metric_{index:04d}" for index in range(3000)]
+    metrics = [
+        {"__name__": "node_cpu_seconds_total", "instance": f"host{index:04d}:9100"}
+        for index in range(3000)
+    ]
+    metadata = {
+        name: [{"type": "counter", "help": "Synthetic CPU metric", "unit": ""}] for name in names
+    }
+    return {
+        **SAMPLES,
+        "/api/v1/label/__name__/values": names,
+        "/api/v1/labels": [f"synthetic_label_{index:04d}" for index in range(3000)],
+        "/api/v1/series": metrics,
+        "/api/v1/metadata": metadata,
+        "/api/v1/query": {
+            "resultType": "vector",
+            "result": [{"metric": metric, "value": [1720000000, "1"]} for metric in metrics],
+        },
+        "/api/v1/query_range": {
+            "resultType": "matrix",
+            "result": [
+                {
+                    "metric": metric,
+                    "values": [[1720000000, "1"], [1720000300, "0"], [1722678400, "1"]],
+                }
+                for metric in metrics
+            ],
+        },
+    }
+
+
+@pytest.mark.parametrize(
+    ("name", "arguments", "path"),
+    [
+        (
+            "label_values",
+            {"label": "__name__", "matches": [], **WINDOW},
+            "/api/v1/label/__name__/values",
+        ),
+        ("label_names", {"matches": [], **WINDOW}, "/api/v1/labels"),
+        ("series", {"matches": ["node_cpu_seconds_total"], **WINDOW}, "/api/v1/series"),
+        ("query", {"query": "node_cpu_seconds_total"}, "/api/v1/query"),
+        (
+            "range_query",
+            {**RANGE, "query": "node_cpu_seconds_total", "end_time": "1722678400", "step": "300s"},
+            "/api/v1/query_range",
+        ),
+    ],
+)
+async def test_official_high_cardinality_reads_fit_recommended_limits_through_web(
+    env: Env, official_binary: Path, name: str, arguments: dict[str, Any], path: str
+) -> None:
+    samples = high_cardinality_samples()
+    assert len(json.dumps(samples[path]).encode()) > 64_000
+    with prometheus_backend(samples=samples) as (backend, state):
+        with official_server(
+            official_binary, backend.server_port, tools="list_rules", truncation_limit=200
+        ) as url:
+            values = p2_config(url)
+            assert values["mcp_servers"][0]["max_response_bytes"] == 64_000
+            async with env.running(env.config(**values)) as served:
+                await served.page()
+
+                def limited(call: ModelCall) -> list[Any]:
+                    output = last_output(call)
+                    assert output["truncated"] is True
+                    result = output["data"]["result"]
+                    assert "--prometheus.truncation-limit=200" in result
+                    assert "synthetic partial data" in output["data"]["warnings"]
+                    return cite("仅取得部分数据；按需要收窄查询，不能证明全量健康")(call)
+
+                message = env.scripts.add(
+                    "监控里能看到多少 CPU/内存",
+                    tool_call(f"{SOURCE}__{name}", **arguments),
+                    limited,
+                )
+                body = (await served.turn(message, "query")).json()
+                assert len(state.requests) == 1
+                assert state.requests[0][0] == path
+                if name == "range_query":
+                    assert state.requests[0][1] == {
+                        "query": ["node_cpu_seconds_total"],
+                        "start": ["1720000000"],
+                        "end": ["1722678400"],
+                        "step": ["300"],
+                    }
+                assert body["state"] == "completed"
+                (fact,) = body["delivery"]["facts"]
+                assert fact["truncated"] is True
+                assert fact["tool_id"] == f"{SOURCE}/{name}"
+                for sql in (
+                    "SELECT model_content FROM xiaowei_evidence",
+                    "SELECT session_content FROM xiaowei_evidence",
+                    "SELECT web_content FROM xiaowei_evidence",
+                    "SELECT feishu_content FROM xiaowei_evidence",
+                ):
+                    assert json.loads(await env.scalar(sql))["truncated"] is True
+                history = (await served.client.get("/api/turns/r1")).json()
+                assert history["delivery"]["facts"][0]["truncated"] is True
+            assert await env.scalar("SELECT count(*) FROM xiaowei_evidence") == 1
+
+
+@pytest.mark.parametrize("metric", ["", " ", "\t\n"])
+async def test_empty_metadata_has_zero_io_and_can_be_corrected_to_one_metric(
+    env: Env, official_binary: Path, metric: str
+) -> None:
+    samples = high_cardinality_samples()
+    assert len(samples["/api/v1/metadata"]) == 3000
+    selected = next(iter(samples["/api/v1/metadata"]))
+    with prometheus_backend(samples=samples) as (backend, state):
+        with official_server(
+            official_binary, backend.server_port, tools="list_rules", truncation_limit=200
+        ) as url:
+            async with env.running(env.config(**p2_config(url))) as served:
+                await served.page()
+
+                def corrected(call: ModelCall) -> list[Any]:
+                    assert state.requests == []
+                    output = [
+                        i["output"] for i in call.input if i.get("type") == "function_call_output"
+                    ][-1]
+                    assert "An error occurred" in output and "不能为空" in output
+                    return tool_call(f"{SOURCE}__metric_metadata", metric=selected)(call)
+
+                message = env.scripts.add(
+                    "读取 CPU 指标元数据",
+                    tool_call(f"{SOURCE}__metric_metadata", metric=metric),
+                    corrected,
+                    cite(),
+                )
+                body = (await served.turn(message, "query")).json()
+                assert len(state.requests) == 1
+                assert state.requests[0][1] == {"metric": [selected], "limit": ["200"]}
+                assert body["state"] == "completed"
+                (fact,) = body["delivery"]["facts"]
+                assert list(json.loads(fact["result_json"])["metadata"]) == [selected]
+            assert await env.scalar("SELECT count(*) FROM xiaowei_evidence") == 1
+
+
+async def test_official_unbounded_metric_names_still_abort_on_receive_limit(
+    env: Env, official_binary: Path
+) -> None:
+    with prometheus_backend(samples=high_cardinality_samples()) as (backend, state):
+        with official_server(official_binary, backend.server_port, tools="list_rules") as url:
+            async with env.running(env.config(**p2_config(url))) as served:
+                await served.page()
+                message = env.scripts.add(
+                    "不截断的全源指标发现",
+                    tool_call(f"{SOURCE}__label_values", label="__name__", matches=[], **WINDOW),
+                    cite(),
+                )
+                body = (await served.turn(message, "query")).json()
+                assert len(state.requests) == 1
+                assert body["state"] == "failed"
+                assert len(env.scripts.calls[message]) == 1
+            assert await env.scalar("SELECT count(*) FROM xiaowei_evidence") == 0
+
+
+def test_discovery_descriptions_offer_narrowing_without_fixed_order() -> None:
+    config = ServeConfig.model_validate(
+        serve_config(8501, **p2_config("http://127.0.0.1:9000/mcp"))
+    )
+    contracts, _ = _monitoring_catalog(config)
+    descriptions = {contract.policy_id: contract.description for contract in contracts}
+    for name in ("label_names", "label_values", "series"):
+        assert "收窄" in descriptions[f"prometheus.{name}"]
+    assert "非空" in descriptions["prometheus.metric_metadata"]
+    assert "空串可发现全部" not in descriptions["prometheus.metric_metadata"]
+
+
+@pytest.mark.browser
+async def test_browser_high_cardinality_discovery_and_empty_metadata_refusal(
+    env: Env, official_binary: Path, chrome_binary: str
+) -> None:
+    with prometheus_backend(samples=high_cardinality_samples()) as (backend, state):
+        with official_server(
+            official_binary, backend.server_port, tools="list_rules", truncation_limit=200
+        ) as url:
+            async with env.running(env.config(**p2_config(url))), launch(chrome_binary) as chrome:
+                page = await chrome.page()
+                await page.navigate(f"{env.origin}/")
+                discovered = env.scripts.add(
+                    "监控里有哪些 CPU 指标",
+                    tool_call(f"{SOURCE}__label_values", label="__name__", matches=[], **WINDOW),
+                    cite("结果被截断，按需收窄范围才能补齐所需证据"),
+                )
+                await send(page, discovered, "query")
+                shown = await settled(page, 0, "completed")
+                assert SOURCE in shown and "结果已截断" in shown
+                assert "node_cpu_seconds_total_synthetic_metric_0000" in shown
+                assert len(state.requests) == 1
+                rejected = env.scripts.add(
+                    "空指标名读取元数据",
+                    tool_call(f"{SOURCE}__metric_metadata", metric=""),
+                    lambda call: answer([], analysis="", advice="指标名不能为空，请指定需要的指标"),
+                )
+                await send(page, rejected, "query")
+                shown = await settled(page, 1, "completed")
+                assert "指标名不能为空" in shown
+                assert len(state.requests) == 1
+            assert await env.scalar("SELECT count(*) FROM xiaowei_evidence") == 1

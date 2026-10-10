@@ -448,6 +448,10 @@ def _prepare_prometheus(request: ToolRequest, policy_id: str, now: datetime) -> 
             value = arguments[key]
             if not isinstance(value, str) or len(value) > 8192 or (key == "query" and not value):
                 raise ToolRejectedError("表达式/指标名须符合长度上限8192，查询表达式不能为空")
+            if key == "metric" and not value.strip():
+                raise ToolRejectedError(
+                    "metric 指标名不能为空；请提供具体指标，未知名称可用 label_values 按需发现"
+                )
     if "matches" in arguments:
         matches = arguments["matches"]
         if (
