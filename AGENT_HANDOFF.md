@@ -36,7 +36,7 @@
 
 ## 3. 当前计划与下一项工作
 
-**当前下一步：** 复审[生产对话七项修复计划 v2](docs/superpowers/plans/2026-10-10-production-dialogue-repairs.md)；只写计划，实施须另获授权。监控主线 A4 已随 PR #73 合入，后续仍为 W5 群审批底座及真实环境验收，契约/门槛只在监控计划维护；与本片并行时协调共享调用链、迁移版本和隔离测试环境。
+**当前下一步：** 复审[生产对话七项修复计划 v3](docs/superpowers/plans/2026-10-10-production-dialogue-repairs.md)；R7 已补目标来源、既有工具纠错反馈/停止分类及完整任务验收。仅文档，真实模型未验证，C7 硬目标确认仍待批准；实施须另获授权。监控主线 A4 已随 PR #73 合入，后续仍为 W5 群审批底座及真实环境验收，契约/门槛只在监控计划维护；与本片并行时协调共享调用链、迁移版本和隔离测试环境。
 
 **A4 当前离线证据：** 先在旧代码实跑正式 Web 两条 RED（`alertmanager_sources` 不识别）；实现后正式 `serve → Web/指定群事件替身 → 真 SDK Runner → GovernedTools → 外部 API v2 → Evidence/PolicySession/PostgreSQL → 交付` 通过。官方 Alertmanager v0.34.1 仅 loopback、无外部通知接收器；测试预置合成告警/静默的 POST 不属于产品写能力。社区候选的固定版本与不可接入/错误分类损失证据只在计划 §3.3 维护，不把不同协议的结果相互替代。
 
