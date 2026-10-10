@@ -1,6 +1,6 @@
 # 小维：当前交接
 
-> 更新：2026-10-10，Asia/Shanghai。这里只记录当前事实、证据与下一项工作；设计见 [ARCHITECTURE.md](ARCHITECTURE.md)，路线见 [DEVELOPMENT_PLAN.md](DEVELOPMENT_PLAN.md)，协作规则见 [AGENTS.md](AGENTS.md)。
+> 更新：2026-10-11，Asia/Shanghai。这里只记录当前事实、证据与下一项工作；设计见 [ARCHITECTURE.md](ARCHITECTURE.md)，路线见 [DEVELOPMENT_PLAN.md](DEVELOPMENT_PLAN.md)，协作规则见 [AGENTS.md](AGENTS.md)。
 
 **OpenAI Agents SDK 负责 Agent Loop；小维负责权限、受治理工具执行、证据真实性和数据边界。**
 
@@ -45,6 +45,8 @@
 完整 SDK/P1B 首轮（同 A4 的本机官方二进制/社区候选环境，`.venv/bin/python -m pytest tests/sdk_core tests/p1b -q -W error --tb=short`）为 **2791 passed, 5 failed, 59 deselected**（715.41s，无跳过/警告）；五处失败仅因原测试仍期待版本6，已同步为实际版本7并纳入上段388项复验。全量结果覆盖工作说明与期限修复补充前的实现，不把它冒充最终提交全量重跑。发行候选检查 `.venv/bin/python -m pytest tests/deployment/test_release.py tests/deployment/test_release_workflow.py tests/security/test_docs_command_consistency.py tests/contract/test_doc_fact_binding.py -q -W error --tb=short` 为 **76 passed**（22.94s），含可丢弃本机镜像 CLI 冒烟，非部署；审查后的 README/计划/交接修改另复跑后两文件 **5 passed**。Ruff、改动文件格式、mypy（128源文件）、离线锁（92包）与 `git diff --check` 通过。
 
 独立审查 `291be6a4d9f9ce632e813207ad3918da30497f14` 实跑 W5 四文件 **51 passed**，另复现14分59秒批准、回读跨过15分钟后仍写入的阻断。期限边界回归先为 **2 failed, 1 passed**；修复写前准入同时复核批准/保留期限后 **3 passed**，并纳入上述388项。新提交的精确复审结论见 PR，不沿用旧 SHA 的审查结果。非阻断的固定失败回执缺少“重新提出/查状态”原因区分，暂保留现有契约，在实际写切片接入时复核用户体验；不据此放宽写失败或自动重试。
+
+`ea7bffb3552598637a2494d804923449e88f44ec` 的期限修复经独立差异复审无新增阻断，另实跑 **3 passed**，已推送并建草稿 [PR #74](https://github.com/shixian66/xiaowei-agent-sdk/pull/74)。首次 CI 的 `p3-release` 为 **3 failed, 79 passed**：旧容器演练没有随 schema7 修正历史版本事实及迁移/恢复准备。修正测试的 v5 形状、固定历史镜像仍为v6，显式 v6→v7 迁移后才切换，回退时恢复迁移前备份到隔离库；产品代码、密钥核验和版本拒绝未放宽。三条容器演练复验 **3 passed**（350.47s，`/private/tmp/xw-w5-container-reregression.log`），命令为 `.venv/bin/python -m pytest tests/deployment/test_compose.py::test_formal_compose_entry_success_failure_network_and_signal tests/deployment/test_maintenance.py::test_different_image_upgrade_rollback_and_paired_restore tests/deployment/test_maintenance.py::test_feishu_users_upgrade_rollback_restores_the_config_the_old_image_reads -q -W error --tb=short`。新增差异仍按精确提交复审，最新 head/CI 结果以 PR 为准；不将首次失败覆盖成通过。
 
 仓库外 `/private/tmp/xw-w5-mutations.py` 复制小维源码，不改工作树或 SDK；分别移除写批准绑定、单次占用、完整送达与实例核对，四项对应真实断言均失败，输出在 `/private/tmp/xw-w5-mutations.json`。诊断脚本起初只识别一种 pytest 断言格式，已修正并完成四项；不将脚本自身错误当作保护证据。
 
