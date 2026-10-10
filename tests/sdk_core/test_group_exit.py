@@ -17,6 +17,7 @@ import pytest
 from tests.p1b.test_starrocks_adapter import TARGET as SR
 from tests.p1b.test_starrocks_adapter import Result, driver
 from tests.sdk_core.test_app import cite, clarify, tool_call
+from tests.sdk_core.test_feishu_render import message_text
 from tests.sdk_core.test_group_gateway import GroupChannel, raw_group_event, runtime_group
 from tests.sdk_core.test_group_gateway import runtime_env as runtime_env  # pytest fixture
 from tests.sdk_core.test_group_identity import APP, CHAT, TENANT, A, B, C
@@ -58,9 +59,9 @@ def with_plan(drv: Any, sql: str) -> None:
 
 
 def replies(channel: GroupChannel) -> list[tuple[str, str]]:
-    """（回复的原消息, 文本）；每条都发往指定群。"""
+    """（回复的原消息, 纯文本内容）；每条都发往指定群，卡片结构仍留在 sends。"""
     assert all(to == CHAT for to, _, _ in channel.sends)
-    return [(opts["reply_to"], message["text"]) for _, message, opts in channel.sends]
+    return [(opts["reply_to"], message_text(message)) for _, message, opts in channel.sends]
 
 
 def user_turns(env: RuntimeEnv, message: str, call: int = 0) -> list[str]:

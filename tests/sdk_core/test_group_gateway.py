@@ -34,6 +34,7 @@ from tests.p1b.test_starrocks_adapter import TARGET as SR
 from tests.sdk_core.synthetic_tools import QUERY_TOOL
 from tests.sdk_core.test_app import cite, clarify, tool_call
 from tests.sdk_core.test_feishu import FakeChannel, Outbox, dropped, logs
+from tests.sdk_core.test_feishu_render import message_text, tables
 from tests.sdk_core.test_group_identity import APP, CHAT, TENANT, TOOLS, A, B, C, Env
 from tests.sdk_core.test_group_identity import env as env  # pytest fixture
 from tests.sdk_core.test_runtime import (
@@ -216,7 +217,7 @@ async def test_a_mentioned_member_gets_one_reply_to_the_original_message(env: En
     assert all(QUERY_NAME in seen for seen in env.scripts.tools_seen(asked))
     ((chat_id, text),) = group.outbox.sent
     assert chat_id == CHAT and group.outbox.replies == ["om_1"]
-    assert "来源 local/order_total" in text
+    assert "来源 local/order_total" in message_text(text)
     assert await request_rows(env) == [
         (True, "group", A, "query", "completed", "sent", CHAT, "om_1")
     ]
@@ -410,7 +411,9 @@ class HeldOutbox(Outbox):
     sending: asyncio.Event = field(default_factory=asyncio.Event)
     release: asyncio.Event = field(default_factory=asyncio.Event)
 
-    async def __call__(self, chat_id: str, text: str, *, reply_to: str | None = None) -> Any:
+    async def __call__(
+        self, chat_id: str, text: str | dict[str, Any], *, reply_to: str | None = None
+    ) -> Any:
         if text != QUEUED and not self.sending.is_set():
             self.sending.set()
             await self.release.wait()
@@ -489,8 +492,8 @@ async def test_a_pending_result_is_delivered_once_on_redelivery_after_a_membersh
             await group.gateway.receive(event)
             await group.gateway.idle()
     assert group.outbox.replies == ["om_left", "om_outsider"]
-    assert "来源 local/order_total" in group.outbox.sent[0][1]
-    assert "未能确认你当前的使用权限或群成员身份" in group.outbox.sent[1][1]
+    assert "来源 local/order_total" in group.outbox.texts()[0]
+    assert "未能确认你当前的使用权限或群成员身份" in group.outbox.texts()[1]
     assert await states(env) == {
         "om_left": ("completed", "sent"),
         "om_outsider": ("failed", "sent"),
@@ -824,12 +827,23 @@ def test_group_tools_must_be_registered(runtime_env: RuntimeEnv) -> None:
         runtime_env.config(feishu=runtime_group(tools=["local/order_total"]))
 
 
+@pytest.mark.parametrize("send_delay", [0.0, 0.1])
 async def test_formal_runtime_answers_a_member_and_refuses_an_outsider(
     runtime_env: RuntimeEnv,
+    send_delay: float,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     env = runtime_env
     config = env.config(feishu=runtime_group())
-    channel = GroupChannel()
+    channel = GroupChannel(delay=send_delay)
+    gateways: list[FeishuGateway] = []
+
+    def observe_gateway(*args: Any, **kwargs: Any) -> FeishuGateway:
+        gateway = FeishuGateway(*args, **kwargs)
+        gateways.append(gateway)
+        return gateway
+
+    monkeypatch.setattr(runtime, "FeishuGateway", observe_gateway)
     asked = env.scripts.add(
         attributed(A, "有哪些表"),
         tool_call("list_tables", cluster=SR.target_id, **SEARCH),
@@ -839,13 +853,17 @@ async def test_formal_runtime_answers_a_member_and_refuses_an_outsider(
         assert (await served.ready())["feishu"] == "connected"
         channel.emit_raw_from_sdk_thread(raw_group_event(env, "有哪些表", "om_ok"))
         await until(lambda: len(channel.sends) == 1)
+        # sends 记录发送开始，不代表投递/群队头已结束；等待真实网关，避免第二条收到排队提示。
+        assert len(gateways) == 1
+        await asyncio.wait_for(gateways[0].idle(), 20)
         channel.emit_raw_from_sdk_thread(raw_group_event(env, "有哪些表", "om_out", sender=C))
         await until(lambda: len(channel.member_calls) == 4)
-        await asyncio.sleep(0.2)
+        await asyncio.wait_for(gateways[0].idle(), 20)
         assert await served.finish() == 0
     ((to, message, opts),) = channel.sends
     assert to == CHAT and opts["reply_to"] == "om_ok" and opts["reply_target_gone"] == "fail"
-    assert "<at" not in message["text"] and "＜at" in message["text"]
+    assert "<at" in message_text(message)  # 原文仅进入 plain_text，不解析 mention。
+    assert all(c["data_type"] == "text" for t in tables(message) for c in t["columns"])
     assert len(env.scripts.calls[asked]) == 2
     assert [c["chat_id"] for c in channel.member_calls] == [CHAT] * 4  # A：开始与发送；C：同样两次
     assert (
@@ -1016,7 +1034,8 @@ async def test_real_sdk_group_turn_through_the_formal_runtime(
             assert await served.finish() == 0
     ((target, body),) = replies
     assert target.startswith("im/v1/messages/om_real/")
-    assert "list_tables" in json.loads(body["content"])["text"]
+    assert body["msg_type"] == "interactive"
+    assert "list_tables" in message_text({"card": json.loads(body["content"])})
     assert len(env.scripts.calls[asked]) == 2 and "不该处理" not in str(env.scripts.calls)
     members = [p for p in seen if p.endswith("/members")]
     assert len(members) == 2  # 开始运行与发送前各一次

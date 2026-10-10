@@ -297,15 +297,22 @@ async def test_unchanged_access_keeps_followup_history_and_resend(env: Env) -> N
         outbox = Outbox()
         assert await rt.service.results.send(ref("om_1"), outbox) == "failed"
         (delivery,) = outbox.sent
-        assert "| east | 100 |" in delivery.content  # 飞书交付是纯文本
+        assert delivery.facts[0].rows == (
+            {"region": "east", "total": 100},
+            {"region": "west", "total": 50},
+        )
         env.db.forget()
 
         view = await rt.service.results.view(ref("om_1"))
         assert view.delivery is not None and view.delivery.content == delivery.content
+        env.clock.advance(60)
         record, message = await followup(env, rt, "om_2")
         assert record.state == "completed"
         assert len(env.scripts.calls[message]) == 1
         assert env.db.business() == []
+        history = await rt.service.results.view(ref("om_2"))
+        assert history.delivery is not None
+        assert history.delivery.facts[0].captured_at == delivery.facts[0].captured_at
         # 同一批次（一条连接）内同一对象只探测一次。
         for conn in env.db.drv.connections:
             probed = [sql for sql, _ in conn.executed if sql.startswith("SELECT 1 FROM `")]
@@ -347,7 +354,8 @@ async def test_unverifiable_access_blocks_only_this_delivery(env: Env) -> None:
     env.db.down = False
     async with env.opened(config) as rt:
         view = await rt.service.results.view(ref("om_1"))
-        assert view.delivery is not None and "| east | 100 |" in view.delivery.content
+        assert view.delivery is not None
+        assert view.delivery.facts[0].rows[0] == {"region": "east", "total": 100}
         record, message = await followup(env, rt, "om_3")
         assert record.state == "completed" and len(env.scripts.calls[message]) == 1
         assert env.db.business() == []
@@ -389,7 +397,7 @@ async def test_view_facts_are_delivered_once_and_never_replayed(env: Env) -> Non
         outbox = Outbox()
         assert await rt.service.results.send(ref("om_1"), outbox) == "failed"
         (delivery,) = outbox.sent
-        assert delivery.evidence_ids and "| east |" in delivery.content
+        assert delivery.evidence_ids and delivery.facts[0].rows[0]["region"] == "east"
 
         env.db.forget()
         with pytest.raises(ResultUnavailableError) as history:

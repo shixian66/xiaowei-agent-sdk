@@ -310,13 +310,61 @@ async def test_advice_is_a_separate_answer_without_facts(postgres_url: URL) -> N
             # 建议原文保持在一行内（换行写成转义），不能伪造标题或事实区。
             assert rest == ["SELECT region, SUM(total) AS total\\nFROM sales GROUP BY region"]
             assert delivery.web_text == (sql if channel == "web" else None)
-            assert (delivery.evidence_ids, delivery.facts, delivery.layout) == ((), (), None)
+            assert getattr(delivery, "feishu_text", None) == (sql if channel == "feishu" else None)
+            assert set(delivery.model_dump(exclude={"channel"})) == {
+                "content",
+                "evidence_ids",
+                "facts",
+                "analysis",
+                "web_text",
+            }
+            assert (delivery.evidence_ids, delivery.facts) == ((), ())
             assert _FACTS_HEADER not in delivery.content
 
 
 def test_answers_saved_before_advice_existed_still_load() -> None:
     old = '{"evidence_ids": [], "inferences": [], "clarification": "请说明地区"}'
     assert AgentAnswer.model_validate_json(old).advice is None
+
+
+async def test_feishu_structured_fact_reads_only_its_own_projection(postgres_url: URL) -> None:
+    grants, clock = Grants(), Clock()
+    grants.grant("alice", TOTAL_TOOL)
+    ctx = context(channel="feishu", session="channel-fields")
+    projections = {
+        "model": Projection(fields=("total",), max_bytes=2000),
+        "session": Projection(fields=("total",), max_bytes=2000),
+        "web": Projection(fields=("total", "web_secret"), max_bytes=2000),
+        "feishu": Projection(fields=("total", "feishu_only"), max_bytes=2000),
+    }
+    policy = ToolPolicy(policy_id="synthetic.region", arguments=RegionArgs, projections=projections)
+    async with ready_engine(postgres_url) as engine:
+        evidence = EvidenceStore(
+            engine,
+            ToolCatalog(CONTRACTS, (policy,)),
+            authorize=grants,
+            clock=clock,
+            retention_seconds=RETENTION_SECONDS,
+        )
+        recorded = await evidence.record(
+            ctx,
+            request(),
+            ToolObservation(
+                payload={
+                    "total": 100,
+                    "web_secret": "WEB_ONLY_SENTINEL",
+                    "feishu_only": "own-channel",
+                },
+                captured_at=clock(),
+                truncated=False,
+            ),
+        )
+        delivery = await evidence.validate_answer(cited(_answer((recorded.evidence_id,))), ctx)
+        (fact,) = delivery.facts
+        assert fact.metadata == {"total": 100, "feishu_only": "own-channel"}
+        assert json.loads(fact.result_json or "null") == fact.metadata
+        assert "WEB_ONLY_SENTINEL" not in delivery.model_dump_json()
+        assert delivery.web_text is None
 
 
 def _cite_evidence(inference: str, **extra: object) -> ModelStep:

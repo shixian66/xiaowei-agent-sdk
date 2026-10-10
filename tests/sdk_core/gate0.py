@@ -16,12 +16,13 @@
 """
 
 import asyncio
+import hashlib
 import json
 import secrets
 import time
 from collections.abc import AsyncIterator, Callable, Sequence
 from contextlib import asynccontextmanager
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime
 from typing import Any, Literal
 
@@ -215,7 +216,8 @@ def app_config(profile: ModelProfile) -> AppConfig:
 class RequestObservation:
     """一次模型 HTTP 请求的元数据；不含正文。签名计数只对 Chat Completions 与 Vertex 有意义。"""
 
-    status: int
+    status: int | None
+    """HTTP 状态；尚未收到响应（包括超时、连接错误或取消）时为 None。"""
     elapsed_ms: int
     tools_offered: tuple[str, ...]
     history_tool_calls: int
@@ -228,6 +230,9 @@ class RequestObservation:
     tool_result_fields: tuple[str, ...]
     """请求中（本轮与回放历史）工具结果信封 ``data`` 的字段名，只取 ``OBSERVED_FIELDS``。"""
     usage: dict[str, int] | None
+    instructions_sha256: str = ""
+    tool_descriptions_sha256: str = ""
+    """实际 HTTP 请求中的指令、工具名/说明哈希；不保存原文或参数。"""
 
 
 class ObservingTransport(httpx2.AsyncBaseTransport):
@@ -243,20 +248,28 @@ class ObservingTransport(httpx2.AsyncBaseTransport):
     async def handle_async_request(self, request: httpx2.Request) -> httpx2.Response:
         shape = _request_shape(await request.aread())
         started = time.monotonic()
-        response = await self._inner.handle_async_request(request)
-        stream = response.stream
-        if not isinstance(stream, httpx2.AsyncByteStream):
-            return response
+        index = len(self.observations)
+        self.observations.append(RequestObservation(status=None, elapsed_ms=0, usage=None, **shape))
+        try:
+            response = await self._inner.handle_async_request(request)
+        finally:
+            # 请求一进入 transport 就登记；异常/取消照常传播，不丢失版本哈希或请求计数。
+            self.observations[index] = replace(
+                self.observations[index], elapsed_ms=int((time.monotonic() - started) * 1000)
+            )
+        self.observations[index] = replace(self.observations[index], status=response.status_code)
 
         def record(body: bytes) -> None:
-            self.observations.append(
-                RequestObservation(
-                    status=response.status_code,
-                    elapsed_ms=int((time.monotonic() - started) * 1000),
-                    usage=usage_counts(body),
-                    **shape,
-                )
+            self.observations[index] = replace(
+                self.observations[index],
+                elapsed_ms=int((time.monotonic() - started) * 1000),
+                usage=usage_counts(body),
             )
+
+        stream = response.stream
+        if not isinstance(stream, httpx2.AsyncByteStream):
+            record(b"")
+            return response
 
         return httpx2.Response(
             response.status_code,
@@ -283,10 +296,12 @@ class _Tee(httpx2.AsyncByteStream):
             yield chunk
 
     async def aclose(self) -> None:
-        await self._inner.aclose()
-        if not self._closed:
-            self._closed = True
-            self._done(bytes(self._body))
+        try:
+            await self._inner.aclose()
+        finally:
+            if not self._closed:
+                self._closed = True
+                self._done(bytes(self._body))
 
 
 def _request_shape(body: bytes) -> dict[str, Any]:
@@ -295,7 +310,7 @@ def _request_shape(body: bytes) -> dict[str, Any]:
     except ValueError:
         data = {}
     if "contents" in data:
-        return _vertex_shape(data)
+        return _vertex_shape(data) | _instruction_hashes(data)
     tools = tuple(
         str(t.get("name") or t.get("function", {}).get("name"))
         for t in data.get("tools", [])
@@ -330,6 +345,36 @@ def _request_shape(body: bytes) -> dict[str, Any]:
         "turn_signatures": counts["turn"][1],
         "turn_tools": tuple(chosen),
         "tool_result_fields": tuple(sorted(fields)),
+    } | _instruction_hashes(data)
+
+
+def _instruction_hashes(data: dict[str, Any]) -> dict[str, str]:
+    if "contents" in data:
+        instructions = data.get("systemInstruction")
+        functions = [
+            f for group in data.get("tools", []) for f in group.get("functionDeclarations", [])
+        ]
+    else:
+        instructions = (
+            data.get("instructions")
+            if "instructions" in data
+            else [
+                m.get("content")
+                for m in data.get("messages", [])
+                if m.get("role") in {"system", "developer"}
+            ]
+        )
+        functions = [t.get("function", t) for t in data.get("tools", [])]
+    descriptions = [{"name": f.get("name"), "description": f.get("description")} for f in functions]
+
+    def digest(value: object) -> str:
+        return hashlib.sha256(
+            json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode()
+        ).hexdigest()
+
+    return {
+        "instructions_sha256": digest(instructions),
+        "tool_descriptions_sha256": digest(descriptions),
     }
 
 

@@ -23,6 +23,7 @@ from tests.sdk_core.browser import launch
 from tests.sdk_core.mcp_fixture import LOOPBACK, ASGIApp, Recorder, recording, serve
 from tests.sdk_core.test_app import answer, cite, tool_call
 from tests.sdk_core.test_feishu import FakeChannel
+from tests.sdk_core.test_feishu_render import message_text
 from tests.sdk_core.test_group_gateway import GroupChannel, raw_group_event, runtime_group
 from tests.sdk_core.test_group_identity import CHAT, A
 from tests.sdk_core.test_prometheus_mcp_protocol import official_server
@@ -276,7 +277,7 @@ async def test_feishu_query_projects_source_and_expression(env: Env) -> None:
             assert (await served.ready())["feishu"] == "connected"
             channel.emit_raw_from_sdk_thread(feishu_event(env, message, "om_monitor_query"))
             await until(lambda: len(channel.sends) == 1)
-            rendered = channel.sends[0][1]["text"]
+            rendered = message_text(channel.sends[0][1])
             assert SOURCE in rendered and "up" in rendered and "host1" in rendered
             assert "采集于" in rendered and "partial" in rendered
         assert upstream.recorder.tool_calls == [("query", {"query": "up"})]
@@ -309,7 +310,9 @@ async def test_group_member_can_query_only_a_group_granted_source(env: Env) -> N
             channel.emit_raw_from_sdk_thread(raw_group_event(env, "群查指标", "om_monitor_group"))
             await until(lambda: len(channel.sends) == 1)
             to, payload, _ = channel.sends[0]
-            assert to == CHAT and SOURCE in payload["text"] and "host1" in payload["text"]
+            assert (
+                to == CHAT and SOURCE in message_text(payload) and "host1" in message_text(payload)
+            )
         assert len(env.scripts.calls[message]) == 2
         assert upstream.recorder.tool_calls == [("query", {"query": "up"})]
 

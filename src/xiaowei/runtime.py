@@ -34,6 +34,7 @@ from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
 from contextlib import AbstractAsyncContextManager, AsyncExitStack, asynccontextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from functools import partial
 from pathlib import Path
 from typing import Annotated, Any, Literal
 
@@ -82,7 +83,7 @@ from xiaowei.config import (
     resolve_secret_ref,
 )
 from xiaowei.evidence import EvidenceStore
-from xiaowei.feishu import FeishuGateway, LarkChannel, LarkTransport, lark_channel, render
+from xiaowei.feishu import FeishuGateway, LarkChannel, LarkTransport, lark_channel, send_delivery
 from xiaowei.governance import GovernedTools, Projection, ToolCatalog, ToolPolicy
 from xiaowei.mcp import MCPIntegration
 from xiaowei.model_api import ModelProfile, open_model
@@ -93,7 +94,6 @@ from xiaowei.models import (
     Budget,
     Channel,
     ClusterId,
-    Delivery,
     Identity,
     Label,
     Owner,
@@ -1393,13 +1393,13 @@ async def _resend(
     else:
         raise ResendTargetError
 
-    async def transmit(delivery: Delivery) -> SendOutcome:
-        text = render(delivery, feishu.max_reply_chars)
-        try:
-            return await transport.send(conversation, text, reply_to=reply_to)
-        except Exception as exc:
-            logger.error("飞书发送异常，按结果不明记录：%s", type(exc).__name__)
-            return "unknown"
+    transmit = partial(
+        send_delivery,
+        send=transport.send,
+        chat_id=conversation,
+        max_chars=feishu.max_reply_chars,
+        reply_to=reply_to,
+    )
 
     ref = RequestRef(
         channel="feishu",
