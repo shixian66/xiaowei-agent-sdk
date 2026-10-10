@@ -1,7 +1,8 @@
 """外部 Alertmanager API v2 只读 Adapter：固定 GET，经现有治理后才执行。
 
 API 返回完整的过滤结果；分页在有界接收后进行，不能用 limit 限制上游负荷。
-仅保存完成调查需要的状态，不读取通知目的地、原配置、作者或集群地址。
+对完整响应做白名单投影，不保存或向模型、Session、渠道暴露通知目的地、
+原配置、作者或 peer 地址。
 """
 
 # ruff: noqa: N815 - 事实字段保留官方 API v2 的名称，避免混淆抑制类别。
@@ -305,7 +306,8 @@ _SPECS: dict[str, tuple[type[BaseModel], type[BaseModel], str, str]] = {
         _Args,
         _Status,
         "status",
-        "读取 Alertmanager 自身集群状态、版本和 uptime（启动时间）。不读取原配置或 peer 地址；"
+        "读取 Alertmanager 自身集群状态、版本和 uptime（启动时间）。原配置和 peer 地址不保存，"
+        "不向模型、Session 或渠道暴露；"
         "服务状态不证明主机健康或通知已发送。",
     ),
 }

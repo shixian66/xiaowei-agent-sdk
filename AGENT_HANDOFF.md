@@ -11,7 +11,7 @@
 | 仓库 | [shixian66/xiaowei-agent-sdk](https://github.com/shixian66/xiaowei-agent-sdk) |
 | 本地目录 / 分支 | `/Users/kloenguyen/.codex/worktrees/monitoring-a4/agent-SDK` / `codex/monitoring-a4`，基于 PR #72 合并后的 `origin/main`：`8a7072d86abf6e93e0fb5e4be8e84f61308feb80`。主工作区与已有修改保留；接手仍须核对实际 HEAD 与工作区。 |
 | M5 历史起点 | `372c381f44ecfa1fa53961f137d0058033cbd805`；不是远端当前 main 的核验结论 |
-| 本轮审查版本 | G3 随 PR #72 合入。A4 协议/计划 `0345d32cb8369a39910dbb07237d4e23e702025d` 独立审查无开工阻断；六项 API v2 产品候选已通过完整离线回归，待精确版本独立复审。审查通过不证明真实模型或环境通过。 |
+| 本轮审查版本 | G3 随 PR #72 合入。A4 协议/计划 `0345d32cb8369a39910dbb07237d4e23e702025d` 与产品 `677b6745937378fc026024871e37036d17d2d144` 独立审查均无阻断；产品审查另独立复跑77项通过。后续只收准非阻断的原配置投影文案。审查通过不证明真实模型或环境通过。 |
 | 当前阶段 | R1a/R1b、只读故障续查、P2、G3 离线部分已合入；A4 候选增加独立 Alertmanager 六项只读 API v2，契约唯一维护在监控计划 §3.3。真实模型自主调查、公司三源与真实双入口未验收；P3 实战验收独立开放。 |
 | 当前源码与依赖 | 新包 `src/xiaowei/` 仍为应用表 v6。V1-A 新增 `vertex_model.py`（SDK 公开 `Model` 的非流式 Vertex 适配器），`model_api` 增加 `provider="vertex"` 与受控 transport 的认证头/成功校验参数；显式声明已直接导入的 `httpx2>=2.12,<3`（锁定 2.13.1 不变）。V1-B 使 `PolicySession` 随函数调用保存并回放 `provider_data.thought_signature`（单字段白名单，其余供应商字段丢弃），`app.safe_run_config()` 成为应用与 `model check` 共用的运行配置。V2 新增 `runtime.check_model` / `validate_model_config` 与 CLI `model check`。C2 把主模板改为一个 Vertex Profile、一个目标；占位符清单新增 Vertex 模型标记，C2 前模板的标记作为历史值继续拒绝。发布归档仍只含白名单文件 |
 | 新产品入口 | 原生主线仍为 `xiaowei`（与 `python -m xiaowei` 相同）的 `serve`、`config check`、`model check`、`storage init/upgrade/cleanup`、`requests resend`；`listen_host` 可为任意地址（默认 `127.0.0.1`）。镜像固定入口复用同一 CLI，在容器内绑定 `0.0.0.0`，宿主机发布地址由 `XW_WEB_BIND_ADDRESS`（默认 `0.0.0.0`）决定。真实模型、用户 StarRocks 与真实飞书未参与 P3-A 验证；旧 CLI/Compose 不是产品入口 |
@@ -36,15 +36,15 @@
 
 ## 3. 当前计划与下一项工作
 
-**当前下一步：** 完成 A4 精确版本独立复审，按授权提交/推送草稿 PR；不合并或部署。真实模型、公司三源与真实双入口仍按监控计划 §3.1–§3.3 验收，不继承 U1 例外。后续切片是 W5 群审批底座；本片不自动推进写能力。
+**当前下一步：** A4 离线实现与精确版本独立审查已无阻断，按授权提交/推送草稿 PR 供复审验收；不合并或部署。真实模型、公司三源与真实双入口仍按监控计划 §3.1–§3.3 验收，不继承 U1 例外。后续切片是 W5 群审批底座；本片不自动推进写能力。
 
 **A4 当前离线证据：** 先在旧代码实跑正式 Web 两条 RED（`alertmanager_sources` 不识别）；实现后正式 `serve → Web/指定群事件替身 → 真 SDK Runner → GovernedTools → 外部 API v2 → Evidence/PolicySession/PostgreSQL → 交付` 通过。官方 Alertmanager v0.34.1 仅 loopback、无外部通知接收器；测试预置合成告警/静默的 POST 不属于产品写能力。社区候选的固定版本与不可接入/错误分类损失证据只在计划 §3.3 维护，不把不同协议的结果相互替代。
 
 定向命令：设置 `SDK_TEST_POSTGRES_URL=postgresql+asyncpg://postgres@127.0.0.1:55432/postgres`、`XW_TEST_ALERTMANAGER_BIN=/private/tmp/xw-a4-official/alertmanager-0.34.1.darwin-arm64/alertmanager` 后，`.venv/bin/python -m pytest tests/sdk_core/test_alertmanager_a4.py tests/sdk_core/test_alertmanager_contracts.py -q -W error --tb=short` 为 **92 passed, 1 deselected**；随后补不可达/Basic 两项分支，定向 **3 passed**。设置本机 Chrome 路径的 `SDK_TEST_CHROME`，同一 A4 正式入口文件 `-m browser` 为 **1 passed, 69 deselected**。已覆盖六项官方读取、源/工具撤权零 I/O、固定 GET/Basic/子路径/重复 filter、分类失败计预算且本源本轮零重试、获准 Prometheus 续查、未分类/超限/畸形结果零 Evidence、静默 ID 不匹配、过期状态、分页/大分组/二次投影截断、源离线历史/群重发及撤权、跨会话伪造引用、成功读取必须引用，以及 HTTP 响应/客户端正常关闭、取消和总时限。大分组先保留摘要、后投影明细，不提高模型或交付边界。
 
-最终完整 SDK/P1B 回归：上述 PostgreSQL 配置，另设置 `XW_TEST_PROMETHEUS_MCP_BIN=/private/tmp/xw-prometheus-mcp-v018/prometheus-mcp-server`、`XW_TEST_GRAFANA_MCP_BIN=/private/tmp/xw-g3-official/mcp-grafana`、`XW_TEST_ALERTMANAGER_COMMUNITY_PYTHON=/private/tmp/xw-a4-community/.venv/bin/python`、`XW_TEST_ALERTMANAGER_COMMUNITY_ROOT=/private/tmp/xw-a4-community` 后，`.venv/bin/python -m pytest tests/sdk_core tests/p1b -q -W error --tb=short` 为 **2740 passed, 59 deselected**（682.55s，无警告、无跳过）。文档/发行命令 `.venv/bin/python -m pytest tests/security/test_docs_command_consistency.py tests/contract/test_doc_fact_binding.py tests/deployment/test_release.py -q -W error --tb=short` 为 **73 passed**（24.17s），包含本机可丢弃运行镜像的构建/装载/CLI 冒烟，不代表最终发行或部署。
+产品审查版本 `677b6745937378fc026024871e37036d17d2d144` 的完整 SDK/P1B 回归：上述 PostgreSQL 配置，另设置 `XW_TEST_PROMETHEUS_MCP_BIN=/private/tmp/xw-prometheus-mcp-v018/prometheus-mcp-server`、`XW_TEST_GRAFANA_MCP_BIN=/private/tmp/xw-g3-official/mcp-grafana`、`XW_TEST_ALERTMANAGER_COMMUNITY_PYTHON=/private/tmp/xw-a4-community/.venv/bin/python`、`XW_TEST_ALERTMANAGER_COMMUNITY_ROOT=/private/tmp/xw-a4-community` 后，`.venv/bin/python -m pytest tests/sdk_core tests/p1b -q -W error --tb=short` 为 **2740 passed, 59 deselected**（682.55s，无警告、无跳过）。文档/发行命令 `.venv/bin/python -m pytest tests/security/test_docs_command_consistency.py tests/contract/test_doc_fact_binding.py tests/deployment/test_release.py -q -W error --tb=short` 为 **73 passed**（24.17s），包含本机可丢弃运行镜像的构建/装载/CLI 冒烟，不代表最终发行或部署。独立审查另实跑 **32 + 45 = 77 passed**，覆盖官方 API 正式链、权限/历史/群重发、失败续查与投影。非阻断文案已改为“接收后不保存、不暴露原配置/peer”，白名单逻辑没有改变。
 
-本工作树独立 `.venv`、SDK 0.22.3/mcp 2.2.0；Ruff、mypy（25 源文件）、锁文件已通过。A4 不改变应用表 v6，不需要数据迁移；旧配置/旧证据兼容沿完整回归核对。以上只证明离线调用链与护栏，不证明真实 Agent 的自主选择/澄清/修正/答案/用量，公司版本/认证/过滤容量/HA及真实平台通知，也不证明已部署；这些门槛保留在原计划。
+非阻断文案修订后，正式 Web 成功/拒绝、A4 配置/生命周期与受影响文档定向 **30 passed**（4.82s），Ruff check/format、mypy25源文件及差异检查再通过；只修工具说明和证据状态，没有重跑无变化的完整套件。本工作树独立 `.venv`、SDK 0.22.3/mcp 2.2.0，锁文件已通过。A4 不改变应用表 v6，不需要数据迁移；旧配置/旧证据兼容沿完整回归核对。以上只证明离线调用链与护栏，不证明真实 Agent 的自主选择/澄清/修正/答案/用量，公司版本/认证/过滤容量/HA及真实平台通知，也不证明已部署；这些门槛保留在原计划。
 
 **G3 已合入证据：** PR #72 合并于 `8a7072d8`。产品审查 `4ebd5e217cf4bda3966d67a7932e4a99241f3f97` 与随后文档提交 `d1c41d34eaf98926130cb55e23d24d01d3db2d8a` 仅证明离线实现和审查；主线有效回归、官方二进制与 Chrome 的具体命令/结果见 PR #72。真实模型与公司 Grafana 仍未验收。
 
