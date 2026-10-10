@@ -19,6 +19,7 @@ import asyncio
 import json
 import logging
 import os
+import re
 import time
 from collections.abc import AsyncIterator, Callable, Iterable
 from contextlib import AsyncExitStack
@@ -36,8 +37,14 @@ from mcp.types import Tool as MCPTool
 from pydantic import BaseModel, SecretStr
 
 from xiaowei.config import MCPServerConfig, resolve_secret_ref
-from xiaowei.governance import GovernedTools, contract_dump, schema_shape
-from xiaowei.models import RunContext, ToolContract, ToolObservation, ToolRequest
+from xiaowei.governance import GovernedTools, MonitoringReadError, contract_dump, schema_shape
+from xiaowei.models import (
+    MonitoringFailureReason,
+    RunContext,
+    ToolContract,
+    ToolObservation,
+    ToolRequest,
+)
 from xiaowei.tools import governed_function_tool
 
 logger = logging.getLogger(__name__)
@@ -46,6 +53,11 @@ _READ_TIMEOUT_FACTOR = 2
 _RECONNECT_MAX_SECONDS = 3.0
 _RECONNECT_COOLDOWN_SECONDS = 2.0
 _RECONNECT_MAX_COOLDOWN_SECONDS = 60.0
+_PROMETHEUS_QUERY_ERROR = re.compile(
+    r"failed making query api call: failed to execute instant query: "
+    r"(?:(client_error: client error: (?:401|403))|"
+    r"(server_error: server error: 5[0-9][0-9]))"
+)
 
 # MCP 库的源码目录：源自这里的日志记录可能含协议原文，生成时即换成固定信息。
 _WIRE_SOURCE = os.path.join(os.path.dirname(mcp.__file__), "")
@@ -331,7 +343,15 @@ class MCPIntegration:
                     and source.snapshot.server is server
                 ):
                     source.status = "disconnected"
+                if binding.contract.policy_id == "prometheus.query":
+                    reason = _read_transport_failure(exc)
+                    if reason is not None:
+                        raise MonitoringReadError(reason) from None
                 raise
+            if binding.contract.policy_id == "prometheus.query" and result.is_error:
+                reason = _prometheus_query_failure(result)
+                if reason is not None:
+                    raise MonitoringReadError(reason)
             payload = _payload(result, binding.result)
             if binding.contract.policy_id == "prometheus.query":
                 # 只记录治理层规范化后实际发出的表达式；远端返回中的同名字段不能冒充它。
@@ -354,6 +374,42 @@ def _connection_lost(exc: BaseException) -> bool:
     if isinstance(exc, BaseExceptionGroup):
         return any(_connection_lost(item) for item in exc.exceptions)
     return exc.__cause__ is not None and _connection_lost(exc.__cause__)
+
+
+def _read_transport_failure(exc: BaseException) -> MonitoringFailureReason | None:
+    """只识别锁版连接码与网络异常；端点/协议/投影异常保持整轮失败。"""
+    if isinstance(exc, MCPError):
+        if exc.code == -32001:
+            return "timeout"
+        if exc.code in {-32000, -32600}:
+            return "unavailable"
+        return None
+    if isinstance(exc, httpx2.TimeoutException):
+        return "timeout"
+    if isinstance(exc, httpx2.NetworkError):
+        return "unavailable"
+    if isinstance(exc, BaseExceptionGroup):
+        reasons = {_read_transport_failure(item) for item in exc.exceptions}
+        return reasons.pop() if len(reasons) == 1 else None
+    return _read_transport_failure(exc.__cause__) if exc.__cause__ is not None else None
+
+
+def _prometheus_query_failure(result: CallToolResult) -> MonitoringFailureReason | None:
+    """仅识别官方 v0.18.0 的单段错误类别；远端原文和其他 is_error 不交模型。"""
+    if (
+        not result.is_error
+        or result.result_type != "complete"
+        or result.structured_content is not None
+        or len(result.content) != 1
+    ):
+        return None
+    item = result.content[0]
+    if not isinstance(item, TextContent):
+        return None
+    matched = _PROMETHEUS_QUERY_ERROR.fullmatch(item.text)
+    if matched is None:
+        return None
+    return "auth" if matched.group(1) is not None else "upstream_5xx"
 
 
 def _bindings(

@@ -38,6 +38,8 @@ from pydantic import BaseModel
 from xiaowei.models import (
     AUDIENCES,
     Identity,
+    MonitoringFailure,
+    MonitoringFailureReason,
     RunContext,
     ToolContract,
     ToolObservation,
@@ -90,6 +92,14 @@ class ToolExecutionError(Exception):
     def __init__(self, code: StarRocksErrorCode | Literal["mcp_error", "other"] = "other") -> None:
         super().__init__("工具执行失败")
         self.code = code
+
+
+class MonitoringReadError(Exception):
+    """已执行的 Prometheus 读取明确失败；本源本轮不可再读，不产生成功 Evidence。"""
+
+    def __init__(self, reason: MonitoringFailureReason) -> None:
+        super().__init__("监控源本轮未核实")
+        self.reason = reason
 
 
 @dataclass(frozen=True)
@@ -224,13 +234,14 @@ class TurnRuns:
 
     ``started`` 是通过前置检查、占用预算后开始执行的调用的工具 ID（每次调用一项）；``produced``
     是其中结果已生成证据并交给模型的 ``(工具 ID, 证据标识)``；``truncated`` 计模型可见
-    结果的截断次数，``rejected`` 计 SDK 包装层确认的 I/O 前拒绝次数。开始执行后失败的调用
-    中止整轮，因此能走到最终回答的轮次中 ``started`` 与 ``produced`` 一一对应。
+    结果的截断次数，``rejected`` 计 SDK 包装层确认的 I/O 前拒绝次数。多数执行后失败
+    中止整轮；明确分类的 Prometheus 读取失败记录在 ``monitoring_failures``，不生成 Evidence。
     ``limit_rescue_started`` 标记 SDK 步数用完后已进入无工具收尾，供失败日志保留上下文。
     """
 
     started: tuple[str, ...] = ()
     produced: tuple[tuple[str, str], ...] = ()
+    monitoring_failures: tuple[MonitoringFailure, ...] = ()
     truncated: int = 0
     rejected: int = 0
     limit_rescue_started: bool = False
@@ -287,6 +298,11 @@ class GovernedTools:
         effective = request.model_copy(update={"arguments": arguments})
         if not await self._currently_authorized(ctx.identity, contract):
             raise ToolRejectedError("当前无权调用该工具")
+        if any(
+            failure.target_id == contract.target_id
+            for failure in self._runs.get(_turn_key(ctx.identity), TurnRuns()).monitoring_failures
+        ):
+            raise ToolRejectedError("该监控源本轮读取已失败；可调查其他已授权源，不要重试本源")
         # 授权回调之后、执行之前不再 await：前置检查与计数在同一步完成，并行调用不能同时越过
         # 上限；前置检查拒绝时尚未占用预算。
         run = _bind(execute, effective)
@@ -300,6 +316,17 @@ class GovernedTools:
         with trace_sql_io() as trace:
             try:
                 observation = await run()
+            except MonitoringReadError as exc:
+                if contract.policy_id != "prometheus.query":
+                    raise ToolExecutionError() from None
+                current = self._runs.get(key, TurnRuns())
+                failure = MonitoringFailure(
+                    tool_id=contract.tool_id, target_id=contract.target_id, reason=exc.reason
+                )
+                self._runs[key] = replace(
+                    current, monitoring_failures=(*current.monitoring_failures, failure)
+                )
+                raise
             except Exception as exc:
                 if (
                     isinstance(exc, StarRocksError)

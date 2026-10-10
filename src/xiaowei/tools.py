@@ -5,9 +5,9 @@
 不能提供执行路径。
 
 只有确定发生在 I/O 之前的治理拒绝（``ToolRejectedError``）按 SDK 公开的
-``default_tool_error_function`` 以固定信息交给模型，模型可以修正后再调用。执行已开始后的
-失败（执行错误、结果不合约、证据无法保存或执行期间撤权）结果未知，不能让模型在同一轮
-重试：异常照常抛出，SDK 据此中止整轮（包装为 ``UserError``，原异常为 ``__cause__``）。
+``default_tool_error_function`` 以固定信息交给模型。已分类的 Prometheus 只读源失败由治理层
+记录后交回固定类别，本源本轮不再调用；其他执行后失败（结果不合约、证据无法保存、执行期间
+撤权或写动作结果不明）继续抛出并中止整轮，不自动重试。
 
 多目标工具（``routed_function_tool``）对模型只有一个函数，参数 ``cluster`` 必填：按它选取该目标
 的契约与执行函数；缺少、不是字符串或没有登记该目标时以固定信息拒绝，不回退到其他目标。
@@ -22,7 +22,13 @@ from typing import Any
 from agents import FunctionTool, UserError, default_tool_error_function
 from agents.tool_context import ToolContext
 
-from xiaowei.governance import TARGET_ARGUMENT, Execute, GovernedTools, ToolRejectedError
+from xiaowei.governance import (
+    TARGET_ARGUMENT,
+    Execute,
+    GovernedTools,
+    MonitoringReadError,
+    ToolRejectedError,
+)
 from xiaowei.models import ToolContract, ToolRequest, ToolResult
 
 _UNKNOWN_CLUSTER = "集群不存在或该集群不提供此工具，未执行；请使用工具说明中列出的集群 ID"
@@ -89,6 +95,16 @@ def _function_tool(
         except ToolRejectedError as exc:
             governance.note_rejected(tool_ctx.context.identity)
             return default_tool_error_function(tool_ctx, exc)
+        except MonitoringReadError as exc:
+            return json.dumps(
+                {
+                    "status": "unverified",
+                    "source": contract.target_id,
+                    "reason": exc.reason,
+                    "retry_this_turn": False,
+                },
+                ensure_ascii=False,
+            )
         return result.model_content
 
     try:

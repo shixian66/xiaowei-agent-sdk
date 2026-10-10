@@ -46,7 +46,7 @@ from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine
 
 from xiaowei.app import Mode
-from xiaowei.models import AgentAnswer, Channel, Owner, TurnAnswer
+from xiaowei.models import AgentAnswer, Channel, MonitoringFailure, Owner, TurnAnswer
 from xiaowei.session import close_interrupted_sessions, close_sessions
 from xiaowei.storage import Backend, InstanceLock, Readiness
 
@@ -323,6 +323,7 @@ class RequestRecord:
     answer: AgentAnswer | None
     context_evidence: tuple[str, ...] | None
     """回答保存时记录的本轮模型可见证据（``TurnAnswer``）；此前格式保存的回答没有，为 ``None``。"""
+    monitoring_failures: tuple[MonitoringFailure, ...]
     failure_code: FailureCode | None
     created_at: datetime
     expires_at: datetime
@@ -689,6 +690,7 @@ class ChannelStore:
             state="completed",
             answer=turn.answer,
             context_evidence=turn.context_evidence,
+            monitoring_failures=turn.monitoring_failures,
         )
 
     async def fail(self, record: RequestRecord, code: CallerFailureCode) -> RequestRecord:
@@ -844,11 +846,12 @@ class ChannelStore:
 
     def _record(self, row: Mapping[str, Any]) -> RequestRecord:
         answer, context = None, None
+        monitoring_failures: tuple[MonitoringFailure, ...] = ()
         if row["answer"] is not None:
             raw = row["answer"]
             if len(raw.encode()) > self._max_answer_bytes:
                 raise RequestUnavailableError
-            answer, context = _saved_answer(raw)
+            answer, context, monitoring_failures = _saved_answer(raw)
         if row["failure_code"] is not None and row["failure_code"] not in _FAILURE_CODES:
             raise RequestUnavailableError
         return RequestRecord(
@@ -864,6 +867,7 @@ class ChannelStore:
             delivery=row["delivery"],
             answer=answer,
             context_evidence=context,
+            monitoring_failures=monitoring_failures,
             failure_code=row["failure_code"],
             created_at=row["created_at"],
             expires_at=row["expires_at"],
@@ -939,17 +943,19 @@ class ChannelStore:
         return hmac.new(self._key, body.encode(), hashlib.sha256).hexdigest()
 
 
-def _saved_answer(raw: str) -> tuple[AgentAnswer, tuple[str, ...] | None]:
+def _saved_answer(
+    raw: str,
+) -> tuple[AgentAnswer, tuple[str, ...] | None, tuple[MonitoringFailure, ...]]:
     """读取保存的回答：``TurnAnswer`` JSON，或此前只保存 ``AgentAnswer`` 的格式（没有上下文证据
     记录，交付方据此拒绝）。两者都不是时按不可用处理。"""
     try:
         turn = TurnAnswer.model_validate_json(raw)
     except ValidationError:
         try:
-            return AgentAnswer.model_validate_json(raw), None
+            return AgentAnswer.model_validate_json(raw), None, ()
         except ValidationError:
             raise RequestUnavailableError from None
-    return turn.answer, turn.context_evidence
+    return turn.answer, turn.context_evidence, turn.monitoring_failures
 
 
 def _keys(record: RequestRecord) -> dict[str, object]:

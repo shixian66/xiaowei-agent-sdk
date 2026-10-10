@@ -125,6 +125,14 @@ _FACTS_HEADER = "工具结果（系统根据证据生成）"
 _ANALYSIS_HEADER = "分析建议（模型推断，未经系统核实）"
 _CLARIFICATION_HEADER = "需要澄清（本轮未执行业务查询）"
 _ADVICE_HEADER = "建议（本轮未执行业务查询；模型生成，未经系统核实）"
+_UNVERIFIED_ADVICE_HEADER = "排查建议（监控读取失败；模型生成，未经数据验证）"
+_UNVERIFIED_CLARIFICATION_HEADER = "需要澄清（监控读取失败，结果未核实）"
+_MONITORING_REASONS = {
+    "auth": "上游认证或授权失败",
+    "timeout": "读取超时，结果未知",
+    "unavailable": "源连接不可用，结果未知",
+    "upstream_5xx": "上游服务错误",
+}
 
 _INSERT = text(
     """
@@ -342,6 +350,7 @@ class EvidenceStore:
         answer = turn.answer
         context = tuple(dict.fromkeys(turn.context_evidence))
         channel = ctx.identity.channel
+        monitoring_notice = await self._monitoring_failure_notice(turn, ctx)
         unverified = [
             (header, text)
             for header, text in (
@@ -351,22 +360,30 @@ class EvidenceStore:
             if text is not None
         ]
         if unverified:
-            # 澄清与未执行建议不引用证据：不能与证据、分析或彼此混用。“本轮未执行业务查询”由
-            # ``Application`` 在提交前核实（本轮取得业务查询证据时必须引用它）。模型可能复述了
-            # 可见的证据，因此照样复核它们。
+            # 澄清与建议不引用证据：不能与证据、分析或彼此混用。没有监控失败时，
+            # “本轮未执行业务查询”由 Application 在提交前核实；有监控失败时改用未核实标题。
+            # 模型可能复述可见证据，因此照样复核它们。
             if answer.evidence_ids or answer.inferences or len(unverified) > 1:
                 raise AnswerRejectedError(
                     AnswerRejectCode.MIXED_KINDS, "澄清或建议不能与查询结果、分析或彼此混用"
                 )
             await self._context_readable(ctx, channel, context, history=history)
             ((header, text),) = unverified
-            content = f"{header}\n{_one_line(text)}"
+            if monitoring_notice is not None:
+                header = (
+                    _UNVERIFIED_ADVICE_HEADER
+                    if answer.advice is not None
+                    else _UNVERIFIED_CLARIFICATION_HEADER
+                )
+            rendered = f"{monitoring_notice}\n{text}" if monitoring_notice else text
+            content = f"{header}\n{_one_line(rendered)}"
             return Delivery(
                 content=content,
                 evidence_ids=(),
                 channel=channel,
-                web_text=text if channel == "web" else None,
-                feishu_text=text if channel == "feishu" else None,
+                monitoring_notice=monitoring_notice,
+                web_text=rendered if channel == "web" else None,
+                feishu_text=rendered if channel == "feishu" else None,
             )
 
         cited = answer.evidence_ids
@@ -396,14 +413,54 @@ class EvidenceStore:
                     for i in answer.inferences
                 ),
             )
-        lines = (_FACTS_HEADER, *(line for item in shown for line in _fact_lines(item)), *analysis)
+        lines = (
+            _FACTS_HEADER,
+            *(line for item in shown for line in _fact_lines(item)),
+            *analysis,
+            *((monitoring_notice,) if monitoring_notice else ()),
+        )
         return Delivery(
             content="\n".join(lines),
             evidence_ids=cited,
             channel=channel,
             facts=tuple(_fact(item, channel) for item in shown),
             analysis=tuple(answer.inferences),
+            monitoring_notice=monitoring_notice,
         )
+
+    async def _monitoring_failure_notice(self, turn: TurnAnswer, ctx: RunContext) -> str | None:
+        """失败源也按当前目标/工具许可复核；任何撤权使整条历史回答不可交付。"""
+        if not turn.monitoring_failures:
+            return None
+        descriptions: dict[str, set[str]] = {}
+        for failure in turn.monitoring_failures:
+            contract = self._catalog.contract(failure.tool_id, failure.target_id)
+            if (
+                contract is None
+                or contract.policy_id != "prometheus.query"
+                or failure.target_id not in ctx.target_scope
+            ):
+                raise AnswerRejectedError(
+                    AnswerRejectCode.EVIDENCE_UNAVAILABLE, "监控失败源当前不可读"
+                )
+            try:
+                authorized = await self._authorize(ctx.identity, failure.target_id, failure.tool_id)
+            except Exception:
+                raise AnswerRejectedError(
+                    AnswerRejectCode.EVIDENCE_UNAVAILABLE, "监控失败源当前不可读"
+                ) from None
+            if authorized is not True:
+                raise AnswerRejectedError(
+                    AnswerRejectCode.EVIDENCE_UNAVAILABLE, "监控失败源当前不可读"
+                )
+            descriptions.setdefault(failure.target_id, set()).add(
+                _MONITORING_REASONS[failure.reason]
+            )
+        sources = "；".join(
+            f"{source}（{'、'.join(sorted(reasons))}）"
+            for source, reasons in sorted(descriptions.items())
+        )
+        return f"未核实监控源（系统记录）：{sources}。这些源不能据此判定健康。"
 
     async def _context_readable(
         self, ctx: RunContext, channel: Channel, evidence_ids: Sequence[str], *, history: bool

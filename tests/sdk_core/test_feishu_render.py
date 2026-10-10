@@ -389,6 +389,28 @@ def test_advice_keeps_unverified_label() -> None:
     assert "未执行查询" in message["text"] and "未经系统核实" in message["text"]
 
 
+def test_monitoring_failure_notice_is_visible_in_fact_card_and_advice() -> None:
+    notice = "未核实监控源（系统记录）：prometheus-prod（上游认证或授权失败）。"
+    with_fact = delivery(
+        fact(
+            tool_id="prometheus-other/query", target_id="prometheus-other", metadata={"query": "up"}
+        )
+    ).model_copy(update={"monitoring_notice": notice})
+    card = build_feishu_message(with_fact, 3500, "oc_test")
+    assert notice in "\n".join(text_parts(card, folded=False))
+
+    no_fact = Delivery(
+        content="排查建议（监控读取失败；模型生成，未经数据验证）\n" + notice,
+        feishu_text=notice + "\n未经数据验证：检查采集端。",
+        monitoring_notice=notice,
+        channel="feishu",
+        evidence_ids=(),
+    )
+    text_message = build_feishu_message(no_fact, 3500, "oc_test")
+    assert notice in text_message["text"]
+    assert "未经数据验证" in text_message["text"]
+
+
 def test_short_fact_fits_when_zero_row_placeholders_would_not() -> None:
     source = fact(
         evidence_id="ev_123456789012345678901234",

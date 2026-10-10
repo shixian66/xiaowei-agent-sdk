@@ -122,6 +122,8 @@ def _card(
     omissions: bool = True,
 ) -> Message:
     elements: list[Message] = []
+    if delivery.monitoring_notice:
+        elements.append(_div(delivery.monitoring_notice))
     tables = 0
     for index, fact in enumerate(delivery.facts):
         columns, all_rows = _data(fact)
@@ -251,9 +253,13 @@ def build_feishu_message(
         else:
             raw = delivery.feishu_text
             title = (
-                "需要澄清"
-                if delivery.content.startswith("需要澄清")
-                else "建议（未执行查询，模型生成，未经系统核实）"
+                delivery.content.partition("\n")[0]
+                if delivery.monitoring_notice
+                else (
+                    "需要澄清"
+                    if delivery.content.startswith("需要澄清")
+                    else "建议（未执行查询，模型生成，未经系统核实）"
+                )
             )
             prefix = title + "\n"
         full = {"text": mention_safe(display_text(prefix + raw))}
