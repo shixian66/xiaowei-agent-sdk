@@ -117,11 +117,11 @@ async def test_protocol_failure_aborts_formal_turn_without_model_continuation(
                 lambda call: answer([], analysis="", advice="未经数据验证，无法核实当前指标"),
             )
             body = (await served.turn(message, "query")).json()
+            assert source.recorder.tool_calls == [("query", {"query": "up"})]
+            assert all(target == "/mcp" for _, target, _ in source.recorder.requests)
+            assert await env.scalar("SELECT count(*) FROM xiaowei_evidence") == 0
             assert body["state"] == "failed"
             assert "本轮未交付；不会自动重试" in body["delivery"]["content"]
             assert await env.scalar("SELECT failure_code FROM xiaowei_request") == "evidence_failed"
             assert len(env.scripts.calls[message]) == 1
-        assert source.recorder.tool_calls == [("query", {"query": "up"})]
-        assert all(target == "/mcp" for _, target, _ in source.recorder.requests)
-        assert await env.scalar("SELECT count(*) FROM xiaowei_evidence") == 0
         assert await env.scalar("SELECT count(*) FROM agent_messages") == 0

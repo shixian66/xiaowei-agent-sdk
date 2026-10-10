@@ -130,7 +130,9 @@ def test_only_locked_prometheus_query_errors_are_source_local(
 
 def test_only_typed_transport_failures_are_source_local() -> None:
     assert _read_transport_failure(MCPError(-32000, "secret")) == "unavailable"
-    assert _read_transport_failure(MCPError(-32600, "secret")) == "unavailable"
+    assert _read_transport_failure(MCPError(-32600, "Session terminated")) == "unavailable"
+    assert _read_transport_failure(MCPError(-32600, "secret")) is None
+    assert _read_transport_failure(MCPError(-32600, "Session terminated", data={})) is None
     assert _read_transport_failure(MCPError(-32001, "secret")) == "timeout"
     assert _read_transport_failure(MCPError(-32603, "secret")) is None
     assert _read_transport_failure(MCPTransportError("secret")) is None
