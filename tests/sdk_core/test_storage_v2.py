@@ -14,9 +14,19 @@ from sqlalchemy import inspect, text
 from sqlalchemy.engine import URL
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine
-from tests.sdk_core.synthetic_tools import secret
+from tests.sdk_core.synthetic_tools import (
+    TOTAL_TOOL,
+    Clock,
+    Grants,
+    RecordingAdapter,
+    context,
+    request,
+    secret,
+    store,
+)
 
 from xiaowei import storage as storage_module
+from xiaowei.governance import GovernedTools
 from xiaowei.storage import (
     APP_SCHEMA_VERSION,
     APP_TABLES,
@@ -58,6 +68,7 @@ async def _install_v1(engine: AsyncEngine, *, through: str = "001_initial.sql") 
         "003_delivery_attempt.sql",
         "004_evidence_dependencies.sql",
         "005_group_ownership.sql",
+        "006_digest_key_binding.sql",
     ]
     async with engine.begin() as conn:
         for name in names[: names.index(through) + 1]:
@@ -84,9 +95,11 @@ def test_v2_migration_only_touches_application_tables() -> None:
         "003_delivery_attempt.sql",
         "004_evidence_dependencies.sql",
         "005_group_ownership.sql",
+        "006_digest_key_binding.sql",
+        "007_monitoring_actions.sql",
     ):
         assert "agent_" not in _migration(name)
-    assert APP_SCHEMA_VERSION == 6
+    assert APP_SCHEMA_VERSION == 7
     assert _V2_TABLES <= APP_TABLES
     assert all(name.startswith("xiaowei_") for name in APP_TABLES)
 
@@ -132,6 +145,69 @@ async def test_existing_v5_needs_an_explicit_first_digest_key_binding(postgres_u
         with pytest.raises(StorageError, match="摘要密钥与数据库不匹配"):
             await upgrade_storage(engine, digest_key=SecretStr("different-digest-key"))
         assert await _version(engine) == APP_SCHEMA_VERSION
+
+
+async def test_v6_to_v7_preserves_existing_binding_rows_and_sdk_history(postgres_url: URL) -> None:
+    async with open_engine(secret(postgres_url)) as engine:
+        await _install_v1(engine, through="006_digest_key_binding.sql")
+        async with engine.begin() as conn:
+            await storage_module._write_digest_key_binding(conn, _DIGEST_KEY)
+            await conn.execute(
+                text(
+                    "INSERT INTO xiaowei_request (channel, request_key, owner_kind, owner_id, "
+                    "subject_id, conversation_key, session_id, turn_id, mode, "
+                    "message_digest, state, failure_code,"
+                    " delivery, created_at, updated_at, expires_at) VALUES ('web', 'old-key',"
+                    " 'personal', 'alice', 'alice', 'c', 's', 't', 'query', 'd', 'failed', 'busy',"
+                    " 'sent', now(), now(), now() + interval '1 hour')"
+                )
+            )
+        session = SQLAlchemySession("existing", engine=engine)
+        await session.add_items([{"role": "user", "content": "retained history"}])
+        grants = Grants()
+        grants.grant("alice", TOTAL_TOOL)
+        evidence = store(engine, grants, Clock())
+        ctx = context()
+        result = await GovernedTools(evidence).invoke(ctx, request(), RecordingAdapter().execute)
+        original_projection = await evidence.project(result.evidence_id, ctx, "web")
+        async with engine.connect() as conn:
+            before = [
+                tuple(row) for row in await conn.execute(text("SELECT * FROM xiaowei_request"))
+            ]
+            binding = [
+                tuple(row) for row in await conn.execute(text("SELECT * FROM xiaowei_installation"))
+            ]
+        with pytest.raises(StorageVersionMismatchError):
+            await check_storage(engine)
+        assert await _version(engine) == 6
+        assert await upgrade_storage(engine, digest_key=_DIGEST_KEY) == 7
+        assert "xiaowei_action" in await _tables(engine)
+        async with engine.connect() as conn:
+            assert [
+                tuple(row) for row in await conn.execute(text("SELECT * FROM xiaowei_request"))
+            ] == before
+            assert [
+                tuple(row) for row in await conn.execute(text("SELECT * FROM xiaowei_installation"))
+            ] == binding
+        assert await session.get_items() == [{"role": "user", "content": "retained history"}]
+        assert await evidence.project(result.evidence_id, ctx, "web") == original_projection
+        await check_storage(engine)
+
+
+@pytest.mark.parametrize("confirm", [False, True])
+@pytest.mark.parametrize("damage", ["different", "missing"])
+async def test_v6_upgrade_cannot_rebind_or_repair_digest_key(
+    postgres_url: URL, confirm: bool, damage: str
+) -> None:
+    async with open_engine(secret(postgres_url)) as engine:
+        await _install_v1(engine, through="006_digest_key_binding.sql")
+        if damage == "different":
+            async with engine.begin() as conn:
+                await storage_module._write_digest_key_binding(conn, SecretStr("original-key"))
+        with pytest.raises(StorageDigestKeyMismatchError):
+            await upgrade_storage(engine, digest_key=_DIGEST_KEY, bind_existing_digest_key=confirm)
+        assert await _version(engine) == 6
+        assert "xiaowei_action" not in await _tables(engine)
 
 
 @pytest.mark.parametrize("damage", ["missing", "different"])
@@ -203,7 +279,7 @@ async def test_initialization_advances_the_schema_version(postgres_url: URL) -> 
     """全新初始化推进到当前版本。旧程序只接受各自版本由基线源码保证，这里不复制旧实现。"""
     async with open_engine(secret(postgres_url)) as engine:
         await initialize_storage(engine, digest_key=_DIGEST_KEY)
-        assert await _version(engine) == APP_SCHEMA_VERSION == 6
+        assert await _version(engine) == APP_SCHEMA_VERSION == 7
 
 
 async def test_failed_upgrade_rolls_back_completely(postgres_url: URL) -> None:

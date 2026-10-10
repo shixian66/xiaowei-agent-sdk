@@ -30,7 +30,7 @@ SDK_SESSIONS_TABLE = "agent_sessions"
 SDK_MESSAGES_TABLE = "agent_messages"
 _SDK_TABLES = frozenset({SDK_SESSIONS_TABLE, SDK_MESSAGES_TABLE})
 
-APP_SCHEMA_VERSION = 6
+APP_SCHEMA_VERSION = 7
 APP_TABLES = frozenset(
     {
         "xiaowei_schema_version",
@@ -39,6 +39,7 @@ APP_TABLES = frozenset(
         "xiaowei_session",
         "xiaowei_channel_session",
         "xiaowei_request",
+        "xiaowei_action",
     }
 )
 # 版本 n 由第 n 个迁移建立；升级只按顺序执行当前版本之后的迁移。
@@ -49,6 +50,7 @@ _MIGRATIONS = (
     "migrations/004_evidence_dependencies.sql",
     "migrations/005_group_ownership.sql",
     "migrations/006_digest_key_binding.sql",
+    "migrations/007_monitoring_actions.sql",
 )
 # 实例锁：会话级（serve）与事务级（初始化、升级）共用同一个键，二者互斥。锁按数据库区分。
 _INSTANCE_LOCK_KEY = 0x7869_6177_6569_0001
@@ -419,10 +421,15 @@ async def upgrade_storage(
             if not isinstance(version, int) or not 1 <= version <= APP_SCHEMA_VERSION:
                 raise StorageVersionMismatchError("应用表版本未知，不能升级")
             if version < APP_SCHEMA_VERSION:
-                if not bind_existing_digest_key:
-                    raise StorageDigestKeyBindingRequiredError
+                needs_binding = version < 6
+                if needs_binding:
+                    if not bind_existing_digest_key:
+                        raise StorageDigestKeyBindingRequiredError
+                else:
+                    await _check_digest_key_binding(conn, digest_key)
                 await _apply_migrations(conn, after=version)
-                await _write_digest_key_binding(conn, digest_key)
+                if needs_binding:
+                    await _write_digest_key_binding(conn, digest_key)
             else:
                 await _check_digest_key_binding(conn, digest_key)
     except (OSError, SQLAlchemyError):

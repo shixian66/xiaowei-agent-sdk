@@ -111,10 +111,11 @@ IDENTITY_NOTICE = "你还没有获得授权。你的编号是 {open_id}，请把
 IDENTITY_NOTICE_WINDOW = timedelta(minutes=10)
 
 _EVENT_TYPE = "im.message.receive_v1"
-_COMMANDS: Mapping[str, Mode | Literal["new"]] = {
+_COMMANDS: Mapping[str, Mode | Literal["new", "approve"]] = {
     "/查询": "query",
     "/诊断": "diagnose",
     "/新建": "new",
+    "/批准": "approve",
 }
 _CLOCK_SKEW = timedelta(seconds=60)
 _MAX_ID_CHARS = 200  # 与 InboundRequest 的 Label 上限一致
@@ -319,7 +320,7 @@ def attributed(open_id: str, text: str) -> str:
     return f"{_AUTHOR}{alias}】\n{text.replace(_AUTHOR, _FORGED_AUTHOR)}"
 
 
-def _command(text: str) -> tuple[Mode | Literal["new"], str]:
+def _command(text: str) -> tuple[Mode | Literal["new", "approve"], str]:
     """消息首部的命令与剥离后的正文；普通文本是默认用途（由单 Agent 判断是否查询）。"""
     for name, kind in _COMMANDS.items():
         if text == name or (text.startswith(name) and text[len(name)].isspace()):
@@ -344,7 +345,10 @@ async def send_delivery(
     if message == {"text": CAPACITY_NOTICE}:
         logger.warning("飞书仅发送容量说明：reason=reply_capacity_notice")
     try:
-        return await send(chat_id, message, reply_to=reply_to)
+        outcome = await send(chat_id, message, reply_to=reply_to)
+        if delivery.requires_complete and message == {"text": CAPACITY_NOTICE}:
+            return "failed" if outcome == "sent" else outcome
+        return outcome
     except Exception as exc:
         logger.error("飞书发送异常，按结果不明记录：%s", type(exc).__name__)
         return "unknown"
@@ -378,6 +382,7 @@ class _Job:
     # 不交给消费者，它的繁忙回执也不发送：本地的发送尝试中提示在前（平台收到的先后另受发送期限与
     # 不明结果影响）。
     notice: asyncio.Event | None = None
+    action_id: str | None = None
 
 
 class FeishuGateway:
@@ -443,7 +448,7 @@ class FeishuGateway:
         if isinstance(message, _Unregistered):
             return None
         kind, body = _command(message.text)
-        if kind == "new" or not body:
+        if kind == "new" or kind == "approve" or not body:
             return None
         return self._request(message, kind, body)
 
@@ -477,6 +482,20 @@ class FeishuGateway:
         try:
             if kind == "new":
                 await self._new_session(message)
+            elif kind == "approve":
+                from uuid import UUID
+
+                try:
+                    action_id = str(UUID(body))
+                except ValueError:
+                    action_id = None
+                if message.group is None or action_id is None:
+                    if self._first(message):
+                        await self._notify(
+                            message, "仅在指定群 @小维 /批准 <Action ID>；本次未执行"
+                        )
+                else:
+                    await self._accept(message, "query", f"/批准 {action_id}", action_id=action_id)
             elif not body:
                 if self._first(message):
                     await self._notify(message, EMPTY_COMMAND)
@@ -532,11 +551,18 @@ class FeishuGateway:
             return False
         return True
 
-    async def _accept(self, message: _Message, mode: Mode, body: str) -> None:
+    async def _accept(
+        self,
+        message: _Message,
+        mode: Mode,
+        body: str,
+        *,
+        action_id: str | None = None,
+    ) -> None:
         request = self._request(message, mode, body)
         if message.group is None:
             receipt = await self._service.accept(request)
-            job = self._job(receipt, message)
+            job = replace(self._job(receipt, message), action_id=action_id)
             if receipt.created and self._plain < self._config.queue_size:
                 self._plain += 1
                 self._queue.put_nowait(job)
@@ -547,7 +573,7 @@ class FeishuGateway:
             # 没有 await，不会出现已接受却未入队又未被拒绝的请求。
             async with self._group_lock:
                 receipt = await self._service.accept(request)
-                job = self._job(receipt, message)
+                job = replace(self._job(receipt, message), action_id=action_id)
                 placement, job = self._place(job) if receipt.created else (None, job)
         if placement is None:
             # 重投不再运行。只有已结束且投递仍为 pending 的记录进入首次发送竞争（交付时复核当前权限
@@ -692,7 +718,10 @@ class FeishuGateway:
                     self._plain -= 1
                 try:
                     try:
-                        await self._service.process(job.receipt)
+                        if job.action_id is None:
+                            await self._service.process(job.receipt)
+                        else:
+                            await self._service.approve(job.receipt, job.action_id)
                     except ResultNotSavedError:
                         pass  # 已记为 failed/result_not_saved，下面发送固定回执
                     await self._deliver(job)

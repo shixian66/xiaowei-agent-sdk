@@ -495,7 +495,7 @@ def test_different_image_upgrade_rollback_and_paired_restore(
 
         assert _compose(active, "stop", "xiaowei").returncode == 0
         seeded = _probe(active, "seed")
-        assert seeded["schema_version"] == 6
+        assert seeded["schema_version"] == 7
         assert seeded["counts"]["xiaowei_request"] == 2
         assert _compose(active, "up", "-d", "xiaowei", "--wait").returncode == 0
 
@@ -812,7 +812,7 @@ def test_container_migration_v4_to_v5_to_v6_and_old_program_refusal(
         )
         assert missing_confirmation.returncode == 1
         assert _pg(pg_id, "SELECT version FROM xiaowei_schema_version").stdout.strip() == "5"
-        migrated_v6 = _compose(
+        migrated_current = _compose(
             directory,
             "run",
             "--rm",
@@ -822,7 +822,10 @@ def test_container_migration_v4_to_v5_to_v6_and_old_program_refusal(
             "upgrade",
             "--bind-existing-digest-key",
         )
-        assert migrated_v6.returncode == 0 and migrated_v6.stdout.strip() == "storage version 6"
+        assert (
+            migrated_current.returncode == 0
+            and migrated_current.stdout.strip() == "storage version 7"
+        )
         preserved = _pg(
             pg_id,
             "SELECT version || ':' || "
@@ -831,13 +834,13 @@ def test_container_migration_v4_to_v5_to_v6_and_old_program_refusal(
             "(SELECT count(*) FROM xiaowei_session WHERE owner_kind = 'group') || ':' || "
             "(SELECT count(*) FROM xiaowei_evidence) FROM xiaowei_schema_version",
         )
-        assert preserved.returncode == 0 and preserved.stdout.strip() == "6:1:1:1:2"
+        assert preserved.returncode == 0 and preserved.stdout.strip() == "7:1:1:1:2"
 
         _replace_app_image(directory, runtime_image, v5_image)
         old_upgrade = _historical_cli(directory, "storage", "upgrade")
         old_serve = _historical_cli(directory, "serve")
         assert old_upgrade.returncode == old_serve.returncode == 1
-        assert _pg(pg_id, "SELECT version FROM xiaowei_schema_version").stdout.strip() == "6"
+        assert _pg(pg_id, "SELECT version FROM xiaowei_schema_version").stdout.strip() == "7"
 
         restored = _restore(directory, pre_v6, "xiaowei_v5_rollback")
         assert restored.returncode == 0, restored.stderr.decode(errors="replace")
@@ -868,7 +871,7 @@ def test_container_migration_v4_to_v5_to_v6_and_old_program_refusal(
         )
         assert unknown.returncode == 1
         assert _pg(pg_id, "SELECT version FROM xiaowei_schema_version").stdout.strip() == "999"
-        assert _pg(pg_id, "UPDATE xiaowei_schema_version SET version = 6").returncode == 0
+        assert _pg(pg_id, "UPDATE xiaowei_schema_version SET version = 7").returncode == 0
     finally:
         _compose(directory, "down", "-v", "--remove-orphans", timeout=60)
         docker("volume", "rm", "-f", volume)

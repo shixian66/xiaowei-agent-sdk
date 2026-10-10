@@ -46,7 +46,7 @@ from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine
 
 from xiaowei.app import Mode
-from xiaowei.models import AgentAnswer, Channel, MonitoringFailure, Owner, TurnAnswer
+from xiaowei.models import AgentAnswer, Channel, Identity, MonitoringFailure, Owner, TurnAnswer
 from xiaowei.session import close_interrupted_sessions, close_sessions
 from xiaowei.storage import Backend, InstanceLock, Readiness
 
@@ -340,6 +340,32 @@ class DeliveryClaim:
 
 
 @dataclass(frozen=True)
+class ActionRecord:
+    """有界、已批准字段的动作事实，独立于 SDK Session 的状态。"""
+
+    action_id: str
+    owner_id: str
+    requester_id: str
+    proposal_session_id: str
+    proposal_turn_id: str
+    call_id: str
+    proposal_tool_id: str
+    write_tool_id: str
+    target_id: str
+    binding: str
+    plan: str
+    state: str
+    attempt: str | None
+    approver_id: str | None
+    approval_turn_id: str | None
+    result: str | None
+    created_at: datetime
+    updated_at: datetime
+    approval_expires_at: datetime
+    expires_at: datetime
+
+
+@dataclass(frozen=True)
 class Acceptance:
     record: RequestRecord
     created: bool
@@ -598,7 +624,7 @@ class ChannelStore:
             or row["expires_at"] <= self._clock()
         ):
             raise RequestUnavailableError
-        return self._record(row)
+        return self._record(dict(row))
 
     async def start(
         self, record: RequestRecord, *, message: str, policy_version: str
@@ -797,8 +823,234 @@ class ChannelStore:
                 )
                 unknown = (await conn.execute(_RECOVER_SENDING, {"now": now})).rowcount
                 unsent = (await conn.execute(_RECOVER_UNSENT, {"now": now})).rowcount
+                await conn.execute(
+                    text(
+                        "UPDATE xiaowei_action SET state = 'unknown', updated_at = :now "
+                        "WHERE state = 'executing'"
+                    ),
+                    {"now": now},
+                )
         self._instance = lock
         return RecoveryReport(interrupted=len(rows), unknown=unknown, unsent=unsent)
+
+    # ---- 监控 Action：只复用应用存储和实例锁，不触碰 SDK Session -----------------------
+
+    async def propose_action(self, action: ActionRecord) -> None:
+        self._require_ready()
+        if len(action.plan.encode()) > 128_000:
+            raise RequestUnavailableError
+        params = dict(vars(action))
+        with self._critical("action_save_failed", "动作未保存"):
+            async with self._engine.begin() as conn:
+                await self._admit(conn)
+                request = (
+                    await conn.execute(
+                        text(
+                            "SELECT expires_at FROM xiaowei_request WHERE turn_id = :turn "
+                            "AND owner_kind = 'group' AND owner_id = :owner AND channel = 'feishu' "
+                            "AND state = 'running'"
+                        ),
+                        {"turn": action.proposal_turn_id, "owner": action.owner_id},
+                    )
+                ).scalar_one_or_none()
+                if request is None or action.expires_at > request:
+                    raise RequestUnavailableError
+                await conn.execute(
+                    text("""
+                        INSERT INTO xiaowei_action (
+                            action_id, owner_id, requester_id,
+                            proposal_session_id, proposal_turn_id,
+                            call_id, proposal_tool_id, write_tool_id, target_id, binding, plan,
+                            state, attempt, approver_id, approval_turn_id, result, created_at,
+                            updated_at, approval_expires_at, expires_at
+                        ) VALUES (
+                            :action_id, :owner_id, :requester_id,
+                            :proposal_session_id, :proposal_turn_id,
+                            :call_id, :proposal_tool_id, :write_tool_id,
+                            :target_id, :binding, :plan,
+                            :state, :attempt, :approver_id, :approval_turn_id,
+                            :result, :created_at,
+                            :updated_at, :approval_expires_at, :expires_at
+                        )
+                    """),
+                    params,
+                )
+
+    async def get_action(self, action_id: str, identity: Identity) -> ActionRecord:
+        if identity.channel != "feishu" or identity.owner.kind != "group":
+            raise RequestUnavailableError
+        async with self._engine.connect() as conn:
+            row = (
+                (
+                    await conn.execute(
+                        text(
+                            "SELECT * FROM xiaowei_action WHERE action_id = :id AND "
+                            "owner_id = :owner "
+                            "AND expires_at > :now"
+                        ),
+                        {"id": action_id, "owner": identity.owner.id, "now": self._clock()},
+                    )
+                )
+                .mappings()
+                .one_or_none()
+            )
+        if row is None:
+            raise RequestUnavailableError
+        return ActionRecord(**dict(row))
+
+    async def proposal_request(self, action: ActionRecord) -> RequestRecord:
+        async with self._engine.connect() as conn:
+            row = (
+                (
+                    await conn.execute(
+                        text(
+                            "SELECT * FROM xiaowei_request WHERE turn_id = :turn "
+                            "AND channel = 'feishu' AND owner_kind = 'group' AND owner_id = :owner "
+                            "AND expires_at > :now"
+                        ),
+                        {
+                            "turn": action.proposal_turn_id,
+                            "owner": action.owner_id,
+                            "now": self._clock(),
+                        },
+                    )
+                )
+                .mappings()
+                .one_or_none()
+            )
+        if row is None:
+            raise RequestUnavailableError
+        return self._record(dict(row))
+
+    async def proposal_request_for_turn(self, identity: Identity) -> RequestRecord:
+        if identity.channel != "feishu" or identity.owner.kind != "group":
+            raise RequestUnavailableError
+        async with self._engine.connect() as conn:
+            row = (
+                (
+                    await conn.execute(
+                        text(
+                            "SELECT * FROM xiaowei_request WHERE turn_id = :turn AND "
+                            "session_id = :session "
+                            "AND subject_id = :actor AND owner_id = :owner AND "
+                            "owner_kind = 'group' "
+                            "AND channel = 'feishu' AND state = 'running' AND expires_at > :now"
+                        ),
+                        {
+                            "turn": identity.turn_id,
+                            "session": identity.session_id,
+                            "actor": identity.subject_id,
+                            "owner": identity.owner.id,
+                            "now": self._clock(),
+                        },
+                    )
+                )
+                .mappings()
+                .one_or_none()
+            )
+        if row is None:
+            raise RequestUnavailableError
+        return self._record(dict(row))
+
+    async def claim_action(self, action: ActionRecord, approver: Identity) -> ActionRecord | None:
+        """原子占用仅一次；审批事件也必须已由同群请求状态机开始。"""
+        self._require_ready()
+        if self._instance is None:
+            raise NotReadyError  # 显式重发/维护命令不能执行写动作。
+        attempt = secrets.token_hex(_ATTEMPT_BYTES)
+        with self._critical("action_claim_failed", "动作状态无法保存"):
+            async with self._engine.begin() as conn:
+                await self._admit(conn)
+                row = (
+                    (
+                        await conn.execute(
+                            text(
+                                "UPDATE xiaowei_action a SET state = 'executing', "
+                                "attempt = :attempt, "
+                                "approver_id = :approver, approval_turn_id = :turn, "
+                                "updated_at = :now "
+                                "WHERE action_id = :id AND owner_id = :owner AND state = 'pending' "
+                                "AND binding = :binding AND plan = :plan AND "
+                                "approval_expires_at > :now "
+                                "AND expires_at > :now AND EXISTS (SELECT 1 FROM xiaowei_request r "
+                                "WHERE r.turn_id = a.proposal_turn_id AND r.state = 'completed' "
+                                "AND r.delivery = 'sent' AND r.expires_at > :now) "
+                                "AND EXISTS (SELECT 1 FROM xiaowei_request r WHERE "
+                                "r.turn_id = :turn "
+                                "AND r.owner_kind = 'group' AND r.owner_id = a.owner_id "
+                                "AND r.subject_id = :approver AND r.channel = 'feishu' "
+                                "AND r.state = 'running' AND r.expires_at > :now) RETURNING a.*"
+                            ),
+                            {
+                                "id": action.action_id,
+                                "owner": approver.owner.id,
+                                "approver": approver.subject_id,
+                                "turn": approver.turn_id,
+                                "attempt": attempt,
+                                "now": self._clock(),
+                                "binding": action.binding,
+                                "plan": action.plan,
+                            },
+                        )
+                    )
+                    .mappings()
+                    .one_or_none()
+                )
+        return None if row is None else ActionRecord(**dict(row))
+
+    async def admit_action(self, action: ActionRecord) -> None:
+        """写 I/O 前再核对实例与本次尝试；旧实例或已恢复的尝试不能执行。"""
+        self._require_ready()
+        if self._instance is None:
+            raise NotReadyError
+        async with self._engine.begin() as conn:
+            await self._admit(conn)
+            exists = await conn.scalar(
+                text(
+                    "SELECT 1 FROM xiaowei_action WHERE action_id = :id AND state = 'executing' "
+                    "AND attempt = :attempt AND approver_id = :approver AND "
+                    "approval_turn_id = :turn"
+                ),
+                {
+                    "id": action.action_id,
+                    "attempt": action.attempt,
+                    "approver": action.approver_id,
+                    "turn": action.approval_turn_id,
+                },
+            )
+            if exists != 1:
+                raise RequestUnavailableError
+
+    async def finish_action(
+        self,
+        action: ActionRecord,
+        state: Literal["succeeded", "unknown", "rejected"],
+        result: str | None = None,
+    ) -> None:
+        if result is not None and len(result.encode()) > 128_000:
+            raise RequestUnavailableError
+        with self._critical("action_finish_failed", "动作结果无法保存"):
+            async with self._engine.begin() as conn:
+                await self._admit(conn)
+                changed = (
+                    await conn.execute(
+                        text(
+                            "UPDATE xiaowei_action SET state = :state, result = "
+                            ":result, updated_at = :now "
+                            "WHERE action_id = :id AND state = 'executing' AND attempt = :attempt"
+                        ),
+                        {
+                            "id": action.action_id,
+                            "attempt": action.attempt,
+                            "state": state,
+                            "result": result,
+                            "now": self._clock(),
+                        },
+                    )
+                ).rowcount
+                if changed != 1:
+                    self._readiness.lock("action_attempt_lost")
+                    raise NotReadyError
 
     # ---- 内部 ------------------------------------------------------------------------
 

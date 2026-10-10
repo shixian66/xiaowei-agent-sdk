@@ -237,6 +237,10 @@ class EvidenceStore:
     def authorize(self) -> Authorizer:
         return self._authorize
 
+    def fingerprint(self, contract: ToolContract) -> str:
+        """Action 与 Evidence 复用同一契约指纹，不维护第二套公式。"""
+        return _policy_fingerprint(contract, self._catalog.policy_for(contract))
+
     async def record(
         self, ctx: RunContext, request: ToolRequest, observation: ToolObservation
     ) -> ToolResult:
@@ -425,9 +429,23 @@ class EvidenceStore:
             content="\n".join(lines),
             evidence_ids=cited,
             channel=channel,
-            facts=tuple(_fact(item, channel) for item in shown),
+            facts=tuple(
+                _fact(item, channel).model_copy(
+                    update={
+                        "requires_complete": contract is not None
+                        and self._catalog.policy_for(contract).effect == "propose"
+                    }
+                )
+                for item in shown
+                for contract in [self._catalog.contract(item.record.tool_id, item.record.target_id)]
+            ),
             analysis=tuple(answer.inferences),
             monitoring_notice=monitoring_notice,
+            requires_complete=any(
+                contract is not None and self._catalog.policy_for(contract).effect == "propose"
+                for r in records[: len(cited)]
+                for contract in [self._catalog.contract(r.tool_id, r.target_id)]
+            ),
         )
 
     async def _monitoring_failure_notice(self, turn: TurnAnswer, ctx: RunContext) -> str | None:
@@ -677,6 +695,8 @@ def _policy_fingerprint(contract: ToolContract, policy: ToolPolicy) -> str:
     }
     if policy.data_scope is not None:
         body["data_scope"] = policy.data_scope
+    if policy.effect != "read" or policy.group_only:
+        body["execution"] = {"effect": policy.effect, "group_only": policy.group_only}
     canonical = json.dumps(body, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
     return f"sha256:{hashlib.sha256(canonical.encode()).hexdigest()}"
 
@@ -690,6 +710,20 @@ def _arguments_digest(arguments: Mapping[str, object]) -> str:
     except (TypeError, ValueError):
         raise EvidenceStoreError("工具参数不符合证据契约") from None
     return f"sha256:{hashlib.sha256(canonical.encode()).hexdigest()}"
+
+
+def arguments_digest(arguments: Mapping[str, object]) -> str:
+    """已规范化参数的绑定摘要。"""
+    return _arguments_digest(arguments)
+
+
+def action_result_projection(policy: ToolPolicy, observation: ToolObservation) -> str:
+    """Action 只保存模型/Session/群共同获准的最小结果，复用 Evidence 的投影与容量规则。"""
+    check_projection_capacity(policy, observation)
+    content, _ = _project(
+        "ev_action_result", observation, *_reachable_limits(policy, "feishu"), policy.required
+    )
+    return json.dumps(json.loads(content)["data"], ensure_ascii=False, allow_nan=False)
 
 
 def check_projection_capacity(policy: ToolPolicy, observation: ToolObservation) -> None:

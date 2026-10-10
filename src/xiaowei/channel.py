@@ -44,7 +44,13 @@ from xiaowei.channel_store import (
     SendOutcome,
     SessionBusyError,
 )
-from xiaowei.evidence import AnswerRejectedError, EvidenceStore, EvidenceUnverifiableError
+from xiaowei.evidence import (
+    AnswerRejectedError,
+    EvidenceStore,
+    EvidenceStoreError,
+    EvidenceUnverifiableError,
+)
+from xiaowei.governance import ToolExecutionError, ToolRejectedError
 from xiaowei.models import (
     Budget,
     Channel,
@@ -581,6 +587,54 @@ class ChannelService:
         if not receipt.created:
             return receipt.record
         return await self._store.fail(receipt.record, "busy")
+
+    async def approve(self, receipt: RequestReceipt, action_id: str) -> RequestRecord:
+        """群内确定性批准；复用请求去重/队列/终态，既不调用 Runner 也不写 Session。"""
+        from xiaowei.feishu import attributed
+
+        record = receipt.record
+        if not receipt.created:
+            return record
+        if (
+            self._app.actions is None
+            or receipt.group is None
+            or receipt.message != attributed(record.subject_id, f"/批准 {action_id}")
+        ):
+            return await self._store.fail(record, "access_denied")
+        try:
+            decision = await self._authorize_start(record, receipt.group)
+        except AccessDeniedError:
+            return await self._store.fail(record, "access_denied")
+        if record.session_id in self._running:
+            return await self._store.fail(record, "busy")
+        self._running.add(record.session_id)
+        try:
+            record = await self._store.start(
+                record,
+                message=receipt.message,
+                policy_version=decision.policy_version,
+            )
+            if record.state != "running":
+                return record
+            try:
+                async with asyncio.timeout(self._results.budget.timeout_seconds):
+                    answer = await self._app.actions.approve(
+                        action_id, self._context(record, decision)
+                    )
+                    await self._results.evidence.validate_answer(
+                        answer, self._context(record, decision)
+                    )
+            except (ToolRejectedError, RequestUnavailableError):
+                return await self._store.fail(record, "access_denied")
+            except (ToolExecutionError, AnswerRejectedError, EvidenceStoreError, TimeoutError):
+                return await self._store.fail(record, "evidence_failed")
+            except asyncio.CancelledError:
+                self._store.readiness.lock("action_cancelled")
+                raise
+            return await self._store.complete(record, answer)
+        finally:
+            if self._store.readiness.ok:
+                self._running.discard(record.session_id)
 
     async def new_session(
         self,

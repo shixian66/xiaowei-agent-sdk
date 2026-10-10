@@ -136,6 +136,14 @@ _DELETE_EXPIRED_REQUESTS = text(
 _DELETE_EXPIRED_EVIDENCE = text(
     "DELETE FROM xiaowei_evidence WHERE session_id = :session_id AND expires_at <= :now"
 )
+_DELETE_EXPIRED_ACTIONS = text(
+    """
+    DELETE FROM xiaowei_action WHERE action_id IN (
+        SELECT action_id FROM xiaowei_action WHERE expires_at <= :now AND state <> 'executing'
+        ORDER BY expires_at, action_id LIMIT :limit FOR UPDATE SKIP LOCKED
+    )
+    """
+)
 # 元数据与映射在最后删除：会话仍须已关闭、仍满足清理条件，且不再有任何请求记录。
 _DELETE_SESSION = text(
     """
@@ -763,16 +771,19 @@ async def cleanup_expired(engine: AsyncEngine, *, now: datetime, batch_size: int
     不清历史，只删除已过期的请求与证据，再在不再有任何请求时删除映射。两类合计不超过
     ``batch_size``。每条删除都重新核对条件，竞争导致条件不再成立时跳过；任一步存储失败立即
     停下并抛出，已关闭的会话保持不可回放，可再次运行完成。未过期的请求与证据保留到各自过期
-    后的下一次清理。普通启动不调用本函数。
+    后的下一次清理。Action 按自身保留期限独立清理，每批最多 ``batch_size`` 条；执行中的
+    Action 不删除，须先启动恢复为 unknown。普通启动不调用本函数。
     """
     if batch_size <= 0:
         raise ValueError("清理批次必须为正数")
     params: dict[str, object] = {"now": now, "limit": batch_size}
     try:
+        async with engine.begin() as conn:
+            await conn.execute(_DELETE_EXPIRED_ACTIONS, params)
         async with engine.connect() as conn:
             candidates = [r[0] for r in await conn.execute(_CLEANUP_CANDIDATES, params)]
     except (OSError, SQLAlchemyError):
-        raise SessionStoreError("会话存储不可用，清理未执行") from None
+        raise SessionStoreError("存储不可用，清理未完成") from None
     cleaned = 0
     for session_id in candidates:
         scoped = {"now": now, "session_id": session_id}
