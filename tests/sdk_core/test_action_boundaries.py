@@ -20,7 +20,15 @@ from xiaowei.channel import ChannelService, ResultDelivery
 from xiaowei.feishu import attributed
 from xiaowei.feishu_render import build_feishu_message
 from xiaowei.governance import Prechecked, ToolRejectedError
-from xiaowei.models import Delivery, DeliveryFact, Identity, RunContext, ToolRequest, TurnAnswer
+from xiaowei.models import (
+    Delivery,
+    DeliveryFact,
+    Identity,
+    RunContext,
+    ToolObservation,
+    ToolRequest,
+    TurnAnswer,
+)
 from xiaowei.session import close_sessions
 
 pytestmark = pytest.mark.loopback
@@ -389,6 +397,172 @@ async def test_write_success_with_revoked_feedback_permission_reports_execution(
     assert "动作已执行" in receipt and "不要重复批准" in receipt
     assert "工具执行失败" not in receipt
     assert "after" not in receipt and "must-not-save" not in receipt
+
+
+@pytest.mark.parametrize(
+    "stage,state,writes,code,required",
+    [
+        (
+            "feedback",
+            "succeeded",
+            1,
+            "action_feedback_failed",
+            ("动作已执行", "反馈", "Action ID", "不要重复批准"),
+        ),
+        ("preclaim", "pending", 0, "action_not_approvable", ("本次批准未执行", "Action ID")),
+    ],
+)
+async def test_approval_deadline_receipt_reads_actual_action_state(
+    actions: Actions,
+    monkeypatch: pytest.MonkeyPatch,
+    stage: str,
+    state: str,
+    writes: int,
+    code: str,
+    required: tuple[str, ...],
+) -> None:
+    env = actions.env
+    env.results = ResultDelivery(
+        env.store,
+        env.evidence,
+        env.access,
+        budget=BUDGET.model_copy(update={"timeout_seconds": 1}),
+    )
+    env.service = ChannelService(env.app, env.results)
+    env.scripts.add(
+        attributed(A, "提出"), tool_call("am-synthetic__propose_change", value="after"), cite()
+    )
+    assert env.app.actions is not None
+    async with running(env, max_reply_chars=3500) as group:
+        await group.ask("提出", message_id="om_p")
+        action_id = await actions.one()
+        history = await env.rows("SELECT message_data FROM agent_messages ORDER BY id")
+        reads_before = len(actions.adapter.reads)
+        entered = asyncio.Event()
+        reads: list[tuple[str, Identity]] = []
+        get_action = env.store.get_action
+
+        async def observed_read(action_id: str, identity: Identity):
+            reads.append((action_id, identity))
+            return await get_action(action_id, identity)
+
+        monkeypatch.setattr(env.store, "get_action", observed_read)
+        if stage == "feedback":
+            status = env.app.actions.status
+
+            async def delayed_status(ctx: RunContext, request: ToolRequest) -> ToolObservation:
+                entered.set()
+                await asyncio.sleep(2)
+                return await status(ctx, request)
+
+            monkeypatch.setattr(env.app.actions, "status", delayed_status)
+        else:
+            validate = env.evidence.validate_answer
+
+            async def delayed_validation(
+                turn: TurnAnswer, ctx: RunContext, *, history: bool = False
+            ) -> Delivery:
+                # 提案已经保存并送达；只延迟批准时的材料复核，尚未占用执行机会。
+                entered.set()
+                await asyncio.sleep(2)
+                return await validate(turn, ctx, history=history)
+
+            monkeypatch.setattr(env.evidence, "validate_answer", delayed_validation)
+        await asyncio.wait_for(group.ask(f"/批准 {action_id}", message_id="om_a"), 5)
+        receipt = message_text(group.outbox.sent[-1][1])
+        assert entered.is_set()
+        assert len(actions.adapter.calls) == writes
+        assert len(actions.adapter.reads) == reads_before + writes
+        assert await env.rows("SELECT state, result FROM xiaowei_action") == [
+            (state, '{"value": "after"}' if writes else None)
+        ]
+        assert await env.rows(
+            "SELECT state, failure_code, delivery, answer FROM xiaowei_request "
+            "WHERE reply_message_id='om_a'"
+        ) == [("failed", code, "sent", None)]
+        assert all(text in receipt for text in required)
+        assert "工具执行失败" not in receipt and "must-not-save" not in receipt
+        assert "after" not in receipt
+        # 批准与超时回读均经过相同群归属，后者读取真实应用表而非执行局部标记。
+        assert len(reads) == 2
+        assert all(id_ == action_id for id_, _ in reads)
+        assert all(identity.owner == GROUP.owner for _, identity in reads)
+        assert reads[0][1] == reads[1][1]
+        assert await env.rows("SELECT message_data FROM agent_messages ORDER BY id") == history
+        assert await env.rows("SELECT count(*) FROM xiaowei_evidence") == [(1 + writes,)]
+        assert env.store.readiness.ok
+        await group.ask(f"/批准 {action_id}", message_id="om_a")
+        assert len(actions.adapter.calls) == writes
+
+
+@pytest.mark.parametrize(
+    "case,code,required",
+    [
+        ("executing", "action_unknown", ("结果未知", "Action ID")),
+        ("unknown", "action_unknown", ("人工核对远端", "Action ID")),
+        ("rejected", "action_rejected", ("动作未执行", "重新提出")),
+        ("missing", "action_not_approvable", ("本次批准未执行", "Action ID")),
+        ("unreadable", "action_unknown", ("人工核对远端", "Action ID")),
+    ],
+)
+async def test_approval_timeout_readback_classifies_saved_or_unreadable_state(
+    actions: Actions,
+    monkeypatch: pytest.MonkeyPatch,
+    case: str,
+    code: str,
+    required: tuple[str, ...],
+) -> None:
+    """隔离超时处理边界：状态由真实存储形成，注入中断，不声称测试了远端写入。"""
+    env = actions.env
+    env.scripts.add(
+        attributed(A, "提出"), tool_call("am-synthetic__propose_change", value="after"), cite()
+    )
+    assert env.app.actions is not None
+    unreadable = False
+
+    async def interrupted_approval(action_id: str, ctx: RunContext) -> TurnAnswer:
+        nonlocal unreadable
+        action = await env.store.get_action(action_id, ctx.identity)
+        if case in {"executing", "unknown", "rejected"}:
+            claimed = await env.store.claim_action(action, ctx.identity)
+            assert claimed is not None
+            if case != "executing":
+                await env.store.finish_action(claimed, case)
+        elif case == "missing":
+            async with env.engine.begin() as conn:
+                await conn.execute(
+                    text("DELETE FROM xiaowei_action WHERE action_id=:id"), {"id": action_id}
+                )
+        else:
+            unreadable = True
+        raise TimeoutError("synthetic approval interruption")
+
+    def fail_read(_conn, _cursor, statement, _parameters, *_args):
+        if unreadable and "SELECT * FROM xiaowei_action" in statement:
+            raise SQLAlchemyError("synthetic protected database failure")
+
+    monkeypatch.setattr(env.app.actions, "approve", interrupted_approval)
+    event.listen(env.engine.sync_engine, "before_cursor_execute", fail_read)
+    try:
+        async with running(env, max_reply_chars=3500) as group:
+            await group.ask("提出", message_id="om_p")
+            action_id = await actions.one()
+            await group.ask(f"/批准 {action_id}", message_id="om_a")
+            receipt = message_text(group.outbox.sent[-1][1])
+    finally:
+        event.remove(env.engine.sync_engine, "before_cursor_execute", fail_read)
+    assert await env.rows("SELECT state FROM xiaowei_action") == (
+        [] if case == "missing" else [("pending" if case == "unreadable" else case,)]
+    )
+    assert await env.rows(
+        "SELECT state, failure_code, delivery, answer FROM xiaowei_request "
+        "WHERE reply_message_id='om_a'"
+    ) == [("failed", code, "sent", None)]
+    assert all(text in receipt for text in required)
+    assert "工具执行失败" not in receipt and "synthetic" not in receipt
+    assert "after" not in receipt and "must-not-save" not in receipt
+    assert actions.adapter.calls == []
+    assert await env.rows("SELECT count(*) FROM xiaowei_evidence") == [(1,)]
 
 
 async def test_concurrent_approval_messages_execute_only_once(actions: Actions) -> None:

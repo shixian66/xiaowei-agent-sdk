@@ -36,7 +36,7 @@
 
 ## 3. 当前计划与下一项工作
 
-**当前下一步：** W5 草稿 PR #74 修复批准回执阻断B1后，按新精确提交复审，不合并或部署。之后为 S6 创建/提前结束静默，先核对真实 API 写入、认证、长期到期与回读契约，并由用户决定下列取消/整轮期限的可用性取舍，不自动扩大写范围。真实模型、公司三源与真实双入口仍按监控计划验收，不继承 U1 例外。
+**当前下一步：** W5 草稿 PR #74 修复批准回执B1及超时遗留B1′后，按新精确提交及对应全量 CI 结果复审，不合并或部署。之后为 S6 创建/提前结束静默，先核对真实 API 写入、认证、长期到期与回读契约，并由用户决定下列取消/整轮期限的可用性取舍，不自动扩大写范围。真实模型、公司三源与真实双入口仍按监控计划验收，不继承 U1 例外。
 
 **W5 当前离线证据：** 先复现 `/批准` 被当成模型提问、读事实过长导致审批材料被隐藏、批准执行与状态反馈重复获得预算；再按原有入口/治理/投递链修复。真 SDK、隔离 PostgreSQL、群原始事件/SDK公开传输替身及合成 Adapter 覆盖提出→送达→批准→一次执行→状态追问；正式 `serve` 的获权成功和无审批权零写入已通过。审批不调用模型或在 Runner 外写 Session；满/关闭 Session 仍可批准，新建群会话可查状态。数据库并发占用、实际终止旧持锁后端后接管、取消前后恢复 unknown、旧尝试不能覆写、撤权/退群/材料或源绑定变化、未送达/缺证据、写后 Evidence/反馈保存失败均有真实断言；失败与重启不会重放。
 
@@ -46,9 +46,13 @@
 
 独立审查 `291be6a4d9f9ce632e813207ad3918da30497f14` 实跑 W5 四文件 **51 passed**，另复现14分59秒批准、回读跨过15分钟后仍写入的阻断。期限边界回归先为 **2 failed, 1 passed**；修复写前准入同时复核批准/保留期限后 **3 passed**，并纳入上述388项。新提交的精确复审结论见 PR，不沿用旧 SHA 的审查结果。外部独立审查 `4366844` 将批准回执不区分执行事实列为阻断B1；本次修复范围只调整事实到固定回执的映射，权限、预算、证据校验、写审批和不重放边界保持。具体失败契约见监控计划 §3.4，修复候选及验证结果以 PR #74 为准。
 
-B1 先在 `4366844` 产品代码上运行真实 PostgreSQL/群网关回归：**9 failed, 1 passed**，失败均为执行事实与群回执类别不符；修复后同组 **10 passed**。另补写成功后最终 Evidence 复核撤权的反例，受限结果不能交付，但回执仍如实说明已执行。设置本机 `SDK_TEST_POSTGRES_URL` 后，`.venv/bin/python -m pytest tests/sdk_core/test_actions_runtime.py tests/sdk_core/test_group_actions.py tests/sdk_core/test_action_boundaries.py tests/sdk_core/test_action_lifecycle.py tests/sdk_core/test_channel_store.py tests/sdk_core/test_channel_service.py tests/sdk_core/test_group_gateway.py tests/sdk_core/test_group_identity.py tests/sdk_core/test_storage_v2.py -q -W error --tb=short` 为 **285 passed**（72.71s），覆盖写超时未知、回读变化零写、写后 Evidence/状态/回答保存失败、占用前过期/未送达/已处理、重投不重放及新增固定失败码的真实 CHECK。首次扩展运行为1失败、3初始化错误，数据库日志显示接管测试同时终止两条持锁连接，其中初始化 DDL 被中断；确认无其他测试连接后串行通过，未改测试断言或产品锁策略。日志 `/private/tmp/xw-w5-b1-red.log`、`/private/tmp/xw-w5-b1-green.log`、`/private/tmp/xw-w5-b1-regression.log`、`/private/tmp/xw-w5-b1-regression-serial.log`。
+B1 主体的 `5c09e7d9656b401b2ec383d75f5912ea0231d7fc` 经用户复审实跑197项，但发现整轮超时仍固定返回 evidence_failed 的同根因遗留B1′。当前差异只在渠道超时分支按同群 Action 表回读分类，复用已有失败码，不改迁移、取消锁低、权限或一次执行策略。旧 head 的 [CI run 38071855924](https://github.com/shixian66/xiaowei-agent-sdk/actions/runs/38071855924) 已10/10成功，不能代替新提交的 CI 或复审。
 
-仓库外 `.venv/bin/python /private/tmp/xw-w5-b1-mutations.py` 仅复制产品源码，分别改错 succeeded/unknown/rejected 的回执映射、最终反馈的执行标记与回答保存失败类别；**五项均被实际状态/回执断言检出**，每项退出1且为预期断言失败，成功对照保留。报告 `/private/tmp/xw-w5-b1-mutations.json`，未修改 SDK 或合入诊断脚本。本次 Ruff、受影响文件格式、mypy（128源文件）、离线锁（92包）、5项文档检查与 `git diff --check` 通过；后续 CI 及精确复审结果见 PR #74，不把旧 head 的 CI 当作修复候选证据。
+B1′ 先在 `5c09e7d` 产品代码上运行真实 PostgreSQL/群网关：写后状态反馈延迟2秒、本轮期限1秒时，Action succeeded/1次写；占用前材料复核超时为pending/零写，两者错误回执均被检出（**2 failed**）。补齐执行中、未知、拒绝、查不到与回读失败分类后 **7 failed**；修复后 **7 passed**（4.68s）。后五项只验证真实应用表状态到群回执的分类，不冒充远端写入；真实写链由前两项和原有审批测试覆盖。首次修复复跑6项通过、1项为新测试错误地要求 rejected 回执含 Action ID；按既定“未执行、重新提出”契约校正该新增断言，未改变回执或保护边界。日志 `/private/tmp/xw-w5-b1prime-red.log`、`/private/tmp/xw-w5-b1prime-red-all.log`、`/private/tmp/xw-w5-b1prime-green-initial.log`、`/private/tmp/xw-w5-b1prime-green.log`。
+
+设置本机 `SDK_TEST_POSTGRES_URL` 后，`.venv/bin/python -m pytest tests/sdk_core/test_actions_runtime.py tests/sdk_core/test_group_actions.py tests/sdk_core/test_action_boundaries.py tests/sdk_core/test_action_lifecycle.py tests/sdk_core/test_channel_store.py tests/sdk_core/test_channel_service.py tests/sdk_core/test_group_gateway.py tests/sdk_core/test_group_identity.py tests/sdk_core/test_storage_v2.py -q -W error --tb=short` 为 **292 passed**（78.73s），串行覆盖正式 serve 群成功/拒绝、未知结果、版本变化零写、写后反馈/存储失败、权限撤销、并发/取消/接管、去重不重放及新失败码的真实 CHECK；日志 `/private/tmp/xw-w5-b1prime-regression.log`。
+
+仓库外 `.venv/bin/python /private/tmp/xw-w5-b1prime-mutation.py` 仅复制产品源码，恢复旧超时回执分支；**两个真实期限回归均以预期状态/回执断言失败检出，另三个成功/未知/拒绝对照仍通过**（2 failed, 3 passed，4.47s）。报告 `/private/tmp/xw-w5-b1prime-mutation.json`，临时源码已清理，未修改 SDK 或工作树；不合入诊断脚本。B1 原有五项隔离变异证据保留在 PR 历史及 `/private/tmp/xw-w5-b1-mutations.json`。本次 Ruff、受影响格式、mypy（128源文件）、离线锁（92包）、5项文档检查和 `git diff --check` 通过；新 head 的 CI 与精确复审结果见 PR #74，不把旧 head 的 CI 当作修复候选证据。
 
 B1 上下游回归：使用相同测试 PostgreSQL，设置 `XW_TEST_ALERTMANAGER_BIN=/private/tmp/xw-a4-official/alertmanager-0.34.1.darwin-arm64/alertmanager` 后，`.venv/bin/python -m pytest tests/sdk_core/test_mcp_integration.py tests/sdk_core/test_alertmanager_a4.py tests/sdk_core/test_alertmanager_contracts.py tests/sdk_core/test_evidence.py tests/sdk_core/test_session_policy.py -q -W error --tb=short` 为 **216 passed, 1 deselected**（86.31s，未选的是浏览器用例），日志 `/private/tmp/xw-w5-b1-read-regression.log`。本片群正式 `serve` 成功/拒绝已包含在285项中，未新增模型、公司服务或真实渠道验证。
 

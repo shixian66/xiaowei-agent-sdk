@@ -84,6 +84,8 @@ _FAILURE_CODES: Mapping[TurnReason, CallerFailureCode] = {
     "scope_rejected": "session_failed",
 }
 _ACTION_FAILURE_CODES: Mapping[str, CallerFailureCode] = {
+    "pending": "action_not_approvable",
+    "executing": "action_unknown",
     "succeeded": "action_feedback_failed",
     "unknown": "action_unknown",
     "rejected": "action_rejected",
@@ -654,7 +656,19 @@ class ChannelService:
                     record, "action_feedback_failed" if executed else "action_not_approvable"
                 )
             except TimeoutError:
-                return await self._store.fail(record, "evidence_failed")
+                # 超时可能发生在写入后的反馈阶段；以同群应用表的事实给回执，不重放动作。
+                failure_code: CallerFailureCode
+                try:
+                    action = await self._store.get_action(
+                        action_id, self._context(record, decision).identity
+                    )
+                except RequestUnavailableError:
+                    failure_code = "action_not_approvable"
+                except Exception:
+                    failure_code = "action_unknown"
+                else:
+                    failure_code = _ACTION_FAILURE_CODES[action.state]
+                return await self._store.fail(record, failure_code)
             except asyncio.CancelledError:
                 self._store.readiness.lock("action_cancelled")
                 raise
