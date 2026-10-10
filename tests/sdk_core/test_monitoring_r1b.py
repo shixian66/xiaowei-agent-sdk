@@ -59,8 +59,16 @@ pytestmark = pytest.mark.loopback
 @pytest.mark.parametrize(
     ("error", "expected"),
     [
-        (MCPError(-32000, "synthetic closed"), True),
-        (MCPError(-32600, "synthetic session ended"), True),
+        (MCPError(-32000, "Connection closed"), True),
+        (MCPError(-32000, "synthetic closed"), False),
+        (MCPError(-32000, "Connection closed extra"), False),
+        (MCPError(-32000, " Connection closed"), False),
+        (MCPError(-32000, "Connection closed", data={}), False),
+        (MCPError(-32600, "Session terminated"), True),
+        (MCPError(-32600, "synthetic session ended"), False),
+        (MCPError(-32600, "Session terminated extra"), False),
+        (MCPError(-32600, " Session terminated"), False),
+        (MCPError(-32600, "Session terminated", data={}), False),
         (MCPError(-32001, "synthetic timeout"), False),
         (MCPError(-32603, "synthetic server error"), False),
         (httpx2.ConnectError("synthetic connect failure"), True),
@@ -118,6 +126,8 @@ async def test_stopped_mcp_connection_reports_connection_closed_code() -> None:
         with pytest.raises(MCPError) as closed:
             await client.call_tool("lookup", {"key": "x"})
         assert closed.value.code == -32000
+        assert closed.value.message == "Connection closed"
+        assert closed.value.data is None
     finally:
         await client.cleanup()
         source.stop()
@@ -207,6 +217,8 @@ async def test_official_session_termination_recovers_via_formal_web(env: Env) ->
                         with pytest.raises(MCPError) as ended:
                             await raw.call_tool("query", {"query": "up"})
                         assert ended.value.code == -32600
+                        assert ended.value.message == "Session terminated"
+                        assert ended.value.data is None
                         failed = env.scripts.add(
                             "旧会话再查", tool_call(f"{SOURCE}__query", query="up")
                         )

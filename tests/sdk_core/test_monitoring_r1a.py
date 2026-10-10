@@ -177,11 +177,22 @@ def test_trusted_http_monitoring_source_is_opt_in_and_old_config_still_loads() -
             ServeConfig.model_validate(serve_config(8501, **monitoring_config(url)))
 
 
-def test_only_selected_query_and_distinct_source_ids_can_be_configured() -> None:
+def test_only_selected_read_tools_and_distinct_source_ids_can_be_configured() -> None:
     values = monitoring_config("http://10.10.0.12:8080/mcp")
     values["mcp_servers"][0]["allowed_tools"]["range_query"] = "prometheus.range_query"
-    with pytest.raises(ValidationError, match="R1a 只允许 Prometheus query 工具"):
-        ServeConfig.model_validate(serve_config(8501, **values))
+    config = ServeConfig.model_validate(serve_config(8501, **values))
+    assert config.mcp_servers[0].allowed_tools == {
+        "query": "prometheus.query",
+        "range_query": "prometheus.range_query",
+    }
+    for tool, policy in (
+        ("query", "prometheus.range_query"),
+        ("delete_series", "prometheus.delete_series"),
+    ):
+        values = monitoring_config("http://10.10.0.12:8080/mcp")
+        values["mcp_servers"][0]["allowed_tools"][tool] = policy
+        with pytest.raises(ValidationError, match="只允许已核约的 Prometheus 只读工具及其准确映射"):
+            ServeConfig.model_validate(serve_config(8501, **values))
 
     values = monitoring_config("http://10.10.0.12:8080/mcp")
     values["mcp_servers"].append(values["mcp_servers"][0].copy())

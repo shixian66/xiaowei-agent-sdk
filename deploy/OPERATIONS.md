@@ -245,9 +245,10 @@ Agent 在预算内完成。Web 本片保持原样，仍把有后续页标为“�
 
 ## 选配 Prometheus 监控源
 
-R1a 只开放官方 Prometheus MCP 的即时 `query`。MCP Server 单独部署在外部节点，Compose 不新增
-容器；小维只连固定地址。外部锁版 Server 也只启用已核对的只读工具集（v0.18.0 的
-`--mcp.tools=core` 包含 `query`，不含 TSDB 管理工具），不要仅靠小维隐藏未选工具。
+可选配官方 Prometheus MCP v0.18.0 的七项只读工具；旧的仅 `query` 配置继续可用。
+MCP Server 单独部署在外部节点，Compose 不新增容器；小维只连固定地址。外部 Server 使用已核对的
+只读工具集，不启用 TSDB 删除、reload、quit；需要规则读取时，锁版用例的 `--mcp.tools=list_rules`
+已实测能开放规则与 core 读取。当前 P2 为离线候选，真实模型和目标 Prometheus 限额尚未验收。
 保持现有 `xiaowei.json` 的其他字段，在顶层加入：
 
 ```json
@@ -268,10 +269,43 @@ R1a 只开放官方 Prometheus MCP 的即时 `query`。MCP Server 单独部署�
 `XW_PROMETHEUS_READ_TOKEN` 保存只读身份的令牌，JSON 仅留引用。官方 Prometheus MCP 会把小维的
 Bearer `Authorization` 原样转发到 Prometheus，它不是与上游隔离的第二重身份。内网 HTTP 无须
 配置 CA，但请求、结果与认证头以明文传输；只在可信内网和现有网络限制内使用。地址不能含用户名、
-密码、查询串或片段，也不会跟随跳转。外部部署须维持 `--prometheus.truncation-limit=0`，直到 P2
-完成截断识别的验收。
+密码、查询串或片段，也不会跟随跳转。首选以外部 Server 的 `--prometheus.truncation-limit=200`
+配合上例的 `max_response_bytes: 64000` 作为可截断读取的起点；P2 已用 3000 项合成数据和正式 Web 验证
+标签发现、序列与 query/range 在这组值下返回部分结果并生成 Evidence。截断按行/条目计数，
+接收上限按字节计数，两者不能相互换算；长标签或长 help 的源须按实际返回调小截断值或调整
+接收上限后实测。不要直接关闭截断做全源发现。锁版完整截断标记和投影截断都会标为
+`truncated`，Agent 可按需要收窄选择器、聚合或缩小窗口；部分结果不证明全量健康。
+metadata 的全局值会作为上游 `limit` 发送，并非 MCP 本地按行裁剪；小维只开放非空具体指标名。
+实际响应仍超过接收上限时整轮中止，不能将这类协议异常伪装为正常部分结果。
 
-在 `data_policy.model_tools` 加入 `"prometheus-prod/query"`，再只给获准的
+**规则读取须单独核对接收容量。** 锁版 `list_rules` 无过滤/分页参数，一次返回全部已加载规则，
+不受 `--prometheus.truncation-limit` 约束，不带 Server 截断标记。上述 `200/64000` 起点没有覆盖
+全部读取。启用前用同版 MCP 试读目标源，测量完整 MCP 响应的传输字节数；`max_response_bytes`
+设为高于实测值并留余量，规则增长或变更后重新核对。若所需容量超过该源可接受的接收上限，
+不在 `allowed_tools` 中选配 `list_rules`，也不加入相应授权。只测 Prometheus API 的 JSON 大小
+不能代替 MCP 响应大小；小维接收后的投影截断不能缩小已经传输的响应。官方二进制与300条合成规则
+已验证：全局截断值200仍返回全部规则，在64000字节接收上限下正式 Web 中止、零成功 Evidence。
+
+如需发现或历史窗口，在同一 `allowed_tools` 中按需加入下面的准确映射；也可以只选其中几项：
+
+| 远端工具 | 策略 ID | 适用任务 |
+| --- | --- | --- |
+| `range_query` | `prometheus.range_query` | 范围 PromQL 与趋势 |
+| `label_names` | `prometheus.label_names` | 发现标签名称 |
+| `label_values` | `prometheus.label_values` | 发现指标名、主机等标签值 |
+| `series` | `prometheus.series` | 选择器匹配的序列标签 |
+| `metric_metadata` | `prometheus.metric_metadata` | 指定非空指标名的类型/help/unit |
+| `list_rules` | `prometheus.list_rules` | 当前已加载规则及求值状态 |
+
+时间窗由 Agent 按问题选择；实际时间在调用前冻结，客户端边界与接口见 [P2 契约](../docs/superpowers/plans/2026-10-09-monitoring-mcp.md#31-p2-当前切片基线-4c5b89495fdf57bfd6d18bb4483d5682e56cce59)。
+启用前核对 Prometheus **实际生效**的 timeout/max-samples/max-concurrency；客户端窗宽/点数不能限制
+表达式内部扫描。即时 query 保留 Server 自己取当前求值时间的行为，采集时钟不是求值时钟。
+metadata/rules 的官方返回会丢弃上游 warnings，页面保留固定限制说明，不能据此判定整体健康。
+发现时优先用已知主机、job 或指标选择器收窄 `matches`；未知范围仍可做有限的源内发现。
+已知指标可直接查询或读元数据，不要求固定先发现、再查询。
+
+把每个选中工具的 `"<server_id>/<tool_name>"`（如 `"prometheus-prod/query"`）加入
+`data_policy.model_tools`，再只给获准的
 `access.grants["<内部 subject>"]` 加入同一工具 ID；Web 使用 `web.operator_id` 对应的 subject，
 飞书单聊使用 `feishu.users` 映射的 subject，指定群使用 `feishu.group.tools`。不要因为配置了源就给
 所有人加权限。空 `mcp_servers` 或不填该字段时，现有 StarRocks 行为保持不变。
@@ -284,12 +318,15 @@ Bearer `Authorization` 原样转发到 Prometheus，它不是与上游隔离的�
 端点或凭据；单个监控源不可用时 Web 和 StarRocks 仍可用。查询用途里有该监控源授权的用户，
 即使本轮只问 StarRocks，冷却到期时也可能在运行前等待一次重连；连接与列工具共用至多 3 秒的期限
 （源配置更短时取更短值）。
-重连失败后按该源从 2 秒起翻倍退避，最长 60 秒，成功后复位。即时查询遇到可分类的上游
+重连失败后按该源从 2 秒起翻倍退避，最长 60 秒，成功后复位。选中读取遇到可分类的上游
 401/403/5xx、断线或超时，该源本轮标为未核实，Agent 可继续调查其他已授权源；本源本轮不再
 调用，原调用不自动重放。超时结果可能未知，不仅凭超时标记断线；未知错误或协议不合规仍中止
-整轮。更改源地址或认证引用、撤权仍需停止旧小维进程、更新配置、通过
+整轮。只有锁版 query/range 的确定解析错误可由 Agent 在额度内修正，失败仍计预算且没有成功证据；
+全失败可给明确未经数据验证的建议，步骤耗尽会说明调查不完整。更改源地址或认证引用、撤权仍需停止旧小维进程、更新配置、通过
 `config check` 后重启；旧监控事实的历史
-读取和重发会按当前授权拒绝。回退到旧镜像前，先删除 `mcp_servers` 及其工具授权，再用旧镜像
+读取和重发会按当前授权拒绝。改变模型可用工具的数据策略后，新调查按现有规则新建会话；旧获准 query
+事实的历史读取不重新调用远端。回退到 R1 镜像须去掉它不识别的新工具映射和授权；回退到更早镜像前，
+删除 `mcp_servers` 及其工具授权，再用旧镜像
 `config check`，避免旧版拒绝新字段。
 
 ## 状态、停止与重启

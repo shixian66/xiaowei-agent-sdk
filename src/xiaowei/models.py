@@ -21,6 +21,19 @@ Channel = Literal["web", "feishu"]
 Audience = Literal["model", "session", "web", "feishu"]
 AUDIENCES: tuple[Audience, ...] = ("model", "session", "web", "feishu")
 
+# 只枚举已核约的只读语义；失败续查不能凭命名前缀开放未来工具。
+PROMETHEUS_QUERY_POLICIES = frozenset({"prometheus.query", "prometheus.range_query"})
+PROMETHEUS_DISCOVERY_POLICIES = frozenset(
+    {
+        "prometheus.label_names",
+        "prometheus.label_values",
+        "prometheus.series",
+        "prometheus.metric_metadata",
+        "prometheus.list_rules",
+    }
+)
+PROMETHEUS_READ_POLICIES = PROMETHEUS_QUERY_POLICIES | PROMETHEUS_DISCOVERY_POLICIES
+
 Label = Annotated[str, StringConstraints(min_length=1, max_length=200)]
 JsonScalar = None | bool | int | float | str
 ToolId = Annotated[str, StringConstraints(pattern=r"^[a-z0-9_-]{1,64}/[a-z0-9_.-]{1,64}$")]
@@ -213,7 +226,9 @@ class AgentAnswer(_Answer):
     advice: Annotated[str, Field(min_length=1, max_length=4000)] | None = None
 
 
-MonitoringFailureReason = Literal["auth", "timeout", "unavailable", "upstream_5xx"]
+MonitoringFailureReason = Literal[
+    "auth", "timeout", "unavailable", "upstream_5xx", "invalid_expression"
+]
 
 
 class MonitoringFailure(_Trusted):

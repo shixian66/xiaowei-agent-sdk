@@ -43,7 +43,7 @@ from xiaowei.evidence import (
     EvidenceUnavailableError,
     EvidenceUnverifiableError,
 )
-from xiaowei.models import AgentAnswer, Owner, RunContext, ToolCall, TurnAnswer
+from xiaowei.models import AgentAnswer, MonitoringFailure, Owner, RunContext, ToolCall, TurnAnswer
 
 SessionState = Literal["active", "writing", "sealed", "closed"]
 
@@ -337,13 +337,18 @@ class PolicySession:
         """丢弃本轮暂存项；运行失败、取消或最终回答未通过校验时调用。"""
         self._pending.clear()
 
-    async def commit_validated(self, context_evidence: Sequence[str]) -> None:
+    async def commit_validated(
+        self,
+        context_evidence: Sequence[str],
+        *,
+        monitoring_failures: Sequence[MonitoringFailure] = (),
+    ) -> None:
         """校验本轮最终回答与完整历史后写入底层 Session；任何失败都不保留本轮暂存项。
 
         ``context_evidence`` 是应用记录的本轮模型可见证据（见 ``TurnAnswer``），与最终回答一起校验。
         """
         pending, self._pending = self._pending, []
-        await self._validate_final_answer(pending, context_evidence)
+        await self._validate_final_answer(pending, context_evidence, monitoring_failures)
         turns = await self._open()
         if turns >= self._limits.max_history_turns:
             raise SessionLimitError
@@ -362,7 +367,10 @@ class PolicySession:
             raise SessionStoreError("会话保存失败，该会话已停止使用，请新建会话")
 
     async def _validate_final_answer(
-        self, pending: list[TResponseInputItem], context_evidence: Sequence[str]
+        self,
+        pending: list[TResponseInputItem],
+        context_evidence: Sequence[str],
+        monitoring_failures: Sequence[MonitoringFailure],
     ) -> None:
         """最终持久化复用 Evidence 回答验证器：最后一项须是通过校验的 ``AgentAnswer``。"""
         final = pending[-1] if pending else None
@@ -370,7 +378,11 @@ class PolicySession:
             raise SessionItemRejectedError("本轮没有可提交的最终回答")
         try:
             answer = AgentAnswer.model_validate_json(cast(dict[str, str], final)["content"])
-            turn = TurnAnswer(answer=answer, context_evidence=tuple(context_evidence))
+            turn = TurnAnswer(
+                answer=answer,
+                context_evidence=tuple(context_evidence),
+                monitoring_failures=tuple(monitoring_failures),
+            )
             await self._evidence.validate_answer(turn, self._ctx)
         except (ValidationError, AnswerRejectedError):
             raise SessionItemRejectedError("最终回答未通过校验，本轮不保存") from None
