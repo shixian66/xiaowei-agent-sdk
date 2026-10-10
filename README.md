@@ -95,7 +95,7 @@ uv run --locked xiaowei --config xiaowei.json requests resend --subject <发起�
 
 **SQL 语义与升级。** 小维连接固定 SQL 模式，`||` 表示逻辑 OR；完整约定见 [ARCHITECTURE §6](ARCHITECTURE.md#6-只读查询保护)。D1/D2 修复把 StarRocks 证据摘要升为 v3，P2.5 Task 3（跨库与复杂 SQL）再升为 v4，Task 6（搜表分页与多库慢查询）升为 v5；每次升级前保存的 StarRocks 证据一次性失效，引用它们的旧会话须新建并重新查询，历史与重发也不能继续交付旧事实。其他工具的证据指纹不变。P2.5 Task 7 起，每条回答随结果保存模型本轮看过的证据，交付时一并按当前权限复核；升级前保存的回答没有这项记录，历史读取与 `requests resend` 不再交付（包括澄清与建议），不需要迁移表结构。
 
-**应用表版本 6、升级与恢复。** 版本 5 保存个人/群 owner 与群回复目的地；版本 6 再把数据库与 `XW_DIGEST_KEY` 的不可逆指纹绑定。`serve`、升级、清理和重发遇到错密钥都会在业务 I/O 前拒绝。v1–v5 只有在操作者确认 `.env` 仍是原部署密钥并已完成配套备份后，才可执行 `storage upgrade --bind-existing-digest-key`；程序不能替操作者证明旧密钥来源。普通启动不建表、不迁移，旧程序也拒绝新 schema。回退到不认识新 schema 的旧程序时，须使用旧镜像、旧配置和迁移前备份恢复出的隔离数据库，不在原库降级。容器首次安装、普通升级/回退、原子 `pg_dump`、隔离 `pg_restore`、主机重启后的启动和排障命令统一见 [容器运维说明](deploy/OPERATIONS.md)。运行镜像与发行归档不包含根文档、源码测试或开发工具。
+**应用表版本 7、升级与恢复。** 版本 5 保存个人/群 owner 与群回复目的地；版本 6 把数据库与 `XW_DIGEST_KEY` 的不可逆指纹绑定；版本 7 新增监控 Action 表，会话历史表不变。`serve`、升级、清理和重发遇到错密钥都会在业务 I/O 前拒绝。v1–v5 只有在操作者确认 `.env` 仍是原部署密钥并已完成配套备份后，才可执行 `storage upgrade --bind-existing-digest-key`；程序不能替操作者证明旧密钥来源。v6 升到 v7 使用普通 `storage upgrade`，必须保留原密钥绑定，缺失或错配不会自动修补。普通启动不建表、不迁移，旧程序也拒绝新 schema。回退到不认识新 schema 的旧程序时，须使用旧镜像、旧配置和迁移前备份恢复出的隔离数据库，不在原库降级。容器首次安装、普通升级/回退、原子 `pg_dump`、隔离 `pg_restore`、主机重启后的启动和排障命令统一见 [容器运维说明](deploy/OPERATIONS.md)。运行镜像与发行归档不包含根文档、源码测试或开发工具。
 
 **数据范围（自动发现）。** 不再配置表与列：小维每隔 `schema_limits.refresh_seconds` 读取一次 `information_schema` 中全部用户库的表、视图与列，并对每个对象做一次不返回数据的 `SELECT 1 … WHERE 1 = 0` 探测，只有只读账号确实能 SELECT 的对象才进入范围。查询与执行计划可引用其中任何库的对象并跨库 JOIN：表名写成 `库名.表名`，只在一个库中存在的表可以省略库名（不使用连接的默认库猜测；多个库都有同名表时要求写明库名）。`list_tables`、`describe_table`、`describe_table_layout` 在返回前会再次确认对象仍可读。
 
@@ -109,7 +109,7 @@ uv run --locked xiaowei --config xiaowei.json requests resend --subject <发起�
 
 该工具需独立加入 `data_policy.model_tools` 与使用者的 `access.grants`，已有授权不会自动扩大。示例仅给 Web 使用者配置此能力，飞书群示例未加入。每个目标可配置 `starrocks.max_ddl_bytes`（JSON 编码字节数），未配置时沿用 `max_value_bytes`；仍须满足 `max_result_bytes` 与四种投影容量。示例 DDL 上限 64000 不是所有表通用的值；显式日分区很多的表可能超过，升级前须用目标集群的代表性 SHOW CREATE 原文测量 JSON 编码字节数，并核对结果及四种投影容量。普通查询单值上限示例为 4000 字节，超限值带截短标记并继续返回放得下的行；DDL 超限则整条原文不返回，不裁成半段后声称完整。
 
-**Web 实战修复升级。** StarRocks 证据范围摘要升至 v7（与应用表版本 6 是两回事），旧 StarRocks 证据一次性失效，相关旧会话须新建；不迁移应用表。Web 主回复中的事实表格只显示一次，SQL、游标、来源与本次获准结果原文可展开；采集时间、固定说明与普通查询的模型分析默认可见。澄清和未执行的 SQL 建议保留原换行。表格保留未截短值的大整数精度，区分真正的 NULL、字符串 `"NULL"`、空字符串与未提供字段；嵌套字段完整保留。原文仅包含本次获准展示的数据；超长单值只保留前缀与截短标记，无法从展示恢复原值或原类型，分页或截断也不等于已取全。“已回复”表示已交付，不代表每项业务需求均已满足。每轮向模型提供当前 UTC 时间，相对日期仍须结合明确的业务时区。
+**Web 实战修复升级。** StarRocks 证据范围摘要升至 v7（独立于应用表版本），旧 StarRocks 证据一次性失效，相关旧会话须新建；该修复不迁移应用表。Web 主回复中的事实表格只显示一次，SQL、游标、来源与本次获准结果原文可展开；采集时间、固定说明与普通查询的模型分析默认可见。澄清和未执行的 SQL 建议保留原换行。表格保留未截短值的大整数精度，区分真正的 NULL、字符串 `"NULL"`、空字符串与未提供字段；嵌套字段完整保留。原文仅包含本次获准展示的数据；超长单值只保留前缀与截短标记，无法从展示恢复原值或原类型，分页或截断也不等于已取全。“已回复”表示已交付，不代表每项业务需求均已满足。每轮向模型提供当前 UTC 时间，相对日期仍须结合明确的业务时区。
 
 **SQL 写法（`run_readonly_query` / `explain_query`）。** 单条只读 SELECT 或 UNION/UNION ALL，可带非递归 WITH、子查询（含相关子查询）与窗口函数（PARTITION BY / ORDER BY，不支持窗口框架与命名窗口），函数须在 `allowed_functions` 中（窗口函数如 `ROW_NUMBER`、`RANK` 同样要列出）；名单按解析后的内部名填写，如 `IFNULL` 需要 `COALESCE`、`DATE_FORMAT` 需要 `TIME_TO_STR`、`DATE_TRUNC` 需要 `TIMESTAMP_TRUNC`，对照表与日期区间限制见[运维说明](deploy/OPERATIONS.md#常用上限与函数名单)。`*` 与 `别名.*` 按表结构展开，展开后的 SQL 同样受 `max_sql_bytes` 限制；查询结果最多 `max_result_columns` 列，列名不能重复，表达式列须用 `AS` 起别名（执行计划不要求）。列名不区分大小写，库名、表名与别名区分。名字按 StarRocks 的规则解析：WHERE、JOIN ON 与窗口中不能引用输出别名；ORDER BY 中的输出列名原样交给 StarRocks 解析，结果与直接执行原 SQL 相同（包括原 SQL 会报的错）；相关子查询中本层没有的列按外层表解析，多个外层表都有时需写明表名。
 

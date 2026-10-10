@@ -999,7 +999,7 @@ class ChannelStore:
         return None if row is None else ActionRecord(**dict(row))
 
     async def admit_action(self, action: ActionRecord) -> None:
-        """写 I/O 前再核对实例与本次尝试；旧实例或已恢复的尝试不能执行。"""
+        """回读后、写 I/O 前复核实例、尝试与期限；过期或已恢复的尝试不能执行。"""
         self._require_ready()
         if self._instance is None:
             raise NotReadyError
@@ -1009,13 +1009,15 @@ class ChannelStore:
                 text(
                     "SELECT 1 FROM xiaowei_action WHERE action_id = :id AND state = 'executing' "
                     "AND attempt = :attempt AND approver_id = :approver AND "
-                    "approval_turn_id = :turn"
+                    "approval_turn_id = :turn AND approval_expires_at > :now "
+                    "AND expires_at > :now"
                 ),
                 {
                     "id": action.action_id,
                     "attempt": action.attempt,
                     "approver": action.approver_id,
                     "turn": action.approval_turn_id,
+                    "now": self._clock(),
                 },
             )
             if exists != 1:

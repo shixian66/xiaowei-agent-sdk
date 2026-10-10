@@ -97,6 +97,35 @@ async def test_database_claim_is_single_even_without_gateway_fifo(actions: Actio
     ]
 
 
+@pytest.mark.parametrize("elapsed_seconds", [0, 1, 2])
+async def test_approval_expiry_is_rechecked_after_readback(
+    actions: Actions, elapsed_seconds: int
+) -> None:
+    action_id = await propose(actions)
+    env, adapter = actions.env, actions.adapter
+    env.clock.now += timedelta(minutes=14, seconds=59)
+    adapter.read_entered, adapter.read_release = asyncio.Event(), asyncio.Event()
+    receipt = await env.service.accept(env.group(attributed(A, f"/批准 {action_id}"), "om_a"))
+    task = asyncio.create_task(env.service.approve(receipt, action_id))
+    await asyncio.wait_for(adapter.read_entered.wait(), 5)
+    assert await env.rows("SELECT state FROM xiaowei_action") == [("executing",)]
+    env.clock.now += timedelta(seconds=elapsed_seconds)
+    adapter.read_release.set()
+    record = await task
+
+    if elapsed_seconds == 0:
+        assert [r.arguments for r in adapter.calls] == [{"value": "after"}]
+        assert record.state == "completed"
+        assert await env.rows("SELECT state FROM xiaowei_action") == [("succeeded",)]
+    else:
+        assert adapter.calls == []
+        assert record.state == "failed"
+        assert await env.rows("SELECT state, result FROM xiaowei_action") == [("rejected", None)]
+        assert await env.rows(
+            "SELECT count(*) FROM xiaowei_evidence WHERE turn_id=:turn", turn=record.turn_id
+        ) == [(0,)]
+
+
 @pytest.mark.parametrize("when", ["read", "write"])
 async def test_cancelled_execution_recovers_unknown_and_is_never_replayed(
     actions: Actions, when: str
