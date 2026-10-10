@@ -68,6 +68,10 @@ export XW_TEST_ALERTMANAGER_COMMUNITY_ROOT=/private/tmp/xw-a4-community
 
 首次完整检查为 24 failed，按真实失败定位新反馈与旧协议替身的兼容、采集入口的默认参数、共享 PostgreSQL 诊断隔离；没有跳过失败或放宽产品检查。首次检查中另有会话用例的 GC 警告，出现在前序失锁异常之后；未把时间先后当作已确认根因。失锁路径隔离修正后，最终严格 `-W error` 的 SDK/P1B 全套通过且无警告；这不是对首次警告根因的补证，也不能用单跑通过代替全套结论。完整输出位于仓库外 `/private/tmp/r7-sdk-p1b-final.log`，基线 RED、定向与变异记录在 `/private/tmp/r7-*.log`，供本机复查。
 
+**本地独立复查：** fresh-context reviewer 针对产品候选 `83014507c4b3ba4dad351d8b85871ac03fd0c13a` 核对真实 diff、调用路径和既有验证证据，未发现 Critical / Important 阻断；独立运行全分支 `git diff --check` 通过，未重复执行全套。该结论仅覆盖 R7 本地实现与离线交付范围，用户后续精确版本审查、真实模型与部署验收仍独立。
+
+**接受的非阻断边界：** 非 SQLGuard 的参数拒绝统一返回固定 `invalid_arguments`，会减少部分原固定文案的修正细节（例如游标快照失效后应从 `cursor=null` 开始）。工具说明仍给出失效重搜与参数限制，现有正式纠正成功/零 I/O 回归保留，尚无证据证明实际任务退化；本片不扩建子码体系。若部署获授权后的观察出现具体纠正失败，按该场景增加最少的可信固定修正说明并补正式失败→成功回归，不读取异常原文。
+
 **未覆盖与残余边界：** 真实模型未验证（只适用于 R7 的用户例外），不证明已解决所有自然语言误选。猜一个合法且有权限的目标仍可能被执行链接受；C7 暂不决定，部署后按授权观察再议。未调用真实 Lark/飞书、公司 StarRocks，未跑浏览器/真实客户端样式或部署验收；Web 产品渲染未改，正式 HTTP 成功/失败已覆盖。其他六项未实施；模板仍 20 轮，公司配置不会自动改变，后续会话切片手动项见 [OPERATIONS](deploy/OPERATIONS.md#会话轮数的手动配置)。回退 R7 可撤回提示词/工具反馈/C8 变更，无数据库迁移；不可把未知执行结果或未知投递自动重放。
 
 **A4 当前离线证据：** 先在旧代码实跑正式 Web 两条 RED（`alertmanager_sources` 不识别）；实现后正式 `serve → Web/指定群事件替身 → 真 SDK Runner → GovernedTools → 外部 API v2 → Evidence/PolicySession/PostgreSQL → 交付` 通过。官方 Alertmanager v0.34.1 仅 loopback、无外部通知接收器；测试预置合成告警/静默的 POST 不属于产品写能力。社区候选的固定版本与不可接入/错误分类损失证据只在计划 §3.3 维护，不把不同协议的结果相互替代。
