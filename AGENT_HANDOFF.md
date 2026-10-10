@@ -11,7 +11,7 @@
 | 仓库 | [shixian66/xiaowei-agent-sdk](https://github.com/shixian66/xiaowei-agent-sdk) |
 | 本地目录 / 分支 | `/Users/kloenguyen/.codex/worktrees/monitoring-p2/agent-SDK` / `codex/monitoring-p2`，基于 PR #70 合并后的 `origin/main`：`4c5b89495fdf57bfd6d18bb4483d5682e56cce59`；其他工作树不受本片修改。接手仍须核对实际 HEAD 与工作区。 |
 | M5 历史起点 | `372c381f44ecfa1fa53961f137d0058033cbd805`；不是远端当前 main 的核验结论 |
-| 本轮审查版本 | PR #70 在 head `273ef97bd917b14ded24e7f370f3081efa9c983a`、10 项 CI 通过后已合入基线；P2 协议/计划 `1414ec2690123c60a3ca42b8a627ea1681ae2ede` 经独立审查无架构阻断。实现候选仍须独立审查；未合并或部署。U1 的公司 API IP 限制例外不豁免 P2 真实模型门槛。 |
+| 本轮审查版本 | PR #70 在 head `273ef97bd917b14ded24e7f370f3081efa9c983a`、10 项 CI 通过后已合入基线；P2 协议/计划 `1414ec2690123c60a3ca42b8a627ea1681ae2ede` 经独立审查无架构阻断。实现 `1767da3a2c8330e209cf8b0546adc710c1455fa6` 独立审查发现一项失败分类阻断，当前修复与回归情况见 §3；未推送 P2、开 PR、合并或部署。U1 的公司 API IP 限制例外不豁免 P2 真实模型门槛。 |
 | 当前阶段 | R1a/R1b 与只读故障续查已合入；P2 候选实现七项 Prometheus 读取、资源前置检查、有限语法修正及失败收尾，具体契约唯一维护在监控计划 §3.1。真实模型自主调查、真实 Prometheus 资源边界和真实双入口未验收；P3 实战验收独立开放。 |
 | 当前源码与依赖 | 新包 `src/xiaowei/` 仍为应用表 v6。V1-A 新增 `vertex_model.py`（SDK 公开 `Model` 的非流式 Vertex 适配器），`model_api` 增加 `provider="vertex"` 与受控 transport 的认证头/成功校验参数；显式声明已直接导入的 `httpx2>=2.12,<3`（锁定 2.13.1 不变）。V1-B 使 `PolicySession` 随函数调用保存并回放 `provider_data.thought_signature`（单字段白名单，其余供应商字段丢弃），`app.safe_run_config()` 成为应用与 `model check` 共用的运行配置。V2 新增 `runtime.check_model` / `validate_model_config` 与 CLI `model check`。C2 把主模板改为一个 Vertex Profile、一个目标；占位符清单新增 Vertex 模型标记，C2 前模板的标记作为历史值继续拒绝。发布归档仍只含白名单文件 |
 | 新产品入口 | 原生主线仍为 `xiaowei`（与 `python -m xiaowei` 相同）的 `serve`、`config check`、`model check`、`storage init/upgrade/cleanup`、`requests resend`；`listen_host` 可为任意地址（默认 `127.0.0.1`）。镜像固定入口复用同一 CLI，在容器内绑定 `0.0.0.0`，宿主机发布地址由 `XW_WEB_BIND_ADDRESS`（默认 `0.0.0.0`）决定。真实模型、用户 StarRocks 与真实飞书未参与 P3-A 验证；旧 CLI/Compose 不是产品入口 |
@@ -36,15 +36,11 @@
 
 ## 3. 当前计划与下一项工作
 
-**当前下一步：** `762571f` 已独立审查通过；补记下列三条非阻断项后，推送本分支并以 `main`（`1052dabe`）开 PR，新增 handoff 差异另行复审，暂不合并。合入后才从新的 `main` 开分支做 P2 主体：先用官方 Prometheus MCP `v0.18.0` 逐个核对指标/标签/元数据发现、`range_query` 和已加载规则的 schema、错误类型与结果结构，再修订现有切片计划，明确接口、失败分类、PromQL 有限修正边界和验证方法；计划独立审查通过后再实现，不开放写能力、不部署。U1 真实模型旧/新对照及 U2 真实 Lark 收发按原例外留待获准环境验收。
+**当前下一步：** PR #70 已合入基线 `4c5b89495fdf57bfd6d18bb4483d5682e56cce59`；P2 七项读取、正式装配和有限修正已形成候选 `1767da3`。独立审查发现：锁版 SDK 把协议/超限错误也转换为通用断线码，当前分类会错误续查；已补正式入口反例，修复须先明确原“只按类型/码”要求在同码歧义下的取舍。时间解析、规则持续时长和部分失败提示已补回归并修复，具体证据见下文。解决阻断后对新增差异定向复审，再提交、推送并开草稿 PR；真实模型和 Prometheus 资源限额门槛保持开放，不开放写能力、不合并或部署。
 
 **P2 只读故障续查离线证据（`762571f` 已独立审查通过）：** 基于 `1052dabe`，正式 `serve` 的 Web、飞书群替身、真 SDK Runner/治理/Evidence、隔离 PostgreSQL、loopback MCP 与官方 Prometheus MCP `v0.18.0` + 本机合成 API 已验证：可分类的上游 401/403/500、断线和超时只使本源本轮未核实，其他已授权源可继续；失败不生成 Evidence、不重放，本源本轮再次调用为零 I/O；未知结果仍中止。代码生成的失败源说明随回答保存，历史读取在撤权后拒绝；Web Chrome 与飞书卡片能展示失败源和已有事实。先在旧代码观察到正式 Web 用例失败，再实现修复。完整离线套件 **2394 passed, 55 deselected**；最终提示词与断言调整后，受影响的应用/监控用例 **101 passed, 1 deselected**，监控单文件 `-W error` **18 passed, 1 deselected**，Chrome `-m browser` **1 passed, 18 deselected**。Ruff check/format、mypy（24 文件）、离线锁文件与差异检查通过。以上不证明真实模型会自主选对工具、公司 Prometheus/网络、真实飞书/Lark、部署或用户验收；P2 发现/range/语法纠错和服务端查询限额验收仍待后续切片。
 
-**P2 只读故障续查非阻断项（独立审查已确认，后续 P2 复查）：**
-
-1. 同一源的并行查询可能在失败记录产生前都已开始，一次成功、一次失败时，已有事实与按源生成的“未核实”说明并存，展示可能互相矛盾。相关路径：`GovernedTools.invoke` / `EvidenceStore._monitoring_failure_notice`；后续验证同源成功/失败混合时的结果与限制表述，不把失败查询当成功 Evidence。
-2. 全部监控读取失败且 SDK 步数同时用尽时，`finish_on_limit` 因没有成功 Evidence 不执行收尾，用户收到步骤上限失败提示，没有“未经数据验证”的排查建议。后续验证无成功证据的步骤上限场景，保持不重放工具、不编造事实。
-3. `PolicySession.commit_validated` 内部复核重建 `TurnAnswer` 时未带上 `monitoring_failures`；应用提交前的完整验证已带上该字段，但 Session 的第二次验证未覆盖失败源。后续验证提交复核时失败源的当前权限，保证撤权不能越过该复核。
+**PR #70 三条非阻断项：** 本片候选已覆盖同源成功/失败的范围说明、全失败且步数耗尽的无工具收尾，以及提交时失败源撤权复核；实际契约只在 [P2 计划 §3.1](docs/superpowers/plans/2026-10-09-monitoring-mcp.md) 维护。原版本的离线结果只证明该版本；候选覆盖与当前阻断以本节最新证据为准。
 
 **U1/U2 本地证据：** 最终真 Runner/SDK、隔离 PostgreSQL、驱动与协议替身下新产品全量 **2375 passed, 54 deselected**（`-W error`）；最后增量的群聊/观测/版本绑定 **160 passed**，此前九文件调用链 **631 passed**，两组都在最终全量内。Ruff、格式（79 文件）、mypy（24 源文件）、锁文件与差异检查通过。5×400 回归的卡片构造从 8644 次降至 102 次，零行/完整端点及 SQL 优先保持；两个 Git 源码树的报告 SHA 与实际请求哈希正确，脏树、无 Git 及中途变化拒绝。失败/取消/关闭异常的请求记录保留，异常传播不变，新增五组版本/性能变异与两组请求漏报变异均被发现。全量中另复现基线群测试把发送开始当完成的竞态，只改测试等待真实网关完成、保留原断言并加延迟对照；删除等待的变异也被发现。未变 Web 路径沿用六个 18501 用例含参数化 **9 passed** 的有效 Chrome 证据。默认可见 DDL 超限等非技术原因，区分无结果/零行，建议恢复未核实标签；嵌套值额外类型标签暂不做。完整命令、首次失败、日志、前次有效审查与残余边界见计划 §10。产品安全检查与发送失败语义未变；真实模型行为、Lark 和公司入口未验收；用户已批准本次 U1 门槛例外及开 PR/合入，不能把例外写成实战通过。
 
@@ -63,6 +59,10 @@
 验证环境沿用本机 `/private/tmp/xw-g0-venv` 与 R1a 的二进制，设置 `SDK_TEST_POSTGRES_URL=postgresql+asyncpg://postgres@127.0.0.1:55432/postgres`、`XW_TEST_PROMETHEUS_MCP_BIN=/private/tmp/xw-prometheus-mcp-v018/prometheus-mcp-server`、`PYTHONPATH=src:.`。`python -m pytest tests/sdk_core tests/p1b -q --tb=short`：**2456 passed, 56 deselected**；随后只新增精确旧基线的 query 指纹断言和强化拒绝观测，定向 `test_prometheus_p2.py -k 'query_policy_preserves or range_limits or commit_rechecks_failure' -q -W error --tb=short`：**10 passed**，产品源码未变。设置 `SDK_TEST_CHROME` 后对 P2/R1a/read-recovery 三文件显式 `-m browser -q -W error`：**3 passed, 89 deselected**，含正式浏览器一成功、一越界零 I/O 拒绝。`ruff check .`、改动文件 `ruff format --check`、`mypy src --cache-dir /private/tmp/xw-p2-all-mypy-cache`（126 文件）、`uv lock --check --offline`、现有文档命令检查（2 passed）、本地链接及 `git diff --check` 通过；mypy 初次因工作树缓存不可写失败，改用临时缓存后通过，没有放宽检查。
 
 六项仓库外隔离变异均由真实断言发现：错误载荷混入结构化内容、nullable 数组元素/约束漂移、两次修正额度、提交时失败源复核、点数 I/O 前上限、metadata 未知尾部；诊断脚本位于 `/private/tmp/xw-p2-mutation-check.py` 和 `/private/tmp/xw-p2-behavior-mutations.py`，临时源码副本已删除，未修改 SDK。模型为 HTTP 脚本、StarRocks/飞书底层为替身，正式入口、SDK Runner、治理、PostgreSQL 和 Session 为产品路径。真实模型配置尚未取得，计划业务样例、工具选择/取证/澄清/修正质量、耗时/用量门槛保持开放；真实 Prometheus 的 timeout/max-samples/max-concurrency、高基数行为、非 loopback 公司链路和真实 Lark 未验证。不将离线成功写成能力验收，也不继承 U1 的合入例外。
+
+`1767da3` 独立审查后的当前差异：先补正式入口回归，复现八位 Unix 秒/分数秒误判日期、规则 duration 丢失和模型指令否定同源成功事实（5 failed、2 passed），再修正数值优先解析、可选告警 `for` 秒数和实际模型指令。相同环境运行 `test_prometheus_p2.py test_prometheus_repair.py test_prometheus_p2_protocol.py test_monitoring_r1a.py -q -W error --tb=short` 为 **89 passed, 2 deselected**；四投影与历史回放实际保留 alerting duration=60、缺失 recording duration=null。P2/R1a/read-recovery 的 Chrome 回归为 **3 passed, 96 deselected**；Ruff 全仓检查、改动格式、mypy（126 源文件）和差异检查通过。此前 2456 项全量结果只属于修订前候选，不将其当作本次新差异的全量结果。
+
+**当前阻断未关闭：** 真 SDK 2.2.0 的 `-32600` 可表示错误 Content-Type、202 请求响应、重定向或非法请求；旧 SSE 分支还会丢失字节超限原因，将它和响应前 EOF 都转换为 `-32000`。`test_monitoring_protocol_failures.py` 沿正式 `serve/Web → Runner → 治理 → MCP` 验证后为 **6 failed, 1 passed**：六项误续查确实取得 completed，JSON 超限对照正常中止。测试未跳过、不弱化断言；修复后须证明模型不继续、无成功 Evidence、无重放。锁版 SDK 无专用类型区分这些情况；已集中请求明确原 R1b“按类型/码、不读消息文本”的取舍，推荐仅接受经真路径验证的两个完整固定关闭信号，其他同码形态仍中止。尚未获得答复，未改该分类，阻断解决前不推送或开 PR。
 
 **R1b、G3 与写切片后续验收：** R1a 已实现产品内 Prometheus `query` 契约/策略、可信配置 HTTP、`serve` 装配、`StaticAccess` 源授权、投影上限和 `/readyz` 状态，并以正式 Web/飞书替身验证成功与拒绝路径；R1b 已随 PR #68 合入；真实外部节点验证仍待完成。非 loopback 公司内网固定地址、真实 Prometheus 及 Lark 线上路径仍待真实环境验证。Prometheus MCP 会把小维 `auth_ref` 的 Bearer 原样转发给上游，不能视为另一层身份隔离；真实环境验收时用固定内网 HTTP 复测，并仅使用 Prometheus 侧只读凭据。`_accepts_input` 通用于所有 MCP 工具：S6/D7/C8 分别列出选中写工具省略的可选参数及默认行为；会改变覆盖、移动或授权范围的默认值须在本地契约显式声明并发送，否则不开放。远端根 schema 多出 `$schema` 会保守隐藏工具；G3 核对 Grafana 时先识别这类不匹配，不误判为整体 Server 不兼容。
 

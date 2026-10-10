@@ -506,15 +506,15 @@ def _timestamp(value: object, now: datetime) -> Decimal:
             seconds = Decimal(str(now.timestamp())) + _seconds(value)
         else:
             try:
-                stamp = datetime.fromisoformat(value.replace("Z", "+00:00"))
-            except ValueError:
                 seconds = _seconds(value)
-                if _DURATION.fullmatch(value):
-                    raise ValueError from None
-            else:
+            except ToolRejectedError:
+                stamp = datetime.fromisoformat(value.replace("Z", "+00:00"))
                 if stamp.tzinfo is None:
-                    raise ValueError
+                    raise ValueError from None
                 seconds = Decimal(str(stamp.timestamp()))
+            else:
+                if _DURATION.fullmatch(value):
+                    raise ValueError
         # 官方 ParseTimestamp 以毫秒舍入，发送已舍入秒值防止记录更细的虚假精度。
         return seconds.quantize(Decimal("0.001"), rounding=ROUND_HALF_UP)
     except (ValueError, InvalidOperation, OverflowError):

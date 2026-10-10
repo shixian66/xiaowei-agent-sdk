@@ -177,6 +177,39 @@ async def test_formal_range_records_actual_expression_window_and_warnings(env: E
 
 
 @pytest.mark.parametrize(
+    ("timestamp", "expected"),
+    [
+        ("19700101", "19700101"),
+        ("20240101", "20240101"),
+        ("20240101.1236", "20240101.124"),
+        ("-86400.1234", "-86400.123"),
+        ("2024-07-03T09:46:40Z", "1720000000"),
+    ],
+)
+async def test_unix_seconds_are_not_compact_dates_in_formal_range(
+    env: Env, timestamp: str, expected: str
+) -> None:
+    arguments = {"query": "up", "start_time": timestamp, "end_time": timestamp, "step": "1"}
+    with serve(p2_server) as source:
+        async with env.running(env.config(**p2_config(source.url))) as served:
+            await served.page()
+            message = env.scripts.add(
+                "指定时刻查询", tool_call(f"{SOURCE}__range_query", **arguments), cite()
+            )
+            body = (await served.turn(message, "query")).json()
+            assert body["state"] == "completed"
+            (fact,) = body["delivery"]["facts"]
+            assert fact["metadata"]["start_time"] == expected
+            assert fact["metadata"]["end_time"] == expected
+        assert source.recorder.tool_calls == [
+            (
+                "range_query",
+                {**arguments, "start_time": expected, "end_time": expected, "step": "1000ms"},
+            )
+        ]
+
+
+@pytest.mark.parametrize(
     "changes",
     [
         {"step": "0s"},
@@ -275,6 +308,41 @@ async def test_official_seven_tools_reach_formal_web_and_evidence(
                 if name == "metric_metadata":
                     assert state.requests[0][1] == {}  # metric 空串，limit 省略，默认不限制。
             assert await env.scalar("SELECT count(*) FROM xiaowei_evidence") == 1
+
+
+async def test_official_rules_duration_survives_all_projections_and_replay(
+    env: Env, official_binary: Path
+) -> None:
+    def check_duration(data: dict[str, Any]) -> None:
+        alerting, recording_rule = data["groups"][0]["rules"]
+        assert alerting["duration"] == 60
+        assert recording_rule["duration"] is None
+
+    with prometheus_backend() as (backend, state):
+        with official_server(official_binary, backend.server_port, tools="list_rules") as url:
+            async with env.running(env.config(**p2_config(url))) as served:
+                await served.page()
+                message = env.scripts.add(
+                    "CPU 告警须持续多久", tool_call(f"{SOURCE}__list_rules"), cite()
+                )
+                body = (await served.turn(message, "query")).json()
+                assert body["state"] == "completed"
+                check_duration(last_output(env.scripts.calls[message][-1])["data"])
+                check_duration(json.loads(body["delivery"]["facts"][0]["result_json"]))
+                for sql in (
+                    "SELECT model_content FROM xiaowei_evidence",
+                    "SELECT session_content FROM xiaowei_evidence",
+                    "SELECT web_content FROM xiaowei_evidence",
+                    "SELECT feishu_content FROM xiaowei_evidence",
+                ):
+                    envelope = json.loads(await env.scalar(sql))
+                    check_duration(envelope["data"])
+                followup = env.scripts.add("解释刚才的持续条件，不再查询", cite())
+                assert (await served.turn(followup, "query", request_id="r2")).json()["state"] == (
+                    "completed"
+                )
+                check_duration(last_output(env.scripts.calls[followup][0])["data"])
+            assert len(state.requests) == 1
 
 
 @pytest.mark.browser
@@ -475,6 +543,10 @@ async def test_same_source_parallel_success_and_failure_are_not_contradictory(en
             assert len(body["delivery"]["facts"]) == 1
             assert "部分读取" in body["delivery"]["monitoring_notice"]
             assert "这些源" not in body["delivery"]["monitoring_notice"]
+            instructions = env.scripts.calls[message][-1].instructions
+            assert "该源本轮未取得事实" not in instructions
+            assert "该次调用未取得事实" in instructions
+            assert "已有成功查询仅证明各自覆盖范围" in instructions
 
 
 async def test_commit_rechecks_failure_source_authorization(

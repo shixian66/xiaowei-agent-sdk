@@ -708,6 +708,7 @@ class _LoadedRule(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True)
     name: str
     query: str
+    duration: float | None = Field(default=None, description="告警 for 持续秒数；未返回时为 null")
     labels: dict[str, str] = Field(default_factory=dict)
     annotations: dict[str, str] | None = None
     state: str | None = None
@@ -800,8 +801,10 @@ def _monitoring_catalog(
             _PrometheusRulesResult,
             ("groups",),
             "读取当前已加载的原生规则和求值状态，不修改规则。"
+            "duration 是告警 for 持续秒数，null 表示上游未返回。"
             "health 是规则求值状态；官方 Server 不返回 type 和上游 warnings。",
-            "规则定义/求值状态不是主机健康；官方 Server 不返回 type 和上游 warnings。",
+            "duration 为告警 for 持续秒数，null 表示未返回；规则定义/求值状态不是主机健康。"
+            "官方 Server 不返回 type 和上游 warnings。",
         ),
     )
     policies = {"query": query_policy}

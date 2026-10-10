@@ -45,7 +45,7 @@
 
 ### 3.1 P2 当前切片（基线 `4c5b89495fdf57bfd6d18bb4483d5682e56cce59`）
 
-PR #70 的只读故障续查已合入。本片只扩展 Prometheus 读取，不改写能力。先用官方 v0.18.0 核约，再沿 `serve → Web/飞书 → Runner → GovernedTools → MCP → Evidence/PolicySession → 交付` 实现。协议/计划的独立审查已覆盖 `1414ec2690123c60a3ca42b8a627ea1681ae2ede`，没有架构阻断；未覆盖后续实现。候选的当前验证只记 handoff；不合入实验分支。
+PR #70 的只读故障续查已合入。本片只扩展 Prometheus 读取，不改写能力。先用官方 v0.18.0 核约，再沿 `serve → Web/飞书 → Runner → GovernedTools → MCP → Evidence/PolicySession → 交付` 实现。协议/计划的独立审查已覆盖 `1414ec2690123c60a3ca42b8a627ea1681ae2ede`，没有架构阻断；后续实现 `1767da3a2c8330e209cf8b0546adc710c1455fa6` 的独立审查发现一项 SDK 同码歧义导致协议错误续查的阻断，解决并复审后才能交付。候选的当前修复、验证与未解决取舍只记 handoff；不合入实验分支。
 
 **Agent 的任务和选择。** 用户问“host1 最近为什么 CPU 告警”“这台主机叫什么、监控里能看到多少 CPU/内存”“Kafka 积压是否和已加载规则有关”：Agent 自选获准源、指标/标签、发现方式、表达式、时间窗、步长和调查顺序；可直接查已知指标，缺关键业务含义时才澄清。主机配置仅报告指标实际提供的事实，不推断未采集的硬件配置。失败或信息不足时可换已授权源、补证据或结束；不要求每次先发现、先读规则或固定工具顺序。代码管授权、资源、真实证据和分类边界。
 
@@ -56,7 +56,7 @@ PR #70 的只读故障续查已合入。本片只扩展 Prometheus 读取，不�
 | `label_names` / `label_names`；`label_values` / `label_values` | 均含 `matches, start_time, end_time`；后者另有 `label`。空 matches 表示源内发现；返回排版文本/warnings 与实际时间窗 |
 | `series` / `series` | `matches, start_time, end_time`；至少一个选择器。返回标签集排版文本/warnings 与实际时间窗；不称为主机资产清单 |
 | `metric_metadata` / `metric_metadata` | `metric`（空串表示发现全部元数据）；不发送可选 limit，沿用 Server 默认。元数据 JSON 包为固定 `metadata` 字段，类型/help/unit 做声明式投影 |
-| `list_rules` / `list_rules` | 无参数；只读当前已加载规则，投影 group/name/query/labels/annotations/state/health/lastEvaluation 等必要事实。Server 不返回 type；不以猜测补上。health 是规则求值状态，不是主机健康 |
+| `list_rules` / `list_rules` | 无参数；只读当前已加载规则，投影 group/name/query/duration/labels/annotations/state/health/lastEvaluation 等必要事实。duration 是告警 `for` 持续秒数，未返回时为 null，不补零。Server 不返回 type；不以猜测补上。health 是规则求值状态，不是主机健康 |
 
 策略 ID 均为 `prometheus.<后缀>`，工具/目标 ID 沿用源的静态映射和 Grants。只可配置本表的准确映射与子集；空配置、旧 query 配置和旧 query/StarRocks Evidence 不变。SDK 严格输入的字段均必填。只对本地非 nullable 数组、远端 `type:[null,array]` 且其余约束相同的情况接受类型子集；反方向、元素/约束漂移仍隐藏工具。其余未暴露可选参数不发送，默认行为见锁版用例，不引入 schema 通用转换器。
 
