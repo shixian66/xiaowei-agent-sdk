@@ -8,6 +8,7 @@ from typing import Any
 
 import httpx
 import pytest
+from agents.mcp import MCPServerStreamableHttp
 from agents.testing import function_call
 from mcp.server.mcpserver import MCPServer
 from mcp.types import CallToolResult, TextContent
@@ -25,6 +26,7 @@ from tests.sdk_core.test_prometheus_p2_protocol import (
     SAMPLES,
     WINDOW,
     prometheus_backend,
+    text_result,
 )
 from tests.sdk_core.test_prometheus_p2_protocol import official_binary as official_binary
 from tests.sdk_core.test_runtime import Env, serve_config, until
@@ -1077,6 +1079,69 @@ async def test_official_unbounded_metric_names_still_abort_on_receive_limit(
                 assert body["state"] == "failed"
                 assert len(env.scripts.calls[message]) == 1
             assert await env.scalar("SELECT count(*) FROM xiaowei_evidence") == 0
+
+
+async def test_official_rules_ignore_truncation_and_abort_above_receive_limit(
+    env: Env, official_binary: Path
+) -> None:
+    group = RULES["groups"][0]
+    samples = {
+        **SAMPLES,
+        "/api/v1/rules": {
+            "groups": [
+                {
+                    **group,
+                    "rules": [
+                        {**group["rules"][0], "name": f"HostCPUHigh{index:04d}"}
+                        for index in range(300)
+                    ],
+                }
+            ]
+        },
+    }
+    with prometheus_backend(samples=samples) as (backend, state):
+        with official_server(
+            official_binary, backend.server_port, tools="list_rules", truncation_limit=200
+        ) as url:
+            # 无客户端接收上限的协议对照：全局 200 不会裁剪这 300 条规则。
+            async with MCPServerStreamableHttp(
+                {"url": url}, max_retry_attempts=0, client_session_timeout_seconds=5
+            ) as client:
+                listed = {tool.name: tool.input_schema for tool in await client.list_tools()}
+                assert listed["list_rules"] == {
+                    "type": "object",
+                    "properties": {},
+                    "additionalProperties": False,
+                }
+                result = await client.call_tool("list_rules", {})
+                assert not result.is_error
+                raw = text_result(result)
+                assert len(raw.encode()) > 64_000
+                assert "--prometheus.truncation-limit" not in raw
+                rules = json.loads(raw)["groups"][0]["rules"]
+                assert len(rules) == 300
+                assert rules[-1]["name"] == "HostCPUHigh0299"
+                assert state.requests == [("/api/v1/rules", {}, None)]
+
+            values = p2_config(url)
+            assert values["mcp_servers"][0]["max_response_bytes"] == 64_000
+            async with env.running(env.config(**values)) as served:
+                await served.page()
+                message = env.scripts.add(
+                    "当前已加载哪些告警规则",
+                    tool_call(f"{SOURCE}__list_rules"),
+                    cite(),
+                )
+                body = (await served.turn(message, "query")).json()
+                assert state.requests == [("/api/v1/rules", {}, None)] * 2
+                assert body["state"] == "failed"
+                assert "本轮未交付；不会自动重试" in body["delivery"]["content"]
+                assert len(env.scripts.calls[message]) == 1
+                assert await env.scalar("SELECT failure_code FROM xiaowei_request") == (
+                    "evidence_failed"
+                )
+            assert await env.scalar("SELECT count(*) FROM xiaowei_evidence") == 0
+            assert await env.scalar("SELECT count(*) FROM agent_messages") == 0
 
 
 def test_discovery_descriptions_offer_narrowing_without_fixed_order() -> None:
