@@ -10,7 +10,7 @@ import json
 from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
-from typing import Any
+from typing import Any, Literal
 
 import pytest
 from pydantic import SecretStr, ValidationError
@@ -96,10 +96,16 @@ class BarrierStore(ChannelStore):
     entered: asyncio.Event
     release: asyncio.Event
 
-    async def complete(self, record: RequestRecord, result: TurnAnswer) -> RequestRecord:
+    async def complete(
+        self,
+        record: RequestRecord,
+        result: TurnAnswer,
+        *,
+        failure_code: Literal["result_not_saved", "action_feedback_failed"] = "result_not_saved",
+    ) -> RequestRecord:
         self.entered.set()
         await self.release.wait()
-        return await super().complete(record, result)
+        return await super().complete(record, result, failure_code=failure_code)
 
 
 def app_config(**overrides: Any) -> AppConfig:

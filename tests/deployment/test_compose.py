@@ -424,7 +424,8 @@ def test_formal_compose_entry_success_failure_network_and_signal(
 
         downgraded = _pg(
             pg_id,
-            "BEGIN; DROP TABLE xiaowei_installation; "
+            # 本机演练重建真实 v5 形状，不能只改版本而留下后来新增的表。
+            "BEGIN; DROP TABLE xiaowei_action; DROP TABLE xiaowei_installation; "
             "UPDATE xiaowei_schema_version SET version = 5; COMMIT",
         )
         assert downgraded.returncode == 0
@@ -507,7 +508,7 @@ def test_formal_compose_entry_success_failure_network_and_signal(
             "upgrade",
             "--bind-existing-digest-key",
         )
-        assert restored.returncode == 0 and restored.stdout.strip() == "storage version 6"
+        assert restored.returncode == 0 and restored.stdout.strip() == "storage version 7"
         upgrade_process = None
 
         wrong_key = "wrong digest $ # space ' quote"
