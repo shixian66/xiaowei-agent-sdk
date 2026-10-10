@@ -1,6 +1,6 @@
 # 小维：当前交接
 
-> 更新：2026-10-10，Asia/Shanghai。这里只记录当前事实、证据与下一项工作；设计见 [ARCHITECTURE.md](ARCHITECTURE.md)，路线见 [DEVELOPMENT_PLAN.md](DEVELOPMENT_PLAN.md)，协作规则见 [AGENTS.md](AGENTS.md)。
+> 更新：2026-10-11，Asia/Shanghai。这里只记录当前事实、证据与下一项工作；设计见 [ARCHITECTURE.md](ARCHITECTURE.md)，路线见 [DEVELOPMENT_PLAN.md](DEVELOPMENT_PLAN.md)，协作规则见 [AGENTS.md](AGENTS.md)。
 
 **OpenAI Agents SDK 负责 Agent Loop；小维负责权限、受治理工具执行、证据真实性和数据边界。**
 
@@ -11,7 +11,7 @@
 | 仓库 | [shixian66/xiaowei-agent-sdk](https://github.com/shixian66/xiaowei-agent-sdk) |
 | 本地目录 / 分支 | `/Users/kloenguyen/.codex/worktrees/session-limits-plan/agent-SDK` / `codex/session-limits-plan`，本轮文档基线为 PR #73 合入后的 `origin/main`：`2b541a30bb39d88d160e7f6f69de1c81fdea74d8`。主工作区及监控工作树保留；接手仍须核对实际 HEAD 与差异。 |
 | M5 历史起点 | `372c381f44ecfa1fa53961f137d0058033cbd805`；不是远端当前 main 的核验结论 |
-| 本轮审查版本 | 当前生产对话七项修复计划 v2 待独立审查，未实现。此前 A4 计划 `0345d32cb8369a39910dbb07237d4e23e702025d` 与产品 `677b6745937378fc026024871e37036d17d2d144` 的独立审查无阻断，A4 已随 PR #73 合入；这些证据不证明本轮会话修复或真实环境通过。 |
+| 本轮审查版本 | 当前生产对话七项修复计划 v4 为 v3 独立审查后的文档修订，未实现、待复审；B1 两条目标规则均已获用户决定，A2/A3 原文已补齐，C8 繁忙再试上限已获用户 2026-10-11 决定，尚未实现。此前 A4 计划 `0345d32cb8369a39910dbb07237d4e23e702025d` 与产品 `677b6745937378fc026024871e37036d17d2d144` 的独立审查无阻断，A4 已随 PR #73 合入；这些证据不证明本轮会话修复或真实环境通过。 |
 | 当前阶段 | R1a/R1b、只读故障续查、P2、G3、A4 离线部分已合入；真实模型自主调查、公司三源与真实双入口未验收。生产对话七项修复仅完成设计计划，P3 实战验收独立开放。 |
 | 当前源码与依赖 | 新包 `src/xiaowei/` 仍为应用表 v6。V1-A 新增 `vertex_model.py`（SDK 公开 `Model` 的非流式 Vertex 适配器），`model_api` 增加 `provider="vertex"` 与受控 transport 的认证头/成功校验参数；显式声明已直接导入的 `httpx2>=2.12,<3`（锁定 2.13.1 不变）。V1-B 使 `PolicySession` 随函数调用保存并回放 `provider_data.thought_signature`（单字段白名单，其余供应商字段丢弃），`app.safe_run_config()` 成为应用与 `model check` 共用的运行配置。V2 新增 `runtime.check_model` / `validate_model_config` 与 CLI `model check`。C2 把主模板改为一个 Vertex Profile、一个目标；占位符清单新增 Vertex 模型标记，C2 前模板的标记作为历史值继续拒绝。发布归档仍只含白名单文件 |
 | 新产品入口 | 原生主线仍为 `xiaowei`（与 `python -m xiaowei` 相同）的 `serve`、`config check`、`model check`、`storage init/upgrade/cleanup`、`requests resend`；`listen_host` 可为任意地址（默认 `127.0.0.1`）。镜像固定入口复用同一 CLI，在容器内绑定 `0.0.0.0`，宿主机发布地址由 `XW_WEB_BIND_ADDRESS`（默认 `0.0.0.0`）决定。真实模型、用户 StarRocks 与真实飞书未参与 P3-A 验证；旧 CLI/Compose 不是产品入口 |
@@ -36,7 +36,7 @@
 
 ## 3. 当前计划与下一项工作
 
-**当前下一步：** 复审[生产对话七项修复计划 v3](docs/superpowers/plans/2026-10-10-production-dialogue-repairs.md)；R7 已补目标来源、既有工具纠错反馈/停止分类及完整任务验收。仅文档，真实模型未验证，C7 硬目标确认仍待批准；实施须另获授权。监控主线 A4 已随 PR #73 合入，后续仍为 W5 群审批底座及真实环境验收，契约/门槛只在监控计划维护；与本片并行时协调共享调用链、迁移版本和隔离测试环境。
+**当前下一步：** 复审[生产对话七项修复计划 v4](docs/superpowers/plans/2026-10-10-production-dialogue-repairs.md)；v3 审查的唯一可读匹配与共享群明确目标引用均获用户决定，详见计划 §3.3，A2/A3 已补齐。C8 已获用户 2026-10-11 批准：同轮同 StarRocks 目标最多一次零 SQL 繁忙再试，由治理层限制，换工具或参数不另给额度；尚未实现。R7 已补闭集反馈、停止类错误不劝重试、分工具/源的发现与具体读取验收、双模型隐藏工具拒收；E5a 已补身份/@/类型顺序，C7 有关键误选触发条件。本轮文档检查 2 passed，链接/路径/章节/版本一致性与 diff check 通过，命令见计划 §10；仅文档，真实模型未验证，C7 硬目标确认仍待批准；实施须另获授权。监控主线 A4 已随 PR #73 合入，后续仍为 W5 群审批底座及真实环境验收，契约/门槛只在监控计划维护；与本片并行时协调共享调用链、迁移版本和隔离测试环境。
 
 **A4 当前离线证据：** 先在旧代码实跑正式 Web 两条 RED（`alertmanager_sources` 不识别）；实现后正式 `serve → Web/指定群事件替身 → 真 SDK Runner → GovernedTools → 外部 API v2 → Evidence/PolicySession/PostgreSQL → 交付` 通过。官方 Alertmanager v0.34.1 仅 loopback、无外部通知接收器；测试预置合成告警/静默的 POST 不属于产品写能力。社区候选的固定版本与不可接入/错误分类损失证据只在计划 §3.3 维护，不把不同协议的结果相互替代。
 
