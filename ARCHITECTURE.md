@@ -291,8 +291,8 @@ Alertmanager 原生 API v2 若由薄 Adapter 直连，须支持其 Web 配置可
 - **B1(a)：唯一可读匹配。** 未指定集群时，Agent 可直接澄清或按任务做获准发现，不强制穷举。必要候选范围的发现完整、没有源错误、未完成分页、截断或预算中断，且恰好一个可读的精确库表匹配时，可以继续；必须说明“仅在该集群的本轮可读范围内找到，其他集群未匹配不代表不存在”。多匹配、模糊命中或发现不完整先澄清。发现结果不是用户明确选择，不能覆盖明确目标、禁止执行或诊断范围；选定目标不可用时不自动换源。
 - **B1(b)：群目标引用。** 当前发起人清楚引用群成员明确指定且仍适用的目标时可沿用，只沿用目标/对象，不继承执行许可；本条意图与当前身份、群、工具、源权限独立复核。引用不清、多个对象/来源、目标已切换、新建后的旧历史、仅有模型上次调用时先澄清。
 - 目标判断由单 Agent 结合可信说明与工具结果完成，没有新增分类器、Planner 或硬目标选择入口。参数 cluster 的一致性、当前权限、SQLGuard、预算与 Evidence 仍由执行链强制核对；上述提示规则不能证明自然语言永不误选。
-- I/O 前治理拒绝由 FunctionTool 返回闭集 code、固定 reason 与 retry_this_turn；只允许参数/受支持 SQL 或目标缺项在现有预算内修正、补获准发现或澄清。代码为 invalid_arguments、unknown_target、object_not_readable、not_allowed、authorization_unavailable、budget_exhausted、schema_unavailable、source_stopped、busy；SQL 细项复用 SQLGuard 固定枚举，busy 附 remaining_retries。无统一“Please try again”，不读取异常原文，不生成成功 Evidence。
-- 无权、预算或结构暂不可用时停止相关操作；结构暂不可用不等待本轮刷新、不换集群。监控失败/表达式修正按 §5 原契约；执行后失败、结果未知、Evidence 或最终回答拒收保持原中止路径，不因新反馈改成自动重放。
+- I/O 前治理拒绝由 FunctionTool 返回闭集 code、固定 reason 与 retry_this_turn；只允许参数/受支持 SQL 或目标缺项在现有预算内修正、补获准发现或澄清。代码为 invalid_arguments、unknown_target、object_not_readable、unsupported、capacity_exceeded、precheck_failed、not_allowed、authorization_unavailable、budget_exhausted、schema_unavailable、source_stopped、busy；SQL 细项复用 SQLGuard 固定枚举，busy 附 remaining_retries。可信拒绝点可提供闭集提示标识，由 FunctionTool 映射固定说明，保留游标从头开始、收窄搜索及监控参数的具体改法；提示不改变类别的可修正/停止语义。无统一“Please try again”，不读取异常原文，不生成成功 Evidence。
+- 能力尚未开放、不可通过参数修正的固定容量超限、前置检查自身失败，以及无权、预算或结构暂不可用时停止相关操作；结构暂不可用不等待本轮刷新、不换集群。监控失败/表达式修正按 §5 原契约；执行后失败、结果未知、Evidence 或最终回答拒收保持原中止路径，不因新反馈改成自动重放。
 
 <a id="p25-scope"></a>
 

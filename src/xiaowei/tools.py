@@ -30,6 +30,7 @@ from xiaowei.governance import (
     PromQLExpressionError,
     ToolRejectCode,
     ToolRejectedError,
+    ToolRejectHint,
 )
 from xiaowei.models import ToolContract, ToolRequest, ToolResult
 from xiaowei.sqlguard import REJECTION_MESSAGES
@@ -45,6 +46,12 @@ _REJECTION_FEEDBACK: dict[ToolRejectCode, tuple[str, bool]] = {
         "参数不符合工具契约或SQL写法不受支持；检查提供的参数schema和受支持写法，修改后再调用，不重发同一错误",
         True,
     ),
+    "unsupported": ("该能力尚未开放，未执行；已停止该操作，告诉用户能力限制，不换参数绕过", False),
+    "capacity_exceeded": (
+        "结果或生成SQL超过固定容量限额，未执行；已停止该操作，告诉用户容量限制，不反复调用",
+        False,
+    ),
+    "precheck_failed": ("工具前置检查失败，未执行；停止该操作，告诉用户当前无法执行", False),
     "unknown_target": (
         "目标未确认，未执行；核实本轮用户明确目标或完整发现的唯一可读匹配，不猜选集群；信息不足先澄清",
         True,
@@ -70,8 +77,61 @@ _REJECTION_FEEDBACK: dict[ToolRejectCode, tuple[str, bool]] = {
 }
 
 
+_REJECTION_HINTS: dict[ToolRejectHint, str] = {
+    "restart_cursor": (
+        "cursor 无效、已失效或与本次参数不一致；请从头开始，cursor 传 null，再按返回的游标续取"
+    ),
+    "search_scope": (
+        "下一个匹配对象的一行超过单值或结果字节上限；"
+        "请用 database 过滤或更具体的关键词避开它，不重发同一搜索"
+    ),
+    "search_keyword": (
+        "keyword 不能为空白；请给出有效关键词，列出全部表时使用 keyword=null 并指定 database"
+    ),
+    "database_required": ("列出全部表须指定 database；库名不明确先核实，列库请用 list_databases"),
+    "page_size": "page_size 须为正整数且不超过工具说明中的页大小上限；修改后再调用",
+    "audit_window": "时间窗须为正整数分钟且不超过工具说明中的审计窗口上限；请缩小或核实窗口",
+    "audit_order": "order_by 只允许工具schema列出的排序方式；修改后再调用",
+    "internal_ddl_only": (
+        "原始 DDL 未读取：只支持普通内部表，视图和物化视图尚未开放；已停止该操作，告诉用户能力限制"
+    ),
+    "database_capacity": (
+        "下一个库名超过结果容量，无法列出；已停止列库，告诉用户容量限制，不反复调用"
+    ),
+    "column_capacity": (
+        "下一列的定义（含注释）超过单值或结果字节上限，无法显示；"
+        "已停止读取字段结构，告诉用户容量限制"
+    ),
+    "ddl_sql_capacity": (
+        "生成的 SHOW CREATE TABLE 超过 SQL 字节限额；已停止原始 DDL 读取，告诉用户容量限制"
+    ),
+    "change_promql": (
+        "该表达式本轮已解析失败，未重发；修改括号、运算符或函数参数后再调用，不重发同一表达式"
+    ),
+    "prometheus_text": "表达式/指标名最多8192字符，查询表达式不能为空；修改后再调用",
+    "metric_required": (
+        "metric 指标名不能为空；请提供具体指标，未知名称可用 label_values 按需发现"
+    ),
+    "selectors": "选择器最多32个、每个1–8192字符；series 至少一个选择器；修改后再调用",
+    "label_name": "label 须为1–256字符的标签名（字母/下划线开头）；修改后再调用",
+    "time_window": "起止时间须有序，窗口不超过31天；请核实起止时间或缩小窗口",
+    "range_step": "step 至少1秒、每序列最多11000点；请增大步长或缩小窗口",
+    "step_precision": "step 须为整毫秒且至少1秒；修改后再调用",
+    "duration_format": "时间/步长须为有限秒数或单单位时长（如30s/5m）；修改后再调用",
+    "timestamp_format": "时间须为Unix秒、含时区RFC3339、now或负的单单位时长；修改后再调用",
+    "grafana_text": "查询文本最多2000字符，其他文本最多256字符，uid 不能为空；修改后再调用",
+    "grafana_tags": "标签最多32个，每个1–256字符；修改后再调用",
+    "grafana_pagination": (
+        "limit 须为1–100；page 从1开始，offset/panelId 从0开始，不超过32位整数；修改后再调用"
+    ),
+    "grafana_time_window": "from/to 须为有序 Unix 毫秒，窗口不超过31天；请核实起止时间或缩小窗口",
+}
+
+
 def _rejection_feedback(exc: ToolRejectedError, name: str) -> str:
     reason, retry = _REJECTION_FEEDBACK[exc.code]
+    if exc.hint is not None:
+        reason = _REJECTION_HINTS[exc.hint]
     feedback: dict[str, object] = {
         "status": "rejected",
         "code": exc.code,

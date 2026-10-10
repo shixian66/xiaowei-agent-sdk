@@ -38,15 +38,17 @@
 
 **当前下一步：** 将 R7 本地候选的精确 SHA 交独立审查，处理批准范围内的阻断后再请求后续操作授权；本轮不推送、不开 PR、不合并、不部署。用户已批准的 B1(b)、R7 模型例外及其他六项方向统一见[计划 v5](docs/superpowers/plans/2026-10-10-production-dialogue-repairs.md#1-基线授权与生产证据)，不把方向当作实施授权。私聊/测试群观察也须另获部署授权；真实模型未验证。
 
-**R7 当前本地实现与证据：** 产品基线 `2b541a30bb39d88d160e7f6f69de1c81fdea74d8`；计划 v4 / `4484e5cb183047c5b64d9523dcc5afc71c28188a`，用户决定文档提交 `e3a594637ce51408696a7fb08d2e62832e8db4a0`。目标选择保持单 Agent，B1 两条规则仅落实在实际发送的指令与工具说明；不新增 C7 硬目标确认。FunctionTool 的确定性前置拒绝改为闭集 JSON 反馈，权限/预算/结构不可用不带统一重试建议；执行后失败、未知结果和 Evidence/回答拒收仍中止。C8 在治理层同步准入，按轮次/目标预占唯一再试，在途排他、成功不复位；不改变权限、普通调用预算、SQLGuard、连接池或应用表 v6。
+**R7 当前本地实现与证据：** 产品基线 `2b541a30bb39d88d160e7f6f69de1c81fdea74d8`；计划 v4 / `4484e5cb183047c5b64d9523dcc5afc71c28188a`，用户决定文档提交 `e3a594637ce51408696a7fb08d2e62832e8db4a0`。目标选择保持单 Agent，B1 两条规则仅落实在实际发送的指令与工具说明；不新增 C7 硬目标确认。C8 按轮次/目标同步预占唯一再试、在途排他、成功不复位；权限、普通调用预算、SQLGuard、连接池与应用表 v6 未改。
 
-- RED：基线拒绝反馈/C8 **10 failed**，A2 的旧猜目标提示 **3 failed**；取消后延迟清理新增回归 **1 failed**（原本 KeyError 覆盖 CancelledError）。修复后正式 Web 路径观察 SQL 拒绝→修正→一次 SQL→Evidence/Session→交付及历史不重查；Chat Completions / Vertex 隐藏工具各一次模型伪请求、零 Adapter/SQL。
-- 复用原 dialogue_gate / dialogue_real_model，准备 `--suite r7` 的固定业务样例；按目标/工具分别统计选择、事实、连接、槽位超时、SQL 与权限探测。群 A/B 走真实 StaticAccess/Session，成员查询由本机替身提供，公开 new_session 旋转上下文。完整/不完整发现、明确/歧义/唯一匹配、目标不可用不替换、群引用、切换/比较、预算与繁忙均有离线场景。**脚本预设选择只证明执行路径和护栏，不证明真实模型会选对。**
-- C8 的实际 Adapter 信号量回归断言两次等待、零建连/SQL、第三次在 Adapter 前拒绝；固定样例的 connector 注入只作合成故障，二者分开记录。五项隔离变异（移除再试上限、按参数重置、并发等候后计数、移除 cluster 复核、已发 SQL 仍退款）均导致目标用例失败，临时源码副本未改变候选。
-- 上下游兼容：旧测试模型按新反馈契约跳过 rejected（仍断言没有 evidence_id），保留结果/权限/无 I/O 的原断言。共享测试库上发现基线 runtime 失锁辅助 SQL 会终止其他数据库持锁连接；最小限定到 current_database，补两库对照，**8 passed, 168 deselected**。产品实例锁不变，不修改监控工作树。
-- 检查命令与最终结果：见下表；完整套件包含以上定向回归，不重复计成独立实战证明。
+**R7-1 复审修正：** 用户指定的独立复审针对 `3a254d305bf532a5bd1534a4666c7fc6269a0681` 提出一个阻断，核实成立。默认 `invalid_arguments` 的固定说明覆盖了能力未开放/固定容量超限，也把可修正拒绝的具体改法抹掉。停止点现显式使用 `unsupported`、`capacity_exceeded`；同根因核对发现前置检查意外异常也不属于可修正输入，改用 `precheck_failed`。上述类别均 `retry_this_turn=false`；不自动重放或扩大能力。现有可信拒绝点用闭集提示标识，由 tools.py 映射固定改法，保留游标 `cursor=null` 从头开始、过滤搜索、Prometheus 指标/步长/窗口和 Grafana 参数说明。不读取 `str(exc)`，不回显参数/SQL/端点/异常原文。其余默认点只负责 JSON/schema/目标参数一致性与 SQLGuard 已分类的可修正输入。执行后失败、未知结果和 Evidence/回答拒收仍走原中止路径。
 
-本工作树独立 `.venv`：`uv sync --locked --extra dev --offline`，Python 3.11.16、Agents 0.22.3。全部网络测试只准 loopback。完整回归的环境为：
+- RED → GREEN：先在旧代码补回归；修正了两处测试设置（所有刷新连接使用一致元数据；无证据停止回答只写 advice）。随后将精确 `3a254d3` 源码导入临时副本，验证实际导入路径。最终相同 36 项用例旧版 **30 failed, 6 passed**：29 项到达目标拒绝/提示行为分支，另 1 项因旧版没有新增的闭集提示类型而失败，后者单列为新接口覆盖，不能算旧问题的行为复现。候选 **36 passed**，未跳过失败用例。正式 Web 视图 DDL 停止：能力说明交给模型，回答注明未开放，零 Adapter 连接/SQL、零 Evidence；游标/指标修正仍能交付。
+- N1：脚本模型在预算用完后仍持续调用，真实 SDK 在 max_turns=4 后触发一次无工具收尾；恰 5 次模型伪请求、1 条业务 SQL，后续均预算拒绝。脚本证明上限和调用链，不证明真实模型会主动停止。
+- 隔离变异：停止点改回默认码时 **4 failed, 1 passed**；忽略闭集提示时游标正式回归 **1 failed**。每次检查实际导入的是临时变异源码，候选未被修改。旧 R7 的五项 C8/目标/执行后变异证据仍来自前次记录，本轮没有无理由重复。
+- 本轮定向：R7、治理、DDL、跨库、StarRocks 工具、Prometheus P2/Grafana 协议 **340 passed, 2 deselected**，112.29s；两个浏览器项按默认选择规则不收集，未占用 8501。随后因通用工具反馈/_bind 分类影响共享路径，重跑 SDK/P1B 全套，结果见下表。
+- 目标样例继续复用 `--suite r7` 的 dialogue_gate / dialogue_real_model，完整/不完整发现、明确/歧义/唯一匹配、群 A/B/新建、隐藏工具与 C8 离线用例保持；模板与模型指令本轮未改。**脚本预设选择只证明调用路径和护栏，真实模型未验证。**
+
+本工作树独立 `.venv`：Python 3.11.16、Agents 0.22.3，锁定依赖不变；网络测试只准 loopback。环境为：
 
 ```bash
 export SDK_TEST_POSTGRES_URL=postgresql+asyncpg://postgres@127.0.0.1:55432/postgres
@@ -59,20 +61,20 @@ export XW_TEST_ALERTMANAGER_COMMUNITY_ROOT=/private/tmp/xw-a4-community
 
 | 实际执行命令 | 结果 |
 | --- | --- |
-| `.venv/bin/python -m pytest tests/sdk_core tests/p1b -q -W error --tb=short` | **2785 passed, 59 deselected**，690.12s；无跳过、无警告；默认排除浏览器标记 |
+| `.venv/bin/python -m pytest tests/sdk_core tests/p1b -q -W error --tb=short` | **2809 passed, 59 deselected in 694.30s (0:11:34)**；无跳过、无警告；浏览器按既有标记默认不收集 |
 | `.venv/bin/python -m pytest tests/security/test_docs_command_consistency.py tests/contract/test_doc_fact_binding.py -q -W error` | **5 passed**，0.14s |
 | `.venv/bin/ruff check --no-cache src/xiaowei tests/sdk_core scripts/dialogue_real_model.py` | 通过 |
-| `.venv/bin/ruff format --check --no-cache src/xiaowei tests/sdk_core scripts/dialogue_real_model.py` | 89 文件通过 |
-| `.venv/bin/mypy src/xiaowei` | 25 源文件通过 |
+| `.venv/bin/ruff format --check --no-cache src/xiaowei tests/sdk_core scripts/dialogue_real_model.py` | 90 文件通过 |
+| `.venv/bin/mypy src/xiaowei --no-incremental --cache-dir=/private/tmp/r7-1-mypy-cache` | 25 源文件通过；默认增量缓存先出现 mypy 内部错误，禁用增量缓存后完成类型检查，未修改或关闭规则 |
 | `git diff --check` | 通过 |
 
-首次完整检查为 24 failed，按真实失败定位新反馈与旧协议替身的兼容、采集入口的默认参数、共享 PostgreSQL 诊断隔离；没有跳过失败或放宽产品检查。首次检查中另有会话用例的 GC 警告，出现在前序失锁异常之后；未把时间先后当作已确认根因。失锁路径隔离修正后，最终严格 `-W error` 的 SDK/P1B 全套通过且无警告；这不是对首次警告根因的补证，也不能用单跑通过代替全套结论。完整输出位于仓库外 `/private/tmp/r7-sdk-p1b-final.log`，基线 RED、定向与变异记录在 `/private/tmp/r7-*.log`，供本机复查。
+完整重复回归日志 `/private/tmp/r7-1-sdk-p1b-repeat.log`。本轮首次全套为 **3 failed, 2806 passed, 59 deselected**（701.36s），三个监控用例均在实例锁连接断开后停服，定向重复为 **3 passed**（18.49s）；这三项单跑通过不能代替全套结果。主工作区另有跨数据库终止持锁连接的测试 SQL，可能造成并行测试干扰，但未确认首轮原因；未修改或停止该工作区，也未改实例锁保护。现有测试协议固定校验 55432，未为使用其他端口放宽；临时专用 PostgreSQL 已清理，最终全套仍用既有隔离测试实例。保留首次日志 `/private/tmp/r7-1-sdk-p1b-final.log` 和定向诊断 `/private/tmp/r7-1-lock-diagnostic.log`。
 
-**本地独立复查：** fresh-context reviewer 针对产品候选 `83014507c4b3ba4dad351d8b85871ac03fd0c13a` 核对真实 diff、调用路径和既有验证证据，未发现 Critical / Important 阻断；独立运行全分支 `git diff --check` 通过，未重复执行全套。该结论仅覆盖 R7 本地实现与离线交付范围，用户后续精确版本审查、真实模型与部署验收仍独立。
+定向 `/private/tmp/r7-1-related.log`，准确旧版 RED `/private/tmp/r7-1-red-confirmed.log`、对应最终 GREEN `/private/tmp/r7-1-green-final.log`，变异 `/private/tmp/r7-1-mut-summary.log`。前次产品候选的 2785 passed 属于旧 SHA 的证据，不冒充本轮通过。
 
-**接受的非阻断边界：** 非 SQLGuard 的参数拒绝统一返回固定 `invalid_arguments`，会减少部分原固定文案的修正细节（例如游标快照失效后应从 `cursor=null` 开始）。工具说明仍给出失效重搜与参数限制，现有正式纠正成功/零 I/O 回归保留，尚无证据证明实际任务退化；本片不扩建子码体系。若部署获授权后的观察出现具体纠正失败，按该场景增加最少的可信固定修正说明并补正式失败→成功回归，不读取异常原文。
+**复查与独立审查：** 前次 fresh-context reviewer 是实现方发起的本地复查，不能称为 AGENTS 意义上的独立审查（N2）；它当时未发现阻断，不能覆盖本次 Claude 对 `3a254d3` 的新证据。上述 R7-1 修正与 N1/N2 交新的精确 SHA，再由用户指定审查方复审；尚未宣称复审通过。
 
-**未覆盖与残余边界：** 真实模型未验证（只适用于 R7 的用户例外），不证明已解决所有自然语言误选。猜一个合法且有权限的目标仍可能被执行链接受；C7 暂不决定，部署后按授权观察再议。未调用真实 Lark/飞书、公司 StarRocks，未跑浏览器/真实客户端样式或部署验收；Web 产品渲染未改，正式 HTTP 成功/失败已覆盖。其他六项未实施；模板仍 20 轮，公司配置不会自动改变，后续会话切片手动项见 [OPERATIONS](deploy/OPERATIONS.md#会话轮数的手动配置)。回退 R7 可撤回提示词/工具反馈/C8 变更，无数据库迁移；不可把未知执行结果或未知投递自动重放。
+**未覆盖与残余边界：** 真实模型未验证（仅 R7 的用户例外），不证明已解决所有自然语言误选或真实模型必然按停止反馈结束。猜一个合法且有权限的目标仍可能被执行链接受；C7 暂不决定。未调用真实 Lark/飞书、公司 StarRocks，未跑浏览器/真实客户端样式或部署验收；正式 Web HTTP 路径不等于客户端和生产验收。其他六项未实施；模板仍 20 轮，公司配置不会自动改变。没有数据库迁移；回退 R7 可撤回提示词/反馈/C8 变更，不自动重放未知执行或未知投递。不推送、不开 PR、不合并、不部署，私聊/测试群观察也须另获部署授权。
 
 **A4 当前离线证据：** 先在旧代码实跑正式 Web 两条 RED（`alertmanager_sources` 不识别）；实现后正式 `serve → Web/指定群事件替身 → 真 SDK Runner → GovernedTools → 外部 API v2 → Evidence/PolicySession/PostgreSQL → 交付` 通过。官方 Alertmanager v0.34.1 仅 loopback、无外部通知接收器；测试预置合成告警/静默的 POST 不属于产品写能力。社区候选的固定版本与不可接入/错误分类损失证据只在计划 §3.3 维护，不把不同协议的结果相互替代。
 

@@ -452,6 +452,9 @@ async def test_failed_expression_is_not_replayed_across_query_tools(env: Env) ->
             body = (await served.turn(message, "query")).json()
             assert body["state"] == "completed"
         assert [a["query"] for _, a in source.recorder.tool_calls] == ["bad(", "up"]
+        rejected = last_output(env.scripts.calls[message][2])
+        assert rejected["code"] == "invalid_arguments" and rejected["retry_this_turn"] is True
+        assert "修改括号" in rejected["reason"]
 
 
 async def test_parallel_initial_errors_and_two_repair_slots_have_exact_io_counts(env: Env) -> None:
@@ -1050,6 +1053,8 @@ async def test_empty_metadata_has_zero_io_and_can_be_corrected_to_one_metric(
                     assert feedback["status"] == "rejected"
                     assert feedback["code"] == "invalid_arguments"
                     assert feedback["retry_this_turn"] is True and "evidence_id" not in feedback
+                    assert "metric 指标名不能为空" in feedback["reason"]
+                    assert "label_values" in feedback["reason"]
                     return tool_call(f"{SOURCE}__metric_metadata", metric=selected)(call)
 
                 message = env.scripts.add(

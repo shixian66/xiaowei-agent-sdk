@@ -5,7 +5,8 @@ import json
 import httpx2
 import pytest
 from tests.p1b.test_starrocks_adapter import TARGET as SR
-from tests.sdk_core.test_app import cite, tool_call
+from tests.sdk_core.test_app import ModelCall, answer, cite, tool_call
+from tests.sdk_core.test_ddl_tools import scripted
 from tests.sdk_core.test_gate0 import vertex_call
 from tests.sdk_core.test_model_api import GEMINI, _chat_tool_call
 from tests.sdk_core.test_runtime import Env, statements
@@ -107,3 +108,65 @@ async def test_formal_budget_exhaustion_stops_new_io_and_model_is_bounded(env: E
         assert rejected["retry_this_turn"] is False
         assert len(env.scripts.calls[message]) <= cfg.budget.max_turns + 1
         assert "只能取得第一项" in body["delivery"]["content"]
+
+
+async def test_formal_view_ddl_stops_with_capability_explanation_and_zero_io(env: Env) -> None:
+    env.drv = scripted(view=True)
+
+    def stop(call: ModelCall):
+        (raw,) = tool_outputs(call)
+        feedback = json.loads(raw)
+        assert feedback["code"] == "unsupported"
+        assert feedback["retry_this_turn"] is False
+        assert "视图和物化视图尚未开放" in feedback["reason"]
+        assert "evidence_id" not in feedback
+        return answer([], analysis="", advice="已停止读取原始 DDL：视图和物化视图尚未开放。")
+
+    message = env.scripts.add(
+        "查看指定集群视图的原始 DDL",
+        tool_call("show_create_table", cluster=SR.target_id, database="shop", table="sales"),
+        stop,
+    )
+    async with env.running(env.config()) as served:
+        await served.page()
+        body = (await served.turn(message, "query")).json()
+        assert body["state"] == "completed", body
+        assert "视图和物化视图尚未开放" in body["delivery"]["content"]
+        assert body["delivery"]["facts"] == []
+        assert env.drv.attempts == 0 and statements(env.drv) == []
+        assert await env.scalar("SELECT count(*) FROM xiaowei_evidence") == 0
+        assert len(env.scripts.calls[message]) == 2
+
+
+async def test_formal_repeated_calls_after_budget_hit_sdk_limit_without_extra_io(env: Env) -> None:
+    limit = 4
+
+    def keep_calling(call: ModelCall):
+        assert call.tools  # The scripted model keeps calling until the SDK removes all tools.
+        outputs = tool_outputs(call)
+        if len(outputs) > 1:
+            feedback = json.loads(outputs[-1])
+            assert feedback["code"] == "budget_exhausted"
+            assert feedback["retry_this_turn"] is False
+        return tool_call(
+            "run_readonly_query", cluster=SR.target_id, sql="SELECT region FROM shop.sales"
+        )(call)
+
+    def rescued(call: ModelCall):
+        assert call.tools == [] and "本轮步骤已用完" in call.instructions
+        return cite("步骤用完，仅取得一次结果")(call)
+
+    message = env.scripts.add("持续调用直到用完步骤", *([keep_calling] * limit), rescued)
+    cfg = env.config(
+        budget={**env.config().budget.model_dump(), "max_tool_calls": 1, "max_turns": limit}
+    )
+    async with env.running(cfg) as served:
+        await served.page()
+        body = (await served.turn(message, "query")).json()
+        assert body["state"] == "completed", body
+        assert len(statements(env.drv)) == 1
+        assert len(body["delivery"]["facts"]) == 1
+        assert len(env.scripts.calls[message]) == limit + 1
+        outputs = tool_outputs(env.scripts.calls[message][-1])
+        assert len(outputs) == limit
+        assert all(json.loads(raw)["code"] == "budget_exhausted" for raw in outputs[1:])

@@ -115,6 +115,7 @@ from xiaowei.starrocks_tools import (
     scope_canonical,
     starrocks_tools,
 )
+from xiaowei.tools import _rejection_feedback
 
 pytestmark = pytest.mark.loopback
 
@@ -1081,6 +1082,8 @@ async def test_an_unexpected_precheck_failure_is_a_fixed_rejection_without_io(en
     with pytest.raises(ToolRejectedError) as refused:
         await env.governed.invoke(ctx, request, Prechecked(check=broken, run=run))
     assert str(refused.value) == "工具参数检查失败，未执行"
+    feedback = json.loads(_rejection_feedback(refused.value, "run_readonly_query"))
+    assert feedback["code"] == "precheck_failed" and feedback["retry_this_turn"] is False
     assert refused.value.__context__ is None and "canary" not in repr(refused.value)
     assert ran == []
     # 拒绝未占预算：上限为 1 时同一轮仍可执行一次。

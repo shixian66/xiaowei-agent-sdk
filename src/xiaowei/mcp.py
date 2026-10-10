@@ -460,13 +460,15 @@ def _prepare_grafana(request: ToolRequest) -> ToolRequest:
         if isinstance(value, str):
             bound = 2000 if key == "query" else 256
             if len(value) > bound or (key == "uid" and not value.strip()):
-                raise ToolRejectedError("查询文本最多2000字符，其他文本最多256字符，uid 不能为空")
+                raise ToolRejectedError(
+                    "查询文本最多2000字符，其他文本最多256字符，uid 不能为空", hint="grafana_text"
+                )
         if key in {"tag", "tags"} and (
             not isinstance(value, list)
             or len(value) > 32
             or any(not isinstance(tag, str) or not tag or len(tag) > 256 for tag in value)
         ):
-            raise ToolRejectedError("标签最多32个，每个1–256字符")
+            raise ToolRejectedError("标签最多32个，每个1–256字符", hint="grafana_tags")
     for key, lower, upper in (
         ("limit", 1, 100),
         ("page", 1, 2147483647),
@@ -477,7 +479,8 @@ def _prepare_grafana(request: ToolRequest) -> ToolRequest:
             value = arguments[key]
             if not isinstance(value, int) or not lower <= value <= upper:
                 raise ToolRejectedError(
-                    "limit 须为1–100；page 从1开始，offset/panelId 从0开始，不超过32位整数"
+                    "limit 须为1–100；page 从1开始，offset/panelId 从0开始，不超过32位整数",
+                    hint="grafana_pagination",
                 )
     if "from" in arguments:
         start, end = arguments["from"], arguments["to"]
@@ -487,7 +490,9 @@ def _prepare_grafana(request: ToolRequest) -> ToolRequest:
             or not 0 <= start <= end <= 253402300799000
             or end - start > 31 * 86400 * 1000
         ):
-            raise ToolRejectedError("from/to 须为有序 Unix 毫秒，窗口不超过31天")
+            raise ToolRejectedError(
+                "from/to 须为有序 Unix 毫秒，窗口不超过31天", hint="grafana_time_window"
+            )
     if arguments.get("panelId") == 0:
         del arguments["panelId"]
     if arguments.get("dashboardUid") == "":
@@ -502,10 +507,13 @@ def _prepare_prometheus(request: ToolRequest, policy_id: str, now: datetime) -> 
         if key in arguments:
             value = arguments[key]
             if not isinstance(value, str) or len(value) > 8192 or (key == "query" and not value):
-                raise ToolRejectedError("表达式/指标名须符合长度上限8192，查询表达式不能为空")
+                raise ToolRejectedError(
+                    "表达式/指标名须符合长度上限8192，查询表达式不能为空", hint="prometheus_text"
+                )
             if key == "metric" and not value.strip():
                 raise ToolRejectedError(
-                    "metric 指标名不能为空；请提供具体指标，未知名称可用 label_values 按需发现"
+                    "metric 指标名不能为空；请提供具体指标，未知名称可用 label_values 按需发现",
+                    hint="metric_required",
                 )
     if "matches" in arguments:
         matches = arguments["matches"]
@@ -517,34 +525,40 @@ def _prepare_prometheus(request: ToolRequest, policy_id: str, now: datetime) -> 
                 not isinstance(value, str) or not value or len(value) > 8192 for value in matches
             )
         ):
-            raise ToolRejectedError("选择器最多32个、每个1–8192字符；series 至少一个选择器")
+            raise ToolRejectedError(
+                "选择器最多32个、每个1–8192字符；series 至少一个选择器", hint="selectors"
+            )
     if "label" in arguments:
         label = arguments["label"]
         if (
             not isinstance(label, str)
             or re.fullmatch(r"[a-zA-Z_][a-zA-Z0-9_]{0,255}", label) is None
         ):
-            raise ToolRejectedError("label 须为1–256字符的标签名（字母/下划线开头）")
+            raise ToolRejectedError(
+                "label 须为1–256字符的标签名（字母/下划线开头）", hint="label_name"
+            )
     if "start_time" in arguments:
         start = _timestamp(arguments["start_time"], now)
         end = _timestamp(arguments["end_time"], now)
         if start > end or end - start > 31 * 86400:
-            raise ToolRejectedError("起止时间须有序，窗口不超过31天")
+            raise ToolRejectedError("起止时间须有序，窗口不超过31天", hint="time_window")
         arguments.update(start_time=_seconds_text(start), end_time=_seconds_text(end))
         if "step" in arguments:
             step = _seconds(arguments["step"])
             if step < 1 or ((end - start) // step) + 1 > 11000:
-                raise ToolRejectedError("step 至少1秒、每序列最多11000点；请增大步长或缩小窗口")
+                raise ToolRejectedError(
+                    "step 至少1秒、每序列最多11000点；请增大步长或缩小窗口", hint="range_step"
+                )
             # 官方 range 工具只接受 Prometheus 时长；以整数毫秒发送，记录秒数。
             if step * 1000 != (step * 1000).to_integral_value():
-                raise ToolRejectedError("step 须为整毫秒且至少1秒")
+                raise ToolRejectedError("step 须为整毫秒且至少1秒", hint="step_precision")
             arguments["step"] = f"{int(step * 1000)}ms"
     return request.model_copy(update={"arguments": arguments})
 
 
 def _seconds(value: object) -> Decimal:
     if not isinstance(value, str) or len(value) > 100:
-        raise ToolRejectedError("时间/步长格式无效")
+        raise ToolRejectedError("时间/步长格式无效", hint="duration_format")
     try:
         match = _DURATION.fullmatch(value)
         seconds = Decimal(match[1]) * _DURATION_SECONDS[match[2]] if match else Decimal(value)
@@ -552,12 +566,14 @@ def _seconds(value: object) -> Decimal:
             raise ValueError
         return seconds
     except (InvalidOperation, ValueError):
-        raise ToolRejectedError("时间/步长须为有限秒数或单单位时长（如30s/5m）") from None
+        raise ToolRejectedError(
+            "时间/步长须为有限秒数或单单位时长（如30s/5m）", hint="duration_format"
+        ) from None
 
 
 def _timestamp(value: object, now: datetime) -> Decimal:
     if not isinstance(value, str) or len(value) > 100:
-        raise ToolRejectedError("时间格式无效")
+        raise ToolRejectedError("时间格式无效", hint="timestamp_format")
     try:
         if value == "now":
             seconds = Decimal(str(now.timestamp()))
@@ -577,7 +593,9 @@ def _timestamp(value: object, now: datetime) -> Decimal:
         # 官方 ParseTimestamp 以毫秒舍入，发送已舍入秒值防止记录更细的虚假精度。
         return seconds.quantize(Decimal("0.001"), rounding=ROUND_HALF_UP)
     except (ValueError, InvalidOperation, OverflowError):
-        raise ToolRejectedError("时间须为Unix秒、含时区RFC3339、now或负的单单位时长") from None
+        raise ToolRejectedError(
+            "时间须为Unix秒、含时区RFC3339、now或负的单单位时长", hint="timestamp_format"
+        ) from None
 
 
 def _seconds_text(value: Decimal) -> str:

@@ -66,7 +66,8 @@ class Prechecked(Generic[Prepared]):
     """带同步前置检查的执行：``check`` 在授权之后、预算预留之前运行，``run`` 只收到它的结果。
 
     ``check`` 必须是零 I/O 的纯函数：把规范化请求转换为执行所需的受信对象，拒绝时抛出信息
-    固定、不含参数原文的 ``ToolRejectedError``；此时本次调用不占预算，模型可以修正后再调用。
+    固定、不含参数原文的 ``ToolRejectedError``；此时本次调用不占预算，是否允许修正由可信拒绝
+    类别决定。能力未开放、固定容量超限或检查自身失败时，停止相关操作。
     """
 
     check: Callable[[ToolRequest], Prepared]
@@ -88,6 +89,9 @@ TARGET_ARGUMENT = "cluster"
 
 ToolRejectCode = Literal[
     "invalid_arguments",
+    "unsupported",
+    "capacity_exceeded",
+    "precheck_failed",
     "unknown_target",
     "not_allowed",
     "authorization_unavailable",
@@ -99,6 +103,36 @@ ToolRejectCode = Literal[
 ]
 
 
+ToolRejectHint = Literal[
+    "restart_cursor",
+    "search_scope",
+    "search_keyword",
+    "database_required",
+    "page_size",
+    "audit_window",
+    "audit_order",
+    "internal_ddl_only",
+    "database_capacity",
+    "column_capacity",
+    "ddl_sql_capacity",
+    "change_promql",
+    "prometheus_text",
+    "metric_required",
+    "selectors",
+    "label_name",
+    "time_window",
+    "range_step",
+    "step_precision",
+    "duration_format",
+    "timestamp_format",
+    "grafana_text",
+    "grafana_tags",
+    "grafana_pagination",
+    "grafana_time_window",
+]
+"""可信拒绝点提供的固定修正/限制提示标识；不携带参数或异常原文。"""
+
+
 class ToolRejectedError(Exception):
     """调用前拒绝。反馈类别由可信拒绝点赋值，模型端不读取异常原文。"""
 
@@ -107,11 +141,13 @@ class ToolRejectedError(Exception):
         message: str,
         *,
         code: ToolRejectCode = "invalid_arguments",
+        hint: ToolRejectHint | None = None,
         remaining_retries: Literal[0, 1] = 0,
         query_reject: QueryRejectionCode | None = None,
     ) -> None:
         super().__init__(message)
         self.code = code
+        self.hint = hint
         self.remaining_retries = remaining_retries
         self.query_reject = query_reject
 
@@ -366,7 +402,9 @@ class GovernedTools:
         repair_from: int | None = None
         if contract.policy_id in PROMETHEUS_QUERY_POLICIES:
             if (contract.target_id, str(arguments["query"])) in runs.promql_errors:
-                raise ToolRejectedError("该表达式本轮已解析失败，未重发；请修改表达式")
+                raise ToolRejectedError(
+                    "该表达式本轮已解析失败，未重发；请修改表达式", hint="change_promql"
+                )
             if contract.target_id in runs.promql_pending:
                 if runs.promql_repairs.count(contract.target_id) >= 2:
                     raise ToolRejectedError(
@@ -525,7 +563,7 @@ def _bind(execute: Execute, request: ToolRequest) -> Callable[[], Awaitable[Tool
     except ToolRejectedError as exc:
         rejected = exc
     except Exception:
-        rejected = ToolRejectedError("工具参数检查失败，未执行")
+        rejected = ToolRejectedError("工具参数检查失败，未执行", code="precheck_failed")
     if rejected is not None:
         # 在 except 之外抛出：拒绝不带下层异常的上下文。
         raise rejected

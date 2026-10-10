@@ -184,6 +184,8 @@ async def test_search_continues_after_corrected_calls(env: Env) -> None:
             assert rejected["status"] == "rejected" and rejected["code"] == "invalid_arguments"
             assert rejected["retry_this_turn"] is True
             assert "evidence_id" not in rejected
+        reason = json.loads(mismatched)["reason"]
+        assert "从头开始" in reason and "cursor" in reason and "null" in reason
         pages = [json.loads(o) for o in (first, second)]
         rows = [p["data"]["rows"] for p in pages]
         assert [(r[0]["database"], r[0]["name"]) for r in rows] == [ARCHIVE, ("shop", "sales")]
