@@ -717,7 +717,7 @@ docker compose --env-file .env up -d --no-deps --force-recreate xiaowei --wait
 
 `--bind-existing-digest-key` 对 v1–v5 只表示操作者确认这是原密钥，程序无法从旧库证明。
 来源不明时不要执行。v6→v7 已有密钥绑定，须先通过绑定校验，使用普通 `storage upgrade`
-即可；保留这个标志也不会重绑或修补缺失/错误的绑定。v7 只新增 Action 表，会话历史表不变。
+即可；保留这个标志也不会重绑或修补缺失/错误的绑定。v7 新增 Action 表及固定审批回执的请求失败码 CHECK，会话历史表不变。
 迁移在一个事务内完成；普通 `serve` 遇到旧、未知或更高 schema 会以 1 退出，不会自动迁移。
 
 迁移提交后若必须回到不认识新 schema 的旧程序，不能把原库原地降级：按“恢复到隔离数据库”把

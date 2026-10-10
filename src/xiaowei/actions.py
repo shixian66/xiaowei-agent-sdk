@@ -12,7 +12,7 @@ import json
 from collections.abc import Awaitable, Callable, Iterable, Mapping
 from dataclasses import dataclass
 from datetime import datetime, timedelta
-from typing import TYPE_CHECKING, Annotated, Any
+from typing import TYPE_CHECKING, Annotated, Any, Literal
 from uuid import UUID, uuid4
 
 from agents import FunctionTool
@@ -95,6 +95,14 @@ class ActionBinding:
 class ActionStatusArgs(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True)
     action_id: Annotated[str, AfterValidator(lambda value: str(UUID(value)))]
+
+
+class ActionOutcomeError(ToolExecutionError):
+    """占用后已持久化的动作终态；渠道只据此给固定回执，不传递原始异常。"""
+
+    def __init__(self, state: Literal["succeeded", "unknown", "rejected"]) -> None:
+        super().__init__()
+        self.state = state
 
 
 def action_status_catalog(
@@ -461,15 +469,15 @@ class ActionService:
             self._store.readiness.lock("action_cancelled")
             raise
         except Exception:
+            state: Literal["succeeded", "unknown", "rejected"] = (
+                "succeeded" if finished else "unknown" if write_started else "rejected"
+            )
             try:
                 if not finished:
-                    await self._store.finish_action(
-                        claimed,
-                        "unknown" if write_started else "rejected",
-                    )
+                    await self._store.finish_action(claimed, state)
             finally:
                 self.governance.end_turn(approved.identity)
-            raise ToolExecutionError() from None
+            raise ActionOutcomeError(state) from None
         # 状态反馈也是当前群/源权限下的 Evidence，不在 Runner 外提交 Session。
         request = ToolRequest(
             tool_id=status_tool,
@@ -491,5 +499,8 @@ class ActionService:
                 ),
                 context_evidence=(result.evidence_id,),
             )
+        except Exception:
+            # 执行事实已保存；状态 Evidence/投影失败不能把成功写入说成未执行。
+            raise ActionOutcomeError("succeeded") from None
         finally:
             self.governance.end_turn(status_ctx.identity)

@@ -1,6 +1,8 @@
 """W5 的失败窗口与治理边界；所有存储与 SDK 路径为真实实现。"""
 
 import asyncio
+from dataclasses import replace
+from datetime import timedelta
 
 import pytest
 from sqlalchemy import event, text
@@ -18,7 +20,7 @@ from xiaowei.channel import ChannelService, ResultDelivery
 from xiaowei.feishu import attributed
 from xiaowei.feishu_render import build_feishu_message
 from xiaowei.governance import Prechecked, ToolRejectedError
-from xiaowei.models import Delivery, DeliveryFact, Identity, RunContext, ToolRequest
+from xiaowei.models import Delivery, DeliveryFact, Identity, RunContext, ToolRequest, TurnAnswer
 from xiaowei.session import close_sessions
 
 pytestmark = pytest.mark.loopback
@@ -256,6 +258,137 @@ async def test_storage_failure_never_replays_a_write(actions: Actions, stage: st
     assert await env.rows("SELECT state FROM xiaowei_action") == [
         ("pending" if stage == "proposal_evidence" else "succeeded",)
     ]
+    code = "action_not_approvable" if stage == "proposal_evidence" else "action_feedback_failed"
+    assert await env.rows(
+        "SELECT state, failure_code, delivery FROM xiaowei_request WHERE reply_message_id='om_a'"
+    ) == [("failed", code, "sent")]
+    receipt = message_text(group.outbox.sent[1][1])
+    if stage == "proposal_evidence":
+        assert "本次批准未执行" in receipt
+    else:
+        assert "动作已执行" in receipt
+        assert "反馈" in receipt and "Action ID" in receipt
+        assert "不要重复批准" in receipt
+        assert "工具执行失败" not in receipt
+        assert "新建会话后重试" not in receipt
+    assert "synthetic" not in receipt and "must-not-save" not in receipt
+
+
+@pytest.mark.parametrize(
+    "outcome,state,writes,code,required",
+    [
+        ("success", "succeeded", 1, None, ("succeeded", "after")),
+        ("timeout", "unknown", 1, "action_unknown", ("结果未知", "人工核对远端", "不要再次批准")),
+        ("changed", "rejected", 0, "action_rejected", ("动作未执行", "重新提出")),
+    ],
+)
+async def test_approval_receipt_reports_actual_execution_outcome(
+    actions: Actions,
+    outcome: str,
+    state: str,
+    writes: int,
+    code: str | None,
+    required: tuple[str, ...],
+) -> None:
+    env = actions.env
+    env.scripts.add(
+        attributed(A, "提出"), tool_call("am-synthetic__propose_change", value="after"), cite()
+    )
+    async with running(env, max_reply_chars=3500) as group:
+        await group.ask("提出", message_id="om_p")
+        action_id = await actions.one()
+        if outcome == "timeout":
+            actions.adapter.fail = True
+        elif outcome == "changed":
+            actions.adapter.revision = "v2"
+        await group.ask(f"/批准 {action_id}", message_id="om_a")
+        receipt = message_text(group.outbox.sent[-1][1])
+        assert len(actions.adapter.calls) == writes
+        assert await env.rows("SELECT state FROM xiaowei_action") == [(state,)]
+        assert await env.rows(
+            "SELECT state, failure_code, delivery FROM xiaowei_request "
+            "WHERE reply_message_id='om_a'"
+        ) == [("completed" if outcome == "success" else "failed", code, "sent")]
+        assert all(text in receipt for text in required)
+        assert "工具执行失败" not in receipt
+        assert "must-not-save" not in receipt
+        before = len(actions.adapter.calls)
+        await group.ask(f"/批准 {action_id}", message_id="om_a")
+        await group.ask(f"/批准 {action_id}", message_id="om_repeat")
+        assert len(actions.adapter.calls) == before
+
+
+@pytest.mark.parametrize(
+    "refusal,state,writes",
+    [("expired", "pending", 0), ("not_sent", "pending", 0), ("processed", "succeeded", 1)],
+)
+async def test_preclaim_refusal_reports_this_approval_not_executed(
+    actions: Actions, refusal: str, state: str, writes: int
+) -> None:
+    env = actions.env
+    env.scripts.add(
+        attributed(A, "提出"), tool_call("am-synthetic__propose_change", value="after"), cite()
+    )
+    async with running(env, max_reply_chars=3500) as group:
+        await group.ask("提出", message_id="om_p")
+        action_id = await actions.one()
+        if refusal == "expired":
+            env.clock.now += timedelta(minutes=16)
+        elif refusal == "not_sent":
+            async with env.engine.begin() as conn:
+                await conn.execute(
+                    text(
+                        "UPDATE xiaowei_request SET delivery='failed' WHERE reply_message_id='om_p'"
+                    )
+                )
+        else:
+            await group.ask(f"/批准 {action_id}", message_id="om_first")
+        await group.ask(f"/批准 {action_id}", message_id="om_refusal")
+        receipt = message_text(group.outbox.sent[-1][1])
+    assert len(actions.adapter.calls) == writes
+    assert await env.rows("SELECT state FROM xiaowei_action") == [(state,)]
+    assert await env.rows(
+        "SELECT state, failure_code, delivery FROM xiaowei_request "
+        "WHERE reply_message_id='om_refusal'"
+    ) == [("failed", "action_not_approvable", "sent")]
+    assert "本次批准未执行" in receipt
+    assert "Action" in receipt
+    assert "未能确认你当前的使用权限或群成员身份" not in receipt
+
+
+async def test_write_success_with_revoked_feedback_permission_reports_execution(
+    actions: Actions, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    env = actions.env
+    env.scripts.add(
+        attributed(A, "提出"), tool_call("am-synthetic__propose_change", value="after"), cite()
+    )
+    async with running(env, max_reply_chars=3500) as group:
+        await group.ask("提出", message_id="om_p")
+        action_id = await actions.one()
+        ((proposal_turn,),) = await env.rows("SELECT proposal_turn_id FROM xiaowei_action")
+        validate = env.evidence.validate_answer
+
+        async def revoke_before_feedback(
+            turn: TurnAnswer, ctx: RunContext, *, history: bool = False
+        ) -> Delivery:
+            if ctx.identity.turn_id != proposal_turn:
+                # 只注入撤权时点；实际的读取、授权和最终 Evidence 校验仍由产品执行。
+                assert env.access._group is not None
+                env.access._group = replace(env.access._group, tools=SHARED - {STATUS})
+            return await validate(turn, ctx, history=history)
+
+        monkeypatch.setattr(env.evidence, "validate_answer", revoke_before_feedback)
+        await group.ask(f"/批准 {action_id}", message_id="om_a")
+        receipt = message_text(group.outbox.sent[-1][1])
+    assert len(actions.adapter.calls) == 1
+    assert await env.rows("SELECT state FROM xiaowei_action") == [("succeeded",)]
+    assert await env.rows(
+        "SELECT state, failure_code, answer FROM xiaowei_request WHERE reply_message_id='om_a'"
+    ) == [("failed", "action_feedback_failed", None)]
+    assert "动作已执行" in receipt and "不要重复批准" in receipt
+    assert "工具执行失败" not in receipt
+    assert "after" not in receipt and "must-not-save" not in receipt
 
 
 async def test_concurrent_approval_messages_execute_only_once(actions: Actions) -> None:

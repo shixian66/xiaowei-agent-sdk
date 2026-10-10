@@ -53,7 +53,7 @@ from xiaowei.storage import Backend, InstanceLock, Readiness
 RequestState = Literal["accepted", "running", "completed", "failed", "interrupted"]
 DeliveryState = Literal["pending", "sending", "sent", "failed", "unknown"]
 SendOutcome = Literal["sent", "failed", "unknown"]
-# 安全失败码闭集（与迁移 002 的 CHECK 一致）：只表达失败类别，不携带异常文字。调用者经 ``fail()``
+# 安全失败码闭集（与迁移 007 的 CHECK 一致）：只表达失败类别，不携带异常文字。调用者经 ``fail()``
 # 只能写入 ``CallerFailureCode``；两个内部码各有唯一写入路径：``result_not_saved`` 由结果保存
 # 失败路径与关闭 Session 同一事务写入，``interrupted`` 由启动恢复写入。
 CallerFailureCode = Literal[
@@ -63,6 +63,10 @@ CallerFailureCode = Literal[
     "session_failed",
     "scope_unverifiable",
     "access_denied",
+    "action_not_approvable",
+    "action_feedback_failed",
+    "action_unknown",
+    "action_rejected",
 ]
 InternalFailureCode = Literal["result_not_saved", "interrupted"]
 FailureCode = CallerFailureCode | InternalFailureCode
@@ -687,14 +691,24 @@ class ChannelStore:
         )
         return claimed == stored and hmac.compare_digest(row["message_digest"], digest)
 
-    async def complete(self, record: RequestRecord, turn: TurnAnswer) -> RequestRecord:
+    async def complete(
+        self,
+        record: RequestRecord,
+        turn: TurnAnswer,
+        *,
+        failure_code: Literal["result_not_saved", "action_feedback_failed"] = "result_not_saved",
+    ) -> RequestRecord:
         """``running → completed`` 并保存受限回答；失败时标为 failed 并关闭会话，不交付。
 
         回答与本轮模型可见的证据一起保存为 ``TurnAnswer`` JSON（同一列、同一次写入）。
+        已成功执行的批准使用 action_feedback_failed；保留关闭会话和锁低的原有失败策略。
         """
+        if failure_code not in {"result_not_saved", "action_feedback_failed"}:
+            self._readiness.lock("result_state_unwritable")
+            raise ValueError("结果保存失败码不在允许的范围内")
         content = turn.model_dump_json()
         if len(content.encode()) > self._max_answer_bytes:
-            await self._fail_after_commit(record)
+            await self._fail_after_commit(record, failure_code)
             raise ResultNotSavedError
         try:
             async with self._engine.begin() as conn:
@@ -706,10 +720,10 @@ class ChannelStore:
             self._readiness.lock("result_state_unwritable")
             raise
         except (OSError, SQLAlchemyError):
-            await self._fail_after_commit(record)
+            await self._fail_after_commit(record, failure_code)
             raise ResultNotSavedError from None
         if saved.rowcount != 1:
-            await self._fail_after_commit(record)
+            await self._fail_after_commit(record, failure_code)
             raise ResultNotSavedError
         return replace(
             record,
@@ -733,9 +747,11 @@ class ChannelStore:
             raise RequestUnavailableError
         return replace(record, state="failed", failure_code=code)
 
-    async def _fail_after_commit(self, record: RequestRecord) -> None:
-        """Session 已提交而结果未保存：同一事务标记 failed 并关闭会话；也失败时锁低 readiness。"""
-        params = {**_keys(record), "code": RESULT_NOT_SAVED, "now": self._clock()}
+    async def _fail_after_commit(
+        self, record: RequestRecord, code: FailureCode = RESULT_NOT_SAVED
+    ) -> None:
+        """结果未保存：同一事务标记 failed 并关闭会话；也失败时锁低 readiness。"""
+        params = {**_keys(record), "code": code, "now": self._clock()}
         try:
             async with self._engine.begin() as conn:
                 if (await conn.execute(_FAIL, params)).rowcount != 1:

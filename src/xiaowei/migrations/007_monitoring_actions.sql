@@ -31,4 +31,15 @@ CREATE TABLE xiaowei_action (
 
 CREATE INDEX xiaowei_action_retention_idx ON xiaowei_action (expires_at);
 
+-- 批准回执按已保存的动作事实分类；只保存固定类别，不保存异常文字或动作参数。
+ALTER TABLE xiaowei_request DROP CONSTRAINT xiaowei_request_failure_code_check;
+ALTER TABLE xiaowei_request ADD CONSTRAINT xiaowei_request_failure_code_check
+    CHECK (
+        failure_code IN (
+            'busy', 'model_failed', 'evidence_failed', 'session_failed', 'scope_unverifiable',
+            'access_denied', 'result_not_saved', 'interrupted',
+            'action_not_approvable', 'action_feedback_failed', 'action_unknown', 'action_rejected'
+        )
+    );
+
 UPDATE xiaowei_schema_version SET version = 7;

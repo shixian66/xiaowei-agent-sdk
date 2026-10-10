@@ -723,7 +723,7 @@ class FeishuGateway:
                         else:
                             await self._service.approve(job.receipt, job.action_id)
                     except ResultNotSavedError:
-                        pass  # 已记为 failed/result_not_saved，下面发送固定回执
+                        pass  # 保存失败路径已处理状态；下方投递仍需就绪与权限复核
                     await self._deliver(job)
                 except asyncio.CancelledError:
                     # 本条可能已保存却未落定投递：不再开放新工作，交给重启恢复。
