@@ -8,7 +8,7 @@
 | --- | --- |
 | `mcp.py` 通过锁定 SDK 0.22.3 的 `MCPServerStreamableHttp` 发现/调用工具；只接受受治理映射和 JSON 对象结果 | 沿用连接、固定工具目录、调用前过滤；逐个锁版核对官方/社区工具的 schema、错误与结果，必要时只补选中工具的薄转换。不把 Server 对象直接挂给 Agent |
 | `governance.py` / `tools.py` 的 `ToolCatalog`、预算、参数与目标复核；`app.py` 的单 Agent、Runner 与最终 Evidence 校验 | 按监控源登记只读工具；只为可分类的监控只读失败增加有界续查，联动本轮 `started/produced` 与最终证据检查。选中写动作只给 Runner“提出”工具，实际写工具从不入其 Tool Scope；其余执行后错误仍中止 |
-| `runtime.py` 的 `StaticAccess`、`channel.py` 的交付复核；`evidence.py`、`session.py` 的数据/会话边界 | 正式 `serve` 当前只装 StarRocks，个人授权默认拿到全部已配置目标；必须接入独立监控源授权，不得沿用“新增目标自动给所有人”。Evidence 现只有参数摘要、MCP `data_scope=None`，需新增获准的实际 PromQL 与源/对象历史复核 |
+| `runtime.py` 的 `StaticAccess`、`channel.py` 的交付复核；`evidence.py`、`session.py` 的数据/会话边界 | R1 已在正式 `serve` 装配 query；监控目标按现有 Grants 的工具许可取得，历史/重发本地复核。P2 沿用实际表达式与源/采集时间记录，新增范围参数与选中发现工具的最小投影，不另建授权表 |
 | `feishu.py` 的指定群 `chat_id`、真实 `sender_id`、成员检查、消息去重、群排队与共享会话 | 复用入站身份和回帖；另持久化待审批 Action、审批名单、执行状态。现有群队列不能充当等人确认的长事务；Web 的共用 `operator_id` 不能批准写动作 |
 | `PolicySession`、PostgreSQL 应用表、P3 备份/升级约定 | 对话继续使用 `PolicySession`；Action 提议与执行状态单独持久化到现有应用存储，批准执行不在 Runner 外写 SDK Session。下一轮经受治理只读工具查询 Action 状态并产生 Evidence，由正常 Runner 提交；当前 `get_items(limit)` 拒绝非空 `limit`，不把 RunState 恢复设为前提 |
 
@@ -42,6 +42,38 @@
 | **E9 真实入口与运维验收**：一版可试用的监控报告及群审批 | 用户从 Web/飞书调查主机及关联告警 → Agent 按问题选择监控源，联合调查样例覆盖三源并给带实际 PromQL 的报告；群成员提出首批写 → 名单成员批准 → 回读结果与群反馈 | 真实模型、真实三源、指定群、撤权、重复飞书事件、超时/中断/重启、协议变化、版本回退、历史复核和隔离库恢复分别留证；三源联合样例校准预算，任一读源 5xx 后仍能报告已有证据和未核实部分，预算耗尽提示不完整；审批申请人可自批的用例单列。未取得真实环境或用户验收时只标离线完成 |
 
 每片最少验证当前源码所改的正常/拒绝路径、受影响 lint/type、协议和存储边界；权限拒绝必须断言**实际远端 I/O 为零**。模型/提示词变化另用获准模型固定问题样例比较取证充分性、事实/推断、实际 PromQL 与资源开销，允许不同的合理调查顺序，不把某条工具调用序列写成通过条件。部署、真实入口和用户接受按 [AGENTS §6](../../../AGENTS.md) 分级，不用模拟器宣称实战。独立审查写精确提交 SHA 和覆盖范围，不把自查写成独立复审。
+
+### 3.1 P2 当前切片（基线 `4c5b89495fdf57bfd6d18bb4483d5682e56cce59`）
+
+PR #70 的只读故障续查已合入。本片只扩展 Prometheus 读取，不改写能力。先用官方 v0.18.0 核约，再沿 `serve → Web/飞书 → Runner → GovernedTools → MCP → Evidence/PolicySession → 交付` 实现。独立审查以本节与协议用例的具体提交为准；不合入实验分支。
+
+**Agent 的任务和选择。** 用户问“host1 最近为什么 CPU 告警”“这台主机叫什么、监控里能看到多少 CPU/内存”“Kafka 积压是否和已加载规则有关”：Agent 自选获准源、指标/标签、发现方式、表达式、时间窗、步长和调查顺序；可直接查已知指标，缺关键业务含义时才澄清。主机配置仅报告指标实际提供的事实，不推断未采集的硬件配置。失败或信息不足时可换已授权源、补证据或结束；不要求每次先发现、先读规则或固定工具顺序。代码管授权、资源、真实证据和分类边界。
+
+| 接口（远端名 / 策略后缀） | 本地必填输入与输出约定 |
+| --- | --- |
+| `query` / `query` | 保持 R1 的 `{query}` 输入和结果契约/指纹，兼容旧证据；服务端即时求值。实际表达式由代码补入，排版文本中的样本时间原样展示；采集时钟不冒充求值时间 |
+| `range_query` / `range_query` | `query, start_time, end_time, step`；时间可为 Unix 秒、含时区的 RFC3339，或 `now` / `-15m` 等单单位相对时间。调用前冻结为实际 Unix 秒和秒步长，结果记录冻结值。起止相同时可查明确时刻；返回排版文本与 warnings，不解析数值或 PromQL |
+| `label_names` / `label_names`；`label_values` / `label_values` | 均含 `matches, start_time, end_time`；后者另有 `label`。空 matches 表示源内发现；返回排版文本/warnings 与实际时间窗 |
+| `series` / `series` | `matches, start_time, end_time`；至少一个选择器。返回标签集排版文本/warnings 与实际时间窗；不称为主机资产清单 |
+| `metric_metadata` / `metric_metadata` | `metric`（空串表示发现全部元数据）；不发送可选 limit，沿用 Server 默认。元数据 JSON 包为固定 `metadata` 字段，类型/help/unit 做声明式投影 |
+| `list_rules` / `list_rules` | 无参数；只读当前已加载规则，投影 group/name/query/labels/annotations/state/health/lastEvaluation 等必要事实。Server 不返回 type；不以猜测补上。health 是规则求值状态，不是主机健康 |
+
+策略 ID 均为 `prometheus.<后缀>`，工具/目标 ID 沿用源的静态映射和 Grants。只可配置本表的准确映射与子集；空配置、旧 query 配置和旧 query/StarRocks Evidence 不变。SDK 严格输入的字段均必填。只对本地非空数组、远端 `type:[null,array]` 且其余约束相同的情况接受类型子集；反方向、元素/约束漂移仍隐藏工具。其余未暴露可选参数不发送，默认行为见锁版用例，不引入 schema 通用转换器。
+
+**实际协议依据。** `tests/sdk_core/test_prometheus_p2_protocol.py` 使用官方 v0.18.0（源码 `924e43dbea816b92c3e79e73c1568af417e8e30e`）、真 SDK 和 loopback API，逐项断言 schema、结果及每次上游请求数加 1。本机 darwin/arm64 二进制 SHA-256 为 `6272e0d8fbc8af341d1e93fdc6aa130f7086b7a993faedb015966c2ace5e3a82`，不同于发布压缩包校验值。query/range/标签/series 返回 JSON 包裹排版文本；metadata/rules 丢弃上游 warnings，固定说明这项完整性限制。已核实 truncation 标记：文本工具标记在 result 内，metadata 标记可能追加在 JSON 之后；只接受锁版完整标记，其余尾随内容拒绝。标记或投影截断设置 truncated，空结果不声称健康；未知结果形状仍中止。正常部署继续推荐 `--prometheus.truncation-limit=0`。
+
+**失败与资源契约。** 所有本表只读工具沿用已批准的源级 auth/timeout/unavailable/upstream_5xx 续查，不自动重放；当轮停用失败源，可继续其他获准源。仅 query/range 的锁版单段错误，完整匹配工具前缀、`bad_data: invalid parameter "query": 行:列: parse error: …`，才交回可信的解析失败类别与位置；不透传原始错误。每源每轮最多 3 次已执行的语法失败（初次及最多两次失败的修正），同一失败表达式不再发出；失败计预算、无成功 Evidence，成功后才生成证据。bad_data 的 step/标签错误、422 execution、未知文本、多段/结构化错误、协议/投影/存储失败仍中止。最终校验分别统计成功查询、分类的源故障和语法失败，不能靠忽略失败调用通过；发现事实由 Agent 按需要引用，已成功执行的 query/range 仍全部引用。
+
+I/O 前复用 `Prechecked`：表达式/选择器最长 8192 字符、最多 32 个选择器；时间须有限且起止有序、窗宽不超过 31 天；step 至少 1 秒，单序列求值点数 `floor((end-start)/step)+1` 不超过 11000；label 非空且符合标签名语法。拒绝零上游请求并说明可修正原因，Agent 在范围内自选参数。以上是客户端硬上限，不限制表达式内部回看/扫描量；真实启用前仍须核对服务端生效的 timeout/max-samples/max-concurrency，据容量收紧，未核实时不标真实验收通过。
+
+PR #70 的三个非阻断项在本片同一失败契约中落实：并行成功/失败的说明只称该源部分读取未核实，不否定成功调用各自范围；全失败且步数耗尽使用现有 SDK 无工具收尾，明确未验证/不完整；`commit_validated` 再次校验带同一份 monitoring_failures，撤权后不可提交。
+
+| 顺序与可独立验证的结果 | 成功/关键失败验收 |
+| --- | --- |
+| P2.1 锁版协议与本节审查 | 真 Server 覆盖七工具、带/不带认证、原样时间、warnings 缺失及截断；400 query 与 step 反例、422/401/403/500/503 分开断言；调用恰一次，无重试。审查通过后再改产品代码 |
+| P2.2 正式装配与最小用户闭环 | 先补失败测试，再用正式 serve/Web 查 range 或发现，真实 PostgreSQL/SDK/Evidence/Session；先跑一成功、一越界零 I/O 拒绝。子集授权、固定端点、schema 漂移、跨源引用、旧配置/旧证据兼容；query 与发现输出不混称数值 |
+| P2.3 自主修正与失败收尾 | 真 Server + 正式治理链验证坏表达式→模型改写→成功证据，重复表达式/次数/预算上限、错误隔离变异；故障换源、全失败无证据建议、并行成功/失败、提交时撤权；正常/拒绝均覆盖历史和重发 |
+| P2.4 能力评估与交付 | 正式浏览器与群事件替身展示来源、实际表达式/冻结时间、warnings/截断和推断；R1/MCP/G0/SDK 相关回归、Ruff/type 检查。获准真实模型上评估上述三业务问题及一次语法修正，不固定顺序，记录答案/取证/澄清/调用次数/耗时/用量；真实 Prometheus 验扫描限额。缺模型或真实源继续离线并留下能力/环境验收门槛，不用脚本模型豁免；提交、推送并开 PR，不合并/部署 |
 
 ## 4. 环境、兼容与恢复
 

@@ -122,7 +122,14 @@ def test_query_json_text_keeps_result_and_warnings() -> None:
 
 
 @contextmanager
-def official_server(binary: Path, backend_port: int, *, port: int | None = None) -> Iterator[str]:
+def official_server(
+    binary: Path,
+    backend_port: int,
+    *,
+    port: int | None = None,
+    tools: str = "core",
+    truncation_limit: int = 0,
+) -> Iterator[str]:
     if port is None:
         with socket.socket() as probe:
             probe.bind(("127.0.0.1", 0))
@@ -133,7 +140,8 @@ def official_server(binary: Path, backend_port: int, *, port: int | None = None)
             "--mcp.transport=http",
             f"--prometheus.url=http://127.0.0.1:{backend_port}",
             f"--web.listen-address=127.0.0.1:{port}",
-            "--mcp.tools=core",
+            f"--mcp.tools={tools}",
+            f"--prometheus.truncation-limit={truncation_limit}",
             "--log.level=error",
         ],
         stdout=subprocess.DEVNULL,
