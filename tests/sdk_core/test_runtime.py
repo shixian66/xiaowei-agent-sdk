@@ -35,6 +35,7 @@ from sqlalchemy import text
 from sqlalchemy.engine import URL
 from tests.p1b.test_starrocks_adapter import TARGET as SR
 from tests.p1b.test_starrocks_adapter import Result, driver, schema_results
+from tests.sdk_core.postgres_harness import isolated_database
 from tests.sdk_core.synthetic_tools import Clock
 from tests.sdk_core.test_app import (
     SEARCH_ALL,
@@ -56,6 +57,7 @@ from tests.sdk_core.test_model_api import (
 )
 from tests.sdk_core.test_model_api import OPENAI as PROFILE
 from tests.sdk_core.test_model_api import Endpoint as ChatEndpoint
+from tests.sdk_core.test_starrocks_tools import tool_outputs
 from tests.sdk_core.test_vertex_model import VERTEX
 
 from xiaowei import runtime
@@ -1000,8 +1002,12 @@ async def test_occupied_port_fails_before_touching_the_database(env: Env) -> Non
 TERMINATE_LOCK = (
     "SELECT count(pg_terminate_backend(pid)) FROM pg_locks"
     " WHERE locktype = 'advisory' AND granted AND mode = 'ExclusiveLock'"
+    " AND database = (SELECT oid FROM pg_database WHERE datname = current_database())"
 )
-WAITING_ON_LOCK = "SELECT count(*) FROM pg_stat_activity WHERE wait_event_type = 'Lock'"
+WAITING_ON_LOCK = (
+    "SELECT count(*) FROM pg_stat_activity WHERE wait_event_type = 'Lock'"
+    " AND datname = current_database()"
+)
 
 
 async def waiting_on_locks(env: Env, count: int, timeout: float = 10) -> bool:
@@ -1029,6 +1035,21 @@ async def test_losing_the_instance_lock_stops_the_process(env: Env) -> None:
     async with env.running(env.config()) as served:
         assert await env.scalar(TERMINATE_LOCK) == 1
         assert await asyncio.wait_for(served.task, 30) == 1
+
+
+async def test_lock_loss_fixture_leaves_other_test_databases_connected(env: Env) -> None:
+    """失锁诊断只终止本用例的持锁后端，不能干扰同机其他隔离数据库。"""
+    async with isolated_database() as other_url:
+        secret = SecretStr(other_url.render_as_string(hide_password=False))
+        async with open_engine(secret) as other, other.connect() as conn:
+            await conn.execute(text("SELECT pg_advisory_lock(736701)"))
+            try:
+                async with env.running(env.config()) as served:
+                    assert await env.scalar(TERMINATE_LOCK) == 1
+                    assert await asyncio.wait_for(served.task, 30) == 1
+                    assert await conn.scalar(text("SELECT 1")) == 1
+            finally:
+                await conn.execute(text("SELECT pg_advisory_unlock(736701)"))
 
 
 async def test_normal_stop_during_a_lock_check_is_not_a_lock_loss(env: Env) -> None:
@@ -2563,7 +2584,9 @@ async def test_formal_assembly_routes_each_turn_to_the_named_cluster(env: Env) -
         )
         body = (await served.turn(unknown, "query", "r2")).json()
         assert body["state"] == "completed" and body["delivery"]["facts"] == []
-        assert "集群不存在" in json.dumps(env.scripts.calls[unknown][1].input, ensure_ascii=False)
+        feedback = json.loads(tool_outputs(env.scripts.calls[unknown][1])[-1])
+        assert feedback["status"] == "rejected" and feedback["code"] == "unknown_target"
+        assert "不猜选集群" in feedback["reason"] and "evidence_id" not in feedback
         assert drivers["sr-a"].attempts == 0 and len(statements(drivers["sr-b"])) == 1
         assert await served.finish() == 0
 

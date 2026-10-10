@@ -1,4 +1,4 @@
-"""U1 固定模型样例：复用 Gate 0 观测/驱动，只替换 I/O，走正式 runtime 与渠道。
+"""U1/R7 固定模型样例：复用 Gate 0 观测/驱动，只替换 I/O，走正式 runtime 与渠道。
 
 同一文件复制到基线与候选工作树运行，不覆盖产品提示词/工具说明。报告只给计数和判定；
 自动检查不判断自然语言质量，合入仍需逐项独立比较，不把脚本成功当作模型验收。
@@ -11,6 +11,7 @@ import time
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from functools import partial
 from pathlib import Path
 from typing import Any
 
@@ -21,11 +22,12 @@ from sqlalchemy.engine import URL
 from tests.sdk_core.gate0 import ObservingTransport, SyntheticStarRocks
 from tests.sdk_core.synthetic_tools import TEST_DIGEST_KEY, ready_engine
 
-from xiaowei.channel import InboundRequest, RequestRef
+from xiaowei.channel import GroupScope, InboundRequest, RequestRef
 from xiaowei.model_api import ModelProfile
 from xiaowei.models import Delivery
 from xiaowei.runtime import ServeConfig, open_runtime
-from xiaowei.starrocks import show_create_sql
+from xiaowei.starrocks import StarRocksError, StarRocksErrorCode, show_create_sql
+from xiaowei.starrocks_tools import QUERY_TOOLS
 
 NOW = datetime(2026, 10, 10, 12, tzinfo=UTC)
 OPERATOR = "u1-synthetic-operator"
@@ -45,6 +47,12 @@ class Scenario:
     tool_budget: int = 16
     ambiguous_database: bool = False
     raw_field: str = "raw"
+    only_match: str | None = None
+    unavailable: str | None = None
+    discovery_pages: bool = False
+    busy_target: str | None = None
+    actors: tuple[str, ...] = ()
+    new_session_at: frozenset[int] = frozenset()
 
 
 class ReviewVerdict(BaseModel):
@@ -150,11 +158,178 @@ SCENARIOS = (
 )
 
 
+# R7 fixed tasks: scripted endpoints test paths; real-model runs require separate authorization.
+R7_SCENARIOS = (
+    Scenario(
+        "r7_explicit_target", (("query", f"查看 fat data_center.{TABLE} 的字段"),), multi=True
+    ),
+    Scenario(
+        "r7_unique_readable",
+        (("query", f"desc data_center.{TABLE}"),),
+        multi=True,
+        only_match="pre",
+    ),
+    Scenario("r7_multiple_matches", (("query", f"desc data_center.{TABLE}"),), multi=True),
+    Scenario(
+        "r7_discovery_incomplete",
+        (("query", f"desc data_center.{TABLE}"),),
+        multi=True,
+        discovery_pages=True,
+    ),
+    Scenario(
+        "r7_target_unavailable",
+        (("query", f"查看 fat data_center.{TABLE} 的字段"),),
+        multi=True,
+        unavailable="fat",
+    ),
+    Scenario(
+        "r7_group_reference",
+        (
+            ("query", f"查看 fat data_center.{TABLE} 的字段"),
+            ("query", "沿用A明确指定的集群和表，看看它的布局"),
+        ),
+        multi=True,
+        actors=("ou_r7_a", "ou_r7_b"),
+    ),
+    Scenario(
+        "r7_group_unclear",
+        (
+            ("query", f"查看 fat data_center.{TABLE} 的字段"),
+            ("query", f"pre 也有 data_center.{TABLE} 吗？"),
+            ("query", "看看那个表的布局"),
+        ),
+        multi=True,
+        actors=("ou_r7_a", "ou_r7_b", "ou_r7_a"),
+    ),
+    Scenario(
+        "r7_new_session",
+        (
+            ("query", f"查看 fat data_center.{TABLE} 的字段"),
+            ("query", f"desc data_center.{TABLE}"),
+        ),
+        multi=True,
+        new_session_at=frozenset({1}),
+    ),
+    Scenario("r7_busy", (("query", "看看pre有哪些库；如果繁忙可再试一次"),), busy_target="pre"),
+    Scenario("r7_budget_exhausted", (("query", "列出 pre 所有数据库和各库全部表"),), tool_budget=1),
+    Scenario(
+        "r7_only_sql", (("query", f"写fat的data_center.{TABLE}查询SQL，不要执行"),), multi=True
+    ),
+    Scenario(
+        "r7_after_discovery",
+        (
+            ("query", "列出fat、fat1和pre各集群的可读库"),
+            ("query", f"desc data_center.{TABLE}"),
+        ),
+        multi=True,
+    ),
+    Scenario(
+        "r7_explicit_followup",
+        (
+            ("query", f"看fat的data_center.{TABLE}字段"),
+            ("query", "沿用刚才明确的fat集群和表，看看它的布局"),
+            ("query", f"切到pre，查看data_center.{TABLE}字段"),
+        ),
+        multi=True,
+    ),
+    Scenario(
+        "r7_compare_targets",
+        (("query", f"比较fat、fat1和pre的data_center.{TABLE}字段"),),
+        multi=True,
+    ),
+    Scenario(
+        "r7_discovery_error",
+        (("query", f"desc data_center.{TABLE}"),),
+        multi=True,
+        unavailable="fat1",
+    ),
+    *(s for s in SCENARIOS if s.name in {"desc_single", "desc_ambiguous_database"}),
+    Scenario(
+        "r7_unknown_target", (("query", f"看unknown集群data_center.{TABLE}的字段"),), multi=True
+    ),
+)
+
+
+def tool_choices(body: bytes, targets: frozenset[str]) -> list[tuple[str, str]]:
+    """Only retain known tool/target labels; never copy arbitrary identifiers or arguments."""
+    try:
+        data = json.loads(body)
+    except (ValueError, UnicodeError):
+        return []
+    if not isinstance(data, dict):
+        return []
+
+    def objects(value: Any) -> list[dict[str, Any]]:
+        return [item for item in value if isinstance(item, dict)] if isinstance(value, list) else []
+
+    calls = []
+    if "candidates" in data:
+        for candidate in objects(data["candidates"]):
+            content = candidate.get("content")
+            if isinstance(content, dict):
+                calls.extend(
+                    p["functionCall"]
+                    for p in objects(content.get("parts"))
+                    if isinstance(p.get("functionCall"), dict)
+                )
+    elif "choices" in data:
+        for choice in objects(data["choices"]):
+            message = choice.get("message")
+            if isinstance(message, dict):
+                calls.extend(
+                    c["function"]
+                    for c in objects(message.get("tool_calls"))
+                    if isinstance(c.get("function"), dict)
+                )
+    else:
+        calls = [c for c in objects(data.get("output")) if c.get("type") == "function_call"]
+    selected = []
+    known_tools = {t.partition("/")[2] for t in QUERY_TOOLS}
+    for call in calls:
+        args = call.get("args", call.get("arguments"))
+        if isinstance(args, str):
+            try:
+                args = json.loads(args)
+            except ValueError:
+                args = None
+        target = args.get("cluster") if isinstance(args, dict) else None
+        selected.append(
+            (
+                call["name"]
+                if isinstance(call.get("name"), str) and call["name"] in known_tools
+                else "other-tool",
+                target if isinstance(target, str) and target in targets else "other-target",
+            )
+        )
+    return selected
+
+
+def _record_choices(choices: list[tuple[str, str]], targets: frozenset[str], body: bytes) -> None:
+    choices.extend(tool_choices(body, targets))
+
+
+async def _synthetic_members(actors: frozenset[str], checks: list[str], _: str, actor: str) -> bool:
+    checks.append(actor)
+    return actor in actors  # No Lark API; each actor is checked independently.
+
+
 @dataclass
 class DialogueStarRocks(SyntheticStarRocks):
     raw_chars: int = 100
     deny_middle: bool = False
+    unavailable: bool = False
+    busy: bool = False
+    slot_timeouts: int = 0
     raw_field: str = "raw"
+
+    async def __call__(self, **kwargs: Any) -> Any:
+        if self.busy:
+            # Public connector failure seam. Real semaphore waiting is tested separately.
+            self.slot_timeouts += 1
+            raise StarRocksError(StarRocksErrorCode.POOL_TIMEOUT, slot_wait=True)
+        if self.unavailable:
+            raise OperationalError(2003, "synthetic source unavailable")
+        return await super().__call__(**kwargs)
 
     def classify(self, sql: str, args: tuple[object, ...] | None) -> Any:
         if sql in {show_create_sql(db, name) for db, name in self.tables}:
@@ -229,9 +404,35 @@ def configuration(profile: ModelProfile, scenario: Scenario) -> ServeConfig:
     sr.update(max_value_bytes=4000, max_result_bytes=200000, pool_size=4)
     values["targets"] = [target]
     if scenario.multi:
-        other = json.loads(json.dumps(target))
-        other["starrocks"]["target_id"] = "fat"
-        values["targets"].append(other)
+        for target_id in ("fat", "fat1"):
+            other = json.loads(json.dumps(target))
+            other["starrocks"]["target_id"] = target_id
+            values["targets"].append(other)
+    if scenario.actors:
+        values["feishu"] = {
+            "app_id": "cli_r7synthetic",
+            "app_secret_ref": "env:XW_R7_UNUSED_FEISHU_SECRET",
+            "tenant_key": "r7-synthetic-tenant",
+            "users": {},
+            "max_event_age_seconds": 300,
+            "max_message_chars": 2000,
+            "max_reply_chars": 3500,
+            "queue_size": 4,
+            "consumer_count": 1,
+            "send_timeout_seconds": 5,
+            "connect_timeout_seconds": 5,
+            "stop_timeout_seconds": 10,
+            "group": {
+                "chat_id": "oc_r7_synthetic",
+                "tools": sorted(QUERY_TOOLS),
+                "member_page_size": 50,
+                "member_max_pages": 2,
+                "member_timeout_seconds": 2,
+                "max_waiting": 2,
+                "max_wait_seconds": 60,
+                "wait_check_seconds": 1,
+            },
+        }
     return ServeConfig.model_validate(values)
 
 
@@ -265,6 +466,20 @@ async def run_dialogue(
                             "sql_text",
                             "result_json",
                         )
+                        if scenario.name.startswith("r7_"):
+                            tables["data_center", TABLE] += (f"r7_{target.target_id}",)
+                        if (
+                            scenario.only_match is not None
+                            and target.target_id != scenario.only_match
+                        ):
+                            del tables["data_center", TABLE]
+                        if scenario.discovery_pages:
+                            tables.update(
+                                {
+                                    ("data_center", f"{TABLE}_bak_{i:03}"): ("region",)
+                                    for i in range(401)
+                                }
+                            )
                         if scenario.ambiguous_database:
                             tables["other_center", TABLE] = tables["data_center", TABLE]
                         tables["data_center", "quota_other"] = ("region",)
@@ -275,27 +490,66 @@ async def run_dialogue(
                             tables=tables,
                             raw_chars=scenario.raw_chars,
                             raw_field=scenario.raw_field,
+                            unavailable=target.target_id == scenario.unavailable,
                         )
-                    observer = ObservingTransport(network())
+                    choices: list[tuple[str, str]] = []
+                    observer = ObservingTransport(
+                        network(),
+                        observe_response=partial(_record_choices, choices, frozenset(drivers)),
+                    )
+
+                    member_checks: list[str] = []
+
+                    members = partial(_synthetic_members, frozenset(scenario.actors), member_checks)
+
+                    group = (
+                        GroupScope(
+                            app_id="cli_r7synthetic",
+                            tenant_key="r7-synthetic-tenant",
+                            chat_id="oc_r7_synthetic",
+                        )
+                        if scenario.actors
+                        else None
+                    )
+                    channel = "feishu" if group is not None else "web"
+
                     async with open_runtime(
                         config,
                         clock=lambda: NOW,
                         model_transport=observer,
                         starrocks_connect=drivers,
+                        members=members,
                     ) as runtime:
                         for drv in drivers.values():
                             drv.deny_middle = scenario.pages
-                        conversation = f"u1-{secrets.token_hex(8)}"
+                            drv.busy = drv.target.target_id == scenario.busy_target
+                        conversation = (
+                            group.chat_id if group is not None else f"u1-{secrets.token_hex(8)}"
+                        )
+                        if group is not None:
+                            await runtime.service.new_session(
+                                channel, scenario.actors[0], conversation, group=group
+                            )
                         for index, (mode, message) in enumerate(scenario.messages):
+                            subject = scenario.actors[index] if scenario.actors else OPERATOR
+                            if index in scenario.new_session_at:
+                                await runtime.service.new_session(
+                                    channel, subject, conversation, group=group
+                                )
                             first = len(observer.observations)
+                            first_choice = len(choices)
+                            first_members = len(member_checks)
+                            before_connections = {k: d.attempts for k, d in drivers.items()}
+                            before_timeouts = {k: d.slot_timeouts for k, d in drivers.items()}
                             before = {k: len(d.statements) for k, d in drivers.items()}
                             started = time.monotonic()
                             receipt = await runtime.service.accept(
                                 InboundRequest(
-                                    channel="web",
+                                    channel=channel,
                                     channel_request_id=f"r{index}",
-                                    subject_id=OPERATOR,
+                                    subject_id=subject,
                                     conversation_id=conversation,
+                                    group=group,
                                     mode=mode,
                                     message=message,
                                     received_at=NOW,
@@ -304,9 +558,10 @@ async def run_dialogue(
                             record = await runtime.service.process(receipt)
                             view = await runtime.service.results.view(
                                 RequestRef(
-                                    channel="web",
-                                    subject_id=OPERATOR,
+                                    channel=channel,
+                                    subject_id=subject,
                                     conversation_id=conversation,
+                                    group=group,
                                     request_id=f"r{index}",
                                 ),
                                 first=True,
@@ -347,9 +602,48 @@ async def run_dialogue(
                                     "failure": record.failure_code,
                                     "elapsed_ms": elapsed_ms,
                                     "requests": [vars(r) for r in observer.observations[first:]],
+                                    "tool_choices_by_target": {
+                                        target: {
+                                            tool: sum(
+                                                t == target and name == tool
+                                                for name, t in choices[first_choice:]
+                                            )
+                                            for tool in sorted(
+                                                {
+                                                    name
+                                                    for name, t in choices[first_choice:]
+                                                    if t == target
+                                                }
+                                            )
+                                        }
+                                        for target in sorted({t for _, t in choices[first_choice:]})
+                                    },
+                                    "facts_by_tool_target": {
+                                        target: {
+                                            tool: sum(
+                                                f.target_id == target and f.tool_id == tool
+                                                for f in facts
+                                            )
+                                            for tool in sorted(
+                                                {f.tool_id for f in facts if f.target_id == target}
+                                            )
+                                        }
+                                        for target in sorted({f.target_id for f in facts})
+                                    },
                                     "io_counts": {
                                         kind: sum(k == kind for _, k, _ in statements)
                                         for kind in sorted({k for _, k, _ in statements})
+                                    },
+                                    "membership_checks_for_actor": member_checks[
+                                        first_members:
+                                    ].count(subject),
+                                    "connection_attempts_by_target": {
+                                        k: d.attempts - before_connections[k]
+                                        for k, d in drivers.items()
+                                    },
+                                    "synthetic_slot_timeouts_by_target": {
+                                        k: d.slot_timeouts - before_timeouts[k]
+                                        for k, d in drivers.items()
                                     },
                                     "io_by_target": {
                                         target: {

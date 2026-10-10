@@ -233,7 +233,9 @@ async def test_unix_seconds_are_not_compact_dates_in_formal_range(
 async def test_range_limits_reject_before_upstream_io(env: Env, changes: dict[str, str]) -> None:
     def rejected(call: ModelCall) -> list[Any]:
         output = [i["output"] for i in call.input if i.get("type") == "function_call_output"][-1]
-        assert "An error occurred" in output
+        feedback = json.loads(output)
+        assert feedback["status"] == "rejected" and feedback["code"] == "invalid_arguments"
+        assert feedback["retry_this_turn"] is True and "evidence_id" not in feedback
         return answer([], analysis="", advice="参数越界，尚未查询；请调整范围或步长")
 
     with serve(p2_server) as source:
@@ -1044,7 +1046,10 @@ async def test_empty_metadata_has_zero_io_and_can_be_corrected_to_one_metric(
                     output = [
                         i["output"] for i in call.input if i.get("type") == "function_call_output"
                     ][-1]
-                    assert "An error occurred" in output and "不能为空" in output
+                    feedback = json.loads(output)
+                    assert feedback["status"] == "rejected"
+                    assert feedback["code"] == "invalid_arguments"
+                    assert feedback["retry_this_turn"] is True and "evidence_id" not in feedback
                     return tool_call(f"{SOURCE}__metric_metadata", metric=selected)(call)
 
                 message = env.scripts.add(

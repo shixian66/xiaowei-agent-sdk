@@ -479,7 +479,10 @@ docker compose --env-file .env ps
 同一目标的后台结构刷新由 `SchemaCache` 合并为一次；对象、列、ID 读取和权限探测串行进行，
 任何时刻最多占用该目标的 1 个连接槽位。刷新与前台查询共用 `pool_size` 个槽位，按进入
 信号量等待队列的顺序竞争，没有为前台预留槽位；等槽位超过 `connect_timeout_seconds`
-且本次工具调用尚未发出 SQL 时，前台会收到固定的“系统繁忙，可稍后再试”。
+且本次工具调用尚未发出任何 SQL 时，退还执行预算并向 Agent 返回 busy 与剩余再试次数。
+按 [ARCHITECTURE C8](../ARCHITECTURE.md#6-只读查询保护)，同轮同集群最多再试 1 次；
+唯一再试在途时拒绝该集群新调用，成功不复位额度，再次繁忙后本轮该集群不再试。
+这不改变后台刷新，不自动重放已开始的 SQL；后续新提问独立计算。
 
 **函数名单按解析后的内部名填写。** SQLGuard 先把 SQL 解析再检查函数名，部分常用写法会被归一：
 
@@ -502,6 +505,16 @@ docker compose --env-file .env ps
 `DATE_ADD`、`DATE_SUB`、`ADDDATE`、`SUBDATE`、`DATE_TRUNC`、`DATEDIFF` 都只接受两个
 顶层实参，缺少或多出实参会在执行前拒绝，不会静默丢弃。
 `DATE_DIFF` 不因允许 `DATEDIFF` 而自动放行；两种写法须分别验证其语义。
+
+### 会话轮数的手动配置
+
+用户 2026-10-11 批准 100 轮方向；本轮 R7 不实施会话切片，也不改现有模板的 20 轮。
+后续获授权实施时，公司 `/opt/xiaowei/current/xiaowei.json` 需由操作者把
+`session_limits.max_history_turns` 改为 `100`；镜像升级不会自动修改该配置。
+`session_limits.max_history_bytes`、`retention_seconds` 和模型请求上限保持原值。
+100 是已提交交互轮次上限，较长结果可能先触发字节或请求上限，不保证所有对话都能聊到 100 轮。
+容量测算仍须记录实际情况，不再作为调整轮数的前置条件。配置预检和重启按本文升级步骤执行，
+本段不授予当前部署/改配置许可。
 
 ## 普通升级与回退（schema 不变）
 

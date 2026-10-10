@@ -312,7 +312,17 @@ def starrocks_tools(
             target_id=target.target_id,
             input_schema=tool_policy.arguments.model_json_schema(),
             policy_id=tool_policy.policy_id,
-            description=description,
+            description=(
+                description
+                + (
+                    " 集群与对象须来自本轮明确目标、仍适用的明确上下文，"
+                    "或完整发现的唯一可读精确匹配；"
+                    "否则先澄清。rejected按固定code纠正或停止，不换集群绕过拒绝。"
+                    if tool_id not in {LIST_DATABASES, LIST_TABLES}
+                    else " 可按任务发现获准候选；搜索命中不等于用户选源，未匹配不证明不存在。"
+                    "rejected按固定code纠正或停止，不猜选集群。"
+                )
+            ),
         )
 
     databases_policy = policy("list_databases", ListDatabasesArgs, DATABASE_NOTE, PAGED_FIELDS)
@@ -358,7 +368,7 @@ def starrocks_tools(
             return schema.current()
         except SchemaUnavailableError:
             pass
-        raise ToolRejectedError(SCHEMA_UNAVAILABLE)
+        raise ToolRejectedError(SCHEMA_UNAVAILABLE, code="schema_unavailable")
 
     page_rows = target.policy.max_rows
 
@@ -503,7 +513,8 @@ def starrocks_tools(
         found = snapshot.object(str(request.arguments["database"]), str(request.arguments["table"]))
         if found is None:
             raise ToolRejectedError(
-                "对象不在可读的表结构中，未执行；请先用 list_tables 查看可用的库与表"
+                "对象不在可读的表结构中，未执行；请先用 list_tables 查看可用的库与表",
+                code="object_not_readable",
             )
         return snapshot, found
 
@@ -583,7 +594,9 @@ def starrocks_tools(
         except QueryRejectedError as exc:
             code = exc.code
         # 在 except 之外抛出：拒绝只带固定原因码与说明，不带 SQLGuard 异常的上下文。
-        raise ToolRejectedError(f"查询未执行（{code}）：{REJECTION_MESSAGES[code]}")
+        raise ToolRejectedError(
+            f"查询未执行（{code}）：{REJECTION_MESSAGES[code]}", query_reject=code
+        )
 
     async def run_query(checked: tuple[SchemaSnapshot, GuardedQuery]) -> ToolObservation:
         snapshot, query = checked
@@ -599,7 +612,9 @@ def starrocks_tools(
             )
         except QueryRejectedError as exc:
             code = exc.code
-        raise ToolRejectedError(f"执行计划未获取（{code}）：{REJECTION_MESSAGES[code]}")
+        raise ToolRejectedError(
+            f"执行计划未获取（{code}）：{REJECTION_MESSAGES[code]}", query_reject=code
+        )
 
     async def explain(checked: tuple[SchemaSnapshot, ExplainQuery]) -> ToolObservation:
         snapshot, query = checked
@@ -625,7 +640,8 @@ def starrocks_tools(
             f"page_size 为 1 到 {page_rows}（结果字节放不下时一页会少于它）。第一页 cursor 传 "
             "null；结果的 next_cursor 非空表示还有未返回的匹配，原样传回它并保持 keyword、"
             "database 与 page_size 不变即可取得下一页，为 null 时已全部返回。"
-            "表结构内容变化时 cursor 失效，须从头搜索。"
+            "表结构内容变化时 cursor 失效，须从头搜索；空页也须跟随非空next_cursor。"
+            "已知准确对象且只需字段时可直接describe_table，无需先搜表。"
             "sql 为结构采集 SQL 模板；elapsed_ms 为本次处理与可读性确认耗时，不是采集 SQL 耗时。",
         ),
         contract(

@@ -15,7 +15,12 @@ import sys
 from pathlib import Path
 
 import httpx2
-from tests.sdk_core.dialogue_gate import ReviewSample, ReviewVerdict, run_dialogue
+from tests.sdk_core.dialogue_gate import (
+    R7_SCENARIOS,
+    ReviewSample,
+    ReviewVerdict,
+    run_dialogue,
+)
 from tests.sdk_core.postgres_harness import isolated_database
 
 import xiaowei
@@ -63,7 +68,7 @@ async def review_sample(sample: ReviewSample) -> ReviewVerdict:
     return ReviewVerdict(**values)
 
 
-async def collect(profile_path: Path, repeats: int) -> dict[str, object]:
+async def collect(profile_path: Path, repeats: int, suite: str = "u1") -> dict[str, object]:
     sha = source_sha()
     harness = harness_sha256()
     profile = load_profile(profile_path)
@@ -74,6 +79,7 @@ async def collect(profile_path: Path, repeats: int) -> dict[str, object]:
             url,
             lambda: httpx2.AsyncHTTPTransport(retries=0, trust_env=False),
             repeats=repeats,
+            **({"scenarios": R7_SCENARIOS} if suite == "r7" else {}),
             manual_review=review_sample,
         )
     if source_sha() != sha or harness_sha256() != harness:
@@ -84,6 +90,7 @@ async def collect(profile_path: Path, repeats: int) -> dict[str, object]:
         "profile_id": profile.profile_id,
         "profile_fingerprint": profile_fingerprint(profile),
         "repeats": repeats,
+        "suite": suite,
         "samples": results,
         "merge_gate": "需要逐项独立比较自然语言、证据与行为；采集成功不是验收通过",
     }
@@ -127,6 +134,7 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--profile", type=Path, required=True)
     parser.add_argument("--repeats", type=int, default=3)
+    parser.add_argument("--suite", choices=("u1", "r7"), default="u1")
     args = parser.parse_args()
     if args.repeats < 3:
         parser.error("旧/新每项至少各运行 3 次")
@@ -134,7 +142,7 @@ def main() -> int:
         print("U1 gate: 需要交互终端逐条核对；仅 stdout 可重定向为无内容报告", file=sys.stderr)
         return 2
     try:
-        report = asyncio.run(collect(args.profile, args.repeats))
+        report = asyncio.run(collect(args.profile, args.repeats, args.suite))
     except ConfigurationError as exc:
         print(f"U1 gate: {exc}", file=sys.stderr)
         return 2

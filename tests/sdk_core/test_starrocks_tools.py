@@ -929,7 +929,9 @@ async def test_schema_refresh_holds_only_slot_and_model_receives_busy_rejection(
         try:
             await env.app.run_turn(env.ctx(max_tool_calls=1), message)
             (rejected,) = tool_outputs(env.scripts.calls[message][1])
-            assert "系统繁忙，可稍后再试" in rejected
+            feedback = json.loads(rejected)
+            assert feedback["code"] == "busy" and feedback["remaining_retries"] == 1
+            assert feedback["retry_this_turn"] is True
             assert env.drv.attempts == 1  # 刷新占用的连接；前台没有连接或 SQL
             assert executed_sql(env.drv) == []
             assert await env.evidence_rows() == 0

@@ -241,9 +241,15 @@ class ObservingTransport(httpx2.AsyncBaseTransport):
     产品 transport 仍在外层执行请求头重建与字节限额。
     """
 
-    def __init__(self, inner: httpx2.AsyncBaseTransport) -> None:
+    def __init__(
+        self,
+        inner: httpx2.AsyncBaseTransport,
+        *,
+        observe_response: Callable[[bytes], None] | None = None,
+    ) -> None:
         self._inner = inner
         self.observations: list[RequestObservation] = []
+        self._observe_response = observe_response
 
     async def handle_async_request(self, request: httpx2.Request) -> httpx2.Response:
         shape = _request_shape(await request.aread())
@@ -260,6 +266,8 @@ class ObservingTransport(httpx2.AsyncBaseTransport):
         self.observations[index] = replace(self.observations[index], status=response.status_code)
 
         def record(body: bytes) -> None:
+            if self._observe_response is not None:
+                self._observe_response(body)
             self.observations[index] = replace(
                 self.observations[index],
                 elapsed_ms=int((time.monotonic() - started) * 1000),

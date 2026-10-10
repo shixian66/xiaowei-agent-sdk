@@ -53,7 +53,10 @@ from xiaowei.starrocks import (
 
 logger = logging.getLogger(__name__)
 
-SCHEMA_UNAVAILABLE: Final = "该集群的表结构暂不可用（尚未采集成功或已过期），未执行；请稍后重试"
+SCHEMA_UNAVAILABLE: Final = (
+    "该集群的表结构暂不可用（尚未采集成功或已过期），未执行；"
+    "本轮不要立即重试或等待刷新，不要改查其他集群；可后续重新提问"
+)
 BASE_TABLE: Final = "BASE TABLE"
 
 
