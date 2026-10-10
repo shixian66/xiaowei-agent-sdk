@@ -166,6 +166,17 @@ DEFAULT_INSTRUCTIONS = (
     "或历史结果，也不能只给 clarification 或 advice。"
 )
 
+MONITORING_INSTRUCTIONS = (
+    "上述 run_readonly_query、库表和 SQL 的先决条件只约束 StarRocks 工具。"
+    "监控调查按问题在本轮已授权的监控源和工具中自主选择，不必先搜 StarRocks 表；"
+    "根据本轮时间与可用工具决定查询时刻或范围，并说明实际覆盖；即时查询不能冒充历史时间段。"
+    "只有必要信息缺失、影响判断且无法从可信"
+    "上下文确定时才澄清。"
+    "监控工具返回 unverified 表示该源本轮未取得事实，不要在本轮重试该源；"
+    "可调查其他已授权源，并明确哪部分未核实。所有监控读取都失败时，可在 advice 中给出"
+    "明确标为‘未经数据验证’的排查步骤，不断言当前健康或故障根因。"
+)
+
 TurnReason = Literal[
     "session_busy",
     "busy",
@@ -311,6 +322,8 @@ class Application:
         self._model = model
         self._binding = _binding_fingerprint(model.fingerprint, data_policy, config.targets)
         self._instructions = _instructions(config.instructions, config.targets, capabilities)
+        if any(contract.policy_id == "prometheus.query" for contract in catalog.contracts):
+            self._instructions += "\n" + MONITORING_INSTRUCTIONS
         self._engine = engine
         self._governance = governance
         self._evidence = governance.evidence
@@ -508,16 +521,21 @@ class Application:
         _stage(turn, "answered", started)
         answer = result.final_output_as(AgentAnswer, raise_if_incorrect_type=True)
         runs = self._governance.turn_runs(ctx.identity)
-        # 本轮成功的业务查询（可信记录）都必须被引用：其他工具或历史证据不能代替查询结果，
-        # 澄清与建议的“本轮未执行业务查询”因此属实。I/O 前被拒绝的调用不算执行。
+        # 本轮成功的业务查询（可信记录）都必须被引用；明确分类的监控读取失败单独计数，
+        # 不能伪装成成功证据。I/O 前被拒绝的调用不算执行。
         queried = [e for tool_id, e in runs.produced if tool_id in self._queries]
-        unfinished = len(queried) != sum(t in self._queries for t in runs.started)
+        failed_queries = sum(f.tool_id in self._queries for f in runs.monitoring_failures)
+        unfinished = len(queried) + failed_queries != sum(t in self._queries for t in runs.started)
         uncited = set(queried) - set(answer.evidence_ids)
         if unfinished or uncited:
             raise TurnError("answer_rejected", answer_reject=AnswerRejectCode.UNCITED_QUERY)
         # 模型可见的证据：回放的历史与本轮工具结果，随回答保存，每次交付都复核。
         context = (*session.replayed_evidence, *(e for _, e in runs.produced))
-        validated = TurnAnswer(answer=answer, context_evidence=tuple(dict.fromkeys(context)))
+        validated = TurnAnswer(
+            answer=answer,
+            context_evidence=tuple(dict.fromkeys(context)),
+            monitoring_failures=runs.monitoring_failures,
+        )
         # 先单独校验回答，使拒绝原因明确；提交时 Session 仍会用同一验证器再校验一次。
         await self._evidence.validate_answer(validated, ctx)
         await session.commit_validated(validated.context_evidence)
@@ -611,9 +629,10 @@ def _local_tools(
 
 
 _TARGETS_HEADER = (
-    "可用集群如下；调用数据工具时 cluster 参数必须取其中一个 ID。用户没有说明集群、也不能从本轮"
-    "对话确定时先澄清，不要猜测；某个集群失败或不可用时如实说明，不要改查其他集群代替。"
-    "不同集群中同名的库表彼此独立，不能混用结果。"
+    "可用 StarRocks 集群如下；调用 StarRocks 数据工具时 cluster 参数必须取其中一个 ID。"
+    "用户没有说明 StarRocks 集群、也不能从本轮对话确定时先澄清，不要猜测；某个 "
+    "StarRocks 集群失败或不可用时如实说明，不要改查其他 StarRocks 集群代替。"
+    "不同 StarRocks 集群中同名的库表彼此独立，不能混用结果。"
 )
 
 

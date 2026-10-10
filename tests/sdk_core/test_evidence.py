@@ -316,6 +316,7 @@ async def test_advice_is_a_separate_answer_without_facts(postgres_url: URL) -> N
                 "evidence_ids",
                 "facts",
                 "analysis",
+                "monitoring_notice",
                 "web_text",
             }
             assert (delivery.evidence_ids, delivery.facts) == ((), ())

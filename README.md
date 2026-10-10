@@ -17,7 +17,7 @@
 
 **P2.5 与后续增量：** P2.5 开放账号实际 SELECT 范围、复杂 SQL、多集群和单 Agent 自然语言工具选择；随后增加指定飞书群共享与排队，均在 P3 前完成。产品边界见 [ARCHITECTURE](ARCHITECTURE.md#p25-scope)，实施顺序见 [DEVELOPMENT_PLAN](DEVELOPMENT_PLAN.md#6-p25-与飞书单群增量)。下文命令、配置和诊断用法描述当前主线；配置已改为 `targets` 多目标格式（P2.5 Task 1），数据范围改为只读账号实际可 SELECT 的对象（P2.5 Task 2）；跨库与复杂 SQL 已实现（P2.5 Task 3），搜表分页与多库慢查询（Task 6）、普通消息由单 Agent 判断是否查询（Task 7）均已合入。原 P2.5 Task 4 已取消，查询沿用权限、SQLGuard 和运行限额，EXPLAIN LOGICAL 用于按需诊断（见上述产品边界）。P2.5 的离线与隔离服务证据已齐（Task 8，见 AGENT_HANDOFF）；真实模型、用户 StarRocks 与飞书的实战验证在 P3。
 
-**P4 监控增量（分片开发中）：** 同一 Agent 规划调查获准 Prometheus、Grafana 与独立 Alertmanager，并在指定飞书群对首批监控写动作逐次审批。R1a 已把 Prometheus MCP 的 `query` 接入正式 `serve`，支持按源授权、Evidence 和就绪状态；R1b 的按源有界重连已在隔离环境实现，待独立审查，尚未在公司监控环境验证。P2 指标发现、Grafana、Alertmanager 和监控写入口尚未接入。产品与权限边界见 [监控接入设计](ARCHITECTURE.md#monitoring-mcp)，切片与门槛见 [实施计划](docs/superpowers/plans/2026-10-09-monitoring-mcp.md)，当前证据见 [handoff](AGENT_HANDOFF.md)。主配置样例仍不启用监控源；选配方式见[运维说明](deploy/OPERATIONS.md#选配-prometheus-监控源)。
+**P4 监控增量（分片开发中）：** 同一 Agent 规划调查获准 Prometheus、Grafana 与独立 Alertmanager，并在指定飞书群对首批监控写动作逐次审批。R1a 已把 Prometheus MCP 的 `query` 接入正式 `serve`，支持按源授权、Evidence 和就绪状态；R1b 按源有界重连已合入主线，尚未在公司监控环境验证。P2 指标发现、Grafana、Alertmanager 和监控写入口尚未接入。产品与权限边界见 [监控接入设计](ARCHITECTURE.md#monitoring-mcp)，切片与门槛见 [实施计划](docs/superpowers/plans/2026-10-09-monitoring-mcp.md)，当前证据见 [handoff](AGENT_HANDOFF.md)。主配置样例仍不启用监控源；选配方式见[运维说明](deploy/OPERATIONS.md#选配-prometheus-监控源)。
 
 ## 最小产品形态
 

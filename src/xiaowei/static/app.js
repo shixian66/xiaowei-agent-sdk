@@ -86,6 +86,9 @@
     if (data.error) item.append(el("p", "content", data.error));
     if (data.delivery) {
       if (data.delivery.facts.length) {
+        if (data.delivery.monitoring_notice) {
+          item.append(el("p", "meta", data.delivery.monitoring_notice));
+        }
         for (const fact of data.delivery.facts) item.append(factTable(fact));
         if (data.delivery.analysis.length) {
           const analysis = el("section", "analysis");

@@ -201,7 +201,8 @@ class AgentAnswer(_Answer):
     """SDK ``output_type``：模型只选择引用并给出分析；事实区域由代码从 Evidence 生成。
 
     三种回答互斥（见 ``EvidenceStore.validate_answer``）：引用证据的回答（可带分析）、澄清、
-    未执行建议（``advice``：只解释、只写 SQL、不要执行等场景的说明或 SQL 草稿，不含查询事实）。
+    无成功查询证据的建议（``advice``：只解释、只写 SQL、不要执行或监控源读取失败后的
+    未验证排查建议，不含已核实的查询事实）。
     ``advice`` 有默认值，只为解析此前保存、没有该字段的回答（它们没有可信的上下文证据记录，
     不再交付，见 ``ChannelStore``）；SDK 严格模式下模型仍须显式给出它（可为 null）。
     """
@@ -210,6 +211,17 @@ class AgentAnswer(_Answer):
     inferences: list[AnswerInference]
     clarification: Annotated[str, Field(min_length=1, max_length=2000)] | None
     advice: Annotated[str, Field(min_length=1, max_length=4000)] | None = None
+
+
+MonitoringFailureReason = Literal["auth", "timeout", "unavailable", "upstream_5xx"]
+
+
+class MonitoringFailure(_Trusted):
+    """可信执行链记录的监控读取失败；不来自模型或远端正文。"""
+
+    tool_id: ToolId
+    target_id: Label
+    reason: MonitoringFailureReason
 
 
 class TurnAnswer(_Trusted):
@@ -222,6 +234,7 @@ class TurnAnswer(_Trusted):
 
     answer: AgentAnswer
     context_evidence: tuple[Label, ...]
+    monitoring_failures: tuple[MonitoringFailure, ...] = ()
 
 
 class DeliveryFact(_Trusted):
@@ -253,6 +266,8 @@ class Delivery(_Trusted):
     facts: tuple[DeliveryFact, ...] = ()
     analysis: tuple[AnswerInference, ...] = ()
     """独立渲染的模型分析；仅由证据验证后的回答生成，不在事实表格中混排。"""
+    monitoring_notice: str | None = None
+    """系统按可信失败记录生成的未核实源说明；Web 与飞书均须展示。"""
     web_text: str | None = None
     """Web 澄清或未执行建议的原文。"""
     feishu_text: str | None = Field(default=None, exclude=True)

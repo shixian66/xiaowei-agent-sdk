@@ -403,7 +403,11 @@ class ResultDelivery:
         if record.context_evidence is None:
             # 此前格式保存的回答没有本轮模型可见证据的记录，无法确认它依赖的数据当前仍可读。
             raise ResultUnavailableError
-        turn = TurnAnswer(answer=record.answer, context_evidence=record.context_evidence)
+        turn = TurnAnswer(
+            answer=record.answer,
+            context_evidence=record.context_evidence,
+            monitoring_failures=record.monitoring_failures,
+        )
         try:
             return await self._evidence.validate_answer(
                 turn, self._context(record, decision), history=history
