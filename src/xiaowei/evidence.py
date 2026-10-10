@@ -56,6 +56,7 @@ from xiaowei.governance import (
     schema_shape,
 )
 from xiaowei.models import (
+    PROMETHEUS_READ_POLICIES,
     Audience,
     Channel,
     Delivery,
@@ -132,6 +133,7 @@ _MONITORING_REASONS = {
     "timeout": "读取超时，结果未知",
     "unavailable": "源连接不可用，结果未知",
     "upstream_5xx": "上游服务错误",
+    "invalid_expression": "查询表达式解析失败",
 }
 
 _INSERT = text(
@@ -437,7 +439,7 @@ class EvidenceStore:
             contract = self._catalog.contract(failure.tool_id, failure.target_id)
             if (
                 contract is None
-                or contract.policy_id != "prometheus.query"
+                or contract.policy_id not in PROMETHEUS_READ_POLICIES
                 or failure.target_id not in ctx.target_scope
             ):
                 raise AnswerRejectedError(
@@ -460,7 +462,10 @@ class EvidenceStore:
             f"{source}（{'、'.join(sorted(reasons))}）"
             for source, reasons in sorted(descriptions.items())
         )
-        return f"未核实监控源（系统记录）：{sources}。这些源不能据此判定健康。"
+        return (
+            f"监控源部分读取未核实（系统记录）：{sources}。失败调用没有成功证据；"
+            "其他成功查询仅证明各自覆盖范围，不能据此判定整体健康。"
+        )
 
     async def _context_readable(
         self, ctx: RunContext, channel: Channel, evidence_ids: Sequence[str], *, history: bool

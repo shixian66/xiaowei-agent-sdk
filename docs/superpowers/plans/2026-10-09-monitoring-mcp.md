@@ -32,7 +32,7 @@
 | --- | --- | --- |
 | **G0 共用协议门槛**：用一项 Prometheus 只读工具核对锁定 Server、SDK 与小维的最小接入契约 | 开发者对合成目标调用代表工具 → 真 SDK 客户端发现、调用并做必要的薄转换 → 看见符合 JSON 对象契约的结果 | 核对输入 schema、`is_error`、文本/structuredContent、错误与返回上限，以及固定端点、所选 HTTP/HTTPS、关闭、超时和实际认证传递；分别记录不带 `Authorization` 与带 `Authorization` 时 Prometheus MCP 的行为及上游身份。不兼容则先修正映射；Grafana、Alertmanager 与写工具各在对应切片核对 |
 | **R1 源级装配/授权/Evidence**：R1a 已随 PR #67 合入；R1b 重连已合入主线，真实外部节点待验证。正式 `serve` 能选配已映射的监控源，空配置继续启动 | 获准用户在 Web/飞书问已接入源的内容 → 本轮只显示对应读工具、调用前复核、结果进入 Evidence → 看见来源/时间；外部 Server 重启 → 后续轮次按源有界重连并重新核约 → 恢复后可继续查询，无须重启小维 | 未授权源、按架构 §5 停旧进程后配置撤权、跨源引用、MCP 断开、schema 漂移：零未授权 I/O、无越权历史/重发；重连失败按源指数退避、不变更进行中工具集合、不自动重放调用；`/readyz` 列出源状态且 StarRocks 可用。真实 PostgreSQL + 真 SDK + loopback 与固定内网 HTTP 合成 MCP 检查启动不可达、运行中断开与恢复、读取投影、会话、证据、端点/认证头；源级历史本地复核在 Grafana 不可达时仍可回放获准群 Session；旧配置和旧证据兼容按 §4 验证 |
-| **P2 Prometheus 自主调查**：发现指标/标签/主机/已加载规则，instant/range PromQL；只读故障续查先行作为本行的独立子片 | 用户在 Web 或群问主机 CPU/内存/Kafka 状态 → Agent 自主发现并生成 PromQL，按源/时间查询 → 显示实际表达式、采集/求值时间、有限数值和推断 | 先核对选中工具的真实 schema、Prometheus `errorType`/错误内容与结果；仅可确定的语法/表达式错误允许有限修正，错误计预算无成功 Evidence，修正后真实成功才生成 Evidence。超时/不可达/上游 5xx/401/403 可标明该源未核实并续查其他已授权源；本源本轮不重试。未知/协议错误中止，本地无权调用零 I/O；全部读取失败可给明确未验证的排查建议，不报“健康”。warnings/截断及预算耗尽不报“健康”，越界时间/点数/长度零网络请求。真 SDK + 协议替身、获准真实 Prometheus 验服务端 timeout/max-samples/max-concurrency 与高基数失败；三源联合问题样例校准 `max_tool_calls/max_turns`，固定模型任务样例覆盖不同指标，不建指标白名单 |
+| **P2 Prometheus 自主调查**：当前候选实现发现/规则/instant/range 与有限修正，协议/计划 `1414ec2` 已独立审查；实现复审及真实模型/源门槛开放，详见 §3.1 与 handoff | 用户在 Web 或群问主机 CPU/内存/Kafka 状态 → Agent 自主发现并生成 PromQL，按源/时间查询 → 显示实际表达式、采集/求值时间、有限数值和推断 | 先核对选中工具的真实 schema、Prometheus `errorType`/错误内容与结果；仅可确定的语法/表达式错误允许有限修正，错误计预算无成功 Evidence，修正后真实成功才生成 Evidence。超时/不可达/上游 5xx/401/403 可标明该源未核实并续查其他已授权源；本源本轮不重试。未知/协议错误中止，本地无权调用零 I/O；全部读取失败可给明确未验证的排查建议，不报“健康”。warnings/截断及预算耗尽不报“健康”，越界时间/点数/长度零网络请求。真 SDK + 协议替身、获准真实 Prometheus 验服务端 timeout/max-samples/max-concurrency 与高基数失败；三源联合问题样例校准 `max_tool_calls/max_turns`，固定模型任务样例覆盖不同指标，不建指标白名单 |
 | **G3 Grafana 只读调查**：Dashboard/Panel/数据源元数据与历史权限 | 用户在飞书问 Dashboard 面板含义 → Agent 按问题选工具，可读定义并关联获准 Prometheus 实时结果 → 分列显示定义和实时证据 | 首批只核约所需只读工具（Dashboard 搜索/读取、数据源元数据、Annotation 读取），这不是固定调用顺序或永久对象白名单；逐项核对 schema/结果。无源权限、当前读取失败、面板引用未授权数据源、版本/内容过大：拒绝读取或只报告定义且标明未查实时；历史回放/重发按当前源和接收权限本地复核，不为每个对象远端查 ACL。锁版真 Server + 合成/获准 Grafana 核对响应，禁止未授权代理查询 |
 | **A4 Alertmanager 只读调查**：告警/静默/接收器和状态，确定社区 Server 或薄 API v2 Adapter | 群员问某告警是否被静默 → Agent 读独立 Alertmanager → 展示匹配依据、静默 ID/起止时间和采集时间 | 先核对候选 Server 的所选只读工具和 API v2；写入口若缺认证或远端工具限制，S6 改用经认证的薄 API v2 Adapter。目标不可达、分页未取完、静默已到期、权限撤销：不称“无告警/未静默”；只读调用不暴露写工具。取消静默的实际 API 行为留在 S6 验证 |
 | **W5 群审批底座**：仅为已选监控动作持久化候选 Action 与批准状态 | 当前群成员申请具体动作 → Runner 调用受治理“提出”工具，可信代码回读对象/版本、规范化参数、生成差异与 Action/提议 Evidence，Runner 正常结束并引用证据；应用按已存内容交付群且记录 `sent` → 仍在群内的名单成员 @ 机器人逐次批准 → 应用绑定批准并进入可执行状态；批准后群收到代码生成的执行反馈，追问时 Agent 用只读工具查询 Action 状态 | 提议 Evidence/最终校验/群发送失败、Web/单聊/其他群、退群/非名单、伪造 open_id、过期、撤权、参数/目标变更、重复或并发事件：远端写 I/O 为零；审批入口确定性解析并去重，不进模型。真实 PostgreSQL + 真 SDK + 飞书事件替身验证提议工具调用/结果成对进入 Session，旧实例失锁后不能抢执行机会、同群执行与 Agent 轮次串行、重启后不自动补写；审批人身份的仅此写工具 Tool Scope 经 GovernedTools 和已有 MCPIntegration/Adapter 执行，结果以应用 Action 表为准。状态只读工具验证群/源/Action 归属与当前权限，生成 Evidence 并由下一轮正常提交；Session 已满、关闭或保存失败时执行事实仍保留、不重复写，用户新建会话凭 Action ID 仍可获准查询；群队列不因等待审批而阻塞 |
@@ -45,24 +45,24 @@
 
 ### 3.1 P2 当前切片（基线 `4c5b89495fdf57bfd6d18bb4483d5682e56cce59`）
 
-PR #70 的只读故障续查已合入。本片只扩展 Prometheus 读取，不改写能力。先用官方 v0.18.0 核约，再沿 `serve → Web/飞书 → Runner → GovernedTools → MCP → Evidence/PolicySession → 交付` 实现。独立审查以本节与协议用例的具体提交为准；不合入实验分支。
+PR #70 的只读故障续查已合入。本片只扩展 Prometheus 读取，不改写能力。先用官方 v0.18.0 核约，再沿 `serve → Web/飞书 → Runner → GovernedTools → MCP → Evidence/PolicySession → 交付` 实现。协议/计划的独立审查已覆盖 `1414ec2690123c60a3ca42b8a627ea1681ae2ede`，没有架构阻断；未覆盖后续实现。候选的当前验证只记 handoff；不合入实验分支。
 
 **Agent 的任务和选择。** 用户问“host1 最近为什么 CPU 告警”“这台主机叫什么、监控里能看到多少 CPU/内存”“Kafka 积压是否和已加载规则有关”：Agent 自选获准源、指标/标签、发现方式、表达式、时间窗、步长和调查顺序；可直接查已知指标，缺关键业务含义时才澄清。主机配置仅报告指标实际提供的事实，不推断未采集的硬件配置。失败或信息不足时可换已授权源、补证据或结束；不要求每次先发现、先读规则或固定工具顺序。代码管授权、资源、真实证据和分类边界。
 
 | 接口（远端名 / 策略后缀） | 本地必填输入与输出约定 |
 | --- | --- |
 | `query` / `query` | 保持 R1 的 `{query}` 输入和结果契约/指纹，兼容旧证据；服务端即时求值。实际表达式由代码补入，排版文本中的样本时间原样展示；采集时钟不冒充求值时间 |
-| `range_query` / `range_query` | `query, start_time, end_time, step`；时间可为 Unix 秒、含时区的 RFC3339，或 `now` / `-15m` 等单单位相对时间。调用前冻结为实际 Unix 秒和秒步长，结果记录冻结值。起止相同时可查明确时刻；返回排版文本与 warnings，不解析数值或 PromQL |
+| `range_query` / `range_query` | `query, start_time, end_time, step`；时间可为 Unix 秒、含时区的 RFC3339，或 `now` / `-15m` 等单单位相对时间。调用前按 Server 毫秒精度冻结为实际 Unix 秒和秒步长，按冻结值检查点数并记录；回放摘要不按新时钟重新解析相对时间。起止相同时可查明确时刻；返回排版文本与 warnings，不解析数值或 PromQL |
 | `label_names` / `label_names`；`label_values` / `label_values` | 均含 `matches, start_time, end_time`；后者另有 `label`。空 matches 表示源内发现；返回排版文本/warnings 与实际时间窗 |
 | `series` / `series` | `matches, start_time, end_time`；至少一个选择器。返回标签集排版文本/warnings 与实际时间窗；不称为主机资产清单 |
 | `metric_metadata` / `metric_metadata` | `metric`（空串表示发现全部元数据）；不发送可选 limit，沿用 Server 默认。元数据 JSON 包为固定 `metadata` 字段，类型/help/unit 做声明式投影 |
 | `list_rules` / `list_rules` | 无参数；只读当前已加载规则，投影 group/name/query/labels/annotations/state/health/lastEvaluation 等必要事实。Server 不返回 type；不以猜测补上。health 是规则求值状态，不是主机健康 |
 
-策略 ID 均为 `prometheus.<后缀>`，工具/目标 ID 沿用源的静态映射和 Grants。只可配置本表的准确映射与子集；空配置、旧 query 配置和旧 query/StarRocks Evidence 不变。SDK 严格输入的字段均必填。只对本地非空数组、远端 `type:[null,array]` 且其余约束相同的情况接受类型子集；反方向、元素/约束漂移仍隐藏工具。其余未暴露可选参数不发送，默认行为见锁版用例，不引入 schema 通用转换器。
+策略 ID 均为 `prometheus.<后缀>`，工具/目标 ID 沿用源的静态映射和 Grants。只可配置本表的准确映射与子集；空配置、旧 query 配置和旧 query/StarRocks Evidence 不变。SDK 严格输入的字段均必填。只对本地非 nullable 数组、远端 `type:[null,array]` 且其余约束相同的情况接受类型子集；反方向、元素/约束漂移仍隐藏工具。其余未暴露可选参数不发送，默认行为见锁版用例，不引入 schema 通用转换器。
 
-**实际协议依据。** `tests/sdk_core/test_prometheus_p2_protocol.py` 使用官方 v0.18.0（源码 `924e43dbea816b92c3e79e73c1568af417e8e30e`）、真 SDK 和 loopback API，逐项断言 schema、结果及每次上游请求数加 1。本机 darwin/arm64 二进制 SHA-256 为 `6272e0d8fbc8af341d1e93fdc6aa130f7086b7a993faedb015966c2ace5e3a82`，不同于发布压缩包校验值。query/range/标签/series 返回 JSON 包裹排版文本；metadata/rules 丢弃上游 warnings，固定说明这项完整性限制。已核实 truncation 标记：文本工具标记在 result 内，metadata 标记可能追加在 JSON 之后；只接受锁版完整标记，其余尾随内容拒绝。标记或投影截断设置 truncated，空结果不声称健康；未知结果形状仍中止。正常部署继续推荐 `--prometheus.truncation-limit=0`。
+**实际协议依据。** `tests/sdk_core/test_prometheus_p2_protocol.py` 使用官方 v0.18.0（源码 `924e43dbea816b92c3e79e73c1568af417e8e30e`）、真 SDK 和 loopback API，逐项断言 schema、结果及每次上游请求数加 1。本机 darwin/arm64 二进制 SHA-256 为 `6272e0d8fbc8af341d1e93fdc6aa130f7086b7a993faedb015966c2ace5e3a82`，不同于发布压缩包校验值。query/range/标签/series 返回 JSON 包裹排版文本；metadata/rules 丢弃上游 warnings，固定说明这项完整性限制。已核实 truncation 标记：文本工具标记在 result 内，metadata 标记可能追加在 JSON 之后；只接受锁版完整标记，其余尾随内容拒绝。标记或投影截断设置 truncated，空结果不声称健康；未知结果形状仍中止。正常部署继续推荐 `--prometheus.truncation-limit=0`。官方 range 不接受裸数字 step，本地按秒检查后发整数毫秒时长（如 `30000ms`）；记录秒值。锁版 SDK 的 Streamable HTTP 同连接请求实际串行，FunctionTool 治理仍可并行；额度在网络前预留，不依赖远端并发顺序。
 
-**失败与资源契约。** 所有本表只读工具沿用已批准的源级 auth/timeout/unavailable/upstream_5xx 续查，不自动重放；当轮停用失败源，可继续其他获准源。仅 query/range 的锁版单段错误，完整匹配工具前缀、`bad_data: invalid parameter "query": 行:列: parse error: …`，才交回可信的解析失败类别与位置；不透传原始错误。每源每轮最多 3 次已执行的语法失败（初次及最多两次失败的修正），同一失败表达式不再发出；失败计预算、无成功 Evidence，成功后才生成证据。bad_data 的 step/标签错误、422 execution、未知文本、多段/结构化错误、协议/投影/存储失败仍中止。最终校验分别统计成功查询、分类的源故障和语法失败，不能靠忽略失败调用通过；发现事实由 Agent 按需要引用，已成功执行的 query/range 仍全部引用。
+**失败与资源契约。** 所有本表只读工具沿用已批准的源级 auth/timeout/unavailable/upstream_5xx 续查，不自动重放；当轮停用失败源，可继续其他获准源。仅 query/range 的锁版单段错误，完整匹配工具前缀、`bad_data: invalid parameter "query": 行:列: parse error: …`，才交回可信的解析失败类别与位置；不透传原始错误。每源整轮累计最多两次已观测失败后的修正调用，治理在 I/O 前同步占用机会，成功不重置额度；只由占用机会的成功调用结束待修正状态，较早/其他并行成功不得清除它。同一已失败表达式跨 query/range 零 I/O 拒绝；已开始的并行首次调用仍各计总预算、started 和分类失败，不承诺最多三次错误响应。失败无成功 Evidence，成功后才生成证据。bad_data 的 step/标签错误、422 execution、未知文本、多段/结构化错误、协议/投影/存储失败仍中止。最终校验分别统计成功查询、分类的源故障和语法失败，不能靠忽略失败调用通过；发现事实由 Agent 按需要引用，已成功执行的 query/range 仍全部引用。
 
 I/O 前复用 `Prechecked`：表达式/选择器最长 8192 字符、最多 32 个选择器；时间须有限且起止有序、窗宽不超过 31 天；step 至少 1 秒，单序列求值点数 `floor((end-start)/step)+1` 不超过 11000；label 非空且符合标签名语法。拒绝零上游请求并说明可修正原因，Agent 在范围内自选参数。以上是客户端硬上限，不限制表达式内部回看/扫描量；真实启用前仍须核对服务端生效的 timeout/max-samples/max-concurrency，据容量收紧，未核实时不标真实验收通过。
 
@@ -70,9 +70,9 @@ PR #70 的三个非阻断项在本片同一失败契约中落实：并行成功/
 
 | 顺序与可独立验证的结果 | 成功/关键失败验收 |
 | --- | --- |
-| P2.1 锁版协议与本节审查 | 真 Server 覆盖七工具、带/不带认证、原样时间、warnings 缺失及截断；400 query 与 step 反例、422/401/403/500/503 分开断言；调用恰一次，无重试。审查通过后再改产品代码 |
+| P2.1 锁版协议与本节审查 | 真 Server 覆盖七工具、带/不带认证、毫秒时间、metadata 空 metric/省略 limit、warnings 缺失及完整截断标记/篡改尾部；400 query 与 step 反例、422/401/403/500/503 分开断言；调用恰一次，无重试。审查通过后再改产品代码 |
 | P2.2 正式装配与最小用户闭环 | 先补失败测试，再用正式 serve/Web 查 range 或发现，真实 PostgreSQL/SDK/Evidence/Session；先跑一成功、一越界零 I/O 拒绝。子集授权、固定端点、schema 漂移、跨源引用、旧配置/旧证据兼容；query 与发现输出不混称数值 |
-| P2.3 自主修正与失败收尾 | 真 Server + 正式治理链验证坏表达式→模型改写→成功证据，重复表达式/次数/预算上限、错误隔离变异；故障换源、全失败无证据建议、并行成功/失败、提交时撤权；正常/拒绝均覆盖历史和重发 |
+| P2.3 自主修正与失败收尾 | 真 Server + 正式治理链验证坏表达式→模型改写→成功证据，重复表达式/次数/预算上限、四并行初次失败和修正最多两次 I/O、错误隔离变异；故障换源、全失败无证据建议、并行成功/失败、提交时撤权；正常/拒绝均覆盖历史和重发 |
 | P2.4 能力评估与交付 | 正式浏览器与群事件替身展示来源、实际表达式/冻结时间、warnings/截断和推断；R1/MCP/G0/SDK 相关回归、Ruff/type 检查。获准真实模型上评估上述三业务问题及一次语法修正，不固定顺序，记录答案/取证/澄清/调用次数/耗时/用量；真实 Prometheus 验扫描限额。缺模型或真实源继续离线并留下能力/环境验收门槛，不用脚本模型豁免；提交、推送并开 PR，不合并/部署 |
 
 ## 4. 环境、兼容与恢复
@@ -96,7 +96,7 @@ PR #70 的三个非阻断项在本片同一失败契约中落实：并行成功/
 | 锁版 Grafana/社区 Alertmanager Server 能否直接拒绝无/错调用者凭据及未选写工具？ | G3/A4 查实际配置，S6/D7/C8 在隔离环境按三种直接访问做零写入用例；当前 Grafana README 的 `--disable-write` 列表未列 `create_datasource/update_datasource`，不能凭开关名推断它们受限，必须查锁版注册表并直调验证，连同通用 API 旁路。社区 Alertmanager 不满足则只用经认证的薄 API v2 Adapter；Grafana 不满足时不开放该写能力，先核对锁版能力及最小替代路径 |
 | 目标 Alertmanager API v2 的 Web Basic 与所选社区 MCP 的认证形态是否符合写入口契约？ | A4/S6 锁版核对目标 Web 配置；薄 Adapter 用安全引用装配 Basic 用户名/密码，分别验证无/错凭据零写入、正确凭据批准后读回，不把当前 Bearer `auth_ref` 复用为 Basic。社区 MCP 若另有认证协议单独验证，不能继承原生 API 的结论 |
 | Grafana 的共享服务账号、组织 ACL 与新数据源可连到哪些内网地址，是否与源级共享授权相符？ | G3/C8 以真实环境核实；不满足则不开放相应源或数据源写，不建立对象白名单来掩盖出网越界 |
-| Prometheus 当前生效的 timeout/max-samples/max-concurrency、可接受的查询时间窗与点数是多少？ | P2 前由监控环境负责人提供并验证生效值，据容量在可信配置中定阈值；无服务端边界则不能开放自由 PromQL |
+| Prometheus 当前生效的 timeout/max-samples/max-concurrency、可接受的查询时间窗与点数是多少？ | P2 真实启用前由监控环境负责人提供并验证生效值，据容量核对或收紧 §3.1 的可信上限；无服务端边界则该源不能启用自由 PromQL，未验证不标真实验收通过。当前不新增运维配置项 |
 | 目标 Grafana 版本的 Dashboard API 是否支持所需版本冲突拒绝、历史回读与按组织权限控制？ | D7 实测；不能证明不覆盖他人版本则不启用修改动作 |
 | Grafana 数据源更新 API 是否提供原子版本条件？ | C8 实测；至少批准前及写前比对当前配置摘要。若无原子冲突拒绝，记录真实竞争窗口，生产启用前由用户明确接受该残余风险或改变范围，不能宣称完全避免并发覆盖 |
 

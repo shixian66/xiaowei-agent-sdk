@@ -37,6 +37,8 @@ from pydantic import BaseModel
 
 from xiaowei.models import (
     AUDIENCES,
+    PROMETHEUS_QUERY_POLICIES,
+    PROMETHEUS_READ_POLICIES,
     Identity,
     MonitoringFailure,
     MonitoringFailureReason,
@@ -100,6 +102,16 @@ class MonitoringReadError(Exception):
     def __init__(self, reason: MonitoringFailureReason) -> None:
         super().__init__("监控源本轮未核实")
         self.reason = reason
+
+
+class PromQLExpressionError(MonitoringReadError):
+    """锁版协议确认的查询语法失败；只交回位置，修正额度由治理层决定。"""
+
+    def __init__(self, line: int, column: int) -> None:
+        super().__init__("invalid_expression")
+        self.line = line
+        self.column = column
+        self.correction_allowed = False
 
 
 @dataclass(frozen=True)
@@ -242,6 +254,9 @@ class TurnRuns:
     started: tuple[str, ...] = ()
     produced: tuple[tuple[str, str], ...] = ()
     monitoring_failures: tuple[MonitoringFailure, ...] = ()
+    promql_errors: tuple[tuple[str, str], ...] = ()  # 目标、已失败表达式，跨 query/range 禁止重发。
+    promql_pending: frozenset[str] = frozenset()
+    promql_repairs: tuple[str, ...] = ()  # 每源整轮最多两项，不随成功复位。
     truncated: int = 0
     rejected: int = 0
     limit_rescue_started: bool = False
@@ -299,17 +314,35 @@ class GovernedTools:
         if not await self._currently_authorized(ctx.identity, contract):
             raise ToolRejectedError("当前无权调用该工具")
         if any(
-            failure.target_id == contract.target_id
+            failure.target_id == contract.target_id and failure.reason != "invalid_expression"
             for failure in self._runs.get(_turn_key(ctx.identity), TurnRuns()).monitoring_failures
         ):
             raise ToolRejectedError("该监控源本轮读取已失败；可调查其他已授权源，不要重试本源")
         # 授权回调之后、执行之前不再 await：前置检查与计数在同一步完成，并行调用不能同时越过
         # 上限；前置检查拒绝时尚未占用预算。
         run = _bind(execute, effective)
-        self._reserve(ctx)
         key = _turn_key(ctx.identity)
         runs = self._runs.get(key, TurnRuns())
-        self._runs[key] = replace(runs, started=(*runs.started, contract.tool_id))
+        repair_from: int | None = None
+        if contract.policy_id in PROMETHEUS_QUERY_POLICIES:
+            if (contract.target_id, str(arguments["query"])) in runs.promql_errors:
+                raise ToolRejectedError("该表达式本轮已解析失败，未重发；请修改表达式")
+            if contract.target_id in runs.promql_pending:
+                if runs.promql_repairs.count(contract.target_id) >= 2:
+                    raise ToolRejectedError(
+                        "本源本轮两次PromQL修正机会已用完；可读取发现信息或其他源"
+                    )
+                repair_from = sum(target == contract.target_id for target, _ in runs.promql_errors)
+        self._reserve(ctx)
+        self._runs[key] = replace(
+            runs,
+            started=(*runs.started, contract.tool_id),
+            promql_repairs=(
+                (*runs.promql_repairs, contract.target_id)
+                if repair_from is not None
+                else runs.promql_repairs
+            ),
+        )
 
         observation: ToolObservation | None = None
         busy_before_sql = False
@@ -317,9 +350,23 @@ class GovernedTools:
             try:
                 observation = await run()
             except MonitoringReadError as exc:
-                if contract.policy_id != "prometheus.query":
+                if contract.policy_id not in PROMETHEUS_READ_POLICIES:
                     raise ToolExecutionError() from None
                 current = self._runs.get(key, TurnRuns())
+                if isinstance(exc, PromQLExpressionError):
+                    if contract.policy_id not in PROMETHEUS_QUERY_POLICIES:
+                        raise ToolExecutionError() from None
+                    current = replace(
+                        current,
+                        promql_errors=(
+                            *current.promql_errors,
+                            (contract.target_id, str(arguments["query"])),
+                        ),
+                        promql_pending=current.promql_pending | {contract.target_id},
+                    )
+                    exc.correction_allowed = current.promql_repairs.count(contract.target_id) < 2
+                elif exc.reason == "invalid_expression":
+                    raise ToolExecutionError() from None
                 failure = MonitoringFailure(
                     tool_id=contract.tool_id, target_id=contract.target_id, reason=exc.reason
                 )
@@ -351,6 +398,10 @@ class GovernedTools:
         result = await self._evidence.record(ctx, effective, observation)
         # 同一轮的并行调用可能已更新记录：取当前值再追加（两步之间没有 await）。
         runs = self._runs.get(key, TurnRuns())
+        if repair_from is not None and repair_from == sum(
+            target == contract.target_id for target, _ in runs.promql_errors
+        ):
+            runs = replace(runs, promql_pending=runs.promql_pending - {contract.target_id})
         produced = (*runs.produced, (contract.tool_id, result.evidence_id))
         self._runs[key] = replace(
             runs, produced=produced, truncated=runs.truncated + int(result.truncated)

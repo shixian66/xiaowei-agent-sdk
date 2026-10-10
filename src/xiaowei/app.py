@@ -67,6 +67,8 @@ from xiaowei.model_api import (
     ResponseRejectReason,
 )
 from xiaowei.models import (
+    PROMETHEUS_DISCOVERY_POLICIES,
+    PROMETHEUS_READ_POLICIES,
     AgentAnswer,
     AnswerInference,
     ClusterId,
@@ -175,6 +177,11 @@ MONITORING_INSTRUCTIONS = (
     "监控工具返回 unverified 表示该源本轮未取得事实，不要在本轮重试该源；"
     "可调查其他已授权源，并明确哪部分未核实。所有监控读取都失败时，可在 advice 中给出"
     "明确标为‘未经数据验证’的排查步骤，不断言当前健康或故障根因。"
+    "发现指标、标签、元数据和已加载规则按缺失信息选用，不要求固定顺序；主机配置只报告"
+    "指标实际采集的事实，缺的配置不能猜。invalid_expression 仅表示确定的PromQL解析失败，"
+    "可在 correction_allowed 和本轮预算内自主修改表达式，不重发同一失败表达式。"
+    "成功 query/range_query 的全部证据都要引用；排版文本、warnings/截断、元数据/规则的"
+    "完整性限制须如实说明，空结果不能解释为健康。"
 )
 
 TurnReason = Literal[
@@ -317,12 +324,17 @@ class Application:
         self._local = _local_tools(governance, local_tools)
         self._config = config
         # 执行业务查询的工具：只在查询用途、不在诊断用途中的工具（可信配置，不来自模型）。
-        self._queries = config.purposes["query"] - config.purposes["diagnose"]
+        discovery = frozenset(
+            contract.tool_id
+            for contract in catalog.contracts
+            if contract.policy_id in PROMETHEUS_DISCOVERY_POLICIES
+        )
+        self._queries = config.purposes["query"] - config.purposes["diagnose"] - discovery
         self._data_policy = data_policy
         self._model = model
         self._binding = _binding_fingerprint(model.fingerprint, data_policy, config.targets)
         self._instructions = _instructions(config.instructions, config.targets, capabilities)
-        if any(contract.policy_id == "prometheus.query" for contract in catalog.contracts):
+        if any(contract.policy_id in PROMETHEUS_READ_POLICIES for contract in catalog.contracts):
             self._instructions += "\n" + MONITORING_INSTRUCTIONS
         self._engine = engine
         self._governance = governance
@@ -472,7 +484,7 @@ class Application:
             # SDK 的公开错误处理器只接收最终值；另用一次无工具的 SDK Runner 调用让模型
             # 根据已获准的模型历史收尾。两次运行都受外层整轮期限约束，工具与证据不会重放。
             runs = self._governance.turn_runs(ctx.identity)
-            if not runs.produced:
+            if not runs.produced and not runs.monitoring_failures:
                 return None
             self._governance.note_limit_rescue(ctx.identity)
             query_ids = [e for tool_id, e in runs.produced if tool_id in self._queries]
@@ -487,7 +499,8 @@ class Application:
                 handoffs=[],
                 instructions=(
                     f"{agent.instructions}\n本轮步骤已用完；只基于上面已有的证据，"
-                    "现在给出最终回答，不再调用工具。必须引用实际可见的 evidence_id，"
+                    "现在给出最终回答，不再调用工具。只能引用实际可见的 evidence_id；"
+                    "无成功证据时只给明确未经数据验证的 advice，不作健康或根因结论。"
                     f"并说明结果可能不完整。{query_instruction}"
                 ),
             )
@@ -500,6 +513,14 @@ class Application:
             )
             answer = final.final_output_as(AgentAnswer, raise_if_incorrect_type=True)
             if not answer.evidence_ids:
+                if not runs.produced and runs.monitoring_failures and answer.advice is not None:
+                    return RunErrorHandlerResult(
+                        final_output=answer.model_copy(
+                            update={
+                                "advice": "步骤已用完，调查不完整；未经数据验证。\n" + answer.advice
+                            }
+                        )
+                    )
                 return None
             note = AnswerInference(
                 text="步骤已用完，以下基于已有结果；可能不完整。",
@@ -538,7 +559,9 @@ class Application:
         )
         # 先单独校验回答，使拒绝原因明确；提交时 Session 仍会用同一验证器再校验一次。
         await self._evidence.validate_answer(validated, ctx)
-        await session.commit_validated(validated.context_evidence)
+        await session.commit_validated(
+            validated.context_evidence, monitoring_failures=validated.monitoring_failures
+        )
         _stage(turn, "committed", started)
         return validated
 

@@ -237,7 +237,7 @@ Alertmanager 原生 API v2 若由薄 Adapter 直连，须支持其 Web 配置可
 
 保留“治理在小维、执行端可替换”：`SDK FunctionTool → GovernedTools / SQLGuard → 本地 Adapter（设置并回读会话限额，有界执行）→ StarRocks`。只读账号、会话限额设置与回读、有界读取、固定 EXPLAIN、错误过滤和连接关闭仍由 Adapter 实施。小维仓库不内嵌数据库 Server；将来启用 MCP 时由外部独立维护，连接级保证须由 Server 实现并重新验收，不能自动继承。[接入约定](docs/contracts/database-mcp-server.md) 保留为暂缓草案。
 
-重新评估条件：出现可验证的独立部署/多客户端共享需求、成熟 Server 明确减少维护成本，且有责任方、版本与验收证据；届时单独决策。通用 MCP Client Integration 保留，监控增量按上节单独接入。正式入口已可选配 Prometheus `query`；静态 Bearer 和当前仅开放一项读取工具仍是 MCP 接入事实，R1b 的按源重连已合入主线，不构成数据库阶段前提。
+重新评估条件：出现可验证的独立部署/多客户端共享需求、成熟 Server 明确减少维护成本，且有责任方、版本与验收证据；届时单独决策。通用 MCP Client Integration 保留，监控增量按上节单独接入。正式入口可选配已核约的 Prometheus 只读工具；所选接口、有限修正与资源边界见 [P4 当前 P2 切片](docs/superpowers/plans/2026-10-09-monitoring-mcp.md#31-p2-当前切片基线-4c5b89495fdf57bfd6d18bb4483d5682e56cce59)，只使用安全引用装配的静态 Bearer。R1b 的按源重连已合入主线，不构成数据库阶段前提。
 
 ### 首版 StarRocks 工具
 

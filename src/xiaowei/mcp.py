@@ -25,6 +25,7 @@ from collections.abc import AsyncIterator, Callable, Iterable
 from contextlib import AsyncExitStack
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
+from decimal import ROUND_HALF_UP, Decimal, InvalidOperation
 from types import TracebackType
 
 import httpx2
@@ -37,8 +38,18 @@ from mcp.types import Tool as MCPTool
 from pydantic import BaseModel, SecretStr
 
 from xiaowei.config import MCPServerConfig, resolve_secret_ref
-from xiaowei.governance import GovernedTools, MonitoringReadError, contract_dump, schema_shape
+from xiaowei.governance import (
+    GovernedTools,
+    MonitoringReadError,
+    Prechecked,
+    PromQLExpressionError,
+    ToolRejectedError,
+    contract_dump,
+    schema_shape,
+)
 from xiaowei.models import (
+    PROMETHEUS_QUERY_POLICIES,
+    PROMETHEUS_READ_POLICIES,
     MonitoringFailureReason,
     RunContext,
     ToolContract,
@@ -53,11 +64,50 @@ _READ_TIMEOUT_FACTOR = 2
 _RECONNECT_MAX_SECONDS = 3.0
 _RECONNECT_COOLDOWN_SECONDS = 2.0
 _RECONNECT_MAX_COOLDOWN_SECONDS = 60.0
-_PROMETHEUS_QUERY_ERROR = re.compile(
-    r"failed making query api call: failed to execute instant query: "
+_PROMETHEUS_ERROR_PREFIXES = {
+    "query": "failed making query api call: failed to execute instant query: ",
+    "range_query": "failed making range query api call: failed to execute range query: ",
+    "label_names": "failed making label names api call: failed to get label names: ",
+    "label_values": "failed making label values api call: failed to get label values: ",
+    "series": "failed making series api call: failed to get series: ",
+    "metric_metadata": (
+        "failed making metric metadata api call: failed to get metric metadata from Prometheus: "
+    ),
+    "list_rules": "failed making rules api call: failed to get rules from Prometheus: ",
+}
+_PROMETHEUS_READ_ERROR = re.compile(
     r"(?:(client_error: client error: (?:401|403))|"
     r"(server_error: server error: 5[0-9][0-9]))"
 )
+_PROMQL_SYNTAX = re.compile(
+    r'bad_data: invalid parameter "query": ([1-9][0-9]{0,5}):([1-9][0-9]{0,5}): '
+    r"parse error: [^\r\n]{1,1024}"
+)
+_TRUNCATION = re.compile(
+    re.escape(
+        "\n\nWarning: The result was truncated because the Prometheus MCP server was "
+        "started with the flag '--prometheus.truncation-limit="
+    )
+    + r"[1-9][0-9]*"
+    + re.escape(
+        "'.\nYou may want to try optimizing your query by refining label filters or "
+        "using aggregation functions to group results, where possible.\n"
+        "If needed, several tools support a 'truncation_limit'/'limit' argument that can "
+        "override the global truncation limit on a per-tool-call basis.\n"
+        "This includes the ability to disable truncation on a tool call by setting the "
+        "truncation limit to -1."
+    )
+    + r"\Z"
+)
+_DURATION = re.compile(r"(-?[0-9]+(?:\.[0-9]+)?)(ms|s|m|h|d|w)")
+_DURATION_SECONDS = {
+    "ms": Decimal("0.001"),
+    "s": Decimal(1),
+    "m": Decimal(60),
+    "h": Decimal(3600),
+    "d": Decimal(86400),
+    "w": Decimal(604800),
+}
 
 # MCP 库的源码目录：源自这里的日志记录可能含协议原文，生成时即换成固定信息。
 _WIRE_SOURCE = os.path.join(os.path.dirname(mcp.__file__), "")
@@ -343,26 +393,137 @@ class MCPIntegration:
                     and source.snapshot.server is server
                 ):
                     source.status = "disconnected"
-                if binding.contract.policy_id == "prometheus.query":
+                if binding.contract.policy_id in PROMETHEUS_READ_POLICIES:
                     reason = _read_transport_failure(exc)
                     if reason is not None:
                         raise MonitoringReadError(reason) from None
                 raise
-            if binding.contract.policy_id == "prometheus.query" and result.is_error:
-                reason = _prometheus_query_failure(result)
+            if binding.contract.policy_id in PROMETHEUS_READ_POLICIES and result.is_error:
+                if binding.contract.policy_id in PROMETHEUS_QUERY_POLICIES:
+                    position = _promql_error_position(result, binding.remote_name)
+                    if position is not None:
+                        raise PromQLExpressionError(*position)
+                reason = _prometheus_query_failure(result, binding.remote_name)
                 if reason is not None:
                     raise MonitoringReadError(reason)
-            payload = _payload(result, binding.result)
-            if binding.contract.policy_id == "prometheus.query":
+            if binding.contract.policy_id in PROMETHEUS_READ_POLICIES:
+                payload, truncated = _prometheus_payload(
+                    result, binding.result, binding.remote_name
+                )
+                # 仅补入实际请求字段：远端同名字段不能伪造表达式/冻结后的时间范围。
+                for key in ("query", "start_time", "end_time", "step"):
+                    if key in request.arguments:
+                        payload[key] = request.arguments[key]
+                if "step" in request.arguments:
+                    payload["step"] = _seconds_text(_seconds(request.arguments["step"]))
+            else:
+                payload, truncated = _payload(result, binding.result), False
+            if binding.contract.policy_id in PROMETHEUS_QUERY_POLICIES:
                 # 只记录治理层规范化后实际发出的表达式；远端返回中的同名字段不能冒充它。
                 payload["query"] = request.arguments["query"]
             return ToolObservation(
                 payload=payload,
                 captured_at=self._clock(),
-                truncated=False,
+                truncated=truncated,
             )
 
-        return governed_function_tool(name, binding.contract, self._governance, execute)
+        checked = (
+            Prechecked(
+                lambda request: _prepare_prometheus(
+                    request, binding.contract.policy_id, self._clock()
+                ),
+                execute,
+            )
+            if binding.contract.policy_id in PROMETHEUS_READ_POLICIES
+            else execute
+        )
+        return governed_function_tool(name, binding.contract, self._governance, checked)
+
+
+def _prepare_prometheus(request: ToolRequest, policy_id: str, now: datetime) -> ToolRequest:
+    """授权之后、预算与网络之前冻结时间/检查资源；原模型参数仍用于 Session 摘要复核。"""
+    arguments = dict(request.arguments)
+    for key in ("query", "metric"):
+        if key in arguments:
+            value = arguments[key]
+            if not isinstance(value, str) or len(value) > 8192 or (key == "query" and not value):
+                raise ToolRejectedError("表达式/指标名须符合长度上限8192，查询表达式不能为空")
+    if "matches" in arguments:
+        matches = arguments["matches"]
+        if (
+            not isinstance(matches, list)
+            or len(matches) > 32
+            or (policy_id == "prometheus.series" and not matches)
+            or any(
+                not isinstance(value, str) or not value or len(value) > 8192 for value in matches
+            )
+        ):
+            raise ToolRejectedError("选择器最多32个、每个1–8192字符；series 至少一个选择器")
+    if "label" in arguments:
+        label = arguments["label"]
+        if (
+            not isinstance(label, str)
+            or re.fullmatch(r"[a-zA-Z_][a-zA-Z0-9_]{0,255}", label) is None
+        ):
+            raise ToolRejectedError("label 须为1–256字符的标签名（字母/下划线开头）")
+    if "start_time" in arguments:
+        start = _timestamp(arguments["start_time"], now)
+        end = _timestamp(arguments["end_time"], now)
+        if start > end or end - start > 31 * 86400:
+            raise ToolRejectedError("起止时间须有序，窗口不超过31天")
+        arguments.update(start_time=_seconds_text(start), end_time=_seconds_text(end))
+        if "step" in arguments:
+            step = _seconds(arguments["step"])
+            if step < 1 or ((end - start) // step) + 1 > 11000:
+                raise ToolRejectedError("step 至少1秒、每序列最多11000点；请增大步长或缩小窗口")
+            # 官方 range 工具只接受 Prometheus 时长；以整数毫秒发送，记录秒数。
+            if step * 1000 != (step * 1000).to_integral_value():
+                raise ToolRejectedError("step 须为整毫秒且至少1秒")
+            arguments["step"] = f"{int(step * 1000)}ms"
+    return request.model_copy(update={"arguments": arguments})
+
+
+def _seconds(value: object) -> Decimal:
+    if not isinstance(value, str) or len(value) > 100:
+        raise ToolRejectedError("时间/步长格式无效")
+    try:
+        match = _DURATION.fullmatch(value)
+        seconds = Decimal(match[1]) * _DURATION_SECONDS[match[2]] if match else Decimal(value)
+        if not seconds.is_finite() or abs(seconds) > 253402300799:
+            raise ValueError
+        return seconds
+    except (InvalidOperation, ValueError):
+        raise ToolRejectedError("时间/步长须为有限秒数或单单位时长（如30s/5m）") from None
+
+
+def _timestamp(value: object, now: datetime) -> Decimal:
+    if not isinstance(value, str) or len(value) > 100:
+        raise ToolRejectedError("时间格式无效")
+    try:
+        if value == "now":
+            seconds = Decimal(str(now.timestamp()))
+        elif value.startswith("-") and _DURATION.fullmatch(value):
+            seconds = Decimal(str(now.timestamp())) + _seconds(value)
+        else:
+            try:
+                stamp = datetime.fromisoformat(value.replace("Z", "+00:00"))
+            except ValueError:
+                seconds = _seconds(value)
+                if _DURATION.fullmatch(value):
+                    raise ValueError from None
+            else:
+                if stamp.tzinfo is None:
+                    raise ValueError
+                seconds = Decimal(str(stamp.timestamp()))
+        # 官方 ParseTimestamp 以毫秒舍入，发送已舍入秒值防止记录更细的虚假精度。
+        return seconds.quantize(Decimal("0.001"), rounding=ROUND_HALF_UP)
+    except (ValueError, InvalidOperation, OverflowError):
+        raise ToolRejectedError("时间须为Unix秒、含时区RFC3339、now或负的单单位时长") from None
+
+
+def _seconds_text(value: Decimal) -> str:
+    text = format(value, "f")
+    return text.rstrip("0").rstrip(".") if "." in text else text
 
 
 def _connection_lost(exc: BaseException) -> bool:
@@ -394,7 +555,9 @@ def _read_transport_failure(exc: BaseException) -> MonitoringFailureReason | Non
     return _read_transport_failure(exc.__cause__) if exc.__cause__ is not None else None
 
 
-def _prometheus_query_failure(result: CallToolResult) -> MonitoringFailureReason | None:
+def _prometheus_query_failure(
+    result: CallToolResult, tool_name: str = "query"
+) -> MonitoringFailureReason | None:
     """仅识别官方 v0.18.0 的单段错误类别；远端原文和其他 is_error 不交模型。"""
     if (
         not result.is_error
@@ -406,10 +569,33 @@ def _prometheus_query_failure(result: CallToolResult) -> MonitoringFailureReason
     item = result.content[0]
     if not isinstance(item, TextContent):
         return None
-    matched = _PROMETHEUS_QUERY_ERROR.fullmatch(item.text)
+    prefix = _PROMETHEUS_ERROR_PREFIXES.get(tool_name)
+    if prefix is None or not item.text.startswith(prefix):
+        return None
+    matched = _PROMETHEUS_READ_ERROR.fullmatch(item.text[len(prefix) :])
     if matched is None:
         return None
     return "auth" if matched.group(1) is not None else "upstream_5xx"
+
+
+def _promql_error_position(result: CallToolResult, tool_name: str) -> tuple[int, int] | None:
+    """仅锁版、单段且完整匹配的 query bad_data；step/selector/执行资源错误不可冒充语法错误。"""
+    if (
+        not result.is_error
+        or result.result_type != "complete"
+        or result.structured_content is not None
+        or len(result.content) != 1
+        or not isinstance(result.content[0], TextContent)
+    ):
+        return None
+    prefix = _PROMETHEUS_ERROR_PREFIXES.get(tool_name)
+    if prefix is None or tool_name not in {"query", "range_query"}:
+        return None
+    text = result.content[0].text
+    if not text.startswith(prefix):
+        return None
+    matched = _PROMQL_SYNTAX.fullmatch(text[len(prefix) :])
+    return (int(matched[1]), int(matched[2])) if matched else None
 
 
 def _bindings(
@@ -482,6 +668,8 @@ def _accepts_input(local: dict[str, object], remote: dict[str, object]) -> bool:
     if not isinstance(expected, dict) or not isinstance(offered, dict):
         return False
     simple_object = {"type", "properties", "required"}
+    if set(offered) == {"type", "properties"}:
+        offered = {**offered, "required": []}
     if set(expected) != simple_object or set(offered) != simple_object:
         return False
     if expected["type"] != "object" or offered["type"] != "object":
@@ -501,7 +689,19 @@ def _accepts_input(local: dict[str, object], remote: dict[str, object]) -> bool:
         or not set(remote_required) <= set(local_fields) <= set(remote_fields)
     ):
         return False
-    return all(local_fields[name] == remote_fields[name] for name in local_fields)
+    return all(_accepts_field(local_fields[name], remote_fields[name]) for name in local_fields)
+
+
+def _accepts_field(local: object, remote: object) -> bool:
+    if local == remote:
+        return True
+    return (
+        isinstance(local, dict)
+        and isinstance(remote, dict)
+        and local.get("type") == "array"
+        and remote.get("type") in (["null", "array"], ["array", "null"])
+        and local == {**remote, "type": "array"}
+    )
 
 
 def _client_factory(
@@ -616,6 +816,37 @@ def _payload(result: CallToolResult, model: type[BaseModel]) -> dict[str, object
             raise ValueError("MCP 结果不符合登记契约")
         raw = texts[0]
     return contract_dump(model, model.model_validate_json(raw, strict=True, extra="ignore"))
+
+
+def _prometheus_payload(
+    result: CallToolResult, model: type[BaseModel], tool_name: str
+) -> tuple[dict[str, object], bool]:
+    if result.result_type != "complete":
+        raise ValueError("MCP 结果不符合登记契约")
+    if tool_name == "metric_metadata":
+        if (
+            result.is_error
+            or result.structured_content is not None
+            or len(result.content) != 1
+            or not isinstance(result.content[0], TextContent)
+        ):
+            raise ValueError("MCP 结果不符合登记契约")
+        raw = result.content[0].text.lstrip()
+        metadata, end = json.JSONDecoder().raw_decode(raw)
+        tail = raw[end:]
+        truncated = bool(tail and _TRUNCATION.fullmatch(tail))
+        if tail.strip() and not truncated:
+            raise ValueError("MCP 元数据结果尾部不符合锁版契约")
+        payload = contract_dump(
+            model,
+            model.model_validate_json(
+                json.dumps({"metadata": metadata}), strict=True, extra="ignore"
+            ),
+        )
+        return payload, truncated
+    payload = _payload(result, model)
+    text = payload.get("result")
+    return payload, isinstance(text, str) and _TRUNCATION.search(text) is not None
 
 
 class _WireSafeFactory:

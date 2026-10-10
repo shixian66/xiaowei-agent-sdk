@@ -89,6 +89,7 @@ from xiaowei.mcp import MCPIntegration
 from xiaowei.model_api import ModelProfile, open_model
 from xiaowei.models import (
     AUDIENCES,
+    PROMETHEUS_READ_POLICIES,
     AgentAnswer,
     Audience,
     Budget,
@@ -268,8 +269,12 @@ class ServeConfig(_Config):
         ids = [server.server_id for server in value]
         if len(set(ids)) != len(ids):
             raise ValueError("mcp_servers 中的 server_id 不能重复")
-        if any(server.allowed_tools != {"query": "prometheus.query"} for server in value):
-            raise ValueError("R1a 只允许 Prometheus query 工具")
+        if any(
+            policy_id not in PROMETHEUS_READ_POLICIES or policy_id != f"prometheus.{remote_name}"
+            for server in value
+            for remote_name, policy_id in server.allowed_tools.items()
+        ):
+            raise ValueError("只允许已核约的 Prometheus 只读工具及其准确映射")
         return value
 
     @field_validator("projection_bytes")
@@ -622,9 +627,11 @@ def _reason(error: Mapping[str, object]) -> str:
 
 
 def _registered_tools(config: ServeConfig) -> frozenset[str]:
-    """装配时会登记的工具；监控只登记当前切片已验证的 query。"""
+    """装配时会登记的工具；监控只登记可信配置选中的已核约工具。"""
     audited = any(t.starrocks.audit is not None for t in config.targets)
-    monitoring = {server.tool_id("query") for server in config.mcp_servers}
+    monitoring = {
+        server.tool_id(name) for server in config.mcp_servers for name in server.allowed_tools
+    }
     return QUERY_TOOLS | (AUDIT_TOOLS if audited else frozenset()) | monitoring
 
 
@@ -643,12 +650,89 @@ class _PrometheusQueryResult(BaseModel):
     query: str | None = None
 
 
+class _PrometheusWindowArgs(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+    start_time: str
+    end_time: str
+
+
+class _PrometheusRangeArgs(_PrometheusWindowArgs):
+    query: str
+    step: str
+
+
+class _PrometheusLabelsArgs(_PrometheusWindowArgs):
+    matches: list[str]
+
+
+class _PrometheusLabelValuesArgs(_PrometheusLabelsArgs):
+    label: str
+
+
+class _PrometheusMetadataArgs(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+    metric: str
+
+
+class _PrometheusRulesArgs(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+
+class _PrometheusWindowResult(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+    result: str
+    warnings: list[str] | None
+    # 实际网络参数由可信执行准备补入，远端同名字段不能冒充它们。
+    start_time: str | None = None
+    end_time: str | None = None
+
+
+class _PrometheusRangeResult(_PrometheusWindowResult):
+    query: str | None = None
+    step: str | None = None
+
+
+class _MetricMetadata(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+    type: str
+    help: str
+    unit: str
+
+
+class _PrometheusMetadataResult(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+    metadata: dict[str, list[_MetricMetadata]]
+
+
+class _LoadedRule(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+    name: str
+    query: str
+    labels: dict[str, str] = Field(default_factory=dict)
+    annotations: dict[str, str] | None = None
+    state: str | None = None
+    health: str
+    last_evaluation: str = Field(alias="lastEvaluation")
+
+
+class _RuleGroup(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+    name: str
+    interval: float
+    rules: list[_LoadedRule]
+
+
+class _PrometheusRulesResult(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+    groups: list[_RuleGroup]
+
+
 def _monitoring_catalog(
     config: ServeConfig,
 ) -> tuple[tuple[ToolContract, ...], tuple[ToolPolicy, ...]]:
     if not config.mcp_servers:
         return (), ()
-    policy = ToolPolicy(
+    query_policy = ToolPolicy(
         policy_id="prometheus.query",
         arguments=_PrometheusQueryArgs,
         result=_PrometheusQueryResult,
@@ -662,21 +746,98 @@ def _monitoring_catalog(
         required=("query", "result", "warnings"),
         fact_note="Prometheus MCP 返回的结果为服务端排版文本；采集时间不是指标求值时间。",
     )
+    windows = (
+        "时间为 Unix 秒、含时区 RFC3339，或 now/-15m/-1h/-7d；窗宽最多31天。"
+        "自主选择时间范围，不必先发现或读规则。"
+    )
+    specifications = (
+        (
+            "range_query",
+            _PrometheusRangeArgs,
+            _PrometheusRangeResult,
+            ("query", "start_time", "end_time", "step", "result", "warnings"),
+            "只读 PromQL 范围查询；step 为秒或 30s/5m 等单单位时长，至少1秒，最多11000点/序列。"
+            + windows,
+            "结果为服务端排版文本；求值网格以实际起止秒和步长为准，不代表未查范围。",
+        ),
+        (
+            "label_names",
+            _PrometheusLabelsArgs,
+            _PrometheusWindowResult,
+            ("start_time", "end_time", "result", "warnings"),
+            "发现标签名称；matches 为选择器列表，空列表表示源内发现。" + windows,
+            "结果是该窗口发现的标签名称，不是实时健康检查。",
+        ),
+        (
+            "label_values",
+            _PrometheusLabelValuesArgs,
+            _PrometheusWindowResult,
+            ("start_time", "end_time", "result", "warnings"),
+            "发现指定 label 的值；__name__ 可发现指标，instance/nodename 可寻找主机。"
+            "matches 空列表表示源内发现。" + windows,
+            "标签值只证明窗口内存在相应序列，不证明当前主机健康或配置。",
+        ),
+        (
+            "series",
+            _PrometheusLabelsArgs,
+            _PrometheusWindowResult,
+            ("start_time", "end_time", "result", "warnings"),
+            "按至少一个选择器读取序列标签集，可定位主机；不返回指标数值。" + windows,
+            "标签集为发现事实；主机配置仅限实际采集的标签/指标，不是资产清单。",
+        ),
+        (
+            "metric_metadata",
+            _PrometheusMetadataArgs,
+            _PrometheusMetadataResult,
+            ("metadata",),
+            "读取指标的类型/help/unit；metric 空串可发现全部元数据。"
+            "官方 Server 不传回上游 warnings，结果不证明查询完整性或健康。",
+            "仅指标元数据；官方 Server 不传回上游 warnings，不能据此判定健康或完整。",
+        ),
+        (
+            "list_rules",
+            _PrometheusRulesArgs,
+            _PrometheusRulesResult,
+            ("groups",),
+            "读取当前已加载的原生规则和求值状态，不修改规则。"
+            "health 是规则求值状态；官方 Server 不返回 type 和上游 warnings。",
+            "规则定义/求值状态不是主机健康；官方 Server 不返回 type 和上游 warnings。",
+        ),
+    )
+    policies = {"query": query_policy}
+    descriptions = {"query": "只读 PromQL 即时查询；由 Server 即时求值，不代表历史窗口。"}
+    for name, arguments, result, fields, description, note in specifications:
+        policies[name] = ToolPolicy(
+            policy_id=f"prometheus.{name}",
+            arguments=arguments,
+            result=result,
+            projections={
+                audience: Projection(fields=fields, max_bytes=config.projection_bytes[audience])
+                for audience in AUDIENCES
+            },
+            required=fields,
+            fact_note=note,
+        )
+        descriptions[name] = description
+    selected = {name for server in config.mcp_servers for name in server.allowed_tools}
     contracts = tuple(
         ToolContract(
-            tool_id=server.tool_id("query"),
+            tool_id=server.tool_id(name),
             target_id=server.server_id,
-            input_schema=policy.arguments.model_json_schema(),
-            policy_id=policy.policy_id,
-            description=f"在监控源 {server.server_id} 执行只读 PromQL 即时查询",
+            input_schema=policies[name].arguments.model_json_schema(),
+            policy_id=policies[name].policy_id,
+            description=f"监控源 {server.server_id}：{descriptions[name]}",
         )
         for server in config.mcp_servers
+        for name in server.allowed_tools
     )
-    return contracts, (policy,)
+    return contracts, tuple(policy for name, policy in policies.items() if name in selected)
 
 
 def _app_config(config: ServeConfig) -> AppConfig:
-    monitoring = frozenset(server.tool_id("query") for server in config.mcp_servers)
+    monitoring = frozenset(
+        server.tool_id(name) for server in config.mcp_servers for name in server.allowed_tools
+    )
     audit = _registered_tools(config) - QUERY_TOOLS - monitoring
     return AppConfig(
         purposes={

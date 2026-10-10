@@ -27,6 +27,7 @@ from xiaowei.governance import (
     Execute,
     GovernedTools,
     MonitoringReadError,
+    PromQLExpressionError,
     ToolRejectedError,
 )
 from xiaowei.models import ToolContract, ToolRequest, ToolResult
@@ -95,6 +96,18 @@ def _function_tool(
         except ToolRejectedError as exc:
             governance.note_rejected(tool_ctx.context.identity)
             return default_tool_error_function(tool_ctx, exc)
+        except PromQLExpressionError as exc:
+            return json.dumps(
+                {
+                    "status": "invalid_expression",
+                    "source": contract.target_id,
+                    "line": exc.line,
+                    "column": exc.column,
+                    "correction_allowed": exc.correction_allowed,
+                    "reason": "PromQL解析失败；检查括号、运算符与函数参数，勿重发同一表达式",
+                },
+                ensure_ascii=False,
+            )
         except MonitoringReadError as exc:
             return json.dumps(
                 {

@@ -109,6 +109,7 @@ class BackendState:
     status: int = 200
     error_type: str = "bad_data"
     detail: str = 'invalid parameter "query": 1:4: parse error: unexpected end of input'
+    query_errors: dict[str, tuple[int, str, str]] = field(default_factory=dict)
 
 
 @contextmanager
@@ -119,19 +120,21 @@ def prometheus_backend() -> Iterator[tuple[ThreadingHTTPServer, BackendState]]:
     class Handler(BaseHTTPRequestHandler):
         def do_GET(self) -> None:
             parsed = urlsplit(self.path)
-            state.requests.append(
-                (parsed.path, parse_qs(parsed.query), self.headers.get("Authorization"))
+            arguments = parse_qs(parsed.query)
+            state.requests.append((parsed.path, arguments, self.headers.get("Authorization")))
+            status, error_type, detail = state.query_errors.get(
+                arguments.get("query", [""])[0], (state.status, state.error_type, state.detail)
             )
-            if state.status == 200:
+            if status == 200:
                 body = {
                     "status": "success",
                     "data": SAMPLES[parsed.path],
                     "warnings": ["synthetic partial data"],
                 }
             else:
-                body = {"status": "error", "errorType": state.error_type, "error": state.detail}
+                body = {"status": "error", "errorType": error_type, "error": detail}
             encoded = json.dumps(body).encode()
-            self.send_response(state.status)
+            self.send_response(status)
             self.send_header("Content-Type", "application/json")
             self.send_header("Content-Length", str(len(encoded)))
             self.end_headers()
