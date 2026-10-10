@@ -75,6 +75,34 @@ PR #70 的三个非阻断项在本片同一失败契约中落实：并行成功/
 | P2.3 自主修正与失败收尾 | 真 Server + 正式治理链验证坏表达式→模型改写→成功证据，重复表达式/次数/预算上限、四并行初次失败和修正最多两次 I/O、错误隔离变异；故障换源、全失败无证据建议、并行成功/失败、提交时撤权；正常/拒绝均覆盖历史和重发 |
 | P2.4 能力评估与交付 | 正式浏览器与群事件替身展示来源、实际表达式/冻结时间、warnings/截断和推断；R1/MCP/G0/SDK 相关回归、Ruff/type 检查。获准真实模型上评估上述三业务问题及一次语法修正，不固定顺序，记录答案/取证/澄清/调用次数/耗时/用量；真实 Prometheus 验扫描限额。缺模型或真实源继续离线并留下能力/环境验收门槛，不用脚本模型豁免；提交、推送并开 PR，不合并/部署 |
 
+### 3.2 G3 当前切片（基线 `4cbb27a2b6e54050fc350fcd62a1a9e5cf123eae`）
+
+**任务与复用。** PR #71 的 P2 已合入。用户问“Host CPU 的面板怎么算、引用什么数据源”“近期有没有部署标记” → Agent 自选获准源与读取顺序，按需关联获准 Prometheus → 分列展示定义与实时证据。直接复用 runtime、MCPIntegration 快照/核约/重连、Grants、GovernedTools、Evidence/PolicySession 与渠道，不增加客户端、授权表或工作流。真实模型仍按用户选择暂缺，离线不能关闭能力验收。
+
+**锁版。** 官方 Grafana MCP `v2.0.2`（源码 tag `0eb7e0a`），Darwin arm64 发布包 SHA-256 `33161366ddc5eb3cfca288d9d1badd2aaa7d3f1d3a7090a2bde367fc51f45a0f`，二进制 `480c23f5f0c80e7819fa060e12d4faf471732b63bd05a2023e45f868a7f33baf`。SDK 0.22.3 / mcp 2.2.0 实测五项 schema 为简单对象、无 `$schema`，复用现有核约，不扩大通用 schema 兼容范围。成功结果为完整单段 JSON 文本；panel queries 是数组，annotations 是 `{"Payload": [...]}`，仅对此锁版形态薄转换。
+
+| 远端名 / `grafana.` 策略后缀 | 本地必填输入与最小投影 |
+| --- | --- |
+| `search_dashboards` | `query, folderUid, tag, starred, limit, page`；空过滤允许源内搜索，limit 1–100、page≥1。UID/标题/文件夹/标签、当前页 total 与 hasMore；total 不是全源总数 |
+| `get_dashboard_summary` | `uid`；UID/标题/说明、面板概要、变量名/类型、默认时间窗、meta.version/folderUid；不留作者、编辑权限或插件配置。工具未提供单位/阈值时不得推断配置 |
+| `get_dashboard_panel_queries` | `uid, panelId`；0 表示全部，网络前省略 panelId，正数精确选择。原始 query/refId/数据源 UID与类型，代码补实际请求 UID/面板 ID；不发送 variables，不执行变量查询，不暴露 visual-editor 任意 target |
+| `list_datasources` | `type, name, limit, offset`；空 type/name 可发现全部，limit 1–100、offset≥0。ID/UID/名称/类型/默认标志、筛选后总数与 hasMore；不留 URL、账户、jsonData/secureJsonData |
+| `get_annotations` | `from, to, limit, dashboardUid, tags, matchAny`；有序 Unix 毫秒窗口≤31天、limit 1–100。空 dashboardUid 网络前省略表示源内读取；ID/Dashboard/Panel、起止毫秒、文本/标签，代码补实际窗口；不留作者/email。数量达到 limit 标可能不完整 |
+
+字符串/UID/标签数量在 I/O 前检查，不设对象白名单。省略参数默认行为：search 空过滤不限制对象；panel queries 无 panelId 取全部、无 variables 保留原表达式；annotations 不发送 alertUid/panelId/userId/type，不限定这些维度，matchAny 显式传值。其余表内参数显式发送。不开放 full dashboard/JSONPath/代理查询/通用 API/写工具；这是首批核约范围，不是固定步骤或永久限制。
+
+**数据、失败与权限。** 五项固定登记为监控只读语义，同一 Grants 授权源/工具；定义/目录/标记不是实时健康证据，各次是独立采集快照，不承诺跨工具原子版本。分页与截断保留；集合字段允许现有投影省略并标截断，必要来源/对象/窗口字段必须保留，不裁 JSON 冒充完整。历史/重发本地复核当前源/工具/接收权限，源离线不发远端 ACL；旧 P2 指纹不变。
+
+网络故障/超时复用已批准固定分类。远端 is_error 仅完整单文本、固定工具/GET 路径/锁版错误结构且可确认 401/403/5xx 时记源级失败，不输出原文，该源本轮不再读，Agent 可查其他获准源。404、未知错误、畸形/非完整结果、接收超限与存储失败仍中止；不改变 MCP 同码错误分类、不增加自动重试。
+
+**外部部署。** 固定 Grafana URL/组织及共享只读账号；不启用 dynamic-multi-org、URL override、跨源重定向。选 `--enabled-tools=search,dashboard,datasource,annotations --disable-write --disable-query --usage-stats=disabled`，小维仅映射五项。MCP Bearer 与 Grafana Service Account Token 独立，实测无/错 token 零上游 I/O及正确身份。接收上限同时容纳 tools/list 与代表性最大定义；list_datasources 分页仍先读取上游全目录，摘要/面板工具也先读完整 Dashboard，不能把分页当成服务端开销上限。公司启用前按对象规模确定接收/投影配套值；超限失败关闭。内网 HTTP 沿用架构，不增证书管理。
+
+**可验证实施顺序。**
+1. 官方二进制 + 合成 API 核对五项 schema、成功/错误/分页/认证和禁用写/代理；精确计划提交独立审查后实现。
+2. 先补失败测试，再装配策略/薄投影；尽早走正式 serve/Web + 真 Runner/治理/PostgreSQL 的定义成功路径及未授权强行调用零业务 I/O路径。
+3. 补分页/大目录/空结果、秘密与作者字段过滤、参数越界零 I/O、schema 漂移、401/403/5xx 续查其他源、未知错误/超限零成功 Evidence；群替身共享追问、历史/重发撤权与源离线回放、跨源/会话伪造引用；回归 MCP/P2/重连及 Ruff/mypy/doc checks。
+4. Chrome 正式 Web 验收；模型任务样例含直接 UID、标题发现、变量/数据源含糊时澄清和部分故障，合理不同顺序都可通过。真实模型的选择/取证/澄清/答案/调用数/耗时/用量、实际 Grafana 版本/组织权限与公司双入口仍待获准环境，不部署。
+
 ## 4. 环境、兼容与恢复
 
 - **开发/协议：** 锁定 `uv.lock` 中 SDK 0.22.3；隔离 PostgreSQL、真 SDK Runner、loopback MCP fixture。每个源的切片才准备对应的可丢弃 Prometheus/Grafana/Alertmanager 实例，并以所选 Server 的**具体发布版本/镜像 digest**核对其工具清单与响应，不从当前 `main` 文档推断未来固定镜像的行为。社区 Alertmanager Server 若传输、鉴权或返回契约不合适，A4 选择 API v2 薄 Adapter 并记录证据，不引入第四个常驻服务。官方来源：[Prometheus MCP](https://github.com/prometheus/prometheus-mcp)、[Grafana MCP](https://github.com/grafana/mcp-grafana)、[Alertmanager API v2](https://github.com/prometheus/alertmanager/blob/main/api/v2/openapi.yaml)、[社区候选](https://github.com/ntk148v/alertmanager-mcp-server)。
