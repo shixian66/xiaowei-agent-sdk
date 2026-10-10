@@ -676,7 +676,9 @@ def _grafana_read_failure(
         prefixes = (
             re.escape("determine dashboard.grafana.app capability: "),
             re.escape(f"get dashboard {json.dumps(uid, ensure_ascii=False)} via k8s api: "),
-            r"get native v2(?:alpha|beta)1 dashboard via k8s api " + re.escape(uid) + r": ",
+            r"get native v2(?:(?:alpha|beta)[1-9][0-9]*)? dashboard via k8s api "
+            + re.escape(uid)
+            + r": ",
         )
         native = re.fullmatch(
             r"get dashboard by uid: (?:" + "|".join(prefixes) + r")"

@@ -93,7 +93,7 @@ PR #70 的三个非阻断项在本片同一失败契约中落实：并行成功/
 
 **数据、失败与权限。** 五项固定登记为监控只读语义，同一 Grants 授权源/工具；定义/目录/标记不是实时健康证据，各次是独立采集快照，不承诺跨工具原子版本。分页与截断保留；集合字段允许现有投影省略并标截断，必要来源/对象/窗口字段必须保留，不裁 JSON 冒充完整。历史/重发本地复核当前源/工具/接收权限，源离线不发远端 ACL；旧 P2 指纹不变。
 
-网络故障/超时复用已批准固定分类。远端 is_error 仅完整单文本、固定工具/GET 路径/锁版错误结构且可确认 401/403/5xx 时记源级失败，不输出原文，该源本轮不再读，Agent 可查其他获准源。Dashboard 同时核对 legacy、capability discovery、命名空间 settings 和原生 v1beta1/v2alpha1/v2beta1 读取的实际格式；Kubernetes 错误的两处状态码与标准状态名称须一致，不按文本包含 HTTP 码判断。原生对象或 settings 的404、未知错误、畸形/非完整结果、接收超限与存储失败仍中止；capability 的404由官方 Server 确定旧 API 分支，不当作对象不存在。不改变 MCP 同码错误分类、不增加自动重试。
+网络故障/超时复用已批准固定分类。远端 is_error 仅完整单文本、固定工具/GET 路径/锁版错误结构且可确认 401/403/5xx 时记源级失败，不输出原文，该源本轮不再读，Agent 可查其他获准源。Dashboard 同时核对 legacy、capability discovery、命名空间 settings 和原生 v1beta1/v2 读取的实际格式；锁版 Server 将 storedVersion 动态写入错误格式，原生版本字段只接受 v2 或 v2alphaN/v2betaN（N 为正整数），实测 v2、v2alpha1、v2beta1 和 v2beta2。Kubernetes 错误的两处状态码与标准状态名称须一致，不按文本包含 HTTP 码判断。原生对象或 settings 的404、未知错误、畸形/非完整结果、接收超限与存储失败仍中止；capability 的404由官方 Server 确定旧 API 分支，不当作对象不存在。不改变 MCP 同码错误分类、不增加自动重试。
 
 **外部部署。** 固定 Grafana URL/组织及共享只读账号；不启用 dynamic-multi-org、URL override、跨源重定向。选 `--enabled-tools=search,dashboard,datasource,annotations --disable-write --disable-query --usage-stats=disabled`，小维仅映射五项。MCP Bearer 与 Grafana Service Account Token 独立，实测无/错 token 零上游 I/O及正确身份。原生 Dashboard 由官方 Server 读取 discovery、同源 settings 的 namespace，必要时按 storedVersion 再读原生对象；不由 Agent 猜 namespace，不自行回退有损旧格式。接收上限同时容纳 tools/list 与代表性最大定义；list_datasources 分页仍先读取上游全目录，摘要/面板工具也先读完整 Dashboard，不能把分页当成服务端开销上限。公司启用前按对象规模确定接收/投影配套值；超限失败关闭。内网 HTTP 沿用架构，不增证书管理。
 

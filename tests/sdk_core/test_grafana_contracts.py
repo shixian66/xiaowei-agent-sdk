@@ -91,6 +91,40 @@ def test_native_dashboard_known_http_status_cannot_override_identity_or_shape(ki
     assert _grafana_read_failure(result, name, {"uid": "host"}) is None
 
 
+@pytest.mark.parametrize("version", ["v2", "v2beta2"])
+def test_locked_native_version_http_error_is_source_local(version: str) -> None:
+    result = CallToolResult(
+        is_error=True,
+        content=[
+            TextContent(
+                type="text",
+                text=(
+                    f"get dashboard by uid: get native {version} dashboard via k8s api host: "
+                    "kubernetes API error: 403 Forbidden (HTTP 403): {}"
+                ),
+            )
+        ],
+    )
+    assert _grafana_read_failure(result, "get_dashboard_summary", {"uid": "host"}) == "auth"
+
+
+@pytest.mark.parametrize("version", ["v3", "v2unknown", "v2beta0", "v2beta1 extra"])
+def test_noncanonical_native_version_error_is_not_classified(version: str) -> None:
+    result = CallToolResult(
+        is_error=True,
+        content=[
+            TextContent(
+                type="text",
+                text=(
+                    f"get dashboard by uid: get native {version} dashboard via k8s api host: "
+                    "kubernetes API error: 403 Forbidden (HTTP 403): {}"
+                ),
+            )
+        ],
+    )
+    assert _grafana_read_failure(result, "get_dashboard_summary", {"uid": "host"}) is None
+
+
 @pytest.mark.parametrize(
     "kind", ["wrong_uid", "missing_title", "wrong_type", "error", "multiple", "structured"]
 )

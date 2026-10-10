@@ -709,7 +709,9 @@ async def test_visible_grafana_tool_rechecks_current_permission_before_io(
 
 
 @pytest.mark.parametrize("name", ["get_dashboard_summary", "get_dashboard_panel_queries"])
-@pytest.mark.parametrize("branch", ["discovery", "namespace", "v1beta1", "v2beta1"])
+@pytest.mark.parametrize(
+    "branch", ["discovery", "namespace", "v1beta1", "v2", "v2alpha1", "v2beta1", "v2beta2"]
+)
 @pytest.mark.parametrize("status", [401, 403, 500, 502])
 async def test_native_dashboard_failure_is_source_local_and_not_replayed(
     env: Env, grafana_binary: Path, name: str, branch: str, status: int
@@ -729,7 +731,7 @@ async def test_native_dashboard_failure_is_source_local_and_not_replayed(
             elif branch == "v1beta1":
                 state.dashboard_status = status
             else:
-                state.stored_version = "v2beta1"
+                state.stored_version = branch
                 state.native_status = status
         values = g3_config(url)
         values["mcp_servers"].append(
@@ -759,9 +761,8 @@ async def test_native_dashboard_failure_is_source_local_and_not_replayed(
             assert len(body["delivery"]["facts"]) == 1
             assert body["delivery"]["facts"][0]["target_id"] == "prometheus-prod"
             assert SOURCE in body["delivery"]["monitoring_notice"]
-            assert (
-                len(state.requests)
-                == {"discovery": 1, "namespace": 2, "v1beta1": 2, "v2beta1": 3}[branch]
+            assert len(state.requests) == (
+                1 if branch == "discovery" else 3 if branch.startswith("v2") else 2
             )
             assert all(
                 path.startswith("/apis/dashboard.grafana.app") or path == "/api/frontend/settings"
@@ -778,7 +779,7 @@ async def test_native_dashboard_failure_is_source_local_and_not_replayed(
 
 
 @pytest.mark.parametrize("name", ["get_dashboard_summary", "get_dashboard_panel_queries"])
-@pytest.mark.parametrize("native", ["", "v2alpha1", "v2beta1"])
+@pytest.mark.parametrize("native", ["", "v2", "v2alpha1", "v2beta1", "v2beta2"])
 async def test_native_dashboard_success_keeps_locked_result_contract(
     env: Env, grafana_binary: Path, name: str, native: str
 ) -> None:
