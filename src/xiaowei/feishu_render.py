@@ -134,6 +134,12 @@ def _card(
         )
         if fact.note is not None:
             elements.append(_div(f"说明：{fact.note}"))
+        if fact.columns:
+            elements.extend(
+                _div(f"{key}: {_cell({key: value}, key)}")
+                for key, value in fact.metadata.items()
+                if key not in _TECHNICAL and value is not None
+            )
         cursor = fact.metadata.get("next_cursor")
         if cursor is not None:
             elements.append(_div("还有后续页，本页不是全部结果。"))
@@ -143,7 +149,8 @@ def _card(
             elements.append(_div("SQL 未展示。"))
         if not rows:
             if not all_rows:
-                elements.append(_div("（无数据行）"))
+                absent = not fact.columns and not fact.metadata and fact.result_json is None
+                elements.append(_div("（无结果）" if absent else "（无数据行）"))
             elif omissions:
                 elements.append(_div("结果行未展示。"))
         elif fact.tool_id == "local/show_create_table":
@@ -246,7 +253,7 @@ def build_feishu_message(
             title = (
                 "需要澄清"
                 if delivery.content.startswith("需要澄清")
-                else "建议（未执行查询，模型生成）"
+                else "建议（未执行查询，模型生成，未经系统核实）"
             )
             prefix = title + "\n"
         full = {"text": mention_safe(display_text(prefix + raw))}
@@ -286,12 +293,26 @@ def build_feishu_message(
         if not fits(_card(delivery, counts, sqls, analysis, technical, omissions=False)):
             return best
         for index, total in enumerate(totals):
-            for _ in range(total):
-                counts[index] += 1
+            if total == 0:
+                continue
+            # 完整端点可能移除截断提示，零行端点可能移除/增加占位，不能混进二分区间。
+            counts[index] = total
+            if fits(_card(delivery, counts, sqls, analysis, technical)):
+                best = counts.copy()
+                continue
+            low, high = 0, total - 1
+            while low < high:
+                mid = (low + high + 1) // 2
+                counts[index] = mid
                 if fits(_card(delivery, counts, sqls, analysis, technical)):
+                    low = mid
                     best = counts.copy()
-                elif not fits(_card(delivery, counts, sqls, analysis, technical, omissions=False)):
-                    return best
+                else:
+                    high = mid - 1
+            counts[index] = total
+            if not fits(_card(delivery, counts, sqls, analysis, technical, omissions=False)):
+                return best
+            # 此端点不合容量但下界合容量：后续短事实可能移除更大的占位，继续检查。
         return best
 
     sqls: set[int] = set()

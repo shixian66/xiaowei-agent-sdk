@@ -16,6 +16,7 @@
 """
 
 import asyncio
+import hashlib
 import json
 import secrets
 import time
@@ -228,6 +229,9 @@ class RequestObservation:
     tool_result_fields: tuple[str, ...]
     """请求中（本轮与回放历史）工具结果信封 ``data`` 的字段名，只取 ``OBSERVED_FIELDS``。"""
     usage: dict[str, int] | None
+    instructions_sha256: str = ""
+    tool_descriptions_sha256: str = ""
+    """实际 HTTP 请求中的指令、工具名/说明哈希；不保存原文或参数。"""
 
 
 class ObservingTransport(httpx2.AsyncBaseTransport):
@@ -295,7 +299,7 @@ def _request_shape(body: bytes) -> dict[str, Any]:
     except ValueError:
         data = {}
     if "contents" in data:
-        return _vertex_shape(data)
+        return _vertex_shape(data) | _instruction_hashes(data)
     tools = tuple(
         str(t.get("name") or t.get("function", {}).get("name"))
         for t in data.get("tools", [])
@@ -330,6 +334,36 @@ def _request_shape(body: bytes) -> dict[str, Any]:
         "turn_signatures": counts["turn"][1],
         "turn_tools": tuple(chosen),
         "tool_result_fields": tuple(sorted(fields)),
+    } | _instruction_hashes(data)
+
+
+def _instruction_hashes(data: dict[str, Any]) -> dict[str, str]:
+    if "contents" in data:
+        instructions = data.get("systemInstruction")
+        functions = [
+            f for group in data.get("tools", []) for f in group.get("functionDeclarations", [])
+        ]
+    else:
+        instructions = (
+            data.get("instructions")
+            if "instructions" in data
+            else [
+                m.get("content")
+                for m in data.get("messages", [])
+                if m.get("role") in {"system", "developer"}
+            ]
+        )
+        functions = [t.get("function", t) for t in data.get("tools", [])]
+    descriptions = [{"name": f.get("name"), "description": f.get("description")} for f in functions]
+
+    def digest(value: object) -> str:
+        return hashlib.sha256(
+            json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode()
+        ).hexdigest()
+
+    return {
+        "instructions_sha256": digest(instructions),
+        "tool_descriptions_sha256": digest(descriptions),
     }
 
 

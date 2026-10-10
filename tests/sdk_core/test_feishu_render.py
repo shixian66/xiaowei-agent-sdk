@@ -1,11 +1,13 @@
 """U2：纯文本静态卡片与两个完整容量预算，预期从公开请求和人工样本独立推导。"""
 
 import json
+import math
 from datetime import UTC, datetime
 from typing import Any
 
 import pytest
 
+from xiaowei import feishu_render
 from xiaowei.feishu_render import (
     ANALYSIS_CLIPPED,
     CAPACITY_NOTICE,
@@ -14,7 +16,7 @@ from xiaowei.feishu_render import (
     request_bytes,
 )
 from xiaowei.models import AnswerInference, Delivery, DeliveryFact
-from xiaowei.starrocks_tools import PLAN_NOTE
+from xiaowei.starrocks_tools import DDL_NOTE, DDL_TOO_LARGE, PLAN_NOTE
 
 AT = datetime(2026, 10, 9, 11, 47, 56, tzinfo=UTC)
 
@@ -346,6 +348,47 @@ def test_empty_result_is_visible_without_a_fake_row_or_loss_marker() -> None:
     assert tables(message) == [] and FACTS_CLIPPED not in text_parts(message)
 
 
+def test_table_limit_explanation_is_visible_even_without_optional_json() -> None:
+    source = fact(
+        tool_id="local/show_create_table",
+        columns=("table", "ddl"),
+        rows=(),
+        metadata={"message": DDL_TOO_LARGE, "row_count": 0},
+        note=DDL_NOTE,
+        truncated=True,
+        result_json="OPTIONAL_JSON_SENTINEL" * 1000,
+    )
+    message = build_feishu_message(delivery(source), 3500, "oc_test")
+    visible = "\n".join(text_parts(message, folded=False))
+    assert DDL_TOO_LARGE in visible and DDL_NOTE in visible
+    assert "工具结果已截断" in visible and "（无数据行）" in visible
+    assert "OPTIONAL_JSON_SENTINEL" not in "\n".join(text_parts(message))
+    assert "row_count" not in visible and size(message) <= 30_000
+    too_small = build_feishu_message(delivery(source), 80, "oc_test")
+    assert too_small == {"text": CAPACITY_NOTICE}
+
+
+def test_absent_projection_is_not_described_as_empty_rows() -> None:
+    source = fact(columns=(), rows=(), metadata={}, result_json=None)
+    message = build_feishu_message(delivery(source), 3500, "oc_test")
+    assert "（无结果）" in text_parts(message, folded=False)
+    assert "（无数据行）" not in text_parts(message, folded=False)
+
+
+def test_advice_keeps_unverified_label() -> None:
+    message = build_feishu_message(
+        Delivery(
+            content="建议（本轮未执行业务查询）",
+            feishu_text="你好",
+            channel="feishu",
+            evidence_ids=(),
+        ),
+        3500,
+        "oc_test",
+    )
+    assert "未执行查询" in message["text"] and "未经系统核实" in message["text"]
+
+
 def test_short_fact_fits_when_zero_row_placeholders_would_not() -> None:
     source = fact(
         evidence_id="ev_123456789012345678901234",
@@ -414,3 +457,34 @@ def test_short_prefix_survives_larger_zero_row_placeholders() -> None:
     assert [t["rows"] for t in tables(shown)] == [[{"c0": "1"}]]
     assert FACTS_CLIPPED in text_parts(shown)
     assert sum(map(len, text_parts(shown))) <= needed and size(shown) <= 30_000
+
+
+def test_capacity_search_builds_logarithmically_many_cards(monkeypatch: pytest.MonkeyPatch) -> None:
+    # 五条实际 SQL、每条 400 行：字节预算触发裁剪，字符预算不先挡住搜索。
+    rows = tuple({"v": i} for i in range(400))
+    sources = tuple(
+        fact(
+            evidence_id=f"ev_{i}",
+            columns=("v",),
+            rows=rows,
+            metadata={"sql": f"SELECT v FROM db.t{i} LIMIT 400", "row_count": 400},  # noqa: S608 -- synthetic only.
+        )
+        for i in range(5)
+    )
+    actual_card = feishu_render._card
+    builds = 0
+
+    def counted(*args, **kwargs):
+        nonlocal builds
+        builds += 1
+        return actual_card(*args, **kwargs)
+
+    monkeypatch.setattr(feishu_render, "_card", counted)
+    shown = build_feishu_message(delivery(*sources), 100_000, "oc_test")
+    assert "card" in shown and 0 < sum(len(t["rows"]) for t in tables(shown)) < 2000
+    assert size(shown) <= 30_000 and FACTS_CLIPPED in text_parts(shown)
+    assert all(source.metadata["sql"] in "\n".join(text_parts(shown)) for source in sources)
+    # 每次 SQL 选择复用同一前缀搜索；每条事实最多 log(399) 次内点、两个端点/下界。
+    per_search = 2 + len(sources) * (math.ceil(math.log2(399)) + 2)
+    bound = (len(sources) + 1) * per_search + len(sources) + 2
+    assert builds <= bound, f"card builds={builds}, logarithmic bound={bound}"

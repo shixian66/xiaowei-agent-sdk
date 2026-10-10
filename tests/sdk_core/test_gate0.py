@@ -7,6 +7,7 @@
 """
 
 import base64
+import hashlib
 import itertools
 import json
 import logging
@@ -1215,6 +1216,50 @@ def test_request_shape_records_only_offered_tool_names_of_this_turn() -> None:
     assert shape["turn_tools"] == ("list_tables", gate0.OTHER_TOOL, QUERY_NAME)
     assert shape["history_tool_calls"] == 1 and shape["turn_tool_calls"] == 3
     assert unapproved not in json.dumps(shape) and "drop_all" not in json.dumps(shape)
+
+
+@pytest.mark.parametrize("wire", ["responses", "chat", "vertex"])
+def test_request_hashes_bind_sent_instructions_and_descriptions_without_content(wire: str) -> None:
+    instructions = "SENT_INSTRUCTION_SENTINEL"
+    functions = [{"name": "list_tables", "description": "SENT_DESCRIPTION_SENTINEL"}]
+    if wire == "vertex":
+        body = {
+            "systemInstruction": {"parts": [{"text": instructions}]},
+            "tools": [{"functionDeclarations": functions}],
+            "contents": [],
+        }
+        expected_instructions = body["systemInstruction"]
+    elif wire == "chat":
+        body = {
+            "messages": [{"role": "system", "content": instructions}],
+            "tools": [{"type": "function", "function": f} for f in functions],
+        }
+        expected_instructions = [instructions]
+    else:
+        body = {"instructions": instructions, "tools": functions, "input": []}
+        expected_instructions = instructions
+
+    def digest(value):
+        return hashlib.sha256(
+            json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode()
+        ).hexdigest()
+
+    shape = gate0._request_shape(json.dumps(body).encode())
+    assert shape["instructions_sha256"] == digest(expected_instructions)
+    assert shape["tool_descriptions_sha256"] == digest(functions)
+    assert "SENTINEL" not in json.dumps(shape)
+    changed_instruction = json.loads(json.dumps(body).replace(instructions, "other instruction"))
+    changed_description = json.loads(
+        json.dumps(body).replace(functions[0]["description"], "other description")
+    )
+    assert (
+        gate0._request_shape(json.dumps(changed_instruction).encode())["instructions_sha256"]
+        != shape["instructions_sha256"]
+    )
+    assert (
+        gate0._request_shape(json.dumps(changed_description).encode())["tool_descriptions_sha256"]
+        != shape["tool_descriptions_sha256"]
+    )
 
 
 def _named(name: str, **values: Any) -> Callable[[list[gate0.DiagnosisResult]], None]:

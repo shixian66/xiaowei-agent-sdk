@@ -18,6 +18,7 @@ import httpx2
 from tests.sdk_core.dialogue_gate import ReviewSample, ReviewVerdict, run_dialogue
 from tests.sdk_core.postgres_harness import isolated_database
 
+import xiaowei
 from scripts.gate0_real_model import ConfigurationError, check_postgres, load_profile
 from xiaowei.model_api import profile_fingerprint
 
@@ -63,6 +64,8 @@ async def review_sample(sample: ReviewSample) -> ReviewVerdict:
 
 
 async def collect(profile_path: Path, repeats: int) -> dict[str, object]:
+    sha = source_sha()
+    harness = harness_sha256()
     profile = load_profile(profile_path)
     check_postgres()
     async with isolated_database() as url:
@@ -73,16 +76,43 @@ async def collect(profile_path: Path, repeats: int) -> dict[str, object]:
             repeats=repeats,
             manual_review=review_sample,
         )
+    if source_sha() != sha or harness_sha256() != harness:
+        raise ConfigurationError("运行期间产品或评估框架版本发生变化，不生成合入证据")
+    return {
+        "source_sha": sha,
+        "harness_sha256": harness,
+        "profile_id": profile.profile_id,
+        "profile_fingerprint": profile_fingerprint(profile),
+        "repeats": repeats,
+        "samples": results,
+        "merge_gate": "需要逐项独立比较自然语言、证据与行为；采集成功不是验收通过",
+    }
+
+
+def source_sha() -> str:
+    """绑定实际导入的产品树；调用前及采集后都要求精确、无本地修改的 Git 版本。"""
     git = shutil.which("git")
     if git is None:
         raise ConfigurationError("缺少 Git，不能记录精确版本")
-    sha = subprocess.run(  # noqa: S603 -- resolved Git with fixed, read-only arguments; no shell.
-        [git, "rev-parse", "HEAD"],
-        check=True,
-        text=True,
-        capture_output=True,
-        cwd=ROOT,
-    ).stdout.strip()
+    package = Path(xiaowei.__file__).resolve()
+
+    def read(*args: str, cwd: Path) -> str:
+        try:
+            return subprocess.run(  # noqa: S603 -- resolved Git; fixed read-only arguments, no shell.
+                [git, *args], cwd=cwd, check=True, text=True, capture_output=True, timeout=5
+            ).stdout.strip()
+        except (OSError, subprocess.SubprocessError):
+            raise ConfigurationError("无法核实产品 Git 版本，不生成合入证据") from None
+
+    root = Path(read("rev-parse", "--show-toplevel", cwd=package.parent))
+    if package != root / "src/xiaowei/__init__.py":
+        raise ConfigurationError("实际导入的产品不在 Git 源码目录，不生成合入证据")
+    if read("status", "--porcelain", "--untracked-files=all", cwd=root):
+        raise ConfigurationError("产品源码树有未提交修改，不生成合入证据")
+    return read("rev-parse", "HEAD", cwd=root)
+
+
+def harness_sha256() -> str:
     harness = hashlib.sha256()
     for path in (
         "tests/sdk_core/gate0.py",
@@ -90,15 +120,7 @@ async def collect(profile_path: Path, repeats: int) -> dict[str, object]:
         "scripts/dialogue_real_model.py",
     ):
         harness.update((ROOT / path).read_bytes())
-    return {
-        "source_sha": sha,
-        "harness_sha256": harness.hexdigest(),
-        "profile_id": profile.profile_id,
-        "profile_fingerprint": profile_fingerprint(profile),
-        "repeats": repeats,
-        "samples": results,
-        "merge_gate": "需要逐项独立比较自然语言、证据与行为；采集成功不是验收通过",
-    }
+    return harness.hexdigest()
 
 
 def main() -> int:
@@ -114,7 +136,7 @@ def main() -> int:
     try:
         report = asyncio.run(collect(args.profile, args.repeats))
     except ConfigurationError as exc:
-        print(f"U1 gate: {exc}")
+        print(f"U1 gate: {exc}", file=sys.stderr)
         return 2
     print(json.dumps(report, ensure_ascii=False, indent=2))
     return 0
