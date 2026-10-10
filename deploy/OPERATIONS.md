@@ -331,7 +331,7 @@ metadata/rules 的官方返回会丢弃上游 warnings，页面保留固定限�
 
 ## 选配 Grafana 监控源
 
-G3 候选仅接入官方 Grafana MCP **v2.0.2** 的五项只读定义工具；实际公司 Grafana 版本/组织权限、
+G3 已接入官方 Grafana MCP **v2.0.2** 的五项只读定义工具；实际公司 Grafana 版本/组织权限、
 真实模型和双入口仍需验收。外部节点运行 MCP，小维 Compose 不新增服务。
 固定 Grafana URL/组织和共享只读 Service Account；不启用通用 API、写工具或代理指标查询。
 本机协议用例使用的开关为：
@@ -385,6 +385,51 @@ storedVersion 的原生对象。数据源目录失败也可能读取同源 setti
 官方结果没有逐条面板 ID。摘要未返回单位/阈值，visual-editor 的任意 target 不保留。
 数据源 UID/名称/type 不证明它对应某个 Prometheus 源；没有可信对应关系时，实时指标按独立来源
 报告，不声称来自这个面板。工具接口、失败分类与验收的唯一细则见[计划 §3.2](../docs/superpowers/plans/2026-10-09-monitoring-mcp.md#32-g3-当前切片基线-4cbb27a2b6e54050fc350fcd62a1a9e5cf123eae)。
+
+## 选配 Alertmanager 监控源
+
+A4 只读直连外部独立 Alertmanager **API v2**，本机以官方 **v0.34.1** 验证；公司实际版本仍须核对。
+不安装额外服务，Compose 不变。在配置顶层选配下面这一段；URL 填根地址，可含部署子路径，
+**不含 `/api/v2`**。用户名和密码只在运行环境的安全引用中填写，Compose 的 `.env` 会传给小维：
+
+```json
+"alertmanager_sources": [
+  {
+    "server_id": "alertmanager-prod",
+    "url": "http://alertmanager.internal:9093",
+    "username_ref": "env:XW_ALERTMANAGER_USERNAME",
+    "password_ref": "env:XW_ALERTMANAGER_PASSWORD",
+    "timeout_seconds": 5,
+    "max_response_bytes": 128000,
+    "tools": ["get_alerts", "get_alert_groups", "get_silences", "get_silence", "get_receivers", "get_status"]
+  }
+]
+```
+
+按需选 tools，再把 `alertmanager-prod/<工具名>` 加入 `data_policy.model_tools` 和获准用户/指定群
+已有授权表；只填连接不授予权限。Basic 与 MCP 的 Bearer 是不同认证，不复用 `auth_ref`。
+仅只读且已有网络限制时，两个引用可同时为 null。内网 HTTP 不需要 CA，认证头明文传输；
+选择 HTTPS 时沿用正常证书验证。Basic 只验证调用者身份，不能证明账号仅可读；小维本片只发固定 GET。
+
+API 没有服务端分页：先接收完整过滤响应，再用 limit（1–100）和 offset 本地分页；优先按已知
+标签收窄 filters。receiver 是正则，布尔值表示包含相应状态，不是只选该状态。
+128000 只是合成测试起点。启用前测代表性过滤结果与最大分组/静默目录的原始大小，配套现有
+四用途投影、模型请求和结果保存上限；超过可接受大小时不选配相应工具。limit 不限制上游负荷。
+分组摘要与最多100条组内明细分别投影，用本次响应内的 group_index 关联；明细放不下仍保留
+可容纳的摘要并标截断。has_more=false 不保证投影完整；跨页不是一致快照。
+
+结果保留抑制类别、静默 ID/匹配器/起止时间，不保存原配置、通知目的地、peer 地址或作者。
+静默存在不证明命中告警，按 silencedBy 的 ID 关联；接收器名不证明通知已发送，过期记录不证明
+当前仍被静默。uptime 表示启动时间，采集时间由小维另列。
+401/403、5xx、网络不可达或超时按现有契约使该源本轮未核实，其他获准源可继续；本源本轮不再读。
+未知状态（含400/404/422）、协议不合规、超限或证据失败仍中止，不自动修正 matcher 或重放。
+
+`config check` 后停止旧进程、更新配置并重启生效。`/readyz` 的 `alertmanager.alertmanager-prod`
+只表示 configured（已装配、未实读）或最后一次读取的 available/unavailable，不做探测，不影响
+Web/StarRocks 就绪。源离线时历史与重发仍按本地当前授权复核；撤权则拒绝，不重跑 API。
+回退到旧镜像前移除 `alertmanager_sources` 及相关工具授权，再用旧镜像 `config check`。
+完整接口与验收只维护在[计划 §3.3](../docs/superpowers/plans/2026-10-09-monitoring-mcp.md#33-a4-当前切片基线-8a7072d86abf6e93e0fb5e4be8e84f61308feb80)；
+真实模型、公司 Alertmanager 版本/容量/认证与真实飞书未验收。创建和取消静默本片均未开放。
 
 ## 状态、停止与重启
 
