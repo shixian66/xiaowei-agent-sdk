@@ -11,7 +11,7 @@
 | 仓库 | [shixian66/xiaowei-agent-sdk](https://github.com/shixian66/xiaowei-agent-sdk) |
 | 本地目录 / 分支 | `/Users/kloenguyen/.codex/worktrees/monitoring-g3/agent-SDK` / `codex/monitoring-g3`，基于 PR #71 合并后的 `origin/main`：`4cbb27a2b6e54050fc350fcd62a1a9e5cf123eae`。主工作区与已有修改保留；接手仍须核对实际 HEAD 与工作区。 |
 | M5 历史起点 | `372c381f44ecfa1fa53961f137d0058033cbd805`；不是远端当前 main 的核验结论 |
-| 本轮审查版本 | PR #71 已合入基线；G3 协议/计划 `58d340ccb22134709e9a1c07b497598efffdae13` 独立审查无架构阻断，已补面板选择值及数据源对应关系的明确边界。产品实现另按精确提交复审；方案通过不证明功能或真实环境通过。 |
+| 本轮审查版本 | PR #71 已合入基线；G3 协议/计划 `58d340ccb22134709e9a1c07b497598efffdae13` 独立审查无架构阻断。初次实现 `e42c34dd8cf8bcf224a573bd619f15c39c913453` 的原生 Dashboard 故障兼容缺口已补回归修复，新差异按精确提交复审；方案通过不证明功能或真实环境通过。 |
 | 当前阶段 | R1a/R1b、只读故障续查和 P2 离线部分已合入；G3 候选增加五项 Grafana 只读定义/目录/标记，契约唯一维护在监控计划 §3.2。真实模型自主调查、公司三源与真实双入口未验收；P3 实战验收独立开放。 |
 | 当前源码与依赖 | 新包 `src/xiaowei/` 仍为应用表 v6。V1-A 新增 `vertex_model.py`（SDK 公开 `Model` 的非流式 Vertex 适配器），`model_api` 增加 `provider="vertex"` 与受控 transport 的认证头/成功校验参数；显式声明已直接导入的 `httpx2>=2.12,<3`（锁定 2.13.1 不变）。V1-B 使 `PolicySession` 随函数调用保存并回放 `provider_data.thought_signature`（单字段白名单，其余供应商字段丢弃），`app.safe_run_config()` 成为应用与 `model check` 共用的运行配置。V2 新增 `runtime.check_model` / `validate_model_config` 与 CLI `model check`。C2 把主模板改为一个 Vertex Profile、一个目标；占位符清单新增 Vertex 模型标记，C2 前模板的标记作为历史值继续拒绝。发布归档仍只含白名单文件 |
 | 新产品入口 | 原生主线仍为 `xiaowei`（与 `python -m xiaowei` 相同）的 `serve`、`config check`、`model check`、`storage init/upgrade/cleanup`、`requests resend`；`listen_host` 可为任意地址（默认 `127.0.0.1`）。镜像固定入口复用同一 CLI，在容器内绑定 `0.0.0.0`，宿主机发布地址由 `XW_WEB_BIND_ADDRESS`（默认 `0.0.0.0`）决定。真实模型、用户 StarRocks 与真实飞书未参与 P3-A 验证；旧 CLI/Compose 不是产品入口 |
@@ -37,6 +37,10 @@
 ## 3. 当前计划与下一项工作
 
 **当前下一步：** G3 基于 PR #71 主线，五项官方协议和方案已核对并独立审查，当前完成实现及离线回归后交精确差异复审，再按本轮授权推送开 PR。原 P2 的 B1/list_rules 修复已复审通过并合入，不重复开工。G3 真实模型、公司 Grafana 的组织/版本/权限与双入口保持开放；后续 A4 需按其计划核对候选社区 MCP/API v2，不自动推进写能力。
+
+**G3 当前离线证据：** 基于上表 main，官方 Grafana MCP v2.0.2 只连接 loopback 合成 Grafana API。先在旧代码观察到正式 Web 成功/拒绝场景不能装配，再实现；真实 `serve → Web/群事件替身 → SDK Runner → 治理 → MCP → Evidence/PolicySession → 交付` 覆盖五项读取、当前源/工具撤权零业务 I/O、分页/投影省略、作者/秘密字段过滤、每项 401/403/500/502、另一已授权 Prometheus 续查、未知格式/超限中止、schema 漂移、原参数回放及源离线历史/群重发。初次独立源码审查的原生 Dashboard 故障已用正式 Web 复现：修复前 **32 failed / 4 passed**，修复后核对 discovery、settings namespace、v1beta1/v2alpha1/v2beta1 的成功/故障及状态不一致反例，未放宽未知错误。旧 StarRocks 重查提示也已明确限定到 StarRocks，Grafana 分窗仍由 Agent 和总预算决定。正式 Chrome 验证定义展示和参数越界零 I/O；群渠道仍为替身。
+
+本工作树 `.venv` 由 `uv sync --locked --extra dev` 独立安装；设置 `SDK_TEST_POSTGRES_URL=postgresql+asyncpg://postgres@127.0.0.1:55432/postgres`、`XW_TEST_GRAFANA_MCP_BIN` 和 `XW_TEST_PROMETHEUS_MCP_BIN` 为计划锁定的官方二进制后，`.venv/bin/python -m pytest tests/sdk_core tests/p1b -q -W error --tb=short` 初次实现为 **2554 passed, 58 deselected**，最终差异正在复核完整套件。审查修复后设置 `SDK_TEST_CHROME`，运行 `.venv/bin/python -m pytest tests/sdk_core/test_grafana_g3.py tests/sdk_core/test_grafana_contracts.py tests/sdk_core/test_grafana_mcp_protocol.py -q -W error -m 'loopback or browser' --tb=short` 为 **121 passed**。另在仓库外临时源码副本中去掉调用前授权、加入嵌套作者字段，两项变异均被对应零 I/O / 禁止字段断言发现；未改 SDK 或保留变异产品代码。Ruff、mypy（24 源文件）、离线锁文件与现有文档检查（5 passed）通过，完整命令/输出见交付 PR。官方 Grafana 二进制用例按环境变量显式启用；未提供时会跳过，不能以未配置该二进制的 CI 代替本机锁版证据。离线不证明真实 Agent 工具选择、澄清、答案质量、耗时/用量，也不证明公司 Grafana 的版本/组织/账号权限、实际规模、内网网络或真实飞书；模型任务样例仍按计划 §3.2 验收，不继承 U1 例外。
 
 **P2 只读故障续查离线证据（`762571f` 已独立审查通过）：** 基于 `1052dabe`，正式 `serve` 的 Web、飞书群替身、真 SDK Runner/治理/Evidence、隔离 PostgreSQL、loopback MCP 与官方 Prometheus MCP `v0.18.0` + 本机合成 API 已验证：可分类的上游 401/403/500、断线和超时只使本源本轮未核实，其他已授权源可继续；失败不生成 Evidence、不重放，本源本轮再次调用为零 I/O；未知结果仍中止。代码生成的失败源说明随回答保存，历史读取在撤权后拒绝；Web Chrome 与飞书卡片能展示失败源和已有事实。先在旧代码观察到正式 Web 用例失败，再实现修复。完整离线套件 **2394 passed, 55 deselected**；最终提示词与断言调整后，受影响的应用/监控用例 **101 passed, 1 deselected**，监控单文件 `-W error` **18 passed, 1 deselected**，Chrome `-m browser` **1 passed, 18 deselected**。Ruff check/format、mypy（24 文件）、离线锁文件与差异检查通过。以上不证明真实模型会自主选对工具、公司 Prometheus/网络、真实飞书/Lark、部署或用户验收；P2 发现/range/语法纠错和服务端查询限额验收仍待后续切片。
 

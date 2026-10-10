@@ -55,6 +55,12 @@ class BackendState:
     count: int = 1
     public_url: str = ""
     version: str = ""
+    discovery_status: int = 404
+    stored_version: str = ""
+    native_status: int = 200
+    dashboard_status: int = 200
+    settings_status: int | None = None
+    namespace: str = ""
 
 
 @contextmanager
@@ -67,8 +73,63 @@ def grafana_backend() -> Iterator[tuple[int, BackendState]]:
             args = parse_qs(parsed.query)
             state.requests.append((parsed.path, args, self.headers.get("Authorization")))
             status = state.status
-            if parsed.path.startswith("/apis"):
-                status, body = 404, {"message": "Not found"}
+            if parsed.path == "/api/frontend/settings" and state.settings_status is not None:
+                status = state.settings_status
+            if parsed.path == "/apis/dashboard.grafana.app":
+                status = state.discovery_status
+                body = (
+                    {"versions": [{"version": "v1beta1"}, {"version": "v2beta1"}]}
+                    if status == 200
+                    else {"message": "synthetic discovery failure"}
+                )
+            elif parsed.path.startswith("/apis/dashboard.grafana.app/"):
+                version = parsed.path.split("/")[3]
+                status = state.native_status if version.startswith("v2") else state.dashboard_status
+                if status != 200:
+                    body = {"message": "synthetic dashboard failure"}
+                else:
+                    spec = state.dashboard["dashboard"]
+                    if version.startswith("v2"):
+                        panel = spec["panels"][0]
+                        spec = {
+                            "title": spec["title"],
+                            "timeSettings": spec["time"],
+                            "elements": {
+                                "cpu": {
+                                    "kind": "Panel",
+                                    "spec": {
+                                        "id": panel["id"],
+                                        "title": panel["title"],
+                                        "vizConfig": {"group": "timeseries"},
+                                        "data": {
+                                            "spec": {
+                                                "queries": [
+                                                    {
+                                                        "spec": {
+                                                            "refId": "A",
+                                                            "query": {
+                                                                "group": "prometheus",
+                                                                "datasource": {"name": "prom"},
+                                                                "spec": panel["targets"][0],
+                                                            },
+                                                        }
+                                                    }
+                                                ]
+                                            }
+                                        },
+                                    },
+                                }
+                            },
+                        }
+                    body = {
+                        "apiVersion": f"dashboard.grafana.app/{version}",
+                        "metadata": {
+                            "name": "host",
+                            "annotations": {"grafana.app/folder": "hosts"},
+                        },
+                        "spec": spec,
+                        "status": {"conversion": {"storedVersion": state.stored_version}},
+                    }
             elif status != 200:
                 body = {"message": "synthetic failure with private detail"}
             elif parsed.path == "/api/search":
@@ -105,6 +166,7 @@ def grafana_backend() -> Iterator[tuple[int, BackendState]]:
                     else {
                         "datasources": {d["uid"]: d for d in items},
                         "appUrl": state.public_url,
+                        "namespace": state.namespace,
                         "buildInfo": {"version": state.version},
                     }
                 )

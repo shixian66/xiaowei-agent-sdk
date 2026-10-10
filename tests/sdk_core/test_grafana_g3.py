@@ -457,6 +457,7 @@ async def test_grafana_optional_filter_replay_and_no_unnecessary_queries(
                     "panelId": 0,
                 }
                 assert "不能证明它对应哪个 Prometheus" in call.instructions
+                assert "StarRocks非分页结果被截断时" in call.instructions
                 return cite("只解释上次定义；实时状态未核实")(call)
 
             next_message = env.scripts.add("解释刚才的定义，不再查询", followup)
@@ -702,6 +703,132 @@ async def test_visible_grafana_tool_rechecks_current_permission_before_io(
                 lambda call: answer([], analysis="", advice="当前无权，未读取"),
             )
             body = (await served.turn(message, "query")).json()
-            assert body["state"] == "completed" and "未读取" in body["delivery"]["content"]
             assert not state.requests
             assert await env.scalar("SELECT count(*) FROM xiaowei_evidence") == 0
+            assert body["state"] == "completed" and "未读取" in body["delivery"]["content"]
+
+
+@pytest.mark.parametrize("name", ["get_dashboard_summary", "get_dashboard_panel_queries"])
+@pytest.mark.parametrize("branch", ["discovery", "namespace", "v1beta1", "v2beta1"])
+@pytest.mark.parametrize("status", [401, 403, 500, 502])
+async def test_native_dashboard_failure_is_source_local_and_not_replayed(
+    env: Env, grafana_binary: Path, name: str, branch: str, status: int
+) -> None:
+    with (
+        grafana_backend() as (port, state),
+        official_grafana(grafana_binary, port) as url,
+        serve(query_server) as prom,
+    ):
+        if branch == "discovery":
+            state.discovery_status = status
+        else:
+            state.discovery_status = 200
+            state.namespace = "org-2"
+            if branch == "namespace":
+                state.settings_status = status
+            elif branch == "v1beta1":
+                state.dashboard_status = status
+            else:
+                state.stored_version = "v2beta1"
+                state.native_status = status
+        values = g3_config(url)
+        values["mcp_servers"].append(
+            {
+                "server_id": "prometheus-prod",
+                "url": prom.url,
+                "auth_ref": None,
+                "timeout_seconds": 2,
+                "max_response_bytes": 64000,
+                "allowed_tools": {"query": "prometheus.query"},
+            }
+        )
+        values["data_policy"]["model_tools"].append("prometheus-prod/query")
+        values["access"]["grants"]["operator"].append("prometheus-prod/query")
+        async with env.running(env.config(**values)) as served:
+            await served.page()
+            state.requests.clear()
+            message = env.scripts.add(
+                "Grafana 的读取失败，继续调查其他获准源",
+                tool_call(f"{SOURCE}__{name}", **CALLS[name]),
+                tool_call(f"{SOURCE}__{name}", **CALLS[name]),
+                tool_call("prometheus-prod__query", query="up"),
+                cite("Grafana 未核实，Prometheus 仅证明本次查询范围"),
+            )
+            body = (await served.turn(message, "query")).json()
+            assert body["state"] == "completed"
+            assert len(body["delivery"]["facts"]) == 1
+            assert body["delivery"]["facts"][0]["target_id"] == "prometheus-prod"
+            assert SOURCE in body["delivery"]["monitoring_notice"]
+            assert (
+                len(state.requests)
+                == {"discovery": 1, "namespace": 2, "v1beta1": 2, "v2beta1": 3}[branch]
+            )
+            assert all(
+                path.startswith("/apis/dashboard.grafana.app") or path == "/api/frontend/settings"
+                for path, _, _ in state.requests
+            )
+            assert all(
+                token == "Bearer synthetic-upstream-token"  # noqa: S105 - synthetic
+                for _, _, token in state.requests
+            )
+            assert prom.recorder.tool_calls == [("query", {"query": "up"})]
+            assert await env.scalar("SELECT count(*) FROM xiaowei_evidence") == 1
+            assert "synthetic dashboard failure" not in json.dumps(body)
+            assert "synthetic discovery failure" not in json.dumps(body)
+
+
+@pytest.mark.parametrize("name", ["get_dashboard_summary", "get_dashboard_panel_queries"])
+@pytest.mark.parametrize("native", ["", "v2alpha1", "v2beta1"])
+async def test_native_dashboard_success_keeps_locked_result_contract(
+    env: Env, grafana_binary: Path, name: str, native: str
+) -> None:
+    with grafana_backend() as (port, state), official_grafana(grafana_binary, port) as url:
+        state.discovery_status = 200
+        state.namespace = "org-2"
+        state.stored_version = native
+        async with env.running(env.config(**g3_config(url))) as served:
+            await served.page()
+            state.requests.clear()
+            message = env.scripts.add(
+                "读取原生面板定义", tool_call(f"{SOURCE}__{name}", **CALLS[name]), cite()
+            )
+            body = (await served.turn(message, "query")).json()
+            assert body["state"] == "completed"
+            assert (
+                "Host CPU" in body["delivery"]["content"] or name == "get_dashboard_panel_queries"
+            )
+            if name == "get_dashboard_panel_queries":
+                assert "cpu_ratio" in body["delivery"]["content"]
+            assert len(state.requests) == (3 if native else 2)
+            assert all(
+                path.startswith("/apis/dashboard.grafana.app") for path, _, _ in state.requests
+            )
+            assert await env.scalar("SELECT count(*) FROM xiaowei_evidence") == 1
+
+
+@pytest.mark.parametrize("name", ["get_dashboard_summary", "get_dashboard_panel_queries"])
+@pytest.mark.parametrize("branch", ["namespace", "v1beta1", "v2beta1"])
+async def test_native_dashboard_unclassified_404_aborts_without_evidence(
+    env: Env, grafana_binary: Path, name: str, branch: str
+) -> None:
+    with grafana_backend() as (port, state), official_grafana(grafana_binary, port) as url:
+        state.discovery_status = 200
+        state.namespace = "org-2"
+        if branch == "namespace":
+            state.settings_status = 404
+        elif branch == "v1beta1":
+            state.dashboard_status = 404
+        else:
+            state.stored_version = "v2beta1"
+            state.native_status = 404
+        async with env.running(env.config(**g3_config(url))) as served:
+            await served.page()
+            state.requests.clear()
+            message = env.scripts.add(
+                "原生定义找不到", tool_call(f"{SOURCE}__{name}", **CALLS[name])
+            )
+            body = (await served.turn(message, "query")).json()
+            assert body["state"] == "failed"
+            assert len(state.requests) == (3 if branch == "v2beta1" else 2)
+            assert await env.scalar("SELECT count(*) FROM xiaowei_evidence") == 0
+            assert await env.scalar("SELECT count(*) FROM agent_messages") == 0

@@ -26,6 +26,7 @@ from contextlib import AsyncExitStack
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from decimal import ROUND_HALF_UP, Decimal, InvalidOperation
+from http import HTTPStatus
 from types import TracebackType
 
 import httpx2
@@ -664,6 +665,34 @@ def _grafana_read_failure(
         )
         path, operation, typed = "/search", "search", "search"
     elif tool_name in {"get_dashboard_summary", "get_dashboard_panel_queries"}:
+        namespace = re.fullmatch(
+            r"get dashboard by uid: resolve grafana namespace from /api/frontend/settings: "
+            r"frontend settings returned HTTP (401|403|5[0-9][0-9])",
+            text,
+        )
+        if namespace is not None:
+            return "auth" if namespace[1] in {"401", "403"} else "upstream_5xx"
+        uid = str(arguments["uid"])
+        prefixes = (
+            re.escape("determine dashboard.grafana.app capability: "),
+            re.escape(f"get dashboard {json.dumps(uid, ensure_ascii=False)} via k8s api: "),
+            r"get native v2(?:alpha|beta)1 dashboard via k8s api " + re.escape(uid) + r": ",
+        )
+        native = re.fullmatch(
+            r"get dashboard by uid: (?:" + "|".join(prefixes) + r")"
+            r"kubernetes API error: (?P<status>401|403|5[0-9][0-9]) (?P<phrase>[A-Za-z ]+) "
+            r"\(HTTP (?P=status)\): (?P<body>\{[^\r\n]*\})",
+            text,
+        )
+        if native is not None:
+            try:
+                http_status = HTTPStatus(int(native["status"]))
+                body = json.loads(native["body"])
+            except ValueError:
+                return None
+            if native["phrase"] != http_status.phrase or not isinstance(body, dict):
+                return None
+            return "auth" if http_status in {401, 403} else "upstream_5xx"
         prefix = re.escape(f"get dashboard by uid: get dashboard by uid {arguments['uid']}: ")
         path, operation, typed = "/dashboards/uid/{uid}", "getDashboardByUID", "getDashboardByUid"
     elif tool_name == "list_datasources":

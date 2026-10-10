@@ -97,7 +97,7 @@ class ToolExecutionError(Exception):
 
 
 class MonitoringReadError(Exception):
-    """已执行的 Prometheus 读取明确失败；本源本轮不可再读，不产生成功 Evidence。"""
+    """已执行的监控读取明确失败；本源本轮不可再读，不产生成功 Evidence。"""
 
     def __init__(self, reason: MonitoringFailureReason) -> None:
         super().__init__("监控源本轮未核实")
@@ -247,7 +247,7 @@ class TurnRuns:
     ``started`` 是通过前置检查、占用预算后开始执行的调用的工具 ID（每次调用一项）；``produced``
     是其中结果已生成证据并交给模型的 ``(工具 ID, 证据标识)``；``truncated`` 计模型可见
     结果的截断次数，``rejected`` 计 SDK 包装层确认的 I/O 前拒绝次数。多数执行后失败
-    中止整轮；明确分类的 Prometheus 读取失败记录在 ``monitoring_failures``，不生成 Evidence。
+    中止整轮；明确分类的监控读取失败记录在 ``monitoring_failures``，不生成 Evidence。
     ``limit_rescue_started`` 标记 SDK 步数用完后已进入无工具收尾，供失败日志保留上下文。
     """
 

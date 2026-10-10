@@ -50,6 +50,48 @@ def test_similar_unverified_errors_are_not_classified(error: str) -> None:
 
 
 @pytest.mark.parametrize(
+    "suffix",
+    [
+        "kubernetes API error: 404 Not Found (HTTP 404): {}",
+        "kubernetes API error: 403 Forbidden (HTTP 401): {}",
+        "kubernetes API error: 403 Unauthorized (HTTP 403): {}",
+        "kubernetes API error: 403 Forbidden (HTTP 403): []",
+        "kubernetes API error: 403 Forbidden (HTTP 403): not-json",
+        "kubernetes API error: 403 Forbidden (HTTP 403): {} extra",
+    ],
+)
+def test_native_dashboard_unverified_error_shapes_are_not_classified(suffix: str) -> None:
+    for prefix in (
+        "determine dashboard.grafana.app capability: ",
+        'get dashboard "host" via k8s api: ',
+        "get native v2beta1 dashboard via k8s api host: ",
+    ):
+        result = CallToolResult(
+            is_error=True,
+            content=[TextContent(type="text", text=f"get dashboard by uid: {prefix}{suffix}")],
+        )
+        assert _grafana_read_failure(result, "get_dashboard_summary", {"uid": "host"}) is None
+
+
+@pytest.mark.parametrize("kind", ["other_uid", "other_tool", "multiple", "structured"])
+def test_native_dashboard_known_http_status_cannot_override_identity_or_shape(kind: str) -> None:
+    text = (
+        'get dashboard by uid: get dashboard "host" via k8s api: '
+        "kubernetes API error: 403 Forbidden (HTTP 403): {}"
+    )
+    if kind == "other_uid":
+        text = text.replace('"host"', '"other"')
+    content = [TextContent(type="text", text=text)]
+    if kind == "multiple":
+        content.append(TextContent(type="text", text="{}"))
+    result = CallToolResult(
+        is_error=True, content=content, structured_content={} if kind == "structured" else None
+    )
+    name = "get_annotations" if kind == "other_tool" else "get_dashboard_summary"
+    assert _grafana_read_failure(result, name, {"uid": "host"}) is None
+
+
+@pytest.mark.parametrize(
     "kind", ["wrong_uid", "missing_title", "wrong_type", "error", "multiple", "structured"]
 )
 async def test_malformed_result_aborts_formal_turn_with_zero_evidence(env: Env, kind: str) -> None:

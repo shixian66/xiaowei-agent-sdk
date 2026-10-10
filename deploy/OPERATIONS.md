@@ -371,8 +371,9 @@ Bearer 是另一项凭据，不转发给 Grafana。内网 HTTP 沿用上节的�
 搜索 total 是当前页数量；数据源 total 是筛选后总数；hasMore/投影省略都标明部分结果。
 标记使用 Unix 毫秒、最多31天窗口和100条；这是本地容量边界，达到 limit 视为可能未完整，可分窗。
 分页不等于服务端开销受限：数据源每次先读取全目录，摘要与表达式先读取完整 Dashboard。
-初始化会读一次 `/api/frontend/settings`；首次 Dashboard 读取有 capability discovery，数据源目录失败
-还可能读取同源 frontend settings。这些是官方实现行为，不是小维重放调用。
+初始化会读 `/api/frontend/settings`；首次 Dashboard 读取有 capability discovery。原生 API 按同源
+settings 的 namespace 读取，未缓存 namespace 时还会读 settings；v2 对象可能先读 v1beta1 再读
+storedVersion 的原生对象。数据源目录失败也可能读取同源 settings。这些是官方实现行为，不是小维重放调用。
 
 按上节方式给 `data_policy.model_tools` 和获准用户/群加入 `grafana-prod/<工具名>`；群成员共享获准
 源内的定义，不做对象白名单。仅填源地址不会授权。`config check` 后停止旧进程并重启生效；
