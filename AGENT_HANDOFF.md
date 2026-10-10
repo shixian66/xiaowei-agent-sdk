@@ -11,7 +11,7 @@
 | 仓库 | [shixian66/xiaowei-agent-sdk](https://github.com/shixian66/xiaowei-agent-sdk) |
 | 本地目录 / 分支 | `/Users/kloenguyen/.codex/worktrees/agent-dialogue-repair-plan/agent-SDK` / `codex/agent-dialogue-feishu-repair`，基于 R1b PR #68 合并后 `origin/main` 的 `8503099fb403afb2cc5bc4da0eab3b22618606f2`；`codex/monitoring-g0` 与其他工作树保持独立。接手仍须核对实际 HEAD 与工作区。 |
 | M5 历史起点 | `372c381f44ecfa1fa53961f137d0058033cbd805`；不是远端当前 main 的核验结论 |
-| 本轮审查版本 | R1a/R1b 已随 PR #67/#68 合入基线；Claude 复审 `7f6d8d8a1ddf709bd6803eb979a08996c1b4084b` 发现 B1 容量搜索及 G1 版本绑定问题。本地独立复审 `9b721c1e61cac2e02cfbfacec849efc2075d35fa` 关闭 B1，确认 G1 成功路径绑定，但复现超时请求漏报；本轮已补回归和修复，最终离线检查通过，待新 SHA 复审。旧“无新阻断”不作为当前结论。真实模型门槛未执行，未推送或开 PR。 |
+| 本轮审查版本 | R1a/R1b 已随 PR #67/#68 合入基线。Claude `7f6d8d8` 的 B1/G1 和本地复审 `9b721c1` 的请求漏报均已修复；代码提交 `50cfe3c1739127d7dfeb4f14acfb3865491cf962` 本地独立复审通过，无新增阻断。本次记录更新只改文档，源码/测试一致。等待外部 Claude 复审；真实模型门槛未执行，合入仍不满足，未推送或开 PR。 |
 | 当前阶段 | U1 对话规则与 U2 静态飞书卡片已实施本地候选，先完成离线检查、审查与修复。监控 R1b 按源有界重连保持；本片未接公司监控、真实模型或飞书/Lark，未执行监控写；P3 实战验收仍独立开放。 |
 | 当前源码与依赖 | 新包 `src/xiaowei/` 仍为应用表 v6。V1-A 新增 `vertex_model.py`（SDK 公开 `Model` 的非流式 Vertex 适配器），`model_api` 增加 `provider="vertex"` 与受控 transport 的认证头/成功校验参数；显式声明已直接导入的 `httpx2>=2.12,<3`（锁定 2.13.1 不变）。V1-B 使 `PolicySession` 随函数调用保存并回放 `provider_data.thought_signature`（单字段白名单，其余供应商字段丢弃），`app.safe_run_config()` 成为应用与 `model check` 共用的运行配置。V2 新增 `runtime.check_model` / `validate_model_config` 与 CLI `model check`。C2 把主模板改为一个 Vertex Profile、一个目标；占位符清单新增 Vertex 模型标记，C2 前模板的标记作为历史值继续拒绝。发布归档仍只含白名单文件 |
 | 新产品入口 | 原生主线仍为 `xiaowei`（与 `python -m xiaowei` 相同）的 `serve`、`config check`、`model check`、`storage init/upgrade/cleanup`、`requests resend`；`listen_host` 可为任意地址（默认 `127.0.0.1`）。镜像固定入口复用同一 CLI，在容器内绑定 `0.0.0.0`，宿主机发布地址由 `XW_WEB_BIND_ADDRESS`（默认 `0.0.0.0`）决定。真实模型、用户 StarRocks 与真实飞书未参与 P3-A 验证；旧 CLI/Compose 不是产品入口 |
@@ -36,7 +36,7 @@
 
 ## 3. 当前计划与下一项工作
 
-**当前下一步：** [对话与飞书结果展示修复计划](docs/superpowers/plans/2026-10-09-agent-dialogue-feishu-repair.md)中 B1、G1 版本绑定及 `9b721c1` 独立复审的超时请求漏报已本地修复，最终检查通过，交新 SHA 复审，不提前开 PR。U1 获准真实模型旧/新固定任务各至少 3 次尚未执行，仍阻断合入；框架绑定实际导入的干净 Git 源码树，并在请求进入 transport 时记录实际指令/工具说明哈希，失败请求不丢失计数。未收到 HTTP 响应时 status/usage 为 null，异常仍原样传播。具体旧/新命令见计划 §8。U2 真实 Lark 客户端及收发未验收。门槛满足后再按授权处理 PR/合入，再回监控 P2；PromQL 纠错与部分失败续查仍归监控计划，Evidence 拒收后改写不实现。
+**当前下一步：** [对话与飞书结果展示修复计划](docs/superpowers/plans/2026-10-09-agent-dialogue-feishu-repair.md)的 B1、G1 和请求漏报已修复，代码提交 `50cfe3c` 本地独立复审无新增阻断，交最新 SHA 给外部 Claude 复审，不提前开 PR。U1 获准真实模型旧/新固定任务各至少 3 次尚未执行，仍阻断合入；框架绑定实际导入的干净 Git 源码树，并在请求进入 transport 时记录实际指令/工具说明哈希，失败请求不丢失计数。未收到 HTTP 响应时 status/usage 为 null，异常仍原样传播。具体旧/新命令见计划 §8。U2 真实 Lark 客户端及收发未验收。门槛满足后再按授权处理 PR/合入，再回监控 P2；PromQL 纠错与部分失败续查仍归监控计划，Evidence 拒收后改写不实现。
 
 **U1/U2 本地证据：** 最终真 Runner/SDK、隔离 PostgreSQL、驱动与协议替身下新产品全量 **2375 passed, 54 deselected**（`-W error`）；最后增量的群聊/观测/版本绑定 **160 passed**，此前九文件调用链 **631 passed**，两组都在最终全量内。Ruff、格式（79 文件）、mypy（24 源文件）、锁文件与差异检查通过。5×400 回归的卡片构造从 8644 次降至 102 次，零行/完整端点及 SQL 优先保持；两个 Git 源码树的报告 SHA 与实际请求哈希正确，脏树、无 Git 及中途变化拒绝。失败/取消/关闭异常的请求记录保留，异常传播不变，新增五组版本/性能变异与两组请求漏报变异均被发现。全量中另复现基线群测试把发送开始当完成的竞态，只改测试等待真实网关完成、保留原断言并加延迟对照；删除等待的变异也被发现。未变 Web 路径沿用六个 18501 用例含参数化 **9 passed** 的有效 Chrome 证据。默认可见 DDL 超限等非技术原因，区分无结果/零行，建议恢复未核实标签；嵌套值额外类型标签暂不做。完整命令、首次失败、日志、前次有效审查与残余边界见计划 §10。产品安全检查与发送失败语义未变；真实模型门槛、Lark 和公司入口未验收，不推送或开 PR。
 
