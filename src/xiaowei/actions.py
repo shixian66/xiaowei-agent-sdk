@@ -55,6 +55,7 @@ if TYPE_CHECKING:
     from xiaowei.channel import AccessPolicy
 
 APPROVAL_WINDOW = timedelta(minutes=15)
+ACTION_SETTLE_TIMEOUT_SECONDS = 5
 STATUS_POLICY = "monitoring.action_status"
 _PROPOSAL_FIELDS = (
     "action_id",
@@ -465,8 +466,19 @@ class ActionService:
         try:
             await self.governance.invoke(approved, write_request, Prechecked(precheck, execute))
         except asyncio.CancelledError:
-            self.governance.end_turn(approved.identity)
-            self._store.readiness.lock("action_cancelled")
+            try:
+                # 取消不证明远端已停止；只在关键状态仍可信时结束本次尝试，不补跑写入。
+                if not finished and self._store.readiness.ok:
+                    async with asyncio.timeout(ACTION_SETTLE_TIMEOUT_SECONDS):
+                        await self._store.finish_action(
+                            claimed, "unknown" if write_started else "rejected"
+                        )
+            except BaseException:
+                # 收尾在进入关键 SQL 前也可能中断；未保存 Action 终态时不能恢复接活。
+                self._store.readiness.lock("action_settle_failed")
+                raise
+            finally:
+                self.governance.end_turn(approved.identity)
             raise
         except Exception:
             state: Literal["succeeded", "unknown", "rejected"] = (

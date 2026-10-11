@@ -31,7 +31,7 @@ from typing import Protocol
 
 from pydantic import AwareDatetime, BaseModel, ConfigDict, Field, model_validator
 
-from xiaowei.actions import ActionOutcomeError
+from xiaowei.actions import ACTION_SETTLE_TIMEOUT_SECONDS, ActionOutcomeError
 from xiaowei.app import Application, Mode, TurnError, TurnReason
 from xiaowei.channel_store import (
     CallerFailureCode,
@@ -657,28 +657,49 @@ class ChannelService:
                 )
             except TimeoutError:
                 # 超时可能发生在写入后的反馈阶段；以同群应用表的事实给回执，不重放动作。
-                failure_code: CallerFailureCode
                 try:
-                    action = await self._store.get_action(
-                        action_id, self._context(record, decision).identity
+                    failure_code = await self._approval_failure(
+                        action_id, self._context(record, decision)
                     )
                 except asyncio.CancelledError:
-                    self._store.readiness.lock("action_cancelled")
+                    await self._fail_cancelled_approval(
+                        record, action_id, self._context(record, decision)
+                    )
                     raise
-                except RequestUnavailableError:
-                    failure_code = "action_not_approvable"
-                except Exception:
-                    failure_code = "action_unknown"
-                else:
-                    failure_code = _ACTION_FAILURE_CODES[action.state]
                 return await self._store.fail(record, failure_code)
             except asyncio.CancelledError:
-                self._store.readiness.lock("action_cancelled")
+                await self._fail_cancelled_approval(
+                    record, action_id, self._context(record, decision)
+                )
                 raise
             return await self._store.complete(record, answer, failure_code="action_feedback_failed")
         finally:
             if self._store.readiness.ok:
                 self._running.discard(record.session_id)
+
+    async def _approval_failure(self, action_id: str, ctx: RunContext) -> CallerFailureCode:
+        try:
+            async with asyncio.timeout(ACTION_SETTLE_TIMEOUT_SECONDS):
+                action = await self._store.get_action(action_id, ctx.identity)
+        except RequestUnavailableError:
+            return "action_not_approvable"
+        except Exception:
+            return "action_unknown"
+        return _ACTION_FAILURE_CODES[action.state]
+
+    async def _fail_cancelled_approval(
+        self, record: RequestRecord, action_id: str, ctx: RunContext
+    ) -> None:
+        if not self._store.readiness.ok:
+            return  # 关键写入/实例锁已失效，保持原有重启恢复边界。
+        try:
+            failure_code = await self._approval_failure(action_id, ctx)
+            async with asyncio.timeout(ACTION_SETTLE_TIMEOUT_SECONDS):
+                await self._store.fail(record, failure_code)
+        except BaseException:
+            # 请求没有可靠落定，不能仅释放群占用继续接活。保留异常及全局故障保护。
+            self._store.readiness.lock("action_settle_failed")
+            raise
 
     async def new_session(
         self,
