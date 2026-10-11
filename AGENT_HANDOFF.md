@@ -43,9 +43,9 @@
 
 **已取得证据。** 锁版官方 Alertmanager v0.34.1（darwin-arm64 二进制 SHA-256 `c09fe5d0e479e44a39e8501e5ab6b6a16b19370bf51ce8433b92406ba6368cac`）在临时 loopback 实例验证无/错 Basic 零写、1/3年、POST 带 ID 更新、active/pending 提前结束和记录保留。正式 `runtime.serve` + 真 SDK/PostgreSQL/群平台替身完成提出→非名单拒绝→批准→真实 API 回读→另次取消→状态追问；告警的 silencedBy 由静默 UUID 变为空。Web 强行提出/写、无源/工具权限为零 I/O；写后超时/回读异常记未知、不重放，随后真实 Web HTTP 的 StarRocks 驱动替身读取继续可用。
 
-**红绿与反例。** 初始配置/正式入口缺少 write_actions；工具误入用途集合先失败再排除。未来 startsAt 被改晚却判成功的用例先为1 failed/5 passed，修后拒收；过去开始时间的官方对照仍允许。期限失效反馈错用了 Prometheus 31天提示，模型实收断言先失败，改为闭集 silence_end 后通过，不新增静默时长上限。六项仓库外独立变异移除未来开始校验、取消状态校验、提出前检查、批准材料复核、Basic 配置要求、用途排除，均被目标断言检出；副本导入失误不算行为证据。
+**红绿与反例。** 初始配置/正式入口缺少 write_actions；工具误入用途集合先失败再排除。未来 startsAt 被改晚却判成功的用例先为1 failed/5 passed，修后拒收。实现方新鲜全分支复查又确认过去 startsAt 被调至未来/pending 仍会误判成功，三项正式群用例先失败；按同源 updatedAt 与 active 校验后为未知、无成功 Evidence、不重放，官方过去时间调整对照保持通过，不新增钟差配置。期限失效反馈错用了 Prometheus 31天提示，模型实收断言先失败，改为闭集 silence_end 后通过，不新增静默时长上限。八项仓库外独立变异移除未来开始、过去开始上界/active、取消状态、提出前检查、批准材料复核、Basic 配置和用途排除，均被目标断言检出；副本导入失误不算行为证据。
 
-**离线检查。** 首个 A4/W5 基线8 passed/1社区跳过；官方写协议3 passed；扩展 S6/官方入口38 passed（25.62s）；反馈修正单项1 passed（1.43s）。Ruff/format 已通过，mypy26个新包源文件与92包锁文件检查通过。最终 SDK/P1B 完整批次正在运行，未完成前不记全量通过；此前为修正反馈主动中断的581 passed/59 deselected不算完整结果。日志 `/private/tmp/xw-s6-{baseline,protocol,complete-paths-green,feedback-red,feedback-green,sdk-p1b-final}.log`，变异复现 `/private/tmp/xw-s6-mutations.py` 与 `/private/tmp/xw-s6-mutations/*.log`，只操作隔离测试库与合成数据。
+**离线检查。** 修复后 `SDK_TEST_POSTGRES_URL` 指向本机隔离库，显式配置官方及社区测试程序，执行 `uv run --frozen pytest tests/sdk_core tests/p1b -q -W error --tb=short` 为2957 passed、59 deselected（766.43s）。S6/官方协议/Action装配/A4 四文件118 passed、1 deselected（88.88s）。全仓 Ruff、97文件格式、mypy128个源码、92包锁、5项文档检查与离线 wheel 通过，wheel 含现有007迁移和新能力模块、未含 tests/docs；82个受影响文档本地 Markdown 目标存在。`1d4e96c` 的2954 passed仅是修复前证据，不代替当前批次；更早主动中断的581通过不计完整证据。日志 `/private/tmp/xw-s6-{baseline,protocol,past-start-red,past-start-green,sdk-p1b-1d4e96c,sdk-p1b-final}.log`，变异复现 `/private/tmp/xw-s6-mutations.py` 与 `/private/tmp/xw-s6-mutations/*.log`。实现方全分支只读复查报告 `/private/tmp/xw-s6-branch-review.md` 确认回读反例修复，未发现其他可复现阻断；不替代用户独立审查。全部只操作隔离测试库与合成数据，旧包全量由CI另列，不混称本地新产品回归。
 
 **未覆盖与恢复。** 脚本模型不能证明自主选工具、必要澄清或静默期限质量；真实 Agent 任务样例、公司版本/Basic/容量/HA 与通知、真实飞书投递审批、部署/备份恢复均未验收。API 没有原子版本条件，写前回读不能消除最后一段竞争/HA窗口，生产启用前须核对并明确接受该风险。配置默认只读；停止旧进程后移除写动作及其提出/执行授权可退回只读，退回 S6 前镜像还须移除新字段。S6 不改 v7 表；未知 Action 不自动补跑。
 

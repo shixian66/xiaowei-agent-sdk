@@ -242,6 +242,46 @@ async def test_create_readback_must_match_approved_write(
             assert "工具执行失败" not in receipt
 
 
+@pytest.mark.parametrize(
+    ("state_name", "start_offset"),
+    [
+        ("active", timedelta(days=365)),
+        ("pending", timedelta(days=365)),
+        ("pending", timedelta(minutes=1)),
+    ],
+)
+async def test_past_start_adjustment_must_be_active_and_at_most_updated_at(
+    env: Env, group_channel: GroupChannel, state_name: str, start_offset: timedelta
+) -> None:
+    with backend() as (url, state):
+        state.write_result_updates.update(
+            startsAt=(env.clock() + start_offset).isoformat(),
+            status={"state": state_name},
+        )
+        env.scripts.add(
+            attributed(A, "提出"),
+            tool_call(f"{SOURCE}__propose_create_silence", **create_args(env)),
+            cite(),
+        )
+        async with env.running(env.config(**s6_config(url)), feishu_channel=group_channel):
+            await group_send(env, group_channel, "提出", "om_p")
+            action_id = await env.scalar("SELECT action_id FROM xiaowei_action")
+            await group_send(env, group_channel, f"/批准 {action_id}", "om_a", sender=B)
+            assert await env.scalar("SELECT state FROM xiaowei_action") == "unknown"
+            assert await env.scalar("SELECT result FROM xiaowei_action") is None
+            assert (
+                await env.scalar(
+                    "SELECT count(*) FROM xiaowei_evidence WHERE tool_id=:tool", {"tool": CREATE}
+                )
+                == 0
+            )
+            receipt = message_text(group_channel.sends[-1][1])
+            assert "未知" in receipt and "核对" in receipt
+            await group_send(env, group_channel, f"/批准 {action_id}", "om_again", sender=B)
+            assert len(state.writes) == 1
+            assert sum(method == "POST" for method, _, _ in state.requests) == 1
+
+
 @pytest.mark.parametrize("problem", ["timeout", "readback", "auth", "5xx", "redirect"])
 async def test_formal_unknown_write_not_replayed_and_readonly_continues(
     env: Env, group_channel: GroupChannel, problem: str

@@ -649,7 +649,14 @@ class AlertmanagerAdapter:
                     or datetime.fromisoformat(actual.endsAt)
                     != datetime.fromisoformat(str(args["ends_at"]))
                     or actual_start < requested_start
-                    or (start_is_future and actual_start != requested_start)
+                    or (
+                        actual_start != requested_start
+                        and (
+                            start_is_future
+                            or actual.status.state != "active"
+                            or actual_start > datetime.fromisoformat(actual.updatedAt)
+                        )
+                    )
                     or actual_start >= datetime.fromisoformat(actual.endsAt)
                     or actual.status.state == "expired"
                 ):

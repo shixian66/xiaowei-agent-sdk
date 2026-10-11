@@ -43,6 +43,9 @@ def test_official_create_expire_and_auth_zero_writes(alertmanager_binary: Path, 
         assert datetime.fromisoformat(
             actual["startsAt"].replace("Z", "+00:00")
         ) > current - timedelta(seconds=1)
+        assert datetime.fromisoformat(
+            actual["startsAt"].replace("Z", "+00:00")
+        ) <= datetime.fromisoformat(actual["updatedAt"].replace("Z", "+00:00"))
         for auth in (None, ("reader", "wrong")):
             assert (
                 httpx.delete(f"{url}/api/v2/silence/{sid}", auth=auth, trust_env=False).status_code
