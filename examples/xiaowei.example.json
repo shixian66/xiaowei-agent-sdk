@@ -35,7 +35,7 @@
     ]
   },
   "session_limits": {
-    "max_history_turns": 20,
+    "max_history_turns": 100,
     "max_history_bytes": 400000,
     "retention_seconds": 604800
   },
