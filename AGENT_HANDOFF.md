@@ -37,7 +37,7 @@
 
 ## 3. 当前计划与下一项工作
 
-**当前下一步：** 本轮实施 [七项修复计划 R12](docs/superpowers/plans/2026-10-10-production-dialogue-repairs.md#r12统一业务卡片与受限格式第-12-项同一展示根因)，精确基线见快照。完成离线检查后按本次授权推送并开 PR，交用户指定审查方；合并和部署仍须另获授权。R4 的 100 轮容量切片及附件/报告尚未实施，不因本轮“继续”一并推进。
+**当前下一步：** 本轮已完成本地实现及离线检查的 [七项修复计划 R12](docs/superpowers/plans/2026-10-10-production-dialogue-repairs.md#r12统一业务卡片与受限格式第-12-项同一展示根因)，精确基线见快照。按本次授权推送并开 PR，交用户指定审查方；合并和部署仍须另获授权。R4 的 100 轮容量切片及附件/报告尚未实施，不因本轮“继续”一并推进。
 
 **R12 当前实现与证据（2026-10-11）：** 复用已验证的 `send_delivery` / `build_feishu_message`、静态 `OutboundCard` 与二分容量搜索；Gateway 和 CLI 发送路径未另写。只有 `feishu_text` 中的模型业务原文及模型分析进入格式器；固定 `monitoring_notice` 先按可信字段分离；固定回执、来源、限制、引用、获准事实、SQL/DDL、原文 JSON 始终纯文字。本片不改变模型/工具契约，未调用真实模型，不属于 R7/R3 豁免的扩展。生效展示与回退说明只在 ARCHITECTURE §7 / OPERATIONS 维护。
 
@@ -46,7 +46,7 @@
 - 格式边界：markdown-it-py 4.2.0 是显式生产依赖，使用公开 token API 的零预设，只开启允许规则。数据库原值和 SQL/DDL 不解析；模型说明含代码块、行内代码或反斜杠时整段原文退纯文字，格式符一并保留、不拼接围栏。链接、媒体、HTML/@、伪表格、双重实体、任意长度代码围栏、未闭合/复杂嵌套与控制符反例验证发出的组件与字面文字。真实客户端是否显示样式、只解码一次实体、标签不解析及复制保真仍未验证。
 - 性能/容量：原有五事实×400行的对数卡片构造回归保留；解析只在容量选择之后，每条选中说明最多一次、输入至多 3500 字符、嵌套 16 与 token 量有界。实体膨胀放不下时退同一张纯文字卡片，保留原事实优先、完整 SQL/未展示说明、整行裁剪、两种预算及截断标记。
 - 回归发现并修复：初版把无事实固定回执也卡片化，既有失败/繁忙/控制符回执用例发现 **64 failed**；已按可信 `feishu_text` 字段区分业务与固定回执，保留既有断言。两项无事实业务容器断言按已批准 C1 改为卡片，换行、控制符、容量、单消息与未核实标签保护未删除。一次测试命令引用不存在的文件未执行用例，已改用实际 R3 文件；一次 uv 默认缓存权限错误改用仓库外缓存后锁检查通过。
-- 新上下文分支复查发现并闭合：解析器规范化行内代码的换行/空格、吞掉反斜杠，以及无事实监控固定说明误入格式器；先补 **9 failed**，随后原文整段回退、固定说明独立展示，定向 **108 passed**，另补两项必要说明容量边界。首轮完整离线回归为 **1 failed, 2987 passed, 60 deselected**（762.34s）；唯一失败是既有诊断测试仍要求首行没有卡片标题，按 C1 更新为标题+澄清类型，零 SQL、零 Evidence、无分析断言原样保留。正在修复后重跑完整套件；最终结果见表。复查是实现方发起，不能代替用户指定独立审查。
+- 新上下文分支复查发现并闭合：解析器规范化行内代码的换行/空格、吞掉反斜杠，以及无事实监控固定说明误入格式器；先补 **9 failed**，随后原文整段回退、固定说明独立展示，定向 **108 passed**，另补两项必要说明容量边界。首轮完整离线回归为 **1 failed, 2987 passed, 60 deselected**（762.34s）；唯一失败是既有诊断测试仍要求首行没有卡片标题，按 C1 更新为标题+澄清类型，零 SQL、零 Evidence、无分析断言原样保留。修复后完整套件已通过；最终结果见表。复查是实现方发起，不能代替用户指定独立审查。
 - 隔离变异：在 `/private/tmp` 源码副本分别去掉字面转义、恢复业务文本容器、把解析移回容量搜索、忽略 Markdown 字符预算；连同去掉代码原文保护、反斜杠保护和固定说明展示，共七项变异，对应回归分别 **7 / 2 / 1 / 1 / 5 / 2 / 4 项失败**；确认导入副本，候选未受修改。容量搜索变异曾匹配两个签名，脚本中收窄到事实构造器后验证完成，没有修改产品代码。
 
 | R12 实际执行命令（本机 PostgreSQL 55432，其他端点仅 loopback） | 结果 |
@@ -55,7 +55,9 @@
 | `.venv/bin/python -m pytest tests/sdk_core/test_feishu_format.py tests/sdk_core/test_feishu_render.py tests/sdk_core/test_feishu.py tests/sdk_core/test_channel_service.py tests/sdk_core/test_web.py tests/sdk_core/test_evidence.py tests/sdk_core/test_runtime.py tests/sdk_core/test_cli.py tests/sdk_core/test_r3_render.py tests/sdk_core/test_r3_entrypoints.py -q -W error --tb=short` | 658 passed，149.50s（修复前中间候选；新候选最终证据为完整套件） |
 | `.venv/bin/ruff check --no-cache src/xiaowei tests/sdk_core tests/p1b`；五个改动 Python 文件 `ruff format --check`；`.venv/bin/mypy --cache-dir=/private/tmp/r12-mypy src`；`UV_CACHE_DIR=/private/tmp/r12-uv-cache uv lock --check --offline`；`git diff --check` | 全部通过；129 源文件、92 锁定包 |
 | `.venv/bin/python -m pytest tests/security/test_docs_command_consistency.py tests/contract/test_doc_fact_binding.py -q -W error --tb=short` | 5 passed，0.10s |
-| `.venv/bin/python -m pytest tests/sdk_core tests/p1b -q -W error --tb=short`（下文相同本机监控替身环境） | 正在运行；最终结果更新后才作为交付证据 |
+| `.venv/bin/python -m pytest tests/sdk_core tests/p1b -q -W error --tb=short`（下文相同本机监控替身环境） | **2999 passed, 60 deselected**，758.73s（12:38）；浏览器/真实 StarRocks opt-in 按既有规则未选入，无跳过、无警告 |
+
+最终产品验证及实现方发起的新上下文复查均对应 `1f9784340419aa543b6e01ff1e9aa9109a3628f2`；复查确认代码原值、反斜杠与固定监控说明三项闭合，未发现新增阻断，另作五个原值诊断及 200/3500 字符容量检查。其后只补本段最终证据；没有再次改产品代码。最终 PR head 由 Git/PR 获取，不把该复查写成用户指定独立审查。完整运行日志 `/private/tmp/r12-sdk-p1b-reviewed.log`。
 
 **R12 未覆盖：** 真实 Lark/飞书 >=7.20 桌面及移动端实际显示、字面标签不解析、代码复制与送达；真实模型、公司 StarRocks、浏览器及部署。本片没有改 Web 代码，未重复浏览器验收。用户指定独立审查未执行；本地新上下文复查不能代替。回退展示不改数据库/schema；整镜像若跨 R3 仍须遵守其向前兼容边界。
 
