@@ -37,7 +37,7 @@
 
 ## 3. 当前计划与下一项工作
 
-**当前下一步：** 完成 PR #79 的 B1 候选全套检查，按新精确 SHA 复审；明确拒绝保持已有调查证据，创建400按用户批准记未执行，不新增 RE2。PR 保持草稿，不合并、不部署。后续为 D7，真实模型/公司 Alertmanager/真实群写门槛开放，不继承 R3、U1 或 W5 的例外。PR #78 与 PR #77 已同步，本片不重做其功能。
+**当前下一步：** PR #79 的 B1 候选已完成本机完整检查，提交推送同一草稿后按新精确 SHA 独立复审；明确拒绝保持已有证据，仅创建400按用户批准记未执行，不新增 RE2。不合并、不部署。后续为 D7，真实模型/公司 Alertmanager/真实群写门槛开放，不继承 R3、U1 或 W5 的例外；PR #78 与 PR #77 已同步，本片不重做其功能。
 
 **R3 当前实现与证据（2026-10-11）：** 基线为上述 main，具体提交从工作分支取得。只改变模型选择的事实显示方式和两个入口的渲染，详细契约唯一维护在 [ARCHITECTURE §7](ARCHITECTURE.md#7-双入口的最小实现)。SDK 的严格 AgentAnswer 增加闭集 fact_views；省略即 full。已有可见历史行数短问可 brief，计数来自当前接收渠道的获准 row_count 与实际行数；本轮新事实不能 brief，待批准动作保持完整。不支持或不一致的摘要回 full，不让模型提供可信数值。原事实、引用、权限/依赖、历史和重发复核不变，提示词减少 DDL/字段/列表复述，未增加过滤器、分类器或另一套循环。
 
@@ -61,19 +61,23 @@
 **R3 未覆盖与兼容：** 获准真实模型环境仍不可用（公司 API IP 限制），没有调用真实模型、Lark/飞书或公司 StarRocks。脚本只证明调用链与保护，不能证明模型减少复述或自主选对显示方式。用户 2026-10-11 批准免做 R3 真实模型旧/新对照，真实模型未验证，上线后先在私聊或测试群观察；样例脚本保留，其他切片不继承此例外。R3 仍须 CI 通过、独立复审无阻断并另获合并授权，观察须另获部署授权。真实 Lark 客户端与收发、部署/UAT 未验收。本片未改数据库 v7、模板轮数/字节/期限；不是会话摘要或裁剪。新版本能读取旧回答默认 full，旧镜像会按 extra=forbid 拒收带 fact_views 的新保存回答；回退操作见 [OPERATIONS](deploy/OPERATIONS.md#历史简短追问与-r3-兼容)。飞书摘要原文仍占单消息预算，放不下时明确省略，不自动查询或多发一条，已 sent 不由 requests resend 补全。
 
 
-**S6 当前实现。** 正式 `serve` 在原 AlertmanagerAdapter 上装配两项 ActionBinding；`write_actions` 默认空、启用须有 Basic 安全引用。Runner 仅能在获准群提出/查状态，实际写从工具集合和用途集合排除。参数全部显式，有限到期支持多年；过去开始时间由上游移至执行时刻，未来开始和结束时间须保持批准值。创建省略 id/annotations，不能走更新分支；取消仅使已知 UUID 提前到期并保留记录，恢复须另次创建审批。具体接口/失败只维护在[监控计划 §3.5](docs/superpowers/plans/2026-10-09-monitoring-mcp.md#35-s6-当前切片基线-b0174d273bce89b49bfbba82fedf86bb6a14c66b)，配置与退回见[运维说明](deploy/OPERATIONS.md#选配创建和取消静默)。
+**S6 当前实现。** 正式 `serve` 在原 AlertmanagerAdapter 上装配两项 ActionBinding；`write_actions` 默认空、启用须有 Basic 安全引用。Runner 仅能在获准群提出/查状态，实际写不进入 Runner。参数全部显式，有限到期支持多年；创建省略 id/annotations，不开放更新；取消只使已知 UUID 提前到期并保留记录，恢复须另次创建审批。接口与失败契约见[监控计划 §3.5](docs/superpowers/plans/2026-10-09-monitoring-mcp.md#35-s6-当前切片基线-b0174d273bce89b49bfbba82fedf86bb6a14c66b)，配置与退回见[运维说明](deploy/OPERATIONS.md#选配创建和取消静默)。
 
-**B1 修复候选（待完整验证与独立复审）。** 已在此分支同步 main `bb50e045bd5caf82f197faee7a966937fad690c5`。四项官方群回归在修复前均失败；到期、ID不存在及过滤400现按专用提出拒绝交回模型，无 Action/成功提案证据，已有证据与配对历史仍可交付。未分类错误、撤权及实际写继续中止。用户明确不批准新增 RE2，改以上游为准：正则由提出阶段过滤400判定；仅创建POST400确定未执行，其他写后失败仍未知。该契约调整已落实在 Adapter/Action 终态和固定群回执，工具提示空串要求，不拒绝纯否定。新官方回归先1 failed/7 passed（400仍unknown），修复后16 passed/42 deselected；七个受影响文件275 passed、1 deselected（133.37s），11个隔离变异均被目标断言或预期异常发现；完整 SDK/P1B 在进行中。此候选将提交供实现方复查，不合并、不部署。
+**B1 修复候选。** 已同步 main `bb50e045bd5caf82f197faee7a966937fad690c5`，源码修复为 `7d49bebf6b2f3749fabb6ff5c864d0d8d4e868ce`。到期、ID不存在及过滤400只在提出阶段返回具体拒绝：无 Action/成功提案 Evidence，保留已占预算、已有证据与配对历史；读取后仍复核权限，未分类错误、撤权及实际批准复核保持中止。用户不批准新增 RE2，改以上游为准：正则由过滤400判定；仅创建 POST400确定未执行，Action 落为 rejected，群回执提示检查匹配器后重新提出。DELETE/写后回读400、其他非200与超时仍未知、不重放；不额外拒绝纯否定。工具说明至少一个匹配器不匹配空串，架构、计划和运维已同步这项批准的契约，不新增依赖/迁移。
 
-**较早的部分增量证据（不代替最终批次）。** `test_alertmanager_s6.py`、官方协议、Action装配、A4 与治理五文件为214 passed、3 deselected（108.20s，明确排除两项待授权用例）；随后加强已有证据/拒绝历史配对与未来开始保护的四项为4 passed、47 deselected（4.25s）。六个仓库外变异分别删除到期/404拒绝、只改变 `start_is_future`、放开实际写恢复、跳过准备后权限复核、忽略已完成拒绝的最终计数，均被行为断言检出。全套旧记录与 CI 仅覆盖 `8bde2a4`，不证明此未提交候选通过；当前 Ruff 与26源文件类型检查通过；受影响的5项文档检查及 git diff --check 通过。复现日志 `/private/tmp/xw-s6-b1-{red,object-green,preparation-green,independent-green,session-green}.log`；变异脚本 `/private/tmp/xw-s6-b1-mutations.py` 与结果 `/private/tmp/xw-s6-b1-mutations/summary.txt`。
+**正式入口证据。** 锁版官方 Alertmanager v0.34.1（darwin-arm64 二进制 SHA-256 `c09fe5d0e479e44a39e8501e5ab6b6a16b19370bf51ce8433b92406ba6368cac`）、真 SDK/PostgreSQL、正式 `runtime.serve` 与群事件/模型替身完成提出、非名单拒绝、批准、回读、另次取消和状态追问。无/错 Basic 零写，1/3年、active/pending 提前结束及记录保留、Web 强行提出/写和无权限零 I/O 均有回归。B1 官方群用例证明已有版本 Evidence 在明确提出拒绝后仍可交付并回放；`instance=~".*"` 批准后官方400、零静默、回执“未执行”；纯否定 `alertname!="Watchdog"` 成功。官方已成功写入后由测试转发层返回503或延迟响应，应用记未知、零成功写 Evidence、不重放；这不证明官方自身产生5xx。未来 starts_at 以发 POST 前的本机时刻区分，未来值必须保持批准值；过去值调整须 active 且不晚于同源 updatedAt，远端钟差可能导致未知。
 
-**已取得证据。** 锁版官方 Alertmanager v0.34.1（darwin-arm64 二进制 SHA-256 `c09fe5d0e479e44a39e8501e5ab6b6a16b19370bf51ce8433b92406ba6368cac`）在临时 loopback 实例验证无/错 Basic 零写、1/3年、POST 带 ID 更新、active/pending 提前结束和记录保留。正式 `runtime.serve` + 真 SDK/PostgreSQL/群平台替身完成提出→非名单拒绝→批准→真实 API 回读→另次取消→状态追问；告警的 silencedBy 由静默 UUID 变为空。Web 强行提出/写、无源/工具权限为零 I/O；写后超时/回读异常记未知、不重放，随后真实 Web HTTP 的 StarRocks 驱动替身读取继续可用。
+| 本候选实际验证 | 结果 |
+| --- | --- |
+| 新批准的创建400契约红绿，正式官方群入口 | 修复前1 failed、7 passed（unknown != rejected）；修复后16 passed、42 deselected，14.88s |
+| S6、官方协议、Action装配、群审批、通道、A4、治理七文件 | 275 passed、1 deselected，133.37s |
+| `uv run --frozen pytest tests/sdk_core tests/p1b -q -W error --tb=short`，显式配置五项官方/社区测试路径 | 3015 passed、60 deselected，804.11s（13分24秒） |
+| 全仓 Ruff、103文件格式、mypy128源文件、92包锁文件、5项现有文档检查、离线 wheel 与 `git diff --check` | 通过；无依赖/锁文件变化，wheel不含旧包/tests/docs |
+| 11项仓库外隔离变异 | 全部被目标断言或预期异常发现，均确认导入对应副本；行为代码与候选一致，两处后来变化仅为文档字符串和提示文字 |
 
-**红绿与反例。** 初始配置/正式入口缺少 write_actions；工具误入用途集合先失败再排除。未来 startsAt 被改晚却判成功的用例先为1 failed/5 passed，修后拒收。实现方新鲜全分支复查又确认过去 startsAt 被调至未来/pending 仍会误判成功，三项正式群用例先失败；按同源 updatedAt 与 active 校验后为未知、无成功 Evidence、不重放，官方过去时间调整对照保持通过，不新增钟差配置。期限失效反馈错用了 Prometheus 31天提示，模型实收断言先失败，改为闭集 silence_end 后通过，不新增静默时长上限。八项仓库外独立变异移除未来开始、过去开始上界/active、取消状态、提出前检查、批准材料复核、Basic 配置和用途排除，均被目标断言检出；副本导入失误不算行为证据。
+复现配置继续使用下方 SDK/P1B 环境；七文件命令及完整结果记录于 [PR #79](https://github.com/shixian66/xiaowei-agent-sdk/pull/79)。日志 `/private/tmp/xw-s6-b1-upstream-{red,green}.log`、`/private/tmp/xw-s6-b1-target-final.log`、`/private/tmp/xw-s6-b1-sdk-p1b-final.log`；变异脚本 `/private/tmp/xw-s6-b1-upstream-mutations.py` 与 `/private/tmp/xw-s6-b1-upstream-mutations/summary.txt`。变异覆盖到期/404/过滤400、创建400、纯否定、5xx/超时未知、未来开始、仅提出可恢复、准备后复核权限和最终计数。先前 `8bde2a4` 的 CI 与离线全套只证明旧版，不能代替本候选；CI 未配置官方二进制，官方路径以本机对应日志为据。
 
-**原 `8bde2a4` 离线检查。** 修复后 `SDK_TEST_POSTGRES_URL` 指向本机隔离库，显式配置官方及社区测试程序，执行 `uv run --frozen pytest tests/sdk_core tests/p1b -q -W error --tb=short` 为2957 passed、59 deselected（766.43s）。S6/官方协议/Action装配/A4 四文件118 passed、1 deselected（88.88s）。全仓 Ruff、97文件格式、mypy128个源码、92包锁、5项文档检查与离线 wheel 通过，wheel 含现有007迁移和新能力模块、未含 tests/docs；82个受影响文档本地 Markdown 目标存在。`1d4e96c` 的2954 passed仅是修复前证据，不代替当前批次；更早主动中断的581通过不计完整证据。日志 `/private/tmp/xw-s6-{baseline,protocol,past-start-red,past-start-green,sdk-p1b-1d4e96c,sdk-p1b-final}.log`，变异复现 `/private/tmp/xw-s6-mutations.py` 与 `/private/tmp/xw-s6-mutations/*.log`。实现方全分支只读复查报告 `/private/tmp/xw-s6-branch-review.md` 确认回读反例修复，未发现其他可复现阻断；不替代用户独立审查。全部只操作隔离测试库与合成数据，旧包全量由CI另列，不混称本地新产品回归。
-
-**未覆盖与恢复。** 脚本模型不能证明自主选工具、必要澄清或静默期限质量；真实 Agent 任务样例、公司版本/Basic/容量/HA 与通知、真实飞书投递审批、部署/备份恢复均未验收。API 没有原子版本条件，写前回读不能消除最后一段竞争/HA窗口，生产启用前须核对并明确接受该风险。配置默认只读；停止旧进程后移除写动作及其提出/执行授权可退回只读，退回 S6 前镜像还须移除新字段。S6 不改 v7 表；未知 Action 不自动补跑。
+**审查与未覆盖。** 实现方新上下文只读复查覆盖源码 `7d49beb`，未发现可复现阻断；只读报告不能代替用户指定的独立复审，PR 保持草稿。脚本模型不能证明自主选工具、必要澄清或匹配/期限质量；真实 Agent、公司版本/Basic/容量/HA与通知、真实飞书审批、部署/备份恢复均未验收，其他切片的真实模型例外不转作 S6 退出条件。POST400与终态保存取消的组合窗口本次仅核对源码及已有 W5 取消/存储失败回归，未新增该组合实测。API 没有原子版本条件，写前回读不能消除最后一段竞争/HA窗口，生产启用前须核对并明确接受该风险。停旧进程后移除写动作及提出/执行授权可退回只读；退回 S6 前镜像还须移除新字段。S6 不改 v7 表，未知 Action 不自动补跑。
 
 **R7 当前本地实现与证据：** 产品基线 `2b541a30bb39d88d160e7f6f69de1c81fdea74d8`；计划 v4 / `4484e5cb183047c5b64d9523dcc5afc71c28188a`，用户决定文档提交 `e3a594637ce51408696a7fb08d2e62832e8db4a0`。目标选择保持单 Agent，B1 两条规则仅落实在实际发送的指令与工具说明；不新增 C7 硬目标确认。C8 按轮次/目标同步预占唯一再试、在途排他、成功不复位；R7 未改变权限、普通调用预算、SQLGuard 与连接池，也未新增应用表；同步主线 W5 后当前 schema 为 v7。
 
