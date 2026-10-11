@@ -35,7 +35,7 @@ from sqlalchemy import text
 from sqlalchemy.engine import URL
 from tests.p1b.test_starrocks_adapter import TARGET as SR
 from tests.p1b.test_starrocks_adapter import Result, driver, schema_results
-from tests.sdk_core.postgres_harness import isolated_database
+from tests.sdk_core.postgres_harness import WAITING_ON_LOCK, isolated_database
 from tests.sdk_core.synthetic_tools import Clock
 from tests.sdk_core.test_app import (
     SEARCH_ALL,
@@ -1010,10 +1010,6 @@ INSTANCE_LOCK_PARAMETERS = {
     "classid": _INSTANCE_LOCK_KEY >> 32,
     "objid": _INSTANCE_LOCK_KEY & 0xFFFF_FFFF,
 }
-WAITING_ON_LOCK = (
-    "SELECT count(*) FROM pg_stat_activity WHERE wait_event_type = 'Lock'"
-    " AND datname = current_database()"
-)
 
 
 async def waiting_on_locks(env: Env, count: int, timeout: float = 10) -> bool:

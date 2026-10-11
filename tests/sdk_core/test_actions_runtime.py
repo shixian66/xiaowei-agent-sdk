@@ -36,7 +36,7 @@ from xiaowei.starrocks_tools import QUERY_TOOLS
 pytestmark = pytest.mark.loopback
 
 
-@pytest.mark.parametrize("interruption", [None, "read", "write", "feedback"])
+@pytest.mark.parametrize("interruption", [None, "preclaim", "read", "write", "feedback"])
 async def test_formal_serve_proposes_approves_and_refuses_non_approver(
     runtime_env: Env,
     monkeypatch: pytest.MonkeyPatch,
@@ -75,9 +75,12 @@ async def test_formal_serve_proposes_approves_and_refuses_non_approver(
             ),
         )
 
-    def action_service(governance: GovernedTools, *args: Any, **kwargs: Any) -> ActionService:
+    def action_service(
+        governance: GovernedTools, action_store: Any, *args: Any, **kwargs: Any
+    ) -> ActionService:
         service = ActionService(
             governance,
+            action_store,
             *args,
             bindings=[
                 ActionBinding(
@@ -86,7 +89,18 @@ async def test_formal_serve_proposes_approves_and_refuses_non_approver(
             ],
             **kwargs,
         )
-        if interruption == "feedback":
+        if interruption == "preclaim":
+            get_action, paused = action_store.get_action, False
+
+            async def pause_once(action_id, identity):
+                nonlocal paused
+                if identity.subject_id == B and not paused:
+                    paused = True
+                    await asyncio.Event().wait()
+                return await get_action(action_id, identity)
+
+            monkeypatch.setattr(action_store, "get_action", pause_once)
+        elif interruption == "feedback":
             status = service.status
 
             async def slow_status(ctx, request):
@@ -153,12 +167,13 @@ async def test_formal_serve_proposes_approves_and_refuses_non_approver(
         await until(lambda: len(channel.sends) == 3)
         await gateways[0].idle()
         assert [c.arguments for c in adapter.calls] == (
-            [] if interruption == "read" else [{"value": "after"}]
+            [] if interruption in {"preclaim", "read"} else [{"value": "after"}]
         )
         assert (
             await env.scalar("SELECT state FROM xiaowei_action")
             == {
                 None: "succeeded",
+                "preclaim": "pending",
                 "read": "rejected",
                 "write": "unknown",
                 "feedback": "succeeded",
@@ -175,6 +190,7 @@ async def test_formal_serve_proposes_approves_and_refuses_non_approver(
                     "SELECT failure_code FROM xiaowei_request WHERE reply_message_id='om_ok'"
                 )
                 == {
+                    "preclaim": "action_not_approvable",
                     "read": "action_rejected",
                     "write": "action_unknown",
                     "feedback": "action_feedback_failed",

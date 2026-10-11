@@ -18,7 +18,7 @@ from pydantic import SecretStr
 from sqlalchemy import text
 from sqlalchemy.engine import URL
 from sqlalchemy.ext.asyncio import AsyncEngine
-from tests.sdk_core.postgres_harness import isolated_database
+from tests.sdk_core.postgres_harness import SLEEPING_IN_DATABASE, WAITING_ON_LOCK, isolated_database
 from tests.sdk_core.synthetic_tools import Clock, ready_engine, secret
 
 from xiaowei.channel_store import (
@@ -204,18 +204,19 @@ class Env:
     async def cancel_while_sleeping(self, operation: Awaitable[object]) -> None:
         """运行操作，待其写入在数据库内等待时取消；取消必须原样传播。"""
         task = asyncio.ensure_future(operation)
-        async with self.engine.connect() as conn:
-            for _ in range(200):
-                sleeping = await conn.scalar(
-                    text("SELECT count(*) FROM pg_stat_activity WHERE wait_event = 'PgSleep'")
-                )
-                if sleeping or task.done():
-                    break
-                await asyncio.sleep(0.02)
-        assert not task.done(), "写入没有进入等待"
-        task.cancel()
-        with pytest.raises(asyncio.CancelledError):
-            await task
+        try:
+            async with self.engine.connect() as conn:
+                for _ in range(200):
+                    sleeping = await conn.scalar(text(SLEEPING_IN_DATABASE))
+                    if sleeping or task.done():
+                        break
+                    await conn.commit()
+                    await asyncio.sleep(0.02)
+            assert sleeping and not task.done(), "写入没有进入等待"
+        finally:
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
 
 
 @asynccontextmanager
@@ -609,18 +610,13 @@ TERMINATE_INSTANCE_LOCK = text(
     "SELECT count(pg_terminate_backend(pid)) FROM pg_stat_activity"
     " WHERE pid = :pid AND datname = current_database()"
 )
-WAITING_ON_LOCK = text(
-    "SELECT count(*) FROM pg_stat_activity"
-    " WHERE wait_event_type = 'Lock' AND pid <> pg_backend_pid()"
-    " AND datname = current_database()"
-)
 
 
 async def waiting_on_locks(engine: AsyncEngine, count: int) -> bool:
     """在期限内至少有 ``count`` 个后端在数据库锁上等待。"""
     async with engine.connect() as conn:
         for _ in range(100):
-            if await conn.scalar(WAITING_ON_LOCK) >= count:
+            if await conn.scalar(text(WAITING_ON_LOCK)) >= count:
                 return True
             await conn.commit()
             await asyncio.sleep(0.02)
