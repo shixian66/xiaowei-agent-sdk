@@ -1,4 +1,4 @@
-"""外部 Alertmanager API v2 只读 Adapter：固定 GET，经现有治理后才执行。
+"""外部 Alertmanager API v2 Adapter：固定读取与群批准的创建/提前结束静默。
 
 API 返回完整的过滤结果；分页在有界接收后进行，不能用 limit 限制上游负荷。
 对完整响应做白名单投影，不保存或向模型、Session、渠道暴露通知目的地、
@@ -8,6 +8,7 @@ API 返回完整的过滤结果；分页在有界接收后进行，不能用 lim
 # ruff: noqa: N815 - 事实字段保留官方 API v2 的名称，避免混淆抑制类别。
 
 import asyncio
+import json
 from collections.abc import Callable, Mapping
 from datetime import UTC, datetime
 from typing import Annotated, Any, Literal, cast
@@ -26,19 +27,25 @@ from pydantic import (
     model_validator,
 )
 
+from xiaowei.actions import ActionBinding, ActionPlan, ActionWriteRejectedError, proposal_policy
 from xiaowei.config import is_secret_ref, resolve_secret_ref
+from xiaowei.evidence import arguments_digest
 from xiaowei.governance import (
     Execute,
     MonitoringReadError,
     Prechecked,
     Projection,
+    ProposalRejectedError,
+    ToolCatalog,
     ToolPolicy,
+    ToolRejectedError,
 )
 from xiaowei.models import AUDIENCES, Audience, ToolContract, ToolObservation, ToolRequest
 
 ReadTool = Literal[
     "get_alerts", "get_alert_groups", "get_silences", "get_silence", "get_receivers", "get_status"
 ]
+WriteAction = Literal["create_silence", "cancel_silence"]
 
 
 class AlertmanagerConfig(BaseModel):
@@ -52,6 +59,7 @@ class AlertmanagerConfig(BaseModel):
     timeout_seconds: float = Field(gt=0, allow_inf_nan=False)
     max_response_bytes: int = Field(gt=0)
     tools: tuple[ReadTool, ...] = Field(min_length=1)
+    write_actions: tuple[WriteAction, ...] = ()
 
     @field_validator("server_id")
     @classmethod
@@ -86,10 +94,22 @@ class AlertmanagerConfig(BaseModel):
             raise ValueError("Basic 凭据必须使用 env:NAME 安全引用")
         if len(set(self.tools)) != len(self.tools):
             raise ValueError("Alertmanager tools 不能重复")
+        if len(set(self.write_actions)) != len(self.write_actions):
+            raise ValueError("Alertmanager write_actions 不能重复")
+        if self.write_actions and self.username_ref is None:
+            raise ValueError("Alertmanager 写动作必须配置 Basic 安全引用")
         return self
 
     def tool_id(self, name: str) -> str:
         return f"{self.server_id}/{name}"
+
+    @property
+    def action_tools(self) -> frozenset[str]:
+        return frozenset(
+            self.tool_id(name)
+            for action in self.write_actions
+            for name in (action, f"propose_{action}")
+        )
 
 
 class _Model(BaseModel):
@@ -150,6 +170,43 @@ def _timestamp(value: str) -> str:
 
 
 _Time = Annotated[str, AfterValidator(_timestamp)]
+
+
+def _write_time(value: str) -> str:
+    instant = datetime.fromisoformat(_timestamp(value))
+    return instant.replace(microsecond=instant.microsecond // 1000 * 1000).isoformat()
+
+
+class _WriteMatcher(_Args):
+    name: str = Field(min_length=1, max_length=256)
+    value: str = Field(max_length=8192)
+    isRegex: bool
+    isEqual: bool
+
+
+class _CreateSilenceArgs(_Args):
+    matchers: list[_WriteMatcher] = Field(min_length=1, max_length=32)
+    starts_at: Annotated[str, AfterValidator(_write_time)]
+    ends_at: Annotated[str, AfterValidator(_write_time)]
+    comment: str = Field(min_length=1, max_length=4000)
+
+    @model_validator(mode="after")
+    def _ordered(self) -> "_CreateSilenceArgs":
+        if datetime.fromisoformat(self.starts_at) >= datetime.fromisoformat(self.ends_at):
+            raise ValueError("结束时间必须晚于开始时间")
+        return self
+
+
+class _RequestStatusError(ValueError):
+    """只携带 HTTP 状态；上游正文不进入错误或模型反馈。"""
+
+    def __init__(self, status_code: int) -> None:
+        super().__init__("Alertmanager 请求被拒绝")
+        self.status_code = status_code
+
+
+class _ResponseLimitError(ValueError):
+    """只供当前匹配影响准备识别容量不足；普通读取/写回读仍失败关闭。"""
 
 
 class _Receiver(_Model):
@@ -362,6 +419,49 @@ def alertmanager_catalog(
                     ),
                 )
             )
+        for action_name in source.write_actions:
+            args = _CreateSilenceArgs if action_name == "create_silence" else _SilenceArgs
+            proposal_id = f"alertmanager.propose_{action_name}"
+            write_id = f"alertmanager.{action_name}"
+            policies[proposal_id] = proposal_policy(
+                proposal_id, args, min(projection_bytes.values())
+            )
+            policies[write_id] = ToolPolicy(
+                write_id,
+                args,
+                {
+                    a: Projection(tuple(_Silence.model_fields), projection_bytes[a])
+                    for a in AUDIENCES
+                },
+                required=tuple(_Silence.model_fields),
+                effect="write",
+                group_only=True,
+                fact_note="批准后实际回读的静默快照；不证明后续通知发送。",
+            )
+            for tool, policy in (
+                (f"propose_{action_name}", proposal_id),
+                (action_name, write_id),
+            ):
+                contracts.append(
+                    ToolContract(
+                        tool_id=source.tool_id(tool),
+                        target_id=source.server_id,
+                        policy_id=policy,
+                        input_schema=args.model_json_schema(),
+                        description=(
+                            "仅在本群提出创建静默，不执行。"
+                            "matchers 每项显式 name/value/isRegex/isEqual，"
+                            "正则整串匹配；至少一个匹配器不匹配空串，由上游校验。纯否定匹配器按上游规则处理。"
+                            "starts_at/ends_at 为含时区绝对时间，允许多年但必须到期。"
+                            "过去 starts_at 会由上游调整到批准执行时刻，不表示从过去已抑制告警。"
+                            "准确范围/期限不明确时澄清，不扩大范围猜测。comment 写明用途。"
+                            if action_name == "create_silence"
+                            else "仅在本群提出按 UUID 提前结束静默，不执行也不移除记录。"
+                            "可直接给已知 silence_id，无须固定先查列表；"
+                            "显示当前对象与影响后等本次批准。"
+                        ),
+                    )
+                )
     return tuple(contracts), tuple(policies.values())
 
 
@@ -409,11 +509,247 @@ class AlertmanagerAdapter:
             raise ValueError("Alertmanager 执行绑定不符")
         return request
 
-    async def _read(self, request: ToolRequest) -> ToolObservation:
-        name = request.tool_id.partition("/")[2]
+    def action_bindings(self, catalog: ToolCatalog) -> tuple[ActionBinding, ...]:
+        bindings = []
+        for name in self.config.write_actions:
+            proposal = catalog.contract(
+                self.config.tool_id(f"propose_{name}"), self.config.server_id
+            )
+            write = catalog.contract(self.config.tool_id(name), self.config.server_id)
+            if proposal is None or write is None:
+                raise ValueError("Alertmanager 动作未登记")
+            bindings.append(
+                ActionBinding(
+                    proposal,
+                    write,
+                    self._plan,
+                    Prechecked(self._prepare_write, self._write),
+                    target_binding=arguments_digest(
+                        {"config": self.config.model_dump(mode="json"), "semantics": "silence-v1"}
+                    ),
+                    precheck=self._prepare_write,
+                )
+            )
+        return tuple(bindings)
+
+    def _prepare_write(self, request: ToolRequest) -> ToolRequest:
+        name = request.tool_id.partition("/")[2].removeprefix("propose_")
+        if request.target_id != self.config.server_id or name not in self.config.write_actions:
+            raise ToolRejectedError("动作不可用", code="not_allowed")
+        if name == "create_silence":
+            if datetime.fromisoformat(str(request.arguments["ends_at"])) <= self._clock():
+                raise ToolRejectedError("静默结束时间已到", hint="silence_end")
+        return request
+
+    async def _impact(self, matchers: list[dict[str, Any]]) -> str:
+        filters = [
+            (
+                "filter",
+                json.dumps(m["name"], ensure_ascii=False)
+                + ("=" if m["isEqual"] else "!")
+                + ("~" if m["isRegex"] else "=" if not m["isEqual"] else "")
+                + json.dumps(m["value"], ensure_ascii=False),
+            )
+            for m in matchers
+        ]
+        # 四种告警状态全部纳入当前影响；没有上游分页或长期命中预测。
+        params = [
+            *filters,
+            *((flag, "true") for flag in ("active", "silenced", "inhibited", "unprocessed")),
+        ]
+        try:
+            body = await self._request("GET", "alerts", params=tuple(params))
+        except _RequestStatusError as exc:
+            if exc.status_code != 400:
+                raise
+            raise ProposalRejectedError("告警过滤条件被拒绝", hint="silence_filter") from None
+        except _ResponseLimitError:
+            return (
+                "当前命中数量未知：过滤响应超过接收上限，无法完整计数；"
+                "无可核实样例。未来命中也受此匹配器影响。"
+            )
+        alerts = sorted(
+            _LIST_READERS["get_alerts"].validate_json(body), key=lambda a: a.fingerprint
+        )
+        samples = [
+            {
+                "fingerprint": a.fingerprint,
+                "labels": {
+                    k: v[:128] + ("…" if len(v) > 128 else "")
+                    for k, v in a.labels.items()
+                    if k in {"alertname", "instance", "job"}
+                },
+            }
+            for a in alerts[:5]
+        ]
+        return (
+            f"当前命中 {len(alerts)} 条告警；最多5个标签/指纹样例（长标签省略）："
+            + json.dumps(samples, ensure_ascii=False, sort_keys=True)
+            + "。仅为此次过滤快照，未来命中也受此匹配器影响；静默不证明主机健康或通知发送。"
+        )
+
+    async def _silence(self, sid: str) -> _Silence:
+        silence = _Silence.model_validate_json(await self._request("GET", f"silence/{sid}"))
+        if silence.id != sid:
+            raise ValueError("Alertmanager 静默 ID 不符")
+        return silence
+
+    async def _plan(self, request: ToolRequest) -> ActionPlan:
+        self._prepare_write(request)
+        args = request.arguments
+        if request.tool_id.endswith("create_silence"):
+            impact = await self._impact(cast(list[dict[str, Any]], args["matchers"]))
+            return ActionPlan(
+                parameters=args,
+                revision=arguments_digest({"parameters": args, "impact": impact}),
+                change="新建静默："
+                + json.dumps(args, ensure_ascii=False, sort_keys=True)
+                + "。过去开始时间由服务端归到执行时刻；结束时间保持批准值。",
+                impact=impact,
+                rollback="按执行结果的静默 UUID 另提取消静默并批准；不自动撤销。",
+            )
+        try:
+            current = await self._silence(str(args["silence_id"]))
+        except _RequestStatusError as exc:
+            if exc.status_code != 404:
+                raise
+            raise ProposalRejectedError(
+                "静默未找到", code="object_unavailable", hint="silence_missing"
+            ) from None
+        if current.status.state == "expired":
+            raise ProposalRejectedError(
+                "静默已经到期，未提出取消", code="object_unavailable", hint="silence_expired"
+            )
+        snapshot = current.model_dump(mode="json")
+        impact = await self._impact(snapshot["matchers"])
+        return ActionPlan(
+            parameters=args,
+            revision=arguments_digest({"silence": snapshot, "impact": impact}),
+            change="提前结束并保留静默记录："
+            + json.dumps(snapshot, ensure_ascii=False, sort_keys=True),
+            impact=impact,
+            rollback="取消不可恢复原记录；若需重新静默，按原匹配器/明确到期时间另提创建并批准。",
+        )
+
+    async def _write(self, request: ToolRequest) -> ToolObservation:
+        self._prepare_write(request)
+        args = request.arguments
+        async with asyncio.timeout(self.config.timeout_seconds):
+            if request.tool_id.endswith("/create_silence"):
+                requested_start = datetime.fromisoformat(str(args["starts_at"]))
+                start_is_future = requested_start > self._clock()
+                try:
+                    response = await self._request(
+                        "POST",
+                        "silences",
+                        payload={
+                            "matchers": args["matchers"],
+                            "startsAt": args["starts_at"],
+                            "endsAt": args["ends_at"],
+                            "comment": args["comment"],
+                            "createdBy": "xiaowei",
+                        },
+                    )
+                except _RequestStatusError as exc:
+                    if exc.status_code != 400:
+                        raise
+                    # 锁版 API 的新建分支在400前未写入；只分类此POST，不含回读/取消。
+                    raise ActionWriteRejectedError() from None
+                body = json.loads(response)
+                if (
+                    not isinstance(body, dict)
+                    or set(body) != {"silenceID"}
+                    or not isinstance(body["silenceID"], str)
+                ):
+                    raise ValueError("Alertmanager 创建结果不合约")
+                sid = _uuid(body["silenceID"])
+                actual = await self._silence(sid)
+                actual_start = datetime.fromisoformat(actual.startsAt)
+                if (
+                    sorted(
+                        (m.model_dump() for m in actual.matchers),
+                        key=lambda m: json.dumps(m, sort_keys=True),
+                    )
+                    != sorted(
+                        cast(list[dict[str, Any]], args["matchers"]),
+                        key=lambda m: json.dumps(m, sort_keys=True),
+                    )
+                    or actual.comment != args["comment"]
+                    or datetime.fromisoformat(actual.endsAt)
+                    != datetime.fromisoformat(str(args["ends_at"]))
+                    or actual_start < requested_start
+                    or (
+                        actual_start != requested_start
+                        and (
+                            start_is_future
+                            or actual.status.state != "active"
+                            or actual_start > datetime.fromisoformat(actual.updatedAt)
+                        )
+                    )
+                    or actual_start >= datetime.fromisoformat(actual.endsAt)
+                    or actual.status.state == "expired"
+                ):
+                    raise ValueError("Alertmanager 创建回读不符")
+            else:
+                sid = str(args["silence_id"])
+                await self._request("DELETE", f"silence/{sid}", empty=True)
+                actual = await self._silence(sid)
+                if actual.status.state != "expired":
+                    raise ValueError("Alertmanager 取消回读不符")
+        return ToolObservation(
+            payload=actual.model_dump(mode="json"), captured_at=self._clock(), truncated=False
+        )
+
+    async def _request(
+        self,
+        method: str,
+        path: str,
+        *,
+        params: tuple[tuple[str, str], ...] = (),
+        payload: dict[str, Any] | None = None,
+        empty: bool = False,
+    ) -> bytes:
         client = self._client
         if client is None:
             raise ValueError("Alertmanager 客户端未装配")
+        async with asyncio.timeout(self.config.timeout_seconds):
+            async with client.stream(
+                method,
+                f"{self.config.url}/api/v2/{path}",
+                params=params,
+                json=payload,
+                headers={"Accept": "application/json", "Accept-Encoding": "identity"},
+            ) as response:
+                if response.status_code in {401, 403}:
+                    raise MonitoringReadError("auth")
+                if 500 <= response.status_code <= 599:
+                    raise MonitoringReadError("upstream_5xx")
+                if response.status_code in {400, 404}:
+                    raise _RequestStatusError(response.status_code)
+                if (
+                    response.status_code != 200
+                    or response.headers.get("content-encoding", "identity").lower() != "identity"
+                    or (
+                        not empty
+                        and response.headers.get("content-type", "")
+                        .partition(";")[0]
+                        .strip()
+                        .lower()
+                        != "application/json"
+                    )
+                ):
+                    raise ValueError("Alertmanager 响应不合约")
+                data = bytearray()
+                async for chunk in response.aiter_raw():
+                    if len(data) + len(chunk) > self.config.max_response_bytes:
+                        raise _ResponseLimitError("Alertmanager 响应超限")
+                    data.extend(chunk)
+                if empty and data:
+                    raise ValueError("Alertmanager 取消结果不合约")
+                return bytes(data)
+
+    async def _read(self, request: ToolRequest) -> ToolObservation:
+        name = request.tool_id.partition("/")[2]
         args = request.arguments
         path = _SPECS[name][2]
         if name == "get_silence":
@@ -427,34 +763,9 @@ class AlertmanagerAdapter:
             elif key == "receiver" and value:
                 params.append((key, str(value)))
         try:
-            async with asyncio.timeout(self.config.timeout_seconds):
-                async with client.stream(
-                    "GET",
-                    f"{self.config.url}/api/v2/{path}",
-                    params=tuple(params),
-                    headers={"Accept": "application/json", "Accept-Encoding": "identity"},
-                ) as response:
-                    if response.status_code in {401, 403}:
-                        raise MonitoringReadError("auth")
-                    if 500 <= response.status_code <= 599:
-                        raise MonitoringReadError("upstream_5xx")
-                    if (
-                        response.status_code != 200
-                        or response.headers.get("content-encoding", "identity").lower()
-                        != "identity"
-                        or response.headers.get("content-type", "")
-                        .partition(";")[0]
-                        .strip()
-                        .lower()
-                        != "application/json"
-                    ):
-                        raise ValueError("Alertmanager 响应不合约")
-                    data = bytearray()
-                    async for chunk in response.aiter_raw():
-                        if len(data) + len(chunk) > self.config.max_response_bytes:
-                            raise ValueError("Alertmanager 响应超限")
-                        data.extend(chunk)
-                    payload, truncated = self._project(name, bytes(data), args)
+            payload, truncated = self._project(
+                name, await self._request("GET", path, params=tuple(params)), args
+            )
         except (TimeoutError, httpx2.TimeoutException):
             self.status = "unavailable"
             raise MonitoringReadError("timeout") from None
