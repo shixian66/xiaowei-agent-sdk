@@ -100,6 +100,7 @@ ToolRejectCode = Literal[
     "source_stopped",
     "schema_unavailable",
     "object_not_readable",
+    "object_unavailable",
 ]
 
 
@@ -130,12 +131,15 @@ ToolRejectHint = Literal[
     "grafana_pagination",
     "grafana_time_window",
     "silence_end",
+    "silence_expired",
+    "silence_missing",
+    "silence_filter",
 ]
 """可信拒绝点提供的固定修正/限制提示标识；不携带参数或异常原文。"""
 
 
 class ToolRejectedError(Exception):
-    """调用前拒绝。反馈类别由可信拒绝点赋值，模型端不读取异常原文。"""
+    """调用前拒绝；明确的提出准备拒绝使用专用子类，模型端不读取异常原文。"""
 
     def __init__(
         self,
@@ -153,8 +157,16 @@ class ToolRejectedError(Exception):
         self.query_reject = query_reject
 
 
+class ProposalRejectedError(ToolRejectedError):
+    """只读准备已明确拒绝提出；此时尚未保存 Action，也未发出任何业务写请求。
+
+    仅 effect=propose 的调用可交回模型，调用仍占预算且不产生成功 Evidence。
+    实际写工具抛出该异常仍是执行失败，不能据此重放写入。
+    """
+
+
 class ToolExecutionError(Exception):
-    """工具已开始执行但失败；结果未知，不自动重试。"""
+    """执行阶段失败，不自动重试；Action 按可信执行事实区分拒绝/成功/未知。"""
 
     def __init__(self, code: StarRocksErrorCode | Literal["mcp_error", "other"] = "other") -> None:
         super().__init__("工具执行失败")
@@ -319,11 +331,13 @@ class TurnRuns:
     是其中结果已生成证据并交给模型的 ``(工具 ID, 证据标识)``；``truncated`` 计模型可见
     结果的截断次数，``rejected`` 计 SDK 包装层确认的 I/O 前拒绝次数。多数执行后失败
     中止整轮；明确分类的监控读取失败记录在 ``monitoring_failures``，不生成 Evidence。
+    ``proposal_rejections`` 记录只读准备的明确拒绝，调用仍占预算，但不形成 Action/成功证据。
     ``limit_rescue_started`` 标记 SDK 步数用完后已进入无工具收尾，供失败日志保留上下文。
     """
 
     started: tuple[str, ...] = ()
     produced: tuple[tuple[str, str], ...] = ()
+    proposal_rejections: tuple[str, ...] = ()  # 已完成只读准备、明确未形成 Action 的调用。
     monitoring_failures: tuple[MonitoringFailure, ...] = ()
     promql_errors: tuple[tuple[str, str], ...] = ()  # 目标、已失败表达式，跨 query/range 禁止重发。
     promql_pending: frozenset[str] = frozenset()
@@ -465,6 +479,22 @@ class GovernedTools:
             with trace_sql_io() as trace:
                 try:
                     observation = await run()
+                except ProposalRejectedError:
+                    if policy.effect != "propose":
+                        raise ToolExecutionError() from None
+                    # 准备阶段可能已有只读 I/O；明确原因只交付给仍获准的调用者。
+                    try:
+                        authorized = await self._currently_authorized(ctx.identity, contract)
+                    except ToolRejectedError:
+                        raise ToolExecutionError() from None
+                    if not authorized:
+                        raise ToolExecutionError() from None
+                    current = self._runs.get(key, TurnRuns())
+                    self._runs[key] = replace(
+                        current,
+                        proposal_rejections=(*current.proposal_rejections, contract.tool_id),
+                    )
+                    raise
                 except MonitoringReadError as exc:
                     if contract.policy_id not in MONITORING_READ_POLICIES:
                         raise ToolExecutionError() from None

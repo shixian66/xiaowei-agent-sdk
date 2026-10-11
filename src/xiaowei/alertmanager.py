@@ -27,7 +27,7 @@ from pydantic import (
     model_validator,
 )
 
-from xiaowei.actions import ActionBinding, ActionPlan, proposal_policy
+from xiaowei.actions import ActionBinding, ActionPlan, ActionWriteRejectedError, proposal_policy
 from xiaowei.config import is_secret_ref, resolve_secret_ref
 from xiaowei.evidence import arguments_digest
 from xiaowei.governance import (
@@ -35,6 +35,7 @@ from xiaowei.governance import (
     MonitoringReadError,
     Prechecked,
     Projection,
+    ProposalRejectedError,
     ToolCatalog,
     ToolPolicy,
     ToolRejectedError,
@@ -194,6 +195,14 @@ class _CreateSilenceArgs(_Args):
         if datetime.fromisoformat(self.starts_at) >= datetime.fromisoformat(self.ends_at):
             raise ValueError("结束时间必须晚于开始时间")
         return self
+
+
+class _RequestStatusError(ValueError):
+    """只携带 HTTP 状态；上游正文不进入错误或模型反馈。"""
+
+    def __init__(self, status_code: int) -> None:
+        super().__init__("Alertmanager 请求被拒绝")
+        self.status_code = status_code
 
 
 class _ResponseLimitError(ValueError):
@@ -442,7 +451,8 @@ def alertmanager_catalog(
                         description=(
                             "仅在本群提出创建静默，不执行。"
                             "matchers 每项显式 name/value/isRegex/isEqual，"
-                            "正则整串匹配；starts_at/ends_at 为含时区绝对时间，允许多年但必须到期。"
+                            "正则整串匹配；至少一个匹配器不匹配空串，由上游校验。纯否定匹配器按上游规则处理。"
+                            "starts_at/ends_at 为含时区绝对时间，允许多年但必须到期。"
                             "过去 starts_at 会由上游调整到批准执行时刻，不表示从过去已抑制告警。"
                             "准确范围/期限不明确时澄清，不扩大范围猜测。comment 写明用途。"
                             if action_name == "create_silence"
@@ -549,6 +559,10 @@ class AlertmanagerAdapter:
         ]
         try:
             body = await self._request("GET", "alerts", params=tuple(params))
+        except _RequestStatusError as exc:
+            if exc.status_code != 400:
+                raise
+            raise ProposalRejectedError("告警过滤条件被拒绝", hint="silence_filter") from None
         except _ResponseLimitError:
             return (
                 "当前命中数量未知：过滤响应超过接收上限，无法完整计数；"
@@ -594,9 +608,18 @@ class AlertmanagerAdapter:
                 impact=impact,
                 rollback="按执行结果的静默 UUID 另提取消静默并批准；不自动撤销。",
             )
-        current = await self._silence(str(args["silence_id"]))
+        try:
+            current = await self._silence(str(args["silence_id"]))
+        except _RequestStatusError as exc:
+            if exc.status_code != 404:
+                raise
+            raise ProposalRejectedError(
+                "静默未找到", code="object_unavailable", hint="silence_missing"
+            ) from None
         if current.status.state == "expired":
-            raise ValueError("静默已经到期，未提出取消")
+            raise ProposalRejectedError(
+                "静默已经到期，未提出取消", code="object_unavailable", hint="silence_expired"
+            )
         snapshot = current.model_dump(mode="json")
         impact = await self._impact(snapshot["matchers"])
         return ActionPlan(
@@ -615,17 +638,23 @@ class AlertmanagerAdapter:
             if request.tool_id.endswith("/create_silence"):
                 requested_start = datetime.fromisoformat(str(args["starts_at"]))
                 start_is_future = requested_start > self._clock()
-                response = await self._request(
-                    "POST",
-                    "silences",
-                    payload={
-                        "matchers": args["matchers"],
-                        "startsAt": args["starts_at"],
-                        "endsAt": args["ends_at"],
-                        "comment": args["comment"],
-                        "createdBy": "xiaowei",
-                    },
-                )
+                try:
+                    response = await self._request(
+                        "POST",
+                        "silences",
+                        payload={
+                            "matchers": args["matchers"],
+                            "startsAt": args["starts_at"],
+                            "endsAt": args["ends_at"],
+                            "comment": args["comment"],
+                            "createdBy": "xiaowei",
+                        },
+                    )
+                except _RequestStatusError as exc:
+                    if exc.status_code != 400:
+                        raise
+                    # 锁版 API 的新建分支在400前未写入；只分类此POST，不含回读/取消。
+                    raise ActionWriteRejectedError() from None
                 body = json.loads(response)
                 if (
                     not isinstance(body, dict)
@@ -695,6 +724,8 @@ class AlertmanagerAdapter:
                     raise MonitoringReadError("auth")
                 if 500 <= response.status_code <= 599:
                     raise MonitoringReadError("upstream_5xx")
+                if response.status_code in {400, 404}:
+                    raise _RequestStatusError(response.status_code)
                 if (
                     response.status_code != 200
                     or response.headers.get("content-encoding", "identity").lower() != "identity"

@@ -108,12 +108,46 @@ class State:
 
 
 @contextmanager
-def backend() -> Iterator[tuple[str, State]]:
+def backend(*, upstream_url: str | None = None) -> Iterator[tuple[str, State]]:
     state = State()
 
     class Handler(BaseHTTPRequestHandler):
+        def _forward(self, body: Any = None) -> bool:
+            if upstream_url is None:
+                return False
+            with httpx.Client(base_url=upstream_url, trust_env=False, timeout=5) as client:
+                response = client.request(
+                    self.command,
+                    self.path,
+                    json=body,
+                    headers={
+                        "Authorization": self.headers.get("authorization", ""),
+                        "Accept-Encoding": "identity",
+                    },
+                )
+            if self.command in {"POST", "DELETE"} and response.status_code == 200:
+                state.writes.append((self.command, self.path, copy.deepcopy(body)))
+            code = response.status_code
+            if self.command in {"POST", "DELETE"}:
+                # 官方上游已经完成；模拟响应在返回途中失败/延迟，不改变其写入事实。
+                time.sleep(state.write_delay)
+                if code == 200 and state.write_status != 200:
+                    code = state.write_status
+            self.send_response(code)
+            if "content-type" in response.headers:
+                self.send_header("Content-Type", response.headers["content-type"])
+            self.send_header("Content-Length", str(len(response.content)))
+            self.end_headers()
+            try:
+                self.wfile.write(response.content)
+            except (BrokenPipeError, ConnectionResetError):
+                pass  # 客户端有界超时；官方上游已经处理完。
+            return True
+
         def do_GET(self) -> None:
             state.requests.append(("GET", self.path, self.headers.get("authorization")))
+            if self._forward():
+                return
             time.sleep(state.delay)
             code = state.status
             if state.writes and state.read_status_after_write is not None:
@@ -148,6 +182,8 @@ def backend() -> Iterator[tuple[str, State]]:
 
         def _write(self, body: Any) -> None:
             state.requests.append((self.command, self.path, self.headers.get("authorization")))
+            if self._forward(body):
+                return
             code = state.write_status
             if state.require_auth and self.headers.get("authorization") != AUTHORIZATION:
                 code = 401
