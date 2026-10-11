@@ -515,3 +515,38 @@ def test_capacity_search_builds_logarithmically_many_cards(monkeypatch: pytest.M
     per_search = 2 + len(sources) * (math.ceil(math.log2(399)) + 2)
     bound = (len(sources) + 1) * per_search + len(sources) + 2
     assert builds <= bound, f"card builds={builds}, logarithmic bound={bound}"
+
+
+def test_complete_action_json_is_displayed_as_original_plain_text() -> None:
+    parameters = json.dumps(
+        {
+            "dashboard_json": json.dumps({"uid": "host", "panels": []}),
+            "folder_uid": "",
+            "message": "edit",
+        }
+    )
+    change = '{"before":{"title":"Old"},"after":{"title":"New","enabled":true,"label":"true"}}'
+    metadata = {
+        "action_id": "action-1",
+        "action": "grafana-write/update_dashboard",
+        "parameters": parameters,
+        "revision": "v1",
+        "change": change,
+        "impact": "Only this Dashboard",
+        "rollback": "Use before with new approval",
+        "approve_before": "2026-10-11T11:00:00+00:00",
+        "approval_command": "@小维 /批准 action-1",
+    }
+    source = fact(
+        tool_id="grafana-write/propose_update_dashboard",
+        columns=(),
+        rows=(),
+        metadata=metadata,
+        requires_complete=True,
+    )
+    message = build_feishu_message(delivery(source), 3500, "oc_test")
+    parts = text_parts(message, folded=False)
+    assert "实际参数：" + parameters in parts
+    assert "差异：" + change in parts
+    assert "批准命令：@小维 /批准 action-1" in parts
+    assert source.metadata == metadata

@@ -49,6 +49,13 @@ from xiaowei.governance import (
     contract_dump,
     schema_shape,
 )
+from xiaowei.grafana import (
+    D7_POLICIES,
+    prepare_dashboard,
+    schema_matches,
+    wire_arguments,
+    wire_payload,
+)
 from xiaowei.models import (
     GRAFANA_READ_POLICIES,
     MONITORING_READ_POLICIES,
@@ -139,6 +146,7 @@ class _Snapshot:
     server: MCPServerStreamableHttp
     connection: AsyncExitStack
     tools: tuple[tuple[str, FunctionTool], ...]
+    executes: tuple[tuple[str, Execute], ...]
 
 
 @dataclass
@@ -275,7 +283,16 @@ class MCPIntegration:
             if source.status != "available"
             and any(
                 binding.config is source.config
-                and binding.contract.tool_id in allowed_tools
+                and (
+                    binding.contract.tool_id in allowed_tools
+                    or (
+                        binding.contract.policy_id == "grafana.update_dashboard"
+                        and any(
+                            source.config.tool_id(f"propose_{action}") in allowed_tools
+                            for action in ("create_dashboard", "update_dashboard")
+                        )
+                    )
+                )
                 and binding.contract.target_id in target_scope
                 for binding in self._planned.values()
             )
@@ -369,14 +386,22 @@ class MCPIntegration:
                 await connection.enter_async_context(server)
                 # 新对象的工具缓存为空；每次都从新会话重新 list_tools 核约。
                 verified = _verified(await server.list_tools(), self._planned, config)
+                executes = tuple(
+                    (name, self._execute(self._planned[name], server, source)) for name in verified
+                )
                 tools = tuple(
-                    (name, self._function_tool(name, self._planned[name], server, source))
-                    for name in verified
+                    (
+                        name,
+                        governed_function_tool(
+                            name, self._planned[name].contract, self._governance, execute
+                        ),
+                    )
+                    for name, execute in executes
                 )
         except BaseException:
             await self._close(connection)
             raise
-        return _Snapshot(server, connection, tools)
+        return _Snapshot(server, connection, tools, executes)
 
     def _function_tool(
         self,
@@ -385,11 +410,36 @@ class MCPIntegration:
         server: MCPServerStreamableHttp | None,
         source: _Source,
     ) -> FunctionTool:
+        return governed_function_tool(
+            name, binding.contract, self._governance, self._execute(binding, server, source)
+        )
+
+    def execute_for(self, tool_id: str, target_id: str) -> Execute:
+        """应用的选中Action复用已核约执行函数；调用方仍须经同一个GovernedTools。"""
+        source = self._sources.get(target_id)
+        if source is None or source.status != "available" or source.snapshot is None:
+            raise ToolRejectedError("MCP源暂不可用", code="unsupported")
+        for name, execute in source.snapshot.executes:
+            if self._planned[name].contract.tool_id == tool_id:
+                return execute
+        raise ToolRejectedError("MCP工具未核约", code="unsupported")
+
+    def _execute(
+        self,
+        binding: _Binding,
+        server: MCPServerStreamableHttp | None,
+        source: _Source,
+    ) -> Execute:
         async def execute(request: ToolRequest) -> ToolObservation:
             if server is None:  # 构造期只验证 SDK schema，不展示此工具
                 raise RuntimeError("MCP 工具尚未绑定连接")
             try:
-                result = await server.call_tool(binding.remote_name, request.arguments)
+                arguments = (
+                    wire_arguments(binding.remote_name, request.arguments)
+                    if binding.contract.policy_id in D7_POLICIES
+                    else request.arguments
+                )
+                result = await server.call_tool(binding.remote_name, arguments)
             except Exception as exc:
                 if (
                     _connection_lost(exc)
@@ -414,7 +464,12 @@ class MCPIntegration:
                 reason = _grafana_read_failure(result, binding.remote_name, request.arguments)
                 if reason is not None:
                     raise MonitoringReadError(reason)
-            if binding.contract.policy_id in PROMETHEUS_READ_POLICIES:
+            if binding.contract.policy_id in D7_POLICIES:
+                payload, truncated = (
+                    wire_payload(result, binding.remote_name, request.arguments),
+                    False,
+                )
+            elif binding.contract.policy_id in PROMETHEUS_READ_POLICIES:
                 payload, truncated = _prometheus_payload(
                     result, binding.result, binding.remote_name
                 )
@@ -439,8 +494,10 @@ class MCPIntegration:
                 truncated=truncated,
             )
 
-        if binding.contract.policy_id in PROMETHEUS_READ_POLICIES:
-            checked: Execute = Prechecked(
+        if binding.contract.policy_id in D7_POLICIES:
+            checked: Execute = Prechecked(prepare_dashboard, execute)
+        elif binding.contract.policy_id in PROMETHEUS_READ_POLICIES:
+            checked = Prechecked(
                 lambda request: _prepare_prometheus(
                     request, binding.contract.policy_id, self._clock()
                 ),
@@ -450,7 +507,7 @@ class MCPIntegration:
             checked = Prechecked(_prepare_grafana, execute)
         else:
             checked = execute
-        return governed_function_tool(name, binding.contract, self._governance, checked)
+        return checked
 
 
 def _prepare_grafana(request: ToolRequest) -> ToolRequest:
@@ -816,8 +873,10 @@ def _verified(
         if binding.config is not config:
             continue
         matches = [tool for tool in listed if tool.name == binding.remote_name]
-        if len(matches) == 1 and _accepts_input(
-            binding.contract.input_schema, matches[0].input_schema
+        if len(matches) == 1 and (
+            schema_matches(binding.remote_name, matches[0].input_schema)
+            if binding.contract.policy_id in D7_POLICIES
+            else _accepts_input(binding.contract.input_schema, matches[0].input_schema)
         ):
             verified.append(name)
         else:

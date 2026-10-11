@@ -427,6 +427,65 @@ storedVersion 的原生对象。数据源目录失败也可能读取同源 setti
 数据源 UID/名称/type 不证明它对应某个 Prometheus 源；没有可信对应关系时，实时指标按独立来源
 报告，不声称来自这个面板。工具接口、失败分类与验收的唯一细则见[计划 §3.2](../docs/superpowers/plans/2026-10-09-monitoring-mcp.md#32-g3-当前切片基线-4cbb27a2b6e54050fc350fcd62a1a9e5cf123eae)。
 
+### 选配经典 Dashboard 创建和修改
+
+D7 默认不启用。只在指定群逐次批准；产品边界以[架构 D7 契约](../ARCHITECTURE.md#monitoring-mcp)为准。
+本机已用官方 MCP v2.0.2 / 隔离 Grafana13.2.3 验证，不代表公司版本、真实群或模型已验收。
+保留上面的只读端；在外部节点另开 Dashboard 写端，只开下面类别（本机已核对唯一写工具）：
+
+```text
+--transport=streamable-http --enabled-tools=search,dashboard
+--disable-query --usage-stats=disabled
+--allow-grafana-url-override=false --dynamic-multi-org=false
+--server-auth-token=<从外部节点安全运行配置提供>
+```
+
+此写端不加 `--disable-write`；锁版的 `--enable-write-tools=update_dashboard` 不能覆盖这个开关。
+写端的 Service Account 必须固定 Grafana URL/组织及已确认共享权限，调用者 Bearer 与上游凭据分别配置。
+部署时重验无/错调用者凭据为401且零写入，正确凭据不能直调未选写工具（含 grafana_api_request）。
+不要将数据源/Annotation 类别混入这个写端。
+
+在现有 `mcp_servers` 追加一项，既有只读端不变：
+
+```json
+{
+  "server_id": "grafana-write",
+  "url": "http://grafana-mcp.internal:8001/mcp",
+  "auth_ref": "env:XW_GRAFANA_WRITE_MCP_TOKEN",
+  "timeout_seconds": 5,
+  "max_response_bytes": 128000,
+  "allowed_tools": {
+    "get_dashboard_by_uid": "grafana.get_dashboard_by_uid",
+    "list_dashboard_versions": "grafana.list_dashboard_versions",
+    "update_dashboard": "grafana.update_dashboard"
+  }
+}
+```
+
+将 `grafana-write/propose_create_dashboard`、`grafana-write/propose_update_dashboard` 和
+`grafana-write/get_action_status` 加入现有 `data_policy.model_tools` 与 `feishu.group.tools`；
+群成员可申请，`access.grants` 中给有审批权的成员 `grafana-write/update_dashboard`，沿用真实 open_id。
+实际写工具不加进模型/群共享工具表。需要完整定义辅助编辑的已授权用户/群可另外加入
+`get_dashboard_by_uid`、`list_dashboard_versions` 的同源工具 ID；原生v2可读、不可提出写。
+提出动作授权包含该动作固定的同源只读准备，不查询其他源，不执行面板实时查询。
+
+设置能容纳完整材料的四用途 `projection_bytes`（本机用60000），并按实际 Dashboard 大小验收；
+JSON定义上限16000字节，完整差异/恢复材料过大时不保存可批准 Action，不提高或截断来假装完整。
+这不是所有 Dashboard 的容量保证；还受现有飞书3500字符单卡片/完整请求预算限制。
+群显示完整before/after，恢复说明引用其中before；材料不完整送达时不能批准。
+审批JSON用纯文本显示原内容，避免标量字符串二次转义；不会截断必要定义来获取批准。
+版本由保存历史读取，不能从当前响应缺失字段中猜测；
+读取版本0只是本地“当前”的约定，发送到上游时省略 version。更新不使用 patch。
+
+批准后版本变化时未执行、需重新提出；原子保存竞争的锁版409也明确未执行。
+其他写后错误/超时/回读不符显示结果未知，先按 Action ID 和远端 UID 核对，不再批准、不自动重放。
+如需恢复旧定义，经另次申请/批准，以最新版本恢复；创建撤销由管理员按UID人工删除并记录。
+普通取消/超时的实例恢复沿用下节，D7不新增迁移、后台任务或自动回滚。
+
+启用前运行 config check；停止旧进程后切换配置。回退到旧镜像前移除写端及全部新增工具授权；
+已成功/未知 Action 先人工核对，保留 PostgreSQL 备份，不重放写请求。
+公司版本的冲突/回读、组织权限、provisioning限制、真实群展示和恢复实测仍为上线前门槛。
+
 ## 选配 Alertmanager 监控源
 
 A4 只读直连外部独立 Alertmanager **API v2**，本机以官方 **v0.34.1** 验证；公司实际版本仍须核对。
@@ -521,7 +580,7 @@ S6 在同一个 API v2 源上选配，默认 `write_actions` 为空，旧配置�
 
 ## 监控群审批底座
 
-W5 交付审批底座，S6 复用它选配创建/取消静默；Grafana 写工具尚未开放。群内调用选中动作的
+W5 交付审批底座，S6 选配创建/取消静默；D7 可选配经典 Dashboard 创建/修改。群内调用选中动作的
 “提出”工具后，代码生成实际参数、版本、差异、影响、恢复办法、Action ID 和批准截止时间。
 有审批权的成员在原群 `@小维 /批准 <Action ID>`，应用重新核对当前群成员、权限和材料，
 再占用一次执行机会；申请人有审批权时可自己确认。等待批准期间不占群队列，批准事件

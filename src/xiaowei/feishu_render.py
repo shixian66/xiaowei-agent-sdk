@@ -154,10 +154,10 @@ def _card(
             elements.append(_div(f"说明：{fact.note}"))
         if fact.requires_complete:
             elements.append(_div("待批准动作（尚未执行）"))
-            elements.extend(
-                _div(f"{_ACTION_LABELS.get(key, key)}：{_cell({key: value}, key)}")
-                for key, value in fact.metadata.items()
-            )
+            # 提出材料已是可信JSON/文本；用纯文本显示，避免将整份JSON再次转义成标量字符串。
+            for key, value in fact.metadata.items():
+                text = display_text(value) if isinstance(value, str) else _cell({key: value}, key)
+                elements.append(_div(f"{_ACTION_LABELS.get(key, key)}：{text}"))
             continue
         if fact.columns:
             elements.extend(

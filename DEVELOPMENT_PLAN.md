@@ -153,7 +153,7 @@ Web 宿主发布地址由 `.env` 的 `XW_WEB_BIND_ADDRESS` 决定，缺省 `0.0.
 
 ## 8. P4 监控增量与之后的扩展
 
-实战对话与飞书展示的已核实问题另见[修复实施计划](docs/superpowers/plans/2026-10-09-agent-dialogue-feishu-repair.md)。R1b 随 PR #68、U1/U2 随 PR #69、监控只读故障续查随 PR #70、P2 随 PR #71 合入；U1 真实模型对照因公司 API IP 限制按用户批准的例外未验收，真实 Lark 展示和收发仍未验收。G3 随 PR #72、A4 随 PR #73 合入；W5 群审批底座随 PR #74 离线合入，普通审批取消/超时局部恢复随 PR #76 合入；S6 创建/取消静默已在本分支离线实现、待精确版本独立审查，下一片为 D7；Grafana 写接口仍归 D7/C8。切片接口和验收只维护在[监控计划 §3.1–§3.5](docs/superpowers/plans/2026-10-09-monitoring-mcp.md)，当前证据见 handoff。真实模型调查能力、真实 Prometheus 服务端限额、Grafana 组织/版本/权限、Alertmanager 版本/认证/容量/HA 和群写审批门槛保持开放，不继承 U1 例外；不等待全部监控源完成，不合并或部署。
+实战对话与飞书展示的已核实问题另见[修复实施计划](docs/superpowers/plans/2026-10-09-agent-dialogue-feishu-repair.md)。R1b 随 PR #68、U1/U2 随 PR #69、监控只读故障续查随 PR #70、P2 随 PR #71 合入；U1 真实模型对照因公司 API IP 限制按用户批准的例外未验收，真实 Lark 展示和收发仍未验收。G3 随 PR #72、A4 随 PR #73 合入；W5 群审批底座随 PR #74 离线合入，普通审批取消/超时局部恢复随 PR #76 合入；S6 创建/取消静默已随 PR #79 合入；D7 经典 Dashboard 创建/修改在当前分支实现并验证，待精确版本独立审查，下一片为 C8。切片接口和验收只维护在[监控计划 §3.1–§3.6](docs/superpowers/plans/2026-10-09-monitoring-mcp.md)，当前证据见 handoff。真实模型调查能力、真实 Prometheus 服务端限额、Grafana 组织/版本/权限、Alertmanager 版本/认证/容量/HA 和群写审批门槛保持开放，不继承 U1 例外；不等待全部监控源完成，不合并或部署。
 
 P4 的已批准范围只在 [ARCHITECTURE §5「监控接入」](ARCHITECTURE.md#monitoring-mcp) 定义；任务、门槛与验收见 [监控 MCP 增量实施计划](docs/superpowers/plans/2026-10-09-monitoring-mcp.md)。共用协议验证可在 P3 真实环境验收期间独立推进；每项生产写开放须先完成对应源的读取、群 Action 批准闭环与该源真实环境验证，不要求其他监控源先完成。P4 不回写 P1–P3 的 StarRocks 只读验收结论，监控代码/离线检查、真实三源、公司部署与用户接受分别记证。
 

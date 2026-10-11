@@ -194,6 +194,20 @@ def grafana_backend() -> Iterator[tuple[int, BackendState]]:
             self.end_headers()
             self.wfile.write(encoded)
 
+        def _reject_write(self) -> None:
+            parsed = urlsplit(self.path)
+            state.requests.append(
+                (parsed.path, parse_qs(parsed.query), self.headers.get("Authorization"))
+            )
+            self.send_response(405)
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+
+        do_POST = _reject_write  # noqa: N815 - BaseHTTPRequestHandler hook
+        do_PUT = _reject_write  # noqa: N815 - BaseHTTPRequestHandler hook
+        do_DELETE = _reject_write  # noqa: N815 - BaseHTTPRequestHandler hook
+        do_PATCH = _reject_write  # noqa: N815 - BaseHTTPRequestHandler hook
+
         def log_message(self, *_args: object) -> None:
             return
 

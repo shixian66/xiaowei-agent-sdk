@@ -25,7 +25,7 @@ UNSELECTED = (
     "create_annotation",
     "delete_annotation",
     "create_folder",
-    "grafana_api",
+    "grafana_api_request",
 )
 
 
@@ -56,6 +56,15 @@ def payload(result: CallToolResult) -> object:
     item = result.content[0]
     assert isinstance(item, TextContent)
     return json.loads(item.text)
+
+
+@pytest.mark.parametrize("method", ["POST", "PUT", "DELETE", "PATCH"])
+async def test_backend_records_rejected_write_requests(method: str) -> None:
+    with grafana_backend() as (port, state):
+        async with httpx2.AsyncClient(trust_env=False) as http:
+            response = await http.request(method, f"http://127.0.0.1:{port}/api/dashboards/db")
+        assert response.status_code == 405
+        assert state.requests == [("/api/dashboards/db", {}, None)]
 
 
 async def test_disable_write_override_does_not_register_dashboard_write(
