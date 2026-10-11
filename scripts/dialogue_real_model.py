@@ -16,6 +16,7 @@ from pathlib import Path
 
 import httpx2
 from tests.sdk_core.dialogue_gate import (
+    R3_SCENARIOS,
     R7_SCENARIOS,
     ReviewSample,
     ReviewVerdict,
@@ -45,6 +46,12 @@ async def review_sample(sample: ReviewSample) -> ReviewVerdict:
     # 同一 harness 必须能在尚无 U2 渲染器的基线运行；终端控制符交给标准 JSON 转义。
     print("合成请求：" + json.dumps(sample.message, ensure_ascii=False), file=sys.stderr)
     print(f"state={sample.state} failure={sample.failure}", file=sys.stderr)
+    if sample.scenario.startswith("r3_"):
+        print(
+            "R3 核对：新结果及索要原文为 full；历史短问可 brief；本次返回行数不是全表总数或聚合值。"
+            "核对分析是否重复事实、分页/丢失说明、短问是否产生无谓查询，不要求固定工具顺序。",
+            file=sys.stderr,
+        )
     print("按目标记录的实际 I/O：", file=sys.stderr)
     print(json.dumps(sample.statements, ensure_ascii=False, indent=2), file=sys.stderr)
     print("已校验的交付：", file=sys.stderr)
@@ -79,7 +86,11 @@ async def collect(profile_path: Path, repeats: int, suite: str = "u1") -> dict[s
             url,
             lambda: httpx2.AsyncHTTPTransport(retries=0, trust_env=False),
             repeats=repeats,
-            **({"scenarios": R7_SCENARIOS} if suite == "r7" else {}),
+            **(
+                {"scenarios": R3_SCENARIOS if suite == "r3" else R7_SCENARIOS}
+                if suite in {"r3", "r7"}
+                else {}
+            ),
             manual_review=review_sample,
         )
     if source_sha() != sha or harness_sha256() != harness:
@@ -134,7 +145,7 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--profile", type=Path, required=True)
     parser.add_argument("--repeats", type=int, default=3)
-    parser.add_argument("--suite", choices=("u1", "r7"), default="u1")
+    parser.add_argument("--suite", choices=("u1", "r7", "r3"), default="u1")
     args = parser.parse_args()
     if args.repeats < 3:
         parser.error("旧/新每项至少各运行 3 次")

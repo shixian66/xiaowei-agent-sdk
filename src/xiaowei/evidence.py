@@ -199,6 +199,7 @@ class AnswerRejectCode(enum.StrEnum):
     INFERENCE_UNLINKED = "inference_unlinked"
     EVIDENCE_UNAVAILABLE = "evidence_unavailable"
     UNCITED_QUERY = "uncited_query"
+    INVALID_FACT_VIEW = "invalid_fact_view"
 
 
 class AnswerRejectedError(EvidenceError):
@@ -369,7 +370,7 @@ class EvidenceStore:
             # 澄清与建议不引用证据：不能与证据、分析或彼此混用。没有监控失败时，
             # “本轮未执行业务查询”由 Application 在提交前核实；有监控失败时改用未核实标题。
             # 模型可能复述可见证据，因此照样复核它们。
-            if answer.evidence_ids or answer.inferences or len(unverified) > 1:
+            if answer.evidence_ids or answer.inferences or answer.fact_views or len(unverified) > 1:
                 raise AnswerRejectedError(
                     AnswerRejectCode.MIXED_KINDS, "澄清或建议不能与查询结果、分析或彼此混用"
                 )
@@ -401,6 +402,11 @@ class EvidenceStore:
             raise AnswerRejectedError(
                 AnswerRejectCode.UNKNOWN_EVIDENCE, "回答只能引用本轮模型可见的证据"
             )
+        views = {item.evidence_id: item.view for item in answer.fact_views}
+        if len(views) != len(answer.fact_views) or not views.keys() <= set(cited):
+            raise AnswerRejectedError(
+                AnswerRejectCode.INVALID_FACT_VIEW, "显示方式只能指定一次且必须属于本回答引用"
+            )
         for inference in answer.inferences:
             if not inference.evidence_ids or not set(inference.evidence_ids) <= set(cited):
                 raise AnswerRejectedError(
@@ -410,6 +416,31 @@ class EvidenceStore:
         records = await self._context_readable(ctx, channel, (*cited, *unshown), history=history)
 
         shown = [_shown(r, channel, self._fact_note(r)) for r in records[: len(cited)]]
+        facts: list[DeliveryFact] = []
+        for item in shown:
+            contract = self._catalog.contract(item.record.tool_id, item.record.target_id)
+            complete = (
+                contract is not None and self._catalog.policy_for(contract).effect == "propose"
+            )
+            fact = _fact(item, channel).model_copy(update={"requires_complete": complete})
+            if views.get(fact.evidence_id) == "brief":
+                if item.record.identity.turn_id == ctx.identity.turn_id:
+                    raise AnswerRejectedError(
+                        AnswerRejectCode.INVALID_FACT_VIEW, "本轮新事实必须完整展示"
+                    )
+                # 行数只来自接收渠道的获准结果；不是模型所报数值或全表总数。
+                count = (item.data or {}).get("row_count")
+                if (
+                    not complete
+                    and type(count) is int
+                    and count >= 0
+                    and count == len(fact.rows)
+                    and fact.columns
+                ):
+                    fact = fact.model_copy(
+                        update={"view": "brief", "summary": f"本次返回行数：{count}。"}
+                    )
+            facts.append(fact)
         analysis: tuple[str, ...] = ()
         if answer.inferences:
             analysis = (
@@ -429,16 +460,7 @@ class EvidenceStore:
             content="\n".join(lines),
             evidence_ids=cited,
             channel=channel,
-            facts=tuple(
-                _fact(item, channel).model_copy(
-                    update={
-                        "requires_complete": contract is not None
-                        and self._catalog.policy_for(contract).effect == "propose"
-                    }
-                )
-                for item in shown
-                for contract in [self._catalog.contract(item.record.tool_id, item.record.target_id)]
-            ),
+            facts=tuple(facts),
             analysis=tuple(answer.inferences),
             monitoring_notice=monitoring_notice,
             requires_complete=any(
