@@ -36,7 +36,7 @@
 
 ## 3. 当前计划与下一项工作
 
-**当前下一步：** W5 草稿 PR #74 修复批准回执B1及超时遗留B1′后，按新精确提交及对应全量 CI 结果复审，不合并或部署。之后为 S6 创建/提前结束静默，先核对真实 API 写入、认证、长期到期与回读契约，并由用户决定下列取消/整轮期限的可用性取舍，不自动扩大写范围。真实模型、公司三源与真实双入口仍按监控计划验收，不继承 U1 例外。
+**当前下一步：** W5 代码 head `198c8d6204547ec40f94d92ee615463b05235b58` 经用户转交独立复审无阻断，PR #74 的对应 CI 十项全绿；本次仅补交接记录，新增文档提交先报精确 SHA 复审，当前仍未合并或部署。W5 按用户批准的离线合入例外交付：真实模型、真实飞书及实际写接口均未验收，合入不代表这些门槛通过，例外仅适用于本片。之后为 S6 创建/提前结束静默，先核对真实 API 写入、认证、长期到期与回读契约；审批执行中取消或超时触发的实例整体锁低/需重启取舍，必须在 S6 前由用户决定，不在本片擅自改变。真实模型、公司三源与真实双入口仍按监控计划验收，不继承 U1 例外；实际合并状态以 PR #74 为准。
 
 **W5 当前离线证据：** 先复现 `/批准` 被当成模型提问、读事实过长导致审批材料被隐藏、批准执行与状态反馈重复获得预算；再按原有入口/治理/投递链修复。真 SDK、隔离 PostgreSQL、群原始事件/SDK公开传输替身及合成 Adapter 覆盖提出→送达→批准→一次执行→状态追问；正式 `serve` 的获权成功和无审批权零写入已通过。审批不调用模型或在 Runner 外写 Session；满/关闭 Session 仍可批准，新建群会话可查状态。数据库并发占用、实际终止旧持锁后端后接管、取消前后恢复 unknown、旧尝试不能覆写、撤权/退群/材料或源绑定变化、未送达/缺证据、写后 Evidence/反馈保存失败均有真实断言；失败与重启不会重放。
 
@@ -57,6 +57,10 @@ B1′ 先在 `5c09e7d` 产品代码上运行真实 PostgreSQL/群网关：写后
 仓库外 `.venv/bin/python /private/tmp/xw-w5-b1prime-mutation.py` 仅复制产品源码：恢复旧超时回执分支为 **2 failed, 3 passed**（4.37s），两个真实期限回归检出、三个成功/未知/拒绝对照保留；删去新回读的取消锁低为 **2 failed, 2 passed**（3.82s），两个取消窗口均检出、原有执行取消/恢复对照保留。报告 `/private/tmp/xw-w5-b1prime-final-mutations.json`，临时源码已清理，未修改 SDK 或工作树；不合入诊断脚本。B1 原有五项隔离变异证据保留在 PR 历史及 `/private/tmp/xw-w5-b1-mutations.json`。本次 Ruff、受影响格式、mypy（128源文件）、离线锁（92包）、5项文档检查和 `git diff --check` 通过；新 head 的 CI 与精确复审结果见 PR #74，不把旧 head 的 CI 当作修复候选证据。
 
 B1 上下游回归：使用相同测试 PostgreSQL，设置 `XW_TEST_ALERTMANAGER_BIN=/private/tmp/xw-a4-official/alertmanager-0.34.1.darwin-arm64/alertmanager` 后，`.venv/bin/python -m pytest tests/sdk_core/test_mcp_integration.py tests/sdk_core/test_alertmanager_a4.py tests/sdk_core/test_alertmanager_contracts.py tests/sdk_core/test_evidence.py tests/sdk_core/test_session_policy.py -q -W error --tb=short` 为 **216 passed, 1 deselected**（86.31s，未选的是浏览器用例），日志 `/private/tmp/xw-w5-b1-read-regression.log`。本片群正式 `serve` 成功/拒绝已包含在285项中，未新增模型、公司服务或真实渠道验证。
+
+最终代码版本 `198c8d6` 的 [CI run 38075708095](https://github.com/shixian66/xiaowei-agent-sdk/actions/runs/38075708095) 十项成功，完整 integration 为 **4788 passed, 316 skipped, 59 deselected, 5 warnings**（1354.10s）；五条 warning 来自 pytest_socket 的网络禁止反例，不把跳过或未选择项算作已验收。用户复审以原复现用例确认写后反馈超时返回 action_feedback_failed、一次写入且不重放。新增交接文字不改变该代码版本；新的文档 head 与 CI 不冒充已完成复审。
+
+非阻断清理诊断仅用上述代码与本机隔离 PostgreSQL，四个 Action 测试文件加三个锁/接管用例为 **73 passed**（30.55s，`/private/tmp/xw-w5-cleanup-audit.log`）。仓库外插件在 fixture 释放后、隔离库强制删除前逐例检查：测试库剩余连接和 advisory lock 均为0，同一事件循环内无新增未完成任务，报告 `/private/tmp/xw-w5-cleanup-audit.json`。另用两个自行创建的随机库，仅 SELECT 计数：旧接管测试的全实例锁筛选命中2，按当前库/明确持锁PID各命中1（`/private/tmp/xw-w5-lock-filter-probe.json`）；实验未调用终止后端语句。未发现此次运行的用例间泄漏，但不能据此确定用户先前两轮偶发失败的根因。后续测试维护应把终止目标限定为已知持锁PID，等待条件限定当前测试库；本片保留已审代码，不把该非阻断混入修复。
 
 `ea7bffb3552598637a2494d804923449e88f44ec` 的期限修复经独立差异复审无新增阻断，另实跑 **3 passed**，已推送并建草稿 [PR #74](https://github.com/shixian66/xiaowei-agent-sdk/pull/74)。首次 CI 的 `p3-release` 为 **3 failed, 79 passed**：旧容器演练没有随 schema7 修正历史版本事实及迁移/恢复准备。修正测试的 v5 形状、固定历史镜像仍为v6，显式 v6→v7 迁移后才切换，回退时恢复迁移前备份到隔离库；产品代码、密钥核验和版本拒绝未放宽。三条容器演练复验 **3 passed**（350.47s，`/private/tmp/xw-w5-container-reregression.log`），命令为 `.venv/bin/python -m pytest tests/deployment/test_compose.py::test_formal_compose_entry_success_failure_network_and_signal tests/deployment/test_maintenance.py::test_different_image_upgrade_rollback_and_paired_restore tests/deployment/test_maintenance.py::test_feishu_users_upgrade_rollback_restores_the_config_the_old_image_reads -q -W error --tb=short`。新增差异仍按精确提交复审，最新 head/CI 结果以 PR 为准；不将首次失败覆盖成通过。
 
