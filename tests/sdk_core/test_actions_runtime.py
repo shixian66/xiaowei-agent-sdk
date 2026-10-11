@@ -1,9 +1,12 @@
 """正式 serve 的 W5 群闭环：只替换模型/渠道/远端写及可信合成工具登记。"""
 
+import asyncio
 from typing import Any
 
 import pytest
+from tests.p1b.test_starrocks_adapter import TARGET as SR
 from tests.sdk_core.test_app import cite, tool_call
+from tests.sdk_core.test_feishu_render import message_text
 from tests.sdk_core.test_group_actions import (
     PROPOSE,
     SOURCE,
@@ -21,20 +24,23 @@ from tests.sdk_core.test_group_gateway import (
     runtime_env as runtime_env,
 )
 from tests.sdk_core.test_group_identity import A, B
-from tests.sdk_core.test_runtime import Env, until
+from tests.sdk_core.test_runtime import BUDGET_CONFIG, OPERATOR, Env, statements, until
 
 from xiaowei import runtime
 from xiaowei.actions import ActionBinding, ActionService, proposal_policy
 from xiaowei.feishu import FeishuGateway, attributed
 from xiaowei.governance import GovernedTools, Projection, ToolPolicy
 from xiaowei.models import AUDIENCES, ToolContract
+from xiaowei.starrocks_tools import QUERY_TOOLS
 
 pytestmark = pytest.mark.loopback
 
 
+@pytest.mark.parametrize("interruption", [None, "read", "write", "feedback"])
 async def test_formal_serve_proposes_approves_and_refuses_non_approver(
     runtime_env: Env,
     monkeypatch: pytest.MonkeyPatch,
+    interruption: str | None,
 ) -> None:
     env = runtime_env
     adapter = ActionAdapter(env.clock)
@@ -70,7 +76,7 @@ async def test_formal_serve_proposes_approves_and_refuses_non_approver(
         )
 
     def action_service(governance: GovernedTools, *args: Any, **kwargs: Any) -> ActionService:
-        return ActionService(
+        service = ActionService(
             governance,
             *args,
             bindings=[
@@ -80,6 +86,15 @@ async def test_formal_serve_proposes_approves_and_refuses_non_approver(
             ],
             **kwargs,
         )
+        if interruption == "feedback":
+            status = service.status
+
+            async def slow_status(ctx, request):
+                await asyncio.sleep(2)
+                return await status(ctx, request)
+
+            monkeypatch.setattr(service, "status", slow_status)
+        return service
 
     gateways: list[FeishuGateway] = []
 
@@ -107,8 +122,12 @@ async def test_formal_serve_proposes_approves_and_refuses_non_approver(
             }
         ],
         feishu=feishu,
-        access={"policy_version": "w5", "grants": {B: [WRITE]}},
-        data_policy={"input": {"max_bytes": 2000}, "model_tools": [PROPOSE, STATUS]},
+        access={"policy_version": "w5", "grants": {B: [WRITE], OPERATOR: sorted(QUERY_TOOLS)}},
+        data_policy={
+            "input": {"max_bytes": 2000},
+            "model_tools": [PROPOSE, STATUS, *sorted(QUERY_TOOLS)],
+        },
+        budget={**BUDGET_CONFIG, "timeout_seconds": 1 if interruption else 30},
     )
     channel = GroupChannel()
     asked = env.scripts.add(
@@ -126,12 +145,56 @@ async def test_formal_serve_proposes_approves_and_refuses_non_approver(
         await until(lambda: len(channel.sends) == 2)
         await gateways[0].idle()
         assert adapter.calls == []
+        if interruption == "read":
+            adapter.read_release = asyncio.Event()
+        elif interruption == "write":
+            adapter.release = asyncio.Event()
         channel.emit_raw_from_sdk_thread(raw_group_event(env, f"/批准 {action_id}", "om_ok", B))
         await until(lambda: len(channel.sends) == 3)
         await gateways[0].idle()
-        assert [c.arguments for c in adapter.calls] == [{"value": "after"}]
-        assert await env.scalar("SELECT state FROM xiaowei_action") == "succeeded"
+        assert [c.arguments for c in adapter.calls] == (
+            [] if interruption == "read" else [{"value": "after"}]
+        )
+        assert (
+            await env.scalar("SELECT state FROM xiaowei_action")
+            == {
+                None: "succeeded",
+                "read": "rejected",
+                "write": "unknown",
+                "feedback": "succeeded",
+            }[interruption]
+        )
         assert len(env.scripts.calls[asked]) == 2
         assert len(env.scripts.calls) == 1  # 两次批准均未调用模型。
         assert (await served.ready())["status"] == "ready"
+        if interruption:
+            receipt = message_text(channel.sends[-1][1])
+            assert "工具执行失败" not in receipt
+            assert (
+                await env.scalar(
+                    "SELECT failure_code FROM xiaowei_request WHERE reply_message_id='om_ok'"
+                )
+                == {
+                    "read": "action_rejected",
+                    "write": "action_unknown",
+                    "feedback": "action_feedback_failed",
+                }[interruption]
+            )
+        # 正式 HTTP 入口仍可执行只读查询，证据来自真实治理/SQLGuard/存储链。
+        await served.page()
+        query = env.scripts.add(
+            "各地区销售额",
+            tool_call(
+                "run_readonly_query", cluster=SR.target_id, sql="SELECT region, total FROM sales"
+            ),
+            cite(),
+        )
+        response = await served.turn(query, "query", "after-approval")
+        assert response.status_code == 200
+        body = response.json()
+        assert body["state"] == "completed"
+        (fact,) = body["delivery"]["facts"]
+        assert fact["tool_id"] == "local/run_readonly_query"
+        assert fact["rows"] == [{"region": "east", "total": 100}, {"region": "west", "total": 50}]
+        assert len(statements(env.drv)) == 1
         assert await served.finish() == 0

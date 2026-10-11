@@ -128,7 +128,7 @@ async def test_approval_expiry_is_rechecked_after_readback(
 
 
 @pytest.mark.parametrize("when", ["read", "write"])
-async def test_cancelled_execution_recovers_unknown_and_is_never_replayed(
+async def test_settled_cancel_survives_restart_and_is_never_replayed(
     actions: Actions, when: str
 ) -> None:
     action_id = await propose(actions)
@@ -145,20 +145,22 @@ async def test_cancelled_execution_recovers_unknown_and_is_never_replayed(
     task.cancel()
     with pytest.raises(asyncio.CancelledError):
         await task
-    assert not env.store.readiness.ok
+    assert env.store.readiness.ok
     assert len(adapter.calls) == (0 if when == "read" else 1)
     async with takeover(actions) as new:
-        assert await new.rows("SELECT state FROM xiaowei_action") == [("unknown",)]
+        assert await new.rows("SELECT state FROM xiaowei_action") == [
+            ("rejected" if when == "read" else "unknown",)
+        ]
         assert await new.rows(
             "SELECT state FROM xiaowei_request WHERE turn_id=:turn", turn=receipt.record.turn_id
-        ) == [("interrupted",)]
+        ) == [("failed",)]
         async with running(new, max_reply_chars=3500) as group:
             await group.ask(f"/批准 {action_id}", message_id="om_again")
     assert len(adapter.calls) == (0 if when == "read" else 1)
 
 
 @pytest.mark.parametrize("stage", ["preclaim", "feedback"])
-async def test_cancelled_timeout_readback_keeps_instance_fenced(
+async def test_cancelled_timeout_readback_settles_request_without_stopping_instance(
     actions: Actions, monkeypatch: pytest.MonkeyPatch, stage: str
 ) -> None:
     action_id = await propose(actions)
@@ -207,17 +209,23 @@ async def test_cancelled_timeout_readback_keeps_instance_fenced(
     task.cancel()
     with pytest.raises(asyncio.CancelledError):
         await task
-    assert reads == 2
-    assert not env.store.readiness.ok
+    assert reads == 3
+    assert env.store.readiness.ok
     assert len(actions.adapter.calls) == (1 if stage == "feedback" else 0)
     assert await env.rows("SELECT state FROM xiaowei_action") == [
         ("succeeded" if stage == "feedback" else "pending",)
     ]
     assert await env.rows(
-        "SELECT state, answer FROM xiaowei_request WHERE reply_message_id='om_a'"
-    ) == [("running", None)]
-    with pytest.raises(NotReadyError):
-        await env.service.accept(env.group(attributed(A, "再次提问"), "om_next"))
+        "SELECT state, failure_code, answer FROM xiaowei_request WHERE reply_message_id='om_a'"
+    ) == [
+        (
+            "failed",
+            "action_feedback_failed" if stage == "feedback" else "action_not_approvable",
+            None,
+        )
+    ]
+    next_receipt = await env.service.accept(env.group(attributed(A, "再次提问"), "om_next"))
+    assert next_receipt.record.state == "accepted"
 
 
 async def test_loss_of_instance_lock_during_recheck_prevents_write(actions: Actions) -> None:
