@@ -37,7 +37,7 @@
 
 ## 3. 当前计划与下一项工作
 
-**当前下一步：** 本轮已完成本地实现及离线检查的 [七项修复计划 R12](docs/superpowers/plans/2026-10-10-production-dialogue-repairs.md#r12统一业务卡片与受限格式第-12-项同一展示根因)，精确基线见快照。按本次授权推送并开 PR，交用户指定审查方；合并和部署仍须另获授权。R4 的 100 轮容量切片及附件/报告尚未实施，不因本轮“继续”一并推进。
+**当前下一步：** 本轮已完成本地实现及离线检查的 [七项修复计划 R12](docs/superpowers/plans/2026-10-10-production-dialogue-repairs.md#r12统一业务卡片与受限格式第-12-项同一展示根因)，精确基线见快照。[PR #80](https://github.com/shixian66/xiaowei-agent-sdk/pull/80) 已创建；补齐 CI 发现的批准依赖闭集遗漏后，核对最终 head 的 CI，交用户指定审查方。合并和部署仍须另获授权。R4 的 100 轮容量切片及附件/报告尚未实施，不因本轮“继续”一并推进。
 
 **R12 当前实现与证据（2026-10-11）：** 复用已验证的 `send_delivery` / `build_feishu_message`、静态 `OutboundCard` 与二分容量搜索；Gateway 和 CLI 发送路径未另写。只有 `feishu_text` 中的模型业务原文及模型分析进入格式器；固定 `monitoring_notice` 先按可信字段分离；固定回执、来源、限制、引用、获准事实、SQL/DDL、原文 JSON 始终纯文字。本片不改变模型/工具契约，未调用真实模型，不属于 R7/R3 豁免的扩展。生效展示与回退说明只在 ARCHITECTURE §7 / OPERATIONS 维护。
 
@@ -49,6 +49,8 @@
 - 新上下文分支复查发现并闭合：解析器规范化行内代码的换行/空格、吞掉反斜杠，以及无事实监控固定说明误入格式器；先补 **9 failed**，随后原文整段回退、固定说明独立展示，定向 **108 passed**，另补两项必要说明容量边界。首轮完整离线回归为 **1 failed, 2987 passed, 60 deselected**（762.34s）；唯一失败是既有诊断测试仍要求首行没有卡片标题，按 C1 更新为标题+澄清类型，零 SQL、零 Evidence、无分析断言原样保留。修复后完整套件已通过；最终结果见表。复查是实现方发起，不能代替用户指定独立审查。
 - 隔离变异：在 `/private/tmp` 源码副本分别去掉字面转义、恢复业务文本容器、把解析移回容量搜索、忽略 Markdown 字符预算；连同去掉代码原文保护、反斜杠保护和固定说明展示，共七项变异，对应回归分别 **7 / 2 / 1 / 1 / 5 / 2 / 4 项失败**；确认导入副本，候选未受修改。容量搜索变异曾匹配两个签名，脚本中收窄到事实构造器后验证完成，没有修改产品代码。
 
+- CI 发现并闭合：初次 PR head `784b062` 的 tests/security-gate 均仅因生产依赖闭集漏登记已批准的 `markdown-it-py` 而失败；本地同一检查先为 **1 failed, 10 passed**。仅新增这一项及来源注释，集合严格相等的断言保持；修正后 **11 passed**。临时副本恢复漏登、加入未批准依赖的两项变异各为 **1 failed**，证明检查没有放宽。产品及锁定版本未再改变。
+
 | R12 实际执行命令（本机 PostgreSQL 55432，其他端点仅 loopback） | 结果 |
 | --- | --- |
 | `.venv/bin/python -m pytest tests/sdk_core/test_feishu_format.py tests/sdk_core/test_feishu_render.py tests/sdk_core/test_diagnosis.py -q -W error --tb=short` | 108 passed，17.28s；含后补说明容量边界的 11 项定向用例另为 11 passed，39 deselected（0.42s） |
@@ -56,8 +58,11 @@
 | `.venv/bin/ruff check --no-cache src/xiaowei tests/sdk_core tests/p1b`；五个改动 Python 文件 `ruff format --check`；`.venv/bin/mypy --cache-dir=/private/tmp/r12-mypy src`；`UV_CACHE_DIR=/private/tmp/r12-uv-cache uv lock --check --offline`；`git diff --check` | 全部通过；129 源文件、92 锁定包 |
 | `.venv/bin/python -m pytest tests/security/test_docs_command_consistency.py tests/contract/test_doc_fact_binding.py -q -W error --tb=short` | 5 passed，0.10s |
 | `.venv/bin/python -m pytest tests/sdk_core tests/p1b -q -W error --tb=short`（下文相同本机监控替身环境） | **2999 passed, 60 deselected**，758.73s（12:38）；浏览器/真实 StarRocks opt-in 按既有规则未选入，无跳过、无警告 |
+| `.venv/bin/python -m pytest -q --ignore=tests/sdk_core --ignore=tests/deployment` | **2725 passed, 152 skipped, 40 deselected, 6 warnings**，20.38s；按 CI tests 原命令运行；跳过为既有环境/opt-in 规则，警告来自测试刻意阻断 socket |
+| `.venv/bin/python -m pytest -m security -q` | **928 passed, 79 skipped, 4337 deselected, 5 warnings**，7.27s；按 CI security-gate 原命令运行；相同既有环境及网络守卫说明 |
+| `.venv/bin/ruff check --no-cache .`；闭集测试 `ruff format --check`；`git diff --check` | 闭集修正后通过 |
 
-最终产品验证及实现方发起的新上下文复查均对应 `1f9784340419aa543b6e01ff1e9aa9109a3628f2`；复查确认代码原值、反斜杠与固定监控说明三项闭合，未发现新增阻断，另作五个原值诊断及 200/3500 字符容量检查。其后只补本段最终证据；没有再次改产品代码。最终 PR head 由 Git/PR 获取，不把该复查写成用户指定独立审查。完整运行日志 `/private/tmp/r12-sdk-p1b-reviewed.log`。
+最终产品验证及实现方发起的新上下文复查均对应 `1f9784340419aa543b6e01ff1e9aa9109a3628f2`；复查确认代码原值、反斜杠与固定监控说明三项闭合，未发现新增阻断，另作五个原值诊断及 200/3500 字符容量检查。其后仅补验证文档和已批准依赖闭集测试遗漏，没有再次改产品代码。最终 PR head 由 Git/PR 获取，不把该复查写成用户指定独立审查。完整运行日志 `/private/tmp/r12-sdk-p1b-reviewed.log`。
 
 **R12 未覆盖：** 真实 Lark/飞书 >=7.20 桌面及移动端实际显示、字面标签不解析、代码复制与送达；真实模型、公司 StarRocks、浏览器及部署。本片没有改 Web 代码，未重复浏览器验收。用户指定独立审查未执行；本地新上下文复查不能代替。回退展示不改数据库/schema；整镜像若跨 R3 仍须遵守其向前兼容边界。
 
