@@ -1,7 +1,8 @@
 """只格式化模型说明；事实、来源、SQL/DDL 原值不进入 Markdown 解析器。
 
 Lark Markdown 特殊字符按官方参考编码为 HTML 数字实体；仅代码生成的加粗、列表和换行
-保留语法。代码内容用 plain_text，避免围栏逃逸。解析只在容量分配结束后执行一次。
+保留语法。含代码或反斜杠的说明整段保留原文 plain_text，避免规范化或围栏逃逸。
+解析只在容量分配结束后执行一次。
 """
 
 import string
@@ -40,9 +41,6 @@ def _inline(tokens: list[Token]) -> str:
             parts.append("**")
         elif token.type in {"softbreak", "hardbreak"}:
             parts.append("\n")
-        elif token.type == "code_inline":
-            # 保留内容和字面定界符，不把任意长度的反引号再送入平台代码语法。
-            parts.append((token.markup + token.content + token.markup).translate(_LITERAL))
         else:
             parts.append((token.content or token.markup).translate(_LITERAL))
     return "".join(parts)
@@ -51,13 +49,19 @@ def _inline(tokens: list[Token]) -> str:
 def format_prose(text: str) -> list[dict[str, Any]]:
     """把已经 display_text 处理过的模型文字变成受限组件；容量不足可保留调用方的纯文字卡片。"""
     plain = [{"tag": "div", "text": {"tag": "plain_text", "content": text}}]
-    if len(text) > MAX_FORMAT_CHARS:
+    if len(text) > MAX_FORMAT_CHARS or "\\" in text:
         return plain
     tokens = _PARSER.parse(text)
     if sum(1 + len(t.children or ()) for t in tokens) > MAX_FORMAT_TOKENS:
         return plain
+    # Markdown 会规范化代码的换行、首尾空格和缩进；保留原输入，不能由 token 重建。
+    if any(
+        t.type in {"fence", "code_block"} or any(c.type == "code_inline" for c in t.children or ())
+        for t in tokens
+    ):
+        return plain
     if not any(
-        t.type in {"heading_open", "bullet_list_open", "ordered_list_open", "fence", "code_block"}
+        t.type in {"heading_open", "bullet_list_open", "ordered_list_open"}
         or any(c.type == "strong_open" for c in t.children or ())
         for t in tokens
     ):
@@ -94,8 +98,5 @@ def format_prose(text: str) -> list[dict[str, Any]]:
             parts.append(_inline(token.children or []))
         elif kind == "paragraph_close":
             parts.append("\n" if lists else "\n\n")
-        elif kind in {"fence", "code_block"}:
-            flush()
-            elements.append({"tag": "div", "text": {"tag": "plain_text", "content": token.content}})
     flush()
     return elements or plain

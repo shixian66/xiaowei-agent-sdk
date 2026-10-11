@@ -39,20 +39,21 @@
 
 **当前下一步：** 本轮实施 [七项修复计划 R12](docs/superpowers/plans/2026-10-10-production-dialogue-repairs.md#r12统一业务卡片与受限格式第-12-项同一展示根因)，精确基线见快照。完成离线检查后按本次授权推送并开 PR，交用户指定审查方；合并和部署仍须另获授权。R4 的 100 轮容量切片及附件/报告尚未实施，不因本轮“继续”一并推进。
 
-**R12 当前实现与证据（2026-10-11）：** 复用已验证的 `send_delivery` / `build_feishu_message`、静态 `OutboundCard` 与二分容量搜索；Gateway 和 CLI 发送路径未另写。只有 `feishu_text` 业务原文及模型分析进入格式器；固定回执、来源、限制、引用、获准事实、SQL/DDL、原文 JSON 始终纯文字。本片不改变模型/工具契约，未调用真实模型，不属于 R7/R3 豁免的扩展。生效展示与回退说明只在 ARCHITECTURE §7 / OPERATIONS 维护。
+**R12 当前实现与证据（2026-10-11）：** 复用已验证的 `send_delivery` / `build_feishu_message`、静态 `OutboundCard` 与二分容量搜索；Gateway 和 CLI 发送路径未另写。只有 `feishu_text` 中的模型业务原文及模型分析进入格式器；固定 `monitoring_notice` 先按可信字段分离；固定回执、来源、限制、引用、获准事实、SQL/DDL、原文 JSON 始终纯文字。本片不改变模型/工具契约，未调用真实模型，不属于 R7/R3 豁免的扩展。生效展示与回退说明只在 ARCHITECTURE §7 / OPERATIONS 维护。
 
 - RED：新增格式/统一卡片回归在基线为 **15 failed, 2 passed**；正式 Gateway 建议/澄清为 **2 failed, 1 passed**，失败点分别是文本容器和没有格式，成功对照是渲染失败记 failed / 零发送 / readiness 正常。仅为脚本模型与本机协议复现，不证明真实 Agent 或客户端行为。
 - 早期闭环：真实 Agents Runner、治理、Evidence/Session、隔离 PostgreSQL 与 Feishu Gateway 完成问候/澄清的一次交付，事件重投不重跑、不补发；正式失败对照保留原状态。真实 `lark-channel-sdk 1.4.0` 对本机 OpenAPI 发送建议、澄清、SQL 草稿和事实分析，私聊/原消息回复均只发一个 interactive 请求，捕获原始双层 JSON 字节与预算计算一致。
-- 格式边界：markdown-it-py 4.2.0 是显式生产依赖，使用公开 token API 的零预设，只开启允许规则。数据库原值和 SQL/DDL 不解析；代码块退纯文字、不拼接围栏。链接、媒体、HTML/@、伪表格、双重实体、任意长度代码围栏、未闭合/复杂嵌套与控制符反例验证发出的组件与字面文字。真实客户端是否显示样式、只解码一次实体、标签不解析及复制保真仍未验证。
+- 格式边界：markdown-it-py 4.2.0 是显式生产依赖，使用公开 token API 的零预设，只开启允许规则。数据库原值和 SQL/DDL 不解析；模型说明含代码块、行内代码或反斜杠时整段原文退纯文字，格式符一并保留、不拼接围栏。链接、媒体、HTML/@、伪表格、双重实体、任意长度代码围栏、未闭合/复杂嵌套与控制符反例验证发出的组件与字面文字。真实客户端是否显示样式、只解码一次实体、标签不解析及复制保真仍未验证。
 - 性能/容量：原有五事实×400行的对数卡片构造回归保留；解析只在容量选择之后，每条选中说明最多一次、输入至多 3500 字符、嵌套 16 与 token 量有界。实体膨胀放不下时退同一张纯文字卡片，保留原事实优先、完整 SQL/未展示说明、整行裁剪、两种预算及截断标记。
 - 回归发现并修复：初版把无事实固定回执也卡片化，既有失败/繁忙/控制符回执用例发现 **64 failed**；已按可信 `feishu_text` 字段区分业务与固定回执，保留既有断言。两项无事实业务容器断言按已批准 C1 改为卡片，换行、控制符、容量、单消息与未核实标签保护未删除。一次测试命令引用不存在的文件未执行用例，已改用实际 R3 文件；一次 uv 默认缓存权限错误改用仓库外缓存后锁检查通过。
-- 隔离变异：在 `/private/tmp` 源码副本分别去掉字面转义、恢复业务文本容器、把解析移回容量搜索、忽略 Markdown 字符预算；各对应回归 **7 / 2 / 1 / 1 项失败**，确认导入副本，候选未受修改。
+- 新上下文分支复查发现并闭合：解析器规范化行内代码的换行/空格、吞掉反斜杠，以及无事实监控固定说明误入格式器；先补 **9 failed**，随后原文整段回退、固定说明独立展示，定向 **108 passed**，另补两项必要说明容量边界。首轮完整离线回归为 **1 failed, 2987 passed, 60 deselected**（762.34s）；唯一失败是既有诊断测试仍要求首行没有卡片标题，按 C1 更新为标题+澄清类型，零 SQL、零 Evidence、无分析断言原样保留。正在修复后重跑完整套件；最终结果见表。复查是实现方发起，不能代替用户指定独立审查。
+- 隔离变异：在 `/private/tmp` 源码副本分别去掉字面转义、恢复业务文本容器、把解析移回容量搜索、忽略 Markdown 字符预算；连同去掉代码原文保护、反斜杠保护和固定说明展示，共七项变异，对应回归分别 **7 / 2 / 1 / 1 / 5 / 2 / 4 项失败**；确认导入副本，候选未受修改。容量搜索变异曾匹配两个签名，脚本中收窄到事实构造器后验证完成，没有修改产品代码。
 
 | R12 实际执行命令（本机 PostgreSQL 55432，其他端点仅 loopback） | 结果 |
 | --- | --- |
-| `.venv/bin/python -m pytest tests/sdk_core/test_feishu_format.py tests/sdk_core/test_feishu_render.py -q -W error --tb=short` | 68 passed，4.30s；随后加强字面反例单独 13 passed，26 deselected |
-| `.venv/bin/python -m pytest tests/sdk_core/test_feishu_format.py tests/sdk_core/test_feishu_render.py tests/sdk_core/test_feishu.py tests/sdk_core/test_channel_service.py tests/sdk_core/test_web.py tests/sdk_core/test_evidence.py tests/sdk_core/test_runtime.py tests/sdk_core/test_cli.py tests/sdk_core/test_r3_render.py tests/sdk_core/test_r3_entrypoints.py -q -W error --tb=short` | 658 passed，149.50s |
-| `.venv/bin/ruff check --no-cache src/xiaowei tests/sdk_core tests/p1b`；四个改动 Python 文件 `ruff format --check`；`.venv/bin/mypy --cache-dir=/private/tmp/r12-mypy src`；`UV_CACHE_DIR=/private/tmp/r12-uv-cache uv lock --check --offline`；`git diff --check` | 全部通过；129 源文件、92 锁定包 |
+| `.venv/bin/python -m pytest tests/sdk_core/test_feishu_format.py tests/sdk_core/test_feishu_render.py tests/sdk_core/test_diagnosis.py -q -W error --tb=short` | 108 passed，17.28s；含后补说明容量边界的 11 项定向用例另为 11 passed，39 deselected（0.42s） |
+| `.venv/bin/python -m pytest tests/sdk_core/test_feishu_format.py tests/sdk_core/test_feishu_render.py tests/sdk_core/test_feishu.py tests/sdk_core/test_channel_service.py tests/sdk_core/test_web.py tests/sdk_core/test_evidence.py tests/sdk_core/test_runtime.py tests/sdk_core/test_cli.py tests/sdk_core/test_r3_render.py tests/sdk_core/test_r3_entrypoints.py -q -W error --tb=short` | 658 passed，149.50s（修复前中间候选；新候选最终证据为完整套件） |
+| `.venv/bin/ruff check --no-cache src/xiaowei tests/sdk_core tests/p1b`；五个改动 Python 文件 `ruff format --check`；`.venv/bin/mypy --cache-dir=/private/tmp/r12-mypy src`；`UV_CACHE_DIR=/private/tmp/r12-uv-cache uv lock --check --offline`；`git diff --check` | 全部通过；129 源文件、92 锁定包 |
 | `.venv/bin/python -m pytest tests/security/test_docs_command_consistency.py tests/contract/test_doc_fact_binding.py -q -W error --tb=short` | 5 passed，0.10s |
 | `.venv/bin/python -m pytest tests/sdk_core tests/p1b -q -W error --tb=short`（下文相同本机监控替身环境） | 正在运行；最终结果更新后才作为交付证据 |
 

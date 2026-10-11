@@ -272,10 +272,17 @@ def _static_card(elements: list[Message], title: str) -> Message:
 
 
 def _prose_card(
-    prefix: str, raw: str, *, clipped: bool = False, formatted: bool = False
+    prefix: str,
+    raw: str,
+    *,
+    notice: str | None = None,
+    clipped: bool = False,
+    formatted: bool = False,
 ) -> Message:
     text = display_text(raw)
     elements = [_div(prefix)] if prefix else []
+    if notice:
+        elements.append(_div(notice))
     elements.extend(format_prose(text) if formatted else [_div(text)])
     if clipped:
         elements.append(_div(TEXT_CLIPPED))
@@ -313,6 +320,9 @@ def build_feishu_message(
             raw, prefix = delivery.content, ""
         else:
             raw = delivery.feishu_text
+            if delivery.monitoring_notice:
+                # Evidence 的原文字段包含这条系统说明；独立保留，不把限制送进模型格式器。
+                raw = raw.removeprefix(delivery.monitoring_notice + "\n")
             title = (
                 delivery.content.partition("\n")[0]
                 if delivery.monitoring_notice
@@ -329,7 +339,13 @@ def build_feishu_message(
                 # 固定回执没有模型原文字段；保持原来的文本消息，不按关键词猜业务类型。
                 shown = mention_safe(display_text(text))
                 return {"text": shown + ("\n" + TEXT_CLIPPED if clipped else "")}
-            return _prose_card(prefix, text, clipped=clipped, formatted=formatted)
+            return _prose_card(
+                prefix,
+                text,
+                notice=delivery.monitoring_notice,
+                clipped=clipped,
+                formatted=formatted,
+            )
 
         full = prose_message(raw)
         if fits(full):

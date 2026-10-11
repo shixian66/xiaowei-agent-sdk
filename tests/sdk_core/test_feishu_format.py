@@ -112,6 +112,57 @@ def test_code_drafts_fall_back_to_plain_text_without_fence_escape(fence: str) ->
     assert all(code not in n["content"] for n in markdowns(message))
 
 
+@pytest.mark.parametrize(
+    "raw",
+    [
+        "**草稿**\n`SELECT 'first\nsecond';`",
+        "**草稿**\n` SELECT 1 `",
+        "**草稿**\n``  SELECT `x`  ``",
+        "**SQL草稿**\nSELECT '\\_%' AS pattern",
+        "**路径** C:\\tmp\\log",
+        "**草稿**\n```sql\nSELECT  1;\n```",
+        "**草稿**\n\n    SELECT  1\n",
+    ],
+)
+def test_code_and_backslash_prose_keep_exact_original_as_plain_text(raw: str) -> None:
+    message = build_feishu_message(prose("建议", raw), 3500, "oc_test")
+    assert markdowns(message) == []
+    assert raw in text_parts(message)
+
+
+@pytest.mark.parametrize("model_text", ["**检查采集端**", "**草稿**\n```sql\nSELECT 1;\n```"])
+def test_monitoring_notice_stays_plain_when_model_prose_has_format(model_text: str) -> None:
+    notice = "未核实监控源（系统记录）：prometheus-prod（上游认证或授权失败）。"
+    source = Delivery(
+        channel="feishu",
+        evidence_ids=(),
+        content="排查建议（监控读取失败；模型生成，未经数据验证）\n旧转义内容",
+        feishu_text=notice + "\n" + model_text,
+        monitoring_notice=notice,
+    )
+    message = build_feishu_message(source, 3500, "oc_test")
+    elements = message["card"]["body"]["elements"]
+    assert {"tag": "div", "text": {"tag": "plain_text", "content": notice}} in elements
+    assert all("prometheus" not in node["content"] for node in markdowns(message))
+    assert "旧转义内容" not in "\n".join(text_parts(message))
+
+
+@pytest.mark.parametrize("max_chars", [200, 3500])
+def test_monitoring_notice_is_never_clipped_with_model_prose(max_chars: int) -> None:
+    notice = "未核实监控源（系统记录）：prometheus-prod（上游认证或授权失败）。"
+    source = Delivery(
+        channel="feishu",
+        evidence_ids=(),
+        content="排查建议（监控读取失败；模型生成，未经数据验证）\n旧转义内容",
+        feishu_text=notice + "\n" + "**检查采集端**\n" * 1200,
+        monitoring_notice=notice,
+    )
+    message = build_feishu_message(source, max_chars, "oc_test")
+    assert notice in text_parts(message) and TEXT_CLIPPED in text_parts(message)
+    assert all("prometheus" not in n["content"] for n in markdowns(message))
+    assert sum(map(len, text_parts(message))) <= max_chars and size(message) <= 30_000
+
+
 def test_controls_and_unclosed_syntax_cannot_make_platform_tags() -> None:
     raw = "**没有结束 [x](url)\n\u202e\u200b<at id=all>"
     message = build_feishu_message(prose("需要澄清", raw), 3500, "oc_test")
@@ -234,10 +285,12 @@ async def test_product_sender_and_real_sdk_send_one_bounded_business_card(
     assert body["msg_type"] == "interactive"
     message = {"card": json.loads(body["content"])}
     assert message["card"]["schema"] == "2.0"
-    assert "**关键**" in "\n".join(n["content"] for n in markdowns(message))
     assert len(raw) == request_bytes(message, "oc_alice", reply_to=reply_to) <= 30_000
     if kind == "SQL草稿":
-        assert 'SELECT "<at id=all> ```";' in "\n".join(text_parts(message))
+        # 按已批准的保真回退，含代码的说明整段原文纯文字，仍只发送一张业务卡片。
+        assert markdowns(message) == [] and source.feishu_text in text_parts(message)
+    else:
+        assert "**关键**" in "\n".join(n["content"] for n in markdowns(message))
 
 
 @pytest.mark.parametrize(
