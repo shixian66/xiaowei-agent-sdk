@@ -37,7 +37,7 @@ _PARSER = MarkdownIt("zero", {"maxNesting": 16}).enable(
 def _inline(tokens: list[Token]) -> str:
     parts: list[str] = []
     for token in tokens:
-        if token.type in {"strong_open", "strong_close"}:
+        if token.type in {"strong_open", "strong_close"} and token.markup == "**":
             parts.append("**")
         elif token.type in {"softbreak", "hardbreak"}:
             parts.append("\n")
@@ -62,7 +62,7 @@ def format_prose(text: str) -> list[dict[str, Any]]:
         return plain
     if not any(
         t.type in {"heading_open", "bullet_list_open", "ordered_list_open"}
-        or any(c.type == "strong_open" for c in t.children or ())
+        or any(c.type == "strong_open" and c.markup == "**" for c in t.children or ())
         for t in tokens
     ):
         return plain

@@ -61,6 +61,39 @@ def test_approved_headings_bold_and_lists_are_generated_not_copied() -> None:
     assert len(tables(message)) == 1
 
 
+@pytest.mark.parametrize("identifier", ["__name__", "__DORIS_DELETE_SIGN__", "__init__"])
+@pytest.mark.parametrize("has_facts", [False, True], ids=["advice", "fact_analysis"])
+@pytest.mark.parametrize(
+    ("raw_template", "shown_template", "formatted"),
+    [
+        ("按 {identifier} 过滤", "按 {identifier} 过滤", False),
+        ("**重点**：按 {identifier} 过滤", "**重点**：按 {identifier} 过滤", True),
+        ("**按 {identifier} 过滤**", "**按 {identifier} 过滤**", True),
+        ("- 按 {identifier} 过滤", "- 按 {identifier} 过滤", True),
+    ],
+    ids=["plain", "alongside_bold", "inside_bold", "list"],
+)
+def test_double_underscore_identifiers_keep_literal_spelling(
+    identifier: str,
+    has_facts: bool,
+    raw_template: str,
+    shown_template: str,
+    formatted: bool,
+) -> None:
+    raw = raw_template.format(identifier=identifier)
+    source = delivery(fact(), analysis=raw) if has_facts else prose("建议", raw)
+    message = build_feishu_message(source, 3500, "oc_test")
+    nodes = markdowns(message)
+    assert bool(nodes) is formatted
+    if formatted:
+        # 解码实体后只允许已有的 ** 加粗标记，双下划线必须仍属于标识符原值。
+        shown = html.unescape("\n".join(node["content"] for node in nodes))
+        assert shown == shown_template.format(identifier=identifier)
+    else:
+        expected = f"- {raw}（依据：ev_original）" if has_facts else raw
+        assert expected in text_parts(message)
+
+
 @pytest.mark.parametrize(
     "text",
     [
