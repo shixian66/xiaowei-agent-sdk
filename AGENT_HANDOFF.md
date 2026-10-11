@@ -9,7 +9,7 @@
 | 项目 | 已核对事实 |
 | --- | --- |
 | 仓库 | [shixian66/xiaowei-agent-sdk](https://github.com/shixian66/xiaowei-agent-sdk) |
-| 本地目录 / 分支 | D7：`/Users/kloenguyen/.codex/worktrees/monitoring-d7/agent-SDK` / `codex/monitoring-d7`；基线 origin/main `0b136bb711dbfb41e8a82a7265008fad332c5526`（PR #80 合入提交，含 PR #79 / S6）。主工作区旧 G0 分支与其他工作树未改动。 |
+| 本地目录 / 分支 | D7：`/Users/kloenguyen/.codex/worktrees/monitoring-d7/agent-SDK` / `codex/monitoring-d7`；初始基线 `0b136bb711dbfb41e8a82a7265008fad332c5526`（PR #80，含 PR #79 / S6）；交付前同步 origin/main `4f6132edf20677ec4769a0f87eec564ba45f584b`（PR #81 / S1）。主工作区旧 G0 分支与其他工作树未改动。 |
 | M5 历史起点 | `372c381f44ecfa1fa53961f137d0058033cbd805`；不是远端当前 main 的核验结论 |
 | 本轮审查版本 | D7 前置协议 215b445 已作新上下文只读复查；当前产品实现的精确候选以交付 head 为准，尚未独立审查。R12 / PR #80 已合入，原验证证据保留。 |
 | 已同步主线审查记录 | W5 `fdfdb469cbcf5e8499f9ee8d69dae954bae0ebda` 经用户独立复审通过并随 PR #74 合入。取消恢复候选 `0ec6c4351824c6b85338ba713d85d54ef34484c2` 的内部只读复查及后续验证记录见下文；这些不是 R7 的新独立审查。本次以已经合入的 PR #76 / main `c7e1e40c346fcd488dbd0dfd3af2e36377e2ee66` 同步，原监控记录与实战缺口保留。 |
@@ -51,9 +51,26 @@
 - 旧完整回归在数值/展示边界修复前主动中断（749 passed、60 deselected），不计完整通过。最新完整回归 /private/tmp/xw-d7-sdk-final.log 正在运行，最终检查及新上下文复查待补；尚未推送/创建PR。
 - 未覆盖：获准真实模型的任务选择/澄清/修正/答案/步数/耗时/用量，真实群收发与展示，公司Grafana版本/组织/provisioning/规模/恢复。按用户本轮只做离线验证；离线不自动晋级真实能力或部署。
 
-**R12 已合入的有效证据：** 以下保留 PR #80 对应的离线证据，不代替当前 D7 验收。
+**已同步主线的有效证据：** 下文保留 S1（PR #81）与 R12（PR #80）当时的离线记录，不代替当前 D7 验收。
 
-**R12 当前实现与证据（2026-10-11）：** 复用已验证的 `send_delivery` / `build_feishu_message`、静态 `OutboundCard` 与二分容量搜索；Gateway 和 CLI 发送路径未另写。只有 `feishu_text` 中的模型业务原文及模型分析进入格式器；固定 `monitoring_notice` 先按可信字段分离；固定回执、来源、限制、引用、获准事实、SQL/DDL、原文 JSON 始终纯文字。本片不改变模型/工具契约，未调用真实模型，不属于 R7/R3 豁免的扩展。生效展示与回退说明只在 ARCHITECTURE §7 / OPERATIONS 维护。
+**S1 已合入实现与证据（PR #81）：** 产品只改主模板轮数 20→100。新增测试侧容量观察，复用正式 serve/Web、真实 Runner/治理/SQLGuard/PolicySession 与隔离 PostgreSQL，底层模型/StarRocks 用既有替身，监控用真 SDK 和本机 MCP 服务。完整回放、签名、scope 复核、请求字节准入都保持；没有引入压缩、裁剪、第二套循环、产品测试入口或新的权限。容量表、统计口径和复现命令唯一记录在[容量报告](docs/superpowers/reports/2026-10-11-session-capacity-s1.md)。
+
+- 基线相关 Session/Vertex/R3 **188 passed**；混合序列先在旧模板上观察到第 21 轮拒绝，再调整唯一模板值。初始 fixture 参数错误先定位修正，不把它们算作产品 RED。
+- 成功与关键失败：30 个混合排障交互全部完成；原 20/21、新 100/101 边界经正式 Web 验证，拒绝轮没有模型或新增工具 I/O。active 历史仅提高轮数可继续，撤权/封存/关闭仍拒绝；多查询已执行但提交超字节不保存 SDK 历史、不重放。
+- 最先触顶的历史/MCP/scope 对照、首次及工具返回后 HTTP 超限零发送、完整调用结果/签名配对、新增目标/工具的实际开销均覆盖。测量记录大小/次数/时间/哈希，不保存问题、SQL、结果、签名或主机。
+- 隔离变异确认导入副本：模板恢复 20 的 30 轮回归为 **1 failed**；移除请求字节检查使首次/工具返回后回归为 **2 failed**。日志 `/private/tmp/s1-mutation-template20.log`、`/private/tmp/s1-mutation-request_guard.log`，候选未被变异。
+
+| S1 实际检查（本机隔离 PostgreSQL 55432，模型与源均为替身） | 结果 |
+| --- | --- |
+| `SDK_TEST_POSTGRES_URL=postgresql+asyncpg://postgres@127.0.0.1:55432/postgres .venv/bin/python -m pytest tests/sdk_core/test_session_policy.py tests/sdk_core/test_vertex_model.py tests/sdk_core/test_r3_entrypoints.py -q -W error` | 基线 188 passed，18.67s；`/private/tmp/s1-baseline.log` |
+| `.venv/bin/python -m pytest tests/sdk_core/test_session_capacity.py -q -W error --basetemp=/private/tmp/s1-capacity-evidence`（同一测试库环境） | 新增 16 passed，30.46s；`/private/tmp/s1-green.log` |
+| `.venv/bin/python -m pytest tests/sdk_core/test_session_capacity.py tests/sdk_core/test_session_policy.py tests/sdk_core/test_vertex_model.py tests/sdk_core/test_dialogue_gate.py tests/sdk_core/test_r3_entrypoints.py tests/sdk_core/test_cli.py tests/security/test_docs_command_consistency.py tests/deployment/test_compose.py -q -W error --basetemp=/private/tmp/s1-capacity-final`（同一测试库环境） | 315 passed、1 failed，211.16s；`/private/tmp/s1-related.log`。唯一失败为本机 Docker 磁盘满导致独立 PostgreSQL `initdb` 失败；隔离诊断 `/private/tmp/s1-pg-diagnostic.log` 已确认，不改变断言或清理其他任务资源 |
+| `.venv/bin/python -m pytest tests/sdk_core/test_session_capacity.py tests/sdk_core/test_session_policy.py tests/sdk_core/test_vertex_model.py tests/sdk_core/test_dialogue_gate.py tests/sdk_core/test_r3_entrypoints.py tests/sdk_core/test_cli.py tests/security/test_docs_command_consistency.py tests/contract/test_doc_fact_binding.py -q -W error --basetemp=/private/tmp/s1-final-evidence`（同一测试库环境） | 测量字段命名及文档更新后 314 passed，127.33s；`/private/tmp/s1-final-regressions.log`，含 16 项 S1 与 5 项文档检查。此命令不含 Compose，不能用于抹去上条失败 |
+| `.venv/bin/ruff check --no-cache .`；两新增文件 `ruff format --no-cache --check`；`.venv/bin/mypy --cache-dir /private/tmp/s1-mypy-cache src`；`git diff --check` | 已通过，129 源文件；最终定向回归及 CI 以精确候选另记 |
+
+**S1 未覆盖与后续：** 真实模型长上下文排障质量、token 用量、真实 Lark/公司 StarRocks、浏览器及部署未验证。S1 不改变提示词/工具契约，不新增模型豁免；离线统计不能证明真实 Agent 能完成同样任务。现有模板以外的公司配置不自动改写，具体操作及回退见 OPERATIONS。实现方的新上下文分支复查未发现阻断，报告的单值截断措辞已明确；不代表独立通过。S1 已随 PR #81 合入；已核对 head `cdab6bd705b81e2c21a8692f91d1642fe44f8b4e` 的[十项 CI](https://github.com/shixian66/xiaowei-agent-sdk/actions/runs/38142846169)全通过，仅证明 S1 版本。后续 S2/S3 仍未实施。
+
+**R12 已合入实现与历史证据（2026-10-11）：** 复用已验证的 `send_delivery` / `build_feishu_message`、静态 `OutboundCard` 与二分容量搜索；Gateway 和 CLI 发送路径未另写。只有 `feishu_text` 中的模型业务原文及模型分析进入格式器；固定 `monitoring_notice` 先按可信字段分离；固定回执、来源、限制、引用、获准事实、SQL/DDL、原文 JSON 始终纯文字。本片不改变模型/工具契约，未调用真实模型，不属于 R7/R3 豁免的扩展。生效展示与回退说明只在 ARCHITECTURE §7 / OPERATIONS 维护。
 
 - RED：新增格式/统一卡片回归在基线为 **15 failed, 2 passed**；正式 Gateway 建议/澄清为 **2 failed, 1 passed**，失败点分别是文本容器和没有格式，成功对照是渲染失败记 failed / 零发送 / readiness 正常。仅为脚本模型与本机协议复现，不证明真实 Agent 或客户端行为。
 - 早期闭环：真实 Agents Runner、治理、Evidence/Session、隔离 PostgreSQL 与 Feishu Gateway 完成问候/澄清的一次交付，事件重投不重跑、不补发；正式失败对照保留原状态。真实 `lark-channel-sdk 1.4.0` 对本机 OpenAPI 发送建议、澄清、SQL 草稿和事实分析，私聊/原消息回复均只发一个 interactive 请求，捕获原始双层 JSON 字节与预算计算一致。
@@ -167,7 +184,7 @@ export XW_TEST_ALERTMANAGER_COMMUNITY_ROOT=/private/tmp/xw-a4-community
 
 **复查与独立审查：** 前次 fresh-context reviewer 是实现方发起的本地复查，不能称为 AGENTS 意义上的独立审查（N2）；它当时未发现阻断，不能覆盖本次 Claude 对 `3a254d3` 的新证据。用户指定的审查方已复审 `9ba40de` 并确认通过；同步主线后的差异、检查结果和 CI 单列，不把实现方自查称作新的独立审查。
 
-**未覆盖与残余边界：** 真实模型未验证（仅 R7 的用户例外），不证明已解决所有自然语言误选或真实模型必然按停止反馈结束。猜一个合法且有权限的目标仍可能被执行链接受；C7 暂不决定。未调用真实 Lark/飞书、公司 StarRocks，未跑浏览器/真实客户端样式或部署验收；正式 Web HTTP 路径不等于客户端和生产验收。其他六项未实施；模板仍 20 轮，公司配置不会自动改变。R7 本身没有数据库迁移；同步主线 W5 含 v6→v7，旧镜像回退须按主线成对恢复流程，不能仅换镜像。只回退 R7 可撤回提示词/反馈/C8 变更，不自动重放未知执行或未知投递。首次推送阶段只授权推送/开 PR；本次用户已授权核对最新 CI 与合并条件通过后合并。部署及私聊/测试群上线观察仍须另获授权。
+**未覆盖与残余边界：** 真实模型未验证（仅 R7 的用户例外），不证明已解决所有自然语言误选或真实模型必然按停止反馈结束。猜一个合法且有权限的目标仍可能被执行链接受；C7 暂不决定。未调用真实 Lark/飞书、公司 StarRocks，未跑浏览器/真实客户端样式或部署验收；正式 Web HTTP 路径不等于客户端和生产验收。R7 交付时其他六项未实施、模板为 20 轮；当前状态见快照，公司配置不会自动改变。R7 本身没有数据库迁移；同步主线 W5 含 v6→v7，旧镜像回退须按主线成对恢复流程，不能仅换镜像。只回退 R7 可撤回提示词/反馈/C8 变更，不自动重放未知执行或未知投递。首次推送阶段只授权推送/开 PR；本次用户已授权核对最新 CI 与合并条件通过后合并。部署及私聊/测试群上线观察仍须另获授权。
 
 **推送前主线同步验证（本次候选）：** main 已再次 fetch 核对为 `3530a4d1bd358011a7b45982512f3a8f876eef4c`（PR #74 / W5）。群入口限制与写批准绑定仍在 I/O 前拒绝；同步时两处明确为已有 `not_allowed`，避免 R7 误报可再试。实际拒绝回归为修前 **3 failed**、修后 **3 passed**；隔离副本恢复默认码后 **3 failed**，核对实际导入临时源码，候选未被变异修改。日志 `/private/tmp/r7-main-sync-red.log`、`/private/tmp/r7-main-sync-mut.log`。未改变 Action 权限、批准绑定、一次执行、未知不重放或数据库契约。
 
