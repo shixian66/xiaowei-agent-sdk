@@ -100,6 +100,11 @@ class State:
     raw: bytes | None = None
     headers: dict[str, str] = field(default_factory=dict)
     require_auth: bool = True
+    writes: list[tuple[str, str, Any]] = field(default_factory=list)
+    write_status: int = 200
+    write_delay: float = 0
+    read_status_after_write: int | None = None
+    write_result_updates: dict[str, Any] = field(default_factory=dict)
 
 
 @contextmanager
@@ -111,6 +116,8 @@ def backend() -> Iterator[tuple[str, State]]:
             state.requests.append(("GET", self.path, self.headers.get("authorization")))
             time.sleep(state.delay)
             code = state.status
+            if state.writes and state.read_status_after_write is not None:
+                code = state.read_status_after_write
             if state.require_auth and self.headers.get("authorization") != AUTHORIZATION:
                 code = 401
             body = (
@@ -131,6 +138,48 @@ def backend() -> Iterator[tuple[str, State]]:
                 self.wfile.write(body)
             except (BrokenPipeError, ConnectionResetError):
                 pass  # 客户端取消/有界超时后的隔离端点。
+
+        def do_POST(self) -> None:
+            body = json.loads(self.rfile.read(int(self.headers.get("Content-Length", "0"))))
+            self._write(body)
+
+        def do_DELETE(self) -> None:
+            self._write(None)
+
+        def _write(self, body: Any) -> None:
+            state.requests.append((self.command, self.path, self.headers.get("authorization")))
+            code = state.write_status
+            if state.require_auth and self.headers.get("authorization") != AUTHORIZATION:
+                code = 401
+            if code == 200:
+                state.writes.append((self.command, self.path, copy.deepcopy(body)))
+                current = datetime.now(UTC).isoformat()
+                if self.command == "POST":
+                    value = {
+                        **body,
+                        "id": SILENCE_ID,
+                        "updatedAt": current,
+                        "status": {"state": "active"},
+                        **copy.deepcopy(state.write_result_updates),
+                    }
+                    state.payloads[f"/api/v2/silence/{SILENCE_ID}"] = value
+                    state.payloads["/api/v2/silences"] = [value]
+                else:
+                    value = state.payloads[self.path]
+                    value.update(endsAt=current, updatedAt=current, status={"state": "expired"})
+                    value.update(copy.deepcopy(state.write_result_updates))
+            time.sleep(state.write_delay)  # 写已发生，客户端超时不能撤销它。
+            response = (
+                json.dumps({"silenceID": SILENCE_ID}).encode() if self.command == "POST" else b""
+            )
+            try:
+                self.send_response(code)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(response)))
+                self.end_headers()
+                self.wfile.write(response)
+            except (BrokenPipeError, ConnectionResetError):
+                pass
 
         def log_message(self, *_: Any) -> None:
             pass

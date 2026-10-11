@@ -125,6 +125,10 @@ _REJECTION_HINTS: dict[ToolRejectHint, str] = {
         "limit 须为1–100；page 从1开始，offset/panelId 从0开始，不超过32位整数；修改后再调用"
     ),
     "grafana_time_window": "from/to 须为有序 Unix 毫秒，窗口不超过31天；请核实起止时间或缩小窗口",
+    "silence_end": (
+        "ends_at 须晚于当前时间与 starts_at；支持多年且必须明确到期，"
+        "请核实用户要求的期限后修正，不要擅自改短"
+    ),
 }
 
 

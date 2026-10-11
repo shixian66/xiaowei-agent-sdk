@@ -129,6 +129,7 @@ ToolRejectHint = Literal[
     "grafana_tags",
     "grafana_pagination",
     "grafana_time_window",
+    "silence_end",
 ]
 """可信拒绝点提供的固定修正/限制提示标识；不携带参数或异常原文。"""
 

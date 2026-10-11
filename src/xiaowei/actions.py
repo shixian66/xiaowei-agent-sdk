@@ -91,6 +91,8 @@ class ActionBinding:
     execute: Execute
     target_binding: str
     """可信装配产生的固定源配置/执行语义版本摘要；不含凭据，改变即使旧批准失效。"""
+    precheck: Callable[[ToolRequest], ToolRequest] | None = None
+    """动作切片的零 I/O 提出检查；复用 Prechecked，拒绝可在本轮修正。"""
 
 
 class ActionStatusArgs(BaseModel):
@@ -204,7 +206,9 @@ class ActionService:
                         raise ToolRejectedError("动作不可用")
                     return await self._propose(ctx, req, b)
 
-                execute: Execute = propose
+                execute: Execute = (
+                    Prechecked(binding.precheck, propose) if binding.precheck else propose
+                )
             elif contract.policy_id == STATUS_POLICY:
 
                 async def status(req: ToolRequest) -> ToolObservation:
