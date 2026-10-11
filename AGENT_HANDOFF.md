@@ -48,6 +48,7 @@
 - 测试夹具修正：迁移后重新建立连接，避免复用 ALTER TABLE 前的 `SELECT *` 缓存；浏览器等待新建会话清空列表后再提问；无证据成功场景使用合法澄清回答。均保留原状态、权限、零业务 I/O 和不重放断言。
 - 实现方新上下文复查发现两处快照边界：提交阶段沿用旧字节、编码失败发生在 Session 提交之后。先补十项 RED（含矛盾状态反例），随后清空阶段旧测量、执行前检查 1024 字节配置兼容、成功状态编码前移至 SDK 写入前；提交后编码错误走原 `result_not_saved`/关闭链。没有新增业务限额、权限或 Agent 行为。日志 `/private/tmp/s2-review-red.log` 为 10 failed，修复后同文件及相关链路包含在 264 passed 中；这不是用户指定独立审查。
 - 新增三项隔离变异：恢复旧阶段字节、移除容量预检、移除提交后编码失败关闭，分别 3/2/1 failed；导入临时副本已核对，日志 `/private/tmp/s2-review-mutations.log`。S1 容量观察器需要转交新增提交返回值，先补持久状态断言复现 1 failed，再修测试装配，不改产品观测次数。
+- 发行 CI 揭示三处兼容遗漏：操作者文档带入开发框架名称；迁移保留计数仍期望 v7；模拟 v5 的夹具保留了 v8 列。仅修文档与夹具，保留原计数、回滚、旧程序拒绝及敏感信息断言。隔离 PostgreSQL 诊断确认旧夹具为重复列错误（42701），补齐真实 v5 形状后升级为 v8（`/private/tmp/s2-compose-migration-probe.log`）；完整镜像链由修订 head 的 CI 验证。
 
 **S2 验证状态：** 本机隔离 PostgreSQL 为 55432；下列命令中的 `pytest` 均使用 `SDK_TEST_POSTGRES_URL=postgresql+asyncpg://postgres@127.0.0.1:55432/postgres`。本机 Docker overlay 30G/30G（0 可用），镜像类验证受环境限制，未清理其他任务镜像/卷。PR 干净 CI 结果按精确 head 另记，不能把本机未通过的全量写成通过。
 
@@ -61,6 +62,7 @@
 | `.venv/bin/python -m pytest tests/sdk_core/test_session_capacity.py -q -W error`；`.venv/bin/python -m pytest tests/sdk_core/test_session_rejection_state.py -q -W error` | 最后一次容量观察器/状态边界调整后分别 16 passed（30.75s）和 36 passed（7.24s）；`/private/tmp/s2-capacity-observer-green.log`、`/private/tmp/s2-state-final-review.log` |
 | `.venv/bin/ruff check --no-cache .`；`.venv/bin/ruff format --check --no-cache src/xiaowei tests/sdk_core scripts/package_release.py tests/deployment/test_release.py tests/deployment/test_compose.py tests/deployment/test_maintenance.py`；`.venv/bin/mypy src/xiaowei`；`uv lock --check`；`git diff --check` | 已通过；格式 114 文件，类型 27 源文件；最终提交前重核未变输入 |
 | `.venv/bin/python -m pytest tests/security/test_docs_command_consistency.py tests/contract/test_doc_fact_binding.py -q -W error`；发行归档契约、包内文档引用、旧配置回退三个离线用例 | 分别 5 passed（0.17s）与 3 passed（0.11s）；`/private/tmp/s2-docs-final.log`、`/private/tmp/s2-release-contract-final.log`。不证明本机镜像检查通过 |
+| CI 兼容修正后的操作者文档/命令事实检查、发行契约三用例、`test_storage_v2.py -q -W error` | 分别 6 passed（0.26s）、3 passed（0.11s）、29 passed（4.04s）；`/private/tmp/s2-ci-doc-green.log`、`/private/tmp/s2-ci-release-offline-retry.log`、`/private/tmp/s2-ci-storage-green.log`。Ruff、改动文件格式、差异检查通过；镜像回归由 PR 修订 head 的 CI 核验 |
 
 **S2 未覆盖：** 真实 Lark 收发、公司 Web/StarRocks/模型、v8 在公司环境的升级/成对回退与用户验收。S2 不更改 Agent 行为契约，不新增真实模型豁免；S3 提前提醒及其他未批准切片仍未实施。数据库迁移需要显式操作，部署及私聊/测试群观察须用户另行授权。
 

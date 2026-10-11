@@ -424,11 +424,19 @@ def test_formal_compose_entry_success_failure_network_and_signal(
 
         downgraded = _pg(
             pg_id,
-            # 本机演练重建真实 v5 形状，不能只改版本而留下后来新增的表。
+            # 本机演练重建真实 v5 形状，不能只改版本而留下后来新增的表或列。
             "BEGIN; DROP TABLE xiaowei_action; DROP TABLE xiaowei_installation; "
+            "ALTER TABLE xiaowei_request DROP COLUMN session_state; "
             "UPDATE xiaowei_schema_version SET version = 5; COMMIT",
         )
         assert downgraded.returncode == 0
+        legacy_columns = _pg(
+            pg_id,
+            "SELECT count(*) FROM information_schema.columns "
+            "WHERE table_schema = current_schema() AND table_name = 'xiaowei_request' "
+            "AND column_name = 'session_state'",
+        )
+        assert legacy_columns.returncode == 0 and legacy_columns.stdout.strip() == "0"
         lock = docker(
             "exec",
             "-d",
