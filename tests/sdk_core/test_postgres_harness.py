@@ -4,6 +4,7 @@ fixture 会在测试实例上执行 ``CREATE DATABASE`` / ``DROP DATABASE ... WI
 因此“连接的就是 compose.sdk-test.yml 启动的那台一次性实例”必须由代码核对，而不是约定。
 """
 
+import asyncio
 import re
 from pathlib import Path
 from typing import Any
@@ -20,12 +21,17 @@ from tests.sdk_core.postgres_harness import (
     INSTANCE_MARKER,
     LOOPBACK,
     PORT,
+    SLEEPING_IN_DATABASE,
     TEST_DATABASE_PREFIX,
+    WAITING_ON_LOCK,
     HarnessMisconfiguredError,
     isolated_database,
     parse_admin_url,
     verify_test_instance,
 )
+from tests.sdk_core.synthetic_tools import secret
+
+from xiaowei.storage import open_engine
 
 _COMPOSE = Path(__file__).resolve().parents[2] / "compose.sdk-test.yml"
 _DOCUMENTED_URL = "postgresql+asyncpg://postgres@127.0.0.1:55432/postgres"
@@ -157,3 +163,73 @@ async def test_database_is_dropped_when_the_body_raises(test_postgres: None) -> 
 
     assert created
     assert created[0] not in await _existing_test_databases()
+
+
+@pytest.mark.loopback
+@pytest.mark.parametrize("same_database,expected", [(True, 1), (False, 0)])
+async def test_lock_wait_statistics_only_count_the_current_database(
+    postgres_url: URL, same_database: bool, expected: int
+) -> None:
+    async with (
+        isolated_database() as other_url,
+        open_engine(secret(postgres_url if same_database else other_url)) as waiting_engine,
+        open_engine(secret(postgres_url)) as observer,
+        waiting_engine.connect() as holder,
+        waiting_engine.connect() as waiter,
+    ):
+        await holder.execute(text("SELECT pg_advisory_xact_lock(987654321)"))
+        pid = await waiter.scalar(text("SELECT pg_backend_pid()"))
+        await waiter.commit()
+        pending = asyncio.create_task(
+            waiter.execute(text("SELECT pg_advisory_xact_lock(987654321)"))
+        )
+        try:
+            async with waiting_engine.connect() as probe, asyncio.timeout(2):
+                while (
+                    await probe.scalar(
+                        text("SELECT wait_event_type FROM pg_stat_activity WHERE pid=:pid"),
+                        {"pid": pid},
+                    )
+                    != "Lock"
+                ):
+                    await probe.commit()
+                    await asyncio.sleep(0.01)
+            async with observer.connect() as conn:
+                assert await conn.scalar(text(WAITING_ON_LOCK)) == expected
+        finally:
+            await holder.rollback()
+            await asyncio.wait_for(pending, 2)
+            await waiter.rollback()
+
+
+@pytest.mark.loopback
+@pytest.mark.parametrize("same_database,expected", [(True, 1), (False, 0)])
+async def test_sleep_statistics_only_count_the_current_database(
+    postgres_url: URL, same_database: bool, expected: int
+) -> None:
+    async with (
+        isolated_database() as other_url,
+        open_engine(secret(postgres_url if same_database else other_url)) as sleeping_engine,
+        open_engine(secret(postgres_url)) as observer,
+        sleeping_engine.connect() as sleeper,
+    ):
+        pid = await sleeper.scalar(text("SELECT pg_backend_pid()"))
+        await sleeper.commit()
+        sleeping = asyncio.create_task(sleeper.execute(text("SELECT pg_sleep(30)")))
+        try:
+            async with sleeping_engine.connect() as probe, asyncio.timeout(2):
+                while (
+                    await probe.scalar(
+                        text("SELECT wait_event FROM pg_stat_activity WHERE pid=:pid"), {"pid": pid}
+                    )
+                    != "PgSleep"
+                ):
+                    await probe.commit()
+                    await asyncio.sleep(0.01)
+            async with observer.connect() as conn:
+                assert await conn.scalar(text(SLEEPING_IN_DATABASE)) == expected
+        finally:
+            sleeping.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await sleeping
+            await sleeper.rollback()

@@ -9,7 +9,7 @@
 | 项目 | 已核对事实 |
 | --- | --- |
 | 仓库 | [shixian66/xiaowei-agent-sdk](https://github.com/shixian66/xiaowei-agent-sdk) |
-| 本地目录 / 分支 | R3：`/Users/kloenguyen/.codex/worktrees/dialogue-brief-r3/agent-SDK` / `codex/dialogue-brief-r3`；基线为 R7 已合并的 main `5de6efc0cc2ae4f30d8d467950bbe73316a4e21e`。监控及原 R7 工作树未改动。 |
+| 本地目录 / 分支 | R3：`/Users/kloenguyen/.codex/worktrees/dialogue-brief-r3/agent-SDK` / `codex/dialogue-brief-r3`；基线为 R7 已合并的 main `5de6efc0cc2ae4f30d8d467950bbe73316a4e21e`。已同步 PR #78 / main `b0174d273bce89b49bfbba82fedf86bb6a14c66b` 的测试隔离修复与文档，仅 handoff 冲突人工合并；产品代码不变。监控及原 R7 工作树未改动。 |
 | M5 历史起点 | `372c381f44ecfa1fa53961f137d0058033cbd805`；不是远端当前 main 的核验结论 |
 | 本轮审查版本 | R7 已审 `9ba40de`，同步候选 `cb63f748e9d491a9fa8f2a2088740e39ca1baefc` 的十项 CI 通过后随 PR #75 合并。当前七项计划 v5.3 的 §8 已按用户 2026-10-11 决定免做 R3 真实模型旧/新对照；真实模型未验证。本地复查不等于用户指定的独立审查，R3 新 SHA 仍须复核。 |
 | 已同步主线审查记录 | W5 `fdfdb469cbcf5e8499f9ee8d69dae954bae0ebda` 经用户独立复审通过并随 PR #74 合入。取消恢复候选 `0ec6c4351824c6b85338ba713d85d54ef34484c2` 的内部只读复查及后续验证记录见下文；这些不是 R7 的新独立审查。本次以已经合入的 PR #76 / main `c7e1e40c346fcd488dbd0dfd3af2e36377e2ee66` 同步，原监控记录与实战缺口保留。 |
@@ -61,6 +61,18 @@
 **R3 未覆盖与兼容：** 获准真实模型环境仍不可用（公司 API IP 限制），没有调用真实模型、Lark/飞书或公司 StarRocks。脚本只证明调用链与保护，不能证明模型减少复述或自主选对显示方式。用户 2026-10-11 批准免做 R3 真实模型旧/新对照，真实模型未验证，上线后先在私聊或测试群观察；样例脚本保留，其他切片不继承此例外。R3 仍须 CI 通过、独立复审无阻断并另获合并授权，观察须另获部署授权。真实 Lark 客户端与收发、部署/UAT 未验收。本片未改数据库 v7、模板轮数/字节/期限；不是会话摘要或裁剪。新版本能读取旧回答默认 full，旧镜像会按 extra=forbid 拒收带 fact_views 的新保存回答；回退操作见 [OPERATIONS](deploy/OPERATIONS.md#历史简短追问与-r3-兼容)。飞书摘要原文仍占单消息预算，放不下时明确省略，不自动查询或多发一条，已 sent 不由 requests resend 补全。
 
 **以下为 R7 与监控底座对应版本的既有证据，不代替 R3 验证：**
+
+### 已同步主线 PR #78 的测试证据（非 R3 验收）
+
+**本轮测试修复与基线同步。** 原 `c7e1e40` 基线的接管/等待 SQL 两库回归先为 **2 failed, 1 passed**，PgSleep 两库回归先为 **1 failed, 1 passed**；旧全局筛选确实误选另一库，旧取消 helper 也可能把另一库等待当成本轮暂停点。危险的终止/等待复现与变异只在任务自建55433一次性 PostgreSQL 上运行，容器已删除；测试实例身份校验没有放宽。提交前发现 PR #75 已解决终止筛选：按当前数据库和已知 `InstanceLock.pid`、或正式入口的准确实例锁键限定。保留该实现及其同库/跨库回归，移除本轮重复的终止 SQL 和用例，不用较宽筛选替换它。
+
+当前新增仅为：共享本库 Lock/PgSleep 统计与四项两库正反例；取消观察逐轮提交、要求看到本库等待、失败时取消并 await 回收；群网关占用前/反馈超时和正式 serve 占用前超时。占用前为 pending/零写/action_not_approvable，反馈阶段为 succeeded/一次写/action_feedback_failed；同一批准事件不重放，下一轮群查询与真实 Web HTTP 继续可用。使用真 SDK、治理、Evidence/Session和PostgreSQL，底层模型/飞书平台/写接口/StarRocks驱动为替身，不证明真实模型或实际写能力。
+
+**验证证据按版本分开。** 同步前最终七个受影响测试文件 **360 passed**（76.45s）；原完整仓库为 **2 failed, 4974 passed, 152 skipped, 59 deselected, 5 warnings**（1041.58s，最后PgSleep补充前）。两项未改部署迁移用例启动 PostgreSQL 失败，尚未进入迁移；原样串行复验仍失败。诊断留存的 users-rollback 容器 `initdb` 报 `No space left on device`，Docker盘100%；观察插件按 helper 覆盖日志，两份留存日志属于同一容器，不能分别证明两项原因。仅回收未使用构建缓存421.4MB，两项原样复跑 **2 passed**（153.63s）。这不是一次完整批次全绿，不能代替同步后候选验证；现有容器和数据卷未删除。
+
+**同步后候选验证。** 固定 `SDK_TEST_POSTGRES_URL=postgresql+asyncpg://postgres@127.0.0.1:55432/postgres`，`.venv/bin/python -m pytest` 运行七个受影响存储/群/正式入口文件、五个 `test_r7_*` 文件及 `test_action_boundaries.py`，参数 `-q -W error --tb=short`，为 **478 passed**（105.15s，完整命令随PR记录）。移除共享 Lock或PgSleep数据库条件的两项独立变异各为 **1 failed, 1 passed**，同库正向仍通过；它们只改进程内测试SQL，不改SDK/产品。Ruff全仓及7文件格式、mypy128源文件、锁文件92包和差异检查通过。前置超时的原回执变异有效证据沿用：已核对 `c7e1e40..5de6efc` 的 Action/ChannelService/ChannelStore 源码没有差异，目标失败映射未变，不无理由重跑。
+
+最终 CI 与用户精确 head 独立审查以本片 PR 为准，既有 R7/取消恢复记录只证明对应版本。任务日志为 `/private/tmp/xw-test-isolation-main75-related.log`、`/private/tmp/xw-test-isolation-main75-{wait,sleep}-mutation.log`、`/private/tmp/xw-test-isolation-full.log`、`/private/tmp/xw-test-isolation-deployment-after-cache.log`；诊断/变异脚本在 `/private/tmp/xw-test-isolation-diagnostics/`。只读复查不冒称用户独立验收，S6 的真实模型/公司环境门槛不因测试修复而豁免。
 
 **R7 当前本地实现与证据：** 产品基线 `2b541a30bb39d88d160e7f6f69de1c81fdea74d8`；计划 v4 / `4484e5cb183047c5b64d9523dcc5afc71c28188a`，用户决定文档提交 `e3a594637ce51408696a7fb08d2e62832e8db4a0`。目标选择保持单 Agent，B1 两条规则仅落实在实际发送的指令与工具说明；不新增 C7 硬目标确认。C8 按轮次/目标同步预占唯一再试、在途排他、成功不复位；R7 未改变权限、普通调用预算、SQLGuard 与连接池，也未新增应用表；同步主线 W5 后当前 schema 为 v7。
 

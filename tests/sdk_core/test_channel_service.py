@@ -17,6 +17,7 @@ from pydantic import SecretStr, ValidationError
 from sqlalchemy import text
 from sqlalchemy.engine import URL
 from sqlalchemy.ext.asyncio import AsyncEngine
+from tests.sdk_core.postgres_harness import WAITING_ON_LOCK
 from tests.sdk_core.synthetic_tools import (
     QUERY_TOOL,
     RETENTION_SECONDS,
@@ -695,11 +696,6 @@ TERMINATE_INSTANCE_LOCK = text(
     "SELECT count(pg_terminate_backend(pid)) FROM pg_stat_activity"
     " WHERE pid = :pid AND datname = current_database()"
 )
-WAITING_ON_LOCK = text(
-    "SELECT count(*) FROM pg_stat_activity"
-    " WHERE wait_event_type = 'Lock' AND pid <> pg_backend_pid()"
-    " AND datname = current_database()"
-)
 INTERRUPTED_TEXT = "接管时中断的轮次"
 
 
@@ -711,7 +707,7 @@ async def terminate_instance_lock(env: Env, previous_pid: int) -> None:
 async def waiting_on_locks(env: Env, count: int, timeout: float = 5) -> bool:
     async with env.engine.connect() as conn:
         for _ in range(int(timeout / 0.02)):
-            if await conn.scalar(WAITING_ON_LOCK) >= count:
+            if await conn.scalar(text(WAITING_ON_LOCK)) >= count:
                 return True
             await conn.commit()
             await asyncio.sleep(0.02)

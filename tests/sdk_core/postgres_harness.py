@@ -16,6 +16,17 @@ INSTANCE_MARKER = "xiaowei-sdk-test"
 TEST_DATABASE_PREFIX = "xw_sdk_test_"
 ADMIN_URL = f"postgresql+asyncpg://{ADMIN_USER}@{LOOPBACK}:{PORT}/{ADMIN_DATABASE}"
 
+# 只观察当前测试数据库，不能把并行工作树的等待当成本用例的暂停点。
+WAITING_ON_LOCK = (
+    "SELECT count(*) FROM pg_stat_activity"
+    " WHERE wait_event_type = 'Lock' AND pid <> pg_backend_pid()"
+    " AND datname = current_database()"
+)
+SLEEPING_IN_DATABASE = (
+    "SELECT count(*) FROM pg_stat_activity WHERE wait_event = 'PgSleep'"
+    " AND datname = current_database()"
+)
+
 
 class HarnessMisconfiguredError(Exception):
     """测试数据库地址不是隔离测试实例；消息不回显 URL。"""
