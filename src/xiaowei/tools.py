@@ -5,8 +5,9 @@
 不能提供执行路径。
 
 只有确定发生在 I/O 之前的治理拒绝（``ToolRejectedError``）按 SDK 公开的
-``FunctionTool`` 返回固定结构反馈交给模型（不读取异常原文）。已分类的监控只读源失败由治理层
-记录后交回固定类别，本源本轮不再调用；其他执行后失败（结果不合约、证据无法保存、执行期间
+``FunctionTool`` 返回固定结构反馈交给模型（不读取异常原文）。提出工具的只读准备可通过
+专用的 ``ProposalRejectedError`` 返回明确拒绝：无 Action、无业务写入，已开始的调用计预算。
+已分类的监控只读源失败由治理层记录后交回固定类别，本源本轮不再调用；其他执行后失败（结果不合约、证据无法保存、执行期间
 撤权或写动作结果不明）继续抛出并中止整轮，不自动重试。
 
 多目标工具（``routed_function_tool``）对模型只有一个函数，参数 ``cluster`` 必填：按它选取该目标
@@ -28,6 +29,7 @@ from xiaowei.governance import (
     GovernedTools,
     MonitoringReadError,
     PromQLExpressionError,
+    ProposalRejectedError,
     ToolRejectCode,
     ToolRejectedError,
     ToolRejectHint,
@@ -45,6 +47,10 @@ _REJECTION_FEEDBACK: dict[ToolRejectCode, tuple[str, bool]] = {
     "invalid_arguments": (
         "参数不符合工具契约或SQL写法不受支持；检查提供的参数schema和受支持写法，修改后再调用，不重发同一错误",
         True,
+    ),
+    "object_unavailable": (
+        "该对象不能执行当前动作；未保存Action、未写入，请说明原因，不重试同一对象的该动作",
+        False,
     ),
     "unsupported": ("该能力尚未开放，未执行；已停止该操作，告诉用户能力限制，不换参数绕过", False),
     "capacity_exceeded": (
@@ -125,6 +131,18 @@ _REJECTION_HINTS: dict[ToolRejectHint, str] = {
         "limit 须为1–100；page 从1开始，offset/panelId 从0开始，不超过32位整数；修改后再调用"
     ),
     "grafana_time_window": "from/to 须为有序 Unix 毫秒，窗口不超过31天；请核实起止时间或缩小窗口",
+    "silence_expired": "指定静默已到期，无需再取消；未保存Action、未写入，不对此ID再次提出取消",
+    "silence_missing": (
+        "指定静默ID在当前获准源未找到；未保存Action、未写入，请用户核对源或ID，不猜测或重发同一ID"
+    ),
+    "silence_filter": (
+        "告警筛选条件被上游拒绝；未保存Action、未写入。"
+        "核实匹配器名称、上游支持的Go正则和目标版本支持，修改后再提出，不重发同一条件"
+    ),
+    "silence_end": (
+        "ends_at 须晚于当前时间与 starts_at；支持多年且必须明确到期，"
+        "请核实用户要求的期限后修正，不要擅自改短"
+    ),
 }
 
 
@@ -209,6 +227,9 @@ def _function_tool(
         try:
             contract, execute = route(arguments)
             result = await _governed(tool_ctx, contract, arguments, governance, execute)
+        except ProposalRejectedError as exc:
+            # 只读准备已计入预算/started；治理层确认仅提出工具可返回，不重复计数。
+            return _rejection_feedback(exc, name)
         except ToolRejectedError as exc:
             governance.note_rejected(tool_ctx.context.identity)
             return _rejection_feedback(exc, name)

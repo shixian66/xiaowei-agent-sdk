@@ -76,8 +76,13 @@ async def test_formal_serve_proposes_approves_and_refuses_non_approver(
         )
 
     def action_service(
-        governance: GovernedTools, action_store: Any, *args: Any, **kwargs: Any
+        governance: GovernedTools,
+        action_store: Any,
+        *args: Any,
+        bindings: Any = (),
+        **kwargs: Any,
     ) -> ActionService:
+        assert not bindings  # 本夹具配置没有实际监控写动作。
         service = ActionService(
             governance,
             action_store,

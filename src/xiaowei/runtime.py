@@ -652,6 +652,7 @@ def _registered_tools(config: ServeConfig) -> frozenset[str]:
     monitoring = {
         server.tool_id(name) for server in config.mcp_servers for name in server.allowed_tools
     } | {source.tool_id(name) for source in config.alertmanager_sources for name in source.tools}
+    monitoring |= {tool for source in config.alertmanager_sources for tool in source.action_tools}
     monitoring |= {
         f"{sid}/get_action_status"
         for sid in (
@@ -1109,13 +1110,23 @@ def _app_config(config: ServeConfig) -> AppConfig:
         server.tool_id(name) for server in config.mcp_servers for name in server.allowed_tools
     ) | {source.tool_id(name) for source in config.alertmanager_sources for name in source.tools}
     monitoring |= {
+        source.tool_id(f"propose_{name}")
+        for source in config.alertmanager_sources
+        for name in source.write_actions
+    }
+    monitoring |= {
         f"{sid}/get_action_status"
         for sid in (
             *[s.server_id for s in config.mcp_servers],
             *[s.server_id for s in config.alertmanager_sources],
         )
     }
-    audit = _registered_tools(config) - QUERY_TOOLS - monitoring
+    write_tools = {
+        source.tool_id(name)
+        for source in config.alertmanager_sources
+        for name in source.write_actions
+    }
+    audit = _registered_tools(config) - QUERY_TOOLS - monitoring - write_tools
     return AppConfig(
         purposes={
             "query": QUERY_TOOLS | audit | monitoring,
@@ -1433,7 +1444,17 @@ async def open_runtime(
             local_tools=executes,
             mcp=mcp,
             clock=clock,
-            actions=ActionService(governance, parts.store, parts.results.access, clock=clock),
+            actions=ActionService(
+                governance,
+                parts.store,
+                parts.results.access,
+                bindings=[
+                    binding
+                    for adapter in alertmanagers.values()
+                    for binding in adapter.action_bindings(governance.catalog)
+                ],
+                clock=clock,
+            ),
         )
         service = ChannelService(app, parts.results)
         yield Runtime(engine, lock, readiness, recovery, service, mcp, alertmanagers)

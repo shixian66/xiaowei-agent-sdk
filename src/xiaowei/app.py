@@ -606,10 +606,14 @@ class Application:
         answer = result.final_output_as(AgentAnswer, raise_if_incorrect_type=True)
         runs = self._governance.turn_runs(ctx.identity)
         # 本轮成功的业务查询（可信记录）都必须被引用；明确分类的监控读取失败单独计数，
-        # 不能伪装成成功证据。I/O 前被拒绝的调用不算执行。
+        # 不能伪装成成功证据。明确未形成 Action 的准备拒绝单独计数，不丢弃已有证据。
+        # I/O 前被拒绝的调用不算执行。
         queried = [e for tool_id, e in runs.produced if tool_id in self._queries]
         failed_queries = sum(f.tool_id in self._queries for f in runs.monitoring_failures)
-        unfinished = len(queried) + failed_queries != sum(t in self._queries for t in runs.started)
+        rejected_proposals = sum(t in self._queries for t in runs.proposal_rejections)
+        unfinished = len(queried) + failed_queries + rejected_proposals != sum(
+            t in self._queries for t in runs.started
+        )
         uncited = set(queried) - set(answer.evidence_ids)
         if unfinished or uncited:
             raise TurnError("answer_rejected", answer_reject=AnswerRejectCode.UNCITED_QUERY)

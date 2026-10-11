@@ -49,6 +49,7 @@ from xiaowei.evidence import EvidenceUnavailableError
 from xiaowei.governance import (
     GovernedTools,
     Projection,
+    ProposalRejectedError,
     ToolCatalog,
     ToolExecutionError,
     ToolPolicy,
@@ -56,8 +57,10 @@ from xiaowei.governance import (
     normalize_arguments,
 )
 from xiaowei.models import (
+    ApprovedAction,
     Budget,
     Identity,
+    Owner,
     RunContext,
     ToolContract,
     ToolObservation,
@@ -1193,3 +1196,97 @@ def test_catalog_rejects_ambiguous_routing(
 ) -> None:
     with pytest.raises(ValueError, match="工具目录"):
         ToolCatalog(contracts, policies)
+
+
+@pytest.mark.parametrize("effect", ["read", "propose", "write"])
+async def test_only_proposal_can_return_classified_preparation_rejection(
+    postgres_url: URL, effect: str
+) -> None:
+    from xiaowei.evidence import arguments_digest
+
+    grants = Grants()
+    grants.grant("alice", TOTAL_TOOL)
+    policy = ToolPolicy("synthetic.region", RegionArgs, PROJECTIONS, effect=effect)
+    catalog = ToolCatalog(CONTRACTS, [policy])
+    ctx = context(tools=frozenset({TOTAL_TOOL}), max_tool_calls=1)
+    ctx = ctx.model_copy(
+        update={
+            "identity": ctx.identity.model_copy(
+                update={"channel": "feishu", "owner": Owner(kind="group", id="synthetic-group")}
+            ),
+            "approved_action": ApprovedAction(
+                action_id="synthetic-action",
+                attempt="synthetic-attempt",
+                tool_id=TOTAL_TOOL,
+                target_id=TARGET,
+                arguments_digest=arguments_digest({"region": "east"}),
+            ),
+        }
+    )
+    calls = []
+
+    async def reject(req: ToolRequest) -> ToolObservation:
+        calls.append(req)
+        raise ProposalRejectedError(
+            "secret-canary", code="object_unavailable", hint="silence_expired"
+        )
+
+    async with ready_engine(postgres_url) as engine:
+        governed = GovernedTools(store(engine, grants, Clock(), catalog))
+        error = ProposalRejectedError if effect == "propose" else ToolExecutionError
+        with pytest.raises(error):
+            await governed.invoke(ctx, request(), reject)
+        runs = governed.turn_runs(ctx.identity)
+        assert runs.proposal_rejections == ((TOTAL_TOOL,) if effect == "propose" else ())
+        assert runs.started == (TOTAL_TOOL,) and runs.produced == ()
+        with pytest.raises(ToolRejectedError) as exhausted:
+            await governed.invoke(ctx, request(call_id="second"), reject)
+        assert exhausted.value.code == "budget_exhausted"
+        assert len(calls) == 1
+
+
+async def test_preparation_rejection_after_revocation_is_not_returned(postgres_url: URL) -> None:
+    grants = Grants()
+    grants.grant("alice", TOTAL_TOOL)
+    policy = ToolPolicy("synthetic.region", RegionArgs, PROJECTIONS, effect="propose")
+    ctx = context()
+    ctx = ctx.model_copy(
+        update={
+            "identity": ctx.identity.model_copy(
+                update={"channel": "feishu", "owner": Owner(kind="group", id="synthetic-group")}
+            )
+        }
+    )
+
+    async def revoked(req: ToolRequest) -> ToolObservation:
+        grants.revoke_all()
+        raise ProposalRejectedError("secret-canary", hint="silence_expired")
+
+    async with ready_engine(postgres_url) as engine:
+        governed = GovernedTools(store(engine, grants, Clock(), ToolCatalog(CONTRACTS, [policy])))
+        with pytest.raises(ToolExecutionError):
+            await governed.invoke(ctx, request(), revoked)
+        assert governed.turn_runs(ctx.identity).proposal_rejections == ()
+
+
+async def test_plain_execution_rejection_still_stops_proposal(postgres_url: URL) -> None:
+    grants = Grants()
+    grants.grant("alice", TOTAL_TOOL)
+    policy = ToolPolicy("synthetic.region", RegionArgs, PROJECTIONS, effect="propose")
+    ctx = context()
+    ctx = ctx.model_copy(
+        update={
+            "identity": ctx.identity.model_copy(
+                update={"channel": "feishu", "owner": Owner(kind="group", id="synthetic-group")}
+            )
+        }
+    )
+
+    async def unclassified(req: ToolRequest) -> ToolObservation:
+        raise ToolRejectedError("secret-canary")
+
+    async with ready_engine(postgres_url) as engine:
+        governed = GovernedTools(store(engine, grants, Clock(), ToolCatalog(CONTRACTS, [policy])))
+        with pytest.raises(ToolExecutionError):
+            await governed.invoke(ctx, request(), unclassified)
+        assert governed.turn_runs(ctx.identity).proposal_rejections == ()

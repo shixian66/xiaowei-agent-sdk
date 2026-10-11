@@ -91,11 +91,20 @@ class ActionBinding:
     execute: Execute
     target_binding: str
     """可信装配产生的固定源配置/执行语义版本摘要；不含凭据，改变即使旧批准失效。"""
+    precheck: Callable[[ToolRequest], ToolRequest] | None = None
+    """动作切片的零 I/O 提出检查；复用 Prechecked，拒绝可在本轮修正。"""
 
 
 class ActionStatusArgs(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True)
     action_id: Annotated[str, AfterValidator(lambda value: str(UUID(value)))]
+
+
+class ActionWriteRejectedError(Exception):
+    """可信 Adapter 在已核验/批准的上游分支确认未写入，不代表一般4xx可重试。
+
+    仅由当前批准执行捕获为 rejected；不进入 Runner，也不放宽治理的异常处理。
+    """
 
 
 class ActionOutcomeError(ToolExecutionError):
@@ -204,7 +213,9 @@ class ActionService:
                         raise ToolRejectedError("动作不可用")
                     return await self._propose(ctx, req, b)
 
-                execute: Execute = propose
+                execute: Execute = (
+                    Prechecked(binding.precheck, propose) if binding.precheck else propose
+                )
             elif contract.policy_id == STATUS_POLICY:
 
                 async def status(req: ToolRequest) -> ToolObservation:
@@ -425,6 +436,7 @@ class ActionService:
         )
         finished = False
         write_started = False
+        write_rejected = False
         prepared: Any = None
 
         def precheck(req: ToolRequest) -> ToolRequest:
@@ -434,7 +446,7 @@ class ActionService:
             return req
 
         async def execute(req: ToolRequest) -> ToolObservation:
-            nonlocal finished, write_started
+            nonlocal finished, write_started, write_rejected
             if not await self._current_approver(ctx.identity, b.write.target_id, b.write.tool_id):
                 raise ToolRejectedError("当前批准已失效，未执行")
             # 复核使用已批准的实际参数，不能重新计算相对时间或默认值。
@@ -453,9 +465,14 @@ class ActionService:
                 raise ToolRejectedError("当前批准已失效，未执行")
             await self._store.admit_action(claimed)
             write_started = True
-            observation = await (
-                b.execute.run(prepared) if isinstance(b.execute, Prechecked) else b.execute(req)
-            )
+            try:
+                observation = await (
+                    b.execute.run(prepared) if isinstance(b.execute, Prechecked) else b.execute(req)
+                )
+            except ActionWriteRejectedError:
+                # 先保留可信拒绝事实；治理层仍将底层执行异常封闭，之后应用落定状态。
+                write_rejected = True
+                raise
             projected = action_result_projection(
                 self.governance.catalog.policy_for(b.write), observation
             )
@@ -471,7 +488,8 @@ class ActionService:
                 if not finished and self._store.readiness.ok:
                     async with asyncio.timeout(ACTION_SETTLE_TIMEOUT_SECONDS):
                         await self._store.finish_action(
-                            claimed, "unknown" if write_started else "rejected"
+                            claimed,
+                            "unknown" if write_started and not write_rejected else "rejected",
                         )
             except BaseException:
                 # 收尾在进入关键 SQL 前也可能中断；未保存 Action 终态时不能恢复接活。
@@ -482,7 +500,11 @@ class ActionService:
             raise
         except Exception:
             state: Literal["succeeded", "unknown", "rejected"] = (
-                "succeeded" if finished else "unknown" if write_started else "rejected"
+                "succeeded"
+                if finished
+                else "rejected"
+                if write_rejected or not write_started
+                else "unknown"
             )
             try:
                 if not finished:
