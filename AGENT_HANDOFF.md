@@ -56,6 +56,8 @@
 | .venv/bin/ruff check --no-cache . / .venv/bin/ruff format --check --no-cache src/xiaowei tests/sdk_core scripts/dialogue_real_model.py | 通过；102 文件格式已符合 |
 | .venv/bin/mypy src/xiaowei --no-incremental --cache-dir /private/tmp/r3-final-mypy-cache / git diff --check | 26 源文件类型通过；差异检查通过 |
 
+**R3 实现方复查：** 针对 `565043b1429fda280339174a9d5f7461649e322d` 的整分支只读自查未发现确定的代码阻断；指出计划把分层测试统称“正式双入口覆盖”，已拆开入口、Evidence/渲染及历史重发的证据范围。此为实现方发起的复查，不是用户指定的独立审查，不关闭真实模型合入门槛。
+
 **R3 未覆盖与兼容：** 获准真实模型环境仍不可用（公司 API IP 限制），没有调用真实模型、Lark/飞书或公司 StarRocks。脚本只证明调用链与保护，不能证明模型减少复述或自主选对显示方式；R3 必须完成计划 §8 的真实模型门槛且无独立审查阻断才可合入。真实 Lark 客户端与收发、部署/UAT 未验收。本片未改数据库 v7、模板轮数/字节/期限；不是会话摘要或裁剪。新版本能读取旧回答默认 full，旧镜像会按 extra=forbid 拒收带 fact_views 的新保存回答；回退操作见 [OPERATIONS](deploy/OPERATIONS.md#历史简短追问与-r3-兼容)。飞书摘要原文仍占单消息预算，放不下时明确省略，不自动查询或多发一条，已 sent 不由 requests resend 补全。
 
 **以下为 R7 与监控底座对应版本的既有证据，不代替 R3 验证：**
