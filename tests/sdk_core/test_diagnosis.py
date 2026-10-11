@@ -333,7 +333,11 @@ async def test_no_evidence_is_a_pure_clarification(diag: Env, channel: str) -> N
 
     assert reply.state == "completed" and env.drv.attempts == 0
     content = lines(reply)
-    assert content[0] == (CLARIFICATION_HEADER if channel == "web" else "需要澄清")
+    if channel == "web":
+        assert content[0] == CLARIFICATION_HEADER
+    else:
+        # C1 已批准业务澄清改用卡片；标题与业务类型同时保留，下面零 I/O/Evidence 断言不变。
+        assert reply.card is not None and content[:2] == ["小维 · 回复", "需要澄清"]
     assert FACTS_HEADER not in content and ANALYSIS_HEADER not in content
     assert reply.facts in (None, [])
     assert await evidence_rows(env) == 0

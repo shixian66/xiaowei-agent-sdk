@@ -1,4 +1,4 @@
-"""飞书单消息展示：只读已验证的当前渠道投影，不解析模型 Markdown，不执行 I/O。
+"""飞书单消息展示：只读已验证的当前渠道投影；模型说明可用受限格式，不执行 I/O。
 
 JSON 2.0 要求客户端 >=7.20。纯文本表格最多五个，额外/宽表用纯文本字段；所有组件和
 折叠文字均计入预算。完整 HTTP 请求预算包括 SDK 的内层 JSON 字符串与外层再次转义。
@@ -10,6 +10,7 @@ import unicodedata
 from collections.abc import Sequence
 from typing import Any, Final
 
+from xiaowei.feishu_markdown import format_prose
 from xiaowei.models import AnswerInference, Delivery, DeliveryFact, JsonScalar
 
 MAX_REQUEST_BYTES: Final = 30_000
@@ -107,7 +108,7 @@ def _chars(value: object) -> int:
         return sum(_chars(v) for v in value)
     if not isinstance(value, dict):
         return 0
-    if value.get("tag") == "plain_text":
+    if value.get("tag") in {"plain_text", "markdown"}:
         return len(value["content"])
     if value.get("tag") == "table":
         return sum(len(c["display_name"]) for c in value["columns"]) + sum(
@@ -134,6 +135,7 @@ def _card(
     technical: set[int],
     *,
     omissions: bool = True,
+    formatted: bool = False,
 ) -> Message:
     elements: list[Message] = []
     if delivery.monitoring_notice:
@@ -216,7 +218,14 @@ def _card(
         elements.append(_div(FACTS_CLIPPED))
     if analysis:
         elements.append(_div("分析与建议（模型推断）"))
-        elements.extend(_div(f"- {a.text}（依据：{', '.join(a.evidence_ids)}）") for a in analysis)
+        for item in analysis:
+            prose = format_prose(display_text(item.text)) if formatted else [_div(item.text)]
+            if prose == [_div(item.text)]:
+                elements.append(_div(f"- {item.text}（依据：{', '.join(item.evidence_ids)}）"))
+            else:
+                elements.extend(prose)
+                # 引用由代码单独展示，不让模型的格式、围栏或裁剪隐藏依据。
+                elements.append(_div(f"依据：{', '.join(item.evidence_ids)}"))
     if omissions and tuple(analysis) != delivery.analysis:
         elements.append(_div(ANALYSIS_CLIPPED))
     for index, fact in enumerate(delivery.facts):
@@ -249,13 +258,35 @@ def _card(
                     "elements": details,
                 }
             )
+    return _static_card(elements, "小维 · 工具结果")
+
+
+def _static_card(elements: list[Message], title: str) -> Message:
     return {
         "card": {
             "schema": "2.0",
-            "header": {"template": "blue", "title": _plain("小维 · 工具结果")},
+            "header": {"template": "blue", "title": _plain(title)},
             "body": {"elements": elements},
         }
     }
+
+
+def _prose_card(
+    prefix: str,
+    raw: str,
+    *,
+    notice: str | None = None,
+    clipped: bool = False,
+    formatted: bool = False,
+) -> Message:
+    text = display_text(raw)
+    elements = [_div(prefix)] if prefix else []
+    if notice:
+        elements.append(_div(notice))
+    elements.extend(format_prose(text) if formatted else [_div(text)])
+    if clipped:
+        elements.append(_div(TEXT_CLIPPED))
+    return _static_card(elements, "小维 · 回复")
 
 
 def build_feishu_message(
@@ -266,7 +297,7 @@ def build_feishu_message(
     reply_to: str | None = None,
     max_bytes: int = MAX_REQUEST_BYTES,
 ) -> Message:
-    """构造单个 SDK text/card 输入：必要说明 → 实际 SQL → 整行事实 → 分析 → 其他详情。
+    """构造单张业务卡片（放不下时固定容量回执）：必要说明 → 实际 SQL → 整行事实 → 分析 → 其他详情。
 
     来源/限制放不下时只发固定容量说明；本地异常由调用方记 failed。这里不读另一渠道的投影，
     不靠 SDK 分片，不在发送开始后改发另一消息。
@@ -289,6 +320,9 @@ def build_feishu_message(
             raw, prefix = delivery.content, ""
         else:
             raw = delivery.feishu_text
+            if delivery.monitoring_notice:
+                # Evidence 的原文字段包含这条系统说明；独立保留，不把限制送进模型格式器。
+                raw = raw.removeprefix(delivery.monitoring_notice + "\n")
             title = (
                 delivery.content.partition("\n")[0]
                 if delivery.monitoring_notice
@@ -298,22 +332,38 @@ def build_feishu_message(
                     else "建议（未执行查询，模型生成，未经系统核实）"
                 )
             )
-            prefix = title + "\n"
-        full = {"text": mention_safe(display_text(prefix + raw))}
+            prefix = title
+
+        def prose_message(text: str, *, clipped: bool = False, formatted: bool = False) -> Message:
+            if delivery.feishu_text is None:
+                # 固定回执没有模型原文字段；保持原来的文本消息，不按关键词猜业务类型。
+                shown = mention_safe(display_text(text))
+                return {"text": shown + ("\n" + TEXT_CLIPPED if clipped else "")}
+            return _prose_card(
+                prefix,
+                text,
+                notice=delivery.monitoring_notice,
+                clipped=clipped,
+                formatted=formatted,
+            )
+
+        full = prose_message(raw)
         if fits(full):
-            return full
+            formatted = prose_message(raw, formatted=True)
+            return formatted if fits(formatted) else full
         low, high = 0, len(raw)
         while low < high:
             mid = (low + high + 1) // 2
-            candidate = {
-                "text": mention_safe(display_text(prefix + raw[:mid])) + "\n" + TEXT_CLIPPED
-            }
+            candidate = prose_message(raw[:mid], clipped=True)
             if fits(candidate):
                 low = mid
             else:
                 high = mid - 1
-        clipped = {"text": mention_safe(display_text(prefix + raw[:low])) + "\n" + TEXT_CLIPPED}
-        return clipped if fits(clipped) else notice
+        clipped = prose_message(raw[:low], clipped=True)
+        if not fits(clipped):
+            return notice
+        formatted = prose_message(raw[:low], clipped=True, formatted=True)
+        return formatted if fits(formatted) else clipped
 
     totals = [len(_data(f)[1]) for f in delivery.facts]
     all_sql = {
@@ -324,7 +374,10 @@ def build_feishu_message(
     all_technical = set(range(len(delivery.facts)))
     full = _card(delivery, totals, all_sql, delivery.analysis, all_technical)
     if fits(full):
-        return full
+        formatted = _card(
+            delivery, totals, all_sql, delivery.analysis, all_technical, formatted=True
+        )
+        return formatted if fits(formatted) else full
     analysis: list[AnswerInference] = []
     technical: set[int] = set()
 
@@ -388,4 +441,6 @@ def build_feishu_message(
         candidate = _card(delivery, counts, sqls, analysis, technical | {index})
         if fits(candidate):
             technical.add(index)
-    return _card(delivery, counts, sqls, analysis, technical)
+    plain = _card(delivery, counts, sqls, analysis, technical)
+    formatted = _card(delivery, counts, sqls, analysis, technical, formatted=True)
+    return formatted if fits(formatted) else plain

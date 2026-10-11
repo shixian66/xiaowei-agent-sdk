@@ -36,6 +36,7 @@ dependencies = [
     "httpx2>=2.12,<3",
     "asyncmy==0.2.15",
     "lark-channel-sdk==1.4.0",
+    "markdown-it-py>=4.2,<5",  # 飞书受限格式使用公开 token API，不直接发送模型 Markdown
 ]
 
 [project.scripts]

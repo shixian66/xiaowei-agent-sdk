@@ -60,7 +60,7 @@ def text_parts(value: Any, *, folded: bool = True) -> list[str]:
         return [part for child in value for part in text_parts(child, folded=folded)]
     if not isinstance(value, dict):
         return []
-    if value.get("tag") == "plain_text":
+    if value.get("tag") in {"plain_text", "markdown"}:
         return [value["content"]]
     if value.get("tag") == "collapsible_panel" and not folded and not value["expanded"]:
         return text_parts(value["header"], folded=False)
@@ -208,11 +208,13 @@ def test_advice_and_clarification_keep_newlines_and_do_not_chunk(kind: str) -> N
         feishu_text=raw,
     )
     message = build_feishu_message(unverified, 200, "oc_test")
-    assert set(message) == {"text"}
-    assert "SELECT 1\nFROM orders" in message["text"]
-    assert "\\u202e" in message["text"] and "\u202e" not in message["text"]
-    assert "旧转义" not in message["text"] and "截断" in message["text"]
-    assert len(message["text"]) <= 200
+    # C1 已批准统一业务卡片；换行、控制符、单消息与容量保护保持。
+    assert set(message) == {"card"}
+    shown = "\n".join(text_parts(message))
+    assert "SELECT 1\nFROM orders" in shown
+    assert "\\u202e" in shown and "\u202e" not in shown
+    assert "旧转义" not in shown and "截断" in shown
+    assert sum(map(len, text_parts(message))) <= 200
 
 
 def test_query_sql_has_capacity_before_whole_rows_and_analysis() -> None:
@@ -386,7 +388,9 @@ def test_advice_keeps_unverified_label() -> None:
         3500,
         "oc_test",
     )
-    assert "未执行查询" in message["text"] and "未经系统核实" in message["text"]
+    assert "card" in message
+    shown = "\n".join(text_parts(message, folded=False))
+    assert "未执行查询" in shown and "未经系统核实" in shown
 
 
 def test_monitoring_failure_notice_is_visible_in_fact_card_and_advice() -> None:
@@ -407,8 +411,9 @@ def test_monitoring_failure_notice_is_visible_in_fact_card_and_advice() -> None:
         evidence_ids=(),
     )
     text_message = build_feishu_message(no_fact, 3500, "oc_test")
-    assert notice in text_message["text"]
-    assert "未经数据验证" in text_message["text"]
+    assert "card" in text_message
+    visible = "\n".join(text_parts(text_message, folded=False))
+    assert notice in visible and "未经数据验证" in visible
 
 
 def test_short_fact_fits_when_zero_row_placeholders_would_not() -> None:
