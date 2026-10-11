@@ -17,6 +17,7 @@ CAPACITY_NOTICE: Final = "结果未展示：单消息容量不足。可缩小问
 FACTS_CLIPPED: Final = "事实展示已截断，未展示全部结果。"
 ANALYSIS_CLIPPED: Final = "分析展示已截断，未展示全部模型分析。"
 TEXT_CLIPPED: Final = "（内容超过单消息上限，已截断）"
+BRIEF_ORIGINAL_OMITTED: Final = "获准原文未展示（单消息容量限制）；如需原文请明确提出。"
 _TECHNICAL = frozenset({"sql", "row_count", "elapsed_ms", "next_cursor"})
 _PAGED = frozenset({"local/list_databases", "local/list_tables", "local/describe_table"})
 _ACTION_LABELS = {
@@ -71,6 +72,8 @@ def _cell(row: dict[str, JsonScalar], name: str) -> str:
 
 
 def _data(fact: DeliveryFact) -> tuple[tuple[str, ...], tuple[dict[str, JsonScalar], ...]]:
+    if fact.view == "brief":
+        return (), ()
     if fact.columns:
         return fact.columns, fact.rows
     # 非表格 MCP/标量结果也展示获准事实，技术字段留在折叠区。
@@ -167,6 +170,11 @@ def _card(
             elements.append(_div("工具结果已截断，不能据此声称完整。"))
         if fact.tool_id == "local/run_readonly_query" and index not in sqls:
             elements.append(_div("SQL 未展示。"))
+        if fact.view == "brief":
+            elements.append(_div(fact.summary or "摘要不可用。"))
+            if omissions and fact.result_json is not None and index not in technical:
+                elements.append(_div(BRIEF_ORIGINAL_OMITTED))
+            continue
         if not rows:
             if not all_rows:
                 absent = not fact.columns and not fact.metadata and fact.result_json is None
@@ -231,7 +239,13 @@ def _card(
                 {
                     "tag": "collapsible_panel",
                     "expanded": False,
-                    "header": {"title": _plain(f"技术详情 · {fact.evidence_id}")},
+                    "header": {
+                        "title": _plain(
+                            f"获准原文与查询信息 · {fact.evidence_id}"
+                            if fact.view == "brief"
+                            else f"技术详情 · {fact.evidence_id}"
+                        )
+                    },
                     "elements": details,
                 }
             )

@@ -40,11 +40,13 @@
 
   const factTable = (fact) => {
     const box = el("div", "fact");
+    const brief = fact.view === "brief";
     const details = el("details", "evidence");
-    details.append(el("summary", "", "查看依据与查询信息"));
+    details.append(el("summary", "", brief ? "查看获准原文与查询信息" : "查看依据与查询信息"));
     box.append(el("p", "meta", `采集于 ${fact.captured_at}`));
     const meta = [`来源 ${fact.tool_id}`, `目标 ${fact.target_id}`];
-    details.append(el("p", "meta", `[${fact.evidence_id}] ${meta.join(" · ")}`));
+    (brief ? box : details).append(el("p", "meta", `[${fact.evidence_id}] ${meta.join(" · ")}`));
+    if (brief && fact.summary) box.append(el("p", "content fact-summary", fact.summary));
     if (fact.truncated) box.append(el("p", "note", "结果已截断，当前显示的不是全部结果"));
     if (fact.note) box.append(el("p", "note", `说明：${fact.note}`));
     for (const [key, value] of Object.entries(fact.metadata || {})) {
@@ -66,8 +68,8 @@
       }
       const wrap = el("div", "table-wrap");
       wrap.append(table);
-      box.append(wrap);
-      if (!fact.rows.length) box.append(el("p", "content", "未返回数据行"));
+      (brief ? details : box).append(wrap);
+      if (!fact.rows.length) (brief ? details : box).append(el("p", "content", "未返回数据行"));
     }
     if (fact.result_json !== null && fact.result_json !== undefined) {
       details.append(el("p", "meta", "本次结果原文（仅含获准展示字段；分页或截断范围见上方提示）"));

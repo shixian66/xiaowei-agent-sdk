@@ -243,6 +243,13 @@ class AnswerInference(_Answer):
     evidence_ids: tuple[str, ...]
 
 
+class AnswerFactView(_Answer):
+    """只选择已有引用的显示方式，不接受模型提供的摘要数值。"""
+
+    evidence_id: str
+    view: Literal["full", "brief"]
+
+
 class AgentAnswer(_Answer):
     """SDK ``output_type``：模型只选择引用并给出分析；事实区域由代码从 Evidence 生成。
 
@@ -254,6 +261,8 @@ class AgentAnswer(_Answer):
     """
 
     evidence_ids: tuple[str, ...]
+    fact_views: tuple[AnswerFactView, ...] = ()
+    """未指定的引用默认 full；brief 仅用于已有可见历史事实，由 Evidence 校验。"""
     inferences: list[AnswerInference]
     clarification: Annotated[str, Field(min_length=1, max_length=2000)] | None
     advice: Annotated[str, Field(min_length=1, max_length=4000)] | None = None
@@ -304,6 +313,9 @@ class DeliveryFact(_Trusted):
     note: str | None = None
     result_json: str | None = None
     requires_complete: bool = Field(default=False, exclude=True)
+    view: Literal["full", "brief"] = "full"
+    summary: str | None = None
+    """代码从当前渠道投影生成的摘要；原表与 JSON 保留，仍占同一展示预算。"""
 
 
 class Delivery(_Trusted):

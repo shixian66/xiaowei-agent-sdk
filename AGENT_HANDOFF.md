@@ -9,11 +9,11 @@
 | 项目 | 已核对事实 |
 | --- | --- |
 | 仓库 | [shixian66/xiaowei-agent-sdk](https://github.com/shixian66/xiaowei-agent-sdk) |
-| 本地目录 / 分支 | `/Users/kloenguyen/.codex/worktrees/monitoring-s6/agent-SDK` / `codex/monitoring-s6`，基线为 PR #78 合入后的 `b0174d273bce89b49bfbba82fedf86bb6a14c66b`。主工作区及旧工作树保留；接手仍核对实际 HEAD、远端与工作区。 |
+| 本地目录 / 分支 | `/Users/kloenguyen/.codex/worktrees/monitoring-s6/agent-SDK` / `codex/monitoring-s6`，已同步 origin/main `bb50e045bd5caf82f197faee7a966937fad690c5`；原 S6 审查基线为 `b0174d273bce89b49bfbba82fedf86bb6a14c66b`。主工作区及旧工作树保留；接手仍核对实际 HEAD、远端与工作区。 |
 | M5 历史起点 | `372c381f44ecfa1fa53961f137d0058033cbd805`；不是远端当前 main 的核验结论 |
-| 本轮审查版本 | S6 当前候选待精确提交独立审查。实现方最终复查与用户独立审查分别记录，不把前片通过转作本片验收。 |
+| 本轮审查版本 | PR #79 的 `8bde2a4f706a8af1ae698906b48ac1f43ef9ad24` 经用户独立审查有 B1：明确的提出失败被扩大成整轮失败；修复候选须另行复审，不合并、不部署。 |
 | 已同步主线审查记录 | W5 `fdfdb469cbcf5e8499f9ee8d69dae954bae0ebda` 经用户独立复审随 PR #74 合入，取消恢复随 PR #76 合入。R7 `9ba40def16c99dc19000182e08f5a6c6747dd04e` 经用户确认独立复审，随后同步 PR #76 并随 PR #75 合入。下方记录保留各自版本与验证限度，不转作本轮新增测试的独立审查。 |
-| 当前阶段 | R1a/R1b、只读故障续查、P2、G3、A4、W5、取消恢复及测试隔离已合入。S6 创建/提前结束静默已在本分支离线实现、默认不开放、待审查；真实模型、公司三源及真实群写未验收，D7/C8 未实施。生产对话 R7 已离线合入；其他六项保持设计状态，P3 实战门槛开放。 |
+| 当前阶段 | R1a/R1b、只读故障续查、P2、G3、A4、W5、取消恢复及测试隔离已合入。S6 创建/提前结束静默已在本分支离线实现、默认不开放、待审查；真实模型、公司三源及真实群写未验收，D7/C8 未实施。生产对话 R7 与 R3 已离线合入；R3 的真实模型例外不转作 S6 验收，其他对话切片保持设计状态，P3 实战门槛开放。 |
 | 当前源码与依赖 | 新包 `src/xiaowei/` 的 W5 为应用表 v7（迁移007新增 Action 表和审批回执失败码 CHECK，SDK 表不变）。V1-A 新增 `vertex_model.py`（SDK 公开 `Model` 的非流式 Vertex 适配器），`model_api` 增加 `provider="vertex"` 与受控 transport 的认证头/成功校验参数；显式声明已直接导入的 `httpx2>=2.12,<3`（锁定 2.13.1 不变）。V1-B 使 `PolicySession` 随函数调用保存并回放 `provider_data.thought_signature`（单字段白名单，其余供应商字段丢弃），`app.safe_run_config()` 成为应用与 `model check` 共用的运行配置。V2 新增 `runtime.check_model` / `validate_model_config` 与 CLI `model check`。C2 把主模板改为一个 Vertex Profile、一个目标；占位符清单新增 Vertex 模型标记，C2 前模板的标记作为历史值继续拒绝。发布归档仍只含白名单文件 |
 | 新产品入口 | 原生主线仍为 `xiaowei`（与 `python -m xiaowei` 相同）的 `serve`、`config check`、`model check`、`storage init/upgrade/cleanup`、`requests resend`；`listen_host` 可为任意地址（默认 `127.0.0.1`）。镜像固定入口复用同一 CLI，在容器内绑定 `0.0.0.0`，宿主机发布地址由 `XW_WEB_BIND_ADDRESS`（默认 `0.0.0.0`）决定。真实模型、用户 StarRocks 与真实飞书未参与 P3-A 验证；旧 CLI/Compose 不是产品入口 |
 | 本次工作范围 | S6：复用 A4 API v2 和 W5，选配创建/取消静默与群审批、回读和反馈；无新模块、依赖或迁移，不改 Grafana、规则文件或其他写能力。授权提交、推送、开审查 PR；不合并、不部署，不连接真实模型、飞书/Lark 或公司服务。 |
@@ -37,7 +37,29 @@
 
 ## 3. 当前计划与下一项工作
 
-**当前下一步：** S6 候选先独立审查；通过后再按用户授权处理合入。后续切片为 D7 Grafana Dashboard 创建/修改，仍需先核对锁版写协议。真实模型/公司 Alertmanager/真实群写审批门槛开放，不继承 U1 或 W5 的例外。PR #78 的隔离修复已合入，不再作为待实施任务。
+**当前下一步：** 修复 PR #79 的 S6 提出拒绝 B1，保留已有调查证据，按新精确 SHA 复审；不合并、不部署。后续为 D7，真实模型/公司 Alertmanager/真实群写门槛开放，不继承 R3、U1 或 W5 的例外。PR #78 与 PR #77 已同步，本片不重做其功能。
+
+**R3 当前实现与证据（2026-10-11）：** 基线为上述 main，具体提交从工作分支取得。只改变模型选择的事实显示方式和两个入口的渲染，详细契约唯一维护在 [ARCHITECTURE §7](ARCHITECTURE.md#7-双入口的最小实现)。SDK 的严格 AgentAnswer 增加闭集 fact_views；省略即 full。已有可见历史行数短问可 brief，计数来自当前接收渠道的获准 row_count 与实际行数；本轮新事实不能 brief，待批准动作保持完整。不支持或不一致的摘要回 full，不让模型提供可信数值。原事实、引用、权限/依赖、历史和重发复核不变，提示词减少 DDL/字段/列表复述，未增加过滤器、分类器或另一套循环。
+
+- RED → GREEN：新回归在基线上四项失败，其中正式历史摘要与新事实隐藏到达模型/回答出口；两项因尚无新的显示 schema 失败，单列为接口覆盖，不声称已用真实模型复现。修复后正式 Web 的 full → 历史 brief 不新增业务 SQL，本轮新结果试图隐藏按 invalid_fact_view 失败；正式飞书 Gateway 使用真 Runner/治理/Evidence/隔离 PostgreSQL，经通道替身交付卡片。Chat Completions 与 Vertex 伪端点均完成完整结果→历史摘要，两轮合计一次业务 SQL。
+- 边界：返回行数与全表总数、COUNT 值分开；多引用、零行、分页与真实丢失、摘要不支持、原文容量省略、飞书/Web 不同投影、撤权/过期/其他会话、暂不可复核与 CLI 显式重发覆盖。真实 Chrome 在空闲端口验证默认摘要、收起原文和用户展开，不使用 8501。
+- 隔离变异：移除新事实保护、飞书串用 Web 投影、允许重复显示项、漏掉原文省略提示、摘要默认展开，五项各被目标回归发现。变异只在 /private/tmp 副本，确认实际导入路径，候选未受修改。
+- 测试中修正的夹具/观察问题：错误表名/列名改按真实存储 schema；Chrome 关闭 details 的子节点仍可有 ClientRect，改检查 checkVisibility、默认文字与展开行为；协议替身的“总额”专用回答改为引用实际普通查询证据。上述没有改变产品语义或删掉安全断言。
+
+| R3 实际执行命令（隔离 PostgreSQL 55432；依赖与监控替身环境沿下文，全部 loopback） | 结果 |
+| --- | --- |
+| .venv/bin/python -m pytest tests/sdk_core/test_r3_history.py tests/sdk_core/test_r3_entrypoints.py tests/sdk_core/test_r3_evidence.py tests/sdk_core/test_r3_render.py tests/sdk_core/test_evidence.py tests/sdk_core/test_session_policy.py tests/sdk_core/test_evidence_scope.py tests/sdk_core/test_feishu_render.py -q --tb=short | 170 passed，32.32s；后加两种协议入口独立 5 passed，3.74s |
+| .venv/bin/python -m pytest tests/sdk_core/test_r3_eval.py tests/sdk_core/test_dialogue_gate.py -q --tb=short | 24 passed，20.12s；固定八类 R3 样例与精确版本/指令哈希框架准备完成，不是实际模型评估 |
+| SDK_TEST_CHROME='/Applications/Google Chrome.app/Contents/MacOS/Google Chrome' .venv/bin/python -m pytest tests/sdk_core/test_r3_browser.py -m browser -q --tb=short | 1 passed，2.13s；端口由测试选空闲值 |
+| .venv/bin/python -m pytest tests/sdk_core tests/p1b -m 'not starrocks_real and not browser' -q --tb=short | **2940 passed, 60 deselected**，790.35s；日志 /private/tmp/r3-sdk-p1b.log。收集后仅新增两项协议入口，单独绿色记录见首行；不冒充最后两项也包含在此计数内 |
+| .venv/bin/python -m pytest tests/security/test_docs_command_consistency.py tests/contract/test_doc_fact_binding.py -q -W error --tb=short | **5 passed**，0.10s |
+| .venv/bin/ruff check --no-cache . / .venv/bin/ruff format --check --no-cache src/xiaowei tests/sdk_core scripts/dialogue_real_model.py | 通过；102 文件格式已符合 |
+| .venv/bin/mypy src/xiaowei --no-incremental --cache-dir /private/tmp/r3-final-mypy-cache / git diff --check | 26 源文件类型通过；差异检查通过 |
+
+**R3 实现方复查：** 针对 `565043b1429fda280339174a9d5f7461649e322d` 的整分支只读自查未发现确定的代码阻断；指出计划把分层测试统称“正式双入口覆盖”，已拆开入口、Evidence/渲染及历史重发的证据范围。此为实现方发起的复查，不是用户指定的独立审查。真实模型旧/新对照由用户 2026-10-11 单独批准免做，不由本地复查关闭；新 SHA 仍须交独立审查方复核。
+
+**R3 未覆盖与兼容：** 获准真实模型环境仍不可用（公司 API IP 限制），没有调用真实模型、Lark/飞书或公司 StarRocks。脚本只证明调用链与保护，不能证明模型减少复述或自主选对显示方式。用户 2026-10-11 批准免做 R3 真实模型旧/新对照，真实模型未验证，上线后先在私聊或测试群观察；样例脚本保留，其他切片不继承此例外。R3 仍须 CI 通过、独立复审无阻断并另获合并授权，观察须另获部署授权。真实 Lark 客户端与收发、部署/UAT 未验收。本片未改数据库 v7、模板轮数/字节/期限；不是会话摘要或裁剪。新版本能读取旧回答默认 full，旧镜像会按 extra=forbid 拒收带 fact_views 的新保存回答；回退操作见 [OPERATIONS](deploy/OPERATIONS.md#历史简短追问与-r3-兼容)。飞书摘要原文仍占单消息预算，放不下时明确省略，不自动查询或多发一条，已 sent 不由 requests resend 补全。
+
 
 **S6 当前实现。** 正式 `serve` 在原 AlertmanagerAdapter 上装配两项 ActionBinding；`write_actions` 默认空、启用须有 Basic 安全引用。Runner 仅能在获准群提出/查状态，实际写从工具集合和用途集合排除。参数全部显式，有限到期支持多年；过去开始时间由上游移至执行时刻，未来开始和结束时间须保持批准值。创建省略 id/annotations，不能走更新分支；取消仅使已知 UUID 提前到期并保留记录，恢复须另次创建审批。具体接口/失败只维护在[监控计划 §3.5](docs/superpowers/plans/2026-10-09-monitoring-mcp.md#35-s6-当前切片基线-b0174d273bce89b49bfbba82fedf86bb6a14c66b)，配置与退回见[运维说明](deploy/OPERATIONS.md#选配创建和取消静默)。
 

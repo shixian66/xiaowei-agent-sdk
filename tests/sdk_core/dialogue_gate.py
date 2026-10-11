@@ -9,7 +9,7 @@ import os
 import secrets
 import time
 from collections.abc import Awaitable, Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from functools import partial
 from pathlib import Path
@@ -246,6 +246,50 @@ R7_SCENARIOS = (
     *(s for s in SCENARIOS if s.name in {"desc_single", "desc_ambiguous_database"}),
     Scenario(
         "r7_unknown_target", (("query", f"看unknown集群data_center.{TABLE}的字段"),), multi=True
+    ),
+)
+
+
+# R3 reuses the same governed synthetic environment and version-bound report.
+R3_SCENARIOS = (
+    Scenario(
+        "r3_databases",
+        (
+            ("query", "列出 pre 的数据库"),
+            ("query", "刚才本次返回多少个库？只要条数"),
+            ("query", "把刚才的库名原文再发一遍"),
+        ),
+    ),
+    Scenario(
+        "r3_structure",
+        (
+            ("query", f"查看 pre 的 data_center.{TABLE} 字段结构，不要重复字段列表"),
+            ("query", "刚才本次返回多少行字段？"),
+            ("query", "完整字段结构再发一下"),
+        ),
+    ),
+    Scenario(
+        "r3_five_rows",
+        (
+            ("query", f"pre 的 data_center.{TABLE} 只查 5 条 region, amount"),
+            ("query", "刚才本次返回多少条？不要重发整表"),
+            ("query", "把刚才那 5 条的原值再发给我"),
+            ("query", "重新查询最新 5 条 region, amount"),
+        ),
+    ),
+    Scenario(
+        "r3_aggregate",
+        (
+            ("query", f"查询 pre 的 data_center.{TABLE} 的全表 COUNT(*)"),
+            ("query", "刚才全表总数是多少？"),
+            ("query", "刚才聚合查询本次返回多少行？只告诉我返回行数"),
+        ),
+    ),
+    *(
+        replace(s, name=f"r3_{s.name}")
+        for s in SCENARIOS
+        if s.name
+        in {"ddl_history_and_refresh", "pages_with_empty_middle", "sql_only", "raw_over_limit"}
     ),
 )
 
@@ -661,6 +705,7 @@ async def run_dialogue(
                                             "tool": f.tool_id,
                                             "target": f.target_id,
                                             "rows": len(f.rows),
+                                            "view": getattr(f, "view", "full"),
                                             "truncated": f.truncated,
                                             "has_cursor": f.metadata.get("next_cursor") is not None,
                                         }
