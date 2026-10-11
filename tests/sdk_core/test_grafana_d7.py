@@ -170,9 +170,13 @@ async def test_formal_group_create_and_conflicting_update_not_written(
                 "SELECT action_id FROM xiaowei_action WHERE proposal_tool_id=:tool",
                 {"tool": UPDATE},
             )
+            request_states = await env.scalar(
+                "SELECT json_agg(json_build_array(reply_message_id, state, failure_code)) "
+                "FROM xiaowei_request"
+            )
             assert update_id, (
                 message_text(group_channel.sends[-1][1]),
-                await env.rows("SELECT reply_message_id, state, failure_code FROM xiaowei_request"),
+                request_states,
                 traffic[1].requests[-4:],
             )
             external = await isolated_api.post(
