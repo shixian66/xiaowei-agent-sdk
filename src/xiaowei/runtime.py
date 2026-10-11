@@ -57,6 +57,7 @@ from pydantic import (
 )
 from sqlalchemy.ext.asyncio import AsyncEngine
 
+from xiaowei.actions import ActionService, action_status_catalog
 from xiaowei.alertmanager import AlertmanagerAdapter, AlertmanagerConfig, alertmanager_catalog
 from xiaowei.app import (
     AppConfig,
@@ -651,6 +652,13 @@ def _registered_tools(config: ServeConfig) -> frozenset[str]:
     monitoring = {
         server.tool_id(name) for server in config.mcp_servers for name in server.allowed_tools
     } | {source.tool_id(name) for source in config.alertmanager_sources for name in source.tools}
+    monitoring |= {
+        f"{sid}/get_action_status"
+        for sid in (
+            *[s.server_id for s in config.mcp_servers],
+            *[s.server_id for s in config.alertmanager_sources],
+        )
+    }
     return QUERY_TOOLS | (AUDIT_TOOLS if audited else frozenset()) | monitoring
 
 
@@ -1100,6 +1108,13 @@ def _app_config(config: ServeConfig) -> AppConfig:
     monitoring = frozenset(
         server.tool_id(name) for server in config.mcp_servers for name in server.allowed_tools
     ) | {source.tool_id(name) for source in config.alertmanager_sources for name in source.tools}
+    monitoring |= {
+        f"{sid}/get_action_status"
+        for sid in (
+            *[s.server_id for s in config.mcp_servers],
+            *[s.server_id for s in config.alertmanager_sources],
+        )
+    }
     audit = _registered_tools(config) - QUERY_TOOLS - monitoring
     return AppConfig(
         purposes={
@@ -1152,11 +1167,14 @@ class StaticAccess:
         config: AccessConfig,
         target_ids: frozenset[str],
         group: GroupAccess | None = None,
+        *,
+        write_tools: frozenset[str] = frozenset(),
     ) -> None:
         self._grants: Mapping[str, frozenset[str]] = dict(config.grants)
         self._version = config.policy_version
         self._targets = target_ids
         self._group = group
+        self._write_tools = write_tools
 
     async def resolve(self, channel: Channel, subject_id: str) -> AccessDecision | None:
         tools = self._grants.get(subject_id)
@@ -1193,6 +1211,12 @@ class StaticAccess:
         owner = identity.owner
         if owner.kind == "group":
             shared = self._group
+            if tool_id in self._write_tools:
+                return (
+                    shared is not None
+                    and owner == shared.scope.owner
+                    and tool_id in self._grants.get(identity.subject_id, frozenset())
+                )
             return shared is not None and owner == shared.scope.owner and tool_id in shared.tools
         return owner.id == identity.subject_id and tool_id in self._grants.get(
             identity.subject_id, frozenset()
@@ -1282,13 +1306,25 @@ def _delivery(
         | {server.server_id for server in config.mcp_servers}
         | {source.server_id for source in config.alertmanager_sources}
     )
-    access = StaticAccess(config.access, frozenset(targets), _group_access(config, members))
+    action_contracts, action_policies = action_status_catalog(
+        targets - frozenset(schemas),
+        config.projection_bytes,
+    )
+    catalog = ToolCatalog(
+        (*tools.contracts, *monitoring_contracts, *api_contracts, *action_contracts),
+        (*tools.policies, *monitoring_policies, *api_policies, *action_policies),
+    )
+    access = StaticAccess(
+        config.access,
+        frozenset(targets),
+        _group_access(config, members),
+        write_tools=frozenset(
+            c.tool_id for c in catalog.contracts if catalog.policy_for(c).effect == "write"
+        ),
+    )
     evidence = EvidenceStore(
         engine,
-        ToolCatalog(
-            (*tools.contracts, *monitoring_contracts, *api_contracts),
-            (*tools.policies, *monitoring_policies, *api_policies),
-        ),
+        catalog,
         authorize=access.authorize,
         clock=clock,
         retention_seconds=storage.evidence_retention_seconds,
@@ -1397,6 +1433,7 @@ async def open_runtime(
             local_tools=executes,
             mcp=mcp,
             clock=clock,
+            actions=ActionService(governance, parts.store, parts.results.access, clock=clock),
         )
         service = ChannelService(app, parts.results)
         yield Runtime(engine, lock, readiness, recovery, service, mcp, alertmanagers)

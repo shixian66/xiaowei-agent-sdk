@@ -10,7 +10,7 @@ import json
 from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
-from typing import Any
+from typing import Any, Literal
 
 import pytest
 from pydantic import SecretStr, ValidationError
@@ -96,10 +96,16 @@ class BarrierStore(ChannelStore):
     entered: asyncio.Event
     release: asyncio.Event
 
-    async def complete(self, record: RequestRecord, result: TurnAnswer) -> RequestRecord:
+    async def complete(
+        self,
+        record: RequestRecord,
+        result: TurnAnswer,
+        *,
+        failure_code: Literal["result_not_saved", "action_feedback_failed"] = "result_not_saved",
+    ) -> RequestRecord:
         self.entered.set()
         await self.release.wait()
-        return await super().complete(record, result)
+        return await super().complete(record, result, failure_code=failure_code)
 
 
 def app_config(**overrides: Any) -> AppConfig:
@@ -686,19 +692,20 @@ async def test_entry_and_evidence_authorization_share_one_access_policy(env: Env
 
 # 只终止持有会话级实例锁（排他）的后端。
 TERMINATE_INSTANCE_LOCK = text(
-    "SELECT count(pg_terminate_backend(pid)) FROM pg_locks"
-    " WHERE locktype = 'advisory' AND granted AND mode = 'ExclusiveLock'"
+    "SELECT count(pg_terminate_backend(pid)) FROM pg_stat_activity"
+    " WHERE pid = :pid AND datname = current_database()"
 )
 WAITING_ON_LOCK = text(
     "SELECT count(*) FROM pg_stat_activity"
     " WHERE wait_event_type = 'Lock' AND pid <> pg_backend_pid()"
+    " AND datname = current_database()"
 )
 INTERRUPTED_TEXT = "接管时中断的轮次"
 
 
-async def terminate_instance_lock(env: Env) -> None:
+async def terminate_instance_lock(env: Env, previous_pid: int) -> None:
     async with env.engine.begin() as conn:
-        assert await conn.scalar(TERMINATE_INSTANCE_LOCK) == 1
+        assert await conn.scalar(TERMINATE_INSTANCE_LOCK, {"pid": previous_pid}) == 1
 
 
 async def waiting_on_locks(env: Env, count: int, timeout: float = 5) -> bool:
@@ -740,7 +747,7 @@ async def test_start_after_the_lock_moved_is_refused_before_the_model(env: Env) 
     async with hold_instance_lock(env.engine, Readiness()) as old_lock:
         await env.store.recover(old_lock)
         receipt = await env.service.accept(env.inbound(message))
-        await terminate_instance_lock(env)
+        await terminate_instance_lock(env, old_lock.pid)
         async with hold_instance_lock(env.engine, Readiness()):
             assert env.readiness.ok
             with pytest.raises(NotReadyError):

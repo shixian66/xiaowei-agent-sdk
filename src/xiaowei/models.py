@@ -114,6 +114,16 @@ class Budget(_Trusted):
     max_scope_checks: int = Field(gt=0, le=100_000)
 
 
+class ApprovedAction(_Trusted):
+    """应用占用执行机会后产生的绑定元数据；模型不能提供。"""
+
+    action_id: Label
+    attempt: Label
+    tool_id: ToolId
+    target_id: Label
+    arguments_digest: Label
+
+
 class RunContext(_Trusted):
     """SDK 本地 context：可信身份、目标与工具范围、预算及 Evidence 标识，不含任何依赖。"""
 
@@ -122,6 +132,7 @@ class RunContext(_Trusted):
     tool_scope: frozenset[ToolId]
     budget: Budget
     evidence_ids: tuple[Label, ...] = ()
+    approved_action: ApprovedAction | None = None
 
 
 class ToolContract(_Trusted):
@@ -292,6 +303,7 @@ class DeliveryFact(_Trusted):
     metadata: dict[str, JsonScalar]
     note: str | None = None
     result_json: str | None = None
+    requires_complete: bool = Field(default=False, exclude=True)
 
 
 class Delivery(_Trusted):
@@ -304,6 +316,8 @@ class Delivery(_Trusted):
     analysis: tuple[AnswerInference, ...] = ()
     """独立渲染的模型分析；仅由证据验证后的回答生成，不在事实表格中混排。"""
     monitoring_notice: str | None = None
+    requires_complete: bool = Field(default=False, exclude=True)
+    """包含待批准动作时，所有代码生成的材料必须完整发送；容量提示不算动作送达。"""
     """系统按可信失败记录生成的未核实源说明；Web 与飞书均须展示。"""
     web_text: str | None = None
     """Web 澄清或未执行建议的原文。"""

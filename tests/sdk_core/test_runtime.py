@@ -84,6 +84,7 @@ from xiaowei.starrocks_tools import (
     starrocks_tools,
 )
 from xiaowei.storage import (
+    _INSTANCE_LOCK_KEY,
     Readiness,
     StorageBusyError,
     StorageDigestKeyMismatchError,
@@ -239,10 +240,10 @@ class Env:
                 stop.set()
                 await asyncio.wait({task}, timeout=30)
 
-    async def scalar(self, sql: str) -> Any:
+    async def scalar(self, sql: str, parameters: dict[str, Any] | None = None) -> Any:
         async with open_engine(SecretStr(self.url.render_as_string(hide_password=False))) as e:
             async with e.connect() as conn:
-                return await conn.scalar(text(sql))
+                return await conn.scalar(text(sql), parameters)
 
 
 def forget(drv: Any) -> None:
@@ -1003,7 +1004,12 @@ TERMINATE_LOCK = (
     "SELECT count(pg_terminate_backend(pid)) FROM pg_locks"
     " WHERE locktype = 'advisory' AND granted AND mode = 'ExclusiveLock'"
     " AND database = (SELECT oid FROM pg_database WHERE datname = current_database())"
+    " AND classid = CAST(:classid AS oid) AND objid = CAST(:objid AS oid) AND objsubid = 1"
 )
+INSTANCE_LOCK_PARAMETERS = {
+    "classid": _INSTANCE_LOCK_KEY >> 32,
+    "objid": _INSTANCE_LOCK_KEY & 0xFFFF_FFFF,
+}
 WAITING_ON_LOCK = (
     "SELECT count(*) FROM pg_stat_activity WHERE wait_event_type = 'Lock'"
     " AND datname = current_database()"
@@ -1033,7 +1039,7 @@ async def not_serving(served: Served, timeout: float = 2) -> None:
 
 async def test_losing_the_instance_lock_stops_the_process(env: Env) -> None:
     async with env.running(env.config()) as served:
-        assert await env.scalar(TERMINATE_LOCK) == 1
+        assert await env.scalar(TERMINATE_LOCK, INSTANCE_LOCK_PARAMETERS) == 1
         assert await asyncio.wait_for(served.task, 30) == 1
 
 
@@ -1045,7 +1051,7 @@ async def test_lock_loss_fixture_leaves_other_test_databases_connected(env: Env)
             await conn.execute(text("SELECT pg_advisory_lock(736701)"))
             try:
                 async with env.running(env.config()) as served:
-                    assert await env.scalar(TERMINATE_LOCK) == 1
+                    assert await env.scalar(TERMINATE_LOCK, INSTANCE_LOCK_PARAMETERS) == 1
                     assert await asyncio.wait_for(served.task, 30) == 1
                     assert await conn.scalar(text("SELECT 1")) == 1
             finally:
@@ -1066,7 +1072,7 @@ async def test_lock_loss_is_noticed_at_once_not_at_the_next_check(env: Env) -> N
     config = env.config(lock_check_seconds=60)
     async with env.running(config) as served:
         await served.page()
-        assert await env.scalar(TERMINATE_LOCK) == 1
+        assert await env.scalar(TERMINATE_LOCK, INSTANCE_LOCK_PARAMETERS) == 1
         await not_serving(served)
         late = env.scripts.add(
             "丢锁后的新请求", tool_call("list_tables", cluster=SR.target_id, **SEARCH_ALL), cite()
@@ -1095,7 +1101,7 @@ async def test_second_instance_after_lock_loss_never_runs_the_old_request(env: E
         await served.page()
         pending = asyncio.create_task(served.turn(slow, request_id="inflight"))
         await asyncio.wait_for(entered.wait(), 20)
-        assert await env.scalar(TERMINATE_LOCK) == 1
+        assert await env.scalar(TERMINATE_LOCK, INSTANCE_LOCK_PARAMETERS) == 1
         await not_serving(served)
 
         second = Env(env.url, free_port(), env.scripts, env.clock, env.drv)
@@ -1134,7 +1140,7 @@ async def test_accept_paused_across_a_takeover_ends_interrupted_not_stranded(env
             await blocker.execute(text("SELECT 1 FROM xiaowei_channel_session FOR UPDATE"))
             pending = asyncio.create_task(served.turn(late, request_id="late"))
             assert await waiting_on_locks(env, 1)
-            assert await env.scalar(TERMINATE_LOCK) == 1
+            assert await env.scalar(TERMINATE_LOCK, INSTANCE_LOCK_PARAMETERS) == 1
 
             # 新实例用自己的驱动：它只做启动时的结构快照刷新，不能为任何请求运行查询。
             second = Env(env.url, free_port(), env.scripts, env.clock, driver(SALES))
@@ -1612,7 +1618,7 @@ async def test_resend_requires_feishu(env: Env) -> None:
 async def test_storage_commands_use_the_configured_database(env: Env) -> None:
     config = env.config()
     await runtime.initialize(config)  # 已初始化时幂等
-    assert await runtime.upgrade(config) == 6
+    assert await runtime.upgrade(config) == 7
     report = await runtime.cleanup(config, batch_size=10)
     assert (report.sessions, report.unregistered) == (0, 0)
 
@@ -1640,7 +1646,7 @@ async def test_maintenance_commands_reject_a_digest_key_mismatch_before_business
             starrocks_connect=env.connect(config),
         )
 
-    assert await env.scalar("SELECT version FROM xiaowei_schema_version") == 6
+    assert await env.scalar("SELECT version FROM xiaowei_schema_version") == 7
     assert env.drv.attempts == 0 and channel.sends == []
 
 

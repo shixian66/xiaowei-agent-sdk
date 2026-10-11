@@ -19,6 +19,17 @@ ANALYSIS_CLIPPED: Final = "分析展示已截断，未展示全部模型分析�
 TEXT_CLIPPED: Final = "（内容超过单消息上限，已截断）"
 _TECHNICAL = frozenset({"sql", "row_count", "elapsed_ms", "next_cursor"})
 _PAGED = frozenset({"local/list_databases", "local/list_tables", "local/describe_table"})
+_ACTION_LABELS = {
+    "action_id": "Action ID",
+    "action": "动作",
+    "parameters": "实际参数",
+    "revision": "当前版本",
+    "change": "差异",
+    "impact": "影响",
+    "rollback": "恢复办法",
+    "approve_before": "批准截止时间",
+    "approval_command": "批准命令",
+}
 
 Message = dict[str, Any]
 _AT_TAG = re.compile(r"<(?=\s*at\b)", re.IGNORECASE)
@@ -136,6 +147,13 @@ def _card(
         )
         if fact.note is not None:
             elements.append(_div(f"说明：{fact.note}"))
+        if fact.requires_complete:
+            elements.append(_div("待批准动作（尚未执行）"))
+            elements.extend(
+                _div(f"{_ACTION_LABELS.get(key, key)}：{_cell({key: value}, key)}")
+                for key, value in fact.metadata.items()
+            )
+            continue
         if fact.columns:
             elements.extend(
                 _div(f"{key}: {_cell({key: value}, key)}")
@@ -183,7 +201,10 @@ def _card(
             elements.extend(
                 _div("\n".join(f"{name}: {_cell(row, name)}" for name in columns)) for row in rows
             )
-    if omissions and any(n < len(_data(f)[1]) for f, n in zip(delivery.facts, counts, strict=True)):
+    if omissions and any(
+        not f.requires_complete and n < len(_data(f)[1])
+        for f, n in zip(delivery.facts, counts, strict=True)
+    ):
         elements.append(_div(FACTS_CLIPPED))
     if analysis:
         elements.append(_div("分析与建议（模型推断）"))
@@ -191,6 +212,8 @@ def _card(
     if omissions and tuple(analysis) != delivery.analysis:
         elements.append(_div(ANALYSIS_CLIPPED))
     for index, fact in enumerate(delivery.facts):
+        if fact.requires_complete:
+            continue
         details: list[Message] = []
         if index in sqls:
             details.append(_div(f"实际 SQL:\n{fact.metadata['sql']}"))
