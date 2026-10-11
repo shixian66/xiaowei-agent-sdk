@@ -25,13 +25,13 @@ import json
 import re
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Any, Literal, cast
 
 from agents import TResponseInputItem
 from agents.extensions.memory import SQLAlchemySession
 from agents.memory import Session, SessionSettings
-from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator, model_validator
 from sqlalchemy import TextClause, text
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine
@@ -258,6 +258,25 @@ class SessionLimits(BaseModel):
     max_history_bytes: int = Field(gt=0)
     retention_seconds: int = Field(gt=0)
 
+    @model_validator(mode="after")
+    def _snapshot_capacity(self) -> "SessionLimits":
+        # 两个限额和对应计数都会进入状态列；启动时确认能写入既定容量，不另设业务数值上限。
+        timestamp = datetime.max.replace(tzinfo=timezone(timedelta(hours=14)))
+        try:
+            SessionSnapshot(
+                observed_at=timestamp,
+                phase="before_commit",
+                committed_turns=self.max_history_turns,
+                turn_limit=self.max_history_turns,
+                replay_bytes=self.max_history_bytes + 1,
+                byte_limit=self.max_history_bytes,
+                expires_at=timestamp,
+                reason="history_bytes_limit",
+            )
+        except ValidationError:
+            raise ValueError("会话上限超出会话状态容量") from None
+        return self
+
 
 class SessionInputPolicy(BaseModel):
     """可信配置的用户输入准入策略：用户文字进入会话的字节上限与禁止保存的模式。
@@ -355,6 +374,7 @@ class PolicySession:
         if limit is not None:
             # 按条数截断会拆开工具调用/结果配对；历史大小由 SessionLimits 约束。
             raise SessionError("会话历史不支持按条数截断")
+        self._bytes = None
         turns = await self._open()
         if turns >= self._limits.max_history_turns:
             raise self._limit("history_turn_limit")
@@ -398,12 +418,13 @@ class PolicySession:
         context_evidence: Sequence[str],
         *,
         monitoring_failures: Sequence[MonitoringFailure] = (),
-    ) -> None:
+    ) -> SessionSnapshot:
         """校验本轮最终回答与完整历史后写入底层 Session；任何失败都不保留本轮暂存项。
 
         ``context_evidence`` 是应用记录的本轮模型可见证据（见 ``TurnAnswer``），与最终回答一起校验。
         """
         self._phase = "before_commit"
+        self._bytes = None
         pending, self._pending = self._pending, []
         await self._validate_final_answer(pending, context_evidence, monitoring_failures)
         turns = await self._open()
@@ -415,6 +436,16 @@ class PolicySession:
             # 本轮已执行的工具不重跑，也不裁剪历史凑数；封存后提示新建。
             await self._transition("active", "sealed")
             raise self._limit("history_bytes_limit")
+        # 先构造可保存的成功状态；编码校验不能发生在 SDK 已提交之后。
+        completed = SessionSnapshot(
+            observed_at=self._clock(),
+            phase="after_commit",
+            committed_turns=turns + 1,
+            turn_limit=self._limits.max_history_turns,
+            replay_bytes=self._bytes,
+            byte_limit=self._limits.max_history_bytes,
+            expires_at=self._expires,
+        )
         if not await self._transition("active", "writing"):
             raise self._unavailable()
         try:
@@ -425,6 +456,7 @@ class PolicySession:
             raise SessionStoreError("会话保存失败，该会话已停止使用，请新建会话")
         self._turns = turns + 1
         self._phase = "after_commit"
+        return completed.model_copy(update={"observed_at": self._clock()})
 
     async def _validate_final_answer(
         self,
@@ -467,6 +499,7 @@ class PolicySession:
         元数据缺失而底层已有历史（应用表丢失、局部恢复、标识复用）时无法确认归属，拒绝
         认领，要求新建或走单独的恢复流程。
         """
+        self._turns = self._expires = None
         row = await self._load()
         if row is None:
             try:

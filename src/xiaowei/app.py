@@ -629,11 +629,11 @@ class Application:
         )
         # 先单独校验回答，使拒绝原因明确；提交时 Session 仍会用同一验证器再校验一次。
         await self._evidence.validate_answer(validated, ctx)
-        await session.commit_validated(
+        snapshot = await session.commit_validated(
             validated.context_evidence, monitoring_failures=validated.monitoring_failures
         )
         _stage(turn, "committed", started)
-        return validated.model_copy(update={"session_state": session.snapshot()})
+        return validated.model_copy(update={"session_state": snapshot})
 
     def _tools_for(self, ctx: RunContext) -> list[Tool]:
         """本轮 Agent 的工具：可信范围内的本地工具与 MCP 工具，列表只属于这一轮。"""

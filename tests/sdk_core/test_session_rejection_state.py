@@ -4,13 +4,15 @@ import json
 from datetime import UTC, datetime
 
 import pytest
+from agents import Runner
 from agents.extensions.memory import SQLAlchemySession
+from agents.testing import ScriptedModel
 from pydantic import ValidationError
 from sqlalchemy import TextClause, text
 from sqlalchemy.engine import URL
 from tests.sdk_core.synthetic_tools import context
 from tests.sdk_core.test_app import cite, clarify, tool_call, upstream_error
-from tests.sdk_core.test_channel_service import Env, Outbox, ref
+from tests.sdk_core.test_channel_service import Env, Outbox, app_config, ref
 from tests.sdk_core.test_channel_service import env as env
 from tests.sdk_core.test_session_policy import LIMITS, _call, _cite, harness
 
@@ -25,7 +27,9 @@ from xiaowei.models import Delivery, SessionSnapshot
 from xiaowei.session import (
     SessionItemRejectedError,
     SessionLimitError,
+    SessionLimits,
     SessionStoreError,
+    SessionUnavailableError,
     SessionUnverifiableError,
 )
 from xiaowei.storage import Readiness, hold_instance_lock
@@ -45,6 +49,17 @@ def test_non_session_rejections_keep_category_and_have_no_snapshot(error, reason
     failed = _turn_error(error)
     assert failed.reason == reason
     assert failed.session_state is None
+
+
+@pytest.mark.parametrize("limit", ["max_history_turns", "max_history_bytes"])
+def test_limits_that_cannot_fit_the_snapshot_are_rejected_before_execution(limit: str) -> None:
+    values = {"max_history_turns": 100, "max_history_bytes": 400_000, "retention_seconds": 7200}
+    values[limit] = 10**1000
+    with pytest.raises(ValidationError, match="会话状态容量"):
+        app_config(session_limits=values)
+    # 没有另设任意数值上限；能放进已批准快照容量的配置仍可用。
+    accepted = SessionLimits.model_validate({**values, limit: 10**100})
+    assert getattr(accepted, limit) == 10**100
 
 
 @pytest.mark.parametrize(
@@ -128,6 +143,45 @@ async def test_complete_replay_bytes_limit_is_measured_without_changing_history(
         assert snapshot.replay_bytes is not None and snapshot.replay_bytes >= 200
         assert await h.stored() == old
         assert await h.state() == ("active", 1)
+        assert len(h.adapter.calls) == 1
+
+
+@pytest.mark.parametrize(
+    ("update", "reason", "count"),
+    [
+        (text("UPDATE xiaowei_session SET expires_at='2020-01-01'"), "expired", 1),
+        (
+            text("UPDATE xiaowei_session SET profile_fingerprint='changed'"),
+            "binding_changed",
+            1,
+        ),
+        (text("UPDATE xiaowei_session SET owner_id='bob'"), "unavailable", None),
+    ],
+)
+async def test_commit_rejection_does_not_reuse_prior_stage_measurements(
+    postgres_url: URL, update: TextClause, reason: str, count: int | None
+) -> None:
+    async with harness(postgres_url) as h:
+        await h.turn(context(), [_call(), _cite()])
+        old = await h.stored()
+        ctx = context(turn="t2")
+        session = h.session(ctx)
+        await Runner.run(
+            h.agent(ScriptedModel([_cite()])), "解释已有结果", context=ctx, session=session
+        )
+        assert session.snapshot().replay_bytes is not None
+        async with h.engine.begin() as conn:
+            await conn.execute(update)
+        with pytest.raises(SessionUnavailableError) as caught:
+            await session.commit_validated(h.seen(session, ctx))
+        snapshot = caught.value.snapshot
+        assert snapshot is not None and snapshot.reason == reason
+        assert snapshot.phase == "before_commit"
+        assert snapshot.replay_bytes is None
+        assert snapshot.committed_turns == count
+        if count is None:
+            assert snapshot.expires_at is None
+        assert await h.stored() == old
         assert len(h.adapter.calls) == 1
 
 
@@ -250,7 +304,34 @@ async def test_snapshot_write_failure_after_session_commit_keeps_result_not_save
     assert duplicate == record and len(env.adapter.calls) == 1
 
 
-@pytest.mark.parametrize("corrupt", ["extra", "reason", "phase", "count", "invalid_json"])
+async def test_snapshot_serialization_failure_after_commit_closes_session(
+    env: Env, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    run_turn = env.app.run_turn
+
+    async def corrupt_after_commit(ctx, message):
+        result = await run_turn(ctx, message)
+        assert result.session_state is not None and result.session_state.phase == "after_commit"
+        corrupted = result.session_state.model_copy(update={"expires_at": object()})
+        return result.model_copy(update={"session_state": corrupted})
+
+    monkeypatch.setattr(env.app, "run_turn", corrupt_after_commit)
+    message = env.scripts.add("query-once", tool_call("order_total", region="east"), cite())
+    with pytest.raises(ResultNotSavedError):
+        await env.run(message)
+    record = await env.store.get("web", "alice", "cookie-1", "r1")
+    assert record.state == "failed" and record.failure_code == "result_not_saved"
+    assert record.answer is None and record.session_state is None
+    assert await env.session_state(record.session_id) == "closed"
+    assert len(env.adapter.calls) == 1 and env.readiness.ok
+    duplicate = await env.run(message)
+    assert duplicate == record and len(env.adapter.calls) == 1
+
+
+@pytest.mark.parametrize(
+    "corrupt",
+    ["extra", "reason", "phase", "count", "invalid_json", "turns_below_limit", "bytes_below_limit"],
+)
 async def test_corrupt_snapshot_refuses_delivery_instead_of_hiding_notice(
     env: Env, corrupt: str
 ) -> None:
@@ -271,6 +352,10 @@ async def test_corrupt_snapshot_refuses_delivery_instead_of_hiding_notice(
             data["phase"] = "after_commit"
         elif corrupt == "count":
             data["committed_turns"] = "canary"
+        elif corrupt == "turns_below_limit":
+            data["committed_turns"] = 0
+        elif corrupt == "bytes_below_limit":
+            data.update(reason="history_bytes_limit", replay_bytes=2)
         raw = "{canary" if corrupt == "invalid_json" else json.dumps(data)
         await conn.execute(
             text("UPDATE xiaowei_request SET session_state=:v WHERE state='failed'"), {"v": raw}
@@ -280,6 +365,25 @@ async def test_corrupt_snapshot_refuses_delivery_instead_of_hiding_notice(
         await env.results().view(ref("r2"))
     with pytest.raises(RequestUnavailableError):
         await env.results().send(ref("r2"), out)
+    assert out.sent == []
+
+
+@pytest.mark.parametrize("count", ["committed_turns", "replay_bytes"])
+async def test_completed_snapshot_over_limit_is_not_delivered(env: Env, count: str) -> None:
+    assert (await env.run(env.scripts.add("first", clarify()))).state == "completed"
+    async with env.engine.begin() as conn:
+        raw = await conn.scalar(text("SELECT session_state FROM xiaowei_request"))
+        data = json.loads(raw)
+        limit = "turn_limit" if count == "committed_turns" else "byte_limit"
+        data[count] = data[limit] + 1
+        await conn.execute(
+            text("UPDATE xiaowei_request SET session_state=:v"), {"v": json.dumps(data)}
+        )
+    out = Outbox()
+    with pytest.raises(RequestUnavailableError):
+        await env.results().view(ref())
+    with pytest.raises(RequestUnavailableError):
+        await env.results().send(ref(), out)
     assert out.sent == []
 
 

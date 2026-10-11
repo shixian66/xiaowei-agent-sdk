@@ -1287,7 +1287,10 @@ def _session_state(
 ) -> str | None:
     if snapshot is None:
         return None
-    raw = snapshot.model_dump_json()
+    try:
+        raw = snapshot.model_dump_json()
+    except (TypeError, ValueError):
+        raise RequestUnavailableError from None
     _read_session_state(raw, state, code)  # 写入也验证，model_copy 不得绕过闭集和容量。
     return raw
 

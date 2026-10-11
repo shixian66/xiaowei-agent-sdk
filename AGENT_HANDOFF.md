@@ -37,7 +37,7 @@
 
 ## 3. 当前计划与下一项工作
 
-**当前下一步：** 为[七项修复计划 S2](docs/superpowers/plans/2026-10-10-production-dialogue-repairs.md#s2会话拒绝原因贯穿存储与双入口)提交、推送并创建 PR，核对精确 head 的 CI，交用户指定审查方复核。S1 已随 PR #81 合入。S3 接近上限提醒仍未实施，后续须按用户授权推进；本轮不合并、不部署、不改公司配置。
+**当前下一步：** 将[七项修复计划 S2](docs/superpowers/plans/2026-10-10-production-dialogue-repairs.md#s2会话拒绝原因贯穿存储与双入口)的工作分支及对应 PR 交用户指定审查方复核；精确 base/head、最终 CI 以 PR 为准。S1 已随 PR #81 合入。S3 接近上限提醒仍未实施，后续须按用户授权推进；本轮不合并、不部署、不改公司配置。
 
 **S2 本地实现与证据（2026-10-11）：** 复用 `PolicySession` 的元数据读取/完整回放计数，经 Application 的可信返回/异常、请求终态事务、当前身份读取，生成 Web/飞书固定说明。成功提交和失败状态单独保存，不进入回答 JSON、模型或 SDK 历史；Agent 指令、工具、治理及 Evidence 校验不变。主线 v7 已被占用，本片用 v8 迁移，发行清单只允许 v8 直接启动，v1–v7 显式升级。旧空快照保留通用回执；坏快照拒绝交付，保存失败、取消和恢复沿既有状态机。
 
@@ -46,8 +46,21 @@
 - 真实 Chrome 用空闲端口，检查具体提示默认可见、刷新不变、新建后查询可继续；`/private/tmp/s2-browser-green.log` 为 1 passed，未占用 8501。
 - 隔离变异：去掉快照保存、提交超限写成未执行、去掉接收者校验，三项全部被目标测试发现（后一项 owner/actor 两个反例）；`/private/tmp/s2-mutations.log` 记录实际导入的临时源码路径，候选未被变异修改。
 - 测试夹具修正：迁移后重新建立连接，避免复用 ALTER TABLE 前的 `SELECT *` 缓存；浏览器等待新建会话清空列表后再提问；无证据成功场景使用合法澄清回答。均保留原状态、权限、零业务 I/O 和不重放断言。
+- 实现方新上下文复查发现两处快照边界：提交阶段沿用旧字节、编码失败发生在 Session 提交之后。先补十项 RED（含矛盾状态反例），随后清空阶段旧测量、执行前检查 1024 字节配置兼容、成功状态编码前移至 SDK 写入前；提交后编码错误走原 `result_not_saved`/关闭链。没有新增业务限额、权限或 Agent 行为。日志 `/private/tmp/s2-review-red.log` 为 10 failed，修复后同文件及相关链路包含在 264 passed 中；这不是用户指定独立审查。
+- 新增三项隔离变异：恢复旧阶段字节、移除容量预检、移除提交后编码失败关闭，分别 3/2/1 failed；导入临时副本已核对，日志 `/private/tmp/s2-review-mutations.log`。S1 容量观察器需要转交新增提交返回值，先补持久状态断言复现 1 failed，再修测试装配，不改产品观测次数。
 
-**S2 验证状态：** 定向测试、全量回归及静态检查的最终命令/结果在提交前更新此处；本机 Docker overlay 30G/30G（0 可用），镜像类验证受环境限制，未清理其他任务镜像/卷。PR 干净 CI 的结果另按精确 head 核对。实现方新的上下文复查不代替用户指定独立审查。
+**S2 验证状态：** 本机隔离 PostgreSQL 为 55432；下列命令中的 `pytest` 均使用 `SDK_TEST_POSTGRES_URL=postgresql+asyncpg://postgres@127.0.0.1:55432/postgres`。本机 Docker overlay 30G/30G（0 可用），镜像类验证受环境限制，未清理其他任务镜像/卷。PR 干净 CI 结果按精确 head 另记，不能把本机未通过的全量写成通过。
+
+| 实际检查 | 结果 |
+| --- | --- |
+| `.venv/bin/python -m pytest tests/sdk_core/test_session_rejection_state.py tests/sdk_core/test_session_rejection_entrypoints.py tests/sdk_core/test_cli.py tests/sdk_core/test_evidence.py tests/sdk_core/test_group_identity.py tests/sdk_core/test_session_policy.py -q` | 264 passed，117.57s；`/private/tmp/s2-review-green.log` |
+| `.venv/bin/python -m pytest tests/sdk_core/test_session_rejection_browser.py -m browser -q -W error`，另设 `SDK_TEST_CHROME=/Applications/Google Chrome.app/Contents/MacOS/Google Chrome` | 1 passed，2.57s；`/private/tmp/s2-browser-final-correct-env.log`。先前误用 `CHROME_BINARY` 导致 1 个 setup error，未启动 Chrome；按仓库变量修正后重跑，没有改断言 |
+| `.venv/bin/python -m pytest -q`（中间候选） | 5 failed、5081 passed、329 skipped、61 deselected、7 errors，756.20s；`/private/tmp/s2-full.log`。四个失败分别是 CLI/迁移期望仍为 v7、Delivery 精确字段缺 session_notice，按批准契约更新且保留其余断言；一个监控计时断言原样复核见下；七个镜像 setup error 均为 Docker 空间耗尽 |
+| `.venv/bin/python -m pytest tests/sdk_core/test_monitoring_r1b.py::test_concurrent_reconnect_is_single_flight_bounded_and_cools_down -q`，原样分别运行三次 | 3 次均 1 passed，5.43/5.51/5.47s；`/private/tmp/s2-monitoring-timing-{1,2,3}.log`。未改监控源码或 0.5 秒断言，单测通过不证明全量负载下永不波动 |
+| `.venv/bin/python -m pytest tests/sdk_core tests/p1b tests/security/test_docs_command_consistency.py tests/contract/test_doc_fact_binding.py -q -W error` | 2978 passed、177 skipped、61 deselected，693.72s；`/private/tmp/s2-sdk-p1b-final.log`。执行期间完成了下条观察器返回值兼容及配置预检时区长度调整，之后定向重跑；最终冻结 head 的全量由 PR CI 核验。该范围不包含镜像检查 |
+| `.venv/bin/python -m pytest tests/sdk_core/test_session_capacity.py -q -W error`；`.venv/bin/python -m pytest tests/sdk_core/test_session_rejection_state.py -q -W error` | 最后一次容量观察器/状态边界调整后分别 16 passed（30.75s）和 36 passed（7.24s）；`/private/tmp/s2-capacity-observer-green.log`、`/private/tmp/s2-state-final-review.log` |
+| `.venv/bin/ruff check --no-cache .`；`.venv/bin/ruff format --check --no-cache src/xiaowei tests/sdk_core scripts/package_release.py tests/deployment/test_release.py tests/deployment/test_compose.py tests/deployment/test_maintenance.py`；`.venv/bin/mypy src/xiaowei`；`uv lock --check`；`git diff --check` | 已通过；格式 114 文件，类型 27 源文件；最终提交前重核未变输入 |
+| `.venv/bin/python -m pytest tests/security/test_docs_command_consistency.py tests/contract/test_doc_fact_binding.py -q -W error`；发行归档契约、包内文档引用、旧配置回退三个离线用例 | 分别 5 passed（0.17s）与 3 passed（0.11s）；`/private/tmp/s2-docs-final.log`、`/private/tmp/s2-release-contract-final.log`。不证明本机镜像检查通过 |
 
 **S2 未覆盖：** 真实 Lark 收发、公司 Web/StarRocks/模型、v8 在公司环境的升级/成对回退与用户验收。S2 不更改 Agent 行为契约，不新增真实模型豁免；S3 提前提醒及其他未批准切片仍未实施。数据库迁移需要显式操作，部署及私聊/测试群观察须用户另行授权。
 

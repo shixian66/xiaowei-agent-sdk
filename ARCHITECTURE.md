@@ -382,7 +382,7 @@ PostgreSQL 使用持久卷；SDK 表由锁定版本的 SQLAlchemySession 契约�
 
 **会话拒绝说明（S2，已批准并实施，真实渠道未验收）：** `PolicySession` 在已有元数据读取和完整回放计算处生成可信快照：观察时间/阶段、已提交轮数及限额、完整回放字节及限额、失效时间与闭集原因。提交前字节包含待提交内容，轮数只含成功提交；无法安全取得的值为空，不补零。快照不含问题、SQL、工具结果、签名或连接信息，不进入模型、SDK 历史或回答 JSON；不增加一次回放或 Evidence 探测。
 
-快照与请求终态在同次应用事务保存到独立可空字段，UTF-8 JSON 上限 1024 字节；`max_answer_bytes` 仍只约束回答列。completed 只能保存成功提交后的快照；失败仍是 `session_unavailable` / `session_failed`，日志只追加 `session_reject`，取值为 `history_turn_limit`、`history_bytes_limit`、`expired`、`binding_changed`、`unavailable`。内容拒收、存储失败、暂不能复核的类别不变。Session 与请求存储不增加跨组件原子性；请求保存失败仍关闭 Session，按既有 `result_not_saved` 处理。
+快照与请求终态在同次应用事务保存到独立可空字段，UTF-8 JSON 上限 1024 字节；`max_answer_bytes` 仍只约束回答列。配置阶段校验限额能放进既定快照容量，不另设业务数值上限；成功快照在 SDK 写入前完成编码校验，只有提交成功后才返回并更新时间。进入新的观察阶段清空旧字节测量，重新确认归属前清空轮数与期限；无法完成检查时不沿用之前阶段的值。读取和保存都校验计数、原因、阶段的确定关系，矛盾状态拒绝交付。completed 只能保存成功提交后的快照；失败仍是 `session_unavailable` / `session_failed`，日志只追加 `session_reject`，取值为 `history_turn_limit`、`history_bytes_limit`、`expired`、`binding_changed`、`unavailable`。内容拒收、存储失败、暂不能复核的类别不变。Session 与请求存储不增加跨组件原子性；提交后的快照编码或请求保存失败仍关闭 Session，按既有 `result_not_saved` 处理。
 
 读取、轮询、投递及重启后读取先核对当前身份和权限，再从快照生成固定回执与独立 `Delivery.session_notice`。历史标为“本轮结束时”，不推算当前余额；旧空字段保留通用回执，坏快照拒绝交付。提交容量超限明确说明回答未保存/交付、会话封存、已执行工具不自动重试。Web 指引点“新建会话”，飞书指引发 `/新建`，新建不等于立即删除保存记录。必要提示计入渠道容量，放不下时按发送前失败处理，不截掉原因后冒充成功；成功回复的提前提醒尚未实现。
 

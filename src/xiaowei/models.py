@@ -310,8 +310,20 @@ class SessionSnapshot(_Trusted):
             or self.committed_turns is None
             or self.replay_bytes is None
             or self.expires_at is None
+            or self.committed_turns > self.turn_limit
+            or self.replay_bytes > self.byte_limit
         ):
-            raise ValueError("提交后的会话状态不完整")
+            raise ValueError("提交后的会话状态不完整或超出上限")
+        if self.reason == "history_turn_limit" and (
+            self.committed_turns is None or self.committed_turns < self.turn_limit
+        ):
+            raise ValueError("交互轮数上限与会话状态不一致")
+        if self.reason == "history_bytes_limit" and (
+            self.replay_bytes is None
+            or self.replay_bytes < self.byte_limit
+            or (self.phase == "before_commit" and self.replay_bytes == self.byte_limit)
+        ):
+            raise ValueError("历史容量上限与会话状态不一致")
         if len(self.model_dump_json().encode()) > SESSION_STATE_MAX_BYTES:
             raise ValueError("会话状态超过容量")
         return self
