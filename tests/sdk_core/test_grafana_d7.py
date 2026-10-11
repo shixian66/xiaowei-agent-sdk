@@ -170,7 +170,11 @@ async def test_formal_group_create_and_conflicting_update_not_written(
                 "SELECT action_id FROM xiaowei_action WHERE proposal_tool_id=:tool",
                 {"tool": UPDATE},
             )
-            assert update_id
+            assert update_id, (
+                message_text(group_channel.sends[-1][1]),
+                await env.rows("SELECT reply_message_id, state, failure_code FROM xiaowei_request"),
+                traffic[1].requests[-4:],
+            )
             external = await isolated_api.post(
                 "/api/dashboards/db",
                 json={
@@ -232,6 +236,7 @@ async def test_unavailable_dashboard_source_hides_proposals(
         ("save_mismatch", True),
         ("read_mismatch", True),
         ("read_type_mismatch", True),
+        ("read_missing_null", True),
     ],
 )
 async def test_formal_write_unknown_is_not_replayed(
@@ -246,6 +251,8 @@ async def test_formal_write_unknown_is_not_replayed(
     uid = f"d7-{uuid4().hex}"
     state = traffic[1]
     body = dashboard(uid)
+    if failure == "read_missing_null":
+        body["description"] = None
     if failure == "read_type_mismatch":
         body["panels"] = [{"id": 1, "title": "CPU", "type": "timeseries", "targets": []}]
     args = {"dashboard_json": json.dumps(body), "folder_uid": "", "message": "create"}

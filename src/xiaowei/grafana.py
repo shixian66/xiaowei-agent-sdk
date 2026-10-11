@@ -484,7 +484,7 @@ def dashboard_actions(
                 raise ValueError("Dashboard回读版本/文件夹不符")
             # Grafana创建会补默认字段；所有明确批准的字段须精确一致。
             for key, value in expected.items():
-                if key != "version" and not _same_json(actual.get(key), value):
+                if key != "version" and (key not in actual or not _same_json(actual[key], value)):
                     raise ValueError("Dashboard回读定义不符")
             return ToolObservation(
                 payload={

@@ -79,11 +79,14 @@ def dashboard_relay() -> Iterator[tuple[int, DashboardTraffic]]:
                             )  # locked MCP Grafana timeout is 1s; write has already happened
                     elif (
                         state.written
-                        and state.behavior in {"read_mismatch", "read_type_mismatch"}
+                        and state.behavior
+                        in {"read_mismatch", "read_type_mismatch", "read_missing_null"}
                         and "/versions/" in self.path
                     ):
                         value = response.json()
-                        if state.behavior == "read_type_mismatch":
+                        if state.behavior == "read_missing_null":
+                            value["data"].pop("description", None)
+                        elif state.behavior == "read_type_mismatch":
                             value["data"]["panels"][0]["id"] = True
                         else:
                             value["data"]["title"] = "wrong-readback"
