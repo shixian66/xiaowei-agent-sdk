@@ -11,9 +11,9 @@
 | 仓库 | [shixian66/xiaowei-agent-sdk](https://github.com/shixian66/xiaowei-agent-sdk) |
 | 本地目录 / 分支 | D7：`/Users/kloenguyen/.codex/worktrees/monitoring-d7/agent-SDK` / `codex/monitoring-d7`；初始基线 `0b136bb711dbfb41e8a82a7265008fad332c5526`（PR #80，含 PR #79 / S6）；交付前同步 origin/main `4f6132edf20677ec4769a0f87eec564ba45f584b`（PR #81 / S1）。主工作区旧 G0 分支与其他工作树未改动。 |
 | M5 历史起点 | `372c381f44ecfa1fa53961f137d0058033cbd805`；不是远端当前 main 的核验结论 |
-| 本轮审查版本 | D7 前置协议 215b445 已作新上下文只读复查；当前产品实现的精确候选以交付 head 为准，尚未独立审查。R12 / PR #80 已合入，原验证证据保留。 |
+| 本轮审查版本 | D7 前置协议 `215b445` 与产品 `7c8e530` 已作实现方发起的新上下文只读复查；后者发现回读缺失null字段误报，最小修复 `fc83e36f9689ff047da7ee8e10728d351c14ac29` 已复查闭环。主线同步未改变此生产源码；用户指定独立审查仍待交付head，不把本地复查称为用户验收。 |
 | 已同步主线审查记录 | W5 `fdfdb469cbcf5e8499f9ee8d69dae954bae0ebda` 经用户独立复审通过并随 PR #74 合入。取消恢复候选 `0ec6c4351824c6b85338ba713d85d54ef34484c2` 的内部只读复查及后续验证记录见下文；这些不是 R7 的新独立审查。本次以已经合入的 PR #76 / main `c7e1e40c346fcd488dbd0dfd3af2e36377e2ee66` 同步，原监控记录与实战缺口保留。 |
-| 当前阶段 | R1、P2、G3、A4、W5、取消恢复、S6、R12 已合入；D7 离线候选已实现，完整回归及精确版本复查中；两项产品取舍已确认。真实模型、真实源、群客户端与部署门槛分别保留。 |
+| 当前阶段 | R1、P2、G3、A4、W5、取消恢复、S6、R12、S1 已合入；D7 离线候选已实现并完成新产品回归；两项产品取舍已确认。真实模型、真实源、群客户端与部署门槛分别保留。 |
 | 当前源码与依赖 | 新包 `src/xiaowei/` 的 W5 为应用表 v7（迁移007新增 Action 表和审批回执失败码 CHECK，SDK 表不变）。V1-A 新增 `vertex_model.py`（SDK 公开 `Model` 的非流式 Vertex 适配器），`model_api` 增加 `provider="vertex"` 与受控 transport 的认证头/成功校验参数；显式声明已直接导入的 `httpx2>=2.12,<3`（锁定 2.13.1 不变）。V1-B 使 `PolicySession` 随函数调用保存并回放 `provider_data.thought_signature`（单字段白名单，其余供应商字段丢弃），`app.safe_run_config()` 成为应用与 `model check` 共用的运行配置。V2 新增 `runtime.check_model` / `validate_model_config` 与 CLI `model check`。C2 把主模板改为一个 Vertex Profile、一个目标；占位符清单新增 Vertex 模型标记，C2 前模板的标记作为历史值继续拒绝。发布归档仍只含白名单文件 |
 | 新产品入口 | 原生主线仍为 `xiaowei`（与 `python -m xiaowei` 相同）的 `serve`、`config check`、`model check`、`storage init/upgrade/cleanup`、`requests resend`；`listen_host` 可为任意地址（默认 `127.0.0.1`）。镜像固定入口复用同一 CLI，在容器内绑定 `0.0.0.0`，宿主机发布地址由 `XW_WEB_BIND_ADDRESS`（默认 `0.0.0.0`）决定。真实模型、用户 StarRocks 与真实飞书未参与 P3-A 验证；旧 CLI/Compose 不是产品入口 |
 | 本次工作范围 | D7 经典 Dashboard 创建/修改：用户已确认独立写端、v2只读。实现/测试/常规修复、提交/推送/PR已授权；不合并、不部署，不连接真实模型/飞书/公司源。 |
@@ -37,7 +37,7 @@
 
 ## 3. 当前计划与下一项工作
 
-**当前下一步：** D7 经典 Dashboard 创建/修改候选完成定向验证，完整回归/精确版本复查中；用户已确认独立写端、原生v2只读。产品契约仅见[架构 D7 段](ARCHITECTURE.md#monitoring-mcp)，切片验收见[监控计划 §3.6](docs/superpowers/plans/2026-10-09-monitoring-mcp.md)。不推进 C8、不合并、不部署。
+**当前下一步：** 为D7经典 Dashboard 创建/修改提交、推送并开草稿PR，核对精确head的CI，交用户指定审查方复核；用户已确认独立写端、原生v2只读。产品契约仅见[架构 D7 段](ARCHITECTURE.md#monitoring-mcp)，切片验收见[监控计划 §3.6](docs/superpowers/plans/2026-10-09-monitoring-mcp.md)。不推进 C8、不合并、不部署。
 
 **D7 当前证据（2026-10-11）：**
 
@@ -45,11 +45,27 @@
 - 前置协议 `215b445` 已作新上下文只读复查，两个核心结论成立。补观测缺口：计数器覆盖全部写方法、真实通用API工具名为 grafana_api_request；写方法阳性对照先4failed，修后4passed。原合法初始化settings读取单独计数。
 - 产品 RED：正式群创建/版本冲突与配置 scope 两项先失败，原因是D7尚未装配；源不可用仍展示提出工具先1failed，后在已有ActionBinding补零I/O可用性过滤。未放宽通用schema/权限/审批。
 - 最小闭环：真serve、Runner、治理、PostgreSQL、Action/Evidence、群网关替身、官方MCP及隔离Grafana完成创建成功、重复批准不重放、版本变化未执行。准确版本更新成功、写前原子竞争409拒绝、恢复材料保留；正式Web两项拒绝均零工具I/O。
-- 最新定向D7/飞书展示/W5六文件 **177 passed**（29.63s，日志 /private/tmp/xw-d7-complete-final3.log）。包括经典含PromQL面板和数值阈值创建、非名单批准零工具I/O、状态追问、完整定义恢复到最新版本及非空文件夹；5xx、已写入后超时、写响应/回读/布尔类型不符均unknown，无成功写Evidence且不重放。正式Web不能提出/写入；schema漂移隐藏全部提出能力且零工具I/O。非法输入在I/O前拒绝，完整材料投影放不下时无Action/Evidence。
+- 最终定向D7/飞书展示/W5六文件 **178 passed**（32.87s，日志 /private/tmp/xw-d7-complete-null-fix.log）。包括经典含PromQL面板和数值阈值创建、非名单批准零工具I/O、状态追问、完整定义恢复到最新版本及非空文件夹；5xx、已写入后超时、写响应/回读/布尔类型不符均unknown，无成功写Evidence且不重放。正式Web不能提出/写入；schema漂移隐藏全部提出能力且零工具I/O。非法输入在I/O前拒绝，完整材料投影放不下时无Action/Evidence。
 - 严格警告合跑曾发现Web测试没有注入群替身，测试资源事件循环未关闭；核对夹具后改为显式有关闭路径的GroupChannel，保留-Werror并复验17passed。网络守卫未允许真实飞书连接。
 - 结果边界RED：12项版本bool/float/string/0先失败，修后严格正整数；正式回读bool当1先误判成功，修后unknown。JSON数值1.0被锁版规范化1时先误判unknown，修后允许同一数值、仍拒绝布尔/字符串；原定义只在完整before保留一份。审批JSON二次转义和完整材料重复曾使合法小面板材料不送达，先复现再修为可信材料原文纯文本，保留单卡片/请求容量边界。根目录folderUid省略已核对锁版源码/实际协议，空值按根目录，不新增拒绝；非空文件夹实际恢复已验证。
-- 旧完整回归在数值/展示边界修复前主动中断（749 passed、60 deselected），不计完整通过。最新完整回归 /private/tmp/xw-d7-sdk-final.log 正在运行，最终检查及新上下文复查待补；尚未推送/创建PR。
-- 未覆盖：获准真实模型的任务选择/澄清/修正/答案/步数/耗时/用量，真实群收发与展示，公司Grafana版本/组织/provisioning/规模/恢复。按用户本轮只做离线验证；离线不自动晋级真实能力或部署。
+- 精确产品复查发现已批准顶层null字段缺失仍被get误当一致：正式群回归原为succeeded（RED1failed），修后unknown、零成功写Evidence、不重放；`fc83e36` 的增量复查闭环。测试失败诊断误用不存在的rows已改为现有scalar聚合，正式成功路径实际执行该查询 **1 passed**；不改保护断言。
+- 完整新产品/P1-B回归 **3157 passed、60 deselected**（875.53s，/private/tmp/xw-d7-sdk-null-final.log）。前版完整回归曾3155passed/1failed，群更新Action ID缺失；原用例单跑和最终完整均通过，首次原因未确认，保留原日志/诊断，不声称已定位为偶发。中断的早期运行不计通过。
+- 同步PR #81/S1至 `bfc732e`：`git diff fc83e36 HEAD -- src pyproject.toml uv.lock` 为空，完整回归的生产源码/依赖仍有效；新容量、模板CLI与对话路径补验 **121 passed**（112.79s）。Ruff全仓、mypy130源文件、11受影响文件格式、离线uv锁检查与文档检查通过。十项仓库外隔离变异全部检出（包括缺失null），候选源码哈希未变。
+- 已运行CI同命令：旧包兼容2725passed/152skipped/40deselected（既有6warnings）；安全检查928passed/79skipped/4494deselected（既有5warnings）。跳过、排除和警告不计成功证据。检查对象/命令见下表及PR。
+- 发行检查本机未通过：初次75passed/7errors，构建复制库时no space；只清理D7自己的隔离Grafana容器/镜像后重跑为78passed/3failed/1error（116.40s）。三项停在PostgreSQL unhealthy；一项历史镜像构建报parent snapshot不存在。Docker根盘仍100%且仅约155MB可用。另建无网络诊断PostgreSQL当前可启动，旧容器日志已被夹具清理，所以不把三项失败的详细根因写成已证实；未改断言/跳过，也不清理其他项目。D7精确head的CI需另核对，旧S1 CI不能替代本片发行通过。专用Grafana与诊断容器/卷已清理，共享测试PostgreSQL保留。
+- 未覆盖：D7专门的多源重连交错、文件夹移动竞争未独立注入；获准真实模型的任务选择/澄清/修正/答案/步数/耗时/用量，真实群收发与展示，公司Grafana版本/组织/provisioning/规模/恢复。按用户本轮只做离线验证；离线不自动晋级真实能力或部署。
+
+
+**D7 复现命令：** SDK_TEST_POSTGRES_URL 使用本机隔离55432；官方协议用例另需哈希校验的 XW_TEST_GRAFANA_MCP_BIN、XW_TEST_PROMETHEUS_MCP_BIN、XW_TEST_ALERTMANAGER_BIN 及loopback Grafana（XW_TEST_GRAFANA_D7_URL）。二进制与隔离环境前提见监控计划；不指向公司源。官方Grafana MCP二进制SHA256为 `480c23f5f0c80e7819fa060e12d4faf471732b63bd05a2023e45f868a7f33baf`。
+
+| 实际命令（工作树内，PYTHONPATH=src:.） | 对应结果/日志 |
+| --- | --- |
+| `.venv/bin/python -m pytest tests/sdk_core tests/p1b -q -W error --tb=short` | 3157passed/60deselected；/private/tmp/xw-d7-sdk-null-final.log，产品源码fc83e36 |
+| `.venv/bin/python -m pytest tests/sdk_core/test_grafana_d7.py tests/sdk_core/test_grafana_d7_contracts.py tests/sdk_core/test_grafana_d7_protocol.py tests/sdk_core/test_feishu_render.py tests/sdk_core/test_feishu_format.py tests/sdk_core/test_group_actions.py -q -W error --tb=short` | 178passed；/private/tmp/xw-d7-complete-null-fix.log |
+| `.venv/bin/python -m pytest tests/sdk_core/test_session_capacity.py tests/sdk_core/test_cli.py tests/sdk_core/test_dialogue_gate.py -q -W error --tb=short` | 同步主线121passed；/private/tmp/xw-d7-main-supplement.log |
+| `.venv/bin/python -m pytest -q --ignore=tests/sdk_core --ignore=tests/deployment`；`.venv/bin/python -m pytest -m security -q` | 兼容与安全结果见上；/private/tmp/xw-d7-legacy-ci.log、xw-d7-security-ci.log |
+| `.venv/bin/python -m pytest tests/deployment/test_release.py tests/deployment/test_compose.py tests/deployment/test_maintenance.py tests/deployment/test_release_workflow.py -q --tb=short` | 本机环境未通过；/private/tmp/xw-d7-release-retry.log，原始失败xw-d7-release-ci.log；无网络PostgreSQL诊断xw-d7-pg-diagnostic.log |
+| `.venv/bin/ruff check --no-cache .`；`.venv/bin/mypy --cache-dir=/private/tmp/xw-d7-mypy-merged src`；`UV_CACHE_DIR=/private/tmp/xw-d7-uv-cache uv lock --check --offline`；`git diff --check` | 已通过；文档检查为既有test_docs_command_consistency.py与test_doc_fact_binding.py，5passed |
 
 **已同步主线的有效证据：** 下文保留 S1（PR #81）与 R12（PR #80）当时的离线记录，不代替当前 D7 验收。
 

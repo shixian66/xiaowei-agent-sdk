@@ -434,7 +434,7 @@ D7 默认不启用。只在指定群逐次批准；产品边界以[架构 D7 契
 保留上面的只读端；在外部节点另开 Dashboard 写端，只开下面类别（本机已核对唯一写工具）：
 
 ```text
---transport=streamable-http --enabled-tools=search,dashboard
+--transport=streamable-http --address=0.0.0.0:8001 --enabled-tools=search,dashboard
 --disable-query --usage-stats=disabled
 --allow-grafana-url-override=false --dynamic-multi-org=false
 --server-auth-token=<从外部节点安全运行配置提供>
