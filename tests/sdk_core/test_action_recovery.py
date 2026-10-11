@@ -334,10 +334,20 @@ async def test_remote_finishing_after_client_cancellation_does_not_replay_or_cla
 
 @pytest.mark.parametrize(
     "stage,state,writes,code",
-    [("read", "rejected", 0, "action_rejected"), ("write", "unknown", 1, "action_unknown")],
+    [
+        ("preclaim", "pending", 0, "action_not_approvable"),
+        ("read", "rejected", 0, "action_rejected"),
+        ("write", "unknown", 1, "action_unknown"),
+        ("feedback", "succeeded", 1, "action_feedback_failed"),
+    ],
 )
 async def test_approval_deadline_keeps_group_queue_and_reading_available(
-    actions: Actions, stage: str, state: str, writes: int, code: str
+    actions: Actions,
+    monkeypatch: pytest.MonkeyPatch,
+    stage: str,
+    state: str,
+    writes: int,
+    code: str,
 ) -> None:
     action_id = await propose(actions)
     env, adapter = actions.env, actions.adapter
@@ -348,7 +358,26 @@ async def test_approval_deadline_keeps_group_queue_and_reading_available(
         budget=env.results.budget.model_copy(update={"timeout_seconds": 1}),
     )
     env.service = ChannelService(env.app, env.results)
-    if stage == "read":
+    if stage == "preclaim":
+        get_action = env.store.get_action
+        paused = False
+
+        async def pause_once(action_id, identity):
+            nonlocal paused
+            if not paused:
+                paused = True
+                await asyncio.Event().wait()
+            return await get_action(action_id, identity)
+
+        monkeypatch.setattr(env.store, "get_action", pause_once)
+    elif stage == "feedback":
+        assert env.app.actions is not None
+
+        async def pause_feedback(ctx, request):
+            await asyncio.Event().wait()
+
+        monkeypatch.setattr(env.app.actions, "status", pause_feedback)
+    elif stage == "read":
         adapter.read_release = asyncio.Event()
     else:
         adapter.release = asyncio.Event()
@@ -365,7 +394,10 @@ async def test_approval_deadline_keeps_group_queue_and_reading_available(
         ) == [("failed", code, "sent")]
         assert "工具执行失败" not in message_text(group.outbox.sent[-1][1])
         await group.ask("继续查订单", message_id="om_read")
-        await group.ask(f"/批准 {action_id}", message_id="om_again")
+        # 同一批准事件重投只重发固定回执，不重新占用或执行。
+        await group.ask(f"/批准 {action_id}", message_id="om_a")
+        if stage != "preclaim":
+            await group.ask(f"/批准 {action_id}", message_id="om_again")
     assert env.model_calls(asked) == 2
     assert len(adapter.calls) == writes
     assert len(env.adapter.calls) == 1
