@@ -31,6 +31,7 @@ from typing import Protocol
 
 from pydantic import AwareDatetime, BaseModel, ConfigDict, Field, model_validator
 
+from xiaowei.actions import ActionOutcomeError
 from xiaowei.app import Application, Mode, TurnError, TurnReason
 from xiaowei.channel_store import (
     CallerFailureCode,
@@ -44,7 +45,13 @@ from xiaowei.channel_store import (
     SendOutcome,
     SessionBusyError,
 )
-from xiaowei.evidence import AnswerRejectedError, EvidenceStore, EvidenceUnverifiableError
+from xiaowei.evidence import (
+    AnswerRejectedError,
+    EvidenceStore,
+    EvidenceStoreError,
+    EvidenceUnverifiableError,
+)
+from xiaowei.governance import ToolExecutionError, ToolRejectedError
 from xiaowei.models import (
     Budget,
     Channel,
@@ -76,6 +83,13 @@ _FAILURE_CODES: Mapping[TurnReason, CallerFailureCode] = {
     "storage_unavailable": "session_failed",
     "scope_rejected": "session_failed",
 }
+_ACTION_FAILURE_CODES: Mapping[str, CallerFailureCode] = {
+    "pending": "action_not_approvable",
+    "executing": "action_unknown",
+    "succeeded": "action_feedback_failed",
+    "unknown": "action_unknown",
+    "rejected": "action_rejected",
+}
 _RECEIPTS: Mapping[FailureCode, str] = {
     "busy": "系统繁忙，本轮未执行，请稍后用新消息重试",
     "model_failed": "模型未能完成本轮（调用失败、超时或次数达到上限）；已执行的工具不会自动重试",
@@ -88,6 +102,19 @@ _RECEIPTS: Mapping[FailureCode, str] = {
         "暂时无法确认数据当前权限（集群不可达或超时），本轮未交付；会话保留，请稍后重新发送"
     ),
     "access_denied": "未能确认你当前的使用权限或群成员身份，本轮未执行",
+    "action_not_approvable": (
+        "本次批准未执行：动作不存在、已过期或已被处理，材料未有效送达，或你当前无权批准。"
+        "请先按原 Action ID 核对状态"
+    ),
+    "action_feedback_failed": (
+        "动作已执行，但反馈未能保存或通过校验。请按本次批准消息中的 Action ID 查询状态，"
+        "不要重复批准或重新提出同一动作"
+    ),
+    "action_unknown": (
+        "动作执行结果未知，不会自动重试。请先人工核对远端，"
+        "并按本次批准消息中的 Action ID 查询状态；不要再次批准或重新提出同一动作"
+    ),
+    "action_rejected": ("动作未执行：当前执行条件未通过复核。请核对权限与对象状态后重新提出动作"),
     "result_not_saved": "结果保存失败，请新建会话后重试",
     "interrupted": "上次处理已中断，请重新发送",
 }
@@ -581,6 +608,77 @@ class ChannelService:
         if not receipt.created:
             return receipt.record
         return await self._store.fail(receipt.record, "busy")
+
+    async def approve(self, receipt: RequestReceipt, action_id: str) -> RequestRecord:
+        """群内确定性批准；复用请求去重/队列/终态，既不调用 Runner 也不写 Session。"""
+        from xiaowei.feishu import attributed
+
+        record = receipt.record
+        if not receipt.created:
+            return record
+        if (
+            self._app.actions is None
+            or receipt.group is None
+            or receipt.message != attributed(record.subject_id, f"/批准 {action_id}")
+        ):
+            return await self._store.fail(record, "access_denied")
+        try:
+            decision = await self._authorize_start(record, receipt.group)
+        except AccessDeniedError:
+            return await self._store.fail(record, "access_denied")
+        if record.session_id in self._running:
+            return await self._store.fail(record, "busy")
+        self._running.add(record.session_id)
+        try:
+            record = await self._store.start(
+                record,
+                message=receipt.message,
+                policy_version=decision.policy_version,
+            )
+            if record.state != "running":
+                return record
+            executed = False
+            try:
+                async with asyncio.timeout(self._results.budget.timeout_seconds):
+                    answer = await self._app.actions.approve(
+                        action_id, self._context(record, decision)
+                    )
+                    executed = True
+                    await self._results.evidence.validate_answer(
+                        answer, self._context(record, decision)
+                    )
+            except ActionOutcomeError as exc:
+                return await self._store.fail(record, _ACTION_FAILURE_CODES[exc.state])
+            except (ToolRejectedError, RequestUnavailableError):
+                return await self._store.fail(record, "action_not_approvable")
+            except (ToolExecutionError, AnswerRejectedError, EvidenceStoreError):
+                return await self._store.fail(
+                    record, "action_feedback_failed" if executed else "action_not_approvable"
+                )
+            except TimeoutError:
+                # 超时可能发生在写入后的反馈阶段；以同群应用表的事实给回执，不重放动作。
+                failure_code: CallerFailureCode
+                try:
+                    action = await self._store.get_action(
+                        action_id, self._context(record, decision).identity
+                    )
+                except asyncio.CancelledError:
+                    self._store.readiness.lock("action_cancelled")
+                    raise
+                except RequestUnavailableError:
+                    failure_code = "action_not_approvable"
+                except Exception:
+                    failure_code = "action_unknown"
+                else:
+                    failure_code = _ACTION_FAILURE_CODES[action.state]
+                return await self._store.fail(record, failure_code)
+            except asyncio.CancelledError:
+                self._store.readiness.lock("action_cancelled")
+                raise
+            return await self._store.complete(record, answer, failure_code="action_feedback_failed")
+        finally:
+            if self._store.readiness.ok:
+                self._running.discard(record.session_id)
 
     async def new_session(
         self,

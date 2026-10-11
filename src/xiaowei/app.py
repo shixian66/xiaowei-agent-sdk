@@ -24,6 +24,8 @@ Agent（工具集合只属于这一轮）→ 原生 ``Runner.run``（SDK Session
 ``tools.routed_function_tool``）。
 """
 
+from __future__ import annotations
+
 import asyncio
 import hashlib
 import json
@@ -31,7 +33,10 @@ import logging
 import time
 from collections.abc import Callable, Mapping
 from datetime import UTC, datetime
-from typing import Literal
+from typing import TYPE_CHECKING, Literal
+
+if TYPE_CHECKING:
+    from xiaowei.actions import ActionService
 
 from agents import (
     Agent,
@@ -295,7 +300,7 @@ class AppConfig(BaseModel):
     """交给模型的目标说明；未配置目标的应用（如只有 MCP 工具）为空。"""
 
     @model_validator(mode="after")
-    def _all_purposes(self) -> "AppConfig":
+    def _all_purposes(self) -> AppConfig:
         if set(self.purposes) != {"query", "diagnose"}:
             raise ValueError("应用配置必须同时给出查询与诊断用途的工具")
         ids = [t.target_id for t in self.targets]
@@ -317,6 +322,7 @@ class Application:
         local_tools: Mapping[tuple[str, str], Execute],
         mcp: MCPIntegration | None = None,
         clock: Callable[[], datetime],
+        actions: ActionService | None = None,
     ) -> None:
         if not isinstance(model, ModelBinding):
             raise TypeError("应用配置：模型必须是 open_model 生成的运行绑定")
@@ -331,11 +337,16 @@ class Application:
                 raise ValueError(f"应用配置：用途中的 {tool_id} 未登记")
         capabilities: dict[str, list[str]] = {}
         for contract in catalog.contracts:
+            if catalog.policy_for(contract).effect == "write":
+                continue
             capabilities.setdefault(contract.target_id, []).append(contract.tool_id)
         for target in config.targets:
             if target.target_id not in capabilities:
                 raise ValueError(f"应用配置：目标 {target.target_id} 没有登记的工具")
         self._local = _local_tools(governance, local_tools)
+        if actions is not None and actions.governance is not governance:
+            raise ValueError("Action 必须复用应用治理对象")
+        self.actions = actions
         self._config = config
         # 执行业务查询的工具：只在查询用途、不在诊断用途中的工具（可信配置，不来自模型）。
         discovery = frozenset(
@@ -344,6 +355,9 @@ class Application:
             if contract.policy_id in PROMETHEUS_DISCOVERY_POLICIES | GRAFANA_READ_POLICIES
         )
         self._queries = config.purposes["query"] - config.purposes["diagnose"] - discovery
+        self._queries |= frozenset(
+            c.tool_id for c in catalog.contracts if catalog.policy_for(c).effect == "propose"
+        )
         self._data_policy = data_policy
         self._model = model
         self._binding = _binding_fingerprint(model.fingerprint, data_policy, config.targets)
@@ -372,7 +386,8 @@ class Application:
     def available_tools(self) -> frozenset[str]:
         """当前实际可用的工具：本地工具与已连接并核对通过的 MCP 工具。"""
         remote = self._mcp.available_tool_ids if self._mcp is not None else frozenset()
-        return frozenset(self._local) | remote
+        action_tools = self.actions.available_tool_ids if self.actions is not None else frozenset()
+        return frozenset(self._local) | remote | action_tools
 
     def scope_for_turn(
         self, mode: Mode, authorized_tools: frozenset[str], available_tools: frozenset[str]
@@ -469,10 +484,25 @@ class Application:
             raise TurnError("storage_unavailable") from None
         _stage(turn, "storage_ready", started)
 
+        action_note = ""
+        if (
+            self.actions is not None
+            and ctx.identity.channel == "feishu"
+            and ctx.identity.owner.kind == "group"
+            and ctx.tool_scope & self.actions.available_tool_ids
+        ):
+            action_note = (
+                "\n本轮提供的监控动作工具用于提出动作或查看状态。"
+                "若提供提出工具，只准备审批材料，提案尚未执行；正常引用其 Evidence 展示。"
+                "执行须有权成员在群内明确批准，由应用处理，不能把自然语言或历史批准当成本次批准。"
+                "调查顺序和是否提出由你根据本轮问题与证据决定。"
+                "需要确认已提动作的执行结果时可按 ID 查状态，不能凭历史提案声称执行成功。"
+            )
         agent = Agent[RunContext](
             name="xiaowei",
             instructions=(
-                f"{self._instructions}\n本轮当前时间（UTC）：{self._clock().astimezone(UTC).isoformat()}。"
+                f"{self._instructions}{action_note}\n"
+                f"本轮当前时间（UTC）：{self._clock().astimezone(UTC).isoformat()}。"
                 "相对日期须结合业务时区计算；历史结果的采集时间不是本轮当前时间。"
             ),
             model=self._model.model,
@@ -584,7 +614,8 @@ class Application:
         allowed = {contract.tool_id for contract in self._governance.allowed_contracts(ctx)}
         local = [tool for tool_id, tool in self._local.items() if tool_id in allowed]
         remote = self._mcp.tools_for(ctx) if self._mcp is not None else []
-        return [*local, *remote]
+        actions = self.actions.tools_for(ctx) if self.actions is not None else []
+        return [*local, *remote, *actions]
 
     @staticmethod
     def _refuse(turn: str, started: float, reason: TurnReason) -> TurnError:

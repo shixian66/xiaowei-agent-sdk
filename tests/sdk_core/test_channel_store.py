@@ -1035,7 +1035,19 @@ async def test_cancelled_recovery_locks_readiness(postgres_url: URL) -> None:
     await _assert_recovered_consistently(postgres_url)
 
 
-@pytest.mark.parametrize("code", ["busy", "model_failed", "evidence_failed", "session_failed"])
+@pytest.mark.parametrize(
+    "code",
+    [
+        "busy",
+        "model_failed",
+        "evidence_failed",
+        "session_failed",
+        "action_not_approvable",
+        "action_feedback_failed",
+        "action_unknown",
+        "action_rejected",
+    ],
+)
 async def test_allowed_failure_codes_round_trip(env: Env, code: CallerFailureCode) -> None:
     record = (await env.accept()).record
     await env.store.fail(record, code)

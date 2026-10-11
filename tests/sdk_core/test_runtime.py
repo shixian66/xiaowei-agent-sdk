@@ -1591,7 +1591,7 @@ async def test_resend_requires_feishu(env: Env) -> None:
 async def test_storage_commands_use_the_configured_database(env: Env) -> None:
     config = env.config()
     await runtime.initialize(config)  # 已初始化时幂等
-    assert await runtime.upgrade(config) == 6
+    assert await runtime.upgrade(config) == 7
     report = await runtime.cleanup(config, batch_size=10)
     assert (report.sessions, report.unregistered) == (0, 0)
 
@@ -1619,7 +1619,7 @@ async def test_maintenance_commands_reject_a_digest_key_mismatch_before_business
             starrocks_connect=env.connect(config),
         )
 
-    assert await env.scalar("SELECT version FROM xiaowei_schema_version") == 6
+    assert await env.scalar("SELECT version FROM xiaowei_schema_version") == 7
     assert env.drv.attempts == 0 and channel.sends == []
 
 

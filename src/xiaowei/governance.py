@@ -154,6 +154,12 @@ class ToolPolicy:
     required: tuple[str, ...] = ()
     data_scope: str | None = None
     fact_note: str | None = None
+    effect: Literal["read", "propose", "write"] = "read"
+    group_only: bool = False
+
+
+def _group_context(ctx: RunContext) -> bool:
+    return ctx.identity.channel == "feishu" and ctx.identity.owner.kind == "group"
 
 
 class ToolCatalog:
@@ -287,7 +293,19 @@ class GovernedTools:
 
     def allowed_contracts(self, ctx: RunContext) -> list[ToolContract]:
         """本轮可展示的工具：可信配置与本轮 Tool Scope、Target Scope 的交集。"""
-        return [c for c in self._catalog.contracts if _in_scope(ctx, c)]
+        return [
+            c
+            for c in self._catalog.contracts
+            if _in_scope(ctx, c)
+            and self._catalog.policy_for(c).effect != "write"
+            and (
+                not (
+                    self._catalog.policy_for(c).group_only
+                    or self._catalog.policy_for(c).effect == "propose"
+                )
+                or _group_context(ctx)
+            )
+        ]
 
     async def invoke(
         self,
@@ -306,7 +324,22 @@ class GovernedTools:
         if not _in_scope(ctx, contract):
             raise ToolRejectedError("本轮不允许使用该工具")
         policy = self._catalog.policy_for(contract)
+        if (policy.group_only or policy.effect != "read") and not _group_context(ctx):
+            raise ToolRejectedError("仅指定飞书群可使用此工具")
         arguments = normalize_arguments(policy, request.arguments)
+        if policy.effect == "write":
+            binding = ctx.approved_action
+            from xiaowei.evidence import arguments_digest
+
+            if (
+                not _group_context(ctx)
+                or binding is None
+                or binding.tool_id != contract.tool_id
+                or binding.target_id != contract.target_id
+                or binding.arguments_digest != arguments_digest(arguments)
+                or ctx.tool_scope != frozenset({contract.tool_id})
+            ):
+                raise ToolRejectedError("写动作缺少有效的批准绑定")
         if TARGET_ARGUMENT in policy.arguments.model_fields and (
             arguments.get(TARGET_ARGUMENT) != contract.target_id
         ):

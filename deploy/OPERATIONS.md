@@ -431,6 +431,29 @@ Web/StarRocks 就绪。源离线时历史与重发仍按本地当前授权复核
 完整接口与验收只维护在[计划 §3.3](../docs/superpowers/plans/2026-10-09-monitoring-mcp.md#33-a4-当前切片基线-8a7072d86abf6e93e0fb5e4be8e84f61308feb80)；
 真实模型、公司 Alertmanager 版本/容量/认证与真实飞书未验收。创建和取消静默本片均未开放。
 
+## 监控群审批底座
+
+W5 只交付审批底座，实际创建/取消静默及 Grafana 写工具尚未开放。群内调用选中动作的
+“提出”工具后，代码生成实际参数、版本、差异、影响、恢复办法、Action ID 和批准截止时间。
+有审批权的成员在原群 `@小维 /批准 <Action ID>`，应用重新核对当前群成员、权限和材料，
+再占用一次执行机会；申请人有审批权时可自己确认。等待批准期间不占群队列，批准事件
+与调查在同群按收到顺序处理；Web 和单聊均不批准，不直接执行写工具。
+
+每个已配置监控源登记本地 `<server_id>/get_action_status`：按需加入已有
+`data_policy.model_tools` 和 `feishu.group.tools` 即可查询本群动作，不能靠配置开放未实现的写工具。
+后续写切片通过 `access.grants` 中对应写工具的权限指定审批人（键为其群事件 `open_id`），
+不增加第二份名单；实际写工具不进入模型工具集或群共享工具列表。
+
+批准期限固定为15分钟，且不超过原请求/证据保留期；它限制本次批准有效期，不限制未来
+静默的1年/3年时长。材料未完整送达（包括只发容量提示）、过期、对象版本/参数/源绑定
+变化都不能执行，需重新提出。结果未知或处理中断时不自动重试或补跑；可用 Action ID
+查询应用执行记录并人工核对远端。状态不是远端实时健康检查，pending 不保证可以批准。
+执行记录独立于会话历史，关闭/清理群会话不会提前删除仍有效记录；批准反馈不写历史，
+后续提问时小维可按需查状态，新建群会话后仍可查本群尚在保留期内的动作。
+
+W5 的应用表版本是7，需要按下面“含迁移的升级”备份、停旧进程、显式迁移后启动。
+离线合成入口验证不能证明真实飞书、真实模型或监控写接口可用。
+
 ## 状态、停止与重启
 
 ```sh
@@ -530,7 +553,7 @@ PR B 使用 StarRocks 证据范围摘要 v7：普通查询的超长单值现在�
 `…（原值已截短）` 标记显示，保留该行与后续行；总字节上限仍可能截断后续行。
 内部表 DDL、结构快照和审计原文仍要求完整值。v6 及更早的 StarRocks 证据不能继续交付，
 升级后新建会话再查。
-此摘要与 PostgreSQL 应用表版本 6 无关，本次不新增存储迁移。
+此摘要与 PostgreSQL 应用表版本无关；本段配置修改不新增存储迁移。
 
 先把新包展开到 `/opt/xiaowei/releases/<新 SHA>`。查看当前和新版 `release.json`，并从当前
 PostgreSQL 读取 schema：
@@ -692,7 +715,9 @@ docker compose --env-file .env run --rm --no-deps xiaowei \
 docker compose --env-file .env up -d --no-deps --force-recreate xiaowei --wait
 ```
 
-`--bind-existing-digest-key` 只表示操作者确认这是原密钥，程序无法从旧库证明。来源不明时不要执行。
+`--bind-existing-digest-key` 对 v1–v5 只表示操作者确认这是原密钥，程序无法从旧库证明。
+来源不明时不要执行。v6→v7 已有密钥绑定，须先通过绑定校验，使用普通 `storage upgrade`
+即可；保留这个标志也不会重绑或修补缺失/错误的绑定。v7 新增 Action 表及固定审批回执的请求失败码 CHECK，会话历史表不变。
 迁移在一个事务内完成；普通 `serve` 遇到旧、未知或更高 schema 会以 1 退出，不会自动迁移。
 
 迁移提交后若必须回到不认识新 schema 的旧程序，不能把原库原地降级：按“恢复到隔离数据库”把
@@ -710,6 +735,9 @@ docker compose --env-file .env run --rm --no-deps xiaowei requests resend \
 docker compose --env-file .env run --rm --no-deps xiaowei requests resend \
   --subject <发起人 open_id> --group --message <message_id>
 ```
+
+Action 同样由 `storage cleanup` 按自身保留期分批清理；执行中记录先由启动恢复记为 unknown，
+不能在执行中删除。不新增定时任务；正常升级前继续成对备份数据库与配置。
 
 重发只处理已保存的 failed/unknown 结果，重新检查当前权限和群成员资格，不重跑模型或原业务
 SQL。未完成请求在启动恢复时记为中断，同样不自动重跑。日志只记录安全状态、原因码和请求编号；

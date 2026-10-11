@@ -495,7 +495,7 @@ def test_different_image_upgrade_rollback_and_paired_restore(
 
         assert _compose(active, "stop", "xiaowei").returncode == 0
         seeded = _probe(active, "seed")
-        assert seeded["schema_version"] == 6
+        assert seeded["schema_version"] == 6  # 固定 P3_A_SHA 的历史镜像事实。
         assert seeded["counts"]["xiaowei_request"] == 2
         assert _compose(active, "up", "-d", "xiaowei", "--wait").returncode == 0
 
@@ -537,6 +537,24 @@ def test_different_image_upgrade_rollback_and_paired_restore(
         rollback.mkdir()
         for name in ("compose.yaml", "release.json"):
             shutil.copyfile(active / name, rollback / name)
+        # 历史镜像为 v6：停旧应用并备份，再用预检过的候选显式升到 v7。
+        assert _compose(active, "stop", "xiaowei").returncode == 0
+        before_upgrade = _probe(active, "snapshot")
+        pre_upgrade = host_tmp / "pre-upgrade.dump"
+        assert _safe_dump(active, pre_upgrade).returncode == 0
+        migrated = _compose(
+            active,
+            "-f",
+            "compose.next.yaml",
+            "run",
+            "--rm",
+            "--no-deps",
+            "xiaowei",
+            "storage",
+            "upgrade",
+        )
+        assert migrated.returncode == 0 and migrated.stdout.strip() == "storage version 7"
+        assert _pg(pg_id, "SELECT version FROM xiaowei_schema_version").stdout.strip() == "7"
         (active / "compose.next.yaml").replace(active / "compose.yaml")
         (active / "release.next.json").replace(active / "release.json")
         upgraded = _compose(
@@ -644,6 +662,11 @@ def test_different_image_upgrade_rollback_and_paired_restore(
 
         for name in ("compose.yaml", "release.json"):
             shutil.copyfile(rollback / name, active / name)
+        # 旧程序不识别 v7，回退使用迁移前备份的隔离库，保留升级后的原库。
+        assert _restore(active, pre_upgrade, "xiaowei_before_upgrade").returncode == 0
+        rollback_url = values["XW_DATABASE_URL"].rsplit("/", 1)[0] + "/xiaowei_before_upgrade"
+        _replace_env_value(active / ".env", "XW_DATABASE_URL", rollback_url)
+        assert _compose_app_database_url(active) == rollback_url
         rolled_back = _compose(
             active,
             "up",
@@ -659,12 +682,16 @@ def test_different_image_upgrade_rollback_and_paired_restore(
             _image_id(p3_a_image) in docker("inspect", rollback_id, "--format", "{{.Image}}").stdout
         )
         assert _http(port, "/readyz")[0] == 200
+        assert _serve_databases(pg_id) == ["xiaowei_before_upgrade"]
         assert _compose(active, "stop", "xiaowei").returncode == 0
         rolled_back_snapshot = _probe(active, "snapshot")
-        assert rolled_back_snapshot == original_snapshot
-        assert {
-            name: _sha256(active / name) for name in (".env", "xiaowei.json", "certs/ca.pem")
-        } == operator_hashes
+        assert rolled_back_snapshot == {**before_upgrade, "database": "xiaowei_before_upgrade"}
+        assert {name: _sha256(active / name) for name in ("xiaowei.json", "certs/ca.pem")} == {
+            name: operator_hashes[name] for name in ("xiaowei.json", "certs/ca.pem")
+        }
+        assert (active / ".env").read_bytes().replace(
+            rollback_url.encode(), values["XW_DATABASE_URL"].encode()
+        ) == original_env
     finally:
         _compose(active, "down", "-v", "--remove-orphans", timeout=60)
         docker("volume", "rm", "-f", volume)
@@ -812,7 +839,7 @@ def test_container_migration_v4_to_v5_to_v6_and_old_program_refusal(
         )
         assert missing_confirmation.returncode == 1
         assert _pg(pg_id, "SELECT version FROM xiaowei_schema_version").stdout.strip() == "5"
-        migrated_v6 = _compose(
+        migrated_current = _compose(
             directory,
             "run",
             "--rm",
@@ -822,7 +849,10 @@ def test_container_migration_v4_to_v5_to_v6_and_old_program_refusal(
             "upgrade",
             "--bind-existing-digest-key",
         )
-        assert migrated_v6.returncode == 0 and migrated_v6.stdout.strip() == "storage version 6"
+        assert (
+            migrated_current.returncode == 0
+            and migrated_current.stdout.strip() == "storage version 7"
+        )
         preserved = _pg(
             pg_id,
             "SELECT version || ':' || "
@@ -831,13 +861,13 @@ def test_container_migration_v4_to_v5_to_v6_and_old_program_refusal(
             "(SELECT count(*) FROM xiaowei_session WHERE owner_kind = 'group') || ':' || "
             "(SELECT count(*) FROM xiaowei_evidence) FROM xiaowei_schema_version",
         )
-        assert preserved.returncode == 0 and preserved.stdout.strip() == "6:1:1:1:2"
+        assert preserved.returncode == 0 and preserved.stdout.strip() == "7:1:1:1:2"
 
         _replace_app_image(directory, runtime_image, v5_image)
         old_upgrade = _historical_cli(directory, "storage", "upgrade")
         old_serve = _historical_cli(directory, "serve")
         assert old_upgrade.returncode == old_serve.returncode == 1
-        assert _pg(pg_id, "SELECT version FROM xiaowei_schema_version").stdout.strip() == "6"
+        assert _pg(pg_id, "SELECT version FROM xiaowei_schema_version").stdout.strip() == "7"
 
         restored = _restore(directory, pre_v6, "xiaowei_v5_rollback")
         assert restored.returncode == 0, restored.stderr.decode(errors="replace")
@@ -868,7 +898,7 @@ def test_container_migration_v4_to_v5_to_v6_and_old_program_refusal(
         )
         assert unknown.returncode == 1
         assert _pg(pg_id, "SELECT version FROM xiaowei_schema_version").stdout.strip() == "999"
-        assert _pg(pg_id, "UPDATE xiaowei_schema_version SET version = 6").returncode == 0
+        assert _pg(pg_id, "UPDATE xiaowei_schema_version SET version = 7").returncode == 0
     finally:
         _compose(directory, "down", "-v", "--remove-orphans", timeout=60)
         docker("volume", "rm", "-f", volume)
@@ -906,6 +936,7 @@ def test_feishu_users_upgrade_rollback_restores_the_config_the_old_image_reads(
     逐字执行 OPERATIONS 的留存、切换与回退命令块，只替换目录和 ``config_file``：配置放在非默认的
     嵌套路径，默认位置的 ``xiaowei.json`` 是内容不同的诱饵。预检失败不停旧服务；回退先停止候选
     应用，再把升级前的 JSON 恢复到同一路径，旧镜像重新读取配置并就绪。
+    历史镜像为 v6，另按含迁移契约先升到 v7，回退再恢复迁移前备份到隔离库。
     """
     host_tmp = ROOT / ".pytest_cache" / f"p3-users-rollback-{uuid.uuid4().hex}"
     host_tmp.mkdir(parents=True)
@@ -991,6 +1022,22 @@ def test_feishu_users_upgrade_rollback_restores_the_config_the_old_image_reads(
         passed = _isolated(active, "compose.next.yaml", *check)
         assert passed.returncode == 0, passed.stderr
 
+        original_url = _compose_app_database_url(active)
+        pre_upgrade = host_tmp / "pre-upgrade.dump"
+        assert _isolated(active, "compose.yaml", "stop", "xiaowei").returncode == 0
+        assert _safe_dump(active, pre_upgrade).returncode == 0
+        migrated = _isolated(
+            active,
+            "compose.next.yaml",
+            "run",
+            "--rm",
+            "--no-deps",
+            "xiaowei",
+            "storage",
+            "upgrade",
+        )
+        assert migrated.returncode == 0 and migrated.stdout.strip() == "storage version 7"
+        assert _pg(postgres_id, "SELECT version FROM xiaowei_schema_version").stdout.strip() == "7"
         switched = _run_block(blocks["switch"], shims, log)
         assert switched.returncode == 0, switched.stderr
 
@@ -1009,6 +1056,11 @@ def test_feishu_users_upgrade_rollback_restores_the_config_the_old_image_reads(
         unreadable = _isolated(active, old_compose, "--project-directory", str(active), *check)
         assert unreadable.returncode == 2 and "feishu.users" in unreadable.stderr
 
+        assert _isolated(active, "compose.yaml", "stop", "xiaowei").returncode == 0
+        assert _restore(active, pre_upgrade, "xiaowei_users_restore").returncode == 0
+        rollback_url = original_url.rsplit("/", 1)[0] + "/xiaowei_users_restore"
+        _replace_env_value(active / ".env", "XW_DATABASE_URL", rollback_url)
+        assert _compose_app_database_url(active) == rollback_url
         log.write_text("", encoding="utf-8")
         rolled_back = _run_block(blocks["rollback"], shims, log, candidate=new_id)
         assert rolled_back.returncode == 0, rolled_back.stderr
@@ -1024,14 +1076,17 @@ def test_feishu_users_upgrade_rollback_restores_the_config_the_old_image_reads(
         image = docker("inspect", rollback_id, "--format", "{{.Image}}").stdout
         assert _image_id(users_required_image) in image
         assert _health(rollback_id) == "healthy"
-        # 回退只换应用：PostgreSQL 容器、卷、.env 与摘要密钥原样保留。
+        # PostgreSQL 容器/卷不变；.env 只改成迁移前备份的隔离库，摘要密钥不变。
         assert _isolated(active, "compose.yaml", "ps", "-q", "postgres").stdout.strip() == (
             postgres_id
         )
         assert docker("volume", "inspect", volume, "--format", "{{.CreatedAt}}").stdout == (
             volume_created
         )
-        assert (active / ".env").read_bytes() == env_before
+        assert _serve_databases(postgres_id) == ["xiaowei_users_restore"]
+        assert (active / ".env").read_bytes().replace(
+            rollback_url.encode(), original_url.encode()
+        ) == env_before
     finally:
         _isolated(active, "compose.yaml", "down", "-v", "--remove-orphans")
         shutil.rmtree(host_tmp, ignore_errors=True)
