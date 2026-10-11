@@ -281,6 +281,42 @@ class MonitoringFailure(_Trusted):
     reason: MonitoringFailureReason
 
 
+SessionRejectReason = Literal[
+    "history_turn_limit", "history_bytes_limit", "expired", "binding_changed", "unavailable"
+]
+SESSION_STATE_MAX_BYTES = 1024
+
+
+class SessionSnapshot(_Trusted):
+    """可信执行链在已有检查处取得的状态；不含历史内容，不交给模型。
+
+    提交前的 replay_bytes 包含待提交轮次，committed_turns 始终只计成功提交的轮次。
+    未完成完整回放或无法确认归属时相应计数留空。
+    """
+
+    observed_at: AwareDatetime
+    phase: Literal["before_start", "before_commit", "after_commit"]
+    committed_turns: int | None = Field(ge=0, strict=True)
+    turn_limit: int = Field(gt=0, strict=True)
+    replay_bytes: int | None = Field(ge=0, strict=True)
+    byte_limit: int = Field(gt=0, strict=True)
+    expires_at: AwareDatetime | None
+    reason: SessionRejectReason | None = None
+
+    @model_validator(mode="after")
+    def _bounded(self) -> "SessionSnapshot":
+        if self.phase == "after_commit" and (
+            self.reason is not None
+            or self.committed_turns is None
+            or self.replay_bytes is None
+            or self.expires_at is None
+        ):
+            raise ValueError("提交后的会话状态不完整")
+        if len(self.model_dump_json().encode()) > SESSION_STATE_MAX_BYTES:
+            raise ValueError("会话状态超过容量")
+        return self
+
+
 class TurnAnswer(_Trusted):
     """一轮的最终回答与本轮模型可见的证据；后者由可信代码记录，不来自模型。
 
@@ -292,6 +328,8 @@ class TurnAnswer(_Trusted):
     answer: AgentAnswer
     context_evidence: tuple[Label, ...]
     monitoring_failures: tuple[MonitoringFailure, ...] = ()
+    session_state: SessionSnapshot | None = Field(default=None, exclude=True)
+    """成功提交后由应用附加；请求表单独保存，不进入回答 JSON 或 SDK Session。"""
 
 
 class DeliveryFact(_Trusted):
@@ -328,6 +366,8 @@ class Delivery(_Trusted):
     analysis: tuple[AnswerInference, ...] = ()
     """独立渲染的模型分析；仅由证据验证后的回答生成，不在事实表格中混排。"""
     monitoring_notice: str | None = None
+    session_notice: str | None = None
+    """当前身份读取后，由可信请求状态生成的固定系统提示；不来自模型。"""
     requires_complete: bool = Field(default=False, exclude=True)
     """包含待批准动作时，所有代码生成的材料必须完整发送；容量提示不算动作送达。"""
     """系统按可信失败记录生成的未核实源说明；Web 与飞书均须展示。"""

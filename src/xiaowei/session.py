@@ -43,7 +43,16 @@ from xiaowei.evidence import (
     EvidenceUnavailableError,
     EvidenceUnverifiableError,
 )
-from xiaowei.models import AgentAnswer, MonitoringFailure, Owner, RunContext, ToolCall, TurnAnswer
+from xiaowei.models import (
+    AgentAnswer,
+    MonitoringFailure,
+    Owner,
+    RunContext,
+    SessionRejectReason,
+    SessionSnapshot,
+    ToolCall,
+    TurnAnswer,
+)
 
 SessionState = Literal["active", "writing", "sealed", "closed"]
 
@@ -201,8 +210,16 @@ class SessionError(Exception):
 class SessionUnavailableError(SessionError):
     """历史不能继续使用：归属或 Profile 不符、已过期、已封存/关闭、证据失效或结构异常。"""
 
-    def __init__(self, message: str = "会话历史不可继续使用，请新建会话") -> None:
+    def __init__(
+        self,
+        message: str = "会话历史不可继续使用，请新建会话",
+        *,
+        reason: SessionRejectReason = "unavailable",
+        snapshot: SessionSnapshot | None = None,
+    ) -> None:
         super().__init__(message)
+        self.reason = reason
+        self.snapshot = snapshot
 
 
 class SessionUnverifiableError(SessionError):
@@ -215,8 +232,13 @@ class SessionUnverifiableError(SessionError):
 class SessionLimitError(SessionUnavailableError):
     """历史轮数或字节达到上限；在新一轮模型调用前拒绝。"""
 
-    def __init__(self) -> None:
-        super().__init__("会话历史已达上限，请新建会话")
+    def __init__(
+        self,
+        *,
+        reason: Literal["history_turn_limit", "history_bytes_limit"] = "history_turn_limit",
+        snapshot: SessionSnapshot | None = None,
+    ) -> None:
+        super().__init__("会话历史已达上限，请新建会话", reason=reason, snapshot=snapshot)
 
 
 class SessionItemRejectedError(SessionError):
@@ -297,6 +319,31 @@ class PolicySession:
         self._clock = clock
         self._pending: list[TResponseInputItem] = []
         self._replayed: dict[str, None] = {}
+        self._phase: Literal["before_start", "before_commit", "after_commit"] = "before_start"
+        self._turns: int | None = None
+        self._bytes: int | None = None
+        self._expires: datetime | None = None
+
+    def snapshot(self, reason: SessionRejectReason | None = None) -> SessionSnapshot:
+        """只观察已有检查记录；不再读取历史或复核 Evidence。"""
+        return SessionSnapshot(
+            observed_at=self._clock(),
+            phase=self._phase,
+            committed_turns=self._turns,
+            turn_limit=self._limits.max_history_turns,
+            replay_bytes=self._bytes,
+            byte_limit=self._limits.max_history_bytes,
+            expires_at=self._expires,
+            reason=reason,
+        )
+
+    def _unavailable(self, reason: SessionRejectReason = "unavailable") -> SessionUnavailableError:
+        return SessionUnavailableError(reason=reason, snapshot=self.snapshot(reason))
+
+    def _limit(
+        self, reason: Literal["history_turn_limit", "history_bytes_limit"]
+    ) -> SessionLimitError:
+        return SessionLimitError(reason=reason, snapshot=self.snapshot(reason))
 
     @property
     def replayed_evidence(self) -> tuple[str, ...]:
@@ -310,10 +357,11 @@ class PolicySession:
             raise SessionError("会话历史不支持按条数截断")
         turns = await self._open()
         if turns >= self._limits.max_history_turns:
-            raise SessionLimitError
+            raise self._limit("history_turn_limit")
         replay = await self._replay([*await self._committed(), *self._pending], seen=self._replayed)
-        if _size(replay) >= self._limits.max_history_bytes:
-            raise SessionLimitError
+        self._bytes = _size(replay)
+        if self._bytes >= self._limits.max_history_bytes:
+            raise self._limit("history_bytes_limit")
         return replay
 
     async def add_items(self, items: list[TResponseInputItem]) -> None:
@@ -335,7 +383,7 @@ class PolicySession:
         self._pending.clear()
         await self._claim()
         if await self._execute(_CLOSE, self._owner()) == 0:
-            raise SessionUnavailableError
+            raise self._unavailable()
         try:
             await self._inner.clear_session()
         except (OSError, SQLAlchemyError):
@@ -355,24 +403,28 @@ class PolicySession:
 
         ``context_evidence`` 是应用记录的本轮模型可见证据（见 ``TurnAnswer``），与最终回答一起校验。
         """
+        self._phase = "before_commit"
         pending, self._pending = self._pending, []
         await self._validate_final_answer(pending, context_evidence, monitoring_failures)
         turns = await self._open()
         if turns >= self._limits.max_history_turns:
-            raise SessionLimitError
+            raise self._limit("history_turn_limit")
         replay = await self._replay([*await self._committed(), *pending])
-        if _size(replay) > self._limits.max_history_bytes:
+        self._bytes = _size(replay)
+        if self._bytes > self._limits.max_history_bytes:
             # 本轮已执行的工具不重跑，也不裁剪历史凑数；封存后提示新建。
             await self._transition("active", "sealed")
-            raise SessionLimitError
+            raise self._limit("history_bytes_limit")
         if not await self._transition("active", "writing"):
-            raise SessionUnavailableError
+            raise self._unavailable()
         try:
             await self._inner.add_items(pending)
         except (OSError, SQLAlchemyError):
             raise SessionStoreError("会话保存失败，该会话已停止使用，请新建会话") from None
         if not await self._transition("writing", "active", add_turns=1):
             raise SessionStoreError("会话保存失败，该会话已停止使用，请新建会话")
+        self._turns = turns + 1
+        self._phase = "after_commit"
 
     async def _validate_final_answer(
         self,
@@ -401,10 +453,12 @@ class PolicySession:
         """返回可继续使用的会话已提交轮数；归属、Profile、状态或期限不符时拒绝。"""
         row = await self._claim()
         # 先判断状态：恢复写入的已关闭占位没有指纹，不能被报成“配置已变化”。
-        if row["state"] != "active" or self._clock() >= row["expires_at"]:
-            raise SessionUnavailableError
+        if row["state"] != "active":
+            raise self._unavailable()
+        if self._clock() >= row["expires_at"]:
+            raise self._unavailable("expired")
         if row["profile_fingerprint"] != self._profile:
-            raise SessionUnavailableError("模型配置或数据策略已变化，请新建会话")
+            raise self._unavailable("binding_changed")
         return cast(int, row["turns"])
 
     async def _claim(self) -> Mapping[str, Any]:
@@ -420,7 +474,7 @@ class PolicySession:
             except (OSError, SQLAlchemyError):
                 raise SessionStoreError("会话存储不可用") from None
             if existing:
-                raise SessionUnavailableError
+                raise self._unavailable()
             await self._execute(_INSERT_IF_ABSENT, self._new_row())
             row = await self._load()
         identity = self._ctx.identity
@@ -430,7 +484,9 @@ class PolicySession:
             or row["owner_id"] != identity.owner.id
             or row["channel"] != identity.channel
         ):
-            raise SessionUnavailableError
+            raise self._unavailable()
+        self._turns = row["turns"]
+        self._expires = row["expires_at"]
         return row
 
     async def _load(self) -> Mapping[str, Any] | None:
@@ -493,6 +549,7 @@ class PolicySession:
         给出 ``seen`` 时，回放成功后把其中的证据标识记入它（交给模型的历史证据）。
         """
         replay: list[TResponseInputItem] = []
+        self._bytes = None  # 本次完整回放尚未成功，不能沿用另一观察阶段的字节计数。
         references: list[tuple[int, str, ToolCall]] = []
         open_calls: dict[str, dict[str, Any]] = {}
         closed_calls: set[str] = set()
@@ -505,28 +562,28 @@ class PolicySession:
                 elif kind == "function_call":
                     call_id = _text(raw.get("call_id"))
                     if call_id in open_calls or call_id in closed_calls:
-                        raise SessionUnavailableError
+                        raise self._unavailable()
                     open_calls[call_id] = raw
                     replay.append(_function_call(raw))
                 elif kind == "function_call_output":
                     call_id = _text(raw.get("call_id"))
                     if call_id not in open_calls:
-                        raise SessionUnavailableError
+                        raise self._unavailable()
                     call = _tool_call(open_calls.pop(call_id))
                     closed_calls.add(call_id)
                     output = raw.get("output")
                     if output != NO_EVIDENCE_OUTPUT:
                         evidence_id = _reference(output)
                         if evidence_id is None or call is None:
-                            raise SessionUnavailableError
+                            raise self._unavailable()
                         references.append((len(replay), evidence_id, call))
                     replay.append(_output(call_id, NO_EVIDENCE_OUTPUT))
                 else:
-                    raise SessionUnavailableError
+                    raise self._unavailable()
         except SessionItemRejectedError:
-            raise SessionUnavailableError from None
+            raise self._unavailable() from None
         if open_calls:
-            raise SessionUnavailableError
+            raise self._unavailable()
         for (index, _, _), content in zip(references, await self._project(references), strict=True):
             replay[index] = _output(cast(dict[str, Any], replay[index])["call_id"], content)
         if seen is not None:
@@ -541,7 +598,7 @@ class PolicySession:
                 [(evidence_id, call) for _, evidence_id, call in references], self._ctx, "session"
             )
         except EvidenceUnavailableError:
-            raise SessionUnavailableError from None
+            raise self._unavailable() from None
         except EvidenceUnverifiableError:
             raise SessionUnverifiableError from None
         except EvidenceError:

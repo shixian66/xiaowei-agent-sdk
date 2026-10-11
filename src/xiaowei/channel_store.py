@@ -46,7 +46,16 @@ from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine
 
 from xiaowei.app import Mode
-from xiaowei.models import AgentAnswer, Channel, Identity, MonitoringFailure, Owner, TurnAnswer
+from xiaowei.models import (
+    SESSION_STATE_MAX_BYTES,
+    AgentAnswer,
+    Channel,
+    Identity,
+    MonitoringFailure,
+    Owner,
+    SessionSnapshot,
+    TurnAnswer,
+)
 from xiaowei.session import close_interrupted_sessions, close_sessions
 from xiaowei.storage import Backend, InstanceLock, Readiness
 
@@ -144,7 +153,7 @@ _SELECT_REQUEST = text(
     """
     SELECT channel, request_key, owner_kind, owner_id, subject_id, conversation_key, session_id,
            turn_id, mode, message_digest, state, answer, failure_code, delivery, reply_chat_id,
-           reply_message_id, created_at, expires_at
+           reply_message_id, created_at, expires_at, session_state
     FROM xiaowei_request WHERE channel = :channel AND request_key = :request_key
     """
 )
@@ -152,7 +161,7 @@ _SELECT_REQUEST_FOR_UPDATE = text(
     """
     SELECT channel, request_key, owner_kind, owner_id, subject_id, conversation_key, session_id,
            turn_id, mode, message_digest, state, answer, failure_code, delivery, reply_chat_id,
-           reply_message_id, created_at, expires_at
+           reply_message_id, created_at, expires_at, session_state
     FROM xiaowei_request WHERE channel = :channel AND request_key = :request_key
     FOR UPDATE
     """
@@ -169,7 +178,8 @@ _START = text(
 )
 _COMPLETE = text(
     """
-    UPDATE xiaowei_request SET state = 'completed', answer = :answer, updated_at = :now
+    UPDATE xiaowei_request SET state = 'completed', answer = :answer,
+        session_state = :session_state, updated_at = :now
     WHERE channel = :channel AND request_key = :request_key AND owner_kind = :owner_kind
       AND owner_id = :owner_id AND subject_id = :subject_id
       AND turn_id = :turn_id
@@ -178,7 +188,8 @@ _COMPLETE = text(
 )
 _FAIL = text(
     """
-    UPDATE xiaowei_request SET state = 'failed', failure_code = :code, updated_at = :now
+    UPDATE xiaowei_request SET state = 'failed', failure_code = :code,
+        session_state = :session_state, updated_at = :now
     WHERE channel = :channel AND request_key = :request_key AND owner_kind = :owner_kind
       AND owner_id = :owner_id AND subject_id = :subject_id
       AND turn_id = :turn_id
@@ -333,6 +344,7 @@ class RequestRecord:
     expires_at: datetime
     reply_chat_id: str | None = None
     reply_message_id: str | None = None
+    session_state: SessionSnapshot | None = None
 
 
 @dataclass(frozen=True)
@@ -660,7 +672,9 @@ class ChannelStore:
                     if (await conn.execute(_START, params)).rowcount != 1:
                         raise RequestUnavailableError
                     return replace(stored, state="running")
-                await conn.execute(_FAIL, {**params, "code": "access_denied"})
+                await conn.execute(
+                    _FAIL, {**params, "code": "access_denied", "session_state": None}
+                )
                 return replace(stored, state="failed", failure_code="access_denied")
 
     def _binds(
@@ -707,13 +721,24 @@ class ChannelStore:
             self._readiness.lock("result_state_unwritable")
             raise ValueError("结果保存失败码不在允许的范围内")
         content = turn.model_dump_json()
+        try:
+            snapshot = _session_state(turn.session_state, "completed", None)
+        except RequestUnavailableError:
+            await self._fail_after_commit(record, failure_code)
+            raise ResultNotSavedError from None
         if len(content.encode()) > self._max_answer_bytes:
             await self._fail_after_commit(record, failure_code)
             raise ResultNotSavedError
         try:
             async with self._engine.begin() as conn:
                 saved = await conn.execute(
-                    _COMPLETE, {**_keys(record), "answer": content, "now": self._clock()}
+                    _COMPLETE,
+                    {
+                        **_keys(record),
+                        "answer": content,
+                        "session_state": snapshot,
+                        "now": self._clock(),
+                    },
                 )
         except asyncio.CancelledError:
             # 保存结果不明，也不能在取消中再写失败状态：锁低后交给重启恢复。
@@ -731,9 +756,16 @@ class ChannelStore:
             answer=turn.answer,
             context_evidence=turn.context_evidence,
             monitoring_failures=turn.monitoring_failures,
+            session_state=turn.session_state,
         )
 
-    async def fail(self, record: RequestRecord, code: CallerFailureCode) -> RequestRecord:
+    async def fail(
+        self,
+        record: RequestRecord,
+        code: CallerFailureCode,
+        *,
+        session_state: SessionSnapshot | None = None,
+    ) -> RequestRecord:
         """``accepted/running → failed``，保存安全失败码（如 Session 未提交的模型失败、繁忙）。
 
         失败码不在调用者闭集内（如误传异常文字或内部码）时不写入：失败状态无法保存，按关键
@@ -742,16 +774,21 @@ class ChannelStore:
         if code not in _CALLER_FAILURE_CODES:
             self._readiness.lock("request_fail_failed")
             raise ValueError("失败码不在允许的范围内")
-        params = {"code": code}
+        try:
+            snapshot = _session_state(session_state, "failed", code)
+        except RequestUnavailableError:
+            self._readiness.lock("request_fail_failed")
+            raise
+        params = {"code": code, "session_state": snapshot}
         if await self._update(_FAIL, record, critical="request_fail_failed", **params) != 1:
             raise RequestUnavailableError
-        return replace(record, state="failed", failure_code=code)
+        return replace(record, state="failed", failure_code=code, session_state=session_state)
 
     async def _fail_after_commit(
         self, record: RequestRecord, code: FailureCode = RESULT_NOT_SAVED
     ) -> None:
         """结果未保存：同一事务标记 failed 并关闭会话；也失败时锁低 readiness。"""
-        params = {**_keys(record), "code": code, "now": self._clock()}
+        params = {**_keys(record), "code": code, "session_state": None, "now": self._clock()}
         try:
             async with self._engine.begin() as conn:
                 if (await conn.execute(_FAIL, params)).rowcount != 1:
@@ -1124,6 +1161,7 @@ class ChannelStore:
             answer, context, monitoring_failures = _saved_answer(raw)
         if row["failure_code"] is not None and row["failure_code"] not in _FAILURE_CODES:
             raise RequestUnavailableError
+        snapshot = _read_session_state(row["session_state"], row["state"], row["failure_code"])
         return RequestRecord(
             channel=row["channel"],
             request_key=row["request_key"],
@@ -1143,6 +1181,7 @@ class ChannelStore:
             expires_at=row["expires_at"],
             reply_chat_id=row["reply_chat_id"],
             reply_message_id=row["reply_message_id"],
+            session_state=snapshot,
         )
 
     def _owner(
@@ -1211,6 +1250,46 @@ class ChannelStore:
         """带服务端密钥的摘要；各部分按 JSON 数组编码，边界不会混淆。"""
         body = json.dumps([purpose, *parts], ensure_ascii=False, separators=(",", ":"))
         return hmac.new(self._key, body.encode(), hashlib.sha256).hexdigest()
+
+
+def _read_session_state(
+    raw: str | None,
+    state: str,
+    failure_code: FailureCode | None,
+) -> SessionSnapshot | None:
+    if raw is None:
+        return None  # 旧记录及没有进入 PolicySession 的请求不猜原因。
+    if not isinstance(raw, str) or len(raw.encode()) > SESSION_STATE_MAX_BYTES:
+        raise RequestUnavailableError
+    try:
+        snapshot = SessionSnapshot.model_validate_json(raw)
+    except ValidationError:
+        raise RequestUnavailableError from None
+    if state == "completed":
+        if snapshot.phase != "after_commit" or snapshot.reason is not None:
+            raise RequestUnavailableError
+    elif state == "failed":
+        if (
+            failure_code != "session_failed"
+            or snapshot.reason is None
+            or snapshot.phase == "after_commit"
+        ):
+            raise RequestUnavailableError
+    else:
+        raise RequestUnavailableError
+    return snapshot
+
+
+def _session_state(
+    snapshot: SessionSnapshot | None,
+    state: str,
+    code: FailureCode | None,
+) -> str | None:
+    if snapshot is None:
+        return None
+    raw = snapshot.model_dump_json()
+    _read_session_state(raw, state, code)  # 写入也验证，model_copy 不得绕过闭集和容量。
+    return raw
 
 
 def _saved_answer(

@@ -316,6 +316,16 @@ def build_feishu_message(
     if not fits(notice):
         raise ValueError("单消息预算无法保留容量说明")
     if not delivery.facts:
+        if delivery.session_notice is not None:
+            # 固定会话回执必须完整保留原因和操作方法；预算不足记明确发送失败，不裁掉限制。
+            receipt = {
+                "text": mention_safe(
+                    display_text(delivery.content + "\n" + delivery.session_notice)
+                )
+            }
+            if not fits(receipt):
+                raise ValueError("单消息预算无法保留会话回执")
+            return receipt
         if delivery.feishu_text is None:
             raw, prefix = delivery.content, ""
         else:
