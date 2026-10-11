@@ -2,8 +2,8 @@
 
 工具可见性（``allowed_contracts``）只回答“这轮可以考虑什么”；``invoke`` 在实际 I/O 前重新
 检查契约、范围、参数、当前权限和预算；I/O 之后由 Evidence 结果入口按当前权限重新读取，
-执行期间撤权时结果不交给模型。拒绝与失败使用固定信息：SDK 默认把异常文本交给模型，
-因此这里的错误不能携带原始参数、结果、连接信息或下层异常。
+执行期间撤权时结果不交给模型。拒绝反馈只使用可信分支的闭集类别，不把异常原文交给模型；
+这里的错误不能携带原始参数、结果、连接信息或下层异常。
 
 参数经 ``normalize_arguments`` 按 JSON 严格模式校验：不做字符串转数字等转换，拒绝非有限
 数值，并在校验调用上强制禁止未声明字段（含嵌套模型，不依赖模型自身配置或可被覆盖的
@@ -49,6 +49,7 @@ from xiaowei.models import (
     ToolRequest,
     ToolResult,
 )
+from xiaowei.sqlguard import QueryRejectionCode
 from xiaowei.starrocks import StarRocksError, StarRocksErrorCode, trace_sql_io
 
 if TYPE_CHECKING:
@@ -65,7 +66,8 @@ class Prechecked(Generic[Prepared]):
     """带同步前置检查的执行：``check`` 在授权之后、预算预留之前运行，``run`` 只收到它的结果。
 
     ``check`` 必须是零 I/O 的纯函数：把规范化请求转换为执行所需的受信对象，拒绝时抛出信息
-    固定、不含参数原文的 ``ToolRejectedError``；此时本次调用不占预算，模型可以修正后再调用。
+    固定、不含参数原文的 ``ToolRejectedError``；此时本次调用不占预算，是否允许修正由可信拒绝
+    类别决定。能力未开放、固定容量超限或检查自身失败时，停止相关操作。
     """
 
     check: Callable[[ToolRequest], Prepared]
@@ -85,8 +87,69 @@ TARGET_ARGUMENT = "cluster"
 """多目标工具的路由参数：参数模型声明它的工具按其取值选择目标，取值必须等于契约的目标。"""
 
 
+ToolRejectCode = Literal[
+    "invalid_arguments",
+    "unsupported",
+    "capacity_exceeded",
+    "precheck_failed",
+    "unknown_target",
+    "not_allowed",
+    "authorization_unavailable",
+    "budget_exhausted",
+    "busy",
+    "source_stopped",
+    "schema_unavailable",
+    "object_not_readable",
+]
+
+
+ToolRejectHint = Literal[
+    "restart_cursor",
+    "search_scope",
+    "search_keyword",
+    "database_required",
+    "page_size",
+    "audit_window",
+    "audit_order",
+    "internal_ddl_only",
+    "database_capacity",
+    "column_capacity",
+    "ddl_sql_capacity",
+    "change_promql",
+    "prometheus_text",
+    "metric_required",
+    "selectors",
+    "label_name",
+    "time_window",
+    "range_step",
+    "step_precision",
+    "duration_format",
+    "timestamp_format",
+    "grafana_text",
+    "grafana_tags",
+    "grafana_pagination",
+    "grafana_time_window",
+]
+"""可信拒绝点提供的固定修正/限制提示标识；不携带参数或异常原文。"""
+
+
 class ToolRejectedError(Exception):
-    """调用前治理拒绝；未发生任何工具 I/O。"""
+    """调用前拒绝。反馈类别由可信拒绝点赋值，模型端不读取异常原文。"""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        code: ToolRejectCode = "invalid_arguments",
+        hint: ToolRejectHint | None = None,
+        remaining_retries: Literal[0, 1] = 0,
+        query_reject: QueryRejectionCode | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.code = code
+        self.hint = hint
+        self.remaining_retries = remaining_retries
+        self.query_reject = query_reject
 
 
 class ToolExecutionError(Exception):
@@ -267,6 +330,9 @@ class TurnRuns:
     truncated: int = 0
     rejected: int = 0
     limit_rescue_started: bool = False
+    slot_busy: frozenset[str] = frozenset()
+    slot_retries: frozenset[str] = frozenset()  # 一次配额，成功不复位。
+    slot_retrying: frozenset[str] = frozenset()  # 跨工具/参数的在途独占。
 
 
 class GovernedTools:
@@ -320,12 +386,12 @@ class GovernedTools:
         """
         contract = self._catalog.contract(request.tool_id, request.target_id)
         if contract is None:
-            raise ToolRejectedError("工具不可用")
+            raise ToolRejectedError("工具不可用", code="not_allowed")
         if not _in_scope(ctx, contract):
-            raise ToolRejectedError("本轮不允许使用该工具")
+            raise ToolRejectedError("本轮不允许使用该工具", code="not_allowed")
         policy = self._catalog.policy_for(contract)
         if (policy.group_only or policy.effect != "read") and not _group_context(ctx):
-            raise ToolRejectedError("仅指定飞书群可使用此工具")
+            raise ToolRejectedError("仅指定飞书群可使用此工具", code="not_allowed")
         arguments = normalize_arguments(policy, request.arguments)
         if policy.effect == "write":
             binding = ctx.approved_action
@@ -339,38 +405,52 @@ class GovernedTools:
                 or binding.arguments_digest != arguments_digest(arguments)
                 or ctx.tool_scope != frozenset({contract.tool_id})
             ):
-                raise ToolRejectedError("写动作缺少有效的批准绑定")
+                raise ToolRejectedError("写动作缺少有效的批准绑定", code="not_allowed")
         if TARGET_ARGUMENT in policy.arguments.model_fields and (
             arguments.get(TARGET_ARGUMENT) != contract.target_id
         ):
             raise ToolRejectedError("参数不符合工具契约")
         effective = request.model_copy(update={"arguments": arguments})
         if not await self._currently_authorized(ctx.identity, contract):
-            raise ToolRejectedError("当前无权调用该工具")
+            raise ToolRejectedError("当前无权调用该工具", code="not_allowed")
         if any(
             failure.target_id == contract.target_id and failure.reason != "invalid_expression"
             for failure in self._runs.get(_turn_key(ctx.identity), TurnRuns()).monitoring_failures
         ):
-            raise ToolRejectedError("该监控源本轮读取已失败；可调查其他已授权源，不要重试本源")
+            raise ToolRejectedError(
+                "该监控源本轮读取已失败；可调查其他已授权源，不要重试本源", code="source_stopped"
+            )
         # 授权回调之后、执行之前不再 await：前置检查与计数在同一步完成，并行调用不能同时越过
         # 上限；前置检查拒绝时尚未占用预算。
         run = _bind(execute, effective)
         key = _turn_key(ctx.identity)
         runs = self._runs.get(key, TurnRuns())
+        # 在授权 await 之后、进入 Adapter 之前同步决定准入和占用配额。
+        target = contract.target_id
+        if target in runs.slot_retrying or (
+            target in runs.slot_busy and target in runs.slot_retries
+        ):
+            raise ToolRejectedError("系统繁忙，本轮该集群再试已用完", code="busy")
+        slot_retry = target in runs.slot_busy
         repair_from: int | None = None
         if contract.policy_id in PROMETHEUS_QUERY_POLICIES:
             if (contract.target_id, str(arguments["query"])) in runs.promql_errors:
-                raise ToolRejectedError("该表达式本轮已解析失败，未重发；请修改表达式")
+                raise ToolRejectedError(
+                    "该表达式本轮已解析失败，未重发；请修改表达式", hint="change_promql"
+                )
             if contract.target_id in runs.promql_pending:
                 if runs.promql_repairs.count(contract.target_id) >= 2:
                     raise ToolRejectedError(
-                        "本源本轮两次PromQL修正机会已用完；可读取发现信息或其他源"
+                        "本源本轮两次PromQL修正机会已用完；可读取发现信息或其他源",
+                        code="source_stopped",
                     )
                 repair_from = sum(target == contract.target_id for target, _ in runs.promql_errors)
         self._reserve(ctx)
         self._runs[key] = replace(
             runs,
             started=(*runs.started, contract.tool_id),
+            slot_retries=runs.slot_retries | {target} if slot_retry else runs.slot_retries,
+            slot_retrying=runs.slot_retrying | {target} if slot_retry else runs.slot_retrying,
             promql_repairs=(
                 (*runs.promql_repairs, contract.target_id)
                 if repair_from is not None
@@ -378,72 +458,90 @@ class GovernedTools:
             ),
         )
 
-        observation: ToolObservation | None = None
-        busy_before_sql = False
-        with trace_sql_io() as trace:
-            try:
-                observation = await run()
-            except MonitoringReadError as exc:
-                if contract.policy_id not in MONITORING_READ_POLICIES:
-                    raise ToolExecutionError() from None
-                current = self._runs.get(key, TurnRuns())
-                if isinstance(exc, PromQLExpressionError):
-                    if contract.policy_id not in PROMETHEUS_QUERY_POLICIES:
+        try:
+            observation: ToolObservation | None = None
+            busy_before_sql = False
+            with trace_sql_io() as trace:
+                try:
+                    observation = await run()
+                except MonitoringReadError as exc:
+                    if contract.policy_id not in MONITORING_READ_POLICIES:
                         raise ToolExecutionError() from None
-                    current = replace(
-                        current,
-                        promql_errors=(
-                            *current.promql_errors,
-                            (contract.target_id, str(arguments["query"])),
-                        ),
-                        promql_pending=current.promql_pending | {contract.target_id},
+                    current = self._runs.get(key, TurnRuns())
+                    if isinstance(exc, PromQLExpressionError):
+                        if contract.policy_id not in PROMETHEUS_QUERY_POLICIES:
+                            raise ToolExecutionError() from None
+                        current = replace(
+                            current,
+                            promql_errors=(
+                                *current.promql_errors,
+                                (contract.target_id, str(arguments["query"])),
+                            ),
+                            promql_pending=current.promql_pending | {contract.target_id},
+                        )
+                        exc.correction_allowed = (
+                            current.promql_repairs.count(contract.target_id) < 2
+                        )
+                    elif exc.reason == "invalid_expression":
+                        raise ToolExecutionError() from None
+                    failure = MonitoringFailure(
+                        tool_id=contract.tool_id, target_id=contract.target_id, reason=exc.reason
                     )
-                    exc.correction_allowed = current.promql_repairs.count(contract.target_id) < 2
-                elif exc.reason == "invalid_expression":
-                    raise ToolExecutionError() from None
-                failure = MonitoringFailure(
-                    tool_id=contract.tool_id, target_id=contract.target_id, reason=exc.reason
-                )
-                self._runs[key] = replace(
-                    current, monitoring_failures=(*current.monitoring_failures, failure)
-                )
-                raise
-            except Exception as exc:
-                if (
-                    isinstance(exc, StarRocksError)
-                    and exc.code is StarRocksErrorCode.POOL_TIMEOUT
-                    and exc.slot_wait
-                    and not trace.started
-                ):
-                    busy_before_sql = True
-                else:
-                    if isinstance(exc, StarRocksError):
-                        code: StarRocksErrorCode | Literal["mcp_error", "other"] = exc.code
-                    elif (
-                        request.tool_id.partition("/")[0] != "local"
-                        and contract.policy_id not in ALERTMANAGER_READ_POLICIES
+                    self._runs[key] = replace(
+                        current, monitoring_failures=(*current.monitoring_failures, failure)
+                    )
+                    raise
+                except Exception as exc:
+                    if (
+                        isinstance(exc, StarRocksError)
+                        and exc.code is StarRocksErrorCode.POOL_TIMEOUT
+                        and exc.slot_wait
+                        and not trace.started
                     ):
-                        code = "mcp_error"
+                        busy_before_sql = True
                     else:
-                        code = "other"
-                    raise ToolExecutionError(code) from None
-        if busy_before_sql:
-            self._refund_before_io(key, contract.tool_id)
-            raise ToolRejectedError("系统繁忙，可稍后再试")
-        if not isinstance(observation, ToolObservation):
-            raise ToolExecutionError()
-        result = await self._evidence.record(ctx, effective, observation)
-        # 同一轮的并行调用可能已更新记录：取当前值再追加（两步之间没有 await）。
-        runs = self._runs.get(key, TurnRuns())
-        if repair_from is not None and repair_from == sum(
-            target == contract.target_id for target, _ in runs.promql_errors
-        ):
-            runs = replace(runs, promql_pending=runs.promql_pending - {contract.target_id})
-        produced = (*runs.produced, (contract.tool_id, result.evidence_id))
-        self._runs[key] = replace(
-            runs, produced=produced, truncated=runs.truncated + int(result.truncated)
-        )
-        return result
+                        if isinstance(exc, StarRocksError):
+                            code: StarRocksErrorCode | Literal["mcp_error", "other"] = exc.code
+                        elif (
+                            request.tool_id.partition("/")[0] != "local"
+                            and contract.policy_id not in ALERTMANAGER_READ_POLICIES
+                        ):
+                            code = "mcp_error"
+                        else:
+                            code = "other"
+                        raise ToolExecutionError(code) from None
+            if busy_before_sql:
+                self._refund_before_io(key, contract.tool_id)
+                current = self._runs[key]
+                self._runs[key] = replace(current, slot_busy=current.slot_busy | {target})
+                remaining: Literal[0, 1] = 0 if target in current.slot_retries else 1
+                raise ToolRejectedError(
+                    "系统繁忙，可稍后再试", code="busy", remaining_retries=remaining
+                )
+            if not isinstance(observation, ToolObservation):
+                raise ToolExecutionError()
+            result = await self._evidence.record(ctx, effective, observation)
+            # 同一轮的并行调用可能已更新记录：取当前值再追加（两步之间没有 await）。
+            runs = self._runs.get(key, TurnRuns())
+            if repair_from is not None and repair_from == sum(
+                target == contract.target_id for target, _ in runs.promql_errors
+            ):
+                runs = replace(runs, promql_pending=runs.promql_pending - {contract.target_id})
+            produced = (*runs.produced, (contract.tool_id, result.evidence_id))
+            self._runs[key] = replace(
+                runs,
+                produced=produced,
+                truncated=runs.truncated + int(result.truncated),
+                slot_busy=runs.slot_busy - {target} if slot_retry else runs.slot_busy,
+            )
+            return result
+        finally:
+            if slot_retry:
+                pending = self._runs.get(key)
+                if pending is not None:
+                    self._runs[key] = replace(
+                        pending, slot_retrying=pending.slot_retrying - {target}
+                    )
 
     def note_rejected(self, identity: Identity) -> None:
         """SDK 包装层报告一次 I/O 前拒绝；不占工具执行预算。"""
@@ -470,13 +568,15 @@ class GovernedTools:
             return await self._authorize(identity, contract.target_id, contract.tool_id) is True
         except Exception:
             # 授权查询失败时拒绝调用，并以固定信息报告，不把下层异常交给模型。
-            raise ToolRejectedError("权限检查失败，未执行工具") from None
+            raise ToolRejectedError(
+                "权限检查失败，未执行工具", code="authorization_unavailable"
+            ) from None
 
     def _reserve(self, ctx: RunContext) -> None:
         key = _turn_key(ctx.identity)
         used = self._used.get(key, 0)
         if used >= ctx.budget.max_tool_calls:
-            raise ToolRejectedError("本轮工具调用次数已用完")
+            raise ToolRejectedError("本轮工具调用次数已用完", code="budget_exhausted")
         self._used[key] = used + 1
 
     def _refund_before_io(self, key: tuple[str, str, str], tool_id: str) -> None:
@@ -496,7 +596,7 @@ def _bind(execute: Execute, request: ToolRequest) -> Callable[[], Awaitable[Tool
     except ToolRejectedError as exc:
         rejected = exc
     except Exception:
-        rejected = ToolRejectedError("工具参数检查失败，未执行")
+        rejected = ToolRejectedError("工具参数检查失败，未执行", code="precheck_failed")
     if rejected is not None:
         # 在 except 之外抛出：拒绝不带下层异常的上下文。
         raise rejected

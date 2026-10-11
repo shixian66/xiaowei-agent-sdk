@@ -24,6 +24,7 @@ from xiaowei.governance import ToolExecutionError, ToolRejectedError
 from xiaowei.models import AUDIENCES, Audience, ToolRequest
 from xiaowei.starrocks_schema import SchemaCache
 from xiaowei.starrocks_tools import QUERY_TOOLS, data_scope_digest, starrocks_tools
+from xiaowei.tools import _rejection_feedback
 
 pytestmark = pytest.mark.loopback
 SHOW_CREATE = "local/show_create_table"
@@ -135,8 +136,14 @@ async def test_ddl_denied_before_io(
             execute = starrocks_tools(
                 ada, dict.fromkeys(AUDIENCES, CAPACITY), schema=SchemaCache(ada, clock=lambda: NOW)
             ).executes[(SHOW_CREATE, SR.target_id)]
-        with pytest.raises(ToolRejectedError):
+        with pytest.raises(ToolRejectedError) as refused:
             await env.governed.invoke(ctx, call, execute)
+        if denial in {"view", "sql_length"}:
+            feedback = json.loads(_rejection_feedback(refused.value, "show_create_table"))
+            assert feedback["code"] == ("unsupported" if denial == "view" else "capacity_exceeded")
+            assert feedback["retry_this_turn"] is False
+            assert "停止" in feedback["reason"]
+            assert ("尚未开放" if denial == "view" else "SQL 字节限额") in feedback["reason"]
         assert env.drv.attempts == 0 and await env.evidence_rows() == 0
 
 

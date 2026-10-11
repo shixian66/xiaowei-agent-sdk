@@ -145,10 +145,14 @@ def search(**changes: object) -> dict[str, object]:
 
 
 def following(call: ModelCall) -> str:
-    """模型输入中最近一次成功结果的 next_cursor（被拒的输出是文字说明，跳过）。"""
+    """模型输入中最近一次成功结果的 next_cursor；固定结构的拒绝不是证据。"""
     for output in reversed(tool_outputs(call)):
         if output.startswith("{"):
-            return str(json.loads(output)["data"]["next_cursor"])
+            envelope = json.loads(output)
+            if envelope.get("status") == "rejected":
+                assert "evidence_id" not in envelope
+                continue
+            return str(envelope["data"]["next_cursor"])
     raise AssertionError("没有成功的结果")
 
 
@@ -175,8 +179,13 @@ async def test_search_continues_after_corrected_calls(env: Env) -> None:
         assert record.state == "completed", record.failure_code
         outputs = [tool_outputs(c)[-1] for c in env.scripts.calls[message][1:5]]
         oversized, first, mismatched, second = outputs
-        assert "page_size" in oversized and "evidence_id" not in oversized
-        assert "cursor 与本次参数不符" in mismatched and "evidence_id" not in mismatched
+        for output in (oversized, mismatched):
+            rejected = json.loads(output)
+            assert rejected["status"] == "rejected" and rejected["code"] == "invalid_arguments"
+            assert rejected["retry_this_turn"] is True
+            assert "evidence_id" not in rejected
+        reason = json.loads(mismatched)["reason"]
+        assert "从头开始" in reason and "cursor" in reason and "null" in reason
         pages = [json.loads(o) for o in (first, second)]
         rows = [p["data"]["rows"] for p in pages]
         assert [(r[0]["database"], r[0]["name"]) for r in rows] == [ARCHIVE, ("shop", "sales")]

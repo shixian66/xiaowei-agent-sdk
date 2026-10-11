@@ -115,6 +115,7 @@ from xiaowei.starrocks_tools import (
     scope_canonical,
     starrocks_tools,
 )
+from xiaowei.tools import _rejection_feedback
 
 pytestmark = pytest.mark.loopback
 
@@ -929,7 +930,9 @@ async def test_schema_refresh_holds_only_slot_and_model_receives_busy_rejection(
         try:
             await env.app.run_turn(env.ctx(max_tool_calls=1), message)
             (rejected,) = tool_outputs(env.scripts.calls[message][1])
-            assert "系统繁忙，可稍后再试" in rejected
+            feedback = json.loads(rejected)
+            assert feedback["code"] == "busy" and feedback["remaining_retries"] == 1
+            assert feedback["retry_this_turn"] is True
             assert env.drv.attempts == 1  # 刷新占用的连接；前台没有连接或 SQL
             assert executed_sql(env.drv) == []
             assert await env.evidence_rows() == 0
@@ -1079,6 +1082,8 @@ async def test_an_unexpected_precheck_failure_is_a_fixed_rejection_without_io(en
     with pytest.raises(ToolRejectedError) as refused:
         await env.governed.invoke(ctx, request, Prechecked(check=broken, run=run))
     assert str(refused.value) == "工具参数检查失败，未执行"
+    feedback = json.loads(_rejection_feedback(refused.value, "run_readonly_query"))
+    assert feedback["code"] == "precheck_failed" and feedback["retry_this_turn"] is False
     assert refused.value.__context__ is None and "canary" not in repr(refused.value)
     assert ran == []
     # 拒绝未占预算：上限为 1 时同一轮仍可执行一次。

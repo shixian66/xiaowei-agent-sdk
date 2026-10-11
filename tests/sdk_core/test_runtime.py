@@ -35,6 +35,7 @@ from sqlalchemy import text
 from sqlalchemy.engine import URL
 from tests.p1b.test_starrocks_adapter import TARGET as SR
 from tests.p1b.test_starrocks_adapter import Result, driver, schema_results
+from tests.sdk_core.postgres_harness import isolated_database
 from tests.sdk_core.synthetic_tools import Clock
 from tests.sdk_core.test_app import (
     SEARCH_ALL,
@@ -56,6 +57,7 @@ from tests.sdk_core.test_model_api import (
 )
 from tests.sdk_core.test_model_api import OPENAI as PROFILE
 from tests.sdk_core.test_model_api import Endpoint as ChatEndpoint
+from tests.sdk_core.test_starrocks_tools import tool_outputs
 from tests.sdk_core.test_vertex_model import VERTEX
 
 from xiaowei import runtime
@@ -82,6 +84,7 @@ from xiaowei.starrocks_tools import (
     starrocks_tools,
 )
 from xiaowei.storage import (
+    _INSTANCE_LOCK_KEY,
     Readiness,
     StorageBusyError,
     StorageDigestKeyMismatchError,
@@ -237,10 +240,10 @@ class Env:
                 stop.set()
                 await asyncio.wait({task}, timeout=30)
 
-    async def scalar(self, sql: str) -> Any:
+    async def scalar(self, sql: str, parameters: dict[str, Any] | None = None) -> Any:
         async with open_engine(SecretStr(self.url.render_as_string(hide_password=False))) as e:
             async with e.connect() as conn:
-                return await conn.scalar(text(sql))
+                return await conn.scalar(text(sql), parameters)
 
 
 def forget(drv: Any) -> None:
@@ -1000,8 +1003,17 @@ async def test_occupied_port_fails_before_touching_the_database(env: Env) -> Non
 TERMINATE_LOCK = (
     "SELECT count(pg_terminate_backend(pid)) FROM pg_locks"
     " WHERE locktype = 'advisory' AND granted AND mode = 'ExclusiveLock'"
+    " AND database = (SELECT oid FROM pg_database WHERE datname = current_database())"
+    " AND classid = CAST(:classid AS oid) AND objid = CAST(:objid AS oid) AND objsubid = 1"
 )
-WAITING_ON_LOCK = "SELECT count(*) FROM pg_stat_activity WHERE wait_event_type = 'Lock'"
+INSTANCE_LOCK_PARAMETERS = {
+    "classid": _INSTANCE_LOCK_KEY >> 32,
+    "objid": _INSTANCE_LOCK_KEY & 0xFFFF_FFFF,
+}
+WAITING_ON_LOCK = (
+    "SELECT count(*) FROM pg_stat_activity WHERE wait_event_type = 'Lock'"
+    " AND datname = current_database()"
+)
 
 
 async def waiting_on_locks(env: Env, count: int, timeout: float = 10) -> bool:
@@ -1027,8 +1039,23 @@ async def not_serving(served: Served, timeout: float = 2) -> None:
 
 async def test_losing_the_instance_lock_stops_the_process(env: Env) -> None:
     async with env.running(env.config()) as served:
-        assert await env.scalar(TERMINATE_LOCK) == 1
+        assert await env.scalar(TERMINATE_LOCK, INSTANCE_LOCK_PARAMETERS) == 1
         assert await asyncio.wait_for(served.task, 30) == 1
+
+
+async def test_lock_loss_fixture_leaves_other_test_databases_connected(env: Env) -> None:
+    """失锁诊断只终止本用例的持锁后端，不能干扰同机其他隔离数据库。"""
+    async with isolated_database() as other_url:
+        secret = SecretStr(other_url.render_as_string(hide_password=False))
+        async with open_engine(secret) as other, other.connect() as conn:
+            await conn.execute(text("SELECT pg_advisory_lock(736701)"))
+            try:
+                async with env.running(env.config()) as served:
+                    assert await env.scalar(TERMINATE_LOCK, INSTANCE_LOCK_PARAMETERS) == 1
+                    assert await asyncio.wait_for(served.task, 30) == 1
+                    assert await conn.scalar(text("SELECT 1")) == 1
+            finally:
+                await conn.execute(text("SELECT pg_advisory_unlock(736701)"))
 
 
 async def test_normal_stop_during_a_lock_check_is_not_a_lock_loss(env: Env) -> None:
@@ -1045,7 +1072,7 @@ async def test_lock_loss_is_noticed_at_once_not_at_the_next_check(env: Env) -> N
     config = env.config(lock_check_seconds=60)
     async with env.running(config) as served:
         await served.page()
-        assert await env.scalar(TERMINATE_LOCK) == 1
+        assert await env.scalar(TERMINATE_LOCK, INSTANCE_LOCK_PARAMETERS) == 1
         await not_serving(served)
         late = env.scripts.add(
             "丢锁后的新请求", tool_call("list_tables", cluster=SR.target_id, **SEARCH_ALL), cite()
@@ -1074,7 +1101,7 @@ async def test_second_instance_after_lock_loss_never_runs_the_old_request(env: E
         await served.page()
         pending = asyncio.create_task(served.turn(slow, request_id="inflight"))
         await asyncio.wait_for(entered.wait(), 20)
-        assert await env.scalar(TERMINATE_LOCK) == 1
+        assert await env.scalar(TERMINATE_LOCK, INSTANCE_LOCK_PARAMETERS) == 1
         await not_serving(served)
 
         second = Env(env.url, free_port(), env.scripts, env.clock, env.drv)
@@ -1113,7 +1140,7 @@ async def test_accept_paused_across_a_takeover_ends_interrupted_not_stranded(env
             await blocker.execute(text("SELECT 1 FROM xiaowei_channel_session FOR UPDATE"))
             pending = asyncio.create_task(served.turn(late, request_id="late"))
             assert await waiting_on_locks(env, 1)
-            assert await env.scalar(TERMINATE_LOCK) == 1
+            assert await env.scalar(TERMINATE_LOCK, INSTANCE_LOCK_PARAMETERS) == 1
 
             # 新实例用自己的驱动：它只做启动时的结构快照刷新，不能为任何请求运行查询。
             second = Env(env.url, free_port(), env.scripts, env.clock, driver(SALES))
@@ -2563,7 +2590,9 @@ async def test_formal_assembly_routes_each_turn_to_the_named_cluster(env: Env) -
         )
         body = (await served.turn(unknown, "query", "r2")).json()
         assert body["state"] == "completed" and body["delivery"]["facts"] == []
-        assert "集群不存在" in json.dumps(env.scripts.calls[unknown][1].input, ensure_ascii=False)
+        feedback = json.loads(tool_outputs(env.scripts.calls[unknown][1])[-1])
+        assert feedback["status"] == "rejected" and feedback["code"] == "unknown_target"
+        assert "不猜选集群" in feedback["reason"] and "evidence_id" not in feedback
         assert drivers["sr-a"].attempts == 0 and len(statements(drivers["sr-b"])) == 1
         assert await served.finish() == 0
 

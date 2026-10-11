@@ -802,15 +802,19 @@ async def test_tampered_signature_fails_the_followup_without_retry(
 
 
 def _tool_results(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """模型收到的工具结果信封；被治理层拒绝的调用只有一段文字，不是信封。"""
+    """模型收到的成功证据信封；固定结构的拒绝反馈不是证据。"""
     found = []
     for message in messages:
         if message.get("role") != "tool":
             continue
         try:
-            found.append(json.loads(message["content"]))
+            envelope = json.loads(message["content"])
         except ValueError:
             continue
+        if envelope.get("status") == "rejected":
+            assert "evidence_id" not in envelope
+            continue
+        found.append(envelope)
     return found
 
 

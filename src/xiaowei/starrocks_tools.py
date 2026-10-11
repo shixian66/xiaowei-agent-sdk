@@ -312,7 +312,17 @@ def starrocks_tools(
             target_id=target.target_id,
             input_schema=tool_policy.arguments.model_json_schema(),
             policy_id=tool_policy.policy_id,
-            description=description,
+            description=(
+                description
+                + (
+                    " 集群与对象须来自本轮明确目标、仍适用的明确上下文，"
+                    "或完整发现的唯一可读精确匹配；"
+                    "否则先澄清。rejected按固定code纠正或停止，不换集群绕过拒绝。"
+                    if tool_id not in {LIST_DATABASES, LIST_TABLES}
+                    else " 可按任务发现获准候选；搜索命中不等于用户选源，未匹配不证明不存在。"
+                    "rejected按固定code纠正或停止，不猜选集群。"
+                )
+            ),
         )
 
     databases_policy = policy("list_databases", ListDatabasesArgs, DATABASE_NOTE, PAGED_FIELDS)
@@ -358,7 +368,7 @@ def starrocks_tools(
             return schema.current()
         except SchemaUnavailableError:
             pass
-        raise ToolRejectedError(SCHEMA_UNAVAILABLE)
+        raise ToolRejectedError(SCHEMA_UNAVAILABLE, code="schema_unavailable")
 
     page_rows = target.policy.max_rows
 
@@ -366,16 +376,22 @@ def starrocks_tools(
         snapshot = current()
         size = request.arguments["page_size"]
         if not _counting(size) or not 1 <= size <= page_rows:
-            raise ToolRejectedError(f"列库未执行：page_size 须在 1 到 {page_rows} 之间")
+            raise ToolRejectedError(
+                f"列库未执行：page_size 须在 1 到 {page_rows} 之间", hint="page_size"
+            )
         scope = ("list_databases", size)
         start = _resume(request.arguments["cursor"], snapshot, scope)
         objects = sorted(snapshot.objects)
         if start and start >= len(objects):
-            raise ToolRejectedError(CURSOR_INVALID)
+            raise ToolRejectedError(CURSOR_INVALID, hint="restart_cursor")
         candidates = list(dict.fromkeys(key[0] for key in objects[start:]))[:size]
         count = fitting_rows([{"database": name} for name in candidates], size, target)
         if candidates and count == 0:
-            raise ToolRejectedError("列库未执行：下一个库名超过结果容量，无法列出")
+            raise ToolRejectedError(
+                "列库未执行：下一个库名超过结果容量，无法列出",
+                code="capacity_exceeded",
+                hint="database_capacity",
+            )
         selected = set(candidates[:count])
         end = start
         for database, _ in objects[start:]:
@@ -452,13 +468,17 @@ def starrocks_tools(
         args = request.arguments
         keyword = None if args["keyword"] is None else str(args["keyword"]).strip()
         if keyword == "":
-            raise ToolRejectedError("搜表未执行：关键词不能为空")
+            raise ToolRejectedError("搜表未执行：关键词不能为空", hint="search_keyword")
         size = args["page_size"]
         if not _counting(size) or not 1 <= size <= page_rows:
-            raise ToolRejectedError(f"搜表未执行：page_size 须在 1 到 {page_rows} 之间")
+            raise ToolRejectedError(
+                f"搜表未执行：page_size 须在 1 到 {page_rows} 之间", hint="page_size"
+            )
         database = None if args["database"] is None else str(args["database"])
         if keyword is None and not database:
-            raise ToolRejectedError("列出全部表须指定 database；列库请用 list_databases")
+            raise ToolRejectedError(
+                "列出全部表须指定 database；列库请用 list_databases", hint="database_required"
+            )
         needle = keyword.casefold() if keyword is not None else None
         scope = ("list_tables", needle, database, size)
         start = _resume(args["cursor"], snapshot, scope)
@@ -468,14 +488,17 @@ def starrocks_tools(
             if database in (None, key[0]) and (needle is None or _matches(obj, needle))
         ]
         if start and start >= len(matches):
-            raise ToolRejectedError(CURSOR_INVALID)  # 同快照同参数的游标不会越界
+            raise ToolRejectedError(
+                CURSOR_INVALID, hint="restart_cursor"
+            )  # 同快照同参数的游标不会越界
         # 页在 I/O 前按快照中的行规划：撤权只会让本页变短，规划出的页一定放得下。
         candidates = matches[start : start + size]
         count = fitting_rows([_listed(snapshot.objects[k]) for k in candidates], size, target)
         if candidates and count == 0:
             raise ToolRejectedError(
                 "搜表未执行：下一个匹配对象的一行（含表注释）超过单值或结果字节上限，无法列出；"
-                "请用 database 过滤或更具体的关键词避开它"
+                "请用 database 过滤或更具体的关键词避开它",
+                hint="search_scope",
             )
         end = start + count
         following = _cursor(snapshot.version, scope, end) if end < len(matches) else None
@@ -503,7 +526,8 @@ def starrocks_tools(
         found = snapshot.object(str(request.arguments["database"]), str(request.arguments["table"]))
         if found is None:
             raise ToolRejectedError(
-                "对象不在可读的表结构中，未执行；请先用 list_tables 查看可用的库与表"
+                "对象不在可读的表结构中，未执行；请先用 list_tables 查看可用的库与表",
+                code="object_not_readable",
             )
         return snapshot, found
 
@@ -512,7 +536,7 @@ def starrocks_tools(
         scope = ("describe_table", found.database, found.name)
         start = _resume(request.arguments["cursor"], snapshot, scope)
         if start and start >= len(found.columns):
-            raise ToolRejectedError(CURSOR_INVALID)
+            raise ToolRejectedError(CURSOR_INVALID, hint="restart_cursor")
         rows: list[dict[str, Scalar]] = [
             {"name": c.name, "type": c.type, "nullable": c.nullable, "comment": c.comment}
             for c in found.columns[start:]
@@ -520,7 +544,9 @@ def starrocks_tools(
         count = fitting_rows(rows, len(rows), target)
         if rows and count == 0:
             raise ToolRejectedError(
-                "表结构未获取：下一列的定义（含注释）超过单值或结果字节上限，无法显示"
+                "表结构未获取：下一列的定义（含注释）超过单值或结果字节上限，无法显示",
+                code="capacity_exceeded",
+                hint="column_capacity",
             )
         end = start + count
         following = _cursor(snapshot.version, scope, end) if end < len(found.columns) else None
@@ -555,10 +581,18 @@ def starrocks_tools(
     def check_ddl(request: ToolRequest) -> tuple[ObjectInfo, int]:
         _, found = check_table(request)
         if found.type != BASE_TABLE or found.table_id is None or found.table_id <= 0:
-            raise ToolRejectedError("原始 DDL 未读取：只支持普通内部表，视图和物化视图尚未开放")
+            raise ToolRejectedError(
+                "原始 DDL 未读取：只支持普通内部表，视图和物化视图尚未开放",
+                code="unsupported",
+                hint="internal_ddl_only",
+            )
         sql = show_create_sql(found.database, found.name)
         if len(sql.encode()) > target.policy.max_sql_bytes:
-            raise ToolRejectedError("原始 DDL 未读取：生成的 SHOW CREATE TABLE 超过 SQL 字节限额")
+            raise ToolRejectedError(
+                "原始 DDL 未读取：生成的 SHOW CREATE TABLE 超过 SQL 字节限额",
+                code="capacity_exceeded",
+                hint="ddl_sql_capacity",
+            )
         return found, found.table_id
 
     async def show_create_table(checked: tuple[ObjectInfo, int]) -> ToolObservation:
@@ -583,7 +617,9 @@ def starrocks_tools(
         except QueryRejectedError as exc:
             code = exc.code
         # 在 except 之外抛出：拒绝只带固定原因码与说明，不带 SQLGuard 异常的上下文。
-        raise ToolRejectedError(f"查询未执行（{code}）：{REJECTION_MESSAGES[code]}")
+        raise ToolRejectedError(
+            f"查询未执行（{code}）：{REJECTION_MESSAGES[code]}", query_reject=code
+        )
 
     async def run_query(checked: tuple[SchemaSnapshot, GuardedQuery]) -> ToolObservation:
         snapshot, query = checked
@@ -599,7 +635,9 @@ def starrocks_tools(
             )
         except QueryRejectedError as exc:
             code = exc.code
-        raise ToolRejectedError(f"执行计划未获取（{code}）：{REJECTION_MESSAGES[code]}")
+        raise ToolRejectedError(
+            f"执行计划未获取（{code}）：{REJECTION_MESSAGES[code]}", query_reject=code
+        )
 
     async def explain(checked: tuple[SchemaSnapshot, ExplainQuery]) -> ToolObservation:
         snapshot, query = checked
@@ -625,7 +663,8 @@ def starrocks_tools(
             f"page_size 为 1 到 {page_rows}（结果字节放不下时一页会少于它）。第一页 cursor 传 "
             "null；结果的 next_cursor 非空表示还有未返回的匹配，原样传回它并保持 keyword、"
             "database 与 page_size 不变即可取得下一页，为 null 时已全部返回。"
-            "表结构内容变化时 cursor 失效，须从头搜索。"
+            "表结构内容变化时 cursor 失效，须从头搜索；空页也须跟随非空next_cursor。"
+            "已知准确对象且只需字段时可直接describe_table，无需先搜表。"
             "sql 为结构采集 SQL 模板；elapsed_ms 为本次处理与可读性确认耗时，不是采集 SQL 耗时。",
         ),
         contract(
@@ -697,10 +736,12 @@ def starrocks_tools(
             args = request.arguments
             window, order = args["window_minutes"], args["order_by"]
             if not _counting(window) or not 1 <= window <= limit:
-                raise ToolRejectedError(f"慢查询未读取：时间窗须在 1 到 {limit} 分钟之间")
+                raise ToolRejectedError(
+                    f"慢查询未读取：时间窗须在 1 到 {limit} 分钟之间", hint="audit_window"
+                )
             # 参数模型已把排序方式限定为枚举；这里再按 Adapter 的固定映射复核。
             if order not in AUDIT_ORDER_COLUMNS:
-                raise ToolRejectedError("慢查询未读取：排序方式不在允许范围内")
+                raise ToolRejectedError("慢查询未读取：排序方式不在允许范围内", hint="audit_order")
             database = args["database"]
             return _SlowQueries(
                 window=window,
@@ -914,12 +955,12 @@ def _resume(cursor: object, snapshot: SchemaSnapshot, scope: tuple[object, ...])
         return 0
     found = _CURSOR_FORMAT.fullmatch(str(cursor))
     if found is None:
-        raise ToolRejectedError(CURSOR_INVALID)
+        raise ToolRejectedError(CURSOR_INVALID, hint="restart_cursor")
     version, offset, tag = found[1], int(found[2]), found[3]
     if version != snapshot.version:
-        raise ToolRejectedError(SNAPSHOT_STALE)
+        raise ToolRejectedError(SNAPSHOT_STALE, hint="restart_cursor")
     if tag != _cursor_tag(version, scope, offset):
-        raise ToolRejectedError(CURSOR_MISMATCH)
+        raise ToolRejectedError(CURSOR_MISMATCH, hint="restart_cursor")
     return offset
 
 

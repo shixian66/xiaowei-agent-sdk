@@ -18,6 +18,7 @@ from pydantic import SecretStr
 from sqlalchemy import text
 from sqlalchemy.engine import URL
 from sqlalchemy.ext.asyncio import AsyncEngine
+from tests.sdk_core.postgres_harness import isolated_database
 from tests.sdk_core.synthetic_tools import Clock, ready_engine, secret
 
 from xiaowei.channel_store import (
@@ -36,6 +37,7 @@ from xiaowei.models import AgentAnswer, AnswerInference, TurnAnswer
 from xiaowei.session import SessionStoreError, cleanup_expired
 from xiaowei.storage import (
     Backend,
+    InstanceLock,
     Readiness,
     _release,
     hold_backend,
@@ -604,12 +606,13 @@ async def test_recovery_failure_rolls_back_and_blocks_readiness(env: Env) -> Non
 
 # 只终止持有会话级实例锁的后端（排他）；接收事务的共享屏障锁不受影响。
 TERMINATE_INSTANCE_LOCK = text(
-    "SELECT count(pg_terminate_backend(pid)) FROM pg_locks"
-    " WHERE locktype = 'advisory' AND granted AND mode = 'ExclusiveLock'"
+    "SELECT count(pg_terminate_backend(pid)) FROM pg_stat_activity"
+    " WHERE pid = :pid AND datname = current_database()"
 )
 WAITING_ON_LOCK = text(
     "SELECT count(*) FROM pg_stat_activity"
     " WHERE wait_event_type = 'Lock' AND pid <> pg_backend_pid()"
+    " AND datname = current_database()"
 )
 
 
@@ -639,7 +642,7 @@ async def test_takeover_recovery_waits_for_an_accept_still_committing(postgres_u
             assert await waiting_on_locks(new.engine, 1)
 
             async with new.engine.begin() as conn:
-                assert await conn.scalar(TERMINATE_INSTANCE_LOCK) == 1
+                assert await conn.scalar(TERMINATE_INSTANCE_LOCK, {"pid": old_lock.pid}) == 1
             await asyncio.wait_for(old_lock.lost.wait(), 2)
 
             async with hold_instance_lock(new.engine, new.readiness) as new_lock:
@@ -661,6 +664,45 @@ async def test_takeover_recovery_waits_for_an_accept_still_committing(postgres_u
                     await started(old.store, late.record)
 
 
+@pytest.mark.parametrize("selector", ["store", "service", "runtime"])
+async def test_lock_loss_injection_selects_only_its_instance(
+    postgres_url: URL, selector: str
+) -> None:
+    """先只读核对终止筛选，再实际终止；同库其他锁与其他库实例必须照常存活。"""
+    from tests.sdk_core.test_channel_service import TERMINATE_INSTANCE_LOCK as SERVICE_SELECTOR
+    from tests.sdk_core.test_runtime import TERMINATE_LOCK as RUNTIME_SELECTOR
+
+    statement = {
+        "store": TERMINATE_INSTANCE_LOCK.text,
+        "service": SERVICE_SELECTOR.text,
+        "runtime": RUNTIME_SELECTOR,
+    }[selector]
+    async with (
+        isolated_database() as foreign_url,
+        environment(postgres_url) as current,
+        environment(foreign_url) as foreign,
+        current.engine.connect() as auxiliary,
+        hold_instance_lock(current.engine, current.readiness) as own_lock,
+        hold_instance_lock(foreign.engine, foreign.readiness) as foreign_lock,
+    ):
+        await current.store.recover(own_lock)
+        await foreign.store.recover(foreign_lock)
+        await auxiliary.execute(text("SELECT pg_advisory_lock(736701)"))
+        try:
+            # Extra bound values are ignored by old SQL; the RED probe never terminates a backend.
+            params = {"pid": own_lock.pid, "classid": 0x7869_6177, "objid": 0x6569_0001}
+            async with current.engine.begin() as conn:
+                read_only = text(statement.replace("pg_terminate_backend(pid)", "TRUE"))
+                assert await conn.scalar(read_only, params) == 1
+                assert await conn.scalar(text(statement), params) == 1
+            await asyncio.wait_for(own_lock.lost.wait(), 2)
+            assert await auxiliary.scalar(text("SELECT 1")) == 1
+            await foreign_lock.verify()
+            assert foreign.readiness.ok and not foreign_lock.lost.is_set()
+        finally:
+            await auxiliary.execute(text("SELECT pg_advisory_unlock(736701)"))
+
+
 async def test_accept_after_the_lock_moved_is_refused_without_the_notice(
     postgres_url: URL,
 ) -> None:
@@ -670,7 +712,7 @@ async def test_accept_after_the_lock_moved_is_refused_without_the_notice(
             await old.store.recover(old_lock)
             assert (await old.accept("r0")).created  # 对照：持锁时正常接收
             async with new.engine.begin() as conn:
-                assert await conn.scalar(TERMINATE_INSTANCE_LOCK) == 1
+                assert await conn.scalar(TERMINATE_INSTANCE_LOCK, {"pid": old_lock.pid}) == 1
             async with hold_instance_lock(new.engine, new.readiness) as new_lock:
                 await new.store.recover(new_lock)
                 assert old.readiness.ok
@@ -683,18 +725,18 @@ async def test_accept_after_the_lock_moved_is_refused_without_the_notice(
 
 
 @asynccontextmanager
-async def missed_notice(old: Env) -> AsyncIterator[None]:
+async def missed_notice(old: Env) -> AsyncIterator[InstanceLock]:
     """旧实例持锁并完成恢复（绑定实例锁）；锁的 readiness 与存储的分开，模拟终止通知被错过。"""
     async with hold_instance_lock(old.engine, Readiness()) as lock:
         await old.store.recover(lock)
-        yield
+        yield lock
 
 
 @asynccontextmanager
-async def taken_over(new: Env) -> AsyncIterator[None]:
+async def taken_over(new: Env, previous_pid: int) -> AsyncIterator[None]:
     """终止旧实例的锁连接，新实例取得锁并完成接管恢复。"""
     async with new.engine.begin() as conn:
-        assert await conn.scalar(TERMINATE_INSTANCE_LOCK) == 1
+        assert await conn.scalar(TERMINATE_INSTANCE_LOCK, {"pid": previous_pid}) == 1
     async with hold_instance_lock(new.engine, new.readiness) as lock:
         await new.store.recover(lock)
         yield
@@ -713,9 +755,9 @@ async def session_rows(env: Env) -> list[tuple[str, int, str]]:
 
 async def test_rotation_after_takeover_is_refused_without_the_notice(postgres_url: URL) -> None:
     async with environment(postgres_url) as old, environment(postgres_url) as new:
-        async with missed_notice(old):
+        async with missed_notice(old) as old_lock:
             first = await old.store.current_session("web", "alice", "cookie-1")
-            async with taken_over(new):
+            async with taken_over(new, old_lock.pid):
                 assert old.readiness.ok
                 with pytest.raises(NotReadyError):
                     await old.store.new_session("web", "alice", "cookie-1")
@@ -727,7 +769,7 @@ async def test_rotation_after_takeover_is_refused_without_the_notice(postgres_ur
 
 async def test_first_session_after_takeover_is_not_created(postgres_url: URL) -> None:
     async with environment(postgres_url) as old, environment(postgres_url) as new:
-        async with missed_notice(old), taken_over(new):
+        async with missed_notice(old) as old_lock, taken_over(new, old_lock.pid):
             with pytest.raises(NotReadyError):
                 await old.store.current_session("feishu", "alice", "chat-1")
             assert old.readiness.reason == "instance_lock_lost"
@@ -738,9 +780,9 @@ async def test_first_session_after_takeover_is_not_created(postgres_url: URL) ->
 async def test_duplicate_after_takeover_is_not_returned(postgres_url: URL) -> None:
     """接管后旧实例收到重复事件：不返回记录（不去重投、不运行）；新实例按去重与投递契约处理一次。"""
     async with environment(postgres_url) as old, environment(postgres_url) as new:
-        async with missed_notice(old):
+        async with missed_notice(old) as old_lock:
             record = (await old.accept("r1")).record
-            async with taken_over(new):
+            async with taken_over(new, old_lock.pid):
                 assert old.readiness.ok
                 with pytest.raises(NotReadyError):
                     await old.accept("r1")
@@ -756,9 +798,9 @@ async def test_duplicate_after_takeover_is_not_returned(postgres_url: URL) -> No
 async def test_delivery_claim_after_takeover_is_refused(postgres_url: URL) -> None:
     """旧实例在接管后取得投递权：在数据库内拒绝，delivery 不变，新实例仍能取得一次。"""
     async with environment(postgres_url) as old, environment(postgres_url) as new:
-        async with missed_notice(old):
+        async with missed_notice(old) as old_lock:
             record = (await old.accept("r1")).record
-            async with taken_over(new):
+            async with taken_over(new, old_lock.pid):
                 assert old.readiness.ok
                 with pytest.raises(NotReadyError):
                     await old.store.claim_send(record)

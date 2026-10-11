@@ -24,7 +24,7 @@ def fake_model_key(monkeypatch: pytest.MonkeyPatch) -> None:
 
 def test_fixed_samples_use_deployment_limits_and_independent_targets() -> None:
     cfg = configuration(PROFILE, next(s for s in SCENARIOS if s.multi))
-    assert {t.target_id for t in cfg.targets} == {"pre", "fat"}
+    assert {t.target_id for t in cfg.targets} == {"pre", "fat", "fat1"}
     for target in cfg.targets:
         assert target.starrocks.max_value_bytes == 4000
         assert target.starrocks.max_result_bytes == 200000

@@ -1,6 +1,7 @@
 """W5 的失败窗口与治理边界；所有存储与 SDK 路径为真实实现。"""
 
 import asyncio
+import json
 from dataclasses import replace
 from datetime import timedelta
 
@@ -30,6 +31,7 @@ from xiaowei.models import (
     TurnAnswer,
 )
 from xiaowei.session import close_sessions
+from xiaowei.tools import _rejection_feedback
 
 pytestmark = pytest.mark.loopback
 
@@ -158,9 +160,12 @@ async def test_write_tools_hidden_and_unapproved_calls_have_zero_io(actions: Act
         tool_name="change",
         arguments={"value": "after"},
     )
-    with pytest.raises(ToolRejectedError, match="批准绑定"):
+    with pytest.raises(ToolRejectedError, match="批准绑定") as denied:
         await actions.governance.invoke(ctx, request, actions.adapter.execute)
-    assert actions.adapter.calls == []
+    feedback = json.loads(_rejection_feedback(denied.value, "change"))
+    assert feedback["code"] == "not_allowed"
+    assert feedback["retry_this_turn"] is False
+    assert actions.adapter.reads == [] and actions.adapter.calls == []
 
 
 def test_large_read_result_can_clip_without_hiding_approval_material() -> None:
@@ -771,8 +776,11 @@ async def test_personal_entry_hides_proposal_write_and_status(
             tool_name="forced",
             arguments={"value": "after"} if tool != STATUS else {"action_id": "invalid"},
         )
-        with pytest.raises(ToolRejectedError, match="指定飞书群"):
+        with pytest.raises(ToolRejectedError, match="指定飞书群") as denied:
             await actions.governance.invoke(ctx, request, actions.adapter.execute)
+        feedback = json.loads(_rejection_feedback(denied.value, "forced"))
+        assert feedback["code"] == "not_allowed"
+        assert feedback["retry_this_turn"] is False
     assert actions.adapter.reads == [] and actions.adapter.calls == []
 
 

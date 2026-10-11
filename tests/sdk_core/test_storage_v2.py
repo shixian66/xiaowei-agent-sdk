@@ -553,9 +553,10 @@ async def test_losing_the_lock_connection_locks_readiness(postgres_url: URL) -> 
             async with admin.begin() as conn:
                 terminated = await conn.scalar(
                     text(
-                        "SELECT count(pg_terminate_backend(pid)) FROM pg_locks"
-                        " WHERE locktype = 'advisory' AND granted"
-                    )
+                        "SELECT count(pg_terminate_backend(pid)) FROM pg_stat_activity"
+                        " WHERE pid = :pid AND datname = current_database()"
+                    ),
+                    {"pid": lock.pid},
                 )
             assert terminated == 1
             with pytest.raises(StorageUnavailableError):
@@ -579,9 +580,10 @@ async def test_lock_loss_is_signalled_without_a_check(postgres_url: URL) -> None
             async with admin.begin() as conn:
                 await conn.execute(
                     text(
-                        "SELECT pg_terminate_backend(pid) FROM pg_locks"
-                        " WHERE locktype = 'advisory' AND granted"
-                    )
+                        "SELECT pg_terminate_backend(pid) FROM pg_stat_activity"
+                        " WHERE pid = :pid AND datname = current_database()"
+                    ),
+                    {"pid": lock.pid},
                 )
             await asyncio.wait_for(lock.lost.wait(), 2)
             assert readiness.reason == "instance_lock_lost"
