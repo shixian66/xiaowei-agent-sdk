@@ -1,0 +1,106 @@
+{
+  "get_dashboard_by_uid": {
+    "type": "object",
+    "properties": {
+      "uid": {
+        "type": "string",
+        "description": "The UID of the dashboard"
+      },
+      "version": {
+        "type": "integer",
+        "minimum": 1,
+        "description": "Optional saved version. Omit for the current dashboard"
+      }
+    },
+    "required": [
+      "uid"
+    ],
+    "additionalProperties": false
+  },
+  "list_dashboard_versions": {
+    "type": "object",
+    "properties": {
+      "limit": {
+        "type": "integer",
+        "minimum": 1,
+        "description": "Maximum number of versions to return"
+      },
+      "start": {
+        "type": "integer",
+        "minimum": 1,
+        "description": "Version to start from. Only versions at or below this number are returned"
+      },
+      "uid": {
+        "type": "string",
+        "description": "The UID of the dashboard"
+      }
+    },
+    "required": [
+      "uid"
+    ],
+    "additionalProperties": false
+  },
+  "update_dashboard": {
+    "type": "object",
+    "properties": {
+      "dashboard": {
+        "type": "object",
+        "description": "The full dashboard JSON: classic v1 (panels[]) or v2 (elements/layout; skeleton in the tool description). Use for creating new dashboards or complete updates. Saved dashboard annotation queries/definitions live in 'annotations.list' inside this JSON; they are different from annotation events, which are stored separately. Large dashboards consume significant context - consider using patches for small changes."
+      },
+      "folderUid": {
+        "type": "string",
+        "description": "The UID of the dashboard's folder"
+      },
+      "message": {
+        "type": "string",
+        "description": "Set a commit message for the version history"
+      },
+      "operations": {
+        "items": {
+          "properties": {
+            "op": {
+              "type": "string",
+              "description": "Operation type: 'replace', 'add', 'remove'"
+            },
+            "path": {
+              "type": "string",
+              "description": "JSONPath to the property to modify. Supports: '$.title', '$.panels[0].title', '$.panels[0].targets[0].expr', '$.panels[1].targets[0].datasource', '$.templating.list/-' (append a variable), '$.annotations.list/-' (append a saved dashboard annotation query/definition). For appending to arrays, use '/- ' syntax: '$.panels/- ' (append to panels array) or '$.panels[2]/- ' (append to nested array at index 2)."
+            },
+            "value": {
+              "description": "New value for replace/add operations. When adding a saved dashboard annotation query/definition, append an object to '$.annotations.list'.",
+              "type": [
+                "string",
+                "number",
+                "integer",
+                "boolean",
+                "object",
+                "array",
+                "null"
+              ]
+            }
+          },
+          "type": "object",
+          "required": [
+            "op",
+            "path"
+          ]
+        },
+        "type": "array",
+        "description": "Array of patch operations for targeted updates. More efficient than full dashboard JSON for small changes. Common paths: '$.templating.list/-' to add a variable, '$.annotations.list/-' to add a saved dashboard annotation query/definition, '$.panels[0].targets[0].expr' to replace a panel query. v2 paths: '$.elements.<name>.spec.title', '$.variables/-', '$.layout.spec.items/-'."
+      },
+      "overwrite": {
+        "type": "boolean",
+        "description": "Overwrite the dashboard if it exists. Otherwise create one"
+      },
+      "uid": {
+        "type": "string",
+        "description": "UID of existing dashboard to update. Must be used together with 'operations'. Providing 'uid' without 'operations' will fail."
+      },
+      "userId": {
+        "type": "integer",
+        "description": "ID of the user making the change"
+      }
+    },
+    "additionalProperties": false
+  }
+}

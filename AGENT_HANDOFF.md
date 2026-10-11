@@ -9,11 +9,11 @@
 | 项目 | 已核对事实 |
 | --- | --- |
 | 仓库 | [shixian66/xiaowei-agent-sdk](https://github.com/shixian66/xiaowei-agent-sdk) |
-| 本地目录 / 分支 | R12：`/Users/kloenguyen/.codex/worktrees/dialogue-format-r12/agent-SDK` / `codex/dialogue-format-r12`；初始基线为 R3 / PR #77 的 `bb50e045bd5caf82f197faee7a966937fad690c5`；等待 R12-1 CI 期间，PR #79 / S6 合入，现同步 origin/main `ebee727d2fcfb0a66c575dd69b683e22076194e8`。主工作区 `codex/monitoring-g0`、监控及原 R7/R3 工作树未改动。 |
+| 本地目录 / 分支 | D7：`/Users/kloenguyen/.codex/worktrees/monitoring-d7/agent-SDK` / `codex/monitoring-d7`；基线 origin/main `0b136bb711dbfb41e8a82a7265008fad332c5526`（PR #80 合入提交，含 PR #79 / S6）。主工作区旧 G0 分支与其他工作树未改动。 |
 | M5 历史起点 | `372c381f44ecfa1fa53961f137d0058033cbd805`；不是远端当前 main 的核验结论 |
-| 本轮审查版本 | R7 已随 PR #75、R3 已经独立复审和 CI 随 PR #77 合入。用户指定独立审查已检查 R12 `289f4af`，R12-1 与同步新主线的候选待新 SHA 复核；精确提交按 Git 获取；本地自查/新上下文复查不能称为用户指定的独立审查，R12 仍须独立验收。 |
+| 本轮审查版本 | D7 前置协议测试及文档，精确提交从当前工作分支获取；D7 产品功能尚未实现或独立审查。R12 / PR #80 已合入，原验证证据保留。 |
 | 已同步主线审查记录 | W5 `fdfdb469cbcf5e8499f9ee8d69dae954bae0ebda` 经用户独立复审通过并随 PR #74 合入。取消恢复候选 `0ec6c4351824c6b85338ba713d85d54ef34484c2` 的内部只读复查及后续验证记录见下文；这些不是 R7 的新独立审查。本次以已经合入的 PR #76 / main `c7e1e40c346fcd488dbd0dfd3af2e36377e2ee66` 同步，原监控记录与实战缺口保留。 |
-| 当前阶段 | R1a/R1b、只读故障续查、P2、G3、A4、W5、取消恢复及 R7/R3 已合入。S6 已随 PR #79 合入，仍保留真实环境门槛。当前只实施 R12 飞书展示；其他七项切片仍按计划逐片授权。真实模型、真实源、Lark 客户端与部署分别开放。 |
+| 当前阶段 | R1a/R1b、只读故障续查、P2、G3、A4、W5、取消恢复、R7/R3、S6 和 R12 已合入；当前 D7 前置核约，依赖两项产品取舍。真实模型、真实源、群客户端与部署门槛分别保留。 |
 | 当前源码与依赖 | 新包 `src/xiaowei/` 的 W5 为应用表 v7（迁移007新增 Action 表和审批回执失败码 CHECK，SDK 表不变）。V1-A 新增 `vertex_model.py`（SDK 公开 `Model` 的非流式 Vertex 适配器），`model_api` 增加 `provider="vertex"` 与受控 transport 的认证头/成功校验参数；显式声明已直接导入的 `httpx2>=2.12,<3`（锁定 2.13.1 不变）。V1-B 使 `PolicySession` 随函数调用保存并回放 `provider_data.thought_signature`（单字段白名单，其余供应商字段丢弃），`app.safe_run_config()` 成为应用与 `model check` 共用的运行配置。V2 新增 `runtime.check_model` / `validate_model_config` 与 CLI `model check`。C2 把主模板改为一个 Vertex Profile、一个目标；占位符清单新增 Vertex 模型标记，C2 前模板的标记作为历史值继续拒绝。发布归档仍只含白名单文件 |
 | 新产品入口 | 原生主线仍为 `xiaowei`（与 `python -m xiaowei` 相同）的 `serve`、`config check`、`model check`、`storage init/upgrade/cleanup`、`requests resend`；`listen_host` 可为任意地址（默认 `127.0.0.1`）。镜像固定入口复用同一 CLI，在容器内绑定 `0.0.0.0`，宿主机发布地址由 `XW_WEB_BIND_ADDRESS`（默认 `0.0.0.0`）决定。真实模型、用户 StarRocks 与真实飞书未参与 P3-A 验证；旧 CLI/Compose 不是产品入口 |
 | 本次工作范围 | 用户 2026-10-11 授权继续下一独立切片的实现、测试、常规修复、提交、推送和 PR。本轮只落地 C1/C2 的统一飞书业务卡片与受限格式；不改 Agent 指令/工具/schema、治理或权限，不实施 R4/E5/E6/C7。真实服务不调用，不占用 8501，不合并、不部署。 |
@@ -37,7 +37,19 @@
 
 ## 3. 当前计划与下一项工作
 
-**当前下一步：** 本轮已完成本地实现及离线检查的 [七项修复计划 R12](docs/superpowers/plans/2026-10-10-production-dialogue-repairs.md#r12统一业务卡片与受限格式第-12-项同一展示根因)，精确基线见快照。[PR #80](https://github.com/shixian66/xiaowei-agent-sdk/pull/80) 已创建；用户指定独立审查核对 `289f4af` 后发现 R12-1 双下划线标识符改写。本轮已补回归并最小修复；更新同一 PR 后核对新 head 的 CI，交原审查方定向复核。合并和部署仍须另获授权。R4 的 100 轮容量切片及附件/报告尚未实施，不因本轮“继续”一并推进。
+**当前下一步：** S6 已随 [PR #79](https://github.com/shixian66/xiaowei-agent-sdk/pull/79) 合入，R12 已随 [PR #80](https://github.com/shixian66/xiaowei-agent-sdk/pull/80) 合入。按用户“继续开发”接手 D7 Dashboard 创建/修改。先完成锁版协议核约，发现两项需要用户确认的实际兼容取舍；当前只提交测试与计划/交接，不改产品代码，不推进 C8、不合并或部署。接口候选和取舍仅见 [监控计划 §3.6](docs/superpowers/plans/2026-10-09-monitoring-mcp.md)。
+
+**D7 当前已验证（2026-10-11）：** 工作树 `/Users/kloenguyen/.codex/worktrees/monitoring-d7/agent-SDK`，分支 `codex/monitoring-d7`，基线为上表具体 SHA。官方 MCP 二进制哈希沿用 G3 的完整校验。临时隔离 Grafana 13.2.3 仅绑定127.0.0.1:3307；Docker 磁盘不足使首次启动失败，改用本轮容器内存盘后成功，不清理其他项目。无公司服务、真实模型/飞书，也未部署小维。
+
+- 已验证：所选工具实际 schema；无/错调用者认证零上游 I/O；正确认证直调未选写工具为 -32602、零工具上游 I/O；经典完整 JSON 创建和指定保存版本回读；外部更新后陈旧版本409拒绝、远端未覆盖；原生v2旧定义覆盖最新版的实际反例。
+- 原始锁版配置的 `--enable-write-tools` 不会开放 update_dashboard。后续开发依赖两个产品决定：写端类别单独配置、保留原只读端；首版经典格式可写、原生v2只读。已集中提出，尚未收到确认，不把推荐当授权。
+- 未覆盖：D7 正式 serve / Web / 群网关、治理/Action/Evidence 路径和产品失败分类尚未实现；真实 Agent 工具选择与答案/步数/耗时/用量、真实群和公司 Grafana 权限/规模/恢复未验收。本轮不是 D7 功能完成。
+- 基线检查：`uv sync --extra dev --frozen` 通过；`pytest -q -W error tests/sdk_core/test_grafana_contracts.py tests/sdk_core/test_grafana_mcp_protocol.py tests/sdk_core/test_group_actions.py` 为40 passed（15.15s），使用本机隔离 PostgreSQL 与官方 MCP。
+- 新协议检查：`XW_TEST_GRAFANA_MCP_BIN=/private/tmp/xw-g3-official/mcp-grafana XW_TEST_GRAFANA_D7_URL=http://127.0.0.1:3307 .venv/bin/pytest -q -W error tests/sdk_core/test_grafana_d7_protocol.py` 为6 passed（3.14s）。首次两条观测断言把合法初始化 settings 读取误算为被拒绝工具 I/O；现明确断言该一次认证读取，再验证拒绝后的零 I/O，未放宽产品规则。这是协议观测修正，不记为产品功能 RED。
+
+- 兼容合跑：既有 G3 契约/官方协议/正式 Web 与新协议、文档检查为164 passed、1 failed、1 deselected（118.27s）；唯一失败为新清单漏记官方只读 search_folders，源码 tools/search.go 已确认。补齐精确集合后，协议与两项文档文件为11 passed（3.17s）；无关已通过用例不重复重跑，browser opt-in 未选。Ruff check/format、mypy（129源文件）和 git diff --check 通过；src/ 与依赖未改，未跑无关全仓重型检查。
+
+**R12 已合入的有效证据：** 以下保留 PR #80 对应的离线证据，不代替当前 D7 验收。
 
 **R12 当前实现与证据（2026-10-11）：** 复用已验证的 `send_delivery` / `build_feishu_message`、静态 `OutboundCard` 与二分容量搜索；Gateway 和 CLI 发送路径未另写。只有 `feishu_text` 中的模型业务原文及模型分析进入格式器；固定 `monitoring_notice` 先按可信字段分离；固定回执、来源、限制、引用、获准事实、SQL/DDL、原文 JSON 始终纯文字。本片不改变模型/工具契约，未调用真实模型，不属于 R7/R3 豁免的扩展。生效展示与回退说明只在 ARCHITECTURE §7 / OPERATIONS 维护。
 
