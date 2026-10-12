@@ -57,7 +57,7 @@ from xiaowei.model_api import open_model
 from xiaowei.models import Identity, Owner, RunContext
 from xiaowei.runtime import AccessConfig, GroupAccess, StaticAccess
 from xiaowei.session import PolicySession, SessionInputPolicy, SessionUnavailableError
-from xiaowei.storage import hold_instance_lock, open_engine, upgrade_storage
+from xiaowei.storage import APP_SCHEMA_VERSION, hold_instance_lock, open_engine, upgrade_storage
 
 pytestmark = pytest.mark.loopback
 
@@ -750,7 +750,7 @@ def _digest(*parts: str) -> str:
 
 
 async def test_v4_personal_records_keep_their_keys_after_the_upgrade(env: Env) -> None:
-    """v4 的个人请求键与摘要按原格式保存：升级到 v5 后同一请求仍是重复请求，不重新运行。"""
+    """v4 的个人请求键与摘要按原格式保存：升级后同一请求仍是重复请求，不重新运行。"""
     from tests.sdk_core.test_storage_v2 import _install_v1
 
     async with open_engine(secret(env.engine.url)) as legacy:
@@ -785,7 +785,7 @@ async def test_v4_personal_records_keep_their_keys_after_the_upgrade(env: Env) -
                 digest_key=SecretStr(KEY),
                 bind_existing_digest_key=True,
             )
-            == 10
+            == APP_SCHEMA_VERSION
         )
     env.clock.now = datetime.now(UTC)
     again = await env.service.accept(env.personal("旧问题", "r1", "alice", "web", "cookie-1"))
