@@ -92,7 +92,7 @@ from xiaowei.channel_store import (
     SessionBusyError,
 )
 from xiaowei.config import FeishuConfig, FeishuGroupConfig, resolve_secret_ref
-from xiaowei.feishu_render import CAPACITY_NOTICE, Message, build_feishu_message, mention_safe
+from xiaowei.feishu_render import Message, build_feishu_message, capacity_notice, mention_safe
 from xiaowei.models import Delivery
 
 logger = logging.getLogger(__name__)
@@ -339,14 +339,15 @@ async def send_delivery(
     """Gateway 与 CLI 共用：本地构造失败明确未发送，SDK 开始后的异常保留 unknown。"""
     try:
         message = build_feishu_message(delivery, max_chars, chat_id, reply_to=reply_to)
+        omitted = message == capacity_notice(delivery.session_notice)
     except Exception:
         logger.error("飞书结果未发送：reason=render_failed")
         return "failed"
-    if message == {"text": CAPACITY_NOTICE}:
+    if omitted:
         logger.warning("飞书仅发送容量说明：reason=reply_capacity_notice")
     try:
         outcome = await send(chat_id, message, reply_to=reply_to)
-        if delivery.requires_complete and message == {"text": CAPACITY_NOTICE}:
+        if delivery.requires_complete and omitted:
             return "failed" if outcome == "sent" else outcome
         return outcome
     except Exception as exc:
