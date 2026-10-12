@@ -249,6 +249,7 @@ TurnReason = Literal[
     "tool_failed",
     "timeout",
     "model_failed",
+    "action_unresumable",
 ]
 
 _MESSAGES: Mapping[TurnReason, str] = {
@@ -265,6 +266,7 @@ _MESSAGES: Mapping[TurnReason, str] = {
     ),
     "timeout": "本轮超过期限已停止；已执行的工具不会自动重试",
     "model_failed": "模型调用失败，本轮未完成；已执行的工具不会自动重试",
+    "action_unresumable": "执行请求没有形成唯一且有额度的可恢复审批，未执行；请重新提出",
 }
 
 
@@ -353,6 +355,7 @@ class PausedTurn:
     binding: str
     scope_checks: int
     expires_at: datetime
+    approvable_action_ids: tuple[str, ...] = ()
     prior_version: int = 0
     prior_binding: str | None = None
 
@@ -545,6 +548,8 @@ class Application:
         native: RunState[RunContext] | None = None,
         prior_version: int = 0,
         prior_binding: str | None = None,
+        prior_interruptions: frozenset[tuple[str, str]] = frozenset(),
+        approval_requests: dict[str, int] | None = None,
         scope_count: ScopeChecks | None = None,
     ) -> TurnAnswer | PausedTurn:
         turn = ctx.identity.turn_id
@@ -556,7 +561,8 @@ class Application:
             raise TurnError("storage_unavailable") from None
         _stage(turn, "storage_ready", started)
 
-        agent = self._agent(ctx)
+        approval_requests = approval_requests if approval_requests is not None else {}
+        agent = self._agent(ctx, approval_requests)
         session = self._session(ctx)
 
         # 每轮新建 PolicySession：失败或取消时，未提交的暂存项随对象一起丢弃。
@@ -629,6 +635,8 @@ class Application:
                 session,
                 started,
                 scope_count,
+                approval_requests,
+                prior_interruptions,
                 prior_version=prior_version,
                 prior_binding=prior_binding,
             )
@@ -682,7 +690,9 @@ class Application:
         _stage(turn, "committed", started)
         return validated.model_copy(update={"session_state": snapshot})
 
-    def _agent(self, ctx: RunContext) -> Agent[RunContext]:
+    def _agent(
+        self, ctx: RunContext, approval_requests: dict[str, int] | None = None
+    ) -> Agent[RunContext]:
         action_note = ""
         if (
             self.actions is not None
@@ -707,7 +717,7 @@ class Application:
             ),
             model=self._model.model,
             model_settings=self._model.settings,
-            tools=self._tools_for(ctx),
+            tools=self._tools_for(ctx, approval_requests),
             output_type=AgentAnswer,
         )
 
@@ -754,6 +764,8 @@ class Application:
         session: PolicySession,
         started: float,
         checks: ScopeChecks | None,
+        approval_requests: dict[str, int],
+        prior_interruptions: frozenset[tuple[str, str]],
         *,
         prior_version: int = 0,
         prior_binding: str | None = None,
@@ -781,6 +793,8 @@ class Application:
             if t.endswith("/request_action_execution") and e not in ctx.evidence_ids
         ]
         expires = []
+        action_ids: list[str] = []
+        recognized: list[bool] = []
         for item in result.interruptions:
             raw = _approval_call(item)
             contract = next(
@@ -793,9 +807,12 @@ class Application:
             )
             if contract is None:
                 raise TurnError("scope_rejected")
-            args = contract_dump(
-                ActionStatusArgs, ActionStatusArgs.model_validate_json(raw.arguments)
-            )
+            try:
+                args = contract_dump(
+                    ActionStatusArgs, ActionStatusArgs.model_validate_json(raw.arguments)
+                )
+            except ValueError:
+                raise TurnError("action_unresumable") from None
             action = await self.actions._store.get_action(str(args["action_id"]), ctx.identity)
             if (
                 action.state != "pending"
@@ -808,6 +825,21 @@ class Application:
                 raise RequestUnavailableError
             material_ids.append(await self.actions.verify_material(action, ctx, runs))
             expires.append(action.approval_expires_at)
+            action_ids.append(action.action_id)
+            recognized.append(
+                approval_requests.get(action.action_id) == 1
+                or (
+                    approval_requests.get(action.action_id, 0) == 0
+                    and (raw.call_id, action.action_id) in prior_interruptions
+                )
+            )
+        if (
+            len(action_ids) != len(set(action_ids))
+            or not all(recognized)
+            or self._governance.checkpoint(ctx.identity).used + 2 * len(action_ids)
+            > ctx.budget.max_tool_calls
+        ):
+            raise TurnError("action_unresumable")
         material = TurnAnswer(
             answer=AgentAnswer(
                 evidence_ids=tuple(dict.fromkeys(material_ids)), inferences=[], clarification=None
@@ -850,6 +882,7 @@ class Application:
             self._native_binding(ctx),
             checks.used if checks is not None else 0,
             max(expires),
+            tuple(action_ids),
             prior_version,
             prior_binding,
         )
@@ -938,7 +971,8 @@ class Application:
                     await self.actions.verify_material(action, ctx, ledger.runs)
                     if ledger.used + (2 if approve else 1) > ctx.budget.max_tool_calls:
                         raise ResumeRejectedError("action_not_approvable")
-                    agent = self._agent(ctx)
+                    approval_requests: dict[str, int] = {}
+                    agent = self._agent(ctx, approval_requests)
                     state = await RunState.from_string(
                         agent,
                         native.run_state,
@@ -956,6 +990,15 @@ class Application:
                     ]
                     if len(matches) != 1:
                         raise ResumeRejectedError("action_not_approvable")
+                    prior_interruptions = frozenset(
+                        (
+                            _approval_call(item).call_id,
+                            ActionStatusArgs.model_validate_json(
+                                _approval_call(item).arguments
+                            ).action_id,
+                        )
+                        for item in state.get_interruptions()
+                    )
                     claimed, cause = await store.claim_native_action(
                         action, native, ctx.identity, approval_ctx.identity, approve=approve
                     )
@@ -979,7 +1022,7 @@ class Application:
                     )
                     # 用绑定后的可信context重建SDK，不沿用刚才无批准的context/闭包。
                     state = await RunState.from_string(
-                        self._agent(ctx),
+                        self._agent(ctx, approval_requests),
                         native.run_state,
                         context_override=RunContextWrapper(ctx),
                         strict_context=True,
@@ -1018,6 +1061,8 @@ class Application:
                         native=state,
                         prior_version=native.version,
                         prior_binding=native.binding,
+                        prior_interruptions=prior_interruptions,
+                        approval_requests=approval_requests,
                         scope_count=checks,
                     )
                     return result
@@ -1053,12 +1098,14 @@ class Application:
             self._governance.end_turn(original.identity)
             self._active.discard(session_id)
 
-    def _tools_for(self, ctx: RunContext) -> list[Tool]:
+    def _tools_for(
+        self, ctx: RunContext, approval_requests: dict[str, int] | None = None
+    ) -> list[Tool]:
         """本轮 Agent 的工具：可信范围内的本地工具与 MCP 工具，列表只属于这一轮。"""
         allowed = {contract.tool_id for contract in self._governance.allowed_contracts(ctx)}
         local = [tool for tool_id, tool in self._local.items() if tool_id in allowed]
         remote = self._mcp.tools_for(ctx) if self._mcp is not None else []
-        actions = self.actions.tools_for(ctx) if self.actions is not None else []
+        actions = self.actions.tools_for(ctx, approval_requests) if self.actions is not None else []
         return [*local, *remote, *actions]
 
     @staticmethod

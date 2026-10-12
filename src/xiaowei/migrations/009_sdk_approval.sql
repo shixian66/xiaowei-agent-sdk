@@ -3,7 +3,7 @@ ALTER TABLE xiaowei_action ADD COLUMN failure_code text;
 ALTER TABLE xiaowei_action ADD CONSTRAINT xiaowei_action_failure_check CHECK (
     failure_code IS NULL OR (state = 'rejected' AND failure_code IN (
         'action_requester_invalid', 'action_session_invalid', 'action_upgrade_invalidated',
-        'action_expired', 'action_rejected'
+        'action_expired', 'action_rejected', 'action_unresumable'
     ))
 );
 -- v8没有RunState；只作废旧pending，其他执行事实（包括executing）不改。
@@ -38,6 +38,7 @@ ALTER TABLE xiaowei_request ADD CONSTRAINT xiaowei_request_failure_code_check CH
     failure_code IN ('busy','model_failed','evidence_failed','session_failed','scope_unverifiable',
         'access_denied','result_not_saved','interrupted','action_not_approvable',
         'action_feedback_failed','action_unknown','action_rejected','action_requester_invalid',
-        'action_session_invalid','action_upgrade_invalidated','action_expired')
+        'action_session_invalid','action_upgrade_invalidated','action_expired',
+        'action_unresumable')
 );
 UPDATE xiaowei_schema_version SET version = 9;

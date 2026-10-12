@@ -84,6 +84,10 @@ _REJECTION_FEEDBACK: dict[ToolRejectCode, tuple[str, bool]] = {
 
 
 _REJECTION_HINTS: dict[ToolRejectHint, str] = {
+    "action_request": (
+        "只有本轮已提出、证据可读且尚未请求过执行的Action ID可申请群审批；"
+        "请核对ID并避免重复调用。同一轮须为执行请求和写入保留两次工具额度"
+    ),
     "restart_cursor": (
         "cursor 无效、已失效或与本次参数不一致；请从头开始，cursor 传 null，再按返回的游标续取"
     ),

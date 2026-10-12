@@ -16,7 +16,7 @@ from datetime import datetime, timedelta
 from typing import TYPE_CHECKING, Annotated, Any, Literal
 from uuid import UUID, uuid4
 
-from agents import FunctionTool
+from agents import FunctionTool, RunContextWrapper, UserError
 from pydantic import AfterValidator, BaseModel, ConfigDict, Field
 
 from xiaowei.channel_store import (
@@ -246,8 +246,11 @@ class ActionService:
             or (c.policy_id == EXECUTION_POLICY and c.target_id in bound_sources)
         )
 
-    def tools_for(self, ctx: RunContext) -> list[FunctionTool]:
+    def tools_for(
+        self, ctx: RunContext, approval_requests: dict[str, int] | None = None
+    ) -> list[FunctionTool]:
         tools = []
+        requested = approval_requests if approval_requests is not None else {}
         for contract in self.governance.allowed_contracts(ctx):
             binding = self._bindings.get((contract.tool_id, contract.target_id))
             if binding is not None:
@@ -272,6 +275,41 @@ class ActionService:
                     return await self.approve(str(req.arguments["action_id"]), ctx)
 
                 execute = execute_action
+
+                async def needs_approval(
+                    tool_ctx: RunContextWrapper[RunContext],
+                    params: dict[str, Any],
+                    _call_id: str,
+                    c: ToolContract = contract,
+                ) -> bool:
+                    # SDK 的 False 会继续调用工具；未获批准的执行请求由 GovernedTools
+                    # 在预算占用和 Adapter I/O 前固定拒绝，不能由此触发写入。
+                    active = tool_ctx.context
+                    try:
+                        action_id = ActionStatusArgs.model_validate(params).action_id
+                        action = await self._store.get_action(action_id, active.identity)
+                        if (
+                            action.state != "pending"
+                            or action.requester_id != active.identity.subject_id
+                            or action.proposal_session_id != active.identity.session_id
+                            or action.proposal_turn_id != active.identity.turn_id
+                            or action.target_id != c.target_id
+                            or self._clock() >= action.approval_expires_at
+                        ):
+                            return False
+                        await self.verify_material(
+                            action, active, self.governance.turn_runs(active.identity)
+                        )
+                        used = self.governance.checkpoint(active.identity).used
+                    except (ValueError, RequestUnavailableError, ToolRejectedError):
+                        return False
+                    except Exception as exc:
+                        # 锁版 SDK 把普通回调异常当作“需要批准”；UserError 会直接
+                        # 结束本轮，避免暂时性检查故障产生看似可批准的材料。
+                        raise UserError("执行请求预检失败") from exc
+                    count = requested.get(action_id, 0) + 1
+                    requested[action_id] = count
+                    return count == 1 and used + 2 * len(requested) <= active.budget.max_tool_calls
             elif contract.policy_id == STATUS_POLICY:
 
                 async def status(req: ToolRequest) -> ToolObservation:
@@ -284,7 +322,7 @@ class ActionService:
                 contract.tool_id.replace("/", "__"), contract, self.governance, execute
             )
             tools.append(
-                replace(tool, needs_approval=True)
+                replace(tool, needs_approval=needs_approval)
                 if contract.policy_id == EXECUTION_POLICY
                 else tool
             )

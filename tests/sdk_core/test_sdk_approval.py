@@ -5,7 +5,7 @@ from dataclasses import replace
 
 import pytest
 from tests.sdk_core.synthetic_tools import QUERY_TOOL, TOTAL_TOOL
-from tests.sdk_core.test_app import cite, tool_call
+from tests.sdk_core.test_app import cite, clarify, tool_call, upstream_error
 from tests.sdk_core.test_group_actions import SOURCE, WRITE, Actions, request_execution
 from tests.sdk_core.test_group_actions import actions as actions
 from tests.sdk_core.test_group_gateway import running
@@ -118,6 +118,243 @@ async def test_approval_without_native_pause_has_no_legacy_write_fallback(action
         action_id = await actions.one()
         await group.ask(f"/批准 {action_id}", sender=B)
     assert actions.adapter.calls == []
+
+
+async def test_proposal_without_sdk_request_is_terminal_and_cannot_be_approved(actions):
+    env = actions.env
+    env.scripts.add(
+        attributed(A, "只提出"),
+        tool_call(f"{SOURCE}__propose_change", value="after"),
+        cite("仅形成提案"),
+    )
+    async with running(env, max_reply_chars=3500) as group:
+        await group.ask("只提出", message_id="om_orphan")
+        action_id = await actions.one()
+        assert await env.rows("SELECT state, failure_code FROM xiaowei_action") == [
+            ("rejected", "action_unresumable")
+        ]
+        assert await env.rows(
+            "SELECT state FROM xiaowei_request WHERE reply_message_id='om_orphan'"
+        ) == [("completed",)]
+        assert "待批准动作" not in group.outbox.texts()[-1]
+        assert "批准命令" not in group.outbox.texts()[-1]
+        view = await env.results.view(group_ref("om_orphan", A), first=True)
+        assert view.delivery is not None
+        assert f"/批准 {action_id}" not in view.delivery.content
+        assert all("approval_command" not in fact.metadata for fact in view.delivery.facts)
+        assert all(
+            fact.result_json is None or f"/批准 {action_id}" not in fact.result_json
+            for fact in view.delivery.facts
+        )
+        await group.ask(f"/批准 {action_id}", sender=B, message_id="om_orphan_approve")
+    assert actions.adapter.calls == []
+    assert await env.rows(
+        "SELECT failure_code FROM xiaowei_request WHERE reply_message_id='om_orphan_approve'"
+    ) == [("action_unresumable",)]
+    assert "未形成可恢复审批" in group.outbox.texts()[-1]
+
+
+@pytest.mark.parametrize("tool_limit", [2, 3])
+async def test_execution_request_budget_is_decided_before_pause(actions, tool_limit):
+    env = actions.env
+    env.results._budget = env.results.budget.model_copy(update={"max_tool_calls": tool_limit})
+    env.scripts.add(
+        attributed(A, "额度临界"),
+        tool_call(f"{SOURCE}__propose_change", value="after"),
+        request_execution,
+        cite("说明本轮结果"),
+    )
+    async with running(env, max_reply_chars=3500) as group:
+        await group.ask("额度临界", message_id="om_budget_boundary")
+        action_id = await actions.one()
+        if tool_limit == 2:
+            assert await env.rows("SELECT state, failure_code FROM xiaowei_action") == [
+                ("rejected", "action_unresumable")
+            ]
+            assert "待批准动作" not in group.outbox.texts()[-1]
+            assert "批准命令" not in group.outbox.texts()[-1]
+            assert await env.rows(
+                "SELECT state FROM xiaowei_request WHERE reply_message_id='om_budget_boundary'"
+            ) == [("completed",)]
+            outputs = [
+                json.loads(item["output"])
+                for call in env.scripts.calls[attributed(A, "额度临界")]
+                for item in call.input
+                if item.get("type") == "function_call_output"
+            ]
+            assert any(
+                item.get("status") == "rejected" and item.get("code") == "budget_exhausted"
+                for item in outputs
+            )
+            await group.ask(f"/批准 {action_id}", sender=B, message_id="om_budget_refused")
+            assert "未形成可恢复审批" in group.outbox.texts()[-1]
+        else:
+            assert await env.rows("SELECT state FROM xiaowei_action") == [("pending",)]
+            await group.ask(f"/批准 {action_id}", sender=B, message_id="om_budget_approved")
+            assert await env.rows("SELECT state FROM xiaowei_action") == [("succeeded",)]
+    assert len(actions.adapter.calls) == (0 if tool_limit == 2 else 1)
+
+
+async def test_duplicate_execution_requests_do_not_leave_an_unusable_candidate(actions):
+    from agents.testing import function_call
+
+    env = actions.env
+
+    def request_twice(call):
+        action_id = next(
+            json.loads(item["output"])["data"]["action_id"]
+            for item in call.input
+            if item.get("type") == "function_call_output"
+            and "action_id" in json.loads(item["output"]).get("data", {})
+        )
+        return [function_call(GATE, {"action_id": action_id}, call_id=f"dup-{n}") for n in (1, 2)]
+
+    env.scripts.add(
+        attributed(A, "重复请求"),
+        tool_call(f"{SOURCE}__propose_change", value="after"),
+        request_twice,
+        cite(),
+    )
+    async with running(env, max_reply_chars=3500) as group:
+        await group.ask("重复请求", message_id="om_duplicate_gate")
+        action_id = await actions.one()
+        assert await env.rows("SELECT state, failure_code FROM xiaowei_action") == [
+            ("rejected", "action_unresumable")
+        ]
+        assert await env.rows(
+            "SELECT failure_code FROM xiaowei_request WHERE reply_message_id='om_duplicate_gate'"
+        ) == [("action_unresumable",)]
+        assert "待批准动作" not in group.outbox.texts()[-1]
+        assert "批准命令" not in group.outbox.texts()[-1]
+        await group.ask(f"/批准 {action_id}", sender=B, message_id="om_duplicate_approve")
+    assert actions.adapter.calls == []
+    assert "未形成可恢复审批" in group.outbox.texts()[-1]
+
+
+async def test_unknown_action_id_is_rejected_to_model_without_pausing(actions):
+    from uuid import uuid4
+
+    env = actions.env
+    script = env.scripts.add(
+        attributed(A, "错误动作 ID"),
+        tool_call(GATE, action_id=str(uuid4())),
+        clarify("请核对 Action ID 后重新提出"),
+    )
+    async with running(env, max_reply_chars=3500) as group:
+        await group.ask("错误动作 ID", message_id="om_unknown_gate")
+    assert actions.adapter.calls == []
+    assert await env.rows(
+        "SELECT state FROM xiaowei_request WHERE reply_message_id='om_unknown_gate'"
+    ) == [("completed",)]
+    outputs = [
+        json.loads(item["output"])
+        for call in env.scripts.calls[script]
+        for item in call.input
+        if item.get("type") == "function_call_output"
+    ]
+    assert any(item.get("status") == "rejected" for item in outputs)
+
+
+async def test_false_sdk_approval_cannot_reach_write_without_bound_approver(actions):
+    from uuid import uuid4
+
+    from tests.sdk_core.test_group_identity import GROUP
+
+    from xiaowei.governance import ToolRejectedError
+    from xiaowei.models import Identity, RunContext, ToolRequest
+
+    env = actions.env
+    gate = f"{SOURCE}/request_action_execution"
+    ctx = RunContext(
+        identity=Identity(
+            subject_id=A,
+            session_id="s_approval_guard",
+            turn_id="t_approval_guard",
+            owner=GROUP.owner,
+            channel="feishu",
+        ),
+        target_scope=frozenset({SOURCE}),
+        tool_scope=frozenset({gate}),
+        budget=env.results.budget,
+    )
+    executed = False
+
+    async def forbidden_write(_request):
+        nonlocal executed
+        executed = True
+        raise AssertionError("未经批准不得调用执行函数")
+
+    with pytest.raises(ToolRejectedError):
+        await actions.governance.invoke(
+            ctx,
+            ToolRequest(
+                tool_id=gate,
+                target_id=SOURCE,
+                call_id="c_approval_guard",
+                tool_name=GATE,
+                arguments={"action_id": str(uuid4())},
+            ),
+            forbidden_write,
+        )
+    assert not executed and actions.adapter.calls == []
+    assert actions.governance.checkpoint(ctx.identity).used == 0
+
+
+async def test_failed_resumed_turn_settles_new_proposal_without_replaying_write(actions):
+    env = actions.env
+    env.results._budget = env.results.budget.model_copy(update={"max_tool_calls": 6})
+    env.scripts.add(
+        attributed(A, "续跑后失败"),
+        tool_call(f"{SOURCE}__propose_change", value="first"),
+        request_execution,
+        tool_call(f"{SOURCE}__propose_change", value="second"),
+        upstream_error,
+    )
+    async with running(env, max_reply_chars=3500) as group:
+        await group.ask("续跑后失败", message_id="om_resume_fail_origin")
+        first = await actions.one()
+        await group.ask(f"/批准 {first}", sender=B, message_id="om_resume_fail_approve")
+        rows = await env.rows("SELECT state, failure_code, plan, action_id FROM xiaowei_action")
+        by_value = {
+            json.loads(plan)["plan"]["parameters"]["value"]: (state, failure, aid)
+            for state, failure, plan, aid in rows
+        }
+        assert by_value["first"][:2] == ("succeeded", None)
+        assert by_value["second"][:2] == ("rejected", "action_unresumable")
+        await group.ask(f"/批准 {by_value['second'][2]}", sender=B)
+    assert len(actions.adapter.calls) == 1
+    assert "未形成可恢复审批" in group.outbox.texts()[-1]
+
+
+async def test_pause_keeps_only_the_unique_requested_action(actions):
+    env = actions.env
+    env.results._budget = env.results.budget.model_copy(update={"max_tool_calls": 5})
+    env.scripts.add(
+        attributed(A, "两个提案只执行一个"),
+        tool_call(f"{SOURCE}__propose_change", value="unused"),
+        tool_call(f"{SOURCE}__propose_change", value="selected"),
+        request_execution,
+        cite(),
+    )
+    async with running(env, max_reply_chars=3500) as group:
+        await group.ask("两个提案只执行一个", message_id="om_one_gate")
+        rows = await env.rows("SELECT state, failure_code, plan, action_id FROM xiaowei_action")
+        by_value = {
+            json.loads(plan)["plan"]["parameters"]["value"]: (state, failure, aid)
+            for state, failure, plan, aid in rows
+        }
+        assert by_value["unused"][:2] == ("rejected", "action_unresumable")
+        assert by_value["selected"][:2] == ("pending", None)
+        card = group.outbox.texts()[-1]
+        assert by_value["unused"][2] not in card
+        assert f"/批准 {by_value['selected'][2]}" in card
+        await group.ask(f"/批准 {by_value['unused'][2]}", sender=B)
+        assert "未形成可恢复审批" in group.outbox.texts()[-1]
+        await group.ask(f"/批准 {by_value['selected'][2]}", sender=B)
+    assert len(actions.adapter.calls) == 1
+    assert await env.rows(
+        "SELECT state FROM xiaowei_action WHERE action_id=:id", id=by_value["selected"][2]
+    ) == [("succeeded",)]
 
 
 @pytest.mark.parametrize("invalid", ["sealed", "closed", "expired"])
@@ -271,6 +508,10 @@ async def test_partial_approvals_save_new_version_and_keep_original_turn(actions
         assert {"action_id", "state", "approver", "result"} <= outcomes[0].metadata.keys()
         assert "动作执行事实" in group.outbox.texts()[-1]
         assert ids[0] in group.outbox.texts()[-1] and ids[1] in group.outbox.texts()[-1]
+        await group.ask(f"/批准 {ids[0]}", sender=B, message_id="om_first_again")
+        assert await env.rows(
+            "SELECT state FROM xiaowei_action WHERE action_id=:id", id=ids[1]
+        ) == [("pending",)]
         await group.ask(f"/批准 {ids[1]}", sender=B, message_id="om_second")
     assert len(actions.adapter.calls) == 2 and env.model_calls(script) == 4
     assert await env.rows("SELECT state FROM xiaowei_action ORDER BY call_id") == [
@@ -936,6 +1177,8 @@ async def test_scope_probe_budget_continues_across_pause_and_refuses_before_prob
     from xiaowei.models import ObjectDependency
 
     env, old = actions.env, actions.env.app
+    # 首次调查读 + 两次提案、审批请求与写入共需 7 次工具额度。
+    env.results._budget = env.results.budget.model_copy(update={"max_tool_calls": 7})
     base = env.evidence.catalog
     policy = base.policy_for(base.contract(TOTAL_TOOL, TARGET))
     changed = ToolCatalog(
@@ -1072,6 +1315,9 @@ async def test_session_expiry_at_pause_save_has_terminal_request_and_allows_new_
     from sqlalchemy import text
 
     env = actions.env
+    if phase == "resumed":
+        # 两次提案、审批请求与写入共需 6 次；保留此用例的二次暂停路径。
+        env.results._budget = env.results.budget.model_copy(update={"max_tool_calls": 6})
     async with running(env, max_reply_chars=3500) as group:
         if phase == "resumed":
             aid, script = await paused(actions, group)

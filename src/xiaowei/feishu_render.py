@@ -31,6 +31,7 @@ _ACTION_LABELS = {
     "rollback": "恢复办法",
     "approve_before": "批准截止时间",
     "approval_command": "批准命令",
+    "approval_status": "审批状态",
 }
 
 Message = dict[str, Any]
@@ -154,7 +155,15 @@ def _card(
             elements.append(_div(f"说明：{fact.note}"))
         if fact.requires_complete:
             elements.append(
-                _div("动作执行事实" if "state" in fact.metadata else "待批准动作（尚未执行）")
+                _div(
+                    "动作执行事实"
+                    if "state" in fact.metadata
+                    else (
+                        "动作提案（当前不可批准）"
+                        if "approval_status" in fact.metadata
+                        else "待批准动作（尚未执行）"
+                    )
+                )
             )
             elements.extend(
                 _div(f"{_ACTION_LABELS.get(key, key)}：{_cell({key: value}, key)}")

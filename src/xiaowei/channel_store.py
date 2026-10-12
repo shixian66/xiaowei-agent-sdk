@@ -44,7 +44,7 @@ if TYPE_CHECKING:
     from xiaowei.app import PausedTurn
 
 from pydantic import SecretStr, ValidationError
-from sqlalchemy import TextClause, text
+from sqlalchemy import String, TextClause, bindparam, text
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine
 
@@ -84,6 +84,7 @@ CallerFailureCode = Literal[
     "action_session_invalid",
     "action_upgrade_invalidated",
     "action_expired",
+    "action_unresumable",
 ]
 InternalFailureCode = Literal["result_not_saved", "interrupted"]
 FailureCode = CallerFailureCode | InternalFailureCode
@@ -204,6 +205,11 @@ _FAIL = text(
       AND state IN ('accepted', 'running')
     """
 )
+_SETTLE_UNRESUMABLE = text(
+    "UPDATE xiaowei_action SET state='rejected', failure_code='action_unresumable',"
+    " updated_at=:now WHERE owner_id=:owner AND proposal_turn_id=:turn"
+    " AND state='pending' AND action_id NOT IN :keep"
+).bindparams(bindparam("keep", expanding=True, type_=String()))
 # 首次发送：completed 结果或 failed/interrupted 的固定回执，各最多一次。
 # 取得投递权时写入新的尝试标识（与可选的重发命令连接身份）；落定只认同一标识。
 _CLAIM_FIRST = text(
@@ -759,10 +765,10 @@ class ChannelStore:
         try:
             snapshot = _session_state(turn.session_state, "completed", None)
         except RequestUnavailableError:
-            await self._fail_after_commit(record, failure_code)
+            await self._fail_after_commit(record, failure_code, settle_turn_id=turn.run_turn_id)
             raise ResultNotSavedError from None
         if len(content.encode()) > self._max_answer_bytes:
-            await self._fail_after_commit(record, failure_code)
+            await self._fail_after_commit(record, failure_code, settle_turn_id=turn.run_turn_id)
             raise ResultNotSavedError
         try:
             async with self._engine.begin() as conn:
@@ -775,15 +781,19 @@ class ChannelStore:
                         "now": self._clock(),
                     },
                 )
+                if saved.rowcount == 1:
+                    await self._settle_unresumable_actions(
+                        conn, record.owner.id, turn.run_turn_id or record.turn_id
+                    )
         except asyncio.CancelledError:
             # 保存结果不明，也不能在取消中再写失败状态：锁低后交给重启恢复。
             self._readiness.lock("result_state_unwritable")
             raise
         except (OSError, SQLAlchemyError):
-            await self._fail_after_commit(record, failure_code)
+            await self._fail_after_commit(record, failure_code, settle_turn_id=turn.run_turn_id)
             raise ResultNotSavedError from None
         if saved.rowcount != 1:
-            await self._fail_after_commit(record, failure_code)
+            await self._fail_after_commit(record, failure_code, settle_turn_id=turn.run_turn_id)
             raise ResultNotSavedError
         return replace(
             record,
@@ -801,6 +811,7 @@ class ChannelStore:
         code: CallerFailureCode,
         *,
         session_state: SessionSnapshot | None = None,
+        settle_action_id: str | None = None,
     ) -> RequestRecord:
         """``accepted/running → failed``，保存安全失败码（如 Session 未提交的模型失败、繁忙）。
 
@@ -816,12 +827,37 @@ class ChannelStore:
             self._readiness.lock("request_fail_failed")
             raise
         params = {"code": code, "session_state": snapshot}
-        if await self._update(_FAIL, record, critical="request_fail_failed", **params) != 1:
-            raise RequestUnavailableError
+        with self._critical("request_fail_failed", "请求状态无法保存"):
+            async with self._engine.begin() as conn:
+                changed = await conn.execute(
+                    _FAIL, {**_keys(record), "now": self._clock(), **params}
+                )
+                if changed.rowcount != 1:
+                    raise RequestUnavailableError
+                await self._settle_unresumable_actions(conn, record.owner.id, record.turn_id)
+                if settle_action_id is not None:
+                    original = (
+                        await conn.execute(
+                            text(
+                                "SELECT a.proposal_turn_id FROM xiaowei_action a"
+                                " JOIN xiaowei_action_run r ON r.turn_id=a.proposal_turn_id"
+                                " AND r.owner_id=a.owner_id WHERE a.action_id=:action"
+                                " AND a.owner_id=:owner AND a.attempt IS NOT NULL"
+                                " AND r.consumed=true FOR UPDATE OF r"
+                            ),
+                            {"action": settle_action_id, "owner": record.owner.id},
+                        )
+                    ).scalar_one_or_none()
+                    if original is not None:
+                        await self._settle_unresumable_actions(conn, record.owner.id, original)
         return replace(record, state="failed", failure_code=code, session_state=session_state)
 
     async def _fail_after_commit(
-        self, record: RequestRecord, code: FailureCode = RESULT_NOT_SAVED
+        self,
+        record: RequestRecord,
+        code: FailureCode = RESULT_NOT_SAVED,
+        *,
+        settle_turn_id: str | None = None,
     ) -> None:
         """结果未保存：同一事务标记 failed 并关闭会话；也失败时锁低 readiness。"""
         params = {**_keys(record), "code": code, "session_state": None, "now": self._clock()}
@@ -829,6 +865,9 @@ class ChannelStore:
             async with self._engine.begin() as conn:
                 if (await conn.execute(_FAIL, params)).rowcount != 1:
                     raise ChannelStoreUnavailableError
+                await self._settle_unresumable_actions(conn, record.owner.id, record.turn_id)
+                if settle_turn_id is not None and settle_turn_id != record.turn_id:
+                    await self._settle_unresumable_actions(conn, record.owner.id, settle_turn_id)
                 await close_sessions(conn, [record.session_id])
         except asyncio.CancelledError:
             self._readiness.lock("result_state_unwritable")
@@ -986,6 +1025,47 @@ class ChannelStore:
         if row is None:
             raise RequestUnavailableError
         return ActionRecord(**dict(row))
+
+    async def action_delivery_state(self, action_id: str, owner_id: str) -> tuple[str, str | None]:
+        """投递时读取当前动作事实；过期或缺失的提案不能继续展示批准命令。"""
+        try:
+            async with self._engine.connect() as conn:
+                row = (
+                    (
+                        await conn.execute(
+                            text(
+                                "SELECT state, failure_code, approval_expires_at, expires_at"
+                                " FROM xiaowei_action WHERE action_id=:id AND owner_id=:owner"
+                            ),
+                            {"id": action_id, "owner": owner_id},
+                        )
+                    )
+                    .mappings()
+                    .one_or_none()
+                )
+        except (OSError, SQLAlchemyError):
+            raise ChannelStoreUnavailableError from None
+        if row is None:
+            return "unavailable", None
+        if row["state"] == "pending" and self._clock() >= min(
+            row["approval_expires_at"], row["expires_at"]
+        ):
+            return "expired", None
+        return str(row["state"]), row["failure_code"]
+
+    async def _settle_unresumable_actions(
+        self,
+        conn: AsyncConnection,
+        owner_id: str,
+        turn_id: str,
+        *,
+        keep: Sequence[str] = (),
+    ) -> None:
+        """请求终态或暂停与未绑定候选同事务落定；已开始的写不受影响。"""
+        await conn.execute(
+            _SETTLE_UNRESUMABLE,
+            {"owner": owner_id, "turn": turn_id, "keep": tuple(keep), "now": self._clock()},
+        )
 
     async def proposal_request(self, action: ActionRecord) -> RequestRecord:
         async with self._engine.connect() as conn:
@@ -1180,7 +1260,9 @@ class ChannelStore:
         ledger = TypeAdapter(TurnLedger).dump_json(pause.ledger).decode()
         content = pause.material.model_dump_json()
         if len(content.encode()) > self._max_answer_bytes:
-            await self._fail_after_commit(record, failure_code)
+            await self._fail_after_commit(
+                record, failure_code, settle_turn_id=pause.context.identity.turn_id
+            )
             raise ResultNotSavedError
         params = {
             "turn": pause.context.identity.turn_id,
@@ -1263,9 +1345,17 @@ class ChannelStore:
                     )
                     if changed.rowcount != 1:
                         raise RequestUnavailableError
+                    await self._settle_unresumable_actions(
+                        conn,
+                        record.owner.id,
+                        pause.context.identity.turn_id,
+                        keep=pause.approvable_action_ids,
+                    )
         except RequestUnavailableError:
             # 确定未保存的拒绝也须落定请求；不能留下running持续挡住/新建。
-            await self._fail_after_commit(record, failure_code)
+            await self._fail_after_commit(
+                record, failure_code, settle_turn_id=pause.context.identity.turn_id
+            )
             raise ResultNotSavedError from None
         return replace(
             record,

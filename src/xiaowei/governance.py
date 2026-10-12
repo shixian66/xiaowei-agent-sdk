@@ -105,6 +105,7 @@ ToolRejectCode = Literal[
 
 
 ToolRejectHint = Literal[
+    "action_request",
     "restart_cursor",
     "search_scope",
     "search_keyword",
@@ -418,11 +419,17 @@ class GovernedTools:
         arguments = normalize_arguments(policy, request.arguments)
         if policy.effect == "approval":
             approval = ctx.approved_action
+            # SDK 的 needs_approval=False 只跳过暂停；未经当前批准绑定的调用在这里
+            # 必须始终拒绝，且先于预算占用和 Adapter I/O。
+            if approval is None or approval.action_id != arguments.get("action_id"):
+                if self._used.get(_turn_key(ctx.identity), 0) + 2 > ctx.budget.max_tool_calls:
+                    raise ToolRejectedError(
+                        "本轮剩余工具额度不足以执行动作", code="budget_exhausted"
+                    )
+                raise ToolRejectedError("本轮执行请求未形成有效批准", hint="action_request")
             if (
-                approval is None
-                or approval.approver is None
+                approval.approver is None
                 or approval.target_id != request.target_id
-                or approval.action_id != arguments.get("action_id")
                 or approval.sdk_call_id != request.call_id
             ):
                 raise ToolRejectedError("执行请求缺少本次 SDK 批准绑定", code="not_allowed")
