@@ -113,21 +113,32 @@ async def test_connect_timeout_and_cancelled_candidate_are_cleaned():
     stalled = ProbeServer("stalled", hang=True)
     lifecycle = manager(stalled)
     started = time.monotonic()
-    await lifecycle.connect_all()
-    assert 0.15 <= time.monotonic() - started < 0.8
-    assert lifecycle.active_servers == [] and lifecycle.failed_servers == [stalled]
-    assert isinstance(lifecycle.errors[stalled], TimeoutError)
-    await lifecycle.cleanup_all()
+    try:
+        await lifecycle.connect_all()
+        assert 0.15 <= time.monotonic() - started < 0.8
+        assert lifecycle.active_servers == [] and lifecycle.failed_servers == [stalled]
+        assert isinstance(lifecycle.errors[stalled], TimeoutError)
+    finally:
+        await lifecycle.cleanup_all()
     assert not stalled.live
 
     cancelled = ProbeServer("cancelled", hang=True)
     candidate = manager(cancelled)
     task = asyncio.create_task(candidate.__aenter__())
-    await cancelled.entered.wait()
-    task.cancel()
-    with pytest.raises(asyncio.CancelledError):
-        await task
-    await candidate.cleanup_all()
+    try:
+        await asyncio.wait_for(cancelled.entered.wait(), 1)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+    finally:
+        if not task.done():
+            task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass  # 只收集本用例主动取消的任务；其他异常继续抛出。
+        finally:
+            await candidate.cleanup_all()
     await asyncio.sleep(0)
     assert cancelled.cleanups >= 1 and not cancelled.live
     assert all(worker.done() for _, worker in cancelled.tasks)
