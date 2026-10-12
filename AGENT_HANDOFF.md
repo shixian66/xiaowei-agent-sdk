@@ -1,6 +1,6 @@
 # 小维：当前交接
 
-> 更新：2026-10-11，Asia/Shanghai。这里只记录当前事实、证据与下一项工作；设计见 [ARCHITECTURE.md](ARCHITECTURE.md)，路线见 [DEVELOPMENT_PLAN.md](DEVELOPMENT_PLAN.md)，协作规则见 [AGENTS.md](AGENTS.md)。
+> 更新：2026-10-12，Asia/Shanghai。这里只记录当前事实、证据与下一项工作；设计见 [ARCHITECTURE.md](ARCHITECTURE.md)，路线见 [DEVELOPMENT_PLAN.md](DEVELOPMENT_PLAN.md)，协作规则见 [AGENTS.md](AGENTS.md)。
 
 **OpenAI Agents SDK 负责 Agent Loop；小维负责权限、受治理工具执行、证据真实性和数据边界。**
 
@@ -9,14 +9,14 @@
 | 项目 | 已核对事实 |
 | --- | --- |
 | 仓库 | [shixian66/xiaowei-agent-sdk](https://github.com/shixian66/xiaowei-agent-sdk) |
-| 本地目录 / 分支 | S2：`/Users/kloenguyen/.codex/worktrees/session-limits-plan/agent-SDK` / `codex/session-rejection-reasons-s2`；基线 main `4f6132edf20677ec4769a0f87eec564ba45f584b`（PR #81 / S1）。复用干净的已附加工作树，旧分支保留；主工作区及监控/R3/R12 工作树未改动。 |
+| 本地目录 / 分支 | SDK整改方案：`/Users/kloenguyen/.codex/worktrees/sdk-reuse-plan/agent-SDK` / `codex/sdk-reuse-plan`；基线 main `ebb4db3c4738134ef7371f076e0662ac3c0c741d`（PR #82 / S2）。主工作区与 D7 工作树保留未修改；本轮仅方案/实验。 |
 | M5 历史起点 | `372c381f44ecfa1fa53961f137d0058033cbd805`；不是远端当前 main 的核验结论 |
-| 本轮审查版本 | R7/R3/R12/S1 已获用户指定独立审查、CI 和授权合入。S1 审查 head `cdab6bd705b81e2c21a8692f91d1642fe44f8b4e`，PR #81 squash 为上述 main，代码树一致；十项 CI 通过。S2 精确候选由 Git/PR 获取，待用户指定独立审查；实现方复查不算独立验收。 |
+| 本轮审查版本 | S2 已随 PR #82 合入上述基线。当前 SDK整改方案尚未独立审查，精确本地候选 SHA 在交付中给出；不以实现方复查冒充独立验收。D7 PR #83 草稿 head `52346a23e8d1b1c30f27951d95ba8167e39f681d` 冻结。 |
 | 已同步主线审查记录 | W5 `fdfdb469cbcf5e8499f9ee8d69dae954bae0ebda` 经用户独立复审通过并随 PR #74 合入。取消恢复候选 `0ec6c4351824c6b85338ba713d85d54ef34484c2` 的内部只读复查及后续验证记录见下文；这些不是 R7 的新独立审查。本次以已经合入的 PR #76 / main `c7e1e40c346fcd488dbd0dfd3af2e36377e2ee66` 同步，原监控记录与实战缺口保留。 |
-| 当前阶段 | R1a/R1b、只读故障续查、P2、G3、A4、W5、取消恢复、S6 和 R7/R3/R12/S1 已合入，真实环境缺口保留。当前只实施 R4/S2，会话拒绝原因贯穿存储和双入口；S3、附件和报告未实施。 |
+| 当前阶段 | R1a/R1b、只读续查、P2/G3/A4、W5/取消恢复/S6 与 R7/R3/R12/S1/S2 已合入，真实环境缺口保留。暂停后续新功能，当前仅 SDK复用方案/实验；整改产品实现、D7/C8 和 S3 待授权阶段推进。 |
 | 当前源码与依赖 | 新包 `src/xiaowei/` 当前为应用表 v8（迁移008只新增独立请求会话快照；主线 v7 Action 表和失败码 CHECK 不变，SDK 表不变）。V1-A 新增 `vertex_model.py`（SDK 公开 `Model` 的非流式 Vertex 适配器），`model_api` 增加 `provider="vertex"` 与受控 transport 的认证头/成功校验参数；显式声明已直接导入的 `httpx2>=2.12,<3`（锁定 2.13.1 不变）。V1-B 使 `PolicySession` 随函数调用保存并回放 `provider_data.thought_signature`（单字段白名单，其余供应商字段丢弃），`app.safe_run_config()` 成为应用与 `model check` 共用的运行配置。V2 新增 `runtime.check_model` / `validate_model_config` 与 CLI `model check`。C2 把主模板改为一个 Vertex Profile、一个目标；占位符清单新增 Vertex 模型标记，C2 前模板的标记作为历史值继续拒绝。发布归档仍只含白名单文件 |
 | 新产品入口 | 原生主线仍为 `xiaowei`（与 `python -m xiaowei` 相同）的 `serve`、`config check`、`model check`、`storage init/upgrade/cleanup`、`requests resend`；`listen_host` 可为任意地址（默认 `127.0.0.1`）。镜像固定入口复用同一 CLI，在容器内绑定 `0.0.0.0`，宿主机发布地址由 `XW_WEB_BIND_ADDRESS`（默认 `0.0.0.0`）决定。真实模型、用户 StarRocks 与真实飞书未参与 P3-A 验证；旧 CLI/Compose 不是产品入口 |
-| 本次工作范围 | 用户 2026-10-11 授权继续下一独立切片并提交、推送、开 PR。本轮仅 S2：可信原因和状态保存、固定说明及 v8 迁移；Agent 指令/工具契约、治理、权限、Evidence、历史/请求/期限上限不变。真实服务不调用，不占用 8501，不合并、不部署。 |
+| 本次工作范围 | 用户 2026-10-12 授权文档与有界离线实验；不改产品源码/迁移/依赖，不连接真实模型/飞书/公司服务，不推送、不开PR、不合并、不部署。先交方案/实验核对；保留群审批和业务执行边界。 |
 | 外部操作 | 主线曾获用户授权用合成数据调用 Gemini API（见第 3 节），验证后本机凭据文件已删除，用户负责作废该密钥；Gate 0 离线部分与 SQLGuard 没有调用真实模型；全部工作均未调用飞书或外部 MCP Server。Gate 0 真实运行经用户授权使用第三方中转端点 `bbtoken.boywe.cn`（OpenAI 兼容 Chat Completions）发送合成数据，共 22 次模型请求（含诊断探测），另有 1 次模型列表查询，串行、不重试；凭据只写入仓库外权限 600 的临时文件，运行后已删除，用户负责作废该密钥。Task 2 从 Docker Hub 拉取官方 `starrocks/allin1-ubuntu:latest`（digest `sha256:faf7ce9c…276b`，StarRocks 4.1.4）在本机 127.0.0.1:59030 运行可丢弃容器，只写入随机名合成库，用后删除；未连接用户的 StarRocks。P2 Task 0 用同一本地镜像在 127.0.0.1:59030 运行可丢弃容器，从 `releases.starrocks.io/resources/auditloader.zip` 下载官方 AuditLoader 5.0.0（sha256 `cd2a8ace…8ea2`）只装入该容器，临时把 FE `query_explain_level` 改为 ANALYZE 后已恢复；容器与合成数据已删除。P2.5 Task 0 用同一 digest 新建可丢弃容器 `xw-p25-t0-sr`（只发布 127.0.0.1:59030/58030）与 `xiaowei-sdk-test` PostgreSQL，装入同一 AuditLoader 5.0.0；临时改 FE `query_explain_level`、`enable_statistic_collect_on_first_load` 并建极低阈值资源组，均已恢复/删除并回读；容器与测试库已删除，未触碰 `xiaowei-release-*`。P2.5 Task 1 只用本机 `xiaowei-sdk-test` PostgreSQL 与 StarRocks 驱动替身，未连接任何 StarRocks、模型 API、飞书或外部 MCP。P2.5 Task 2 用同一 digest 新建可丢弃容器 `xw-p25-t2-sr`（只发布 127.0.0.1:59030），装入同一 AuditLoader 5.0.0（`max_stmt_length=1000`），运行 SR 用例与工作树外的 1,000 表规模实验；规模实验前两次（每批 50 条建表）期间单容器 FE 多次重启、实验失败，`docker restart` 后改为每批 20 条完成；合成库、账号与角色均已删除，容器与测试 PostgreSQL 已删除，未触碰 `xiaowei-release-*`。Task 2 审查修订用同一 digest 新建可丢弃容器 `xw-p25-t2r-sr`（标签 `xiaowei.task=p25-task2-review`，只发布 127.0.0.1:59030/58030），装入同一 AuditLoader 5.0.0，只运行 §5 SR 用例；未改 FE 设置。P2.5 Task 3 用同一 digest 新建可丢弃容器 `xw-p25-t3-sr`（标签 `xiaowei.task=p25-task3`，只发布 127.0.0.1:59030/58030），装入同一 AuditLoader 5.0.0，运行 §5 SR 用例（含新增的复杂 SQL 对照，临时建库 `<随机库>_hr` 用后删除）；审查修复另建同 digest 可丢弃容器 `xw-p25-t3r-sr`（只发布 127.0.0.1:59030/58030），以 root 在合成库 `p` 中探测名字解析规则后删除该库（复审第 2 轮另建同 digest 容器 `xw-p25-t3r2-sr` 重复同样流程），装入同一 AuditLoader 5.0.0 运行 §5 SR 用例；未改 FE 设置，未连接用户的 StarRocks、模型 API、飞书或外部 MCP。P2.5 Task 5 用同一 digest 新建可丢弃容器 `xw-p25-t5-sr`（标签 `xiaowei.task=p25-task5`，只发布 127.0.0.1:59030/58030），装入同一 AuditLoader 5.0.0（官方包 sha256 `cd2a8ace…8ea2`，只把 `max_stmt_length` 改为 1000），运行 §5 SR 用例，另起 `xiaowei-sdk-test` PostgreSQL；未改 FE 设置，用后删除，未触碰 `xiaowei-release-*`。P2.5 Task 6 同样新建可丢弃容器 `xw-p25-t6-sr`（标签 `xiaowei.task=p25-task6`，只发布 127.0.0.1:59030/58030）与 `xiaowei-sdk-test` PostgreSQL，装入同一 AuditLoader 5.0.0（先误用 Task 5 的包，`max_batch_interval_sec` 为默认 60，卸载后按 P2.5 §9.1 改为 10 重装），运行 §5 SR 用例（含新增的搜表与跨库审计用例，临时库 `<随机库>_b` 用后删除）；未改 FE 设置，用后删除 P2.5 Task 7 的实现与第一轮审查修订只用隔离的 `xiaowei-sdk-test` PostgreSQL 与本机 Chrome（脚本模型、驱动与合成 StarRocks 替身）；复审修订用同一 digest 新建可丢弃容器 `xw-p25-t7r-sr`（标签 `xiaowei.task=p25-task7-review`，只发布 127.0.0.1:59030/58030）与 `xiaowei-sdk-test` PostgreSQL，装入同一 AuditLoader 5.0.0（§9.1 的包），只运行 §5 SR 用例；未改 FE 设置，用后删除，未触碰 `xiaowei-release-*`；没有调用真实模型、用户的 StarRocks、飞书或外部 MCP。P2.5 Task 8 只用 `xiaowei-sdk-test` PostgreSQL 与本机 Chrome（脚本模型、驱动替身与飞书替身），没有新建 StarRocks 容器（SR 结果沿用 PR #40 复审修订的运行，理由见计划 Task 8 实施说明），没有调用真实模型、用户的 StarRocks、飞书或外部 MCP。飞书单群 F2、F3 只用 `xiaowei-sdk-test` PostgreSQL 与本机 127.0.0.1 上的合成飞书 OpenAPI（真实 SDK 用例），没有调用真实飞书、模型、用户 StarRocks 或外部 MCP，未触碰 `xiaowei-release-*`。飞书单群 F0 只在本机 127.0.0.1 运行合成飞书 HTTP/长连接端点与 `xiaowei-sdk-test` PostgreSQL；为核对权限名称只读查阅了飞书开放平台公开文档；没有调用真实飞书、模型、用户 StarRocks 或外部 MCP，未触碰 `xiaowei-release-*`。 |
 
 表中外部操作一行保留以往阶段记录。G0 曾下载并运行官方 Prometheus MCP 二进制；R1a 复用已校验二进制，连接本机合成 Prometheus API、loopback MCP 和隔离 PostgreSQL，并通过飞书通道替身验证；未接公司监控源、真实模型或真实飞书。历史任务 SHA 只证明对应切片，不能混用。接手先用 `git rev-parse HEAD` 和 `git status --short` 取得实际版本；审查使用对应提交的精确 SHA，本文件的修改历史由 Git 保存。
@@ -37,9 +37,25 @@
 
 ## 3. 当前计划与下一项工作
 
-**当前下一步：** 将[七项修复计划 S2](docs/superpowers/plans/2026-10-10-production-dialogue-repairs.md#s2会话拒绝原因贯穿存储与双入口)的工作分支及对应 PR 交用户指定审查方复核；精确 base/head、最终 CI 以 PR 为准。S1 已随 PR #81 合入。S3 接近上限提醒仍未实施，后续须按用户授权推进；本轮不合并、不部署、不改公司配置。
+**当前下一步：** 交用户核对[SDK复用整改 §3.6](docs/superpowers/plans/2026-10-09-monitoring-mcp.md#sdk-reuse)与实验，再实施 SDK-A。原会话失效旧候选拒绝已获批准；旧 pending Action 无快照时作废/重提的兼容建议仍待本方案核对。S2已随PR #82合入，旧本机证据保留在下方；D7草稿冻结，不继续新功能。
 
-**S2 本地实现与证据（2026-10-11）：** 复用 `PolicySession` 的元数据读取/完整回放计数，经 Application 的可信返回/异常、请求终态事务、当前身份读取，生成 Web/飞书固定说明。成功提交和失败状态单独保存，不进入回答 JSON、模型或 SDK 历史；Agent 指令、工具、治理及 Evidence 校验不变。主线 v7 已被占用，本片用 v8 迁移，发行清单只允许 v8 直接启动，v1–v7 显式升级。旧空快照保留通用回执；坏快照拒绝交付，保存失败、取消和恢复沿既有状态机。
+**SDK 复用整改：方案与离线实验（2026-10-12）。** 用户已暂停 D7/C8 新功能，批准补[原监控计划 §3.6](docs/superpowers/plans/2026-10-09-monitoring-mcp.md#sdk-reuse)，产品实现仍待方案核对。原“不恢复 RunState”设计已被批准的原生 HITL 方向替代；原会话不可用的契约变更只在[架构 §5](ARCHITECTURE.md#monitoring-mcp)维护。当前只修改四份相关文档和 `tests/spike/`，不改产品/迁移/依赖；D7 PR #83 保持草稿、未合入/未继续修改。
+
+本工作树独立 `.venv` 锁定 Python3.11.16、SDK0.22.3、mcp2.2.0；仅脚本模型、本机 stateful MCP 和逐例隔离的 `xiaowei-sdk-test` PostgreSQL。三组实验区分 SDK 原生能力、SQL 原语可行性和可复用产品路径；不把后两者拼成“正式原生审批已实现”。关键反例：同一合法 SDK 快照可执行两次；旧 Evidence 可绕过 PolicySession 随 RunState 再到模型；PolicySession直接恢复在工具已调用一次后因 limit 拒绝；Manager就地重连让旧闭包串新连接，且不跟踪调用期断开。
+
+| 本轮实际检查 | 结果 / 原始本机日志 |
+| --- | --- |
+| `SDK_TEST_POSTGRES_URL=postgresql+asyncpg://postgres@127.0.0.1:55432/postgres .venv/bin/python -m pytest tests/spike -q -s -W error --tb=short` | 38 passed，9.02s；`/private/tmp/xw-sdk-reuse-final-38.log`。暂停/保存/恢复、权限与重复、超时、Session接续、关闭/claim排序、执行中关闭与事实回执、Manager生命周期 |
+| 现有 MCP、群 Action、PolicySession 三文件回归（同一 PostgreSQL 变量，见下方命令） | 108 passed，30.07s；`/private/tmp/xw-sdk-reuse-baseline.log` |
+| R1b 退避/旧快照/候选取消/并发恢复定向回归 | 5 passed，12.11s；`/private/tmp/xw-sdk-reuse-r1b-baseline.log` |
+| `.venv/bin/ruff check --no-cache tests/spike`；`.venv/bin/ruff format --check --no-cache tests/spike`；`.venv/bin/mypy src/xiaowei` | 通过；4个实验文件格式、27个源文件类型；`/private/tmp/xw-sdk-reuse-type.log` |
+| `.venv/bin/python -m pytest tests/security/test_docs_command_consistency.py tests/contract/test_doc_fact_binding.py -q -W error`；`UV_CACHE_DIR=/private/tmp/xw-sdk-reuse-uv-cache uv lock --check --offline`；`git diff --check` | 5 passed，0.13s；`/private/tmp/xw-sdk-reuse-docs-final.log`；锁文件/差异检查通过；未改依赖 |
+
+基线回归命令：`.venv/bin/python -m pytest tests/sdk_core/test_mcp_integration.py tests/sdk_core/test_group_actions.py tests/sdk_core/test_session_policy.py -q -W error --tb=short`。R1b 命令：`.venv/bin/python -m pytest tests/sdk_core/test_monitoring_r1b.py::test_reconnect_backoff_caps_at_sixty_seconds_and_resets tests/sdk_core/test_monitoring_r1b.py::test_old_runner_tool_stays_on_old_connection_after_reconnect tests/sdk_core/test_monitoring_r1b.py::test_cancelled_reconnect_closes_candidate_and_allows_later_recovery tests/sdk_core/test_monitoring_r1b.py::test_concurrent_reconnect_is_single_flight_bounded_and_cools_down -q -W error --tb=short`。
+
+**仍未证明：** 原生审批正式入口、恢复版本/Action/会话检查的完整生产事务、gate调用与Evidence/最终完整性绑定、合法最大快照、真实模型/飞书/公司服务及部署恢复。SQL原语用实验表证明排序/回滚，正式 claim 尚未改变；执行中关闭的群回执使用当前 W5 事实路径。方案由实现方核对，不称独立审查；本轮不推送、不开 PR、不合并、不部署。下一步仅交用户核对方案与兼容取舍，再按 SDK-A 实施和精确版本审查。
+
+**S2 本地实现与证据（2026-10-11，已合入）：** 复用 `PolicySession` 的元数据读取/完整回放计数，经 Application 的可信返回/异常、请求终态事务、当前身份读取，生成 Web/飞书固定说明。成功提交和失败状态单独保存，不进入回答 JSON、模型或 SDK 历史；Agent 指令、工具、治理及 Evidence 校验不变。主线 v7 已被占用，本片用 v8 迁移，发行清单只允许 v8 直接启动，v1–v7 显式升级。旧空快照保留通用回执；坏快照拒绝交付，保存失败、取消和恢复沿既有状态机。
 
 - 先红后绿：基线 `4f6132e` 导出副本中正式入口八个用例全部失败，均在固定说明缺失处（`/private/tmp/s2-baseline-final-red.log`）；候选完成成功查询→轮数拒绝、开始前历史容量/期限/绑定/不可继续和执行后提交容量失败。脚本模型只证明链路，不证明真实模型能力。
 - 实际 PostgreSQL 覆盖请求终态/快照一起回滚、readiness 锁低、Session 已提交而请求保存失败时 `result_not_saved`/关闭、重启恢复、旧 NULL、坏快照、owner/actor/渠道/当前权限。正式 Web 重启后读取与重复请求一致，不再执行；正式飞书事件/发送使用通道替身。
