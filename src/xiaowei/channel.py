@@ -32,7 +32,7 @@ from typing import Protocol
 from pydantic import AwareDatetime, BaseModel, ConfigDict, Field, model_validator
 
 from xiaowei.actions import ACTION_SETTLE_TIMEOUT_SECONDS, ActionOutcomeError
-from xiaowei.app import Application, Mode, TurnError, TurnReason
+from xiaowei.app import Application, Mode, PausedTurn, ResumeRejectedError, TurnError, TurnReason
 from xiaowei.channel_store import (
     CallerFailureCode,
     ChannelSession,
@@ -91,6 +91,12 @@ _ACTION_FAILURE_CODES: Mapping[str, CallerFailureCode] = {
     "rejected": "action_rejected",
 }
 _RECEIPTS: Mapping[FailureCode, str] = {
+    "action_requester_invalid": "发起人已不在群或权限已变化，未执行，请重新提出",
+    "action_session_invalid": (
+        "原会话不可继续，未执行；暂停前调查未形成最终报告、未入历史，请新建会话重新调查并提出"
+    ),
+    "action_upgrade_invalidated": "已因升级作废、未执行，请重新提出",
+    "action_expired": "候选已过期，未执行；暂停前调查未形成最终报告、未入历史，请重新调查并提出",
     "busy": "系统繁忙，本轮未执行，请稍后用新消息重试",
     "model_failed": "模型未能完成本轮（调用失败、超时或次数达到上限）；已执行的工具不会自动重试",
     "evidence_failed": (
@@ -357,7 +363,7 @@ class ResultDelivery:
         ``first`` 只由渠道在本请求刚运行完时传入（首次交付）；其余读取都是历史读取。
         """
         record, decision = await self._load(ref)
-        if record.state == "completed":
+        if record.state in {"completed", "paused"}:
             return RequestView(
                 record.state, await self._validated(record, decision, history=not first)
             )
@@ -385,7 +391,7 @@ class ResultDelivery:
             raise RequestUnavailableError
         refused: ResultUnavailableError | None = None
         delivery: Delivery | None = None
-        if record.state == "completed":
+        if record.state in {"completed", "paused"}:
             try:
                 delivery = await self._validated(record, decision, history=resend)
             except ResultUnavailableError as exc:
@@ -453,7 +459,7 @@ class ResultDelivery:
             identity=Identity(
                 subject_id=decision.subject_id,
                 session_id=record.session_id,
-                turn_id=record.turn_id,
+                turn_id=record.run_turn_id or record.turn_id,
                 channel=record.channel,
                 owner=record.owner,
             ),
@@ -630,6 +636,8 @@ class ChannelService:
                 # 运行结果与 Session 状态不明：不在取消中补写，交给重启恢复。
                 self._store.readiness.lock("turn_cancelled")
                 raise
+            if isinstance(answer, PausedTurn):
+                return await self._store.save_pause(record, answer)
             return await self._store.complete(record, answer)
         finally:
             # 终态保存失败时 readiness 已锁低：会话保持封闭，等待停止并重启。
@@ -642,8 +650,10 @@ class ChannelService:
             return receipt.record
         return await self._store.fail(receipt.record, "busy")
 
-    async def approve(self, receipt: RequestReceipt, action_id: str) -> RequestRecord:
-        """群内确定性批准；复用请求去重/队列/终态，既不调用 Runner 也不写 Session。"""
+    async def approve(
+        self, receipt: RequestReceipt, action_id: str, *, approve: bool = True
+    ) -> RequestRecord:
+        """确定性批准事件恢复原SDK轮次；入口身份、去重、回执仍属本请求。"""
         from xiaowei.feishu import attributed
 
         record = receipt.record
@@ -652,7 +662,8 @@ class ChannelService:
         if (
             self._app.actions is None
             or receipt.group is None
-            or receipt.message != attributed(record.subject_id, f"/批准 {action_id}")
+            or receipt.message
+            != attributed(record.subject_id, f"/{'批准' if approve else '拒绝'} {action_id}")
         ):
             return await self._store.fail(record, "access_denied")
         try:
@@ -673,13 +684,28 @@ class ChannelService:
             executed = False
             try:
                 async with asyncio.timeout(self._results.budget.timeout_seconds):
-                    answer = await self._app.actions.approve(
-                        action_id, self._context(record, decision)
+                    answer = await self._app.resume_action(
+                        action_id, self._context(record, decision), approve=approve
                     )
                     executed = True
-                    await self._results.evidence.validate_answer(
-                        answer, self._context(record, decision)
-                    )
+                    if not isinstance(answer, PausedTurn):
+                        feedback_ctx = self._context(record, decision)
+                        if answer.run_turn_id is not None:
+                            feedback_ctx = feedback_ctx.model_copy(
+                                update={
+                                    "identity": feedback_ctx.identity.model_copy(
+                                        update={"turn_id": answer.run_turn_id}
+                                    )
+                                }
+                            )
+                        await self._results.evidence.validate_answer(answer, feedback_ctx)
+            except ResumeRejectedError as exc:
+                return await self._store.fail(record, exc.code)
+            except TurnError:
+                if not self._store.readiness.ok:
+                    raise NotReadyError from None
+                code = await self._approval_failure(action_id, self._context(record, decision))
+                return await self._store.fail(record, code)
             except ActionOutcomeError as exc:
                 return await self._store.fail(record, _ACTION_FAILURE_CODES[exc.state])
             except (ToolRejectedError, RequestUnavailableError):
@@ -705,6 +731,21 @@ class ChannelService:
                     record, action_id, self._context(record, decision)
                 )
                 raise
+            except Exception as exc:
+                if not self._store.readiness.ok:
+                    raise
+                logger.warning("SDK审批恢复失败：%s", type(exc).__name__)
+                return await self._store.fail(
+                    record, await self._approval_failure(action_id, self._context(record, decision))
+                )
+            if isinstance(answer, PausedTurn):
+                return await self._store.save_pause(
+                    record,
+                    answer,
+                    failure_code=await self._approval_failure(
+                        action_id, self._context(record, decision)
+                    ),
+                )
             return await self._store.complete(record, answer, failure_code="action_feedback_failed")
         finally:
             if self._store.readiness.ok:
@@ -718,7 +759,7 @@ class ChannelService:
             return "action_not_approvable"
         except Exception:
             return "action_unknown"
-        return _ACTION_FAILURE_CODES[action.state]
+        return action.failure_code or _ACTION_FAILURE_CODES[action.state]
 
     async def _fail_cancelled_approval(
         self, record: RequestRecord, action_id: str, ctx: RunContext

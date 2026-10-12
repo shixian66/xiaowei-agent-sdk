@@ -6,7 +6,7 @@ from dataclasses import replace
 from datetime import timedelta
 
 import pytest
-from agents import Agent, RunContextWrapper, Runner, RunState, UserError, function_tool
+from agents import Agent, Runner, RunState, function_tool
 from agents.extensions.memory import SQLAlchemySession
 from agents.testing import ModelStep, ScriptedModel, assistant_message, function_call
 from agents.tool_guardrails import (
@@ -16,16 +16,13 @@ from agents.tool_guardrails import (
 )
 from sqlalchemy import text
 from tests.sdk_core.synthetic_tools import context, ready_engine
-from tests.sdk_core.test_action_lifecycle import propose
 from tests.sdk_core.test_group_actions import SHARED, SOURCE, WRITE, Actions
 from tests.sdk_core.test_group_actions import actions as actions
 from tests.sdk_core.test_group_identity import GROUP, A, B
 from tests.sdk_core.test_session_policy import _call, _cite, harness
 
-from xiaowei.actions import ActionOutcomeError
 from xiaowei.app import safe_run_config
 from xiaowei.feishu import attributed
-from xiaowei.governance import ToolRejectedError
 from xiaowei.models import RunContext
 from xiaowei.session import SessionError
 
@@ -292,71 +289,46 @@ async def approval_context(actions: Actions):
     "case", ["success", "not_sent", "revoked", "left", "expired", "changed", "timeout"]
 )
 async def test_native_resume_keeps_existing_business_fences(actions: Actions, case: str):
-    action_id = await propose(actions)
-    current = await approval_context(actions)
-    effects = actions.adapter
-    assert actions.env.app.actions is not None
+    """实验版独立approve已移除；相同场景改由正式SDK暂停/群恢复路径证明。"""
+    from tests.sdk_core.test_group_gateway import running
+    from tests.sdk_core.test_sdk_approval import paused
 
-    @function_tool(needs_approval=True, failure_error_function=None)
-    async def apply(ctx: RunContextWrapper[RunContext], action_id: str) -> str:
-        answer = await actions.env.app.actions.approve(action_id, ctx.context)
-        return answer.model_dump_json()
-
-    agent = Agent(
-        name="spike",
-        tools=[apply],
-        tool_use_behavior="stop_on_first_tool",
-        model=ScriptedModel([[function_call("apply", {"action_id": action_id}, call_id="sdk-c1")]]),
-    )
-    requester = current.model_copy(
-        update={"identity": current.identity.model_copy(update={"subject_id": A})}
-    )
-    paused = await run(agent, "申请修改", ctx=requester)
-    assert effects.calls == [] and len(paused.interruptions) == 1
-    if case == "not_sent":
-        async with actions.env.engine.begin() as conn:
-            await conn.execute(
-                text("UPDATE xiaowei_request SET delivery='failed' WHERE reply_message_id='om_p'")
-            )
-    elif case == "revoked":
-        actions.env.access._grants = {A: SHARED}
-    elif case == "left":
-        actions.env.members.current = {A}
-    elif case == "expired":
-        actions.env.clock.now += timedelta(minutes=16)
-    elif case == "changed":
-        effects.revision = "v2"
-    elif case == "timeout":
-        effects.fail = True
-    saved = snapshot(paused)
-    state = await restore(agent, saved, current)
-    state.approve(state.get_interruptions()[0], always_approve=False)
-    if case == "success":
-        result = await run(agent, state)
-        assert result.interruptions == []
-        assert len(effects.calls) == 1
-        assert await actions.env.rows("SELECT state, approver_id FROM xiaowei_action") == [
-            ("succeeded", B)
-        ]
-    elif case == "timeout":
-        with pytest.raises(UserError) as caught:
-            await run(agent, state)
-        assert isinstance(caught.value.__cause__, ActionOutcomeError)
-        assert len(effects.calls) == 1
-        assert await actions.env.rows("SELECT state FROM xiaowei_action") == [("unknown",)]
-    else:
-        with pytest.raises(UserError) as caught:
-            await run(agent, state)
-        assert isinstance(caught.value.__cause__, (ToolRejectedError, ActionOutcomeError))
-        assert effects.calls == []
-    if case in {"success", "timeout"}:
-        # 独立恢复的旧快照不能靠 SDK 防重；既有数据库 Action 占用必须继续挡住它。
-        duplicate = await restore(agent, saved, current)
-        duplicate.approve(duplicate.get_interruptions()[0], always_approve=False)
-        with pytest.raises(UserError) as caught:
-            await run(agent, duplicate)
-        assert isinstance(caught.value.__cause__, ToolRejectedError)
-        assert len(effects.calls) == 1
+    env = actions.env
+    async with running(env, max_reply_chars=3500) as group:
+        aid, script = await paused(actions, group)
+        if case == "not_sent":
+            async with env.engine.begin() as conn:
+                await conn.execute(
+                    text(
+                        "UPDATE xiaowei_request SET delivery='failed' "
+                        "WHERE reply_message_id='om_sdk_origin'"
+                    )
+                )
+        elif case == "revoked":
+            env.access._grants = {A: SHARED}
+        elif case == "left":
+            env.members.current = {A}
+        elif case == "expired":
+            env.clock.now += timedelta(minutes=16)
+        elif case == "changed":
+            actions.adapter.revision = "v2"
+        elif case == "timeout":
+            actions.adapter.fail = True
+        await group.ask(f"/批准 {aid}", sender=B, message_id="om_native_review")
+        expected = (
+            "succeeded"
+            if case == "success"
+            else "unknown"
+            if case == "timeout"
+            else "rejected"
+            if case in {"expired", "changed"}
+            else "pending"
+        )
+        assert await env.rows("SELECT state FROM xiaowei_action") == [(expected,)]
+        assert len(actions.adapter.calls) == (1 if case in {"success", "timeout"} else 0)
+        assert env.model_calls(script) == (3 if case == "success" else 2)
+        await group.ask(f"/批准 {aid}", sender=B, message_id="om_native_duplicate")
+        assert len(actions.adapter.calls) == (1 if case in {"success", "timeout"} else 0)
 
 
 async def test_pause_releases_the_runner_task_without_execution():
@@ -490,72 +462,78 @@ async def test_public_result_can_rejoin_policy_session_without_private_sdk_api(
 
 
 async def test_two_restored_approved_states_still_share_the_atomic_action_claim(actions: Actions):
-    action_id = await propose(actions)
-    current = await approval_context(actions)
-    assert actions.env.app.actions is not None
+    """两个服务器端Application各自恢复同一快照，最终共享数据库的一次执行机会。"""
+    from tests.sdk_core.synthetic_tools import QUERY_TOOL, TARGET, TOTAL_TOOL
+    from tests.sdk_core.test_group_gateway import running
+    from tests.sdk_core.test_sdk_approval import paused
 
-    @function_tool(needs_approval=True, failure_error_function=None)
-    async def apply(ctx: RunContextWrapper[RunContext], action_id: str) -> str:
-        return (await actions.env.app.actions.approve(action_id, ctx.context)).model_dump_json()
+    from xiaowei.actions import ActionService
+    from xiaowei.app import Application
+    from xiaowei.channel import ChannelService
+    from xiaowei.governance import GovernedTools
 
-    agent = Agent(
-        name="spike",
-        tools=[apply],
-        tool_use_behavior="stop_on_first_tool",
-        model=ScriptedModel([[function_call("apply", {"action_id": action_id}, call_id="c1")]]),
-    )
-    paused = await run(agent, "申请修改", ctx=current)
-    saved = snapshot(paused)
-    states = [await restore(agent, saved, current) for _ in range(2)]
-    for state in states:
-        state.approve(state.get_interruptions()[0], always_approve=False)
+    env = actions.env
+    async with running(env, max_reply_chars=3500) as group:
+        aid, script = await paused(actions, group)
+    services = []
+    old = env.app
+    for _n in range(2):
+        governed = GovernedTools(env.evidence)
+        app = Application(
+            old._config,
+            model=old._model,
+            engine=env.engine,
+            governance=governed,
+            clock=env.clock,
+            local_tools={
+                (TOTAL_TOOL, TARGET): env.adapter.execute,
+                (QUERY_TOOL, TARGET): env.adapter.execute,
+            },
+            actions=ActionService(
+                governed, env.store, env.access, [actions.binding], clock=env.clock
+            ),
+        )
+        services.append(ChannelService(app, env.results))
+    receipts = [
+        await svc.accept(env.group(attributed(B, f"/批准 {aid}"), f"om_server_{n}", actor=B))
+        for n, svc in enumerate(services)
+    ]
     outcomes = await asyncio.gather(
-        *(run(agent, state) for state in states), return_exceptions=True
+        *(svc.approve(r, aid) for svc, r in zip(services, receipts, strict=True))
     )
-    assert sum(isinstance(outcome, UserError) for outcome in outcomes) == 1
-    assert sum(not isinstance(outcome, BaseException) for outcome in outcomes) == 1
-    assert len(actions.adapter.calls) == 1
-    assert await actions.env.rows("SELECT state FROM xiaowei_action") == [("succeeded",)]
+    assert sum(r.state == "completed" for r in outcomes) == 1
+    assert len(actions.adapter.calls) == 1 and env.model_calls(script) == 3
+    assert await env.rows("SELECT state FROM xiaowei_action") == [("succeeded",)]
+    assert await env.rows("SELECT consumed FROM xiaowei_action_run") == [(True,)]
 
 
-async def test_sdk_tool_timeout_keeps_unknown_execution_fact(actions: Actions):
-    from agents.exceptions import ToolTimeoutError
+async def test_sdk_tool_timeout_keeps_unknown_execution_fact(actions: Actions, monkeypatch):
+    """SDK公开FunctionTool.timeout取消原生gate，写事实未知且不能重放。"""
+    from dataclasses import replace
 
-    action_id = await propose(actions)
-    current = await approval_context(actions)
-    actions.adapter.entered, actions.adapter.release = asyncio.Event(), asyncio.Event()
-    assert actions.env.app.actions is not None
+    from tests.sdk_core.test_group_gateway import running
+    from tests.sdk_core.test_sdk_approval import paused
 
-    @function_tool(
-        needs_approval=True,
-        failure_error_function=None,
-        timeout=0.1,
-        timeout_behavior="raise_exception",
-    )
-    async def apply(ctx: RunContextWrapper[RunContext], action_id: str) -> str:
-        return (await actions.env.app.actions.approve(action_id, ctx.context)).model_dump_json()
+    env = actions.env
+    original = env.app.actions.tools_for
 
-    agent = Agent(
-        name="spike",
-        tools=[apply],
-        tool_use_behavior="stop_on_first_tool",
-        model=ScriptedModel([[function_call("apply", {"action_id": action_id}, call_id="c1")]]),
-    )
-    paused = await run(agent, "申请修改", ctx=current)
-    saved = snapshot(paused)
-    state = await restore(agent, saved, current)
-    state.approve(state.get_interruptions()[0], always_approve=False)
-    with pytest.raises(ToolTimeoutError):
-        await run(agent, state)
-    assert actions.adapter.entered.is_set()
-    assert len(actions.adapter.calls) == 1
-    assert await actions.env.rows("SELECT state FROM xiaowei_action") == [("unknown",)]
-    duplicate = await restore(agent, saved, current)
-    duplicate.approve(duplicate.get_interruptions()[0], always_approve=False)
-    with pytest.raises(UserError) as caught:
-        await run(agent, duplicate)
-    assert isinstance(caught.value.__cause__, ToolRejectedError)
-    assert len(actions.adapter.calls) == 1
+    def timed(ctx):
+        return [
+            replace(t, timeout_seconds=0.1, timeout_behavior="raise_exception")
+            if t.needs_approval
+            else t
+            for t in original(ctx)
+        ]
+
+    monkeypatch.setattr(env.app.actions, "tools_for", timed)
+    async with running(env, max_reply_chars=3500) as group:
+        aid, script = await paused(actions, group)
+        actions.adapter.entered, actions.adapter.release = asyncio.Event(), asyncio.Event()
+        await group.ask(f"/批准 {aid}", sender=B, message_id="om_sdk_timeout")
+        assert actions.adapter.entered.is_set() and len(actions.adapter.calls) == 1
+        assert await env.rows("SELECT state FROM xiaowei_action") == [("unknown",)]
+        await group.ask(f"/批准 {aid}", sender=B, message_id="om_sdk_timeout_duplicate")
+    assert len(actions.adapter.calls) == 1 and env.model_calls(script) == 2
 
 
 @pytest.mark.parametrize("preflight", [False, True])

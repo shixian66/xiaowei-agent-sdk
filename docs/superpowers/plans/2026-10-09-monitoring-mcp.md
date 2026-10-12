@@ -162,9 +162,9 @@ PR #70 的三个非阻断项在本片同一失败契约中落实：并行成功/
 
 <a id="sdk-reuse"></a>
 
-### 3.6 SDK 原生能力复用整改（方案已复审，SDK-A 获准实施）
+### 3.6 SDK 原生能力复用整改（SDK-A 产品候选待独立审查）
 
-**当前交付与基线。** 2026-10-12 从主线 `ebb4db3c4738134ef7371f076e0662ac3c0c741d`（PR #82）建立隔离分支 `codex/sdk-reuse-plan`。方案/实验阶段仅改必要文档和 `tests/spike/`，未改产品源码、迁移或依赖。`ccc7e27` 已独立复审关闭 B1，补齐用户批准的 N1 后进入 SDK-A；SDK-A 可改必要产品代码/迁移及测试，模型/端点不改，不合并、不部署。D7 草稿 PR #83（`52346a23e8d1b1c30f27951d95ba8167e39f681d`）冻结，未合入内容不作为本轮基线；D7/C8 新功能暂停。本节替代上文 W5/S6 的“不恢复 RunState”与“原会话关闭仍可批准”实施前提，批准范围和唯一执行契约见[架构 §5](../../../ARCHITECTURE.md#monitoring-mcp)。
+**当前交付与基线。** 2026-10-12 从主线 `ebb4db3c4738134ef7371f076e0662ac3c0c741d`（PR #82）建立隔离分支 `codex/sdk-reuse-plan`。方案/实验阶段仅改必要文档和 `tests/spike/`，未改产品源码、迁移或依赖。`ccc7e27` 已独立复审关闭 B1，补齐用户批准的 N1 后进入 SDK-A；SDK-A 在 `codex/sdk-native-approval` / `9b7eb06` 上实现必要产品代码、迁移009与测试；模型/端点不改，不推送、不合并、不部署。D7 草稿 PR #83（`52346a23e8d1b1c30f27951d95ba8167e39f681d`）冻结，未合入内容不作为本轮基线；D7/C8 新功能暂停。本节替代上文 W5/S6 的“不恢复 RunState”与“原会话关闭仍可批准”实施前提，批准范围和唯一执行契约见[架构 §5](../../../ARCHITECTURE.md#monitoring-mcp)。
 
 **用户任务与最小方案。** 群员要求“静默 host1 三年” → 同一 Agent 自主调查、必要澄清、形成确定 Action 并调用 SDK 审批入口 → 群收到代码生成的完整材料和批准期限；名单成员批准 → SDK 恢复原任务，经原治理层执行一次并回读 → 群看到实际执行事实。读源、指标、工具顺序、PromQL、补证与是否需要写继续由 Agent 决定；因果所需的准备/送达/批准/复核约束执行权，不固定调查步骤。
 
@@ -180,7 +180,7 @@ PR #70 的三个非阻断项在本片同一失败契约中落实：并行成功/
 
 恢复版本消费、原会话锁与 Action claim 共事务，写前最终准入继续与关闭排序；专用失效原因须落应用事实、FailureCode、调用方允许码及新迁移 CHECK，回执从可信记录生成。迁移007已合入，正式实现不能回改007。状态查询与事实回执只依赖 Action，不依赖可写 Session；真正的源/群接收权限仍须有效。部分批准后只保存 SDK 返回的新版本，未批准项仍须人工逐次批准；已消费、取消/超时或结果未知的版本不自动恢复。上述业务原子性不是 SDK 提供的能力。
 
-**恢复轮与账本（B1）。** SDK context 保留原发起人/owner/session/turn，读取按原发起人当前权限；审批事件新 turn 只负责入口和回执，单次写的审批主体取已存 Action，经 `approved_action` 传递，不能替换整轮身份。当前键为 `(subject_id, session_id, turn_id)`，不是只有 turn；当前 _used/_runs 纯内存，原函数尚无导出/装载接口，正式 SDK-A 只补最小可信接口。不要直接用旧 `approve()` 清掉原轮账本，也不要把实际写的授权身份复制为整轮 context。
+**恢复轮与账本（B1）。** SDK context 保留原发起人/owner/session/turn，读取按原发起人当前权限；审批事件新 turn 只负责入口和回执，单次写的审批主体取已存 Action，经 `approved_action` 传递，不能替换整轮身份。当前键为 `(subject_id, session_id, turn_id)`，不是只有 turn；SDK-A 增加最小 `checkpoint/restore` 接口，把完整账本同 SDK 状态保存/装载；运行中计数仍只在治理层维护。不要直接用旧 `approve()` 清掉原轮账本，也不要把实际写的授权身份复制为整轮 context。
 
 | 随 RunState 同事务保存/恢复的可信数据 | 用途与暂停条件 |
 | --- | --- |
@@ -191,22 +191,22 @@ PR #70 的三个非阻断项在本片同一失败契约中落实：并行成功/
 | `truncated / rejected / limit_rescue_started / slot_busy / slot_retries` | 完整性/拒绝计数、步数收尾和既有槽位一次重试额度，保留整轮语义 |
 | `slot_retrying` 与未落定 I/O | 暂停检查点须无进行中的工具/写；slot_retrying 必须为空。保存的是已落定记账，不恢复 asyncio任务、客户端或未知写；部分批准后的写事实先落 Action 再保存新的完整检查点 |
 
-本轮只验证工具额度、SDK步数、字段序列化和失败记录延续；剩余活动时间/依赖复核额度及实际写 gate 的完整生产接点仍是 SDK-A 必须验证项，不能把实验表当正式恢复存储。检查点保存失败/取消必须整体回滚；结束或作废才清理内存账本，部分暂停不 end_turn。
+方案实验仅验证工具额度、SDK步数、字段序列化和失败记录延续；剩余活动时间/依赖复核额度及实际写 gate 的完整生产接点仍是 SDK-A 必须验证项，不能把实验表当正式恢复存储。检查点保存失败/取消必须整体回滚；暂停先捕获完整不可变账本，由同一个 PausedTurn 交给存储。捕获之后可释放运行内存，恢复时装载完整原轮账本；不得在捕获前或续跑中途清理，不能把每次批准当作新轮重置。
 
-**Session 接续的实测限制与选择。** 锁版 SDK 恢复时会为增量保存调用 `get_items(limit)`，现有 PolicySession 拒绝非空 limit；实验在工具已执行一次后抛 SessionError，同一对象/新对象均如此。当前最小可行方式：初次运行仍使用 PolicySession；保存暂停态后丢弃仅在内存的暂存项；恢复由 RunState 携带原执行历史，不重复传 Session 给 SDK；完整结果用公开 `RunResult.new_items / RunItem.to_input_item()`，排除 SDK approval 控制项后，经原 PolicySession 暂存/完整校验/提交。既有历史与等待期间另一轮提交的接续均已实验通过，不复制 SDK Session 底表或增加另一份聊天记录。正式切片仍须验证：恢复前的完整当前历史与权限、模型/Session 投影转换、SDK调用 ID/参数与实际执行 Evidence 的配对、最终查询完整性和预算跨暂停保存；当前 `ActionService.approve` 会清理独立 ledger、返回状态 Evidence，不能直接满足这条绑定。
+**Session 接续的实测限制与选择。** 锁版 SDK 恢复时会为增量保存调用 `get_items(limit)`，现有 PolicySession 拒绝非空 limit；实验在工具已执行一次后抛 SessionError，同一对象/新对象均如此。当前最小可行方式：初次运行仍使用 PolicySession；保存暂停态后丢弃仅在内存的暂存项；恢复由 RunState 携带原执行历史，不重复传 Session 给 SDK；完整结果用公开 `RunResult.new_items / RunItem.to_input_item()`，排除 SDK approval 控制项后，经原 PolicySession 暂存/完整校验/提交。既有历史与等待期间另一轮提交的接续均已实验通过，不复制 SDK Session 底表或增加另一份聊天记录。正式切片仍须验证：恢复前的完整当前历史与权限、模型/Session 投影转换、SDK调用 ID/参数与实际执行 Evidence 的配对、最终查询完整性和预算跨暂停保存；原轮恢复后仍可提出下一项候选，部分批准先完整交付本次执行事实与剩余材料，依赖复核额度在暂停末尾记录；等待期间合法收窄未用工具时，按旧绑定/版本核对后原子保存新权限交集与新绑定，不以新指纹拒绝旧行；SDK-A 的 `ActionService.approve` 只接受原生 gate 的本次绑定，不再创建独立执行轮或清理原轮账本；执行事实由 gate 生成与 SDK 调用配对的 Evidence。
 
-**公开 SDK 能力的实验结论。** [官方 HITL](https://openai.github.io/openai-agents-python/human_in_the_loop/)、[Manager](https://openai.github.io/openai-agents-python/ref/mcp/manager/)、[guardrails](https://openai.github.io/openai-agents-python/guardrails/)仅作说明；签名和实际行为核对锁版 SDK 0.22.3 / mcp 2.2.0，[SDK 精确源码](https://github.com/openai/openai-agents-python/tree/fdf21db62c303a3db54b0dfbee82de2141fa2799)。
+**公开 SDK 能力的实验结论。** 下列实验对应已审方案 `86eeff2`；产品落地状态以 handoff 的 SDK-A 证据为准，旧协议局限不代表继续保留旧实现。 [官方 HITL](https://openai.github.io/openai-agents-python/human_in_the_loop/)、[Manager](https://openai.github.io/openai-agents-python/ref/mcp/manager/)、[guardrails](https://openai.github.io/openai-agents-python/guardrails/)仅作说明；签名和实际行为核对锁版 SDK 0.22.3 / mcp 2.2.0，[SDK 精确源码](https://github.com/openai/openai-agents-python/tree/fdf21db62c303a3db54b0dfbee82de2141fa2799)。
 
 | 已验证行为（可复现用例） | 对正式实现的约束 |
 | --- | --- |
 | 暂停、PG 保存/新连接池恢复、逐次批准/拒绝、部分批准、max_turns 不复位；两份同一合法快照可执行两次（`test_sdk_hitl_reuse.py`） | SDK 管续跑，不提供业务防重；保留持久原子消费/Action占用。context_override 不认证合法外来快照；恢复前核对服务端绑定与当前授权 |
 | `needs_approval` 回调先于输入 tool guardrail，已批准恢复不重跑回调；撤权后的旧工具结果会随 RunState 到模型（同文件） | 不用初次审批回调代替当前治理；恢复前全量 Evidence 读取复核必须先于模型 I/O |
 | 现有群权限、材料 sent、期限、版本与 Action claim 在 SDK gated function 内仍挡住无权/重复执行；SDK工具超时落 unknown，不重放（同文件） | 仅证明可复用业务边界，不是正式 native 入口或终态 Evidence/Session 配对已完成 |
-| 封存/关闭/过期拒绝、关闭先胜/claim先胜的真实 PG 锁排序、取消回滚快照/占用（`test_sdk_session_admission.py`） | SQL 原语实验可支撑同事务改动；当前产品 `claim_action` 尚无原会话检查，不能把实验记为产品已具备 |
+| 封存/关闭/过期拒绝、关闭先胜/claim先胜的真实 PG 锁排序、取消回滚快照/占用（`test_sdk_session_admission.py`） | SQL 原语实验可支撑同事务改动；方案实验时产品的 `claim_action` 尚无原会话检查，不能把实验记为产品已具备 |
 | 已开始写入后关闭原会话，原群网关/治理/Evidence/ResultDelivery 仍送达 succeeded，重复批准不写（同文件） | 可复用 Action 事实回执；SDK 续跑错误转这条路径仍待正式入口验证 |
 | 审批人 B 的真实新请求产生新 turn；SDK 恢复原 A/session/turn，可提交；新 GovernedTools 装载同事务保存账本后也可提交（`test_sdk_resume_ledger.py`） | 原轮账本与审批事件分离；用审批身份/新turn恢复会拆分账本并触发 SessionItemRejectedError，旧接续实验只覆盖同ctx，不能证明跨审批请求 |
 | 重启恢复后工具预算不复位、失败PromQL/已停止源零重复I/O、monitoring_failures进入代码交付、proposal_rejections及完整性/拒绝标记延续（同文件） | 保留最小治理账本导出/装载；实验访问小维私有字段仅用于验证，不调用 SDK 私有 API，不把该实验代码直接搬入产品 |
-| 无RunState旧pending迁移原语置rejected，succeeded/unknown逐字段不变，真实旧群入口零写；专用原因的固定回执投影符合文案（`test_sdk_upgrade_actions.py`） | 产品迁移/失败码及正式专用回执路由尚未实施；实验使用独立原因表，正式 SDK-A 必须整合 Action字段/新迁移/请求CHECK与真实群回执 |
+| 无RunState旧pending迁移原语置rejected，succeeded/unknown逐字段不变，真实旧群入口零写；专用原因的固定回执投影符合文案（`test_sdk_upgrade_actions.py`） | 方案实验时产品迁移/失败码及正式专用回执路由尚未实施；实验使用独立原因表，正式 SDK-A 必须整合 Action字段/新迁移/请求CHECK与真实群回执 |
 | Manager 的连接失败子集、单次并发连接、跨任务关闭、超时/取消清理与不同源隔离（`test_sdk_mcp_manager.py`） | 单源/单代际 Manager，公开 `connect_in_parallel=True` 保持 SDK 内部任务归属；`suppress_cancelled_error=False` 不吞取消。SDK内部生命周期 worker 不是自建后台探测 |
 | Manager 不识别运行时断开，all reconnect 复用对象且保留工具缓存，旧闭包会调用新连接；新对象/新Manager可隔离（同文件） | 不删除现有断线分类、源锁/退避/快照；connect和list_tools/核约仍共用总时限，不能仅依赖 Manager 的 connect timeout |
 
@@ -214,7 +214,7 @@ PR #70 的三个非阻断项在本片同一失败契约中落实：并行成功/
 
 | 切片与依赖 | 独立可验证结果、成功与关键失败 |
 | --- | --- |
-| **SDK-A：原生审批＋最小 Session 接续**；复用已合入 S6，接口/迁移与实现按精确差异独立审查 | 先跑正式群入口替身的创建静默成功与非名单零 I/O，补原轮身份/真实新审批请求/新治理对象重启恢复、账本/预算/失败表达式延续及装载删除变异；再补发起人退群/历史Evidence撤权的真实停止与专用回执（rejected、零写、零模型I/O），以及无效/跨群Action ID、送达失败/审批人撤权/版本变化/重复与并发/过期/预算/暂停后重启/多候选部分批准。封存、关闭、过期及关闭并发均须原子拒绝、明确终态/专用回执；执行中关闭或续跑失败仍按 Action 事实送达，不重放。覆盖旧历史、等待期间其他调查、写后 Session容量不足、模型失败、状态/Evidence/投递失败及取消，关键保护隔离变异。SDK gate结果必须与实际调用和 Evidence 配对；不能直接绕过最终查询完整性校验 |
+| **SDK-A：原生审批＋最小 Session 接续（本地产品候选，待独立审查）**；复用已合入 S6，接口/迁移与实现按精确差异独立审查 | 先跑正式群入口替身的创建静默成功与非名单零 I/O，补原轮身份/真实新审批请求/新治理对象重启恢复、账本/预算/失败表达式延续及装载删除变异；再补发起人退群/历史Evidence撤权的真实停止与专用回执（rejected、零写、零模型I/O），以及无效/跨群Action ID、送达失败/审批人撤权/版本变化/重复与并发/过期/预算/暂停后重启/多候选部分批准。封存、关闭、过期及关闭并发均须原子拒绝、明确终态/专用回执；执行中关闭或续跑失败仍按 Action 事实送达，不重放。覆盖旧历史、等待期间其他调查、写后 Session容量不足、模型失败、状态/Evidence/投递失败及取消，关键保护隔离变异。SDK gate结果必须与实际调用和 Evidence 配对；不能直接绕过最终查询完整性校验 |
 | **SDK-B：Manager 替换重复 MCP 生命周期**；SDK-A 后独立差异/审查 | 主要改 MCPIntegration，用受治理查询正式入口成功及重连失败对照。沿现有 R1b 用例验证新代际重新核约/解析auth_ref、旧轮次不串新连接、并发单次恢复、退避复位、connect+list_tools总期限、候选取消及所有代际关闭；候选 cleanup 必须放 finally，无论连接、核约、超时或取消在哪阶段抛出都收尾；未授权源零 I/O，健康源/StarRocks不受影响，readyz不泄露信息。升级 SDK/mcp 重跑任务归属与状态协议验证。收益用产品生命周期代码的净删除、移除的重复职责与维护点衡量（不计测试/文档）；若只是叠一层Manager、职责未减少则不称整改完成 |
 | **SDK-C：已证明等价的薄层缩减**；按 A/B 实际差异决定，未证实就保留 | 只处理有现有消费者/可观察对照的护栏、错误反馈或 Session 胶水；正常、拒绝、超时/取消、历史/投影与授权行为保持等价。没有可删部分即可结束，不以删行数作成功标准，不预建统一插件/guardrail框架 |
 
@@ -222,7 +222,7 @@ PR #70 的三个非阻断项在本片同一失败契约中落实：并行成功/
 
 用户已批准原会话作废/候选过期时，未完成调查报告不交付、不入历史；回执说明调查未形成最终报告并提示重新调查，已存Evidence按原规则保留，已开始写单独送达事实。详细契约只在架构 §5。
 
-本轮实验只有小型合成数据；未验证真实模型、真实飞书、公司服务、最长合法快照/供应商签名、升级/回退镜像或产品正式 native 入口。正式实现先做完整 SDK→治理→Evidence/Session/群反馈闭环，再跑影响范围的离线回归、Ruff/mypy/文档检查；任务能力和真实环境按 AGENTS §6 独立留证，不因实验通过豁免。精确 head 独立审查后才恢复 D7/C8 新功能。
+原方案实验的证据仍以 `86eeff2` 为准。SDK-A 正式入口、迁移、签名/容量、账本和取消验证记录在 handoff；仍未验证真实模型、真实飞书、公司服务和升级/回退镜像。依赖旧独立 approve 的实验用例已改为正式 native 路径的相同场景，其余 SDK 能力实验保留；不为通过回归增加后备执行。正式实现先做完整 SDK→治理→Evidence/Session/群反馈闭环，再跑影响范围的离线回归、Ruff/mypy/文档检查；任务能力和真实环境按 AGENTS §6 独立留证，不因实验通过豁免。精确 head 独立审查后才恢复 D7/C8 新功能。
 
 ## 4. 环境、兼容与恢复
 

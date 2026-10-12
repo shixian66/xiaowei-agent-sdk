@@ -32,25 +32,33 @@ import json
 import logging
 import time
 from collections.abc import Callable, Mapping
+from dataclasses import dataclass
 from datetime import UTC, datetime
-from typing import TYPE_CHECKING, Literal
+from typing import TYPE_CHECKING, Literal, cast
 
 if TYPE_CHECKING:
     from xiaowei.actions import ActionService
+    from xiaowei.channel_store import CallerFailureCode
 
 from agents import (
     Agent,
     MaxTurnsExceeded,
     RunConfig,
+    RunContextWrapper,
     RunErrorHandlerInput,
     RunErrorHandlerResult,
     Runner,
+    RunResult,
+    RunState,
     Tool,
+    ToolApprovalItem,
     ToolExecutionConfig,
 )
 from agents.exceptions import ModelBehaviorError, ModelRefusalError, ModelTimeoutError, UserError
 from agents.extensions.memory import SQLAlchemySession
+from agents.items import TResponseInputItem
 from openai import APIConnectionError, APIStatusError, APITimeoutError
+from openai.types.responses import ResponseFunctionToolCall
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 from sqlalchemy.ext.asyncio import AsyncEngine
 
@@ -61,9 +69,11 @@ from xiaowei.evidence import (
     EvidenceStore,
     EvidenceStoreError,
     EvidenceUnverifiableError,
+    ScopeChecks,
+    arguments_digest,
     scope_checks,
 )
-from xiaowei.governance import Execute, GovernedTools, ToolExecutionError, TurnRuns
+from xiaowei.governance import Execute, GovernedTools, ToolExecutionError, TurnLedger, TurnRuns
 from xiaowei.mcp import MCPIntegration
 from xiaowei.model_api import (
     ModelBinding,
@@ -78,11 +88,13 @@ from xiaowei.models import (
     PROMETHEUS_DISCOVERY_POLICIES,
     AgentAnswer,
     AnswerInference,
+    ApprovedAction,
     ClusterId,
     Label,
     RunContext,
     SessionSnapshot,
     ToolId,
+    ToolRequest,
     TurnAnswer,
 )
 from xiaowei.session import (
@@ -331,6 +343,26 @@ class AppConfig(BaseModel):
         return self
 
 
+@dataclass(frozen=True)
+class PausedTurn:
+    context: RunContext
+    run_state: str
+    ledger: TurnLedger
+    material: TurnAnswer
+    message: str
+    binding: str
+    scope_checks: int
+    expires_at: datetime
+    prior_version: int = 0
+    prior_binding: str | None = None
+
+
+class ResumeRejectedError(Exception):
+    def __init__(self, code: CallerFailureCode) -> None:
+        self.code = code
+        super().__init__("候选不可恢复，未执行")
+
+
 class Application:
     """单进程运行核心；依赖在启动时装配，每轮只从可信 context 取得身份与范围。"""
 
@@ -378,7 +410,13 @@ class Application:
         )
         self._queries = config.purposes["query"] - config.purposes["diagnose"] - discovery
         self._queries |= frozenset(
-            c.tool_id for c in catalog.contracts if catalog.policy_for(c).effect == "propose"
+            c.tool_id
+            for c in catalog.contracts
+            if catalog.policy_for(c).effect in {"propose", "approval"}
+        )
+        # 实际写不进入Runner工具集合，也不交模型；其事实经SDK gate的Action投影引用。
+        self._queries -= frozenset(
+            c.tool_id for c in catalog.contracts if catalog.policy_for(c).effect == "write"
         )
         self._data_policy = data_policy
         self._model = model
@@ -420,12 +458,14 @@ class Application:
         """
         if mode not in self._config.purposes:
             raise ValueError("未知的用途")
-        return (
-            self._config.purposes[mode]
-            & self._data_policy.model_tools
-            & authorized_tools
-            & available_tools
+        from xiaowei.actions import execution_requests
+
+        purpose = (
+            execution_requests(self._config.purposes[mode])
+            if mode == "query"
+            else self._config.purposes[mode]
         )
+        return purpose & self._model_tools() & authorized_tools & available_tools
 
     async def prepare_tools(
         self,
@@ -444,7 +484,7 @@ class Application:
                 eligible, target_scope=target_scope, turn_timeout_seconds=timeout_seconds
             )
 
-    async def run_turn(self, ctx: RunContext, message: str) -> TurnAnswer:
+    async def run_turn(self, ctx: RunContext, message: str) -> TurnAnswer | PausedTurn:
         """执行一轮，返回已校验并已提交 Session 的回答；失败抛出 ``TurnError``，取消照常传播。
 
         回答连同本轮模型可见的证据返回，不是可直接发送的内容：调用方保存二者，在每次发送前用
@@ -462,9 +502,9 @@ class Application:
         self._active.add(session_id)
         try:
             # 证据依赖的检查次数整轮共用一个计数（回放、工具记录、最终校验与提交）。
-            with scope_checks():
+            with scope_checks() as checks:
                 async with asyncio.timeout(ctx.budget.timeout_seconds):
-                    answer = await self._turn(ctx, message, started)
+                    answer = await self._turn(ctx, message, started, scope_count=checks)
         except TurnError as exc:
             _stage(
                 turn,
@@ -493,12 +533,22 @@ class Application:
         finally:
             self._governance.end_turn(ctx.identity)
             self._active.discard(session_id)
-        _stage(turn, "completed", started)
+        _stage(turn, "paused" if isinstance(answer, PausedTurn) else "completed", started)
         return answer
 
-    async def _turn(self, ctx: RunContext, message: str, started: float) -> TurnAnswer:
+    async def _turn(
+        self,
+        ctx: RunContext,
+        message: str,
+        started: float,
+        *,
+        native: RunState[RunContext] | None = None,
+        prior_version: int = 0,
+        prior_binding: str | None = None,
+        scope_count: ScopeChecks | None = None,
+    ) -> TurnAnswer | PausedTurn:
         turn = ctx.identity.turn_id
-        if not ctx.tool_scope <= self._data_policy.model_tools:
+        if not ctx.tool_scope <= self._model_tools():
             raise TurnError("scope_rejected")
         try:
             await check_storage(self._engine)
@@ -506,42 +556,8 @@ class Application:
             raise TurnError("storage_unavailable") from None
         _stage(turn, "storage_ready", started)
 
-        action_note = ""
-        if (
-            self.actions is not None
-            and ctx.identity.channel == "feishu"
-            and ctx.identity.owner.kind == "group"
-            and ctx.tool_scope & self.actions.available_tool_ids
-        ):
-            action_note = (
-                "\n本轮提供的监控动作工具用于提出动作或查看状态。"
-                "若提供提出工具，只准备审批材料，提案尚未执行；正常引用其 Evidence 展示。"
-                "执行须有权成员在群内明确批准，由应用处理，不能把自然语言或历史批准当成本次批准。"
-                "调查顺序和是否提出由你根据本轮问题与证据决定。"
-                "需要确认已提动作的执行结果时可按 ID 查状态，不能凭历史提案声称执行成功。"
-            )
-        agent = Agent[RunContext](
-            name="xiaowei",
-            instructions=(
-                f"{self._instructions}{action_note}\n"
-                f"本轮当前时间（UTC）：{self._clock().astimezone(UTC).isoformat()}。"
-                "相对日期须结合业务时区计算；历史结果的采集时间不是本轮当前时间。"
-            ),
-            model=self._model.model,
-            model_settings=self._model.settings,
-            tools=self._tools_for(ctx),
-            output_type=AgentAnswer,
-        )
-        session = PolicySession(
-            SQLAlchemySession(ctx.identity.session_id, engine=self._engine),
-            ctx,
-            self._evidence,
-            self._binding,
-            self._config.session_limits,
-            input_policy=self._data_policy.input,
-            engine=self._engine,
-            clock=self._clock,
-        )
+        agent = self._agent(ctx)
+        session = self._session(ctx)
 
         # 每轮新建 PolicySession：失败或取消时，未提交的暂存项随对象一起丢弃。
         async def finish_on_limit(
@@ -598,13 +614,32 @@ class Application:
 
         result = await Runner.run(
             agent,
-            message,
+            native if native is not None else message,
             context=ctx,
-            session=session,
+            session=None if native is not None else session,
             max_turns=ctx.budget.max_turns,
             run_config=self._run_config,
             error_handlers={"max_turns": finish_on_limit},
         )
+        if result.interruptions:
+            return await self._paused(
+                ctx,
+                message,
+                result,
+                session,
+                started,
+                scope_count,
+                prior_version=prior_version,
+                prior_binding=prior_binding,
+            )
+        if native is not None:
+            await session.get_items()
+            items = [{"role": "user", "content": message}] + [
+                item.to_input_item()
+                for item in result.new_items
+                if item.type != "tool_approval_item"
+            ]
+            await session.add_items(cast(list[TResponseInputItem], items))
         _stage(turn, "answered", started)
         answer = result.final_output_as(AgentAnswer, raise_if_incorrect_type=True)
         runs = self._governance.turn_runs(ctx.identity)
@@ -621,11 +656,23 @@ class Application:
         if unfinished or uncited:
             raise TurnError("answer_rejected", answer_reject=AnswerRejectCode.UNCITED_QUERY)
         # 模型可见的证据：回放的历史与本轮工具结果，随回答保存，每次交付都复核。
-        context = (*session.replayed_evidence, *(e for _, e in runs.produced))
+        context = (
+            *(ctx.evidence_ids if native is not None else session.replayed_evidence),
+            *(e for t, e in runs.produced if t in ctx.tool_scope),
+        )
+        if native is not None:
+            outcomes = {e for t, e in runs.produced if t.endswith("/request_action_execution")}
+            answer = answer.model_copy(
+                update={
+                    "evidence_ids": tuple(e for e in answer.evidence_ids if e in outcomes)
+                    + tuple(e for e in answer.evidence_ids if e not in outcomes)
+                }
+            )
         validated = TurnAnswer(
             answer=answer,
             context_evidence=tuple(dict.fromkeys(context)),
             monitoring_failures=runs.monitoring_failures,
+            run_turn_id=ctx.identity.turn_id,
         )
         # 先单独校验回答，使拒绝原因明确；提交时 Session 仍会用同一验证器再校验一次。
         await self._evidence.validate_answer(validated, ctx)
@@ -634,6 +681,377 @@ class Application:
         )
         _stage(turn, "committed", started)
         return validated.model_copy(update={"session_state": snapshot})
+
+    def _agent(self, ctx: RunContext) -> Agent[RunContext]:
+        action_note = ""
+        if (
+            self.actions is not None
+            and ctx.identity.channel == "feishu"
+            and ctx.identity.owner.kind == "group"
+            and ctx.tool_scope & self.actions.available_tool_ids
+        ):
+            action_note = (
+                "\n本轮提供的监控动作工具用于提出动作或查看状态。"
+                "提出工具只准备材料、尚未写入。需要执行时再以Action ID调用"
+                "request_action_execution，SDK暂停等待逐次群审批。"
+                "只有有权群成员明确批准才可恢复；不能把自然语言或历史批准当成本次批准。"
+                "调查顺序和是否提出由你根据本轮问题与证据决定。"
+                "需要确认已提动作的执行结果时可按 ID 查状态，不能凭历史提案声称执行成功。"
+            )
+        return Agent[RunContext](
+            name="xiaowei",
+            instructions=(
+                f"{self._instructions}{action_note}\n"
+                f"本轮当前时间（UTC）：{self._clock().astimezone(UTC).isoformat()}。"
+                "相对日期须结合业务时区计算；历史结果的采集时间不是本轮当前时间。"
+            ),
+            model=self._model.model,
+            model_settings=self._model.settings,
+            tools=self._tools_for(ctx),
+            output_type=AgentAnswer,
+        )
+
+    def _model_tools(self) -> frozenset[str]:
+        from xiaowei.actions import execution_requests
+
+        base = self._data_policy.model_tools
+        return (
+            base
+            if self.actions is None
+            else base | (execution_requests(base) & self.actions.available_tool_ids)
+        )
+
+    def _native_binding(self, ctx: RunContext) -> str:
+        from importlib.metadata import version
+
+        parts = [self._binding, version("openai-agents"), version("mcp")]
+        parts.extend(
+            sorted(
+                self._evidence.fingerprint(c)
+                for c in self._governance.catalog.contracts
+                if c.tool_id in ctx.tool_scope and c.target_id in ctx.target_scope
+            )
+        )
+        return hashlib.sha256(json.dumps(parts, separators=(",", ":")).encode()).hexdigest()
+
+    def _session(self, ctx: RunContext) -> PolicySession:
+        return PolicySession(
+            SQLAlchemySession(ctx.identity.session_id, engine=self._engine),
+            ctx,
+            self._evidence,
+            self._binding,
+            self._config.session_limits,
+            input_policy=self._data_policy.input,
+            engine=self._engine,
+            clock=self._clock,
+        )
+
+    async def _paused(
+        self,
+        ctx: RunContext,
+        message: str,
+        result: RunResult,
+        session: PolicySession,
+        started: float,
+        checks: ScopeChecks | None,
+        *,
+        prior_version: int = 0,
+        prior_binding: str | None = None,
+    ) -> PausedTurn:
+        from xiaowei.actions import EXECUTION_POLICY, ActionStatusArgs
+        from xiaowei.channel_store import RequestUnavailableError
+        from xiaowei.governance import contract_dump
+
+        if self.actions is None or ctx.identity.owner.kind != "group":
+            raise TurnError("scope_rejected")
+        runs = self._governance.turn_runs(ctx.identity)
+        context_evidence = tuple(
+            dict.fromkeys(
+                (
+                    *ctx.evidence_ids,
+                    *session.replayed_evidence,
+                    *(e for t, e in runs.produced if t in ctx.tool_scope),
+                )
+            )
+        )
+        # 本次批准已完成的SDK gate事实先交付，即使后续候选一直未获批准也不会丢失。
+        material_ids = [
+            e
+            for t, e in runs.produced
+            if t.endswith("/request_action_execution") and e not in ctx.evidence_ids
+        ]
+        expires = []
+        for item in result.interruptions:
+            raw = _approval_call(item)
+            contract = next(
+                (
+                    c
+                    for c in self._governance.allowed_contracts(ctx)
+                    if c.tool_id.replace("/", "__") == raw.name and c.policy_id == EXECUTION_POLICY
+                ),
+                None,
+            )
+            if contract is None:
+                raise TurnError("scope_rejected")
+            args = contract_dump(
+                ActionStatusArgs, ActionStatusArgs.model_validate_json(raw.arguments)
+            )
+            action = await self.actions._store.get_action(str(args["action_id"]), ctx.identity)
+            if (
+                action.state != "pending"
+                or action.requester_id != ctx.identity.subject_id
+                or action.proposal_turn_id != ctx.identity.turn_id
+                or action.proposal_session_id != ctx.identity.session_id
+                or action.target_id != contract.target_id
+                or self._clock() >= action.approval_expires_at
+            ):
+                raise RequestUnavailableError
+            material_ids.append(await self.actions.verify_material(action, ctx, runs))
+            expires.append(action.approval_expires_at)
+        material = TurnAnswer(
+            answer=AgentAnswer(
+                evidence_ids=tuple(dict.fromkeys(material_ids)), inferences=[], clarification=None
+            ),
+            context_evidence=context_evidence,
+            monitoring_failures=runs.monitoring_failures,
+            run_turn_id=ctx.identity.turn_id,
+        )
+        await self._evidence.validate_answer(material, ctx)
+        remaining = ctx.budget.timeout_seconds - (time.monotonic() - started)
+        if remaining <= 0:
+            raise TimeoutError
+        saved_ctx = ctx.model_copy(
+            update={
+                "budget": ctx.budget.model_copy(update={"timeout_seconds": remaining}),
+                "evidence_ids": context_evidence,
+                "approved_action": None,
+            }
+        )
+        saved = result.to_state().to_string(
+            context_serializer=lambda _ctx: saved_ctx.model_dump(mode="json"),
+            strict_context=True,
+            include_tracing_api_key=False,
+        )
+        # JSON转义与SDK多处保存输入/工具项留余量，沿已有容量/工具预算计算，不加配置。
+        limit = (
+            self._config.session_limits.max_history_bytes * 16
+            + (ctx.budget.max_tool_calls + 1) * 256_000
+            + self._data_policy.input.max_bytes * 16
+        )
+        if len(saved.encode()) > limit:
+            raise TurnError("session_unavailable")
+        await session.discard_pending()
+        return PausedTurn(
+            saved_ctx,
+            saved,
+            self._governance.checkpoint(ctx.identity),
+            material,
+            message,
+            self._native_binding(ctx),
+            checks.used if checks is not None else 0,
+            max(expires),
+            prior_version,
+            prior_binding,
+        )
+
+    async def resume_action(
+        self, action_id: str, approval_ctx: RunContext, *, approve: bool = True
+    ) -> TurnAnswer | PausedTurn:
+        """审批新请求只承载身份/回执，SDK恢复原轮；所有前置检查在模型/写I/O之前。"""
+        from pydantic import TypeAdapter
+
+        from xiaowei.actions import ACTION_SETTLE_TIMEOUT_SECONDS, ActionStatusArgs
+        from xiaowei.channel import GroupScope
+        from xiaowei.channel_store import RequestUnavailableError
+        from xiaowei.evidence import EvidencePermissionError
+        from xiaowei.governance import TurnLedger
+
+        if self.actions is None:
+            raise ResumeRejectedError("action_not_approvable")
+        store = self.actions._store
+        action = await store.get_action(action_id, approval_ctx.identity)
+        # 无权审批的人不能作废别人的候选，也不能由SDK approval扩大权限。
+        binding = await self.actions.authorize_approval(action, approval_ctx)
+        if action.failure_code is not None:
+            raise ResumeRejectedError(action.failure_code)
+        if action.state != "pending":
+            raise ResumeRejectedError("action_not_approvable")
+        try:
+            native = await store.native_run(action)
+        except RequestUnavailableError:
+            raise ResumeRejectedError("action_not_approvable") from None
+        original = RunContext.model_validate_json(native.context)
+        if (
+            original.identity.owner != approval_ctx.identity.owner
+            or original.identity.subject_id != action.requester_id
+            or original.identity.session_id != action.proposal_session_id
+            or original.identity.turn_id != action.proposal_turn_id
+        ):
+            raise ResumeRejectedError("action_not_approvable")
+        session_id = original.identity.session_id
+        if session_id in self._active or len(self._active) >= self._config.max_concurrent_turns:
+            raise TurnError("session_busy")
+        self._active.add(session_id)
+        started = time.monotonic()
+        claimed = None
+        try:
+            with scope_checks(native.scope_checks) as checks:
+                async with asyncio.timeout(
+                    min(original.budget.timeout_seconds, approval_ctx.budget.timeout_seconds)
+                ):
+                    group_app, tenant, chat = json.loads(original.identity.owner.id)
+                    decision = await self.actions._access.resolve_group(
+                        GroupScope(app_id=group_app, tenant_key=tenant, chat_id=chat),
+                        original.identity.subject_id,
+                        verify_member=True,
+                    )
+                    if decision is None:
+                        await store.reject_native(action, "action_requester_invalid")
+                        raise ResumeRejectedError("action_requester_invalid")
+                    if native.binding != self._native_binding(original):
+                        raise ResumeRejectedError("action_not_approvable")
+                    ctx = original.model_copy(
+                        update={
+                            "tool_scope": original.tool_scope & decision.authorized_tools,
+                            "target_scope": original.target_scope & decision.target_ids,
+                        }
+                    )
+                    try:
+                        await self._evidence.project_many(
+                            [(e, None) for e in ctx.evidence_ids], ctx, "model"
+                        )
+                    except EvidencePermissionError:
+                        await store.reject_native(action, "action_requester_invalid")
+                        raise ResumeRejectedError("action_requester_invalid") from None
+                    session = self._session(ctx)
+                    try:
+                        await (
+                            session.get_items()
+                        )  # 包括等待期间的新历史、当前容量和状态，不喂入旧任务。
+                    except SessionUnavailableError:
+                        await store.reject_native(action, "action_session_invalid")
+                        raise ResumeRejectedError("action_session_invalid") from None
+                    if self._clock() >= min(action.approval_expires_at, native.expires_at):
+                        await store.reject_native(action, "action_expired")
+                        raise ResumeRejectedError("action_expired")
+                    ledger = TypeAdapter(TurnLedger).validate_json(native.ledger, strict=True)
+                    await self.actions.verify_material(action, ctx, ledger.runs)
+                    if ledger.used + (2 if approve else 1) > ctx.budget.max_tool_calls:
+                        raise ResumeRejectedError("action_not_approvable")
+                    agent = self._agent(ctx)
+                    state = await RunState.from_string(
+                        agent,
+                        native.run_state,
+                        context_override=RunContextWrapper(ctx),
+                        strict_context=True,
+                    )
+                    matches = [
+                        i
+                        for i in state.get_interruptions()
+                        if _approval_call(i).name == f"{action.target_id}__request_action_execution"
+                        and ActionStatusArgs.model_validate_json(
+                            _approval_call(i).arguments
+                        ).action_id
+                        == action.action_id
+                    ]
+                    if len(matches) != 1:
+                        raise ResumeRejectedError("action_not_approvable")
+                    claimed, cause = await store.claim_native_action(
+                        action, native, ctx.identity, approval_ctx.identity, approve=approve
+                    )
+                    if claimed is None:
+                        raise ResumeRejectedError(cause or "action_not_approvable")
+                    if claimed.attempt is None:
+                        raise TurnError("storage_failed")
+                    params = json.loads(claimed.plan)["plan"]["parameters"]
+                    ctx = ctx.model_copy(
+                        update={
+                            "approved_action": ApprovedAction(
+                                action_id=action_id,
+                                attempt=claimed.attempt,
+                                tool_id=binding.write.tool_id,
+                                target_id=binding.write.target_id,
+                                arguments_digest=arguments_digest(params),
+                                approver=approval_ctx.identity,
+                                sdk_call_id=_approval_call(matches[0]).call_id,
+                            )
+                        }
+                    )
+                    # 用绑定后的可信context重建SDK，不沿用刚才无批准的context/闭包。
+                    state = await RunState.from_string(
+                        self._agent(ctx),
+                        native.run_state,
+                        context_override=RunContextWrapper(ctx),
+                        strict_context=True,
+                    )
+                    selected = next(
+                        i
+                        for i in state.get_interruptions()
+                        if _approval_call(i).call_id == _approval_call(matches[0]).call_id
+                    )
+                    self._governance.restore(ctx, ledger)
+                    if approve:
+                        state.approve(selected, always_approve=False)
+                    else:
+                        actions = self.actions
+                        if actions is None:
+                            raise TurnError("scope_rejected")
+                        raw = _approval_call(selected)
+                        refusal = await self._governance.invoke(
+                            ctx,
+                            ToolRequest(
+                                tool_id=f"{action.target_id}/request_action_execution",
+                                target_id=action.target_id,
+                                call_id=raw.call_id,
+                                tool_name=raw.name,
+                                arguments={"action_id": action_id},
+                            ),
+                            lambda req: actions.status(ctx, req),
+                        )
+                        state.reject(
+                            selected, always_reject=False, rejection_message=refusal.model_content
+                        )
+                    result = await self._turn(
+                        ctx,
+                        native.message,
+                        started,
+                        native=state,
+                        prior_version=native.version,
+                        prior_binding=native.binding,
+                        scope_count=checks,
+                    )
+                    return result
+        except BaseException as exc:
+            if isinstance(exc, Exception):
+                diagnostic = _turn_error(exc) if not isinstance(exc, TurnError) else exc
+                _stage(
+                    original.identity.turn_id,
+                    "failed",
+                    started,
+                    diagnostic.reason,
+                    detail=diagnostic,
+                    runs=self._governance.turn_runs(original.identity),
+                )
+            # 进入业务execute后由ActionService保证落定；剩下executing且存储可信只可能未进入写。
+            if claimed is not None and store.readiness.ok:
+                try:
+                    async with asyncio.timeout(ACTION_SETTLE_TIMEOUT_SECONDS):
+                        current = await store.get_action(action_id, approval_ctx.identity)
+                        if current.state == "executing":
+                            await store.finish_action(
+                                claimed, "rejected", failure_code="action_rejected"
+                            )
+                except BaseException:
+                    store.readiness.lock("action_settle_failed")
+                    raise
+            if isinstance(exc, (asyncio.CancelledError, ResumeRejectedError, TurnError)):
+                raise
+            if isinstance(exc, Exception):
+                raise _turn_error(exc) from None
+            raise
+        finally:
+            self._governance.end_turn(original.identity)
+            self._active.discard(session_id)
 
     def _tools_for(self, ctx: RunContext) -> list[Tool]:
         """本轮 Agent 的工具：可信范围内的本地工具与 MCP 工具，列表只属于这一轮。"""
@@ -647,6 +1065,13 @@ class Application:
     def _refuse(turn: str, started: float, reason: TurnReason) -> TurnError:
         _stage(turn, "refused", started, reason)
         return TurnError(reason)
+
+
+def _approval_call(item: ToolApprovalItem) -> ResponseFunctionToolCall:
+    raw = item.raw_item
+    if not isinstance(raw, ResponseFunctionToolCall):
+        raise TurnError("scope_rejected")
+    return raw
 
 
 def safe_run_config() -> RunConfig:

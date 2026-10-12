@@ -153,7 +153,9 @@ def _card(
         if fact.note is not None:
             elements.append(_div(f"说明：{fact.note}"))
         if fact.requires_complete:
-            elements.append(_div("待批准动作（尚未执行）"))
+            elements.append(
+                _div("动作执行事实" if "state" in fact.metadata else "待批准动作（尚未执行）")
+            )
             elements.extend(
                 _div(f"{_ACTION_LABELS.get(key, key)}：{_cell({key: value}, key)}")
                 for key, value in fact.metadata.items()

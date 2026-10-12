@@ -139,7 +139,7 @@ _CLEANUP_CLOSE = text(
 _DELETE_EXPIRED_REQUESTS = text(
     """
     DELETE FROM xiaowei_request WHERE session_id = :session_id AND expires_at <= :now
-      AND state IN ('completed', 'failed', 'interrupted') AND delivery <> 'sending'
+      AND state IN ('completed', 'paused', 'failed', 'interrupted') AND delivery <> 'sending'
     """
 )
 _DELETE_EXPIRED_EVIDENCE = text(
@@ -153,6 +153,21 @@ _DELETE_EXPIRED_ACTIONS = text(
     )
     """
 )
+_DELETE_EXPIRED_RUNS = text(
+    """
+    WITH expired AS (
+        SELECT turn_id FROM xiaowei_action_run r WHERE expires_at <= :now
+        AND NOT EXISTS (SELECT 1 FROM xiaowei_action a
+            WHERE a.proposal_turn_id=r.turn_id AND a.state='executing')
+        ORDER BY expires_at, turn_id LIMIT :limit FOR UPDATE SKIP LOCKED
+    ), invalidated AS (
+        UPDATE xiaowei_action SET state='rejected', failure_code='action_expired', updated_at=:now
+        WHERE proposal_turn_id IN (SELECT turn_id FROM expired) AND state='pending'
+    )
+    DELETE FROM xiaowei_action_run WHERE turn_id IN (SELECT turn_id FROM expired)
+    """
+)
+
 # 元数据与映射在最后删除：会话仍须已关闭、仍满足清理条件，且不再有任何请求记录。
 _DELETE_SESSION = text(
     """
@@ -869,6 +884,7 @@ async def cleanup_expired(engine: AsyncEngine, *, now: datetime, batch_size: int
     params: dict[str, object] = {"now": now, "limit": batch_size}
     try:
         async with engine.begin() as conn:
+            await conn.execute(_DELETE_EXPIRED_RUNS, params)
             await conn.execute(_DELETE_EXPIRED_ACTIONS, params)
         async with engine.connect() as conn:
             candidates = [r[0] for r in await conn.execute(_CLEANUP_CANDIDATES, params)]

@@ -235,7 +235,7 @@ async def test_cancelled_admission_rolls_back_both_claim_and_snapshot(actions: A
 
 
 async def test_inflight_write_receipt_does_not_require_original_session(actions: Actions):
-    """现有产品事实回执可复用；不是 SDK 恢复入口已实现的证明。"""
+    """SDK-A在写中关闭后，经Action事实失败回执反馈，不丢成功、不重放。"""
     action_id = await propose(actions)
     env, adapter = actions.env, actions.adapter
     session_id = await session_id_of(actions, action_id)
@@ -253,12 +253,12 @@ async def test_inflight_write_receipt_does_not_require_original_session(actions:
             adapter.release.set()
         await asyncio.wait_for(approval, 5)
         rendered = message_text(group.outbox.sent[-1][1])
-        assert action_id in rendered and "succeeded" in rendered
+        assert "动作已执行" in rendered and "Action ID" in rendered
         assert "工具执行失败" not in rendered
         assert await env.rows(
             "SELECT state, delivery FROM xiaowei_request WHERE reply_message_id=:id",
             id="om_close_while_writing",
-        ) == [("completed", "sent")]
+        ) == [("failed", "sent")]
         await group.ask(f"/批准 {action_id}", sender=B, message_id="om_close_duplicate")
     assert len(adapter.calls) == 1
     assert await env.rows("SELECT state, result FROM xiaowei_action") == [

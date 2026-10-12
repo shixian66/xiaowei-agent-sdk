@@ -1,7 +1,8 @@
 """P4 选中监控动作：受治理提出、群批准、一次执行、只读状态。
 
-Runner 只接触提出和状态工具。绑定由对应写切片的可信代码装配；没有通用 API、
-工作流、自动恢复或模型提供的 Action。执行事实在 ChannelStore 的应用表内。
+Runner 只接触提出、状态和SDK执行请求工具，暂停与恢复由SDK管理。
+绑定由对应写切片装配；不从模型文字生成Action，不自动批准或重放写入。
+执行事实在ChannelStore应用表内。
 """
 
 from __future__ import annotations
@@ -10,7 +11,7 @@ import asyncio
 import hashlib
 import json
 from collections.abc import Awaitable, Callable, Iterable, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timedelta
 from typing import TYPE_CHECKING, Annotated, Any, Literal
 from uuid import UUID, uuid4
@@ -18,9 +19,13 @@ from uuid import UUID, uuid4
 from agents import FunctionTool
 from pydantic import AfterValidator, BaseModel, ConfigDict, Field
 
-from xiaowei.channel_store import ActionRecord, ChannelStore, RequestUnavailableError
+from xiaowei.channel_store import (
+    ActionAdmissionRejectedError,
+    ActionRecord,
+    ChannelStore,
+    RequestUnavailableError,
+)
 from xiaowei.evidence import (
-    AnswerRejectedError,
     EvidenceUnavailableError,
     action_result_projection,
     arguments_digest,
@@ -34,20 +39,17 @@ from xiaowei.governance import (
     ToolExecutionError,
     ToolPolicy,
     ToolRejectedError,
+    TurnRuns,
     normalize_arguments,
 )
 from xiaowei.models import (
     AUDIENCES,
-    AgentAnswer,
-    ApprovedAction,
     Audience,
     Identity,
     RunContext,
-    ToolCall,
     ToolContract,
     ToolObservation,
     ToolRequest,
-    TurnAnswer,
 )
 from xiaowei.tools import governed_function_tool
 
@@ -146,7 +148,30 @@ def action_status_catalog(
         )
         for sid in source_ids
     )
-    return contracts, (policy,) if contracts else ()
+    gates = tuple(
+        ToolContract(
+            tool_id=f"{c.target_id}/request_action_execution",
+            target_id=c.target_id,
+            policy_id="action.execution-request/1",
+            input_schema=ActionStatusArgs.model_json_schema(),
+            description=(
+                "请求执行本轮已提出的Action ID，SDK会暂停等待群人工批准；不能执行原始写参数。"
+            ),
+        )
+        for c in contracts
+    )
+    outcome_fields = ("action_id", "state", "approver", "result")
+    gate_policy = replace(
+        policy,
+        policy_id=EXECUTION_POLICY,
+        effect="approval",
+        projections={
+            a: replace(spec, fields=outcome_fields) for a, spec in policy.projections.items()
+        },
+        required=outcome_fields,
+    )
+
+    return (*contracts, *gates), (policy, gate_policy) if contracts else ()
 
 
 def proposal_policy(
@@ -162,6 +187,24 @@ def proposal_policy(
         required=_PROPOSAL_FIELDS,
         effect="propose",
         group_only=True,
+    )
+
+
+EXECUTION_POLICY = "action.execution-request/1"
+EXECUTION_SUFFIX = "/request_action_execution"
+
+
+def execution_requests(
+    tools: Iterable[str], sources: Iterable[str] | None = None
+) -> frozenset[str]:
+    """执行请求继承同源状态读取许可；实际写仍只按本次审批人Grant。"""
+    tools = frozenset(tools)
+    enabled = None if sources is None else frozenset(sources)
+    return tools | frozenset(
+        t.removesuffix("/get_action_status") + EXECUTION_SUFFIX
+        for t in tools
+        if t.endswith("/get_action_status")
+        and (enabled is None or t.removesuffix("/get_action_status") in enabled)
     )
 
 
@@ -195,8 +238,12 @@ class ActionService:
 
     @property
     def available_tool_ids(self) -> frozenset[str]:
+        bound_sources = {b.proposal.target_id for b in self._bindings.values()}
         return frozenset(b.proposal.tool_id for b in self._bindings.values()) | frozenset(
-            c.tool_id for c in self.governance.catalog.contracts if c.policy_id == STATUS_POLICY
+            c.tool_id
+            for c in self.governance.catalog.contracts
+            if c.policy_id == STATUS_POLICY
+            or (c.policy_id == EXECUTION_POLICY and c.target_id in bound_sources)
         )
 
     def tools_for(self, ctx: RunContext) -> list[FunctionTool]:
@@ -206,8 +253,7 @@ class ActionService:
             if binding is not None:
 
                 async def propose(
-                    req: ToolRequest,
-                    b: ActionBinding | None = binding,
+                    req: ToolRequest, b: ActionBinding | None = binding
                 ) -> ToolObservation:
                     if b is None:
                         raise ToolRejectedError("动作不可用")
@@ -216,6 +262,16 @@ class ActionService:
                 execute: Execute = (
                     Prechecked(binding.precheck, propose) if binding.precheck else propose
                 )
+            elif contract.policy_id == EXECUTION_POLICY:
+                if not any(
+                    b.proposal.target_id == contract.target_id for b in self._bindings.values()
+                ):
+                    continue
+
+                async def execute_action(req: ToolRequest) -> ToolObservation:
+                    return await self.approve(str(req.arguments["action_id"]), ctx)
+
+                execute = execute_action
             elif contract.policy_id == STATUS_POLICY:
 
                 async def status(req: ToolRequest) -> ToolObservation:
@@ -224,13 +280,13 @@ class ActionService:
                 execute = status
             else:
                 continue
+            tool = governed_function_tool(
+                contract.tool_id.replace("/", "__"), contract, self.governance, execute
+            )
             tools.append(
-                governed_function_tool(
-                    contract.tool_id.replace("/", "__"),
-                    contract,
-                    self.governance,
-                    execute,
-                )
+                replace(tool, needs_approval=True)
+                if contract.policy_id == EXECUTION_POLICY
+                else tool
             )
         return tools
 
@@ -250,7 +306,9 @@ class ActionService:
         binding: ActionBinding,
     ) -> ToolObservation:
         # 调用来自 GovernedTools；只有当前群有提出权才会回读。
-        record = await self._store.proposal_request_for_turn(ctx.identity)
+        record = await self._store.proposal_request_for_turn(
+            ctx.identity, approval=ctx.approved_action
+        )
         plan = await binding.prepare(request)
         normalized = normalize_arguments(
             self.governance.catalog.policy_for(binding.write), plan.parameters
@@ -288,7 +346,7 @@ class ActionService:
             payload=self._material(action), captured_at=now, truncated=False
         )
         check_projection_capacity(self.governance.catalog.policy_for(binding.proposal), observation)
-        await self._store.propose_action(action)
+        await self._store.propose_action(action, approval=ctx.approved_action)
         return observation
 
     @staticmethod
@@ -336,6 +394,28 @@ class ActionService:
             truncated=False,
         )
 
+    async def verify_material(self, action: ActionRecord, ctx: RunContext, runs: TurnRuns) -> str:
+        """保存/恢复都从同一提案Evidence核对确定材料，Action表变化不能借旧批准执行。"""
+        from xiaowei.models import ToolCall
+
+        call = ToolCall(
+            call_id=action.call_id,
+            tool_name=action.proposal_tool_id.replace("/", "__"),
+            arguments=json.loads(action.plan)["proposal_arguments"],
+        )
+        for tool, evidence_id in runs.produced:
+            if tool != action.proposal_tool_id:
+                continue
+            try:
+                content = await self.governance.evidence.project(
+                    evidence_id, ctx, "feishu", call=call
+                )
+            except EvidenceUnavailableError:
+                continue
+            if json.loads(content)["data"] == self._material(action):
+                return evidence_id
+        raise ToolRejectedError("提案Evidence与当前动作不符，未执行，请重新提出")
+
     async def _current_approver(self, identity: Identity, target: str, tool: str) -> bool:
         # 群成员验证在外部读期间可能已过时：写 I/O 前再按现有目录/Grants 核对。
         from xiaowei.channel import GroupScope
@@ -351,82 +431,44 @@ class ActionService:
         except Exception:
             return False
 
-    async def approve(self, action_id: str, ctx: RunContext) -> TurnAnswer:
-        action = await self._store.get_action(str(UUID(action_id)), ctx.identity)
+    async def authorize_approval(self, action: ActionRecord, ctx: RunContext) -> ActionBinding:
         b = self._bindings.get((action.proposal_tool_id, action.target_id))
-        status_tool = f"{action.target_id}/get_action_status"
         if (
             b is None
-            or action.state != "pending"
-            or self._clock() >= action.approval_expires_at
-            or action.binding != self._binding_hash(b)
             or action.write_tool_id != b.write.tool_id
+            or action.binding != self._binding_hash(b)
             or not await self._access.authorize(ctx.identity, action.target_id, b.proposal.tool_id)
-            or not await self._access.authorize(ctx.identity, action.target_id, status_tool)
+            or not await self._access.authorize(
+                ctx.identity, action.target_id, f"{action.target_id}/get_action_status"
+            )
             or not await self._current_approver(ctx.identity, action.target_id, b.write.tool_id)
         ):
-            raise ToolRejectedError("动作不存在、已失效或当前无权批准，未执行")
-        original = await self._store.proposal_request(action)
-        if original.state != "completed" or original.delivery != "sent" or original.answer is None:
-            raise ToolRejectedError("动作材料尚未有效送达，未执行")
-        evidence = self.governance.evidence
-        origin_ctx = ctx.model_copy(
-            update={
-                "identity": Identity(
-                    subject_id=ctx.identity.subject_id,
-                    session_id=action.proposal_session_id,
-                    turn_id=action.proposal_turn_id,
-                    channel="feishu",
-                    owner=ctx.identity.owner,
-                )
-            }
-        )
-        if original.context_evidence is None:
-            raise ToolRejectedError("动作材料缺少有效证据，未执行")
-        try:
-            await evidence.validate_answer(
-                TurnAnswer(
-                    answer=original.answer,
-                    context_evidence=original.context_evidence,
-                    monitoring_failures=original.monitoring_failures,
-                ),
-                origin_ctx,
-            )
-            material = self._material(action)
-            proposal_call = ToolCall(
-                call_id=action.call_id,
-                tool_name=b.proposal.tool_id.replace("/", "__"),
-                arguments=json.loads(action.plan)["proposal_arguments"],
-            )
-            matched = False
-            for evidence_id in original.answer.evidence_ids:
-                content = json.loads(await evidence.project(evidence_id, origin_ctx, "feishu"))
-                if content["data"] == material and not content["truncated"]:
-                    await evidence.project(evidence_id, origin_ctx, "feishu", call=proposal_call)
-                    matched = True
-            if not matched:
-                raise ToolRejectedError("动作材料缺少有效证据，未执行")
-        except (AnswerRejectedError, EvidenceUnavailableError):
-            raise ToolRejectedError("动作材料缺少有效证据，未执行") from None
-        stored = json.loads(action.plan)
-        approved_plan = ActionPlan.model_validate(stored["plan"])
-        claimed = await self._store.claim_action(action, ctx.identity)
-        if claimed is None:
-            raise ToolRejectedError("动作已过期或已被处理，未执行")
-        if claimed.attempt is None:
-            raise RequestUnavailableError
-        approved = ctx.model_copy(
-            update={
-                "tool_scope": frozenset({b.write.tool_id}),
-                "approved_action": ApprovedAction(
-                    action_id=claimed.action_id,
-                    attempt=claimed.attempt,
-                    tool_id=b.write.tool_id,
-                    target_id=b.write.target_id,
-                    arguments_digest=arguments_digest(approved_plan.parameters),
-                ),
-            }
-        )
+            raise ToolRejectedError("当前无权批准或动作契约已变化，未执行")
+        return b
+
+    async def approve(self, action_id: str, ctx: RunContext) -> ToolObservation:
+        """只由已恢复SDK gate调用；没有本次绑定时不保留旧独立执行后备。"""
+        approval = ctx.approved_action
+        if approval is None or approval.approver is None or approval.sdk_call_id is None:
+            raise ToolRejectedError("缺少可恢复的本次SDK批准，未执行")
+        approver = approval.approver
+        claimed = await self._store.get_action(str(UUID(action_id)), ctx.identity)
+        if (
+            claimed.state != "executing"
+            or claimed.attempt != approval.attempt
+            or claimed.action_id != approval.action_id
+            or claimed.requester_id != ctx.identity.subject_id
+            or claimed.proposal_turn_id != ctx.identity.turn_id
+            or claimed.proposal_session_id != ctx.identity.session_id
+            or claimed.approver_id != approval.approver.subject_id
+            or claimed.approval_turn_id != approval.approver.turn_id
+        ):
+            raise ToolRejectedError("批准与原轮绑定不符，未执行")
+        b = self._bindings.get((claimed.proposal_tool_id, claimed.target_id))
+        if b is None:
+            raise ToolRejectedError("动作契约已变化，未执行")
+        approved_plan = ActionPlan.model_validate(json.loads(claimed.plan)["plan"])
+        approved = ctx.model_copy(update={"tool_scope": frozenset({b.write.tool_id})})
         write_request = ToolRequest(
             tool_id=b.write.tool_id,
             target_id=b.write.target_id,
@@ -437,6 +479,7 @@ class ActionService:
         finished = False
         write_started = False
         write_rejected = False
+        reason = "action_rejected"
         prepared: Any = None
 
         def precheck(req: ToolRequest) -> ToolRequest:
@@ -446,10 +489,9 @@ class ActionService:
             return req
 
         async def execute(req: ToolRequest) -> ToolObservation:
-            nonlocal finished, write_started, write_rejected
-            if not await self._current_approver(ctx.identity, b.write.target_id, b.write.tool_id):
-                raise ToolRejectedError("当前批准已失效，未执行")
-            # 复核使用已批准的实际参数，不能重新计算相对时间或默认值。
+            nonlocal finished, write_started, write_rejected, reason
+            if not await self._current_approver(approver, b.write.target_id, b.write.tool_id):
+                raise ToolRejectedError("本次批准权限已失效，未执行")
             current = await b.prepare(req)
             current = current.model_copy(
                 update={
@@ -459,18 +501,25 @@ class ActionService:
                     )
                 }
             )
-            if current != approved_plan:
-                raise ToolRejectedError("对象、参数或差异已变化，请重新提出动作；未执行")
-            if not await self._current_approver(ctx.identity, b.write.target_id, b.write.tool_id):
-                raise ToolRejectedError("当前批准已失效，未执行")
-            await self._store.admit_action(claimed)
+            if current != approved_plan or claimed.binding != self._binding_hash(b):
+                raise ToolRejectedError("对象、参数或版本已变化，未执行，请重新提出")
+            if not await self._current_approver(approver, b.write.target_id, b.write.tool_id):
+                raise ToolRejectedError("本次批准已失效，未执行")
+            # 读取身份保持原发起人；最后写准入也不借审批人读取旧证据。
+            if not await self._current_requester(ctx):
+                reason = "action_requester_invalid"
+                raise ToolRejectedError("原发起人已失效，未执行")
+            try:
+                await self._store.admit_action(claimed)
+            except ActionAdmissionRejectedError as exc:
+                reason = exc.code
+                raise
             write_started = True
             try:
                 observation = await (
                     b.execute.run(prepared) if isinstance(b.execute, Prechecked) else b.execute(req)
                 )
             except ActionWriteRejectedError:
-                # 先保留可信拒绝事实；治理层仍将底层执行异常封闭，之后应用落定状态。
                 write_rejected = True
                 raise
             projected = action_result_projection(
@@ -484,19 +533,16 @@ class ActionService:
             await self.governance.invoke(approved, write_request, Prechecked(precheck, execute))
         except asyncio.CancelledError:
             try:
-                # 取消不证明远端已停止；只在关键状态仍可信时结束本次尝试，不补跑写入。
                 if not finished and self._store.readiness.ok:
                     async with asyncio.timeout(ACTION_SETTLE_TIMEOUT_SECONDS):
                         await self._store.finish_action(
                             claimed,
                             "unknown" if write_started and not write_rejected else "rejected",
+                            failure_code=reason,
                         )
             except BaseException:
-                # 收尾在进入关键 SQL 前也可能中断；未保存 Action 终态时不能恢复接活。
                 self._store.readiness.lock("action_settle_failed")
                 raise
-            finally:
-                self.governance.end_turn(approved.identity)
             raise
         except Exception:
             state: Literal["succeeded", "unknown", "rejected"] = (
@@ -506,35 +552,37 @@ class ActionService:
                 if write_rejected or not write_started
                 else "unknown"
             )
-            try:
-                if not finished:
-                    await self._store.finish_action(claimed, state)
-            finally:
-                self.governance.end_turn(approved.identity)
+            if not finished:
+                await self._store.finish_action(claimed, state, failure_code=reason)
             raise ActionOutcomeError(state) from None
-        # 状态反馈也是当前群/源权限下的 Evidence，不在 Runner 外提交 Session。
-        request = ToolRequest(
-            tool_id=status_tool,
-            target_id=action.target_id,
-            call_id=f"status-{action.action_id}",
-            tool_name=status_tool.replace("/", "__"),
-            arguments={"action_id": action.action_id},
+        return await self.status(
+            ctx,
+            ToolRequest(
+                tool_id=f"{claimed.target_id}/get_action_status",
+                target_id=claimed.target_id,
+                call_id=approval.sdk_call_id,
+                tool_name="action-fact",
+                arguments={"action_id": action_id},
+            ),
         )
-        status_ctx = ctx.model_copy(update={"tool_scope": frozenset({status_tool})})
+
+    async def _current_requester(self, ctx: RunContext) -> bool:
+        from xiaowei.channel import GroupScope
+
+        app, tenant, chat = json.loads(ctx.identity.owner.id)
+        decision = await self._access.resolve_group(
+            GroupScope(app_id=app, tenant_key=tenant, chat_id=chat),
+            ctx.identity.subject_id,
+            verify_member=True,
+        )
+        if decision is None:
+            return False
+        from xiaowei.evidence import EvidencePermissionError
+
         try:
-            result = await self.governance.invoke(
-                status_ctx, request, lambda req: self.status(status_ctx, req)
+            await self.governance.evidence.project_many(
+                [(e, None) for e in ctx.evidence_ids], ctx, "model"
             )
-            return TurnAnswer(
-                answer=AgentAnswer(
-                    evidence_ids=(result.evidence_id,),
-                    inferences=[],
-                    clarification=None,
-                ),
-                context_evidence=(result.evidence_id,),
-            )
-        except Exception:
-            # 执行事实已保存；状态 Evidence/投影失败不能把成功写入说成未执行。
-            raise ActionOutcomeError("succeeded") from None
-        finally:
-            self.governance.end_turn(status_ctx.identity)
+        except EvidencePermissionError:
+            return False
+        return True
