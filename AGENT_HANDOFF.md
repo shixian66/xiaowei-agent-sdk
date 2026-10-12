@@ -37,7 +37,7 @@
 
 ## 3. 当前计划与下一项工作
 
-**当前下一步：** 将[七项修复计划 S3](docs/superpowers/plans/2026-10-10-production-dialogue-repairs.md#s3同条回复的接近上限提醒)的离线候选推送/开 PR，核对精确 head CI 后交用户指定审查方复核；S3 不自动合并或部署。E5/E6 的未定契约继续开放，未提前实施。
+**当前下一步：** [七项修复计划 S3](docs/superpowers/plans/2026-10-10-production-dialogue-repairs.md#s3同条回复的接近上限提醒)已推送并开 [PR #85](https://github.com/shixian66/xiaowei-agent-sdk/pull/85)。核对其精确 head CI 后交用户指定审查方复核；S3 不自动合并或部署。PR 当前 head 和 checks 以 GitHub 实际状态为准，不沿用旧 head 结论。E5/E6 的未定契约继续开放，未提前实施。
 
 **S3 本轮证据（2026-10-12，离线候选）：** S2 成功快照由现有请求事务保存，提醒只在当前授权和 Evidence 校验后的交付链生成；复用 Web 已有显示字段，飞书共用渲染/发送保持单条。没有新测量、配置、迁移、通知表或模型行为改动。有效基线 RED 为阈值/容器/容量 17 failed，以及正式 Web/飞书提醒缺失；S2 提交超限控制路径仍通过。真实 Chrome RED 为成功消息缺少提醒元素。新测试早期请求列名定位及群读取假设已按真实契约修正，不是产品修复证据；群共享历史不授予另一成员的请求读取权，原发起人保护保持。
 
