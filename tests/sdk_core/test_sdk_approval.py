@@ -162,6 +162,7 @@ async def test_image_session_offers_no_execution_request_and_proposal_stays_unap
     assert await env.rows(
         "SELECT failure_code FROM xiaowei_request WHERE reply_message_id='om_image_approve'"
     ) == [("action_unresumable",)]
+    assert "需先发送 /新建 后重新提出" in str(group.outbox.sent[-1])
     assert actions.adapter.calls == []
 
 
