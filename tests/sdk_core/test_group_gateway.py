@@ -326,7 +326,10 @@ REJECTED: dict[str, tuple[dict[str, Any], str]] = {
     "bot sender": ({"event__sender__sender_type": "app"}, "sender_type"),
     "malformed sender": ({"sender": "user-1"}, "sender"),
     "topic chat": ({"event__message__chat_type": "topic_group"}, "chat_type"),
-    "image": ({"event__message__message_type": "image"}, "message_type"),
+    "image without mention": (
+        {"event__message__message_type": "image", "mentions": []},
+        "mention",
+    ),
     "stale": ({"age_seconds": 301}, "stale"),
     "too long": ({"content": json.dumps({"text": f"{KEY} " + "长" * 200})}, "too_long"),
 }
