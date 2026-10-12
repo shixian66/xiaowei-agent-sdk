@@ -6,6 +6,7 @@
 """
 
 import asyncio
+import base64
 import gzip
 import json
 import logging
@@ -55,6 +56,8 @@ VERTEX = ModelProfile(
     reasoning_effort=None,
 )
 URL = VERTEX_ENDPOINT.format(model="gemini-3-flash-preview")
+IMAGE_BYTES = b"\x89PNG\r\n\x1a\nsynthetic-image"
+IMAGE_URL = "data:image/png;base64," + base64.b64encode(IMAGE_BYTES).decode("ascii")
 SIG_A = "c2lnbmF0dXJlLUE="
 SIG_B = "c2lnbmF0dXJlLUI="
 INSTRUCTIONS = "使用工具回答。"
@@ -117,6 +120,46 @@ def _call(**kwargs: Any) -> dict[str, Any]:
 
 def _answer(text: str = FINAL, **kwargs: Any) -> dict[str, Any]:
     return _body([{"text": text}], **kwargs)
+
+
+async def test_runner_maps_one_trusted_image_to_vertex_inline_data() -> None:
+    seen: list[dict[str, Any]] = []
+
+    def endpoint(request: httpx2.Request) -> httpx2.Response:
+        seen.append(json.loads(request.content))
+        return httpx2.Response(200, json=_answer())
+
+    profile = VERTEX.model_copy(update={"image_input_enabled": True})
+    async with open_model(profile, transport=httpx2.MockTransport(endpoint)) as binding:
+        agent = Agent(
+            name="image-test",
+            instructions=INSTRUCTIONS,
+            model=binding.model,
+            model_settings=binding.settings,
+            output_type=TotalAnswer,
+        )
+        result = await Runner.run(
+            agent,
+            [
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "input_text", "text": "图右侧是什么错误？"},
+                        {"type": "input_image", "image_url": IMAGE_URL, "detail": "auto"},
+                    ],
+                }
+            ],
+        )
+    assert result.final_output_as(TotalAnswer).total == 100
+    assert seen[0]["contents"][-1]["parts"] == [
+        {"text": "图右侧是什么错误？"},
+        {
+            "inlineData": {
+                "mimeType": "image/png",
+                "data": base64.b64encode(IMAGE_BYTES).decode("ascii"),
+            }
+        },
+    ]
 
 
 # ---- 记录请求的 mock 端点 -------------------------------------------------------------------
@@ -674,6 +717,52 @@ async def test_request_over_limit_is_rejected_before_sending() -> None:
             await Runner.run(_agent(binding, []), "x" * 5_000)
     assert endpoint.requests == []
     assert "xxxx" not in str(excinfo.value)
+
+
+async def test_image_allowance_does_not_increase_nonimage_request_budget() -> None:
+    encoded = base64.b64encode(b"P" * 1_000_000).decode("ascii")
+    profile = VERTEX.model_copy(
+        update={
+            "image_input_enabled": True,
+            "max_request_bytes": 2_000,
+        }
+    )
+    endpoint = Endpoint([_answer()])
+    async with open_model(profile, transport=endpoint.transport) as binding:
+        content = [
+            {"type": "input_text", "text": "解释图片"},
+            {"type": "input_image", "image_url": f"data:image/png;base64,{encoded}"},
+        ]
+        result = await Runner.run(_agent(binding, []), [{"role": "user", "content": content}])
+        assert result.final_output_as(TotalAnswer).total == 100
+        with pytest.raises(ModelRequestRejectedError):
+            await Runner.run(
+                _agent(binding, []),
+                [
+                    {
+                        "role": "user",
+                        "content": [
+                            {"type": "input_text", "text": "x" * 2_000},
+                            {
+                                "type": "input_image",
+                                "image_url": f"data:image/png;base64,{encoded}",
+                            },
+                        ],
+                    }
+                ],
+            )
+    assert len(endpoint.requests) == 1
+    assert len(endpoint.requests[0].content) > 1_000_000
+
+
+async def test_thirteenth_image_is_rejected_before_model_io() -> None:
+    profile = VERTEX.model_copy(update={"image_input_enabled": True})
+    endpoint = Endpoint([_answer()])
+    images = [{"type": "input_image", "image_url": IMAGE_URL} for _ in range(13)]
+    async with open_model(profile, transport=endpoint.transport) as binding:
+        with pytest.raises(ModelRequestRejectedError):
+            await Runner.run(_agent(binding, []), [{"role": "user", "content": images}])
+    assert endpoint.requests == []
 
 
 # ---- 响应在交给 Runner 和工具前拒绝 -----------------------------------------------------------

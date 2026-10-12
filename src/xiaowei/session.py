@@ -145,6 +145,9 @@ _DELETE_EXPIRED_REQUESTS = text(
 _DELETE_EXPIRED_EVIDENCE = text(
     "DELETE FROM xiaowei_evidence WHERE session_id = :session_id AND expires_at <= :now"
 )
+_DELETE_EXPIRED_IMAGES = text(
+    "DELETE FROM xiaowei_image WHERE session_id = :session_id AND expires_at <= :now"
+)
 _DELETE_EXPIRED_ACTIONS = text(
     """
     DELETE FROM xiaowei_action WHERE action_id IN (
@@ -322,6 +325,7 @@ class PolicySession:
         input_policy: SessionInputPolicy,
         engine: AsyncEngine,
         clock: Callable[[], datetime],
+        allow_image_parts: bool = False,
     ) -> None:
         if inner.session_id != context.identity.session_id:
             raise ValueError("底层 Session 标识必须与可信身份的会话一致")
@@ -336,6 +340,7 @@ class PolicySession:
         self._input_policy = input_policy
         self._engine = engine
         self._clock = clock
+        self._allow_image_parts = allow_image_parts
         self._pending: list[TResponseInputItem] = []
         self._replayed: dict[str, None] = {}
         self._phase: Literal["before_start", "before_commit", "after_commit"] = "before_start"
@@ -545,7 +550,7 @@ class PolicySession:
             # 推理项是模型内部内容，不进入历史；回放不依赖它。
             return None
         if kind == "message":
-            return _message(raw, self._input_policy)
+            return _message(raw, self._input_policy, allow_image_parts=self._allow_image_parts)
         if kind == "function_call":
             return _function_call(raw)
         if kind == "function_call_output":
@@ -676,7 +681,9 @@ class PolicySession:
         }
 
 
-def _message(raw: dict[str, Any], input_policy: SessionInputPolicy) -> TResponseInputItem:
+def _message(
+    raw: dict[str, Any], input_policy: SessionInputPolicy, *, allow_image_parts: bool = False
+) -> TResponseInputItem:
     """用户与助手消息只保留纯文本；用户文字另须符合输入准入策略。
 
     图片、文件、拒答片段与其他角色没有安全保存形式。助手文字只能复述模型可达内容（工具数据
@@ -690,9 +697,25 @@ def _message(raw: dict[str, Any], input_policy: SessionInputPolicy) -> TResponse
         text = content
     elif isinstance(content, list) and content:
         # 只接受携带文字的片段；图片、文件、音频与拒答片段没有 text，整轮拒绝。
-        text = "".join(
-            _text(p.get("text") if isinstance(p, dict) else None, allow_empty=True) for p in content
-        )
+        chunks: list[str] = []
+        for part in content:
+            if not isinstance(part, dict):
+                raise SessionItemRejectedError("本轮包含不支持保存的会话内容")
+            if part.get("type") == "input_image" and role == "user" and allow_image_parts:
+                url = part.get("image_url")
+                if not isinstance(url, str) or not url.startswith(
+                    ("data:image/png;base64,", "data:image/jpeg;base64,")
+                ):
+                    raise SessionItemRejectedError("本轮图片输入无法安全保存")
+                continue  # 原图只留应用表；SDK Session 中不保存 URL、Base64 或资源键。
+            if part.get("type") not in ("input_text", "output_text"):
+                raise SessionItemRejectedError("本轮包含不支持保存的会话内容")
+            value = _text(part.get("text"), allow_empty=True)
+            if not (role == "user" and allow_image_parts and chunks):
+                # 后续图片序号是本轮可信装配的显示标签；原图与标签由应用表回放，
+                # Session 只保留第一段经文字策略准入的用户消息。
+                chunks.append(value)
+        text = "".join(chunks)
     else:
         raise SessionItemRejectedError("本轮包含不支持保存的会话内容")
     if role == "user" and not input_policy.admits(text):
@@ -870,6 +893,14 @@ async def cleanup_expired(engine: AsyncEngine, *, now: datetime, batch_size: int
     try:
         async with engine.begin() as conn:
             await conn.execute(_DELETE_EXPIRED_ACTIONS, params)
+            await conn.execute(
+                text(
+                    "DELETE FROM xiaowei_image WHERE ctid IN ("
+                    "SELECT ctid FROM xiaowei_image WHERE expires_at <= :now "
+                    "ORDER BY expires_at LIMIT :limit)"
+                ),
+                params,
+            )
         async with engine.connect() as conn:
             candidates = [r[0] for r in await conn.execute(_CLEANUP_CANDIDATES, params)]
     except (OSError, SQLAlchemyError):
@@ -885,6 +916,7 @@ async def cleanup_expired(engine: AsyncEngine, *, now: datetime, batch_size: int
             async with engine.begin() as conn:
                 await conn.execute(_DELETE_EXPIRED_REQUESTS, scoped)
                 await conn.execute(_DELETE_EXPIRED_EVIDENCE, scoped)
+                await conn.execute(_DELETE_EXPIRED_IMAGES, scoped)
                 deleted = (await conn.execute(_DELETE_SESSION, scoped)).rowcount
                 await conn.execute(_DELETE_MAPPINGS, scoped)
         except (OSError, SQLAlchemyError):
@@ -908,6 +940,7 @@ async def _cleanup_unregistered(engine: AsyncEngine, *, now: datetime, limit: in
             async with engine.begin() as conn:
                 await conn.execute(_DELETE_EXPIRED_REQUESTS, scoped)
                 await conn.execute(_DELETE_EXPIRED_EVIDENCE, scoped)
+                await conn.execute(_DELETE_EXPIRED_IMAGES, scoped)
                 cleaned += (await conn.execute(_DELETE_UNREGISTERED_MAPPING, scoped)).rowcount
     except (OSError, SQLAlchemyError):
         raise SessionStoreError("会话清理中断，可再次运行完成") from None
