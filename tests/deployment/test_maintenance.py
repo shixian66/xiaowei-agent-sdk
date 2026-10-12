@@ -537,7 +537,7 @@ def test_different_image_upgrade_rollback_and_paired_restore(
         rollback.mkdir()
         for name in ("compose.yaml", "release.json"):
             shutil.copyfile(active / name, rollback / name)
-        # 历史镜像为 v6：停旧应用并备份，再用预检过的候选显式升到 v7。
+        # 历史镜像为 v6：停旧应用并备份，再用预检过的当前候选升到 v10。
         assert _compose(active, "stop", "xiaowei").returncode == 0
         before_upgrade = _probe(active, "snapshot")
         pre_upgrade = host_tmp / "pre-upgrade.dump"

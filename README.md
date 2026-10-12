@@ -97,6 +97,8 @@ uv run --locked xiaowei --config xiaowei.json requests resend --subject <发起�
 
 飞书业务回答（包括问候、建议、澄清和 SQL 草稿）使用一张静态卡片；固定状态回执仍为文本。来源、采集时间、必要说明与事实默认可见，分析在事实后显示。模型说明按受限 Markdown 规范化标题、`**` 加粗、列表及换行（有序列表重新编号、段落空白规范化），双下划线标识符保持字面原值；链接、图片、@ 和 HTML 按文字显示；含代码或反斜杠的说明整段保留原文纯文字（包括格式符），容量紧张时格式也退回纯文字卡片。超容量优先保留必要说明、实际业务 SQL 和整行事实，再放分析；未展示的事实、分析或 SQL 分别标明。实际 SQL 与其他技术详情可折叠；DDL 原文直接显示。JSON 2.0 卡片要求客户端至少 7.20；容量与发送状态的限制见[运维说明](deploy/OPERATIONS.md#飞书结果展示与容量)。本机测试和预览不证明真实 Lark 客户端效果。
 
+飞书中可明确要求“检查 pre 集群并生成巡检报告文件”：有获准事实时由代码生成一份 MD 文件；明确要求 HTML 时使用固定静态模板。同时要求 MD 和 HTML 会先询问选哪一种。报告写明来源、时间、事实、限制与单列的模型分析；没有成功证据不会冒充已巡检。报告文件不会附带第二条结果卡片，大小、留存、重发和真实环境验收缺口见[报告文件说明](deploy/OPERATIONS.md#飞书报告文件)。
+
 飞书默认不读取图片、文件或富文本 post：合法且当前获准的消息获得固定说明。可显式开启 `feishu.document_input_enabled` 接收 UTF-8 TXT/MD；截图还须同时开启 `feishu.image_input_enabled` 和 Vertex 模型 Profile 的 `image_input_enabled`，仅接收单张不超过 2 MiB 的 PNG/JPEG，每会话最多 12 张，后续提问回放原图。指定群仍要求同一条消息的平台 @本机器人及当前成员资格；未 @ 的附件、post 内的 at 标签不会触发。真实 Lark 图片事件、模型识图及 12 图请求尚未验收；配置、容量和回退见[运维说明](deploy/OPERATIONS.md#飞书-pngjpeg-输入)。
 
 **目标（`targets`）。** 每项为 `type`（目前只能是 `starrocks`）、`description`（集群用途，交给模型选择集群）、`business_context`（该集群的业务口径 `{"version", "text"}`，没有则写 `null`）与 `starrocks`（连接、限额、函数闭集与结构快照上限）。集群 ID 就是 `starrocks.target_id`，只能用 1–32 位小写字母、数字、`_`、`-`，不能重复；连接地址、账号与凭据引用不交给模型。授权表按工具授予，获准用户可用全部已配置集群；模型每次调用数据工具都必须给出 `cluster`，未知集群在连接前拒绝，不会改查其他集群。旧版顶层 `starrocks`/`business_context` 会在启动时报错并给出迁移方式：把原 `starrocks` 放进 `targets` 的一项，原 `business_context` 去掉 `target_id` 后放到同一项。新增、删除集群或修改口径后，旧会话需要新建；已保存的 StarRocks 结果在本次升级后一次失效。

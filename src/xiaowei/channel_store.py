@@ -42,6 +42,7 @@ from typing import TYPE_CHECKING, Any, Literal, get_args
 
 if TYPE_CHECKING:
     from xiaowei.app import PausedTurn
+    from xiaowei.feishu_report import ReportFile
 
 from pydantic import SecretStr, ValidationError
 from sqlalchemy import String, TextClause, bindparam, text
@@ -66,6 +67,7 @@ from xiaowei.storage import Backend, InstanceLock, Readiness
 RequestState = Literal["accepted", "running", "paused", "completed", "failed", "interrupted"]
 DeliveryState = Literal["pending", "sending", "sent", "failed", "unknown"]
 SendOutcome = Literal["sent", "failed", "unknown"]
+ReportUploadState = Literal["pending", "uploading", "uploaded", "unknown"]
 # 安全失败码闭集（与迁移 007 的 CHECK 一致）：只表达失败类别，不携带异常文字。调用者经 ``fail()``
 # 只能写入 ``CallerFailureCode``；两个内部码各有唯一写入路径：``result_not_saved`` 由结果保存
 # 失败路径与关闭 Session 同一事务写入，``interrupted`` 由启动恢复写入。
@@ -318,6 +320,13 @@ class ActionAdmissionRejectedError(RequestUnavailableError):
     def __init__(self, code: Literal["action_session_invalid", "action_expired"]) -> None:
         self.code = code
         super().__init__()
+
+
+class ReportMismatchError(ChannelStoreError):
+    """已保存报告与当前获准投影不一致，或上传状态不能安全继续。"""
+
+    def __init__(self) -> None:
+        super().__init__("报告原文件或上传状态无法确认，停止发送")
 
 
 class SessionBusyError(ChannelStoreError):
@@ -915,6 +924,161 @@ class ChannelStore:
         if updated != 1:
             self._readiness.lock("delivery_state_lost")
             raise ChannelStoreUnavailableError("投递状态无法保存")
+
+    async def bind_report(
+        self, record: RequestRecord, report: ReportFile
+    ) -> tuple[ReportUploadState, str | None, str]:
+        """发送前保存不可变原文件；重发只接受同一字节与摘要，不重查或重写旧报告。"""
+        self._require_ready()
+        if (
+            record.channel != "feishu"
+            or hashlib.sha256(report.content).hexdigest() != report.digest
+        ):
+            raise ReportMismatchError
+        params = {
+            **_keys(record),
+            "format": report.format,
+            "body": report.content,
+            "digest": report.digest,
+            "now": self._clock(),
+        }
+        with self._critical("report_bind_failed", "报告绑定状态无法保存"):
+            async with self._engine.begin() as conn:
+                await conn.execute(
+                    text(
+                        "INSERT INTO xiaowei_report "
+                        "(turn_id, format, body, digest, upload_state, expires_at) "
+                        "SELECT r.turn_id, :format, :body, :digest, 'pending', r.expires_at "
+                        "FROM xiaowei_request r WHERE r.turn_id = :turn_id "
+                        "AND r.channel = :channel AND r.request_key = :request_key "
+                        "AND r.owner_kind = :owner_kind AND r.owner_id = :owner_id "
+                        "AND r.subject_id = :subject_id AND r.state = 'completed' "
+                        "AND r.delivery = 'sending' AND r.expires_at > :now "
+                        "ON CONFLICT (turn_id) DO NOTHING"
+                    ),
+                    params,
+                )
+                row = (
+                    (
+                        await conn.execute(
+                            text(
+                                "SELECT p.format, p.body, p.digest, p.upload_state, p.file_key, "
+                                "r.delivery_attempt "
+                                "FROM xiaowei_report p JOIN xiaowei_request r "
+                                "ON r.turn_id = p.turn_id WHERE r.turn_id = :turn_id "
+                                "AND r.channel = :channel AND r.request_key = :request_key "
+                                "AND r.owner_kind = :owner_kind AND r.owner_id = :owner_id "
+                                "AND r.subject_id = :subject_id AND r.state = 'completed' "
+                                "AND r.delivery = 'sending' AND r.expires_at > :now"
+                            ),
+                            params,
+                        )
+                    )
+                    .mappings()
+                    .one_or_none()
+                )
+        if row is None or (
+            row["format"] != report.format
+            or bytes(row["body"]) != report.content
+            or row["digest"] != report.digest
+        ):
+            raise ReportMismatchError
+        state, key = row["upload_state"], row["file_key"]
+        if state not in ("pending", "uploading", "uploaded", "unknown"):
+            raise ReportMismatchError
+        if (state == "uploaded") != (isinstance(key, str) and bool(key)):
+            raise ReportMismatchError
+        attempt = row["delivery_attempt"]
+        if not isinstance(attempt, str) or not attempt:
+            raise ReportMismatchError
+        return state, key, attempt
+
+    async def begin_report_upload(self, record: RequestRecord, attempt: str) -> bool:
+        """上传 I/O 前原子占位；重入、恢复后的 uploading/unknown 一律不再上传。"""
+        changed = await self._update(
+            text(
+                "UPDATE xiaowei_report p SET upload_state = 'uploading' "
+                "WHERE p.turn_id = :turn_id AND p.upload_state = 'pending' "
+                "AND EXISTS (SELECT 1 FROM xiaowei_request r WHERE r.turn_id = p.turn_id "
+                "AND r.channel = :channel AND r.request_key = :request_key "
+                "AND r.owner_kind = :owner_kind AND r.owner_id = :owner_id "
+                "AND r.subject_id = :subject_id AND r.state = 'completed' "
+                "AND r.delivery = 'sending' AND r.delivery_attempt = :attempt "
+                "AND r.expires_at > :now)"
+            ),
+            record,
+            critical="report_upload_start_failed",
+            attempt=attempt,
+        )
+        return changed == 1
+
+    async def complete_report_upload(self, record: RequestRecord, attempt: str, key: str) -> None:
+        """上传键先持久化，才允许开始向原接收者发送文件消息。"""
+        if not isinstance(key, str) or not key:
+            raise ReportMismatchError
+        changed = await self._update(
+            text(
+                "UPDATE xiaowei_report p SET upload_state = 'uploaded', file_key = :key "
+                "WHERE p.turn_id = :turn_id AND p.upload_state = 'uploading' "
+                "AND EXISTS (SELECT 1 FROM xiaowei_request r WHERE r.turn_id = p.turn_id "
+                "AND r.channel = :channel AND r.request_key = :request_key "
+                "AND r.owner_kind = :owner_kind AND r.owner_id = :owner_id "
+                "AND r.subject_id = :subject_id AND r.state = 'completed' "
+                "AND r.delivery = 'sending' AND r.delivery_attempt = :attempt "
+                "AND r.expires_at > :now)"
+            ),
+            record,
+            critical="report_upload_key_failed",
+            key=key,
+            attempt=attempt,
+        )
+        if changed != 1:
+            self._readiness.lock("report_upload_state_lost")
+            raise ChannelStoreUnavailableError("报告上传状态无法保存")
+
+    async def mark_report_upload_unknown(self, record: RequestRecord, attempt: str) -> None:
+        """SDK 上传错误无法证明平台没有保存文件；保留原文但禁止自动或显式再上传。"""
+        changed = await self._update(
+            text(
+                "UPDATE xiaowei_report p SET upload_state = 'unknown' "
+                "WHERE p.turn_id = :turn_id AND p.upload_state = 'uploading' "
+                "AND EXISTS (SELECT 1 FROM xiaowei_request r WHERE r.turn_id = p.turn_id "
+                "AND r.channel = :channel AND r.request_key = :request_key "
+                "AND r.owner_kind = :owner_kind AND r.owner_id = :owner_id "
+                "AND r.subject_id = :subject_id AND r.state = 'completed' "
+                "AND r.delivery = 'sending' AND r.delivery_attempt = :attempt "
+                "AND r.expires_at > :now)"
+            ),
+            record,
+            critical="report_upload_unknown_failed",
+            attempt=attempt,
+        )
+        if changed != 1:
+            self._readiness.lock("report_upload_state_lost")
+            raise ChannelStoreUnavailableError("报告上传状态无法保存")
+
+    async def confirm_report_send(self, record: RequestRecord, attempt: str, key: str) -> None:
+        """上传后、文件消息前确认取得的投递尝试未被恢复或重发取代。"""
+        self._require_ready()
+        params = {**_keys(record), "attempt": attempt, "key": key, "now": self._clock()}
+        with self._critical("report_send_state_lost", "报告发送状态无法确认"):
+            async with self._engine.connect() as conn:
+                valid = await conn.scalar(
+                    text(
+                        "SELECT 1 FROM xiaowei_report p JOIN xiaowei_request r "
+                        "ON r.turn_id = p.turn_id WHERE r.turn_id = :turn_id "
+                        "AND r.channel = :channel AND r.request_key = :request_key "
+                        "AND r.owner_kind = :owner_kind AND r.owner_id = :owner_id "
+                        "AND r.subject_id = :subject_id AND r.state = 'completed' "
+                        "AND r.delivery = 'sending' AND r.delivery_attempt = :attempt "
+                        "AND r.expires_at > :now AND p.upload_state = 'uploaded' "
+                        "AND p.file_key = :key"
+                    ),
+                    params,
+                )
+        if valid != 1:
+            self._readiness.lock("report_send_state_lost")
+            raise ChannelStoreUnavailableError("报告发送状态无法确认")
 
     # ---- 启动恢复 --------------------------------------------------------------------
 

@@ -854,6 +854,7 @@ async def test_uninitialized_database_is_refused(
     secret = SecretStr(env.url.render_as_string(hide_password=False))
     async with open_engine(secret) as engine, engine.begin() as conn:
         await conn.execute(text("DROP TABLE xiaowei_image"))
+        await conn.execute(text("DROP TABLE xiaowei_report"))
         await conn.execute(text("DROP TABLE xiaowei_request"))
     with pytest.raises(StorageNotInitializedError):
         await env.serve(env.config(), asyncio.Event())
@@ -1348,6 +1349,9 @@ async def test_feishu_start_failure_logs_only_safe_codes(
         async def send(self, *args: Any, **kwargs: Any) -> str:
             del args, kwargs
             return "sent"
+
+        async def upload_file(self, report: object) -> str:
+            raise AssertionError("启动失败时不应上传报告")
 
     config = runtime.ServeConfig.model_validate(serve_config(18501, feishu=feishu_config()))
     service = SimpleNamespace(

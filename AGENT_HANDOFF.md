@@ -9,14 +9,14 @@
 | 项目 | 已核对事实 |
 | --- | --- |
 | 仓库 | [shixian66/xiaowei-agent-sdk](https://github.com/shixian66/xiaowei-agent-sdk) |
-| 本地目录 / 分支 | SDK-A `codex/sdk-native-approval`；实现起点 `9b7eb060`，已集成主线 E5b TXT/MD `f89b586` 与 PNG/JPEG `ca6212ec41589d6d2c6b891521d9fe48987f79cc`（PR #90）。 |
+| 本地目录 / 分支 | E6：`/Users/kloenguyen/.codex/worktrees/e6-report-files/agent-SDK` / `codex/feishu-report-files-e6`；本次同步主线 `96e17a02c7b64550073510623b128432cc58a69f`，包含 SDK-A 原生审批与 E5b PNG/JPEG。 |
 | M5 历史起点 | `372c381f44ecfa1fa53961f137d0058033cbd805`；不是远端当前 main 的核验结论 |
-| 本轮审查版本 | SDK-A `5c8fbac` 与集成 head `86dd4ed` 经独立审查无阻断；与 PR #90 的集成由 Claude 按用户授权解决冲突（迁移改为010/v10，有图会话不提供执行请求），这次集成差异是自行复查，不是独立审查。E5b PNG/JPEG 已随 PR #90 合入。 |
-| 已同步主线审查记录 | W5 `fdfdb469cbcf5e8499f9ee8d69dae954bae0ebda` 经用户独立复审通过并随 PR #74 合入。取消恢复候选 `0ec6c4351824c6b85338ba713d85d54ef34484c2` 的内部只读复查及后续验证记录见下文；这些不是 R7 的新独立审查。本次以已经合入的 PR #76 / main `c7e1e40c346fcd488dbd0dfd3af2e36377e2ee66` 同步，原监控记录与实战缺口保留。 |
-| 当前阶段 | SDK-A 原生审批与 E5b TXT/MD、PNG/JPEG 已集成；SDK-B/C、D7/C8、E6/C7 暂停。真实模型、飞书、公司监控源和部署尚未验收。 |
-| 当前源码与依赖 | 应用表 v10：迁移009保存会话原图，迁移010保存 SDK 暂停检查点并作废旧 pending；SDK 表不变。`Pillow` 用于有界完整解码；模型/端点不变。 |
-| 新产品入口 | 原生主线仍为 `xiaowei`（与 `python -m xiaowei` 相同）的 `serve`、`config check`、`model check`、`storage init/upgrade/cleanup`、`requests resend`；`listen_host` 可为任意地址（默认 `127.0.0.1`）。镜像固定入口复用同一 CLI，在容器内绑定 `0.0.0.0`，宿主机发布地址由 `XW_WEB_BIND_ADDRESS`（默认 `0.0.0.0`）决定。真实模型、用户 StarRocks 与真实飞书未参与 P3-A 验证；旧 CLI/Compose 不是产品入口 |
-| 本次工作范围 | SDK-A 按计划§3.6、架构§5实现；群身份/权限、逐次人工审批及写入不重放不放宽。E5b 图片双开关默认关闭；含原图的会话动作只能提出、不进入审批。不部署，不接真实模型、飞书或公司服务。 |
+| 本轮审查版本 | SDK-A 已随 PR #92 前的主线合入；E6 PR #91 的旧 head `52308d8` 审查发现迁移编号冲突与报告静默失败，本分支正在修复，最终精确 SHA 待提交与复审。 |
+| 已同步主线审查记录 | W5 `fdfdb469cbcf5e8499f9ee8d69dae954bae0ebda` 经独立复审并随 PR #74 合入；历史记录不代替本次 E6 审查。 |
+| 当前阶段 | E6 报告文件候选与 SDK-A 主线集成；真实模型与 Lark 平台验收仍开放。C7 不在本片。 |
+| 当前源码与依赖 | 主线应用表 v10（010 SDK-A）；E6 候选迁移 011 至 v11，增加原请求绑定的报告原字节、摘要和上传状态。复用既有 Agent、Evidence、渠道投递和锁定飞书客户端公开文件上传/发送接口。 |
+| 新产品入口 | `xiaowei` 的 `serve`、`config check`、`model check`、`storage init/upgrade/cleanup`、`requests resend`；容器 Web 绑定沿现有部署配置。真实模型、公司 StarRocks 与真实飞书不由离线测试证明。 |
+| 本次工作范围 | E6 的单份 MD/HTML 报告生成、原请求绑定、文件上传/单消息发送及显式重发；用户选择默认 MD、两种同时请求先澄清、功能默认启用、上传结果不明停止重传。容量上限 400,000 字节/10,000 行；不改治理授权。SDK-A 的 paused 与动作续跑保持。 |
 | 外部操作 | 主线曾获用户授权用合成数据调用 Gemini API（见第 3 节），验证后本机凭据文件已删除，用户负责作废该密钥；Gate 0 离线部分与 SQLGuard 没有调用真实模型；全部工作均未调用飞书或外部 MCP Server。Gate 0 真实运行经用户授权使用第三方中转端点 `bbtoken.boywe.cn`（OpenAI 兼容 Chat Completions）发送合成数据，共 22 次模型请求（含诊断探测），另有 1 次模型列表查询，串行、不重试；凭据只写入仓库外权限 600 的临时文件，运行后已删除，用户负责作废该密钥。Task 2 从 Docker Hub 拉取官方 `starrocks/allin1-ubuntu:latest`（digest `sha256:faf7ce9c…276b`，StarRocks 4.1.4）在本机 127.0.0.1:59030 运行可丢弃容器，只写入随机名合成库，用后删除；未连接用户的 StarRocks。P2 Task 0 用同一本地镜像在 127.0.0.1:59030 运行可丢弃容器，从 `releases.starrocks.io/resources/auditloader.zip` 下载官方 AuditLoader 5.0.0（sha256 `cd2a8ace…8ea2`）只装入该容器，临时把 FE `query_explain_level` 改为 ANALYZE 后已恢复；容器与合成数据已删除。P2.5 Task 0 用同一 digest 新建可丢弃容器 `xw-p25-t0-sr`（只发布 127.0.0.1:59030/58030）与 `xiaowei-sdk-test` PostgreSQL，装入同一 AuditLoader 5.0.0；临时改 FE `query_explain_level`、`enable_statistic_collect_on_first_load` 并建极低阈值资源组，均已恢复/删除并回读；容器与测试库已删除，未触碰 `xiaowei-release-*`。P2.5 Task 1 只用本机 `xiaowei-sdk-test` PostgreSQL 与 StarRocks 驱动替身，未连接任何 StarRocks、模型 API、飞书或外部 MCP。P2.5 Task 2 用同一 digest 新建可丢弃容器 `xw-p25-t2-sr`（只发布 127.0.0.1:59030），装入同一 AuditLoader 5.0.0（`max_stmt_length=1000`），运行 SR 用例与工作树外的 1,000 表规模实验；规模实验前两次（每批 50 条建表）期间单容器 FE 多次重启、实验失败，`docker restart` 后改为每批 20 条完成；合成库、账号与角色均已删除，容器与测试 PostgreSQL 已删除，未触碰 `xiaowei-release-*`。Task 2 审查修订用同一 digest 新建可丢弃容器 `xw-p25-t2r-sr`（标签 `xiaowei.task=p25-task2-review`，只发布 127.0.0.1:59030/58030），装入同一 AuditLoader 5.0.0，只运行 §5 SR 用例；未改 FE 设置。P2.5 Task 3 用同一 digest 新建可丢弃容器 `xw-p25-t3-sr`（标签 `xiaowei.task=p25-task3`，只发布 127.0.0.1:59030/58030），装入同一 AuditLoader 5.0.0，运行 §5 SR 用例（含新增的复杂 SQL 对照，临时建库 `<随机库>_hr` 用后删除）；审查修复另建同 digest 可丢弃容器 `xw-p25-t3r-sr`（只发布 127.0.0.1:59030/58030），以 root 在合成库 `p` 中探测名字解析规则后删除该库（复审第 2 轮另建同 digest 容器 `xw-p25-t3r2-sr` 重复同样流程），装入同一 AuditLoader 5.0.0 运行 §5 SR 用例；未改 FE 设置，未连接用户的 StarRocks、模型 API、飞书或外部 MCP。P2.5 Task 5 用同一 digest 新建可丢弃容器 `xw-p25-t5-sr`（标签 `xiaowei.task=p25-task5`，只发布 127.0.0.1:59030/58030），装入同一 AuditLoader 5.0.0（官方包 sha256 `cd2a8ace…8ea2`，只把 `max_stmt_length` 改为 1000），运行 §5 SR 用例，另起 `xiaowei-sdk-test` PostgreSQL；未改 FE 设置，用后删除，未触碰 `xiaowei-release-*`。P2.5 Task 6 同样新建可丢弃容器 `xw-p25-t6-sr`（标签 `xiaowei.task=p25-task6`，只发布 127.0.0.1:59030/58030）与 `xiaowei-sdk-test` PostgreSQL，装入同一 AuditLoader 5.0.0（先误用 Task 5 的包，`max_batch_interval_sec` 为默认 60，卸载后按 P2.5 §9.1 改为 10 重装），运行 §5 SR 用例（含新增的搜表与跨库审计用例，临时库 `<随机库>_b` 用后删除）；未改 FE 设置，用后删除 P2.5 Task 7 的实现与第一轮审查修订只用隔离的 `xiaowei-sdk-test` PostgreSQL 与本机 Chrome（脚本模型、驱动与合成 StarRocks 替身）；复审修订用同一 digest 新建可丢弃容器 `xw-p25-t7r-sr`（标签 `xiaowei.task=p25-task7-review`，只发布 127.0.0.1:59030/58030）与 `xiaowei-sdk-test` PostgreSQL，装入同一 AuditLoader 5.0.0（§9.1 的包），只运行 §5 SR 用例；未改 FE 设置，用后删除，未触碰 `xiaowei-release-*`；没有调用真实模型、用户的 StarRocks、飞书或外部 MCP。P2.5 Task 8 只用 `xiaowei-sdk-test` PostgreSQL 与本机 Chrome（脚本模型、驱动替身与飞书替身），没有新建 StarRocks 容器（SR 结果沿用 PR #40 复审修订的运行，理由见计划 Task 8 实施说明），没有调用真实模型、用户的 StarRocks、飞书或外部 MCP。飞书单群 F2、F3 只用 `xiaowei-sdk-test` PostgreSQL 与本机 127.0.0.1 上的合成飞书 OpenAPI（真实 SDK 用例），没有调用真实飞书、模型、用户 StarRocks 或外部 MCP，未触碰 `xiaowei-release-*`。飞书单群 F0 只在本机 127.0.0.1 运行合成飞书 HTTP/长连接端点与 `xiaowei-sdk-test` PostgreSQL；为核对权限名称只读查阅了飞书开放平台公开文档；没有调用真实飞书、模型、用户 StarRocks 或外部 MCP，未触碰 `xiaowei-release-*`。 |
 
 表中外部操作一行保留以往阶段记录。G0 曾下载并运行官方 Prometheus MCP 二进制；R1a 复用已校验二进制，连接本机合成 Prometheus API、loopback MCP 和隔离 PostgreSQL，并通过飞书通道替身验证；未接公司监控源、真实模型或真实飞书。历史任务 SHA 只证明对应切片，不能混用。接手先用 `git rev-parse HEAD` 和 `git status --short` 取得实际版本；审查使用对应提交的精确 SHA，本文件的修改历史由 Git 保存。
@@ -37,7 +37,11 @@
 
 ## 3. 当前计划与下一项工作
 
-**当前下一步：** SDK-A 与 E5b 图片集成后，在精确 PR head 上完成整仓、Docker 迁移/回退与 CI 后合并。随后按 [监控计划 §3.6](docs/superpowers/plans/2026-10-09-monitoring-mcp.md#sdk-reuse)推进 SDK-B；真实模型（含 Vertex 识图与 request_action_execution 选择）、飞书和监控源仍须另行验收，本次不部署。
+**当前下一步：** 完成 E6 与 SDK-A 主线集成、迁移 v11 和报告失败卡片回退；在精确 SHA 上复审与 CI。E6 提示词改动的真实模型旧/新固定样例门槛未豁免，本地受公司模型 API 的 IP 限制，真实模型行为未验证。真实 Lark 收发及公司环境另行验收，不部署。
+
+**E6 候选边界（2026-10-13）：** 模型只选择有限格式，报告内容由获准飞书投影构造，MD 动态值放进文字围栏，HTML 使用固定模板并逐值转义。原文件/摘要绑定已完成请求，上传前原子占位，已知资源键先持久化后发送；上传结果未知或恢复后的上传中状态禁止再次上传，文件消息明确失败可用原键显式重发。含待批动作、暂停状态或报告容量超限时退回一张带固定说明的卡片，不上传；动作提案的完整展示仍受原容量处理约束。每次发送前复核当前接收身份、成员、目标和 Evidence；报告随请求到期清理，平台已交付副本无法撤回。
+
+**E6 旧 head 离线验证：** 旧候选在飞书合成端点、隔离 PostgreSQL、浏览器 HTML 中覆盖文件构造与发送；非 Docker 全量曾为 **5202 passed、329 skipped、63 deselected**，最终差异定向回归 **58 passed**、浏览器 **1 passed**。这些结果不覆盖 SDK-A 集成、B1/B2 修复、真实模型或真实 Lark；新 head 验证另记。
 
 **E5b PNG/JPEG 候选（2026-10-12）：** 基于已合入的 TXT/MD 下载链，飞书和 Vertex Profile 独立显式启用图片，默认仍按 E5a 回执。图片完整解码前限制原值 2 MiB，每边不超过 8192 像素，总像素不超过 16,777,216；原字节不改写。应用表 v9 按原请求和当前会话/身份保存最多 12 张，只有已完成请求的图片供后续轮回放，失败/中断及其他轮尚在途图片不参与；读取前按当前身份、会话期限、数据权限及摘要再核验。`/新建` 不继承图片。每次模型请求只让可信 Base64 图片占独立 33,554,448 字节额度，其余内容仍受原 Profile 上限。原图不进入 SDK 文字历史、Evidence 或日志；取消与投递结果不明沿既有恢复路径。本候选只证明替身和隔离 PostgreSQL 下的正式调用链，不能证明真实模型视觉理解、真实 Lark 消息形态或公司环境可用。
 
@@ -103,7 +107,7 @@
 
 **E5a PR #86 首次 CI：** `b305463ab7a02e99c19fa4bfb0250f28b78123ca` 的 p3-release 为 **1 failed, 81 passed**（551.38s）；唯一失败 `test_operator_visible_files_name_no_hosting_platform_or_framework` 指向新增 OPERATIONS 文案里的 `SDK`，违反既有面向操作者发行包契约。本地原检查先复现 **1 failed**（0.09s），只去掉框架名称、保留“自动媒体拉取等继续关闭”的行为说明，断言及产品代码不变；原失败用例与两个文档检查为 **6 passed**（0.24s），diff check 通过。日志 `/private/tmp/e5a-p3-job.log`、`e5a-doc-release-{red,green}.log`；最终 head CI 按 PR 获取，不用首轮部分绿色替代。
 
-**E5a 未覆盖：** 真实 Lark 收发/群纯图片 mention、公司环境、浏览器和部署；本片不改 Web，无新的浏览器任务。未调用真实模型，E5a 不改变 Agent 或模型/工具契约、不新增豁免。单条固定回执不占业务轮数；与身份提示共用每实际 open_id 10 分钟内存窗口，跨私聊/指定群共享，失败/未知不释放，普通文本提问不受影响。E5b 下载/识图和 E6 报告输出未实施。
+**E5a 未覆盖：** 真实 Lark 收发/群纯图片 mention、公司环境、浏览器和部署；该历史切片不改 Web。未调用真实模型，E5a 不改变 Agent 或模型/工具契约、不新增豁免。单条固定回执不占业务轮数；与身份提示共用每实际 open_id 10 分钟内存窗口，跨私聊/指定群共享，失败/未知不释放，普通文本提问不受影响。E5b 已合入；E6 目前为离线候选。
 
 **S3 已合入证据（2026-10-12，真实环境未验收）：** S2 成功快照由现有请求事务保存，提醒只在当前授权和 Evidence 校验后的交付链生成；复用 Web 已有显示字段，飞书共用渲染/发送保持单条。没有新测量、配置、迁移、通知表或模型行为改动。有效基线 RED 为阈值/容器/容量 17 failed，以及正式 Web/飞书提醒缺失；S2 提交超限控制路径仍通过。真实 Chrome RED 为成功消息缺少提醒元素。新测试早期请求列名定位及群读取假设已按真实契约修正，不是产品修复证据；群共享历史不授予另一成员的请求读取权，原发起人保护保持。
 

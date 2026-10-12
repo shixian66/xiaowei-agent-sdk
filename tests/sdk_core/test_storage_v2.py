@@ -73,6 +73,7 @@ async def _install_v1(engine: AsyncEngine, *, through: str = "001_initial.sql") 
         "008_session_state.sql",
         "009_session_images.sql",
         "010_sdk_approval.sql",
+        "011_feishu_reports.sql",
     ]
     async with engine.begin() as conn:
         for name in names[: names.index(through) + 1]:
@@ -104,9 +105,10 @@ def test_v2_migration_only_touches_application_tables() -> None:
         "008_session_state.sql",
         "009_session_images.sql",
         "010_sdk_approval.sql",
+        "011_feishu_reports.sql",
     ):
         assert "agent_" not in _migration(name)
-    assert APP_SCHEMA_VERSION == 10
+    assert APP_SCHEMA_VERSION == 11
     assert _V2_TABLES <= APP_TABLES
     assert all(name.startswith("xiaowei_") for name in APP_TABLES)
 
@@ -163,7 +165,7 @@ async def test_existing_v5_needs_an_explicit_first_digest_key_binding(postgres_u
         "009_session_images.sql",
     ],
 )
-async def test_v6_to_v9_upgrade_to_v10_preserves_binding_rows_and_sdk_history(
+async def test_v6_to_v9_upgrade_to_v11_preserves_binding_rows_and_sdk_history(
     postgres_url: URL, through: str
 ) -> None:
     async with open_engine(secret(postgres_url)) as engine:
@@ -202,7 +204,7 @@ async def test_v6_to_v9_upgrade_to_v10_preserves_binding_rows_and_sdk_history(
         with pytest.raises(StorageVersionMismatchError):
             await check_storage(engine)
         assert await _version(engine) in (6, 7, 8, 9)
-        assert await upgrade_storage(engine, digest_key=_DIGEST_KEY) == 10
+        assert await upgrade_storage(engine, digest_key=_DIGEST_KEY) == 11
         # 升级与新版启动是不同进程；丢弃 ALTER TABLE 前准备的 SELECT * 查询缓存。
         await engine.dispose()
         assert "xiaowei_action" in await _tables(engine)
@@ -302,7 +304,7 @@ async def test_initialization_advances_the_schema_version(postgres_url: URL) -> 
     """全新初始化推进到当前版本。旧程序只接受各自版本由基线源码保证，这里不复制旧实现。"""
     async with open_engine(secret(postgres_url)) as engine:
         await initialize_storage(engine, digest_key=_DIGEST_KEY)
-        assert await _version(engine) == APP_SCHEMA_VERSION == 10
+        assert await _version(engine) == APP_SCHEMA_VERSION == 11
 
 
 async def test_failed_upgrade_rolls_back_completely(postgres_url: URL) -> None:

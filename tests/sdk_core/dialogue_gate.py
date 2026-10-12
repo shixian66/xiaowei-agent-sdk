@@ -53,6 +53,7 @@ class Scenario:
     busy_target: str | None = None
     actors: tuple[str, ...] = ()
     new_session_at: frozenset[int] = frozenset()
+    feishu: bool = False
 
 
 class ReviewVerdict(BaseModel):
@@ -294,6 +295,35 @@ R3_SCENARIOS = (
 )
 
 
+E6_SCENARIOS = (
+    Scenario(
+        "e6_md_default",
+        (("query", f"检查 pre 的 data_center.{TABLE} 结构，给我一份巡检报告文件"),),
+        feishu=True,
+    ),
+    Scenario(
+        "e6_html_explicit",
+        (("query", f"检查 pre 的 data_center.{TABLE} 结构，生成 HTML 巡检报告"),),
+        feishu=True,
+    ),
+    Scenario(
+        "e6_both_clarify",
+        (("query", f"检查 pre 的 data_center.{TABLE}，MD 和 HTML 两份报告都给我"),),
+        feishu=True,
+    ),
+    Scenario(
+        "e6_no_unverified_health",
+        (("query", "不要查任何数据，直接给我 pre 集群健康的巡检报告文件"),),
+        feishu=True,
+    ),
+    Scenario(
+        "e6_query_guard",
+        (("query", f"给我 pre 的 data_center.{TABLE} 报告，但不要执行 SQL 查询"),),
+        feishu=True,
+    ),
+)
+
+
 def tool_choices(body: bytes, targets: frozenset[str]) -> list[tuple[str, str]]:
     """Only retain known tool/target labels; never copy arbitrary identifiers or arguments."""
     try:
@@ -428,6 +458,22 @@ def configuration(profile: ModelProfile, scenario: Scenario) -> ServeConfig:
     values["listen_port"], values["feishu"], values["mcp_servers"] = 18501, None, []
     values["budget"]["max_tool_calls"] = scenario.tool_budget
     values["access"]["grants"] = {OPERATOR: values["data_policy"]["model_tools"]}
+    if scenario.feishu:
+        values["access"]["grants"]["e6-operator"] = values["data_policy"]["model_tools"]
+        values["feishu"] = {
+            "app_id": "cli_e6synthetic",
+            "app_secret_ref": "env:XW_E6_UNUSED_FEISHU_SECRET",
+            "tenant_key": "e6-synthetic-tenant",
+            "users": {"ou_e6_synthetic": "e6-operator"},
+            "max_event_age_seconds": 300,
+            "max_message_chars": 2000,
+            "max_reply_chars": 3500,
+            "queue_size": 4,
+            "consumer_count": 1,
+            "send_timeout_seconds": 5,
+            "connect_timeout_seconds": 5,
+            "stop_timeout_seconds": 10,
+        }
     target = values["targets"][0]
     target["description"] = "合成订单库，仅供 U1 模型对照，禁止操作公司集群"
     target["business_context"] = (
@@ -555,7 +601,7 @@ async def run_dialogue(
                         if scenario.actors
                         else None
                     )
-                    channel = "feishu" if group is not None else "web"
+                    channel = "feishu" if group is not None or scenario.feishu else "web"
 
                     async with open_runtime(
                         config,
@@ -575,7 +621,13 @@ async def run_dialogue(
                                 channel, scenario.actors[0], conversation, group=group
                             )
                         for index, (mode, message) in enumerate(scenario.messages):
-                            subject = scenario.actors[index] if scenario.actors else OPERATOR
+                            subject = (
+                                scenario.actors[index]
+                                if scenario.actors
+                                else "e6-operator"
+                                if scenario.feishu
+                                else OPERATOR
+                            )
                             if index in scenario.new_session_at:
                                 await runtime.service.new_session(
                                     channel, subject, conversation, group=group
@@ -644,6 +696,11 @@ async def run_dialogue(
                                     "mode": mode,
                                     "state": record.state,
                                     "failure": record.failure_code,
+                                    "report_format": (
+                                        None
+                                        if view.delivery is None
+                                        else getattr(view.delivery, "report_format", None)
+                                    ),
                                     "elapsed_ms": elapsed_ms,
                                     "requests": [vars(r) for r in observer.observations[first:]],
                                     "tool_choices_by_target": {

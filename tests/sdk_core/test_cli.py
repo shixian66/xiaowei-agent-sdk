@@ -11,6 +11,7 @@ console script ``xiaowei`` 与 ``python -m xiaowei`` 各自在独立进程中运
 Task 9。成功轮次与飞书路径在 ``test_runtime.py`` 中经同一装配（替换最底层 I/O）验证。
 """
 
+import argparse
 import asyncio
 import json
 import logging
@@ -59,6 +60,23 @@ ENTRIES = {
 CANARY = "xw-cli-canary-41f9"
 ENDPOINT = "xw-endpoint-canary-7c2e"  # 只出现在模型端点路径中
 PRESET = {"OPENAI_AGENTS_DONT_LOG_MODEL_DATA": "0", "OPENAI_AGENTS_DONT_LOG_TOOL_DATA": "false"}
+
+
+@pytest.mark.asyncio
+async def test_unknown_resend_tells_operator_to_check_manually(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    async def unknown(*args: object, **kwargs: object) -> str:
+        return "unknown"
+
+    monkeypatch.setattr(runtime, "resend", unknown)
+    args = argparse.Namespace(
+        command="requests", subject="alice", chat="oc_test", group=False, message="om_unknown"
+    )
+    assert await cli_module._run(None, args) == 1  # type: ignore[arg-type]
+    out, err = capsys.readouterr()
+    assert out.strip() == "om_unknown unknown"
+    assert "结果不明" in err and "人工核实" in err
 
 
 @pytest.fixture(autouse=True)
