@@ -553,8 +553,8 @@ def test_different_image_upgrade_rollback_and_paired_restore(
             "storage",
             "upgrade",
         )
-        assert migrated.returncode == 0 and migrated.stdout.strip() == "storage version 7"
-        assert _pg(pg_id, "SELECT version FROM xiaowei_schema_version").stdout.strip() == "7"
+        assert migrated.returncode == 0 and migrated.stdout.strip() == "storage version 8"
+        assert _pg(pg_id, "SELECT version FROM xiaowei_schema_version").stdout.strip() == "8"
         (active / "compose.next.yaml").replace(active / "compose.yaml")
         (active / "release.next.json").replace(active / "release.json")
         upgraded = _compose(
@@ -851,7 +851,7 @@ def test_container_migration_v4_to_v5_to_v6_and_old_program_refusal(
         )
         assert (
             migrated_current.returncode == 0
-            and migrated_current.stdout.strip() == "storage version 7"
+            and migrated_current.stdout.strip() == "storage version 8"
         )
         preserved = _pg(
             pg_id,
@@ -861,13 +861,13 @@ def test_container_migration_v4_to_v5_to_v6_and_old_program_refusal(
             "(SELECT count(*) FROM xiaowei_session WHERE owner_kind = 'group') || ':' || "
             "(SELECT count(*) FROM xiaowei_evidence) FROM xiaowei_schema_version",
         )
-        assert preserved.returncode == 0 and preserved.stdout.strip() == "7:1:1:1:2"
+        assert preserved.returncode == 0 and preserved.stdout.strip() == "8:1:1:1:2"
 
         _replace_app_image(directory, runtime_image, v5_image)
         old_upgrade = _historical_cli(directory, "storage", "upgrade")
         old_serve = _historical_cli(directory, "serve")
         assert old_upgrade.returncode == old_serve.returncode == 1
-        assert _pg(pg_id, "SELECT version FROM xiaowei_schema_version").stdout.strip() == "7"
+        assert _pg(pg_id, "SELECT version FROM xiaowei_schema_version").stdout.strip() == "8"
 
         restored = _restore(directory, pre_v6, "xiaowei_v5_rollback")
         assert restored.returncode == 0, restored.stderr.decode(errors="replace")
@@ -898,7 +898,7 @@ def test_container_migration_v4_to_v5_to_v6_and_old_program_refusal(
         )
         assert unknown.returncode == 1
         assert _pg(pg_id, "SELECT version FROM xiaowei_schema_version").stdout.strip() == "999"
-        assert _pg(pg_id, "UPDATE xiaowei_schema_version SET version = 7").returncode == 0
+        assert _pg(pg_id, "UPDATE xiaowei_schema_version SET version = 8").returncode == 0
     finally:
         _compose(directory, "down", "-v", "--remove-orphans", timeout=60)
         docker("volume", "rm", "-f", volume)
@@ -1036,8 +1036,8 @@ def test_feishu_users_upgrade_rollback_restores_the_config_the_old_image_reads(
             "storage",
             "upgrade",
         )
-        assert migrated.returncode == 0 and migrated.stdout.strip() == "storage version 7"
-        assert _pg(postgres_id, "SELECT version FROM xiaowei_schema_version").stdout.strip() == "7"
+        assert migrated.returncode == 0 and migrated.stdout.strip() == "storage version 8"
+        assert _pg(postgres_id, "SELECT version FROM xiaowei_schema_version").stdout.strip() == "8"
         switched = _run_block(blocks["switch"], shims, log)
         assert switched.returncode == 0, switched.stderr
 

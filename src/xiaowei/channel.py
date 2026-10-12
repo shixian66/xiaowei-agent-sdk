@@ -466,8 +466,36 @@ class ResultDelivery:
     def _receipt(record: RequestRecord) -> Delivery:
         if record.failure_code is None:  # 数据库约束保证不会发生
             raise ResultUnavailableError
+        snapshot = record.session_state
+        content = _RECEIPTS[record.failure_code]
+        notice = None
+        if snapshot is not None:
+            messages = {
+                "history_turn_limit": (
+                    "会话已达交互轮数上限。请新建会话继续；之前的上下文不会自动带过去。"
+                ),
+                "history_bytes_limit": "会话历史已达容量上限。请新建会话，并补充目标和关键线索。",
+                "expired": "会话已超过保留期限。请新建会话；原历史不能继续回放。",
+                "binding_changed": "模型或数据策略已变化。请新建会话。",
+                "unavailable": "会话历史不能安全继续，请新建会话；已执行操作不会自动重试。",
+            }
+            if snapshot.reason is None:
+                raise ResultUnavailableError
+            content = messages[snapshot.reason]
+            if snapshot.reason == "history_bytes_limit" and snapshot.phase == "before_commit":
+                content = (
+                    "本轮执行后历史超出容量，回答未保存/交付，会话已封存；"
+                    "已执行的工具不会自动重试。"
+                )
+            observation = [f"本轮结束时（{snapshot.observed_at.isoformat()}）"]
+            if snapshot.committed_turns is not None:
+                observation.append(f"已提交 {snapshot.committed_turns}/{snapshot.turn_limit} 轮")
+            if snapshot.replay_bytes is not None:
+                observation.append(f"完整回放 {snapshot.replay_bytes}/{snapshot.byte_limit} 字节")
+            action = "点击“新建会话”" if record.channel == "web" else "发送 /新建"
+            notice = "；".join(observation) + f"。{action}；新建上下文不等于立即删除保存记录。"
         return Delivery(
-            content=_RECEIPTS[record.failure_code], evidence_ids=(), channel=record.channel
+            content=content, evidence_ids=(), channel=record.channel, session_notice=notice
         )
 
 
@@ -595,7 +623,9 @@ class ChannelService:
                 )
                 answer = await self._app.run_turn(self._context(record, decision), receipt.message)
             except TurnError as exc:
-                return await self._store.fail(record, _FAILURE_CODES[exc.reason])
+                return await self._store.fail(
+                    record, _FAILURE_CODES[exc.reason], session_state=exc.session_state
+                )
             except asyncio.CancelledError:
                 # 运行结果与 Session 状态不明：不在取消中补写，交给重启恢复。
                 self._store.readiness.lock("turn_cancelled")

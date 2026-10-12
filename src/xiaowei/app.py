@@ -81,6 +81,7 @@ from xiaowei.models import (
     ClusterId,
     Label,
     RunContext,
+    SessionSnapshot,
     ToolId,
     TurnAnswer,
 )
@@ -265,11 +266,13 @@ class TurnError(Exception):
         *,
         answer_reject: AnswerRejectCode | None = None,
         tool_error: StarRocksErrorCode | Literal["mcp_error", "other"] | None = None,
+        session_state: SessionSnapshot | None = None,
     ) -> None:
         super().__init__(message or _MESSAGES[reason])
         self.reason = reason
         self.answer_reject = answer_reject
         self.tool_error = tool_error
+        self.session_state = session_state
 
 
 class DataPolicy(BaseModel):
@@ -626,11 +629,11 @@ class Application:
         )
         # 先单独校验回答，使拒绝原因明确；提交时 Session 仍会用同一验证器再校验一次。
         await self._evidence.validate_answer(validated, ctx)
-        await session.commit_validated(
+        snapshot = await session.commit_validated(
             validated.context_evidence, monitoring_failures=validated.monitoring_failures
         )
         _stage(turn, "committed", started)
-        return validated
+        return validated.model_copy(update={"session_state": snapshot})
 
     def _tools_for(self, ctx: RunContext) -> list[Tool]:
         """本轮 Agent 的工具：可信范围内的本地工具与 MCP 工具，列表只属于这一轮。"""
@@ -664,8 +667,9 @@ def _turn_error(exc: Exception) -> TurnError:
         isinstance(e, (SessionUnverifiableError, EvidenceUnverifiableError)) for e in _causes(exc)
     ):
         return TurnError("scope_unverifiable")
-    if isinstance(exc, SessionUnavailableError):
-        return TurnError("session_unavailable", str(exc))
+    for error in _causes(exc):
+        if isinstance(error, SessionUnavailableError):
+            return TurnError("session_unavailable", str(error), session_state=error.snapshot)
     if isinstance(exc, SessionItemRejectedError):
         return TurnError("content_rejected", str(exc))
     if isinstance(exc, (SessionStoreError, EvidenceStoreError)):
@@ -822,6 +826,9 @@ def _stage(
     elapsed_ms = int((time.monotonic() - started) * 1000)
     fields: tuple[object, ...] = (turn, stage, reason, elapsed_ms)
     message = "turn=%s stage=%s reason=%s elapsed_ms=%d"
+    if reason == "session_unavailable" and detail is not None and detail.session_state is not None:
+        message += " session_reject=%s"
+        fields += (detail.session_state.reason or "unavailable",)
     if reason == "model_failed" and cause is not None:
         kind, status, reject_reason = _model_failure_details(cause)
         message += " error_kind=%s http_status=%s"
