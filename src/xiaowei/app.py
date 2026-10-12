@@ -404,6 +404,10 @@ class Application:
         """全局并发上限：所有渠道的轮次共同受此约束。"""
         return self._config.max_concurrent_turns
 
+    def admits_input(self, text: str) -> bool:
+        """渠道在创建请求前复用本模型 Profile 的文字输入策略。"""
+        return self._data_policy.input.admits(text)
+
     @property
     def available_tools(self) -> frozenset[str]:
         """当前实际可用的工具：本地工具与已连接并核对通过的 MCP 工具。"""
