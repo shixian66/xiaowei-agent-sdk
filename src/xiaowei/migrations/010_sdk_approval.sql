@@ -29,7 +29,7 @@ CREATE INDEX xiaowei_action_run_expiry_idx ON xiaowei_action_run(expires_at);
 ALTER TABLE xiaowei_request DROP CONSTRAINT xiaowei_request_state_check;
 ALTER TABLE xiaowei_request ADD CONSTRAINT xiaowei_request_state_check
     CHECK(state IN ('accepted', 'running', 'paused', 'completed', 'failed', 'interrupted'));
--- 前八个迁移实测的原answer/state约束；保持简单SQL迁移，不改变拆分器。
+-- 前九个迁移实测的原answer/state约束；保持简单SQL迁移，不改变拆分器。
 ALTER TABLE xiaowei_request DROP CONSTRAINT xiaowei_request_check;
 ALTER TABLE xiaowei_request ADD CONSTRAINT xiaowei_request_answer_state_check
     CHECK((state IN ('completed', 'paused')) = (answer IS NOT NULL));
@@ -41,4 +41,4 @@ ALTER TABLE xiaowei_request ADD CONSTRAINT xiaowei_request_failure_code_check CH
         'action_session_invalid','action_upgrade_invalidated','action_expired',
         'action_unresumable')
 );
-UPDATE xiaowei_schema_version SET version = 9;
+UPDATE xiaowei_schema_version SET version = 10;

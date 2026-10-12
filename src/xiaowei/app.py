@@ -27,6 +27,7 @@ Agent（工具集合只属于这一轮）→ 原生 ``Runner.run``（SDK Session
 from __future__ import annotations
 
 import asyncio
+import base64
 import hashlib
 import json
 import logging
@@ -53,10 +54,10 @@ from agents import (
     Tool,
     ToolApprovalItem,
     ToolExecutionConfig,
+    TResponseInputItem,
 )
 from agents.exceptions import ModelBehaviorError, ModelRefusalError, ModelTimeoutError, UserError
 from agents.extensions.memory import SQLAlchemySession
-from agents.items import TResponseInputItem
 from openai import APIConnectionError, APIStatusError, APITimeoutError
 from openai.types.responses import ResponseFunctionToolCall
 from pydantic import BaseModel, ConfigDict, Field, model_validator
@@ -74,6 +75,7 @@ from xiaowei.evidence import (
     scope_checks,
 )
 from xiaowei.governance import Execute, GovernedTools, ToolExecutionError, TurnLedger, TurnRuns
+from xiaowei.image_input import ImageStoreError, SessionImageStore
 from xiaowei.mcp import MCPIntegration
 from xiaowei.model_api import (
     ModelBinding,
@@ -380,9 +382,12 @@ class Application:
         mcp: MCPIntegration | None = None,
         clock: Callable[[], datetime],
         actions: ActionService | None = None,
+        images: SessionImageStore | None = None,
     ) -> None:
         if not isinstance(model, ModelBinding):
             raise TypeError("应用配置：模型必须是 open_model 生成的运行绑定")
+        if model.profile.image_input_enabled and images is None:
+            raise ValueError("图片模型必须装配受控原图存储")
         if mcp is not None and mcp.governance is not governance:
             raise ValueError("应用配置：MCP 接入必须使用同一个治理对象")
         data_policy = config.data_policies.get(model.profile.data_policy_id)
@@ -432,6 +437,7 @@ class Application:
         self._evidence = governance.evidence
         self._mcp = mcp
         self._clock = clock
+        self.images = images
         self._run_config = safe_run_config()
         self._active: set[str] = set()
 
@@ -566,8 +572,47 @@ class Application:
         _stage(turn, "storage_ready", started)
 
         approval_requests = approval_requests if approval_requests is not None else {}
-        agent = self._agent(ctx, approval_requests)
-        session = self._session(ctx)
+        # 恢复只沿用暂停时的 RunState；有图会话不提供执行请求，因此不会有含原图的检查点。
+        saved_images = (
+            await self.images.load(ctx.identity)
+            if self.images is not None and native is None
+            else []
+        )
+        if saved_images and not self._model.profile.image_input_enabled:
+            raise TurnError("session_unavailable")
+        user_input: str | list[TResponseInputItem] = message
+        if saved_images:
+            from xiaowei.actions import EXECUTION_SUFFIX
+
+            # RunState 会保存整轮输入；原图只留应用表，有图会话的动作只能提出、不能进入审批。
+            ctx = ctx.model_copy(
+                update={
+                    "tool_scope": frozenset(
+                        t for t in ctx.tool_scope if not t.endswith(EXECUTION_SUFFIX)
+                    )
+                }
+            )
+            pieces: list[dict[str, str]] = [{"type": "input_text", "text": message}]
+            for number, saved in enumerate(saved_images, 1):
+                pieces.append(
+                    {
+                        "type": "input_text",
+                        "text": f"\n已获准原图 {number}，来源摘要 {saved.source_digest}：\n",
+                    }
+                )
+                pieces.append(
+                    {
+                        "type": "input_image",
+                        "image_url": (
+                            f"data:{saved.mime_type};base64,"
+                            + base64.b64encode(saved.data).decode("ascii")
+                        ),
+                        "detail": "auto",
+                    }
+                )
+            user_input = [cast(TResponseInputItem, {"role": "user", "content": pieces})]
+        agent = self._agent(ctx, approval_requests, images=bool(saved_images))
+        session = self._session(ctx, allow_image_parts=bool(saved_images))
 
         # 每轮新建 PolicySession：失败或取消时，未提交的暂存项随对象一起丢弃。
         async def finish_on_limit(
@@ -624,7 +669,7 @@ class Application:
 
         result = await Runner.run(
             agent,
-            native if native is not None else message,
+            native if native is not None else user_input,
             context=ctx,
             session=None if native is not None else session,
             max_turns=ctx.budget.max_turns,
@@ -695,7 +740,11 @@ class Application:
         return validated.model_copy(update={"session_state": snapshot})
 
     def _agent(
-        self, ctx: RunContext, approval_requests: dict[str, int] | None = None
+        self,
+        ctx: RunContext,
+        approval_requests: dict[str, int] | None = None,
+        *,
+        images: bool = False,
     ) -> Agent[RunContext]:
         action_note = ""
         if (
@@ -704,10 +753,14 @@ class Application:
             and ctx.identity.owner.kind == "group"
             and ctx.tool_scope & self.actions.available_tool_ids
         ):
+            request = (
+                "本会话含图片，不能请求执行；需要执行时告知用户先 /新建 会话后重新提出。"
+                if images
+                else "需要执行时再以Action ID调用request_action_execution，SDK暂停等待逐次群审批。"
+            )
             action_note = (
                 "\n本轮提供的监控动作工具用于提出动作或查看状态。"
-                "提出工具只准备材料、尚未写入。需要执行时再以Action ID调用"
-                "request_action_execution，SDK暂停等待逐次群审批。"
+                f"提出工具只准备材料、尚未写入。{request}"
                 "只有有权群成员明确批准才可恢复；不能把自然语言或历史批准当成本次批准。"
                 "调查顺序和是否提出由你根据本轮问题与证据决定。"
                 "需要确认已提动作的执行结果时可按 ID 查状态，不能凭历史提案声称执行成功。"
@@ -748,7 +801,7 @@ class Application:
         )
         return hashlib.sha256(json.dumps(parts, separators=(",", ":")).encode()).hexdigest()
 
-    def _session(self, ctx: RunContext) -> PolicySession:
+    def _session(self, ctx: RunContext, *, allow_image_parts: bool = False) -> PolicySession:
         return PolicySession(
             SQLAlchemySession(ctx.identity.session_id, engine=self._engine),
             ctx,
@@ -758,6 +811,7 @@ class Application:
             input_policy=self._data_policy.input,
             engine=self._engine,
             clock=self._clock,
+            allow_image_parts=allow_image_parts,
         )
 
     async def _paused(
@@ -1148,6 +1202,8 @@ def _turn_error(exc: Exception) -> TurnError:
             return TurnError("session_unavailable", str(error), session_state=error.snapshot)
     if isinstance(exc, SessionItemRejectedError):
         return TurnError("content_rejected", str(exc))
+    if isinstance(exc, ImageStoreError):
+        return TurnError("session_unavailable")
     if isinstance(exc, (SessionStoreError, EvidenceStoreError)):
         return TurnError("storage_failed", str(exc))
     for error in _causes(exc):

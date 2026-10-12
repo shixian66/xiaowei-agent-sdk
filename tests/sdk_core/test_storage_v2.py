@@ -71,7 +71,8 @@ async def _install_v1(engine: AsyncEngine, *, through: str = "001_initial.sql") 
         "006_digest_key_binding.sql",
         "007_monitoring_actions.sql",
         "008_session_state.sql",
-        "009_sdk_approval.sql",
+        "009_session_images.sql",
+        "010_sdk_approval.sql",
     ]
     async with engine.begin() as conn:
         for name in names[: names.index(through) + 1]:
@@ -101,10 +102,11 @@ def test_v2_migration_only_touches_application_tables() -> None:
         "006_digest_key_binding.sql",
         "007_monitoring_actions.sql",
         "008_session_state.sql",
-        "009_sdk_approval.sql",
+        "009_session_images.sql",
+        "010_sdk_approval.sql",
     ):
         assert "agent_" not in _migration(name)
-    assert APP_SCHEMA_VERSION == 9
+    assert APP_SCHEMA_VERSION == 10
     assert _V2_TABLES <= APP_TABLES
     assert all(name.startswith("xiaowei_") for name in APP_TABLES)
 
@@ -152,8 +154,16 @@ async def test_existing_v5_needs_an_explicit_first_digest_key_binding(postgres_u
         assert await _version(engine) == APP_SCHEMA_VERSION
 
 
-@pytest.mark.parametrize("through", ["006_digest_key_binding.sql", "007_monitoring_actions.sql"])
-async def test_v6_v7_to_v9_preserves_binding_rows_and_sdk_history(
+@pytest.mark.parametrize(
+    "through",
+    [
+        "006_digest_key_binding.sql",
+        "007_monitoring_actions.sql",
+        "008_session_state.sql",
+        "009_session_images.sql",
+    ],
+)
+async def test_v6_to_v9_upgrade_to_v10_preserves_binding_rows_and_sdk_history(
     postgres_url: URL, through: str
 ) -> None:
     async with open_engine(secret(postgres_url)) as engine:
@@ -179,23 +189,25 @@ async def test_v6_v7_to_v9_preserves_binding_rows_and_sdk_history(
         result = await GovernedTools(evidence).invoke(ctx, request(), RecordingAdapter().execute)
         original_projection = await evidence.project(result.evidence_id, ctx, "web")
         async with engine.connect() as conn:
-            before = [
-                tuple(row) for row in await conn.execute(text("SELECT * FROM xiaowei_request"))
-            ]
+            request_rows = text(
+                "SELECT channel, request_key, owner_kind, owner_id, subject_id, "
+                "conversation_key, session_id, turn_id, mode, message_digest, state, "
+                "failure_code, delivery, created_at, updated_at, expires_at "
+                "FROM xiaowei_request"
+            )
+            before = [tuple(row) for row in await conn.execute(request_rows)]
             binding = [
                 tuple(row) for row in await conn.execute(text("SELECT * FROM xiaowei_installation"))
             ]
         with pytest.raises(StorageVersionMismatchError):
             await check_storage(engine)
-        assert await _version(engine) in (6, 7)
-        assert await upgrade_storage(engine, digest_key=_DIGEST_KEY) == 9
+        assert await _version(engine) in (6, 7, 8, 9)
+        assert await upgrade_storage(engine, digest_key=_DIGEST_KEY) == 10
         # 升级与新版启动是不同进程；丢弃 ALTER TABLE 前准备的 SELECT * 查询缓存。
         await engine.dispose()
         assert "xiaowei_action" in await _tables(engine)
         async with engine.connect() as conn:
-            assert [
-                tuple(row)[:-1] for row in await conn.execute(text("SELECT * FROM xiaowei_request"))
-            ] == before
+            assert [tuple(row) for row in await conn.execute(request_rows)] == before
             assert await conn.scalar(text("SELECT session_state FROM xiaowei_request")) is None
             assert [
                 tuple(row) for row in await conn.execute(text("SELECT * FROM xiaowei_installation"))
@@ -290,7 +302,7 @@ async def test_initialization_advances_the_schema_version(postgres_url: URL) -> 
     """全新初始化推进到当前版本。旧程序只接受各自版本由基线源码保证，这里不复制旧实现。"""
     async with open_engine(secret(postgres_url)) as engine:
         await initialize_storage(engine, digest_key=_DIGEST_KEY)
-        assert await _version(engine) == APP_SCHEMA_VERSION == 9
+        assert await _version(engine) == APP_SCHEMA_VERSION == 10
 
 
 async def test_failed_upgrade_rolls_back_completely(postgres_url: URL) -> None:
@@ -647,13 +659,16 @@ async def test_a_lock_connection_closed_before_watching_is_a_lock_loss(postgres_
             await conn.close()
 
 
-async def test_v8_upgrade_invalidates_only_pending_and_recovery_does_not_replay(postgres_url: URL):
+@pytest.mark.parametrize("through", ["008_session_state.sql", "009_session_images.sql"])
+async def test_v8_v9_upgrade_invalidates_only_pending_and_recovery_does_not_replay(
+    postgres_url: URL, through: str
+):
     from datetime import UTC, datetime
 
     from xiaowei.channel_store import ChannelStore
 
     async with open_engine(secret(postgres_url)) as engine:
-        await _install_v1(engine, through="008_session_state.sql")
+        await _install_v1(engine, through=through)
         async with engine.begin() as conn:
             await storage_module._write_digest_key_binding(conn, _DIGEST_KEY)
             for state in ("pending", "succeeded", "unknown", "executing"):
@@ -678,7 +693,7 @@ async def test_v8_upgrade_invalidates_only_pending_and_recovery_does_not_replay(
                 r.action_id: tuple(r)
                 for r in await conn.execute(text("SELECT * FROM xiaowei_action"))
             }
-        assert await upgrade_storage(engine, digest_key=_DIGEST_KEY) == 9
+        assert await upgrade_storage(engine, digest_key=_DIGEST_KEY) == 10
         await engine.dispose()
         async with engine.connect() as conn:
             after = {
@@ -691,7 +706,7 @@ async def test_v8_upgrade_invalidates_only_pending_and_recovery_does_not_replay(
         )
         for state in ("succeeded", "unknown", "executing"):
             assert after[state][:-1] == before[state] and after[state][-1] is None
-        assert await upgrade_storage(engine, digest_key=_DIGEST_KEY) == 9
+        assert await upgrade_storage(engine, digest_key=_DIGEST_KEY) == 10
         ready = Readiness()
         store = ChannelStore(
             engine,

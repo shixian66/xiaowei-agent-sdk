@@ -13,7 +13,7 @@ from typing import Literal
 import httpx2
 from lark_channel.core.const import FEISHU_DOMAIN, LARK_DOMAIN
 
-from xiaowei.config import FeishuConfig, resolve_secret_ref
+from xiaowei.config import FeishuConfig, SecretRefError, resolve_secret_ref
 
 ResourceKind = Literal["image", "file"]
 ResourceErrorCode = Literal[
@@ -90,6 +90,8 @@ class LarkResourceDownloader:
                         if not content:
                             raise ResourceDownloadError("resource_unavailable")
                         return content
+        except SecretRefError:
+            raise ResourceDownloadError("authentication_failed") from None
         except TimeoutError:
             raise ResourceDownloadError("timeout") from None
         except httpx2.TimeoutException:

@@ -120,6 +120,51 @@ async def test_approval_without_native_pause_has_no_legacy_write_fallback(action
     assert actions.adapter.calls == []
 
 
+async def test_image_session_offers_no_execution_request_and_proposal_stays_unapprovable(
+    actions, monkeypatch
+):
+    """RunState 会保存整轮输入；原图只留应用表，有图会话不进入 SDK 审批暂停。"""
+    from tests.sdk_core.test_feishu_images import _png
+
+    from xiaowei.image_input import SavedImage
+
+    env = actions.env
+    digest = "d" * 64
+
+    class Images:
+        async def load(self, identity):
+            return [SavedImage(digest, _png(), "image/png")]
+
+    monkeypatch.setattr(env.app, "images", Images())
+    monkeypatch.setattr(
+        env.app._model,
+        "_profile",
+        env.app._model.profile.model_copy(update={"image_input_enabled": True}),
+    )
+    script = env.scripts.add(
+        attributed(A, "有图提出") + f"\n已获准原图 1，来源摘要 {digest}：\n",
+        tool_call(f"{SOURCE}__propose_change", value="after"),
+        cite("仅形成提案"),
+    )
+    async with running(env, max_reply_chars=3500) as group:
+        await group.ask("有图提出", message_id="om_image_proposal")
+        action_id = await actions.one()
+        await group.ask(f"/批准 {action_id}", sender=B, message_id="om_image_approve")
+    seen = env.scripts.tools_seen(script)
+    assert seen and all(GATE not in names for names in seen)
+    assert f"{SOURCE}__propose_change" in seen[0]
+    assert "本会话含图片，不能请求执行" in env.scripts.calls[script][0].instructions
+    assert env.model_calls(script) == 2
+    assert await env.rows("SELECT state, failure_code FROM xiaowei_action") == [
+        ("rejected", "action_unresumable")
+    ]
+    assert await env.rows("SELECT COUNT(*) FROM xiaowei_action_run") == [(0,)]
+    assert await env.rows(
+        "SELECT failure_code FROM xiaowei_request WHERE reply_message_id='om_image_approve'"
+    ) == [("action_unresumable",)]
+    assert actions.adapter.calls == []
+
+
 async def test_proposal_without_sdk_request_is_terminal_and_cannot_be_approved(actions):
     env = actions.env
     env.scripts.add(
@@ -687,7 +732,7 @@ async def test_migrated_old_action_has_dedicated_receipt_and_no_resume_or_write(
     async with running(env, max_reply_chars=3500) as group:
         await group.ask("旧提案")
         aid = await actions.one()
-        # 此用例验证迁移产物的入口；迁移的真实v8输入另在test_storage_v2实跑。
+        # 此用例验证迁移产物的入口；迁移的真实v8/v9输入另在test_storage_v2实跑。
         async with env.engine.begin() as conn:
             await conn.execute(
                 text(

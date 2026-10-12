@@ -88,6 +88,7 @@ from xiaowei.config import (
 from xiaowei.evidence import EvidenceStore
 from xiaowei.feishu import FeishuGateway, LarkChannel, LarkTransport, lark_channel, send_delivery
 from xiaowei.governance import GovernedTools, Projection, ToolCatalog, ToolPolicy
+from xiaowei.image_input import SessionImageStore
 from xiaowei.mcp import MCPIntegration
 from xiaowei.model_api import ModelProfile, open_model
 from xiaowei.models import (
@@ -311,6 +312,13 @@ class ServeConfig(_Config):
         if storage.request_retention_seconds > storage.evidence_retention_seconds:
             raise ValueError("可重发结果的保留期不得长于证据保留期")
         if self.feishu is not None:
+            if self.feishu.image_input_enabled and not self.model.image_input_enabled:
+                raise ValueError("启用飞书图片输入前须显式启用受审定的 Vertex 图片 Profile")
+            if (
+                self.feishu.image_input_enabled
+                and storage.request_retention_seconds < self.session_limits.retention_seconds
+            ):
+                raise ValueError("图片请求保留期不得短于会话保留期")
             if self.web.operator_id in self.feishu.users.values():
                 raise ValueError("Web 操作者与飞书用户不能使用同一个内部 subject")
             # 空 grant 在 StaticAccess 中等于无权限；已登记却无权限的用户在启动前拒绝，不静默失效。
@@ -1463,6 +1471,9 @@ async def open_runtime(
                 ],
                 clock=clock,
             ),
+            images=SessionImageStore(engine, clock=clock)
+            if config.model.image_input_enabled
+            else None,
         )
         service = ChannelService(app, parts.results)
         yield Runtime(engine, lock, readiness, recovery, service, mcp, alertmanagers)
@@ -1727,7 +1738,11 @@ async def _start_feishu(
         return None
     from xiaowei.feishu_resource import LarkResourceDownloader
 
-    downloader = LarkResourceDownloader(feishu).download if feishu.document_input_enabled else None
+    downloader = (
+        LarkResourceDownloader(feishu).download
+        if feishu.document_input_enabled or feishu.image_input_enabled
+        else None
+    )
     gateway = FeishuGateway(
         runtime.service,
         feishu,
