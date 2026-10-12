@@ -106,7 +106,7 @@ _call_ids = itertools.count(1)
 
 def _user_text(call: ModelCall) -> str:
     content = [i for i in call.input if i.get("role") == "user"][-1]["content"]
-    return content if isinstance(content, str) else "".join(p["text"] for p in content)
+    return content if isinstance(content, str) else "".join(p.get("text", "") for p in content)
 
 
 def evidence_in(call: ModelCall) -> list[str]:

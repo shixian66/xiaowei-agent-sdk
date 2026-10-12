@@ -105,6 +105,7 @@ ToolRejectCode = Literal[
 
 
 ToolRejectHint = Literal[
+    "action_request",
     "restart_cursor",
     "search_scope",
     "search_keyword",
@@ -230,7 +231,7 @@ class ToolPolicy:
     required: tuple[str, ...] = ()
     data_scope: str | None = None
     fact_note: str | None = None
-    effect: Literal["read", "propose", "write"] = "read"
+    effect: Literal["read", "propose", "approval", "write"] = "read"
     group_only: bool = False
 
 
@@ -350,6 +351,14 @@ class TurnRuns:
     slot_retrying: frozenset[str] = frozenset()  # 跨工具/参数的在途独占。
 
 
+@dataclass(frozen=True)
+class TurnLedger:
+    """原轮已落定记账；随 SDK RunState 同事务保存，无依赖/任务引用。"""
+
+    used: int
+    runs: TurnRuns
+
+
 class GovernedTools:
     """本地与 MCP 工具共用的治理入口；依赖由应用装配，``execute`` 只由应用绑定。
 
@@ -408,6 +417,22 @@ class GovernedTools:
         if (policy.group_only or policy.effect != "read") and not _group_context(ctx):
             raise ToolRejectedError("仅指定飞书群可使用此工具", code="not_allowed")
         arguments = normalize_arguments(policy, request.arguments)
+        if policy.effect == "approval":
+            approval = ctx.approved_action
+            # SDK 的 needs_approval=False 只跳过暂停；未经当前批准绑定的调用在这里
+            # 必须始终拒绝，且先于预算占用和 Adapter I/O。
+            if approval is None or approval.action_id != arguments.get("action_id"):
+                if self._used.get(_turn_key(ctx.identity), 0) + 2 > ctx.budget.max_tool_calls:
+                    raise ToolRejectedError(
+                        "本轮剩余工具额度不足以执行动作", code="budget_exhausted"
+                    )
+                raise ToolRejectedError("本轮执行请求未形成有效批准", hint="action_request")
+            if (
+                approval.approver is None
+                or approval.target_id != request.target_id
+                or approval.sdk_call_id != request.call_id
+            ):
+                raise ToolRejectedError("执行请求缺少本次 SDK 批准绑定", code="not_allowed")
         if policy.effect == "write":
             binding = ctx.approved_action
             from xiaowei.evidence import arguments_digest
@@ -426,7 +451,16 @@ class GovernedTools:
         ):
             raise ToolRejectedError("参数不符合工具契约")
         effective = request.model_copy(update={"arguments": arguments})
-        if not await self._currently_authorized(ctx.identity, contract):
+        principal = (
+            ctx.approved_action.approver
+            if policy.effect == "write"
+            and ctx.approved_action is not None
+            and ctx.approved_action.approver is not None
+            else ctx.identity
+        )
+        if principal.owner != ctx.identity.owner or principal.channel != ctx.identity.channel:
+            raise ToolRejectedError("批准主体归属不符", code="not_allowed")
+        if not await self._currently_authorized(principal, contract):
             raise ToolRejectedError("当前无权调用该工具", code="not_allowed")
         if any(
             failure.target_id == contract.target_id and failure.reason != "invalid_expression"
@@ -551,7 +585,8 @@ class GovernedTools:
                 )
             if not isinstance(observation, ToolObservation):
                 raise ToolExecutionError()
-            result = await self._evidence.record(ctx, effective, observation)
+            evidence_ctx = ctx.model_copy(update={"identity": principal})
+            result = await self._evidence.record(evidence_ctx, effective, observation)
             # 同一轮的并行调用可能已更新记录：取当前值再追加（两步之间没有 await）。
             runs = self._runs.get(key, TurnRuns())
             if repair_from is not None and repair_from == sum(
@@ -588,6 +623,24 @@ class GovernedTools:
     def turn_runs(self, identity: Identity) -> TurnRuns:
         """本轮已开始执行的调用与已交给模型的证据；I/O 前被拒绝的调用不在其中。"""
         return self._runs.get(_turn_key(identity), TurnRuns())
+
+    def checkpoint(self, identity: Identity) -> TurnLedger:
+        runs = self.turn_runs(identity)
+        if runs.slot_retrying:
+            raise ToolExecutionError()
+        return TurnLedger(self._used.get(_turn_key(identity), 0), runs)
+
+    def restore(self, ctx: RunContext, ledger: TurnLedger) -> None:
+        key = _turn_key(ctx.identity)
+        if (
+            key in self._used
+            or key in self._runs
+            or not 0 <= ledger.used <= ctx.budget.max_tool_calls
+        ):
+            raise ToolExecutionError()
+        if ledger.runs.slot_retrying:
+            raise ToolExecutionError()
+        self._used[key], self._runs[key] = ledger.used, ledger.runs
 
     def end_turn(self, identity: Identity) -> None:
         """轮次结束时由应用调用，清理该轮计数与记录。"""

@@ -57,7 +57,7 @@ from pydantic import (
 )
 from sqlalchemy.ext.asyncio import AsyncEngine
 
-from xiaowei.actions import ActionService, action_status_catalog
+from xiaowei.actions import ActionService, action_status_catalog, execution_requests
 from xiaowei.alertmanager import AlertmanagerAdapter, AlertmanagerConfig, alertmanager_catalog
 from xiaowei.app import (
     AppConfig,
@@ -1219,7 +1219,9 @@ class StaticAccess:
             subject_id=subject_id,
             owner=group.owner,
             target_ids=self._targets,
-            authorized_tools=shared.tools,
+            authorized_tools=execution_requests(
+                shared.tools, {t.partition("/")[0] for t in self._write_tools}
+            ),
             policy_version=self._version,
         )
 
@@ -1228,6 +1230,12 @@ class StaticAccess:
         if target_id not in self._targets:
             return False
         owner = identity.owner
+        if tool_id.endswith("/request_action_execution"):
+            if identity.owner.kind != "group" or target_id not in {
+                t.partition("/")[0] for t in self._write_tools
+            }:
+                return False
+            tool_id = f"{target_id}/get_action_status"
         if owner.kind == "group":
             shared = self._group
             if tool_id in self._write_tools:

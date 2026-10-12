@@ -109,7 +109,7 @@ from xiaowei.models import Delivery
 
 logger = logging.getLogger(__name__)
 
-_FINISHED = frozenset({"completed", "failed", "interrupted"})
+_FINISHED = frozenset({"completed", "paused", "failed", "interrupted"})
 
 QUEUED = "已收到，前面还有问题在处理，将按顺序回复"
 # 到期回执同时在途的上限：每条都要复核当前成员（一次成员目录查询）再发送；任务总数另受群等待
@@ -132,11 +132,12 @@ IMAGE_UNAVAILABLE = "图片暂时无法安全读取或保存；本轮未处理�
 IDENTITY_NOTICE_WINDOW = timedelta(minutes=10)
 
 _EVENT_TYPE = "im.message.receive_v1"
-_COMMANDS: Mapping[str, Mode | Literal["new", "approve"]] = {
+_COMMANDS: Mapping[str, Mode | Literal["new", "approve", "reject"]] = {
     "/查询": "query",
     "/诊断": "diagnose",
     "/新建": "new",
     "/批准": "approve",
+    "/拒绝": "reject",
 }
 _CLOCK_SKEW = timedelta(seconds=60)
 _MAX_ID_CHARS = 200  # 与 InboundRequest 的 Label 上限一致
@@ -385,7 +386,7 @@ def attributed(open_id: str, text: str) -> str:
     return f"{_AUTHOR}{alias}】\n{text.replace(_AUTHOR, _FORGED_AUTHOR)}"
 
 
-def _command(text: str) -> tuple[Mode | Literal["new", "approve"], str]:
+def _command(text: str) -> tuple[Mode | Literal["new", "approve", "reject"], str]:
     """消息首部的命令与剥离后的正文；普通文本是默认用途（由单 Agent 判断是否查询）。"""
     for name, kind in _COMMANDS.items():
         if text == name or (text.startswith(name) and text[len(name)].isspace()):
@@ -449,6 +450,7 @@ class _Job:
     # 不明结果影响）。
     notice: asyncio.Event | None = None
     action_id: str | None = None
+    approve: bool = True
 
 
 class FeishuGateway:
@@ -520,7 +522,7 @@ class FeishuGateway:
         if isinstance(message, _Unregistered):
             return None
         kind, body = _command(message.text)
-        if kind == "new" or kind == "approve" or not body:
+        if kind == "new" or kind == "approve" or kind == "reject" or not body:
             return None
         return self._request(message, kind, body)
 
@@ -566,7 +568,7 @@ class FeishuGateway:
             kind, body = _command(message.text)
             if kind == "new":
                 await self._new_session(message)
-            elif kind == "approve":
+            elif kind == "approve" or kind == "reject":
                 from uuid import UUID
 
                 try:
@@ -579,7 +581,14 @@ class FeishuGateway:
                             message, "仅在指定群 @小维 /批准 <Action ID>；本次未执行"
                         )
                 else:
-                    await self._accept(message, "query", f"/批准 {action_id}", action_id=action_id)
+                    command = "批准" if kind == "approve" else "拒绝"
+                    await self._accept(
+                        message,
+                        "query",
+                        f"/{command} {action_id}",
+                        action_id=action_id,
+                        approve=kind == "approve",
+                    )
             elif not body:
                 if self._first(message):
                     await self._notify(message, EMPTY_COMMAND)
@@ -735,6 +744,7 @@ class FeishuGateway:
         body: str,
         *,
         action_id: str | None = None,
+        approve: bool = True,
         image: tuple[str, ValidatedImage] | None = None,
     ) -> None:
         request = self._request(message, mode, body)
@@ -742,7 +752,7 @@ class FeishuGateway:
             receipt = await self._service.accept(request)
             if receipt.created and image is not None:
                 await self._service.save_image(receipt, request, *image)
-            job = replace(self._job(receipt, message), action_id=action_id)
+            job = replace(self._job(receipt, message), action_id=action_id, approve=approve)
             if receipt.created and self._plain < self._config.queue_size:
                 self._plain += 1
                 self._queue.put_nowait(job)
@@ -755,7 +765,7 @@ class FeishuGateway:
                 receipt = await self._service.accept(request)
                 if receipt.created and image is not None:
                     await self._service.save_image(receipt, request, *image)
-                job = replace(self._job(receipt, message), action_id=action_id)
+                job = replace(self._job(receipt, message), action_id=action_id, approve=approve)
                 placement, job = self._place(job) if receipt.created else (None, job)
         if placement is None:
             # 重投不再运行。只有已结束且投递仍为 pending 的记录进入首次发送竞争（交付时复核当前权限
@@ -903,7 +913,9 @@ class FeishuGateway:
                         if job.action_id is None:
                             await self._service.process(job.receipt)
                         else:
-                            await self._service.approve(job.receipt, job.action_id)
+                            await self._service.approve(
+                                job.receipt, job.action_id, approve=job.approve
+                            )
                     except ResultNotSavedError:
                         pass  # 保存失败路径已处理状态；下方投递仍需就绪与权限复核
                     await self._deliver(job)

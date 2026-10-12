@@ -83,22 +83,25 @@ DependencyVerifier = Callable[[str, Sequence[ObjectDependency]], Awaitable[Depen
 
 
 @dataclass
-class _ScopeChecks:
+class ScopeChecks:
     used: int = 0
 
 
-_SCOPE_CHECKS: ContextVar[_ScopeChecks | None] = ContextVar("xiaowei_scope_checks", default=None)
+_SCOPE_CHECKS: ContextVar[ScopeChecks | None] = ContextVar("xiaowei_scope_checks", default=None)
 
 
 @contextmanager
-def scope_checks() -> Iterator[None]:
+def scope_checks(used: int = 0) -> Iterator[ScopeChecks]:
     """一个请求共用的依赖复核计数，由应用在一轮的全部工作之外进入。
 
     SDK 在其中派生的任务复制 context，仍引用同一个计数；离开后不再保留，没有跨请求的状态。
     """
-    token = _SCOPE_CHECKS.set(_ScopeChecks())
+    if used < 0:
+        raise ValueError("复核额度不可为负")
+    checks = ScopeChecks(used)
+    token = _SCOPE_CHECKS.set(checks)
     try:
-        yield
+        yield checks
     finally:
         _SCOPE_CHECKS.reset(token)
 
@@ -182,6 +185,10 @@ class EvidenceUnavailableError(EvidenceError):
 
     def __init__(self) -> None:
         super().__init__(_UNAVAILABLE)
+
+
+class EvidencePermissionError(EvidenceUnavailableError):
+    """明确的当前权限拒绝；SDK恢复用其区分发起人撤权与存储/协议不可用。"""
 
 
 class EvidenceUnverifiableError(EvidenceError):
@@ -416,12 +423,20 @@ class EvidenceStore:
         records = await self._context_readable(ctx, channel, (*cited, *unshown), history=history)
 
         shown = [_shown(r, channel, self._fact_note(r)) for r in records[: len(cited)]]
+        # 已配对的SDK执行事实取代同一Action的待批材料；不重复强制展示旧材料挤掉结果。
+        outcomes = {
+            (item.data or {}).get("action_id")
+            for item in shown
+            if (c := self._catalog.contract(item.record.tool_id, item.record.target_id)) is not None
+            and self._catalog.policy_for(c).effect == "approval"
+        }
         facts: list[DeliveryFact] = []
         for item in shown:
             contract = self._catalog.contract(item.record.tool_id, item.record.target_id)
+            effect = self._catalog.policy_for(contract).effect if contract is not None else "read"
             complete = (
-                contract is not None and self._catalog.policy_for(contract).effect == "propose"
-            )
+                effect == "propose" and (item.data or {}).get("action_id") not in outcomes
+            ) or (effect == "approval" and item.record.identity.turn_id == ctx.identity.turn_id)
             fact = _fact(item, channel).model_copy(update={"requires_complete": complete})
             if views.get(fact.evidence_id) == "brief":
                 if item.record.identity.turn_id == ctx.identity.turn_id:
@@ -463,11 +478,7 @@ class EvidenceStore:
             facts=tuple(facts),
             analysis=tuple(answer.inferences),
             monitoring_notice=monitoring_notice,
-            requires_complete=any(
-                contract is not None and self._catalog.policy_for(contract).effect == "propose"
-                for r in records[: len(cited)]
-                for contract in [self._catalog.contract(r.tool_id, r.target_id)]
-            ),
+            requires_complete=any(f.requires_complete for f in facts),
         )
 
     async def _monitoring_failure_notice(self, turn: TurnAnswer, ctx: RunContext) -> str | None:
@@ -536,13 +547,17 @@ class EvidenceStore:
         ):
             raise EvidenceUnavailableError
         record = await self._load(evidence_id, identity)
+        if record is not None and (
+            record.target_id not in ctx.target_scope
+            or not await self._currently_authorized(identity, record)
+        ):
+            raise EvidencePermissionError
         if (
             record is None
             or not self._matches_current_policy(record)
             or self._clock() >= record.expires_at
             or record.target_id not in ctx.target_scope
             or not self._dependencies_declared(record)
-            or not await self._currently_authorized(identity, record)
         ):
             raise EvidenceUnavailableError
         # 不可回放的依赖（视图）：只有产生它的这一轮、首次交付时可读。
@@ -573,7 +588,7 @@ class EvidenceStore:
         verify = self._verify_dependencies
         if verify is None:  # 装配错误：有依赖却没有复核方式，不能放行
             raise EvidenceUnavailableError
-        checks = _SCOPE_CHECKS.get() or _ScopeChecks()
+        checks = _SCOPE_CHECKS.get() or ScopeChecks()
         needed = sum(len({(d.database, d.name) for d in deps}) for deps in merged.values())
         if checks.used + needed > limit:
             logger.warning("证据依赖复核超过检查次数上限：used=%d needed=%d", checks.used, needed)

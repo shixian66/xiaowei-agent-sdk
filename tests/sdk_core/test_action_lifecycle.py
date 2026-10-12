@@ -8,7 +8,7 @@ from datetime import timedelta
 import pytest
 from sqlalchemy import text
 from tests.sdk_core.test_app import cite, tool_call
-from tests.sdk_core.test_group_actions import Actions
+from tests.sdk_core.test_group_actions import Actions, request_execution
 from tests.sdk_core.test_group_actions import actions as actions  # pytest fixture
 from tests.sdk_core.test_group_gateway import running
 from tests.sdk_core.test_group_identity import GROUP, A, Env
@@ -17,7 +17,7 @@ from xiaowei.actions import ActionService
 from xiaowei.channel import ChannelService, ResultDelivery
 from xiaowei.channel_store import NotReadyError
 from xiaowei.feishu import attributed
-from xiaowei.models import Identity
+from xiaowei.models import Identity, RunContext
 from xiaowei.session import cleanup_expired
 from xiaowei.storage import hold_instance_lock
 
@@ -27,13 +27,16 @@ pytestmark = pytest.mark.loopback
 async def propose(actions: Actions) -> str:
     env = actions.env
     env.scripts.add(
-        attributed(A, "提出"), tool_call("am-synthetic__propose_change", value="after"), cite()
+        attributed(A, "提出"),
+        tool_call("am-synthetic__propose_change", value="after"),
+        request_execution,
+        cite(),
     )
     async with running(env, max_reply_chars=3500) as group:
         await group.ask("提出", message_id="om_p")
     assert await env.rows(
         "SELECT state, delivery FROM xiaowei_request WHERE reply_message_id='om_p'"
-    ) == [("completed", "sent")]
+    ) == [("paused", "sent")]
     return await actions.one()
 
 
@@ -86,12 +89,17 @@ async def test_database_claim_is_single_even_without_gateway_fifo(actions: Actio
             )
         )
     action = await env.store.get_action(action_id, identities[0])
+    native = await env.store.native_run(action)
+    original = RunContext.model_validate_json(native.context).identity
     claims = await asyncio.gather(
-        *[env.store.claim_action(action, identity) for identity in identities]
+        *[
+            env.store.claim_native_action(action, native, original, identity)
+            for identity in identities
+        ]
     )
-    accepted = [claim for claim in claims if claim is not None]
+    accepted = [claim for claim, _cause in claims if claim is not None]
     assert len(accepted) == 1
-    assert await env.store.claim_action(action, identities[0]) is None
+    assert (await env.store.claim_native_action(action, native, original, identities[0]))[0] is None
     assert actions.adapter.calls == []
     assert await env.rows("SELECT state, attempt FROM xiaowei_action") == [
         ("executing", accepted[0].attempt)
@@ -121,7 +129,10 @@ async def test_approval_expiry_is_rechecked_after_readback(
     else:
         assert adapter.calls == []
         assert record.state == "failed"
-        assert await env.rows("SELECT state, result FROM xiaowei_action") == [("rejected", None)]
+        assert record.failure_code == "action_expired"
+        assert await env.rows("SELECT state, result, failure_code FROM xiaowei_action") == [
+            ("rejected", None, "action_expired")
+        ]
         assert await env.rows(
             "SELECT count(*) FROM xiaowei_evidence WHERE turn_id=:turn", turn=record.turn_id
         ) == [(0,)]
@@ -173,43 +184,51 @@ async def test_cancelled_timeout_readback_settles_request_without_stopping_insta
     )
     env.service = ChannelService(env.app, env.results)
     assert env.app.actions is not None
+    timed_out = False
     if stage == "feedback":
         status = env.app.actions.status
 
         async def delay_status(ctx, request):
-            await asyncio.sleep(2)
-            return await status(ctx, request)
+            nonlocal timed_out
+            try:
+                await asyncio.sleep(2)
+                return await status(ctx, request)
+            finally:
+                timed_out = True
 
         monkeypatch.setattr(env.app.actions, "status", delay_status)
     else:
-        validate = env.evidence.validate_answer
+        load = env.store.native_run
 
-        async def delay_validation(turn, ctx, *, history=False):
-            await asyncio.sleep(2)
-            return await validate(turn, ctx, history=history)
+        async def delay_native(action):
+            nonlocal timed_out
+            try:
+                await asyncio.sleep(2)
+                return await load(action)
+            finally:
+                timed_out = True
 
-        monkeypatch.setattr(env.evidence, "validate_answer", delay_validation)
-    get_action = env.store.get_action
-    readback = asyncio.Event()
-    release = asyncio.Event()
-    reads = 0
+        monkeypatch.setattr(env.store, "native_run", delay_native)
+    readback, release = asyncio.Event(), asyncio.Event()
+    read_fact = env.service._approval_failure
+    held = False
 
-    async def pause_timeout_readback(action_id: str, identity: Identity):
-        nonlocal reads
-        reads += 1
-        if reads == 2:
+    async def pause_timeout_readback(action_id, ctx):
+        nonlocal held
+        if not held:
+            held = True
             readback.set()
             await release.wait()
-        return await get_action(action_id, identity)
+        return await read_fact(action_id, ctx)
 
-    monkeypatch.setattr(env.store, "get_action", pause_timeout_readback)
+    monkeypatch.setattr(env.service, "_approval_failure", pause_timeout_readback)
     receipt = await env.service.accept(env.group(attributed(A, f"/批准 {action_id}"), "om_a"))
     task = asyncio.create_task(env.service.approve(receipt, action_id))
     await asyncio.wait_for(readback.wait(), 5)
     task.cancel()
     with pytest.raises(asyncio.CancelledError):
         await task
-    assert reads == 3
+    assert held and timed_out
     assert env.store.readiness.ok
     assert len(actions.adapter.calls) == (1 if stage == "feedback" else 0)
     assert await env.rows("SELECT state FROM xiaowei_action") == [
@@ -266,9 +285,10 @@ async def test_stale_attempt_cannot_overwrite_recovered_unknown(actions: Actions
         session_id=record.session_id,
         turn_id=record.turn_id,
     )
-    claimed = await env.store.claim_action(
-        await env.store.get_action(action_id, identity), identity
-    )
+    action = await env.store.get_action(action_id, identity)
+    native = await env.store.native_run(action)
+    original = RunContext.model_validate_json(native.context).identity
+    claimed, _cause = await env.store.claim_native_action(action, native, original, identity)
     assert claimed is not None
     async with takeover(actions) as new:
         with pytest.raises(NotReadyError):

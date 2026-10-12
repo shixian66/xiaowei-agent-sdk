@@ -1,6 +1,7 @@
 """W5：群审批命令使用真实入口、存储与治理路径，不进入模型。"""
 
 import asyncio
+import json
 from collections.abc import AsyncIterator
 from dataclasses import dataclass, field, replace
 from datetime import timedelta
@@ -18,7 +19,7 @@ from tests.sdk_core.synthetic_tools import (
     catalog,
     ready_engine,
 )
-from tests.sdk_core.test_app import Scripts, cite, clarify, tool_call
+from tests.sdk_core.test_app import ModelCall, Scripts, cite, clarify, tool_call
 from tests.sdk_core.test_channel_service import FAKE_MODEL_KEY, app_config
 from tests.sdk_core.test_group_gateway import running
 from tests.sdk_core.test_group_identity import GROUP, TOOLS, A, B, Env, Members
@@ -54,6 +55,21 @@ PROPOSE = f"{SOURCE}/propose_change"
 WRITE = f"{SOURCE}/change"
 STATUS = f"{SOURCE}/get_action_status"
 SHARED = TOOLS | {PROPOSE, STATUS}
+
+
+def request_execution(call: ModelCall):
+    """脚本Agent对实际提出的Action请求SDK批准；准备拒绝则如实收尾。"""
+    names = {i["call_id"]: i["name"] for i in call.input if i.get("type") == "function_call"}
+    for item in reversed(call.input):
+        if item.get("type") != "function_call_output":
+            continue
+        data = json.loads(item["output"]).get("data", {})
+        if "action_id" in data:
+            source = names[item["call_id"]].partition("__")[0]
+            return tool_call(f"{source}__request_action_execution", action_id=data["action_id"])(
+                call
+            )
+    return cite("没有形成可执行候选")(call)
 
 
 class ChangeArgs(BaseModel):
@@ -221,13 +237,14 @@ async def test_approval_command_never_becomes_a_model_question(env: Env) -> None
     assert len(group.outbox.sent) == 1
 
 
-async def test_propose_sent_approve_once_and_follow_up_without_writing_session(
+async def test_propose_pause_approve_once_and_follow_up_with_native_history(
     actions: Actions,
 ) -> None:
     env = actions.env
     proposed = env.scripts.add(
         attributed(A, "改为 after"),
         tool_call("am-synthetic__propose_change", value="after"),
+        request_execution,
         cite("等待群批准"),
     )
     async with running(env, max_reply_chars=3500) as group:
@@ -237,7 +254,8 @@ async def test_propose_sent_approve_once_and_follow_up_without_writing_session(
         before = await env.rows("SELECT message_data FROM agent_messages ORDER BY id")
         await group.ask(f"/批准 {action_id}", sender=B, message_id="om_approval")
         assert [r.arguments for r in actions.adapter.calls] == [{"value": "after"}]
-        assert await env.rows("SELECT message_data FROM agent_messages ORDER BY id") == before
+        assert before == []
+        assert await env.rows("SELECT message_data FROM agent_messages ORDER BY id") != before
         assert await env.rows("SELECT state, approver_id, result FROM xiaowei_action") == [
             ("succeeded", B, '{"value": "after"}')
         ]
@@ -250,10 +268,10 @@ async def test_propose_sent_approve_once_and_follow_up_without_writing_session(
             cite(),
         )
         await group.ask("动作怎样了", message_id="om_status")
-    assert env.model_calls(proposed) == 2 and env.model_calls(follow) == 2
+    assert env.model_calls(proposed) == 3 and env.model_calls(follow) == 2
     for call in env.scripts.calls[proposed]:
-        assert "提案尚未执行" in call.instructions
-        assert "群内明确批准" in call.instructions
+        assert "提出工具只准备材料、尚未写入" in call.instructions
+        assert "有权群成员明确批准" in call.instructions
     assert all("am-synthetic__change" not in names for names in env.scripts.tools_seen(proposed))
     rows = await env.rows(
         "SELECT state, delivery FROM xiaowei_request WHERE reply_message_id=:id", id="om_approval"
@@ -265,7 +283,10 @@ async def test_propose_sent_approve_once_and_follow_up_without_writing_session(
 async def test_invalid_approval_has_zero_writes(actions: Actions, failure: str) -> None:
     env = actions.env
     env.scripts.add(
-        attributed(A, "提出"), tool_call("am-synthetic__propose_change", value="after"), cite()
+        attributed(A, "提出"),
+        tool_call("am-synthetic__propose_change", value="after"),
+        request_execution,
+        cite(),
     )
     async with running(env, max_reply_chars=3500) as group:
         await group.ask("提出", message_id="om_p")

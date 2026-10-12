@@ -14,6 +14,7 @@ from tests.sdk_core.test_group_actions import (
     WRITE,
     ActionAdapter,
     ChangeArgs,
+    request_execution,
 )
 from tests.sdk_core.test_group_gateway import (
     GroupChannel,
@@ -152,6 +153,7 @@ async def test_formal_serve_proposes_approves_and_refuses_non_approver(
     asked = env.scripts.add(
         attributed(A, "提出"),
         tool_call("am-synthetic__propose_change", value="after"),
+        request_execution,
         cite("等待批准"),
     )
     async with env.running(config, feishu_channel=channel) as served:
@@ -184,8 +186,8 @@ async def test_formal_serve_proposes_approves_and_refuses_non_approver(
                 "feedback": "succeeded",
             }[interruption]
         )
-        assert len(env.scripts.calls[asked]) == 2
-        assert len(env.scripts.calls) == 1  # 两次批准均未调用模型。
+        assert len(env.scripts.calls[asked]) == (3 if interruption is None else 2)
+        assert len(env.scripts.calls) == 1  # 非名单不调用模型；批准恢复原任务的模型脚本。
         assert (await served.ready())["status"] == "ready"
         if interruption:
             receipt = message_text(channel.sends[-1][1])

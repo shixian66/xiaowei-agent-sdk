@@ -122,6 +122,8 @@ class ApprovedAction(_Trusted):
     tool_id: ToolId
     target_id: Label
     arguments_digest: Label
+    approver: Identity | None = None
+    sdk_call_id: Label | None = None
 
 
 class RunContext(_Trusted):
@@ -340,6 +342,7 @@ class TurnAnswer(_Trusted):
     answer: AgentAnswer
     context_evidence: tuple[Label, ...]
     monitoring_failures: tuple[MonitoringFailure, ...] = ()
+    run_turn_id: Label | None = None
     session_state: SessionSnapshot | None = Field(default=None, exclude=True)
     """成功提交后由应用附加；请求表单独保存，不进入回答 JSON 或 SDK Session。"""
 

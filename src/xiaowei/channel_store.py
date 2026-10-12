@@ -38,10 +38,13 @@ from collections.abc import Callable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass, replace
 from datetime import datetime, timedelta
-from typing import Any, Literal, get_args
+from typing import TYPE_CHECKING, Any, Literal, get_args
+
+if TYPE_CHECKING:
+    from xiaowei.app import PausedTurn
 
 from pydantic import SecretStr, ValidationError
-from sqlalchemy import TextClause, text
+from sqlalchemy import String, TextClause, bindparam, text
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine
 
@@ -49,6 +52,7 @@ from xiaowei.app import Mode
 from xiaowei.models import (
     SESSION_STATE_MAX_BYTES,
     AgentAnswer,
+    ApprovedAction,
     Channel,
     Identity,
     MonitoringFailure,
@@ -59,7 +63,7 @@ from xiaowei.models import (
 from xiaowei.session import close_interrupted_sessions, close_sessions
 from xiaowei.storage import Backend, InstanceLock, Readiness
 
-RequestState = Literal["accepted", "running", "completed", "failed", "interrupted"]
+RequestState = Literal["accepted", "running", "paused", "completed", "failed", "interrupted"]
 DeliveryState = Literal["pending", "sending", "sent", "failed", "unknown"]
 SendOutcome = Literal["sent", "failed", "unknown"]
 # 安全失败码闭集（与迁移 007 的 CHECK 一致）：只表达失败类别，不携带异常文字。调用者经 ``fail()``
@@ -76,6 +80,11 @@ CallerFailureCode = Literal[
     "action_feedback_failed",
     "action_unknown",
     "action_rejected",
+    "action_requester_invalid",
+    "action_session_invalid",
+    "action_upgrade_invalidated",
+    "action_expired",
+    "action_unresumable",
 ]
 InternalFailureCode = Literal["result_not_saved", "interrupted"]
 FailureCode = CallerFailureCode | InternalFailureCode
@@ -196,6 +205,11 @@ _FAIL = text(
       AND state IN ('accepted', 'running')
     """
 )
+_SETTLE_UNRESUMABLE = text(
+    "UPDATE xiaowei_action SET state='rejected', failure_code='action_unresumable',"
+    " updated_at=:now WHERE owner_id=:owner AND proposal_turn_id=:turn"
+    " AND state='pending' AND action_id NOT IN :keep"
+).bindparams(bindparam("keep", expanding=True, type_=String()))
 # 首次发送：completed 结果或 failed/interrupted 的固定回执，各最多一次。
 # 取得投递权时写入新的尝试标识（与可选的重发命令连接身份）；落定只认同一标识。
 _CLAIM_FIRST = text(
@@ -206,7 +220,7 @@ _CLAIM_FIRST = text(
       AND owner_id = :owner_id AND subject_id = :subject_id
       AND turn_id = :turn_id
       AND delivery = 'pending' AND expires_at > :now
-      AND state IN ('completed', 'failed', 'interrupted')
+      AND state IN ('completed', 'paused', 'failed', 'interrupted')
     """
 )
 _CLAIM_RESEND = text(
@@ -216,7 +230,8 @@ _CLAIM_RESEND = text(
     WHERE channel = :channel AND request_key = :request_key AND owner_kind = :owner_kind
       AND owner_id = :owner_id AND subject_id = :subject_id
       AND turn_id = :turn_id
-      AND delivery IN ('failed', 'unknown') AND expires_at > :now AND state = 'completed'
+      AND delivery IN ('failed', 'unknown') AND expires_at > :now
+      AND state IN ('completed', 'paused')
     """
 )
 _FINISH_SEND = text(
@@ -262,7 +277,7 @@ _RECOVER_SENDING = text(
 _RECOVER_UNSENT = text(
     """
     UPDATE xiaowei_request SET delivery = 'failed', updated_at = :now
-    WHERE channel = 'feishu' AND state = 'completed' AND delivery = 'pending'
+    WHERE channel = 'feishu' AND state IN ('completed', 'paused') AND delivery = 'pending'
     """
 )
 
@@ -295,6 +310,14 @@ class RequestUnavailableError(ChannelStoreError):
 
     def __init__(self) -> None:
         super().__init__("请求不存在或已过期")
+
+
+class ActionAdmissionRejectedError(RequestUnavailableError):
+    """最后写准入的确定拒绝，按实际原因落定，不与尝试丢失混同。"""
+
+    def __init__(self, code: Literal["action_session_invalid", "action_expired"]) -> None:
+        self.code = code
+        super().__init__()
 
 
 class SessionBusyError(ChannelStoreError):
@@ -345,6 +368,7 @@ class RequestRecord:
     reply_chat_id: str | None = None
     reply_message_id: str | None = None
     session_state: SessionSnapshot | None = None
+    run_turn_id: str | None = None
 
 
 @dataclass(frozen=True)
@@ -378,6 +402,23 @@ class ActionRecord:
     created_at: datetime
     updated_at: datetime
     approval_expires_at: datetime
+    expires_at: datetime
+    failure_code: CallerFailureCode | None = None
+
+
+@dataclass(frozen=True)
+class NativeRunRecord:
+    turn_id: str
+    owner_id: str
+    context: str
+    run_state: str
+    ledger: str
+    message: str
+    binding: str
+    scope_checks: int
+    version: int
+    consumed: bool
+    material_turn_id: str
     expires_at: datetime
 
 
@@ -724,10 +765,10 @@ class ChannelStore:
         try:
             snapshot = _session_state(turn.session_state, "completed", None)
         except RequestUnavailableError:
-            await self._fail_after_commit(record, failure_code)
+            await self._fail_after_commit(record, failure_code, settle_turn_id=turn.run_turn_id)
             raise ResultNotSavedError from None
         if len(content.encode()) > self._max_answer_bytes:
-            await self._fail_after_commit(record, failure_code)
+            await self._fail_after_commit(record, failure_code, settle_turn_id=turn.run_turn_id)
             raise ResultNotSavedError
         try:
             async with self._engine.begin() as conn:
@@ -740,15 +781,19 @@ class ChannelStore:
                         "now": self._clock(),
                     },
                 )
+                if saved.rowcount == 1:
+                    await self._settle_unresumable_actions(
+                        conn, record.owner.id, turn.run_turn_id or record.turn_id
+                    )
         except asyncio.CancelledError:
             # 保存结果不明，也不能在取消中再写失败状态：锁低后交给重启恢复。
             self._readiness.lock("result_state_unwritable")
             raise
         except (OSError, SQLAlchemyError):
-            await self._fail_after_commit(record, failure_code)
+            await self._fail_after_commit(record, failure_code, settle_turn_id=turn.run_turn_id)
             raise ResultNotSavedError from None
         if saved.rowcount != 1:
-            await self._fail_after_commit(record, failure_code)
+            await self._fail_after_commit(record, failure_code, settle_turn_id=turn.run_turn_id)
             raise ResultNotSavedError
         return replace(
             record,
@@ -757,6 +802,7 @@ class ChannelStore:
             context_evidence=turn.context_evidence,
             monitoring_failures=turn.monitoring_failures,
             session_state=turn.session_state,
+            run_turn_id=turn.run_turn_id,
         )
 
     async def fail(
@@ -765,6 +811,7 @@ class ChannelStore:
         code: CallerFailureCode,
         *,
         session_state: SessionSnapshot | None = None,
+        settle_action_id: str | None = None,
     ) -> RequestRecord:
         """``accepted/running → failed``，保存安全失败码（如 Session 未提交的模型失败、繁忙）。
 
@@ -780,12 +827,37 @@ class ChannelStore:
             self._readiness.lock("request_fail_failed")
             raise
         params = {"code": code, "session_state": snapshot}
-        if await self._update(_FAIL, record, critical="request_fail_failed", **params) != 1:
-            raise RequestUnavailableError
+        with self._critical("request_fail_failed", "请求状态无法保存"):
+            async with self._engine.begin() as conn:
+                changed = await conn.execute(
+                    _FAIL, {**_keys(record), "now": self._clock(), **params}
+                )
+                if changed.rowcount != 1:
+                    raise RequestUnavailableError
+                await self._settle_unresumable_actions(conn, record.owner.id, record.turn_id)
+                if settle_action_id is not None:
+                    original = (
+                        await conn.execute(
+                            text(
+                                "SELECT a.proposal_turn_id FROM xiaowei_action a"
+                                " JOIN xiaowei_action_run r ON r.turn_id=a.proposal_turn_id"
+                                " AND r.owner_id=a.owner_id WHERE a.action_id=:action"
+                                " AND a.owner_id=:owner AND a.attempt IS NOT NULL"
+                                " AND r.consumed=true FOR UPDATE OF r"
+                            ),
+                            {"action": settle_action_id, "owner": record.owner.id},
+                        )
+                    ).scalar_one_or_none()
+                    if original is not None:
+                        await self._settle_unresumable_actions(conn, record.owner.id, original)
         return replace(record, state="failed", failure_code=code, session_state=session_state)
 
     async def _fail_after_commit(
-        self, record: RequestRecord, code: FailureCode = RESULT_NOT_SAVED
+        self,
+        record: RequestRecord,
+        code: FailureCode = RESULT_NOT_SAVED,
+        *,
+        settle_turn_id: str | None = None,
     ) -> None:
         """结果未保存：同一事务标记 failed 并关闭会话；也失败时锁低 readiness。"""
         params = {**_keys(record), "code": code, "session_state": None, "now": self._clock()}
@@ -793,6 +865,9 @@ class ChannelStore:
             async with self._engine.begin() as conn:
                 if (await conn.execute(_FAIL, params)).rowcount != 1:
                     raise ChannelStoreUnavailableError
+                await self._settle_unresumable_actions(conn, record.owner.id, record.turn_id)
+                if settle_turn_id is not None and settle_turn_id != record.turn_id:
+                    await self._settle_unresumable_actions(conn, record.owner.id, settle_turn_id)
                 await close_sessions(conn, [record.session_id])
         except asyncio.CancelledError:
             self._readiness.lock("result_state_unwritable")
@@ -888,7 +963,9 @@ class ChannelStore:
 
     # ---- 监控 Action：只复用应用存储和实例锁，不触碰 SDK Session -----------------------
 
-    async def propose_action(self, action: ActionRecord) -> None:
+    async def propose_action(
+        self, action: ActionRecord, *, approval: ApprovedAction | None = None
+    ) -> None:
         self._require_ready()
         if len(action.plan.encode()) > 128_000:
             raise RequestUnavailableError
@@ -896,17 +973,15 @@ class ChannelStore:
         with self._critical("action_save_failed", "动作未保存"):
             async with self._engine.begin() as conn:
                 await self._admit(conn)
-                request = (
-                    await conn.execute(
-                        text(
-                            "SELECT expires_at FROM xiaowei_request WHERE turn_id = :turn "
-                            "AND owner_kind = 'group' AND owner_id = :owner AND channel = 'feishu' "
-                            "AND state = 'running'"
-                        ),
-                        {"turn": action.proposal_turn_id, "owner": action.owner_id},
-                    )
-                ).scalar_one_or_none()
-                if request is None or action.expires_at > request:
+                identity = Identity(
+                    subject_id=action.requester_id,
+                    session_id=action.proposal_session_id,
+                    turn_id=action.proposal_turn_id,
+                    owner=Owner(kind="group", id=action.owner_id),
+                    channel="feishu",
+                )
+                request = await self._proposal_request(conn, identity, approval)
+                if request is None or action.expires_at > request["expires_at"]:
                     raise RequestUnavailableError
                 await conn.execute(
                     text("""
@@ -951,6 +1026,47 @@ class ChannelStore:
             raise RequestUnavailableError
         return ActionRecord(**dict(row))
 
+    async def action_delivery_state(self, action_id: str, owner_id: str) -> tuple[str, str | None]:
+        """投递时读取当前动作事实；过期或缺失的提案不能继续展示批准命令。"""
+        try:
+            async with self._engine.connect() as conn:
+                row = (
+                    (
+                        await conn.execute(
+                            text(
+                                "SELECT state, failure_code, approval_expires_at, expires_at"
+                                " FROM xiaowei_action WHERE action_id=:id AND owner_id=:owner"
+                            ),
+                            {"id": action_id, "owner": owner_id},
+                        )
+                    )
+                    .mappings()
+                    .one_or_none()
+                )
+        except (OSError, SQLAlchemyError):
+            raise ChannelStoreUnavailableError from None
+        if row is None:
+            return "unavailable", None
+        if row["state"] == "pending" and self._clock() >= min(
+            row["approval_expires_at"], row["expires_at"]
+        ):
+            return "expired", None
+        return str(row["state"]), row["failure_code"]
+
+    async def _settle_unresumable_actions(
+        self,
+        conn: AsyncConnection,
+        owner_id: str,
+        turn_id: str,
+        *,
+        keep: Sequence[str] = (),
+    ) -> None:
+        """请求终态或暂停与未绑定候选同事务落定；已开始的写不受影响。"""
+        await conn.execute(
+            _SETTLE_UNRESUMABLE,
+            {"owner": owner_id, "turn": turn_id, "keep": tuple(keep), "now": self._clock()},
+        )
+
     async def proposal_request(self, action: ActionRecord) -> RequestRecord:
         async with self._engine.connect() as conn:
             row = (
@@ -975,81 +1091,61 @@ class ChannelStore:
             raise RequestUnavailableError
         return self._record(dict(row))
 
-    async def proposal_request_for_turn(self, identity: Identity) -> RequestRecord:
-        if identity.channel != "feishu" or identity.owner.kind != "group":
-            raise RequestUnavailableError
+    async def proposal_request_for_turn(
+        self, identity: Identity, *, approval: ApprovedAction | None = None
+    ) -> RequestRecord:
         async with self._engine.connect() as conn:
-            row = (
-                (
-                    await conn.execute(
-                        text(
-                            "SELECT * FROM xiaowei_request WHERE turn_id = :turn AND "
-                            "session_id = :session "
-                            "AND subject_id = :actor AND owner_id = :owner AND "
-                            "owner_kind = 'group' "
-                            "AND channel = 'feishu' AND state = 'running' AND expires_at > :now"
-                        ),
-                        {
-                            "turn": identity.turn_id,
-                            "session": identity.session_id,
-                            "actor": identity.subject_id,
-                            "owner": identity.owner.id,
-                            "now": self._clock(),
-                        },
-                    )
-                )
-                .mappings()
-                .one_or_none()
-            )
+            row = await self._proposal_request(conn, identity, approval)
         if row is None:
             raise RequestUnavailableError
         return self._record(dict(row))
 
-    async def claim_action(self, action: ActionRecord, approver: Identity) -> ActionRecord | None:
-        """原子占用仅一次；审批事件也必须已由同群请求状态机开始。"""
-        self._require_ready()
-        if self._instance is None:
-            raise NotReadyError  # 显式重发/维护命令不能执行写动作。
-        attempt = secrets.token_hex(_ATTEMPT_BYTES)
-        with self._critical("action_claim_failed", "动作状态无法保存"):
-            async with self._engine.begin() as conn:
-                await self._admit(conn)
-                row = (
-                    (
-                        await conn.execute(
-                            text(
-                                "UPDATE xiaowei_action a SET state = 'executing', "
-                                "attempt = :attempt, "
-                                "approver_id = :approver, approval_turn_id = :turn, "
-                                "updated_at = :now "
-                                "WHERE action_id = :id AND owner_id = :owner AND state = 'pending' "
-                                "AND binding = :binding AND plan = :plan AND "
-                                "approval_expires_at > :now "
-                                "AND expires_at > :now AND EXISTS (SELECT 1 FROM xiaowei_request r "
-                                "WHERE r.turn_id = a.proposal_turn_id AND r.state = 'completed' "
-                                "AND r.delivery = 'sent' AND r.expires_at > :now) "
-                                "AND EXISTS (SELECT 1 FROM xiaowei_request r WHERE "
-                                "r.turn_id = :turn "
-                                "AND r.owner_kind = 'group' AND r.owner_id = a.owner_id "
-                                "AND r.subject_id = :approver AND r.channel = 'feishu' "
-                                "AND r.state = 'running' AND r.expires_at > :now) RETURNING a.*"
-                            ),
-                            {
-                                "id": action.action_id,
-                                "owner": approver.owner.id,
-                                "approver": approver.subject_id,
-                                "turn": approver.turn_id,
-                                "attempt": attempt,
-                                "now": self._clock(),
-                                "binding": action.binding,
-                                "plan": action.plan,
-                            },
-                        )
-                    )
-                    .mappings()
-                    .one_or_none()
+    async def _proposal_request(
+        self, conn: AsyncConnection, identity: Identity, approval: ApprovedAction | None
+    ) -> Mapping[str, Any] | None:
+        if identity.channel != "feishu" or identity.owner.kind != "group":
+            raise RequestUnavailableError
+        approver = approval.approver if approval is not None else None
+        # 原请求paused时只接受已消费检查点的当前审批请求，不能拿历史批准再次提出。
+        row = (
+            (
+                await conn.execute(
+                    text("""
+                    SELECT r.* FROM xiaowei_request r WHERE r.turn_id=:turn
+                    AND r.session_id=:session AND r.subject_id=:actor AND r.owner_id=:owner
+                    AND r.owner_kind='group' AND r.channel='feishu' AND r.expires_at>:now
+                    AND (r.state='running' OR (r.state='paused' AND EXISTS(
+                        SELECT 1 FROM xiaowei_action a
+                        JOIN xiaowei_action_run n ON n.turn_id=a.proposal_turn_id
+                            AND n.owner_id=a.owner_id
+                        JOIN xiaowei_request b ON b.turn_id=a.approval_turn_id
+                            AND b.owner_id=a.owner_id AND b.owner_kind='group'
+                            AND b.channel='feishu'
+                        WHERE a.action_id=:approved AND a.attempt=:attempt
+                            AND a.proposal_turn_id=r.turn_id AND a.owner_id=r.owner_id
+                            AND a.proposal_session_id=r.session_id AND a.requester_id=r.subject_id
+                            AND a.approver_id=:approver AND a.approval_turn_id=:approval_turn
+                            AND n.consumed=true AND b.subject_id=a.approver_id
+                            AND b.state='running' AND b.expires_at>:now
+                    )))
+                """),
+                    {
+                        "turn": identity.turn_id,
+                        "session": identity.session_id,
+                        "actor": identity.subject_id,
+                        "owner": identity.owner.id,
+                        "now": self._clock(),
+                        "approved": approval.action_id if approval else None,
+                        "attempt": approval.attempt if approval else None,
+                        "approver": approver.subject_id if approver else None,
+                        "approval_turn": approver.turn_id if approver else None,
+                    },
                 )
-        return None if row is None else ActionRecord(**dict(row))
+            )
+            .mappings()
+            .one_or_none()
+        )
+        return None if row is None else dict(row)
 
     async def admit_action(self, action: ActionRecord) -> None:
         """回读后、写 I/O 前复核实例、尝试与期限；过期或已恢复的尝试不能执行。"""
@@ -1058,29 +1154,47 @@ class ChannelStore:
             raise NotReadyError
         async with self._engine.begin() as conn:
             await self._admit(conn)
-            exists = await conn.scalar(
-                text(
-                    "SELECT 1 FROM xiaowei_action WHERE action_id = :id AND state = 'executing' "
-                    "AND attempt = :attempt AND approver_id = :approver AND "
-                    "approval_turn_id = :turn AND approval_expires_at > :now "
-                    "AND expires_at > :now"
-                ),
-                {
-                    "id": action.action_id,
-                    "attempt": action.attempt,
-                    "approver": action.approver_id,
-                    "turn": action.approval_turn_id,
-                    "now": self._clock(),
-                },
+            identity = Identity(
+                subject_id=action.requester_id,
+                session_id=action.proposal_session_id,
+                turn_id=action.proposal_turn_id,
+                owner=Owner(kind="group", id=action.owner_id),
+                channel="feishu",
             )
-            if exists != 1:
+            if not await self._native_session(conn, identity):
+                raise ActionAdmissionRejectedError("action_session_invalid")
+            row = (
+                (
+                    await conn.execute(
+                        text(
+                            "SELECT approval_expires_at, expires_at FROM xiaowei_action"
+                            " WHERE action_id = :id AND state = 'executing' "
+                            "AND attempt = :attempt AND approver_id = :approver AND "
+                            "approval_turn_id = :turn"
+                        ),
+                        {
+                            "id": action.action_id,
+                            "attempt": action.attempt,
+                            "approver": action.approver_id,
+                            "turn": action.approval_turn_id,
+                        },
+                    )
+                )
+                .mappings()
+                .one_or_none()
+            )
+            if row is None:
                 raise RequestUnavailableError
+            if self._clock() >= min(row["approval_expires_at"], row["expires_at"]):
+                raise ActionAdmissionRejectedError("action_expired")
 
     async def finish_action(
         self,
         action: ActionRecord,
         state: Literal["succeeded", "unknown", "rejected"],
         result: str | None = None,
+        *,
+        failure_code: str | None = None,
     ) -> None:
         if result is not None and len(result.encode()) > 128_000:
             raise RequestUnavailableError
@@ -1091,7 +1205,7 @@ class ChannelStore:
                     await conn.execute(
                         text(
                             "UPDATE xiaowei_action SET state = :state, result = "
-                            ":result, updated_at = :now "
+                            ":result, failure_code=:failure_code, updated_at = :now "
                             "WHERE action_id = :id AND state = 'executing' AND attempt = :attempt"
                         ),
                         {
@@ -1099,6 +1213,7 @@ class ChannelStore:
                             "attempt": action.attempt,
                             "state": state,
                             "result": result,
+                            "failure_code": failure_code if state == "rejected" else None,
                             "now": self._clock(),
                         },
                     )
@@ -1106,6 +1221,301 @@ class ChannelStore:
                 if changed != 1:
                     self._readiness.lock("action_attempt_lost")
                     raise NotReadyError
+
+    async def native_run(self, action: ActionRecord) -> NativeRunRecord:
+        async with self._engine.connect() as conn:
+            row = (
+                (
+                    await conn.execute(
+                        text(
+                            "SELECT * FROM xiaowei_action_run WHERE turn_id=:turn AND"
+                            " owner_id=:owner"
+                        ),
+                        {"turn": action.proposal_turn_id, "owner": action.owner_id},
+                    )
+                )
+                .mappings()
+                .one_or_none()
+            )
+        if row is None:
+            raise RequestUnavailableError
+        return NativeRunRecord(**dict(row))
+
+    async def save_pause(
+        self,
+        record: RequestRecord,
+        pause: PausedTurn,
+        *,
+        failure_code: FailureCode = RESULT_NOT_SAVED,
+    ) -> RequestRecord:
+        """SDK快照/原轮账本与材料请求一起提交，暂停不提交SDK历史。"""
+        from pydantic import TypeAdapter
+
+        from xiaowei.governance import TurnLedger
+
+        self._require_ready()
+        if record.owner.kind != "group" or record.channel != "feishu":
+            raise RequestUnavailableError
+        context = pause.context.model_dump_json()
+        ledger = TypeAdapter(TurnLedger).dump_json(pause.ledger).decode()
+        content = pause.material.model_dump_json()
+        if len(content.encode()) > self._max_answer_bytes:
+            await self._fail_after_commit(
+                record, failure_code, settle_turn_id=pause.context.identity.turn_id
+            )
+            raise ResultNotSavedError
+        params = {
+            "turn": pause.context.identity.turn_id,
+            "owner": record.owner.id,
+            "ctx": context,
+            "ledger": ledger,
+            "state": pause.run_state,
+            "message": pause.message,
+            "binding": pause.binding,
+            "checks": pause.scope_checks,
+            "material": record.turn_id,
+            "expires": pause.expires_at,
+            "prior": pause.prior_version,
+            "prior_binding": pause.prior_binding,
+        }
+        try:
+            with self._critical("resume_save_failed", "暂停状态未保存"):
+                async with self._engine.begin() as conn:
+                    await self._admit(conn)
+                    if not await self._native_session(conn, pause.context.identity):
+                        await self._reject_native(
+                            conn,
+                            record.owner.id,
+                            pause.context.identity.turn_id,
+                            "action_session_invalid",
+                        )
+                        code = (
+                            "action_session_invalid" if pause.prior_version == 0 else failure_code
+                        )
+                        failed = await conn.execute(
+                            _FAIL,
+                            {
+                                **_keys(record),
+                                "code": code,
+                                "session_state": None,
+                                "now": self._clock(),
+                            },
+                        )
+                        if failed.rowcount != 1:
+                            self._readiness.lock("resume_save_failed")
+                            raise NotReadyError
+                        return replace(record, state="failed", failure_code=code)
+                    if pause.prior_version == 0:
+                        saved = await conn.execute(
+                            text(
+                                "INSERT INTO xiaowei_action_run VALUES"
+                                " (:turn,:owner,:ctx,:state,:ledger,"
+                                ":message,:binding,:checks,1,false,:material,:expires) ON CONFLICT"
+                                " DO NOTHING"
+                            ),
+                            params,
+                        )
+                    else:
+                        saved = await conn.execute(
+                            text(
+                                "UPDATE xiaowei_action_run SET context=:ctx, run_state=:state,"
+                                " ledger=:ledger,"
+                                " scope_checks=:checks, material_turn_id=:material,"
+                                " binding=:binding,"
+                                " expires_at=:expires,"
+                                " consumed=false, version=version+1 WHERE turn_id=:turn AND"
+                                " owner_id=:owner"
+                                " AND version=:prior AND consumed=true AND binding=:prior_binding"
+                            ),
+                            params,
+                        )
+                    if saved.rowcount != 1:
+                        raise RequestUnavailableError
+                    changed = await conn.execute(
+                        text(
+                            "UPDATE xiaowei_request SET state='paused', answer=:answer,"
+                            " updated_at=:now"
+                            " WHERE channel=:channel AND request_key=:request_key AND"
+                            " owner_kind=:owner_kind"
+                            " AND owner_id=:owner_id AND subject_id=:subject_id"
+                            " AND turn_id=:turn_id"
+                            " AND state='running'"
+                        ),
+                        {**_keys(record), "answer": content, "now": self._clock()},
+                    )
+                    if changed.rowcount != 1:
+                        raise RequestUnavailableError
+                    await self._settle_unresumable_actions(
+                        conn,
+                        record.owner.id,
+                        pause.context.identity.turn_id,
+                        keep=pause.approvable_action_ids,
+                    )
+        except RequestUnavailableError:
+            # 确定未保存的拒绝也须落定请求；不能留下running持续挡住/新建。
+            await self._fail_after_commit(
+                record, failure_code, settle_turn_id=pause.context.identity.turn_id
+            )
+            raise ResultNotSavedError from None
+        return replace(
+            record,
+            state="paused",
+            answer=pause.material.answer,
+            context_evidence=pause.material.context_evidence,
+            monitoring_failures=pause.material.monitoring_failures,
+            run_turn_id=pause.context.identity.turn_id,
+        )
+
+    async def _native_session(self, conn: AsyncConnection, identity: Identity) -> bool:
+        # 与/新建保持相同锁顺序：渠道映射先、应用Session后；版本消费/claim仍在本事务。
+        current = await conn.scalar(
+            text(
+                "SELECT 1 FROM xiaowei_channel_session WHERE session_id=:session AND"
+                " owner_kind='group'"
+                " AND owner_id=:owner AND channel='feishu' AND state='current' AND expires_at>:now"
+                " FOR UPDATE"
+            ),
+            {"session": identity.session_id, "owner": identity.owner.id, "now": self._clock()},
+        )
+        session = await conn.scalar(
+            text(
+                "SELECT 1 FROM xiaowei_session WHERE session_id=:session AND owner_kind='group'"
+                " AND owner_id=:owner AND channel='feishu' AND state='active' AND expires_at>:now"
+                " FOR UPDATE"
+            ),
+            {"session": identity.session_id, "owner": identity.owner.id, "now": self._clock()},
+        )
+        return bool(current == 1 and session == 1)
+
+    async def reject_native(self, action: ActionRecord, code: CallerFailureCode) -> None:
+        """确定未执行的原轮候选作废；不改已开始的执行事实。"""
+        self._require_ready()
+        if code not in {"action_requester_invalid", "action_session_invalid", "action_expired"}:
+            raise ValueError("作废原因不合约")
+        with self._critical("action_reject_failed", "动作作废无法保存"):
+            async with self._engine.begin() as conn:
+                await self._admit(conn)
+                await self._reject_native(conn, action.owner_id, action.proposal_turn_id, code)
+
+    async def _reject_native(
+        self, conn: AsyncConnection, owner_id: str, turn_id: str, code: str
+    ) -> None:
+        await conn.execute(
+            text(
+                "SELECT 1 FROM xiaowei_action_run WHERE turn_id=:turn "
+                "AND owner_id=:owner FOR UPDATE"
+            ),
+            {"turn": turn_id, "owner": owner_id},
+        )
+        await conn.execute(
+            text(
+                "UPDATE xiaowei_action SET state='rejected', failure_code=:code, updated_at=:now"
+                " WHERE owner_id=:owner AND proposal_turn_id=:turn AND state='pending'"
+            ),
+            {
+                "owner": owner_id,
+                "turn": turn_id,
+                "code": code,
+                "now": self._clock(),
+            },
+        )
+        await conn.execute(
+            text(
+                "UPDATE xiaowei_action_run SET consumed=true WHERE turn_id=:turn AND"
+                " owner_id=:owner"
+            ),
+            {"turn": turn_id, "owner": owner_id},
+        )
+
+    async def claim_native_action(
+        self,
+        action: ActionRecord,
+        run: NativeRunRecord,
+        original: Identity,
+        approver: Identity,
+        *,
+        approve: bool = True,
+    ) -> tuple[ActionRecord | None, CallerFailureCode | None]:
+        self._require_ready()
+        if self._instance is None or original.owner != approver.owner:
+            raise RequestUnavailableError
+        attempt = secrets.token_hex(_ATTEMPT_BYTES)
+        with self._critical("action_claim_failed", "动作占用未保存"):
+            async with self._engine.begin() as conn:
+                await self._admit(conn)
+                if not await self._native_session(conn, original):
+                    await self._reject_native(
+                        conn, action.owner_id, action.proposal_turn_id, "action_session_invalid"
+                    )
+                    return None, "action_session_invalid"
+                current = (
+                    (
+                        await conn.execute(
+                            text(
+                                "SELECT * FROM xiaowei_action_run WHERE turn_id=:turn AND"
+                                " owner_id=:owner"
+                                " FOR UPDATE"
+                            ),
+                            {"turn": original.turn_id, "owner": original.owner.id},
+                        )
+                    )
+                    .mappings()
+                    .one_or_none()
+                )
+                if current is None or current["version"] != run.version or current["consumed"]:
+                    return None, None
+                if self._clock() >= min(action.approval_expires_at, current["expires_at"]):
+                    await self._reject_native(
+                        conn, action.owner_id, action.proposal_turn_id, "action_expired"
+                    )
+                    return None, "action_expired"
+                row = (
+                    (
+                        await conn.execute(
+                            text(
+                                "UPDATE xiaowei_action a SET state=:state, failure_code=:cause,"
+                                " attempt=:attempt,"
+                                " approver_id=:actor, approval_turn_id=:approval, updated_at=:now"
+                                " WHERE action_id=:id AND owner_id=:owner AND state='pending'"
+                                " AND binding=:binding AND plan=:plan AND expires_at>:now"
+                                " AND EXISTS(SELECT 1 FROM xiaowei_request r WHERE"
+                                " r.turn_id=:material"
+                                " AND r.owner_id=:owner AND r.state='paused' AND r.delivery='sent'"
+                                " AND r.channel='feishu' AND r.expires_at>:now)"
+                                " AND EXISTS(SELECT 1 FROM xiaowei_request r WHERE"
+                                " r.turn_id=:approval"
+                                " AND r.owner_id=:owner AND r.subject_id=:actor AND"
+                                " r.state='running'"
+                                " AND r.channel='feishu' AND r.expires_at>:now) RETURNING a.*"
+                            ),
+                            {
+                                "attempt": attempt,
+                                "state": "executing" if approve else "rejected",
+                                "cause": None if approve else "action_rejected",
+                                "actor": approver.subject_id,
+                                "approval": approver.turn_id,
+                                "now": self._clock(),
+                                "id": action.action_id,
+                                "owner": original.owner.id,
+                                "binding": action.binding,
+                                "plan": action.plan,
+                                "material": current["material_turn_id"],
+                            },
+                        )
+                    )
+                    .mappings()
+                    .one_or_none()
+                )
+                if row is None:
+                    return None, None
+                await conn.execute(
+                    text(
+                        "UPDATE xiaowei_action_run SET consumed=true WHERE turn_id=:turn AND"
+                        " version=:version"
+                    ),
+                    {"turn": original.turn_id, "version": run.version},
+                )
+        return ActionRecord(**dict(row)), None
 
     # ---- 内部 ------------------------------------------------------------------------
 
@@ -1152,13 +1562,17 @@ class ChannelStore:
         return None if row is None else dict(row)
 
     def _record(self, row: Mapping[str, Any]) -> RequestRecord:
-        answer, context = None, None
+        answer, context, run_turn_id = None, None, None
         monitoring_failures: tuple[MonitoringFailure, ...] = ()
         if row["answer"] is not None:
             raw = row["answer"]
             if len(raw.encode()) > self._max_answer_bytes:
                 raise RequestUnavailableError
             answer, context, monitoring_failures = _saved_answer(raw)
+            try:
+                run_turn_id = TurnAnswer.model_validate_json(raw).run_turn_id
+            except ValidationError:
+                pass  # 已由_saved_answer验证的旧AgentAnswer格式。
         if row["failure_code"] is not None and row["failure_code"] not in _FAILURE_CODES:
             raise RequestUnavailableError
         snapshot = _read_session_state(row["session_state"], row["state"], row["failure_code"])
@@ -1182,6 +1596,7 @@ class ChannelStore:
             reply_chat_id=row["reply_chat_id"],
             reply_message_id=row["reply_message_id"],
             session_state=snapshot,
+            run_turn_id=run_turn_id,
         )
 
     def _owner(

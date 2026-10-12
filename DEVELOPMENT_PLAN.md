@@ -153,12 +153,12 @@ Web 宿主发布地址由 `.env` 的 `XW_WEB_BIND_ADDRESS` 决定，缺省 `0.0.
 
 ## 8. P4 监控增量与之后的扩展
 
-实战对话与飞书展示的已核实问题另见[修复实施计划](docs/superpowers/plans/2026-10-09-agent-dialogue-feishu-repair.md)。R1b 随 PR #68、U1/U2 随 PR #69、监控只读故障续查随 PR #70、P2 随 PR #71 合入；U1 真实模型对照因公司 API IP 限制按用户批准的例外未验收，真实 Lark 展示和收发仍未验收。G3 随 PR #72、A4 随 PR #73 合入；W5 群审批底座随 PR #74 离线合入，普通审批取消/超时局部恢复随 PR #76 合入；S6 创建/取消静默已在本分支离线实现、待精确版本独立审查，下一片为 D7；Grafana 写接口仍归 D7/C8。切片接口和验收只维护在[监控计划 §3.1–§3.5](docs/superpowers/plans/2026-10-09-monitoring-mcp.md)，当前证据见 handoff。真实模型调查能力、真实 Prometheus 服务端限额、Grafana 组织/版本/权限、Alertmanager 版本/认证/容量/HA 和群写审批门槛保持开放，不继承 U1 例外；不等待全部监控源完成，不合并或部署。
+实战对话与飞书展示的已核实问题另见[修复实施计划](docs/superpowers/plans/2026-10-09-agent-dialogue-feishu-repair.md)。R1b 随 PR #68、U1/U2 随 PR #69、监控只读故障续查随 PR #70、P2 随 PR #71 合入；U1 真实模型对照因公司 API IP 限制按用户批准的例外未验收，真实 Lark 展示和收发仍未验收。G3 随 PR #72、A4 随 PR #73 合入；W5 群审批底座随 PR #74 离线合入，普通审批取消/超时局部恢复随 PR #76 合入；S6 创建/取消静默已随 PR #79 离线合入；D7 草稿 PR #83 冻结，C8 暂停。当前先按用户批准做 SDK 原生审批、MCP 生命周期复用整改，方案/实验核对后才实施，见[监控计划 §3.6](docs/superpowers/plans/2026-10-09-monitoring-mcp.md#sdk-reuse)。切片接口和验收只维护在[监控计划 §3.1–§3.6](docs/superpowers/plans/2026-10-09-monitoring-mcp.md)，当前证据见 handoff。真实模型调查能力、真实 Prometheus 服务端限额、Grafana 组织/版本/权限、Alertmanager 版本/认证/容量/HA 和群写审批门槛保持开放，不继承 U1 例外；不等待全部监控源完成，不合并或部署。
 
 P4 的已批准范围只在 [ARCHITECTURE §5「监控接入」](ARCHITECTURE.md#monitoring-mcp) 定义；任务、门槛与验收见 [监控 MCP 增量实施计划](docs/superpowers/plans/2026-10-09-monitoring-mcp.md)。共用协议验证可在 P3 真实环境验收期间独立推进；每项生产写开放须先完成对应源的读取、群 Action 批准闭环与该源真实环境验证，不要求其他监控源先完成。P4 不回写 P1–P3 的 StarRocks 只读验收结论，监控代码/离线检查、真实三源、公司部署与用户接受分别记证。
 
 P4 之外再根据实际使用决定：多群管理、跨渠道身份与会话、正式多人 Web、导出、后台长任务、新 transport/认证方式、多 Agent、TiDB/MySQL 或数据库 MCP。多个 StarRocks 集群已在 P2.5，单群在其后、P3 前；审计慢查询已在 P2，不能重复列为未来交付。数据库 MCP 的重评条件见 ARCHITECTURE §5。其他生产写动作（含原生 Prometheus 规则文件、Grafana 托管规则、StarRocks DDL/DML、重启与发布）不因 P4 的审批能力自动获准，逐项按 §4 的 Action 契约另行决定。
 
-此前“DDL 是首个写场景、通过独立写 MCP Server 执行”的预想已被本次真实监控写需求取代；DDL 路径仍待后续独立决定，不以旧接入约定作为 P4 前提。群批准采用持久 Action 与确定性执行，不跨消息恢复 SDK RunState；Action 绑定、一次执行机会、调用前复核和未知结果处置未验证通过前，不开放对应监控写动作。
+此前“DDL 是首个写场景、通过独立写 MCP Server 执行”的预想已被监控写需求取代；DDL 仍待独立决定。群批准改用 SDK needs_approval/interruptions/RunState，替代“不跨消息恢复”的旧设计；小维保留确定 Action、当前身份/权限、材料送达、原子防重、对象版本及执行/Evidence事实，详细契约只看 ARCHITECTURE §5。SDK整改的正式闭环与原会话失效分支未验证前，不开放对应生产写。
 
 旧代码复用是每个切片的局部判断。没有直接消费者或依赖过重的旧资产不移植；不再单列“保留整个 M5 底座”的迁移阶段。

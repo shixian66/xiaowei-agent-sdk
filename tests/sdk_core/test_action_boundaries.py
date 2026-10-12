@@ -12,7 +12,15 @@ from tests.sdk_core.test_app import cite, clarify, tool_call
 from tests.sdk_core.test_channel_service import BUDGET
 from tests.sdk_core.test_feishu import Outbox
 from tests.sdk_core.test_feishu_render import message_text
-from tests.sdk_core.test_group_actions import PROPOSE, SHARED, SOURCE, STATUS, WRITE, Actions
+from tests.sdk_core.test_group_actions import (
+    PROPOSE,
+    SHARED,
+    SOURCE,
+    STATUS,
+    WRITE,
+    Actions,
+    request_execution,
+)
 from tests.sdk_core.test_group_actions import actions as actions  # pytest fixture
 from tests.sdk_core.test_group_gateway import group_config, running
 from tests.sdk_core.test_group_identity import GROUP, A, B
@@ -42,7 +50,10 @@ async def test_capacity_notice_never_authorizes_unshown_action(
 ) -> None:
     env = actions.env
     env.scripts.add(
-        attributed(A, "提出"), tool_call("am-synthetic__propose_change", value="after"), cite()
+        attributed(A, "提出"),
+        tool_call("am-synthetic__propose_change", value="after"),
+        request_execution,
+        cite(),
     )
     outbox = Outbox(outcomes=[outcome])
     async with running(env, outbox, max_reply_chars=200) as group:
@@ -72,12 +83,15 @@ async def test_uncited_proposal_cannot_be_approved(actions: Actions) -> None:
 
 
 @pytest.mark.parametrize("closed", [False, True])
-async def test_full_or_closed_session_still_allows_valid_approval(
+async def test_full_or_closed_session_rejects_native_approval(
     actions: Actions, closed: bool
 ) -> None:
     env = actions.env
     env.scripts.add(
-        attributed(A, "提出"), tool_call("am-synthetic__propose_change", value="after"), cite()
+        attributed(A, "提出"),
+        tool_call("am-synthetic__propose_change", value="after"),
+        request_execution,
+        cite(),
     )
     async with running(env, max_reply_chars=3500) as group:
         await group.ask("提出", message_id="om_p")
@@ -89,12 +103,15 @@ async def test_full_or_closed_session_still_allows_valid_approval(
             async with env.engine.begin() as conn:
                 await close_sessions(conn, [sid])
         else:
-            for n in range(4):
+            for n in range(5):
                 env.scripts.add(attributed(A, f"解释{n}"), clarify())
                 await group.ask(f"解释{n}", message_id=f"om_{n}")
         before = await env.rows("SELECT message_data FROM agent_messages ORDER BY id")
         await group.ask(f"/批准 {action_id}", message_id="om_a")
-        assert len(actions.adapter.calls) == 1
+        assert actions.adapter.calls == []
+        assert await env.rows("SELECT state, failure_code FROM xiaowei_action") == [
+            ("rejected", "action_session_invalid")
+        ]
         assert await env.rows("SELECT message_data FROM agent_messages ORDER BY id") == before
         await group.ask("/新建", message_id="om_new")
         env.scripts.add(
@@ -111,7 +128,10 @@ async def test_full_or_closed_session_still_allows_valid_approval(
 async def test_unknown_write_is_not_replayed_by_another_approval(actions: Actions) -> None:
     env = actions.env
     env.scripts.add(
-        attributed(A, "提出"), tool_call("am-synthetic__propose_change", value="after"), cite()
+        attributed(A, "提出"),
+        tool_call("am-synthetic__propose_change", value="after"),
+        request_execution,
+        cite(),
     )
     async with running(env, max_reply_chars=3500) as group:
         await group.ask("提出", message_id="om_p")
@@ -127,7 +147,10 @@ async def test_unknown_write_is_not_replayed_by_another_approval(actions: Action
 async def test_same_group_approval_and_agent_turn_are_serial(actions: Actions) -> None:
     env = actions.env
     env.scripts.add(
-        attributed(A, "提出"), tool_call("am-synthetic__propose_change", value="after"), cite()
+        attributed(A, "提出"),
+        tool_call("am-synthetic__propose_change", value="after"),
+        request_execution,
+        cite(),
     )
     actions.adapter.entered, actions.adapter.release = asyncio.Event(), asyncio.Event()
     next_message = env.scripts.add(attributed(B, "解释状态"), clarify())
@@ -213,22 +236,29 @@ def test_large_read_result_can_clip_without_hiding_approval_material() -> None:
 async def test_status_feedback_does_not_reset_approval_tool_budget(actions: Actions) -> None:
     env = actions.env
     env.results = ResultDelivery(
-        env.store, env.evidence, env.access, budget=BUDGET.model_copy(update={"max_tool_calls": 1})
+        env.store, env.evidence, env.access, budget=BUDGET.model_copy(update={"max_tool_calls": 2})
     )
     env.service = ChannelService(env.app, env.results)
     env.scripts.add(
-        attributed(A, "提出"), tool_call("am-synthetic__propose_change", value="after"), cite()
+        attributed(A, "提出"),
+        tool_call("am-synthetic__propose_change", value="after"),
+        request_execution,
+        cite(),
     )
     async with running(env, max_reply_chars=3500) as group:
         await group.ask("提出", message_id="om_p")
         action_id = await actions.one()
         await group.ask(f"/批准 {action_id}", message_id="om_a")
-    assert len(actions.adapter.calls) == 1
-    assert await env.rows("SELECT state FROM xiaowei_action") == [("succeeded",)]
-    assert await env.rows("SELECT state FROM xiaowei_request WHERE reply_message_id='om_a'") == [
-        ("failed",)
+    assert actions.adapter.calls == []
+    # 少一次工具额度时执行请求不会形成暂停，提案须在原轮终态一并作废。
+    assert await env.rows("SELECT state, failure_code FROM xiaowei_action") == [
+        ("rejected", "action_unresumable")
     ]
-    assert await env.rows("SELECT count(*) FROM xiaowei_evidence") == [(2,)]
+    assert await env.rows(
+        "SELECT state, failure_code FROM xiaowei_request WHERE reply_message_id='om_a'"
+    ) == [("failed", "action_unresumable")]
+    assert "未形成可恢复审批" in group.outbox.texts()[-1]
+    assert await env.rows("SELECT count(*) FROM xiaowei_evidence") == [(1,)]
 
 
 @pytest.mark.parametrize(
@@ -237,7 +267,10 @@ async def test_status_feedback_does_not_reset_approval_tool_budget(actions: Acti
 async def test_storage_failure_never_replays_a_write(actions: Actions, stage: str) -> None:
     env = actions.env
     env.scripts.add(
-        attributed(A, "提出"), tool_call("am-synthetic__propose_change", value="after"), cite()
+        attributed(A, "提出"),
+        tool_call("am-synthetic__propose_change", value="after"),
+        request_execution,
+        cite(),
     )
     armed = stage == "proposal_evidence"
     seen = 0
@@ -268,16 +301,20 @@ async def test_storage_failure_never_replays_a_write(actions: Actions, stage: st
     finally:
         event.remove(env.engine.sync_engine, "before_cursor_execute", fail_sql)
     assert len(actions.adapter.calls) == (0 if stage == "proposal_evidence" else 1)
-    assert await env.rows("SELECT state FROM xiaowei_action") == [
-        ("pending" if stage == "proposal_evidence" else "succeeded",)
+    assert await env.rows("SELECT state, failure_code FROM xiaowei_action") == [
+        (
+            ("rejected", "action_unresumable")
+            if stage == "proposal_evidence"
+            else ("succeeded", None)
+        )
     ]
-    code = "action_not_approvable" if stage == "proposal_evidence" else "action_feedback_failed"
+    code = "action_unresumable" if stage == "proposal_evidence" else "action_feedback_failed"
     assert await env.rows(
         "SELECT state, failure_code, delivery FROM xiaowei_request WHERE reply_message_id='om_a'"
     ) == [("failed", code, "sent")]
     receipt = message_text(group.outbox.sent[1][1])
     if stage == "proposal_evidence":
-        assert "本次批准未执行" in receipt
+        assert "未形成可恢复审批" in receipt and "未执行" in receipt
     else:
         assert "动作已执行" in receipt
         assert "反馈" in receipt and "Action ID" in receipt
@@ -305,7 +342,10 @@ async def test_approval_receipt_reports_actual_execution_outcome(
 ) -> None:
     env = actions.env
     env.scripts.add(
-        attributed(A, "提出"), tool_call("am-synthetic__propose_change", value="after"), cite()
+        attributed(A, "提出"),
+        tool_call("am-synthetic__propose_change", value="after"),
+        request_execution,
+        cite(),
     )
     async with running(env, max_reply_chars=3500) as group:
         await group.ask("提出", message_id="om_p")
@@ -333,14 +373,17 @@ async def test_approval_receipt_reports_actual_execution_outcome(
 
 @pytest.mark.parametrize(
     "refusal,state,writes",
-    [("expired", "pending", 0), ("not_sent", "pending", 0), ("processed", "succeeded", 1)],
+    [("expired", "rejected", 0), ("not_sent", "pending", 0), ("processed", "succeeded", 1)],
 )
 async def test_preclaim_refusal_reports_this_approval_not_executed(
     actions: Actions, refusal: str, state: str, writes: int
 ) -> None:
     env = actions.env
     env.scripts.add(
-        attributed(A, "提出"), tool_call("am-synthetic__propose_change", value="after"), cite()
+        attributed(A, "提出"),
+        tool_call("am-synthetic__propose_change", value="after"),
+        request_execution,
+        cite(),
     )
     async with running(env, max_reply_chars=3500) as group:
         await group.ask("提出", message_id="om_p")
@@ -363,9 +406,10 @@ async def test_preclaim_refusal_reports_this_approval_not_executed(
     assert await env.rows(
         "SELECT state, failure_code, delivery FROM xiaowei_request "
         "WHERE reply_message_id='om_refusal'"
-    ) == [("failed", "action_not_approvable", "sent")]
-    assert "本次批准未执行" in receipt
-    assert "Action" in receipt
+    ) == [("failed", "action_expired" if refusal == "expired" else "action_not_approvable", "sent")]
+    assert ("候选已过期，未执行" if refusal == "expired" else "本次批准未执行") in receipt
+    if refusal != "expired":
+        assert "Action" in receipt
     assert "未能确认你当前的使用权限或群成员身份" not in receipt
 
 
@@ -374,7 +418,10 @@ async def test_write_success_with_revoked_feedback_permission_reports_execution(
 ) -> None:
     env = actions.env
     env.scripts.add(
-        attributed(A, "提出"), tool_call("am-synthetic__propose_change", value="after"), cite()
+        attributed(A, "提出"),
+        tool_call("am-synthetic__propose_change", value="after"),
+        request_execution,
+        cite(),
     )
     async with running(env, max_reply_chars=3500) as group:
         await group.ask("提出", message_id="om_p")
@@ -385,14 +432,15 @@ async def test_write_success_with_revoked_feedback_permission_reports_execution(
         async def revoke_before_feedback(
             turn: TurnAnswer, ctx: RunContext, *, history: bool = False
         ) -> Delivery:
-            if ctx.identity.turn_id != proposal_turn:
+            if ctx.identity.subject_id == B:
+                assert ctx.identity.turn_id == proposal_turn
                 # 只注入撤权时点；实际的读取、授权和最终 Evidence 校验仍由产品执行。
                 assert env.access._group is not None
                 env.access._group = replace(env.access._group, tools=SHARED - {STATUS})
             return await validate(turn, ctx, history=history)
 
         monkeypatch.setattr(env.evidence, "validate_answer", revoke_before_feedback)
-        await group.ask(f"/批准 {action_id}", message_id="om_a")
+        await group.ask(f"/批准 {action_id}", sender=B, message_id="om_a")
         receipt = message_text(group.outbox.sent[-1][1])
     assert len(actions.adapter.calls) == 1
     assert await env.rows("SELECT state FROM xiaowei_action") == [("succeeded",)]
@@ -435,7 +483,10 @@ async def test_approval_deadline_receipt_reads_actual_action_state(
     )
     env.service = ChannelService(env.app, env.results)
     env.scripts.add(
-        attributed(A, "提出"), tool_call("am-synthetic__propose_change", value="after"), cite()
+        attributed(A, "提出"),
+        tool_call("am-synthetic__propose_change", value="after"),
+        request_execution,
+        cite(),
     )
     assert env.app.actions is not None
     async with running(env, max_reply_chars=3500) as group:
@@ -462,17 +513,14 @@ async def test_approval_deadline_receipt_reads_actual_action_state(
 
             monkeypatch.setattr(env.app.actions, "status", delayed_status)
         else:
-            validate = env.evidence.validate_answer
+            load = env.store.native_run
 
-            async def delayed_validation(
-                turn: TurnAnswer, ctx: RunContext, *, history: bool = False
-            ) -> Delivery:
-                # 提案已经保存并送达；只延迟批准时的材料复核，尚未占用执行机会。
+            async def delayed_native(action):
                 entered.set()
                 await asyncio.sleep(2)
-                return await validate(turn, ctx, history=history)
+                return await load(action)
 
-            monkeypatch.setattr(env.evidence, "validate_answer", delayed_validation)
+            monkeypatch.setattr(env.store, "native_run", delayed_native)
         await asyncio.wait_for(group.ask(f"/批准 {action_id}", message_id="om_a"), 5)
         receipt = message_text(group.outbox.sent[-1][1])
         assert entered.is_set()
@@ -489,10 +537,10 @@ async def test_approval_deadline_receipt_reads_actual_action_state(
         assert "工具执行失败" not in receipt and "must-not-save" not in receipt
         assert "after" not in receipt
         # 批准与超时回读均经过相同群归属，后者读取真实应用表而非执行局部标记。
-        assert len(reads) == 2
+        assert len(reads) == (4 if stage == "feedback" else 2)
         assert all(id_ == action_id for id_, _ in reads)
         assert all(identity.owner == GROUP.owner for _, identity in reads)
-        assert reads[0][1] == reads[1][1]
+        assert reads[0][1] == reads[-1][1]
         assert await env.rows("SELECT message_data FROM agent_messages ORDER BY id") == history
         assert await env.rows("SELECT count(*) FROM xiaowei_evidence") == [(1 + writes,)]
         assert env.store.readiness.ok
@@ -520,16 +568,23 @@ async def test_approval_timeout_readback_classifies_saved_or_unreadable_state(
     """隔离超时处理边界：状态由真实存储形成，注入中断，不声称测试了远端写入。"""
     env = actions.env
     env.scripts.add(
-        attributed(A, "提出"), tool_call("am-synthetic__propose_change", value="after"), cite()
+        attributed(A, "提出"),
+        tool_call("am-synthetic__propose_change", value="after"),
+        request_execution,
+        cite(),
     )
     assert env.app.actions is not None
     unreadable = False
 
-    async def interrupted_approval(action_id: str, ctx: RunContext) -> TurnAnswer:
+    async def interrupted_approval(action_id: str, ctx: RunContext, *, approve=True) -> TurnAnswer:
         nonlocal unreadable
         action = await env.store.get_action(action_id, ctx.identity)
         if case in {"executing", "unknown", "rejected"}:
-            claimed = await env.store.claim_action(action, ctx.identity)
+            native = await env.store.native_run(action)
+            original = RunContext.model_validate_json(native.context).identity
+            claimed, _cause = await env.store.claim_native_action(
+                action, native, original, ctx.identity
+            )
             assert claimed is not None
             if case != "executing":
                 await env.store.finish_action(claimed, case)
@@ -546,7 +601,7 @@ async def test_approval_timeout_readback_classifies_saved_or_unreadable_state(
         if unreadable and "SELECT * FROM xiaowei_action" in statement:
             raise SQLAlchemyError("synthetic protected database failure")
 
-    monkeypatch.setattr(env.app.actions, "approve", interrupted_approval)
+    monkeypatch.setattr(env.app, "resume_action", interrupted_approval)
     event.listen(env.engine.sync_engine, "before_cursor_execute", fail_read)
     try:
         async with running(env, max_reply_chars=3500) as group:
@@ -573,7 +628,10 @@ async def test_approval_timeout_readback_classifies_saved_or_unreadable_state(
 async def test_concurrent_approval_messages_execute_only_once(actions: Actions) -> None:
     env = actions.env
     env.scripts.add(
-        attributed(A, "提出"), tool_call("am-synthetic__propose_change", value="after"), cite()
+        attributed(A, "提出"),
+        tool_call("am-synthetic__propose_change", value="after"),
+        request_execution,
+        cite(),
     )
     config = group_config().group.model_copy(update={"max_waiting": 12})
     async with running(
@@ -591,7 +649,9 @@ async def test_concurrent_approval_messages_execute_only_once(actions: Actions) 
         )
         await group.gateway.idle()
     assert len(actions.adapter.calls) == 1
-    assert await env.rows("SELECT count(*) FROM xiaowei_request WHERE state='completed'") == [(2,)]
+    assert await env.rows(
+        "SELECT count(*) FROM xiaowei_request WHERE state IN ('completed','paused')"
+    ) == [(2,)]
 
 
 @pytest.mark.parametrize("mutation", ["parameters", "target", "binding", "evidence_deleted"])
@@ -600,7 +660,10 @@ async def test_changed_binding_or_missing_evidence_blocks_before_remote_io(
 ) -> None:
     env = actions.env
     env.scripts.add(
-        attributed(A, "提出"), tool_call("am-synthetic__propose_change", value="after"), cite()
+        attributed(A, "提出"),
+        tool_call("am-synthetic__propose_change", value="after"),
+        request_execution,
+        cite(),
     )
     async with running(env, max_reply_chars=3500) as group:
         await group.ask("提出", message_id="om_p")
@@ -628,7 +691,10 @@ async def test_status_permission_revocation_rejects_history_and_resend(actions: 
 
     env = actions.env
     env.scripts.add(
-        attributed(A, "提出"), tool_call("am-synthetic__propose_change", value="after"), cite()
+        attributed(A, "提出"),
+        tool_call("am-synthetic__propose_change", value="after"),
+        request_execution,
+        cite(),
     )
     async with running(env, max_reply_chars=3500) as group:
         await group.ask("提出", message_id="om_p")
@@ -676,7 +742,10 @@ async def test_recheck_uses_frozen_actual_parameters_not_relative_proposal(
     actions.rebind(prepare=prepare)
     env = actions.env
     env.scripts.add(
-        attributed(A, "提出"), tool_call("am-synthetic__propose_change", value="now"), cite()
+        attributed(A, "提出"),
+        tool_call("am-synthetic__propose_change", value="now"),
+        request_execution,
+        cite(),
     )
     async with running(env, max_reply_chars=3500) as group:
         await group.ask("提出", message_id="om_p")
@@ -690,7 +759,10 @@ async def test_recheck_uses_frozen_actual_parameters_not_relative_proposal(
 async def test_source_configuration_change_invalidates_pending_action(actions: Actions) -> None:
     env = actions.env
     env.scripts.add(
-        attributed(A, "提出"), tool_call("am-synthetic__propose_change", value="after"), cite()
+        attributed(A, "提出"),
+        tool_call("am-synthetic__propose_change", value="after"),
+        request_execution,
+        cite(),
     )
     async with running(env, max_reply_chars=3500) as group:
         await group.ask("提出", message_id="om_p")
@@ -716,7 +788,10 @@ async def test_write_precheck_is_preserved_and_runs_before_remote_recheck(
     actions.rebind(execute=Prechecked(check, actions.adapter.execute))
     env = actions.env
     env.scripts.add(
-        attributed(A, "提出"), tool_call("am-synthetic__propose_change", value="after"), cite()
+        attributed(A, "提出"),
+        tool_call("am-synthetic__propose_change", value="after"),
+        request_execution,
+        cite(),
     )
     async with running(env, max_reply_chars=3500) as group:
         await group.ask("提出", message_id="om_p")
@@ -735,7 +810,10 @@ async def test_write_precheck_is_preserved_and_runs_before_remote_recheck(
 async def test_authority_lost_during_readback_prevents_write(actions: Actions, change: str) -> None:
     env = actions.env
     env.scripts.add(
-        attributed(A, "提出"), tool_call("am-synthetic__propose_change", value="after"), cite()
+        attributed(A, "提出"),
+        tool_call("am-synthetic__propose_change", value="after"),
+        request_execution,
+        cite(),
     )
     actions.adapter.read_entered, actions.adapter.read_release = asyncio.Event(), asyncio.Event()
     actions.adapter.read_release.set()

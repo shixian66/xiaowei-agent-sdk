@@ -42,7 +42,7 @@ _EXPECTED_JOBS = (
 # 「多出的东西」，挡不住删除必需命令、重复摘要顶替、把配置挪到无关 action 下、
 # 或加 `continue-on-error` 让 gate 形同虚设。整文件摘要是唯一能覆盖全部
 # 增/删/改/移位的锚点；合法修改 workflow 时必须显式更新此常量。
-_WORKFLOW_SHA256 = "dca96b089b266148f58a9b41b761d8408ad8859da62aed047a6ea4153f2d3f89"
+_WORKFLOW_SHA256 = "60cc129213a6b0876a7c89f57eb743d457ac6e1aba0a7fc120ea934b93448c98"
 
 # ---- 闭集白名单：改动 ci.yml 必须同步更新此处，否则测试变红 ----------------
 _ALLOWED_EXPRESSIONS = {"github.ref"}
@@ -151,8 +151,11 @@ def test_single_line_run_commands_match_exactly() -> None:
     expected = Counter(
         {
             "uv sync --extra dev --frozen": 8,
-            # 旧套件维持默认跳过；SDK PostgreSQL 全套在 integration 的 digest-pinned block 中运行。
-            "python -m pytest -q --ignore=tests/sdk_core --ignore=tests/deployment": 1,
+            # 无数据库 job 排除 SDK 与 spike；两者在 integration 的 PostgreSQL 全量命令中运行。
+            (
+                "python -m pytest -q --ignore=tests/sdk_core "
+                "--ignore=tests/deployment --ignore=tests/spike"
+            ): 1,
             (
                 "python -m pytest tests/deployment/test_release.py "
                 "tests/deployment/test_compose.py "
@@ -283,9 +286,13 @@ def test_sdk_postgres_compose_image_is_digest_pinned() -> None:
 
 def test_the_integration_job_runs_no_extra_command() -> None:
     """unit 与全套路径各有一条精确 pytest 命令；integration 包含全套路径。"""
-    assert _TEXT.count(
-        "- run: python -m pytest -q --ignore=tests/sdk_core --ignore=tests/deployment\n"
-    ) == 1
+    assert (
+        _TEXT.count(
+            "- run: python -m pytest -q --ignore=tests/sdk_core "
+            "--ignore=tests/deployment --ignore=tests/spike\n"
+        )
+        == 1
+    )
     assert _job_text("integration").count("python -m pytest -q\n") == 1
     assert "compose.sdk-test.yml up -d --wait" in _job_text("integration")
     assert "compose.sdk-test.yml down -v" in _job_text("integration")

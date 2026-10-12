@@ -28,7 +28,7 @@ jobs:
           enable-cache: false
           activate-environment: true
       - run: uv sync --extra dev --frozen
-      - run: python -m pytest -q --ignore=tests/sdk_core --ignore=tests/deployment
+      - run: python -m pytest -q --ignore=tests/sdk_core --ignore=tests/deployment --ignore=tests/spike
 
   integration:
     name: integration
