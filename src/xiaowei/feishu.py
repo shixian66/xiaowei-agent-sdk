@@ -108,6 +108,7 @@ NEW_SESSION = "已新建会话，之前的对话不再作为上下文"
 NEW_SESSION_BUSY = "当前会话正在处理消息，请稍后再新建会话"
 NEW_GROUP_SESSION = "已为本群新建会话：群内之前的对话不再作为任何成员的上下文"
 IDENTITY_NOTICE = "你还没有获得授权。你的编号是 {open_id}，请把它发给管理员。"
+UNSUPPORTED_INPUT = "暂不支持图片、文件或富文本等非文本消息，请将需要分析的内容作为文字发送。"
 IDENTITY_NOTICE_WINDOW = timedelta(minutes=10)
 
 _EVENT_TYPE = "im.message.receive_v1"
@@ -174,10 +175,12 @@ class _RejectedError(Exception):
 @dataclass(frozen=True)
 class _Message:
     message_id: str
+    open_id: str
     subject_id: str
     chat_id: str
     text: str
     group: GroupScope | None = None
+    unsupported: bool = False
 
 
 @dataclass(frozen=True)
@@ -204,8 +207,8 @@ def _string(node: object, *path: str, max_chars: int = _MAX_ID_CHARS) -> str:
     return value
 
 
-def _text(event: object, max_chars: int) -> str:
-    """序列化正文先按容器上限拒绝，再解析，最后按实际文本长度限制。"""
+def _content(event: object, max_chars: int) -> dict[str, Any]:
+    """只校验有界 JSON 容器；非文本内容不提取、不保存、不下载。"""
     raw = _field(event, "event", "message", "content")
     if not isinstance(raw, str):
         raise _RejectedError("content")
@@ -215,7 +218,14 @@ def _text(event: object, max_chars: int) -> str:
         content = json.loads(raw)
     except json.JSONDecodeError:
         raise _RejectedError("content") from None
-    text = content.get("text") if isinstance(content, dict) else None
+    if not isinstance(content, dict):
+        raise _RejectedError("content")
+    return content
+
+
+def _text(event: object, max_chars: int) -> str:
+    """序列化正文先按容器上限拒绝，再解析，最后按实际文本长度限制。"""
+    text = _content(event, max_chars).get("text")
     if not isinstance(text, str) or not text.strip():
         raise _RejectedError("content")
     try:
@@ -257,8 +267,7 @@ def _parse(
         raise _RejectedError("chat_type")
     if _OPEN_ID.fullmatch(open_id) is None:
         raise _RejectedError("sender")
-    if _field(event, "event", "message", "message_type") != "text":
-        raise _RejectedError("message_type")
+    message_type = _string(event, "event", "message", "message_type")
     try:
         created = datetime.fromtimestamp(
             int(_string(event, "event", "message", "create_time")) / 1000, UTC
@@ -268,8 +277,12 @@ def _parse(
     max_age = timedelta(seconds=config.max_event_age_seconds)
     if now - created > max_age or created - now > _CLOCK_SKEW:
         raise _RejectedError("stale")
-    text = _text(event, config.max_message_chars)
     message_id = _string(event, "event", "message", "message_id")
+    if message_type == "text":
+        text = _text(event, config.max_message_chars)
+    else:
+        _content(event, config.max_message_chars)
+        text = ""
     if group is not None:
         text = _addressed(event, text, bot())
         subject: str | None = open_id
@@ -279,10 +292,12 @@ def _parse(
         return _Unregistered(message_id=message_id, open_id=open_id, chat_id=chat_id)
     return _Message(
         message_id=message_id,
+        open_id=open_id,
         subject_id=subject,
         chat_id=chat_id,
         text=text,
         group=group,
+        unsupported=message_type != "text",
     )
 
 
@@ -479,8 +494,13 @@ class FeishuGateway:
             if self._reserve_notice(message):
                 await self._send_notice(message)
             return
-        kind, body = _command(message.text)
         try:
+            if message.unsupported:
+                if self._reserve_notice(message):
+                    await self._service.authorize_notice(self._ref(message))
+                    await self._notify(message, UNSUPPORTED_INPUT)
+                return
+            kind, body = _command(message.text)
             if kind == "new":
                 await self._new_session(message)
             elif kind == "approve":
@@ -792,7 +812,7 @@ class FeishuGateway:
         if outcome != "sent":
             logger.warning("飞书提示发送未成功：%s", outcome)
 
-    def _reserve_notice(self, message: _Unregistered) -> bool:
+    def _reserve_notice(self, message: _Unregistered | _Message) -> bool:
         """在任何发送 await 之前同步完成“检查并占位”：同一消息只尝试一次，同一用户每个窗口一次。"""
         key = (message.open_id, message.message_id)
         if key in self._noticed_messages:

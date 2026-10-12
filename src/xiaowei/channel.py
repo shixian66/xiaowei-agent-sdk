@@ -552,6 +552,10 @@ class ChannelService:
         """应用的全局并发上限；渠道的消费者数不得超过它。"""
         return self._app.max_concurrent_turns
 
+    async def authorize_notice(self, ref: RequestRef) -> None:
+        """无数据回执发送前复核当前身份及群成员；不创建请求、会话或工具执行范围。"""
+        await _decide_ref(self._access, ref)
+
     async def accept(self, inbound: InboundRequest) -> RequestReceipt:
         """当前授权通过后持久接受请求；同一请求编号返回已有记录，不再运行。
 
