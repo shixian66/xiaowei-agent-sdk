@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 from collections.abc import AsyncIterator
 
 import httpx2
@@ -15,6 +16,24 @@ pytestmark = pytest.mark.loopback
 
 _IMAGE_LIMIT = 2 * 1024 * 1024
 _CHUNK = 64 * 1024
+
+
+def test_twelve_full_images_have_separate_request_cost() -> None:
+    """锁版编码器的合成请求大小；不代表真实 Vertex 已接受这个请求。"""
+    encoded = base64.b64encode(b"x" * _IMAGE_LIMIT).decode("ascii")
+    parts = [{"inlineData": {"mimeType": "image/png", "data": encoded}} for _ in range(12)]
+    request = httpx2.Request(
+        "POST",
+        "https://example.invalid",
+        json={
+            "contents": [{"role": "user", "parts": [{"text": "检查这些截图"}, *parts]}],
+            "generationConfig": {"candidateCount": 1},
+        },
+    )
+    image_bytes = 12 * len(encoded)
+    assert image_bytes == 33_554_448
+    assert len(request.content) == 33_555_158
+    assert len(request.content) - image_bytes == 710
 
 
 class _TooLargeError(Exception):
