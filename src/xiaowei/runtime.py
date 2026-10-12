@@ -1725,8 +1725,16 @@ async def _start_feishu(
     feishu = config.feishu
     if feishu is None or transport is None:
         return None
+    from xiaowei.feishu_resource import LarkResourceDownloader
+
+    downloader = LarkResourceDownloader(feishu).download if feishu.document_input_enabled else None
     gateway = FeishuGateway(
-        runtime.service, feishu, transport.send, clock=clock, bot_open_id=transport.bot_open_id
+        runtime.service,
+        feishu,
+        transport.send,
+        clock=clock,
+        bot_open_id=transport.bot_open_id,
+        download_resource=downloader,
     )
     consumers = asyncio.create_task(gateway.run(), name="xiaowei-feishu")
     starting = asyncio.create_task(transport.start(gateway.receive), name="xiaowei-feishu-start")

@@ -861,7 +861,7 @@ def test_container_migration_v4_to_v5_to_v6_and_old_program_refusal(
             "(SELECT count(*) FROM xiaowei_session WHERE owner_kind = 'group') || ':' || "
             "(SELECT count(*) FROM xiaowei_evidence) FROM xiaowei_schema_version",
         )
-        assert preserved.returncode == 0 and preserved.stdout.strip() == "8:1:1:1:2"
+        assert preserved.returncode == 0 and preserved.stdout.strip() == "9:1:1:1:2"
 
         _replace_app_image(directory, runtime_image, v5_image)
         old_upgrade = _historical_cli(directory, "storage", "upgrade")

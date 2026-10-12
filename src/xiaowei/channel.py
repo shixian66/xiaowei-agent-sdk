@@ -611,6 +611,10 @@ class ChannelService:
         """应用的全局并发上限；渠道的消费者数不得超过它。"""
         return self._app.max_concurrent_turns
 
+    def admits_input(self, text: str) -> bool:
+        """附件准入仍使用当前应用的数据策略；持久化和模型前调用。"""
+        return self._app.admits_input(text)
+
     async def authorize_notice(self, ref: RequestRef) -> None:
         """无数据回执发送前复核当前身份及群成员；不创建请求、会话或工具执行范围。"""
         await _decide_ref(self._access, ref)

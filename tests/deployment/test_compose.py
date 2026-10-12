@@ -425,7 +425,19 @@ def test_formal_compose_entry_success_failure_network_and_signal(
         downgraded = _pg(
             pg_id,
             # 本机演练重建真实 v5 形状，不能只改版本而留下后来新增的表或列。
-            "BEGIN; DROP TABLE xiaowei_action; DROP TABLE xiaowei_installation; "
+            "BEGIN; DROP TABLE xiaowei_action_run; DROP TABLE xiaowei_action; "
+            "DROP TABLE xiaowei_installation; "
+            "ALTER TABLE xiaowei_request DROP CONSTRAINT xiaowei_request_answer_state_check; "
+            "ALTER TABLE xiaowei_request ADD CONSTRAINT xiaowei_request_check "
+            "CHECK ((state = 'completed') = (answer IS NOT NULL)); "
+            "ALTER TABLE xiaowei_request DROP CONSTRAINT xiaowei_request_state_check; "
+            "ALTER TABLE xiaowei_request ADD CONSTRAINT xiaowei_request_state_check "
+            "CHECK (state IN ('accepted', 'running', 'completed', 'failed', 'interrupted')); "
+            "ALTER TABLE xiaowei_request DROP CONSTRAINT xiaowei_request_failure_code_check; "
+            "ALTER TABLE xiaowei_request ADD CONSTRAINT xiaowei_request_failure_code_check "
+            "CHECK (failure_code IN ('busy', 'model_failed', 'evidence_failed', "
+            "'session_failed', 'scope_unverifiable', 'access_denied', 'result_not_saved', "
+            "'interrupted')); "
             "ALTER TABLE xiaowei_request DROP COLUMN session_state; "
             "UPDATE xiaowei_schema_version SET version = 5; COMMIT",
         )
