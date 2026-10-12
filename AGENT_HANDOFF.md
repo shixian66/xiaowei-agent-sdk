@@ -37,17 +37,23 @@
 
 ## 3. 当前计划与下一项工作
 
-**当前下一步：** 完成[七项计划 E5a](docs/superpowers/plans/2026-10-10-production-dialogue-repairs.md#e5图片和文档输入第-5-项)最终离线检查、隔离变异与提交/推送/PR，再交用户指定独立审查；不自动合并或部署。E5b/E6 的未定契约继续开放，不提前实施。
+**当前下一步：** [七项计划 E5a](docs/superpowers/plans/2026-10-10-production-dialogue-repairs.md#e5图片和文档输入第-5-项)本地实现及必要检查已完成，按授权提交/推送/PR，按精确 head 核对 CI，再交用户指定独立审查；不自动合并或部署。E5b/E6 的未定契约继续开放，不提前实施。
 
-**E5a 当前证据（2026-10-12，最终检查待补）：** 基线只要 message_type != text 就提前丢弃，早于群 mention 和单聊登记。现共用有界 JSON 容器与公共事件校验，之后复用当前授权核心、固定发送及原提示窗口；不下载/提取，不进入命令、Agent、请求、Session 或 Evidence。新增 ChannelService.authorize_notice 只复用 _decide_ref，不创建第二套授权或循环。
+**E5a 当前证据（2026-10-12）：** 基线只要 message_type != text 就提前丢弃，早于群 mention 和单聊登记。现共用有界 JSON 容器与公共事件校验，之后复用当前授权核心、固定发送及原提示窗口；不下载，不将正文提取为业务输入，不进入命令、Agent、请求、Session 或 Evidence。SDK raw 后原管线仍在内存解析/规范化 post，标准策略禁用且小维不消费结果。新增 ChannelService.authorize_notice 只复用 _decide_ref，不创建第二套授权或循环。
 
 基线现有飞书/群三文件 **288 passed**（41.90s）；首次命令引用不存在的 test_group_auth.py，未收集测试，不作为证据。新回归在基线 **23 failed, 16 passed**（67.07s）：合法消息无反馈、群无当前成员检查；首轮候选 **36 passed, 3 failed**，失败因合成端点把 bot 身份和发送返回 data 混合导致 SDK 备用查询。按锁版 SDK 的实际响应形状修正替身，保留资源接口闭集，随后 **39 passed**（6.46s）。时钟辅助接受秒数、真实 SDK 时效需当前时间，均在测试侧校正；不改变产品检查。
 
 正式 serve/raw 桥成功 + 非法租户、实际 SDK webhook/raw/OpenAPI、群当前成员/mentions、私聊登记、post 嵌入命令、并发限频、未知与重复事件共 **48 passed**（8.57s）。实际 SDK 端点只出现 auth、bot info、一次消息创建，零资源下载；应用侧数据库监听及正式空表验证零请求/Session/Evidence，模型和工具计数为零。替身证明协议/治理调用链，不证明真实客户端纯图片 mention。
 
-既有兼容检查首轮 **5 failed, 283 passed**：合法 image/post 静默断言已被 E5a 批准契约取代。原负例更新为非法类型字段和未 @ 图片，正例另验证单条固定回执及零 I/O；其他原断言不放宽。六相关文件最终 **336 passed**（50.44s）。初次 Ruff 发现测试中静态表名的 SQL 插值，改为四条固定语句；27 个产品源文件 mypy 通过，完整检查/隔离变异稍后补入。日志 `/private/tmp/e5a-*.log`。
+既有兼容检查首轮 **5 failed, 283 passed**：合法 image/post 静默断言已被 E5a 批准契约取代。原负例更新为非法类型字段和未 @ 图片，正例另验证单条固定回执及零业务 I/O；其他原断言不放宽。六相关文件最终 **336 passed**（50.44s）。初次 Ruff 发现测试中静态表名的 SQL 插值，改为四条固定语句。日志 `/private/tmp/e5a-*.log`。
 
-**E5a 隔离变异：** 确认导入仓库外源码副本后，跳过当前授权、绕过非文本群 mention、去掉未支持类型去重/限频分别 **3 / 4 / 10 项失败**，工作树未受变异。脚本 `/private/tmp/e5a-mutations.py`，日志 `/private/tmp/e5a-mutation-{auth,mention,dedup}.log`。全仓 Ruff、118 文件格式、文档命令/事实 5 passed（0.18s）及 diff check 已通过；最终产品版本完整 SDK/P1B 与实现方分支复查待补。
+**E5a 隔离变异：** 确认导入仓库外源码副本后，跳过当前授权、绕过非文本群 mention、去掉未支持类型去重/限频分别 **3 / 4 / 10 项失败**，工作树未受变异。脚本 `/private/tmp/e5a-mutations.py`，日志 `/private/tmp/e5a-mutation-{auth,mention,dedup}.log`。全仓 Ruff、118 文件格式、129 源文件 mypy、文档命令/事实 5 passed（0.18s）及 diff check 已通过。
+
+冻结实现 `e2b0e86a14651389cb34b258fb90f6909fcd8d66` 的完整 SDK/P1B 为 **3217 passed, 16 skipped, 62 deselected**（875.15s，退出 0，`/private/tmp/e5a-full-sdk-p1b.log`）。实际命令：`SDK_TEST_POSTGRES_URL=postgresql+asyncpg://postgres@127.0.0.1:55432/postgres XW_TEST_PROMETHEUS_MCP_BIN=/private/tmp/xw-prometheus-mcp-v018/prometheus-mcp-server XW_TEST_GRAFANA_MCP_BIN=/private/tmp/xw-g3-official/mcp-grafana .venv/bin/python -m pytest tests/sdk_core tests/p1b -q`；官方二进制只接本机合成端点，其他可选环境沿原跳过规则，浏览器/真实 StarRocks opt-in 未选入，不改变选择规则、不将其计作通过。后续仅文档及模块说明澄清，行为代码不再改变。
+
+文案澄清后按 `SDK_TEST_POSTGRES_URL=postgresql+asyncpg://postgres@127.0.0.1:55432/postgres .venv/bin/python -m pytest tests/sdk_core/test_unsupported_feishu.py tests/sdk_core/test_unsupported_group.py tests/sdk_core/test_unsupported_entrypoints.py tests/security/test_docs_command_consistency.py tests/contract/test_doc_fact_binding.py -q -W error -o cache_dir=/private/tmp/e5a-final-pytest-cache` 完成 **53 passed**（9.29s，`/private/tmp/e5a-final-targeted.log`）；全仓 Ruff、118 文件格式、129 源文件 mypy 与 diff check 再次通过。不因纯文案澄清重跑相同输入的完整重型套件。
+
+实现方发起的新上下文只读分支复查核对上述冻结实现：未发现阻断；SDK 仍解析 post 的非阻断文案点已据源码收窄到“不提取为业务输入”。此复查不替代用户指定独立审查。E5a 专用取消/drain 未新增回归；取消保持占位是源码推理，原身份提示共享路径已有 drain 用例，不声称专用实测通过。CI 由精确 PR head 获取，用户指定独立审查和真实平台验收仍开放。
 
 **E5a 未覆盖：** 真实 Lark 收发/群纯图片 mention、公司环境、浏览器和部署；本片不改 Web，无新的浏览器任务。未调用真实模型，E5a 不改变 Agent 或模型/工具契约、不新增豁免。单条固定回执不占业务轮数；与身份提示共用每实际 open_id 10 分钟内存窗口，跨私聊/指定群共享，失败/未知不释放，普通文本提问不受影响。E5b 下载/识图和 E6 报告输出未实施。
 
