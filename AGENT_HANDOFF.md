@@ -11,9 +11,9 @@
 | 仓库 | [shixian66/xiaowei-agent-sdk](https://github.com/shixian66/xiaowei-agent-sdk) |
 | 本地目录 / 分支 | SDK整改方案：`/Users/kloenguyen/.codex/worktrees/sdk-reuse-plan/agent-SDK` / `codex/sdk-reuse-plan`；实验基线 main `ebb4db3c4738134ef7371f076e0662ac3c0c741d`（PR #82 / S2）。最新 origin/main `7aa545189018ffdfa7d5d40e949d0f7b23897b6f` 仅合入 PR #84 的对话修复文档，本候选未改基线；主工作区与 D7 工作树保留未修改。 |
 | M5 历史起点 | `372c381f44ecfa1fa53961f137d0058033cbd805`；不是远端当前 main 的核验结论 |
-| 本轮审查版本 | S2 已随 PR #82 合入上述基线。SDK整改方案 `5e2525c5a013d7d61708f4caac07a8c07a6adceb` 已经用户指定审查方复跑38项，发现恢复身份/账本的B1阻断；修订候选待复审，精确本地 SHA 在交付中给出。D7 PR #83 草稿 head `52346a23e8d1b1c30f27951d95ba8167e39f681d` 冻结。 |
+| 本轮审查版本 | S2 已随 PR #82 合入上述基线。SDK整改方案 `5e2525c5a013d7d61708f4caac07a8c07a6adceb` 已经用户指定审查方复跑38项，发现恢复身份/账本的B1阻断；`ccc7e27725f1c2df7f3899fa4e60c17da0f93ea2` 已独立复审关闭B1并复现48项及装载删除变异。N1补齐后进入SDK-A，精确版本由Git取得。D7 PR #83 草稿 head `52346a23e8d1b1c30f27951d95ba8167e39f681d` 冻结。 |
 | 已同步主线审查记录 | W5 `fdfdb469cbcf5e8499f9ee8d69dae954bae0ebda` 经用户独立复审通过并随 PR #74 合入。取消恢复候选 `0ec6c4351824c6b85338ba713d85d54ef34484c2` 的内部只读复查及后续验证记录见下文；这些不是 R7 的新独立审查。本次以已经合入的 PR #76 / main `c7e1e40c346fcd488dbd0dfd3af2e36377e2ee66` 同步，原监控记录与实战缺口保留。 |
-| 当前阶段 | R1a/R1b、只读续查、P2/G3/A4、W5/取消恢复/S6 与 R7/R3/R12/S1/S2 已合入，真实环境缺口保留。暂停后续新功能，当前仅 SDK复用方案/实验；整改产品实现、D7/C8 和 S3 待授权阶段推进。 |
+| 当前阶段 | R1a/R1b、只读续查、P2/G3/A4、W5/取消恢复/S6 与 R7/R3/R12/S1/S2 已合入，真实环境缺口保留。暂停后续新功能，当前已完成 SDK复用方案/实验及N1修订，SDK-A前置条件已满足，产品实现尚未开始；D7/C8 和 S3 不在本轮增量范围。 |
 | 当前源码与依赖 | 新包 `src/xiaowei/` 当前为应用表 v8（迁移008只新增独立请求会话快照；主线 v7 Action 表和失败码 CHECK 不变，SDK 表不变）。V1-A 新增 `vertex_model.py`（SDK 公开 `Model` 的非流式 Vertex 适配器），`model_api` 增加 `provider="vertex"` 与受控 transport 的认证头/成功校验参数；显式声明已直接导入的 `httpx2>=2.12,<3`（锁定 2.13.1 不变）。V1-B 使 `PolicySession` 随函数调用保存并回放 `provider_data.thought_signature`（单字段白名单，其余供应商字段丢弃），`app.safe_run_config()` 成为应用与 `model check` 共用的运行配置。V2 新增 `runtime.check_model` / `validate_model_config` 与 CLI `model check`。C2 把主模板改为一个 Vertex Profile、一个目标；占位符清单新增 Vertex 模型标记，C2 前模板的标记作为历史值继续拒绝。发布归档仍只含白名单文件 |
 | 新产品入口 | 原生主线仍为 `xiaowei`（与 `python -m xiaowei` 相同）的 `serve`、`config check`、`model check`、`storage init/upgrade/cleanup`、`requests resend`；`listen_host` 可为任意地址（默认 `127.0.0.1`）。镜像固定入口复用同一 CLI，在容器内绑定 `0.0.0.0`，宿主机发布地址由 `XW_WEB_BIND_ADDRESS`（默认 `0.0.0.0`）决定。真实模型、用户 StarRocks 与真实飞书未参与 P3-A 验证；旧 CLI/Compose 不是产品入口 |
 | 本次工作范围 | 用户 2026-10-12 授权文档与有界离线实验；不改产品源码/迁移/依赖，不连接真实模型/飞书/公司服务，不推送、不开PR、不合并、不部署。先交方案/实验核对；保留群审批和业务执行边界。 |
@@ -37,9 +37,9 @@
 
 ## 3. 当前计划与下一项工作
 
-**当前下一步：** 交用户核对[SDK复用整改 §3.6](docs/superpowers/plans/2026-10-09-monitoring-mcp.md#sdk-reuse)与实验，再实施 SDK-A。原会话失效拒绝、原发起人权限续读、旧pending升级作废及未完成报告不交付均已获用户批准；B1修订实验提交精确版本复审后，再由用户批准SDK-A开工。S2已随PR #82合入，旧本机证据保留在下方；D7草稿冻结，不继续新功能。
+**当前下一步：** 按已复审的[SDK复用整改 §3.6](docs/superpowers/plans/2026-10-09-monitoring-mcp.md#sdk-reuse)进入 SDK-A。B1已关闭；用户批准N1：发起人退群/历史Evidence因撤权不可读，恢复前按专用原因拒绝，真实停止路径须零写、零模型I/O。旧executing迁移不改、启动恢复转unknown，详细契约仅在架构 §5。S2已随PR #82合入，旧本机证据保留在下方；D7草稿冻结，不继续新功能。
 
-**SDK 复用整改：方案与离线实验（2026-10-12）。** 用户已暂停 D7/C8 新功能，批准补[原监控计划 §3.6](docs/superpowers/plans/2026-10-09-monitoring-mcp.md#sdk-reuse)，产品实现仍待方案核对。原“不恢复 RunState”设计已被批准的原生 HITL 方向替代；原会话失效、恢复身份、旧pending升级作废及未完成报告的批准契约只在[架构 §5](ARCHITECTURE.md#monitoring-mcp)维护。当前只修改四份相关文档和 `tests/spike/`，不改产品/迁移/依赖；D7 PR #83 保持草稿、未合入/未继续修改。
+**SDK 复用整改：方案与离线实验（2026-10-12）。** 用户已暂停 D7/C8 新功能，批准补[原监控计划 §3.6](docs/superpowers/plans/2026-10-09-monitoring-mcp.md#sdk-reuse)；ccc7e27复审已关闭B1，N1契约及旧executing处理补齐，SDK-A可进入，产品代码尚未实施。原“不恢复 RunState”设计已被批准的原生 HITL 方向替代；原会话失效、恢复身份、旧pending升级作废及未完成报告的批准契约只在[架构 §5](ARCHITECTURE.md#monitoring-mcp)维护。当前只修改四份相关文档和 `tests/spike/`，不改产品/迁移/依赖；D7 PR #83 保持草稿、未合入/未继续修改。
 
 本工作树独立 `.venv` 锁定 Python3.11.16、SDK0.22.3、mcp2.2.0；仅脚本模型、本机 stateful MCP 和逐例隔离的 `xiaowei-sdk-test` PostgreSQL。实验区分 SDK 原生能力、SQL 原语可行性和可复用产品路径；不把后两者拼成“正式原生审批已实现”。关键反例：同一合法 SDK 快照可执行两次；旧 Evidence 可绕过 PolicySession 随 RunState 再到模型；PolicySession直接恢复在工具已调用一次后因 limit 拒绝；Manager就地重连让旧闭包串新连接，且不跟踪调用期断开。
 
@@ -51,13 +51,15 @@
 | `.venv/bin/ruff check --no-cache tests/spike`；`.venv/bin/ruff format --check --no-cache tests/spike`；`.venv/bin/mypy src/xiaowei` | 实验 Ruff/格式通过，6个文件；源代码未变，复用原27个源文件类型检查（`/private/tmp/xw-sdk-reuse-type.log`） |
 | `.venv/bin/python -m pytest tests/security/test_docs_command_consistency.py tests/contract/test_doc_fact_binding.py -q -W error`；`UV_CACHE_DIR=/private/tmp/xw-sdk-reuse-uv-cache uv lock --check --offline`；`git diff --check` | 5 passed，0.13s；`/private/tmp/xw-sdk-b1-docs-final.log`；锁文件/差异检查通过；未改依赖 |
 
+**N1本次增量：** 仅改架构、原计划与交接三份文档；已核对 `ChannelStore.recover` 现有 executing→unknown 规则，迁移不介入。文档两文件检查5 passed（0.13s），`git diff --check` 通过；原48项与装载变异未变，不重复重跑，也不声称正式N1停止/回执路径已实现。
+
 **B1增量证据：** 审批人B的真实新请求带新turn；SDK按服务端保存的A/原turn接续，原轮账本同事务保存/装载，新 GovernedTools 模拟重启仍可提交。反例使用B/newturn会拆分账本并触发 SessionItemRejectedError。新测试验证工具预算不复位、失败PromQL/停止源不重复I/O、失败说明进入最终投影，提议拒绝/截断等标记延续。迁移实验只验证旧pending置rejected、成功/未知逐字段不变、旧群入口零写，以及独立的专用回执投影；正式迁移和群专用回执尚未实施。
 
 **隔离变异：** 在 `/private/tmp/xw-sdk-ledger-mutation/` 复制账本用例和conftest，仅删除load_checkpoint里的 `_used`/`_runs` 装载；确认实际导入临时副本。`PYTHONPATH=. SDK_TEST_POSTGRES_URL=postgresql+asyncpg://postgres@127.0.0.1:55432/postgres .venv/bin/python -m pytest -c pyproject.toml /private/tmp/xw-sdk-ledger-mutation/test_sdk_resume_ledger.py -q -s -W error --tb=short` 得到5 failed、4 passed，失败到达重启提交、预算、重复监控I/O及标记丢失分支；日志 `/private/tmp/xw-sdk-ledger-mutation-configured.log`。初次仓库外运行遗漏pytest配置，9个夹具装配错误未算证据；补显式配置后才完成变异，无候选代码/断言变更。
 
 基线回归命令：`.venv/bin/python -m pytest tests/sdk_core/test_mcp_integration.py tests/sdk_core/test_group_actions.py tests/sdk_core/test_session_policy.py -q -W error --tb=short`。R1b 命令：`.venv/bin/python -m pytest tests/sdk_core/test_monitoring_r1b.py::test_reconnect_backoff_caps_at_sixty_seconds_and_resets tests/sdk_core/test_monitoring_r1b.py::test_old_runner_tool_stays_on_old_connection_after_reconnect tests/sdk_core/test_monitoring_r1b.py::test_cancelled_reconnect_closes_candidate_and_allows_later_recovery tests/sdk_core/test_monitoring_r1b.py::test_concurrent_reconnect_is_single_flight_bounded_and_cools_down -q -W error --tb=short`。
 
-**仍未证明：** 原生审批正式入口、恢复版本/Action/会话检查的完整生产事务、gate调用与Evidence/最终完整性绑定、活动时间/依赖复核预算延续、合法最大快照、正式升级迁移/专用群回执、真实模型/飞书/公司服务及部署恢复。SQL原语用实验表证明排序/回滚，正式 claim 尚未改变；执行中关闭的群回执使用当前 W5 事实路径。5e2525c已由用户指定审查方复跑38项并发现B1阻断，本次修订仍待复审；本轮不推送、不开 PR、不合并、不部署。下一步仅交用户核对方案与兼容取舍，再按 SDK-A 实施和精确版本审查。
+**仍未证明：** 原生审批正式入口、恢复版本/Action/会话检查的完整生产事务、gate调用与Evidence/最终完整性绑定、活动时间/依赖复核预算延续、合法最大快照、正式升级迁移/专用群回执、真实模型/飞书/公司服务及部署恢复。SQL原语用实验表证明排序/回滚，正式 claim 尚未改变；执行中关闭的群回执使用当前 W5 事实路径。ccc7e27已独立复审关闭B1，48项与删除装载后5项失败均由审查方复现。N1文档修订不重跑未变化实验；下一步SDK-A按新差异独立审查。本轮仍不开PR、不合并、不部署。
 
 **S2 本地实现与证据（2026-10-11，已合入）：** 复用 `PolicySession` 的元数据读取/完整回放计数，经 Application 的可信返回/异常、请求终态事务、当前身份读取，生成 Web/飞书固定说明。成功提交和失败状态单独保存，不进入回答 JSON、模型或 SDK 历史；Agent 指令、工具、治理及 Evidence 校验不变。主线 v7 已被占用，本片用 v8 迁移，发行清单只允许 v8 直接启动，v1–v7 显式升级。旧空快照保留通用回执；坏快照拒绝交付，保存失败、取消和恢复沿既有状态机。
 
