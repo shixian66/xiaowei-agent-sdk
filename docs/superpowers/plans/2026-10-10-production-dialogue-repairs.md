@@ -1,6 +1,6 @@
 # 生产对话七项修复实施计划
 
-> 文档版本：v5.14，2026-10-12。R7/R3/R12/S1/S2/S3/E5a 已合入；E5b 基线为 main `872214727d1c5cfbbec7287ac13ce514b4f05fc9`（PR #86），应用表 v8。用户已授权继续 E5b 开发，先闭合有界下载和容量/保存/回放契约，再实施正式入口；E6/C7 不在本片。不改监控工作树、不使用 8501，不调用真实模型、Lark/飞书或公司 StarRocks，不合并、不部署。七项范围统一在本文件维护。
+> 文档版本：v5.15，2026-10-12。R7/R3/R12/S1/S2/S3/E5a 已合入；E5b 基线为 main `872214727d1c5cfbbec7287ac13ce514b4f05fc9`（PR #86），应用表 v8。用户已授权继续 E5b 开发，先闭合有界下载和容量/保存/回放契约，再实施正式入口；E6/C7 不在本片。不改监控工作树、不使用 8501，不调用真实模型、Lark/飞书或公司 StarRocks，不合并、不部署。七项范围统一在本文件维护。
 > 后续实施按 `superpowers:executing-plans` 串行完成可验证切片；每片先观察目标测试失败，再最小修复、验证和提交。计划审查不等于产品已实现。
 
 **目标：** 同名表不擅自选集群；可修正拒绝后由同一 Agent 改正或澄清并完成任务；回答清楚、保留获准原文与限制、减少重复；长排障能在明确容量内继续；图片文档与报告附件有明确的可用范围及失败反馈。
@@ -215,11 +215,11 @@ E5a 中富文本 post 与图片/文件同属未支持类型，不将嵌入正文
 
 容量实测（锁定 httpx2 JSON 编码，`test_twelve_full_images_have_separate_request_cost` 的 12 张各 2,097,152 字节、短文本合成请求）：图片原值合计 25,165,824 字节，Base64 共 33,554,448 字节，请求体 33,555,158 字节，其中非图片 710 字节。图片单独计 `4 * ceil(raw_bytes / 3)`，整轮图片附加额度上限由 12 × 2 MiB 推导为 **33,554,448 字节**；仅可信图片 part 的 Base64 可占用该额度，其余所有请求字节仍不得超过 Profile 的原 `max_request_bytes`，不能只把总限额放大后让纯文字占用图片额度。格式包装、系统指令及工具声明计入非图片部分；每次 SDK 调用前按最终请求体核算。这个本地容量实验只证明小维装配大小，不能证明真实 Vertex Express 端点接受约 33.6 MB，真实模型闭环仍是合入门槛。Google Gemini 3 Flash 的公开模型页列单图内联上限 7 MB、单次最多 3000 张，但未给当前 Express 组合的这份总请求验收证据。[模型规格](https://docs.cloud.google.com/gemini-enterprise-agent-platform/models/gemini/3-flash?hl=en)。
 
-锁版 `lark-channel-sdk` 的公开 `download_resource` / `download_resource_to_file` 在返回前读完响应，不满足 2 MiB 接收上限；`ChannelConfig.http_executor` 未接入该路径。`tests/sdk_core/test_e5b_stream_probe.py` 用本机合成端点证明 httpx2 公开 `AsyncClient.stream` 可处理无 Content-Length、分块越限、声明超限、超时与取消；虚报过小的 Content-Length 会得到残缺内容，因此正式实现还必须验证图片格式与解码边界。下一实现单元只可用固定 Lark/Feishu 域名、原消息 `message_id` 与资源键的受控 HTTP 下载，不接受用户/模型 URL，不启用 SDK 自动媒体拉取；取得凭据、资源请求与关闭均须有期限，日志只记固定类别。SDK `input_image` 只是输入形状；当前 `PolicySession` 与 Vertex 适配器只接受文本，后续须完成可信原图保存/回放和该 Profile 的协议映射，不把通过协议实验写成产品闭环。
+锁版 `lark-channel-sdk` 的公开 `download_resource` / `download_resource_to_file` 在返回前读完响应，不满足 2 MiB 接收上限；`ChannelConfig.http_executor` 未接入该路径。原探针的 `httpx2.Timeout` 用例只证明单次读取间隔超时，不能证明整个下载有总期限。`tests/sdk_core/test_e5b_stream_probe.py` 现用本机合成端点覆盖无 Content-Length、分块越限、声明超限、慢速滴流触发 `asyncio.timeout` 总期限、正文中途取消后断连，以及非 `identity` 的 `Content-Encoding` 在读正文前拒绝；虚报过小的 Content-Length 会得到残缺内容，因此正式实现还必须验证图片格式与解码边界。这些仅是公开流式接口的协议实验，没有取得真实凭据，也没有经过产品入口。下一实现单元只可用固定 Lark/Feishu 域名、原消息 `message_id` 与资源键的受控 HTTP 下载，不接受用户/模型 URL，不启用 SDK 自动媒体拉取；须以同一个 `asyncio.timeout` 覆盖取得凭据、资源请求、读取与关闭连接，另设单次网络超时，日志只记固定类别。SDK `input_image` 只是输入形状；当前 `PolicySession` 与 Vertex 适配器只接受文本，后续须完成可信原图保存/回放和该 Profile 的协议映射，不把通过协议实验写成产品闭环。
 
 保存方式定为 PostgreSQL 应用表的原始字节与类型、顺序、原消息/内容摘要，按当前会话归属和固定到期时间读写、清理；不把 Base64 放进 SDK 文本历史或 Evidence，不依赖 Lark 临时资源 URL 做续问。会话满额后新图在下载前拒绝；单会话最坏原图约 24 MiB，需要在上线容量测算中把活动会话数和备份体积一并计入。模型组合默认不开图片输入；首版仅在已验证图片协议的可信 Vertex Profile 上显式启用，不让其他 Provider 因字段存在而自动获得图片数据。图像解码限额和 TXT/MD 原文下载限额仍须由实现前的有界实验定值，不能将 2 MiB 图片原值上限误当成解码内存上限。
 
-- [ ] 核对锁定 SDK 的公开 download_resource、ImageContent/FileContent、Model 输入项与 Session 支持；MediaContent 是平台 media 消息类型，不当成图片/文件的通用输入。当前 download_resource 完整读入并失败返回 None；download_resource_to_file 也先取得完整响应，不能代替有界下载。锁版 ChannelConfig.http_executor 仅有声明、未接入调用，不能按字段名推定可用。先验证可用的公开扩展点，以无 Content-Length、虚报长度、分块超限、超时/取消反例证明下载时停止读取；无法有界时暂停 E5b，提出最小受控 HTTP 方案或锁版升级，不调用私有方法/monkey patch，不以下载后检查冒充接收上限。
+- [ ] 核对锁定 SDK 的公开 download_resource、ImageContent/FileContent、Model 输入项与 Session 支持；MediaContent 是平台 media 消息类型，不当成图片/文件的通用输入。当前 download_resource 完整读入并失败返回 None；download_resource_to_file 也先取得完整响应，不能代替有界下载。锁版 ChannelConfig.http_executor 仅有声明、未接入调用，不能按字段名推定可用。先验证可用的公开扩展点，以无 Content-Length、虚报长度、分块超限、单次读超时、总期限、取消中途断连和非 identity 编码反例证明下载时停止读取；无法有界时暂停 E5b，提出最小受控 HTTP 方案或锁版升级，不调用私有方法/monkey patch，不以下载后检查冒充接收上限。
 - [ ] 只用可信事件配对的 message_id/resource_key 取原消息资源，不允许模型传地址/键或猜其他消息；先复核当前用户/群与数据策略，下载、解析、入模各阶段限制独立。复用请求去重与开始前内容绑定，附件类型、原消息资源与获准内容摘要必须参与校验，不能只绑定附带文字后换入另一文件。异步有期限/取消/清理，同步提取不得堵事件循环；不打开 SDK 自动媒体下载绕过该路径。
 - [ ] 文档提取为有限不可信文本；图像用 SDK 公开输入项经现有 Runner 和对应 Vertex/其他 Profile 映射，只补协议适配，不加识图 Agent 或第二套循环。每个模型组合独立验证，文本默认行为不变，不跨供应商 fallback；unsupported 的 Profile 明确拒绝附件。
 - [ ] 临时文件与回放记录归当前可信身份和 Session；开工前决定“不保存二进制只保存获准提取文本”或“保存限额内图像/不可外部转用的引用”的具体方案及TTL。不能写到 SDK 文本历史后声称支持图像续问，模型生成的图片摘要不能充当原图事实；若不保存可回放图像，必须明确告知续问限制，并先确认是否满足本片贯通上下文的需求。不能把 Lark 资源键当作永久可访问 URL；临时文件、模型输入与回放各按保存方案清理、计量和当前授权复核。
