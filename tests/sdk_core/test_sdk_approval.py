@@ -965,20 +965,22 @@ async def test_resume_uses_saved_remaining_active_time_not_new_request_budget(ac
         aid, script = await paused(actions, group)
         ((raw,),) = await env.rows("SELECT context FROM xiaowei_action_run")
         saved = json.loads(raw)
-        saved["budget"]["timeout_seconds"] = 0.15
+        # 留足从 PG 检查点走到 Adapter 的调度余量；仍明显短于新批准请求的 30 秒。
+        saved["budget"]["timeout_seconds"] = 2.0
         async with env.engine.begin() as conn:
             await conn.execute(
                 text("UPDATE xiaowei_action_run SET context=:ctx"), {"ctx": json.dumps(saved)}
             )
-        # 模拟可信检查点只剩0.15s；新批准请求仍有30s，不能重新发满额。
+        # 模拟可信检查点只剩 2 秒；新批准请求仍有 30 秒，不能重新发满额。
         actions.adapter.read_entered, actions.adapter.read_release = (
             asyncio.Event(),
             asyncio.Event(),
         )
         began = time.monotonic()
-        await asyncio.wait_for(group.ask(f"/批准 {aid}", sender=B), 1.5)
-        assert time.monotonic() - began < 1.5
+        await asyncio.wait_for(group.ask(f"/批准 {aid}", sender=B), 6)
+        assert time.monotonic() - began < 6
     assert actions.adapter.read_entered.is_set()
+    assert env.store.readiness.ok
     assert actions.adapter.calls == [] and env.model_calls(script) == 2
     assert await env.rows("SELECT state FROM xiaowei_action") == [("rejected",)]
     assert await env.rows("SELECT consumed FROM xiaowei_action_run") == [(True,)]
