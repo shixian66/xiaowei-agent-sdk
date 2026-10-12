@@ -85,6 +85,26 @@ async def test_default_domain_uses_feishu_sdk_constant(monkeypatch: pytest.Monke
 
 
 @pytest.mark.asyncio
+async def test_missing_runtime_credential_has_fixed_failure_without_request(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from xiaowei.feishu_resource import ResourceDownloadError
+
+    requests: list[httpx2.Request] = []
+
+    def handler(request: httpx2.Request) -> httpx2.Response:
+        requests.append(request)
+        return _response(b"unexpected")
+
+    downloader = _downloader(monkeypatch, handler)
+    monkeypatch.delenv("XW_TEST_FEISHU_SECRET")
+    with pytest.raises(ResourceDownloadError) as rejected:
+        await downloader.download("om_test", "img_test", "image", max_bytes=100)
+    assert rejected.value.code == "authentication_failed"
+    assert requests == []
+
+
+@pytest.mark.asyncio
 async def test_resource_at_exact_byte_limit_is_accepted(monkeypatch: pytest.MonkeyPatch) -> None:
     def handler(request: httpx2.Request) -> httpx2.Response:
         if request.url.path.endswith("/internal"):

@@ -425,7 +425,8 @@ def test_formal_compose_entry_success_failure_network_and_signal(
         downgraded = _pg(
             pg_id,
             # 本机演练重建真实 v5 形状，不能只改版本而留下后来新增的表或列。
-            "BEGIN; DROP TABLE xiaowei_action; DROP TABLE xiaowei_installation; "
+            "BEGIN; DROP TABLE xiaowei_image; DROP TABLE xiaowei_action; "
+            "DROP TABLE xiaowei_installation; "
             "ALTER TABLE xiaowei_request DROP COLUMN session_state; "
             "UPDATE xiaowei_schema_version SET version = 5; COMMIT",
         )
@@ -437,6 +438,12 @@ def test_formal_compose_entry_success_failure_network_and_signal(
             "AND column_name = 'session_state'",
         )
         assert legacy_columns.returncode == 0 and legacy_columns.stdout.strip() == "0"
+        legacy_images = _pg(
+            pg_id,
+            "SELECT count(*) FROM pg_tables WHERE schemaname = current_schema() "
+            "AND tablename = 'xiaowei_image'",
+        )
+        assert legacy_images.returncode == 0 and legacy_images.stdout.strip() == "0"
         lock = docker(
             "exec",
             "-d",
@@ -516,7 +523,7 @@ def test_formal_compose_entry_success_failure_network_and_signal(
             "upgrade",
             "--bind-existing-digest-key",
         )
-        assert restored.returncode == 0 and restored.stdout.strip() == "storage version 8"
+        assert restored.returncode == 0 and restored.stdout.strip() == "storage version 9"
         upgrade_process = None
 
         wrong_key = "wrong digest $ # space ' quote"

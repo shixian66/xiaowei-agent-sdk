@@ -27,13 +27,14 @@ Agent（工具集合只属于这一轮）→ 原生 ``Runner.run``（SDK Session
 from __future__ import annotations
 
 import asyncio
+import base64
 import hashlib
 import json
 import logging
 import time
 from collections.abc import Callable, Mapping
 from datetime import UTC, datetime
-from typing import TYPE_CHECKING, Literal
+from typing import TYPE_CHECKING, Literal, cast
 
 if TYPE_CHECKING:
     from xiaowei.actions import ActionService
@@ -47,6 +48,7 @@ from agents import (
     Runner,
     Tool,
     ToolExecutionConfig,
+    TResponseInputItem,
 )
 from agents.exceptions import ModelBehaviorError, ModelRefusalError, ModelTimeoutError, UserError
 from agents.extensions.memory import SQLAlchemySession
@@ -64,6 +66,7 @@ from xiaowei.evidence import (
     scope_checks,
 )
 from xiaowei.governance import Execute, GovernedTools, ToolExecutionError, TurnRuns
+from xiaowei.image_input import ImageStoreError, SessionImageStore
 from xiaowei.mcp import MCPIntegration
 from xiaowei.model_api import (
     ModelBinding,
@@ -345,9 +348,12 @@ class Application:
         mcp: MCPIntegration | None = None,
         clock: Callable[[], datetime],
         actions: ActionService | None = None,
+        images: SessionImageStore | None = None,
     ) -> None:
         if not isinstance(model, ModelBinding):
             raise TypeError("应用配置：模型必须是 open_model 生成的运行绑定")
+        if model.profile.image_input_enabled and images is None:
+            raise ValueError("图片模型必须装配受控原图存储")
         if mcp is not None and mcp.governance is not governance:
             raise ValueError("应用配置：MCP 接入必须使用同一个治理对象")
         data_policy = config.data_policies.get(model.profile.data_policy_id)
@@ -391,6 +397,7 @@ class Application:
         self._evidence = governance.evidence
         self._mcp = mcp
         self._clock = clock
+        self.images = images
         self._run_config = safe_run_config()
         self._active: set[str] = set()
 
@@ -510,6 +517,31 @@ class Application:
             raise TurnError("storage_unavailable") from None
         _stage(turn, "storage_ready", started)
 
+        saved_images = await self.images.load(ctx.identity) if self.images is not None else []
+        if saved_images and not self._model.profile.image_input_enabled:
+            raise TurnError("session_unavailable")
+        user_input: str | list[TResponseInputItem] = message
+        if saved_images:
+            pieces: list[dict[str, str]] = [{"type": "input_text", "text": message}]
+            for number, saved in enumerate(saved_images, 1):
+                pieces.append(
+                    {
+                        "type": "input_text",
+                        "text": f"\n已获准原图 {number}，来源摘要 {saved.source_digest}：\n",
+                    }
+                )
+                pieces.append(
+                    {
+                        "type": "input_image",
+                        "image_url": (
+                            f"data:{saved.mime_type};base64,"
+                            + base64.b64encode(saved.data).decode("ascii")
+                        ),
+                        "detail": "auto",
+                    }
+                )
+            user_input = [cast(TResponseInputItem, {"role": "user", "content": pieces})]
+
         action_note = ""
         if (
             self.actions is not None
@@ -545,6 +577,7 @@ class Application:
             input_policy=self._data_policy.input,
             engine=self._engine,
             clock=self._clock,
+            allow_image_parts=bool(saved_images),
         )
 
         # 每轮新建 PolicySession：失败或取消时，未提交的暂存项随对象一起丢弃。
@@ -602,7 +635,7 @@ class Application:
 
         result = await Runner.run(
             agent,
-            message,
+            user_input,
             context=ctx,
             session=session,
             max_turns=ctx.budget.max_turns,
@@ -676,6 +709,8 @@ def _turn_error(exc: Exception) -> TurnError:
             return TurnError("session_unavailable", str(error), session_state=error.snapshot)
     if isinstance(exc, SessionItemRejectedError):
         return TurnError("content_rejected", str(exc))
+    if isinstance(exc, ImageStoreError):
+        return TurnError("session_unavailable")
     if isinstance(exc, (SessionStoreError, EvidenceStoreError)):
         return TurnError("storage_failed", str(exc))
     for error in _causes(exc):

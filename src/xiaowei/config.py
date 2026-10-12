@@ -191,6 +191,7 @@ class FeishuConfig(BaseModel):
     app_secret_ref: str
     domain: Literal["feishu", "lark"] = "feishu"
     document_input_enabled: bool = False
+    image_input_enabled: bool = False
     tenant_key: _Identifier
     users: dict[_OpenId, _Identifier]
     max_event_age_seconds: int = Field(gt=0, le=86_400)

@@ -9,6 +9,7 @@
 ``NaN``/``Infinity`` 与溢出为无穷的数字），并在任何集合或字典查找前检查字段的运行时类型。
 """
 
+import base64
 import binascii
 import json
 import math
@@ -84,9 +85,12 @@ class ModelAPITimeoutError(ModelAPITransportError):
 class VertexModel(Model):
     """非流式 Vertex 适配器；HTTP 客户端由 ``open_model`` 装配并负责关闭。"""
 
-    def __init__(self, client: httpx2.AsyncClient, endpoint: str) -> None:
+    def __init__(
+        self, client: httpx2.AsyncClient, endpoint: str, *, image_input_enabled: bool = False
+    ) -> None:
         self._client = client
         self._endpoint = endpoint
+        self._image_input_enabled = image_input_enabled
 
     async def get_response(
         self,
@@ -117,7 +121,10 @@ class VertexModel(Model):
         }
         if model_settings.max_tokens is not None:
             generation["maxOutputTokens"] = model_settings.max_tokens
-        body: dict[str, Any] = {"contents": _contents(input), "generationConfig": generation}
+        body: dict[str, Any] = {
+            "contents": _contents(input, image_input_enabled=self._image_input_enabled),
+            "generationConfig": generation,
+        }
         if functions:
             body["tools"] = [{"functionDeclarations": [_declaration(t) for t in functions]}]
         if system_instructions:
@@ -205,7 +212,9 @@ def _declaration(tool: FunctionTool) -> dict[str, Any]:
     }
 
 
-def _contents(input: str | list[TResponseInputItem]) -> list[dict[str, Any]]:
+def _contents(
+    input: str | list[TResponseInputItem], *, image_input_enabled: bool = False
+) -> list[dict[str, Any]]:
     """按输入顺序映射；调用结果只按同一输入中的 ``call_id → 函数名`` 关联。"""
     if isinstance(input, str):
         return [_text_content("user", input)]
@@ -218,7 +227,7 @@ def _contents(input: str | list[TResponseInputItem]) -> list[dict[str, Any]]:
             _reject_request("Vertex 适配器不支持该输入项")
         kind = raw.get("type", "message")
         if kind == "message":
-            contents.append(_message(raw))
+            contents.append(_message(raw, image_input_enabled=image_input_enabled))
         elif kind == "function_call":
             call_id = _string(raw.get("call_id"))
             name = _string(raw.get("name"))
@@ -254,7 +263,7 @@ def _contents(input: str | list[TResponseInputItem]) -> list[dict[str, Any]]:
 _ROLES: dict[object, str] = {"user": "user", "assistant": "model"}
 
 
-def _message(raw: Mapping[str, Any]) -> dict[str, Any]:
+def _message(raw: Mapping[str, Any], *, image_input_enabled: bool = False) -> dict[str, Any]:
     raw_role = raw.get("role")
     role = _ROLES.get(raw_role) if isinstance(raw_role, str) else None
     if role is None:
@@ -264,12 +273,29 @@ def _message(raw: Mapping[str, Any]) -> dict[str, Any]:
         return _text_content(role, content)
     if not isinstance(content, list) or not content:
         _reject_request("Vertex 适配器只映射文本消息")
-    texts: list[str] = []
+    parts: list[dict[str, Any]] = []
     for part in content:
-        if not isinstance(part, Mapping) or part.get("type") not in ("input_text", "output_text"):
+        if not isinstance(part, Mapping):
             _reject_request("Vertex 适配器只映射文本消息")
-        texts.append(_string(part.get("text"), allow_empty=True))
-    return {"role": role, "parts": [{"text": text} for text in texts]}
+        if part.get("type") in ("input_text", "output_text"):
+            parts.append({"text": _string(part.get("text"), allow_empty=True)})
+        elif part.get("type") == "input_image" and role == "user" and image_input_enabled:
+            url = part.get("image_url")
+            if not isinstance(url, str) or part.get("detail") not in (None, "auto"):
+                _reject_request("图片输入形态无效")
+            mime, separator, encoded = url.partition(";base64,")
+            if separator != ";base64," or mime not in ("data:image/png", "data:image/jpeg"):
+                _reject_request("图片输入形态无效")
+            try:
+                raw_image = base64.b64decode(encoded, validate=True)
+            except (ValueError, binascii.Error):
+                _reject_request("图片编码无效")
+            if not raw_image or len(raw_image) > 2 * 1024 * 1024:
+                _reject_request("图片超过单张上限")
+            parts.append({"inlineData": {"mimeType": mime[5:], "data": encoded}})
+        else:
+            _reject_request("Vertex 适配器只映射文本消息")
+    return {"role": role, "parts": parts}
 
 
 def _text_content(role: str, text: str) -> dict[str, Any]:

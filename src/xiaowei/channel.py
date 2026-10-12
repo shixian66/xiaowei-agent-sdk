@@ -53,6 +53,7 @@ from xiaowei.evidence import (
     EvidenceUnverifiableError,
 )
 from xiaowei.governance import ToolExecutionError, ToolRejectedError
+from xiaowei.image_input import ImageStoreError, ValidatedImage
 from xiaowei.models import (
     Budget,
     Channel,
@@ -555,6 +556,52 @@ class ChannelService:
     def admits_input(self, text: str) -> bool:
         """附件准入仍使用当前应用的数据策略；持久化和模型前调用。"""
         return self._app.admits_input(text)
+
+    async def image_has_capacity(self, ref: RequestRef) -> bool:
+        """先重验身份，再取服务端 current 会话；满额时不下载图片。"""
+        decision = await _decide_ref(self._access, ref)
+        images = self._app.images
+        if images is None or ref.channel != "feishu":
+            raise ImageStoreError("图片能力未启用")
+        session = await self._store.current_session(
+            ref.channel, decision.subject_id, ref.conversation_id, owner=decision.owner
+        )
+        return await images.has_capacity(session)
+
+    async def save_image(
+        self,
+        receipt: RequestReceipt,
+        inbound: InboundRequest,
+        source_digest: str,
+        image: ValidatedImage,
+    ) -> None:
+        """请求已持久接受后，核对原会话并在排队前原子写入原图。"""
+        images = self._app.images
+        if images is None or not receipt.created or receipt.record.channel != "feishu":
+            raise ImageStoreError("图片请求无法绑定")
+        try:
+            session = await self._store.current_session(
+                inbound.channel,
+                inbound.subject_id,
+                inbound.conversation_id,
+                owner=receipt.record.owner,
+            )
+            if (
+                session.session_id != receipt.record.session_id
+                or receipt.message != inbound.message
+            ):
+                raise ImageStoreError("图片请求会话不匹配")
+            await images.save(session, source_digest, image, turn_id=receipt.record.turn_id)
+        except asyncio.CancelledError:
+            self._store.readiness.lock("image_accept_unsettled")
+            raise
+        except (ImageStoreError, ChannelStoreError) as exc:
+            try:
+                await self._store.fail(receipt.record, "session_failed")
+            except BaseException:
+                self._store.readiness.lock("image_accept_unsettled")
+                raise
+            raise ImageStoreError("图片请求未能绑定") from exc
 
     async def authorize_notice(self, ref: RequestRef) -> None:
         """无数据回执发送前复核当前身份及群成员；不创建请求、会话或工具执行范围。"""

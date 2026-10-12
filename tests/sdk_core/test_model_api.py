@@ -701,6 +701,9 @@ def test_vertex_profile_needs_only_common_fields() -> None:
     profile = _vertex()
     assert profile.provider == "vertex"
     assert (profile.base_url, profile.api_mode, profile.output_mode) == (None, None, None)
+    assert profile_fingerprint(profile) != profile_fingerprint(
+        profile.model_copy(update={"image_input_enabled": True})
+    )
 
 
 @pytest.mark.parametrize(
@@ -912,6 +915,7 @@ async def test_compressed_response_is_rejected(status: int, no_ambient_openai_en
         pytest.param({"max_output_tokens": 0}, id="zero-tokens"),
         pytest.param({"max_request_bytes": -1}, id="negative-request-bytes"),
         pytest.param({"max_response_bytes": 0}, id="zero-response-bytes"),
+        pytest.param({"image_input_enabled": True}, id="images-not-verified-for-openai"),
         pytest.param({"provider": "deepseek"}, id="responses-for-deepseek"),
         pytest.param({"output_mode": "json_object"}, id="json-object-on-responses"),
         pytest.param({"reasoning_effort": "extreme"}, id="unknown-effort"),
