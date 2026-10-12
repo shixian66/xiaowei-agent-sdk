@@ -321,6 +321,16 @@ E6_SCENARIOS = (
         (("query", f"给我 pre 的 data_center.{TABLE} 报告，但不要执行 SQL 查询"),),
         feishu=True,
     ),
+    Scenario(
+        "e6_action_with_report",
+        (("query", "巡检 pre 并提出需审批的修复动作，再给我 MD 报告"),),
+        feishu=True,
+    ),
+    Scenario(
+        "e6_plain_answer_no_file",
+        (("query", f"解释 pre 的 data_center.{TABLE} 表结构，不要生成文件"),),
+        feishu=True,
+    ),
 )
 
 

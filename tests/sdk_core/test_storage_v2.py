@@ -219,6 +219,72 @@ async def test_v6_to_v9_upgrade_to_v11_preserves_binding_rows_and_sdk_history(
         await check_storage(engine)
 
 
+async def test_v10_sdk_approval_upgrade_to_v11_keeps_paused_request_and_action_run(
+    postgres_url: URL,
+) -> None:
+    async with open_engine(secret(postgres_url)) as engine:
+        await _install_v1(engine, through="010_sdk_approval.sql")
+        async with engine.begin() as conn:
+            await storage_module._write_digest_key_binding(conn, _DIGEST_KEY)
+            await conn.execute(
+                text("""
+                INSERT INTO xiaowei_request (
+                    channel, request_key, owner_kind, owner_id, subject_id,
+                    conversation_key, session_id, turn_id, mode, message_digest,
+                    state, answer, delivery, reply_chat_id, reply_message_id,
+                    created_at, updated_at, expires_at
+                ) VALUES (
+                    'feishu', 'request-v10', 'group', 'group-v10', 'alice',
+                    'conversation-v10', 'session-v10', 'turn-v10', 'query', 'digest-v10',
+                    'paused', '{}', 'sent', 'conversation-v10', 'message-v10',
+                    now(), now(), now() + interval '1 hour'
+                )
+                """)
+            )
+            await conn.execute(
+                text("""
+                INSERT INTO xiaowei_action (
+                    action_id, owner_id, requester_id, proposal_session_id, proposal_turn_id,
+                    call_id, proposal_tool_id, write_tool_id, target_id, binding, plan,
+                    state, created_at, updated_at, approval_expires_at, expires_at
+                ) VALUES (
+                    'action-v10', 'group-v10', 'alice', 'session-v10', 'turn-v10',
+                    'call-v10', 'source/propose', 'source/write', 'source', 'binding-v10', '{}',
+                    'pending', now(), now(), now() + interval '30 minutes',
+                    now() + interval '1 hour'
+                )
+                """)
+            )
+            await conn.execute(
+                text("""
+                INSERT INTO xiaowei_action_run (
+                    turn_id, owner_id, context, run_state, ledger, message, binding,
+                    scope_checks, version, consumed, material_turn_id, expires_at
+                ) VALUES (
+                    'turn-v10', 'group-v10', '{}', '{}', '{}', 'question', 'binding-v10',
+                    2, 1, false, 'turn-v10', now() + interval '1 hour'
+                )
+                """)
+            )
+            request_before = (await conn.execute(text("SELECT * FROM xiaowei_request"))).one()
+            action_before = (await conn.execute(text("SELECT * FROM xiaowei_action"))).one()
+            run_before = (await conn.execute(text("SELECT * FROM xiaowei_action_run"))).one()
+        with pytest.raises(StorageVersionMismatchError):
+            await check_storage(engine)
+        assert await upgrade_storage(engine, digest_key=_DIGEST_KEY) == 11
+        await engine.dispose()
+        async with engine.connect() as conn:
+            assert (
+                await conn.execute(text("SELECT * FROM xiaowei_request"))
+            ).one() == request_before
+            assert (await conn.execute(text("SELECT * FROM xiaowei_action"))).one() == action_before
+            assert (
+                await conn.execute(text("SELECT * FROM xiaowei_action_run"))
+            ).one() == run_before
+            assert await conn.scalar(text("SELECT count(*) FROM xiaowei_report")) == 0
+        await check_storage(engine)
+
+
 @pytest.mark.parametrize("confirm", [False, True])
 @pytest.mark.parametrize("damage", ["different", "missing"])
 async def test_v6_upgrade_cannot_rebind_or_repair_digest_key(
@@ -695,7 +761,7 @@ async def test_v8_v9_upgrade_invalidates_only_pending_and_recovery_does_not_repl
                 r.action_id: tuple(r)
                 for r in await conn.execute(text("SELECT * FROM xiaowei_action"))
             }
-        assert await upgrade_storage(engine, digest_key=_DIGEST_KEY) == 10
+        assert await upgrade_storage(engine, digest_key=_DIGEST_KEY) == 11
         await engine.dispose()
         async with engine.connect() as conn:
             after = {
@@ -708,7 +774,7 @@ async def test_v8_v9_upgrade_invalidates_only_pending_and_recovery_does_not_repl
         )
         for state in ("succeeded", "unknown", "executing"):
             assert after[state][:-1] == before[state] and after[state][-1] is None
-        assert await upgrade_storage(engine, digest_key=_DIGEST_KEY) == 10
+        assert await upgrade_storage(engine, digest_key=_DIGEST_KEY) == 11
         ready = Readiness()
         store = ChannelStore(
             engine,

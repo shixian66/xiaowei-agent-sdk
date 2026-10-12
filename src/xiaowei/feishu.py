@@ -98,7 +98,7 @@ from xiaowei.channel_store import (
 )
 from xiaowei.config import FeishuConfig, FeishuGroupConfig, resolve_secret_ref
 from xiaowei.feishu_render import Message, build_feishu_message, capacity_notice, mention_safe
-from xiaowei.feishu_report import ReportFile, build_report
+from xiaowei.feishu_report import ReportCapacityError, ReportFile, build_report
 from xiaowei.feishu_resource import ResourceDownloadError
 from xiaowei.image_input import (
     MAX_IMAGE_BYTES,
@@ -414,19 +414,46 @@ async def send_delivery(
 ) -> SendOutcome:
     """Gateway 与 CLI 共用：本地构造失败明确未发送，SDK 开始后的异常保留 unknown。"""
     if delivery.report_format is not None:
-        if results is None or ref is None or upload_file is None:
-            logger.error("飞书报告未发送：reason=report_transport_unavailable")
-            return "failed"
-        return await _send_report(
-            delivery,
-            send=send,
-            chat_id=chat_id,
-            reply_to=reply_to,
-            results=results,
-            ref=ref,
-            upload_file=upload_file,
-            resend=resend,
-        )
+        report_notice: str | None = None
+        if delivery.requires_complete:
+            report_notice = "本轮含需完整展示的动作事实，已改用消息展示，未生成报告文件。"
+        elif delivery.request_state != "completed":
+            report_notice = "本轮尚未完成，已改用消息展示，未生成报告文件。"
+        else:
+            if results is None or ref is None or upload_file is None:
+                logger.error("飞书报告未发送：reason=report_transport_unavailable")
+                return "failed"
+            try:
+                report = build_report(delivery)
+            except ReportCapacityError:
+                report_notice = "报告超过文件容量，已改用消息展示；需要文件请缩小范围后重试。"
+            except (ValueError, TypeError):
+                logger.warning("飞书报告未发送：reason=report_render_failed")
+                return "failed"
+            else:
+                return await _send_report(
+                    delivery,
+                    report=report,
+                    send=send,
+                    chat_id=chat_id,
+                    reply_to=reply_to,
+                    results=results,
+                    ref=ref,
+                    upload_file=upload_file,
+                    resend=resend,
+                )
+        if results is not None and ref is not None:
+            record = await results.store.get(
+                ref.channel,
+                ref.subject_id,
+                ref.conversation_id,
+                ref.request_id,
+                owner=ref.group.owner if ref.group is not None else None,
+            )
+            if await results.store.has_bound_report(record):
+                logger.warning("飞书报告停止改发卡片：reason=report_already_bound")
+                return "unknown"
+        delivery = delivery.model_copy(update={"report_notice": report_notice})
     try:
         message = build_feishu_message(delivery, max_chars, chat_id, reply_to=reply_to)
         omitted = message == capacity_notice(delivery.session_notice)
@@ -448,6 +475,7 @@ async def send_delivery(
 async def _send_report(
     delivery: Delivery,
     *,
+    report: ReportFile,
     send: Send,
     chat_id: str,
     reply_to: str | None,
@@ -457,11 +485,6 @@ async def _send_report(
     resend: bool,
 ) -> SendOutcome:
     """原文件绑定请求；上传不明不重传；每次外发前按当前权限复核。"""
-    try:
-        report = build_report(delivery)
-    except (ValueError, TypeError):
-        logger.warning("飞书报告未发送：reason=report_render_failed")
-        return "failed"
 
     async def still_authorized() -> bool:
         try:

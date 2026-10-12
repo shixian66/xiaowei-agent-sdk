@@ -20,12 +20,16 @@ from tests.sdk_core.mcp_fixture import serve
 from tests.sdk_core.test_app import answer, evidence_in, tool_call
 from tests.sdk_core.test_channel_service import Env
 from tests.sdk_core.test_channel_service import env as env  # pytest fixture
-from tests.sdk_core.test_feishu import Feishu, Outbox, config
+from tests.sdk_core.test_feishu import CHATS, Feishu, Outbox, config
+from tests.sdk_core.test_group_actions import SOURCE, Actions, request_execution
+from tests.sdk_core.test_group_actions import actions as actions  # pytest fixture
+from tests.sdk_core.test_group_gateway import BOT, Group, group_config
+from tests.sdk_core.test_group_identity import CHAT, A, B, group_ref
 
 from xiaowei import feishu_report
 from xiaowei.channel import RequestRef
 from xiaowei.channel_store import ChannelStoreUnavailableError, ReportMismatchError
-from xiaowei.feishu import FeishuGateway, LarkTransport, lark_channel, send_delivery
+from xiaowei.feishu import FeishuGateway, LarkTransport, attributed, lark_channel, send_delivery
 from xiaowei.feishu_report import build_report
 from xiaowei.models import AnswerInference, Delivery, DeliveryFact
 from xiaowei.storage import Readiness, hold_instance_lock
@@ -136,7 +140,14 @@ def test_report_line_limit_rejects_whole_file(monkeypatch: pytest.MonkeyPatch) -
 
 
 def test_report_format_is_not_exposed_in_web_serialization() -> None:
-    assert "report_format" not in _delivery("md").model_dump(exclude={"channel"})
+    view = (
+        _delivery("md")
+        .model_copy(update={"request_state": "paused", "report_notice": "本轮尚未完成"})
+        .model_dump(exclude={"channel"})
+    )
+    assert "report_format" not in view
+    assert "request_state" not in view
+    assert "report_notice" not in view
 
 
 @pytest.mark.asyncio
@@ -302,7 +313,7 @@ async def test_report_uses_one_upload_and_one_file_message_on_delivery(env: Env)
 
 @pytest.mark.asyncio
 async def test_unknown_report_upload_cannot_be_retried_or_sent(
-    env: Env, caplog: pytest.LogCaptureFixture
+    env: Env, caplog: pytest.LogCaptureFixture, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     message = env.scripts.add(
         "生成东区订单 MD 报告",
@@ -336,7 +347,12 @@ async def test_unknown_report_upload_cannot_be_retried_or_sent(
         upload_file=upload,
     )
     assert await env.service.results.send(ref, transmit) == "unknown"
-    assert await env.service.results.send(ref, transmit, resend=True) == "unknown"
+    # 即使新版容量规则变小，旧请求已有结果不明的上传记录，也不能改走卡片发送。
+    monkeypatch.setattr(feishu_report, "MAX_REPORT_BYTES", 100)
+    assert (
+        await env.service.results.send(ref, partial(transmit, resend=True), resend=True)
+        == "unknown"
+    )
     assert calls == ["upload"]
     assert "sentinel upstream message" not in caplog.text
     assert "reason=report_upload_unknown" in caplog.text
@@ -550,7 +566,7 @@ async def test_report_rechecks_permission_after_upload_before_send(env: Env) -> 
 
 
 @pytest.mark.asyncio
-async def test_report_capacity_failure_has_no_upload_or_send(
+async def test_report_capacity_falls_back_to_card_and_resend_without_upload(
     env: Env, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     message = env.scripts.add(
@@ -565,20 +581,17 @@ async def test_report_capacity_failure_has_no_upload_or_send(
         conversation_id="oc_capacity",
         request_id="om_report_capacity",
     )
-    calls: list[str] = []
+    uploads: list[str] = []
+    outbox = Outbox(outcomes=["failed", "sent"])
 
     async def upload(report: object) -> str:
-        calls.append("upload")
+        uploads.append("upload")
         return "file_key_1"
-
-    async def send(chat_id: str, value: object, *, reply_to: str | None = None) -> str:
-        calls.append("send")
-        return "sent"
 
     monkeypatch.setattr(feishu_report, "MAX_REPORT_BYTES", 100)
     transmit = partial(
         send_delivery,
-        send=send,
+        send=outbox,
         chat_id="oc_capacity",
         max_chars=2000,
         results=env.service.results,
@@ -586,7 +599,223 @@ async def test_report_capacity_failure_has_no_upload_or_send(
         upload_file=upload,
     )
     assert await env.service.results.send(ref, transmit) == "failed"
-    assert calls == []
+    resent = await env.service.results.send(ref, partial(transmit, resend=True), resend=True)
+    assert resent == "sent"
+    assert uploads == []
+    assert len(outbox.sent) == 2
+    assert outbox.texts()[0] == outbox.texts()[1]
+    assert "报告超过文件容量，已改用消息展示" in outbox.texts()[0]
+    assert "来源 local/order_total" in outbox.texts()[0]
+
+
+@pytest.mark.asyncio
+async def test_action_report_card_capacity_uses_existing_receipt_without_upload() -> None:
+    delivery = _delivery("md").model_copy(
+        update={"requires_complete": True, "request_state": "completed"}
+    )
+    outbox = Outbox()
+    uploads: list[str] = []
+
+    async def upload(report: object) -> str:
+        uploads.append("upload")
+        return "file_should_not_exist"
+
+    assert (
+        await send_delivery(
+            delivery,
+            send=outbox,
+            chat_id="oc_report_capacity_receipt",
+            max_chars=100,
+            upload_file=upload,
+        )
+        == "failed"
+    )
+    assert uploads == []
+    assert len(outbox.sent) == 1
+    assert "容量" in outbox.texts()[0]
+
+
+@pytest.mark.asyncio
+async def test_action_proposal_with_report_request_sends_card_and_resends(
+    actions: Actions,
+) -> None:
+    env = actions.env
+    question = "提出修改建议，并给 MD 巡检报告"
+    env.scripts.add(
+        attributed(A, question),
+        tool_call("order_total", region="east"),
+        tool_call(f"{SOURCE}__propose_change", value="after"),
+        lambda call: answer(evidence_in(call), report_format="md"),
+    )
+    uploads: list[str] = []
+
+    async def upload(report: object) -> str:
+        uploads.append("upload")
+        return "file_should_not_exist"
+
+    outbox = Outbox(outcomes=["failed", "sent"])
+    gateway = FeishuGateway(
+        env.service,
+        group_config(max_reply_chars=3500),
+        outbox,
+        clock=env.clock,
+        bot_open_id=lambda: BOT,
+        upload_file=upload,
+    )
+    group = Group(env, gateway, outbox)
+    task = asyncio.create_task(gateway.run())
+    try:
+        await group.ask(question, sender=A, message_id="om_e6_action_proposal")
+        ref = group_ref("om_e6_action_proposal", A)
+        transmit = partial(
+            send_delivery,
+            send=outbox,
+            chat_id=CHAT,
+            reply_to="om_e6_action_proposal",
+            max_chars=3500,
+            results=env.service.results,
+            ref=ref,
+            upload_file=upload,
+            resend=True,
+        )
+        assert await env.service.results.send(ref, transmit, resend=True) == "sent"
+    finally:
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+    assert uploads == []
+    assert len(outbox.sent) == 2
+    assert outbox.texts()[0] == outbox.texts()[1]
+    assert "含需完整展示的动作事实" in outbox.texts()[0]
+    assert "动作提案" in outbox.texts()[0]
+
+
+@pytest.mark.asyncio
+async def test_action_result_with_report_request_sends_card_and_resends_same_card(
+    actions: Actions,
+) -> None:
+    env = actions.env
+    question = "巡检后提出动作并给 MD 报告"
+    env.scripts.add(
+        attributed(A, question),
+        tool_call("order_total", region="east"),
+        tool_call(f"{SOURCE}__propose_change", value="after"),
+        request_execution,
+        lambda call: answer(evidence_in(call), report_format="md"),
+    )
+    uploaded: list[str] = []
+
+    async def upload(report: object) -> str:
+        uploaded.append("upload")
+        return "file_should_not_exist"
+
+    outbox = Outbox(outcomes=["sent", "failed", "sent"])
+    gateway = FeishuGateway(
+        env.service,
+        group_config(max_reply_chars=3500),
+        outbox,
+        clock=env.clock,
+        bot_open_id=lambda: BOT,
+        upload_file=upload,
+    )
+    group = Group(env, gateway, outbox)
+    task = asyncio.create_task(gateway.run())
+    try:
+        await group.ask(question, sender=A, message_id="om_e6_action_origin")
+        action_id = await actions.one()
+        await group.ask(f"/批准 {action_id}", sender=B, message_id="om_e6_action_approve")
+        assert await env.rows(
+            "SELECT state, delivery FROM xiaowei_request "
+            "WHERE reply_message_id='om_e6_action_approve'"
+        ) == [("completed", "failed")]
+        ref = group_ref("om_e6_action_approve", B)
+        transmit = partial(
+            send_delivery,
+            send=outbox,
+            chat_id=CHAT,
+            reply_to="om_e6_action_approve",
+            max_chars=3500,
+            results=env.service.results,
+            ref=ref,
+            upload_file=upload,
+            resend=True,
+        )
+        assert await env.service.results.send(ref, transmit, resend=True) == "sent"
+    finally:
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+    assert uploaded == []
+    assert len(outbox.sent) == 3
+    assert outbox.texts()[1] == outbox.texts()[2]
+    assert "含需完整展示的动作事实" in outbox.texts()[1]
+    assert "动作执行事实" in outbox.texts()[1]
+
+
+@pytest.mark.asyncio
+async def test_paused_saved_answer_with_report_format_uses_card_before_upload(
+    env: Env, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    question = "巡检东区订单并生成 MD 报告"
+    env.scripts.add(
+        question,
+        tool_call("order_total", region="east"),
+        lambda call: answer(evidence_in(call), report_format="md"),
+    )
+    original_process = env.service.process
+
+    async def pause_before_send(receipt: object) -> object:
+        record = await original_process(receipt)  # type: ignore[arg-type]
+        # 防御性状态组合：SDK-A 当前的暂停材料不会选择报告，但已保存回答可能来自兼容版本。
+        async with env.engine.begin() as conn:
+            await conn.execute(
+                text(
+                    "UPDATE xiaowei_request SET state='paused', session_state=NULL "
+                    "WHERE turn_id=:turn"
+                ),
+                {"turn": record.turn_id},
+            )
+        return record
+
+    monkeypatch.setattr(env.service, "process", pause_before_send)
+    uploads: list[str] = []
+
+    async def upload(report: object) -> str:
+        uploads.append("upload")
+        return "file_should_not_exist"
+
+    outbox = Outbox(outcomes=["failed", "sent"])
+    gateway = FeishuGateway(env.service, config(), outbox, clock=env.clock, upload_file=upload)
+    fs = Feishu(env, gateway, outbox)
+    task = asyncio.create_task(gateway.run())
+    try:
+        await gateway.receive(fs.event(question, message_id="om_e6_paused"))
+        await gateway.idle()
+        ref = RequestRef(
+            channel="feishu",
+            subject_id="alice",
+            conversation_id=CHATS["ou_alice"],
+            request_id="om_e6_paused",
+        )
+        transmit = partial(
+            send_delivery,
+            send=outbox,
+            chat_id=CHATS["ou_alice"],
+            max_chars=2000,
+            results=env.service.results,
+            ref=ref,
+            upload_file=upload,
+            resend=True,
+        )
+        assert await env.service.results.send(ref, transmit, resend=True) == "sent"
+    finally:
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+    assert uploads == []
+    assert len(outbox.sent) == 2
+    assert outbox.texts()[0] == outbox.texts()[1]
+    assert "本轮尚未完成" in outbox.texts()[0]
 
 
 @pytest.mark.asyncio

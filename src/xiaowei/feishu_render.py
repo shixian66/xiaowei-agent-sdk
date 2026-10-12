@@ -156,6 +156,8 @@ def _card(
     formatted: bool = False,
 ) -> Message:
     elements: list[Message] = []
+    if delivery.report_notice:
+        elements.append(_div(delivery.report_notice))
     if delivery.monitoring_notice:
         elements.append(_div(delivery.monitoring_notice))
     if delivery.session_notice:
