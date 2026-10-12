@@ -517,12 +517,12 @@ async def test_sdk_tool_timeout_keeps_unknown_execution_fact(actions: Actions, m
     env = actions.env
     original = env.app.actions.tools_for
 
-    def timed(ctx):
+    def timed(ctx, approval_requests=None):
         return [
             replace(t, timeout_seconds=0.1, timeout_behavior="raise_exception")
             if t.needs_approval
             else t
-            for t in original(ctx)
+            for t in original(ctx, approval_requests)
         ]
 
     monkeypatch.setattr(env.app.actions, "tools_for", timed)

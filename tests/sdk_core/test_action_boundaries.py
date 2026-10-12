@@ -250,10 +250,14 @@ async def test_status_feedback_does_not_reset_approval_tool_budget(actions: Acti
         action_id = await actions.one()
         await group.ask(f"/批准 {action_id}", message_id="om_a")
     assert actions.adapter.calls == []
-    assert await env.rows("SELECT state FROM xiaowei_action") == [("pending",)]
-    assert await env.rows("SELECT state FROM xiaowei_request WHERE reply_message_id='om_a'") == [
-        ("failed",)
+    # 少一次工具额度时执行请求不会形成暂停，提案须在原轮终态一并作废。
+    assert await env.rows("SELECT state, failure_code FROM xiaowei_action") == [
+        ("rejected", "action_unresumable")
     ]
+    assert await env.rows(
+        "SELECT state, failure_code FROM xiaowei_request WHERE reply_message_id='om_a'"
+    ) == [("failed", "action_unresumable")]
+    assert "未形成可恢复审批" in group.outbox.texts()[-1]
     assert await env.rows("SELECT count(*) FROM xiaowei_evidence") == [(1,)]
 
 
@@ -297,16 +301,20 @@ async def test_storage_failure_never_replays_a_write(actions: Actions, stage: st
     finally:
         event.remove(env.engine.sync_engine, "before_cursor_execute", fail_sql)
     assert len(actions.adapter.calls) == (0 if stage == "proposal_evidence" else 1)
-    assert await env.rows("SELECT state FROM xiaowei_action") == [
-        ("pending" if stage == "proposal_evidence" else "succeeded",)
+    assert await env.rows("SELECT state, failure_code FROM xiaowei_action") == [
+        (
+            ("rejected", "action_unresumable")
+            if stage == "proposal_evidence"
+            else ("succeeded", None)
+        )
     ]
-    code = "action_not_approvable" if stage == "proposal_evidence" else "action_feedback_failed"
+    code = "action_unresumable" if stage == "proposal_evidence" else "action_feedback_failed"
     assert await env.rows(
         "SELECT state, failure_code, delivery FROM xiaowei_request WHERE reply_message_id='om_a'"
     ) == [("failed", code, "sent")]
     receipt = message_text(group.outbox.sent[1][1])
     if stage == "proposal_evidence":
-        assert "本次批准未执行" in receipt
+        assert "未形成可恢复审批" in receipt and "未执行" in receipt
     else:
         assert "动作已执行" in receipt
         assert "反馈" in receipt and "Action ID" in receipt

@@ -236,7 +236,8 @@ async def test_unsettled_request_cannot_release_the_instance(
     adapter.read_entered, adapter.read_release = asyncio.Event(), asyncio.Event()
     cleanup_entered, never = asyncio.Event(), asyncio.Event()
 
-    async def stalled_fail(record, code):
+    async def stalled_fail(record, code, *, settle_action_id=None):
+        assert settle_action_id == action_id
         cleanup_entered.set()
         await never.wait()
 
