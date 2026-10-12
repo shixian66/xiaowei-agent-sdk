@@ -37,15 +37,19 @@
 
 ## 3. 当前计划与下一项工作
 
-**当前下一步：** 完成[七项修复计划 S3](docs/superpowers/plans/2026-10-10-production-dialogue-repairs.md#s3同条回复的接近上限提醒)的最终回归，提交/推送/开 PR 后交用户指定审查方复核；S3 不自动合并或部署。E5/E6 的未定契约继续开放，未提前实施。
+**当前下一步：** 将[七项修复计划 S3](docs/superpowers/plans/2026-10-10-production-dialogue-repairs.md#s3同条回复的接近上限提醒)的离线候选推送/开 PR，核对精确 head CI 后交用户指定审查方复核；S3 不自动合并或部署。E5/E6 的未定契约继续开放，未提前实施。
 
-**S3 本轮证据（2026-10-12，最终全量检查待补）：** S2 成功快照由现有请求事务保存，提醒只在当前授权和 Evidence 校验后的交付链生成；复用 Web 已有显示字段，飞书共用渲染/发送保持单条。没有新测量、配置、迁移、通知表或模型行为改动。有效基线 RED 为阈值/容器/容量 17 failed，以及正式 Web/飞书提醒缺失；S2 提交超限控制路径仍通过。真实 Chrome RED 为成功消息缺少提醒元素。新测试早期请求列名定位及群读取假设已按真实契约修正，不是产品修复证据；群共享历史不授予另一成员的请求读取权，原发起人保护保持。
+**S3 本轮证据（2026-10-12，离线候选）：** S2 成功快照由现有请求事务保存，提醒只在当前授权和 Evidence 校验后的交付链生成；复用 Web 已有显示字段，飞书共用渲染/发送保持单条。没有新测量、配置、迁移、通知表或模型行为改动。有效基线 RED 为阈值/容器/容量 17 failed，以及正式 Web/飞书提醒缺失；S2 提交超限控制路径仍通过。真实 Chrome RED 为成功消息缺少提醒元素。新测试早期请求列名定位及群读取假设已按真实契约修正，不是产品修复证据；群共享历史不授予另一成员的请求读取权，原发起人保护保持。
 
-已运行：S3 与 S2 正式入口/快照/群/渲染 34 passed；实际提交字节/期限及首轮历史隔离补充 3 passed；Chrome S3/S2 2 passed；真实锁版飞书 SDK 对本机合成发送/回复端点 4 passed，原始请求体与容量计算相符；S3/既有渲染/格式 116 passed。小消息容量分支先 1 failed，随后修正为完整合规消息优先，只在需要容量回执时检查回执，所有原容量上限保留。隔离副本变异（确认导入副本）去字节阈值、折叠提醒、写入 SDK 历史分别 4/1/1 项失败；历史变异初次定位不符未执行，按实际 pending 保存点补跑通过检测。日志位于 `/private/tmp/s3-*.log`；最终命令和全量结果下次更新，不把以上计数合并为去重总量。
+已运行：S3 与 S2 正式入口/快照/群/渲染 34 passed；实际提交字节/期限及首轮历史隔离补充 3 passed；Chrome S3/S2 2 passed；真实锁版飞书 SDK 对本机合成发送/回复端点 4 passed，原始请求体与容量计算相符；S3/既有渲染/格式 116 passed。小消息容量分支先 1 failed，随后修正为完整合规消息优先，只在需要容量回执时检查回执，所有原容量上限保留。隔离副本变异（确认导入副本）去字节阈值、折叠提醒、写入 SDK 历史分别 4/1/1 项失败；历史变异初次定位不符未执行，按实际 pending 保存点补跑通过检测。日志位于 `/private/tmp/s3-*.log`，不把以上计数合并为去重总量。
 
 **计划 PR #84 CI：** 首次 integration 为 1 failed, 5105 passed；唯一失败 `test_expired_cancel_never_proposed_or_written` 的临时端口 43375 无法绑定，随后 raw 处理器缺失。本机同用例 -W error 为 1 passed；不改测试或产品代码，相同 head 32d9213 仅重跑失败 job 后十项全绿，再按用户授权合并为当前基线。保留 `/private/tmp/plan84-ci-failed.log` 与诊断日志；未跳过或抹去首次失败。
 
-**冻结候选前定向检查：** `SDK_TEST_POSTGRES_URL=postgresql+asyncpg://postgres@127.0.0.1:55432/postgres .venv/bin/python -m pytest tests/sdk_core/test_session_warning.py tests/sdk_core/test_session_warning_group.py tests/sdk_core/test_session_warning_render.py tests/sdk_core/test_session_warning_entrypoints.py tests/sdk_core/test_session_rejection_state.py tests/sdk_core/test_session_rejection_entrypoints.py tests/sdk_core/test_feishu.py tests/security/test_docs_command_consistency.py -q -W error` 为 **280 passed**（43.53s，`/private/tmp/s3-targeted-final.log`）。`ruff check --no-cache src/xiaowei tests/sdk_core`、`ruff format --check --no-cache src/xiaowei tests/sdk_core`、`mypy --cache-dir=/private/tmp/s3-mypy-final src/xiaowei`（27 files）及 `git diff --check` 通过；命令均经当前 `.venv/bin/python -m` 运行。全量 SDK/P1B 与最终 CI 仍待完成，不将当前定向结果当作全量通过。
+**冻结候选前定向检查：** `SDK_TEST_POSTGRES_URL=postgresql+asyncpg://postgres@127.0.0.1:55432/postgres .venv/bin/python -m pytest tests/sdk_core/test_session_warning.py tests/sdk_core/test_session_warning_group.py tests/sdk_core/test_session_warning_render.py tests/sdk_core/test_session_warning_entrypoints.py tests/sdk_core/test_session_rejection_state.py tests/sdk_core/test_session_rejection_entrypoints.py tests/sdk_core/test_feishu.py tests/security/test_docs_command_consistency.py -q -W error` 为 **280 passed**（43.53s，`/private/tmp/s3-targeted-final.log`）。Ruff、格式和 27 文件 mypy 通过；后补全仓 `ruff check --no-cache .`、`mypy --cache-dir=/private/tmp/s3-mypy-all src` 为 **129 source files 无问题**，命令均经当前 `.venv/bin/python -m` 运行。文档命令与事实检查 5 passed，差异检查通过。
+
+**冻结版本完整 SDK/P1B：** 在干净 `553718ec153d9545fa3994bf00f6c11d764cdf90` 上运行 `SDK_TEST_POSTGRES_URL=postgresql+asyncpg://postgres@127.0.0.1:55432/postgres XW_TEST_PROMETHEUS_MCP_BIN=/private/tmp/xw-prometheus-mcp-v018/prometheus-mcp-server XW_TEST_GRAFANA_MCP_BIN=/private/tmp/xw-g3-official/mcp-grafana .venv/bin/python -m pytest tests/sdk_core tests/p1b -q`，结果 **3168 passed, 16 skipped, 62 deselected**（858.48s，`/private/tmp/s3-full-sdk-p1b.log`）。没有修改既有 skip/opt-in 规则；本机未启用官方 Alertmanager / 社区协议环境，真实 StarRocks 与浏览器按现有 opt-in 未选入，Chrome 单独运行的证据见上文。不能把此结果写成整仓或真实环境验收；最终 PR head CI 另核。
+
+**实现方复查与补充：** 对 `7aa5451… → 553718e…` 的 fresh-context 只读自查未发现已证实阻断，不是用户指定独立审查。指出正式飞书用例名称含澄清、实际却均查 SQL；已参数化为事实/真正无工具澄清，明确断言模型请求数、SQL 数与事件重复不重跑。在 main `7aa5451` 源码副本上，澄清提醒断言为 **1 failed**（1.49s，`/private/tmp/s3-clarification-red.log`），确认实际导入副本；候选正式 Web/飞书三例为 **3 passed**（2.77s，`/private/tmp/s3-entrypoints-final.log`）。完整回归后仅补该测试及文档，产品源码不变，不冒充补充用例也包含在旧全量计数中。
 
 **未覆盖：** 真实 Lark 显示、公司 Web/StarRocks、部署与人工验收；脚本模型不证明自主任务能力。S3 不改变 Agent 行为或模型/工具契约，因此不需要新增模型对照，不新增真实模型豁免；真实服务验证仍须授权。
 
@@ -74,7 +78,7 @@
 | `.venv/bin/python -m pytest tests/security/test_docs_command_consistency.py tests/contract/test_doc_fact_binding.py -q -W error`；发行归档契约、包内文档引用、旧配置回退三个离线用例 | 分别 5 passed（0.17s）与 3 passed（0.11s）；`/private/tmp/s2-docs-final.log`、`/private/tmp/s2-release-contract-final.log`。不证明本机镜像检查通过 |
 | CI 兼容修正后的操作者文档/命令事实检查、发行契约三用例、`test_storage_v2.py -q -W error` | 分别 6 passed（0.26s）、3 passed（0.11s）、29 passed（4.04s）；`/private/tmp/s2-ci-doc-green.log`、`/private/tmp/s2-ci-release-offline-retry.log`、`/private/tmp/s2-ci-storage-green.log`。Ruff、改动文件格式、差异检查通过；镜像回归由 PR 修订 head 的 CI 核验 |
 
-**S2 未覆盖：** 真实 Lark 收发、公司 Web/StarRocks/模型、v8 在公司环境的升级/成对回退与用户验收。S2 不更改 Agent 行为契约，不新增真实模型豁免；S3 提前提醒及其他未批准切片仍未实施。数据库迁移需要显式操作，部署及私聊/测试群观察须用户另行授权。
+**S2 未覆盖：** 真实 Lark 收发、公司 Web/StarRocks/模型、v8 在公司环境的升级/成对回退与用户验收。S2 不更改 Agent 行为契约，不新增真实模型豁免；S3 状态见当前快照，其他未批准切片未实施。数据库迁移需要显式操作，部署及私聊/测试群观察须用户另行授权。
 
 **S1 当前实现与证据（2026-10-11）：** 产品只改主模板轮数 20→100。新增测试侧容量观察，复用正式 serve/Web、真实 Runner/治理/SQLGuard/PolicySession 与隔离 PostgreSQL，底层模型/StarRocks 用既有替身，监控用真 SDK 和本机 MCP 服务。完整回放、签名、scope 复核、请求字节准入都保持；没有引入压缩、裁剪、第二套循环、产品测试入口或新的权限。容量表、统计口径和复现命令唯一记录在[容量报告](docs/superpowers/reports/2026-10-11-session-capacity-s1.md)。
 
@@ -91,7 +95,7 @@
 | `.venv/bin/python -m pytest tests/sdk_core/test_session_capacity.py tests/sdk_core/test_session_policy.py tests/sdk_core/test_vertex_model.py tests/sdk_core/test_dialogue_gate.py tests/sdk_core/test_r3_entrypoints.py tests/sdk_core/test_cli.py tests/security/test_docs_command_consistency.py tests/contract/test_doc_fact_binding.py -q -W error --basetemp=/private/tmp/s1-final-evidence`（同一测试库环境） | 测量字段命名及文档更新后 314 passed，127.33s；`/private/tmp/s1-final-regressions.log`，含 16 项 S1 与 5 项文档检查。此命令不含 Compose，不能用于抹去上条失败 |
 | `.venv/bin/ruff check --no-cache .`；两新增文件 `ruff format --no-cache --check`；`.venv/bin/mypy --cache-dir /private/tmp/s1-mypy-cache src`；`git diff --check` | 已通过，129 源文件；最终定向回归及 CI 以精确候选另记 |
 
-**S1 未覆盖与后续：** 真实模型长上下文排障质量、token 用量、真实 Lark/公司 StarRocks、浏览器及部署未验证。S1 不改变提示词/工具契约，不新增模型豁免；离线统计不能证明真实 Agent 能完成同样任务。现有模板以外的公司配置不自动改写，具体操作及回退见 OPERATIONS。实现方的新上下文分支复查未发现阻断，报告的单值截断措辞已明确；不代表独立通过。S1 独立复审通过并获用户授权随 PR #81 合入，精确 head 十项 CI 通过（run 38142846169）。当前 S2 实施，S3 未实施。
+**S1 未覆盖与后续：** 真实模型长上下文排障质量、token 用量、真实 Lark/公司 StarRocks、浏览器及部署未验证。S1 不改变提示词/工具契约，不新增模型豁免；离线统计不能证明真实 Agent 能完成同样任务。现有模板以外的公司配置不自动改写，具体操作及回退见 OPERATIONS。实现方的新上下文分支复查未发现阻断，报告的单值截断措辞已明确；不代表独立通过。S1 独立复审通过并获用户授权随 PR #81 合入，精确 head 十项 CI 通过（run 38142846169）；S2/S3 状态见当前快照。
 
 **R12 已合入实现与历史证据（2026-10-11）：** 复用已验证的 `send_delivery` / `build_feishu_message`、静态 `OutboundCard` 与二分容量搜索；Gateway 和 CLI 发送路径未另写。只有 `feishu_text` 中的模型业务原文及模型分析进入格式器；固定 `monitoring_notice` 先按可信字段分离；固定回执、来源、限制、引用、获准事实、SQL/DDL、原文 JSON 始终纯文字。本片不改变模型/工具契约，未调用真实模型，不属于 R7/R3 豁免的扩展。生效展示与回退说明只在 ARCHITECTURE §7 / OPERATIONS 维护。
 

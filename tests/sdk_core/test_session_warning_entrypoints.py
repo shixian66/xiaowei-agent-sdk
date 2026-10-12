@@ -3,6 +3,7 @@
 import json
 
 import pytest
+from tests.sdk_core.test_app import clarify
 from tests.sdk_core.test_feishu import FakeChannel
 from tests.sdk_core.test_feishu_render import text_parts
 from tests.sdk_core.test_runtime import Env, feishu_config, feishu_event, statements, until
@@ -53,12 +54,19 @@ async def test_formal_web_warning_saved_restart_duplicate_and_last_turn(env: Env
         assert len(statements(env.drv)) == 1
 
 
-async def test_formal_feishu_fact_and_clarification_warning_are_one_card(env: Env) -> None:
+@pytest.mark.parametrize("kind", ["fact", "clarification"])
+async def test_formal_feishu_warning_is_one_card_with_fact_or_clarification(
+    env: Env, kind: str
+) -> None:
     channel = FakeChannel()
     config = env.config(session_limits=limits(turns=2), feishu=feishu_config())
     async with env.running(config, feishu_channel=channel) as served:
         first = query(env, "s3-feishu-first")
-        second = query(env, "s3-feishu-second")
+        second = (
+            query(env, "s3-feishu-second")
+            if kind == "fact"
+            else env.scripts.add("s3-feishu-confirm-target", clarify("请确认本轮集群。"))
+        )
         channel.emit_raw_from_sdk_thread(feishu_event(env, first, "om_s3_first"))
         await until(lambda: len(channel.sends) == 1)
         channel.emit_raw_from_sdk_thread(feishu_event(env, second, "om_s3_second"))
@@ -68,7 +76,10 @@ async def test_formal_feishu_fact_and_clarification_warning_are_one_card(env: En
         visible = "\n".join(text_parts(message, folded=False))
         assert "2/2" in visible and "下轮需要新建" in visible and "/新建" in visible
         assert visible.count("本轮结束时") == 1
-        assert len(statements(env.drv)) == 2
+        assert len(statements(env.drv)) == (2 if kind == "fact" else 1)
+        assert len(env.scripts.calls[second]) == (2 if kind == "fact" else 1)
+        if kind == "clarification":
+            assert "请确认本轮集群。" in visible
         channel.emit_raw_from_sdk_thread(feishu_event(env, second, "om_s3_second"))
         await channel.flush()
         assert await served.finish() == 0
