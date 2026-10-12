@@ -53,6 +53,12 @@ def display_text(text: str) -> str:
     )
 
 
+def capacity_notice(session_notice: str | None = None) -> Message:
+    """容量回执同条保留必要系统提醒；也供发送端识别省略结果的消息。"""
+    text = CAPACITY_NOTICE + ("\n" + session_notice if session_notice is not None else "")
+    return {"text": mention_safe(display_text(text))}
+
+
 def _plain(text: str) -> Message:
     return {"tag": "plain_text", "content": display_text(text)}
 
@@ -141,6 +147,8 @@ def _card(
     elements: list[Message] = []
     if delivery.monitoring_notice:
         elements.append(_div(delivery.monitoring_notice))
+    if delivery.session_notice:
+        elements.append(_div(delivery.session_notice))
     tables = 0
     for index, fact in enumerate(delivery.facts):
         columns, all_rows = _data(fact)
@@ -323,11 +331,16 @@ def build_feishu_message(
             and request_bytes(message, chat_id, reply_to=reply_to) <= max_bytes
         )
 
-    notice = {"text": CAPACITY_NOTICE}
-    if not fits(notice):
-        raise ValueError("单消息预算无法保留容量说明")
+    notice = capacity_notice(delivery.session_notice)
+
+    def omitted_message() -> Message:
+        # 完整消息可能比容量回执更短；只在确实需要回执时检查它是否可发送。
+        if not fits(notice):
+            raise ValueError("单消息预算无法保留容量说明")
+        return notice
+
     if not delivery.facts:
-        if delivery.session_notice is not None:
+        if delivery.session_notice is not None and delivery.feishu_text is None:
             # 固定会话回执必须完整保留原因和操作方法；预算不足记明确发送失败，不裁掉限制。
             receipt = {
                 "text": mention_safe(
@@ -363,7 +376,12 @@ def build_feishu_message(
             return _prose_card(
                 prefix,
                 text,
-                notice=delivery.monitoring_notice,
+                notice="\n".join(
+                    n
+                    for n in (delivery.monitoring_notice, delivery.session_notice)
+                    if n is not None
+                )
+                or None,
                 clipped=clipped,
                 formatted=formatted,
             )
@@ -382,7 +400,7 @@ def build_feishu_message(
                 high = mid - 1
         clipped = prose_message(raw[:low], clipped=True)
         if not fits(clipped):
-            return notice
+            return omitted_message()
         formatted = prose_message(raw[:low], clipped=True, formatted=True)
         return formatted if fits(formatted) else clipped
 
@@ -435,7 +453,7 @@ def build_feishu_message(
     sqls: set[int] = set()
     counts = fitting_prefix(sqls)
     if counts is None:
-        return notice
+        return omitted_message()
     # SQL 每条完整保留或明示未展示；放不下不阻止展示已有结果行。
     for index in sorted(all_sql):
         selected_counts = fitting_prefix(sqls | {index})

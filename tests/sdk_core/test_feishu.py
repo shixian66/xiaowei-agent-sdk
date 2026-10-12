@@ -254,8 +254,9 @@ REJECTED: dict[str, tuple[dict[str, Any], str]] = {
     "bot sender": ({"event__sender__sender_type": "bot"}, "sender_type"),
     "app sender": ({"event__sender__sender_type": "app"}, "sender_type"),
     "group chat": ({"event__message__chat_type": "group"}, "chat_type"),
-    "image": ({"event__message__message_type": "image"}, "message_type"),
-    "post": ({"event__message__message_type": "post"}, "message_type"),
+    # E5a 批准合法非文本的固定回执，正例在 test_unsupported_feishu；非法类型字段仍拒绝。
+    "missing message type": ({"event__message__message_type": None}, "malformed"),
+    "empty message type": ({"event__message__message_type": ""}, "malformed"),
     "stale": ({"age_seconds": 301}, "stale"),
     "from the future": ({"age_seconds": -120}, "stale"),
     "blank text": ({"content": json.dumps({"text": "  \n "})}, "content"),
@@ -381,7 +382,7 @@ UNREGISTERED_REJECTED = {
 async def test_unregistered_sender_is_silent_unless_every_event_check_passes(
     env: Env, monkeypatch: pytest.MonkeyPatch, name: str
 ) -> None:
-    """身份提示只在全部可信事件校验通过之后：错应用、错租户、机器人、群聊、非文本、过期、超长、
+    """身份提示只在全部可信事件校验通过之后：错应用、错租户、机器人、群聊、过期、超长、
     格式错误都和已登记用户一样静默丢弃，不发送任何内容。"""
     changes, code = UNREGISTERED_REJECTED[name]
     spy = spy_on(env, monkeypatch)

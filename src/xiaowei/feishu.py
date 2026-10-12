@@ -6,10 +6,10 @@
 安全原因码，由操作者处理后用户重发。去重、单次发送与不重跑 Agent/查询的语义不变。
 
 - 入站只用 ``on("raw")``：SDK 已认证的完整事件字典含 app、tenant 与时间。这里逐字段核对事件类型、
-  应用、唯一租户、用户发送者、获准 ``open_id``、单聊、纯文本、时效与长度，任一不符即在持久化与
-  模型之前丢弃。普通文本是默认用途（``query``）：查询工具按授权可见，由单 Agent 按正文判断是否
-  查询；``/查询`` 与普通文本相同。``/诊断`` 只作用于本条消息，隐藏并拒绝实际查询工具；``/新建``
-  不进入模型。
+  应用、唯一租户、用户发送者、会话、时效与长度，任一不符即在持久化与模型之前丢弃。纯文本经身份
+  授权进入业务；合法非文本在当前授权及指定群 mention 检查后只给固定提示，不作为业务输入。
+  普通文本是默认用途（``query``）：查询工具按授权可见，由单 Agent 按正文判断是否查询；``/查询``
+  与普通文本相同。``/诊断`` 只作用于本条消息，隐藏并拒绝实际查询工具；``/新建`` 不进入模型。
 - 身份：``open_id`` 经配置映射为内部 subject，再由同一个 ``AccessPolicy`` 授权；会话语境是单聊
   ``chat_id``，请求编号是 ``message_id``。``chat_id`` 只在内存中用于本次回复，不持久化。
 - 未登记的单聊发送者：全部事件校验通过后，只回复一条固定身份提示，内容是该事件发送者自己的
@@ -92,7 +92,7 @@ from xiaowei.channel_store import (
     SessionBusyError,
 )
 from xiaowei.config import FeishuConfig, FeishuGroupConfig, resolve_secret_ref
-from xiaowei.feishu_render import CAPACITY_NOTICE, Message, build_feishu_message, mention_safe
+from xiaowei.feishu_render import Message, build_feishu_message, capacity_notice, mention_safe
 from xiaowei.models import Delivery
 
 logger = logging.getLogger(__name__)
@@ -108,6 +108,7 @@ NEW_SESSION = "已新建会话，之前的对话不再作为上下文"
 NEW_SESSION_BUSY = "当前会话正在处理消息，请稍后再新建会话"
 NEW_GROUP_SESSION = "已为本群新建会话：群内之前的对话不再作为任何成员的上下文"
 IDENTITY_NOTICE = "你还没有获得授权。你的编号是 {open_id}，请把它发给管理员。"
+UNSUPPORTED_INPUT = "暂不支持图片、文件或富文本等非文本消息，请将需要分析的内容作为文字发送。"
 IDENTITY_NOTICE_WINDOW = timedelta(minutes=10)
 
 _EVENT_TYPE = "im.message.receive_v1"
@@ -175,10 +176,12 @@ class _RejectedError(Exception):
 @dataclass(frozen=True)
 class _Message:
     message_id: str
+    open_id: str
     subject_id: str
     chat_id: str
     text: str
     group: GroupScope | None = None
+    unsupported: bool = False
 
 
 @dataclass(frozen=True)
@@ -205,8 +208,8 @@ def _string(node: object, *path: str, max_chars: int = _MAX_ID_CHARS) -> str:
     return value
 
 
-def _text(event: object, max_chars: int) -> str:
-    """序列化正文先按容器上限拒绝，再解析，最后按实际文本长度限制。"""
+def _content(event: object, max_chars: int) -> dict[str, Any]:
+    """只校验有界 JSON 容器；非文本内容不提取、不保存、不下载。"""
     raw = _field(event, "event", "message", "content")
     if not isinstance(raw, str):
         raise _RejectedError("content")
@@ -216,7 +219,14 @@ def _text(event: object, max_chars: int) -> str:
         content = json.loads(raw)
     except json.JSONDecodeError:
         raise _RejectedError("content") from None
-    text = content.get("text") if isinstance(content, dict) else None
+    if not isinstance(content, dict):
+        raise _RejectedError("content")
+    return content
+
+
+def _text(event: object, max_chars: int) -> str:
+    """序列化正文先按容器上限拒绝，再解析，最后按实际文本长度限制。"""
+    text = _content(event, max_chars).get("text")
     if not isinstance(text, str) or not text.strip():
         raise _RejectedError("content")
     try:
@@ -258,8 +268,7 @@ def _parse(
         raise _RejectedError("chat_type")
     if _OPEN_ID.fullmatch(open_id) is None:
         raise _RejectedError("sender")
-    if _field(event, "event", "message", "message_type") != "text":
-        raise _RejectedError("message_type")
+    message_type = _string(event, "event", "message", "message_type")
     try:
         created = datetime.fromtimestamp(
             int(_string(event, "event", "message", "create_time")) / 1000, UTC
@@ -269,8 +278,12 @@ def _parse(
     max_age = timedelta(seconds=config.max_event_age_seconds)
     if now - created > max_age or created - now > _CLOCK_SKEW:
         raise _RejectedError("stale")
-    text = _text(event, config.max_message_chars)
     message_id = _string(event, "event", "message", "message_id")
+    if message_type == "text":
+        text = _text(event, config.max_message_chars)
+    else:
+        _content(event, config.max_message_chars)
+        text = ""
     if group is not None:
         text = _addressed(event, text, bot())
         subject: str | None = open_id
@@ -280,10 +293,12 @@ def _parse(
         return _Unregistered(message_id=message_id, open_id=open_id, chat_id=chat_id)
     return _Message(
         message_id=message_id,
+        open_id=open_id,
         subject_id=subject,
         chat_id=chat_id,
         text=text,
         group=group,
+        unsupported=message_type != "text",
     )
 
 
@@ -340,14 +355,15 @@ async def send_delivery(
     """Gateway 与 CLI 共用：本地构造失败明确未发送，SDK 开始后的异常保留 unknown。"""
     try:
         message = build_feishu_message(delivery, max_chars, chat_id, reply_to=reply_to)
+        omitted = message == capacity_notice(delivery.session_notice)
     except Exception:
         logger.error("飞书结果未发送：reason=render_failed")
         return "failed"
-    if message == {"text": CAPACITY_NOTICE}:
+    if omitted:
         logger.warning("飞书仅发送容量说明：reason=reply_capacity_notice")
     try:
         outcome = await send(chat_id, message, reply_to=reply_to)
-        if delivery.requires_complete and message == {"text": CAPACITY_NOTICE}:
+        if delivery.requires_complete and omitted:
             return "failed" if outcome == "sent" else outcome
         return outcome
     except Exception as exc:
@@ -480,8 +496,13 @@ class FeishuGateway:
             if self._reserve_notice(message):
                 await self._send_notice(message)
             return
-        kind, body = _command(message.text)
         try:
+            if message.unsupported:
+                if self._reserve_notice(message):
+                    await self._service.authorize_notice(self._ref(message))
+                    await self._notify(message, UNSUPPORTED_INPUT)
+                return
+            kind, body = _command(message.text)
             if kind == "new":
                 await self._new_session(message)
             elif kind == "approve" or kind == "reject":
@@ -803,7 +824,7 @@ class FeishuGateway:
         if outcome != "sent":
             logger.warning("飞书提示发送未成功：%s", outcome)
 
-    def _reserve_notice(self, message: _Unregistered) -> bool:
+    def _reserve_notice(self, message: _Unregistered | _Message) -> bool:
         """在任何发送 await 之前同步完成“检查并占位”：同一消息只尝试一次，同一用户每个窗口一次。"""
         key = (message.open_id, message.message_id)
         if key in self._noticed_messages:

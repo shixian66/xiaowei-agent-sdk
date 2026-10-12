@@ -27,6 +27,7 @@ import json
 import logging
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass
+from datetime import timedelta
 from typing import Protocol
 
 from pydantic import AwareDatetime, BaseModel, ConfigDict, Field, model_validator
@@ -60,6 +61,7 @@ from xiaowei.models import (
     Label,
     Owner,
     RunContext,
+    SessionSnapshot,
     ToolId,
     TurnAnswer,
     group_owner,
@@ -501,7 +503,40 @@ class ResultDelivery:
                 json.dumps("approval_status") + ": " + json.dumps(status, ensure_ascii=False)
             )
             content = content.replace(original, replacement).replace(command, status)
-        return delivery.model_copy(update={"facts": tuple(facts), "content": content})
+        return delivery.model_copy(
+            update={
+                "facts": tuple(facts),
+                "content": content,
+                "session_notice": self._session_warning(record.session_state, record.channel),
+            }
+        )
+
+    @staticmethod
+    def _session_warning(snapshot: SessionSnapshot | None, channel: Channel) -> str | None:
+        """仅依据本请求保存的成功观察；不读取当前余额或再次回放历史。"""
+        if snapshot is None:
+            return None
+        turns, used, expires = snapshot.committed_turns, snapshot.replay_bytes, snapshot.expires_at
+        if snapshot.phase != "after_commit" or turns is None or used is None or expires is None:
+            raise ResultUnavailableError
+        limits = []
+        if turns * 100 >= snapshot.turn_limit * 80:
+            limits.append(f"会话已用 {turns}/{snapshot.turn_limit} 次")
+        if used * 100 >= snapshot.byte_limit * 80:
+            limits.append(f"历史容量接近上限（{used}/{snapshot.byte_limit} 字节）")
+        remaining = expires - snapshot.observed_at
+        if remaining <= timedelta(0):
+            limits.append("会话已到固定保留期限")
+        elif remaining <= timedelta(hours=1):
+            limits.append("距固定保留期限不超过 1 小时")
+        if not limits:
+            return None
+        last = (
+            turns == snapshot.turn_limit or used == snapshot.byte_limit or remaining <= timedelta(0)
+        )
+        next_turn = "下轮需要新建会话" if last else "后续可能需新建会话"
+        action = "点击“新建会话”" if channel == "web" else "发送 /新建"
+        return "本轮结束时" + "；".join(limits) + f"。{next_turn}；{action}，并补充关键线索。"
 
     def _context(self, record: RequestRecord, decision: AccessDecision) -> RunContext:
         """交付用 context：结果所属会话与轮次、当前授权的目标集合；不授予任何工具。"""
@@ -575,6 +610,10 @@ class ChannelService:
     def max_concurrent_turns(self) -> int:
         """应用的全局并发上限；渠道的消费者数不得超过它。"""
         return self._app.max_concurrent_turns
+
+    async def authorize_notice(self, ref: RequestRef) -> None:
+        """无数据回执发送前复核当前身份及群成员；不创建请求、会话或工具执行范围。"""
+        await _decide_ref(self._access, ref)
 
     async def accept(self, inbound: InboundRequest) -> RequestReceipt:
         """当前授权通过后持久接受请求；同一请求编号返回已有记录，不再运行。
