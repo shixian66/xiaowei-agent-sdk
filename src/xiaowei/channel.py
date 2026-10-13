@@ -414,6 +414,8 @@ class ResultDelivery:
         if delivery is None:
             await self._store.finish_send(claim, "failed")
             raise refused or ResultUnavailableError()
+        if record.state in {"completed", "paused"}:
+            delivery = delivery.model_copy(update={"request_state": record.state})
         try:
             outcome = await transmit(delivery)
         except BaseException as exc:

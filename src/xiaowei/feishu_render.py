@@ -53,6 +53,17 @@ def display_text(text: str) -> str:
     )
 
 
+def fact_limit_notices(fact: DeliveryFact) -> tuple[str, ...]:
+    """区分分页未完与真实截断，供卡片和报告沿用同一事实口径。"""
+    cursor = fact.metadata.get("next_cursor")
+    notices = []
+    if cursor is not None:
+        notices.append("还有后续页，本页不是全部结果。")
+    if fact.truncated and not (fact.tool_id in _PAGED and cursor is not None):
+        notices.append("工具结果已截断，不能据此声称完整。")
+    return tuple(notices)
+
+
 def capacity_notice(session_notice: str | None = None) -> Message:
     """容量回执同条保留必要系统提醒；也供发送端识别省略结果的消息。"""
     text = CAPACITY_NOTICE + ("\n" + session_notice if session_notice is not None else "")
@@ -145,6 +156,8 @@ def _card(
     formatted: bool = False,
 ) -> Message:
     elements: list[Message] = []
+    if delivery.report_notice:
+        elements.append(_div(delivery.report_notice))
     if delivery.monitoring_notice:
         elements.append(_div(delivery.monitoring_notice))
     if delivery.session_notice:
@@ -184,11 +197,7 @@ def _card(
                 for key, value in fact.metadata.items()
                 if key not in _TECHNICAL and value is not None
             )
-        cursor = fact.metadata.get("next_cursor")
-        if cursor is not None:
-            elements.append(_div("还有后续页，本页不是全部结果。"))
-        if fact.truncated and not (fact.tool_id in _PAGED and cursor is not None):
-            elements.append(_div("工具结果已截断，不能据此声称完整。"))
+        elements.extend(_div(notice) for notice in fact_limit_notices(fact))
         if fact.tool_id == "local/run_readonly_query" and index not in sqls:
             elements.append(_div("SQL 未展示。"))
         if fact.view == "brief":

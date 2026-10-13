@@ -1750,6 +1750,7 @@ async def _start_feishu(
         clock=clock,
         bot_open_id=transport.bot_open_id,
         download_resource=downloader,
+        upload_file=transport.upload_file,
     )
     consumers = asyncio.create_task(gateway.run(), name="xiaowei-feishu")
     starting = asyncio.create_task(transport.start(gateway.receive), name="xiaowei-feishu-start")
@@ -1933,6 +1934,9 @@ async def _resend(
         chat_id=conversation,
         max_chars=feishu.max_reply_chars,
         reply_to=reply_to,
+        results=parts.results,
+        upload_file=transport.upload_file,
+        resend=True,
     )
 
     ref = RequestRef(
@@ -1942,4 +1946,5 @@ async def _resend(
         request_id=message_id,
         group=None if group is None else group.scope,
     )
+    transmit = partial(transmit, ref=ref)
     return await parts.results.send(ref, transmit, resend=True)

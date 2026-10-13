@@ -765,10 +765,20 @@ class Application:
                 "调查顺序和是否提出由你根据本轮问题与证据决定。"
                 "需要确认已提动作的执行结果时可按 ID 查状态，不能凭历史提案声称执行成功。"
             )
+        report_note = (
+            "\n当前为飞书渠道。用户明确要把本轮获准的只读事实做成报告文件时，"
+            "在完成必要取证后设置 report_format：默认 md，明确只要 HTML 时为 html。"
+            "同轮同时要求 MD 与 HTML 时先用 clarification 请用户选一种；一次只交付一个文件。"
+            "未要求文件或本轮含待确认动作时 report_format 为 null。"
+            "没有成功证据不能写已巡检或健康结论，未核实来源如实说明；"
+            "报告不改变查询、权限、预算与证据规则。"
+            if ctx.identity.channel == "feishu"
+            else "\n当前渠道不支持报告文件；report_format 必须为 null，可给出文字建议。"
+        )
         return Agent[RunContext](
             name="xiaowei",
             instructions=(
-                f"{self._instructions}{action_note}\n"
+                f"{self._instructions}{action_note}{report_note}\n"
                 f"本轮当前时间（UTC）：{self._clock().astimezone(UTC).isoformat()}。"
                 "相对日期须结合业务时区计算；历史结果的采集时间不是本轮当前时间。"
             ),

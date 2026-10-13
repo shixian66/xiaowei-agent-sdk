@@ -268,6 +268,8 @@ class AgentAnswer(_Answer):
     inferences: list[AnswerInference]
     clarification: Annotated[str, Field(min_length=1, max_length=2000)] | None
     advice: Annotated[str, Field(min_length=1, max_length=4000)] | None = None
+    report_format: Literal["md", "html"] | None = None
+    """仅在飞书用户明确要求只读事实报告时选定的文件格式；文件内容由代码构造。"""
 
 
 MonitoringFailureReason = Literal[
@@ -390,3 +392,9 @@ class Delivery(_Trusted):
     """Web 澄清或未执行建议的原文。"""
     feishu_text: str | None = Field(default=None, exclude=True)
     """飞书澄清或建议的原文；不进入 Web 序列化，不能从转义 content 反解。"""
+    report_format: Literal["md", "html"] | None = Field(default=None, exclude=True)
+    """模型在本轮选择的飞书报告格式；事实和文件内容仍由代码生成。"""
+    request_state: Literal["completed", "paused"] | None = Field(default=None, exclude=True)
+    """发送时由已保存请求附加，供报告文件与卡片选择；不进入回答或渠道 JSON。"""
+    report_notice: str | None = Field(default=None, exclude=True)
+    """报告不能作为文件交付时的可信固定说明，只进入本次飞书卡片。"""

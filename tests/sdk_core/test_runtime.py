@@ -854,6 +854,7 @@ async def test_uninitialized_database_is_refused(
     secret = SecretStr(env.url.render_as_string(hide_password=False))
     async with open_engine(secret) as engine, engine.begin() as conn:
         await conn.execute(text("DROP TABLE xiaowei_image"))
+        await conn.execute(text("DROP TABLE xiaowei_report"))
         await conn.execute(text("DROP TABLE xiaowei_request"))
     with pytest.raises(StorageNotInitializedError):
         await env.serve(env.config(), asyncio.Event())
@@ -1349,6 +1350,9 @@ async def test_feishu_start_failure_logs_only_safe_codes(
             del args, kwargs
             return "sent"
 
+        async def upload_file(self, report: object) -> str:
+            raise AssertionError("启动失败时不应上传报告")
+
     config = runtime.ServeConfig.model_validate(serve_config(18501, feishu=feishu_config()))
     service = SimpleNamespace(
         max_concurrent_turns=4,
@@ -1639,7 +1643,7 @@ async def test_resend_requires_feishu(env: Env) -> None:
 async def test_storage_commands_use_the_configured_database(env: Env) -> None:
     config = env.config()
     await runtime.initialize(config)  # 已初始化时幂等
-    assert await runtime.upgrade(config) == 10
+    assert await runtime.upgrade(config) == 11
     report = await runtime.cleanup(config, batch_size=10)
     assert (report.sessions, report.unregistered) == (0, 0)
 
@@ -1667,7 +1671,7 @@ async def test_maintenance_commands_reject_a_digest_key_mismatch_before_business
             starrocks_connect=env.connect(config),
         )
 
-    assert await env.scalar("SELECT version FROM xiaowei_schema_version") == 10
+    assert await env.scalar("SELECT version FROM xiaowei_schema_version") == 11
     assert env.drv.attempts == 0 and channel.sends == []
 
 

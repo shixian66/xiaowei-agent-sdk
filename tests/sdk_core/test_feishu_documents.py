@@ -318,6 +318,9 @@ async def test_runtime_start_wires_enabled_document_download_into_gateway(
         async def send(self, chat_id: str, message: Any, *, reply_to: str | None = None) -> Any:
             return await outbox(chat_id, message, reply_to=reply_to)
 
+        async def upload_file(self, report: object) -> str:
+            raise AssertionError("文档输入不应上传报告")
+
         def bot_open_id(self) -> None:
             return None
 

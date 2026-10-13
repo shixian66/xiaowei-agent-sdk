@@ -72,7 +72,7 @@ from lark_channel.channel import (
 )
 from lark_channel.channel.config import TransportConfig
 from lark_channel.channel.errors import FeishuChannelErrorCode
-from lark_channel.channel.types import SendResult
+from lark_channel.channel.types import MediaSource, OutboundFile, SendResult
 from lark_channel.core.const import FEISHU_DOMAIN, LARK_DOMAIN
 from lark_channel.core.enum import LogLevel
 from lark_channel.ws import client as ws_client
@@ -85,10 +85,12 @@ from xiaowei.channel import (
     InboundRequest,
     RequestReceipt,
     RequestRef,
+    ResultDelivery,
     ResultUnavailableError,
 )
 from xiaowei.channel_store import (
     ChannelStoreError,
+    ReportMismatchError,
     RequestUnavailableError,
     ResultNotSavedError,
     SendOutcome,
@@ -96,6 +98,7 @@ from xiaowei.channel_store import (
 )
 from xiaowei.config import FeishuConfig, FeishuGroupConfig, resolve_secret_ref
 from xiaowei.feishu_render import Message, build_feishu_message, capacity_notice, mention_safe
+from xiaowei.feishu_report import ReportCapacityError, ReportFile, build_report
 from xiaowei.feishu_resource import ResourceDownloadError
 from xiaowei.image_input import (
     MAX_IMAGE_BYTES,
@@ -177,8 +180,11 @@ class Send(Protocol):
     （原消息编号），只回复原消息。"""
 
     def __call__(
-        self, chat_id: str, text: str | Message, *, reply_to: str | None = ...
+        self, chat_id: str, text: str | Message | OutboundFile, *, reply_to: str | None = ...
     ) -> Awaitable[SendOutcome]: ...
+
+
+UploadFile = Callable[[ReportFile], Awaitable[str]]
 
 
 class DownloadResource(Protocol):
@@ -401,8 +407,53 @@ async def send_delivery(
     chat_id: str,
     max_chars: int,
     reply_to: str | None = None,
+    results: ResultDelivery | None = None,
+    ref: RequestRef | None = None,
+    upload_file: UploadFile | None = None,
+    resend: bool = False,
 ) -> SendOutcome:
     """Gateway 与 CLI 共用：本地构造失败明确未发送，SDK 开始后的异常保留 unknown。"""
+    if delivery.report_format is not None:
+        report_notice: str | None = None
+        if delivery.requires_complete:
+            report_notice = "本轮含需完整展示的动作事实，已改用消息展示，未生成报告文件。"
+        elif delivery.request_state != "completed":
+            report_notice = "本轮尚未完成，已改用消息展示，未生成报告文件。"
+        else:
+            if results is None or ref is None or upload_file is None:
+                logger.error("飞书报告未发送：reason=report_transport_unavailable")
+                return "failed"
+            try:
+                report = build_report(delivery)
+            except ReportCapacityError:
+                report_notice = "报告超过文件容量，已改用消息展示；需要文件请缩小范围后重试。"
+            except (ValueError, TypeError):
+                logger.warning("飞书报告未发送：reason=report_render_failed")
+                return "failed"
+            else:
+                return await _send_report(
+                    delivery,
+                    report=report,
+                    send=send,
+                    chat_id=chat_id,
+                    reply_to=reply_to,
+                    results=results,
+                    ref=ref,
+                    upload_file=upload_file,
+                    resend=resend,
+                )
+        if results is not None and ref is not None:
+            record = await results.store.get(
+                ref.channel,
+                ref.subject_id,
+                ref.conversation_id,
+                ref.request_id,
+                owner=ref.group.owner if ref.group is not None else None,
+            )
+            if await results.store.has_bound_report(record):
+                logger.warning("飞书报告停止改发卡片：reason=report_already_bound")
+                return "unknown"
+        delivery = delivery.model_copy(update={"report_notice": report_notice})
     try:
         message = build_feishu_message(delivery, max_chars, chat_id, reply_to=reply_to)
         omitted = message == capacity_notice(delivery.session_notice)
@@ -416,6 +467,75 @@ async def send_delivery(
         if delivery.requires_complete and omitted:
             return "failed" if outcome == "sent" else outcome
         return outcome
+    except Exception as exc:
+        logger.error("飞书发送异常，按结果不明记录：%s", type(exc).__name__)
+        return "unknown"
+
+
+async def _send_report(
+    delivery: Delivery,
+    *,
+    report: ReportFile,
+    send: Send,
+    chat_id: str,
+    reply_to: str | None,
+    results: ResultDelivery,
+    ref: RequestRef,
+    upload_file: UploadFile,
+    resend: bool,
+) -> SendOutcome:
+    """原文件绑定请求；上传不明不重传；每次外发前按当前权限复核。"""
+
+    async def still_authorized() -> bool:
+        try:
+            view = await results.view(ref, first=not resend)
+            current = view.delivery
+            return current is not None and build_report(current).content == report.content
+        except (
+            ResultUnavailableError,
+            AccessDeniedError,
+            RequestUnavailableError,
+            ValueError,
+            TypeError,
+        ):
+            return False
+
+    if not await still_authorized():
+        logger.warning("飞书报告未发送：reason=report_revalidation_failed")
+        return "failed"
+    record = await results.store.get(
+        ref.channel,
+        ref.subject_id,
+        ref.conversation_id,
+        ref.request_id,
+        owner=ref.group.owner if ref.group is not None else None,
+    )
+    try:
+        state, key, attempt = await results.store.bind_report(record, report)
+    except ReportMismatchError:
+        logger.warning("飞书报告未发送：reason=report_mismatch")
+        return "failed"
+    if state == "pending":
+        if not await results.store.begin_report_upload(record, attempt):
+            logger.warning("飞书报告未发送：reason=report_upload_claim_lost")
+            return "unknown"
+        try:
+            key = await upload_file(report)
+        except Exception:
+            await results.store.mark_report_upload_unknown(record, attempt)
+            logger.warning("飞书报告上传结果不明：reason=report_upload_unknown")
+            return "unknown"
+        await results.store.complete_report_upload(record, attempt, key)
+    elif state != "uploaded" or key is None:
+        logger.warning("飞书报告停止重发：reason=report_upload_unknown")
+        return "unknown"
+    if not await still_authorized():
+        logger.warning("飞书报告未发送：reason=report_revalidation_failed")
+        return "failed"
+    await results.store.confirm_report_send(record, attempt, key)
+    message = OutboundFile(source=MediaSource(kind="key", key=key), file_name=report.filename)
+    try:
+        return await send(chat_id, message, reply_to=reply_to)
     except Exception as exc:
         logger.error("飞书发送异常，按结果不明记录：%s", type(exc).__name__)
         return "unknown"
@@ -468,6 +588,7 @@ class FeishuGateway:
         clock: Callable[[], datetime],
         bot_open_id: BotOpenId = lambda: None,
         download_resource: DownloadResource | None = None,
+        upload_file: UploadFile | None = None,
     ) -> None:
         if config.consumer_count > service.max_concurrent_turns:
             raise ValueError("consumer_count 不得超过应用的全局并发上限")
@@ -481,6 +602,7 @@ class FeishuGateway:
         self._clock = clock
         self._bot = bot_open_id
         self._download_resource = download_resource
+        self._upload_file = upload_file
         self._readiness = service.results.store.readiness
         # 尚未开始的群请求（含下一条将运行的队头）都留在群 FIFO 中，始终受等待期限管理。群空闲且
         # 队头的排队提示尝试已结束时，共享队列中放入一个“群可运行”标记（None，另占一个保留槽，
@@ -950,6 +1072,9 @@ class FeishuGateway:
             chat_id=job.chat_id,
             max_chars=self._config.max_reply_chars,
             reply_to=job.reply_to,
+            results=self._service.results,
+            ref=job.ref,
+            upload_file=self._upload_file,
         )
         try:
             outcome = await self._service.results.send(job.ref, transmit)
@@ -1066,8 +1191,17 @@ class LarkChannel(Protocol):
     def schedule(self, coro: Coroutine[Any, Any, object]) -> concurrent.futures.Future[object]: ...
 
     async def send(
-        self, to: str, message: Message, opts: dict[str, str] | None = None
+        self, to: str, message: Message | OutboundFile, opts: dict[str, str] | None = None
     ) -> object: ...
+
+    async def upload_media(
+        self,
+        source: MediaSource,
+        *,
+        kind: Literal["image", "file"],
+        file_name: str | None = None,
+        file_type: str | None = None,
+    ) -> str: ...
 
     def get_bot_identity(self) -> object: ...
 
@@ -1179,14 +1313,14 @@ class LarkTransport:
             _report(future)
 
     async def send(
-        self, chat_id: str, text: str | Message, *, reply_to: str | None = None
+        self, chat_id: str, text: str | Message | OutboundFile, *, reply_to: str | None = None
     ) -> SendOutcome:
         """单次发送；``reply_to`` 给出时只回复该原消息，原消息不可回复时明确失败、不改发新消息。"""
         opts = {"receive_id_type": "chat_id"}
         if reply_to is not None:
             opts |= {"reply_to": reply_to, "reply_target_gone": "fail"}
         message = {"text": mention_safe(text)} if isinstance(text, str) else text
-        if "text" in message:
+        if isinstance(message, dict) and "text" in message:
             message = {"text": mention_safe(message["text"])}
         future = self._channel.schedule(self._channel.send(chat_id, message, opts))
         try:
@@ -1199,6 +1333,21 @@ class LarkTransport:
             logger.warning("飞书发送异常，结果不明：%s", type(exc).__name__)
             return "unknown"
         return send_outcome(result)
+
+    async def upload_file(self, report: ReportFile) -> str:
+        """用 SDK 公开上传接口上传有界报告；超时后结果未知，由请求状态禁止再上传。"""
+        future = self._channel.schedule(
+            self._channel.upload_media(
+                MediaSource(kind="buffer", buffer=report.content),
+                kind="file",
+                file_name=report.filename,
+            )
+        )
+        async with asyncio.timeout(self._config.send_timeout_seconds):
+            key = await asyncio.wrap_future(future)
+        if not isinstance(key, str):
+            raise ValueError("报告上传未返回资源键")
+        return key
 
     def bot_open_id(self) -> str | None:
         """SDK 已解析且属于本应用的机器人 ``open_id``；未解析、出错或应用不符时为 None。"""

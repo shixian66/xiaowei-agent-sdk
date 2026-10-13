@@ -16,6 +16,7 @@ from pathlib import Path
 
 import httpx2
 from tests.sdk_core.dialogue_gate import (
+    E6_SCENARIOS,
     R3_SCENARIOS,
     R7_SCENARIOS,
     ReviewSample,
@@ -61,6 +62,14 @@ async def review_sample(sample: ReviewSample) -> ReviewVerdict:
         else json.dumps(sample.delivery.model_dump(mode="json"), ensure_ascii=False, indent=2),
         file=sys.stderr,
     )
+    if sample.scenario.startswith("e6_"):
+        format_ = (
+            None if sample.delivery is None else getattr(sample.delivery, "report_format", None)
+        )
+        print(
+            "E6 报告格式：" + str(format_),
+            file=sys.stderr,
+        )
     values: dict[str, bool | None] = {}
     for field, label in REVIEW_LABELS.items():
         while True:
@@ -87,8 +96,8 @@ async def collect(profile_path: Path, repeats: int, suite: str = "u1") -> dict[s
             lambda: httpx2.AsyncHTTPTransport(retries=0, trust_env=False),
             repeats=repeats,
             **(
-                {"scenarios": R3_SCENARIOS if suite == "r3" else R7_SCENARIOS}
-                if suite in {"r3", "r7"}
+                {"scenarios": {"r3": R3_SCENARIOS, "r7": R7_SCENARIOS, "e6": E6_SCENARIOS}[suite]}
+                if suite in {"r3", "r7", "e6"}
                 else {}
             ),
             manual_review=review_sample,
@@ -145,7 +154,7 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--profile", type=Path, required=True)
     parser.add_argument("--repeats", type=int, default=3)
-    parser.add_argument("--suite", choices=("u1", "r7", "r3"), default="u1")
+    parser.add_argument("--suite", choices=("u1", "r7", "r3", "e6"), default="u1")
     args = parser.parse_args()
     if args.repeats < 3:
         parser.error("旧/新每项至少各运行 3 次")
