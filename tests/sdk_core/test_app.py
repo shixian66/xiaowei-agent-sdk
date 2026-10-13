@@ -488,12 +488,16 @@ async def test_invalid_answer_is_never_delivered_or_committed(env: Env) -> None:
 
 
 async def test_timeout_does_not_replay_tools(env: Env) -> None:
-    slow = env.scripts.add("超时", tool_call("order_total", region="east"), sleeping(10, cite()))
+    entered = asyncio.Event()
+    slow = env.scripts.add(
+        "超时", tool_call("order_total", region="east"), sleeping(10, cite(), entered=entered)
+    )
     started = time.monotonic()
     with pytest.raises(TurnError) as timed_out:
-        await env.app.run_turn(env.ctx(turn="t1", timeout=0.5), slow)
+        await env.app.run_turn(env.ctx(turn="t1", timeout=5), slow)
     assert timed_out.value.reason == "timeout"
-    assert time.monotonic() - started < 3
+    assert time.monotonic() - started < 8
+    assert entered.is_set()  # 确认期限发生在工具执行后，而不是会话准备期间。
     assert env.tool_ids() == [TOTAL_TOOL]
     assert await env.stored("s1") == []
 
