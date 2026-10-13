@@ -1,7 +1,8 @@
 """MCP 客户端接入：SDK 官方 Streamable HTTP 客户端 + 薄 FunctionTool，调用一律经过治理核心。
 
 不把 ``MCPServer`` 挂到 Agent：SDK 的 MCP 工具把远端结果直接交给模型，输出护栏只能放行或
-拒绝，不能过滤（Task 1 实测）。这里只用公开的 ``connect``/``list_tools``/``call_tool``：
+拒绝，不能过滤（Task 1 实测）。连接代际由公开的 ``MCPServerManager`` 管理，
+这里只用 SDK 的 ``list_tools``/``call_tool``：
 启动时按静态登记核对远端工具，每个获准工具包装为 FunctionTool，调用前复用
 ``GovernedTools.invoke``，结果按登记的结果模型严格校验后进入 Evidence 投影。远端的只读标注、
 说明文字与自带的证据标识都不参与授权，也不交给模型。
@@ -22,7 +23,6 @@ import os
 import re
 import time
 from collections.abc import AsyncIterator, Callable, Iterable
-from contextlib import AsyncExitStack
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from decimal import ROUND_HALF_UP, Decimal, InvalidOperation
@@ -32,7 +32,7 @@ from types import TracebackType
 import httpx2
 import mcp
 from agents import FunctionTool, Tool
-from agents.mcp import MCPServerStreamableHttp
+from agents.mcp import MCPServerManager, MCPServerStreamableHttp
 from mcp.shared.exceptions import MCPError
 from mcp.types import CallToolResult, TextContent
 from mcp.types import Tool as MCPTool
@@ -137,7 +137,7 @@ class _Snapshot:
     """一次已核约连接；工具闭包只引用此连接，不查询当前源状态。"""
 
     server: MCPServerStreamableHttp
-    connection: AsyncExitStack
+    manager: MCPServerManager
     tools: tuple[tuple[str, FunctionTool], ...]
 
 
@@ -184,7 +184,7 @@ class MCPIntegration:
         # 登记错误拒绝，而不是在某个 Server 连上之后中止整个接入。
         for name, binding in self._planned.items():
             self._function_tool(name, binding, None, self._sources[binding.config.server_id])
-        self._connections: set[AsyncExitStack] = set()
+        self._managers: set[MCPServerManager] = set()
         self._entered = False
         self._closing = False
 
@@ -214,12 +214,12 @@ class MCPIntegration:
         self._entered = False
 
     async def _close_all(self) -> None:
-        for connection in tuple(self._connections):
-            await self._close(connection)
+        for manager in tuple(self._managers):
+            await self._close(manager)
 
-    async def _close(self, connection: AsyncExitStack) -> None:
-        await connection.aclose()
-        self._connections.discard(connection)
+    async def _close(self, manager: MCPServerManager) -> None:
+        await manager.cleanup_all()
+        self._managers.discard(manager)
 
     @property
     def governance(self) -> GovernedTools:
@@ -300,7 +300,7 @@ class MCPIntegration:
         else:
             source.status = "contract_mismatch"
             source.back_off()
-            await self._close(snapshot.connection)
+            await self._close(snapshot.manager)
 
     async def _reconnect(self, source: _Source, turn_timeout_seconds: float) -> None:
         async with source.lock:
@@ -322,10 +322,10 @@ class MCPIntegration:
                 )
                 if old is not None:
                     source.snapshot = None
-                    await self._close(old.connection)
+                    await self._close(old.manager)
                 return
             if self._closing:
-                await self._close(snapshot.connection)
+                await self._close(snapshot.manager)
                 return
             source.snapshot = snapshot if snapshot.tools else None
             source.status = "available" if snapshot.tools else "contract_mismatch"
@@ -333,9 +333,9 @@ class MCPIntegration:
                 source.recovered()
             else:
                 source.back_off()
-                await self._close(snapshot.connection)
+                await self._close(snapshot.manager)
             if old is not None:
-                await self._close(old.connection)
+                await self._close(old.manager)
 
     async def _connect(self, source: _Source, limit: float) -> _Snapshot:
         _contain_wire_logs()
@@ -362,21 +362,31 @@ class MCPIntegration:
             client_session_timeout_seconds=config.timeout_seconds,
             max_retry_attempts=0,
         )
-        connection = AsyncExitStack()
-        self._connections.add(connection)
+        manager = MCPServerManager(
+            [server],
+            connect_timeout_seconds=limit,
+            cleanup_timeout_seconds=limit,
+            strict=True,
+            suppress_cancelled_error=False,
+            connect_in_parallel=True,
+        )
+        self._managers.add(manager)
+        published = False
         try:
             async with asyncio.timeout(limit):
-                await connection.enter_async_context(server)
+                if server not in await manager.connect_all():
+                    raise RuntimeError("MCP Server 未连接")
                 # 新对象的工具缓存为空；每次都从新会话重新 list_tools 核约。
                 verified = _verified(await server.list_tools(), self._planned, config)
                 tools = tuple(
                     (name, self._function_tool(name, self._planned[name], server, source))
                     for name in verified
                 )
-        except BaseException:
-            await self._close(connection)
-            raise
-        return _Snapshot(server, connection, tools)
+            published = True
+            return _Snapshot(server, manager, tools)
+        finally:
+            if not published:
+                await self._close(manager)
 
     def _function_tool(
         self,
