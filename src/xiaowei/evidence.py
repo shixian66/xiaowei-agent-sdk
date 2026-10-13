@@ -12,11 +12,11 @@
 
 声明了数据范围的工具（StarRocks）另给出可信的对象依赖（``ObjectDependency``）。读取边界在上述
 检查之后、交付之前，把同一批记录的依赖按目标合并，交给应用装配的 ``DependencyVerifier`` 复核
-当前数据库权限与对象版本，结论三态：``valid`` 放行；``invalid``（确定撤权、对象重建或依赖变化）
+当前数据库权限与对象版本，结论三态：``valid`` 放行；``invalid``（确定撤权、可识别的对象或列变化）
 与其他拒绝一样按不可读处理；``unverifiable``（目标不可达、超时、无法识别的错误）只阻断这一次
 读取，抛出 ``EvidenceUnverifiableError``，不改动证据。复核只做探测与元数据读取，不调用模型、
-不执行原业务 SQL。依赖不可回放（视图）的证据只在产生它的这一轮、非历史读取时可读，在任何 I/O
-前判断。
+不执行原业务 SQL。视图事实与基表事实共用当前权限和依赖复核；视图定义与间接依赖的变化
+不参与复核，历史结果按采集时刻解释。
 
 复核次数有上限（``Budget.max_scope_checks``）：每次复核按目标去重后的对象数计数，在探测之前累加，
 失败不退还；超出时在任何探测前按 ``EvidenceUnverifiableError`` 拒绝。一轮的全部读取（回放、工具
@@ -357,7 +357,7 @@ class EvidenceStore:
 
         回答只能引用本轮模型可见的证据（``turn.context_evidence``）；这些证据不论是否被引用、
         回答是否只是澄清或建议，每次都与引用一起按当前权限复核（一批），只展示引用的事实。
-        ``history`` 为真表示历史读取或显式重发（不是本轮首次交付）：依赖不可回放的证据拒绝。
+        ``history`` 为真表示历史读取或显式重发；所有证据均复核当前权限与依赖。
         确定不可读抛出 ``AnswerRejectedError``；暂时无法复核时 ``EvidenceUnverifiableError`` 原样
         传播。
         """
@@ -568,10 +568,6 @@ class EvidenceStore:
             or record.target_id not in ctx.target_scope
             or not self._dependencies_declared(record)
         ):
-            raise EvidenceUnavailableError
-        # 不可回放的依赖（视图）：只有产生它的这一轮、首次交付时可读。
-        later = history or record.identity.turn_id != identity.turn_id
-        if later and any(not d.replayable for d in record.dependencies or ()):
             raise EvidenceUnavailableError
         return record
 

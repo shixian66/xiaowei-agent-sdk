@@ -11,9 +11,9 @@
 - ``ResultDelivery``：读取与发送已保存的结果，只依赖请求存储、``EvidenceStore`` 与同一个
   ``AccessPolicy``，不持有 ``Application``、模型绑定或模型凭据。completed 结果每次都按当前身份、
   目标、渠道与当前数据权限经 ``EvidenceStore.validate_answer`` 重新生成 ``Delivery``（连同保存的
-  本轮模型可见证据一起复核；没有该记录的旧格式回答不交付）；首次交付
-  （Web 提交后的读取、飞书首次发送）之外的读取与显式重发是历史交付，依赖不可回放（视图）的事实
-  拒绝。确定不可交付抛出 ``ResultUnavailableError``，暂时无法复核抛出其子类
+  本轮模型可见证据一起复核；没有该记录的旧格式回答不交付）；历史读取与显式重发
+  同样复核视图事实的当前权限、对象类型与被读取列的类型。确定不可交付抛出
+  ``ResultUnavailableError``，暂时无法复核抛出其子类
   ``ResultUnverifiableError``（结果与会话保留，之后可再读取或显式重发）。failed/interrupted 只给
   固定回执。发送紧邻在取得投递权之后，只发送一次，结果按 sent/failed/unknown 记录，不自动重试。
 

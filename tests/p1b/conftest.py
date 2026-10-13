@@ -22,6 +22,7 @@ LOOPBACK = "127.0.0.1"
 
 def pytest_configure(config: pytest.Config) -> None:
     config.addinivalue_line("markers", f"{MARKER}: 需要可丢弃的真实 StarRocks 测试实例")
+    config.addinivalue_line("markers", "loopback: 被复用的 SDK 测试辅助模块仅访问本机")
     config.addinivalue_line(
         "markers", f"{AUDIT_MARKER}: 需要已安装 AuditLoader 的可丢弃 StarRocks 测试实例"
     )

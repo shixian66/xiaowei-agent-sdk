@@ -21,11 +21,12 @@ RunContext。
 证据依赖：工具用 ``listed_dependency`` / ``read_dependency`` 从快照对象生成 Evidence 的对象依赖
 （版本取自采集它的快照）；``DependencyCheck`` 是交给 ``EvidenceStore`` 的复核：每批依赖在一条
 连接上零行探测当前权限，``read`` 依赖另读当前版本（``StarRocksAdapter.verify_objects``），与依赖
-记录的类型、表 ID 及被读取列的类型逐项比较。表 ID 全局分配、同名重建即改变（Task 0 §9.2），
-因此不比较创建时间（4.1.4 的 ``CREATE_TIME`` 时区随读法不同，见 ``ObjectVersion``）。任一对象
+记录的类型、表 ID 及被读取列的类型逐项比较。基表 ID 全局分配、同名重建即改变（Task 0 §9.2），
+因此不比较创建时间（4.1.4 的 ``CREATE_TIME`` 时区随读法不同，见 ``ObjectVersion``）。视图
+的表 ID 为 0；定义、内层视图或底表变化但被读取列类型不变时，旧证据仍可读。任一对象
 确定不可读或版本不同为 ``invalid``；连接、超时、无法识别的错误为 ``unverifiable``。复核不刷新、
-不读取快照，因此也用于不刷新快照的显式重发。只有 ``BASE TABLE`` 的读取可跨轮回放：视图（及其他
-类型）的版本不能证明内层视图与底表未变（Task 0 §9.2）。
+不读取快照，因此也用于不刷新快照的显式重发。``read`` 依赖的 ``replayable`` 仍记录对象
+是否为基表，但不作为历史读取的限制（Task 0 §9.2 的视图版本局限由产品接受）。
 """
 
 from __future__ import annotations
