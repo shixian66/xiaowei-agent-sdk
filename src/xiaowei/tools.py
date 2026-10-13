@@ -147,6 +147,17 @@ _REJECTION_HINTS: dict[ToolRejectHint, str] = {
         "ends_at 须晚于当前时间与 starts_at；支持多年且必须明确到期，"
         "请核实用户要求的期限后修正，不要擅自改短"
     ),
+    "datasource_fields": (
+        "fields 含该插件不支持的键；只使用 allowed_fields 中的键修改后再提出，未保存Action、未写入"
+    ),
+    "datasource_field_type": (
+        "fields 的字段值类型与插件说明不符；string 用字符串、boolean 用 true/false、number 用数字，"
+        "修改后再提出，未保存Action、未写入"
+    ),
+    "datasource_no_schema": (
+        "该插件没有字段说明；不要使用 fields，改用顶层 url、access、database 等参数，"
+        "未保存Action、未写入"
+    ),
 }
 
 
@@ -166,6 +177,8 @@ def _rejection_feedback(exc: ToolRejectedError, name: str) -> str:
         feedback["reason"] = (
             f"{prefix}（{exc.query_reject.value}）：{REJECTION_MESSAGES[exc.query_reject]}"
         )
+    if exc.allowed_fields is not None:
+        feedback["allowed_fields"] = exc.allowed_fields
     if exc.code == "busy":
         feedback.update(
             remaining_retries=exc.remaining_retries, retry_this_turn=exc.remaining_retries == 1

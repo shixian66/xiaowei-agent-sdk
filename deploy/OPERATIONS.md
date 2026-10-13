@@ -531,6 +531,70 @@ JSON定义上限16000字节，完整差异/恢复材料过大时不保存可批�
 已成功/未知 Action 先人工核对，保留 PostgreSQL 备份，不重放写请求。
 公司版本的冲突/回读、组织权限、provisioning限制、真实群展示和恢复实测仍为上线前门槛。
 
+### 选配 Grafana 数据源与 Annotation 写端（C8）
+
+C8 默认不启用，原 G3 只读端保持独立。外部节点另开经调用者认证的 Grafana MCP v2.0.2 写端；
+小维不代管该 Server，也不要求新 CA。内网 HTTP 会明文传输 Bearer 与内容，端点和令牌只由可信配置提供：
+
+```text
+--transport=streamable-http --address=0.0.0.0:8002 --enabled-tools=datasource,annotations
+--disable-query --usage-stats=disabled
+--allow-grafana-url-override=false --dynamic-multi-org=false
+--server-auth-token=<从外部节点安全运行配置提供>
+```
+
+此写端不能加 `--disable-write`，也不加写工具筛选参数。官方类别还会注册未选中的删除/修改
+Annotation 等工具；小维只映射下面列出的创建/修改和必要回读。**持有写端令牌者可以绕过小维群审批，
+直调远端全部工具（包括删除）**，这是已接受的风险；限制该端网络可达范围并保管令牌。
+启用前验证不带或带错 Bearer 均为401、零上游写入；正确令牌只用于小维配置的固定端点。
+
+```json
+{
+  "server_id": "grafana-c8",
+  "url": "http://grafana-mcp.internal:8002/mcp",
+  "auth_ref": "env:XW_GRAFANA_C8_MCP_TOKEN",
+  "timeout_seconds": 5,
+  "max_response_bytes": 128000,
+  "allowed_tools": {
+    "get_annotations": "grafana.get_annotations",
+    "create_annotation": "grafana.create_annotation",
+    "get_datasource": "grafana.get_datasource",
+    "create_datasource": "grafana.create_datasource",
+    "update_datasource": "grafana.update_datasource"
+  }
+}
+```
+
+可只选配 Annotation 或数据源；前者必须带 `get_annotations`，后者必须带 `get_datasource`。
+在 `data_policy.model_tools` 与 `feishu.group.tools` 只加入获准的
+`grafana-c8/propose_create_annotation`、`grafana-c8/propose_create_datasource`、
+`grafana-c8/propose_update_datasource`、`grafana-c8/get_action_status`；审批名单成员的
+`access.grants` 才加入对应 `grafana-c8/create_annotation`、`grafana-c8/create_datasource`、
+`grafana-c8/update_datasource`。实际写工具、删除和通用 API 工具不进入模型工具表。
+Web 和私聊不能申请或批准这些写动作。群内每个 Action 单独批准，版本变化未写入须重新提出，
+写后超时或回读不符按结果未知处理、人工核对、绝不自动重放。
+
+`settings_json` 用锁版 MCP 的实际字段，不按插件类型建白名单，也没有逐类验证或小维 URL
+目标白名单。提出阶段只用 `create_datasource` 的空 `name` + `type`，或 `update_datasource`
+的单独 `uid` 获取字段说明；这两个锁版分支已实测不写入。**不要**把非空 `name`、未知插件
+和省略 `schemaReviewed` 的组合当作只读探测：它可能直接 POST。返回 `fields` 说明时，
+`settings_json.fields` 只能使用说明列出的键及其基础值类型；不认识的键在提出时拒绝并返回可用键名，基础值类型不符也在提出时拒绝。
+没有 `fields` 说明的插件须用顶层 `url` 等参数，提交 `fields` 会拒绝；`fields` 与
+`jsonData` 也不能同时提交。只有群批准后的写调用才带 `schemaReviewed=true`。
+插件默认值、字段语义、Grafana 可访问的目标地址仍由启用者按实际安装环境判断，
+本机 Prometheus 插件成功不证明所有插件成功。`secureJsonData`、有值的 password/token/apiKey/secret
+动态字段及带账号密码或已识别凭据查询参数的 URL 在提出阶段拒绝；需密码时群回执显示“待配置凭据”，
+管理员到 Grafana 数据源设置页手动填写，健康检查前不称可用。修改 `jsonData` 时，
+小维回读并合并现有非秘密字段后展示完整待写内容；现有字段被隐藏则拒绝局部修改，
+由管理员在 Grafana 手动处理。未知插件若把密码放在不含上述关键词的普通字段里，
+本地字段名检查无法识别，操作者不得把它交给群提案。已批准的飞书私聊
+`/设置密码` 是**后续独立切片**，本版未开放；不要把密码发到群里。
+
+启用前用目标 Grafana 版本检查响应大小、Service Account 组织权限、群成员与审批名单，
+再做一次成功创建/修改/标记、一次未授权零写入及一次外部抢先修改的验收。
+`config check` 后停止旧进程并切换配置。回退旧镜像前移除 C8 写端和新增授权；
+已成功/未知的 Action 先按 UID/ID 在 Grafana 核实，保留 PostgreSQL 备份，不重放写入。
+
 ## 选配 Alertmanager 监控源
 
 A4 只读直连外部独立 Alertmanager **API v2**，本机以官方 **v0.34.1** 验证；公司实际版本仍须核对。

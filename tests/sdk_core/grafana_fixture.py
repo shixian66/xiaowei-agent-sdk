@@ -230,6 +230,7 @@ def official_grafana(
     token: str = "synthetic-mcp-token",  # noqa: S107 - synthetic only
     dashboard_write: bool = False,
     dashboard_override: bool = False,
+    c8_write: bool = False,
     upstream_token: str = "synthetic-upstream-token",  # noqa: S107
 ) -> Iterator[str]:
     with socket.socket() as probe:
@@ -242,9 +243,15 @@ def official_grafana(
             f"--address=127.0.0.1:{port}",
             "--enabled-tools="
             + (
-                "search,dashboard" if dashboard_write else "search,dashboard,datasource,annotations"
+                "datasource,annotations"
+                if c8_write
+                else (
+                    "search,dashboard"
+                    if dashboard_write
+                    else "search,dashboard,datasource,annotations"
+                )
             ),
-            *([] if dashboard_write else ["--disable-write"]),
+            *([] if dashboard_write or c8_write else ["--disable-write"]),
             *(["--enable-write-tools=update_dashboard"] if dashboard_override else []),
             "--disable-query",
             "--usage-stats=disabled",

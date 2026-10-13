@@ -56,6 +56,14 @@ from xiaowei.grafana import (
     wire_arguments,
     wire_payload,
 )
+from xiaowei.grafana_c8 import (
+    C8_POLICIES,
+    prepare_annotation,
+    prepare_datasource,
+    schema_matches_c8,
+    wire_arguments_c8,
+    wire_payload_c8,
+)
 from xiaowei.models import (
     GRAFANA_READ_POLICIES,
     MONITORING_READ_POLICIES,
@@ -292,6 +300,18 @@ class MCPIntegration:
                             for action in ("create_dashboard", "update_dashboard")
                         )
                     )
+                    or (
+                        binding.contract.policy_id == "grafana.create_annotation"
+                        and source.config.tool_id("propose_create_annotation") in allowed_tools
+                    )
+                    or (
+                        binding.contract.policy_id
+                        in {
+                            "grafana.create_datasource",
+                            "grafana.update_datasource",
+                        }
+                        and source.config.tool_id(f"propose_{binding.remote_name}") in allowed_tools
+                    )
                 )
                 and binding.contract.target_id in target_scope
                 for binding in self._planned.values()
@@ -424,6 +444,30 @@ class MCPIntegration:
             name, binding.contract, self._governance, self._execute(binding, server, source)
         )
 
+    async def datasource_guidance(
+        self, server_id: str, remote_name: str, value: str
+    ) -> CallToolResult:
+        """仅供已通过治理的 C8 提出/批准准备；锁版说明分支确认不写入。"""
+        if remote_name == "create_datasource":
+            arguments = {"name": "", "type": value}
+        elif remote_name == "update_datasource":
+            arguments = {"uid": value}
+        else:
+            raise ValueError("未开放此数据源说明工具")
+        source = self._sources.get(server_id)
+        if source is None:
+            raise ToolRejectedError("MCP源暂不可用", code="unsupported")
+        self.execute_for(source.config.tool_id(remote_name), server_id)
+        snapshot = source.snapshot
+        if snapshot is None:
+            raise ToolRejectedError("MCP源暂不可用", code="unsupported")
+        try:
+            return await snapshot.server.call_tool(remote_name, arguments)
+        except Exception as exc:
+            if _connection_lost(exc) and source.snapshot is snapshot:
+                source.status = "disconnected"
+            raise
+
     def execute_for(self, tool_id: str, target_id: str) -> Execute:
         """应用的选中Action复用已核约执行函数；调用方仍须经同一个GovernedTools。"""
         source = self._sources.get(target_id)
@@ -447,6 +491,8 @@ class MCPIntegration:
                 arguments = (
                     wire_arguments(binding.remote_name, request.arguments)
                     if binding.contract.policy_id in D7_POLICIES
+                    else wire_arguments_c8(binding.remote_name, request.arguments)
+                    if binding.contract.policy_id in C8_POLICIES
                     else request.arguments
                 )
                 result = await server.call_tool(binding.remote_name, arguments)
@@ -479,6 +525,8 @@ class MCPIntegration:
                     wire_payload(result, binding.remote_name, request.arguments),
                     False,
                 )
+            elif binding.contract.policy_id in C8_POLICIES:
+                payload, truncated = wire_payload_c8(result, binding.remote_name), False
             elif binding.contract.policy_id in PROMETHEUS_READ_POLICIES:
                 payload, truncated = _prometheus_payload(
                     result, binding.result, binding.remote_name
@@ -506,6 +554,13 @@ class MCPIntegration:
 
         if binding.contract.policy_id in D7_POLICIES:
             checked: Execute = Prechecked(prepare_dashboard, execute)
+        elif binding.contract.policy_id in C8_POLICIES:
+            checked = Prechecked(
+                prepare_annotation
+                if binding.remote_name == "create_annotation"
+                else prepare_datasource,
+                execute,
+            )
         elif binding.contract.policy_id in PROMETHEUS_READ_POLICIES:
             checked = Prechecked(
                 lambda request: _prepare_prometheus(
@@ -886,6 +941,8 @@ def _verified(
         if len(matches) == 1 and (
             schema_matches(binding.remote_name, matches[0].input_schema)
             if binding.contract.policy_id in D7_POLICIES
+            else schema_matches_c8(binding.remote_name, matches[0].input_schema)
+            if binding.contract.policy_id in C8_POLICIES
             else _accepts_input(binding.contract.input_schema, matches[0].input_schema)
         ):
             verified.append(name)
