@@ -425,6 +425,9 @@ async def test_concurrent_reconnect_is_single_flight_bounded_and_cools_down(
             ):
                 ctx = mcp_context("alpha", "beta")
                 old_tools = integration.tools_for(ctx)
+                old = integration._sources["alpha"].snapshot
+                assert old is not None
+                assert old.manager.active_servers == [old.server]
                 broken.stop()
                 await c.aborted(old_tools, "alpha__lookup", ctx)
                 assert integration.source_status["alpha"] == "disconnected"
@@ -446,6 +449,7 @@ async def test_concurrent_reconnect_is_single_flight_bounded_and_cools_down(
                 await asyncio.wait_for(asyncio.gather(*pending), timeout=1)
                 assert other_elapsed < 0.5
                 assert integration.source_status["alpha"] == "cooldown"
+                assert old.manager.active_servers == []
                 assert integration.source_status["beta"] == "available"
                 posts = [request for request in hanging.recorder.requests if request[0] == "POST"]
                 assert len(posts) == 1
@@ -667,6 +671,9 @@ async def test_old_runner_tool_stays_on_old_connection_after_reconnect(
             first_ctx = mcp_context()
             old_tools = integration.tools_for(first_ctx)
             assert names(old_tools) == {"fixture__lookup"}
+            old = integration._sources["fixture"].snapshot
+            assert old is not None
+            assert old.manager.active_servers == [old.server]
             first_done = asyncio.Event()
             continue_turn = asyncio.Event()
 
@@ -701,6 +708,7 @@ async def test_old_runner_tool_stays_on_old_connection_after_reconnect(
                 assert integration.source_status == {
                     "fixture": "contract_mismatch" if schema_drift else "available"
                 }
+                assert old.manager.active_servers == []
                 assert names(integration.tools_for(first_ctx)) == (
                     set() if schema_drift else {"fixture__lookup"}
                 )
