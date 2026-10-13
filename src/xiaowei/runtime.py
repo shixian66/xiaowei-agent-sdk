@@ -89,6 +89,13 @@ from xiaowei.evidence import EvidenceStore
 from xiaowei.feishu import FeishuGateway, LarkChannel, LarkTransport, lark_channel, send_delivery
 from xiaowei.governance import GovernedTools, Projection, ToolCatalog, ToolPolicy
 from xiaowei.grafana import D7_POLICIES, dashboard_actions, dashboard_catalog
+from xiaowei.grafana_c8 import (
+    C8_POLICIES,
+    annotation_actions,
+    annotation_catalog,
+    datasource_actions,
+    datasource_catalog,
+)
 from xiaowei.image_input import SessionImageStore
 from xiaowei.mcp import MCPIntegration
 from xiaowei.model_api import ModelProfile, open_model
@@ -277,7 +284,8 @@ class ServeConfig(_Config):
         if len(set(ids)) != len(ids):
             raise ValueError("mcp_servers 中的 server_id 不能重复")
         if any(
-            policy_id not in PROMETHEUS_READ_POLICIES | GRAFANA_READ_POLICIES | D7_POLICIES
+            policy_id
+            not in PROMETHEUS_READ_POLICIES | GRAFANA_READ_POLICIES | D7_POLICIES | C8_POLICIES
             or policy_id.rsplit(".", 1)[-1] != remote_name
             for server in value
             for remote_name, policy_id in server.allowed_tools.items()
@@ -296,6 +304,28 @@ class ServeConfig(_Config):
                 if any(policy not in D7_POLICIES for policy in server.allowed_tools.values()):
                     raise ValueError(
                         "Dashboard写端单独配置，只选D7已核约工具；其他读取使用原只读端"
+                    )
+            if "create_annotation" in server.allowed_tools:
+                if (
+                    server.auth_ref is None
+                    or "get_annotations" not in server.allowed_tools
+                    or any(
+                        policy not in C8_POLICIES | {"grafana.get_annotations"}
+                        for policy in server.allowed_tools.values()
+                    )
+                ):
+                    raise ValueError("C8写端须认证，只映射选中创建/修改工具及其回读")
+            if {"create_datasource", "update_datasource"} & server.allowed_tools.keys():
+                if (
+                    server.auth_ref is None
+                    or "get_datasource" not in server.allowed_tools
+                    or any(
+                        policy not in C8_POLICIES | {"grafana.get_annotations"}
+                        for policy in server.allowed_tools.values()
+                    )
+                ):
+                    raise ValueError(
+                        "数据源写端须认证，且有get_datasource回读；不映射删除或通用API工具"
                     )
         return value
 
@@ -679,6 +709,17 @@ def _registered_tools(config: ServeConfig) -> frozenset[str]:
         for s in config.mcp_servers
         if "update_dashboard" in s.allowed_tools
         for action in ("create_dashboard", "update_dashboard")
+    }
+    monitoring |= {
+        s.tool_id("propose_create_annotation")
+        for s in config.mcp_servers
+        if "create_annotation" in s.allowed_tools
+    }
+    monitoring |= {
+        s.tool_id(f"propose_{name}")
+        for s in config.mcp_servers
+        for name in ("create_datasource", "update_datasource")
+        if name in s.allowed_tools
     }
     monitoring |= {
         f"{sid}/get_action_status"
@@ -1131,9 +1172,13 @@ def _monitoring_catalog(
         if name in policies
     )
     d7_contracts, d7_policies = dashboard_catalog(config.mcp_servers, config.projection_bytes)
-    return (*contracts, *d7_contracts), (
+    c8_contracts, c8_policies = annotation_catalog(config.mcp_servers, config.projection_bytes)
+    ds_contracts, ds_policies = datasource_catalog(config.mcp_servers, config.projection_bytes)
+    return (*contracts, *d7_contracts, *c8_contracts, *ds_contracts), (
         *(policy for name, policy in policies.items() if name in selected),
         *d7_policies,
+        *c8_policies,
+        *ds_policies,
     )
 
 
@@ -1142,13 +1187,30 @@ def _app_config(config: ServeConfig) -> AppConfig:
         server.tool_id(name)
         for server in config.mcp_servers
         for name in server.allowed_tools
-        if server.allowed_tools[name] != "grafana.update_dashboard"
+        if server.allowed_tools[name]
+        not in {
+            "grafana.update_dashboard",
+            "grafana.create_annotation",
+            "grafana.create_datasource",
+            "grafana.update_datasource",
+        }
     ) | {source.tool_id(name) for source in config.alertmanager_sources for name in source.tools}
     monitoring |= {
         s.tool_id(f"propose_{action}")
         for s in config.mcp_servers
         if "update_dashboard" in s.allowed_tools
         for action in ("create_dashboard", "update_dashboard")
+    }
+    monitoring |= {
+        s.tool_id("propose_create_annotation")
+        for s in config.mcp_servers
+        if "create_annotation" in s.allowed_tools
+    }
+    monitoring |= {
+        s.tool_id(f"propose_{name}")
+        for s in config.mcp_servers
+        for name in ("create_datasource", "update_datasource")
+        if name in s.allowed_tools
     }
     monitoring |= {
         source.tool_id(f"propose_{name}")
@@ -1171,6 +1233,17 @@ def _app_config(config: ServeConfig) -> AppConfig:
         s.tool_id("update_dashboard")
         for s in config.mcp_servers
         if "update_dashboard" in s.allowed_tools
+    }
+    write_tools |= {
+        s.tool_id("create_annotation")
+        for s in config.mcp_servers
+        if "create_annotation" in s.allowed_tools
+    }
+    write_tools |= {
+        s.tool_id(name)
+        for s in config.mcp_servers
+        for name in ("create_datasource", "update_datasource")
+        if name in s.allowed_tools
     }
     audit = _registered_tools(config) - QUERY_TOOLS - monitoring - write_tools
     return AppConfig(
@@ -1510,6 +1583,16 @@ async def open_runtime(
                     ],
                     *(
                         dashboard_actions(mcp, config.mcp_servers, governance.catalog, clock=clock)
+                        if mcp
+                        else ()
+                    ),
+                    *(
+                        annotation_actions(mcp, config.mcp_servers, governance.catalog, clock=clock)
+                        if mcp
+                        else ()
+                    ),
+                    *(
+                        datasource_actions(mcp, config.mcp_servers, governance.catalog, clock=clock)
                         if mcp
                         else ()
                     ),
