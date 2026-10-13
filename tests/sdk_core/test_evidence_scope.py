@@ -39,14 +39,17 @@ from tests.sdk_core.synthetic_tools import Clock
 from tests.sdk_core.test_app import SEARCH_ALL, Scripts, cite, clarify, tool_call
 from tests.sdk_core.test_feishu import FakeChannel
 from tests.sdk_core.test_runtime import (
+    APP_ID,
     AUDIT_CONFIG,
     AUDIT_SOURCE,
     BUDGET_CONFIG,
     DB_ENV,
     FEISHU_ENV,
+    GROUP_SECTION,
     KEY_ENV,
     MODEL_ENV,
     PLAN,
+    TENANT,
     audit_record,
     cluster_config,
     feishu_config,
@@ -58,8 +61,11 @@ from tests.sdk_core.test_starrocks_tools import LAYOUT_COLUMNS
 
 from xiaowei import runtime
 from xiaowei.channel import (
+    AccessDeniedError,
+    GroupScope,
     InboundRequest,
     RequestRef,
+    RequestUnavailableError,
     ResultUnavailableError,
     ResultUnverifiableError,
 )
@@ -151,20 +157,24 @@ class Env:
     """按目标指定驱动；未指定的目标都连到 ``db``。"""
 
     def config(self, **overrides: Any) -> runtime.ServeConfig:
+        feishu = overrides.pop("feishu", feishu_config())
         return runtime.ServeConfig.model_validate(
-            serve_config(self.port, feishu=feishu_config(), **overrides)
+            serve_config(self.port, feishu=feishu, **overrides)
         )
 
     def connect(self, config: runtime.ServeConfig) -> dict[str, Driver]:
         return {t.target_id: self.drivers.get(t.target_id, self.db.drv) for t in config.targets}
 
     @asynccontextmanager
-    async def opened(self, config: runtime.ServeConfig) -> AsyncIterator[runtime.Runtime]:
+    async def opened(
+        self, config: runtime.ServeConfig, *, members: runtime.MemberCheck | None = None
+    ) -> AsyncIterator[runtime.Runtime]:
         async with runtime.open_runtime(
             config,
             clock=self.clock,
             model_transport=self.scripts.transport(),
             starrocks_connect=self.connect(config),
+            members=members,
         ) as rt:
             self.db.forget()  # 只统计启动之后的 I/O
             yield rt
@@ -387,10 +397,10 @@ async def test_unverifiable_access_at_the_end_of_a_turn_keeps_the_session(env: E
         assert await session_state(env) == "active"
 
 
-# ---- 视图：本轮首次交付可用；跨轮回放、历史读取与重发一律拒绝 -----------------------------------
+# ---- 视图：当前权限与依赖有效时，跨轮回放、历史读取与重发可用 -------------------------------
 
 
-async def test_view_facts_are_delivered_once_and_never_replayed(env: Env) -> None:
+async def test_view_facts_remain_readable_across_turns_history_and_resend(env: Env) -> None:
     config = env.config()
     async with env.opened(config) as rt:
         await saved(env, rt, "om_1", sql="SELECT region FROM v_sales")
@@ -400,17 +410,163 @@ async def test_view_facts_are_delivered_once_and_never_replayed(env: Env) -> Non
         assert delivery.evidence_ids and delivery.facts[0].rows[0]["region"] == "east"
 
         env.db.forget()
-        with pytest.raises(ResultUnavailableError) as history:
-            await rt.service.results.view(ref("om_1"))
-        assert not isinstance(history.value, ResultUnverifiableError)
+        history = await rt.service.results.view(ref("om_1"))
+        assert history.delivery is not None and history.delivery.content == delivery.content
         record, message = await followup(env, rt, "om_2")
-        assert (record.state, record.failure_code) == ("failed", "session_failed")
-        assert message not in env.scripts.calls
-        assert env.db.drv.attempts == 0  # 拒绝不依赖数据库：没有任何连接
+        assert record.state == "completed" and record.answer is not None
+        assert delivery.evidence_ids[0] in record.answer.evidence_ids
+        assert len(env.scripts.calls[message]) == 1
+        assert env.db.business() == []  # 追问只用已保存证据，不重跑业务查询
 
-    with pytest.raises(ResultUnavailableError):
-        await env.resend(config, "om_1")
-    assert env.db.drv.attempts == 0
+    env.db.forget()
+    result, sends = await env.resend(config, "om_1")
+    assert result == "sent" and len(sends) == 1
+    assert "east" in str(sends[0][1])
+    assert env.db.business() == []
+
+
+async def test_saved_view_dependency_with_replayable_false_needs_no_migration(env: Env) -> None:
+    config = env.config()
+    async with env.opened(config) as rt:
+        await saved(env, rt, "om_1", sql="SELECT region FROM v_sales")
+        # 直接写回已上线格式的 JSON，读取路径不能依赖新生成的 Python 对象。
+        raw = await env.scalar("SELECT dependencies FROM xiaowei_evidence")
+        body = json.loads(raw)
+        assert body["format"] == 1 and body["objects"][0]["replayable"] is False
+        async with open_engine(SecretStr(env.url.render_as_string(hide_password=False))) as e:
+            async with e.begin() as conn:
+                await conn.execute(
+                    text("UPDATE xiaowei_evidence SET dependencies = :d"),
+                    {"d": json.dumps(body, indent=2)},
+                )
+        assert (await rt.service.results.view(ref("om_1"))).delivery is not None
+        record, message = await followup(env, rt, "om_2")
+        assert record.state == "completed" and len(env.scripts.calls[message]) == 1
+
+
+@pytest.mark.parametrize("change", ["revoked", "dropped", "column_type", "unverifiable"])
+async def test_saved_view_still_requires_current_access_and_dependency(
+    env: Env, change: str
+) -> None:
+    config = env.config()
+    async with env.opened(config) as rt:
+        await saved(env, rt, "om_1", sql="SELECT region FROM v_sales")
+        if change == "revoked":
+            env.db.revoked = {VIEW}
+        elif change == "dropped":
+            env.db.overrides[probe_sql(*VIEW)] = ProgrammingError(1146, "view missing")
+        elif change == "column_type":
+            env.db.tables = {**TABLES, VIEW: (("region", "bigint", "YES", None),)}
+        else:
+            env.db.down = True
+        env.db.forget()
+        error = ResultUnverifiableError if change == "unverifiable" else ResultUnavailableError
+        with pytest.raises(error):
+            await rt.service.results.view(ref("om_1"))
+        record, message = await followup(env, rt, "om_2")
+        expected = "scope_unverifiable" if change == "unverifiable" else "session_failed"
+        assert (record.state, record.failure_code) == ("failed", expected)
+        assert message not in env.scripts.calls and env.db.business() == []
+
+
+async def test_view_redefinition_with_unchanged_read_columns_keeps_old_fact(env: Env) -> None:
+    config = env.config()
+    async with env.opened(config) as rt:
+        await saved(env, rt, "om_1", sql="SELECT region FROM v_sales")
+        # 模拟同名重建：当前视图查询结果改变，版本仍为 0，已读取列名/类型不变。
+        env.db.query = Result(("region",), [("west",)])
+        env.db.forget()
+        history = await rt.service.results.view(ref("om_1"))
+        assert history.delivery is not None
+        assert history.delivery.facts[0].rows[0]["region"] == "east"
+        assert env.db.business() == []
+
+
+async def test_group_view_fact_stays_with_authorized_group_members(env: Env) -> None:
+    group = GroupScope(app_id=APP_ID, tenant_key=TENANT, chat_id=GROUP_SECTION["chat_id"])
+    members = {"ou_alice", "ou_bob"}
+
+    async def is_member(chat_id: str, actor: str) -> bool:
+        return chat_id == group.chat_id and actor in members
+
+    async def group_turn(
+        rt: runtime.Runtime, message: str, request_id: str, actor: str
+    ) -> RequestRecord:
+        receipt = await rt.service.accept(
+            InboundRequest(
+                channel="feishu",
+                channel_request_id=request_id,
+                subject_id=actor,
+                conversation_id=group.chat_id,
+                mode="query",
+                message=message,
+                received_at=datetime.now(UTC),
+                group=group,
+            )
+        )
+        return await rt.service.process(receipt)
+
+    config = env.config(feishu=feishu_config(group=GROUP_SECTION, stop_timeout_seconds=7))
+    async with env.opened(config, members=is_member) as rt:
+        first = env.scripts.add(
+            "群看视图",
+            tool_call("run_readonly_query", cluster=SR.target_id, sql="SELECT region FROM v_sales"),
+            cite(),
+        )
+        done_a = await group_turn(rt, first, "om_a", "ou_alice")
+        assert done_a.state == "completed" and done_a.answer is not None
+        (view_evidence,) = done_a.answer.evidence_ids
+        env.db.forget()
+
+        second = env.scripts.add("群内追问", cite("接着看"))
+        done_b = await group_turn(rt, second, "om_b", "ou_bob")
+        assert done_b.state == "completed" and done_b.answer is not None
+        assert view_evidence in done_b.answer.evidence_ids
+        reader = RequestRef(
+            channel="feishu",
+            subject_id="ou_bob",
+            conversation_id=group.chat_id,
+            request_id="om_b",
+            group=group,
+        )
+        history = await rt.service.results.view(reader)
+        assert (
+            history.delivery is not None and history.delivery.facts[0].rows[0]["region"] == "east"
+        )
+        assert env.db.business() == []
+
+        other = GroupScope(app_id=APP_ID, tenant_key=TENANT, chat_id="oc_other")
+        with pytest.raises(AccessDeniedError):
+            await rt.service.results.view(
+                RequestRef(
+                    channel="feishu",
+                    subject_id="ou_bob",
+                    conversation_id=other.chat_id,
+                    request_id="om_b",
+                    group=other,
+                )
+            )
+        with pytest.raises(RequestUnavailableError):
+            await rt.service.results.view(
+                RequestRef(
+                    channel="web",
+                    subject_id="alice",
+                    conversation_id=group.chat_id,
+                    request_id="om_b",
+                )
+            )
+
+        members.remove("ou_bob")
+        env.db.forget()
+        with pytest.raises(AccessDeniedError):
+            await rt.service.results.view(reader)
+        assert env.db.drv.attempts == 0
+
+        members.add("ou_bob")
+        env.db.revoked = {VIEW}
+        with pytest.raises(ResultUnavailableError):
+            await rt.service.results.view(reader)
+        assert probe_sql(*VIEW) in env.db.probes()
 
 
 async def test_the_same_turn_may_cite_view_facts(env: Env) -> None:
@@ -552,8 +708,7 @@ async def test_missing_or_tampered_dependencies_are_definitely_unreadable(
 
 
 async def test_web_first_delivery_and_history_follow_the_same_rules(env: Env) -> None:
-    """正式 ``serve``（真实 Uvicorn）：视图事实只在提交响应中交付一次，之后读取 403，含它的会话
-    不能续轮；表事实在目标暂时不可达时读取 503（不是 403），恢复后再读成功。"""
+    """正式 ``serve``（真实 Uvicorn）：视图历史与续轮可读；目标暂不可达时读取 503。"""
     web = RuntimeEnv(env.url, free_port(), scripts=env.scripts, clock=env.clock, drv=env.db.drv)
     async with web.running(web.config()) as served:
         await served.page()
@@ -564,27 +719,22 @@ async def test_web_first_delivery_and_history_follow_the_same_rules(env: Env) ->
         )
         body = (await served.turn(view_message, "query", "r1")).json()
         assert body["state"] == "completed" and body["delivery"]["facts"]
-        assert (await served.client.get("/api/turns/r1")).status_code == 403
+        history = await served.client.get("/api/turns/r1")
+        assert history.status_code == 200 and history.json()["delivery"]["facts"]
 
         table_message = env.scripts.add(
             "网页看表",
             tool_call("run_readonly_query", cluster=SR.target_id, sql="SELECT region FROM sales"),
             cite(),
         )
-        # 同一会话的下一轮会回放这条视图事实：整段历史拒绝，要求新建会话（模型不被调用）。
-        refused = (await served.turn(table_message, "query", "r2")).json()
-        assert refused["state"] == "failed" and table_message not in env.scripts.calls
-        origin = {"origin": str(served.client.base_url).rstrip("/")}
-        assert (
-            await served.client.post("/api/sessions", json={}, headers=origin)
-        ).status_code == 200
-        assert (await served.turn(table_message, "query", "r3")).json()["state"] == "completed"
+        continued = (await served.turn(table_message, "query", "r2")).json()
+        assert continued["state"] == "completed" and len(env.scripts.calls[table_message]) == 2
         env.db.down = True
-        unverifiable = await served.client.get("/api/turns/r3")
+        unverifiable = await served.client.get("/api/turns/r2")
         assert unverifiable.status_code == 503
         assert "canary" not in unverifiable.text
         env.db.down = False
-        assert (await served.client.get("/api/turns/r3")).status_code == 200
+        assert (await served.client.get("/api/turns/r2")).status_code == 200
         assert await served.finish() == 0
 
 

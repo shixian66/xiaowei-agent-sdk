@@ -28,6 +28,7 @@ import asyncmy
 import pytest
 from asyncmy.cursors import SSCursor
 from asyncmy.errors import MySQLError
+from pydantic import SecretStr
 from tests.p1b.conftest import admin_address
 from tests.sdk_core.postgres_harness import (
     HarnessMisconfiguredError,
@@ -35,7 +36,18 @@ from tests.sdk_core.postgres_harness import (
     parse_admin_url,
 )
 from tests.sdk_core.synthetic_tools import Clock, Grants, ready_engine
+from tests.sdk_core.test_app import cite, tool_call
+from tests.sdk_core.test_runtime import (
+    DB_ENV,
+    KEY_ENV,
+    MODEL_ENV,
+    free_port,
+    serve_config,
+    target_config,
+)
+from tests.sdk_core.test_runtime import Env as RuntimeEnv
 
+from xiaowei import runtime
 from xiaowei.evidence import EvidenceStore, EvidenceUnavailableError
 from xiaowei.governance import (
     GovernedTools,
@@ -86,6 +98,7 @@ from xiaowei.starrocks_tools import (
     SHOW_CREATE_TABLE,
     starrocks_tools,
 )
+from xiaowei.storage import initialize_storage, open_engine
 
 pytestmark = pytest.mark.starrocks_real
 
@@ -1421,7 +1434,8 @@ async def test_evidence_dependencies_follow_current_grants_and_object_versions(
     instance: Instance,
 ) -> None:
     """证据依赖复核（P2.5 Task 2 审查修订）：只读账号读得到依赖的当前版本；未变化为 valid，撤权、
-    同名重建（重新授权后）为 invalid，别处加列仍 valid；视图依赖不可跨轮回放。
+    同名基表重建（重新授权后）为 invalid，别处加列仍 valid；视图依赖仍记录
+    ``replayable=false``，但历史读取不再因此拒绝。视图表 ID 为 0，不能发现同名重建。
 
     同时固定 4.1.4 的元数据事实：带 ``TABLE_SCHEMA`` 条件读取的 ``CREATE_TIME`` 不随会话时区，
     与结构快照的全表读取不同，因此版本不比较创建时间。"""
@@ -1486,6 +1500,79 @@ async def test_evidence_dependencies_follow_current_grants_and_object_versions(
     )
     assert await check("sr-real", [listed_dependency(db, "hidden")]) == "valid"
     assert await check("sr-real", [deps[1]]) == "invalid"
+
+
+async def test_web_replays_view_fact_after_same_column_redefinition(
+    instance: Instance, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """正式 Web + 脚本模型 + 隔离 PostgreSQL + 4.1.4：视图改定义后旧事实仍按采集时刻可读。"""
+    raw = os.environ.get("SDK_TEST_POSTGRES_URL")
+    if not raw:
+        pytest.fail("SDK_TEST_POSTGRES_URL 未设置：需要隔离测试 PostgreSQL")
+    try:
+        parse_admin_url(raw)
+    except HarnessMisconfiguredError as exc:
+        pytest.fail(f"SDK_TEST_POSTGRES_URL {exc}")
+
+    host, port, user = admin_address()
+    db, ro = instance.database, instance.ro_user
+    await admin(
+        host,
+        port,
+        user,
+        f"CREATE VIEW {db}.v_sales AS SELECT id, region FROM {db}.sales",
+        f"GRANT SELECT ON VIEW {db}.v_sales TO USER '{ro}'@'%'",
+    )
+    async with isolated_database() as url:
+        monkeypatch.setenv(DB_ENV, url.render_as_string(hide_password=False))
+        monkeypatch.setenv(KEY_ENV, "r1-real-web-test-key")
+        monkeypatch.setenv(MODEL_ENV, "sk-test-r1-real-web")
+        async with open_engine(SecretStr(url.render_as_string(hide_password=False))) as engine:
+            await initialize_storage(engine, digest_key=SecretStr("r1-real-web-test-key"))
+
+        web = RuntimeEnv(url, free_port())
+        config = runtime.ServeConfig.model_validate(
+            serve_config(
+                web.port,
+                targets=[target_config(target(instance).model_dump(mode="json"))],
+            )
+        )
+        first_message = web.scripts.add(
+            "查视图第一条",
+            tool_call(
+                "run_readonly_query",
+                cluster="sr-real",
+                sql=f"SELECT id, region FROM {db}.v_sales ORDER BY id LIMIT 1",
+            ),
+            cite(),
+        )
+        async with web.running(config, starrocks_connect=None) as served:
+            await served.page()
+            first = (await served.turn(first_message, "query", "r1")).json()
+            assert first["state"] == "completed"
+            assert first["delivery"]["facts"][0]["rows"][0]["id"] == 0
+
+            await admin(
+                host,
+                port,
+                user,
+                f"CREATE OR REPLACE VIEW {db}.v_sales AS "
+                f"SELECT id, region FROM {db}.sales WHERE id >= 10",
+                f"GRANT SELECT ON VIEW {db}.v_sales TO USER '{ro}'@'%'",
+            )
+            current = await admin_rows(
+                host, port, user, f"SELECT id FROM {db}.v_sales ORDER BY id LIMIT 1"
+            )
+            assert current == [(10,)]
+
+            history = await served.client.get("/api/turns/r1")
+            assert history.status_code == 200
+            assert history.json()["delivery"]["facts"][0]["rows"][0]["id"] == 0
+            follow = web.scripts.add("继续用第一条", cite("沿用第一条"))
+            second = (await served.turn(follow, "query", "r2")).json()
+            assert second["state"] == "completed" and len(web.scripts.calls[follow]) == 1
+            assert second["delivery"]["facts"][0]["rows"][0]["id"] == 0
+            assert await served.finish() == 0
 
 
 async def test_create_time_zone_depends_on_the_metadata_predicate(instance: Instance) -> None:

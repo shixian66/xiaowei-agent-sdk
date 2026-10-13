@@ -390,7 +390,7 @@ class PolicySession:
         return tuple(self._replayed)
 
     async def get_items(self, limit: int | None = None) -> list[TResponseInputItem]:
-        """回放：整段复核后返回已提交历史与本轮暂存项；达到上限或不可回放时拒绝。"""
+        """回放：整段按当前权限复核后返回已提交历史与本轮暂存项；超限或失效时拒绝。"""
         if limit is not None:
             # 按条数截断会拆开工具调用/结果配对；历史大小由 SessionLimits 约束。
             raise SessionError("会话历史不支持按条数截断")
