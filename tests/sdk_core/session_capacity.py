@@ -28,6 +28,7 @@ from tests.sdk_core.test_vertex_model import VERTEX
 from xiaowei import app as app_module
 from xiaowei import evidence as evidence_module
 from xiaowei import model_api
+from xiaowei.models import SessionSnapshot
 from xiaowei.runtime import ServeConfig
 from xiaowei.session import PolicySession
 
@@ -211,11 +212,11 @@ class CapacityRecorder:
                     )
                 return replay
 
-            async def commit_validated(self, *args: Any, **kwargs: Any) -> None:
+            async def commit_validated(self, *args: Any, **kwargs: Any) -> SessionSnapshot:
                 # Observe the already-required replay; don't call get_items again or probe evidence.
                 self.observing_commit = True
                 try:
-                    await super().commit_validated(*args, **kwargs)
+                    return await super().commit_validated(*args, **kwargs)
                 finally:
                     self.observing_commit = False
 

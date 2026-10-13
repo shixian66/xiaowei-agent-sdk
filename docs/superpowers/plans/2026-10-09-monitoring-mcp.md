@@ -2,31 +2,33 @@
 
 > 规划基线：`5b36375e6cf8f68d02125677e174122df6775277`（2026-10-09 读取的 `origin/main`）。本文件只规定切片、验证与阻断条件；产品范围、源授权、Action 和 Evidence 的唯一权威是 [ARCHITECTURE §5「监控接入」](../../../ARCHITECTURE.md#monitoring-mcp)，通用执行和数据规则仍引用该文其他章节。当前实现与运行证据只看 [handoff](../../../AGENT_HANDOFF.md)。本计划本身不代表功能代码、真实环境或用户验收已完成。
 
+> 2026-10-13 SDK 整改：方案及实验见 [§3.6](#sdk-reuse)。SDK-A/B 已随 PR #89/#93 离线合入；SDK-C 等价评估未发现可删除薄层，已随 PR #94 合入；D7 正在离线复验，C8 其后。
+
 ## 1. 接手事实与最小连接方式
 
 | 已有能力（源码事实） | 复用位置与仍需补的接点 |
 | --- | --- |
 | `mcp.py` 通过锁定 SDK 0.22.3 的 `MCPServerStreamableHttp` 发现/调用工具；只接受受治理映射和 JSON 对象结果 | 沿用连接、固定工具目录、调用前过滤；逐个锁版核对官方/社区工具的 schema、错误与结果，必要时只补选中工具的薄转换。不把 Server 对象直接挂给 Agent |
-| `governance.py` / `tools.py` 的 `ToolCatalog`、预算、参数与目标复核；`app.py` 的单 Agent、Runner 与最终 Evidence 校验 | 按监控源登记只读工具；只为可分类的监控只读失败增加有界续查，联动本轮 `started/produced` 与最终证据检查。选中写动作只给 Runner“提出”工具，实际写工具从不入其 Tool Scope；其余执行后错误仍中止 |
+| `governance.py` / `tools.py` 的 `ToolCatalog`、预算、参数与目标复核；`app.py` 的单 Agent、Runner 与最终 Evidence 校验 | 按监控源登记只读工具；只为可分类的监控只读失败增加有界续查，联动本轮 `started/produced` 与最终证据检查。现有 W5/S6 只有提出/status 入 Runner；SDK 整改按 §3.6 增加受审批的 Action ID 入口，底层写工具仍封闭；其余执行后错误仍中止 |
 | `runtime.py` 的 `StaticAccess`、`channel.py` 的交付复核；`evidence.py`、`session.py` 的数据/会话边界 | R1 已在正式 `serve` 装配 query；监控目标按现有 Grants 的工具许可取得，历史/重发本地复核。P2 沿用实际表达式与源/采集时间记录，新增范围参数与选中发现工具的最小投影，不另建授权表 |
 | `feishu.py` 的指定群 `chat_id`、真实 `sender_id`、成员检查、消息去重、群排队与共享会话 | 复用入站身份和回帖；另持久化待审批 Action、审批名单、执行状态。现有群队列不能充当等人确认的长事务；Web 的共用 `operator_id` 不能批准写动作 |
-| `PolicySession`、PostgreSQL 应用表、P3 备份/升级约定 | 对话继续使用 `PolicySession`；Action 提议与执行状态单独持久化到现有应用存储，批准执行不在 Runner 外写 SDK Session。下一轮经受治理只读工具查询 Action 状态并产生 Evidence，由正常 Runner 提交；当前 `get_items(limit)` 拒绝非空 `limit`，不把 RunState 恢复设为前提 |
+| `PolicySession`、PostgreSQL 应用表、P3 备份/升级约定 | 保留 PolicySession 和 SDK 存储；当前 `get_items(limit)` 拒绝非空 limit，SDK 原生审批的最小接续方式和实测限制见 §3.6。Action 仍保存确定材料与执行事实，状态查询不依赖恢复旧会话 |
 
-调用链：**Web/飞书读消息 → 当前身份与监控源授权 → 同一 Agent/Runner → 本轮允许的薄 FunctionTool/MCP 映射 → GovernedTools 在网络前复核 → SDK MCP Client / 必要的 Alertmanager API v2 薄 Adapter → 结果过滤与 Evidence → 最终校验 → 按渠道/接收者投影**。群内写申请只让 Runner 调用选中动作的“提出”工具：可信代码回读当前对象、形成并保存确定 Action、返回提议 Evidence；Runner 正常完成并引用它。应用按保存内容向群投递、等 `sent` 后才接受批准，随后以审批人的可信身份重新经 GovernedTools 执行实际写工具并回读；执行事实留应用表、代码生成结果反馈，下一轮由 Agent 按权限读取 Action 状态。批准消息不得被解释成自由文本工具调用。
+调用链：**Web/飞书读消息 → 当前身份与监控源授权 → 同一 Agent/Runner → 本轮允许的薄 FunctionTool/MCP 映射 → GovernedTools 在网络前复核 → SDK MCP Client / 必要的 Alertmanager API v2 薄 Adapter → 结果过滤与 Evidence → 最终校验 → 按渠道/接收者投影**。写申请继续由可信代码形成 Action；SDK 原生暂停/批准/恢复与独立事实回执按架构 §5 和本计划 §3.6 接续，不另建模型循环。
 
-最小新增仅为正式运行装配、三种监控源各自选中工具的契约与结果投影、源权限/Evidence、群待审批状态及首批选中 Action。不建指标模板引擎、PromQL 解析器、独立 Planner、Multi-Agent、通用插件/RBAC 平台、自研业务 MCP Server、RunState 恢复或后台续期任务。
+最小新增仅为正式运行装配、三种监控源各自选中工具的契约与结果投影、源权限/Evidence、群待审批状态及首批选中 Action。不建指标模板引擎、PromQL 解析器、独立 Planner、Multi-Agent、通用插件/RBAC 平台、自研业务 MCP Server或后台续期任务。
 
 ## 2. 各能力启用前必须定实的契约
 
 1. **工具与源。** 每项工具固定 `server_id / tool_name / target_id / effect / 风险 / 输入输出版本`，启动发现必须与锁版契约相符；调用时再核对源、参数、预算及当前身份。Prometheus 的 `reload`、`quit`、TSDB 管理和 Grafana/Alertmanager 未选写工具不入目录。Grafana Dashboard 内的数据源引用不能借共享 Grafana 凭据绕过 Prometheus/其他源授权。若上游一个工具同时可创建/覆盖，或先返回字段 schema、再执行创建，必须按实际参数分支确认副作用并绑定准确的 Action；不能以工具名推断安全。
 2. **认证与网络。** 监控 MCP Server 部署在小维节点之外，小维只建立可信配置中的固定出站连接，不在本机 Compose 中启动或维护 MCP 进程。公司可信内网的 HTTP 可用，不要求部署 CA/证书；已有 HTTPS 也可用，跨公网或不受控网络不使用本条 HTTP 取舍。R1 在现有 `MCPServerConfig` 中最小放开远端 HTTP 的校验，并保留固定端点、无跳转、预算与调用前治理；不增加 CA 管理或额外代理。代码无法仅凭 URL 判断是否属于可信内网，由操作者配置和现有网络访问控制落实这一范围。仅只读入口在网络已限定范围时可不配调用者认证；Grafana/Alertmanager 写入口必须验证调用者认证和远端选中工具限制，无认证则不开放写。Grafana MCP 的 `--server-auth-token` 对应小维已有 Bearer `auth_ref`；Alertmanager 社区 Server 不满足时改用带认证的薄 API v2 Adapter，直连原生 API 时支持目标的 HTTP Basic，用户名和密码取安全引用，不把现有 MCP Bearer `auth_ref` 当作 Basic。Prometheus 官方 HTTP MCP 会转发调用方的 `Authorization` 到 Prometheus；其可选 Web Basic Auth 与转发共用该头，G0 实测带头/不带头，不能假定两层身份隔离。在内网 HTTP 下认证头和业务内容均为明文。Grafana MCP 的使用统计在外部部署参数中显式关闭。
 3. **读结果与失败。** PromQL、时刻/范围/步长、源与采集时间由可信代码记录；成功证据只对应真实成功调用。Prometheus `warnings`、部分数据与截断须显式传给回答；Dashboard 定义不能冒充实时数据。只有上游 `errorType` 与响应可可靠判为语法/表达式错误时才允许 PromQL 有界修正，不能只凭模糊文本或单个通用错误码。选中只读工具的超时、不可达、上游 5xx 与可确认的上游 401/403 按固定类别交模型续查其他已授权源，计预算、无成功 Evidence、本源本轮不再调用；本地授权拒绝仍在 I/O 前完成。同步本轮执行记录和最终校验，由代码在交付时附失败源说明；历史与重发重新核对失败源当前授权。无成功证据时可给明显标为“未经数据验证”的排查建议，代码展示失败源，不作当前健康结论。分类不明、协议/投影/Evidence 失败及任何写失败仍中止。表达式内部窗口和高基数由 Prometheus 服务器限额兜底。
-4. **写状态。** Action 在现有 PostgreSQL 应用存储中保留待审批、已拒绝/过期、执行机会已占用、成功或结果未知等足以区分下一步的状态，具体枚举由开发切片确定。提议 Evidence 与最终回答校验失败时 Action 不可批准；群交付未处于 `sent` 也不可批准。执行机会参照现有投递 claim/实例锁机制做持久抢占，旧实例失去锁后不得执行。飞书重投、多人同时批准、进程重启和网络断开不能导致二次写。审批入口只依赖有效 Action/群身份和执行锁，不以群 Session 仍可提交为执行条件；执行与回读的可信事实以 Action 应用表为准，不在 Runner 外写 `SQLAlchemySession` 底表。下一轮的状态只读工具须按群、监控源和当前权限生成 Evidence，再经现有数据策略、历史上限和 Session 状态检查保存。每个动作的确认材料、回读与补偿按架构 §4/§5；无权审批、关键条件变动、冲突、未知结果在写请求前或执行后按相应状态终止。群确认只准对应本次 Action，不准“以后都同意”。
+4. **写状态。** Action 在现有 PostgreSQL 应用存储中保留待审批、已拒绝/过期、执行机会已占用、成功或结果未知等足以区分下一步的状态，具体枚举由开发切片确定。提议 Evidence 与最终回答校验失败时 Action 不可批准；群交付未处于 `sent` 也不可批准。执行机会参照现有投递 claim/实例锁机制做持久抢占，旧实例失去锁后不得执行。飞书重投、多人同时批准、进程重启和网络断开不能导致二次写。SDK 整改后原会话失效的拒绝、原子 claim、恢复绑定与执行事实回执按架构 §5；现有独立批准代码的替换见 §3.6。执行/回读事实以 Action 应用表为准，不直接写 `SQLAlchemySession` 底表。下一轮的状态只读工具须按群、监控源和当前权限生成 Evidence，再经现有数据策略、历史上限和 Session 状态检查保存。每个动作的确认材料、回读与补偿按架构 §4/§5；无权审批、关键条件变动、冲突、未知结果在写请求前或执行后按相应状态终止。群确认只准对应本次 Action，不准“以后都同意”。
 5. **数据与权限。** 源级共享许可不等于无边界：监控源由现有 AccessPolicy/StaticAccess 配置授权给人/群，批准名单从同一授权配置取得，不建第二套授权源；远端服务账号必须限制到同一 Grafana 组织和获准上游。历史按当前源、工具及接收权限本地复核，不依赖每个 Dashboard 的远端 ACL；Grafana 暂不可达不应使整个群 Session 无法回放。四种投影、Evidence 保留、Session/模型外发照现有 §9。数据源创建/修改不得接收或展示密码、Token、`secureJsonData`；创建后“待配置凭据”，由用户去 Grafana UI 填写。对 Grafana 数据源 URL/插件连接能力，必须核实远端网络出口，不能靠群确认代替服务端隔离。
 
 ## 3. 实施切片与验收
 
-**依赖顺序：G0 → R1 → P2；R1 后 G3、A4、W5 可按环境独立推进；S6 依赖 A4 + W5，D7/C8 依赖 G3 + W5，E9 汇总全部能力。** G0 只验证共用 MCP 接入的代表路径；各源和写动作的选中工具在自己的切片启用前验证，不让尚未开发的 Grafana/Alertmanager 工具阻塞 Prometheus 读取。Agent 调查时的工具选择与顺序按 [架构的自主调查约定](../../../ARCHITECTURE.md#monitoring-mcp)。每片以具体源码差异、适用的离线/真实证据和交接状态独立复审；不以后一片的通过覆盖前一片缺口。
+**已落地依赖：G0 → R1 → P2；R1 后 G3、A4、W5，S6 依赖 A4 + W5。当前优先顺序：D7 → C8，E9 汇总全部能力。** G0 只验证共用 MCP 接入的代表路径；各源和写动作的选中工具在自己的切片启用前验证，不让尚未开发的 Grafana/Alertmanager 工具阻塞 Prometheus 读取。Agent 调查时的工具选择与顺序按 [架构的自主调查约定](../../../ARCHITECTURE.md#monitoring-mcp)。每片以具体源码差异、适用的离线/真实证据和交接状态独立复审；不以后一片的通过覆盖前一片缺口。
 
 | 切片与可审阅结果 | 正常场景：用户操作 → 系统行为 → 用户所见 | 关键失败与验收证据 |
 | --- | --- | --- |
@@ -35,9 +37,9 @@
 | **P2 Prometheus 自主调查**：离线部分经独立复审随 PR #71 合入 `4cbb27a2`；真实模型/源门槛开放，详见 §3.1 与 handoff | 用户在 Web 或群问主机 CPU/内存/Kafka 状态 → Agent 自主发现并生成 PromQL，按源/时间查询 → 显示实际表达式、采集/求值时间、有限数值和推断 | 先核对选中工具的真实 schema、Prometheus `errorType`/错误内容与结果；仅可确定的语法/表达式错误允许有限修正，错误计预算无成功 Evidence，修正后真实成功才生成 Evidence。超时/不可达/上游 5xx/401/403 可标明该源未核实并续查其他已授权源；本源本轮不重试。未知/协议错误中止，本地无权调用零 I/O；全部读取失败可给明确未验证的排查建议，不报“健康”。warnings/截断及预算耗尽不报“健康”，越界时间/点数/长度零网络请求。真 SDK + 协议替身、获准真实 Prometheus 验服务端 timeout/max-samples/max-concurrency 与高基数失败；三源联合问题样例校准 `max_tool_calls/max_turns`，固定模型任务样例覆盖不同指标，不建指标白名单 |
 | **G3 Grafana 只读调查**：离线部分随 PR #72 合入 `8a7072d8`，首批五项与限制见 §3.2；真实模型/公司源门槛开放 | 用户在飞书问 Dashboard 面板含义 → Agent 按问题选工具，可读定义并独立调查获准 Prometheus → 分列显示定义和实时证据，只有可信对应关系才声称同源 | 首批只核约所需只读工具（Dashboard 搜索/读取、数据源元数据、Annotation 读取），这不是固定调用顺序或永久对象白名单；逐项核对 schema/结果。无源权限、当前读取失败、面板引用未授权数据源、版本/内容过大：拒绝读取或只报告定义且标明未查实时；历史回放/重发按当前源和接收权限本地复核，不为每个对象远端查 ACL。锁版真 Server + 合成/获准 Grafana 核对响应，禁止未授权代理查询 |
 | **A4 Alertmanager 只读调查**：六项 API v2 读取已随 PR #73 合入，接口/协议证据见 §3.3；真实模型/公司源门槛开放 | 群员问某告警是否被静默 → Agent 读独立 Alertmanager → 展示匹配依据、静默 ID/起止时间和采集时间 | 先核对候选 Server 的所选只读工具和 API v2；写入口若缺认证或远端工具限制，S6 改用经认证的薄 API v2 Adapter。目标不可达、分页未取完、静默已到期、权限撤销：不称“无告警/未静默”；只读调用不暴露写工具。取消静默的实际 API 行为留在 S6 验证 |
-| **W5 群审批底座**：离线底座已随 PR #74 合入；取消恢复增量随 PR #76 离线合入（§3.4），仅为已选监控动作持久化候选 Action 与批准状态 | 当前群成员申请具体动作 → Runner 调用受治理“提出”工具，可信代码回读对象/版本、规范化参数、生成差异与 Action/提议 Evidence，Runner 正常结束并引用证据；应用按已存内容交付群且记录 `sent` → 仍在群内的名单成员 @ 机器人逐次批准 → 应用绑定批准并进入可执行状态；批准后群收到代码生成的执行反馈，追问时 Agent 用只读工具查询 Action 状态 | 提议 Evidence/最终校验/群发送失败、Web/单聊/其他群、退群/非名单、伪造 open_id、过期、撤权、参数/目标变更、重复或并发事件：远端写 I/O 为零；审批入口确定性解析并去重，不进模型。真实 PostgreSQL + 真 SDK + 飞书事件替身验证提议工具调用/结果成对进入 Session，旧实例失锁后不能抢执行机会、同群执行与 Agent 轮次串行、重启后不自动补写；审批人身份的仅此写工具 Tool Scope 经 GovernedTools 和已有 MCPIntegration/Adapter 执行，结果以应用 Action 表为准。状态只读工具验证群/源/Action 归属与当前权限，生成 Evidence 并由下一轮正常提交；Session 已满、关闭或保存失败时执行事实仍保留、不重复写，用户新建会话凭 Action ID 仍可获准查询；群队列不因等待审批而阻塞 |
-| **S6 Alertmanager 静默写闭环**：已随 PR #79 离线合入，真实环境待验收；接口与限制见 §3.5 | 群员申请覆盖某告警 1 年/3 年/明确到期的自定义时长 → 应用在群审批材料中列出匹配器当前命中的告警数量和有界样例（无法完整计数则明示） → 有权成员批准 → 创建并回读，群显示实际起止时间；取消某静默 ID 经另一次批准后回读提前结束状态 | 先核对所选 Server/API 的创建、更新和按 ID 取消分支。匹配器意外扩大、结束早于开始、取消了错误 ID、审批失效、重复回调、上游超时/结果未知：拒绝或待核实，不自动重发；取消前展示并核对 ID、当前匹配器与影响，已到期不谎报“刚取消”。走薄 API v2 Adapter 时按目标 Web 配置验证 Basic 用户名/密码的安全引用、无/错凭据零写入及正确凭据仅执行批准动作；现有 MCP `auth_ref` 只发 Bearer，不当作 Basic。社区 MCP 若不能隔离选中工具则用经认证的 API v2 Adapter。隔离 Alertmanager 实跑创建/取消、读回状态及告警抑制；路由与时间决定是否发后续通知 |
-| **D7 Grafana Dashboard 写闭环**：两项取舍已确认；经典创建与修改离线已实现，待用户指定独立审查 | 群员申请创建/修改 Dashboard → 群显示目标、完整结构化差异、版本和恢复方式；批准后提交并回读 → 看见 UID/版本及结果 | 先核对锁版 Server 的创建/覆盖参数分支、`--disable-write` / `--enable-write-tools` 的实际注册结果与返回；未选写工具用正确凭据直调仍不存在或拒绝，无/错凭据零写入。外部先改版本、上游写后读失败、内容超限、越权文件夹/组织、重复批准：冲突拒绝或结果未知，不覆盖新版本、不自动重写。更新可通过新一次获批准的更新恢复前版；创建若需删除，首批由 Grafana 管理员按 UID 人工恢复。隔离 Grafana 实跑、版本冲突与备份证据 |
+| **W5 群审批底座**：离线底座已随 PR #74 合入；取消恢复增量随 PR #76 离线合入（§3.4），仅为已选监控动作持久化候选 Action 与批准状态 | 当前群成员申请具体动作 → Runner 调用受治理“提出”工具，可信代码回读对象/版本、规范化参数、生成差异与 Action/提议 Evidence，Runner 正常结束并引用证据；应用按已存内容交付群且记录 `sent` → 仍在群内的名单成员 @ 机器人逐次批准 → 应用绑定批准并进入可执行状态；批准后群收到代码生成的执行反馈，追问时 Agent 用只读工具查询 Action 状态 | 提议 Evidence/最终校验/群发送失败、Web/单聊/其他群、退群/非名单、伪造 open_id、过期、撤权、参数/目标变更、重复或并发事件：远端写 I/O 为零；审批入口确定性解析并去重，不进模型。真实 PostgreSQL + 真 SDK + 飞书事件替身验证提议工具调用/结果成对进入 Session，旧实例失锁后不能抢执行机会、同群执行与 Agent 轮次串行、重启后不自动补写；审批人身份的仅此写工具 Tool Scope 经 GovernedTools 和已有 MCPIntegration/Adapter 执行，结果以应用 Action 表为准。状态只读工具验证群/源/Action 归属与当前权限，生成 Evidence 并由下一轮正常提交；SDK-A 补原会话失效时未执行候选原子拒绝；已开始的执行事实不因 Session 已满、关闭或保存失败丢失/重放，新会话凭 Action ID 可获准查询；群队列不因等待审批而阻塞 |
+| **S6 Alertmanager 静默写闭环**：已随 PR #79 离线合入；接口与限制见 §3.5，审批接续将按 §3.6整改 | 群员申请覆盖某告警 1 年/3 年/明确到期的自定义时长 → 应用在群审批材料中列出匹配器当前命中的告警数量和有界样例（无法完整计数则明示） → 有权成员批准 → 创建并回读，群显示实际起止时间；取消某静默 ID 经另一次批准后回读提前结束状态 | 先核对所选 Server/API 的创建、更新和按 ID 取消分支。匹配器意外扩大、结束早于开始、取消了错误 ID、审批失效、重复回调、上游超时/结果未知：拒绝或待核实，不自动重发；取消前展示并核对 ID、当前匹配器与影响，已到期不谎报“刚取消”。走薄 API v2 Adapter 时按目标 Web 配置验证 Basic 用户名/密码的安全引用、无/错凭据零写入及正确凭据仅执行批准动作；现有 MCP `auth_ref` 只发 Bearer，不当作 Basic。社区 MCP 若不能隔离选中工具则用经认证的 API v2 Adapter。隔离 Alertmanager 实跑创建/取消、读回状态及告警抑制；路由与时间决定是否发后续通知 |
+| **D7 Grafana Dashboard 写闭环**：经典创建与修改离线候选，待精确 head 独立审查；接口见 §3.7 | 群员申请创建/修改 Dashboard → 群显示目标、完整结构化差异、版本和恢复方式；批准后提交并回读 → 看见 UID/版本及结果 | 先核对锁版 Server 的创建/覆盖参数分支、`--disable-write` / `--enable-write-tools` 的实际注册结果与返回；未选写工具用正确凭据直调仍不存在或拒绝，无/错凭据零写入。外部先改版本、上游写后读失败、内容超限、越权文件夹/组织、重复批准：冲突拒绝或结果未知，不覆盖新版本、不自动重写。更新可通过新一次获批准的更新恢复前版；创建若需删除，首批由 Grafana 管理员按 UID 人工恢复。隔离 Grafana 实跑、版本冲突与备份证据；另用真 SDK/群网关验证已开始写请求后工具内部取消：Action 为 unknown、远端零重放、群回执明确先核对实际状态，不把 SDK 的可重试工具结果解释为写入成功 |
 | **C8 Grafana 数据源与 Annotation 写闭环**：两类能力可分别启用/验收 | 群员申请创建/修改非秘密数据源或新增 Annotation → 群显示精确字段/URL/对象和影响，批准后回读 → 数据源需密码时显示“待配置凭据”和 Grafana 设置入口，Annotation 显示 ID | 先核对数据源建前 schema/实际写入和 Annotation 工具的参数分支，确认选中写工具以外的操作不能用正确凭据直调；无/错凭据零写入。secret/未知字段、URL 带凭据、Grafana 出口可达未授权内网、错误插件类型、Annotation 重复/时间错误：拒绝、隔离或结果未知；健康检查前数据源不称可用。更新旧数据源可经另一次获批准的更新恢复；新建数据源/Annotation 需删除时由 Grafana 管理员人工恢复。隔离 Grafana/受控出口实跑、无凭据泄漏检查，逐能力开关 |
 | **E9 真实入口与运维验收**：一版可试用的监控报告及群审批 | 用户从 Web/飞书调查主机及关联告警 → Agent 按问题选择监控源，联合调查样例覆盖三源并给带实际 PromQL 的报告；群成员提出首批写 → 名单成员批准 → 回读结果与群反馈 | 真实模型、真实三源、指定群、撤权、重复飞书事件、超时/中断/重启、协议变化、版本回退、历史复核和隔离库恢复分别留证；三源联合样例校准预算，任一读源 5xx 后仍能报告已有证据和未核实部分，预算耗尽提示不完整；审批申请人可自批的用例单列。未取得真实环境或用户验收时只标离线完成 |
 
@@ -132,7 +134,7 @@ PR #70 的三个非阻断项在本片同一失败契约中落实：并行成功/
 3. 验各项输入、状态语义、空页/多页/大量分组、过期静默与同源 ID；Basic、固定端点/跳转、总时限/超限/协议漂移、局部故障换源与本源零重试、正常关闭/取消；历史/重发/回放撤权零业务 I/O、跨源/会话引用拒绝，旧配置/证据兼容。官方 API 经正式工具链读取，不只 HTTP helper；Chrome Web 与指定群事件替身各验成功/拒绝。
 4. MCP/P2/G3/治理/Session 回归与 Ruff/mypy/doc checks，具体差异独立复审后提交/推送/开 PR，不合并、不部署。真实模型业务样例至少包括上述三问、含糊告警/多源的必要澄清及源部分故障，评估选择/取证/事实/调用数/耗时/用量，不固定顺序。当前用户批准暂只离线，真实模型、公司 Alertmanager 版本/认证/容量/HA与双入口通知行为仍开放；写审批、创建/取消静默归 W5/S6。
 
-### 3.4 W5 当前切片（基线 `2b541a30bb39d88d160e7f6f69de1c81fdea74d8`）
+### 3.4 W5 已合入切片（SDK整改见 §3.6；原基线 `2b541a30bb39d88d160e7f6f69de1c81fdea74d8`）
 
 **本片结果。** A4 已随 PR #73 合入。群成员提出动作 → 单 Agent 可自主调查并调用“提出”工具 → 代码生成并保存参数、对象版本、差异、影响、恢复办法及批准期限，正常 Evidence/Session/最终回答交付；有权成员在同群 `@小维 /批准 <Action ID>` → 应用复核并占用一次执行机会 → 群收到代码生成的状态。只用合成动作验证底座，真实 S6/D7/C8 工具仍各自核约后开放；不要求固定调查顺序，也不引入 RunState 或另一套 Agent Loop。
 
@@ -140,17 +142,17 @@ PR #70 的三个非阻断项在本片同一失败契约中落实：并行成功/
 
 **存储与执行。** 复用 ChannelStore、实例锁 `_admit`、请求去重/投递状态和同群 FIFO；新增一张应用 Action 表并显式迁移，不写 SDK Session 底表。Action 只有在对应提议 Evidence 仍有效、有效最终回答已保存且原群请求投递为 `sent` 时才可批准。批准有效期为代码常量15分钟，且不超过原请求/证据保留期；静默的1年/3年时长不受此批准期限影响。批准绑定源配置/执行语义的可信摘要及工具契约；源绑定变化直接拒绝。写前按已批准的实际参数回读同一对象，比较当前版本/参数/差异/影响/恢复办法；不重新计算相对时间或默认值，变化须重新提出。原子占用绑定审批人与尝试标识，回读后、写前复核实例所有权及批准/保留期限，正好到期也拒绝；开始执行后失败/取消/结果不明均不自动重放，重启只把遗留执行记为未知。执行事实先存 Action 表，反馈或 Session 保存失败不能丢失事实或再执行。
 
-**交付与后续上下文。** 审批命令确定性解析并复用原请求队列，不进入模型；等待审批不占队列。审批材料必须完整投递，容量提示不能算已送达动作。执行后由受治理只读 Action 状态生成反馈 Evidence；下一轮 Agent 可按需查询状态并正常提交 PolicySession。已满/关闭的 Session 不阻止有效动作批准；新建群会话后可按 ID 查询，始终复核群/源/当前权限。批准失败回执以已保存的 Action 事实区分：成功但反馈未保存/未通过校验时明确“已执行”，按原批准消息中的 Action ID 查状态，不重复批准或重新提出；结果未知时先人工核对远端，不自动重试或再次批准；写前终止明确“未执行”，核对当前条件后重新提出。占用前的动作资格拒绝只说明本次批准未执行及可能原因，不把过期、未送达或已处理误说成身份验证失败；真实入口身份拒绝仍沿用权限回执。整轮超时后按当前可信群归属回读同一 Action：succeeded→action_feedback_failed，executing/unknown→action_unknown，rejected→action_rejected，pending/查不到→action_not_approvable，回读失败→action_unknown；不据局部执行标记推断结果，不补跑动作。取消/超时后的局部落定与关键状态失败的全局停止边界以[架构 §5](../../../ARCHITECTURE.md#monitoring-mcp)为准。固定回执不含原始异常、动作参数或受限结果，实际执行内容仍须通过 Evidence 校验；失败码加入尚未发布的007请求 CHECK，不新增迁移。
+**交付与后续上下文。** 审批命令确定性解析并复用原请求队列，不进入模型；等待审批不占队列。审批材料必须完整投递，容量提示不能算已送达动作。执行后由受治理只读 Action 状态生成反馈 Evidence；下一轮 Agent 可按需查询状态并正常提交 PolicySession。原实现允许已满/关闭的 Session 批准，SDK-A 将按架构 §5 改为未执行候选作废；已开始写入事实仍保留，新建群会话后可按 ID 查询，始终复核群/源/当前权限。批准失败回执以已保存的 Action 事实区分：成功但反馈未保存/未通过校验时明确“已执行”，按原批准消息中的 Action ID 查状态，不重复批准或重新提出；结果未知时先人工核对远端，不自动重试或再次批准；写前终止明确“未执行”，核对当前条件后重新提出。占用前的动作资格拒绝只说明本次批准未执行及可能原因，不把过期、未送达或已处理误说成身份验证失败；真实入口身份拒绝仍沿用权限回执。整轮超时后按当前可信群归属回读同一 Action：succeeded→action_feedback_failed，executing/unknown→action_unknown，rejected→action_rejected，pending/查不到→action_not_approvable，回读失败→action_unknown；不据局部执行标记推断结果，不补跑动作。取消/超时后的局部落定与关键状态失败的全局停止边界以[架构 §5](../../../ARCHITECTURE.md#monitoring-mcp)为准。固定回执不含原始异常、动作参数或受限结果，实际执行内容仍须通过 Evidence 校验；失败码加入尚未发布的007请求 CHECK，不新增迁移。
 
 **验收顺序。** 先验证命令不调用模型的失败回归；随后真 SDK/隔离 PostgreSQL/群事件与合成 Adapter 完成提出→送达→批准→执行→状态追问。覆盖未送达/无有效证据/未引用、跨群或入口、审批人退群/无权/撤权、过期/版本或参数变更、重复/并发、旧实例失锁、重启未知、写后反馈失败及满/关闭 Session；拒绝断言零写 I/O。正式 serve 的群渠道用已批准协议替身验证成功与拒绝，离线不证明真实模型、飞书或监控写接口。回归群队列、Evidence/Session、存储迁移、MCP/A4 与 Ruff/mypy/doc checks；精确提交独立审查后交付，不合并、不部署。
 
 **取消恢复增量（基线 `3530a4d1bd358011a7b45982512f3a8f876eef4c`）。** 用户已批准普通审批中断可靠落定后继续只读调查，当前仅复用 ActionService/ChannelService 和现有应用表、实例锁、失败回执；不增加后台任务、配置、迁移或正式监控写工具。真 PostgreSQL 与 SDK 验证占用前取消、写前终止、写后未知、成功后反馈中断各自的 Action/请求状态、固定群回执、零新增写、Session 不被额外写入及下一轮读取；用远端仍执行的合成场景证明客户端取消不被当作远端撤销。关键存储失败、收尾期限/再次取消和实例失锁须继续停止接活，已落定状态重启后不覆写、不重放。正式 `serve` 用群事件/写接口替身覆盖成功、拒绝与期限后恢复，随即从真实 Web 查询并核对 Evidence 与 `/readyz`；任务能力和真实写环境门槛仍开放。已独立复审，随 PR #76 合入 `c7e1e40c346fcd488dbd0dfd3af2e36377e2ee66`，未部署。接管测试隔离与群网关占用前/反馈阶段超时验收由后续测试修复补齐，当前证据见 handoff；不改上述产品契约。
 
-### 3.5 S6 当前切片（基线 `b0174d273bce89b49bfbba82fedf86bb6a14c66b`）
+### 3.5 S6 已合入切片（SDK整改见 §3.6；原基线 `b0174d273bce89b49bfbba82fedf86bb6a14c66b`）
 
 **任务与复用。** 群员要求“静默 host1 三年”或“提前结束这个静默 ID” → Agent 自主调查、必要时澄清准确匹配范围/到期时间，调用提出工具 → A4 的经认证 API v2 Adapter 只读准备材料 → W5 保存/交付 Action，名单成员批准后按原治理链执行/回读。不新增 MCP Server、审批表、后台任务或固定调查步骤；Web/单聊仅调查。只做离线开发，真实模型、真实群和公司 Alertmanager 的写权限、版本、容量/HA、通知行为仍须单独验收。
 
-**接口与配置。** `alertmanager_sources` 可选 `write_actions`（默认空），只接受 `create_silence`、`cancel_silence`；启用写动作必须有成对 Basic 安全引用。对应提出工具为 `propose_create_silence`/`propose_cancel_silence`，沿现有群共享 tools、data_policy 与 Grants；实际写工具仅授给名单审批人，永不进 Runner。创建输入：显式 `matchers[{name,value,isRegex,isEqual}]`、`starts_at`、`ends_at`、`comment`；不接受 ID、作者、URL 或未知字段。取消输入仅 `silence_id` UUID。时间须带时区，规范化为 UTC 毫秒精度；起止有序、结束未到，不设多年时长上限。审批期限仍为 W5 的15分钟。
+**接口与配置。** `alertmanager_sources` 可选 `write_actions`（默认空），只接受 `create_silence`、`cancel_silence`；启用写动作必须有成对 Basic 安全引用。对应提出工具为 `propose_create_silence`/`propose_cancel_silence`，沿现有群共享 tools、data_policy 与 Grants；现有实际写工具仅授给名单审批人；SDK-A 按 §3.6增加 Action ID 审批入口，底层写工具仍由治理服务封闭。创建输入：显式 `matchers[{name,value,isRegex,isEqual}]`、`starts_at`、`ends_at`、`comment`；不接受 ID、作者、URL 或未知字段。取消输入仅 `silence_id` UUID。时间须带时区，规范化为 UTC 毫秒精度；起止有序、结束未到，不设多年时长上限。审批期限仍为 W5 的15分钟。
 
 **准备、执行与失败。** 创建材料由完整过滤 GET `/api/v2/alerts` 得出当前匹配数量与最多5个标签/指纹样例；响应超限时明确数量未知、不提供虚构样例，仍展示准确匹配器与完整期限，不把 API 的响应上限说成上游分页。取消回读同一 UUID 的匹配器、状态、时间、updatedAt 和当前影响；已到期不提出“刚取消”。W5 写前重读并比对批准材料，变化须重新提出。创建 POST `/api/v2/silences` 始终省略 id/annotations，createdBy 固定 `xiaowei`，不开放更新分支；取消仅 DELETE `/api/v2/silence/{id}`，是提前结束、保留记录。过去 startsAt 由上游归到执行时刻，材料说明这项锁版行为；若回读开始时间被调整，须为 active 且不晚于同源 updatedAt，未来请求则须保持批准值，不依赖新增客户端钟差配置。endsAt 不重新计算，成功结果展示实际回读时间。创建 POST 返回400按用户批准记 rejected，固定回执提示核对/修改匹配器后重新提出；其他写后非200、超时、协议/回读不符仍沿 W5 记未知，不重试。正则由提出阶段的上游过滤400判定，不新增本地正则依赖；工具说明至少一个匹配器不匹配空串，纯否定匹配器不额外拒绝。只读准备失败不给成功提案证据；明确的提出拒绝及批准复核边界见[架构 §5](../../../ARCHITECTURE.md#monitoring-mcp)。API 无原子版本条件，写前检查不能消除最后一段竞争或 HA传播窗口，生产启用前须核对并明确接受该残余风险。
 
@@ -158,23 +160,77 @@ PR #70 的三个非阻断项在本片同一失败契约中落实：并行成功/
 
 **独立验证顺序。** ①锁版官方 `v0.34.1` 验证 Basic 无/错认证零写入、创建1年/3年、POST更新分支、active/pending 的提前结束与记录保留。②正式 serve/群事件替身、真 SDK/PostgreSQL 跑创建→拒绝非名单→批准→回读→另次取消→状态追问；正式 Web 强行提出/写调用零远端 I/O。③参数/身份/来源/材料变化、失效/重复/并发批准、HTTP错误/写后读失败/未知、不重放、关闭/取消、历史撤权等回归，关键保护做隔离变异；保持 A4/W5/MCP/Session 兼容。④完整新产品离线检查、Ruff/mypy/doc checks，精确提交独立审查；真实 Agent 的工具选择、必要澄清与证据/时长质量保持验证缺口，不把脚本模型当能力验收。
 
-### 3.6 D7 当前切片（基线 `0b136bb711dbfb41e8a82a7265008fad332c5526`，两项取舍已确认）
+<a id="sdk-reuse"></a>
 
-**本片结果。** 指定群提出经典 Dashboard 创建/修改 → 代码展示完整差异、真实保存版本和恢复办法 → 有权群成员逐次批准后经原治理/MCP执行并回读；下一轮可按需查 Action 状态。先完成下述协议门槛，再复用现有 W5 实现；不要求固定调查顺序。
+### 3.6 SDK 原生能力复用整改（SDK-A/B 已离线合入，SDK-C 评估已合入）
 
-**前置协议证据。**SDK 0.22.3 / mcp 2.2.0、官方 Grafana MCP v2.0.2 的锁版与 G3 相同；选中 schema 固化在 `tests/sdk_core/grafana_d7_schemas.json`，公开客户端实验与断言在 `test_grafana_d7_protocol.py`。隔离 Grafana 13.2.3 镜像固定到官方 MCP 项目 Compose 的 digest `b28bae15e219c998fb0e0424ed724930cc61b1f61fb404d47c862f9a23f9e572`。这是本机协议证据，不是公司版本兼容、正式群审批或 Agent 能力验收。
+**当前交付与基线。** 2026-10-12 从主线 `ebb4db3c4738134ef7371f076e0662ac3c0c741d`（PR #82）建立隔离分支 `codex/sdk-reuse-plan`。方案/实验阶段仅改必要文档和 `tests/spike/`，未改产品源码、迁移或依赖。`ccc7e27` 已独立复审关闭 B1，补齐用户批准的 N1 后进入 SDK-A；SDK-A 已随 PR #89 离线合入 `6e516c7`，E6 随 PR #91 合入 `89521cd`；SDK-B 随 PR #93、SDK-C 随 PR #94 离线合入，未部署。D7 草稿 PR #83 在 SDK-A/B/C 合入后从新主线续做；C8 仍暂停。本节替代上文 W5/S6 的“不恢复 RunState”与“原会话关闭仍可批准”实施前提，批准范围和唯一执行契约见[架构 §5](../../../ARCHITECTURE.md#monitoring-mcp)。
 
-**实际发现与已确认取舍。**
+**用户任务与最小方案。** 群员要求“静默 host1 三年” → 同一 Agent 自主调查、必要澄清、形成确定 Action 并调用 SDK 审批入口 → 群收到代码生成的完整材料和批准期限；名单成员批准 → SDK 恢复原任务，经原治理层执行一次并回读 → 群看到实际执行事实。读源、指标、工具顺序、PromQL、补证与是否需要写继续由 Agent 决定；因果所需的准备/送达/批准/复核约束执行权，不固定调查步骤。
 
-- `--disable-write --enable-write-tools=update_dashboard` 没有注册 Dashboard 写；锁版的 override 只参与部分查询工具，不参与 Dashboard 注册。仅启用 `search,dashboard`、不加 `--disable-write`，实际唯一写工具为 `update_dashboard`，其他数据源、Annotation、文件夹写及通用 API 不存在；正确调用者凭据直调这些工具仍返回 -32602，零工具上游 I/O。无/错凭据为401、零上游 I/O。合法 MCP 初始化会读取同源 frontend settings，不能误算为被拒绝工具的请求。[锁版注册逻辑](https://github.com/grafana/mcp-grafana/blob/v2.0.2/cmd/mcp-grafana/main.go)
-- 用户已确认写端单独使用 Dashboard/search 类别，原 G3 只读端保留其他读取；不放出未选写工具。产品契约唯一维护在 ARCHITECTURE §5 的 D7 段。
-- 经典 `panels[]` 完整 JSON、准确版本和 `overwrite=false` 已实测创建、更新与陈旧版本409拒绝；陈旧提交之后远端版本/标题不变。patch 分支自行读取当前对象并强制覆盖，不使用它来落实批准版本。[锁版 Dashboard 实现](https://github.com/grafana/mcp-grafana/blob/v2.0.2/tools/dashboard.go)
-- Grafana 13.2.3 的当前读取不返回版本；`list_dashboard_versions(uid, limit=1)` 配合 `get_dashboard_by_uid(uid, version=N)` 可获得真实保存版本/定义。版本只能由可信代码取证，不能取客户端时钟、模型猜测或把当前结果当带版本的备份。指定版本回读还需结合当前对象的文件夹/组织信息，不能从历史接口猜文件夹。
-- 原生 v2 完整 JSON 更新在 MCP 内重新读取最新版，再替换定义；实测“保存版本1 → 外部改为版本2 → 提交旧定义”仍成功保存为版本3，覆盖新定义。公开工具没有期望 resourceVersion 参数，无法绑定批准版本。用户已确认首版经典格式可写、原生v2只读，不增加直连写客户端绕过 MCP。
+| 原有机制 | 整改接点与保留理由 |
+| --- | --- |
+| `ActionBinding / ActionService` 提出、材料与状态读取 | 保留确定参数、差异和提议 Evidence；新增仅接受 Action ID 的 SDK 审批执行入口。拆出可复用的业务执行/事实反馈，删除被 SDK 等价替代的独立批准编排；不把现有 `approve()` 原封不动套入 Runner 后宣称完成 |
+| `ChannelService / ChannelStore / StaticAccess` | 入口确定性核对群/名单/送达；现有应用存储保存服务端 RunState、调用绑定和恢复版本，原请求记录 SDK 暂停事实并释放运行占用，不伪造已完成回答。沿现有实例准入/事务原子占用，执行前再次核对；不新增授权表、审批服务或后台任务 |
+| `GovernedTools / Evidence / PolicySession` | 保留权限、Action Binding、版本、资源、四种投影与真实性。恢复前复核完整历史/已见 Evidence；末尾经同一 PolicySession 保存配对项。SDK 护栏不能代替执行治理或历史读取校验 |
+| `MCPIntegration` | 每个新连接代际采用新的 SDK Server 与 `MCPServerManager` 管连接/关闭；保留现有源状态、锁、2→60秒退避、核约、不可变快照、固定 transport 和不重放。不对已发布 Server 就地 `reconnect()` |
+| 工具错误回传和 Session 包装 | 先逐项对比锁版公开能力；只缩减传输/编排胶水。尚无证据表明通用 guardrail、默认 error-as-result 或裸 SQLAlchemySession 可替代领域失败分类、Evidence 与四种数据边界 |
 
-**实现接点。** 复用 W5 的 ActionBinding/ActionPlan、确定性批准入口、同一 StaticAccess、群串行和存储状态；复用 MCPIntegration 已核约连接与执行函数，在现有治理 invoke 内执行，不另建客户端、注册表或后台任务。真实写从不进 Runner Tool Scope。可信代码准备完整结构化差异、当前版本与恢复材料，批准后再回读比较，版本冲突拒绝；其他不能证明未执行的写失败按 unknown、不重放。参数必须显式绑定完整 JSON、folderUid、message 和 overwrite=false；省略的 uid/operations/userId 只采用锁版完整 JSON 分支的空/无/0默认值，不接受模型切换 patch、覆盖或执行身份。本地参数以有界 dashboard_json 文本承载开放 JSON；选中三工具用锁版 schema 摘要核约并作明确转换，保留现有类型与参数检查。创建/修改分别提出，共用一个实际写工具；没有新增配置层，写端选配 update_dashboard 即登记两项提出动作。JSON 16KB、完整材料和四种投影沿用 Action 容量约束；版本0只用于本地当前读取，线协议省略版本，正整数才发送保存版本。失败分类和产品边界以 ARCHITECTURE §5 为准。
+**恢复接口必须落实的契约。** 服务端恢复记录只保存完成任务必需的、已允许发模型的快照，以及可信归属/版本、Action↔SDK调用绑定、已见 Evidence 和预算元数据；不保存凭据、连接、未投影结果或 tracing key。使用公开 `to_string/from_string` 与严格 context 序列化，原轮 context 由保存记录重建并复核原发起人当前权限；发起人退群或因撤权导致历史 Evidence 不可读时按架构 §5 的 action_requester_invalid 拒绝，零写、零模型 I/O；审批人/新审批事件仅形成单次 approved_action，不信任快照里的旧许可。模型/端点/Profile、数据策略、SDK/工具契约或 Action 关键事实不匹配则不执行，提示重新提出。快照保持有界并按审批期限与既有保留/清理规则回收；正式切片实测合法最长历史与供应商签名容量，不随意增加用户配置或缩小任务范围。
 
-**验证。** 正式 serve / 群网关替身验证经典含面板创建、完整材料送达、非名单批准零I/O、状态追问、准确版本修改、外部版本变化和原子竞争拒绝、新一次批准恢复定义/文件夹；覆盖未知不重放、schema漂移、读回不符（含已批准顶层null字段缺失）、材料容量及Web拒绝。W5现有权限/材料/撤权/并发/取消契约运行相关回归，不重复实现。完整before是原定义的唯一恢复副本，恢复说明引用它；审批JSON按原内容纯文本展示，不做标量字符串的二次转义。JSON数值允许锁版规范化1.0为1，布尔/字符串仍严格区分；版本始终严格正整数。完整新产品回归及精确版本复查见handoff；主线同步未改变受测生产源码，新增模板路径另补验。本机发行环境失败单列，不算通过。工具说明与任务样例沿用 D7 行；调查顺序交给 Agent，必要的版本绑定和写审批是执行边界。真实模型、真实群、公司 Grafana 版本/权限与恢复均未验证，不以本机协议用例豁免。
+恢复版本消费、原会话锁与 Action claim 共事务，写前最终准入继续与关闭排序；专用失效原因须落应用事实、FailureCode、调用方允许码及新迁移 CHECK，回执从可信记录生成。迁移007已合入，正式实现不能回改007。状态查询与事实回执只依赖 Action，不依赖可写 Session；真正的源/群接收权限仍须有效。部分批准后只保存 SDK 返回的新版本，未批准项仍须人工逐次批准；已消费、取消/超时或结果未知的版本不自动恢复。上述业务原子性不是 SDK 提供的能力。
+
+**恢复轮与账本（B1）。** SDK context 保留原发起人/owner/session/turn，读取按原发起人当前权限；审批事件新 turn 只负责入口和回执，单次写的审批主体取已存 Action，经 `approved_action` 传递，不能替换整轮身份。当前键为 `(subject_id, session_id, turn_id)`，不是只有 turn；SDK-A 增加最小 `checkpoint/restore` 接口，把完整账本同 SDK 状态保存/装载；运行中计数仍只在治理层维护。不要直接用旧 `approve()` 清掉原轮账本，也不要把实际写的授权身份复制为整轮 context。
+
+| 随 RunState 同事务保存/恢复的可信数据 | 用途与暂停条件 |
+| --- | --- |
+| 原轮 context、原调用/Action绑定、Profile/数据策略/契约版本、已见 Evidence、SDK状态及恢复版本 | 同一恢复记录的一次原子检查/消费；先装载并复核，再进入 SDK/模型，不从 SDK JSON 里的旧许可授予权限 |
+| `_used` 已用工具数、剩余活动执行时间、已有 Evidence 依赖复核额度 | 小维预算跨暂停不重置；等待时间不计活动执行时间。SDK模型步数/usage沿其原状态，不能在新审批请求另给一轮满额 |
+| `started / produced / proposal_rejections / monitoring_failures` | 所有调用的完成判定、模型可见证据、最终查询完整性、未核实源说明；传给最终交付及 commit_validated，不只在解释文本里保留 |
+| `promql_errors / promql_pending / promql_repairs` | 同一失败表达式不重发、待修正状态与每源两次修正额度；成功不能清空已花额度，重启也不能重置 |
+| `truncated / rejected / limit_rescue_started / slot_busy / slot_retries` | 完整性/拒绝计数、步数收尾和既有槽位一次重试额度，保留整轮语义 |
+| `slot_retrying` 与未落定 I/O | 暂停检查点须无进行中的工具/写；slot_retrying 必须为空。保存的是已落定记账，不恢复 asyncio任务、客户端或未知写；部分批准后的写事实先落 Action 再保存新的完整检查点 |
+
+方案实验仅验证工具额度、SDK步数、字段序列化和失败记录延续；剩余活动时间/依赖复核额度及实际写 gate 的完整生产接点仍是 SDK-A 必须验证项，不能把实验表当正式恢复存储。检查点保存失败/取消必须整体回滚；暂停先捕获完整不可变账本，由同一个 PausedTurn 交给存储。捕获之后可释放运行内存，恢复时装载完整原轮账本；不得在捕获前或续跑中途清理，不能把每次批准当作新轮重置。
+
+**Session 接续的实测限制与选择。** 锁版 SDK 恢复时会为增量保存调用 `get_items(limit)`，现有 PolicySession 拒绝非空 limit；实验在工具已执行一次后抛 SessionError，同一对象/新对象均如此。当前最小可行方式：初次运行仍使用 PolicySession；保存暂停态后丢弃仅在内存的暂存项；恢复由 RunState 携带原执行历史，不重复传 Session 给 SDK；完整结果用公开 `RunResult.new_items / RunItem.to_input_item()`，排除 SDK approval 控制项后，经原 PolicySession 暂存/完整校验/提交。既有历史与等待期间另一轮提交的接续均已实验通过，不复制 SDK Session 底表或增加另一份聊天记录。正式切片仍须验证：恢复前的完整当前历史与权限、模型/Session 投影转换、SDK调用 ID/参数与实际执行 Evidence 的配对、最终查询完整性和预算跨暂停保存；原轮恢复后仍可提出下一项候选，部分批准先完整交付本次执行事实与剩余材料，依赖复核额度在暂停末尾记录；等待期间合法收窄未用工具时，按旧绑定/版本核对后原子保存新权限交集与新绑定，不以新指纹拒绝旧行；SDK-A 的 `ActionService.approve` 只接受原生 gate 的本次绑定，不再创建独立执行轮或清理原轮账本；执行事实由 gate 生成与 SDK 调用配对的 Evidence。
+
+**公开 SDK 能力的实验结论。** 下列实验对应已审方案 `86eeff2`；产品落地状态以 handoff 的 SDK-A 证据为准，旧协议局限不代表继续保留旧实现。 [官方 HITL](https://openai.github.io/openai-agents-python/human_in_the_loop/)、[Manager](https://openai.github.io/openai-agents-python/ref/mcp/manager/)、[guardrails](https://openai.github.io/openai-agents-python/guardrails/)仅作说明；签名和实际行为核对锁版 SDK 0.22.3 / mcp 2.2.0，[SDK 精确源码](https://github.com/openai/openai-agents-python/tree/fdf21db62c303a3db54b0dfbee82de2141fa2799)。
+
+| 已验证行为（可复现用例） | 对正式实现的约束 |
+| --- | --- |
+| 暂停、PG 保存/新连接池恢复、逐次批准/拒绝、部分批准、max_turns 不复位；两份同一合法快照可执行两次（`test_sdk_hitl_reuse.py`） | SDK 管续跑，不提供业务防重；保留持久原子消费/Action占用。context_override 不认证合法外来快照；恢复前核对服务端绑定与当前授权 |
+| `needs_approval` 回调先于输入 tool guardrail，已批准恢复不重跑回调；撤权后的旧工具结果会随 RunState 到模型（同文件） | 不用初次审批回调代替当前治理；恢复前全量 Evidence 读取复核必须先于模型 I/O |
+| 现有群权限、材料 sent、期限、版本与 Action claim 在 SDK gated function 内仍挡住无权/重复执行；SDK工具超时落 unknown，不重放（同文件） | 仅证明可复用业务边界，不是正式 native 入口或终态 Evidence/Session 配对已完成 |
+| 封存/关闭/过期拒绝、关闭先胜/claim先胜的真实 PG 锁排序、取消回滚快照/占用（`test_sdk_session_admission.py`） | SQL 原语实验可支撑同事务改动；方案实验时产品的 `claim_action` 尚无原会话检查，不能把实验记为产品已具备 |
+| 已开始写入后关闭原会话，原群网关/治理/Evidence/ResultDelivery 仍送达 succeeded，重复批准不写（同文件） | 可复用 Action 事实回执；SDK 续跑错误转这条路径仍待正式入口验证 |
+| 审批人 B 的真实新请求产生新 turn；SDK 恢复原 A/session/turn，可提交；新 GovernedTools 装载同事务保存账本后也可提交（`test_sdk_resume_ledger.py`） | 原轮账本与审批事件分离；用审批身份/新turn恢复会拆分账本并触发 SessionItemRejectedError，旧接续实验只覆盖同ctx，不能证明跨审批请求 |
+| 重启恢复后工具预算不复位、失败PromQL/已停止源零重复I/O、monitoring_failures进入代码交付、proposal_rejections及完整性/拒绝标记延续（同文件） | 保留最小治理账本导出/装载；实验访问小维私有字段仅用于验证，不调用 SDK 私有 API，不把该实验代码直接搬入产品 |
+| 无RunState旧pending迁移原语置rejected，succeeded/unknown逐字段不变，真实旧群入口零写；专用原因的固定回执投影符合文案（`test_sdk_upgrade_actions.py`） | 方案实验时产品迁移/失败码及正式专用回执路由尚未实施；实验使用独立原因表，正式 SDK-A 必须整合 Action字段/新迁移/请求CHECK与真实群回执 |
+| Manager 的连接失败子集、单次并发连接、跨任务关闭、超时/取消清理与不同源隔离（`test_sdk_mcp_manager.py`） | 单源/单代际 Manager，公开 `connect_in_parallel=True` 保持 SDK 内部任务归属；`suppress_cancelled_error=False` 不吞取消。SDK内部生命周期 worker 不是自建后台探测 |
+| Manager 不识别运行时断开，all reconnect 复用对象且保留工具缓存，旧闭包会调用新连接；新对象/新Manager可隔离（同文件） | 不删除现有断线分类、源锁/退避/快照；connect和list_tools/核约仍共用总时限，不能仅依赖 Manager 的 connect timeout |
+
+**实施顺序。**
+
+| 切片与依赖 | 独立可验证结果、成功与关键失败 |
+| --- | --- |
+| **SDK-A：原生审批＋最小 Session 接续（PR #89 已离线合入）**；复用已合入 S6，接口/迁移与实现按精确差异独立审查 | 先跑正式群入口替身的创建静默成功与非名单零 I/O，补原轮身份/真实新审批请求/新治理对象重启恢复、账本/预算/失败表达式延续及装载删除变异；再补发起人退群/历史Evidence撤权的真实停止与专用回执（rejected、零写、零模型I/O），以及无效/跨群Action ID、送达失败/审批人撤权/版本变化/重复与并发/过期/预算/暂停后重启/多候选部分批准。封存、关闭、过期及关闭并发均须原子拒绝、明确终态/专用回执；执行中关闭或续跑失败仍按 Action 事实送达，不重放。覆盖旧历史、等待期间其他调查、写后 Session容量不足、模型失败、状态/Evidence/投递失败及取消，关键保护隔离变异。SDK gate结果必须与实际调用和 Evidence 配对；不能直接绕过最终查询完整性校验 |
+| **SDK-B：Manager 替换重复 MCP 生命周期**；SDK-A 后独立差异/审查 | 主要改 MCPIntegration，用受治理查询正式入口成功及重连失败对照。沿现有 R1b 用例验证新代际重新核约/解析auth_ref、旧轮次不串新连接、并发单次恢复、退避复位、connect+list_tools总期限、候选取消及所有代际关闭；候选 cleanup 必须放 finally，无论连接、核约、超时或取消在哪阶段抛出都收尾；未授权源零 I/O，健康源/StarRocks不受影响，readyz不泄露信息。升级 SDK/mcp 重跑任务归属与状态协议验证。收益用产品生命周期代码的净删除、移除的重复职责与维护点衡量（不计测试/文档）；若只是叠一层Manager、职责未减少则不称整改完成 |
+| **SDK-C：已证明等价的薄层缩减**；按 A/B 实际差异决定，未证实就保留 | 只处理有现有消费者/可观察对照的护栏、错误反馈或 Session 胶水；正常、拒绝、超时/取消、历史/投影与授权行为保持等价。没有可删部分即可结束，不以删行数作成功标准，不预建统一插件/guardrail框架 |
+
+**兼容、恢复与交付门槛。** 保持空监控配置与普通只读路径；已执行/未知 Action 和旧 Evidence 不变。用户已批准：新迁移统一将无 RunState 的旧 pending 置 rejected 并持久保存 action_upgrade_invalidated；旧成功/未知逐字段不改，旧executing迁移不改并由启动恢复按既有规则转unknown；不从历史猜造续跑，无旧执行后备，不主动群发。对旧ID批准复核身份/接收权限后零写并固定回复“已因升级作废、未执行，请重新提出”。SDK-A 须验证pending作废、succeeded/unknown逐字段不变、executing迁移不改且启动恢复转unknown/零重放，以及迁移幂等、旧ID群回执与专用失败码，不回改007。新恢复版本不兼容时拒绝旧候选，不自动退回旧独立执行路径。正式实现用新的应用迁移与版本拒绝，按现有 P3 备份/停止旧进程/回退约定恢复，不在同实例运行两套审批。保持现有取消落定和关键存储失败的全局停止边界，不加后台补偿。
+
+用户已批准原会话作废/候选过期时，未完成调查报告不交付、不入历史；回执说明调查未形成最终报告并提示重新调查，已存Evidence按原规则保留，已开始写单独送达事实。详细契约只在架构 §5。
+
+原方案实验的证据仍以 `86eeff2` 为准。SDK-A 正式入口、迁移、签名/容量、账本和取消验证记录在 handoff；仍未验证真实模型、真实飞书、公司服务和升级/回退镜像。依赖旧独立 approve 的实验用例已改为正式 native 路径的相同场景，其余 SDK 能力实验保留；不为通过回归增加后备执行。正式实现先做完整 SDK→治理→Evidence/Session/群反馈闭环，再跑影响范围的离线回归、Ruff/mypy/文档检查；任务能力和真实环境按 AGENTS §6 独立留证，不因实验通过豁免。SDK-C 精确 head 已复审并随 PR #94 合入；D7 从新主线恢复，C8 待 D7 复审。
+
+### 3.7 D7 经典 Dashboard 创建与修改
+
+**用户任务。** 指定群成员要求创建或修改经典 Dashboard → Agent 自主调查并提出完整定义 → 可信代码读取真实保存版本、原定义和文件夹，生成完整差异与恢复材料 → 模型用 SDK 执行请求暂停，群里只显示已送达且可恢复的候选 → 名单成员逐次批准 → 恢复原轮，经治理层调用已核约的官方 MCP，回读并反馈 Action 事实。工具选择和调查顺序由 Agent 决定；版本绑定、执行准入和群审批是写边界。
+
+**协议与接口。** 锁定 SDK 0.22.3、mcp 2.2.0、官方 Grafana MCP v2.0.2；隔离 Grafana 13.2.3 镜像 digest `b28bae15e219c998fb0e0424ed724930cc61b1f61fb404d47c862f9a23f9e572`。写端须与原 G3 只读端分开，认证后仅开 `search,dashboard` 类别；本机直调已核实唯一写工具是 `update_dashboard`，无/错凭据零上游写，未选写工具不能直调。小维仅映射完整定义读取、保存版本列表与 `update_dashboard`，并提供 `propose_create_dashboard`、`propose_update_dashboard`。首版经典 `panels[]` 可写、原生 v2 只读；模型传有界完整 JSON，可信薄转换显式传 `overwrite=false`、`folderUid`、`message` 和准确版本，不开放 patch 或上游身份参数。产品契约只在[架构 §5](../../../ARCHITECTURE.md#monitoring-mcp)维护。
+
+**验收。** 真 `serve`、SDK Runner、PostgreSQL、群网关替身、官方 MCP 和隔离 Grafana 跑创建、修改、版本冲突、另次批准恢复；正式 Web 无写工具且零未授权 I/O。验证未选工具、认证失败、schema 漂移、材料超限、读回不符、5xx/超时和重复批准；已开始的写工具内部取消须使 Action 为 unknown、群回执提示核对远端，零自动重放。验证 Evidence/Session、旧配置兼容及受影响回归。获准真实模型、真实 Lark、公司 Grafana 组织/权限和部署仍留到 E9，脚本模型不能证明 Agent 自主能力。
 
 ## 4. 环境、兼容与恢复
 
@@ -187,10 +243,10 @@ PR #70 的三个非阻断项在本片同一失败契约中落实：并行成功/
 
 | 疑点 | 本计划默认处理与决定时点 |
 | --- | --- |
-| 锁定 SDK 的提议工具、Evidence 与 Session 提交，能否按已定 Action 契约原子地保证“未成功交付就不可批准”？ | W5 用合成动作、真 SDK 与 PostgreSQL 验证 Action/Evidence/最终回答/群投递失败的每个窗口；只有已保存提议 Evidence、有效最终回答及 `sent` 交付可批准。执行仍复用 GovernedTools 与既有 MCPIntegration/Adapter，不恢复 Runner、另起模型工具循环或绕过治理。路径不成立则阻断写切片，不影响只读 |
-| Action 执行发生在 Runner 外，下一轮如何看到结果而不绕过 PolicySession？ | W5 已选受治理的只读 Action 状态工具：应用表保存执行事实、群反馈代码生成；下一轮按 Action ID、群和当前源授权产生 Evidence，再由正常 Runner/PolicySession 按数据策略、历史上限和状态提交。模拟已有效提议后群 Session 达轮数/字节上限、关闭、查询保存失败与新会话查询；批准执行仍按有效 Action/群身份处理，不得直写 SDK 底表，也不得因会话错误丢失或重放 Action |
+| SDK 暂停候选、送达、原子恢复/Action claim和Evidence/Session能否连成正式入口？ | 按 §3.6 SDK-A 验 SDK调用与确定Action/证据绑定、只有 sent 材料可批准、原会话状态与占用同事务、重复/取消/恢复不重放；实验不代替正式链路 |
+| 原会话不可恢复时，已开始写入如何仍交付事实？ | 按架构 §5 复用 Action状态/GovernedTools/Evidence/ResultDelivery 的独立回执；SDK-A 覆盖关闭/封存/过期、写中关闭、模型/Session失败，不能因错误回执诱发重复写 |
 | 选中只读 MCP 工具的超时、不可达、上游 401/403/5xx 和 PromQL 表达式错误，是否能从锁版 Server 响应中可靠分类？ | G0/P2/G3/A4 用实际错误样本验证；不能可靠分类的结果继续中止。可续查失败须计预算、无成功 Evidence、本源本轮不重试，并同步最终查询完整性检查；测试部分故障后现有证据可交付且由代码标明未核实，全部读取失败时可交付明确未验证的建议与代码生成的失败源。本地授权拒绝、协议/Evidence 与写失败仍按原边界处理 |
-| 锁定 SDK 的公开 MCP 生命周期能否在不修改进行中 Runner 工具集合的情况下按源重连？ | R1 以启动失败、运行中断、恢复和并发轮次验证；仅后续轮次重新发现并核对契约，不自动重放调用/写动作，不引入后台探测器。若公开能力无法做到，先停 R1 并明确需要改变的运维取舍，不以无界重试代替 |
+| SDK Manager 能否等价替换重复连接生命周期？ | §3.6 实验已证明公开能力可用及就地reconnect的反例；SDK-B 新代际Manager仍保留源锁/退避/核约/快照和总期限，正式入口/取消/所有实例清理须回归 |
 | 官方/社区 MCP 的选中工具实际 schema、错误载荷、写幂等性、回读字段与 `is_error` 是否满足严格 JSON 对象契约？ | G0 只验证代表路径；P2/G3/A4/S6/D7/C8 分别验证各自要开放的工具，转换只做获准工具。社区 Alertmanager 不合格则 A4 选择薄 API v2 Adapter；未知结果不自动重试 |
 | Grafana `create_datasource` 的建前 schema 查询、Dashboard 创建/覆盖，以及 Alertmanager `post_silence` 的更新能力，能否与选中 Action 明确分开？ | S6/D7/C8 按锁定版本验证各自参数分支；无法在网络前证明某次调用是只读或批准的准确动作，就不开放该调用，不靠 MCP 的 `readOnlyHint` 判断 |
 | 外部 MCP 的固定内网地址能否从小维容器访问，且部署网络能限制可达范围、避免 Prometheus `Authorization` 意外转发？ | R1/相应源真实环境确认；内网 HTTP 可用、无需 CA；仅只读入口在网络受限时可无 MCP `auth_ref`，写入口须验证认证与远端选中工具限制。若选择 HTTPS 才检查证书；端点无法固定或网络不受控时该源不启用 |

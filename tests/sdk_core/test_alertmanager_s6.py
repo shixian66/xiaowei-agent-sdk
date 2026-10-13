@@ -23,6 +23,7 @@ from tests.sdk_core.test_alertmanager_a4 import SOURCE, a4_config
 from tests.sdk_core.test_alertmanager_a4 import synthetic_basic as synthetic_basic
 from tests.sdk_core.test_app import cite, tool_call
 from tests.sdk_core.test_feishu_render import message_text
+from tests.sdk_core.test_group_actions import request_execution
 from tests.sdk_core.test_group_gateway import GroupChannel, raw_group_event, runtime_group
 from tests.sdk_core.test_group_identity import A, B
 from tests.sdk_core.test_runtime import Env, until
@@ -105,6 +106,7 @@ async def test_formal_group_creates_then_cancels_official_silence_once(
         asked = env.scripts.add(
             attributed(A, "静默 host1 三年"),
             tool_call(f"{SOURCE}__propose_create_silence", **args),
+            request_execution,
             cite("等待群批准"),
         )
         async with env.running(env.config(**s6_config(url)), feishu_channel=channel) as served:
@@ -119,7 +121,7 @@ async def test_formal_group_creates_then_cancels_official_silence_once(
             assert args["ends_at"].split("T")[0] in material
             assert CREATE not in env.scripts.tools_seen(asked)[0]
             assert f"{SOURCE}__create_silence" not in env.scripts.tools_seen(asked)[0]
-            # 非名单成员拒绝，随后名单成员批准；两条批准都不调用模型。
+            # 非名单成员零模型I/O；名单成员批准恢复原轮，随后模型收尾。
             await group_send(env, channel, f"/批准 {action_id}", "om_denied")
             assert await env.scalar("SELECT state FROM xiaowei_action") == "pending"
             await group_send(env, channel, f"/批准 {action_id}", "om_approve", sender=B)
@@ -140,6 +142,7 @@ async def test_formal_group_creates_then_cancels_official_silence_once(
             env.scripts.add(
                 attributed(A, "取消静默"),
                 tool_call(f"{SOURCE}__propose_cancel_silence", silence_id=sid),
+                request_execution,
                 cite("提前结束须另次批准"),
             )
             await group_send(env, channel, "取消静默", "om_cancel")
@@ -223,6 +226,7 @@ async def test_create_readback_must_match_approved_write(
         env.scripts.add(
             attributed(A, "提出"),
             tool_call(f"{SOURCE}__propose_create_silence", **args),
+            request_execution,
             cite(),
         )
         async with env.running(env.config(**s6_config(url)), feishu_channel=group_channel):
@@ -263,6 +267,7 @@ async def test_past_start_adjustment_must_be_active_and_at_most_updated_at(
         env.scripts.add(
             attributed(A, "提出"),
             tool_call(f"{SOURCE}__propose_create_silence", **create_args(env)),
+            request_execution,
             cite(),
         )
         async with env.running(env.config(**s6_config(url)), feishu_channel=group_channel):
@@ -297,6 +302,7 @@ async def test_formal_unknown_write_not_replayed_and_readonly_continues(
         env.scripts.add(
             attributed(A, "提出静默"),
             tool_call(f"{SOURCE}__propose_create_silence", **create_args(env)),
+            request_execution,
             cite(),
         )
         async with env.running(env.config(**config), feishu_channel=channel) as served:
@@ -363,7 +369,9 @@ async def test_changed_approval_material_refuses_before_write(
     with backend() as (url, state):
         args = create_args(env) if action == "create" else {"silence_id": SILENCE_ID}
         name = f"propose_{action}_silence"
-        env.scripts.add(attributed(A, "提出"), tool_call(f"{SOURCE}__{name}", **args), cite())
+        env.scripts.add(
+            attributed(A, "提出"), tool_call(f"{SOURCE}__{name}", **args), request_execution, cite()
+        )
         async with env.running(env.config(**s6_config(url)), feishu_channel=channel) as served:
             await group_send(env, channel, "提出", "om_p")
             action_id = await env.scalar("SELECT action_id FROM xiaowei_action")
@@ -417,6 +425,7 @@ async def test_silence_expired_during_approval_wait_is_rejected_before_io(
         env.scripts.add(
             attributed(A, "提出"),
             tool_call(f"{SOURCE}__propose_create_silence", **args),
+            request_execution,
             cite(),
         )
         async with env.running(env.config(**s6_config(url)), feishu_channel=group_channel):
@@ -444,6 +453,7 @@ async def test_future_silence_keeps_exact_normalized_times_and_self_approval(
         env.scripts.add(
             attributed(B, "提出"),
             tool_call(f"{SOURCE}__propose_create_silence", **args),
+            request_execution,
             cite(),
         )
         async with env.running(env.config(**s6_config(url)), feishu_channel=group_channel):
@@ -470,6 +480,7 @@ async def test_cancel_readback_not_expired_is_unknown_and_never_replayed(
         env.scripts.add(
             attributed(A, "取消"),
             tool_call(f"{SOURCE}__propose_cancel_silence", silence_id=SILENCE_ID),
+            request_execution,
             cite(),
         )
         async with env.running(env.config(**s6_config(url)), feishu_channel=group_channel):
@@ -518,6 +529,7 @@ async def test_invalid_create_can_be_corrected_with_zero_bad_io(
             attributed(A, "提出"),
             tool_call(f"{SOURCE}__propose_create_silence", **broken),
             tool_call(f"{SOURCE}__propose_create_silence", **args),
+            request_execution,
             cite(),
         )
         async with env.running(env.config(**s6_config(url)), feishu_channel=channel):
@@ -582,6 +594,7 @@ async def test_large_matching_response_discloses_unknown_count(
         env.scripts.add(
             attributed(A, "提出"),
             tool_call(f"{SOURCE}__propose_create_silence", **create_args(env)),
+            request_execution,
             cite(),
         )
         async with env.running(env.config(**config), feishu_channel=group_channel):
@@ -722,7 +735,12 @@ async def test_approval_preparation_rejection_is_rejected_not_unknown(
     with backend() as (url, state):
         tool = PROPOSE_CREATE if problem == "filter" else PROPOSE_CANCEL
         args = create_args(env) if problem == "filter" else {"silence_id": SILENCE_ID}
-        env.scripts.add(attributed(A, "提出"), tool_call(tool.replace("/", "__"), **args), cite())
+        env.scripts.add(
+            attributed(A, "提出"),
+            tool_call(tool.replace("/", "__"), **args),
+            request_execution,
+            cite(),
+        )
         async with env.running(env.config(**s6_config(url)), feishu_channel=group_channel):
             await group_send(env, group_channel, "提出", "om_prepare")
             action_id = await env.scalar("SELECT action_id FROM xiaowei_action")
@@ -749,6 +767,7 @@ async def test_unclassified_proposal_failure_still_stops_without_action(
         asked = env.scripts.add(
             attributed(A, "提出"),
             tool_call(f"{SOURCE}__propose_create_silence", **create_args(env)),
+            request_execution,
             cite(),
         )
         async with env.running(env.config(**s6_config(url)), feishu_channel=group_channel):
@@ -774,6 +793,7 @@ async def test_future_requested_start_changed_by_a_faster_server_is_unknown(
         env.scripts.add(
             attributed(A, "未来开始"),
             tool_call(f"{SOURCE}__propose_create_silence", **args),
+            request_execution,
             cite(),
         )
         async with env.running(env.config(**s6_config(url)), feishu_channel=group_channel):
@@ -822,6 +842,7 @@ async def test_official_create_post400_is_rejected_and_negative_still_accepted(
         asked = env.scripts.add(
             attributed(A, "提出指定范围的静默"),
             tool_call(PROPOSE_CREATE.replace("/", "__"), **args),
+            request_execution,
             cite(),
         )
         async with env.running(
@@ -866,7 +887,7 @@ async def test_official_create_post400_is_rejected_and_negative_still_accepted(
             count = len(state.requests)
             await group_send(env, group_channel, f"/批准 {action_id}", "om_match_again", sender=B)
             assert len(state.requests) == count  # rejected/succeeded 都没有重放机会。
-            assert len(env.scripts.calls[asked]) == 2
+            assert len(env.scripts.calls[asked]) == (3 if expected_state == "succeeded" else 2)
             assert (await served.ready())["status"] == "ready"
 
 
@@ -883,6 +904,7 @@ async def test_official_write_with_lost_response_stays_unknown_and_never_replays
         env.scripts.add(
             attributed(A, "提出静默，响应故障"),
             tool_call(PROPOSE_CREATE.replace("/", "__"), **create_args(env)),
+            request_execution,
             cite(),
         )
         async with env.running(env.config(**config), feishu_channel=group_channel) as served:
@@ -923,6 +945,7 @@ async def test_cancel_400_is_unknown_not_create_rejection(
         env.scripts.add(
             attributed(A, "提前结束"),
             tool_call(PROPOSE_CANCEL.replace("/", "__"), silence_id=SILENCE_ID),
+            request_execution,
             cite(),
         )
         async with env.running(env.config(**s6_config(url)), feishu_channel=group_channel):

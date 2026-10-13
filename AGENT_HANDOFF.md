@@ -1,6 +1,6 @@
 # 小维：当前交接
 
-> 更新：2026-10-11，Asia/Shanghai。这里只记录当前事实、证据与下一项工作；设计见 [ARCHITECTURE.md](ARCHITECTURE.md)，路线见 [DEVELOPMENT_PLAN.md](DEVELOPMENT_PLAN.md)，协作规则见 [AGENTS.md](AGENTS.md)。
+> 更新：2026-10-13，Asia/Shanghai。这里只记录当前事实、证据与下一项工作；设计见 [ARCHITECTURE.md](ARCHITECTURE.md)，路线见 [DEVELOPMENT_PLAN.md](DEVELOPMENT_PLAN.md)，协作规则见 [AGENTS.md](AGENTS.md)。
 
 **OpenAI Agents SDK 负责 Agent Loop；小维负责权限、受治理工具执行、证据真实性和数据边界。**
 
@@ -9,14 +9,14 @@
 | 项目 | 已核对事实 |
 | --- | --- |
 | 仓库 | [shixian66/xiaowei-agent-sdk](https://github.com/shixian66/xiaowei-agent-sdk) |
-| 本地目录 / 分支 | D7：`/Users/kloenguyen/.codex/worktrees/monitoring-d7/agent-SDK` / `codex/monitoring-d7`；初始基线 `0b136bb711dbfb41e8a82a7265008fad332c5526`（PR #80，含 PR #79 / S6）；交付前同步 origin/main `4f6132edf20677ec4769a0f87eec564ba45f584b`（PR #81 / S1）。主工作区旧 G0 分支与其他工作树未改动。 |
+| 本地目录 / 分支 | D7：`/Users/kloenguyen/.codex/worktrees/monitoring-d7/agent-SDK` / `codex/monitoring-d7`；旧候选 `52346a2` 同步 `origin/main` `515a94a99f9a01505ea475003e084a0f24c36663`（PR #94）后续做，其他工作树保留。 |
 | M5 历史起点 | `372c381f44ecfa1fa53961f137d0058033cbd805`；不是远端当前 main 的核验结论 |
-| 本轮审查版本 | D7 前置协议 `215b445` 与产品 `7c8e530` 已作实现方发起的新上下文只读复查；后者发现回读缺失null字段误报，最小修复 `fc83e36f9689ff047da7ee8e10728d351c14ac29` 已复查闭环。主线同步未改变此生产源码；用户指定独立审查仍待交付head，不把本地复查称为用户验收。 |
-| 已同步主线审查记录 | W5 `fdfdb469cbcf5e8499f9ee8d69dae954bae0ebda` 经用户独立复审通过并随 PR #74 合入。取消恢复候选 `0ec6c4351824c6b85338ba713d85d54ef34484c2` 的内部只读复查及后续验证记录见下文；这些不是 R7 的新独立审查。本次以已经合入的 PR #76 / main `c7e1e40c346fcd488dbd0dfd3af2e36377e2ee66` 同步，原监控记录与实战缺口保留。 |
-| 当前阶段 | R1、P2、G3、A4、W5、取消恢复、S6、R12、S1 已合入；D7 离线候选已实现并完成新产品回归；两项产品取舍已确认。真实模型、真实源、群客户端与部署门槛分别保留。 |
-| 当前源码与依赖 | 新包 `src/xiaowei/` 的 W5 为应用表 v7（迁移007新增 Action 表和审批回执失败码 CHECK，SDK 表不变）。V1-A 新增 `vertex_model.py`（SDK 公开 `Model` 的非流式 Vertex 适配器），`model_api` 增加 `provider="vertex"` 与受控 transport 的认证头/成功校验参数；显式声明已直接导入的 `httpx2>=2.12,<3`（锁定 2.13.1 不变）。V1-B 使 `PolicySession` 随函数调用保存并回放 `provider_data.thought_signature`（单字段白名单，其余供应商字段丢弃），`app.safe_run_config()` 成为应用与 `model check` 共用的运行配置。V2 新增 `runtime.check_model` / `validate_model_config` 与 CLI `model check`。C2 把主模板改为一个 Vertex Profile、一个目标；占位符清单新增 Vertex 模型标记，C2 前模板的标记作为历史值继续拒绝。发布归档仍只含白名单文件 |
-| 新产品入口 | 原生主线仍为 `xiaowei`（与 `python -m xiaowei` 相同）的 `serve`、`config check`、`model check`、`storage init/upgrade/cleanup`、`requests resend`；`listen_host` 可为任意地址（默认 `127.0.0.1`）。镜像固定入口复用同一 CLI，在容器内绑定 `0.0.0.0`，宿主机发布地址由 `XW_WEB_BIND_ADDRESS`（默认 `0.0.0.0`）决定。真实模型、用户 StarRocks 与真实飞书未参与 P3-A 验证；旧 CLI/Compose 不是产品入口 |
-| 本次工作范围 | D7 经典 Dashboard 创建/修改：用户已确认独立写端、v2只读。实现/测试/常规修复、提交/推送/PR已授权；不合并、不部署，不连接真实模型/飞书/公司源。 |
+| 本轮审查版本 | SDK-C 文档修正 `eaa9185` 随 PR #94 合入主线 `515a94a`；D7 旧候选正在新主线上重新验证，精确交付 SHA 待提交及独立审查。 |
+| 已同步主线审查记录 | SDK-A/B/C 已随 PR #89/#93/#94 合入；D7 仍为待独立审查的草稿 PR #83，不继承旧审查结论。 |
+| 当前阶段 | D7 经典 Dashboard 创建/修改离线候选；C8 暂停。真实模型、Lark、公司 Grafana 及部署未验收。 |
+| 当前源码与依赖 | 主线应用表 v11；锁定 Agents SDK 0.22.3 / mcp 2.2.0。D7 复用 SDK-A 暂停/恢复、SDK-B 连接代际与既有治理/Evidence，不增加数据库迁移。 |
+| 新产品入口 | `xiaowei` 的 `serve`、`config check`、`model check`、`storage init/upgrade/cleanup`、`requests resend`；容器 Web 绑定沿现有部署配置。真实模型、公司 StarRocks 与真实飞书不由离线测试证明。 |
+| 本次工作范围 | D7 仅经典 Dashboard 创建/修改，独立受认证写端、群内逐次审批；原生 v2 只读。当前离线开发，不合并、不部署。 |
 | 外部操作 | 主线曾获用户授权用合成数据调用 Gemini API（见第 3 节），验证后本机凭据文件已删除，用户负责作废该密钥；Gate 0 离线部分与 SQLGuard 没有调用真实模型；全部工作均未调用飞书或外部 MCP Server。Gate 0 真实运行经用户授权使用第三方中转端点 `bbtoken.boywe.cn`（OpenAI 兼容 Chat Completions）发送合成数据，共 22 次模型请求（含诊断探测），另有 1 次模型列表查询，串行、不重试；凭据只写入仓库外权限 600 的临时文件，运行后已删除，用户负责作废该密钥。Task 2 从 Docker Hub 拉取官方 `starrocks/allin1-ubuntu:latest`（digest `sha256:faf7ce9c…276b`，StarRocks 4.1.4）在本机 127.0.0.1:59030 运行可丢弃容器，只写入随机名合成库，用后删除；未连接用户的 StarRocks。P2 Task 0 用同一本地镜像在 127.0.0.1:59030 运行可丢弃容器，从 `releases.starrocks.io/resources/auditloader.zip` 下载官方 AuditLoader 5.0.0（sha256 `cd2a8ace…8ea2`）只装入该容器，临时把 FE `query_explain_level` 改为 ANALYZE 后已恢复；容器与合成数据已删除。P2.5 Task 0 用同一 digest 新建可丢弃容器 `xw-p25-t0-sr`（只发布 127.0.0.1:59030/58030）与 `xiaowei-sdk-test` PostgreSQL，装入同一 AuditLoader 5.0.0；临时改 FE `query_explain_level`、`enable_statistic_collect_on_first_load` 并建极低阈值资源组，均已恢复/删除并回读；容器与测试库已删除，未触碰 `xiaowei-release-*`。P2.5 Task 1 只用本机 `xiaowei-sdk-test` PostgreSQL 与 StarRocks 驱动替身，未连接任何 StarRocks、模型 API、飞书或外部 MCP。P2.5 Task 2 用同一 digest 新建可丢弃容器 `xw-p25-t2-sr`（只发布 127.0.0.1:59030），装入同一 AuditLoader 5.0.0（`max_stmt_length=1000`），运行 SR 用例与工作树外的 1,000 表规模实验；规模实验前两次（每批 50 条建表）期间单容器 FE 多次重启、实验失败，`docker restart` 后改为每批 20 条完成；合成库、账号与角色均已删除，容器与测试 PostgreSQL 已删除，未触碰 `xiaowei-release-*`。Task 2 审查修订用同一 digest 新建可丢弃容器 `xw-p25-t2r-sr`（标签 `xiaowei.task=p25-task2-review`，只发布 127.0.0.1:59030/58030），装入同一 AuditLoader 5.0.0，只运行 §5 SR 用例；未改 FE 设置。P2.5 Task 3 用同一 digest 新建可丢弃容器 `xw-p25-t3-sr`（标签 `xiaowei.task=p25-task3`，只发布 127.0.0.1:59030/58030），装入同一 AuditLoader 5.0.0，运行 §5 SR 用例（含新增的复杂 SQL 对照，临时建库 `<随机库>_hr` 用后删除）；审查修复另建同 digest 可丢弃容器 `xw-p25-t3r-sr`（只发布 127.0.0.1:59030/58030），以 root 在合成库 `p` 中探测名字解析规则后删除该库（复审第 2 轮另建同 digest 容器 `xw-p25-t3r2-sr` 重复同样流程），装入同一 AuditLoader 5.0.0 运行 §5 SR 用例；未改 FE 设置，未连接用户的 StarRocks、模型 API、飞书或外部 MCP。P2.5 Task 5 用同一 digest 新建可丢弃容器 `xw-p25-t5-sr`（标签 `xiaowei.task=p25-task5`，只发布 127.0.0.1:59030/58030），装入同一 AuditLoader 5.0.0（官方包 sha256 `cd2a8ace…8ea2`，只把 `max_stmt_length` 改为 1000），运行 §5 SR 用例，另起 `xiaowei-sdk-test` PostgreSQL；未改 FE 设置，用后删除，未触碰 `xiaowei-release-*`。P2.5 Task 6 同样新建可丢弃容器 `xw-p25-t6-sr`（标签 `xiaowei.task=p25-task6`，只发布 127.0.0.1:59030/58030）与 `xiaowei-sdk-test` PostgreSQL，装入同一 AuditLoader 5.0.0（先误用 Task 5 的包，`max_batch_interval_sec` 为默认 60，卸载后按 P2.5 §9.1 改为 10 重装），运行 §5 SR 用例（含新增的搜表与跨库审计用例，临时库 `<随机库>_b` 用后删除）；未改 FE 设置，用后删除 P2.5 Task 7 的实现与第一轮审查修订只用隔离的 `xiaowei-sdk-test` PostgreSQL 与本机 Chrome（脚本模型、驱动与合成 StarRocks 替身）；复审修订用同一 digest 新建可丢弃容器 `xw-p25-t7r-sr`（标签 `xiaowei.task=p25-task7-review`，只发布 127.0.0.1:59030/58030）与 `xiaowei-sdk-test` PostgreSQL，装入同一 AuditLoader 5.0.0（§9.1 的包），只运行 §5 SR 用例；未改 FE 设置，用后删除，未触碰 `xiaowei-release-*`；没有调用真实模型、用户的 StarRocks、飞书或外部 MCP。P2.5 Task 8 只用 `xiaowei-sdk-test` PostgreSQL 与本机 Chrome（脚本模型、驱动替身与飞书替身），没有新建 StarRocks 容器（SR 结果沿用 PR #40 复审修订的运行，理由见计划 Task 8 实施说明），没有调用真实模型、用户的 StarRocks、飞书或外部 MCP。飞书单群 F2、F3 只用 `xiaowei-sdk-test` PostgreSQL 与本机 127.0.0.1 上的合成飞书 OpenAPI（真实 SDK 用例），没有调用真实飞书、模型、用户 StarRocks 或外部 MCP，未触碰 `xiaowei-release-*`。飞书单群 F0 只在本机 127.0.0.1 运行合成飞书 HTTP/长连接端点与 `xiaowei-sdk-test` PostgreSQL；为核对权限名称只读查阅了飞书开放平台公开文档；没有调用真实飞书、模型、用户 StarRocks 或外部 MCP，未触碰 `xiaowei-release-*`。 |
 
 表中外部操作一行保留以往阶段记录。G0 曾下载并运行官方 Prometheus MCP 二进制；R1a 复用已校验二进制，连接本机合成 Prometheus API、loopback MCP 和隔离 PostgreSQL，并通过飞书通道替身验证；未接公司监控源、真实模型或真实飞书。历史任务 SHA 只证明对应切片，不能混用。接手先用 `git rev-parse HEAD` 和 `git status --short` 取得实际版本；审查使用对应提交的精确 SHA，本文件的修改历史由 Git 保存。
@@ -37,39 +37,132 @@
 
 ## 3. 当前计划与下一项工作
 
-**当前下一步：** 为D7经典 Dashboard 创建/修改提交、推送并开草稿PR，核对精确head的CI，交用户指定审查方复核；用户已确认独立写端、原生v2只读。产品契约仅见[架构 D7 段](ARCHITECTURE.md#monitoring-mcp)，切片验收见[监控计划 §3.6](docs/superpowers/plans/2026-10-09-monitoring-mcp.md)。不推进 C8、不合并、不部署。
+**当前下一步：** D7 同步新主线后的正式入口、权限、失败和回归检查完成后，更新草稿 PR #83，以精确 SHA 交独立审查；不合并、不部署。C8 待 D7 闭环后另片推进。真实模型、真实 Lark、公司 Grafana 权限/组织和部署仍未验证。
 
-**D7 当前证据（2026-10-11）：**
+**D7 当前离线证据：** 旧候选从 `52346a2` 合入 `515a94a`，保留 SDK-A 审批请求和 SDK-B `MCPServerManager` 连接管理。真 `serve`、Runner、PostgreSQL、群网关替身、官方 Grafana MCP v2.0.2 与隔离 Grafana 13.2.3 通过创建/修改、非名单批准、版本冲突、写后结果未知、独立恢复等 22 项 D7 正式用例；六个受影响文件共 **179 passed**（33.84s）。新增内部自发取消的正式群入口用例：官方 MCP 实际写一次后抛 `CancelledError`，Action 为 unknown，回执提示核对，重复批准未重放，单项 **1 passed**。脚本模型不能证明自主调查或真实群可用；最终版本的完整检查另记。
 
-- 基线 origin/main `0b136bb711dbfb41e8a82a7265008fad332c5526`，独立工作树/分支见上表；锁定 SDK0.22.3、mcp2.2.0、官方 Grafana MCPv2.0.2。隔离 Grafana13.2.3 固定官方digest，127.0.0.1:3307，容器内存盘；只使用合成账号和数据，不清理其他项目。
-- 前置协议 `215b445` 已作新上下文只读复查，两个核心结论成立。补观测缺口：计数器覆盖全部写方法、真实通用API工具名为 grafana_api_request；写方法阳性对照先4failed，修后4passed。原合法初始化settings读取单独计数。
-- 产品 RED：正式群创建/版本冲突与配置 scope 两项先失败，原因是D7尚未装配；源不可用仍展示提出工具先1failed，后在已有ActionBinding补零I/O可用性过滤。未放宽通用schema/权限/审批。
-- 最小闭环：真serve、Runner、治理、PostgreSQL、Action/Evidence、群网关替身、官方MCP及隔离Grafana完成创建成功、重复批准不重放、版本变化未执行。准确版本更新成功、写前原子竞争409拒绝、恢复材料保留；正式Web两项拒绝均零工具I/O。
-- 最终定向D7/飞书展示/W5六文件 **178 passed**（32.87s，日志 /private/tmp/xw-d7-complete-null-fix.log）。包括经典含PromQL面板和数值阈值创建、非名单批准零工具I/O、状态追问、完整定义恢复到最新版本及非空文件夹；5xx、已写入后超时、写响应/回读/布尔类型不符均unknown，无成功写Evidence且不重放。正式Web不能提出/写入；schema漂移隐藏全部提出能力且零工具I/O。非法输入在I/O前拒绝，完整材料投影放不下时无Action/Evidence。
-- 严格警告合跑曾发现Web测试没有注入群替身，测试资源事件循环未关闭；核对夹具后改为显式有关闭路径的GroupChannel，保留-Werror并复验17passed。网络守卫未允许真实飞书连接。
-- 结果边界RED：12项版本bool/float/string/0先失败，修后严格正整数；正式回读bool当1先误判成功，修后unknown。JSON数值1.0被锁版规范化1时先误判unknown，修后允许同一数值、仍拒绝布尔/字符串；原定义只在完整before保留一份。审批JSON二次转义和完整材料重复曾使合法小面板材料不送达，先复现再修为可信材料原文纯文本，保留单卡片/请求容量边界。根目录folderUid省略已核对锁版源码/实际协议，空值按根目录，不新增拒绝；非空文件夹实际恢复已验证。
-- 精确产品复查发现已批准顶层null字段缺失仍被get误当一致：正式群回归原为succeeded（RED1failed），修后unknown、零成功写Evidence、不重放；`fc83e36` 的增量复查闭环。测试失败诊断误用不存在的rows已改为现有scalar聚合，正式成功路径实际执行该查询 **1 passed**；不改保护断言。
-- 完整新产品/P1-B回归 **3157 passed、60 deselected**（875.53s，/private/tmp/xw-d7-sdk-null-final.log）。前版完整回归曾3155passed/1failed，群更新Action ID缺失；原用例单跑和最终完整均通过，首次原因未确认，保留原日志/诊断，不声称已定位为偶发。中断的早期运行不计通过。
-- 同步PR #81/S1至 `bfc732e`：`git diff fc83e36 HEAD -- src pyproject.toml uv.lock` 为空，完整回归的生产源码/依赖仍有效；新容量、模板CLI与对话路径补验 **121 passed**（112.79s）。Ruff全仓、mypy130源文件、11受影响文件格式、离线uv锁检查与文档检查通过。十项仓库外隔离变异全部检出（包括缺失null），候选源码哈希未变。
-- 已运行CI同命令：旧包兼容2725passed/152skipped/40deselected（既有6warnings）；安全检查928passed/79skipped/4494deselected（既有5warnings）。跳过、排除和警告不计成功证据。检查对象/命令见下表及PR。
-- 发行检查本机未通过：初次75passed/7errors，构建复制库时no space；只清理D7自己的隔离Grafana容器/镜像后重跑为78passed/3failed/1error（116.40s）。三项停在PostgreSQL unhealthy；一项历史镜像构建报parent snapshot不存在。Docker根盘仍100%且仅约155MB可用。另建无网络诊断PostgreSQL当前可启动，旧容器日志已被夹具清理，所以不把三项失败的详细根因写成已证实；未改断言/跳过，也不清理其他项目。D7精确head的CI需另核对，旧S1 CI不能替代本片发行通过。专用Grafana与诊断容器/卷已清理，共享测试PostgreSQL保留。
-- 未覆盖：D7专门的多源重连交错、文件夹移动竞争未独立注入；获准真实模型的任务选择/澄清/修正/答案/步数/耗时/用量，真实群收发与展示，公司Grafana版本/组织/provisioning/规模/恢复。按用户本轮只做离线验证；离线不自动晋级真实能力或部署。
+**D7 最终本机检查（同步主线后）。** 首次整套回归在 `test_action_boundaries.py` 有 3 项失败：D7 旧分支给 `authorize_approval` 增加的 pending/过期前置拒绝抢在 SDK-A 专用作废/失败码之前。核对 `Application.resume_action`、同事务 `claim_native_action` 与写 I/O 前 `admit_action` 均保留状态/期限保护后，只移除重复前置项；该文件复验 **47 passed**，包含过期零写。真 SDK/PostgreSQL、官方 Grafana MCP/隔离 Grafana 与官方 Alertmanager 的 `.venv/bin/python -m pytest tests/sdk_core tests/p1b -q -W error` 为 **3420 passed、39 skipped、63 deselected**（902.26s）。`.venv/bin/python -m pytest -m security -q` 按 CI 命令为 **928 passed、79 skipped、5 条预期 socket 拦截警告**；额外 `-W error` 的第一次运行因这 5 条预期警告失败，不作为产品缺陷。`tests/deployment` 的四个发布文件 **82 passed**（356.43s），覆盖本机容器迁移/升级/回退。Ruff 全仓、mypy `src` 133 文件、文档/工作流 28 项、`uv lock --check --offline` 与 diff 检查通过。内部取消回归补断言 SDK 将错误结果交回模型，单项复验通过。所有外部服务均为本机隔离或替身；Grafana 测试容器已停止，未部署。精确 head 与 CI 待草稿 PR 更新后另核。
 
+**SDK-C 等价评估（基线 `182b26c`，PR #94 原审查版本无阻断）：** 锁定 SDK 0.22.3 的输入护栏可在工具执行前用固定内容拒绝；但 `needs_approval` 默认先于护栏，已批准恢复仍须在 `GovernedTools.invoke` 按当前身份、Action 绑定、目标与预算复核。现有 `tools.py` 把确定发生在 I/O 前的拒绝、可修正的 PromQL 错误和监控只读故障分类交给模型，普通执行后异常中止。工具内部自发抛出的取消异常属于例外：SDK 默认格式化为含 “Please try again” 的工具结果并继续 Runner；现有最终完整性校验与 Action 持久占用负责防止写入被当成成功或自动重放，D7 正式群入口现已验证这条内部取消路径。SDK 的通用护栏/错误格式化没有替代这些业务分类和账本的等价能力。底层 `SQLAlchemySession` 只按条数读写历史，不复核归属、到期、当前 Evidence/接收权限、工具调用与结果配对，也不提供 `PolicySession.commit_validated` 的提交前检查。原生恢复时 SDK 会调用 `get_items(limit)`，而 `PolicySession` 拒绝按条数读取以免拆开工具调用与结果；因此恢复使用 `session=None`，再将公开 `RunResult.new_items` 手动交给 `PolicySession.add_items` 与 `commit_validated`，这段适配仍须保留。对照 `src/xiaowei/tools.py`、`governance.py`、`session.py`、`app.py` 与隔离环境中的 `agents/tool.py`、`run_internal/tool_execution.py`、`extensions/memory/sqlalchemy_session.py`。无产品代码变更。
 
-**D7 复现命令：** SDK_TEST_POSTGRES_URL 使用本机隔离55432；官方协议用例另需哈希校验的 XW_TEST_GRAFANA_MCP_BIN、XW_TEST_PROMETHEUS_MCP_BIN、XW_TEST_ALERTMANAGER_BIN 及loopback Grafana（XW_TEST_GRAFANA_D7_URL）。二进制与隔离环境前提见监控计划；不指向公司源。官方Grafana MCP二进制SHA256为 `480c23f5f0c80e7819fa060e12d4faf471732b63bd05a2023e45f868a7f33baf`。
+**SDK-C 离线证据：** 真 Runner、脚本模型、无网络的小实验显示：普通工具异常调用一次后停止；输入护栏在零业务调用时返回固定拒绝并继续；工具内部取消会给模型 “Please try again” 并继续（模型调用 2 次）。`SDK_TEST_POSTGRES_URL=postgresql+asyncpg://postgres@127.0.0.1:55432/postgres .venv/bin/python -m pytest tests/sdk_core/test_r7_governance.py tests/sdk_core/test_r7_rejection_categories.py tests/sdk_core/test_session_policy.py -q -W error -p no:cacheprovider --maxfail=1`：隔离 PostgreSQL 的治理/会话回归 **104 passed**（21.07 秒）。上述结果不证明真实模型、飞书或公司服务；D7/C8 原有缺口保持开放。
 
-| 实际命令（工作树内，PYTHONPATH=src:.） | 对应结果/日志 |
+**SDK-B 离线候选证据（基线 `89521cd`）。** `MCPIntegration` 以锁定 SDK 0.22.3 的公开 `MCPServerManager` 管理每个新连接代际，取代手工 `AsyncExitStack` 的连接与清理持有职责；旧实现跨任务关闭没有观察到用户可见失败；小维保留源级锁、退避、核约、快照、治理与 Evidence。产品源码该文件增加 32 行、删除 22 行（净增 10 行，未达到计划的净删减指标），没有新增模块、配置或后台探测。可测收益是 SDK worker 使 connect/cleanup 同任务归属、候选清理有上限；连接中及 `list_tools` 失败、慢清理的候选均关闭。R1b 新断言覆盖重连成功与失败后旧代际清理。正式 Web 的断线→下一轮重连、官方 Prometheus MCP v0.18.0 会话失效、旧轮次与 schema 漂移等沿 R1b 用例复验。受影响协议/接入 8 文件 **122 passed、2 deselected**；本机隔离 PostgreSQL、真 SDK、loopback 和两种官方 MCP 二进制的整仓 `python -m pytest -q` 为 **5555 passed、168 skipped、63 deselected、5 项预期 socket 拦截警告**（1350.27 秒）。Ruff 全仓、改动代码格式、mypy 132 个源码文件、文档事实检查与差异检查通过。这里证明离线连接与治理路径，不证明真实模型、真实飞书、公司监控源、部署或用户验收；精确提交与 PR CI 另以交付记录为准。
+
+**E6 候选边界（2026-10-13）：** 模型只选择有限格式，报告内容由获准飞书投影构造，MD 动态值放进文字围栏，HTML 使用固定模板并逐值转义。原文件/摘要绑定已完成请求，上传前原子占位，已知资源键先持久化后发送；上传结果未知或恢复后的上传中状态禁止再次上传，文件消息明确失败可用原键显式重发。含待批动作、暂停状态或报告容量超限时退回一张带固定说明的卡片，不上传；动作提案的完整展示仍受原容量处理约束。每次发送前复核当前接收身份、成员、目标和 Evidence；报告随请求到期清理，平台已交付副本无法撤回。
+
+**E6 旧 head 离线验证：** 旧候选在飞书合成端点、隔离 PostgreSQL、浏览器 HTML 中覆盖文件构造与发送；非 Docker 全量曾为 **5202 passed、329 skipped、63 deselected**，最终差异定向回归 **58 passed**、浏览器 **1 passed**。PR #91 首次 p3-release 为 **1 failed、81 passed**，原因是 v5 回退夹具没有删除报告表；旧候选修正后 Compose 演练 **1 passed**。这些结果不覆盖 SDK-A 集成、B1/B2 修复、真实模型或真实 Lark；新 head 验证另记。
+
+**E6 集成修订离线验证：** 在已含 SDK-A 的 `origin/main` 上把报告迁移排在 010 后面作为 v11，v10→v11 回归保留 paused 请求、Action 与续跑记录；v5→v11 Compose 演练 **1 passed**，三条历史镜像升级/回退演练 **3 passed**。正式飞书网关验证动作提案、已执行动作、paused 回答和文件容量超限均退回带原因的卡片，零上传；普通容量回退的显式重发保持一致。报告上传未知后收紧容量的反例先复现错误 `sent`，增加已绑定报告核对后为 `unknown`、零再次发送。E6/存储/动作/渠道定向回归 **115 passed**，正式 CLI 与样例脚本 **15 passed**，发布契约 **68 passed**；Ruff、受影响文件格式、mypy 132 源文件与 `git diff --check` 通过。最终实现 SHA `7900085` 的 CI 十项全绿，integration **5390 passed、329 skipped、63 deselected**；修正后的群身份升级文件本地 **38 passed**。以上仅为隔离 PostgreSQL、合成飞书与本机 Docker 证据；获准真实模型旧/新各至少 3 次对照未运行，也未验证真实 Lark 收发。
+
+**E5b PNG/JPEG 候选（2026-10-12）：** 基于已合入的 TXT/MD 下载链，飞书和 Vertex Profile 独立显式启用图片，默认仍按 E5a 回执。图片完整解码前限制原值 2 MiB，每边不超过 8192 像素，总像素不超过 16,777,216；原字节不改写。应用表 v9 按原请求和当前会话/身份保存最多 12 张，只有已完成请求的图片供后续轮回放，失败/中断及其他轮尚在途图片不参与；读取前按当前身份、会话期限、数据权限及摘要再核验。`/新建` 不继承图片。每次模型请求只让可信 Base64 图片占独立 33,554,448 字节额度，其余内容仍受原 Profile 上限。原图不进入 SDK 文字历史、Evidence 或日志；取消与投递结果不明沿既有恢复路径。本候选只证明替身和隔离 PostgreSQL 下的正式调用链，不能证明真实模型视觉理解、真实 Lark 消息形态或公司环境可用。
+
+**E5b PNG/JPEG 离线验证：** 正式 Gateway → ChannelService → 隔离 PostgreSQL → 真 SDK Runner → Vertex 合成端点的图片上传和后续原图回放成功；无权、群无 mention/撤权、损坏、超 12 张、请求绑定失败与取消均有拒绝/零未授权 I/O 对照。先在旧代码观察到图片协议和运行中密钥失败分支的红例，修复后定向通过。迁移测试覆盖 v6/v7/v8→v9 保留请求、摘要密钥、SDK 历史及 Evidence。全量非 Docker 回归首次 **5172 passed、4 failed、329 skipped、62 deselected**：三项仍要求 v8，另一项依赖闭集未包含新增 Pillow；精确修复后定向 **14 passed**，最终相同命令重跑 **5176 passed、329 skipped、62 deselected、5 条既有 socket 拦截 warning**。发布/文档/清理定向 **79 passed**，下载器含运行中密钥丢失 **12 passed**；`ruff check --no-cache .`、受影响代码 `ruff format --check`、`mypy src --no-incremental`（131 文件）、`uv lock --check --offline`、`git diff --check` 与离线 wheel 打包（含迁移009）通过。本机 Docker 集成运行因镜像存储空间耗尽，在历史镜像构建/容器启动阶段失败；未清理其他项目的镜像/卷，留待精确 SHA CI 验证。真实 Vertex/Lark、公司 StarRocks、浏览器和部署均未验证，图片真实模型合入门槛未豁免。
+
+**SDK-A 与 E5b 主线集成（合并前）。** 主线 `f89b586` 的飞书 TXT/MD 路径与 SDK-A 代码自动合流，仅交接文档冲突需整理；群网关、飞书资源、会话提醒、Action/SDK-A 共 293 项通过（`/private/tmp/xw-sdk-a-merge-targeted.log`）。本机 Colima 容器盘原为 30 GB/可用 0，仅读取归属后清理超过 24 小时的无容器引用悬空镜像，不动容器、数据卷或具名镜像，回读可用约 16 GB。四项 Docker 部署/迁移/升级/回退首次复跑为 2 passed、2 failed：手工 v5 夹具遗漏 v9 暂停表与请求约束，另一处保留数据断言仍写 v8；补全真实 v5 形状并断言升级后 v9，原数据保留与旧程序拒绝检查不放宽，复验 **4 passed**（390.22s，`/private/tmp/xw-sdk-a-docker-four-rerun.log`）。最终集成 head 的整仓回归与 CI 以 PR 验证记录为准；离线替身仍不能证明真实模型、飞书、公司服务或部署。
+
+**SDK-A 本地实现（2026-10-12）。** 依据已复审 `86eeff2` 的监控计划§3.6与架构§5。模型先受治理提出确定 Action，再调用仅收 Action ID 的 `request_action_execution`；SDK `needs_approval` 返回 interruption，服务端同事务保存 SDK RunState/完整 TurnLedger/剩余时间与依赖复核额度、材料请求。`/批准`/`/拒绝` 使用 SDK公开 approve/reject/from_string，恢复原发起人/原turn，审批人只绑定那一次写；无旧独立审批后备，底层写工具不进Runner。
+
+- v10/010（原 v9/009，与 E5b 原图迁移009 集成后顺延）：旧pending以 action_upgrade_invalidated 作废；成功/未知逐字段不改，executing迁移不改、启动恢复为unknown；旧ID专用回执/零写。SDK表仍只经 PolicySession/SQLAlchemySession写入。
+- 状态消费与原会话锁/Action claim共事务；后续暂停按旧绑定/版本核对、原子保存当前权限交集的新绑定；材料未送达、发起人失效、会话失效/过期、版本/材料变化和重复批准均阻断相应执行。写后成功/未知事实不依赖模型或Session成功，失败回执按Action事实映射。执行事实优先完整显示，已配对同一Action的旧待批材料不重复抢占容量。
+- 暂停释放群/Runner；等待期间其他调查可提交，恢复继续原任务而不吞入新消息。完整结果仍校验所有已开始查询及SDK调用/结果与Evidence配对，末尾通过同一PolicySession提交。预算、PromQL/监控失败、scope检查次数跨暂停/新治理对象不重置。
+- 复用既有实例准入、恢复和显式cleanup。暂停材料未发送的启动恢复为failed；过期检查点有界清理，不增后台任务。关键保存失败/取消/失锁仍保持全局停止，普通可靠落定不扩大影响。
+- SDK-A 审查 B1 修复：执行请求的 `needs_approval` 回调先核对本轮待批 Action、唯一请求和剩余两次工具额度；错误 Action ID 或额度不足由治理层在 I/O 前给模型可修正拒绝。普通结束和保存暂停在同一事务把无法唯一恢复的待批候选置为 `rejected/action_unresumable`，卡片移除批准命令；有效的其他候选继续保留。旧候选批准按 Action 事实回执，零写入。新增用例先在旧代码失败、修复后通过；移除落定逻辑的隔离变异使关键用例重新失败。同步主线 `2227040` 后，群网关、飞书渲染、会话提醒及 SDK-A 定向集成 **362 passed**（65.15s）；最终完整回归仍待本次提交后执行。
+- 合并候选 `c2c6a60` 的整仓回归为 **5463 passed、8 failed、1 error、153 skipped、62 deselected**：5项 Action/SDK 测试沿用旧 `pending` 预期或旧替身签名，3项失败与1项错误出在 Docker 部署镜像检查。5项已逐一复现；按 B1 已批准的作废终态加强原断言，并更新测试替身后，审批边界/恢复/SDK 测试合跑 **137 passed**（54.61s）。最终新 HEAD 的整仓结果另以实际运行记录为准，不用旧总数冒充通过。
+- `de7e3a9` 整仓复跑为 **5467 passed、4 failed、1 error、153 skipped、62 deselected**（`/private/tmp/xw-sdk-a-final-de7e3a9-pytest.log`）。三项部署失败及一项构建错误发生在 Docker：Colima `/var/lib/docker` 30G 已满、可用0，PostgreSQL 容器不健康且旧镜像构建缺 parent snapshot；未清理其他任务资源。余下一项是 SDK-A 时限用例：0.15秒在整仓负载下可能未到 Adapter 就取消关键状态，单项重跑通过。测试改为保存2秒、仍小于新请求30秒，并继续断言进入 Adapter、零写、Action终态和实例就绪；单项 **1 passed**（3.50s）。最终新 HEAD 再跑整仓，结果另记。
+- 产品/测试 HEAD `270989f` 整仓复跑 **5468 passed、3 failed、1 error、153 skipped、62 deselected、5 warnings**，1009.72s（`/private/tmp/xw-sdk-a-final-270989f-pytest.log`）：唯一未通过的是 Docker 部署镜像路径，三项 PostgreSQL 容器不健康及一项旧镜像构建 parent snapshot 缺失；复核 Colima `/var/lib/docker` 30G/可用0。未清理任何现存镜像或卷，不声称整仓全绿，也不把 Docker 检查当作已验收。其余 SDK-A、群/飞书替身、治理与 Session 用例无失败；Ruff 全仓、改动文件格式、mypy 129源文件、离线锁与差异检查通过。真实模型/飞书/公司服务及部署未验收；E5b 新主线集成另以本次验证记录为准。
+
+| SDK-A实际检查（本机隔离PostgreSQL55432，SDK0.22.3/mcp2.2.0） | 结果 |
 | --- | --- |
-| `.venv/bin/python -m pytest tests/sdk_core tests/p1b -q -W error --tb=short` | 3157passed/60deselected；/private/tmp/xw-d7-sdk-null-final.log，产品源码fc83e36 |
-| `.venv/bin/python -m pytest tests/sdk_core/test_grafana_d7.py tests/sdk_core/test_grafana_d7_contracts.py tests/sdk_core/test_grafana_d7_protocol.py tests/sdk_core/test_feishu_render.py tests/sdk_core/test_feishu_format.py tests/sdk_core/test_group_actions.py -q -W error --tb=short` | 178passed；/private/tmp/xw-d7-complete-null-fix.log |
-| `.venv/bin/python -m pytest tests/sdk_core/test_session_capacity.py tests/sdk_core/test_cli.py tests/sdk_core/test_dialogue_gate.py -q -W error --tb=short` | 同步主线121passed；/private/tmp/xw-d7-main-supplement.log |
-| `.venv/bin/python -m pytest -q --ignore=tests/sdk_core --ignore=tests/deployment`；`.venv/bin/python -m pytest -m security -q` | 兼容与安全结果见上；/private/tmp/xw-d7-legacy-ci.log、xw-d7-security-ci.log |
-| `.venv/bin/python -m pytest tests/deployment/test_release.py tests/deployment/test_compose.py tests/deployment/test_maintenance.py tests/deployment/test_release_workflow.py -q --tb=short` | 本机环境未通过；/private/tmp/xw-d7-release-retry.log，原始失败xw-d7-release-ci.log；无网络PostgreSQL诊断xw-d7-pg-diagnostic.log |
-| `.venv/bin/ruff check --no-cache .`；`.venv/bin/mypy --cache-dir=/private/tmp/xw-d7-mypy-merged src`；`UV_CACHE_DIR=/private/tmp/xw-d7-uv-cache uv lock --check --offline`；`git diff --check` | 已通过；文档检查为既有test_docs_command_consistency.py与test_doc_fact_binding.py，5passed |
+| TDD与真实新审批请求 | 首4项、暂停保存/恢复清理、发布v9元数据首次分别4/2/1 failed；确认目标分支后实现。审批B恢复A的原身份/预算/配对历史，无旧独立执行后备 |
+| SDK-A、spike、CLI/runtime/群身份、S6/取消的10个受影响文件（修订前） | 529 passed，223.40s；`/private/tmp/xw-sdk-a-affected-current.log`。含正式serve＋官方Alertmanager0.34.1创建/取消、非名单零模型/零写；模型/飞书替身 |
+| 新上下文开发方复查与定向回归 | 六项接点缺陷已复现：终态原turn丢失、partial漏事实、scope少记、暂停保存未落定、恢复再提出被拒、期满误报码。修复后核心＋撤权反馈40 passed（14.54s）；`/private/tmp/xw-sdk-a-review-final-green.log`。部分执行后其他候选过期、容量不足不冒充送达、首pause/重pause保存遇会话过期、确定保存拒绝均覆盖。不是用户指定独立审查 |
+| 原生状态/材料同事务回滚、取消、损坏检查点 | 5 passed，2.22s；`/private/tmp/xw-sdk-a-snapshot.log`。旧实验场景迁到正式native路径，不删除原保护；原始48项实验保留在方案Git版本 |
+| 等待中其他调查、原Actor/审批人分离、剩余活动时间与scope额度 | 正式用例覆盖；剩余活动时间单例1 passed（1.72s）。多次暂停保存值与实际probe数相符，满额恢复不发许可probe；等待不重给预算 |
+| 最大允许65536字节签名、最后合法第5轮/接近90KB历史 | SDK/Session原样保留；Vertex适配器HTTP替身在恢复后原样回传。OpenAI Responses剔除不适用provider_data不代表Vertex丢签名；对应`test_sdk_approval.py`两例 |
+| 隔离变异（均核对导入仓库外副本） | 删除账本装载3 failed、跳过N1历史预检1 failed、绕过claim会话判定1 failed。新增六项修复变异分别1/2/1/2/1/2 failed；`/private/tmp/xw-sdk-a-mutations-summary.log`、`/private/tmp/xw-sdk-a-review-mutations-summary.log`。候选源文件未变异 |
+| 发行归档与文档事实（不含Docker） | 72 passed、1 deselected，26.09s；`/private/tmp/xw-sdk-a-release-final.log`。修正运维文档SDK术语，schema v9/009和打包边界均保留 |
+| 中间全仓 `pytest -q -W error` | 5192 passed、9 failed、314 skipped、61 deselected、1 error，829.02s；`/private/tmp/xw-sdk-a-final-full.log`。1项本轮运维文案已修；5项旧网络保护被预期UserWarning转异常，按CI原命令复核11 passed/5 warnings；Docker3项失败/1 error，本机Colima容器盘30GB、100%满，未清理其他任务资源。不称全仓通过 |
+| 新包完整回归 `tests/sdk_core tests/p1b tests/spike`＋文档事实，`-q -W error` | 3242 passed、1 skipped、61 deselected，906.54s；`/private/tmp/xw-sdk-a-product-final.log`。启用已批准本机Prometheus MCP0.18.0、Grafana MCP2.0.2、Alertmanager0.34.1；上游HTTP/模型/飞书为替身。该轮后仅修下条收权再暂停接点，最终差异按下条定向验证，不宣称已重跑全仓 |
+| 合法收权后的再次暂停绑定 | 新复查发现撤销未使用读工具时新scope指纹误匹配旧行，1 failed（`/private/tmp/xw-sdk-a-scope-binding-red.log`）。现按可信prior_binding/版本/消费状态核对并原子保存新binding；SDK-A、Action边界/生命周期、全部spike 150 passed，50.19s（`/private/tmp/xw-sdk-a-scope-binding-green.log`），包括撤销已见Evidence仍按N1零写/零模型；仓库外恢复旧错误匹配后该新用例1 failed，1.37s，确认导入临时副本 |
+| Ruff、mypy、格式、diff、锁文件 | Ruff/mypy（27源文件）已通过；最终提交前重核。依赖和锁定SDK未变 |
 
-**已同步主线的有效证据：** 下文保留 S1（PR #81）与 R12（PR #80）当时的离线记录，不代替当前 D7 验收。
+**开发方复查：** 已对具体索引树 `aea741b3dbc06ff4bb9777fde238b8e51382195f` 做新上下文只读复核，六项接点及后续收权问题已闭合，无新增阻断；之后只补交接证据。该结论不代表用户指定独立验收通过。最终候选精确提交由Git读取，不在交接里重复写自身SHA。
 
-**S1 已合入实现与证据（PR #81）：** 产品只改主模板轮数 20→100。新增测试侧容量观察，复用正式 serve/Web、真实 Runner/治理/SQLGuard/PolicySession 与隔离 PostgreSQL，底层模型/StarRocks 用既有替身，监控用真 SDK 和本机 MCP 服务。完整回放、签名、scope 复核、请求字节准入都保持；没有引入压缩、裁剪、第二套循环、产品测试入口或新的权限。容量表、统计口径和复现命令唯一记录在[容量报告](docs/superpowers/reports/2026-10-11-session-capacity-s1.md)。
+**缺口与限制：** 没有真实模型、飞书/Lark、公司监控源、公司部署/升级/恢复或真实用户验收；脚本模型不能证明自主提出/取证/答案质量。Vertex只验证本地协议替身。未自行豁免真实能力和生产写门槛。已将主线 E5b `f89b586` 纳入集成；渠道展示、会话提醒及未支持输入的兼容以本次回归和 PR CI 为准。SDK-A只替代批准暂停/恢复协议；SDK-B 产品差异已独立复审；SDK-C 等价评估未发现可安全删除的薄层，未修改产品代码。
+
+**已合入主线 E5b：** [七项计划 E5b](docs/superpowers/plans/2026-10-10-production-dialogue-repairs.md#e5图片和文档输入第-5-项)的 TXT/MD 受控输入随主线 `f89b586` 合入；本次只核对它与 SDK-A 审批路径的集成。图片保存/回放与模型输入属后续独立切片，E6/C7 不提前实施。
+
+**E5b TXT/MD 候选离线证据（2026-10-12）：** 先在基线添加六个可观察的回归场景，因配置禁止新字段而失败；实现后以 `document_input_enabled=false` 保持 E5a 默认回执，显式开启才接收获准的 UTF-8 TXT/MD。受控下载器只用可信消息编号/资源键和锁定 SDK 的飞书/Lark 域名，流式限制声明及实际字节、拒绝重定向与非 identity 编码，30 秒总期限覆盖取凭据、读取和关闭；资源失败只给固定原因码。文件内容经既有文字策略、授权与群成员复核，按不可信资料进入同一 SDK Runner 的诊断用途；历史追问由原 Session 回放文字，不新增存储表或 Agent 循环。正式 runtime 装配、Gateway + Runner + 隔离 PostgreSQL 的成功、拒绝、取消、去重、群 mention/成员以及锁定 Lark SDK raw/webhook 与本机合成端点均已覆盖；后者不是公司 Lark 验收。新增及文档定向检查 **37 passed**，先前受影响的 16 个测试文件 **797 passed**；最终产品源码仅再修改了注释，新增资源键、精确字节边界及 runtime 装配用例，未重跑这 797 项。`ruff check --no-cache .`、`ruff format --check --no-cache src/xiaowei tests/sdk_core`（123 文件）、`mypy src/xiaowei --no-incremental`（28 文件）、`git diff --check` 均通过。真实模型阅读/抗注入、真实 Lark 下载与收发、公司 StarRocks、浏览器、部署、图片输入与 12 图请求均未验证；E5b 真实模型门槛没有豁免；PR #88 已离线合入，但真实环境和部署未据此验收。
+
+**E5b 前置核验（2026-10-12，实验阶段未形成产品功能）：** 基线 `8722147` 的飞书 E5a 路径仍只对非文本发固定回执；锁定 `lark-channel-sdk` 的公开资源下载方法会先读完整响应，不能落实 2 MiB 接收上限，`ChannelConfig.http_executor` 未接入此路径。本机合成端点的 `httpx2.AsyncClient.stream` 协议实验覆盖无 Content-Length、分块越限、声明超限及虚报过短长度；原 `httpx2.Timeout` 用例只证明单次读取超时。复审指出慢速滴流可避开该超时，随后补总期限反例与 `asyncio.timeout`、正文中途取消断连断言及非 identity 编码拒绝。该协议实验未覆盖凭据取得或产品入口；TXT/MD 后续实现见上方候选证据，图片格式/解码仍待实施。锁定 SDK 定义 `input_image` 输入形状，但小维当前 `PolicySession`、Vertex 映射和模型 transport 都只接受文字；协议实验不证明图像进了 Runner 或可回放。
+
+用户将上限定为每会话 **12 张**（每张 2 MiB 原图，每轮全部回放）；由此推导最坏原值 25,165,824 字节、Base64 33,554,448 字节。可复现的本机锁版 httpx2 短文本合成请求体 33,555,158 字节，其中非图片 710 字节。图片只对可信图片 part 加独立额度，文字、工具与系统字段仍守原 Profile 请求上限；没有自动压缩或悄悄丢图。获准原图须按原会话固定保留期绑定保存，回放前重新核对当前身份/权限/期限；`/新建` 不继承。真实 Vertex Express 是否接受 12 图请求、真实 Lark 下载和模型识图均未验证，不继承 R7/R3 的模型豁免。
+
+协议与文档检查命令：`PYTHONDONTWRITEBYTECODE=1 .venv/bin/python -m pytest tests/sdk_core/test_e5b_stream_probe.py tests/security/test_docs_command_consistency.py tests/contract/test_doc_fact_binding.py -q -W error -o cache_dir=/private/tmp/e5b-review-pytest-cache --tb=short`。原 head `83d07d0` 为 **12 passed**；审查反例先得 **2 failed, 1 passed**（总期限、编码拒绝两例按预期失败，取消中途断连通过），修正后协议探针 **9 passed**，新增显式 identity 成功对照后完整组合 **15 passed**。先前默认沙箱拒绝绑定临时端口，导致协议六例均因 `PermissionError` 失败；隔离环境运行后原用例通过，没有改断言或跳过。全仓 `ruff check --no-cache .`、新增测试文件的 Ruff 格式、`git diff --check` 通过；本次 `mypy --cache-dir=/private/tmp/e5b-review-mypy src` 为 129 源文件无问题。全仓 `ruff format --check .` 因未改动的旧源码/历史文档共 123 文件会被格式化而失败，不因本片重排旧文件。该前置实验没有产品附件路径；图片解码像素/尺寸和启用模型组合仍待后续锁定。
+
+**E5a 当前证据（2026-10-12）：** 基线只要 message_type != text 就提前丢弃，早于群 mention 和单聊登记。现共用有界 JSON 容器与公共事件校验，之后复用当前授权核心、固定发送及原提示窗口；不下载，不将正文提取为业务输入，不进入命令、Agent、请求、Session 或 Evidence。SDK raw 后原管线仍在内存解析/规范化 post，标准策略禁用且小维不消费结果。新增 ChannelService.authorize_notice 只复用 _decide_ref，不创建第二套授权或循环。
+
+基线现有飞书/群三文件 **288 passed**（41.90s）；首次命令引用不存在的 test_group_auth.py，未收集测试，不作为证据。新回归在基线 **23 failed, 16 passed**（67.07s）：合法消息无反馈、群无当前成员检查；首轮候选 **36 passed, 3 failed**，失败因合成端点把 bot 身份和发送返回 data 混合导致 SDK 备用查询。按锁版 SDK 的实际响应形状修正替身，保留资源接口闭集，随后 **39 passed**（6.46s）。时钟辅助接受秒数、真实 SDK 时效需当前时间，均在测试侧校正；不改变产品检查。
+
+正式 serve/raw 桥成功 + 非法租户、实际 SDK webhook/raw/OpenAPI、群当前成员/mentions、私聊登记、post 嵌入命令、并发限频、未知与重复事件共 **48 passed**（8.57s）。实际 SDK 端点只出现 auth、bot info、一次消息创建，零资源下载；应用侧数据库监听及正式空表验证零请求/Session/Evidence，模型和工具计数为零。替身证明协议/治理调用链，不证明真实客户端纯图片 mention。
+
+既有兼容检查首轮 **5 failed, 283 passed**：合法 image/post 静默断言已被 E5a 批准契约取代。原负例更新为非法类型字段和未 @ 图片，正例另验证单条固定回执及零业务 I/O；其他原断言不放宽。六相关文件最终 **336 passed**（50.44s）。初次 Ruff 发现测试中静态表名的 SQL 插值，改为四条固定语句。日志 `/private/tmp/e5a-*.log`。
+
+**E5a 隔离变异：** 确认导入仓库外源码副本后，跳过当前授权、绕过非文本群 mention、去掉未支持类型去重/限频分别 **3 / 4 / 10 项失败**，工作树未受变异。脚本 `/private/tmp/e5a-mutations.py`，日志 `/private/tmp/e5a-mutation-{auth,mention,dedup}.log`。全仓 Ruff、118 文件格式、129 源文件 mypy、文档命令/事实 5 passed（0.18s）及 diff check 已通过。
+
+冻结实现 `e2b0e86a14651389cb34b258fb90f6909fcd8d66` 的完整 SDK/P1B 为 **3217 passed, 16 skipped, 62 deselected**（875.15s，退出 0，`/private/tmp/e5a-full-sdk-p1b.log`）。实际命令：`SDK_TEST_POSTGRES_URL=postgresql+asyncpg://postgres@127.0.0.1:55432/postgres XW_TEST_PROMETHEUS_MCP_BIN=/private/tmp/xw-prometheus-mcp-v018/prometheus-mcp-server XW_TEST_GRAFANA_MCP_BIN=/private/tmp/xw-g3-official/mcp-grafana .venv/bin/python -m pytest tests/sdk_core tests/p1b -q`；官方二进制只接本机合成端点，其他可选环境沿原跳过规则，浏览器/真实 StarRocks opt-in 未选入，不改变选择规则、不将其计作通过。后续仅文档及模块说明澄清，行为代码不再改变。
+
+文案澄清后按 `SDK_TEST_POSTGRES_URL=postgresql+asyncpg://postgres@127.0.0.1:55432/postgres .venv/bin/python -m pytest tests/sdk_core/test_unsupported_feishu.py tests/sdk_core/test_unsupported_group.py tests/sdk_core/test_unsupported_entrypoints.py tests/security/test_docs_command_consistency.py tests/contract/test_doc_fact_binding.py -q -W error -o cache_dir=/private/tmp/e5a-final-pytest-cache` 完成 **53 passed**（9.29s，`/private/tmp/e5a-final-targeted.log`）；全仓 Ruff、118 文件格式、129 源文件 mypy 与 diff check 再次通过。不因纯文案澄清重跑相同输入的完整重型套件。
+
+实现方发起的新上下文只读分支复查核对上述冻结实现：未发现阻断；SDK 仍解析 post 的非阻断文案点已据源码收窄到“不提取为业务输入”。此复查不替代用户指定独立审查。E5a 专用取消/drain 未新增回归；取消保持占位是源码推理，原身份提示共享路径已有 drain 用例，不声称专用实测通过。CI 由精确 PR head 获取，用户指定独立审查和真实平台验收仍开放。
+
+**E5a PR #86 首次 CI：** `b305463ab7a02e99c19fa4bfb0250f28b78123ca` 的 p3-release 为 **1 failed, 81 passed**（551.38s）；唯一失败 `test_operator_visible_files_name_no_hosting_platform_or_framework` 指向新增 OPERATIONS 文案里的 `SDK`，违反既有面向操作者发行包契约。本地原检查先复现 **1 failed**（0.09s），只去掉框架名称、保留“自动媒体拉取等继续关闭”的行为说明，断言及产品代码不变；原失败用例与两个文档检查为 **6 passed**（0.24s），diff check 通过。日志 `/private/tmp/e5a-p3-job.log`、`e5a-doc-release-{red,green}.log`；最终 head CI 按 PR 获取，不用首轮部分绿色替代。
+
+**E5a 未覆盖：** 真实 Lark 收发/群纯图片 mention、公司环境、浏览器和部署；该历史切片不改 Web。未调用真实模型，E5a 不改变 Agent 或模型/工具契约、不新增豁免。单条固定回执不占业务轮数；与身份提示共用每实际 open_id 10 分钟内存窗口，跨私聊/指定群共享，失败/未知不释放，普通文本提问不受影响。E5b 已合入；E6 目前为离线候选。
+
+**S3 已合入证据（2026-10-12，真实环境未验收）：** S2 成功快照由现有请求事务保存，提醒只在当前授权和 Evidence 校验后的交付链生成；复用 Web 已有显示字段，飞书共用渲染/发送保持单条。没有新测量、配置、迁移、通知表或模型行为改动。有效基线 RED 为阈值/容器/容量 17 failed，以及正式 Web/飞书提醒缺失；S2 提交超限控制路径仍通过。真实 Chrome RED 为成功消息缺少提醒元素。新测试早期请求列名定位及群读取假设已按真实契约修正，不是产品修复证据；群共享历史不授予另一成员的请求读取权，原发起人保护保持。
+
+已运行：S3 与 S2 正式入口/快照/群/渲染 34 passed；实际提交字节/期限及首轮历史隔离补充 3 passed；Chrome S3/S2 2 passed；真实锁版飞书 SDK 对本机合成发送/回复端点 4 passed，原始请求体与容量计算相符；S3/既有渲染/格式 116 passed。小消息容量分支先 1 failed，随后修正为完整合规消息优先，只在需要容量回执时检查回执，所有原容量上限保留。隔离副本变异（确认导入副本）去字节阈值、折叠提醒、写入 SDK 历史分别 4/1/1 项失败；历史变异初次定位不符未执行，按实际 pending 保存点补跑通过检测。日志位于 `/private/tmp/s3-*.log`，不把以上计数合并为去重总量。
+
+**计划 PR #84 CI：** 首次 integration 为 1 failed, 5105 passed；唯一失败 `test_expired_cancel_never_proposed_or_written` 的临时端口 43375 无法绑定，随后 raw 处理器缺失。本机同用例 -W error 为 1 passed；不改测试或产品代码，相同 head 32d9213 仅重跑失败 job 后十项全绿，再按用户授权合并为当前基线。保留 `/private/tmp/plan84-ci-failed.log` 与诊断日志；未跳过或抹去首次失败。
+
+**冻结候选前定向检查：** `SDK_TEST_POSTGRES_URL=postgresql+asyncpg://postgres@127.0.0.1:55432/postgres .venv/bin/python -m pytest tests/sdk_core/test_session_warning.py tests/sdk_core/test_session_warning_group.py tests/sdk_core/test_session_warning_render.py tests/sdk_core/test_session_warning_entrypoints.py tests/sdk_core/test_session_rejection_state.py tests/sdk_core/test_session_rejection_entrypoints.py tests/sdk_core/test_feishu.py tests/security/test_docs_command_consistency.py -q -W error` 为 **280 passed**（43.53s，`/private/tmp/s3-targeted-final.log`）。Ruff、格式和 27 文件 mypy 通过；后补全仓 `ruff check --no-cache .`、`mypy --cache-dir=/private/tmp/s3-mypy-all src` 为 **129 source files 无问题**，命令均经当前 `.venv/bin/python -m` 运行。文档命令与事实检查 5 passed，差异检查通过。
+
+**冻结版本完整 SDK/P1B：** 在干净 `553718ec153d9545fa3994bf00f6c11d764cdf90` 上运行 `SDK_TEST_POSTGRES_URL=postgresql+asyncpg://postgres@127.0.0.1:55432/postgres XW_TEST_PROMETHEUS_MCP_BIN=/private/tmp/xw-prometheus-mcp-v018/prometheus-mcp-server XW_TEST_GRAFANA_MCP_BIN=/private/tmp/xw-g3-official/mcp-grafana .venv/bin/python -m pytest tests/sdk_core tests/p1b -q`，结果 **3168 passed, 16 skipped, 62 deselected**（858.48s，`/private/tmp/s3-full-sdk-p1b.log`）。没有修改既有 skip/opt-in 规则；本机未启用官方 Alertmanager / 社区协议环境，真实 StarRocks 与浏览器按现有 opt-in 未选入，Chrome 单独运行的证据见上文。不能把此结果写成整仓或真实环境验收；最终 PR head CI 另核。
+
+**实现方复查与补充：** 对 `7aa5451… → 553718e…` 的 fresh-context 只读自查未发现已证实阻断，不是用户指定独立审查。指出正式飞书用例名称含澄清、实际却均查 SQL；已参数化为事实/真正无工具澄清，明确断言模型请求数、SQL 数与事件重复不重跑。在 main `7aa5451` 源码副本上，澄清提醒断言为 **1 failed**（1.49s，`/private/tmp/s3-clarification-red.log`），确认实际导入副本；候选正式 Web/飞书三例为 **3 passed**（2.77s，`/private/tmp/s3-entrypoints-final.log`）。完整回归后仅补该测试及文档，产品源码不变，不冒充补充用例也包含在旧全量计数中。
+
+**未覆盖：** 真实 Lark 显示、公司 Web/StarRocks、部署与人工验收；脚本模型不证明自主任务能力。S3 不改变 Agent 行为或模型/工具契约，因此不需要新增模型对照，不新增真实模型豁免；真实服务验证仍须授权。
+
+**S2 本地实现与证据（2026-10-11）：** 复用 `PolicySession` 的元数据读取/完整回放计数，经 Application 的可信返回/异常、请求终态事务、当前身份读取，生成 Web/飞书固定说明。成功提交和失败状态单独保存，不进入回答 JSON、模型或 SDK 历史；Agent 指令、工具、治理及 Evidence 校验不变。主线 v7 已被占用，本片用 v8 迁移，发行清单只允许 v8 直接启动，v1–v7 显式升级。旧空快照保留通用回执；坏快照拒绝交付，保存失败、取消和恢复沿既有状态机。
+
+- 先红后绿：基线 `4f6132e` 导出副本中正式入口八个用例全部失败，均在固定说明缺失处（`/private/tmp/s2-baseline-final-red.log`）；候选完成成功查询→轮数拒绝、开始前历史容量/期限/绑定/不可继续和执行后提交容量失败。脚本模型只证明链路，不证明真实模型能力。
+- 实际 PostgreSQL 覆盖请求终态/快照一起回滚、readiness 锁低、Session 已提交而请求保存失败时 `result_not_saved`/关闭、重启恢复、旧 NULL、坏快照、owner/actor/渠道/当前权限。正式 Web 重启后读取与重复请求一致，不再执行；正式飞书事件/发送使用通道替身。
+- 真实 Chrome 用空闲端口，检查具体提示默认可见、刷新不变、新建后查询可继续；`/private/tmp/s2-browser-green.log` 为 1 passed，未占用 8501。
+- 隔离变异：去掉快照保存、提交超限写成未执行、去掉接收者校验，三项全部被目标测试发现（后一项 owner/actor 两个反例）；`/private/tmp/s2-mutations.log` 记录实际导入的临时源码路径，候选未被变异修改。
+- 测试夹具修正：迁移后重新建立连接，避免复用 ALTER TABLE 前的 `SELECT *` 缓存；浏览器等待新建会话清空列表后再提问；无证据成功场景使用合法澄清回答。均保留原状态、权限、零业务 I/O 和不重放断言。
+- 实现方新上下文复查发现两处快照边界：提交阶段沿用旧字节、编码失败发生在 Session 提交之后。先补十项 RED（含矛盾状态反例），随后清空阶段旧测量、执行前检查 1024 字节配置兼容、成功状态编码前移至 SDK 写入前；提交后编码错误走原 `result_not_saved`/关闭链。没有新增业务限额、权限或 Agent 行为。日志 `/private/tmp/s2-review-red.log` 为 10 failed，修复后同文件及相关链路包含在 264 passed 中；这不是用户指定独立审查。
+- 新增三项隔离变异：恢复旧阶段字节、移除容量预检、移除提交后编码失败关闭，分别 3/2/1 failed；导入临时副本已核对，日志 `/private/tmp/s2-review-mutations.log`。S1 容量观察器需要转交新增提交返回值，先补持久状态断言复现 1 failed，再修测试装配，不改产品观测次数。
+- 发行 CI 揭示三处兼容遗漏：操作者文档带入开发框架名称；迁移保留计数仍期望 v7；模拟 v5 的夹具保留了 v8 列。仅修文档与夹具，保留原计数、回滚、旧程序拒绝及敏感信息断言。隔离 PostgreSQL 诊断确认旧夹具为重复列错误（42701），补齐真实 v5 形状后升级为 v8（`/private/tmp/s2-compose-migration-probe.log`）；完整镜像链由修订 head 的 CI 验证。
+
+**S2 验证状态：** 本机隔离 PostgreSQL 为 55432；下列命令中的 `pytest` 均使用 `SDK_TEST_POSTGRES_URL=postgresql+asyncpg://postgres@127.0.0.1:55432/postgres`。本机 Docker overlay 30G/30G（0 可用），镜像类验证受环境限制，未清理其他任务镜像/卷。PR 干净 CI 结果按精确 head 另记，不能把本机未通过的全量写成通过。
+
+| 实际检查 | 结果 |
+| --- | --- |
+| `.venv/bin/python -m pytest tests/sdk_core/test_session_rejection_state.py tests/sdk_core/test_session_rejection_entrypoints.py tests/sdk_core/test_cli.py tests/sdk_core/test_evidence.py tests/sdk_core/test_group_identity.py tests/sdk_core/test_session_policy.py -q` | 264 passed，117.57s；`/private/tmp/s2-review-green.log` |
+| `.venv/bin/python -m pytest tests/sdk_core/test_session_rejection_browser.py -m browser -q -W error`，另设 `SDK_TEST_CHROME=/Applications/Google Chrome.app/Contents/MacOS/Google Chrome` | 1 passed，2.57s；`/private/tmp/s2-browser-final-correct-env.log`。先前误用 `CHROME_BINARY` 导致 1 个 setup error，未启动 Chrome；按仓库变量修正后重跑，没有改断言 |
+| `.venv/bin/python -m pytest -q`（中间候选） | 5 failed、5081 passed、329 skipped、61 deselected、7 errors，756.20s；`/private/tmp/s2-full.log`。四个失败分别是 CLI/迁移期望仍为 v7、Delivery 精确字段缺 session_notice，按批准契约更新且保留其余断言；一个监控计时断言原样复核见下；七个镜像 setup error 均为 Docker 空间耗尽 |
+| `.venv/bin/python -m pytest tests/sdk_core/test_monitoring_r1b.py::test_concurrent_reconnect_is_single_flight_bounded_and_cools_down -q`，原样分别运行三次 | 3 次均 1 passed，5.43/5.51/5.47s；`/private/tmp/s2-monitoring-timing-{1,2,3}.log`。未改监控源码或 0.5 秒断言，单测通过不证明全量负载下永不波动 |
+| `.venv/bin/python -m pytest tests/sdk_core tests/p1b tests/security/test_docs_command_consistency.py tests/contract/test_doc_fact_binding.py -q -W error` | 2978 passed、177 skipped、61 deselected，693.72s；`/private/tmp/s2-sdk-p1b-final.log`。执行期间完成了下条观察器返回值兼容及配置预检时区长度调整，之后定向重跑；最终冻结 head 的全量由 PR CI 核验。该范围不包含镜像检查 |
+| `.venv/bin/python -m pytest tests/sdk_core/test_session_capacity.py -q -W error`；`.venv/bin/python -m pytest tests/sdk_core/test_session_rejection_state.py -q -W error` | 最后一次容量观察器/状态边界调整后分别 16 passed（30.75s）和 36 passed（7.24s）；`/private/tmp/s2-capacity-observer-green.log`、`/private/tmp/s2-state-final-review.log` |
+| `.venv/bin/ruff check --no-cache .`；`.venv/bin/ruff format --check --no-cache src/xiaowei tests/sdk_core scripts/package_release.py tests/deployment/test_release.py tests/deployment/test_compose.py tests/deployment/test_maintenance.py`；`.venv/bin/mypy src/xiaowei`；`uv lock --check`；`git diff --check` | 已通过；格式 114 文件，类型 27 源文件；最终提交前重核未变输入 |
+| `.venv/bin/python -m pytest tests/security/test_docs_command_consistency.py tests/contract/test_doc_fact_binding.py -q -W error`；发行归档契约、包内文档引用、旧配置回退三个离线用例 | 分别 5 passed（0.17s）与 3 passed（0.11s）；`/private/tmp/s2-docs-final.log`、`/private/tmp/s2-release-contract-final.log`。不证明本机镜像检查通过 |
+| CI 兼容修正后的操作者文档/命令事实检查、发行契约三用例、`test_storage_v2.py -q -W error` | 分别 6 passed（0.26s）、3 passed（0.11s）、29 passed（4.04s）；`/private/tmp/s2-ci-doc-green.log`、`/private/tmp/s2-ci-release-offline-retry.log`、`/private/tmp/s2-ci-storage-green.log`。Ruff、改动文件格式、差异检查通过；镜像回归由 PR 修订 head 的 CI 核验 |
+
+**S2 未覆盖：** 真实 Lark 收发、公司 Web/StarRocks/模型、v8 在公司环境的升级/成对回退与用户验收。S2 不更改 Agent 行为契约，不新增真实模型豁免；S3 状态见当前快照，其他未批准切片未实施。数据库迁移需要显式操作，部署及私聊/测试群观察须用户另行授权。
+
+**S1 当前实现与证据（2026-10-11）：** 产品只改主模板轮数 20→100。新增测试侧容量观察，复用正式 serve/Web、真实 Runner/治理/SQLGuard/PolicySession 与隔离 PostgreSQL，底层模型/StarRocks 用既有替身，监控用真 SDK 和本机 MCP 服务。完整回放、签名、scope 复核、请求字节准入都保持；没有引入压缩、裁剪、第二套循环、产品测试入口或新的权限。容量表、统计口径和复现命令唯一记录在[容量报告](docs/superpowers/reports/2026-10-11-session-capacity-s1.md)。
 
 - 基线相关 Session/Vertex/R3 **188 passed**；混合序列先在旧模板上观察到第 21 轮拒绝，再调整唯一模板值。初始 fixture 参数错误先定位修正，不把它们算作产品 RED。
 - 成功与关键失败：30 个混合排障交互全部完成；原 20/21、新 100/101 边界经正式 Web 验证，拒绝轮没有模型或新增工具 I/O。active 历史仅提高轮数可继续，撤权/封存/关闭仍拒绝；多查询已执行但提交超字节不保存 SDK 历史、不重放。
@@ -84,7 +177,7 @@
 | `.venv/bin/python -m pytest tests/sdk_core/test_session_capacity.py tests/sdk_core/test_session_policy.py tests/sdk_core/test_vertex_model.py tests/sdk_core/test_dialogue_gate.py tests/sdk_core/test_r3_entrypoints.py tests/sdk_core/test_cli.py tests/security/test_docs_command_consistency.py tests/contract/test_doc_fact_binding.py -q -W error --basetemp=/private/tmp/s1-final-evidence`（同一测试库环境） | 测量字段命名及文档更新后 314 passed，127.33s；`/private/tmp/s1-final-regressions.log`，含 16 项 S1 与 5 项文档检查。此命令不含 Compose，不能用于抹去上条失败 |
 | `.venv/bin/ruff check --no-cache .`；两新增文件 `ruff format --no-cache --check`；`.venv/bin/mypy --cache-dir /private/tmp/s1-mypy-cache src`；`git diff --check` | 已通过，129 源文件；最终定向回归及 CI 以精确候选另记 |
 
-**S1 未覆盖与后续：** 真实模型长上下文排障质量、token 用量、真实 Lark/公司 StarRocks、浏览器及部署未验证。S1 不改变提示词/工具契约，不新增模型豁免；离线统计不能证明真实 Agent 能完成同样任务。现有模板以外的公司配置不自动改写，具体操作及回退见 OPERATIONS。实现方的新上下文分支复查未发现阻断，报告的单值截断措辞已明确；不代表独立通过。S1 已随 PR #81 合入；已核对 head `cdab6bd705b81e2c21a8692f91d1642fe44f8b4e` 的[十项 CI](https://github.com/shixian66/xiaowei-agent-sdk/actions/runs/38142846169)全通过，仅证明 S1 版本。后续 S2/S3 仍未实施。
+**S1 未覆盖与后续：** 真实模型长上下文排障质量、token 用量、真实 Lark/公司 StarRocks、浏览器及部署未验证。S1 不改变提示词/工具契约，不新增模型豁免；离线统计不能证明真实 Agent 能完成同样任务。现有模板以外的公司配置不自动改写，具体操作及回退见 OPERATIONS。实现方的新上下文分支复查未发现阻断，报告的单值截断措辞已明确；不代表独立通过。S1 独立复审通过并获用户授权随 PR #81 合入，精确 head 十项 CI 通过（run 38142846169）；S2/S3 状态见当前快照。
 
 **R12 已合入实现与历史证据（2026-10-11）：** 复用已验证的 `send_delivery` / `build_feishu_message`、静态 `OutboundCard` 与二分容量搜索；Gateway 和 CLI 发送路径未另写。只有 `feishu_text` 中的模型业务原文及模型分析进入格式器；固定 `monitoring_notice` 先按可信字段分离；固定回执、来源、限制、引用、获准事实、SQL/DDL、原文 JSON 始终纯文字。本片不改变模型/工具契约，未调用真实模型，不属于 R7/R3 豁免的扩展。生效展示与回退说明只在 ARCHITECTURE §7 / OPERATIONS 维护。
 

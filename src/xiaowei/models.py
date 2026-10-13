@@ -122,6 +122,8 @@ class ApprovedAction(_Trusted):
     tool_id: ToolId
     target_id: Label
     arguments_digest: Label
+    approver: Identity | None = None
+    sdk_call_id: Label | None = None
 
 
 class RunContext(_Trusted):
@@ -266,6 +268,8 @@ class AgentAnswer(_Answer):
     inferences: list[AnswerInference]
     clarification: Annotated[str, Field(min_length=1, max_length=2000)] | None
     advice: Annotated[str, Field(min_length=1, max_length=4000)] | None = None
+    report_format: Literal["md", "html"] | None = None
+    """仅在飞书用户明确要求只读事实报告时选定的文件格式；文件内容由代码构造。"""
 
 
 MonitoringFailureReason = Literal[
@@ -281,6 +285,54 @@ class MonitoringFailure(_Trusted):
     reason: MonitoringFailureReason
 
 
+SessionRejectReason = Literal[
+    "history_turn_limit", "history_bytes_limit", "expired", "binding_changed", "unavailable"
+]
+SESSION_STATE_MAX_BYTES = 1024
+
+
+class SessionSnapshot(_Trusted):
+    """可信执行链在已有检查处取得的状态；不含历史内容，不交给模型。
+
+    提交前的 replay_bytes 包含待提交轮次，committed_turns 始终只计成功提交的轮次。
+    未完成完整回放或无法确认归属时相应计数留空。
+    """
+
+    observed_at: AwareDatetime
+    phase: Literal["before_start", "before_commit", "after_commit"]
+    committed_turns: int | None = Field(ge=0, strict=True)
+    turn_limit: int = Field(gt=0, strict=True)
+    replay_bytes: int | None = Field(ge=0, strict=True)
+    byte_limit: int = Field(gt=0, strict=True)
+    expires_at: AwareDatetime | None
+    reason: SessionRejectReason | None = None
+
+    @model_validator(mode="after")
+    def _bounded(self) -> "SessionSnapshot":
+        if self.phase == "after_commit" and (
+            self.reason is not None
+            or self.committed_turns is None
+            or self.replay_bytes is None
+            or self.expires_at is None
+            or self.committed_turns > self.turn_limit
+            or self.replay_bytes > self.byte_limit
+        ):
+            raise ValueError("提交后的会话状态不完整或超出上限")
+        if self.reason == "history_turn_limit" and (
+            self.committed_turns is None or self.committed_turns < self.turn_limit
+        ):
+            raise ValueError("交互轮数上限与会话状态不一致")
+        if self.reason == "history_bytes_limit" and (
+            self.replay_bytes is None
+            or self.replay_bytes < self.byte_limit
+            or (self.phase == "before_commit" and self.replay_bytes == self.byte_limit)
+        ):
+            raise ValueError("历史容量上限与会话状态不一致")
+        if len(self.model_dump_json().encode()) > SESSION_STATE_MAX_BYTES:
+            raise ValueError("会话状态超过容量")
+        return self
+
+
 class TurnAnswer(_Trusted):
     """一轮的最终回答与本轮模型可见的证据；后者由可信代码记录，不来自模型。
 
@@ -292,6 +344,9 @@ class TurnAnswer(_Trusted):
     answer: AgentAnswer
     context_evidence: tuple[Label, ...]
     monitoring_failures: tuple[MonitoringFailure, ...] = ()
+    run_turn_id: Label | None = None
+    session_state: SessionSnapshot | None = Field(default=None, exclude=True)
+    """成功提交后由应用附加；请求表单独保存，不进入回答 JSON 或 SDK Session。"""
 
 
 class DeliveryFact(_Trusted):
@@ -328,6 +383,8 @@ class Delivery(_Trusted):
     analysis: tuple[AnswerInference, ...] = ()
     """独立渲染的模型分析；仅由证据验证后的回答生成，不在事实表格中混排。"""
     monitoring_notice: str | None = None
+    session_notice: str | None = None
+    """当前身份读取后，由可信请求状态生成的固定系统提示；不来自模型。"""
     requires_complete: bool = Field(default=False, exclude=True)
     """包含待批准动作时，所有代码生成的材料必须完整发送；容量提示不算动作送达。"""
     """系统按可信失败记录生成的未核实源说明；Web 与飞书均须展示。"""
@@ -335,3 +392,9 @@ class Delivery(_Trusted):
     """Web 澄清或未执行建议的原文。"""
     feishu_text: str | None = Field(default=None, exclude=True)
     """飞书澄清或建议的原文；不进入 Web 序列化，不能从转义 content 反解。"""
+    report_format: Literal["md", "html"] | None = Field(default=None, exclude=True)
+    """模型在本轮选择的飞书报告格式；事实和文件内容仍由代码生成。"""
+    request_state: Literal["completed", "paused"] | None = Field(default=None, exclude=True)
+    """发送时由已保存请求附加，供报告文件与卡片选择；不进入回答或渠道 JSON。"""
+    report_notice: str | None = Field(default=None, exclude=True)
+    """报告不能作为文件交付时的可信固定说明，只进入本次飞书卡片。"""

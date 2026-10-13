@@ -1,5 +1,6 @@
 """D7 formal serve/group path, real SDK/PG + locked official MCP/isolated Grafana."""
 
+import asyncio
 import json
 from collections.abc import AsyncIterator
 from pathlib import Path
@@ -8,14 +9,16 @@ from uuid import uuid4
 
 import httpx2
 import pytest
+from agents.mcp import MCPServerStreamableHttp
 from tests.sdk_core.grafana_d7_fixture import DashboardTraffic, dashboard_relay
 from tests.sdk_core.grafana_fixture import official_grafana
 from tests.sdk_core.test_alertmanager_s6 import group_channel as group_channel
-from tests.sdk_core.test_alertmanager_s6 import group_send
+from tests.sdk_core.test_alertmanager_s6 import group_send as _group_send
 from tests.sdk_core.test_app import cite, tool_call
 from tests.sdk_core.test_feishu_render import message_text
 from tests.sdk_core.test_grafana_d7_protocol import isolated_api as isolated_api
 from tests.sdk_core.test_grafana_mcp_protocol import grafana_binary as grafana_binary
+from tests.sdk_core.test_group_actions import request_execution
 from tests.sdk_core.test_group_gateway import GroupChannel, runtime_group
 from tests.sdk_core.test_group_identity import A, B
 from tests.sdk_core.test_runtime import Env
@@ -62,6 +65,22 @@ def d7_config(url: str, **changes: Any) -> dict[str, Any]:
     values["feishu"]["max_reply_chars"] = 3500
     values.update(changes)
     return values
+
+
+async def group_send(
+    env: Env, channel: GroupChannel, message: str, mid: str, *, sender: str = A
+) -> None:
+    """等该消息的最终群回执；排队提示不代表这一轮已经结束。"""
+    await _group_send(env, channel, message, mid, sender=sender)
+    async with asyncio.timeout(25):
+        while True:
+            state = await env.scalar(
+                "SELECT state FROM xiaowei_request WHERE reply_message_id=:mid AND delivery='sent'",
+                {"mid": mid},
+            )
+            if state in {"completed", "paused", "failed", "interrupted"}:
+                return
+            await asyncio.sleep(0.02)
 
 
 @pytest.fixture
@@ -122,6 +141,7 @@ async def test_formal_group_create_and_conflicting_update_not_written(
     asked = env.scripts.add(
         attributed(A, "创建主机看板"),
         tool_call(CREATE.replace("/", "__"), **args),
+        request_execution,
         cite(),
     )
     try:
@@ -163,6 +183,7 @@ async def test_formal_group_create_and_conflicting_update_not_written(
                 tool_call(
                     UPDATE.replace("/", "__"), **{**args, "dashboard_json": json.dumps(changed)}
                 ),
+                request_execution,
                 cite(),
             )
             await group_send(env, group_channel, "修改主机看板", "om_update")
@@ -201,6 +222,66 @@ async def test_formal_group_create_and_conflicting_update_not_written(
             assert "未执行" in message_text(group_channel.sends[-1][1])
             assert (await served.ready())["status"] == "ready"
             assert len(env.scripts.calls) == 3
+    finally:
+        await isolated_api.delete(f"/api/dashboards/uid/{uid}")
+
+
+async def test_internal_write_cancellation_keeps_unknown_fact_without_replay(
+    env: Env,
+    write_endpoint: str,
+    isolated_api: httpx2.AsyncClient,
+    group_channel: GroupChannel,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """写入已到达官方 Server 后工具自身取消，SDK 可继续，但 Action 不重放。"""
+    uid = f"d7-{uuid4().hex}"
+    args = {
+        "dashboard_json": json.dumps(dashboard(uid)),
+        "folder_uid": "",
+        "message": "create",
+    }
+    original = MCPServerStreamableHttp.call_tool
+    writes = 0
+
+    async def cancel_after_write(
+        server: MCPServerStreamableHttp, name: str, arguments: dict[str, Any] | None = None
+    ) -> Any:
+        nonlocal writes
+        result = await original(server, name, arguments)
+        if name == "update_dashboard":
+            writes += 1
+            raise asyncio.CancelledError
+        return result
+
+    monkeypatch.setattr(MCPServerStreamableHttp, "call_tool", cancel_after_write)
+    asked = env.scripts.add(
+        attributed(A, "创建主机看板"),
+        tool_call(CREATE.replace("/", "__"), **args),
+        request_execution,
+        cite(),
+    )
+    try:
+        async with env.running(
+            env.config(**d7_config(write_endpoint)), feishu_channel=group_channel
+        ):
+            await group_send(env, group_channel, "创建主机看板", "om_cancel_propose")
+            action_id = await env.scalar("SELECT action_id FROM xiaowei_action")
+            assert action_id and await env.scalar("SELECT state FROM xiaowei_action") == "pending"
+            await group_send(
+                env, group_channel, f"/批准 {action_id}", "om_cancel_approve", sender=B
+            )
+            assert await env.scalar("SELECT state FROM xiaowei_action") == "unknown"
+            assert writes == 1
+            actual = (await isolated_api.get(f"/api/dashboards/uid/{uid}")).json()["dashboard"]
+            assert actual["version"] == 1
+            receipt = message_text(group_channel.sends[-1][1])
+            assert "未知" in receipt and "核对" in receipt
+            assert len(env.scripts.calls[asked]) == 3  # SDK把内部取消作为工具结果再交给模型
+            await group_send(env, group_channel, f"/批准 {action_id}", "om_cancel_again", sender=B)
+            assert writes == 1
+            assert (await isolated_api.get(f"/api/dashboards/uid/{uid}")).json()["dashboard"][
+                "version"
+            ] == 1
     finally:
         await isolated_api.delete(f"/api/dashboards/uid/{uid}")
 
@@ -260,7 +341,12 @@ async def test_formal_write_unknown_is_not_replayed(
     if failure == "read_type_mismatch":
         body["panels"] = [{"id": 1, "title": "CPU", "type": "timeseries", "targets": []}]
     args = {"dashboard_json": json.dumps(body), "folder_uid": "", "message": "create"}
-    env.scripts.add(attributed(A, "提出"), tool_call(CREATE.replace("/", "__"), **args), cite())
+    env.scripts.add(
+        attributed(A, "提出"),
+        tool_call(CREATE.replace("/", "__"), **args),
+        request_execution,
+        cite(),
+    )
     try:
         async with env.running(
             env.config(**d7_config(write_endpoint)), feishu_channel=group_channel
@@ -342,7 +428,12 @@ async def test_formal_update_success_then_atomic_race_is_rejected(
         "folder_uid": "",
         "message": "edit",
     }
-    env.scripts.add(attributed(A, "修改"), tool_call(UPDATE.replace("/", "__"), **args), cite())
+    env.scripts.add(
+        attributed(A, "修改"),
+        tool_call(UPDATE.replace("/", "__"), **args),
+        request_execution,
+        cite(),
+    )
     try:
         async with env.running(
             env.config(**d7_config(write_endpoint)), feishu_channel=group_channel
@@ -374,6 +465,7 @@ async def test_formal_update_success_then_atomic_race_is_rejected(
                         "dashboard_json": json.dumps({**body, "title": "Must not overwrite"}),
                     },
                 ),
+                request_execution,
                 cite(),
             )
             await group_send(env, group_channel, "竞争修改", "om_race_p")
@@ -481,6 +573,7 @@ async def test_restore_requires_new_action_and_uses_latest_version(
                     folder_uid=folder,
                     message="edit",
                 ),
+                request_execution,
                 cite(),
             )
             await group_send(env, group_channel, "修改", "om_edit")
@@ -498,6 +591,7 @@ async def test_restore_requires_new_action_and_uses_latest_version(
                     folder_uid=before["folderUid"],
                     message="restore prior approved definition",
                 ),
+                request_execution,
                 cite(),
             )
             await group_send(env, group_channel, "恢复原版", "om_restore")

@@ -424,11 +424,38 @@ def test_formal_compose_entry_success_failure_network_and_signal(
 
         downgraded = _pg(
             pg_id,
-            # 本机演练重建真实 v5 形状，不能只改版本而留下后来新增的表。
-            "BEGIN; DROP TABLE xiaowei_action; DROP TABLE xiaowei_installation; "
+            # 本机演练重建真实 v5 形状，不能只改版本而留下后来新增的表或列。
+            "BEGIN; DROP TABLE xiaowei_report; DROP TABLE xiaowei_action_run; "
+            "DROP TABLE xiaowei_image; "
+            "DROP TABLE xiaowei_action; DROP TABLE xiaowei_installation; "
+            "ALTER TABLE xiaowei_request DROP CONSTRAINT xiaowei_request_answer_state_check; "
+            "ALTER TABLE xiaowei_request ADD CONSTRAINT xiaowei_request_check "
+            "CHECK ((state = 'completed') = (answer IS NOT NULL)); "
+            "ALTER TABLE xiaowei_request DROP CONSTRAINT xiaowei_request_state_check; "
+            "ALTER TABLE xiaowei_request ADD CONSTRAINT xiaowei_request_state_check "
+            "CHECK (state IN ('accepted', 'running', 'completed', 'failed', 'interrupted')); "
+            "ALTER TABLE xiaowei_request DROP CONSTRAINT xiaowei_request_failure_code_check; "
+            "ALTER TABLE xiaowei_request ADD CONSTRAINT xiaowei_request_failure_code_check "
+            "CHECK (failure_code IN ('busy', 'model_failed', 'evidence_failed', "
+            "'session_failed', 'scope_unverifiable', 'access_denied', 'result_not_saved', "
+            "'interrupted')); "
+            "ALTER TABLE xiaowei_request DROP COLUMN session_state; "
             "UPDATE xiaowei_schema_version SET version = 5; COMMIT",
         )
         assert downgraded.returncode == 0
+        legacy_columns = _pg(
+            pg_id,
+            "SELECT count(*) FROM information_schema.columns "
+            "WHERE table_schema = current_schema() AND table_name = 'xiaowei_request' "
+            "AND column_name = 'session_state'",
+        )
+        assert legacy_columns.returncode == 0 and legacy_columns.stdout.strip() == "0"
+        legacy_images = _pg(
+            pg_id,
+            "SELECT count(*) FROM pg_tables WHERE schemaname = current_schema() "
+            "AND tablename = 'xiaowei_image'",
+        )
+        assert legacy_images.returncode == 0 and legacy_images.stdout.strip() == "0"
         lock = docker(
             "exec",
             "-d",
@@ -508,7 +535,7 @@ def test_formal_compose_entry_success_failure_network_and_signal(
             "upgrade",
             "--bind-existing-digest-key",
         )
-        assert restored.returncode == 0 and restored.stdout.strip() == "storage version 7"
+        assert restored.returncode == 0 and restored.stdout.strip() == "storage version 11"
         upgrade_process = None
 
         wrong_key = "wrong digest $ # space ' quote"

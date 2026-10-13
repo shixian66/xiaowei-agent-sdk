@@ -27,12 +27,13 @@ import json
 import logging
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass
+from datetime import timedelta
 from typing import Protocol
 
 from pydantic import AwareDatetime, BaseModel, ConfigDict, Field, model_validator
 
 from xiaowei.actions import ACTION_SETTLE_TIMEOUT_SECONDS, ActionOutcomeError
-from xiaowei.app import Application, Mode, TurnError, TurnReason
+from xiaowei.app import Application, Mode, PausedTurn, ResumeRejectedError, TurnError, TurnReason
 from xiaowei.channel_store import (
     CallerFailureCode,
     ChannelSession,
@@ -52,6 +53,7 @@ from xiaowei.evidence import (
     EvidenceUnverifiableError,
 )
 from xiaowei.governance import ToolExecutionError, ToolRejectedError
+from xiaowei.image_input import ImageStoreError, ValidatedImage
 from xiaowei.models import (
     Budget,
     Channel,
@@ -60,6 +62,7 @@ from xiaowei.models import (
     Label,
     Owner,
     RunContext,
+    SessionSnapshot,
     ToolId,
     TurnAnswer,
     group_owner,
@@ -82,6 +85,7 @@ _FAILURE_CODES: Mapping[TurnReason, CallerFailureCode] = {
     "storage_failed": "session_failed",
     "storage_unavailable": "session_failed",
     "scope_rejected": "session_failed",
+    "action_unresumable": "action_unresumable",
 }
 _ACTION_FAILURE_CODES: Mapping[str, CallerFailureCode] = {
     "pending": "action_not_approvable",
@@ -91,6 +95,16 @@ _ACTION_FAILURE_CODES: Mapping[str, CallerFailureCode] = {
     "rejected": "action_rejected",
 }
 _RECEIPTS: Mapping[FailureCode, str] = {
+    "action_requester_invalid": "发起人已不在群或权限已变化，未执行，请重新提出",
+    "action_session_invalid": (
+        "原会话不可继续，未执行；暂停前调查未形成最终报告、未入历史，请新建会话重新调查并提出"
+    ),
+    "action_upgrade_invalidated": "已因升级作废、未执行，请重新提出",
+    "action_unresumable": (
+        "本轮未形成可恢复审批，动作已作废、未执行；请重新提出并明确请求执行"
+        "（含图片的会话不能请求执行，需先发送 /新建 后重新提出）"
+    ),
+    "action_expired": "候选已过期，未执行；暂停前调查未形成最终报告、未入历史，请重新调查并提出",
     "busy": "系统繁忙，本轮未执行，请稍后用新消息重试",
     "model_failed": "模型未能完成本轮（调用失败、超时或次数达到上限）；已执行的工具不会自动重试",
     "evidence_failed": (
@@ -357,7 +371,7 @@ class ResultDelivery:
         ``first`` 只由渠道在本请求刚运行完时传入（首次交付）；其余读取都是历史读取。
         """
         record, decision = await self._load(ref)
-        if record.state == "completed":
+        if record.state in {"completed", "paused"}:
             return RequestView(
                 record.state, await self._validated(record, decision, history=not first)
             )
@@ -385,7 +399,7 @@ class ResultDelivery:
             raise RequestUnavailableError
         refused: ResultUnavailableError | None = None
         delivery: Delivery | None = None
-        if record.state == "completed":
+        if record.state in {"completed", "paused"}:
             try:
                 delivery = await self._validated(record, decision, history=resend)
             except ResultUnavailableError as exc:
@@ -400,6 +414,8 @@ class ResultDelivery:
         if delivery is None:
             await self._store.finish_send(claim, "failed")
             raise refused or ResultUnavailableError()
+        if record.state in {"completed", "paused"}:
+            delivery = delivery.model_copy(update={"request_state": record.state})
         try:
             outcome = await transmit(delivery)
         except BaseException as exc:
@@ -439,13 +455,94 @@ class ResultDelivery:
             monitoring_failures=record.monitoring_failures,
         )
         try:
-            return await self._evidence.validate_answer(
+            delivery = await self._evidence.validate_answer(
                 turn, self._context(record, decision), history=history
             )
         except AnswerRejectedError:
             raise ResultUnavailableError from None
         except EvidenceUnverifiableError:
             raise ResultUnverifiableError from None
+        facts = []
+        content = delivery.content
+        for fact in delivery.facts:
+            command = fact.metadata.get("approval_command")
+            action_id = fact.metadata.get("action_id")
+            if not fact.requires_complete or not isinstance(command, str):
+                facts.append(fact)
+                continue
+            if not isinstance(action_id, str):
+                raise ResultUnavailableError
+            try:
+                state, failure = await self._store.action_delivery_state(action_id, record.owner.id)
+            except ChannelStoreError:
+                raise ResultUnverifiableError from None
+            if state == "pending":
+                facts.append(fact)
+                continue
+            status = (
+                _RECEIPTS["action_unresumable"]
+                if failure == "action_unresumable"
+                else "候选当前不可批准；请按 Action ID 查询动作状态"
+            )
+            metadata = {
+                key: value for key, value in fact.metadata.items() if key != "approval_command"
+            }
+            metadata["approval_status"] = status
+            raw = json.loads(fact.result_json) if fact.result_json is not None else None
+            if isinstance(raw, dict):
+                raw.pop("approval_command", None)
+                raw["approval_status"] = status
+            facts.append(
+                fact.model_copy(
+                    update={
+                        "metadata": metadata,
+                        "result_json": (
+                            json.dumps(raw, ensure_ascii=False) if raw is not None else None
+                        ),
+                    }
+                )
+            )
+            original = (
+                json.dumps("approval_command") + ": " + json.dumps(command, ensure_ascii=False)
+            )
+            replacement = (
+                json.dumps("approval_status") + ": " + json.dumps(status, ensure_ascii=False)
+            )
+            content = content.replace(original, replacement).replace(command, status)
+        return delivery.model_copy(
+            update={
+                "facts": tuple(facts),
+                "content": content,
+                "session_notice": self._session_warning(record.session_state, record.channel),
+            }
+        )
+
+    @staticmethod
+    def _session_warning(snapshot: SessionSnapshot | None, channel: Channel) -> str | None:
+        """仅依据本请求保存的成功观察；不读取当前余额或再次回放历史。"""
+        if snapshot is None:
+            return None
+        turns, used, expires = snapshot.committed_turns, snapshot.replay_bytes, snapshot.expires_at
+        if snapshot.phase != "after_commit" or turns is None or used is None or expires is None:
+            raise ResultUnavailableError
+        limits = []
+        if turns * 100 >= snapshot.turn_limit * 80:
+            limits.append(f"会话已用 {turns}/{snapshot.turn_limit} 次")
+        if used * 100 >= snapshot.byte_limit * 80:
+            limits.append(f"历史容量接近上限（{used}/{snapshot.byte_limit} 字节）")
+        remaining = expires - snapshot.observed_at
+        if remaining <= timedelta(0):
+            limits.append("会话已到固定保留期限")
+        elif remaining <= timedelta(hours=1):
+            limits.append("距固定保留期限不超过 1 小时")
+        if not limits:
+            return None
+        last = (
+            turns == snapshot.turn_limit or used == snapshot.byte_limit or remaining <= timedelta(0)
+        )
+        next_turn = "下轮需要新建会话" if last else "后续可能需新建会话"
+        action = "点击“新建会话”" if channel == "web" else "发送 /新建"
+        return "本轮结束时" + "；".join(limits) + f"。{next_turn}；{action}，并补充关键线索。"
 
     def _context(self, record: RequestRecord, decision: AccessDecision) -> RunContext:
         """交付用 context：结果所属会话与轮次、当前授权的目标集合；不授予任何工具。"""
@@ -453,7 +550,7 @@ class ResultDelivery:
             identity=Identity(
                 subject_id=decision.subject_id,
                 session_id=record.session_id,
-                turn_id=record.turn_id,
+                turn_id=record.run_turn_id or record.turn_id,
                 channel=record.channel,
                 owner=record.owner,
             ),
@@ -466,8 +563,36 @@ class ResultDelivery:
     def _receipt(record: RequestRecord) -> Delivery:
         if record.failure_code is None:  # 数据库约束保证不会发生
             raise ResultUnavailableError
+        snapshot = record.session_state
+        content = _RECEIPTS[record.failure_code]
+        notice = None
+        if snapshot is not None:
+            messages = {
+                "history_turn_limit": (
+                    "会话已达交互轮数上限。请新建会话继续；之前的上下文不会自动带过去。"
+                ),
+                "history_bytes_limit": "会话历史已达容量上限。请新建会话，并补充目标和关键线索。",
+                "expired": "会话已超过保留期限。请新建会话；原历史不能继续回放。",
+                "binding_changed": "模型或数据策略已变化。请新建会话。",
+                "unavailable": "会话历史不能安全继续，请新建会话；已执行操作不会自动重试。",
+            }
+            if snapshot.reason is None:
+                raise ResultUnavailableError
+            content = messages[snapshot.reason]
+            if snapshot.reason == "history_bytes_limit" and snapshot.phase == "before_commit":
+                content = (
+                    "本轮执行后历史超出容量，回答未保存/交付，会话已封存；"
+                    "已执行的工具不会自动重试。"
+                )
+            observation = [f"本轮结束时（{snapshot.observed_at.isoformat()}）"]
+            if snapshot.committed_turns is not None:
+                observation.append(f"已提交 {snapshot.committed_turns}/{snapshot.turn_limit} 轮")
+            if snapshot.replay_bytes is not None:
+                observation.append(f"完整回放 {snapshot.replay_bytes}/{snapshot.byte_limit} 字节")
+            action = "点击“新建会话”" if record.channel == "web" else "发送 /新建"
+            notice = "；".join(observation) + f"。{action}；新建上下文不等于立即删除保存记录。"
         return Delivery(
-            content=_RECEIPTS[record.failure_code], evidence_ids=(), channel=record.channel
+            content=content, evidence_ids=(), channel=record.channel, session_notice=notice
         )
 
 
@@ -491,6 +616,60 @@ class ChannelService:
     def max_concurrent_turns(self) -> int:
         """应用的全局并发上限；渠道的消费者数不得超过它。"""
         return self._app.max_concurrent_turns
+
+    def admits_input(self, text: str) -> bool:
+        """附件准入仍使用当前应用的数据策略；持久化和模型前调用。"""
+        return self._app.admits_input(text)
+
+    async def image_has_capacity(self, ref: RequestRef) -> bool:
+        """先重验身份，再取服务端 current 会话；满额时不下载图片。"""
+        decision = await _decide_ref(self._access, ref)
+        images = self._app.images
+        if images is None or ref.channel != "feishu":
+            raise ImageStoreError("图片能力未启用")
+        session = await self._store.current_session(
+            ref.channel, decision.subject_id, ref.conversation_id, owner=decision.owner
+        )
+        return await images.has_capacity(session)
+
+    async def save_image(
+        self,
+        receipt: RequestReceipt,
+        inbound: InboundRequest,
+        source_digest: str,
+        image: ValidatedImage,
+    ) -> None:
+        """请求已持久接受后，核对原会话并在排队前原子写入原图。"""
+        images = self._app.images
+        if images is None or not receipt.created or receipt.record.channel != "feishu":
+            raise ImageStoreError("图片请求无法绑定")
+        try:
+            session = await self._store.current_session(
+                inbound.channel,
+                inbound.subject_id,
+                inbound.conversation_id,
+                owner=receipt.record.owner,
+            )
+            if (
+                session.session_id != receipt.record.session_id
+                or receipt.message != inbound.message
+            ):
+                raise ImageStoreError("图片请求会话不匹配")
+            await images.save(session, source_digest, image, turn_id=receipt.record.turn_id)
+        except asyncio.CancelledError:
+            self._store.readiness.lock("image_accept_unsettled")
+            raise
+        except (ImageStoreError, ChannelStoreError) as exc:
+            try:
+                await self._store.fail(receipt.record, "session_failed")
+            except BaseException:
+                self._store.readiness.lock("image_accept_unsettled")
+                raise
+            raise ImageStoreError("图片请求未能绑定") from exc
+
+    async def authorize_notice(self, ref: RequestRef) -> None:
+        """无数据回执发送前复核当前身份及群成员；不创建请求、会话或工具执行范围。"""
+        await _decide_ref(self._access, ref)
 
     async def accept(self, inbound: InboundRequest) -> RequestReceipt:
         """当前授权通过后持久接受请求；同一请求编号返回已有记录，不再运行。
@@ -595,11 +774,15 @@ class ChannelService:
                 )
                 answer = await self._app.run_turn(self._context(record, decision), receipt.message)
             except TurnError as exc:
-                return await self._store.fail(record, _FAILURE_CODES[exc.reason])
+                return await self._store.fail(
+                    record, _FAILURE_CODES[exc.reason], session_state=exc.session_state
+                )
             except asyncio.CancelledError:
                 # 运行结果与 Session 状态不明：不在取消中补写，交给重启恢复。
                 self._store.readiness.lock("turn_cancelled")
                 raise
+            if isinstance(answer, PausedTurn):
+                return await self._store.save_pause(record, answer)
             return await self._store.complete(record, answer)
         finally:
             # 终态保存失败时 readiness 已锁低：会话保持封闭，等待停止并重启。
@@ -612,8 +795,10 @@ class ChannelService:
             return receipt.record
         return await self._store.fail(receipt.record, "busy")
 
-    async def approve(self, receipt: RequestReceipt, action_id: str) -> RequestRecord:
-        """群内确定性批准；复用请求去重/队列/终态，既不调用 Runner 也不写 Session。"""
+    async def approve(
+        self, receipt: RequestReceipt, action_id: str, *, approve: bool = True
+    ) -> RequestRecord:
+        """确定性批准事件恢复原SDK轮次；入口身份、去重、回执仍属本请求。"""
         from xiaowei.feishu import attributed
 
         record = receipt.record
@@ -622,7 +807,8 @@ class ChannelService:
         if (
             self._app.actions is None
             or receipt.group is None
-            or receipt.message != attributed(record.subject_id, f"/批准 {action_id}")
+            or receipt.message
+            != attributed(record.subject_id, f"/{'批准' if approve else '拒绝'} {action_id}")
         ):
             return await self._store.fail(record, "access_denied")
         try:
@@ -641,22 +827,41 @@ class ChannelService:
             if record.state != "running":
                 return record
             executed = False
+
+            async def fail_approval(code: CallerFailureCode) -> RequestRecord:
+                return await self._store.fail(record, code, settle_action_id=action_id)
+
             try:
                 async with asyncio.timeout(self._results.budget.timeout_seconds):
-                    answer = await self._app.actions.approve(
-                        action_id, self._context(record, decision)
+                    answer = await self._app.resume_action(
+                        action_id, self._context(record, decision), approve=approve
                     )
                     executed = True
-                    await self._results.evidence.validate_answer(
-                        answer, self._context(record, decision)
-                    )
+                    if not isinstance(answer, PausedTurn):
+                        feedback_ctx = self._context(record, decision)
+                        if answer.run_turn_id is not None:
+                            feedback_ctx = feedback_ctx.model_copy(
+                                update={
+                                    "identity": feedback_ctx.identity.model_copy(
+                                        update={"turn_id": answer.run_turn_id}
+                                    )
+                                }
+                            )
+                        await self._results.evidence.validate_answer(answer, feedback_ctx)
+            except ResumeRejectedError as exc:
+                return await fail_approval(exc.code)
+            except TurnError:
+                if not self._store.readiness.ok:
+                    raise NotReadyError from None
+                code = await self._approval_failure(action_id, self._context(record, decision))
+                return await fail_approval(code)
             except ActionOutcomeError as exc:
-                return await self._store.fail(record, _ACTION_FAILURE_CODES[exc.state])
+                return await fail_approval(_ACTION_FAILURE_CODES[exc.state])
             except (ToolRejectedError, RequestUnavailableError):
-                return await self._store.fail(record, "action_not_approvable")
+                return await fail_approval("action_not_approvable")
             except (ToolExecutionError, AnswerRejectedError, EvidenceStoreError):
-                return await self._store.fail(
-                    record, "action_feedback_failed" if executed else "action_not_approvable"
+                return await fail_approval(
+                    "action_feedback_failed" if executed else "action_not_approvable"
                 )
             except TimeoutError:
                 # 超时可能发生在写入后的反馈阶段；以同群应用表的事实给回执，不重放动作。
@@ -669,12 +874,27 @@ class ChannelService:
                         record, action_id, self._context(record, decision)
                     )
                     raise
-                return await self._store.fail(record, failure_code)
+                return await fail_approval(failure_code)
             except asyncio.CancelledError:
                 await self._fail_cancelled_approval(
                     record, action_id, self._context(record, decision)
                 )
                 raise
+            except Exception as exc:
+                if not self._store.readiness.ok:
+                    raise
+                logger.warning("SDK审批恢复失败：%s", type(exc).__name__)
+                return await fail_approval(
+                    await self._approval_failure(action_id, self._context(record, decision))
+                )
+            if isinstance(answer, PausedTurn):
+                return await self._store.save_pause(
+                    record,
+                    answer,
+                    failure_code=await self._approval_failure(
+                        action_id, self._context(record, decision)
+                    ),
+                )
             return await self._store.complete(record, answer, failure_code="action_feedback_failed")
         finally:
             if self._store.readiness.ok:
@@ -688,7 +908,7 @@ class ChannelService:
             return "action_not_approvable"
         except Exception:
             return "action_unknown"
-        return _ACTION_FAILURE_CODES[action.state]
+        return action.failure_code or _ACTION_FAILURE_CODES[action.state]
 
     async def _fail_cancelled_approval(
         self, record: RequestRecord, action_id: str, ctx: RunContext
@@ -698,7 +918,7 @@ class ChannelService:
         try:
             failure_code = await self._approval_failure(action_id, ctx)
             async with asyncio.timeout(ACTION_SETTLE_TIMEOUT_SECONDS):
-                await self._store.fail(record, failure_code)
+                await self._store.fail(record, failure_code, settle_action_id=action_id)
         except BaseException:
             # 请求没有可靠落定，不能仅释放群占用继续接活。保留异常及全局故障保护。
             self._store.readiness.lock("action_settle_failed")

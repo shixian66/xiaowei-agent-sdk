@@ -57,7 +57,7 @@ from pydantic import (
 )
 from sqlalchemy.ext.asyncio import AsyncEngine
 
-from xiaowei.actions import ActionService, action_status_catalog
+from xiaowei.actions import ActionService, action_status_catalog, execution_requests
 from xiaowei.alertmanager import AlertmanagerAdapter, AlertmanagerConfig, alertmanager_catalog
 from xiaowei.app import (
     AppConfig,
@@ -89,6 +89,7 @@ from xiaowei.evidence import EvidenceStore
 from xiaowei.feishu import FeishuGateway, LarkChannel, LarkTransport, lark_channel, send_delivery
 from xiaowei.governance import GovernedTools, Projection, ToolCatalog, ToolPolicy
 from xiaowei.grafana import D7_POLICIES, dashboard_actions, dashboard_catalog
+from xiaowei.image_input import SessionImageStore
 from xiaowei.mcp import MCPIntegration
 from xiaowei.model_api import ModelProfile, open_model
 from xiaowei.models import (
@@ -324,6 +325,13 @@ class ServeConfig(_Config):
         if storage.request_retention_seconds > storage.evidence_retention_seconds:
             raise ValueError("可重发结果的保留期不得长于证据保留期")
         if self.feishu is not None:
+            if self.feishu.image_input_enabled and not self.model.image_input_enabled:
+                raise ValueError("启用飞书图片输入前须显式启用受审定的 Vertex 图片 Profile")
+            if (
+                self.feishu.image_input_enabled
+                and storage.request_retention_seconds < self.session_limits.retention_seconds
+            ):
+                raise ValueError("图片请求保留期不得短于会话保留期")
             if self.web.operator_id in self.feishu.users.values():
                 raise ValueError("Web 操作者与飞书用户不能使用同一个内部 subject")
             # 空 grant 在 StaticAccess 中等于无权限；已登记却无权限的用户在启动前拒绝，不静默失效。
@@ -1249,7 +1257,9 @@ class StaticAccess:
             subject_id=subject_id,
             owner=group.owner,
             target_ids=self._targets,
-            authorized_tools=shared.tools,
+            authorized_tools=execution_requests(
+                shared.tools, {t.partition("/")[0] for t in self._write_tools}
+            ),
             policy_version=self._version,
         )
 
@@ -1258,6 +1268,12 @@ class StaticAccess:
         if target_id not in self._targets:
             return False
         owner = identity.owner
+        if tool_id.endswith("/request_action_execution"):
+            if identity.owner.kind != "group" or target_id not in {
+                t.partition("/")[0] for t in self._write_tools
+            }:
+                return False
+            tool_id = f"{target_id}/get_action_status"
         if owner.kind == "group":
             shared = self._group
             if tool_id in self._write_tools:
@@ -1500,6 +1516,9 @@ async def open_runtime(
                 ],
                 clock=clock,
             ),
+            images=SessionImageStore(engine, clock=clock)
+            if config.model.image_input_enabled
+            else None,
         )
         service = ChannelService(app, parts.results)
         yield Runtime(engine, lock, readiness, recovery, service, mcp, alertmanagers)
@@ -1762,8 +1781,21 @@ async def _start_feishu(
     feishu = config.feishu
     if feishu is None or transport is None:
         return None
+    from xiaowei.feishu_resource import LarkResourceDownloader
+
+    downloader = (
+        LarkResourceDownloader(feishu).download
+        if feishu.document_input_enabled or feishu.image_input_enabled
+        else None
+    )
     gateway = FeishuGateway(
-        runtime.service, feishu, transport.send, clock=clock, bot_open_id=transport.bot_open_id
+        runtime.service,
+        feishu,
+        transport.send,
+        clock=clock,
+        bot_open_id=transport.bot_open_id,
+        download_resource=downloader,
+        upload_file=transport.upload_file,
     )
     consumers = asyncio.create_task(gateway.run(), name="xiaowei-feishu")
     starting = asyncio.create_task(transport.start(gateway.receive), name="xiaowei-feishu-start")
@@ -1947,6 +1979,9 @@ async def _resend(
         chat_id=conversation,
         max_chars=feishu.max_reply_chars,
         reply_to=reply_to,
+        results=parts.results,
+        upload_file=transport.upload_file,
+        resend=True,
     )
 
     ref = RequestRef(
@@ -1956,4 +1991,5 @@ async def _resend(
         request_id=message_id,
         group=None if group is None else group.scope,
     )
+    transmit = partial(transmit, ref=ref)
     return await parts.results.send(ref, transmit, resend=True)

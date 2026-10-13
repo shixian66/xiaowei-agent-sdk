@@ -10,6 +10,8 @@ Agent Loop、工具续轮与最终输出校验全部由 SDK ``Runner`` 完成；
 """
 
 import asyncio
+import base64
+import binascii
 import hashlib
 import json
 import re
@@ -90,6 +92,7 @@ class ModelProfile(BaseModel):
     max_output_tokens: PositiveInt
     max_request_bytes: PositiveInt
     max_response_bytes: PositiveInt
+    image_input_enabled: bool = False
     data_policy_id: str = Field(min_length=1)
     reasoning_effort: str | None
 
@@ -118,6 +121,8 @@ class ModelProfile(BaseModel):
     @model_validator(mode="after")
     def _supported_combination(self) -> "ModelProfile":
         protocol_fields = (self.base_url, self.api_mode, self.output_mode)
+        if self.image_input_enabled and self.provider != "vertex":
+            raise ValueError("图片输入仅可用于已审定的 Vertex 组合")
         if self.provider == "vertex":
             if any(value is not None for value in protocol_fields):
                 raise ValueError(
@@ -216,6 +221,8 @@ class ModelResponseRejectedError(ModelAPIRejectedError):
 def profile_fingerprint(profile: ModelProfile) -> str:
     """Profile 的稳定配置版本，用于把会话绑定到“端点 + 协议 + 模型”组合。"""
     identity = profile.model_dump(mode="json")
+    if not profile.image_input_enabled:
+        identity.pop("image_input_enabled")  # 新能力默认关闭，不改变旧会话的绑定指纹。
     if profile.provider == "vertex":
         # 端点与协议不在 Profile 中，由固定常量补入；既有 Provider 的指纹保持原样。
         identity |= {"vertex_endpoint": VERTEX_ENDPOINT, "vertex_protocol": VERTEX_PROTOCOL}
@@ -304,6 +311,7 @@ async def open_model(
             else ("authorization", f"Bearer {api_key.get_secret_value()}")
         ),
         max_request_bytes=profile.max_request_bytes,
+        image_input_enabled=profile.image_input_enabled,
         max_response_bytes=profile.max_response_bytes,
         check_success=(
             _require_complete_vertex
@@ -323,7 +331,11 @@ async def open_model(
         try:
             yield ModelBinding(
                 profile,
-                VertexModel(http_client, VERTEX_ENDPOINT.format(model=profile.model)),
+                VertexModel(
+                    http_client,
+                    VERTEX_ENDPOINT.format(model=profile.model),
+                    image_input_enabled=profile.image_input_enabled,
+                ),
                 opened_by=_OPENED_BY,
             )
         finally:
@@ -359,6 +371,49 @@ async def _close(closing: Awaitable[None]) -> None:
         raise ModelAPIRejectedError("模型客户端关闭超时") from None
 
 
+def _trusted_image_bytes(body: bytes) -> int:
+    """只把 Vertex 用户图片 part 的 Base64 计入图片额度，其他字节仍用原 Profile 限额。"""
+    try:
+        request = json.loads(body)
+    except (ValueError, RecursionError):
+        raise ModelRequestRejectedError("模型请求不是合法 JSON") from None
+    contents = request.get("contents") if isinstance(request, dict) else None
+    if not isinstance(contents, list):
+        raise ModelRequestRejectedError("模型请求缺少内容")
+    encoded_bytes = 0
+    images = 0
+    for content in contents:
+        if not isinstance(content, dict):
+            raise ModelRequestRejectedError("模型请求内容无效")
+        parts = content.get("parts")
+        if not isinstance(parts, list):
+            raise ModelRequestRejectedError("模型请求内容无效")
+        for part in parts:
+            if not isinstance(part, dict) or "inlineData" not in part:
+                continue
+            inline = part["inlineData"]
+            if (
+                content.get("role") != "user"
+                or not isinstance(inline, dict)
+                or set(inline) != {"mimeType", "data"}
+                or inline.get("mimeType") not in ("image/png", "image/jpeg")
+                or not isinstance(inline.get("data"), str)
+            ):
+                raise ModelRequestRejectedError("图片请求形态无效")
+            data = inline["data"]
+            try:
+                raw = base64.b64decode(data, validate=True)
+            except (ValueError, binascii.Error):
+                raise ModelRequestRejectedError("图片编码无效") from None
+            if not raw or len(raw) > 2 * 1024 * 1024:
+                raise ModelRequestRejectedError("图片超过单张上限")
+            images += 1
+            encoded_bytes += len(data)
+            if images > 12 or encoded_bytes > 33_554_448:
+                raise ModelRequestRejectedError("图片超过本轮上限")
+    return encoded_bytes
+
+
 class _GuardedTransport(httpx2.AsyncBaseTransport):
     """模型 HTTP 的唯一出入口：请求在发出前、响应在交给 SDK 前各检查一次。"""
 
@@ -368,18 +423,21 @@ class _GuardedTransport(httpx2.AsyncBaseTransport):
         *,
         auth_header: tuple[str, str],
         max_request_bytes: int,
+        image_input_enabled: bool,
         max_response_bytes: int,
         check_success: Callable[[object], None] | None,
     ) -> None:
         self._inner = inner
         self._auth_header = auth_header
         self._max_request_bytes = max_request_bytes
+        self._image_input_enabled = image_input_enabled
         self._max_response_bytes = max_response_bytes
         self._check_success = check_success
 
     async def handle_async_request(self, request: httpx2.Request) -> httpx2.Response:
         body = await request.aread()
-        if len(body) > self._max_request_bytes:
+        image_bytes = _trusted_image_bytes(body) if self._image_input_enabled else 0
+        if len(body) - image_bytes > self._max_request_bytes:
             raise ModelRequestRejectedError("模型请求超过 Profile 的请求字节上限")
         # 不沿用 SDK 请求中的任何头值：SDK 客户端会把环境变量中的自定义头合并进来。
         # Host 与 Content-Length 由 httpx 从可信 URL 与实际 body 生成，其余为固定协议值。

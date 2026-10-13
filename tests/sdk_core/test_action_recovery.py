@@ -55,14 +55,14 @@ async def test_cancelled_approval_saves_facts_and_keeps_queries_available(
 
         monkeypatch.setattr(env.app.actions, "status", paused_status)
     else:
-        validate = env.evidence.validate_answer
+        load = env.store.native_run
 
-        async def paused_validation(turn, ctx, *, history=False):
+        async def paused_native(action):
             entered.set()
             await release.wait()
-            return await validate(turn, ctx, history=history)
+            return await load(action)
 
-        monkeypatch.setattr(env.evidence, "validate_answer", paused_validation)
+        monkeypatch.setattr(env.store, "native_run", paused_native)
     history = await env.rows("SELECT message_data FROM agent_messages ORDER BY id")
     receipt = await env.service.accept(env.group(attributed(A, f"/批准 {action_id}"), "om_a"))
     task = asyncio.create_task(env.service.approve(receipt, action_id))
@@ -154,7 +154,7 @@ async def test_unsettled_action_cannot_release_the_instance(
     cleanup_entered = asyncio.Event()
     never = asyncio.Event()
 
-    async def stalled_finish(action, state, result=None):
+    async def stalled_finish(action, state, result=None, **kwargs):
         cleanup_entered.set()
         await never.wait()
 
@@ -205,7 +205,7 @@ async def test_timeout_state_read_is_bounded_and_does_not_prevent_local_failure_
     async def stalled_read(action_id, identity):
         nonlocal reads
         reads += 1
-        if reads == 2:
+        if reads == 4:
             await release.wait()
         return await get_action(action_id, identity)
 
@@ -236,7 +236,8 @@ async def test_unsettled_request_cannot_release_the_instance(
     adapter.read_entered, adapter.read_release = asyncio.Event(), asyncio.Event()
     cleanup_entered, never = asyncio.Event(), asyncio.Event()
 
-    async def stalled_fail(record, code):
+    async def stalled_fail(record, code, *, settle_action_id=None):
+        assert settle_action_id == action_id
         cleanup_entered.set()
         await never.wait()
 

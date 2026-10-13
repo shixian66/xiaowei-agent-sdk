@@ -317,8 +317,10 @@ async def test_advice_is_a_separate_answer_without_facts(postgres_url: URL) -> N
                 "facts",
                 "analysis",
                 "monitoring_notice",
+                "session_notice",
                 "web_text",
             }
+            assert delivery.session_notice is None
             assert (delivery.evidence_ids, delivery.facts) == ((), ())
             assert _FACTS_HEADER not in delivery.content
 

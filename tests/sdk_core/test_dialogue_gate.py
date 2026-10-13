@@ -7,8 +7,14 @@ import pytest
 from pydantic import SecretStr
 from sqlalchemy import text
 from sqlalchemy.engine import URL
-from tests.sdk_core.dialogue_gate import SCENARIOS, Scenario, configuration, run_dialogue
-from tests.sdk_core.test_app import Scripts, cite, tool_call
+from tests.sdk_core.dialogue_gate import (
+    E6_SCENARIOS,
+    SCENARIOS,
+    Scenario,
+    configuration,
+    run_dialogue,
+)
+from tests.sdk_core.test_app import Scripts, answer, cite, evidence_in, tool_call
 from tests.sdk_core.test_model_api import OPENAI as PROFILE
 from tests.sdk_core.test_starrocks_tools import tool_outputs
 
@@ -64,6 +70,34 @@ async def test_dialogue_harness_runs_success_and_hidden_tool_failure(postgres_ur
     assert described not in encoded and forbidden not in encoded and "ev_" not in encoded
     assert "SELECT" not in encoded and "synthetic.invalid" not in encoded
     assert all(r["manual_review_required"] for r in reports)
+
+
+async def test_e6_fixed_samples_use_feishu_identity_and_record_selected_format(
+    postgres_url: URL, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config = configuration(PROFILE, E6_SCENARIOS[0])
+    assert config.feishu is not None and config.feishu.users == {"ou_e6_synthetic": "e6-operator"}
+    assert config.web.operator_id != "e6-operator"
+    monkeypatch.setenv("XW_E6_UNUSED_FEISHU_SECRET", "synthetic-only")
+    scripts = Scripts()
+    message = scripts.add(
+        "生成报告",
+        tool_call(
+            "describe_table",
+            cluster="pre",
+            database="data_center",
+            table="quota_virtual_account_quasi_rt",
+            cursor=None,
+        ),
+        lambda call: answer(evidence_in(call), report_format="md"),
+    )
+    case = Scenario("e6_offline_format", (("query", message),), feishu=True)
+    (result,) = await run_dialogue(
+        PROFILE, postgres_url, scripts.transport, scenarios=(case,), repeats=1
+    )
+    assert result["state"] == "completed" and result["report_format"] == "md"
+    assert result["facts"][0]["tool"] == "local/describe_table"
+    assert result["manual_review_required"]
 
 
 async def test_dialogue_harness_keeps_timed_out_request_hashes_and_failed_verdict(

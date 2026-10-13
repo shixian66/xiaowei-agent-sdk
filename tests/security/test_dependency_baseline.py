@@ -33,7 +33,8 @@ _SRC = _ROOT / "src"
 # P1-B Task 7 加入飞书 ``lark-channel-sdk``（精确钉版）。P1-B Task 8 切换正式入口：wheel 只含新包，
 # 旧包专用的 ``alembic`` 移出生产依赖，只留在 dev（旧测试）与 legacy（旧 Compose 镜像）。
 # Vertex V1-A 把 ``src/xiaowei`` 已直接导入的 ``httpx2`` 显式声明，不再依赖 SDK 的传递依赖。
-# R12 按批准的 C1 受限格式计划显式加入 ``markdown-it-py``；闭集仍须严格相等。
+# R12 按批准的 C1 受限格式计划显式加入 ``markdown-it-py``；E5b 图片完整解码
+# 增加 ``pillow``。闭集仍须严格相等。
 _EXPECTED_RUNTIME_DEPENDENCIES = frozenset(
     {
         "httpx2",
@@ -47,6 +48,7 @@ _EXPECTED_RUNTIME_DEPENDENCIES = frozenset(
         "asyncmy",
         "lark-channel-sdk",
         "markdown-it-py",
+        "pillow",
     }
 )
 

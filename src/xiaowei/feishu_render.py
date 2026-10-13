@@ -31,6 +31,7 @@ _ACTION_LABELS = {
     "rollback": "恢复办法",
     "approve_before": "批准截止时间",
     "approval_command": "批准命令",
+    "approval_status": "审批状态",
 }
 
 Message = dict[str, Any]
@@ -50,6 +51,23 @@ def display_text(text: str) -> str:
         else c
         for c in text
     )
+
+
+def fact_limit_notices(fact: DeliveryFact) -> tuple[str, ...]:
+    """区分分页未完与真实截断，供卡片和报告沿用同一事实口径。"""
+    cursor = fact.metadata.get("next_cursor")
+    notices = []
+    if cursor is not None:
+        notices.append("还有后续页，本页不是全部结果。")
+    if fact.truncated and not (fact.tool_id in _PAGED and cursor is not None):
+        notices.append("工具结果已截断，不能据此声称完整。")
+    return tuple(notices)
+
+
+def capacity_notice(session_notice: str | None = None) -> Message:
+    """容量回执同条保留必要系统提醒；也供发送端识别省略结果的消息。"""
+    text = CAPACITY_NOTICE + ("\n" + session_notice if session_notice is not None else "")
+    return {"text": mention_safe(display_text(text))}
 
 
 def _plain(text: str) -> Message:
@@ -138,8 +156,12 @@ def _card(
     formatted: bool = False,
 ) -> Message:
     elements: list[Message] = []
+    if delivery.report_notice:
+        elements.append(_div(delivery.report_notice))
     if delivery.monitoring_notice:
         elements.append(_div(delivery.monitoring_notice))
+    if delivery.session_notice:
+        elements.append(_div(delivery.session_notice))
     tables = 0
     for index, fact in enumerate(delivery.facts):
         columns, all_rows = _data(fact)
@@ -153,8 +175,18 @@ def _card(
         if fact.note is not None:
             elements.append(_div(f"说明：{fact.note}"))
         if fact.requires_complete:
-            elements.append(_div("待批准动作（尚未执行）"))
-            # 提出材料已是可信JSON/文本；用纯文本显示，避免将整份JSON再次转义成标量字符串。
+            elements.append(
+                _div(
+                    "动作执行事实"
+                    if "state" in fact.metadata
+                    else (
+                        "动作提案（当前不可批准）"
+                        if "approval_status" in fact.metadata
+                        else "待批准动作（尚未执行）"
+                    )
+                )
+            )
+            # 完整动作材料是可信代码生成的文本；避免把整份 JSON 再转义为标量。
             for key, value in fact.metadata.items():
                 text = display_text(value) if isinstance(value, str) else _cell({key: value}, key)
                 elements.append(_div(f"{_ACTION_LABELS.get(key, key)}：{text}"))
@@ -165,11 +197,7 @@ def _card(
                 for key, value in fact.metadata.items()
                 if key not in _TECHNICAL and value is not None
             )
-        cursor = fact.metadata.get("next_cursor")
-        if cursor is not None:
-            elements.append(_div("还有后续页，本页不是全部结果。"))
-        if fact.truncated and not (fact.tool_id in _PAGED and cursor is not None):
-            elements.append(_div("工具结果已截断，不能据此声称完整。"))
+        elements.extend(_div(notice) for notice in fact_limit_notices(fact))
         if fact.tool_id == "local/run_readonly_query" and index not in sqls:
             elements.append(_div("SQL 未展示。"))
         if fact.view == "brief":
@@ -312,10 +340,25 @@ def build_feishu_message(
             and request_bytes(message, chat_id, reply_to=reply_to) <= max_bytes
         )
 
-    notice = {"text": CAPACITY_NOTICE}
-    if not fits(notice):
-        raise ValueError("单消息预算无法保留容量说明")
+    notice = capacity_notice(delivery.session_notice)
+
+    def omitted_message() -> Message:
+        # 完整消息可能比容量回执更短；只在确实需要回执时检查它是否可发送。
+        if not fits(notice):
+            raise ValueError("单消息预算无法保留容量说明")
+        return notice
+
     if not delivery.facts:
+        if delivery.session_notice is not None and delivery.feishu_text is None:
+            # 固定会话回执必须完整保留原因和操作方法；预算不足记明确发送失败，不裁掉限制。
+            receipt = {
+                "text": mention_safe(
+                    display_text(delivery.content + "\n" + delivery.session_notice)
+                )
+            }
+            if not fits(receipt):
+                raise ValueError("单消息预算无法保留会话回执")
+            return receipt
         if delivery.feishu_text is None:
             raw, prefix = delivery.content, ""
         else:
@@ -342,7 +385,12 @@ def build_feishu_message(
             return _prose_card(
                 prefix,
                 text,
-                notice=delivery.monitoring_notice,
+                notice="\n".join(
+                    n
+                    for n in (delivery.monitoring_notice, delivery.session_notice)
+                    if n is not None
+                )
+                or None,
                 clipped=clipped,
                 formatted=formatted,
             )
@@ -361,7 +409,7 @@ def build_feishu_message(
                 high = mid - 1
         clipped = prose_message(raw[:low], clipped=True)
         if not fits(clipped):
-            return notice
+            return omitted_message()
         formatted = prose_message(raw[:low], clipped=True, formatted=True)
         return formatted if fits(formatted) else clipped
 
@@ -414,7 +462,7 @@ def build_feishu_message(
     sqls: set[int] = set()
     counts = fitting_prefix(sqls)
     if counts is None:
-        return notice
+        return omitted_message()
     # SQL 每条完整保留或明示未展示；放不下不阻止展示已有结果行。
     for index in sorted(all_sql):
         selected_counts = fitting_prefix(sqls | {index})

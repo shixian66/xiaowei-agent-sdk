@@ -55,6 +55,13 @@ async def test_default_template_supports_thirty_full_troubleshooting_turns(
             assert await served.finish() == 0
 
     assert await env.scalar("SELECT turns FROM xiaowei_session") == 30
+    assert (
+        await env.scalar(
+            "SELECT count(*) FROM xiaowei_request"
+            " WHERE state='completed' AND session_state IS NOT NULL"
+        )
+        == 30
+    )
     assert len(upstream.recorder.tool_calls) == 5
     assert config.session_limits.max_history_turns == 100
     report = recorder.report(config, connectors)
