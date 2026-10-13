@@ -379,6 +379,145 @@ async def test_formal_write_unknown_is_not_replayed(
         await isolated_api.delete(f"/api/dashboards/uid/{uid}")
 
 
+@pytest.mark.parametrize("boundary", ["folder", "organization"])
+async def test_formal_restricted_grafana_account_cannot_write_target(
+    env: Env,
+    grafana_binary: Path,
+    isolated_api: httpx2.AsyncClient,
+    group_channel: GroupChannel,
+    traffic: tuple[int, DashboardTraffic],
+    monkeypatch: pytest.MonkeyPatch,
+    boundary: str,
+) -> None:
+    """群审批不能赋予写端服务账号缺少的 Grafana 文件夹或组织权限。"""
+    uid = f"d7-{uuid4().hex}"
+    folder = f"d7-{uuid4().hex}"
+    organization: int | None = None
+    org_header: dict[str, str] = {}
+    if boundary == "organization":
+        created_org = await isolated_api.post("/api/orgs", json={"name": folder})
+        assert created_org.status_code == 200
+        organization = created_org.json()["orgId"]
+        org_header = {"X-Grafana-Org-Id": str(organization)}
+    folder_created = False
+    account_id: int | None = None
+    try:
+        created_folder = await isolated_api.post(
+            "/api/folders", headers=org_header, json={"uid": folder, "title": folder}
+        )
+        assert created_folder.status_code == 200
+        folder_created = True
+        if boundary == "folder":
+            limited = await isolated_api.post(
+                f"/api/folders/{folder}/permissions",
+                json={
+                    "items": [
+                        {"role": "Editor", "permission": 1},
+                        {"role": "Viewer", "permission": 1},
+                    ]
+                },
+            )
+            assert limited.status_code == 200
+        account = await isolated_api.post(
+            "/api/serviceaccounts", json={"name": uid, "role": "Editor"}
+        )
+        assert account.status_code == 201
+        account_id = account.json()["id"]
+        token = await isolated_api.post(
+            f"/api/serviceaccounts/{account_id}/tokens", json={"name": uid}
+        )
+        assert token.status_code == 200
+        # 该账号在自己组织的根目录可写，拒绝由目标文件夹/组织权限造成。
+        async with httpx2.AsyncClient(
+            base_url="http://127.0.0.1:3307",
+            headers={"Authorization": f"Bearer {token.json()['key']}"},
+            trust_env=False,
+        ) as member:
+            own_uid = f"d7-{uuid4().hex}"
+            own = await member.post(
+                "/api/dashboards/db",
+                json={"dashboard": dashboard(own_uid), "folderUid": "", "overwrite": False},
+            )
+            assert own.status_code == 200
+            try:
+                denied_uid = f"d7-{uuid4().hex}"
+                denied = await member.post(
+                    "/api/dashboards/db",
+                    json={
+                        "dashboard": dashboard(denied_uid),
+                        "folderUid": folder,
+                        "overwrite": False,
+                    },
+                )
+                assert denied.status_code == 403
+                assert (
+                    await isolated_api.get(f"/api/dashboards/uid/{denied_uid}", headers=org_header)
+                ).status_code == 404
+            finally:
+                assert (
+                    await isolated_api.delete(f"/api/dashboards/uid/{own_uid}")
+                ).status_code == 200
+
+        monkeypatch.setenv("XW_TEST_D7_MCP_TOKEN", "synthetic-mcp-token")
+        with official_grafana(
+            grafana_binary,
+            traffic[0],
+            dashboard_write=True,
+            upstream_token=token.json()["key"],
+        ) as write_endpoint:
+            env.scripts.add(
+                attributed(A, "在受限文件夹创建看板"),
+                tool_call(
+                    CREATE.replace("/", "__"),
+                    dashboard_json=json.dumps(dashboard(uid)),
+                    folder_uid=folder,
+                    message="create",
+                ),
+                request_execution,
+                cite(),
+            )
+            async with env.running(
+                env.config(**d7_config(write_endpoint)), feishu_channel=group_channel
+            ):
+                await group_send(env, group_channel, "在受限文件夹创建看板", "om_restricted_p")
+                action_id = await env.scalar("SELECT action_id FROM xiaowei_action")
+                assert action_id
+                assert await env.scalar("SELECT state FROM xiaowei_action") == "pending"
+                assert len(traffic[1].writes) == 0
+                await group_send(
+                    env, group_channel, f"/批准 {action_id}", "om_restricted_a", sender=B
+                )
+                assert await env.scalar("SELECT state FROM xiaowei_action") == "unknown"
+                assert await env.scalar("SELECT result FROM xiaowei_action") is None
+                assert len(traffic[1].writes) == 1 and not traffic[1].written
+                assert (
+                    await isolated_api.get(f"/api/dashboards/uid/{uid}", headers=org_header)
+                ).status_code == 404
+                if organization is not None:
+                    assert (await isolated_api.get(f"/api/dashboards/uid/{uid}")).status_code == 404
+                assert (
+                    await env.scalar(
+                        "SELECT count(*) FROM xiaowei_evidence WHERE tool_id=:tool",
+                        {"tool": WRITE},
+                    )
+                    == 0
+                )
+                receipt = message_text(group_channel.sends[-1][1])
+                assert "未知" in receipt and "核对" in receipt and "工具执行失败" not in receipt
+                await group_send(
+                    env, group_channel, f"/批准 {action_id}", "om_restricted_again", sender=B
+                )
+                assert len(traffic[1].writes) == 1
+    finally:
+        if account_id is not None:
+            await isolated_api.delete(f"/api/serviceaccounts/{account_id}")
+        if folder_created:
+            await isolated_api.delete(f"/api/folders/{folder}", headers=org_header)
+        if organization is not None:
+            # Grafana 13.2.3 的组织删除 API 对空组织仍返回 500；容器是一次性环境。
+            await isolated_api.delete(f"/api/orgs/{organization}")
+
+
 @pytest.mark.parametrize("tool", [CREATE, WRITE])
 async def test_formal_web_cannot_propose_or_write_dashboards(
     env: Env,

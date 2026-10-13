@@ -9,10 +9,10 @@
 | 项目 | 已核对事实 |
 | --- | --- |
 | 仓库 | [shixian66/xiaowei-agent-sdk](https://github.com/shixian66/xiaowei-agent-sdk) |
-| 本地目录 / 分支 | D7：`/Users/kloenguyen/.codex/worktrees/monitoring-d7/agent-SDK` / `codex/monitoring-d7`；旧候选 `52346a2` 同步 `origin/main` `515a94a99f9a01505ea475003e084a0f24c36663`（PR #94）后续做，其他工作树保留。 |
+| 本地目录 / 分支 | D7：`/Users/kloenguyen/.codex/worktrees/monitoring-d7/agent-SDK` / `codex/monitoring-d7`；基线 `origin/main` `515a94a99f9a01505ea475003e084a0f24c36663`，其他工作树保留。 |
 | M5 历史起点 | `372c381f44ecfa1fa53961f137d0058033cbd805`；不是远端当前 main 的核验结论 |
-| 本轮审查版本 | SDK-C 文档修正 `eaa9185` 随 PR #94 合入主线 `515a94a`；D7 旧候选正在新主线上重新验证，精确交付 SHA 待提交及独立审查。 |
-| 已同步主线审查记录 | SDK-A/B/C 已随 PR #89/#93/#94 合入；D7 仍为待独立审查的草稿 PR #83，不继承旧审查结论。 |
+| 本轮审查版本 | D7 草稿 [PR #83](https://github.com/shixian66/xiaowei-agent-sdk/pull/83) 的 `4905736db204493e219c32d6c6e1fdbe10fe5653` 已独立审查，无阻断；审查后新增的受限账号回归和证据说明须按新 SHA 核对。 |
+| 已同步主线审查记录 | SDK-A/B/C 已随 PR #89/#93/#94 合入；D7 尚未合并，离线审查不代表真实模型、飞书或公司 Grafana 验收。 |
 | 当前阶段 | D7 经典 Dashboard 创建/修改离线候选；C8 暂停。真实模型、Lark、公司 Grafana 及部署未验收。 |
 | 当前源码与依赖 | 主线应用表 v11；锁定 Agents SDK 0.22.3 / mcp 2.2.0。D7 复用 SDK-A 暂停/恢复、SDK-B 连接代际与既有治理/Evidence，不增加数据库迁移。 |
 | 新产品入口 | `xiaowei` 的 `serve`、`config check`、`model check`、`storage init/upgrade/cleanup`、`requests resend`；容器 Web 绑定沿现有部署配置。真实模型、公司 StarRocks 与真实飞书不由离线测试证明。 |
@@ -37,7 +37,11 @@
 
 ## 3. 当前计划与下一项工作
 
-**当前下一步：** D7 同步新主线后的正式入口、权限、失败和回归检查完成后，更新草稿 PR #83，以精确 SHA 交独立审查；不合并、不部署。C8 待 D7 闭环后另片推进。真实模型、真实 Lark、公司 Grafana 权限/组织和部署仍未验证。
+**当前下一步：** 补齐 D7 受限文件夹/跨组织账号的正式用例与 CI 证据边界，更新草稿 PR #83 后以新 SHA 复审；不合并、不部署。C8 待 D7 闭环后另片推进。真实模型、真实 Lark、公司 Grafana 权限/组织和部署仍未验证。
+
+**D7 独立审查与 CI 边界：** 审查版本 `4905736` 无阻断；审查方在本机隔离 Grafana 13.2.3、官方 MCP v2.0.2 与 PostgreSQL 上运行 D7 三个文件 **68 passed、0 skipped**，受影响十个文件 **396 passed、11 skipped**。该版本 PR 的十项 CI 检查全绿，但 `.github/workflows/ci.yml` 未配置 `XW_TEST_GRAFANA_MCP_BIN` 和 `XW_TEST_GRAFANA_D7_URL`；正式 Grafana/D7 协议用例在 CI 中跳过。官方 Server 与真实 Grafana 的 D7 证据只来自本机隔离环境，不能把 CI 全绿写成这些用例在 CI 运行过。
+
+**D7 审查后增量：** 正式群入口新增两项受限 Editor 用例：该账号可写本组织根目录，但本组织已降为只读的文件夹、另一组织的文件夹均实得 403；群内批准各发出一次被拒绝的 POST，Grafana 两个组织均无新增 Dashboard，Action 按现行契约为 `unknown`、无成功 Evidence，回执要求核对，重复批准零重放。设置 `SDK_TEST_POSTGRES_URL`、`XW_TEST_GRAFANA_MCP_BIN`、`XW_TEST_GRAFANA_D7_URL` 后运行 `test_grafana_d7.py`、`test_grafana_d7_protocol.py`、`test_grafana_mcp_protocol.py` 为本机 **38 passed、0 skipped**；文档检查 **5 passed**，Ruff、格式及差异检查通过。锁版 Grafana 13.2.3 的空组织删除 API 返回 500；跨组织用例只在可丢弃容器上运行，测试后移除该容器。403 改为确定未执行的 `rejected` 属另项契约取舍，本片未更改。
 
 **D7 当前离线证据：** 旧候选从 `52346a2` 合入 `515a94a`，保留 SDK-A 审批请求和 SDK-B `MCPServerManager` 连接管理。真 `serve`、Runner、PostgreSQL、群网关替身、官方 Grafana MCP v2.0.2 与隔离 Grafana 13.2.3 通过创建/修改、非名单批准、版本冲突、写后结果未知、独立恢复等 22 项 D7 正式用例；六个受影响文件共 **179 passed**（33.84s）。新增内部自发取消的正式群入口用例：官方 MCP 实际写一次后抛 `CancelledError`，Action 为 unknown，回执提示核对，重复批准未重放，单项 **1 passed**。脚本模型不能证明自主调查或真实群可用；最终版本的完整检查另记。
 
