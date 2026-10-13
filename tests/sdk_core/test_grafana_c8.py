@@ -22,7 +22,7 @@ from tests.sdk_core.test_grafana_d7 import group_send
 from tests.sdk_core.test_group_actions import request_execution
 from tests.sdk_core.test_group_gateway import GroupChannel, runtime_group
 from tests.sdk_core.test_group_identity import A, B
-from tests.sdk_core.test_runtime import Env
+from tests.sdk_core.test_runtime import BUDGET_CONFIG, Env
 from tests.sdk_core.test_runtime import env as env
 
 from xiaowei.feishu import attributed
@@ -537,3 +537,147 @@ async def test_datasource_schema_drift_hides_only_changed_action_without_tool_io
         assert SOURCE + "__propose_update_datasource" in seen
         assert remote_calls == []
         assert await env.scalar("SELECT count(*) FROM xiaowei_action") == 0
+
+
+async def test_group_datasource_unknown_field_is_rejected_before_action_or_write(
+    env: Env,
+    write_endpoint: str,
+    isolated_api: httpx2.AsyncClient,
+    group_channel: GroupChannel,
+) -> None:
+    from tests.sdk_core.test_starrocks_tools import tool_outputs
+
+    name = f"c8-{uuid4().hex}"
+    original_url = "http://127.0.0.1:9090"
+    created = await isolated_api.post(
+        "/api/datasources",
+        json={"name": name, "type": "prometheus", "access": "proxy", "url": original_url},
+    )
+    assert created.status_code in (200, 201)
+    uid = created.json()["datasource"]["uid"]
+    try:
+        asked = env.scripts.add(
+            attributed(A, "把数据源地址改为新地址"),
+            tool_call(
+                DS_UPDATE.replace("/", "__"),
+                uid=uid,
+                settings_json=json.dumps(
+                    {"fields": {"url": "http://127.0.0.1:9091", "bogusKey": "ignored"}}
+                ),
+            ),
+            cite(),
+        )
+        async with env.running(
+            env.config(**c8_config(write_endpoint, datasources=True)),
+            feishu_channel=group_channel,
+        ):
+            await group_send(env, group_channel, "把数据源地址改为新地址", "om_c8_unknown_key")
+            assert await env.scalar("SELECT count(*) FROM xiaowei_action") == 0
+            current = await isolated_api.get(f"/api/datasources/uid/{uid}")
+            assert current.status_code == 200 and current.json()["url"] == original_url
+            feedback = json.loads(tool_outputs(env.scripts.calls[asked][1])[0])
+            assert feedback["status"] == "rejected" and feedback["retry_this_turn"] is True
+            assert "url" in feedback["allowed_fields"]
+            assert "bogusKey" not in feedback["allowed_fields"]
+    finally:
+        await isolated_api.delete(f"/api/datasources/uid/{uid}")
+
+
+async def test_group_datasource_without_schema_requires_top_level_url(
+    env: Env,
+    write_endpoint: str,
+    isolated_api: httpx2.AsyncClient,
+    group_channel: GroupChannel,
+) -> None:
+    from tests.sdk_core.test_starrocks_tools import tool_outputs
+
+    name = f"c8-{uuid4().hex}"
+    url = "http://127.0.0.1:9090"
+    asked = env.scripts.add(
+        attributed(A, "创建测试数据源"),
+        tool_call(
+            DS_CREATE.replace("/", "__"),
+            name=name,
+            plugin_type="grafana-testdata-datasource",
+            settings_json=json.dumps({"fields": {"url": url}}),
+        ),
+        tool_call(
+            DS_CREATE.replace("/", "__"),
+            name=name,
+            plugin_type="grafana-testdata-datasource",
+            settings_json=json.dumps({"url": url}),
+        ),
+        request_execution,
+        cite(),
+    )
+    uid: str | None = None
+    try:
+        async with env.running(
+            env.config(
+                **c8_config(
+                    write_endpoint,
+                    datasources=True,
+                    budget={**BUDGET_CONFIG, "max_tool_calls": 4},
+                )
+            ),
+            feishu_channel=group_channel,
+        ):
+            await group_send(env, group_channel, "创建测试数据源", "om_c8_no_schema")
+            feedback = json.loads(tool_outputs(env.scripts.calls[asked][1])[0])
+            assert feedback["status"] == "rejected" and feedback["retry_this_turn"] is True
+            assert "顶层" in feedback["reason"]
+            assert await env.scalar("SELECT count(*) FROM xiaowei_action") == 1
+            action_id = await env.scalar("SELECT action_id FROM xiaowei_action")
+            assert action_id and await env.scalar("SELECT state FROM xiaowei_action") == "pending"
+            assert all(
+                item["name"] != name for item in (await isolated_api.get("/api/datasources")).json()
+            )
+            await group_send(
+                env, group_channel, f"/批准 {action_id}", "om_c8_no_schema_ok", sender=B
+            )
+            assert await env.scalar("SELECT state FROM xiaowei_action") == "succeeded"
+            selected = [
+                item
+                for item in (await isolated_api.get("/api/datasources")).json()
+                if item["name"] == name
+            ]
+            assert len(selected) == 1 and selected[0]["url"] == url
+            uid = selected[0]["uid"]
+    finally:
+        if uid is not None:
+            await isolated_api.delete(f"/api/datasources/uid/{uid}")
+
+
+@pytest.mark.parametrize("fields", [{"url": 42}, {"isDefault": "yes"}])
+async def test_group_datasource_field_with_wrong_root_type_is_rejected_before_action(
+    env: Env,
+    write_endpoint: str,
+    isolated_api: httpx2.AsyncClient,
+    group_channel: GroupChannel,
+    fields: dict[str, object],
+) -> None:
+    from tests.sdk_core.test_starrocks_tools import tool_outputs
+
+    name = f"c8-{uuid4().hex}"
+    asked = env.scripts.add(
+        attributed(A, "创建监控数据源"),
+        tool_call(
+            DS_CREATE.replace("/", "__"),
+            name=name,
+            plugin_type="prometheus",
+            settings_json=json.dumps({"fields": fields}),
+        ),
+        cite(),
+    )
+    async with env.running(
+        env.config(**c8_config(write_endpoint, datasources=True)),
+        feishu_channel=group_channel,
+    ):
+        await group_send(env, group_channel, "创建监控数据源", "om_c8_wrong_type")
+        assert await env.scalar("SELECT count(*) FROM xiaowei_action") == 0
+        assert all(
+            item["name"] != name for item in (await isolated_api.get("/api/datasources")).json()
+        )
+        feedback = json.loads(tool_outputs(env.scripts.calls[asked][1])[0])
+        assert feedback["status"] == "rejected" and feedback["retry_this_turn"] is True
+        assert "字段值类型" in feedback["reason"] and "url" in feedback["allowed_fields"]

@@ -7,7 +7,7 @@ import json
 import re
 from collections.abc import Callable, Iterable
 from datetime import datetime
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 from urllib.parse import parse_qsl, urlsplit
 
 from mcp.types import CallToolResult, ResourceLink, TextContent
@@ -18,6 +18,7 @@ from xiaowei.evidence import arguments_digest
 from xiaowei.governance import (
     Prechecked,
     Projection,
+    ProposalRejectedError,
     ToolCatalog,
     ToolPolicy,
     ToolRejectedError,
@@ -159,6 +160,9 @@ def _request_settings(text: object, *, update: bool) -> dict[str, Any]:
     except (ValueError, TypeError, RecursionError):
         raise ToolRejectedError("数据源设置须为锁版MCP参数对象；修改时至少一项") from None
 
+    if "fields" in settings and "jsonData" in settings:
+        raise ToolRejectedError("fields 与 jsonData 不能同时提交；请只选择一种修改方式")
+
     def check(value: object) -> None:
         if isinstance(value, dict):
             for key, item in value.items():
@@ -179,6 +183,37 @@ def _request_settings(text: object, *, update: bool) -> dict[str, Any]:
 
     check(settings)
     return settings
+
+
+def _guidance_fields(result: CallToolResult, plugin_type: str) -> dict[str, str] | None:
+    if (
+        result.is_error
+        or result.result_type != "complete"
+        or result.structured_content is not None
+        or len(result.content) != 1
+        or not isinstance(result.content[0], TextContent)
+    ):
+        raise ValueError("数据源字段说明不符合锁版契约")
+    guidance = json.loads(result.content[0].text, object_pairs_hook=_pairs)
+    if not isinstance(guidance, dict) or guidance.get("type") != plugin_type:
+        raise ValueError("数据源字段说明的插件类型不符")
+    if "fields" not in guidance:
+        if not isinstance(guidance.get("message"), str):
+            raise ValueError("无schema插件的字段说明不符")
+        return None
+    fields = guidance["fields"]
+    if not isinstance(fields, list) or any(
+        not isinstance(field, dict)
+        or not isinstance(field.get("key"), str)
+        or not field["key"]
+        or not isinstance(field.get("type"), str)
+        for field in fields
+    ):
+        raise ValueError("数据源字段说明的字段列表不符")
+    guidance_types = {field["key"]: field["type"] for field in fields}
+    if len(guidance_types) != len(fields):
+        raise ValueError("数据源字段说明有重复键")
+    return guidance_types
 
 
 def schema_matches_c8(name: str, schema: dict[str, object]) -> bool:
@@ -428,18 +463,21 @@ def datasource_catalog(
         ),
     }
     descriptions = {
-        "get_datasource": "供确定性写动作回读当前数据源配置与版本；不进入Runner。",
+        "get_datasource": "读取当前数据源配置与版本，凭据值会隐藏；仅在本轮获准工具范围内可见。",
         "create_datasource": "仅供群批准后创建数据源；不进入Runner。",
         "update_datasource": "仅供群批准后修改数据源；不进入Runner。",
         "propose_create_datasource": (
             "提出创建Grafana数据源，不执行。name为显示名，plugin_type为插件类型（不设类型白名单）；"
-            "settings_json是MCP参数JSON对象，动态插件字段放fields内，例如"
-            '{"fields":{"url":"http://prometheus:9090"}}。按需求填写，不猜测。'
+            "settings_json是MCP参数JSON对象；有字段说明的插件把合法动态字段放fields内，例如"
+            '{"fields":{"url":"http://prometheus:9090"}}；无字段说明的插件使用顶层url等参数。'
+            "不确定字段名时按拒绝反馈中的allowed_fields修正。"
             "密码/Token须到Grafana手动配置，不提交secureJsonData或含账号密码/Token的URL。"
         ),
         "propose_update_datasource": (
             "提出修改Grafana数据源，不执行。uid指定现有对象；settings_json仅写要改的字段，"
-            "动态插件字段放fields内。jsonData局部变更会合并当前非秘密字段并展示实际差异；"
+            "有字段说明的插件把合法动态字段放fields内；无字段说明时使用顶层url等参数。"
+            "不确定字段名时按allowed_fields修正。fields与jsonData不能同时提交。"
+            "jsonData局部变更会合并当前非秘密字段并展示实际差异；"
             "旧值含隐藏字段时拒绝，需管理员在Grafana手动处理。"
             "密码/Token到Grafana手动配置，不提交secureJsonData或含账号密码/Token的URL。"
         ),
@@ -529,11 +567,48 @@ def datasource_actions(
                 raise ValueError("数据源回读UID不符")
             return decoded
 
-        async def plan(req: ToolRequest, load: Callable[..., Any] = read) -> ActionPlan:
+        async def plan(
+            req: ToolRequest,
+            load: Callable[..., Any] = read,
+            s: MCPServerConfig = source,
+        ) -> ActionPlan:
             args = req.arguments
             update = "uid" in args
             settings = _request_settings(args["settings_json"], update=update)
             before = await load(args["uid"]) if update else None
+            plugin_type = cast(str, before["type"] if before is not None else args["plugin_type"])
+            guidance = await mcp.datasource_guidance(
+                s.server_id,
+                "update_datasource" if update else "create_datasource",
+                cast(str, args["uid"]) if update else plugin_type,
+            )
+            allowed = _guidance_fields(guidance, plugin_type)
+            if allowed is None and "fields" in settings:
+                raise ProposalRejectedError("无schema插件不接受fields", hint="datasource_no_schema")
+            fields = settings.get("fields", {})
+            if allowed is not None:
+                allowed_keys = tuple(sorted(allowed))
+                if set(fields) - allowed.keys():
+                    raise ProposalRejectedError(
+                        "fields含未知插件字段",
+                        hint="datasource_fields",
+                        allowed_fields=allowed_keys,
+                    )
+                for key, value in fields.items():
+                    expected = allowed[key]
+                    valid = (
+                        (expected == "string" and isinstance(value, str))
+                        or (expected == "boolean" and type(value) is bool)
+                        or (expected == "number" and type(value) in (int, float))
+                        or (expected == "integer" and type(value) is int)
+                        or expected not in {"string", "boolean", "number", "integer"}
+                    )
+                    if not valid:
+                        raise ProposalRejectedError(
+                            "fields字段值类型与说明不符",
+                            hint="datasource_field_type",
+                            allowed_fields=allowed_keys,
+                        )
             if before is not None and "jsonData" in settings:
                 settings["jsonData"] = _merge_json_data(before["jsonData"], settings["jsonData"])
                 settings = _request_settings(_json(settings), update=True)

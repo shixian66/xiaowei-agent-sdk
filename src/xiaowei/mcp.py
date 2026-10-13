@@ -444,6 +444,30 @@ class MCPIntegration:
             name, binding.contract, self._governance, self._execute(binding, server, source)
         )
 
+    async def datasource_guidance(
+        self, server_id: str, remote_name: str, value: str
+    ) -> CallToolResult:
+        """仅供已通过治理的 C8 提出/批准准备；锁版说明分支确认不写入。"""
+        if remote_name == "create_datasource":
+            arguments = {"name": "", "type": value}
+        elif remote_name == "update_datasource":
+            arguments = {"uid": value}
+        else:
+            raise ValueError("未开放此数据源说明工具")
+        source = self._sources.get(server_id)
+        if source is None:
+            raise ToolRejectedError("MCP源暂不可用", code="unsupported")
+        self.execute_for(source.config.tool_id(remote_name), server_id)
+        snapshot = source.snapshot
+        if snapshot is None:
+            raise ToolRejectedError("MCP源暂不可用", code="unsupported")
+        try:
+            return await snapshot.server.call_tool(remote_name, arguments)
+        except Exception as exc:
+            if _connection_lost(exc) and source.snapshot is snapshot:
+                source.status = "disconnected"
+            raise
+
     def execute_for(self, tool_id: str, target_id: str) -> Execute:
         """应用的选中Action复用已核约执行函数；调用方仍须经同一个GovernedTools。"""
         source = self._sources.get(target_id)

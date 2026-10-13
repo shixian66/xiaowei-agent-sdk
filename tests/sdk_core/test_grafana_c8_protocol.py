@@ -202,10 +202,19 @@ async def test_official_datasource_create_result_has_text_and_resource_link(
             grafana_binary, 3308, c8_write=True, upstream_token=token.json()["key"]
         ) as url:
             async with client(url) as mcp:
+                original = (await isolated_api.get("/api/datasources")).json()
                 schema = payload(
-                    await mcp.call_tool("create_datasource", {"name": name, "type": "prometheus"})
+                    await mcp.call_tool("create_datasource", {"name": "", "type": "prometheus"})
                 )
-                assert any(f["key"] == "url" and f["required"] is True for f in schema["fields"])
+                assert any(
+                    f["key"] == "url" and f["required"] is True and f["type"] == "string"
+                    for f in schema["fields"]
+                )
+                no_schema = payload(
+                    await mcp.call_tool("create_datasource", {"name": "", "type": "testdata"})
+                )
+                assert no_schema["type"] == "testdata" and "fields" not in no_schema
+                assert (await isolated_api.get("/api/datasources")).json() == original
                 result = await mcp.call_tool(
                     "create_datasource",
                     {
@@ -223,6 +232,11 @@ async def test_official_datasource_create_result_has_text_and_resource_link(
                 assert body["name"] == name and isinstance(uid, str)
                 current = payload(await mcp.call_tool("get_datasource", {"uid": uid}))
                 assert current["uid"] == uid and current["url"] == "http://127.0.0.1:9090"
+                update_schema = payload(await mcp.call_tool("update_datasource", {"uid": uid}))
+                assert update_schema["type"] == "prometheus"
+                assert any(f["key"] == "url" for f in update_schema["fields"])
+                unchanged = payload(await mcp.call_tool("get_datasource", {"uid": uid}))
+                assert unchanged == current
     finally:
         if uid is not None:
             await isolated_api.delete(f"/api/datasources/uid/{uid}")

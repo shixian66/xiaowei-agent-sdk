@@ -574,10 +574,14 @@ Annotation 等工具；小维只映射下面列出的创建/修改和必要回�
 Web 和私聊不能申请或批准这些写动作。群内每个 Action 单独批准，版本变化未写入须重新提出，
 写后超时或回读不符按结果未知处理、人工核对、绝不自动重放。
 
-`settings_json` 用锁版 MCP 的实际字段，插件特有非秘密设置放 `fields`；不按插件类型建白名单，
-也没有逐类验证或小维 URL 目标白名单。官方 MCP 对未知插件类型的“先取字段 schema”调用
-可能直接 POST；C8 提出阶段不调用它，只有批准后的 `schemaReviewed=true` 请求才执行。
-因此插件默认值、字段语义、Grafana 可访问的目标地址须由启用者按实际安装环境判断，
+`settings_json` 用锁版 MCP 的实际字段，不按插件类型建白名单，也没有逐类验证或小维 URL
+目标白名单。提出阶段只用 `create_datasource` 的空 `name` + `type`，或 `update_datasource`
+的单独 `uid` 获取字段说明；这两个锁版分支已实测不写入。**不要**把非空 `name`、未知插件
+和省略 `schemaReviewed` 的组合当作只读探测：它可能直接 POST。返回 `fields` 说明时，
+`settings_json.fields` 只能使用说明列出的键及其基础值类型；不认识的键在提出时拒绝并返回可用键名，基础值类型不符也在提出时拒绝。
+没有 `fields` 说明的插件须用顶层 `url` 等参数，提交 `fields` 会拒绝；`fields` 与
+`jsonData` 也不能同时提交。只有群批准后的写调用才带 `schemaReviewed=true`。
+插件默认值、字段语义、Grafana 可访问的目标地址仍由启用者按实际安装环境判断，
 本机 Prometheus 插件成功不证明所有插件成功。`secureJsonData`、有值的 password/token/apiKey/secret
 动态字段及带账号密码或已识别凭据查询参数的 URL 在提出阶段拒绝；需密码时群回执显示“待配置凭据”，
 管理员到 Grafana 数据源设置页手动填写，健康检查前不称可用。修改 `jsonData` 时，

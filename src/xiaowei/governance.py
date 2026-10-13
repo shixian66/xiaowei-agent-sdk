@@ -135,6 +135,9 @@ ToolRejectHint = Literal[
     "silence_expired",
     "silence_missing",
     "silence_filter",
+    "datasource_fields",
+    "datasource_field_type",
+    "datasource_no_schema",
 ]
 """可信拒绝点提供的固定修正/限制提示标识；不携带参数或异常原文。"""
 
@@ -150,12 +153,14 @@ class ToolRejectedError(Exception):
         hint: ToolRejectHint | None = None,
         remaining_retries: Literal[0, 1] = 0,
         query_reject: QueryRejectionCode | None = None,
+        allowed_fields: tuple[str, ...] | None = None,
     ) -> None:
         super().__init__(message)
         self.code = code
         self.hint = hint
         self.remaining_retries = remaining_retries
         self.query_reject = query_reject
+        self.allowed_fields = allowed_fields
 
 
 class ProposalRejectedError(ToolRejectedError):

@@ -51,6 +51,23 @@ def test_nonsecret_dynamic_plugin_fields_are_allowed() -> None:
     assert prepare_datasource(request) is request
 
 
+def test_datasource_update_rejects_fields_and_jsondata_together() -> None:
+    request = datasource_request(
+        {"fields": {"httpMethod": "POST"}, "jsonData": {"timeInterval": "60s"}}
+    ).model_copy(
+        update={
+            "arguments": {
+                "uid": "example",
+                "settings_json": json.dumps(
+                    {"fields": {"httpMethod": "POST"}, "jsonData": {"timeInterval": "60s"}}
+                ),
+            }
+        }
+    )
+    with pytest.raises(ToolRejectedError):
+        prepare_datasource(request)
+
+
 def test_remote_datasource_readback_never_projects_credentials() -> None:
     remote = {
         "id": 7,
