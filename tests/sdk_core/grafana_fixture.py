@@ -194,6 +194,20 @@ def grafana_backend() -> Iterator[tuple[int, BackendState]]:
             self.end_headers()
             self.wfile.write(encoded)
 
+        def _reject_write(self) -> None:
+            parsed = urlsplit(self.path)
+            state.requests.append(
+                (parsed.path, parse_qs(parsed.query), self.headers.get("Authorization"))
+            )
+            self.send_response(405)
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+
+        do_POST = _reject_write  # noqa: N815 - BaseHTTPRequestHandler hook
+        do_PUT = _reject_write  # noqa: N815 - BaseHTTPRequestHandler hook
+        do_DELETE = _reject_write  # noqa: N815 - BaseHTTPRequestHandler hook
+        do_PATCH = _reject_write  # noqa: N815 - BaseHTTPRequestHandler hook
+
         def log_message(self, *_args: object) -> None:
             return
 
@@ -214,6 +228,9 @@ def official_grafana(
     backend_port: int,
     *,
     token: str = "synthetic-mcp-token",  # noqa: S107 - synthetic only
+    dashboard_write: bool = False,
+    dashboard_override: bool = False,
+    upstream_token: str = "synthetic-upstream-token",  # noqa: S107
 ) -> Iterator[str]:
     with socket.socket() as probe:
         probe.bind(("127.0.0.1", 0))
@@ -223,8 +240,12 @@ def official_grafana(
             str(binary),
             "--transport=streamable-http",
             f"--address=127.0.0.1:{port}",
-            "--enabled-tools=search,dashboard,datasource,annotations",
-            "--disable-write",
+            "--enabled-tools="
+            + (
+                "search,dashboard" if dashboard_write else "search,dashboard,datasource,annotations"
+            ),
+            *([] if dashboard_write else ["--disable-write"]),
+            *(["--enable-write-tools=update_dashboard"] if dashboard_override else []),
             "--disable-query",
             "--usage-stats=disabled",
             "--allow-grafana-url-override=false",
@@ -236,7 +257,7 @@ def official_grafana(
         env={
             "PATH": os.environ["PATH"],
             "GRAFANA_URL": f"http://127.0.0.1:{backend_port}",
-            "GRAFANA_SERVICE_ACCOUNT_TOKEN": "synthetic-upstream-token",
+            "GRAFANA_SERVICE_ACCOUNT_TOKEN": upstream_token,
             "DO_NOT_TRACK": "1",
         },
         stdout=subprocess.DEVNULL,

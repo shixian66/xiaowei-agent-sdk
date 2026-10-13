@@ -95,6 +95,8 @@ class ActionBinding:
     """可信装配产生的固定源配置/执行语义版本摘要；不含凭据，改变即使旧批准失效。"""
     precheck: Callable[[ToolRequest], ToolRequest] | None = None
     """动作切片的零 I/O 提出检查；复用 Prechecked，拒绝可在本轮修正。"""
+    available: Callable[[], bool] | None = None
+    """选中MCP写切片的当前核约可用性；不探测、不授予权限。"""
 
 
 class ActionStatusArgs(BaseModel):
@@ -238,8 +240,16 @@ class ActionService:
 
     @property
     def available_tool_ids(self) -> frozenset[str]:
-        bound_sources = {b.proposal.target_id for b in self._bindings.values()}
-        return frozenset(b.proposal.tool_id for b in self._bindings.values()) | frozenset(
+        bound_sources = {
+            b.proposal.target_id
+            for b in self._bindings.values()
+            if b.available is None or b.available()
+        }
+        return frozenset(
+            b.proposal.tool_id
+            for b in self._bindings.values()
+            if b.available is None or b.available()
+        ) | frozenset(
             c.tool_id
             for c in self.governance.catalog.contracts
             if c.policy_id == STATUS_POLICY
@@ -254,6 +264,8 @@ class ActionService:
         for contract in self.governance.allowed_contracts(ctx):
             binding = self._bindings.get((contract.tool_id, contract.target_id))
             if binding is not None:
+                if binding.available is not None and not binding.available():
+                    continue
 
                 async def propose(
                     req: ToolRequest, b: ActionBinding | None = binding
@@ -473,6 +485,7 @@ class ActionService:
         b = self._bindings.get((action.proposal_tool_id, action.target_id))
         if (
             b is None
+            or (b.available is not None and not b.available())
             or action.write_tool_id != b.write.tool_id
             or action.binding != self._binding_hash(b)
             or not await self._access.authorize(ctx.identity, action.target_id, b.proposal.tool_id)

@@ -186,10 +186,10 @@ def _card(
                     )
                 )
             )
-            elements.extend(
-                _div(f"{_ACTION_LABELS.get(key, key)}：{_cell({key: value}, key)}")
-                for key, value in fact.metadata.items()
-            )
+            # 完整动作材料是可信代码生成的文本；避免把整份 JSON 再转义为标量。
+            for key, value in fact.metadata.items():
+                text = display_text(value) if isinstance(value, str) else _cell({key: value}, key)
+                elements.append(_div(f"{_ACTION_LABELS.get(key, key)}：{text}"))
             continue
         if fact.columns:
             elements.extend(

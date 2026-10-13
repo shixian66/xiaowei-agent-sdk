@@ -88,6 +88,7 @@ from xiaowei.config import (
 from xiaowei.evidence import EvidenceStore
 from xiaowei.feishu import FeishuGateway, LarkChannel, LarkTransport, lark_channel, send_delivery
 from xiaowei.governance import GovernedTools, Projection, ToolCatalog, ToolPolicy
+from xiaowei.grafana import D7_POLICIES, dashboard_actions, dashboard_catalog
 from xiaowei.image_input import SessionImageStore
 from xiaowei.mcp import MCPIntegration
 from xiaowei.model_api import ModelProfile, open_model
@@ -276,7 +277,7 @@ class ServeConfig(_Config):
         if len(set(ids)) != len(ids):
             raise ValueError("mcp_servers 中的 server_id 不能重复")
         if any(
-            policy_id not in PROMETHEUS_READ_POLICIES | GRAFANA_READ_POLICIES
+            policy_id not in PROMETHEUS_READ_POLICIES | GRAFANA_READ_POLICIES | D7_POLICIES
             or policy_id.rsplit(".", 1)[-1] != remote_name
             for server in value
             for remote_name, policy_id in server.allowed_tools.items()
@@ -284,6 +285,18 @@ class ServeConfig(_Config):
             raise ValueError(
                 "只允许已核约的 Prometheus 只读工具及其准确映射；Grafana 同样按已核约映射"
             )
+        for server in value:
+            if "update_dashboard" in server.allowed_tools:
+                if (
+                    server.auth_ref is None
+                    or not {"get_dashboard_by_uid", "list_dashboard_versions", "update_dashboard"}
+                    <= server.allowed_tools.keys()
+                ):
+                    raise ValueError("Dashboard写端必须有auth_ref及版本/定义回读工具")
+                if any(policy not in D7_POLICIES for policy in server.allowed_tools.values()):
+                    raise ValueError(
+                        "Dashboard写端单独配置，只选D7已核约工具；其他读取使用原只读端"
+                    )
         return value
 
     @field_validator("projection_bytes")
@@ -661,6 +674,12 @@ def _registered_tools(config: ServeConfig) -> frozenset[str]:
         server.tool_id(name) for server in config.mcp_servers for name in server.allowed_tools
     } | {source.tool_id(name) for source in config.alertmanager_sources for name in source.tools}
     monitoring |= {tool for source in config.alertmanager_sources for tool in source.action_tools}
+    monitoring |= {
+        s.tool_id(f"propose_{action}")
+        for s in config.mcp_servers
+        if "update_dashboard" in s.allowed_tools
+        for action in ("create_dashboard", "update_dashboard")
+    }
     monitoring |= {
         f"{sid}/get_action_status"
         for sid in (
@@ -1109,14 +1128,28 @@ def _monitoring_catalog(
         )
         for server in config.mcp_servers
         for name in server.allowed_tools
+        if name in policies
     )
-    return contracts, tuple(policy for name, policy in policies.items() if name in selected)
+    d7_contracts, d7_policies = dashboard_catalog(config.mcp_servers, config.projection_bytes)
+    return (*contracts, *d7_contracts), (
+        *(policy for name, policy in policies.items() if name in selected),
+        *d7_policies,
+    )
 
 
 def _app_config(config: ServeConfig) -> AppConfig:
     monitoring = frozenset(
-        server.tool_id(name) for server in config.mcp_servers for name in server.allowed_tools
+        server.tool_id(name)
+        for server in config.mcp_servers
+        for name in server.allowed_tools
+        if server.allowed_tools[name] != "grafana.update_dashboard"
     ) | {source.tool_id(name) for source in config.alertmanager_sources for name in source.tools}
+    monitoring |= {
+        s.tool_id(f"propose_{action}")
+        for s in config.mcp_servers
+        if "update_dashboard" in s.allowed_tools
+        for action in ("create_dashboard", "update_dashboard")
+    }
     monitoring |= {
         source.tool_id(f"propose_{name}")
         for source in config.alertmanager_sources
@@ -1133,6 +1166,11 @@ def _app_config(config: ServeConfig) -> AppConfig:
         source.tool_id(name)
         for source in config.alertmanager_sources
         for name in source.write_actions
+    }
+    write_tools |= {
+        s.tool_id("update_dashboard")
+        for s in config.mcp_servers
+        if "update_dashboard" in s.allowed_tools
     }
     audit = _registered_tools(config) - QUERY_TOOLS - monitoring - write_tools
     return AppConfig(
@@ -1465,9 +1503,16 @@ async def open_runtime(
                 parts.store,
                 parts.results.access,
                 bindings=[
-                    binding
-                    for adapter in alertmanagers.values()
-                    for binding in adapter.action_bindings(governance.catalog)
+                    *[
+                        binding
+                        for adapter in alertmanagers.values()
+                        for binding in adapter.action_bindings(governance.catalog)
+                    ],
+                    *(
+                        dashboard_actions(mcp, config.mcp_servers, governance.catalog, clock=clock)
+                        if mcp
+                        else ()
+                    ),
                 ],
                 clock=clock,
             ),
