@@ -11,9 +11,9 @@
 | 仓库 | [shixian66/xiaowei-agent-sdk](https://github.com/shixian66/xiaowei-agent-sdk) |
 | 本地目录 / 分支 | SDK-C：`/Users/kloenguyen/.codex/worktrees/monitoring-sdk-c/agent-SDK` / `codex/monitoring-sdk-c`；基线 `origin/main` 为 `182b26c3be0313e1400d91719a605bdee21a9651`，主目录旧分支保留未改。 |
 | M5 历史起点 | `372c381f44ecfa1fa53961f137d0058033cbd805`；不是远端当前 main 的核验结论 |
-| 本轮审查版本 | SDK-B 已随 PR #93 合入 `main`；SDK-C 从 `182b26c3be0313e1400d91719a605bdee21a9651` 评估薄层等价性，本分支只修订状态与证据，精确 head 以 Git 和 PR 为准。 |
-| 已同步主线审查记录 | SDK-A 已随 PR #89、E6 已随 PR #91、SDK-B 已随 PR #93 合入；SDK-C 结论仍需按本分支精确版本独立审查。 |
-| 当前阶段 | SDK-C 等价评估完成，未发现可安全删除的薄层，本分支待独立审查；D7/C8 暂停至该差异审查完成。真实模型、Lark 与公司服务未验收，当前未部署。 |
+| 本轮审查版本 | SDK-B 已随 PR #93 合入 `main`；SDK-C 从 `182b26c3be0313e1400d91719a605bdee21a9651` 评估薄层等价性，PR #94 的 `f037d0a` 独立审查无阻断，后续文档修正以 Git 和 PR 的最终 head 为准。 |
+| 已同步主线审查记录 | SDK-A 已随 PR #89、E6 已随 PR #91、SDK-B 已随 PR #93 合入；SDK-C PR #94 的原审查版本 `f037d0a` 无阻断。 |
+| 当前阶段 | SDK-C 等价评估未发现可安全删除的薄层，独立审查无阻断；下一片 D7，C8 其后。真实模型、Lark 与公司服务未验收，当前未部署。 |
 | 当前源码与依赖 | 主线应用表 v11；锁定 Agents SDK 0.22.3 / mcp 2.2.0。SDK-B 已用 `MCPServerManager` 接管连接/关闭所有权；SDK-C 不改产品代码、配置、存储或业务工具契约。 |
 | 新产品入口 | `xiaowei` 的 `serve`、`config check`、`model check`、`storage init/upgrade/cleanup`、`requests resend`；容器 Web 绑定沿现有部署配置。真实模型、公司 StarRocks 与真实飞书不由离线测试证明。 |
 | 本次工作范围 | SDK-C 核对现有工具护栏、错误反馈和 Session 策略是否可由锁定 SDK 公开能力等价替换；未证实等价时保留，不新增包装或框架。 |
@@ -37,9 +37,11 @@
 
 ## 3. 当前计划与下一项工作
 
-**当前下一步：** SDK-A（PR #89）、E6（PR #91）与 SDK-B（PR #93）已离线合入 `main`。SDK-C 等价评估分支待独立审查；审查完成后按监控计划恢复 D7/C8。E6 的真实模型旧/新对照按用户批准的例外移至另获授权的部署验收；真实 Lark、公司服务与部署仍未验证。
+**当前下一步：** SDK-A（PR #89）、E6（PR #91）与 SDK-B（PR #93）已离线合入 `main`。SDK-C 等价评估已获独立审查无阻断；下一片按监控计划恢复 D7，之后推进 C8。E6 的真实模型旧/新对照按用户批准的例外移至另获授权的部署验收；真实 Lark、公司服务与部署仍未验证。
 
-**SDK-C 等价评估（基线 `182b26c`，本分支待审）：** 锁定 SDK 0.22.3 的输入护栏可在工具执行前用固定内容拒绝；但 `needs_approval` 默认先于护栏，已批准恢复仍须在 `GovernedTools.invoke` 按当前身份、Action 绑定、目标与预算复核。现有 `tools.py` 把确定发生在 I/O 前的拒绝、可修正的 PromQL 错误和监控只读故障分类交给模型，其他执行后异常中止；SDK 的通用护栏/错误格式化没有替代这些业务分类和账本的等价能力。底层 `SQLAlchemySession` 只按条数读写历史，不复核归属、到期、当前 Evidence/接收权限、工具调用与结果配对，也不提供 `PolicySession.commit_validated` 的提交前检查。对照 `src/xiaowei/tools.py`、`governance.py`、`session.py`、`app.py` 与隔离环境中的 `agents/tool.py`、`run_internal/tool_execution.py`、`extensions/memory/sqlalchemy_session.py`。无产品代码变更。SDK 小实验（真 Runner、脚本模型、无网络）：直接工具异常调用一次后停止；输入护栏在零业务调用时返回固定拒绝并继续。隔离 PostgreSQL 的治理/会话相关回归 **104 passed**（21.07 秒）；这不证明真实模型、飞书或公司服务。D7/C8 原有缺口保持开放。
+**SDK-C 等价评估（基线 `182b26c`，PR #94 原审查版本无阻断）：** 锁定 SDK 0.22.3 的输入护栏可在工具执行前用固定内容拒绝；但 `needs_approval` 默认先于护栏，已批准恢复仍须在 `GovernedTools.invoke` 按当前身份、Action 绑定、目标与预算复核。现有 `tools.py` 把确定发生在 I/O 前的拒绝、可修正的 PromQL 错误和监控只读故障分类交给模型，普通执行后异常中止。工具内部自发抛出的取消异常属于例外：SDK 默认格式化为含 “Please try again” 的工具结果并继续 Runner；现有最终完整性校验与 Action 持久占用负责防止写入被当成成功或自动重放，D7 须验证这条正式路径。SDK 的通用护栏/错误格式化没有替代这些业务分类和账本的等价能力。底层 `SQLAlchemySession` 只按条数读写历史，不复核归属、到期、当前 Evidence/接收权限、工具调用与结果配对，也不提供 `PolicySession.commit_validated` 的提交前检查。原生恢复时 SDK 会调用 `get_items(limit)`，而 `PolicySession` 拒绝按条数读取以免拆开工具调用与结果；因此恢复使用 `session=None`，再将公开 `RunResult.new_items` 手动交给 `PolicySession.add_items` 与 `commit_validated`，这段适配仍须保留。对照 `src/xiaowei/tools.py`、`governance.py`、`session.py`、`app.py` 与隔离环境中的 `agents/tool.py`、`run_internal/tool_execution.py`、`extensions/memory/sqlalchemy_session.py`。无产品代码变更。
+
+**SDK-C 离线证据：** 真 Runner、脚本模型、无网络的小实验显示：普通工具异常调用一次后停止；输入护栏在零业务调用时返回固定拒绝并继续；工具内部取消会给模型 “Please try again” 并继续（模型调用 2 次）。`SDK_TEST_POSTGRES_URL=postgresql+asyncpg://postgres@127.0.0.1:55432/postgres .venv/bin/python -m pytest tests/sdk_core/test_r7_governance.py tests/sdk_core/test_r7_rejection_categories.py tests/sdk_core/test_session_policy.py -q -W error -p no:cacheprovider --maxfail=1`：隔离 PostgreSQL 的治理/会话回归 **104 passed**（21.07 秒）。上述结果不证明真实模型、飞书或公司服务；D7/C8 原有缺口保持开放。
 
 **SDK-B 离线候选证据（基线 `89521cd`）。** `MCPIntegration` 以锁定 SDK 0.22.3 的公开 `MCPServerManager` 管理每个新连接代际，取代手工 `AsyncExitStack` 的连接与清理持有职责；旧实现跨任务关闭没有观察到用户可见失败；小维保留源级锁、退避、核约、快照、治理与 Evidence。产品源码该文件增加 32 行、删除 22 行（净增 10 行，未达到计划的净删减指标），没有新增模块、配置或后台探测。可测收益是 SDK worker 使 connect/cleanup 同任务归属、候选清理有上限；连接中及 `list_tools` 失败、慢清理的候选均关闭。R1b 新断言覆盖重连成功与失败后旧代际清理。正式 Web 的断线→下一轮重连、官方 Prometheus MCP v0.18.0 会话失效、旧轮次与 schema 漂移等沿 R1b 用例复验。受影响协议/接入 8 文件 **122 passed、2 deselected**；本机隔离 PostgreSQL、真 SDK、loopback 和两种官方 MCP 二进制的整仓 `python -m pytest -q` 为 **5555 passed、168 skipped、63 deselected、5 项预期 socket 拦截警告**（1350.27 秒）。Ruff 全仓、改动代码格式、mypy 132 个源码文件、文档事实检查与差异检查通过。这里证明离线连接与治理路径，不证明真实模型、真实飞书、公司监控源、部署或用户验收；精确提交与 PR CI 另以交付记录为准。
 
@@ -83,7 +85,7 @@
 
 **开发方复查：** 已对具体索引树 `aea741b3dbc06ff4bb9777fde238b8e51382195f` 做新上下文只读复核，六项接点及后续收权问题已闭合，无新增阻断；之后只补交接证据。该结论不代表用户指定独立验收通过。最终候选精确提交由Git读取，不在交接里重复写自身SHA。
 
-**缺口与限制：** 没有真实模型、飞书/Lark、公司监控源、公司部署/升级/恢复或真实用户验收；脚本模型不能证明自主提出/取证/答案质量。Vertex只验证本地协议替身。未自行豁免真实能力和生产写门槛。已将主线 E5b `f89b586` 纳入集成；渠道展示、会话提醒及未支持输入的兼容以本次回归和 PR CI 为准。SDK-A只替代批准暂停/恢复协议；SDK-B 产品差异已独立复审，SDK-C 未实现。
+**缺口与限制：** 没有真实模型、飞书/Lark、公司监控源、公司部署/升级/恢复或真实用户验收；脚本模型不能证明自主提出/取证/答案质量。Vertex只验证本地协议替身。未自行豁免真实能力和生产写门槛。已将主线 E5b `f89b586` 纳入集成；渠道展示、会话提醒及未支持输入的兼容以本次回归和 PR CI 为准。SDK-A只替代批准暂停/恢复协议；SDK-B 产品差异已独立复审；SDK-C 等价评估未发现可安全删除的薄层，未修改产品代码。
 
 **已合入主线 E5b：** [七项计划 E5b](docs/superpowers/plans/2026-10-10-production-dialogue-repairs.md#e5图片和文档输入第-5-项)的 TXT/MD 受控输入随主线 `f89b586` 合入；本次只核对它与 SDK-A 审批路径的集成。图片保存/回放与模型输入属后续独立切片，E6/C7 不提前实施。
 
