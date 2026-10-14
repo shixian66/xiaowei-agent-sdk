@@ -345,6 +345,48 @@ async def test_database_and_layout_warnings_are_visible_by_default(
         assert sql in expanded and cursor in expanded and '"rows":' in expanded
 
 
+async def test_audit_completeness_metadata_is_visible_in_web_fact(
+    env: Env, chrome_binary: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    catalog = env.evidence._catalog
+    policy = catalog._policies["synthetic.region"]
+    monkeypatch.setitem(
+        catalog._policies,
+        "synthetic.region",
+        replace(
+            policy,
+            projections={
+                audience: Projection(
+                    (*spec.fields, "checked_candidates", "omitted_sqlguard"), spec.max_bytes
+                )
+                for audience, spec in policy.projections.items()
+            },
+        ),
+    )
+    monkeypatch.setattr(
+        synthetic_tools,
+        "payload",
+        lambda *args: {
+            "region": "shop",
+            "total": 1,
+            "rows": [{"name": "orders"}],
+            "checked_candidates": 3,
+            "omitted_sqlguard": 2,
+        },
+    )
+    app = create_web_app(env.service, config())
+    message = env.scripts.add("慢查询完整性", tool_call("order_total", region="east"), cite(""))
+    async with serving(app, port=18501), launch(chrome_binary) as chrome:
+        page = await chrome.page()
+        await page.navigate("http://127.0.0.1:18501/")
+        await send(page, message)
+        await settled(page, 0, "completed")
+        assert await page.evaluate(f"{item(0)}.querySelector('details.evidence').open") is False
+        visible = await page.evaluate(f"{item(0)}.innerText")
+        assert "checked_candidates: 3" in visible
+        assert "omitted_sqlguard: 2" in visible
+
+
 async def test_multiline_clarification_and_sql_advice_are_readable_in_web(
     env: Env, chrome_binary: str
 ) -> None:
