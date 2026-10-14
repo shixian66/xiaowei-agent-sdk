@@ -25,6 +25,7 @@ from agents.tool_context import ToolContext
 
 from xiaowei.governance import (
     TARGET_ARGUMENT,
+    AlertmanagerCorrectionError,
     Execute,
     GovernedTools,
     MonitoringReadError,
@@ -69,7 +70,8 @@ _REJECTION_FEEDBACK: dict[ToolRejectCode, tuple[str, bool]] = {
     "authorization_unavailable": ("权限检查失败，未执行工具；停止该操作，不绕过权限复核", False),
     "budget_exhausted": ("本轮工具调用次数已用完；停止调用，用已有证据说明限制或澄清", False),
     "source_stopped": (
-        "该监控源的相关读取已失败或两次PromQL修正机会已用完；停止被拒绝的操作，可按原契约读取发现信息或其他已授权源",
+        "该监控源读取已失败或修正机会已用完；停止被拒绝的操作，可调查其他已授权源；"
+        "PromQL 情形仍可按原契约读取发现信息",
         False,
     ),
     "schema_unavailable": (
@@ -158,6 +160,17 @@ _REJECTION_HINTS: dict[ToolRejectHint, str] = {
     "datasource_no_schema": (
         "该插件没有字段说明；不要使用 fields，改用顶层 url、access、database 等参数，"
         "未保存Action、未写入"
+    ),
+    "alertmanager_change_request": (
+        "本轮同一请求已失败，未重发；请修改 filters 或核对静默 ID，勿重复相同参数"
+    ),
+    "alertmanager_alerts_exhausted": (
+        "本源告警/分组读取的两次修正机会已用完；停止本类读取。"
+        "仍可按任务需要读取本源静默或状态，以及其他已授权源"
+    ),
+    "alertmanager_silence_exhausted": (
+        "本源指定静默 ID 读取的两次修正机会已用完；停止本类读取。"
+        "仍可按任务需要读取本源告警/分组或状态，以及其他已授权源"
     ),
 }
 
@@ -262,6 +275,28 @@ def _function_tool(
                     "column": exc.column,
                     "correction_allowed": exc.correction_allowed,
                     "reason": "PromQL解析失败；检查括号、运算符与函数参数，勿重发同一表达式",
+                },
+                ensure_ascii=False,
+            )
+        except AlertmanagerCorrectionError as exc:
+            reasons = {
+                "response_limit": (
+                    "告警数量过多，响应超过接收上限；请加 filters 按 alertname、instance、"
+                    "severity 或 job 收窄后重试"
+                ),
+                "invalid_matcher": (
+                    "上游拒绝匹配条件；请检查 filters 的 matcher 或 receiver 正则，例如 "
+                    'alertname="HostDown" '
+                    '或 instance=~"10\\.0\\..*"'
+                ),
+                "silence_missing": "未找到该静默 ID；请核对 ID 或从已授权源读取静默目录",
+            }
+            return json.dumps(
+                {
+                    "status": exc.reason,
+                    "source": contract.target_id,
+                    "correction_allowed": exc.correction_allowed,
+                    "reason": reasons[exc.reason],
                 },
                 ensure_ascii=False,
             )

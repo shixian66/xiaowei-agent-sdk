@@ -137,6 +137,9 @@ _MONITORING_REASONS = {
     "unavailable": "源连接不可用，结果未知",
     "upstream_5xx": "上游服务错误",
     "invalid_expression": "查询表达式解析失败",
+    "response_limit": "告警响应超出接收上限",
+    "invalid_matcher": "告警匹配条件被上游拒绝",
+    "silence_missing": "指定静默 ID 未找到",
 }
 
 _INSERT = text(
@@ -174,6 +177,8 @@ _SELECT_OWNED = text(
 
 class EvidenceError(Exception):
     """Evidence 边界错误；信息固定，不含原始结果或连接信息。"""
+
+    tool_id: str | None = None  # 仅由已治理的实际调用写入，用于失败日志。
 
 
 class EvidenceStoreError(EvidenceError):
