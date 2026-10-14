@@ -1,6 +1,6 @@
 """StarRocks 只读 Adapter：只执行 SQLGuard 产物与代码生成的元数据查询，结果有界。
 
-执行计划只以代码常量 ``EXPLAIN_PREFIX``（固定显式级别）加 ``ExplainQuery`` 的规范化 SQL
+执行计划只以代码常量 ``EXPLAIN_PREFIX``（固定显式级别）加 ``ExplainQuery`` 的已检原文
 发出，不使用裸 ``EXPLAIN``：其级别取自 FE 可变配置 ``query_explain_level``，可被改为
 ANALYZE 而实际执行查询。显式级别 ``LOGICAL`` 由 P2 Task 0 在 StarRocks 4.1.4 上实测选定。
 
@@ -267,11 +267,11 @@ class AuditSource(BaseModel):
 
 
 class SqlPolicy(BaseModel):
-    """SQLGuard 的静态部分：函数闭集与行数、SQL 字节（星号展开后同样计算）、结果列数上限。
+    """SQLGuard 的静态部分：函数闭集、行数、原文 SQL 字节、结果列数上限。
 
     对象与列不在配置中：它们来自结构快照中只读账号实际可 SELECT 的对象（``starrocks_schema``）。
-    ``max_result_columns`` 约束查询结果的列数，与 schema 有多少列无关；列名总字节不超过展开后的
-    SQL 字节上限（每个结果列名都以别名出现在规范化 SQL 中）。函数名统一为大写。
+    ``max_result_columns`` 约束查询结果的列数，与 schema 有多少列无关；查询列头的估算总字节
+    也受 ``max_sql_bytes`` 约束，实际返回列头在 Adapter 中再次核对。函数名统一为大写。
     """
 
     model_config = ConfigDict(frozen=True, extra="forbid")
@@ -573,14 +573,12 @@ class StarRocksAdapter:
         return self._target
 
     async def run_query(self, query: GuardedQuery) -> QueryResult:
-        """执行 SQLGuard 产物中的规范化 SQL；只接受本目标的 ``GuardedQuery``。"""
+        """执行 SQLGuard 校验过的原文；只接受本目标的 ``GuardedQuery``。"""
         if not isinstance(query, GuardedQuery):
             raise TypeError("只执行 SQLGuard 产生的 GuardedQuery")
         if query.target_id != self._target.target_id:
             raise StarRocksError(_Code.OBJECT_NOT_ALLOWED)
-        return await self._run(
-            query.normalized_sql, None, query.max_returned_rows, clip_values=True
-        )
+        return await self._run(query.executed_sql, None, query.max_returned_rows, clip_values=True)
 
     async def explain(self, query: ExplainQuery) -> QueryResult:
         """以固定显式级别 EXPLAIN SQLGuard 产物；只接受本目标的 ``ExplainQuery``。
@@ -592,7 +590,7 @@ class StarRocksAdapter:
             raise TypeError("只对 SQLGuard 产生的 ExplainQuery 取执行计划")
         if query.target_id != self._target.target_id:
             raise StarRocksError(_Code.OBJECT_NOT_ALLOWED)
-        sql = EXPLAIN_PREFIX + query.normalized_sql
+        sql = EXPLAIN_PREFIX + query.executed_sql
         return await self._run(sql, None, self._target.max_plan_lines, plan=True)
 
     async def read_schema(self) -> SchemaRows:
@@ -1056,7 +1054,11 @@ class StarRocksAdapter:
                 await self._prepare_session(conn)
                 stage = _Code.QUERY_FAILED
                 columns = await conn.execute(sql, args)
-                if len(set(columns)) != len(columns):
+                if (
+                    any(not isinstance(name, str) for name in columns)
+                    or len({name.casefold() for name in columns}) != len(columns)
+                    or (clip_values and len(columns) > self._target.policy.max_result_columns)
+                ):
                     raise _ResultContractError
                 if plan:
                     if len(columns) != 1:

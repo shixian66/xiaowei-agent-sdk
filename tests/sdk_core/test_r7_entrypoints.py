@@ -21,7 +21,9 @@ async def test_formal_web_corrects_invalid_sql_then_delivers_once(env: Env) -> N
     message = env.scripts.add(
         "查所选集群的销售",
         tool_call(
-            "run_readonly_query", cluster=SR.target_id, sql="SELECT R7_PRIVATE_SENTINEL FROM sales"
+            "run_readonly_query",
+            cluster=SR.target_id,
+            sql="SELECT R7_PRIVATE_SENTINEL FROM shop.sales",
         ),
         tool_call(
             "run_readonly_query",

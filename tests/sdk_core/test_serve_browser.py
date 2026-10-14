@@ -26,11 +26,11 @@ from tests.p1b.test_starrocks_adapter import driver
 from tests.sdk_core.browser import Page, launch
 from tests.sdk_core.test_app import SEARCH_ALL, after, cite, tool_call
 from tests.sdk_core.test_cli import CANARY, Deployment, secrets_absent
-from tests.sdk_core.test_runtime import PLAN, Env
+from tests.sdk_core.test_runtime import PLAN, Env, free_port
 from tests.sdk_core.test_runtime import env as env  # pytest fixture
 from tests.sdk_core.test_web_browser import item, js, send, settled, table_rows
 
-from xiaowei.starrocks_tools import PLAN_NOTE, SCHEMA_NOTE
+from xiaowei.starrocks_tools import PLAN_NOTE, QUERY_NOTE, SCHEMA_NOTE
 from xiaowei.web import COOKIE
 
 pytestmark = [pytest.mark.loopback, pytest.mark.browser]
@@ -46,9 +46,9 @@ def require_port() -> None:
             pytest.fail(f"127.0.0.1:{PORT} 已被占用：验收使用正式默认端口")
 
 
-async def check_cookie(page: Page) -> str:
+async def check_cookie(page: Page, origin: str = ORIGIN) -> str:
     assert await page.evaluate("document.cookie") == ""
-    cookies = (await page.send("Network.getCookies", {"urls": [ORIGIN]}))["cookies"]
+    cookies = (await page.send("Network.getCookies", {"urls": [origin]}))["cookies"]
     (cookie,) = [c for c in cookies if c["name"] == COOKIE]
     assert cookie["httpOnly"] and cookie["sameSite"] == "Strict" and not cookie["secure"]
     value: str = cookie["value"]
@@ -108,16 +108,17 @@ async def test_formal_command_in_chrome(
 
 
 async def test_formal_assembly_turns_in_chrome(env: Env, chrome_binary: str) -> None:
-    require_port()
-    env.port = PORT
+    port = free_port()
+    origin = f"http://127.0.0.1:{port}"
+    env.port = port
     config = env.config(
-        listen_port=PORT,
-        web={**env.config().web.model_dump(mode="json"), "allowed_origins": [ORIGIN]},
+        listen_port=port,
+        web={**env.config().web.model_dump(mode="json"), "allowed_origins": [origin]},
     )
     async with env.running(config) as served, launch(chrome_binary) as chrome:
         page = await chrome.page()
-        await page.navigate(f"{ORIGIN}/")
-        await check_cookie(page)
+        await page.navigate(f"{origin}/")
+        await check_cookie(page, origin)
 
         diagnose = env.scripts.add(
             "浏览器诊断表结构", tool_call("list_tables", cluster=SR.target_id, **SEARCH_ALL), cite()
@@ -129,7 +130,9 @@ async def test_formal_assembly_turns_in_chrome(env: Env, chrome_binary: str) -> 
         query = env.scripts.add(
             "浏览器查询销售额",
             tool_call(
-                "run_readonly_query", cluster=SR.target_id, sql="SELECT region, total FROM sales"
+                "run_readonly_query",
+                cluster=SR.target_id,
+                sql="SELECT region, total FROM shop.sales",
             ),
             cite(),
         )
@@ -137,16 +140,26 @@ async def test_formal_assembly_turns_in_chrome(env: Env, chrome_binary: str) -> 
         await settled(page, 1, "completed")
         assert any("run_readonly_query" in seen for seen in env.scripts.tools_seen(query))
         assert 2 in await table_rows(page, 1)
+        visible = await page.evaluate(
+            f"[...{item(1)}.querySelectorAll('.fact')]"
+            ".filter(f => f.textContent.includes('来源 local/run_readonly_query'))"
+            ".flatMap(f => [...f.querySelectorAll(':scope > p')])"
+            ".filter(p => p.getClientRects().length).map(p => p.textContent)"
+        )
+        assert "applied_limit: 6" in visible
+        assert f"说明：{QUERY_NOTE}" in visible
 
         env.drv.make = driver(PLAN).make
         plan = env.scripts.add(
             "浏览器查看执行计划",
-            tool_call("explain_query", cluster=SR.target_id, sql="SELECT region, total FROM sales"),
+            tool_call(
+                "explain_query", cluster=SR.target_id, sql="SELECT region, total FROM shop.sales"
+            ),
             cite(),
         )
         await send(page, plan, "diagnose")
         await settled(page, 2, "completed")
-        # 本轮还引用了回放中的历史证据：表清单带快照说明、查询结果没有说明、计划带计划说明；
+        # 本轮还引用了回放中的历史证据：表清单、查询 LIMIT 与计划各带自己的说明；
         # 每条说明与自己的表格在同一个事实框中。
         noted = await page.evaluate(
             f"[...{item(2)}.querySelectorAll('.fact')].filter(f => f.querySelector('.note'))"
@@ -155,6 +168,7 @@ async def test_formal_assembly_turns_in_chrome(env: Env, chrome_binary: str) -> 
         )
         assert noted == [
             [f"说明：{SCHEMA_NOTE}", ["database", "name", "type", "comment"]],
+            [f"说明：{QUERY_NOTE}", ["region", "total"]],
             [f"说明：{PLAN_NOTE}", ["plan"]],
         ]
 

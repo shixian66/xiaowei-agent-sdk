@@ -423,8 +423,8 @@ ALL_CALLS: list[tuple[str, dict[str, object]]] = [
     (LIST_TABLES, SEARCH_ALL),
     (DESCRIBE_TABLE, {"database": "shop", "table": "sales", "cursor": None}),
     (LAYOUT_TOOL, {"database": "shop", "table": "sales"}),
-    (RUN_QUERY, {"sql": "SELECT region FROM sales"}),
-    (EXPLAIN_QUERY, {"sql": "SELECT region FROM sales"}),
+    (RUN_QUERY, {"sql": "SELECT region FROM shop.sales"}),
+    (EXPLAIN_QUERY, {"sql": "SELECT region FROM shop.sales"}),
 ]
 
 
@@ -568,10 +568,10 @@ async def test_describe_serves_the_snapshot_columns_after_a_fresh_probe() -> Non
 @pytest.mark.parametrize(
     "sql",
     [
-        "SELECT name FROM regions",  # 可见但无 SELECT 权限：不在快照中
-        "SELECT secret FROM sales",
+        "SELECT name FROM shop.regions",  # 可见但无 SELECT 权限：不在快照中
+        "SELECT secret FROM shop.sales",
         "SELECT id FROM crm.payroll",  # 其他库中不在快照的对象
-        "SELECT id FROM customers c JOIN crm.customers d ON c.id = d.id",  # 两个来源都有 id
+        "SELECT id FROM crm.customers c JOIN crm.customers d ON c.id = d.id",  # 两个来源都有 id
     ],
 )
 async def test_queries_outside_the_snapshot_scope_never_reach_the_database(sql: str) -> None:
@@ -615,13 +615,13 @@ async def test_a_new_grant_becomes_queryable_after_the_next_refresh() -> None:
     execute = executes[(RUN_QUERY, TARGET.target_id)]
     assert isinstance(execute, Prechecked)
     with pytest.raises(ToolRejectedError):
-        execute.check(run("SELECT name FROM regions"))
+        execute.check(run("SELECT name FROM shop.regions"))
 
     world.denied = set()  # DBA 授权
     clock.advance(60)
     assert await cache.refresh()
     forget(drv)
-    observation = await execute.run(execute.check(run("SELECT name FROM regions")))
+    observation = await execute.run(execute.check(run("SELECT name FROM shop.regions")))
     assert observation.payload["rows"] == [{"region": "east"}]
     assert len(statements(drv)) == 1
 

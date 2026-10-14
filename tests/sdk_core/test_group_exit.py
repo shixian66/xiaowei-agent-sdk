@@ -38,7 +38,7 @@ from xiaowei.starrocks_tools import RUN_QUERY
 
 pytestmark = pytest.mark.loopback
 
-SALES_SQL = "SELECT region, total FROM sales"
+SALES_SQL = "SELECT region, total FROM shop.sales"
 QUERY_NAME = RUN_QUERY.split("/", 1)[1]
 BUSY = "系统繁忙，本轮未执行"
 # 两个集群同名库表、不同数据：回答中的数值能区分来源集群。

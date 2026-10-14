@@ -123,7 +123,6 @@ ToolRejectCode = Literal[
 
 ToolRejectHint = Literal[
     "action_request",
-    "from_unixtime_format",
     "restart_cursor",
     "search_scope",
     "search_keyword",
@@ -175,6 +174,9 @@ class ToolRejectedError(Exception):
         remaining_retries: Literal[0, 1] = 0,
         query_reject: QueryRejectionCode | None = None,
         allowed_fields: tuple[str, ...] | None = None,
+        unqualified_tables: tuple[dict[str, object], ...] = (),
+        missing_tables: int = 0,
+        more: bool = False,
     ) -> None:
         super().__init__(message)
         self.code = code
@@ -182,6 +184,9 @@ class ToolRejectedError(Exception):
         self.remaining_retries = remaining_retries
         self.query_reject = query_reject
         self.allowed_fields = allowed_fields
+        self.unqualified_tables = unqualified_tables
+        self.missing_tables = missing_tables
+        self.more = more
 
 
 class ProposalRejectedError(ToolRejectedError):

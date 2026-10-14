@@ -1,4 +1,4 @@
-"""SQLGuard：单条只读 SELECT 的闭集校验与规范化（P1-B Task 1）及执行计划产物（P2 Task 2）。
+"""SQLGuard：单条只读 SELECT 的闭集校验、原文执行与执行计划产物。
 
 正例先证明闸门不是恒拒；反例逐类断言稳定原因码、固定说明，且说明、异常链与 sqlglot 日志都
 不含输入 SQL 的任何片段。SQLGuard 是纯函数：本文件在默认禁网下运行，不需要任何替身。
@@ -59,6 +59,102 @@ def narrowed(**changes: object) -> QueryPolicy:
     return POLICY.model_copy(update=changes)
 
 
+def test_s1_preserves_qualified_sql_and_reports_limit_edits() -> None:
+    original = "SeLeCt region, SUM(total) AS amount FROM `shop`.`sales` GROUP BY region LIMIT 7"
+    unchanged = guard(original)
+    assert unchanged.executed_sql == original
+    assert (unchanged.requested_limit, unchanged.applied_limit) == (7, 7)
+
+    unbounded = "SELECT region FROM shop.sales"
+    bounded = guard(unbounded)
+    assert bounded.executed_sql == f"{unbounded} LIMIT {CAP}"
+    assert (bounded.requested_limit, bounded.applied_limit) == (None, CAP)
+
+    capped = "SELECT region FROM shop.sales LIMIT 1000"
+    result = guard(capped)
+    assert result.executed_sql == "SELECT region FROM shop.sales LIMIT 101"
+    assert (result.requested_limit, result.applied_limit) == (1000, CAP)
+
+    padded = guard("SELECT region FROM shop.sales LIMIT 0001000")
+    assert padded.executed_sql == "SELECT region FROM shop.sales LIMIT 101"
+    assert (padded.requested_limit, padded.applied_limit) == (1000, CAP)
+
+    unicode_sql = "SELECT region FROM shop.sales WHERE region = '华东' LIMIT 1000;  "
+    assert guard(unicode_sql).executed_sql == (
+        "SELECT region FROM shop.sales WHERE region = '华东' LIMIT 101"
+    )
+
+
+def test_s1_unqualified_table_gives_only_readable_database_candidates() -> None:
+    policy = narrowed(
+        tables={
+            "shop": {"sales": ("region", "total")},
+            "archive": {"sales": ("region", "total")},
+        }
+    )
+    error = rejection("SELECT region FROM sales", policy)
+    assert error.code is Code.UNQUALIFIED_TABLE
+    assert error.unqualified_tables == ({"table": "sales", "databases": ["archive", "shop"]},)
+    assert error.missing_tables == 0
+
+
+def test_s1_unqualified_candidates_are_bounded_and_missing_names_not_echoed() -> None:
+    names = tuple(f"t{i}" for i in range(6))
+    policy = narrowed(tables={f"db{i:02d}": {name: ("x",) for name in names} for i in range(21)})
+    sql = "SELECT 1 FROM " + " CROSS JOIN ".join((*names, "not_readable"))
+    error = rejection(sql, policy)
+    assert error.code is Code.UNQUALIFIED_TABLE
+    assert len(error.unqualified_tables) == 5
+    assert [item["table"] for item in error.unqualified_tables] == list(names[:5])
+    assert all(len(item["databases"]) == 20 for item in error.unqualified_tables)
+    assert error.missing_tables == 1
+    assert "not_readable" not in str(error)
+    assert error.more is True
+
+
+def test_s1_cte_name_is_not_a_physical_table() -> None:
+    sql = "WITH t AS (SELECT region FROM shop.sales) SELECT region FROM t"
+    assert guard(sql).executed_sql == f"{sql} LIMIT {CAP}"
+
+
+def test_s1_allows_unaliased_expression_and_formatted_from_unixtime() -> None:
+    policy = narrowed(allowed_functions=frozenset({"SUM", "UNIX_TO_TIME"}))
+    original = (
+        "SELECT region, SUM(total), FROM_UNIXTIME(total, '%Y-%m-%d %H:%i') "
+        "FROM shop.sales GROUP BY region, total"
+    )
+    assert guard(original, policy).executed_sql == f"{original} LIMIT {CAP}"
+
+
+def test_s1_comment_rejection_explains_how_to_repair() -> None:
+    error = rejection("SELECT region FROM shop.sales -- remove me")
+    assert error.code is Code.COMMENT_NOT_ALLOWED
+    assert str(error) == "SQL 含注释，请删除注释后重试"
+    # 字符串里的 /*+ 不是 hint；真正的尾注释仍给删除注释的提示。
+    assert (
+        rejection("SELECT '/*+' AS marker FROM shop.sales /* ordinary */").code
+        is Code.COMMENT_NOT_ALLOWED
+    )
+
+
+def test_s1_wide_star_is_rejected_before_execution_by_header_bound() -> None:
+    columns = tuple(f"column_{index:02d}_long_name" for index in range(8))
+    policy = narrowed(
+        tables={"shop": {"wide": columns}},
+        max_sql_bytes=100,
+        max_result_columns=8,
+    )
+    assert rejection("SELECT * FROM shop.wide", policy).code is Code.TOO_MANY_COLUMNS
+
+
+@pytest.mark.parametrize(
+    "sql",
+    ("SELECT N'abc' AS v", "SELECT X'4142' AS v", "SELECT b'0101' AS v", "SELECT 1 AS `a``b`"),
+)
+def test_s1_rejects_literal_or_identifier_forms_with_parser_differences(sql: str) -> None:
+    assert rejection(sql).code is Code.UNSUPPORTED_SYNTAX
+
+
 DATE_POLICY = narrowed(
     allowed_functions=POLICY.allowed_functions
     | {"ABS", "DATE_ADD", "DATE_SUB", "DATEDIFF", "TIMESTAMP_TRUNC", "CURRENT_DATE"}
@@ -66,7 +162,7 @@ DATE_POLICY = narrowed(
 
 
 @pytest.mark.parametrize(
-    ("expression", "normalized"),
+    ("expression", "_old_normalized"),
     [
         ("DATE_SUB(dt, INTERVAL 7 DAY)", "DATE_SUB(`sales`.`dt`, INTERVAL 7 DAY)"),
         ("DATE_ADD(dt, INTERVAL 1 MONTH)", "DATE_ADD(`sales`.`dt`, INTERVAL 1 MONTH)"),
@@ -79,11 +175,12 @@ DATE_POLICY = narrowed(
     ],
 )
 def test_configured_date_functions_preserve_starrocks_spelling(
-    expression: str, normalized: str
+    expression: str, _old_normalized: str
 ) -> None:
-    query = guard(f"SELECT {expression} AS d FROM sales", DATE_POLICY)
-    assert normalized in query.normalized_sql
-    assert guard(query.normalized_sql, DATE_POLICY).normalized_sql == query.normalized_sql
+    sql = f"SELECT {expression} AS d FROM shop.sales"
+    query = guard(sql, DATE_POLICY)
+    assert query.executed_sql == f"{sql} LIMIT {CAP}"
+    assert guard(query.executed_sql, DATE_POLICY).executed_sql == query.executed_sql
     assert query.referenced_columns == {("shop", "sales", "dt")}
 
 
@@ -100,7 +197,7 @@ def test_configured_date_functions_preserve_starrocks_spelling(
     ],
 )
 def test_date_interval_rejects_dynamic_or_unknown_units(expression: str) -> None:
-    assert rejection(f"SELECT {expression} AS d FROM sales", DATE_POLICY).code in {
+    assert rejection(f"SELECT {expression} AS d FROM shop.sales", DATE_POLICY).code in {
         Code.UNSUPPORTED_SYNTAX,
         Code.FUNCTION_NOT_ALLOWED,
     }
@@ -108,20 +205,19 @@ def test_date_interval_rejects_dynamic_or_unknown_units(expression: str) -> None
 
 def test_date_function_still_requires_explicit_allowlist() -> None:
     assert (
-        rejection("SELECT DATE_SUB(dt, INTERVAL 7 DAY) AS d FROM sales").code
+        rejection("SELECT DATE_SUB(dt, INTERVAL 7 DAY) AS d FROM shop.sales").code
         == Code.FUNCTION_NOT_ALLOWED
     )
 
 
-def test_formatted_from_unixtime_is_rejected_with_a_safe_rewrite() -> None:
+def test_formatted_from_unixtime_keeps_original_format() -> None:
     policy = narrowed(allowed_functions=frozenset({"UNIX_TO_TIME"}))
-    error = rejection("SELECT FROM_UNIXTIME(1700000000, '%Y-%m-%d %H:%i') AS d FROM sales", policy)
-    assert error.code is Code.UNSUPPORTED_SYNTAX
-    assert "DATE_FORMAT(FROM_UNIXTIME(x), 格式)" in str(error)
+    sql = "SELECT FROM_UNIXTIME(1700000000, '%Y-%m-%d %H:%i') AS d FROM shop.sales"
+    assert guard(sql, policy).executed_sql == f"{sql} LIMIT {CAP}"
 
 
 def test_audit_references_keeps_formatted_from_unixtime_with_function_grant() -> None:
-    sql = "SELECT region, FROM_UNIXTIME(total, '%Y-%m-%d') AS d FROM sales"
+    sql = "SELECT region, FROM_UNIXTIME(total, '%Y-%m-%d') AS d FROM shop.sales"
     policy = narrowed(allowed_functions=frozenset({"UNIX_TO_TIME"}))
     objects, columns = audit_references(sql, policy, "shop")
     assert objects == {("shop", "sales")}
@@ -133,52 +229,52 @@ def test_audit_references_keeps_formatted_from_unixtime_with_function_grant() ->
 
 
 @pytest.mark.parametrize(
-    ("sql", "allowed", "normalized"),
+    ("sql", "allowed", "_old_normalized"),
     [
         (
-            "SELECT FROM_UNIXTIME(1700000000) AS d FROM sales",
+            "SELECT FROM_UNIXTIME(1700000000) AS d FROM shop.sales",
             {"FROM_UNIXTIME"},
             "FROM_UNIXTIME(1700000000)",
         ),
         (
-            "SELECT FROM_UNIXTIME(1700000000) AS d FROM sales",
+            "SELECT FROM_UNIXTIME(1700000000) AS d FROM shop.sales",
             {"UNIX_TO_TIME"},
             "FROM_UNIXTIME(1700000000)",
         ),
         (
-            "SELECT DATE_FORMAT(dt, '%H:%i:%s') AS d FROM sales",
+            "SELECT DATE_FORMAT(dt, '%H:%i:%s') AS d FROM shop.sales",
             {"DATE_FORMAT"},
             "DATE_FORMAT(`sales`.`dt`, '%T')",
         ),
         (
-            "SELECT DATE_FORMAT(dt, '%H:%i:%s') AS d FROM sales",
+            "SELECT DATE_FORMAT(dt, '%H:%i:%s') AS d FROM shop.sales",
             {"TIME_TO_STR", "TS_OR_DS_TO_TIMESTAMP"},
             "DATE_FORMAT(`sales`.`dt`, '%T')",
         ),
         (
-            "SELECT DATE_TRUNC('day', dt) AS d FROM sales",
+            "SELECT DATE_TRUNC('day', dt) AS d FROM shop.sales",
             {"DATE_TRUNC"},
             "DATE_TRUNC('DAY', `sales`.`dt`)",
         ),
         (
-            "SELECT STR_TO_DATE('2026-10-14 12:34:56', '%Y-%m-%d %H:%i:%s') AS d FROM sales",
+            "SELECT STR_TO_DATE('2026-10-14 12:34:56', '%Y-%m-%d %H:%i:%s') AS d FROM shop.sales",
             {"STR_TO_DATE"},
             "STR_TO_DATE('2026-10-14 12:34:56', '%Y-%m-%d %T')",
         ),
     ],
 )
 def test_starrocks_function_spelling_is_accepted_without_extra_grants(
-    sql: str, allowed: set[str], normalized: str
+    sql: str, allowed: set[str], _old_normalized: str
 ) -> None:
     query = guard(sql, narrowed(allowed_functions=frozenset(allowed)))
-    assert normalized in query.normalized_sql
+    assert query.executed_sql == f"{sql} LIMIT {CAP}"
 
 
 def test_date_format_grant_does_not_allow_explicit_implicit_cast() -> None:
     policy = narrowed(allowed_functions=frozenset({"DATE_FORMAT"}))
     for sql in (
-        "SELECT TS_OR_DS_TO_TIMESTAMP(dt) AS d FROM sales",
-        "SELECT DATE_FORMAT(TS_OR_DS_TO_TIMESTAMP(dt), '%Y') AS d FROM sales",
+        "SELECT TS_OR_DS_TO_TIMESTAMP(dt) AS d FROM shop.sales",
+        "SELECT DATE_FORMAT(TS_OR_DS_TO_TIMESTAMP(dt), '%Y') AS d FROM shop.sales",
     ):
         assert rejection(sql, policy).code is Code.FUNCTION_NOT_ALLOWED
 
@@ -221,28 +317,27 @@ def test_format_tokens_keep_their_starrocks_meaning(
     function: str, value: str, format_code: str
 ) -> None:
     policy = narrowed(allowed_functions=frozenset({function}))
-    query = guard(f"SELECT {function}({value}, '{format_code}') AS d FROM sales", policy)
-    expected = "%s" if format_code == "%S" and function != "UNIX_TIMESTAMP" else format_code
-    assert f"'{expected}'" in query.normalized_sql
+    query = guard(f"SELECT {function}({value}, '{format_code}') AS d FROM shop.sales", policy)
+    assert f"'{format_code}'" in query.executed_sql
 
 
 @pytest.mark.parametrize("function", ("DATE_FORMAT", "STR_TO_DATE"))
 def test_compound_time_format_uses_the_equivalent_t_token(function: str) -> None:
     value = "dt" if function == "DATE_FORMAT" else "'2026-10-14 12:34:56'"
     policy = narrowed(allowed_functions=frozenset({function}))
-    query = guard(f"SELECT {function}({value}, '%Y-%m-%d %H:%i:%s') AS d FROM sales", policy)
-    assert "'%Y-%m-%d %T'" in query.normalized_sql
+    query = guard(f"SELECT {function}({value}, '%Y-%m-%d %H:%i:%s') AS d FROM shop.sales", policy)
+    assert "'%Y-%m-%d %H:%i:%s'" in query.executed_sql
 
 
 def test_date_diff_spelling_is_not_implicitly_allowed_as_datediff() -> None:
     for spelling in ("DATE_DIFF", "`DATE_DIFF`"):
         assert (
-            rejection(f"SELECT {spelling}('DAY', dt, dt) AS d FROM sales", DATE_POLICY).code
+            rejection(f"SELECT {spelling}('DAY', dt, dt) AS d FROM shop.sales", DATE_POLICY).code
             == Code.FUNCTION_NOT_ALLOWED
         )
     assert (
         "DATE_DIFF(x)"
-        in guard("SELECT 'DATE_DIFF(x)' AS literal FROM sales", DATE_POLICY).normalized_sql
+        in guard("SELECT 'DATE_DIFF(x)' AS literal FROM shop.sales", DATE_POLICY).executed_sql
     )
 
 
@@ -263,14 +358,14 @@ def test_date_diff_spelling_is_not_implicitly_allowed_as_datediff() -> None:
     ],
 )
 def test_date_functions_reject_wrong_top_level_arity(expression: str) -> None:
-    error = rejection(f"SELECT {expression} AS d FROM sales", DATE_POLICY)
+    error = rejection(f"SELECT {expression} AS d FROM shop.sales", DATE_POLICY)
     assert error.code == Code.UNSUPPORTED_SYNTAX
     assert error.__cause__ is None and error.__context__ is None
 
 
 @pytest.mark.parametrize("expression", ["DATE_ADD(dt, )", "DATE_SUB(dt, )"])
 def test_date_parser_unexpected_errors_become_unparsable(expression: str) -> None:
-    error = rejection(f"SELECT {expression} AS d FROM sales", DATE_POLICY)
+    error = rejection(f"SELECT {expression} AS d FROM shop.sales", DATE_POLICY)
     assert error.code == Code.UNPARSABLE
     assert error.__cause__ is None and error.__context__ is None
 
@@ -281,32 +376,35 @@ def test_date_arity_ignores_nested_function_and_subquery_commas() -> None:
         "DATE_ADD(DATE_SUB(dt, INTERVAL 1 DAY), INTERVAL 2 DAY)",
         "DATEDIFF(COALESCE(dt, dt), dt)",
     ):
-        assert "AS `d`" in guard(f"SELECT {expression} AS d FROM sales", DATE_POLICY).normalized_sql
+        assert (
+            " AS d FROM shop.sales"
+            in guard(f"SELECT {expression} AS d FROM shop.sales", DATE_POLICY).executed_sql
+        )
 
     policy = DATE_POLICY.model_copy(
         update={"allowed_functions": DATE_POLICY.allowed_functions | {"MIN"}}
     )
     subquery = (
-        "SELECT DATE_ADD((SELECT COALESCE(MAX(dt), MIN(dt)) FROM sales), "
-        "INTERVAL 1 DAY) AS d FROM sales"
+        "SELECT DATE_ADD((SELECT COALESCE(MAX(dt), MIN(dt)) FROM shop.sales), "
+        "INTERVAL 1 DAY) AS d FROM shop.sales"
     )
-    assert "DATE_ADD((SELECT" in guard(subquery, policy).normalized_sql
+    assert "DATE_ADD((SELECT" in guard(subquery, policy).executed_sql
     assert (
         "DATE_ADD(1, 2, 3)"
-        in guard("SELECT 'DATE_ADD(1, 2, 3)' AS text FROM sales", DATE_POLICY).normalized_sql
+        in guard("SELECT 'DATE_ADD(1, 2, 3)' AS text FROM shop.sales", DATE_POLICY).executed_sql
     )
 
 
 def test_date_arity_applies_to_explain_and_audit_paths() -> None:
-    invalid = "SELECT DATE_ADD(dt, INTERVAL 1 DAY, 5) AS d FROM sales"
+    invalid = "SELECT DATE_ADD(dt, INTERVAL 1 DAY, 5) AS d FROM shop.sales"
     with pytest.raises(QueryRejectedError) as explain:
         guard_explain_query(invalid, DATE_POLICY)
     with pytest.raises(QueryRejectedError) as audit:
         audit_references(invalid, DATE_POLICY, "shop")
     assert explain.value.code == audit.value.code == Code.UNSUPPORTED_SYNTAX
 
-    valid = "SELECT DATE_ADD(dt, INTERVAL 1 DAY) AS d FROM sales"
-    assert "DATE_ADD" in guard_explain_query(valid, DATE_POLICY).normalized_sql
+    valid = "SELECT DATE_ADD(dt, INTERVAL 1 DAY) AS d FROM shop.sales"
+    assert "DATE_ADD" in guard_explain_query(valid, DATE_POLICY).executed_sql
     objects, columns = audit_references(valid, DATE_POLICY, "shop")
     assert objects == {("shop", "sales")}
     assert columns == {("shop", "sales", "dt")}
@@ -315,18 +413,14 @@ def test_date_arity_applies_to_explain_and_audit_paths() -> None:
 # ---- 正例 ----------------------------------------------------------------------------------
 
 
-def test_single_table_query_is_fully_qualified_and_keeps_a_smaller_limit() -> None:
-    query = guard(
-        "SELECT region, SUM(total) AS s FROM sales WHERE dt >= '2026-01-01' "
+def test_single_table_query_preserves_original_and_smaller_limit() -> None:
+    sql = (
+        "SELECT region, SUM(total) AS s FROM shop.sales WHERE dt >= '2026-01-01' "
         "GROUP BY region HAVING SUM(total) > 1 ORDER BY s DESC LIMIT 5"
     )
+    query = guard(sql)
 
-    assert query.normalized_sql == (
-        "SELECT `sales`.`region` AS `region`, SUM(`sales`.`total`) AS `s` "
-        "FROM `shop`.`sales` AS `sales` WHERE `sales`.`dt` >= '2026-01-01' "
-        "GROUP BY `sales`.`region` HAVING SUM(`sales`.`total`) > 1 "
-        "ORDER BY `s` DESC LIMIT 5"
-    )
+    assert query.executed_sql == sql
     assert query.target_id == "sr-test"
     assert query.referenced_objects == frozenset({("shop", "sales")})
     assert query.referenced_columns == frozenset(
@@ -339,62 +433,66 @@ def test_single_table_query_is_fully_qualified_and_keeps_a_smaller_limit() -> No
     ("sql", "objects", "columns"),
     [
         (
-            "SELECT s.region, r.name FROM sales s JOIN regions r ON s.region = r.region",
+            "SELECT s.region, r.name FROM shop.sales s JOIN shop.regions r ON s.region = r.region",
             {"sales", "regions"},
             {("sales", "region"), ("regions", "name"), ("regions", "region")},
         ),
         (
-            "SELECT s.region FROM sales s LEFT JOIN regions r ON s.region = r.region "
+            "SELECT s.region FROM shop.sales s LEFT JOIN shop.regions r ON s.region = r.region "
             "WHERE r.name IS NULL",
             {"sales", "regions"},
             {("sales", "region"), ("regions", "name"), ("regions", "region")},
         ),
         (
-            "WITH t AS (SELECT region, total FROM sales) SELECT region FROM t",
+            "WITH t AS (SELECT region, total FROM shop.sales) SELECT region FROM t",
             {"sales"},
             {("sales", "region"), ("sales", "total")},
         ),
         (
-            "SELECT region FROM sales WHERE region IN (SELECT region FROM regions)",
+            "SELECT region FROM shop.sales WHERE region IN (SELECT region FROM shop.regions)",
             {"sales", "regions"},
             {("sales", "region"), ("regions", "region")},
         ),
         (
-            "SELECT q.s FROM (SELECT region AS s FROM sales) q",
+            "SELECT q.s FROM (SELECT region AS s FROM shop.sales) q",
             {"sales"},
             {("sales", "region")},
         ),
         (
-            "SELECT region FROM sales WHERE total > (SELECT MAX(total) FROM sales)",
+            "SELECT region FROM shop.sales WHERE total > (SELECT MAX(total) FROM shop.sales)",
             {"sales"},
             {("sales", "region"), ("sales", "total")},
         ),
         # CTE 名遮蔽物理表名：只引用 CTE 内部的物理表。
         (
-            "WITH regions AS (SELECT region AS name FROM sales) SELECT name FROM regions",
+            "WITH regions AS (SELECT region AS name FROM shop.sales) SELECT name FROM regions",
             {"sales"},
             {("sales", "region")},
         ),
         # CTE 名与未获准物理表同名也不误判。
         (
-            "WITH customers AS (SELECT region FROM sales) SELECT region FROM customers",
+            "WITH customers AS (SELECT region FROM shop.sales) SELECT region FROM customers",
             {"sales"},
             {("sales", "region")},
         ),
         # ORDER BY 输出别名不是物理列，即使与未获准列同名。
-        ("SELECT region AS secret FROM sales ORDER BY secret", {"sales"}, {("sales", "region")}),
-        ("SELECT COUNT(*) AS n FROM sales", {"sales"}, set()),
-        ("SELECT COUNT(DISTINCT region) AS n FROM sales", {"sales"}, {("sales", "region")}),
+        (
+            "SELECT region AS secret FROM shop.sales ORDER BY secret",
+            {"sales"},
+            {("sales", "region")},
+        ),
+        ("SELECT COUNT(*) AS n FROM shop.sales", {"sales"}, set()),
+        ("SELECT COUNT(DISTINCT region) AS n FROM shop.sales", {"sales"}, {("sales", "region")}),
         (
             "SELECT CAST(total AS DECIMAL(10, 2)) AS t, IF(total > 1, 'big', 'small') AS k, "
             "CASE WHEN orders > 1 THEN 'many' ELSE 'one' END AS c, COALESCE(region, '-') AS r "
-            "FROM sales",
+            "FROM shop.sales",
             {"sales"},
             {("sales", "total"), ("sales", "orders"), ("sales", "region")},
         ),
         ("SELECT `region` FROM `shop`.`sales`", {"sales"}, {("sales", "region")}),
         ("SELECT shop.sales.region FROM shop.sales", {"sales"}, {("sales", "region")}),
-        ("SELECT DISTINCT region FROM sales ORDER BY 1", {"sales"}, {("sales", "region")}),
+        ("SELECT DISTINCT region FROM shop.sales ORDER BY 1", {"sales"}, {("sales", "region")}),
         ("SELECT 'a;b' AS v, 1 AS one", set(), set()),
     ],
 )
@@ -403,21 +501,8 @@ def test_allowed_queries(sql: str, objects: set[str], columns: set[tuple[str, st
 
     assert query.referenced_objects == {("shop", o) for o in objects}
     assert query.referenced_columns == {("shop", t, c) for t, c in columns}
-    assert guard(query.normalized_sql).normalized_sql == query.normalized_sql  # 往返幂等
-    assert_every_column_is_qualified(query)
-
-
-def assert_every_column_is_qualified(query: GuardedQuery) -> None:
-    """执行的 SQL 只有 ORDER BY 对本层输出别名的引用不限定（交给数据库按原文绑定）。"""
-    tree = sqlglot.parse_one(query.normalized_sql, read="starrocks")
-    for column in tree.find_all(exp.Column):
-        if column.table:
-            continue
-        order = column.find_ancestor(exp.Order, exp.Select)
-        assert isinstance(order, exp.Order) and isinstance(order.parent, exp.Select)
-        assert column.name in {
-            p.alias for p in order.parent.expressions if isinstance(p, exp.Alias)
-        }
+    assert query.executed_sql == f"{sql} LIMIT {CAP}"
+    assert guard(query.executed_sql).executed_sql == query.executed_sql
 
 
 @pytest.mark.parametrize(
@@ -435,52 +520,52 @@ def assert_every_column_is_qualified(query: GuardedQuery) -> None:
 def test_limit_is_capped_for_truncation_detection(
     limit: str, expected_sql_limit: int, expected_rows: int
 ) -> None:
-    query = guard(f"SELECT region FROM sales {limit}")
+    query = guard(f"SELECT region FROM shop.sales {limit}")
 
-    assert query.normalized_sql.endswith(f" LIMIT {expected_sql_limit}")
+    assert query.executed_sql.endswith(f" LIMIT {expected_sql_limit}")
     assert query.max_returned_rows == expected_rows
-    assert guard(query.normalized_sql) == query
+    assert guard(query.executed_sql).executed_sql == query.executed_sql
 
 
 def test_with_query_limit_lands_on_the_final_body() -> None:
-    query = guard("WITH t AS (SELECT region FROM sales LIMIT 3) SELECT region FROM t")
+    query = guard("WITH t AS (SELECT region FROM shop.sales LIMIT 3) SELECT region FROM t")
 
-    assert query.normalized_sql == (
-        "WITH `t` AS (SELECT `sales`.`region` AS `region` FROM `shop`.`sales` AS `sales` LIMIT 3) "
-        f"SELECT `t`.`region` AS `region` FROM `t` AS `t` LIMIT {CAP}"
+    assert query.executed_sql == (
+        f"WITH t AS (SELECT region FROM shop.sales LIMIT 3) SELECT region FROM t LIMIT {CAP}"
     )
-    assert guard(query.normalized_sql) == query
+    assert guard(query.executed_sql).executed_sql == query.executed_sql
 
 
 @pytest.mark.parametrize("check", [guard_readonly_query, guard_explain_query])
 @pytest.mark.parametrize(
     ("sql", "orders"),
     [
-        ("SELECT region AS x, total AS x FROM sales ORDER BY 1", ["ORDER BY 1"]),
+        ("SELECT region AS x, total AS x FROM shop.sales ORDER BY 1", ["ORDER BY 1"]),
         (
-            "SELECT s.region, r.region FROM sales s JOIN regions r ON s.region = r.region "
+            "SELECT s.region, r.region FROM shop.sales s JOIN shop.regions r "
+            "ON s.region = r.region "
             "ORDER BY 1, 2 DESC",
             ["ORDER BY 1, 2 DESC"],
         ),
         (
-            "SELECT region AS x, total AS x, COUNT(*) AS n FROM sales "
+            "SELECT region AS x, total AS x, COUNT(*) AS n FROM shop.sales "
             "GROUP BY 1, 2 ORDER BY 3 DESC, 1",
             ["ORDER BY 3 DESC, 1"],
         ),
         # 提前复制未限定的投影会被交叉别名重新解释；常量也不能变成另一个序号。
-        ("SELECT total AS orders, orders AS total FROM sales ORDER BY 1", ["ORDER BY 1"]),
-        ("SELECT 2 AS x, total AS y FROM sales ORDER BY 1", ["ORDER BY 1"]),
+        ("SELECT total AS orders, orders AS total FROM shop.sales ORDER BY 1", ["ORDER BY 1"]),
+        ("SELECT 2 AS x, total AS y FROM shop.sales ORDER BY 1", ["ORDER BY 1"]),
         (
-            "WITH q AS (SELECT total AS x, orders AS x, region FROM sales ORDER BY 1 LIMIT 1) "
+            "WITH q AS (SELECT total AS x, orders AS x, region FROM shop.sales ORDER BY 1 LIMIT 1) "
             "SELECT q.region AS label FROM q ORDER BY 1 DESC",
             ["ORDER BY 1 DESC", "ORDER BY 1"],
         ),
         (
-            "SELECT q.region FROM (SELECT total AS x, orders AS x, region FROM sales "
+            "SELECT q.region FROM (SELECT total AS x, orders AS x, region FROM shop.sales "
             "ORDER BY 2 DESC LIMIT 1) q",
             ["ORDER BY 2 DESC"],
         ),
-        ("SELECT DISTINCT region FROM sales ORDER BY 1", ["ORDER BY 1"]),
+        ("SELECT DISTINCT region FROM shop.sales ORDER BY 1", ["ORDER BY 1"]),
     ],
 )
 def test_order_ordinals_keep_their_projection_position(check, sql, orders) -> None:  # type: ignore[no-untyped-def]
@@ -491,21 +576,16 @@ def test_order_ordinals_keep_their_projection_position(check, sql, orders) -> No
         assert rejection(sql).code is Code.AMBIGUOUS_REFERENCE
         return
     query = check(sql, POLICY)
-    tree = sqlglot.parse_one(query.normalized_sql, read="starrocks")
+    tree = sqlglot.parse_one(query.executed_sql, read="starrocks")
     assert [order.sql(dialect="starrocks") for order in tree.find_all(exp.Order)] == orders
-    assert check(query.normalized_sql, POLICY) == query
-    assert_every_column_is_qualified(query)
-    if "GROUP BY" in sql:
-        assert tree.args["group"].sql(dialect="starrocks") == (
-            "GROUP BY `sales`.`region`, `sales`.`total`"
-        )
+    assert query.executed_sql == (sql if check is guard_explain_query else f"{sql} LIMIT {CAP}")
 
 
 @pytest.mark.parametrize("check", [guard_readonly_query, guard_explain_query])
 @pytest.mark.parametrize("order", ["x", "x + 1"])
 def test_ambiguous_output_alias_is_not_silently_bound_to_the_last_column(check, order) -> None:  # type: ignore[no-untyped-def]
     with pytest.raises(QueryRejectedError) as refused:
-        check(f"SELECT region AS x, total AS x FROM sales ORDER BY {order}", POLICY)
+        check(f"SELECT region AS x, total AS x FROM shop.sales ORDER BY {order}", POLICY)
     assert refused.value.code is Code.AMBIGUOUS_REFERENCE
 
 
@@ -513,11 +593,11 @@ def test_ambiguous_output_alias_is_not_silently_bound_to_the_last_column(check, 
 @pytest.mark.parametrize("ordinal", [0, 3])
 def test_invalid_order_ordinal_is_rejected(check, ordinal) -> None:  # type: ignore[no-untyped-def]
     with pytest.raises(QueryRejectedError):
-        check(f"SELECT region, total FROM sales ORDER BY {ordinal}", POLICY)
+        check(f"SELECT region, total FROM shop.sales ORDER BY {ordinal}", POLICY)
 
 
 def test_function_names_are_matched_case_insensitively() -> None:
-    assert guard("SELECT Sum(total) AS s, max(total) AS m FROM sales").referenced_objects == {
+    assert guard("SELECT Sum(total) AS s, max(total) AS m FROM shop.sales").referenced_objects == {
         ("shop", "sales")
     }
 
@@ -526,19 +606,19 @@ def test_function_names_are_matched_case_insensitively() -> None:
 
 
 COLUMN_REJECTED: list[str] = [
-    "SELECT secret FROM sales",
-    "SELECT sales.secret FROM sales",
-    "SELECT region FROM sales WHERE secret = 1",
-    "SELECT s.region FROM sales s JOIN regions r ON s.secret = r.region",
-    "SELECT region FROM sales GROUP BY secret",
-    "SELECT region FROM sales GROUP BY region HAVING MAX(secret) > 1",
-    "SELECT region FROM sales ORDER BY secret",
-    "SELECT region FROM sales WHERE region IN (SELECT secret FROM regions)",
-    "SELECT q.region FROM (SELECT region, secret FROM sales) q",
-    "WITH t AS (SELECT secret FROM sales) SELECT secret FROM t",
-    "WITH t AS (SELECT region FROM sales) SELECT secret FROM t",
-    "SELECT COUNT(DISTINCT secret) AS n FROM sales",
-    "SELECT x.region FROM sales",
+    "SELECT secret FROM shop.sales",
+    "SELECT sales.secret FROM shop.sales",
+    "SELECT region FROM shop.sales WHERE secret = 1",
+    "SELECT s.region FROM shop.sales s JOIN shop.regions r ON s.secret = r.region",
+    "SELECT region FROM shop.sales GROUP BY secret",
+    "SELECT region FROM shop.sales GROUP BY region HAVING MAX(secret) > 1",
+    "SELECT region FROM shop.sales ORDER BY secret",
+    "SELECT region FROM shop.sales WHERE region IN (SELECT secret FROM shop.regions)",
+    "SELECT q.region FROM (SELECT region, secret FROM shop.sales) q",
+    "WITH t AS (SELECT secret FROM shop.sales) SELECT secret FROM t",
+    "WITH t AS (SELECT region FROM shop.sales) SELECT secret FROM t",
+    "SELECT COUNT(DISTINCT secret) AS n FROM shop.sales",
+    "SELECT x.region FROM shop.sales",
 ]
 
 
@@ -550,11 +630,11 @@ def test_columns_outside_the_allowlist_are_rejected_in_every_clause(sql: str) ->
 IDENTIFIER_REJECTED: list[tuple[str, Code]] = [
     # 列名按快照不区分大小写（P2.5 Task 3，见 tests/p25/test_sql_scope.py）；库、表与别名区分
     # 大小写。全角、同形字与不可见字符不是大小写差异，只会失败关闭。
-    ("SELECT region FROM Sales", Code.OBJECT_NOT_ALLOWED),
-    ("SELECT `ｒegion` FROM sales", Code.COLUMN_NOT_ALLOWED),  # 全角
-    ("SELECT `rеgion` FROM sales", Code.COLUMN_NOT_ALLOWED),  # 西里尔 е
-    ("SELECT `re​gion` FROM sales", Code.COLUMN_NOT_ALLOWED),  # 零宽空格
-    ("SELECT region FROM `sаles`", Code.OBJECT_NOT_ALLOWED),  # 西里尔 а
+    ("SELECT region FROM shop.Sales", Code.OBJECT_NOT_ALLOWED),
+    ("SELECT `ｒegion` FROM shop.sales", Code.COLUMN_NOT_ALLOWED),  # 全角
+    ("SELECT `rеgion` FROM shop.sales", Code.COLUMN_NOT_ALLOWED),  # 西里尔 е
+    ("SELECT `re​gion` FROM shop.sales", Code.COLUMN_NOT_ALLOWED),  # 零宽空格
+    ("SELECT region FROM shop.`sаles`", Code.OBJECT_NOT_ALLOWED),  # 西里尔 а
 ]
 
 
@@ -567,9 +647,9 @@ def test_identifier_variants_cannot_bypass_the_allowlist(sql: str, code: Code) -
     "sql",
     [
         # 数据库在 WHERE/GROUP BY/HAVING 中可能把未限定名解析为同名物理列，而不是输出别名。
-        "SELECT region AS secret FROM sales WHERE secret = 'x'",
-        "SELECT region AS secret FROM sales GROUP BY secret",
-        "SELECT SUM(total) AS s FROM sales GROUP BY region HAVING s > 1",
+        "SELECT region AS secret FROM shop.sales WHERE secret = 'x'",
+        "SELECT region AS secret FROM shop.sales GROUP BY secret",
+        "SELECT SUM(total) AS s FROM shop.sales GROUP BY region HAVING s > 1",
     ],
 )
 def test_output_alias_outside_order_by_is_never_left_for_the_database(sql: str) -> None:
@@ -577,21 +657,22 @@ def test_output_alias_outside_order_by_is_never_left_for_the_database(sql: str) 
         query = guard(sql)
     except QueryRejectedError as error:
         assert error.code in {Code.AMBIGUOUS_REFERENCE, Code.COLUMN_NOT_ALLOWED}
-    else:  # 别名已展开为获准表达式
-        assert_every_column_is_qualified(query)
+    else:
+        assert query.executed_sql == f"{sql} LIMIT {CAP}"
 
 
 def test_order_by_alias_is_kept_as_an_output_reference() -> None:
     """ORDER BY 的输出别名原样保留，由数据库按原文规则绑定；不在范围内的同名列不进入依赖。"""
     query = guard(
-        "SELECT region AS secret, SUM(total) AS s FROM sales GROUP BY region ORDER BY s, secret"
+        "SELECT region AS secret, SUM(total) AS s FROM shop.sales "
+        "GROUP BY region ORDER BY s, secret"
     )
-    assert query.normalized_sql.split(" ORDER BY ", 1)[1] == f"`s`, `secret` LIMIT {CAP}"
+    assert query.executed_sql.split(" ORDER BY ", 1)[1] == f"s, secret LIMIT {CAP}"
     assert query.referenced_columns == {("shop", "sales", "region"), ("shop", "sales", "total")}
 
 
 def test_unqualified_column_present_in_two_sources_is_ambiguous() -> None:
-    sql = "SELECT region FROM sales JOIN regions ON sales.region = regions.region"
+    sql = "SELECT region FROM shop.sales JOIN shop.regions ON sales.region = regions.region"
     assert rejection(sql).code is Code.AMBIGUOUS_REFERENCE
 
 
@@ -599,19 +680,19 @@ def test_unqualified_column_present_in_two_sources_is_ambiguous() -> None:
 
 
 FUNCTION_REJECTED: list[tuple[str, QueryPolicy]] = [
-    ("SELECT FOO(total) AS x FROM sales", POLICY),  # Anonymous
-    ("SELECT MIN(total) AS x FROM sales", POLICY),  # 已知函数但未获准
-    ("SELECT SUM(ABS(total)) AS x FROM sales", POLICY),  # 嵌套在获准函数内
-    ("SELECT region FROM sales WHERE LOWER(region) = 'x'", POLICY),
-    ("SELECT region FROM sales ORDER BY LENGTH(region)", POLICY),
-    ("SELECT CAST(total AS INT) AS x FROM sales", narrowed(allowed_functions=frozenset())),
+    ("SELECT FOO(total) AS x FROM shop.sales", POLICY),  # Anonymous
+    ("SELECT MIN(total) AS x FROM shop.sales", POLICY),  # 已知函数但未获准
+    ("SELECT SUM(ABS(total)) AS x FROM shop.sales", POLICY),  # 嵌套在获准函数内
+    ("SELECT region FROM shop.sales WHERE LOWER(region) = 'x'", POLICY),
+    ("SELECT region FROM shop.sales ORDER BY LENGTH(region)", POLICY),
+    ("SELECT CAST(total AS INT) AS x FROM shop.sales", narrowed(allowed_functions=frozenset())),
     (
-        "SELECT region FROM sales WHERE dt >= DATE '2026-01-01'",
+        "SELECT region FROM shop.sales WHERE dt >= DATE '2026-01-01'",
         narrowed(allowed_functions=frozenset({"SUM"})),
     ),
-    ("SELECT IF(total > 1, 1, 0) AS x FROM sales", narrowed(allowed_functions=frozenset())),
-    ("SELECT COUNT(*) AS n FROM sales", narrowed(allowed_functions=frozenset({"SUM"}))),
-    ("SELECT DATE_TRUNC('day', dt) AS d FROM sales", POLICY),
+    ("SELECT IF(total > 1, 1, 0) AS x FROM shop.sales", narrowed(allowed_functions=frozenset())),
+    ("SELECT COUNT(*) AS n FROM shop.sales", narrowed(allowed_functions=frozenset({"SUM"}))),
+    ("SELECT DATE_TRUNC('day', dt) AS d FROM shop.sales", POLICY),
 ]
 
 
@@ -622,7 +703,7 @@ def test_functions_outside_the_allowlist_are_rejected(sql: str, policy: QueryPol
 
 def test_case_expression_does_not_need_the_if_function() -> None:
     policy = narrowed(allowed_functions=frozenset())
-    assert guard("SELECT CASE WHEN total > 1 THEN 'a' END AS c FROM sales", policy)
+    assert guard("SELECT CASE WHEN total > 1 THEN 'a' END AS c FROM shop.sales", policy)
 
 
 # ---- 其余关键反例 ----------------------------------------------------------------------------
@@ -634,66 +715,81 @@ REJECTED: list[tuple[str, Code]] = [
     ("SELECT FROM WHERE", Code.UNPARSABLE),
     ("SELECT region FROM", Code.UNPARSABLE),
     ("SELECT 'unterminated", Code.UNPARSABLE),
-    ("SELECT region FROM sales INTO OUTFILE '/tmp/x'", Code.UNPARSABLE),
-    ("SELECT region FROM sales; DROP TABLE sales", Code.MULTIPLE_STATEMENTS),
+    ("SELECT region FROM shop.sales INTO OUTFILE '/tmp/x'", Code.UNPARSABLE),
+    ("SELECT region FROM shop.sales; DROP TABLE sales", Code.MULTIPLE_STATEMENTS),
     ("SELECT 1; SELECT 2", Code.MULTIPLE_STATEMENTS),
     ("SELECT 1;;", Code.MULTIPLE_STATEMENTS),
     ("DROP TABLE sales", Code.UNSUPPORTED_SYNTAX),
-    ("CREATE TABLE x AS SELECT region FROM sales", Code.UNSUPPORTED_SYNTAX),
+    ("CREATE TABLE x AS SELECT region FROM shop.sales", Code.UNSUPPORTED_SYNTAX),
     ("INSERT INTO sales (region) VALUES ('x')", Code.UNSUPPORTED_SYNTAX),
     ("UPDATE sales SET total = 0", Code.UNSUPPORTED_SYNTAX),
-    ("DELETE FROM sales", Code.UNSUPPORTED_SYNTAX),
+    ("DELETE FROM shop.sales", Code.UNSUPPORTED_SYNTAX),
     ("SET CATALOG other", Code.UNSUPPORTED_SYNTAX),
     ("SET query_timeout = 1", Code.UNSUPPORTED_SYNTAX),
     ("USE other", Code.UNSUPPORTED_SYNTAX),
     ("SHOW TABLES", Code.UNSUPPORTED_SYNTAX),
-    ("EXPLAIN SELECT region FROM sales", Code.UNSUPPORTED_SYNTAX),
-    ("(SELECT region FROM sales)", Code.UNSUPPORTED_SYNTAX),
+    ("EXPLAIN SELECT region FROM shop.sales", Code.UNSUPPORTED_SYNTAX),
+    ("(SELECT region FROM shop.sales)", Code.UNSUPPORTED_SYNTAX),
     # UNION、相关子查询、窗口与星号展开自 P2.5 Task 3 起支持，见 tests/p25/test_sql_scope.py。
-    ("SELECT region FROM sales INTERSECT SELECT region FROM regions", Code.UNSUPPORTED_SYNTAX),
-    ("SELECT region FROM sales EXCEPT SELECT region FROM regions", Code.UNSUPPORTED_SYNTAX),
+    (
+        "SELECT region FROM shop.sales INTERSECT SELECT region FROM shop.regions",
+        Code.UNSUPPORTED_SYNTAX,
+    ),
+    (
+        "SELECT region FROM shop.sales EXCEPT SELECT region FROM shop.regions",
+        Code.UNSUPPORTED_SYNTAX,
+    ),
     ("WITH RECURSIVE t AS (SELECT 1 AS n) SELECT n FROM t", Code.UNSUPPORTED_SYNTAX),
-    ("SELECT region FROM sales -- note", Code.UNSUPPORTED_SYNTAX),
-    ("SELECT region /* note */ FROM sales", Code.UNSUPPORTED_SYNTAX),
-    ("SELECT region FROM sales # note", Code.UNSUPPORTED_SYNTAX),
-    ("SELECT /*+ SET_VAR(query_timeout = 999) */ region FROM sales", Code.UNSUPPORTED_SYNTAX),
-    ("SELECT region FROM sales FOR UPDATE", Code.UNSUPPORTED_SYNTAX),
-    ("SELECT region FROM sales LOCK IN SHARE MODE", Code.UNSUPPORTED_SYNTAX),
+    ("SELECT region FROM shop.sales -- note", Code.COMMENT_NOT_ALLOWED),
+    ("SELECT region /* note */ FROM shop.sales", Code.COMMENT_NOT_ALLOWED),
+    ("SELECT region FROM shop.sales # note", Code.COMMENT_NOT_ALLOWED),
+    ("SELECT /*+ SET_VAR(query_timeout = 999) */ region FROM shop.sales", Code.UNSUPPORTED_SYNTAX),
+    ("SELECT region FROM shop.sales FOR UPDATE", Code.UNSUPPORTED_SYNTAX),
+    ("SELECT region FROM shop.sales LOCK IN SHARE MODE", Code.UNSUPPORTED_SYNTAX),
     ("SELECT @x", Code.UNSUPPORTED_SYNTAX),
     ("SELECT @@query_timeout", Code.UNSUPPORTED_SYNTAX),
     ("SELECT @x := 1", Code.UNSUPPORTED_SYNTAX),
-    ("SELECT region FROM sales WHERE total = ?", Code.UNSUPPORTED_SYNTAX),
-    ("SELECT region FROM sales WHERE region = 0x41", Code.UNSUPPORTED_SYNTAX),
+    ("SELECT region FROM shop.sales WHERE total = ?", Code.UNSUPPORTED_SYNTAX),
+    ("SELECT region FROM shop.sales WHERE region = 0x41", Code.UNSUPPORTED_SYNTAX),
     # sqlglot 把 COLLATE 建模为函数节点，按函数闭集拒绝。
-    ("SELECT region FROM sales WHERE region = 'a' COLLATE utf8_bin", Code.FUNCTION_NOT_ALLOWED),
-    ("SELECT region FROM sales TABLESAMPLE (10 PERCENT)", Code.UNSUPPORTED_SYNTAX),
-    ("SELECT region FROM sales PARTITION (p1)", Code.UNSUPPORTED_SYNTAX),
-    ("SELECT region FROM sales USE INDEX (i)", Code.UNSUPPORTED_SYNTAX),
-    ("SELECT region FROM sales FOR SYSTEM_TIME AS OF '2020-01-01'", Code.UNSUPPORTED_SYNTAX),
-    ("SELECT sales.region FROM sales NATURAL JOIN regions", Code.UNSUPPORTED_SYNTAX),
-    ("SELECT sales.region FROM sales JOIN regions USING (region)", Code.UNSUPPORTED_SYNTAX),
+    (
+        "SELECT region FROM shop.sales WHERE region = 'a' COLLATE utf8_bin",
+        Code.FUNCTION_NOT_ALLOWED,
+    ),
+    ("SELECT region FROM shop.sales TABLESAMPLE (10 PERCENT)", Code.UNSUPPORTED_SYNTAX),
+    ("SELECT region FROM shop.sales PARTITION (p1)", Code.UNSUPPORTED_SYNTAX),
+    ("SELECT region FROM shop.sales USE INDEX (i)", Code.UNSUPPORTED_SYNTAX),
+    ("SELECT region FROM shop.sales FOR SYSTEM_TIME AS OF '2020-01-01'", Code.UNSUPPORTED_SYNTAX),
+    ("SELECT sales.region FROM shop.sales NATURAL JOIN shop.regions", Code.UNSUPPORTED_SYNTAX),
+    (
+        "SELECT sales.region FROM shop.sales JOIN shop.regions USING (region)",
+        Code.UNSUPPORTED_SYNTAX,
+    ),
     ("SELECT n FROM LATERAL (SELECT 1 AS n) x", Code.UNSUPPORTED_SYNTAX),
-    ("SELECT q.x FROM (SELECT region FROM sales) AS q(x)", Code.UNSUPPORTED_SYNTAX),
+    ("SELECT q.x FROM (SELECT region FROM shop.sales) AS q(x)", Code.UNSUPPORTED_SYNTAX),
     ("SELECT n FROM TABLE(GENERATE_SERIES(1, 3)) t", Code.UNSUPPORTED_SYNTAX),
     ("SELECT region FROM FILES('path' = 's3://bucket/x')", Code.UNSUPPORTED_SYNTAX),
     ("SELECT other.sales.region FROM shop.sales", Code.COLUMN_NOT_ALLOWED),
-    ("SELECT region FROM customers", Code.OBJECT_NOT_ALLOWED),
+    ("SELECT region FROM shop.customers", Code.OBJECT_NOT_ALLOWED),
     ("SELECT region FROM other.sales", Code.OBJECT_NOT_ALLOWED),
     ("SELECT region FROM ext_catalog.shop.sales", Code.OBJECT_NOT_ALLOWED),
-    ("SELECT s.region FROM sales s JOIN shop.customers c ON 1 = 1", Code.OBJECT_NOT_ALLOWED),
-    ("WITH t AS (SELECT region FROM customers) SELECT region FROM t", Code.OBJECT_NOT_ALLOWED),
+    ("SELECT s.region FROM shop.sales s JOIN shop.customers c ON 1 = 1", Code.OBJECT_NOT_ALLOWED),
+    ("WITH t AS (SELECT region FROM shop.customers) SELECT region FROM t", Code.OBJECT_NOT_ALLOWED),
     (
-        "SELECT region FROM sales WHERE region IN (SELECT region FROM other.x)",
+        "SELECT region FROM shop.sales WHERE region IN (SELECT region FROM other.x)",
         Code.OBJECT_NOT_ALLOWED,
     ),
-    ("SELECT COUNT(sales.*) AS n FROM sales", Code.STAR_PROJECTION),
-    ("SELECT region FROM sales LIMIT '5'", Code.UNSUPPORTED_LIMIT),
-    ("SELECT region FROM sales LIMIT -1", Code.UNSUPPORTED_LIMIT),
-    ("SELECT region FROM sales LIMIT 1 + 1", Code.UNSUPPORTED_LIMIT),
-    ("SELECT region FROM sales LIMIT 1.5", Code.UNSUPPORTED_LIMIT),
-    ("SELECT region FROM sales LIMIT 1 OFFSET 2", Code.UNSUPPORTED_LIMIT),
-    ("SELECT region FROM sales LIMIT 2, 3", Code.UNSUPPORTED_LIMIT),
-    ("SELECT q.region FROM (SELECT region FROM sales LIMIT 1 OFFSET 1) q", Code.UNSUPPORTED_LIMIT),
+    ("SELECT COUNT(sales.*) AS n FROM shop.sales", Code.STAR_PROJECTION),
+    ("SELECT region FROM shop.sales LIMIT '5'", Code.UNSUPPORTED_LIMIT),
+    ("SELECT region FROM shop.sales LIMIT -1", Code.UNSUPPORTED_LIMIT),
+    ("SELECT region FROM shop.sales LIMIT 1 + 1", Code.UNSUPPORTED_LIMIT),
+    ("SELECT region FROM shop.sales LIMIT 1.5", Code.UNSUPPORTED_LIMIT),
+    ("SELECT region FROM shop.sales LIMIT 1 OFFSET 2", Code.UNSUPPORTED_LIMIT),
+    ("SELECT region FROM shop.sales LIMIT 2, 3", Code.UNSUPPORTED_LIMIT),
+    (
+        "SELECT q.region FROM (SELECT region FROM shop.sales LIMIT 1 OFFSET 1) q",
+        Code.UNSUPPORTED_LIMIT,
+    ),
 ]
 
 
@@ -705,42 +801,44 @@ def test_rejections_use_stable_codes(sql: str, code: Code) -> None:
 @pytest.mark.parametrize(
     "sql",
     [
-        "SELECT region FROM sales; -- note",
-        "SELECT region FROM sales; /* note */",
-        "SELECT region FROM sales; # note",
-        "SELECT region FROM sales; /*+ SET_VAR(query_timeout = 999) */",
-        "SELECT region FROM sales /*+ SET_VAR(query_timeout = 999) */;",
+        "SELECT region FROM shop.sales; -- note",
+        "SELECT region FROM shop.sales; /* note */",
+        "SELECT region FROM shop.sales; # note",
+        "SELECT region FROM shop.sales; /*+ SET_VAR(query_timeout = 999) */",
+        "SELECT region FROM shop.sales /*+ SET_VAR(query_timeout = 999) */;",
     ],
 )
 def test_comments_and_hints_after_the_final_semicolon_are_rejected(sql: str) -> None:
     """注释附着在尾部分号词元上：必须在去掉可选尾部分号之前检查。"""
-    assert rejection(sql).code is Code.UNSUPPORTED_SYNTAX
+    expected = Code.UNSUPPORTED_SYNTAX if "/*+" in sql else Code.COMMENT_NOT_ALLOWED
+    assert rejection(sql).code is expected
 
 
 @pytest.mark.parametrize(
     "sql",
     [
-        "SELECT region FROM sales;",
-        "SELECT region FROM sales ;  \n",
-        "WITH t AS (SELECT region FROM sales) SELECT region FROM t;",
+        "SELECT region FROM shop.sales;",
+        "SELECT region FROM shop.sales ;  \n",
+        "WITH t AS (SELECT region FROM shop.sales) SELECT region FROM t;",
     ],
 )
 def test_a_single_trailing_semicolon_is_allowed(sql: str) -> None:
-    assert guard(sql).normalized_sql == guard(sql.rstrip().rstrip(";")).normalized_sql
+    assert guard(sql).executed_sql == guard(sql.rstrip().rstrip(";")).executed_sql
 
 
 LOWER_LEVEL_REJECTED: list[tuple[str, Code]] = [
     # 非 SELECT 语句藏在 WITH 之后：sqlglot 回退为 Command 时会把原文写进日志。
     # sqlglot 回退后仍报解析错误（SHOW），或得到非 SELECT 根节点（DELETE）。
     ("WITH c AS (SELECT 1 AS n) SHOW TABLES", Code.UNPARSABLE),
-    ("WITH c AS (SELECT 1 AS n) DELETE FROM sales", Code.UNSUPPORTED_SYNTAX),
+    ("WITH c AS (SELECT 1 AS n) DELETE FROM shop.sales", Code.UNSUPPORTED_SYNTAX),
     # 重复的来源别名：sqlglot scope 在读取来源时抛 OptimizeError。
     (
-        "SELECT c.region FROM sales c JOIN regions c ON c.region = c.region",
+        "SELECT c.region FROM shop.sales c JOIN shop.regions c ON c.region = c.region",
         Code.AMBIGUOUS_REFERENCE,
     ),
     (
-        "WITH t AS (SELECT region FROM sales) SELECT t.region FROM t JOIN sales t ON 1 = 1",
+        "WITH t AS (SELECT region FROM shop.sales) "
+        "SELECT t.region FROM t JOIN shop.sales t ON 1 = 1",
         Code.AMBIGUOUS_REFERENCE,
     ),
     # JSON 可表达、UTF-8 不可编码的孤立代理项。
@@ -755,19 +853,19 @@ def test_lower_level_input_errors_become_stable_rejections(sql: str, code: Code)
 
 
 def test_oversized_input_is_rejected_before_parsing() -> None:
-    sql = "SELECT region FROM sales WHERE region = '" + "x" * 4000 + "'"
+    sql = "SELECT region FROM shop.sales WHERE region = '" + "x" * 4000 + "'"
     assert rejection(sql).code is Code.INPUT_TOO_LARGE
 
 
 def test_size_limit_counts_utf8_bytes() -> None:
     policy = narrowed(max_sql_bytes=60)
-    sql = "SELECT region FROM sales WHERE region = '" + "区" * 7 + "'"  # 41 + 21 + 1 字节
+    sql = "SELECT region FROM shop.sales WHERE region = '" + "区" * 7 + "'"  # 41 + 21 + 1 字节
     assert len(sql) < policy.max_sql_bytes < len(sql.encode())
     assert rejection(sql, policy).code is Code.INPUT_TOO_LARGE
 
 
-def test_normalized_sql_must_also_fit() -> None:
-    sql = "SELECT region FROM sales"
+def test_appended_limit_must_fit() -> None:
+    sql = "SELECT region FROM shop.sales"
     policy = narrowed(max_sql_bytes=len(sql))
     assert rejection(sql, policy).code is Code.INPUT_TOO_LARGE
 
@@ -787,22 +885,22 @@ CANARY = "canary7f3a"
 @pytest.mark.parametrize(
     "sql",
     [
-        f"SELECT {CANARY} FROM sales",
+        f"SELECT {CANARY} FROM shop.sales",
         f"SELECT region FROM {CANARY}",
-        f"SELECT {CANARY}(total) AS x FROM sales",
-        f"SELECT region FROM sales WHERE region = '{CANARY}' OR '",
-        f"SELECT region FROM sales; DROP TABLE {CANARY}",
+        f"SELECT {CANARY}(total) AS x FROM shop.sales",
+        f"SELECT region FROM shop.sales WHERE region = '{CANARY}' OR '",
+        f"SELECT region FROM shop.sales; DROP TABLE {CANARY}",
         f"SET CATALOG {CANARY}",
         f"SHOW {CANARY}",
-        f"SELECT region FROM sales -- {CANARY}",
-        f"SELECT region FROM sales LIMIT '{CANARY}'",
-        f"SELECT region FROM sales WHERE region = 'x' COLLATE {CANARY}",
-        f"SELECT region FROM sales TABLESAMPLE ({CANARY} PERCENT)",
+        f"SELECT region FROM shop.sales -- {CANARY}",
+        f"SELECT region FROM shop.sales LIMIT '{CANARY}'",
+        f"SELECT region FROM shop.sales WHERE region = 'x' COLLATE {CANARY}",
+        f"SELECT region FROM shop.sales TABLESAMPLE ({CANARY} PERCENT)",
         f"SELECT '{CANARY}",
-        f"SELECT region FROM sales; -- {CANARY}",
+        f"SELECT region FROM shop.sales; -- {CANARY}",
         f"WITH c AS (SELECT 1 AS n) SHOW {CANARY}",
         f"WITH c AS (SELECT 1 AS n) SET {CANARY} = 1",
-        f"SELECT {CANARY}.region FROM sales {CANARY} JOIN regions {CANARY} "
+        f"SELECT {CANARY}.region FROM shop.sales {CANARY} JOIN shop.regions {CANARY} "
         f"ON {CANARY}.region = {CANARY}.region",
         f"SELECT '{CANARY}\ud800' AS v",
     ],
@@ -847,7 +945,7 @@ def test_guarded_query_cannot_be_built_outside_the_guard() -> None:
     with pytest.raises(TypeError):
         GuardedQuery(
             target_id="sr-test",
-            normalized_sql="DROP TABLE sales",
+            executed_sql="DROP TABLE sales",
             referenced_objects=frozenset(),
             referenced_columns=frozenset(),
             max_returned_rows=1,
@@ -855,9 +953,9 @@ def test_guarded_query_cannot_be_built_outside_the_guard() -> None:
 
 
 def test_guarded_query_is_immutable() -> None:
-    query = guard("SELECT region FROM sales")
+    query = guard("SELECT region FROM shop.sales")
     with pytest.raises(AttributeError):
-        query.normalized_sql = "DROP TABLE sales"  # type: ignore[misc]
+        query.executed_sql = "DROP TABLE sales"  # type: ignore[misc]
 
 
 @pytest.mark.parametrize(
@@ -896,25 +994,24 @@ def explain(sql: str, policy: QueryPolicy = POLICY) -> ExplainQuery:
 )
 def test_explain_keeps_the_user_limit_and_does_not_add_one(limit: str, query_limit: int) -> None:
     """EXPLAIN 不返回数据行；改写 LIMIT 会改变被解释的计划。查询路径作为对照。"""
-    sql = f"SELECT region FROM sales {limit}".strip()
+    sql = f"SELECT region FROM shop.sales {limit}".strip()
     plan = explain(sql)
 
     if limit:
-        assert plan.normalized_sql.endswith(f" {limit}")
+        assert plan.executed_sql.endswith(f" {limit}")
     else:
-        assert " LIMIT " not in plan.normalized_sql
-    assert guard(sql).normalized_sql.endswith(f" LIMIT {query_limit}")
-    assert plan.normalized_sql.removesuffix(f" {limit}") == guard(sql).normalized_sql.removesuffix(
+        assert " LIMIT " not in plan.executed_sql
+    assert guard(sql).executed_sql.endswith(f" LIMIT {query_limit}")
+    assert plan.executed_sql.removesuffix(f" {limit}") == guard(sql).executed_sql.removesuffix(
         f" LIMIT {query_limit}"
     )
 
 
 def test_explain_keeps_a_nested_limit_and_the_final_body_without_one() -> None:
-    plan = explain("WITH t AS (SELECT region FROM sales LIMIT 3) SELECT region FROM t")
+    plan = explain("WITH t AS (SELECT region FROM shop.sales LIMIT 3) SELECT region FROM t")
 
-    assert plan.normalized_sql == (
-        "WITH `t` AS (SELECT `sales`.`region` AS `region` FROM `shop`.`sales` AS `sales` LIMIT 3) "
-        "SELECT `t`.`region` AS `region` FROM `t` AS `t`"
+    assert plan.executed_sql == (
+        "WITH t AS (SELECT region FROM shop.sales LIMIT 3) SELECT region FROM t"
     )
 
 
@@ -923,10 +1020,15 @@ def _all_rejections() -> list[tuple[str, QueryPolicy]]:
     samples += [(sql, POLICY) for sql in COLUMN_REJECTED]
     samples += FUNCTION_REJECTED
     samples += [
-        ("SELECT region FROM sales JOIN regions ON sales.region = regions.region", POLICY),
-        ("SELECT region FROM sales WHERE region = '" + "x" * 4000 + "'", POLICY),
-        ("SELECT region FROM sales WHERE region = '" + "区" * 7 + "'", narrowed(max_sql_bytes=60)),
-        ("SELECT region FROM sales", narrowed(max_sql_bytes=len("SELECT region FROM sales"))),
+        (
+            "SELECT region FROM shop.sales JOIN shop.regions ON sales.region = regions.region",
+            POLICY,
+        ),
+        ("SELECT region FROM shop.sales WHERE region = '" + "x" * 4000 + "'", POLICY),
+        (
+            "SELECT region FROM shop.sales WHERE region = '" + "区" * 7 + "'",
+            narrowed(max_sql_bytes=60),
+        ),
     ]
     return samples
 
@@ -955,7 +1057,8 @@ VIEW_POLICY = narrowed(
 
 def test_explain_accepts_allowed_views_like_tables() -> None:
     plan = explain(
-        "SELECT s.region, v.amount FROM sales s JOIN v_region_totals v ON s.region = v.region",
+        "SELECT s.region, v.amount FROM shop.sales s JOIN shop.v_region_totals v "
+        "ON s.region = v.region",
         VIEW_POLICY,
     )
 
@@ -969,29 +1072,29 @@ def test_explain_accepts_allowed_views_like_tables() -> None:
     )
     assert plan.target_id == POLICY.target_id
     for sql in (
-        "SELECT region FROM v_secret_totals",
-        "SELECT s.region FROM sales s JOIN v_secret_totals v ON s.region = v.region",
+        "SELECT region FROM shop.v_secret_totals",
+        "SELECT s.region FROM shop.sales s JOIN shop.v_secret_totals v ON s.region = v.region",
     ):
         with pytest.raises(QueryRejectedError) as info:
             explain(sql, VIEW_POLICY)
         assert info.value.code is Code.OBJECT_NOT_ALLOWED
     with pytest.raises(QueryRejectedError) as info:
-        explain("SELECT secret FROM v_region_totals", VIEW_POLICY)
+        explain("SELECT secret FROM shop.v_region_totals", VIEW_POLICY)
     assert info.value.code is Code.COLUMN_NOT_ALLOWED
 
 
 @pytest.mark.parametrize(
     "sql",
     [
-        "EXPLAIN SELECT region FROM sales",
-        "EXPLAIN ANALYZE SELECT region FROM sales",
-        "EXPLAIN LOGICAL SELECT region FROM sales",
-        "EXPLAIN VERBOSE SELECT region FROM sales",
-        "EXPLAIN COSTS SELECT region FROM sales",
-        "EXPLAIN SCHEDULER SELECT region FROM sales",
+        "EXPLAIN SELECT region FROM shop.sales",
+        "EXPLAIN ANALYZE SELECT region FROM shop.sales",
+        "EXPLAIN LOGICAL SELECT region FROM shop.sales",
+        "EXPLAIN VERBOSE SELECT region FROM shop.sales",
+        "EXPLAIN COSTS SELECT region FROM shop.sales",
+        "EXPLAIN SCHEDULER SELECT region FROM shop.sales",
         "DESC sales",
-        "DESCRIBE SELECT region FROM sales",
-        "TRACE TIMES SELECT region FROM sales",
+        "DESCRIBE SELECT region FROM shop.sales",
+        "TRACE TIMES SELECT region FROM shop.sales",
         "ANALYZE TABLE sales",
     ],
 )
@@ -1006,50 +1109,50 @@ def test_explain_query_is_sealed_and_distinct() -> None:
     with pytest.raises(TypeError):
         ExplainQuery(
             target_id="sr-test",
-            normalized_sql="SELECT 1",
+            executed_sql="SELECT 1",
             referenced_objects=frozenset(),
             referenced_columns=frozenset(),
         )
-    plan = explain("SELECT region FROM sales")
-    query = guard("SELECT region FROM sales")
+    plan = explain("SELECT region FROM shop.sales")
+    query = guard("SELECT region FROM shop.sales")
 
     assert not isinstance(plan, GuardedQuery)
     assert not isinstance(query, ExplainQuery)
     assert not issubclass(ExplainQuery, GuardedQuery)
     assert not issubclass(GuardedQuery, ExplainQuery)
     with pytest.raises(AttributeError):
-        plan.normalized_sql = "SELECT 1"  # type: ignore[misc]
+        plan.executed_sql = "SELECT 1"  # type: ignore[misc]
 
 
 @pytest.mark.parametrize("sealed", ["query", "plan"])
 def test_sealed_products_cannot_be_copied_with_other_sql(sealed: str) -> None:
     """``dataclasses.replace`` 不能复制封存产物再换掉 SQL（原先会连同封存标记一起复制）。"""
     product = (
-        guard("SELECT region FROM sales")
+        guard("SELECT region FROM shop.sales")
         if sealed == "query"
-        else explain("SELECT region FROM sales")
+        else explain("SELECT region FROM shop.sales")
     )
     with pytest.raises((TypeError, ValueError)):
-        dataclasses.replace(product, normalized_sql="DELETE FROM sales")
+        dataclasses.replace(product, executed_sql="DELETE FROM shop.sales")
     assert copy.copy(product) == product  # 原样复制不改变内容
 
 
 @pytest.mark.parametrize(
     "sql",
     [
-        "SELECT region, SUM(total) AS s FROM sales GROUP BY region ORDER BY s DESC LIMIT 5",
-        "SELECT region FROM sales",
-        "SELECT region FROM sales LIMIT 1000",
-        "WITH t AS (SELECT region FROM sales LIMIT 3) SELECT region FROM t",
-        "SELECT s.region, r.name FROM sales s JOIN regions r ON s.region = r.region",
-        "SELECT region AS secret FROM sales ORDER BY secret",
-        "SELECT CAST(total AS DECIMAL(10, 2)) AS t FROM sales WHERE dt >= '2026-01-01'",
+        "SELECT region, SUM(total) AS s FROM shop.sales GROUP BY region ORDER BY s DESC LIMIT 5",
+        "SELECT region FROM shop.sales",
+        "SELECT region FROM shop.sales LIMIT 1000",
+        "WITH t AS (SELECT region FROM shop.sales LIMIT 3) SELECT region FROM t",
+        "SELECT s.region, r.name FROM shop.sales s JOIN shop.regions r ON s.region = r.region",
+        "SELECT region AS secret FROM shop.sales ORDER BY secret",
+        "SELECT CAST(total AS DECIMAL(10, 2)) AS t FROM shop.sales WHERE dt >= '2026-01-01'",
     ],
 )
 def test_explain_normalization_is_idempotent_including_previous_guarded_sql(sql: str) -> None:
     plan = explain(sql)
     previous = guard(sql)
 
-    assert explain(plan.normalized_sql) == plan
-    assert explain(previous.normalized_sql).normalized_sql == previous.normalized_sql
-    assert explain(previous.normalized_sql).referenced_columns == previous.referenced_columns
+    assert explain(plan.executed_sql) == plan
+    assert explain(previous.executed_sql).executed_sql == previous.executed_sql
+    assert explain(previous.executed_sql).referenced_columns == previous.referenced_columns

@@ -1,8 +1,8 @@
-"""P2.5 Task 3：复杂只读 SQL、跨库与星号展开（SQLGuard，纯函数，离线）。
+"""复杂只读 SQL、跨库与星号分析（SQLGuard，纯函数，离线）。
 
 范围是结构快照给出的全部库的可读对象与按序的列（``QueryPolicy.tables``）。能证明：R3 语法的
-规范化保持语义（排序序号、UNION 的整体 LIMIT、星号按快照列序展开）、依赖覆盖每个分支与子句、
-未限定表名只按唯一匹配补全、展开后的 SQL 大小与结果列数在任何 I/O 前受限。不能证明 StarRocks
+分析保持语义（排序序号、UNION 的整体 LIMIT、星号按快照列序展开）、依赖覆盖每个分支与子句、
+未限定物理表在 I/O 前拒绝、原文 SQL 大小与结果列数在任何 I/O 前受限。不能证明 StarRocks
 对同一 SQL 的实际结果（见 ``tests/p1b/test_starrocks_real.py`` 的对照用例）。
 """
 
@@ -57,15 +57,12 @@ def narrowed(**changes: object) -> QueryPolicy:
 
 
 def query(sql: str, policy: QueryPolicy = POLICY) -> GuardedQuery:
-    guarded = guard_readonly_query(sql, policy)
-    assert guard_readonly_query(guarded.normalized_sql, policy) == guarded  # 往返幂等
-    assert_no_unqualified_column(guarded.normalized_sql)
-    return guarded
+    return guard_readonly_query(sql, policy)
 
 
 def plan(sql: str, policy: QueryPolicy = POLICY) -> ExplainQuery:
     guarded = guard_explain_query(sql, policy)
-    assert guard_explain_query(guarded.normalized_sql, policy) == guarded
+    assert guard_explain_query(guarded.executed_sql, policy) == guarded
     return guarded
 
 
@@ -116,7 +113,7 @@ def test_cross_database_join_records_qualified_objects_and_columns() -> None:
     )
     assert guarded.referenced_objects == {("shop", "sales"), ("hr", "staff")}
     assert guarded.referenced_columns == sales("region", "total") | staff("name", "region")
-    assert "FROM `shop`.`sales` AS `s` JOIN `hr`.`staff` AS `t`" in guarded.normalized_sql
+    assert "FROM shop.sales s JOIN hr.staff t" in guarded.executed_sql
 
 
 def test_same_table_name_in_two_databases_stays_apart() -> None:
@@ -128,13 +125,12 @@ def test_same_table_name_in_two_databases_stays_apart() -> None:
     }
 
 
-def test_unqualified_table_is_completed_only_by_a_unique_match() -> None:
-    guarded = query("SELECT name FROM staff")
-    assert guarded.referenced_objects == {("hr", "staff")}
-    assert "FROM `hr`.`staff` AS `staff`" in guarded.normalized_sql
-    # 两个库都有 sales：不猜库，交回给 Agent 澄清。
-    assert refused("SELECT id FROM sales") is Code.AMBIGUOUS_OBJECT
-    assert refused("SELECT id FROM sales", check=guard_explain_query) is Code.AMBIGUOUS_OBJECT
+def test_unqualified_table_requires_database_even_with_unique_match() -> None:
+    assert refused("SELECT name FROM staff") is Code.UNQUALIFIED_TABLE
+    assert refused("SELECT name FROM staff", check=guard_explain_query) is Code.UNQUALIFIED_TABLE
+    assert query("SELECT name FROM hr.staff").referenced_objects == {("hr", "staff")}
+    assert refused("SELECT id FROM sales") is Code.UNQUALIFIED_TABLE
+    assert refused("SELECT id FROM sales", check=guard_explain_query) is Code.UNQUALIFIED_TABLE
 
 
 def test_audit_context_resolves_unqualified_tables_in_its_own_database() -> None:
@@ -157,7 +153,7 @@ def test_audit_context_resolves_unqualified_tables_in_its_own_database() -> None
         ("SELECT id FROM shop.Sales", Code.OBJECT_NOT_ALLOWED),  # 表名大小写敏感
         ("SELECT id FROM SHOP.sales", Code.OBJECT_NOT_ALLOWED),  # 库名大小写敏感
         ("SELECT id FROM default_catalog.shop.sales", Code.OBJECT_NOT_ALLOWED),
-        ("SELECT id FROM payroll", Code.OBJECT_NOT_ALLOWED),
+        ("SELECT id FROM hr.payroll", Code.OBJECT_NOT_ALLOWED),
         ("SELECT s.region FROM shop.sales s JOIN hr.payroll p ON 1 = 1", Code.OBJECT_NOT_ALLOWED),
         ("SELECT t.secret FROM hr.staff t", Code.COLUMN_NOT_ALLOWED),
         ("SELECT S.region FROM shop.sales s", Code.COLUMN_NOT_ALLOWED),  # 别名大小写敏感
@@ -172,9 +168,8 @@ def test_unknown_objects_and_columns_are_rejected(sql: str, code: Code) -> None:
 def test_column_names_resolve_case_insensitively_against_the_snapshot() -> None:
     """4.1.4 的列名不区分大小写（Task 0 §9.4）；库、表与别名仍区分。列头保留原写法。"""
     guarded = query("SELECT REGION, s.Total FROM shop.sales s WHERE ORDERS > 1 ORDER BY Dt")
-    assert guarded.normalized_sql == (
-        "SELECT `s`.`region` AS `REGION`, `s`.`total` AS `Total` FROM `shop`.`sales` AS `s` "
-        f"WHERE `s`.`orders` > 1 ORDER BY `s`.`dt` LIMIT {CAP}"
+    assert guarded.executed_sql == (
+        f"SELECT REGION, s.Total FROM shop.sales s WHERE ORDERS > 1 ORDER BY Dt LIMIT {CAP}"
     )
     assert guarded.referenced_columns == sales("region", "total", "orders", "dt")
 
@@ -194,7 +189,7 @@ def test_union_all_keeps_ordinals_and_limits_the_whole_set() -> None:
     )
     assert guarded.referenced_objects == {("shop", "sales"), ("hr", "staff")}
     assert guarded.referenced_columns == sales("region") | staff("name")
-    assert tail(guarded.normalized_sql) == "ORDER BY 1 DESC LIMIT 5"
+    assert tail(guarded.executed_sql) == "ORDER BY 1 DESC LIMIT 5"
     assert guarded.max_returned_rows == 5
 
 
@@ -202,7 +197,7 @@ def test_union_without_limit_is_capped_as_a_whole_not_per_branch() -> None:
     guarded = query(
         "(SELECT region FROM shop.sales LIMIT 1) UNION (SELECT name FROM hr.staff LIMIT 2)"
     )
-    tree = sqlglot.parse_one(guarded.normalized_sql, read="starrocks")
+    tree = sqlglot.parse_one(guarded.executed_sql, read="starrocks")
     assert isinstance(tree, exp.Union)
     assert tree.args["limit"].sql(dialect="starrocks") == f"LIMIT {CAP}"
     branches = [s.args["limit"].sql(dialect="starrocks") for s in tree.find_all(exp.Select)]
@@ -214,7 +209,7 @@ def test_union_order_by_output_name_becomes_its_position() -> None:
         "SELECT region AS r, total AS t FROM shop.sales UNION SELECT name, id FROM hr.staff "
         "ORDER BY t DESC, r"
     )
-    assert tail(guarded.normalized_sql) == f"ORDER BY 2 DESC, 1 LIMIT {CAP}"
+    assert tail(guarded.executed_sql) == f"ORDER BY t DESC, r LIMIT {CAP}"
 
 
 @pytest.mark.parametrize(
@@ -275,7 +270,7 @@ def test_window_partition_and_order_columns_are_dependencies() -> None:
         "SUM(total) OVER (PARTITION BY region) AS s FROM shop.sales"
     )
     assert guarded.referenced_columns == sales("region", "dt", "orders", "total")
-    assert "PARTITION BY `sales`.`dt` ORDER BY `sales`.`orders` DESC" in guarded.normalized_sql
+    assert "PARTITION BY dt ORDER BY orders DESC" in guarded.executed_sql
 
 
 @pytest.mark.parametrize(
@@ -347,11 +342,7 @@ def test_correlated_references_to_unknown_columns_are_rejected(sql: str) -> None
 
 def test_star_expands_in_snapshot_column_order() -> None:
     guarded = query("SELECT * FROM shop.sales")
-    assert guarded.normalized_sql == (
-        "SELECT `sales`.`id` AS `id`, `sales`.`region` AS `region`, `sales`.`total` AS `total`, "
-        "`sales`.`orders` AS `orders`, `sales`.`dt` AS `dt` FROM `shop`.`sales` AS `sales` "
-        f"LIMIT {CAP}"
-    )
+    assert guarded.executed_sql == f"SELECT * FROM shop.sales LIMIT {CAP}"
     assert guarded.referenced_columns == sales("id", "region", "total", "orders", "dt")
 
 
@@ -364,8 +355,8 @@ def test_alias_star_and_stars_inside_ctes_and_derived_tables() -> None:
         ("shop", "regions", "region"),
         ("shop", "regions", "name"),
     }
-    tree = sqlglot.parse_one(guarded.normalized_sql, read="starrocks")
-    assert tree.named_selects == ["id", "name", "region", "label"]
+    analyzed, _, _, _, _ = sqlguard._guard(guarded.executed_sql, POLICY)
+    assert analyzed.named_selects == ["id", "name", "region", "label"]
 
 
 def test_count_star_keeps_the_object_dependency_without_columns() -> None:
@@ -379,15 +370,14 @@ def test_expanded_result_columns_are_bounded_before_any_io() -> None:
     assert refused("SELECT * FROM shop.sales", narrowed(max_result_columns=4)) is (
         Code.TOO_MANY_COLUMNS
     )
-    # 执行计划不返回这些列，只受展开后的 SQL 大小约束。
+    # 执行计划不返回这些列，只受原文 SQL 大小约束。
     assert plan("SELECT * FROM shop.sales", narrowed(max_result_columns=4))
 
 
 @pytest.mark.parametrize("check", [guard_readonly_query, guard_explain_query])
-@pytest.mark.parametrize("sql", ["SELECT * FROM shop.sales", "SELECT * FROM cn.`订单`"])
-def test_expanded_sql_size_is_checked_in_utf8_bytes(check, sql: str) -> None:  # type: ignore[no-untyped-def]
-    size = len(check(sql, POLICY).normalized_sql.encode())
-    assert size > len(sql.encode()) * 2  # 展开后明显变长：限长必须作用于展开结果
+@pytest.mark.parametrize("sql", ["SELECT region FROM shop.sales", "SELECT 金额 FROM cn.`订单`"])
+def test_executed_sql_size_is_checked_in_utf8_bytes(check, sql: str) -> None:  # type: ignore[no-untyped-def]
+    size = len(check(sql, POLICY).executed_sql.encode())
     assert check(sql, narrowed(max_sql_bytes=size))
     assert refused(sql, narrowed(max_sql_bytes=size - 1), check=check) is Code.INPUT_TOO_LARGE
 
@@ -441,10 +431,9 @@ def test_star_over_a_derived_table_with_duplicate_names_is_ambiguous() -> None:
         "SELECT COUNT(*) FROM shop.sales UNION ALL SELECT id AS n FROM hr.staff",
     ],
 )
-def test_expression_outputs_need_an_explicit_alias(sql: str) -> None:
-    """sqlglot 会把无别名的表达式列改名为 ``_col_N``：交付的列头会与 StarRocks 不同。执行计划
-    与审计原文不交付列头，规范化 SQL 内部的名字前后一致，照常接受（诊断常见的无别名聚合）。"""
-    assert refused(sql) is Code.UNNAMED_COLUMN
+def test_expression_outputs_do_not_need_an_explicit_alias(sql: str) -> None:
+    """原文交给 StarRocks 命名表达式列；诊断与审计路径也接受。"""
+    assert query(sql)
     assert plan(sql)
     assert audit_references(sql, POLICY, "")
 
@@ -471,11 +460,12 @@ def test_unnamed_expressions_are_fine_where_no_name_is_exposed(sql: str) -> None
 BOTH = pytest.mark.parametrize("check", [guard_readonly_query, guard_explain_query])
 
 
-def normalized(check, sql: str, policy: QueryPolicy = POLICY) -> str:  # type: ignore[no-untyped-def]
-    guarded = check(sql, policy)
-    assert check(guarded.normalized_sql, policy) == guarded
-    assert_no_unqualified_column(guarded.normalized_sql)
-    return str(guarded.normalized_sql)
+def analyzed_sql(check, sql: str, policy: QueryPolicy = POLICY) -> str:  # type: ignore[no-untyped-def]
+    check(sql, policy)
+    analysis, _, _, _, _ = sqlguard._guard(sql, policy)
+    printable = sqlguard._normalize(analysis, policy)
+    assert_no_unqualified_column(printable)
+    return printable
 
 
 @BOTH
@@ -510,7 +500,7 @@ def normalized(check, sql: str, policy: QueryPolicy = POLICY) -> str:  # type: i
     ],
 )
 def test_names_shadowed_by_an_output_alias_stay_physical_columns(check, sql, expected) -> None:  # type: ignore[no-untyped-def]
-    normalized_sql = normalized(check, sql)
+    normalized_sql = analyzed_sql(check, sql)
     assert expected in normalized_sql
     deps = check(sql, POLICY).referenced_columns
     assert ("shop", "sales", "orders") in deps or ("shop", "sales", "region") in deps
@@ -645,7 +635,7 @@ def test_alias_and_column_conflicts_are_not_resolved_by_guessing(check, sql, cod
     ],
 )
 def test_order_by_and_group_by_aliases_without_a_conflict_keep_working(check, sql, order) -> None:  # type: ignore[no-untyped-def]
-    assert normalized(check, sql).split(" ORDER BY ", 1)[1].split(" LIMIT ")[0] == order
+    assert analyzed_sql(check, sql).split(" ORDER BY ", 1)[1].split(" LIMIT ")[0] == order
 
 
 @BOTH
@@ -681,7 +671,7 @@ def test_order_by_and_group_by_aliases_without_a_conflict_keep_working(check, sq
 def test_correlated_names_shadowed_by_an_inner_alias_resolve_outward(  # type: ignore[no-untyped-def]
     check, sql, expected, outer
 ) -> None:
-    assert expected in normalized(check, sql)
+    assert expected in analyzed_sql(check, sql)
     assert outer in check(sql, POLICY).referenced_columns
 
 
@@ -693,8 +683,9 @@ def test_deep_star_ctes_do_not_exhaust_the_stack() -> None:
     sql = f"WITH {', '.join(ctes)} SELECT * FROM c{depth - 1}"
     policy = narrowed(max_sql_bytes=200_000)
     for check in (guard_readonly_query, guard_explain_query):
-        tree = sqlglot.parse_one(check(sql, policy).normalized_sql, read="starrocks")
-        assert tree.named_selects == ["region", "name"]
+        check(sql, policy)
+        analyzed, _, _, _, _ = sqlguard._guard(sql, policy)
+        assert analyzed.named_selects == ["region", "name"]
 
 
 def test_recursion_while_binding_names_is_a_fixed_rejection(
@@ -735,11 +726,11 @@ def test_qualified_star_checks_its_database_like_a_column(check, sql, code) -> N
     ("sql", "names"),
     [
         ("SELECT shop.sales.* FROM shop.sales", ["id", "region", "total", "orders", "dt"]),
-        ("SELECT shop.regions.* FROM regions", ["region", "name"]),
+        ("SELECT shop.regions.* FROM shop.regions", ["region", "name"]),
     ],
 )
 def test_qualified_star_with_the_right_database_expands(check, sql, names) -> None:  # type: ignore[no-untyped-def]
-    tree = sqlglot.parse_one(normalized(check, sql), read="starrocks")
+    tree = sqlglot.parse_one(analyzed_sql(check, sql), read="starrocks")
     assert tree.named_selects == names
 
 
@@ -758,7 +749,7 @@ WIDE = narrowed(max_result_columns=7)
     ],
 )
 def test_stars_over_sources_with_distinct_columns_expand_to_unique_names(check, sql) -> None:  # type: ignore[no-untyped-def]
-    tree = sqlglot.parse_one(normalized(check, sql, WIDE), read="starrocks")
+    tree = sqlglot.parse_one(analyzed_sql(check, sql, WIDE), read="starrocks")
     assert tree.named_selects == ["id", "region", "total", "orders", "dt", "金额", "地区"]
 
 
@@ -805,7 +796,7 @@ def test_stars_over_distinct_sources_still_respect_the_column_cap() -> None:
 )
 def test_derived_output_names_keep_their_spelling_through_normalization(check, sql, names) -> None:  # type: ignore[no-untyped-def]
     """StarRocks 的 CTE/派生表输出名沿用写法，引用时不区分大小写；规范化不能改写它们。"""
-    tree = sqlglot.parse_one(normalized(check, sql), read="starrocks")
+    tree = sqlglot.parse_one(analyzed_sql(check, sql), read="starrocks")
     assert tree.named_selects == names
 
 
@@ -838,9 +829,9 @@ def test_order_by_an_implicit_output_name_inside_a_subquery(check) -> None:  # t
         "SELECT (SELECT s.region FROM shop.sales s JOIN shop.regions r "
         "ON s.region = r.region ORDER BY region LIMIT 1) AS v"
     )
-    assert "ORDER BY `s`.`region` LIMIT 1" in normalized(check, sql)
+    assert "ORDER BY `s`.`region` LIMIT 1" in analyzed_sql(check, sql)
     # 未起别名的括号列同样以列名作为输出名（4.1.4 实测）
-    assert "ORDER BY `s`.`region` LIMIT 1" in normalized(
+    assert "ORDER BY `s`.`region` LIMIT 1" in analyzed_sql(
         check, sql.replace("s.region F", "((s.region)) F")
     )
 
@@ -920,7 +911,7 @@ def test_order_by_an_implicit_output_name_inside_a_subquery(check) -> None:  # t
     ],
 )
 def test_order_by_output_references_are_left_for_the_database(check, sql, order) -> None:  # type: ignore[no-untyped-def]
-    normalized_sql = normalized(check, sql)
+    normalized_sql = analyzed_sql(check, sql)
     tree = sqlglot.parse_one(normalized_sql, read="starrocks")
     clause = tree.args.get("order")
     ordered = ", ".join(o.sql(dialect="starrocks") for o in clause.expressions) if clause else ""
@@ -931,7 +922,7 @@ def test_order_by_output_references_are_left_for_the_database(check, sql, order)
 @BOTH
 def test_union_order_by_a_parenthesized_name_uses_its_position(check) -> None:  # type: ignore[no-untyped-def]
     sql = "SELECT region FROM shop.sales UNION SELECT name FROM hr.staff ORDER BY (region) DESC"
-    assert tail(normalized(check, sql)).startswith("ORDER BY 1 DESC")
+    assert tail(analyzed_sql(check, sql)).startswith("ORDER BY 1 DESC")
 
 
 @BOTH

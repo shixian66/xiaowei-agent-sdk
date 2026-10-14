@@ -801,9 +801,9 @@ docker compose --env-file .env ps
 | `DATE_TRUNC('day', a)` | `DATE_TRUNC` 或 `TIMESTAMP_TRUNC` |
 | `APPROX_COUNT_DISTINCT(...)` | `APPROX_DISTINCT` |
 
-`IFNULL` 仍需填写 `COALESCE`。`FROM_UNIXTIME(x, 格式)` 会在执行前拒绝，因为锁定的 SQL 解析器会改变部分格式符；可改写为 `DATE_FORMAT(FROM_UNIXTIME(x), 格式)`，并授权所用函数。未带格式的 `FROM_UNIXTIME(x)` 继续可用。
+`IFNULL` 仍需填写 `COALESCE`。S1 起 SQLGuard 检查原文，Adapter 执行原文（只可去尾分号、追加或下调顶层 LIMIT），因此获准的 `FROM_UNIXTIME(x, 格式)` 可以执行；4.1.4 本地对照已覆盖 `%i` 格式符。函数白名单仍逐个核对。物理表须写 `库.表`，缺库名时根据工具给出的可读结构快照候选修正，执行时仍复核当前权限；多库同名先澄清。
 
-StarRocks 4.1.4 合成数据实测：`INTERVAL 3 HOUR` 与规范化的 `INTERVAL '3' HOUR` 等价；`GROUP_CONCAT` 省略分隔符与补写 `SEPARATOR ','` 等价（含 NULL、重复值、DISTINCT 与排序样例）。本次数据范围格式升为 `/8`，旧 StarRocks Evidence 因版本不符不能再用于历史事实；无需应用表迁移。
+R2 的 StarRocks 4.1.4 合成数据曾实测：`INTERVAL 3 HOUR` 与规范化的 `INTERVAL '3' HOUR` 等价；`GROUP_CONCAT` 省略分隔符与补写 `SEPARATOR ','` 等价（含 NULL、重复值、DISTINCT 与排序样例）。R2 数据范围格式升为 `/8`。S1 不再重打印业务 SQL，也不升级该摘要；旧普通查询 Evidence 因新增 LIMIT 策略字段失效，旧计划、结构和慢查询事实继续按当前权限复核，无应用表迁移。
 
 模板名单经测试覆盖常用聚合、数值、
 条件、日期、字符串和窗口函数。日期加减只接受整数常量区间，单位限 `SECOND`、`MINUTE`、

@@ -208,7 +208,9 @@ async def test_formal_serve_proposes_approves_and_refuses_non_approver(
         query = env.scripts.add(
             "各地区销售额",
             tool_call(
-                "run_readonly_query", cluster=SR.target_id, sql="SELECT region, total FROM sales"
+                "run_readonly_query",
+                cluster=SR.target_id,
+                sql="SELECT region, total FROM shop.sales",
             ),
             cite(),
         )

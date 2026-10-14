@@ -25,6 +25,7 @@ from xiaowei.starrocks_tools import (
     LAYOUT_TOOL,
     LIST_TABLES,
     PAGED_FIELDS,
+    QUERY_FIELDS,
     RESULT_FIELDS,
     RUN_QUERY,
     RunQueryArgs,
@@ -72,7 +73,12 @@ def envelope_size(observation: ToolObservation) -> int:
     """与证据投影相同的编码；truncated=false 是两种写法中较长的一种。"""
     body = {
         "evidence_id": "ev_" + "f" * 32,
-        "data": {name: observation.payload[name] for name in RESULT_FIELDS},
+        "data": {
+            name: observation.payload[name]
+            for name in (
+                QUERY_FIELDS if "requested_limit" in observation.payload else RESULT_FIELDS
+            )
+        },
         "truncated": False,
         "empty": False,
     }
@@ -104,6 +110,7 @@ def test_every_audience_must_hold_the_worst_case_result() -> None:
     assert required.pop("list_databases") == PAGED_FIELDS
     assert PAGED_FIELDS == (*RESULT_FIELDS, "next_cursor")
     assert required.pop("show_create_table") == (*RESULT_FIELDS, "message")
+    assert required.pop("run_readonly_query") == QUERY_FIELDS
     assert set(required.values()) == {RESULT_FIELDS}
     ToolCatalog(tools.contracts, tools.policies)  # 登记一致
 
@@ -138,11 +145,11 @@ async def test_explain_at_the_sql_limit_fits_the_worst_case() -> None:
     """规范化 SQL 恰好用满 ``max_sql_bytes``、字面量全是控制字符时，带前缀的计划结果仍在
     装配时假定的上限内，不在 ``_observation`` 被判为结果契约不符。"""
     policy = POLICY.model_copy(update={"max_sql_bytes": 400})
-    prefix, suffix = "SELECT region FROM sales WHERE note = '", "'"
+    prefix, suffix = "SELECT region FROM shop.sales WHERE note = '", "'"
     # 规范化会补全库名等：按空字面量规范化后的长度反推，使规范化结果恰好等于上限。
-    overhead = len(guard_explain_query(prefix + suffix, policy).normalized_sql.encode())
+    overhead = len(guard_explain_query(prefix + suffix, policy).executed_sql.encode())
     sql = prefix + NASTY * (policy.max_sql_bytes - overhead) + suffix
-    assert len(guard_explain_query(sql, policy).normalized_sql.encode()) == policy.max_sql_bytes
+    assert len(guard_explain_query(sql, policy).executed_sql.encode()) == policy.max_sql_bytes
     plan = Result(("Explain String",), [(NASTY * 40,) for _ in range(10)])
     ada = adapter(plan, policy=policy, max_result_bytes=900)
 
@@ -158,7 +165,7 @@ async def test_worst_case_is_an_upper_bound_for_escape_heavy_results() -> None:
     policy = POLICY.model_copy(update={"max_sql_bytes": 400})
     limit = policy.max_sql_bytes
     # 规范化后的 SQL 恰在上限附近，字面量全是控制字符；行的每个值同样如此。
-    prefix = "SELECT region, note FROM sales WHERE note = '"
+    prefix = "SELECT region, note FROM shop.sales WHERE note = '"
     sql = prefix + NASTY * (limit - len(prefix) - 120) + "'"
     rows = [(NASTY * 30, '"\\' * 15) for _ in range(40)]
     ada = adapter(Result(("region", "note"), rows), policy=policy, max_result_bytes=900)
@@ -174,7 +181,7 @@ async def test_server_column_labels_beyond_the_assumed_bound_fail_closed() -> No
     long_label = NASTY * (6 * SR.policy.max_sql_bytes)
     ada = adapter(Result((long_label,), [("x",)]))
     with pytest.raises(StarRocksError) as failed:
-        await run_query(ada, "SELECT region FROM sales")
+        await run_query(ada, "SELECT region FROM shop.sales")
     assert failed.value.code is StarRocksErrorCode.RESULT_CONTRACT
 
 
@@ -213,12 +220,12 @@ async def test_full_width_escape_heavy_headers_stay_within_the_worst_case() -> N
     columns, limit = 4, 400
     labels = [NASTY * (i + 1) for i in range(columns)]
     projections = ", ".join(f"region AS `{label}`" for label in labels)
-    sql = f"SELECT {projections} FROM sales LIMIT 1"
+    sql = f"SELECT {projections} FROM shop.sales LIMIT 1"
     policy = POLICY.model_copy(update={"max_sql_bytes": limit, "max_result_columns": columns})
-    size = len(guard_readonly_query(sql, policy).normalized_sql.encode())
+    size = len(guard_readonly_query(sql, policy).executed_sql.encode())
     labels[-1] += NASTY * (limit - size)  # 最后一个别名补满，使规范化 SQL 恰好等于上限
-    sql = f"SELECT {', '.join(f'region AS `{label}`' for label in labels)} FROM sales LIMIT 1"
-    assert len(guard_readonly_query(sql, policy).normalized_sql.encode()) == limit
+    sql = f"SELECT {', '.join(f'region AS `{label}`' for label in labels)} FROM shop.sales LIMIT 1"
+    assert len(guard_readonly_query(sql, policy).executed_sql.encode()) == limit
 
     ada = StarRocksAdapter(
         wider(columns, max_sql_bytes=limit).target,
@@ -238,5 +245,5 @@ async def test_star_expansion_beyond_the_column_limit_never_reaches_the_driver()
     execute = tools.executes[(RUN_QUERY, SR.target_id)]
     assert isinstance(execute, Prechecked)
     with pytest.raises(ToolRejectedError, match="too_many_columns"):
-        execute.check(request("SELECT * FROM sales"))  # shop.sales 有 3 列
-    assert execute.check(request("SELECT * FROM regions"))  # 恰好 2 列
+        execute.check(request("SELECT * FROM shop.sales"))  # shop.sales 有 3 列
+    assert execute.check(request("SELECT * FROM shop.regions"))  # 恰好 2 列

@@ -45,6 +45,7 @@ from xiaowei.starrocks_tools import (
     LAYOUT_NOTE,
     LAYOUT_TOOL,
     PLAN_NOTE,
+    QUERY_NOTE,
     RUN_QUERY,
     SLOW_QUERIES,
 )
@@ -66,8 +67,12 @@ EVIDENCE_FAILED = (
 SR_TOOLS = {"list_slow_queries", "explain_query", "describe_table_layout", "describe_table"}
 
 
+def qualified(sql: str, database: str = "shop") -> str:
+    return sql.replace("FROM sales", f"FROM {database}.sales")
+
+
 def explained(sql: str) -> str:
-    return EXPLAIN_PREFIX + guard_explain_query(sql, POLICY).normalized_sql
+    return EXPLAIN_PREFIX + guard_explain_query(qualified(sql), POLICY).executed_sql
 
 
 @dataclass
@@ -151,8 +156,8 @@ async def evidence_rows(env: Env) -> int:
 
 def listed_sql(call: ModelCall) -> str:
     rows = json.loads(tool_outputs(call)[-1])["data"]["rows"]
-    sql: str = rows[0]["sql"]
-    return sql
+    row = rows[0]
+    return qualified(row["sql"], row["database"])
 
 
 def explain_listed(call: ModelCall) -> Any:
@@ -189,7 +194,7 @@ async def test_slow_query_to_plan_and_layout(diag: Env, channel: str) -> None:
         assert await served.finish() == 0
 
     assert reply.state == "completed"
-    # 诊断轮从未看到、也从未执行实际查询工具；被解释的正是审计记录中的 SQL。
+    # 诊断轮不执行原查询；按审计行的 database 补库名后取计划。
     assert all("run_readonly_query" not in seen for seen in env.scripts.tools_seen(message))
     assert not env.drv.sent("query")
     assert env.drv.sent("explain") == [explained(SLOW_SQL)]
@@ -234,7 +239,7 @@ async def test_previous_query_is_explained_without_running_it_again(
     first = env.scripts.add(
         "各地区订单总额",
         tool_call(
-            "run_readonly_query", cluster=SR.target_id, sql="select region, total from sales"
+            "run_readonly_query", cluster=SR.target_id, sql="select region, total from shop.sales"
         ),
         cite("东区高于西区"),
     )
@@ -276,7 +281,7 @@ async def test_previous_query_is_explained_without_running_it_again(
         assert columns["tool_id"] == "local/describe_table"
         # 上一轮证据保留它自己的采集时间，本轮计划是当前采集。
         assert query["metadata"]["sql"] == ran and plan["metadata"]["sql"] == EXPLAIN_PREFIX + ran
-        assert query["note"] is None and plan["note"] == PLAN_NOTE
+        assert query["note"] == QUERY_NOTE and plan["note"] == PLAN_NOTE
         assert query["captured_at"] <= plan["captured_at"]
 
 
@@ -295,7 +300,7 @@ async def test_audit_only_answer_when_the_plan_is_rejected(diag: Env, channel: s
             order_by="query_time",
             database=None,
         ),
-        tool_call("explain_query", cluster=SR.target_id, sql=UNAPPROVED_SQL),
+        tool_call("explain_query", cluster=SR.target_id, sql=qualified(UNAPPROVED_SQL)),
         cite("审计显示扫描行数高；缺少执行计划，无法确认原因，请提供只引用获准列的 SQL"),
     )
     running, feishu = serving(env, channel)
@@ -322,7 +327,7 @@ async def test_no_evidence_is_a_pure_clarification(diag: Env, channel: str) -> N
     env = diag
     message = env.scripts.add(
         "这条 secret 查询为什么慢",
-        tool_call("explain_query", cluster=SR.target_id, sql=UNAPPROVED_SQL),
+        tool_call("explain_query", cluster=SR.target_id, sql=qualified(UNAPPROVED_SQL)),
         clarify("secret 列不在可查看范围内，请换成获准的列"),
     )
     running, feishu = serving(env, channel)
@@ -381,7 +386,7 @@ async def test_pasted_sql_is_explained_without_running_it(diag: Env, channel: st
     env = diag
     message = env.scripts.add(
         f"这条 SQL 为什么慢：{SLOW_SQL}",
-        tool_call("explain_query", cluster=SR.target_id, sql=SLOW_SQL),
+        tool_call("explain_query", cluster=SR.target_id, sql=qualified(SLOW_SQL)),
         tool_call("describe_table_layout", cluster=SR.target_id, database="shop", table="sales"),
         cite("全表扫描；建议加日期过滤"),
     )
@@ -458,7 +463,7 @@ async def test_tool_failures_stop_the_turn_without_retry(
     env = diag
     if failure == "plan_timeout":
         env.drv.hang = "explain"  # Adapter 的客户端期限（1 秒）到达
-        first = tool_call("explain_query", cluster=SR.target_id, sql=SLOW_SQL)
+        first = tool_call("explain_query", cluster=SR.target_id, sql=qualified(SLOW_SQL))
     else:
         env.drv.failures["audit"] = OperationalError(5203, "Access denied canary-audit")
         first = tool_call(
