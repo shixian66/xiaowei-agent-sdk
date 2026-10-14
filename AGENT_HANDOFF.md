@@ -11,7 +11,7 @@
 | 仓库 | [shixian66/xiaowei-agent-sdk](https://github.com/shixian66/xiaowei-agent-sdk) |
 | 本地目录 / 分支 | B2+N1：`/private/tmp/xw-alertmanager-b2-n1` / `codex/alertmanager-limit-b2-n1`；基线 `origin/main` `0c54442fbd15d92e2d9fc544b6e7cddd8cc0cbca`，其他工作树保留。 |
 | M5 历史起点 | `372c381f44ecfa1fa53961f137d0058033cbd805`；不是远端当前 main 的核验结论 |
-| 本轮审查版本 | R1–R4 已随 PR #96–#99 合入；B2+N1 PR #100 的 `b74338b` 经 Claude 独立审查无阻断，同参数判定和分类额度两项验收修复待新 head 增量复审；不合并、不部署。 |
+| 本轮审查版本 | R1–R4 已随 PR #96–#99 合入；B2+N1 PR #100 的 `0cdf9dc` 经 Claude 增量复审无阻断。N1 回执精确文案获用户同意；新 head 验证与合并状态以 PR 为准，不部署。 |
 | 已同步主线审查记录 | SDK-A/B/C 已随 PR #89/#93/#94 合入；D7 已随 PR #83 离线合入。上述合入不代表真实模型、飞书或公司 Grafana 验收。 |
 | 当前阶段 | Alertmanager 读取超限可修正 B2 与通用失败回执 N1 单独切片；真实模型行为由用户上线后人工试用。 |
 | 当前源码与依赖 | 基线应用表 v11；锁定 Agents SDK 0.22.3 / mcp 2.2.0 / sqlglot 30.17.0。B2 仅改变 Alertmanager 指定读取的执行后可修正反馈；N1 只改失败回执文案，不改存储或迁移。 |
@@ -37,9 +37,9 @@
 
 ## 3. 当前计划与下一项工作
 
-**当前下一步：** B2+N1 PR #100 的两项验收修复交 Claude 对新 head 增量复审；审查与用户验收前不合并、不部署。真实模型按用户已批准例外在上线后人工试用“查看监控”和“查某主机的告警”。S1 等本切片审查后另行实施。
+**当前下一步：** 按用户授权完成 B2+N1 PR #100 的验证与合入，不部署；随后另行实施 S1。真实模型仍按用户已批准例外在上线后人工试用“查看监控”和“查某主机的告警”。
 
-**B2+N1 本地验证边界：** 基线 `0c54442`。首轮 PR head `b74338b` 的 CI 10/10 通过，Claude 审查无阻断。增量修复先以正式 `serve`、真 SDK Runner、治理、隔离 PostgreSQL、Alertmanager API v2 loopback 替身与脚本模型复现同参数和类别额度缺陷，再验证 A→B→A、只改 limit/offset 零重发、告警/分组共用额度、告警与单条静默类别隔离及相应模型反馈；Alertmanager 文件 **89 passed、1 skipped、1 deselected**，相邻治理/PromQL/应用文件 **245 passed、26 skipped、3 deselected**。Ruff 全仓、改动文件格式、mypy 134 源文件、文档契约 8 项与差异检查通过；新 head 的 CI 以 PR 验证记录为准。固定失败回执仍按已有契约不可显式重发，N1 文案未做未获同意的可选改写；未调用真实模型、公司监控源或真实飞书，官方 Alertmanager 二进制未装，本地协议测试跳过。
+**B2+N1 本地验证边界：** 基线 `0c54442`。首轮 PR head `b74338b` 的 CI 10/10 通过，Claude 审查无阻断。增量修复先以正式 `serve`、真 SDK Runner、治理、隔离 PostgreSQL、Alertmanager API v2 loopback 替身与脚本模型复现同参数和类别额度缺陷，再验证 A→B→A、只改 limit/offset 零重发、告警/分组共用额度、告警与单条静默类别隔离及相应模型反馈；Alertmanager 文件 **89 passed、1 skipped、1 deselected**，相邻治理/PromQL/应用文件 **245 passed、26 skipped、3 deselected**。Ruff 全仓、改动文件格式、mypy 134 源文件、文档契约 8 项与差异检查通过；新 head 的 CI 以 PR 验证记录为准。固定失败回执仍按已有契约不可显式重发；N1 获用户同意后只改回执文字及断言，三个相关测试文件 **94 passed**，不改存储或迁移；未调用真实模型、公司监控源或真实飞书，官方 Alertmanager 二进制未装，本地协议测试跳过。
 
 **R1 验证边界：** 基线 `408fafb85edae29e3583d6793289e3eff411d019`；真 SDK、正式 Web、脚本模型、隔离 PostgreSQL 与 StarRocks 驱动替身的 Evidence/群身份/依赖用例 **86 passed**。专用无持久卷的 StarRocks 容器回读 `CURRENT_VERSION()=4.1.4-4a9848e`；正式 Web 两轮在视图同列改定义后仍读到旧事实，既有真实依赖复核共 **2 passed**；容器已删除。Ruff、格式、mypy 与文档事实检查结果见 PR #96。没有连接用户的 StarRocks、真实模型或真实飞书；没有部署。视图定义或间接依赖变化而被读取列类型不变时，旧事实仍可读，这是用户接受的契约。
 

@@ -428,7 +428,10 @@ async def test_turn_failures_persist_safe_codes_and_fixed_receipts(env: Env) -> 
     # 失败记录只保存 evidence_failed 类别；新旧记录的历史读取都使用当前通用回执。
     evidence_view = await env.service.results.view(ref("r2"))
     assert evidence_view.delivery is not None
-    assert "核对相关数据源和问题条件" in evidence_view.delivery.content
+    assert evidence_view.delivery.content == (
+        "工具执行失败，或工具结果、回答未通过证据校验，本轮未交付；不会自动重试。"
+        "可缩小查询范围、核对数据源和问题条件后重新提问，或换一种问法"
+    )
     assert "缩小时间范围" not in evidence_view.delivery.content
     outbox = Outbox(outcome="failed")
     assert await env.service.results.send(ref("r2"), outbox) == "failed"
