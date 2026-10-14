@@ -11,7 +11,7 @@
 | 仓库 | [shixian66/xiaowei-agent-sdk](https://github.com/shixian66/xiaowei-agent-sdk) |
 | 本地目录 / 分支 | 文档计划：`/Users/kloenguyen/.codex/worktrees/delivery-document-plan/agent-SDK` / `codex/result-delivery-plan`；基线本地 `origin/main` `0c54442fbd15d92e2d9fc544b6e7cddd8cc0cbca`，其他工作树和原目录未提交配置保留。 |
 | M5 历史起点 | `372c381f44ecfa1fa53961f137d0058033cbd805`；不是远端当前 main 的核验结论 |
-| 本轮审查版本 | 自然回答与完整结果交付设计/计划 v1.0；审查使用包含文档的精确 Git 提交，不能用源码基线代替文档 SHA。R1–R4 已在基线主线，R4 为 PR #99 合并提交 `0c54442`；本次未重新核验旧 PR 的 CI/独立审查。 |
+| 本轮审查版本 | 自然回答与完整结果交付设计/计划 v1.1；审查使用包含文档的精确 Git 提交，不能用源码基线代替文档 SHA。R1–R4 已在基线主线，R4 为 PR #99 合并提交 `0c54442`；本次未重新核验旧 PR 的 CI/独立审查。 |
 | 已同步主线审查记录 | SDK-A/B/C 已随 PR #89/#93/#94 合入；D7 已随 PR #83 离线合入。上述合入不代表真实模型、飞书或公司 Grafana 验收。 |
 | 当前阶段 | 仅编写交付修复的设计、实施计划与必要文档；有边界离线核查。完整交付、自然排版、通用文档与真实曲线均未实施；旧实战缺口仍保留。 |
 | 当前源码与依赖 | 基线应用表 v11；uv.lock 为 Agents SDK 0.22.3 / lark-channel-sdk 1.4.0 / markdown-it-py 4.2.0 / mcp 2.2.0 / sqlglot 30.17.0。本次不修改源码、锁文件、配置或表结构。 |
@@ -39,7 +39,7 @@
 
 **当前下一步：** 按[自然回答与完整结果交付计划](docs/superpowers/plans/2026-10-14-result-delivery-documents.md) D0 审阅具体文档SHA与C1–C6取舍，关闭对应实现疑点；产品实现、真实服务调用、推送/合并/部署均未授权。后续只推进另获授权的独立切片。用户原先安排的真实模型审计工具选择、遗漏说明与“查慢查询 → 转 MD”试用保持开放，旧例外不自动覆盖新的模型行为改动。
 
-**本次离线核查：** 无网络核对真实安装的 Agents SDK 0.22.3 与 Channel SDK 1.4.0；公开 AgentOutputSchema 验证既有 AgentAnswer、FeishuChannel 的 send/upload_media/stream 签名与 SendResult 字段成立。公开 markdown_to_post_ast 的 native/structured 合成转换均返回内容，structured 的合成 SQL code_block 原文相等。未构造真实channel、读取凭据、调用模型或外部平台；这些证据不证明新产品实现、真实Lark排版、监控曲线或公司环境可用。文档检查与最终审查结果按本次提交记录；下面各阶段证据属于历史版本。
+**本次验证边界：** 无网络核对真实安装的 Agents SDK 0.22.3 与 Channel SDK 1.4.0；公开 AgentOutputSchema 验证既有 AgentAnswer、FeishuChannel 的 send/upload_media/stream 签名与 SendResult 字段成立。公开 markdown_to_post_ast 的 native/structured 合成转换均返回内容，structured 的合成 SQL code_block 原文相等。现有文档命令检查 **2 passed**，新增计划本地链接/入口、引用测试文件及差异检查通过。独立审查的 v1.0 精确 SHA `cd1145267dc651db27d78c40de0eb0cab4fd11e6` 无 P0/P1，指出两处 P2：短结果显式文件例外、上传/消息发送次数不能当总 I/O 上界；v1.1 已补规则和对应验收，最终提交复核以审查输出为准。未构造真实channel、读取凭据、调用模型/外部平台或执行产品回归；不证明新功能、真实Lark排版、监控曲线或公司环境可用。下面各阶段证据属于历史版本。
 
 **R1 验证边界：** 基线 `408fafb85edae29e3583d6793289e3eff411d019`；真 SDK、正式 Web、脚本模型、隔离 PostgreSQL 与 StarRocks 驱动替身的 Evidence/群身份/依赖用例 **86 passed**。专用无持久卷的 StarRocks 容器回读 `CURRENT_VERSION()=4.1.4-4a9848e`；正式 Web 两轮在视图同列改定义后仍读到旧事实，既有真实依赖复核共 **2 passed**；容器已删除。Ruff、格式、mypy 与文档事实检查结果见 PR #96。没有连接用户的 StarRocks、真实模型或真实飞书；没有部署。视图定义或间接依赖变化而被读取列类型不变时，旧事实仍可读，这是用户接受的契约。
 
