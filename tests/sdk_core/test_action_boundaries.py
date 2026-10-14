@@ -61,9 +61,9 @@ async def test_capacity_notice_never_authorizes_unshown_action(
         action_id = await actions.one()
         await group.ask(f"/批准 {action_id}", message_id="om_a")
     assert actions.adapter.calls == []
-    assert "单消息容量不足" in message_text(outbox.sent[0][1])
+    assert "审批材料容量不足" in message_text(outbox.sent[0][1])
     assert await env.rows("SELECT delivery FROM xiaowei_request WHERE reply_message_id='om_p'") == [
-        ("failed" if outcome == "sent" else outcome,)
+        ("failed",)
     ]
 
 
@@ -355,7 +355,7 @@ async def test_approval_receipt_reports_actual_execution_outcome(
         elif outcome == "changed":
             actions.adapter.revision = "v2"
         await group.ask(f"/批准 {action_id}", message_id="om_a")
-        receipt = message_text(group.outbox.sent[-1][1])
+        receipt = "\n".join(message_text(m) for _, m in group.outbox.sent[-2:])
         assert len(actions.adapter.calls) == writes
         assert await env.rows("SELECT state FROM xiaowei_action") == [(state,)]
         assert await env.rows(
@@ -394,7 +394,8 @@ async def test_preclaim_refusal_reports_this_approval_not_executed(
             async with env.engine.begin() as conn:
                 await conn.execute(
                     text(
-                        "UPDATE xiaowei_request SET delivery='failed' WHERE reply_message_id='om_p'"
+                        "UPDATE xiaowei_request SET delivery='failed', delivery_version=0 "
+                        "WHERE reply_message_id='om_p'"
                     )
                 )
         else:
@@ -709,7 +710,10 @@ async def test_status_permission_revocation_rejects_history_and_resend(actions: 
     # 显式重发只竞争 failed/unknown；已经 sent 的消息不会再次取得投递权。
     async with env.engine.begin() as conn:
         await conn.execute(
-            text("UPDATE xiaowei_request SET delivery='failed' WHERE reply_message_id='om_a'")
+            text(
+                "UPDATE xiaowei_request SET delivery='failed', delivery_version=0 "
+                "WHERE reply_message_id='om_a'"
+            )
         )
     env.access._group = replace(env.access._group, tools=SHARED - {STATUS})
     with pytest.raises(ResultUnavailableError):

@@ -443,11 +443,9 @@ def build_feishu_message(
     all_sql = {
         i
         for i, f in enumerate(delivery.facts)
-        if f.tool_id == "local/run_readonly_query"
-        and isinstance(f.metadata.get("sql"), str)
-        and (allow_preview or f.view != "brief")
+        if f.tool_id == "local/run_readonly_query" and isinstance(f.metadata.get("sql"), str)
     }
-    all_technical = {i for i, f in enumerate(delivery.facts) if allow_preview or f.view != "brief"}
+    all_technical = set(range(len(delivery.facts)))
     full = _card(delivery, totals, all_sql, delivery.analysis, all_technical)
     if fits(full):
         formatted = _card(
@@ -455,6 +453,13 @@ def build_feishu_message(
         )
         return formatted if fits(formatted) else full
     if not allow_preview:
+        # 历史brief的小原文可折叠展示；放不下则只交付已选择的摘要，不因此自动导出原值。
+        if any(f.view == "brief" for f in delivery.facts):
+            brief_technical = {i for i, f in enumerate(delivery.facts) if f.view != "brief"}
+            brief_sql = all_sql & brief_technical
+            brief = _card(delivery, totals, brief_sql, delivery.analysis, brief_technical)
+            if fits(brief):
+                return brief
         raise MessageCapacityError("完整结果超过单消息容量")
     analysis: list[AnswerInference] = []
     technical: set[int] = set()

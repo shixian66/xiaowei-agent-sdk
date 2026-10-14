@@ -10,7 +10,7 @@ import pytest
 from lark_channel.channel.errors import FeishuChannelErrorCode, SendError
 from lark_channel.channel.types import OutboundFile, SendResult
 from sqlalchemy import text
-from tests.sdk_core.test_app import answer, evidence_in, tool_call
+from tests.sdk_core.test_app import answer, clarify, evidence_in, tool_call
 from tests.sdk_core.test_channel_service import Env
 from tests.sdk_core.test_channel_service import env as env
 from tests.sdk_core.test_feishu_reports import _delivery
@@ -137,6 +137,20 @@ async def test_short_complete_reply_has_one_receipt_and_no_attachment(env: Env) 
 
 
 @pytest.mark.asyncio
+async def test_plain_clarification_send_failure_has_nonempty_incomplete_hint(env: Env) -> None:
+    question = env.scripts.add("需要补充目标", clarify("请说明目标集群"))
+    await env.run(question, "om_d1a", channel="feishu", conversation="oc_d1a")
+    ref = RequestRef(
+        channel="feishu", subject_id="alice", conversation_id="oc_d1a", request_id="om_d1a"
+    )
+    platform = Platform(outcomes=[rejected()])
+    assert await env.service.results.send(ref, transmit(env, ref, platform)) == "failed"
+    assert len(platform.sent) == 2 and platform.files == []
+    hint = json.dumps(platform.sent[-1][0], ensure_ascii=False)
+    assert "完整结果尚未交付" in hint and "操作员" in hint
+
+
+@pytest.mark.asyncio
 async def test_uncited_auxiliary_index_has_only_tool_object_and_never_raw_values(env: Env) -> None:
     message = env.scripts.add(
         "先调查后回答业务问题",
@@ -225,6 +239,25 @@ async def test_unknown_then_definite_failure_stays_unknown(env: Env) -> None:
         == "unknown"
     )
     assert (await parts(env, ref))[0].send_state == "unknown"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("format_", [None, "md"])
+async def test_legacy_unknown_then_failed_keeps_unknown(env: Env, format_: str | None) -> None:
+    ref = await request(env, format_=format_)
+    async with env.engine.begin() as conn:
+        await conn.execute(text("UPDATE xiaowei_request SET delivery_version=0"))
+    outcomes = ["unknown", "failed"]
+    platform = Platform()
+
+    async def legacy_send(*_args, **_kwargs):
+        return outcomes.pop(0)
+
+    send = partial(transmit(env, ref, platform), send=legacy_send)
+    assert await env.service.results.send(ref, send) == "unknown"
+    assert await env.service.results.send(ref, partial(send, resend=True), resend=True) == "unknown"
+    record = await env.store.get("feishu", "alice", ref.conversation_id, ref.request_id)
+    assert record.delivery == "unknown" and record.delivery_version == 0
 
 
 @pytest.mark.asyncio
@@ -321,16 +354,21 @@ async def test_evidence_expiry_during_upload_stops_remaining_messages(env: Env) 
 
     ref = await request(env)
     async with env.engine.begin() as conn:
-        await conn.execute(text("UPDATE xiaowei_evidence SET expires_at=:end"),
-                           {"end": env.clock() + timedelta(seconds=1)})
+        await conn.execute(
+            text("UPDATE xiaowei_evidence SET expires_at=:end"),
+            {"end": env.clock() + timedelta(seconds=1)},
+        )
     platform = Platform()
+
     async def delayed_upload(report: ReportFile) -> str:
         key = await platform.upload(report)
         env.clock.advance(2)
         return key
+
     with pytest.raises(RequestUnavailableError):
-        await env.service.results.send(ref,
-            partial(transmit(env, ref, platform), upload_file=delayed_upload))
+        await env.service.results.send(
+            ref, partial(transmit(env, ref, platform), upload_file=delayed_upload)
+        )
     assert platform.sent == []
 
 

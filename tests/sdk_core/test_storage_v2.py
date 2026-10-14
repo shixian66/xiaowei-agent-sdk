@@ -288,6 +288,87 @@ async def test_v10_sdk_approval_upgrade_to_v11_keeps_paused_request_and_action_r
         await check_storage(engine)
 
 
+async def test_direct_v11_upgrade_and_isolated_dump_restore_preserve_unknown_report(
+    postgres_url: URL,
+) -> None:
+    import hashlib
+    import shutil
+    import subprocess
+
+    from tests.sdk_core.postgres_harness import isolated_database
+
+    body = b"<html>legacy report &amp; original bytes</html>"
+    async with open_engine(secret(postgres_url)) as engine:
+        await _install_v1(engine, through="011_feishu_reports.sql")
+        async with engine.begin() as conn:
+            await storage_module._write_digest_key_binding(conn, _DIGEST_KEY)
+            await conn.execute(
+                text("""
+                INSERT INTO xiaowei_request (
+                    channel,request_key,owner_kind,owner_id,subject_id,conversation_key,
+                    session_id,turn_id,mode,message_digest,state,answer,delivery,
+                    created_at,updated_at,expires_at
+                ) VALUES ('feishu','legacy-key','personal','alice','alice','opaque-chat',
+                    'session-v11','turn-v11','query','message-digest','completed','{}','unknown',
+                    now(),now(),now()+interval '1 hour')
+            """)
+            )
+            await conn.execute(
+                text("""
+                INSERT INTO xiaowei_report(turn_id,format,body,digest,upload_state,expires_at)
+                VALUES('turn-v11','html',:body,:digest,'unknown',now()+interval '1 hour')
+            """),
+                {"body": body, "digest": hashlib.sha256(body).hexdigest()},
+            )
+        assert await upgrade_storage(engine, digest_key=_DIGEST_KEY) == 12
+        async with engine.connect() as conn:
+            assert (
+                await conn.execute(text("SELECT delivery,delivery_version FROM xiaowei_request"))
+            ).one() == ("unknown", 0)
+            assert bytes(await conn.scalar(text("SELECT body FROM xiaowei_report"))) == body
+    binary = shutil.which("docker")
+    assert binary is not None, "隔离备份恢复检查需要专用测试PostgreSQL容器"
+    container = "xiaowei-sdk-test-postgres-1"
+
+    def pg(*args, data=None):
+        return subprocess.run(  # noqa: S603 - 固定Docker/PG工具；数据库名仅取自隔离harness。
+            [binary, "exec", "-i", container, *args],
+            input=data,
+            capture_output=True,
+            check=True,
+            timeout=60,
+        )
+
+    dumped = await asyncio.to_thread(
+        pg, "pg_dump", "-U", "postgres", "-Fc", "--no-owner", "--no-acl", postgres_url.database
+    )
+    async with isolated_database() as restored:
+        await asyncio.to_thread(
+            pg,
+            "pg_restore",
+            "-U",
+            "postgres",
+            "--no-owner",
+            "--no-acl",
+            "--dbname",
+            restored.database,
+            data=dumped.stdout,
+        )
+        async with open_engine(secret(restored)) as engine:
+            await check_storage(engine)
+            async with engine.connect() as conn:
+                assert bytes(await conn.scalar(text("SELECT body FROM xiaowei_report"))) == body
+                assert (
+                    await conn.scalar(text("SELECT upload_state FROM xiaowei_report")) == "unknown"
+                )
+                assert (
+                    await conn.execute(
+                        text("SELECT delivery,delivery_version FROM xiaowei_request")
+                    )
+                ).one() == ("unknown", 0)
+                assert await conn.scalar(text("SELECT count(*) FROM xiaowei_delivery_part")) == 0
+
+
 @pytest.mark.parametrize("confirm", [False, True])
 @pytest.mark.parametrize("damage", ["different", "missing"])
 async def test_v6_upgrade_cannot_rebind_or_repair_digest_key(

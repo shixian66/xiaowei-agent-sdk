@@ -287,7 +287,7 @@ async def test_feishu_query_projects_source_and_expression(env: Env) -> None:
         async with env.running(config, feishu_channel=channel) as served:
             assert (await served.ready())["feishu"] == "connected"
             channel.emit_raw_from_sdk_thread(feishu_event(env, message, "om_monitor_query"))
-            await until(lambda: len(channel.sends) == 1)
+            await until(lambda: len(channel.sends) >= 1)
             rendered = message_text(channel.sends[0][1])
             assert SOURCE in rendered and "up" in rendered and "host1" in rendered
             assert "采集于" in rendered and "partial" in rendered
@@ -305,7 +305,7 @@ async def test_feishu_ungranted_query_is_hidden_without_query_io(env: Env) -> No
         )
         async with env.running(config, feishu_channel=channel):
             channel.emit_raw_from_sdk_thread(feishu_event(env, message, "om_monitor_rejected"))
-            await until(lambda: len(channel.sends) == 1)
+            await until(lambda: len(channel.sends) >= 1)
             assert f"{SOURCE}__query" not in env.scripts.tools_seen(message)[0]
         assert upstream.recorder.tool_calls == []
 
@@ -319,7 +319,7 @@ async def test_group_member_can_query_only_a_group_granted_source(env: Env) -> N
         )
         async with env.running(config, feishu_channel=channel):
             channel.emit_raw_from_sdk_thread(raw_group_event(env, "群查指标", "om_monitor_group"))
-            await until(lambda: len(channel.sends) == 1)
+            await until(lambda: len(channel.sends) >= 1)
             to, payload, _ = channel.sends[0]
             assert (
                 to == CHAT and SOURCE in message_text(payload) and "host1" in message_text(payload)
@@ -340,7 +340,7 @@ async def test_group_without_source_grant_cannot_call_query(env: Env) -> None:
             channel.emit_raw_from_sdk_thread(
                 raw_group_event(env, "群无监控权限", "om_monitor_denied")
             )
-            await until(lambda: len(channel.sends) == 1)
+            await until(lambda: len(channel.sends) >= 1)
             assert f"{SOURCE}__query" not in env.scripts.tools_seen(message)[0]
         assert upstream.recorder.tool_calls == []
 
@@ -447,7 +447,7 @@ async def test_revoked_source_evidence_cannot_be_resent_to_feishu(env: Env) -> N
         )
         async with env.running(granted, feishu_channel=channel) as served:
             channel.emit_raw_from_sdk_thread(feishu_event(env, message, "om_monitor_resend"))
-            await until(lambda: len(channel.sends) == 1)
+            await until(lambda: len(channel.sends) >= 1)
             assert await served.finish() == 0
         assert await env.scalar("SELECT delivery FROM xiaowei_request") == "failed"
         resend_channel = FakeChannel()

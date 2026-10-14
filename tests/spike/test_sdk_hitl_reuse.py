@@ -300,7 +300,7 @@ async def test_native_resume_keeps_existing_business_fences(actions: Actions, ca
             async with env.engine.begin() as conn:
                 await conn.execute(
                     text(
-                        "UPDATE xiaowei_request SET delivery='failed' "
+                        "UPDATE xiaowei_request SET delivery='failed', delivery_version=0 "
                         "WHERE reply_message_id='om_sdk_origin'"
                     )
                 )

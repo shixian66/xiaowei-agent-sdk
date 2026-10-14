@@ -57,6 +57,15 @@ def _preview(
                 "report_notice": notice + "\n结果预览。" + "；".join(ranges),
             }
         )
+        if not facts:
+            candidate = candidate.model_copy(
+                update={
+                    "content": notice + "\n" + delivery.content,
+                    "feishu_text": (notice + "\n" + delivery.feishu_text)
+                    if delivery.feishu_text is not None
+                    else None,
+                }
+            )
         try:
             return build_feishu_message(
                 candidate, max_chars, chat_id, reply_to=reply_to, allow_preview=False
@@ -89,6 +98,8 @@ def _data_parts(
             )
             return (_message_part(sequence, "body", message),)
         except MessageCapacityError:
+            if delivery.facts and all(f.view == "brief" for f in delivery.facts):
+                raise MessageCapacityError("历史摘要无法完整放入消息") from None
             pass
     report = build_report(
         delivery.model_copy(update={"report_format": delivery.report_format or "md"})
@@ -153,7 +164,8 @@ async def send_complete_delivery(
     material_parts: tuple[DeliveryPart, ...] = ()
     data_parts = tuple(p for p in existing if p.kind != "approval")
     capacity_failed = False
-    if materials and not existing:
+    material_failed = False
+    if materials and not any(p.kind == "approval" for p in existing):
         material = delivery.model_copy(
             update={
                 "facts": materials,
@@ -167,18 +179,12 @@ async def send_complete_delivery(
                 material, max_chars, chat_id, reply_to=reply_to, allow_preview=False
             )
         except MessageCapacityError:
-            await store.check_delivery_attempt(claim)
-            if not resend:
-                from xiaowei.feishu_render import capacity_notice
-
-                try:
-                    await send(chat_id, capacity_notice(delivery.session_notice), reply_to=reply_to)
-                except Exception:
-                    logger.warning("审批材料容量提醒未送达")
-            else:
+            if resend:
                 logger.warning("容量不足，不能重发")
-            return "failed"
-        material_parts = (_message_part(0, "approval", message),)
+                return "failed"
+            material_failed = True
+        else:
+            material_parts = (_message_part(0, "approval", message),)
     data_delivery = delivery.model_copy(update={"facts": data, "requires_complete": False})
     if materials and not data:
         data_delivery = data_delivery.model_copy(
@@ -206,7 +212,10 @@ async def send_complete_delivery(
                 max_chars,
                 chat_id,
                 reply_to,
-                "完整结果尚未交付。" + reason + "请联系操作员手动补发；不会重新查询。",
+                "完整结果尚未交付。"
+                + reason
+                + f"原请求编号：{ref.request_id}。"
+                + "请联系操作员手动补发；不会重新查询。",
             )
             await send(chat_id, preview, reply_to=reply_to)
         except Exception:
@@ -259,7 +268,7 @@ async def send_complete_delivery(
             outcome, message_id = "unknown", None
         return await store.finish_part_send(claim, part, outcome, message_id)
 
-    outcomes: list[SendOutcome] = []
+    outcomes: list[SendOutcome] = ["failed"] if material_failed else []
     if material_parts:
         existing = await store.bind_delivery_parts(claim, material_parts)
     approvals = tuple(p for p in existing if p.kind == "approval")
@@ -295,6 +304,21 @@ async def send_complete_delivery(
                 continue
         outcomes.append(await send_part(part))
     if capacity_failed or any(o != "sent" for o in outcomes):
-        await hint("文件容量不足。" if capacity_failed else "附件或消息尚未确认送达。")
+        current = await store.delivery_parts(record)
+        failures = [
+            f"第{p.sequence + 1}部分"
+            + ("发送失败。" if p.send_state == "failed" else "发送结果不明。")
+            for p in current
+            if p.send_state in ("failed", "unknown")
+        ]
+        if any(p.upload_state in ("unknown", "uploading") for p in current):
+            failures.append("附件上传结果不明，禁止重传。")
+        material_notice = (
+            "审批材料容量不足。" if delivery.request_state == "paused" else "动作事实消息容量不足。"
+        )
+        reason = (material_notice if material_failed else "") + (
+            "文件容量不足。" if capacity_failed else "".join(failures) or "附件或消息尚未确认送达。"
+        )
+        await hint(reason)
         return "unknown" if "unknown" in outcomes else "failed"
     return "sent"

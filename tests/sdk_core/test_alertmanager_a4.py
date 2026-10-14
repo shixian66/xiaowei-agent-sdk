@@ -1265,7 +1265,7 @@ async def test_group_alert_reading_uses_shared_scope_and_session(env: Env, grant
         )
         async with env.running(config, feishu_channel=channel):
             channel.emit_raw_from_sdk_thread(raw_group_event(env, "host1 告警被谁静默", "om_a4"))
-            await until(lambda: len(channel.sends) == 1)
+            await until(lambda: len(channel.sends) >= 1)
             destination, payload, _ = channel.sends[0]
             shown = message_text(payload)
             assert destination == CHAT
@@ -1327,7 +1327,7 @@ async def test_group_resend_offline_rechecks_current_source_permission(env: Env)
         )
         async with env.running(config, feishu_channel=channel) as served:
             channel.emit_raw_from_sdk_thread(raw_group_event(env, "待重发告警", "om_a4_retry"))
-            await until(lambda: len(channel.sends) == 1)
+            await until(lambda: len(channel.sends) >= 1)
             assert await served.finish() == 0
         assert await env.scalar("SELECT delivery FROM xiaowei_request") == "failed"
         revoked = env.config(**values, feishu=runtime_group(tools=sorted(QUERY_TOOLS)))

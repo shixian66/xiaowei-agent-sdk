@@ -69,6 +69,65 @@ async def test_mixed_round_material_receipt_independently_controls_approval(acti
         assert len(actions.adapter.calls) == (0 if failed_part == "approval" else 1)
 
 
+async def test_material_capacity_failure_does_not_block_independent_query_data(actions):
+    from functools import partial
+
+    from tests.sdk_core.test_group_identity import GROUP
+
+    from xiaowei.feishu import send_delivery
+
+    env = actions.env
+    env.scripts.add(
+        attributed(A, "数据与长材料"),
+        tool_call("run_query", region="east"),
+        tool_call(f"{SOURCE}__propose_change", value="x" * 1700),
+        request_execution,
+        cite(),
+    )
+    async with running(env, max_reply_chars=3500) as group:
+        await group.ask("数据与长材料", message_id="om_material_capacity")
+        assert await env.rows("SELECT kind,send_state FROM xiaowei_delivery_part") == [
+            ("body", "sent")
+        ]
+        assert any('"east"' in shown and "100" in shown for shown in group.outbox.texts())
+        assert await env.rows("SELECT delivery FROM xiaowei_request") == [("failed",)]
+        before = len(group.outbox.sent)
+        ref = group_ref("om_material_capacity", A)
+        transmit = partial(
+            send_delivery,
+            send=group.outbox,
+            chat_id=GROUP.chat_id,
+            reply_to="om_material_capacity",
+            max_chars=3500,
+            results=env.results,
+            ref=ref,
+            resend=True,
+        )
+        assert await env.results.send(ref, transmit, resend=True) == "failed"
+        assert len(group.outbox.sent) == before
+        action_id = await actions.one()
+        await group.ask(f"/批准 {action_id}", sender=B, message_id="om_capacity_approve")
+        assert actions.adapter.calls == []
+
+
+async def test_failed_approval_material_has_nonempty_incomplete_hint(actions):
+    from tests.sdk_core.test_feishu import Outbox
+
+    env = actions.env
+    env.scripts.add(
+        attributed(A, "仅审批材料"),
+        tool_call(f"{SOURCE}__propose_change", value="after"),
+        request_execution,
+        cite(),
+    )
+    async with running(env, outbox=Outbox(["failed"]), max_reply_chars=3500) as group:
+        await group.ask("仅审批材料", message_id="om_material_failure")
+        assert len(group.outbox.sent) == 2
+        hint = group.outbox.texts()[-1]
+        assert "完整结果尚未交付" in hint and "om_material_failure" in hint
+        assert "/批准" not in hint
+
+
 async def test_native_pause_resume_writes_once_and_commits_paired_history(actions: Actions):
     env = actions.env
     # 发起人有群读取/提出权限，没有写权限；B才是本次写的批准主体。
@@ -1452,8 +1511,6 @@ async def test_session_expiry_at_pause_save_has_terminal_request_and_allows_new_
 
 
 async def test_native_execution_receipt_cannot_be_clipped_to_claim_delivery_success(actions):
-    from xiaowei.feishu_render import CAPACITY_NOTICE
-
     env = actions.env
     async with running(env, max_reply_chars=3500) as group:
         aid, script = await paused(actions, group)
@@ -1465,7 +1522,8 @@ async def test_native_execution_receipt_cannot_be_clipped_to_claim_delivery_succ
         "SELECT state,delivery FROM xiaowei_request"
         " WHERE reply_message_id='om_small_execution_receipt'"
     ) == [("completed", "failed")]
-    assert group.outbox.texts()[-1] == CAPACITY_NOTICE
+    assert "完整结果尚未交付" in group.outbox.texts()[-1]
+    assert "动作事实消息容量不足" in group.outbox.texts()[-1]
 
 
 async def test_partial_execution_facts_remain_delivered_when_the_other_action_expires(actions):

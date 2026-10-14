@@ -295,7 +295,8 @@ async def test_invalid_approval_has_zero_writes(actions: Actions, failure: str) 
             async with env.engine.begin() as conn:
                 await conn.execute(
                     text(
-                        "UPDATE xiaowei_request SET delivery='failed' WHERE reply_message_id='om_p'"
+                        "UPDATE xiaowei_request SET delivery='failed', delivery_version=0 "
+                        "WHERE reply_message_id='om_p'"
                     )
                 )
         elif failure == "not_approver":

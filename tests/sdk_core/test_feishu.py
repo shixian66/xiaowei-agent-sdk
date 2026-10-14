@@ -433,10 +433,12 @@ class BlockingOutbox(Outbox):
     release: asyncio.Event = field(default_factory=asyncio.Event)
     entered: asyncio.Event = field(default_factory=asyncio.Event)
 
-    async def __call__(self, chat_id: str, text: str, *, reply_to: str | None = None) -> Any:
+    async def __call__(
+        self, chat_id: str, text: str, *, reply_to: str | None = None, uuid: str | None = None
+    ) -> Any:
         self.entered.set()
         await self.release.wait()
-        return await super().__call__(chat_id, text, reply_to=reply_to)
+        return await super().__call__(chat_id, text, reply_to=reply_to, uuid=uuid)
 
 
 async def test_concurrent_messages_from_one_user_reserve_a_single_notice(env: Env) -> None:
@@ -883,10 +885,20 @@ async def test_cancel_after_completed_before_claim_is_settled_by_recovery(env: E
         resend = Outbox()
         message_id = event["event"]["message"]["message_id"]
 
-        async def transmit(delivery: Delivery) -> Any:
-            return await resend("oc_alice", delivery.content)
-
         results = env.results(restarted)
+        from functools import partial
+
+        from xiaowei.feishu import send_delivery
+
+        transmit = partial(
+            send_delivery,
+            send=resend,
+            chat_id="oc_alice",
+            max_chars=2000,
+            results=results,
+            ref=feishu_ref(message_id),
+            resend=True,
+        )
         assert await results.send(feishu_ref(message_id), transmit) is None  # 首次发送路径不再发送
         assert await results.send(feishu_ref(message_id), transmit, resend=True) == "sent"
         assert len(resend.sent) == 1 and env.model_calls(message) == 2
@@ -906,7 +918,9 @@ async def test_cancel_during_send_records_unknown(env: Env) -> None:
     hold = asyncio.Event()
 
     class Hanging(Outbox):
-        async def __call__(self, chat_id: str, text: str, *, reply_to: str | None = None) -> Any:
+        async def __call__(
+            self, chat_id: str, text: str, *, reply_to: str | None = None, uuid: str | None = None
+        ) -> Any:
             self.sent.append((chat_id, text))
             await hold.wait()
             return "sent"
@@ -1059,9 +1073,11 @@ async def test_drain_waits_for_commands_and_duplicates(env: Env) -> None:
     hold = asyncio.Event()
 
     class Held(Outbox):
-        async def __call__(self, chat_id: str, text: str, *, reply_to: str | None = None) -> Any:
+        async def __call__(
+            self, chat_id: str, text: str, *, reply_to: str | None = None, uuid: str | None = None
+        ) -> Any:
             await hold.wait()
-            return await super().__call__(chat_id, text)
+            return await super().__call__(chat_id, text, reply_to=reply_to, uuid=uuid)
 
     service = gated(env)
     service.release.set()
@@ -1389,6 +1405,7 @@ class FakeChannel:
     result: Any = field(default_factory=lambda: SendResult.ok(message_id="om_sent"))
     delay: float = 0.0
     sends: list[tuple[Any, ...]] = field(default_factory=list)
+    uploads: list[bytes] = field(default_factory=list)
     start_error: BaseException | None = None
     stop_hangs: bool = False
     started: bool = False
@@ -1436,6 +1453,11 @@ class FakeChannel:
         self.sends.append((to, message, opts))
         await asyncio.sleep(self.delay)
         return self.result
+
+    async def upload_media(self, source: Any, **kwargs: Any) -> str:
+        assert asyncio.get_running_loop() is self.loop
+        self.uploads.append(source.buffer)
+        return "file_sdk_fake"
 
     def emit_raw_from_sdk_thread(self, payload: dict[str, Any]) -> None:
         self.loop.call_soon_threadsafe(self.handlers["raw"], payload)

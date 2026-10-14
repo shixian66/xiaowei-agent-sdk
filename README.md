@@ -99,7 +99,7 @@ uv run --locked xiaowei --config xiaowei.json requests resend --subject <发起�
 
 飞书结果按容量交付：短结果完整发送一条消息；完整结果放不进消息时，自动生成完整 MD 文件并发送正文。明确要求 HTML 时使用现有静态模板；普通短回答不附文件。同时要求 MD 和 HTML 仍先询问格式。文件与正文分别保存平台回执，缺少任何必需部分都不记为完整送达。D1a 目前只支持单文件；超过 400,000 字节会给预览并说明未完整交付，多文件和通用美观排版属于后续切片。生产审批卡独立先发，参考数据失败不影响已确认材料的批准。当前是本地候选，真实模型、飞书和客户端尚待验收，未部署。使用、留存和手动补发见[报告文件说明](deploy/OPERATIONS.md#飞书报告文件)，契约见[ARCHITECTURE §7](ARCHITECTURE.md#result-delivery)。
 
-**待实施的交付改进。** 当前仍沿用上述单卡片/显式单文件行为；自动完整附件、分项投递恢复、自然主回复、通用 HTML/MD 与监控曲线仅在[修复计划](docs/superpowers/plans/2026-10-14-result-delivery-documents.md)中设计，不是当前已可使用的功能。
+**后续交付改进。** D1a只提供单文件完整交付与分项恢复的本地候选；多文件、自然主回复、通用HTML/MD排版和监控曲线仍在[修复计划](docs/superpowers/plans/2026-10-14-result-delivery-documents.md)后续切片中，未实现。
 
 飞书默认不读取图片、文件或富文本 post：合法且当前获准的消息获得固定说明。可显式开启 `feishu.document_input_enabled` 接收 UTF-8 TXT/MD；截图还须同时开启 `feishu.image_input_enabled` 和 Vertex 模型 Profile 的 `image_input_enabled`，仅接收单张不超过 2 MiB 的 PNG/JPEG，每会话最多 12 张，后续提问回放原图。指定群仍要求同一条消息的平台 @本机器人及当前成员资格；未 @ 的附件、post 内的 at 标签不会触发。真实 Lark 图片事件、模型识图及 12 图请求尚未验收；配置、容量和回退见[运维说明](deploy/OPERATIONS.md#飞书-pngjpeg-输入)。
 

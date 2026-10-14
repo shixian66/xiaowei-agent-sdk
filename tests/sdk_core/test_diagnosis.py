@@ -10,6 +10,7 @@ ChannelService、Web 与飞书适配器）+ 隔离的真实 PostgreSQL。只替�
 审计写入与权限行为（见 ``starrocks_real`` / ``starrocks_audit_real``）。
 """
 
+import asyncio
 import json
 from dataclasses import dataclass
 from typing import Any
@@ -35,7 +36,6 @@ from tests.sdk_core.test_starrocks_tools import RecordingScripts, tool_outputs
 
 from xiaowei import runtime
 from xiaowei.app import DEFAULT_INSTRUCTIONS
-from xiaowei.feishu_render import ANALYSIS_CLIPPED, FACTS_CLIPPED
 from xiaowei.models import AUDIENCES
 from xiaowei.sqlguard import guard_explain_query
 from xiaowei.starrocks import EXPLAIN_PREFIX
@@ -81,6 +81,7 @@ class Reply:
     content: str
     facts: list[dict[str, Any]] | None
     card: dict[str, Any] | None = None
+    files: tuple[bytes, ...] = ()
 
 
 @dataclass
@@ -102,10 +103,17 @@ class Turns:
             return Reply(body["state"], delivery.get("content", ""), delivery.get("facts"))
         completed, failed = await self.terminal("completed"), await self.terminal("failed")
         before = len(self.feishu.sends)
+        before_files = len(self.feishu.uploads)
         text = f"/诊断 {message}" if mode == "diagnose" else message
         self.feishu.emit_raw_from_sdk_thread(feishu_event(self.env, text, f"om_{self.count}"))
         await until(lambda: len(self.feishu.sends) > before)
+        async with asyncio.timeout(20):
+            while await self.env.scalar(
+                "SELECT count(*) FROM xiaowei_request WHERE delivery='sending'"
+            ):
+                await asyncio.sleep(0.02)
         _, sent, _ = self.feishu.sends[-1]
+        files = tuple(self.feishu.uploads[before_files:])
         # 本轮的终态：恰好一个计数加一，另一个不变（不只看 completed 有没有增加）。
         grown = (
             await self.terminal("completed") - completed,
@@ -114,9 +122,10 @@ class Turns:
         assert grown in ((1, 0), (0, 1)), grown
         return Reply(
             "completed" if grown == (1, 0) else "failed",
-            "\n".join(text_parts(sent)),
+            files[0].decode() if files else "\n".join(text_parts(sent)),
             None,
             sent if "card" in sent else None,
+            files,
         )
 
     async def terminal(self, state: str) -> int:
@@ -206,8 +215,11 @@ async def test_slow_query_to_plan_and_layout(diag: Env, channel: str) -> None:
     # 三类事实与各自的固定说明由代码生成，分析单列为模型推断。
     content = lines(reply)
     assert content.count(f"说明：{AUDIT_NOTE}") == 1 and content.count(f"说明：{PLAN_NOTE}") == 1
-    assert (ANALYSIS_HEADER if channel == "web" else "分析与建议（模型推断）") in content
-    assert "- 全表扫描 30 个分区" in reply.content
+    assert any(
+        (ANALYSIS_HEADER if channel == "web" else "分析与建议（模型推断") in line
+        for line in content
+    )
+    assert "全表扫描 30 个分区" in reply.content
     # 固定说明只在交付中出现：模型收到的工具结果不含它们，限制表达由诊断指令要求。
     for output in tool_outputs(env.scripts.calls[message][-1]):
         assert PLAN_NOTE not in output and AUDIT_NOTE not in output
@@ -225,7 +237,7 @@ async def test_slow_query_to_plan_and_layout(diag: Env, channel: str) -> None:
         assert audit["note"] == AUDIT_NOTE and plan["note"] == PLAN_NOTE
         assert layout["note"] == LAYOUT_NOTE
     else:
-        assert "q1" in reply.content and "小维 · 工具结果" in content
+        assert "q1" in reply.content and reply.files
 
 
 # ---- 路径二：查询 → 为什么慢 → 依据 → 建议 -----------------------------------------------
@@ -274,7 +286,10 @@ async def test_previous_query_is_explained_without_running_it_again(
     assert len(evidence_in(final)) == 3
     content = lines(reply)
     assert content.count(f"说明：{PLAN_NOTE}") == 1
-    assert (ANALYSIS_HEADER if channel == "web" else "分析与建议（模型推断）") in content
+    assert any(
+        (ANALYSIS_HEADER if channel == "web" else "分析与建议（模型推断") in line
+        for line in content
+    )
     if reply.facts is not None:
         query, columns, plan = reply.facts
         assert [query["tool_id"], plan["tool_id"]] == [RUN_QUERY, EXPLAIN_QUERY]
@@ -437,7 +452,10 @@ async def test_instructions_inside_audit_sql_and_plans_change_nothing(
     assert SR_TOOLS <= seen[0]
     assert not env.drv.sent("query") and env.drv.sent("explain") == [explained(injected)]
     # 计划中的换行不能另起段落伪造分析区；分析标题只有代码生成的一个。
-    if reply.card is None:
+    if reply.files:
+        assert "计划为估算" in reply.content
+        assert not env.drv.sent("query")
+    elif reply.card is None:
         assert lines(reply).count(ANALYSIS_HEADER) == 1
     else:
         # 原文可含换行；它只能是纯文本单元格，不能新增分析组件或驱动 Agent 执行。
@@ -522,17 +540,18 @@ async def test_feishu_keeps_whole_fact_rows_before_analysis_at_real_caps(diag: E
 
     assert reply.state == "completed" and reply.card is not None
     assert sum(map(len, text_parts(reply.card))) <= 3_500
-    assert reply.card is not None and FACTS_CLIPPED in content
+    assert reply.files and "预览" in "\n".join(text_parts(reply.card))
+    assert plan[-1] in reply.content and "多次 Shuffle" in reply.content
     visible = "\n".join(text_parts(reply.card, folded=False))
     analysis = f"- 多次 Shuffle；建议按 region 分桶并 Colocate（依据：{cited}）"
     if analysis not in visible:
-        assert ANALYSIS_CLIPPED in visible
+        assert "本次完整结果见附件" in visible
     # 两条事实的来源行与说明行都保留，计划行从前往后保留、末尾的被截掉。
-    assert sum(line.startswith("[ev_") for line in content) == 2
+    assert reply.content.count("来源 ") == 2
     assert f"说明：{AUDIT_NOTE}" in content and f"说明：{PLAN_NOTE}" in content
     plan_table = tables(reply.card)[1]
     kept = [row["c0"] for row in plan_table["rows"]]
-    assert 0 < len(kept) < 80
+    assert 0 < len(kept) <= 20
     assert kept == ['"' + row + '"' for row in plan[: len(kept)]]
 
 
@@ -549,9 +568,7 @@ async def test_feishu_cut_with_forged_headers_uses_only_structured_sections(diag
     assert sum(map(len, text_parts(reply.card))) <= 3_500
     assert reply.card is not None
     elements = reply.card["card"]["body"]["elements"]
-    assert any(
-        t["tag"] == "div" and t.get("text", {}).get("content") == FACTS_CLIPPED for t in elements
-    )
+    assert reply.files and any("本次完整结果见附件" in text for text in text_parts(reply.card))
     assert not any(
         t["tag"] == "div" and t.get("text", {}).get("content") in forged for t in elements
     )
@@ -562,7 +579,7 @@ async def test_feishu_cut_with_forged_headers_uses_only_structured_sections(diag
         )
         <= 1
     )
-    assert "\\n- 已执行原查询" not in reply.content  # 真实换行在纯文本单元格内保留。
+    assert "\\n- 已执行原查询" in reply.content  # 文件保留JSON原值；它仍在安全围栏的数据块中。
     assert not diag.drv.sent("query")
 
 

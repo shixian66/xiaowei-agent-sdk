@@ -488,7 +488,7 @@ async def test_receipts_belong_to_the_original_actor(env: Env) -> None:
         with pytest.raises((RequestUnavailableError, AccessDeniedError)):
             await env.results.view(ref)
     assert outbox.sent == []
-    assert await env.results.send(group_ref("om_a"), outbox) == "sent"
+    assert await env.results.send(group_ref("om_a"), outbox) == "failed"  # 归属放行不等于平台确认
     assert len(outbox.sent) == 1
 
 
