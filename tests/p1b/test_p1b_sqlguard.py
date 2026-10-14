@@ -113,6 +113,115 @@ def test_date_function_still_requires_explicit_allowlist() -> None:
     )
 
 
+def test_formatted_from_unixtime_is_rejected_with_a_safe_rewrite() -> None:
+    policy = narrowed(allowed_functions=frozenset({"UNIX_TO_TIME"}))
+    error = rejection("SELECT FROM_UNIXTIME(1700000000, '%Y-%m-%d %H:%i') AS d FROM sales", policy)
+    assert error.code is Code.UNSUPPORTED_SYNTAX
+    assert "DATE_FORMAT(FROM_UNIXTIME(x), 格式)" in str(error)
+
+
+@pytest.mark.parametrize(
+    ("sql", "allowed", "normalized"),
+    [
+        (
+            "SELECT FROM_UNIXTIME(1700000000) AS d FROM sales",
+            {"FROM_UNIXTIME"},
+            "FROM_UNIXTIME(1700000000)",
+        ),
+        (
+            "SELECT FROM_UNIXTIME(1700000000) AS d FROM sales",
+            {"UNIX_TO_TIME"},
+            "FROM_UNIXTIME(1700000000)",
+        ),
+        (
+            "SELECT DATE_FORMAT(dt, '%H:%i:%s') AS d FROM sales",
+            {"DATE_FORMAT"},
+            "DATE_FORMAT(`sales`.`dt`, '%T')",
+        ),
+        (
+            "SELECT DATE_FORMAT(dt, '%H:%i:%s') AS d FROM sales",
+            {"TIME_TO_STR", "TS_OR_DS_TO_TIMESTAMP"},
+            "DATE_FORMAT(`sales`.`dt`, '%T')",
+        ),
+        (
+            "SELECT DATE_TRUNC('day', dt) AS d FROM sales",
+            {"DATE_TRUNC"},
+            "DATE_TRUNC('DAY', `sales`.`dt`)",
+        ),
+        (
+            "SELECT STR_TO_DATE('2026-10-14 12:34:56', '%Y-%m-%d %H:%i:%s') AS d FROM sales",
+            {"STR_TO_DATE"},
+            "STR_TO_DATE('2026-10-14 12:34:56', '%Y-%m-%d %T')",
+        ),
+    ],
+)
+def test_starrocks_function_spelling_is_accepted_without_extra_grants(
+    sql: str, allowed: set[str], normalized: str
+) -> None:
+    query = guard(sql, narrowed(allowed_functions=frozenset(allowed)))
+    assert normalized in query.normalized_sql
+
+
+def test_date_format_grant_does_not_allow_explicit_implicit_cast() -> None:
+    policy = narrowed(allowed_functions=frozenset({"DATE_FORMAT"}))
+    for sql in (
+        "SELECT TS_OR_DS_TO_TIMESTAMP(dt) AS d FROM sales",
+        "SELECT DATE_FORMAT(TS_OR_DS_TO_TIMESTAMP(dt), '%Y') AS d FROM sales",
+    ):
+        assert rejection(sql, policy).code is Code.FUNCTION_NOT_ALLOWED
+
+
+FORMAT_TOKENS = (
+    "%Y",
+    "%m",
+    "%d",
+    "%H",
+    "%i",
+    "%s",
+    "%f",
+    "%p",
+    "%T",
+    "%W",
+    "%j",
+    "%u",
+    "%a",
+    "%b",
+    "%c",
+    "%e",
+    "%k",
+    "%l",
+    "%h",
+    "%M",
+    "%S",
+)
+
+
+@pytest.mark.parametrize("format_code", FORMAT_TOKENS)
+@pytest.mark.parametrize(
+    ("function", "value"),
+    [
+        ("DATE_FORMAT", "dt"),
+        ("STR_TO_DATE", "'2026-10-14 12:34:56'"),
+        ("UNIX_TIMESTAMP", "dt"),
+    ],
+)
+def test_format_tokens_keep_their_starrocks_meaning(
+    function: str, value: str, format_code: str
+) -> None:
+    policy = narrowed(allowed_functions=frozenset({function}))
+    query = guard(f"SELECT {function}({value}, '{format_code}') AS d FROM sales", policy)
+    expected = "%s" if format_code == "%S" and function != "UNIX_TIMESTAMP" else format_code
+    assert f"'{expected}'" in query.normalized_sql
+
+
+@pytest.mark.parametrize("function", ("DATE_FORMAT", "STR_TO_DATE"))
+def test_compound_time_format_uses_the_equivalent_t_token(function: str) -> None:
+    value = "dt" if function == "DATE_FORMAT" else "'2026-10-14 12:34:56'"
+    policy = narrowed(allowed_functions=frozenset({function}))
+    query = guard(f"SELECT {function}({value}, '%Y-%m-%d %H:%i:%s') AS d FROM sales", policy)
+    assert "'%Y-%m-%d %T'" in query.normalized_sql
+
+
 def test_date_diff_spelling_is_not_implicitly_allowed_as_datediff() -> None:
     for spelling in ("DATE_DIFF", "`DATE_DIFF`"):
         assert (

@@ -21,8 +21,9 @@ import secrets
 import time
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 from typing import Any
+from zoneinfo import ZoneInfo
 
 import asyncmy
 import pytest
@@ -36,7 +37,7 @@ from tests.sdk_core.postgres_harness import (
     parse_admin_url,
 )
 from tests.sdk_core.synthetic_tools import Clock, Grants, ready_engine
-from tests.sdk_core.test_app import cite, tool_call
+from tests.sdk_core.test_app import cite, clarify, tool_call
 from tests.sdk_core.test_runtime import (
     DB_ENV,
     KEY_ENV,
@@ -391,6 +392,130 @@ async def test_row_limit_truncates_and_the_next_query_works(instance: Instance) 
 
     second = await ada.run_query(guarded(instance, "SELECT COUNT(*) AS n FROM sales"))
     assert second.rows == ({"n": SALES_ROWS},)
+
+
+async def test_normalized_time_and_concat_sql_matches_terminal_on_414(instance: Instance) -> None:
+    """固定库、时区和 sql_mode：终端原文、规范化 SQL、真实 Adapter 逐值对照。"""
+    base = target(instance)
+    functions = base.policy.allowed_functions | {
+        "DATE_ADD",
+        "DATE_FORMAT",
+        "STR_TO_DATE",
+        "UNIX_TIMESTAMP",
+        "GROUP_CONCAT",
+        "FROM_UNIXTIME",
+    }
+    t = base.model_copy(
+        update={"policy": base.policy.model_copy(update={"allowed_functions": functions})}
+    )
+    ada = open_starrocks(t, clock=lambda: datetime.now(UTC))
+    cases = {
+        "week": "SELECT DATE_ADD(day, INTERVAL 1 WEEK) AS d FROM sales WHERE id = 0",
+        "adddate": "SELECT ADDDATE(day, 1) AS d FROM sales WHERE id = 0",
+        "interval": "SELECT at - INTERVAL 3 HOUR AS d FROM sales WHERE id = 0",
+        "date_format": "SELECT DATE_FORMAT(at, '%H:%i:%s') AS d FROM sales WHERE id = 0",
+        "seconds_alias": "SELECT DATE_FORMAT(at, '%S') AS d FROM sales WHERE id = 0",
+        "str_to_date": (
+            "SELECT STR_TO_DATE('2026-10-14 12:34:56', '%Y-%m-%d %H:%i:%S') AS d "
+            "FROM sales WHERE id = 0"
+        ),
+        "unix_timestamp": (
+            "SELECT UNIX_TIMESTAMP('2026-10-14 12:34:56', '%Y-%m-%d %H:%i:%s') AS d "
+            "FROM sales WHERE id = 0"
+        ),
+        "from_unixtime": "SELECT FROM_UNIXTIME(1700000000) AS d FROM sales WHERE id = 0",
+        "concat_null": (
+            "SELECT GROUP_CONCAT(CASE WHEN id = 0 THEN NULL ELSE region END ORDER BY id) "
+            "AS d FROM sales"
+        ),
+        "concat_distinct": "SELECT GROUP_CONCAT(DISTINCT region ORDER BY region) AS d FROM sales",
+        "concat_separator": (
+            "SELECT GROUP_CONCAT(region ORDER BY id SEPARATOR '|') AS d FROM sales"
+        ),
+    }
+
+    def displayed(value: object) -> object:
+        if isinstance(value, datetime):
+            return value.replace(tzinfo=ZoneInfo("Asia/Shanghai")).isoformat()
+        if isinstance(value, date):
+            return value.isoformat()
+        return value
+
+    host, port, user = admin_address()
+    conn = await asyncmy.connect(
+        host=host, port=port, user=user, password="", db=instance.database, autocommit=True
+    )
+    try:
+        async with conn.cursor() as cursor:
+            await cursor.execute("SET time_zone = 'Asia/Shanghai'")
+            await cursor.execute("SET sql_mode = 'ONLY_FULL_GROUP_BY'")
+            for name, original in cases.items():
+                query = guard_readonly_query(original, scope(instance, t))
+                await cursor.execute(original)
+                original_rows = await cursor.fetchall()
+                original_types = tuple(column[1] for column in cursor.description)
+                await cursor.execute(query.normalized_sql)
+                normalized_rows = await cursor.fetchall()
+                normalized_types = tuple(column[1] for column in cursor.description)
+                assert (original_rows, original_types) == (normalized_rows, normalized_types), name
+
+                result = await ada.run_query(query)
+                assert result.sql == query.normalized_sql
+                assert result.rows == tuple({"d": displayed(row[0])} for row in original_rows), name
+
+            formatted = (
+                "SELECT FROM_UNIXTIME(1700000000, '%Y-%m-%d %H:%i') AS d FROM sales WHERE id = 0"
+            )
+            with pytest.raises(QueryRejectedError) as refused:
+                guard_readonly_query(formatted, scope(instance, t))
+            assert refused.value.code is QueryRejectionCode.UNSUPPORTED_SYNTAX
+            await cursor.execute(formatted)
+            (original_value,) = await cursor.fetchone()
+            await cursor.execute(formatted.replace("%i", "%M"))
+            (changed_value,) = await cursor.fetchone()
+            assert original_value == "2023-11-15 06:13" and changed_value != original_value
+    finally:
+        await conn.ensure_closed()
+
+
+async def test_unqualified_table_uses_unique_readable_database_not_default(
+    instance: Instance,
+) -> None:
+    """未写库名是已批准的唯一可读匹配规则，与终端默认库解析有意不同。"""
+    host, port, user = admin_address()
+    other = f"{instance.database}_other"
+    props = "DUPLICATE KEY(id) DISTRIBUTED BY HASH(id) BUCKETS 1 PROPERTIES('replication_num'='1')"
+    await admin(
+        host,
+        port,
+        user,
+        f"CREATE DATABASE {other}",
+        f"CREATE TABLE {other}.only_there (id INT) {props}",
+        f"INSERT INTO {other}.only_there VALUES (42)",
+        f"GRANT SELECT ON TABLE {other}.only_there TO USER '{instance.ro_user}'@'%'",
+    )
+    try:
+        ada = adapter(instance)
+        cache = SchemaCache(ada, clock=lambda: datetime.now(UTC))
+        assert await cache.refresh()
+        query = guard_readonly_query(
+            "SELECT id FROM only_there ORDER BY id LIMIT 1", cache.current().query_policy
+        )
+        assert f"`{other}`.`only_there`" in query.normalized_sql
+
+        conn = await asyncmy.connect(
+            host=host, port=port, user=user, password="", db=instance.database, autocommit=True
+        )
+        try:
+            async with conn.cursor() as cursor:
+                with pytest.raises(MySQLError):
+                    await cursor.execute("SELECT id FROM only_there ORDER BY id LIMIT 1")
+        finally:
+            await conn.ensure_closed()
+        result = await ada.run_query(query)
+        assert result.rows == ({"id": 42},)
+    finally:
+        await admin(host, port, user, f"DROP DATABASE {other} FORCE")
 
 
 async def test_byte_limit_stops_reading_mid_stream(instance: Instance) -> None:
@@ -1572,6 +1697,76 @@ async def test_web_replays_view_fact_after_same_column_redefinition(
             second = (await served.turn(follow, "query", "r2")).json()
             assert second["state"] == "completed" and len(web.scripts.calls[follow]) == 1
             assert second["delivery"]["facts"][0]["rows"][0]["id"] == 0
+            assert await served.finish() == 0
+
+
+async def test_web_rejects_formatted_from_unixtime_then_runs_plain_call(
+    instance: Instance, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """正式 Web + 真 Runner/SQLGuard/StarRocks：拒绝格式参数后仍可执行无格式查询。"""
+    raw = os.environ.get("SDK_TEST_POSTGRES_URL")
+    if not raw:
+        pytest.fail("SDK_TEST_POSTGRES_URL 未设置：需要隔离测试 PostgreSQL")
+    try:
+        parse_admin_url(raw)
+    except HarnessMisconfiguredError as exc:
+        pytest.fail(f"SDK_TEST_POSTGRES_URL {exc}")
+
+    async with isolated_database() as url:
+        monkeypatch.setenv(DB_ENV, url.render_as_string(hide_password=False))
+        monkeypatch.setenv(KEY_ENV, "r2-real-web-test-key")
+        monkeypatch.setenv(MODEL_ENV, "sk-test-r2-real-web")
+        async with open_engine(SecretStr(url.render_as_string(hide_password=False))) as engine:
+            await initialize_storage(engine, digest_key=SecretStr("r2-real-web-test-key"))
+
+        base = target(instance)
+        functions = base.policy.allowed_functions | {"FROM_UNIXTIME"}
+        t = base.model_copy(
+            update={"policy": base.policy.model_copy(update={"allowed_functions": functions})}
+        )
+        web = RuntimeEnv(url, free_port())
+        config = runtime.ServeConfig.model_validate(
+            serve_config(web.port, targets=[target_config(t.model_dump(mode="json"))])
+        )
+        bad = web.scripts.add(
+            "带格式查时间",
+            tool_call(
+                "run_readonly_query",
+                cluster="sr-real",
+                sql=(
+                    "SELECT FROM_UNIXTIME(1700000000, '%Y-%m-%d %H:%i') AS d "
+                    f"FROM {instance.database}.sales WHERE id = 0"
+                ),
+            ),
+            clarify(),
+        )
+        good = web.scripts.add(
+            "不带格式查时间",
+            tool_call(
+                "run_readonly_query",
+                cluster="sr-real",
+                sql=(
+                    "SELECT FROM_UNIXTIME(1700000000) AS d "
+                    f"FROM {instance.database}.sales WHERE id = 0"
+                ),
+            ),
+            cite(),
+        )
+        async with web.running(config, starrocks_connect=None) as served:
+            await served.page()
+            refused = (await served.turn(bad, "query", "r1")).json()
+            assert refused["state"] == "completed" and not refused["delivery"]["facts"]
+            output = [
+                item["output"]
+                for item in web.scripts.calls[bad][1].input
+                if item.get("type") == "function_call_output"
+            ]
+            assert len(output) == 1 and "DATE_FORMAT(FROM_UNIXTIME(x), 格式)" in output[0]
+            assert "unsupported_syntax" in output[0]
+
+            succeeded = (await served.turn(good, "query", "r2")).json()
+            assert succeeded["state"] == "completed"
+            assert succeeded["delivery"]["facts"][0]["rows"] == [{"d": "2023-11-15 06:13:20"}]
             assert await served.finish() == 0
 
 

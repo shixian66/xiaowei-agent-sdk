@@ -341,6 +341,60 @@ async def test_business_context_must_belong_to_a_registered_target(env: Env) -> 
 # ---- 成功路径：真 Runner → 治理 → SQLGuard → Adapter → Evidence → 交付 ----------------------
 
 
+async def test_from_unixtime_format_rejects_before_io_and_plain_call_is_delivered(
+    postgres_url: URL, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    policy = SR.policy.model_copy(
+        update={"allowed_functions": SR.policy.allowed_functions | {"FROM_UNIXTIME"}}
+    )
+    target = SR.model_copy(update={"policy": policy})
+    result = Result(("d",), [("2023-11-15 06:13:20",)])
+    async with assembled(postgres_url, monkeypatch, driver(result), target=target) as env:
+        invalid = env.scripts.add(
+            "带格式查时间",
+            tool_call(
+                "run_readonly_query",
+                cluster=SR.target_id,
+                sql="SELECT FROM_UNIXTIME(1700000000, '%Y-%m-%d %H:%i') AS d FROM sales",
+            ),
+            clarify(),
+        )
+        await env.app.run_turn(env.ctx(session="bad"), invalid)
+        (feedback,) = tool_outputs(env.scripts.calls[invalid][1])
+        assert "unsupported_syntax" in feedback
+        assert "DATE_FORMAT(FROM_UNIXTIME(x), 格式)" in feedback
+        assert env.drv.attempts == 0 and await env.evidence_rows() == 0
+
+        invalid_explain = env.scripts.add(
+            "诊断带格式时间",
+            tool_call(
+                "explain_query",
+                cluster=SR.target_id,
+                sql="SELECT FROM_UNIXTIME(1700000000, '%Y-%m-%d %H:%i') AS d FROM sales",
+            ),
+            clarify(),
+        )
+        await env.app.run_turn(env.ctx("diagnose", session="bad-explain"), invalid_explain)
+        (explain_feedback,) = tool_outputs(env.scripts.calls[invalid_explain][1])
+        assert "unsupported_syntax" in explain_feedback
+        assert "DATE_FORMAT(FROM_UNIXTIME(x), 格式)" in explain_feedback
+        assert env.drv.attempts == 0 and await env.evidence_rows() == 0
+
+        valid = env.scripts.add(
+            "不带格式查时间",
+            tool_call(
+                "run_readonly_query",
+                cluster=SR.target_id,
+                sql="SELECT FROM_UNIXTIME(1700000000) AS d FROM sales",
+            ),
+            cite(),
+        )
+        delivered = await env.deliver(env.ctx(session="good"), valid)
+        assert delivered.facts[0].rows == ({"d": "2023-11-15 06:13:20"},)
+        assert len(executed_sql(env.drv)) == 1
+        assert "FROM_UNIXTIME(1700000000)" in executed_sql(env.drv)[0]
+
+
 async def test_database_listing_uses_governed_evidence_and_explicit_authorization(env: Env) -> None:
     tool = "local/list_databases"
     message = env.scripts.add(
@@ -1185,7 +1239,7 @@ def scope_body(target: StarRocksTarget) -> dict[str, Any]:
 
 def test_scope_digest_is_versioned_and_names_the_database_type() -> None:
     body = scope_body(SR)
-    assert body["format"] == "xiaowei.data_scope.starrocks/7"
+    assert body["format"] == "xiaowei.data_scope.starrocks/8"
     assert body["max_result_columns"] == SR.policy.max_result_columns
     assert body["database_type"] == "starrocks"
     assert body["sql_mode"] == "ONLY_FULL_GROUP_BY"

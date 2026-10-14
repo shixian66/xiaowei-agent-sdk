@@ -77,7 +77,6 @@ from xiaowei.models import (
     ToolRequest,
 )
 from xiaowei.sqlguard import (
-    REJECTION_MESSAGES,
     ExplainQuery,
     GuardedQuery,
     QueryPolicy,
@@ -609,6 +608,8 @@ def starrocks_tools(
 
     def check_query(request: ToolRequest) -> tuple[SchemaSnapshot, GuardedQuery]:
         code: QueryRejectionCode | None = None
+        message = ""
+        hint = None
         snapshot = current()
         try:
             return snapshot, guard_readonly_query(
@@ -616,10 +617,10 @@ def starrocks_tools(
             )
         except QueryRejectedError as exc:
             code = exc.code
+            message = str(exc)
+            hint = exc.hint
         # 在 except 之外抛出：拒绝只带固定原因码与说明，不带 SQLGuard 异常的上下文。
-        raise ToolRejectedError(
-            f"查询未执行（{code}）：{REJECTION_MESSAGES[code]}", query_reject=code
-        )
+        raise ToolRejectedError(f"查询未执行（{code}）：{message}", query_reject=code, hint=hint)
 
     async def run_query(checked: tuple[SchemaSnapshot, GuardedQuery]) -> ToolObservation:
         snapshot, query = checked
@@ -628,6 +629,8 @@ def starrocks_tools(
 
     def check_explain(request: ToolRequest) -> tuple[SchemaSnapshot, ExplainQuery]:
         code: QueryRejectionCode | None = None
+        message = ""
+        hint = None
         snapshot = current()
         try:
             return snapshot, guard_explain_query(
@@ -635,8 +638,10 @@ def starrocks_tools(
             )
         except QueryRejectedError as exc:
             code = exc.code
+            message = str(exc)
+            hint = exc.hint
         raise ToolRejectedError(
-            f"执行计划未获取（{code}）：{REJECTION_MESSAGES[code]}", query_reject=code
+            f"执行计划未获取（{code}）：{message}", query_reject=code, hint=hint
         )
 
     async def explain(checked: tuple[SchemaSnapshot, ExplainQuery]) -> ToolObservation:
@@ -697,7 +702,8 @@ def starrocks_tools(
             query_policy,
             "执行一条只读 SELECT 或 UNION/UNION ALL（可带 WITH、子查询与窗口函数），可跨库 JOIN。"
             "只在当前用户本条消息明确要求查询数据时调用；只解释、只写 SQL 或说了不要执行时不调用。"
-            "表名写成 库名.表名；只在一个库中存在的表可省略库名。只能引用可读的表、视图与获准"
+            "表名写成 库名.表名；省略库名时按全部可读库唯一匹配，不按连接默认库解析。"
+            "只能引用可读的表、视图与获准"
             "函数；* 按表结构展开，结果列数有上限。表达式列须用 AS 起别名，结果列名不能重复。"
             "结果行数有上限，超过时返回的结果标记为截断。",
         ),
@@ -793,7 +799,7 @@ def starrocks_tools(
     return StarRocksTools(contracts=tuple(contracts), policies=tuple(policies), executes=executes)
 
 
-DATA_SCOPE_FORMAT: Final = "xiaowei.data_scope.starrocks/7"
+DATA_SCOPE_FORMAT: Final = "xiaowei.data_scope.starrocks/8"
 """摘要公式的显式版本：纳入或排除的字段改变时更新，使旧公式下保存的证据一次性失效。
 
 /2（P2.5 Task 2 审查）：加入数据库类型、TLS、服务端时间与内存限额、客户端期限与时区。
@@ -802,6 +808,8 @@ DATA_SCOPE_FORMAT: Final = "xiaowei.data_scope.starrocks/7"
 /5（P2.5 Task 6）：审计改为读取所有库、按每条记录的当前库解析原文并输出该库；列表改为关键词分页。
 /6（Web 实战修复）：列库、按库遍历、完整类型与内部表原始 DDL；纳入独立 max_ddl_bytes 限额。
 /7（PR B）：普通查询的超长单值改为有界前缀和明确截短标记，行可继续返回；旧查询证据失效。
+/8（StarRocks 可靠性 R2）：拒绝带格式的 FROM_UNIXTIME，并接受已验证的函数名别名；
+   SQL 规范化与函数准入变化使旧查询证据失效。
 """
 
 
