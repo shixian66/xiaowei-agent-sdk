@@ -164,6 +164,14 @@ _REJECTION_HINTS: dict[ToolRejectHint, str] = {
     "alertmanager_change_request": (
         "本轮同一请求已失败，未重发；请修改 filters 或核对静默 ID，勿重复相同参数"
     ),
+    "alertmanager_alerts_exhausted": (
+        "本源告警/分组读取的两次修正机会已用完；停止本类读取。"
+        "仍可按任务需要读取本源静默或状态，以及其他已授权源"
+    ),
+    "alertmanager_silence_exhausted": (
+        "本源指定静默 ID 读取的两次修正机会已用完；停止本类读取。"
+        "仍可按任务需要读取本源告警/分组或状态，以及其他已授权源"
+    ),
 }
 
 

@@ -77,9 +77,22 @@ class Prechecked(Generic[Prepared]):
 Execute = Callable[[ToolRequest], Awaitable[ToolObservation]] | Prechecked[Any]
 """应用绑定的实际 I/O：只在治理通过后以校验、规范化后的请求调用。"""
 
-_ALERTMANAGER_CORRECTABLE_POLICIES = frozenset(
-    {"alertmanager.get_alerts", "alertmanager.get_alert_groups", "alertmanager.get_silence"}
-)
+_ALERTMANAGER_REPAIR_CATEGORY = {
+    "alertmanager.get_alerts": "alerts",
+    "alertmanager.get_alert_groups": "alerts",
+    "alertmanager.get_silence": "silence",
+}
+
+
+def _alertmanager_request_digest(policy_id: str, arguments: Mapping[str, object]) -> str:
+    from xiaowei.evidence import arguments_digest
+
+    if policy_id in {"alertmanager.get_alerts", "alertmanager.get_alert_groups"}:
+        arguments = {
+            key: value for key, value in arguments.items() if key not in {"limit", "offset"}
+        }
+    return arguments_digest(arguments)
+
 
 # 最小投影上限：须容纳证据标识与截断/空结果标记组成的外层结构。
 MIN_PROJECTION_BYTES = 256
@@ -144,6 +157,8 @@ ToolRejectHint = Literal[
     "datasource_field_type",
     "datasource_no_schema",
     "alertmanager_change_request",
+    "alertmanager_alerts_exhausted",
+    "alertmanager_silence_exhausted",
 ]
 """可信拒绝点提供的固定修正/限制提示标识；不携带参数或异常原文。"""
 
@@ -365,9 +380,9 @@ class TurnRuns:
     promql_errors: tuple[tuple[str, str], ...] = ()  # 目标、已失败表达式，跨 query/range 禁止重发。
     promql_pending: frozenset[str] = frozenset()
     promql_repairs: tuple[str, ...] = ()  # 每源整轮最多两项，不随成功复位。
-    alertmanager_errors: tuple[tuple[str, str, str], ...] = ()  # 源、工具、失败参数摘要。
-    alertmanager_pending: frozenset[str] = frozenset()
-    alertmanager_repairs: tuple[str, ...] = ()
+    alertmanager_errors: tuple[tuple[str, str, str, str], ...] = ()  # 源、类别、工具、摘要。
+    alertmanager_pending: frozenset[tuple[str, str]] = frozenset()
+    alertmanager_repairs: tuple[tuple[str, str], ...] = ()
     truncated: int = 0
     rejected: int = 0
     limit_rescue_started: bool = False
@@ -512,6 +527,7 @@ class GovernedTools:
         slot_retry = target in runs.slot_busy
         repair_from: int | None = None
         alertmanager_repair_from: int | None = None
+        alertmanager_repair_key: tuple[str, str] | None = None
         if contract.policy_id in PROMETHEUS_QUERY_POLICIES:
             if (contract.target_id, str(arguments["query"])) in runs.promql_errors:
                 raise ToolRejectedError(
@@ -524,27 +540,30 @@ class GovernedTools:
                         code="source_stopped",
                     )
                 repair_from = sum(target == contract.target_id for target, _ in runs.promql_errors)
-        if contract.policy_id in _ALERTMANAGER_CORRECTABLE_POLICIES:
-            from xiaowei.evidence import arguments_digest
-
-            digest = arguments_digest(arguments)
-            previous = next(
-                (item for item in reversed(runs.alertmanager_errors) if item[0] == target),
-                None,
-            )
-            if previous == (target, contract.tool_id, digest):
+        if contract.policy_id in _ALERTMANAGER_REPAIR_CATEGORY:
+            alertmanager_repair_key = (target, _ALERTMANAGER_REPAIR_CATEGORY[contract.policy_id])
+            digest = _alertmanager_request_digest(contract.policy_id, arguments)
+            if any(
+                source == target and tool_id == contract.tool_id and failed_digest == digest
+                for source, _, tool_id, failed_digest in runs.alertmanager_errors
+            ):
                 raise ToolRejectedError(
                     "本轮同一参数已失败，未重发；请修改 filters 或静默 ID",
                     hint="alertmanager_change_request",
                 )
-            if target in runs.alertmanager_pending:
-                if runs.alertmanager_repairs.count(target) >= 2:
+            if alertmanager_repair_key in runs.alertmanager_pending:
+                if runs.alertmanager_repairs.count(alertmanager_repair_key) >= 2:
                     raise ToolRejectedError(
-                        "本源本轮两次告警读取修正机会已用完；可调查其他已授权源",
+                        "本源本类读取两次修正机会已用完；可调查其他已授权源",
                         code="source_stopped",
+                        hint=(
+                            "alertmanager_alerts_exhausted"
+                            if alertmanager_repair_key[1] == "alerts"
+                            else "alertmanager_silence_exhausted"
+                        ),
                     )
                 alertmanager_repair_from = sum(
-                    item[0] == target for item in runs.alertmanager_errors
+                    item[:2] == alertmanager_repair_key for item in runs.alertmanager_errors
                 )
         self._reserve(ctx)
         self._runs[key] = replace(
@@ -558,8 +577,8 @@ class GovernedTools:
                 else runs.promql_repairs
             ),
             alertmanager_repairs=(
-                (*runs.alertmanager_repairs, target)
-                if alertmanager_repair_from is not None
+                (*runs.alertmanager_repairs, alertmanager_repair_key)
+                if alertmanager_repair_from is not None and alertmanager_repair_key is not None
                 else runs.alertmanager_repairs
             ),
         )
@@ -615,20 +634,23 @@ class GovernedTools:
                         )
                         if not allowed:
                             raise ToolExecutionError() from None
-                        from xiaowei.evidence import arguments_digest
-
+                        repair_key = (
+                            contract.target_id,
+                            _ALERTMANAGER_REPAIR_CATEGORY[contract.policy_id],
+                        )
                         current = replace(
                             current,
                             alertmanager_errors=(
                                 *current.alertmanager_errors,
-                                (contract.target_id, contract.tool_id, arguments_digest(arguments)),
+                                (
+                                    *repair_key,
+                                    contract.tool_id,
+                                    _alertmanager_request_digest(contract.policy_id, arguments),
+                                ),
                             ),
-                            alertmanager_pending=current.alertmanager_pending
-                            | {contract.target_id},
+                            alertmanager_pending=current.alertmanager_pending | {repair_key},
                         )
-                        exc.correction_allowed = (
-                            current.alertmanager_repairs.count(contract.target_id) < 2
-                        )
+                        exc.correction_allowed = current.alertmanager_repairs.count(repair_key) < 2
                     elif exc.reason == "invalid_expression":
                         raise ToolExecutionError() from None
                     failure = MonitoringFailure(
@@ -675,10 +697,14 @@ class GovernedTools:
                 target == contract.target_id for target, _ in runs.promql_errors
             ):
                 runs = replace(runs, promql_pending=runs.promql_pending - {contract.target_id})
-            if alertmanager_repair_from is not None and alertmanager_repair_from == sum(
-                item[0] == target for item in runs.alertmanager_errors
-            ):
-                runs = replace(runs, alertmanager_pending=runs.alertmanager_pending - {target})
+            if alertmanager_repair_key is not None and alertmanager_repair_from is not None:
+                if alertmanager_repair_from == sum(
+                    item[:2] == alertmanager_repair_key for item in runs.alertmanager_errors
+                ):
+                    runs = replace(
+                        runs,
+                        alertmanager_pending=runs.alertmanager_pending - {alertmanager_repair_key},
+                    )
             produced = (*runs.produced, (contract.tool_id, result.evidence_id))
             self._runs[key] = replace(
                 runs,

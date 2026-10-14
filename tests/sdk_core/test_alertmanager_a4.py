@@ -461,17 +461,80 @@ async def test_oversize_rejects_identical_request_before_io_and_charges_only_exe
         assert len(state.requests) == 2
 
 
+async def test_oversize_rejects_any_failed_request_from_this_turn_before_io(env: Env) -> None:
+    with backend() as (url, state):
+        state.raw = b"x" * 128_001
+        first = {**CALLS["get_alerts"], "filters": ['instance="host1"']}
+        second = {**CALLS["get_alerts"], "filters": ['instance="host2"']}
+
+        def next_attempt(arguments: dict[str, Any]) -> Any:
+            def step(call: ModelCall) -> list[Any]:
+                assert last_output(call)["status"] == "response_limit"
+                return tool_call(f"{SOURCE}__get_alerts", **arguments)(call)
+
+            return step
+
+        def rejected(call: ModelCall) -> list[Any]:
+            assert last_output(call)["status"] == "rejected"
+            assert len(state.requests) == 2
+            return answer([], analysis="", advice="两次请求都超限，需进一步收窄")
+
+        async with env.running(env.config(**a4_config(url))) as served:
+            await served.page()
+            message = env.scripts.add(
+                "查看 host1 告警，失败后试 host2，再误试 host1",
+                tool_call(f"{SOURCE}__get_alerts", **first),
+                next_attempt(second),
+                next_attempt(first),
+                rejected,
+            )
+            body = (await served.turn(message, "query")).json()
+            assert body["state"] == "completed"
+        assert len(state.requests) == 2
+
+
+@pytest.mark.parametrize("name", ["get_alerts", "get_alert_groups"])
+@pytest.mark.parametrize("page_change", [{"limit": 1}, {"offset": 1}])
+async def test_oversize_rejects_local_pagination_change_before_io(
+    env: Env, name: str, page_change: dict[str, int]
+) -> None:
+    with backend() as (url, state):
+        state.raw = b"x" * 128_001
+        first = CALLS[name]
+
+        def retry(call: ModelCall) -> list[Any]:
+            assert last_output(call)["status"] == "response_limit"
+            return tool_call(f"{SOURCE}__{name}", **{**first, **page_change})(call)
+
+        def rejected(call: ModelCall) -> list[Any]:
+            assert last_output(call)["status"] == "rejected"
+            assert len(state.requests) == 1
+            return answer([], analysis="", advice="本地分页不能缩小上游告警响应")
+
+        async with env.running(env.config(**a4_config(url))) as served:
+            await served.page()
+            message = env.scripts.add(
+                "告警太多后只改分页", tool_call(f"{SOURCE}__{name}", **first), retry, rejected
+            )
+            body = (await served.turn(message, "query")).json()
+            assert body["state"] == "completed"
+        assert len(state.requests) == 1
+
+
 async def test_alertmanager_correction_stops_after_two_retries(env: Env) -> None:
     with backend() as (url, state):
         state.raw = b"x" * 128_001
-        calls = [{**CALLS["get_alerts"], "filters": [f'instance="host{n}"']} for n in range(4)]
+        names = ("get_alerts", "get_alert_groups", "get_alerts", "get_alert_groups")
+        calls = [
+            {**CALLS[name], "filters": [f'instance="host{n}"']} for n, name in enumerate(names)
+        ]
 
         def next_attempt(index: int) -> Any:
             def step(call: ModelCall) -> list[Any]:
                 result = last_output(call)
                 assert result["status"] == "response_limit"
                 assert result["correction_allowed"] is (index < 3)
-                return tool_call(f"{SOURCE}__get_alerts", **calls[index])(call)
+                return tool_call(f"{SOURCE}__{names[index]}", **calls[index])(call)
 
             return step
 
@@ -484,7 +547,7 @@ async def test_alertmanager_correction_stops_after_two_retries(env: Env) -> None
             await served.page()
             message = env.scripts.add(
                 "反复收窄告警",
-                tool_call(f"{SOURCE}__get_alerts", **calls[0]),
+                tool_call(f"{SOURCE}__{names[0]}", **calls[0]),
                 next_attempt(1),
                 next_attempt(2),
                 next_attempt(3),
@@ -496,6 +559,133 @@ async def test_alertmanager_correction_stops_after_two_retries(env: Env) -> None
             assert (await served.ready())[f"alertmanager.{SOURCE}"] == "configured"
         assert len(state.requests) == 3
         assert await env.scalar("SELECT count(*) FROM xiaowei_evidence") == 0
+
+
+async def test_silence_reads_do_not_consume_or_clear_alert_repair_allowance(env: Env) -> None:
+    with backend() as (url, state):
+        state.raw = b"x" * 128_001
+        calls = [{**CALLS["get_alerts"], "filters": [f'instance="host{n}"']} for n in range(4)]
+
+        def read_silence(call: ModelCall) -> list[Any]:
+            assert last_output(call)["status"] == "response_limit"
+            state.raw = None
+            return tool_call(f"{SOURCE}__get_silence", **CALLS["get_silence"])(call)
+
+        def missing_silence(call: ModelCall) -> list[Any]:
+            assert last_output(call)["evidence_id"]
+            state.status = 404
+            return tool_call(f"{SOURCE}__get_silence", **CALLS["get_silence"])(call)
+
+        def retry(index: int) -> Any:
+            def step(call: ModelCall) -> list[Any]:
+                if index == 1:
+                    assert last_output(call)["status"] == "silence_missing"
+                else:
+                    assert last_output(call)["status"] == "response_limit"
+                    assert last_output(call)["correction_allowed"] is (index == 2)
+                state.status = 200
+                state.raw = b"x" * 128_001
+                return tool_call(f"{SOURCE}__get_alerts", **calls[index])(call)
+
+            return step
+
+        def stopped(call: ModelCall) -> list[Any]:
+            assert last_output(call)["code"] == "source_stopped"
+            assert len(state.requests) == 5
+            return cite()(call)
+
+        async with env.running(env.config(**a4_config(url))) as served:
+            await served.page()
+            message = env.scripts.add(
+                "查看告警，核对静默后继续收窄告警",
+                tool_call(f"{SOURCE}__get_alerts", **calls[0]),
+                read_silence,
+                missing_silence,
+                retry(1),
+                retry(2),
+                retry(3),
+                stopped,
+            )
+            body = (await served.turn(message, "query")).json()
+            assert body["state"] == "completed"
+            assert [fact["tool_id"] for fact in body["delivery"]["facts"]] == [
+                f"{SOURCE}/get_silence"
+            ]
+        assert len(state.requests) == 5
+
+
+async def test_exhausted_alert_repairs_do_not_block_silence_read(env: Env) -> None:
+    with backend() as (url, state):
+        state.raw = b"x" * 128_001
+        calls = [{**CALLS["get_alerts"], "filters": [f'instance="host{n}"']} for n in range(4)]
+
+        def retry(index: int) -> Any:
+            return lambda call: tool_call(f"{SOURCE}__get_alerts", **calls[index])(call)
+
+        def read_silence(call: ModelCall) -> list[Any]:
+            assert last_output(call)["code"] == "source_stopped"
+            assert "告警" in last_output(call)["reason"]
+            assert "静默" in last_output(call)["reason"]
+            assert len(state.requests) == 3
+            state.raw = None
+            return tool_call(f"{SOURCE}__get_silence", **CALLS["get_silence"])(call)
+
+        async with env.running(env.config(**a4_config(url))) as served:
+            await served.page()
+            message = env.scripts.add(
+                "告警响应一直超限，继续核对指定静默",
+                tool_call(f"{SOURCE}__get_alerts", **calls[0]),
+                retry(1),
+                retry(2),
+                retry(3),
+                read_silence,
+                cite(),
+            )
+            body = (await served.turn(message, "query")).json()
+            assert body["state"] == "completed"
+            assert [fact["tool_id"] for fact in body["delivery"]["facts"]] == [
+                f"{SOURCE}/get_silence"
+            ]
+        assert len(state.requests) == 4
+
+
+async def test_exhausted_silence_repairs_do_not_block_alert_read(env: Env) -> None:
+    with backend() as (url, state):
+        state.status = 404
+        silence_ids = [f"11111111-1111-4111-8111-{n:012d}" for n in range(4)]
+
+        def retry(index: int) -> Any:
+            def step(call: ModelCall) -> list[Any]:
+                assert last_output(call)["status"] == "silence_missing"
+                return tool_call(f"{SOURCE}__get_silence", silence_id=silence_ids[index])(call)
+
+            return step
+
+        def read_alerts(call: ModelCall) -> list[Any]:
+            assert last_output(call)["code"] == "source_stopped"
+            assert "静默" in last_output(call)["reason"]
+            assert "告警" in last_output(call)["reason"]
+            assert len(state.requests) == 3
+            state.status = 200
+            return tool_call(f"{SOURCE}__get_alerts", **CALLS["get_alerts"])(call)
+
+        async with env.running(env.config(**a4_config(url))) as served:
+            await served.page()
+            message = env.scripts.add(
+                "静默 ID 均未找到，改查当前告警",
+                tool_call(f"{SOURCE}__get_silence", silence_id=silence_ids[0]),
+                retry(1),
+                retry(2),
+                retry(3),
+                read_alerts,
+                cite(),
+            )
+            body = (await served.turn(message, "query")).json()
+            assert body["state"] == "completed"
+            assert [fact["tool_id"] for fact in body["delivery"]["facts"]] == [
+                f"{SOURCE}/get_alerts"
+            ]
+        assert len(state.requests) == 4
 
 
 async def test_exhausted_alert_repair_does_not_stop_unrelated_status_read(env: Env) -> None:
