@@ -9,6 +9,8 @@ from urllib.parse import parse_qs, urlsplit
 
 import httpx
 import pytest
+from agents.testing import function_call
+from pydantic import TypeAdapter
 from tests.sdk_core.alertmanager_fixture import (
     AUTHORIZATION,
     SELECTED,
@@ -20,17 +22,18 @@ from tests.sdk_core.alertmanager_fixture import (
 from tests.sdk_core.alertmanager_fixture import alertmanager_binary as alertmanager_binary
 from tests.sdk_core.browser import launch
 from tests.sdk_core.mcp_fixture import serve
-from tests.sdk_core.test_app import answer, tool_call
+from tests.sdk_core.test_app import ModelCall, answer, tool_call
 from tests.sdk_core.test_feishu_render import message_text
 from tests.sdk_core.test_group_gateway import GroupChannel, raw_group_event, runtime_group
 from tests.sdk_core.test_group_identity import CHAT, A
 from tests.sdk_core.test_monitoring_r1a import query_server
-from tests.sdk_core.test_prometheus_p2 import cite
+from tests.sdk_core.test_prometheus_p2 import cite, last_output
 from tests.sdk_core.test_runtime import Env, free_port, until
 from tests.sdk_core.test_runtime import env as env
 from tests.sdk_core.test_web_browser import send, settled
 
 from xiaowei.feishu import attributed
+from xiaowei.governance import TurnLedger, TurnRuns
 from xiaowei.models import AUDIENCES
 from xiaowei.starrocks_tools import QUERY_TOOLS
 
@@ -62,6 +65,17 @@ CALLS: dict[str, dict[str, Any]] = {
     "get_receivers": {"limit": 10, "offset": 0},
     "get_status": {},
 }
+
+
+def test_old_paused_ledger_loads_with_new_alertmanager_retry_defaults() -> None:
+    adapter = TypeAdapter(TurnLedger)
+    saved = json.loads(adapter.dump_json(TurnLedger(used=1, runs=TurnRuns())))
+    for field in ("alertmanager_errors", "alertmanager_pending", "alertmanager_repairs"):
+        del saved["runs"][field]
+    restored = adapter.validate_json(json.dumps(saved), strict=True)
+    assert restored.runs.alertmanager_errors == ()
+    assert restored.runs.alertmanager_pending == frozenset()
+    assert restored.runs.alertmanager_repairs == ()
 
 
 def a4_config(
@@ -366,8 +380,313 @@ async def test_rejected_input_can_be_corrected_with_remaining_budget(env: Env) -
         assert await env.scalar("SELECT count(*) FROM xiaowei_evidence") == 1
 
 
+@pytest.mark.parametrize("name", ["get_alerts", "get_alert_groups"])
+async def test_oversize_alert_read_can_narrow_filters_in_same_turn(env: Env, name: str) -> None:
+    with backend() as (url, state):
+        state.raw = b"x" * 128_001
+        arguments = {**CALLS[name], "filters": []}
+
+        def narrow(call: ModelCall) -> list[Any]:
+            assert "response_limit 时可加 filters 收窄" in call.instructions
+            failure = json.loads(
+                [
+                    item["output"]
+                    for item in call.input
+                    if item.get("type") == "function_call_output"
+                ][-1]
+            )
+            assert failure["status"] == "response_limit"
+            assert failure["correction_allowed"] is True
+            assert "filters" in failure["reason"]
+            assert "evidence_id" not in failure
+            assert len(state.requests) == 1
+            state.raw = None
+            return tool_call(f"{SOURCE}__{name}", **CALLS[name])(call)
+
+        async with env.running(env.config(**a4_config(url))) as served:
+            await served.page()
+            message = env.scripts.add(
+                "查看 host1 的告警", tool_call(f"{SOURCE}__{name}", **arguments), narrow, cite()
+            )
+            body = (await served.turn(message, "query")).json()
+            assert body["state"] == "completed"
+            assert len(body["delivery"]["facts"]) == 1
+            assert (await served.ready())[f"alertmanager.{SOURCE}"] == "available"
+        assert len(state.requests) == 2
+        assert "filter=instance" in state.requests[1][1]
+        assert await env.scalar("SELECT count(*) FROM xiaowei_evidence") == 1
+
+
+async def test_oversize_rejects_identical_request_before_io_and_charges_only_executed(
+    env: Env,
+) -> None:
+    with backend() as (url, state):
+        state.raw = b"x" * 128_001
+        original = {**CALLS["get_alerts"], "filters": []}
+        values = a4_config(url)
+        values["budget"]["max_tool_calls"] = 2
+
+        def repeat(call: ModelCall) -> list[Any]:
+            assert last_output(call)["status"] == "response_limit"
+            return tool_call(f"{SOURCE}__get_alerts", **original)(call)
+
+        def repair(call: ModelCall) -> list[Any]:
+            assert last_output(call)["status"] == "rejected"
+            assert len(state.requests) == 1
+            state.raw = None
+            return tool_call(f"{SOURCE}__get_alerts", **CALLS["get_alerts"])(call)
+
+        def exhausted(call: ModelCall) -> list[Any]:
+            assert last_output(call)["evidence_id"]
+            return tool_call(f"{SOURCE}__get_status")(call)
+
+        def finish(call: ModelCall) -> list[Any]:
+            assert last_output(call)["code"] == "budget_exhausted"
+            assert len(state.requests) == 2
+            return cite()(call)
+
+        async with env.running(env.config(**values)) as served:
+            await served.page()
+            message = env.scripts.add(
+                "收窄告警",
+                tool_call(f"{SOURCE}__get_alerts", **original),
+                repeat,
+                repair,
+                exhausted,
+                finish,
+            )
+            body = (await served.turn(message, "query")).json()
+            assert body["state"] == "completed"
+            assert len(body["delivery"]["facts"]) == 1
+        assert len(state.requests) == 2
+
+
+async def test_alertmanager_correction_stops_after_two_retries(env: Env) -> None:
+    with backend() as (url, state):
+        state.raw = b"x" * 128_001
+        calls = [{**CALLS["get_alerts"], "filters": [f'instance="host{n}"']} for n in range(4)]
+
+        def next_attempt(index: int) -> Any:
+            def step(call: ModelCall) -> list[Any]:
+                result = last_output(call)
+                assert result["status"] == "response_limit"
+                assert result["correction_allowed"] is (index < 3)
+                return tool_call(f"{SOURCE}__get_alerts", **calls[index])(call)
+
+            return step
+
+        def stopped(call: ModelCall) -> list[Any]:
+            assert last_output(call)["code"] == "source_stopped"
+            assert len(state.requests) == 3
+            return answer([], analysis="", advice="告警响应仍超限，需用户提供更窄条件")
+
+        async with env.running(env.config(**a4_config(url))) as served:
+            await served.page()
+            message = env.scripts.add(
+                "反复收窄告警",
+                tool_call(f"{SOURCE}__get_alerts", **calls[0]),
+                next_attempt(1),
+                next_attempt(2),
+                next_attempt(3),
+                stopped,
+            )
+            body = (await served.turn(message, "query")).json()
+            assert body["state"] == "completed"
+            assert not body["delivery"]["facts"]
+            assert (await served.ready())[f"alertmanager.{SOURCE}"] == "configured"
+        assert len(state.requests) == 3
+        assert await env.scalar("SELECT count(*) FROM xiaowei_evidence") == 0
+
+
+async def test_exhausted_alert_repair_does_not_stop_unrelated_status_read(env: Env) -> None:
+    with backend() as (url, state):
+        state.raw = b"x" * 128_001
+        calls = [{**CALLS["get_alerts"], "filters": [f'instance="host{n}"']} for n in range(4)]
+
+        def retry(index: int) -> Any:
+            return lambda call: tool_call(f"{SOURCE}__get_alerts", **calls[index])(call)
+
+        def status_after_stop(call: ModelCall) -> list[Any]:
+            assert last_output(call)["code"] == "source_stopped"
+            assert len(state.requests) == 3
+            state.raw = None
+            return tool_call(f"{SOURCE}__get_status")(call)
+
+        async with env.running(env.config(**a4_config(url))) as served:
+            await served.page()
+            message = env.scripts.add(
+                "告警过大后检查源状态",
+                tool_call(f"{SOURCE}__get_alerts", **calls[0]),
+                retry(1),
+                retry(2),
+                retry(3),
+                status_after_stop,
+                cite(),
+            )
+            body = (await served.turn(message, "query")).json()
+            assert body["state"] == "completed"
+            assert [f["tool_id"] for f in body["delivery"]["facts"]] == [f"{SOURCE}/get_status"]
+        assert len(state.requests) == 4
+
+
+@pytest.mark.parametrize("name", ["get_alerts", "get_alert_groups"])
+async def test_alert_matcher_400_is_correctable(env: Env, name: str) -> None:
+    with backend() as (url, state):
+        state.status = 400
+        state.raw = b"secret-canary"
+
+        def repair(call: ModelCall) -> list[Any]:
+            result = last_output(call)
+            assert result["status"] == "invalid_matcher"
+            assert result["correction_allowed"] is True
+            assert 'alertname="HostDown"' in result["reason"]
+            assert "evidence_id" not in result
+            assert "secret-canary" not in json.dumps(result)
+            state.status = 200
+            state.raw = None
+            return tool_call(f"{SOURCE}__{name}", **CALLS[name])(call)
+
+        async with env.running(env.config(**a4_config(url))) as served:
+            await served.page()
+            message = env.scripts.add(
+                "修正匹配条件",
+                tool_call(f"{SOURCE}__{name}", **{**CALLS[name], "filters": ["invalid{"]}),
+                repair,
+                cite(),
+            )
+            body = (await served.turn(message, "query")).json()
+            assert body["state"] == "completed" and len(body["delivery"]["facts"]) == 1
+        assert len(state.requests) == 2
+
+
+async def test_missing_silence_id_has_clear_feedback_without_stopping_turn(env: Env) -> None:
+    with backend() as (url, state):
+        state.status = 404
+        state.raw = b"secret-canary"
+
+        def explain(call: ModelCall) -> list[Any]:
+            result = last_output(call)
+            assert result["status"] == "silence_missing"
+            assert "未找到该静默 ID" in result["reason"]
+            assert "evidence_id" not in result
+            assert "secret-canary" not in json.dumps(result)
+            return answer([], analysis="", advice="未找到指定静默，请核对 ID")
+
+        async with env.running(env.config(**a4_config(url))) as served:
+            await served.page()
+            message = env.scripts.add(
+                "读取已知静默",
+                tool_call(f"{SOURCE}__get_silence", **CALLS["get_silence"]),
+                explain,
+            )
+            body = (await served.turn(message, "query")).json()
+            assert body["state"] == "completed" and not body["delivery"]["facts"]
+            assert (await served.ready())[f"alertmanager.{SOURCE}"] == "configured"
+        assert len(state.requests) == 1
+
+
+async def test_other_alertmanager_read_limit_keeps_existing_stop_boundary(env: Env) -> None:
+    with backend() as (url, state):
+        state.raw = b"x" * 128_001
+        async with env.running(env.config(**a4_config(url))) as served:
+            await served.page()
+            message = env.scripts.add(
+                "查静默列表", tool_call(f"{SOURCE}__get_silences", **CALLS["get_silences"])
+            )
+            body = (await served.turn(message, "query")).json()
+            assert body["state"] == "failed"
+            assert (await served.ready())[f"alertmanager.{SOURCE}"] == "unavailable"
+        assert len(state.requests) == 1
+        assert await env.scalar("SELECT count(*) FROM xiaowei_evidence") == 0
+
+
+async def test_parallel_sources_keep_success_when_other_alert_response_is_oversize(
+    env: Env,
+) -> None:
+    other = "alertmanager-other"
+    with backend() as (url, large), backend() as (other_url, healthy):
+        large.raw = b"x" * 128_001
+        values = a4_config(url)
+        values["alertmanager_sources"].append(
+            {
+                **values["alertmanager_sources"][0],
+                "server_id": other,
+                "url": other_url,
+                "tools": ["get_alerts"],
+            }
+        )
+        values["data_policy"]["model_tools"].append(f"{other}/get_alerts")
+        values["access"]["grants"]["operator"].append(f"{other}/get_alerts")
+
+        def both(_: ModelCall) -> list[Any]:
+            return [
+                function_call(
+                    f"{SOURCE}__get_alerts",
+                    {**CALLS["get_alerts"], "filters": []},
+                    call_id="large-alerts",
+                ),
+                function_call(
+                    f"{other}__get_alerts", CALLS["get_alerts"], call_id="healthy-alerts"
+                ),
+            ]
+
+        async with env.running(env.config(**values)) as served:
+            await served.page()
+            message = env.scripts.add("并行查两个告警源", both, cite())
+            body = (await served.turn(message, "query")).json()
+            assert body["state"] == "completed"
+            assert [fact["target_id"] for fact in body["delivery"]["facts"]] == [other]
+            assert SOURCE in body["delivery"]["monitoring_notice"]
+        assert len(large.requests) == len(healthy.requests) == 1
+        assert await env.scalar("SELECT count(*) FROM xiaowei_evidence") == 1
+
+
+async def test_failed_stage_logs_actual_tool_id_after_other_source_attempt(
+    env: Env, caplog: pytest.LogCaptureFixture
+) -> None:
+    other = "alertmanager-other"
+    with backend() as (url, large), backend() as (other_url, malformed):
+        large.raw = b"x" * 128_001
+        malformed.raw = b"not JSON secret-canary"
+        malformed.body_delay = 0.1
+        values = a4_config(url)
+        values["alertmanager_sources"].append(
+            {
+                **values["alertmanager_sources"][0],
+                "server_id": other,
+                "url": other_url,
+                "tools": ["get_alerts"],
+            }
+        )
+        values["data_policy"]["model_tools"].append(f"{other}/get_alerts")
+        values["access"]["grants"]["operator"].append(f"{other}/get_alerts")
+        caplog.set_level("INFO", logger="xiaowei.app")
+
+        def both(_: ModelCall) -> list[Any]:
+            return [
+                function_call(
+                    f"{other}__get_alerts", CALLS["get_alerts"], call_id="malformed-alerts"
+                ),
+                function_call(
+                    f"{SOURCE}__get_alerts",
+                    {**CALLS["get_alerts"], "filters": []},
+                    call_id="large-alerts",
+                ),
+            ]
+
+        async with env.running(env.config(**values)) as served:
+            await served.page()
+            message = env.scripts.add("并行看大源和坏源", both)
+            body = (await served.turn(message, "query")).json()
+            assert body["state"] == "failed"
+        assert len(large.requests) == len(malformed.requests) == 1
+        assert "stage=failed reason=tool_failed" in caplog.text
+        assert f"tool_error=other tool_id={other}/get_alerts" in caplog.text
+        assert "secret-canary" not in caplog.text
+
+
 @pytest.mark.parametrize(
-    "kind", ["400", "404", "422", "302", "json", "type", "state", "timezone", "encoding", "limit"]
+    "kind", ["404", "422", "302", "json", "type", "state", "timezone", "encoding"]
 )
 async def test_unknown_protocol_or_oversize_aborts_without_evidence(env: Env, kind: str) -> None:
     with backend() as (url, state):

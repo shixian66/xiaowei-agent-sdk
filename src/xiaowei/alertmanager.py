@@ -31,6 +31,7 @@ from xiaowei.actions import ActionBinding, ActionPlan, ActionWriteRejectedError,
 from xiaowei.config import is_secret_ref, resolve_secret_ref
 from xiaowei.evidence import arguments_digest
 from xiaowei.governance import (
+    AlertmanagerCorrectionError,
     Execute,
     MonitoringReadError,
     Prechecked,
@@ -206,7 +207,7 @@ class _RequestStatusError(ValueError):
 
 
 class _ResponseLimitError(ValueError):
-    """只供当前匹配影响准备识别容量不足；普通读取/写回读仍失败关闭。"""
+    """只携带容量超限类别；调用位置决定可修正反馈或失败关闭。"""
 
 
 class _Receiver(_Model):
@@ -326,7 +327,8 @@ _SPECS: dict[str, tuple[type[BaseModel], type[BaseModel], str, str]] = {
         _AlertArgs,
         _Alerts,
         "alerts",
-        "读取告警快照。filters 是重复的标签 matcher，可按已知主机/告警收窄；空列表不限。"
+        "读取告警快照。告警多时先带 filters；它是重复的标签 matcher，"
+        "可按已知主机/告警收窄；空列表不限。"
         "active/silenced/inhibited/unprocessed 为包含开关，true 同时保留其他状态，不是只选该状态。"
         "receiver 是接收器正则，空串不限。silencedBy/inhibitedBy/mutedBy 分列；不证明已通知。",
     ),
@@ -334,7 +336,7 @@ _SPECS: dict[str, tuple[type[BaseModel], type[BaseModel], str, str]] = {
         _GroupArgs,
         _Groups,
         "alerts/groups",
-        "读取分组告警快照，filters 可收窄，receiver 是正则或空串不限。"
+        "读取分组告警快照，告警多时先带 filters 收窄；receiver 是正则或空串不限。"
         "布尔值表示包含对应状态；muted=false 排除全部被抑制的分组。每组最多保留100条告警，"
         "data 保留分组摘要，alerts 单独投影；用 group_index 关联，它仅是本次响应内序号。"
         "alert_count 是省略前数量，alerts_truncated 表示组内省略。接收器名不证明已通知。",
@@ -412,7 +414,8 @@ def alertmanager_catalog(
                     input_schema=args.model_json_schema(),
                     description=description
                     + (
-                        "limit 1–100、offset≥0；有界接收完整响应后本地分页，分页不是跨页一致快照。"
+                        "limit 1–100、offset≥0；有界接收完整响应后本地分页，limit 不减少上游响应；"
+                        "分页不是跨页一致快照。"
                         "查看 has_more、truncated 与组内标记；空页/部分结果不能证明源内无告警。"
                         if paged
                         else ""
@@ -772,6 +775,18 @@ class AlertmanagerAdapter:
         except httpx2.NetworkError:
             self.status = "unavailable"
             raise MonitoringReadError("unavailable") from None
+        except _ResponseLimitError:
+            if name in {"get_alerts", "get_alert_groups"}:
+                raise AlertmanagerCorrectionError("response_limit") from None
+            self.status = "unavailable"
+            raise
+        except _RequestStatusError as exc:
+            if exc.status_code == 400 and name in {"get_alerts", "get_alert_groups"}:
+                raise AlertmanagerCorrectionError("invalid_matcher") from None
+            if exc.status_code == 404 and name == "get_silence":
+                raise AlertmanagerCorrectionError("silence_missing") from None
+            self.status = "unavailable"
+            raise
         except Exception:
             self.status = "unavailable"
             raise

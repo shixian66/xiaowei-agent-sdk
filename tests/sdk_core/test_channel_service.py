@@ -425,6 +425,16 @@ async def test_turn_failures_persist_safe_codes_and_fixed_receipts(env: Env) -> 
     view = await env.service.results.view(ref("r1"))
     assert view.delivery is not None and view.delivery.evidence_ids == ()
     assert "invalid request" not in view.delivery.content
+    # 失败记录只保存 evidence_failed 类别；新旧记录的历史读取都使用当前通用回执。
+    evidence_view = await env.service.results.view(ref("r2"))
+    assert evidence_view.delivery is not None
+    assert "核对相关数据源和问题条件" in evidence_view.delivery.content
+    assert "缩小时间范围" not in evidence_view.delivery.content
+    outbox = Outbox(outcome="failed")
+    assert await env.service.results.send(ref("r2"), outbox) == "failed"
+    assert outbox.sent[0].content == evidence_view.delivery.content
+    # 固定失败回执按原契约不能显式重发，不能为文案修改放宽交付规则。
+    assert await env.service.results.send(ref("r2"), outbox, resend=True) is None
 
 
 async def test_request_number_links_to_failure_stage_without_message(

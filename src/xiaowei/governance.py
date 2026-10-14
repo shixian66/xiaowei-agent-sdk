@@ -77,6 +77,10 @@ class Prechecked(Generic[Prepared]):
 Execute = Callable[[ToolRequest], Awaitable[ToolObservation]] | Prechecked[Any]
 """应用绑定的实际 I/O：只在治理通过后以校验、规范化后的请求调用。"""
 
+_ALERTMANAGER_CORRECTABLE_POLICIES = frozenset(
+    {"alertmanager.get_alerts", "alertmanager.get_alert_groups", "alertmanager.get_silence"}
+)
+
 # 最小投影上限：须容纳证据标识与截断/空结果标记组成的外层结构。
 MIN_PROJECTION_BYTES = 256
 
@@ -139,6 +143,7 @@ ToolRejectHint = Literal[
     "datasource_fields",
     "datasource_field_type",
     "datasource_no_schema",
+    "alertmanager_change_request",
 ]
 """可信拒绝点提供的固定修正/限制提示标识；不携带参数或异常原文。"""
 
@@ -178,10 +183,11 @@ class ToolExecutionError(Exception):
     def __init__(self, code: StarRocksErrorCode | Literal["mcp_error", "other"] = "other") -> None:
         super().__init__("工具执行失败")
         self.code = code
+        self.tool_id: str | None = None
 
 
 class MonitoringReadError(Exception):
-    """已执行的监控读取明确失败；本源本轮不可再读，不产生成功 Evidence。"""
+    """已执行的监控读取明确失败；可修正子类除外，本源本轮不可再读。"""
 
     def __init__(self, reason: MonitoringFailureReason) -> None:
         super().__init__("监控源本轮未核实")
@@ -195,6 +201,16 @@ class PromQLExpressionError(MonitoringReadError):
         super().__init__("invalid_expression")
         self.line = line
         self.column = column
+        self.correction_allowed = False
+
+
+class AlertmanagerCorrectionError(MonitoringReadError):
+    """已发请求的可修正 Alertmanager 读取失败；不携带上游正文。"""
+
+    def __init__(
+        self, reason: Literal["response_limit", "invalid_matcher", "silence_missing"]
+    ) -> None:
+        super().__init__(reason)
         self.correction_allowed = False
 
 
@@ -349,6 +365,9 @@ class TurnRuns:
     promql_errors: tuple[tuple[str, str], ...] = ()  # 目标、已失败表达式，跨 query/range 禁止重发。
     promql_pending: frozenset[str] = frozenset()
     promql_repairs: tuple[str, ...] = ()  # 每源整轮最多两项，不随成功复位。
+    alertmanager_errors: tuple[tuple[str, str, str], ...] = ()  # 源、工具、失败参数摘要。
+    alertmanager_pending: frozenset[str] = frozenset()
+    alertmanager_repairs: tuple[str, ...] = ()
     truncated: int = 0
     rejected: int = 0
     limit_rescue_started: bool = False
@@ -414,6 +433,8 @@ class GovernedTools:
         多目标工具的目标只能由参数 ``cluster`` 决定：请求目标与参数不一致时在 I/O 前拒绝，
         执行与证据不会落到参数之外的目标。
         """
+        from xiaowei.evidence import EvidenceError
+
         contract = self._catalog.contract(request.tool_id, request.target_id)
         if contract is None:
             raise ToolRejectedError("工具不可用", code="not_allowed")
@@ -469,7 +490,9 @@ class GovernedTools:
         if not await self._currently_authorized(principal, contract):
             raise ToolRejectedError("当前无权调用该工具", code="not_allowed")
         if any(
-            failure.target_id == contract.target_id and failure.reason != "invalid_expression"
+            failure.target_id == contract.target_id
+            and failure.reason
+            not in {"invalid_expression", "response_limit", "invalid_matcher", "silence_missing"}
             for failure in self._runs.get(_turn_key(ctx.identity), TurnRuns()).monitoring_failures
         ):
             raise ToolRejectedError(
@@ -488,6 +511,7 @@ class GovernedTools:
             raise ToolRejectedError("系统繁忙，本轮该集群再试已用完", code="busy")
         slot_retry = target in runs.slot_busy
         repair_from: int | None = None
+        alertmanager_repair_from: int | None = None
         if contract.policy_id in PROMETHEUS_QUERY_POLICIES:
             if (contract.target_id, str(arguments["query"])) in runs.promql_errors:
                 raise ToolRejectedError(
@@ -500,6 +524,28 @@ class GovernedTools:
                         code="source_stopped",
                     )
                 repair_from = sum(target == contract.target_id for target, _ in runs.promql_errors)
+        if contract.policy_id in _ALERTMANAGER_CORRECTABLE_POLICIES:
+            from xiaowei.evidence import arguments_digest
+
+            digest = arguments_digest(arguments)
+            previous = next(
+                (item for item in reversed(runs.alertmanager_errors) if item[0] == target),
+                None,
+            )
+            if previous == (target, contract.tool_id, digest):
+                raise ToolRejectedError(
+                    "本轮同一参数已失败，未重发；请修改 filters 或静默 ID",
+                    hint="alertmanager_change_request",
+                )
+            if target in runs.alertmanager_pending:
+                if runs.alertmanager_repairs.count(target) >= 2:
+                    raise ToolRejectedError(
+                        "本源本轮两次告警读取修正机会已用完；可调查其他已授权源",
+                        code="source_stopped",
+                    )
+                alertmanager_repair_from = sum(
+                    item[0] == target for item in runs.alertmanager_errors
+                )
         self._reserve(ctx)
         self._runs[key] = replace(
             runs,
@@ -510,6 +556,11 @@ class GovernedTools:
                 (*runs.promql_repairs, contract.target_id)
                 if repair_from is not None
                 else runs.promql_repairs
+            ),
+            alertmanager_repairs=(
+                (*runs.alertmanager_repairs, target)
+                if alertmanager_repair_from is not None
+                else runs.alertmanager_repairs
             ),
         )
 
@@ -552,6 +603,31 @@ class GovernedTools:
                         )
                         exc.correction_allowed = (
                             current.promql_repairs.count(contract.target_id) < 2
+                        )
+                    elif isinstance(exc, AlertmanagerCorrectionError):
+                        allowed = (
+                            exc.reason in {"response_limit", "invalid_matcher"}
+                            and contract.policy_id
+                            in {"alertmanager.get_alerts", "alertmanager.get_alert_groups"}
+                        ) or (
+                            exc.reason == "silence_missing"
+                            and contract.policy_id == "alertmanager.get_silence"
+                        )
+                        if not allowed:
+                            raise ToolExecutionError() from None
+                        from xiaowei.evidence import arguments_digest
+
+                        current = replace(
+                            current,
+                            alertmanager_errors=(
+                                *current.alertmanager_errors,
+                                (contract.target_id, contract.tool_id, arguments_digest(arguments)),
+                            ),
+                            alertmanager_pending=current.alertmanager_pending
+                            | {contract.target_id},
+                        )
+                        exc.correction_allowed = (
+                            current.alertmanager_repairs.count(contract.target_id) < 2
                         )
                     elif exc.reason == "invalid_expression":
                         raise ToolExecutionError() from None
@@ -599,6 +675,10 @@ class GovernedTools:
                 target == contract.target_id for target, _ in runs.promql_errors
             ):
                 runs = replace(runs, promql_pending=runs.promql_pending - {contract.target_id})
+            if alertmanager_repair_from is not None and alertmanager_repair_from == sum(
+                item[0] == target for item in runs.alertmanager_errors
+            ):
+                runs = replace(runs, alertmanager_pending=runs.alertmanager_pending - {target})
             produced = (*runs.produced, (contract.tool_id, result.evidence_id))
             self._runs[key] = replace(
                 runs,
@@ -607,6 +687,12 @@ class GovernedTools:
                 slot_busy=runs.slot_busy - {target} if slot_retry else runs.slot_busy,
             )
             return result
+        except ToolExecutionError as exc:
+            exc.tool_id = contract.tool_id
+            raise
+        except EvidenceError as exc:
+            exc.tool_id = contract.tool_id
+            raise
         finally:
             if slot_retry:
                 pending = self._runs.get(key)

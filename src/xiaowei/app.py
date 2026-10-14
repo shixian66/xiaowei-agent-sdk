@@ -220,6 +220,9 @@ MONITORING_INSTRUCTIONS = (
     "只有必要信息缺失、影响判断且无法从可信"
     "上下文确定时才澄清。"
     "监控工具返回 unverified 表示该次调用未取得事实，本源本轮后续读取暂停；"
+    "Alertmanager 告警读取返回 response_limit 时可加 filters 收窄；invalid_matcher 时"
+    "检查 filters matcher 或 receiver 正则；仅在 correction_allowed 与本轮预算内重试。"
+    "silence_missing 表示该静默 ID 未找到，可核对 ID，不重发完全相同的请求。"
     "已有成功查询仅证明各自覆盖范围。"
     "可调查其他已授权源，并明确哪部分未核实。所有监控读取都失败时，可在 advice 中给出"
     "明确标为‘未经数据验证’的排查步骤，不断言当前健康或故障根因。"
@@ -286,12 +289,14 @@ class TurnError(Exception):
         *,
         answer_reject: AnswerRejectCode | None = None,
         tool_error: StarRocksErrorCode | Literal["mcp_error", "other"] | None = None,
+        tool_id: str | None = None,
         session_state: SessionSnapshot | None = None,
     ) -> None:
         super().__init__(message or _MESSAGES[reason])
         self.reason = reason
         self.answer_reject = answer_reject
         self.tool_error = tool_error
+        self.tool_id = tool_id
         self.session_state = session_state
 
 
@@ -1228,9 +1233,9 @@ def _turn_error(exc: Exception) -> TurnError:
     # 工具执行开始后的失败：SDK 把工具抛出的异常包装后中止本轮，原异常在原因链上。
     for error in _causes(exc):
         if isinstance(error, ToolExecutionError):
-            return TurnError("tool_failed", tool_error=error.code)
+            return TurnError("tool_failed", tool_error=error.code, tool_id=error.tool_id)
         if isinstance(error, EvidenceError):
-            return TurnError("tool_failed", tool_error="other")
+            return TurnError("tool_failed", tool_error="other", tool_id=error.tool_id)
     # SDK 与模型客户端的异常消息可能含模型输出或上游错误体，不向外传递。
     return TurnError("model_failed")
 
@@ -1391,6 +1396,9 @@ def _stage(
         allowed = {item.value for item in StarRocksErrorCode} | {"mcp_error", "other"}
         message += " tool_error=%s"
         fields += (tool_code if tool_code in allowed else "other",)
+        if detail is not None and detail.tool_id is not None:
+            message += " tool_id=%s"
+            fields += (detail.tool_id,)
     elif reason == "answer_rejected":
         answer_code = detail.answer_reject if detail is not None else None
         message += " answer_reject=%s"
