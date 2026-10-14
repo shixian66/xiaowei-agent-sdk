@@ -36,12 +36,15 @@ async def paused(actions: Actions, group, *, investigate=False):
 
 
 @pytest.mark.parametrize("failed_part", ["approval", "data"])
-async def test_mixed_round_material_receipt_independently_controls_approval(actions, failed_part):
+@pytest.mark.parametrize("failure", ["failed", "unknown"])
+async def test_mixed_round_material_receipt_independently_controls_approval(
+    actions, failed_part, failure
+):
     from sqlalchemy import text
     from tests.sdk_core.test_feishu import Outbox
 
     env = actions.env
-    outbox = Outbox(["failed", "sent"] if failed_part == "approval" else ["sent", "failed"])
+    outbox = Outbox([failure, "sent"] if failed_part == "approval" else ["sent", failure])
     env.scripts.add(
         attributed(A, "查询并静默"),
         tool_call("run_query", region="east"),
@@ -61,10 +64,14 @@ async def test_mixed_round_material_receipt_independently_controls_approval(acti
                 )
             ).all()
         assert states == [
-            ("approval", "failed" if failed_part == "approval" else "sent"),
-            ("body", "sent" if failed_part == "approval" else "failed"),
+            ("approval", failure if failed_part == "approval" else "sent"),
+            ("body", "sent" if failed_part == "approval" else failure),
         ]
-        assert await env.rows("SELECT delivery FROM xiaowei_request") == [("failed",)]
+        assert await env.rows("SELECT delivery FROM xiaowei_request") == [(failure,)]
+        if failed_part == "approval":
+            async with env.engine.begin() as conn:
+                await conn.execute(text("UPDATE xiaowei_request SET delivery='sent'"))
+            # 新记录只认审批材料回执，父请求错误的sent缓存不能放行。
         await group.ask(f"/批准 {action_id}", sender=B, message_id="om_mixed_approve")
         assert len(actions.adapter.calls) == (0 if failed_part == "approval" else 1)
 

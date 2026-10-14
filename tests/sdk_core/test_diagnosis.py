@@ -453,8 +453,15 @@ async def test_instructions_inside_audit_sql_and_plans_change_nothing(
     assert not env.drv.sent("query") and env.drv.sent("explain") == [explained(injected)]
     # 计划中的换行不能另起段落伪造分析区；分析标题只有代码生成的一个。
     if reply.files:
-        assert "计划为估算" in reply.content
-        assert not env.drv.sent("query")
+        from markdown_it import MarkdownIt
+
+        tokens = MarkdownIt().parse(reply.content)
+        headings = [tokens[i + 1].content for i, t in enumerate(tokens) if t.type == "heading_open"]
+        assert sum(h.startswith("分析与建议") for h in headings) == 1
+        assert ANALYSIS_HEADER not in headings and "已执行原查询" not in headings
+        data_blocks = [t.content for t in tokens if t.type == "fence"]
+        assert any(INJECTION in block and ANALYSIS_HEADER in block for block in data_blocks)
+        assert any("计划为估算" in block for block in data_blocks)
     elif reply.card is None:
         assert lines(reply).count(ANALYSIS_HEADER) == 1
     else:

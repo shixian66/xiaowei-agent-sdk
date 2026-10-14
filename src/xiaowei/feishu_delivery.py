@@ -98,11 +98,10 @@ def _data_parts(
             )
             return (_message_part(sequence, "body", message),)
         except MessageCapacityError:
-            if delivery.facts and all(f.view == "brief" for f in delivery.facts):
-                raise MessageCapacityError("历史摘要无法完整放入消息") from None
             pass
     report = build_report(
-        delivery.model_copy(update={"report_format": delivery.report_format or "md"})
+        delivery.model_copy(update={"report_format": delivery.report_format or "md"}),
+        expand_brief=delivery.report_format is not None,
     )
     body = _preview(delivery, max_chars, chat_id, reply_to, "本次完整结果见附件。")
     return (

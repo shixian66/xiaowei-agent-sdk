@@ -46,7 +46,7 @@ def _fence(value: str) -> str:
     return f"{marker}text\n{value}\n{marker}"
 
 
-def _sections(delivery: Delivery) -> list[tuple[str, str, str]]:
+def _sections(delivery: Delivery, *, expand_brief: bool) -> list[tuple[str, str, str]]:
     parts: list[tuple[str, str, str]] = []
     if not delivery.facts:
         parts.append(
@@ -65,8 +65,13 @@ def _sections(delivery: Delivery) -> list[tuple[str, str, str]]:
         if fact.note:
             details.append(f"说明：{fact.note}")
         details.extend(fact_limit_notices(fact))
-        # 显式文件是当前权限下的原值交付，不能从历史摘要反向拼接。
-        details.append(_fact_json(fact))
+        if fact.view == "brief" and not expand_brief:
+            if fact.summary is None:
+                raise ValueError("历史摘要缺失")
+            details.append(fact.summary)
+        else:
+            # 显式文件可在当前权限下展开原值；自动换载体保持所选摘要语义。
+            details.append(_fact_json(fact))
         parts.append(("证据", source, "\n".join(details)))
     if delivery.monitoring_notice:
         parts.append(("未核实来源", "未核实来源", delivery.monitoring_notice))
@@ -87,14 +92,14 @@ def _sections(delivery: Delivery) -> list[tuple[str, str, str]]:
     return parts
 
 
-def build_report(delivery: Delivery) -> ReportFile:
+def build_report(delivery: Delivery, *, expand_brief: bool = True) -> ReportFile:
     """全量构造一个有界 MD 或 HTML 文件；放不下时整体失败，不裁掉事实或限制。"""
     format_: ReportFormat | None = delivery.report_format
     if delivery.channel != "feishu" or format_ not in ("md", "html"):
         raise ValueError("当前交付没有获准的报告格式")
     if delivery.requires_complete:
         raise ValueError("当前回答不能作为只读事实报告交付")
-    sections = _sections(delivery)
+    sections = _sections(delivery, expand_brief=expand_brief)
     if format_ == "md":
         blocks = []
         for index, (heading, title, value) in enumerate(sections, start=1):

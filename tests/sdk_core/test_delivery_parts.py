@@ -19,6 +19,7 @@ from xiaowei.channel import AccessDeniedError, RequestRef
 from xiaowei.channel_store import RequestUnavailableError
 from xiaowei.feishu import send_delivery
 from xiaowei.feishu_report import ReportFile, build_report
+from xiaowei.models import AnswerInference
 from xiaowei.storage import Readiness, hold_instance_lock
 
 pytestmark = pytest.mark.loopback
@@ -98,6 +99,37 @@ def test_explicit_brief_file_contains_authorized_original_values() -> None:
     assert "SELECT" in body
     assert "<at id=all>" in body
     assert "历史摘要" not in body
+
+
+@pytest.mark.parametrize("mixed", [False, True])
+def test_automatic_file_keeps_brief_and_complete_analysis_without_expanding_history(mixed):
+    from xiaowei.feishu_delivery import _data_parts
+
+    delivery = _delivery("md").model_copy(update={"report_format": None})
+    brief = delivery.facts[0].model_copy(
+        update={
+            "view": "brief",
+            "summary": "历史摘要：本次返回一行",
+            "result_json": '{"raw":"HISTORICAL_ORIGINAL_CANARY"}',
+            "metadata": {"sql": "HISTORICAL_SQL_CANARY"},
+        }
+    )
+    facts = (brief, delivery.facts[0]) if mixed else (brief,)
+    analysis = "完整分析" + "分析内容" * 375
+    delivery = delivery.model_copy(
+        update={
+            "facts": facts,
+            "analysis": (AnswerInference(text=analysis, evidence_ids=delivery.evidence_ids),),
+        }
+    )
+    file, body = _data_parts(delivery, 0, 600, "oc_d1a", None)
+    report = file.body.decode()
+    assert file.kind == "md" and body.kind == "body"
+    assert "历史摘要：本次返回一行" in report and analysis in report
+    assert "HISTORICAL_ORIGINAL_CANARY" not in report
+    assert "HISTORICAL_SQL_CANARY" not in report
+    if mixed:
+        assert "<at id=all>" in report  # 新full事实仍完整保留。
 
 
 def transmit(
@@ -181,6 +213,43 @@ async def test_new_feishu_request_cannot_be_marked_sent_without_part_receipts(en
     assert await env.service.results.send(ref, unconfirmed) == "failed"
     record = await env.store.get("feishu", "alice", ref.conversation_id, ref.request_id)
     assert record.delivery == "failed"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("stage", ["bind", "receipt"])
+async def test_part_storage_failure_never_claims_delivery_or_sends_remaining_parts(env: Env, stage):
+    from sqlalchemy import event
+    from sqlalchemy.exc import SQLAlchemyError
+
+    from xiaowei.channel_store import ChannelStoreUnavailableError
+
+    ref = await request(env)
+    platform = Platform()
+
+    def fail(_conn, _cursor, statement, _parameters, *_args):
+        before_upload = stage == "bind" and "INSERT INTO xiaowei_delivery_part" in statement
+        after_message = (
+            stage == "receipt"
+            and "UPDATE xiaowei_delivery_part SET send_state=" in statement
+            and "message_id=" in statement
+        )
+        if before_upload or after_message:
+            raise SQLAlchemyError("synthetic delivery storage failure")
+
+    event.listen(env.engine.sync_engine, "before_cursor_execute", fail)
+    try:
+        with pytest.raises(ChannelStoreUnavailableError):
+            await env.service.results.send(ref, transmit(env, ref, platform))
+    finally:
+        event.remove(env.engine.sync_engine, "before_cursor_execute", fail)
+    assert not env.store.readiness.ok
+    assert len(platform.files) == len(platform.sent) == (0 if stage == "bind" else 1)
+    if stage == "receipt":
+        file, body = await parts(env, ref)
+        assert file.upload_state == "uploaded" and file.send_state == "unknown"
+        assert file.message_id is None and body.send_state == "pending"
+    record = await env.store.get("feishu", "alice", ref.conversation_id, ref.request_id)
+    assert record.delivery == "unknown"
 
 
 @pytest.mark.asyncio
