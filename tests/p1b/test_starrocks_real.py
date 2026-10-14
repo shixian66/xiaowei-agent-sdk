@@ -30,6 +30,7 @@ import pytest
 from asyncmy.cursors import SSCursor
 from asyncmy.errors import MySQLError
 from pydantic import SecretStr
+from sqlglot import exp, parse_one
 from sqlglot.dialects.dialect import Dialect
 from tests.p1b.conftest import admin_address
 from tests.sdk_core.postgres_harness import (
@@ -489,6 +490,8 @@ async def test_s1_parser_difference_matrix_on_414(instance: Instance) -> None:
         r"SELECT 'a\\' AS v",
         r"SELECT 'a\q' AS v",
         'SELECT "abc" AS v',
+        "SELECT 'a''b' AS v",
+        'SELECT "a""b" AS v',
     )
     rejected = (
         ("SELECT N'abc' AS v", QueryRejectionCode.UNSUPPORTED_SYNTAX),
@@ -521,6 +524,11 @@ async def test_s1_parser_difference_matrix_on_414(instance: Instance) -> None:
                 assert query.executed_sql == sql + " LIMIT 6"
                 await cursor.execute(sql)
                 direct, description = await cursor.fetchall(), cursor.description
+                parsed = parse_one(sql, read="starrocks")
+                projection = parsed.expressions[0]
+                assert isinstance(projection, exp.Alias)
+                assert isinstance(projection.this, exp.Literal)
+                assert len(direct) == 1 and projection.this.this == direct[0][0]
                 await cursor.execute(query.executed_sql)
                 assert (await cursor.fetchall(), cursor.description) == (direct, description)
                 result = await ada.run_query(query)

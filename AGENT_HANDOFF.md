@@ -11,7 +11,7 @@
 | 仓库 | [shixian66/xiaowei-agent-sdk](https://github.com/shixian66/xiaowei-agent-sdk) |
 | 本地目录 / 分支 | S1：`/private/tmp/xw-starrocks-s1` / `codex/starrocks-sql-verbatim-s1`；基线 `origin/main` `ae220ac3a3ef15bb384e805418e09fa42d9a9765`，其他工作树保留。 |
 | M5 历史起点 | `372c381f44ecfa1fa53961f137d0058033cbd805`；不是远端当前 main 的核验结论 |
-| 本轮审查版本 | R1–R4 与 B2+N1 已在上述主线基线中。S1 当前仅本地开发和验证；精确提交 SHA 在完成测试后报告，待 Claude 审核。用户要求审核通过前不推送、不建 PR、不合并、不部署。 |
+| 本轮审查版本 | R1–R4 与 B2+N1 已在上述主线基线中。S1 本地提交 `a9c9701` 经 Claude 审查无阻断；浏览器、飞书和宽表增量验证已补，待新 head 复审。推送和建 PR 须用户另行批准；不合并、不部署。 |
 | 已同步主线审查记录 | SDK-A/B/C 已随 PR #89/#93/#94 合入；D7 已随 PR #83 离线合入。上述合入不代表真实模型、飞书或公司 Grafana 验收。 |
 | 当前阶段 | S1 StarRocks SQL 原文执行单独切片；真实模型任务能力按用户批准例外，在上线后用计划 A–F 人工试用。 |
 | 当前源码与依赖 | 基线应用表 v11；锁定 Agents SDK 0.22.3 / mcp 2.2.0 / sqlglot 30.17.0。S1 使用现有 SQLGuard、治理、Adapter 与 Evidence 路径，不改存储或数据范围摘要 `/8`。 |
@@ -37,9 +37,9 @@
 
 ## 3. 当前计划与下一项工作
 
-**当前下一步：** 完成 S1 本地回归与开发方复查，形成仅本地提交并给 Claude 精确 SHA 审核。按用户最新指令，Claude 审核通过前不推送、不建 PR、不合并、不部署。真实模型按 S1 计划 §8 的用户例外上线后人工试用。
+**当前下一步：** 将 S1 增量提交的精确 SHA 交 Claude 复审；推送和建 PR 待用户另行批准，不合并、不部署。真实模型按 S1 计划 §8 的用户例外上线后人工试用。
 
-**S1 当前证据与缺口：** 基线 `ae220ac`，锁定 sqlglot 30.17.0。可丢弃 StarRocks `4.1.4-4a9848e` 真协议文件在最终源码上 **43 passed、7 条 asyncmy 非缓冲查询 warning**，覆盖执行原文、带格式 `FROM_UNIXTIME`、UNION LIMIT 和解析差异矩阵；不一致或不受支持的字面量、标识符及全部注释在守卫拒绝。真 SDK Runner + 治理 + Adapter 驱动替身 + 隔离 PostgreSQL 的缺库名拒绝、单候选同轮修正、多候选澄清、注释同轮修正和旧普通查询证据失效用例已通过。CI 单元命令 **2813 passed、152 skipped、47 deselected**；相关 SDK/SQL/权限宽回归 **4602 passed、221 skipped、71 deselected**；安全门 **928 passed、79 skipped、5018 deselected**；部署与 spike **126 passed**，其中 4 项容器用例在 `/private/tmp` 因 Docker bind mount 不可见而失败，移到 Docker 可见的一次性隔离检出后 **4 passed**，检出已删除。Ruff、改动文件格式、mypy 134 个源文件、锁文件一致性、文档事实 5 项和差异检查通过。真实模型、公司 StarRocks、真实飞书、产品部署与用户 A–F 验收未运行；脚本模型不证明 Agent 自主选择与答案质量。
+**S1 当前证据与缺口：** 基线 `ae220ac`，锁定 sqlglot 30.17.0。可丢弃 StarRocks `4.1.4-4a9848e` 真协议文件在最终源码上 **43 passed、7 条 asyncmy 非缓冲查询 warning**，覆盖执行原文、带格式 `FROM_UNIXTIME`、UNION LIMIT 和解析差异矩阵；不一致或不受支持的字面量、标识符及全部注释在守卫拒绝。真 SDK Runner + 治理 + Adapter 驱动替身 + 隔离 PostgreSQL 的缺库名拒绝、单候选同轮修正、多候选澄清、注释同轮修正和旧普通查询证据失效用例已通过。审查增量：正式装配的真实 Chrome 查询事实区直接显示 `applied_limit` 与 LIMIT 说明（动态 loopback 端口，1 passed）；真 SDK／治理／隔离 PostgreSQL 的宽表 `SELECT *` 在列头边界值可交付，按接收渠道隔离的四种 Evidence 投影可读，飞书卡片直接显示 `applied_limit`；相关文件 134 passed。字面量矩阵增补两种引号写法，并与 StarRocks 4.1.4 直接返回值逐一对照，真协议文件仍 43 passed。CI 单元命令 **2813 passed、152 skipped、47 deselected**；相关 SDK/SQL/权限宽回归 **4602 passed、221 skipped、71 deselected**；安全门 **928 passed、79 skipped、5018 deselected**；部署与 spike **126 passed**，其中 4 项容器用例在 `/private/tmp` 因 Docker bind mount 不可见而失败，移到 Docker 可见的一次性隔离检出后 **4 passed**，检出已删除。Ruff、改动文件格式、mypy 134 个源文件、锁文件一致性、文档事实 5 项和差异检查通过。真实模型、公司 StarRocks、真实飞书、产品部署与用户 A–F 验收未运行；脚本模型不证明 Agent 自主选择与答案质量。
 
 **B2+N1 本地验证边界：** 基线 `0c54442`。首轮 PR head `b74338b` 的 CI 10/10 通过，Claude 审查无阻断。增量修复先以正式 `serve`、真 SDK Runner、治理、隔离 PostgreSQL、Alertmanager API v2 loopback 替身与脚本模型复现同参数和类别额度缺陷，再验证 A→B→A、只改 limit/offset 零重发、告警/分组共用额度、告警与单条静默类别隔离及相应模型反馈；Alertmanager 文件 **89 passed、1 skipped、1 deselected**，相邻治理/PromQL/应用文件 **245 passed、26 skipped、3 deselected**。Ruff 全仓、改动文件格式、mypy 134 源文件、文档契约 8 项与差异检查通过；新 head 的 CI 以 PR 验证记录为准。固定失败回执仍按已有契约不可显式重发；N1 获用户同意后只改回执文字及断言，三个相关测试文件 **94 passed**，不改存储或迁移；未调用真实模型、公司监控源或真实飞书，官方 Alertmanager 二进制未装，本地协议测试跳过。
 

@@ -53,7 +53,7 @@ from tests.sdk_core.test_app import (
     evidence_in,
     tool_call,
 )
-from tests.sdk_core.test_feishu_render import message_text, tables
+from tests.sdk_core.test_feishu_render import message_text, tables, text_parts
 
 from xiaowei.app import (
     AppConfig,
@@ -544,6 +544,9 @@ async def test_feishu_gets_original_rows_in_pure_text_card_cells(env: Env) -> No
     assert fact.columns == web_fact.columns == HOSTILE.columns
     assert fact.rows == web_fact.rows == expected
     card = build_feishu_message(delivered, 3500, "oc_test")
+    visible = "\n".join(text_parts(card, folded=False))
+    assert "applied_limit: 6" in visible
+    assert f"说明：{QUERY_NOTE}" in visible
     (table,) = tables(card)
     assert all(c["data_type"] == "text" for c in table["columns"])
     assert len(table["rows"]) == len(HOSTILE.rows)
@@ -871,6 +874,53 @@ async def test_cross_database_query_is_delivered_and_replayed_against_both_objec
         "SELECT 1 FROM `shop`.`sales` WHERE 1 = 0",
     ]
     assert executed_sql(cross.drv) == []
+
+
+async def test_s1_wide_star_at_header_bound_reaches_all_four_projections(
+    postgres_url: URL, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    columns = tuple(f"column_{i:02d}_abcdefghijkl" for i in range(8))
+    values = tuple(f"v{i}" for i in range(len(columns)))
+    tables = {("shop", "wide"): tuple((name, "varchar", "YES", None) for name in columns)}
+    sql = "SELECT * FROM shop.wide"
+
+    def make() -> FakeConnection:
+        return FakeConnection(
+            results={
+                SESSION_SET: Result(()),
+                SESSION_READ: Result(("q", "m", "t", "s"), [SESSION_VALUES]),
+                **schema_results(tables),
+                AUDIT_PROBE: Result(("1",)),
+                "*": Result(columns, [values]),
+            }
+        )
+
+    target = scoped(
+        policy={
+            "max_sql_bytes": sum(len(name.encode()) for name in columns),
+            "max_result_columns": len(columns),
+        }
+    )
+    async with assembled(postgres_url, monkeypatch, Driver(make), target) as wide:
+        expected = dict(zip(columns, values, strict=True))
+        covered: set[str] = set()
+        for channel in ("web", "feishu"):
+            message = wide.scripts.add(
+                f"{channel} 读取宽表",
+                tool_call("run_readonly_query", cluster=SR.target_id, sql=sql),
+                cite(),
+            )
+            ctx = wide.ctx(session=f"wide-{channel}", channel=channel)
+            delivered = await wide.deliver(ctx, message)
+            (fact,) = delivered.facts
+            assert fact.columns == columns and fact.rows == (expected,)
+            for audience in ("model", "session", channel):
+                projected = json.loads(await wide.evidence.project(fact.evidence_id, ctx, audience))
+                assert projected["data"]["columns"] == list(columns)
+                assert projected["data"]["rows"] == [expected]
+                covered.add(audience)
+        assert covered == set(AUDIENCES)
+        assert executed_sql(wide.drv) == [f"{sql} LIMIT 6"] * 2
 
 
 async def test_scope_errors_go_back_to_the_model_before_any_database_io(cross: Env) -> None:
