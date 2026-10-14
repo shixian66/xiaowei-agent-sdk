@@ -6,11 +6,11 @@ AuditLoader 的实际写入，也不能证明真实模型会这样选择工具�
 """
 
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any
 
 import pytest
-from asyncmy.errors import OperationalError
+from asyncmy.errors import OperationalError, ProgrammingError
 from sqlalchemy import text
 from tests.p1b.test_starrocks_adapter import NOW, Result, driver, ready_schema
 from tests.p1b.test_starrocks_audit import ACCEPTED, AUDIT_TARGET, CANARY, REJECTED, SOURCE, record
@@ -28,10 +28,17 @@ from tests.sdk_core.test_starrocks_tools import env as env  # pytest fixture
 
 from xiaowei.app import Application, DataPolicy, Mode, TurnError
 from xiaowei.evidence import AnswerRejectedError, EvidenceStore, EvidenceUnavailableError
-from xiaowei.governance import GovernedTools, ToolCatalog, ToolRejectedError
-from xiaowei.models import AUDIENCES, Budget, Identity, RunContext, ToolRequest, TurnAnswer
+from xiaowei.feishu_render import build_feishu_message, request_bytes
+from xiaowei.governance import GovernedTools, Projection, ToolCatalog, ToolRejectedError
+from xiaowei.models import AUDIENCES, Budget, Channel, Identity, RunContext, ToolRequest, TurnAnswer
 from xiaowei.session import SessionInputPolicy
-from xiaowei.starrocks import AUDIT_COLUMNS, EXPLAIN_PREFIX, StarRocksAdapter, StarRocksTarget
+from xiaowei.starrocks import (
+    AUDIT_COLUMNS,
+    EXPLAIN_PREFIX,
+    StarRocksAdapter,
+    StarRocksTarget,
+    probe_sql,
+)
 from xiaowei.starrocks_schema import DependencyCheck, SchemaCache
 from xiaowei.starrocks_tools import (
     AUDIT_NOTE,
@@ -39,6 +46,7 @@ from xiaowei.starrocks_tools import (
     DIAGNOSE_TOOLS,
     PLAN_NOTE,
     QUERY_TOOLS,
+    RESULT_FIELDS,
     RUN_QUERY,
     SLOW_QUERIES,
     data_scope_digest,
@@ -61,10 +69,18 @@ class Audited:
     executes: Any
 
     def ctx(
-        self, mode: Mode = "diagnose", *, session: str = "s1", turn: str = "t1", calls: int = 3
+        self,
+        mode: Mode = "diagnose",
+        *,
+        session: str = "s1",
+        turn: str = "t1",
+        calls: int = 3,
+        channel: Channel = "web",
     ) -> RunContext:
         return RunContext(
-            identity=Identity(subject_id="alice", session_id=session, turn_id=turn, channel="web"),
+            identity=Identity(
+                subject_id="alice", session_id=session, turn_id=turn, channel=channel
+            ),
             target_scope=frozenset({AUDIT_TARGET.target_id}),
             tool_scope=self.app.scope_for_turn(mode, ALL_TOOLS, self.app.available_tools),
             budget=Budget(
@@ -166,6 +182,24 @@ async def test_diagnose_turn_lists_slow_queries_then_explains_one(env: Env) -> N
     assert audit_fact.tool_id == SLOW_QUERIES and audit_fact.columns == AUDIT_COLUMNS
     # 未通过 SQLGuard 的记录（未获准列）不出现；列出的原文原样交给 explain_query 并通过检查。
     assert [row["sql"] for row in audit_fact.rows] == [ACCEPTED[0], ACCEPTED[1]]
+    assert audit_fact.metadata["checked_candidates"] == 3
+    assert audit_fact.metadata["omitted_sqlguard"] == 1
+    assert audit_fact.metadata["omitted_revoked"] == 0
+    assert audit_fact.metadata["more_candidates"] is False
+    (listed,) = tool_outputs(env.scripts.calls[message][1])
+    assert json.loads(listed)["data"]["omitted_sqlguard"] == 1
+    async with env.engine.connect() as conn:
+        stored = (
+            await conn.execute(
+                text(
+                    "SELECT model_content, session_content, web_content, feishu_content "
+                    "FROM xiaowei_evidence WHERE tool_id = :tool"
+                ),
+                {"tool": SLOW_QUERIES},
+            )
+        ).one()
+    for content in stored:
+        assert json.loads(content)["data"]["omitted_sqlguard"] == 1
     assert audit_fact.note == AUDIT_NOTE and plan_fact.note == PLAN_NOTE
     sent = executed_sql(env.drv)
     assert sent[-1].startswith(EXPLAIN_PREFIX) and len(sent) == 2
@@ -207,7 +241,51 @@ async def test_list_can_be_shorter_than_max_rows_and_is_not_truncated(env: Env) 
     delivered = await au.evidence.validate_answer(await au.app.run_turn(ctx, message), ctx)
     (fact,) = delivered.facts
     assert len(fact.rows) == 1 and not fact.truncated
+    assert fact.metadata["checked_candidates"] == 6
+    assert fact.metadata["omitted_sqlguard"] == 5
+    assert fact.metadata["unchecked_candidates"] == 0
     assert "只显示能确认引用对象全部获准的查询" in (fact.note or "")
+
+
+async def test_revoked_object_is_counted_without_showing_its_sql(env: Env) -> None:
+    au = await audited(env)
+    denied = ProgrammingError(1142, "SELECT denied")
+    make = driver(audit_rows(ACCEPTED[0])).make
+
+    def denied_connection() -> Any:
+        conn = make()
+        conn.results[probe_sql("shop", "sales")] = denied
+        return conn
+
+    env.drv.make = denied_connection
+    message = env.scripts.add("慢查询", list_slow(), cite())
+    ctx = au.ctx()
+    delivered = await au.evidence.validate_answer(await au.app.run_turn(ctx, message), ctx)
+
+    (fact,) = delivered.facts
+    assert fact.rows == () and fact.metadata["row_count"] == 0
+    assert fact.metadata["checked_candidates"] == 1
+    assert fact.metadata["omitted_revoked"] == 1
+    assert ACCEPTED[0] not in delivered.content
+    assert any(
+        sql == probe_sql("shop", "sales")
+        for conn in env.drv.connections
+        for sql, _ in conn.executed
+    )
+
+
+async def test_feishu_fact_shows_omission_counts(env: Env) -> None:
+    au = await audited(env)
+    env.drv.make = driver(audit_rows(REJECTED[0], ACCEPTED[0])).make
+    message = env.scripts.add("慢查询", list_slow(), cite())
+    ctx = au.ctx(channel="feishu")
+    delivered = await au.evidence.validate_answer(await au.app.run_turn(ctx, message), ctx)
+    card = build_feishu_message(delivered, 3500, "oc_test")
+    body = json.dumps(card, ensure_ascii=False)
+
+    assert "omitted_sqlguard: 1" in body
+    assert "checked_candidates: 2" in body
+    assert request_bytes(card, "oc_test") <= 30_000
 
 
 # ---- 拒绝与失败 -----------------------------------------------------------------------------
@@ -317,6 +395,48 @@ def test_slow_queries_tool_absent_without_audit_source() -> None:
         if p.policy_id == f"starrocks.{AUDIT_TARGET.target_id}.list_slow_queries"
     ]
     assert policy.fact_note == AUDIT_NOTE and policy.data_scope == data_scope_digest(AUDIT_TARGET)
+    assert "omitted_revoked" in policy.required
+    assert all("omitted_revoked" in p.fields for p in policy.projections.values())
+
+
+def test_audit_counts_are_included_in_startup_projection_capacity() -> None:
+    capacity = 32_500  # 足以容纳同一目标的普通查询，却不足以容纳审计计数。
+    plain = AUDIT_TARGET.model_copy(update={"audit": None})
+    for target in (plain, AUDIT_TARGET):
+        adapter = StarRocksAdapter(target, connect=driver(), clock=lambda: NOW)
+        schema = SchemaCache(adapter, clock=lambda: NOW)
+        if target.audit is None:
+            starrocks_tools(adapter, dict.fromkeys(AUDIENCES, capacity), schema=schema)
+        else:
+            with pytest.raises(ValueError, match="投影放不下最坏情况的必需字段"):
+                starrocks_tools(adapter, dict.fromkeys(AUDIENCES, capacity), schema=schema)
+
+
+async def test_old_audit_evidence_is_invalid_after_count_fields_change(env: Env) -> None:
+    au = await audited(env)
+    catalog = au.evidence._catalog
+    key = f"starrocks.{AUDIT_TARGET.target_id}.list_slow_queries"
+    current = catalog._policies[key]
+    old = replace(
+        current,
+        projections={
+            audience: Projection(RESULT_FIELDS, spec.max_bytes)
+            for audience, spec in current.projections.items()
+        },
+        required=RESULT_FIELDS,
+    )
+    env.drv.make = driver(audit_rows(ACCEPTED[0])).make
+    message = env.scripts.add("慢查询", list_slow(), cite())
+    ctx = au.ctx()
+    catalog._policies[key] = old
+    try:
+        answer = await au.app.run_turn(ctx, message)
+    finally:
+        catalog._policies[key] = current
+
+    (evidence_id,) = answer.answer.evidence_ids
+    with pytest.raises(EvidenceUnavailableError):
+        await au.evidence.project(evidence_id, ctx, "web")
 
 
 # ---- 证据随审计源配置失效 -------------------------------------------------------------------

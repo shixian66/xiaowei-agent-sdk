@@ -56,7 +56,7 @@ from contextvars import ContextVar
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 from decimal import ROUND_HALF_UP, Decimal
-from typing import Annotated, Final, Protocol, cast
+from typing import Annotated, Final, Literal, Protocol, cast
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import asyncmy
@@ -417,6 +417,12 @@ class QueryResult(BaseModel):
         return self
 
 
+class AuditResult(QueryResult):
+    """慢查询列表及本次已读取候选的完整性计数。"""
+
+    counts: dict[str, int | bool]
+
+
 @dataclass(frozen=True)
 class SchemaRows:
     """``read_schema`` 的原始结果（已转为 JSON 标量）；``truncated`` 表示任一读取超限。"""
@@ -752,7 +758,7 @@ class StarRocksAdapter:
         order_by: str,
         policy: QueryPolicy,
         database: str | None = None,
-    ) -> QueryResult:
+    ) -> AuditResult:
         """最近 ``window_minutes`` 分钟内的慢查询，按 ``order_by`` 降序，至多 ``max_rows`` 行。
 
         ``database`` 为 ``None`` 时读取所有库的记录，否则只读会话当前库（审计 ``db`` 列）为它的
@@ -796,7 +802,7 @@ class StarRocksAdapter:
             timeout = self._target.client_timeout_seconds
             deadline = time.monotonic() + timeout
             async with asyncio.timeout(timeout):
-                rows, over = await asyncio.to_thread(
+                rows, over, counts = await asyncio.to_thread(
                     self._listed, candidates.rows, audit.max_rows, deadline, policy, audit
                 )
         except TimeoutError:
@@ -805,7 +811,7 @@ class StarRocksAdapter:
             code = _Code.RESULT_CONTRACT
         if code is not None:
             raise StarRocksError(code)
-        return QueryResult(
+        return AuditResult(
             target_id=self._target.target_id,
             sql=sql,
             columns=AUDIT_COLUMNS,
@@ -814,6 +820,7 @@ class StarRocksAdapter:
             truncated=candidates.truncated or over,
             collected_at=candidates.collected_at,
             elapsed_ms=candidates.elapsed_ms + round((time.monotonic() - started) * 1000),
+            counts={**counts, "more_candidates": candidates.truncated},
         )
 
     def _listed(
@@ -823,8 +830,8 @@ class StarRocksAdapter:
         deadline: float,
         policy: QueryPolicy,
         audit: AuditSource,
-    ) -> tuple[list[dict[str, Scalar]], bool]:
-        """按原排序取通过检查的行；返回 (行, 是否可能不完整)。
+    ) -> tuple[list[dict[str, Scalar]], bool, dict[str, int]]:
+        """按原排序取通过检查的行、截断标记及已读取候选的计数。
 
         可能不完整：已有 ``max_rows`` 行而后面还有未检查的候选（不为确认它们是否获准而继续
         解析），获准的行因单值或结果字节上限没有列出。``deadline`` 为 ``time.monotonic()`` 时刻：
@@ -833,25 +840,42 @@ class StarRocksAdapter:
         rows: list[dict[str, Scalar]] = []
         size = 2  # "[]"
         dropped = False
-        for candidate in candidates:
+        counts = {
+            "checked_candidates": 0,
+            "omitted_sqlguard": 0,
+            "omitted_self": 0,
+            "omitted_statement_too_long": 0,
+            "omitted_value_too_large": 0,
+            "omitted_result_too_large": 0,
+            "unchecked_candidates": 0,
+        }
+        for index, candidate in enumerate(candidates):
             if len(rows) == max_rows:
-                return rows, True
+                counts["unchecked_candidates"] = len(candidates) - index
+                return rows, True, counts
             if time.monotonic() >= deadline:
                 raise TimeoutError
+            counts["checked_candidates"] += 1
             row = _audit_row(candidate)
-            if row is None or not _within_scope(
-                row["sql"], policy, str(row["database"] or ""), audit
-            ):
+            if row is None:
+                counts["omitted_statement_too_long"] += 1
+                continue
+            scope = _audit_scope(row["sql"], policy, str(row["database"] or ""), audit)
+            if scope != "allowed":
+                counts["omitted_self" if scope == "self" else "omitted_sqlguard"] += 1
                 continue
             if any(_json_size(v) > self._target.max_value_bytes for v in row.values()):
+                counts["omitted_value_too_large"] += 1
                 dropped = True
                 continue
             added = _json_size(row) + (2 if rows else 0)
             if size + added > self._target.max_result_bytes:
-                return rows, True
+                counts["omitted_result_too_large"] += 1
+                counts["unchecked_candidates"] = len(candidates) - index - 1
+                return rows, True, counts
             rows.append(row)
             size += added
-        return rows, dropped
+        return rows, dropped, counts
 
     async def _run(
         self,
@@ -1191,19 +1215,20 @@ def audit_candidate_bound(target: StarRocksTarget) -> int:
     return 2 + keys + len(_AUDIT_SOURCE) * _audit_value_bound(target)
 
 
-def _within_scope(sql: Scalar, policy: QueryPolicy, database: str, audit: AuditSource) -> bool:
-    """原文在会话当前库 ``database``（``''`` 为没有当前库）下能否通过当前 SQLGuard 范围；任何
-    失败（含解析器意外异常）或引用审计源表自身都按未通过处理。
+def _audit_scope(
+    sql: Scalar, policy: QueryPolicy, database: str, audit: AuditSource
+) -> Literal["allowed", "self", "sqlguard"]:
+    """原文在会话当前库 ``database`` 下的判定；空字符串表示没有当前库。
 
     审计原文来自全集群、不可信：检查失败的唯一后果是这一行不列出，异常与原文都不外传。
     """
     if not isinstance(sql, str):
-        return False
+        return "sqlguard"
     try:
         objects, _ = audit_references(sql, policy, database)
     except Exception:  # 失败即丢弃该行，不传播可能含原文的异常
-        return False
-    return (audit.database, audit.table) not in objects
+        return "sqlguard"
+    return "self" if (audit.database, audit.table) in objects else "allowed"
 
 
 def _audit_row(candidate: dict[str, Scalar]) -> dict[str, Scalar] | None:

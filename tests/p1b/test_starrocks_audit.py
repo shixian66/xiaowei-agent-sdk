@@ -433,6 +433,54 @@ async def test_list_can_be_shorter_than_max_rows() -> None:
     assert not result.truncated
 
 
+async def test_omission_counts_explain_checked_candidates() -> None:
+    small = target(max_value_bytes=300, audit={"max_rows": 10})
+    rows = [
+        record(None, "q-long"),
+        record(REJECTED[0], "q-guard"),
+        record(OWN[-1], "q-self"),
+        record(long_stmt(400), "q-value"),
+        record(ACCEPTED[0], "q-shown"),
+    ]
+    result = await adapter(audit_driver(*rows), small).slow_queries(60, "query_time", SCOPE)
+
+    assert [row["query_id"] for row in result.rows] == ["q-shown"]
+    assert result.row_count == 1 and result.truncated
+    assert result.counts == {
+        "checked_candidates": 5,
+        "omitted_sqlguard": 1,
+        "omitted_self": 1,
+        "omitted_statement_too_long": 1,
+        "omitted_value_too_large": 1,
+        "omitted_result_too_large": 0,
+        "unchecked_candidates": 0,
+        "more_candidates": False,
+    }
+
+
+async def test_candidate_ceiling_reports_checked_unchecked_and_unknown_tail() -> None:
+    limited = target(audit={"max_rows": 2, "candidate_rows": 3})
+    rows = [record(ACCEPTED[0], query_id=f"q{i}") for i in range(5)]
+    result = await adapter(audit_driver(*rows), limited).slow_queries(60, "query_time", SCOPE)
+
+    assert [row["query_id"] for row in result.rows] == ["q0", "q1"]
+    assert result.row_count == 2 and result.truncated
+    assert result.counts["checked_candidates"] == 2
+    assert result.counts["unchecked_candidates"] == 1
+    assert result.counts["more_candidates"] is True
+
+
+async def test_result_byte_limit_counts_the_omitted_row_without_calling_it_unchecked() -> None:
+    small = target(max_result_bytes=500, max_value_bytes=300, audit={"max_rows": 10})
+    rows = [record(ACCEPTED[0], "q0"), record(ACCEPTED[1], "q1"), record(ACCEPTED[2], "q2")]
+    result = await adapter(audit_driver(*rows), small).slow_queries(60, "query_time", SCOPE)
+
+    assert result.row_count == 1 and result.truncated
+    assert result.counts["checked_candidates"] == 2
+    assert result.counts["omitted_result_too_large"] == 1
+    assert result.counts["unchecked_candidates"] == 1
+
+
 @pytest.mark.parametrize(
     ("stmts", "truncated"),
     [
@@ -589,14 +637,14 @@ async def test_parsing_stops_once_the_client_deadline_has_passed(
 ) -> None:
     """候选在线程中逐行检查；期限到达时本次调用按超时失败，线程也随即停止，不在后台检查完剩余候选。"""
     checked: list[str] = []
-    real = starrocks._within_scope
+    real = starrocks._audit_scope
 
-    def slow(sql: str, policy: Any, database: str, audit: AuditSource) -> bool:
+    def slow(sql: str, policy: Any, database: str, audit: AuditSource) -> str:
         checked.append(sql)
         time.sleep(0.05)
-        return bool(real(sql, policy, database, audit))
+        return real(sql, policy, database, audit)
 
-    monkeypatch.setattr(starrocks, "_within_scope", slow)
+    monkeypatch.setattr(starrocks, "_audit_scope", slow)
     rows = [record("SELECT secret FROM sales", query_id=f"q{i}") for i in range(100)]
     t = target(audit={"candidate_rows": 100})  # 客户端期限 1 秒，约可检查 20 行
     failed = await failure(adapter(audit_driver(*rows), t).slow_queries(60, "query_time", SCOPE))

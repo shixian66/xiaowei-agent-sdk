@@ -134,7 +134,9 @@ AUDIT_NOTE: Final = (
     "审计记录由 AuditLoader 批量导入，最近约一个导入周期内的查询可能尚未出现；SQL 中未写库名的表"
     "按 database 列（语句执行时的当前库，空值为没有当前库）解析。只显示能确认引用对象全部获准的"
     "查询，且每次只检查有限条候选记录：列表可能少于上限，为空也不代表没有慢查询；标记截断时列表"
-    "不完整，可能还有未检查或未列出的记录。指标为 StarRocks 实测值，空值表示未知。"
+    "不完整，可能还有未检查或未列出的记录。计数只覆盖本次读取的候选；more_candidates 为真"
+    "表示候选读取已截断，之外的数量未知。isQuery 与 catalog 在数据库端过滤，排除数量未知；需"
+    "完整审计口径时请直接查询获准审计表。指标为 StarRocks 实测值，空值表示未知。"
 )
 SCHEMA_NOTE: Final = (
     "表结构来自定期采集的元数据快照（采集时间见来源），只含只读账号可 SELECT 的对象；"
@@ -178,6 +180,18 @@ PLAN_NOTE: Final = (
 )
 
 RESULT_FIELDS: Final = ("sql", "columns", "rows", "row_count", "elapsed_ms")
+AUDIT_FIELDS: Final = (
+    *RESULT_FIELDS,
+    "checked_candidates",
+    "omitted_sqlguard",
+    "omitted_self",
+    "omitted_statement_too_long",
+    "omitted_value_too_large",
+    "omitted_result_too_large",
+    "omitted_revoked",
+    "unchecked_candidates",
+    "more_candidates",
+)
 PAGED_FIELDS: Final = (*RESULT_FIELDS, "next_cursor")
 """搜表与表结构另带续取游标：还有未交付的对象或列时非空（见 ``_cursor``）。"""
 _DATABASE_PROBE_LIMIT: Final = 32
@@ -782,16 +796,34 @@ def starrocks_tools(
                 ),
             ]
             filtered = result.model_copy(update={"rows": rows, "row_count": len(rows)})
-            return _observation(filtered, bounds, dependencies)
+            return _observation(
+                filtered,
+                bounds,
+                dependencies,
+                extra={**result.counts, "omitted_revoked": len(result.rows) - len(rows)},
+            )
 
-        audit_policy = policy("list_slow_queries", ListSlowQueriesArgs, AUDIT_NOTE)
+        audit_policy = policy("list_slow_queries", ListSlowQueriesArgs, AUDIT_NOTE, AUDIT_FIELDS)
+        # 每个计数最大为候选/输出上限；用真实投影器检查新增必需字段能随最坏结果交付。
+        maximum = audit.candidate_rows
+        payload = {
+            **worst.payload,
+            **{name: maximum for name in AUDIT_FIELDS if name not in RESULT_FIELDS},
+            "omitted_revoked": audit.max_rows,
+            "more_candidates": True,
+        }
+        try:
+            check_projection_capacity(audit_policy, worst.model_copy(update={"payload": payload}))
+        except ValueError as exc:
+            raise ValueError(f"StarRocks 工具：{exc}") from None
         contracts.append(
             contract(
                 SLOW_QUERIES,
                 audit_policy,
                 "列出最近一段时间内所选集群实际运行过的慢查询（来自审计表），按所选指标降序；只列出"
                 "引用对象全部获准的查询，给出实测耗时、扫描量、CPU、内存、排队时间、执行时的当前库"
-                "与 SQL 原文；不含身份列，也不能代替用户指定的审计 SQL。"
+                "与 SQL 原文；结果另给已检查、各原因未列出、未检查候选的数量及候选截断标记。"
+                "不含身份列，也不能代替用户指定的审计 SQL。"
                 f"时间窗为 1 到 {limit} 分钟；"
                 "database 为 null 时读取所有库的记录，"
                 "否则只读执行时当前库为它的记录。",
