@@ -1,7 +1,7 @@
 # 自然回答与完整结果交付修复实施计划
 
 > 文档版本：v1.4，2026-10-14，Asia/Shanghai。源码基线 `0c54442fbd15d92e2d9fc544b6e7cddd8cc0cbca`（本地 `origin/main`，含 PR #99）；审查版本为包含本文件的精确 Git 提交，不以源码基线代替。
-> **执行说明：** D1a已授权连续实现、测试、常规修复和本地提交；按用户最新指令，先本地审核验收，暂不推送/开PR，无合并/部署授权。串行交付本切片，使用 `superpowers:executing-plans`；真实模型/平台门槛保留。
+> **执行说明：** D1a已授权连续实现、测试、常规修复和本地提交；实施已同步主线`cc03eeb`，设计仍以批准的v1.4 `b58f0d9`为准。按用户最新指令，先本地审核验收，暂不推送/开PR，无合并/部署授权。串行交付本切片，使用 `superpowers:executing-plans`；真实模型/平台门槛保留。
 
 **目标：** 普通回复简洁自然；模型引用及既有代码强制引用的获准结果、已保存分析完整可得；其他成功调查只提供简短依据索引；HTML/MD 在同类场景共用可读展示；部分投递可定位和手动恢复。
 
@@ -128,6 +128,10 @@ D0 → D1a 为共同基础。D1b、D2、D3 可分别推进：D2/D3 的单文件�
 
 ### D1a：单文件加正文、分项状态和手动恢复
 
+**本地实施状态：** 交付源码`4b440f9`增量复审通过；最终检查发现下述既有P1取消竞态，补修源码`955156e4de65ec3d15374f42dca6da8c479bc079`已独立复审，无新增阻断。检查结果和仍待真实环境验证的部分只在[AGENT_HANDOFF当前快照](../../../AGENT_HANDOFF.md#3-当前计划与下一项工作)维护。下列为验收清单，不以代码存在替代通过证据；用户审核验收后才考虑PR。
+
+**验收发现的必要常规修复：** 锁版SDK取消Runner时仅取消工具任务，不等其清理完成；原恢复层可能抢先把已开始的写记为rejected，与工具保存unknown竞争。此恢复段及Action CAS与主线`cc03eeb`相同，是既有缺陷，但影响C7失败验收。按[ARCHITECTURE §5审批取消与超时](../../../ARCHITECTURE.md#monitoring-mcp)的既定契约修复：只记住SDK已创建的本次执行任务，恢复层在原有5秒落定期限内等其结束，然后处理确实未进入写的占位；清理失败仍锁低全实例，不能再尝试rejected。不开另一套Loop/后台收尾，不增加配置、持久状态、权限或重试，不放宽attempt防重。真SDK/治理/PG屏障回归验证一次unknown、原turn不提前释放、收尾保存失败仍停止和重复批准零写；精确版本独立审查见§7。
+
 **涉及：** models/evidence/app、feishu_render/report、channel/store、feishu/cli/storage 与下一迁移；复用 test_feishu_reports、test_channel_service、test_channel_store、test_evidence、test_r3_render 及群 Action/恢复测试。
 
 <a id="d1a-review-1-5"></a>
@@ -206,17 +210,22 @@ D0 → D1a 为共同基础。D1b、D2、D3 可分别推进：D2/D3 的单文件�
 
 ## 5. 环境、检查与恢复
 
-文档阶段仅事实、链接/anchor、差异、现有文档检查和无网络 SDK 核查。原环境缺 Pillow 等依赖不安装到用户运行环境，也不宣称产品套件通过。
-
-实施前独立环境按锁文件准备；下列是**计划命令，本次未运行产品回归**：
+D0仅做文档与无网络SDK核查；D1a已在隔离工作树按锁文件建立独立`.venv`，不借用原目录运行环境。当前本地检查命令如下，结果见AGENT_HANDOFF：
 
 ```bash
 uv sync --locked --extra dev
-uv run --locked python -m pytest tests/sdk_core/test_feishu_render.py tests/sdk_core/test_feishu_reports.py tests/sdk_core/test_channel_service.py tests/sdk_core/test_channel_store.py -q
-uv run --locked python -m pytest tests/security/test_docs_command_consistency.py -q
+SDK_TEST_POSTGRES_URL=postgresql+asyncpg://postgres@127.0.0.1:55432/postgres .venv/bin/python -m pytest -q
+.venv/bin/python -m pytest -q --ignore=tests/sdk_core --ignore=tests/deployment --ignore=tests/spike
+.venv/bin/python -m pytest -m security -q
+.venv/bin/ruff check --no-cache .
+.venv/bin/mypy src --no-incremental
+uv lock --check
+git diff --check
 ```
 
-按切片补上节受影响测试，按真实路径做 Ruff/mypy/`git diff --check`，不扩成旧包全仓验证。存储用仓库 compose.sdk-test.yml/postgres_harness.py 与 SDK_TEST_POSTGRES_URL，仅 loopback；浏览器沿 -m browser/SDK_TEST_CHROME、本地正式入口/文件，不占用户端口。真实模型/飞书/公司源/部署另获授权；合成平台不能代替真实去重验证。
+全套/单元/安全检查遵循当前CI，分别记证据；新增回归和改动文件格式先单独验证。存储用仓库compose.sdk-test.yml/postgres_harness.py与SDK_TEST_POSTGRES_URL，仅loopback，每用例独立数据库；容器只操作测试自建资源。构建wheel并在仓库外仅安装锁定运行依赖，核对`xiaowei --help`与`python -m xiaowei --help`、v12迁移资源及无旧包/alembic。浏览器沿-m browser/SDK_TEST_CHROME与本地正式入口，不占用户端口。真实模型/飞书/公司源/部署另获授权；合成平台不能代替真实去重验证。
+
+依赖审计与Git密钥扫描复用[CI工作流](../../../.github/workflows/ci.yml)的锁文件导出、strict审计及脱敏扫描/自测，不扫描用户未提交配置。平台不同的扫描器资产分别记录版本与校验依据；本地检查不声明远端CI通过。
 
 - 迁移前核对应用表版本，事务扩展分项/语义版本，不写 SDK Session 表；cleanup 实测级联删除。
 - 旧请求/字节不重跑、不改写、不自动续发；兼容须证明绑定，错密钥/schema I/O 前拒绝。
@@ -245,5 +254,9 @@ v1.2精确提交 `99ec6e3d8e054fd1be723e67d13aca111c854a0c` 已按用户答复�
 v1.3精确提交 `17489da4ee6074b8ccfa7759b53764a21811d4e5` 补齐验收1–5并保留当时待定的C7提案。用户现已明确替换该提案；以当前ARCHITECTURE的C7为唯一生效设计，旧提案不再约束实施。
 
 v1.4落实用户最新C7及七项简化：审批卡先发、对应材料分项确认即可满足送达条件；不新增总文件量、容量终态、失败提示账本、重复分项元数据、四维说明或范围/历史辅助分类。投递每attempt完整复核一次，手动补发重查，接受期间撤权窗口；旧attempt、上传未知、平台ID、附件先于“见附件”正文及单聊ID不入库保留。原验收4改成本地容量拒绝，1–5按当前契约调整。只改文档，新精确SHA供复审，不构成产品实现/部署授权。
+
+**D1a独立实现审查：** 只读复核`11a2a73 → 77f5bd2`发现旧unknown状态被失败覆盖、审批材料容量阻断独立数据、无事实失败提醒为空三项P2；修复后复核`04eceda`又发现自动附件未保持brief摘要语义。先复现后修复，精确源码`4b440f9260c7687b57bea19c6c8a21cc73b1c560`增量复审无新增阻断；独立执行两个自动摘要文件和一个显式原值文件样例均通过。补齐MD围栏结构、父请求sent不能替代审批材料回执、存储失败零后续外发的验收。最终整仓结果在handoff维护，复审不代表真实环境或用户验收。
+
+**取消补修独立复审：** 精确差异`b322f62a07b189d7237ed331ba3b84344f58f195 → 955156e4de65ec3d15374f42dca6da8c479bc079`只读审查通过，P1关闭；核对执行任务登记先于首个await、按attempt隔离、沿原5秒期限等待及readiness再次核实，Action CAS与权限不变。审查人另做SDK取消事件屏障和等待者取消/超时的离线实验；未独立重跑PG/容器或完整回归。正式链二次取消/等待超时的专门屏障样例为非阻断补充建议，不以helper实验宣称真实模型或平台通过。
 
 每片记录精确 SHA、实际差异/检查、任务质量与治理结果、代码/离线/模型/工具/渠道/部署/用户验收层级和下一项。普通文档不重复评审；本设计跨数据/审批/恢复边界，实施前须独立审查。自行复查、合成平台和文档检查不能替代独立/真实验收。
