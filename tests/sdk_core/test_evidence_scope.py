@@ -241,12 +241,15 @@ class Outbox:
         return self.outcome
 
 
-def query(message: str, sql: str = "SELECT region, total FROM sales") -> tuple[str, Any]:
+def query(message: str, sql: str = "SELECT region, total FROM shop.sales") -> tuple[str, Any]:
     return message, tool_call("run_readonly_query", cluster=SR.target_id, sql=sql)
 
 
 async def saved(
-    env: Env, rt: runtime.Runtime, request_id: str, sql: str = "SELECT region, total FROM sales"
+    env: Env,
+    rt: runtime.Runtime,
+    request_id: str,
+    sql: str = "SELECT region, total FROM shop.sales",
 ) -> RequestRecord:
     """经正式路径完成一轮查询并保存（未发送）；返回已保存的请求。"""
     message = env.scripts.add(f"查询 {request_id}", query(request_id, sql)[1], cite())
@@ -384,7 +387,9 @@ async def test_unverifiable_access_at_the_end_of_a_turn_keeps_the_session(env: E
 
         message = env.scripts.add(
             "查询后断开",
-            tool_call("run_readonly_query", cluster=SR.target_id, sql="SELECT region FROM sales"),
+            tool_call(
+                "run_readonly_query", cluster=SR.target_id, sql="SELECT region FROM shop.sales"
+            ),
             disconnect_then_cite,
         )
         record = await env.turn(rt, message, "om_1")
@@ -403,7 +408,7 @@ async def test_unverifiable_access_at_the_end_of_a_turn_keeps_the_session(env: E
 async def test_view_facts_remain_readable_across_turns_history_and_resend(env: Env) -> None:
     config = env.config()
     async with env.opened(config) as rt:
-        await saved(env, rt, "om_1", sql="SELECT region FROM v_sales")
+        await saved(env, rt, "om_1", sql="SELECT region FROM shop.v_sales")
         outbox = Outbox()
         assert await rt.service.results.send(ref("om_1"), outbox) == "failed"
         (delivery,) = outbox.sent
@@ -428,7 +433,7 @@ async def test_view_facts_remain_readable_across_turns_history_and_resend(env: E
 async def test_saved_view_dependency_with_replayable_false_needs_no_migration(env: Env) -> None:
     config = env.config()
     async with env.opened(config) as rt:
-        await saved(env, rt, "om_1", sql="SELECT region FROM v_sales")
+        await saved(env, rt, "om_1", sql="SELECT region FROM shop.v_sales")
         # 直接写回已上线格式的 JSON，读取路径不能依赖新生成的 Python 对象。
         raw = await env.scalar("SELECT dependencies FROM xiaowei_evidence")
         body = json.loads(raw)
@@ -450,7 +455,7 @@ async def test_saved_view_still_requires_current_access_and_dependency(
 ) -> None:
     config = env.config()
     async with env.opened(config) as rt:
-        await saved(env, rt, "om_1", sql="SELECT region FROM v_sales")
+        await saved(env, rt, "om_1", sql="SELECT region FROM shop.v_sales")
         if change == "revoked":
             env.db.revoked = {VIEW}
         elif change == "dropped":
@@ -472,7 +477,7 @@ async def test_saved_view_still_requires_current_access_and_dependency(
 async def test_view_redefinition_with_unchanged_read_columns_keeps_old_fact(env: Env) -> None:
     config = env.config()
     async with env.opened(config) as rt:
-        await saved(env, rt, "om_1", sql="SELECT region FROM v_sales")
+        await saved(env, rt, "om_1", sql="SELECT region FROM shop.v_sales")
         # 模拟同名重建：当前视图查询结果改变，版本仍为 0，已读取列名/类型不变。
         env.db.query = Result(("region",), [("west",)])
         env.db.forget()
@@ -510,7 +515,9 @@ async def test_group_view_fact_stays_with_authorized_group_members(env: Env) -> 
     async with env.opened(config, members=is_member) as rt:
         first = env.scripts.add(
             "群看视图",
-            tool_call("run_readonly_query", cluster=SR.target_id, sql="SELECT region FROM v_sales"),
+            tool_call(
+                "run_readonly_query", cluster=SR.target_id, sql="SELECT region FROM shop.v_sales"
+            ),
             cite(),
         )
         done_a = await group_turn(rt, first, "om_a", "ou_alice")
@@ -575,7 +582,9 @@ async def test_the_same_turn_may_cite_view_facts(env: Env) -> None:
     async with env.opened(config) as rt:
         message = env.scripts.add(
             "看视图",
-            tool_call("run_readonly_query", cluster=SR.target_id, sql="SELECT region FROM v_sales"),
+            tool_call(
+                "run_readonly_query", cluster=SR.target_id, sql="SELECT region FROM shop.v_sales"
+            ),
             cite(),
         )
         record = await env.turn(rt, message, "om_1")
@@ -592,7 +601,7 @@ async def test_explain_facts_follow_current_access(env: Env) -> None:
     async with env.opened(config) as rt:
         message = env.scripts.add(
             "计划",
-            tool_call("explain_query", cluster=SR.target_id, sql="SELECT region FROM sales"),
+            tool_call("explain_query", cluster=SR.target_id, sql="SELECT region FROM shop.sales"),
             cite(),
         )
         assert (await env.turn(rt, message, "om_1")).state == "completed"
@@ -615,7 +624,7 @@ async def test_explain_of_an_object_revoked_since_the_refresh_is_never_delivered
         env.db.revoked = {("shop", "sales")}
         message = env.scripts.add(
             "撤权后的计划",
-            tool_call("explain_query", cluster=SR.target_id, sql="SELECT region FROM sales"),
+            tool_call("explain_query", cluster=SR.target_id, sql="SELECT region FROM shop.sales"),
             cite(),
         )
         record = await env.turn(rt, message, "om_1")
@@ -714,7 +723,9 @@ async def test_web_first_delivery_and_history_follow_the_same_rules(env: Env) ->
         await served.page()
         view_message = env.scripts.add(
             "网页看视图",
-            tool_call("run_readonly_query", cluster=SR.target_id, sql="SELECT region FROM v_sales"),
+            tool_call(
+                "run_readonly_query", cluster=SR.target_id, sql="SELECT region FROM shop.v_sales"
+            ),
             cite(),
         )
         body = (await served.turn(view_message, "query", "r1")).json()
@@ -724,7 +735,9 @@ async def test_web_first_delivery_and_history_follow_the_same_rules(env: Env) ->
 
         table_message = env.scripts.add(
             "网页看表",
-            tool_call("run_readonly_query", cluster=SR.target_id, sql="SELECT region FROM sales"),
+            tool_call(
+                "run_readonly_query", cluster=SR.target_id, sql="SELECT region FROM shop.sales"
+            ),
             cite(),
         )
         continued = (await served.turn(table_message, "query", "r2")).json()
@@ -753,7 +766,7 @@ async def test_every_target_in_a_batch_is_verified(env: Env) -> None:
             lambda call: [
                 function_call(
                     "run_readonly_query",
-                    {"cluster": t, "sql": "SELECT region FROM sales"},
+                    {"cluster": t, "sql": "SELECT region FROM shop.sales"},
                     call_id=f"q-{t}",
                 )
                 for t in ("sr-a", "sr-b")
@@ -806,7 +819,9 @@ async def test_an_unrelated_target_does_not_affect_history(env: Env) -> None:
     async with env.opened(config) as rt:
         message = env.scripts.add(
             "只看 sr-a",
-            tool_call("run_readonly_query", cluster="sr-a", sql="SELECT region, total FROM sales"),
+            tool_call(
+                "run_readonly_query", cluster="sr-a", sql="SELECT region, total FROM shop.sales"
+            ),
             cite(),
         )
         assert (await env.turn(rt, message, "om_1")).state == "completed"
@@ -859,9 +874,9 @@ async def test_revoked_metadata_facts_are_never_delivered_again(env: Env, tool: 
 
 WIDE = {("shop", f"t{i}"): (("region", "varchar", "YES", None),) for i in range(6)}
 WIDE_SQL = (
-    "SELECT t0.region FROM t0 JOIN t1 ON t1.region = t0.region "
-    "JOIN t2 ON t2.region = t0.region JOIN t3 ON t3.region = t0.region "
-    "JOIN t4 ON t4.region = t0.region JOIN t5 ON t5.region = t0.region"
+    "SELECT t0.region FROM shop.t0 JOIN shop.t1 ON t1.region = t0.region "
+    "JOIN shop.t2 ON t2.region = t0.region JOIN shop.t3 ON t3.region = t0.region "
+    "JOIN shop.t4 ON t4.region = t0.region JOIN shop.t5 ON t5.region = t0.region"
 )
 
 
@@ -895,7 +910,7 @@ def both_clusters(env: Env, message: str) -> str:
         lambda call: [
             function_call(
                 "run_readonly_query",
-                {"cluster": t, "sql": "SELECT region FROM sales"},
+                {"cluster": t, "sql": "SELECT region FROM shop.sales"},
                 call_id=f"q-{t}",
             )
             for t in ("sr-a", "sr-b")

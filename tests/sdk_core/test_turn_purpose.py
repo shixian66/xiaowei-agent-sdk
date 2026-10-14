@@ -43,10 +43,10 @@ pytestmark = pytest.mark.loopback
 
 ADVICE_HEADER = "建议（本轮未执行业务查询；模型生成，未经系统核实）"
 QUERY = "run_readonly_query"
-SALES_SQL = "SELECT region, total FROM sales"
+SALES_SQL = "SELECT region, total FROM shop.sales"
 
 
-def advise(text: str = "SELECT region, SUM(total) AS total FROM sales GROUP BY region") -> Any:
+def advise(text: str = "SELECT region, SUM(total) AS total FROM shop.sales GROUP BY region") -> Any:
     body = {"evidence_ids": [], "inferences": [], "clarification": None, "advice": text}
     return lambda call: [assistant_message(json.dumps(body, ensure_ascii=False))]
 
@@ -116,7 +116,7 @@ CROSS_DB = (
     "SELECT t.region, r.name, RANK() OVER (ORDER BY t.total DESC) AS place "
     "FROM t JOIN shop.regions AS r ON t.region = r.region"
 )
-UNION = "SELECT region FROM sales UNION ALL SELECT region FROM regions"
+UNION = "SELECT region FROM shop.sales UNION ALL SELECT region FROM shop.regions"
 
 
 def ranking_cluster(target_id: str) -> dict[str, Any]:
@@ -185,8 +185,8 @@ async def test_a_forced_query_in_a_do_not_run_message_is_still_guarded(env: Env)
     async with env.opened(env.config()) as rt:
         # 越权的 SQL：I/O 前拒绝；模型据拒绝原因只给建议，不伪装成查询结果。
         refused = env.scripts.add(
-            "不要执行，只看看这条 SQL：SELECT secret FROM sales",
-            run_query("SELECT secret FROM sales"),
+            "不要执行，只看看这条 SQL：SELECT secret FROM shop.sales",
+            run_query("SELECT secret FROM shop.sales"),
             advise(),
         )
         record = await turn(env, rt, refused, "om_1")

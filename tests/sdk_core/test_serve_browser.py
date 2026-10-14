@@ -129,7 +129,9 @@ async def test_formal_assembly_turns_in_chrome(env: Env, chrome_binary: str) -> 
         query = env.scripts.add(
             "浏览器查询销售额",
             tool_call(
-                "run_readonly_query", cluster=SR.target_id, sql="SELECT region, total FROM sales"
+                "run_readonly_query",
+                cluster=SR.target_id,
+                sql="SELECT region, total FROM shop.sales",
             ),
             cite(),
         )
@@ -141,7 +143,9 @@ async def test_formal_assembly_turns_in_chrome(env: Env, chrome_binary: str) -> 
         env.drv.make = driver(PLAN).make
         plan = env.scripts.add(
             "浏览器查看执行计划",
-            tool_call("explain_query", cluster=SR.target_id, sql="SELECT region, total FROM sales"),
+            tool_call(
+                "explain_query", cluster=SR.target_id, sql="SELECT region, total FROM shop.sales"
+            ),
             cite(),
         )
         await send(page, plan, "diagnose")

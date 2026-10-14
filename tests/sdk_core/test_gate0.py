@@ -832,7 +832,8 @@ def diagnose(messages: list[dict[str, Any]]) -> dict[str, Any]:
 
 
 def explain_listed(messages: list[dict[str, Any]]) -> dict[str, Any]:
-    sql = _tool_results(messages)[-1]["data"]["rows"][0]["sql"]
+    row = _tool_results(messages)[-1]["data"]["rows"][0]
+    sql = row["sql"].replace("FROM orders", f"FROM {row['database']}.orders")
     return call_tool("explain_query", cluster=gate0.DIAG_TARGET.target_id, sql=sql)(messages)
 
 
@@ -858,7 +859,11 @@ def scripted_diagnosis() -> GeminiLikeEndpoint:
         database="shop",
         table="orders",
     )
-    pasted = call_tool("explain_query", cluster=gate0.DIAG_TARGET.target_id, sql=gate0.SLOW_SQL)
+    pasted = call_tool(
+        "explain_query",
+        cluster=gate0.DIAG_TARGET.target_id,
+        sql=gate0.SLOW_SQL.replace("FROM orders", "FROM shop.orders"),
+    )
     unapproved = call_tool(
         "explain_query", cluster=gate0.DIAG_TARGET.target_id, sql=gate0.UNAPPROVED_SQL
     )
@@ -868,7 +873,9 @@ def scripted_diagnosis() -> GeminiLikeEndpoint:
         "pasted_sql": [pasted, layout, diagnose],
         "previous_query": [
             call_tool(
-                "run_readonly_query", cluster=gate0.DIAG_TARGET.target_id, sql=gate0.SLOW_SQL
+                "run_readonly_query",
+                cluster=gate0.DIAG_TARGET.target_id,
+                sql=gate0.SLOW_SQL.replace("FROM orders", "FROM shop.orders"),
             ),
             diagnose,
         ],
@@ -932,7 +939,7 @@ def _dx(name: str, *statements: tuple[gate0.StatementKind, str], **values: Any) 
 
 
 EXPLAINED = gate0._explained(gate0.SLOW_SQL)
-RAN = guard_readonly_query("SELECT region FROM orders", gate0.DIAG_POLICY).normalized_sql
+RAN = guard_readonly_query("SELECT region FROM shop.orders", gate0.DIAG_POLICY).executed_sql
 
 
 def _passing_diagnosis() -> list[gate0.DiagnosisResult]:
@@ -1009,13 +1016,16 @@ def test_diagnosis_judge_rejects_missing_evidence(
 # ---- 合成替身的语句分类（审查 N1）：只有 Adapter 模板本身才算元数据或审计读取 ------------------
 
 LOOKALIKES = {
-    "表清单字面量": "SELECT region FROM orders WHERE status = 'information_schema.tables'",
-    "列字面量": "SELECT region FROM orders WHERE status = 'information_schema.columns'",
-    "布局字面量": "SELECT region FROM orders WHERE status = 'information_schema.tables_config'",
-    "审计表名字面量": (
-        "SELECT region FROM orders WHERE status = '`starrocks_audit_db__`.`starrocks_audit_tbl__`'"
+    "表清单字面量": "SELECT region FROM shop.orders WHERE status = 'information_schema.tables'",
+    "列字面量": "SELECT region FROM shop.orders WHERE status = 'information_schema.columns'",
+    "布局字面量": (
+        "SELECT region FROM shop.orders WHERE status = 'information_schema.tables_config'"
     ),
-    "会话前缀字面量": "SELECT region FROM orders WHERE status = 'SELECT @@query_timeout'",
+    "审计表名字面量": (
+        "SELECT region FROM shop.orders WHERE status = "
+        "'`starrocks_audit_db__`.`starrocks_audit_tbl__`'"
+    ),
+    "会话前缀字面量": "SELECT region FROM shop.orders WHERE status = 'SELECT @@query_timeout'",
 }
 
 
@@ -1037,7 +1047,11 @@ async def test_adapter_templates_are_classified_by_exact_match() -> None:
     await adapter.describe_layout("shop", "orders", frozenset(gate0.DIAG_COLUMNS))
     for order in ("query_time", "scan_rows"):
         await adapter.slow_queries(60, order, gate0.DIAG_POLICY)
-    await adapter.explain(guard_explain_query(gate0.SLOW_SQL, gate0.DIAG_POLICY))
+    await adapter.explain(
+        guard_explain_query(
+            gate0.SLOW_SQL.replace("FROM orders", "FROM shop.orders"), gate0.DIAG_POLICY
+        )
+    )
     kinds = [k for k, _ in starrocks.statements if k != "session"]
     assert kinds == ["schema", "schema", "schema", "probe", "layout", "audit", "audit", "explain"]
     assert {k for k, _ in starrocks.statements} - set(kinds) == {"session"}
@@ -1062,9 +1076,9 @@ def test_no_evidence_sample_rejects_clarifying_after_obtaining_evidence() -> Non
 
 
 def test_previous_sql_accepts_the_original_sql_without_the_added_limit() -> None:
-    """模型解释上一轮的原句（不带代码追加的 LIMIT）：规范化后就是执行过的那条，合格。"""
-    original = "select region from orders"
-    ran = guard_readonly_query(original, gate0.DIAG_POLICY).normalized_sql
+    """模型解释上一轮的原句（不带代码追加的 LIMIT）仍是同一查询，合格。"""
+    original = "select region from shop.orders"
+    ran = guard_readonly_query(original, gate0.DIAG_POLICY).executed_sql
     assert "LIMIT" in ran
     results = _passing_diagnosis()
     results[3] = _dx("previous_query", ("query", ran), cited_tools=(RUN_QUERY,))
@@ -1310,7 +1324,7 @@ def test_intent_judge_allows_metadata_tools_and_a_corrected_query() -> None:
 
 def test_request_shape_records_only_offered_tool_names_of_this_turn() -> None:
     """记录本轮选择的函数名（按出现顺序），不含参数；未展示的名字只记占位，历史轮次不计。"""
-    unapproved = "SELECT customer_phone FROM orders"
+    unapproved = "SELECT customer_phone FROM shop.orders"
 
     def call(name: str) -> dict[str, Any]:
         arguments = json.dumps({"sql": unapproved})

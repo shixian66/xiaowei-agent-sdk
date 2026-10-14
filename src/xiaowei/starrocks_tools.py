@@ -19,11 +19,11 @@
 ``local/describe_table_layout`` 同样先探测，再读该表的布局；两个 ``describe`` 工具按
 ``database`` 与 ``table`` 定位快照中的对象。``local/run_readonly_query`` 只执行 SQLGuard
 产生的 ``GuardedQuery``，``local/explain_query`` 只以 Adapter 的固定显式级别 EXPLAIN
-``ExplainQuery``，不执行被解释的查询；二者的 SQLGuard 范围是快照中默认库的可读对象与列，
+``ExplainQuery``，不执行被解释的查询；二者的 SQLGuard 范围是快照中全部库的可读对象与列，
 执行时由数据库自己的权限检查最终把关。配置的审计源表也按同一可读性探测进入快照；慢查询
 列表仍单独过滤读取审计表自身的语句。对象核对与 SQLGuard 都是 ``Prechecked`` 的同步前置
-检查：在当前授权之后、预算预留与任何 StarRocks I/O 之前运行，拒绝时模型只收到固定原因码与
-说明，可在本轮剩余轮次内修正。
+检查：在当前授权之后、预算预留与任何 StarRocks I/O 之前运行，拒绝时模型收到固定原因码、
+说明及缺库名时当前可读快照中的有限候选，可在本轮剩余轮次内修正。
 
 ``local/list_slow_queries`` 只在目标配置了审计源时登记：读已有审计表中所有库（或可选的一个会话
 当前库）、原文通过当前快照 SQLGuard 范围的慢查询（见 ``StarRocksAdapter.slow_queries``）；原文中
@@ -178,8 +178,14 @@ PLAN_NOTE: Final = (
     "执行计划是优化器按当前统计信息给出的估算；获取时未执行原查询，不包含实际耗时与资源消耗。"
     "没有对应审计记录时，不能确认实际运行慢的原因。"
 )
+QUERY_NOTE: Final = (
+    "requested_limit 是原文顶层 LIMIT，缺省为 null；applied_limit 是实际执行的 LIMIT。"
+    "两者不同或 requested_limit 为 null 时，小维为控制返回量追加或下调了 LIMIT；"
+    "此时最多交付 applied_limit 减 1 行，多取的 1 行仅用于判断截断。"
+)
 
 RESULT_FIELDS: Final = ("sql", "columns", "rows", "row_count", "elapsed_ms")
+QUERY_FIELDS: Final = (*RESULT_FIELDS, "requested_limit", "applied_limit")
 AUDIT_FIELDS: Final = (
     *RESULT_FIELDS,
     "checked_candidates",
@@ -344,7 +350,7 @@ def starrocks_tools(
     describe_policy = policy("describe_table", DescribeTableArgs, DESCRIBE_NOTE, PAGED_FIELDS)
     layout_policy = policy("describe_table_layout", TableArgs, LAYOUT_NOTE)
     ddl_policy = policy("show_create_table", TableArgs, DDL_NOTE, DDL_FIELDS)
-    query_policy = policy("run_readonly_query", RunQueryArgs)
+    query_policy = policy("run_readonly_query", RunQueryArgs, QUERY_NOTE, QUERY_FIELDS)
     explain_policy = policy("explain_query", ExplainQueryArgs, PLAN_NOTE)
     # 其余策略的投影与查询相同，检查一次即覆盖；搜表与表结构多一个续取游标，按它们的实际形态
     # 另查：SQL 与列头是固定的元数据模板，行与查询同受 ``max_result_bytes`` 约束，游标按最长的
@@ -624,7 +630,9 @@ def starrocks_tools(
     def check_query(request: ToolRequest) -> tuple[SchemaSnapshot, GuardedQuery]:
         code: QueryRejectionCode | None = None
         message = ""
-        hint = None
+        candidates: tuple[dict[str, object], ...] = ()
+        missing = 0
+        more = False
         snapshot = current()
         try:
             return snapshot, guard_readonly_query(
@@ -633,19 +641,32 @@ def starrocks_tools(
         except QueryRejectedError as exc:
             code = exc.code
             message = str(exc)
-            hint = exc.hint
+            candidates, missing, more = exc.unqualified_tables, exc.missing_tables, exc.more
         # 在 except 之外抛出：拒绝只带固定原因码与说明，不带 SQLGuard 异常的上下文。
-        raise ToolRejectedError(f"查询未执行（{code}）：{message}", query_reject=code, hint=hint)
+        raise ToolRejectedError(
+            f"查询未执行（{code}）：{message}",
+            query_reject=code,
+            unqualified_tables=candidates,
+            missing_tables=missing,
+            more=more,
+        )
 
     async def run_query(checked: tuple[SchemaSnapshot, GuardedQuery]) -> ToolObservation:
         snapshot, query = checked
         dependencies = _referenced(snapshot, query.referenced_objects, query.referenced_columns)
-        return _observation(await adapter.run_query(query), bounds, dependencies)
+        return _observation(
+            await adapter.run_query(query),
+            bounds,
+            dependencies,
+            extra={"requested_limit": query.requested_limit, "applied_limit": query.applied_limit},
+        )
 
     def check_explain(request: ToolRequest) -> tuple[SchemaSnapshot, ExplainQuery]:
         code: QueryRejectionCode | None = None
         message = ""
-        hint = None
+        candidates: tuple[dict[str, object], ...] = ()
+        missing = 0
+        more = False
         snapshot = current()
         try:
             return snapshot, guard_explain_query(
@@ -654,9 +675,13 @@ def starrocks_tools(
         except QueryRejectedError as exc:
             code = exc.code
             message = str(exc)
-            hint = exc.hint
+            candidates, missing, more = exc.unqualified_tables, exc.missing_tables, exc.more
         raise ToolRejectedError(
-            f"执行计划未获取（{code}）：{message}", query_reject=code, hint=hint
+            f"执行计划未获取（{code}）：{message}",
+            query_reject=code,
+            unqualified_tables=candidates,
+            missing_tables=missing,
+            more=more,
         )
 
     async def explain(checked: tuple[SchemaSnapshot, ExplainQuery]) -> ToolObservation:
@@ -717,9 +742,13 @@ def starrocks_tools(
             query_policy,
             "执行一条只读 SELECT 或 UNION/UNION ALL（可带 WITH、子查询与窗口函数），可跨库 JOIN。"
             "只在当前用户本条消息明确要求查询数据时调用；只解释、只写 SQL 或说了不要执行时不调用。"
-            "表名写成 库名.表名；省略库名时按全部可读库唯一匹配，不按连接默认库解析。"
+            "物理表名必须写成 库名.表名；未写库名时拒绝并给可读快照中的候选库。"
+            "只有一个候选库可补全后重试并说明所用库；多个候选先问用户，不能猜。"
+            "无候选只表示当前快照未找到或不可读。带注释的 SQL 须删除注释后重试。"
             "只能引用可读的表、视图与获准"
-            "函数；* 按表结构展开，结果列数有上限。表达式列须用 AS 起别名，结果列名不能重复。"
+            "函数；* 按快照检查依赖，结果列数与列头容量有上限。表达式列可不写 AS，"
+            "结果列名以 StarRocks 返回为准，重名时拒绝。SQL 经审核后按原文执行，"
+            "仅可能去尾分号、追加或下调顶层 LIMIT；事实区说明原始与实际 LIMIT。"
             "结果行数有上限，超过时返回的结果标记为截断。审计表与其他可读表同样可查；"
             "长文本单值可能按容量截短，需完整 SQL 原文时检查截短标记。",
         ),
@@ -727,7 +756,9 @@ def starrocks_tools(
             EXPLAIN_QUERY,
             explain_policy,
             "获取一条只读 SELECT 或 UNION 的执行计划（优化器估算），不执行该查询。只接受与"
-            "查询相同的语法与范围（表名写法同 run_readonly_query）；结果不是实际运行数据。",
+            "查询相同的语法与范围（表名写法同 run_readonly_query）；原文只加固定"
+            " EXPLAIN LOGICAL 前缀，不执行原查询。审计慢查询的原文若未写库名，"
+            "须按该行 database 补全；database 为空时先说明无法可靠确定。",
         ),
     ]
     policies = [
@@ -844,8 +875,8 @@ DATA_SCOPE_FORMAT: Final = "xiaowei.data_scope.starrocks/8"
 /5（P2.5 Task 6）：审计改为读取所有库、按每条记录的当前库解析原文并输出该库；列表改为关键词分页。
 /6（Web 实战修复）：列库、按库遍历、完整类型与内部表原始 DDL；纳入独立 max_ddl_bytes 限额。
 /7（PR B）：普通查询的超长单值改为有界前缀和明确截短标记，行可继续返回；旧查询证据失效。
-/8（StarRocks 可靠性 R2）：拒绝带格式的 FROM_UNIXTIME，并接受已验证的函数名别名；
-   SQL 规范化与函数准入变化使旧查询证据失效。
+/8（StarRocks 可靠性 R2）：当时拒绝带格式的 FROM_UNIXTIME，并接受函数名别名；
+   S1 已撤销该拒绝。S1 未改摘要公式，普通查询旧证据因策略字段变化失效。
 """
 
 
@@ -905,9 +936,8 @@ def scope_canonical(target: StarRocksTarget) -> str:
 def worst_case_observation(adapter: StarRocksAdapter) -> ToolObservation:
     """按目标声明的上限构造序列化后最大的合成结果，供启动容量检查交给真实投影器。
 
-    实际 SQL 不超过“EXPLAIN 前缀 + SQLGuard 字节上限”与元数据模板中的较大者（查询的 SQL
-    不带前缀，被前者覆盖；星号展开后的 SQL 同样受 SQLGuard 字节上限约束）。查询的列数不超过
-    ``max_result_columns``，每个列名都以别名出现在规范化 SQL 中，因此列名合计不超过同一字节数；
+    实际 SQL 不超过“EXPLAIN 前缀 + SQLGuard 字节上限”与元数据模板中的较大者。查询列头
+    单独受 ``max_sql_bytes`` 限制，星号按快照列名预检，数据库实返列头仍在运行时复核。
     元数据、计划与审计的列头是固定的短名，也在此界内。最坏情形是列数取满、列名合计取满：除一列
     外每列一个字符（每多一列多出引号与分隔符）。运行时 ``_observation`` 按同一上限复核。SQL 与
     列名都以 JSON 转义膨胀最大的字符填满。结果行的序列化大小不超过 ``max_result_bytes``（Adapter
@@ -919,8 +949,9 @@ def worst_case_observation(adapter: StarRocksAdapter) -> ToolObservation:
         metadata_sql_bytes(),
         audit_sql_bytes(target),
     )
-    names = min(target.policy.max_result_columns, sql_bytes)
-    columns = [_WIDEST_CHAR] * (names - 1) + [_WIDEST_CHAR * (sql_bytes - names + 1)]
+    column_bytes = target.policy.max_sql_bytes
+    names = min(target.policy.max_result_columns, column_bytes)
+    columns = [_WIDEST_CHAR] * (names - 1) + [_WIDEST_CHAR * (column_bytes - names + 1)]
     return ToolObservation(
         payload={
             "sql": _WIDEST_CHAR * sql_bytes,
@@ -928,6 +959,8 @@ def worst_case_observation(adapter: StarRocksAdapter) -> ToolObservation:
             "rows": "x" * (target.max_result_bytes - 2),
             "row_count": _WIDEST_INT,
             "elapsed_ms": _WIDEST_INT,
+            "requested_limit": _WIDEST_INT,
+            "applied_limit": _WIDEST_INT,
         },
         captured_at=datetime(1, 1, 1, tzinfo=UTC),
         truncated=False,
