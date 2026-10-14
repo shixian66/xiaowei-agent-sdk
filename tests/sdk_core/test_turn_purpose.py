@@ -174,7 +174,7 @@ async def test_a_resource_limit_stops_the_turn_without_rerunning(env: Env) -> No
         # 业务 SQL 只执行了一次；模型没有得到第二次机会，本轮不自动重跑。
         assert len(env.db.business()) == 1 and len(env.scripts.calls[message]) == 1
         receipt = await delivered(rt, "om_1")
-        assert "缩小" in receipt and "canary-mem" not in receipt
+        assert "核对相关数据源和问题条件" in receipt and "canary-mem" not in receipt
 
 
 # ---- 反例中的误调：保护照常生效 -----------------------------------------------------------------

@@ -61,7 +61,7 @@ FACTS_TRUNCATED = "（工具结果超过飞书单条上限，已截断）"
 TRUNCATED = "（内容超过飞书单条消息上限，已截断）"
 EVIDENCE_FAILED = (
     "工具执行失败，或工具结果、回答未通过证据校验，本轮未交付；不会自动重试。"
-    "若查询超出时间或内存限制，请缩小时间范围或数据量后重新提问"
+    "请核对相关数据源和问题条件后重新提问，或换一种问法"
 )
 SR_TOOLS = {"list_slow_queries", "explain_query", "describe_table_layout", "describe_table"}
 
