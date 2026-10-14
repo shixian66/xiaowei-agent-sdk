@@ -135,6 +135,64 @@ async def test_failed_approval_material_has_nonempty_incomplete_hint(actions):
         assert "/批准" not in hint
 
 
+@pytest.mark.parametrize("settle_failure", [False, True])
+async def test_runner_cancellation_waits_for_started_write_to_settle_once(
+    actions, monkeypatch, settle_failure
+):
+    import asyncio
+
+    env = actions.env
+    settling, release, settled = asyncio.Event(), asyncio.Event(), asyncio.Event()
+    actions.adapter.entered = asyncio.Event()
+    actions.adapter.release = asyncio.Event()
+    attempts = []
+    original = env.store.finish_action
+
+    async def finish(action, state, *args, **kwargs):
+        attempts.append(state)
+        if state == "unknown":
+            settling.set()
+            await release.wait()
+        try:
+            if state == "unknown" and settle_failure:
+                raise OSError("synthetic unknown settlement failure")
+            await original(action, state, *args, **kwargs)
+        finally:
+            if state == "unknown":
+                settled.set()
+
+    monkeypatch.setattr(env.store, "finish_action", finish)
+    async with running(env) as group:
+        action_id, _ = await paused(actions, group)
+        receipt = await env.service.accept(
+            env.group(attributed(B, f"/批准 {action_id}"), "om_cancel_settle", actor=B)
+        )
+        processing = asyncio.create_task(env.service.approve(receipt, action_id))
+        try:
+            await asyncio.wait_for(actions.adapter.entered.wait(), 5)
+            processing.cancel()
+            await asyncio.wait_for(settling.wait(), 5)
+            # SDK Runner已返回取消，写清理尚被屏障阻塞；应用不得抢先rejected或结束原turn。
+            with pytest.raises(TimeoutError):
+                await asyncio.wait_for(asyncio.shield(processing), 0.2)
+            assert attempts == ["unknown"]
+            assert await env.rows("SELECT state FROM xiaowei_action") == [("executing",)]
+        finally:
+            release.set()
+            from xiaowei.channel_store import ChannelStoreUnavailableError
+
+            with pytest.raises(
+                ChannelStoreUnavailableError if settle_failure else asyncio.CancelledError
+            ):
+                await processing
+            await asyncio.wait_for(settled.wait(), 5)
+    assert attempts == ["unknown"] and env.store.readiness.ok is not settle_failure
+    assert await env.rows("SELECT state FROM xiaowei_action") == [
+        ("executing" if settle_failure else "unknown",)
+    ]
+    assert len(actions.adapter.calls) == 1
+
+
 async def test_native_pause_resume_writes_once_and_commits_paired_history(actions: Actions):
     env = actions.env
     # 发起人有群读取/提出权限，没有写权限；B才是本次写的批准主体。

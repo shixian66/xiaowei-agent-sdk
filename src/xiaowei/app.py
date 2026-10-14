@@ -992,7 +992,7 @@ class Application:
 
         from xiaowei.actions import ACTION_SETTLE_TIMEOUT_SECONDS, ActionStatusArgs
         from xiaowei.channel import GroupScope
-        from xiaowei.channel_store import RequestUnavailableError
+        from xiaowei.channel_store import ChannelStoreUnavailableError, RequestUnavailableError
         from xiaowei.evidence import EvidencePermissionError
         from xiaowei.governance import TurnLedger
 
@@ -1174,10 +1174,14 @@ class Application:
                     detail=diagnostic,
                     runs=self._governance.turn_runs(original.identity),
                 )
-            # 进入业务execute后由ActionService保证落定；剩下executing且存储可信只可能未进入写。
+            # SDK取消Runner不等待工具清理，先让同一执行任务落定，再处理未进入写的占位。
             if claimed is not None and store.readiness.ok:
                 try:
                     async with asyncio.timeout(ACTION_SETTLE_TIMEOUT_SECONDS):
+                        if claimed.attempt is not None:
+                            await self.actions.wait_for_execution(claimed.attempt)
+                        if not store.readiness.ok:
+                            raise ChannelStoreUnavailableError("动作结果无法可靠保存")
                         current = await store.get_action(action_id, approval_ctx.identity)
                         if current.state == "executing":
                             await store.finish_action(

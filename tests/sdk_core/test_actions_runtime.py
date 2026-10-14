@@ -158,21 +158,27 @@ async def test_formal_serve_proposes_approves_and_refuses_non_approver(
     )
     async with env.running(config, feishu_channel=channel) as served:
         channel.emit_raw_from_sdk_thread(raw_group_event(env, "提出", "om_p"))
-        await until(lambda: len(channel.sends) == 1)
+        await until(lambda: len(channel.sends) >= 1)
         await gateways[0].idle()
+        assert len(channel.sends) == 1
         action_id = await env.scalar("SELECT action_id FROM xiaowei_action")
         assert action_id is not None and adapter.calls == []
         channel.emit_raw_from_sdk_thread(raw_group_event(env, f"/批准 {action_id}", "om_denied", A))
-        await until(lambda: len(channel.sends) == 2)
+        await until(lambda: len(channel.sends) >= 2)
         await gateways[0].idle()
+        assert len(channel.sends) == 2
         assert adapter.calls == []
         if interruption == "read":
             adapter.read_release = asyncio.Event()
         elif interruption == "write":
             adapter.release = asyncio.Event()
         channel.emit_raw_from_sdk_thread(raw_group_event(env, f"/批准 {action_id}", "om_ok", B))
-        await until(lambda: len(channel.sends) == 3)
+        expected_sends = 4 if interruption is None else 3
+        await until(lambda: len(channel.sends) >= expected_sends)
         await gateways[0].idle()
+        assert len(channel.sends) == expected_sends
+        if interruption is None:
+            assert [opts["reply_to"] for _, _, opts in channel.sends[-2:]] == ["om_ok", "om_ok"]
         assert [c.arguments for c in adapter.calls] == (
             [] if interruption in {"preclaim", "read"} else [{"value": "after"}]
         )
