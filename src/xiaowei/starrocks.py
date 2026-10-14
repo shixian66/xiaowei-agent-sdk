@@ -797,7 +797,7 @@ class StarRocksAdapter:
             deadline = time.monotonic() + timeout
             async with asyncio.timeout(timeout):
                 rows, over = await asyncio.to_thread(
-                    self._listed, candidates.rows, audit.max_rows, deadline, policy
+                    self._listed, candidates.rows, audit.max_rows, deadline, policy, audit
                 )
         except TimeoutError:
             code = _Code.TIMEOUT
@@ -822,6 +822,7 @@ class StarRocksAdapter:
         max_rows: int,
         deadline: float,
         policy: QueryPolicy,
+        audit: AuditSource,
     ) -> tuple[list[dict[str, Scalar]], bool]:
         """按原排序取通过检查的行；返回 (行, 是否可能不完整)。
 
@@ -838,7 +839,9 @@ class StarRocksAdapter:
             if time.monotonic() >= deadline:
                 raise TimeoutError
             row = _audit_row(candidate)
-            if row is None or not _within_scope(row["sql"], policy, str(row["database"] or "")):
+            if row is None or not _within_scope(
+                row["sql"], policy, str(row["database"] or ""), audit
+            ):
                 continue
             if any(_json_size(v) > self._target.max_value_bytes for v in row.values()):
                 dropped = True
@@ -1188,19 +1191,19 @@ def audit_candidate_bound(target: StarRocksTarget) -> int:
     return 2 + keys + len(_AUDIT_SOURCE) * _audit_value_bound(target)
 
 
-def _within_scope(sql: Scalar, policy: QueryPolicy, database: str) -> bool:
+def _within_scope(sql: Scalar, policy: QueryPolicy, database: str, audit: AuditSource) -> bool:
     """原文在会话当前库 ``database``（``''`` 为没有当前库）下能否通过当前 SQLGuard 范围；任何
-    失败（含解析器意外异常）都按未通过处理。
+    失败（含解析器意外异常）或引用审计源表自身都按未通过处理。
 
     审计原文来自全集群、不可信：检查失败的唯一后果是这一行不列出，异常与原文都不外传。
     """
     if not isinstance(sql, str):
         return False
     try:
-        audit_references(sql, policy, database)
+        objects, _ = audit_references(sql, policy, database)
     except Exception:  # 失败即丢弃该行，不传播可能含原文的异常
         return False
-    return True
+    return (audit.database, audit.table) not in objects
 
 
 def _audit_row(candidate: dict[str, Scalar]) -> dict[str, Scalar] | None:

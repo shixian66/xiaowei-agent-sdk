@@ -614,7 +614,7 @@ def test_default_instructions_bound_retries_and_followup_evidence() -> None:
         "仍被截断就基于已有结果回答并说明限制",
         "SUBSTRING",
         "长文本列",
-        "找实际运行慢的查询优先使用 list_slow_queries",
+        "list_slow_queries 只用于无需指定 SQL 的快捷诊断",
         "只有一个合理的获准目标时无需反问或穷举发现",
         "不要改查其他集群来替代用户已选的",
         "本轮可见证据",
