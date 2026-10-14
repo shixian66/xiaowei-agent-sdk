@@ -99,6 +99,8 @@ uv run --locked xiaowei --config xiaowei.json requests resend --subject <发起�
 
 飞书中可明确要求“检查 pre 集群并生成巡检报告文件”：有获准事实时由代码生成一份 MD 文件；明确要求 HTML 时使用固定静态模板。同时要求 MD 和 HTML 会先询问选哪一种。报告写明来源、时间、事实、限制与单列的模型分析；没有成功证据不会冒充已巡检。报告功能默认启用；完整文件可交付时只发送文件，若含需完整展示的动作事实、请求尚未完成或文件超出容量，则改发一张说明原因的卡片且不上传。大小、留存、重发和真实环境验收缺口见[报告文件说明](deploy/OPERATIONS.md#飞书报告文件)。
 
+**待实施的交付改进。** 当前仍沿用上述单卡片/显式单文件行为；自动完整附件、分项投递恢复、自然主回复、通用 HTML/MD 与监控曲线仅在[修复计划](docs/superpowers/plans/2026-10-14-result-delivery-documents.md)中设计，不是当前已可使用的功能。
+
 飞书默认不读取图片、文件或富文本 post：合法且当前获准的消息获得固定说明。可显式开启 `feishu.document_input_enabled` 接收 UTF-8 TXT/MD；截图还须同时开启 `feishu.image_input_enabled` 和 Vertex 模型 Profile 的 `image_input_enabled`，仅接收单张不超过 2 MiB 的 PNG/JPEG，每会话最多 12 张，后续提问回放原图。指定群仍要求同一条消息的平台 @本机器人及当前成员资格；未 @ 的附件、post 内的 at 标签不会触发。真实 Lark 图片事件、模型识图及 12 图请求尚未验收；配置、容量和回退见[运维说明](deploy/OPERATIONS.md#飞书-pngjpeg-输入)。
 
 **目标（`targets`）。** 每项为 `type`（目前只能是 `starrocks`）、`description`（集群用途，交给模型选择集群）、`business_context`（该集群的业务口径 `{"version", "text"}`，没有则写 `null`）与 `starrocks`（连接、限额、函数闭集与结构快照上限）。集群 ID 就是 `starrocks.target_id`，只能用 1–32 位小写字母、数字、`_`、`-`，不能重复；连接地址、账号与凭据引用不交给模型。授权表按工具授予，获准用户可用全部已配置集群；模型每次调用数据工具都必须给出 `cluster`，未知集群在连接前拒绝，不会改查其他集群。旧版顶层 `starrocks`/`business_context` 会在启动时报错并给出迁移方式：把原 `starrocks` 放进 `targets` 的一项，原 `business_context` 去掉 `target_id` 后放到同一项。新增、删除集群或修改口径后，旧会话需要新建；已保存的 StarRocks 结果在本次升级后一次失效。
