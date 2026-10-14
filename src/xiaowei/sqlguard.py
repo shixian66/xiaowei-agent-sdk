@@ -48,7 +48,7 @@ import enum
 from collections.abc import Callable, Mapping
 from dataclasses import InitVar, dataclass
 from itertools import pairwise
-from typing import Annotated, Final, NoReturn, TypeVar
+from typing import Annotated, Final, Literal, NoReturn, TypeVar
 
 from pydantic import (
     BaseModel,
@@ -106,14 +106,21 @@ REJECTION_MESSAGES: Final[Mapping[QueryRejectionCode, str]] = {
     _Code.TOO_MANY_COLUMNS: "结果列数超过上限，请只选择需要的列",
     _Code.UNSUPPORTED_LIMIT: "LIMIT 只接受非负整数字面量，不支持 OFFSET",
 }
+FROM_UNIXTIME_FORMAT_HINT: Final = (
+    "FROM_UNIXTIME 暂不支持格式参数，请改写为 DATE_FORMAT(FROM_UNIXTIME(x), 格式)"
+)
 
 
 class QueryRejectedError(Exception):
     """查询在任何 I/O 前被拒绝；消息只有固定说明。"""
 
-    def __init__(self, code: QueryRejectionCode) -> None:
-        super().__init__(REJECTION_MESSAGES[code])
+    def __init__(
+        self, code: QueryRejectionCode, *, hint: Literal["from_unixtime_format"] | None = None
+    ) -> None:
+        message = REJECTION_MESSAGES[code]
+        super().__init__(f"{message}；{FROM_UNIXTIME_FORMAT_HINT}" if hint is not None else message)
         self.code = code
+        self.hint = hint
 
 
 class QueryPolicy(BaseModel):
@@ -201,6 +208,7 @@ def guard_readonly_query(sql: str, policy: QueryPolicy) -> GuardedQuery:
     :raises QueryRejectedError: 任一规则不通过；只带原因码与固定说明。
     """
     root, objects, columns = _guard(sql, policy, delivered=True)
+    _check_executable_from_unixtime(root)
     _check_result_columns(root, policy)
     returned = _cap_limit(root, policy.max_rows)
     return GuardedQuery(
@@ -219,6 +227,7 @@ def guard_explain_query(sql: str, policy: QueryPolicy) -> ExplainQuery:
     :raises QueryRejectedError: 任一规则不通过；只带原因码与固定说明。
     """
     root, objects, columns = _guard(sql, policy)
+    _check_executable_from_unixtime(root)
     return ExplainQuery(
         target_id=policy.target_id,
         normalized_sql=_normalize(root, policy),
@@ -281,7 +290,7 @@ def _normalize(root: exp.Query, policy: QueryPolicy) -> str:
         if isinstance(node, exp.DateAdd | exp.DateSub):
             number = int(node.expression.this)
             if node.args["unit"].name.upper() == "WEEK":
-                number *= 7  # StarRocks DATE_ADD/SUB 不接受 WEEK；常量周等价于七倍 DAY
+                number *= 7  # 4.1.4 原写法也可执行；常量周与七倍 DAY 实测等价。
                 node.set("unit", exp.Var(this="DAY"))
             node.set("expression", exp.Literal.number(number))
         return node
@@ -414,6 +423,13 @@ _STRUCTURAL: Final[frozenset[type[exp.Expr]]] = frozenset(
 窗口函数本身（``ROW_NUMBER``、``SUM`` 等）仍按函数 allowlist 检查。"""
 
 _DATE_UNITS: Final = frozenset({"SECOND", "MINUTE", "HOUR", "DAY", "WEEK", "MONTH", "YEAR"})
+_FUNCTION_ALIASES: Final[Mapping[str, frozenset[str]]] = {
+    "UNIX_TO_TIME": frozenset({"FROM_UNIXTIME"}),
+    "TIME_TO_STR": frozenset({"DATE_FORMAT"}),
+    "TIMESTAMP_TRUNC": frozenset({"DATE_TRUNC"}),
+    "STR_TO_TIME": frozenset({"STR_TO_DATE"}),
+    "STR_TO_DATE": frozenset({"STR_TO_TIME"}),
+}
 
 _ALLOWED_ARGS: Final[Mapping[type[exp.Expr], frozenset[str]]] = {
     exp.Select: frozenset(
@@ -478,10 +494,15 @@ def _check_nodes(root: exp.Query, policy: QueryPolicy) -> None:
         elif type(node) in _STRUCTURAL:
             pass
         elif isinstance(node, exp.Func):
-            if _function_name(node) not in policy.allowed_functions:
+            if not _function_allowed(node, policy):
                 _reject(_Code.FUNCTION_NOT_ALLOWED)
         else:
             _reject(_Code.UNSUPPORTED_SYNTAX)
+
+
+def _check_executable_from_unixtime(root: exp.Query) -> None:
+    if any(node.args.get("format") is not None for node in root.find_all(exp.UnixToTime)):
+        raise QueryRejectedError(_Code.UNSUPPORTED_SYNTAX, hint="from_unixtime_format")
 
 
 def _star_allowed(star: exp.Star) -> bool:
@@ -498,11 +519,24 @@ def _function_name(node: exp.Func) -> str:
     return node.sql_name()
 
 
+def _function_allowed(node: exp.Func, policy: QueryPolicy) -> bool:
+    name = _function_name(node)
+    allowed = policy.allowed_functions
+    if name in allowed or _FUNCTION_ALIASES.get(name, frozenset()) & allowed:
+        return True
+    # DATE_FORMAT 的锁版解析树自动插入此 CAST；显式嵌套调用仍须单独获准。
+    return (
+        isinstance(node, exp.TsOrDsToTimestamp)
+        and isinstance(node.parent, exp.TimeToStr)
+        and "DATE_FORMAT" in allowed
+    )
+
+
 def _check_date_function(
     node: exp.DateAdd | exp.DateSub | exp.DateDiff | exp.TimestampTrunc,
     policy: QueryPolicy,
 ) -> None:
-    if _function_name(node) not in policy.allowed_functions:
+    if not _function_allowed(node, policy):
         _reject(_Code.FUNCTION_NOT_ALLOWED)
     unit = node.args.get("unit")
     if not isinstance(unit, exp.Var) or unit.name.upper() not in _DATE_UNITS:

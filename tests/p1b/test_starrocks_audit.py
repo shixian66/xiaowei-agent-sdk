@@ -1,7 +1,7 @@
 """P2 Task 6：审计慢查询的 Adapter 契约（recording 驱动替身，不连接任何服务）。
 
 候选查询由代码模板与绑定值构成；每条候选原文在 Adapter 内经当前 SQLGuard 范围
-（``guard_explain_query``）检查，未通过、无法读出或放不下的行整行丢弃，原文不离开 Adapter。
+（``audit_references``）检查，未通过、无法读出或放不下的行整行丢弃，原文不离开 Adapter。
 替身不能证明 AuditLoader 的实际写入（列、时区、截断），这些由 ``starrocks_audit_real`` 证明。
 """
 

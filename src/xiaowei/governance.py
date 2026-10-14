@@ -106,6 +106,7 @@ ToolRejectCode = Literal[
 
 ToolRejectHint = Literal[
     "action_request",
+    "from_unixtime_format",
     "restart_cursor",
     "search_scope",
     "search_keyword",

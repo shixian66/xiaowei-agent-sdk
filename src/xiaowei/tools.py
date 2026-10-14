@@ -35,7 +35,7 @@ from xiaowei.governance import (
     ToolRejectHint,
 )
 from xiaowei.models import ToolContract, ToolRequest, ToolResult
-from xiaowei.sqlguard import REJECTION_MESSAGES
+from xiaowei.sqlguard import FROM_UNIXTIME_FORMAT_HINT, REJECTION_MESSAGES
 
 _UNKNOWN_CLUSTER = "目标未确认，未执行；请核实本轮明确目标，不猜选其他集群"
 
@@ -84,6 +84,7 @@ _REJECTION_FEEDBACK: dict[ToolRejectCode, tuple[str, bool]] = {
 
 
 _REJECTION_HINTS: dict[ToolRejectHint, str] = {
+    "from_unixtime_format": FROM_UNIXTIME_FORMAT_HINT,
     "action_request": (
         "只有本轮已提出、证据可读且尚未请求过执行的Action ID可申请群审批；"
         "请核对ID并避免重复调用。同一轮须为执行请求和写入保留两次工具额度"
@@ -177,6 +178,8 @@ def _rejection_feedback(exc: ToolRejectedError, name: str) -> str:
         feedback["reason"] = (
             f"{prefix}（{exc.query_reject.value}）：{REJECTION_MESSAGES[exc.query_reject]}"
         )
+        if exc.hint is not None:
+            feedback["reason"] = f"{feedback['reason']}；{_REJECTION_HINTS[exc.hint]}"
     if exc.allowed_fields is not None:
         feedback["allowed_fields"] = exc.allowed_fields
     if exc.code == "busy":

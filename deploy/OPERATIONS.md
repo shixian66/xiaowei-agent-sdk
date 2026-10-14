@@ -783,22 +783,27 @@ docker compose --env-file .env ps
 唯一再试在途时拒绝该集群新调用，成功不复位额度，再次繁忙后本轮该集群不再试。
 这不改变后台刷新，不自动重放已开始的 SQL；后续新提问独立计算。
 
-**函数名单按解析后的内部名填写。** SQLGuard 先把 SQL 解析再检查函数名，部分常用写法会被归一：
+**函数名单按下表填写。** SQLGuard 先解析 SQL，再逐个检查函数；标有“或”的行接受所列别名，其他行仍按解析后的名称填写：
 
 | 写法 | 名单中需要的名字 |
 | --- | --- |
 | `IFNULL(...)` | `COALESCE` |
 | `SUBSTR(...)` | `SUBSTRING` |
 | `DATE(...)`、`YEAR/MONTH/DAY/WEEK(...)` | `TS_OR_DS_TO_DATE`，以及对应的 `YEAR` 等 |
-| `DATE_FORMAT(...)` | `TIME_TO_STR`、`TS_OR_DS_TO_TIMESTAMP` |
+| `DATE_FORMAT(...)` | `DATE_FORMAT`，或同时列出 `TIME_TO_STR`、`TS_OR_DS_TO_TIMESTAMP` |
 | `CURDATE()` | `CURRENT_DATE` |
-| `FROM_UNIXTIME(...)` | `UNIX_TO_TIME` |
+| `FROM_UNIXTIME(x)` | `FROM_UNIXTIME` 或 `UNIX_TO_TIME` |
+| `STR_TO_DATE(...)` | `STR_TO_DATE` 或 `STR_TO_TIME` |
 | `DATE_ADD(..., INTERVAL n unit)`、`DATE_SUB(..., INTERVAL n unit)` | `DATE_ADD`、`DATE_SUB` |
 | `DATEDIFF(a, b)` | `DATEDIFF`（规范化后仍为 `DATEDIFF`） |
-| `DATE_TRUNC('day', a)` | `TIMESTAMP_TRUNC` |
+| `DATE_TRUNC('day', a)` | `DATE_TRUNC` 或 `TIMESTAMP_TRUNC` |
 | `APPROX_COUNT_DISTINCT(...)` | `APPROX_DISTINCT` |
 
-只写成平时习惯的名字（如 `IFNULL`、`DATE_FORMAT`）不会放行。模板名单经测试覆盖常用聚合、数值、
+`IFNULL` 仍需填写 `COALESCE`。`FROM_UNIXTIME(x, 格式)` 会在执行前拒绝，因为锁定的 SQL 解析器会改变部分格式符；可改写为 `DATE_FORMAT(FROM_UNIXTIME(x), 格式)`，并授权所用函数。未带格式的 `FROM_UNIXTIME(x)` 继续可用。
+
+StarRocks 4.1.4 合成数据实测：`INTERVAL 3 HOUR` 与规范化的 `INTERVAL '3' HOUR` 等价；`GROUP_CONCAT` 省略分隔符与补写 `SEPARATOR ','` 等价（含 NULL、重复值、DISTINCT 与排序样例）。本次数据范围格式升为 `/8`，旧 StarRocks Evidence 因版本不符不能再用于历史事实；无需应用表迁移。
+
+模板名单经测试覆盖常用聚合、数值、
 条件、日期、字符串和窗口函数。日期加减只接受整数常量区间，单位限 `SECOND`、`MINUTE`、
 `HOUR`、`DAY`、`WEEK`、`MONTH`、`YEAR`；动态区间、未知单位和子查询在 I/O 前拒绝。
 `DATE_ADD`、`DATE_SUB`、`ADDDATE`、`SUBDATE`、`DATE_TRUNC`、`DATEDIFF` 都只接受两个
