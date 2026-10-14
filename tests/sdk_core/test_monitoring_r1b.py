@@ -276,10 +276,13 @@ async def test_formal_web_reconnect_failure_hides_source_but_keeps_starrocks(env
     first = source.start()
     try:
         values = monitoring_config(first.url)
-        values["mcp_servers"][0]["timeout_seconds"] = 0.3
+        # 预算同时用于首次SDK握手；0.3秒在整仓负载下会提前失败，未进入待验的断线场景。
+        # 1秒仍小于下方hanging_server的2秒延迟，保持重连超时与零远端工具调用断言。
+        values["mcp_servers"][0]["timeout_seconds"] = 1
         config = env.config(**values)
         async with env.running(config) as served:
             await served.page()
+            assert (await served.ready())[f"mcp.{SOURCE}"] == "available"
             source.stop()
             broken = env.scripts.add("源已断开", tool_call(f"{SOURCE}__query", query="up"))
             assert (await served.turn(broken, "query", "failure-1")).json()["state"] == "failed"
