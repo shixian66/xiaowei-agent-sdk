@@ -31,6 +31,7 @@ from lark_channel.channel.types import ChatMember, SendResult
 from pydantic import SecretStr, ValidationError
 from sqlalchemy.engine import URL
 from tests.p1b.test_starrocks_adapter import TARGET as SR
+from tests.p1b.test_starrocks_adapter import Result
 from tests.sdk_core.synthetic_tools import QUERY_TOOL
 from tests.sdk_core.test_app import cite, clarify, tool_call
 from tests.sdk_core.test_feishu import FakeChannel, Outbox, dropped, logs
@@ -42,6 +43,8 @@ from tests.sdk_core.test_runtime import (
     FEISHU_ENV,
     KEY_ENV,
     MODEL_ENV,
+    audit_config,
+    audit_table_driver,
     feishu_config,
     free_port,
     serve_config,
@@ -64,7 +67,7 @@ from xiaowei.feishu import (
     LarkTransport,
     attributed,
 )
-from xiaowei.starrocks_tools import QUERY_TOOLS
+from xiaowei.starrocks_tools import AUDIT_TOOLS, QUERY_TOOLS
 from xiaowei.storage import initialize_storage, open_engine
 
 pytestmark = pytest.mark.loopback
@@ -876,6 +879,35 @@ async def test_formal_runtime_answers_a_member_and_refuses_an_outsider(
         )
         == "completed/sent,failed/pending"
     )
+
+
+async def test_group_member_can_query_the_readable_audit_table(runtime_env: RuntimeEnv) -> None:
+    env = runtime_env
+    sql = "SELECT queryId, `user`, stmt FROM starrocks_audit_db__.starrocks_audit_tbl__ LIMIT 1"
+    env.drv = audit_table_driver(
+        Result(("queryId", "user", "stmt"), [("q-group", "bob", "SELECT 1")])
+    )
+    values = audit_config(env.port)
+    values["feishu"] = runtime_group(tools=sorted(QUERY_TOOLS | AUDIT_TOOLS))
+    config = runtime.ServeConfig.model_validate(values)
+    channel = GroupChannel()
+    asked = env.scripts.add(
+        attributed(A, "执行审计查询"),
+        tool_call("run_readonly_query", cluster=SR.target_id, sql=sql),
+        cite(),
+    )
+
+    async with env.running(config, feishu_channel=channel) as served:
+        channel.emit_raw_from_sdk_thread(raw_group_event(env, "执行审计查询", "om_audit"))
+        await until(lambda: len(channel.sends) == 1)
+        assert await served.finish() == 0
+
+    assert len(env.scripts.calls[asked]) == 2
+    ((to, message, _),) = channel.sends
+    assert to == CHAT
+    assert [row["c0"] for table in tables(message) for row in table["rows"]] == ['"q-group"']
+    assert len(statements(env.drv)) == 1
+    assert "starrocks_audit_tbl__" in statements(env.drv)[0]
 
 
 async def group_result_unsent(env: RuntimeEnv, config: runtime.ServeConfig) -> str:

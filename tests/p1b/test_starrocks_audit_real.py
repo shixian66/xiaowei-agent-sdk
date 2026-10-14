@@ -4,7 +4,8 @@
       uv run --locked --extra dev python -m pytest tests/p1b/test_starrocks_audit_real.py \\
       -m starrocks_audit_real -q
 
-前提：可丢弃实例已按官方文档建好 ``starrocks_audit_db__.starrocks_audit_tbl__`` 并安装 AuditLoader
+前提：可丢弃实例已建好 ``starrocks_audit_db__.starrocks_audit_tbl__``，字段名与类型符合
+官方文档，并安装 AuditLoader
 （``plugin.conf`` 中 ``max_stmt_length`` 与下方 ``STMT_LIMIT`` 一致，导入间隔不超过 10 秒）。
 fixture 复用 ``test_starrocks_real`` 的随机合成库与只读账号，并给只读账号授予审计表的 SELECT。
 它证明审计表的实际列、时区与截断在锁定版本上与 Adapter 的假设一致，以及真实记录经 SQLGuard
@@ -17,7 +18,7 @@ import asyncio
 import secrets
 import time
 from collections.abc import AsyncIterator
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 import pytest
 from asyncmy.errors import MySQLError
@@ -88,18 +89,13 @@ def audit_target(inst: Instance, **audit: object) -> StarRocksTarget:
 
 
 async def snapshot_scope(t: StarRocksTarget) -> QueryPolicy:
-    """产品路径的 SQLGuard 范围：在真实实例上刷新一次结构快照。审计表本身不进入快照。"""
+    """产品路径的 SQLGuard 范围：在真实实例上刷新一次结构快照。"""
     cache = SchemaCache(
         open_starrocks(t, clock=lambda: datetime.now(UTC)), clock=lambda: datetime.now(UTC)
     )
     assert await cache.refresh()
     snapshot = cache.current()
-    # 只排除配置的审计源表；配置指向别的表时，真实审计表若可读就是普通可读对象。
-    configured = t.audit is not None and (t.audit.database, t.audit.table) == (
-        AUDIT_DB,
-        AUDIT_TABLE,
-    )
-    assert ((AUDIT_DB, AUDIT_TABLE) in snapshot.objects) is not configured
+    assert (AUDIT_DB, AUDIT_TABLE) in snapshot.objects
     return snapshot.query_policy
 
 
@@ -162,6 +158,7 @@ async def test_real_audit_rows_are_filtered_by_the_current_scope(audited: Instan
         assert {(d, n) for d, objects in scope.tables.items() for n in objects} == {
             (db, "sales"),
             (db, "sales_view"),
+            (AUDIT_DB, AUDIT_TABLE),
         }
         # 小维自身发出的语句：查询照常列出；EXPLAIN、元数据查询与会话回读都不列出。
         ran = await ada.run_query(
@@ -193,6 +190,40 @@ async def test_real_audit_rows_are_filtered_by_the_current_scope(audited: Instan
         assert not any(mk in str(row["sql"]) for row in wrong.rows)
     finally:
         await admin(host, port, user, f"DROP DATABASE {other} FORCE")
+
+
+async def test_real_direct_audit_query_matches_administrator_for_fixed_window(
+    audited: Instance,
+) -> None:
+    """审计源表进入快照后，用户给出的排序与 LIMIT 经 SQLGuard 执行仍得到相同 Query ID。"""
+    host, port, user = admin_address()
+    marker = f"r3{secrets.token_hex(3)}"
+    original = [f"SELECT region FROM sales WHERE note = '{marker}{i}'" for i in range(3)]
+    await admin(host, port, user, f"USE {audited.database}", *original)
+    await flushed(marker, len(original))
+
+    now = datetime.now(UTC)
+    lower = (now - timedelta(minutes=5)).strftime("%Y-%m-%d %H:%M:%S")
+    upper = (now + timedelta(minutes=5)).strftime("%Y-%m-%d %H:%M:%S")
+    prefix = f"SELECT region FROM sales WHERE note = '{marker}".replace("'", "''")
+    sql = (
+        f"SELECT queryId, `user`, authorizedUser, clientIp, stmt FROM {AUDIT_DB}.{AUDIT_TABLE} "
+        f"WHERE `timestamp` >= '{lower}' AND `timestamp` < '{upper}' "
+        f"AND stmt LIKE '{prefix}%' ORDER BY queryTime DESC, queryId ASC LIMIT 3"
+    )
+    expected = {str(row[0]) for row in await admin_rows(host, port, user, sql)}
+    assert len(expected) == 3
+
+    t = audit_target(audited)
+    policy = await snapshot_scope(t)
+    actual = await open_starrocks(t, clock=lambda: datetime.now(UTC)).run_query(
+        guard_readonly_query(sql, policy)
+    )
+    assert {str(row["queryId"]) for row in actual.rows} == expected
+    assert actual.row_count == 3
+    assert actual.sql.endswith(
+        "ORDER BY `starrocks_audit_tbl__`.`queryTime` DESC, `queryId` ASC LIMIT 3"
+    )
 
 
 async def test_real_audit_resolves_each_record_in_its_own_database(audited: Instance) -> None:

@@ -344,7 +344,7 @@ async def test_targets_refresh_independently() -> None:
         bad.current()
 
 
-async def test_audit_table_and_unquotable_names_never_enter_the_snapshot() -> None:
+async def test_readable_audit_table_enters_snapshot_but_unquotable_names_do_not() -> None:
     world = World()
     world.tables = {
         **SCHEMA_TABLES,
@@ -367,9 +367,11 @@ async def test_audit_table_and_unquotable_names_never_enter_the_snapshot() -> No
     )
     _, cache = cache_for(drv, clock, audited)
     assert await cache.refresh()
-    assert set(cache.current().objects) == set(SCHEMA_TABLES)
-    # 审计表与无法安全引用的名字也不会被探测。
-    assert not any("starrocks_audit_tbl__" in sql or "odd" in sql for sql in statements(drv))
+    audit_key = ("starrocks_audit_db__", "starrocks_audit_tbl__")
+    assert set(cache.current().objects) == {*SCHEMA_TABLES, audit_key}
+    assert cache.current().query_policy.tables[audit_key[0]][audit_key[1]] == ("stmt",)
+    assert probe_sql(*audit_key) in statements(drv)
+    assert not any("odd" in sql for sql in statements(drv))
 
 
 # ---- 工具：快照缺失在 I/O 前拒绝；交付前按当前权限重新探测 -------------------------------------

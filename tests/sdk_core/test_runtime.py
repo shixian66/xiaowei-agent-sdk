@@ -33,8 +33,8 @@ from lark_channel.ws.exception import ClientException
 from pydantic import SecretStr, ValidationError
 from sqlalchemy import text
 from sqlalchemy.engine import URL
+from tests.p1b.test_starrocks_adapter import SCHEMA_TABLES, Result, driver, schema_results
 from tests.p1b.test_starrocks_adapter import TARGET as SR
-from tests.p1b.test_starrocks_adapter import Result, driver, schema_results
 from tests.sdk_core.postgres_harness import WAITING_ON_LOCK, isolated_database
 from tests.sdk_core.synthetic_tools import Clock
 from tests.sdk_core.test_app import (
@@ -610,6 +610,34 @@ AUDIT_SOURCE = (
     "stmt",
 )
 
+AUDIT_TABLE_KEY = ("starrocks_audit_db__", "starrocks_audit_tbl__")
+AUDIT_TABLE_SCHEMA = {
+    **SCHEMA_TABLES,
+    AUDIT_TABLE_KEY: (
+        ("queryId", "varchar(64)", "NO", None),
+        ("user", "varchar(64)", "YES", None),
+        ("authorizedUser", "varchar(64)", "YES", None),
+        ("clientIp", "varchar(64)", "YES", None),
+        ("stmt", "varchar(1000)", "YES", None),
+        ("timestamp", "datetime", "YES", None),
+        ("queryTime", "bigint", "YES", None),
+    ),
+}
+
+
+def audit_table_driver(query: Result, *, denied: frozenset[tuple[str, str]] = frozenset()) -> Any:
+    """结构刷新读取完整审计表；仅最底层 StarRocks 连接使用替身。"""
+    drv = driver(query)
+    original = drv.make
+
+    def make() -> Any:
+        conn = original()
+        conn.results.update(schema_results(AUDIT_TABLE_SCHEMA, denied))
+        return conn
+
+    drv.make = make
+    return drv
+
 
 def audit_record(stmt: str, query_id: str, db: str = "shop") -> tuple[object, ...]:
     started = datetime(2026, 9, 29, 23, 30)
@@ -647,6 +675,100 @@ async def test_formal_assembly_lists_only_approved_slow_queries(env: Env) -> Non
         assert [row["query_id"] for row in fact["rows"]] == ["q-ok"]
         assert "secret" not in json.dumps(body, ensure_ascii=False)
         assert await served.finish() == 0
+
+
+async def test_formal_web_executes_requested_audit_sql_with_all_requested_columns(env: Env) -> None:
+    sql = (
+        "SELECT queryId, `user`, authorizedUser, clientIp, stmt "
+        "FROM starrocks_audit_db__.starrocks_audit_tbl__ "
+        "WHERE `timestamp` >= DATE_SUB(NOW(), INTERVAL 3 HOUR) "
+        "ORDER BY queryTime DESC LIMIT 3"
+    )
+    env.drv = audit_table_driver(
+        Result(
+            ("queryId", "user", "authorizedUser", "clientIp", "stmt"),
+            [("q-1", "bob", "bob@%", "192.0.2.1", "SELECT 1")],
+        )
+    )
+    values = audit_config(env.port)
+    values["targets"][0]["starrocks"]["policy"]["allowed_functions"] += [
+        "DATE_SUB",
+        "NOW",
+    ]
+    config = runtime.ServeConfig.model_validate(values)
+
+    async with env.running(config) as served:
+        await served.page()
+        message = env.scripts.add(
+            "在 sr-test 执行这条审计 SQL",
+            tool_call("run_readonly_query", cluster=SR.target_id, sql=sql),
+            cite(),
+        )
+        response = await served.turn(message, mode="query")
+        assert response.status_code == 200, response.text
+        body = response.json()
+        assert body["state"] == "completed"
+        instructions = env.scripts.calls[message][0].instructions
+        assert "用户提供针对审计表的 SQL 并明确要求执行" in instructions
+        assert "list_slow_queries 只用于无需指定 SQL 的快捷诊断" in instructions
+        (fact,) = body["delivery"]["facts"]
+        assert fact["tool_id"] == "local/run_readonly_query"
+        assert fact["rows"] == [
+            {
+                "queryId": "q-1",
+                "user": "bob",
+                "authorizedUser": "bob@%",
+                "clientIp": "192.0.2.1",
+                "stmt": "SELECT 1",
+            }
+        ]
+        assert "DATE_SUB(NOW(), INTERVAL 3 HOUR)" in fact["metadata"]["sql"]
+        assert (
+            "ORDER BY `starrocks_audit_tbl__`.`queryTime` DESC LIMIT 3" in (fact["metadata"]["sql"])
+        )
+        assert statements(env.drv) == [fact["metadata"]["sql"]]
+        for statement in (
+            "SELECT model_content FROM xiaowei_evidence",
+            "SELECT session_content FROM xiaowei_evidence",
+            "SELECT web_content FROM xiaowei_evidence",
+            "SELECT feishu_content FROM xiaowei_evidence",
+        ):
+            stored = await env.scalar(statement)
+            assert all(value in stored for value in ("bob@%", "192.0.2.1", "SELECT 1"))
+        provider_input = json.dumps(env.scripts.calls[message][1].input, ensure_ascii=False)
+        assert all(value in provider_input for value in ("bob@%", "192.0.2.1", "SELECT 1"))
+        follow = env.scripts.add("继续解释刚才的审计结果", cite())
+        again = (await served.turn(follow, mode="query", request_id="r2")).json()
+        assert again["state"] == "completed"
+        assert again["delivery"]["facts"][0]["rows"] == fact["rows"]
+        assert statements(env.drv) == [fact["metadata"]["sql"]]
+        assert await served.finish() == 0
+
+
+async def test_formal_web_rejects_unreadable_audit_table_before_query_io(env: Env) -> None:
+    env.drv = audit_table_driver(
+        Result(("queryId",), [("q-1",)]), denied=frozenset({AUDIT_TABLE_KEY})
+    )
+    config = runtime.ServeConfig.model_validate(audit_config(env.port))
+    async with env.running(config) as served:
+        await served.page()
+        message = env.scripts.add(
+            "查审计表",
+            tool_call(
+                "run_readonly_query",
+                cluster=SR.target_id,
+                sql="SELECT queryId FROM starrocks_audit_db__.starrocks_audit_tbl__",
+            ),
+            clarify("审计表当前不可读"),
+        )
+        response = await served.turn(message, mode="query")
+        assert response.status_code == 200, response.text
+        body = response.json()
+        assert body["state"] == "completed"
+        assert body["delivery"]["facts"] == []
+        assert env.drv.attempts == 0
+        assert await served.finish() == 0
+    assert await env.scalar("SELECT count(*) FROM xiaowei_evidence") == 0
 
 
 async def test_formal_assembly_stops_the_turn_when_the_audit_table_is_missing(env: Env) -> None:

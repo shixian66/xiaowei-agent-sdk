@@ -1,7 +1,7 @@
 """StarRocks 结构快照：自动发现只读账号实际可 SELECT 的对象与列，有界、定时刷新、到期关闭。
 
 一次刷新（``SchemaCache.refresh``）在 ``refresh_timeout_seconds`` 内完成全部步骤：经 Adapter 的代码
-模板读取全部用户库的对象、列与表 ID → 去掉系统库、审计源表与无法安全引用的名字 → 对其余每个
+模板读取全部用户库的对象、列与表 ID → 去掉系统库与无法安全引用的名字 → 对其余每个
 对象做零行 SELECT 探测，只保留数据库确认可读的对象。任一步失败、超时或超过容量上限，都不发布
 新快照（不发布半份结构），已有快照继续可用到它自己的期限；期限从刷新开始时计，不因后台重试
 延长。没有快照或快照已到期时，``current`` 拒绝，该目标的数据工具在任何 I/O 前不可用。
@@ -10,9 +10,6 @@
 是否可空、注释），以及据此给出的 SQLGuard 范围（全部用户库中的可读对象与它们按序的全部列；4.1.4
 不支持列级授权）。快照中的“可读”只是采集时的结论：交付表结构前仍须按当前权限重新探测，新查询由
 数据库自己的权限检查把关。
-
-审计源表即使可读也不进入快照：审计原文只经 ``list_slow_queries`` 按语句检查后交付，不能被业务
-查询直接读取。
 
 每个目标一份缓存，各自刷新、互不影响；同一目标同时只有一次刷新在进行（single-flight），刷新任务
 不随某个等待者的取消而中止，``aclose`` 时取消。缓存只在应用进程内存中，不含凭据，不进入
@@ -126,10 +123,7 @@ class SchemaCache:
     def __init__(self, adapter: StarRocksAdapter, *, clock: Callable[[], datetime]) -> None:
         self._adapter = adapter
         self._clock = clock
-        target = adapter.target
-        self._limits = target.schema_limits
-        audit = target.audit
-        self._excluded = frozenset() if audit is None else {(audit.database, audit.table)}
+        self._limits = adapter.target.schema_limits
         self._snapshot: SchemaSnapshot | None = None
         self._inflight: asyncio.Task[bool] | None = None
 
@@ -215,7 +209,7 @@ class SchemaCache:
         return True
 
     def _candidates(self, rows: SchemaRows) -> dict[tuple[str, str], ObjectInfo]:
-        """对象、列与 ID 合并为待探测对象；无法安全引用、属于审计源或没有列的对象不进入。"""
+        """对象、列与 ID 合并为待探测对象；无法安全引用或没有列的对象不进入。"""
         columns: dict[tuple[str, str], list[ColumnInfo]] = {}
         for row in rows.columns:
             key = (_text(row["db"]), _text(row["name"]))
@@ -237,7 +231,7 @@ class SchemaCache:
         for row in rows.objects:
             database, name = _text(row["db"]), _text(row["name"])
             key = (database, name)
-            if key in self._excluded or not (safe_identifier(database) and safe_identifier(name)):
+            if not (safe_identifier(database) and safe_identifier(name)):
                 continue
             names = [c.name.casefold() for c in columns.get(key, ())]
             if not names or len(set(names)) != len(names):  # 无列，或列名只差大小写（无法唯一引用）

@@ -31,7 +31,7 @@ from tests.p1b.test_starrocks_adapter import (
 )
 
 from xiaowei import starrocks
-from xiaowei.sqlguard import QueryPolicy, guard_explain_query
+from xiaowei.sqlguard import QueryPolicy, audit_references, guard_explain_query
 from xiaowei.starrocks import (
     AUDIT_COLUMNS,
     AUDIT_ORDER_COLUMNS,
@@ -76,8 +76,16 @@ AUDIT_TARGET = TARGET.model_copy(
         "audit": AUDIT,
     }
 )
-# 结构快照给出的 SQLGuard 范围（与 POLICY 相同的对象与列）；审计原文按它检查。
-SCOPE = POLICY.model_copy(update={"max_sql_bytes": 1000})
+# 结构快照给出的 SQLGuard 范围：审计表可读；审计原文按它检查。
+SCOPE = POLICY.model_copy(
+    update={
+        "max_sql_bytes": 1000,
+        "tables": {
+            **POLICY.tables,
+            AUDIT.database: {AUDIT.table: ("queryId", "timestamp", "queryTime", "stmt")},
+        },
+    }
+)
 STARTED = datetime(2026, 9, 30, 7, 30)  # 审计表中的无时区 DATETIME（按审计时区写入）
 
 
@@ -253,6 +261,16 @@ async def test_only_statements_passing_sqlguard_are_listed() -> None:
 
 
 async def test_xiaowei_own_statements_are_filtered() -> None:
+    # 审计表已在范围内；只靠 SQLGuard 不再能过滤自己的审计读取。
+    assert audit_references(OWN[-1], SCOPE, "shop") == (
+        frozenset({(AUDIT.database, AUDIT.table)}),
+        frozenset(
+            {
+                (AUDIT.database, AUDIT.table, "queryId"),
+                (AUDIT.database, AUDIT.table, "timestamp"),
+            }
+        ),
+    )
     ran = guard_explain_query("SELECT region FROM sales", POLICY).normalized_sql
     shown = await listed(*OWN, ran, t=target(audit={"max_rows": 10}))
     # 小维经 run_readonly_query 执行的获准查询是真实的查询记录，照常列出。
@@ -573,10 +591,10 @@ async def test_parsing_stops_once_the_client_deadline_has_passed(
     checked: list[str] = []
     real = starrocks._within_scope
 
-    def slow(sql: str, policy: Any, database: str) -> bool:
+    def slow(sql: str, policy: Any, database: str, audit: AuditSource) -> bool:
         checked.append(sql)
         time.sleep(0.05)
-        return bool(real(sql, policy, database))
+        return bool(real(sql, policy, database, audit))
 
     monkeypatch.setattr(starrocks, "_within_scope", slow)
     rows = [record("SELECT secret FROM sales", query_id=f"q{i}") for i in range(100)]

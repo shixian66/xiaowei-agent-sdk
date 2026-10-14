@@ -127,10 +127,12 @@ uv run --locked xiaowei --config xiaowei.json requests resend --subject <发起�
 - `schema_limits`：`refresh_seconds` / `max_age_seconds` / `refresh_timeout_seconds`（代码默认 60 / 300 / 10 秒，主模板取 300 / 900 / 120；间隔不能大于最大年龄，刷新期限不能大于间隔）；`max_objects`、`max_columns`、`max_bytes`（每条元数据读取序列化后的字节上限）与 `max_comment_chars` 必须按目标规模填写，超过任一上限时这次刷新不生效。字段类型改为完整的 `COLUMN_TYPE` 后，长度和精度会增加列元数据字节数；升级前按目标集群的真实字段规模核对 `max_bytes` 和刷新期限。新快照超限时保留旧快照直到过期，随后该目标的数据工具不可用。
 - 刷新失败时沿用上一份结构，直到它超过 `max_age_seconds`；之后该集群的数据工具暂不可用，其他集群不受影响。新授予的表在下一次成功刷新后可用；撤权后列表与表结构在返回前即发现，新查询由 StarRocks 拒绝。
 - StarRocks 4.1.4 不支持列级授权：能读的表，其全部列都可能进入查询结果。需要隐藏列时，请 DBA 只授予只含允许列的视图。账号只靠未激活的角色获得权限时视为无权，需 DBA 设置默认角色或直接授权。
-- 配置的审计源表不会进入查询范围，审计原文只通过 `list_slow_queries` 逐条检查后展示。
+- 配置的审计源表经零行权限探测后进入查询范围。明确要求执行审计 SQL 时用 `run_readonly_query`；`list_slow_queries` 仍是有界的快捷诊断，只列 `isQuery=1` 且原文通过检查的记录，不列身份字段或审计表自身读取，不能替代用户指定的 SQL。
 - 交付已保存的事实前，按当前权限逐个对象复核，次数受 `budget.max_scope_checks` 限制（必填，1–100000，旧配置需补上）。一轮对话中的历史回放、工具结果、最终校验与保存共用一个计数，每次复核同一集群的同一对象只算一次；轮次结束后的首次发送、历史读取与 `requests resend` 每次单独计数。用完后本次不交付，按“暂时无法确认”处理，会话与已保存结果保留，可新建会话或稍后重试。一轮新列表的每个对象要复核 5 次，因此该值不能小于各集群 `policy.max_rows` 的 5 倍；同一会话的历史越长，每轮需要的次数越多。
 
 **审计源（可选）。** `targets[].starrocks.audit` 指向该集群上已有的 AuditLoader 审计表；小维不安装插件、不改其配置。各字段：
+
+审计表全部可读列（包括 `user`、`authorizedUser`、`clientIp`、`stmt`）按只读账号权限开放给获准的 Web／飞书私聊与群聊。结果可能进入模型供应商、Session 和最长 7 天的 Evidence；查询仍受 SQLGuard、行数、单值／总字节、超时、内存与交付时权限复核约束。审计表较大，建议用 `timestamp` 限定时间范围；`NOW()` 按连接时区计算，审计 `timestamp` 按 FE 时区写入，两者不同时比较会偏移。`stmt` 经普通查询返回时可能带截短标记；需要完整原文须检查该标记，不可把前缀称作完整 SQL。
 
 - `database` / `table`：审计库表名（官方默认 `starrocks_audit_db__` / `starrocks_audit_tbl__`），只读账号需要该表的 SELECT 权限。
 - `time_zone`：必须等于 FE 服务器的系统时区（审计时间按它写入）。配错不会报错，但时间窗会偏移，结果为空或错位；示例中的 `Asia/Shanghai` 部署时按实际核对。
