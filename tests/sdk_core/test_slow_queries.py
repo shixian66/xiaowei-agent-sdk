@@ -164,7 +164,9 @@ async def test_diagnose_turn_lists_slow_queries_then_explains_one(env: Env) -> N
         (listed,) = tool_outputs(call)
         rows = json.loads(listed)["data"]["rows"]
         env.drv.make = driver(PLAN).make
-        return tool_call("explain_query", cluster=AUDIT_TARGET.target_id, sql=rows[0]["sql"])(call)
+        row = rows[0]
+        sql = row["sql"].replace("FROM sales", f"FROM {row['database']}.sales")
+        return tool_call("explain_query", cluster=AUDIT_TARGET.target_id, sql=sql)(call)
 
     message = env.scripts.add(
         "最近一小时最慢的查询为什么慢",
@@ -180,7 +182,7 @@ async def test_diagnose_turn_lists_slow_queries_then_explains_one(env: Env) -> N
     assert "run_readonly_query" not in seen
     audit_fact, plan_fact = delivered.facts
     assert audit_fact.tool_id == SLOW_QUERIES and audit_fact.columns == AUDIT_COLUMNS
-    # 未通过 SQLGuard 的记录（未获准列）不出现；列出的原文原样交给 explain_query 并通过检查。
+    # 未通过 SQLGuard 的记录不出现；取计划时按审计行 database 补全原文的物理表。
     assert [row["sql"] for row in audit_fact.rows] == [ACCEPTED[0], ACCEPTED[1]]
     assert audit_fact.metadata["checked_candidates"] == 3
     assert audit_fact.metadata["omitted_sqlguard"] == 1

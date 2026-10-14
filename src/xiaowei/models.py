@@ -274,7 +274,14 @@ class AgentAnswer(_Answer):
 
 
 MonitoringFailureReason = Literal[
-    "auth", "timeout", "unavailable", "upstream_5xx", "invalid_expression"
+    "auth",
+    "timeout",
+    "unavailable",
+    "upstream_5xx",
+    "invalid_expression",
+    "response_limit",
+    "invalid_matcher",
+    "silence_missing",
 ]
 
 

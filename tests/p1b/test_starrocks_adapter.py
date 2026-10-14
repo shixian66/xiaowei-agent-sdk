@@ -300,7 +300,7 @@ async def ready_schema(ada: StarRocksAdapter, drv: Driver | None = None) -> Sche
     return cache
 
 
-def guarded(sql: str = "SELECT region, total FROM sales"):  # type: ignore[no-untyped-def]
+def guarded(sql: str = "SELECT region, total FROM shop.sales"):  # type: ignore[no-untyped-def]
     return guard_readonly_query(sql, POLICY)
 
 
@@ -326,7 +326,7 @@ def only(drv: Driver) -> FakeConnection:
 
 
 async def test_query_runs_the_guarded_sql_after_verified_session_setup() -> None:
-    query = guarded("SELECT region, total FROM sales WHERE region = 'a%b'")
+    query = guarded("SELECT region, total FROM shop.sales WHERE region = 'a%b'")
     drv = driver(Result(("region", "total"), [("east", 100), ("west", 50)]))
 
     result = await adapter(drv).run_query(query)
@@ -335,11 +335,11 @@ async def test_query_runs_the_guarded_sql_after_verified_session_setup() -> None
     assert conn.executed == [
         (SESSION_SET, None),
         (SESSION_READ, None),
-        (query.normalized_sql, None),  # 无参数：驱动不做 % 插值
+        (query.executed_sql, None),  # 无参数：驱动不做 % 插值
     ]
     assert result == QueryResult(
         target_id="sr-test",
-        sql=query.normalized_sql,
+        sql=query.executed_sql,
         columns=("region", "total"),
         rows=({"region": "east", "total": 100}, {"region": "west", "total": 50}),
         truncated=False,
@@ -372,7 +372,7 @@ async def test_empty_result_is_complete() -> None:
 
 
 async def test_reads_at_most_one_row_past_the_limit_and_discards_the_connection() -> None:
-    query = guarded("SELECT region FROM sales")  # LIMIT 改写为 max_rows + 1
+    query = guarded("SELECT region FROM shop.sales")  # LIMIT 改写为 max_rows + 1
     rows = [(f"r{i}",) for i in range(50)]
     drv = driver(Result(("region",), rows))
 
@@ -386,7 +386,7 @@ async def test_reads_at_most_one_row_past_the_limit_and_discards_the_connection(
 
 
 async def test_a_smaller_limit_that_is_filled_exactly_is_not_truncated() -> None:
-    query = guarded("SELECT region FROM sales LIMIT 3")
+    query = guarded("SELECT region FROM shop.sales LIMIT 3")
     drv = driver(Result(("region",), [("a",), ("b",), ("c",)]))
     result = await adapter(drv).run_query(query)
     assert (result.row_count, result.truncated) == (3, False)
@@ -404,7 +404,7 @@ async def test_total_bytes_use_the_production_json_encoding() -> None:
     target = TARGET.model_copy(update={"max_result_bytes": 500})
     drv = driver(Result(("note",), rows))
 
-    result = await adapter(drv, target).run_query(guarded("SELECT note FROM sales"))
+    result = await adapter(drv, target).run_query(guarded("SELECT note FROM shop.sales"))
 
     assert result.truncated
     assert 0 < result.row_count < len(rows)
@@ -418,7 +418,7 @@ async def test_an_oversized_query_value_is_marked_without_losing_other_rows() ->
     big = "x" * (TARGET.max_value_bytes - 1)  # 加上引号即超过单值上限
     drv = driver(Result(("region", "note"), [("a", "ok"), ("b", big), ("c", "ok")]))
 
-    result = await adapter(drv).run_query(guarded("SELECT region, note FROM sales"))
+    result = await adapter(drv).run_query(guarded("SELECT region, note FROM shop.sales"))
 
     assert result.rows[0] == {"region": "a", "note": "ok"}
     assert result.rows[1]["region"] == "b"
@@ -435,7 +435,7 @@ async def test_oversized_query_cell_keeps_its_row_and_later_rows(position: int) 
     source[position] = (source[position][0], original)
     drv = driver(Result(("region", "note"), source))
 
-    result = await adapter(drv).run_query(guarded("SELECT region, note FROM sales"))
+    result = await adapter(drv).run_query(guarded("SELECT region, note FROM shop.sales"))
 
     assert [row["region"] for row in result.rows] == ["a", "b", "c"]
     clipped = result.rows[position]["note"]
@@ -450,7 +450,7 @@ async def test_multiple_oversized_cells_and_total_byte_limit_remain_bounded() ->
     target = TARGET.model_copy(update={"max_result_bytes": 450, "max_value_bytes": 90})
     raw = [("a", "甲" * 90), ("b", "乙" * 90), ("c", "ok")]
     drv = driver(Result(("region", "note"), raw))
-    result = await adapter(drv, target).run_query(guarded("SELECT region, note FROM sales"))
+    result = await adapter(drv, target).run_query(guarded("SELECT region, note FROM shop.sales"))
     assert len(result.rows) == 3
     assert all(str(row["note"]).endswith("…（原值已截短）") for row in result.rows[:2])
     assert result.rows[2]["note"] == "ok"
@@ -459,7 +459,7 @@ async def test_multiple_oversized_cells_and_total_byte_limit_remain_bounded() ->
 
     tighter = target.model_copy(update={"max_result_bytes": 125})
     short = await adapter(driver(Result(("region", "note"), raw)), tighter).run_query(
-        guarded("SELECT region, note FROM sales")
+        guarded("SELECT region, note FROM shop.sales")
     )
     assert short.truncated and 0 < short.row_count < 3
     assert rows_size(short.rows) <= tighter.max_result_bytes
@@ -467,7 +467,7 @@ async def test_multiple_oversized_cells_and_total_byte_limit_remain_bounded() ->
 
 async def test_two_large_values_in_one_row_are_marked_independently() -> None:
     drv = driver(Result(("region", "note"), [("东" * 100, "西" * 100), ("next", "ok")]))
-    result = await adapter(drv).run_query(guarded("SELECT region, note FROM sales"))
+    result = await adapter(drv).run_query(guarded("SELECT region, note FROM shop.sales"))
     assert result.row_count == 2 and result.truncated
     assert all(str(value).endswith("…（原值已截短）") for value in result.rows[0].values())
     assert result.rows[1] == {"region": "next", "note": "ok"}
@@ -476,7 +476,7 @@ async def test_two_large_values_in_one_row_are_marked_independently() -> None:
 async def test_query_keeps_whole_row_truncation_when_even_marker_cannot_fit() -> None:
     tiny = TARGET.model_copy(update={"max_value_bytes": 4})
     result = await adapter(driver(Result(("note",), [("x" * 20,)])), tiny).run_query(
-        guarded("SELECT note FROM sales")
+        guarded("SELECT note FROM shop.sales")
     )
     assert result.rows == () and result.truncated
 
@@ -503,7 +503,7 @@ async def test_query_keeps_whole_row_truncation_when_even_marker_cannot_fit() ->
 )
 async def test_values_are_normalized_to_json_scalars(value: object, expected: object) -> None:
     drv = driver(Result(("v",), [(value,)]))
-    result = await adapter(drv).run_query(guarded("SELECT total FROM sales"))
+    result = await adapter(drv).run_query(guarded("SELECT total FROM shop.sales"))
     assert result.rows == ({"v": expected},)
 
 
@@ -536,6 +536,24 @@ async def test_duplicate_column_names_are_rejected_before_reading_rows() -> None
     assert conn.rows_read == 0 and conn.aborted
 
 
+async def test_s1_database_result_casefold_duplicates_and_column_growth_fail_closed() -> None:
+    query = guard_readonly_query("SELECT region FROM shop.sales", POLICY)
+    for columns, target in (
+        (("region", "REGION"), TARGET),
+        (
+            ("region", "extra"),
+            TARGET.model_copy(
+                update={"policy": TARGET.policy.model_copy(update={"max_result_columns": 1})}
+            ),
+        ),
+    ):
+        drv = driver(Result(columns, [("east", "west")]))
+        error = await failure(adapter(drv, target).run_query(query))
+        assert error.code is Code.RESULT_CONTRACT
+        conn = only(drv)
+        assert conn.rows_read == 0 and conn.aborted
+
+
 async def test_row_width_must_match_the_columns() -> None:
     drv = driver(Result(("region", "total"), [("a",)]))
     assert (await failure(adapter(drv).run_query(guarded()))).code is Code.RESULT_CONTRACT
@@ -561,7 +579,7 @@ async def test_session_readback_mismatch_stops_before_the_query(values: tuple[ob
 
     conn = only(drv)
     assert error.code is Code.SESSION_SETUP_FAILED
-    assert all(sql != query.normalized_sql for sql, _ in conn.executed)
+    assert all(sql != query.executed_sql for sql, _ in conn.executed)
     assert conn.aborted
 
 
@@ -595,7 +613,7 @@ async def test_session_setup_failures_never_run_the_query(
     conn = only(drv)
     assert error.code is Code.SESSION_SETUP_FAILED
     assert_safe(error)
-    assert all(sql != query.normalized_sql for sql, _ in conn.executed)
+    assert all(sql != query.executed_sql for sql, _ in conn.executed)
     assert conn.aborted
 
 
@@ -611,7 +629,7 @@ async def test_sql_mode_is_set_and_verified_before_business_sql(plan: bool) -> N
     sent = [sql for sql, _ in only(drv).executed]
     assert "sql_mode = 'ONLY_FULL_GROUP_BY'" in sent[0]
     assert sent[1] == "SELECT @@query_timeout, @@query_mem_limit, @@time_zone, @@sql_mode"
-    assert sent[2] == result.sql and " OR " in result.sql
+    assert sent[2] == result.sql and " || " in result.sql
 
 
 @pytest.mark.parametrize("plan", [False, True], ids=["query", "explain"])
@@ -898,17 +916,17 @@ async def test_rejected_sql_never_reaches_the_driver() -> None:
     drv = driver()
     ada = adapter(drv)
     with pytest.raises(QueryRejectedError):
-        await ada.run_query(guarded("DELETE FROM sales"))
+        await ada.run_query(guarded("DELETE FROM shop.sales"))
     assert drv.attempts == 0
 
 
 async def test_only_guarded_queries_for_this_target_are_executed() -> None:
     drv = driver()
     other = guard_readonly_query(
-        "SELECT region FROM sales", POLICY.model_copy(update={"target_id": "sr-other"})
+        "SELECT region FROM shop.sales", POLICY.model_copy(update={"target_id": "sr-other"})
     )
     with pytest.raises(TypeError):
-        await adapter(drv).run_query("SELECT region FROM sales")  # type: ignore[arg-type]
+        await adapter(drv).run_query("SELECT region FROM shop.sales")  # type: ignore[arg-type]
     with pytest.raises(StarRocksError) as info:
         await adapter(drv).run_query(other)
     assert info.value.code is Code.OBJECT_NOT_ALLOWED
@@ -1180,7 +1198,7 @@ def test_every_code_has_a_fixed_message() -> None:
 SERVER_PLAN_COLUMN = "Explain String"  # Task 0 在 4.1.4 上实测的服务端列名
 
 
-def explained(sql: str = "SELECT region, total FROM sales"):  # type: ignore[no-untyped-def]
+def explained(sql: str = "SELECT region, total FROM shop.sales"):  # type: ignore[no-untyped-def]
     return guard_explain_query(sql, POLICY)
 
 
@@ -1188,9 +1206,9 @@ def plan_result(*lines: object, columns: tuple[str, ...] = (SERVER_PLAN_COLUMN,)
     return Result(columns, [(line,) if len(columns) == 1 else (line, line) for line in lines])
 
 
-async def test_explain_sends_exactly_the_explicit_level_and_normalized_sql() -> None:
+async def test_explain_sends_exactly_the_explicit_level_and_checked_original_sql() -> None:
     plan = explained(
-        "SELECT region, SUM(total) AS s FROM sales WHERE region = 'a%b' GROUP BY region"
+        "SELECT region, SUM(total) AS s FROM shop.sales WHERE region = 'a%b' GROUP BY region"
     )
     drv = driver(plan_result("- Output => [1:region]", "    - SCAN [sales]"))
 
@@ -1202,9 +1220,9 @@ async def test_explain_sends_exactly_the_explicit_level_and_normalized_sql() -> 
     assert conn.executed == [
         (SESSION_SET, None),
         (SESSION_READ, None),
-        ("EXPLAIN LOGICAL " + plan.normalized_sql, None),  # 无参数：驱动不做 % 插值
+        ("EXPLAIN LOGICAL " + plan.executed_sql, None),  # 无参数：驱动不做 % 插值
     ]
-    assert result.sql == "EXPLAIN LOGICAL " + plan.normalized_sql
+    assert result.sql == "EXPLAIN LOGICAL " + plan.executed_sql
     assert (conn.closed, conn.aborted) == (True, False)
 
 
@@ -1277,7 +1295,7 @@ async def test_plan_limit_does_not_follow_the_query_row_limit() -> None:
     """计划行数只受 ``max_plan_lines`` 约束；查询的 ``max_rows`` 与用户 LIMIT 不截断计划。"""
     lines = [f"l{i}" for i in range(POLICY.max_rows + 3)]
     drv = driver(plan_result(*lines))
-    result = await adapter(drv).explain(explained("SELECT region FROM sales LIMIT 1"))
+    result = await adapter(drv).explain(explained("SELECT region FROM shop.sales LIMIT 1"))
     assert (result.row_count, result.truncated) == (len(lines), False)
 
 
@@ -1289,9 +1307,9 @@ async def test_explain_and_run_query_reject_each_others_products() -> None:
     with pytest.raises(TypeError):
         await ada.run_query(explained())  # type: ignore[arg-type]
     with pytest.raises(TypeError):
-        await ada.explain("SELECT region FROM sales")  # type: ignore[arg-type]
+        await ada.explain("SELECT region FROM shop.sales")  # type: ignore[arg-type]
     other = guard_explain_query(
-        "SELECT region FROM sales", POLICY.model_copy(update={"target_id": "sr-other"})
+        "SELECT region FROM shop.sales", POLICY.model_copy(update={"target_id": "sr-other"})
     )
     with pytest.raises(StarRocksError) as info:
         await ada.explain(other)

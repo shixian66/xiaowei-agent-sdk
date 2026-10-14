@@ -134,6 +134,10 @@ DEFAULT_INSTRUCTIONS = (
     "按问题缺少的信息选择工具，不必按固定顺序搜表、查列、写 SQL。用户提供的准确库表名"
     "可直接查结构；已有可见证据或可信上下文足以确定对象和列时可以直接写 SQL。"
     "对象或列不清时用 list_tables 搜索、describe_table 补证据，多个合理候选不要猜。"
+    "StarRocks 查询和执行计划的物理表须写库名.表名。未写库名的拒绝若只有一个可读候选库，"
+    "可补库名后重试并告知用户所用库；多个候选先问用户。没有候选只表示当前快照"
+    "未找到该表或无权读取。"
+    "带注释的 SQL 被拒后，可删除注释再重试，事实区展示重试时实际执行的 SQL。"
     "用户提供针对审计表的 SQL 并明确要求执行时，用 run_readonly_query 执行获准的 SQL，"
     "不要用 list_slow_queries 代替。list_slow_queries 只用于无需指定 SQL 的快捷诊断："
     "它只列 isQuery=1 且原文可通过检查的记录，不含身份列，不代表全部最慢查询。"
@@ -195,6 +199,8 @@ DEFAULT_INSTRUCTIONS = (
     "诊断 SQL 性能时按缺失证据选择 describe_table、describe_table_layout、explain_query，"
     "已有足够依据不必重复取证，缺什么就补什么；"
     "不要为诊断执行原查询；需要找实际运行慢的查询时用 list_slow_queries。"
+    "对 list_slow_queries 的某条原文取执行计划时，未写库名的物理表须按该行 database 补全；"
+    "database 为空且无法确定原执行库时，不猜库，不获取计划。"
     "执行计划是优化器按统计信息给出的估算，取得计划时没有执行原查询，不含实际耗时；"
     "审计记录的指标是实际运行值。表布局中的分区键只显示列名、不显示分区粒度，"
     "分区裁剪效果要结合计划中的 partitionRatio 判断。"
@@ -220,6 +226,9 @@ MONITORING_INSTRUCTIONS = (
     "只有必要信息缺失、影响判断且无法从可信"
     "上下文确定时才澄清。"
     "监控工具返回 unverified 表示该次调用未取得事实，本源本轮后续读取暂停；"
+    "Alertmanager 告警读取返回 response_limit 时可加 filters 收窄；invalid_matcher 时"
+    "检查 filters matcher 或 receiver 正则；仅在 correction_allowed 与本轮预算内重试。"
+    "silence_missing 表示该静默 ID 未找到，可核对 ID，不重发完全相同的请求。"
     "已有成功查询仅证明各自覆盖范围。"
     "可调查其他已授权源，并明确哪部分未核实。所有监控读取都失败时，可在 advice 中给出"
     "明确标为‘未经数据验证’的排查步骤，不断言当前健康或故障根因。"
@@ -286,12 +295,14 @@ class TurnError(Exception):
         *,
         answer_reject: AnswerRejectCode | None = None,
         tool_error: StarRocksErrorCode | Literal["mcp_error", "other"] | None = None,
+        tool_id: str | None = None,
         session_state: SessionSnapshot | None = None,
     ) -> None:
         super().__init__(message or _MESSAGES[reason])
         self.reason = reason
         self.answer_reject = answer_reject
         self.tool_error = tool_error
+        self.tool_id = tool_id
         self.session_state = session_state
 
 
@@ -1228,9 +1239,9 @@ def _turn_error(exc: Exception) -> TurnError:
     # 工具执行开始后的失败：SDK 把工具抛出的异常包装后中止本轮，原异常在原因链上。
     for error in _causes(exc):
         if isinstance(error, ToolExecutionError):
-            return TurnError("tool_failed", tool_error=error.code)
+            return TurnError("tool_failed", tool_error=error.code, tool_id=error.tool_id)
         if isinstance(error, EvidenceError):
-            return TurnError("tool_failed", tool_error="other")
+            return TurnError("tool_failed", tool_error="other", tool_id=error.tool_id)
     # SDK 与模型客户端的异常消息可能含模型输出或上游错误体，不向外传递。
     return TurnError("model_failed")
 
@@ -1391,6 +1402,9 @@ def _stage(
         allowed = {item.value for item in StarRocksErrorCode} | {"mcp_error", "other"}
         message += " tool_error=%s"
         fields += (tool_code if tool_code in allowed else "other",)
+        if detail is not None and detail.tool_id is not None:
+            message += " tool_id=%s"
+            fields += (detail.tool_id,)
     elif reason == "answer_rejected":
         answer_code = detail.answer_reject if detail is not None else None
         message += " answer_reject=%s"

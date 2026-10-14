@@ -365,7 +365,7 @@ async def test_formal_assembly_answers_web_turns_and_stops_cleanly(env: Env) -> 
                 tool_call(
                     "run_readonly_query",
                     cluster=SR.target_id,
-                    sql="SELECT region, total FROM sales",
+                    sql="SELECT region, total FROM shop.sales",
                 ),
                 cite(),
             )
@@ -494,7 +494,9 @@ async def test_formal_assembly_diagnoses_with_a_plan_and_never_runs_the_query(en
         await served.page()
         message = env.scripts.add(
             "为什么按地区查询慢",
-            tool_call("explain_query", cluster=SR.target_id, sql="SELECT region, total FROM sales"),
+            tool_call(
+                "explain_query", cluster=SR.target_id, sql="SELECT region, total FROM shop.sales"
+            ),
             cite("扫描了整张表"),
         )
         body = (await served.turn(message)).json()
@@ -517,7 +519,7 @@ async def test_formal_assembly_rejects_out_of_scope_explain_without_io(env: Env)
         await served.page()
         message = env.scripts.add(
             "看看 secret 列的计划",
-            tool_call("explain_query", cluster=SR.target_id, sql="SELECT secret FROM sales"),
+            tool_call("explain_query", cluster=SR.target_id, sql="SELECT secret FROM shop.sales"),
             clarify("secret 列不在可查看范围内"),
         )
         body = (await served.turn(message)).json()
@@ -723,9 +725,7 @@ async def test_formal_web_executes_requested_audit_sql_with_all_requested_column
             }
         ]
         assert "DATE_SUB(NOW(), INTERVAL 3 HOUR)" in fact["metadata"]["sql"]
-        assert (
-            "ORDER BY `starrocks_audit_tbl__`.`queryTime` DESC LIMIT 3" in (fact["metadata"]["sql"])
-        )
+        assert "ORDER BY queryTime DESC LIMIT 3" in fact["metadata"]["sql"]
         assert statements(env.drv) == [fact["metadata"]["sql"]]
         for statement in (
             "SELECT model_content FROM xiaowei_evidence",
@@ -825,7 +825,7 @@ async def test_formal_assembly_replays_vertex_signatures_across_web_turns(
     """正式入口用 Vertex Profile：第一轮工具往返，追问时端点核对上一轮调用的签名。"""
     monkeypatch.setenv(VERTEX.api_key_ref.removeprefix("env:"), "fake-runtime-vertex-key")
     query, followup = "各地区销售额", "刚才的结果？"
-    sql = "SELECT region, total FROM sales"
+    sql = "SELECT region, total FROM shop.sales"
     endpoint = VertexLikeEndpoint(
         replies={
             query: [
@@ -856,7 +856,7 @@ async def test_vertex_signature_rejection_is_a_fixed_receipt(
     """上游拒绝签名（400）：正式入口给出固定回执，不含签名或上游信息，工具不重跑。"""
     monkeypatch.setenv(VERTEX.api_key_ref.removeprefix("env:"), "fake-runtime-vertex-key")
     query = "各地区销售额"
-    sql = "SELECT region, total FROM sales"
+    sql = "SELECT region, total FROM shop.sales"
     endpoint = VertexLikeEndpoint(
         replies={query: [vertex_call("run_readonly_query", cluster=SR.target_id, sql=sql)]}
     )
@@ -2720,7 +2720,9 @@ async def test_formal_assembly_routes_each_turn_to_the_named_cluster(env: Env) -
         await served.page()
         query = env.scripts.add(
             "看 sr-b 的东区",
-            tool_call("run_readonly_query", cluster="sr-b", sql="SELECT region, total FROM sales"),
+            tool_call(
+                "run_readonly_query", cluster="sr-b", sql="SELECT region, total FROM shop.sales"
+            ),
             cite(),
         )
         body = (await served.turn(query, "query", "r1")).json()
@@ -2732,7 +2734,9 @@ async def test_formal_assembly_routes_each_turn_to_the_named_cluster(env: Env) -
         # 未知集群在任何 StarRocks I/O 前拒绝，不回退到其他集群；模型只能澄清。
         unknown = env.scripts.add(
             "看 sr-z 的东区",
-            tool_call("run_readonly_query", cluster="sr-z", sql="SELECT region, total FROM sales"),
+            tool_call(
+                "run_readonly_query", cluster="sr-z", sql="SELECT region, total FROM shop.sales"
+            ),
             clarify("没有 sr-z 集群"),
         )
         body = (await served.turn(unknown, "query", "r2")).json()
@@ -2762,7 +2766,9 @@ async def test_a_cluster_failing_mid_task_changes_nothing_on_the_others(env: Env
         found = env.scripts.add(
             "sr-a 东区销售额",
             tool_call("list_tables", cluster="sr-a", **SEARCH_ALL),
-            tool_call("run_readonly_query", cluster="sr-a", sql="SELECT region, total FROM sales"),
+            tool_call(
+                "run_readonly_query", cluster="sr-a", sql="SELECT region, total FROM shop.sales"
+            ),
             cite(),
         )
         body = (await served.turn(found, "query", "r1")).json()
@@ -2779,8 +2785,12 @@ async def test_a_cluster_failing_mid_task_changes_nothing_on_the_others(env: Env
         before = {t: d.attempts for t, d in drivers.items()}
         broken = env.scripts.add(
             "sr-b 东区销售额",
-            tool_call("run_readonly_query", cluster="sr-b", sql="SELECT region, total FROM sales"),
-            tool_call("run_readonly_query", cluster="sr-a", sql="SELECT region, total FROM sales"),
+            tool_call(
+                "run_readonly_query", cluster="sr-b", sql="SELECT region, total FROM shop.sales"
+            ),
+            tool_call(
+                "run_readonly_query", cluster="sr-a", sql="SELECT region, total FROM shop.sales"
+            ),
             cite(),
         )
         body = (await served.turn(broken, "query", "r2")).json()
@@ -2797,7 +2807,9 @@ async def test_a_cluster_failing_mid_task_changes_nothing_on_the_others(env: Env
         attempts_b = drivers["sr-b"].attempts
         other = env.scripts.add(
             "sr-c 东区销售额",
-            tool_call("run_readonly_query", cluster="sr-c", sql="SELECT region, total FROM sales"),
+            tool_call(
+                "run_readonly_query", cluster="sr-c", sql="SELECT region, total FROM shop.sales"
+            ),
             cite(),
         )
         channel.emit_raw_from_sdk_thread(feishu_event(env, other, "om_c"))
@@ -2919,7 +2931,9 @@ async def test_a_cluster_without_a_schema_snapshot_is_unavailable_but_the_others
         await served.page()
         ok = env.scripts.add(
             "sr-a 东区",
-            tool_call("run_readonly_query", cluster="sr-a", sql="SELECT region, total FROM sales"),
+            tool_call(
+                "run_readonly_query", cluster="sr-a", sql="SELECT region, total FROM shop.sales"
+            ),
             cite(),
         )
         body = (await served.turn(ok, "query", "r1")).json()
@@ -2927,7 +2941,9 @@ async def test_a_cluster_without_a_schema_snapshot_is_unavailable_but_the_others
 
         refused = env.scripts.add(
             "sr-b 东区",
-            tool_call("run_readonly_query", cluster="sr-b", sql="SELECT region, total FROM sales"),
+            tool_call(
+                "run_readonly_query", cluster="sr-b", sql="SELECT region, total FROM shop.sales"
+            ),
             clarify("sr-b 暂不可用"),
         )
         body = (await served.turn(refused, "query", "r2")).json()

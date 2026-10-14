@@ -30,6 +30,8 @@ import pytest
 from asyncmy.cursors import SSCursor
 from asyncmy.errors import MySQLError
 from pydantic import SecretStr
+from sqlglot import exp, parse_one
+from sqlglot.dialects.dialect import Dialect
 from tests.p1b.conftest import admin_address
 from tests.sdk_core.postgres_harness import (
     HarnessMisconfiguredError,
@@ -37,7 +39,7 @@ from tests.sdk_core.postgres_harness import (
     parse_admin_url,
 )
 from tests.sdk_core.synthetic_tools import Clock, Grants, ready_engine
-from tests.sdk_core.test_app import cite, clarify, tool_call
+from tests.sdk_core.test_app import cite, tool_call
 from tests.sdk_core.test_runtime import (
     DB_ENV,
     KEY_ENV,
@@ -225,7 +227,15 @@ def adapter(inst: Instance, **changes: object) -> StarRocksAdapter:
 
 
 def guarded(inst: Instance, sql: str, t: StarRocksTarget | None = None):  # type: ignore[no-untyped-def]
-    return guard_readonly_query(sql, scope(inst, t or target(inst)))
+    # 旧协议用例关注类型、超时等独立行为；测试输入先显式限定合成库。
+    return guard_readonly_query(_fixture_qualified_sql(inst, sql), scope(inst, t or target(inst)))
+
+
+def _fixture_qualified_sql(inst: Instance, sql: str) -> str:
+    for name in ("sales", "sales_view", "ungranted", "hidden"):
+        sql = sql.replace(f"FROM {name}", f"FROM {inst.database}.{name}")
+        sql = sql.replace(f"JOIN {name}", f"JOIN {inst.database}.{name}")
+    return sql
 
 
 async def test_long_internal_ddl_matches_server_original(instance: Instance) -> None:
@@ -394,8 +404,8 @@ async def test_row_limit_truncates_and_the_next_query_works(instance: Instance) 
     assert second.rows == ({"n": SALES_ROWS},)
 
 
-async def test_normalized_time_and_concat_sql_matches_terminal_on_414(instance: Instance) -> None:
-    """固定库、时区和 sql_mode：终端原文、规范化 SQL、真实 Adapter 逐值对照。"""
+async def test_verbatim_time_and_concat_sql_matches_terminal_on_414(instance: Instance) -> None:
+    """固定库、时区和 sql_mode：终端原文、受控 LIMIT 后文本、真实 Adapter 逐值对照。"""
     base = target(instance)
     functions = base.policy.allowed_functions | {
         "DATE_ADD",
@@ -424,6 +434,9 @@ async def test_normalized_time_and_concat_sql_matches_terminal_on_414(instance: 
             "FROM sales WHERE id = 0"
         ),
         "from_unixtime": "SELECT FROM_UNIXTIME(1700000000) AS d FROM sales WHERE id = 0",
+        "from_unixtime_format": (
+            "SELECT FROM_UNIXTIME(1700000000, '%Y-%m-%d %H:%i') AS d FROM sales WHERE id = 0"
+        ),
         "concat_null": (
             "SELECT GROUP_CONCAT(CASE WHEN id = 0 THEN NULL ELSE region END ORDER BY id) "
             "AS d FROM sales"
@@ -450,38 +463,109 @@ async def test_normalized_time_and_concat_sql_matches_terminal_on_414(instance: 
             await cursor.execute("SET time_zone = 'Asia/Shanghai'")
             await cursor.execute("SET sql_mode = 'ONLY_FULL_GROUP_BY'")
             for name, original in cases.items():
+                original = original.replace("FROM sales", f"FROM {instance.database}.sales")
                 query = guard_readonly_query(original, scope(instance, t))
                 await cursor.execute(original)
                 original_rows = await cursor.fetchall()
                 original_types = tuple(column[1] for column in cursor.description)
-                await cursor.execute(query.normalized_sql)
-                normalized_rows = await cursor.fetchall()
-                normalized_types = tuple(column[1] for column in cursor.description)
-                assert (original_rows, original_types) == (normalized_rows, normalized_types), name
+                await cursor.execute(query.executed_sql)
+                executed_rows = await cursor.fetchall()
+                executed_types = tuple(column[1] for column in cursor.description)
+                assert query.executed_sql == original + " LIMIT 6", name
+                assert (original_rows, original_types) == (executed_rows, executed_types), name
 
                 result = await ada.run_query(query)
-                assert result.sql == query.normalized_sql
+                assert result.sql == query.executed_sql
                 assert result.rows == tuple({"d": displayed(row[0])} for row in original_rows), name
 
-            formatted = (
-                "SELECT FROM_UNIXTIME(1700000000, '%Y-%m-%d %H:%i') AS d FROM sales WHERE id = 0"
-            )
-            with pytest.raises(QueryRejectedError) as refused:
-                guard_readonly_query(formatted, scope(instance, t))
-            assert refused.value.code is QueryRejectionCode.UNSUPPORTED_SYNTAX
-            await cursor.execute(formatted)
-            (original_value,) = await cursor.fetchone()
-            await cursor.execute(formatted.replace("%i", "%M"))
-            (changed_value,) = await cursor.fetchone()
-            assert original_value == "2023-11-15 06:13" and changed_value != original_value
     finally:
         await conn.ensure_closed()
 
 
-async def test_unqualified_table_uses_unique_readable_database_not_default(
+async def test_s1_parser_difference_matrix_on_414(instance: Instance) -> None:
+    """锁版词元与 4.1.4 对照：获准写法原文执行，歧义字面量、标识符和注释拒绝。"""
+    accepted = (
+        r"SELECT 'a\'b' AS v",
+        r"SELECT 'a\\b' AS v",
+        r"SELECT 'a\\' AS v",
+        r"SELECT 'a\q' AS v",
+        'SELECT "abc" AS v',
+        "SELECT 'a''b' AS v",
+        'SELECT "a""b" AS v',
+    )
+    rejected = (
+        ("SELECT N'abc' AS v", QueryRejectionCode.UNSUPPORTED_SYNTAX),
+        ("SELECT X'4142' AS v", QueryRejectionCode.UNSUPPORTED_SYNTAX),
+        ("SELECT b'0101' AS v", QueryRejectionCode.UNSUPPORTED_SYNTAX),
+        ("SELECT 1 AS `a``b`", QueryRejectionCode.UNSUPPORTED_SYNTAX),
+        ("SELECT 1 -- note\n", QueryRejectionCode.COMMENT_NOT_ALLOWED),
+        ("SELECT 1 --note\n", QueryRejectionCode.COMMENT_NOT_ALLOWED),
+        ("SELECT 1 #note\n", QueryRejectionCode.COMMENT_NOT_ALLOWED),
+        ("SELECT /*! 2 */ 1", QueryRejectionCode.COMMENT_NOT_ALLOWED),
+    )
+    dialect = Dialect.get_or_raise("starrocks")
+    t = target(instance)
+    ada = open_starrocks(t, clock=lambda: datetime.now(UTC))
+    conn = await asyncmy.connect(
+        host=instance.host,
+        port=instance.port,
+        user=instance.ro_user,
+        password=os.environ[PASSWORD_ENV],
+        db=instance.database,
+        autocommit=True,
+    )
+    try:
+        async with conn.cursor() as cursor:
+            await cursor.execute("SET time_zone = 'Asia/Shanghai'")
+            await cursor.execute("SET sql_mode = 'ONLY_FULL_GROUP_BY'")
+            for sql in accepted:
+                assert dialect.tokenize(sql)
+                query = guard_readonly_query(sql, scope(instance, t))
+                assert query.executed_sql == sql + " LIMIT 6"
+                await cursor.execute(sql)
+                direct, description = await cursor.fetchall(), cursor.description
+                parsed = parse_one(sql, read="starrocks")
+                projection = parsed.expressions[0]
+                assert isinstance(projection, exp.Alias)
+                assert isinstance(projection.this, exp.Literal)
+                assert len(direct) == 1 and projection.this.this == direct[0][0]
+                await cursor.execute(query.executed_sql)
+                assert (await cursor.fetchall(), cursor.description) == (direct, description)
+                result = await ada.run_query(query)
+                assert result.columns == tuple(item[0] for item in description)
+                assert tuple(tuple(row.values()) for row in result.rows) == direct
+            for sql, code in rejected:
+                assert dialect.tokenize(sql)
+                with pytest.raises(QueryRejectedError) as failure:
+                    guard_readonly_query(sql, scope(instance, t))
+                assert failure.value.code is code
+            # 两类实测差异：X 字面量是字节值，双反引号列头被服务端解成 ab。
+            await cursor.execute("SELECT X'4142' AS v")
+            assert await cursor.fetchone() == (b"AB",)
+            await cursor.execute("SELECT 1 AS `a``b`")
+            assert cursor.description[0][0] == "ab"
+    finally:
+        await conn.ensure_closed()
+
+
+async def test_s1_union_limit_applies_to_whole_result_on_414(instance: Instance) -> None:
+    sql = (
+        f"SELECT id FROM {instance.database}.sales WHERE id < 3 UNION ALL "
+        f"SELECT id FROM {instance.database}.sales WHERE id >= 3 ORDER BY id"
+    )
+    t = target(instance)
+    query = guard_readonly_query(sql, scope(instance, t))
+    assert query.executed_sql == sql + " LIMIT 6"
+    direct = await readonly_rows(instance, query.executed_sql)
+    result = await open_starrocks(t, clock=lambda: datetime.now(UTC)).run_query(query)
+    assert [row["id"] for row in result.rows] == [row[0] for row in direct[:5]]
+    assert len(direct) == 6 and result.truncated
+
+
+async def test_unqualified_table_needs_explicit_database_even_with_unique_candidate(
     instance: Instance,
 ) -> None:
-    """未写库名是已批准的唯一可读匹配规则，与终端默认库解析有意不同。"""
+    """未写库名只给获准快照候选；补全是下一次模型调用的显式 SQL。"""
     host, port, user = admin_address()
     other = f"{instance.database}_other"
     props = "DUPLICATE KEY(id) DISTRIBUTED BY HASH(id) BUCKETS 1 PROPERTIES('replication_num'='1')"
@@ -498,10 +582,15 @@ async def test_unqualified_table_uses_unique_readable_database_not_default(
         ada = adapter(instance)
         cache = SchemaCache(ada, clock=lambda: datetime.now(UTC))
         assert await cache.refresh()
-        query = guard_readonly_query(
-            "SELECT id FROM only_there ORDER BY id LIMIT 1", cache.current().query_policy
-        )
-        assert f"`{other}`.`only_there`" in query.normalized_sql
+        with pytest.raises(QueryRejectedError) as refused:
+            guard_readonly_query(
+                "SELECT id FROM only_there ORDER BY id LIMIT 1", cache.current().query_policy
+            )
+        assert refused.value.code is QueryRejectionCode.UNQUALIFIED_TABLE
+        assert refused.value.unqualified_tables == ({"table": "only_there", "databases": [other]},)
+        qualified = f"SELECT id FROM {other}.only_there ORDER BY id LIMIT 1"
+        query = guard_readonly_query(qualified, cache.current().query_policy)
+        assert query.executed_sql == qualified
 
         conn = await asyncmy.connect(
             host=host, port=port, user=user, password="", db=instance.database, autocommit=True
@@ -679,6 +768,7 @@ async def test_governed_query_tool_end_to_end(
     except HarnessMisconfiguredError as exc:
         pytest.fail(f"SDK_TEST_POSTGRES_URL {exc}")
 
+    sql = _fixture_qualified_sql(instance, sql)
     ada = adapter(instance)
     schema = SchemaCache(ada, clock=lambda: datetime.now(UTC))
     assert await schema.refresh()
@@ -716,7 +806,9 @@ async def test_governed_query_tool_end_to_end(
         # 不在快照中的对象（无权的 ungranted）在 I/O 前由 SQLGuard 拒绝。
         with pytest.raises(ToolRejectedError, match="object_not_allowed"):
             await governed.invoke(
-                ctx, call("SELECT id FROM ungranted"), tools.executes[(RUN_QUERY, "sr-real")]
+                ctx,
+                call(f"SELECT id FROM {instance.database}.ungranted"),
+                tools.executes[(RUN_QUERY, "sr-real")],
             )
 
         result = await governed.invoke(
@@ -735,7 +827,8 @@ async def test_governed_query_tool_end_to_end(
     (fact,) = delivery.facts
     assert fact.columns == columns
     assert fact.rows == rows
-    assert fact.metadata["row_count"] == len(rows) and "`sales`" in str(fact.metadata["sql"])
+    assert fact.metadata["row_count"] == len(rows)
+    assert f"{instance.database}.sales" in str(fact.metadata["sql"])
     assert not fact.truncated
 
 
@@ -778,7 +871,7 @@ async def test_order_ordinals_match_original_rows_and_plan(instance: Instance, s
     duplicate = "AS x" in sql and "q.label" not in sql
     query = explained(instance, sql) if duplicate else guarded(instance, sql)
     original = await readonly_rows(instance, sql)
-    assert await readonly_rows(instance, query.normalized_sql) == original
+    assert await readonly_rows(instance, query.executed_sql) == original
     plan = await adapter(instance).explain(explained(instance, sql))
     expected = await readonly_rows(instance, "EXPLAIN LOGICAL " + sql)
     assert [row["plan"] for row in plan.rows] == [row[0] for row in expected]
@@ -870,13 +963,13 @@ async def test_r3_sql_keeps_server_rows_headers_and_order(instance: Instance) ->
         scope = cache.current().query_policy
         assert set(scope.tables) == {instance.database, hr}
         for name, template in R3_SAMPLES.items():
-            sql = template.format(d=instance.database, h=hr)
+            sql = _fixture_qualified_sql(instance, template.format(d=instance.database, h=hr))
             query = guard_readonly_query(sql, scope)
             original = await readonly_result(instance, sql)
             assert original[1], name  # 对照有数据，不是两个空结果相等
-            assert await readonly_result(instance, query.normalized_sql) == original, name
+            assert await readonly_result(instance, query.executed_sql) == original, name
         # 经 Adapter 的跨库查询：列头与行数与直接执行一致。
-        cross = R3_SAMPLES["cross database"].format(h=hr)
+        cross = _fixture_qualified_sql(instance, R3_SAMPLES["cross database"].format(h=hr))
         result = await ada.run_query(guard_readonly_query(cross, scope))
         headers, rows = await readonly_result(instance, cross)
         assert list(result.columns) == headers and result.row_count == len(rows)
@@ -988,16 +1081,16 @@ async def test_r3_names_resolve_like_the_server(instance: Instance) -> None:
         assert await cache.refresh()
         scope = cache.current().query_policy
         for name, template in R3_NAME_SAMPLES.items():
-            sql = template.format(d=instance.database, h=hr)
+            sql = _fixture_qualified_sql(instance, template.format(d=instance.database, h=hr))
             original = await readonly_result(instance, sql)
             assert original[1], name
             query = guard_readonly_query(sql, scope)
-            assert await readonly_result(instance, query.normalized_sql) == original, name
+            assert await readonly_result(instance, query.executed_sql) == original, name
             plan = await ada.explain(guard_explain_query(sql, scope))
             expected = await readonly_rows(instance, "EXPLAIN LOGICAL " + sql)
             assert [row["plan"] for row in plan.rows] == [row[0] for row in expected], name
         for name, (template, code) in R3_NAME_REJECTED.items():
-            sql = template.format(h=hr)
+            sql = _fixture_qualified_sql(instance, template.format(h=hr))
             with pytest.raises(MySQLError):
                 await readonly_result(instance, sql)
             for check in (guard_readonly_query, guard_explain_query):
@@ -1024,27 +1117,34 @@ async def test_r3_names_resolve_like_the_server(instance: Instance) -> None:
                 "ON s.id = b.id ORDER BY s.id LIMIT 3",
             ),
         ):
+            crossed = _fixture_qualified_sql(instance, crossed)
+            if by_alias is not None:
+                by_alias = _fixture_qualified_sql(instance, by_alias)
             server = await readonly_result(instance, crossed)
             assert server[1]
             if by_alias is not None:
                 assert server != await readonly_result(instance, by_alias), crossed
-            normalized = guard_readonly_query(crossed, scope).normalized_sql
+            normalized = guard_readonly_query(crossed, scope).executed_sql
             assert await readonly_result(instance, normalized) == server, crossed
             plan = await ada.explain(guard_explain_query(crossed, scope))
             expected = await readonly_rows(instance, "EXPLAIN LOGICAL " + crossed)
             assert [row["plan"] for row in plan.rows] == [row[0] for row in expected], crossed
         # 原文在服务器报错（排序名指向未分组的列）：规范化后同样报错，不被改写成功执行。
-        invalid = "SELECT id AS total, SUM(total) AS s FROM sales GROUP BY id ORDER BY total"
+        invalid = _fixture_qualified_sql(
+            instance, "SELECT id AS total, SUM(total) AS s FROM sales GROUP BY id ORDER BY total"
+        )
         with pytest.raises(MySQLError):
             await readonly_result(instance, invalid)
         with pytest.raises(MySQLError):
-            await readonly_result(instance, guard_readonly_query(invalid, scope).normalized_sql)
+            await readonly_result(instance, guard_readonly_query(invalid, scope).executed_sql)
         with pytest.raises(MySQLError):
             await readonly_rows(
-                instance, "EXPLAIN LOGICAL " + guard_explain_query(invalid, scope).normalized_sql
+                instance, "EXPLAIN LOGICAL " + guard_explain_query(invalid, scope).executed_sql
             )
         # 相关子查询的依赖记入外层列。
-        correlated = R3_NAME_SAMPLES["correlated outer"].format(h=hr)
+        correlated = _fixture_qualified_sql(
+            instance, R3_NAME_SAMPLES["correlated outer"].format(h=hr)
+        )
         assert (instance.database, "sales", "id") in guard_readonly_query(
             correlated, scope
         ).referenced_columns
@@ -1210,7 +1310,9 @@ async def test_sql_mode_is_pinned_when_server_default_changes(instance: Instance
 def explained(  # type: ignore[no-untyped-def]
     inst: Instance, sql: str, t: StarRocksTarget | None = None, **extra: tuple[str, ...]
 ):
-    return guard_explain_query(sql, scope(inst, t or target(inst), **extra))
+    return guard_explain_query(
+        _fixture_qualified_sql(inst, sql), scope(inst, t or target(inst), **extra)
+    )
 
 
 def plan_text(result: object) -> str:
@@ -1239,7 +1341,7 @@ async def test_explain_table_view_and_cte(instance: Instance) -> None:
         plan = explained(instance, sql, t, **view)
         result = await ada.explain(plan)
         text = plan_text(result)
-        assert result.sql == EXPLAIN_PREFIX + plan.normalized_sql
+        assert result.sql == EXPLAIN_PREFIX + plan.executed_sql
         assert result.columns == ("plan",) and result.row_count > 0 and not result.truncated
         assert "SCAN [" in text and "sales" in text
         # LOGICAL 不含列统计值（COSTS）与资源组（VERBOSE），Task 0 的披露结论在本环境复核。
@@ -1539,7 +1641,7 @@ async def test_grants_and_revocations_take_effect_at_the_next_boundary(instance:
     assert layout.value.code is Code.OBJECT_UNREADABLE
     # 新查询：SQLGuard 仍按旧快照放行，数据库是最终防线。
     with pytest.raises(StarRocksError) as denied:
-        await call_tool(executes, RUN_QUERY, sql="SELECT id FROM hidden")
+        await call_tool(executes, RUN_QUERY, sql=f"SELECT id FROM {db}.hidden")
     assert denied.value.code is Code.PERMISSION_DENIED
     assert await cache.refresh()
     assert (db, "hidden") not in cache.current().objects
@@ -1700,10 +1802,10 @@ async def test_web_replays_view_fact_after_same_column_redefinition(
             assert await served.finish() == 0
 
 
-async def test_web_rejects_formatted_from_unixtime_then_runs_plain_call(
+async def test_web_runs_formatted_from_unixtime_verbatim(
     instance: Instance, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """正式 Web + 真 Runner/SQLGuard/StarRocks：拒绝格式参数后仍可执行无格式查询。"""
+    """正式 Web + 真 Runner/SQLGuard/StarRocks：带格式函数原文可执行。"""
     raw = os.environ.get("SDK_TEST_POSTGRES_URL")
     if not raw:
         pytest.fail("SDK_TEST_POSTGRES_URL 未设置：需要隔离测试 PostgreSQL")
@@ -1728,7 +1830,7 @@ async def test_web_rejects_formatted_from_unixtime_then_runs_plain_call(
         config = runtime.ServeConfig.model_validate(
             serve_config(web.port, targets=[target_config(t.model_dump(mode="json"))])
         )
-        bad = web.scripts.add(
+        formatted = web.scripts.add(
             "带格式查时间",
             tool_call(
                 "run_readonly_query",
@@ -1738,35 +1840,15 @@ async def test_web_rejects_formatted_from_unixtime_then_runs_plain_call(
                     f"FROM {instance.database}.sales WHERE id = 0"
                 ),
             ),
-            clarify(),
-        )
-        good = web.scripts.add(
-            "不带格式查时间",
-            tool_call(
-                "run_readonly_query",
-                cluster="sr-real",
-                sql=(
-                    "SELECT FROM_UNIXTIME(1700000000) AS d "
-                    f"FROM {instance.database}.sales WHERE id = 0"
-                ),
-            ),
             cite(),
         )
         async with web.running(config, starrocks_connect=None) as served:
             await served.page()
-            refused = (await served.turn(bad, "query", "r1")).json()
-            assert refused["state"] == "completed" and not refused["delivery"]["facts"]
-            output = [
-                item["output"]
-                for item in web.scripts.calls[bad][1].input
-                if item.get("type") == "function_call_output"
-            ]
-            assert len(output) == 1 and "DATE_FORMAT(FROM_UNIXTIME(x), 格式)" in output[0]
-            assert "unsupported_syntax" in output[0]
+            first = (await served.turn(formatted, "query", "r1")).json()
+            assert first["state"] == "completed"
+            assert first["delivery"]["facts"][0]["rows"] == [{"d": "2023-11-15 06:13"}]
+            assert "%Y-%m-%d %H:%i" in first["delivery"]["facts"][0]["metadata"]["sql"]
 
-            succeeded = (await served.turn(good, "query", "r2")).json()
-            assert succeeded["state"] == "completed"
-            assert succeeded["delivery"]["facts"][0]["rows"] == [{"d": "2023-11-15 06:13:20"}]
             assert await served.finish() == 0
 
 

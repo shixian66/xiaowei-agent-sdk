@@ -350,7 +350,7 @@ async def test_formal_unknown_write_not_replayed_and_readonly_continues(
                 tool_call(
                     "run_readonly_query",
                     cluster="sr-test",
-                    sql="SELECT region, total FROM sales",
+                    sql="SELECT region, total FROM shop.sales",
                 ),
                 cite(),
             )

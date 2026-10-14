@@ -1,39 +1,16 @@
-"""SQLGuard：把模型给出的 SQL 收窄为一条可执行的只读 ``GuardedQuery``，或给出固定原因码。
+"""SQLGuard：只读 SQL 的纯函数守卫；执行原文，不按 AST 重打印。
 
-``guard_explain_query`` 用同一套校验产出 ``ExplainQuery``，供 Adapter 以固定显式级别取执行
-计划；两者是互不兼容的封存类型。差别只在结果列：执行计划不改写 LIMIT，也不检查列名与列数
-（第 2、6 步只保护交付给用户的列头）。``audit_references`` 只为不执行的审计原文给出引用的对象
-与列，范围校验与执行计划相同。
+``guard_readonly_query`` 与 ``guard_explain_query`` 产生互不兼容的封存类型。范围来自
+``QueryPolicy.tables``（当前可读快照）；不查询元数据、不取连接。先按 UTF-8 限长、分词并拒绝
+注释、hint、多语句及非 SELECT/WITH 开头，再用锁定的 sqlglot 检查语法闭集、函数、对象、列和
+物理依赖。业务 SQL 的物理表须写明库；拒绝可附当前可读快照中的有限同名候选，不回显输入 SQL。
+AST 的限定列名与星号展开只用于权限和依赖分析，不作为执行文本。审计原文不执行，仍按记录的
+会话当前库解析，沿用原来的可打印性过滤。
 
-同步纯函数，不查询元数据、不取连接、不访问网络或凭据。范围是 ``QueryPolicy.tables``：结构快照中
-各库的可读对象与按序的列。只接受单条 ``SELECT`` 或 ``UNION``/``UNION ALL``（可带非递归 ``WITH``）；
-未列入闭集的语法、节点、函数和参数一律拒绝。顺序：
-
-1. 按 UTF-8 字节限长；先分词，再按词元拒绝注释、hint、多语句和非 ``SELECT``/``WITH`` 开头的
-   语句。非 SELECT 语句在 sqlglot 中会回退为 ``Command`` 并把原文写进日志，因此必须在解析前挡住。
-2. 解析后逐节点检查闭集、函数 allowlist、星号位置、LIMIT 与各节点的参数位置。查询的结果列名
-   来自对外给出列名的查询体（最外层、CTE、派生表，UNION 取最左分支），其中的表达式列必须有显式
-   别名：sqlglot 会把无别名的表达式改名为 ``_col_N``，在规范化 SQL 内部前后一致（计划不变），
-   但交付的列头会与 StarRocks 不同。
-3. 按 sqlglot scope 区分 CTE 与物理表。物理表必须在范围内：写了库名就按库名，没写时只在恰好一个
-   库有同名对象时补全（审计原文按记录的会话当前库解析，见 ``audit_references``），多个库都有即
-   歧义。列名按快照不区分大小写匹配并改写为快照中的写法（库、表与别名区分大小写）；未限定列在
-   多个来源中都存在时判为歧义。与输出别名同名的未限定列按 StarRocks 各子句的规则区分列与别名（见
-   ``_bind_shadowed``）；CTE 与派生表的输出名保持原写法。
-4. 用 sqlglot ``qualify`` 按“只含被引用对象”的 schema 完整限定所有列、按快照列序展开星号，解析
-   失败即列不在范围内；再逐 scope 复核物理列归属（相关子查询沿外层 scope 查找）。UNION 的排序名
-   换为位置。执行的 SQL 中唯一保留的未限定名是 SELECT 的 ORDER BY 对本层输出名的引用：数据库按
-   投影、分组与窗口决定它指向输出列还是同名物理列，原样保留才能得到与原文相同的绑定（内联输出
-   表达式会改变排序，内联标量子查询会被拒绝）；两种可能的列都计入依赖。依赖是全部 scope（每个
-   UNION 分支、子查询、窗口与各子句）中的物理对象与列。
-5. 查询：顶层 LIMIT 缺失或超过 ``max_rows`` 时改为 ``max_rows + 1``（供 Adapter 判定截断；UNION 的
-   LIMIT 作用于整个集合）；执行计划：LIMIT 保持原样，因为 EXPLAIN 不返回数据行，改写会改变被解释
-   的计划。再生成规范化 SQL；展开后的规范化结果也要满足长度上限，且再过一次同一函数结果不变。
-6. 查询的结果列数不超过 ``max_result_columns``，列名不区分大小写也不得重复（Adapter 无法交付重名
-   列；要求唯一别名而不是悄悄改名）。
-
-函数名按 sqlglot 规范名（大写）比较，例如 ``DATE_TRUNC`` 解析为 ``TIMESTAMP_TRUNC``。拒绝只带
-``QueryRejectionCode`` 与固定说明，不含 SQL、标识符、字面量或解析器原文。
+查询在去尾分号后，只可追加顶层 LIMIT 或下调其数字，并在编辑后重过守卫；EXPLAIN 保留原 LIMIT。
+查询列数、顶层重名和估算列头字节在 I/O 前受限，Adapter 再核对 StarRocks 实际返回列头。
+函数名按 sqlglot 规范名（大写）与允许的别名比较。解析器输入异常映射成固定原因码；程序异常
+照常传播。拒绝不含 SQL 字面量或底层异常链，除可读快照候选外不回显标识符。
 
 拒绝边界：sqlglot 的输入错误（``SqlglotError``）与过深嵌套（``RecursionError``）是预期的输入
 失败；解析器对畸形函数抛出的其他 ``Exception`` 同样映射为不可解析。拒绝总在下层 ``except``
@@ -48,7 +25,7 @@ import enum
 from collections.abc import Callable, Mapping
 from dataclasses import InitVar, dataclass
 from itertools import pairwise
-from typing import Annotated, Final, Literal, NoReturn, TypeVar
+from typing import Annotated, Final, NoReturn, TypeVar
 
 from pydantic import (
     BaseModel,
@@ -77,11 +54,11 @@ class QueryRejectionCode(enum.StrEnum):
     UNSUPPORTED_SYNTAX = "unsupported_syntax"
     STAR_PROJECTION = "star_projection"
     OBJECT_NOT_ALLOWED = "object_not_allowed"
-    AMBIGUOUS_OBJECT = "ambiguous_object"
+    UNQUALIFIED_TABLE = "unqualified_table"
     COLUMN_NOT_ALLOWED = "column_not_allowed"
     FUNCTION_NOT_ALLOWED = "function_not_allowed"
     AMBIGUOUS_REFERENCE = "ambiguous_reference"
-    UNNAMED_COLUMN = "unnamed_column"
+    COMMENT_NOT_ALLOWED = "comment_not_allowed"
     TOO_MANY_COLUMNS = "too_many_columns"
     UNSUPPORTED_LIMIT = "unsupported_limit"
 
@@ -89,7 +66,7 @@ class QueryRejectionCode(enum.StrEnum):
 _Code = QueryRejectionCode
 
 REJECTION_MESSAGES: Final[Mapping[QueryRejectionCode, str]] = {
-    _Code.INPUT_TOO_LARGE: "SQL 超过允许的长度（星号展开后同样计算）",
+    _Code.INPUT_TOO_LARGE: "SQL 超过允许的长度",
     _Code.UNPARSABLE: "SQL 无法解析",
     _Code.MULTIPLE_STATEMENTS: "只允许一条语句",
     _Code.UNSUPPORTED_SYNTAX: (
@@ -98,29 +75,32 @@ REJECTION_MESSAGES: Final[Mapping[QueryRejectionCode, str]] = {
     ),
     _Code.STAR_PROJECTION: "* 只能用于查询列表（含 别名.*）或 COUNT(*)",
     _Code.OBJECT_NOT_ALLOWED: "引用了不存在或当前账号不可读的表或视图",
-    _Code.AMBIGUOUS_OBJECT: "表名在多个数据库中存在，请写成 库名.表名",
+    _Code.UNQUALIFIED_TABLE: "表名须写成 库名.表名",
     _Code.COLUMN_NOT_ALLOWED: "引用了不存在或不可读的列",
     _Code.FUNCTION_NOT_ALLOWED: "使用了未获准的函数",
     _Code.AMBIGUOUS_REFERENCE: "列引用或结果列名有歧义，请用表名限定列，或为输出列设置唯一别名",
-    _Code.UNNAMED_COLUMN: "表达式输出列需要用 AS 设置别名",
-    _Code.TOO_MANY_COLUMNS: "结果列数超过上限，请只选择需要的列",
+    _Code.COMMENT_NOT_ALLOWED: "SQL 含注释，请删除注释后重试",
+    _Code.TOO_MANY_COLUMNS: "结果列数或列名总长超过上限，请只选择需要的列",
     _Code.UNSUPPORTED_LIMIT: "LIMIT 只接受非负整数字面量，不支持 OFFSET",
 }
-FROM_UNIXTIME_FORMAT_HINT: Final = (
-    "FROM_UNIXTIME 暂不支持格式参数，请改写为 DATE_FORMAT(FROM_UNIXTIME(x), 格式)"
-)
 
 
 class QueryRejectedError(Exception):
-    """查询在任何 I/O 前被拒绝；消息只有固定说明。"""
+    """查询在任何 I/O 前被拒绝；只携带固定说明与获准快照候选。"""
 
     def __init__(
-        self, code: QueryRejectionCode, *, hint: Literal["from_unixtime_format"] | None = None
+        self,
+        code: QueryRejectionCode,
+        *,
+        unqualified_tables: tuple[dict[str, object], ...] = (),
+        missing_tables: int = 0,
+        more: bool = False,
     ) -> None:
-        message = REJECTION_MESSAGES[code]
-        super().__init__(f"{message}；{FROM_UNIXTIME_FORMAT_HINT}" if hint is not None else message)
+        super().__init__(REJECTION_MESSAGES[code])
         self.code = code
-        self.hint = hint
+        self.unqualified_tables = unqualified_tables
+        self.missing_tables = missing_tables
+        self.more = more
 
 
 class QueryPolicy(BaseModel):
@@ -128,7 +108,7 @@ class QueryPolicy(BaseModel):
 
     ``tables`` 是 库 → 对象 → 按序的列（星号按此顺序展开）；每个对象至少一列，同一对象的列名
     不区分大小写也不重复（StarRocks 列名不区分大小写）。业务查询不继承连接的默认库：未限定
-    对象名只按唯一匹配补全（审计原文另按记录的会话当前库，见 ``audit_references``）。函数名统一
+    物理表名须拒绝（审计原文另按记录的会话当前库，见 ``audit_references``）。函数名统一
     为大写。
     """
 
@@ -166,17 +146,19 @@ _SEAL: Final = object()
 
 @dataclass(frozen=True, slots=True)
 class GuardedQuery:
-    """SQLGuard 的唯一产物；Adapter 只执行 ``normalized_sql``。
+    """SQLGuard 的查询产物；Adapter 只执行 ``executed_sql``。
 
     ``referenced_objects`` 为 ``(库, 对象)``，``referenced_columns`` 为 ``(库, 对象, 列)``，列名是
     快照中的写法。``max_returned_rows`` 是最多交付的行数；超过即截断。
     """
 
     target_id: str
-    normalized_sql: str
+    executed_sql: str
     referenced_objects: frozenset[tuple[str, str]]
     referenced_columns: frozenset[tuple[str, str, str]]
     max_returned_rows: int
+    requested_limit: int | None
+    applied_limit: int
     _seal: InitVar[object] = None
 
     def __post_init__(self, _seal: object) -> None:
@@ -186,13 +168,13 @@ class GuardedQuery:
 
 @dataclass(frozen=True, slots=True)
 class ExplainQuery:
-    """``guard_explain_query`` 的唯一产物；Adapter 只以固定显式级别 EXPLAIN ``normalized_sql``。
+    """``guard_explain_query`` 的产物；Adapter 只以固定级别 EXPLAIN ``executed_sql``。
 
     与 ``GuardedQuery`` 互不兼容：不能被当作查询执行，也没有返回行数。
     """
 
     target_id: str
-    normalized_sql: str
+    executed_sql: str
     referenced_objects: frozenset[tuple[str, str]]
     referenced_columns: frozenset[tuple[str, str, str]]
     _seal: InitVar[object] = None
@@ -203,34 +185,48 @@ class ExplainQuery:
 
 
 def guard_readonly_query(sql: str, policy: QueryPolicy) -> GuardedQuery:
-    """校验并规范化一条只读查询。
+    """校验一条只读查询；执行原文只可能去尾分号并编辑顶层 LIMIT。
 
     :raises QueryRejectedError: 任一规则不通过；只带原因码与固定说明。
     """
-    root, objects, columns = _guard(sql, policy, delivered=True)
-    _check_executable_from_unixtime(root)
-    _check_result_columns(root, policy)
-    returned = _cap_limit(root, policy.max_rows)
+    root, objects, columns, tokens, header_extra = _guard(sql, policy)
+    _check_result_columns(root, policy, header_extra)
+    executed, requested, applied = _edit_limit(sql, tokens, root, policy)
+    if executed != _without_terminator(sql):
+        checked, checked_objects, checked_columns, _, checked_header_extra = _guard(
+            executed, policy
+        )
+        _check_result_columns(checked, policy, checked_header_extra)
+        if (
+            (checked_objects, checked_columns) != (objects, columns)
+            or _functions(checked) != _functions(root)
+            or _inner_limits(checked) != _inner_limits(root)
+            or _root_limit(checked) != applied
+        ):
+            _reject(_Code.UNSUPPORTED_SYNTAX)
     return GuardedQuery(
         target_id=policy.target_id,
-        normalized_sql=_normalize(root, policy),
+        executed_sql=executed,
         referenced_objects=objects,
         referenced_columns=columns,
-        max_returned_rows=returned,
+        max_returned_rows=(
+            min(requested, policy.max_rows) if requested is not None else policy.max_rows
+        ),
+        requested_limit=requested,
+        applied_limit=applied,
         _seal=_SEAL,
     )
 
 
 def guard_explain_query(sql: str, policy: QueryPolicy) -> ExplainQuery:
-    """按与查询相同的范围校验并规范化一条待取执行计划的 SQL；LIMIT 保持原样。
+    """按与查询相同的范围校验原文，执行计划保留原 LIMIT。
 
     :raises QueryRejectedError: 任一规则不通过；只带原因码与固定说明。
     """
-    root, objects, columns = _guard(sql, policy)
-    _check_executable_from_unixtime(root)
+    _, objects, columns, _, _ = _guard(sql, policy)
     return ExplainQuery(
         target_id=policy.target_id,
-        normalized_sql=_normalize(root, policy),
+        executed_sql=_without_terminator(sql),
         referenced_objects=objects,
         referenced_columns=columns,
         _seal=_SEAL,
@@ -249,7 +245,7 @@ def audit_references(sql: str, policy: QueryPolicy, database: str) -> tuple[_Obj
 
     :raises QueryRejectedError: 不在范围内或无法可靠判定；调用方据此不列出该条原文。
     """
-    root, objects, columns = _guard(sql, policy, current_database=database)
+    root, objects, columns, _, _ = _guard(sql, policy, current_database=database)
     _normalize(root, policy)
     return objects, columns
 
@@ -258,27 +254,35 @@ def _guard(
     sql: str,
     policy: QueryPolicy,
     *,
-    delivered: bool = False,
     current_database: str | None = None,
-) -> tuple[exp.Query, _Objects, _Columns]:
+) -> tuple[exp.Query, _Objects, _Columns, list[Token], int]:
     """三个公开函数共用的校验：返回完整限定后的语法树与引用的对象、列。
 
-    ``delivered`` 为真（查询）时结果列名会交付给用户，表达式列必须有显式别名。
     ``current_database`` 只由审计原文给出（见 ``_bind_table``）。
     """
     if _utf8_size(sql) > policy.max_sql_bytes:
         _reject(_Code.INPUT_TOO_LARGE)
-    root = _parse(sql)
+    root, tokens = _parse(sql)
     _check_nodes(root, policy)
-    if delivered:
-        _check_output_names(root)
+    # 无 AS 的表达式由数据库命名。sqlglot 在 qualify 时会生成短 _col_N，不能拿它
+    # 低估原文表达式的列头；使用原始解析树表达式的长度，运行时仍复核数据库实返列头。
+    leftmost = _leftmost(root)
+    header_extra = sum(
+        _expression_header_bytes(projection)
+        for projection in (leftmost.expressions if leftmost is not None else ())
+        if not isinstance(projection, exp.Alias | exp.Column | exp.Star)
+    )
     _bind_tables(root, policy, current_database)
     # 名字推导与 sqlglot 一样按作用域递归；过深的嵌套是预期的输入失败，映射为固定原因码。
     _attempt(lambda: _bind_columns(root, policy), _Code.UNSUPPORTED_SYNTAX)
     qualified = _qualify(root, policy)
     _order_unions(qualified)
     objects, columns = _resolve_columns(qualified, policy)
-    return qualified, objects, columns
+    return qualified, objects, columns, tokens, header_extra
+
+
+def _expression_header_bytes(projection: exp.Expression) -> int:
+    return len(_attempt(lambda: projection.sql(dialect=DIALECT), _Code.UNSUPPORTED_SYNTAX).encode())
 
 
 def _normalize(root: exp.Query, policy: QueryPolicy) -> str:
@@ -340,10 +344,18 @@ _DATE_CALLS: Final = frozenset(
 _FUNCTION_NAME_TOKENS: Final = frozenset({TokenType.VAR, TokenType.IDENTIFIER})
 
 
-def _parse(sql: str) -> exp.Query:
+def _parse(sql: str) -> tuple[exp.Query, list[Token]]:
     tokens: list[Token] = _attempt(lambda: _DIALECT.tokenize(sql), _Code.UNPARSABLE)
     # 尾部注释附着在最后的分号词元上：先检查全部词元，再去掉可选的尾部分号。
-    if any(token.comments or token.token_type is TokenType.HINT for token in tokens):
+    if any(token.token_type is TokenType.HINT for token in tokens):
+        _reject(_Code.UNSUPPORTED_SYNTAX)
+    if any(token.comments for token in tokens):
+        hint = sql.find("/*+")
+        while hint >= 0 and any(token.start <= hint <= token.end for token in tokens):
+            hint = sql.find("/*+", hint + 3)
+        _reject(_Code.UNSUPPORTED_SYNTAX if hint >= 0 else _Code.COMMENT_NOT_ALLOWED)
+    # sqlglot 把 ``a``b`` 解成 a`b，4.1.4 却把该别名解成 ab；不让检查与执行绑定不同名字。
+    if any(token.token_type is TokenType.IDENTIFIER and "`" in token.text for token in tokens):
         _reject(_Code.UNSUPPORTED_SYNTAX)
     if tokens and tokens[-1].token_type is TokenType.SEMICOLON:
         tokens = tokens[:-1]
@@ -375,7 +387,7 @@ def _parse(sql: str) -> exp.Query:
         _reject(parse_error)
     if len(statements) != 1 or statements[0] is None:
         _reject(_Code.MULTIPLE_STATEMENTS)
-    return _query_root(statements[0])
+    return _query_root(statements[0]), tokens
 
 
 def _check_date_arity(tokens: list[Token]) -> None:
@@ -500,11 +512,6 @@ def _check_nodes(root: exp.Query, policy: QueryPolicy) -> None:
             _reject(_Code.UNSUPPORTED_SYNTAX)
 
 
-def _check_executable_from_unixtime(root: exp.Query) -> None:
-    if any(node.args.get("format") is not None for node in root.find_all(exp.UnixToTime)):
-        raise QueryRejectedError(_Code.UNSUPPORTED_SYNTAX, hint="from_unixtime_format")
-
-
 def _star_allowed(star: exp.Star) -> bool:
     """``COUNT(*)``，或查询列表中的 ``*`` / ``别名.*``（按快照列序展开）。"""
     if isinstance(star.parent, exp.Count):
@@ -564,18 +571,6 @@ def _limit_value(limit: exp.Limit) -> int:
     return int(literal.name)
 
 
-def _check_output_names(root: exp.Query) -> None:
-    """结果列名可能来自的查询体中，表达式列必须有显式别名。
-
-    最外层的列头直接交付；CTE 与派生表的列名可经外层 ``*`` 成为列头。标量、IN、EXISTS 子查询与
-    UNION 的非最左分支不对外给出列名，不受此限。
-    """
-    for select in _named_bodies(root):
-        for projection in select.expressions:
-            if not isinstance(projection, exp.Alias | exp.Column | exp.Star):
-                _reject(_Code.UNNAMED_COLUMN)
-
-
 def _named_bodies(root: exp.Query) -> list[exp.Select]:
     """对外给出列名的查询体（最外层、CTE、派生表）的最左 SELECT。"""
     bodies: list[exp.Expr] = [root]
@@ -611,34 +606,51 @@ def _named_sources(scope: Scope) -> dict[str, tuple[exp.Expr, exp.Table | Scope]
 
 
 def _bind_tables(root: exp.Query, policy: QueryPolicy, current_database: str | None) -> None:
-    """物理表写成 ``库.表``；没写库名时按唯一匹配补全（CTE 引用不是物理表，不补库名）。"""
+    """业务 SQL 拒绝未限定物理表；审计原文仍按记录的当前库解析。"""
     seen: set[int] = set()
+    missing: set[str] = set()
+    candidates: dict[str, list[str]] = {}
     for scope in _scopes(root):
         for node, source in _sources(scope):
             seen.add(id(node))
             if isinstance(source, exp.Table):
-                _bind_table(source, policy, current_database)
+                if current_database is None and not source.text("db"):
+                    name = source.name
+                    found = sorted(db for db, objects in policy.tables.items() if name in objects)
+                    if found:
+                        candidates[name] = found
+                    else:
+                        missing.add(name)
+                else:
+                    _bind_table(source, policy, current_database)
     # 每个表节点都必须是某个 scope 的来源（物理表或 CTE 引用），不留未归属的表。
     if any(id(table) not in seen for table in root.find_all(exp.Table)):
         _reject(_Code.UNSUPPORTED_SYNTAX)
+    if candidates or missing:
+        chosen = sorted(candidates.items())[:5]
+        raise QueryRejectedError(
+            _Code.UNQUALIFIED_TABLE,
+            unqualified_tables=tuple(
+                {"table": name, "databases": databases[:20]} for name, databases in chosen
+            ),
+            missing_tables=len(missing),
+            more=len(candidates) > 5
+            or any(len(databases) > 20 for databases in candidates.values()),
+        )
 
 
 def _bind_table(table: exp.Table, policy: QueryPolicy, current_database: str | None) -> None:
-    """``current_database`` 为 ``None``（业务查询）时未限定名按唯一匹配补全；审计原文给出记录的
-    会话当前库，未限定名只在它之中找（``''`` 为没有当前库，找不到任何对象）。"""
+    """显式库名按快照校验；审计未限定表仅按记录的会话当前库查找。"""
     name, database = table.name, table.text("db")
     if database:
         if policy.columns(database, name) is None:
             _reject(_Code.OBJECT_NOT_ALLOWED)
         return
-    if current_database is not None:
-        found = [current_database] if policy.columns(current_database, name) else []
-    else:
-        found = [db for db, objects in policy.tables.items() if name in objects]
+    found = (
+        [current_database] if current_database and policy.columns(current_database, name) else []
+    )
     if not found:
         _reject(_Code.OBJECT_NOT_ALLOWED)
-    if len(found) > 1:
-        _reject(_Code.AMBIGUOUS_OBJECT)
     table.set("db", exp.to_identifier(found[0]))
 
 
@@ -1064,21 +1076,75 @@ def _order_output_columns(
 # ---- 5. LIMIT --------------------------------------------------------------------------------
 
 
-def _cap_limit(root: exp.Query, max_rows: int) -> int:
+def _without_terminator(sql: str) -> str:
+    stripped = sql.rstrip()
+    return stripped[:-1] if stripped.endswith(";") else sql
+
+
+def _root_limit(root: exp.Query) -> int | None:
     limit = root.args.get("limit")
-    requested = _limit_value(limit) if isinstance(limit, exp.Limit) else None
-    if requested is not None and requested <= max_rows:
-        return requested
-    root.limit(max_rows + 1, copy=False)
-    return max_rows
+    return _limit_value(limit) if isinstance(limit, exp.Limit) else None
+
+
+def _edit_limit(
+    sql: str, tokens: list[Token], root: exp.Query, policy: QueryPolicy
+) -> tuple[str, int | None, int]:
+    """只定位顶层 LIMIT 的数字词元，不重新打印其余 SQL。"""
+    depth = 0
+    limit_token: Token | None = None
+    number: Token | None = None
+    for index, token in enumerate(tokens):
+        if token.token_type is TokenType.L_PAREN:
+            depth += 1
+        elif token.token_type is TokenType.R_PAREN:
+            depth -= 1
+        elif depth == 0 and token.token_type is TokenType.LIMIT:
+            if limit_token is not None or index + 1 == len(tokens):
+                _reject(_Code.UNSUPPORTED_SYNTAX)
+            limit_token, number = token, tokens[index + 1]
+    requested = _root_limit(root)
+    if (limit_token is None) != (requested is None):
+        _reject(_Code.UNSUPPORTED_SYNTAX)
+    base = _without_terminator(sql)
+    applied = min(requested, policy.max_rows) if requested is not None else policy.max_rows + 1
+    if requested is not None:
+        if (
+            number is None
+            or number.token_type is not TokenType.NUMBER
+            or not number.text.isascii()
+            or not number.text.isdigit()
+            or int(number.text) != requested
+        ):
+            _reject(_Code.UNSUPPORTED_SYNTAX)
+        if requested > policy.max_rows:
+            applied = policy.max_rows + 1
+            base = base[: number.start] + str(applied) + base[number.end + 1 :]
+    else:
+        base = f"{base.rstrip()} LIMIT {applied}"
+    if _utf8_size(base) > policy.max_sql_bytes:
+        _reject(_Code.INPUT_TOO_LARGE)
+    return base, requested, applied
+
+
+def _functions(root: exp.Query) -> tuple[str, ...]:
+    return tuple(_function_name(node) for node in root.find_all(exp.Func))
+
+
+def _inner_limits(root: exp.Query) -> tuple[int, ...]:
+    outer = root.args.get("limit")
+    return tuple(_limit_value(node) for node in root.find_all(exp.Limit) if node is not outer)
 
 
 # ---- 6. 结果列 -------------------------------------------------------------------------------
 
 
-def _check_result_columns(root: exp.Query, policy: QueryPolicy) -> None:
+def _check_result_columns(root: exp.Query, policy: QueryPolicy, header_extra: int) -> None:
     names = root.named_selects
+    # 只交付最外层结果列。内部 CTE/派生表即使有同名列，只要外层选出的列唯一且
+    # 引用解析无歧义，就不因内部名字而拒绝整条查询。
     if len({name.casefold() for name in names}) != len(names):
         _reject(_Code.AMBIGUOUS_REFERENCE)
     if len(names) > policy.max_result_columns:
+        _reject(_Code.TOO_MANY_COLUMNS)
+    if sum(len(name.encode()) for name in names) + header_extra > policy.max_sql_bytes:
         _reject(_Code.TOO_MANY_COLUMNS)

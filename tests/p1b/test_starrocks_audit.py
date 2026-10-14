@@ -271,7 +271,7 @@ async def test_xiaowei_own_statements_are_filtered() -> None:
             }
         ),
     )
-    ran = guard_explain_query("SELECT region FROM sales", POLICY).normalized_sql
+    ran = guard_explain_query("SELECT region FROM shop.sales", POLICY).executed_sql
     shown = await listed(*OWN, ran, t=target(audit={"max_rows": 10}))
     # 小维经 run_readonly_query 执行的获准查询是真实的查询记录，照常列出。
     assert shown == [ran]

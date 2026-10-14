@@ -49,7 +49,7 @@ from tests.sdk_core.test_vertex_model import VERTEX, _body, _call_part
 from xiaowei import app as app_module
 from xiaowei.app import AppConfig, Application, DataPolicy, TurnError, safe_run_config
 from xiaowei.config import configure_runtime
-from xiaowei.evidence import AnswerRejectedError
+from xiaowei.evidence import AnswerRejectedError, EvidenceError
 from xiaowei.governance import GovernedTools
 from xiaowei.mcp import MCPIntegration
 from xiaowei.model_api import ModelBinding, open_model
@@ -1267,6 +1267,23 @@ async def test_unknown_tool_failure_logs_other_without_exception_text(env: Env) 
     assert failed.value.reason == "tool_failed"
     assert "tool_error=other" in output
     assert MODEL_SECRET not in output and SYNTHETIC_SQL not in output
+
+
+async def test_evidence_record_failure_logs_actual_tool_id(
+    env: Env, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    async def fail_record(*_: Any, **__: Any) -> Any:
+        raise EvidenceError(MODEL_SECRET)
+
+    monkeypatch.setattr(env.governed.evidence, "record", fail_record)
+    app = env.application()
+    message = env.scripts.add("证据保存失败", tool_call("order_total", region="east"))
+    with all_logs() as records, pytest.raises(TurnError) as failed:
+        await app.run_turn(env.ctx(turn="evidence-log"), message)
+    output = "\n".join(r.getMessage() for r in records)
+    assert failed.value.reason == "tool_failed"
+    assert f"tool_error=other tool_id={TOTAL_TOOL}" in output
+    assert MODEL_SECRET not in output
 
 
 async def test_mcp_failure_logs_fixed_category_without_remote_text(

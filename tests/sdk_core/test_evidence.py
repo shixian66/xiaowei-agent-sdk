@@ -293,7 +293,7 @@ async def test_advice_is_a_separate_answer_without_facts(postgres_url: URL) -> N
     async with ready_engine(postgres_url) as engine:
         evidence = store(engine, grants, clock)
         real = await _record(evidence)
-        sql = "SELECT region, SUM(total) AS total\nFROM sales GROUP BY region"
+        sql = "SELECT region, SUM(total) AS total\nFROM shop.sales GROUP BY region"
         for mixed in (
             _answer((real,), advice=sql),
             _answer(inferences=(("按地区汇总", ()),), advice=sql),
@@ -308,7 +308,7 @@ async def test_advice_is_a_separate_answer_without_facts(postgres_url: URL) -> N
             first, *rest = delivery.content.split("\n")
             assert first == _ADVICE_HEADER and "未执行业务查询" in first and "未经系统核实" in first
             # 建议原文保持在一行内（换行写成转义），不能伪造标题或事实区。
-            assert rest == ["SELECT region, SUM(total) AS total\\nFROM sales GROUP BY region"]
+            assert rest == ["SELECT region, SUM(total) AS total\\nFROM shop.sales GROUP BY region"]
             assert delivery.web_text == (sql if channel == "web" else None)
             assert getattr(delivery, "feishu_text", None) == (sql if channel == "feishu" else None)
             assert set(delivery.model_dump(exclude={"channel"})) == {
