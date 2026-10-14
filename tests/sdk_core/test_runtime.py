@@ -41,8 +41,10 @@ from tests.sdk_core.test_app import (
     SEARCH_ALL,
     Scripts,
     after,
+    answer,
     cite,
     clarify,
+    evidence_in,
     tool_call,
     upstream_error,
 )
@@ -976,6 +978,7 @@ async def test_uninitialized_database_is_refused(
     secret = SecretStr(env.url.render_as_string(hide_password=False))
     async with open_engine(secret) as engine, engine.begin() as conn:
         await conn.execute(text("DROP TABLE xiaowei_image"))
+        await conn.execute(text("DROP TABLE xiaowei_delivery_part"))
         await conn.execute(text("DROP TABLE xiaowei_report"))
         await conn.execute(text("DROP TABLE xiaowei_request"))
     with pytest.raises(StorageNotInitializedError):
@@ -1320,6 +1323,127 @@ async def test_accept_paused_across_a_takeover_ends_interrupted_not_stranded(env
 # ---- 飞书 ----------------------------------------------------------------------------
 
 
+@dataclass
+class DeliveryChannel(FakeChannel):
+    uploads: list[bytes] = field(default_factory=list)
+    reject_body: bool = False
+
+    async def upload_media(self, source: Any, **kwargs: Any) -> str:
+        self.uploads.append(source.buffer)
+        return "file_formal_d1a"
+
+    async def send(self, to: str, message: Any, opts: Any = None) -> Any:
+        from lark_channel.channel.types import OutboundFile
+
+        await super().send(to, message, opts)
+        if self.reject_body and isinstance(message, dict) and opts.get("uuid"):
+            return SendResult.fail(
+                SendError(code=FeishuChannelErrorCode.PERMISSION_DENIED, retryable=False)
+            )
+        assert isinstance(message, (dict, OutboundFile))
+        return SendResult.ok(message_id=f"om_formal_{len(self.sends)}")
+
+
+@pytest.mark.parametrize("reject_body", [False, True])
+async def test_formal_feishu_file_body_receipts_and_failure(env: Env, reject_body: bool) -> None:
+    channel = DeliveryChannel(reject_body=reject_body)
+    script = env.scripts.add(
+        "请找表并生成完整MD结果",
+        tool_call("list_tables", cluster=SR.target_id, **SEARCH_ALL),
+        lambda call: answer(evidence_in(call), report_format="md"),
+    )
+    async with env.running(env.config(feishu=feishu_config()), feishu_channel=channel) as served:
+        channel.emit_raw_from_sdk_thread(feishu_event(env, script, "om_formal_delivery"))
+        await until(lambda: len(channel.sends) >= (3 if reject_body else 2))
+        async with asyncio.timeout(20):
+            while await env.scalar("SELECT delivery FROM xiaowei_request") == "sending":
+                await asyncio.sleep(0.02)
+        assert await env.scalar("SELECT delivery FROM xiaowei_request") == (
+            "failed" if reject_body else "sent"
+        )
+        assert len(channel.uploads) == 1
+        assert await env.scalar("SELECT count(*) FROM xiaowei_delivery_part") == 2
+        assert await env.scalar(
+            "SELECT count(*) FROM xiaowei_delivery_part WHERE message_id IS NOT NULL"
+        ) == (1 if reject_body else 2)
+        assert channel.sends[0][2]["uuid"] and channel.sends[1][2]["uuid"]
+        if reject_body:
+            assert "完整结果尚未交付" in json.dumps(channel.sends[-1][1], ensure_ascii=False)
+        assert await served.finish() == 0
+
+
+@pytest.mark.parametrize("format_", [None, "html"])
+async def test_formal_thousand_rows_complete_file_or_explicit_incomplete_preview(
+    env: Env,
+    format_: str | None,
+) -> None:
+    region = "<" * 110 if format_ == "html" else "row"
+    rows = [(f"{region}{i}", i) for i in range(1000)]
+    env.drv = driver(Result(("region", "total"), rows))
+    target = SR.model_dump(mode="json")
+    target["policy"]["max_rows"] = 1000
+    target["max_result_bytes"] = 300_000
+    target["max_value_bytes"] = 500
+    projections = dict.fromkeys(AUDIENCES, 400_000)
+    config = env.config(
+        starrocks=target,
+        projection_bytes=projections,
+        budget={**BUDGET_CONFIG, "max_scope_checks": 5000},
+        model={**PROFILE.model_dump(mode="json"), "max_request_bytes": 2_000_000},
+        feishu=feishu_config(max_reply_chars=3500),
+    )
+    channel = DeliveryChannel()
+    question = env.scripts.add(
+        "交付本次查询返回的1000行",
+        tool_call(
+            "run_readonly_query",
+            cluster=SR.target_id,
+            sql="SELECT region, total FROM shop.sales LIMIT 1000",
+        ),
+        lambda call: answer(evidence_in(call), report_format=format_),
+    )
+    async with env.running(config, feishu_channel=channel) as served:
+        channel.emit_raw_from_sdk_thread(feishu_event(env, question, "om_thousand"))
+        await until(lambda: bool(channel.sends))
+        async with asyncio.timeout(20):
+            while await env.scalar("SELECT delivery FROM xiaowei_request") == "sending":
+                await asyncio.sleep(0.02)
+        assert await env.scalar("SELECT state FROM xiaowei_request") == "completed", {
+            "scripts": list(env.scripts.calls),
+            "tool_outputs": [
+                item
+                for call in env.scripts.calls[question]
+                for item in call.input
+                if item.get("type") == "function_call_output"
+            ],
+        }
+        if format_ is None:
+            assert await env.scalar("SELECT delivery FROM xiaowei_request") == "sent"
+            assert len(channel.uploads) == 1 and len(channel.sends) == 2
+            document = channel.uploads[0].decode()
+            decoder = json.JSONDecoder()
+            values = []
+            for i, char in enumerate(document):
+                if char == "{":
+                    try:
+                        value, _ = decoder.raw_decode(document[i:])
+                    except ValueError:
+                        continue
+                    if isinstance(value, dict) and "rows" in value:
+                        values.append(value)
+            assert len(values) == 1 and len(values[0]["rows"]) == 1000
+            assert values[0]["rows"][-1] == {"region": "row999", "total": 999}
+            assert "预览 20／本次返回 1000 行" in str(channel.sends[1][1])
+        else:
+            assert await env.scalar("SELECT delivery FROM xiaowei_request") == "failed"
+            assert channel.uploads == []
+            shown = str(channel.sends[0][1])
+            assert "完整结果尚未交付" in shown and "本次返回 1000 行" in shown
+            assert "见附件" not in shown and "总共" not in shown
+        assert len(env.scripts.calls[question]) == 2
+        assert await served.finish() == 0
+
+
 def feishu_event(env: Env, message: str, message_id: str) -> dict[str, Any]:
     millis = str(int(env.clock().timestamp() * 1000))
     return {
@@ -1391,7 +1515,7 @@ async def test_feishu_turn_is_drained_before_the_long_connection_closes(env: Env
         assert await asyncio.wait_for(served.task, 30) == 0
     assert channel.log == ["send", "stop"]
     (sent,) = channel.sends
-    assert sent[0] == "oc_alice" and sent[2] == {"receive_id_type": "chat_id"}
+    assert sent[0] == "oc_alice" and sent[2]["receive_id_type"] == "chat_id"
 
 
 async def test_stop_during_a_long_feishu_turn_is_bounded_and_fails_closed(env: Env) -> None:
@@ -1517,7 +1641,7 @@ async def failed_feishu_result(env: Env, config: runtime.ServeConfig) -> str:
     )
     async with env.running(config, feishu_channel=channel) as served:
         channel.emit_raw_from_sdk_thread(feishu_event(env, message, "om_resend"))
-        await until(lambda: len(channel.sends) == 1)
+        await until(lambda: len(channel.sends) >= 1)
         assert await served.finish() == 0
     assert await env.scalar("SELECT delivery FROM xiaowei_request") == "failed"
     return message
@@ -1559,7 +1683,7 @@ async def test_resend_sends_a_failed_result_once_without_rerunning(env: Env) -> 
     assert statements(env.drv) == []
 
 
-async def test_resend_render_failure_does_not_send_and_remains_retryable(
+async def test_resend_uses_saved_message_even_after_template_failure(
     env: Env,
     monkeypatch: pytest.MonkeyPatch,
     caplog: pytest.LogCaptureFixture,
@@ -1573,7 +1697,7 @@ async def test_resend_render_failure_does_not_send_and_remains_retryable(
 
     failed = FakeChannel()
     with monkeypatch.context() as patch:
-        patch.setattr("xiaowei.feishu.build_feishu_message", broken)
+        patch.setattr("xiaowei.feishu_delivery.build_feishu_message", broken)
         assert (
             await runtime.resend(
                 config,
@@ -1582,11 +1706,10 @@ async def test_resend_render_failure_does_not_send_and_remains_retryable(
                 starrocks_connect=env.connect(config),
                 **target,
             )
-            == "failed"
+            == "sent"
         )
-    assert failed.sends == [] and failed.stops == 1
-    assert await env.scalar("SELECT delivery FROM xiaowei_request") == "failed"
-    assert "reason=render_failed" in caplog.text
+    assert len(failed.sends) == 1 and failed.stops == 1
+    assert await env.scalar("SELECT delivery FROM xiaowei_request") == "sent"
     assert "RENDER_CANARY" not in caplog.text and "internal.invalid" not in caplog.text
     success = FakeChannel()
     assert (
@@ -1597,20 +1720,20 @@ async def test_resend_render_failure_does_not_send_and_remains_retryable(
             starrocks_connect=env.connect(config),
             **target,
         )
-        == "sent"
+        is None
     )
-    assert len(success.sends) == 1 and "card" in success.sends[0][1]
+    assert success.sends == [] and "card" in failed.sends[0][1]
     assert len(env.scripts.calls[message]) == 2 and statements(env.drv) == []
 
 
-async def test_capacity_notice_is_sent_once_and_cannot_resend_full_result(
+async def test_small_message_capacity_delivers_complete_file_and_body(
     env: Env,
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     from xiaowei.feishu_render import CAPACITY_NOTICE
 
     config = env.config(feishu=feishu_config(max_reply_chars=200))
-    channel = FakeChannel()
+    channel = DeliveryChannel()
     message = env.scripts.add(
         "容量不足",
         tool_call("list_tables", cluster=SR.target_id, **SEARCH_ALL),
@@ -1618,11 +1741,12 @@ async def test_capacity_notice_is_sent_once_and_cannot_resend_full_result(
     )
     async with env.running(config, feishu_channel=channel) as served:
         channel.emit_raw_from_sdk_thread(feishu_event(env, message, "om_capacity"))
-        await until(lambda: len(channel.sends) == 1)
+        await until(lambda: len(channel.sends) >= 1)
         assert await served.finish() == 0
-    assert channel.sends[0][1] == {"text": CAPACITY_NOTICE}
+    assert len(channel.uploads) == 1 and len(channel.sends) == 2
+    assert channel.sends[1][1] != {"text": CAPACITY_NOTICE}
+    assert "完整结果见附件" in str(channel.sends[1][1])
     assert await env.scalar("SELECT delivery FROM xiaowei_request") == "sent"
-    assert "reason=reply_capacity_notice" in caplog.text
     resend = FakeChannel()
     assert (
         await runtime.resend(
@@ -1639,9 +1763,9 @@ async def test_capacity_notice_is_sent_once_and_cannot_resend_full_result(
     assert resend.sends == [] and len(env.scripts.calls[message]) == 2
 
 
-async def test_small_capacity_sends_short_plan_once_instead_of_false_notice(env: Env) -> None:
+async def test_small_capacity_preserves_complete_plan_in_file(env: Env) -> None:
     from tests.p1b.test_starrocks_adapter import plan_result
-    from tests.sdk_core.test_feishu_render import tables, text_parts
+    from tests.sdk_core.test_feishu_render import text_parts
 
     from xiaowei.feishu_render import CAPACITY_NOTICE, request_bytes
 
@@ -1650,7 +1774,7 @@ async def test_small_capacity_sends_short_plan_once_instead_of_false_notice(env:
     values = env.config(feishu=feishu_config(max_reply_chars=225)).model_dump()
     values["targets"][0]["starrocks"]["target_id"] = target
     config = runtime.ServeConfig.model_validate(values)
-    channel = FakeChannel()
+    channel = DeliveryChannel()
     message = env.scripts.add(
         "短计划",
         tool_call("explain_query", cluster=target, sql="SELECT region FROM shop.sales"),
@@ -1658,11 +1782,11 @@ async def test_small_capacity_sends_short_plan_once_instead_of_false_notice(env:
     )
     async with env.running(config, feishu_channel=channel) as served:
         channel.emit_raw_from_sdk_thread(feishu_event(env, message, "om_short_plan"))
-        await until(lambda: len(channel.sends) == 1)
+        await until(lambda: len(channel.sends) >= 1)
         assert await served.finish() == 0
-    shown = channel.sends[0][1]
+    assert len(channel.uploads) == 1 and b"SCAN" in channel.uploads[0]
+    shown = channel.sends[1][1]
     assert shown != {"text": CAPACITY_NOTICE}
-    assert tables(shown)[0]["rows"] == [{"c0": '"SCAN"'}]
     assert sum(map(len, text_parts(shown))) <= 225
     assert request_bytes(shown, "oc_alice", reply_to="om_short_plan") <= 30_000
     assert await env.scalar("SELECT delivery FROM xiaowei_request") == "sent"
@@ -1765,7 +1889,7 @@ async def test_resend_requires_feishu(env: Env) -> None:
 async def test_storage_commands_use_the_configured_database(env: Env) -> None:
     config = env.config()
     await runtime.initialize(config)  # 已初始化时幂等
-    assert await runtime.upgrade(config) == 11
+    assert await runtime.upgrade(config) == 12
     report = await runtime.cleanup(config, batch_size=10)
     assert (report.sessions, report.unregistered) == (0, 0)
 
@@ -1793,7 +1917,7 @@ async def test_maintenance_commands_reject_a_digest_key_mismatch_before_business
             starrocks_connect=env.connect(config),
         )
 
-    assert await env.scalar("SELECT version FROM xiaowei_schema_version") == 11
+    assert await env.scalar("SELECT version FROM xiaowei_schema_version") == 12
     assert env.drv.attempts == 0 and channel.sends == []
 
 
@@ -2813,7 +2937,7 @@ async def test_a_cluster_failing_mid_task_changes_nothing_on_the_others(env: Env
             cite(),
         )
         channel.emit_raw_from_sdk_thread(feishu_event(env, other, "om_c"))
-        await until(lambda: len(channel.sends) == 1)
+        await until(lambda: len(channel.sends) >= 1)
         from tests.sdk_core.test_feishu_render import text_parts
 
         text = "\n".join(text_parts(channel.sends[0][1]))

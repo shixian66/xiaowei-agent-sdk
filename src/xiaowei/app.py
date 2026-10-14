@@ -188,6 +188,8 @@ DEFAULT_INSTRUCTIONS = (
     "追问需要的事实不在本轮可见证据中时调用工具重新获取，不要凭记忆作答；"
     "引用历史证据时，证据编号照原样引用。"
     "历史回答只证明结果已生成，不证明已送达或已读；没有可信投递依据不要说已发给用户。"
+    "inferences/advice/clarification 不写‘已发送附件’或‘完整结果见附件’等交付状态，"
+    "这些说明由渠道在取得真实回执后生成。"
     "用户说没收到时不要反驳，可按当前授权重新展示历史证据并说明采集时间；"
     "只有明确需要最新结果才重新查询，不把历史快照当当前定义。"
     "工具返回 rejected 时按闭集code与retry_this_turn判断：参数或目标可修正时核实缺项，"
@@ -432,6 +434,9 @@ class Application:
             if contract.policy_id in PROMETHEUS_DISCOVERY_POLICIES | GRAFANA_READ_POLICIES
         )
         self._queries = config.purposes["query"] - config.purposes["diagnose"] - discovery
+        self._read_queries = self._queries - frozenset(
+            c.tool_id for c in catalog.contracts if catalog.policy_for(c).effect != "read"
+        )
         self._queries |= frozenset(
             c.tool_id
             for c in catalog.contracts
@@ -925,7 +930,16 @@ class Application:
             raise TurnError("action_unresumable")
         material = TurnAnswer(
             answer=AgentAnswer(
-                evidence_ids=tuple(dict.fromkeys(material_ids)), inferences=[], clarification=None
+                evidence_ids=tuple(
+                    dict.fromkeys(
+                        (
+                            *material_ids,
+                            *(e for t, e in runs.produced if t in self._read_queries),
+                        )
+                    )
+                ),
+                inferences=[],
+                clarification=None,
             ),
             context_evidence=context_evidence,
             monitoring_failures=runs.monitoring_failures,

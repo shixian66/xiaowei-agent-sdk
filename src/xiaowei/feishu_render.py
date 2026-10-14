@@ -286,6 +286,7 @@ def _card(
                     "elements": details,
                 }
             )
+    elements.extend(_basis_panels(delivery.basis))
     return _static_card(elements, "小维 · 工具结果")
 
 
@@ -299,6 +300,21 @@ def _static_card(elements: list[Message], title: str) -> Message:
     }
 
 
+def _basis_panels(basis: tuple[tuple[str, str], ...]) -> list[Message]:
+    return (
+        [
+            {
+                "tag": "collapsible_panel",
+                "expanded": False,
+                "header": {"title": _plain("查看依据 · 其他调查")},
+                "elements": [_div(f"{tool} · {obj}") for tool, obj in basis],
+            }
+        ]
+        if basis
+        else []
+    )
+
+
 def _prose_card(
     prefix: str,
     raw: str,
@@ -306,6 +322,7 @@ def _prose_card(
     notice: str | None = None,
     clipped: bool = False,
     formatted: bool = False,
+    basis: tuple[tuple[str, str], ...] = (),
 ) -> Message:
     text = display_text(raw)
     elements = [_div(prefix)] if prefix else []
@@ -314,7 +331,12 @@ def _prose_card(
     elements.extend(format_prose(text) if formatted else [_div(text)])
     if clipped:
         elements.append(_div(TEXT_CLIPPED))
+    elements.extend(_basis_panels(basis))
     return _static_card(elements, "小维 · 回复")
+
+
+class MessageCapacityError(ValueError):
+    """完整单消息不合容量；调用方应换载体。"""
 
 
 def build_feishu_message(
@@ -324,6 +346,7 @@ def build_feishu_message(
     *,
     reply_to: str | None = None,
     max_bytes: int = MAX_REQUEST_BYTES,
+    allow_preview: bool = True,
 ) -> Message:
     """构造单张业务卡片（放不下时固定容量回执）：必要说明 → 实际 SQL → 整行事实 → 分析 → 其他详情。
 
@@ -393,12 +416,15 @@ def build_feishu_message(
                 or None,
                 clipped=clipped,
                 formatted=formatted,
+                basis=delivery.basis,
             )
 
         full = prose_message(raw)
         if fits(full):
             formatted = prose_message(raw, formatted=True)
             return formatted if fits(formatted) else full
+        if not allow_preview:
+            raise MessageCapacityError("完整正文超过单消息容量")
         low, high = 0, len(raw)
         while low < high:
             mid = (low + high + 1) // 2
@@ -417,15 +443,19 @@ def build_feishu_message(
     all_sql = {
         i
         for i, f in enumerate(delivery.facts)
-        if f.tool_id == "local/run_readonly_query" and isinstance(f.metadata.get("sql"), str)
+        if f.tool_id == "local/run_readonly_query"
+        and isinstance(f.metadata.get("sql"), str)
+        and (allow_preview or f.view != "brief")
     }
-    all_technical = set(range(len(delivery.facts)))
+    all_technical = {i for i, f in enumerate(delivery.facts) if allow_preview or f.view != "brief"}
     full = _card(delivery, totals, all_sql, delivery.analysis, all_technical)
     if fits(full):
         formatted = _card(
             delivery, totals, all_sql, delivery.analysis, all_technical, formatted=True
         )
         return formatted if fits(formatted) else full
+    if not allow_preview:
+        raise MessageCapacityError("完整结果超过单消息容量")
     analysis: list[AnswerInference] = []
     technical: set[int] = set()
 

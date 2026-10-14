@@ -415,7 +415,13 @@ class ResultDelivery:
             await self._store.finish_send(claim, "failed")
             raise refused or ResultUnavailableError()
         if record.state in {"completed", "paused"}:
-            delivery = delivery.model_copy(update={"request_state": record.state})
+            delivery = delivery.model_copy(
+                update={
+                    "request_state": record.state,
+                    "delivery_attempt": claim.attempt,
+                    "delivery_version": record.delivery_version,
+                }
+            )
         try:
             outcome = await transmit(delivery)
         except BaseException as exc:
@@ -426,8 +432,7 @@ class ResultDelivery:
                 # 原样传播发送本身的异常或取消。
                 raise exc from lost
             raise
-        await self._store.finish_send(claim, outcome)
-        return outcome
+        return await self._store.finish_send(claim, outcome)
 
     async def _load(self, ref: RequestRef) -> tuple[RequestRecord, AccessDecision]:
         """先按当前授权解析（群请求在这里查一次当前成员资格），再按同一身份读取请求。"""
@@ -467,7 +472,7 @@ class ResultDelivery:
         for fact in delivery.facts:
             command = fact.metadata.get("approval_command")
             action_id = fact.metadata.get("action_id")
-            if not fact.requires_complete or not isinstance(command, str):
+            if not isinstance(command, str):
                 facts.append(fact)
                 continue
             if not isinstance(action_id, str):

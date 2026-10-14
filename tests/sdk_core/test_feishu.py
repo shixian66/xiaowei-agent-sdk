@@ -87,13 +87,27 @@ class Outbox:
     replies: list[str | None] = field(default_factory=list)
 
     async def __call__(
-        self, chat_id: str, text: str | Message, *, reply_to: str | None = None
+        self,
+        chat_id: str,
+        text: str | Message,
+        *,
+        reply_to: str | None = None,
+        uuid: str | None = None,
     ) -> Any:
         self.sent.append((chat_id, text))
         self.replies.append(reply_to)
         outcome = self.outcomes.pop(0) if self.outcomes else "sent"
         if isinstance(outcome, BaseException):
             raise outcome
+        if uuid is not None:
+            if outcome == "sent":
+                return SendResult.ok(message_id=f"om_outbox_{len(self.sent)}")
+            if outcome == "failed":
+                return SendResult.fail(
+                    SendError(code=FeishuChannelErrorCode.PERMISSION_DENIED, retryable=False)
+                )
+            if outcome == "unknown":
+                return SendResult.ok(message_id="")
         return outcome
 
     def texts(self) -> list[str]:
@@ -647,7 +661,8 @@ async def test_failed_or_unknown_send_is_not_retried(env: Env, outcome: Any, exp
         await fs.drain()
         await fs.gateway.receive(event)  # 重投不再发送
         await fs.drain()
-    assert len(fs.outbox.sent) == 1 and env.model_calls(message) == 2
+    assert len(fs.outbox.sent) == 2 and env.model_calls(message) == 2
+    assert "完整结果尚未交付" in fs.outbox.texts()[-1]
     async with env.engine.connect() as conn:
         from sqlalchemy import text as sql
 
@@ -663,7 +678,7 @@ async def test_render_failure_is_failed_without_io_or_readiness_lock(
     def broken(*args: Any, **kwargs: Any) -> Any:
         raise ValueError("SDK_CANARY https://private-host.invalid")
 
-    monkeypatch.setattr("xiaowei.feishu.build_feishu_message", broken)
+    monkeypatch.setattr("xiaowei.feishu_delivery.build_feishu_message", broken)
     async with running(env) as fs:
         message = env.scripts.add("本地构造失败", tool_call("order_total", region="east"), cite())
         event = fs.event(message)

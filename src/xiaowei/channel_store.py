@@ -34,11 +34,12 @@ import hashlib
 import hmac
 import json
 import secrets
-from collections.abc import Callable, Iterator, Mapping, Sequence
-from contextlib import contextmanager
+from collections.abc import AsyncIterator, Callable, Iterator, Mapping, Sequence
+from contextlib import asynccontextmanager, contextmanager
 from dataclasses import dataclass, replace
 from datetime import datetime, timedelta
 from typing import TYPE_CHECKING, Any, Literal, get_args
+from uuid import uuid4
 
 if TYPE_CHECKING:
     from xiaowei.app import PausedTurn
@@ -151,11 +152,11 @@ _INSERT_REQUEST = text(
     INSERT INTO xiaowei_request (
         channel, request_key, owner_kind, owner_id, subject_id, conversation_key, session_id,
         turn_id, mode, message_digest, state, delivery, reply_chat_id, reply_message_id,
-        created_at, updated_at, expires_at
+        created_at, updated_at, expires_at, delivery_version
     ) VALUES (
         :channel, :request_key, :owner_kind, :owner_id, :subject_id, :conversation_key,
         :session_id, :turn_id, :mode, :message_digest, 'accepted', 'pending', :reply_chat_id,
-        :reply_message_id, :now, :now, :expires_at
+        :reply_message_id, :now, :now, :expires_at, 1
     )
     ON CONFLICT (channel, request_key) DO NOTHING
     """
@@ -164,7 +165,7 @@ _SELECT_REQUEST = text(
     """
     SELECT channel, request_key, owner_kind, owner_id, subject_id, conversation_key, session_id,
            turn_id, mode, message_digest, state, answer, failure_code, delivery, reply_chat_id,
-           reply_message_id, created_at, expires_at, session_state
+           reply_message_id, created_at, expires_at, session_state, delivery_version
     FROM xiaowei_request WHERE channel = :channel AND request_key = :request_key
     """
 )
@@ -172,7 +173,7 @@ _SELECT_REQUEST_FOR_UPDATE = text(
     """
     SELECT channel, request_key, owner_kind, owner_id, subject_id, conversation_key, session_id,
            turn_id, mode, message_digest, state, answer, failure_code, delivery, reply_chat_id,
-           reply_message_id, created_at, expires_at, session_state
+           reply_message_id, created_at, expires_at, session_state, delivery_version
     FROM xiaowei_request WHERE channel = :channel AND request_key = :request_key
     FOR UPDATE
     """
@@ -378,6 +379,7 @@ class RequestRecord:
     reply_message_id: str | None = None
     session_state: SessionSnapshot | None = None
     run_turn_id: str | None = None
+    delivery_version: int = 0
 
 
 @dataclass(frozen=True)
@@ -386,6 +388,20 @@ class DeliveryClaim:
 
     record: RequestRecord
     attempt: str
+    content_expires_at: datetime | None = None
+
+
+@dataclass(frozen=True)
+class DeliveryPart:
+    sequence: int
+    kind: Literal["approval", "body", "md", "html"]
+    body: bytes
+    file_key: str | None = None
+    upload_state: ReportUploadState = "pending"
+    send_state: DeliveryState = "pending"
+    attempt: str | None = None
+    uuid: str = ""
+    message_id: str | None = None
 
 
 @dataclass(frozen=True)
@@ -912,18 +928,218 @@ class ChannelStore:
                 claimed = (await conn.execute(statement, params)).rowcount == 1
         return DeliveryClaim(record, attempt) if claimed else None
 
-    async def finish_send(self, claim: DeliveryClaim, outcome: SendOutcome) -> None:
+    async def finish_send(self, claim: DeliveryClaim, outcome: SendOutcome) -> SendOutcome:
         """落定自己取得的那次尝试：``sending → sent/failed/unknown``。
 
         尝试已被启动恢复作废、或已被更新的尝试取代时不改写任何状态，锁低 readiness 并报错。
         """
-        params = {"outcome": outcome, "attempt": claim.attempt}
-        updated = await self._update(
-            _FINISH_SEND, claim.record, critical="delivery_state_failed", **params
-        )
+        params = {**_keys(claim.record), "now": self._clock(), "attempt": claim.attempt}
+        with self._critical("delivery_state_failed", "投递状态无法保存"):
+            async with self._engine.begin() as conn:
+                # 分项和整体在同一事务落定；unknown 不被一次明确失败覆盖。
+                rows = (
+                    await conn.execute(
+                        text(
+                            "SELECT send_state, upload_state FROM xiaowei_delivery_part "
+                            "WHERE turn_id=:turn_id"
+                        ),
+                        params,
+                    )
+                ).all()
+                if outcome == "unknown":
+                    await conn.execute(
+                        text(
+                            "UPDATE xiaowei_delivery_part SET "
+                            "send_state=CASE WHEN send_state='sending' THEN 'unknown' "
+                            "ELSE send_state END, "
+                            "upload_state=CASE WHEN upload_state='uploading' THEN 'unknown' "
+                            "ELSE upload_state END "
+                            "WHERE turn_id=:turn_id AND attempt=:attempt"
+                        ),
+                        params,
+                    )
+                if any(r.send_state == "unknown" or r.upload_state == "unknown" for r in rows):
+                    outcome = "unknown"
+                elif rows and outcome == "sent" and any(r.send_state != "sent" for r in rows):
+                    outcome = "failed"
+                elif (
+                    not rows
+                    and outcome == "sent"
+                    and claim.record.delivery_version == 1
+                    and claim.record.channel == "feishu"
+                    and claim.record.state in {"completed", "paused"}
+                ):
+                    outcome = "failed"
+                updated = (
+                    await conn.execute(_FINISH_SEND, {**params, "outcome": outcome})
+                ).rowcount
         if updated != 1:
             self._readiness.lock("delivery_state_lost")
             raise ChannelStoreUnavailableError("投递状态无法保存")
+        return outcome
+
+    async def delivery_parts(self, record: RequestRecord) -> tuple[DeliveryPart, ...]:
+        """调用方已复核原请求/Evidence；这里只按原请求归属和期限读取不可变字节。"""
+        params = {**_keys(record), "now": self._clock()}
+        with self._critical("delivery_parts_unreadable", "投递内容无法读取"):
+            async with self._engine.connect() as conn:
+                rows = (
+                    (
+                        await conn.execute(
+                            text(
+                                "SELECT p.* FROM xiaowei_delivery_part p JOIN xiaowei_request r "
+                                "ON r.turn_id=p.turn_id WHERE r.turn_id=:turn_id "
+                                "AND r.channel=:channel "
+                                "AND r.request_key=:request_key AND r.owner_kind=:owner_kind "
+                                "AND r.owner_id=:owner_id AND r.subject_id=:subject_id "
+                                "AND r.expires_at>:now ORDER BY p.sequence"
+                            ),
+                            params,
+                        )
+                    )
+                    .mappings()
+                    .all()
+                )
+        return tuple(
+            DeliveryPart(
+                sequence=row["sequence"],
+                kind=row["kind"],
+                body=bytes(row["body"]),
+                file_key=row["file_key"],
+                upload_state=row["upload_state"],
+                send_state=row["send_state"],
+                attempt=row["attempt"],
+                uuid=row["uuid"],
+                message_id=row["message_id"],
+            )
+            for row in rows
+        )
+
+    @asynccontextmanager
+    async def _part_attempt(self, claim: DeliveryClaim) -> AsyncIterator[AsyncConnection]:
+        """每次 I/O 的廉价所有权检查，不重新查询数据权限。"""
+        self._require_ready()
+        if claim.content_expires_at is not None and self._clock() >= claim.content_expires_at:
+            raise RequestUnavailableError
+        with self._critical("delivery_part_state_failed", "投递状态无法保存"):
+            async with self._engine.begin() as conn:
+                await self._admit(conn)
+                valid = await conn.scalar(
+                    text(
+                        "SELECT 1 FROM xiaowei_request WHERE turn_id=:turn_id "
+                        "AND channel=:channel AND request_key=:request_key "
+                        "AND owner_kind=:owner_kind AND owner_id=:owner_id "
+                        "AND subject_id=:subject_id AND state IN ('completed','paused') "
+                        "AND delivery='sending' AND delivery_attempt=:attempt "
+                        "AND expires_at>:now FOR UPDATE"
+                    ),
+                    {**_keys(claim.record), "now": self._clock(), "attempt": claim.attempt},
+                )
+                if valid != 1:
+                    raise RequestUnavailableError
+                yield conn
+
+    async def bind_delivery_parts(
+        self, claim: DeliveryClaim, parts: Sequence[DeliveryPart]
+    ) -> tuple[DeliveryPart, ...]:
+        """新分项首次 I/O 前绑定字节/uuid；已有分项从不按当前模板改写。"""
+        async with self._part_attempt(claim) as conn:
+            for part in parts:
+                await conn.execute(
+                    text(
+                        "INSERT INTO xiaowei_delivery_part(turn_id,sequence,kind,body,uuid) "
+                        "VALUES(:turn,:seq,:kind,:body,:uuid) ON CONFLICT DO NOTHING"
+                    ),
+                    {
+                        "turn": claim.record.turn_id,
+                        "seq": part.sequence,
+                        "kind": part.kind,
+                        "body": part.body,
+                        "uuid": str(uuid4()),
+                    },
+                )
+        return await self.delivery_parts(claim.record)
+
+    async def check_delivery_attempt(self, claim: DeliveryClaim) -> None:
+        async with self._part_attempt(claim):
+            pass
+
+    async def begin_part_upload(self, claim: DeliveryClaim, part: DeliveryPart) -> bool:
+        async with self._part_attempt(claim) as conn:
+            changed = await conn.execute(
+                text(
+                    "UPDATE xiaowei_delivery_part SET upload_state='uploading',attempt=:attempt "
+                    "WHERE turn_id=:turn AND sequence=:seq AND upload_state='pending'"
+                ),
+                {"turn": claim.record.turn_id, "seq": part.sequence, "attempt": claim.attempt},
+            )
+            return changed.rowcount == 1
+
+    async def finish_part_upload(
+        self, claim: DeliveryClaim, part: DeliveryPart, key: str | None
+    ) -> None:
+        if key is not None and not key:
+            raise ValueError("上传键无效")
+        async with self._part_attempt(claim) as conn:
+            changed = await conn.execute(
+                text(
+                    "UPDATE xiaowei_delivery_part SET upload_state=:state,file_key=:key "
+                    "WHERE turn_id=:turn AND sequence=:seq AND upload_state='uploading' "
+                    "AND attempt=:attempt"
+                ),
+                {
+                    "turn": claim.record.turn_id,
+                    "seq": part.sequence,
+                    "attempt": claim.attempt,
+                    "state": "uploaded" if key is not None else "unknown",
+                    "key": key,
+                },
+            )
+            if changed.rowcount != 1:
+                raise RequestUnavailableError
+
+    async def begin_part_send(self, claim: DeliveryClaim, part: DeliveryPart) -> bool:
+        async with self._part_attempt(claim) as conn:
+            changed = await conn.execute(
+                text(
+                    "UPDATE xiaowei_delivery_part SET send_state='sending',attempt=:attempt "
+                    "WHERE turn_id=:turn AND sequence=:seq "
+                    "AND send_state IN ('pending','failed','unknown') "
+                    "AND (kind IN ('body','approval') OR upload_state='uploaded')"
+                ),
+                {"turn": claim.record.turn_id, "seq": part.sequence, "attempt": claim.attempt},
+            )
+            return changed.rowcount == 1
+
+    async def finish_part_send(
+        self,
+        claim: DeliveryClaim,
+        part: DeliveryPart,
+        outcome: SendOutcome,
+        message_id: str | None,
+    ) -> SendOutcome:
+        if outcome == "sent" and not message_id:
+            outcome = "unknown"
+        if part.send_state == "unknown" and outcome == "failed":
+            outcome = "unknown"
+        async with self._part_attempt(claim) as conn:
+            changed = await conn.execute(
+                text(
+                    "UPDATE xiaowei_delivery_part SET send_state=:state,message_id=:id "
+                    "WHERE turn_id=:turn AND sequence=:seq AND send_state='sending' "
+                    "AND attempt=:attempt"
+                ),
+                {
+                    "turn": claim.record.turn_id,
+                    "seq": part.sequence,
+                    "attempt": claim.attempt,
+                    "state": outcome,
+                    "id": message_id if outcome == "sent" else None,
+                },
+            )
+            if changed.rowcount != 1:
+                raise RequestUnavailableError
+        return outcome
 
     async def bind_report(
         self, record: RequestRecord, report: ReportFile
@@ -1133,6 +1349,17 @@ class ChannelStore:
                     expires_at=now + self._session_retention,
                 )
                 unknown = (await conn.execute(_RECOVER_SENDING, {"now": now})).rowcount
+                await conn.execute(
+                    text(
+                        "UPDATE xiaowei_delivery_part p SET "
+                        "send_state=CASE WHEN p.send_state='sending' THEN 'unknown' "
+                        "ELSE p.send_state END, "
+                        "upload_state=CASE WHEN p.upload_state='uploading' THEN 'unknown' "
+                        "ELSE p.upload_state END "
+                        "FROM xiaowei_request r WHERE r.turn_id=p.turn_id AND r.delivery='unknown' "
+                        "AND r.delivery_attempt IS NULL"
+                    )
+                )
                 unsent = (await conn.execute(_RECOVER_UNSENT, {"now": now})).rowcount
                 await conn.execute(
                     text(
@@ -1663,7 +1890,12 @@ class ChannelStore:
                                 " AND binding=:binding AND plan=:plan AND expires_at>:now"
                                 " AND EXISTS(SELECT 1 FROM xiaowei_request r WHERE"
                                 " r.turn_id=:material"
-                                " AND r.owner_id=:owner AND r.state='paused' AND r.delivery='sent'"
+                                " AND r.owner_id=:owner AND r.state='paused' AND ("
+                                " (r.delivery_version=0 AND r.delivery='sent') OR "
+                                " (r.delivery_version=1 AND EXISTS(SELECT 1 "
+                                "FROM xiaowei_delivery_part p "
+                                " WHERE p.turn_id=r.turn_id AND p.kind='approval' "
+                                "AND p.send_state='sent')))"
                                 " AND r.channel='feishu' AND r.expires_at>:now)"
                                 " AND EXISTS(SELECT 1 FROM xiaowei_request r WHERE"
                                 " r.turn_id=:approval"
@@ -1780,6 +2012,7 @@ class ChannelStore:
             reply_message_id=row["reply_message_id"],
             session_state=snapshot,
             run_turn_id=run_turn_id,
+            delivery_version=row.get("delivery_version", 0),
         )
 
     def _owner(

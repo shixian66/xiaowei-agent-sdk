@@ -39,6 +39,7 @@ async def test_delivered_rules_distinguish_pages_snapshots_and_delivery(env: Env
     assert "续页不是重跑" in rules
     assert "结构采集 SQL 模板" in rules
     assert "不证明已送达或已读" in rules
+    assert "inferences/advice/clarification 不写" in rules
     assert "在 inferences 中提问" in rules
 
 

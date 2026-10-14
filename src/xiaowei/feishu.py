@@ -90,6 +90,7 @@ from xiaowei.channel import (
 )
 from xiaowei.channel_store import (
     ChannelStoreError,
+    DeliveryClaim,
     ReportMismatchError,
     RequestUnavailableError,
     ResultNotSavedError,
@@ -180,8 +181,13 @@ class Send(Protocol):
     （原消息编号），只回复原消息。"""
 
     def __call__(
-        self, chat_id: str, text: str | Message | OutboundFile, *, reply_to: str | None = ...
-    ) -> Awaitable[SendOutcome]: ...
+        self,
+        chat_id: str,
+        text: str | Message | OutboundFile,
+        *,
+        reply_to: str | None = ...,
+        uuid: str | None = ...,
+    ) -> Awaitable[SendOutcome | SendResult]: ...
 
 
 UploadFile = Callable[[ReportFile], Awaitable[str]]
@@ -413,6 +419,24 @@ async def send_delivery(
     resend: bool = False,
 ) -> SendOutcome:
     """Gateway 与 CLI 共用：本地构造失败明确未发送，SDK 开始后的异常保留 unknown。"""
+    if delivery.delivery_version == 1 and results is not None and ref is not None:
+        from xiaowei.feishu_delivery import send_complete_delivery
+
+        try:
+            return await send_complete_delivery(
+                delivery,
+                results=results,
+                ref=ref,
+                send=send,
+                upload_file=upload_file,
+                chat_id=chat_id,
+                max_chars=max_chars,
+                reply_to=reply_to,
+                resend=resend,
+            )
+        except (ValueError, TypeError):
+            logger.error("飞书结果未发送：reason=render_failed")
+            return "failed"
     if delivery.report_format is not None:
         report_notice: str | None = None
         if delivery.requires_complete:
@@ -464,6 +488,8 @@ async def send_delivery(
         logger.warning("飞书仅发送容量说明：reason=reply_capacity_notice")
     try:
         outcome = await send(chat_id, message, reply_to=reply_to)
+        if isinstance(outcome, SendResult):
+            outcome = send_outcome(outcome)
         if delivery.requires_complete and omitted:
             return "failed" if outcome == "sent" else outcome
         return outcome
@@ -484,25 +510,7 @@ async def _send_report(
     upload_file: UploadFile,
     resend: bool,
 ) -> SendOutcome:
-    """原文件绑定请求；上传不明不重传；每次外发前按当前权限复核。"""
-
-    async def still_authorized() -> bool:
-        try:
-            view = await results.view(ref, first=not resend)
-            current = view.delivery
-            return current is not None and build_report(current).content == report.content
-        except (
-            ResultUnavailableError,
-            AccessDeniedError,
-            RequestUnavailableError,
-            ValueError,
-            TypeError,
-        ):
-            return False
-
-    if not await still_authorized():
-        logger.warning("飞书报告未发送：reason=report_revalidation_failed")
-        return "failed"
+    """旧原文件绑定请求；权限沿本次 ResultDelivery 快照，上传不明不重传。"""
     record = await results.store.get(
         ref.channel,
         ref.subject_id,
@@ -515,6 +523,11 @@ async def _send_report(
     except ReportMismatchError:
         logger.warning("飞书报告未发送：reason=report_mismatch")
         return "failed"
+    if delivery.delivery_attempt is not None and attempt != delivery.delivery_attempt:
+        raise RequestUnavailableError
+    await results.store.check_delivery_attempt(
+        DeliveryClaim(record, attempt, delivery.content_expires_at)
+    )
     if state == "pending":
         if not await results.store.begin_report_upload(record, attempt):
             logger.warning("飞书报告未发送：reason=report_upload_claim_lost")
@@ -529,13 +542,14 @@ async def _send_report(
     elif state != "uploaded" or key is None:
         logger.warning("飞书报告停止重发：reason=report_upload_unknown")
         return "unknown"
-    if not await still_authorized():
-        logger.warning("飞书报告未发送：reason=report_revalidation_failed")
-        return "failed"
     await results.store.confirm_report_send(record, attempt, key)
+    await results.store.check_delivery_attempt(
+        DeliveryClaim(record, attempt, delivery.content_expires_at)
+    )
     message = OutboundFile(source=MediaSource(kind="key", key=key), file_name=report.filename)
     try:
-        return await send(chat_id, message, reply_to=reply_to)
+        outcome = await send(chat_id, message, reply_to=reply_to)
+        return send_outcome(outcome) if isinstance(outcome, SendResult) else outcome
     except Exception as exc:
         logger.error("飞书发送异常，按结果不明记录：%s", type(exc).__name__)
         return "unknown"
@@ -550,7 +564,7 @@ def send_outcome(result: object) -> SendOutcome:
     if not isinstance(result, SendResult):
         return "unknown"
     if result.success:
-        return "sent" if result.message_id else "unknown"
+        return "sent" if isinstance(result.message_id, str) and result.message_id else "unknown"
     error = result.error
     if error is not None and (
         error.code in _DEFINITE_FAILURES or error.raw_code in _DEFINITE_FAILURE_CODES
@@ -1313,10 +1327,17 @@ class LarkTransport:
             _report(future)
 
     async def send(
-        self, chat_id: str, text: str | Message | OutboundFile, *, reply_to: str | None = None
-    ) -> SendOutcome:
+        self,
+        chat_id: str,
+        text: str | Message | OutboundFile,
+        *,
+        reply_to: str | None = None,
+        uuid: str | None = None,
+    ) -> SendOutcome | SendResult:
         """单次发送；``reply_to`` 给出时只回复该原消息，原消息不可回复时明确失败、不改发新消息。"""
         opts = {"receive_id_type": "chat_id"}
+        if uuid is not None:
+            opts["uuid"] = uuid
         if reply_to is not None:
             opts |= {"reply_to": reply_to, "reply_target_gone": "fail"}
         message = {"text": mention_safe(text)} if isinstance(text, str) else text
@@ -1332,7 +1353,9 @@ class LarkTransport:
         except Exception as exc:
             logger.warning("飞书发送异常，结果不明：%s", type(exc).__name__)
             return "unknown"
-        return send_outcome(result)
+        return (
+            result if uuid is not None and isinstance(result, SendResult) else send_outcome(result)
+        )
 
     async def upload_file(self, report: ReportFile) -> str:
         """用 SDK 公开上传接口上传有界报告；超时后结果未知，由请求状态禁止再上传。"""
