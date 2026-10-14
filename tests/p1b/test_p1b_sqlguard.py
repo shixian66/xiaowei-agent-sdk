@@ -120,6 +120,18 @@ def test_formatted_from_unixtime_is_rejected_with_a_safe_rewrite() -> None:
     assert "DATE_FORMAT(FROM_UNIXTIME(x), 格式)" in str(error)
 
 
+def test_audit_references_keeps_formatted_from_unixtime_with_function_grant() -> None:
+    sql = "SELECT region, FROM_UNIXTIME(total, '%Y-%m-%d') AS d FROM sales"
+    policy = narrowed(allowed_functions=frozenset({"UNIX_TO_TIME"}))
+    objects, columns = audit_references(sql, policy, "shop")
+    assert objects == {("shop", "sales")}
+    assert columns == {("shop", "sales", "region"), ("shop", "sales", "total")}
+
+    with pytest.raises(QueryRejectedError) as denied:
+        audit_references(sql, narrowed(allowed_functions=frozenset()), "shop")
+    assert denied.value.code is Code.FUNCTION_NOT_ALLOWED
+
+
 @pytest.mark.parametrize(
     ("sql", "allowed", "normalized"),
     [

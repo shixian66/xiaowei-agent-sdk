@@ -11,7 +11,7 @@
 | 仓库 | [shixian66/xiaowei-agent-sdk](https://github.com/shixian66/xiaowei-agent-sdk) |
 | 本地目录 / 分支 | R2：`/Users/kloenguyen/.codex/worktrees/starrocks-sqlguard-r2/agent-SDK` / `codex/starrocks-sqlguard-r2`；基线 `origin/main` `ba3a421c86dd31faf447f69f2bc850daac0ef466`，其他工作树保留。 |
 | M5 历史起点 | `372c381f44ecfa1fa53961f137d0058033cbd805`；不是远端当前 main 的核验结论 |
-| 本轮审查版本 | R1 已随 PR #96 合入主线（合并提交 `ba3a421c86dd31faf447f69f2bc850daac0ef466`）；用户明确决定先合并，未获得 Claude 独立审查结论。R2 基于该提交独立开发，待精确 head 审查；不部署。 |
+| 本轮审查版本 | R1 已随 PR #96 合入主线（合并提交 `ba3a421c86dd31faf447f69f2bc850daac0ef466`）；据用户提供的记录，Claude 合并前审查 `6216a3e` 无阻断，当时 integration 待定；其后测试稳定性修订的最终 head 为 `9af7d59`，用户批准先合并。R2 PR #97 首轮审查指出 B1，正在按精确新 head 复验；不部署。 |
 | 已同步主线审查记录 | SDK-A/B/C 已随 PR #89/#93/#94 合入；D7 已随 PR #83 离线合入。上述合入不代表真实模型、飞书或公司 Grafana 验收。 |
 | 当前阶段 | StarRocks 查询可靠性 R2 单独切片；R3–R4 继续等待前一切片审查。线上“查慢查询 → 转 MD”仍待用户试用。 |
 | 当前源码与依赖 | 基线应用表 v11；锁定 Agents SDK 0.22.3 / mcp 2.2.0 / sqlglot 30.17.0。R2 定点调整 SQLGuard 与函数白名单别名；数据范围格式 `/8` 使旧 StarRocks 证据失效，不迁移应用表。 |
@@ -37,11 +37,13 @@
 
 ## 3. 当前计划与下一项工作
 
-**当前下一步：** R2 完成定向、4.1.4 与 CI 验证后提独立 PR，由 Claude 按精确 head SHA 审查；R3–R4 待前一切片审查后逐个开发。不部署；用户上线后自行验证真实模型下的“查慢查询 → 转 MD”。R1 #96 已按用户 2026-10-14 的决定先行合并，本次不把缺失的独立审查追认为已完成。
+**当前下一步：** R2 PR #97 修复 B1 后按新 head 跑完 CI 并交 Claude 复审；R3–R4 待前一切片审查后逐个开发。不部署；用户上线后自行验证真实模型下的“查慢查询 → 转 MD”。R1 #96 的 Claude 审查只覆盖 `6216a3e`，最终 head 的测试稳定性修订由用户决定先合并，不能把旧 SHA 的审查扩大到新 SHA。
 
 **R1 验证边界：** 基线 `408fafb85edae29e3583d6793289e3eff411d019`；真 SDK、正式 Web、脚本模型、隔离 PostgreSQL 与 StarRocks 驱动替身的 Evidence/群身份/依赖用例 **86 passed**。专用无持久卷的 StarRocks 容器回读 `CURRENT_VERSION()=4.1.4-4a9848e`；正式 Web 两轮在视图同列改定义后仍读到旧事实，既有真实依赖复核共 **2 passed**；容器已删除。Ruff、格式、mypy 与文档事实检查结果见 PR #96。没有连接用户的 StarRocks、真实模型或真实飞书；没有部署。视图定义或间接依赖变化而被读取列类型不变时，旧事实仍可读，这是用户接受的契约。
 
 **R2 本地验证边界：** 基线为 R1 合并提交 `ba3a421c86dd31faf447f69f2bc850daac0ef466`。锁定 sqlglot 30.17.0；旧实现对带格式 `FROM_UNIXTIME` 的回归用例先失败，修复后 SQLGuard **487 passed**。真 SDK Runner、治理、隔离 PostgreSQL、驱动替身的 StarRocks 工具回归 **98 passed**，包含查询与 EXPLAIN 在 I/O 前拒绝、无格式查询成功取证。可丢弃容器回读 StarRocks `4.1.4-4a9848e`，原文与规范化 SQL 值/类型、非默认库解析、正式 Web 拒绝与成功共 **3 passed**；容器已删除。脚本模型只证明调用链，不证明自主选工具。Ruff 全仓/改动代码格式、mypy 134 个源码文件、文档事实 **5 passed**、离线锁及差异检查通过。仅使用合成数据、本机容器和隔离 PostgreSQL；未调用真实模型、公司 StarRocks、飞书或外部 MCP，未部署。CI 与独立审查须以最终 PR head 另记。
+
+**R2 首轮审查修复：** Claude 对 PR #97 head `72c6dbb` 指出 B1：带格式 `FROM_UNIXTIME` 的执行拒绝放在三条路径共用的 `_check_nodes`，使只展示、不执行的慢查询原文静默丢失。新增 SQLGuard 引用与真 Runner／治理／PostgreSQL／Adapter 替身用例在旧 head 分别失败（`QueryRejectedError` 与慢查询少一条）；将拒绝移至可执行查询和 EXPLAIN 的 `_guard` 之后，审计仍逐函数验白名单。修复后相关四文件 **662 passed**，查询与 EXPLAIN 原有零 I/O 拒绝保持通过；新 head CI 与独立复审待完成。首轮 CI `72c6dbb` 的 10/10 通过只证明该旧 head，不能作为 B1 修复版本的 CI 结果。
 
 **C8 离线执行证据（基线 `7b6673817eb6f51a8a2353921c9132f7d5c8d580`）：** 正式 `serve`、真 SDK Runner、隔离 PostgreSQL、群网关替身、官方 Grafana MCP v2.0.2（本机二进制 SHA-256 `480c23f5f0c80e7819fa060e12d4faf471732b63bd05a2023e45f868a7f33baf`）与本机可丢弃 Grafana 13.2.3 覆盖群提出/逐次批准、Annotation 新增一次、数据源创建/修改和版本冲突、Web 禁写、未映射删除工具零 I/O、无/错 MCP Bearer 零写、schema 漂移仅隐藏不符动作及凭据字段/URL 请求前拒绝。官方 MCP 对未知插件的非空 `name` 且省略 `schemaReviewed` 可能先 POST；B1 修订后，C8 提出只用创建空 `name` 或修改仅 `uid` 的锁版说明分支（真 Server 实测零写），有字段说明时拒绝未知 `fields` 键和基础值类型不符，回传合法键名或类型提示；无说明时拒绝 `fields`、要求顶层参数；仅已批准写入显式传 `schemaReviewed=true`。实测显式局部更新 `jsonData` 会清掉未提交旧键；先补正式群入口失败用例，再在提议时合并当前非秘密字段入完整审批参数；旧字段有隐藏值时零写拒绝。空凭据字段仍可保留。`api_key` 与 URL `?apiKey=...` 的漏判也先红后修，字段名分隔符规范化，不建插件白名单。
 

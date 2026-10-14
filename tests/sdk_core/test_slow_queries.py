@@ -173,6 +173,25 @@ async def test_diagnose_turn_lists_slow_queries_then_explains_one(env: Env) -> N
     assert f"说明：{AUDIT_NOTE}" in delivered.content.split("\n")
 
 
+async def test_formatted_from_unixtime_audit_row_is_listed_without_executing_it(env: Env) -> None:
+    sql = "SELECT region, FROM_UNIXTIME(total, '%Y-%m-%d') AS d FROM sales"
+    policy = AUDIT_TARGET.policy.model_copy(
+        update={"allowed_functions": AUDIT_TARGET.policy.allowed_functions | {"UNIX_TO_TIME"}}
+    )
+    target = AUDIT_TARGET.model_copy(update={"policy": policy})
+    au = await audited(env, target)
+    env.drv.make = driver(audit_rows(sql, ACCEPTED[0])).make
+
+    message = env.scripts.add("列出最近慢查询", list_slow(), cite())
+    ctx = au.ctx()
+    delivered = await au.evidence.validate_answer(await au.app.run_turn(ctx, message), ctx)
+
+    (fact,) = delivered.facts
+    assert [row["sql"] for row in fact.rows] == [sql, ACCEPTED[0]]
+    assert len(audit_reads(env.drv)) == 1
+    assert sql not in executed_sql(env.drv)
+
+
 async def test_query_purpose_also_sees_slow_queries(env: Env) -> None:
     au = await audited(env)
     message = env.scripts.add("看看", clarify())

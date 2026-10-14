@@ -208,6 +208,7 @@ def guard_readonly_query(sql: str, policy: QueryPolicy) -> GuardedQuery:
     :raises QueryRejectedError: 任一规则不通过；只带原因码与固定说明。
     """
     root, objects, columns = _guard(sql, policy, delivered=True)
+    _check_executable_from_unixtime(root)
     _check_result_columns(root, policy)
     returned = _cap_limit(root, policy.max_rows)
     return GuardedQuery(
@@ -226,6 +227,7 @@ def guard_explain_query(sql: str, policy: QueryPolicy) -> ExplainQuery:
     :raises QueryRejectedError: 任一规则不通过；只带原因码与固定说明。
     """
     root, objects, columns = _guard(sql, policy)
+    _check_executable_from_unixtime(root)
     return ExplainQuery(
         target_id=policy.target_id,
         normalized_sql=_normalize(root, policy),
@@ -491,13 +493,16 @@ def _check_nodes(root: exp.Query, policy: QueryPolicy) -> None:
             pass  # CASE WHEN 分支，不是 IF() 函数
         elif type(node) in _STRUCTURAL:
             pass
-        elif isinstance(node, exp.UnixToTime) and node.args.get("format") is not None:
-            raise QueryRejectedError(_Code.UNSUPPORTED_SYNTAX, hint="from_unixtime_format")
         elif isinstance(node, exp.Func):
             if not _function_allowed(node, policy):
                 _reject(_Code.FUNCTION_NOT_ALLOWED)
         else:
             _reject(_Code.UNSUPPORTED_SYNTAX)
+
+
+def _check_executable_from_unixtime(root: exp.Query) -> None:
+    if any(node.args.get("format") is not None for node in root.find_all(exp.UnixToTime)):
+        raise QueryRejectedError(_Code.UNSUPPORTED_SYNTAX, hint="from_unixtime_format")
 
 
 def _star_allowed(star: exp.Star) -> bool:
