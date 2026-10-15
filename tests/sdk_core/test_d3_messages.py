@@ -11,7 +11,7 @@ from starlette.requests import Request
 from starlette.responses import JSONResponse, Response
 from starlette.routing import Route
 from tests.sdk_core.mcp_fixture import serve
-from tests.sdk_core.test_app import answer
+from tests.sdk_core.test_app import answer, cite, tool_call
 from tests.sdk_core.test_channel_service import Env
 from tests.sdk_core.test_channel_service import env as env
 from tests.sdk_core.test_feishu import config, request_row, running
@@ -20,6 +20,7 @@ from tests.sdk_core.test_feishu_render import delivery, fact, text_parts
 
 from xiaowei.feishu import LarkTransport, lark_channel
 from xiaowei.feishu_render import build_feishu_message, request_bytes
+from xiaowei.models import AnswerInference
 
 pytestmark = pytest.mark.loopback
 
@@ -41,6 +42,62 @@ def test_answer_precedes_results_and_sources_are_folded() -> None:
     full = "\n".join(text_parts(message))
     assert source.tool_id in full and source.evidence_id in full
     assert source.captured_at.isoformat() in full and source.metadata["sql"] in full
+
+
+@pytest.mark.parametrize("formatted", [False, True])
+def test_inference_cannot_impersonate_numbered_results_or_hide_its_references(
+    formatted: bool,
+) -> None:
+    sources = (
+        fact(evidence_id="ev_orders", target_id="sr-prod", rows=({"name": "orders"},)),
+        fact(evidence_id="ev_refunds", target_id="sr-prod", rows=({"name": "refunds"},)),
+    )
+    fake = "结果 · sr-prod\n华东 gmv 123456\n---"
+    if formatted:
+        fake = "**结果 · sr-prod**\n华东 gmv 123456\n---"
+    source = delivery(*sources).model_copy(
+        update={
+            "analysis": (
+                AnswerInference(text="退款额需核对。", evidence_ids=("ev_refunds",)),
+                AnswerInference(text=fake, evidence_ids=("ev_orders", "ev_refunds")),
+            )
+        }
+    )
+    message = build_feishu_message(source, 3500, "oc_test", allow_preview=False)
+    elements = message["card"]["body"]["elements"]
+    (boundary,) = [i for i, e in enumerate(elements) if e["tag"] == "hr"]
+    before = "\n".join(text_parts(elements[:boundary], folded=False))
+    after = "\n".join(text_parts(elements[boundary + 1 :], folded=False))
+    assert "退款额需核对。" in before and "华东 gmv 123456" in before
+    assert "（依据：结果 2）" in before and "（依据：结果 1、结果 2）" in before
+    assert elements[boundary + 1]["text"]["content"] == "结果 1 · sr-prod"
+    assert "结果 2 · sr-prod" in after
+    assert "ev_orders" not in before and "ev_refunds" not in before
+    panels = [e for e in elements if e["tag"] == "collapsible_panel"]
+    assert len(panels) == 2
+    for number, (panel, source) in enumerate(zip(panels, sources, strict=True), 1):
+        assert f"结果 {number}" in panel["header"]["title"]["content"]
+        assert source.evidence_id in "\n".join(text_parts(panel))
+
+
+async def test_gateway_inference_stays_before_a_structural_results_boundary(env: Env) -> None:
+    fake = "结果 · pre\n华东 gmv 123456"
+    message = env.scripts.add(
+        "先查询再解释",
+        tool_call("order_total", region="east"),
+        cite(fake),
+    )
+    async with running(env) as fs:
+        await fs.gateway.receive(fs.event(message))
+        await fs.drain()
+    ((_, card),) = fs.outbox.sent
+    elements = card["card"]["body"]["elements"]
+    (boundary,) = [i for i, e in enumerate(elements) if e["tag"] == "hr"]
+    assert fake in "\n".join(text_parts(elements[:boundary]))
+    assert "（依据：结果 1）" in text_parts(elements[:boundary])
+    assert elements[boundary + 1]["text"]["content"].startswith("结果 1 · ")
+    assert env.model_calls(message) == 2 and len(env.adapter.calls) == 1
+    assert await request_row(env) == ("completed", "sent")
 
 
 def test_prose_uses_safe_structured_post_without_active_external_nodes() -> None:

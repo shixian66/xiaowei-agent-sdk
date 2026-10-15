@@ -416,6 +416,42 @@ def test_formatting_is_outside_capacity_search_and_input_is_bounded(
     assert inputs == []
 
 
+@pytest.mark.parametrize("budget", ["chars", "bytes"])
+def test_format_expansion_keeps_plain_card_with_basis_when_it_fits(budget: str) -> None:
+    raw = "**结论** " + "[x](https://evil.invalid) " * 8 + "。"
+    source = prose("建议", raw).model_copy(update={"basis": (("local/list_tables", "sr-prod"),)})
+    formatted = build_feishu_message(source, 3500, "oc_test", allow_preview=False)
+    assert "card" in formatted and markdowns(formatted)
+    elements = formatted["card"]["body"]["elements"]
+    plain = {
+        "card": {
+            **formatted["card"],
+            "body": {
+                "elements": [
+                    elements[0],
+                    {"tag": "div", "text": {"tag": "plain_text", "content": raw}},
+                    elements[-1],
+                ]
+            },
+        }
+    }
+    plain_chars, plain_bytes = sum(map(len, text_parts(plain))), size(plain)
+    assert sum(map(len, text_parts(formatted))) > plain_chars
+    assert size(formatted) > plain_bytes
+    limited = build_feishu_message(
+        source,
+        plain_chars if budget == "chars" else 3500,
+        "oc_test",
+        max_bytes=plain_bytes if budget == "bytes" else 30_000,
+        allow_preview=False,
+    )
+    assert limited == plain
+    assert not markdowns(limited) and TEXT_CLIPPED not in text_parts(limited)
+    assert raw in text_parts(limited) and "local/list_tables · sr-prod" in text_parts(limited)
+    assert sum(map(len, text_parts(limited))) <= plain_chars
+    assert size(limited) <= plain_bytes
+
+
 def test_structured_post_does_not_charge_escaped_entities_as_visible_text() -> None:
     source = prose("建议", "**结论** [x](https://evil.invalid)")
     formatted = build_feishu_message(source, 3500, "oc_test")

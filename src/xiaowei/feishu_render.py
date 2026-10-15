@@ -164,13 +164,22 @@ def _card(
         elements.append(_div(delivery.monitoring_notice))
     if delivery.session_notice:
         elements.append(_div(delivery.session_notice))
+    result_labels = {
+        fact.evidence_id: f"结果 {index + 1}"
+        for index, fact in enumerate(delivery.facts)
+        if not fact.requires_complete
+    }
     if analysis:
         elements.append(_div("分析与建议（模型推断）"))
         for item in analysis:
             prose = format_prose(display_text(item.text)) if formatted else [_div(item.text)]
             elements.extend(prose)
+            references = "、".join(result_labels.get(eid, eid) for eid in item.evidence_ids)
+            elements.append(_div(f"（依据：{references}）"))
     if omissions and tuple(analysis) != delivery.analysis:
         elements.append(_div(ANALYSIS_CLIPPED))
+    if analysis:
+        elements.append({"tag": "hr"})
     tables = 0
     for index, fact in enumerate(delivery.facts):
         columns, all_rows = _data(fact)
@@ -184,7 +193,7 @@ def _card(
                 )
             )
         else:
-            elements.append(_div(f"结果 · {fact.target_id}"))
+            elements.append(_div(f"结果 {index + 1} · {fact.target_id}"))
         if fact.note is not None:
             elements.append(
                 _div(
@@ -292,7 +301,8 @@ def _card(
                     "expanded": False,
                     "header": {
                         "title": _plain(
-                            "查看依据 · 获准原文与查询信息" if fact.view == "brief" else "查看依据"
+                            f"查看依据 · 结果 {index + 1}"
+                            + (" · 获准原文与查询信息" if fact.view == "brief" else "")
                         )
                     },
                     "elements": details,

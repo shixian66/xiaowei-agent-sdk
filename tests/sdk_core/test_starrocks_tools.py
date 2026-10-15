@@ -559,8 +559,16 @@ async def test_feishu_gets_original_rows_in_pure_text_card_cells(env: Env) -> No
     assert sum(e.get("text", {}).get("content") == "分析与建议（模型推断）" for e in elements) == 1
     assert any(e.get("text", {}).get("content", "").startswith("仅供参考\n") for e in elements)
     assert "\\u2028" in message_text(card) and "\u2028" not in message_text(card)
-    # 批准改为真实换行和纯文本组件；值可多行，但不能另起结构化事实或 Markdown 元素。
-    assert all(e["tag"] in {"div", "table", "collapsible_panel"} for e in elements)
+    # 唯一的结构分隔线来自代码；原值和模型文字不能新增结构化事实或 Markdown 元素。
+    (boundary,) = [i for i, e in enumerate(elements) if e["tag"] == "hr"]
+    assert "仅供参考" in "\n".join(text_parts(elements[:boundary]))
+    assert "（依据：结果 1）" in text_parts(elements[:boundary])
+    assert elements[boundary + 1]["text"]["content"] == f"结果 1 · {SR.target_id}"
+    assert all(
+        e["tag"] in {"div", "table", "collapsible_panel"}
+        for index, e in enumerate(elements)
+        if index != boundary
+    )
     assert on_web.content.splitlines() == on_web.content.split("\n")
 
 

@@ -12,7 +12,6 @@ from xiaowei.feishu_render import (
     ANALYSIS_CLIPPED,
     CAPACITY_NOTICE,
     FACTS_CLIPPED,
-    MessageCapacityError,
     build_feishu_message,
     request_bytes,
 )
@@ -438,8 +437,34 @@ def test_short_fact_fits_when_zero_row_placeholders_would_not() -> None:
         note=PLAN_NOTE,
     )
     complete = build_feishu_message(delivery(source), 3500, "oc_test")
-    primary = complete
+    primary = {
+        "card": {
+            **complete["card"],
+            "body": {
+                "elements": [
+                    {**e, "elements": e["elements"][:1]} if e["tag"] == "collapsible_panel" else e
+                    for e in complete["card"]["body"]["elements"]
+                ]
+            },
+        }
+    }
     needed = sum(map(len, text_parts(primary)))
+    assert needed < sum(map(len, text_parts(complete)))
+    zero = {
+        "card": {
+            **primary["card"],
+            "body": {
+                "elements": [
+                    {"tag": "div", "text": {"tag": "plain_text", "content": "结果行未展示。"}}
+                    if e["tag"] == "table"
+                    else e
+                    for e in primary["card"]["body"]["elements"]
+                ]
+                + [{"tag": "div", "text": {"tag": "plain_text", "content": FACTS_CLIPPED}}]
+            },
+        }
+    }
+    assert sum(map(len, text_parts(zero))) > needed
     for budget in (needed, needed + 1, needed + 12):
         shown = build_feishu_message(delivery(source), budget, "oc_test")
         assert "card" in shown
@@ -452,8 +477,9 @@ def test_short_fact_fits_when_zero_row_placeholders_would_not() -> None:
         byte_limited = build_feishu_message(delivery(source), 3500, "oc_test", max_bytes=budget)
         assert tables(byte_limited)[0]["rows"] == [{"c0": '"SCAN"'}]
         assert size(byte_limited) <= budget
-    with pytest.raises(MessageCapacityError):
-        build_feishu_message(delivery(source), needed - 1, "oc_test", allow_preview=False)
+    below = build_feishu_message(delivery(source), needed - 1, "oc_test")
+    assert '"SCAN"' not in text_parts(below)
+    assert sum(map(len, text_parts(below))) <= needed - 1 and size(below) <= 30_000
 
 
 def test_short_prefix_survives_larger_zero_row_placeholders() -> None:
