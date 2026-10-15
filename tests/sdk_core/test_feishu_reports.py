@@ -26,8 +26,8 @@ from tests.sdk_core.test_group_actions import actions as actions  # pytest fixtu
 from tests.sdk_core.test_group_gateway import BOT, Group, group_config
 from tests.sdk_core.test_group_identity import CHAT, A, B, group_ref
 
-from xiaowei import feishu_report
-from xiaowei.channel import RequestRef
+from xiaowei import feishu, feishu_report
+from xiaowei.channel import AccessDeniedError, RequestRef
 from xiaowei.channel_store import ChannelStore, ChannelStoreUnavailableError, ReportMismatchError
 from xiaowei.feishu import FeishuGateway, LarkTransport, attributed, lark_channel, send_delivery
 from xiaowei.feishu_report import build_report
@@ -960,3 +960,129 @@ async def test_real_sdk_sends_one_file_after_one_upload_to_local_endpoint(
     )
     assert sent_body["msg_type"] == "file"
     assert json.loads(sent_body["content"]) == {"file_key": "file_synthetic"}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("format_", ["md", "html"])
+@pytest.mark.parametrize("initial", ["failed", "unknown", "upload_unknown", "revoked"])
+async def test_legacy_resend_keeps_bound_file_across_renderer_upgrade(
+    env: Env, monkeypatch: pytest.MonkeyPatch, format_: str, initial: str
+) -> None:
+    """任意模板升级都不能改写已绑定的 v0 文件，真实 SDK 仅访问本机协议替身。"""
+    question = env.scripts.add(
+        "查东区订单并生成文件",
+        tool_call("order_total", region="east"),
+        lambda call: answer(evidence_in(call), report_format=format_),
+    )
+    await env.run(question, "om_legacy_upgrade", channel="feishu", conversation="oc_legacy")
+    ref = RequestRef(
+        channel="feishu",
+        subject_id="alice",
+        conversation_id="oc_legacy",
+        request_id="om_legacy_upgrade",
+    )
+    uploads: list[bytes] = []
+    messages: list[dict[str, Any]] = []
+
+    async def token(request: Request) -> Response:
+        return JSONResponse({"code": 0, "tenant_access_token": "t-synthetic", "expire": 7200})
+
+    async def upload(request: Request) -> Response:
+        uploads.append(await request.body())
+        if initial == "upload_unknown":
+            return JSONResponse({}, status_code=500)
+        return JSONResponse({"code": 0, "data": {"file_key": "file_original"}})
+
+    async def sent(request: Request) -> Response:
+        messages.append(json.loads(await request.body()))
+        if len(messages) == 1:
+            if initial == "unknown":
+                return JSONResponse({}, status_code=500)
+            return JSONResponse({"code": 230050, "msg": "synthetic rejection"})
+        return JSONResponse({"code": 0, "data": {"message_id": "om_restored"}})
+
+    def endpoint(_: Any) -> Starlette:
+        return Starlette(
+            routes=[
+                Route("/open-apis/auth/v3/tenant_access_token/internal", token, methods=["POST"]),
+                Route("/open-apis/im/v1/files", upload, methods=["POST"]),
+                Route("/open-apis/im/v1/messages", sent, methods=["POST"]),
+            ]
+        )
+
+    # 更换模板后，旧实现会把新字节交给 bind_report，导致 report_mismatch。
+    original_builder = feishu.build_report
+
+    def upgraded_builder(delivery: Delivery):
+        report = original_builder(delivery)
+        content = report.content + b"\nchanged template\n"
+        return dataclasses.replace(
+            report, content=content, digest=hashlib.sha256(content).hexdigest()
+        )
+
+    monkeypatch.setenv("XW_TEST_FEISHU_SECRET", "not-a-real-secret")
+    with serve(endpoint, path="") as http:
+        channel = FeishuChannel(
+            config=dataclasses.replace(lark_channel(config()).config, domain=http.url)
+        )
+        transport = LarkTransport(channel, config())
+        transmit = partial(
+            send_delivery,
+            send=transport.send,
+            upload_file=transport.upload_file,
+            chat_id="oc_legacy",
+            max_chars=2000,
+            results=env.service.results,
+            ref=ref,
+        )
+        try:
+            expected = "unknown" if initial in ("unknown", "upload_unknown") else "failed"
+            assert await env.service.results.send(ref, transmit) == expected
+            async with env.engine.connect() as conn:
+                saved = (
+                    await conn.execute(
+                        text(
+                            "SELECT format, body, digest, file_key, upload_state "
+                            "FROM xiaowei_report"
+                        )
+                    )
+                ).one()
+            assert saved.format == format_
+            assert saved.body in uploads[0]
+            assert hashlib.sha256(saved.body).hexdigest() == saved.digest
+            if initial != "upload_unknown":
+                assert saved.file_key == "file_original" and saved.upload_state == "uploaded"
+            model_calls, query_calls = (
+                sum(len(calls) for calls in env.scripts.calls.values()),
+                len(env.adapter.calls),
+            )
+            monkeypatch.setattr(feishu, "build_report", upgraded_builder)
+            resend = partial(transmit, resend=True)
+            if initial == "revoked":
+                env.grants.revoke_all()
+                with pytest.raises(AccessDeniedError):
+                    await env.service.results.send(ref, resend, resend=True)
+            else:
+                expected = "unknown" if initial == "upload_unknown" else "sent"
+                assert await env.service.results.send(ref, resend, resend=True) == expected
+            assert len(uploads) == 1  # 补发没有重新上传或查询。
+            assert len(messages) == (
+                2 if initial in ("failed", "unknown") else 0 if initial == "upload_unknown" else 1
+            )
+            for message in messages:
+                assert json.loads(message["content"]) == {"file_key": "file_original"}
+            assert (
+                sum(len(calls) for calls in env.scripts.calls.values()),
+                len(env.adapter.calls),
+            ) == (model_calls, query_calls)
+            async with env.engine.connect() as conn:
+                assert (
+                    await conn.execute(
+                        text(
+                            "SELECT format, body, digest, file_key, upload_state "
+                            "FROM xiaowei_report"
+                        )
+                    )
+                ).one() == saved
+        finally:
+            channel.stop(join_timeout=5)

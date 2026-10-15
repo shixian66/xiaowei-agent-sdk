@@ -1,12 +1,15 @@
 """D2：文件里的结果可读，同时保留可信投影的值和类型。"""
 
 import json
+import re
 from html import unescape
 
+import pytest
+from markdown_it import MarkdownIt
 from tests.sdk_core.test_feishu_reports import _delivery
 
 from xiaowei.feishu_report import build_report
-from xiaowei.models import Delivery
+from xiaowei.models import AnswerInference, Delivery
 
 
 def test_html_report_uses_real_table_and_preserves_values_without_duplicate_json() -> None:
@@ -60,8 +63,6 @@ def test_md_report_uses_table_for_simple_rows_and_fences_complex_originals() -> 
 
 
 def test_md_report_keeps_source_links_and_markup_inside_fences() -> None:
-    from markdown_it import MarkdownIt
-
     delivery = _delivery("md")
     for value in ("https://invalid.example/path", "__strong__"):
         result = {"columns": ["value"], "rows": [{"value": value}]}
@@ -74,8 +75,6 @@ def test_md_report_keeps_source_links_and_markup_inside_fences() -> None:
 
 
 def test_md_report_keeps_word_internal_underscores_in_a_readable_table() -> None:
-    from markdown_it import MarkdownIt
-
     delivery = _delivery("md")
     result = {"columns": ["order_id"], "rows": [{"order_id": "east_1"}]}
     fact = delivery.facts[0].model_copy(update={"result_json": json.dumps(result)})
@@ -87,7 +86,7 @@ def test_md_report_keeps_word_internal_underscores_in_a_readable_table() -> None
     assert "<td>&quot;east_1&quot;</td>" in rendered
 
 
-def test_no_fact_advice_reads_as_prose_and_invalid_projection_stays_literal() -> None:
+def test_no_fact_advice_preserves_lines_and_invalid_projection_stays_literal() -> None:
     advice = Delivery(
         content="解释第一段。\n第二段。",
         channel="feishu",
@@ -98,7 +97,8 @@ def test_no_fact_advice_reads_as_prose_and_invalid_projection_stays_literal() ->
     md = build_report(advice.model_copy(update={"report_format": "md"})).content.decode()
     assert '<p class="prose">' in html and "解释第一段。" in html
     assert "本文件包含 0 项结果" not in html
-    assert "```" not in md and "~~~text\n解释第一段。" not in md
+    rendered = MarkdownIt("default").render(md)
+    assert "解释第一段。\n第二段。" in unescape(rendered)
 
     delivery = _delivery("html")
     fact = delivery.facts[0].model_copy(update={"result_json": "not valid JSON <x>"})
@@ -179,3 +179,51 @@ def test_dashboard_summary_and_diagnostic_plan_keep_readable_shapes() -> None:
             assert 'class="sql-code"' in body
         else:
             assert "~~~text\n" in body
+
+
+@pytest.mark.parametrize("section", ["answer", "analysis", "basis"])
+def test_md_prose_preserves_visible_lines_indentation_and_literal_markup(section: str) -> None:
+    original = (
+        "SELECT region, -- 区域\n"
+        "    SUM(total) AS s\n"
+        "FROM shop.sales\n"
+        "GROUP BY region;\n\n"
+        "_强调_ ~~旧值~~ &lt; [链接](https://invalid.example)\n"
+        "~~~text\n围栏里的文字\n~~~"
+    )
+    if section == "answer":
+        delivery = Delivery(
+            channel="feishu",
+            content=original,
+            feishu_text=original,
+            evidence_ids=(),
+            report_format="md",
+        )
+    else:
+        delivery = _delivery("md")
+        if section == "analysis":
+            delivery = delivery.model_copy(
+                update={
+                    "analysis": (
+                        AnswerInference(text=original, evidence_ids=delivery.evidence_ids),
+                    )
+                }
+            )
+        else:
+            delivery = delivery.model_copy(
+                update={
+                    "basis": (
+                        ("local/show_create_table", "shop.sales"),
+                        ("local/describe_table", "shop.orders"),
+                    )
+                }
+            )
+            original = "local/show_create_table · shop.sales\nlocal/describe_table · shop.orders"
+    rendered = MarkdownIt("default").render(build_report(delivery).content.decode())
+    visible_blocks = [
+        unescape(value)
+        for value in re.findall(r"<pre><code[^>]*>(.*?)</code></pre>", rendered, re.DOTALL)
+    ]
+    assert original.splitlines() in [value.splitlines() for value in visible_blocks]
+    assert "<del>旧值</del>" not in rendered and "<em>强调</em>" not in rendered
+    assert "<a href=" not in rendered

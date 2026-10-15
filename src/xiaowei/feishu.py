@@ -457,7 +457,19 @@ async def send_delivery(
                 logger.error("飞书报告未发送：reason=report_transport_unavailable")
                 return "failed"
             try:
-                report = build_report(delivery)
+                record = await results.store.get(
+                    ref.channel,
+                    ref.subject_id,
+                    ref.conversation_id,
+                    ref.request_id,
+                    owner=ref.group.owner if ref.group is not None else None,
+                )
+                report = await results.store.get_bound_report(record)
+                if report is None:
+                    report = build_report(delivery)
+            except ReportMismatchError:
+                logger.warning("飞书报告未发送：reason=report_mismatch")
+                return "failed"
             except ReportCapacityError:
                 report_notice = "报告超过文件容量，已改用消息展示；需要文件请缩小范围后重试。"
             except (ValueError, TypeError):
@@ -483,7 +495,7 @@ async def send_delivery(
                 ref.request_id,
                 owner=ref.group.owner if ref.group is not None else None,
             )
-            if await results.store.has_bound_report(record):
+            if await results.store.get_bound_report(record) is not None:
                 logger.warning("飞书报告停止改发卡片：reason=report_already_bound")
                 return "unknown"
         delivery = delivery.model_copy(update={"report_notice": report_notice})

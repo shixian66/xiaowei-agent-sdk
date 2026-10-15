@@ -1216,24 +1216,39 @@ class ChannelStore:
             raise ReportMismatchError
         return state, key, attempt
 
-    async def has_bound_report(self, record: RequestRecord) -> bool:
-        """重发改走卡片前核对是否曾绑定文件；已有上传记录不得绕过未知状态。"""
+    async def get_bound_report(self, record: RequestRecord) -> ReportFile | None:
+        """读取归属和期限内的旧文件；模板升级不能改写已绑定字节。"""
+        from xiaowei.feishu_report import ReportFile
+
+        self._require_ready()
         params = {**_keys(record), "now": self._clock()}
         try:
             async with self._engine.connect() as conn:
-                bound = await conn.scalar(
-                    text(
-                        "SELECT 1 FROM xiaowei_report p JOIN xiaowei_request r "
-                        "ON r.turn_id = p.turn_id WHERE r.turn_id = :turn_id "
-                        "AND r.channel = :channel AND r.request_key = :request_key "
-                        "AND r.owner_kind = :owner_kind AND r.owner_id = :owner_id "
-                        "AND r.subject_id = :subject_id AND r.expires_at > :now"
-                    ),
-                    params,
+                row = (
+                    (
+                        await conn.execute(
+                            text(
+                                "SELECT p.format, p.body, p.digest "
+                                "FROM xiaowei_report p JOIN xiaowei_request r "
+                                "ON r.turn_id = p.turn_id WHERE r.turn_id = :turn_id "
+                                "AND r.channel = :channel AND r.request_key = :request_key "
+                                "AND r.owner_kind = :owner_kind AND r.owner_id = :owner_id "
+                                "AND r.subject_id = :subject_id AND r.expires_at > :now"
+                            ),
+                            params,
+                        )
+                    )
+                    .mappings()
+                    .one_or_none()
                 )
         except (OSError, SQLAlchemyError):
             raise ChannelStoreUnavailableError from None
-        return bound is not None
+        if row is None:
+            return None
+        format_, content, digest = row["format"], bytes(row["body"]), row["digest"]
+        if format_ not in ("md", "html") or hashlib.sha256(content).hexdigest() != digest:
+            raise ReportMismatchError
+        return ReportFile(format_, f"xiaowei-report.{format_}", content, digest)
 
     async def begin_report_upload(self, record: RequestRecord, attempt: str) -> bool:
         """上传 I/O 前原子占位；重入、恢复后的 uploading/unknown 一律不再上传。"""

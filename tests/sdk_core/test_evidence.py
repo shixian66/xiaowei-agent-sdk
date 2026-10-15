@@ -326,7 +326,7 @@ async def test_advice_is_a_separate_answer_without_facts(postgres_url: URL) -> N
 
 
 @pytest.mark.parametrize("kind", ["advice", "clarification"])
-async def test_explicit_feishu_document_can_contain_unverified_text_without_query(
+async def test_unverified_advice_can_be_a_file_but_clarification_ignores_format(
     postgres_url: URL,
     kind: str,
 ) -> None:
@@ -338,13 +338,19 @@ async def test_explicit_feishu_document_can_contain_unverified_text_without_quer
         delivery = await evidence.validate_answer(
             cited(answer), context(channel="feishu", session="document-advice")
         )
-        assert delivery.report_format == "html"
+        assert delivery.report_format == ("html" if kind == "advice" else None)
         assert delivery.feishu_text == text
         assert delivery.facts == () and delivery.evidence_ids == ()
-        with pytest.raises(AnswerRejectedError):
-            await evidence.validate_answer(
-                cited(answer), context(channel="web", session="document-advice-web")
+        if kind == "advice":
+            with pytest.raises(AnswerRejectedError):
+                await evidence.validate_answer(
+                    cited(answer), context(channel="web", session="document-advice-web")
+                )
+        else:
+            web = await evidence.validate_answer(
+                cited(answer), context(channel="web", session="document-clarification-web")
             )
+            assert web.report_format is None and web.web_text == text
 
 
 def test_answers_saved_before_advice_existed_still_load() -> None:

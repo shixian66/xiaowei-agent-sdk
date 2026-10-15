@@ -346,7 +346,7 @@ def _render(
     if format_ == "md":
         blocks = []
         for index, section in enumerate(sections, start=1):
-            content = _md_fact(section.value) if section.fact else _md_escape(section.value)
+            content = _md_fact(section.value) if section.fact else _fence(section.value)
             meta = f"\n\n{_inline_code(display_text(section.meta))}" if section.meta else ""
             notes = "".join(f"\n\n> {_md_escape(note)}" for note in section.notices)
             blocks.append(f"## {index}. {_md_escape(section.title)}{meta}{notes}\n\n{content}")

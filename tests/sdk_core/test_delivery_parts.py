@@ -773,3 +773,50 @@ async def test_real_channel_sdk_passes_saved_uuid_and_keeps_each_part_one_messag
     assert messages[0]["msg_type"] == "file"
     assert messages[0]["uuid"] == first[0].uuid
     assert messages[1]["uuid"] == messages[3]["uuid"] == first[1].uuid
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("format_", ["md", "html"])
+async def test_clarification_with_report_format_sends_only_question_without_upload(
+    env: Env, format_: str
+) -> None:
+    question = "请明确业务时区。"
+    message = env.scripts.add(
+        "查询昨天的订单，做成文件",
+        lambda call: answer([], analysis="", clarification=question, report_format=format_),
+    )
+    record = await env.run(message, "om_d1a", channel="feishu", conversation="oc_d1a")
+    assert record.state == "completed", record.failure_code
+    ref = RequestRef(
+        channel="feishu", subject_id="alice", conversation_id="oc_d1a", request_id="om_d1a"
+    )
+    view = await env.service.results.view(ref, first=True)
+    assert view.delivery is not None and view.delivery.report_format is None
+    platform = Platform()
+    assert await env.service.results.send(ref, transmit(env, ref, platform)) == "sent"
+    assert platform.files == [] and len(platform.sent) == 1
+    shown = json.dumps(platform.sent[0][0], ensure_ascii=False)
+    assert question in shown and "附件" not in shown
+    assert len(env.scripts.calls[message]) == 1 and env.adapter.calls == []
+    (part,) = await parts(env, ref)
+    assert part.kind == "body" and part.send_state == "sent"
+
+
+@pytest.mark.asyncio
+async def test_long_clarification_never_changes_into_an_automatic_attachment(env: Env) -> None:
+    question = "请先明确目标集群和业务时区。" * 40
+    message = env.scripts.add(
+        "信息不足时先问我",
+        lambda call: answer([], analysis="", clarification=question, report_format="html"),
+    )
+    await env.run(message, "om_d1a", channel="feishu", conversation="oc_d1a")
+    ref = RequestRef(
+        channel="feishu", subject_id="alice", conversation_id="oc_d1a", request_id="om_d1a"
+    )
+    platform = Platform()
+    result = await env.service.results.send(
+        ref, partial(transmit(env, ref, platform), max_chars=200)
+    )
+    assert platform.files == []
+    assert result != "sent"  # 放不进正文时沿容量失败处理，不把提醒当完整交付。
+    assert all(part.kind == "body" for part in await parts(env, ref))

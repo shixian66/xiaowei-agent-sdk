@@ -96,14 +96,15 @@ def _preview(
 def _data_parts(
     delivery: Delivery, sequence: int, max_chars: int, chat_id: str, reply_to: str | None
 ) -> tuple[DeliveryPart, ...]:
-    if delivery.report_format is None:
+    if delivery.report_format is None or delivery.is_clarification:
         try:
             message = build_feishu_message(
                 delivery, max_chars, chat_id, reply_to=reply_to, allow_preview=False
             )
             return (_message_part(sequence, "body", message),)
         except MessageCapacityError:
-            pass
+            if delivery.is_clarification:
+                raise
     reports = build_reports(
         delivery.model_copy(update={"report_format": delivery.report_format or "md"}),
         expand_brief=delivery.report_format is not None,

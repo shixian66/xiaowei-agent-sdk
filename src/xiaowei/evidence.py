@@ -386,7 +386,8 @@ class EvidenceStore:
                 raise AnswerRejectedError(
                     AnswerRejectCode.MIXED_KINDS, "澄清或建议不能与查询结果、分析或彼此混用"
                 )
-            if answer.report_format is not None and channel != "feishu":
+            report_format = None if answer.clarification is not None else answer.report_format
+            if report_format is not None and channel != "feishu":
                 raise AnswerRejectedError(AnswerRejectCode.MIXED_KINDS, "当前渠道不能交付报告文件")
             records = await self._context_readable(ctx, channel, context, history=history)
             ((header, text),) = unverified
@@ -405,7 +406,8 @@ class EvidenceStore:
                 monitoring_notice=monitoring_notice,
                 web_text=rendered if channel == "web" else None,
                 feishu_text=rendered if channel == "feishu" else None,
-                report_format=answer.report_format,
+                report_format=report_format,
+                is_clarification=answer.clarification is not None,
                 basis=_basis(records, ctx),
                 content_expires_at=min((r.expires_at for r in records), default=None),
             )

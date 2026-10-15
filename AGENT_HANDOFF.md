@@ -11,7 +11,7 @@
 | 仓库 | [shixian66/xiaowei-agent-sdk](https://github.com/shixian66/xiaowei-agent-sdk) |
 | 本地目录 / 分支 | D2：`/Users/kloenguyen/.codex/worktrees/delivery-document-plan/agent-SDK` / `codex/result-documents-d2`；基线为已合并 D1b 的 `origin/main` `a450806d`。原目录未跟踪公司配置未读取或改动。 |
 | M5 历史起点 | `372c381f44ecfa1fa53961f137d0058033cbd805`；不是远端当前 main 的核验结论 |
-| 本轮审查版本 | 设计 v1.4 `b58f0d9025bf06356dda374410e8792db231b8f0` 已批准；D1a、D1b 分别经 PR #102/#103 合入，当前主线 `a450806d`。D2 尚待本次精确 SHA 独立审查，不能沿用 D1b 结论。 |
+| 本轮审查版本 | 设计 v1.4 `b58f0d9025bf06356dda374410e8792db231b8f0` 已批准；D1a、D1b 分别经 PR #102/#103 合入，当前主线 `a450806d`。D2 `ea5f6a4` 已获独立审查，B1/B2 补修及用户新批准的 C4 澄清规则待新精确 SHA 复审，不能沿用旧结论。 |
 | 已同步主线审查记录 | SDK-A/B/C 已随 PR #89/#93/#94 合入；D7 已随 PR #83 离线合入。上述合入不代表真实模型、飞书或公司 Grafana 验收。 |
 | 当前阶段 | D2 本地实现、测试与常规修复；先本地审查验收，再另行决定 PR/合并；没有部署授权。 |
 | 当前源码与依赖 | 应用表v12，新请求分项回执、旧请求v0语义兼容；SDK/锁文件不变，独立.venv按锁安装；正式启动不自动迁移。 |
@@ -47,7 +47,9 @@
 
 **D1b 本地结果：** 已从合并后的 D1a 建独立分支，报告按整章节或整行拆分，保持每份编码后不超过 400,000 字节、标记 `1/N`；所有数据文件与正文在首个数据上传前生成并检查。现有分项表按序保存不可变字节，文件逐个上传/发送；全部附件确认后才发正文。审批卡仍先独立发送。新请求整体状态只从分项推导，旧请求保留 unknown 保护；相应回归已先红后绿。首轮独立审查发现大文件同步渲染阻塞事件循环，已将纯数据文件构造移到线程，返回后仍由原路径绑定、复核与发送；取消时零绑定/上传有回归。同群多文件连续消息及失败提醒留 0.21 秒间隔，依据[Lark 官方消息 FAQ](https://open.larksuite.com/document/server-docs/im-v1/faq)的单群 5 QPS 限制；中国飞书实际规则及跨请求/其他发送者占用仍未实测。
 
-**D2 本地候选：** 在原 `feishu_report` 上把获准 `result_json` 显示为通用 HTML/MD 章节、字段、真实表格与 SQL/DDL/计划代码块；空值、缺失、大整数、嵌套类型及控制符有可见区别。HTML 只有内联固定 CSS/CSP，无脚本或外部资源；本机 Chrome 桌面/窄屏核对了布局、DDL 代码元素 `textContent` 与原文逐字一致、零外部请求。MD 将 URL 和会触发强调的原值放进围栏，词内下划线的普通列名仍用表格；反例先失败再通过，且经 Markdown 解析验证。显式要求文件的无事实 advice/clarification 经 Evidence 仍复核上下文、仅飞书允许、不增加查询；普通短答仍无附件。既有 D1b 分卷、权限、存储字节与手动恢复路径未改。真 SDK/隔离 PostgreSQL 的相关入口、诊断及审批 **166 passed**；本机 Chrome **2 passed**；整仓 `.venv/bin/python -m pytest -q` **5651 passed、373 skipped、72 deselected、5 条预期网络隔离警告**，退出码 0；独立安全标记 **928 passed、79 skipped、5089 deselected**。全仓 Ruff、14 个改动 Python 文件格式、mypy 135 个源码文件、离线锁（93 包）、文档事实 5 项、差异检查及离线 wheel 构建均通过。16 份各 380,933 字节的合成 JSON 经新 HTML 排版生成 80 文件、共约 29.82 MB，纯渲染 25.32 秒（无发送/无内存跟踪）。真实模型对新增说明的选择、真实飞书手机/桌面客户端和平台去重尚未验证；当前结论只证明离线链路与本机页面，独立审查仍待精确 SHA。
+**D2 本地候选：** 在原 `feishu_report` 上把获准 `result_json` 显示为通用 HTML/MD 章节、字段、真实表格与 SQL/DDL/计划代码块；HTML 固定 CSS/CSP，无脚本或外部资源。D1b 分卷、权限与手动恢复机制复用，未改 Agent Loop 或取证范围。`ea5f6a4` 独立审查发现 B1（旧 v0 报告按新模板重建后绑定不符）、B2（MD 说明/分析/依据失去逐行文本）。本次先红后绿修复：旧路径在本次权限复核后直接复用已存格式、字节和 digest，原 `_send_report` 继续校验绑定、上传键、期限与尝试权；MD 非证据正文恢复动态文本围栏，Markdown 渲染后逐行核对 SQL 注释、缩进、分析与依据。用户本次修订 C4：解释/建议可做文件，澄清只发普通消息，代码忽略模型格式；小容量触发自动附件的反例也已复现并阻止，不增加模型重跑或取证。
+
+**D2 验证边界：** 初审版本 `ea5f6a4` 的整仓 **5651 passed、373 skipped、72 deselected**、安全 **928 passed、79 skipped**、本机 Chrome **2 passed** 仍只证明该版本。本次先红后绿：B1 模板变化的四个成功恢复组合先失败；B2 三类章节的逐行检查先失败；C4 格式忽略和小容量自动附件反例先失败。修复后，真 SDK/隔离 PostgreSQL 的报告、布局、分项投递、审批、诊断、存储及 Evidence **268 passed**（118.26s，`/private/tmp/xw-d2-review-related.log`）；额外以 `a450806` 真实旧模板播种 MD/HTML 绑定的临时协议诊断 **8 passed**（5.35s，`/private/tmp/xw-d2-review-old-template.log`）。全仓 Ruff、11 个改动 Python 文件格式、mypy 135 个源码文件、离线锁 93 包和文档事实 5 项通过；独立安全标记 **928 passed、79 skipped、5103 deselected、5 条预期网络隔离警告**（`/private/tmp/xw-d2-review-security.log`）。整仓离线 `.venv/bin/python -m pytest -q -o cache_dir=/private/tmp/xw-d2-review-full --tb=short`（README 的隔离测试库环境，另设 `PYTHONDONTWRITEBYTECODE=1`）为 **5665 passed、373 skipped、72 deselected、5 条预期网络隔离警告**，退出码 0，1419.25s；日志 `/private/tmp/xw-d2-review-full.log`。`UV_CACHE_DIR=/private/tmp/xw-d2-uv-cache uv build --offline --wheel --no-build-isolation --out-dir /private/tmp/xw-d2-review-dist` 构建通过；没有改动跳过/收集规则，不把旧版本 Chrome 证据升级为真实飞书验收。真实模型的固定任务集（含 `d2_html_advice_no_query`、原始 DDL、零误执行、必要澄清、取证及限制表达）没有运行；现有记录中的临时模型凭据已删除，本次没有可复用的获准模型运行配置，不索要或保存凭据。真实飞书手机/桌面、平台 uuid 行为亦未验证，不能以脚本模型、本机浏览器或协议替身替代。非阻断的 MD 连续空格/分片内行号/控制字符复制边界和 Web 错误码仍保留，下一步只对新精确 SHA 复审，不开 PR、不合并或部署。
 
 | D1a实际本地检查 | 已取得的证据 |
 | --- | --- |
