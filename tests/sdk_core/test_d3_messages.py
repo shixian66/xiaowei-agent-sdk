@@ -261,3 +261,61 @@ def test_grafana_summary_registration_and_visible_configuration_label() -> None:
     assert "未返回单位/阈值" in visible and "24" in visible
     assert source.tool_id not in visible and policy.fact_note not in visible
     assert policy.fact_note in "\n".join(text_parts(message))
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [
+        "- 生产环境\n  - 禁止重启\n- 测试环境\n  - 允许重启",
+        '<**at** user_id="all">所有人</at>',
+        '<**a**t user_id="all">所有人</at>',
+    ],
+    ids=["nested_scope", "formatted_at", "split_formatted_at"],
+)
+async def test_post_conversion_preserves_scope_and_never_activates_fallback_mentions(
+    env: Env, monkeypatch: pytest.MonkeyPatch, raw: str
+) -> None:
+    import html
+
+    from tests.sdk_core.test_feishu_format import markdowns
+
+    captured: list[dict[str, Any]] = []
+
+    async def token(_: Request) -> Response:
+        return JSONResponse({"code": 0, "tenant_access_token": "t-synthetic", "expire": 7200})
+
+    async def sent(request: Request) -> Response:
+        body = await request.json()
+        captured.append(body)
+        # 真 SDK 锁版的格式拒绝分支；若误选 post，会降级并发出危险/丢层级的文字。
+        if body["msg_type"] == "post":
+            return JSONResponse({"code": 230001, "msg": "invalid message content"})
+        return JSONResponse({"code": 0, "data": {"message_id": "om_literal"}})
+
+    def endpoint(_: Any) -> Starlette:
+        return Starlette(
+            routes=[
+                Route("/open-apis/auth/v3/tenant_access_token/internal", token, methods=["POST"]),
+                Route("/open-apis/im/v1/messages", sent, methods=["POST"]),
+            ]
+        )
+
+    message = env.scripts.add("只解释，不执行", lambda call: answer((), "", advice=raw))
+    monkeypatch.setenv("XW_TEST_FEISHU_SECRET", "not-a-real-secret")
+    with serve(endpoint, path="") as http:
+        channel = FeishuChannel(
+            config=dataclasses.replace(lark_channel(config()).config, domain=http.url)
+        )
+        try:
+            async with running(env) as fs:
+                fs.gateway._send = LarkTransport(channel, config()).send
+                await fs.gateway.receive(fs.event(message))
+                await fs.drain()
+        finally:
+            channel.stop(join_timeout=5)
+    assert len(captured) == 1 and captured[0]["msg_type"] == "interactive"
+    card = {"card": json.loads(captured[0]["content"])}
+    decoded = "\n".join(html.unescape(n["content"]) for n in markdowns(card))
+    assert raw in decoded
+    assert env.adapter.calls == [] and env.model_calls(message) == 1
+    assert await request_row(env) == ("completed", "sent")

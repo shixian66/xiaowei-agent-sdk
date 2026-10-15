@@ -168,10 +168,7 @@ def _card(
         elements.append(_div("分析与建议（模型推断）"))
         for item in analysis:
             prose = format_prose(display_text(item.text)) if formatted else [_div(item.text)]
-            if prose == [_div(item.text)]:
-                elements.append(_div(item.text))
-            else:
-                elements.extend(prose)
+            elements.extend(prose)
     if omissions and tuple(analysis) != delivery.analysis:
         elements.append(_div(ANALYSIS_CLIPPED))
     tables = 0
@@ -437,8 +434,7 @@ def build_feishu_message(
             )
 
         shown = display_text(raw)
-        # SDK 内部 post→text 降级不会经过 Transport 的 mention_safe；含 @ 标签留在卡片。
-        if delivery.feishu_text is not None and not delivery.basis and mention_safe(shown) == shown:
+        if delivery.feishu_text is not None and not delivery.basis:
             post = prose_post(shown)
             if post is not None:
                 leading = [
@@ -447,7 +443,13 @@ def build_feishu_message(
                 post["post"]["zh_cn"]["content"][:0] = [
                     [{"tag": "text", "text": display_text(n)}] for n in leading
                 ]
-                if fits(post):
+                # SDK 降级直接拼接 text runs，不经过 Transport 的 mention_safe。
+                # 转换可将 <**at** 拼成 <at，故检查完整 AST 的潜在降级文字（含系统说明）。
+                plain = "\n".join(
+                    "".join(node["text"] for node in row)
+                    for row in post["post"]["zh_cn"]["content"]
+                )
+                if mention_safe(plain) == plain and fits(post):
                     return post
         full = prose_message(raw)
         if fits(full):

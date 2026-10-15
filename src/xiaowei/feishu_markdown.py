@@ -124,6 +124,9 @@ def prose_post(text: str) -> dict[str, Any] | None:
         if element["tag"] == "div":
             rows.append([{"tag": "text", "text": element["text"]["content"]}])
             continue
+        # SDK structured 的列表转换会剥掉缩进；层级承载约束时沿原卡片展示。
+        if any(line.startswith((" ", "\t")) for line in element["content"].splitlines()):
+            return None
         converted = markdown_to_post_ast(element["content"], tag_md_mode="structured")
         for row in converted["zh_cn"]["content"]:
             for node in row:
