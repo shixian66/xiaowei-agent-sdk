@@ -1154,6 +1154,8 @@ async def test_d3_group_post_format_error_keeps_original_reply_and_uuid(
         "".join(node["text"] for node in row)
         for row in json.loads(post["content"])["zh_cn"]["content"]
     ).strip()
+    for phrase in ("先看配置", "核对目标", "明确时间"):
+        assert phrase in expected
     assert json.loads(fallback["content"])["text"] == expected
     assert post["uuid"] == fallback["uuid"] and post["uuid"]
     assert "receive_id" not in post and "receive_id" not in fallback
