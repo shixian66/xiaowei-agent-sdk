@@ -157,7 +157,7 @@ Web 宿主发布地址由 `.env` 的 `XW_WEB_BIND_ADDRESS` 决定，缺省 `0.0.
 
 P4 的已批准范围只在 [ARCHITECTURE §5「监控接入」](ARCHITECTURE.md#monitoring-mcp) 定义；任务、门槛与验收见 [监控 MCP 增量实施计划](docs/superpowers/plans/2026-10-09-monitoring-mcp.md)。共用协议验证可在 P3 真实环境验收期间独立推进；每项生产写开放须先完成对应源的读取、群 Action 批准闭环与该源真实环境验证，不要求其他监控源先完成。P4 不回写 P1–P3 的 StarRocks 只读验收结论，监控代码/离线检查、真实三源、公司部署与用户接受分别记证。
 
-**自然回答与完整结果交付修复。** D1a、D1b 已合入；D2 通用可读 HTML/MD 在独立分支实施与本地验证，D3 自然回复、D4 监控曲线仍未实施。产品契约只在 [ARCHITECTURE §7](ARCHITECTURE.md#result-delivery) 维护，切片、依赖与验收只看[修复实施计划](docs/superpowers/plans/2026-10-14-result-delivery-documents.md)。用户要求先本地审核验收，暂不推送或开 PR，没有部署授权；真实模型、真实平台与客户端验收不由离线测试替代，旧模型例外不自动继承。
+**自然回答与完整结果交付修复。** D1a、D1b、D2 已合入（PR #102/#103/#104）；D3 自然回复在独立分支本地验证，D4 监控曲线仍未实施。产品契约只在 [ARCHITECTURE §7](ARCHITECTURE.md#result-delivery) 维护，切片、依赖与验收只看[修复实施计划](docs/superpowers/plans/2026-10-14-result-delivery-documents.md)。用户要求先本地审核验收，暂不推送或开 PR，没有部署授权；真实模型、真实平台与客户端验收不由离线测试替代，旧模型例外不自动继承。
 
 P4 之外再根据实际使用决定：多群管理、跨渠道身份与会话、正式多人 Web、导出、后台长任务、新 transport/认证方式、多 Agent、TiDB/MySQL 或数据库 MCP。多个 StarRocks 集群已在 P2.5，单群在其后、P3 前；审计慢查询已在 P2，不能重复列为未来交付。数据库 MCP 的重评条件见 ARCHITECTURE §5。其他生产写动作（含原生 Prometheus 规则文件、Grafana 托管规则、StarRocks DDL/DML、重启与发布）不因 P4 的审批能力自动获准，逐项按 §4 的 Action 契约另行决定。
 

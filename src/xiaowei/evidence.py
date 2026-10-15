@@ -445,7 +445,16 @@ class EvidenceStore:
             complete = effect == "propose" or (
                 effect == "approval" and item.record.identity.turn_id == ctx.identity.turn_id
             )
-            fact = _fact(item, channel).model_copy(update={"requires_complete": complete})
+            fact = _fact(item, channel).model_copy(
+                update={
+                    "requires_complete": complete,
+                    "note_summary": (
+                        self._catalog.policy_for(contract).fact_note_summary
+                        if contract is not None
+                        else None
+                    ),
+                }
+            )
             if views.get(fact.evidence_id) == "brief":
                 if item.record.identity.turn_id == ctx.identity.turn_id:
                     raise AnswerRejectedError(

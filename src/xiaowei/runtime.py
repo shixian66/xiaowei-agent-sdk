@@ -1156,6 +1156,11 @@ def _monitoring_catalog(
             },
             required=required,
             fact_note=note,
+            fact_note_summary=(
+                "仪表盘配置摘要；默认时间窗不是已执行的指标查询，未返回单位/阈值。"
+                if name == "get_dashboard_summary"
+                else None
+            ),
         )
         descriptions[name] = description
     selected = {name for server in config.mcp_servers for name in server.allowed_tools}

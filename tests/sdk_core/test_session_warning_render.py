@@ -32,6 +32,9 @@ def test_notice_visible_once_with_existing_business_container(kind: str) -> None
     assert visible.count(NOTICE) == 1
     if kind == "receipt":
         assert "text" in message and "原有说明" in message["text"]
+    elif "post" in message:
+        assert "第一行" in visible and "第二行" in visible
+        assert [{"tag": "text", "text": NOTICE}] in message["post"]["zh_cn"]["content"]
     else:
         assert "card" in message
         assert "第一行" in visible and "第二行" in visible
@@ -152,12 +155,12 @@ async def test_native_sdk_warning_wire_body_is_single_and_matches_budget(
     assert len(raw) <= 30_000
 
 
-def test_full_warning_card_can_fit_even_if_fallback_text_is_larger() -> None:
+def test_full_warning_post_can_fit_even_if_fallback_text_is_larger() -> None:
     value = Delivery(
         channel="feishu", evidence_ids=(), content="建议", feishu_text="OK", session_notice=NOTICE
     )
     message = build_feishu_message(value, 80, "oc_test")
-    assert "card" in message
+    assert "post" in message
     assert sum(len(part) for part in text_parts(message)) <= 80
     assert NOTICE in "\n".join(text_parts(message, folded=False))
     assert size(message) <= 30_000

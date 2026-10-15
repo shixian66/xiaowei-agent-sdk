@@ -264,6 +264,7 @@ class ToolPolicy:
 
     ``fact_note`` 是交付事实时由代码附加的固定说明（如执行计划未执行原查询）；只影响渲染，
     不进入策略指纹，也不保存在证据记录中：渲染时总是取当前登记的说明。
+    ``fact_note_summary`` 是可选的可信业务摘要，只影响主消息排版；完整说明仍在依据中。
     """
 
     policy_id: str
@@ -273,6 +274,8 @@ class ToolPolicy:
     required: tuple[str, ...] = ()
     data_scope: str | None = None
     fact_note: str | None = None
+    # 可信业务摘要；只有显式登记时才可将完整说明折叠。未分类说明原样可见。
+    fact_note_summary: str | None = None
     effect: Literal["read", "propose", "approval", "write"] = "read"
     group_only: bool = False
 

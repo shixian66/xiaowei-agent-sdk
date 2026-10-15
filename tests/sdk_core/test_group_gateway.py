@@ -66,6 +66,7 @@ from xiaowei.feishu import (
     FeishuGateway,
     LarkTransport,
     attributed,
+    lark_channel,
 )
 from xiaowei.starrocks_tools import AUDIT_TOOLS, QUERY_TOOLS
 from xiaowei.storage import initialize_storage, open_engine
@@ -1092,3 +1093,74 @@ async def test_real_sdk_group_turn_through_the_formal_runtime(
     assert len(members) == 2  # 开始运行与发送前各一次
     assert not any("contact" in p for p in seen)  # 入站不查通讯录
     assert not any(p == "POST /open-apis/im/v1/messages" for p in seen)  # 没有改发新消息
+
+
+async def test_d3_group_post_format_error_keeps_original_reply_and_uuid(
+    env: Env, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from starlette.applications import Starlette
+    from starlette.requests import Request
+    from starlette.responses import JSONResponse, Response
+    from starlette.routing import Route
+    from tests.sdk_core.mcp_fixture import serve
+    from tests.sdk_core.test_app import answer
+
+    from xiaowei.feishu_render import request_bytes
+
+    captured: list[tuple[str, bytes]] = []
+
+    async def token(_: Request) -> Response:
+        return JSONResponse({"code": 0, "tenant_access_token": "t-synthetic", "expire": 7200})
+
+    async def sent(request: Request) -> Response:
+        captured.append((request.url.path, await request.body()))
+        if len(captured) == 1:
+            return JSONResponse({"code": 230001, "msg": "invalid message content"})
+        return JSONResponse({"code": 0, "data": {"message_id": "om_d3_reply_sent"}})
+
+    def endpoint(_: Any) -> Starlette:
+        return Starlette(
+            routes=[
+                Route("/open-apis/auth/v3/tenant_access_token/internal", token, methods=["POST"]),
+                Route("/open-apis/im/v1/messages/{message_id}/reply", sent, methods=["POST"]),
+            ]
+        )
+
+    question, parent = "只解释，不查询", "om_d3_original"
+    asked = env.scripts.add(
+        attributed(A, question),
+        lambda call: answer((), "", advice="**先看配置**\n\n- 核对目标\n- 明确时间"),
+    )
+    cfg = group_config()
+    monkeypatch.setenv("XW_TEST_FEISHU_SECRET", "not-a-real-secret")
+    with serve(endpoint, path="") as http:
+        channel = FeishuChannel(
+            config=dataclasses.replace(lark_channel(cfg).config, domain=http.url)
+        )
+        try:
+            async with running(env) as group:
+                group.gateway._send = LarkTransport(channel, cfg).send
+                await group.ask(question, message_id=parent)
+        finally:
+            channel.stop(join_timeout=5)
+    assert len(captured) == 2
+    assert [path for path, _ in captured] == [
+        f"/open-apis/im/v1/messages/{parent}/reply",
+        f"/open-apis/im/v1/messages/{parent}/reply",
+    ]
+    post, fallback = [json.loads(raw) for _, raw in captured]
+    assert post["msg_type"] == "post" and fallback["msg_type"] == "text"
+    expected = "\n".join(
+        "".join(node["text"] for node in row)
+        for row in json.loads(post["content"])["zh_cn"]["content"]
+    ).strip()
+    for phrase in ("先看配置", "核对目标", "明确时间"):
+        assert phrase in expected
+    assert json.loads(fallback["content"])["text"] == expected
+    assert post["uuid"] == fallback["uuid"] and post["uuid"]
+    assert "receive_id" not in post and "receive_id" not in fallback
+    assert len(captured[0][1]) == request_bytes(
+        {"post": json.loads(post["content"])}, CHAT, reply_to=parent
+    )
+    assert await states(env) == {parent: ("completed", "sent")}
+    assert env.model_calls(asked) == 1 and env.adapter.calls == []

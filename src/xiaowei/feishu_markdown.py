@@ -2,12 +2,14 @@
 
 Lark Markdown 特殊字符按官方参考编码为 HTML 数字实体；仅代码生成的加粗、列表和换行
 保留语法。含代码或反斜杠的说明整段保留原文 plain_text，避免规范化或围栏逃逸。
-解析只在容量分配结束后执行一次。
+解析输入沿既有展示上限有界；先检查完整 post，再退回完整卡片或既有预览路径。
 """
 
+import html
 import string
 from typing import Any, Final
 
+from lark_channel.channel import markdown_to_post_ast
 from markdown_it import MarkdownIt
 from markdown_it.token import Token
 
@@ -46,20 +48,20 @@ def _inline(tokens: list[Token]) -> str:
     return "".join(parts)
 
 
-def format_prose(text: str) -> list[dict[str, Any]]:
+def _prose_elements(text: str) -> list[dict[str, Any]] | None:
     """把已经 display_text 处理过的模型文字变成受限组件；容量不足可保留调用方的纯文字卡片。"""
     plain = [{"tag": "div", "text": {"tag": "plain_text", "content": text}}]
     if len(text) > MAX_FORMAT_CHARS or "\\" in text:
-        return plain
+        return None
     tokens = _PARSER.parse(text)
     if sum(1 + len(t.children or ()) for t in tokens) > MAX_FORMAT_TOKENS:
-        return plain
+        return None
     # Markdown 会规范化代码的换行、首尾空格和缩进；保留原输入，不能由 token 重建。
     if any(
         t.type in {"fence", "code_block"} or any(c.type == "code_inline" for c in t.children or ())
         for t in tokens
     ):
-        return plain
+        return None
     if not any(
         t.type in {"heading_open", "bullet_list_open", "ordered_list_open"}
         or any(c.type == "strong_open" and c.markup == "**" for c in t.children or ())
@@ -100,3 +102,36 @@ def format_prose(text: str) -> list[dict[str, Any]]:
             parts.append("\n" if lists else "\n\n")
     flush()
     return elements or plain
+
+
+def format_prose(text: str) -> list[dict[str, Any]]:
+    """卡片只格式化白名单说明，代码/超长输入仍保留原文。"""
+    return _prose_elements(text) or [{"tag": "div", "text": {"tag": "plain_text", "content": text}}]
+
+
+def prose_post(text: str) -> dict[str, Any] | None:
+    """复用官方 structured 转换；原生 md 在 1.4.0 的文本降级中会被丢弃。
+
+    仅把白名单生成的 Markdown 交给 SDK，转换后逐 text 值解码一次实体。链接、@、
+    HTML 和标识符始终是字面文字。代码、反斜杠或末尾空白继续用原文卡片，避免降级
+    的 strip/Markdown 规范化改变可复制内容。预建 AST 不进入 SDK 自动分段。
+    """
+    elements = _prose_elements(text)
+    if elements is None or text != text.rstrip():
+        return None
+    rows: list[list[dict[str, Any]]] = []
+    for element in elements:
+        if element["tag"] == "div":
+            rows.append([{"tag": "text", "text": element["text"]["content"]}])
+            continue
+        # SDK structured 的列表转换会剥掉缩进；层级承载约束时沿原卡片展示。
+        if any(line.startswith((" ", "\t")) for line in element["content"].splitlines()):
+            return None
+        converted = markdown_to_post_ast(element["content"], tag_md_mode="structured")
+        for row in converted["zh_cn"]["content"]:
+            for node in row:
+                if node["tag"] != "text" or any(s != "bold" for s in node.get("style", ())):
+                    return None
+                node["text"] = html.unescape(node["text"])
+            rows.append(row)
+    return {"post": {"zh_cn": {"title": "", "content": rows}}}

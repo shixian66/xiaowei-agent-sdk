@@ -351,7 +351,7 @@ async def test_runtime_start_wires_enabled_document_download_into_gateway(
     assert len(outbox.sent) == 1
 
 
-async def test_native_lark_raw_event_downloads_document_and_sends_one_card(
+async def test_native_lark_raw_event_downloads_document_and_sends_one_post(
     env: Env,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -431,5 +431,10 @@ async def test_native_lark_raw_event_downloads_document_and_sends_one_card(
             with pytest.raises(asyncio.CancelledError):
                 await task
     assert paths.count("/open-apis/im/v1/messages/om_doc/resources/file_test") == 1
-    assert len(sent) == 1 and sent[0]["msg_type"] == "interactive"
+    assert len(sent) == 1 and sent[0]["msg_type"] == "post"
+    post = json.loads(sent[0]["content"])["zh_cn"]
+    assert post["content"] == [
+        [{"tag": "text", "text": "需要澄清"}],
+        [{"tag": "text", "text": "文件中出现 E42。"}],
+    ]
     assert env.model_calls(body) == 1 and env.adapter.calls == []

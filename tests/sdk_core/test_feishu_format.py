@@ -37,9 +37,9 @@ def prose(kind: str, text: str) -> Delivery:
 
 
 @pytest.mark.parametrize("kind", ["建议", "需要澄清"])
-def test_business_prose_is_one_card_with_real_newlines(kind: str) -> None:
+def test_business_prose_is_one_post_with_real_newlines(kind: str) -> None:
     message = build_feishu_message(prose(kind, "第一行\n第二行"), 3500, "oc_test")
-    assert set(message) == {"card"}
+    assert set(message) == {"post"}
     shown = "\n".join(text_parts(message))
     assert "第一行\n第二行" in shown and "旧转义内容" not in shown
     assert kind in shown
@@ -56,8 +56,9 @@ def test_approved_headings_bold_and_lists_are_generated_not_copied() -> None:
     assert "**关键结论**" in contents and "**主键**" in contents
     assert "- 第一点" in contents and "1. 检查列" in contents
     shown = "\n".join(text_parts(message, folded=False))
-    assert "依据：ev_original" in shown and fact().note in shown
-    assert AT.isoformat() in shown
+    assert "ev_original" not in shown and fact().note in shown
+    assert "依据：ev_original" in "\n".join(text_parts(message))
+    assert AT.isoformat() not in shown and AT.isoformat() in "\n".join(text_parts(message))
     assert len(tables(message)) == 1
 
 
@@ -83,6 +84,17 @@ def test_double_underscore_identifiers_keep_literal_spelling(
     raw = raw_template.format(identifier=identifier)
     source = delivery(fact(), analysis=raw) if has_facts else prose("建议", raw)
     message = build_feishu_message(source, 3500, "oc_test")
+    if "post" in message:
+        nodes = [n for row in message["post"]["zh_cn"]["content"] for n in row]
+        shown = "\n".join(text_parts(message))
+        assert identifier in shown
+        assert bool([n for n in nodes if n.get("style")]) is (
+            formatted and not raw.startswith("- ")
+        )
+        if raw.startswith("- "):
+            assert "• 按 " + identifier + " 过滤" in shown
+        assert all(n["tag"] == "text" and n.get("style", []) in ([], ["bold"]) for n in nodes)
+        return
     nodes = markdowns(message)
     assert bool(nodes) is formatted
     if formatted:
@@ -90,7 +102,7 @@ def test_double_underscore_identifiers_keep_literal_spelling(
         shown = html.unescape("\n".join(node["content"] for node in nodes))
         assert shown == shown_template.format(identifier=identifier)
     else:
-        expected = f"- {raw}（依据：ev_original）" if has_facts else raw
+        expected = raw
         assert expected in text_parts(message)
 
 
@@ -108,6 +120,12 @@ def test_double_underscore_identifiers_keep_literal_spelling(
 )
 def test_non_whitelisted_syntax_is_literal_text(text: str) -> None:
     message = build_feishu_message(prose("建议", text), 3500, "oc_test")
+    if "post" in message:
+        nodes = [n for row in message["post"]["zh_cn"]["content"] for n in row]
+        assert all(n["tag"] == "text" for n in nodes)
+        assert any(n.get("style") == ["bold"] for n in nodes)
+        assert text.replace("**", "") in "".join(n["text"] for n in nodes)
+        return
     assert "card" in message
     contents = "\n".join(node["content"] for node in markdowns(message))
     assert "<at" not in contents and "<font" not in contents and "<script" not in contents
@@ -174,8 +192,13 @@ def test_monitoring_notice_stays_plain_when_model_prose_has_format(model_text: s
         monitoring_notice=notice,
     )
     message = build_feishu_message(source, 3500, "oc_test")
-    elements = message["card"]["body"]["elements"]
-    assert {"tag": "div", "text": {"tag": "plain_text", "content": notice}} in elements
+    if "post" in message:
+        nodes = [n for row in message["post"]["zh_cn"]["content"] for n in row]
+        assert {"tag": "text", "text": notice} in nodes
+        assert all("prometheus" not in n["text"] for n in nodes if n.get("style"))
+    else:
+        elements = message["card"]["body"]["elements"]
+        assert {"tag": "div", "text": {"tag": "plain_text", "content": notice}} in elements
     assert all("prometheus" not in node["content"] for node in markdowns(message))
     assert "旧转义内容" not in "\n".join(text_parts(message))
 
@@ -219,7 +242,7 @@ def test_prose_card_two_envelope_budgets_and_truncation(reply_to: str | None) ->
 
 
 @pytest.mark.parametrize("kind", ["建议", "需要澄清"])
-async def test_gateway_model_business_reply_is_card_and_not_a_query(env: Env, kind: str) -> None:
+async def test_gateway_model_business_reply_is_post_and_not_a_query(env: Env, kind: str) -> None:
     text = "**先确认目标**\n请提供集群。"
     step = clarify(text) if kind == "需要澄清" else lambda call: answer((), "", advice=text)
     message = env.scripts.add("只问候或澄清，不查询", step)
@@ -232,8 +255,11 @@ async def test_gateway_model_business_reply_is_card_and_not_a_query(env: Env, ki
     assert await request_row(env) == ("completed", "sent")
     assert len(fs.outbox.sent) == 1 and env.model_calls(message) == 1
     assert env.adapter.calls == []
-    assert "card" in fs.outbox.sent[0][1]
-    assert "**先确认目标**" in "\n".join(n["content"] for n in markdowns(fs.outbox.sent[0][1]))
+    message = fs.outbox.sent[0][1]
+    assert "post" in message and "先确认目标" in text_parts(message)
+    assert any(
+        n.get("style") == ["bold"] for row in message["post"]["zh_cn"]["content"] for n in row
+    )
 
 
 async def test_gateway_prose_render_error_is_failed_without_send_or_lock(
@@ -258,7 +284,7 @@ async def test_gateway_prose_render_error_is_failed_without_send_or_lock(
 
 @pytest.mark.parametrize("reply_to", [None, "om_original"])
 @pytest.mark.parametrize("kind", ["建议", "需要澄清", "SQL草稿", "事实"])
-async def test_product_sender_and_real_sdk_send_one_bounded_business_card(
+async def test_product_sender_and_real_sdk_send_one_bounded_business_message(
     monkeypatch: pytest.MonkeyPatch, reply_to: str | None, kind: str
 ) -> None:
     from starlette.applications import Starlette
@@ -315,13 +341,20 @@ async def test_product_sender_and_real_sdk_send_one_bounded_business_card(
         f"/open-apis/im/v1/messages/{reply_to}/reply" if reply_to else "/open-apis/im/v1/messages"
     )
     body = json.loads(raw)
-    assert body["msg_type"] == "interactive"
-    message = {"card": json.loads(body["content"])}
-    assert message["card"]["schema"] == "2.0"
+    post = kind in {"建议", "需要澄清"}
+    assert body["msg_type"] == ("post" if post else "interactive")
+    message = {"post" if post else "card": json.loads(body["content"])}
+    if not post:
+        assert message["card"]["schema"] == "2.0"
     assert len(raw) == request_bytes(message, "oc_alice", reply_to=reply_to) <= 30_000
     if kind == "SQL草稿":
         # 按已批准的保真回退，含代码的说明整段原文纯文字，仍只发送一张业务卡片。
         assert markdowns(message) == [] and source.feishu_text in text_parts(message)
+    elif post:
+        assert "关键" in text_parts(message)
+        assert any(
+            n.get("style") == ["bold"] for row in message["post"]["zh_cn"]["content"] for n in row
+        )
     else:
         assert "**关键**" in "\n".join(n["content"] for n in markdowns(message))
 
@@ -339,8 +372,11 @@ async def test_product_sender_and_real_sdk_send_one_bounded_business_card(
 )
 def test_complex_format_does_not_enable_other_components(sample: str) -> None:
     message = build_feishu_message(prose("建议", sample), 3500, "oc_test")
-    assert "card" in message and size(message) <= 30_000
-    assert sum(map(len, text_parts(message))) <= 3500
+    assert size(message) <= 30_000 and sum(map(len, text_parts(message))) <= 3500
+    if "post" in message:
+        nodes = [n for row in message["post"]["zh_cn"]["content"] for n in row]
+        assert all(n["tag"] == "text" and n.get("style", []) in ([], ["bold"]) for n in nodes)
+        return
     elements = message["card"]["body"]["elements"]
     assert all(e["tag"] in {"div", "markdown"} for e in elements)
     for node in markdowns(message):
@@ -380,20 +416,56 @@ def test_formatting_is_outside_capacity_search_and_input_is_bounded(
     assert inputs == []
 
 
-def test_format_expansion_keeps_plain_card_when_capacity_would_be_exceeded() -> None:
+@pytest.mark.parametrize("budget", ["chars", "bytes"])
+def test_format_expansion_keeps_plain_card_with_basis_when_it_fits(budget: str) -> None:
+    raw = "**结论** " + "[x](https://evil.invalid) " * 8 + "。"
+    source = prose("建议", raw).model_copy(update={"basis": (("local/list_tables", "sr-prod"),)})
+    formatted = build_feishu_message(source, 3500, "oc_test", allow_preview=False)
+    assert "card" in formatted and markdowns(formatted)
+    elements = formatted["card"]["body"]["elements"]
+    plain = {
+        "card": {
+            **formatted["card"],
+            "body": {
+                "elements": [
+                    elements[0],
+                    {"tag": "div", "text": {"tag": "plain_text", "content": raw}},
+                    elements[-1],
+                ]
+            },
+        }
+    }
+    plain_chars, plain_bytes = sum(map(len, text_parts(plain))), size(plain)
+    assert sum(map(len, text_parts(formatted))) > plain_chars
+    assert size(formatted) > plain_bytes
+    limited = build_feishu_message(
+        source,
+        plain_chars if budget == "chars" else 3500,
+        "oc_test",
+        max_bytes=plain_bytes if budget == "bytes" else 30_000,
+        allow_preview=False,
+    )
+    assert limited == plain
+    assert not markdowns(limited) and TEXT_CLIPPED not in text_parts(limited)
+    assert raw in text_parts(limited) and "local/list_tables · sr-prod" in text_parts(limited)
+    assert sum(map(len, text_parts(limited))) <= plain_chars
+    assert size(limited) <= plain_bytes
+
+
+def test_structured_post_does_not_charge_escaped_entities_as_visible_text() -> None:
     source = prose("建议", "**结论** [x](https://evil.invalid)")
     formatted = build_feishu_message(source, 3500, "oc_test")
-    assert markdowns(formatted)
-    # 格式实体膨胀不能挤掉文字、伪造截断或超容量；卡片退回纯文字且仍为单消息。
+    assert "post" in formatted
+    # SDK 结构化节点保存解码后的原文字，外层序列化容量仍单独核算。
     plain_chars = (
         len("小维 · 回复")
         + len("建议（未执行查询，模型生成，未经系统核实）")
         + len(source.feishu_text)
     )
     limited = build_feishu_message(source, plain_chars, "oc_test")
-    assert "card" in limited and markdowns(limited) == []
-    assert source.feishu_text in text_parts(limited) and TEXT_CLIPPED not in text_parts(limited)
-    assert sum(map(len, text_parts(limited))) == plain_chars
+    assert "post" in limited and TEXT_CLIPPED not in text_parts(limited)
+    assert " [x](https://evil.invalid)" in text_parts(limited)
+    assert sum(map(len, text_parts(limited))) <= plain_chars and size(limited) <= 30_000
 
 
 @pytest.mark.parametrize("outcome", ["failed", "unknown", RuntimeError("SDK_CANARY")])
@@ -408,7 +480,7 @@ async def test_prose_delivery_does_not_fallback_or_retry_after_sending(
         await fs.drain()
         await fs.gateway.receive(event)
         await fs.drain()
-    assert len(outbox.sent) == 2 and "card" in outbox.sent[0][1]
+    assert len(outbox.sent) == 2 and "post" in outbox.sent[0][1]
     assert "完整结果尚未交付" in outbox.texts()[-1]
     assert env.model_calls(message) == 1 and env.adapter.calls == []
     assert await request_row(env) == ("completed", "failed" if outcome == "failed" else "unknown")
