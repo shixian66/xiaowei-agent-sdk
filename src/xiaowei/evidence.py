@@ -382,16 +382,13 @@ class EvidenceStore:
             # 澄清与建议不引用证据：不能与证据、分析或彼此混用。没有监控失败时，
             # “本轮未执行业务查询”由 Application 在提交前核实；有监控失败时改用未核实标题。
             # 模型可能复述可见证据，因此照样复核它们。
-            if (
-                answer.evidence_ids
-                or answer.inferences
-                or answer.fact_views
-                or answer.report_format is not None
-                or len(unverified) > 1
-            ):
+            if answer.evidence_ids or answer.inferences or answer.fact_views or len(unverified) > 1:
                 raise AnswerRejectedError(
                     AnswerRejectCode.MIXED_KINDS, "澄清或建议不能与查询结果、分析或彼此混用"
                 )
+            report_format = None if answer.clarification is not None else answer.report_format
+            if report_format is not None and channel != "feishu":
+                raise AnswerRejectedError(AnswerRejectCode.MIXED_KINDS, "当前渠道不能交付报告文件")
             records = await self._context_readable(ctx, channel, context, history=history)
             ((header, text),) = unverified
             if monitoring_notice is not None:
@@ -409,6 +406,8 @@ class EvidenceStore:
                 monitoring_notice=monitoring_notice,
                 web_text=rendered if channel == "web" else None,
                 feishu_text=rendered if channel == "feishu" else None,
+                report_format=report_format,
+                is_clarification=answer.clarification is not None,
                 basis=_basis(records, ctx),
                 content_expires_at=min((r.expires_at for r in records), default=None),
             )

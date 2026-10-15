@@ -163,7 +163,8 @@ async def test_group_large_result_delivers_all_files_before_body(actions):
     from tests.sdk_core.test_group_identity import GROUP
 
     env = actions.env
-    env.adapter.rows, env.adapter.memo = 900, "x" * 190
+    # MD 表格比原始 JSON 紧凑；仍用两份各自获准、合并后超文件容量的结果。
+    env.adapter.rows, env.adapter.memo = 900, "x" * 280
     files = []
     sent_at = []
 
@@ -205,7 +206,7 @@ async def test_group_large_result_delivers_all_files_before_body(actions):
         assert len(sent_at) == len(files) + 1
         assert all(b - a >= 0.19 for a, b in pairwise(sent_at))
         body = "\n".join(report.content.decode() for report in files)
-        assert body.count('"day":"2026-09-01"') + body.count('"day": "2026-09-01"') == 2
+        assert body.count('| "2026-09-01" |') == 2
         assert await env.rows("SELECT delivery FROM xiaowei_request") == [("sent",)]
 
 
@@ -282,7 +283,7 @@ async def test_second_large_file_failure_recovers_only_that_message(actions, sec
     from xiaowei.feishu import send_delivery
 
     env = actions.env
-    env.adapter.rows, env.adapter.memo = 900, "x" * 190
+    env.adapter.rows, env.adapter.memo = 900, "x" * 280
     uploads, uuids = [], []
 
     async def upload(report):
@@ -351,7 +352,7 @@ async def test_second_large_upload_unknown_blocks_body_and_never_reuploads(actio
     from xiaowei.feishu import send_delivery
 
     env = actions.env
-    env.adapter.rows, env.adapter.memo = 900, "x" * 190
+    env.adapter.rows, env.adapter.memo = 900, "x" * 280
     uploads = []
 
     async def upload(report):
@@ -408,7 +409,7 @@ async def test_large_files_sent_but_final_body_failure_resends_only_body(actions
     from xiaowei.feishu import send_delivery
 
     env = actions.env
-    env.adapter.rows, env.adapter.memo = 900, "x" * 190
+    env.adapter.rows, env.adapter.memo = 900, "x" * 280
     uploads = []
 
     async def upload(report):
@@ -459,7 +460,7 @@ async def test_multi_file_delivery_holds_the_following_same_group_request(action
     from tests.sdk_core.test_feishu import Outbox
 
     env = actions.env
-    env.adapter.rows, env.adapter.memo = 900, "x" * 190
+    env.adapter.rows, env.adapter.memo = 900, "x" * 280
     second_upload, release = asyncio.Event(), asyncio.Event()
     uploads = 0
 

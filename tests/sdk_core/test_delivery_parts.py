@@ -73,6 +73,33 @@ async def request(env: Env, *, format_: str | None = "md") -> RequestRef:
     )
 
 
+@pytest.mark.asyncio
+async def test_explicit_html_advice_file_uses_verified_no_query_delivery(env: Env) -> None:
+    draft = "SELECT region, SUM(total) FROM shop.sales GROUP BY region"
+    message = env.scripts.add(
+        "只解释这段 SQL，做一份 HTML 文件，不执行查询",
+        lambda call: answer([], analysis="", advice=draft, report_format="html"),
+    )
+    record = await env.run(message, "om_advice_html", channel="feishu", conversation="oc_d1a")
+    assert record.state == "completed", record.failure_code
+    assert env.adapter.calls == []
+    assert "只为换成文件格式不增加查询" in env.scripts.calls[message][0].instructions
+    assert "容量超限由代码分卷" in env.scripts.calls[message][0].instructions
+    ref = RequestRef(
+        channel="feishu",
+        subject_id="alice",
+        conversation_id="oc_d1a",
+        request_id="om_advice_html",
+    )
+    platform = Platform()
+    assert await env.service.results.send(ref, transmit(env, ref, platform)) == "sent"
+    assert len(platform.files) == 1 and len(platform.sent) == 2
+    assert b'<p class="prose">' in platform.files[0]
+    assert draft.encode() in platform.files[0]
+    assert "本次完整结果见附件" in str(platform.sent[-1][0])
+    assert "结果预览" not in str(platform.sent[-1][0])
+
+
 @pytest.mark.parametrize("format_", ["md", "html"])
 def test_split_report_preserves_every_typed_row_and_labels_each_file(
     monkeypatch: pytest.MonkeyPatch, format_: str
@@ -104,31 +131,43 @@ def test_split_report_preserves_every_typed_row_and_labels_each_file(
             "monitoring_notice": "[not-a-link](https://invalid.example) <img src=x>",
         }
     )
-    monkeypatch.setattr("xiaowei.feishu_report.MAX_REPORT_BYTES", 1100)
+    # HTML 文件现在自带离线样式；容量测量仍只按完整序列化字节。
+    limit = 5500 if format_ == "html" else 1100
+    monkeypatch.setattr("xiaowei.feishu_report.MAX_REPORT_BYTES", limit)
     files = build_reports(delivery)
     assert len(files) > 1
     recovered = []
     for index, report in enumerate(files, 1):
-        assert len(report.content) <= 1100
+        assert len(report.content) <= limit
         assert report.filename == f"xiaowei-report-{index}-of-{len(files)}.{format_}"
         body = report.content.decode()
         assert f"{index}/{len(files)}" in body
         assert "工具结果已截断" in body
         if format_ == "md":
-            assert "范围说明\n\n~~~text\n" in body
+            assert "> 范围说明：" in body
         else:
             assert "<img src=x>" not in body
         if format_ == "html":
-            body = "\n".join(
-                unescape(block) for block in re.findall(r"<pre>(.*?)</pre>", body, re.S)
-            )
-        for raw in body.splitlines():
-            if raw.startswith('{"sql":'):
-                chunk = json.loads(raw)
-                assert chunk["columns"] == result["columns"]
-                assert chunk["metadata"] == result["metadata"]
-                recovered.extend(chunk["rows"])
-                assert "SELECT '<x>'" in raw
+            for table in re.findall(r"<tbody>(.*?)</tbody>", body, re.S):
+                assert all(f'<th scope="col">{name}</th>' in body for name in result["columns"])
+                for row in re.findall(r"<tr>(.*?)</tr>", table, re.S):
+                    cells = re.findall(r'<code class="cell">(.*?)</code>', row, re.S)
+                    recovered.append(
+                        dict(
+                            zip(
+                                result["columns"],
+                                (json.loads(unescape(c)) for c in cells),
+                                strict=True,
+                            )
+                        )
+                    )
+        else:
+            for raw in body.splitlines():
+                if raw.startswith('{"index":'):
+                    recovered.append(json.loads(raw))
+        if "证据 ev_report" in body:
+            assert "scope" in body and "applied_limit" in body
+            assert "SELECT" in body
     assert recovered == rows
     assert any("需要复核" in report.content.decode() for report in files)
 
@@ -184,7 +223,8 @@ def test_automatic_split_keeps_historical_brief_without_exporting_raw_values(
     content = "\n".join(report.content.decode() for report in reports)
     assert len(reports) > 1
     assert "历史结果摘要" in content and "HISTORICAL_RAW_CANARY" not in content
-    assert [int(n) for n in re.findall(r'"index"\s*:\s*(\d+)', content)] == list(range(12))
+    assert [int(n) for n in re.findall(r"^\| (\d+) \|", content, re.M)] == list(range(12))
+    assert len(re.findall(r'\| "x{140}" \|', content)) == 12
 
 
 @pytest.mark.asyncio
@@ -733,3 +773,50 @@ async def test_real_channel_sdk_passes_saved_uuid_and_keeps_each_part_one_messag
     assert messages[0]["msg_type"] == "file"
     assert messages[0]["uuid"] == first[0].uuid
     assert messages[1]["uuid"] == messages[3]["uuid"] == first[1].uuid
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("format_", ["md", "html"])
+async def test_clarification_with_report_format_sends_only_question_without_upload(
+    env: Env, format_: str
+) -> None:
+    question = "请明确业务时区。"
+    message = env.scripts.add(
+        "查询昨天的订单，做成文件",
+        lambda call: answer([], analysis="", clarification=question, report_format=format_),
+    )
+    record = await env.run(message, "om_d1a", channel="feishu", conversation="oc_d1a")
+    assert record.state == "completed", record.failure_code
+    ref = RequestRef(
+        channel="feishu", subject_id="alice", conversation_id="oc_d1a", request_id="om_d1a"
+    )
+    view = await env.service.results.view(ref, first=True)
+    assert view.delivery is not None and view.delivery.report_format is None
+    platform = Platform()
+    assert await env.service.results.send(ref, transmit(env, ref, platform)) == "sent"
+    assert platform.files == [] and len(platform.sent) == 1
+    shown = json.dumps(platform.sent[0][0], ensure_ascii=False)
+    assert question in shown and "附件" not in shown
+    assert len(env.scripts.calls[message]) == 1 and env.adapter.calls == []
+    (part,) = await parts(env, ref)
+    assert part.kind == "body" and part.send_state == "sent"
+
+
+@pytest.mark.asyncio
+async def test_long_clarification_never_changes_into_an_automatic_attachment(env: Env) -> None:
+    question = "请先明确目标集群和业务时区。" * 40
+    message = env.scripts.add(
+        "信息不足时先问我",
+        lambda call: answer([], analysis="", clarification=question, report_format="html"),
+    )
+    await env.run(message, "om_d1a", channel="feishu", conversation="oc_d1a")
+    ref = RequestRef(
+        channel="feishu", subject_id="alice", conversation_id="oc_d1a", request_id="om_d1a"
+    )
+    platform = Platform()
+    result = await env.service.results.send(
+        ref, partial(transmit(env, ref, platform), max_chars=200)
+    )
+    assert platform.files == []
+    assert result != "sent"  # 放不进正文时沿容量失败处理，不把提醒当完整交付。
+    assert all(part.kind == "body" for part in await parts(env, ref))

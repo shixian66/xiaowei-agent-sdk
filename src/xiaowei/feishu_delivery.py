@@ -45,7 +45,7 @@ def _preview(
     delivery: Delivery, max_chars: int, chat_id: str, reply_to: str | None, notice: str
 ) -> Message:
     # 只把确定能完整放入正文的整行标成预览，不能标20后再次静默裁剪。
-    for count in range(20, -1, -1):
+    for count in range(20, -1, -1) if delivery.facts else (0,):
         facts = tuple(
             f.model_copy(update={"rows": f.rows[:count], "result_json": None})
             for f in delivery.facts
@@ -96,14 +96,15 @@ def _preview(
 def _data_parts(
     delivery: Delivery, sequence: int, max_chars: int, chat_id: str, reply_to: str | None
 ) -> tuple[DeliveryPart, ...]:
-    if delivery.report_format is None:
+    if delivery.report_format is None or delivery.is_clarification:
         try:
             message = build_feishu_message(
                 delivery, max_chars, chat_id, reply_to=reply_to, allow_preview=False
             )
             return (_message_part(sequence, "body", message),)
         except MessageCapacityError:
-            pass
+            if delivery.is_clarification:
+                raise
     reports = build_reports(
         delivery.model_copy(update={"report_format": delivery.report_format or "md"}),
         expand_brief=delivery.report_format is not None,
