@@ -326,3 +326,122 @@ async def test_official_truncation_marker_and_metadata_non_json_suffix(
                 assert text[end:].startswith("\n\nWarning: The result was truncated")
                 with pytest.raises(json.JSONDecodeError):
                     json.loads(text)
+
+
+@pytest.mark.parametrize("toon", [False, True], ids=["json", "toon"])
+@pytest.mark.parametrize(
+    ("left", "right", "expected"),
+    [
+        (
+            [
+                {"metric": {"__name__": "a"}, "values": [[1720000000, "1"]]},
+                {"metric": {"__name__": "b"}, "values": [[1720000000, "2"]]},
+            ],
+            [
+                {
+                    "metric": {"__name__": "a =>\n1 @[1720000000]\nb"},
+                    "values": [[1720000000, "2"]],
+                }
+            ],
+            "a =>\n1 @[1720000000]\nb =>\n2 @[1720000000]",
+        ),
+        (
+            [
+                {
+                    "metric": {"__name__": "up", "a": "x", "b": "y"},
+                    "values": [[1720000000, "1"]],
+                }
+            ],
+            [
+                {
+                    "metric": {"__name__": "up", 'a="x", b': "y"},
+                    "values": [[1720000000, "1"]],
+                }
+            ],
+            'up{a="x", b="y"} =>\n1 @[1720000000]',
+        ),
+    ],
+    ids=["different-series-count", "different-label-identities"],
+)
+async def test_official_range_text_is_ambiguous_even_when_it_looks_parseable(
+    official_binary: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    toon: bool,
+    left: list[dict[str, Any]],
+    right: list[dict[str, Any]],
+    expected: str,
+) -> None:
+    # Prometheus 3 允许 UTF-8 名称；不能在文本解析后才假定原始名称满足旧字符集。
+    assert left != right
+    arguments = {**CALLS["range_query"], "query": '{__name__!=""}'}
+    monkeypatch.setenv("PROMETHEUS_MCP_SERVER_MCP_ENABLE_TOON_OUTPUT", str(toon).lower())
+    samples: dict[str, Any] = {"/api/v1/query_range": {"resultType": "matrix", "result": []}}
+    with prometheus_backend(samples=samples) as (backend, state):
+        with official_server(official_binary, backend.server_port) as url:
+            async with MCPServerStreamableHttp(
+                {"url": url}, max_retry_attempts=0, client_session_timeout_seconds=5
+            ) as client:
+                outputs = []
+                for original in (left, right):
+                    samples["/api/v1/query_range"]["result"] = original
+                    result = await client.call_tool("range_query", arguments)
+                    assert not result.is_error
+                    outputs.append(text_result(result))
+                assert outputs[0] == outputs[1]
+                if not toon:
+                    assert json.loads(outputs[0]) == {
+                        "result": expected,
+                        "warnings": ["synthetic partial data"],
+                    }
+                else:
+                    assert "result:" in outputs[0]
+                    assert "warnings" in outputs[0]
+                assert [request[0] for request in state.requests] == [
+                    "/api/v1/query_range",
+                    "/api/v1/query_range",
+                ]
+
+                assert [request[1]["query"] for request in state.requests] == [
+                    ['{__name__!=""}'],
+                    ['{__name__!=""}'],
+                ]
+
+
+async def test_official_range_retains_explicit_points_but_not_a_structured_grid(
+    official_binary: Path,
+) -> None:
+    samples: dict[str, Any] = {
+        "/api/v1/query_range": {
+            "resultType": "matrix",
+            "result": [
+                {
+                    "metric": {"__name__": "up", "instance": "host1"},
+                    "values": [
+                        [1720000000.123, "1.2345678901234567"],
+                        [1720000001.999, "NaN"],
+                        [1720000005, "+Inf"],
+                        [1720000003, "-Inf"],
+                        [1720000007, "-0"],
+                        [1720000007, "2"],
+                    ],
+                }
+            ],
+        }
+    }
+    with prometheus_backend(samples=samples) as (backend, state):
+        with official_server(official_binary, backend.server_port) as url:
+            async with MCPServerStreamableHttp(
+                {"url": url}, max_retry_attempts=0, client_session_timeout_seconds=5
+            ) as client:
+                result = await client.call_tool("range_query", CALLS["range_query"])
+                assert not result.is_error
+                assert json.loads(text_result(result)) == {
+                    "result": (
+                        'up{instance="host1"} =>\n'
+                        "1.2345678901234567 @[1720000000.123]\n"
+                        "NaN @[1720000001.999]\n+Inf @[1720000005]\n"
+                        "-Inf @[1720000003]\n-0 @[1720000007]\n2 @[1720000007]"
+                    ),
+                    "warnings": ["synthetic partial data"],
+                }
+                assert len(state.requests) == 1

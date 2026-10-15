@@ -61,6 +61,7 @@ class BackendState:
     dashboard_status: int = 200
     settings_status: int | None = None
     namespace: str = ""
+    prometheus_response: str | None = None
 
 
 @contextmanager
@@ -132,6 +133,28 @@ def grafana_backend() -> Iterator[tuple[int, BackendState]]:
                     }
             elif status != 200:
                 body = {"message": "synthetic failure with private detail"}
+            elif (
+                state.prometheus_response is not None
+                and parsed.path == "/api/datasources/uid/prom0"
+            ):
+                body = {
+                    "id": 1,
+                    "uid": "prom0",
+                    "name": "Synthetic Prometheus",
+                    "type": "prometheus",
+                    "jsonData": {"httpMethod": "GET"},
+                }
+            elif state.prometheus_response is not None and parsed.path in (
+                "/api/datasources/uid/prom0/resources/api/v1/query_range",
+                "/api/datasources/uid/prom0/resources/api/v1/query",
+            ):
+                encoded = state.prometheus_response.encode()
+                self.send_response(status)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(encoded)))
+                self.end_headers()
+                self.wfile.write(encoded)
+                return
             elif parsed.path == "/api/search":
                 start = (int(args.get("page", ["1"])[0]) - 1) * int(args.get("limit", ["50"])[0])
                 body = [
@@ -231,6 +254,7 @@ def official_grafana(
     dashboard_write: bool = False,
     dashboard_override: bool = False,
     c8_write: bool = False,
+    prometheus_query: bool = False,
     upstream_token: str = "synthetic-upstream-token",  # noqa: S107
 ) -> Iterator[str]:
     with socket.socket() as probe:
@@ -243,7 +267,9 @@ def official_grafana(
             f"--address=127.0.0.1:{port}",
             "--enabled-tools="
             + (
-                "datasource,annotations"
+                "prometheus"
+                if prometheus_query
+                else "datasource,annotations"
                 if c8_write
                 else (
                     "search,dashboard"
@@ -253,7 +279,7 @@ def official_grafana(
             ),
             *([] if dashboard_write or c8_write else ["--disable-write"]),
             *(["--enable-write-tools=update_dashboard"] if dashboard_override else []),
-            "--disable-query",
+            *([] if prometheus_query else ["--disable-query"]),
             "--usage-stats=disabled",
             "--allow-grafana-url-override=false",
             "--dynamic-multi-org=false",
