@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+from collections.abc import Callable
 from typing import TYPE_CHECKING, Literal
 
 from lark_channel.channel.types import MediaSource, OutboundFile, SendResult
@@ -143,6 +144,7 @@ async def send_complete_delivery(
     max_chars: int,
     reply_to: str | None,
     resend: bool,
+    notice: Callable[[str], None] | None = None,
 ) -> SendOutcome:
     from xiaowei.feishu import send_outcome
 
@@ -164,6 +166,13 @@ async def send_complete_delivery(
     data_parts = tuple(p for p in existing if p.kind != "approval")
     capacity_failed = False
     material_failed = False
+
+    def capacity_refusal() -> Literal["failed"]:
+        logger.warning("容量不足，不能重发")
+        if notice is not None:
+            notice("容量不足，不能重发")
+        return "failed"
+
     if materials and not any(p.kind == "approval" for p in existing):
         material = delivery.model_copy(
             update={
@@ -179,8 +188,7 @@ async def send_complete_delivery(
             )
         except MessageCapacityError:
             if resend:
-                logger.warning("容量不足，不能重发")
-                return "failed"
+                return capacity_refusal()
             material_failed = True
         else:
             material_parts = (_message_part(0, "approval", message),)
@@ -271,28 +279,28 @@ async def send_complete_delivery(
     if material_parts:
         existing = await store.bind_delivery_parts(claim, material_parts)
     approvals = tuple(p for p in existing if p.kind == "approval")
-    if not resend:
-        # C7: the independent material is confirmed before preparing any reference file.
-        outcomes.extend([await send_part(p) for p in approvals])
+    # C7：首次和补发都先独立交付材料；数据容量不能阻断它，材料自身仍须合容量。
+    try:
+        _check_capacity(approvals, max_chars, chat_id, reply_to)
+    except (ReportCapacityError, MessageCapacityError):
+        return capacity_refusal()
+    outcomes.extend([await send_part(p) for p in approvals])
     needs_data = bool(data or delivery.analysis or not materials)
     try:
         if needs_data and not data_parts:
             data_parts = _data_parts(
                 data_delivery, 1 if materials else 0, max_chars, chat_id, reply_to
             )
-        _check_capacity((*existing, *material_parts, *data_parts), max_chars, chat_id, reply_to)
+        _check_capacity(data_parts, max_chars, chat_id, reply_to)
     except (ReportCapacityError, MessageCapacityError):
         capacity_failed = True
         if resend:
-            logger.warning("容量不足，不能重发")
-            return "failed"
+            return capacity_refusal()
     except (ValueError, TypeError):
         logger.error("飞书结果未发送：reason=render_failed")
         if not materials:
             return "failed"
         capacity_failed = True
-    if resend:
-        outcomes.extend([await send_part(p) for p in approvals])
     parts = await store.bind_delivery_parts(claim, () if capacity_failed else data_parts)
     for part in parts:
         if part.kind == "approval":

@@ -76,6 +76,114 @@ async def test_mixed_round_material_receipt_independently_controls_approval(
         assert len(actions.adapter.calls) == (0 if failed_part == "approval" else 1)
 
 
+@pytest.mark.parametrize("actions", [400_000], indirect=True)
+async def test_resend_confirms_unknown_approval_even_when_reference_file_is_oversized(actions):
+    from functools import partial
+
+    from tests.sdk_core.test_feishu import Outbox
+    from tests.sdk_core.test_group_identity import GROUP
+
+    from xiaowei.feishu import send_delivery
+    from xiaowei.feishu_report import ReportCapacityError, build_report
+
+    env = actions.env
+    env.adapter.rows, env.adapter.memo = 1, "x" * 210_000
+    uuids, uploads = [], []
+
+    class Receipts(Outbox):
+        async def __call__(self, chat_id, message, *, uuid=None, **kwargs):
+            uuids.append(uuid)
+            return await super().__call__(chat_id, message, uuid=uuid, **kwargs)
+
+    async def upload(report):
+        uploads.append(report.content)
+        raise AssertionError("超容量数据不得上传")
+
+    script = env.scripts.add(
+        attributed(A, "大结果与独立静默"),
+        tool_call("run_query", region="east"),
+        tool_call("run_query", region="west"),
+        tool_call(f"{SOURCE}__propose_change", value="after"),
+        request_execution,
+        cite("根据实际执行事实反馈"),
+    )
+    async with running(env, outbox=Receipts(["unknown"]), max_reply_chars=3500) as group:
+        await group.ask("大结果与独立静默", message_id="om_large_mixed")
+        ref = group_ref("om_large_mixed", A)
+        record = await env.store.get("feishu", A, GROUP.chat_id, ref.request_id, owner=GROUP.owner)
+        before = await env.store.delivery_parts(record)
+        assert [(p.kind, p.send_state) for p in before] == [("approval", "unknown")]
+        view = await env.results.view(ref, first=True)
+        data = tuple(f for f in view.delivery.facts if not f.requires_complete)
+        assert len(data) == 2 and sum(len(f.result_json.encode()) for f in data) > 400_000
+        with pytest.raises(ReportCapacityError):
+            build_report(
+                view.delivery.model_copy(
+                    update={"facts": data, "report_format": "md", "requires_complete": False}
+                )
+            )
+        sent = len(group.outbox.sent)
+        transmit = partial(
+            send_delivery,
+            send=group.outbox,
+            upload_file=upload,
+            chat_id=GROUP.chat_id,
+            reply_to=ref.request_id,
+            max_chars=3500,
+            results=env.results,
+            ref=ref,
+            resend=True,
+        )
+        assert await env.results.send(ref, transmit, resend=True) == "unknown"
+        after = await env.store.delivery_parts(record)
+        assert len(group.outbox.sent) == sent + 1
+        assert after[0].send_state == "sent" and after[0].message_id
+        assert uuids[-1] == before[0].uuid == after[0].uuid
+        assert uploads == []
+        assert await env.rows("SELECT delivery FROM xiaowei_request") == [("unknown",)]
+        assert env.model_calls(script) == 4 and len(env.adapter.calls) == 2
+        action_id = await actions.one()
+        await group.ask(f"/批准 {action_id}", sender=B, message_id="om_large_approve")
+        await group.ask(f"/批准 {action_id}", sender=B, message_id="om_large_duplicate")
+        assert await env.rows("SELECT state FROM xiaowei_action") == [("succeeded",)]
+        assert len(actions.adapter.calls) == 1 and len(env.adapter.calls) == 2
+
+
+async def test_resend_still_checks_saved_approval_capacity_before_sending(actions):
+    from functools import partial
+
+    from tests.sdk_core.test_feishu import Outbox
+    from tests.sdk_core.test_group_identity import GROUP
+
+    from xiaowei.feishu import send_delivery
+
+    env = actions.env
+    env.scripts.add(
+        attributed(A, "待补发审批卡"),
+        tool_call(f"{SOURCE}__propose_change", value="after"),
+        request_execution,
+        cite(),
+    )
+    async with running(env, outbox=Outbox(["unknown"]), max_reply_chars=3500) as group:
+        await group.ask("待补发审批卡", message_id="om_approval_capacity")
+        ref = group_ref("om_approval_capacity", A)
+        sent = len(group.outbox.sent)
+        transmit = partial(
+            send_delivery,
+            send=group.outbox,
+            chat_id=GROUP.chat_id,
+            reply_to=ref.request_id,
+            max_chars=200,
+            results=env.results,
+            ref=ref,
+            resend=True,
+        )
+        assert await env.results.send(ref, transmit, resend=True) == "unknown"
+        assert len(group.outbox.sent) == sent
+        assert await env.rows("SELECT send_state FROM xiaowei_delivery_part") == [("unknown",)]
+        assert actions.adapter.calls == []
+
+
 async def test_material_capacity_failure_does_not_block_independent_query_data(actions):
     from functools import partial
 

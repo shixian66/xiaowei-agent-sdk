@@ -178,20 +178,23 @@ async def _run(config: "ServeConfig", args: argparse.Namespace, *, container: bo
             report = await rt.cleanup(config, batch_size=args.batch_size)
             print(f"cleaned sessions={report.sessions} unregistered={report.unregistered}")
         return 0
-    print("手动补发可能重复；旧请求无稳定 uuid，去重窗口及响应尚待真实飞书验证。", file=sys.stderr)
     outcome = await rt.resend(
         config,
         subject_id=args.subject,
         chat_id=args.chat,
         group=args.group,
         message_id=args.message,
+        notice=lambda message: print(message, file=sys.stderr),
     )
     if outcome is None:
         print(f"{args.message} not_resendable", file=sys.stderr)
         return 1
     print(f"{args.message} {outcome}")
     if outcome == "unknown":
-        print("结果不明，请人工核实后再决定下一步；不要直接重复重发", file=sys.stderr)
+        print(
+            "结果不明，请人工核实；可由操作员手动补发未知消息部分，可能重复；上传结果不明仍禁止重传。",
+            file=sys.stderr,
+        )
     return 0 if outcome == "sent" else 1
 
 

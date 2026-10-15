@@ -417,8 +417,16 @@ async def send_delivery(
     ref: RequestRef | None = None,
     upload_file: UploadFile | None = None,
     resend: bool = False,
+    notice: Callable[[str], None] | None = None,
 ) -> SendOutcome:
     """Gateway 与 CLI 共用：本地构造失败明确未发送，SDK 开始后的异常保留 unknown。"""
+    if resend and notice is not None:
+        identity = (
+            "旧请求无稳定 uuid"
+            if delivery.delivery_version == 0
+            else "新请求按消息部分保存并复用 uuid"
+        )
+        notice(f"手动补发可能重复；{identity}；去重窗口及响应尚待真实飞书验证。")
     if delivery.delivery_version == 1 and results is not None and ref is not None:
         from xiaowei.feishu_delivery import send_complete_delivery
 
@@ -433,6 +441,7 @@ async def send_delivery(
                 max_chars=max_chars,
                 reply_to=reply_to,
                 resend=resend,
+                notice=notice,
             )
         except (ValueError, TypeError):
             logger.error("飞书结果未发送：reason=render_failed")

@@ -1683,6 +1683,66 @@ async def test_resend_sends_a_failed_result_once_without_rerunning(env: Env) -> 
     assert statements(env.drv) == []
 
 
+@pytest.mark.parametrize(
+    ("legacy", "outcome"),
+    [(False, "sent"), (True, "sent"), (False, "unknown"), (True, "unknown"), (False, "capacity")],
+)
+async def test_cli_resend_explains_version_unknown_and_capacity(
+    env: Env,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    legacy: bool,
+    outcome: str,
+) -> None:
+    import argparse
+
+    from sqlalchemy import text
+
+    from xiaowei import cli
+
+    config = env.config(feishu=feishu_config())
+    message = await failed_feishu_result(env, config)
+    if legacy:
+        async with open_engine(SecretStr(env.url.render_as_string(hide_password=False))) as engine:
+            async with engine.begin() as conn:
+                await conn.execute(text("DELETE FROM xiaowei_delivery_part"))
+                await conn.execute(text("UPDATE xiaowei_request SET delivery_version=0"))
+    if outcome == "capacity":
+        config = config.model_copy(
+            update={"feishu": config.feishu.model_copy(update={"max_reply_chars": 200})}
+        )
+    channel = FakeChannel(
+        result=SendResult.ok(message_id="" if outcome == "unknown" else "om_resent")
+    )
+    original = runtime.resend
+
+    async def resend(config, **kwargs):
+        return await original(
+            config,
+            clock=env.clock,
+            feishu_channel=channel,
+            starrocks_connect=env.connect(config),
+            **kwargs,
+        )
+
+    monkeypatch.setattr(runtime, "resend", resend)
+    capsys.readouterr()
+    args = argparse.Namespace(
+        command="requests", subject="alice", chat="oc_alice", group=False, message="om_resend"
+    )
+    assert await cli._run(config, args) == (0 if outcome == "sent" else 1)
+    out, err = capsys.readouterr()
+    assert out.strip() == "om_resend " + ("failed" if outcome == "capacity" else outcome)
+    assert "可能重复" in err
+    if outcome == "unknown":
+        assert "结果不明" in err and "手动补发" in err and "不要直接重复重发" not in err
+    if outcome == "capacity":
+        assert "容量不足，不能重发" in err
+        assert channel.sends == [] and channel.uploads == []
+    assert ("旧请求无稳定 uuid" in err) is legacy
+    assert len(env.scripts.calls[message]) == 2 and statements(env.drv) == []
+
+
 async def test_resend_uses_saved_message_even_after_template_failure(
     env: Env,
     monkeypatch: pytest.MonkeyPatch,
