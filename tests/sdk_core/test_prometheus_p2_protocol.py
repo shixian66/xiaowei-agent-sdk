@@ -373,6 +373,7 @@ async def test_official_range_text_is_ambiguous_even_when_it_looks_parseable(
 ) -> None:
     # Prometheus 3 允许 UTF-8 名称；不能在文本解析后才假定原始名称满足旧字符集。
     assert left != right
+    arguments = {**CALLS["range_query"], "query": '{__name__!=""}'}
     monkeypatch.setenv("PROMETHEUS_MCP_SERVER_MCP_ENABLE_TOON_OUTPUT", str(toon).lower())
     samples: dict[str, Any] = {"/api/v1/query_range": {"resultType": "matrix", "result": []}}
     with prometheus_backend(samples=samples) as (backend, state):
@@ -383,7 +384,7 @@ async def test_official_range_text_is_ambiguous_even_when_it_looks_parseable(
                 outputs = []
                 for original in (left, right):
                     samples["/api/v1/query_range"]["result"] = original
-                    result = await client.call_tool("range_query", CALLS["range_query"])
+                    result = await client.call_tool("range_query", arguments)
                     assert not result.is_error
                     outputs.append(text_result(result))
                 assert outputs[0] == outputs[1]
@@ -398,6 +399,11 @@ async def test_official_range_text_is_ambiguous_even_when_it_looks_parseable(
                 assert [request[0] for request in state.requests] == [
                     "/api/v1/query_range",
                     "/api/v1/query_range",
+                ]
+
+                assert [request[1]["query"] for request in state.requests] == [
+                    ['{__name__!=""}'],
+                    ['{__name__!=""}'],
                 ]
 
 
