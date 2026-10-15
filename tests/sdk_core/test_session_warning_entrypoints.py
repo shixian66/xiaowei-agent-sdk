@@ -55,7 +55,7 @@ async def test_formal_web_warning_saved_restart_duplicate_and_last_turn(env: Env
 
 
 @pytest.mark.parametrize("kind", ["fact", "clarification"])
-async def test_formal_feishu_warning_is_one_card_with_fact_or_clarification(
+async def test_formal_feishu_warning_is_one_message_with_fact_or_clarification(
     env: Env, kind: str
 ) -> None:
     channel = FakeChannel()
@@ -72,7 +72,7 @@ async def test_formal_feishu_warning_is_one_card_with_fact_or_clarification(
         channel.emit_raw_from_sdk_thread(feishu_event(env, second, "om_s3_second"))
         await until(lambda: len(channel.sends) == 2)
         message = channel.sends[-1][1]
-        assert "card" in message
+        assert ("card" if kind == "fact" else "post") in message
         visible = "\n".join(text_parts(message, folded=False))
         assert "2/2" in visible and "下轮需要新建" in visible and "/新建" in visible
         assert visible.count("本轮结束时") == 1

@@ -36,7 +36,15 @@ from tests.p1b.test_starrocks_adapter import (
 )
 from tests.p1b.test_starrocks_adapter import TARGET as SR
 from tests.sdk_core.synthetic_tools import Clock
-from tests.sdk_core.test_app import SEARCH_ALL, Scripts, cite, clarify, tool_call
+from tests.sdk_core.test_app import (
+    SEARCH_ALL,
+    Scripts,
+    answer,
+    cite,
+    clarify,
+    evidence_in,
+    tool_call,
+)
 from tests.sdk_core.test_feishu import FakeChannel
 from tests.sdk_core.test_runtime import (
     APP_ID,
@@ -968,7 +976,8 @@ async def test_history_reads_and_resends_have_their_own_limit(env: Env) -> None:
                 )
                 for c in ("w-1", "w-2")
             ],
-            cite(),
+            # 显式文件使本用例继续覆盖多部分权限快照；不依赖展示模板恰好超容量。
+            lambda call: answer(evidence_in(call), report_format="md"),
         )
         record = await env.turn(rt, message, "om_1")
         assert record.state == "completed" and record.answer is not None

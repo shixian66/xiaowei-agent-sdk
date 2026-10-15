@@ -82,6 +82,7 @@ class Reply:
     facts: list[dict[str, Any]] | None
     card: dict[str, Any] | None = None
     files: tuple[bytes, ...] = ()
+    post: dict[str, Any] | None = None
 
 
 @dataclass
@@ -126,6 +127,7 @@ class Turns:
             None,
             sent if "card" in sent else None,
             files,
+            post=sent if "post" in sent else None,
         )
 
     async def terminal(self, state: str) -> int:
@@ -303,7 +305,7 @@ async def test_previous_query_is_explained_without_running_it_again(
     final = env.scripts.calls[second][-1]
     assert len(evidence_in(final)) == 3
     content = visible_lines(reply)
-    assert content.count(f"说明：{PLAN_NOTE}") == 1
+    assert sum(line.removeprefix("说明：") == PLAN_NOTE for line in content) == 1
     if reply.files:
         assert any(line.endswith(". 分析与建议") for line in content)
         assert any("模型推断，未经系统核实" in line for line in content)
@@ -352,7 +354,8 @@ async def test_audit_only_answer_when_the_plan_is_rejected(diag: Env, channel: s
     assert reply.state == "completed"
     content = lines(reply)
     # 保留审计事实并照常给出分析；没有计划事实与计划说明，也不是澄清。
-    assert f"说明：{AUDIT_NOTE}" in content and f"说明：{PLAN_NOTE}" not in content
+    notes = [line.removeprefix("说明：") for line in content]
+    assert AUDIT_NOTE in notes and PLAN_NOTE not in notes
     assert (ANALYSIS_HEADER if channel == "web" else "分析与建议（模型推断）") in content
     assert CLARIFICATION_HEADER not in content
     if reply.facts is not None:
@@ -378,8 +381,9 @@ async def test_no_evidence_is_a_pure_clarification(diag: Env, channel: str) -> N
     if channel == "web":
         assert content[0] == CLARIFICATION_HEADER
     else:
-        # C1 已批准业务澄清改用卡片；标题与业务类型同时保留，下面零 I/O/Evidence 断言不变。
-        assert reply.card is not None and content[:2] == ["小维 · 回复", "需要澄清"]
+        # D3 澄清用单条普通 post；问题、零 I/O/Evidence 与无附件边界仍须成立。
+        assert reply.post is not None and reply.card is None and reply.files == ()
+        assert content == ["需要澄清", "secret 列不在可查看范围内，请换成获准的列"]
     assert FACTS_HEADER not in content and ANALYSIS_HEADER not in content
     assert reply.facts in (None, [])
     assert await evidence_rows(env) == 0
@@ -435,7 +439,7 @@ async def test_pasted_sql_is_explained_without_running_it(diag: Env, channel: st
 
     assert reply.state == "completed" and not env.drv.sent("query")
     assert env.drv.sent("explain") == [explained(SLOW_SQL)]
-    assert f"说明：{PLAN_NOTE}" in visible_lines(reply)
+    assert PLAN_NOTE in [line.removeprefix("说明：") for line in visible_lines(reply)]
 
 
 # ---- 不可信文字：审计原文与计划中的“指令” ------------------------------------------------

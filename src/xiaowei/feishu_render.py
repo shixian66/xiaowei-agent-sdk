@@ -445,11 +445,11 @@ def build_feishu_message(
                 ]
                 # SDK 降级直接拼接 text runs，不经过 Transport 的 mention_safe。
                 # 转换可将 <**at** 拼成 <at，故检查完整 AST 的潜在降级文字（含系统说明）。
-                plain = "\n".join(
+                fallback_text = "\n".join(
                     "".join(node["text"] for node in row)
                     for row in post["post"]["zh_cn"]["content"]
                 )
-                if mention_safe(plain) == plain and fits(post):
+                if mention_safe(fallback_text) == fallback_text and fits(post):
                     return post
         full = prose_message(raw)
         if fits(full):

@@ -546,7 +546,7 @@ async def test_feishu_gets_original_rows_in_pure_text_card_cells(env: Env) -> No
     card = build_feishu_message(delivered, 3500, "oc_test")
     visible = "\n".join(text_parts(card, folded=False))
     assert "applied_limit: 6" in visible
-    assert f"说明：{QUERY_NOTE}" in visible
+    assert QUERY_NOTE in visible
     (table,) = tables(card)
     assert all(c["data_type"] == "text" for c in table["columns"])
     assert len(table["rows"]) == len(HOSTILE.rows)
@@ -557,7 +557,7 @@ async def test_feishu_gets_original_rows_in_pure_text_card_cells(env: Env) -> No
     assert chinese == {"c0": '"华东区"', "c1": "NULL（空值）"}
     elements = card["card"]["body"]["elements"]
     assert sum(e.get("text", {}).get("content") == "分析与建议（模型推断）" for e in elements) == 1
-    assert any(e.get("text", {}).get("content", "").startswith("- 仅供参考\n") for e in elements)
+    assert any(e.get("text", {}).get("content", "").startswith("仅供参考\n") for e in elements)
     assert "\\u2028" in message_text(card) and "\u2028" not in message_text(card)
     # 批准改为真实换行和纯文本组件；值可多行，但不能另起结构化事实或 Markdown 元素。
     assert all(e["tag"] in {"div", "table", "collapsible_panel"} for e in elements)
@@ -1730,11 +1730,9 @@ async def test_hostile_plan_lines_cannot_forge_sections(env: Env) -> None:
     ]
     assert all(c["data_type"] == "text" for c in table["columns"])
     elements = card["card"]["body"]["elements"]
-    assert [
-        e["text"]["content"]
-        for e in elements
-        if e.get("text", {}).get("content", "").startswith("说明：")
-    ] == [f"说明：{PLAN_NOTE}"]
+    divs = [e["text"]["content"] for e in elements if e.get("tag") == "div"]
+    assert divs.count(PLAN_NOTE) == 1
+    assert not any(text.startswith("说明：") for text in divs)
 
 
 @pytest.mark.parametrize(
