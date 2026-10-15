@@ -11,7 +11,7 @@
 | 仓库 | [shixian66/xiaowei-agent-sdk](https://github.com/shixian66/xiaowei-agent-sdk) |
 | 本地目录 / 分支 | D1a：`/Users/kloenguyen/.codex/worktrees/delivery-document-plan/agent-SDK` / `codex/result-delivery-plan`；并入最新主线`cc03eeb`，保留已批准设计`b58f0d9`及原目录未提交配置。 |
 | M5 历史起点 | `372c381f44ecfa1fa53961f137d0058033cbd805`；不是远端当前 main 的核验结论 |
-| 本轮审查版本 | 设计v1.4 `b58f0d9025bf06356dda374410e8792db231b8f0`已批准；实现基线为PR #100/#101主线`cc03eebf9978b09c692fecc0771bb4827787f2ed`。交付源码`4b440f9`复审通过；最终源码`955156e4de65ec3d15374f42dca6da8c479bc079`的审批取消补修已独立增量复审，P1关闭，无新增阻断。 |
+| 本轮审查版本 | 设计v1.4 `b58f0d9025bf06356dda374410e8792db231b8f0`已批准；实现基线为PR #100/#101主线`cc03eebf9978b09c692fecc0771bb4827787f2ed`。用户对`53a1875e2c7b84a8459bfb6213e46751388f57cd`只读审查发现B1及CLI提示问题；补修源码`dfb39696c3942d1c7ae62d2873066da93ecb18bf`待复查，仅涉及这两项。 |
 | 已同步主线审查记录 | SDK-A/B/C 已随 PR #89/#93/#94 合入；D7 已随 PR #83 离线合入。上述合入不代表真实模型、飞书或公司 Grafana 验收。 |
 | 当前阶段 | D1a本地实现/测试/常规修复与本地提交；用户最新要求先审核验收，暂不推送/开PR，无合并/部署授权。 |
 | 当前源码与依赖 | 应用表v12，新请求分项回执、旧请求v0语义兼容；SDK/锁文件不变，独立.venv按锁安装；正式启动不自动迁移。 |
@@ -37,22 +37,24 @@
 
 ## 3. 当前计划与下一项工作
 
-**当前下一步：** `955156e`本地必需检查已通过，提供隔离分支供用户审核验收；之后的提交仅更新验证文档。暂不推送/开PR，后续D1b–D4单独交付，没有部署授权。真实模型/飞书验收门槛不豁免。
+**当前下一步：** `dfb3969`本地检查已通过；之后的提交仅更新验证文档，将精确版本交原审查人复查B1与CLI提示差异。暂不推送/开PR，后续D1b–D4单独交付，没有部署授权。真实模型/飞书验收门槛不豁免。
 
 **D1a本地结果：** 保留唯一SDK Agent Loop，复用治理/Evidence/Session、Channel SDK公开上传/发送、原请求owner/attempt及CLI手动补发。完整所选事实与分析先检查消息容量，必要时生成一个完整获准文件，再发送带准确预览的正文；文件超过400,000字节则预览并明确未完整交付，不裁剪冒充完成。分项只存必要字节、上传键、状态、uuid和平台消息ID；审批材料先发、回执独立控制批准，参考数据失败不挡批准。每次投递起始复核权限一次，手动补发重查；仍逐项检查所有权/readiness/保留期。应用表升级v12，旧请求兼容，锁定SDK/依赖未变。自动附件保留历史brief摘要语义，显式文件才展开获准原值；完整分析不因brief丢失。
 
 **审批取消常规补修：** 整仓检查暴露主线已有竞态：锁版SDK取消Runner不等待工具清理，恢复层可能先将已开始的写记成rejected，与工具保存unknown竞争。真SDK/治理/PG屏障用例复现后，在原有5秒落定期限内等待本次SDK执行任务，清理失败继续全实例停止，不放宽Action CAS/权限/防重。实现依据和具体差异见计划D1a；没有新增任务循环、后台重试或产品取舍。
 
+**B1与CLI补修：** 审批材料首次与补发都先检查自身容量并独立发送，再检查数据容量；超容量数据仍零上传/发送、整轮未完整，不妨碍已确认卡片的有效批准。CLI按实际新旧语义提示uuid风险，直接显示容量拒绝原因，允许操作员手动补发未知消息部分，上传未知仍禁重传。只增加静态操作提示回传，不新增持久字段、状态、权限或重试。契约文字仅澄清已有C7对数据容量拒绝的适用范围。
+
 | D1a实际本地检查 | 已取得的证据 |
 | --- | --- |
-| TDD与常规回归 | 相关基线164 passed；先复现文件缺正文、brief文件缺原值及无回执误sent。首独立审查三项P2先复现5 failed，再修复；摘要自动附件问题2 failed，再修复。交付/报告/诊断/混合审批组合86 passed；存储故障注入2 passed；此前相关入口426 passed。审批取消竞态先复现后修复，最终8个受影响文件197 passed，95.53s：`/private/tmp/xw-d1a-cancel-accepted.log`。中间版本不作为最终全套通过证据 |
+| TDD与常规回归 | B1/CLI新增回归在原实现5 failed、1 passed，再修复为6 passed；实际SDK暂停与PG中，两份获准结果合计超400,000字节，未知卡片复用原uuid补发成功、数据零上传、父请求未sent、批准只写一次。卡片自身容量保护另1 passed。8个相关文件647 passed、198.81s（该轮收集早于补充保护用例）；`/private/tmp/xw-d1a-review-b1-red.log`、`/private/tmp/xw-d1a-review-b1-green.log`、`/private/tmp/xw-d1a-review-b1-related.log`、`/private/tmp/xw-d1a-review-b1-material-capacity.log` |
 | 正式入口与真实SDK协议 | `runtime.serve`成功/正文失败2项；实际1000行完整单文件/HTML超400KB后预览2项；锁定Channel SDK+loopback HTTP的uuid透传、每部分单消息、缺ID及只补原正文1项。使用真SDK Runner/治理/实际PostgreSQL，模型/业务驱动/平台为替身 |
 | 存储、容器与恢复 | v11→v12直接迁移及隔离`pg_dump/pg_restore`1项通过，旧unknown/原文件字节保留；分项级联删除、过期/接管停止及C7审批回执有实际PG回归。两项旧容器检查修正测试降级形状/版本预期后2 passed，130.77s；`/private/tmp/xw-d1a-container-fixes.log` |
-| 最终源码单元与安全 | `955156e`的CI单元命令2813 passed、152 skipped、47 deselected，23.64s；独立安全命令928 passed、79 skipped、5056 deselected，6.72s。各有5条已有pytest-socket预期警告；`/private/tmp/xw-d1a-final-955156e-unit.log`、`/private/tmp/xw-d1a-final-955156e-security.log` |
-| 整仓检查 | 精确源码`955156e`：5619 passed、373 skipped、71 deselected、5条预期网络隔离警告，1347.52s（22分27秒），退出码0。`/private/tmp/xw-d1a-final-955156e-full.log`；跳过项没有晋级为已验证，旧失败/中断运行不作为本次通过证据 |
-| 静态与发行入口 | 全仓Ruff、39个改动Python文件格式、mypy 135源文件、文档事实/命令5项、锁文件与差异检查通过。`955156e`重建wheel并在仓库外只安装锁定运行依赖，两个CLI入口可启动，v12迁移已打包，旧包/alembic不可导入；不是运行部署 |
-| 依赖与密钥检查 | 按CI从锁文件导出第三方依赖，`pip-audit --strict`通过，未发现已知漏洞：`/private/tmp/xw-d1a-final-deps-audit.log`。官方Gitleaks 8.30.0全Git历史脱敏扫描及随机诱饵/豁免窄度自测通过：`/private/tmp/xw-d1a-final-gitleaks.log`。使用临时Darwin arm64包并核对官方checksum；不是CI所用Linux固定摘要资产的运行证据，未扫描原目录未提交配置 |
-| 精确版本独立审查 | `11a2a73 → 77f5bd2`三项P2、`04eceda`摘要P2已修复，`4b440f9`增量复审通过；`b322f62 → 955156e4de65ec3d15374f42dca6da8c479bc079`只读复审关闭P1，无新增阻断。审查人独立验证SDK取消不等待清理，以及等待者取消/超时不取消执行任务、attempt隔离；未独立重跑PG/容器/197项或全套。没有削弱治理断言 |
+| 最终源码单元与安全 | `dfb3969`的CI单元命令2813 passed、152 skipped、47 deselected，24.20s；独立安全命令928 passed、79 skipped、5063 deselected，6.37s。各有5条已有pytest-socket预期警告；`/private/tmp/xw-d1a-review-b1-unit.log`、`/private/tmp/xw-d1a-review-b1-security.log` |
+| 整仓检查 | 精确源码`dfb39696c3942d1c7ae62d2873066da93ecb18bf`：5626 passed、373 skipped、71 deselected、5条预期网络隔离警告，1297.10s（21分37秒），退出码0。`/private/tmp/xw-d1a-review-b1-full.log`；跳过项不晋级为已验证，不以旧版本结果代替本次回归 |
+| 静态与发行入口 | 全仓Ruff、本次7个改动Python文件格式、mypy 135源文件、锁文件与差异检查通过。`dfb3969`重建wheel，在原隔离运行依赖环境重新安装，两个CLI入口可启动；v12迁移/旧包边界输入不变，沿前轮资源核验，不作部署证据。现有文档检查5 passed：`/private/tmp/xw-d1a-review-b1-docs.log` |
+| 依赖与密钥检查 | 锁文件及审计输入未变，复用前轮`pip-audit --strict`无已知漏洞证据：`/private/tmp/xw-d1a-final-deps-audit.log`。官方Gitleaks 8.30.0全历史扫描/自测仍为前轮证据；同一扫描器对本次新增提交增量扫描通过：`/private/tmp/xw-d1a-review-b1-gitleaks.log`。使用已校验官方checksum的临时Darwin arm64资产，不作为CI Linux固定摘要资产的运行证据，未扫描原目录未提交配置 |
+| 精确版本独立审查 | 原审批取消P1在`955156e`的独立复审已关闭。用户对`53a1875`实际核对完整投递链、运行81项无跳过SDK/PG用例并用scratchpad复现B1，指出CLI三项提示矛盾；本次补修待其精确版本复查，不以自行检查称为独立通过 |
 
 **未覆盖与交付门槛：** 真实Agent的DDL引用/工具选择/澄清修正/答案质量、耗时与用量，真实飞书收发/uuid去重窗口及客户端复制均未验证；脚本模型和合成平台不能证明这些。尚无可用的获准真实模型配置，不读取原目录公司配置或索要凭据；既定能力验收门槛没有豁免。D1b多文件、D2通用可读HTML/MD、D3自然Markdown和D4监控曲线未实施；HTML仍沿既有安全模板。没有推送、PR、合并或部署，原目录未提交配置保持原样。
 
