@@ -95,7 +95,14 @@ def test_report_does_not_interpret_source_labels_as_markdown() -> None:
 def test_report_displays_invisible_controls_as_literals(format_: str) -> None:
     delivery = _delivery(format_)
     inference = AnswerInference(text="方向\u202e反转", evidence_ids=("ev_report",))
-    body = build_report(delivery.model_copy(update={"analysis": (inference,)})).content.decode()
+    fact = delivery.facts[0].model_copy(
+        update={
+            "result_json": json.dumps({"rows": [{"value": "方向\u202e反转"}]}, ensure_ascii=False)
+        }
+    )
+    body = build_report(
+        delivery.model_copy(update={"facts": (fact,), "analysis": (inference,)})
+    ).content.decode()
     assert "\u202e" not in body
     assert "\\u202e" in body
 

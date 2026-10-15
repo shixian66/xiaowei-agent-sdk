@@ -270,7 +270,7 @@ class AgentAnswer(_Answer):
     clarification: Annotated[str, Field(min_length=1, max_length=2000)] | None
     advice: Annotated[str, Field(min_length=1, max_length=4000)] | None = None
     report_format: Literal["md", "html"] | None = None
-    """仅在飞书用户明确要求只读事实报告时选定的文件格式；文件内容由代码构造。"""
+    """飞书用户明确要结果或无事实说明文件时选定格式；文件内容由代码构造。"""
 
 
 MonitoringFailureReason = Literal[

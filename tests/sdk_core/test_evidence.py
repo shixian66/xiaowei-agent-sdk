@@ -325,6 +325,28 @@ async def test_advice_is_a_separate_answer_without_facts(postgres_url: URL) -> N
             assert _FACTS_HEADER not in delivery.content
 
 
+@pytest.mark.parametrize("kind", ["advice", "clarification"])
+async def test_explicit_feishu_document_can_contain_unverified_text_without_query(
+    postgres_url: URL,
+    kind: str,
+) -> None:
+    grants, clock = Grants(), Clock()
+    async with ready_engine(postgres_url) as engine:
+        evidence = store(engine, grants, clock)
+        text = "这是未执行的 SQL 草稿。" if kind == "advice" else "请明确业务时区。"
+        answer = _answer(**{kind: text}).model_copy(update={"report_format": "html"})
+        delivery = await evidence.validate_answer(
+            cited(answer), context(channel="feishu", session="document-advice")
+        )
+        assert delivery.report_format == "html"
+        assert delivery.feishu_text == text
+        assert delivery.facts == () and delivery.evidence_ids == ()
+        with pytest.raises(AnswerRejectedError):
+            await evidence.validate_answer(
+                cited(answer), context(channel="web", session="document-advice-web")
+            )
+
+
 def test_answers_saved_before_advice_existed_still_load() -> None:
     old = '{"evidence_ids": [], "inferences": [], "clarification": "请说明地区"}'
     assert AgentAnswer.model_validate_json(old).advice is None

@@ -1421,18 +1421,14 @@ async def test_formal_thousand_rows_complete_single_or_split_files(
             assert await env.scalar("SELECT delivery FROM xiaowei_request") == "sent"
             assert len(channel.uploads) == 1 and len(channel.sends) == 2
             document = channel.uploads[0].decode()
-            decoder = json.JSONDecoder()
-            values = []
-            for i, char in enumerate(document):
-                if char == "{":
-                    try:
-                        value, _ = decoder.raw_decode(document[i:])
-                    except ValueError:
-                        continue
-                    if isinstance(value, dict) and "rows" in value:
-                        values.append(value)
-            assert len(values) == 1 and len(values[0]["rows"]) == 1000
-            assert values[0]["rows"][-1] == {"region": "row999", "total": 999}
+            from re import MULTILINE, findall
+
+            values = [
+                {"region": json.loads(name), "total": int(total)}
+                for name, total in findall(r'^\| ("row\d+") \| (\d+) \|$', document, MULTILINE)
+            ]
+            assert len(values) == 1000
+            assert values[-1] == {"region": "row999", "total": 999}
             assert "预览 20／本次返回 1000 行" in str(channel.sends[1][1])
         else:
             from html import unescape
@@ -1448,12 +1444,16 @@ async def test_formal_thousand_rows_complete_single_or_split_files(
             for index, content in enumerate(channel.uploads, 1):
                 document = content.decode()
                 assert f"{index}/{len(channel.uploads)}" in document
-                for block in findall(r"<pre>(.*?)</pre>", document, flags=DOTALL):
-                    for line in unescape(block).splitlines():
-                        if line.startswith("{"):
-                            value = json.loads(line)
-                            if isinstance(value, dict) and "rows" in value:
-                                seen.extend(value["rows"])
+                for block in findall(r"<tbody>(.*?)</tbody>", document, flags=DOTALL):
+                    for raw in findall(r"<tr>(.*?)</tr>", block, flags=DOTALL):
+                        cells = findall(r'<code class="cell">(.*?)</code>', raw, flags=DOTALL)
+                        assert len(cells) == 2
+                        seen.append(
+                            {
+                                "region": json.loads(unescape(cells[0])),
+                                "total": json.loads(unescape(cells[1])),
+                            }
+                        )
             assert seen == [{"region": f"{region}{i}", "total": i} for i in range(1000)]
             shown = str(channel.sends[-1][1])
             assert "预览 20／本次返回 1000 行" in shown

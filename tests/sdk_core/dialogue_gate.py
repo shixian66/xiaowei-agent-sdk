@@ -322,6 +322,17 @@ E6_SCENARIOS = (
         feishu=True,
     ),
     Scenario(
+        "d2_html_advice_no_query",
+        (
+            (
+                "query",
+                "只解释 SELECT region, SUM(total) FROM shop.sales GROUP BY region，"
+                "给 HTML 文件，不执行查询",
+            ),
+        ),
+        feishu=True,
+    ),
+    Scenario(
         "e6_action_with_report",
         (("query", "巡检 pre 并提出需审批的修复动作，再给我 MD 报告"),),
         feishu=True,

@@ -45,7 +45,7 @@ def _preview(
     delivery: Delivery, max_chars: int, chat_id: str, reply_to: str | None, notice: str
 ) -> Message:
     # 只把确定能完整放入正文的整行标成预览，不能标20后再次静默裁剪。
-    for count in range(20, -1, -1):
+    for count in range(20, -1, -1) if delivery.facts else (0,):
         facts = tuple(
             f.model_copy(update={"rows": f.rows[:count], "result_json": None})
             for f in delivery.facts

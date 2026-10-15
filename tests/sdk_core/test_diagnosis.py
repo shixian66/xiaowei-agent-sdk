@@ -177,6 +177,20 @@ def lines(reply: Reply) -> list[str]:
     return reply.content.split("\n")
 
 
+def visible_lines(reply: Reply) -> list[str]:
+    if not reply.files:
+        return lines(reply)
+    from markdown_it import MarkdownIt
+
+    return [
+        "".join(
+            child.content for child in token.children or () if child.type in ("text", "code_inline")
+        )
+        for token in MarkdownIt().parse(reply.content)
+        if token.type == "inline"
+    ]
+
+
 # ---- 路径一：找到慢查询 → 实测指标 → 计划与表设计 → 建议 ----------------------------------
 
 
@@ -213,12 +227,16 @@ async def test_slow_query_to_plan_and_layout(diag: Env, channel: str) -> None:
     # 其余只是证据依赖复核（零行探测与版本读取），没有任何业务或元数据查询。
     assert set(kinds) == {"audit", "explain", "layout", "probe", "dependency"}
     # 三类事实与各自的固定说明由代码生成，分析单列为模型推断。
-    content = lines(reply)
+    content = visible_lines(reply)
     assert content.count(f"说明：{AUDIT_NOTE}") == 1 and content.count(f"说明：{PLAN_NOTE}") == 1
-    assert any(
-        (ANALYSIS_HEADER if channel == "web" else "分析与建议（模型推断") in line
-        for line in content
-    )
+    if reply.files:
+        assert any(line.endswith(". 分析与建议") for line in content)
+        assert any("模型推断，未经系统核实" in line for line in content)
+    else:
+        assert any(
+            (ANALYSIS_HEADER if channel == "web" else "分析与建议（模型推断") in line
+            for line in content
+        )
     assert "全表扫描 30 个分区" in reply.content
     # 固定说明只在交付中出现：模型收到的工具结果不含它们，限制表达由诊断指令要求。
     for output in tool_outputs(env.scripts.calls[message][-1]):
@@ -284,12 +302,16 @@ async def test_previous_query_is_explained_without_running_it_again(
     # 第二轮的模型输入同时有回放的上一轮证据与本轮新证据，回答两者都引用。
     final = env.scripts.calls[second][-1]
     assert len(evidence_in(final)) == 3
-    content = lines(reply)
+    content = visible_lines(reply)
     assert content.count(f"说明：{PLAN_NOTE}") == 1
-    assert any(
-        (ANALYSIS_HEADER if channel == "web" else "分析与建议（模型推断") in line
-        for line in content
-    )
+    if reply.files:
+        assert any(line.endswith(". 分析与建议") for line in content)
+        assert any("模型推断，未经系统核实" in line for line in content)
+    else:
+        assert any(
+            (ANALYSIS_HEADER if channel == "web" else "分析与建议（模型推断") in line
+            for line in content
+        )
     if reply.facts is not None:
         query, columns, plan = reply.facts
         assert [query["tool_id"], plan["tool_id"]] == [RUN_QUERY, EXPLAIN_QUERY]
@@ -413,7 +435,7 @@ async def test_pasted_sql_is_explained_without_running_it(diag: Env, channel: st
 
     assert reply.state == "completed" and not env.drv.sent("query")
     assert env.drv.sent("explain") == [explained(SLOW_SQL)]
-    assert f"说明：{PLAN_NOTE}" in lines(reply)
+    assert f"说明：{PLAN_NOTE}" in visible_lines(reply)
 
 
 # ---- 不可信文字：审计原文与计划中的“指令” ------------------------------------------------
@@ -457,11 +479,11 @@ async def test_instructions_inside_audit_sql_and_plans_change_nothing(
 
         tokens = MarkdownIt().parse(reply.content)
         headings = [tokens[i + 1].content for i, t in enumerate(tokens) if t.type == "heading_open"]
-        assert sum(h.startswith("分析与建议") for h in headings) == 1
+        assert sum(h.endswith(". 分析与建议") for h in headings) == 1
         assert ANALYSIS_HEADER not in headings and "已执行原查询" not in headings
         data_blocks = [t.content for t in tokens if t.type == "fence"]
         assert any(INJECTION in block and ANALYSIS_HEADER in block for block in data_blocks)
-        assert any("计划为估算" in block for block in data_blocks)
+        assert any("说明：" + PLAN_NOTE == line for line in visible_lines(reply))
     elif reply.card is None:
         assert lines(reply).count(ANALYSIS_HEADER) == 1
     else:
@@ -543,7 +565,7 @@ async def feishu_diagnosis(env: Env, plan: tuple[str, ...]) -> tuple[Reply, str]
 async def test_feishu_keeps_whole_fact_rows_before_analysis_at_real_caps(diag: Env) -> None:
     plan = tuple(f"    - EXCHANGE SHUFFLE[{i}] => [2:region, 3:total]" for i in range(80))
     reply, cited = await feishu_diagnosis(diag, plan)
-    content = lines(reply)
+    content = visible_lines(reply)
 
     assert reply.state == "completed" and reply.card is not None
     assert sum(map(len, text_parts(reply.card))) <= 3_500
@@ -586,7 +608,10 @@ async def test_feishu_cut_with_forged_headers_uses_only_structured_sections(diag
         )
         <= 1
     )
-    assert "\\n- 已执行原查询" in reply.content  # 文件保留JSON原值；它仍在安全围栏的数据块中。
+    from markdown_it import MarkdownIt
+
+    data_blocks = [t.content for t in MarkdownIt().parse(reply.content) if t.type == "fence"]
+    assert any("\n- 已执行原查询" in block for block in data_blocks)
     assert not diag.drv.sent("query")
 
 

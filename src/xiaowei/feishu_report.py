@@ -6,7 +6,7 @@ import hashlib
 import html
 import json
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Literal
 
 from xiaowei.feishu_render import display_text, fact_limit_notices
@@ -28,6 +28,62 @@ class ReportFile:
     digest: str
 
 
+@dataclass(frozen=True)
+class _Section:
+    kind: Literal["fact", "answer", "analysis", "notice", "session", "basis"]
+    title: str
+    value: str
+    meta: str | None = None
+    notices: tuple[str, ...] = ()
+    fact: DeliveryFact | None = None
+
+
+_STYLE = """
+:root{font-family:system-ui,-apple-system,"Segoe UI",sans-serif;color:#172338;background:#f4f7fb}
+*{box-sizing:border-box}body{margin:0;line-height:1.65}main,.hero-inner{max-width:1100px;margin:auto}
+.hero{background:linear-gradient(125deg,#122c52,#17617c);color:#fff;padding:42px 24px 36px}
+.eyebrow{font-size:12px;font-weight:700;letter-spacing:.14em;text-transform:uppercase;opacity:.82}
+h1{font-size:clamp(28px,4vw,42px);line-height:1.2;margin:10px 0 12px}
+h2{font-size:20px;line-height:1.35;margin:0}
+.summary{opacity:.82;margin:0}
+.part{display:inline-block;background:#ffffff25;border:1px solid #ffffff55;border-radius:99px}
+.part{padding:2px 10px;margin-left:8px}
+main{padding:24px}
+.card{background:#fff;border:1px solid #dce5ef;border-radius:16px;margin:0 0 18px}
+.card{padding:24px;box-shadow:0 8px 25px #1723380a}
+.card-head{display:flex;gap:14px;align-items:flex-start}
+.number{color:#106b83;background:#e7f5f6;border-radius:9px;padding:3px 9px}
+.number{font-weight:700;font-size:13px}
+.meta{color:#52647b;font-size:13px;overflow-wrap:anywhere;margin:9px 0 16px}
+.notice{background:#fff5e7;border-left:3px solid #d98922;padding:10px 14px}
+.notice{border-radius:6px;margin:12px 0;color:#5d3d13}
+.prose{white-space:pre-wrap;overflow-wrap:anywhere;margin:14px 0}
+.field-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr))}
+.field-grid{gap:10px;margin:14px 0}
+.field{background:#f5f8fc;border:1px solid #e5ebf2;border-radius:9px;padding:10px 12px;min-width:0}
+.field-name{color:#52647b;font-size:12px;margin-bottom:4px;overflow-wrap:anywhere}
+.field-value,.cell{font-family:ui-monospace,SFMono-Regular,Consolas,monospace}
+.field-value,.cell{font-size:12px;overflow-wrap:anywhere;white-space:pre-wrap}
+.field.full{grid-column:1/-1}
+.sql-code,.raw-code{margin:12px 0 0;background:#14243a;color:#edf6fc;border-radius:9px}
+.sql-code,.raw-code{padding:14px;overflow:auto;white-space:pre-wrap;overflow-wrap:anywhere}
+.sql-code,.raw-code{font-size:12px}
+.table-wrap{overflow:auto;border:1px solid #dce5ef;border-radius:10px;margin-top:14px}
+table{width:100%;border-collapse:collapse;font-size:13px}
+th,td{text-align:left;vertical-align:top;border-bottom:1px solid #e7edf4}
+th,td{padding:10px 12px;min-width:90px}
+th{background:#eaf2f8;color:#304b64;position:sticky;top:0}
+tr:last-child td{border-bottom:0}tbody tr:nth-child(even){background:#f9fbfd}
+.missing{color:#7c8898}.count{color:#52647b;font-size:12px;margin:10px 0 0}
+footer{max-width:1100px;margin:8px auto 32px;padding:0 24px;color:#718095;font-size:12px}
+@media(max-width:650px){.hero{padding:28px 18px}main{padding:14px}}
+@media(max-width:650px){.card{padding:16px;border-radius:12px}.field-grid{grid-template-columns:1fr}}
+@media(max-width:650px){th,td{padding:8px}}
+@media print{body{background:#fff}.hero{color:#172338;background:#fff}}
+@media print{.hero{border-bottom:2px solid #17617c}.card{box-shadow:none;break-inside:avoid}}
+"""
+
+
 def _fact_json(fact: DeliveryFact) -> str:
     if fact.result_json is not None:
         return fact.result_json
@@ -39,98 +95,294 @@ def _fact_json(fact: DeliveryFact) -> str:
     )
 
 
-def _fence(value: str) -> str:
+def _fence(value: str, language: str = "text") -> str:
     """动态围栏只能包裹数据，长度严格大于数据中的任意波浪号序列。"""
+    value = display_text(value)
     width = max([3, *(len(m.group()) + 1 for m in re.finditer(r"~+", value))])
     marker = "~" * width
-    return f"{marker}text\n{value}\n{marker}"
+    return f"{marker}{language}\n{value}\n{marker}"
 
 
-def _fact_section(fact: DeliveryFact, *, expand_brief: bool) -> tuple[str, str, str]:
-    source = (
-        f"证据 {fact.evidence_id} · 来源 {fact.tool_id} · 目标 {fact.target_id} · "
-        f"采集于 {fact.captured_at.isoformat()}"
-    )
-    details = []
-    if fact.note:
-        details.append(f"说明：{fact.note}")
-    details.extend(fact_limit_notices(fact))
+def _fact_section(fact: DeliveryFact, *, expand_brief: bool) -> _Section:
+    meta = f"来源 {fact.tool_id} · 目标 {fact.target_id} · 采集于 {fact.captured_at.isoformat()}"
+    notices = tuple(([f"说明：{fact.note}"] if fact.note else []) + list(fact_limit_notices(fact)))
     if fact.view == "brief" and not expand_brief:
         if fact.summary is None:
             raise ValueError("历史摘要缺失")
-        details.append(fact.summary)
-    else:
-        # 显式文件可在当前权限下展开原值；自动换载体保持所选摘要语义。
-        details.append(_fact_json(fact))
-    return "证据", source, "\n".join(details)
+        return _Section("fact", f"证据 {fact.evidence_id}", fact.summary, meta, notices)
+    # 显式文件可在当前权限下展开原值；自动换载体保持所选摘要语义。
+    return _Section("fact", f"证据 {fact.evidence_id}", _fact_json(fact), meta, notices, fact)
 
 
-def _sections(delivery: Delivery, *, expand_brief: bool) -> list[tuple[str, str, str]]:
-    parts: list[tuple[str, str, str]] = []
+def _sections(delivery: Delivery, *, expand_brief: bool) -> list[_Section]:
+    parts: list[_Section] = []
     if not delivery.facts:
         parts.append(
-            (
-                "回答",
-                "回答（模型生成，未经系统核实）",
+            _Section(
+                "answer",
+                "答复",
                 delivery.feishu_text if delivery.feishu_text is not None else delivery.content,
+                "模型生成，未经系统核实",
             )
         )
     parts.extend(_fact_section(fact, expand_brief=expand_brief) for fact in delivery.facts)
     if delivery.monitoring_notice:
-        parts.append(("未核实来源", "未核实来源", delivery.monitoring_notice))
+        parts.append(_Section("notice", "未核实来源", delivery.monitoring_notice))
     for inference in delivery.analysis:
         parts.append(
-            (
+            _Section(
+                "analysis",
                 "分析与建议",
-                "分析与建议（模型推断，未经系统核实；依据："
-                + "、".join(inference.evidence_ids)
-                + "）",
                 inference.text,
+                "模型推断，未经系统核实；依据：" + "、".join(inference.evidence_ids),
             )
         )
     if delivery.session_notice:
-        parts.append(("会话提示", "会话提示", delivery.session_notice))
+        parts.append(_Section("session", "会话提示", delivery.session_notice))
     if delivery.basis:
-        parts.append(("查看依据", "其他调查", "\n".join(f"{t} · {o}" for t, o in delivery.basis)))
+        parts.append(
+            _Section("basis", "查看依据", "\n".join(f"{t} · {o}" for t, o in delivery.basis))
+        )
     return parts
+
+
+_INVALID = object()
+_RAW_FIELDS = ("sql", "ddl", "plan")
+
+
+def _decoded(value: str) -> object:
+    def nonfinite(raw: str) -> None:
+        raise ValueError(raw)
+
+    try:
+        return json.loads(value, parse_constant=nonfinite)
+    except (ValueError, TypeError):
+        return _INVALID
+
+
+def _table(data: object) -> tuple[tuple[str, ...], list[dict[str, object]]] | None:
+    if not isinstance(data, dict) or not isinstance(data.get("rows"), list):
+        return None
+    rows = data["rows"]
+    raw_columns = data.get("columns", [])
+    if not isinstance(raw_columns, list) or any(not isinstance(c, str) for c in raw_columns):
+        return None
+    if any(not isinstance(row, dict) for row in rows):
+        return None
+    extra = dict.fromkeys(key for row in rows for key in row if key not in raw_columns)
+    columns = (*raw_columns, *extra)
+    return columns, rows
+
+
+def _escaped(value: str) -> str:
+    return html.escape(display_text(value), quote=True)
+
+
+def _json_value(value: object, *, indent: int | None = None) -> str:
+    return json.dumps(value, ensure_ascii=False, allow_nan=False, indent=indent)
+
+
+def _html_fact(value: str) -> str:
+    data = _decoded(value)
+    if data is _INVALID:
+        return f'<pre class="raw-code"><code>{_escaped(value)}</code></pre>'
+    table = _table(data)
+    if not isinstance(data, dict):
+        return f'<pre class="raw-code"><code>{_escaped(_json_value(data, indent=2))}</code></pre>'
+    if not data:
+        return '<pre class="raw-code"><code>{}</code></pre>'
+    fields = []
+    for key, item in data.items():
+        if table is not None and key in ("columns", "rows"):
+            continue
+        if key in _RAW_FIELDS and isinstance(item, str):
+            fields.append(
+                '<div class="field full"><div class="field-name">'
+                f"{_escaped(key.upper())} 原文</div>"
+                f'<pre class="sql-code"><code>{_escaped(item)}</code></pre></div>'
+            )
+        else:
+            fields.append(
+                f'<div class="field"><div class="field-name">{_escaped(str(key))}</div>'
+                f'<code class="field-value">{_escaped(_json_value(item))}</code></div>'
+            )
+    body = '<div class="field-grid">' + "".join(fields) + "</div>" if fields else ""
+    if table is None:
+        return body
+    columns, rows = table
+    if columns:
+        head = "".join(f'<th scope="col">{_escaped(c)}</th>' for c in columns)
+        cells = []
+        for row in rows:
+            values = []
+            for column in columns:
+                if column not in row:
+                    values.append('<td><span class="missing">未提供</span></td>')
+                elif column in _RAW_FIELDS and isinstance(item := row[column], str):
+                    values.append(
+                        f'<td><pre class="sql-code"><code>{_escaped(item)}</code></pre></td>'
+                    )
+                else:
+                    rendered = _escaped(_json_value(row[column]))
+                    values.append(f'<td><code class="cell">{rendered}</code></td>')
+            cells.append("<tr>" + "".join(values) + "</tr>")
+        body += (
+            '<div class="table-wrap"><table><thead><tr>'
+            f"{head}</tr></thead><tbody>{''.join(cells)}</tbody></table></div>"
+        )
+    elif "columns" in data:
+        body += '<p class="count">列定义 []</p>'
+    body += f'<p class="count">本文件展示 {len(rows)} 行。</p>'
+    return body
+
+
+_SIMPLE_MD = re.compile(r'^(?:[\w ,+"-]+|-?\d+\.\d+(?:[eE][+-]?\d+)?)$', re.UNICODE)
+
+
+def _safe_md_cell(value: str) -> bool:
+    return bool(_SIMPLE_MD.fullmatch(value)) and all(
+        char != "_"
+        or (
+            0 < index < len(value) - 1 and value[index - 1].isalnum() and value[index + 1].isalnum()
+        )
+        for index, char in enumerate(value)
+    )
+
+
+def _md_fact(value: str) -> str:
+    data = _decoded(value)
+    if data is _INVALID:
+        return _fence(display_text(value))
+    table = _table(data)
+    if not isinstance(data, dict):
+        return _fence(_json_value(data, indent=2), "json")
+    if not data:
+        return _fence("{}", "json")
+    blocks = []
+    for key, item in data.items():
+        if table is not None and key in ("columns", "rows"):
+            continue
+        if key in _RAW_FIELDS and isinstance(item, str):
+            language = "text" if key == "plan" else "sql"
+            blocks.append(f"**{key.upper()} 原文**\n\n{_fence(item, language)}")
+        else:
+            blocks.append(f"**{_md_escape(key)}**\n\n{_fence(_json_value(item, indent=2), 'json')}")
+    if table is not None:
+        columns, rows = table
+        simple = (
+            bool(columns)
+            and all(_safe_md_cell(column) for column in columns)
+            and all(_safe_md_cell(_json_value(item)) for row in rows for item in row.values())
+            and not set(columns).intersection(_RAW_FIELDS)
+        )
+        if simple:
+            blocks.append(
+                "\n".join(
+                    [
+                        "| " + " | ".join(columns) + " |",
+                        "| " + " | ".join("---" for _ in columns) + " |",
+                        *(
+                            "| "
+                            + " | ".join(
+                                _json_value(row[column]) if column in row else "（未提供）"
+                                for column in columns
+                            )
+                            + " |"
+                            for row in rows
+                        ),
+                    ]
+                )
+            )
+        else:
+            if "columns" in data:
+                blocks.append("**列定义**\n\n" + _fence(_json_value(columns), "json"))
+            for index, row in enumerate(rows, 1):
+                ordinary = {key: item for key, item in row.items() if key not in _RAW_FIELDS}
+                pieces = [f"**第 {index} 行**"]
+                if ordinary:
+                    pieces.append(_fence(_json_value(ordinary), "json"))
+                for key in _RAW_FIELDS:
+                    if key in row:
+                        item = row[key]
+                        language = "text" if key == "plan" else "sql"
+                        pieces.append(
+                            f"**{key.upper()} 原文**\n\n" + _fence(item, language)
+                            if isinstance(item, str)
+                            else f"**{key}**\n\n{_fence(_json_value(item), 'json')}"
+                        )
+                blocks.append("\n\n".join(pieces))
+        blocks.append(f"本文件展示 {len(rows)} 行。")
+    return "\n\n".join(blocks)
+
+
+def _md_escape(value: str) -> str:
+    return re.sub(r"([\\`*{}\[\]()#|<>])", r"\\\1", display_text(value))
+
+
+def _inline_code(value: str) -> str:
+    width = max([1, *(len(m.group()) + 1 for m in re.finditer(r"`+", value))])
+    marker = "`" * width
+    return f"{marker}{value}{marker}"
+
+
+def _html_prose(value: str) -> str:
+    return "".join(
+        f'<p class="prose">{_escaped(paragraph)}</p>'
+        for paragraph in re.split(r"\n\s*\n", value)
+        if paragraph
+    )
 
 
 def _render(
     format_: ReportFormat,
-    sections: list[tuple[str, str, str]],
+    sections: list[_Section],
     *,
     label: str | None = None,
     notice: str | None = None,
 ) -> bytes:
-    document_title = "小维巡检报告" + (f" {label}" if label else "")
+    document_title = ("小维结果" if any(s.kind == "fact" for s in sections) else "小维答复") + (
+        f" {label}" if label else ""
+    )
     if format_ == "md":
         blocks = []
-        for index, (heading, title, value) in enumerate(sections, start=1):
-            details = display_text(f"{title}\n{value}")
-            blocks.append(f"## {heading} {index}\n\n{_fence(details)}")
-        prefix = "# 小维巡检报告" + (f" {label}" if label else "") + "\n\n"
+        for index, section in enumerate(sections, start=1):
+            content = _md_fact(section.value) if section.fact else _md_escape(section.value)
+            meta = f"\n\n{_inline_code(display_text(section.meta))}" if section.meta else ""
+            notes = "".join(f"\n\n> {_md_escape(note)}" for note in section.notices)
+            blocks.append(f"## {index}. {_md_escape(section.title)}{meta}{notes}\n\n{content}")
+        prefix = "# " + document_title + "\n\n"
         if notice:
-            prefix += f"范围说明\n\n{_fence(display_text(notice))}\n\n"
+            prefix += f"> 范围说明：{_md_escape(notice)}\n\n"
         body = prefix + "\n\n".join(blocks) + "\n"
     else:
-        html_blocks = "".join(
-            f"<section><h2>{html.escape(display_text(title), quote=True)}</h2>"
-            f"<pre>{html.escape(display_text(value), quote=True)}</pre></section>"
-            for _, title, value in sections
-        )
+        html_blocks = []
+        for index, section in enumerate(sections, 1):
+            detail = _html_fact(section.value) if section.fact else _html_prose(section.value)
+            meta = f'<p class="meta">{_escaped(section.meta)}</p>' if section.meta else ""
+            notes = "".join(f'<p class="notice">{_escaped(item)}</p>' for item in section.notices)
+            html_blocks.append(
+                '<section class="card"><div class="card-head">'
+                f'<span class="number">{index:02}</span>'
+                f"<h2>{_escaped(section.title)}</h2></div>{meta}{notes}{detail}</section>"
+            )
+        fact_count = sum(s.kind == "fact" for s in sections)
+        summary = f"本文件包含 {fact_count} 项结果" if fact_count else "本轮答复与说明"
+        if label:
+            summary += f'<span class="part">{_escaped(label)}</span>'
         body = (
             '<!doctype html><html lang="zh"><head><meta charset="utf-8">'
+            '<meta name="viewport" content="width=device-width,initial-scale=1">'
             '<meta http-equiv="Content-Security-Policy" '
-            "content=\"default-src 'none'; base-uri 'none'; form-action 'none'\">"
-            f"<title>{html.escape(document_title, quote=True)}</title></head><body>"
-            f"<h1>{html.escape(document_title, quote=True)}</h1>"
-            + (
-                f"<p>范围说明：{html.escape(display_text(notice), quote=True)}</p>"
-                if notice
-                else ""
-            )
-            + html_blocks
-            + "</body></html>"
+            "content=\"default-src 'none'; style-src 'unsafe-inline'; script-src 'none'; "
+            "base-uri 'none'; form-action 'none'\">"
+            f"<title>{_escaped(document_title)}</title><style>{_STYLE}</style></head><body>"
+            '<header class="hero"><div class="hero-inner">'
+            '<div class="eyebrow">小维 · 结果文件</div>'
+            f"<h1>{_escaped(document_title)}</h1>"
+            f'<p class="summary">{summary}</p></div></header><main>'
+            + (f'<p class="notice">范围说明：{_escaped(notice)}</p>' if notice else "")
+            + "".join(html_blocks)
+            + "</main><footer>由小维生成 · 静态离线文件</footer></body></html>"
         )
     return body.encode("utf-8")
 
@@ -173,11 +425,11 @@ def build_reports(delivery: Delivery, *, expand_brief: bool = True) -> tuple[Rep
         or None
     )
 
-    def pack(estimated_total: int) -> list[list[tuple[str, str, str]]]:
-        files: list[list[tuple[str, str, str]]] = []
-        current: list[tuple[str, str, str]] = []
+    def pack(estimated_total: int) -> list[list[_Section]]:
+        files: list[list[_Section]] = []
+        current: list[_Section] = []
 
-        def fits(candidate: list[tuple[str, str, str]]) -> bool:
+        def fits(candidate: list[_Section]) -> bool:
             return (
                 len(
                     _render(
@@ -190,7 +442,7 @@ def build_reports(delivery: Delivery, *, expand_brief: bool = True) -> tuple[Rep
                 <= MAX_REPORT_BYTES
             )
 
-        def add(section: tuple[str, str, str]) -> bool:
+        def add(section: _Section) -> bool:
             nonlocal current
             if fits([*current, section]):
                 current.append(section)
@@ -203,14 +455,14 @@ def build_reports(delivery: Delivery, *, expand_brief: bool = True) -> tuple[Rep
                 return True
             return False
 
-        for index, section in enumerate(sections):
+        for section in sections:
             if add(section):
                 continue
-            fact = delivery.facts[index] if index < len(delivery.facts) else None
-            if fact is None or (fact.view == "brief" and not expand_brief):
+            fact = section.fact
+            if fact is None:
                 raise ReportCapacityError("完整章节超过当前文件容量")
             try:
-                original = json.loads(_fact_json(fact))
+                original = json.loads(section.value)
             except (ValueError, TypeError) as exc:
                 raise ReportCapacityError("证据无法按整行拆分") from exc
             if not isinstance(original, dict) or not isinstance(original.get("rows"), list):
@@ -230,13 +482,11 @@ def build_reports(delivery: Delivery, *, expand_brief: bool = True) -> tuple[Rep
                         )
                     except (TypeError, ValueError) as exc:
                         raise ReportCapacityError("证据无法按整行拆分") from exc
-                    fragment = _fact_section(
-                        fact.model_copy(update={"result_json": value}), expand_brief=expand_brief
-                    )
-                    fragment = (
-                        fragment[0],
-                        fragment[1] + f" · 行 {start + 1}–{end}/{len(rows)}",
-                        fragment[2],
+                    fragment = replace(
+                        section,
+                        title=section.title + f" · 行 {start + 1}–{end}/{len(rows)}",
+                        value=value,
+                        fact=fact.model_copy(update={"result_json": value}),
                     )
                     if fits([*current, fragment]):
                         best = end, fragment
