@@ -24,8 +24,8 @@
 
 1. 结果字节合规但组件超过 200（例如 60 列 × 250 行宽表按逐行文本展示）——必须转附件并给准确预览，不能因只看字节而发送被平台拒绝的卡片。→ Task 2 `test_element_budget_still_forces_attachment`。
 2. 固定回执、会话提示等纯文本消息超过 `max_reply_chars`——仍按原上限处理，不能交给 SDK 自动分段成多条。→ Task 1 `test_plain_text_keeps_reply_char_limit`。
-3. 含大整数（>2^53）或嵌套值的结果——可见单元格已字符串化，原文 JSON 必须仍为必需项，不能以“重复”为由丢掉类型。→ Task 1 `test_lossy_fact_keeps_raw_json_required`。
-4. MD 单元格含反引号、竖线、`<at>`、URL、`__强调__`、U+2028——渲染为表格时不得产生链接、强调、HTML 或 mention，值可无损还原。→ Task 4 `test_md_table_cells_are_inert_and_reversible`。
+3. 含大整数（>2^53）或嵌套值的结果，且“表格放得下、表格加原文放不下”——可见单元格已字符串化，原文 JSON 仍为必需项，必须换附件，不能以“重复”为由内联并丢掉类型。→ Task 1 `test_lossy_fact_keeps_raw_json_required`（大整数、嵌套各一）。
+4. MD 单元格或列名含换行、首尾空格、反引号、竖线、`<at>`、URL、`__强调__`、U+2028——渲染时不得跳出表格或产生链接、列表、强调、HTML、mention，值与列名可无损还原；表下明细标题同样适用。→ Task 4 `test_md_table_cells_are_inert_and_reversible`、`test_md_table_headers_and_detail_titles_are_inert_and_reversible`。
 5. 用户已在旧 3500 规则下保存的分项被手动补发——新检查必须接受（规则只放宽），不能因模板变化拒发。→ Task 2 `test_old_saved_body_part_still_passes_capacity_check`。
 
 ---
@@ -36,7 +36,7 @@
 | --- | --- | --- |
 | T | 普通查询、主机列表、看板搜索几乎都进附件 | 新语义正文按 `max_reply_chars`（≤3500，且折叠区计入）判断；数据卡片还强制带与表格重复的“原文 JSON”（`feishu_render.py:491` 的 `all_technical`），实际可用空间约一千多字，远低于平台 30 KB |
 | A | 正文写“预览 0／本次返回 3 行”又写“（无数据行）” | `_preview`（`feishu_delivery.py:44-90`）先截 `fact.rows` 再以 `allow_preview=False` 渲染，渲染器看到空行而输出“（无数据行）”（`feishu_render.py:236-239`），与计划 D1a 验收 5“无行可容纳时说明预览不可展示”冲突 |
-| C | MCP 小结果（主机、看板）正文“预览无法在本消息容量内展示” | 同一 `_preview` 只截 `rows`；MCP 结果的数据在 `metadata`，截不到，所有候选大小相同 |
+| C（本切片部分修复） | MCP 小结果（主机、看板）正文“预览无法在本消息容量内展示” | 同一 `_preview` 只截 `rows`；MCP 结果的数据在 `metadata`，截不到，所有候选大小相同。本切片后：合平台限制的 MCP 结果直接内联；多字段结果超限时按字段预览。**单个大字段（如投影里的 `dashboards` 字符串）超限时仍显示“预览 0／共 N 个字段”、没有任何条目**，需 MCP 行视图解决，不在本切片宣称修复 |
 | D | 转附件时正文没有模型回答 | `_preview` 设置 `"analysis": ()`（`feishu_delivery.py:61`）；渲染器原有预览顺序也是先装满行，再装分析 |
 | B | 用户要求 MD 表格仍是逐行 JSON | `_SIMPLE_MD`（`feishu_report.py:239`）白名单不允许 `:`、`.`、`/`、换行等，时间戳+IP 两列也无法成表 |
 
@@ -75,6 +75,8 @@
 **Interfaces:**
 - Produces: `build_feishu_message(delivery, max_chars, chat_id, *, reply_to=None, max_bytes=MAX_REQUEST_BYTES, allow_preview=True, platform_limits=False) -> Message`。`platform_limits=True` 时：(1) 卡片与 post 只检查字节与组件，`{"text": ...}` 仍检查 `max_chars`；(2) 完整卡片中只有“不可无损替代”的原文 JSON 是必需项；(3) 预览先放模型分析，再放行与 SQL。
 - Produces: 常量 `RAW_OMITTED: Final = "原文 JSON 未展示（单消息容量）；如需精确原值与类型，可要求 MD/HTML 文件。"`
+- Produces: `_card(..., raw_hidden: AbstractSet[int] = frozenset())`，只控制原文 JSON 是否以 `RAW_OMITTED` 代替；`row_count`、`elapsed_ms`、`next_cursor` 等技术字段仍由 `technical` 控制，在完整判断中始终必需。
+- Produces: `_raw_redundant(fact) -> bool`：可见行/字段逐值等同原文（按 JSON 文本比较）时为 True。
 - Produces: 每个部分展示的事实在结果标题后有 `预览 {n}／本次返回 {m} 行`（有列）或 `预览 {n}／共 {m} 个字段`（无列）。
 
 - [ ] **Step 1: 写失败测试**
@@ -95,6 +97,8 @@ from xiaowei.feishu_render import (
     build_feishu_message,
     request_bytes,
 )
+from xiaowei.channel_store import DeliveryPart
+from xiaowei.feishu_delivery import _check_capacity, _data_parts, _preview
 from xiaowei.models import AnswerInference, Delivery, DeliveryFact
 
 CHAT = "oc_inline"
@@ -148,23 +152,42 @@ def test_medium_result_is_inline_under_platform_limits_but_not_under_reply_chars
     assert "最慢的查询来自 etl 用户。" in shown(message) and "SELECT 1" in shown(message)
 
 
-def test_redundant_raw_json_is_optional_and_marked_when_omitted() -> None:
+def test_redundant_raw_json_is_optional_but_technical_fields_stay() -> None:
     # 6×3000 字：只放可见行约 18 KB 可容纳；再带一份原文 JSON 则超过 30,000 字节。
     rows = audit_rows(6, 3000)
-    d = delivery(fact(("queryId", "user", "duration_ms", "sql_text"), rows))
+    metadata = {"sql": "SELECT 1", "row_count": 6, "elapsed_ms": 1234567}
+    d = delivery(fact(("queryId", "user", "duration_ms", "sql_text"), rows, metadata=metadata))
     message = build_feishu_message(d, 3500, CHAT, allow_preview=False, platform_limits=True)
     text = shown(message)
     assert text.count("S" * 3000) == 6  # 每行一次，没有原文 JSON 的第二份
     assert RAW_OMITTED in text
+    # 省略的只是重复的原文 JSON；其他获准技术字段仍完整。
+    assert "elapsed_ms: 1234567" in text and "row_count: 6" in text
 
 
-def test_lossy_fact_keeps_raw_json_required() -> None:
+def _lossy_rows(kind: str):
+    """可见单元格与原值类型不同（大整数→字符串、嵌套→JSON 文本），且带足够长的填充。"""
     big = 2**60
-    raw = json.dumps({"sql": "SELECT 1", "columns": ["id"], "rows": [{"id": big}]})
-    d = delivery(fact(("id",), ({"id": str(big)},), raw=raw))
-    message = build_feishu_message(d, 3500, CHAT, allow_preview=False, platform_limits=True)
-    assert RAW_OMITTED not in shown(message)
-    assert shown(message).count(str(big)) == 2  # 单元格字符串 + 原文 JSON 中的整数
+    if kind == "bigint":
+        shown_rows = [{"id": str(big + i), "sql_text": "S" * 3000} for i in range(6)]
+        raw_rows = [{"id": big + i, "sql_text": "S" * 3000} for i in range(6)]
+    else:
+        shown_rows = [{"tags": json.dumps(["a", i]), "sql_text": "S" * 3000} for i in range(6)]
+        raw_rows = [{"tags": ["a", i], "sql_text": "S" * 3000} for i in range(6)]
+    columns = tuple(shown_rows[0])
+    raw = json.dumps({"sql": "SELECT 1", "columns": list(columns), "rows": raw_rows})
+    return columns, shown_rows, raw
+
+
+@pytest.mark.parametrize("kind", ["bigint", "nested"])
+def test_lossy_fact_keeps_raw_json_required(kind: str) -> None:
+    # 表格单独约 18 KB 放得下，表格加原文放不下：原文不能省，整体必须换附件。
+    columns, rows, raw = _lossy_rows(kind)
+    d = delivery(fact(columns, rows, raw=raw))
+    with pytest.raises(MessageCapacityError):
+        build_feishu_message(d, 3500, CHAT, allow_preview=False, platform_limits=True)
+    *files, body = _data_parts(d, 0, 3500, CHAT, None)
+    assert files and RAW_OMITTED not in body.body.decode()
 
 
 def test_plain_text_keeps_reply_char_limit() -> None:
@@ -202,7 +225,18 @@ def test_metadata_fact_preview_counts_fields() -> None:
     message = build_feishu_message(d, 3500, CHAT, platform_limits=True)
     text = shown(message)
     assert "共 12 个字段" in text and "预览" in text
+
+
+def test_single_large_metadata_field_preview_is_honest_but_empty() -> None:
+    # 已知边界（本切片不做 MCP 行视图）：看板列表通常是一个字符串字段，超限时预览不到条目。
+    metadata = {"dashboards": json.dumps([{"title": "N" * 100}] * 400)}
+    raw = json.dumps({"dashboards": json.loads(metadata["dashboards"])})
+    d = delivery(fact((), (), metadata=metadata, raw=raw, tool_id="grafana/search"), analysis=None)
+    text = shown(build_feishu_message(d, 3500, CHAT, platform_limits=True))
+    assert "预览 0／共 1 个字段" in text and "结果行未展示。" in text
+    assert "（无数据行）" not in text
 ```
+
 
 - [ ] **Step 2: 运行并确认失败**
 
@@ -251,14 +285,40 @@ def _raw_redundant(fact: DeliveryFact) -> bool:
             )
 ```
 
-在 `_card` 的依据面板构造里（`if index in technical:` 块之后）加入：
+给 `_card` 增加只控制原文 JSON 的关键字参数（不复用 `technical`，`row_count`、`elapsed_ms`、`next_cursor` 等技术字段仍由 `technical` 决定）：
 
 ```python
-        elif omissions and fact.result_json is not None and fact.view != "brief":
-            details.append(_div(RAW_OMITTED))
+def _card(
+    delivery: Delivery,
+    counts: Sequence[int],
+    sqls: set[int],
+    analysis: Sequence[AnswerInference],
+    technical: set[int],
+    *,
+    omissions: bool = True,
+    formatted: bool = False,
+    raw_hidden: AbstractSet[int] = frozenset(),
+) -> Message:
 ```
 
-（该 `elif` 接在 `if index in technical:` 之后，保证技术字段已展示时不出现说明。）
+（导入 `from collections.abc import Sequence, Set as AbstractSet`。）依据面板中把
+
+```python
+            if fact.result_json is not None:
+                details.append(_div(f"原文 JSON:\n{fact.result_json}"))
+```
+
+替换为：
+
+```python
+            if fact.result_json is not None:
+                # 只有可由可见值无损替代的原文才会被列入 raw_hidden；省略时如实说明。
+                details.append(
+                    _div(RAW_OMITTED)
+                    if index in raw_hidden
+                    else _div(f"原文 JSON:\n{fact.result_json}")
+                )
+```
 
 修改 `build_feishu_message` 签名与 `fits`：
 
@@ -292,17 +352,27 @@ def build_feishu_message(
 
 ```python
     if platform_limits:
-        # 行、实际 SQL、分析与不可替代的原文均完整时即为完整消息；其余技术详情尽量附带。
-        required = {i for i, f in enumerate(delivery.facts) if not _raw_redundant(f)}
-        if fits(_card(delivery, totals, all_sql, delivery.analysis, required)):
-            chosen = set(required)
-            for index in range(len(totals)):
-                if index not in chosen and fits(
-                    _card(delivery, totals, all_sql, delivery.analysis, chosen | {index})
-                ):
-                    chosen.add(index)
-            plain = _card(delivery, totals, all_sql, delivery.analysis, chosen)
-            formatted = _card(delivery, totals, all_sql, delivery.analysis, chosen, formatted=True)
+        # 行、实际 SQL、分析、全部技术字段与不可替代的原文都完整才算完整消息；
+        # 只有能由可见值无损替代的原文 JSON 可省略，放得下的仍逐条恢复展示。
+        hidden = {i for i, f in enumerate(delivery.facts) if _raw_redundant(f)}
+
+        def core(raw_hidden: set[int], *, formatted: bool = False) -> Message:
+            return _card(
+                delivery,
+                totals,
+                all_sql,
+                delivery.analysis,
+                all_technical,
+                formatted=formatted,
+                raw_hidden=raw_hidden,
+            )
+
+        if hidden and fits(core(hidden)):
+            for index in sorted(hidden):
+                if fits(core(hidden - {index})):
+                    hidden = hidden - {index}
+            plain = core(hidden)
+            formatted = core(hidden, formatted=True)
             return formatted if fits(formatted) else plain
 ```
 
@@ -349,12 +419,12 @@ def build_feishu_message(
 - [ ] **Step 4: 运行新测试**
 
 Run: `PYTHONDONTWRITEBYTECODE=1 .venv/bin/python -m pytest -q tests/sdk_core/test_inline_delivery.py -p no:cacheprovider --tb=short`
-Expected: 7 passed。
+Expected: 10 passed（`test_lossy_*` 为参数化 2 项）。
 
 - [ ] **Step 5: 运行受影响的渲染回归**
 
 Run: `SDK_TEST_POSTGRES_URL=postgresql+asyncpg://postgres@127.0.0.1:55432/postgres PYTHONDONTWRITEBYTECODE=1 .venv/bin/python -m pytest -q tests/sdk_core/test_feishu_format.py tests/sdk_core/test_feishu.py -p no:cacheprovider --tb=short`
-Expected: 全部通过。旧路径 `platform_limits=False` 的唯一预期输出变化是新增的“预览 N／本次返回 M 行”与 `RAW_OMITTED` 两行；若有用例因此失败，只为这两行补充期望，其他断言不改、不删。
+Expected: 全部通过。旧路径 `platform_limits=False` 的唯一预期输出变化是预览卡新增的“预览 N／本次返回 M 行”（`raw_hidden` 默认为空，旧路径不出现 `RAW_OMITTED`）；若有用例因此失败，只为这一行补充期望，其他断言不改、不删。
 
 - [ ] **Step 6: Commit**
 
@@ -380,10 +450,6 @@ git commit -m "fix(feishu): 平台限制门槛与回答优先预览的渲染支�
 追加到 `tests/sdk_core/test_inline_delivery.py`：
 
 ```python
-from xiaowei.channel_store import DeliveryPart
-from xiaowei.feishu_delivery import _check_capacity, _data_parts, _preview
-
-
 def test_medium_result_without_file_request_has_no_attachment() -> None:
     d = delivery(fact(("queryId", "user", "duration_ms", "sql_text"), audit_rows(3, 1500)))
     (body,) = _data_parts(d, 0, 3500, CHAT, None)
@@ -416,9 +482,9 @@ def test_preview_of_metadata_fact_shows_some_fields() -> None:
 
 
 def test_element_budget_still_forces_attachment() -> None:
-    # 40 条小结果：字节远低于 30,000，但卡片组件超过 200（超过 5 个表格后逐行文本展示）。
+    # 25 条小结果：完整卡片约 2 万字节（低于 30,000），但组件约 300 个，超过 200。
     facts = tuple(
-        fact(("v",), ({"v": i},)).model_copy(update={"evidence_id": f"ev_{i}"}) for i in range(40)
+        fact(("v",), ({"v": i},)).model_copy(update={"evidence_id": f"ev_{i}"}) for i in range(25)
     )
     d = delivery(*facts, analysis=None)
     with pytest.raises(MessageCapacityError):  # 字符与字节都放开时仍不合，只能是组件预算
@@ -565,7 +631,7 @@ def _check_capacity(
 - [ ] **Step 4: 运行新测试**
 
 Run: `PYTHONDONTWRITEBYTECODE=1 .venv/bin/python -m pytest -q tests/sdk_core/test_inline_delivery.py -p no:cacheprovider --tb=short`
-Expected: 13 passed。
+Expected: 16 passed。
 
 - [ ] **Step 5: 运行交付回归（需隔离测试 PostgreSQL）**
 
@@ -634,17 +700,18 @@ def test_production_round_r14_dashboard_search_stays_inline() -> None:
 - [ ] **Step 2: 运行**
 
 Run: `PYTHONDONTWRITEBYTECODE=1 .venv/bin/python -m pytest -q tests/sdk_core/test_inline_delivery.py -p no:cacheprovider --tb=short`
-Expected: 15 passed（这两项在 Task 2 完成后应直接通过；若在基线 `eda4a0b` 上运行则失败，作为复盘回归证据，记录在提交说明中）。
+Expected: 18 passed（这两项在 Task 2 完成后应直接通过；若在基线 `eda4a0b` 上运行则失败，作为复盘回归证据，记录在提交说明中）。
 
 - [ ] **Step 3: 变异检查（临时，不提交）**
 
 逐项在工作树中临时改动并运行本文件，确认对应用例失败后 `git checkout -- src` 还原：
 1. `_preview` 恢复为截 `fact.rows` 后 `allow_preview=False` → `test_zero_row_preview_never_claims_no_data` 或 `test_oversized_result_gets_file_and_body_with_answer_and_exact_preview` 失败。
 2. `fits` 中对卡片也检查 `max_chars` → `test_medium_result_*` 失败。
-3. `_raw_redundant` 永远返回 `True` → `test_lossy_fact_keeps_raw_json_required` 失败。
+3. `_raw_redundant` 永远返回 `True` → `test_lossy_fact_keeps_raw_json_required[bigint]` 与 `[nested]` 失败（错误实现会内联并丢失原类型）。
 4. 删去回答优先的 `fit_analysis([0] * len(totals))` → `test_preview_keeps_answer_first_and_states_exact_range` 失败。
+5. 平台完整判断改为 `technical` 只含不可替代项（即把技术字段与原文 JSON 一起设为可选）→ `test_redundant_raw_json_is_optional_but_technical_fields_stay` 失败。
 
-把四次结果（失败用例名与退出码）记入提交说明。
+把五次结果（失败用例名与退出码）记入提交说明。
 
 - [ ] **Step 4: Commit**
 
@@ -699,7 +766,7 @@ def test_md_table_cells_are_inert_and_reversible() -> None:
         "<at id=all>",
         "https://invalid.example/path",
         "__strong__",
-        "line sep",
+        "line\u2028sep",
     ]
     body = _md_body({"columns": ["v"], "rows": [{"v": v} for v in values]})
     html = MarkdownIt("default").enable("table").render(body)
@@ -708,6 +775,32 @@ def test_md_table_cells_are_inert_and_reversible() -> None:
     cells = re.findall(r"<td><code>(.*?)</code></td>", html)
     assert [json.loads(unescape(c)) for c in cells[:5]] == values[:5]
     assert "\\u2028" in cells[5]
+
+
+def test_md_table_headers_and_detail_titles_are_inert_and_reversible() -> None:
+    # SQLGuard 接受带引号的别名，列名可含换行、链接与 Markdown 结构，不能指望上游拦截。
+    names = [
+        "x\n\n[click](https://example.invalid)\n\ny",
+        " lead ",
+        "a`b",
+        "a|b",
+        "z\n\n- injected",
+        "ok",
+    ]
+    row = {name: "1" for name in names}
+    row["z\n\n- injected"] = "multi\nline"  # 触发表下明细标题
+    body = _md_body({"columns": names, "rows": [row]})
+    html = MarkdownIt("default").enable("table").render(body)
+    assert "<table>" in html
+    assert "<a href=" not in html and "<li>" not in html
+    headers = re.findall(r"<th>(.*?)</th>", html)
+    assert len(headers) == len(names)
+    decoded = [
+        json.loads(unescape(h[len("<code>") : -len("</code>")])) if h.startswith("<code>") else h
+        for h in headers
+    ]
+    assert decoded == names
+    assert "见下方 第 1 行" in body and "multi\nline" in body
 ```
 
 （文件顶部已有 `json`、`re`、`unescape`、`MarkdownIt` 导入。）
@@ -715,7 +808,7 @@ def test_md_table_cells_are_inert_and_reversible() -> None:
 - [ ] **Step 2: 运行并确认失败**
 
 Run: `PYTHONDONTWRITEBYTECODE=1 .venv/bin/python -m pytest -q tests/sdk_core/test_feishu_report_layout.py -k "md_table" -p no:cacheprovider --tb=short`
-Expected: 2 failed（无表头 `| ts | host | sql_text |`）。
+Expected: 3 failed（基线没有表格；表头用例在基线上还会生成链接或列表）。
 
 - [ ] **Step 3: 实现**
 
@@ -736,9 +829,15 @@ def _md_cell(value: object) -> str | None:
     return _inline_code(display_text(text).replace("|", "\\|"))
 
 
-def _md_header(name: str) -> str:
-    return name if _safe_md_cell(name) else _inline_code(display_text(name).replace("|", "\\|"))
+def _md_label(name: str) -> str:
+    """列名/字段名：简单名直出；其余用 JSON 单行编码放入代码片段，可逆且不跨行。"""
+    if _safe_md_cell(name) and name == name.strip():
+        return name
+    # json.dumps 把换行等转成转义序列，引号保住首尾空格；再转义竖线、显示不可见控制符。
+    return _inline_code(display_text(_json_value(name)).replace("|", "\\|"))
 ```
+
+`_md_label` 同时替换 `_md_fact` 中既有的元数据字段标题 `**{_md_escape(key)}**` 为 `**{_md_label(key)}**`：简单字段名输出不变，含换行等的字段名不再能改变文档结构。
 
 把 `_md_fact` 中 `if table is not None:` 分支整体替换为：
 
@@ -748,7 +847,7 @@ def _md_header(name: str) -> str:
         if columns:
             details = []
             lines = [
-                "| " + " | ".join(_md_header(c) for c in columns) + " |",
+                "| " + " | ".join(_md_label(c) for c in columns) + " |",
                 "| " + " | ".join("---" for _ in columns) + " |",
             ]
             for index, row in enumerate(rows, 1):
@@ -761,7 +860,7 @@ def _md_header(name: str) -> str:
                     cell = None if column in _RAW_FIELDS else _md_cell(item)
                     if cell is None:
                         cells.append(f"见下方 第 {index} 行")
-                        title = f"**第 {index} 行 · {_md_escape(column)}**"
+                        title = f"**第 {index} 行** · {_md_label(column)}"
                         if isinstance(item, str):
                             language = (
                                 "sql" if column in ("sql", "ddl") else "text"
@@ -791,6 +890,8 @@ def _md_header(name: str) -> str:
 
 Run: `PYTHONDONTWRITEBYTECODE=1 .venv/bin/python -m pytest -q tests/sdk_core/test_feishu_report_layout.py tests/sdk_core/test_feishu_reports.py -p no:cacheprovider --tb=short`（`test_feishu_reports.py` 中依赖 PostgreSQL 的用例需带 `SDK_TEST_POSTGRES_URL`）
 Expected: 全部通过；拆分用例（每个文件 ≤400,000 字节、整行不拆）不受影响。若其他既有用例断言复杂行为“第 N 行 + JSON 围栏”形态，改为断言表格中的对应单元格或“见下方 第 N 行”明细，原有的值、类型（NULL/字符串 NULL/大整数/嵌套）与安全断言逐条保留；每处改动在提交说明中列出。
+
+变异检查（临时，不提交）：把 `_md_label` 改回 `_inline_code(display_text(name).replace("|", "\\|"))`（保留换行），确认 `test_md_table_headers_and_detail_titles_are_inert_and_reversible` 失败后 `git checkout -- src` 还原，结果记入提交说明。
 
 - [ ] **Step 6: Commit**
 
@@ -860,5 +961,7 @@ git commit -m "docs: 飞书交付以平台限制为门槛并记录复盘修复�
 | 真实模型 | 不涉及 | 提示词与工具未改；任务样例沿结果交付计划 §2，未运行 |
 | 真实飞书 | 未验证 | 接近 30,000 字节卡片在手机/桌面的显示与性能；MD 表格在飞书文件预览及常见编辑器中的显示；均需获准测试群 |
 | 部署 | 不做 | 不推送、不合并、不部署，除非用户另行授权 |
+
+**审核修订（`5898dda` 审核）：** 原文 JSON 的省略改用独立的 `raw_hidden`，技术字段始终完整；MD 列名与明细标题用 JSON 单行编码；补充“表格放得下、表格加原文放不下”的大整数与嵌套样本；C 改记为部分修复并加单大字段边界用例。
 
 **退出条件：** 中等结果（<30,000 字节、≤200 组件）无附件；超限结果有附件且正文含回答与准确预览范围，不再出现“（无数据行）”误述；显式 MD 对真实数据成表且安全断言保持；旧 v0 与审批材料卡行为不变；整体检查通过并有独立审查记录。
