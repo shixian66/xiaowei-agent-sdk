@@ -10,7 +10,7 @@ import unicodedata
 from collections.abc import Sequence
 from typing import Any, Final
 
-from xiaowei.feishu_markdown import format_prose
+from xiaowei.feishu_markdown import format_prose, prose_post
 from xiaowei.models import AnswerInference, Delivery, DeliveryFact, JsonScalar
 
 MAX_REQUEST_BYTES: Final = 30_000
@@ -106,12 +106,12 @@ def request_bytes(message: Message, chat_id: str, *, reply_to: str | None = None
     card 先按 SDK json.dumps 默认分隔符序列化为字符串，httpx 外层使用紧凑 JSON。
     reply 的 message_id 在路径中，不在请求体中。不调用 SDK 私有编码器。
     """
-    card = "card" in message
+    key = "card" if "card" in message else "post" if "post" in message else None
     body = {
         "content": json.dumps(
-            message["card"] if card else message, ensure_ascii=False, allow_nan=False
+            message[key] if key else message, ensure_ascii=False, allow_nan=False
         ),
-        "msg_type": "interactive" if card else "text",
+        "msg_type": "interactive" if key == "card" else "post" if key == "post" else "text",
         "uuid": "0" * 36,
     }
     if reply_to is None:
@@ -132,6 +132,8 @@ def _chars(value: object) -> int:
         return sum(len(c["display_name"]) for c in value["columns"]) + sum(
             len(cell) for row in value["rows"] for cell in row.values()
         )
+    if value.get("tag") == "text":
+        return len(value["text"])
     if set(value) == {"text"}:
         return len(value["text"])
     return sum(_chars(v) for v in value.values())
@@ -162,18 +164,38 @@ def _card(
         elements.append(_div(delivery.monitoring_notice))
     if delivery.session_notice:
         elements.append(_div(delivery.session_notice))
+    if analysis:
+        elements.append(_div("分析与建议（模型推断）"))
+        for item in analysis:
+            prose = format_prose(display_text(item.text)) if formatted else [_div(item.text)]
+            if prose == [_div(item.text)]:
+                elements.append(_div(item.text))
+            else:
+                elements.extend(prose)
+    if omissions and tuple(analysis) != delivery.analysis:
+        elements.append(_div(ANALYSIS_CLIPPED))
     tables = 0
     for index, fact in enumerate(delivery.facts):
         columns, all_rows = _data(fact)
         rows = all_rows[: counts[index]]
-        elements.append(
-            _div(
-                f"[{fact.evidence_id}] 来源 {fact.tool_id} · 目标 {fact.target_id}\n"
-                f"采集于 {fact.captured_at.isoformat()}"
+        if fact.requires_complete:
+            # 独立审批材料保留原来的完整来源、说明和正文。
+            elements.append(
+                _div(
+                    f"[{fact.evidence_id}] 来源 {fact.tool_id} · 目标 {fact.target_id}\n"
+                    f"采集于 {fact.captured_at.isoformat()}"
+                )
             )
-        )
+        else:
+            elements.append(_div(f"结果 · {fact.target_id}"))
         if fact.note is not None:
-            elements.append(_div(f"说明：{fact.note}"))
+            elements.append(
+                _div(
+                    f"说明：{fact.note}"
+                    if fact.requires_complete
+                    else fact.note_summary or fact.note
+                )
+            )
         if fact.requires_complete:
             elements.append(
                 _div(
@@ -244,22 +266,17 @@ def _card(
         for f, n in zip(delivery.facts, counts, strict=True)
     ):
         elements.append(_div(FACTS_CLIPPED))
-    if analysis:
-        elements.append(_div("分析与建议（模型推断）"))
-        for item in analysis:
-            prose = format_prose(display_text(item.text)) if formatted else [_div(item.text)]
-            if prose == [_div(item.text)]:
-                elements.append(_div(f"- {item.text}（依据：{', '.join(item.evidence_ids)}）"))
-            else:
-                elements.extend(prose)
-                # 引用由代码单独展示，不让模型的格式、围栏或裁剪隐藏依据。
-                elements.append(_div(f"依据：{', '.join(item.evidence_ids)}"))
-    if omissions and tuple(analysis) != delivery.analysis:
-        elements.append(_div(ANALYSIS_CLIPPED))
     for index, fact in enumerate(delivery.facts):
         if fact.requires_complete:
             continue
-        details: list[Message] = []
+        details: list[Message] = [
+            _div(
+                f"依据：{fact.evidence_id} · 来源 {fact.tool_id} · 目标 {fact.target_id}\n"
+                f"采集于 {fact.captured_at.isoformat()}"
+            )
+        ]
+        if fact.note_summary and fact.note:
+            details.append(_div(fact.note))
         if index in sqls:
             details.append(_div(f"实际 SQL:\n{fact.metadata['sql']}"))
         if index in technical:
@@ -278,16 +295,16 @@ def _card(
                     "expanded": False,
                     "header": {
                         "title": _plain(
-                            f"获准原文与查询信息 · {fact.evidence_id}"
-                            if fact.view == "brief"
-                            else f"技术详情 · {fact.evidence_id}"
+                            "查看依据 · 获准原文与查询信息" if fact.view == "brief" else "查看依据"
                         )
                     },
                     "elements": details,
                 }
             )
     elements.extend(_basis_panels(delivery.basis))
-    return _static_card(elements, "小维 · 工具结果")
+    return _static_card(
+        elements, "小维 · 工具结果" if any(f.requires_complete for f in delivery.facts) else "小维"
+    )
 
 
 def _static_card(elements: list[Message], title: str) -> Message:
@@ -348,7 +365,7 @@ def build_feishu_message(
     max_bytes: int = MAX_REQUEST_BYTES,
     allow_preview: bool = True,
 ) -> Message:
-    """构造单张业务卡片（放不下时固定容量回执）：必要说明 → 实际 SQL → 整行事实 → 分析 → 其他详情。
+    """生成受控 post 或结果卡片：必要提醒、回答、完整事实与折叠依据。
 
     来源/限制放不下时只发固定容量说明；本地异常由调用方记 failed。这里不读另一渠道的投影，
     不靠 SDK 分片，不在发送开始后改发另一消息。
@@ -419,6 +436,19 @@ def build_feishu_message(
                 basis=delivery.basis,
             )
 
+        shown = display_text(raw)
+        # SDK 内部 post→text 降级不会经过 Transport 的 mention_safe；含 @ 标签留在卡片。
+        if delivery.feishu_text is not None and not delivery.basis and mention_safe(shown) == shown:
+            post = prose_post(shown)
+            if post is not None:
+                leading = [
+                    n for n in (prefix, delivery.monitoring_notice, delivery.session_notice) if n
+                ]
+                post["post"]["zh_cn"]["content"][:0] = [
+                    [{"tag": "text", "text": display_text(n)}] for n in leading
+                ]
+                if fits(post):
+                    return post
         full = prose_message(raw)
         if fits(full):
             formatted = prose_message(raw, formatted=True)

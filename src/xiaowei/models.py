@@ -374,6 +374,7 @@ class DeliveryFact(_Trusted):
     rows: tuple[dict[str, JsonScalar], ...]
     metadata: dict[str, JsonScalar]
     note: str | None = None
+    note_summary: str | None = None
     result_json: str | None = None
     requires_complete: bool = Field(default=False, exclude=True)
     view: Literal["full", "brief"] = "full"

@@ -12,6 +12,7 @@ from xiaowei.feishu_render import (
     ANALYSIS_CLIPPED,
     CAPACITY_NOTICE,
     FACTS_CLIPPED,
+    MessageCapacityError,
     build_feishu_message,
     request_bytes,
 )
@@ -68,13 +69,19 @@ def text_parts(value: Any, *, folded: bool = True) -> list[str]:
         return [c["display_name"] for c in value["columns"]] + [
             cell for row in value["rows"] for cell in row.values()
         ]
+    if value.get("tag") == "text":
+        return [value["text"]]
     if set(value) == {"text"}:
         return [value["text"]]
     return [part for child in value.values() for part in text_parts(child, folded=folded)]
 
 
 def tables(message: dict[str, Any]) -> list[dict[str, Any]]:
-    return [e for e in message["card"]["body"]["elements"] if e["tag"] == "table"]
+    return [
+        e
+        for e in message.get("card", {}).get("body", {}).get("elements", [])
+        if e["tag"] == "table"
+    ]
 
 
 def message_text(message: str | dict[str, Any]) -> str:
@@ -83,8 +90,9 @@ def message_text(message: str | dict[str, Any]) -> str:
 
 
 def size(message: dict[str, Any], chat: str = "oc_test", reply: str | None = None) -> int:
-    kind = "interactive" if "card" in message else "text"
-    content = json.dumps(message["card"] if "card" in message else message, ensure_ascii=False)
+    key = "card" if "card" in message else "post" if "post" in message else None
+    kind = "interactive" if key == "card" else "post" if key == "post" else "text"
+    content = json.dumps(message[key] if key else message, ensure_ascii=False)
     body = {"content": content, "msg_type": kind, "uuid": "0" * 36}
     if reply is None:
         body["receive_id"] = chat
@@ -96,23 +104,25 @@ def test_facts_visible_once_analysis_multiline_and_details_folded() -> None:
     message = build_feishu_message(delivery(source, analysis="第一行\n第二行"), 3500, "oc_test")
     assert message["card"]["schema"] == "2.0"
     visible = "\n".join(text_parts(message, folded=False))
-    assert "ev_original" in visible and "2026-10-09T11:47:56+00:00" in visible
+    assert "ev_original" not in visible and "2026-10-09T11:47:56+00:00" not in visible
+    assert "ev_original" in "\n".join(text_parts(message))
     assert source.note in visible
     assert "分析与建议（模型推断）" in visible and "第一行\n第二行" in visible
     assert visible.count('"orders"') == 1
     assert "SELECT name" not in visible and "next_cursor" not in visible
     all_text = "\n".join(text_parts(message))
     assert "SELECT name FROM shop.orders LIMIT 5" in all_text
-    assert "依据：ev_original" in visible
-    assert visible.index('"orders"') < visible.index("分析与建议")
+    assert "依据：ev_original" in all_text
+    assert visible.index("分析与建议") < visible.index('"orders"')
     assert "旧转义文字" not in all_text
 
 
 @pytest.mark.parametrize("tool", ["local/list_databases", "local/describe_table_layout"])
-def test_notes_and_capture_time_are_not_hidden_with_technical_fields(tool: str) -> None:
+def test_business_notes_visible_and_capture_time_in_evidence(tool: str) -> None:
     message = build_feishu_message(delivery(fact(tool_id=tool)), 3500, "oc_test")
     visible = "\n".join(text_parts(message, folded=False))
-    assert "采集时的结果" in visible and "采集于" in visible
+    assert "采集时的结果" in visible and "采集于" not in visible
+    assert "采集于" in "\n".join(text_parts(message))
     assert "row_count" not in visible and "elapsed_ms" not in visible
 
 
@@ -388,7 +398,7 @@ def test_advice_keeps_unverified_label() -> None:
         3500,
         "oc_test",
     )
-    assert "card" in message
+    assert "post" in message
     shown = "\n".join(text_parts(message, folded=False))
     assert "未执行查询" in shown and "未经系统核实" in shown
 
@@ -411,7 +421,7 @@ def test_monitoring_failure_notice_is_visible_in_fact_card_and_advice() -> None:
         evidence_ids=(),
     )
     text_message = build_feishu_message(no_fact, 3500, "oc_test")
-    assert "card" in text_message
+    assert "post" in text_message
     visible = "\n".join(text_parts(text_message, folded=False))
     assert notice in visible and "未经数据验证" in visible
 
@@ -428,18 +438,7 @@ def test_short_fact_fits_when_zero_row_placeholders_would_not() -> None:
         note=PLAN_NOTE,
     )
     complete = build_feishu_message(delivery(source), 3500, "oc_test")
-    primary = {
-        "card": {
-            **complete["card"],
-            "body": {
-                "elements": [
-                    e
-                    for e in complete["card"]["body"]["elements"]
-                    if e["tag"] != "collapsible_panel"
-                ]
-            },
-        }
-    }
+    primary = complete
     needed = sum(map(len, text_parts(primary)))
     for budget in (needed, needed + 1, needed + 12):
         shown = build_feishu_message(delivery(source), budget, "oc_test")
@@ -453,9 +452,8 @@ def test_short_fact_fits_when_zero_row_placeholders_would_not() -> None:
         byte_limited = build_feishu_message(delivery(source), 3500, "oc_test", max_bytes=budget)
         assert tables(byte_limited)[0]["rows"] == [{"c0": '"SCAN"'}]
         assert size(byte_limited) <= budget
-    below = build_feishu_message(delivery(source), needed - 1, "oc_test")
-    assert '"SCAN"' not in text_parts(below)
-    assert sum(map(len, text_parts(below))) <= needed - 1 and size(below) <= 30_000
+    with pytest.raises(MessageCapacityError):
+        build_feishu_message(delivery(source), needed - 1, "oc_test", allow_preview=False)
 
 
 def test_short_prefix_survives_larger_zero_row_placeholders() -> None:
