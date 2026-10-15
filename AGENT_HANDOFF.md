@@ -9,14 +9,14 @@
 | 项目 | 已核对事实 |
 | --- | --- |
 | 仓库 | [shixian66/xiaowei-agent-sdk](https://github.com/shixian66/xiaowei-agent-sdk) |
-| 本地目录 / 分支 | D3：`/Users/kloenguyen/.codex/worktrees/delivery-document-plan/agent-SDK` / `codex/result-messages-d3`；基线 `0fff2200316f85a92a963cddaed7d25b983b46cb`（D2 PR #104 合并）。原目录其他分支及未跟踪公司配置未读取或改动。 |
+| 本地目录 / 分支 | D4：`/Users/kloenguyen/.codex/worktrees/delivery-document-plan/agent-SDK` / `codex/result-timeseries-d4`；基线 `6f2806265091db9cbfb4973e88be4d05e5cdb21a`（D3 PR #105 合并）。原目录其他分支及未跟踪公司配置未读取或改动。 |
 | M5 历史起点 | `372c381f44ecfa1fa53961f137d0058033cbd805`；不是远端当前 main 的核验结论 |
-| 本轮审查版本 | 设计 v1.4 `b58f0d9` 已批准；D1a/D1b/D2 分别经 PR #102/#103/#104 合入，D2 合并基线 `0fff2200`，未部署。用户独立审查 `0fff220..74aa6be` 提出 B1 和三项测试缺口；产品补修 `9e8010d164150eaf5dd554b88f3879defbe7f0ba` 与仅追加两行测试断言的 `02675340ae9d4ca6328d1c777dac70ca4893ad24` 已独立增量复核，后续仅更新验证文档。仍待用户审核验收。 |
+| 本轮审查版本 | 设计 v1.4 `b58f0d9` 已批准；D1–D3 已合入。D3 用户复审通过 `424c465`，PR #105 CI 10/10 后合为 `6f28062`，merge tree 与获审 head 一致。当前 D4 只验证协议前置，不实施图形或修改产品契约。 |
 | 已同步主线审查记录 | SDK-A/B/C 已随 PR #89/#93/#94 合入；D7 已随 PR #83 离线合入。上述合入不代表真实模型、飞书或公司 Grafana 验收。 |
-| 当前阶段 | D3 本地补修与离线检查完成，待用户增量复查；审核验收前不推送或开 PR，没有部署授权。 |
+| 当前阶段 | D4.0 发现官方锁版文本输出不可逆歧义，图形按已批准停止条件暂停；用户授权继续开发、测试、推送与开 PR，不含本片合并或部署。 |
 | 当前源码与依赖 | 应用表v12，新请求分项回执、旧请求v0语义兼容；SDK/锁文件不变，独立.venv按锁安装；正式启动不自动迁移。 |
 | 新产品入口 | `xiaowei` 的 `serve`、`config check`、`model check`、`storage init/upgrade/cleanup`、`requests resend`；容器 Web 绑定沿现有部署配置。真实模型、公司 StarRocks 与真实飞书不由离线测试证明。 |
-| 本次工作范围 | D3 复用官方结构化 Markdown、既有卡片和完整交付/恢复；回答优先、技术依据折叠、必要业务限制可见。Agent Loop、工具选择、权限、SQL/DDL 原文组件及独立审批不变；D4 曲线不在本片范围。 |
+| 本次工作范围 | 官方 MCP + 真 SDK + loopback API 的名称碰撞与采样特征验证，以及计划中的最小上游契约修订提案。产品源码、Agent/工具说明、权限、Evidence/Session、指纹、依赖和迁移均不改。 |
 | 外部操作 | 主线曾获用户授权用合成数据调用 Gemini API（见第 3 节），验证后本机凭据文件已删除，用户负责作废该密钥；Gate 0 离线部分与 SQLGuard 没有调用真实模型；全部工作均未调用飞书或外部 MCP Server。Gate 0 真实运行经用户授权使用第三方中转端点 `bbtoken.boywe.cn`（OpenAI 兼容 Chat Completions）发送合成数据，共 22 次模型请求（含诊断探测），另有 1 次模型列表查询，串行、不重试；凭据只写入仓库外权限 600 的临时文件，运行后已删除，用户负责作废该密钥。Task 2 从 Docker Hub 拉取官方 `starrocks/allin1-ubuntu:latest`（digest `sha256:faf7ce9c…276b`，StarRocks 4.1.4）在本机 127.0.0.1:59030 运行可丢弃容器，只写入随机名合成库，用后删除；未连接用户的 StarRocks。P2 Task 0 用同一本地镜像在 127.0.0.1:59030 运行可丢弃容器，从 `releases.starrocks.io/resources/auditloader.zip` 下载官方 AuditLoader 5.0.0（sha256 `cd2a8ace…8ea2`）只装入该容器，临时把 FE `query_explain_level` 改为 ANALYZE 后已恢复；容器与合成数据已删除。P2.5 Task 0 用同一 digest 新建可丢弃容器 `xw-p25-t0-sr`（只发布 127.0.0.1:59030/58030）与 `xiaowei-sdk-test` PostgreSQL，装入同一 AuditLoader 5.0.0；临时改 FE `query_explain_level`、`enable_statistic_collect_on_first_load` 并建极低阈值资源组，均已恢复/删除并回读；容器与测试库已删除，未触碰 `xiaowei-release-*`。P2.5 Task 1 只用本机 `xiaowei-sdk-test` PostgreSQL 与 StarRocks 驱动替身，未连接任何 StarRocks、模型 API、飞书或外部 MCP。P2.5 Task 2 用同一 digest 新建可丢弃容器 `xw-p25-t2-sr`（只发布 127.0.0.1:59030），装入同一 AuditLoader 5.0.0（`max_stmt_length=1000`），运行 SR 用例与工作树外的 1,000 表规模实验；规模实验前两次（每批 50 条建表）期间单容器 FE 多次重启、实验失败，`docker restart` 后改为每批 20 条完成；合成库、账号与角色均已删除，容器与测试 PostgreSQL 已删除，未触碰 `xiaowei-release-*`。Task 2 审查修订用同一 digest 新建可丢弃容器 `xw-p25-t2r-sr`（标签 `xiaowei.task=p25-task2-review`，只发布 127.0.0.1:59030/58030），装入同一 AuditLoader 5.0.0，只运行 §5 SR 用例；未改 FE 设置。P2.5 Task 3 用同一 digest 新建可丢弃容器 `xw-p25-t3-sr`（标签 `xiaowei.task=p25-task3`，只发布 127.0.0.1:59030/58030），装入同一 AuditLoader 5.0.0，运行 §5 SR 用例（含新增的复杂 SQL 对照，临时建库 `<随机库>_hr` 用后删除）；审查修复另建同 digest 可丢弃容器 `xw-p25-t3r-sr`（只发布 127.0.0.1:59030/58030），以 root 在合成库 `p` 中探测名字解析规则后删除该库（复审第 2 轮另建同 digest 容器 `xw-p25-t3r2-sr` 重复同样流程），装入同一 AuditLoader 5.0.0 运行 §5 SR 用例；未改 FE 设置，未连接用户的 StarRocks、模型 API、飞书或外部 MCP。P2.5 Task 5 用同一 digest 新建可丢弃容器 `xw-p25-t5-sr`（标签 `xiaowei.task=p25-task5`，只发布 127.0.0.1:59030/58030），装入同一 AuditLoader 5.0.0（官方包 sha256 `cd2a8ace…8ea2`，只把 `max_stmt_length` 改为 1000），运行 §5 SR 用例，另起 `xiaowei-sdk-test` PostgreSQL；未改 FE 设置，用后删除，未触碰 `xiaowei-release-*`。P2.5 Task 6 同样新建可丢弃容器 `xw-p25-t6-sr`（标签 `xiaowei.task=p25-task6`，只发布 127.0.0.1:59030/58030）与 `xiaowei-sdk-test` PostgreSQL，装入同一 AuditLoader 5.0.0（先误用 Task 5 的包，`max_batch_interval_sec` 为默认 60，卸载后按 P2.5 §9.1 改为 10 重装），运行 §5 SR 用例（含新增的搜表与跨库审计用例，临时库 `<随机库>_b` 用后删除）；未改 FE 设置，用后删除 P2.5 Task 7 的实现与第一轮审查修订只用隔离的 `xiaowei-sdk-test` PostgreSQL 与本机 Chrome（脚本模型、驱动与合成 StarRocks 替身）；复审修订用同一 digest 新建可丢弃容器 `xw-p25-t7r-sr`（标签 `xiaowei.task=p25-task7-review`，只发布 127.0.0.1:59030/58030）与 `xiaowei-sdk-test` PostgreSQL，装入同一 AuditLoader 5.0.0（§9.1 的包），只运行 §5 SR 用例；未改 FE 设置，用后删除，未触碰 `xiaowei-release-*`；没有调用真实模型、用户的 StarRocks、飞书或外部 MCP。P2.5 Task 8 只用 `xiaowei-sdk-test` PostgreSQL 与本机 Chrome（脚本模型、驱动替身与飞书替身），没有新建 StarRocks 容器（SR 结果沿用 PR #40 复审修订的运行，理由见计划 Task 8 实施说明），没有调用真实模型、用户的 StarRocks、飞书或外部 MCP。飞书单群 F2、F3 只用 `xiaowei-sdk-test` PostgreSQL 与本机 127.0.0.1 上的合成飞书 OpenAPI（真实 SDK 用例），没有调用真实飞书、模型、用户 StarRocks 或外部 MCP，未触碰 `xiaowei-release-*`。飞书单群 F0 只在本机 127.0.0.1 运行合成飞书 HTTP/长连接端点与 `xiaowei-sdk-test` PostgreSQL；为核对权限名称只读查阅了飞书开放平台公开文档；没有调用真实飞书、模型、用户 StarRocks 或外部 MCP，未触碰 `xiaowei-release-*`。 |
 
 表中外部操作一行保留以往阶段记录。G0 曾下载并运行官方 Prometheus MCP 二进制；R1a 复用已校验二进制，连接本机合成 Prometheus API、loopback MCP 和隔离 PostgreSQL，并通过飞书通道替身验证；未接公司监控源、真实模型或真实飞书。历史任务 SHA 只证明对应切片，不能混用。接手先用 `git rev-parse HEAD` 和 `git status --short` 取得实际版本；审查使用对应提交的精确 SHA，本文件的修改历史由 Git 保存。
@@ -37,7 +37,18 @@
 
 ## 3. 当前计划与下一项工作
 
-**当前下一步：** 用户按本地分支精确 HEAD 增量复查 `74aa6be..0267534` 的 B1 与验收 1–3；产品补修为 `9e8010d`，追加两行测试断言为 `0267534`，后续提交仅更新验证文档。整仓与追加断言的证据分别记录；审核验收后才推送、开 PR/合并。D4 保持后续切片，真实模型/飞书门槛不豁免，没有部署授权。
+**当前下一步：** 审查 D4.0 协议证据与[计划 D4.0 上游修订提案](docs/superpowers/plans/2026-10-14-result-delivery-documents.md#d40-协议前置结果与最小修订提案2026-10-15)。取得经批准、可区分原值的结构化上游结果前，不实施曲线、不改变原读取范围。D4 全片未完成，真实模型/源/飞书门槛不豁免，没有部署授权。
+
+**D4.0 协议前置：** 已校验官方 v0.18.0 二进制，复用现有协议夹具和真 SDK；具体反例、官方源码依据及唯一修订提案见[计划 D4.0](docs/superpowers/plans/2026-10-14-result-delivery-documents.md#d40-协议前置结果与最小修订提案2026-10-15)，不在此复制设计。新增两组名称碰撞分别在 JSON/TOON 验证，加一组毫秒时间戳、长小数、缺点、错序、重复点、非有限值的原文本验证，共 5 项；这是对已发布协议的特征验证，没有功能行为变更，未写产品解析器或图形代码，也不以“用例通过”声称协议满足图表要求。
+
+| D4.0 当前验证 | 结果与范围 |
+| --- | --- |
+| 官方协议基线 / 新反例 | 原协议文件 9 passed（11.69s，`/private/tmp/xw-d4-protocol-baseline.log`）；新增 5 passed、9 deselected（6.52s，`/private/tmp/xw-d4-protocol-gate.log`），没有跳过。命令：`XW_TEST_PROMETHEUS_MCP_BIN=/private/tmp/xw-prometheus-mcp-v018/prometheus-mcp-server PYTHONDONTWRITEBYTECODE=1 .venv/bin/python -m pytest -q tests/sdk_core/test_prometheus_p2_protocol.py -k 'ambiguous or explicit_points' -p no:cacheprovider --tb=short`。 |
+| 正式入口与相关回归 | README 的隔离测试 PostgreSQL 环境，设置上述官方二进制与 `PYTHONDONTWRITEBYTECODE=1`，运行 `python -m pytest -q tests/sdk_core/test_prometheus_mcp_protocol.py tests/sdk_core/test_prometheus_p2_protocol.py tests/sdk_core/test_prometheus_p2.py tests/sdk_core/test_feishu_report_layout.py tests/sdk_core/test_feishu_reports.py -p no:cacheprovider --tb=short`：139 passed、2 deselected（109.97s，`/private/tmp/xw-d4-related.log`）。覆盖真官方 MCP/SDK、正式 Web 范围查询 → 治理/Evidence/实际 PG、原飞书事件报告发送、越限零源 I/O、无效证据零上传及上传未知恢复；模型和 Prometheus/飞书 API 为本机替身。没有曲线成功路径。 |
+| 静态与文档 | 全仓 `ruff check --no-cache .`、改动测试文件 `ruff format --check`、mypy `src --no-incremental` 135 文件、`UV_CACHE_DIR=/private/tmp/xw-d3-review2-uv-cache uv lock --check --offline` 93 包、`git diff --check` 通过；文档事实/命令检查 `tests/contract/test_doc_fact_binding.py tests/security/test_docs_command_consistency.py tests/security/test_capabilities_doc.py` 为 8 passed（0.32s，`/private/tmp/xw-d4-docs.log`）。原默认 uv 缓存因 sandbox 权限不可读，改用已批准临时缓存后通过，未改变依赖。 |
+| 复用证据 | `git diff --quiet 6f280626 -- src pyproject.toml uv.lock` 通过，产品/依赖与 D3 获审 424c465 及合并 6f280626 完全一致；整仓、安全、构建和旧版本兼容复用 PR #105 的精确版本证据，不写作 D4 新 head 的全套运行。新增用例沿原二进制 opt-in：未配置时跳过，本机显式配置的上述检查实际执行。 |
+
+**D4 未覆盖：** 没有获准的可复用真实模型配置，本次未调用真实模型/公司源/飞书，未查找公司凭据。没有修改 Agent 行为，脚本模型不证明实际自主调查质量。未实现结构化上游修订、SVG、图形统计、模型同主机同窗口对照或客户端展示；它们依赖协议修订并保留原退出条件。没有迁移/指纹变化或恢复步骤，测试和文档可单独回退，不改旧报告字节或重跑业务查询。
 
 **D1a本地结果：** 保留唯一SDK Agent Loop，复用治理/Evidence/Session、Channel SDK公开上传/发送、原请求owner/attempt及CLI手动补发。完整所选事实与分析先检查消息容量，必要时生成一个完整获准文件，再发送带准确预览的正文；文件超过400,000字节则预览并明确未完整交付，不裁剪冒充完成。分项只存必要字节、上传键、状态、uuid和平台消息ID；审批材料先发、回执独立控制批准，参考数据失败不挡批准。每次投递起始复核权限一次，手动补发重查；仍逐项检查所有权/readiness/保留期。应用表升级v12，旧请求兼容，锁定SDK/依赖未变。自动附件保留历史brief摘要语义，显式文件才展开获准原值；完整分析不因brief丢失。
 
@@ -45,9 +56,9 @@
 
 **B1与CLI补修：** 审批材料首次与补发都先检查自身容量并独立发送，再检查数据容量；超容量数据仍零上传/发送、整轮未完整，不妨碍已确认卡片的有效批准。CLI按实际新旧语义提示uuid风险，直接显示容量拒绝原因，允许操作员手动补发未知消息部分，上传未知仍禁重传。只增加静态操作提示回传，不新增持久字段、状态、权限或重试。契约文字仅澄清已有C7对数据容量拒绝的适用范围。
 
-**D3 本地候选：** 在 D2 合并基线实现自然正文和折叠依据；普通说明复用官方 `markdown_to_post_ast(..., tag_md_mode="structured")`，post 保存预建 AST，不用 SDK 隐式分段。锁版 native 降级不读取 md 节点，因此不用 native。代码/嵌套列表/反斜杠/末尾空白/转换后 @ 风险或需折叠依据的说明保持原文卡片；实际 SQL/DDL/原值不进 Markdown。必要业务限制继续主展示，未知说明不隐藏；Grafana 配置摘要的短说明来自可信策略，完整固定说明在依据中。无新增依赖、迁移或取数/权限限制；审批材料沿原组件。
+**D3 已合并：** 在 D2 合并基线实现自然正文和折叠依据；普通说明复用官方 `markdown_to_post_ast(..., tag_md_mode="structured")`，post 保存预建 AST，不用 SDK 隐式分段。锁版 native 降级不读取 md 节点，因此不用 native。代码/嵌套列表/反斜杠/末尾空白/转换后 @ 风险或需折叠依据的说明保持原文卡片；实际 SQL/DDL/原值不进 Markdown。必要业务限制继续主展示，未知说明不隐藏；Grafana 配置摘要的短说明来自可信策略，完整固定说明在依据中。无新增依赖、迁移或取数/权限限制；审批材料沿原组件。
 
-**D3 本地验证：** 产品补修固定为 `9e8010d164150eaf5dd554b88f3879defbe7f0ba`；`0267534` 仅补两行测试断言。用户对 `74aa6be` 的审查发现 B1：模型分析可伪造结果标题，且逐条证据对应关系不可见；本轮恢复代码生成的结果序号、逐条分析引用和结构分隔，Evidence 编号仍在折叠区。独立审批组件不改；当前卡片之外的材料引用保留原 Evidence ID，不假造本卡编号。没有新增工具种类登记、数据字段、权限、硬限制或状态机。
+**D3 验证记录：** 产品补修固定为 `9e8010d164150eaf5dd554b88f3879defbe7f0ba`；`0267534` 仅补两行测试断言。用户对 `74aa6be` 的审查发现 B1：模型分析可伪造结果标题，且逐条证据对应关系不可见；本轮恢复代码生成的结果序号、逐条分析引用和结构分隔，Evidence 编号仍在折叠区。独立审批组件不改；当前卡片之外的材料引用保留原 Evidence ID，不假造本卡编号。没有新增工具种类登记、数据字段、权限、硬限制或状态机。
 
 B1 的两种文本及正式 Gateway/Runner/Evidence/PostgreSQL 反例先 **3 failed、4 passed**（`/private/tmp/xw-d3-review2-target-red.log`），修复后相关三文件与正式群回复用例 **124 passed**（10.17s，`/private/tmp/xw-d3-review2-target-green.log`）。群用例实际触发锁版 SDK 的 230001 降级，两次请求均为原消息 `/reply`、同 uuid、必要全文保留，模型一次/业务查询零次。14 个相关文件首轮 **486 passed、1 failed**；唯一旧断言拒绝新增 hr，现改为只允许唯一代码分隔线、严格断言其位置及引用，其他结构白名单/原值断言不放宽，单项 **1 passed**。不把该首轮运行记为全通过；最终整仓结果见下表。
 
@@ -57,11 +68,11 @@ B1 的两种文本及正式 Gateway/Runner/Evidence/PostgreSQL 反例先 **3 fai
 | --- | --- |
 | 整仓离线回归 | README 的隔离 PostgreSQL 环境下，`PYTHONDONTWRITEBYTECODE=1 .venv/bin/python -m pytest -q --failed-first -x -o cache_dir=/private/tmp/xw-d3-review2-full-cache --tb=short`：**5685 passed、373 skipped、72 deselected、5 条预期网络隔离警告**（1439.67s，退出码 0）；日志 `/private/tmp/xw-d3-review2-full.log`。开始前已提交 `9e8010d`，收集/跳过规则未改变；运行期间 `0267534` 仅追加两行断言，已单独实测/复核，当前产品源码与 `9e8010d` 逐字一致。不把整仓记录混写为 `0267534` 的全套运行，也不以上轮 5679 passed 代替本轮。 |
 | 安全与单元范围 | 当前候选安全标记 **928 passed、79 skipped、5123 deselected**（7.44s）；CI 单元范围 **2813 passed、152 skipped、47 deselected**（23.80s）；两者各五条预期 socket 隔离警告。日志 `/private/tmp/xw-d3-review2-security.log`、`/private/tmp/xw-d3-review2-unit.log`。 |
-| 静态/文档检查 | 全仓 Ruff、全部 18 个 D3 改动 Python 文件格式、mypy `src` 135 文件、离线锁 93 包和差异检查通过；文档事实/命令与发布包操作文档检查 **6 passed**。依赖与锁未变，依赖审计引用同一锁文件的 D2 CI run `38706556681`，没有新 D3 CI。 |
+| 静态/文档检查 | 全仓 Ruff、全部 18 个 D3 改动 Python 文件格式、mypy `src` 135 文件、离线锁 93 包和差异检查通过；文档事实/命令与发布包操作文档检查 **6 passed**。依赖与锁未变；后续 D3 CI run `38730626616` 在获审 `424c465` 上 10/10 成功，依赖审计也通过。 |
 | 构建与正式命令 | 当前 wheel 在仓库外仅有锁定运行依赖的环境安装；六个 D3 改动模块逐文件摘要与源码一致，两个命令入口通过，含 v12 迁移且不带旧包/alembic。日志 `/private/tmp/xw-d3-review2-product.log`。 |
 | 密钥扫描 | Gitleaks 8.30.0 Darwin arm64 沿已校验缓存与自测；最终 Git 全历史脱敏扫描零泄漏，不扫描未提交公司配置。 |
 
-**D3 验证缺口与保留边界：** 未运行真实模型 §2 固定任务集，没有可复用的获准模型运行配置，不读取公司配置寻找凭据。真实飞书收发、手机/桌面显示和复制、缩进段落/列表续段的从属关系、uuid 去重及首次格式拒绝是否占用 uuid 均未验证；合成平台只证明 SDK 调用和透传。Agent Loop、提示词和工具选择本轮未改，脚本模型不证明实际任务能力，既定验收门槛保留。旧 v0 无事实回答补发仍按现模板重建，沿用旧语义，未改成分项恢复；已绑定的分项/报告仍复用原字节。工具种类业务名暂不增加登记机制。本轮没有推送、开 PR、合并或部署。
+**D3 验证缺口与保留边界：** 未运行真实模型 §2 固定任务集，没有可复用的获准模型运行配置，不读取公司配置寻找凭据。真实飞书收发、手机/桌面显示和复制、缩进段落/列表续段的从属关系、uuid 去重及首次格式拒绝是否占用 uuid 均未验证；合成平台只证明 SDK 调用和透传。Agent Loop、提示词和工具选择本轮未改，脚本模型不证明实际任务能力，既定验收门槛保留。旧 v0 无事实回答补发仍按现模板重建，沿用旧语义，未改成分项恢复；已绑定的分项/报告仍复用原字节。工具种类业务名暂不增加登记机制。D3 随 PR #105 合并为 `6f2806265091db9cbfb4973e88be4d05e5cdb21a`，未部署。CI 首轮整仓有一次既有测试就绪探测失败，诊断支持端口竞争；定向 24 passed，并仅重跑失败 job，最终 5685 passed（1417.59s）、10/10 成功，首次失败与复核证据见 PR #105。
 
 **D1b 本地结果：** 已从合并后的 D1a 建独立分支，报告按整章节或整行拆分，保持每份编码后不超过 400,000 字节、标记 `1/N`；所有数据文件与正文在首个数据上传前生成并检查。现有分项表按序保存不可变字节，文件逐个上传/发送；全部附件确认后才发正文。审批卡仍先独立发送。新请求整体状态只从分项推导，旧请求保留 unknown 保护；相应回归已先红后绿。首轮独立审查发现大文件同步渲染阻塞事件循环，已将纯数据文件构造移到线程，返回后仍由原路径绑定、复核与发送；取消时零绑定/上传有回归。同群多文件连续消息及失败提醒留 0.21 秒间隔，依据[Lark 官方消息 FAQ](https://open.larksuite.com/document/server-docs/im-v1/faq)的单群 5 QPS 限制；中国飞书实际规则及跨请求/其他发送者占用仍未实测。
 
