@@ -178,11 +178,21 @@ class Group:
 
 @asynccontextmanager
 async def running(
-    env: Env, outbox: Outbox | None = None, *, bot: str | None = BOT, **overrides: Any
+    env: Env,
+    outbox: Outbox | None = None,
+    *,
+    bot: str | None = BOT,
+    upload_file: Any = None,
+    **overrides: Any,
 ) -> AsyncIterator[Group]:
     outbox = outbox or Outbox()
     gateway = FeishuGateway(
-        env.service, group_config(**overrides), outbox, clock=env.clock, bot_open_id=lambda: bot
+        env.service,
+        group_config(**overrides),
+        outbox,
+        clock=env.clock,
+        bot_open_id=lambda: bot,
+        upload_file=upload_file,
     )
     task = asyncio.create_task(gateway.run())
     try:

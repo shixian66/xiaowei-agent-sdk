@@ -2,8 +2,10 @@
 
 import asyncio
 import json
+import threading
 from dataclasses import dataclass, field, replace
 from functools import partial
+from time import monotonic
 from typing import Any
 
 import pytest
@@ -18,7 +20,7 @@ from tests.sdk_core.test_feishu_reports import _delivery
 from xiaowei.channel import AccessDeniedError, RequestRef
 from xiaowei.channel_store import RequestUnavailableError
 from xiaowei.feishu import send_delivery
-from xiaowei.feishu_report import ReportFile, build_report
+from xiaowei.feishu_report import ReportCapacityError, ReportFile, build_report, build_reports
 from xiaowei.models import AnswerInference
 from xiaowei.storage import Readiness, hold_instance_lock
 
@@ -71,6 +73,120 @@ async def request(env: Env, *, format_: str | None = "md") -> RequestRef:
     )
 
 
+@pytest.mark.parametrize("format_", ["md", "html"])
+def test_split_report_preserves_every_typed_row_and_labels_each_file(
+    monkeypatch: pytest.MonkeyPatch, format_: str
+) -> None:
+    import re
+    from html import unescape
+
+    delivery = _delivery(format_)
+    rows = [
+        {"index": n, "nullable": None, "literal": "NULL", "huge": 2**60 + n, "text": f"<值{n}>"}
+        for n in range(12)
+    ]
+    result = {
+        "sql": "SELECT '<x>'",
+        "columns": ["index", "nullable", "literal", "huge", "text"],
+        "metadata": {"scope": "昨天", "applied_limit": 1000},
+        "rows": rows,
+    }
+    fact = delivery.facts[0].model_copy(
+        update={
+            "rows": tuple(rows),
+            "truncated": True,
+            "result_json": json.dumps(result, ensure_ascii=False),
+        }
+    )
+    delivery = delivery.model_copy(
+        update={
+            "facts": (fact,),
+            "monitoring_notice": "[not-a-link](https://invalid.example) <img src=x>",
+        }
+    )
+    monkeypatch.setattr("xiaowei.feishu_report.MAX_REPORT_BYTES", 1100)
+    files = build_reports(delivery)
+    assert len(files) > 1
+    recovered = []
+    for index, report in enumerate(files, 1):
+        assert len(report.content) <= 1100
+        assert report.filename == f"xiaowei-report-{index}-of-{len(files)}.{format_}"
+        body = report.content.decode()
+        assert f"{index}/{len(files)}" in body
+        assert "工具结果已截断" in body
+        if format_ == "md":
+            assert "范围说明\n\n~~~text\n" in body
+        else:
+            assert "<img src=x>" not in body
+        if format_ == "html":
+            body = "\n".join(
+                unescape(block) for block in re.findall(r"<pre>(.*?)</pre>", body, re.S)
+            )
+        for raw in body.splitlines():
+            if raw.startswith('{"sql":'):
+                chunk = json.loads(raw)
+                assert chunk["columns"] == result["columns"]
+                assert chunk["metadata"] == result["metadata"]
+                recovered.extend(chunk["rows"])
+                assert "SELECT '<x>'" in raw
+    assert recovered == rows
+    assert any("需要复核" in report.content.decode() for report in files)
+
+
+def test_split_report_rejects_one_indivisible_oversized_row(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    delivery = _delivery("md")
+    row = {"value": "x" * 2000}
+    fact = delivery.facts[0].model_copy(
+        update={"rows": (row,), "result_json": json.dumps({"rows": [row]})}
+    )
+    monkeypatch.setattr("xiaowei.feishu_report.MAX_REPORT_BYTES", 1100)
+    with pytest.raises(ReportCapacityError):
+        build_reports(delivery.model_copy(update={"facts": (fact,)}))
+
+
+def test_report_splits_when_encoded_file_exceeds_boundary_by_one_byte(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    delivery = _delivery("md")
+    complete = build_report(delivery)
+    monkeypatch.setattr("xiaowei.feishu_report.MAX_REPORT_BYTES", len(complete.content))
+    assert build_reports(delivery) == (complete,)
+    monkeypatch.setattr("xiaowei.feishu_report.MAX_REPORT_BYTES", len(complete.content) - 1)
+    pieces = build_reports(delivery)
+    assert len(pieces) > 1
+    assert all(len(piece.content) <= len(complete.content) - 1 for piece in pieces)
+
+
+def test_automatic_split_keeps_historical_brief_without_exporting_raw_values(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import re
+
+    delivery = _delivery("md")
+    brief = delivery.facts[0].model_copy(
+        update={
+            "evidence_id": "ev_history",
+            "view": "brief",
+            "summary": "历史结果摘要",
+            "result_json": '{"secret":"HISTORICAL_RAW_CANARY"}',
+        }
+    )
+    rows = [{"index": n, "value": "x" * 140} for n in range(12)]
+    current = delivery.facts[0].model_copy(
+        update={"rows": tuple(rows), "result_json": json.dumps({"rows": rows})}
+    )
+    monkeypatch.setattr("xiaowei.feishu_report.MAX_REPORT_BYTES", 1100)
+    reports = build_reports(
+        delivery.model_copy(update={"facts": (brief, current)}), expand_brief=False
+    )
+    content = "\n".join(report.content.decode() for report in reports)
+    assert len(reports) > 1
+    assert "历史结果摘要" in content and "HISTORICAL_RAW_CANARY" not in content
+    assert [int(n) for n in re.findall(r'"index"\s*:\s*(\d+)', content)] == list(range(12))
+
+
 @pytest.mark.asyncio
 async def test_explicit_file_is_followed_by_confirmed_body(env: Env) -> None:
     ref = await request(env)
@@ -90,6 +206,55 @@ async def test_explicit_file_is_followed_by_confirmed_body(env: Env) -> None:
     assert isinstance(platform.sent[0][0], OutboundFile)
     assert "完整结果" in json.dumps(platform.sent[1][0], ensure_ascii=False)
     assert all(uuid for _, uuid in platform.sent)
+
+
+@pytest.mark.asyncio
+async def test_report_render_does_not_block_other_requests(
+    env: Env, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    ref = await request(env)
+    platform = Platform()
+    loop = asyncio.get_running_loop()
+    real_build_reports = build_reports
+    probe_lag: list[float] = []
+
+    def delayed_render(*args, **kwargs):
+        started = monotonic()
+        loop.call_soon_threadsafe(lambda: probe_lag.append(monotonic() - started))
+        threading.Event().wait(0.3)
+        return real_build_reports(*args, **kwargs)
+
+    monkeypatch.setattr("xiaowei.feishu_delivery.build_reports", delayed_render)
+    assert await env.service.results.send(ref, transmit(env, ref, platform)) == "sent"
+    assert probe_lag and probe_lag[0] < 0.2
+    assert len(platform.files) == 1 and len(platform.sent) == 2
+
+
+@pytest.mark.asyncio
+async def test_cancel_during_report_render_binds_and_uploads_nothing(
+    env: Env, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    ref = await request(env)
+    platform = Platform()
+    entered, release = threading.Event(), threading.Event()
+    real_build_reports = build_reports
+
+    def delayed_render(*args, **kwargs):
+        entered.set()
+        release.wait(3)
+        return real_build_reports(*args, **kwargs)
+
+    monkeypatch.setattr("xiaowei.feishu_delivery.build_reports", delayed_render)
+    task = asyncio.create_task(env.service.results.send(ref, transmit(env, ref, platform)))
+    try:
+        assert await asyncio.to_thread(entered.wait, 2)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+    finally:
+        release.set()
+    assert await parts(env, ref) == ()
+    assert platform.files == [] and platform.sent == []
 
 
 def test_explicit_brief_file_contains_authorized_original_values() -> None:
@@ -270,7 +435,7 @@ async def test_resend_only_missing_body_preserves_bytes_and_uuid(
     def changed(*_args, **_kwargs):
         raise AssertionError("重发不能按新模板生成字节")
 
-    monkeypatch.setattr("xiaowei.feishu_delivery.build_report", changed)
+    monkeypatch.setattr("xiaowei.feishu_delivery.build_reports", changed)
     assert (
         await env.service.results.send(ref, transmit(env, ref, platform, resend=True), resend=True)
         == "sent"
@@ -464,6 +629,41 @@ async def test_recovery_stops_old_upload_and_preserves_unknown(env: Env) -> None
         await old
     assert platform.sent == []
     assert (await parts(env, ref))[0].upload_state == "unknown"
+
+
+@pytest.mark.asyncio
+async def test_recovery_during_second_file_upload_stops_remaining_messages(
+    env: Env, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    ref = await request(env)
+    report = build_report(_delivery("md"))
+    monkeypatch.setattr(
+        "xiaowei.feishu_delivery.build_reports", lambda *_args, **_kwargs: (report,) * 2
+    )
+    entered, release = asyncio.Event(), asyncio.Event()
+    platform = Platform()
+
+    async def upload(report: ReportFile) -> str:
+        if len(platform.files) == 1:
+            entered.set()
+            await release.wait()
+        return await platform.upload(report)
+
+    old = asyncio.create_task(
+        env.service.results.send(ref, partial(transmit(env, ref, platform), upload_file=upload))
+    )
+    await asyncio.wait_for(entered.wait(), 5)
+    restarted = env.channel_store(readiness=Readiness())
+    async with hold_instance_lock(env.engine, restarted.readiness) as lock:
+        await restarted.recover(lock)
+    release.set()
+    with pytest.raises(RequestUnavailableError):
+        await old
+    file_one, file_two, body = await parts(env, ref)
+    assert file_one.send_state == "sent" and file_one.message_id
+    assert file_two.upload_state == "unknown" and file_two.send_state == "pending"
+    assert body.send_state == "pending"
+    assert len(platform.sent) == 1 and len(platform.files) == 2
 
 
 @pytest.mark.asyncio

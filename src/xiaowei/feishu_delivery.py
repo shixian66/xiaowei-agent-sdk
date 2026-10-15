@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 import logging
 from collections.abc import Callable
+from time import monotonic
 from typing import TYPE_CHECKING, Literal
 
 from lark_channel.channel.types import MediaSource, OutboundFile, SendResult
@@ -19,7 +21,7 @@ from xiaowei.feishu_render import (
     fact_limit_notices,
     request_bytes,
 )
-from xiaowei.feishu_report import MAX_REPORT_BYTES, ReportCapacityError, ReportFile, build_report
+from xiaowei.feishu_report import MAX_REPORT_BYTES, ReportCapacityError, ReportFile, build_reports
 from xiaowei.models import Delivery
 
 if TYPE_CHECKING:
@@ -27,6 +29,8 @@ if TYPE_CHECKING:
     from xiaowei.feishu import Send, UploadFile
 
 logger = logging.getLogger(__name__)
+# Lark 官方消息 FAQ 对单群发送列出 5 QPS；只约束多文件消息的连续发送。
+_GROUP_FILE_SEND_INTERVAL = 0.21
 
 
 def _message_part(
@@ -100,15 +104,17 @@ def _data_parts(
             return (_message_part(sequence, "body", message),)
         except MessageCapacityError:
             pass
-    report = build_report(
+    reports = build_reports(
         delivery.model_copy(update={"report_format": delivery.report_format or "md"}),
         expand_brief=delivery.report_format is not None,
     )
     body = _preview(delivery, max_chars, chat_id, reply_to, "本次完整结果见附件。")
-    return (
-        DeliveryPart(sequence, report.format, report.content),
-        _message_part(sequence + 1, "body", body),
-    )
+    parts = [
+        DeliveryPart(sequence + index, report.format, report.content)
+        for index, report in enumerate(reports)
+    ]
+    parts.append(_message_part(sequence + len(reports), "body", body))
+    return tuple(parts)
 
 
 def _check_capacity(
@@ -166,12 +172,18 @@ async def send_complete_delivery(
     data_parts = tuple(p for p in existing if p.kind != "approval")
     capacity_failed = False
     material_failed = False
+    last_group_send_at: float | None = None
 
     def capacity_refusal() -> Literal["failed"]:
         logger.warning("容量不足，不能重发")
         if notice is not None:
             notice("容量不足，不能重发")
         return "failed"
+
+    async def pace_group_send(file_count: int) -> None:
+        if ref.group is not None and file_count > 1 and last_group_send_at is not None:
+            delay = last_group_send_at + _GROUP_FILE_SEND_INTERVAL - monotonic()
+            await asyncio.sleep(max(0, delay))
 
     if materials and not any(p.kind == "approval" for p in existing):
         material = delivery.model_copy(
@@ -207,6 +219,8 @@ async def send_complete_delivery(
 
     async def hint(reason: str) -> None:
         # 提醒尽力一次，非必需分项；失锁/到期/readiness关闭不再外发。
+        nonlocal last_group_send_at
+        await pace_group_send(file_count)
         await store.check_delivery_attempt(claim)
         try:
             hint_delivery = data_delivery
@@ -224,11 +238,16 @@ async def send_complete_delivery(
                 + f"原请求编号：{ref.request_id}。"
                 + "请联系操作员手动补发；不会重新查询。",
             )
+            if ref.group is not None:
+                last_group_send_at = monotonic()
             await send(chat_id, preview, reply_to=reply_to)
         except Exception:
             logger.warning("未完整交付的提醒未送达")
 
-    async def send_part(part: DeliveryPart) -> SendOutcome:
+    async def send_part(
+        part: DeliveryPart, *, file_index: int = 0, file_count: int = 0
+    ) -> SendOutcome:
+        nonlocal last_group_send_at
         if part.send_state == "sent":
             return "sent"
         if (
@@ -239,6 +258,11 @@ async def send_complete_delivery(
             return "failed"
         key = part.file_key
         if part.kind in ("md", "html"):
+            filename = (
+                f"xiaowei-report-{file_index}-of-{file_count}.{part.kind}"
+                if file_count > 1
+                else f"xiaowei-report.{part.kind}"
+            )
             if part.upload_state in ("unknown", "uploading"):
                 return "unknown"
             if part.upload_state == "pending":
@@ -248,7 +272,7 @@ async def send_complete_delivery(
                     return "unknown"
                 report = ReportFile(
                     part.kind,
-                    f"xiaowei-report.{part.kind}",
+                    filename,
                     part.body,
                     hashlib.sha256(part.body).hexdigest(),
                 )
@@ -261,12 +285,15 @@ async def send_complete_delivery(
                     return "unknown"
                 await store.finish_part_upload(claim, part, key)
             outbound: Message | OutboundFile = OutboundFile(
-                source=MediaSource(kind="key", key=key), file_name=f"xiaowei-report.{part.kind}"
+                source=MediaSource(kind="key", key=key), file_name=filename
             )
         else:
             outbound = json.loads(part.body)
+        await pace_group_send(file_count)
         if not await store.begin_part_send(claim, part):
             return "unknown"
+        if ref.group is not None:
+            last_group_send_at = monotonic()
         try:
             receipt = await send(chat_id, outbound, reply_to=reply_to, uuid=part.uuid)
             outcome = send_outcome(receipt)
@@ -288,8 +315,8 @@ async def send_complete_delivery(
     needs_data = bool(data or delivery.analysis or not materials)
     try:
         if needs_data and not data_parts:
-            data_parts = _data_parts(
-                data_delivery, 1 if materials else 0, max_chars, chat_id, reply_to
+            data_parts = await asyncio.to_thread(
+                _data_parts, data_delivery, 1 if materials else 0, max_chars, chat_id, reply_to
             )
         _check_capacity(data_parts, max_chars, chat_id, reply_to)
     except (ReportCapacityError, MessageCapacityError):
@@ -302,14 +329,18 @@ async def send_complete_delivery(
             return "failed"
         capacity_failed = True
     parts = await store.bind_delivery_parts(claim, () if capacity_failed else data_parts)
+    file_count = sum(p.kind in ("md", "html") for p in parts)
+    file_index = 0
     for part in parts:
         if part.kind == "approval":
             continue
+        if part.kind in ("md", "html"):
+            file_index += 1
         if part.kind == "body":
             current = await store.delivery_parts(record)
             if any(p.kind in ("md", "html") and p.send_state != "sent" for p in current):
                 continue
-        outcomes.append(await send_part(part))
+        outcomes.append(await send_part(part, file_index=file_index, file_count=file_count))
     if capacity_failed or any(o != "sent" for o in outcomes):
         current = await store.delivery_parts(record)
         failures = [
