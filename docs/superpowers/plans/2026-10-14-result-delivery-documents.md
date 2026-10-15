@@ -204,6 +204,8 @@ D0 → D1a 为共同基础。D1b、D2、D3 可分别推进：D2/D3 的单文件�
 
 **前置：** 关闭协议疑点；读取治理不变。复用 runtime/mcp/Evidence/feishu_report、test_prometheus_mcp_protocol、test_prometheus_p2_protocol、test_prometheus_repair 和报告浏览器测试。
 
+**复用范围：** 曲线展示最终消费可信的序列与展示元数据，不绑定 Prometheus 或 Grafana 工具名。后续订单、容量、任务耗时等场景可复用该展示代码，但仍须各自取得获准的结构化数据；本片不提前增加 SQL 绘图适配、图表平台或新图形种类。
+
 - [x] 官方 Prometheus MCP v0.18.0 校验二进制 + loopback 合成 Prometheus + 真 SDK：已核对结构/时间戳/值/标签/完整性，结论为文本不能无歧义还原，精确版本和反例见下方 D4.0；此勾选不表示曲线可用。
 - [x] 已执行不可无歧义读取时的“暂停图表并提出修订”分支，未换源绕过治理；可无歧义读取后才补最小严格契约并保留网格/缺点/精度/非有限值，当前结构化契约与曲线仍未实施。
 - [ ] 自有静态 SVG 展示真实时间、单位/未知单位、图例/统计；可视抽样标明且完整获准采样仍可得，Grafana 默认窗口不作实际执行窗。
@@ -234,9 +236,9 @@ JSON 默认输出及公开 `--mcp.enable-toon-output` 模式都发生上述碰�
 | 候选路径 | 已有能力与未验证项 | 需要承担的代价与批准范围 |
 | --- | --- | --- |
 | 修订官方 Prometheus MCP 输出 | 当前锁版把结果转成字符串；拟由公开契约提供结构化结果，保留原 Prometheus 接入和源身份。尚无已验证的修订版本。 | 需要上游修改、外部依赖发版和重新锁定，验证旧文本兼容、结果精度及指纹；不能只把已转为浮点的结果对象再序列化就声称保留了 API 原值。 |
-| 锁版 Grafana MCP v2.0.2 的 `query_prometheus` | 已校验本机锁版二进制 SHA，并核对 `--version`/`--help`：工具存在，属于查询类工具和默认启用的 prometheus 类别；部署配置仍可能禁用。**实际返回结构未验证，不能认定已具备可用的结构化采样通路。** | 可望复用现有 Grafana 部署，但查询改走 Grafana 数据源和服务账号，新增数据通路及权限面。须先补充并由用户批准 [ARCHITECTURE §5](../../../ARCHITECTURE.md#monitoring-mcp) 的具体通路/权限契约：可信数据源与已授权 Prometheus 源的绑定、Grafana 组织/服务账号范围和同等资源限制；不能把 Dashboard 读取权限等同于数据源查询权限。当前不采用，也不自动注册或暴露此工具。 |
+| 锁版 Grafana MCP v2.0.2 的 `query_prometheus` | 已校验本机锁版二进制 SHA，并核对 `--version`/`--help`：工具存在，属于查询类工具和默认启用的 prometheus 类别；部署配置仍可能禁用。**实际返回已离线验证：标签/序列结构可区分原反例，但会标准化数值、时间戳，且不返回 resultType，不满足本节原值契约；详见下方复核。** | 可望复用现有 Grafana 部署，但查询改走 Grafana 数据源和服务账号，新增数据通路及权限面。须先补充并由用户批准 [ARCHITECTURE §5](../../../ARCHITECTURE.md#monitoring-mcp) 的具体通路/权限契约：可信数据源与已授权 Prometheus 源的绑定、Grafana 组织/服务账号范围和同等资源限制；不能把 Dashboard 读取权限等同于数据源查询权限。当前不采用，也不自动注册或暴露此工具。 |
 
-§5 已有代理查询的原则条件，不等于本工具已获准。选择 Grafana 路径前，必须先验证其返回结构能否保留本节两组原值；若仍不可区分，不进入曲线实现。官方 Prometheus 路径需要承担发版/锁定成本，Grafana 路径需要承担通路/授权变更成本，由用户在上述事实和缺口基础上取舍。
+§5 已有代理查询的原则条件，不等于本工具已获准。Grafana 路径已通过本节两组名称反例，但尚未满足完整保真契约；不能仅凭这项通过就进入曲线实现。官方 Prometheus 路径需要承担发版/锁定成本，Grafana 路径需要承担通路/授权变更成本，由用户在上述事实和缺口基础上取舍。
 
 仅约定“名称只使用旧字符集”不能作为当前客户端修复：转换后的文本无法证明原始名称是否合规，而 Prometheus 3 默认允许 UTF-8 名称，反例本身也可伪装成正常旧格式。不能用输出正则或新增名称白名单代替结构化来源。
 
@@ -245,6 +247,21 @@ JSON 默认输出及公开 `--mcp.enable-toon-output` 模式都发生上述碰�
 结构化结果（JSON 或 MCP structured content）至少独立保留 resultType、逐序列 metric 标签映射、逐点实际时间戳/值以及 warnings/已知截断。[Prometheus API](https://prometheus.io/docs/prometheus/latest/querying/api/#expression-query-result-formats) 的样本值为 JSON 字符串，必须保留原串；时间戳若为 JSON 数字，直接将原始数字词法保留为字符串，若已是字符串则保留原串。不得先转二进制浮点再转回，从而丢失精度；非有限值保留其标记，缺失点不按请求网格制造，未知类型受控保留文本。原文本输出可保留以兼容既有客户，不先扩展其他工具或新源，也不在小维内嵌 MCP Server。
 
 无论选择哪条路径，取得并锁定经批准的结构化能力后才落实本地严格契约、四种投影和 SVG：先用本节两组反例证明返回结构能区分原值，再验证多序列、空结果/缺点/非有限值/部分结果/容量及当前权限。届时单列政策指纹和旧字符串 Evidence/Session 的兼容取舍；本次不更改或作废历史。单位/阈值仍依批准契约补证或标未知，统计仅基于明确获准范围。不能以临时 fork、直接 HTTP 绕源、增加名称白名单或模型补点代替这项决定。
+
+**Grafana 候选的离线复核（2026-10-15）。** 用户授权继续后，仅在测试夹具中启用查询类别，运行锁版 v2.0.2 二进制（SHA-256 `480c23f5f0c80e7819fa060e12d4faf471732b63bd05a2023e45f868a7f33baf`）和真 SDK，所有上游响应来自本机合成 Grafana API。产品工具登记、源绑定、权限和指纹均未改变，也未访问公司服务。
+
+| 实际行为 | 结论与边界 |
+| --- | --- |
+| `query_prometheus` 的 range，以及 instant 返回 matrix | 上文两组名称反例均逐序列保留 metric 映射与 values，两个原值得到不同 JSON；warnings 保留。MCP structured content 仍为空，但 JSON 文本本身具有结构，这一点不构成阻断。 |
+| 采样值与时间戳重新序列化 | 合成原串 `9007199254740993` → `9007199254740992`、`1.0000000000000001` → `1`、`1e3` → `1000`；原始时间数字 `1720000000.123456789` → `1720000000.123`。标准 binary64 字串 `1.2345678901234567`、毫秒采样、NaN/±Inf/-0、已返回点的顺序/重复/缺口保留，没有按网格补点。 |
+| 结果类型 | 返回体为 data 数组和 warnings，原 API 的 resultType 未保留；output schema 为空。当前不能声称已满足本节完整类型契约。 |
+| 调用路径及失败 | 本次 GET 配置下，读取 `/api/frontend/settings` 和数据源 UID，查询走 `/api/datasources/uid/prom0/resources/api/v1/query_range` 或 `query`；所有请求携带合成 Grafana 服务账号身份。元数据 403 时零代理查询，API 超时错误不包装为空成功；这只验证官方协议行为，不证明小维已具备新通路的授权治理。 |
+
+[锁版源码](https://github.com/grafana/mcp-grafana/blob/0eb7e0adf9235720fdc7a8a390e145a8bcc6a152/tools/prometheus.go#L69) 的 data 为 `model.Value`，结果包装没有 resultType；[后端](https://github.com/grafana/mcp-grafana/blob/0eb7e0adf9235720fdc7a8a390e145a8bcc6a152/tools/prom_backend.go#L119) 经 Prometheus Go client 读取后重新序列化，与上述二进制实测一致。
+
+**不能扩大这项诊断的结论。** 精度反例故意包含非 canonical binary64 小数字串与亚毫秒时间；它证明没有逐字保留 API 输入，不证明真实 Prometheus 的常规 binary64/毫秒样本发生数值损坏，也不证明常规监控无法绘图。若接受这种标准化并改选 Grafana，需要由用户单列批准原串/类型契约取舍及 §5 通路/权限变更；本次不自行放宽，也不新增名称、数值或查询限制。若坚持现有原串契约，则两条锁版路径都不能直接满足，仍需上游提供原始结构化契约。
+
+本次协议疑点已收敛，下一步是上述契约/来源取舍，不继续叠加解析器或绘图框架。未来业务曲线复用展示部分的方向不改变这一前置条件。测试命令与结果仅记 AGENT_HANDOFF；真实 Grafana/Prometheus、模型和客户端仍未验证。
 
 本节只提出依赖修订，没有批准上游改版、部署或新数据通路。实际检查命令/结果与当前下一步只在 AGENT_HANDOFF 维护；D4 曲线及真实源/模型/客户端退出条件保持未完成。
 
