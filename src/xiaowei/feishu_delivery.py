@@ -180,6 +180,11 @@ async def send_complete_delivery(
             notice("容量不足，不能重发")
         return "failed"
 
+    async def pace_group_send(file_count: int) -> None:
+        if ref.group is not None and file_count > 1 and last_group_send_at is not None:
+            delay = last_group_send_at + _GROUP_FILE_SEND_INTERVAL - monotonic()
+            await asyncio.sleep(max(0, delay))
+
     if materials and not any(p.kind == "approval" for p in existing):
         material = delivery.model_copy(
             update={
@@ -214,6 +219,8 @@ async def send_complete_delivery(
 
     async def hint(reason: str) -> None:
         # 提醒尽力一次，非必需分项；失锁/到期/readiness关闭不再外发。
+        nonlocal last_group_send_at
+        await pace_group_send(file_count)
         await store.check_delivery_attempt(claim)
         try:
             hint_delivery = data_delivery
@@ -231,6 +238,8 @@ async def send_complete_delivery(
                 + f"原请求编号：{ref.request_id}。"
                 + "请联系操作员手动补发；不会重新查询。",
             )
+            if ref.group is not None:
+                last_group_send_at = monotonic()
             await send(chat_id, preview, reply_to=reply_to)
         except Exception:
             logger.warning("未完整交付的提醒未送达")
@@ -280,9 +289,7 @@ async def send_complete_delivery(
             )
         else:
             outbound = json.loads(part.body)
-        if ref.group is not None and file_count > 1 and last_group_send_at is not None:
-            delay = last_group_send_at + _GROUP_FILE_SEND_INTERVAL - monotonic()
-            await asyncio.sleep(max(0, delay))
+        await pace_group_send(file_count)
         if not await store.begin_part_send(claim, part):
             return "unknown"
         if ref.group is not None:
@@ -308,8 +315,8 @@ async def send_complete_delivery(
     needs_data = bool(data or delivery.analysis or not materials)
     try:
         if needs_data and not data_parts:
-            data_parts = _data_parts(
-                data_delivery, 1 if materials else 0, max_chars, chat_id, reply_to
+            data_parts = await asyncio.to_thread(
+                _data_parts, data_delivery, 1 if materials else 0, max_chars, chat_id, reply_to
             )
         _check_capacity(data_parts, max_chars, chat_id, reply_to)
     except (ReportCapacityError, MessageCapacityError):

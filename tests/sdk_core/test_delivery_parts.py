@@ -2,8 +2,10 @@
 
 import asyncio
 import json
+import threading
 from dataclasses import dataclass, field, replace
 from functools import partial
+from time import monotonic
 from typing import Any
 
 import pytest
@@ -204,6 +206,55 @@ async def test_explicit_file_is_followed_by_confirmed_body(env: Env) -> None:
     assert isinstance(platform.sent[0][0], OutboundFile)
     assert "完整结果" in json.dumps(platform.sent[1][0], ensure_ascii=False)
     assert all(uuid for _, uuid in platform.sent)
+
+
+@pytest.mark.asyncio
+async def test_report_render_does_not_block_other_requests(
+    env: Env, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    ref = await request(env)
+    platform = Platform()
+    loop = asyncio.get_running_loop()
+    real_build_reports = build_reports
+    probe_lag: list[float] = []
+
+    def delayed_render(*args, **kwargs):
+        started = monotonic()
+        loop.call_soon_threadsafe(lambda: probe_lag.append(monotonic() - started))
+        threading.Event().wait(0.3)
+        return real_build_reports(*args, **kwargs)
+
+    monkeypatch.setattr("xiaowei.feishu_delivery.build_reports", delayed_render)
+    assert await env.service.results.send(ref, transmit(env, ref, platform)) == "sent"
+    assert probe_lag and probe_lag[0] < 0.2
+    assert len(platform.files) == 1 and len(platform.sent) == 2
+
+
+@pytest.mark.asyncio
+async def test_cancel_during_report_render_binds_and_uploads_nothing(
+    env: Env, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    ref = await request(env)
+    platform = Platform()
+    entered, release = threading.Event(), threading.Event()
+    real_build_reports = build_reports
+
+    def delayed_render(*args, **kwargs):
+        entered.set()
+        release.wait(3)
+        return real_build_reports(*args, **kwargs)
+
+    monkeypatch.setattr("xiaowei.feishu_delivery.build_reports", delayed_render)
+    task = asyncio.create_task(env.service.results.send(ref, transmit(env, ref, platform)))
+    try:
+        assert await asyncio.to_thread(entered.wait, 2)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+    finally:
+        release.set()
+    assert await parts(env, ref) == ()
+    assert platform.files == [] and platform.sent == []
 
 
 def test_explicit_brief_file_contains_authorized_original_values() -> None:
@@ -578,6 +629,41 @@ async def test_recovery_stops_old_upload_and_preserves_unknown(env: Env) -> None
         await old
     assert platform.sent == []
     assert (await parts(env, ref))[0].upload_state == "unknown"
+
+
+@pytest.mark.asyncio
+async def test_recovery_during_second_file_upload_stops_remaining_messages(
+    env: Env, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    ref = await request(env)
+    report = build_report(_delivery("md"))
+    monkeypatch.setattr(
+        "xiaowei.feishu_delivery.build_reports", lambda *_args, **_kwargs: (report,) * 2
+    )
+    entered, release = asyncio.Event(), asyncio.Event()
+    platform = Platform()
+
+    async def upload(report: ReportFile) -> str:
+        if len(platform.files) == 1:
+            entered.set()
+            await release.wait()
+        return await platform.upload(report)
+
+    old = asyncio.create_task(
+        env.service.results.send(ref, partial(transmit(env, ref, platform), upload_file=upload))
+    )
+    await asyncio.wait_for(entered.wait(), 5)
+    restarted = env.channel_store(readiness=Readiness())
+    async with hold_instance_lock(env.engine, restarted.readiness) as lock:
+        await restarted.recover(lock)
+    release.set()
+    with pytest.raises(RequestUnavailableError):
+        await old
+    file_one, file_two, body = await parts(env, ref)
+    assert file_one.send_state == "sent" and file_one.message_id
+    assert file_two.upload_state == "unknown" and file_two.send_state == "pending"
+    assert body.send_state == "pending"
+    assert len(platform.sent) == 1 and len(platform.files) == 2
 
 
 @pytest.mark.asyncio

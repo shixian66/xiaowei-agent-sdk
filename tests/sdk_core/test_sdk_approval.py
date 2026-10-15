@@ -209,6 +209,66 @@ async def test_group_large_result_delivers_all_files_before_body(actions):
         assert await env.rows("SELECT delivery FROM xiaowei_request") == [("sent",)]
 
 
+async def test_failed_fifth_group_file_leaves_room_for_incomplete_delivery_hint(
+    actions, monkeypatch
+):
+    from time import monotonic
+
+    from lark_channel.channel.errors import FeishuChannelErrorCode, SendError
+    from lark_channel.channel.types import SendResult
+    from tests.sdk_core.test_app import answer, evidence_in
+    from tests.sdk_core.test_feishu import Outbox
+    from tests.sdk_core.test_feishu_reports import _delivery
+
+    from xiaowei.feishu_report import build_report
+
+    env = actions.env
+    report = build_report(_delivery("md"))
+    monkeypatch.setattr(
+        "xiaowei.feishu_delivery.build_reports", lambda *_args, **_kwargs: (report,) * 5
+    )
+
+    class RateLimitedOutbox(Outbox):
+        def __init__(self):
+            super().__init__()
+            self.attempted_at = []
+            self.accepted = []
+
+        async def __call__(self, chat_id, message, *, uuid=None, **kwargs):
+            now = monotonic()
+            self.attempted_at.append(now)
+            await super().__call__(chat_id, message, uuid=uuid, **kwargs)
+            if (
+                len(self.attempted_at) == 5
+                or sum(now - sent_at < 1 for sent_at in self.attempted_at) > 5
+            ):
+                return SendResult.fail(
+                    SendError(code=FeishuChannelErrorCode.PERMISSION_DENIED, retryable=False)
+                )
+            self.accepted.append(message)
+            return SendResult.ok(message_id=f"om_rate_{len(self.attempted_at)}")
+
+    outbox = RateLimitedOutbox()
+    uploads = []
+
+    async def upload(report):
+        uploads.append(report.content)
+        return f"file_{len(uploads)}"
+
+    env.scripts.add(
+        attributed(A, "交付东区订单"),
+        tool_call("run_query", region="east"),
+        lambda call: answer(evidence_in(call), report_format="md"),
+    )
+    async with running(env, outbox=outbox, upload_file=upload) as group:
+        await group.ask("交付东区订单", message_id="om_rate_hint")
+        assert len(uploads) == 5 and len(outbox.attempted_at) == 6
+        assert len(outbox.accepted) == 5, [t - outbox.attempted_at[0] for t in outbox.attempted_at]
+        assert "完整结果尚未交付" in json.dumps(outbox.accepted[-1], ensure_ascii=False)
+        assert outbox.attempted_at[-1] - outbox.attempted_at[0] >= 1
+        assert await env.rows("SELECT delivery FROM xiaowei_request") == [("failed",)]
+
+
 @pytest.mark.parametrize("actions", [400_000], indirect=True)
 @pytest.mark.parametrize("second", ["failed", "unknown"])
 async def test_second_large_file_failure_recovers_only_that_message(actions, second):
