@@ -406,3 +406,10 @@ class Delivery(_Trusted):
     """发送时由已保存请求附加，供报告文件与卡片选择；不进入回答或渠道 JSON。"""
     report_notice: str | None = Field(default=None, exclude=True)
     """报告不能作为文件交付时的可信固定说明，只进入本次飞书卡片。"""
+    delivery_attempt: str | None = Field(default=None, exclude=True)
+    delivery_version: int = Field(default=0, exclude=True)
+    """渠道取得的投递权；不进入模型、Session 或 Web 输出。"""
+    basis: tuple[tuple[str, str], ...] = Field(default=(), exclude=True)
+    """未引用的本轮成功调查：仅工具/对象，不附原值。"""
+    content_expires_at: datetime | None = Field(default=None, exclude=True)
+    """本次已复核内容的最早保留期限，供投递途中廉价检查。"""

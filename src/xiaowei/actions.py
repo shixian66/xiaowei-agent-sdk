@@ -227,6 +227,7 @@ class ActionService:
         self._access = access
         self._clock = clock
         self._bindings = {(b.proposal.tool_id, b.proposal.target_id): b for b in bindings}
+        self._executions: dict[str, asyncio.Task[Any]] = {}
         for b in self._bindings.values():
             catalog = governance.catalog
             if (
@@ -284,7 +285,15 @@ class ActionService:
                     continue
 
                 async def execute_action(req: ToolRequest) -> ToolObservation:
-                    return await self.approve(str(req.arguments["action_id"]), ctx)
+                    approval = ctx.approved_action
+                    task = asyncio.current_task()
+                    if approval is None or task is None:
+                        return await self.approve(str(req.arguments["action_id"]), ctx)
+                    self._executions[approval.attempt] = task
+                    try:
+                        return await self.approve(str(req.arguments["action_id"]), ctx)
+                    finally:
+                        self._executions.pop(approval.attempt, None)
 
                 execute = execute_action
 
@@ -496,6 +505,12 @@ class ActionService:
         ):
             raise ToolRejectedError("当前无权批准或动作契约已变化，未执行")
         return b
+
+    async def wait_for_execution(self, attempt: str) -> None:
+        """Runner取消不等待工具清理；恢复层在已有落定时限内等待同一SDK执行任务。"""
+        task = self._executions.get(attempt)
+        if task is not None:
+            await asyncio.wait({task})
 
     async def approve(self, action_id: str, ctx: RunContext) -> ToolObservation:
         """只由已恢复SDK gate调用；没有本次绑定时不保留旧独立执行后备。"""

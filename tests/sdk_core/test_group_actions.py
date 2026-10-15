@@ -142,7 +142,9 @@ class Actions:
 
 
 @pytest.fixture
-async def actions(postgres_url: URL, monkeypatch: pytest.MonkeyPatch) -> AsyncIterator[Actions]:
+async def actions(
+    postgres_url: URL, monkeypatch: pytest.MonkeyPatch, request: pytest.FixtureRequest
+) -> AsyncIterator[Actions]:
     monkeypatch.setenv(PROFILE.api_key_ref.removeprefix("env:"), FAKE_MODEL_KEY)
     async with ready_engine(postgres_url) as engine:
         clock, members = Clock(), Members()
@@ -153,6 +155,25 @@ async def actions(postgres_url: URL, monkeypatch: pytest.MonkeyPatch) -> AsyncIt
             write_tools=frozenset({WRITE}),
         )
         base = catalog()
+        if feishu_bytes := getattr(request, "param", None):
+            base = ToolCatalog(
+                base.contracts,
+                [
+                    replace(
+                        base.policy_for(c),
+                        projections={
+                            a: Projection(
+                                ("region", "total", "rows")
+                                if a == "feishu"
+                                else ("region", "total"),
+                                feishu_bytes if a == "feishu" else 400,
+                            )
+                            for a in AUDIENCES
+                        },
+                    )
+                    for c in base.contracts
+                ],
+            )
         propose = ToolContract(
             tool_id=PROPOSE,
             target_id=SOURCE,
@@ -295,7 +316,8 @@ async def test_invalid_approval_has_zero_writes(actions: Actions, failure: str) 
             async with env.engine.begin() as conn:
                 await conn.execute(
                     text(
-                        "UPDATE xiaowei_request SET delivery='failed' WHERE reply_message_id='om_p'"
+                        "UPDATE xiaowei_request SET delivery='failed', delivery_version=0 "
+                        "WHERE reply_message_id='om_p'"
                     )
                 )
         elif failure == "not_approver":

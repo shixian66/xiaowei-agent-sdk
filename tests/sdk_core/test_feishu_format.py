@@ -242,7 +242,7 @@ async def test_gateway_prose_render_error_is_failed_without_send_or_lock(
     def broken(*args: Any, **kwargs: Any) -> Any:
         raise ValueError("RENDER_CANARY https://private-host.invalid")
 
-    monkeypatch.setattr("xiaowei.feishu.build_feishu_message", broken)
+    monkeypatch.setattr("xiaowei.feishu_delivery.build_feishu_message", broken)
     message = env.scripts.add("需要确认", clarify("**确认集群**"))
     async with running(env) as fs:
         event = fs.event(message)
@@ -408,6 +408,7 @@ async def test_prose_delivery_does_not_fallback_or_retry_after_sending(
         await fs.drain()
         await fs.gateway.receive(event)
         await fs.drain()
-    assert len(outbox.sent) == 1 and "card" in outbox.sent[0][1]
+    assert len(outbox.sent) == 2 and "card" in outbox.sent[0][1]
+    assert "完整结果尚未交付" in outbox.texts()[-1]
     assert env.model_calls(message) == 1 and env.adapter.calls == []
     assert await request_row(env) == ("completed", "failed" if outcome == "failed" else "unknown")

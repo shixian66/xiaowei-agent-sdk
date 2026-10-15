@@ -14,7 +14,6 @@ from xiaowei.models import Delivery, DeliveryFact
 
 ReportFormat = Literal["md", "html"]
 MAX_REPORT_BYTES = 400_000
-MAX_REPORT_LINES = 10_000
 
 
 class ReportCapacityError(ValueError):
@@ -47,8 +46,16 @@ def _fence(value: str) -> str:
     return f"{marker}text\n{value}\n{marker}"
 
 
-def _sections(delivery: Delivery) -> list[tuple[str, str, str]]:
+def _sections(delivery: Delivery, *, expand_brief: bool) -> list[tuple[str, str, str]]:
     parts: list[tuple[str, str, str]] = []
+    if not delivery.facts:
+        parts.append(
+            (
+                "回答",
+                "回答（模型生成，未经系统核实）",
+                delivery.feishu_text if delivery.feishu_text is not None else delivery.content,
+            )
+        )
     for fact in delivery.facts:
         source = (
             f"证据 {fact.evidence_id} · 来源 {fact.tool_id} · 目标 {fact.target_id} · "
@@ -58,10 +65,12 @@ def _sections(delivery: Delivery) -> list[tuple[str, str, str]]:
         if fact.note:
             details.append(f"说明：{fact.note}")
         details.extend(fact_limit_notices(fact))
-        if fact.view == "brief":
-            details.append(f"摘要：{fact.summary or '摘要不可用。'}")
-            details.append("获准原文未展示；此项仅提供摘要。")
+        if fact.view == "brief" and not expand_brief:
+            if fact.summary is None:
+                raise ValueError("历史摘要缺失")
+            details.append(fact.summary)
         else:
+            # 显式文件可在当前权限下展开原值；自动换载体保持所选摘要语义。
             details.append(_fact_json(fact))
         parts.append(("证据", source, "\n".join(details)))
     if delivery.monitoring_notice:
@@ -78,17 +87,19 @@ def _sections(delivery: Delivery) -> list[tuple[str, str, str]]:
         )
     if delivery.session_notice:
         parts.append(("会话提示", "会话提示", delivery.session_notice))
+    if delivery.basis:
+        parts.append(("查看依据", "其他调查", "\n".join(f"{t} · {o}" for t, o in delivery.basis)))
     return parts
 
 
-def build_report(delivery: Delivery) -> ReportFile:
+def build_report(delivery: Delivery, *, expand_brief: bool = True) -> ReportFile:
     """全量构造一个有界 MD 或 HTML 文件；放不下时整体失败，不裁掉事实或限制。"""
     format_: ReportFormat | None = delivery.report_format
     if delivery.channel != "feishu" or format_ not in ("md", "html"):
         raise ValueError("当前交付没有获准的报告格式")
-    if not delivery.facts or delivery.requires_complete:
+    if delivery.requires_complete:
         raise ValueError("当前回答不能作为只读事实报告交付")
-    sections = _sections(delivery)
+    sections = _sections(delivery, expand_brief=expand_brief)
     if format_ == "md":
         blocks = []
         for index, (heading, title, value) in enumerate(sections, start=1):
@@ -110,7 +121,7 @@ def build_report(delivery: Delivery) -> ReportFile:
             + "</body></html>"
         )
     content = body.encode("utf-8")
-    if len(content) > MAX_REPORT_BYTES or len(body.splitlines()) > MAX_REPORT_LINES:
+    if len(content) > MAX_REPORT_BYTES:
         raise ReportCapacityError("报告超过当前文件容量")
     return ReportFile(
         format=format_,

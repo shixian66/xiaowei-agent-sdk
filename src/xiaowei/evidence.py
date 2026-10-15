@@ -392,7 +392,7 @@ class EvidenceStore:
                 raise AnswerRejectedError(
                     AnswerRejectCode.MIXED_KINDS, "澄清或建议不能与查询结果、分析或彼此混用"
                 )
-            await self._context_readable(ctx, channel, context, history=history)
+            records = await self._context_readable(ctx, channel, context, history=history)
             ((header, text),) = unverified
             if monitoring_notice is not None:
                 header = (
@@ -409,6 +409,8 @@ class EvidenceStore:
                 monitoring_notice=monitoring_notice,
                 web_text=rendered if channel == "web" else None,
                 feishu_text=rendered if channel == "feishu" else None,
+                basis=_basis(records, ctx),
+                content_expires_at=min((r.expires_at for r in records), default=None),
             )
 
         cited = answer.evidence_ids
@@ -436,20 +438,14 @@ class EvidenceStore:
         records = await self._context_readable(ctx, channel, (*cited, *unshown), history=history)
 
         shown = [_shown(r, channel, self._fact_note(r)) for r in records[: len(cited)]]
-        # 已配对的SDK执行事实取代同一Action的待批材料；不重复强制展示旧材料挤掉结果。
-        outcomes = {
-            (item.data or {}).get("action_id")
-            for item in shown
-            if (c := self._catalog.contract(item.record.tool_id, item.record.target_id)) is not None
-            and self._catalog.policy_for(c).effect == "approval"
-        }
         facts: list[DeliveryFact] = []
         for item in shown:
             contract = self._catalog.contract(item.record.tool_id, item.record.target_id)
             effect = self._catalog.policy_for(contract).effect if contract is not None else "read"
-            complete = (
-                effect == "propose" and (item.data or {}).get("action_id") not in outcomes
-            ) or (effect == "approval" and item.record.identity.turn_id == ctx.identity.turn_id)
+            # 提案/执行只进入独立动作组件，不能复制为参考数据文件。
+            complete = effect == "propose" or (
+                effect == "approval" and item.record.identity.turn_id == ctx.identity.turn_id
+            )
             fact = _fact(item, channel).model_copy(update={"requires_complete": complete})
             if views.get(fact.evidence_id) == "brief":
                 if item.record.identity.turn_id == ctx.identity.turn_id:
@@ -493,6 +489,8 @@ class EvidenceStore:
             monitoring_notice=monitoring_notice,
             requires_complete=any(f.requires_complete for f in facts),
             report_format=answer.report_format,
+            basis=_basis(records[len(cited) :], ctx),
+            content_expires_at=min((r.expires_at for r in records), default=None),
         )
 
     async def _monitoring_failure_notice(self, turn: TurnAnswer, ctx: RunContext) -> str | None:
@@ -842,6 +840,19 @@ class _Shown:
     data: dict[str, object] | None
     truncated: bool
     note: str | None
+
+
+def _basis(records: Sequence[EvidenceRecord], ctx: RunContext) -> tuple[tuple[str, str], ...]:
+    if ctx.identity.channel != "feishu":
+        return ()
+    return tuple(
+        dict.fromkeys(
+            (r.tool_id, f"{d.database}.{d.name}" if d else r.target_id)
+            for r in records
+            if r.identity.turn_id == ctx.identity.turn_id
+            for d in (r.dependencies or (None,))
+        )
+    )
 
 
 def _shown(record: EvidenceRecord, channel: Audience, note: str | None) -> _Shown:

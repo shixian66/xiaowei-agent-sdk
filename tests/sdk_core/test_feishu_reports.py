@@ -28,7 +28,7 @@ from tests.sdk_core.test_group_identity import CHAT, A, B, group_ref
 
 from xiaowei import feishu_report
 from xiaowei.channel import RequestRef
-from xiaowei.channel_store import ChannelStoreUnavailableError, ReportMismatchError
+from xiaowei.channel_store import ChannelStore, ChannelStoreUnavailableError, ReportMismatchError
 from xiaowei.feishu import FeishuGateway, LarkTransport, attributed, lark_channel, send_delivery
 from xiaowei.feishu_report import build_report
 from xiaowei.models import AnswerInference, Delivery, DeliveryFact
@@ -125,18 +125,39 @@ def test_report_distinguishes_next_page_from_lost_values() -> None:
     assert "还有后续页" in clipped and "工具结果已截断" in clipped
 
 
-def test_brief_report_explicitly_states_original_not_shown() -> None:
+def test_explicit_brief_report_expands_authorized_original() -> None:
     delivery = _delivery("md")
     brief = delivery.facts[0].model_copy(update={"view": "brief", "summary": "只显示行数摘要"})
     body = build_report(delivery.model_copy(update={"facts": (brief,)})).content.decode()
-    assert "只显示行数摘要" in body and "获准原文未展示" in body
-    assert "SELECT '<script>'" not in body
+    assert "只显示行数摘要" not in body and "获准原文未展示" not in body
+    assert "SELECT '<script>'" in body
 
 
-def test_report_line_limit_rejects_whole_file(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(feishu_report, "MAX_REPORT_LINES", 4)
-    with pytest.raises(feishu_report.ReportCapacityError):
-        build_report(_delivery("md"))
+def test_file_limit_is_serialized_bytes_without_an_extra_line_limit() -> None:
+    delivery = _delivery("md")
+    fact = delivery.facts[0].model_copy(update={"result_json": "\n" * 10_001})
+    report = build_report(delivery.model_copy(update={"facts": (fact,)}))
+    assert len(report.content) < 400_000
+    assert report.content.count(b"\n") > 10_000
+
+
+@pytest.fixture(autouse=True)
+def legacy_requests(monkeypatch: pytest.MonkeyPatch) -> None:
+    """本模块回归升级前 E6 记录；新分项契约在 test_delivery_parts/正式入口独立验收。"""
+    accept = ChannelStore.accept
+
+    async def old_accept(self, **kwargs):
+        result = await accept(self, **kwargs)
+        async with self._engine.begin() as conn:
+            await conn.execute(
+                text("UPDATE xiaowei_request SET delivery_version=0 WHERE turn_id=:turn"),
+                {"turn": result.record.turn_id},
+            )
+        return dataclasses.replace(
+            result, record=dataclasses.replace(result.record, delivery_version=0)
+        )
+
+    monkeypatch.setattr(ChannelStore, "accept", old_accept)
 
 
 def test_report_format_is_not_exposed_in_web_serialization() -> None:
@@ -528,7 +549,7 @@ async def test_rejected_evidence_never_uploads_report(env: Env) -> None:
 
 
 @pytest.mark.asyncio
-async def test_report_rechecks_permission_after_upload_before_send(env: Env) -> None:
+async def test_legacy_report_uses_starting_permission_snapshot(env: Env) -> None:
     message = env.scripts.add(
         "生成东区订单 MD 报告",
         tool_call("order_total", region="east"),
@@ -561,8 +582,8 @@ async def test_report_rechecks_permission_after_upload_before_send(env: Env) -> 
         ref=ref,
         upload_file=upload,
     )
-    assert await env.service.results.send(ref, transmit) == "failed"
-    assert calls == ["upload"]
+    assert await env.service.results.send(ref, transmit) == "sent"
+    assert calls == ["upload", "send"]
 
 
 @pytest.mark.asyncio

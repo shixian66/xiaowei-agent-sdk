@@ -555,7 +555,7 @@ async def test_reread_and_resend_use_saved_answer_without_runner(env: Env) -> No
     outbox.outcome = "sent"
     assert await results.send(ref(), outbox, resend=True) == "sent"
     assert await results.send(ref(), outbox, resend=True) is None
-    assert len(outbox.sent) == 2 and outbox.sent[0] == outbox.sent[1]
+    assert len(outbox.sent) == 2 and outbox.sent[0].model_dump() == outbox.sent[1].model_dump()
     assert (env.model_calls(message), len(env.adapter.calls)) == (model_calls, tool_calls)
 
 

@@ -1989,6 +1989,7 @@ async def resend(
     clock: Callable[[], datetime] = now,
     feishu_channel: LarkChannel | None = None,
     starrocks_connect: Mapping[str, Connector] | None = None,
+    notice: Callable[[str], None] | None = None,
 ) -> SendOutcome | None:
     """显式重发一条飞书结果：只接受当前 owner 下 completed 且投递为 failed/unknown 的记录。
 
@@ -2023,7 +2024,16 @@ async def resend(
         transport = LarkTransport(feishu_channel or lark_channel(feishu), feishu)
         try:
             return await _resend(
-                config, engine, schemas, clock, sender, transport, subject_id, message_id, chat_id
+                config,
+                engine,
+                schemas,
+                clock,
+                sender,
+                transport,
+                subject_id,
+                message_id,
+                chat_id,
+                notice,
             )
         finally:
             if not await transport.stop():
@@ -2040,6 +2050,7 @@ async def _resend(
     subject_id: str,
     message_id: str,
     chat_id: str | None,
+    notice: Callable[[str], None] | None = None,
 ) -> SendOutcome | None:
     """单聊发往操作者给出的 ``chat_id``；群（``chat_id`` 为 None）只回复配置群中的原消息。"""
     feishu = config.feishu
@@ -2065,6 +2076,7 @@ async def _resend(
         results=parts.results,
         upload_file=transport.upload_file,
         resend=True,
+        notice=notice,
     )
 
     ref = RequestRef(

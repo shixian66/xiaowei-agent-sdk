@@ -9,6 +9,8 @@
 
 **权威：** 协作与验收引用 [AGENTS](../../../AGENTS.md)，生效架构引用 [ARCHITECTURE](../../../ARCHITECTURE.md)。本文件是这七项的唯一实施计划；新增契约在 §4 列明为提案，批准后才更新 ARCHITECTURE。监控按[监控实施计划](2026-10-09-monitoring-mcp.md)独立推进。
 
+**后续交付修订（2026-10-14，待实现）：** E6/R12/C3 的既有实现与历史验收保留在本文件。自动完整附件、分项投递状态、自然正文及通用HTML/MD的后续任务只由[新的交付修复计划](2026-10-14-result-delivery-documents.md)维护，修订契约只看[ARCHITECTURE](../../../ARCHITECTURE.md#result-delivery)。新计划不表示旧行为已被替换，也不继承本文件各片的真实模型例外。
+
 ## 1. 基线、授权与生产证据
 
 - **E5a 授权与基线（2026-10-12）：** 用户确认 S3 复审通过并授权合并后继续；PR #85 head `719af62f8968b41cc977044509fe764ca0ea31a6` 十项 CI 全绿，已合入为上述 main。复用既有隔离工作树，分支 `codex/feishu-unsupported-input-e5a`；只完成未支持类型回执，不新增附件内容发送或模型契约，不需要真实模型对照，也不继承 R7/R3 豁免。

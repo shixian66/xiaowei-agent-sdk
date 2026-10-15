@@ -184,13 +184,17 @@ async def _run(config: "ServeConfig", args: argparse.Namespace, *, container: bo
         chat_id=args.chat,
         group=args.group,
         message_id=args.message,
+        notice=lambda message: print(message, file=sys.stderr),
     )
     if outcome is None:
         print(f"{args.message} not_resendable", file=sys.stderr)
         return 1
     print(f"{args.message} {outcome}")
     if outcome == "unknown":
-        print("结果不明，请人工核实后再决定下一步；不要直接重复重发", file=sys.stderr)
+        print(
+            "结果不明，请人工核实；可由操作员手动补发未知消息部分，可能重复；上传结果不明仍禁止重传。",
+            file=sys.stderr,
+        )
     return 0 if outcome == "sent" else 1
 
 

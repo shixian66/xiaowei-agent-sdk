@@ -418,12 +418,17 @@ class HeldOutbox(Outbox):
     release: asyncio.Event = field(default_factory=asyncio.Event)
 
     async def __call__(
-        self, chat_id: str, text: str | dict[str, Any], *, reply_to: str | None = None
+        self,
+        chat_id: str,
+        text: str | dict[str, Any],
+        *,
+        reply_to: str | None = None,
+        uuid: str | None = None,
     ) -> Any:
         if text != QUEUED and not self.sending.is_set():
             self.sending.set()
             await self.release.wait()
-        return await super().__call__(chat_id, text, reply_to=reply_to)
+        return await super().__call__(chat_id, text, reply_to=reply_to, uuid=uuid)
 
 
 async def test_redelivery_while_queued_running_or_sending_never_touches_the_directory(
@@ -532,7 +537,8 @@ async def test_unsuccessful_replies_are_recorded_and_never_retried(
         event = await group.ask("东区订单？", message_id="om_fail")
         await group.gateway.receive(event)  # 重投不重发、不重跑，也不查成员目录
         await group.gateway.idle()
-    assert len(group.outbox.sent) == 1 and env.model_calls(asked) == 2
+    assert len(group.outbox.sent) == 2 and env.model_calls(asked) == 2
+    assert "完整结果尚未交付" in group.outbox.texts()[-1]
     assert len(env.members.checks) == 2
     assert (await request_rows(env))[0][5] == expected
 
@@ -858,7 +864,7 @@ async def test_formal_runtime_answers_a_member_and_refuses_an_outsider(
     async with env.running(config, feishu_channel=channel) as served:
         assert (await served.ready())["feishu"] == "connected"
         channel.emit_raw_from_sdk_thread(raw_group_event(env, "有哪些表", "om_ok"))
-        await until(lambda: len(channel.sends) == 1)
+        await until(lambda: len(channel.sends) >= 1)
         # sends 记录发送开始，不代表投递/群队头已结束；等待真实网关，避免第二条收到排队提示。
         assert len(gateways) == 1
         await asyncio.wait_for(gateways[0].idle(), 20)
@@ -899,7 +905,7 @@ async def test_group_member_can_query_the_readable_audit_table(runtime_env: Runt
 
     async with env.running(config, feishu_channel=channel) as served:
         channel.emit_raw_from_sdk_thread(raw_group_event(env, "执行审计查询", "om_audit"))
-        await until(lambda: len(channel.sends) == 1)
+        await until(lambda: len(channel.sends) >= 1)
         assert await served.finish() == 0
 
     assert len(env.scripts.calls[asked]) == 2
@@ -920,7 +926,7 @@ async def group_result_unsent(env: RuntimeEnv, config: runtime.ServeConfig) -> s
     )
     async with env.running(config, feishu_channel=channel) as served:
         channel.emit_raw_from_sdk_thread(raw_group_event(env, "待重发", "om_resend"))
-        await until(lambda: len(channel.sends) == 1)
+        await until(lambda: len(channel.sends) >= 1)
         assert await served.finish() == 0
     assert await env.scalar("SELECT delivery FROM xiaowei_request") == "failed"
     return message

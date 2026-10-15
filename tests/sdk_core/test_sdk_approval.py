@@ -35,6 +35,272 @@ async def paused(actions: Actions, group, *, investigate=False):
     return await actions.one(), script
 
 
+@pytest.mark.parametrize("failed_part", ["approval", "data"])
+@pytest.mark.parametrize("failure", ["failed", "unknown"])
+async def test_mixed_round_material_receipt_independently_controls_approval(
+    actions, failed_part, failure
+):
+    from sqlalchemy import text
+    from tests.sdk_core.test_feishu import Outbox
+
+    env = actions.env
+    outbox = Outbox([failure, "sent"] if failed_part == "approval" else ["sent", failure])
+    env.scripts.add(
+        attributed(A, "查询并静默"),
+        tool_call("run_query", region="east"),
+        tool_call(f"{SOURCE}__propose_change", value="after"),
+        request_execution,
+        cite("根据实际执行事实反馈"),
+    )
+    async with running(env, outbox=outbox, max_reply_chars=3500) as group:
+        await group.ask("查询并静默", message_id="om_mixed")
+        action_id = await actions.one()
+        assert "/批准" in group.outbox.texts()[0]
+        assert "见附件" not in group.outbox.texts()[0]
+        async with env.engine.connect() as conn:
+            states = (
+                await conn.execute(
+                    text("SELECT kind,send_state FROM xiaowei_delivery_part ORDER BY sequence")
+                )
+            ).all()
+        assert states == [
+            ("approval", failure if failed_part == "approval" else "sent"),
+            ("body", "sent" if failed_part == "approval" else failure),
+        ]
+        assert await env.rows("SELECT delivery FROM xiaowei_request") == [(failure,)]
+        if failed_part == "approval":
+            async with env.engine.begin() as conn:
+                await conn.execute(text("UPDATE xiaowei_request SET delivery='sent'"))
+            # 新记录只认审批材料回执，父请求错误的sent缓存不能放行。
+        await group.ask(f"/批准 {action_id}", sender=B, message_id="om_mixed_approve")
+        assert len(actions.adapter.calls) == (0 if failed_part == "approval" else 1)
+
+
+@pytest.mark.parametrize("actions", [400_000], indirect=True)
+async def test_resend_confirms_unknown_approval_even_when_reference_file_is_oversized(actions):
+    from functools import partial
+
+    from tests.sdk_core.test_feishu import Outbox
+    from tests.sdk_core.test_group_identity import GROUP
+
+    from xiaowei.feishu import send_delivery
+    from xiaowei.feishu_report import ReportCapacityError, build_report
+
+    env = actions.env
+    env.adapter.rows, env.adapter.memo = 1, "x" * 210_000
+    uuids, uploads = [], []
+
+    class Receipts(Outbox):
+        async def __call__(self, chat_id, message, *, uuid=None, **kwargs):
+            uuids.append(uuid)
+            return await super().__call__(chat_id, message, uuid=uuid, **kwargs)
+
+    async def upload(report):
+        uploads.append(report.content)
+        raise AssertionError("超容量数据不得上传")
+
+    script = env.scripts.add(
+        attributed(A, "大结果与独立静默"),
+        tool_call("run_query", region="east"),
+        tool_call("run_query", region="west"),
+        tool_call(f"{SOURCE}__propose_change", value="after"),
+        request_execution,
+        cite("根据实际执行事实反馈"),
+    )
+    async with running(env, outbox=Receipts(["unknown"]), max_reply_chars=3500) as group:
+        await group.ask("大结果与独立静默", message_id="om_large_mixed")
+        ref = group_ref("om_large_mixed", A)
+        record = await env.store.get("feishu", A, GROUP.chat_id, ref.request_id, owner=GROUP.owner)
+        before = await env.store.delivery_parts(record)
+        assert [(p.kind, p.send_state) for p in before] == [("approval", "unknown")]
+        view = await env.results.view(ref, first=True)
+        data = tuple(f for f in view.delivery.facts if not f.requires_complete)
+        assert len(data) == 2 and sum(len(f.result_json.encode()) for f in data) > 400_000
+        with pytest.raises(ReportCapacityError):
+            build_report(
+                view.delivery.model_copy(
+                    update={"facts": data, "report_format": "md", "requires_complete": False}
+                )
+            )
+        sent = len(group.outbox.sent)
+        transmit = partial(
+            send_delivery,
+            send=group.outbox,
+            upload_file=upload,
+            chat_id=GROUP.chat_id,
+            reply_to=ref.request_id,
+            max_chars=3500,
+            results=env.results,
+            ref=ref,
+            resend=True,
+        )
+        assert await env.results.send(ref, transmit, resend=True) == "unknown"
+        after = await env.store.delivery_parts(record)
+        assert len(group.outbox.sent) == sent + 1
+        assert after[0].send_state == "sent" and after[0].message_id
+        assert uuids[-1] == before[0].uuid == after[0].uuid
+        assert uploads == []
+        assert await env.rows("SELECT delivery FROM xiaowei_request") == [("unknown",)]
+        assert env.model_calls(script) == 4 and len(env.adapter.calls) == 2
+        action_id = await actions.one()
+        await group.ask(f"/批准 {action_id}", sender=B, message_id="om_large_approve")
+        await group.ask(f"/批准 {action_id}", sender=B, message_id="om_large_duplicate")
+        assert await env.rows("SELECT state FROM xiaowei_action") == [("succeeded",)]
+        assert len(actions.adapter.calls) == 1 and len(env.adapter.calls) == 2
+
+
+async def test_resend_still_checks_saved_approval_capacity_before_sending(actions):
+    from functools import partial
+
+    from tests.sdk_core.test_feishu import Outbox
+    from tests.sdk_core.test_group_identity import GROUP
+
+    from xiaowei.feishu import send_delivery
+
+    env = actions.env
+    env.scripts.add(
+        attributed(A, "待补发审批卡"),
+        tool_call(f"{SOURCE}__propose_change", value="after"),
+        request_execution,
+        cite(),
+    )
+    async with running(env, outbox=Outbox(["unknown"]), max_reply_chars=3500) as group:
+        await group.ask("待补发审批卡", message_id="om_approval_capacity")
+        ref = group_ref("om_approval_capacity", A)
+        sent = len(group.outbox.sent)
+        transmit = partial(
+            send_delivery,
+            send=group.outbox,
+            chat_id=GROUP.chat_id,
+            reply_to=ref.request_id,
+            max_chars=200,
+            results=env.results,
+            ref=ref,
+            resend=True,
+        )
+        assert await env.results.send(ref, transmit, resend=True) == "unknown"
+        assert len(group.outbox.sent) == sent
+        assert await env.rows("SELECT send_state FROM xiaowei_delivery_part") == [("unknown",)]
+        assert actions.adapter.calls == []
+
+
+async def test_material_capacity_failure_does_not_block_independent_query_data(actions):
+    from functools import partial
+
+    from tests.sdk_core.test_group_identity import GROUP
+
+    from xiaowei.feishu import send_delivery
+
+    env = actions.env
+    env.scripts.add(
+        attributed(A, "数据与长材料"),
+        tool_call("run_query", region="east"),
+        tool_call(f"{SOURCE}__propose_change", value="x" * 1700),
+        request_execution,
+        cite(),
+    )
+    async with running(env, max_reply_chars=3500) as group:
+        await group.ask("数据与长材料", message_id="om_material_capacity")
+        assert await env.rows("SELECT kind,send_state FROM xiaowei_delivery_part") == [
+            ("body", "sent")
+        ]
+        assert any('"east"' in shown and "100" in shown for shown in group.outbox.texts())
+        assert await env.rows("SELECT delivery FROM xiaowei_request") == [("failed",)]
+        before = len(group.outbox.sent)
+        ref = group_ref("om_material_capacity", A)
+        transmit = partial(
+            send_delivery,
+            send=group.outbox,
+            chat_id=GROUP.chat_id,
+            reply_to="om_material_capacity",
+            max_chars=3500,
+            results=env.results,
+            ref=ref,
+            resend=True,
+        )
+        assert await env.results.send(ref, transmit, resend=True) == "failed"
+        assert len(group.outbox.sent) == before
+        action_id = await actions.one()
+        await group.ask(f"/批准 {action_id}", sender=B, message_id="om_capacity_approve")
+        assert actions.adapter.calls == []
+
+
+async def test_failed_approval_material_has_nonempty_incomplete_hint(actions):
+    from tests.sdk_core.test_feishu import Outbox
+
+    env = actions.env
+    env.scripts.add(
+        attributed(A, "仅审批材料"),
+        tool_call(f"{SOURCE}__propose_change", value="after"),
+        request_execution,
+        cite(),
+    )
+    async with running(env, outbox=Outbox(["failed"]), max_reply_chars=3500) as group:
+        await group.ask("仅审批材料", message_id="om_material_failure")
+        assert len(group.outbox.sent) == 2
+        hint = group.outbox.texts()[-1]
+        assert "完整结果尚未交付" in hint and "om_material_failure" in hint
+        assert "/批准" not in hint
+
+
+@pytest.mark.parametrize("settle_failure", [False, True])
+async def test_runner_cancellation_waits_for_started_write_to_settle_once(
+    actions, monkeypatch, settle_failure
+):
+    import asyncio
+
+    env = actions.env
+    settling, release, settled = asyncio.Event(), asyncio.Event(), asyncio.Event()
+    actions.adapter.entered = asyncio.Event()
+    actions.adapter.release = asyncio.Event()
+    attempts = []
+    original = env.store.finish_action
+
+    async def finish(action, state, *args, **kwargs):
+        attempts.append(state)
+        if state == "unknown":
+            settling.set()
+            await release.wait()
+        try:
+            if state == "unknown" and settle_failure:
+                raise OSError("synthetic unknown settlement failure")
+            await original(action, state, *args, **kwargs)
+        finally:
+            if state == "unknown":
+                settled.set()
+
+    monkeypatch.setattr(env.store, "finish_action", finish)
+    async with running(env) as group:
+        action_id, _ = await paused(actions, group)
+        receipt = await env.service.accept(
+            env.group(attributed(B, f"/批准 {action_id}"), "om_cancel_settle", actor=B)
+        )
+        processing = asyncio.create_task(env.service.approve(receipt, action_id))
+        try:
+            await asyncio.wait_for(actions.adapter.entered.wait(), 5)
+            processing.cancel()
+            await asyncio.wait_for(settling.wait(), 5)
+            # SDK Runner已返回取消，写清理尚被屏障阻塞；应用不得抢先rejected或结束原turn。
+            with pytest.raises(TimeoutError):
+                await asyncio.wait_for(asyncio.shield(processing), 0.2)
+            assert attempts == ["unknown"]
+            assert await env.rows("SELECT state FROM xiaowei_action") == [("executing",)]
+        finally:
+            release.set()
+            from xiaowei.channel_store import ChannelStoreUnavailableError
+
+            with pytest.raises(
+                ChannelStoreUnavailableError if settle_failure else asyncio.CancelledError
+            ):
+                await processing
+            await asyncio.wait_for(settled.wait(), 5)
+    assert attempts == ["unknown"] and env.store.readiness.ok is not settle_failure
+    assert await env.rows("SELECT state FROM xiaowei_action") == [
+        ("executing" if settle_failure else "unknown",)
+    ]
+    assert len(actions.adapter.calls) == 1
+
+
 async def test_native_pause_resume_writes_once_and_commits_paired_history(actions: Actions):
     env = actions.env
     # 发起人有群读取/提出权限，没有写权限；B才是本次写的批准主体。
@@ -63,7 +329,7 @@ async def test_native_pause_resume_writes_once_and_commits_paired_history(action
         assert outcome.requires_complete
         assert outcome.metadata["state"] == "succeeded"
         assert {"action_id", "state", "approver", "result"} <= outcome.metadata.keys()
-        assert "动作执行事实" in group.outbox.texts()[-1]
+        assert "动作执行事实" in "\n".join(group.outbox.texts()[-2:])
         before = len(actions.adapter.calls)
         await group.ask(f"/批准 {action_id}", sender=B, message_id="om_sdk_duplicate")
         assert len(actions.adapter.calls) == before == 1
@@ -552,7 +818,7 @@ async def test_partial_approvals_save_new_version_and_keep_original_turn(actions
         assert outcomes[0].metadata["action_id"] == ids[0]
         assert outcomes[0].metadata["state"] == "succeeded"
         assert {"action_id", "state", "approver", "result"} <= outcomes[0].metadata.keys()
-        assert "动作执行事实" in group.outbox.texts()[-1]
+        assert "动作执行事实" in "\n".join(group.outbox.texts()[-2:])
         assert ids[0] in group.outbox.texts()[-1] and ids[1] in group.outbox.texts()[-1]
         await group.ask(f"/批准 {ids[0]}", sender=B, message_id="om_first_again")
         assert await env.rows(
@@ -583,7 +849,7 @@ async def test_group_rejection_uses_native_reject_and_never_writes(actions):
     assert await env.rows(
         "SELECT state FROM xiaowei_request WHERE reply_message_id='om_sdk_reject'"
     ) == [("completed",)]
-    assert "rejected" in str(group.outbox.sent[-1])
+    assert "rejected" in str(group.outbox.sent[-2:])
     assert await env.rows("SELECT turns FROM xiaowei_session") == [(1,)]
 
 
@@ -658,7 +924,7 @@ async def test_failed_material_can_be_explicitly_resent_before_approval(actions)
         async with env.engine.begin() as conn:
             await conn.execute(
                 text(
-                    "UPDATE xiaowei_request SET delivery='failed' "
+                    "UPDATE xiaowei_request SET delivery='failed', delivery_version=0 "
                     "WHERE reply_message_id='om_sdk_origin'"
                 )
             )
@@ -693,7 +959,9 @@ async def test_restart_keeps_pause_and_recovers_unsent_material_without_replayin
     async with running(env, max_reply_chars=3500) as group:
         aid, script = await paused(actions, group)
     async with env.engine.begin() as conn:
-        await conn.execute(text("UPDATE xiaowei_request SET delivery='pending'"))
+        await conn.execute(
+            text("UPDATE xiaowei_request SET delivery='pending', delivery_version=0")
+        )
     report = await env.store.recover(actions.lock)
     assert report.unsent == 1
     assert await env.rows("SELECT state, delivery FROM xiaowei_request") == [("paused", "failed")]
@@ -1338,7 +1606,10 @@ async def test_resumed_agent_can_propose_a_second_action_in_the_same_task(action
         assert await env.rows("SELECT version, consumed FROM xiaowei_action_run") == [(2, False)]
         assert [r.arguments for r in actions.adapter.calls] == [{"value": "first"}]
         ((next_id,),) = await env.rows("SELECT action_id FROM xiaowei_action WHERE state='pending'")
-        assert "动作执行事实" in group.outbox.texts()[-1] and aid in group.outbox.texts()[-1]
+        assert (
+            "动作执行事实" in "\n".join(group.outbox.texts()[-2:])
+            and aid in group.outbox.texts()[-1]
+        )
         await group.ask(f"/批准 {next_id}", sender=B, message_id="om_sequential_second")
     assert env.model_calls(script) == 5
     assert [r.arguments for r in actions.adapter.calls] == [{"value": "first"}, {"value": "second"}]
@@ -1413,8 +1684,6 @@ async def test_session_expiry_at_pause_save_has_terminal_request_and_allows_new_
 
 
 async def test_native_execution_receipt_cannot_be_clipped_to_claim_delivery_success(actions):
-    from xiaowei.feishu_render import CAPACITY_NOTICE
-
     env = actions.env
     async with running(env, max_reply_chars=3500) as group:
         aid, script = await paused(actions, group)
@@ -1426,7 +1695,8 @@ async def test_native_execution_receipt_cannot_be_clipped_to_claim_delivery_succ
         "SELECT state,delivery FROM xiaowei_request"
         " WHERE reply_message_id='om_small_execution_receipt'"
     ) == [("completed", "failed")]
-    assert group.outbox.texts()[-1] == CAPACITY_NOTICE
+    assert "完整结果尚未交付" in group.outbox.texts()[-1]
+    assert "动作事实消息容量不足" in group.outbox.texts()[-1]
 
 
 async def test_partial_execution_facts_remain_delivered_when_the_other_action_expires(actions):

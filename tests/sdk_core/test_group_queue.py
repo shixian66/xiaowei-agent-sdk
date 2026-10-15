@@ -185,7 +185,12 @@ class GatedOutbox(Outbox):
         return self.gates.setdefault((reply_to, prefix), asyncio.Event())
 
     async def __call__(
-        self, chat_id: str, text: str | dict[str, Any], *, reply_to: str | None = None
+        self,
+        chat_id: str,
+        text: str | dict[str, Any],
+        *,
+        reply_to: str | None = None,
+        uuid: str | None = None,
     ) -> Any:
         shown = message_text(text)
         key = next(
@@ -204,7 +209,7 @@ class GatedOutbox(Outbox):
             if key is not None:
                 self.reached.add((reply_to or "", key[1]))
                 await self.gates[key].wait()
-            return await super().__call__(chat_id, text, reply_to=reply_to)
+            return await super().__call__(chat_id, text, reply_to=reply_to, uuid=uuid)
         finally:
             if busy:
                 self.busy_active -= 1
