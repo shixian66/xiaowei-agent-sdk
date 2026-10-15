@@ -77,7 +77,9 @@ async def test_mixed_round_material_receipt_independently_controls_approval(
 
 
 @pytest.mark.parametrize("actions", [400_000], indirect=True)
-async def test_resend_confirms_unknown_approval_even_when_reference_file_is_oversized(actions):
+async def test_resend_confirms_unknown_approval_even_when_reference_row_is_indivisible(
+    actions, monkeypatch
+):
     from functools import partial
 
     from tests.sdk_core.test_feishu import Outbox
@@ -88,6 +90,7 @@ async def test_resend_confirms_unknown_approval_even_when_reference_file_is_over
 
     env = actions.env
     env.adapter.rows, env.adapter.memo = 1, "x" * 210_000
+    monkeypatch.setattr("xiaowei.feishu_report.MAX_REPORT_BYTES", 100)
     uuids, uploads = [], []
 
     class Receipts(Outbox):
@@ -134,19 +137,297 @@ async def test_resend_confirms_unknown_approval_even_when_reference_file_is_over
             ref=ref,
             resend=True,
         )
-        assert await env.results.send(ref, transmit, resend=True) == "unknown"
+        assert await env.results.send(ref, transmit, resend=True) == "failed"
         after = await env.store.delivery_parts(record)
         assert len(group.outbox.sent) == sent + 1
         assert after[0].send_state == "sent" and after[0].message_id
         assert uuids[-1] == before[0].uuid == after[0].uuid
         assert uploads == []
-        assert await env.rows("SELECT delivery FROM xiaowei_request") == [("unknown",)]
+        assert await env.rows("SELECT delivery FROM xiaowei_request") == [("failed",)]
         assert env.model_calls(script) == 4 and len(env.adapter.calls) == 2
         action_id = await actions.one()
         await group.ask(f"/批准 {action_id}", sender=B, message_id="om_large_approve")
         await group.ask(f"/批准 {action_id}", sender=B, message_id="om_large_duplicate")
         assert await env.rows("SELECT state FROM xiaowei_action") == [("succeeded",)]
         assert len(actions.adapter.calls) == 1 and len(env.adapter.calls) == 2
+
+
+@pytest.mark.parametrize("actions", [400_000], indirect=True)
+async def test_group_large_result_delivers_all_files_before_body(actions):
+    from itertools import pairwise
+    from time import monotonic
+
+    from lark_channel.channel.types import OutboundFile
+    from tests.sdk_core.test_app import answer, evidence_in
+    from tests.sdk_core.test_feishu import Outbox
+    from tests.sdk_core.test_group_identity import GROUP
+
+    env = actions.env
+    env.adapter.rows, env.adapter.memo = 900, "x" * 190
+    files = []
+    sent_at = []
+
+    class TimedOutbox(Outbox):
+        async def __call__(self, chat_id, message, *, uuid=None, **kwargs):
+            if uuid is not None:
+                sent_at.append(monotonic())
+            return await super().__call__(chat_id, message, uuid=uuid, **kwargs)
+
+    async def upload(report):
+        files.append(report)
+        return f"file_{len(files)}"
+
+    env.scripts.add(
+        attributed(A, "交付东、西区完整订单"),
+        tool_call("run_query", region="east"),
+        tool_call("run_query", region="west"),
+        lambda call: answer(evidence_in(call), report_format="md"),
+    )
+    async with running(
+        env, outbox=TimedOutbox(), upload_file=upload, max_reply_chars=3500
+    ) as group:
+        await group.ask("交付东、西区完整订单", message_id="om_large_split")
+        ref = group_ref("om_large_split", A)
+        view = await env.results.view(ref, first=True)
+        assert len(view.delivery.facts) == 2
+        assert sum(len(f.result_json.encode()) for f in view.delivery.facts) > 400_000
+        record = await env.store.get("feishu", A, GROUP.chat_id, ref.request_id, owner=GROUP.owner)
+        parts = await env.store.delivery_parts(record)
+        assert len(files) > 1 and len(parts) == len(files) + 1
+        assert all(len(report.content) <= 400_000 for report in files)
+        assert [report.filename for report in files] == [
+            f"xiaowei-report-{i}-of-{len(files)}.md" for i in range(1, len(files) + 1)
+        ]
+        assert all(p.send_state == "sent" and p.message_id for p in parts)
+        messages = [message for _, message in group.outbox.sent]
+        assert all(isinstance(message, OutboundFile) for message in messages[:-1])
+        assert "完整结果见附件" in json.dumps(messages[-1], ensure_ascii=False)
+        assert len(sent_at) == len(files) + 1
+        assert all(b - a >= 0.19 for a, b in pairwise(sent_at))
+        body = "\n".join(report.content.decode() for report in files)
+        assert body.count('"day":"2026-09-01"') + body.count('"day": "2026-09-01"') == 2
+        assert await env.rows("SELECT delivery FROM xiaowei_request") == [("sent",)]
+
+
+@pytest.mark.parametrize("actions", [400_000], indirect=True)
+@pytest.mark.parametrize("second", ["failed", "unknown"])
+async def test_second_large_file_failure_recovers_only_that_message(actions, second):
+    from functools import partial
+
+    from lark_channel.channel.types import OutboundFile
+    from tests.sdk_core.test_app import answer, evidence_in
+    from tests.sdk_core.test_feishu import Outbox
+    from tests.sdk_core.test_group_identity import GROUP
+
+    from xiaowei.feishu import send_delivery
+
+    env = actions.env
+    env.adapter.rows, env.adapter.memo = 900, "x" * 190
+    uploads, uuids = [], []
+
+    async def upload(report):
+        uploads.append(report.filename)
+        return f"file_{len(uploads)}"
+
+    class Receipts(Outbox):
+        async def __call__(self, chat_id, message, *, uuid=None, **kwargs):
+            uuids.append(uuid)
+            return await super().__call__(chat_id, message, uuid=uuid, **kwargs)
+
+    script = env.scripts.add(
+        attributed(A, "东、西区订单完整结果"),
+        tool_call("run_query", region="east"),
+        tool_call("run_query", region="west"),
+        lambda call: answer(evidence_in(call), report_format="md"),
+    )
+    async with running(
+        env, outbox=Receipts(["sent", second]), upload_file=upload, max_reply_chars=3500
+    ) as group:
+        await group.ask("东、西区订单完整结果", message_id="om_large_partial")
+        ref = group_ref("om_large_partial", A)
+        record = await env.store.get("feishu", A, GROUP.chat_id, ref.request_id, owner=GROUP.owner)
+        before = await env.store.delivery_parts(record)
+        assert [(p.kind, p.send_state) for p in before] == [
+            ("md", "sent"),
+            ("md", second),
+            ("body", "pending"),
+        ]
+        assert len(uploads) == 2
+        assert not any(
+            "完整结果见附件" in json.dumps(msg, ensure_ascii=False)
+            for _, msg in group.outbox.sent
+            if not isinstance(msg, OutboundFile)
+        )
+        sent = len(group.outbox.sent)
+        transmit = partial(
+            send_delivery,
+            send=group.outbox,
+            upload_file=upload,
+            chat_id=GROUP.chat_id,
+            reply_to=ref.request_id,
+            max_chars=3500,
+            results=env.results,
+            ref=ref,
+            resend=True,
+        )
+        assert await env.results.send(ref, transmit, resend=True) == "sent"
+        after = await env.store.delivery_parts(record)
+        assert all(p.send_state == "sent" and p.message_id for p in after)
+        assert len(uploads) == 2 and len(group.outbox.sent) == sent + 2
+        assert isinstance(group.outbox.sent[sent][1], OutboundFile)
+        assert uuids[sent] == before[1].uuid == after[1].uuid
+        assert "完整结果见附件" in json.dumps(group.outbox.sent[-1][1], ensure_ascii=False)
+        assert env.model_calls(script) == 3 and len(env.adapter.calls) == 2
+
+
+@pytest.mark.parametrize("actions", [400_000], indirect=True)
+async def test_second_large_upload_unknown_blocks_body_and_never_reuploads(actions):
+    from functools import partial
+
+    from tests.sdk_core.test_app import answer, evidence_in
+    from tests.sdk_core.test_feishu import Outbox
+    from tests.sdk_core.test_group_identity import GROUP
+
+    from xiaowei.feishu import send_delivery
+
+    env = actions.env
+    env.adapter.rows, env.adapter.memo = 900, "x" * 190
+    uploads = []
+
+    async def upload(report):
+        uploads.append(report.filename)
+        if len(uploads) == 2:
+            raise TimeoutError("synthetic uncertain upload")
+        return f"file_{len(uploads)}"
+
+    env.scripts.add(
+        attributed(A, "导出东、西区订单"),
+        tool_call("run_query", region="east"),
+        tool_call("run_query", region="west"),
+        lambda call: answer(evidence_in(call), report_format="md"),
+    )
+    async with running(env, outbox=Outbox(), upload_file=upload, max_reply_chars=3500) as group:
+        await group.ask("导出东、西区订单", message_id="om_large_upload_unknown")
+        ref = group_ref("om_large_upload_unknown", A)
+        record = await env.store.get("feishu", A, GROUP.chat_id, ref.request_id, owner=GROUP.owner)
+        before = await env.store.delivery_parts(record)
+        assert len(before) == 3
+        assert before[0].send_state == "sent"
+        assert before[1].upload_state == "unknown" and before[1].send_state == "pending"
+        assert before[2].kind == "body" and before[2].send_state == "pending"
+        assert len(uploads) == 2
+        sent = len(group.outbox.sent)
+        transmit = partial(
+            send_delivery,
+            send=group.outbox,
+            upload_file=upload,
+            chat_id=GROUP.chat_id,
+            reply_to=ref.request_id,
+            max_chars=3500,
+            results=env.results,
+            ref=ref,
+            resend=True,
+        )
+        assert await env.results.send(ref, transmit, resend=True) == "unknown"
+        assert len(uploads) == 2
+        assert all(
+            "完整结果见附件" not in json.dumps(msg, ensure_ascii=False)
+            for _, msg in group.outbox.sent[sent:]
+        )
+
+
+@pytest.mark.parametrize("actions", [400_000], indirect=True)
+async def test_large_files_sent_but_final_body_failure_resends_only_body(actions):
+    from functools import partial
+
+    from lark_channel.channel.types import OutboundFile
+    from tests.sdk_core.test_app import answer, evidence_in
+    from tests.sdk_core.test_feishu import Outbox
+    from tests.sdk_core.test_group_identity import GROUP
+
+    from xiaowei.feishu import send_delivery
+
+    env = actions.env
+    env.adapter.rows, env.adapter.memo = 900, "x" * 190
+    uploads = []
+
+    async def upload(report):
+        uploads.append(report.filename)
+        return f"file_{len(uploads)}"
+
+    env.scripts.add(
+        attributed(A, "交付大结果及结论"),
+        tool_call("run_query", region="east"),
+        tool_call("run_query", region="west"),
+        lambda call: answer(evidence_in(call), report_format="md"),
+    )
+    async with running(
+        env,
+        outbox=Outbox(["sent", "sent", "failed"]),
+        upload_file=upload,
+        max_reply_chars=3500,
+    ) as group:
+        await group.ask("交付大结果及结论", message_id="om_large_body_failed")
+        ref = group_ref("om_large_body_failed", A)
+        record = await env.store.get("feishu", A, GROUP.chat_id, ref.request_id, owner=GROUP.owner)
+        before = await env.store.delivery_parts(record)
+        assert [p.send_state for p in before] == ["sent", "sent", "failed"]
+        assert len(uploads) == 2
+        sent = len(group.outbox.sent)
+        transmit = partial(
+            send_delivery,
+            send=group.outbox,
+            upload_file=upload,
+            chat_id=GROUP.chat_id,
+            reply_to=ref.request_id,
+            max_chars=3500,
+            results=env.results,
+            ref=ref,
+            resend=True,
+        )
+        assert await env.results.send(ref, transmit, resend=True) == "sent"
+        assert len(uploads) == 2 and len(group.outbox.sent) == sent + 1
+        assert not isinstance(group.outbox.sent[-1][1], OutboundFile)
+        assert (await env.store.delivery_parts(record))[-1].uuid == before[-1].uuid
+
+
+@pytest.mark.parametrize("actions", [400_000], indirect=True)
+async def test_multi_file_delivery_holds_the_following_same_group_request(actions):
+    import asyncio
+
+    from tests.sdk_core.test_app import answer, clarify, evidence_in
+    from tests.sdk_core.test_feishu import Outbox
+
+    env = actions.env
+    env.adapter.rows, env.adapter.memo = 900, "x" * 190
+    second_upload, release = asyncio.Event(), asyncio.Event()
+    uploads = 0
+
+    async def upload(_report):
+        nonlocal uploads
+        uploads += 1
+        if uploads == 2:
+            second_upload.set()
+            await release.wait()
+        return f"file_{uploads}"
+
+    env.scripts.add(
+        attributed(A, "先交付东、西区订单"),
+        tool_call("run_query", region="east"),
+        tool_call("run_query", region="west"),
+        lambda call: answer(evidence_in(call), report_format="md"),
+    )
+    later = env.scripts.add(attributed(A, "后续问题"), clarify("请补充目标"))
+    async with running(env, outbox=Outbox(), upload_file=upload, max_reply_chars=3500) as group:
+        first = asyncio.create_task(group.ask("先交付东、西区订单", message_id="om_fifo_first"))
+        await asyncio.wait_for(second_upload.wait(), 10)
+        following = asyncio.create_task(group.ask("后续问题", message_id="om_fifo_next"))
+        await asyncio.sleep(0.05)
+        assert env.model_calls(later) == 0
+        release.set()
+        await asyncio.gather(first, following)
+        assert env.model_calls(later) == 1
+        assert uploads == 2
 
 
 async def test_resend_still_checks_saved_approval_capacity_before_sending(actions):

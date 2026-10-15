@@ -18,7 +18,7 @@ from tests.sdk_core.test_feishu_reports import _delivery
 from xiaowei.channel import AccessDeniedError, RequestRef
 from xiaowei.channel_store import RequestUnavailableError
 from xiaowei.feishu import send_delivery
-from xiaowei.feishu_report import ReportFile, build_report
+from xiaowei.feishu_report import ReportCapacityError, ReportFile, build_report, build_reports
 from xiaowei.models import AnswerInference
 from xiaowei.storage import Readiness, hold_instance_lock
 
@@ -69,6 +69,120 @@ async def request(env: Env, *, format_: str | None = "md") -> RequestRef:
     return RequestRef(
         channel="feishu", subject_id="alice", conversation_id="oc_d1a", request_id="om_d1a"
     )
+
+
+@pytest.mark.parametrize("format_", ["md", "html"])
+def test_split_report_preserves_every_typed_row_and_labels_each_file(
+    monkeypatch: pytest.MonkeyPatch, format_: str
+) -> None:
+    import re
+    from html import unescape
+
+    delivery = _delivery(format_)
+    rows = [
+        {"index": n, "nullable": None, "literal": "NULL", "huge": 2**60 + n, "text": f"<值{n}>"}
+        for n in range(12)
+    ]
+    result = {
+        "sql": "SELECT '<x>'",
+        "columns": ["index", "nullable", "literal", "huge", "text"],
+        "metadata": {"scope": "昨天", "applied_limit": 1000},
+        "rows": rows,
+    }
+    fact = delivery.facts[0].model_copy(
+        update={
+            "rows": tuple(rows),
+            "truncated": True,
+            "result_json": json.dumps(result, ensure_ascii=False),
+        }
+    )
+    delivery = delivery.model_copy(
+        update={
+            "facts": (fact,),
+            "monitoring_notice": "[not-a-link](https://invalid.example) <img src=x>",
+        }
+    )
+    monkeypatch.setattr("xiaowei.feishu_report.MAX_REPORT_BYTES", 1100)
+    files = build_reports(delivery)
+    assert len(files) > 1
+    recovered = []
+    for index, report in enumerate(files, 1):
+        assert len(report.content) <= 1100
+        assert report.filename == f"xiaowei-report-{index}-of-{len(files)}.{format_}"
+        body = report.content.decode()
+        assert f"{index}/{len(files)}" in body
+        assert "工具结果已截断" in body
+        if format_ == "md":
+            assert "范围说明\n\n~~~text\n" in body
+        else:
+            assert "<img src=x>" not in body
+        if format_ == "html":
+            body = "\n".join(
+                unescape(block) for block in re.findall(r"<pre>(.*?)</pre>", body, re.S)
+            )
+        for raw in body.splitlines():
+            if raw.startswith('{"sql":'):
+                chunk = json.loads(raw)
+                assert chunk["columns"] == result["columns"]
+                assert chunk["metadata"] == result["metadata"]
+                recovered.extend(chunk["rows"])
+                assert "SELECT '<x>'" in raw
+    assert recovered == rows
+    assert any("需要复核" in report.content.decode() for report in files)
+
+
+def test_split_report_rejects_one_indivisible_oversized_row(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    delivery = _delivery("md")
+    row = {"value": "x" * 2000}
+    fact = delivery.facts[0].model_copy(
+        update={"rows": (row,), "result_json": json.dumps({"rows": [row]})}
+    )
+    monkeypatch.setattr("xiaowei.feishu_report.MAX_REPORT_BYTES", 1100)
+    with pytest.raises(ReportCapacityError):
+        build_reports(delivery.model_copy(update={"facts": (fact,)}))
+
+
+def test_report_splits_when_encoded_file_exceeds_boundary_by_one_byte(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    delivery = _delivery("md")
+    complete = build_report(delivery)
+    monkeypatch.setattr("xiaowei.feishu_report.MAX_REPORT_BYTES", len(complete.content))
+    assert build_reports(delivery) == (complete,)
+    monkeypatch.setattr("xiaowei.feishu_report.MAX_REPORT_BYTES", len(complete.content) - 1)
+    pieces = build_reports(delivery)
+    assert len(pieces) > 1
+    assert all(len(piece.content) <= len(complete.content) - 1 for piece in pieces)
+
+
+def test_automatic_split_keeps_historical_brief_without_exporting_raw_values(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import re
+
+    delivery = _delivery("md")
+    brief = delivery.facts[0].model_copy(
+        update={
+            "evidence_id": "ev_history",
+            "view": "brief",
+            "summary": "历史结果摘要",
+            "result_json": '{"secret":"HISTORICAL_RAW_CANARY"}',
+        }
+    )
+    rows = [{"index": n, "value": "x" * 140} for n in range(12)]
+    current = delivery.facts[0].model_copy(
+        update={"rows": tuple(rows), "result_json": json.dumps({"rows": rows})}
+    )
+    monkeypatch.setattr("xiaowei.feishu_report.MAX_REPORT_BYTES", 1100)
+    reports = build_reports(
+        delivery.model_copy(update={"facts": (brief, current)}), expand_brief=False
+    )
+    content = "\n".join(report.content.decode() for report in reports)
+    assert len(reports) > 1
+    assert "历史结果摘要" in content and "HISTORICAL_RAW_CANARY" not in content
+    assert [int(n) for n in re.findall(r'"index"\s*:\s*(\d+)', content)] == list(range(12))
 
 
 @pytest.mark.asyncio
@@ -270,7 +384,7 @@ async def test_resend_only_missing_body_preserves_bytes_and_uuid(
     def changed(*_args, **_kwargs):
         raise AssertionError("重发不能按新模板生成字节")
 
-    monkeypatch.setattr("xiaowei.feishu_delivery.build_report", changed)
+    monkeypatch.setattr("xiaowei.feishu_delivery.build_reports", changed)
     assert (
         await env.service.results.send(ref, transmit(env, ref, platform, resend=True), resend=True)
         == "sent"

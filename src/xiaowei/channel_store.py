@@ -970,7 +970,11 @@ class ChannelStore:
                     and claim.record.state in {"completed", "paused"}
                 ):
                     outcome = "failed"
-                if claim.record.delivery == "unknown" and outcome == "failed":
+                if (
+                    claim.record.delivery_version == 0
+                    and claim.record.delivery == "unknown"
+                    and outcome == "failed"
+                ):
                     # 旧记录没有分项，也不能把此前可能送达改成确定未送达。
                     outcome = "unknown"
                 updated = (

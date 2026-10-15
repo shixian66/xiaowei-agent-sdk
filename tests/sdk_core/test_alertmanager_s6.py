@@ -298,7 +298,8 @@ async def test_formal_unknown_write_not_replayed_and_readonly_continues(
     channel = group_channel
     with backend() as (url, state):
         config = s6_config(url)
-        config["alertmanager_sources"][0]["timeout_seconds"] = 0.15
+        # 整仓测试有容器负载；给本机 HTTP 请求到达替身留余量，慢写仍须超时。
+        config["alertmanager_sources"][0]["timeout_seconds"] = 0.5
         env.scripts.add(
             attributed(A, "提出静默"),
             tool_call(f"{SOURCE}__propose_create_silence", **create_args(env)),
@@ -310,7 +311,7 @@ async def test_formal_unknown_write_not_replayed_and_readonly_continues(
             action_id = await env.scalar("SELECT action_id FROM xiaowei_action")
             assert action_id and state.writes == []
             if problem == "timeout":
-                state.write_delay = 0.3
+                state.write_delay = 1.0
             elif problem in {"readback", "readback_400"}:
                 state.read_status_after_write = 400 if problem == "readback_400" else 503
             else:

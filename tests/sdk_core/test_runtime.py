@@ -1373,7 +1373,7 @@ async def test_formal_feishu_file_body_receipts_and_failure(env: Env, reject_bod
 
 
 @pytest.mark.parametrize("format_", [None, "html"])
-async def test_formal_thousand_rows_complete_file_or_explicit_incomplete_preview(
+async def test_formal_thousand_rows_complete_single_or_split_files(
     env: Env,
     format_: str | None,
 ) -> None:
@@ -1435,11 +1435,29 @@ async def test_formal_thousand_rows_complete_file_or_explicit_incomplete_preview
             assert values[0]["rows"][-1] == {"region": "row999", "total": 999}
             assert "预览 20／本次返回 1000 行" in str(channel.sends[1][1])
         else:
-            assert await env.scalar("SELECT delivery FROM xiaowei_request") == "failed"
-            assert channel.uploads == []
-            shown = str(channel.sends[0][1])
-            assert "完整结果尚未交付" in shown and "本次返回 1000 行" in shown
-            assert "见附件" not in shown and "总共" not in shown
+            from html import unescape
+            from re import DOTALL, findall
+
+            from lark_channel.channel.types import OutboundFile
+
+            assert await env.scalar("SELECT delivery FROM xiaowei_request") == "sent"
+            assert len(channel.uploads) > 1 and len(channel.sends) == len(channel.uploads) + 1
+            assert all(len(content) <= 400_000 for content in channel.uploads)
+            assert all(isinstance(item[1], OutboundFile) for item in channel.sends[:-1])
+            seen = []
+            for index, content in enumerate(channel.uploads, 1):
+                document = content.decode()
+                assert f"{index}/{len(channel.uploads)}" in document
+                for block in findall(r"<pre>(.*?)</pre>", document, flags=DOTALL):
+                    for line in unescape(block).splitlines():
+                        if line.startswith("{"):
+                            value = json.loads(line)
+                            if isinstance(value, dict) and "rows" in value:
+                                seen.extend(value["rows"])
+            assert seen == [{"region": f"{region}{i}", "total": i} for i in range(1000)]
+            shown = str(channel.sends[-1][1])
+            assert "预览 20／本次返回 1000 行" in shown
+            assert "完整结果见附件" in shown and "总共" not in shown
         assert len(env.scripts.calls[question]) == 2
         assert await served.finish() == 0
 
