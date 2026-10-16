@@ -16,14 +16,15 @@ async def test_target_rules_reach_model_without_legacy_guessing(env: Env) -> Non
     await env.deliver(env.ctx(), message)
     instructions = env.scripts.calls[message][0].instructions
     for rule in (
-        "用户明确指定",
-        "唯一可读",
-        "发现不完整",
-        "不继承执行许可",
-        "新建会话",
-        "不要改查其他集群",
+        "只用用户在本会话明确选定的环境",
+        "不做跨环境发现",
+        "执行许可不继承",
+        "新建会话后重新询问",
+        "不改查其他环境代替",
     ):
         assert rule in instructions
+    for legacy in ("唯一可读", "发现不完整", "获准发现"):
+        assert legacy not in instructions
     assert "追问保持原集群与限定表名" not in instructions
     assert "本轮只有一个可用集群时直接使用它" not in instructions
     assert env.drv.attempts == 0

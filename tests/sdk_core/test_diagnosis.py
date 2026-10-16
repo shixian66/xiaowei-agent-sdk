@@ -36,7 +36,7 @@ from tests.sdk_core.test_runtime import env as env  # pytest fixture
 from tests.sdk_core.test_starrocks_tools import RecordingScripts, tool_outputs
 
 from xiaowei import runtime
-from xiaowei.app import DEFAULT_INSTRUCTIONS
+from xiaowei.app import DEFAULT_INSTRUCTIONS, TargetInfo, _instructions
 from xiaowei.feishu_render import _elements, request_bytes
 from xiaowei.models import AUDIENCES
 from xiaowei.sqlguard import guard_explain_query
@@ -645,6 +645,13 @@ async def test_diagnosis_instructions_reach_the_model(diag: Env) -> None:
     assert instructions.startswith(DEFAULT_INSTRUCTIONS)
 
 
+MODEL_INSTRUCTIONS = _instructions(
+    DEFAULT_INSTRUCTIONS,
+    (TargetInfo(target_id="pre", description="合成库", business_context=None),),
+    {"pre": ["local/explain_query"]},
+)
+
+
 @pytest.mark.parametrize(
     "required",
     [
@@ -667,7 +674,8 @@ async def test_diagnosis_instructions_reach_the_model(diag: Env) -> None:
     ],
 )
 def test_default_instructions_state_the_diagnosis_rules(required: str) -> None:
-    assert required in DEFAULT_INSTRUCTIONS
+    # 诊断做法随数据库 Skill 交给模型：按配置了 StarRocks 目标时模型实际收到的说明检查。
+    assert required in MODEL_INSTRUCTIONS
 
 
 def test_analysis_instructions_do_not_repeat_program_rendered_facts() -> None:
@@ -684,10 +692,10 @@ def test_default_instructions_bound_retries_and_followup_evidence() -> None:
         "SUBSTRING",
         "长文本列",
         "list_slow_queries 只用于无需指定 SQL 的快捷诊断",
-        "只有一个合理的获准目标时无需反问或穷举发现",
-        "不要改查其他集群来替代用户已选的",
+        "不改查其他环境代替",
         "本轮可见证据",
         "证据编号照原样引用",
         "澄清或建议不要与证据、分析混用",
     ):
-        assert required in DEFAULT_INSTRUCTIONS
+        assert required in MODEL_INSTRUCTIONS
+    assert "无需反问或穷举发现" not in MODEL_INSTRUCTIONS

@@ -213,6 +213,28 @@ async def test_interactive_review_has_live_answer_and_only_fixed_verdict(
     assert "SENTINEL" not in json.dumps(verdict.model_dump())
 
 
+async def test_env_review_shows_selected_environment_and_asks_two_more_items(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    monkeypatch.setattr(command.sys, "stdin", io.StringIO("y\n" * 7 + "n\na\n"))
+    sample = ReviewSample(
+        scenario="env_select_followup_switch",
+        repeat=1,
+        turn=2,
+        mode="query",
+        message="用 fat",
+        state="completed",
+        failure=None,
+        delivery=None,
+        statements=(),
+    )
+    verdict = await command.review_sample(sample)
+    assert verdict.environment_scope_correct is False
+    assert verdict.diagnosis_basis_sufficient is None
+    assert "本轮用户明确的环境：fat" in capsys.readouterr().err
+
+
 async def test_incomplete_review_fails_instead_of_fabricating_judgement(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

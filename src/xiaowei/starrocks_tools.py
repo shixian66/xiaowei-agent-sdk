@@ -334,14 +334,13 @@ def starrocks_tools(
             policy_id=tool_policy.policy_id,
             description=(
                 description
+                + " 集群须是用户在本会话明确选定的环境，未选定时先澄清。"
                 + (
-                    " 集群与对象须来自本轮明确目标、仍适用的明确上下文，"
-                    "或完整发现的唯一可读精确匹配；"
-                    "否则先澄清。rejected按固定code纠正或停止，不换集群绕过拒绝。"
-                    if tool_id not in {LIST_DATABASES, LIST_TABLES}
-                    else " 可按任务发现获准候选；搜索命中不等于用户选源，未匹配不证明不存在。"
-                    "rejected按固定code纠正或停止，不猜选集群。"
+                    "搜索命中不等于用户选源，未匹配不证明不存在。"
+                    if tool_id in {LIST_DATABASES, LIST_TABLES}
+                    else ""
                 )
+                + "rejected按固定code纠正或停止，不换集群绕过拒绝。"
             ),
         )
 

@@ -60,7 +60,7 @@ _REJECTION_FEEDBACK: dict[ToolRejectCode, tuple[str, bool]] = {
     ),
     "precheck_failed": ("工具前置检查失败，未执行；停止该操作，告诉用户当前无法执行", False),
     "unknown_target": (
-        "目标未确认，未执行；核实本轮用户明确目标或完整发现的唯一可读匹配，不猜选集群；信息不足先澄清",
+        "目标未确认，未执行；核实用户在本会话明确选定的环境，不猜选集群；未选定先澄清",
         True,
     ),
     "not_allowed": (
