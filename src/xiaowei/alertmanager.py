@@ -218,7 +218,8 @@ class _AlertStatus(_Model):
     state: Literal["unprocessed", "active", "suppressed"]
     silencedBy: list[str]
     inhibitedBy: list[str]
-    mutedBy: list[str]
+    mutedBy: list[str] | None = None
+    """较早的 API v2 不返回该字段；null 表示上游未提供，不代表未被时间静音。"""
 
 
 class _Alert(_Model):
@@ -330,7 +331,8 @@ _SPECS: dict[str, tuple[type[BaseModel], type[BaseModel], str, str]] = {
         "读取告警快照。告警多时先带 filters；它是重复的标签 matcher，"
         "可按已知主机/告警收窄；空列表不限。"
         "active/silenced/inhibited/unprocessed 为包含开关，true 同时保留其他状态，不是只选该状态。"
-        "receiver 是接收器正则，空串不限。silencedBy/inhibitedBy/mutedBy 分列；不证明已通知。",
+        "receiver 是接收器正则，空串不限。silencedBy/inhibitedBy/mutedBy 分列；"
+        "mutedBy 为 null 表示该版本未提供，不代表未静音；不证明已通知。",
     ),
     "get_alert_groups": (
         _GroupArgs,

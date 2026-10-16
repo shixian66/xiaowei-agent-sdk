@@ -155,6 +155,30 @@ async def test_formal_web_reads_suppression_sources_and_filters_private_fields(e
         assert "private-" not in stored and "secret-canary" not in stored
 
 
+async def test_alerts_without_muted_by_are_read_as_unknown_not_unmuted(env: Env) -> None:
+    """较早的 API v2 告警状态没有 mutedBy：照常读取，记为 null（上游未提供），不补成空列表。"""
+    with backend() as (url, state):
+        del state.payloads["/api/v2/alerts"][0]["status"]["mutedBy"]
+        del state.payloads["/api/v2/alerts/groups"][0]["alerts"][0]["status"]["mutedBy"]
+        async with env.running(env.config(**a4_config(url))) as served:
+            await served.page()
+            message = env.scripts.add(
+                "现在有哪些告警？",
+                tool_call(f"{SOURCE}__get_alerts", **CALLS["get_alerts"]),
+                tool_call(f"{SOURCE}__get_alert_groups", **CALLS["get_alert_groups"]),
+                cite("采集快照，不证明已发送通知"),
+            )
+            body = (await served.turn(message, "query")).json()
+            assert body["state"] == "completed"
+            assert len(body["delivery"]["facts"]) == 2
+            assert len(state.requests) == 2
+        model_content = await env.scalar(
+            "SELECT string_agg(model_content, '') FROM xiaowei_evidence"
+        )
+        assert model_content.count('"mutedBy": null') == 2
+        assert '"mutedBy": []' not in model_content
+
+
 async def test_formal_web_hidden_unauthorized_api_forced_call_zero_io(env: Env) -> None:
     with backend() as (url, state):
         async with env.running(env.config(**a4_config(url, granted=False))) as served:
