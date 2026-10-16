@@ -285,7 +285,6 @@ def answer_kinds_mixed(answer: AgentAnswer) -> bool:
     )
 
 
-
 MonitoringFailureReason = Literal[
     "auth",
     "timeout",

@@ -1443,6 +1443,35 @@ async def test_answer_repair_keeps_all_query_citations(env: Env) -> None:
     assert env.tool_ids() == [QUERY_TOOL]  # 改写不重放工具
 
 
+@pytest.mark.parametrize("invalid", ["mixed", "facts", "text"])
+async def test_repaired_answer_replaces_the_rejected_one_in_history(env: Env, invalid: str) -> None:
+    rejected = {
+        "mixed": lambda call: answer(evidence_in(call), "", clarification=MODEL_SECRET),
+        "facts": lambda call: answer(evidence_in(call), "", facts=[MODEL_SECRET]),
+        "text": lambda call: [assistant_message(MODEL_SECRET)],
+    }[invalid]
+    message = env.scripts.add(
+        "查完再改写 " + invalid,
+        tool_call("order_total", region="east"),
+        rejected,
+        cite("沿用已核实结果"),
+    )
+    evidence_id = (await env.app.run_turn(env.ctx(turn="repaired"), message)).answer.evidence_ids[0]
+    followup = env.scripts.add("接着问", lambda call: answer([evidence_id], "继续平稳"))
+    result = await env.app.run_turn(env.ctx(turn="followup"), followup)
+
+    stored = await env.stored()
+    replayed = json.dumps(env.scripts.calls[followup][0].input, ensure_ascii=False)
+    assert MODEL_SECRET not in json.dumps(stored, ensure_ascii=False)  # 被拒回答不落库
+    assert MODEL_SECRET not in replayed  # 也不回放给下一轮
+    assert "沿用已核实结果" in replayed  # 合格改写与工具历史照常保存
+    assert [i.get("type") for i in stored].count("function_call") == 1
+    assert len(env.scripts.calls[message]) == 3  # 只改写一次
+    assert env.tool_ids() == [TOTAL_TOOL]  # 工具不重放
+    assert result.answer.evidence_ids == (evidence_id,)
+    assert await env.state() == ("active", 2)
+
+
 async def test_uncited_query_logs_own_rejection_code(env: Env) -> None:
     message = env.scripts.add(
         "未引用查询 " + SYNTHETIC_SQL,

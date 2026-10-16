@@ -139,6 +139,7 @@ ToolRejectHint = Literal[
     "ddl_sql_capacity",
     "change_promql",
     "change_selector",
+    "change_discovery_request",
     "prometheus_text",
     "metric_required",
     "selectors",
@@ -229,10 +230,15 @@ class PromQLExpressionError(MonitoringReadError):
 
 
 class PrometheusSelectorError(MonitoringReadError):
-    """锁版协议确认的发现工具 400 bad_data（选择器/参数被拒）；修正额度由治理层决定。"""
+    """锁版协议确认的发现工具 400 bad_data（选择器/参数被拒）；修正额度由治理层决定。
 
-    def __init__(self) -> None:
+    ``matches_rejected`` 表示上游说明明确指向 match[]：同一组选择器换工具、label 或时间窗
+    也不会成功；否则只拒绝重发完全相同的请求。
+    """
+
+    def __init__(self, *, matches_rejected: bool) -> None:
         super().__init__("invalid_selector")
+        self.matches_rejected = matches_rejected
         self.correction_allowed = False
 
 
@@ -569,13 +575,19 @@ class GovernedTools:
                         code="source_stopped",
                     )
                 repair_from = sum(target == contract.target_id for target, _ in runs.promql_errors)
-        selector_key: str | None = None
+        selector_keys: tuple[str | None, str] | None = None
         selector_repair_from: int | None = None
         if contract.policy_id in PROMETHEUS_SELECTOR_POLICIES:
-            selector_key = _selector_request_key(contract.policy_id, arguments)
-            if (target, selector_key) in runs.selector_errors:
+            selector_keys = _selector_keys(contract.policy_id, arguments)
+            if (target, selector_keys[0]) in runs.selector_errors:
                 raise ToolRejectedError(
-                    "该选择器本轮已被上游拒绝，未重发；请修改 matches", hint="change_selector"
+                    "这组选择器本轮已被上游拒绝，换工具或时间窗也不会重发；请修改 matches",
+                    hint="change_selector",
+                )
+            if (target, selector_keys[1]) in runs.selector_errors:
+                raise ToolRejectedError(
+                    "同一请求本轮已被上游拒绝，未重发；请修改选择器或参数",
+                    hint="change_discovery_request",
                 )
             if target in runs.selector_pending:
                 if runs.selector_repairs.count(target) >= 2:
@@ -673,11 +685,17 @@ class GovernedTools:
                             current.promql_repairs.count(contract.target_id) < 2
                         )
                     elif isinstance(exc, PrometheusSelectorError):
-                        if selector_key is None:
+                        if selector_keys is None:
                             raise ToolExecutionError() from None
+                        matches_key, request_key = selector_keys
+                        failed = (
+                            matches_key
+                            if exc.matches_rejected and matches_key is not None
+                            else request_key
+                        )
                         current = replace(
                             current,
-                            selector_errors=(*current.selector_errors, (target, selector_key)),
+                            selector_errors=(*current.selector_errors, (target, failed)),
                             selector_pending=current.selector_pending | {target},
                         )
                         exc.correction_allowed = current.selector_repairs.count(target) < 2
@@ -867,13 +885,22 @@ class GovernedTools:
         self._used[key] -= 1
 
 
-def _selector_request_key(policy_id: str, arguments: Mapping[str, object]) -> str:
-    """发现请求中决定选择器语义的部分；时间窗不同的同一选择器仍视为同一失败请求。"""
-    return json.dumps(
-        {"tool": policy_id, "matches": arguments.get("matches"), "label": arguments.get("label")},
-        sort_keys=True,
-        ensure_ascii=False,
+def _selector_keys(policy_id: str, arguments: Mapping[str, object]) -> tuple[str | None, str]:
+    """（选择器键，完整请求键）。
+
+    选择器键只含去重排序后的 matches，与工具、label、时间窗无关；没有 matches 时为 None。
+    完整请求键含工具与全部（已规范化的）参数，用于原因不能归到选择器的拒绝。
+    """
+    matches = arguments.get("matches")
+    selectors = (
+        json.dumps({"matches": sorted(set(matches))}, ensure_ascii=False)
+        if isinstance(matches, list) and matches and all(isinstance(m, str) for m in matches)
+        else None
     )
+    request = json.dumps(
+        {"tool": policy_id, "arguments": arguments}, sort_keys=True, ensure_ascii=False
+    )
+    return selectors, request
 
 
 def _bind(execute: Execute, request: ToolRequest) -> Callable[[], Awaitable[ToolObservation]]:

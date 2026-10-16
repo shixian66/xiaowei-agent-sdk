@@ -477,6 +477,116 @@ async def test_same_rejected_selector_is_not_resent_even_with_another_window(env
         assert "修改 matches" in rejected["reason"]
 
 
+async def test_rejected_selector_is_not_resent_through_another_discovery_tool(env: Env) -> None:
+    other_window = {"start_time": "1720000100", "end_time": "1720000200"}
+    with serve(p2_server) as source:
+        async with env.running(env.config(**p2_config(source.url))) as served:
+            await served.page()
+            message = env.scripts.add(
+                "换个发现工具也不重发坏选择器",
+                tool_call(f"{SOURCE}__series", **WINDOW, matches=[EMPTY_MATCHING]),
+                tool_call(f"{SOURCE}__label_names", **other_window, matches=[EMPTY_MATCHING]),
+                tool_call(
+                    f"{SOURCE}__label_values", label="job", **WINDOW, matches=[EMPTY_MATCHING]
+                ),
+                tool_call(f"{SOURCE}__series", **WINDOW, matches=["node_uname_info"]),
+                cite(),
+            )
+            body = (await served.turn(message, "query")).json()
+            assert body["state"] == "completed"
+            assert len(body["delivery"]["facts"]) == 1
+        assert [(n, a["matches"]) for n, a in source.recorder.tool_calls] == [
+            ("series", [EMPTY_MATCHING]),
+            ("series", ["node_uname_info"]),
+        ]
+        for call in env.scripts.calls[message][2:4]:
+            rejected = last_output(call)
+            assert rejected["code"] == "invalid_arguments" and rejected["retry_this_turn"] is True
+            assert "修改 matches" in rejected["reason"]
+            assert "non-empty matcher" not in json.dumps(rejected)  # 上游原文不交模型
+
+
+async def test_dropping_the_rejected_selector_is_a_valid_fix(env: Env) -> None:
+    with serve(p2_server) as source:
+        async with env.running(env.config(**p2_config(source.url))) as served:
+            await served.page()
+            message = env.scripts.add(
+                "去掉坏选择器后重查",
+                tool_call(
+                    f"{SOURCE}__label_values",
+                    label="instance",
+                    **WINDOW,
+                    matches=[EMPTY_MATCHING, "node_uname_info"],
+                ),
+                # 同一组选择器换顺序、换工具仍是同一失败请求。
+                tool_call(
+                    f"{SOURCE}__label_names", **WINDOW, matches=["node_uname_info", EMPTY_MATCHING]
+                ),
+                tool_call(
+                    f"{SOURCE}__label_values",
+                    label="instance",
+                    **WINDOW,
+                    matches=["node_uname_info"],
+                ),
+                cite(),
+            )
+            body = (await served.turn(message, "query")).json()
+            assert body["state"] == "completed"
+            assert len(body["delivery"]["facts"]) == 1
+        assert [a["matches"] for _, a in source.recorder.tool_calls] == [
+            [EMPTY_MATCHING, "node_uname_info"],
+            ["node_uname_info"],
+        ]
+        assert await env.scalar("SELECT count(*) FROM xiaowei_evidence") == 1
+
+
+async def test_non_selector_rejection_does_not_block_the_same_selector_elsewhere(
+    env: Env,
+) -> None:
+    # 不能归到 match[] 的 bad_data：只拒绝完全相同的请求，同一选择器换工具仍可修正。
+    error = 'bad_data: invalid label name: "instance"'
+    rejected_call = {"label": "instance", **WINDOW, "matches": ["node_uname_info"]}
+    with serve(lambda r: p2_server(r, errors={"label_values": error})) as source:
+        async with env.running(env.config(**p2_config(source.url))) as served:
+            await served.page()
+            message = env.scripts.add(
+                "标签名被拒后换发现方式",
+                tool_call(f"{SOURCE}__label_values", **rejected_call),
+                tool_call(f"{SOURCE}__label_values", **rejected_call),
+                tool_call(f"{SOURCE}__label_names", **WINDOW, matches=["node_uname_info"]),
+                cite(),
+            )
+            body = (await served.turn(message, "query")).json()
+            assert body["state"] == "completed"
+            assert len(body["delivery"]["facts"]) == 1
+        assert [n for n, _ in source.recorder.tool_calls] == ["label_values", "label_names"]
+        repeated = last_output(env.scripts.calls[message][2])
+        assert repeated["code"] == "invalid_arguments" and "同一发现请求" in repeated["reason"]
+
+
+async def test_parallel_selector_repairs_reserve_only_two_slots(env: Env) -> None:
+    bad = [EMPTY_MATCHING, '{job=~".*"}', '{nodename=~".*"}']
+
+    def repairs(call: ModelCall) -> list[Any]:
+        return [
+            function_call(f"{SOURCE}__series", {**WINDOW, "matches": [m]}, call_id=f"repair-{i}")
+            for i, m in enumerate([bad[1], bad[2], "node_uname_info"])
+        ]
+
+    with serve(p2_server) as source:
+        async with env.running(env.config(**p2_config(source.url))) as served:
+            await served.page()
+            message = env.scripts.add(
+                "并行修正只占两次额度",
+                tool_call(f"{SOURCE}__series", **WINDOW, matches=[bad[0]]),
+                repairs,
+                lambda call: answer([], analysis="", advice="未经数据验证"),
+            )
+            assert (await served.turn(message, "query")).json()["state"] == "completed"
+        assert [a["matches"] for _, a in source.recorder.tool_calls] == [[m] for m in bad]
+        assert await env.scalar("SELECT count(*) FROM xiaowei_evidence") == 0
+
+
 async def test_selector_repairs_are_capped_per_source(env: Env) -> None:
     bad = [EMPTY_MATCHING, '{job=~".*"}', '{nodename=~".*"}']
     with serve(p2_server) as source:

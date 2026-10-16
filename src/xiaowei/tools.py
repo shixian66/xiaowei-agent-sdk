@@ -123,7 +123,10 @@ _REJECTION_HINTS: dict[ToolRejectHint, str] = {
         "该表达式本轮已解析失败，未重发；修改括号、运算符或函数参数后再调用，不重发同一表达式"
     ),
     "change_selector": (
-        "该选择器本轮已被上游拒绝，未重发；修改 matches 后再调用，不重发同一选择器"
+        "这组选择器本轮已被上游拒绝，换工具、label 或时间窗也不会重发；修改 matches 后再调用"
+    ),
+    "change_discovery_request": (
+        "同一发现请求本轮已被上游拒绝，未重发；修改选择器或参数，或改用其他发现工具"
     ),
     "prometheus_text": "表达式/指标名最多8192字符，查询表达式不能为空；修改后再调用",
     "metric_required": (

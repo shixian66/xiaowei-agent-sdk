@@ -11,7 +11,7 @@ import gzip
 import json
 import logging
 from collections.abc import Awaitable, Callable
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any
 
 import httpx2
@@ -21,6 +21,8 @@ from agents import (
     AgentOutputSchema,
     ModelSettings,
     ModelTracing,
+    RetryDecision,
+    RetryPolicyContext,
     Runner,
     WebSearchTool,
     function_tool,
@@ -29,6 +31,7 @@ from agents import (
 from agents.items import ToolCallItem
 from pydantic import BaseModel
 
+from xiaowei import model_api
 from xiaowei.model_api import (
     VERTEX_ENDPOINT,
     ModelAPIRejectedError,
@@ -921,6 +924,60 @@ async def test_rejected_load_then_success_completes_without_replaying_tools() ->
     assert len(endpoint.requests) == 3
     assert endpoint.requests[1].content == endpoint.requests[2].content
     assert executed == ["east"]
+
+
+@pytest.mark.parametrize(
+    "headers,delay",
+    [
+        ({"retry-after": "120"}, 20.0),  # 超过上限按 20 秒等待
+        ({"retry-after": "5"}, 5.0),
+        ({"retry-after-ms": "1500"}, 1.5),
+        ({}, None),  # 缺失或无效时由退避决定
+        ({"retry-after": "soon"}, None),
+        ({"retry-after": "-3"}, None),
+    ],
+)
+async def test_retry_after_reaches_the_runner_and_is_capped(
+    monkeypatch: pytest.MonkeyPatch, headers: dict[str, str], delay: float | None
+) -> None:
+    decisions: list[RetryDecision | bool] = []
+    policy = model_api._retry_rejected_load
+
+    def recorded(context: RetryPolicyContext) -> bool | RetryDecision:
+        decision = policy(context)
+        decisions.append(decision)
+        # 记录 SDK 按策略将要等待的时长；用例本身不真的等待。
+        return replace(decision, delay=0) if isinstance(decision, RetryDecision) else decision
+
+    monkeypatch.setattr(model_api, "_retry_rejected_load", recorded)
+    endpoint = Endpoint(
+        [_call(), _http(429, {**headers, "x-upstream": "upstream-detail"}), _answer()]
+    )
+    executed: list[str] = []
+
+    await _run(endpoint, executed)
+
+    assert [d.delay for d in decisions if isinstance(d, RetryDecision)] == [delay]
+    assert len(endpoint.requests) == 3
+    assert executed == ["east"]
+
+
+async def test_retry_after_wait_is_cancelled_by_the_turn_deadline() -> None:
+    endpoint = Endpoint([_http(429, {"retry-after": "120"}), _answer()])
+
+    with pytest.raises(TimeoutError):
+        async with asyncio.timeout(0.5):
+            await _run(endpoint, [])
+
+    assert len(endpoint.requests) == 1  # 等待被取消，不再发出请求
+
+
+def test_status_error_keeps_only_retry_headers() -> None:
+    error = ModelAPIStatusError(
+        429, httpx2.Headers({"Retry-After": "7", "x-goog-detail": "upstream-detail"})
+    )
+    assert error.headers == {"retry-after": "7"}
+    assert "upstream-detail" not in repr(vars(error))
 
 
 async def test_cancellation_propagates_without_retry() -> None:

@@ -59,6 +59,7 @@ _FAKE_ID = "__fake_id__"
 # 适配器能如实表达的 SDK 设置；其余设置一旦取值即拒绝，不静默丢弃。
 _MAPPED_SETTINGS = frozenset({"max_tokens", "parallel_tool_calls", "retry", "timeout", "store"})
 _REPORTING_SETTINGS = frozenset({"preserve_raw_usage"})
+_RETRY_HEADERS = frozenset({"retry-after", "retry-after-ms"})
 _USAGE_COUNTS = (
     "promptTokenCount",
     "candidatesTokenCount",
@@ -68,11 +69,17 @@ _USAGE_COUNTS = (
 
 
 class ModelAPIStatusError(ModelAPIRejectedError):
-    """模型服务返回非成功状态；只保留状态码，不含上游正文。"""
+    """模型服务返回非成功状态；只保留状态码和重试等待头，不含上游正文。
 
-    def __init__(self, status_code: int) -> None:
+    ``headers`` 供 SDK Runner 读取 Retry-After（等待上限由重试策略决定）；其他响应头不保留。
+    """
+
+    def __init__(self, status_code: int, headers: Mapping[str, str] | None = None) -> None:
         super().__init__(f"模型服务返回 HTTP {status_code}")
         self.status_code = status_code
+        self.headers = {
+            name: value for name, value in (headers or {}).items() if name.lower() in _RETRY_HEADERS
+        }
 
 
 class ModelAPITransportError(ModelAPIRejectedError):
@@ -148,7 +155,7 @@ class VertexModel(Model):
         except httpx2.TransportError:
             raise ModelAPITransportError("模型服务连接失败") from None
         if not httpx2.codes.is_success(response.status_code):
-            raise ModelAPIStatusError(response.status_code) from None
+            raise ModelAPIStatusError(response.status_code, response.headers) from None
         # 受控 transport 已确认是 JSON；这里再拒绝非有限数字，避免它们进入工具参数或下一步请求。
         payload = _strict_json(response.content)
         if payload is None:
