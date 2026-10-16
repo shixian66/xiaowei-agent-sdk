@@ -4,16 +4,18 @@
 自动检查不判断自然语言质量，合入仍需逐项独立比较，不把脚本成功当作模型验收。
 """
 
+import asyncio
 import json
 import os
 import secrets
 import time
 from collections.abc import Awaitable, Callable
-from dataclasses import dataclass, replace
-from datetime import UTC, datetime
+from dataclasses import dataclass, field, replace
+from datetime import UTC, datetime, timedelta
 from functools import partial
 from pathlib import Path
 from typing import Any
+from zoneinfo import ZoneInfo
 
 import httpx2
 from asyncmy.errors import OperationalError
@@ -337,6 +339,12 @@ ENV_SCENARIOS = (
         environments=(FAT, FAT),
     ),
     Scenario(
+        "env_compare_named",  # 用户本轮明确点名多个环境
+        (("query", f"比较 fat 和 pre 的 data_center.{TABLE} 字段"),),
+        multi=True,
+        environments=(frozenset({"fat", "pre"}),),
+    ),
+    Scenario(
         "env_long_history",  # E15：较长但未超限，穿插不访问数据库的任务
         (
             ("query", "用 fat"),
@@ -352,13 +360,33 @@ ENV_SCENARIOS = (
 )
 
 
-def environment_scope(
-    choices: list[tuple[str, str]], allowed: frozenset[str] | None
-) -> dict[str, Any] | None:
-    """模型本轮发起的 StarRocks 工具调用中，目标不属于用户当时明确环境的次数。
+# E10 的审计记录、结构快照与执行计划须指向同一张表：一条可通过 SQLGuard 的慢查询，
+# 加一条引用快照中不存在对象的记录（应被过滤，``omitted_sqlguard``）。
+FILTERED_AUDIT_SQL = "SELECT region FROM data_center.quota_hidden"
+DIALOGUE_PLAN = (
+    "- Output => [2:region, 5:sum]",
+    "    - AGGREGATE(GLOBAL) [2:region]",
+    "            Estimates: {row: 4, cpu: ?, memory: ?, network: ?, cost: 1.2E8}",
+    f"        - SCAN [{TABLE}] => [2:region, 3:amount]",
+    "                Estimates: {row: 50000000, cpu: ?, memory: ?, network: ?, cost: 1.0E8}",
+    "                partitionRatio: 30/30, tabletRatio: 240/240",
+)
 
-    按模型调用计数而非数据库语句：历史证据复核与快照刷新不是模型调用，不计入；
-    调用即使随后被治理拒绝也计入，因为第一步没有执行层兜底。监控等其他工具不参与。
+
+def environment_scope(
+    choices: list[tuple[str, str]],
+    allowed: frozenset[str] | None,
+    fetched: dict[str, dict[str, int]],
+    rejected: int,
+) -> dict[str, Any] | None:
+    """本轮环境范围的三种计数，分开报告：
+
+    - ``out_of_scope_calls``：模型发起的 StarRocks 工具调用中，目标不属于用户当时明确环境的
+      次数（调用尝试，含随后被治理拒绝的调用；监控等其他工具不参与）。
+    - ``rejected_calls``：本轮被治理拒绝的工具调用数（所有工具）。
+    - ``fetch_by_target`` / ``out_of_scope_fetch_targets``：实际进入 StarRocks 的新取数
+      （列库、列表、查结构、业务查询、审计、执行计划等工具执行时的语句），以及其中超出用户
+      明确范围的目标。合法历史证据复核与后台结构刷新不计入。第二步触发条件只看这一项。
     """
     if allowed is None:
         return None
@@ -367,6 +395,9 @@ def environment_scope(
         "allowed": sorted(allowed),
         "starrocks_calls": len(calls),
         "out_of_scope_calls": sum(target not in allowed for target in calls),
+        "rejected_calls": rejected,
+        "fetch_by_target": fetched,
+        "out_of_scope_fetch_targets": sorted(t for t in fetched if t not in allowed),
     }
 
 
@@ -518,8 +549,87 @@ def tool_choices(body: bytes, targets: frozenset[str]) -> list[tuple[str, str]]:
     return selected
 
 
-def _record_choices(choices: list[tuple[str, str]], targets: frozenset[str], body: bytes) -> None:
-    choices.extend(tool_choices(body, targets))
+@dataclass
+class _ToolWindow:
+    """模型返回工具调用后、下一次模型请求前即工具执行期；SDK 在这段时间执行本轮工具。
+
+    历史证据复核发生在回放与最终校验时，不在这段时间；后台结构刷新另有命名任务，按任务
+    排除。``rejected`` 是最近一次模型请求中本轮被拒绝的工具结果数（只计数，不留内容）。
+    """
+
+    open: bool = False
+    rejected: int = 0
+
+
+class _WindowTransport(httpx2.AsyncBaseTransport):
+    def __init__(self, inner: httpx2.AsyncBaseTransport, window: _ToolWindow) -> None:
+        self._inner = inner
+        self._window = window
+
+    async def handle_async_request(self, request: httpx2.Request) -> httpx2.Response:
+        self._window.open = False
+        self._window.rejected = _rejected_outputs(await request.aread())
+        return await self._inner.handle_async_request(request)
+
+    async def aclose(self) -> None:
+        await self._inner.aclose()
+
+
+def _rejected_outputs(body: bytes) -> int:
+    """请求中最后一条用户文字之后、状态为 rejected 的工具结果数；三种协议同一口径。"""
+    try:
+        data = json.loads(body)
+    except (ValueError, UnicodeError):
+        return 0
+    if not isinstance(data, dict):
+        return 0
+
+    def rejected(value: Any) -> bool:
+        if isinstance(value, str):
+            try:
+                value = json.loads(value)
+            except ValueError:
+                return False
+        if not isinstance(value, dict):
+            return False
+        return value.get("status") == "rejected" or any(
+            rejected(v) for v in value.values() if isinstance(v, str | dict)
+        )
+
+    def dicts(value: Any) -> list[dict[str, Any]]:
+        return [v for v in value if isinstance(v, dict)] if isinstance(value, list) else []
+
+    if "contents" in data:
+        contents = dicts(data["contents"])
+        start = max(
+            (
+                i
+                for i, c in enumerate(contents)
+                if c.get("role") == "user" and any("text" in p for p in dicts(c.get("parts")))
+            ),
+            default=-1,
+        )
+        return sum(
+            rejected(p["functionResponse"].get("response"))
+            for c in contents[start + 1 :]
+            for p in dicts(c.get("parts"))
+            if isinstance(p.get("functionResponse"), dict)
+        )
+    items = dicts(data.get("messages") or data.get("input"))
+    start = max((i for i, m in enumerate(items) if m.get("role") == "user"), default=-1)
+    return sum(
+        rejected(m.get("output") if m.get("type") == "function_call_output" else m.get("content"))
+        for m in items[start + 1 :]
+        if m.get("type") == "function_call_output" or m.get("role") == "tool"
+    )
+
+
+def _record_choices(
+    choices: list[tuple[str, str]], targets: frozenset[str], window: _ToolWindow, body: bytes
+) -> None:
+    called = tool_choices(body, targets)
+    choices.extend(called)
+    window.open = bool(called)
 
 
 async def _synthetic_members(actors: frozenset[str], checks: list[str], _: str, actor: str) -> bool:
@@ -535,6 +645,9 @@ class DialogueStarRocks(SyntheticStarRocks):
     busy: bool = False
     slot_timeouts: int = 0
     raw_field: str = "raw"
+    window: _ToolWindow | None = None
+    fetches: list[str] = field(default_factory=list)
+    """工具执行期到达本目标的语句类别（不含会话设置与后台刷新），即新取数。"""
 
     async def __call__(self, **kwargs: Any) -> Any:
         if self.busy:
@@ -546,9 +659,21 @@ class DialogueStarRocks(SyntheticStarRocks):
         return await super().__call__(**kwargs)
 
     def classify(self, sql: str, args: tuple[object, ...] | None) -> Any:
-        if sql in {show_create_sql(db, name) for db, name in self.tables}:
-            return "ddl"
-        return super().classify(sql, args)
+        kind = (
+            "ddl"
+            if sql in {show_create_sql(db, name) for db, name in self.tables}
+            else super().classify(sql, args)
+        )
+        task = asyncio.current_task()
+        refreshing = task is not None and task.get_name().startswith("xiaowei-schema-")
+        if (
+            self.window is not None
+            and self.window.open
+            and not refreshing
+            and kind not in {"session", "schema"}
+        ):
+            self.fetches.append(kind)
+        return kind
 
     def result(self, kind: Any, sql: str, args: Any) -> Any:
         if (
@@ -686,6 +811,7 @@ async def run_dialogue(
                 for scenario in scenarios:
                     config = configuration(profile, scenario)
                     drivers: dict[str, DialogueStarRocks] = {}
+                    window = _ToolWindow()
                     for target in config.targets:
                         tables = {(f"db{i:02}", "orders"): ("region",) for i in range(14)}
                         tables["data_center", TABLE] = (
@@ -709,11 +835,21 @@ async def run_dialogue(
                             raw_chars=scenario.raw_chars,
                             raw_field=scenario.raw_field,
                             unavailable=target.target_id == scenario.unavailable,
+                            audit=(SLOW_SQL, FILTERED_AUDIT_SQL),
+                            audit_database="data_center",
+                            audit_started=NOW.astimezone(
+                                ZoneInfo(target.starrocks.time_zone)
+                            ).replace(tzinfo=None)
+                            - timedelta(minutes=30),
+                            plan=DIALOGUE_PLAN,
+                            window=window,
                         )
                     choices: list[tuple[str, str]] = []
                     observer = ObservingTransport(
                         network(),
-                        observe_response=partial(_record_choices, choices, frozenset(drivers)),
+                        observe_response=partial(
+                            _record_choices, choices, frozenset(drivers), window
+                        ),
                     )
 
                     member_checks: list[str] = []
@@ -734,7 +870,7 @@ async def run_dialogue(
                     async with open_runtime(
                         config,
                         clock=lambda: NOW,
-                        model_transport=observer,
+                        model_transport=_WindowTransport(observer, window),
                         starrocks_connect=drivers,
                         members=members,
                     ) as runtime:
@@ -762,6 +898,8 @@ async def run_dialogue(
                                 )
                             first = len(observer.observations)
                             first_choice = len(choices)
+                            before_fetches = {k: len(d.fetches) for k, d in drivers.items()}
+                            window.rejected = 0
                             first_members = len(member_checks)
                             before_connections = {k: d.attempts for k, d in drivers.items()}
                             before_timeouts = {k: d.slot_timeouts for k, d in drivers.items()}
@@ -798,6 +936,14 @@ async def run_dialogue(
                                 if kind != "session"
                             ]
                             queries = [sql for _, kind, sql in statements if kind == "query"]
+                            fetched = {
+                                k: {
+                                    kind: drv.fetches[before_fetches[k] :].count(kind)
+                                    for kind in sorted(set(drv.fetches[before_fetches[k] :]))
+                                }
+                                for k, drv in drivers.items()
+                                if drv.fetches[before_fetches[k] :]
+                            }
                             elapsed_ms = int((time.monotonic() - started) * 1000)
                             verdict = (
                                 None
@@ -868,7 +1014,10 @@ async def run_dialogue(
                                         scenario.environments[index]
                                         if scenario.environments
                                         else None,
+                                        fetched,
+                                        window.rejected,
                                     ),
+                                    "fetch_by_target": fetched,
                                     "membership_checks_for_actor": member_checks[
                                         first_members:
                                     ].count(subject),
