@@ -37,7 +37,7 @@
 
 ## 3. 当前计划与下一项工作
 
-**生产轮次失败修复（turn-resilience，本地完成，未推送/合并/部署；待独立审查）：** 分支 `claude/turn-resilience`（工作树 `/Users/kloenguyen/xw-worktrees/turn-resilience`），基线 `abb9bc2`（origin/main，本机 fetch 因代理不可用未刷新）。依据公司部署日志 11 次 `stage=failed`：`tool_failed` 7（`prometheus-prod/series` mcp_error 3、`alertmanager-prod/get_alerts` other 4）、`answer_rejected(mixed_kinds)` 2、`model_failed` 2（均为 Vertex HTTP 429）。根因：只读监控失败、上游限流、回答结构不合格都直接丢弃整轮，不给 Agent 修正机会。用户 2026-10-16 批准以下契约变更，ARCHITECTURE §4/§5/§6/§8 已同步：
+**生产轮次失败修复（turn-resilience，本地完成，未推送/合并/部署；审查修复后待复审）：** 分支 `claude/turn-resilience`（工作树 `/Users/kloenguyen/xw-worktrees/turn-resilience`），基线 `abb9bc2`（origin/main，本机 fetch 因代理不可用未刷新）。依据公司部署日志 11 次 `stage=failed`：`tool_failed` 7（`prometheus-prod/series` mcp_error 3、`alertmanager-prod/get_alerts` other 4）、`answer_rejected(mixed_kinds)` 2、`model_failed` 2（均为 Vertex HTTP 429）。根因：只读监控失败、上游限流、回答结构不合格都直接丢弃整轮，不给 Agent 修正机会。用户 2026-10-16 批准以下契约变更，ARCHITECTURE §4/§5/§6/§8 已同步：
 
 | 提交 | 改动 | 对应失败 |
 | --- | --- | --- |
@@ -56,7 +56,23 @@
 | 未验证 | 真实 Vertex 上 429 退避效果与改写质量、公司 Prometheus/Alertmanager/Grafana、真实飞书、部署；`unclassified` 对远端实际错误形态的覆盖需看线上 `monitoring read unclassified` 日志的异常类型分布 |
 | 残留风险 | `unclassified` 停止本源本轮，接收超限等可修正情况暂不提示收窄；改写对 Evidence 层拒收（缺引用等）不生效 |
 
-**下一项：** 独立审查本分支精确 SHA；通过后推送/PR 由用户决定；部署后用同一日志命令复核 `stage=failed` 分布，并关注 `stage=answer_repair` 与 `monitoring read unclassified` 的频率。
+**独立审查修复（`46dd17b` → `d019f40`）：** 审查确认的问题均先补复现用例（在原代码上失败），再做最小修复：
+
+| 问题 | 修复 | 证据 |
+| --- | --- | --- |
+| 改写成功后被拒回答仍落库并回放（混用、夹带 `facts`、纯文本） | `PolicySession.commit_validated` 只保留最终回答，丢弃紧邻其前的助手消息；工具调用/结果与更早消息不变；普通轮与审批恢复（`native`）同走该提交 | `test_repaired_answer_replaces_the_rejected_one_in_history`×3、`test_rejected_final_answer_after_approval_is_not_saved`：被拒内容不落库、不进下一轮请求，合格回答可追问，只改写一次、工具不重放；改写仍失败不提交沿用原用例 |
+| Vertex 429 丢失 Retry-After | `ModelAPIStatusError` 只保留 `retry-after`/`retry-after-ms` 头供 SDK 读取，仍由 SDK Runner 重试 | 真 Runner + 协议替身：120→20s 封顶、5s、1500ms 按值，缺失/无效/负值回退退避；其他头不保留；外层期限取消等待且不再发请求 |
+| 失败选择器换发现工具绕过去重 | 按锁版 `bad_data` 含义分键：说明指向 match[]（解析错误/只含可匹配空串）时按去重排序后的 matches 拒绝，不论工具、label、时间窗；其他原因只拒完全相同请求（新提示 `change_discovery_request`） | 反例 series→label_names/label_values 均零 I/O；正向：去掉坏选择器后取得证据，非选择器原因被拒后同一选择器换工具取得证据；并行修正只占两次额度；其他读取不停沿用原用例 |
+| `models.py` 多余空行 | 删除 | `ruff format --check` 通过 |
+
+| 验证（`d019f40`） | 结果 |
+| --- | --- |
+| SDK/P1B 全量（同上环境与二进制） | **1 failed, 3785 passed, 52 skipped, 72 deselected**（17m54s，`/private/tmp/xw-turn-resilience-full5.log`）；唯一失败仍是既有 `test_grafana_group_resend_is_local_and_revocation_refuses`（审查方已核：`abb9bc2` 整文件运行同样失败，单跑通过） |
+| 静态 | `ruff check src tests/sdk_core`、改动文件 `ruff format --check`、`mypy src`（135 文件）、`git diff --check` 通过 |
+| 体验 | 无新增用户步骤、配置、重试框架或后台服务；限流时可能多等最多 20s/次，换取不过早耗尽重试，不保证恢复；整轮到期按现有受控失败提示 |
+| 未处理 | OpenAI 协议族 SDK 内置 `conversation_locked` 兼容重试不经“仅 429/503”策略（Vertex 不触发，无生产证据，本轮按要求不改）；选择器组 [坏, 好] 失败后单发 [坏] 仍会发出一次（不做语义分析，受两次额度约束） |
+
+**下一项：** 独立复审 `46dd17b..d019f40`；通过后推送/PR 由用户决定；部署后用同一日志命令复核 `stage=failed` 分布，并关注 `stage=answer_repair` 与 `monitoring read unclassified` 的频率。
 
 **数据库环境选择第一步（本地完成，已做一轮独立审查并修复；真实模型评测待授权）：** 根因是原 R7 B1(a) 允许未选环境时跨环境发现并按唯一匹配继续。现在未选环境先问、选定后沿用、明确切换才换、提及不等于切换、无需取证的 SQL 任务不问；规则只在 Skill 中出现一次。**已接受风险：** 执行层不核对“是否用户选定的环境”，模型不遵守时仍会执行；第二步触发条件见 [ARCHITECTURE R7](ARCHITECTURE.md#r7-targets)。实现与计划的差异见计划 §10。
 
