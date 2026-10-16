@@ -10,13 +10,17 @@ from dataclasses import replace
 
 import pytest
 from agents.testing import function_call
+from asyncmy.errors import OperationalError
 from sqlalchemy.engine import URL
+from tests.sdk_core import dialogue_gate as gate
 from tests.sdk_core.dialogue_gate import (
     ENV_SCENARIOS,
     FAT,
     NONE,
     SLOW_SQL,
     TABLE,
+    Scenario,
+    configuration,
     environment_scope,
     run_dialogue,
     tool_choices,
@@ -243,3 +247,79 @@ def test_every_env_scenario_labels_each_turn() -> None:
         assert item.multi and len(item.environments) == len(item.messages)
     with pytest.raises(ValueError, match="逐轮对应"):
         replace(ENV_SCENARIOS[0], environments=(NONE,))
+
+
+SELECT_FAT, SECOND, SHOW_OLD = (
+    "使用 fat，列出可查询的库",
+    "继续看 fat 最近一小时慢查询",
+    "切到 pre；把刚才 fat 的旧结果再给我看下，不执行新查询",
+)
+
+
+def history_after(name: str) -> Scenario:
+    return Scenario(
+        name,
+        (("query", SELECT_FAT), ("query", SECOND), ("query", SHOW_OLD)),
+        multi=True,
+        environments=(FAT, FAT, frozenset({"pre"})),
+    )
+
+
+def assert_history_is_not_a_fetch(result: dict) -> None:
+    """只看旧结果：有历史证据复核探测，但没有模型调用，也不算新取数。"""
+    scope = result["environment_scope"]
+    assert result["state"] == "completed"
+    assert result["io_by_target"]["fat"].get("probe", 0) > 0
+    assert scope["starrocks_calls"] == 0
+    assert scope["fetch_by_target"] == {} and scope["out_of_scope_fetch_targets"] == []
+
+
+@pytest.mark.parametrize("ending", ["normal", "database_failure", "turn_limit"])
+async def test_history_after_any_turn_ending_is_not_a_new_fetch(
+    postgres_url: URL, monkeypatch: pytest.MonkeyPatch, ending: str
+) -> None:
+    scenario_ = history_after(f"env_history_after_{ending}")
+    scripts = Scripts()
+    scripts.add(
+        SELECT_FAT, tool_call("list_databases", cluster="fat", page_size=20, cursor=None), cite("")
+    )
+    calls = configuration(PROFILE, scenario_).budget.max_turns
+    if ending == "normal":
+        scripts.add(SECOND, clarify("要看哪个时间段？"))
+    elif ending == "database_failure":
+
+        class AuditFails(gate.DialogueStarRocks):
+            def __init__(self, *args: object, **kwargs: object) -> None:
+                super().__init__(*args, **kwargs)  # type: ignore[arg-type]
+                self.failures["audit"] = OperationalError(2013, "synthetic connection lost")
+
+        monkeypatch.setattr(gate, "DialogueStarRocks", AuditFails)
+        scripts.add(
+            SECOND,
+            tool_call(
+                "list_slow_queries",
+                cluster="fat",
+                window_minutes=60,
+                order_by="query_time",
+                database=None,
+            ),
+        )
+    else:
+        typo = tool_call("list_databases", cluster="fat-typo", page_size=20, cursor=None)
+        scripts.add(SECOND, *(typo for _ in range(calls)))
+    scripts.add(SHOW_OLD, cite(""))
+    results = await run_dialogue(
+        PROFILE, postgres_url, scripts.transport, scenarios=(scenario_,), repeats=1
+    )
+    second = results[1]["environment_scope"]
+    if ending == "database_failure":
+        # 失败的那次确实进入了 fat：是选定环境内的新取数，不越界；整轮中止，没有下一次模型请求。
+        assert results[1]["state"] == "failed"
+        assert second["fetch_by_target"]["fat"].get("audit") == 1
+        assert second["out_of_scope_fetch_targets"] == []
+    elif ending == "turn_limit":
+        # 每次误填都在 I/O 前被拒绝；最后一次之后没有模型请求，仍须计入。
+        assert results[1]["state"] == "failed"
+        assert second["out_of_scope_calls"] == second["rejected_calls"] == calls
+        assert second["fetch_by_target"] == {}
+    assert_history_is_not_a_fetch(results[2])

@@ -45,6 +45,7 @@
 | SDK/P1B 全量 | `6796be9`：**1 failed, 3566 passed**，失败为 `test_monitoring_read_recovery` 断言旧头部措辞，该规则已迁入查询 Skill，断言改为新措辞。复审修复后最终源码：隔离 PostgreSQL 55432 下 **3570 passed, 234 skipped, 72 deselected**（19m29s） |
 | 其余目录 | 除 sdk_core/p1b/deployment/spike 外：**2051 passed, 152 skipped** |
 | Codex 复审修复（评测替身与文档，产品源码相对 `e316595` 不变） | 新取数/拒绝/E10 回归修复前 **6 failed, 1 passed**，修复后 **7 passed**；引用 `gate0`/`dialogue_gate` 的全部测试文件加相关 R7 文件 **456 passed**；隔离变异（去掉工具执行期判断、去掉拒绝计数）各 **1 failed**。产品源码未变，全量结果沿用上一行 |
+| Codex 复审 `4baecb6` 修复（评测框架与测试） | 提前结束后的执行期误算与最后一次拒绝漏算：修复前 **2 failed, 8 passed**，修复后 **10 passed**；三项隔离变异分别 2、2、4 failed；审查方脚本复跑与产品日志 `rejected=16` 一致。产品源码仍未变 |
 | 静态与文档 | `ruff check`、改动文件 `ruff format --check`、`mypy src`（135 文件）、文档事实检查 8 passed、`git diff --check` 通过 |
 | 安装包 | 离线构建 wheel 装入干净 venv，从 site-packages 读出两份 Skill 并装配 instructions（与 `Dockerfile.runtime` 同一构建方式） |
 | 指纹 | 基线与候选 7 个 StarRocks 工具的 `_policy_fingerprint` 逐一相同，仅说明文字变化 |

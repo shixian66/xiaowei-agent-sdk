@@ -9,7 +9,8 @@ import json
 import os
 import secrets
 import time
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, timedelta
 from functools import partial
@@ -25,6 +26,7 @@ from tests.sdk_core.gate0 import ObservingTransport, SyntheticStarRocks
 from tests.sdk_core.synthetic_tools import TEST_DIGEST_KEY, ready_engine
 
 from xiaowei.channel import GroupScope, InboundRequest, RequestRef
+from xiaowei.governance import GovernedTools
 from xiaowei.model_api import ModelProfile
 from xiaowei.models import Delivery
 from xiaowei.runtime import ServeConfig, open_runtime
@@ -553,8 +555,10 @@ def tool_choices(body: bytes, targets: frozenset[str]) -> list[tuple[str, str]]:
 class _ToolWindow:
     """模型返回工具调用后、下一次模型请求前即工具执行期；SDK 在这段时间执行本轮工具。
 
-    历史证据复核发生在回放与最终校验时，不在这段时间；后台结构刷新另有命名任务，按任务
-    排除。``rejected`` 是最近一次模型请求中本轮被拒绝的工具结果数（只计数，不留内容）。
+    每轮开始前复位，本轮处理结束（含异常、整轮中止而没有下一次模型请求）即关闭，读取结果
+    之前已关闭。历史证据复核发生在回放与最终校验时，不在这段时间；后台结构刷新另有命名
+    任务，按任务排除。``rejected`` 是本轮治理层在 I/O 前拒绝的调用数，取自执行侧计数
+    （``GovernedTools.note_rejected``），不依赖之后是否还有模型请求。
     """
 
     open: bool = False
@@ -568,60 +572,26 @@ class _WindowTransport(httpx2.AsyncBaseTransport):
 
     async def handle_async_request(self, request: httpx2.Request) -> httpx2.Response:
         self._window.open = False
-        self._window.rejected = _rejected_outputs(await request.aread())
         return await self._inner.handle_async_request(request)
 
     async def aclose(self) -> None:
         await self._inner.aclose()
 
 
-def _rejected_outputs(body: bytes) -> int:
-    """请求中最后一条用户文字之后、状态为 rejected 的工具结果数；三种协议同一口径。"""
+@contextmanager
+def _observe_rejections(window: _ToolWindow) -> Iterator[None]:
+    """只观测执行侧的 I/O 前拒绝计数，照常调用原方法；离开时恢复，不改变治理行为。"""
+    original = GovernedTools.note_rejected
+
+    def note(self: GovernedTools, identity: Any) -> None:
+        window.rejected += 1
+        original(self, identity)
+
+    GovernedTools.note_rejected = note  # type: ignore[method-assign]
     try:
-        data = json.loads(body)
-    except (ValueError, UnicodeError):
-        return 0
-    if not isinstance(data, dict):
-        return 0
-
-    def rejected(value: Any) -> bool:
-        if isinstance(value, str):
-            try:
-                value = json.loads(value)
-            except ValueError:
-                return False
-        if not isinstance(value, dict):
-            return False
-        return value.get("status") == "rejected" or any(
-            rejected(v) for v in value.values() if isinstance(v, str | dict)
-        )
-
-    def dicts(value: Any) -> list[dict[str, Any]]:
-        return [v for v in value if isinstance(v, dict)] if isinstance(value, list) else []
-
-    if "contents" in data:
-        contents = dicts(data["contents"])
-        start = max(
-            (
-                i
-                for i, c in enumerate(contents)
-                if c.get("role") == "user" and any("text" in p for p in dicts(c.get("parts")))
-            ),
-            default=-1,
-        )
-        return sum(
-            rejected(p["functionResponse"].get("response"))
-            for c in contents[start + 1 :]
-            for p in dicts(c.get("parts"))
-            if isinstance(p.get("functionResponse"), dict)
-        )
-    items = dicts(data.get("messages") or data.get("input"))
-    start = max((i for i, m in enumerate(items) if m.get("role") == "user"), default=-1)
-    return sum(
-        rejected(m.get("output") if m.get("type") == "function_call_output" else m.get("content"))
-        for m in items[start + 1 :]
-        if m.get("type") == "function_call_output" or m.get("role") == "tool"
-    )
+        yield
+    finally:
+        GovernedTools.note_rejected = original  # type: ignore[method-assign]
 
 
 def _record_choices(
@@ -899,7 +869,7 @@ async def run_dialogue(
                             first = len(observer.observations)
                             first_choice = len(choices)
                             before_fetches = {k: len(d.fetches) for k, d in drivers.items()}
-                            window.rejected = 0
+                            window.open, window.rejected = False, 0
                             first_members = len(member_checks)
                             before_connections = {k: d.attempts for k, d in drivers.items()}
                             before_timeouts = {k: d.slot_timeouts for k, d in drivers.items()}
@@ -917,7 +887,11 @@ async def run_dialogue(
                                     received_at=NOW,
                                 )
                             )
-                            record = await runtime.service.process(receipt)
+                            try:
+                                with _observe_rejections(window):
+                                    record = await runtime.service.process(receipt)
+                            finally:
+                                window.open = False
                             view = await runtime.service.results.view(
                                 RequestRef(
                                     channel=channel,
