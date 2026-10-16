@@ -839,3 +839,45 @@ async def test_long_clarification_never_changes_into_an_automatic_attachment(env
     # 字符上限 200 只约束纯文本；澄清卡片在平台限制内完整发送。
     assert result == "sent" and question in json.dumps(platform.sent[0][0], ensure_ascii=False)
     assert all(part.kind == "body" for part in await parts(env, ref))
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("invalidate", ["readiness", "expiry"])
+async def test_hint_rechecks_attempt_after_thread_render(
+    env: Env, monkeypatch: pytest.MonkeyPatch, invalidate: str
+) -> None:
+    # 独立审查（5fb2b30）：提醒在线程中渲染期间 readiness 关闭或请求过期，不能再外发结果。
+    import xiaowei.feishu_delivery as module
+    from xiaowei.channel_store import ChannelStoreError
+
+    ref = await request(env)
+    platform = Platform(outcomes=[rejected()])
+    original = module._preview
+    entered, release = threading.Event(), threading.Event()
+
+    def paused_preview(delivery, max_chars, chat_id, reply_to, notice):
+        if notice.startswith("完整结果尚未交付。"):
+            entered.set()
+            assert release.wait(8), "测试屏障超时"
+        return original(delivery, max_chars, chat_id, reply_to, notice)
+
+    monkeypatch.setattr(module, "_preview", paused_preview)
+    task = asyncio.create_task(env.service.results.send(ref, transmit(env, ref, platform)))
+    try:
+        assert await asyncio.wait_for(asyncio.to_thread(entered.wait, 6), 7)
+        sent_before = len(platform.sent)
+        if invalidate == "readiness":
+            env.readiness.lock("review_simulated_state_failure")
+        else:
+            env.clock.advance(10_000)
+        release.set()
+        try:
+            await task
+        except ChannelStoreError:
+            pass  # 失效后的最终状态写入被拒绝是预期的
+        assert len(platform.sent) == sent_before
+    finally:
+        release.set()
+        if not task.done():
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)

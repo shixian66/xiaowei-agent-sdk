@@ -265,10 +265,13 @@ def _md_cell(value: object) -> str | None:
 
 
 def _md_label(name: str) -> str:
-    """列名/字段名：简单名直出；其余用 JSON 单行编码放进代码片段，可逆且不能跨行。"""
+    """列名/字段名：简单名直出；其余用 JSON 单行编码放进代码片段，可逆且不能跨行。
+
+    表格竖线转义只在表头调用处添加；表外标题若也转义，代码片段会保留反斜杠而改变名称。
+    """
     if _safe_md_cell(name) and name == name.strip():
         return name
-    return _inline_code(display_text(_json_value(name)).replace("|", "\\|"))
+    return _inline_code(display_text(_json_value(name)))
 
 
 def _md_fact(value: str, first_row: int = 1) -> str:
@@ -294,7 +297,8 @@ def _md_fact(value: str, first_row: int = 1) -> str:
         if columns:
             details = []
             lines = [
-                "| " + " | ".join(_md_label(c) for c in columns) + " |",
+                # JSON 已把字面反斜杠加倍，故表头中每个 \| 都是竖线转义。
+                "| " + " | ".join(_md_label(c).replace("|", "\\|") for c in columns) + " |",
                 "| " + " | ".join("---" for _ in columns) + " |",
             ]
             # 拆分文件中行号与章节标题“行 a–b/N”一致，按全局行号编号。

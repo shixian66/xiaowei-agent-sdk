@@ -328,3 +328,30 @@ def test_raw_json_kept_for_ambiguous_text_rendering(case: str) -> None:
         build_feishu_message(delivery(f), 3500, CHAT, allow_preview=False, platform_limits=True)
     )
     assert RAW_OMITTED not in text and "原文 JSON:" in text
+
+
+@pytest.mark.parametrize("tool", ["local/show_create_table", "local/run_readonly_query"])
+def test_direct_text_with_rewritten_characters_keeps_raw_json(tool: str) -> None:
+    # 独立审查（5fb2b30）：DDL/实际 SQL 直接以文字展示，真实 U+2028 与字面   显示相同。
+    def build(text: str):
+        if tool == "local/show_create_table":
+            f = fact(("table", "ddl"), ({"table": "t", "ddl": text},), metadata={}, tool_id=tool)
+        else:
+            f = fact(("v",), ({"v": 1},), metadata={"sql": text})
+        return build_feishu_message(
+            delivery(f), 3500, CHAT, allow_preview=False, platform_limits=True
+        )
+
+    real, literal = build('SELECT "a b"'), build('SELECT "a\\u2028b"')
+    assert real != literal
+    assert RAW_OMITTED not in shown(real) and "原文 JSON:" in shown(real)
+    # 保留原文后超过平台限制的，整体转附件，而不是省略原文后内联。
+    big = 'CREATE TABLE t (v STRING COMMENT " ")' + " " * 16_000
+    f = fact(
+        ("table", "ddl"),
+        ({"table": "t", "ddl": big},),
+        metadata={},
+        tool_id="local/show_create_table",
+    )
+    *files, _body = _data_parts(delivery(f), 0, 3500, CHAT, None)
+    assert [p.kind for p in files] == ["md"]

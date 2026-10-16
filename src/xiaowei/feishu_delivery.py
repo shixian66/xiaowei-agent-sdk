@@ -240,6 +240,8 @@ async def send_complete_delivery(
                 + f"原请求编号：{ref.request_id}。"
                 + "请联系操作员手动补发；不会重新查询。",
             )
+            # 线程渲染期间 readiness 可能关闭、请求可能过期：发送前再复核一次。
+            await store.check_delivery_attempt(claim)
             if ref.group is not None:
                 last_group_send_at = monotonic()
             await send(chat_id, preview, reply_to=reply_to)

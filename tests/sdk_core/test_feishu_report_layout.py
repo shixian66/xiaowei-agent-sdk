@@ -322,3 +322,14 @@ def test_md_detail_keeps_strings_that_display_would_rewrite_lossless() -> None:
         for t in fences[: len(values)]
     ]
     assert decoded == values
+
+
+def test_md_pipe_names_stay_reversible_in_headers_and_outside_tables() -> None:
+    # 独立审查（5fb2b30）：竖线转义只属于表格；表外字段标题与明细标题不能多出反斜杠。
+    body = _md_body({"columns": ["a|b"], "rows": [{"a|b": "multi\nline"}], "c|d": 3})
+    html = _md_html(body)
+    (header,) = re.findall(r"<th>(.*?)</th>", html)
+    assert json.loads(unescape(header.removeprefix("<code>").removesuffix("</code>"))) == "a|b"
+    paragraphs = re.findall(r"<p>(.*?)</p>", html, re.S)
+    labels = [unescape(c) for p in paragraphs for c in re.findall(r"<code>(.*?)</code>", p)]
+    assert [json.loads(label) for label in labels if label.startswith('"')] == ["c|d", "a|b"]

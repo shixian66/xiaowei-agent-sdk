@@ -106,12 +106,15 @@ def _raw_redundant(fact: DeliveryFact) -> bool:
     names = [*fact.columns, *fact.metadata]
     if any(display_text(name) != name or "\n" in name or ": " in name for name in names):
         return False  # 转义或“名: 值”文字排版可能使不同名称显示相同
-    if fact.tool_id == "local/run_readonly_query" and not isinstance(fact.metadata.get("sql"), str):
-        return False  # 非字符串 SQL 只显示“SQL 未展示”
+    # 实际 SQL 与 DDL 直接以文字展示：必须是字符串，且显示转义不改写（如 U+2028 与字面 \u2028）。
+    if fact.tool_id == "local/run_readonly_query":
+        sql = fact.metadata.get("sql")
+        if not isinstance(sql, str) or display_text(sql) != sql:
+            return False
     if fact.tool_id == "local/show_create_table" and any(
-        not isinstance(row.get("ddl"), str) for row in fact.rows
+        not isinstance(ddl := row.get("ddl"), str) or display_text(ddl) != ddl for row in fact.rows
     ):
-        return False  # DDL 按原文 str() 展示，None 与 "None" 不可区分
+        return False
 
     def same(left: object, right: object) -> bool:
         # 按 JSON 文本比较，区分 true/1、大整数与其字符串、嵌套值与其 JSON 文本。
