@@ -277,6 +277,15 @@ class AgentAnswer(_Answer):
     """飞书用户明确要结果或解释/建议文件时选定格式；澄清时忽略。"""
 
 
+def answer_kinds_mixed(answer: AgentAnswer) -> bool:
+    """澄清或建议与证据、分析、显示方式或彼此混用：三种回答互斥的唯一判定。"""
+    unverified = [text for text in (answer.clarification, answer.advice) if text is not None]
+    return bool(unverified) and bool(
+        answer.evidence_ids or answer.inferences or answer.fact_views or len(unverified) > 1
+    )
+
+
+
 MonitoringFailureReason = Literal[
     "auth",
     "timeout",

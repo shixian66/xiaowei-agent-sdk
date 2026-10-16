@@ -73,6 +73,7 @@ from xiaowei.models import (
     ToolRequest,
     ToolResult,
     TurnAnswer,
+    answer_kinds_mixed,
 )
 
 logger = logging.getLogger(__name__)
@@ -384,7 +385,7 @@ class EvidenceStore:
             # 澄清与建议不引用证据：不能与证据、分析或彼此混用。没有监控失败时，
             # “本轮未执行业务查询”由 Application 在提交前核实；有监控失败时改用未核实标题。
             # 模型可能复述可见证据，因此照样复核它们。
-            if answer.evidence_ids or answer.inferences or answer.fact_views or len(unverified) > 1:
+            if answer_kinds_mixed(answer):
                 raise AnswerRejectedError(
                     AnswerRejectCode.MIXED_KINDS, "澄清或建议不能与查询结果、分析或彼此混用"
                 )

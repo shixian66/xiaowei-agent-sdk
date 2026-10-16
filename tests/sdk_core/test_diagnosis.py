@@ -395,7 +395,9 @@ async def test_no_evidence_is_a_pure_clarification(diag: Env, channel: str) -> N
 
 
 @pytest.mark.parametrize("channel", CHANNELS)
-async def test_evidence_mixed_with_clarification_is_rejected(diag: Env, channel: str) -> None:
+async def test_evidence_mixed_with_clarification_twice_is_not_delivered(
+    diag: Env, channel: str
+) -> None:
     env = diag
 
     def mixed(call: ModelCall) -> Any:
@@ -411,6 +413,7 @@ async def test_evidence_mixed_with_clarification_is_rejected(diag: Env, channel:
             database=None,
         ),
         mixed,
+        mixed,  # 一次无工具改写后仍混用
     )
     running, feishu = serving(env, channel)
     async with running as served:
@@ -419,12 +422,13 @@ async def test_evidence_mixed_with_clarification_is_rejected(diag: Env, channel:
         assert await served.finish() == 0
 
     # 回答不保存、不发送：渠道只收到固定回执，没有任何事实或分析。
-    assert reply.state == "failed" and reply.content == EVIDENCE_FAILED
+    assert reply.state == "failed" and "扫描量大" not in reply.content
     assert SLOW_SQL not in reply.content and reply.facts in (None, [])
     assert (
         await env.scalar("SELECT failure_code FROM xiaowei_request WHERE state = 'failed'")
-        == "evidence_failed"
+        == "model_failed"
     )
+    assert len(env.scripts.calls[message]) == 3
 
 
 @pytest.mark.parametrize("channel", CHANNELS)

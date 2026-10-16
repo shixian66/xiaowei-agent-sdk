@@ -820,8 +820,9 @@ async def test_model_failure_logs_safe_category_and_http_status(
             raise httpx2.ConnectError(MODEL_SECRET)
         raise httpx2.ReadTimeout(MODEL_SECRET)
 
-    # 分类本身不引入重试；只有 429/503 由 SDK 有限重试（首发 + 3 次）。
-    expected = 4 if case in {"http_429", "http_503"} else 1
+    # 分类本身不引入重试：429/503 由 SDK 有限重试（首发 + 3 次）；不合格的结构化输出由
+    # invalid_final_output 处理器无工具改写一次，仍不合格才失败。
+    expected = {"http_429": 4, "http_503": 4, "invalid_output": 2}.get(case, 1)
     message = env.scripts.add("失败分类 " + SYNTHETIC_SQL, *[respond] * expected)
     with all_logs() as records, pytest.raises(TurnError) as failed:
         await env.app.run_turn(env.ctx(turn="failure-kind"), message)
@@ -1346,7 +1347,7 @@ async def test_mcp_failure_logs_fixed_category_without_remote_text(
 @pytest.mark.parametrize(
     ("case", "code"),
     [
-        ("mixed", "mixed_kinds"),
+        # 混用在 SDK 结构校验阶段即被拦截并改写一次，见 test_mixed_answer_*。
         ("missing", "missing_evidence"),
         ("duplicate", "duplicate_evidence"),
         ("unknown", "unknown_evidence"),
@@ -1361,8 +1362,6 @@ async def test_answer_rejection_logs_exact_fixed_code(env: Env, case: str, code:
     def invalid(call: ModelCall) -> list[Any]:
         if case == "unavailable":
             env.grants.revoke_all()
-        if case == "mixed":
-            return answer([evidence_id], "", clarification=MODEL_SECRET)
         if case == "missing":
             return answer([], "")
         if case == "duplicate":
@@ -1383,6 +1382,65 @@ async def test_answer_rejection_logs_exact_fixed_code(env: Env, case: str, code:
     assert f"answer_reject={code}" in output
     assert MODEL_SECRET not in output and SYNTHETIC_SQL not in output
     assert await env.state() == ("active", 1)
+
+
+async def test_mixed_answer_is_repaired_once_without_tools(env: Env) -> None:
+    seed = env.scripts.add("取得依据", tool_call("order_total", region="east"), cite())
+    evidence_id = (await env.app.run_turn(env.ctx(turn="seed"), seed)).answer.evidence_ids[0]
+
+    def repaired(call: ModelCall) -> list[Any]:
+        assert call.tools == []  # 改写不能再调用工具
+        assert "上一条最终回答未通过结构校验" in call.instructions
+        return answer([evidence_id], "沿用已核实结果")
+
+    message = env.scripts.add(
+        "结果加反问 " + SYNTHETIC_SQL,
+        lambda call: answer([evidence_id], "", clarification=MODEL_SECRET),
+        repaired,
+    )
+    with all_logs() as records:
+        result = await env.app.run_turn(env.ctx(turn="repaired"), message)
+    output = "\n".join(r.getMessage() for r in records)
+    assert result.answer.evidence_ids == (evidence_id,) and result.answer.clarification is None
+    assert "stage=answer_repair" in output and "stage=completed" in output
+    assert MODEL_SECRET not in output and SYNTHETIC_SQL not in output
+    assert len(env.scripts.calls[message]) == 2
+    assert await env.state() == ("active", 2)
+
+
+async def test_mixed_answer_still_mixed_after_one_repair_fails(env: Env) -> None:
+    seed = env.scripts.add("取得依据", tool_call("order_total", region="east"), cite())
+    evidence_id = (await env.app.run_turn(env.ctx(turn="seed"), seed)).answer.evidence_ids[0]
+
+    def mixed(call: ModelCall) -> list[Any]:
+        return answer([evidence_id], "", advice=MODEL_SECRET)
+
+    message = env.scripts.add("仍然混用 " + SYNTHETIC_SQL, mixed, mixed)
+    with all_logs() as records, pytest.raises(TurnError) as failed:
+        await env.app.run_turn(env.ctx(turn="still-mixed"), message)
+    output = "\n".join(r.getMessage() for r in records)
+    assert failed.value.reason == "model_failed"
+    assert "stage=answer_repair" in output and "error_kind=invalid_output" in output
+    assert MODEL_SECRET not in output
+    assert len(env.scripts.calls[message]) == 2  # 只改写一次
+    assert await env.state() == ("active", 1)  # 失败轮不提交
+
+
+async def test_answer_repair_keeps_all_query_citations(env: Env) -> None:
+    def repaired(call: ModelCall) -> list[Any]:
+        ids = evidence_in(call)
+        assert ids and all(i in call.instructions for i in ids)  # 提示必须引用全部查询证据
+        return answer(ids, "已核实")
+
+    message = env.scripts.add(
+        "查询后混用",
+        tool_call("run_query", region="east"),
+        lambda call: answer(evidence_in(call), "", advice="另外建议补索引"),
+        repaired,
+    )
+    result = await env.app.run_turn(env.ctx(turn="repair-query"), message)
+    assert result.answer.advice is None and len(result.answer.evidence_ids) == 1
+    assert env.tool_ids() == [QUERY_TOOL]  # 改写不重放工具
 
 
 async def test_uncited_query_logs_own_rejection_code(env: Env) -> None:
