@@ -298,3 +298,33 @@ def test_legacy_truncated_card_says_shown_not_preview() -> None:
     d = delivery(fact(AUDIT, audit_rows(3, 1500)), analysis=None)
     text = shown(build_feishu_message(d, 3500, CHAT))
     assert "展示 " in text and "／本次返回 3 行" in text and "预览 " not in text
+
+
+def test_preview_with_all_rows_but_hidden_sql_keeps_raw_claim_honest() -> None:
+    # 复审（52549e5）反例：1 行全部放下，但约 29 KB 的实际 SQL 放不下。
+    for size in range(27_000, 30_001, 250):
+        sql = "SELECT " + "x" * size
+        d = delivery(fact(("v",), ({"v": 1},), metadata={"sql": sql}), analysis=None)
+        text = shown(
+            _preview(d.model_copy(update={"report_format": "md"}), 3500, CHAT, None, "见附件")
+        )
+        if "SQL 未展示。" in text:
+            assert RAW_OMITTED not in text
+
+
+@pytest.mark.parametrize("case", ["ddl_none", "newline_name", "colon_name"])
+def test_raw_json_kept_for_ambiguous_text_rendering(case: str) -> None:
+    if case == "ddl_none":
+        f = fact(
+            ("table", "ddl"),
+            ({"table": "t", "ddl": None},),
+            metadata={},
+            tool_id="local/show_create_table",
+        )
+    else:
+        name = "x\ny" if case == "newline_name" else 'x: "1"'
+        f = fact((), (), metadata={name: 2}, raw=json.dumps({name: 2}), tool_id="grafana/search")
+    text = shown(
+        build_feishu_message(delivery(f), 3500, CHAT, allow_preview=False, platform_limits=True)
+    )
+    assert RAW_OMITTED not in text and "原文 JSON:" in text

@@ -104,10 +104,14 @@ def _raw_redundant(fact: DeliveryFact) -> bool:
     if not isinstance(data, dict):
         return False
     names = [*fact.columns, *fact.metadata]
-    if any(display_text(name) != name for name in names):
-        return False  # 不可见字符经转义后可能与字面文本撞名
+    if any(display_text(name) != name or "\n" in name or ": " in name for name in names):
+        return False  # 转义或“名: 值”文字排版可能使不同名称显示相同
     if fact.tool_id == "local/run_readonly_query" and not isinstance(fact.metadata.get("sql"), str):
         return False  # 非字符串 SQL 只显示“SQL 未展示”
+    if fact.tool_id == "local/show_create_table" and any(
+        not isinstance(row.get("ddl"), str) for row in fact.rows
+    ):
+        return False  # DDL 按原文 str() 展示，None 与 "None" 不可区分
 
     def same(left: object, right: object) -> bool:
         # 按 JSON 文本比较，区分 true/1、大整数与其字符串、嵌套值与其 JSON 文本。
@@ -346,8 +350,10 @@ def _card(
                     details.append(_div(f"{label}: {_cell({key: value}, key)}"))
             if fact.result_json is not None:
                 # 只有可由可见值无损替代的原文才会列入 raw_hidden，并如实说明是主动省略。
-                # 只在本卡完整展示该事实时才算重复；预览只放部分行，不能称“逐项一致”。
-                complete = counts[index] >= len(_data(fact)[1])
+                # 只在本卡完整展示该事实（全部行与实际 SQL）时才算重复，否则不能称“逐项一致”。
+                complete = counts[index] >= len(_data(fact)[1]) and (
+                    fact.tool_id != "local/run_readonly_query" or index in sqls
+                )
                 details.append(
                     _div(RAW_OMITTED)
                     if index in raw_hidden and complete
