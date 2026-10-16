@@ -2,6 +2,12 @@ name: publish-amd64
 
 on:
   workflow_dispatch:
+    inputs:
+      version:
+        description: 发行版本号，如 V0.1；只用于发行标题，留空时标题用代码 SHA
+        required: false
+        default: ""
+        type: string
 
 permissions:
   contents: read
@@ -27,8 +33,13 @@ jobs:
         env:
           XW_POSTGRES_IMAGE: postgres:16.15-bookworm@sha256:efedf3595f1d6f415c08568ba171029bf54052e754cc9f030e3f2412b21f3d67
           XW_PLATFORM: linux/amd64
+          XW_VERSION: ${{ inputs.version }}
         run: |
           set -euo pipefail
+          if [ -n "$XW_VERSION" ] && ! printf '%s' "$XW_VERSION" | grep -Eq '^V[0-9]+(\.[0-9]+){1,2}$'; then
+            echo "版本号须形如 V0.1 或 V0.1.2" >&2
+            exit 1
+          fi
           docker buildx version
           image="xiaowei:$GITHUB_SHA"
           image_file="$RUNNER_TEMP/xiaowei-image.tar"
@@ -66,12 +77,25 @@ jobs:
       - name: Publish the versioned release archive
         env:
           GH_TOKEN: ${{ github.token }}
+          XW_VERSION: ${{ inputs.version }}
         run: |
           set -euo pipefail
           tag="sha-$GITHUB_SHA"
-          title="Xiaowei linux/amd64 ${GITHUB_SHA:0:12}"
+          if [ -n "$XW_VERSION" ]; then
+            title="Xiaowei linux/amd64 $XW_VERSION"
+            # 同一版本号只对应一个提交；镜像与 Release tag 仍按代码 SHA 定位。
+            used="$(gh release list --limit 1000 --json name,tagName \
+              --jq ".[] | select(.name == \"$title\" and .tagName != \"$tag\") | .tagName")"
+            if [ -n "$used" ]; then
+              echo "版本号 $XW_VERSION 已用于另一个提交（$used），请换一个版本号" >&2
+              exit 1
+            fi
+          else
+            title="Xiaowei linux/amd64 ${GITHUB_SHA:0:12}"
+          fi
           notes="$RUNNER_TEMP/release-notes.md"
           cat > "$notes" <<EOF
+          Version: ${XW_VERSION:-（未指定）}
           Source commit: $GITHUB_SHA
           Platform: linux/amd64
           Application image: $APP_IMAGE

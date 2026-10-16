@@ -23,7 +23,17 @@ def test_release_is_manual_main_only_and_uses_least_github_permissions() -> None
     workflow = load_workflow()
 
     assert set(workflow["on"]) == {"workflow_dispatch"}
-    assert workflow["on"]["workflow_dispatch"] == ""
+    # 唯一输入是可选的发行版本号，只用于发行标题；镜像名与 Release tag 仍按代码 SHA。
+    assert workflow["on"]["workflow_dispatch"] == {
+        "inputs": {
+            "version": {
+                "description": "发行版本号，如 V0.1；只用于发行标题，留空时标题用代码 SHA",
+                "required": "false",
+                "default": "",
+                "type": "string",
+            }
+        }
+    }
     assert workflow["permissions"] == {"contents": "read"}
     assert workflow["concurrency"] == {
         "group": "publish-amd64-main",
@@ -97,3 +107,28 @@ def test_release_pushes_to_no_registry_and_uploads_only_the_archive() -> None:
         assert command in publish["run"]
     dockerfile = (ROOT / "Dockerfile.runtime").read_text(encoding="utf-8")
     assert "org.opencontainers.image.source" not in dockerfile
+
+
+def test_release_title_uses_a_validated_version_without_renaming_the_image() -> None:
+    workflow = load_workflow()
+    job = workflow["jobs"]["release"]
+    build, publish = (step for step in job["steps"] if "run" in step)
+    version_reference = "${{ inputs." + "version }}"
+    # 版本号只经 env 传入，不直接展开进 shell，避免输入被当作命令。
+    for step in (build, publish):
+        assert step["env"]["XW_VERSION"] == version_reference
+    text = WORKFLOW.read_text(encoding="utf-8")
+    assert text.count(version_reference) == 2
+    # 构建前先校验格式，不合法就不构建。
+    check = "^V[0-9]+(\\.[0-9]+){1,2}$"
+    assert check in build["run"]
+    assert build["run"].index(check) < build["run"].index("docker buildx build")
+    # 标题：有版本用版本，否则沿用代码 SHA 前 12 位；同一版本号不能挂到另一个提交上。
+    assert 'title="Xiaowei linux/amd64 $XW_VERSION"' in publish["run"]
+    assert 'title="Xiaowei linux/amd64 ${GITHUB_SHA:0:12}"' in publish["run"]
+    assert "已用于另一个提交" in publish["run"]
+    assert publish["run"].index("已用于另一个提交") < publish["run"].index("gh release create")
+    assert "Version: " in publish["run"] and "Source commit: $GITHUB_SHA" in publish["run"]
+    # 部署按 xiaowei:<SHA> 与 sha-<SHA> 定位，版本号不改变它们。
+    assert 'image="xiaowei:$GITHUB_SHA"' in build["run"]
+    assert 'tag="sha-$GITHUB_SHA"' in publish["run"]

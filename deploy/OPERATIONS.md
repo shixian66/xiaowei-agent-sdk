@@ -11,7 +11,9 @@ Web 端口默认对服务器所有网卡开放，内网电脑用 `http://服务�
 
 ## 获取 amd64 发行包
 
-发行包是一个文件 `xiaowei-<完整代码 SHA>-linux-amd64.tar.gz`，向发布方索取。它已经带着应用镜像
+发行包是一个文件 `xiaowei-<完整代码 SHA>-linux-amd64.tar.gz`，向发布方索取。发布时可填版本号（如 `V0.1`），
+只用于发行标题（“Xiaowei linux/amd64 V0.1”）和说明中的 `Version:`；文件名、镜像 `xiaowei:<代码 SHA>`
+与下面的命令仍按代码 SHA，从发行说明的 `Source commit:` 取得。它已经带着应用镜像
 （`xiaowei-image.tar`），服务器不需要登录任何镜像仓库，也不需要 Git 或 Python。PostgreSQL 镜像
 按 `release.json` 里的固定 digest 从 Docker Hub 拉取。服务器访问不了 Docker Hub 时，在能访问的
 电脑上准备。这个 digest 同时对应多个平台，ARM 的 Mac 不带 `--platform` 会拿到 arm64 镜像，所以
