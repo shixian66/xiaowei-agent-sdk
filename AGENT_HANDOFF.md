@@ -37,6 +37,27 @@
 
 ## 3. 当前计划与下一项工作
 
+**生产轮次失败修复（turn-resilience，本地完成，未推送/合并/部署；待独立审查）：** 分支 `claude/turn-resilience`（工作树 `/Users/kloenguyen/xw-worktrees/turn-resilience`），基线 `abb9bc2`（origin/main，本机 fetch 因代理不可用未刷新）。依据公司部署日志 11 次 `stage=failed`：`tool_failed` 7（`prometheus-prod/series` mcp_error 3、`alertmanager-prod/get_alerts` other 4）、`answer_rejected(mixed_kinds)` 2、`model_failed` 2（均为 Vertex HTTP 429）。根因：只读监控失败、上游限流、回答结构不合格都直接丢弃整轮，不给 Agent 修正机会。用户 2026-10-16 批准以下契约变更，ARCHITECTURE §4/§5/§6/§8 已同步：
+
+| 提交 | 改动 | 对应失败 |
+| --- | --- | --- |
+| `d596f3e` | cherry-pick `300ee52`：Alertmanager `status.mutedBy` 可选，缺失记 null | get_alerts ×4 |
+| `f7d21d8` | SDK 公开 `ModelRetrySettings` + 自定义策略：仅 429/503 重发同一无状态模型请求，最多 3 次，退避 2–16s，Retry-After ≤20s；Vertex 适配器不再拒绝 Runner 重试 | 429 ×2 |
+| `bc9ca17` | 只读监控工具其他执行后失败记 `unclassified` 交回模型（本源本轮停止、不重发、无 Evidence、日志只记工具 ID 与异常类型）；非监控与写/提出动作仍中止 | series/get_alerts 兜底 |
+| `a2189ea` | series/label_names/label_values 的锁版 `bad_data` 记 `invalid_selector`，同源每轮修正 ≤2 次、同选择器不重发、不停其他读取 | series ×3 |
+| `f27a6e3` | 输出 schema 继承公开 `AgentOutputSchema` 前移三选一互斥；SDK 公开 `invalid_final_output` 处理器无工具改写一次，仍不合格记 `invalid_output`；日志 `stage=answer_repair` | mixed_kinds ×2 |
+
+| 验证（`f27a6e3`） | 结果 |
+| --- | --- |
+| SDK/P1B 全量 | 隔离 PostgreSQL 55432，`XW_TEST_PROMETHEUS_MCP_BIN`（官方 v0.18.0，sha256 `6272e0d8…3a82` 已核）与 `XW_TEST_GRAFANA_MCP_BIN`（官方 v2.0.2，sha256 `480c23f5…3baf` 已核）：**1 failed, 3769 passed, 52 skipped, 72 deselected**（16m42s，`/private/tmp/xw-turn-resilience-full4.log`）。唯一失败 `test_grafana_group_resend_is_local_and_revocation_refuses` 在基线 `f7d21d8`（未含监控改动）加同一测试防护下同样失败（飞书替身发送未完成，等待超时），为既有缺口，未在本分支处理 |
+| 测试防护 | 新增 conftest 收尾断言：模型脚本替身被多调用即失败。据此发现 6 个既有用例（r1a 断线/超时、r1b 重连 4 个）在改动前就靠“脚本用尽”误通过，已按真实行为（unavailable/timeout 交回模型）修正 |
+| 官方协议 | 官方 Prometheus 二进制端到端：`{instance=~".*"}` 被 400 拒绝后模型改用 `node_uname_info` 取得证据；官方 Grafana 未分类 404/超限转为未核实 |
+| 静态 | `ruff check src tests/sdk_core`、改动文件 `ruff format --check`、`mypy src`（135 文件）通过 |
+| 未验证 | 真实 Vertex 上 429 退避效果与改写质量、公司 Prometheus/Alertmanager/Grafana、真实飞书、部署；`unclassified` 对远端实际错误形态的覆盖需看线上 `monitoring read unclassified` 日志的异常类型分布 |
+| 残留风险 | `unclassified` 停止本源本轮，接收超限等可修正情况暂不提示收窄；改写对 Evidence 层拒收（缺引用等）不生效 |
+
+**下一项：** 独立审查本分支精确 SHA；通过后推送/PR 由用户决定；部署后用同一日志命令复核 `stage=failed` 分布，并关注 `stage=answer_repair` 与 `monitoring read unclassified` 的频率。
+
 **数据库环境选择第一步（本地完成，已做一轮独立审查并修复；真实模型评测待授权）：** 根因是原 R7 B1(a) 允许未选环境时跨环境发现并按唯一匹配继续。现在未选环境先问、选定后沿用、明确切换才换、提及不等于切换、无需取证的 SQL 任务不问；规则只在 Skill 中出现一次。**已接受风险：** 执行层不核对“是否用户选定的环境”，模型不遵守时仍会执行；第二步触发条件见 [ARCHITECTURE R7](ARCHITECTURE.md#r7-targets)。实现与计划的差异见计划 §10。
 
 | 验证（本地工作树，基线 `643858f`） | 结果 |
