@@ -975,6 +975,7 @@ git commit -m "docs: 飞书交付以平台限制为门槛并记录复盘修复�
 - **竖线转义：** `_md_cell`/`_md_label` 先 JSON 编码（字面反斜杠已加倍），再把 `|` 写成 `\|`；新增 `a\|b` 单元格用例，确认渲染后可逆。
 - **变异检查：** 只做关键几项，临时改动用文件副本还原，不再用会丢弃未提交工作的 `git checkout -- src`。
 - **因门槛变化调整的既有用例**（意图保留，逐条见提交说明）：`test_short_prefix_survives_larger_zero_row_placeholders`、`test_automatic_file_keeps_brief_...`、`test_long_clarification_never_changes_into_an_automatic_attachment`（澄清最长 2000 字，平台门槛下总能完整内联）、`test_split_report_preserves_every_typed_row_...[md]`、`test_automatic_split_keeps_historical_brief_...`。
+- **MD 单元格宽度口径：** 120 字符按单元格值的 JSON 编码长度计（字符串含引号与转义），只决定放表内还是表下明细，不截断数据。
 - **未执行：** 计划 Task 5 的 `docker compose ... down -v`：测试 PostgreSQL 不是本切片启动的，保留运行。
 
 ## 6. 独立审查记录
@@ -984,5 +985,6 @@ git commit -m "docs: 飞书交付以平台限制为门槛并记录复盘修复�
 | `494de3c` | P2：`_raw_redundant` 把卡片未展示的内容（零行列名、表格事实空值 metadata、非常规 columns、行内未声明列、null SQL、转义后撞名）判冗余；P2：预览只放部分行时仍写“逐项一致”；P3：MD 明细含 `\r`/控制符不可逆、拆分文件行号每片从 1 重来、失败提醒同步构造预览、v0 截断卡片用“预览”易误解 | `52549e5` 全部修复，9 项新回归在旧源码失败、修复后通过 |
 | `52549e5` | 上轮全部关闭；新 P2：全部行放下但实际 SQL 未展示时仍写“逐项一致”；P3：ddl 为 None 与 "None" 显示相同、名称含换行或“: ”的文字排版歧义 | `aa5ced2` 修复，4 项新回归在旧源码失败、修复后通过 |
 | `aa5ced2` | 全部关闭，未发现新问题；结论只覆盖离线路径与所列反例 | — |
+| `5fb2b30`（Codex 异构审查） | P1：失败提醒在线程渲染后未再复核发送资格，readiness 关闭或过期仍外发；P2：实际 SQL/DDL 直接文字展示，含 U+2028 等会被显示转义改写的字符时被误判可省略原文；P2：`_md_label` 的竖线转义被带到表外字段标题与明细标题，名称不可还原 | `489ece6` 修复，5 项新回归在 `5fb2b30` 源码上失败、修复后通过 |
 
 审查未覆盖：飞书在 30,000 字节与 200 组件之外的限制、MD 在飞书文件预览中的显示、`hint()` 改线程后的耗时实测。

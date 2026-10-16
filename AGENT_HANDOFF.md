@@ -39,11 +39,11 @@
 
 **飞书平台门槛修复（本地完成，待独立审查结论与用户决定推送）：** 复盘根因 T/A/B/D 已修，C 为部分修复。行为：结果卡片 ≤30,000 字节且 ≤200 组件时直接在对话展示、无附件；超限时附件给完整结果，正文先给回答，再标“预览 N／本次返回 M 行”，放不下就如实说明；可由可见值无损替代的原文 JSON 不重复展示并注明原因；显式 MD 对任何有列结果成表。旧 v0 请求、审批材料卡、纯文本回执沿原字符上限（v0 截断卡片写“展示 N／本次返回 M 行”）。
 
-| 验证（源码 `aa5ced2`，相对基线 `eda4a0b`） | 结果 |
+| 验证（源码 `489ece6`，相对基线 `eda4a0b`） | 结果 |
 | --- | --- |
-| 全量离线 | 隔离测试 PostgreSQL（127.0.0.1:55432）下 `PYTHONDONTWRITEBYTECODE=1 .venv/bin/python -m pytest -q tests/sdk_core tests/p1b -p no:cacheprovider --tb=short`：**3537 passed, 234 skipped, 72 deselected**（17m06s，`/private/tmp/xw-inline-sdk-core.log`）。首轮在 `52549e5` 前的 9 项失败均为依赖旧字符上限强制附件的既有用例，按契约更新（`494de3c` 提交说明逐条列出），未删安全断言 |
+| 全量离线 | 隔离测试 PostgreSQL（127.0.0.1:55432）下 `PYTHONDONTWRITEBYTECODE=1 .venv/bin/python -m pytest -q tests/sdk_core tests/p1b -p no:cacheprovider --tb=short`：**3542 passed, 234 skipped, 72 deselected**（18m01s，`/private/tmp/xw-inline-sdk-core-5.log`，对应 `489ece6`）。首次全量的 9 项失败均为依赖旧字符上限强制附件的既有用例，按契约更新（`494de3c` 提交说明逐条列出），未删安全断言 |
 | 静态与文档 | 全仓 `ruff check --no-cache .`、改动文件 `ruff format --check`、`mypy src --no-incremental`（135 文件）、文档事实/命令检查 8 passed、`git diff --check` 通过 |
-| 独立审查 | 三轮（`494de3c` → `52549e5` → `aa5ced2`），发现与处理见[计划 §6](docs/superpowers/plans/2026-10-16-inline-delivery-threshold.md#6-独立审查记录)；最终版本未发现新问题，13 项新增回归均在修复前的源码上失败 |
+| 独立审查 | 同模型家族子代理三轮（`494de3c` → `52549e5` → `aa5ced2`）后，Codex 异构审查 `5fb2b30` 提出 1 项 P1、2 项 P2，`489ece6` 修复；发现与处理见[计划 §6](docs/superpowers/plans/2026-10-16-inline-delivery-threshold.md#6-独立审查记录)，18 项新增回归均在对应修复前的源码上失败。`489ece6` 待复审 |
 | 未验证 | 真实模型、真实飞书客户端（接近 30,000 字节卡片的手机/桌面显示、table 行数等 30,000 字节与 200 组件之外的平台限制）、MD 在飞书文件预览中的显示、`hint()` 改线程后的耗时实测 |**未覆盖：** 单个大字段（如 `dashboards` 字符串）超限时预览仍无条目，需 MCP 行视图；busy/evidence_failed 回执细分；R3/R4/R9/R15 需生产日志 `failure_code` 与 stage 日志定根因；真实模型、飞书手机/桌面显示接近 30,000 字节卡片及 MD 文件预览均未验证。
 
 **此前下一步（仍有效）：** 本轮交付修复以 D1a–D3 为准，下一步是合并后在获准环境开展部署测试和真实环境验收，包括[计划 §2](docs/superpowers/plans/2026-10-14-result-delivery-documents.md#2-agent-任务信息与工作方法)的真实模型任务集、飞书手机/桌面客户端的显示与复制、手动补发和 uuid 行为。D4 剩余事项搁置，不再等待来源与保真取舍；核验记录仅作以后重启依据。本次只做文档和 CI 收尾，不执行部署或调用公司服务。
