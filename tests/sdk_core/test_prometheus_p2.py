@@ -14,7 +14,7 @@ from mcp.server.mcpserver import MCPServer
 from mcp.types import CallToolResult, TextContent
 from tests.sdk_core.browser import launch
 from tests.sdk_core.mcp_fixture import LOOPBACK, ASGIApp, Recorder, recording, serve
-from tests.sdk_core.test_app import ModelCall, answer, tool_call
+from tests.sdk_core.test_app import ModelCall, advise_unverified, answer, last_output, tool_call
 from tests.sdk_core.test_feishu_render import message_text
 from tests.sdk_core.test_group_gateway import GroupChannel, raw_group_event, runtime_group
 from tests.sdk_core.test_group_identity import CHAT, A
@@ -381,12 +381,6 @@ async def test_browser_range_success_and_resource_refusal(env: Env, chrome_binar
         assert source.recorder.tool_calls == [("range_query", {**RANGE, "step": "30000ms"})]
 
 
-def last_output(call: ModelCall) -> dict[str, Any]:
-    return json.loads(
-        [i["output"] for i in call.input if i.get("type") == "function_call_output"][-1]
-    )
-
-
 @pytest.mark.parametrize("name", ["query", "range_query"])
 async def test_bad_promql_can_be_corrected_then_only_success_produces_evidence(
     env: Env, name: str
@@ -424,17 +418,23 @@ async def test_bad_promql_can_be_corrected_then_only_success_produces_evidence(
         "bad_data: parse error",
     ],
 )
-async def test_uncertain_expression_or_resource_errors_abort(env: Env, error: str) -> None:
+async def test_uncertain_expression_or_resource_errors_stop_source_unverified(
+    env: Env, error: str
+) -> None:
+    # 不能确定是语法错误：不开放修正，本源本轮停止；只读无副作用，故交回模型而非中止整轮。
     with serve(lambda r: p2_server(r, errors={"range_query": error})) as source:
         async with env.running(env.config(**p2_config(source.url))) as served:
             await served.page()
             message = env.scripts.add(
-                "未知表达式失败", tool_call(f"{SOURCE}__range_query", **RANGE)
+                "未知表达式失败",
+                tool_call(f"{SOURCE}__range_query", **RANGE),
+                advise_unverified(SOURCE),
             )
             body = (await served.turn(message, "query")).json()
-            assert body["state"] == "failed"
+            assert body["state"] == "completed"
+            assert SOURCE in body["delivery"]["monitoring_notice"]
         assert len(source.recorder.tool_calls) == 1
-        assert len(env.scripts.calls[message]) == 1
+        assert len(env.scripts.calls[message]) == 2
         assert await env.scalar("SELECT count(*) FROM xiaowei_evidence") == 0
 
 
@@ -881,7 +881,9 @@ async def test_one_new_tool_schema_drift_does_not_hide_verified_query(env: Env) 
 
 
 @pytest.mark.parametrize("tail", ["\n\nWarning: The result was truncated", "\nextra"])
-async def test_unrecognized_metadata_suffix_aborts_without_evidence(env: Env, tail: str) -> None:
+async def test_unrecognized_metadata_suffix_is_unverified_without_evidence(
+    env: Env, tail: str
+) -> None:
     def malformed(recorder: Recorder) -> ASGIApp:
         server = MCPServer("p2-malformed-metadata")
 
@@ -896,9 +898,11 @@ async def test_unrecognized_metadata_suffix_aborts_without_evidence(env: Env, ta
         async with env.running(env.config(**p2_config(source.url))) as served:
             await served.page()
             message = env.scripts.add(
-                "拒绝不完整截断标记", tool_call(f"{SOURCE}__metric_metadata", metric="up")
+                "拒绝不完整截断标记",
+                tool_call(f"{SOURCE}__metric_metadata", metric="up"),
+                advise_unverified(SOURCE),
             )
-            assert (await served.turn(message, "query")).json()["state"] == "failed"
+            assert (await served.turn(message, "query")).json()["state"] == "completed"
         assert len(source.recorder.tool_calls) == 1
         assert await env.scalar("SELECT count(*) FROM xiaowei_evidence") == 0
 
@@ -1072,7 +1076,7 @@ async def test_empty_metadata_has_zero_io_and_can_be_corrected_to_one_metric(
             assert await env.scalar("SELECT count(*) FROM xiaowei_evidence") == 1
 
 
-async def test_official_unbounded_metric_names_still_abort_on_receive_limit(
+async def test_official_unbounded_metric_names_over_receive_limit_are_unverified(
     env: Env, official_binary: Path
 ) -> None:
     with prometheus_backend(samples=high_cardinality_samples()) as (backend, state):
@@ -1082,16 +1086,17 @@ async def test_official_unbounded_metric_names_still_abort_on_receive_limit(
                 message = env.scripts.add(
                     "不截断的全源指标发现",
                     tool_call(f"{SOURCE}__label_values", label="__name__", matches=[], **WINDOW),
-                    cite(),
+                    advise_unverified(SOURCE),
                 )
                 body = (await served.turn(message, "query")).json()
                 assert len(state.requests) == 1
-                assert body["state"] == "failed"
-                assert len(env.scripts.calls[message]) == 1
+                assert body["state"] == "completed"  # 超限结果不交模型，不冒充完整
+                assert SOURCE in body["delivery"]["monitoring_notice"]
+                assert len(env.scripts.calls[message]) == 2
             assert await env.scalar("SELECT count(*) FROM xiaowei_evidence") == 0
 
 
-async def test_official_rules_ignore_truncation_and_abort_above_receive_limit(
+async def test_official_rules_ignore_truncation_and_are_unverified_above_receive_limit(
     env: Env, official_binary: Path
 ) -> None:
     group = RULES["groups"][0]
@@ -1140,18 +1145,14 @@ async def test_official_rules_ignore_truncation_and_abort_above_receive_limit(
                 message = env.scripts.add(
                     "当前已加载哪些告警规则",
                     tool_call(f"{SOURCE}__list_rules"),
-                    cite(),
+                    advise_unverified(SOURCE),
                 )
                 body = (await served.turn(message, "query")).json()
                 assert state.requests == [("/api/v1/rules", {}, None)] * 2
-                assert body["state"] == "failed"
-                assert "本轮未交付；不会自动重试" in body["delivery"]["content"]
-                assert len(env.scripts.calls[message]) == 1
-                assert await env.scalar("SELECT failure_code FROM xiaowei_request") == (
-                    "evidence_failed"
-                )
+                assert body["state"] == "completed"  # 超限规则不交模型，不冒充完整
+                assert SOURCE in body["delivery"]["monitoring_notice"]
+                assert len(env.scripts.calls[message]) == 2
             assert await env.scalar("SELECT count(*) FROM xiaowei_evidence") == 0
-            assert await env.scalar("SELECT count(*) FROM agent_messages") == 0
 
 
 def test_discovery_descriptions_offer_narrowing_without_fixed_order() -> None:

@@ -140,6 +140,7 @@ _MONITORING_REASONS = {
     "response_limit": "告警响应超出接收上限",
     "invalid_matcher": "告警匹配条件被上游拒绝",
     "silence_missing": "指定静默 ID 未找到",
+    "unclassified": "读取失败，原因未分类",
 }
 
 _INSERT = text(

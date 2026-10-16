@@ -13,7 +13,7 @@ from pathlib import Path
 from urllib.parse import parse_qs, urlsplit
 
 import pytest
-from agents import Agent, Runner, UserError
+from agents import Agent, Runner
 from agents.testing import ModelCall, ModelStep, ScriptedModel, assistant_message, function_call
 from mcp.types import CallToolResult, TextContent
 from mcp.types import Tool as MCPTool
@@ -26,7 +26,6 @@ from xiaowei.governance import (
     GovernedTools,
     Projection,
     ToolCatalog,
-    ToolExecutionError,
     ToolPolicy,
 )
 from xiaowei.mcp import MCPIntegration, _Binding, _payload, _verified
@@ -304,31 +303,61 @@ async def test_official_query_through_runner_and_governance(postgres_url: URL) -
                                 tools=frozenset({"prometheus/query"}),
                                 targets=frozenset({"prometheus-test"}),
                             )
+                            seen: list[dict[str, object]] = []
+
+                            def advise(
+                                call: ModelCall, seen: list[dict[str, object]] = seen
+                            ) -> list[object]:
+                                assert isinstance(call.input, list)
+                                seen.append(json.loads(call.input[-1]["output"]))
+                                return [
+                                    assistant_message(
+                                        json.dumps(
+                                            {
+                                                "evidence_ids": [],
+                                                "inferences": [],
+                                                "clarification": None,
+                                                "advice": "未经数据验证，请检查表达式",
+                                            }
+                                        )
+                                    )
+                                ]
+
                             bad_model = ScriptedModel(
                                 [
                                     [
                                         function_call(
                                             "prometheus__query", {"query": "bad("}, call_id="q-bad"
                                         )
-                                    ]
+                                    ],
+                                    ModelStep.respond(advise),
                                 ]
                             )
                             before = len(requests)
-                            with pytest.raises(UserError) as error:
-                                await Runner.run(
-                                    Agent(
-                                        name="prometheus",
-                                        model=bad_model,
-                                        tools=tools,
-                                        output_type=AgentAnswer,
-                                    ),
-                                    "查错误表达式",
-                                    context=failed,
-                                )
+                            # 无位置的 400 不能认作语法错误：本源未核实交回模型，不中止、不重发。
+                            await Runner.run(
+                                Agent(
+                                    name="prometheus",
+                                    model=bad_model,
+                                    tools=tools,
+                                    output_type=AgentAnswer,
+                                ),
+                                "查错误表达式",
+                                context=failed,
+                            )
                             assert len(requests) == before + 1
                             assert requests[-1] == ("bad(", None)
-                            assert isinstance(error.value.__cause__, ToolExecutionError)
-                            assert governed.turn_runs(failed.identity).produced == ()
+                            assert seen == [
+                                {
+                                    "status": "unverified",
+                                    "source": "prometheus-test",
+                                    "reason": "unclassified",
+                                    "retry_this_turn": False,
+                                }
+                            ]
+                            runs = governed.turn_runs(failed.identity)
+                            assert runs.produced == ()
+                            assert [f.reason for f in runs.monitoring_failures] == ["unclassified"]
     finally:
         backend.shutdown()
         backend.server_close()

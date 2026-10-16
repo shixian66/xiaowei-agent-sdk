@@ -9,7 +9,7 @@ import pytest
 from tests.sdk_core.browser import launch
 from tests.sdk_core.grafana_fixture import SELECTED, grafana_backend, official_grafana
 from tests.sdk_core.mcp_fixture import serve
-from tests.sdk_core.test_app import answer, tool_call
+from tests.sdk_core.test_app import advise_unverified, answer, tool_call
 from tests.sdk_core.test_feishu_render import message_text
 from tests.sdk_core.test_grafana_mcp_protocol import CALLS
 from tests.sdk_core.test_grafana_mcp_protocol import grafana_binary as grafana_binary
@@ -324,7 +324,7 @@ async def test_formal_grafana_pagination_is_partial_evidence(
             assert "结果已截断" in body["delivery"]["content"]
 
 
-async def test_unknown_grafana_error_and_wire_limit_abort_without_evidence(
+async def test_unknown_grafana_error_and_wire_limit_are_unverified_without_evidence(
     env: Env, grafana_binary: Path
 ) -> None:
     with grafana_backend() as (port, state), official_grafana(grafana_binary, port) as url:
@@ -333,9 +333,11 @@ async def test_unknown_grafana_error_and_wire_limit_abort_without_evidence(
             await served.page()
             state.requests.clear()  # 不计官方 Server 初始化时的设置读取
             message = env.scripts.add(
-                "未分类的读取错误", tool_call(f"{SOURCE}__get_dashboard_summary", uid="host")
+                "未分类的读取错误",
+                tool_call(f"{SOURCE}__get_dashboard_summary", uid="host"),
+                advise_unverified(SOURCE),
             )
-            assert (await served.turn(message, "query")).json()["state"] == "failed"
+            assert (await served.turn(message, "query")).json()["state"] == "completed"
             assert await env.scalar("SELECT count(*) FROM xiaowei_evidence") == 0
             assert await served.finish() == 0
         state.status = 200
@@ -344,11 +346,13 @@ async def test_unknown_grafana_error_and_wire_limit_abort_without_evidence(
             await served.page()
             state.requests.clear()  # 不计官方 Server 初始化时的设置读取
             message = env.scripts.add(
-                "超限定义", tool_call(f"{SOURCE}__get_dashboard_summary", uid="host")
+                "超限定义",
+                tool_call(f"{SOURCE}__get_dashboard_summary", uid="host"),
+                advise_unverified(SOURCE),
             )
             assert (await served.turn(message, "query", request_id="r2")).json()[
                 "state"
-            ] == "failed"
+            ] == "completed"
             assert await env.scalar("SELECT count(*) FROM xiaowei_evidence") == 0
 
 
@@ -809,7 +813,7 @@ async def test_native_dashboard_success_keeps_locked_result_contract(
 
 @pytest.mark.parametrize("name", ["get_dashboard_summary", "get_dashboard_panel_queries"])
 @pytest.mark.parametrize("branch", ["namespace", "v1beta1", "v2beta1"])
-async def test_native_dashboard_unclassified_404_aborts_without_evidence(
+async def test_native_dashboard_unclassified_404_is_unverified_without_evidence(
     env: Env, grafana_binary: Path, name: str, branch: str
 ) -> None:
     with grafana_backend() as (port, state), official_grafana(grafana_binary, port) as url:
@@ -826,10 +830,12 @@ async def test_native_dashboard_unclassified_404_aborts_without_evidence(
             await served.page()
             state.requests.clear()
             message = env.scripts.add(
-                "原生定义找不到", tool_call(f"{SOURCE}__{name}", **CALLS[name])
+                "原生定义找不到",
+                tool_call(f"{SOURCE}__{name}", **CALLS[name]),
+                advise_unverified(SOURCE),
             )
             body = (await served.turn(message, "query")).json()
-            assert body["state"] == "failed"
+            assert body["state"] == "completed"
+            assert SOURCE in body["delivery"]["monitoring_notice"]
             assert len(state.requests) == (3 if branch == "v2beta1" else 2)
             assert await env.scalar("SELECT count(*) FROM xiaowei_evidence") == 0
-            assert await env.scalar("SELECT count(*) FROM agent_messages") == 0

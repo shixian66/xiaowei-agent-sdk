@@ -10,6 +10,7 @@
 
 import os
 import socket
+import sys
 import threading
 import time
 from collections.abc import AsyncIterator, Iterator
@@ -64,6 +65,17 @@ def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item
 def _product_runtime() -> None:
     """每个用例都在产品运行配置下执行：tracing 与默认导出关闭。"""
     configure_runtime()
+
+
+@pytest.fixture(autouse=True)
+def _scripts_not_exhausted() -> Iterator[None]:
+    """模型脚本被多调用一次说明行为与用例预期不符；即使轮次照样失败，也让用例失败。"""
+    yield
+    module = sys.modules.get("tests.sdk_core.test_app")
+    if module is not None:
+        exhausted = list(module.SCRIPT_EXHAUSTION)
+        module.SCRIPT_EXHAUSTION.clear()
+        assert not exhausted, f"模型脚本已用尽（多出模型调用）：{exhausted}"
 
 
 @pytest.fixture(autouse=True)

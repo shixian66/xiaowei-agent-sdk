@@ -134,6 +134,28 @@ def tool_call(name: str, /, **arguments: object) -> Step:
     return lambda call: [function_call(name, arguments, call_id=f"call-{next(_call_ids)}")]
 
 
+def last_output(call: ModelCall) -> dict[str, Any]:
+    """本次模型请求中最近一次工具结果（模型实际看到的内容）。"""
+    return json.loads(
+        [i["output"] for i in call.input if i.get("type") == "function_call_output"][-1]
+    )
+
+
+def unverified(source: str, reason: str = "unclassified") -> dict[str, Any]:
+    """监控只读失败交给模型的固定结构：本源本轮停止，不重试。"""
+    return {"status": "unverified", "source": source, "reason": reason, "retry_this_turn": False}
+
+
+def advise_unverified(source: str, reason: str = "unclassified") -> Step:
+    """模型只看到固定失败类别，按“未经数据验证”给建议，不引用证据。"""
+
+    def finish(call: ModelCall) -> list[Any]:
+        assert last_output(call) == unverified(source, reason)
+        return answer([], analysis="", advice="未经数据验证，请缩小范围或检查源状态")
+
+    return finish
+
+
 def answer(evidence_ids: Sequence[str], analysis: str = "数据平稳", **extra: object) -> list[Any]:
     body = {
         "evidence_ids": list(evidence_ids),
@@ -182,6 +204,10 @@ def sleeping(seconds: float, step: Step, *, entered: asyncio.Event | None = None
     return respond
 
 
+SCRIPT_EXHAUSTION: list[str] = []
+"""脚本用尽的消息：conftest 在每个用例结束时断言为空，避免用例靠“脚本用尽”偶然失败而通过。"""
+
+
 @dataclass
 class Scripts:
     by_message: dict[str, list[Step]] = field(default_factory=dict)
@@ -206,6 +232,9 @@ class Scripts:
         )
         message = _user_text(call)
         self.calls.setdefault(message, []).append(call)
+        if not self.by_message.get(message):
+            SCRIPT_EXHAUSTION.append(message)
+            raise AssertionError(f"模型脚本已用尽：{message!r}")
         result = self.by_message[message].pop(0)(call)
         if inspect.isawaitable(result):
             result = await result

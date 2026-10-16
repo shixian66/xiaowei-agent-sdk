@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import enum
 import json
+import logging
 import math
 import types
 from collections.abc import Awaitable, Callable, Iterable, Mapping
@@ -36,7 +37,6 @@ from typing import (
 from pydantic import BaseModel
 
 from xiaowei.models import (
-    ALERTMANAGER_READ_POLICIES,
     AUDIENCES,
     MONITORING_READ_POLICIES,
     PROMETHEUS_QUERY_POLICIES,
@@ -54,6 +54,8 @@ from xiaowei.starrocks import StarRocksError, StarRocksErrorCode, trace_sql_io
 
 if TYPE_CHECKING:
     from xiaowei.evidence import EvidenceStore
+
+logger = logging.getLogger(__name__)
 
 Authorizer = Callable[[Identity, str, str], Awaitable[bool]]
 """应用提供的当前授权查询：``(identity, target_id, tool_id) -> 是否仍获准``。"""
@@ -676,13 +678,29 @@ class GovernedTools:
                         and not trace.started
                     ):
                         busy_before_sql = True
+                    elif contract.policy_id in MONITORING_READ_POLICIES:
+                        # 只读监控读取没有副作用：分类不明（远端错误形态未知、结果不合约、
+                        # 响应超限等）也按“本源未核实”交回模型，本源本轮停止，不中止整轮。
+                        # 日志只记异常类型，不记正文。
+                        logger.info(
+                            "monitoring read unclassified tool_id=%s error_type=%s",
+                            contract.tool_id,
+                            type(exc).__name__,
+                        )
+                        current = self._runs.get(key, TurnRuns())
+                        failure = MonitoringFailure(
+                            tool_id=contract.tool_id,
+                            target_id=contract.target_id,
+                            reason="unclassified",
+                        )
+                        self._runs[key] = replace(
+                            current, monitoring_failures=(*current.monitoring_failures, failure)
+                        )
+                        raise MonitoringReadError("unclassified") from None
                     else:
                         if isinstance(exc, StarRocksError):
                             code: StarRocksErrorCode | Literal["mcp_error", "other"] = exc.code
-                        elif (
-                            request.tool_id.partition("/")[0] != "local"
-                            and contract.policy_id not in ALERTMANAGER_READ_POLICIES
-                        ):
+                        elif request.tool_id.partition("/")[0] != "local":
                             code = "mcp_error"
                         else:
                             code = "other"
