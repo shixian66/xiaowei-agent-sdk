@@ -797,8 +797,7 @@ def _redirect(request: httpx2.Request) -> httpx2.Response:
     [
         pytest.param(_status(401), APIStatusError, id="401"),
         pytest.param(_status(403), APIStatusError, id="403"),
-        pytest.param(_status(429, {"retry-after": "0"}), APIStatusError, id="429"),
-        pytest.param(_status(503), APIStatusError, id="503"),
+        pytest.param(_status(500), APIStatusError, id="500"),
         pytest.param(_raise_timeout, APITimeoutError, id="timeout"),
         pytest.param(_invalid_json, ModelResponseRejectedError, id="invalid-json"),
         pytest.param(_redirect, APIStatusError, id="cross-endpoint-redirect"),
@@ -825,6 +824,39 @@ async def test_api_failure_has_no_retry_or_fallback(
     assert other.requests == []  # 不跟随跨端点重定向，也不切换其他端点
     assert executed == ["east"]  # 工具只执行一次
     assert GEMINI_KEY not in repr(excinfo.value)
+
+
+@pytest.mark.parametrize("status", [429, 503])
+async def test_rejected_load_is_retried_a_bounded_number_of_times(
+    status: int, no_ambient_openai_env: None
+) -> None:
+    # 服务端明确未处理（429/503）：SDK Runner 只重发失败的模型请求（首发 + 3 次），工具不重放。
+    endpoint = Endpoint([_tool_call(GEMINI)] + [_status(status) for _ in range(4)])
+    executed: list[str] = []
+
+    async with open_model(GEMINI, transport=endpoint.transport) as opened:
+        with pytest.raises(APIStatusError):
+            await Runner.run(_agent(opened.model, GEMINI, executed), "hi")
+
+    assert len(endpoint.requests) == 5
+    assert executed == ["east"]
+
+
+async def test_rejected_load_then_success_completes_without_replaying_tools(
+    no_ambient_openai_env: None,
+) -> None:
+    endpoint = Endpoint(
+        [_tool_call(GEMINI), _status(429, {"retry-after": "0"}), _text(GEMINI, FINAL)]
+    )
+    executed: list[str] = []
+
+    async with open_model(GEMINI, transport=endpoint.transport) as opened:
+        result = await Runner.run(_agent(opened.model, GEMINI, executed), "hi")
+
+    assert result.final_output is not None
+    assert len(endpoint.requests) == 3
+    assert endpoint.bodies()[1] == endpoint.bodies()[2]  # 重发的是同一个请求
+    assert executed == ["east"]
 
 
 async def test_upstream_error_body_reaches_the_raw_exception(no_ambient_openai_env: None) -> None:

@@ -27,11 +27,14 @@ from agents import (
     Handoff,
     Model,
     ModelResponse,
+    ModelRetryBackoffSettings,
     ModelRetrySettings,
     ModelSettings,
     ModelTracing,
     OpenAIChatCompletionsModel,
     OpenAIResponsesModel,
+    RetryDecision,
+    RetryPolicyContext,
     Tool,
     TResponseInputItem,
 )
@@ -65,6 +68,15 @@ _VERTEX_MODEL_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}")
 
 _JSON = "application/json"
 _CLIENT_CLOSE_TIMEOUT_SECONDS = 5.0
+# 模型请求层的有限重试（ARCHITECTURE §4）：只认服务端明确未处理请求的 429/503，由 SDK Runner
+# 只重发同一次模型请求，不重跑 Runner、不重放工具；其他状态、超时与连接错误仍是受控失败。
+# 等待受 Retry-After 上限与整轮期限共同约束。
+MODEL_RETRY_STATUSES = frozenset({429, 503})
+MODEL_RETRY_MAX = 3
+MODEL_RETRY_AFTER_CAP_SECONDS = 20.0
+MODEL_RETRY_BACKOFF = ModelRetryBackoffSettings(
+    initial_delay=2.0, max_delay=16.0, multiplier=2.0, jitter=True
+)
 
 # Chat Completions 中表示“正常完成”的终态；截断（length）、过滤（content_filter）、缺失或
 # 供应商私有值都不交给 SDK，因为 SDK 转换为 ModelResponse 后会丢失该终态。
@@ -230,6 +242,16 @@ def profile_fingerprint(profile: ModelProfile) -> str:
     return "sha256:" + hashlib.sha256(canonical.encode()).hexdigest()
 
 
+def _retry_rejected_load(context: RetryPolicyContext) -> bool | RetryDecision:
+    """429/503 才重试；Retry-After 有上限，缺失时用退避。"""
+    if context.normalized.status_code not in MODEL_RETRY_STATUSES:
+        return False
+    after = context.normalized.retry_after
+    return RetryDecision(
+        retry=True, delay=None if after is None else min(after, MODEL_RETRY_AFTER_CAP_SECONDS)
+    )
+
+
 def settings_for(profile: ModelProfile) -> ModelSettings:
     """把 Profile 映射为 SDK 设置；不透传任意供应商参数。"""
     return ModelSettings(
@@ -243,7 +265,9 @@ def settings_for(profile: ModelProfile) -> ModelSettings:
         store=False if profile.api_mode == "responses" else None,
         # OpenAI 协议族仍请求串行；Vertex 不映射此参数，但会接收合法的多调用响应。
         parallel_tool_calls=False,
-        retry=ModelRetrySettings(max_retries=0),
+        retry=ModelRetrySettings(
+            max_retries=MODEL_RETRY_MAX, backoff=MODEL_RETRY_BACKOFF, policy=_retry_rejected_load
+        ),
         timeout=profile.request_timeout_seconds,
         # SDK 会把缺失的 usage 规范化为 0；保留原始 usage 以区分“未上报”和“为 0”。
         preserve_raw_usage=True,

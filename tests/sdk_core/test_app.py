@@ -791,7 +791,9 @@ async def test_model_failure_logs_safe_category_and_http_status(
             raise httpx2.ConnectError(MODEL_SECRET)
         raise httpx2.ReadTimeout(MODEL_SECRET)
 
-    message = env.scripts.add("失败分类 " + SYNTHETIC_SQL, respond)
+    # 分类本身不引入重试；只有 429/503 由 SDK 有限重试（首发 + 3 次）。
+    expected = 4 if case in {"http_429", "http_503"} else 1
+    message = env.scripts.add("失败分类 " + SYNTHETIC_SQL, *[respond] * expected)
     with all_logs() as records, pytest.raises(TurnError) as failed:
         await env.app.run_turn(env.ctx(turn="failure-kind"), message)
     assert failed.value.reason == "model_failed"
@@ -799,7 +801,7 @@ async def test_model_failure_logs_safe_category_and_http_status(
     assert f"error_kind={kind} http_status={status}" in output
     assert MODEL_SECRET not in output and SYNTHETIC_SQL not in output
     assert all(record.exc_info is None for record in records if record.name == "xiaowei.app")
-    assert len(env.scripts.calls[message]) == 1  # 分类不引入请求重试。
+    assert len(env.scripts.calls[message]) == expected
 
 
 def test_unclassified_failure_does_not_log_exception_details() -> None:
@@ -843,7 +845,9 @@ async def test_vertex_failure_uses_the_same_safe_log_categories(
         with all_logs() as records, pytest.raises(TurnError) as failed:
             await vertex_env.app.run_turn(vertex_env.ctx(turn="vertex-failure"), SYNTHETIC_SQL)
     output = "\n".join(record.getMessage() for record in records)
-    assert failed.value.reason == "model_failed" and calls == 1
+    # 429/503 由 SDK 有限重试（首发 + 3 次）后才失败；连接错误与超时不重试。
+    assert failed.value.reason == "model_failed"
+    assert calls == (4 if case in {"429", "503"} else 1)
     assert f"error_kind={kind} http_status={status}" in output
     assert all(value not in output for value in (MODEL_SECRET, SYNTHETIC_SQL, FAKE_MODEL_KEY))
 

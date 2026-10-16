@@ -18,6 +18,7 @@ from typing import Any
 
 import pytest
 import uvicorn
+from agents import ModelRetryBackoffSettings
 from mcp.server.mcpserver import MCPServer as FixtureMCPServer
 from sqlalchemy.engine import URL
 from tests.sdk_core.postgres_harness import (
@@ -27,6 +28,7 @@ from tests.sdk_core.postgres_harness import (
     parse_admin_url,
 )
 
+from xiaowei import model_api
 from xiaowei.config import configure_runtime
 
 POSTGRES_URL_ENV = "SDK_TEST_POSTGRES_URL"
@@ -62,6 +64,16 @@ def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item
 def _product_runtime() -> None:
     """每个用例都在产品运行配置下执行：tracing 与默认导出关闭。"""
     configure_runtime()
+
+
+@pytest.fixture(autouse=True)
+def _instant_model_retry(monkeypatch: pytest.MonkeyPatch) -> None:
+    """429/503 的有限重试照常发生，只把退避等待置零，避免用例空等。"""
+    monkeypatch.setattr(
+        model_api,
+        "MODEL_RETRY_BACKOFF",
+        ModelRetryBackoffSettings(initial_delay=0, max_delay=0, multiplier=1, jitter=False),
+    )
 
 
 @pytest.fixture

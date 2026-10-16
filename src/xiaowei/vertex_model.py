@@ -1,8 +1,9 @@
 """Vertex Express Mode ``generateContent`` 的 SDK ``Model`` 适配器。
 
-只做 SDK 输入输出与 Vertex REST 的双向映射：不执行工具、不续轮、不重试，Agent Loop 仍是 SDK
-``Runner``。请求只来自本次调用的参数（不在实例上保存调用映射，并发运行互不影响）；响应接受单
-候选、完整 ``STOP`` 的文本或一组函数调用，首个调用须有 thought signature。
+只做 SDK 输入输出与 Vertex REST 的双向映射：不执行工具、不续轮、自身不重试，Agent Loop 仍是 SDK
+``Runner``；429/503 的有限重试由 Runner 按 ``ModelSettings.retry`` 重新调用本适配器。请求只来自
+本次调用的参数（不在实例上保存调用映射，并发运行互不影响）；响应接受单候选、完整 ``STOP`` 的
+文本或一组函数调用，首个调用须有 thought signature。
 
 传输层（期限、字节上限、无重定向、无压缩、API Key 请求头）由 ``model_api`` 的受控 transport 负责，
 这里得到的成功响应已是合法 JSON 且是单候选 ``STOP`` 终态。适配器再按严格 JSON 解析一次（拒绝
@@ -191,8 +192,6 @@ def _check_settings(settings: ModelSettings) -> None:
             _reject_request("Vertex 适配器不支持该模型设置")
     if settings.parallel_tool_calls or settings.store:
         _reject_request("Vertex 适配器不支持并行工具调用或服务端保存")
-    if settings.retry is not None and settings.retry.max_retries:
-        _reject_request("Vertex 适配器不自动重试")
 
 
 def _function_tools(tools: list[Tool]) -> list[FunctionTool]:
