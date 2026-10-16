@@ -16,9 +16,7 @@ class RecordingRunner:
         self.collision_at = collision_at
         self.calls: list[tuple[str, ...]] = []
 
-    def __call__(
-        self, argv: Any, *, timeout: float
-    ) -> subprocess.CompletedProcess[str]:
+    def __call__(self, argv: Any, *, timeout: float) -> subprocess.CompletedProcess[str]:
         assert timeout > 0
         call = tuple(argv)
         self.calls.append(call)
@@ -54,9 +52,7 @@ def test_collision_preflight_never_mutates_or_cleans_existing_project(
 
 def test_up_failure_still_cleans_only_the_generated_project(tmp_path: Path) -> None:
     class FailingRunner(RecordingRunner):
-        def __call__(
-            self, argv: Any, *, timeout: float
-        ) -> subprocess.CompletedProcess[str]:
+        def __call__(self, argv: Any, *, timeout: float) -> subprocess.CompletedProcess[str]:
             result = super().__call__(argv, timeout=timeout)
             if "up" in argv:
                 raise subprocess.CalledProcessError(1, argv)
@@ -131,9 +127,7 @@ def test_main_reports_only_the_fixed_smoke_error_code(
 
 def test_compose_command_failure_is_attributed_to_the_current_phase() -> None:
     class FailingRunner(RecordingRunner):
-        def __call__(
-            self, argv: Any, *, timeout: float
-        ) -> subprocess.CompletedProcess[str]:
+        def __call__(self, argv: Any, *, timeout: float) -> subprocess.CompletedProcess[str]:
             super().__call__(argv, timeout=timeout)
             raise subprocess.CalledProcessError(1, argv, stderr="private-driver-output")
 
@@ -173,13 +167,9 @@ def test_external_action_failure_is_attributed_without_exposing_output(
     action: Any, code: str
 ) -> None:
     class FailingRunner(RecordingRunner):
-        def __call__(
-            self, argv: Any, *, timeout: float
-        ) -> subprocess.CompletedProcess[str]:
+        def __call__(self, argv: Any, *, timeout: float) -> subprocess.CompletedProcess[str]:
             super().__call__(argv, timeout=timeout)
-            raise subprocess.CalledProcessError(
-                1, argv, stderr="private-external-output"
-            )
+            raise subprocess.CalledProcessError(1, argv, stderr="private-external-output")
 
     session = ComposeSession(
         docker="/usr/bin/docker",
@@ -259,9 +249,7 @@ def test_psql_rejects_an_unscoped_observation_before_running_docker() -> None:
         ("private unclassified output", "SMOKE_MIGRATION_FAILED"),
     ],
 )
-def test_migration_logs_are_reduced_to_a_fixed_smoke_code(
-    logs: str, expected: str
-) -> None:
+def test_migration_logs_are_reduced_to_a_fixed_smoke_code(logs: str, expected: str) -> None:
     assert compose_smoke._migration_failure_code(logs) == expected
 
 
@@ -275,9 +263,7 @@ def test_migration_logs_are_reduced_to_a_fixed_smoke_code(
         ("hostile-status", "SMOKE_TASK_STATUS_INVALID"),
     ],
 )
-def test_non_success_task_status_is_reduced_to_a_fixed_code(
-    status: str, code: str
-) -> None:
+def test_non_success_task_status_is_reduced_to_a_fixed_code(status: str, code: str) -> None:
     with pytest.raises(SmokeError, match=rf"^{code}$"):
         compose_smoke._require_succeeded({"status": status})
 
@@ -297,9 +283,7 @@ def test_exited_migration_is_looked_up_with_all_containers() -> None:
 
 def test_worker_scale_requires_two_distinct_running_containers() -> None:
     class ScaleRunner(RecordingRunner):
-        def __call__(
-            self, argv: Any, *, timeout: float
-        ) -> subprocess.CompletedProcess[str]:
+        def __call__(self, argv: Any, *, timeout: float) -> subprocess.CompletedProcess[str]:
             result = super().__call__(argv, timeout=timeout)
             if tuple(argv)[-3:] == ("ps", "--quiet", "worker"):
                 return subprocess.CompletedProcess(
@@ -320,9 +304,7 @@ def test_worker_scale_requires_two_distinct_running_containers() -> None:
 @pytest.mark.parametrize("stdout", ["worker-a\n", "worker-a\nworker-a\n"])
 def test_worker_scale_rejects_missing_or_duplicate_containers(stdout: str) -> None:
     class ScaleRunner(RecordingRunner):
-        def __call__(
-            self, argv: Any, *, timeout: float
-        ) -> subprocess.CompletedProcess[str]:
+        def __call__(self, argv: Any, *, timeout: float) -> subprocess.CompletedProcess[str]:
             result = super().__call__(argv, timeout=timeout)
             if tuple(argv)[-3:] == ("ps", "--quiet", "worker"):
                 return subprocess.CompletedProcess(argv, 0, stdout=stdout, stderr="")

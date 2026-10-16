@@ -51,9 +51,7 @@ def _result(rows: tuple[dict[str, object], ...]) -> ToolResult:
     )
     gateway = DeterministicToolGateway(adapters={"starrocks": adapter})
     call = slow_query_call()
-    return asyncio.run(
-        gateway.invoke(call, context=CONTEXT, admission=make_certificate(call))
-    )
+    return asyncio.run(gateway.invoke(call, context=CONTEXT, admission=make_certificate(call)))
 
 
 def _build(rows: tuple[dict[str, object], ...] = (_ROW,)) -> object:
@@ -71,12 +69,8 @@ def _build(rows: tuple[dict[str, object], ...] = (_ROW,)) -> object:
 
 def test_evidence_id_is_deterministic_and_addressable() -> None:
     """证据 id 同时是 ledger 的键与 TaskOutcome.evidence_refs 的元素。"""
-    assert evidence_id(task_id=_TASK, step_id="s1") == evidence_id(
-        task_id=_TASK, step_id="s1"
-    )
-    assert evidence_id(task_id=_TASK, step_id="s1") != evidence_id(
-        task_id=_TASK, step_id="s2"
-    )
+    assert evidence_id(task_id=_TASK, step_id="s1") == evidence_id(task_id=_TASK, step_id="s1")
+    assert evidence_id(task_id=_TASK, step_id="s1") != evidence_id(task_id=_TASK, step_id="s2")
     assert _build().evidence_id == evidence_id(task_id=_TASK, step_id="s1")
 
 

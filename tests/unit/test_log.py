@@ -56,7 +56,8 @@ def test_configure_logging_is_idempotent_and_leaves_foreign_handlers() -> None:
 
 def test_log_level_is_applied() -> None:
     buf = io.StringIO()
-    configure_logging(load_settings({"XIAOWEI_ENVIRONMENT_ID": "dev",
-                                     "XIAOWEI_LOG_LEVEL": "WARNING"}), stream=buf)
+    configure_logging(
+        load_settings({"XIAOWEI_ENVIRONMENT_ID": "dev", "XIAOWEI_LOG_LEVEL": "WARNING"}), stream=buf
+    )
     logging.getLogger(LOGGER_NAME).info("suppressed")
     assert buf.getvalue() == ""

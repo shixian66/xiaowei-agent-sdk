@@ -57,9 +57,7 @@ _HOSTILE_IDENTIFIERS = [
 
 @pytest.mark.parametrize("hostile", _HOSTILE_IDENTIFIERS)
 @pytest.mark.parametrize("slot", ["database", "user_name", "query_id"])
-def test_identifier_slots_reject_everything_but_plain_identifiers(
-    slot: str, hostile: str
-) -> None:
+def test_identifier_slots_reject_everything_but_plain_identifiers(slot: str, hostile: str) -> None:
     with pytest.raises(ValidationError):
         _params(**{slot: hostile})
 
@@ -123,9 +121,7 @@ def test_from_typed_arguments_rejects_a_hostile_identifier() -> None:
 def test_from_typed_arguments_rejects_a_widened_window() -> None:
     """存储里的窗口被拉宽后读回，必须与首次构造一样被拒。"""
     args = dict(_params().to_typed_arguments())
-    args["window_end"] = (
-        _START + dt.timedelta(minutes=MAX_WINDOW_MINUTES + 1)
-    ).isoformat()
+    args["window_end"] = (_START + dt.timedelta(minutes=MAX_WINDOW_MINUTES + 1)).isoformat()
     with pytest.raises(ValidationError):
         SlowQueryParams.from_typed_arguments(args)
 

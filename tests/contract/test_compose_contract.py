@@ -23,12 +23,8 @@ def test_base_compose_has_the_complete_single_image_topology() -> None:
     assert set(services) == _APP_SERVICES | {"postgres"}
     images = {services[name]["image"] for name in _APP_SERVICES}
     assert images == {"xiaowei-agent:m5-local"}
-    assert {services[name]["build"]["dockerfile"] for name in _APP_SERVICES} == {
-        "Dockerfile"
-    }
-    assert services["migrate"]["depends_on"] == {
-        "postgres": {"condition": "service_healthy"}
-    }
+    assert {services[name]["build"]["dockerfile"] for name in _APP_SERVICES} == {"Dockerfile"}
+    assert services["migrate"]["depends_on"] == {"postgres": {"condition": "service_healthy"}}
     for name in ("api", "worker"):
         assert services[name]["depends_on"] == {
             "migrate": {"condition": "service_completed_successfully"}
@@ -38,15 +34,15 @@ def test_base_compose_has_the_complete_single_image_topology() -> None:
 def test_local_environment_exists_in_the_registered_target_directory() -> None:
     services = _yaml("docker-compose.yml")["services"]
     environments = {
-        services[name]["environment"]["XIAOWEI_ENVIRONMENT_ID"]
-        for name in _APP_SERVICES
+        services[name]["environment"]["XIAOWEI_ENVIRONMENT_ID"] for name in _APP_SERVICES
     }
     assert len(environments) == 1
     environment_id = environments.pop()
     assert environment_id in KNOWN_ENVIRONMENT_IDS
-    assert f"XIAOWEI_ENVIRONMENT_ID={environment_id}" in (
-        _ROOT / ".env.example"
-    ).read_text(encoding="utf-8").splitlines()
+    assert (
+        f"XIAOWEI_ENVIRONMENT_ID={environment_id}"
+        in (_ROOT / ".env.example").read_text(encoding="utf-8").splitlines()
+    )
 
 
 def test_compose_exposes_only_api_on_host_loopback() -> None:
@@ -83,17 +79,13 @@ def test_compose_resources_remain_project_scoped_named_resources() -> None:
 
 def test_secrets_are_file_references_and_never_environment_values() -> None:
     compose = _yaml("docker-compose.yml")
-    assert compose["secrets"] == {
-        "postgres_password": {"file": "./.secrets/postgres_password"}
-    }
+    assert compose["secrets"] == {"postgres_password": {"file": "./.secrets/postgres_password"}}
     for service in compose["services"].values():
         environment = service.get("environment", {})
         password_keys = {key for key in environment if "PASSWORD" in key}
         assert all(key.endswith("_FILE") for key in password_keys)
         if "POSTGRES_PASSWORD_FILE" in environment:
-            assert environment["POSTGRES_PASSWORD_FILE"] == (
-                "/run/secrets/postgres_" + "password"
-            )
+            assert environment["POSTGRES_PASSWORD_FILE"] == ("/run/secrets/postgres_" + "password")
             assert service["secrets"] == ["postgres_password"]
     assert not (_ROOT / ".secrets/postgres_password").exists()
 
@@ -137,11 +129,7 @@ def test_overrides_have_only_the_approved_worker_environment_paths() -> None:
         "XIAOWEI_DB_COMMAND_TIMEOUT_SECONDS",
     }
     assert barrier == {
-        "services": {
-            "worker": {
-                "environment": {"XIAOWEI_SMOKE_STEP_BARRIER": "true"}
-            }
-        }
+        "services": {"worker": {"environment": {"XIAOWEI_SMOKE_STEP_BARRIER": "true"}}}
     }
 
 

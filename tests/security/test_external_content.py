@@ -59,8 +59,6 @@ def test_capture_rejects_undeclared_keyword() -> None:
 
 def test_copy_cannot_forge_the_digest() -> None:
     """改内容不改摘要，必须在 copy 时就被抓住。"""
-    original = ExternalContent.capture(
-        source=ExternalSource.TOOL, content="hello", captured_at=_AT
-    )
+    original = ExternalContent.capture(source=ExternalSource.TOOL, content="hello", captured_at=_AT)
     with pytest.raises(ValidationError):
         original.model_copy(update={"content": "tampered"})

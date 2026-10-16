@@ -33,9 +33,7 @@ class _Service:
 
 class _Probe:
     async def check(self) -> ReadinessReport:
-        return ReadinessReport(
-            database_ok=True, revision_matches_head=True, assembled=True
-        )
+        return ReadinessReport(database_ok=True, revision_matches_head=True, assembled=True)
 
 
 def _app(service: _Service) -> Any:
@@ -116,14 +114,10 @@ async def test_trace_binding_matches_submission_and_resets_after_failure() -> No
 
     service = TraceService()
     app = _app(service)
-    first = await _post(
-        app, {"text": "检查慢查询", "idempotency_key": "idem-1"}
-    )
+    first = await _post(app, {"text": "检查慢查询", "idempotency_key": "idem-1"})
     assert first.status_code == 500
     assert get_trace_id() is None
-    second = await _post(
-        app, {"text": "检查慢查询", "idempotency_key": "idem-2"}
-    )
+    second = await _post(app, {"text": "检查慢查询", "idempotency_key": "idem-2"})
     assert second.status_code == 202
     assert service.bound == [
         service.submissions[0].context.trace_id,

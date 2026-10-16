@@ -45,15 +45,10 @@ _CASES = [
 ]
 
 
-@pytest.mark.parametrize(
-    ("model", "mapping"), _CASES, ids=lambda x: getattr(x, "__name__", "")
-)
-def test_every_model_field_maps_to_a_hash_key(
-    model: type, mapping: dict[str, str]
-) -> None:
+@pytest.mark.parametrize(("model", "mapping"), _CASES, ids=lambda x: getattr(x, "__name__", ""))
+def test_every_model_field_maps_to_a_hash_key(model: type, mapping: dict[str, str]) -> None:
     assert set(mapping) == set(model.model_fields), (
-        f"{model.__name__} 的字段集与 hash 映射表不一致；"
-        "新增字段必须同时决定它是否进入指纹"
+        f"{model.__name__} 的字段集与 hash 映射表不一致；新增字段必须同时决定它是否进入指纹"
     )
 
 
@@ -61,9 +56,7 @@ def test_payload_keys_equal_the_declared_hash_keys() -> None:
     """实现真的用了映射表声明的键，而不是另写一份。"""
     assert set(_plan_payload(FIXTURE_PLAN)) == set(PLAN_FIELD_TO_HASH_KEY.values())
     assert set(_target_payload(FIXTURE_TARGET)) == set(TARGET_FIELD_TO_HASH_KEY.values())
-    assert set(_tool_call_payload(FIXTURE_TOOL_CALL)) == set(
-        TOOL_CALL_FIELD_TO_HASH_KEY.values()
-    )
+    assert set(_tool_call_payload(FIXTURE_TOOL_CALL)) == set(TOOL_CALL_FIELD_TO_HASH_KEY.values())
 
 
 def test_nested_payload_keys_equal_their_declared_hash_keys() -> None:
@@ -75,9 +68,7 @@ def test_nested_payload_keys_equal_their_declared_hash_keys() -> None:
     assert set(_condition_payload(FIXTURE_PLAN.steps[0].condition)) == set(
         STEP_CONDITION_FIELD_TO_HASH_KEY.values()
     )
-    assert set(_budget_payload(FIXTURE_PLAN.budget)) == set(
-        PLAN_BUDGET_FIELD_TO_HASH_KEY.values()
-    )
+    assert set(_budget_payload(FIXTURE_PLAN.budget)) == set(PLAN_BUDGET_FIELD_TO_HASH_KEY.values())
 
 
 _VOLATILE_OR_SENSITIVE = {

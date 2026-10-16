@@ -247,9 +247,7 @@ def memory_state() -> "InMemoryPersistenceState":
 
 
 @pytest.fixture
-def store(
-    clock: "ManualClock", memory_state: "InMemoryPersistenceState"
-) -> "InMemoryTaskStore":
+def store(clock: "ManualClock", memory_state: "InMemoryPersistenceState") -> "InMemoryTaskStore":
     from xiaowei_agent.persistence.fake import InMemoryTaskStore
 
     return InMemoryTaskStore(clock=clock, state=memory_state)

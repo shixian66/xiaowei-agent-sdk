@@ -58,9 +58,7 @@ async def test_readiness_requires_database_head_and_assembly(
 @pytest.mark.asyncio
 async def test_readiness_failure_is_a_closed_negative_report() -> None:
     connection = _Connection(revision="", failure=RuntimeError("private db text"))
-    report = await PostgresReadinessProbe(
-        engine=_Engine(connection), assembled=True
-    ).check()
+    report = await PostgresReadinessProbe(engine=_Engine(connection), assembled=True).check()
     assert report.database_ok is False
     assert report.revision_matches_head is False
     assert report.assembled is True

@@ -99,6 +99,7 @@ async def test_errors_do_not_echo_the_task_id(evidence_ledger) -> None:
     assert canary not in str(err.value)
     assert err.value.task_id == canary
 
+
 EVIDENCE_LEDGER_CASES = (
     test_append_returns_the_addressable_id,
     test_load_returns_entries_in_write_order,

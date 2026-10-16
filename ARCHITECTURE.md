@@ -313,12 +313,13 @@ Alertmanager 原生 API v2 若由薄 Adapter 直连，须支持其 Web 配置可
 
 ### R7 目标与拒绝反馈（已批准）
 
-用户 2026-10-10 决定、2026-10-11 确认：
+用户 2026-10-10 决定、2026-10-11 确认；B1(a)/(b) 于 2026-10-16 按用户决定改写（生产中曾在用户未选环境时查询 fat、fat1、pre，根因是原 B1(a) 允许跨环境发现）：
 
-- **B1(a)：唯一可读匹配。** 未指定集群时，Agent 可直接澄清或按任务做获准发现，不强制穷举。必要候选范围的发现完整、没有源错误、未完成分页、截断或预算中断，且恰好一个可读的精确库表匹配时，可以继续；必须说明“仅在该集群的本轮可读范围内找到，其他集群未匹配不代表不存在”。多匹配、模糊命中或发现不完整先澄清。发现结果不是用户明确选择，不能覆盖明确目标、禁止执行或诊断范围；选定目标不可用时不自动换源。
-- **B1(b)：群目标引用。** 当前发起人清楚引用群成员明确指定且仍适用的目标时可沿用，只沿用目标/对象，不继承执行许可；本条意图与当前身份、群、工具、源权限独立复核。引用不清、多个对象/来源、目标已切换、新建后的旧历史、仅有模型上次调用时先澄清。
-- 目标判断由单 Agent 结合可信说明与工具结果完成，没有新增分类器、Planner 或硬目标选择入口。参数 cluster 的一致性、当前权限、SQLGuard、预算与 Evidence 仍由执行链强制核对；上述提示规则不能证明自然语言永不误选。
-- I/O 前治理拒绝由 FunctionTool 返回闭集 code、固定 reason 与 retry_this_turn；只允许参数/受支持 SQL 或目标缺项在现有预算内修正、补获准发现或澄清。代码为 invalid_arguments、unknown_target、object_not_readable、unsupported、capacity_exceeded、precheck_failed、not_allowed、authorization_unavailable、budget_exhausted、schema_unavailable、source_stopped、busy；SQL 细项复用 SQLGuard 固定枚举，busy 附 remaining_retries。可信拒绝点可提供闭集提示标识，由 FunctionTool 映射固定说明，保留游标从头开始、收窄搜索及监控参数的具体改法；提示不改变类别的可修正/停止语义。无统一“Please try again”，不读取异常原文，不生成成功 Evidence。
+- **B1(a)：会话环境。** 需要取数或查结构时，只用用户在本会话明确选定的环境（即 cluster）。未明确时先澄清，不做跨环境发现，也不按“唯一匹配”自行选用；只配置一个环境时也先确认。选定后同一会话的后续数据库任务沿用；只有明确要求切换（如“切到 pre”）才改变，只是提到别的环境（如“pre 上也有吗？”）先问是否切换。用户本轮明确点名多个环境时按点名范围查询，结果按环境分开。无法从对话确定当前环境时重新询问；新建会话后重新询问。选定环境不可用、失败或撤权时不换源。无需取证的 SQL 生成、解释或静态分析不要求选环境。环境选择不授予权限，也不代替本轮执行意图。
+- **B1(b)：群共享环境。** 群内成员明确选定的环境作为该群会话的环境沿用，其他成员换环境同样须明确切换；多人选择冲突或引用含糊时先澄清。执行许可不继承：本条意图与当前发起人的身份、群、工具、源权限独立复核。
+- 环境判断由单 Agent 按随包发布的数据库工作方法（`src/xiaowei/skills/database_query.md`、`database_diagnosis.md`，配置 StarRocks 目标时整份并入 instructions）完成，没有新增分类器、Planner 或硬目标选择入口。参数 cluster 必须是已配置目标、当前权限、SQLGuard、预算与 Evidence 仍由执行链强制核对；上述提示规则不能证明自然语言永不误选。
+- **已接受风险（用户 2026-10-16 决定，第一步）：** 环境选择只存在于对话历史，靠模型遵守；执行层不核对“是否用户选定的那个环境”，模型不遵守时跨环境查询仍会在获准范围内执行。复查触发：获准真实模型评测中任一次超出用户明确范围的新取数（实际进入 StarRocks 的列库、列表、查结构、业务查询、审计或执行计划取数；合法历史证据复核与后台刷新不计；被治理在 I/O 前拒绝的越界调用尝试单独记录，不作为触发条件）、用户把某个环境确认为需强制约束或扩大使用范围、生产再次出现超出用户明确范围的新取数。触发后另立切片做会话环境状态与执行前硬校验。
+- I/O 前治理拒绝由 FunctionTool 返回闭集 code、固定 reason 与 retry_this_turn；只允许参数/受支持 SQL 或目标缺项在现有预算内修正或澄清。代码为 invalid_arguments、unknown_target、object_not_readable、unsupported、capacity_exceeded、precheck_failed、not_allowed、authorization_unavailable、budget_exhausted、schema_unavailable、source_stopped、busy；SQL 细项复用 SQLGuard 固定枚举，busy 附 remaining_retries。可信拒绝点可提供闭集提示标识，由 FunctionTool 映射固定说明，保留游标从头开始、收窄搜索及监控参数的具体改法；提示不改变类别的可修正/停止语义。无统一“Please try again”，不读取异常原文，不生成成功 Evidence。
 - 能力尚未开放、不可通过参数修正的固定容量超限、前置检查自身失败，以及无权、预算或结构暂不可用时停止相关操作；结构暂不可用不等待本轮刷新、不换集群。监控失败/表达式修正按 §5 原契约；执行后失败、结果未知、Evidence 或最终回答拒收保持原中止路径，不因新反馈改成自动重放。
 
 <a id="p25-scope"></a>

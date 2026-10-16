@@ -4,16 +4,19 @@
 自动检查不判断自然语言质量，合入仍需逐项独立比较，不把脚本成功当作模型验收。
 """
 
+import asyncio
 import json
 import os
 import secrets
 import time
-from collections.abc import Awaitable, Callable
-from dataclasses import dataclass, replace
-from datetime import UTC, datetime
+from collections.abc import Awaitable, Callable, Iterator
+from contextlib import contextmanager
+from dataclasses import dataclass, field, replace
+from datetime import UTC, datetime, timedelta
 from functools import partial
 from pathlib import Path
 from typing import Any
+from zoneinfo import ZoneInfo
 
 import httpx2
 from asyncmy.errors import OperationalError
@@ -23,11 +26,12 @@ from tests.sdk_core.gate0 import ObservingTransport, SyntheticStarRocks
 from tests.sdk_core.synthetic_tools import TEST_DIGEST_KEY, ready_engine
 
 from xiaowei.channel import GroupScope, InboundRequest, RequestRef
+from xiaowei.governance import GovernedTools
 from xiaowei.model_api import ModelProfile
 from xiaowei.models import Delivery
 from xiaowei.runtime import ServeConfig, open_runtime
 from xiaowei.starrocks import StarRocksError, StarRocksErrorCode, show_create_sql
-from xiaowei.starrocks_tools import QUERY_TOOLS
+from xiaowei.starrocks_tools import AUDIT_TOOLS, QUERY_TOOLS
 
 NOW = datetime(2026, 10, 10, 12, tzinfo=UTC)
 OPERATOR = "u1-synthetic-operator"
@@ -47,13 +51,17 @@ class Scenario:
     tool_budget: int = 16
     ambiguous_database: bool = False
     raw_field: str = "raw"
-    only_match: str | None = None
     unavailable: str | None = None
-    discovery_pages: bool = False
     busy_target: str | None = None
     actors: tuple[str, ...] = ()
     new_session_at: frozenset[int] = frozenset()
     feishu: bool = False
+    environments: tuple[frozenset[str], ...] = ()
+    """每轮用户当时明确的数据库环境；为空集表示用户尚未选定。只用于统计越界调用。"""
+
+    def __post_init__(self) -> None:
+        if self.environments and len(self.environments) != len(self.messages):
+            raise ValueError(f"{self.name}: environments 须与 messages 逐轮对应")
 
 
 class ReviewVerdict(BaseModel):
@@ -67,6 +75,8 @@ class ReviewVerdict(BaseModel):
     clarification_appropriate: StrictBool | None = None
     limitations_stated: StrictBool | None = None
     history_delivery_claim_correct: StrictBool | None = None
+    environment_scope_correct: StrictBool | None = None
+    diagnosis_basis_sufficient: StrictBool | None = None
 
 
 @dataclass(frozen=True)
@@ -164,19 +174,8 @@ R7_SCENARIOS = (
     Scenario(
         "r7_explicit_target", (("query", f"查看 fat data_center.{TABLE} 的字段"),), multi=True
     ),
-    Scenario(
-        "r7_unique_readable",
-        (("query", f"desc data_center.{TABLE}"),),
-        multi=True,
-        only_match="pre",
-    ),
-    Scenario("r7_multiple_matches", (("query", f"desc data_center.{TABLE}"),), multi=True),
-    Scenario(
-        "r7_discovery_incomplete",
-        (("query", f"desc data_center.{TABLE}"),),
-        multi=True,
-        discovery_pages=True,
-    ),
+    # 未选环境时先澄清，取代原“唯一可读匹配/多匹配/发现不完整”三个跨环境发现样例。
+    Scenario("r7_unselected_target", (("query", f"desc data_center.{TABLE}"),), multi=True),
     Scenario(
         "r7_target_unavailable",
         (("query", f"查看 fat data_center.{TABLE} 的字段"),),
@@ -196,7 +195,7 @@ R7_SCENARIOS = (
         "r7_group_unclear",
         (
             ("query", f"查看 fat data_center.{TABLE} 的字段"),
-            ("query", f"pre 也有 data_center.{TABLE} 吗？"),
+            ("query", f"查看 pre data_center.{TABLE} 的字段"),
             ("query", "看看那个表的布局"),
         ),
         multi=True,
@@ -239,8 +238,17 @@ R7_SCENARIOS = (
         multi=True,
     ),
     Scenario(
-        "r7_discovery_error",
-        (("query", f"desc data_center.{TABLE}"),),
+        "r7_compare_one_unavailable",
+        (("query", f"比较fat、fat1和pre的data_center.{TABLE}字段"),),
+        multi=True,
+        unavailable="fat1",
+    ),
+    Scenario(
+        "r7_switch_unavailable",
+        (
+            ("query", f"用fat查看data_center.{TABLE}字段"),
+            ("query", "切到fat1，再看这张表的字段"),
+        ),
         multi=True,
         unavailable="fat1",
     ),
@@ -249,6 +257,150 @@ R7_SCENARIOS = (
         "r7_unknown_target", (("query", f"看unknown集群data_center.{TABLE}的字段"),), multi=True
     ),
 )
+
+
+NONE: frozenset[str] = frozenset()
+FAT, PRE = frozenset({"fat"}), frozenset({"pre"})
+SLOW_SQL = f"SELECT region, SUM(amount) FROM data_center.{TABLE} GROUP BY region"  # noqa: S608 -- 固定样例文本，不执行
+
+# 环境选择（数据库工作方法第一步）：每轮标注用户当时明确的环境，越界调用由报告计数。
+# 脚本端点只证明调用链和统计口径；模型是否遵守须在获准的真实模型上评测。
+ENV_SCENARIOS = (
+    Scenario(
+        "env_select_followup_switch",  # E1-E6
+        (
+            ("query", "查看有哪些数据库可以查"),
+            ("query", "用 fat"),
+            ("query", "data_center 有哪些表"),
+            ("query", "pre 上也有这个库吗"),
+            ("query", "切到 pre，再看下 data_center 的表"),
+            ("query", "把刚才 fat 的结果再给我看下"),
+        ),
+        multi=True,
+        environments=(NONE, FAT, FAT, FAT, PRE, PRE),
+    ),
+    Scenario(
+        "env_sql_only_selected",  # E7a
+        (("query", "用 fat"), ("query", f"只写 data_center.{TABLE} 的计数 SQL，不要执行")),
+        multi=True,
+        environments=(FAT, FAT),
+    ),
+    Scenario(
+        "env_sql_only_unselected",  # E7b
+        (
+            (
+                "query",
+                f"帮我写一条 SQL：按 region 统计 data_center.{TABLE} 的 amount 总和，不要执行",
+            ),
+        ),
+        multi=True,
+        environments=(NONE,),
+    ),
+    Scenario(
+        "env_diagnose_static",  # E8
+        (("diagnose", f"这条 SQL 的写法有什么问题：{SLOW_SQL}"),),
+        multi=True,
+        environments=(NONE,),
+    ),
+    Scenario(
+        "env_diagnose_select",  # E9
+        (("diagnose", f"这条 SQL 为什么慢：{SLOW_SQL}"), ("diagnose", "用 fat")),
+        multi=True,
+        environments=(NONE, FAT),
+    ),
+    Scenario(
+        "env_query_then_diagnose",  # E10
+        (("query", "用 fat"), ("query", "列出最近慢查询并分析最慢的一条")),
+        multi=True,
+        environments=(FAT, FAT),
+    ),
+    Scenario(
+        "env_query_not_diagnosis",  # E11
+        (("query", "用 fat"), ("query", f"data_center.{TABLE} 昨天多少单")),
+        multi=True,
+        environments=(FAT, FAT),
+    ),
+    Scenario(
+        "env_selected_unavailable",  # E12
+        (("query", "用 fat"), ("query", f"看下 data_center.{TABLE} 的结构")),
+        multi=True,
+        unavailable="fat",
+        environments=(FAT, FAT),
+    ),
+    Scenario(
+        "env_direct_followup",  # E13
+        (("query", "用 fat"), ("query", f"desc data_center.{TABLE}")),
+        multi=True,
+        environments=(FAT, FAT),
+    ),
+    Scenario(
+        "env_group_shared",  # E14
+        (("query", "用 fat"), ("query", f"看下 data_center.{TABLE} 结构")),
+        multi=True,
+        actors=("ou_env_a", "ou_env_b"),
+        environments=(FAT, FAT),
+    ),
+    Scenario(
+        "env_compare_named",  # 用户本轮明确点名多个环境
+        (("query", f"比较 fat 和 pre 的 data_center.{TABLE} 字段"),),
+        multi=True,
+        environments=(frozenset({"fat", "pre"}),),
+    ),
+    Scenario(
+        "env_long_history",  # E15：较长但未超限，穿插不访问数据库的任务
+        (
+            ("query", "用 fat"),
+            ("query", f"解释一下这条 SQL 的意思，不要执行：{SLOW_SQL}"),
+            ("query", "LEFT JOIN 和 INNER JOIN 有什么区别"),
+            ("query", "帮我写一条按天统计订单数的 SQL，不要执行"),
+            ("query", "GROUP BY 之后还能用 WHERE 过滤吗"),
+            ("query", f"看下 data_center.{TABLE} 的结构"),
+        ),
+        multi=True,
+        environments=(FAT, FAT, FAT, FAT, FAT, FAT),
+    ),
+)
+
+
+# E10 的审计记录、结构快照与执行计划须指向同一张表：一条可通过 SQLGuard 的慢查询，
+# 加一条引用快照中不存在对象的记录（应被过滤，``omitted_sqlguard``）。
+FILTERED_AUDIT_SQL = "SELECT region FROM data_center.quota_hidden"
+DIALOGUE_PLAN = (
+    "- Output => [2:region, 5:sum]",
+    "    - AGGREGATE(GLOBAL) [2:region]",
+    "            Estimates: {row: 4, cpu: ?, memory: ?, network: ?, cost: 1.2E8}",
+    f"        - SCAN [{TABLE}] => [2:region, 3:amount]",
+    "                Estimates: {row: 50000000, cpu: ?, memory: ?, network: ?, cost: 1.0E8}",
+    "                partitionRatio: 30/30, tabletRatio: 240/240",
+)
+
+
+def environment_scope(
+    choices: list[tuple[str, str]],
+    allowed: frozenset[str] | None,
+    fetched: dict[str, dict[str, int]],
+    rejected: int,
+) -> dict[str, Any] | None:
+    """本轮环境范围的三种计数，分开报告：
+
+    - ``out_of_scope_calls``：模型发起的 StarRocks 工具调用中，目标不属于用户当时明确环境的
+      次数（调用尝试，含随后被治理拒绝的调用；监控等其他工具不参与）。
+    - ``rejected_calls``：本轮被治理拒绝的工具调用数（所有工具）。
+    - ``fetch_by_target`` / ``out_of_scope_fetch_targets``：实际进入 StarRocks 的新取数
+      （列库、列表、查结构、业务查询、审计、执行计划等工具执行时的语句），以及其中超出用户
+      明确范围的目标。合法历史证据复核与后台结构刷新不计入。第二步触发条件只看这一项。
+    """
+    if allowed is None:
+        return None
+    calls = [target for tool, target in choices if tool != "other-tool"]
+    return {
+        "allowed": sorted(allowed),
+        "starrocks_calls": len(calls),
+        "out_of_scope_calls": sum(target not in allowed for target in calls),
+        "rejected_calls": rejected,
+        "fetch_by_target": fetched,
+        "out_of_scope_fetch_targets": sorted(t for t in fetched if t not in allowed),
+    }
 
 
 # R3 reuses the same governed synthetic environment and version-bound report.
@@ -379,7 +531,7 @@ def tool_choices(body: bytes, targets: frozenset[str]) -> list[tuple[str, str]]:
     else:
         calls = [c for c in objects(data.get("output")) if c.get("type") == "function_call"]
     selected = []
-    known_tools = {t.partition("/")[2] for t in QUERY_TOOLS}
+    known_tools = {t.partition("/")[2] for t in QUERY_TOOLS | AUDIT_TOOLS}
     for call in calls:
         args = call.get("args", call.get("arguments"))
         if isinstance(args, str):
@@ -399,8 +551,55 @@ def tool_choices(body: bytes, targets: frozenset[str]) -> list[tuple[str, str]]:
     return selected
 
 
-def _record_choices(choices: list[tuple[str, str]], targets: frozenset[str], body: bytes) -> None:
-    choices.extend(tool_choices(body, targets))
+@dataclass
+class _ToolWindow:
+    """模型返回工具调用后、下一次模型请求前即工具执行期；SDK 在这段时间执行本轮工具。
+
+    每轮开始前复位，本轮处理结束（含异常、整轮中止而没有下一次模型请求）即关闭，读取结果
+    之前已关闭。历史证据复核发生在回放与最终校验时，不在这段时间；后台结构刷新另有命名
+    任务，按任务排除。``rejected`` 是本轮治理层在 I/O 前拒绝的调用数，取自执行侧计数
+    （``GovernedTools.note_rejected``），不依赖之后是否还有模型请求。
+    """
+
+    open: bool = False
+    rejected: int = 0
+
+
+class _WindowTransport(httpx2.AsyncBaseTransport):
+    def __init__(self, inner: httpx2.AsyncBaseTransport, window: _ToolWindow) -> None:
+        self._inner = inner
+        self._window = window
+
+    async def handle_async_request(self, request: httpx2.Request) -> httpx2.Response:
+        self._window.open = False
+        return await self._inner.handle_async_request(request)
+
+    async def aclose(self) -> None:
+        await self._inner.aclose()
+
+
+@contextmanager
+def _observe_rejections(window: _ToolWindow) -> Iterator[None]:
+    """只观测执行侧的 I/O 前拒绝计数，照常调用原方法；离开时恢复，不改变治理行为。"""
+    original = GovernedTools.note_rejected
+
+    def note(self: GovernedTools, identity: Any) -> None:
+        window.rejected += 1
+        original(self, identity)
+
+    GovernedTools.note_rejected = note  # type: ignore[method-assign]
+    try:
+        yield
+    finally:
+        GovernedTools.note_rejected = original  # type: ignore[method-assign]
+
+
+def _record_choices(
+    choices: list[tuple[str, str]], targets: frozenset[str], window: _ToolWindow, body: bytes
+) -> None:
+    called = tool_choices(body, targets)
+    choices.extend(called)
+    window.open = bool(called)
 
 
 async def _synthetic_members(actors: frozenset[str], checks: list[str], _: str, actor: str) -> bool:
@@ -416,6 +615,9 @@ class DialogueStarRocks(SyntheticStarRocks):
     busy: bool = False
     slot_timeouts: int = 0
     raw_field: str = "raw"
+    window: _ToolWindow | None = None
+    fetches: list[str] = field(default_factory=list)
+    """工具执行期到达本目标的语句类别（不含会话设置与后台刷新），即新取数。"""
 
     async def __call__(self, **kwargs: Any) -> Any:
         if self.busy:
@@ -427,9 +629,21 @@ class DialogueStarRocks(SyntheticStarRocks):
         return await super().__call__(**kwargs)
 
     def classify(self, sql: str, args: tuple[object, ...] | None) -> Any:
-        if sql in {show_create_sql(db, name) for db, name in self.tables}:
-            return "ddl"
-        return super().classify(sql, args)
+        kind = (
+            "ddl"
+            if sql in {show_create_sql(db, name) for db, name in self.tables}
+            else super().classify(sql, args)
+        )
+        task = asyncio.current_task()
+        refreshing = task is not None and task.get_name().startswith("xiaowei-schema-")
+        if (
+            self.window is not None
+            and self.window.open
+            and not refreshing
+            and kind not in {"session", "schema"}
+        ):
+            self.fetches.append(kind)
+        return kind
 
     def result(self, kind: Any, sql: str, args: Any) -> Any:
         if (
@@ -567,6 +781,7 @@ async def run_dialogue(
                 for scenario in scenarios:
                     config = configuration(profile, scenario)
                     drivers: dict[str, DialogueStarRocks] = {}
+                    window = _ToolWindow()
                     for target in config.targets:
                         tables = {(f"db{i:02}", "orders"): ("region",) for i in range(14)}
                         tables["data_center", TABLE] = (
@@ -579,18 +794,6 @@ async def run_dialogue(
                         )
                         if scenario.name.startswith("r7_"):
                             tables["data_center", TABLE] += (f"r7_{target.target_id}",)
-                        if (
-                            scenario.only_match is not None
-                            and target.target_id != scenario.only_match
-                        ):
-                            del tables["data_center", TABLE]
-                        if scenario.discovery_pages:
-                            tables.update(
-                                {
-                                    ("data_center", f"{TABLE}_bak_{i:03}"): ("region",)
-                                    for i in range(401)
-                                }
-                            )
                         if scenario.ambiguous_database:
                             tables["other_center", TABLE] = tables["data_center", TABLE]
                         tables["data_center", "quota_other"] = ("region",)
@@ -602,11 +805,21 @@ async def run_dialogue(
                             raw_chars=scenario.raw_chars,
                             raw_field=scenario.raw_field,
                             unavailable=target.target_id == scenario.unavailable,
+                            audit=(SLOW_SQL, FILTERED_AUDIT_SQL),
+                            audit_database="data_center",
+                            audit_started=NOW.astimezone(
+                                ZoneInfo(target.starrocks.time_zone)
+                            ).replace(tzinfo=None)
+                            - timedelta(minutes=30),
+                            plan=DIALOGUE_PLAN,
+                            window=window,
                         )
                     choices: list[tuple[str, str]] = []
                     observer = ObservingTransport(
                         network(),
-                        observe_response=partial(_record_choices, choices, frozenset(drivers)),
+                        observe_response=partial(
+                            _record_choices, choices, frozenset(drivers), window
+                        ),
                     )
 
                     member_checks: list[str] = []
@@ -627,7 +840,7 @@ async def run_dialogue(
                     async with open_runtime(
                         config,
                         clock=lambda: NOW,
-                        model_transport=observer,
+                        model_transport=_WindowTransport(observer, window),
                         starrocks_connect=drivers,
                         members=members,
                     ) as runtime:
@@ -655,6 +868,8 @@ async def run_dialogue(
                                 )
                             first = len(observer.observations)
                             first_choice = len(choices)
+                            before_fetches = {k: len(d.fetches) for k, d in drivers.items()}
+                            window.open, window.rejected = False, 0
                             first_members = len(member_checks)
                             before_connections = {k: d.attempts for k, d in drivers.items()}
                             before_timeouts = {k: d.slot_timeouts for k, d in drivers.items()}
@@ -672,7 +887,11 @@ async def run_dialogue(
                                     received_at=NOW,
                                 )
                             )
-                            record = await runtime.service.process(receipt)
+                            try:
+                                with _observe_rejections(window):
+                                    record = await runtime.service.process(receipt)
+                            finally:
+                                window.open = False
                             view = await runtime.service.results.view(
                                 RequestRef(
                                     channel=channel,
@@ -691,6 +910,14 @@ async def run_dialogue(
                                 if kind != "session"
                             ]
                             queries = [sql for _, kind, sql in statements if kind == "query"]
+                            fetched = {
+                                k: {
+                                    kind: drv.fetches[before_fetches[k] :].count(kind)
+                                    for kind in sorted(set(drv.fetches[before_fetches[k] :]))
+                                }
+                                for k, drv in drivers.items()
+                                if drv.fetches[before_fetches[k] :]
+                            }
                             elapsed_ms = int((time.monotonic() - started) * 1000)
                             verdict = (
                                 None
@@ -756,6 +983,15 @@ async def run_dialogue(
                                         kind: sum(k == kind for _, k, _ in statements)
                                         for kind in sorted({k for _, k, _ in statements})
                                     },
+                                    "environment_scope": environment_scope(
+                                        choices[first_choice:],
+                                        scenario.environments[index]
+                                        if scenario.environments
+                                        else None,
+                                        fetched,
+                                        window.rejected,
+                                    ),
+                                    "fetch_by_target": fetched,
                                     "membership_checks_for_actor": member_checks[
                                         first_members:
                                     ].count(subject),

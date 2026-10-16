@@ -40,9 +40,9 @@ _ALEMBIC_BOOKKEEPING = "alembic_version"
 
 def _offline_upgrade_sql() -> str:
     config = Config(str(_ROOT / "alembic.ini"))
-    config.set_main_option("script_location", str(_ROOT / config.get_main_option(
-        "script_location", ""
-    )))
+    config.set_main_option(
+        "script_location", str(_ROOT / config.get_main_option("script_location", ""))
+    )
     # 离线模式不建立连接，URL 只用于选方言。此处必须是一个**不可路由的占位**，
     # 而不是任何真实实例——离线模式不连它，但把真实地址写进测试等于把连接串提交
     # 进仓库。
@@ -189,9 +189,7 @@ def test_step_journal_has_the_complete_self_describing_shape() -> None:
         "committed_at",
     }
     assert TASK_STEP_EXECUTIONS.primary_key.columns.keys() == ["task_id", "step_id"]
-    names = {
-        item.name for item in TASK_STEP_EXECUTIONS.constraints if item.name is not None
-    }
+    names = {item.name for item in TASK_STEP_EXECUTIONS.constraints if item.name is not None}
     assert names >= {
         "ck_task_steps_attempt_count_positive",
         "ck_task_steps_fencing_token_positive",
@@ -233,9 +231,9 @@ def test_downgrade_drops_everything_upgrade_created() -> None:
     人工清理的死局。
     """
     config = Config(str(_ROOT / "alembic.ini"))
-    config.set_main_option("script_location", str(_ROOT / config.get_main_option(
-        "script_location", ""
-    )))
+    config.set_main_option(
+        "script_location", str(_ROOT / config.get_main_option("script_location", ""))
+    )
     config.set_main_option("sqlalchemy.url", "postgresql+psycopg://offline/offline")
     buffer = io.StringIO()
     with contextlib.redirect_stdout(buffer):

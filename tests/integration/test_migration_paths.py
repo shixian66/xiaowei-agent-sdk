@@ -22,9 +22,7 @@ from xiaowei_agent.persistence.schema import (
 async def _table_names(engine: AsyncEngine) -> set[str]:
     async with engine.connect() as connection:
         rows = await connection.execute(
-            sa.text(
-                "SELECT tablename FROM pg_tables WHERE schemaname = current_schema()"
-            )
+            sa.text("SELECT tablename FROM pg_tables WHERE schemaname = current_schema()")
         )
         return {row[0] for row in rows}
 
@@ -222,14 +220,10 @@ async def test_explicit_rev_0003_downgrade_settles_active_m5_data(
     task = await store.create_task(submission=make_submission(context))
     run_upgrade, run_downgrade = alembic_runners
     async with clean_database.begin() as connection:
-        await connection.run_sync(
-            run_downgrade, "0002_task_execution_columns", True
-        )
+        await connection.run_sync(run_downgrade, "0002_task_execution_columns", True)
         row = (
             await connection.execute(
-                sa.text(
-                    "SELECT status, terminal_reason FROM tasks WHERE task_id = :task_id"
-                ),
+                sa.text("SELECT status, terminal_reason FROM tasks WHERE task_id = :task_id"),
                 {"task_id": task.task_id},
             )
         ).one()
@@ -237,9 +231,7 @@ async def test_explicit_rev_0003_downgrade_settles_active_m5_data(
         await connection.run_sync(run_upgrade)
         restored = (
             await connection.execute(
-                sa.text(
-                    "SELECT status, terminal_reason FROM tasks WHERE task_id = :task_id"
-                ),
+                sa.text("SELECT status, terminal_reason FROM tasks WHERE task_id = :task_id"),
                 {"task_id": task.task_id},
             )
         ).one()
@@ -273,9 +265,7 @@ async def test_rev_0005_downgrade_requires_authorization_and_settles_active_data
 
     async with clean_database.connect() as connection:
         revision = await connection.scalar(sa.text("SELECT version_num FROM alembic_version"))
-        step_count = await connection.scalar(
-            sa.text("SELECT count(*) FROM task_step_executions")
-        )
+        step_count = await connection.scalar(sa.text("SELECT count(*) FROM task_step_executions"))
     assert revision == "0005_step_journal"
     assert step_count == 1
 
@@ -283,9 +273,7 @@ async def test_rev_0005_downgrade_requires_authorization_and_settles_active_data
         await connection.run_sync(run_downgrade, "0004_retry_markers", True)
         settled = (
             await connection.execute(
-                sa.text(
-                    "SELECT status, terminal_reason FROM tasks WHERE task_id = :task_id"
-                ),
+                sa.text("SELECT status, terminal_reason FROM tasks WHERE task_id = :task_id"),
                 {"task_id": task.task_id},
             )
         ).one()
@@ -295,9 +283,7 @@ async def test_rev_0005_downgrade_requires_authorization_and_settles_active_data
     async with clean_database.connect() as connection:
         assert (
             await connection.scalar(
-                sa.text(
-                    "SELECT count(*) FROM task_step_executions WHERE task_id = :task_id"
-                ),
+                sa.text("SELECT count(*) FROM task_step_executions WHERE task_id = :task_id"),
                 {"task_id": task.task_id},
             )
             == 0

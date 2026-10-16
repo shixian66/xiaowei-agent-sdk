@@ -195,3 +195,13 @@ def test_all_closed_labels_render_without_reading_exception_text() -> None:
     for hint in get_args(ToolRejectHint):
         result = feedback(NoMessageError(SENTINEL, hint=hint), "any_tool")
         assert result["reason"]
+
+
+def test_unknown_target_feedback_points_back_to_the_selected_environment() -> None:
+    result = feedback(ToolRejectedError(SENTINEL, code="unknown_target"), "describe_table")
+    assert result["code"] == "unknown_target" and result["retry_this_turn"] is True
+    reason = result["reason"]
+    assert "用户在本会话明确选定的环境" in reason
+    assert "不猜选集群" in reason and "未选定先澄清" in reason
+    for legacy in ("唯一可读", "完整发现", "获准发现"):
+        assert legacy not in reason

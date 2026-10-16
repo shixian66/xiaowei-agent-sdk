@@ -232,9 +232,7 @@ def test_unregistered_adapter_message_carries_no_gateway_name() -> None:
     call = FIXTURE_TOOL_CALL.model_copy(update={"gateway": CANARY})
     gateway = DeterministicToolGateway(adapters={"registered": object()})
     with pytest.raises(LookupError) as caught:
-        asyncio.run(
-            gateway.invoke(call, context=_context(), admission=make_certificate(call))
-        )
+        asyncio.run(gateway.invoke(call, context=_context(), admission=make_certificate(call)))
     assert CANARY not in str(caught.value)
 
 

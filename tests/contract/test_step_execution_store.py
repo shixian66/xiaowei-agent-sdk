@@ -215,9 +215,7 @@ def test_step_commit_digest_is_order_independent_but_multiplicity_sensitive() ->
         evidence=_evidence(),
         audit_events=(_event(event_id="a"), _event(event_id="b")),
     )
-    reordered = command.model_copy(
-        update={"audit_events": tuple(reversed(command.audit_events))}
-    )
+    reordered = command.model_copy(update={"audit_events": tuple(reversed(command.audit_events))})
     assert step_commit_digest(reordered) == step_commit_digest(command)
 
     extra = command.model_copy(

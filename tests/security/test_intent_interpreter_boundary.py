@@ -34,9 +34,7 @@ CONTEXT = RequestContext(
 )
 def test_interpreter_never_emits_execution_authority_slots(hostile: str) -> None:
     """模型可以往 slots 塞任何键，解释器必须只保留闭集内的槽位。"""
-    draft = RuleBasedIntentInterpreter().interpret(
-        text=f"{hostile}=x 慢查询", context=CONTEXT
-    )
+    draft = RuleBasedIntentInterpreter().interpret(text=f"{hostile}=x 慢查询", context=CONTEXT)
     assert hostile not in draft.slots
 
 

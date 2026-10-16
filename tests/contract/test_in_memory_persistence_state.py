@@ -42,9 +42,7 @@ async def test_task_and_submission_become_visible_together(clock) -> None:
     store = InMemoryTaskStore(clock=clock, state=state)
     context = _context()
 
-    task = await store.create_task(
-        submission=make_submission(context, as_of=_AS_OF)
-    )
+    task = await store.create_task(submission=make_submission(context, as_of=_AS_OF))
 
     assert set(state.tasks) == set(state.submissions) == {task.task_id}
     assert state.submissions[task.task_id].as_of == _AS_OF

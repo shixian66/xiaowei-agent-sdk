@@ -67,7 +67,5 @@ def test_snapshot_rejects_duplicate_capability_version_pair() -> None:
 
 
 def test_snapshot_allows_two_versions_of_the_same_capability() -> None:
-    snapshot = CapabilitySnapshot(
-        snapshot_id="s", specs=(_spec(), _spec(version="1.1.0"))
-    )
+    snapshot = CapabilitySnapshot(snapshot_id="s", specs=(_spec(), _spec(version="1.1.0")))
     assert len(snapshot.specs) == 2

@@ -165,9 +165,7 @@ def _internal_imports(path: Path) -> set[str]:
     return found
 
 
-@pytest.mark.parametrize(
-    "package", sorted(set(_ALLOWED_INTERNAL) - _FILE_SCOPED_PACKAGES)
-)
+@pytest.mark.parametrize("package", sorted(set(_ALLOWED_INTERNAL) - _FILE_SCOPED_PACKAGES))
 def test_package_only_imports_allowed_internal_modules(package: str) -> None:
     allowed = _ALLOWED_INTERNAL[package] | _UNIVERSAL_LEAF
     offenders: list[tuple[str, str]] = []
@@ -187,10 +185,7 @@ def test_interface_file_only_imports_its_explicit_allowlist(relative: str) -> No
 
 
 def test_every_interface_file_is_registered_exactly_once() -> None:
-    actual = {
-        path.relative_to(_SRC).as_posix()
-        for path in (_SRC / "interfaces").rglob("*.py")
-    }
+    actual = {path.relative_to(_SRC).as_posix() for path in (_SRC / "interfaces").rglob("*.py")}
     assert set(_ALLOWED_INTERNAL_BY_FILE) == actual
 
 

@@ -786,6 +786,10 @@ class SyntheticStarRocks:
 
     target: StarRocksTarget
     audit: tuple[str, ...] = (SLOW_SQL,)
+    audit_database: str = "shop"
+    """审计记录的会话当前库；须与 ``tables`` 中的对象一致，否则 SQLGuard 会把记录过滤掉。"""
+    audit_started: datetime = datetime(2026, 9, 30, 7, 30)
+    """审计记录的开始时间（目标时区的本地时间），须落在调用方的查询窗口内。"""
     tables: dict[tuple[str, str], tuple[str, ...]] = field(
         default_factory=lambda: {("shop", "orders"): DIAG_COLUMNS}
     )
@@ -881,11 +885,10 @@ class SyntheticStarRocks:
         if kind == "explain":
             return ("Explain String",), [(line,) for line in self.plan]
         if kind == "audit":
-            started = datetime(2026, 9, 30, 7, 30)
             rows: list[tuple[object, ...]] = [
                 (
                     f"q{i}",
-                    started,
+                    self.audit_started,
                     9_000 - i,
                     2**30,
                     5 * 10**7,
@@ -895,7 +898,7 @@ class SyntheticStarRocks:
                     0,
                     "EOF",
                     "d",
-                    "shop",  # 语句执行时的会话当前库
+                    self.audit_database,  # 语句执行时的会话当前库
                     s,
                 )
                 for i, s in enumerate(self.audit, start=1)

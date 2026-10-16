@@ -68,9 +68,7 @@ def _entry_candidate(snapshot: CapabilitySnapshot = SNAPSHOT) -> Candidate:
     return next(item for item in candidates.items if item.operation == OP_LIST)
 
 
-def _plan(
-    *, params: SlowQueryParams = _PARAMS, snapshot: CapabilitySnapshot = SNAPSHOT
-) -> object:
+def _plan(*, params: SlowQueryParams = _PARAMS, snapshot: CapabilitySnapshot = SNAPSHOT) -> object:
     return compile_plan(
         candidate=_entry_candidate(snapshot),
         params=params,
@@ -95,9 +93,7 @@ def _snapshot_with(operation: str, effect: EffectClass, *, side_effect: bool) ->
                     OperationSpec(
                         operation=op.operation,
                         effect_class=effect if op.operation == operation else op.effect_class,
-                        side_effect=(
-                            side_effect if op.operation == operation else op.side_effect
-                        ),
+                        side_effect=(side_effect if op.operation == operation else op.side_effect),
                         argument_schema_ref=op.argument_schema_ref,
                     )
                     for op in spec.operations

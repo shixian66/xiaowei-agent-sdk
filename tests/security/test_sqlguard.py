@@ -34,10 +34,7 @@ _PARAMS = SlowQueryParams(
 )
 
 _FROM = "FROM `starrocks_audit_db__`.`starrocks_audit_tbl__`"
-_WHERE = (
-    "WHERE `timestamp` >= '2026-09-02 11:30:00' "
-    "AND `timestamp` < '2026-09-02 12:00:00'"
-)
+_WHERE = "WHERE `timestamp` >= '2026-09-02 11:30:00' AND `timestamp` < '2026-09-02 12:00:00'"
 _SELECT_ID = "SELECT `queryId`"
 _LIMIT_1 = "LIMIT 1"
 
@@ -143,9 +140,7 @@ def test_a5_or_predicate_is_a_forbidden_node() -> None:
 
 
 def test_a6_union_has_a_non_select_root() -> None:
-    sql = _sql(
-        _SELECT_ID, _FROM, _WHERE, _LIMIT_1, "UNION", _SELECT_ID, _FROM, _WHERE, _LIMIT_1
-    )
+    sql = _sql(_SELECT_ID, _FROM, _WHERE, _LIMIT_1, "UNION", _SELECT_ID, _FROM, _WHERE, _LIMIT_1)
     assert _rejection(sql) is SqlGuardRejection.NON_SELECT
 
 
@@ -287,30 +282,20 @@ def test_a13_negative_limit_is_refused() -> None:
 )
 def test_a16_unbounded_windows_are_refused(where: str) -> None:
     assert (
-        _rejection(_sql(_SELECT_ID, _FROM, where, _LIMIT_1))
-        is SqlGuardRejection.WINDOW_UNBOUNDED
+        _rejection(_sql(_SELECT_ID, _FROM, where, _LIMIT_1)) is SqlGuardRejection.WINDOW_UNBOUNDED
     )
 
 
 @pytest.mark.parametrize(
     "where",
     [
-        (
-            "WHERE `timestamp` >= '2026-09-02 10:00:00' "
-            "AND `timestamp` < '2026-09-02 12:00:00'"
-        ),
-        (
-            "WHERE `timestamp` >= '2026-09-02 11:30:00' "
-            "AND `timestamp` < '2026-09-02 13:00:00'"
-        ),
+        ("WHERE `timestamp` >= '2026-09-02 10:00:00' AND `timestamp` < '2026-09-02 12:00:00'"),
+        ("WHERE `timestamp` >= '2026-09-02 11:30:00' AND `timestamp` < '2026-09-02 13:00:00'"),
     ],
     ids=["start_moved", "end_moved"],
 )
 def test_a17_window_literals_must_equal_the_params(where: str) -> None:
-    assert (
-        _rejection(_sql(_SELECT_ID, _FROM, where, _LIMIT_1))
-        is SqlGuardRejection.WINDOW_MISMATCH
-    )
+    assert _rejection(_sql(_SELECT_ID, _FROM, where, _LIMIT_1)) is SqlGuardRejection.WINDOW_MISMATCH
 
 
 def test_a14_window_wider_than_the_cap_is_refused_at_the_sql_layer() -> None:

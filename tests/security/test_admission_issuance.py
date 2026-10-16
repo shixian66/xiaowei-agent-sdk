@@ -70,6 +70,7 @@ def _gateway() -> tuple[DeterministicToolGateway, RecordingToolAdapter]:
 
 # --- 不可伪造 ---------------------------------------------------------------
 
+
 def test_public_construction_is_refused() -> None:
     with pytest.raises(ValidationError):
         AdmissionCertificate(
@@ -133,6 +134,7 @@ def test_the_issuer_recomputes_the_call_hash_instead_of_trusting_input() -> None
 
 
 # --- policy revision 绑定 ---------------------------------------------------
+
 
 def test_issuing_under_a_stale_revision_is_refused() -> None:
     with pytest.raises(BindingError):

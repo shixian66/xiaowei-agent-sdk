@@ -25,9 +25,7 @@ from xiaowei_agent.planning import compute_plan_hash, compute_target_fingerprint
 pytestmark = pytest.mark.security
 
 _NOW = dt.datetime(2026, 9, 2, 12, 0, tzinfo=dt.UTC)
-_SNAPSHOT = PolicySnapshot(
-    policy_revision="policy-2026-09-01", profiles=("readonly.default",)
-)
+_SNAPSHOT = PolicySnapshot(policy_revision="policy-2026-09-01", profiles=("readonly.default",))
 
 
 def _approval(**overrides: object) -> ApprovalRequest:
@@ -71,9 +69,7 @@ def test_matching_binding_passes() -> None:
 def test_plan_drift_is_rejected() -> None:
     drifted = FIXTURE_PLAN.model_copy(update={"capability_version": "1.0.1"})
     with pytest.raises(BindingError) as exc:
-        verify_approval_binding(
-            approval=_approval(), plan=drifted, target=FIXTURE_TARGET, now=_NOW
-        )
+        verify_approval_binding(approval=_approval(), plan=drifted, target=FIXTURE_TARGET, now=_NOW)
     assert exc.value.rejection is BindingRejection.PLAN_DRIFT
 
 
@@ -82,18 +78,14 @@ def test_budget_drift_is_detected_through_the_plan_hash() -> None:
     bigger = FIXTURE_PLAN.budget.model_copy(update={"max_tool_calls": 999})
     drifted = FIXTURE_PLAN.model_copy(update={"budget": bigger})
     with pytest.raises(BindingError) as exc:
-        verify_approval_binding(
-            approval=_approval(), plan=drifted, target=FIXTURE_TARGET, now=_NOW
-        )
+        verify_approval_binding(approval=_approval(), plan=drifted, target=FIXTURE_TARGET, now=_NOW)
     assert exc.value.rejection is BindingRejection.PLAN_DRIFT
 
 
 def test_target_drift_is_rejected() -> None:
     drifted = FIXTURE_TARGET.model_copy(update={"resource_ids": ("c3",)})
     with pytest.raises(BindingError) as exc:
-        verify_approval_binding(
-            approval=_approval(), plan=FIXTURE_PLAN, target=drifted, now=_NOW
-        )
+        verify_approval_binding(approval=_approval(), plan=FIXTURE_PLAN, target=drifted, now=_NOW)
     assert exc.value.rejection is BindingRejection.TARGET_DRIFT
 
 
@@ -146,9 +138,7 @@ def test_expiry_is_reported_when_both_expiry_and_state_are_violated() -> None:
     就会通过，顺序对结果毫无影响——那样的测试是空的（变异测试已证实：调换顺序
     仍全绿）。
     """
-    approval = _approval(
-        state=ApprovalState.PENDING, expires_at=_NOW - dt.timedelta(seconds=1)
-    )
+    approval = _approval(state=ApprovalState.PENDING, expires_at=_NOW - dt.timedelta(seconds=1))
     with pytest.raises(BindingError) as exc:
         verify_approval_binding(
             approval=approval, plan=FIXTURE_PLAN, target=FIXTURE_TARGET, now=_NOW
@@ -161,7 +151,5 @@ def test_drift_is_not_reported_while_the_approval_itself_is_invalid() -> None:
     drifted = FIXTURE_PLAN.model_copy(update={"capability_version": "9.9.9"})
     approval = _approval(state=ApprovalState.REJECTED)
     with pytest.raises(BindingError) as exc:
-        verify_approval_binding(
-            approval=approval, plan=drifted, target=FIXTURE_TARGET, now=_NOW
-        )
+        verify_approval_binding(approval=approval, plan=drifted, target=FIXTURE_TARGET, now=_NOW)
     assert exc.value.rejection is BindingRejection.APPROVAL_NOT_GRANTED

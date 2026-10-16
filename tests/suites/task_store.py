@@ -130,14 +130,10 @@ async def test_new_task_has_initial_execution_accounting(store, context) -> None
 async def test_created_sequence_is_strictly_increasing(store, context) -> None:
     """created_seq 是稳定近似公平顺序；至少必须唯一且随创建推进。"""
     first = await store.create_task(
-        submission=make_submission(
-            context, envelope=make_envelope(idempotency_key="created-seq-1")
-        )
+        submission=make_submission(context, envelope=make_envelope(idempotency_key="created-seq-1"))
     )
     second = await store.create_task(
-        submission=make_submission(
-            context, envelope=make_envelope(idempotency_key="created-seq-2")
-        )
+        submission=make_submission(context, envelope=make_envelope(idempotency_key="created-seq-2"))
     )
     assert second.created_seq > first.created_seq
 
@@ -163,9 +159,7 @@ async def test_idempotency_key_is_scoped_per_tenant(store, context) -> None:
     a = await store.create_task(submission=make_submission(context))
     other = context.model_copy(update={"tenant_id": "other-tenant"})
     b = await store.create_task(
-        submission=make_submission(
-            other, envelope=make_envelope(tenant_id="other-tenant")
-        )
+        submission=make_submission(other, envelope=make_envelope(tenant_id="other-tenant"))
     )
     assert a.task_id != b.task_id
 
@@ -174,9 +168,7 @@ async def test_idempotency_key_is_scoped_per_environment(store, context) -> None
     a = await store.create_task(submission=make_submission(context))
     other = context.model_copy(update={"environment_id": "staging"})
     b = await store.create_task(
-        submission=make_submission(
-            other, envelope=make_envelope(environment_id="staging")
-        )
+        submission=make_submission(other, envelope=make_envelope(environment_id="staging"))
     )
     assert a.task_id != b.task_id
 
@@ -201,18 +193,14 @@ async def test_envelope_context_mismatch_is_rejected(store, context, field, valu
     """伪造信封上下文必须拒绝，否则任务会记在未经解析确认的租户/环境下。"""
     with pytest.raises(ContextMismatchError):
         await store.create_task(
-            submission=make_submission(
-                context, envelope=make_envelope(**{field: value})
-            )
+            submission=make_submission(context, envelope=make_envelope(**{field: value}))
         )
 
 
 async def test_envelope_without_environment_id_is_accepted(store, context) -> None:
     """environment_id 在信封中可选；缺省时以 context 解析结果为准（ADR-007 D2）。"""
     record = await store.create_task(
-        submission=make_submission(
-            context, envelope=make_envelope(environment_id=None)
-        )
+        submission=make_submission(context, envelope=make_envelope(environment_id=None))
     )
     assert record.environment_id == context.environment_id
 
@@ -222,18 +210,14 @@ async def test_get_unknown_task_raises(store, context) -> None:
         await store.get(lookup=make_lookup("no-such-task", context))
 
 
-async def test_get_rejects_the_wrong_tenant_without_leaking_existence(
-    store, context
-) -> None:
+async def test_get_rejects_the_wrong_tenant_without_leaking_existence(store, context) -> None:
     record = await store.create_task(submission=make_submission(context))
     lookup = lookup_for(record).model_copy(update={"tenant_id": "other-tenant"})
     with pytest.raises(TaskNotFoundError):
         await store.get(lookup=lookup)
 
 
-async def test_get_rejects_the_wrong_environment_without_leaking_existence(
-    store, context
-) -> None:
+async def test_get_rejects_the_wrong_environment_without_leaking_existence(store, context) -> None:
     record = await store.create_task(submission=make_submission(context))
     lookup = lookup_for(record).model_copy(update={"environment_id": "prod"})
     with pytest.raises(TaskNotFoundError):
@@ -249,8 +233,8 @@ async def test_bare_task_id_is_not_a_supported_read_shape(store, task) -> None:
 
 
 async def test_cas_success_bumps_version(store, task) -> None:
-    result = await _transition(store,
-        task_id=task.task_id, expected_version=task.version, to_status=TaskStatus.PLANNING
+    result = await _transition(
+        store, task_id=task.task_id, expected_version=task.version, to_status=TaskStatus.PLANNING
     )
     assert result.applied is True
     assert result.rejection is None
@@ -259,11 +243,11 @@ async def test_cas_success_bumps_version(store, task) -> None:
 
 async def test_cas_failure_returns_the_storage_winner(store, task) -> None:
     """调用方必须能拿到 winner，而不是只知道"失败了"。"""
-    await _transition(store,
-        task_id=task.task_id, expected_version=task.version, to_status=TaskStatus.PLANNING
+    await _transition(
+        store, task_id=task.task_id, expected_version=task.version, to_status=TaskStatus.PLANNING
     )
-    stale = await _transition(store,
-        task_id=task.task_id, expected_version=task.version, to_status=TaskStatus.RUNNING
+    stale = await _transition(
+        store, task_id=task.task_id, expected_version=task.version, to_status=TaskStatus.RUNNING
     )
     assert stale.applied is False
     assert stale.rejection is TransitionRejection.VERSION_MISMATCH
@@ -272,8 +256,8 @@ async def test_cas_failure_returns_the_storage_winner(store, task) -> None:
 
 
 async def test_illegal_transition_is_rejected(store, task) -> None:
-    result = await _transition(store,
-        task_id=task.task_id, expected_version=task.version, to_status=TaskStatus.SUCCEEDED
+    result = await _transition(
+        store, task_id=task.task_id, expected_version=task.version, to_status=TaskStatus.SUCCEEDED
     )
     assert result.applied is False
     assert result.rejection is TransitionRejection.ILLEGAL_TRANSITION
@@ -289,7 +273,8 @@ async def test_terminal_reason_is_cleared_when_a_transition_omits_it(store, task
     这条同时是 M4 的跨实现约束：PostgreSQL 实现必须同样无条件 ``SET``，包括
     ``SET terminal_reason = NULL``，不得写成"有值才进 SET 子句"。
     """
-    marked = await _transition(store,
+    marked = await _transition(
+        store,
         task_id=task.task_id,
         expected_version=task.version,
         to_status=TaskStatus.PLANNING,
@@ -298,7 +283,8 @@ async def test_terminal_reason_is_cleared_when_a_transition_omits_it(store, task
     assert marked.applied
     assert marked.winner.terminal_reason == "transient.upstream_timeout"
 
-    resumed = await _transition(store,
+    resumed = await _transition(
+        store,
         task_id=task.task_id,
         expected_version=marked.winner.version,
         to_status=TaskStatus.RUNNING,
@@ -316,9 +302,7 @@ async def test_second_holder_is_refused_while_lease_is_live(store, task) -> None
     assert await store.acquire_lease(task_id=task.task_id, owner="w2", ttl_seconds=30) is None
 
 
-async def test_expired_lease_can_be_taken_over_with_a_higher_token(
-    store, task, clock
-) -> None:
+async def test_expired_lease_can_be_taken_over_with_a_higher_token(store, task, clock) -> None:
     first = await store.acquire_lease(task_id=task.task_id, owner="w1", ttl_seconds=30)
     clock.advance(seconds=31)
     second = await store.acquire_lease(task_id=task.task_id, owner="w2", ttl_seconds=30)
@@ -392,7 +376,8 @@ async def test_stale_token_write_is_rejected(store, task, clock) -> None:
     clock.advance(seconds=31)
     await store.acquire_lease(task_id=task.task_id, owner="w2", ttl_seconds=30)
     current = await store.get(lookup=lookup_for(task))
-    result = await _transition(store,
+    result = await _transition(
+        store,
         task_id=task.task_id,
         expected_version=current.version,
         to_status=TaskStatus.PLANNING,
@@ -406,7 +391,8 @@ async def test_write_without_token_under_live_lease_is_rejected(store, task) -> 
     """不传 token 即跳过 fencing 校验，等于没有 fencing。"""
     await store.acquire_lease(task_id=task.task_id, owner="w1", ttl_seconds=30)
     current = await store.get(lookup=lookup_for(task))
-    result = await _transition(store,
+    result = await _transition(
+        store,
         task_id=task.task_id,
         expected_version=current.version,
         to_status=TaskStatus.PLANNING,
@@ -417,7 +403,8 @@ async def test_write_without_token_under_live_lease_is_rejected(store, task) -> 
 
 async def test_token_without_any_live_lease_is_rejected(store, task) -> None:
     """持有一个不存在的租约同样是违规。"""
-    result = await _transition(store,
+    result = await _transition(
+        store,
         task_id=task.task_id,
         expected_version=task.version,
         to_status=TaskStatus.PLANNING,
@@ -429,7 +416,8 @@ async def test_token_without_any_live_lease_is_rejected(store, task) -> None:
 
 async def test_transition_without_any_lease_is_allowed(store, task) -> None:
     """created → planning 发生在取租约之前，必须放行，否则任务无法启动。"""
-    result = await _transition(store,
+    result = await _transition(
+        store,
         task_id=task.task_id,
         expected_version=task.version,
         to_status=TaskStatus.PLANNING,
@@ -439,8 +427,8 @@ async def test_transition_without_any_lease_is_allowed(store, task) -> None:
 
 async def test_terminal_task_cannot_acquire_lease(store, task) -> None:
     """已终态的任务不应再被任何 worker 领走。"""
-    await _transition(store,
-        task_id=task.task_id, expected_version=task.version, to_status=TaskStatus.CANCELED
+    await _transition(
+        store, task_id=task.task_id, expected_version=task.version, to_status=TaskStatus.CANCELED
     )
     assert await store.acquire_lease(task_id=task.task_id, owner="w1", ttl_seconds=30) is None
 
@@ -450,7 +438,8 @@ async def test_stale_token_is_reported_before_version_mismatch(store, task, cloc
     old = await store.acquire_lease(task_id=task.task_id, owner="w1", ttl_seconds=30)
     clock.advance(seconds=31)
     await store.acquire_lease(task_id=task.task_id, owner="w2", ttl_seconds=30)
-    result = await _transition(store,
+    result = await _transition(
+        store,
         task_id=task.task_id,
         expected_version=999,
         to_status=TaskStatus.PLANNING,
@@ -459,9 +448,7 @@ async def test_stale_token_is_reported_before_version_mismatch(store, task, cloc
     assert result.rejection is TransitionRejection.STALE_FENCING_TOKEN
 
 
-async def test_expired_lease_cannot_be_bypassed_by_omitting_the_token(
-    store, task, clock
-) -> None:
+async def test_expired_lease_cannot_be_bypassed_by_omitting_the_token(store, task, clock) -> None:
     """租约过期后，stale worker 不带 token 也不得写入。
 
     把规则锚定在"租约此刻是否 live"会留下这个缺口：过期后 live 为假，"有租约缺
@@ -470,7 +457,8 @@ async def test_expired_lease_cannot_be_bypassed_by_omitting_the_token(
     await store.acquire_lease(task_id=task.task_id, owner="w1", ttl_seconds=30)
     clock.advance(seconds=31)
     current = await store.get(lookup=lookup_for(task))
-    result = await _transition(store,
+    result = await _transition(
+        store,
         task_id=task.task_id,
         expected_version=current.version,
         to_status=TaskStatus.PLANNING,
@@ -479,14 +467,13 @@ async def test_expired_lease_cannot_be_bypassed_by_omitting_the_token(
     assert result.rejection is TransitionRejection.LEASE_NOT_HELD
 
 
-async def test_expired_lease_cannot_be_used_with_its_old_token_either(
-    store, task, clock
-) -> None:
+async def test_expired_lease_cannot_be_used_with_its_old_token_either(store, task, clock) -> None:
     """过期后必须重新 acquire，带着旧 token 同样不行。"""
     granted = await store.acquire_lease(task_id=task.task_id, owner="w1", ttl_seconds=30)
     clock.advance(seconds=31)
     current = await store.get(lookup=lookup_for(task))
-    result = await _transition(store,
+    result = await _transition(
+        store,
         task_id=task.task_id,
         expected_version=current.version,
         to_status=TaskStatus.PLANNING,
@@ -502,15 +489,16 @@ async def test_expired_lease_cannot_be_used_with_its_old_token_either(
 async def test_expected_version_rejects_bool(store, task) -> None:
     """False 会匹配版本 0，True 会匹配版本 1。"""
     with pytest.raises(ValidationError):
-        await _transition(store,
-            task_id=task.task_id, expected_version=False, to_status=TaskStatus.PLANNING
+        await _transition(
+            store, task_id=task.task_id, expected_version=False, to_status=TaskStatus.PLANNING
         )
 
 
 async def test_fencing_token_rejects_bool(store, task) -> None:
     """True 会匹配 token 1。"""
     with pytest.raises(ValidationError):
-        await _transition(store,
+        await _transition(
+            store,
             task_id=task.task_id,
             expected_version=task.version,
             to_status=TaskStatus.PLANNING,
@@ -520,8 +508,8 @@ async def test_fencing_token_rejects_bool(store, task) -> None:
 
 async def test_to_status_rejects_a_plain_string(store, task) -> None:
     with pytest.raises(ValidationError):
-        await _transition(store,
-            task_id=task.task_id, expected_version=task.version, to_status="planning"
+        await _transition(
+            store, task_id=task.task_id, expected_version=task.version, to_status="planning"
         )
 
 
@@ -560,9 +548,7 @@ async def test_invalid_lease_arguments_do_not_mutate_the_store(
 async def _leased_task(store, context, key: str, owner: str):
     """新建一个任务并给它一份租约，返回 ``(record, grant)``。"""
     record = await store.create_task(
-        submission=make_submission(
-            context, envelope=make_envelope(idempotency_key=key)
-        )
+        submission=make_submission(context, envelope=make_envelope(idempotency_key=key))
     )
     grant = await store.acquire_lease(task_id=record.task_id, owner=owner, ttl_seconds=30)
     return record, grant
@@ -595,7 +581,8 @@ async def test_a_terminal_task_is_never_stale(store, task, clock) -> None:
     await store.acquire_lease(task_id=task.task_id, owner="w1", ttl_seconds=30)
     clock.advance(seconds=31)
     current = await store.get(lookup=lookup_for(task))
-    result = await _transition(store,
+    result = await _transition(
+        store,
         task_id=task.task_id,
         expected_version=current.version,
         to_status=TaskStatus.CANCELED,
@@ -603,7 +590,8 @@ async def test_a_terminal_task_is_never_stale(store, task, clock) -> None:
     assert result.applied is False  # 过期租约下写入被拒，任务仍非终态
     taken = await store.acquire_lease(task_id=task.task_id, owner="w2", ttl_seconds=30)
     assert taken is not None
-    done = await _transition(store,
+    done = await _transition(
+        store,
         task_id=task.task_id,
         expected_version=current.version,
         to_status=TaskStatus.CANCELED,
@@ -645,9 +633,7 @@ async def test_stale_leases_with_the_same_expiry_are_ordered_by_task_id(
         stale[0].lease_expires_at,
         stale[0].lease_expires_at,
     ], "前提不成立：两条租约的过期时间应当相同"
-    assert [record.task_id for record in stale] == sorted(
-        [first.task_id, second.task_id]
-    )
+    assert [record.task_id for record in stale] == sorted([first.task_id, second.task_id])
 
 
 async def test_stale_leases_respect_the_limit(store, context, clock) -> None:
@@ -675,7 +661,8 @@ async def test_a_terminal_task_cannot_crowd_out_a_stale_one(store, context, cloc
     pending, _ = await _leased_task(store, context, "idem-pending", "w2")
 
     current = await store.get(lookup=lookup_for(finished))
-    done = await _transition(store,
+    done = await _transition(
+        store,
         task_id=finished.task_id,
         expected_version=current.version,
         to_status=TaskStatus.CANCELED,
@@ -728,8 +715,8 @@ async def test_no_transition_out_of_any_terminal_status(store, task, terminal) -
     await drive_to_terminal(store, lookup_for(task), terminal)
     current = await store.get(lookup=lookup_for(task))
     for target in TaskStatus:
-        result = await _transition(store,
-            task_id=task.task_id, expected_version=current.version, to_status=target
+        result = await _transition(
+            store, task_id=task.task_id, expected_version=current.version, to_status=target
         )
         assert result.applied is False
         assert result.rejection is TransitionRejection.TERMINAL_PROTECTED
@@ -738,11 +725,11 @@ async def test_no_transition_out_of_any_terminal_status(store, task, terminal) -
 
 async def test_terminal_protection_wins_over_version_mismatch(store, task) -> None:
     """拒绝原因必须指向最具体的违规，否则真实原因会被掩盖。"""
-    await _transition(store,
-        task_id=task.task_id, expected_version=task.version, to_status=TaskStatus.CANCELED
+    await _transition(
+        store, task_id=task.task_id, expected_version=task.version, to_status=TaskStatus.CANCELED
     )
-    result = await _transition(store,
-        task_id=task.task_id, expected_version=999, to_status=TaskStatus.RUNNING
+    result = await _transition(
+        store, task_id=task.task_id, expected_version=999, to_status=TaskStatus.RUNNING
     )
     assert result.rejection is TransitionRejection.TERMINAL_PROTECTED
 
@@ -763,9 +750,7 @@ async def test_first_approval_of_a_task_is_seq_one(store, task) -> None:
 
 async def test_approval_seq_increases_within_a_task(store, task) -> None:
     """同一步骤可以被多次请求审批（超时后重新发起），第二次不得覆盖第一次。"""
-    seqs = [
-        await store.record_approval(request=make_approval(task.task_id)) for _ in range(3)
-    ]
+    seqs = [await store.record_approval(request=make_approval(task.task_id)) for _ in range(3)]
     assert seqs == [1, 2, 3]
 
 
@@ -773,9 +758,7 @@ async def test_approval_seq_is_scoped_per_task(store, context) -> None:
     """序号按任务分桶。用全局计数器同样能让上一条通过，但两个任务会共享号段。"""
     first = await store.create_task(submission=make_submission(context))
     second = await store.create_task(
-        submission=make_submission(
-            context, envelope=make_envelope(idempotency_key="idem-2")
-        )
+        submission=make_submission(context, envelope=make_envelope(idempotency_key="idem-2"))
     )
     assert await store.record_approval(request=make_approval(first.task_id)) == 1
     assert await store.record_approval(request=make_approval(second.task_id)) == 1
@@ -794,9 +777,7 @@ async def test_audit_seq_increases_within_a_task(store, task) -> None:
     """
     seqs = [
         await store.record_audit_event(
-            event=make_event(
-                stage=PipelineStage.ADMISSION, task_id=task.task_id, event_id=f"e{n}"
-            )
+            event=make_event(stage=PipelineStage.ADMISSION, task_id=task.task_id, event_id=f"e{n}")
         )
         for n in range(3)
     ]
@@ -806,28 +787,25 @@ async def test_audit_seq_increases_within_a_task(store, task) -> None:
 async def test_audit_seq_is_scoped_per_task(store, context) -> None:
     first = await store.create_task(submission=make_submission(context))
     second = await store.create_task(
-        submission=make_submission(
-            context, envelope=make_envelope(idempotency_key="idem-2")
-        )
+        submission=make_submission(context, envelope=make_envelope(idempotency_key="idem-2"))
     )
     stage = PipelineStage.ADMISSION
-    assert await store.record_audit_event(
-        event=make_event(stage=stage, task_id=first.task_id)
-    ) == 1
-    assert await store.record_audit_event(
-        event=make_event(stage=stage, task_id=second.task_id)
-    ) == 1
-    assert await store.record_audit_event(
-        event=make_event(stage=stage, task_id=first.task_id)
-    ) == 2
+    assert await store.record_audit_event(event=make_event(stage=stage, task_id=first.task_id)) == 1
+    assert (
+        await store.record_audit_event(event=make_event(stage=stage, task_id=second.task_id)) == 1
+    )
+    assert await store.record_audit_event(event=make_event(stage=stage, task_id=first.task_id)) == 2
 
 
 async def test_approval_and_audit_seq_are_independent(store, task) -> None:
     """两张表各自编号。共用一个计数器时，前面几条按任务分桶的用例照样全绿。"""
     assert await store.record_approval(request=make_approval(task.task_id)) == 1
-    assert await store.record_audit_event(
-        event=make_event(stage=PipelineStage.ADMISSION, task_id=task.task_id)
-    ) == 1
+    assert (
+        await store.record_audit_event(
+            event=make_event(stage=PipelineStage.ADMISSION, task_id=task.task_id)
+        )
+        == 1
+    )
     assert await store.record_approval(request=make_approval(task.task_id)) == 2
 
 
@@ -845,9 +823,12 @@ async def test_audit_event_without_a_task_id_is_rejected(store) -> None:
     # 的实现都只会往一个占位桶里写，从 Protocol 上完全观察不到。落盘层面的证据在
     # tests/integration/test_audit_and_approval_ledgers.py 直接读表，调用顺序本身
     # 由 tests/security/test_audit_ledger_guards.py 按 AST 钉死。
-    assert await store.record_audit_event(
-        event=make_event(stage=PipelineStage.ADMISSION, task_id="task-after-reject")
-    ) == 1
+    assert (
+        await store.record_audit_event(
+            event=make_event(stage=PipelineStage.ADMISSION, task_id="task-after-reject")
+        )
+        == 1
+    )
 
 
 async def test_audit_events_do_not_require_the_task_to_exist(store) -> None:
@@ -904,7 +885,8 @@ def _retry_command(grant, *, next_attempt_at: _dt.datetime, event_id: str = "ret
 async def _move(store, record, *statuses: TaskStatus):
     current = record
     for status in statuses:
-        result = await _transition(store,
+        result = await _transition(
+            store,
             task_id=current.task_id,
             expected_version=current.version,
             to_status=status,
@@ -957,9 +939,7 @@ async def test_dispatch_is_scope_isolated_and_stably_ordered(store, context) -> 
     await store.create_task(
         submission=make_submission(
             other_context,
-            envelope=make_envelope(
-                tenant_id="other-tenant", idempotency_key="dispatch-other"
-            ),
+            envelope=make_envelope(tenant_id="other-tenant", idempotency_key="dispatch-other"),
         )
     )
     found = await store.list_dispatchable_tasks(
@@ -972,9 +952,7 @@ async def test_dispatch_is_scope_isolated_and_stably_ordered(store, context) -> 
     assert [record.task_id for record in found] == [first.task_id, second.task_id]
 
 
-async def test_begin_attempt_returns_the_original_submission_and_one_grant(
-    store, context
-) -> None:
+async def test_begin_attempt_returns_the_original_submission_and_one_grant(store, context) -> None:
     submission = make_submission(context)
     task = await store.create_task(submission=submission)
     result = await store.begin_task_attempt(command=_attempt_command(task.task_id))
@@ -986,9 +964,7 @@ async def test_begin_attempt_returns_the_original_submission_and_one_grant(
     assert result.winner.version == task.version
     assert result.committed_audit_events == ()
 
-    loser = await store.begin_task_attempt(
-        command=_attempt_command(task.task_id, owner="worker-2")
-    )
+    loser = await store.begin_task_attempt(command=_attempt_command(task.task_id, owner="worker-2"))
     assert loser.applied is False
     assert loser.rejection is TaskAttemptRejection.LIVE_LEASE
     assert loser.submission is None
@@ -1008,15 +984,11 @@ async def test_attempt_intents_have_disjoint_status_sets(store, task) -> None:
         TaskStatus.RUNNING,
         TaskStatus.AWAITING_APPROVAL,
     )
-    wrong_dispatch = await store.begin_task_attempt(
-        command=_attempt_command(awaiting.task_id)
-    )
+    wrong_dispatch = await store.begin_task_attempt(command=_attempt_command(awaiting.task_id))
     assert wrong_dispatch.rejection is TaskAttemptRejection.NOT_DISPATCHABLE
 
     resumed = await store.begin_task_attempt(
-        command=_attempt_command(
-            awaiting.task_id, intent=AttemptIntent.APPROVAL_RESUME
-        )
+        command=_attempt_command(awaiting.task_id, intent=AttemptIntent.APPROVAL_RESUME)
     )
     assert resumed.applied
     assert resumed.grant is not None
@@ -1027,15 +999,14 @@ async def test_schedule_retry_is_idempotent_and_immediately_fences_the_grant(
 ) -> None:
     started = await store.begin_task_attempt(command=_attempt_command(task.task_id))
     assert started.grant is not None
-    command = _retry_command(
-        started.grant, next_attempt_at=clock() + _dt.timedelta(seconds=10)
-    )
+    command = _retry_command(started.grant, next_attempt_at=clock() + _dt.timedelta(seconds=10))
     first = await store.schedule_retry(command=command)
     assert first.decision is RetryDecision.SCHEDULED
     assert first.winner.task_failure_count == 1
     assert first.winner.fencing_token > started.grant.fencing_token
     assert first.winner.lease_expires_at == command.next_attempt_at
-    stale_write = await _transition(store,
+    stale_write = await _transition(
+        store,
         task_id=task.task_id,
         expected_version=first.winner.version,
         to_status=TaskStatus.PLANNING,
@@ -1057,9 +1028,7 @@ async def test_schedule_retry_is_idempotent_and_immediately_fences_the_grant(
 
 
 @pytest.mark.parametrize("delay", [30, 60, 90], ids=["shorter", "equal", "longer"])
-async def test_retry_is_not_due_until_the_exact_boundary(
-    store, task, clock, delay
-) -> None:
+async def test_retry_is_not_due_until_the_exact_boundary(store, task, clock, delay) -> None:
     started = await store.begin_task_attempt(command=_attempt_command(task.task_id))
     assert started.grant is not None
     due = clock() + _dt.timedelta(seconds=delay)
@@ -1068,9 +1037,7 @@ async def test_retry_is_not_due_until_the_exact_boundary(
     )
     assert scheduled.decision is RetryDecision.SCHEDULED
 
-    early = await store.begin_task_attempt(
-        command=_attempt_command(task.task_id, owner="worker-2")
-    )
+    early = await store.begin_task_attempt(command=_attempt_command(task.task_id, owner="worker-2"))
     assert early.rejection is TaskAttemptRejection.RETRY_NOT_DUE
     clock.advance(seconds=delay)
     next_attempt = await store.begin_task_attempt(
@@ -1086,12 +1053,11 @@ async def test_retry_is_not_due_until_the_exact_boundary(
     assert stale_replay.decision is RetryDecision.STALE_FENCING
 
 
-async def test_retry_accepts_a_grant_that_failed_during_planning(
-    store, task, clock
-) -> None:
+async def test_retry_accepts_a_grant_that_failed_during_planning(store, task, clock) -> None:
     started = await store.begin_task_attempt(command=_attempt_command(task.task_id))
     assert started.grant is not None
-    planning = await _transition(store,
+    planning = await _transition(
+        store,
         task_id=task.task_id,
         expected_version=started.winner.version,
         to_status=TaskStatus.PLANNING,
@@ -1099,9 +1065,7 @@ async def test_retry_accepts_a_grant_that_failed_during_planning(
     )
     assert planning.applied
     retried = await store.schedule_retry(
-        command=_retry_command(
-            started.grant, next_attempt_at=clock() + _dt.timedelta(seconds=1)
-        )
+        command=_retry_command(started.grant, next_attempt_at=clock() + _dt.timedelta(seconds=1))
     )
     assert retried.decision is RetryDecision.SCHEDULED
     assert retried.winner.task_failure_count == 1
@@ -1112,9 +1076,7 @@ async def test_expired_grant_cannot_schedule_retry(store, task, clock) -> None:
     assert started.grant is not None
     clock.advance(seconds=60)
     result = await store.schedule_retry(
-        command=_retry_command(
-            started.grant, next_attempt_at=clock() + _dt.timedelta(seconds=1)
-        )
+        command=_retry_command(started.grant, next_attempt_at=clock() + _dt.timedelta(seconds=1))
     )
     assert result.decision is RetryDecision.STALE_FENCING
     assert result.winner.task_failure_count == 0
@@ -1168,14 +1130,16 @@ async def _running_attempt(store, plan_store, context, *, plan=FIXTURE_PLAN):
     started = await store.begin_task_attempt(command=_attempt_command(task.task_id))
     assert started.grant is not None
     await plan_store.save(task_id=task.task_id, plan=plan, target=FIXTURE_TARGET)
-    planning = await _transition(store,
+    planning = await _transition(
+        store,
         task_id=task.task_id,
         expected_version=started.winner.version,
         to_status=TaskStatus.PLANNING,
         fencing_token=started.grant.fencing_token,
     )
     assert planning.applied
-    running = await _transition(store,
+    running = await _transition(
+        store,
         task_id=task.task_id,
         expected_version=planning.winner.version,
         to_status=TaskStatus.RUNNING,
@@ -1212,9 +1176,7 @@ def _step_evidence(grant, *, value: str = "q1") -> EvidenceEnvelope:
     )
 
 
-async def test_step_begin_is_idempotent_within_one_grant(
-    store, plan_store, context
-) -> None:
+async def test_step_begin_is_idempotent_within_one_grant(store, plan_store, context) -> None:
     grant, _ = await _running_attempt(store, plan_store, context)
     command = StepAttemptCommand(grant=grant, step_id="s1")
     first = await store.begin_step_attempt(command=command)
@@ -1231,13 +1193,15 @@ async def test_unknown_step_and_missing_plan_create_no_journal_rows(
     task = await store.create_task(submission=make_submission(context))
     started = await store.begin_task_attempt(command=_attempt_command(task.task_id))
     assert started.grant is not None
-    planning = await _transition(store,
+    planning = await _transition(
+        store,
         task_id=task.task_id,
         expected_version=started.winner.version,
         to_status=TaskStatus.PLANNING,
         fencing_token=started.grant.fencing_token,
     )
-    running = await _transition(store,
+    running = await _transition(
+        store,
         task_id=task.task_id,
         expected_version=planning.winner.version,
         to_status=TaskStatus.RUNNING,
@@ -1262,9 +1226,7 @@ async def test_step_commit_atomically_exposes_evidence_and_is_idempotent(
     store, plan_store, evidence_ledger, context
 ) -> None:
     grant, _ = await _running_attempt(store, plan_store, context)
-    await store.begin_step_attempt(
-        command=StepAttemptCommand(grant=grant, step_id="s1")
-    )
+    await store.begin_step_attempt(command=StepAttemptCommand(grant=grant, step_id="s1"))
     command = StepCommitCommand(
         grant=grant,
         step_id="s1",
@@ -1292,9 +1254,7 @@ async def test_malformed_adapter_commit_is_terminal_without_evidence(
     store, plan_store, evidence_ledger, context
 ) -> None:
     grant, _ = await _running_attempt(store, plan_store, context)
-    await store.begin_step_attempt(
-        command=StepAttemptCommand(grant=grant, step_id="s1")
-    )
+    await store.begin_step_attempt(command=StepAttemptCommand(grant=grant, step_id="s1"))
     result = await store.commit_step_result(
         command=StepCommitCommand(
             grant=grant,
@@ -1312,9 +1272,7 @@ async def test_malformed_adapter_commit_is_terminal_without_evidence(
     assert await evidence_ledger.load(task_id=grant.task_id) == ()
 
 
-async def test_commit_without_a_matching_begin_is_rejected(
-    store, plan_store, context
-) -> None:
+async def test_commit_without_a_matching_begin_is_rejected(store, plan_store, context) -> None:
     grant, _ = await _running_attempt(store, plan_store, context)
     result = await store.commit_step_result(
         command=StepCommitCommand(
@@ -1334,32 +1292,26 @@ async def test_step_budget_is_derived_from_the_stored_plan(
     store, plan_store, context, two_step_plan
 ) -> None:
     plan = two_step_plan.model_copy(
-        update={
-            "budget": two_step_plan.budget.model_copy(update={"max_tool_calls": 1})
-        }
+        update={"budget": two_step_plan.budget.model_copy(update={"max_tool_calls": 1})}
     )
     grant, _ = await _running_attempt(store, plan_store, context, plan=plan)
-    first = await store.begin_step_attempt(
-        command=StepAttemptCommand(grant=grant, step_id="s1")
-    )
+    first = await store.begin_step_attempt(command=StepAttemptCommand(grant=grant, step_id="s1"))
     exhausted = await store.begin_step_attempt(
         command=StepAttemptCommand(grant=grant, step_id="s2")
     )
     assert first.decision is StepAttemptDecision.PROCEED
     assert exhausted.decision is StepAttemptDecision.BUDGET_EXHAUSTED
     assert exhausted.attempts_used == 1
-    assert [record.step_id for record in await store.load_step_executions(
-        task_id=grant.task_id
-    )] == ["s1"]
+    assert [
+        record.step_id for record in await store.load_step_executions(task_id=grant.task_id)
+    ] == ["s1"]
 
 
 async def test_new_grant_takeover_consumes_budget_and_old_grant_is_stale(
     store, plan_store, context, clock
 ) -> None:
     grant, _ = await _running_attempt(store, plan_store, context)
-    first = await store.begin_step_attempt(
-        command=StepAttemptCommand(grant=grant, step_id="s1")
-    )
+    first = await store.begin_step_attempt(command=StepAttemptCommand(grant=grant, step_id="s1"))
     assert first.record is not None
     clock.advance(seconds=61)
     takeover = await store.begin_task_attempt(
@@ -1392,11 +1344,7 @@ async def test_stale_fencing_and_not_runnable_can_return_no_step_row(
 ) -> None:
     grant, running = await _running_attempt(store, plan_store, context)
     forged = grant.model_copy(
-        update={
-            "lease": grant.lease.model_copy(
-                update={"fencing_token": grant.fencing_token + 1}
-            )
-        }
+        update={"lease": grant.lease.model_copy(update={"fencing_token": grant.fencing_token + 1})}
     )
     stale_begin = await store.begin_step_attempt(
         command=StepAttemptCommand(grant=forged, step_id="s1")
@@ -1448,9 +1396,7 @@ async def test_full_budget_allows_paid_reentry_and_commit(
     store, plan_store, context, two_step_plan
 ) -> None:
     plan = two_step_plan.model_copy(
-        update={
-            "budget": two_step_plan.budget.model_copy(update={"max_tool_calls": 1})
-        }
+        update={"budget": two_step_plan.budget.model_copy(update={"max_tool_calls": 1})}
     )
     grant, _ = await _running_attempt(store, plan_store, context, plan=plan)
     command = StepAttemptCommand(grant=grant, step_id="s1")
@@ -1477,14 +1423,10 @@ async def test_full_budget_blocks_a_new_grant_takeover(
     store, plan_store, context, clock, two_step_plan
 ) -> None:
     plan = two_step_plan.model_copy(
-        update={
-            "budget": two_step_plan.budget.model_copy(update={"max_tool_calls": 1})
-        }
+        update={"budget": two_step_plan.budget.model_copy(update={"max_tool_calls": 1})}
     )
     grant, _ = await _running_attempt(store, plan_store, context, plan=plan)
-    first = await store.begin_step_attempt(
-        command=StepAttemptCommand(grant=grant, step_id="s1")
-    )
+    first = await store.begin_step_attempt(command=StepAttemptCommand(grant=grant, step_id="s1"))
     assert first.record is not None
     clock.advance(seconds=61)
     takeover = await store.begin_task_attempt(
@@ -1503,9 +1445,7 @@ async def test_committed_step_replays_and_rejects_each_semantic_change(
     store, plan_store, evidence_ledger, context
 ) -> None:
     grant, _ = await _running_attempt(store, plan_store, context)
-    await store.begin_step_attempt(
-        command=StepAttemptCommand(grant=grant, step_id="s1")
-    )
+    await store.begin_step_attempt(command=StepAttemptCommand(grant=grant, step_id="s1"))
     command = StepCommitCommand(
         grant=grant,
         step_id="s1",
@@ -1538,21 +1478,15 @@ async def test_committed_step_replays_and_rejects_each_semantic_change(
         assert replay.rejection is StepCommitRejection.ALREADY_COMMITTED_DIFFERENT
         assert replay.record == committed.record
 
-    already = await store.begin_step_attempt(
-        command=StepAttemptCommand(grant=grant, step_id="s1")
-    )
+    already = await store.begin_step_attempt(command=StepAttemptCommand(grant=grant, step_id="s1"))
     assert already.decision is StepAttemptDecision.ALREADY_COMMITTED
     assert already.record == committed.record
     assert await evidence_ledger.load(task_id=grant.task_id) == (command.evidence,)
 
 
-async def test_timeout_is_a_distinct_persisted_step_outcome(
-    store, plan_store, context
-) -> None:
+async def test_timeout_is_a_distinct_persisted_step_outcome(store, plan_store, context) -> None:
     grant, _ = await _running_attempt(store, plan_store, context)
-    await store.begin_step_attempt(
-        command=StepAttemptCommand(grant=grant, step_id="s1")
-    )
+    await store.begin_step_attempt(command=StepAttemptCommand(grant=grant, step_id="s1"))
     result = await store.commit_step_result(
         command=StepCommitCommand(
             grant=grant,

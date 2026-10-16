@@ -43,9 +43,7 @@ def test_slot_environment_never_reaches_the_resolved_target(
     hostile_environment: str,
 ) -> None:
     """即使槽位指定了别的环境（含生产），目标仍恒为上下文里的环境。"""
-    target = resolve_target(
-        context=CONTEXT, draft=_draft(environment_id=hostile_environment)
-    )
+    target = resolve_target(context=CONTEXT, draft=_draft(environment_id=hostile_environment))
     assert target.environment_id == CONTEXT.environment_id
 
 

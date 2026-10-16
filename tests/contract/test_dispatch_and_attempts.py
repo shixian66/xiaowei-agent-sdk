@@ -145,9 +145,9 @@ def test_every_attempt_rejection_hides_submission(rejection: TaskAttemptRejectio
         status=TaskStatus.FAILED if terminal else TaskStatus.RUNNING,
         terminal_reason=rejection.value if terminal else None,
     )
-    event = make_event(
-        task_id="task-1", stage=PipelineStage.LIFECYCLE
-    ).model_copy(update={"attempt_number": 1})
+    event = make_event(task_id="task-1", stage=PipelineStage.LIFECYCLE).model_copy(
+        update={"attempt_number": 1}
+    )
     result = TaskAttemptResult(
         applied=False,
         winner=winner,
@@ -185,9 +185,7 @@ def test_idempotency_key_boundary_is_preserved_in_submission() -> None:
     assert len(submission.envelope.idempotency_key) == 200
 
 
-@pytest.mark.parametrize(
-    "damage", ["missing", "stored_digest", "request_digest", "scope"]
-)
+@pytest.mark.parametrize("damage", ["missing", "stored_digest", "request_digest", "scope"])
 async def test_corrupt_submission_fails_atomically_without_a_grant(
     store, memory_state, context, damage: str
 ) -> None:
@@ -199,14 +197,10 @@ async def test_corrupt_submission_fails_atomically_without_a_grant(
     elif damage == "stored_digest":
         memory_state.submission_digests[task.task_id] = "f" * 64
     elif damage == "request_digest":
-        memory_state.tasks[task.task_id] = task.model_copy(
-            update={"request_digest": "f" * 64}
-        )
+        memory_state.tasks[task.task_id] = task.model_copy(update={"request_digest": "f" * 64})
     else:
         memory_state.tasks[task.task_id] = task.model_copy(update={"actor": "mallory"})
-        assert memory_state.submission_digests[task.task_id] == submission_digest(
-            submission
-        )
+        assert memory_state.submission_digests[task.task_id] == submission_digest(submission)
 
     before_token = memory_state.next_fencing_token
     result = await store.begin_task_attempt(

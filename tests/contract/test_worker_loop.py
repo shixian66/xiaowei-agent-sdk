@@ -266,9 +266,7 @@ class _UnavailableBeginStore:
         return await self._inner.list_dispatchable_tasks(**kwargs)
 
     async def begin_task_attempt(self, **_: Any) -> Any:
-        raise PersistenceUnavailableError(
-            category=PersistenceUnavailableCategory.CONNECT
-        )
+        raise PersistenceUnavailableError(category=PersistenceUnavailableCategory.CONNECT)
 
 
 class _Monotonic:

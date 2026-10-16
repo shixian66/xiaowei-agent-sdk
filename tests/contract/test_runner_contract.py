@@ -87,9 +87,7 @@ async def test_runner_preserves_the_grant_owner(store, task) -> None:
     assert final.lease_owner == "w-alpha"
 
 
-async def test_two_runners_cannot_drive_the_same_task_concurrently(
-    store, task, clock
-) -> None:
+async def test_two_runners_cannot_drive_the_same_task_concurrently(store, task, clock) -> None:
     """Runner 只接受调度层给出的 grant，不得自行竞争或接管租约。"""
     stale = await _grant(store, task)
     clock.advance(seconds=61)

@@ -135,9 +135,7 @@ def test_adapter_response_cannot_carry_effect_classification() -> None:
     assert not ({"side_effect", "effect_class"} & set(AdapterResponse.model_fields))
 
 
-async def test_adapter_error_becomes_a_structured_agent_error(
-    ok_call, context, admission
-) -> None:
+async def test_adapter_error_becomes_a_structured_agent_error(ok_call, context, admission) -> None:
     """丢弃 AdapterResponse.error 会让上游失败在结果里看起来像一次空成功。"""
     cause = ExternalContent.capture(
         source=ExternalSource.TOOL,
@@ -197,9 +195,7 @@ def test_adapter_response_rejects_self_contradictory_combinations() -> None:
     """
     from pydantic import ValidationError
 
-    cause = ExternalContent.capture(
-        source=ExternalSource.TOOL, content="boom", captured_at=_AT
-    )
+    cause = ExternalContent.capture(source=ExternalSource.TOOL, content="boom", captured_at=_AT)
     with pytest.raises(ValidationError, match="must not carry an error"):
         AdapterResponse(
             status=AdapterStatus.OK,
@@ -238,9 +234,7 @@ async def test_failed_call_carries_no_data_view(ok_call, context, admission) -> 
     assert result.error.cause_ref is None  # 明确的"无原文"，不是丢失
 
 
-async def test_adapter_exception_is_structured_not_propagated(
-    ok_call, context, admission
-) -> None:
+async def test_adapter_exception_is_structured_not_propagated(ok_call, context, admission) -> None:
     """adapter 的任意异常不得原样冒泡。
 
     异常文本是外部内容；直接抛出会绕过 ExternalContent、AgentError 与脱敏边界，
@@ -261,9 +255,7 @@ async def test_adapter_exception_is_structured_not_propagated(
     assert result.data_view == ()
 
 
-async def test_adapter_exception_text_never_reaches_the_result(
-    ok_call, context, admission
-) -> None:
+async def test_adapter_exception_text_never_reaches_the_result(ok_call, context, admission) -> None:
     """异常原文只留摘要引用，不进入对外 JSON。"""
 
     class _ExplodingAdapter:
@@ -334,16 +326,20 @@ def test_referenced_detects_aliased_attribute_access(tmp_path: Path) -> None:
 
     aliased = tmp_path / "b.py"
     aliased.write_text(
-        "import xiaowei_agent.contracts.approval as approval" + nl
-        + "x = approval._ADMISSION_WITNESS" + nl,
+        "import xiaowei_agent.contracts.approval as approval"
+        + nl
+        + "x = approval._ADMISSION_WITNESS"
+        + nl,
         encoding="utf-8",
     )
     assert "_ADMISSION_WITNESS" in _referenced(aliased)
 
     dotted = tmp_path / "c.py"
     dotted.write_text(
-        "import xiaowei_agent.contracts.approval" + nl
-        + "x = xiaowei_agent.contracts.approval._ADMISSION_WITNESS" + nl,
+        "import xiaowei_agent.contracts.approval"
+        + nl
+        + "x = xiaowei_agent.contracts.approval._ADMISSION_WITNESS"
+        + nl,
         encoding="utf-8",
     )
     assert "_ADMISSION_WITNESS" in _referenced(dotted)

@@ -39,9 +39,7 @@ _NAIVE = dt.datetime(2026, 9, 2)
 # --- naive datetime ------------------------------------------------------
 def test_external_content_rejects_naive_datetime() -> None:
     with pytest.raises(ValidationError, match="timezone-aware"):
-        ExternalContent.capture(
-            source=ExternalSource.TOOL, content="x", captured_at=_NAIVE
-        )
+        ExternalContent.capture(source=ExternalSource.TOOL, content="x", captured_at=_NAIVE)
 
 
 def test_approval_request_rejects_naive_expiry() -> None:
@@ -126,9 +124,7 @@ def test_tool_result_trace_id_is_typed(gateway, ok_call, context, admission) -> 
 
 # --- ExternalInput 组合封闭 ----------------------------------------------
 def _content() -> ExternalContent:
-    return ExternalContent.capture(
-        source=ExternalSource.USER, content="more info", captured_at=_AT
-    )
+    return ExternalContent.capture(source=ExternalSource.USER, content="more info", captured_at=_AT)
 
 
 @pytest.mark.parametrize(

@@ -89,9 +89,7 @@ def test_sort_key_rejects_a_record_that_was_never_leased() -> None:
     [(TaskStatus.RUNNING, True), (TaskStatus.SUCCEEDED, False), (TaskStatus.FAILED, False)],
     ids=lambda value: getattr(value, "value", str(value)),
 )
-def test_is_stale_lease_excludes_terminal_statuses(
-    status: TaskStatus, expected: bool
-) -> None:
+def test_is_stale_lease_excludes_terminal_statuses(status: TaskStatus, expected: bool) -> None:
     """终态必须单独挡：租约三字段在过期后**不清空**，否则每个正常结束的任务都会被
     永久列为"可恢复"。"""
     record = _leased("a", expires_at=_EXPIRY, status=status)
@@ -132,9 +130,7 @@ def _grant(record: TaskRecord, *, expires_at: _dt.datetime | None = None) -> Tas
         (TaskStatus.SUCCEEDED, False),
     ],
 )
-def test_dispatch_filter_uses_the_closed_status_set(
-    status: TaskStatus, expected: bool
-) -> None:
+def test_dispatch_filter_uses_the_closed_status_set(status: TaskStatus, expected: bool) -> None:
     query = DispatchQuery(tenant_id="dev-local", environment_id="dev", limit=10)
     record = _leased("a", expires_at=_EXPIRY, status=status).model_copy(
         update={"lease_owner": None, "lease_expires_at": None, "fencing_token": None}
@@ -198,10 +194,7 @@ def test_attempt_rejection_order_starts_with_terminal_then_intent(
 ) -> None:
     record = _leased("a", expires_at=_EXPIRY, status=status)
     assert (
-        classify_task_attempt(
-            record, intent=intent, now=_LATER, task_failure_limit=3
-        )
-        is expected
+        classify_task_attempt(record, intent=intent, now=_LATER, task_failure_limit=3) is expected
     )
 
 
@@ -258,8 +251,6 @@ def test_grant_is_current_fails_closed_on_every_identity_dimension(
     grant = _grant(base)
     current = base.model_copy(update=updates)
     assert (
-        grant_is_current(
-            current, grant, now=_LATER, allowed_statuses=frozenset(allowed)
-        )
+        grant_is_current(current, grant, now=_LATER, allowed_statuses=frozenset(allowed))
         is expected
     )

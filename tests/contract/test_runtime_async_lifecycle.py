@@ -86,9 +86,7 @@ async def test_submit_is_persistent_but_does_not_execute() -> None:
 async def test_execute_uses_the_persisted_as_of_and_finishes_the_task() -> None:
     harness = RuntimeHarness(GOLDEN)
     persisted_as_of = dt.datetime(2026, 9, 3, 8, 15, tzinfo=dt.UTC)
-    submission = harness.submission(
-        "最近30分钟有哪些慢查询", as_of=persisted_as_of
-    )
+    submission = harness.submission("最近30分钟有哪些慢查询", as_of=persisted_as_of)
     view = await harness.runtime.submit_task(submission=submission)
     harness.task_id = view.task_id
     attempt = await harness.store.begin_task_attempt(
@@ -102,9 +100,7 @@ async def test_execute_uses_the_persisted_as_of_and_finishes_the_task() -> None:
     )
     assert attempt.grant is not None and attempt.submission is not None
 
-    outcome = await harness.runtime.execute_task(
-        grant=attempt.grant, submission=attempt.submission
-    )
+    outcome = await harness.runtime.execute_task(grant=attempt.grant, submission=attempt.submission)
 
     assert outcome.status is TaskStatus.SUCCEEDED
     assert harness.adapter.calls
@@ -177,9 +173,7 @@ async def test_query_persistence_failure_has_no_side_effects() -> None:
     original = harness.store.get
 
     async def _unavailable(*, lookup: TaskLookup) -> object:
-        raise PersistenceUnavailableError(
-            category=PersistenceUnavailableCategory.CONNECT
-        )
+        raise PersistenceUnavailableError(category=PersistenceUnavailableCategory.CONNECT)
 
     harness.store.get = _unavailable  # type: ignore[method-assign]
     try:
@@ -258,9 +252,7 @@ async def test_async_deterministic_rejection_is_persisted_once() -> None:
     )
     assert attempt.grant is not None and attempt.submission is not None
 
-    outcome = await harness.runtime.execute_task(
-        grant=attempt.grant, submission=attempt.submission
-    )
+    outcome = await harness.runtime.execute_task(grant=attempt.grant, submission=attempt.submission)
 
     record = await harness.store.get(lookup=harness.lookup)
     assert outcome.status is TaskStatus.REJECTED
@@ -298,9 +290,7 @@ async def test_conflicting_stored_plan_fails_before_gateway() -> None:
     )
     assert attempt.grant is not None and attempt.submission is not None
 
-    outcome = await harness.runtime.execute_task(
-        grant=attempt.grant, submission=attempt.submission
-    )
+    outcome = await harness.runtime.execute_task(grant=attempt.grant, submission=attempt.submission)
 
     assert outcome.status is TaskStatus.FAILED
     assert outcome.terminal_reason == RECOVERY_DRIFT_REASON
@@ -407,9 +397,7 @@ async def test_nonempty_new_execution_journal_is_terminal_invariant_failure() ->
 
 async def test_stale_finisher_cannot_borrow_the_winners_fencing_token() -> None:
     harness = RuntimeHarness(GOLDEN)
-    harness.runtime._sink = DurableTraceSink(
-        writer=harness.store, log_sink=harness.sink
-    )
+    harness.runtime._sink = DurableTraceSink(writer=harness.store, log_sink=harness.sink)
     submission = harness.submission("最近30分钟有哪些慢查询")
     view = await harness.runtime.submit_task(submission=submission)
     harness.task_id = view.task_id
@@ -508,9 +496,7 @@ async def _execute_with_failure(failure: Exception) -> tuple[RuntimeHarness, _Ra
     assert attempt.grant is not None and attempt.submission is not None
     runner = _RaisingRunner(failure)
     harness.runtime._runner = runner
-    await harness.runtime.execute_task(
-        grant=attempt.grant, submission=attempt.submission
-    )
+    await harness.runtime.execute_task(grant=attempt.grant, submission=attempt.submission)
     return harness, runner
 
 
@@ -525,9 +511,7 @@ async def test_deterministic_execution_rejection_is_terminal_once(
     assert record.task_failure_count == 0
 
 
-@pytest.mark.parametrize(
-    "failure", [DriftError("constant"), RuntimeError("ordinary failure")]
-)
+@pytest.mark.parametrize("failure", [DriftError("constant"), RuntimeError("ordinary failure")])
 async def test_drift_and_unclassified_failures_take_different_paths(
     failure: Exception,
 ) -> None:
@@ -555,9 +539,7 @@ async def test_drift_and_unclassified_failures_take_different_paths(
         assert outcome.terminal_reason == RECOVERY_DRIFT_REASON
     else:
         with pytest.raises(RetryableTaskError) as caught:
-            await harness.runtime.execute_task(
-                grant=attempt.grant, submission=attempt.submission
-            )
+            await harness.runtime.execute_task(grant=attempt.grant, submission=attempt.submission)
         assert caught.value.task_id == view.task_id
         assert caught.value.__cause__ is None
         assert caught.value.__context__ is None
@@ -569,12 +551,8 @@ async def test_drift_and_unclassified_failures_take_different_paths(
     "failure",
     [
         LookupError("adapter text"),
-        PersistenceUnavailableError(
-            category=PersistenceUnavailableCategory.CONNECT
-        ),
-        PersistenceIntegrityError(
-            category=PersistenceIntegrityCategory.SCHEMA
-        ),
+        PersistenceUnavailableError(category=PersistenceUnavailableCategory.CONNECT),
+        PersistenceIntegrityError(category=PersistenceIntegrityCategory.SCHEMA),
     ],
 )
 async def test_fail_stop_and_persistence_errors_do_not_change_the_task(
@@ -600,9 +578,7 @@ async def test_fail_stop_and_persistence_errors_do_not_change_the_task(
     evidence_count = len(await harness.ledger.load(task_id=view.task_id))
 
     with pytest.raises(type(failure)):
-        await harness.runtime.execute_task(
-            grant=attempt.grant, submission=attempt.submission
-        )
+        await harness.runtime.execute_task(grant=attempt.grant, submission=attempt.submission)
 
     after = await harness.store.get(lookup=harness.lookup)
     assert after == before

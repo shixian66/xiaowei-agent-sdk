@@ -52,9 +52,7 @@ def _is_guard(statement: ast.stmt) -> bool:
 
 def _has_side_effect(statement: ast.stmt) -> bool:
     """开事务、取锁、写入——任何 ``await`` 或 ``async with`` 都算。"""
-    return any(
-        isinstance(node, ast.Await | ast.AsyncWith) for node in ast.walk(statement)
-    )
+    return any(isinstance(node, ast.Await | ast.AsyncWith) for node in ast.walk(statement))
 
 
 @pytest.mark.parametrize("class_name", sorted(_IMPLEMENTATIONS))
@@ -63,9 +61,7 @@ def test_the_unscoped_guard_precedes_every_side_effect(class_name: str) -> None:
     statements = [node for node in body if not isinstance(node, ast.Expr)]
     guard_positions = [index for index, node in enumerate(statements) if _is_guard(node)]
     assert guard_positions, f"{class_name}.record_audit_event 没有 task_id 守卫"
-    effect_positions = [
-        index for index, node in enumerate(statements) if _has_side_effect(node)
-    ]
+    effect_positions = [index for index, node in enumerate(statements) if _has_side_effect(node)]
     assert effect_positions, f"{class_name}.record_audit_event 没有副作用——扫描坏了"
     assert guard_positions[0] < effect_positions[0], (
         f"{class_name}.record_audit_event 的守卫排在第一个副作用之后"
@@ -100,17 +96,14 @@ async def test_admission_rejection_is_durable_without_creating_evidence() -> Non
     from xiaowei_agent.observability.durable_sink import DurableTraceSink
 
     harness = RunnerHarness(GOLDEN, tamper_sql=True)
-    harness.runner._sink = DurableTraceSink(
-        writer=harness.store, log_sink=harness.sink
-    )
+    harness.runner._sink = DurableTraceSink(writer=harness.store, log_sink=harness.sink)
     with pytest.raises(Exception):  # noqa: B017 - 本条只承重 durable audit
         await harness.start()
 
     rejected = [
         event
         for event in harness.state.audit_events[harness.task_id]
-        if event.stage is PipelineStage.ADMISSION
-        and event.outcome is StageOutcome.REJECTED
+        if event.stage is PipelineStage.ADMISSION and event.outcome is StageOutcome.REJECTED
     ]
     assert len(rejected) == 1
     assert await harness.ledger.load(task_id=harness.task_id) == ()

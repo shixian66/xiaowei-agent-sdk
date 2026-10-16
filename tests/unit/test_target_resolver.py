@@ -72,9 +72,7 @@ def test_resolved_target_carries_the_declared_provider_and_kind() -> None:
 def test_every_known_environment_resolves() -> None:
     """环境目录里的每一项都必须真的能解析出目标，否则目录本身是错的。"""
     for environment_id in KNOWN_ENVIRONMENT_IDS:
-        target = resolve_target(
-            context=_context(environment_id=environment_id), draft=_draft()
-        )
+        target = resolve_target(context=_context(environment_id=environment_id), draft=_draft())
         assert target.environment_id == environment_id
 
 

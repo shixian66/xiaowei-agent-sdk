@@ -44,8 +44,19 @@ def test_redact_connection_string_value_shape() -> None:
     assert "p" + "wd123" not in str(redact({"dsn": _CONN}))
 
 
-@pytest.mark.parametrize("key", ["password", "token", "api_key", "authorization",
-                                 "credential", "cookie", "connection_string", "conn_str"])
+@pytest.mark.parametrize(
+    "key",
+    [
+        "password",
+        "token",
+        "api_key",
+        "authorization",
+        "credential",
+        "cookie",
+        "connection_string",
+        "conn_str",
+    ],
+)
 def test_text_key_value_pairs_are_redacted(key: str) -> None:
     out = _emit(f"failed with {key}={_PW} tail")
     assert _PW not in out
@@ -358,8 +369,12 @@ def test_pathological_input_does_not_cause_catastrophic_backtracking() -> None:
     """脱敏正则作用于不可信文本，必须对病态输入保持线性开销。"""
     import time
 
-    payloads = ["password" + "=" * 5000 + "x", 'password="' + "a" * 20000,
-                "password=" + "a" * 200000, "Authorization: Bearer " + "a" * 50000]
+    payloads = [
+        "password" + "=" * 5000 + "x",
+        'password="' + "a" * 20000,
+        "password=" + "a" * 200000,
+        "Authorization: Bearer " + "a" * 50000,
+    ]
     for payload in payloads:
         start = time.perf_counter()
         redact(payload)

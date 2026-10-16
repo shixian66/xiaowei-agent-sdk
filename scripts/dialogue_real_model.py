@@ -17,6 +17,7 @@ from pathlib import Path
 import httpx2
 from tests.sdk_core.dialogue_gate import (
     E6_SCENARIOS,
+    ENV_SCENARIOS,
     R3_SCENARIOS,
     R7_SCENARIOS,
     ReviewSample,
@@ -39,6 +40,12 @@ REVIEW_LABELS = {
     "limitations_stated": "表达了口径、分页或结果限制",
     "history_delivery_claim_correct": "没有把历史生成说成已发送或已读",
 }
+# 环境选择样例另加两项；其他套件不询问，保持原报告口径。
+ENV_REVIEW_LABELS = {
+    "environment_scope_correct": "只在用户当时明确的环境取数，未选时先问",
+    "diagnosis_basis_sufficient": "诊断依据充分，或如实说明缺少什么",
+}
+SUITES = {"r3": R3_SCENARIOS, "r7": R7_SCENARIOS, "e6": E6_SCENARIOS, "env": ENV_SCENARIOS}
 
 
 async def review_sample(sample: ReviewSample) -> ReviewVerdict:
@@ -70,8 +77,14 @@ async def review_sample(sample: ReviewSample) -> ReviewVerdict:
             "E6 报告格式：" + str(format_),
             file=sys.stderr,
         )
+    labels = dict(REVIEW_LABELS)
+    if sample.scenario.startswith("env_"):
+        scenario = next(s for s in ENV_SCENARIOS if s.name == sample.scenario)
+        allowed = "、".join(sorted(scenario.environments[sample.turn - 1])) or "未选定"
+        print(f"本轮用户明确的环境：{allowed}", file=sys.stderr)
+        labels |= ENV_REVIEW_LABELS
     values: dict[str, bool | None] = {}
-    for field, label in REVIEW_LABELS.items():
+    for field, label in labels.items():
         while True:
             print(f"{label} [y=是/n=否/a=不适用]：", end="", file=sys.stderr, flush=True)
             raw = await asyncio.to_thread(sys.stdin.readline)
@@ -95,11 +108,7 @@ async def collect(profile_path: Path, repeats: int, suite: str = "u1") -> dict[s
             url,
             lambda: httpx2.AsyncHTTPTransport(retries=0, trust_env=False),
             repeats=repeats,
-            **(
-                {"scenarios": {"r3": R3_SCENARIOS, "r7": R7_SCENARIOS, "e6": E6_SCENARIOS}[suite]}
-                if suite in {"r3", "r7", "e6"}
-                else {}
-            ),
+            **({"scenarios": SUITES[suite]} if suite in SUITES else {}),
             manual_review=review_sample,
         )
     if source_sha() != sha or harness_sha256() != harness:
@@ -154,7 +163,7 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--profile", type=Path, required=True)
     parser.add_argument("--repeats", type=int, default=3)
-    parser.add_argument("--suite", choices=("u1", "r7", "r3", "e6"), default="u1")
+    parser.add_argument("--suite", choices=("u1", *SUITES), default="u1")
     args = parser.parse_args()
     if args.repeats < 3:
         parser.error("旧/新每项至少各运行 3 次")

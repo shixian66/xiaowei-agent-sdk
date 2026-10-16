@@ -47,15 +47,11 @@ async def test_concurrent_attempt_claim_has_exactly_one_grant(
     winners = [result for result in results if result.applied]
     losers = [result for result in results if not result.applied]
     assert len(winners) == 1
-    assert {result.rejection for result in losers} == {
-        TaskAttemptRejection.LIVE_LEASE
-    }
+    assert {result.rejection for result in losers} == {TaskAttemptRejection.LIVE_LEASE}
     assert {result.winner for result in losers} == {winners[0].winner}
 
 
-@pytest.mark.parametrize(
-    "damage", ["missing", "stored_digest", "request_digest", "scope"]
-)
+@pytest.mark.parametrize("damage", ["missing", "stored_digest", "request_digest", "scope"])
 async def test_submission_corruption_terminalizes_with_the_same_transaction_audit(
     store: Any,
     context: Any,
@@ -66,9 +62,7 @@ async def test_submission_corruption_terminalizes_with_the_same_transaction_audi
     async with clean_database.begin() as connection:
         if damage == "missing":
             await connection.execute(
-                sa.delete(TASK_SUBMISSIONS).where(
-                    TASK_SUBMISSIONS.c.task_id == task.task_id
-                )
+                sa.delete(TASK_SUBMISSIONS).where(TASK_SUBMISSIONS.c.task_id == task.task_id)
             )
         elif damage == "stored_digest":
             await connection.execute(
@@ -84,9 +78,7 @@ async def test_submission_corruption_terminalizes_with_the_same_transaction_audi
             )
         else:
             await connection.execute(
-                sa.update(TASKS)
-                .where(TASKS.c.task_id == task.task_id)
-                .values(actor="mallory")
+                sa.update(TASKS).where(TASKS.c.task_id == task.task_id).values(actor="mallory")
             )
 
     result = await store.begin_task_attempt(command=_attempt_command(task.task_id))
@@ -97,12 +89,16 @@ async def test_submission_corruption_terminalizes_with_the_same_transaction_audi
     assert len(result.committed_audit_events) == 1
     async with clean_database.connect() as connection:
         stored = (
-            await connection.execute(
-                sa.select(TASK_AUDIT_EVENTS.c.event).where(
-                    TASK_AUDIT_EVENTS.c.task_id == task.task_id
+            (
+                await connection.execute(
+                    sa.select(TASK_AUDIT_EVENTS.c.event).where(
+                        TASK_AUDIT_EVENTS.c.task_id == task.task_id
+                    )
                 )
             )
-        ).mappings().all()
+            .mappings()
+            .all()
+        )
     assert tuple(load_contract(TraceEvent, row["event"]) for row in stored) == (
         result.committed_audit_events
     )
@@ -139,14 +135,10 @@ async def test_concurrent_retry_exhaustion_has_one_terminalizing_winner(
         )
     )
     exhausted = [
-        result
-        for result in results
-        if result.rejection is TaskAttemptRejection.RETRY_EXHAUSTED
+        result for result in results if result.rejection is TaskAttemptRejection.RETRY_EXHAUSTED
     ]
     protected = [
-        result
-        for result in results
-        if result.rejection is TaskAttemptRejection.TERMINAL_PROTECTED
+        result for result in results if result.rejection is TaskAttemptRejection.TERMINAL_PROTECTED
     ]
     assert len(exhausted) == 1
     assert len(protected) == 7
