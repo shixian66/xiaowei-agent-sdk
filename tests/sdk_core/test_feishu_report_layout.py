@@ -59,7 +59,8 @@ def test_md_report_uses_table_for_simple_rows_and_fences_complex_originals() -> 
     body = build_report(delivery.model_copy(update={"facts": (changed,)})).content.decode()
     assert "CREATE TABLE t (v STRING);\n-- [x](https://evil.invalid) ~~~" in body
     assert "~~~~sql\n" in body
-    assert "| ddl |" not in body
+    # 新契约：DDL 原文仍在表下围栏中，表格只放指引。
+    assert "| ddl |" in body and "| 见下方 第 1 行 |" in body
 
 
 def test_md_report_keeps_source_links_and_markup_inside_fences() -> None:
@@ -68,8 +69,8 @@ def test_md_report_keeps_source_links_and_markup_inside_fences() -> None:
         result = {"columns": ["value"], "rows": [{"value": value}]}
         fact = delivery.facts[0].model_copy(update={"result_json": json.dumps(result)})
         body = build_report(delivery.model_copy(update={"facts": (fact,)})).content.decode()
-        assert "| value |" not in body
-        assert f'~~~json\n{{"value": "{value}"}}' in body
+        # 新契约：不安全值进入表格，但处于代码片段内，不解析为链接或强调。
+        assert "| value |" in body and f'`"{value}"`' in body
         rendered = MarkdownIt("default").enable("table").render(body)
         assert "<a href=" not in rendered and "<strong>strong</strong>" not in rendered
 
@@ -227,3 +228,84 @@ def test_md_prose_preserves_visible_lines_indentation_and_literal_markup(section
     assert original.splitlines() in [value.splitlines() for value in visible_blocks]
     assert "<del>旧值</del>" not in rendered and "<em>强调</em>" not in rendered
     assert "<a href=" not in rendered
+
+
+def _md_body(result: dict) -> str:
+    delivery = _delivery("md")
+    fact = delivery.facts[0].model_copy(
+        update={"result_json": json.dumps(result, ensure_ascii=False)}
+    )
+    return build_report(delivery.model_copy(update={"facts": (fact,)})).content.decode()
+
+
+def _md_html(body: str) -> str:
+    return MarkdownIt("default").enable("table").render(body)
+
+
+def test_md_table_for_timestamps_ips_and_multiline_sql() -> None:
+    body = _md_body(
+        {
+            "columns": ["ts", "host", "sql_text", "n"],
+            "rows": [
+                {"ts": "2026-10-15 14:00:00", "host": "10.0.0.1", "sql_text": "SELECT 1\nFROM t"},
+                {"ts": "2026-10-15 14:01:00", "host": "10.0.0.2", "sql_text": "SELECT 2", "n": 2},
+            ],
+        }
+    )
+    assert "| ts | host | sql_text | n |" in body
+    assert "| 见下方 第 1 行 | （未提供） |" in body
+    assert "SELECT 1\nFROM t" in body
+    html = _md_html(body)
+    assert html.count("<tr>") == 3  # 表头 + 两行，没有跳出表格
+    assert "<td><code>&quot;10.0.0.1&quot;</code></td>" in html
+    assert "<td>2</td>" in html
+
+
+def test_md_table_cells_are_inert_and_reversible() -> None:
+    values = [
+        "a|b",
+        "a\\|b",
+        "x`y",
+        "<at id=all>",
+        "https://invalid.example/path",
+        "__strong__",
+        {"k": [1, "|", None]},
+        2**60,
+        "line\u2028sep",
+    ]
+    body = _md_body({"columns": ["v"], "rows": [{"v": v} for v in values]})
+    html = _md_html(body)
+    assert html.count("<tr>") == len(values) + 1
+    assert "<a href=" not in html and "<strong>" not in html and "<at" not in html
+    cells = re.findall(r"<td>(.*?)</td>", html)
+    decoded = [
+        json.loads(unescape(c.removeprefix("<code>").removesuffix("</code>"))) for c in cells
+    ]
+    assert decoded == values
+
+
+def test_md_table_headers_and_detail_titles_are_inert_and_reversible() -> None:
+    # SQLGuard 接受带引号的别名，列名可含换行、链接与 Markdown 结构，不能指望上游拦截。
+    names = [
+        "x\n\n[click](https://example.invalid)\n\ny",
+        " lead ",
+        "a`b",
+        "a|b",
+        "z\n\n- injected",
+        "ok",
+    ]
+    row = {name: "1" for name in names}
+    row["z\n\n- injected"] = "multi\nline"  # 触发表下明细标题
+    body = _md_body({"columns": names, "rows": [row]})
+    html = _md_html(body)
+    assert html.count("<tr>") == 2
+    assert "<a href=" not in html and "<li>" not in html
+    headers = re.findall(r"<th>(.*?)</th>", html)
+    decoded = [
+        json.loads(unescape(h.removeprefix("<code>").removesuffix("</code>")))
+        if h.startswith("<code>")
+        else h
+        for h in headers
+    ]
+    assert decoded == names
+    assert "见下方 第 1 行" in body and "multi\nline" in body

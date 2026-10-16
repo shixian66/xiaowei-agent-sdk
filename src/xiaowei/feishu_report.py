@@ -249,6 +249,27 @@ def _safe_md_cell(value: str) -> bool:
     )
 
 
+_MD_CELL_MAX = 120
+
+
+def _md_cell(value: object) -> str | None:
+    """表格单元格：简单值直出，其余放代码片段；多行或过长值返回 None，放表下明细。"""
+    text = _json_value(value)
+    if (isinstance(value, str) and ("\n" in value or "\r" in value)) or len(text) > _MD_CELL_MAX:
+        return None
+    if _safe_md_cell(text):
+        return text
+    # 代码片段内不解析强调、链接与 HTML；JSON 已把字面反斜杠加倍，故每个 \| 都是竖线转义。
+    return _inline_code(display_text(text).replace("|", "\\|"))
+
+
+def _md_label(name: str) -> str:
+    """列名/字段名：简单名直出；其余用 JSON 单行编码放进代码片段，可逆且不能跨行。"""
+    if _safe_md_cell(name) and name == name.strip():
+        return name
+    return _inline_code(display_text(_json_value(name)).replace("|", "\\|"))
+
+
 def _md_fact(value: str) -> str:
     data = _decoded(value)
     if data is _INVALID:
@@ -266,51 +287,38 @@ def _md_fact(value: str) -> str:
             language = "text" if key == "plan" else "sql"
             blocks.append(f"**{key.upper()} 原文**\n\n{_fence(item, language)}")
         else:
-            blocks.append(f"**{_md_escape(key)}**\n\n{_fence(_json_value(item, indent=2), 'json')}")
+            blocks.append(f"**{_md_label(key)}**\n\n{_fence(_json_value(item, indent=2), 'json')}")
     if table is not None:
         columns, rows = table
-        simple = (
-            bool(columns)
-            and all(_safe_md_cell(column) for column in columns)
-            and all(_safe_md_cell(_json_value(item)) for row in rows for item in row.values())
-            and not set(columns).intersection(_RAW_FIELDS)
-        )
-        if simple:
-            blocks.append(
-                "\n".join(
-                    [
-                        "| " + " | ".join(columns) + " |",
-                        "| " + " | ".join("---" for _ in columns) + " |",
-                        *(
-                            "| "
-                            + " | ".join(
-                                _json_value(row[column]) if column in row else "（未提供）"
-                                for column in columns
-                            )
-                            + " |"
-                            for row in rows
-                        ),
-                    ]
-                )
-            )
-        else:
-            if "columns" in data:
-                blocks.append("**列定义**\n\n" + _fence(_json_value(columns), "json"))
+        if columns:
+            details = []
+            lines = [
+                "| " + " | ".join(_md_label(c) for c in columns) + " |",
+                "| " + " | ".join("---" for _ in columns) + " |",
+            ]
             for index, row in enumerate(rows, 1):
-                ordinary = {key: item for key, item in row.items() if key not in _RAW_FIELDS}
-                pieces = [f"**第 {index} 行**"]
-                if ordinary:
-                    pieces.append(_fence(_json_value(ordinary), "json"))
-                for key in _RAW_FIELDS:
-                    if key in row:
-                        item = row[key]
-                        language = "text" if key == "plan" else "sql"
-                        pieces.append(
-                            f"**{key.upper()} 原文**\n\n" + _fence(item, language)
-                            if isinstance(item, str)
-                            else f"**{key}**\n\n{_fence(_json_value(item), 'json')}"
-                        )
-                blocks.append("\n\n".join(pieces))
+                cells = []
+                for column in columns:
+                    if column not in row:
+                        cells.append("（未提供）")
+                        continue
+                    item = row[column]
+                    cell = None if column in _RAW_FIELDS else _md_cell(item)
+                    if cell is not None:
+                        cells.append(cell)
+                        continue
+                    cells.append(f"见下方 第 {index} 行")
+                    title = f"**第 {index} 行** · {_md_label(column)}"
+                    if isinstance(item, str):
+                        language = "sql" if column in ("sql", "ddl") else "text"
+                        details.append(f"{title}（字符串原文）\n\n{_fence(item, language)}")
+                    else:
+                        details.append(f"{title}\n\n{_fence(_json_value(item, indent=2), 'json')}")
+                lines.append("| " + " | ".join(cells) + " |")
+            blocks.append("\n".join(lines))
+            blocks.extend(details)
+        elif "columns" in data:
+            blocks.append("**列定义**\n\n" + _fence(_json_value(columns), "json"))
         blocks.append(f"本文件展示 {len(rows)} 行。")
     return "\n\n".join(blocks)
 
