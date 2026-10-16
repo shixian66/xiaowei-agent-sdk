@@ -62,14 +62,10 @@ async def _begin(harness: RunnerHarness) -> TaskAttemptGrant:
     return result.grant
 
 
-async def _prepare_status(
-    harness: RunnerHarness, *statuses: TaskStatus
-) -> TaskAttemptGrant:
+async def _prepare_status(harness: RunnerHarness, *statuses: TaskStatus) -> TaskAttemptGrant:
     """保存计划并用一个真实 grant 把任务推进到指定崩溃点。"""
     grant = await _begin(harness)
-    await harness.plan_store.save(
-        task_id=harness.task_id, plan=harness.plan, target=harness.target
-    )
+    await harness.plan_store.save(task_id=harness.task_id, plan=harness.plan, target=harness.target)
     record = await harness.store.get(lookup=harness.lookup)
     for status in statuses:
         result = await harness.store.transition(
@@ -301,9 +297,7 @@ async def test_plan_and_target_are_saved_before_execution() -> None:
 async def test_created_task_with_an_identical_stored_plan_can_start() -> None:
     harness = RunnerHarness(GOLDEN)
     await harness.ensure_task()
-    await harness.plan_store.save(
-        task_id=harness.task_id, plan=harness.plan, target=harness.target
-    )
+    await harness.plan_store.save(task_id=harness.task_id, plan=harness.plan, target=harness.target)
     outcome = await harness.start()
     assert outcome.status is TaskStatus.SUCCEEDED
 
@@ -474,9 +468,7 @@ async def test_step_commit_rejections_have_closed_runner_semantics(
         return StepCommitResult(
             committed=False,
             winner=current,
-            record=None
-            if rejection is StepCommitRejection.NO_ATTEMPT_IN_FLIGHT
-            else journal[0],
+            record=None if rejection is StepCommitRejection.NO_ATTEMPT_IN_FLIGHT else journal[0],
             rejection=rejection,
         )
 
@@ -493,9 +485,7 @@ async def test_step_commit_rejections_have_closed_runner_semantics(
 
 async def test_failed_step_context_is_rebuilt_without_replaying_the_gateway() -> None:
     harness = RunnerHarness(GOLDEN)
-    grant = await _prepare_status(
-        harness, TaskStatus.PLANNING, TaskStatus.RUNNING
-    )
+    grant = await _prepare_status(harness, TaskStatus.PLANNING, TaskStatus.RUNNING)
     begun = await harness.store.begin_step_attempt(
         command=StepAttemptCommand(grant=grant, step_id="s1")
     )
@@ -524,9 +514,9 @@ async def test_failed_step_context_is_rebuilt_without_replaying_the_gateway() ->
 
     assert outcome.status is TaskStatus.INDETERMINATE
     assert harness.gateway.invocations == 0
-    assert [item.step_id for item in await harness.store.load_step_executions(
-        task_id=harness.task_id
-    )] == ["s1"]
+    assert [
+        item.step_id for item in await harness.store.load_step_executions(task_id=harness.task_id)
+    ] == ["s1"]
 
 
 async def test_ok_step_is_adopted_after_restart_without_replay() -> None:
@@ -563,9 +553,7 @@ async def test_start_rejects_a_nonempty_step_journal() -> None:
     assert harness.gateway.invocations == 0
 
 
-@pytest.mark.parametrize(
-    "recording", [TIMEOUT, MALFORMED], ids=["timeout", "malformed"]
-)
+@pytest.mark.parametrize("recording", [TIMEOUT, MALFORMED], ids=["timeout", "malformed"])
 async def test_tool_failures_never_look_like_empty_success(recording: object) -> None:
     """失败不得表现为"取到零行"，也不得触发可选分支。
 

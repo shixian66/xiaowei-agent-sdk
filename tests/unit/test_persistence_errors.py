@@ -133,9 +133,7 @@ async def test_postgres_write_boundary_cuts_the_driver_exception_chain() -> None
 
     @_persistence_boundary(write=True)
     async def fail() -> None:
-        raise sa.exc.OperationalError(
-            "SELECT :value", {"value": marker}, ConnectionError(marker)
-        )
+        raise sa.exc.OperationalError("SELECT :value", {"value": marker}, ConnectionError(marker))
 
     with pytest.raises(PersistenceUnavailableError) as caught:
         await fail()
@@ -210,9 +208,7 @@ async def test_write_transaction_reports_a_confirmed_rollback() -> None:
 
 
 async def test_write_transaction_reports_an_unknown_commit_result() -> None:
-    engine = _Engine(
-        _TransactionContext(exit_error=sa.exc.DisconnectionError("private"))
-    )
+    engine = _Engine(_TransactionContext(exit_error=sa.exc.DisconnectionError("private")))
 
     @_persistence_boundary(write=True)
     async def operation() -> None:
@@ -246,9 +242,7 @@ async def test_integrity_error_is_exposed_only_after_confirmed_rollback() -> Non
 
 
 async def test_rollback_connection_loss_overrides_the_original_integrity_error() -> None:
-    engine = _Engine(
-        _TransactionContext(exit_error=sa.exc.DisconnectionError("rollback-private"))
-    )
+    engine = _Engine(_TransactionContext(exit_error=sa.exc.DisconnectionError("rollback-private")))
 
     @_persistence_boundary(write=True)
     async def operation() -> None:

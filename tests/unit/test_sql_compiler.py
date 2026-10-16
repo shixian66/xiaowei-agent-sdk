@@ -115,9 +115,7 @@ def test_compilation_is_idempotent(template_id: str) -> None:
 
 def test_optional_filters_are_appended_in_a_fixed_order() -> None:
     """db → user → queryId 顺序固定；顺序不定会让同一组参数产生两个 plan_hash。"""
-    params = _PARAMS.model_copy(
-        update={"database": "sales", "user_name": "app", "query_id": "q1"}
-    )
+    params = _PARAMS.model_copy(update={"database": "sales", "user_name": "app", "query_id": "q1"})
     sql = compile_sql(template_id=LIST_V1, params=params, surface=SURFACE)
     assert sql.index("`db` =") < sql.index("`user` =") < sql.index("`queryId` =")
 
@@ -147,12 +145,8 @@ def test_unset_filters_produce_no_predicate() -> None:
 def test_row_limit_reaches_the_list_template_but_not_the_count_template() -> None:
     """count 只需要知道"有没有"，恒为 LIMIT 1；它消费 row_limit 仅为键集一致。"""
     params = _PARAMS.model_copy(update={"row_limit": 7})
-    assert compile_sql(template_id=LIST_V1, params=params, surface=SURFACE).endswith(
-        "LIMIT 7"
-    )
-    assert compile_sql(template_id=COUNT_V1, params=params, surface=SURFACE).endswith(
-        "LIMIT 1"
-    )
+    assert compile_sql(template_id=LIST_V1, params=params, surface=SURFACE).endswith("LIMIT 7")
+    assert compile_sql(template_id=COUNT_V1, params=params, surface=SURFACE).endswith("LIMIT 1")
 
 
 @pytest.mark.parametrize("template_id", [LIST_V1, COUNT_V1])

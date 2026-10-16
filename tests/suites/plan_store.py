@@ -89,6 +89,7 @@ async def test_tasks_are_isolated_from_each_other(plan_store) -> None:
     with pytest.raises(PlanNotFoundError):
         await plan_store.load(task_id="b")
 
+
 PLAN_STORE_CASES = (
     test_saved_plan_round_trips,
     test_reloaded_plan_recomputes_to_the_same_hash,

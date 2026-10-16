@@ -56,9 +56,7 @@ async def test_exactly_one_writer_wins_a_concurrent_cas(
     applied = [result for result in results if result.applied]
     rejected = [result for result in results if not result.applied]
     assert len(applied) == 1
-    assert {result.rejection for result in rejected} == {
-        TransitionRejection.VERSION_MISMATCH
-    }
+    assert {result.rejection for result in rejected} == {TransitionRejection.VERSION_MISMATCH}
     assert {result.winner.version for result in rejected} == {applied[0].winner.version}
     assert {result.winner.status for result in rejected} == {TaskStatus.PLANNING}
 
@@ -90,9 +88,7 @@ async def test_only_one_task_row_exists_after_concurrent_creates(
     creators = independent_stores(_CONCURRENCY)
     envelope = make_envelope(idempotency_key="concurrent-idem")
     submission = make_submission(context, envelope=envelope)
-    await asyncio.gather(
-        *(creator.create_task(submission=submission) for creator in creators)
-    )
+    await asyncio.gather(*(creator.create_task(submission=submission) for creator in creators))
     async with clean_database.connect() as connection:
         count = await connection.execute(sa.text("SELECT count(*) FROM tasks"))
         assert count.scalar_one() == 1
@@ -180,9 +176,7 @@ async def test_a_killed_backend_leaves_no_intermediate_state(
             {"task_id": task.task_id},
         )
         async with clean_database.connect() as killer:
-            await killer.execute(
-                sa.text("SELECT pg_terminate_backend(:pid)"), {"pid": pid}
-            )
+            await killer.execute(sa.text("SELECT pg_terminate_backend(:pid)"), {"pid": pid})
         # 后端已被杀，提交必须失败。若它"成功"了，说明我们杀的不是那条连接，
         # 这条用例就什么也没证明——因此这里断言的是失败本身。
         with pytest.raises(sa.exc.SQLAlchemyError):

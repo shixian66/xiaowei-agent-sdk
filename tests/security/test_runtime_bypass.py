@@ -48,9 +48,7 @@ def _attribute_names(path: Path) -> set[str]:
     这与 test_gateway_boundary 里"漏掉 ast.Attribute.attr 就留下一条完整绕过路径"
     是同一条教训。
     """
-    return {
-        node.attr for node in ast.walk(_tree(path)) if isinstance(node, ast.Attribute)
-    }
+    return {node.attr for node in ast.walk(_tree(path)) if isinstance(node, ast.Attribute)}
 
 
 def test_application_never_touches_gateway_invoke() -> None:

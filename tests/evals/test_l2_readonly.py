@@ -50,9 +50,7 @@ async def test_end_to_end_case(case: dict[str, Any]) -> None:
     harness = _harness(case)
     payload = await harness.handle(case["text"])
     assert payload.status is TaskStatus(case["expect_status"])
-    assert [call.operation for call in harness.adapter.calls] == case[
-        "expect_operations"
-    ]
+    assert [call.operation for call in harness.adapter.calls] == case["expect_operations"]
     assert len(payload.refs) >= case["expect_evidence"] or payload.status is (
         TaskStatus.AWAITING_APPROVAL
     )
@@ -72,9 +70,7 @@ async def test_repeated_runs_are_byte_identical(case: dict[str, Any]) -> None:
     if first.task_id and second.task_id:
         assert compute_plan_hash(
             (await first.plan_store.load(task_id=first.task_id)).plan
-        ) == compute_plan_hash(
-            (await second.plan_store.load(task_id=second.task_id)).plan
-        )
+        ) == compute_plan_hash((await second.plan_store.load(task_id=second.task_id)).plan)
 
 
 async def test_empty_evidence_is_never_rendered_as_success() -> None:

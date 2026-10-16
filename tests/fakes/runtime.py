@@ -96,9 +96,7 @@ class RuntimeHarness:
         self.approval_gate = CountingApprovalGate()
         self.sink = RecordingTraceSink()
         self.context = CONTEXT
-        self.snapshot = (
-            WRITE_SNAPSHOT if synthetic_write else StaticCapabilityRegistry().snapshot()
-        )
+        self.snapshot = WRITE_SNAPSHOT if synthetic_write else StaticCapabilityRegistry().snapshot()
         runner: Any = DeterministicStepRunner(
             task_store=self.store,
             plan_store=self.plan_store,

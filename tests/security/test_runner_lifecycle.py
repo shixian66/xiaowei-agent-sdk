@@ -18,9 +18,7 @@ async def test_synthetic_side_effect_step_pauses_with_zero_gateway_calls() -> No
     harness = RunnerHarness(GOLDEN, synthetic_write=True)
     with pytest.raises(WorkflowPaused) as paused:
         await harness.start()
-    assert (await harness.store.get(lookup=harness.lookup)).status is (
-        TaskStatus.AWAITING_APPROVAL
-    )
+    assert (await harness.store.get(lookup=harness.lookup)).status is (TaskStatus.AWAITING_APPROVAL)
     assert harness.adapter.call_count == 0
     assert harness.gateway.invocations == 0
     assert paused.value.approval_ref
@@ -171,9 +169,7 @@ def _granted(harness: RunnerHarness) -> object:
     """把暂停时落库的 PENDING 审批取出并置为 GRANTED。"""
     from xiaowei_agent.contracts import ApprovalState
 
-    return harness.store.approvals[-1].model_copy(
-        update={"state": ApprovalState.GRANTED}
-    )
+    return harness.store.approvals[-1].model_copy(update={"state": ApprovalState.GRANTED})
 
 
 async def _paused_harness() -> RunnerHarness:
@@ -187,9 +183,7 @@ async def _paused_harness() -> RunnerHarness:
 def _approval_input(ref: str) -> object:
     from xiaowei_agent.contracts import ExternalInput, ExternalInputKind
 
-    return ExternalInput(
-        kind=ExternalInputKind.APPROVAL_DECISION, approval_ref=ref
-    )
+    return ExternalInput(kind=ExternalInputKind.APPROVAL_DECISION, approval_ref=ref)
 
 
 async def test_resume_rejects_an_approval_ref_for_another_step() -> None:
@@ -199,9 +193,7 @@ async def test_resume_rejects_an_approval_ref_for_another_step() -> None:
     harness = await _paused_harness()
     approval = _granted(harness)
     with pytest.raises(DriftError):
-        await harness.resume(
-            _approval_input(f"{harness.task_id}:s99"), approval=approval
-        )
+        await harness.resume(_approval_input(f"{harness.task_id}:s99"), approval=approval)
     assert harness.adapter.call_count == 0
     assert harness.gateway.invocations == 0
 
@@ -228,9 +220,7 @@ async def test_a_matching_approval_ref_passes_the_external_input_check() -> None
     approval = _granted(harness)
     raised: Exception | None = None
     try:
-        await harness.resume(
-            _approval_input(f"{harness.task_id}:s1"), approval=approval
-        )
+        await harness.resume(_approval_input(f"{harness.task_id}:s1"), approval=approval)
     except Exception as exc:
         # E1 硬闸等下游拒绝是**预期**的；本条只断言 external_input 这道检查放行了。
         raised = exc
@@ -278,9 +268,7 @@ async def test_the_paused_ref_and_the_gate_ref_come_from_one_builder() -> None:
     harness = RunnerHarness(GOLDEN, synthetic_write=True)
     with pytest.raises(WorkflowPaused) as paused:
         await harness.start()
-    assert paused.value.approval_ref == approval_ref(
-        task_id=harness.task_id, step_id="s1"
-    )
+    assert paused.value.approval_ref == approval_ref(task_id=harness.task_id, step_id="s1")
 
 
 def test_no_module_spells_the_approval_ref_by_hand() -> None:
@@ -309,8 +297,7 @@ def test_no_module_spells_the_approval_ref_by_hand() -> None:
             names = [
                 v.value.id
                 for v in node.values
-                if isinstance(v, ast.FormattedValue)
-                and isinstance(v.value, ast.Name)
+                if isinstance(v, ast.FormattedValue) and isinstance(v.value, ast.Name)
             ]
             if literals == ":" and {"task_id", "step_id"} <= set(names):
                 offenders.append(f"{path.name}:{node.lineno}")

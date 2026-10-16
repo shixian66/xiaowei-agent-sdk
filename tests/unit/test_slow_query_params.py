@@ -128,9 +128,7 @@ def test_from_typed_arguments_rejects_unknown_and_missing_keys() -> None:
     with pytest.raises(ValidationError):
         SlowQueryParams.from_typed_arguments({**_ARGS, "extra": 1})
     with pytest.raises(ValidationError):
-        SlowQueryParams.from_typed_arguments(
-            {k: v for k, v in _ARGS.items() if k != "row_limit"}
-        )
+        SlowQueryParams.from_typed_arguments({k: v for k, v in _ARGS.items() if k != "row_limit"})
 
 
 def test_typed_arguments_round_trip_is_lossless() -> None:
@@ -169,8 +167,7 @@ def test_min_query_time_ms_falls_back_to_the_declared_default() -> None:
     """
     without = {k: v for k, v in _ARGS.items() if k != "min_query_time_ms"}
     assert (
-        SlowQueryParams.from_typed_arguments(without).min_query_time_ms
-        == DEFAULT_MIN_QUERY_TIME_MS
+        SlowQueryParams.from_typed_arguments(without).min_query_time_ms == DEFAULT_MIN_QUERY_TIME_MS
     )
 
 
@@ -180,6 +177,4 @@ def test_params_do_not_carry_execution_context() -> None:
     机械复制执行上下文会让同一份 SQL 参数在两个 DTO 里各有一份真源
     （ARCHITECTURE §6）。
     """
-    assert not (
-        {"environment_id", "tenant_id", "actor"} & set(SlowQueryParams.model_fields)
-    )
+    assert not ({"environment_id", "tenant_id", "actor"} & set(SlowQueryParams.model_fields))

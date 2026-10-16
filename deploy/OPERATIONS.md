@@ -157,7 +157,7 @@ ssh -N -L 127.0.0.1:8501:127.0.0.1:8501 <服务器>
 | 字段 | 改成 |
 | --- | --- |
 | `starrocks.target_id` | 新名字，例如 `archive`；1–32 位小写字母、数字、`_`、`-`，不能和已有目标重复 |
-| `description` | 这个集群的用途，模型靠它选集群 |
+| `description` | 这个集群的用途说明，帮助模型识别环境；会原样交给模型，不代表默认或已选择，不要写“默认用此集群”“可跨环境查找”之类的话 |
 | `starrocks.host`、`database`、`user` | 新集群的 FE 地址、默认库和只读账号名 |
 | `starrocks.password_ref` | `env:XW_ARCHIVE_STARROCKS_PASSWORD`，并在 `.env` 去掉这一行开头的 `#`、填密码 |
 | `starrocks.audit` | 新集群没有审计表时改成 `null`；这时在该集群上不能查慢查询 |

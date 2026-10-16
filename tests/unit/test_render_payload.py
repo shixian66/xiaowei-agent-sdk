@@ -33,9 +33,7 @@ def _evidence(step_id: str, facts: tuple[dict[str, object], ...]) -> EvidenceEnv
     )
 
 
-_ROWS = (
-    {"queryId": "q1", "queryTime": 32_000, "db": "sales", "user": "app_user_1"},
-)
+_ROWS = ({"queryId": "q1", "queryTime": 32_000, "db": "sales", "user": "app_user_1"},)
 
 
 def _render(evidences: tuple[EvidenceEnvelope, ...], status: TaskStatus) -> object:
@@ -105,8 +103,6 @@ def test_pending_payload_is_auditable_and_leaks_nothing() -> None:
 
 
 def test_pending_payload_carries_the_evidence_gathered_so_far() -> None:
-    payload = render_pending(
-        approval_ref="task-1:s2", evidences=(_evidence("s1", _ROWS),)
-    )
+    payload = render_pending(approval_ref="task-1:s2", evidences=(_evidence("s1", _ROWS),))
     assert "task-1:s1" in payload.refs
     assert "task-1:s2" in payload.refs

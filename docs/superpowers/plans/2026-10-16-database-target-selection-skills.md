@@ -258,3 +258,10 @@
 **改动：** `src/xiaowei/skills/database_query.md`（新，2,367 字）、`database_diagnosis.md`（新，858 字）；`app.py` 的 `DEFAULT_INSTRUCTIONS` 迁出 StarRocks 专属段落并删除旧目标规则，`_TARGETS_HEADER` 只留清单与"列出不代表已选择"，`_instructions` 在配置 StarRocks 目标时并入两份 Skill；`starrocks_tools.py` 两支说明后缀统一；`tools.py` `unknown_target` 回执只改文字。测试：新增 `test_database_skills.py`、`test_env_samples.py`，更新 `test_r7_samples.py`、`test_r7_dialogue.py`、`test_r7_rejection_categories.py`、`test_diagnosis.py`、`test_dialogue_real_model.py`、`test_monitoring_read_recovery.py`（“不换集群”断言改为 Skill 新措辞）；评测 `dialogue_gate.py` 新增 `ENV_SCENARIOS`（E1–E15）、`environment_scope`、两项人工判定，`dialogue_real_model.py` 新增 `--suite env`。文档：ARCHITECTURE R7、README 多集群提问、AGENT_HANDOFF。
 
 **先失败后修复：** 实现前新测试 **21 failed, 27 passed**（指纹守护测试本就通过，按设计）；实现后相关文件全部通过，验证结果见 AGENT_HANDOFF。
+
+**独立审查（`6796be9`，同模型家族的全新子代理）与处理：** 无阻断、无高；5 项中、9 项低。
+
+- 已修：越界统计漏 `list_slow_queries`（M2，统计改用 `QUERY_TOOLS | AUDIT_TOOLS`）；Skill 未覆盖"已选环境后本轮明确点名另一个环境查询"（M3，写明视为切换，提及仍先问）；同轮多环境一个失败的保护在迁移中丢失（M4，补 `r7_compare_one_unavailable`）；README/OPERATIONS 仍写"模型靠 description 选集群"（M5）；wheel 测试补读两份 Skill（L1）；删除空转断言（L4）；handoff 过时描述（L5）；Skill 不再限定用 clarification 字段提问，避免与"已有证据时在 inferences 提问"冲突（L6）。
+- **未修，评测前须处理（M1）：** U1/R3 套件及 R7 复用的 `desc_single`、`desc_ambiguous_database`、`yesterday_missing`、6 个 `raw_*`、`r3_raw_over_limit` 首条消息未写环境。按新规则真实模型应先问环境，原本要测的原文、容量、时间口径能力测不到，与旧基线不可直接比较。离线脚本样例仍直接调用工具，只证明调用链。下次对这些套件做真实模型评测前，需在消息中写明环境或另取新基线；这不影响 `--suite env`。
+- **未修，E10 当前无效：** 评测配置没有审计源，模型拿不到 `list_slow_queries`，E10 测不到"先查后诊、复用证据"。真实模型评测前需给评测配置加合成审计源，或把 E10 从判定中剔除并如实记录。
+- 记录不改：L7 升级前的旧会话会继续使用，因为说明文字不在会话绑定里，历史里的旧回答可能被误当成选择，Skill 已写"历史结果不是用户的选择"；L8 评测报告未单独记录 Skill 的 sha256，已由源码 SHA 加干净工作树间接绑定，跑基线时需把同一份评测框架复制到基线工作树；L2/L3/L9 为测试覆盖或措辞的小项，见审查原文。

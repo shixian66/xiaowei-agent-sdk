@@ -38,9 +38,7 @@ def _offenders() -> list[str]:
         for path in sorted(root.rglob("*.py")):
             if path.resolve() == pathlib.Path(__file__).resolve():
                 continue  # 本文件自带样例，见 detector 自测
-            for lineno, line in enumerate(
-                path.read_text(encoding="utf-8").splitlines(), start=1
-            ):
+            for lineno, line in enumerate(path.read_text(encoding="utf-8").splitlines(), start=1):
                 if _PATTERN.search(line):
                     found.append(f"{path.relative_to(ROOT)}:{lineno}")
     return found

@@ -62,22 +62,11 @@ async def test_r7_fixed_target_scenarios(postgres_url: URL, case: str) -> None:
         PROFILE, postgres_url, scripts.transport, scenarios=(scenario,), repeats=1
     )
     assert all(r["state"] == "completed" for r in results), results
-    specific = {
-        "describe_table",
-        "describe_table_layout",
-        "show_create_table",
-        "run_readonly_query",
-    }
     if case == "unselected_target":
         # 原多匹配/发现不完整样例的保护：不读取猜选候选的结构、布局、DDL 或业务数据。
         (result,) = results
         assert result["tool_choices_by_target"] == {} and result["facts"] == []
         assert result["io_counts"] == {}
-        assert not any(
-            name in specific
-            for calls in result["tool_choices_by_target"].values()
-            for name in calls
-        )
         assert "不做跨环境发现" in scripts.calls[first][-1].instructions
     elif case == "target_unavailable":
         assert results[0]["tool_choices_by_target"] == {"fat": {"describe_table": 1}}
@@ -173,7 +162,14 @@ def test_choice_observer_cannot_replace_model_rejection(body: bytes) -> None:
 
 
 @pytest.mark.parametrize(
-    "case", ["after_discovery", "explicit_followup", "compare_targets", "switch_unavailable"]
+    "case",
+    [
+        "after_discovery",
+        "explicit_followup",
+        "compare_targets",
+        "compare_one_unavailable",
+        "switch_unavailable",
+    ],
 )
 async def test_r7_context_and_cross_target_tasks(postgres_url: URL, case: str) -> None:
     scenario = next(s for s in R7_SCENARIOS if s.name == "r7_" + case)
@@ -211,6 +207,12 @@ async def test_r7_context_and_cross_target_tasks(postgres_url: URL, case: str) -
             cite(""),
         )
         scripts.add(scenario.messages[2][1], lambda _: descriptions(["pre"]), cite(""))
+    elif case == "compare_one_unavailable":
+        scripts.add(
+            scenario.messages[0][1],
+            lambda _: descriptions(["fat", "fat1", "pre"]),
+            cite("fat1 暂不可用，只比较 fat 与 pre"),
+        )
     elif case == "compare_targets":
         scripts.add(
             scenario.messages[0][1], lambda _: descriptions(["fat", "fat1", "pre"]), cite("")
@@ -246,6 +248,14 @@ async def test_r7_context_and_cross_target_tasks(postgres_url: URL, case: str) -
         # Driver metadata differs by source; facts must not get silently substituted.
         for t in ("fat", "fat1", "pre"):
             assert t in results[0]["io_by_target"]
+    elif case == "compare_one_unavailable":
+        # 原 discovery_error 的同轮保护：用户点名的多个环境中一个失败，失败源无事实、零 I/O，
+        # 其余照常交付且不串源。
+        assert results[0]["tool_choices_by_target"] == {
+            t: {"describe_table": 1} for t in ("fat", "fat1", "pre")
+        }
+        assert {f["target"] for f in results[0]["facts"]} == {"fat", "pre"}
+        assert results[0]["io_by_target"]["fat1"] == {}
     else:
         # 原 discovery_error 的保护：失败源没有事实、结果不串源、不改查其他环境代替。
         assert results[0]["facts_by_tool_target"] == {"fat": {"local/describe_table": 1}}

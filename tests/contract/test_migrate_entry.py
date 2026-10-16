@@ -23,9 +23,7 @@ class _Connection:
     def __init__(self) -> None:
         self.calls: list[tuple[Callable[..., None], tuple[object, ...]]] = []
 
-    async def run_sync(
-        self, function: Callable[..., None], *args: object
-    ) -> None:
+    async def run_sync(self, function: Callable[..., None], *args: object) -> None:
         self.calls.append((function, args))
 
 
@@ -74,9 +72,7 @@ async def test_upgrade_and_downgrade_use_the_same_async_bridge() -> None:
         allow_destructive=True,
         engine_factory=lambda _: downgrade_engine,
     )
-    assert downgrade_engine.connection.calls == [
-        (run_downgrade, ("0001_initial", True))
-    ]
+    assert downgrade_engine.connection.calls == [(run_downgrade, ("0001_initial", True))]
     assert downgrade_engine.disposed is True
 
 
@@ -99,9 +95,7 @@ def test_main_failure_is_constant_and_does_not_echo_environment(
     ("error", "expected"),
     [
         (
-            sa.exc.OperationalError(
-                "statement", {"value": "private"}, RuntimeError("private")
-            ),
+            sa.exc.OperationalError("statement", {"value": "private"}, RuntimeError("private")),
             "xiaowei-migrate: database_unavailable\n",
         ),
         (

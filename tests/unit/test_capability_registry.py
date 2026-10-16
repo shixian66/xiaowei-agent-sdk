@@ -72,9 +72,7 @@ def test_surface_excludes_the_columns_that_carry_free_text() -> None:
 
 
 def test_surface_declares_exactly_one_allowed_table() -> None:
-    assert SLOW_QUERY_SURFACE.allowed_tables == (
-        "starrocks_audit_db__.starrocks_audit_tbl__",
-    )
+    assert SLOW_QUERY_SURFACE.allowed_tables == ("starrocks_audit_db__.starrocks_audit_tbl__",)
 
 
 def test_surface_time_column_is_within_the_allowed_columns() -> None:

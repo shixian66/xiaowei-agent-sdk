@@ -136,9 +136,7 @@ def test_every_contract_subclass_keeps_strict_mode() -> None:
     import xiaowei_agent
 
     offenders: list[str] = []
-    for module in pkgutil.walk_packages(
-        xiaowei_agent.__path__, prefix="xiaowei_agent."
-    ):
+    for module in pkgutil.walk_packages(xiaowei_agent.__path__, prefix="xiaowei_agent."):
         mod = importlib.import_module(module.name)
         for _, obj in inspect.getmembers(mod, inspect.isclass):
             if issubclass(obj, Contract) and obj is not Contract:

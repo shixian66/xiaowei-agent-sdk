@@ -71,8 +71,13 @@ def _log_surfaces(exc: ValidationError) -> str:
         ),
         pytest.param(
             lambda: IntentDraft.model_validate(
-                {"intent": "q", "slots": {"k": f"  {CANARY}  "}, "missing": (),
-                 "confidence": 0.9, "source": "llm"}
+                {
+                    "intent": "q",
+                    "slots": {"k": f"  {CANARY}  "},
+                    "missing": (),
+                    "confidence": 0.9,
+                    "source": "llm",
+                }
             ),
             id="slot_padding",
         ),
@@ -99,9 +104,7 @@ def test_hide_input_does_not_cover_errors_or_json() -> None:
     直接删掉断言。
     """
     with pytest.raises(ValidationError) as caught:
-        ExternalContent(
-            source=ExternalSource.TOOL, content="x", digest=CANARY, captured_at=NOW
-        )
+        ExternalContent(source=ExternalSource.TOOL, content="x", digest=CANARY, captured_at=NOW)
     exc = caught.value
     assert CANARY in repr(exc.errors()), "pydantic 行为已变,请重新评估 egress 禁令"
     assert CANARY in exc.json(), "pydantic 行为已变,请重新评估 egress 禁令"
@@ -130,9 +133,7 @@ def test_length_limit_still_rejects_genuinely_long_values() -> None:
 
 def test_safe_error_details_carries_no_values() -> None:
     with pytest.raises(ValidationError) as caught:
-        ExternalContent(
-            source=ExternalSource.TOOL, content="x", digest=CANARY, captured_at=NOW
-        )
+        ExternalContent(source=ExternalSource.TOOL, content="x", digest=CANARY, captured_at=NOW)
     details = safe_error_details(caught.value)
     assert details == ("digest: value_error",)
     assert CANARY not in repr(details)
@@ -166,21 +167,32 @@ def test_no_raw_validation_error_egress_outside_the_helper() -> None:
 
 # --- loc 泄漏：本轮新发现的第三条通道 ---------------------------------------
 
+
 @pytest.mark.parametrize(
     "construct",
     [
         pytest.param(
             lambda: IntentDraft.model_validate(
-                {"intent": "q", "slots": {f"  {CANARY}  ": "v"}, "missing": (),
-                 "confidence": 0.9, "source": "llm"}
+                {
+                    "intent": "q",
+                    "slots": {f"  {CANARY}  ": "v"},
+                    "missing": (),
+                    "confidence": 0.9,
+                    "source": "llm",
+                }
             ),
             id="slots_key",
         ),
         pytest.param(lambda: _event({f"  {CANARY}  ": "v"}), id="detail_key"),
         pytest.param(
             lambda: IntentDraft.model_validate(
-                {"intent": "q", "slots": {CANARY: b"bytes"}, "missing": (),
-                 "confidence": 0.9, "source": "llm"}
+                {
+                    "intent": "q",
+                    "slots": {CANARY: b"bytes"},
+                    "missing": (),
+                    "confidence": 0.9,
+                    "source": "llm",
+                }
             ),
             id="slots_value_error_leaks_key_through_loc",
         ),

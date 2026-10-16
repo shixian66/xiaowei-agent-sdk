@@ -72,9 +72,7 @@ def test_alembic_ini_parses_under_an_ascii_decoder() -> None:
     parser = ConfigParser()
     read = parser.read([_ROOT / "alembic.ini"], encoding="ascii")
     assert read, "alembic.ini 未被读到"
-    assert parser.get("alembic", "script_location") == (
-        "src/xiaowei_agent/persistence/migrations"
-    )
+    assert parser.get("alembic", "script_location") == ("src/xiaowei_agent/persistence/migrations")
     assert parser.get("alembic", "path_separator") == "os"
 
 

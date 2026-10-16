@@ -76,9 +76,7 @@ def test_each_kind_requires_exactly_its_operands() -> None:
             field="db",
             threshold=1,
         )
-    ok = StepCondition(
-        kind=StepConditionKind.EVIDENCE_FIELD_ABSENT, ref_step_id="s1", field="db"
-    )
+    ok = StepCondition(kind=StepConditionKind.EVIDENCE_FIELD_ABSENT, ref_step_id="s1", field="db")
     assert ok.field == "db"
 
 
@@ -93,8 +91,6 @@ def test_row_count_threshold_must_be_a_non_negative_strict_int(bad: object) -> N
 
 
 def test_copy_cannot_produce_an_operand_mismatch() -> None:
-    ok = StepCondition(
-        kind=StepConditionKind.EVIDENCE_FIELD_ABSENT, ref_step_id="s1", field="db"
-    )
+    ok = StepCondition(kind=StepConditionKind.EVIDENCE_FIELD_ABSENT, ref_step_id="s1", field="db")
     with pytest.raises(ValidationError):
         ok.model_copy(update={"kind": StepConditionKind.ALWAYS})

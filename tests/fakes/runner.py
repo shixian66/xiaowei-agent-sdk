@@ -174,8 +174,8 @@ class RunnerHarness:
             snapshot = WRITE_SNAPSHOT
             profile = WRITE_PROFILE
         else:
-            params = PARAMS if database is None else PARAMS.model_copy(
-                update={"database": database}
+            params = (
+                PARAMS if database is None else PARAMS.model_copy(update={"database": database})
             )
             self.plan = _slow_query_plan_with(params)
             snapshot = StaticCapabilityRegistry().snapshot()
@@ -195,11 +195,7 @@ class RunnerHarness:
             )
         if max_tool_calls is not None:
             self.plan = self.plan.model_copy(
-                update={
-                    "budget": PLAN_BUDGET.model_copy(
-                        update={"max_tool_calls": max_tool_calls}
-                    )
-                }
+                update={"budget": PLAN_BUDGET.model_copy(update={"max_tool_calls": max_tool_calls})}
             )
         self.runner = DeterministicStepRunner(
             task_store=self.store,
@@ -223,14 +219,14 @@ class RunnerHarness:
         record = await self.store.create_task(
             submission=TaskSubmission(
                 envelope=RequestEnvelope(
-                request_id="r1",
-                tenant_id=self.context.tenant_id,
-                actor=self.context.actor,
-                channel=Channel.CLI,
-                text="慢查询",
-                idempotency_key="idem-1",
-                environment_id=self.context.environment_id,
-            ),
+                    request_id="r1",
+                    tenant_id=self.context.tenant_id,
+                    actor=self.context.actor,
+                    channel=Channel.CLI,
+                    text="慢查询",
+                    idempotency_key="idem-1",
+                    environment_id=self.context.environment_id,
+                ),
                 context=self.context,
                 as_of=self.clock(),
             )
@@ -251,17 +247,13 @@ class RunnerHarness:
             )
         )
         if attempt.grant is None:
-            raise LifecycleError(
-                "task attempt was not granted", rejection=attempt.rejection
-            )
+            raise LifecycleError("task attempt was not granted", rejection=attempt.rejection)
         self.grant = attempt.grant
         return await self.runner.start(
             attempt.grant, plan=self.plan, target=self.target, context=self.context
         )
 
-    async def resume(
-        self, external_input: Any = None, *, approval: Any = None
-    ) -> Any:
+    async def resume(self, external_input: Any = None, *, approval: Any = None) -> Any:
         self.recomputed_fingerprints += 1
         self.clock.advance(seconds=61)
         attempt = await self.store.begin_task_attempt(
@@ -274,9 +266,7 @@ class RunnerHarness:
             )
         )
         if attempt.grant is None:
-            raise LifecycleError(
-                "task attempt was not granted", rejection=attempt.rejection
-            )
+            raise LifecycleError("task attempt was not granted", rejection=attempt.rejection)
         self.grant = attempt.grant
         return await self.runner.resume(
             attempt.grant,
@@ -312,9 +302,7 @@ class RunnerHarness:
         if kind == "target":
             self.target = self.target.model_copy(update={"environment_id": "test"})
         elif kind == "policy_revision":
-            self.context = self.context.model_copy(
-                update={"policy_revision": "policy-2026-10-01"}
-            )
+            self.context = self.context.model_copy(update={"policy_revision": "policy-2026-10-01"})
         elif kind == "plan":
             # 当前编译结果变化；存储中仍保留最初获准执行的计划。
             self.plan = self.plan.model_copy(

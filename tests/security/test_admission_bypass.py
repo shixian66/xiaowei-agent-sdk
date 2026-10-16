@@ -93,9 +93,7 @@ async def test_granted_approval_still_cannot_execute_e1(
 
     gateway = DeterministicToolGateway(adapters={"starrocks": adapter})
     with pytest.raises(PermissionError, match="E1 execution is disabled"):
-        await gateway.invoke(
-            synthetic_write_call(), context=CONTEXT, admission=certificate
-        )
+        await gateway.invoke(synthetic_write_call(), context=CONTEXT, admission=certificate)
     assert adapter.call_count == 0
 
 

@@ -60,9 +60,7 @@ def test_near_miss_phrasings_produce_no_candidate(case: dict[str, Any]) -> None:
         draft=draft, context=CONTEXT, snapshot=_SNAPSHOT
     )
     assert candidates.items == ()
-    assert {r.reason_code for r in candidates.rejections} == {
-        "intent.does_not_match_capability"
-    }
+    assert {r.reason_code for r in candidates.rejections} == {"intent.does_not_match_capability"}
 
 
 @pytest.mark.parametrize("case", _by("missing_context"), ids=lambda c: c["id"])

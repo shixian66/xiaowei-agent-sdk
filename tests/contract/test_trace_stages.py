@@ -64,9 +64,7 @@ async def test_successful_run_routes_each_event_exactly_once() -> None:
     await harness.start()
 
     stored = harness.state.audit_events[harness.task_id]
-    assert [event.event_id for event in stored] == [
-        event.event_id for event in logs.events
-    ]
+    assert [event.event_id for event in stored] == [event.event_id for event in logs.events]
     assert len({event.event_id for event in stored}) == len(stored)
     assert logs.deliveries == [
         Delivery.COMMAND_COMMITTED,
@@ -147,9 +145,7 @@ async def test_structured_log_sink_writes_one_record_per_event(
 
     sink = StructuredLogTraceSink()
     with caplog.at_level(logging.INFO):
-        await sink.emit(
-            make_event(stage=PipelineStage.GATEWAY), delivery=Delivery.LOG_ONLY
-        )
+        await sink.emit(make_event(stage=PipelineStage.GATEWAY), delivery=Delivery.LOG_ONLY)
     assert len(caplog.records) == 1
 
 

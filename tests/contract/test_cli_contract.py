@@ -13,12 +13,16 @@ from xiaowei_agent.interfaces.cli import CLI_RESPONSE_LIMIT, run_cli
 
 
 def _view(task_id: str = "task-1") -> bytes:
-    return TaskView(
-        task_id=task_id,
-        status=TaskStatus.CREATED,
-        render=None,
-        query_path=task_query_path(task_id),
-    ).model_dump_json().encode()
+    return (
+        TaskView(
+            task_id=task_id,
+            status=TaskStatus.CREATED,
+            render=None,
+            query_path=task_query_path(task_id),
+        )
+        .model_dump_json()
+        .encode()
+    )
 
 
 class _Response:
@@ -99,9 +103,7 @@ def test_get_percent_encodes_the_complete_task_id_and_checks_the_response_id() -
         opener,
     )
     assert code == 0
-    assert opener.requests[0].full_url.endswith(
-        "/v1/tasks/task%2Fwith%3Freserved%23chars%25"
-    )
+    assert opener.requests[0].full_url.endswith("/v1/tasks/task%2Fwith%3Freserved%23chars%25")
 
     mismatch = _Opener(_Response(_view("another-task")))
     code, _, _ = _run(["task", "get", task_id], mismatch)
@@ -158,13 +160,14 @@ def test_response_is_read_with_a_hard_one_megabyte_limit() -> None:
         (_view()[:-1] + b',"extra":1}', "application/json"),
     ],
 )
-def test_invalid_success_response_is_a_protocol_error(
-    body: bytes, content_type: str
-) -> None:
-    assert _run(
-        ["task", "get", "task-1"],
-        _Opener(_Response(body, content_type=content_type)),
-    )[0] == 2
+def test_invalid_success_response_is_a_protocol_error(body: bytes, content_type: str) -> None:
+    assert (
+        _run(
+            ["task", "get", "task-1"],
+            _Opener(_Response(body, content_type=content_type)),
+        )[0]
+        == 2
+    )
 
 
 @pytest.mark.parametrize(

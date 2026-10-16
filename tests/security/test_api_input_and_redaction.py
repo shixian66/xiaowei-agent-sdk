@@ -40,9 +40,7 @@ class _Service:
 
 class _Probe:
     async def check(self) -> ReadinessReport:
-        return ReadinessReport(
-            database_ok=True, revision_matches_head=True, assembled=True
-        )
+        return ReadinessReport(database_ok=True, revision_matches_head=True, assembled=True)
 
 
 def _app(service: _Service) -> Any:
@@ -55,9 +53,7 @@ def _app(service: _Service) -> Any:
     )
 
 
-async def _post(
-    app: Any, content: bytes | Any, *, content_type: str | None
-) -> httpx.Response:
+async def _post(app: Any, content: bytes | Any, *, content_type: str | None) -> httpx.Response:
     headers = {} if content_type is None else {"content-type": content_type}
     async with httpx.AsyncClient(
         transport=httpx.ASGITransport(app=app, raise_app_exceptions=False),
@@ -85,9 +81,7 @@ async def test_non_json_media_types_are_rejected_before_runtime(
 async def test_json_charset_is_accepted() -> None:
     service = _Service()
     body = json.dumps({"text": "检查慢查询", "idempotency_key": "idem-1"}).encode()
-    response = await _post(
-        _app(service), body, content_type="application/json; charset=utf-8"
-    )
+    response = await _post(_app(service), body, content_type="application/json; charset=utf-8")
     assert response.status_code == 202
     assert service.calls == 1
 
@@ -106,13 +100,11 @@ async def test_streamed_body_over_limit_is_rejected_before_runtime() -> None:
     service = _Service()
 
     async def chunks() -> Any:
-        yield b'{' + b'"text":"'
+        yield b"{" + b'"text":"'
         yield b"x" * 131_072
         yield b'","idempotency_key":"idem-1"}'
 
-    response = await _post(
-        _app(service), chunks(), content_type="application/json"
-    )
+    response = await _post(_app(service), chunks(), content_type="application/json")
     assert response.status_code == 413
     assert response.json() == {"error": {"code": "payload_too_large"}}
     assert service.calls == 0

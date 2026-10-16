@@ -217,14 +217,12 @@ def admit(
 ) -> AdmissionCertificate:
     """按被测步骤挑选正确的快照与 profile，其余一律走生产路径。"""
     is_write = step.operation == WRITE_OP
-    resolved_plan = plan if plan is not None else (
-        synthetic_write_plan() if is_write else slow_query_plan()
+    resolved_plan = (
+        plan if plan is not None else (synthetic_write_plan() if is_write else slow_query_plan())
     )
     profile = WRITE_PROFILE if is_write else SLOW_QUERY_READONLY_PROFILE
     if profile_environments is not None:
-        profile = profile.model_copy(
-            update={"allowed_environment_ids": profile_environments}
-        )
+        profile = profile.model_copy(update={"allowed_environment_ids": profile_environments})
     return admit_step(
         step=step,
         plan=resolved_plan,

@@ -56,9 +56,7 @@ async def test_gateway_can_construct(gateway, ok_call, context, admission) -> No
     assert result.trace_id == context.trace_id
 
 
-async def test_result_data_view_is_deeply_immutable(
-    gateway, ok_call, context, admission
-) -> None:
+async def test_result_data_view_is_deeply_immutable(gateway, ok_call, context, admission) -> None:
     result = await gateway.invoke(ok_call, context=context, admission=admission)
     with pytest.raises(TypeError):
         result.data_view[0]["query_id"] = "tampered"  # type: ignore[index]

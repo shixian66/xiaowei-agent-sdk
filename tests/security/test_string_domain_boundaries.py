@@ -48,6 +48,7 @@ _ERR = {
 
 # --- StrictStr:标识符与引用 -------------------------------------------------
 
+
 @pytest.mark.parametrize("bad", ["", "   ", " ref-1", "ref-1 ", "\tref-1\n"])
 def test_reference_fields_reject_empty_and_padded(bad: str) -> None:
     """空串与带空白的引用都必须拒绝。
@@ -76,6 +77,7 @@ def test_padded_reference_is_not_silently_stripped() -> None:
 
 
 # --- NonEmptyText:本系统生成的文本 -----------------------------------------
+
 
 def test_generated_text_rejects_empty() -> None:
     # 先证明同样的构造在 body 合法时能成功,否则"拒绝"可能来自别的缺失字段
@@ -106,6 +108,7 @@ def test_generated_text_tuples_reject_empty_entries() -> None:
 
 # --- FreeText:外部不可信文本逐字捕获 ---------------------------------------
 
+
 @pytest.mark.parametrize("raw", ["", "   ", "  含空白的工具输出  ", "\n\n"])
 def test_external_content_is_captured_verbatim(raw: str) -> None:
     """外部文本一个字节都不许改。
@@ -113,9 +116,7 @@ def test_external_content_is_captured_verbatim(raw: str) -> None:
     空串与纯空白都是合法的工具输出。任何收紧(非空、strip)都会篡改被捕获的原文,
     并让 digest 与真实来源对不上——取证链就断在这里。
     """
-    captured = ExternalContent.capture(
-        source=ExternalSource.TOOL, content=raw, captured_at=NOW
-    )
+    captured = ExternalContent.capture(source=ExternalSource.TOOL, content=raw, captured_at=NOW)
     assert captured.content == raw
 
 
@@ -148,15 +149,16 @@ def test_capture_does_not_raise_attribute_error_for_bytes() -> None:
 
 # --- Sha256Hex:摘要形状 ------------------------------------------------------
 
+
 @pytest.mark.parametrize(
     "bad",
     [
-        "different",              # 旧标注下能构造成功
-        "A" * 64,                 # 大写
-        "0" * 63,                 # 短一位
-        "0" * 65,                 # 长一位
-        "g" * 64,                 # 非十六进制
-        "0" * 64 + "\n",          # 尾随换行:锚点写成 $ 时会漏
+        "different",  # 旧标注下能构造成功
+        "A" * 64,  # 大写
+        "0" * 63,  # 短一位
+        "0" * 65,  # 长一位
+        "g" * 64,  # 非十六进制
+        "0" * 64 + "\n",  # 尾随换行:锚点写成 $ 时会漏
     ],
 )
 def test_digest_shaped_fields_reject_malformed(bad: str) -> None:
@@ -184,6 +186,4 @@ def test_digest_shaped_fields_accept_a_real_digest() -> None:
 def test_external_content_digest_mismatch_is_still_caught() -> None:
     """形状合法但内容不符,仍必须被重算比对拒绝——两道防线都要在。"""
     with pytest.raises(ValidationError):
-        ExternalContent(
-            source=ExternalSource.TOOL, content="x", digest=_HEX, captured_at=NOW
-        )
+        ExternalContent(source=ExternalSource.TOOL, content="x", digest=_HEX, captured_at=NOW)

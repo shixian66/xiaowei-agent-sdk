@@ -27,7 +27,7 @@ from xiaowei.model_api import ModelProfile
 from xiaowei.models import Delivery
 from xiaowei.runtime import ServeConfig, open_runtime
 from xiaowei.starrocks import StarRocksError, StarRocksErrorCode, show_create_sql
-from xiaowei.starrocks_tools import QUERY_TOOLS
+from xiaowei.starrocks_tools import AUDIT_TOOLS, QUERY_TOOLS
 
 NOW = datetime(2026, 10, 10, 12, tzinfo=UTC)
 OPERATOR = "u1-synthetic-operator"
@@ -232,6 +232,12 @@ R7_SCENARIOS = (
         "r7_compare_targets",
         (("query", f"比较fat、fat1和pre的data_center.{TABLE}字段"),),
         multi=True,
+    ),
+    Scenario(
+        "r7_compare_one_unavailable",
+        (("query", f"比较fat、fat1和pre的data_center.{TABLE}字段"),),
+        multi=True,
+        unavailable="fat1",
     ),
     Scenario(
         "r7_switch_unavailable",
@@ -492,7 +498,7 @@ def tool_choices(body: bytes, targets: frozenset[str]) -> list[tuple[str, str]]:
     else:
         calls = [c for c in objects(data.get("output")) if c.get("type") == "function_call"]
     selected = []
-    known_tools = {t.partition("/")[2] for t in QUERY_TOOLS}
+    known_tools = {t.partition("/")[2] for t in QUERY_TOOLS | AUDIT_TOOLS}
     for call in calls:
         args = call.get("args", call.get("arguments"))
         if isinstance(args, str):

@@ -45,11 +45,7 @@ def test_every_implemented_protocol_has_a_typed_anchor() -> None:
 def test_anchor_module_has_no_runtime_import_side_effects() -> None:
     """锚点全部位于 TYPE_CHECKING 块内：不得把 fake 拉进生产导入链。"""
     tree = ast.parse(Path(inspect.getfile(_conformance)).read_text(encoding="utf-8"))
-    toplevel_imports = [
-        node
-        for node in tree.body
-        if isinstance(node, ast.Import | ast.ImportFrom)
-    ]
+    toplevel_imports = [node for node in tree.body if isinstance(node, ast.Import | ast.ImportFrom)]
     modules = {
         (node.module if isinstance(node, ast.ImportFrom) else node.names[0].name) or ""
         for node in toplevel_imports
@@ -67,9 +63,7 @@ def _keyword_params(func: object) -> set[str]:
 
 def test_gateway_implementation_keeps_the_protocol_keyword_arguments() -> None:
     """关键字参数漂移不会被结构兼容性检查发现，但会在调用点炸掉。"""
-    assert _keyword_params(DeterministicToolGateway.invoke) == _keyword_params(
-        ToolGateway.invoke
-    )
+    assert _keyword_params(DeterministicToolGateway.invoke) == _keyword_params(ToolGateway.invoke)
 
 
 def _protocol_methods(protocol: type) -> tuple[str, ...]:
@@ -130,9 +124,9 @@ def test_the_real_runner_keeps_the_protocol_signature() -> None:
     from xiaowei_agent.runners.deterministic import DeterministicStepRunner
 
     for method in ("start", "resume"):
-        assert inspect.signature(
-            getattr(DeterministicStepRunner, method)
-        ) == inspect.signature(getattr(WorkflowRunner, method)), method
+        assert inspect.signature(getattr(DeterministicStepRunner, method)) == inspect.signature(
+            getattr(WorkflowRunner, method)
+        ), method
 
 
 def test_the_signature_check_rejects_the_old_narrow_runner() -> None:
@@ -150,9 +144,7 @@ def test_the_signature_check_rejects_the_old_narrow_runner() -> None:
         ) -> TaskOutcome: ...
 
     assert _keyword_params(NarrowRunner.start) != _keyword_params(WorkflowRunner.start)
-    assert _keyword_params(NarrowRunner.resume) != _keyword_params(
-        WorkflowRunner.resume
-    )
+    assert _keyword_params(NarrowRunner.resume) != _keyword_params(WorkflowRunner.resume)
 
 
 def test_protocols_without_implementations_are_documented_as_such() -> None:

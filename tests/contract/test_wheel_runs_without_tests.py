@@ -117,6 +117,8 @@ for name in ("tests", "tests.fakes"):
 root = importlib.resources.files("xiaowei")
 assert root.joinpath("migrations/002_p1b_channels.sql").read_text(encoding="utf-8")
 assert root.joinpath("static/index.html").read_bytes()
+assert root.joinpath("skills/database_query.md").read_text(encoding="utf-8")
+assert root.joinpath("skills/database_diagnosis.md").read_text(encoding="utf-8")
 """
     env = {key: value for key, value in os.environ.items() if key != "PYTHONPATH"}
     completed = subprocess.run(  # noqa: S603 -- venv Python 位于本测试创建的临时目录

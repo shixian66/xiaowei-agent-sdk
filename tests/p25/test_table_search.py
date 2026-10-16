@@ -168,9 +168,7 @@ async def test_database_listing_batches_probes_and_resumes_a_revoked_large_datab
     assert len([s for s in statements(t.drv) if s.startswith("SELECT 1 FROM")]) <= 32
 
     forget(t.drv)
-    second = await t.call(
-        "local/list_databases", page_size=5, cursor=first.payload["next_cursor"]
-    )
+    second = await t.call("local/list_databases", page_size=5, cursor=first.payload["next_cursor"])
     assert second.payload["rows"] == [] and second.payload["next_cursor"] is None
     assert not second.truncated and t.drv.attempts <= 3
     assert len([s for s in statements(t.drv) if s.startswith("SELECT 1 FROM")]) == 12
@@ -186,7 +184,8 @@ async def test_database_listing_does_not_skip_a_late_readable_object() -> None:
     pages = await walk(t, "local/list_databases", page_size=5)
     assert [p.payload["rows"] for p in pages] == [[], [{"database": "a"}, {"database": "b"}]]
     assert [[(d.database, d.name) for d in p.dependencies] for p in pages] == [
-        [], [("a", "t39"), ("b", "visible")]
+        [],
+        [("a", "t39"), ("b", "visible")],
     ]
     assert sum(1 for s in statements(t.drv) if s.startswith("SELECT 1 FROM")) <= 42
 

@@ -54,9 +54,7 @@ async def test_promoted_columns_agree_with_the_stored_payload(
     store: Any, clean_database: AsyncEngine
 ) -> None:
     """提升列不是第二份真相，是载荷的投影。两者不一致时按列查询会给出错误答案。"""
-    event = make_event(
-        stage=PipelineStage.ADMISSION, outcome=StageOutcome.REJECTED, task_id=_TASK
-    )
+    event = make_event(stage=PipelineStage.ADMISSION, outcome=StageOutcome.REJECTED, task_id=_TASK)
     await store.record_audit_event(event=event)
 
     (row,) = await _rows(clean_database, TASK_AUDIT_EVENTS)
@@ -101,15 +99,11 @@ async def test_a_denied_step_leaves_an_audit_row_without_any_evidence(
     assert await evidence_ledger.load(task_id=_TASK) == ()
 
 
-async def test_audit_rows_are_append_only(
-    store: Any, clean_database: AsyncEngine
-) -> None:
+async def test_audit_rows_are_append_only(store: Any, clean_database: AsyncEngine) -> None:
     """同一任务、同一阶段的第二条事件必须新增一行，而不是覆盖第一行。"""
     for index in range(2):
         await store.record_audit_event(
-            event=make_event(
-                stage=PipelineStage.ADMISSION, task_id=_TASK, event_id=f"e{index}"
-            )
+            event=make_event(stage=PipelineStage.ADMISSION, task_id=_TASK, event_id=f"e{index}")
         )
     rows = await _rows(clean_database, TASK_AUDIT_EVENTS)
     assert [row["seq"] for row in rows] == [1, 2]
@@ -128,13 +122,9 @@ async def test_a_rejected_audit_event_leaves_no_row(
     占位桶里写。到了真表上就看得见了：一行 ``task_id`` 为占位值的垃圾审计，或者一个
     来自驱动层的 NOT NULL 违例（而调用方期待的是 ``UnscopedAuditEventError``）。
     """
-    await store.record_audit_event(
-        event=make_event(stage=PipelineStage.ADMISSION, task_id=_TASK)
-    )
+    await store.record_audit_event(event=make_event(stage=PipelineStage.ADMISSION, task_id=_TASK))
     with pytest.raises(UnscopedAuditEventError):
-        await store.record_audit_event(
-            event=make_event(stage=PipelineStage.INTENT, task_id=None)
-        )
+        await store.record_audit_event(event=make_event(stage=PipelineStage.INTENT, task_id=None))
     async with clean_database.connect() as connection:
         total = (
             await connection.execute(sa.select(sa.func.count()).select_from(TASK_AUDIT_EVENTS))
@@ -185,9 +175,7 @@ async def test_concurrent_audit_writes_get_distinct_seqs(
     seqs = await asyncio.gather(
         *(
             writer.record_audit_event(
-                event=make_event(
-                    stage=PipelineStage.ADMISSION, task_id=_TASK, event_id=f"e{index}"
-                )
+                event=make_event(stage=PipelineStage.ADMISSION, task_id=_TASK, event_id=f"e{index}")
             )
             for index, writer in enumerate(writers)
         )

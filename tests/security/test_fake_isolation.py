@@ -101,8 +101,10 @@ def test_the_detector_catches_both_import_spellings(tmp_path: Path) -> None:
 
     c = tmp_path / "c.py"
     c.write_text(
-        '"""docstring 提到 fake 但不 import。"""' + chr(10)
-        + "from xiaowei_agent import contracts" + chr(10),
+        '"""docstring 提到 fake 但不 import。"""'
+        + chr(10)
+        + "from xiaowei_agent import contracts"
+        + chr(10),
         encoding="utf-8",
     )
     assert not _imports_a_fake(c)
@@ -110,9 +112,12 @@ def test_the_detector_catches_both_import_spellings(tmp_path: Path) -> None:
     # TYPE_CHECKING 块内的 import 运行时不发生，不构成"接进真实路径"。
     d = tmp_path / "d.py"
     d.write_text(
-        "from typing import TYPE_CHECKING" + chr(10)
-        + "if TYPE_CHECKING:" + chr(10)
-        + "    from xiaowei_agent.tools.fake import RecordingToolAdapter" + chr(10),
+        "from typing import TYPE_CHECKING"
+        + chr(10)
+        + "if TYPE_CHECKING:"
+        + chr(10)
+        + "    from xiaowei_agent.tools.fake import RecordingToolAdapter"
+        + chr(10),
         encoding="utf-8",
     )
     assert not _imports_a_fake(d)
@@ -120,10 +125,14 @@ def test_the_detector_catches_both_import_spellings(tmp_path: Path) -> None:
     # 但同一个文件在运行时 import 就必须被抓住。
     e = tmp_path / "e.py"
     e.write_text(
-        "from typing import TYPE_CHECKING" + chr(10)
-        + "from xiaowei_agent.tools.fake import RecordingToolAdapter" + chr(10)
-        + "if TYPE_CHECKING:" + chr(10)
-        + "    pass" + chr(10),
+        "from typing import TYPE_CHECKING"
+        + chr(10)
+        + "from xiaowei_agent.tools.fake import RecordingToolAdapter"
+        + chr(10)
+        + "if TYPE_CHECKING:"
+        + chr(10)
+        + "    pass"
+        + chr(10),
         encoding="utf-8",
     )
     assert _imports_a_fake(e)
@@ -137,8 +146,7 @@ def test_the_detector_catches_both_import_spellings(tmp_path: Path) -> None:
 
     g = tmp_path / "g.py"
     g.write_text(
-        "from xiaowei_agent.tools.starrocks_recording import default_recording"
-        + chr(10),
+        "from xiaowei_agent.tools.starrocks_recording import default_recording" + chr(10),
         encoding="utf-8",
     )
     assert _imports_a_fake(g) == ["xiaowei_agent.tools.starrocks_recording"]

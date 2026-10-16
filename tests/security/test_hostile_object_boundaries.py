@@ -60,6 +60,7 @@ class _RaisingStr:
 
 # --- 边界 1：日志过滤器 -----------------------------------------------------
 
+
 def test_log_filter_absorbs_a_message_object_whose_str_raises() -> None:
     """``record.getMessage()`` 会调用消息对象自己的 ``__str__``。
 
@@ -87,6 +88,7 @@ def test_log_filter_still_records_hostile_args() -> None:
 
 # --- 边界 2：TypeAdapter 校验路径 -------------------------------------------
 
+
 def test_content_digest_rejection_hides_the_rejected_input() -> None:
     """``hide_input_in_errors`` 挂在 ``Contract`` 的 model_config 上。
 
@@ -105,6 +107,7 @@ def test_content_digest_still_accepts_text() -> None:
 
 
 # --- 边界 3：运行时构造的类名 -----------------------------------------------
+
 
 def test_canonical_json_rejection_carries_no_type_name() -> None:
     with pytest.raises(TypeError) as caught:

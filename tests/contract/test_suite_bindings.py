@@ -141,9 +141,7 @@ def test_every_module_that_binds_is_registered() -> None:
 
 def test_every_group_has_at_least_one_binding() -> None:
     bound = {(suite, group) for suite, group, _ in _BINDINGS.values()}
-    declared = {
-        (name, group) for name, suite in _SUITES.items() for group in suite.ALL_GROUPS
-    }
+    declared = {(name, group) for name, suite in _SUITES.items() for group in suite.ALL_GROUPS}
     assert bound == declared
 
 

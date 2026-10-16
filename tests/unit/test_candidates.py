@@ -52,17 +52,13 @@ def test_rejection_granularity_matches_candidate_granularity() -> None:
     若拒绝只到 capability/version 级，同一 capability 的一个 operation 被拒就会
     与另一个 operation 的候选冲突，"这个能力到底是候选还是被拒"没有确定答案。
     """
-    assert {"capability_id", "capability_version", "operation"} <= set(
-        Rejection.model_fields
-    )
+    assert {"capability_id", "capability_version", "operation"} <= set(Rejection.model_fields)
 
 
 def test_duplicate_rejection_is_rejected() -> None:
     reject = _rejection()
     with pytest.raises(ValidationError, match="duplicate rejection"):
-        CandidateSet(
-            resolver_version="1", snapshot_id="s", items=(), rejections=(reject, reject)
-        )
+        CandidateSet(resolver_version="1", snapshot_id="s", items=(), rejections=(reject, reject))
 
 
 def test_operation_cannot_be_both_candidate_and_rejection() -> None:

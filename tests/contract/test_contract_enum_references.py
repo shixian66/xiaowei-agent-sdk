@@ -120,10 +120,13 @@ def test_the_check_catches_the_exact_members_that_shipped() -> None:
 def test_the_check_does_not_flag_real_members_or_unrelated_names() -> None:
     """误报会让人把整条检查关掉，因此正例同样要钉。"""
     enums = contract_enums()
-    assert unknown_enum_members(
-        "a = StageOutcome.REJECTED\n"
-        "b = StageOutcome.FAILED.value\n"
-        "c = payload.outcome.value\n"
-        "d = SomeOtherClass.WHATEVER\n",
-        enums=enums,
-    ) == []
+    assert (
+        unknown_enum_members(
+            "a = StageOutcome.REJECTED\n"
+            "b = StageOutcome.FAILED.value\n"
+            "c = payload.outcome.value\n"
+            "d = SomeOtherClass.WHATEVER\n",
+            enums=enums,
+        )
+        == []
+    )

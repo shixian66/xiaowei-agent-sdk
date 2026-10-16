@@ -92,9 +92,7 @@ def _init_annotation(tree: ast.Module, cls: str, param: str) -> str | None:
         if not (isinstance(node, ast.ClassDef) and node.name == cls):
             continue
         for item in node.body:
-            if not (
-                isinstance(item, ast.FunctionDef) and item.name == "__init__"
-            ):
+            if not (isinstance(item, ast.FunctionDef) and item.name == "__init__"):
                 continue
             args = item.args
             for arg in (*args.args, *args.kwonlyargs):
@@ -115,8 +113,7 @@ def test_the_runtime_declares_its_runner_by_protocol() -> None:
 
 def test_the_annotation_reader_distinguishes_object_from_a_protocol() -> None:
     source = (
-        "class C:\n"
-        "    def __init__(self, *, runner: object, other: WorkflowRunner) -> None: ...\n"
+        "class C:\n    def __init__(self, *, runner: object, other: WorkflowRunner) -> None: ...\n"
     )
     tree = ast.parse(source)
     assert _init_annotation(tree, "C", "runner") == "object"

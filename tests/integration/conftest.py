@@ -64,9 +64,7 @@ def _is_integration_item(item: pytest.Item) -> bool:
     return _INTEGRATION_DIR in Path(path).parents or Path(path).parent == _INTEGRATION_DIR
 
 
-def pytest_collection_modifyitems(
-    config: pytest.Config, items: list[pytest.Item]
-) -> None:
+def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item]) -> None:
     """只给本目录的 item 加 ``allow_hosts``，且只放行 DSN 的那一个 host。
 
     DSN 未设置时**不加 marker**——此时用例本就会跳过，加一个空放行只会让
@@ -83,9 +81,7 @@ def pytest_collection_modifyitems(
             item.add_marker(pytest.mark.allow_hosts([host]))
 
 
-def unexpected_integration_skips(
-    skipped_locations: list[str], *, dsn: str | None
-) -> list[str]:
+def unexpected_integration_skips(skipped_locations: list[str], *, dsn: str | None) -> list[str]:
     """DSN 已设置时，integration 目录里**不允许**有任何跳过。
 
     没有这条，CI 里 DSN 拼错、service 没起来、迁移失败等情况全都表现为"全绿"，
@@ -109,8 +105,7 @@ def pytest_sessionfinish(session: pytest.Session, exitstatus: int) -> None:
     offenders = unexpected_integration_skips(locations, dsn=dsn_of(session.config))
     if offenders:
         reporter.write_line(
-            f"{DSN_ENV_VAR} 已设置，但 integration 仍有 {len(offenders)} 条跳过："
-            f"{offenders[:5]}",
+            f"{DSN_ENV_VAR} 已设置，但 integration 仍有 {len(offenders)} 条跳过：{offenders[:5]}",
             red=True,
         )
         session.exitstatus = 1
@@ -150,12 +145,8 @@ async def clean_database(migrated_engine: AsyncEngine) -> AsyncIterator[AsyncEng
     async with migrated_engine.begin() as connection:
         names = ", ".join(table.name for table in ALL_TABLES)
         await connection.execute(sa.text(f"TRUNCATE {names} RESTART IDENTITY CASCADE"))
-        await connection.execute(
-            sa.text(f"ALTER SEQUENCE {FENCING_SEQUENCE_NAME} RESTART WITH 1")
-        )
-        await connection.execute(
-            sa.text(f"ALTER SEQUENCE {CREATED_SEQUENCE_NAME} RESTART WITH 1")
-        )
+        await connection.execute(sa.text(f"ALTER SEQUENCE {FENCING_SEQUENCE_NAME} RESTART WITH 1"))
+        await connection.execute(sa.text(f"ALTER SEQUENCE {CREATED_SEQUENCE_NAME} RESTART WITH 1"))
     yield migrated_engine
 
 

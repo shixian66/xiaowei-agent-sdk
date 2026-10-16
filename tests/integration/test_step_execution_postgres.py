@@ -67,9 +67,7 @@ def _event(grant, *, event_id: str):
         stage=PipelineStage.GATEWAY,
         task_id=grant.task_id,
         event_id=event_id,
-    ).model_copy(
-        update={"attempt_number": grant.attempt_number, "step_id": "s1"}
-    )
+    ).model_copy(update={"attempt_number": grant.attempt_number, "step_id": "s1"})
 
 
 def _evidence(grant, *, captured_at):
@@ -90,9 +88,7 @@ async def test_step_commit_rolls_back_journal_evidence_and_audit_together(
     clean_database: AsyncEngine, store, plan_store, context, clock
 ) -> None:
     grant, _ = await _running_grant(store, plan_store, context)
-    begun = await store.begin_step_attempt(
-        command=StepAttemptCommand(grant=grant, step_id="s1")
-    )
+    begun = await store.begin_step_attempt(command=StepAttemptCommand(grant=grant, step_id="s1"))
     assert begun.record is not None
 
     async with clean_database.begin() as connection:
@@ -184,13 +180,9 @@ async def test_transition_rolls_back_status_and_version_when_audit_fails(
     finally:
         async with clean_database.begin() as connection:
             await connection.execute(
-                sa.text(
-                    "DROP TRIGGER IF EXISTS reject_transition_audit ON task_audit_events"
-                )
+                sa.text("DROP TRIGGER IF EXISTS reject_transition_audit ON task_audit_events")
             )
-            await connection.execute(
-                sa.text("DROP FUNCTION IF EXISTS reject_transition_audit()")
-            )
+            await connection.execute(sa.text("DROP FUNCTION IF EXISTS reject_transition_audit()"))
 
     after = await store.get(lookup=lookup_for(task))
     assert after == before

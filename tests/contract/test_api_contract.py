@@ -119,9 +119,7 @@ async def test_get_uses_trusted_scope_and_returns_runtime_projection() -> None:
         (IdempotencyConflictError("conflict"), 409, "idempotency_conflict"),
         (TaskNotFoundError(task_id="private-task"), 404, "not_found"),
         (
-            PersistenceUnavailableError(
-                category=PersistenceUnavailableCategory.CONNECT
-            ),
+            PersistenceUnavailableError(category=PersistenceUnavailableCategory.CONNECT),
             503,
             "unavailable",
         ),
@@ -191,9 +189,7 @@ async def test_api_get_preserves_runtime_query_purity() -> None:
     audit_count = len(harness.state.audit_events[harness.task_id])
     evidence_count = len(await harness.ledger.load(task_id=harness.task_id))
     gateway_count = harness.gateway.invocations
-    response = await _request(
-        _app(harness.runtime), "GET", f"/v1/tasks/{harness.task_id}"
-    )
+    response = await _request(_app(harness.runtime), "GET", f"/v1/tasks/{harness.task_id}")
 
     after = await harness.store.get(lookup=harness.lookup)
     assert response.status_code == 200

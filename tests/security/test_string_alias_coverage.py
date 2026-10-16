@@ -65,8 +65,10 @@ def _type_aliases() -> dict[str, set[str]]:
         for stmt in tree.body:
             if isinstance(stmt, ast.AnnAssign) and isinstance(stmt.target, ast.Name):
                 target, value = stmt.target.id, stmt.value
-            elif isinstance(stmt, ast.Assign) and len(stmt.targets) == 1 and isinstance(
-                stmt.targets[0], ast.Name
+            elif (
+                isinstance(stmt, ast.Assign)
+                and len(stmt.targets) == 1
+                and isinstance(stmt.targets[0], ast.Name)
             ):
                 target, value = stmt.targets[0].id, stmt.value
             else:
@@ -120,7 +122,7 @@ def test_alias_expansion_is_load_bearing() -> None:
         "Clean": {"Mapping", "StrictStr"},
     }
     assert "str" in _expand({"Leaky"}, aliases)
-    assert "str" in _expand({"Nested"}, aliases)      # 传递展开
+    assert "str" in _expand({"Nested"}, aliases)  # 传递展开
     assert "str" not in _expand({"Clean"}, aliases)
     assert "str" not in _expand({"StrictStr"}, aliases)  # 已批准别名处停止
 
@@ -165,9 +167,7 @@ def test_detector_itself_catches_bare_str(annotation: str, flagged: bool) -> Non
 def test_detector_ignores_str_in_docstrings_and_non_contract_classes() -> None:
     """两条反例:文本扫描会误报的位置,AST 扫描必须放行。"""
     with_docstring = (
-        'class Probe(Contract):\n'
-        '    """这里提到 str 只是散文,不是标注。"""\n'
-        "    field: StrictStr\n"
+        'class Probe(Contract):\n    """这里提到 str 只是散文,不是标注。"""\n    field: StrictStr\n'
     )
     assert _contract_fields(with_docstring) == [("Probe", "field", {"StrictStr"})]
 

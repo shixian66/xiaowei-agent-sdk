@@ -49,7 +49,7 @@ def test_slow_queries_found_is_answerable() -> None:
 
 
 def test_empty_slow_queries_with_traffic_in_scope_is_answerable() -> None:
-    """"该范围内没有慢查询"是一个确定的答案，不是失败。"""
+    """ "该范围内没有慢查询"是一个确定的答案，不是失败。"""
     verdict = assess(evidences=(_empty_s1(), _count(42)))
     assert verdict.sufficient is True
     assert verdict.downgrade_suggestion is False
@@ -104,9 +104,10 @@ def test_verdict_carries_the_evidence_limitations() -> None:
 
 def test_sampled_evidence_is_reported_as_a_limitation() -> None:
     sampled = _slow_rows().model_copy(update={"sampled": True})
-    assert any("sampl" in item.lower() or "截断" in item for item in assess(
-        evidences=(sampled,)
-    ).limitations)
+    assert any(
+        "sampl" in item.lower() or "截断" in item
+        for item in assess(evidences=(sampled,)).limitations
+    )
 
 
 def test_assessment_is_deterministic() -> None:
@@ -131,9 +132,7 @@ def test_verdict_never_carries_execution_authority() -> None:
     )
 
 
-@pytest.mark.parametrize(
-    "hostile", ["steps", "tool", "sql", "approval_ref", "effect_class"]
-)
+@pytest.mark.parametrize("hostile", ["steps", "tool", "sql", "approval_ref", "effect_class"])
 def test_verdict_rejects_execution_authority_fields(hostile: str) -> None:
     from pydantic import ValidationError
 

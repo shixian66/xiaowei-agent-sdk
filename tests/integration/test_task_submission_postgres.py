@@ -26,12 +26,14 @@ async def test_submission_round_trips_with_the_original_as_of(
 
     async with clean_database.connect() as connection:
         row = (
-            await connection.execute(
-                sa.select(TASK_SUBMISSIONS).where(
-                    TASK_SUBMISSIONS.c.task_id == task.task_id
+            (
+                await connection.execute(
+                    sa.select(TASK_SUBMISSIONS).where(TASK_SUBMISSIONS.c.task_id == task.task_id)
                 )
             )
-        ).mappings().one()
+            .mappings()
+            .one()
+        )
 
     assert load_contract(RequestEnvelope, row["envelope"]) == submission.envelope
     assert load_contract(RequestContext, row["context"]) == submission.context
@@ -52,12 +54,14 @@ async def test_idempotent_retry_does_not_overwrite_the_first_submission(
 
     async with clean_database.connect() as connection:
         row = (
-            await connection.execute(
-                sa.select(TASK_SUBMISSIONS).where(
-                    TASK_SUBMISSIONS.c.task_id == first.task_id
+            (
+                await connection.execute(
+                    sa.select(TASK_SUBMISSIONS).where(TASK_SUBMISSIONS.c.task_id == first.task_id)
                 )
             )
-        ).mappings().one()
+            .mappings()
+            .one()
+        )
 
     assert retry.task_id == first.task_id
     assert load_contract(RequestEnvelope, row["envelope"]) == first_submission.envelope

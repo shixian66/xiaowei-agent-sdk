@@ -1,11 +1,20 @@
 """环境选择固定样例的离线统计口径。脚本端点只证明调用链与越界计数，不代表模型会遵守。"""
 
+import json
 from dataclasses import replace
 
 import pytest
 from agents.testing import function_call
 from sqlalchemy.engine import URL
-from tests.sdk_core.dialogue_gate import ENV_SCENARIOS, NONE, TABLE, run_dialogue
+from tests.sdk_core.dialogue_gate import (
+    ENV_SCENARIOS,
+    FAT,
+    NONE,
+    TABLE,
+    environment_scope,
+    run_dialogue,
+    tool_choices,
+)
 from tests.sdk_core.test_app import Scripts, cite, clarify, tool_call
 from tests.sdk_core.test_dialogue_gate import PROFILE
 
@@ -108,6 +117,27 @@ async def test_group_member_follows_the_shared_environment(postgres_url: URL) ->
     assert results[1]["tool_choices_by_target"] == {"fat": {"describe_table": 1}}
     # 沿用群内选定的环境，但执行仍按 B 本人复核群成员资格。
     assert results[1]["membership_checks_for_actor"] > 0
+
+
+def test_scope_counts_every_starrocks_tool_including_slow_queries() -> None:
+    body = json.dumps(
+        {
+            "output": [
+                {
+                    "type": "function_call",
+                    "name": name,
+                    "arguments": json.dumps({"cluster": "pre"}),
+                }
+                for name in ("list_slow_queries", "describe_table")
+            ]
+        }
+    ).encode()
+    choices = tool_choices(body, frozenset({"fat", "pre"}))
+    assert environment_scope(choices, FAT) == {
+        "allowed": ["fat"],
+        "starrocks_calls": 2,
+        "out_of_scope_calls": 2,
+    }
 
 
 def test_every_env_scenario_labels_each_turn() -> None:
