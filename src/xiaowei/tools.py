@@ -30,6 +30,7 @@ from xiaowei.governance import (
     Execute,
     GovernedTools,
     MonitoringReadError,
+    PrometheusSelectorError,
     PromQLExpressionError,
     ProposalRejectedError,
     ToolRejectCode,
@@ -120,6 +121,9 @@ _REJECTION_HINTS: dict[ToolRejectHint, str] = {
     ),
     "change_promql": (
         "该表达式本轮已解析失败，未重发；修改括号、运算符或函数参数后再调用，不重发同一表达式"
+    ),
+    "change_selector": (
+        "该选择器本轮已被上游拒绝，未重发；修改 matches 后再调用，不重发同一选择器"
     ),
     "prometheus_text": "表达式/指标名最多8192字符，查询表达式不能为空；修改后再调用",
     "metric_required": (
@@ -281,6 +285,19 @@ def _function_tool(
                     "column": exc.column,
                     "correction_allowed": exc.correction_allowed,
                     "reason": "PromQL解析失败；检查括号、运算符与函数参数，勿重发同一表达式",
+                },
+                ensure_ascii=False,
+            )
+        except PrometheusSelectorError as exc:
+            return json.dumps(
+                {
+                    "status": "invalid_selector",
+                    "source": contract.target_id,
+                    "correction_allowed": exc.correction_allowed,
+                    "reason": (
+                        "上游拒绝选择器或参数；matches 每项须是合法选择器且至少有一个匹配器"
+                        '不匹配空串，例如 node_uname_info 或 {job="node"}，勿重发同一请求'
+                    ),
                 },
                 ensure_ascii=False,
             )

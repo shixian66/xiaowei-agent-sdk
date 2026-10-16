@@ -40,6 +40,7 @@ from xiaowei.models import (
     AUDIENCES,
     MONITORING_READ_POLICIES,
     PROMETHEUS_QUERY_POLICIES,
+    PROMETHEUS_SELECTOR_POLICIES,
     Identity,
     MonitoringFailure,
     MonitoringFailureReason,
@@ -137,6 +138,7 @@ ToolRejectHint = Literal[
     "column_capacity",
     "ddl_sql_capacity",
     "change_promql",
+    "change_selector",
     "prometheus_text",
     "metric_required",
     "selectors",
@@ -223,6 +225,14 @@ class PromQLExpressionError(MonitoringReadError):
         super().__init__("invalid_expression")
         self.line = line
         self.column = column
+        self.correction_allowed = False
+
+
+class PrometheusSelectorError(MonitoringReadError):
+    """锁版协议确认的发现工具 400 bad_data（选择器/参数被拒）；修正额度由治理层决定。"""
+
+    def __init__(self) -> None:
+        super().__init__("invalid_selector")
         self.correction_allowed = False
 
 
@@ -390,6 +400,9 @@ class TurnRuns:
     promql_errors: tuple[tuple[str, str], ...] = ()  # 目标、已失败表达式，跨 query/range 禁止重发。
     promql_pending: frozenset[str] = frozenset()
     promql_repairs: tuple[str, ...] = ()  # 每源整轮最多两项，不随成功复位。
+    selector_errors: tuple[tuple[str, str], ...] = ()  # 目标、已被拒的发现请求摘要。
+    selector_pending: frozenset[str] = frozenset()
+    selector_repairs: tuple[str, ...] = ()  # 每源整轮最多两项，不随成功复位。
     alertmanager_errors: tuple[tuple[str, str, str, str], ...] = ()  # 源、类别、工具、摘要。
     alertmanager_pending: frozenset[tuple[str, str]] = frozenset()
     alertmanager_repairs: tuple[tuple[str, str], ...] = ()
@@ -517,7 +530,13 @@ class GovernedTools:
         if any(
             failure.target_id == contract.target_id
             and failure.reason
-            not in {"invalid_expression", "response_limit", "invalid_matcher", "silence_missing"}
+            not in {
+                "invalid_expression",
+                "invalid_selector",
+                "response_limit",
+                "invalid_matcher",
+                "silence_missing",
+            }
             for failure in self._runs.get(_turn_key(ctx.identity), TurnRuns()).monitoring_failures
         ):
             raise ToolRejectedError(
@@ -550,6 +569,21 @@ class GovernedTools:
                         code="source_stopped",
                     )
                 repair_from = sum(target == contract.target_id for target, _ in runs.promql_errors)
+        selector_key: str | None = None
+        selector_repair_from: int | None = None
+        if contract.policy_id in PROMETHEUS_SELECTOR_POLICIES:
+            selector_key = _selector_request_key(contract.policy_id, arguments)
+            if (target, selector_key) in runs.selector_errors:
+                raise ToolRejectedError(
+                    "该选择器本轮已被上游拒绝，未重发；请修改 matches", hint="change_selector"
+                )
+            if target in runs.selector_pending:
+                if runs.selector_repairs.count(target) >= 2:
+                    raise ToolRejectedError(
+                        "本源本轮两次选择器修正机会已用完；可用其他发现方式或其他源",
+                        code="source_stopped",
+                    )
+                selector_repair_from = sum(t == target for t, _ in runs.selector_errors)
         if contract.policy_id in _ALERTMANAGER_REPAIR_CATEGORY:
             alertmanager_repair_key = (target, _ALERTMANAGER_REPAIR_CATEGORY[contract.policy_id])
             digest = _alertmanager_request_digest(contract.policy_id, arguments)
@@ -585,6 +619,11 @@ class GovernedTools:
                 (*runs.promql_repairs, contract.target_id)
                 if repair_from is not None
                 else runs.promql_repairs
+            ),
+            selector_repairs=(
+                (*runs.selector_repairs, target)
+                if selector_repair_from is not None
+                else runs.selector_repairs
             ),
             alertmanager_repairs=(
                 (*runs.alertmanager_repairs, alertmanager_repair_key)
@@ -633,6 +672,15 @@ class GovernedTools:
                         exc.correction_allowed = (
                             current.promql_repairs.count(contract.target_id) < 2
                         )
+                    elif isinstance(exc, PrometheusSelectorError):
+                        if selector_key is None:
+                            raise ToolExecutionError() from None
+                        current = replace(
+                            current,
+                            selector_errors=(*current.selector_errors, (target, selector_key)),
+                            selector_pending=current.selector_pending | {target},
+                        )
+                        exc.correction_allowed = current.selector_repairs.count(target) < 2
                     elif isinstance(exc, AlertmanagerCorrectionError):
                         allowed = (
                             exc.reason in {"response_limit", "invalid_matcher"}
@@ -723,6 +771,10 @@ class GovernedTools:
                 target == contract.target_id for target, _ in runs.promql_errors
             ):
                 runs = replace(runs, promql_pending=runs.promql_pending - {contract.target_id})
+            if selector_repair_from is not None and selector_repair_from == sum(
+                t == target for t, _ in runs.selector_errors
+            ):
+                runs = replace(runs, selector_pending=runs.selector_pending - {target})
             if alertmanager_repair_key is not None and alertmanager_repair_from is not None:
                 if alertmanager_repair_from == sum(
                     item[:2] == alertmanager_repair_key for item in runs.alertmanager_errors
@@ -813,6 +865,15 @@ class GovernedTools:
         started.pop(len(started) - 1 - started[::-1].index(tool_id))
         self._runs[key] = replace(self._runs[key], started=tuple(started))
         self._used[key] -= 1
+
+
+def _selector_request_key(policy_id: str, arguments: Mapping[str, object]) -> str:
+    """发现请求中决定选择器语义的部分；时间窗不同的同一选择器仍视为同一失败请求。"""
+    return json.dumps(
+        {"tool": policy_id, "matches": arguments.get("matches"), "label": arguments.get("label")},
+        sort_keys=True,
+        ensure_ascii=False,
+    )
 
 
 def _bind(execute: Execute, request: ToolRequest) -> Callable[[], Awaitable[ToolObservation]]:

@@ -23,6 +23,10 @@ AUDIENCES: tuple[Audience, ...] = ("model", "session", "web", "feishu")
 
 # 只枚举已核约的只读语义；失败续查不能凭命名前缀开放未来工具。
 PROMETHEUS_QUERY_POLICIES = frozenset({"prometheus.query", "prometheus.range_query"})
+PROMETHEUS_SELECTOR_POLICIES = frozenset(
+    {"prometheus.label_names", "prometheus.label_values", "prometheus.series"}
+)
+"""按 matches 选择器读取的发现工具：上游 400 bad_data 可交模型有界修正。"""
 PROMETHEUS_DISCOVERY_POLICIES = frozenset(
     {
         "prometheus.label_names",
@@ -279,6 +283,7 @@ MonitoringFailureReason = Literal[
     "unavailable",
     "upstream_5xx",
     "invalid_expression",
+    "invalid_selector",
     "response_limit",
     "invalid_matcher",
     "silence_missing",

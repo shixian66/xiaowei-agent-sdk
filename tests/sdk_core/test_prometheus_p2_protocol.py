@@ -124,8 +124,9 @@ def prometheus_backend(
             parsed = urlsplit(self.path)
             arguments = parse_qs(parsed.query)
             state.requests.append((parsed.path, arguments, self.headers.get("Authorization")))
+            key = (arguments.get("query") or arguments.get("match[]") or [""])[0]
             status, error_type, detail = state.query_errors.get(
-                arguments.get("query", [""])[0], (state.status, state.error_type, state.detail)
+                key, (state.status, state.error_type, state.detail)
             )
             if status == 200:
                 data = (SAMPLES if samples is None else samples)[parsed.path]

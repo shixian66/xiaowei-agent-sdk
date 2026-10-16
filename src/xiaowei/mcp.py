@@ -44,6 +44,7 @@ from xiaowei.governance import (
     GovernedTools,
     MonitoringReadError,
     Prechecked,
+    PrometheusSelectorError,
     PromQLExpressionError,
     ToolRejectedError,
     contract_dump,
@@ -69,6 +70,7 @@ from xiaowei.models import (
     MONITORING_READ_POLICIES,
     PROMETHEUS_QUERY_POLICIES,
     PROMETHEUS_READ_POLICIES,
+    PROMETHEUS_SELECTOR_POLICIES,
     MonitoringFailureReason,
     RunContext,
     ToolContract,
@@ -102,6 +104,7 @@ _PROMQL_SYNTAX = re.compile(
     r'bad_data: invalid parameter "query": ([1-9][0-9]{0,5}):([1-9][0-9]{0,5}): '
     r"parse error: [^\r\n]{1,1024}"
 )
+_PROMETHEUS_BAD_DATA = re.compile(r"bad_data: [^\r\n]{1,1024}")
 _TRUNCATION = re.compile(
     re.escape(
         "\n\nWarning: The result was truncated because the Prometheus MCP server was "
@@ -513,6 +516,10 @@ class MCPIntegration:
                     position = _promql_error_position(result, binding.remote_name)
                     if position is not None:
                         raise PromQLExpressionError(*position)
+                if binding.contract.policy_id in PROMETHEUS_SELECTOR_POLICIES and (
+                    _prometheus_bad_data(result, binding.remote_name)
+                ):
+                    raise PrometheusSelectorError()
                 reason = _prometheus_query_failure(result, binding.remote_name)
                 if reason is not None:
                     raise MonitoringReadError(reason)
@@ -868,6 +875,23 @@ def _grafana_read_failure(
     if generic is None:
         return None
     return "auth" if generic[1] in {"401", "403"} else "upstream_5xx"
+
+
+def _prometheus_bad_data(result: CallToolResult, tool_name: str) -> bool:
+    """锁版单段错误中上游 400 的 ``bad_data``（选择器/参数被拒）；原文不交模型。"""
+    if (
+        not result.is_error
+        or result.result_type != "complete"
+        or result.structured_content is not None
+        or len(result.content) != 1
+        or not isinstance(result.content[0], TextContent)
+    ):
+        return False
+    prefix = _PROMETHEUS_ERROR_PREFIXES.get(tool_name)
+    text = result.content[0].text
+    if prefix is None or not text.startswith(prefix):
+        return False
+    return _PROMETHEUS_BAD_DATA.fullmatch(text[len(prefix) :]) is not None
 
 
 def _promql_error_position(result: CallToolResult, tool_name: str) -> tuple[int, int] | None:

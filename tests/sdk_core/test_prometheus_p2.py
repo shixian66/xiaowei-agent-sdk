@@ -97,6 +97,9 @@ def p2_server(
             )
         if arguments.get("query") == "auth":
             detail = "client_error: client error: 401"
+        if any('=~".*"' in m for m in arguments.get("matches") or []):
+            # Prometheus 对只含可匹配空串匹配器的选择器返回 400 bad_data。
+            detail = "bad_data: match[] must contain at least one non-empty matcher"
         if detail is not None:
             return CallToolResult(
                 is_error=True, content=[TextContent(type="text", text=PREFIXES[name] + detail)]
@@ -407,6 +410,159 @@ async def test_bad_promql_can_be_corrected_then_only_success_produces_evidence(
             assert body["delivery"]["facts"][0]["metadata"]["query"] == "up"
         assert [a["query"] for _, a in source.recorder.tool_calls] == ["bad(", "up"]
         assert await env.scalar("SELECT count(*) FROM xiaowei_evidence") == 1
+
+
+SELECTOR_CALLS: dict[str, dict[str, Any]] = {
+    "series": {**WINDOW},
+    "label_values": {"label": "instance", **WINDOW},
+    "label_names": {**WINDOW},
+}
+EMPTY_MATCHING = '{instance=~".*"}'
+
+
+@pytest.mark.parametrize("name", list(SELECTOR_CALLS))
+async def test_rejected_selector_can_be_corrected_then_only_success_produces_evidence(
+    env: Env, name: str
+) -> None:
+    base = SELECTOR_CALLS[name]
+
+    def correct(call: ModelCall) -> list[Any]:
+        failure = last_output(call)
+        assert failure["status"] == "invalid_selector" and failure["source"] == SOURCE
+        assert failure["correction_allowed"] is True
+        assert "evidence_id" not in failure
+        assert "non-empty matcher" not in json.dumps(failure)  # 上游原文不交模型
+        return tool_call(f"{SOURCE}__{name}", **base, matches=["node_uname_info"])(call)
+
+    with serve(p2_server) as source:
+        async with env.running(env.config(**p2_config(source.url))) as served:
+            await served.page()
+            message = env.scripts.add(
+                "主机名和IP " + name,
+                tool_call(f"{SOURCE}__{name}", **base, matches=[EMPTY_MATCHING]),
+                correct,
+                cite(),
+            )
+            body = (await served.turn(message, "query")).json()
+            assert body["state"] == "completed"
+            assert len(body["delivery"]["facts"]) == 1
+            assert "发现选择器被上游拒绝" in body["delivery"]["monitoring_notice"]
+        assert [a["matches"] for _, a in source.recorder.tool_calls] == [
+            [EMPTY_MATCHING],
+            ["node_uname_info"],
+        ]
+        assert await env.scalar("SELECT count(*) FROM xiaowei_evidence") == 1
+
+
+async def test_same_rejected_selector_is_not_resent_even_with_another_window(env: Env) -> None:
+    other_window = {"start_time": "1720000100", "end_time": "1720000200"}
+    with serve(p2_server) as source:
+        async with env.running(env.config(**p2_config(source.url))) as served:
+            await served.page()
+            message = env.scripts.add(
+                "同一个坏选择器不要再发",
+                tool_call(f"{SOURCE}__series", **WINDOW, matches=[EMPTY_MATCHING]),
+                tool_call(f"{SOURCE}__series", **other_window, matches=[EMPTY_MATCHING]),
+                tool_call(f"{SOURCE}__series", **WINDOW, matches=["node_uname_info"]),
+                cite(),
+            )
+            body = (await served.turn(message, "query")).json()
+            assert body["state"] == "completed"
+        assert [a["matches"] for _, a in source.recorder.tool_calls] == [
+            [EMPTY_MATCHING],
+            ["node_uname_info"],
+        ]
+        rejected = last_output(env.scripts.calls[message][2])
+        assert rejected["code"] == "invalid_arguments" and rejected["retry_this_turn"] is True
+        assert "修改 matches" in rejected["reason"]
+
+
+async def test_selector_repairs_are_capped_per_source(env: Env) -> None:
+    bad = [EMPTY_MATCHING, '{job=~".*"}', '{nodename=~".*"}']
+    with serve(p2_server) as source:
+        async with env.running(env.config(**p2_config(source.url))) as served:
+            await served.page()
+            message = env.scripts.add(
+                "选择器修正有上限",
+                *[tool_call(f"{SOURCE}__series", **WINDOW, matches=[m]) for m in bad],
+                tool_call(f"{SOURCE}__series", **WINDOW, matches=["node_uname_info"]),
+                lambda call: answer([], analysis="", advice="未经数据验证，请提供主机标签"),
+            )
+            body = (await served.turn(message, "query")).json()
+            assert body["state"] == "completed"
+        calls = env.scripts.calls[message]
+        assert [last_output(c)["correction_allowed"] for c in calls[1:4]] == [True, True, False]
+        stopped = last_output(calls[4])
+        assert stopped["code"] == "source_stopped" and stopped["retry_this_turn"] is False
+        assert [a["matches"] for _, a in source.recorder.tool_calls] == [[m] for m in bad]
+        assert await env.scalar("SELECT count(*) FROM xiaowei_evidence") == 0
+
+
+async def test_selector_error_does_not_stop_other_reads_of_the_source(env: Env) -> None:
+    with serve(p2_server) as source:
+        async with env.running(env.config(**p2_config(source.url))) as served:
+            await served.page()
+            message = env.scripts.add(
+                "选择器错了还能查指标",
+                tool_call(f"{SOURCE}__series", **WINDOW, matches=[EMPTY_MATCHING]),
+                tool_call(f"{SOURCE}__query", query="up"),
+                cite(),
+            )
+            body = (await served.turn(message, "query")).json()
+            assert body["state"] == "completed"
+            assert len(body["delivery"]["facts"]) == 1
+        assert [name for name, _ in source.recorder.tool_calls] == ["series", "query"]
+
+
+async def test_other_discovery_errors_stay_unclassified(env: Env) -> None:
+    error = "execution: query processing would load too many samples"
+    with serve(lambda r: p2_server(r, errors={"series": error})) as source:
+        async with env.running(env.config(**p2_config(source.url))) as served:
+            await served.page()
+            message = env.scripts.add(
+                "非选择器错误",
+                tool_call(f"{SOURCE}__series", **WINDOW, matches=["node_uname_info"]),
+                advise_unverified(SOURCE),
+            )
+            assert (await served.turn(message, "query")).json()["state"] == "completed"
+        assert len(source.recorder.tool_calls) == 1
+
+
+async def test_official_rejected_series_selector_is_corrected(
+    env: Env, official_binary: Path
+) -> None:
+    with prometheus_backend() as (backend, state):
+        state.query_errors[EMPTY_MATCHING] = (
+            400,
+            "bad_data",
+            "match[] must contain at least one non-empty matcher",
+        )
+        with official_server(official_binary, backend.server_port, tools="list_rules") as url:
+            async with env.running(env.config(**p2_config(url))) as served:
+                await served.page()
+
+                def correct(call: ModelCall) -> list[Any]:
+                    failure = last_output(call)
+                    assert failure["status"] == "invalid_selector"
+                    assert failure["correction_allowed"] is True
+                    return tool_call(f"{SOURCE}__series", **WINDOW, matches=["node_uname_info"])(
+                        call
+                    )
+
+                message = env.scripts.add(
+                    "官方源上查主机",
+                    tool_call(f"{SOURCE}__series", **WINDOW, matches=[EMPTY_MATCHING]),
+                    correct,
+                    cite(),
+                )
+                body = (await served.turn(message, "query")).json()
+                assert body["state"] == "completed"
+                assert "host1" in json.dumps(body["delivery"]["facts"], ensure_ascii=False)
+            assert [r[1]["match[]"] for r in state.requests] == [
+                [EMPTY_MATCHING],
+                ["node_uname_info"],
+            ]
+            assert await env.scalar("SELECT count(*) FROM xiaowei_evidence") == 1
 
 
 @pytest.mark.parametrize(

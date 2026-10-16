@@ -185,6 +185,8 @@ MONITORING_INSTRUCTIONS = (
     "发现指标、标签、元数据和已加载规则按缺失信息选用，不要求固定顺序；主机配置只报告"
     "指标实际采集的事实，缺的配置不能猜。invalid_expression 仅表示确定的PromQL解析失败，"
     "可在 correction_allowed 和本轮预算内自主修改表达式，不重发同一失败表达式。"
+    'invalid_selector 表示发现工具的 matches 被上游拒绝（如 {instance=~".*"} 等可匹配空串的'
+    "选择器）；可在 correction_allowed 和预算内改用具体指标名或非空匹配器，不重发同一选择器。"
     "成功 query/range_query 的全部证据都要引用；排版文本、warnings/截断、元数据/规则的"
     "完整性限制须如实说明，空结果不能解释为健康。"
     "Grafana 工具读取仪表盘定义、数据源目录和标记，不执行面板查询、不证明实时健康；"
