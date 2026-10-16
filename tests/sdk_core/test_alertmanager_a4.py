@@ -22,7 +22,7 @@ from tests.sdk_core.alertmanager_fixture import (
 from tests.sdk_core.alertmanager_fixture import alertmanager_binary as alertmanager_binary
 from tests.sdk_core.browser import launch
 from tests.sdk_core.mcp_fixture import serve
-from tests.sdk_core.test_app import ModelCall, answer, tool_call
+from tests.sdk_core.test_app import ModelCall, advise_unverified, answer, tool_call
 from tests.sdk_core.test_feishu_render import message_text
 from tests.sdk_core.test_group_gateway import GroupChannel, raw_group_event, runtime_group
 from tests.sdk_core.test_group_identity import CHAT, A
@@ -153,6 +153,30 @@ async def test_formal_web_reads_suppression_sources_and_filters_private_fields(e
             "web_content || feishu_content, '') FROM xiaowei_evidence"
         )
         assert "private-" not in stored and "secret-canary" not in stored
+
+
+async def test_alerts_without_muted_by_are_read_as_unknown_not_unmuted(env: Env) -> None:
+    """较早的 API v2 告警状态没有 mutedBy：照常读取，记为 null（上游未提供），不补成空列表。"""
+    with backend() as (url, state):
+        del state.payloads["/api/v2/alerts"][0]["status"]["mutedBy"]
+        del state.payloads["/api/v2/alerts/groups"][0]["alerts"][0]["status"]["mutedBy"]
+        async with env.running(env.config(**a4_config(url))) as served:
+            await served.page()
+            message = env.scripts.add(
+                "现在有哪些告警？",
+                tool_call(f"{SOURCE}__get_alerts", **CALLS["get_alerts"]),
+                tool_call(f"{SOURCE}__get_alert_groups", **CALLS["get_alert_groups"]),
+                cite("采集快照，不证明已发送通知"),
+            )
+            body = (await served.turn(message, "query")).json()
+            assert body["state"] == "completed"
+            assert len(body["delivery"]["facts"]) == 2
+            assert len(state.requests) == 2
+        model_content = await env.scalar(
+            "SELECT string_agg(model_content, '') FROM xiaowei_evidence"
+        )
+        assert model_content.count('"mutedBy": null') == 2
+        assert '"mutedBy": []' not in model_content
 
 
 async def test_formal_web_hidden_unauthorized_api_forced_call_zero_io(env: Env) -> None:
@@ -781,10 +805,14 @@ async def test_other_alertmanager_read_limit_keeps_existing_stop_boundary(env: E
         async with env.running(env.config(**a4_config(url))) as served:
             await served.page()
             message = env.scripts.add(
-                "查静默列表", tool_call(f"{SOURCE}__get_silences", **CALLS["get_silences"])
+                "查静默列表",
+                tool_call(f"{SOURCE}__get_silences", **CALLS["get_silences"]),
+                advise_unverified(SOURCE),
             )
             body = (await served.turn(message, "query")).json()
-            assert body["state"] == "failed"
+            # 静默列表超限不开放修正：本源本轮停止并标为不可用，但本轮如实交付未核实。
+            assert body["state"] == "completed"
+            assert SOURCE in body["delivery"]["monitoring_notice"]
             assert (await served.ready())[f"alertmanager.{SOURCE}"] == "unavailable"
         assert len(state.requests) == 1
         assert await env.scalar("SELECT count(*) FROM xiaowei_evidence") == 0
@@ -831,7 +859,7 @@ async def test_parallel_sources_keep_success_when_other_alert_response_is_oversi
         assert await env.scalar("SELECT count(*) FROM xiaowei_evidence") == 1
 
 
-async def test_failed_stage_logs_actual_tool_id_after_other_source_attempt(
+async def test_unclassified_read_logs_actual_tool_id_after_other_source_attempt(
     env: Env, caplog: pytest.LogCaptureFixture
 ) -> None:
     other = "alertmanager-other"
@@ -851,6 +879,7 @@ async def test_failed_stage_logs_actual_tool_id_after_other_source_attempt(
         values["data_policy"]["model_tools"].append(f"{other}/get_alerts")
         values["access"]["grants"]["operator"].append(f"{other}/get_alerts")
         caplog.set_level("INFO", logger="xiaowei.app")
+        caplog.set_level("INFO", logger="xiaowei.governance")
 
         def both(_: ModelCall) -> list[Any]:
             return [
@@ -866,19 +895,25 @@ async def test_failed_stage_logs_actual_tool_id_after_other_source_attempt(
 
         async with env.running(env.config(**values)) as served:
             await served.page()
-            message = env.scripts.add("并行看大源和坏源", both)
+            message = env.scripts.add(
+                "并行看大源和坏源",
+                both,
+                lambda call: answer([], analysis="", advice="未经数据验证，请收窄过滤条件"),
+            )
             body = (await served.turn(message, "query")).json()
-            assert body["state"] == "failed"
+            assert body["state"] == "completed"
+            assert other in body["delivery"]["monitoring_notice"]
         assert len(large.requests) == len(malformed.requests) == 1
-        assert "stage=failed reason=tool_failed" in caplog.text
-        assert f"tool_error=other tool_id={other}/get_alerts" in caplog.text
+        assert f"monitoring read unclassified tool_id={other}/get_alerts" in caplog.text
         assert "secret-canary" not in caplog.text
 
 
 @pytest.mark.parametrize(
     "kind", ["404", "422", "302", "json", "type", "state", "timezone", "encoding"]
 )
-async def test_unknown_protocol_or_oversize_aborts_without_evidence(env: Env, kind: str) -> None:
+async def test_unknown_protocol_or_oversize_is_unverified_without_evidence(
+    env: Env, kind: str
+) -> None:
     with backend() as (url, state):
         values = a4_config(url)
         if kind.isdigit():
@@ -898,13 +933,15 @@ async def test_unknown_protocol_or_oversize_aborts_without_evidence(env: Env, ki
         async with env.running(env.config(**values)) as served:
             await served.page()
             message = env.scripts.add(
-                "未知读取失败", tool_call(f"{SOURCE}__get_alerts", **CALLS["get_alerts"])
+                "未知读取失败",
+                tool_call(f"{SOURCE}__get_alerts", **CALLS["get_alerts"]),
+                advise_unverified(SOURCE),
             )
             body = (await served.turn(message, "query")).json()
-            assert body["state"] == "failed" and "secret-canary" not in json.dumps(body)
+            assert body["state"] == "completed" and "secret-canary" not in json.dumps(body)
+            assert SOURCE in body["delivery"]["monitoring_notice"]
             assert len(state.requests) == 1
             assert await env.scalar("SELECT count(*) FROM xiaowei_evidence") == 0
-            assert await env.scalar("SELECT count(*) FROM agent_messages") == 0
             assert (await served.ready())["status"] == "ready"
 
 
@@ -1028,9 +1065,11 @@ async def test_redirect_is_not_followed_and_no_auth_forwarding(env: Env) -> None
         state.headers["Location"] = other + "/api/v2/status"
         async with env.running(env.config(**a4_config(url))) as served:
             await served.page()
-            message = env.scripts.add("入口跳转", tool_call(f"{SOURCE}__get_status"))
-            assert (await served.turn(message, "query")).json()["state"] == "failed"
-        assert len(state.requests) == 1 and redirected.requests == []
+            message = env.scripts.add(
+                "入口跳转", tool_call(f"{SOURCE}__get_status"), advise_unverified(SOURCE)
+            )
+            assert (await served.turn(message, "query")).json()["state"] == "completed"
+        assert len(state.requests) == 1 and redirected.requests == []  # 不跟随、不转发凭据
 
 
 @pytest.mark.parametrize(

@@ -21,7 +21,7 @@ from mcp.types import CallToolResult, TextContent
 from pydantic import ValidationError
 from tests.sdk_core.browser import launch
 from tests.sdk_core.mcp_fixture import LOOPBACK, ASGIApp, Recorder, recording, serve
-from tests.sdk_core.test_app import answer, cite, tool_call
+from tests.sdk_core.test_app import advise_unverified, answer, cite, tool_call
 from tests.sdk_core.test_feishu import FakeChannel
 from tests.sdk_core.test_feishu_render import message_text
 from tests.sdk_core.test_group_gateway import GroupChannel, raw_group_event, runtime_group
@@ -507,7 +507,7 @@ async def test_revoking_one_source_does_not_authorize_it_through_another(env: En
         assert second.recorder.tool_calls == [("query", {"query": "up"})]
 
 
-async def test_disconnect_fails_current_turn_without_replaying_or_blocking_starrocks(
+async def test_disconnect_is_unverified_without_replaying_or_blocking_starrocks(
     env: Env,
 ) -> None:
     with serve(query_server) as upstream:
@@ -520,8 +520,12 @@ async def test_disconnect_fails_current_turn_without_replaying_or_blocking_starr
                     break
                 await asyncio.sleep(0.02)
             await served.page()
-            message = env.scripts.add("断线查询", tool_call(f"{SOURCE}__query", query="up"))
-            assert (await served.turn(message, "query")).json()["state"] == "failed"
+            message = env.scripts.add(
+                "断线查询",
+                tool_call(f"{SOURCE}__query", query="up"),
+                advise_unverified(SOURCE, "unavailable"),
+            )
+            assert (await served.turn(message, "query")).json()["state"] == "completed"
             ready = await served.ready()
             assert ready["status"] == "ready" and ready[f"mcp.{SOURCE}"] == "disconnected"
             assert upstream.recorder.tool_calls == []
@@ -545,8 +549,13 @@ async def test_timeout_result_is_unknown_and_does_not_mark_source_disconnected(e
         async with env.running(config) as served:
             assert (await served.ready())[f"mcp.{SOURCE}"] == "available"
             await served.page()
-            first = env.scripts.add("首次超时", tool_call(f"{SOURCE}__query", query="up"))
-            assert (await served.turn(first, "query", "r1")).json()["state"] == "failed"
+            first = env.scripts.add(
+                "首次超时",
+                tool_call(f"{SOURCE}__query", query="up"),
+                advise_unverified(SOURCE, "timeout"),
+            )
+            # 超时结果未知：交回模型如实说明，本轮不重发，也不据此判定断线。
+            assert (await served.turn(first, "query", "r1")).json()["state"] == "completed"
             assert (await served.ready())[f"mcp.{SOURCE}"] == "available"
 
             second = env.scripts.add(
@@ -565,8 +574,10 @@ async def test_is_error_does_not_create_success_evidence(env: Env) -> None:
         config = env.config(**monitoring_config(upstream.url))
         async with env.running(config) as served:
             await served.page()
-            message = env.scripts.add("远端错误", tool_call(f"{SOURCE}__query", query="bad("))
-            assert (await served.turn(message, "query")).json()["state"] == "failed"
+            message = env.scripts.add(
+                "远端错误", tool_call(f"{SOURCE}__query", query="bad("), advise_unverified(SOURCE)
+            )
+            assert (await served.turn(message, "query")).json()["state"] == "completed"
             assert upstream.recorder.tool_calls == [("query", {"query": "bad("})]
             assert await env.scalar("SELECT count(*) FROM xiaowei_evidence") == 0
             assert (await served.ready())[f"mcp.{SOURCE}"] == "available"

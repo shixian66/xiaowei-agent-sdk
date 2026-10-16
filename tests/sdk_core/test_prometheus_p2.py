@@ -14,7 +14,7 @@ from mcp.server.mcpserver import MCPServer
 from mcp.types import CallToolResult, TextContent
 from tests.sdk_core.browser import launch
 from tests.sdk_core.mcp_fixture import LOOPBACK, ASGIApp, Recorder, recording, serve
-from tests.sdk_core.test_app import ModelCall, answer, tool_call
+from tests.sdk_core.test_app import ModelCall, advise_unverified, answer, last_output, tool_call
 from tests.sdk_core.test_feishu_render import message_text
 from tests.sdk_core.test_group_gateway import GroupChannel, raw_group_event, runtime_group
 from tests.sdk_core.test_group_identity import CHAT, A
@@ -97,6 +97,9 @@ def p2_server(
             )
         if arguments.get("query") == "auth":
             detail = "client_error: client error: 401"
+        if any('=~".*"' in m for m in arguments.get("matches") or []):
+            # Prometheus 对只含可匹配空串匹配器的选择器返回 400 bad_data。
+            detail = "bad_data: match[] must contain at least one non-empty matcher"
         if detail is not None:
             return CallToolResult(
                 is_error=True, content=[TextContent(type="text", text=PREFIXES[name] + detail)]
@@ -381,12 +384,6 @@ async def test_browser_range_success_and_resource_refusal(env: Env, chrome_binar
         assert source.recorder.tool_calls == [("range_query", {**RANGE, "step": "30000ms"})]
 
 
-def last_output(call: ModelCall) -> dict[str, Any]:
-    return json.loads(
-        [i["output"] for i in call.input if i.get("type") == "function_call_output"][-1]
-    )
-
-
 @pytest.mark.parametrize("name", ["query", "range_query"])
 async def test_bad_promql_can_be_corrected_then_only_success_produces_evidence(
     env: Env, name: str
@@ -415,6 +412,269 @@ async def test_bad_promql_can_be_corrected_then_only_success_produces_evidence(
         assert await env.scalar("SELECT count(*) FROM xiaowei_evidence") == 1
 
 
+SELECTOR_CALLS: dict[str, dict[str, Any]] = {
+    "series": {**WINDOW},
+    "label_values": {"label": "instance", **WINDOW},
+    "label_names": {**WINDOW},
+}
+EMPTY_MATCHING = '{instance=~".*"}'
+
+
+@pytest.mark.parametrize("name", list(SELECTOR_CALLS))
+async def test_rejected_selector_can_be_corrected_then_only_success_produces_evidence(
+    env: Env, name: str
+) -> None:
+    base = SELECTOR_CALLS[name]
+
+    def correct(call: ModelCall) -> list[Any]:
+        failure = last_output(call)
+        assert failure["status"] == "invalid_selector" and failure["source"] == SOURCE
+        assert failure["correction_allowed"] is True
+        assert "evidence_id" not in failure
+        assert "non-empty matcher" not in json.dumps(failure)  # 上游原文不交模型
+        return tool_call(f"{SOURCE}__{name}", **base, matches=["node_uname_info"])(call)
+
+    with serve(p2_server) as source:
+        async with env.running(env.config(**p2_config(source.url))) as served:
+            await served.page()
+            message = env.scripts.add(
+                "主机名和IP " + name,
+                tool_call(f"{SOURCE}__{name}", **base, matches=[EMPTY_MATCHING]),
+                correct,
+                cite(),
+            )
+            body = (await served.turn(message, "query")).json()
+            assert body["state"] == "completed"
+            assert len(body["delivery"]["facts"]) == 1
+            assert "发现选择器被上游拒绝" in body["delivery"]["monitoring_notice"]
+        assert [a["matches"] for _, a in source.recorder.tool_calls] == [
+            [EMPTY_MATCHING],
+            ["node_uname_info"],
+        ]
+        assert await env.scalar("SELECT count(*) FROM xiaowei_evidence") == 1
+
+
+async def test_same_rejected_selector_is_not_resent_even_with_another_window(env: Env) -> None:
+    other_window = {"start_time": "1720000100", "end_time": "1720000200"}
+    with serve(p2_server) as source:
+        async with env.running(env.config(**p2_config(source.url))) as served:
+            await served.page()
+            message = env.scripts.add(
+                "同一个坏选择器不要再发",
+                tool_call(f"{SOURCE}__series", **WINDOW, matches=[EMPTY_MATCHING]),
+                tool_call(f"{SOURCE}__series", **other_window, matches=[EMPTY_MATCHING]),
+                tool_call(f"{SOURCE}__series", **WINDOW, matches=["node_uname_info"]),
+                cite(),
+            )
+            body = (await served.turn(message, "query")).json()
+            assert body["state"] == "completed"
+        assert [a["matches"] for _, a in source.recorder.tool_calls] == [
+            [EMPTY_MATCHING],
+            ["node_uname_info"],
+        ]
+        rejected = last_output(env.scripts.calls[message][2])
+        assert rejected["code"] == "invalid_arguments" and rejected["retry_this_turn"] is True
+        assert "修改 matches" in rejected["reason"]
+
+
+async def test_rejected_selector_is_not_resent_through_another_discovery_tool(env: Env) -> None:
+    other_window = {"start_time": "1720000100", "end_time": "1720000200"}
+    with serve(p2_server) as source:
+        async with env.running(env.config(**p2_config(source.url))) as served:
+            await served.page()
+            message = env.scripts.add(
+                "换个发现工具也不重发坏选择器",
+                tool_call(f"{SOURCE}__series", **WINDOW, matches=[EMPTY_MATCHING]),
+                tool_call(f"{SOURCE}__label_names", **other_window, matches=[EMPTY_MATCHING]),
+                tool_call(
+                    f"{SOURCE}__label_values", label="job", **WINDOW, matches=[EMPTY_MATCHING]
+                ),
+                tool_call(f"{SOURCE}__series", **WINDOW, matches=["node_uname_info"]),
+                cite(),
+            )
+            body = (await served.turn(message, "query")).json()
+            assert body["state"] == "completed"
+            assert len(body["delivery"]["facts"]) == 1
+        assert [(n, a["matches"]) for n, a in source.recorder.tool_calls] == [
+            ("series", [EMPTY_MATCHING]),
+            ("series", ["node_uname_info"]),
+        ]
+        for call in env.scripts.calls[message][2:4]:
+            rejected = last_output(call)
+            assert rejected["code"] == "invalid_arguments" and rejected["retry_this_turn"] is True
+            assert "修改 matches" in rejected["reason"]
+            assert "non-empty matcher" not in json.dumps(rejected)  # 上游原文不交模型
+
+
+async def test_dropping_the_rejected_selector_is_a_valid_fix(env: Env) -> None:
+    with serve(p2_server) as source:
+        async with env.running(env.config(**p2_config(source.url))) as served:
+            await served.page()
+            message = env.scripts.add(
+                "去掉坏选择器后重查",
+                tool_call(
+                    f"{SOURCE}__label_values",
+                    label="instance",
+                    **WINDOW,
+                    matches=[EMPTY_MATCHING, "node_uname_info"],
+                ),
+                # 同一组选择器换顺序、换工具仍是同一失败请求。
+                tool_call(
+                    f"{SOURCE}__label_names", **WINDOW, matches=["node_uname_info", EMPTY_MATCHING]
+                ),
+                tool_call(
+                    f"{SOURCE}__label_values",
+                    label="instance",
+                    **WINDOW,
+                    matches=["node_uname_info"],
+                ),
+                cite(),
+            )
+            body = (await served.turn(message, "query")).json()
+            assert body["state"] == "completed"
+            assert len(body["delivery"]["facts"]) == 1
+        assert [a["matches"] for _, a in source.recorder.tool_calls] == [
+            [EMPTY_MATCHING, "node_uname_info"],
+            ["node_uname_info"],
+        ]
+        assert await env.scalar("SELECT count(*) FROM xiaowei_evidence") == 1
+
+
+async def test_non_selector_rejection_does_not_block_the_same_selector_elsewhere(
+    env: Env,
+) -> None:
+    # 不能归到 match[] 的 bad_data：只拒绝完全相同的请求，同一选择器换工具仍可修正。
+    error = 'bad_data: invalid label name: "instance"'
+    rejected_call = {"label": "instance", **WINDOW, "matches": ["node_uname_info"]}
+    with serve(lambda r: p2_server(r, errors={"label_values": error})) as source:
+        async with env.running(env.config(**p2_config(source.url))) as served:
+            await served.page()
+            message = env.scripts.add(
+                "标签名被拒后换发现方式",
+                tool_call(f"{SOURCE}__label_values", **rejected_call),
+                tool_call(f"{SOURCE}__label_values", **rejected_call),
+                tool_call(f"{SOURCE}__label_names", **WINDOW, matches=["node_uname_info"]),
+                cite(),
+            )
+            body = (await served.turn(message, "query")).json()
+            assert body["state"] == "completed"
+            assert len(body["delivery"]["facts"]) == 1
+        assert [n for n, _ in source.recorder.tool_calls] == ["label_values", "label_names"]
+        repeated = last_output(env.scripts.calls[message][2])
+        assert repeated["code"] == "invalid_arguments" and "同一发现请求" in repeated["reason"]
+
+
+async def test_parallel_selector_repairs_reserve_only_two_slots(env: Env) -> None:
+    bad = [EMPTY_MATCHING, '{job=~".*"}', '{nodename=~".*"}']
+
+    def repairs(call: ModelCall) -> list[Any]:
+        return [
+            function_call(f"{SOURCE}__series", {**WINDOW, "matches": [m]}, call_id=f"repair-{i}")
+            for i, m in enumerate([bad[1], bad[2], "node_uname_info"])
+        ]
+
+    with serve(p2_server) as source:
+        async with env.running(env.config(**p2_config(source.url))) as served:
+            await served.page()
+            message = env.scripts.add(
+                "并行修正只占两次额度",
+                tool_call(f"{SOURCE}__series", **WINDOW, matches=[bad[0]]),
+                repairs,
+                lambda call: answer([], analysis="", advice="未经数据验证"),
+            )
+            assert (await served.turn(message, "query")).json()["state"] == "completed"
+        assert [a["matches"] for _, a in source.recorder.tool_calls] == [[m] for m in bad]
+        assert await env.scalar("SELECT count(*) FROM xiaowei_evidence") == 0
+
+
+async def test_selector_repairs_are_capped_per_source(env: Env) -> None:
+    bad = [EMPTY_MATCHING, '{job=~".*"}', '{nodename=~".*"}']
+    with serve(p2_server) as source:
+        async with env.running(env.config(**p2_config(source.url))) as served:
+            await served.page()
+            message = env.scripts.add(
+                "选择器修正有上限",
+                *[tool_call(f"{SOURCE}__series", **WINDOW, matches=[m]) for m in bad],
+                tool_call(f"{SOURCE}__series", **WINDOW, matches=["node_uname_info"]),
+                lambda call: answer([], analysis="", advice="未经数据验证，请提供主机标签"),
+            )
+            body = (await served.turn(message, "query")).json()
+            assert body["state"] == "completed"
+        calls = env.scripts.calls[message]
+        assert [last_output(c)["correction_allowed"] for c in calls[1:4]] == [True, True, False]
+        stopped = last_output(calls[4])
+        assert stopped["code"] == "source_stopped" and stopped["retry_this_turn"] is False
+        assert [a["matches"] for _, a in source.recorder.tool_calls] == [[m] for m in bad]
+        assert await env.scalar("SELECT count(*) FROM xiaowei_evidence") == 0
+
+
+async def test_selector_error_does_not_stop_other_reads_of_the_source(env: Env) -> None:
+    with serve(p2_server) as source:
+        async with env.running(env.config(**p2_config(source.url))) as served:
+            await served.page()
+            message = env.scripts.add(
+                "选择器错了还能查指标",
+                tool_call(f"{SOURCE}__series", **WINDOW, matches=[EMPTY_MATCHING]),
+                tool_call(f"{SOURCE}__query", query="up"),
+                cite(),
+            )
+            body = (await served.turn(message, "query")).json()
+            assert body["state"] == "completed"
+            assert len(body["delivery"]["facts"]) == 1
+        assert [name for name, _ in source.recorder.tool_calls] == ["series", "query"]
+
+
+async def test_other_discovery_errors_stay_unclassified(env: Env) -> None:
+    error = "execution: query processing would load too many samples"
+    with serve(lambda r: p2_server(r, errors={"series": error})) as source:
+        async with env.running(env.config(**p2_config(source.url))) as served:
+            await served.page()
+            message = env.scripts.add(
+                "非选择器错误",
+                tool_call(f"{SOURCE}__series", **WINDOW, matches=["node_uname_info"]),
+                advise_unverified(SOURCE),
+            )
+            assert (await served.turn(message, "query")).json()["state"] == "completed"
+        assert len(source.recorder.tool_calls) == 1
+
+
+async def test_official_rejected_series_selector_is_corrected(
+    env: Env, official_binary: Path
+) -> None:
+    with prometheus_backend() as (backend, state):
+        state.query_errors[EMPTY_MATCHING] = (
+            400,
+            "bad_data",
+            "match[] must contain at least one non-empty matcher",
+        )
+        with official_server(official_binary, backend.server_port, tools="list_rules") as url:
+            async with env.running(env.config(**p2_config(url))) as served:
+                await served.page()
+
+                def correct(call: ModelCall) -> list[Any]:
+                    failure = last_output(call)
+                    assert failure["status"] == "invalid_selector"
+                    assert failure["correction_allowed"] is True
+                    return tool_call(f"{SOURCE}__series", **WINDOW, matches=["node_uname_info"])(
+                        call
+                    )
+
+                message = env.scripts.add(
+                    "官方源上查主机",
+                    tool_call(f"{SOURCE}__series", **WINDOW, matches=[EMPTY_MATCHING]),
+                    correct,
+                    cite(),
+                )
+                body = (await served.turn(message, "query")).json()
+                assert body["state"] == "completed"
+                assert "host1" in json.dumps(body["delivery"]["facts"], ensure_ascii=False)
+            assert [r[1]["match[]"] for r in state.requests] == [
+                [EMPTY_MATCHING],
+                ["node_uname_info"],
+            ]
+            assert await env.scalar("SELECT count(*) FROM xiaowei_evidence") == 1
+
+
 @pytest.mark.parametrize(
     "error",
     [
@@ -424,17 +684,23 @@ async def test_bad_promql_can_be_corrected_then_only_success_produces_evidence(
         "bad_data: parse error",
     ],
 )
-async def test_uncertain_expression_or_resource_errors_abort(env: Env, error: str) -> None:
+async def test_uncertain_expression_or_resource_errors_stop_source_unverified(
+    env: Env, error: str
+) -> None:
+    # 不能确定是语法错误：不开放修正，本源本轮停止；只读无副作用，故交回模型而非中止整轮。
     with serve(lambda r: p2_server(r, errors={"range_query": error})) as source:
         async with env.running(env.config(**p2_config(source.url))) as served:
             await served.page()
             message = env.scripts.add(
-                "未知表达式失败", tool_call(f"{SOURCE}__range_query", **RANGE)
+                "未知表达式失败",
+                tool_call(f"{SOURCE}__range_query", **RANGE),
+                advise_unverified(SOURCE),
             )
             body = (await served.turn(message, "query")).json()
-            assert body["state"] == "failed"
+            assert body["state"] == "completed"
+            assert SOURCE in body["delivery"]["monitoring_notice"]
         assert len(source.recorder.tool_calls) == 1
-        assert len(env.scripts.calls[message]) == 1
+        assert len(env.scripts.calls[message]) == 2
         assert await env.scalar("SELECT count(*) FROM xiaowei_evidence") == 0
 
 
@@ -881,7 +1147,9 @@ async def test_one_new_tool_schema_drift_does_not_hide_verified_query(env: Env) 
 
 
 @pytest.mark.parametrize("tail", ["\n\nWarning: The result was truncated", "\nextra"])
-async def test_unrecognized_metadata_suffix_aborts_without_evidence(env: Env, tail: str) -> None:
+async def test_unrecognized_metadata_suffix_is_unverified_without_evidence(
+    env: Env, tail: str
+) -> None:
     def malformed(recorder: Recorder) -> ASGIApp:
         server = MCPServer("p2-malformed-metadata")
 
@@ -896,9 +1164,11 @@ async def test_unrecognized_metadata_suffix_aborts_without_evidence(env: Env, ta
         async with env.running(env.config(**p2_config(source.url))) as served:
             await served.page()
             message = env.scripts.add(
-                "拒绝不完整截断标记", tool_call(f"{SOURCE}__metric_metadata", metric="up")
+                "拒绝不完整截断标记",
+                tool_call(f"{SOURCE}__metric_metadata", metric="up"),
+                advise_unverified(SOURCE),
             )
-            assert (await served.turn(message, "query")).json()["state"] == "failed"
+            assert (await served.turn(message, "query")).json()["state"] == "completed"
         assert len(source.recorder.tool_calls) == 1
         assert await env.scalar("SELECT count(*) FROM xiaowei_evidence") == 0
 
@@ -1072,7 +1342,7 @@ async def test_empty_metadata_has_zero_io_and_can_be_corrected_to_one_metric(
             assert await env.scalar("SELECT count(*) FROM xiaowei_evidence") == 1
 
 
-async def test_official_unbounded_metric_names_still_abort_on_receive_limit(
+async def test_official_unbounded_metric_names_over_receive_limit_are_unverified(
     env: Env, official_binary: Path
 ) -> None:
     with prometheus_backend(samples=high_cardinality_samples()) as (backend, state):
@@ -1082,16 +1352,17 @@ async def test_official_unbounded_metric_names_still_abort_on_receive_limit(
                 message = env.scripts.add(
                     "不截断的全源指标发现",
                     tool_call(f"{SOURCE}__label_values", label="__name__", matches=[], **WINDOW),
-                    cite(),
+                    advise_unverified(SOURCE),
                 )
                 body = (await served.turn(message, "query")).json()
                 assert len(state.requests) == 1
-                assert body["state"] == "failed"
-                assert len(env.scripts.calls[message]) == 1
+                assert body["state"] == "completed"  # 超限结果不交模型，不冒充完整
+                assert SOURCE in body["delivery"]["monitoring_notice"]
+                assert len(env.scripts.calls[message]) == 2
             assert await env.scalar("SELECT count(*) FROM xiaowei_evidence") == 0
 
 
-async def test_official_rules_ignore_truncation_and_abort_above_receive_limit(
+async def test_official_rules_ignore_truncation_and_are_unverified_above_receive_limit(
     env: Env, official_binary: Path
 ) -> None:
     group = RULES["groups"][0]
@@ -1140,18 +1411,14 @@ async def test_official_rules_ignore_truncation_and_abort_above_receive_limit(
                 message = env.scripts.add(
                     "当前已加载哪些告警规则",
                     tool_call(f"{SOURCE}__list_rules"),
-                    cite(),
+                    advise_unverified(SOURCE),
                 )
                 body = (await served.turn(message, "query")).json()
                 assert state.requests == [("/api/v1/rules", {}, None)] * 2
-                assert body["state"] == "failed"
-                assert "本轮未交付；不会自动重试" in body["delivery"]["content"]
-                assert len(env.scripts.calls[message]) == 1
-                assert await env.scalar("SELECT failure_code FROM xiaowei_request") == (
-                    "evidence_failed"
-                )
+                assert body["state"] == "completed"  # 超限规则不交模型，不冒充完整
+                assert SOURCE in body["delivery"]["monitoring_notice"]
+                assert len(env.scripts.calls[message]) == 2
             assert await env.scalar("SELECT count(*) FROM xiaowei_evidence") == 0
-            assert await env.scalar("SELECT count(*) FROM agent_messages") == 0
 
 
 def test_discovery_descriptions_offer_narrowing_without_fixed_order() -> None:

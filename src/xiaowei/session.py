@@ -445,7 +445,7 @@ class PolicySession:
         """
         self._phase = "before_commit"
         self._bytes = None
-        pending, self._pending = self._pending, []
+        pending, self._pending = _without_superseded_answers(self._pending), []
         await self._validate_final_answer(pending, context_evidence, monitoring_failures)
         turns = await self._open()
         if turns >= self._limits.max_history_turns:
@@ -817,6 +817,19 @@ def _json_object(value: object) -> dict[str, object] | None:
     except ValueError:
         return None
     return parsed if isinstance(parsed, dict) else None
+
+
+def _without_superseded_answers(pending: list[TResponseInputItem]) -> list[TResponseInputItem]:
+    """最终回答之前紧邻的助手消息不保存：只有最后一条经过校验。
+
+    SDK 的 ``invalid_final_output`` 处理器把改写后的回答追加在被拒回答之后，两者之间没有
+    工具项；被拒回答若落库，会在下一轮回放给模型。工具调用/结果与更早的消息不受影响。
+    """
+    end = len(pending) - 1
+    start = end
+    while start > 0 and _role(pending[start - 1]) == "assistant":
+        start -= 1
+    return pending[:start] + pending[end:]
 
 
 def _role(item: TResponseInputItem) -> object:

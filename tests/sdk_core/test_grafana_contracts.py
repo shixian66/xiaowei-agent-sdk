@@ -7,7 +7,7 @@ import pytest
 from mcp.server.mcpserver import MCPServer
 from mcp.types import CallToolResult, TextContent
 from tests.sdk_core.mcp_fixture import Recorder, recording, serve
-from tests.sdk_core.test_app import tool_call
+from tests.sdk_core.test_app import advise_unverified, tool_call
 from tests.sdk_core.test_grafana_g3 import SOURCE, g3_config
 from tests.sdk_core.test_grafana_g3 import synthetic_token as synthetic_token
 from tests.sdk_core.test_prometheus_p2 import cite
@@ -128,7 +128,7 @@ def test_noncanonical_native_version_error_is_not_classified(version: str) -> No
 @pytest.mark.parametrize(
     "kind", ["wrong_uid", "missing_title", "wrong_type", "error", "multiple", "structured"]
 )
-async def test_malformed_result_aborts_formal_turn_with_zero_evidence(env: Env, kind: str) -> None:
+async def test_malformed_result_is_unverified_with_zero_evidence(env: Env, kind: str) -> None:
     def factory(recorder: Recorder) -> Any:
         server = MCPServer("g3-malformed")
 
@@ -168,12 +168,15 @@ async def test_malformed_result_aborts_formal_turn_with_zero_evidence(env: Env, 
         async with env.running(config) as served:
             await served.page()
             message = env.scripts.add(
-                "结果不合约", tool_call(f"{SOURCE}__get_dashboard_summary", uid="host")
+                "结果不合约",
+                tool_call(f"{SOURCE}__get_dashboard_summary", uid="host"),
+                advise_unverified(SOURCE),
             )
-            assert (await served.turn(message, "query")).json()["state"] == "failed"
+            body = (await served.turn(message, "query")).json()
+            assert body["state"] == "completed"
+            assert SOURCE in body["delivery"]["monitoring_notice"]
         assert source.recorder.tool_calls == [("get_dashboard_summary", {"uid": "host"})]
         assert await env.scalar("SELECT count(*) FROM xiaowei_evidence") == 0
-        assert await env.scalar("SELECT count(*) FROM agent_messages") == 0
 
 
 async def test_one_grafana_schema_drift_hides_only_that_tool(env: Env) -> None:

@@ -44,6 +44,7 @@ if TYPE_CHECKING:
 
 from agents import (
     Agent,
+    AgentOutputSchema,
     MaxTurnsExceeded,
     RunConfig,
     RunContextWrapper,
@@ -99,6 +100,7 @@ from xiaowei.models import (
     ToolId,
     ToolRequest,
     TurnAnswer,
+    answer_kinds_mixed,
 )
 from xiaowei.session import (
     PolicySession,
@@ -185,6 +187,8 @@ MONITORING_INSTRUCTIONS = (
     "发现指标、标签、元数据和已加载规则按缺失信息选用，不要求固定顺序；主机配置只报告"
     "指标实际采集的事实，缺的配置不能猜。invalid_expression 仅表示确定的PromQL解析失败，"
     "可在 correction_allowed 和本轮预算内自主修改表达式，不重发同一失败表达式。"
+    'invalid_selector 表示发现工具的 matches 被上游拒绝（如 {instance=~".*"} 等可匹配空串的'
+    "选择器）；可在 correction_allowed 和预算内改用具体指标名或非空匹配器，不重发同一选择器。"
     "成功 query/range_query 的全部证据都要引用；排版文本、warnings/截断、元数据/规则的"
     "完整性限制须如实说明，空结果不能解释为健康。"
     "Grafana 工具读取仪表盘定义、数据源目录和标记，不执行面板查询、不证明实时健康；"
@@ -233,6 +237,25 @@ _MESSAGES: Mapping[TurnReason, str] = {
     "model_failed": "模型调用失败，本轮未完成；已执行的工具不会自动重试",
     "action_unresumable": "执行请求没有形成唯一且有额度的可恢复审批，未执行；请重新提出",
 }
+
+
+class _OneKindAnswerSchema(AgentOutputSchema):
+    """``AgentAnswer`` 的 SDK 输出 schema（公开扩展点）：schema 与名称不变，结构校验时
+    即拒绝三种回答混用，交 Runner 的 ``invalid_final_output`` 处理器做一次无工具改写。
+    交付前 ``EvidenceStore.validate_answer`` 仍完整复核。
+    """
+
+    def __init__(self) -> None:
+        super().__init__(AgentAnswer)
+
+    def validate_json(self, json_str: str) -> AgentAnswer:
+        answer = cast(AgentAnswer, super().validate_json(json_str))
+        if answer_kinds_mixed(answer):
+            raise ModelBehaviorError("澄清或建议不能与查询结果、分析或彼此混用")
+        return answer
+
+
+_ANSWER_SCHEMA = _OneKindAnswerSchema()
 
 
 class TurnError(Exception):
@@ -635,6 +658,45 @@ class Application:
                 final_output=answer.model_copy(update={"inferences": [note, *answer.inferences]})
             )
 
+        async def repair_final_output(
+            failure: RunErrorHandlerInput[RunContext],
+        ) -> RunErrorHandlerResult | None:
+            # 最终回答未通过结构校验（如澄清/建议与证据混用）：用一次无工具的 SDK Runner 调用
+            # 让模型据已有历史改写；改写结果仍经同一 schema 校验，再不合格则本轮照旧失败。
+            _stage(turn, "answer_repair", started)
+            runs = self._governance.turn_runs(ctx.identity)
+            query_ids = [e for tool_id, e in runs.produced if tool_id in self._queries]
+            query_instruction = (
+                f"本轮查询证据编号：{'、'.join(query_ids)}。最终回答必须引用全部这些编号。"
+                if query_ids
+                else ""
+            )
+            repair_agent = agent.clone(
+                tools=[],
+                mcp_servers=[],
+                handoffs=[],
+                instructions=(
+                    f"{agent.instructions}\n上一条最终回答未通过结构校验，现在只基于上面已有的结果"
+                    "重新给出最终回答，不再调用工具。回答三选一：引用证据（evidence_ids 与 "
+                    "inferences）、只填 clarification、或只填未经数据验证的 advice，其余字段为 "
+                    "null 或空列表；已有证据时，补充提问或建议写进 inferences。"
+                    f"只能引用实际可见的 evidence_id。{query_instruction}"
+                ),
+            )
+            try:
+                repaired = await Runner.run(
+                    repair_agent,
+                    failure.run_data.history,
+                    context=ctx,
+                    max_turns=1,
+                    run_config=self._run_config,
+                )
+            except ModelBehaviorError:
+                return None  # SDK 重新抛出原校验错误，按 invalid_output 记录
+            return RunErrorHandlerResult(
+                final_output=repaired.final_output_as(AgentAnswer, raise_if_incorrect_type=True)
+            )
+
         result = await Runner.run(
             agent,
             native if native is not None else user_input,
@@ -642,7 +704,10 @@ class Application:
             session=None if native is not None else session,
             max_turns=ctx.budget.max_turns,
             run_config=self._run_config,
-            error_handlers={"max_turns": finish_on_limit},
+            error_handlers={
+                "max_turns": finish_on_limit,
+                "invalid_final_output": repair_final_output,
+            },
         )
         if result.interruptions:
             return await self._paused(
@@ -756,7 +821,7 @@ class Application:
             model=self._model.model,
             model_settings=self._model.settings,
             tools=self._tools_for(ctx, approval_requests),
-            output_type=AgentAnswer,
+            output_type=_ANSWER_SCHEMA,
         )
 
     def _model_tools(self) -> frozenset[str]:

@@ -44,6 +44,7 @@ from xiaowei.governance import (
     GovernedTools,
     MonitoringReadError,
     Prechecked,
+    PrometheusSelectorError,
     PromQLExpressionError,
     ToolRejectedError,
     contract_dump,
@@ -69,6 +70,7 @@ from xiaowei.models import (
     MONITORING_READ_POLICIES,
     PROMETHEUS_QUERY_POLICIES,
     PROMETHEUS_READ_POLICIES,
+    PROMETHEUS_SELECTOR_POLICIES,
     MonitoringFailureReason,
     RunContext,
     ToolContract,
@@ -101,6 +103,13 @@ _PROMETHEUS_READ_ERROR = re.compile(
 _PROMQL_SYNTAX = re.compile(
     r'bad_data: invalid parameter "query": ([1-9][0-9]{0,5}):([1-9][0-9]{0,5}): '
     r"parse error: [^\r\n]{1,1024}"
+)
+_PROMETHEUS_BAD_DATA = re.compile(r"bad_data: [^\r\n]{1,1024}")
+# Prometheus 对 match[] 的拒绝：选择器解析错误，或只含可匹配空串的匹配器。label 与时间窗在
+# 发出前已由治理层校验；其余 bad_data 不能确定由选择器引起，只按完整请求去重。
+_SELECTOR_BAD_DATA = re.compile(
+    r"\d+:\d+: parse error: |match\[\] must contain at least one non-empty matcher$"
+    r'|invalid parameter "match\[\]"'
 )
 _TRUNCATION = re.compile(
     re.escape(
@@ -513,6 +522,12 @@ class MCPIntegration:
                     position = _promql_error_position(result, binding.remote_name)
                     if position is not None:
                         raise PromQLExpressionError(*position)
+                if binding.contract.policy_id in PROMETHEUS_SELECTOR_POLICIES:
+                    detail = _prometheus_bad_data(result, binding.remote_name)
+                    if detail is not None:
+                        raise PrometheusSelectorError(
+                            matches_rejected=_SELECTOR_BAD_DATA.match(detail) is not None
+                        )
                 reason = _prometheus_query_failure(result, binding.remote_name)
                 if reason is not None:
                     raise MonitoringReadError(reason)
@@ -868,6 +883,26 @@ def _grafana_read_failure(
     if generic is None:
         return None
     return "auth" if generic[1] in {"401", "403"} else "upstream_5xx"
+
+
+def _prometheus_bad_data(result: CallToolResult, tool_name: str) -> str | None:
+    """锁版单段错误中上游 400 的 ``bad_data`` 说明（选择器/参数被拒）；只供分类，不交模型。"""
+    if (
+        not result.is_error
+        or result.result_type != "complete"
+        or result.structured_content is not None
+        or len(result.content) != 1
+        or not isinstance(result.content[0], TextContent)
+    ):
+        return None
+    prefix = _PROMETHEUS_ERROR_PREFIXES.get(tool_name)
+    text = result.content[0].text
+    if prefix is None or not text.startswith(prefix):
+        return None
+    detail = text[len(prefix) :]
+    if _PROMETHEUS_BAD_DATA.fullmatch(detail) is None:
+        return None
+    return detail.removeprefix("bad_data: ")
 
 
 def _promql_error_position(result: CallToolResult, tool_name: str) -> tuple[int, int] | None:

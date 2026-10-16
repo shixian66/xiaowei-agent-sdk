@@ -953,13 +953,16 @@ async def test_model_check_classifies_openai_client_status_errors(
     monkeypatch: pytest.MonkeyPatch, status: int, reason: str
 ) -> None:
     monkeypatch.setenv(GEMINI.api_key_ref.removeprefix("env:"), "fake-check-key")
-    endpoint = ChatEndpoint([httpx2.Response(status, json={"error": {"message": "upstream"}})])
+    attempts = 4 if status == 429 else 1  # 只有 429/503 有限重试：首发 + 3 次
+    endpoint = ChatEndpoint(
+        [httpx2.Response(status, json={"error": {"message": "upstream"}}) for _ in range(attempts)]
+    )
 
     with pytest.raises(runtime.ModelCheckError) as raised:
         await runtime.check_model(_check_config(GEMINI), transport=endpoint.transport)
 
     assert raised.value.reason == reason and str(raised.value) == reason
-    assert len(endpoint.requests) == 1  # 不重试
+    assert len(endpoint.requests) == attempts
 
 
 # ---- 启动失败：不对外服务，逆序释放 ----------------------------------------------------

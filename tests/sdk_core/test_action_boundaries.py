@@ -8,7 +8,7 @@ from datetime import timedelta
 import pytest
 from sqlalchemy import event, text
 from sqlalchemy.exc import SQLAlchemyError
-from tests.sdk_core.test_app import cite, clarify, tool_call
+from tests.sdk_core.test_app import answer, cite, clarify, evidence_in, tool_call
 from tests.sdk_core.test_channel_service import BUDGET
 from tests.sdk_core.test_feishu import Outbox
 from tests.sdk_core.test_feishu_render import message_text
@@ -369,6 +369,31 @@ async def test_approval_receipt_reports_actual_execution_outcome(
         await group.ask(f"/批准 {action_id}", message_id="om_a")
         await group.ask(f"/批准 {action_id}", message_id="om_repeat")
         assert len(actions.adapter.calls) == before
+
+
+async def test_rejected_final_answer_after_approval_is_not_saved(actions: Actions) -> None:
+    env = actions.env
+    rejected = "REJECTED-AFTER-APPROVAL"
+    message = attributed(A, "提出")
+    env.scripts.add(
+        message,
+        tool_call("am-synthetic__propose_change", value="after"),
+        request_execution,
+        lambda call: answer(evidence_in(call), "", clarification=rejected),
+        cite("APPROVED-ANSWER"),
+    )
+    async with running(env, max_reply_chars=3500) as group:
+        await group.ask("提出", message_id="om_p")
+        action_id = await actions.one()
+        await group.ask(f"/批准 {action_id}", message_id="om_a")
+        assert len(actions.adapter.calls) == 1
+        assert await env.rows(
+            "SELECT state FROM xiaowei_request WHERE reply_message_id='om_a'"
+        ) == [("completed",)]
+    assert len(env.scripts.calls[message]) == 4  # 恢复后只改写一次
+    saved = await env.rows("SELECT message_data FROM agent_messages")
+    assert saved and rejected not in json.dumps(saved, ensure_ascii=False)
+    assert "APPROVED-ANSWER" in json.dumps(saved)  # 合格改写照常保存
 
 
 @pytest.mark.parametrize(

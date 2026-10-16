@@ -26,7 +26,7 @@ from tests.sdk_core.mcp_fixture import (
     rerouted,
     serve,
 )
-from tests.sdk_core.test_app import cite, tool_call
+from tests.sdk_core.test_app import advise_unverified, answer, cite, tool_call
 from tests.sdk_core.test_mcp_integration import (
     FIXTURE_TARGET,
     TOKEN_ENV,
@@ -166,9 +166,11 @@ async def test_formal_web_recovers_on_next_turn_without_replaying_failed_query(e
 
             source.stop()
             failed_message = env.scripts.add(
-                "断线时查 up", tool_call(f"{SOURCE}__query", query="up")
+                "断线时查 up",
+                tool_call(f"{SOURCE}__query", query="up"),
+                advise_unverified(SOURCE, "unavailable"),
             )
-            assert (await served.turn(failed_message, "query", "r2")).json()["state"] == "failed"
+            assert (await served.turn(failed_message, "query", "r2")).json()["state"] == "completed"
             assert (await served.ready())[f"mcp.{SOURCE}"] == "disconnected"
 
             recovered = source.start()
@@ -220,11 +222,13 @@ async def test_official_session_termination_recovers_via_formal_web(env: Env) ->
                         assert ended.value.message == "Session terminated"
                         assert ended.value.data is None
                         failed = env.scripts.add(
-                            "旧会话再查", tool_call(f"{SOURCE}__query", query="up")
+                            "旧会话再查",
+                            tool_call(f"{SOURCE}__query", query="up"),
+                            advise_unverified(SOURCE, "unavailable"),
                         )
                         assert (await served.turn(failed, "query", "official-2")).json()[
                             "state"
-                        ] == "failed"
+                        ] == "completed"
                         assert (await served.ready())[f"mcp.{SOURCE}"] == "disconnected"
                         recovered = env.scripts.add(
                             "官方源恢复后查", tool_call(f"{SOURCE}__query", query="up"), cite()
@@ -284,12 +288,20 @@ async def test_formal_web_reconnect_failure_hides_source_but_keeps_starrocks(env
             await served.page()
             assert (await served.ready())[f"mcp.{SOURCE}"] == "available"
             source.stop()
-            broken = env.scripts.add("源已断开", tool_call(f"{SOURCE}__query", query="up"))
-            assert (await served.turn(broken, "query", "failure-1")).json()["state"] == "failed"
+            broken = env.scripts.add(
+                "源已断开",
+                tool_call(f"{SOURCE}__query", query="up"),
+                advise_unverified(SOURCE, "unavailable"),
+            )
+            assert (await served.turn(broken, "query", "failure-1")).json()["state"] == "completed"
             assert (await served.ready())[f"mcp.{SOURCE}"] == "disconnected"
 
             hanging = source.start(hanging_server)
-            unavailable = env.scripts.add("冷却中的源", tool_call(f"{SOURCE}__query", query="up"))
+            unavailable = env.scripts.add(
+                "冷却中的源",
+                tool_call(f"{SOURCE}__query", query="up"),
+                lambda call: answer([], analysis="", advice="未经数据验证，监控源暂不可用"),
+            )
             assert (await served.turn(unavailable, "query", "failure-2")).json()[
                 "state"
             ] == "failed"
@@ -336,11 +348,23 @@ async def test_formal_web_starrocks_turns_back_off_and_recovery_resets_delay(env
         async with env.running(env.config(**values)) as served:
             await served.page()
             source.stop()
-            failed = env.scripts.add("断线查询", tool_call(f"{SOURCE}__query", query="up"))
+            failed = env.scripts.add(
+                "断线查询",
+                tool_call(f"{SOURCE}__query", query="up"),
+                advise_unverified(SOURCE, "unavailable"),
+            )
             assert (await served.turn(failed, "query", "backoff-disconnect")).json()[
                 "state"
-            ] == "failed"
+            ] == "completed"
             assert (await served.ready())[f"mcp.{SOURCE}"] == "disconnected"
+            # 断线轮如实交付并计入会话；下面 5 个本地轮次从新会话开始，以免触及 5 轮上限。
+            assert (
+                await served.client.post(
+                    "/api/sessions",
+                    json={},
+                    headers={"origin": str(served.client.base_url).rstrip("/")},
+                )
+            ).status_code == 200
             hanging = source.start(lambda recorder: hanging_server(recorder, delay=6))
 
             async def local_turn(label: str) -> float:
@@ -397,10 +421,14 @@ async def test_formal_web_starrocks_turns_back_off_and_recovery_resets_delay(env
             ).status_code == 200
 
             source.stop()
-            failed_again = env.scripts.add("再次断线", tool_call(f"{SOURCE}__query", query="up"))
+            failed_again = env.scripts.add(
+                "再次断线",
+                tool_call(f"{SOURCE}__query", query="up"),
+                advise_unverified(SOURCE, "unavailable"),
+            )
             assert (await served.turn(failed_again, "query", "backoff-disconnect-again")).json()[
                 "state"
-            ] == "failed"
+            ] == "completed"
             await local_turn("backoff-reset-failure")
             assert (await served.ready())[f"mcp.{SOURCE}"] == "cooldown"
             await asyncio.sleep(2.1)

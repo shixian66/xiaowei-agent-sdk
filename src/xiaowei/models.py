@@ -23,6 +23,10 @@ AUDIENCES: tuple[Audience, ...] = ("model", "session", "web", "feishu")
 
 # 只枚举已核约的只读语义；失败续查不能凭命名前缀开放未来工具。
 PROMETHEUS_QUERY_POLICIES = frozenset({"prometheus.query", "prometheus.range_query"})
+PROMETHEUS_SELECTOR_POLICIES = frozenset(
+    {"prometheus.label_names", "prometheus.label_values", "prometheus.series"}
+)
+"""按 matches 选择器读取的发现工具：上游 400 bad_data 可交模型有界修正。"""
 PROMETHEUS_DISCOVERY_POLICIES = frozenset(
     {
         "prometheus.label_names",
@@ -273,15 +277,25 @@ class AgentAnswer(_Answer):
     """飞书用户明确要结果或解释/建议文件时选定格式；澄清时忽略。"""
 
 
+def answer_kinds_mixed(answer: AgentAnswer) -> bool:
+    """澄清或建议与证据、分析、显示方式或彼此混用：三种回答互斥的唯一判定。"""
+    unverified = [text for text in (answer.clarification, answer.advice) if text is not None]
+    return bool(unverified) and bool(
+        answer.evidence_ids or answer.inferences or answer.fact_views or len(unverified) > 1
+    )
+
+
 MonitoringFailureReason = Literal[
     "auth",
     "timeout",
     "unavailable",
     "upstream_5xx",
     "invalid_expression",
+    "invalid_selector",
     "response_limit",
     "invalid_matcher",
     "silence_missing",
+    "unclassified",
 ]
 
 

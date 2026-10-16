@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import enum
 import json
+import logging
 import math
 import types
 from collections.abc import Awaitable, Callable, Iterable, Mapping
@@ -36,10 +37,10 @@ from typing import (
 from pydantic import BaseModel
 
 from xiaowei.models import (
-    ALERTMANAGER_READ_POLICIES,
     AUDIENCES,
     MONITORING_READ_POLICIES,
     PROMETHEUS_QUERY_POLICIES,
+    PROMETHEUS_SELECTOR_POLICIES,
     Identity,
     MonitoringFailure,
     MonitoringFailureReason,
@@ -54,6 +55,8 @@ from xiaowei.starrocks import StarRocksError, StarRocksErrorCode, trace_sql_io
 
 if TYPE_CHECKING:
     from xiaowei.evidence import EvidenceStore
+
+logger = logging.getLogger(__name__)
 
 Authorizer = Callable[[Identity, str, str], Awaitable[bool]]
 """应用提供的当前授权查询：``(identity, target_id, tool_id) -> 是否仍获准``。"""
@@ -135,6 +138,8 @@ ToolRejectHint = Literal[
     "column_capacity",
     "ddl_sql_capacity",
     "change_promql",
+    "change_selector",
+    "change_discovery_request",
     "prometheus_text",
     "metric_required",
     "selectors",
@@ -221,6 +226,19 @@ class PromQLExpressionError(MonitoringReadError):
         super().__init__("invalid_expression")
         self.line = line
         self.column = column
+        self.correction_allowed = False
+
+
+class PrometheusSelectorError(MonitoringReadError):
+    """锁版协议确认的发现工具 400 bad_data（选择器/参数被拒）；修正额度由治理层决定。
+
+    ``matches_rejected`` 表示上游说明明确指向 match[]：同一组选择器换工具、label 或时间窗
+    也不会成功；否则只拒绝重发完全相同的请求。
+    """
+
+    def __init__(self, *, matches_rejected: bool) -> None:
+        super().__init__("invalid_selector")
+        self.matches_rejected = matches_rejected
         self.correction_allowed = False
 
 
@@ -388,6 +406,9 @@ class TurnRuns:
     promql_errors: tuple[tuple[str, str], ...] = ()  # 目标、已失败表达式，跨 query/range 禁止重发。
     promql_pending: frozenset[str] = frozenset()
     promql_repairs: tuple[str, ...] = ()  # 每源整轮最多两项，不随成功复位。
+    selector_errors: tuple[tuple[str, str], ...] = ()  # 目标、已被拒的发现请求摘要。
+    selector_pending: frozenset[str] = frozenset()
+    selector_repairs: tuple[str, ...] = ()  # 每源整轮最多两项，不随成功复位。
     alertmanager_errors: tuple[tuple[str, str, str, str], ...] = ()  # 源、类别、工具、摘要。
     alertmanager_pending: frozenset[tuple[str, str]] = frozenset()
     alertmanager_repairs: tuple[tuple[str, str], ...] = ()
@@ -515,7 +536,13 @@ class GovernedTools:
         if any(
             failure.target_id == contract.target_id
             and failure.reason
-            not in {"invalid_expression", "response_limit", "invalid_matcher", "silence_missing"}
+            not in {
+                "invalid_expression",
+                "invalid_selector",
+                "response_limit",
+                "invalid_matcher",
+                "silence_missing",
+            }
             for failure in self._runs.get(_turn_key(ctx.identity), TurnRuns()).monitoring_failures
         ):
             raise ToolRejectedError(
@@ -548,6 +575,27 @@ class GovernedTools:
                         code="source_stopped",
                     )
                 repair_from = sum(target == contract.target_id for target, _ in runs.promql_errors)
+        selector_keys: tuple[str | None, str] | None = None
+        selector_repair_from: int | None = None
+        if contract.policy_id in PROMETHEUS_SELECTOR_POLICIES:
+            selector_keys = _selector_keys(contract.policy_id, arguments)
+            if (target, selector_keys[0]) in runs.selector_errors:
+                raise ToolRejectedError(
+                    "这组选择器本轮已被上游拒绝，换工具或时间窗也不会重发；请修改 matches",
+                    hint="change_selector",
+                )
+            if (target, selector_keys[1]) in runs.selector_errors:
+                raise ToolRejectedError(
+                    "同一请求本轮已被上游拒绝，未重发；请修改选择器或参数",
+                    hint="change_discovery_request",
+                )
+            if target in runs.selector_pending:
+                if runs.selector_repairs.count(target) >= 2:
+                    raise ToolRejectedError(
+                        "本源本轮两次选择器修正机会已用完；可用其他发现方式或其他源",
+                        code="source_stopped",
+                    )
+                selector_repair_from = sum(t == target for t, _ in runs.selector_errors)
         if contract.policy_id in _ALERTMANAGER_REPAIR_CATEGORY:
             alertmanager_repair_key = (target, _ALERTMANAGER_REPAIR_CATEGORY[contract.policy_id])
             digest = _alertmanager_request_digest(contract.policy_id, arguments)
@@ -583,6 +631,11 @@ class GovernedTools:
                 (*runs.promql_repairs, contract.target_id)
                 if repair_from is not None
                 else runs.promql_repairs
+            ),
+            selector_repairs=(
+                (*runs.selector_repairs, target)
+                if selector_repair_from is not None
+                else runs.selector_repairs
             ),
             alertmanager_repairs=(
                 (*runs.alertmanager_repairs, alertmanager_repair_key)
@@ -631,6 +684,21 @@ class GovernedTools:
                         exc.correction_allowed = (
                             current.promql_repairs.count(contract.target_id) < 2
                         )
+                    elif isinstance(exc, PrometheusSelectorError):
+                        if selector_keys is None:
+                            raise ToolExecutionError() from None
+                        matches_key, request_key = selector_keys
+                        failed = (
+                            matches_key
+                            if exc.matches_rejected and matches_key is not None
+                            else request_key
+                        )
+                        current = replace(
+                            current,
+                            selector_errors=(*current.selector_errors, (target, failed)),
+                            selector_pending=current.selector_pending | {target},
+                        )
+                        exc.correction_allowed = current.selector_repairs.count(target) < 2
                     elif isinstance(exc, AlertmanagerCorrectionError):
                         allowed = (
                             exc.reason in {"response_limit", "invalid_matcher"}
@@ -676,13 +744,29 @@ class GovernedTools:
                         and not trace.started
                     ):
                         busy_before_sql = True
+                    elif contract.policy_id in MONITORING_READ_POLICIES:
+                        # 只读监控读取没有副作用：分类不明（远端错误形态未知、结果不合约、
+                        # 响应超限等）也按“本源未核实”交回模型，本源本轮停止，不中止整轮。
+                        # 日志只记异常类型，不记正文。
+                        logger.info(
+                            "monitoring read unclassified tool_id=%s error_type=%s",
+                            contract.tool_id,
+                            type(exc).__name__,
+                        )
+                        current = self._runs.get(key, TurnRuns())
+                        failure = MonitoringFailure(
+                            tool_id=contract.tool_id,
+                            target_id=contract.target_id,
+                            reason="unclassified",
+                        )
+                        self._runs[key] = replace(
+                            current, monitoring_failures=(*current.monitoring_failures, failure)
+                        )
+                        raise MonitoringReadError("unclassified") from None
                     else:
                         if isinstance(exc, StarRocksError):
                             code: StarRocksErrorCode | Literal["mcp_error", "other"] = exc.code
-                        elif (
-                            request.tool_id.partition("/")[0] != "local"
-                            and contract.policy_id not in ALERTMANAGER_READ_POLICIES
-                        ):
+                        elif request.tool_id.partition("/")[0] != "local":
                             code = "mcp_error"
                         else:
                             code = "other"
@@ -705,6 +789,10 @@ class GovernedTools:
                 target == contract.target_id for target, _ in runs.promql_errors
             ):
                 runs = replace(runs, promql_pending=runs.promql_pending - {contract.target_id})
+            if selector_repair_from is not None and selector_repair_from == sum(
+                t == target for t, _ in runs.selector_errors
+            ):
+                runs = replace(runs, selector_pending=runs.selector_pending - {target})
             if alertmanager_repair_key is not None and alertmanager_repair_from is not None:
                 if alertmanager_repair_from == sum(
                     item[:2] == alertmanager_repair_key for item in runs.alertmanager_errors
@@ -795,6 +883,24 @@ class GovernedTools:
         started.pop(len(started) - 1 - started[::-1].index(tool_id))
         self._runs[key] = replace(self._runs[key], started=tuple(started))
         self._used[key] -= 1
+
+
+def _selector_keys(policy_id: str, arguments: Mapping[str, object]) -> tuple[str | None, str]:
+    """（选择器键，完整请求键）。
+
+    选择器键只含去重排序后的 matches，与工具、label、时间窗无关；没有 matches 时为 None。
+    完整请求键含工具与全部（已规范化的）参数，用于原因不能归到选择器的拒绝。
+    """
+    matches = arguments.get("matches")
+    selectors = (
+        json.dumps({"matches": sorted(set(matches))}, ensure_ascii=False)
+        if isinstance(matches, list) and matches and all(isinstance(m, str) for m in matches)
+        else None
+    )
+    request = json.dumps(
+        {"tool": policy_id, "arguments": arguments}, sort_keys=True, ensure_ascii=False
+    )
+    return selectors, request
 
 
 def _bind(execute: Execute, request: ToolRequest) -> Callable[[], Awaitable[ToolObservation]]:

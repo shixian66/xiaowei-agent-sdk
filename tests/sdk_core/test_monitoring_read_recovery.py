@@ -18,7 +18,7 @@ from mcp.shared.exceptions import MCPError
 from mcp.types import CallToolResult, TextContent
 from tests.sdk_core.browser import launch
 from tests.sdk_core.mcp_fixture import LOOPBACK, ASGIApp, Recorder, recording, serve
-from tests.sdk_core.test_app import ModelCall, answer, tool_call
+from tests.sdk_core.test_app import ModelCall, advise_unverified, answer, tool_call
 from tests.sdk_core.test_feishu_render import message_text
 from tests.sdk_core.test_group_gateway import GroupChannel, raw_group_event, runtime_group
 from tests.sdk_core.test_group_identity import CHAT, A
@@ -269,13 +269,16 @@ async def test_all_monitoring_reads_fail_allows_unverified_advice_with_fixed_sou
             assert second.recorder.tool_calls == [("query", {"query": "up"})]
 
 
-async def test_unknown_remote_error_still_aborts_without_evidence(env: Env) -> None:
+async def test_unknown_remote_error_is_unverified_without_evidence(env: Env) -> None:
     with serve(lambda r: error_server(r, "unexpected remote text")) as upstream:
         async with env.running(env.config(**monitoring_config(upstream.url))) as served:
             await served.page()
-            message = env.scripts.add("未知远端错误", tool_call(f"{SOURCE}__query", query="up"))
+            message = env.scripts.add(
+                "未知远端错误", tool_call(f"{SOURCE}__query", query="up"), advise_unverified(SOURCE)
+            )
             response = (await served.turn(message, "query")).json()
-            assert response["state"] == "failed"
+            assert response["state"] == "completed"
+            assert "unexpected remote text" not in json.dumps(response)  # 远端原文不外泄
             assert upstream.recorder.tool_calls == [("query", {"query": "up"})]
             assert await env.scalar("SELECT count(*) FROM xiaowei_evidence") == 0
 

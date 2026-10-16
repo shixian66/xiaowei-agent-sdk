@@ -7,8 +7,9 @@
 只有确定发生在 I/O 之前的治理拒绝（``ToolRejectedError``）按 SDK 公开的
 ``FunctionTool`` 返回固定结构反馈交给模型（不读取异常原文）。提出工具的只读准备可通过
 专用的 ``ProposalRejectedError`` 返回明确拒绝：无 Action、无业务写入，已开始的调用计预算。
-已分类的监控只读源失败由治理层记录后交回固定类别，本源本轮不再调用；其他执行后失败（结果不合约、证据无法保存、执行期间
-撤权或写动作结果不明）继续抛出并中止整轮，不自动重试。
+监控只读源的执行后失败由治理层记录后交回固定类别（分类不明的记 ``unclassified``），本源本轮不再
+调用；其他执行后失败（非监控工具的结果不合约、证据无法保存、执行期间撤权或写动作结果不明）继续
+抛出并中止整轮，不自动重试。
 
 多目标工具（``routed_function_tool``）对模型只有一个函数，参数 ``cluster`` 必填：按它选取该目标
 的契约与执行函数；缺少、不是字符串或没有登记该目标时以固定信息拒绝，不回退到其他目标。
@@ -29,6 +30,7 @@ from xiaowei.governance import (
     Execute,
     GovernedTools,
     MonitoringReadError,
+    PrometheusSelectorError,
     PromQLExpressionError,
     ProposalRejectedError,
     ToolRejectCode,
@@ -119,6 +121,12 @@ _REJECTION_HINTS: dict[ToolRejectHint, str] = {
     ),
     "change_promql": (
         "该表达式本轮已解析失败，未重发；修改括号、运算符或函数参数后再调用，不重发同一表达式"
+    ),
+    "change_selector": (
+        "这组选择器本轮已被上游拒绝，换工具、label 或时间窗也不会重发；修改 matches 后再调用"
+    ),
+    "change_discovery_request": (
+        "同一发现请求本轮已被上游拒绝，未重发；修改选择器或参数，或改用其他发现工具"
     ),
     "prometheus_text": "表达式/指标名最多8192字符，查询表达式不能为空；修改后再调用",
     "metric_required": (
@@ -280,6 +288,19 @@ def _function_tool(
                     "column": exc.column,
                     "correction_allowed": exc.correction_allowed,
                     "reason": "PromQL解析失败；检查括号、运算符与函数参数，勿重发同一表达式",
+                },
+                ensure_ascii=False,
+            )
+        except PrometheusSelectorError as exc:
+            return json.dumps(
+                {
+                    "status": "invalid_selector",
+                    "source": contract.target_id,
+                    "correction_allowed": exc.correction_allowed,
+                    "reason": (
+                        "上游拒绝选择器或参数；matches 每项须是合法选择器且至少有一个匹配器"
+                        '不匹配空串，例如 node_uname_info 或 {job="node"}，勿重发同一请求'
+                    ),
                 },
                 ensure_ascii=False,
             )

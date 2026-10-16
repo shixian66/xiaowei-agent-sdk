@@ -912,8 +912,9 @@ async def _timeout(request: httpx2.Request) -> httpx2.Response:
     [
         pytest.param([_status(401)], "auth_failed", id="401"),
         pytest.param([_status(403)], "auth_failed", id="403"),
-        pytest.param([_status(429)], "rate_limited", id="429"),
-        pytest.param([_status(503)], "upstream_error", id="5xx"),
+        # 429/503 由 SDK 有限重试（首发 + 3 次），持续失败后仍报告原类别。
+        pytest.param([_status(429) for _ in range(4)], "rate_limited", id="429"),
+        pytest.param([_status(503) for _ in range(4)], "upstream_error", id="5xx"),
         pytest.param([_timeout], "unreachable", id="timeout"),
         pytest.param([_check_answer()], "tool_not_called", id="no-tool"),
         pytest.param(
@@ -955,7 +956,7 @@ def test_model_check_failures_exit_1_with_a_fixed_reason(
     out, err = capsys.readouterr()
     assert out == "" and err.strip() == f"model check failed: {reason}"
     _no_leak(err)
-    assert model_check.endpoint.replies == []  # 没有额外请求：不重试
+    assert model_check.endpoint.replies == []  # 请求数恰为脚本数：重试有上限，其他失败不重试
     assert model_check.calls == ["open_model", "safe_run_config"]
     assert model_check.files() == before
 

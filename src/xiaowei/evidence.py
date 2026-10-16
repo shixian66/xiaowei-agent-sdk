@@ -73,6 +73,7 @@ from xiaowei.models import (
     ToolRequest,
     ToolResult,
     TurnAnswer,
+    answer_kinds_mixed,
 )
 
 logger = logging.getLogger(__name__)
@@ -137,9 +138,11 @@ _MONITORING_REASONS = {
     "unavailable": "源连接不可用，结果未知",
     "upstream_5xx": "上游服务错误",
     "invalid_expression": "查询表达式解析失败",
+    "invalid_selector": "发现选择器被上游拒绝",
     "response_limit": "告警响应超出接收上限",
     "invalid_matcher": "告警匹配条件被上游拒绝",
     "silence_missing": "指定静默 ID 未找到",
+    "unclassified": "读取失败，原因未分类",
 }
 
 _INSERT = text(
@@ -382,7 +385,7 @@ class EvidenceStore:
             # 澄清与建议不引用证据：不能与证据、分析或彼此混用。没有监控失败时，
             # “本轮未执行业务查询”由 Application 在提交前核实；有监控失败时改用未核实标题。
             # 模型可能复述可见证据，因此照样复核它们。
-            if answer.evidence_ids or answer.inferences or answer.fact_views or len(unverified) > 1:
+            if answer_kinds_mixed(answer):
                 raise AnswerRejectedError(
                     AnswerRejectCode.MIXED_KINDS, "澄清或建议不能与查询结果、分析或彼此混用"
                 )

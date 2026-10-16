@@ -1234,11 +1234,12 @@ async def test_model_cannot_submit_facts(env: Env) -> None:
     message = env.scripts.add(
         "东区",
         tool_call("run_readonly_query", cluster=SR.target_id, sql="SELECT region FROM shop.sales"),
-        lambda call: answer(evidence_in(call), facts=[{"rows": [{"region": "伪造"}]}]),
+        *[lambda call: answer(evidence_in(call), facts=[{"rows": [{"region": "伪造"}]}])] * 2,
     )
     with pytest.raises(TurnError) as refused:
         await env.app.run_turn(env.ctx(), message)
     assert refused.value.reason == "model_failed"
+    assert len(env.scripts.calls[message]) == 3  # 工具一轮 + 原回答 + 一次无工具改写
 
 
 async def test_an_unexpected_precheck_failure_is_a_fixed_rejection_without_io(env: Env) -> None:

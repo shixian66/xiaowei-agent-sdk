@@ -189,9 +189,9 @@ async def test_oversized_serialized_request_is_rejected_before_that_http_io(
         ("ddl", {}, {"ddl_bytes": 60000}, 0),
         ("multi_query", {}, {"rows": 45}, 0),
         ("monitoring", {}, {}, 1000),
-        ("monitoring", {}, {}, 3000),
     ],
-    ids=["history-2500", "ddl-60000", "three-large-queries", "wide-monitoring", "mcp-receive-cap"],
+    # MCP 接收上限不再是失败边界：超限读取记为本源未核实、本轮照常交付（见 P2 接收上限用例）。
+    ids=["history-2500", "ddl-60000", "three-large-queries", "wide-monitoring"],
 )
 async def test_first_non_turn_limit_is_reported_without_trimming_or_increasing_limits(
     env: Env,
@@ -257,20 +257,12 @@ async def test_first_non_turn_limit_is_reported_without_trimming_or_increasing_l
                 pytest.fail("Expected a non-turn capacity boundary")
             assert i < 101  # 100 is not a promise that other limits cannot trigger sooner.
             assert await env.scalar("SELECT turns FROM xiaowei_session") < 100
-            if monitor_lines == 3000:
-                assert "reason=tool_failed" in caplog.text and "tool_error=mcp_error" in caplog.text
-                assert i == 1
-                assert max(response_sizes) > config.mcp_servers[0].max_response_bytes
-                first_limit = "mcp_receive"
-            else:
-                assert "reason=session_unavailable" in caplog.text
-                assert await env.scalar("SELECT state FROM xiaowei_session") == "sealed"
-                assert (
-                    recorder.current.commit_replay_bytes > config.session_limits.max_history_bytes
-                )
-                first_limit = "history_bytes"
-                if scenario != "multi_query":
-                    assert i > 1
+            assert "reason=session_unavailable" in caplog.text
+            assert await env.scalar("SELECT state FROM xiaowei_session") == "sealed"
+            assert recorder.current.commit_replay_bytes > config.session_limits.max_history_bytes
+            first_limit = "history_bytes"
+            if scenario != "multi_query":
+                assert i > 1
         report = recorder.report(config, connectors)
         report["mcp_max_response_bytes"] = config.mcp_servers[0].max_response_bytes
         report["first_failed_turn"] = i

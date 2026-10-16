@@ -1,8 +1,9 @@
 """Vertex Express Mode ``generateContent`` 的 SDK ``Model`` 适配器。
 
-只做 SDK 输入输出与 Vertex REST 的双向映射：不执行工具、不续轮、不重试，Agent Loop 仍是 SDK
-``Runner``。请求只来自本次调用的参数（不在实例上保存调用映射，并发运行互不影响）；响应接受单
-候选、完整 ``STOP`` 的文本或一组函数调用，首个调用须有 thought signature。
+只做 SDK 输入输出与 Vertex REST 的双向映射：不执行工具、不续轮、自身不重试，Agent Loop 仍是 SDK
+``Runner``；429/503 的有限重试由 Runner 按 ``ModelSettings.retry`` 重新调用本适配器。请求只来自
+本次调用的参数（不在实例上保存调用映射，并发运行互不影响）；响应接受单候选、完整 ``STOP`` 的
+文本或一组函数调用，首个调用须有 thought signature。
 
 传输层（期限、字节上限、无重定向、无压缩、API Key 请求头）由 ``model_api`` 的受控 transport 负责，
 这里得到的成功响应已是合法 JSON 且是单候选 ``STOP`` 终态。适配器再按严格 JSON 解析一次（拒绝
@@ -58,6 +59,7 @@ _FAKE_ID = "__fake_id__"
 # 适配器能如实表达的 SDK 设置；其余设置一旦取值即拒绝，不静默丢弃。
 _MAPPED_SETTINGS = frozenset({"max_tokens", "parallel_tool_calls", "retry", "timeout", "store"})
 _REPORTING_SETTINGS = frozenset({"preserve_raw_usage"})
+_RETRY_HEADERS = frozenset({"retry-after", "retry-after-ms"})
 _USAGE_COUNTS = (
     "promptTokenCount",
     "candidatesTokenCount",
@@ -67,11 +69,17 @@ _USAGE_COUNTS = (
 
 
 class ModelAPIStatusError(ModelAPIRejectedError):
-    """模型服务返回非成功状态；只保留状态码，不含上游正文。"""
+    """模型服务返回非成功状态；只保留状态码和重试等待头，不含上游正文。
 
-    def __init__(self, status_code: int) -> None:
+    ``headers`` 供 SDK Runner 读取 Retry-After（等待上限由重试策略决定）；其他响应头不保留。
+    """
+
+    def __init__(self, status_code: int, headers: Mapping[str, str] | None = None) -> None:
         super().__init__(f"模型服务返回 HTTP {status_code}")
         self.status_code = status_code
+        self.headers = {
+            name: value for name, value in (headers or {}).items() if name.lower() in _RETRY_HEADERS
+        }
 
 
 class ModelAPITransportError(ModelAPIRejectedError):
@@ -147,7 +155,7 @@ class VertexModel(Model):
         except httpx2.TransportError:
             raise ModelAPITransportError("模型服务连接失败") from None
         if not httpx2.codes.is_success(response.status_code):
-            raise ModelAPIStatusError(response.status_code) from None
+            raise ModelAPIStatusError(response.status_code, response.headers) from None
         # 受控 transport 已确认是 JSON；这里再拒绝非有限数字，避免它们进入工具参数或下一步请求。
         payload = _strict_json(response.content)
         if payload is None:
@@ -191,8 +199,6 @@ def _check_settings(settings: ModelSettings) -> None:
             _reject_request("Vertex 适配器不支持该模型设置")
     if settings.parallel_tool_calls or settings.store:
         _reject_request("Vertex 适配器不支持并行工具调用或服务端保存")
-    if settings.retry is not None and settings.retry.max_retries:
-        _reject_request("Vertex 适配器不自动重试")
 
 
 def _function_tools(tools: list[Tool]) -> list[FunctionTool]:

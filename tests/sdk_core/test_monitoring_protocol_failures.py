@@ -1,4 +1,4 @@
-"""真 SDK 的协议错误传播：正常握手后出错，正式入口须中止，不能误当源级故障。"""
+"""真 SDK 的协议错误传播：正常握手后出错，只读监控读取记为本源未核实，不误当源级断线。"""
 
 import json
 from typing import Any
@@ -9,7 +9,7 @@ from starlette.requests import Request
 from starlette.responses import JSONResponse, Response
 from starlette.routing import Route
 from tests.sdk_core.mcp_fixture import ASGIApp, Recorder, recording, serve
-from tests.sdk_core.test_app import answer, tool_call
+from tests.sdk_core.test_app import ModelCall, answer, last_output, tool_call, unverified
 from tests.sdk_core.test_monitoring_r1a import SOURCE, monitoring_config
 from tests.sdk_core.test_runtime import Env
 from tests.sdk_core.test_runtime import env as env  # pytest fixture
@@ -103,25 +103,25 @@ def protocol_source(recorder: Recorder, failure: str) -> ASGIApp:
         "invalid_request",
     ],
 )
-async def test_protocol_failure_aborts_formal_turn_without_model_continuation(
+async def test_protocol_failure_is_unverified_source_and_turn_continues(
     env: Env, failure: str
 ) -> None:
+    def finish(call: ModelCall) -> list[Any]:
+        assert last_output(call) == unverified(SOURCE)  # 只有固定类别，不含协议原文
+        return answer([], analysis="", advice="未经数据验证，无法核实当前指标")
+
     with serve(lambda recorder: protocol_source(recorder, failure)) as source:
         values = monitoring_config(source.url)
         values["mcp_servers"][0]["max_response_bytes"] = 2048
         async with env.running(env.config(**values)) as served:
             await served.page()
             message = env.scripts.add(
-                "协议异常不能继续调查",
-                tool_call(f"{SOURCE}__query", query="up"),
-                lambda call: answer([], analysis="", advice="未经数据验证，无法核实当前指标"),
+                "协议异常记为未核实", tool_call(f"{SOURCE}__query", query="up"), finish
             )
             body = (await served.turn(message, "query")).json()
-            assert source.recorder.tool_calls == [("query", {"query": "up"})]
+            assert source.recorder.tool_calls == [("query", {"query": "up"})]  # 不重发
             assert all(target == "/mcp" for _, target, _ in source.recorder.requests)
             assert await env.scalar("SELECT count(*) FROM xiaowei_evidence") == 0
-            assert body["state"] == "failed"
-            assert "本轮未交付；不会自动重试" in body["delivery"]["content"]
-            assert await env.scalar("SELECT failure_code FROM xiaowei_request") == "evidence_failed"
-            assert len(env.scripts.calls[message]) == 1
-        assert await env.scalar("SELECT count(*) FROM agent_messages") == 0
+            assert body["state"] == "completed"
+            assert f"{SOURCE}（读取失败，原因未分类）" in body["delivery"]["monitoring_notice"]
+            assert len(env.scripts.calls[message]) == 2
