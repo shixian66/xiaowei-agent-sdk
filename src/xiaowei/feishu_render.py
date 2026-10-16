@@ -8,6 +8,7 @@ import json
 import re
 import unicodedata
 from collections.abc import Sequence
+from collections.abc import Set as AbstractSet
 from typing import Any, Final
 
 from xiaowei.feishu_markdown import format_prose, prose_post
@@ -19,6 +20,7 @@ FACTS_CLIPPED: Final = "事实展示已截断，未展示全部结果。"
 ANALYSIS_CLIPPED: Final = "分析展示已截断，未展示全部模型分析。"
 TEXT_CLIPPED: Final = "（内容超过单消息上限，已截断）"
 BRIEF_ORIGINAL_OMITTED: Final = "获准原文未展示（单消息容量限制）；如需原文请明确提出。"
+RAW_OMITTED: Final = "原文 JSON 与上方展示的值逐项一致，未重复展示；如需原文可要求 MD/HTML 文件。"
 _TECHNICAL = frozenset({"sql", "row_count", "elapsed_ms", "next_cursor"})
 _PAGED = frozenset({"local/list_databases", "local/list_tables", "local/describe_table"})
 _ACTION_LABELS = {
@@ -90,6 +92,27 @@ def _cell(row: dict[str, JsonScalar], name: str) -> str:
     return json.dumps(value, ensure_ascii=False, allow_nan=False)
 
 
+def _raw_redundant(fact: DeliveryFact) -> bool:
+    """可见表格/字段已逐值保留原类型时，原文 JSON 只是同一数据的第二份。"""
+    if fact.result_json is None or fact.view == "brief":
+        return False
+    data = json.loads(fact.result_json)
+    if not isinstance(data, dict):
+        return False
+
+    def same(left: object, right: object) -> bool:
+        # 按 JSON 文本比较，区分 true/1、大整数与其字符串、嵌套值与其 JSON 文本。
+        return json.dumps(left, sort_keys=True, ensure_ascii=False) == json.dumps(
+            right, sort_keys=True, ensure_ascii=False
+        )
+
+    if fact.columns:
+        if not same(data.get("rows"), [dict(row) for row in fact.rows]):
+            return False
+        data = {k: v for k, v in data.items() if k not in ("rows", "columns")}
+    return same(data, fact.metadata)
+
+
 def _data(fact: DeliveryFact) -> tuple[tuple[str, ...], tuple[dict[str, JsonScalar], ...]]:
     if fact.view == "brief":
         return (), ()
@@ -156,6 +179,7 @@ def _card(
     *,
     omissions: bool = True,
     formatted: bool = False,
+    raw_hidden: AbstractSet[int] = frozenset(),
 ) -> Message:
     elements: list[Message] = []
     if delivery.report_notice:
@@ -228,6 +252,14 @@ def _card(
         elements.extend(_div(notice) for notice in fact_limit_notices(fact))
         if fact.tool_id == "local/run_readonly_query" and index not in sqls:
             elements.append(_div("SQL 未展示。"))
+        if omissions and fact.view != "brief" and len(rows) < len(all_rows):
+            elements.append(
+                _div(
+                    f"预览 {len(rows)}／本次返回 {len(all_rows)} 行"
+                    if fact.columns
+                    else f"预览 {len(rows)}／共 {len(all_rows)} 个字段"
+                )
+            )
         if fact.view == "brief":
             elements.append(_div(fact.summary or "摘要不可用。"))
             if omissions and fact.result_json is not None and index not in technical:
@@ -293,7 +325,12 @@ def _card(
                     label = "结构采集 SQL 模板" if key == "sql" and fact.tool_id in _PAGED else key
                     details.append(_div(f"{label}: {_cell({key: value}, key)}"))
             if fact.result_json is not None:
-                details.append(_div(f"原文 JSON:\n{fact.result_json}"))
+                # 只有可由可见值无损替代的原文才会列入 raw_hidden，并如实说明是主动省略。
+                details.append(
+                    _div(RAW_OMITTED)
+                    if index in raw_hidden
+                    else _div(f"原文 JSON:\n{fact.result_json}")
+                )
         if details:
             elements.append(
                 {
@@ -371,18 +408,24 @@ def build_feishu_message(
     reply_to: str | None = None,
     max_bytes: int = MAX_REQUEST_BYTES,
     allow_preview: bool = True,
+    platform_limits: bool = False,
 ) -> Message:
     """生成受控 post 或结果卡片：必要提醒、回答、完整事实与折叠依据。
 
     来源/限制放不下时只发固定容量说明；本地异常由调用方记 failed。这里不读另一渠道的投影，
     不靠 SDK 分片，不在发送开始后改发另一消息。
+
+    platform_limits（新语义交付）：卡片与预建 post 只受请求字节与组件约束，纯文本仍受
+    max_chars；可由可见值无损替代的原文 JSON 不重复展示；预览先放回答，再放行与 SQL。
     """
     if delivery.channel != "feishu":
         raise ValueError("飞书展示仅接受飞书渠道")
 
     def fits(message: Message) -> bool:
+        # SDK 只对纯文本按字符分段；卡片与预建 post 原样发送，平台只限字节与组件。
+        limit_chars = not platform_limits or set(message) == {"text"}
         return (
-            _chars(message) <= max_chars
+            (not limit_chars or _chars(message) <= max_chars)
             and _elements(message) <= 200
             and request_bytes(message, chat_id, reply_to=reply_to) <= max_bytes
         )
@@ -488,18 +531,42 @@ def build_feishu_message(
         if f.tool_id == "local/run_readonly_query" and isinstance(f.metadata.get("sql"), str)
     }
     all_technical = set(range(len(delivery.facts)))
-    full = _card(delivery, totals, all_sql, delivery.analysis, all_technical)
-    if fits(full):
-        formatted = _card(
-            delivery, totals, all_sql, delivery.analysis, all_technical, formatted=True
+    hidden = (
+        frozenset(i for i, f in enumerate(delivery.facts) if _raw_redundant(f))
+        if platform_limits
+        else frozenset()
+    )
+
+    def card(
+        counts: Sequence[int],
+        sqls: set[int],
+        analysis: Sequence[AnswerInference],
+        technical: set[int],
+        *,
+        omissions: bool = True,
+        formatted: bool = False,
+    ) -> Message:
+        return _card(
+            delivery,
+            counts,
+            sqls,
+            analysis,
+            technical,
+            omissions=omissions,
+            formatted=formatted,
+            raw_hidden=hidden,
         )
+
+    full = card(totals, all_sql, delivery.analysis, all_technical)
+    if fits(full):
+        formatted = card(totals, all_sql, delivery.analysis, all_technical, formatted=True)
         return formatted if fits(formatted) else full
     if not allow_preview:
         # 历史brief的小原文可折叠展示；放不下则只交付已选择的摘要，不因此自动导出原值。
         if any(f.view == "brief" for f in delivery.facts):
             brief_technical = {i for i, f in enumerate(delivery.facts) if f.view != "brief"}
             brief_sql = all_sql & brief_technical
-            brief = _card(delivery, totals, brief_sql, delivery.analysis, brief_technical)
+            brief = card(totals, brief_sql, delivery.analysis, brief_technical)
             if fits(brief):
                 return brief
         raise MessageCapacityError("完整结果超过单消息容量")
@@ -508,35 +575,56 @@ def build_feishu_message(
 
     def fitting_prefix(sqls: set[int]) -> list[int] | None:
         counts = [0] * len(totals)
-        best = counts.copy() if fits(_card(delivery, counts, sqls, analysis, technical)) else None
+        best = counts.copy() if fits(card(counts, sqls, analysis, technical)) else None
         # 零行占位与截断提示可能比完整短结果更大；只用不含这些提示的下界提前结束搜索。
         # 下界永不交付，实际候选必须包含所有必要的未展示/截断说明。
-        if not fits(_card(delivery, counts, sqls, analysis, technical, omissions=False)):
+        if not fits(card(counts, sqls, analysis, technical, omissions=False)):
             return best
         for index, total in enumerate(totals):
             if total == 0:
                 continue
             # 完整端点可能移除截断提示，零行端点可能移除/增加占位，不能混进二分区间。
             counts[index] = total
-            if fits(_card(delivery, counts, sqls, analysis, technical)):
+            if fits(card(counts, sqls, analysis, technical)):
                 best = counts.copy()
                 continue
             low, high = 0, total - 1
             while low < high:
                 mid = (low + high + 1) // 2
                 counts[index] = mid
-                if fits(_card(delivery, counts, sqls, analysis, technical)):
+                if fits(card(counts, sqls, analysis, technical)):
                     low = mid
                     best = counts.copy()
                 else:
                     high = mid - 1
             counts[index] = total
-            if not fits(_card(delivery, counts, sqls, analysis, technical, omissions=False)):
+            if not fits(card(counts, sqls, analysis, technical, omissions=False)):
                 return best
             # 此端点不合容量但下界合容量：后续短事实可能移除更大的占位，继续检查。
         return best
 
     sqls: set[int] = set()
+
+    def fit_analysis(counts: list[int]) -> None:
+        for item in delivery.analysis:
+            if fits(card(counts, sqls, [*analysis, item], technical)):
+                analysis.append(item)
+                continue
+            low, high = 0, len(item.text)
+            while low < high:
+                mid = (low + high + 1) // 2
+                short = item.model_copy(update={"text": item.text[:mid]})
+                if fits(card(counts, sqls, [*analysis, short], technical)):
+                    low = mid
+                else:
+                    high = mid - 1
+            if low:
+                analysis.append(item.model_copy(update={"text": item.text[:low]}))
+            break
+
+    if platform_limits:
+        # 正文先回答：分析先占预算，fitting_prefix 经闭包读取 analysis 再放整行与 SQL。
+        fit_analysis([0] * len(totals))
     counts = fitting_prefix(sqls)
     if counts is None:
         return omitted_message()
@@ -546,26 +634,12 @@ def build_feishu_message(
         if selected_counts is not None:
             sqls.add(index)
             counts = selected_counts
-    for item in delivery.analysis:
-        candidate = _card(delivery, counts, sqls, [*analysis, item], technical)
-        if fits(candidate):
-            analysis.append(item)
-            continue
-        low, high = 0, len(item.text)
-        while low < high:
-            mid = (low + high + 1) // 2
-            short = item.model_copy(update={"text": item.text[:mid]})
-            if fits(_card(delivery, counts, sqls, [*analysis, short], technical)):
-                low = mid
-            else:
-                high = mid - 1
-        if low:
-            analysis.append(item.model_copy(update={"text": item.text[:low]}))
-        break
+    if not platform_limits:
+        fit_analysis(counts)
     for index in range(len(totals)):
-        candidate = _card(delivery, counts, sqls, analysis, technical | {index})
+        candidate = card(counts, sqls, analysis, technical | {index})
         if fits(candidate):
             technical.add(index)
-    plain = _card(delivery, counts, sqls, analysis, technical)
-    formatted = _card(delivery, counts, sqls, analysis, technical, formatted=True)
+    plain = card(counts, sqls, analysis, technical)
+    formatted = card(counts, sqls, analysis, technical, formatted=True)
     return formatted if fits(formatted) else plain

@@ -18,6 +18,7 @@ from xiaowei.feishu_render import (
     Message,
     MessageCapacityError,
     build_feishu_message,
+    capacity_notice,
     fact_limit_notices,
     request_bytes,
 )
@@ -44,39 +45,26 @@ def _message_part(
 def _preview(
     delivery: Delivery, max_chars: int, chat_id: str, reply_to: str | None, notice: str
 ) -> Message:
-    # 只把确定能完整放入正文的整行标成预览，不能标20后再次静默裁剪。
-    for count in range(20, -1, -1) if delivery.facts else (0,):
-        facts = tuple(
-            f.model_copy(update={"rows": f.rows[:count], "result_json": None})
-            for f in delivery.facts
-        )
-        ranges = [
-            f"预览 {min(count, len(f.rows))}／本次返回 {len(f.rows)} 行"
-            for f in delivery.facts
-            if f.columns and f.view != "brief"
-        ]
+    # 复用渲染器的整行预览：回答优先，预览范围与“结果行未展示”出自同一预算，不先截事实。
+    if delivery.facts:
+        candidate = delivery.model_copy(update={"report_notice": notice + "\n结果预览。"})
+    else:
         candidate = delivery.model_copy(
             update={
-                "facts": facts,
-                "analysis": (),
-                "report_notice": notice + "\n结果预览。" + "；".join(ranges),
+                "content": notice + "\n" + delivery.content,
+                "feishu_text": (notice + "\n" + delivery.feishu_text)
+                if delivery.feishu_text is not None
+                else None,
             }
         )
-        if not facts:
-            candidate = candidate.model_copy(
-                update={
-                    "content": notice + "\n" + delivery.content,
-                    "feishu_text": (notice + "\n" + delivery.feishu_text)
-                    if delivery.feishu_text is not None
-                    else None,
-                }
-            )
-        try:
-            return build_feishu_message(
-                candidate, max_chars, chat_id, reply_to=reply_to, allow_preview=False
-            )
-        except (MessageCapacityError, ValueError):
-            continue
+    try:
+        message = build_feishu_message(
+            candidate, max_chars, chat_id, reply_to=reply_to, platform_limits=True
+        )
+    except (MessageCapacityError, ValueError):
+        message = None
+    if message is not None and message != capacity_notice(delivery.session_notice):
+        return message
     text = notice + "\n预览无法在本消息容量内展示。"
     limits = list(
         dict.fromkeys(
@@ -99,7 +87,12 @@ def _data_parts(
     if delivery.report_format is None or delivery.is_clarification:
         try:
             message = build_feishu_message(
-                delivery, max_chars, chat_id, reply_to=reply_to, allow_preview=False
+                delivery,
+                max_chars,
+                chat_id,
+                reply_to=reply_to,
+                allow_preview=False,
+                platform_limits=True,
             )
             return (_message_part(sequence, "body", message),)
         except MessageCapacityError:
@@ -119,7 +112,12 @@ def _data_parts(
 
 
 def _check_capacity(
-    parts: tuple[DeliveryPart, ...], max_chars: int, chat_id: str, reply_to: str | None
+    parts: tuple[DeliveryPart, ...],
+    max_chars: int,
+    chat_id: str,
+    reply_to: str | None,
+    *,
+    platform_limits: bool,
 ) -> None:
     for p in parts:
         if p.send_state == "sent":
@@ -132,8 +130,10 @@ def _check_capacity(
             # 使用原卡片的容量规则，绝不按新模板重建/逐字节比较。
             from xiaowei.feishu_render import _chars, _elements
 
+            # 数据分项按平台限制：只有纯文本受字符上限；审批材料沿原规则。
+            limit_chars = not platform_limits or set(message) == {"text"}
             if (
-                _chars(message) > max_chars
+                (limit_chars and _chars(message) > max_chars)
                 or _elements(message) > 200
                 or request_bytes(message, chat_id, reply_to=reply_to) > MAX_REQUEST_BYTES
             ):
@@ -309,7 +309,7 @@ async def send_complete_delivery(
     approvals = tuple(p for p in existing if p.kind == "approval")
     # C7：首次和补发都先独立交付材料；数据容量不能阻断它，材料自身仍须合容量。
     try:
-        _check_capacity(approvals, max_chars, chat_id, reply_to)
+        _check_capacity(approvals, max_chars, chat_id, reply_to, platform_limits=False)
     except (ReportCapacityError, MessageCapacityError):
         return capacity_refusal()
     outcomes.extend([await send_part(p) for p in approvals])
@@ -319,7 +319,7 @@ async def send_complete_delivery(
             data_parts = await asyncio.to_thread(
                 _data_parts, data_delivery, 1 if materials else 0, max_chars, chat_id, reply_to
             )
-        _check_capacity(data_parts, max_chars, chat_id, reply_to)
+        _check_capacity(data_parts, max_chars, chat_id, reply_to, platform_limits=True)
     except (ReportCapacityError, MessageCapacityError):
         capacity_failed = True
         if resend:

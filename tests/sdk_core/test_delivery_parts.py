@@ -320,17 +320,20 @@ def test_automatic_file_keeps_brief_and_complete_analysis_without_expanding_hist
         }
     )
     facts = (brief, delivery.facts[0]) if mixed else (brief,)
-    analysis = "完整分析" + "分析内容" * 375
+    # 新语义按平台限制：分析合计超过 30,000 字节才需要自动附件。
+    analyses = [f"完整分析{i}" + "分析内容" * 490 for i in range(6)]
     delivery = delivery.model_copy(
         update={
             "facts": facts,
-            "analysis": (AnswerInference(text=analysis, evidence_ids=delivery.evidence_ids),),
+            "analysis": tuple(
+                AnswerInference(text=text, evidence_ids=delivery.evidence_ids) for text in analyses
+            ),
         }
     )
     file, body = _data_parts(delivery, 0, 600, "oc_d1a", None)
     report = file.body.decode()
     assert file.kind == "md" and body.kind == "body"
-    assert "历史摘要：本次返回一行" in report and analysis in report
+    assert "历史摘要：本次返回一行" in report and all(text in report for text in analyses)
     assert "HISTORICAL_ORIGINAL_CANARY" not in report
     assert "HISTORICAL_SQL_CANARY" not in report
     if mixed:
@@ -804,6 +807,7 @@ async def test_clarification_with_report_format_sends_only_question_without_uplo
 
 @pytest.mark.asyncio
 async def test_long_clarification_never_changes_into_an_automatic_attachment(env: Env) -> None:
+    # 超过 max_chars=200 的澄清卡片按平台限制完整放入正文；仍不改成附件。
     question = "请先明确目标集群和业务时区。" * 40
     message = env.scripts.add(
         "信息不足时先问我",
@@ -817,6 +821,7 @@ async def test_long_clarification_never_changes_into_an_automatic_attachment(env
     result = await env.service.results.send(
         ref, partial(transmit(env, ref, platform), max_chars=200)
     )
-    assert platform.files == []
-    assert result != "sent"  # 放不进正文时沿容量失败处理，不把提醒当完整交付。
+    assert platform.files == [] and len(platform.sent) == 1
+    # 字符上限 200 只约束纯文本；澄清卡片在平台限制内完整发送。
+    assert result == "sent" and question in json.dumps(platform.sent[0][0], ensure_ascii=False)
     assert all(part.kind == "body" for part in await parts(env, ref))
