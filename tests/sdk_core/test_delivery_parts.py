@@ -162,9 +162,18 @@ def test_split_report_preserves_every_typed_row_and_labels_each_file(
                         )
                     )
         else:
-            for raw in body.splitlines():
-                if raw.startswith('{"index":'):
-                    recovered.append(json.loads(raw))
+            # MD 表格：按渲染后的单元格还原值与类型（代码片段内为 JSON 文本）。
+            from markdown_it import MarkdownIt
+
+            rendered = MarkdownIt("default").enable("table").render(body)
+            for table in re.findall(r"<tbody>(.*?)</tbody>", rendered, re.S):
+                for row in re.findall(r"<tr>(.*?)</tr>", table, re.S):
+                    cells = re.findall(r"<td>(.*?)</td>", row, re.S)
+                    values = (
+                        json.loads(unescape(c.removeprefix("<code>").removesuffix("</code>")))
+                        for c in cells
+                    )
+                    recovered.append(dict(zip(result["columns"], values, strict=True)))
         if "证据 ev_report" in body:
             assert "scope" in body and "applied_limit" in body
             assert "SELECT" in body
@@ -224,7 +233,12 @@ def test_automatic_split_keeps_historical_brief_without_exporting_raw_values(
     assert len(reports) > 1
     assert "历史结果摘要" in content and "HISTORICAL_RAW_CANARY" not in content
     assert [int(n) for n in re.findall(r"^\| (\d+) \|", content, re.M)] == list(range(12))
-    assert len(re.findall(r'\| "x{140}" \|', content)) == 12
+    # 140 字超过单元格宽度，表格写“见下方”，原值在表下围栏中逐条完整保留。
+    # 拆分文件中的行号与章节标题一致，按全局行号编号，不在每个文件里从 1 重来。
+    assert [
+        int(n) for n in re.findall(r"^\| \d+ \| 见下方 第 (\d+) 行 \|$", content, re.M)
+    ] == list(range(1, 13))
+    assert len(re.findall(r"^x{140}$", content, re.M)) == 12
 
 
 @pytest.mark.asyncio
@@ -320,17 +334,20 @@ def test_automatic_file_keeps_brief_and_complete_analysis_without_expanding_hist
         }
     )
     facts = (brief, delivery.facts[0]) if mixed else (brief,)
-    analysis = "完整分析" + "分析内容" * 375
+    # 新语义按平台限制：分析合计超过 30,000 字节才需要自动附件。
+    analyses = [f"完整分析{i}" + "分析内容" * 490 for i in range(6)]
     delivery = delivery.model_copy(
         update={
             "facts": facts,
-            "analysis": (AnswerInference(text=analysis, evidence_ids=delivery.evidence_ids),),
+            "analysis": tuple(
+                AnswerInference(text=text, evidence_ids=delivery.evidence_ids) for text in analyses
+            ),
         }
     )
     file, body = _data_parts(delivery, 0, 600, "oc_d1a", None)
     report = file.body.decode()
     assert file.kind == "md" and body.kind == "body"
-    assert "历史摘要：本次返回一行" in report and analysis in report
+    assert "历史摘要：本次返回一行" in report and all(text in report for text in analyses)
     assert "HISTORICAL_ORIGINAL_CANARY" not in report
     assert "HISTORICAL_SQL_CANARY" not in report
     if mixed:
@@ -804,6 +821,7 @@ async def test_clarification_with_report_format_sends_only_question_without_uplo
 
 @pytest.mark.asyncio
 async def test_long_clarification_never_changes_into_an_automatic_attachment(env: Env) -> None:
+    # 超过 max_chars=200 的澄清卡片按平台限制完整放入正文；仍不改成附件。
     question = "请先明确目标集群和业务时区。" * 40
     message = env.scripts.add(
         "信息不足时先问我",
@@ -817,6 +835,49 @@ async def test_long_clarification_never_changes_into_an_automatic_attachment(env
     result = await env.service.results.send(
         ref, partial(transmit(env, ref, platform), max_chars=200)
     )
-    assert platform.files == []
-    assert result != "sent"  # 放不进正文时沿容量失败处理，不把提醒当完整交付。
+    assert platform.files == [] and len(platform.sent) == 1
+    # 字符上限 200 只约束纯文本；澄清卡片在平台限制内完整发送。
+    assert result == "sent" and question in json.dumps(platform.sent[0][0], ensure_ascii=False)
     assert all(part.kind == "body" for part in await parts(env, ref))
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("invalidate", ["readiness", "expiry"])
+async def test_hint_rechecks_attempt_after_thread_render(
+    env: Env, monkeypatch: pytest.MonkeyPatch, invalidate: str
+) -> None:
+    # 独立审查（5fb2b30）：提醒在线程中渲染期间 readiness 关闭或请求过期，不能再外发结果。
+    import xiaowei.feishu_delivery as module
+    from xiaowei.channel_store import ChannelStoreError
+
+    ref = await request(env)
+    platform = Platform(outcomes=[rejected()])
+    original = module._preview
+    entered, release = threading.Event(), threading.Event()
+
+    def paused_preview(delivery, max_chars, chat_id, reply_to, notice):
+        if notice.startswith("完整结果尚未交付。"):
+            entered.set()
+            assert release.wait(8), "测试屏障超时"
+        return original(delivery, max_chars, chat_id, reply_to, notice)
+
+    monkeypatch.setattr(module, "_preview", paused_preview)
+    task = asyncio.create_task(env.service.results.send(ref, transmit(env, ref, platform)))
+    try:
+        assert await asyncio.wait_for(asyncio.to_thread(entered.wait, 6), 7)
+        sent_before = len(platform.sent)
+        if invalidate == "readiness":
+            env.readiness.lock("review_simulated_state_failure")
+        else:
+            env.clock.advance(10_000)
+        release.set()
+        try:
+            await task
+        except ChannelStoreError:
+            pass  # 失效后的最终状态写入被拒绝是预期的
+        assert len(platform.sent) == sent_before
+    finally:
+        release.set()
+        if not task.done():
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
