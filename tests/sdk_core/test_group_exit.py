@@ -194,10 +194,10 @@ async def test_members_share_one_task_across_clusters_diagnosis_clarification_an
         assert all(QUERY_NAME in seen for seen in env.scripts.tools_seen(vague))  # 查询工具照常可见
         assert "要看哪个集群" in replies(channel)[-1][1]
         assert statements(drivers["sr-a"]) == [ran_a]
-        await ask("sr-a，按地区汇总", "om_5", B, sends=6)
-        assert isinstance(channel.sends[-2][1], OutboundFile)
-        assert "本次完整结果见附件" in reply_to(channel, "om_5")
-        assert b"sr-a" in channel.uploads[-1] and b"sr-b" in channel.uploads[-1]
+        # 引用两轮结果的回答在飞书平台限制内：直接在对话中完整展示，不转附件。
+        await ask("sr-a，按地区汇总", "om_5", B, sends=5)
+        assert channel.uploads == [] and "本次完整结果见附件" not in reply_to(channel, "om_5")
+        assert "目标 sr-a" in reply_to(channel, "om_5") and "目标 sr-b" in reply_to(channel, "om_5")
         assert user_turns(env, answer)[-2:] == [vague, answer]
         assert statements(drivers["sr-a"]) == [ran_a, ran_a]
         assert len(channel.member_calls) == 10
@@ -223,14 +223,12 @@ async def test_members_share_one_task_across_clusters_diagnosis_clarification_an
     assert len(env.scripts.calls[resumed]) == 1
     assert {m: len(env.scripts.calls[m]) for m in calls_before} == calls_before
     assert {t: statements(d) for t, d in drivers.items()} == {t: [] for t in drivers}
-    # 原消息的正文标明预览，完整文件保留模型分析与两个集群的回放事实。
+    # 回放事实与模型分析合平台限制：同一条正文完整展示，无附件。
     ((to, text),) = replies(restarted)
     assert to == "om_6"
-    assert "本次完整结果见附件" in text
-    (complete,) = restarted.uploads
-    report = complete.decode()
-    assert "sr-a 较低" in report and "sr-a" in report and "sr-b" in report
-    assert len(restarted.sends) == 2 and isinstance(restarted.sends[0][1], OutboundFile)
+    assert "本次完整结果见附件" not in text
+    assert "sr-a 较低" in text and "目标 sr-a" in text and "目标 sr-b" in text
+    assert restarted.uploads == [] and len(restarted.sends) == 1
     assert len(restarted.member_calls) == 2
     assert (await rows(env))["om_6"] == DONE
 

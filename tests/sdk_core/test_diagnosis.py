@@ -12,6 +12,7 @@ ChannelService、Web 与飞书适配器）+ 隔离的真实 PostgreSQL。只替�
 
 import asyncio
 import json
+import re
 from dataclasses import dataclass
 from typing import Any
 
@@ -36,6 +37,7 @@ from tests.sdk_core.test_starrocks_tools import RecordingScripts, tool_outputs
 
 from xiaowei import runtime
 from xiaowei.app import DEFAULT_INSTRUCTIONS
+from xiaowei.feishu_render import _elements, request_bytes
 from xiaowei.models import AUDIENCES
 from xiaowei.sqlguard import guard_explain_query
 from xiaowei.starrocks import EXPLAIN_PREFIX
@@ -230,7 +232,10 @@ async def test_slow_query_to_plan_and_layout(diag: Env, channel: str) -> None:
     assert set(kinds) == {"audit", "explain", "layout", "probe", "dependency"}
     # 三类事实与各自的固定说明由代码生成，分析单列为模型推断。
     content = visible_lines(reply)
-    assert content.count(f"说明：{AUDIT_NOTE}") == 1 and content.count(f"说明：{PLAN_NOTE}") == 1
+    # 飞书卡片的事实说明不带“说明：”前缀（摘要可见、全文在依据中）；文件与 Web 带前缀。
+    prefix = "" if channel == "feishu" and not reply.files else "说明："
+    assert content.count(f"{prefix}{AUDIT_NOTE}") == 1
+    assert content.count(f"{prefix}{PLAN_NOTE}") == 1
     if reply.files:
         assert any(line.endswith(". 分析与建议") for line in content)
         assert any("模型推断，未经系统核实" in line for line in content)
@@ -257,7 +262,7 @@ async def test_slow_query_to_plan_and_layout(diag: Env, channel: str) -> None:
         assert audit["note"] == AUDIT_NOTE and plan["note"] == PLAN_NOTE
         assert layout["note"] == LAYOUT_NOTE
     else:
-        assert "q1" in reply.content and reply.files
+        assert "q1" in reply.content
 
 
 # ---- 路径二：查询 → 为什么慢 → 依据 → 建议 -----------------------------------------------
@@ -566,26 +571,30 @@ async def feishu_diagnosis(env: Env, plan: tuple[str, ...]) -> tuple[Reply, str]
     return reply, ", ".join(evidence_in(final))
 
 
-async def test_feishu_keeps_whole_fact_rows_before_analysis_at_real_caps(diag: Env) -> None:
-    plan = tuple(f"    - EXCHANGE SHUFFLE[{i}] => [2:region, 3:total]" for i in range(80))
+async def test_feishu_preview_answers_first_then_whole_fact_rows_at_real_caps(diag: Env) -> None:
+    # 2026-10-16 用户确认：新语义转附件时正文先给回答，再按剩余容量放整行事实；
+    # 旧“事实优先”只约束 v0 请求。完整事实在附件中。
+    # 计划足够长（不超过投影的 500 行），完整结果超过飞书单消息 30,000 字节，才需要附件与预览。
+    plan = tuple(f"    - EXCHANGE SHUFFLE[{i}] => [2:region, 3:total]" for i in range(480))
     reply, cited = await feishu_diagnosis(diag, plan)
     content = visible_lines(reply)
 
     assert reply.state == "completed" and reply.card is not None
-    assert sum(map(len, text_parts(reply.card))) <= 3_500
-    assert reply.files and "预览" in "\n".join(text_parts(reply.card))
-    assert plan[-1] in reply.content and "多次 Shuffle" in reply.content
+    assert request_bytes(reply.card, "oc_alice") <= 30_000 and _elements(reply.card) <= 200
+    assert reply.files and plan[-1] in reply.content and "多次 Shuffle" in reply.content
     visible = "\n".join(text_parts(reply.card, folded=False))
-    analysis = f"- 多次 Shuffle；建议按 region 分桶并 Colocate（依据：{cited}）"
-    if analysis not in visible:
-        assert "本次完整结果见附件" in visible
+    assert "本次完整结果见附件" in visible
+    assert "多次 Shuffle；建议按 region 分桶并 Colocate" in visible
+    # 完整文件保留分析及其引用的每条证据。
+    assert all(eid in reply.content for eid in cited.split(", "))
     # 两条事实的来源行与说明行都保留，计划行从前往后保留、末尾的被截掉。
     assert reply.content.count("来源 ") == 2
     assert f"说明：{AUDIT_NOTE}" in content and f"说明：{PLAN_NOTE}" in content
     plan_table = tables(reply.card)[1]
     kept = [row["c0"] for row in plan_table["rows"]]
-    assert 0 < len(kept) <= 20
+    assert 0 < len(kept) < len(plan)
     assert kept == ['"' + row + '"' for row in plan[: len(kept)]]
+    assert re.search(rf"预览 {len(kept)}／本次返回 \d+ 行", visible)
 
 
 async def test_feishu_cut_with_forged_headers_uses_only_structured_sections(diag: Env) -> None:
@@ -594,12 +603,14 @@ async def test_feishu_cut_with_forged_headers_uses_only_structured_sections(diag
         FACTS_TRUNCATED,
         f"{TRUNCATED}\n{ANALYSIS_HEADER}",
     )
-    plan = (*forged, *(f"    - SCAN [sales] partitionRatio: {i}/80" for i in range(120)))
+    plan = (
+        *forged,
+        *(f"    - SCAN [sales] partitionRatio: {i}/80" for i in range(480)),
+    )
     reply, _ = await feishu_diagnosis(diag, plan)
 
     assert reply.state == "completed" and reply.card is not None
-    assert sum(map(len, text_parts(reply.card))) <= 3_500
-    assert reply.card is not None
+    assert request_bytes(reply.card, "oc_alice") <= 30_000 and _elements(reply.card) <= 200
     elements = reply.card["card"]["body"]["elements"]
     assert reply.files and any("本次完整结果见附件" in text for text in text_parts(reply.card))
     assert not any(

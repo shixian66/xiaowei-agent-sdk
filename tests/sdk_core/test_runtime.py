@@ -1429,7 +1429,11 @@ async def test_formal_thousand_rows_complete_single_or_split_files(
             ]
             assert len(values) == 1000
             assert values[-1] == {"region": "row999", "total": 999}
-            assert "预览 20／本次返回 1000 行" in str(channel.sends[1][1])
+            (shown_rows,) = findall(r"预览 (\d+)／本次返回 1000 行", str(channel.sends[1][1]))
+            assert 0 < int(shown_rows) < 1000
+            preview = channel.sends[1][1]["card"]["body"]["elements"]
+            (table,) = [e for e in preview if e.get("tag") == "table"]
+            assert len(table["rows"]) == int(shown_rows)
         else:
             from html import unescape
             from re import DOTALL, findall
@@ -1456,7 +1460,8 @@ async def test_formal_thousand_rows_complete_single_or_split_files(
                         )
             assert seen == [{"region": f"{region}{i}", "total": i} for i in range(1000)]
             shown = str(channel.sends[-1][1])
-            assert "预览 20／本次返回 1000 行" in shown
+            (shown_rows,) = findall(r"预览 (\d+)／本次返回 1000 行", shown)
+            assert 0 < int(shown_rows) < 1000
             assert "完整结果见附件" in shown and "总共" not in shown
         assert len(env.scripts.calls[question]) == 2
         assert await served.finish() == 0
@@ -1726,9 +1731,8 @@ async def test_cli_resend_explains_version_unknown_and_capacity(
                 await conn.execute(text("DELETE FROM xiaowei_delivery_part"))
                 await conn.execute(text("UPDATE xiaowei_request SET delivery_version=0"))
     if outcome == "capacity":
-        config = config.model_copy(
-            update={"feishu": config.feishu.model_copy(update={"max_reply_chars": 200})}
-        )
+        # 新语义卡片按平台限制检查，字符设置不再拒发；收紧字节预算模拟已保存分项超过平台限制。
+        monkeypatch.setattr("xiaowei.feishu_delivery.MAX_REQUEST_BYTES", 200)
     channel = FakeChannel(
         result=SendResult.ok(message_id="" if outcome == "unknown" else "om_resent")
     )
@@ -1804,11 +1808,14 @@ async def test_resend_uses_saved_message_even_after_template_failure(
     assert len(env.scripts.calls[message]) == 2 and statements(env.drv) == []
 
 
-async def test_small_message_capacity_delivers_complete_file_and_body(
+async def test_small_reply_chars_keep_complete_result_inline(
     env: Env,
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    from xiaowei.feishu_render import CAPACITY_NOTICE
+    # 2026-10-16 复盘：max_reply_chars 只约束纯文本；结果卡片合平台限制就留在对话，不转附件。
+    from tests.sdk_core.test_feishu_render import text_parts
+
+    from xiaowei.feishu_render import CAPACITY_NOTICE, request_bytes
 
     config = env.config(feishu=feishu_config(max_reply_chars=200))
     channel = DeliveryChannel()
@@ -1821,9 +1828,12 @@ async def test_small_message_capacity_delivers_complete_file_and_body(
         channel.emit_raw_from_sdk_thread(feishu_event(env, message, "om_capacity"))
         await until(lambda: len(channel.sends) >= 1)
         assert await served.finish() == 0
-    assert len(channel.uploads) == 1 and len(channel.sends) == 2
-    assert channel.sends[1][1] != {"text": CAPACITY_NOTICE}
-    assert "完整结果见附件" in str(channel.sends[1][1])
+    assert channel.uploads == [] and len(channel.sends) == 1
+    shown = channel.sends[0][1]
+    assert shown != {"text": CAPACITY_NOTICE} and "card" in shown
+    assert "完整结果见附件" not in str(shown) and "预览" not in str(shown)
+    assert sum(map(len, text_parts(shown))) > 200  # 超过字符设置仍完整内联
+    assert request_bytes(shown, "oc_alice", reply_to="om_capacity") <= 30_000
     assert await env.scalar("SELECT delivery FROM xiaowei_request") == "sent"
     resend = FakeChannel()
     assert (
@@ -1841,7 +1851,7 @@ async def test_small_message_capacity_delivers_complete_file_and_body(
     assert resend.sends == [] and len(env.scripts.calls[message]) == 2
 
 
-async def test_small_capacity_preserves_complete_plan_in_file(env: Env) -> None:
+async def test_small_reply_chars_keep_complete_plan_inline(env: Env) -> None:
     from tests.p1b.test_starrocks_adapter import plan_result
     from tests.sdk_core.test_feishu_render import text_parts
 
@@ -1862,10 +1872,10 @@ async def test_small_capacity_preserves_complete_plan_in_file(env: Env) -> None:
         channel.emit_raw_from_sdk_thread(feishu_event(env, message, "om_short_plan"))
         await until(lambda: len(channel.sends) >= 1)
         assert await served.finish() == 0
-    assert len(channel.uploads) == 1 and b"SCAN" in channel.uploads[0]
-    shown = channel.sends[1][1]
-    assert shown != {"text": CAPACITY_NOTICE}
-    assert sum(map(len, text_parts(shown))) <= 225
+    assert channel.uploads == [] and len(channel.sends) == 1
+    shown = channel.sends[0][1]
+    assert shown != {"text": CAPACITY_NOTICE} and '"SCAN"' in str(shown)
+    assert sum(map(len, text_parts(shown))) > 225  # 字符设置不再约束结果卡片
     assert request_bytes(shown, "oc_alice", reply_to="om_short_plan") <= 30_000
     assert await env.scalar("SELECT delivery FROM xiaowei_request") == "sent"
     resend = FakeChannel()
