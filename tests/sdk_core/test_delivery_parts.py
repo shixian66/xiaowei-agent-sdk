@@ -234,7 +234,10 @@ def test_automatic_split_keeps_historical_brief_without_exporting_raw_values(
     assert "历史结果摘要" in content and "HISTORICAL_RAW_CANARY" not in content
     assert [int(n) for n in re.findall(r"^\| (\d+) \|", content, re.M)] == list(range(12))
     # 140 字超过单元格宽度，表格写“见下方”，原值在表下围栏中逐条完整保留。
-    assert len(re.findall(r"^\| \d+ \| 见下方 第 \d+ 行 \|$", content, re.M)) == 12
+    # 拆分文件中的行号与章节标题一致，按全局行号编号，不在每个文件里从 1 重来。
+    assert [
+        int(n) for n in re.findall(r"^\| \d+ \| 见下方 第 (\d+) 行 \|$", content, re.M)
+    ] == list(range(1, 13))
     assert len(re.findall(r"^x{140}$", content, re.M)) == 12
 
 

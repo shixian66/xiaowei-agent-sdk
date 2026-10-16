@@ -93,12 +93,21 @@ def _cell(row: dict[str, JsonScalar], name: str) -> str:
 
 
 def _raw_redundant(fact: DeliveryFact) -> bool:
-    """可见表格/字段已逐值保留原类型时，原文 JSON 只是同一数据的第二份。"""
+    """卡片完整展示时，可见表格/字段已逐值保留原类型，原文 JSON 只是同一数据的第二份。
+
+    只按卡片实际渲染的内容判定：名称经显示转义后不变、列与原文一致、无隐藏的空值字段，
+    且实际 SQL 是可展示的字符串；任何不确定都保留原文。
+    """
     if fact.result_json is None or fact.view == "brief":
         return False
     data = json.loads(fact.result_json)
     if not isinstance(data, dict):
         return False
+    names = [*fact.columns, *fact.metadata]
+    if any(display_text(name) != name for name in names):
+        return False  # 不可见字符经转义后可能与字面文本撞名
+    if fact.tool_id == "local/run_readonly_query" and not isinstance(fact.metadata.get("sql"), str):
+        return False  # 非字符串 SQL 只显示“SQL 未展示”
 
     def same(left: object, right: object) -> bool:
         # 按 JSON 文本比较，区分 true/1、大整数与其字符串、嵌套值与其 JSON 文本。
@@ -107,7 +116,13 @@ def _raw_redundant(fact: DeliveryFact) -> bool:
         )
 
     if fact.columns:
-        if not same(data.get("rows"), [dict(row) for row in fact.rows]):
+        if (
+            not fact.rows  # 零行时卡片只写“无数据行”，列名不可见
+            or data.get("columns") != list(fact.columns)
+            or any(set(row) - set(fact.columns) for row in fact.rows)
+            or any(v is None for k, v in fact.metadata.items() if k not in _TECHNICAL)
+            or not same(data.get("rows"), [dict(row) for row in fact.rows])
+        ):
             return False
         data = {k: v for k, v in data.items() if k not in ("rows", "columns")}
     return same(data, fact.metadata)
@@ -180,6 +195,7 @@ def _card(
     omissions: bool = True,
     formatted: bool = False,
     raw_hidden: AbstractSet[int] = frozenset(),
+    preview: bool = False,
 ) -> Message:
     elements: list[Message] = []
     if delivery.report_notice:
@@ -255,9 +271,13 @@ def _card(
         if omissions and fact.view != "brief" and len(rows) < len(all_rows):
             elements.append(
                 _div(
-                    f"预览 {len(rows)}／本次返回 {len(all_rows)} 行"
-                    if fact.columns
-                    else f"预览 {len(rows)}／共 {len(all_rows)} 个字段"
+                    # 新语义预览旁有完整附件；旧 v0 截断卡片没有附件，只说“展示”。
+                    ("预览" if preview else "展示")
+                    + (
+                        f" {len(rows)}／本次返回 {len(all_rows)} 行"
+                        if fact.columns
+                        else f" {len(rows)}／共 {len(all_rows)} 个字段"
+                    )
                 )
             )
         if fact.view == "brief":
@@ -326,9 +346,11 @@ def _card(
                     details.append(_div(f"{label}: {_cell({key: value}, key)}"))
             if fact.result_json is not None:
                 # 只有可由可见值无损替代的原文才会列入 raw_hidden，并如实说明是主动省略。
+                # 只在本卡完整展示该事实时才算重复；预览只放部分行，不能称“逐项一致”。
+                complete = counts[index] >= len(_data(fact)[1])
                 details.append(
                     _div(RAW_OMITTED)
-                    if index in raw_hidden
+                    if index in raw_hidden and complete
                     else _div(f"原文 JSON:\n{fact.result_json}")
                 )
         if details:
@@ -555,6 +577,7 @@ def build_feishu_message(
             omissions=omissions,
             formatted=formatted,
             raw_hidden=hidden,
+            preview=platform_limits,
         )
 
     full = card(totals, all_sql, delivery.analysis, all_technical)

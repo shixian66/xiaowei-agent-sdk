@@ -498,7 +498,7 @@ def test_short_prefix_survives_larger_zero_row_placeholders() -> None:
                     for item in (
                         [
                             {"tag": "div", "text": {"tag": "plain_text", "content": text}}
-                            for text in ("预览 0／本次返回 1 行", "结果行未展示。")
+                            for text in ("展示 0／本次返回 1 行", "结果行未展示。")
                         ]
                         if e is second_table
                         else [e]
@@ -512,7 +512,7 @@ def test_short_prefix_survives_larger_zero_row_placeholders() -> None:
     shown = build_feishu_message(delivery(short, long), needed, "oc_test")
     assert "card" in shown
     assert [t["rows"] for t in tables(shown)] == [[{"c0": "1"}]]
-    assert FACTS_CLIPPED in text_parts(shown) and "预览 0／本次返回 1 行" in text_parts(shown)
+    assert FACTS_CLIPPED in text_parts(shown) and "展示 0／本次返回 1 行" in text_parts(shown)
     assert sum(map(len, text_parts(shown))) <= needed and size(shown) <= 30_000
 
 

@@ -229,7 +229,8 @@ async def send_complete_delivery(
                 hint_delivery = data_delivery.model_copy(
                     update={"content": "", "feishu_text": None}
                 )
-            preview = _preview(
+            preview = await asyncio.to_thread(
+                _preview,
                 hint_delivery,
                 max_chars,
                 chat_id,

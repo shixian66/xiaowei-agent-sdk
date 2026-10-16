@@ -309,3 +309,16 @@ def test_md_table_headers_and_detail_titles_are_inert_and_reversible() -> None:
     ]
     assert decoded == names
     assert "见下方 第 1 行" in body and "multi\nline" in body
+
+
+def test_md_detail_keeps_strings_that_display_would_rewrite_lossless() -> None:
+    # \r 与控制符经显示转义后会与字面反斜杠文本撞形，改用 JSON 围栏保持可逆。
+    values = ["x\r\ny", "x\\r\ny", "s" * 130 + "\x00", "s" * 130 + "\\u0000"]
+    body = _md_body({"columns": ["v"], "rows": [{"v": v} for v in values]})
+    fences = [t for t in MarkdownIt("default").enable("table").parse(body) if t.type == "fence"]
+    # 表下明细按行顺序排在分析章节之前。
+    decoded = [
+        json.loads(t.content) if t.info == "json" else t.content.removesuffix("\n")
+        for t in fences[: len(values)]
+    ]
+    assert decoded == values

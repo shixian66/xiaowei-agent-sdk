@@ -36,6 +36,7 @@ class _Section:
     meta: str | None = None
     notices: tuple[str, ...] = ()
     fact: DeliveryFact | None = None
+    first_row: int = 1
 
 
 _STYLE = """
@@ -270,7 +271,7 @@ def _md_label(name: str) -> str:
     return _inline_code(display_text(_json_value(name)).replace("|", "\\|"))
 
 
-def _md_fact(value: str) -> str:
+def _md_fact(value: str, first_row: int = 1) -> str:
     data = _decoded(value)
     if data is _INVALID:
         return _fence(display_text(value))
@@ -296,7 +297,8 @@ def _md_fact(value: str) -> str:
                 "| " + " | ".join(_md_label(c) for c in columns) + " |",
                 "| " + " | ".join("---" for _ in columns) + " |",
             ]
-            for index, row in enumerate(rows, 1):
+            # 拆分文件中行号与章节标题“行 a–b/N”一致，按全局行号编号。
+            for index, row in enumerate(rows, first_row):
                 cells = []
                 for column in columns:
                     if column not in row:
@@ -309,7 +311,7 @@ def _md_fact(value: str) -> str:
                         continue
                     cells.append(f"见下方 第 {index} 行")
                     title = f"**第 {index} 行** · {_md_label(column)}"
-                    if isinstance(item, str):
+                    if isinstance(item, str) and display_text(item) == item:
                         language = "sql" if column in ("sql", "ddl") else "text"
                         details.append(f"{title}（字符串原文）\n\n{_fence(item, language)}")
                     else:
@@ -354,7 +356,11 @@ def _render(
     if format_ == "md":
         blocks = []
         for index, section in enumerate(sections, start=1):
-            content = _md_fact(section.value) if section.fact else _fence(section.value)
+            content = (
+                _md_fact(section.value, section.first_row)
+                if section.fact
+                else _fence(section.value)
+            )
             meta = f"\n\n{_inline_code(display_text(section.meta))}" if section.meta else ""
             notes = "".join(f"\n\n> {_md_escape(note)}" for note in section.notices)
             blocks.append(f"## {index}. {_md_escape(section.title)}{meta}{notes}\n\n{content}")
@@ -495,6 +501,7 @@ def build_reports(delivery: Delivery, *, expand_brief: bool = True) -> tuple[Rep
                         title=section.title + f" · 行 {start + 1}–{end}/{len(rows)}",
                         value=value,
                         fact=fact.model_copy(update={"result_json": value}),
+                        first_row=start + 1,
                     )
                     if fits([*current, fragment]):
                         best = end, fragment

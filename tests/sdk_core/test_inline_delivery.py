@@ -257,3 +257,44 @@ def test_production_round_r14_dashboard_search_stays_inline() -> None:
     parts = _data_parts(d, 0, 3500, CHAT, None)
     assert [p.kind for p in parts] == ["body"]
     assert "Node Exporter Full 19" in parts[0].body.decode()
+
+
+# ---- 独立审查（494de3c）反例：原文只有在卡片确实完整展示同一内容时才可省略 ----
+
+
+@pytest.mark.parametrize(
+    "case",
+    ["zero_rows", "null_metadata", "odd_columns", "extra_row_key", "null_sql", "hidden_char"],
+)
+def test_raw_json_kept_when_card_does_not_show_everything(case: str) -> None:
+    columns, rows, metadata = ("x", "y"), [{"x": 1, "y": 2}], {"sql": "SELECT 1"}
+    raw = None
+    if case == "zero_rows":
+        rows = []
+    elif case == "null_metadata":
+        metadata = {"sql": "SELECT 1", "scope": None}
+    elif case == "odd_columns":
+        raw = json.dumps({"sql": "SELECT 1", "columns": "WEIRD_COLS", "rows": rows})
+    elif case == "extra_row_key":
+        rows = [{"x": 1, "y": 2, "z": 3}]
+    elif case == "null_sql":
+        metadata = {"sql": None}
+    else:
+        columns, rows = ("a​b",), [{"a​b": 1}]
+    d = delivery(fact(columns, rows, metadata=metadata, raw=raw))
+    text = shown(build_feishu_message(d, 3500, CHAT, allow_preview=False, platform_limits=True))
+    assert RAW_OMITTED not in text and "原文 JSON:" in text
+
+
+def test_preview_never_claims_raw_json_matches_partial_rows() -> None:
+    d = delivery(fact(AUDIT, audit_rows(10, 3000)), analysis=None)
+    message = _preview(d.model_copy(update={"report_format": "md"}), 3500, CHAT, None, "见附件")
+    text = shown(message)
+    assert "／本次返回 10 行" in text and RAW_OMITTED not in text
+
+
+def test_legacy_truncated_card_says_shown_not_preview() -> None:
+    # 旧 v0 截断卡片没有附件：只说“展示 N／本次返回 M 行”。
+    d = delivery(fact(AUDIT, audit_rows(3, 1500)), analysis=None)
+    text = shown(build_feishu_message(d, 3500, CHAT))
+    assert "展示 " in text and "／本次返回 3 行" in text and "预览 " not in text
