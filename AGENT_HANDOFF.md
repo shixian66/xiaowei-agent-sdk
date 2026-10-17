@@ -69,14 +69,14 @@
 | 审查修正 | 独立审查（`87556b5`）发现 P2：审批材料拆出后，查询卡折叠标题仍按拆分后位置编号（正文“结果 2”、折叠“结果 1”）。折叠标题改用 `result_label`；新增拆分发送回归（正文、分析引用、折叠标题、报告编号一致），修复前失败、修复后通过；渲染/报告/交付相关 234 passed，ruff、mypy 通过 |
 | 未验证 | 真实模型、真实飞书客户端排版；S2 起的工作未开始 |
 
-**S2 协议与恢复验证（分支 `claude/answer-s2`，本地，离线实验，未改产品代码）：** 结论与理由见提案 [8.1](docs/superpowers/plans/2026-10-17-free-answer-structure.md#81-s2-离线结论2026-10-17基线-9231f45)。
+**S2 协议与恢复离线验证（分支 `claude/answer-s2`，本地，未改产品代码，等待定向复审）：** 结论、边界与基线区分见提案 [8.1](docs/superpowers/plans/2026-10-17-free-answer-structure.md)。
 
 | 项 | 状态 |
 | --- | --- |
-| 选定 | schema 用嵌套联合（`TextBlock \| FactBlock`），发送前单值 `const` 改写为单值 `enum`，关键字集合不超出现有生产 schema；文字合计 16_000 UTF-8 字节、块数 64，均在代码校验；审批 RunState 选方案 1（兼容恢复，不改 `_native_binding`） |
-| 证据 | `tests/spike/test_answer_s2_protocol.py` 27 passed（隔离 PostgreSQL 55432）；`tests/spike` 全部 75 passed；ruff check / format 通过。覆盖：两种候选的严格 schema 与关键字对比、非法组合、字符与字节预算、本地 `VertexModel` 原样转发与 400 如实失败、三类非法回答一次改写且工具只执行一次、改写失败抛原错误、`max_turns` 收尾、旧审批 RunState 经 PostgreSQL 由新 schema Agent 恢复（批准/拒绝）、旧回答历史回放 |
-| 未验证 | 真实 Vertex 是否接受对象之间的 `anyOf`（S4 首次真实调用；不接受则退回平铺 + 组合校验）；真实模型遵守率；正式 Xiaowei 审批恢复链须 S3 新契约落地后补测，失败则改方案 2 |
-| 下一步 | S3：新回答契约、校验与归一化、其余结果、动作置顶、渲染、容量、兼容与最低限度提示词；需用户授权开始 |
+| 选定 | 嵌套联合（`TextBlock \| FactBlock`），发送前单值 `const` 改写为单值 `enum`，本地仍按 `Literal` 解析；初始上限文字合计 16_000 UTF-8 字节、块数 64，只约束模型输出规模，代码校验；审批 RunState 条件性选方案 1（不改 `_native_binding`），正式入口在 S3 验证，不成立改方案 2 |
+| 证据 | `tests/spike/test_answer_s2_protocol.py` 59 passed（隔离 PostgreSQL 55432）；`tests/spike` 107 passed；ruff check / format check、`git diff --check` 通过。选定方案（含合成引用预检）覆盖未知引用/非法组合/字节超限各改写一次、改写失败、收尾、旧历史回放、旧 RunState 批准与拒绝（均经 PostgreSQL 提交后读回快照、断言快照含旧回答）；字节与块数边界；本地 `VertexModel` 转发与 400 如实失败；现有渲染器容量反例。三组变异（去引用预检/去预算/去 enum 转换）分别 3/6/9 个选定方案用例失败 |
+| 留 S3 | 重复引用去重、空白块丢弃；系统权限失败不改写；正式 Evidence 授权链下的引用预检；新渲染器的转附件/明确失败/诚实说明；正式入口审批恢复（Action claim、Evidence、PolicySession、权限复核、并发防重） |
+| 待真实验证 | 真实 Vertex 是否接受对象之间的 `anyOf`（拒绝则改平铺，不降级为无约束）；真实模型遵守率与任务质量；真实评测基线 `9231f45` 未部署，取基准待安排 |
 
 **生产轮次失败修复（turn-resilience）：已随 PR #110 合并为 `4e0ab86` 并部署；以下为当时记录。**
 
