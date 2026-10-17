@@ -1,6 +1,6 @@
 # 自由表达的回答结构：模型组织表达，代码保证可信事实
 
-> 状态：**设计提案（修订版），产品取舍已确认，待复审**。基线 `c00ede6`（PR #111 合入后的 main），文中代码位置均按该版本核对。本文不改代码；确认后再写入 ARCHITECTURE 并按第 8 节切片实施。
+> 状态：**设计提案（复审后小修版），产品取舍已确认，复审结论为“小修后进入 S1/S2”**。基线 `c00ede6`（PR #111 合入后的 main），文中代码位置均按该版本核对。本文不改代码；确认后再写入 ARCHITECTURE 并按第 8 节切片实施。
 >
 > 标记：**[事实]** 已按 `c00ede6` 源码核对；**[待验证]** 需在指定切片实验或评测；**[边界]** 明确接受的限制；**[已确认]** 用户 2026-10-17 确认的产品取舍。
 
@@ -116,7 +116,7 @@
 | 每条分析须关联证据（`inference_unlinked`） | 拒绝 | 删除 | — |
 | 缺证据（`missing_evidence`） | 拒绝 | 删除；**不**据此推断“本轮未查询” | — |
 | 查询结果须全部引用（`uncited_query`） | 拒绝 | 改为程序补全（6.4）；不再要求模型引用全部结果 | 代码 |
-| 已开始的查询既无结果也无分类失败（现与 `uncited_query` 混用） | 拒绝 | 独立系统失败（6.5），不进入模型改写 | 代码 |
+| 已开始的查询既无结果也无分类失败（现与 `uncited_query` 共用拒绝码） | Runner 返回后拒绝 | 拆为独立失败原因（6.5），仍是系统失败 | 代码 |
 | 重复引用（`duplicate_evidence`） | 拒绝 | 自动去重 | 代码 |
 | 本轮新事实选 `brief` | 拒绝 | 自动改为完整 | 代码 |
 | 非飞书渠道设置 `report_format` | 拒绝（误记 `mixed_kinds`，`evidence.py:241-243`） | 正文照常交付，附代码说明“当前渠道不支持文件” | 代码 |
@@ -127,30 +127,60 @@
 
 **来源。** 只来自可信执行记录，不用整个 `context_evidence`（含历史证据），也不用 `Delivery.basis`（`evidence.py:874`，只是本轮工具/对象提示，不是结果清单）。
 
-**清单在提交时由代码确定并随 `TurnAnswer` 保存**（新增字段，可信外层）：本轮 `TurnRuns.produced` 中、原执行轮次为本轮、工具属于“需交付结果”类别、且未被模型 `fact` 引用的证据，按产生顺序。每次交付、历史读取、重发都校验它是 `context_evidence` 的子集并按当前权限复核。保存而不在读取时重算，原因是：[事实] `channel._validated`（`channel.py:457`）重建 `TurnAnswer` 时不带 `run_turn_id`，审批恢复轮的执行轮次与请求轮次不同，读取时无法可靠重算“本轮”。
+**方案：交付时计算，不新增持久化清单。** 每次交付（首次、历史读取、重发）都对 `context_evidence` 做现有的 `_context_readable` 一批复核，在复核通过的 `EvidenceRecord` 中取：原执行轮次等于 `ctx.identity.turn_id`、工具属于“需交付结果”类别的证据，作为“本轮需交付结果全集”；减去模型显式 `fact` 引用，得到“其余结果”，按产生顺序展示。
 
-**需交付结果的工具类别。** [事实] `app._queries`（`app.py:410-418`）= query 用途 − diagnose 用途 − 发现读取，再加 propose/approval 工具，不等于“所有只读工具”。新设计拆开两类：
-- **查询结果**：`_read_queries`（`_queries` 中 effect 为 read 的部分）的成功证据，进入“其余结果”。
-- **动作材料**：propose/approval 证据只进入动作组件（6.6），不进“其余结果”，也不转普通数据附件（沿用 `evidence.py:465` 的约束）。
-- diagnose/发现读取保持现状，不进“其余结果”，不强制交付 **[已确认]**。
+理由：
+- [事实] 交付上下文已有原执行轮次：`channel._validated` 重建 `TurnAnswer` 时不传 `run_turn_id`，但随后的 `channel._context` 设置 `turn_id = record.run_turn_id or record.turn_id`（`channel.py:558`），审批恢复轮也能确定原轮。现有 `_basis` 已按同一条件筛选本轮证据。
+- [事实] 提交时 `context_evidence` 已包含本轮在工具范围内的全部 `produced` 证据（`app.py:766-769`），全集不会因“未列入清单”而缺项；不需要再证明一份清单的完整性，也没有“新版本缺清单字段”的解析分支。
+- 代价 **[边界]**：工具类别按交付时的可信配置判断，不冻结提交时的范围。配置使工具不可用时证据复核失败、整条不交付（现有行为）；仅类别调整而工具仍可用时，历史读取按新类别展示，内容仍是同一批获准证据。
 
-**授权。** 显式引用与其余结果一起进入现有 `_context_readable` 一批复核；群聊/私聊、跨会话、撤权后任一不可读则整条回答不交付，不只验证最终选中的事实。
+一致性：正常结束、暂停材料（`PausedTurn` 用暂停前原轮 `ctx.identity.turn_id`）、审批恢复（恢复原轮 `TurnLedger` 与原 `ctx.identity.turn_id`，不用审批请求的新 turn ID）、Session 最终校验（复用同一验证器）用同一计算函数。暂停前成功的查询仍属于原轮；一个请求已发送的分项不视为另一个请求已交付。
+
+**需交付结果的工具类别。** [事实] `app._queries`（`app.py:405-418`）= query 用途 − diagnose 用途 − 发现读取（`PROMETHEUS_DISCOVERY_POLICIES | GRAFANA_READ_POLICIES`），再加 propose/approval；`_read_queries` 是其中 effect 为 read 的部分。按实际集合：
+
+| 工具 | 归属 |
+| --- | --- |
+| StarRocks 实际只读查询 | 查询结果，进入“其余结果” |
+| 与 diagnose 共有的元数据、EXPLAIN、审计慢查询等 | 不补全 **[已确认]** |
+| Prometheus query / range | 查询结果 |
+| Prometheus discovery、`GRAFANA_READ_POLICIES` | 不补全 **[已确认]** |
+| Alertmanager 读取 | 查询结果 |
+| `get_action_status`（`actions.action_status_catalog`，effect=read，经 `runtime._app_config` 进入 query 用途，因此在 `_read_queries` 中） | **动作区域**，不进“其余结果”或普通附件 |
+| propose / approval | 动作区域（6.6）；不属于 `_read_queries` |
+| write | 不进入 Runner 工具集合，其事实经 Action 投影 |
+
+动作状态按可信 policy/tool 类别路由，不只凭 effect=read：结果不因重新分类被丢弃，仍完整展示在动作区域；历史只读状态查询不升级为新的待审批材料。不按工具名（如 list/get_status）泛化归类。
+
+**授权。** 显式引用与其余结果一起进入同一批 `_context_readable` 复核；群聊/私聊、跨会话、撤权后任一不可读则整条回答不交付，不只验证最终选中的事实。
 
 ### 6.5 未完成执行（`unfinished`）
 
-[事实] 现在的判定（`app.py:756-763`）：`len(produced ∩ _queries) + 分类的监控失败 + 准备拒绝 != started ∩ _queries`，不等则按 `uncited_query` 拒绝。账本含义（`governance.py:391-420`）：`started` 是通过前置检查、占用预算后开始执行的调用；I/O 前拒绝不进入 `started`；确认零 SQL 的槽位超时经 `_refund_before_io`（`governance.py:880`）从 `started` 移除并退还预算；多数执行后失败直接中止整轮。
+[事实] 现在的判定（`app.py:756-763`）在 Runner 返回后执行，不在 `_answer_check` 的模型改写路径内：`len(produced ∩ _queries) + 分类的监控失败 + 准备拒绝 != started ∩ _queries` 时，与 `uncited` 共用 `UNCITED_QUERY` 拒绝。账本含义见 `governance.py:391-420`。
 
-新设计：
-- 判定式不变，但改用独立系统失败原因，日志可区分；它表示“开始执行但结果去向不明”，**不交模型改写**（改写不会让结果出现，只会诱导重查）。
-- 用户回执沿用 `evidence_failed`，不新增 DB 失败码（避免迁移）**[已确认]**。
-- 审批恢复：`TurnLedger` 随暂停保存，恢复后账本含暂停前计数，判定沿用同一式子。
+新设计只做拆分：判定式不变；应用错误类型、日志原因与渠道映射同步区分 unfinished；用户回执仍为 `evidence_failed`，DB 回执码不变 **[已确认]**。已分类监控失败、取消、超时不改名为 unfinished。
 
-需要的反例（S3 测试）：同一工具两次调用一成一败（分类失败）；失败后重试成功；执行前拒绝与 busy 退款不计入；工具成功但 Evidence 保存失败（应整轮失败，不能静默通过）；未分类失败、取消、超时；审批恢复前后计数一致。
+测试预期（S1/S3）：
+
+| 场景 | 预期 |
+| --- | --- |
+| 同工具两次调用，一次成功一次分类失败 | started=2，1 个结果 + 1 个失败，计数平衡，交付 |
+| 分类失败后修正成功 | 失败记录保留，后续追加成功 Evidence，计数平衡 |
+| 执行前拒绝 | 不计入 started |
+| busy 退款 | 只针对确认零 SQL 的槽位超时（`_refund_before_io`，`governance.py:880`），不是任意超时 |
+| 工具成功但 Evidence 保存失败 | produced 尚未追加，整轮失败 |
+| 未分类监控异常 | 记录 unclassified 失败，可继续其他源 |
+| 非监控执行异常 | 通常中止整轮 |
+| 取消、整轮超时 | 走取消/超时路径，通常到不了最终计数检查 |
+| 审批恢复 | 恢复原 `TurnLedger`；实际 write 不计入 `_queries`，approval 结果计入 |
+| 用户拒绝审批 | 恢复路径产生 approval 状态证据，计数平衡 |
+| proposal 明确拒绝 | 计入 `proposal_rejections`，计数平衡 |
+| 审批后再次暂停 | 账本随新暂停保存，恢复后同式判定 |
+| 同工具并发一成一败 | 与串行同样平衡 |
 
 ### 6.6 动作材料与状态
 
-- 动作组件由代码从 Action 记录生成，**置于回答最前**，模型块不能移除或改位；置顶的是完整组件，**不用摘要替换完整审批材料**。
-- 保留 `requires_complete`（`evidence.py:465-471`：本轮 propose 及本轮 approval 证据）的专有语义：完整审批材料单独成 `approval` 分项（`feishu_delivery.py:170-200`），放不下时首次发送标记失败、重发直接拒绝，不预览、不转附件。
+- 动作组件由代码从 Action 记录与动作状态证据生成，**置于回答最前**，模型块不能移除或改位；置顶的是完整组件，**不用摘要替换完整审批材料**。“进入动作区域并置顶”与 `requires_complete` 是两个独立判断：动作状态查询进入动作区域，但不因此获得 `requires_complete`。
+- 保留 `requires_complete` 的专有语义，条件不变（[事实] `evidence.py:465-468`：effect 为 propose，或 effect 为 approval 且证据属于当前原执行轮次；propose 没有“必须本轮”的条件，历史提案的完整材料保护不能取消）：完整审批材料单独成 `approval` 分项（`feishu_delivery.py:170-200`），放不下时首次发送标记失败、重发直接拒绝，不预览、不转附件。
 - 历史读取时继续按当前 Action 状态刷新并移除已失效的审批命令（`channel.py:470` 起）。
 - 覆盖状态：待审批、已批准执行中、成功、失败、结果未知、拒绝、过期、升级作废、无法恢复、发起人失效、会话失效、反馈失败（`channel.py:89-130` 的 `_ACTION_FAILURE_CODES` 与 `_RECEIPTS`）。
 
@@ -162,20 +192,34 @@
 
 未采用的备选：只靠提示词要求澄清时 `report_format` 为 null，模型出错时澄清问题会被做成报告文件。
 
+**组合语义。** `awaiting_user` 只决定交付载体与超容量行为，不决定哪些内容要验证、补全或展示；不新增“有事实就不得 awaiting_user”的互斥规则。处理顺序：先形成并验证完整可信交付内容（6.9），再按 `awaiting_user` 选择载体。
+
+| 组合 | 行为 |
+| --- | --- |
+| 纯文字 | 忽略 `report_format`，普通消息；超容量失败 |
+| 带显式 fact | 事实照常完整验证与展示，可用事实卡片 |
+| 本轮有未引用的查询结果 | 照常补全其余结果，不因 `awaiting_user` 提前返回 |
+| 带动作材料 | 动作组件置顶，完整材料与独立 `approval` 分项回执不变 |
+| 上述内容放不进普通消息 | 不生成文件、不删事实、不声称完整交付，明确失败；已确认发送的审批分项保持原状态 |
+
+“普通消息”指不生成文件，可以是卡片，不等于纯文本。
+
 ### 6.8 呈现与来源区分
 
 | 输出 | 现状 [事实] | 新设计 |
 | --- | --- | --- |
 | Web（`static/app.js`） | 只用 `textContent` 与 DOM API，不解析 HTML；事实与“分析与建议（模型推断）”分节 | 按块顺序渲染；事实块为代码生成的结构化区域，带“系统根据证据生成 · 结果 N · 来源 · 采集时间”；文字块为普通段落，不解析 Markdown。模型文字里的同样字样只是普通文字，不进入事实区域样式 |
 | 飞书卡片（`feishu_render.py`） | 事实为卡片组件；模型文字经 `feishu_markdown.py` 白名单转为受限组件 | 事实块沿用代码组件与系统标题；文字块只经白名单转换，生成不了事实组件 |
-| 飞书 post | 仅有模型文字且无 `basis` 时使用 `prose_post`（`feishu_render.py:521-537`）；锁定的 lark-channel-sdk 1.4.0 在平台返回 `format_error` 时把 post 的 text runs 拼成纯文本重发（`lark_channel/channel/outbound/sender.py:526-531`），不经 Transport 的 `mention_safe`，所以 `feishu_render.py:528-536` 预先检查降级文字 | 保留：post 只用于不含系统事实的回答；降级文字检查不变 |
-| 纯文本 | 代码自己的纯文本只用于固定回执、纯说明和容量说明（如 `feishu_delivery.py:68-81`）；事实只经卡片或报告文件交付 | **承诺**：含系统事实的回答不以纯文本混排模型文字交付，放不下时转附件并附代码说明（S3 加断言）。纯文本没有样式，模型仿写的标识无法区分 — **[边界]** 只发生在不含系统事实的纯说明中，由评测抽查 |
+| 飞书 post | 有模型文字且无 `basis` 时使用 `prose_post`，并把 `monitoring_notice`、`session_notice` 等代码说明插在前面（`feishu_render.py:521-537`）；锁定的 lark-channel-sdk 1.4.0 在平台返回 `format_error` 时把 post 的 text runs 拼成纯文本重发（`lark_channel/channel/outbound/sender.py:526-539`），不经 Transport 的 `mention_safe`，所以 `feishu_render.py:528-536` 预先检查降级文字 | post **只用于纯模型说明**（不含任何代码生成的说明）；只要同时含代码说明（查询事实、动作状态、监控失败、会话提示、分页/截断、交付说明）与模型文字，就走有来源边界的卡片。降级文字检查不变 |
+| 纯文本 | 固定回执、容量说明用纯文本（如 `feishu_delivery.py:68-81`）；`_data_parts` → `_preview` 生成的附件正文可能同时含代码交付说明（“本次完整结果见附件”）与模型文字 | **承诺**：代码说明与模型文字不在同一纯文本或 post 中混排；需要同时出现时用卡片分区（附件正文、独立审批材料之后的剩余正文同样适用）。代码独立回执仍可用纯文本。纯模型说明可以是 post 或其纯文本降级 |
 | MD/HTML 报告（`feishu_report.py`） | 代码模板，模型文字转义（如 `feishu_report.py:264`） | 本次按块顺序填入现有模板：事实章节由代码生成并带来源；文字段落转义，不能产生事实章节样式 |
 
-**普通消息 Markdown 安全子集**（以 `feishu_markdown.py` 现有白名单为唯一实现；Web 不渲染 Markdown）：
-- 允许：段落、标题、列表、代码块/行内代码、加粗/斜体、换行（[事实] `MarkdownIt("zero", {"maxNesting": 16})` 只启用这些规则）。
-- 不允许：原始 HTML、链接与自动链接、图片、表格、飞书 `<at>`/标签、颜色等样式。不支持的语法按原文显示（Lark 特殊字符编码为实体），不报错。本次不开放链接（含 `https`）**[已确认]**；确有需要时单独设计网址审核。
-- 预算：`MAX_FORMAT_CHARS=3500`、`MAX_FORMAT_TOKENS`、嵌套深度 16；超出或含反斜杠的段落整段按 `plain_text` 保留（现有行为）。
+**纯模型文字的剩余风险 [边界]：** 即使没有任何代码说明，模型仍可能在文字里写“系统已核实”。来源区分保证的是这类文字拿不到代码区域的呈现身份，不保证用户不被措辞误导；不靠禁用词语解决，由提示词与评测（E）衡量。
+
+**普通消息 Markdown 安全子集**（以 `feishu_markdown.py` 现有行为为唯一实现；Web 不渲染 Markdown）。区分“可作为字面文字输入”和“支持格式化渲染”：
+- 支持格式化渲染 [事实]：标题（转为加粗）、有序/无序列表、`**…**` 加粗、换行。斜体不生成斜体组件。
+- 整段降级为 `plain_text` [事实]：传入文字含代码块或行内代码、含反斜杠、超过 `MAX_FORMAT_CHARS=3500` 或 `MAX_FORMAT_TOKENS` 时，**整个传入文字**按原文输出，不是只处理其中一段；不含任何受支持格式时同样为纯文字。
+- 其余语法（原始 HTML、链接与自动链接、图片、表格、飞书 `<at>`/标签、样式）可作为字面文字出现，不渲染、不报错（Lark 特殊字符编码为实体）。本次不开放链接 **[已确认]**，也不为兑现格式能力新增斜体、代码格式或链接。
 - 工具返回的字符串（事实单元格、SQL、告警标签）不进入 Markdown 解析，按纯文本组件或转义输出（`feishu_markdown.py` 文件头约束）。
 
 ### 6.9 容量与诚实交付
@@ -183,8 +227,8 @@
 原则：**先形成完整可信交付内容（动作材料 → 模型块与显式事实 → 其余结果 → 系统说明），再做容量规划**。规划只决定放在正文还是附件，不删内容。“完整交付”指完整交付已返回的获准结果，不等于取得后端全部数据；分页、截断、未核实说明始终保留。
 
 [事实] 现有机制（PR #107）：
-- 卡片/post 按请求字节（`MAX_REQUEST_BYTES = 30_000`，`feishu_render.py:17`）和组件数（≤200，`feishu_delivery.py:137`）约束；纯文本受 `max_message_chars`（配置 ≤10000）约束。
-- 正文放不下时生成报告附件：每文件 `MAX_REPORT_BYTES = 400_000`（`feishu_report.py:16`），`build_reports` 按整章节或整行分文件（`feishu_report.py:426`）；附件中历史 `brief` 展开为完整（`expand_brief`）。
+- 卡片/post 按请求字节（`MAX_REQUEST_BYTES = 30_000`，`feishu_render.py:17`）和组件数（≤200，`feishu_delivery.py:137`）约束；纯文本回复受 `max_reply_chars`（配置 200–3500，`config.py:199`，`feishu.py:1108`、`:1275`）约束；`max_message_chars`（≤10000，`config.py:198`）是输入上限，不用于判断回复。
+- 正文放不下时生成报告附件：每文件 `MAX_REPORT_BYTES = 400_000`（`feishu_report.py:16`），`build_reports` 按整章节或整行分文件（`feishu_report.py:426`）。400_000 是每文件上限，不是整轮预算。`expand_brief = delivery.report_format is not None`（`feishu_delivery.py:101-103`）：显式报告请求展开历史 `brief`；容量不足自动转 MD 时保留所选摘要。
 - 每个分项（`approval`/`md`/`html`/`body`）保存原字节与发送状态；任一 `unknown` 则整体 `unknown`，有未发送分项则 `failed`；v1 飞书完成/暂停记录无分项按失败；v0 旧记录 `unknown` 不改为确定失败（`channel_store.py:955-980`）。
 - 重发只发未发送分项，按原字节与原容量规则检查，不按新模板重建（`feishu_delivery.py:113-140`）。
 
@@ -197,6 +241,10 @@
 - 现有报告拆分只适用于代码模板，**不是**未来自由 HTML 的通用拆分方案。
 
 反例（S3 测试）：一个附件成功、另一个 unknown；单行超限；说明本身放不下；模型文字声称“已全部发送”。
+
+来源边界组合（S3 测试，检查最终卡片与降级结果）：全源查询失败的未核实说明、会话容量提示、附件正文的交付说明、独立审批材料之后的剩余正文，分别与仿写“系统已核实”的模型文字组合；断言代码说明与模型文字不在同一 post/纯文本中混排。
+
+`awaiting_user` 组合（S3 测试）：6.7 表中每行一例。
 
 ### 6.10 SDK 落点
 
@@ -214,10 +262,15 @@
 | 情形 | 做法 |
 | --- | --- |
 | 未绑定交付内容 | 按答案版本解析并投影，复核当前权限 |
-| 已绑定分项 | 复核当前权限后保留原字节、分项身份、UUID 与回执；已发送分项不重发；`unknown` 不当作普通失败自动重试 |
+| v1 已绑定分项 | 复核当前权限后用 `xiaowei_delivery_part` 原字节、分项身份、UUID 与回执；已确认 `sent` 的分项不重发 |
+| v0 已绑定报告 | 经 `get_bound_report`（`channel_store.py:1219`）读取 `xiaowei_report` 原字节；没有 v1 分项不等于没绑定过旧报告 |
+| 上传 `unknown` | 禁止重新上传（`feishu_delivery.py:356`） |
+| 消息发送 `unknown` | 不自动重试；用户明确手动补发时沿用原 UUID 补发路径并保留可能重复的说明 |
+| 后续明确失败 | 不能把此前的 `unknown` 覆盖为确定未送达（`channel_store.py:955-980`） |
 | v0 `sent` | 不追认为“完整结果已交付”；现有审批前提中 v0 `sent` 视为材料已送达（`channel_store.py:1916`）的规则不变 |
 | 最早期只存 `AgentAnswer`、无 `context_evidence` | 继续拒绝交付（`channel.py:454`） |
-| 未知或损坏的答案版本 | 按不可用处理，不回退旧版本 |
+| 缺版本字段 | 只进入严格旧格式解析，不接受任意缺版本数据 |
+| 未知版本、损坏 JSON、已知新版本缺必需字段 | 拒绝；新版本解析失败不回退旧版本 |
 
 需要兼容的读取路径（“不迁移历史数据”不等于不需要兼容解析）：
 - `channel_store._saved_answer`（`:2151`）与 `channel_store._record`（`:2001`，另行解析 `TurnAnswer.run_turn_id`）；
@@ -230,17 +283,19 @@
 
 策略（S2 验证后二选一）：
 1. **兼容**：SDK 恢复时由新代码重建 Agent，最终输出按新 schema 生成；若实验证明旧暂停 RunState（历史项为旧格式）能用新 Agent 恢复并产出合法新回答，则不改绑定，直接恢复。
-2. **不兼容**：在 `_native_binding` 加入答案契约版本（只影响待审批候选，不动 Session 绑定 `self._binding`，不废弃旧会话）；不一致时在任何写 I/O 之前调用 `reject_native(action, "action_upgrade_invalidated")`（放宽其原因白名单，无需迁移），用户收到“已因升级作废、未执行，请重新提出”。
+2. **不兼容**：在 `_native_binding` 加入答案契约版本（只影响待审批候选，不动 Session 绑定 `self._binding`，不废弃旧会话）；不一致时在业务写 I/O 之前调用 `reject_native(action, "action_upgrade_invalidated")`（作废本身要写数据库；放宽其原因白名单，无需迁移），用户收到“已因升级作废、未执行，请重新提出”。[事实] `_reject_native`（`channel_store.py:1832-1860`）作废同一原轮内全部 `pending` 候选并消费该恢复记录，SQL 不覆盖 executing/succeeded/unknown，不修改 Session。
 
-两种做法下，已执行、执行中或结果未知的动作都在绑定检查之前被 `state != "pending"` 拦下（`app.py:1080`），保留原状态，不重放。[待验证] 真实兼容性在 S2 实验前不当作已有能力。
+两种做法下，已执行、执行中或结果未知的动作都在绑定检查之前被 `state != "pending"` 拦下（`app.py:1080`），保留原状态，不重放。
+
+已有证据与缺口：独立复审中的本地 SDK/脚本模型实验显示，SDK 0.22.3 下旧格式助手历史与旧暂停 RunState 用同名新 Agent 恢复后可按新 schema 输出，工具替身只执行一次。这不是本次执行的实验，也不代表完整小维恢复链通过；Action、Evidence、Session、PostgreSQL 与真实 provider 的兼容仍在 S2 验证 **[待验证]**。
 
 ## 7. 影响面
 
-- 源码：`models.py`、`evidence.py`（校验、归一化、`Delivery` 块与其余结果）、`app.py`（schema、提示词、`_paused`、finish-on-limit、repair、监控提示、`_queries` 拆分、unfinished、`_native_binding`）、`runtime.py`（模型检查提示词、`output_type`、`_check_result`）、`session.py`、`channel.py`（`_validated`、动作刷新）、`channel_store.py`（`_saved_answer`、`_record`、`reject_native`）、`feishu_render.py`、`feishu_markdown.py`、`feishu_delivery.py`（`analysis` 与 `needs_data` 分支，`:208-220`、`:319`）、`feishu_report.py`、`static/app.js`。
+- 源码：`models.py`、`evidence.py`（校验、归一化、`Delivery` 块与其余结果）、`app.py`（schema、提示词、`_paused`、finish-on-limit、repair、监控提示、`_queries` 拆分与动作状态路由、unfinished、`_native_binding`）、`runtime.py`（模型检查提示词、`output_type`、`_check_result`）、`session.py`、`channel.py`（`_validated`、动作刷新）、`channel_store.py`（`_saved_answer`、`_record`、`reject_native`）、`feishu_render.py`、`feishu_markdown.py`、`feishu_delivery.py`（`analysis` 与 `needs_data` 分支，`:208-220`、`:319`）、`feishu_report.py`、`static/app.js`。
 - 评测与脚本：`tests/sdk_core/gate0.py`（以 `delivery.evidence_ids` 是否为空区分“交付/澄清”、统计 `inferences`，补全后语义失效）；`tests/sdk_core/dialogue_gate.py` 的评审指标与 `scripts/dialogue_real_model.py`（不直接读 `Delivery.analysis`；问题是补全后“有事实”不再证明模型引用完整或结论正确，指标需改为评审结论与全部结果一致）。
 - Skill：`skills/database_diagnosis.md:21`“每条分析写明依据的证据”等写法随新结构改写。
 - 文档：ARCHITECTURE 交付与 Evidence 章节、README 用户可见行为、必要的运维说明、AGENT_HANDOFF。
-- 存储表结构不变；`TurnAnswer` JSON 增加可信外层字段（答案版本、其余结果清单），旧行按缺省解析。
+- 存储表结构不变；`TurnAnswer` JSON 只增加可信外层的答案版本字段，缺失时走严格旧格式解析。“其余结果”交付时计算，不持久化清单（6.4）。
 
 ## 8. 实施切片
 
@@ -255,8 +310,8 @@
 
 **S2 退出条件（预先确定）：**
 - 固定端点、协议、模型与 SDK 版本（openai-agents 0.22.3，现有 Vertex Profile）。
-- 离线用例：非法字段组合、未知引用、超长、Unicode 多字节、旧历史回放、旧 RunState 暂停恢复、预算结束收尾、改写失败；任一非法输入不得静默通过，改写不得重跑业务工具。
-- 真实样例（需批准凭据，本次不执行）判据：格式成功率、改写率、任务正确率、完整交付率、耗时与用量，与 `c00ede6` 同批对比。阈值现在不定 **[已确认]**：S2 开始前先跑线上版本取基准，再与用户确定，原则是新版不低于旧版。
+- 离线用例与预期：非法字段组合拒绝；重复引用、空白块被归一化；未知引用最多改写一次；系统权限失败不改写；改写不增加业务工具调用；超长、Unicode 多字节按字节预算判定；旧历史回放、旧 RunState 暂停恢复、预算结束收尾、改写失败各一例。任一非法输入不得静默通过。
+- 真实样例（需批准凭据，本次不执行）判据：格式成功率、改写率、任务正确率、完整交付率、耗时与用量，与 `c00ede6` 同批对比。阈值现在不定 **[已确认]**：S2 开始前先跑线上版本取基准，再与用户确定，原则是新版不低于旧版，按指标方向理解：成功率、正确率、交付率越高越好；耗时、用量、改写率越低越好。
 - 结论：选定 schema 形式与资源上限，RunState 选 6.11 的方案 1 或 2。
 
 ## 9. 测试与评测
@@ -272,10 +327,11 @@
 | 项 | 类别 | 说明 |
 | --- | --- | --- |
 | 结论只挑有利结果 | 待验证 | 数据完整交付，结论仍可能偏；只能评测 |
-| 纯说明的纯文本降级中模型仿写系统标识 | 边界 | 不含系统事实，无事实可冒充；评测抽查 |
+| 纯模型文字中自称“系统已核实” | 边界 | 拿不到代码区域身份，但措辞仍可能误导；提示词与评测衡量 |
+| 工具类别按交付时配置判断 | 边界 | 不冻结提交时范围（6.4） |
 | 其余结果过长 | 待验证 | 先完整交付并依赖附件规划；看生产数据再定折叠 |
 | 历史中的旧格式输出影响模型 | 待验证 | 严格 schema + S2 回放测试 |
-| 旧审批 RunState 恢复 | 待验证 | S2 决定 6.11 方案 |
+| 旧审批 RunState 恢复 | 待验证 | 已有独立复审的本地 SDK 实验；完整恢复链在 S2 验证后决定 6.11 方案 |
 
 **已确认的产品取舍（2026-10-17）：**
 - 6.7 增加 `awaiting_user` 字段：为真时只发普通消息、不生成文件。
