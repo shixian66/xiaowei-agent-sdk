@@ -54,7 +54,20 @@
 | 已知小缺口 | SDK 在“不记模型数据”下把错误处理器内部异常（如改写调用本身 HTTP 失败）换成 UserError，日志 `error_kind=sdk_configuration`，用户仍见 `model_failed`；`4e0ab86` 已如此，未改 |
 | 未验证 | 真实模型：本机无 Vertex 凭据；现有 `scripts/dialogue_real_model.py` 只有 StarRocks 场景且需人工判定，不含 Alertmanager。需用户提供 Profile/密钥或在服务器运行；部署后看 `stage=answer_repair` 与 `answer_reject` 分布 |
 
-**下一项：** 独立审查本分支；真实模型评测待凭据；推送/PR/部署由用户决定。
+**状态更新：** 已经独立审查并合入（PR #111，`c00ede6`），尚未构建镜像/部署；真实模型评测待凭据。
+
+**下一阶段：** [自由表达的回答结构](docs/superpowers/plans/2026-10-17-free-answer-structure.md)（设计已复审通过）。切片 S1 小行为修正，S2 协议与审批恢复验证，S3 契约与最低限度提示词，S4 真实模型评测；自由 HTML/MD 报告为后续方向。
+
+**S1 小行为修正（分支 `claude/answer-s1`，本地，待独立审查）：**
+
+| 项 | 状态 |
+| --- | --- |
+| 改动 | `evidence.normalize_answer`：重复引用去重、同一引用显示方式冲突取完整，输出 schema 预检、提交与交付共用；本轮新事实设为简要时按完整展示（不拒绝、不改写）；非飞书要文件记 `report_unsupported`（原误记 `mixed_kinds`）；已开始查询去向不明记 `query_unfinished`（应用原因与日志独立，渠道仍映射 `evidence_failed`，无 DB 变更）；Web、飞书卡片、审批材料、MD/HTML 报告的用户可见编号统一为按引用顺序的“结果 N”（`Delivery.result_label`），不再展示 `ev_…` |
+| 用例 | 新增去重、冲突显示方式、本轮 brief 完整展示（含正式入口）、`query_unfinished`、`report_unsupported`；原“拒绝重复/拒绝本轮 brief/展示 ev_”的断言按批准的行为变化改写，安全断言（不可见证据、未引用显示方式仍拒绝）保留 |
+| 全量 | 隔离 PostgreSQL 55432 下 `tests/sdk_core tests/p1b`：3611 passed、3 failed（均为上述预期行为变化，改写后对应文件 28 passed）、235 skipped、72 deselected；其余目录 2099 passed、152 skipped；`ruff check`、`mypy`（135 文件）通过 |
+| 浏览器 | 真 Chrome：10 passed，含改写的 Web 编号用例；2 项因本机 8501 端口被已有本地容器占用无法启动，基线同样失败 |
+| 审查修正 | 独立审查（`87556b5`）发现 P2：审批材料拆出后，查询卡折叠标题仍按拆分后位置编号（正文“结果 2”、折叠“结果 1”）。折叠标题改用 `result_label`；新增拆分发送回归（正文、分析引用、折叠标题、报告编号一致），修复前失败、修复后通过；渲染/报告/交付相关 234 passed，ruff、mypy 通过 |
+| 未验证 | 真实模型、真实飞书客户端排版；S2 起的工作未开始 |
 
 **生产轮次失败修复（turn-resilience）：已随 PR #110 合并为 `4e0ab86` 并部署；以下为当时记录。**
 

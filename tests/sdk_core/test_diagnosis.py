@@ -590,7 +590,8 @@ async def test_feishu_preview_answers_first_then_whole_fact_rows_at_real_caps(di
     assert "本次完整结果见附件" in visible
     assert "多次 Shuffle；建议按 region 分桶并 Colocate" in visible
     # 完整文件保留分析及其引用的每条证据。
-    assert all(eid in reply.content for eid in cited.split(", "))
+    labels = [f"结果 {n}" for n in range(1, len(cited.split(", ")) + 1)]
+    assert all(label in reply.content for label in labels) and "ev_" not in reply.content
     # 两条事实的来源行与说明行都保留，计划行从前往后保留、末尾的被截掉。
     assert reply.content.count("来源 ") == 2
     assert f"说明：{AUDIT_NOTE}" in content and f"说明：{PLAN_NOTE}" in content

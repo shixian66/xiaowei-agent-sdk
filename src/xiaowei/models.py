@@ -430,3 +430,9 @@ class Delivery(_Trusted):
     """未引用的本轮成功调查：仅工具/对象，不附原值。"""
     content_expires_at: datetime | None = Field(default=None, exclude=True)
     """本次已复核内容的最早保留期限，供投递途中廉价检查。"""
+
+    def result_label(self, evidence_id: str) -> str:
+        """用户可见的结果编号：按本次引用顺序，拆分审批材料后仍不变；不展示内部证据编号。"""
+        if evidence_id in self.evidence_ids:
+            return f"结果 {self.evidence_ids.index(evidence_id) + 1}"
+        return "历史结果"

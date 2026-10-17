@@ -75,6 +75,7 @@ from xiaowei.evidence import (
     ScopeChecks,
     arguments_digest,
     citation_error,
+    normalize_answer,
     scope_checks,
 )
 from xiaowei.governance import Execute, GovernedTools, ToolExecutionError, TurnLedger, TurnRuns
@@ -213,6 +214,7 @@ TurnReason = Literal[
     "content_rejected",
     "storage_failed",
     "answer_rejected",
+    "query_unfinished",
     "turn_limit",
     "tool_failed",
     "timeout",
@@ -226,6 +228,7 @@ _MESSAGES: Mapping[TurnReason, str] = {
     "scope_rejected": "本轮工具范围超出模型数据策略，未执行",
     "storage_unavailable": "存储未就绪，本轮未执行",
     "answer_rejected": "回答未通过证据校验，本轮未保存也未发送",
+    "query_unfinished": "本轮有已开始的查询没有结果也没有失败记录，未保存也未发送；不会自动重试",
     "scope_unverifiable": "暂时无法确认数据当前权限，本轮未交付；会话保留，请稍后重试",
     "turn_limit": "本轮模型调用次数达到上限，未完成；已执行的工具不会自动重试",
     "tool_failed": (
@@ -748,19 +751,22 @@ class Application:
             ]
             await session.add_items(cast(list[TResponseInputItem], items))
         _stage(turn, "answered", started)
-        answer = result.final_output_as(AgentAnswer, raise_if_incorrect_type=True)
+        answer = normalize_answer(
+            result.final_output_as(AgentAnswer, raise_if_incorrect_type=True)
+        )
         runs = self._governance.turn_runs(ctx.identity)
-        # 本轮成功的业务查询（可信记录）都必须被引用；明确分类的监控读取失败单独计数，
-        # 不能伪装成成功证据。明确未形成 Action 的准备拒绝单独计数，不丢弃已有证据。
-        # I/O 前被拒绝的调用不算执行。
+        # 已开始的查询（可信记录）都须有去向：成功证据、明确分类的监控读取失败，或明确未形成
+        # Action 的准备拒绝。I/O 前被拒绝的调用不算开始。去向不明是系统失败，与引用无关，
+        # 不交模型改写。
         queried = self._query_evidence(runs)
         failed_queries = sum(f.tool_id in self._queries for f in runs.monitoring_failures)
         rejected_proposals = sum(t in self._queries for t in runs.proposal_rejections)
-        unfinished = len(queried) + failed_queries + rejected_proposals != sum(
+        if len(queried) + failed_queries + rejected_proposals != sum(
             t in self._queries for t in runs.started
-        )
-        uncited = set(queried) - set(answer.evidence_ids)
-        if unfinished or uncited:
+        ):
+            raise TurnError("query_unfinished")
+        # 本轮成功的业务查询都必须被引用（输出 schema 已让模型改写一次）。
+        if set(queried) - set(answer.evidence_ids):
             raise TurnError("answer_rejected", answer_reject=AnswerRejectCode.UNCITED_QUERY)
         # 模型可见的证据：回放的历史与本轮工具结果，随回答保存，每次交付都复核。
         context = (
@@ -800,21 +806,17 @@ class Application:
         检查模型自己能改正的规则；证据可读性与当前权限仍只在交付时复核，不能改写修正。
 
         ``replayed`` 为 None 表示审批恢复：可见历史即 ``ctx.evidence_ids``，账本含暂停前的
-        证据，“本轮新事实”只能按证据记录判断，留给交付校验。
+        证据。重复引用、本轮新事实选 brief 等由代码归一化，不在这里拒绝。
         """
 
         def check(answer: AgentAnswer) -> AnswerRejectedError | None:
+            answer = normalize_answer(answer)
             runs = self._governance.turn_runs(ctx.identity)
             current = [e for t, e in runs.produced if t in ctx.tool_scope]
             history = ctx.evidence_ids if replayed is None else replayed()
             rejected = citation_error(answer, (*history, *current), ctx.identity.channel)
             if rejected is not None:
                 return rejected
-            fresh = current if replayed is not None else ()
-            if any(v.view == "brief" and v.evidence_id in fresh for v in answer.fact_views):
-                return AnswerRejectedError(
-                    AnswerRejectCode.INVALID_FACT_VIEW, "本轮新事实必须完整展示"
-                )
             missing = [e for e in self._query_evidence(runs) if e not in answer.evidence_ids]
             if missing:
                 return AnswerRejectedError(
@@ -1526,7 +1528,7 @@ def _stage(
         fields += (answer_code.value if isinstance(answer_code, AnswerRejectCode) else "other",)
     recorded = runs or TurnRuns()
     # 回答被拒时也记工具计数，定位时按 turn 查证据表；不记回答正文与证据编号。
-    if reason in {"turn_limit", "answer_rejected"} or (
+    if reason in {"turn_limit", "answer_rejected", "query_unfinished"} or (
         stage == "failed" and recorded.limit_rescue_started
     ):
         message += " tool_calls=%d executed=%d truncated=%d rejected=%d"

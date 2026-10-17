@@ -49,18 +49,16 @@ async def test_formal_current_result_cannot_be_hidden_by_brief(
         tool_call(
             "run_readonly_query", cluster=SR.target_id, sql="SELECT region FROM shop.sales LIMIT 5"
         ),
-        brief,
-        brief,  # 改写一次仍把本轮新事实设为简要
+        brief,  # 本轮新事实设为简要：代码按完整展示，不拒绝、不改写
     )
     async with env.running(env.config()) as served:
         await served.page()
-        body = (await served.turn(message, "query", "r3-reject")).json()
-        assert body["state"] == "failed", body
-        assert "answer_reject=invalid_fact_view" in caplog.text
+        body = (await served.turn(message, "query", "r3-full")).json()
+        assert body["state"] == "completed", body
+        assert [f["view"] for f in body["delivery"]["facts"]] == ["full"]
+        assert body["delivery"]["facts"][0]["summary"] is None
+        assert "stage=answer_repair" not in caplog.text
         assert len(statements(env.drv)) == 1
-        assert (
-            await env.scalar("SELECT count(*) FROM xiaowei_request WHERE state = 'completed'") == 0
-        )
 
 
 async def test_formal_feishu_short_answer_uses_card_without_repeating_query(env: Env) -> None:

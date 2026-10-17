@@ -50,7 +50,7 @@ from xiaowei import app as app_module
 from xiaowei.app import AppConfig, Application, DataPolicy, TurnError, safe_run_config
 from xiaowei.config import configure_runtime
 from xiaowei.evidence import AnswerRejectedError, EvidenceError
-from xiaowei.governance import GovernedTools
+from xiaowei.governance import GovernedTools, TurnRuns
 from xiaowei.mcp import MCPIntegration
 from xiaowei.model_api import ModelBinding, open_model
 from xiaowei.models import AgentAnswer, Budget, Channel, Delivery, Identity, RunContext
@@ -1354,7 +1354,6 @@ async def test_mcp_failure_logs_fixed_category_without_remote_text(
     [
         # 混用在 SDK 结构校验阶段即被拦截并改写一次，见 test_mixed_answer_*。
         ("missing", "missing_evidence"),
-        ("duplicate", "duplicate_evidence"),
         ("unknown", "unknown_evidence"),
         ("inference", "inference_unlinked"),
         ("unavailable", "evidence_unavailable"),
@@ -1369,8 +1368,6 @@ async def test_answer_rejection_logs_exact_fixed_code(env: Env, case: str, code:
             env.grants.revoke_all()
         if case == "missing":
             return answer([], "")
-        if case == "duplicate":
-            return answer([evidence_id, evidence_id], "")
         if case == "unknown":
             return answer(["ev_" + "0" * 32], "")
         if case == "inference":
@@ -1562,19 +1559,72 @@ async def test_partially_cited_repeat_query_is_repaired_with_missing_ids(env: En
     assert len(env.scripts.calls[message]) == 4
 
 
-async def test_brief_view_of_new_fact_is_repaired(env: Env) -> None:
+async def test_brief_view_of_new_fact_is_shown_in_full_without_repair(env: Env) -> None:
     def brief(call: ModelCall) -> list[Any]:
         ids = evidence_in(call)
         return answer(ids, "简要", fact_views=[{"evidence_id": ids[0], "view": "brief"}])
 
+    message = env.scripts.add("简要展示", tool_call("order_total", region="east"), brief)
+    with all_logs() as records:
+        delivery = await env.deliver(env.ctx(turn="brief"), message)
+    assert "stage=answer_repair" not in "\n".join(r.getMessage() for r in records)
+    assert len(env.scripts.calls[message]) == 2
+    assert [f.view for f in delivery.facts] == ["full"]
+
+
+async def test_duplicate_citations_are_normalized_without_repair(env: Env) -> None:
+    seed = env.scripts.add("取得依据", tool_call("order_total", region="east"), cite())
+    evidence_id = (await env.app.run_turn(env.ctx(turn="seed"), seed)).answer.evidence_ids[0]
+    views = [{"evidence_id": evidence_id, "view": v} for v in ("brief", "full", "brief")]
     message = env.scripts.add(
-        "简要展示", tool_call("order_total", region="east"), brief, cite("完整展示")
+        "重复引用",
+        lambda call: answer([evidence_id, evidence_id], "沿用", fact_views=views),
     )
     with all_logs() as records:
-        await env.deliver(env.ctx(turn="brief"), message)
+        result = await env.app.run_turn(env.ctx(turn="dup"), message)
+    assert "stage=answer_repair" not in "\n".join(r.getMessage() for r in records)
+    assert len(env.scripts.calls[message]) == 1
+    # 保存的是归一化后的回答；冲突的显示方式取完整展示。
+    assert result.answer.evidence_ids == (evidence_id,)
+    assert [(v.evidence_id, v.view) for v in result.answer.fact_views] == [(evidence_id, "full")]
+    delivery = await env.governed.evidence.validate_answer(result, env.ctx(turn="dup"))
+    assert [f.view for f in delivery.facts] == ["full"]
+    assert await env.state() == ("active", 2)
+
+
+async def test_unfinished_query_is_its_own_system_failure(
+    env: Env, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    turn_runs = env.app._governance.turn_runs
+
+    def with_lost_call(identity: Any) -> TurnRuns:
+        runs = turn_runs(identity)
+        # 模拟已开始却既无证据也无分类失败的查询（例如结果去向不明）。
+        return replace(runs, started=(*runs.started, QUERY_TOOL))
+
+    monkeypatch.setattr(env.app._governance, "turn_runs", with_lost_call)
+    message = env.scripts.add("去向不明", tool_call("run_query", region="east"), cite())
+    with all_logs() as records, pytest.raises(TurnError) as failed:
+        await env.app.run_turn(env.ctx(turn="unfinished"), message)
     output = "\n".join(r.getMessage() for r in records)
-    assert "stage=answer_repair reason=invalid_fact_view" in output
-    assert len(env.scripts.calls[message]) == 3
+    assert failed.value.reason == "query_unfinished"
+    assert "reason=query_unfinished" in output and "answer_reject" not in output
+    assert "stage=answer_repair" not in output  # 系统失败不交模型改写
+    assert len(env.scripts.calls[message]) == 2
+    assert await env.stored() == []
+
+
+async def test_report_on_web_logs_its_own_code(env: Env) -> None:
+    message = env.scripts.add(
+        "要文件",
+        *[lambda call: answer([], "", advice="建议先确认地区", report_format="md")] * 2,
+    )
+    with all_logs() as records, pytest.raises(TurnError) as failed:
+        await env.app.run_turn(env.ctx(turn="report"), message)
+    output = "\n".join(r.getMessage() for r in records)
+    assert failed.value.reason == "answer_rejected"
+    assert "stage=answer_repair reason=report_unsupported" in output
+    assert "answer_reject=report_unsupported" in output
 
 
 async def test_valid_answer_costs_no_extra_model_call(env: Env) -> None:

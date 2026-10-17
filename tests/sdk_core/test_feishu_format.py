@@ -57,7 +57,8 @@ def test_approved_headings_bold_and_lists_are_generated_not_copied() -> None:
     assert "- 第一点" in contents and "1. 检查列" in contents
     shown = "\n".join(text_parts(message, folded=False))
     assert "ev_original" not in shown and fact().note in shown
-    assert "依据：ev_original" in "\n".join(text_parts(message))
+    assert "依据：结果 1 · 来源" in "\n".join(text_parts(message))
+    assert "ev_original" not in "\n".join(text_parts(message))
     assert AT.isoformat() not in shown and AT.isoformat() in "\n".join(text_parts(message))
     assert len(tables(message)) == 1
 

@@ -267,7 +267,6 @@ async def test_query_claim_without_evidence_is_denied(postgres_url: URL) -> None
             _answer((real,), (("东区订单总数是 200", ()),)),
             _answer((real,), (("东区订单总数是 200", (forged,)),)),
             _answer((forged,), (("东区订单总数是 200", (forged,)),)),
-            _answer((real, real)),
             _answer(),
             _answer((real,), clarification="请说明地区"),
             _answer(inferences=(("可能是重复计数", ()),), clarification="请说明地区"),
@@ -275,6 +274,10 @@ async def test_query_claim_without_evidence_is_denied(postgres_url: URL) -> None
         for answer in rejected:
             with pytest.raises(AnswerRejectedError):
                 await evidence.validate_answer(cited(answer), context())
+
+        # 重复引用由代码去重后交付，不拒绝。
+        deduped = await evidence.validate_answer(cited(_answer((real, real))), context())
+        assert deduped.evidence_ids == (real,) and len(deduped.facts) == 1
 
         # 澄清：没有实际查询，也不展示任何结果。
         delivery = await evidence.validate_answer(

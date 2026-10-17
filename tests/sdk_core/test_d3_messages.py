@@ -40,7 +40,7 @@ def test_answer_precedes_results_and_sources_are_folded() -> None:
     assert source.evidence_id not in visible and source.captured_at.isoformat() not in visible
     assert "查看依据" in visible and "模型推断" in visible
     full = "\n".join(text_parts(message))
-    assert source.tool_id in full and source.evidence_id in full
+    assert source.tool_id in full and source.evidence_id not in full and "依据：结果 1" in full
     assert source.captured_at.isoformat() in full and source.metadata["sql"] in full
 
 
@@ -77,7 +77,8 @@ def test_inference_cannot_impersonate_numbered_results_or_hide_its_references(
     assert len(panels) == 2
     for number, (panel, source) in enumerate(zip(panels, sources, strict=True), 1):
         assert f"结果 {number}" in panel["header"]["title"]["content"]
-        assert source.evidence_id in "\n".join(text_parts(panel))
+        assert f"依据：结果 {number} · 来源 {source.tool_id}" in "\n".join(text_parts(panel))
+        assert source.evidence_id not in "\n".join(text_parts(panel))
 
 
 async def test_gateway_inference_stays_before_a_structural_results_boundary(env: Env) -> None:
@@ -280,7 +281,7 @@ def test_independent_approval_card_keeps_existing_material_and_labels() -> None:
     assert card["card"]["header"]["title"]["content"] == "小维 · 工具结果"
     visible = text_parts(card, folded=False)
     assert (
-        f"[{material.evidence_id}] 来源 {material.tool_id} · 目标 {material.target_id}\n"
+        f"结果 1 · 来源 {material.tool_id} · 目标 {material.target_id}\n"
         f"采集于 {material.captured_at.isoformat()}" in visible
     )
     assert "说明：" + material.note in visible
@@ -376,3 +377,38 @@ async def test_post_conversion_preserves_scope_and_never_activates_fallback_ment
     assert raw in decoded
     assert env.adapter.calls == [] and env.model_calls(message) == 1
     assert await request_row(env) == ("completed", "sent")
+
+
+def test_split_approval_material_keeps_result_numbers_in_every_view() -> None:
+    from xiaowei.feishu_report import build_reports
+
+    material = fact(
+        evidence_id="ev_material",
+        requires_complete=True,
+        metadata={"action_id": "ac_1", "approval_command": "/批准 ac_1"},
+    )
+    data = fact(evidence_id="ev_data")
+    whole = delivery(material, data, analysis="先看数据，再批准动作。")
+    # 与 send_complete_delivery 相同的拆分：审批材料独立成卡，其余结果另发。
+    material_card = build_feishu_message(
+        whole.model_copy(update={"facts": (material,), "analysis": ()}),
+        3500,
+        "oc_test",
+        allow_preview=False,
+    )
+    data_delivery = whole.model_copy(update={"facts": (data,), "requires_complete": False})
+    data_card = build_feishu_message(data_delivery, 3500, "oc_test")
+
+    assert any(p.startswith("结果 1 · 来源") for p in text_parts(material_card))
+    elements = data_card["card"]["body"]["elements"]
+    shown = "\n".join(text_parts(elements, folded=False))
+    assert "（依据：结果 1、结果 2）" in shown and "结果 2 · pre" in shown
+    (panel,) = [e for e in elements if e["tag"] == "collapsible_panel"]
+    assert panel["header"]["title"]["content"] == "查看依据 · 结果 2"
+    assert "依据：结果 2 · 来源" in "\n".join(text_parts(panel))
+    assert "结果 1 · " not in "\n".join(text_parts(data_card))
+
+    (report,) = build_reports(data_delivery.model_copy(update={"report_format": "md"}))
+    body = report.content.decode()
+    assert "结果 2" in body and "依据：结果 1、结果 2" in body and "结果 1 ·" not in body
+    assert "ev_" not in body + "\n".join(text_parts(data_card) + text_parts(material_card))

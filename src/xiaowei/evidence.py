@@ -58,6 +58,7 @@ from xiaowei.governance import (
 from xiaowei.models import (
     MONITORING_READ_POLICIES,
     AgentAnswer,
+    AnswerFactView,
     Audience,
     Channel,
     Delivery,
@@ -210,7 +211,7 @@ class EvidenceUnverifiableError(EvidenceError):
 class AnswerRejectCode(enum.StrEnum):
     MIXED_KINDS = "mixed_kinds"
     MISSING_EVIDENCE = "missing_evidence"
-    DUPLICATE_EVIDENCE = "duplicate_evidence"
+    REPORT_UNSUPPORTED = "report_unsupported"
     UNKNOWN_EVIDENCE = "unknown_evidence"
     INFERENCE_UNLINKED = "inference_unlinked"
     EVIDENCE_UNAVAILABLE = "evidence_unavailable"
@@ -226,12 +227,29 @@ class AnswerRejectedError(EvidenceError):
         self.code = code
 
 
+def normalize_answer(answer: AgentAnswer) -> AgentAnswer:
+    """代码可无歧义纠正的形式问题直接归一化，不交模型改写：重复引用按首次出现去重；同一引用
+    的显示方式只保留一项，冲突时取完整展示（不少展示事实）。输出 schema 预检、提交与交付都先经
+    这一步，看到同一份回答。"""
+    cited = tuple(dict.fromkeys(answer.evidence_ids))
+    views: dict[str, AnswerFactView] = {}
+    for item in answer.fact_views:
+        kept = views.get(item.evidence_id)
+        if kept is None or (kept.view == "brief" and item.view == "full"):
+            views[item.evidence_id] = item
+    fact_views = tuple(views.values())
+    if cited == answer.evidence_ids and fact_views == answer.fact_views:
+        return answer
+    return answer.model_copy(update={"evidence_ids": cited, "fact_views": fact_views})
+
+
 def citation_error(
     answer: AgentAnswer, context: Sequence[str], channel: Channel
 ) -> AnswerRejectedError | None:
     """只看回答本身与模型可见证据编号的结构和引用规则，不读存储、不复核权限。
 
     交付校验与本轮输出 schema 共用这一份规则：后者让模型在 Runner 内改正，前者仍是权威。
+    调用方先经 ``normalize_answer``。
     """
     unverified = answer.clarification is not None or answer.advice is not None
     if unverified and answer_kinds_mixed(answer):
@@ -240,22 +258,19 @@ def citation_error(
         )
     report_format = None if answer.clarification is not None else answer.report_format
     if report_format is not None and channel != "feishu":
-        return AnswerRejectedError(AnswerRejectCode.MIXED_KINDS, "当前渠道不能交付报告文件")
+        return AnswerRejectedError(AnswerRejectCode.REPORT_UNSUPPORTED, "当前渠道不能交付报告文件")
     if unverified:
         return None
     cited = answer.evidence_ids
     if not cited:
         return AnswerRejectedError(AnswerRejectCode.MISSING_EVIDENCE, "回答缺少证据引用")
-    if len(set(cited)) != len(cited):
-        return AnswerRejectedError(AnswerRejectCode.DUPLICATE_EVIDENCE, "证据引用重复")
     if not set(cited) <= set(context):
         return AnswerRejectedError(
             AnswerRejectCode.UNKNOWN_EVIDENCE, "回答只能引用本轮模型可见的证据"
         )
-    views = {item.evidence_id for item in answer.fact_views}
-    if len(views) != len(answer.fact_views) or not views <= set(cited):
+    if not {item.evidence_id for item in answer.fact_views} <= set(cited):
         return AnswerRejectedError(
-            AnswerRejectCode.INVALID_FACT_VIEW, "显示方式只能指定一次且必须属于本回答引用"
+            AnswerRejectCode.INVALID_FACT_VIEW, "显示方式必须属于本回答引用"
         )
     for inference in answer.inferences:
         if not inference.evidence_ids or not set(inference.evidence_ids) <= set(cited):
@@ -409,7 +424,7 @@ class EvidenceStore:
         确定不可读抛出 ``AnswerRejectedError``；暂时无法复核时 ``EvidenceUnverifiableError`` 原样
         传播。
         """
-        answer = turn.answer
+        answer = normalize_answer(turn.answer)
         context = tuple(dict.fromkeys(turn.context_evidence))
         channel = ctx.identity.channel
         monitoring_notice = await self._monitoring_failure_notice(turn, ctx)
@@ -476,11 +491,11 @@ class EvidenceStore:
                     ),
                 }
             )
-            if views.get(fact.evidence_id) == "brief":
-                if item.record.identity.turn_id == ctx.identity.turn_id:
-                    raise AnswerRejectedError(
-                        AnswerRejectCode.INVALID_FACT_VIEW, "本轮新事实必须完整展示"
-                    )
+            # 本轮新事实总是完整展示：brief 只对可见历史事实生效，不拒绝也不交模型改写。
+            if (
+                views.get(fact.evidence_id) == "brief"
+                and item.record.identity.turn_id != ctx.identity.turn_id
+            ):
                 # 行数只来自接收渠道的获准结果；不是模型所报数值或全表总数。
                 count = (item.data or {}).get("row_count")
                 if (

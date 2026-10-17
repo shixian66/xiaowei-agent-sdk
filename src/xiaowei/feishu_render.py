@@ -211,17 +211,12 @@ def _card(
         elements.append(_div(delivery.monitoring_notice))
     if delivery.session_notice:
         elements.append(_div(delivery.session_notice))
-    result_labels = {
-        fact.evidence_id: f"结果 {index + 1}"
-        for index, fact in enumerate(delivery.facts)
-        if not fact.requires_complete
-    }
     if analysis:
         elements.append(_div("分析与建议（模型推断）"))
         for item in analysis:
             prose = format_prose(display_text(item.text)) if formatted else [_div(item.text)]
             elements.extend(prose)
-            references = "、".join(result_labels.get(eid, eid) for eid in item.evidence_ids)
+            references = "、".join(delivery.result_label(eid) for eid in item.evidence_ids)
             elements.append(_div(f"（依据：{references}）"))
     if omissions and tuple(analysis) != delivery.analysis:
         elements.append(_div(ANALYSIS_CLIPPED))
@@ -235,12 +230,13 @@ def _card(
             # 独立审批材料保留原来的完整来源、说明和正文。
             elements.append(
                 _div(
-                    f"[{fact.evidence_id}] 来源 {fact.tool_id} · 目标 {fact.target_id}\n"
+                    f"{delivery.result_label(fact.evidence_id)} · 来源 {fact.tool_id}"
+                    f" · 目标 {fact.target_id}\n"
                     f"采集于 {fact.captured_at.isoformat()}"
                 )
             )
         else:
-            elements.append(_div(f"结果 {index + 1} · {fact.target_id}"))
+            elements.append(_div(f"{delivery.result_label(fact.evidence_id)} · {fact.target_id}"))
         if fact.note is not None:
             elements.append(
                 _div(
@@ -336,7 +332,8 @@ def _card(
             continue
         details: list[Message] = [
             _div(
-                f"依据：{fact.evidence_id} · 来源 {fact.tool_id} · 目标 {fact.target_id}\n"
+                f"依据：{delivery.result_label(fact.evidence_id)} · 来源 {fact.tool_id}"
+                f" · 目标 {fact.target_id}\n"
                 f"采集于 {fact.captured_at.isoformat()}"
             )
         ]
@@ -369,7 +366,7 @@ def _card(
                     "expanded": False,
                     "header": {
                         "title": _plain(
-                            f"查看依据 · 结果 {index + 1}"
+                            f"查看依据 · {delivery.result_label(fact.evidence_id)}"
                             + (" · 获准原文与查询信息" if fact.view == "brief" else "")
                         )
                     },
