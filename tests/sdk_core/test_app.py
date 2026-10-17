@@ -20,7 +20,7 @@ from typing import Any
 
 import httpx2
 import pytest
-from agents import RunConfig, Runner, set_tracing_disabled
+from agents import AgentOutputSchema, RunConfig, Runner, set_tracing_disabled
 from agents.testing import assistant_message, function_call
 from agents.tracing import flush_traces, set_trace_processors
 from pydantic import ValidationError
@@ -53,7 +53,7 @@ from xiaowei.evidence import AnswerRejectedError, EvidenceError
 from xiaowei.governance import GovernedTools
 from xiaowei.mcp import MCPIntegration
 from xiaowei.model_api import ModelBinding, open_model
-from xiaowei.models import Budget, Channel, Delivery, Identity, RunContext
+from xiaowei.models import AgentAnswer, Budget, Channel, Delivery, Identity, RunContext
 from xiaowei.session import SessionInputPolicy, SessionLimits
 from xiaowei.starrocks import StarRocksError, StarRocksErrorCode
 
@@ -440,7 +440,10 @@ async def test_concurrent_sessions_are_isolated(env: Env) -> None:
     assert not set(a.evidence_ids) & set(b.evidence_ids)
 
     # 证据不跨会话：B 引用 A 的证据被拒绝。
-    stolen = env.scripts.add("B：引用 A", lambda call: answer(a.evidence_ids))
+    # 引用不可见证据可改写一次；改写仍引用 A 的证据时整轮拒绝。
+    stolen = env.scripts.add(
+        "B：引用 A", lambda call: answer(a.evidence_ids), lambda call: answer(a.evidence_ids)
+    )
     with pytest.raises(TurnError) as refused:
         await env.app.run_turn(env.ctx("bob", "s-b", "t-b2", mode="diagnose"), stolen)
     assert refused.value.reason == "answer_rejected"
@@ -488,6 +491,7 @@ async def test_invalid_answer_is_never_delivered_or_committed(env: Env) -> None:
             [
                 tool_call("order_total", region="east"),
                 lambda c: answer(["ev_forged"], MODEL_SECRET),
+                lambda c: answer(["ev_forged"], MODEL_SECRET),  # 改写一次仍伪造
             ],
             "answer_rejected",
         ),
@@ -1106,6 +1110,7 @@ async def test_stage_logs_contain_only_safe_metadata(env: Env) -> None:
         f"再查，{SYNTHETIC_SQL}",
         tool_call("order_total", region="east"),
         lambda c: answer(["ev_forged"], MODEL_SECRET),
+        lambda c: answer(["ev_forged"], MODEL_SECRET),
     )
     upstream = env.scripts.add(f"第三次，{SYNTHETIC_SQL}", upstream_error)
     with all_logs() as records:
@@ -1133,7 +1138,7 @@ async def test_stage_logs_contain_only_safe_metadata(env: Env) -> None:
         "req-bad": [
             ("received", "-"),
             ("storage_ready", "-"),
-            ("answered", "-"),
+            ("answer_repair", "unknown_evidence"),
             ("failed", "answer_rejected"),
         ],
         "req-upstream": [("received", "-"), ("storage_ready", "-"), ("failed", "model_failed")],
@@ -1374,12 +1379,16 @@ async def test_answer_rejection_logs_exact_fixed_code(env: Env, case: str, code:
             )
         return answer([evidence_id], "")
 
-    message = env.scripts.add("追问 " + SYNTHETIC_SQL, invalid)
+    # 可修正的引用错误在 Runner 内改写一次（仍不合格才拒绝）；权限失效不能靠改写修正。
+    repairable = case != "unavailable"
+    message = env.scripts.add("追问 " + SYNTHETIC_SQL, *([invalid] * (1 + repairable)))
     with all_logs() as records, pytest.raises(TurnError) as failed:
         await env.app.run_turn(env.ctx(turn="rejected"), message)
     output = "\n".join(r.getMessage() for r in records)
     assert failed.value.reason == "answer_rejected"
     assert f"answer_reject={code}" in output
+    assert (f"stage=answer_repair reason={code}" in output) is repairable
+    assert len(env.scripts.calls[message]) == 1 + repairable
     assert MODEL_SECRET not in output and SYNTHETIC_SQL not in output
     assert await env.state() == ("active", 1)
 
@@ -1390,7 +1399,7 @@ async def test_mixed_answer_is_repaired_once_without_tools(env: Env) -> None:
 
     def repaired(call: ModelCall) -> list[Any]:
         assert call.tools == []  # 改写不能再调用工具
-        assert "上一条最终回答未通过结构校验" in call.instructions
+        assert "上一条最终回答未通过校验，未通过原因：澄清或建议不能" in call.instructions
         return answer([evidence_id], "沿用已核实结果")
 
     message = env.scripts.add(
@@ -1419,8 +1428,9 @@ async def test_mixed_answer_still_mixed_after_one_repair_fails(env: Env) -> None
     with all_logs() as records, pytest.raises(TurnError) as failed:
         await env.app.run_turn(env.ctx(turn="still-mixed"), message)
     output = "\n".join(r.getMessage() for r in records)
-    assert failed.value.reason == "model_failed"
-    assert "stage=answer_repair" in output and "error_kind=invalid_output" in output
+    assert failed.value.reason == "answer_rejected"
+    assert "stage=answer_repair reason=mixed_kinds" in output
+    assert "answer_reject=mixed_kinds" in output
     assert MODEL_SECRET not in output
     assert len(env.scripts.calls[message]) == 2  # 只改写一次
     assert await env.state() == ("active", 1)  # 失败轮不提交
@@ -1477,14 +1487,127 @@ async def test_uncited_query_logs_own_rejection_code(env: Env) -> None:
         "未引用查询 " + SYNTHETIC_SQL,
         tool_call("run_query", region="east"),
         clarify(MODEL_SECRET),
+        clarify(MODEL_SECRET),
     )
     with all_logs() as records, pytest.raises(TurnError) as failed:
         await env.app.run_turn(env.ctx(turn="uncited"), message)
     output = "\n".join(r.getMessage() for r in records)
     assert failed.value.reason == "answer_rejected"
+    assert "stage=answer_repair reason=uncited_query" in output
     assert "answer_reject=uncited_query" in output
+    assert len(env.scripts.calls[message]) == 3
     assert MODEL_SECRET not in output and SYNTHETIC_SQL not in output
     assert env.tool_ids() == [QUERY_TOOL] and await env.stored() == []
+
+
+async def test_unlinked_inference_is_repaired_once_like_production(env: Env) -> None:
+    """生产形态（列举三套集群）：三次读取都成功，说明配置事实的分析没有挂证据。"""
+    config_fact = "只配置了这三套（来自配置）"
+
+    def unlinked(call: ModelCall) -> list[Any]:
+        ids = evidence_in(call)
+        assert len(ids) == 3
+        return answer(ids, "", inferences=[{"text": config_fact, "evidence_ids": []}])
+
+    def repaired(call: ModelCall) -> list[Any]:
+        assert call.tools == []
+        assert "未通过原因：分析必须引用本回答选择的证据" in call.instructions
+        ids = evidence_in(call)
+        return answer(ids, "", inferences=[{"text": config_fact, "evidence_ids": ids}])
+
+    message = env.scripts.add(
+        "三套集群详情",
+        tool_call("order_total", region="east"),
+        tool_call("order_total", region="west"),
+        tool_call("order_total", region="north"),
+        unlinked,
+        repaired,
+    )
+    with all_logs() as records:
+        delivered = await env.deliver(env.ctx(turn="three"), message)
+    output = "\n".join(r.getMessage() for r in records)
+    assert len(delivered.evidence_ids) == 3 and config_fact in delivered.content
+    assert "stage=answer_repair reason=inference_unlinked" in output
+    assert env.tool_ids() == [TOTAL_TOOL] * 3  # 改写不重放工具
+    assert len(env.scripts.calls[message]) == 5
+    assert await env.state() == ("active", 1)
+
+
+async def test_partially_cited_repeat_query_is_repaired_with_missing_ids(env: Env) -> None:
+    """生产形态（两次读取告警）：同一查询工具成功两次，回答只引用了一次。"""
+
+    def partial(call: ModelCall) -> list[Any]:
+        ids = evidence_in(call)
+        assert len(ids) == 2
+        return answer(ids[1:], "只看了第二次")
+
+    def repaired(call: ModelCall) -> list[Any]:
+        ids = evidence_in(call)
+        assert call.tools == [] and f"还缺：{ids[0]}" in call.instructions
+        return answer(ids, "两次结果")
+
+    message = env.scripts.add(
+        "两次查询",
+        tool_call("run_query", region="east"),
+        tool_call("run_query", region="west"),
+        partial,
+        repaired,
+    )
+    with all_logs() as records:
+        delivered = await env.deliver(env.ctx(turn="twice"), message)
+    output = "\n".join(r.getMessage() for r in records)
+    assert len(delivered.evidence_ids) == 2
+    assert "stage=answer_repair reason=uncited_query" in output
+    assert env.tool_ids() == [QUERY_TOOL, QUERY_TOOL]
+    assert len(env.scripts.calls[message]) == 4
+
+
+async def test_brief_view_of_new_fact_is_repaired(env: Env) -> None:
+    def brief(call: ModelCall) -> list[Any]:
+        ids = evidence_in(call)
+        return answer(ids, "简要", fact_views=[{"evidence_id": ids[0], "view": "brief"}])
+
+    message = env.scripts.add(
+        "简要展示", tool_call("order_total", region="east"), brief, cite("完整展示")
+    )
+    with all_logs() as records:
+        await env.deliver(env.ctx(turn="brief"), message)
+    output = "\n".join(r.getMessage() for r in records)
+    assert "stage=answer_repair reason=invalid_fact_view" in output
+    assert len(env.scripts.calls[message]) == 3
+
+
+async def test_valid_answer_costs_no_extra_model_call(env: Env) -> None:
+    message = env.scripts.add("一次通过", tool_call("run_query", region="east"), cite())
+    with all_logs() as records:
+        await env.deliver(env.ctx(turn="clean"), message)
+    assert "stage=answer_repair" not in "\n".join(r.getMessage() for r in records)
+    assert len(env.scripts.calls[message]) == 2
+
+
+async def test_must_cite_rule_lists_exactly_the_checked_query_tools(env: Env) -> None:
+    seen: list[str] = []
+
+    def finish(call: ModelCall) -> list[Any]:
+        seen.append(call.instructions)
+        return clarify()(call)
+
+    await env.app.run_turn(env.ctx(turn="rule"), env.scripts.add("看规则", finish))
+    (rule,) = [line for line in seen[0].splitlines() if line.startswith("以下工具本轮每次成功")]
+    names = rule.partition("：")[2].partition("。")[0].split("、")
+    # 提示清单与最终校验同源：查询工具在内，诊断工具不在。
+    assert names == ["run_query"]
+    assert set(names) == {app_module._model_tool_name(t) for t in env.app._queries}
+
+
+def test_turn_schema_is_the_plain_sdk_schema() -> None:
+    turn = app_module._AnswerSchema(lambda answer: None)
+    plain = AgentOutputSchema(AgentAnswer)
+    assert (turn.json_schema(), turn.name(), turn.is_strict_json_schema()) == (
+        plain.json_schema(),
+        plain.name(),
+        plain.is_strict_json_schema(),
+    )
 
 
 async def test_max_turns_gets_one_tool_free_final_answer_from_visible_evidence(env: Env) -> None:
@@ -1548,6 +1671,7 @@ async def test_max_turns_partial_query_citation_keeps_rejection_and_rescue_count
         tool_call("run_query", region="east"),
         tool_call("run_query", region="west"),
         finish,
+        finish,  # 收尾回答改写一次仍只引用部分
     )
     ctx = _with_turns(env.ctx(turn="rescue-partial", max_tool_calls=2), 2)
     with all_logs() as records, pytest.raises(TurnError) as failed:
@@ -1562,6 +1686,25 @@ async def test_max_turns_partial_query_citation_keeps_rejection_and_rescue_count
     assert MODEL_SECRET not in "\n".join(r.getMessage() for r in records)
     assert SYNTHETIC_SQL not in "\n".join(r.getMessage() for r in records)
     assert env.tool_ids() == [QUERY_TOOL, QUERY_TOOL] and await env.stored() == []
+
+
+async def test_limit_rescue_answer_gets_the_same_one_repair(env: Env) -> None:
+    def partial(call: ModelCall) -> list[Any]:
+        return answer(evidence_in(call)[:1], "收尾只引用一条")
+
+    message = env.scripts.add(
+        "收尾后改写",
+        tool_call("run_query", region="east"),
+        tool_call("run_query", region="west"),
+        partial,
+        cite("收尾改写引用全部"),
+    )
+    ctx = _with_turns(env.ctx(turn="rescue-repair", max_tool_calls=2), 2)
+    result = await env.app.run_turn(ctx, message)
+    assert len(result.answer.evidence_ids) == 2
+    assert "步骤已用完" in (await env.governed.evidence.validate_answer(result, ctx)).content
+    assert env.tool_ids() == [QUERY_TOOL, QUERY_TOOL]
+    assert len(env.scripts.calls[message]) == 4
 
 
 async def test_max_turns_tool_call_during_final_keeps_model_error_and_rescue_counts(
@@ -1595,13 +1738,15 @@ async def test_max_turns_final_answer_still_rejects_forged_evidence(env: Env) ->
         "收尾伪造",
         tool_call("order_total", region="east"),
         lambda call: answer(["ev_forged"], MODEL_SECRET),
+        lambda call: answer(["ev_forged"], MODEL_SECRET),  # 改写一次仍伪造
     )
     ctx = _with_turns(env.ctx(turn="rescue-rejected", max_tool_calls=1), 1)
     with all_logs() as records, pytest.raises(TurnError) as failed:
         await env.app.run_turn(ctx, message)
     assert failed.value.reason == "answer_rejected"
+    assert failed.value.answer_reject == "unknown_evidence"
     assert env.tool_ids() == [TOTAL_TOOL]
-    assert len(env.scripts.calls[message]) == 2
+    assert len(env.scripts.calls[message]) == 3
     assert await env.stored() == []
     assert MODEL_SECRET not in "\n".join(r.getMessage() for r in records)
 

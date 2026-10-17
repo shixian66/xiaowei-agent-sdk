@@ -1573,7 +1573,9 @@ async def test_feishu_unavailable_at_startup_leaves_web_serving(env: Env) -> Non
     async with env.running(env.config(feishu=feishu_config()), feishu_channel=channel) as served:
         assert await served.ready() == {"status": "ready", "feishu": "unavailable"}
         await served.page()
-        assert (await served.turn(env.scripts.add("飞书断开时的网页", cite()))).status_code == 200
+        # 没有证据的 cite() 会被拒并改写一次；这里只验证网页照常受理。
+        message = env.scripts.add("飞书断开时的网页", cite(), cite())
+        assert (await served.turn(message)).status_code == 200
         assert await served.finish() == 0
 
 

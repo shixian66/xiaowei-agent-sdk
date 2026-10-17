@@ -22,7 +22,7 @@ from tests.sdk_core.alertmanager_fixture import (
 from tests.sdk_core.alertmanager_fixture import alertmanager_binary as alertmanager_binary
 from tests.sdk_core.browser import launch
 from tests.sdk_core.mcp_fixture import serve
-from tests.sdk_core.test_app import ModelCall, advise_unverified, answer, tool_call
+from tests.sdk_core.test_app import ModelCall, advise_unverified, answer, evidence_in, tool_call
 from tests.sdk_core.test_feishu_render import message_text
 from tests.sdk_core.test_group_gateway import GroupChannel, raw_group_event, runtime_group
 from tests.sdk_core.test_group_identity import CHAT, A
@@ -179,6 +179,39 @@ async def test_alerts_without_muted_by_are_read_as_unknown_not_unmuted(env: Env)
         assert '"mutedBy": []' not in model_content
 
 
+async def test_repeat_alert_read_cited_once_is_repaired_without_rereading(env: Env) -> None:
+    """生产形态：两次 get_alerts 都成功、回答只引用一次；提示清单含该工具，改写后两条都展示。"""
+    seen: list[str] = []
+
+    def partial(call: ModelCall) -> list[Any]:
+        seen.append(call.instructions)
+        ids = evidence_in(call)
+        assert len(ids) == 2
+        return answer(ids[1:], "只引用了第二次读取")
+
+    def repaired(call: ModelCall) -> list[Any]:
+        ids = evidence_in(call)
+        assert call.tools == [] and f"还缺：{ids[0]}" in call.instructions
+        return answer(ids, "两次读取的采集快照")
+
+    with backend() as (url, state):
+        async with env.running(env.config(**a4_config(url))) as served:
+            await served.page()
+            message = env.scripts.add(
+                "查看一下 alertmanager 正在告警有哪些",
+                tool_call(f"{SOURCE}__get_alerts", **CALLS["get_alerts"]),
+                tool_call(f"{SOURCE}__get_alerts", **{**CALLS["get_alerts"], "silenced": False}),
+                partial,
+                repaired,
+            )
+            body = (await served.turn(message, "query")).json()
+            assert body["state"] == "completed"
+            assert len(body["delivery"]["facts"]) == 2
+            assert len(state.requests) == 2  # 改写不重读 Alertmanager
+    (rule,) = [line for line in seen[0].splitlines() if line.startswith("以下工具本轮每次成功")]
+    assert f"{SOURCE}__get_alerts" in rule
+
+
 async def test_formal_web_hidden_unauthorized_api_forced_call_zero_io(env: Env) -> None:
     with backend() as (url, state):
         async with env.running(env.config(**a4_config(url, granted=False))) as served:
@@ -206,6 +239,7 @@ async def test_silence_read_cannot_return_another_valid_id(env: Env) -> None:
                 "核对已知静默 ID",
                 tool_call(f"{SOURCE}__get_silence", **CALLS["get_silence"]),
                 cite(),
+                cite(),  # 没有证据可引用：改写一次仍缺引用
             )
             assert (await served.turn(message, "query")).json()["state"] == "failed"
             assert len(state.requests) == 1
@@ -1187,6 +1221,7 @@ async def test_successful_read_must_be_cited_not_replaced_by_advice(env: Env) ->
                 "查告警后漏证据",
                 tool_call(f"{SOURCE}__get_status"),
                 lambda call: answer([], analysis="", advice="只解释不引用"),
+                lambda call: answer([], analysis="", advice="只解释不引用"),  # 改写一次仍漏引
             )
             assert (await served.turn(message, "query")).json()["state"] == "failed"
             assert len(state.requests) == 1
@@ -1286,7 +1321,9 @@ async def test_foreign_session_cannot_cite_prior_source_evidence(env: Env) -> No
             prior = body["delivery"]["facts"][0]["evidence_id"]
             served.client.cookies.clear()
             await served.page()
-            message = env.scripts.add("另一会话伪造引用", lambda call: answer([prior]))
+            message = env.scripts.add(
+                "另一会话伪造引用", lambda call: answer([prior]), lambda call: answer([prior])
+            )
             assert (await served.turn(message, "query")).json()["state"] == "failed"
             assert len(state.requests) == 1
 

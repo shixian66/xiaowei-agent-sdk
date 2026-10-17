@@ -57,6 +57,7 @@ from xiaowei.governance import (
 )
 from xiaowei.models import (
     MONITORING_READ_POLICIES,
+    AgentAnswer,
     Audience,
     Channel,
     Delivery,
@@ -225,6 +226,45 @@ class AnswerRejectedError(EvidenceError):
         self.code = code
 
 
+def citation_error(
+    answer: AgentAnswer, context: Sequence[str], channel: Channel
+) -> AnswerRejectedError | None:
+    """只看回答本身与模型可见证据编号的结构和引用规则，不读存储、不复核权限。
+
+    交付校验与本轮输出 schema 共用这一份规则：后者让模型在 Runner 内改正，前者仍是权威。
+    """
+    unverified = answer.clarification is not None or answer.advice is not None
+    if unverified and answer_kinds_mixed(answer):
+        return AnswerRejectedError(
+            AnswerRejectCode.MIXED_KINDS, "澄清或建议不能与查询结果、分析或彼此混用"
+        )
+    report_format = None if answer.clarification is not None else answer.report_format
+    if report_format is not None and channel != "feishu":
+        return AnswerRejectedError(AnswerRejectCode.MIXED_KINDS, "当前渠道不能交付报告文件")
+    if unverified:
+        return None
+    cited = answer.evidence_ids
+    if not cited:
+        return AnswerRejectedError(AnswerRejectCode.MISSING_EVIDENCE, "回答缺少证据引用")
+    if len(set(cited)) != len(cited):
+        return AnswerRejectedError(AnswerRejectCode.DUPLICATE_EVIDENCE, "证据引用重复")
+    if not set(cited) <= set(context):
+        return AnswerRejectedError(
+            AnswerRejectCode.UNKNOWN_EVIDENCE, "回答只能引用本轮模型可见的证据"
+        )
+    views = {item.evidence_id for item in answer.fact_views}
+    if len(views) != len(answer.fact_views) or not views <= set(cited):
+        return AnswerRejectedError(
+            AnswerRejectCode.INVALID_FACT_VIEW, "显示方式只能指定一次且必须属于本回答引用"
+        )
+    for inference in answer.inferences:
+        if not inference.evidence_ids or not set(inference.evidence_ids) <= set(cited):
+            return AnswerRejectedError(
+                AnswerRejectCode.INFERENCE_UNLINKED, "分析必须引用本回答选择的证据"
+            )
+    return None
+
+
 class EvidenceStore:
     def __init__(
         self,
@@ -381,17 +421,14 @@ class EvidenceStore:
             )
             if text is not None
         ]
+        rejected = citation_error(answer, context, channel)
+        if rejected is not None:
+            raise rejected
         if unverified:
             # 澄清与建议不引用证据：不能与证据、分析或彼此混用。没有监控失败时，
             # “本轮未执行业务查询”由 Application 在提交前核实；有监控失败时改用未核实标题。
             # 模型可能复述可见证据，因此照样复核它们。
-            if answer_kinds_mixed(answer):
-                raise AnswerRejectedError(
-                    AnswerRejectCode.MIXED_KINDS, "澄清或建议不能与查询结果、分析或彼此混用"
-                )
             report_format = None if answer.clarification is not None else answer.report_format
-            if report_format is not None and channel != "feishu":
-                raise AnswerRejectedError(AnswerRejectCode.MIXED_KINDS, "当前渠道不能交付报告文件")
             records = await self._context_readable(ctx, channel, context, history=history)
             ((header, text),) = unverified
             if monitoring_notice is not None:
@@ -416,26 +453,7 @@ class EvidenceStore:
             )
 
         cited = answer.evidence_ids
-        if answer.report_format is not None and channel != "feishu":
-            raise AnswerRejectedError(AnswerRejectCode.MIXED_KINDS, "当前渠道不能交付报告文件")
-        if not cited:
-            raise AnswerRejectedError(AnswerRejectCode.MISSING_EVIDENCE, "回答缺少证据引用")
-        if len(set(cited)) != len(cited):
-            raise AnswerRejectedError(AnswerRejectCode.DUPLICATE_EVIDENCE, "证据引用重复")
-        if not set(cited) <= set(context):
-            raise AnswerRejectedError(
-                AnswerRejectCode.UNKNOWN_EVIDENCE, "回答只能引用本轮模型可见的证据"
-            )
         views = {item.evidence_id: item.view for item in answer.fact_views}
-        if len(views) != len(answer.fact_views) or not views.keys() <= set(cited):
-            raise AnswerRejectedError(
-                AnswerRejectCode.INVALID_FACT_VIEW, "显示方式只能指定一次且必须属于本回答引用"
-            )
-        for inference in answer.inferences:
-            if not inference.evidence_ids or not set(inference.evidence_ids) <= set(cited):
-                raise AnswerRejectedError(
-                    AnswerRejectCode.INFERENCE_UNLINKED, "分析必须引用本回答选择的证据"
-                )
         unshown = tuple(e for e in context if e not in cited)
         records = await self._context_readable(ctx, channel, (*cited, *unshown), history=history)
 

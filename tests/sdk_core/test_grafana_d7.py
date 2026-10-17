@@ -364,7 +364,7 @@ async def test_formal_write_unknown_is_not_replayed(
             if written:
                 assert response.json()["dashboard"]["version"] == 1
             receipt = message_text(group_channel.sends[-1][1])
-            assert "未知" in receipt and "核对" in receipt and "工具执行失败" not in receipt
+            assert "未知" in receipt and "核对" in receipt and "工具结果不可用" not in receipt
             assert (
                 await env.scalar(
                     "SELECT count(*) FROM xiaowei_evidence WHERE tool_id=:tool",
@@ -503,7 +503,7 @@ async def test_formal_restricted_grafana_account_cannot_write_target(
                     == 0
                 )
                 receipt = message_text(group_channel.sends[-1][1])
-                assert "未知" in receipt and "核对" in receipt and "工具执行失败" not in receipt
+                assert "未知" in receipt and "核对" in receipt and "工具结果不可用" not in receipt
                 await group_send(
                     env, group_channel, f"/批准 {action_id}", "om_restricted_again", sender=B
                 )

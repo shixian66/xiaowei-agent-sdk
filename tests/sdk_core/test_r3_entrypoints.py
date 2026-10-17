@@ -50,6 +50,7 @@ async def test_formal_current_result_cannot_be_hidden_by_brief(
             "run_readonly_query", cluster=SR.target_id, sql="SELECT region FROM shop.sales LIMIT 5"
         ),
         brief,
+        brief,  # 改写一次仍把本轮新事实设为简要
     )
     async with env.running(env.config()) as served:
         await served.page()

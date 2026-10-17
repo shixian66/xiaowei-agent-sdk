@@ -63,8 +63,8 @@ CLARIFICATION_HEADER = "需要澄清（本轮未执行业务查询）"
 FACTS_TRUNCATED = "（工具结果超过飞书单条上限，已截断）"
 TRUNCATED = "（内容超过飞书单条消息上限，已截断）"
 EVIDENCE_FAILED = (
-    "工具执行失败，或工具结果、回答未通过证据校验，本轮未交付；不会自动重试。"
-    "可缩小查询范围、核对数据源和问题条件后重新提问，或换一种问法"
+    "本轮未交付：工具结果不可用，或回答的证据引用未通过核对（后者不是数据源故障）；"
+    "不会自动重试。可先原样重发；仍失败再缩小查询范围、核对数据源和问题条件"
 )
 SR_TOOLS = {"list_slow_queries", "explain_query", "describe_table_layout", "describe_table"}
 
@@ -426,7 +426,7 @@ async def test_evidence_mixed_with_clarification_twice_is_not_delivered(
     assert SLOW_SQL not in reply.content and reply.facts in (None, [])
     assert (
         await env.scalar("SELECT failure_code FROM xiaowei_request WHERE state = 'failed'")
-        == "model_failed"
+        == "evidence_failed"  # 回答规则不合格：answer_rejected(mixed_kinds)
     )
     assert len(env.scripts.calls[message]) == 3
 

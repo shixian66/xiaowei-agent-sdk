@@ -70,7 +70,10 @@ async def test_capacity_notice_never_authorizes_unshown_action(
 async def test_uncited_proposal_cannot_be_approved(actions: Actions) -> None:
     env = actions.env
     env.scripts.add(
-        attributed(A, "提出"), tool_call("am-synthetic__propose_change", value="after"), clarify()
+        attributed(A, "提出"),
+        tool_call("am-synthetic__propose_change", value="after"),
+        clarify(),
+        clarify(),  # 改写一次仍不引用提案
     )
     async with running(env) as group:
         await group.ask("提出", message_id="om_p")
@@ -394,6 +397,29 @@ async def test_rejected_final_answer_after_approval_is_not_saved(actions: Action
     saved = await env.rows("SELECT message_data FROM agent_messages")
     assert saved and rejected not in json.dumps(saved, ensure_ascii=False)
     assert "APPROVED-ANSWER" in json.dumps(saved)  # 合格改写照常保存
+
+
+async def test_uncited_proposal_after_approval_is_repaired_once(actions: Actions) -> None:
+    """审批恢复（native）路径：恢复后的回答漏引提案证据，同样在 Runner 内改写一次。"""
+    env = actions.env
+    message = attributed(A, "提出")
+    env.scripts.add(
+        message,
+        tool_call("am-synthetic__propose_change", value="after"),
+        request_execution,
+        lambda call: answer(evidence_in(call)[-1:], "只引用执行结果"),
+        cite("APPROVED-ANSWER"),
+    )
+    async with running(env, max_reply_chars=3500) as group:
+        await group.ask("提出", message_id="om_p")
+        action_id = await actions.one()
+        await group.ask(f"/批准 {action_id}", message_id="om_a")
+        assert len(actions.adapter.calls) == 1  # 改写不重放写操作
+        assert await env.rows(
+            "SELECT state FROM xiaowei_request WHERE reply_message_id='om_a'"
+        ) == [("completed",)]
+    calls = env.scripts.calls[message]
+    assert len(calls) == 4 and "还缺：" in calls[-1].instructions
 
 
 @pytest.mark.parametrize(

@@ -1250,7 +1250,7 @@ async def test_close_while_write_inflight_keeps_success_and_factual_receipt(acti
     assert await env.rows(
         "SELECT failure_code FROM xiaowei_request WHERE reply_message_id='om_inflight_close'"
     ) == [("action_feedback_failed",)]
-    assert "工具执行失败" not in str(group.outbox.sent[-1])
+    assert "工具结果不可用" not in str(group.outbox.sent[-1])
     assert await env.rows("SELECT COUNT(*) FROM agent_messages") == [(0,)]
 
 

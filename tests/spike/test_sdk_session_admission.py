@@ -254,7 +254,7 @@ async def test_inflight_write_receipt_does_not_require_original_session(actions:
         await asyncio.wait_for(approval, 5)
         rendered = message_text(group.outbox.sent[-1][1])
         assert "动作已执行" in rendered and "Action ID" in rendered
-        assert "工具执行失败" not in rendered
+        assert "工具结果不可用" not in rendered
         assert await env.rows(
             "SELECT state, delivery FROM xiaowei_request WHERE reply_message_id=:id",
             id="om_close_while_writing",

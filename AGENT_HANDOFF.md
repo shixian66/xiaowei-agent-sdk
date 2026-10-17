@@ -1,6 +1,6 @@
 # 小维：当前交接
 
-> 更新：2026-10-16，Asia/Shanghai。这里只记录当前事实、证据与下一项工作；设计见 [ARCHITECTURE.md](ARCHITECTURE.md)，路线见 [DEVELOPMENT_PLAN.md](DEVELOPMENT_PLAN.md)，协作规则见 [AGENTS.md](AGENTS.md)。
+> 更新：2026-10-17，Asia/Shanghai。这里只记录当前事实、证据与下一项工作；设计见 [ARCHITECTURE.md](ARCHITECTURE.md)，路线见 [DEVELOPMENT_PLAN.md](DEVELOPMENT_PLAN.md)，协作规则见 [AGENTS.md](AGENTS.md)。
 
 **OpenAI Agents SDK 负责 Agent Loop；小维负责权限、受治理工具执行、证据真实性和数据边界。**
 
@@ -9,11 +9,11 @@
 | 项目 | 已核对事实 |
 | --- | --- |
 | 仓库 | [shixian66/xiaowei-agent-sdk](https://github.com/shixian66/xiaowei-agent-sdk) |
-| 本地目录 / 分支 | 数据库环境选择第一步：`/Users/kloenguyen/xw-worktrees/db-env-plan` / `claude/db-env-selection-plan`；基线 `643858f`（PR #107 合并后的 main）。原目录其他分支及未跟踪公司配置未读取或改动。 |
+| 本地目录 / 分支 | 引用契约修复：`/Users/kloenguyen/xw-worktrees/turn-resilience` / `claude/citation-contract`；基线 `4e0ab86`（PR #110 合并后的 main，即线上镜像 `sha-4e0ab862…`）。原目录其他分支及未跟踪公司配置未读取或改动。 |
 | M5 历史起点 | `372c381f44ecfa1fa53961f137d0058033cbd805`；不是远端当前 main 的核验结论 |
 | 本轮审查版本 | 设计 v1.4 `b58f0d9` 已批准；D1–D3 已合入。D3 用户复审通过 `424c465`，PR #105 CI 10/10 后合为 `6f28062`，merge tree 与获审 head 一致。D4 协议前置已完成离线核验；用户已决定暂不实现曲线，剩余事项搁置，本次只做文档收尾。 |
 | 已同步主线审查记录 | SDK-A/B/C 已随 PR #89/#93/#94 合入；D7 已随 PR #83 离线合入。上述合入不代表真实模型、飞书或公司 Grafana 验收。 |
-| 当前阶段 | 2026-10-16 生产事故（未选环境就查询 fat、fat1、pre）后的第一步：两份数据库工作方法 Skill 与环境规则文字（[计划](docs/superpowers/plans/2026-10-16-database-target-selection-skills.md)）。本地实现与离线验证完成，待独立审查；真实模型评测未获准、未运行；未推送、未合并、未部署。飞书平台门槛修复已随 PR #107 合入。D4 仍搁置。 |
+| 当前阶段 | 2026-10-17 生产复盘（两轮 `answer_rejected`）后的引用契约修复：本地实现与离线验证完成，待独立审查；未推送/合并/部署；真实模型评测已获批但本机无模型凭据、未运行（见第 3 节）。此前：2026-10-16 生产事故（未选环境就查询 fat、fat1、pre）后的第一步：两份数据库工作方法 Skill 与环境规则文字（[计划](docs/superpowers/plans/2026-10-16-database-target-selection-skills.md)）。本地实现与离线验证完成，待独立审查；真实模型评测未获准、未运行；未推送、未合并、未部署。飞书平台门槛修复已随 PR #107 合入。D4 仍搁置。 |
 | 当前源码与依赖 | 应用表v12，新请求分项回执、旧请求v0语义兼容；SDK/锁文件不变，独立.venv按锁安装；正式启动不自动迁移。 |
 | 新产品入口 | `xiaowei` 的 `serve`、`config check`、`model check`、`storage init/upgrade/cleanup`、`requests resend`；容器 Web 绑定沿现有部署配置。真实模型、公司 StarRocks 与真实飞书不由离线测试证明。 |
 | 本次工作范围 | 只改模型可见文字：`DEFAULT_INSTRUCTIONS` 拆出两份随包 Skill（`src/xiaowei/skills/`）、目标清单头、StarRocks 工具说明后缀、`unknown_target` 回执文字；治理、拒绝码与重试语义、工具 schema、Evidence 指纹、Session、存储与依赖不变；评测框架新增环境样例与越界计数。不调用模型、飞书或公司服务。 |
@@ -37,7 +37,28 @@
 
 ## 3. 当前计划与下一项工作
 
-**生产轮次失败修复（turn-resilience，本地完成，未推送/合并/部署；审查修复后待复审）：** 分支 `claude/turn-resilience`（工作树 `/Users/kloenguyen/xw-worktrees/turn-resilience`），基线 `abb9bc2`（origin/main，本机 fetch 因代理不可用未刷新）。依据公司部署日志 11 次 `stage=failed`：`tool_failed` 7（`prometheus-prod/series` mcp_error 3、`alertmanager-prod/get_alerts` other 4）、`answer_rejected(mixed_kinds)` 2、`model_failed` 2（均为 Vertex HTTP 429）。根因：只读监控失败、上游限流、回答结构不合格都直接丢弃整轮，不给 Agent 修正机会。用户 2026-10-16 批准以下契约变更，ARCHITECTURE §4/§5/§6/§8 已同步：
+**引用契约修复（citation-contract，本地完成，未推送/合并/部署；待独立审查）：** 分支 `claude/citation-contract`，基线 `4e0ab86`。线上两轮 `answer_rejected`：列举三套集群后分析未挂证据（`inference_unlinked`，推断为写了来自配置的“只有这三套”），以及 `get_alerts` 成功两次只引用一次（`uncited_query`）；工具与数据源均正常。根因：代码强制的引用规则没有完整告诉模型（手写的必须引用清单与 `_queries` 脱节，分析依据规则与配置信息的写法缺失），且这些模型能改的错误只在 Runner 结束后检查、没有改正机会；失败回执说成“工具执行失败”。用户 2026-10-17 批准 F1–F4 与真实模型评测，ARCHITECTURE §4、§8 已同步。
+
+| 项 | 改动 |
+| --- | --- |
+| F1 提示 | “必须全部引用”工具清单由 `_queries` 生成（`_citation_rule`），删除三处手写清单；补“每条分析至少挂一条本回答引用的证据，配置/口径挂相关证据并注明来自配置” |
+| F2 改正通道 | 每轮一个 `_AnswerSchema`（继承公开 `AgentOutputSchema`，JSON schema/名称不变），用内存可信记录预检：混用、缺/重复/不可见引用、显示方式、普通轮新事实简要、分析未关联、查询未全部引用；不合格经 `invalid_final_output` 无工具改写一次，提示带固定原因与缺失编号。规则与交付共用 `evidence.citation_error`；`evidence_unavailable`、未完成计数、容量仍只在交付/提交时检查。收尾（`max_turns`）与审批恢复同走；改写仍不合格记 `answer_rejected` + 原拒绝码（原混用记 `invalid_output`） |
+| F3 回执（与批准方案不同） | 独立失败码需迁移 013：须停服显式 `storage upgrade`，回退须恢复数据库，违背“不增运维负担”，未做。改为改写共用 `evidence_failed` 回执：说明可能是回答引用未通过核对、不是数据源故障，建议先原样重发 |
+| F4 日志 | `stage=answer_repair reason=<拒绝码>`；`answer_rejected` 失败行加工具计数，不记正文与编号 |
+
+| 验证 | 结果 |
+| --- | --- |
+| 先失败 | 新增 7 项在 `4e0ab86` 源码上失败（两种生产形态、简要展示、收尾改写、审批恢复、提示与校验同源、schema 等价），对照项“合规回答不多调用模型”前后均通过；Alertmanager 两次 `get_alerts` 用例后补，未做修复前运行 |
+| 现有用例 | 只因“改写一次”多一次模型调用或回执措辞而更新：坏回答脚本补第二步（仍断言失败、零交付、零重放），旧措辞的否定断言改为新措辞以免失效 |
+| 全量 | 隔离 PostgreSQL 55432 下 `tests/sdk_core tests/p1b`：**3612 passed, 235 skipped, 72 deselected**（14m25s，`/private/tmp/xw-citation-full2.log`）；其余目录（除 sdk_core/p1b/deployment）**2099 passed, 152 skipped**（`/private/tmp/xw-citation-rest.log`）；`ruff check src tests`、改动文件 `ruff format --check`、`mypy src`（135 文件）、文档检查、`git diff --check` 通过 |
+| 已知小缺口 | SDK 在“不记模型数据”下把错误处理器内部异常（如改写调用本身 HTTP 失败）换成 UserError，日志 `error_kind=sdk_configuration`，用户仍见 `model_failed`；`4e0ab86` 已如此，未改 |
+| 未验证 | 真实模型：本机无 Vertex 凭据；现有 `scripts/dialogue_real_model.py` 只有 StarRocks 场景且需人工判定，不含 Alertmanager。需用户提供 Profile/密钥或在服务器运行；部署后看 `stage=answer_repair` 与 `answer_reject` 分布 |
+
+**下一项：** 独立审查本分支；真实模型评测待凭据；推送/PR/部署由用户决定。
+
+**生产轮次失败修复（turn-resilience）：已随 PR #110 合并为 `4e0ab86` 并部署；以下为当时记录。**
+
+当时分支 `claude/turn-resilience`（工作树 `/Users/kloenguyen/xw-worktrees/turn-resilience`），基线 `abb9bc2`（origin/main，本机 fetch 因代理不可用未刷新）。依据公司部署日志 11 次 `stage=failed`：`tool_failed` 7（`prometheus-prod/series` mcp_error 3、`alertmanager-prod/get_alerts` other 4）、`answer_rejected(mixed_kinds)` 2、`model_failed` 2（均为 Vertex HTTP 429）。根因：只读监控失败、上游限流、回答结构不合格都直接丢弃整轮，不给 Agent 修正机会。用户 2026-10-16 批准以下契约变更，ARCHITECTURE §4/§5/§6/§8 已同步：
 
 | 提交 | 改动 | 对应失败 |
 | --- | --- | --- |
@@ -72,7 +93,7 @@
 | 体验 | 无新增用户步骤、配置、重试框架或后台服务；限流时可能多等最多 20s/次，换取不过早耗尽重试，不保证恢复；整轮到期按现有受控失败提示 |
 | 未处理 | OpenAI 协议族 SDK 内置 `conversation_locked` 兼容重试不经“仅 429/503”策略（Vertex 不触发，无生产证据，本轮按要求不改）；选择器组 [坏, 好] 失败后单发 [坏] 仍会发出一次（不做语义分析，受两次额度约束） |
 
-**下一项：** 独立复审 `46dd17b..d019f40`；通过后推送/PR 由用户决定；部署后用同一日志命令复核 `stage=failed` 分布，并关注 `stage=answer_repair` 与 `monitoring read unclassified` 的频率。
+已复审通过并合入（PR #110）、部署；部署后的两轮 `answer_rejected` 由上面的引用契约修复处理。
 
 **数据库环境选择第一步（本地完成，已做一轮独立审查并修复；真实模型评测待授权）：** 根因是原 R7 B1(a) 允许未选环境时跨环境发现并按唯一匹配继续。现在未选环境先问、选定后沿用、明确切换才换、提及不等于切换、无需取证的 SQL 任务不问；规则只在 Skill 中出现一次。**已接受风险：** 执行层不核对“是否用户选定的环境”，模型不遵守时仍会执行；第二步触发条件见 [ARCHITECTURE R7](ARCHITECTURE.md#r7-targets)。实现与计划的差异见计划 §10。
 
