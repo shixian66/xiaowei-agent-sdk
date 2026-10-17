@@ -377,3 +377,38 @@ async def test_post_conversion_preserves_scope_and_never_activates_fallback_ment
     assert raw in decoded
     assert env.adapter.calls == [] and env.model_calls(message) == 1
     assert await request_row(env) == ("completed", "sent")
+
+
+def test_split_approval_material_keeps_result_numbers_in_every_view() -> None:
+    from xiaowei.feishu_report import build_reports
+
+    material = fact(
+        evidence_id="ev_material",
+        requires_complete=True,
+        metadata={"action_id": "ac_1", "approval_command": "/批准 ac_1"},
+    )
+    data = fact(evidence_id="ev_data")
+    whole = delivery(material, data, analysis="先看数据，再批准动作。")
+    # 与 send_complete_delivery 相同的拆分：审批材料独立成卡，其余结果另发。
+    material_card = build_feishu_message(
+        whole.model_copy(update={"facts": (material,), "analysis": ()}),
+        3500,
+        "oc_test",
+        allow_preview=False,
+    )
+    data_delivery = whole.model_copy(update={"facts": (data,), "requires_complete": False})
+    data_card = build_feishu_message(data_delivery, 3500, "oc_test")
+
+    assert any(p.startswith("结果 1 · 来源") for p in text_parts(material_card))
+    elements = data_card["card"]["body"]["elements"]
+    shown = "\n".join(text_parts(elements, folded=False))
+    assert "（依据：结果 1、结果 2）" in shown and "结果 2 · pre" in shown
+    (panel,) = [e for e in elements if e["tag"] == "collapsible_panel"]
+    assert panel["header"]["title"]["content"] == "查看依据 · 结果 2"
+    assert "依据：结果 2 · 来源" in "\n".join(text_parts(panel))
+    assert "结果 1 · " not in "\n".join(text_parts(data_card))
+
+    (report,) = build_reports(data_delivery.model_copy(update={"report_format": "md"}))
+    body = report.content.decode()
+    assert "结果 2" in body and "依据：结果 1、结果 2" in body and "结果 1 ·" not in body
+    assert "ev_" not in body + "\n".join(text_parts(data_card) + text_parts(material_card))

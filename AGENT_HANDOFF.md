@@ -66,6 +66,7 @@
 | 用例 | 新增去重、冲突显示方式、本轮 brief 完整展示（含正式入口）、`query_unfinished`、`report_unsupported`；原“拒绝重复/拒绝本轮 brief/展示 ev_”的断言按批准的行为变化改写，安全断言（不可见证据、未引用显示方式仍拒绝）保留 |
 | 全量 | 隔离 PostgreSQL 55432 下 `tests/sdk_core tests/p1b`：3611 passed、3 failed（均为上述预期行为变化，改写后对应文件 28 passed）、235 skipped、72 deselected；其余目录 2099 passed、152 skipped；`ruff check`、`mypy`（135 文件）通过 |
 | 浏览器 | 真 Chrome：10 passed，含改写的 Web 编号用例；2 项因本机 8501 端口被已有本地容器占用无法启动，基线同样失败 |
+| 审查修正 | 独立审查（`87556b5`）发现 P2：审批材料拆出后，查询卡折叠标题仍按拆分后位置编号（正文“结果 2”、折叠“结果 1”）。折叠标题改用 `result_label`；新增拆分发送回归（正文、分析引用、折叠标题、报告编号一致），修复前失败、修复后通过；渲染/报告/交付相关 234 passed，ruff、mypy 通过 |
 | 未验证 | 真实模型、真实飞书客户端排版；S2 起的工作未开始 |
 
 **生产轮次失败修复（turn-resilience）：已随 PR #110 合并为 `4e0ab86` 并部署；以下为当时记录。**

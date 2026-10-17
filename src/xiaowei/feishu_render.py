@@ -366,7 +366,7 @@ def _card(
                     "expanded": False,
                     "header": {
                         "title": _plain(
-                            f"查看依据 · 结果 {index + 1}"
+                            f"查看依据 · {delivery.result_label(fact.evidence_id)}"
                             + (" · 获准原文与查询信息" if fact.view == "brief" else "")
                         )
                     },
