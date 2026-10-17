@@ -54,7 +54,9 @@
 | 已知小缺口 | SDK 在“不记模型数据”下把错误处理器内部异常（如改写调用本身 HTTP 失败）换成 UserError，日志 `error_kind=sdk_configuration`，用户仍见 `model_failed`；`4e0ab86` 已如此，未改 |
 | 未验证 | 真实模型：本机无 Vertex 凭据；现有 `scripts/dialogue_real_model.py` 只有 StarRocks 场景且需人工判定，不含 Alertmanager。需用户提供 Profile/密钥或在服务器运行；部署后看 `stage=answer_repair` 与 `answer_reject` 分布 |
 
-**下一项：** 独立审查本分支；真实模型评测待凭据；推送/PR/部署由用户决定。
+**状态更新：** 已经独立审查并合入（PR #111，`c00ede6`），尚未构建镜像/部署；真实模型评测待凭据。
+
+**下一阶段（设计提案，待确认）：** [自由表达的回答结构](docs/superpowers/plans/2026-10-17-free-answer-structure.md)：模型组织表达、代码保证可信事实；切片 S0 部署 #111 取基线，S1 小 PR，S2 结构实验，S3–S5 实现与评测。
 
 **生产轮次失败修复（turn-resilience）：已随 PR #110 合并为 `4e0ab86` 并部署；以下为当时记录。**
 
