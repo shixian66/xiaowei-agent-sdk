@@ -323,7 +323,9 @@ async def test_group_facts_stay_in_the_group_session(env: Env) -> None:
     calls = len(env.adapter.calls)
     for channel, conversation in (("feishu", "oc_dm"), ("web", "cookie-1")):
         message = env.scripts.add(
-            f"{channel}：引用群里的结果", lambda call, e=evidence_a: answer([e])
+            f"{channel}：引用群里的结果",
+            lambda call, e=evidence_a: answer([e]),
+            lambda call, e=evidence_a: answer([e]),  # 改写一次仍引用群证据
         )
         record = await env.run(env.personal(message, f"p-{channel}", A, channel, conversation))
         assert (record.state, record.failure_code) == ("failed", "evidence_failed")
@@ -334,7 +336,9 @@ async def test_a_new_generation_does_not_read_the_previous_group_facts(env: Env)
     done_a, _, evidence_a = await a_then_b(env)
     fresh = await env.service.new_session("feishu", B, CHAT, group=GROUP)
     assert fresh.owner == GROUP.owner and fresh.session_id != done_a.session_id
-    message = env.scripts.add("新会话里引用旧结果", lambda call: answer([evidence_a]))
+    message = env.scripts.add(
+        "新会话里引用旧结果", lambda call: answer([evidence_a]), lambda call: answer([evidence_a])
+    )
     record = await env.run(env.group(message, "om_new"))
     assert record.session_id == fresh.session_id
     assert (record.state, record.failure_code) == ("failed", "evidence_failed")
@@ -422,7 +426,11 @@ async def test_personal_records_do_not_mix_into_the_group(env: Env) -> None:
     mine = await env.run(env.personal(personal, "om_same", A, "feishu", CHAT))
     assert mine.owner == Owner(kind="personal", id=A) and mine.answer is not None
     (personal_evidence,) = mine.answer.evidence_ids
-    message = env.scripts.add("群里：引用私聊结果", lambda call: answer([personal_evidence]))
+    message = env.scripts.add(
+        "群里：引用私聊结果",
+        lambda call: answer([personal_evidence]),
+        lambda call: answer([personal_evidence]),  # 改写一次仍引用私聊证据
+    )
     record = await env.run(env.group(message, "om_same"))
     assert record.owner == GROUP.owner and record.session_id != mine.session_id
     assert (record.state, record.failure_code) == ("failed", "evidence_failed")

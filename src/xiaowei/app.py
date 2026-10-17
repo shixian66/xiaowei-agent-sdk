@@ -32,7 +32,7 @@ import hashlib
 import json
 import logging
 import time
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from importlib.resources import files
@@ -74,6 +74,7 @@ from xiaowei.evidence import (
     EvidenceUnverifiableError,
     ScopeChecks,
     arguments_digest,
+    citation_error,
     scope_checks,
 )
 from xiaowei.governance import Execute, GovernedTools, ToolExecutionError, TurnLedger, TurnRuns
@@ -100,7 +101,6 @@ from xiaowei.models import (
     ToolId,
     ToolRequest,
     TurnAnswer,
-    answer_kinds_mixed,
 )
 from xiaowei.session import (
     PolicySession,
@@ -162,13 +162,13 @@ DEFAULT_INSTRUCTIONS = (
     "回答三选一，其余字段填 null 或空列表："
     "澄清或建议不要与证据、分析混用。"
     "已取得可引用的 evidence_id 时，在 evidence_ids 中列出所依据的工具结果 evidence_id，"
-    "分析写在 inferences 中并注明依据和限制；有证据还需要补条件或选择候选时在 inferences 中提问，"
+    "分析写在 inferences 中并注明依据和限制；每条分析的 evidence_ids 至少一个，且只能取本回答"
+    " evidence_ids 中的编号。集群清单、业务口径等可信配置不是工具证据，需要说明时写进关联相关"
+    "证据的分析并注明来自配置，依据不能留空。有证据还需要补条件或选择候选时在 inferences 中提问，"
     "展示已核实部分，不混填 clarification。没有可引用证据且需要用户补充时才只填 clarification；"
     "没有可引用证据、只给解释、建议或 SQL 草稿时只填写 advice，不要把它写成查询结果，"
     "也不要编造数值。"
     "工具被拒绝或失败的结果没有 evidence_id，不算取得。"
-    "本轮每次成功执行的 run_readonly_query 结果都必须列在 evidence_ids 中，不能只引用其他工具"
-    "或历史结果，也不能只给 clarification 或 advice。"
 )
 
 MONITORING_INSTRUCTIONS = (
@@ -189,7 +189,7 @@ MONITORING_INSTRUCTIONS = (
     "可在 correction_allowed 和本轮预算内自主修改表达式，不重发同一失败表达式。"
     'invalid_selector 表示发现工具的 matches 被上游拒绝（如 {instance=~".*"} 等可匹配空串的'
     "选择器）；可在 correction_allowed 和预算内改用具体指标名或非空匹配器，不重发同一选择器。"
-    "成功 query/range_query 的全部证据都要引用；排版文本、warnings/截断、元数据/规则的"
+    "排版文本、warnings/截断、元数据/规则的"
     "完整性限制须如实说明，空结果不能解释为健康。"
     "Grafana 工具读取仪表盘定义、数据源目录和标记，不执行面板查询、不证明实时健康；"
     "自主选择需要的定义和证据，不要求先搜索再读取。"
@@ -201,7 +201,6 @@ MONITORING_INSTRUCTIONS = (
     "inhibitedBy/mutedBy 分列，不把静默存在、接收器名或服务状态当作已通知/主机健康。"
     "布尔值为包含开关，receiver 为正则；自主选择匹配器与分页，无需固定读取顺序。"
     "has_more 仅描述本地分页，truncated 或组内省略仍表示不完整；历史时间不代表当前状态。"
-    "成功的 Alertmanager 读取均须引用对应 Evidence。"
 )
 
 TurnReason = Literal[
@@ -239,23 +238,27 @@ _MESSAGES: Mapping[TurnReason, str] = {
 }
 
 
-class _OneKindAnswerSchema(AgentOutputSchema):
-    """``AgentAnswer`` 的 SDK 输出 schema（公开扩展点）：schema 与名称不变，结构校验时
-    即拒绝三种回答混用，交 Runner 的 ``invalid_final_output`` 处理器做一次无工具改写。
-    交付前 ``EvidenceStore.validate_answer`` 仍完整复核。
+AnswerCheck = Callable[[AgentAnswer], AnswerRejectedError | None]
+
+
+class _AnswerSchema(AgentOutputSchema):
+    """``AgentAnswer`` 的 SDK 输出 schema（公开扩展点），每轮一个：JSON schema 与名称不变，
+    结构校验时按本轮可信记录检查模型自己能改正的回答规则（三种回答互斥、引用关系、查询全部
+    引用），不通过即交 Runner 的 ``invalid_final_output`` 处理器做一次无工具改写。
+    交付前 ``EvidenceStore.validate_answer`` 与查询引用检查仍完整复核。
     """
 
-    def __init__(self) -> None:
+    def __init__(self, check: AnswerCheck) -> None:
         super().__init__(AgentAnswer)
+        self._check = check
 
     def validate_json(self, json_str: str) -> AgentAnswer:
         answer = cast(AgentAnswer, super().validate_json(json_str))
-        if answer_kinds_mixed(answer):
-            raise ModelBehaviorError("澄清或建议不能与查询结果、分析或彼此混用")
+        rejected = self._check(answer)
+        if rejected is not None:
+            # 原因链保留拒绝码：改写仍不合格时 SDK 重新抛出本错误，按 answer_rejected 记录。
+            raise ModelBehaviorError(str(rejected)) from rejected
         return answer
-
-
-_ANSWER_SCHEMA = _OneKindAnswerSchema()
 
 
 class TurnError(Exception):
@@ -423,6 +426,7 @@ class Application:
         self._instructions = _instructions(config.instructions, config.targets, capabilities)
         if any(contract.policy_id in MONITORING_READ_POLICIES for contract in catalog.contracts):
             self._instructions += "\n" + MONITORING_INSTRUCTIONS
+        self._instructions += _citation_rule(self._queries)
         self._engine = engine
         self._governance = governance
         self._evidence = governance.evidence
@@ -602,8 +606,13 @@ class Application:
                     }
                 )
             user_input = [cast(TResponseInputItem, {"role": "user", "content": pieces})]
-        agent = self._agent(ctx, approval_requests, images=bool(saved_images))
         session = self._session(ctx, allow_image_parts=bool(saved_images))
+        agent = self._agent(
+            ctx,
+            approval_requests,
+            images=bool(saved_images),
+            replayed=None if native is not None else (lambda: session.replayed_evidence),
+        )
 
         # 每轮新建 PolicySession：失败或取消时，未提交的暂存项随对象一起丢弃。
         async def finish_on_limit(
@@ -615,7 +624,7 @@ class Application:
             if not runs.produced and not runs.monitoring_failures:
                 return None
             self._governance.note_limit_rescue(ctx.identity)
-            query_ids = [e for tool_id, e in runs.produced if tool_id in self._queries]
+            query_ids = self._query_evidence(runs)
             query_instruction = (
                 f"本轮查询证据编号：{'、'.join(query_ids)}。最终回答必须引用全部这些编号。"
                 if query_ids
@@ -632,12 +641,14 @@ class Application:
                     f"并说明结果可能不完整。{query_instruction}"
                 ),
             )
+            # 收尾回答同样经本轮 schema 检查，可修正的引用错误也只改写一次。
             final = await Runner.run(
                 final_agent,
                 failure.run_data.history,
                 context=ctx,
                 max_turns=1,
                 run_config=self._run_config,
+                error_handlers={"invalid_final_output": repair_final_output},
             )
             answer = final.final_output_as(AgentAnswer, raise_if_incorrect_type=True)
             if not answer.evidence_ids:
@@ -661,11 +672,15 @@ class Application:
         async def repair_final_output(
             failure: RunErrorHandlerInput[RunContext],
         ) -> RunErrorHandlerResult | None:
-            # 最终回答未通过结构校验（如澄清/建议与证据混用）：用一次无工具的 SDK Runner 调用
-            # 让模型据已有历史改写；改写结果仍经同一 schema 校验，再不合格则本轮照旧失败。
-            _stage(turn, "answer_repair", started)
+            # 最终回答未通过结构或引用校验：用一次无工具的 SDK Runner 调用让模型据已有历史改写；
+            # 改写结果仍经同一 schema 校验，再不合格则本轮照旧失败。拒绝原因是固定文字与本轮
+            # 模型已见的证据编号，不含受限内容。
+            cause = failure.error.__cause__
+            rejected = cause if isinstance(cause, AnswerRejectedError) else None
+            _stage(turn, "answer_repair", started, rejected.code if rejected else "invalid_output")
+            reason = f"未通过原因：{rejected}。" if rejected else ""
             runs = self._governance.turn_runs(ctx.identity)
-            query_ids = [e for tool_id, e in runs.produced if tool_id in self._queries]
+            query_ids = self._query_evidence(runs)
             query_instruction = (
                 f"本轮查询证据编号：{'、'.join(query_ids)}。最终回答必须引用全部这些编号。"
                 if query_ids
@@ -676,10 +691,12 @@ class Application:
                 mcp_servers=[],
                 handoffs=[],
                 instructions=(
-                    f"{agent.instructions}\n上一条最终回答未通过结构校验，现在只基于上面已有的结果"
-                    "重新给出最终回答，不再调用工具。回答三选一：引用证据（evidence_ids 与 "
+                    f"{agent.instructions}\n上一条最终回答未通过校验，{reason}现在只基于上面已有的"
+                    "结果重新给出最终回答，不再调用工具。回答三选一：引用证据（evidence_ids 与 "
                     "inferences）、只填 clarification、或只填未经数据验证的 advice，其余字段为 "
                     "null 或空列表；已有证据时，补充提问或建议写进 inferences。"
+                    "evidence_ids 每个编号只列一次；每条 inference 的 evidence_ids 至少一个，且只能"
+                    "取本回答 evidence_ids 中的编号；配置或口径说明挂在相关证据上并注明来源。"
                     f"只能引用实际可见的 evidence_id。{query_instruction}"
                 ),
             )
@@ -736,7 +753,7 @@ class Application:
         # 本轮成功的业务查询（可信记录）都必须被引用；明确分类的监控读取失败单独计数，
         # 不能伪装成成功证据。明确未形成 Action 的准备拒绝单独计数，不丢弃已有证据。
         # I/O 前被拒绝的调用不算执行。
-        queried = [e for tool_id, e in runs.produced if tool_id in self._queries]
+        queried = self._query_evidence(runs)
         failed_queries = sum(f.tool_id in self._queries for f in runs.monitoring_failures)
         rejected_proposals = sum(t in self._queries for t in runs.proposal_rejections)
         unfinished = len(queried) + failed_queries + rejected_proposals != sum(
@@ -772,13 +789,53 @@ class Application:
         _stage(turn, "committed", started)
         return validated.model_copy(update={"session_state": snapshot})
 
+    def _query_evidence(self, runs: TurnRuns) -> list[str]:
+        """本轮成功的查询类工具证据（可信记录）：最终回答必须全部引用。"""
+        return [e for tool_id, e in runs.produced if tool_id in self._queries]
+
+    def _answer_check(
+        self, ctx: RunContext, replayed: Callable[[], Sequence[str]] | None
+    ) -> AnswerCheck:
+        """本轮输出 schema 的检查：只用内存中的可信记录（治理账本、回放与本轮证据编号），
+        检查模型自己能改正的规则；证据可读性与当前权限仍只在交付时复核，不能改写修正。
+
+        ``replayed`` 为 None 表示审批恢复：可见历史即 ``ctx.evidence_ids``，账本含暂停前的
+        证据，“本轮新事实”只能按证据记录判断，留给交付校验。
+        """
+
+        def check(answer: AgentAnswer) -> AnswerRejectedError | None:
+            runs = self._governance.turn_runs(ctx.identity)
+            current = [e for t, e in runs.produced if t in ctx.tool_scope]
+            history = ctx.evidence_ids if replayed is None else replayed()
+            rejected = citation_error(answer, (*history, *current), ctx.identity.channel)
+            if rejected is not None:
+                return rejected
+            fresh = current if replayed is not None else ()
+            if any(v.view == "brief" and v.evidence_id in fresh for v in answer.fact_views):
+                return AnswerRejectedError(
+                    AnswerRejectCode.INVALID_FACT_VIEW, "本轮新事实必须完整展示"
+                )
+            missing = [e for e in self._query_evidence(runs) if e not in answer.evidence_ids]
+            if missing:
+                return AnswerRejectedError(
+                    AnswerRejectCode.UNCITED_QUERY,
+                    f"本轮成功的查询结果都须列入 evidence_ids，还缺：{'、'.join(missing)}",
+                )
+            return None
+
+        return check
+
     def _agent(
         self,
         ctx: RunContext,
         approval_requests: dict[str, int] | None = None,
         *,
         images: bool = False,
+        replayed: Callable[[], Sequence[str]] | None = None,
     ) -> Agent[RunContext]:
+        """本轮 Agent。``replayed`` 返回 Session 回放给模型的证据编号；审批恢复不经 Session，
+        可见历史证据即暂停时的 ``ctx.evidence_ids``。
+        """
         action_note = ""
         if (
             self.actions is not None
@@ -821,7 +878,7 @@ class Application:
             model=self._model.model,
             model_settings=self._model.settings,
             tools=self._tools_for(ctx, approval_requests),
-            output_type=_ANSWER_SCHEMA,
+            output_type=_AnswerSchema(self._answer_check(ctx, replayed)),
         )
 
     def _model_tools(self) -> frozenset[str]:
@@ -1289,6 +1346,24 @@ def _causes(exc: BaseException) -> list[BaseException]:
     return chain
 
 
+def _model_tool_name(tool_id: str) -> str:
+    """模型看到的函数名：本地工具取名字部分，其余为 ``命名空间__名字``（与 MCP、动作工具一致）。"""
+    namespace, _, suffix = tool_id.partition("/")
+    return suffix if namespace == "local" else f"{namespace}__{suffix}"
+
+
+def _citation_rule(queries: frozenset[str]) -> str:
+    """“必须全部引用”的工具清单由最终校验所用的同一集合生成，提示与代码不会各说各的。"""
+    if not queries:
+        return ""
+    names = "、".join(sorted({_model_tool_name(t) for t in queries}))
+    return (
+        f"\n以下工具本轮每次成功的结果都必须列在最终回答的 evidence_ids 中：{names}。"
+        "同一工具调用多次时每次结果都要引用；不能只引用其他工具或历史结果，也不能只给 "
+        "clarification 或 advice。"
+    )
+
+
 def _local_tools(
     governance: GovernedTools, local_tools: Mapping[tuple[str, str], Execute]
 ) -> dict[str, Tool]:
@@ -1317,10 +1392,8 @@ def _local_tools(
         (contract,) = catalog.contracts_for(tool_id)  # 未声明 cluster 的工具只能有一个目标
         if contract.target_id not in executes:
             raise ValueError(f"应用配置：本地工具 {tool_id} 缺少执行函数")
-        namespace, _, suffix = tool_id.partition("/")
-        name = suffix if namespace == "local" else f"{namespace}__{suffix}"
         tools[tool_id] = governed_function_tool(
-            name, contract, governance, executes[contract.target_id]
+            _model_tool_name(tool_id), contract, governance, executes[contract.target_id]
         )
     return tools
 
@@ -1452,7 +1525,10 @@ def _stage(
         message += " answer_reject=%s"
         fields += (answer_code.value if isinstance(answer_code, AnswerRejectCode) else "other",)
     recorded = runs or TurnRuns()
-    if reason == "turn_limit" or (stage == "failed" and recorded.limit_rescue_started):
+    # 回答被拒时也记工具计数，定位时按 turn 查证据表；不记回答正文与证据编号。
+    if reason in {"turn_limit", "answer_rejected"} or (
+        stage == "failed" and recorded.limit_rescue_started
+    ):
         message += " tool_calls=%d executed=%d truncated=%d rejected=%d"
         fields += (
             len(recorded.started) + recorded.rejected,

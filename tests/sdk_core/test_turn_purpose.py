@@ -174,7 +174,7 @@ async def test_a_resource_limit_stops_the_turn_without_rerunning(env: Env) -> No
         # 业务 SQL 只执行了一次；模型没有得到第二次机会，本轮不自动重跑。
         assert len(env.db.business()) == 1 and len(env.scripts.calls[message]) == 1
         receipt = await delivered(rt, "om_1")
-        assert "可缩小查询范围、核对数据源和问题条件" in receipt
+        assert "缩小查询范围、核对数据源和问题条件" in receipt
         assert "canary-mem" not in receipt
 
 
@@ -206,7 +206,8 @@ async def test_a_forced_query_in_a_do_not_run_message_is_still_guarded(env: Env)
 async def test_advice_cannot_close_a_turn_that_ran_a_query(env: Env) -> None:
     async with env.opened(env.config()) as rt:
         for request_id, finish in (("om_1", advise()), ("om_2", clarify())):
-            message = env.scripts.add(f"查了却不引用 {request_id}", run_query(), finish)
+            # 改写一次仍不引用：整轮失败。
+            message = env.scripts.add(f"查了却不引用 {request_id}", run_query(), finish, finish)
             record = await turn(env, rt, message, request_id)
             # “本轮未执行业务查询”必须属实：开始过业务查询的轮次不能以建议或澄清收尾。
             assert (record.state, record.failure_code) == ("failed", "evidence_failed")
@@ -282,6 +283,7 @@ async def test_a_query_cannot_be_masked_by_other_current_evidence(env: Env) -> N
             run_query(),
             search_sales(),
             cite_only(lambda seen: seen[-1]),  # 只引用 list_tables
+            cite_only(lambda seen: seen[-1]),  # 改写一次仍只引用 list_tables
         )
         record = await turn(env, rt, message, "om_1")
         assert (record.state, record.failure_code) == ("failed", "evidence_failed")
@@ -293,7 +295,10 @@ async def test_a_query_cannot_be_masked_by_history_evidence(env: Env) -> None:
         first = env.scripts.add("昨天销售额", run_query(), cite())
         assert (await turn(env, rt, first, "om_1")).state == "completed"
         again = env.scripts.add(
-            "再查一次，但只引用上一轮", run_query(), cite_only(lambda seen: seen[0])
+            "再查一次，但只引用上一轮",
+            run_query(),
+            cite_only(lambda seen: seen[0]),
+            cite_only(lambda seen: seen[0]),  # 改写一次仍只引用上一轮
         )
         record = await turn(env, rt, again, "om_2")
         assert (record.state, record.failure_code) == ("failed", "evidence_failed")
@@ -302,7 +307,11 @@ async def test_a_query_cannot_be_masked_by_history_evidence(env: Env) -> None:
 async def test_every_successful_query_must_be_cited(env: Env) -> None:
     async with env.opened(env.config()) as rt:
         partial = env.scripts.add(
-            "两次查询只引用第一次", run_query(), run_query(UNION), cite_only(lambda s: s[0])
+            "两次查询只引用第一次",
+            run_query(),
+            run_query(UNION),
+            cite_only(lambda s: s[0]),
+            cite_only(lambda s: s[0]),  # 改写一次仍只引用第一次
         )
         record = await turn(env, rt, partial, "om_1")
         assert (record.state, record.failure_code) == ("failed", "evidence_failed")
@@ -328,10 +337,12 @@ async def test_a_refused_query_before_io_still_allows_advice(env: Env) -> None:
 async def test_unseen_evidence_cannot_be_cited(env: Env) -> None:
     async with env.opened(env.config()) as rt:
         # 失败轮次的证据已保存，但没有进入会话历史：下一轮模型看不到它。
-        failed = env.scripts.add("查了却只给建议", run_query(), advise())
+        failed = env.scripts.add("查了却只给建议", run_query(), advise(), advise())
         assert (await turn(env, rt, failed, "om_1")).state == "failed"
         orphan = await env.scalar("SELECT evidence_id FROM xiaowei_evidence")
-        pasted = env.scripts.add(f"引用 {orphan}", lambda call: answer([orphan]))
+        pasted = env.scripts.add(
+            f"引用 {orphan}", lambda call: answer([orphan]), lambda call: answer([orphan])
+        )
         record = await turn(env, rt, pasted, "om_2")
         assert (record.state, record.failure_code) == ("failed", "evidence_failed")
 

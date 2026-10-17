@@ -414,7 +414,10 @@ async def test_global_concurrency_limit_marks_requests_busy(env: Env) -> None:
 
 async def test_turn_failures_persist_safe_codes_and_fixed_receipts(env: Env) -> None:
     model = env.scripts.add("模型失败", upstream_error)
-    forged = env.scripts.add("伪造引用", lambda call: answer(["ev_forged"]))
+    # 伪造引用改写一次仍伪造：整轮拒绝。
+    forged = env.scripts.add(
+        "伪造引用", lambda call: answer(["ev_forged"]), lambda call: answer(["ev_forged"])
+    )
     failed = await env.run(model, "r1")
     rejected = await env.run(forged, "r2")
     too_long = await env.run("长" * 300, "r3")  # 超出输入准入策略：模型调用前拒绝
@@ -429,8 +432,8 @@ async def test_turn_failures_persist_safe_codes_and_fixed_receipts(env: Env) -> 
     evidence_view = await env.service.results.view(ref("r2"))
     assert evidence_view.delivery is not None
     assert evidence_view.delivery.content == (
-        "工具执行失败，或工具结果、回答未通过证据校验，本轮未交付；不会自动重试。"
-        "可缩小查询范围、核对数据源和问题条件后重新提问，或换一种问法"
+        "本轮未交付：工具结果不可用，或回答的证据引用未通过核对（后者不是数据源故障）；"
+        "不会自动重试。可先原样重发；仍失败再缩小查询范围、核对数据源和问题条件"
     )
     assert "缩小时间范围" not in evidence_view.delivery.content
     outbox = Outbox(outcome="failed")

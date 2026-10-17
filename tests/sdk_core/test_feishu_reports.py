@@ -506,6 +506,7 @@ async def test_web_report_request_is_rejected_after_tool_evidence(env: Env) -> N
         "生成东区订单 MD 报告",
         tool_call("order_total", region="east"),
         lambda call: answer(evidence_in(call), report_format="md"),
+        lambda call: answer(evidence_in(call), report_format="md"),  # 改写一次仍要文件
     )
     record = await env.run(message, "web_report", channel="web", conversation="web_report")
     assert record.state == "failed" and record.failure_code == "evidence_failed"
@@ -517,6 +518,7 @@ async def test_rejected_evidence_never_uploads_report(env: Env) -> None:
         "生成东区订单 MD 报告",
         tool_call("order_total", region="east"),
         lambda call: answer(["ev_not_issued"], report_format="md"),
+        lambda call: answer(["ev_not_issued"], report_format="md"),  # 改写一次仍伪造
     )
     record = await env.run(
         message, "om_bad_evidence_report", channel="feishu", conversation="oc_bad_evidence"

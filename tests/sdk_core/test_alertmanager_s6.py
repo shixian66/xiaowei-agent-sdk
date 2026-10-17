@@ -245,7 +245,7 @@ async def test_create_readback_must_match_approved_write(
             )
             receipt = message_text(group_channel.sends[-1][1])
             assert "未知" in receipt and "核对" in receipt
-            assert "工具执行失败" not in receipt
+            assert "工具结果不可用" not in receipt
 
 
 @pytest.mark.parametrize(
@@ -326,7 +326,7 @@ async def test_formal_unknown_write_not_replayed_and_readonly_continues(
             assert await env.scalar("SELECT state FROM xiaowei_action") == "unknown"
             assert await env.scalar("SELECT result FROM xiaowei_action") is None
             receipt = message_text(channel.sends[-1][1])
-            assert "未知" in receipt and "核对" in receipt and "工具执行失败" not in receipt
+            assert "未知" in receipt and "核对" in receipt and "工具结果不可用" not in receipt
             count = len(state.requests)
             await group_send(env, channel, f"/批准 {action_id}", "om_again", sender=B)
             assert len(state.requests) == count
@@ -582,7 +582,7 @@ async def test_expired_cancel_never_proposed_or_written(
             assert len(env.scripts.calls[asked]) == 2
             assert await env.scalar("SELECT count(*) FROM xiaowei_evidence") == 0
             receipt = message_text(group_channel.sends[-1][1])
-            assert "已到期" in receipt and "工具执行失败" not in receipt
+            assert "已到期" in receipt and "工具结果不可用" not in receipt
 
 
 async def test_large_matching_response_discloses_unknown_count(
@@ -667,7 +667,7 @@ async def test_official_proposal_rejection_keeps_prior_evidence_and_explains_rea
                 assert await env.scalar("SELECT count(*) FROM xiaowei_evidence") == 1
                 assert await env.scalar("SELECT tool_id FROM xiaowei_evidence") == status_tool
                 receipt = message_text(group_channel.sends[-1][1])
-                assert expected[problem] in receipt and "工具执行失败" not in receipt
+                assert expected[problem] in receipt and "工具结果不可用" not in receipt
                 assert "0.34.1" in receipt
                 assert all(method == "GET" for method, _, _ in state.requests)
                 if problem == "regex":
@@ -725,7 +725,7 @@ async def test_preparation_filter_400_is_specific_and_keeps_used_budget(
             assert await env.scalar("SELECT count(*) FROM xiaowei_evidence") == 1
             assert len(state.requests) == 2 and not state.writes
             receipt = message_text(group_channel.sends[-1][1])
-            assert "筛选条件" in receipt and "工具执行失败" not in receipt
+            assert "筛选条件" in receipt and "工具结果不可用" not in receipt
             assert "0.34.1" in receipt and "secret-canary" not in receipt
 
 
@@ -776,7 +776,7 @@ async def test_unclassified_proposal_failure_still_stops_without_action(
             assert len(env.scripts.calls[asked]) == 1
             assert await env.scalar("SELECT count(*) FROM xiaowei_action") == 0
             assert await env.scalar("SELECT count(*) FROM xiaowei_evidence") == 0
-            assert "工具执行失败" in message_text(group_channel.sends[-1][1])
+            assert "工具结果不可用" in message_text(group_channel.sends[-1][1])
             assert len(state.requests) == 1 and not state.writes
 
 
@@ -860,7 +860,7 @@ async def test_official_create_post400_is_rejected_and_negative_still_accepted(
             receipt = message_text(group_channel.sends[-1][1])
             if expected_state == "rejected":
                 assert "未执行" in receipt and "重新提出" in receipt and "匹配器" in receipt
-                assert "未知" not in receipt and "工具执行失败" not in receipt
+                assert "未知" not in receipt and "工具结果不可用" not in receipt
                 assert (
                     await env.scalar(
                         "SELECT failure_code FROM xiaowei_request "
@@ -925,7 +925,7 @@ async def test_official_write_with_lost_response_stays_unknown_and_never_replays
             ) as client:
                 assert len(client.get("/api/v2/silences").json()) == 1
             receipt = message_text(group_channel.sends[-1][1])
-            assert "未知" in receipt and "人工核对" in receipt and "工具执行失败" not in receipt
+            assert "未知" in receipt and "人工核对" in receipt and "工具结果不可用" not in receipt
             assert "动作未执行" not in receipt
             assert (
                 await env.scalar(
