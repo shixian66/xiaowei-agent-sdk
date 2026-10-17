@@ -211,7 +211,8 @@ async def send_complete_delivery(
             update={
                 "content": "分析与建议（模型推断）\n"
                 + "\n".join(
-                    f"{i.text}（依据：{'、'.join(i.evidence_ids)}）" for i in delivery.analysis
+                    f"{i.text}（依据：{'、'.join(map(delivery.result_label, i.evidence_ids))}）"
+                    for i in delivery.analysis
                 )
                 + ("\n" + delivery.monitoring_notice if delivery.monitoring_notice else ""),
                 "feishu_text": None,

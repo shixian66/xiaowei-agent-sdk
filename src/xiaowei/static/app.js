@@ -38,14 +38,19 @@
     }
   };
 
-  const factTable = (fact) => {
+  // 用户可见编号按本次引用顺序生成，不展示内部证据编号。
+  const resultLabel = (delivery, id) => {
+    const index = delivery.evidence_ids.indexOf(id);
+    return index < 0 ? "历史结果" : `结果 ${index + 1}`;
+  };
+  const factTable = (fact, label) => {
     const box = el("div", "fact");
     const brief = fact.view === "brief";
     const details = el("details", "evidence");
     details.append(el("summary", "", brief ? "查看获准原文与查询信息" : "查看依据与查询信息"));
     box.append(el("p", "meta", `采集于 ${fact.captured_at}`));
     const meta = [`来源 ${fact.tool_id}`, `目标 ${fact.target_id}`];
-    (brief ? box : details).append(el("p", "meta", `[${fact.evidence_id}] ${meta.join(" · ")}`));
+    (brief ? box : details).append(el("p", "meta", `${label} · ${meta.join(" · ")}`));
     if (brief && fact.summary) box.append(el("p", "content fact-summary", fact.summary));
     if (fact.truncated) box.append(el("p", "note", "结果已截断，当前显示的不是全部结果"));
     if (fact.note) box.append(el("p", "note", `说明：${fact.note}`));
@@ -94,13 +99,16 @@
         if (data.delivery.monitoring_notice) {
           item.append(el("p", "meta", data.delivery.monitoring_notice));
         }
-        for (const fact of data.delivery.facts) item.append(factTable(fact));
+        for (const fact of data.delivery.facts) {
+          item.append(factTable(fact, resultLabel(data.delivery, fact.evidence_id)));
+        }
         if (data.delivery.analysis.length) {
           const analysis = el("section", "analysis");
           analysis.append(el("p", "meta", "分析与建议（模型推断）"));
           for (const inference of data.delivery.analysis) {
             analysis.append(el("p", "content", inference.text));
-            analysis.append(el("p", "meta", `依据：${inference.evidence_ids.join(", ")}`));
+            const basis = inference.evidence_ids.map((id) => resultLabel(data.delivery, id));
+            analysis.append(el("p", "meta", `依据：${basis.join("、")}`));
           }
           item.append(analysis);
         }

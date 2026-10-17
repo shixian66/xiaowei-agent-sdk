@@ -103,15 +103,17 @@ def test_facts_visible_once_analysis_multiline_and_details_folded() -> None:
     message = build_feishu_message(delivery(source, analysis="第一行\n第二行"), 3500, "oc_test")
     assert message["card"]["schema"] == "2.0"
     visible = "\n".join(text_parts(message, folded=False))
-    assert "ev_original" not in visible and "2026-10-09T11:47:56+00:00" not in visible
-    assert "ev_original" in "\n".join(text_parts(message))
+    assert "2026-10-09T11:47:56+00:00" not in visible
+    # 用户只见结果编号，内部证据编号不出现在卡片任何位置（含折叠依据）。
+    assert "ev_original" not in "\n".join(text_parts(message))
+    assert "依据：结果 1 · 来源" in "\n".join(text_parts(message))
     assert source.note in visible
     assert "分析与建议（模型推断）" in visible and "第一行\n第二行" in visible
     assert visible.count('"orders"') == 1
     assert "SELECT name" not in visible and "next_cursor" not in visible
     all_text = "\n".join(text_parts(message))
     assert "SELECT name FROM shop.orders LIMIT 5" in all_text
-    assert "依据：ev_original" in all_text
+    assert "依据：结果 1 · 来源" in all_text and "ev_original" not in all_text
     assert visible.index("分析与建议") < visible.index('"orders"')
     assert "旧转义文字" not in all_text
 
@@ -316,7 +318,8 @@ def test_six_sources_and_wide_results_use_plain_fields_after_platform_table_limi
     )
     message = build_feishu_message(delivery(*sources), 3500, "oc_test")
     assert len(tables(message)) == 5
-    assert all(f"ev_{i}" in "\n".join(text_parts(message)) for i in range(6))
+    assert all(f"依据：结果 {i + 1} · 来源" in "\n".join(text_parts(message)) for i in range(6))
+    assert "ev_" not in "\n".join(text_parts(message))
     assert '"5"' in "\n".join(text_parts(message))
 
 

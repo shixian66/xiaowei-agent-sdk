@@ -104,15 +104,15 @@ def _fence(value: str, language: str = "text") -> str:
     return f"{marker}{language}\n{value}\n{marker}"
 
 
-def _fact_section(fact: DeliveryFact, *, expand_brief: bool) -> _Section:
+def _fact_section(fact: DeliveryFact, label: str, *, expand_brief: bool) -> _Section:
     meta = f"来源 {fact.tool_id} · 目标 {fact.target_id} · 采集于 {fact.captured_at.isoformat()}"
     notices = tuple(([f"说明：{fact.note}"] if fact.note else []) + list(fact_limit_notices(fact)))
     if fact.view == "brief" and not expand_brief:
         if fact.summary is None:
             raise ValueError("历史摘要缺失")
-        return _Section("fact", f"证据 {fact.evidence_id}", fact.summary, meta, notices)
+        return _Section("fact", label, fact.summary, meta, notices)
     # 显式文件可在当前权限下展开原值；自动换载体保持所选摘要语义。
-    return _Section("fact", f"证据 {fact.evidence_id}", _fact_json(fact), meta, notices, fact)
+    return _Section("fact", label, _fact_json(fact), meta, notices, fact)
 
 
 def _sections(delivery: Delivery, *, expand_brief: bool) -> list[_Section]:
@@ -126,7 +126,10 @@ def _sections(delivery: Delivery, *, expand_brief: bool) -> list[_Section]:
                 "模型生成，未经系统核实",
             )
         )
-    parts.extend(_fact_section(fact, expand_brief=expand_brief) for fact in delivery.facts)
+    parts.extend(
+        _fact_section(fact, delivery.result_label(fact.evidence_id), expand_brief=expand_brief)
+        for fact in delivery.facts
+    )
     if delivery.monitoring_notice:
         parts.append(_Section("notice", "未核实来源", delivery.monitoring_notice))
     for inference in delivery.analysis:
@@ -135,7 +138,8 @@ def _sections(delivery: Delivery, *, expand_brief: bool) -> list[_Section]:
                 "analysis",
                 "分析与建议",
                 inference.text,
-                "模型推断，未经系统核实；依据：" + "、".join(inference.evidence_ids),
+                "模型推断，未经系统核实；依据："
+                + "、".join(map(delivery.result_label, inference.evidence_ids)),
             )
         )
     if delivery.session_notice:

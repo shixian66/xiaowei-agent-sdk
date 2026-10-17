@@ -31,8 +31,9 @@ def test_brief_card_summary_visible_original_folded():
     message = build_feishu_message(delivery(source), 3500, "oc_test")
     visible = "\n".join(text_parts(message, folded=False))
     assert source.summary in visible
-    assert "ev_original" not in visible and source.note in visible
-    assert "ev_original" in "\n".join(text_parts(message))
+    assert source.note in visible
+    assert "ev_original" not in "\n".join(text_parts(message))
+    assert "依据：结果 1 · 来源" in "\n".join(text_parts(message))
     assert "R3_ORIGINAL_VALUE" not in visible
     assert "R3_ORIGINAL_VALUE" in "\n".join(text_parts(message))
     assert not any(e["tag"] == "table" for e in message["card"]["body"]["elements"])

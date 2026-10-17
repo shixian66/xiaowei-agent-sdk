@@ -129,14 +129,24 @@ async def test_only_supported_returned_row_count_is_summarized(
             assert fact.summary is None
 
 
-@pytest.mark.parametrize(
-    "entries",
-    [
-        [{"evidence_id": "ID", "view": "brief"}, {"evidence_id": "ID", "view": "full"}],
-        [{"evidence_id": "NOT_CITED", "view": "brief"}],
-    ],
-)
-async def test_display_entries_must_be_unique_and_cited(postgres_url: URL, entries):
+async def test_conflicting_display_entries_normalize_to_full(postgres_url: URL):
+    grants = Grants()
+    grants.grant("alice", TOTAL_TOOL)
+    async with ready_engine(postgres_url) as engine:
+        evidence = store(engine, grants, Clock(), tools())
+        result = await recorded(evidence, context())
+        entries = [
+            {"evidence_id": result.evidence_id, "view": "brief"},
+            {"evidence_id": result.evidence_id, "view": "full"},
+        ]
+        delivery = await evidence.validate_answer(
+            selected([result.evidence_id], entries), context(turn="next")
+        )
+        assert [f.view for f in delivery.facts] == ["full"]
+
+
+@pytest.mark.parametrize("entries", [[{"evidence_id": "NOT_CITED", "view": "brief"}]])
+async def test_display_entries_must_be_cited(postgres_url: URL, entries):
     grants = Grants()
     grants.grant("alice", TOTAL_TOOL)
     async with ready_engine(postgres_url) as engine:

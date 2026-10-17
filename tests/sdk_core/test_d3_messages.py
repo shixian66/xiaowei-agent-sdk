@@ -40,7 +40,7 @@ def test_answer_precedes_results_and_sources_are_folded() -> None:
     assert source.evidence_id not in visible and source.captured_at.isoformat() not in visible
     assert "查看依据" in visible and "模型推断" in visible
     full = "\n".join(text_parts(message))
-    assert source.tool_id in full and source.evidence_id in full
+    assert source.tool_id in full and source.evidence_id not in full and "依据：结果 1" in full
     assert source.captured_at.isoformat() in full and source.metadata["sql"] in full
 
 
@@ -77,7 +77,8 @@ def test_inference_cannot_impersonate_numbered_results_or_hide_its_references(
     assert len(panels) == 2
     for number, (panel, source) in enumerate(zip(panels, sources, strict=True), 1):
         assert f"结果 {number}" in panel["header"]["title"]["content"]
-        assert source.evidence_id in "\n".join(text_parts(panel))
+        assert f"依据：结果 {number} · 来源 {source.tool_id}" in "\n".join(text_parts(panel))
+        assert source.evidence_id not in "\n".join(text_parts(panel))
 
 
 async def test_gateway_inference_stays_before_a_structural_results_boundary(env: Env) -> None:
@@ -280,7 +281,7 @@ def test_independent_approval_card_keeps_existing_material_and_labels() -> None:
     assert card["card"]["header"]["title"]["content"] == "小维 · 工具结果"
     visible = text_parts(card, folded=False)
     assert (
-        f"[{material.evidence_id}] 来源 {material.tool_id} · 目标 {material.target_id}\n"
+        f"结果 1 · 来源 {material.tool_id} · 目标 {material.target_id}\n"
         f"采集于 {material.captured_at.isoformat()}" in visible
     )
     assert "说明：" + material.note in visible

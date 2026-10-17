@@ -69,7 +69,8 @@ def test_report_preserves_evidence_and_has_no_active_content(format_: str) -> No
     assert report.filename == f"xiaowei-report.{format_}"
     assert report.digest and len(report.digest) == 64
     body = report.content.decode("utf-8")
-    assert "ev_report" in body and "fat" in body
+    assert "结果 1" in body and "依据：结果 1" in body and "fat" in body
+    assert "ev_report" not in body
     assert "SELECT" in body and "需要复核" in body
     if format_ == "html":
         assert "<script>" not in body and "https://invalid.example" in body
@@ -110,7 +111,7 @@ def test_report_displays_invisible_controls_as_literals(format_: str) -> None:
 def test_partial_monitoring_report_keeps_unverified_notice() -> None:
     delivery = _delivery("md").model_copy(update={"monitoring_notice": "CPU 来源未核实"})
     body = build_report(delivery).content.decode()
-    assert "ev_report" in body
+    assert "结果 1" in body and "ev_report" not in body
     assert "未核实来源" in body and "CPU 来源未核实" in body
 
 
@@ -955,7 +956,7 @@ async def test_real_sdk_sends_one_file_after_one_upload_to_local_endpoint(
             channel.stop(join_timeout=5)
     assert len(uploads) == len(messages) == 1
     assert b"xiaowei-report.html" in uploads[0]
-    assert b"ev_" in uploads[0]
+    assert "结果 1".encode() in uploads[0] and b"ev_" not in uploads[0]
     path, sent_body = messages[0]
     assert path == (
         "/open-apis/im/v1/messages/om_origin/reply" if reply_to else "/open-apis/im/v1/messages"

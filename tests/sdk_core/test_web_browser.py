@@ -207,14 +207,15 @@ async def test_compact_facts_and_multiline_analysis(
         source = await page.evaluate(
             f"{item(0)}.querySelector('details.evidence p.meta').textContent"
         )
-        evidence_id = re.search(r"\[(ev_[^\]]+)\]", source)
-        assert evidence_id is not None
+        # 用户只见本次结果编号，内部证据编号不进入页面。
+        assert source.startswith("结果 1 · 来源 ") and "ev_" not in source
         assert (
             await page.evaluate(
                 f"{item(0)}.querySelector('.analysis > p.meta:last-child').textContent"
             )
-            == f"依据：{evidence_id.group(1)}"
+            == "依据：结果 1"
         )
+        assert "ev_" not in await page.evaluate(f"{item(0)}.innerText")
         assert await page.evaluate(f"{item(0)}.querySelector('details.evidence').open") is False
         await page.evaluate(f"{item(0)}.querySelector('details.evidence summary').click()")
         expanded = await page.evaluate(f"{item(0)}.innerText")

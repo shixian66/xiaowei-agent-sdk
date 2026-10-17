@@ -78,6 +78,7 @@ _FAILURE_CODES: Mapping[TurnReason, CallerFailureCode] = {
     "turn_limit": "model_failed",
     "timeout": "model_failed",
     "answer_rejected": "evidence_failed",
+    "query_unfinished": "evidence_failed",
     "tool_failed": "evidence_failed",
     "session_unavailable": "session_failed",
     "scope_unverifiable": "scope_unverifiable",
