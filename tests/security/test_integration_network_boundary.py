@@ -1,17 +1,7 @@
-"""引入 integration 之后，默认路径仍然**没有**网络。
+"""默认阻断网络；产品协议测试仅按用例放行 loopback。
 
-M4 给 ``tests/integration/`` 开了一个针对单个 host 的 socket 放行。放行本身是必要
-的，危险的是它的**范围**——放宽一格就等于给全套件解除封锁，而且不会有任何用例失败。
-这三条钉住范围：
-
-1. 目录之外仍被拦（与 ``test_no_network.py`` 互补：那边断言"默认被拦"，这边断言
-   "引入 integration 之后默认仍被拦"）。
-2. 放行配置必须是**逐 item 的 marker**，不能是全局开关。
-3. 仓库里不得出现裸用 ``socket_enabled``，**连推荐它的散文都不行**。
-
-第 3 条针对的是 pytest-socket 0.8.1 的一个实测行为：``pytest_runtest_setup`` 命中
-``socket_enabled`` 分支后**直接 return**，``allow_hosts`` 再也不会被解析，``connect``
-完全不受保护。它看起来像"放行"，实际是全开。
+pytest-socket 的 socket_enabled 会跳过 allow_hosts 约束，因此禁止使用；
+全局 addopts 同样不得放行网络。
 """
 
 import ast
@@ -72,10 +62,9 @@ def test_no_test_uses_the_bare_socket_enabled_fixture() -> None:
 _BAN_EXPLAINERS = frozenset(
     {
         "tests/security/test_integration_network_boundary.py",
-        "tests/integration/conftest.py",
     }
 )
-"""唯一被许可提到 ``socket_enabled`` 的两个文件：一个是禁令本身，一个说明为何绕开它。"""
+"""只有本文件解释被禁的 ``socket_enabled`` 用法。"""
 
 
 def test_no_file_under_tests_even_recommends_the_banned_fixture() -> None:
@@ -86,7 +75,7 @@ def test_no_file_under_tests_even_recommends_the_banned_fixture() -> None:
     判红的用例，然后以为是护栏坏了。
 
     AST 扫描看不到这种漂移：docstring 里没有 ``ast.Name`` 也没有 ``ast.Attribute``。
-    因此这里按**原文**扫，只豁免解释禁令本身的两个文件。
+    因此这里按**原文**扫，只豁免解释禁令本身的文件。
     """
     offenders = [
         str(path.relative_to(_ROOT))
@@ -105,13 +94,12 @@ def test_the_ban_explainers_still_exist_and_still_explain() -> None:
         assert "socket_enabled" in path.read_text(encoding="utf-8"), relative
 
 
-def test_the_allowlist_is_built_from_the_dsn_host_only() -> None:
-    """放行清单只能来自 DSN 解析出的 host，不能是通配或网段。
+def test_sdk_allowlist_is_only_loopback() -> None:
+    """SDK 集成用例只放行隔离测试实例所在的 loopback。"""
+    from tests.sdk_core.postgres_harness import LOOPBACK
 
-    形态照抄 CI 里 gitleaks allowlist 的窄度自检：允许清单本身也要被检查，否则
-    "加一条就好了"会一点点把它变成 ``0.0.0.0/0``。
-    """
-    source = (_ROOT / "tests/integration/conftest.py").read_text(encoding="utf-8")
+    assert LOOPBACK == "127.0.0.1"
+    source = (_ROOT / "tests/sdk_core/conftest.py").read_text(encoding="utf-8")
     tree = ast.parse(source)
     marker_calls = [
         node
@@ -123,5 +111,5 @@ def test_the_allowlist_is_built_from_the_dsn_host_only() -> None:
     assert len(marker_calls) == 1, "allow_hosts 只应在一处构造"
     (argument,) = marker_calls[0].args
     assert isinstance(argument, ast.List), "放行清单必须是显式列表"
-    assert len(argument.elts) == 1, "只放行 DSN 的那一个 host"
-    assert isinstance(argument.elts[0], ast.Name) and argument.elts[0].id == "host"
+    assert len(argument.elts) == 1, "只放行 loopback"
+    assert isinstance(argument.elts[0], ast.Name) and argument.elts[0].id == "LOOPBACK"

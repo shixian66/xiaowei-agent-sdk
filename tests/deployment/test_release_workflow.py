@@ -10,6 +10,13 @@ ROOT = Path(__file__).resolve().parents[2]
 WORKFLOW = ROOT / ".github/workflows/publish-amd64.yml"
 
 
+def test_build_context_excludes_tests_git_and_secrets() -> None:
+    ignored = (ROOT / ".dockerignore").read_text(encoding="utf-8").splitlines()
+    assert "tests" in ignored
+    assert ".git" in ignored
+    assert ".secrets" in ignored
+
+
 def load_workflow():
     # BaseLoader 只构造字典/列表/字符串，且不会把 GitHub 的 `on` 键解析成 YAML 1.1 布尔值。
     return yaml.load(

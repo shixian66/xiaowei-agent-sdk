@@ -6,7 +6,6 @@ venv
 env
 tests
 docs
-xiaowei_agent
 AGENTS.md
 ARCHITECTURE.md
 AGENT_HANDOFF.md

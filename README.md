@@ -13,11 +13,11 @@
 - 继续追问“这条 SQL 为什么慢”，查看估算执行计划（不执行原查询），得到有依据的优化建议与局限说明。
 - 在 Web 或飞书连续对话，查看实际 SQL、有限结果和诊断依据。
 
-查询与诊断共用一个业务 Agent。StarRocks 通过受治理 function tools 和本地 Adapter 直连；数据库 MCP 暂缓。通用 MCP Client Integration 保留用于将来其他能力；两条工具路径均复核权限、过滤结果并验证 Evidence。
+查询与诊断共用一个业务 Agent。StarRocks 通过受治理 function tools 和本地 Adapter 直连；数据库 MCP 暂缓。通用 MCP Client Integration 用于获准的监控等外部工具；两条工具路径均复核权限、过滤结果并验证 Evidence。
 
 **P2.5 与后续增量：** P2.5 开放账号实际 SELECT 范围、复杂 SQL、多集群和单 Agent 自然语言工具选择；随后增加指定飞书群共享与排队，均在 P3 前完成。产品边界见 [ARCHITECTURE](ARCHITECTURE.md#p25-scope)，实施顺序见 [DEVELOPMENT_PLAN](DEVELOPMENT_PLAN.md#6-p25-与飞书单群增量)。下文命令、配置和诊断用法描述当前主线；配置已改为 `targets` 多目标格式（P2.5 Task 1），数据范围改为只读账号实际可 SELECT 的对象（P2.5 Task 2）；跨库与复杂 SQL 已实现（P2.5 Task 3），搜表分页与多库慢查询（Task 6）、普通消息由单 Agent 判断是否查询（Task 7）均已合入。原 P2.5 Task 4 已取消，查询沿用权限、SQLGuard 和运行限额，EXPLAIN LOGICAL 用于按需诊断（见上述产品边界）。P2.5 的离线与隔离服务证据已齐（Task 8，见 AGENT_HANDOFF）；真实模型、用户 StarRocks 与飞书的实战验证在 P3。
 
-**P4 监控增量（分片开发中）：** 同一 Agent 自主调查获准监控源。R1a/R1b、只读故障续查及 P2 已合入（PR #67/#68/#70/#71）：Prometheus 指标/标签/元数据/已加载规则发现、范围查询和有限 PromQL 修正。G3 已随 PR #72 合入，增加 Grafana 仪表盘搜索、摘要、面板原始表达式、数据源目录和标记读取；定义与实时指标分列，不执行 Grafana 代理查询。复用正式 `serve` 与 Web/飞书入口，接口与限制见[监控计划 §3.1–§3.7](docs/superpowers/plans/2026-10-09-monitoring-mcp.md)。离线实现不证明真实模型调查能力或公司监控环境已验收；A4 已随 PR #73 合入，以 API v2 直连外部独立 Alertmanager，读取告警/分组/静默/接收器/状态并复用同一治理与证据；W5 群审批底座已随 PR #74 离线合入，用合成动作验证；S6 已合入经群逐次批准的创建/取消静默；SDK-A 已随 PR #89 离线合入，改用原生暂停/恢复，默认关闭；SDK-B 已随 PR #93 离线合入，复用官方 MCP 连接生命周期；SDK-C 等价评估未发现可删除薄层，已随 PR #94 合入；D7 经典 Dashboard 创建/修改为离线候选，独立写端与原生 v2 只读的选配见[运维说明](deploy/OPERATIONS.md#选配经典-dashboard-创建和修改)，尚未合入。官方服务与正式入口离线验证不代表生产写已开放；群流程与迁移见[运维说明](deploy/OPERATIONS.md#监控群审批底座)。产品与权限边界见 [监控接入设计](ARCHITECTURE.md#monitoring-mcp)，当前证据见 [handoff](AGENT_HANDOFF.md)。主配置样例仍不启用监控源；选配方式见[Prometheus](deploy/OPERATIONS.md#选配-prometheus-监控源)、[Grafana](deploy/OPERATIONS.md#选配-grafana-监控源)与[Alertmanager 运维说明](deploy/OPERATIONS.md#选配-alertmanager-监控源)。
+**监控能力（P4）。** 同一 Agent 可调查获准的 Prometheus 指标/标签/规则和范围结果、Grafana 仪表盘/面板/数据源/标记，以及独立 Alertmanager 的告警/分组/静默/接收器/状态；Grafana 定义与实时指标分开，不执行 Grafana 代理查询。指定群可选配逐次批准的静默创建/取消、经典 Dashboard 创建/修改、数据源非秘密字段创建/修改和 Annotation 创建，使用 SDK 原生暂停/恢复；这些实现不代表公司生产写已开放。数据源密码目前由管理员在 Grafana UI 配置，私聊密码命令尚未实现。主配置默认不启用监控源；选配、认证、迁移与开放门槛见 [Prometheus](deploy/OPERATIONS.md#选配-prometheus-监控源)、[Grafana](deploy/OPERATIONS.md#选配-grafana-监控源)、[Alertmanager](deploy/OPERATIONS.md#选配-alertmanager-监控源)、[Dashboard 写](deploy/OPERATIONS.md#选配经典-dashboard-创建和修改)和[群审批说明](deploy/OPERATIONS.md#监控群审批底座)。产品边界见 [ARCHITECTURE](ARCHITECTURE.md#monitoring-mcp)，合入版本、验证证据与缺口集中在 [handoff](AGENT_HANDOFF.md)。
 
 ## 最小产品形态
 
@@ -52,13 +52,13 @@ OpenAI Agents SDK 负责 Agent 运行，实际推理可由不同厂商提供。�
 
 MCP 负责标准化工具接入，不能替代业务授权。只有参数含义、风险和结果策略已有支持的服务，才能主要通过配置注册；并非填写一个地址就可安全使用任意工具。
 
-首版不执行数据修改、配置变更或优化建议；不建设复杂管理后台、多 Agent 或分布式任务平台。
+P1–P3 的 StarRocks 能力不执行数据修改、配置变更或优化建议；监控写仅限上文 P4 已批准的动作；不建设复杂管理后台、多 Agent 或分布式任务平台。
 
-未来接入生产变更时，数据库修改、配置调整、取消查询、重启与发布统一按具体 Action 管理。所有生产写操作都先展示目标、改动和影响，取得有审批权限的用户明确确认，再复核权限后执行；目标或关键参数变化需要重新确认。“帮我诊断/优化”不代表同意执行生产变更。
+已接入的监控写按具体 Action 管理；其他数据库修改、配置调整、取消查询、重启与发布仍须单独批准范围。所有生产写操作都先展示目标、改动和影响，取得有审批权限的用户明确确认，再复核权限后执行；目标或关键参数变化需要重新确认。“帮我诊断/优化”不代表同意执行生产变更。
 
 ## 怎样开始
 
-唯一正式命令是 `xiaowei`（`python -m xiaowei` 相同）。它已用测试 PostgreSQL、脚本模型与替身完成离线验证；P3-A 和 P3-B 已通过独立审查并合入，升级、回退和隔离恢复在本机 Linux/arm64 容器环境验证。amd64 发行包由手动发布流程生成，应用镜像以离线文件随包交付；真实模型、用户 StarRocks、真实飞书与公司服务器实战仍未完成（见 handoff）。旧 CLI、Worker 或旧 Compose 命令不是产品入口。
+唯一正式命令是 `xiaowei`（`python -m xiaowei` 相同）。它已用测试 PostgreSQL、脚本模型与替身完成离线验证；P3-A 和 P3-B 已通过独立审查并合入，升级、回退和隔离恢复在本机 Linux/arm64 容器环境验证。amd64 发行包由手动发布流程生成，应用镜像以离线文件随包交付；真实模型、用户 StarRocks、真实飞书与公司服务器的实战验收仍未完成（见 handoff）。旧 CLI、Worker 或旧 Compose 命令不是产品入口。
 
 实施时需要：
 
@@ -109,7 +109,7 @@ uv run --locked xiaowei --config xiaowei.json requests resend --subject <发起�
 
 **应用表版本 12、升级与恢复。** 版本 5 保存个人/群 owner 与群回复目的地；版本 6 把数据库与 `XW_DIGEST_KEY` 的不可逆指纹绑定；版本 7 新增监控 Action 表；v8 新增请求会话状态，v9 新增飞书会话原图表，v10 保存 SDK 暂停/恢复检查点与专用 Action 作废原因，v11 新增原请求绑定的飞书报告文件表，v12 新增最小交付分项与父请求语义版本，SDK 历史表不变。v8/v9 的旧待批 Action 升级后作废、需重新提出，成功/未知事实保留。`serve`、升级、清理和重发遇到错密钥都会在业务 I/O 前拒绝。v1–v5 只有在操作者确认 `.env` 仍是原部署密钥并已完成配套备份后，才可执行 `storage upgrade --bind-existing-digest-key`；程序不能替操作者证明旧密钥来源。v6–v11 升到 v12 使用普通 `storage upgrade`，必须保留原密钥绑定，缺失或错配不会自动修补。普通启动不建表、不迁移，旧程序也拒绝新 schema。回退到不认识新 schema 的旧程序时，须使用旧镜像、旧配置和迁移前备份恢复出的隔离数据库，不在原库降级。容器首次安装、普通升级/回退、原子 `pg_dump`、隔离 `pg_restore`、主机重启后的启动和排障命令统一见 [容器运维说明](deploy/OPERATIONS.md)。运行镜像与发行归档不包含根文档、源码测试或开发工具。
 
-**数据范围（自动发现）。** 不再配置表与列：小维每隔 `schema_limits.refresh_seconds` 读取一次 `information_schema` 中全部用户库的表、视图与列，并对每个对象做一次不返回数据的 `SELECT 1 … WHERE 1 = 0` 探测，只有只读账号确实能 SELECT 的对象才进入范围。查询与执行计划可引用其中任何库的对象并跨库 JOIN：表名写成 `库名.表名`，只在一个库中存在的表可以省略库名（不使用连接的默认库猜测；多个库都有同名表时要求写明库名）。`list_tables`、`describe_table`、`describe_table_layout` 在返回前会再次确认对象仍可读。
+**数据范围（自动发现）。** 不再配置表与列：小维每隔 `schema_limits.refresh_seconds` 读取一次 `information_schema` 中全部用户库的表、视图与列，并对每个对象做一次不返回数据的 `SELECT 1 … WHERE 1 = 0` 探测，只有只读账号确实能 SELECT 的对象才进入范围。查询与执行计划可引用其中任何库的对象并跨库 JOIN：工具 SQL 中的物理表必须写成 `库名.表名`，不使用连接默认库或唯一匹配隐式补全。用户可以在提问中简写；工具收到未限定表名时先拒绝并返回有限候选，唯一候选可由 Agent 补库名后重试并告知用户，多个候选须澄清。`list_tables`、`describe_table`、`describe_table_layout` 在返回前会再次确认对象仍可读。
 
 **列库（`list_databases`）。** 分页列出当前账号有可查询表或视图的数据库，只返回库名；不含空库、系统库或没有可读对象的库。每库确认至少一个对象当前可读，交付与历史读取仍复核该对象权限。每页最多探测 32 个候选对象；撤权库对象较多时可能出现空页但 `next_cursor` 非空，须继续取到 null 才算列完。页大小为 1 到 `policy.max_rows`。新工具需同时加入 `data_policy.model_tools` 和对应 `access.grants`（群还需加入 `feishu.group.tools`），现有部署不会自动获得该权限；示例配置已列出。
 
@@ -143,21 +143,21 @@ uv run --locked xiaowei --config xiaowei.json requests resend --subject <发起�
 
 没有任何集群配置 `audit` 时不提供 `list_slow_queries`，配置开放或授予它会在启动时报错；只给部分集群配置时，只有这些集群可以使用它，其他集群的调用在连接前拒绝。读取该集群所有库的审计记录，`database` 参数不为 null 时只读执行时当前库为它的记录。原文中未写库名的表按该记录执行时的当前库（结果中的 `database` 列）解析，与 StarRocks 执行时相同；当时没有当前库的记录只接受写明库名的原文。只列出原文引用的对象、列与函数全部获准的查询，列表可能少于上限，为空也不代表没有慢查询；结果给出 `checked_candidates`、各 `omitted_*` 原因和 `unchecked_candidates`，`row_count` 仍仅表示实际返回行数。计数只覆盖本次已读取候选，`more_candidates=true` 表示候选读取已截断、之外数量未知；数据库侧 `isQuery` 与 catalog 过滤的条数也未知，需要完整审计口径时直接查询获准审计表。结果标记截断表示列表不完整：候选读满 `candidate_rows` 仍有剩余、候选达到字节上限、已列满 `max_rows` 而还有未检查的候选（即使它们最终可能都不获准），或获准的记录因单值或结果字节上限没有列出。插件刚安装后首批记录可能缺失；审计表任一行格式异常（如时间为空、指标不是整数）时整个工具失败，而不是返回部分结果。候选读取与原文检查各有一个客户端期限，最坏总耗时约为 2 倍 `client_timeout_seconds`。审计证据字段变更会使旧慢查询证据失效，无需数据库迁移。
 
-**开发验证**（只用合成数据、脚本模型、替身与隔离的测试 PostgreSQL，不连接任何真实模型或外部服务）：
+**开发验证**（只用合成数据、脚本模型、替身与隔离的测试 PostgreSQL；发行测试需要本机 Docker 构建镜像，不调用真实模型或公司服务）：
 
 ```bash
 uv sync --locked --extra dev
 docker compose -p xiaowei-sdk-test -f compose.sdk-test.yml up -d --wait   # 或独立的 docker-compose
 SDK_TEST_POSTGRES_URL=postgresql+asyncpg://postgres@127.0.0.1:55432/postgres \
-  uv run --locked --extra dev python -m pytest tests/sdk_core tests/p1b -q
-uv run --locked --extra dev ruff check src/xiaowei tests/sdk_core tests/p1b
-uv run --locked --extra dev mypy src/xiaowei
+  uv run --locked --extra dev python -m pytest -q
+uv run --locked --extra dev ruff check .
+uv run --locked --extra dev mypy src
 docker compose -p xiaowei-sdk-test -f compose.sdk-test.yml down -v
 ```
 
 `SDK_TEST_POSTGRES_URL` 只能是上面这一个测试地址；未设置时数据库用例明确失败而不是跳过。CI 的 integration job 以同样方式运行完整测试。
 
-P3-A 与 P3-B 已经独立审查并合入；精简发行包、两容器 Compose、配置预检、首次初始化与停止步骤见 [deploy/OPERATIONS.md](deploy/OPERATIONS.md)。小维连接已有 StarRocks 和模型 API，不要求在服务器部署模型；应用配置、`.env`、CA 与 PostgreSQL 命名卷由操作者保留。amd64 发行包自带应用镜像文件（`docker load` 导入，不需要镜像仓库）；公司服务器与真实服务验收仍待 P3-C。旧根目录 Compose 文件仍属于历史实现。
+P3-A 与 P3-B 已经独立审查并合入；精简发行包、两容器 Compose、配置预检、首次初始化与停止步骤见 [deploy/OPERATIONS.md](deploy/OPERATIONS.md)。小维连接已有 StarRocks 和模型 API，不要求在服务器部署模型；应用配置、`.env`、CA 与 PostgreSQL 命名卷由操作者保留。amd64 发行包自带应用镜像文件（`docker load` 导入，不需要镜像仓库）；公司服务器与真实服务验收仍待 P3-C。正式镜像使用 `Dockerfile.runtime`，部署使用 `deploy/compose.yaml`；根目录 `compose.sdk-test.yml` 只供隔离测试。
 
 ## 设计与开发
 
@@ -175,4 +175,4 @@ P3-A 与 P3-B 已经独立审查并合入；精简发行包、两容器 Compose�
 
 设计直接使用 [OpenAI Agents SDK](https://developers.openai.com/api/docs/guides/agents/sdk) 原生能力。旧实现只在有明确价值时提取少量业务素材，兼容旧框架不是新产品目标。
 
-M5 是 Git 历史起点，不是必须保留的架构。仓库中尚未清理的旧代码、测试、ADR 和里程碑用于历史参考，不能与上述新设计共同作为新产品规范。
+当前产品源码仅保留 `src/xiaowei`。旧 `xiaowei_agent`、专属测试、Compose/Worker/迁移入口及依赖已移除，历史可从 Git 查回；新产品仍保留旧回答和存储版本的兼容路径。旧 ADR 和里程碑仅供历史参考，不能与上述设计共同作为新产品规范。

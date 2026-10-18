@@ -1,20 +1,8 @@
-"""生产依赖面与类型检查严格度是同一条边界。
-
-M4 引入 SQLAlchemy / Alembic / asyncpg，M5 引入 FastAPI / uvicorn。
-两件事必须被机制钉住，而不是靠计划里的一句话：
-
-1. **依赖面**。M5 只新增 HTTP gateway 所需的 FastAPI / uvicorn，以及开发侧的
-   httpx / PyYAML；仍不引入 Redis、队列、Worker 框架、模型 SDK 或 LangGraph。
-   用集合相等表达比用禁用清单强：禁用清单挡不住清单外的新依赖。
-
-2. **``asyncpg`` 不得被 ``src/`` 直接 import**。T0 实测：``asyncpg`` 0.30.0 **不带
-   ``py.typed``**，直接 import 会让 ``mypy --strict`` 报 ``import-untyped``。M4 计划
-   §5.3 给的退路是"对单个模块加 ``ignore_missing_imports``"，但那条退路不必走：
-   驱动只经 ``postgresql+asyncpg://`` 的 DSN 方言字符串被 SQLAlchemy 内部加载，
-   业务代码从不需要它的符号。**不 import 就不需要任何放宽**，全局 strict 完好。
-"""
+"""产品依赖、正式入口与严格类型检查的公共约束。"""
 
 import ast
+import io
+import tokenize
 import tomllib
 from importlib.util import find_spec
 from pathlib import Path
@@ -24,17 +12,9 @@ import pytest
 pytestmark = pytest.mark.security
 
 _ROOT = Path(__file__).resolve().parents[2]
-# 扫描整个 src/：新包 xiaowei 与过渡期旧包 xiaowei_agent 都受同一条导入禁令约束。
 _SRC = _ROOT / "src"
 
-# ``[project].dependencies`` 的包名集合——新增任何一项都必须先改这里，
-# 从而必须在 review 里被看见。P1-A Task 1 按新产品方向加入 OpenAI Agents SDK
-# （``openai-agents[sqlalchemy]``）；P1-B Task 2 按计划加入 StarRocks 驱动 ``asyncmy``（精确钉版）；
-# P1-B Task 7 加入飞书 ``lark-channel-sdk``（精确钉版）。P1-B Task 8 切换正式入口：wheel 只含新包，
-# 旧包专用的 ``alembic`` 移出生产依赖，只留在 dev（旧测试）与 legacy（旧 Compose 镜像）。
-# Vertex V1-A 把 ``src/xiaowei`` 已直接导入的 ``httpx2`` 显式声明，不再依赖 SDK 的传递依赖。
-# R12 按批准的 C1 受限格式计划显式加入 ``markdown-it-py``；E5b 图片完整解码
-# 增加 ``pillow``。闭集仍须严格相等。
+# 依赖集合变化须随实现一起审查，不接受意外加入的运行或开发依赖。
 _EXPECTED_RUNTIME_DEPENDENCIES = frozenset(
     {
         "httpx2",
@@ -63,10 +43,8 @@ _EXPECTED_DEV_DEPENDENCIES = frozenset(
         "hatchling",
         "httpx",
         "pyyaml",
-        "alembic",
     }
 )
-_EXPECTED_LEGACY_DEPENDENCIES = frozenset({"alembic"})
 
 
 def _pyproject() -> dict[str, object]:
@@ -109,11 +87,7 @@ def test_runtime_dependency_set_is_exactly_the_approved_set() -> None:
 
 
 def test_dev_dependency_set_is_exactly_the_approved_tools() -> None:
-    """M5+ 的基础设施依赖也不得从 ``dev`` 这条侧门进来。
-
-    ``dev`` 不是"随便放"的口袋：一个只在 dev 出现的 FastAPI 同样会让人开始写
-    interfaces 层，而它的准入门在 M5。
-    """
+    """开发依赖只包含当前产品测试与检查所需工具。"""
     optional = _pyproject()["project"]
     assert isinstance(optional, dict)
     dev = optional["optional-dependencies"]
@@ -124,18 +98,17 @@ def test_dev_dependency_set_is_exactly_the_approved_tools() -> None:
     assert not ({"fastapi", "uvicorn"} & _requirement_names(dev_specs))
 
 
-def test_legacy_extra_only_carries_the_old_package_migration_tool() -> None:
-    """``legacy`` 只服务旧 M5 镜像；不能成为新运行依赖的侧门。"""
+def test_only_the_dev_extra_is_declared() -> None:
+    """旧工程已移除，不保留其专属依赖入口。"""
     project = _pyproject()["project"]
     assert isinstance(project, dict)
     extras = project["optional-dependencies"]
     assert isinstance(extras, dict)
-    assert set(extras) == {"dev", "legacy"}
-    assert _requirement_names(extras["legacy"]) == set(_EXPECTED_LEGACY_DEPENDENCIES)
+    assert set(extras) == {"dev"}
 
 
 def test_wheel_and_command_only_point_at_the_new_package() -> None:
-    """正式命令与 wheel 只指向新包 ``xiaowei``；旧包源码只作历史留在工作树。"""
+    """正式命令与 wheel 只指向新包 ``xiaowei``。"""
     data = _pyproject()
     project = data["project"]
     assert isinstance(project, dict)
@@ -154,14 +127,9 @@ def test_new_package_never_imports_the_old_package() -> None:
     assert not offenders
 
 
-@pytest.mark.parametrize("package", ["sqlalchemy", "alembic"])
-def test_typed_dependency_ships_py_typed(package: str) -> None:
-    """SQLAlchemy 与 Alembic 自带 ``py.typed``，因此 strict 下无需任何放宽。
-
-    这条转红意味着上游撤回了类型标注，届时必须重新评估 §5.3.1 的结论，
-    而不是顺手加 ``ignore_missing_imports``。
-    """
-    spec = find_spec(package)
+def test_sqlalchemy_ships_py_typed() -> None:
+    """SQLAlchemy 自带类型声明，strict 检查不需要放宽。"""
+    spec = find_spec("sqlalchemy")
     assert spec is not None and spec.origin is not None
     assert (Path(spec.origin).parent / "py.typed").is_file()
 
@@ -208,6 +176,27 @@ def test_mypy_stays_globally_strict() -> None:
     assert mypy_config["strict"] is True
     assert "ignore_missing_imports" not in mypy_config
     assert "follow_imports" not in mypy_config
+
+
+def _type_ignore_comment_lines(source: str) -> list[int]:
+    lines: list[int] = []
+    for token in tokenize.generate_tokens(io.StringIO(source).readline):
+        if token.type is tokenize.COMMENT and "type: ignore" in token.string:
+            lines.append(token.start[0])
+    return lines
+
+
+def test_no_module_silences_a_type_error() -> None:
+    offenders: list[str] = []
+    for path in sorted(_SRC.rglob("*.py")):
+        for line in _type_ignore_comment_lines(path.read_text(encoding="utf-8")):
+            offenders.append(f"{path.relative_to(_SRC)}:{line}")
+    assert not offenders, offenders
+
+
+def test_the_type_ignore_detector_ignores_docstrings_and_catches_comments() -> None:
+    assert _type_ignore_comment_lines('"""说明：不许写 type: ignore。"""\n') == []
+    assert _type_ignore_comment_lines("x = 1  # type: ignore[arg-type]\n") == [1]
 
 
 def test_mypy_relaxation_is_limited_to_the_untyped_feishu_sdk() -> None:

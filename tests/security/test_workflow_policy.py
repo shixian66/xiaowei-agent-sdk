@@ -8,6 +8,7 @@
 用标准库读文本 + 精确匹配，不引入 YAML parser。
 """
 
+import ast
 import hashlib
 import re
 from collections import Counter
@@ -23,10 +24,52 @@ _LINES = _TEXT.splitlines()
 _SDK_COMPOSE = _WF.parents[2] / "compose.sdk-test.yml"
 _SDK_COMPOSE_TEXT = _SDK_COMPOSE.read_text(encoding="utf-8")
 
+
+def _declares_marker(path: Path) -> bool:
+    tree = ast.parse(path.read_text(encoding="utf-8"))
+    for stmt in tree.body:
+        if not isinstance(stmt, ast.Assign):
+            continue
+        if not any(isinstance(t, ast.Name) and t.id == "pytestmark" for t in stmt.targets):
+            continue
+        candidates = (
+            stmt.value.elts if isinstance(stmt.value, ast.List | ast.Tuple) else [stmt.value]
+        )
+        for item in candidates:
+            if (
+                isinstance(item, ast.Attribute)
+                and item.attr == "security"
+                and isinstance(item.value, ast.Attribute)
+                and item.value.attr == "mark"
+            ):
+                return True
+    return False
+
+
+def test_every_module_under_tests_security_declares_the_marker() -> None:
+    root = Path(__file__).resolve().parent
+    missing = [p.name for p in sorted(root.glob("test_*.py")) if not _declares_marker(p)]
+    assert missing == [], f"以下安全测试模块未声明 security marker: {missing}"
+
+
+def test_marker_detector_is_not_fooled_by_text(tmp_path: Path) -> None:
+    faker = tmp_path / "test_faker.py"
+    faker.write_text('"""pytestmark = pytest.mark.security"""\n', encoding="utf-8")
+    assert not _declares_marker(faker)
+    real = tmp_path / "test_real.py"
+    real.write_text("import pytest\n\npytestmark = pytest.mark.security\n", encoding="utf-8")
+    assert _declares_marker(real)
+    listed = tmp_path / "test_listed.py"
+    listed.write_text(
+        "import pytest\n\npytestmark = [pytest.mark.security, pytest.mark.slow]\n",
+        encoding="utf-8",
+    )
+    assert _declares_marker(listed)
+
+
 _EXPECTED_JOBS = (
     "tests",
     "integration",
-    "compose-smoke",
     "p3-release",
     "security-gate",
     "lint",
@@ -42,7 +85,7 @@ _EXPECTED_JOBS = (
 # 「多出的东西」，挡不住删除必需命令、重复摘要顶替、把配置挪到无关 action 下、
 # 或加 `continue-on-error` 让 gate 形同虚设。整文件摘要是唯一能覆盖全部
 # 增/删/改/移位的锚点；合法修改 workflow 时必须显式更新此常量。
-_WORKFLOW_SHA256 = "60cc129213a6b0876a7c89f57eb743d457ac6e1aba0a7fc120ea934b93448c98"
+_WORKFLOW_SHA256 = "44ae5e7fd4a68c4419d52cc7565bafb67a86e941d4e75b19e06320ba99c635e2"
 
 # ---- 闭集白名单：改动 ci.yml 必须同步更新此处，否则测试变红 ----------------
 _ALLOWED_EXPRESSIONS = {"github.ref"}
@@ -150,7 +193,7 @@ def test_single_line_run_commands_match_exactly() -> None:
     single, _ = _run_commands_and_block_digests()
     expected = Counter(
         {
-            "uv sync --extra dev --frozen": 8,
+            "uv sync --extra dev --frozen": 7,
             # 无数据库 job 排除 SDK 与 spike；两者在 integration 的 PostgreSQL 全量命令中运行。
             (
                 "python -m pytest -q --ignore=tests/sdk_core "
@@ -163,7 +206,6 @@ def test_single_line_run_commands_match_exactly() -> None:
                 "tests/deployment/test_release_workflow.py -q"
             ): 1,
             "python -m pytest -m security -q": 1,
-            "python -m scripts.compose_smoke": 1,
             "ruff check .": 1,
             "mypy src": 1,
             "uv export --frozen --no-emit-project --extra dev -o requirements-audit.txt": 1,
