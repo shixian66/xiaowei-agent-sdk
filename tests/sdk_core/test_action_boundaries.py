@@ -23,7 +23,7 @@ from tests.sdk_core.test_group_actions import (
 )
 from tests.sdk_core.test_group_actions import actions as actions  # pytest fixture
 from tests.sdk_core.test_group_gateway import group_config, running
-from tests.sdk_core.test_group_identity import GROUP, A, B
+from tests.sdk_core.test_group_identity import GROUP, A, B, group_ref
 
 from xiaowei.channel import ChannelService, ResultDelivery
 from xiaowei.feishu import attributed
@@ -67,21 +67,23 @@ async def test_capacity_notice_never_authorizes_unshown_action(
     ]
 
 
-async def test_uncited_proposal_cannot_be_approved(actions: Actions) -> None:
+async def test_uncited_proposal_is_shown_by_code_but_cannot_be_approved(actions: Actions) -> None:
+    """S3：模型没引用的本轮提案由代码置顶完整展示，不再拒绝整轮；没有请求执行就不能批准。"""
     env = actions.env
-    env.scripts.add(
-        attributed(A, "提出"),
-        tool_call("am-synthetic__propose_change", value="after"),
-        clarify(),
-        clarify(),  # 改写一次仍不引用提案
-    )
+    message = attributed(A, "提出")
+    env.scripts.add(message, tool_call("am-synthetic__propose_change", value="after"), clarify())
     async with running(env) as group:
         await group.ask("提出", message_id="om_p")
         action_id = await actions.one()
+        view = await env.results.view(group_ref("om_p", A), first=True)
+        assert view.delivery is not None
+        (proposal,) = view.delivery.section("action")
+        assert proposal.requires_complete and proposal.metadata["action_id"] == action_id
         await group.ask(f"/批准 {action_id}", message_id="om_a")
     assert actions.adapter.calls == []
+    assert env.model_calls(message) == 2
     assert await env.rows("SELECT state FROM xiaowei_request WHERE reply_message_id='om_p'") == [
-        ("failed",)
+        ("completed",)
     ]
 
 
@@ -382,7 +384,7 @@ async def test_rejected_final_answer_after_approval_is_not_saved(actions: Action
         message,
         tool_call("am-synthetic__propose_change", value="after"),
         request_execution,
-        lambda call: answer(evidence_in(call), "", clarification=rejected),
+        lambda call: answer(["ev_" + "f" * 32], rejected),  # 引用不可见证据：改写一次
         cite("APPROVED-ANSWER"),
     )
     async with running(env, max_reply_chars=3500) as group:
@@ -399,8 +401,8 @@ async def test_rejected_final_answer_after_approval_is_not_saved(actions: Action
     assert "APPROVED-ANSWER" in json.dumps(saved)  # 合格改写照常保存
 
 
-async def test_uncited_proposal_after_approval_is_repaired_once(actions: Actions) -> None:
-    """审批恢复（native）路径：恢复后的回答漏引提案证据，同样在 Runner 内改写一次。"""
+async def test_uncited_proposal_after_approval_is_completed_by_code(actions: Actions) -> None:
+    """审批恢复（native）路径：恢复后的回答只引用执行结果时，提案由代码补入动作区域。"""
     env = actions.env
     message = attributed(A, "提出")
     env.scripts.add(
@@ -418,8 +420,12 @@ async def test_uncited_proposal_after_approval_is_repaired_once(actions: Actions
         assert await env.rows(
             "SELECT state FROM xiaowei_request WHERE reply_message_id='om_a'"
         ) == [("completed",)]
-    calls = env.scripts.calls[message]
-    assert len(calls) == 4 and "还缺：" in calls[-1].instructions
+        view = await env.results.view(group_ref("om_a", A), first=True)
+        assert view.delivery is not None
+        sections = [(f.section, f.tool_id.rpartition("/")[2]) for f in view.delivery.facts]
+        assert ("action", "request_action_execution") in sections
+        assert ("action", "propose_change") in sections
+    assert len(env.scripts.calls[message]) == 3  # 不再为漏引提案改写
 
 
 @pytest.mark.parametrize(

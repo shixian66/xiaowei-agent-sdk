@@ -15,7 +15,7 @@ from xiaowei.feishu_render import (
     build_feishu_message,
     request_bytes,
 )
-from xiaowei.models import AnswerInference, Delivery, DeliveryFact
+from xiaowei.models import Delivery, DeliveryFact, DeliveryFactRef, DeliveryText
 from xiaowei.starrocks_tools import DDL_NOTE, DDL_TOO_LARGE, PLAN_NOTE
 
 AT = datetime(2026, 10, 9, 11, 47, 56, tzinfo=UTC)
@@ -44,13 +44,17 @@ def fact(**values: Any) -> DeliveryFact:
 
 
 def delivery(*facts: DeliveryFact, analysis: str | None = None) -> Delivery:
+    """S3 正文：模型文字（如有）在前，事实按块放置。"""
     ids = tuple(f.evidence_id for f in facts)
     return Delivery(
         content="旧转义文字不是卡片的数据源",
         channel="feishu",
         evidence_ids=ids,
         facts=facts,
-        analysis=() if analysis is None else (AnswerInference(text=analysis, evidence_ids=ids),),
+        blocks=(
+            *(() if analysis is None else (DeliveryText(text=analysis),)),
+            *(DeliveryFactRef(evidence_id=e) for e in ids),
+        ),
     )
 
 
@@ -108,13 +112,13 @@ def test_facts_visible_once_analysis_multiline_and_details_folded() -> None:
     assert "ev_original" not in "\n".join(text_parts(message))
     assert "依据：结果 1 · 来源" in "\n".join(text_parts(message))
     assert source.note in visible
-    assert "分析与建议（模型推断）" in visible and "第一行\n第二行" in visible
+    assert "模型说明（未经系统核实）" in visible and "第一行\n第二行" in visible
     assert visible.count('"orders"') == 1
     assert "SELECT name" not in visible and "next_cursor" not in visible
     all_text = "\n".join(text_parts(message))
     assert "SELECT name FROM shop.orders LIMIT 5" in all_text
     assert "依据：结果 1 · 来源" in all_text and "ev_original" not in all_text
-    assert visible.index("分析与建议") < visible.index('"orders"')
+    assert visible.index("模型说明") < visible.index('"orders"')
     assert "旧转义文字" not in all_text
 
 
@@ -216,7 +220,8 @@ def test_advice_and_clarification_keep_newlines_and_do_not_chunk(kind: str) -> N
         content=f"{kind}\n旧转义内容",
         channel="feishu",
         evidence_ids=(),
-        feishu_text=raw,
+        blocks=(DeliveryText(text=raw),),
+        awaiting_user=kind == "需要澄清",
     )
     message = build_feishu_message(unverified, 200, "oc_test")
     # C1 已批准统一业务卡片；换行、控制符、单消息与容量保护保持。
@@ -389,11 +394,12 @@ def test_absent_projection_is_not_described_as_empty_rows() -> None:
     assert "（无数据行）" not in text_parts(message, folded=False)
 
 
-def test_advice_keeps_unverified_label() -> None:
+def test_greeting_is_a_plain_post_without_misplaced_header() -> None:
+    """S3：问候不再套“需要澄清/本轮未执行业务查询”等标题；纯模型文字可以是 post。"""
     message = build_feishu_message(
         Delivery(
-            content="建议（本轮未执行业务查询）",
-            feishu_text="你好",
+            content="你好",
+            blocks=(DeliveryText(text="你好"),),
             channel="feishu",
             evidence_ids=(),
         ),
@@ -402,7 +408,7 @@ def test_advice_keeps_unverified_label() -> None:
     )
     assert "post" in message
     shown = "\n".join(text_parts(message, folded=False))
-    assert "未执行查询" in shown and "未经系统核实" in shown
+    assert shown == "你好"
 
 
 def test_monitoring_failure_notice_is_visible_in_fact_card_and_advice() -> None:
@@ -416,16 +422,18 @@ def test_monitoring_failure_notice_is_visible_in_fact_card_and_advice() -> None:
     assert notice in "\n".join(text_parts(card, folded=False))
 
     no_fact = Delivery(
-        content="排查建议（监控读取失败；模型生成，未经数据验证）\n" + notice,
-        feishu_text=notice + "\n未经数据验证：检查采集端。",
+        content=notice,
+        blocks=(DeliveryText(text="未经数据验证：检查采集端。"),),
         monitoring_notice=notice,
         channel="feishu",
         evidence_ids=(),
     )
     text_message = build_feishu_message(no_fact, 3500, "oc_test")
-    assert "post" in text_message
-    visible = "\n".join(text_parts(text_message, folded=False))
-    assert notice in visible and "未经数据验证" in visible
+    # 代码说明与模型文字同时出现时用分区卡片，不进同一 post。
+    assert "card" in text_message
+    visible = text_parts(text_message, folded=False)
+    assert visible.index(notice) < visible.index("模型说明（未经系统核实）")
+    assert "未经数据验证：检查采集端。" in visible
 
 
 def test_short_fact_fits_when_zero_row_placeholders_would_not() -> None:

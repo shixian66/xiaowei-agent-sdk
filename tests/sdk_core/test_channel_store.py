@@ -33,7 +33,7 @@ from xiaowei.channel_store import (
     ResultNotSavedError,
     SessionBusyError,
 )
-from xiaowei.models import AgentAnswer, AnswerInference, TurnAnswer
+from xiaowei.models import AgentAnswer, FactBlock, TextBlock, TurnAnswer
 from xiaowei.session import SessionStoreError, cleanup_expired
 from xiaowei.storage import (
     Backend,
@@ -52,9 +52,12 @@ REQUEST_RETENTION = 3600
 SESSION_RETENTION = 7200
 EVIDENCE_RETENTION = 3600
 ANSWER = AgentAnswer(
-    evidence_ids=("ev_1",),
-    inferences=[AnswerInference(text="东区平稳", evidence_ids=("ev_1",))],
-    clarification=None,
+    blocks=(
+        FactBlock(type="fact", evidence_id="ev_1", view="full"),
+        TextBlock(type="text", text="东区平稳"),
+    ),
+    report_format=None,
+    awaiting_user=False,
 )
 # 保存的是回答与本轮模型可见的证据（另含一条未引用的 ev_2）。
 TURN = TurnAnswer(answer=ANSWER, context_evidence=("ev_1", "ev_2"))

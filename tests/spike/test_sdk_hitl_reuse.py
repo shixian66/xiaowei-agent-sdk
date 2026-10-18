@@ -15,7 +15,7 @@ from agents.tool_guardrails import (
     tool_input_guardrail,
 )
 from sqlalchemy import text
-from tests.sdk_core.synthetic_tools import context, ready_engine
+from tests.sdk_core.synthetic_tools import context, ready_engine, s3_answer
 from tests.sdk_core.test_group_actions import SHARED, SOURCE, WRITE, Actions
 from tests.sdk_core.test_group_actions import actions as actions
 from tests.sdk_core.test_group_identity import GROUP, A, B
@@ -217,17 +217,7 @@ async def test_rehydrated_context_still_passes_current_governance(postgres_url):
         def rejected(call):
             outputs = [i["output"] for i in call.input if i.get("type") == "function_call_output"]
             assert json.loads(outputs[-1])["status"] == "rejected"
-            return [
-                assistant_message(
-                    json.dumps(
-                        {
-                            "evidence_ids": [],
-                            "inferences": [],
-                            "clarification": "权限已撤销",
-                        }
-                    )
-                )
-            ]
+            return [assistant_message(json.dumps(s3_answer(text="权限已撤销", awaiting_user=True)))]
 
         agent = h.agent(ScriptedModel([_call(), ModelStep(responder=rejected)]))
         agent.tools = [replace(agent.tools[0], needs_approval=True)]
@@ -238,7 +228,7 @@ async def test_rehydrated_context_still_passes_current_governance(postgres_url):
         state = await restore(agent, saved, ctx)
         state.approve(state.get_interruptions()[0], always_approve=False)
         result = await run(agent, state)
-        assert result.final_output.clarification == "权限已撤销"
+        assert result.final_output.text == "权限已撤销"
         assert h.adapter.calls == []
         assert h.governed.turn_runs(ctx.identity).produced == ()
         print("governance_revoked_zero_adapter_calls")
@@ -556,17 +546,7 @@ async def test_run_state_history_requires_current_evidence_preflight(postgres_ur
             assert envelopes[0]["data"]["rows"][0]["orders"] == 50
             assert envelopes[1]["status"] == "rejected"
             observed.append("old_fact_reached_model")
-            return [
-                assistant_message(
-                    json.dumps(
-                        {
-                            "evidence_ids": [],
-                            "inferences": [],
-                            "clarification": "无法核实",
-                        }
-                    )
-                )
-            ]
+            return [assistant_message(json.dumps(s3_answer(text="无法核实", awaiting_user=True)))]
 
         agent = h.agent(
             ScriptedModel(

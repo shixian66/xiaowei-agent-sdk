@@ -21,6 +21,7 @@ from typing import Any
 import httpx2
 import pytest
 from agents import AgentOutputSchema, RunConfig, Runner, set_tracing_disabled
+from agents.exceptions import ModelBehaviorError
 from agents.testing import assistant_message, function_call
 from agents.tracing import flush_traces, set_trace_processors
 from pydantic import ValidationError
@@ -47,6 +48,7 @@ from tests.sdk_core.test_sdk_contract import _RecordingProcessor
 from tests.sdk_core.test_vertex_model import VERTEX, _body, _call_part
 
 from xiaowei import app as app_module
+from xiaowei import evidence as evidence_module
 from xiaowei.app import AppConfig, Application, DataPolicy, TurnError, safe_run_config
 from xiaowei.config import configure_runtime
 from xiaowei.evidence import AnswerRejectedError, EvidenceError
@@ -156,13 +158,34 @@ def advise_unverified(source: str, reason: str = "unclassified") -> Step:
     return finish
 
 
-def answer(evidence_ids: Sequence[str], analysis: str = "数据平稳", **extra: object) -> list[Any]:
-    body = {
-        "evidence_ids": list(evidence_ids),
-        "inferences": [{"text": analysis, "evidence_ids": list(evidence_ids)}] if analysis else [],
-        "clarification": None,
-        **extra,
+def answer_body(
+    evidence_ids: Sequence[str],
+    analysis: str = "数据平稳",
+    *,
+    advice: str | None = None,
+    clarification: str | None = None,
+    fact_views: Sequence[dict[str, str]] = (),
+    report_format: str | None = None,
+    awaiting_user: bool | None = None,
+    blocks: Sequence[dict[str, Any]] | None = None,
+    **raw: object,
+) -> dict[str, Any]:
+    """S3 回答：引用的事实块在前、文字块在后；``clarification`` 即等待用户的文字。"""
+    if blocks is None:
+        views = {v["evidence_id"]: v["view"] for v in fact_views}
+        blocks = [
+            {"type": "fact", "evidence_id": e, "view": views.get(e, "full")} for e in evidence_ids
+        ] + [{"type": "text", "text": t} for t in (analysis, advice, clarification) if t]
+    return {
+        "blocks": list(blocks),
+        "report_format": report_format,
+        "awaiting_user": clarification is not None if awaiting_user is None else awaiting_user,
+        **raw,
     }
+
+
+def answer(evidence_ids: Sequence[str], analysis: str = "数据平稳", **extra: Any) -> list[Any]:
+    body = answer_body(evidence_ids, analysis, **extra)
     return [assistant_message(json.dumps(body, ensure_ascii=False))]
 
 
@@ -172,8 +195,7 @@ def cite(analysis: str = "数据平稳") -> Step:
 
 
 def clarify(question: str = "请说明要看的地区") -> Step:
-    body = {"evidence_ids": [], "inferences": [], "clarification": question}
-    return lambda call: [assistant_message(json.dumps(body, ensure_ascii=False))]
+    return lambda call: answer([], "", clarification=question)
 
 
 def upstream_error(call: ModelCall) -> Any:
@@ -1009,12 +1031,9 @@ async def test_vertex_parallel_calls_keep_each_tool_governed(
                     continue  # SDK 对 I/O 前拒绝的调用返回固定纯文本
                 if isinstance(parsed, dict) and "evidence_id" in parsed:
                     evidence_ids.append(parsed["evidence_id"])
-        answer = {
-            "evidence_ids": evidence_ids,
-            "inferences": [],
-            "clarification": None if evidence_ids else "本轮没有可用结果",
-            "advice": None,
-        }
+        answer = answer_body(
+            evidence_ids, "", clarification=None if evidence_ids else "本轮没有可用结果"
+        )
         return httpx2.Response(200, json=_body([{"text": json.dumps(answer)}]))
 
     if case == "revoked":
@@ -1079,12 +1098,7 @@ async def test_vertex_text_before_tool_never_enters_session_or_delivery(
             )
         output = body["contents"][-1]["parts"][0]["functionResponse"]["response"]["output"]
         evidence_id = json.loads(output)["evidence_id"]
-        answer = {
-            "evidence_ids": [evidence_id],
-            "inferences": [],
-            "clarification": None,
-            "advice": None,
-        }
+        answer = answer_body([evidence_id], "")
         return httpx2.Response(200, json=_body([{"text": json.dumps(answer)}]))
 
     monkeypatch.setenv(VERTEX.api_key_ref.removeprefix("env:"), FAKE_MODEL_KEY)
@@ -1352,10 +1366,8 @@ async def test_mcp_failure_logs_fixed_category_without_remote_text(
 @pytest.mark.parametrize(
     ("case", "code"),
     [
-        # 混用在 SDK 结构校验阶段即被拦截并改写一次，见 test_mixed_answer_*。
-        ("missing", "missing_evidence"),
+        ("empty", "empty_answer"),
         ("unknown", "unknown_evidence"),
-        ("inference", "inference_unlinked"),
         ("unavailable", "evidence_unavailable"),
     ],
 )
@@ -1366,14 +1378,10 @@ async def test_answer_rejection_logs_exact_fixed_code(env: Env, case: str, code:
     def invalid(call: ModelCall) -> list[Any]:
         if case == "unavailable":
             env.grants.revoke_all()
-        if case == "missing":
-            return answer([], "")
+        if case == "empty":
+            return answer([], "   ")  # 空白文字归一化后没有任何可交付内容
         if case == "unknown":
-            return answer(["ev_" + "0" * 32], "")
-        if case == "inference":
-            return answer(
-                [evidence_id], "", inferences=[{"text": MODEL_SECRET, "evidence_ids": ["ev_bad"]}]
-            )
+            return answer(["ev_" + "0" * 32], MODEL_SECRET)
         return answer([evidence_id], "")
 
     # 可修正的引用错误在 Runner 内改写一次（仍不合格才拒绝）；权限失效不能靠改写修正。
@@ -1390,70 +1398,74 @@ async def test_answer_rejection_logs_exact_fixed_code(env: Env, case: str, code:
     assert await env.state() == ("active", 1)
 
 
-async def test_mixed_answer_is_repaired_once_without_tools(env: Env) -> None:
+async def test_mixed_content_in_free_order_is_delivered_without_repair(env: Env) -> None:
+    """结论、事实、追问自由排列：旧的三选一互斥与分析必须挂证据都已删除。"""
     seed = env.scripts.add("取得依据", tool_call("order_total", region="east"), cite())
     evidence_id = (await env.app.run_turn(env.ctx(turn="seed"), seed)).answer.evidence_ids[0]
-
-    def repaired(call: ModelCall) -> list[Any]:
-        assert call.tools == []  # 改写不能再调用工具
-        assert "上一条最终回答未通过校验，未通过原因：澄清或建议不能" in call.instructions
-        return answer([evidence_id], "沿用已核实结果")
-
-    message = env.scripts.add(
-        "结果加反问 " + SYNTHETIC_SQL,
-        lambda call: answer([evidence_id], "", clarification=MODEL_SECRET),
-        repaired,
-    )
+    blocks = [
+        {"type": "text", "text": "结论：东区平稳。"},
+        {"type": "fact", "evidence_id": evidence_id, "view": "full"},
+        {"type": "text", "text": "要不要再看西区？"},
+    ]
+    message = env.scripts.add("结果加反问", lambda call: answer([], blocks=blocks))
     with all_logs() as records:
-        result = await env.app.run_turn(env.ctx(turn="repaired"), message)
-    output = "\n".join(r.getMessage() for r in records)
-    assert result.answer.evidence_ids == (evidence_id,) and result.answer.clarification is None
-    assert "stage=answer_repair" in output and "stage=completed" in output
-    assert MODEL_SECRET not in output and SYNTHETIC_SQL not in output
-    assert len(env.scripts.calls[message]) == 2
+        result = await env.app.run_turn(env.ctx(turn="mixed"), message)
+    delivery = await env.governed.evidence.validate_answer(result, env.ctx(turn="mixed"))
+    assert "stage=answer_repair" not in "\n".join(r.getMessage() for r in records)
+    assert len(env.scripts.calls[message]) == 1
+    assert [type(b).__name__ for b in delivery.blocks] == [
+        "DeliveryText",
+        "DeliveryFactRef",
+        "DeliveryText",
+    ]
+    assert delivery.texts == ("结论：东区平稳。", "要不要再看西区？")
+    assert "需要澄清" not in delivery.content and "本轮未执行业务查询" not in delivery.content
     assert await env.state() == ("active", 2)
 
 
-async def test_mixed_answer_still_mixed_after_one_repair_fails(env: Env) -> None:
+async def test_invalid_block_still_invalid_after_one_repair_fails(env: Env) -> None:
     seed = env.scripts.add("取得依据", tool_call("order_total", region="east"), cite())
     evidence_id = (await env.app.run_turn(env.ctx(turn="seed"), seed)).answer.evidence_ids[0]
+    bad = [{"type": "text", "text": MODEL_SECRET, "evidence_id": evidence_id}]
 
     def mixed(call: ModelCall) -> list[Any]:
-        return answer([evidence_id], "", advice=MODEL_SECRET)
+        return answer([], blocks=bad)
 
-    message = env.scripts.add("仍然混用 " + SYNTHETIC_SQL, mixed, mixed)
+    message = env.scripts.add("字段组合非法 " + SYNTHETIC_SQL, mixed, mixed)
     with all_logs() as records, pytest.raises(TurnError) as failed:
-        await env.app.run_turn(env.ctx(turn="still-mixed"), message)
+        await env.app.run_turn(env.ctx(turn="still-invalid"), message)
     output = "\n".join(r.getMessage() for r in records)
-    assert failed.value.reason == "answer_rejected"
-    assert "stage=answer_repair reason=mixed_kinds" in output
-    assert "answer_reject=mixed_kinds" in output
+    assert failed.value.reason == "model_failed"
+    assert "stage=answer_repair reason=invalid_output" in output
+    assert "error_kind=invalid_output" in output
     assert MODEL_SECRET not in output
     assert len(env.scripts.calls[message]) == 2  # 只改写一次
     assert await env.state() == ("active", 1)  # 失败轮不提交
 
 
-async def test_answer_repair_keeps_all_query_citations(env: Env) -> None:
+async def test_answer_repair_does_not_replay_tools(env: Env) -> None:
     def repaired(call: ModelCall) -> list[Any]:
-        ids = evidence_in(call)
-        assert ids and all(i in call.instructions for i in ids)  # 提示必须引用全部查询证据
-        return answer(ids, "已核实")
+        assert call.tools == []
+        assert "fact 块只填 type、evidence_id 与 view" in call.instructions
+        return answer(evidence_in(call), "已核实")
 
     message = env.scripts.add(
-        "查询后混用",
+        "查询后字段错位",
         tool_call("run_query", region="east"),
-        lambda call: answer(evidence_in(call), "", advice="另外建议补索引"),
+        lambda call: answer([], blocks=[{"type": "fact", "evidence_id": evidence_in(call)[0]}]),
         repaired,
     )
     result = await env.app.run_turn(env.ctx(turn="repair-query"), message)
-    assert result.answer.advice is None and len(result.answer.evidence_ids) == 1
+    assert len(result.answer.evidence_ids) == 1
     assert env.tool_ids() == [QUERY_TOOL]  # 改写不重放工具
 
 
-@pytest.mark.parametrize("invalid", ["mixed", "facts", "text"])
+@pytest.mark.parametrize("invalid", ["combination", "facts", "text"])
 async def test_repaired_answer_replaces_the_rejected_one_in_history(env: Env, invalid: str) -> None:
     rejected = {
-        "mixed": lambda call: answer(evidence_in(call), "", clarification=MODEL_SECRET),
+        "combination": lambda call: answer(
+            [], blocks=[{"type": "text", "text": MODEL_SECRET, "evidence_id": evidence_in(call)[0]}]
+        ),
         "facts": lambda call: answer(evidence_in(call), "", facts=[MODEL_SECRET]),
         "text": lambda call: [assistant_message(MODEL_SECRET)],
     }[invalid]
@@ -1479,84 +1491,63 @@ async def test_repaired_answer_replaces_the_rejected_one_in_history(env: Env, in
     assert await env.state() == ("active", 2)
 
 
-async def test_uncited_query_logs_own_rejection_code(env: Env) -> None:
+async def test_uncited_query_results_are_completed_as_remaining(env: Env) -> None:
+    """模型只写文字、不引用本轮查询：不再拒绝或改写，代码补全为其余结果。"""
     message = env.scripts.add(
-        "未引用查询 " + SYNTHETIC_SQL,
-        tool_call("run_query", region="east"),
-        clarify(MODEL_SECRET),
-        clarify(MODEL_SECRET),
+        "只写文字", tool_call("run_query", region="east"), clarify("还要看西区吗？")
     )
-    with all_logs() as records, pytest.raises(TurnError) as failed:
-        await env.app.run_turn(env.ctx(turn="uncited"), message)
-    output = "\n".join(r.getMessage() for r in records)
-    assert failed.value.reason == "answer_rejected"
-    assert "stage=answer_repair reason=uncited_query" in output
-    assert "answer_reject=uncited_query" in output
-    assert len(env.scripts.calls[message]) == 3
-    assert MODEL_SECRET not in output and SYNTHETIC_SQL not in output
-    assert env.tool_ids() == [QUERY_TOOL] and await env.stored() == []
+    with all_logs() as records:
+        delivery = await env.deliver(env.ctx(turn="uncited"), message)
+    assert "stage=answer_repair" not in "\n".join(r.getMessage() for r in records)
+    assert len(env.scripts.calls[message]) == 2
+    assert [f.section for f in delivery.facts] == ["remaining"]
+    assert delivery.texts == ("还要看西区吗？",) and delivery.awaiting_user
+    assert env.tool_ids() == [QUERY_TOOL]
 
 
-async def test_unlinked_inference_is_repaired_once_like_production(env: Env) -> None:
-    """生产形态（列举三套集群）：三次读取都成功，说明配置事实的分析没有挂证据。"""
+async def test_config_text_without_evidence_link_is_delivered(env: Env) -> None:
+    """生产形态（列举三套集群）：说明配置事实的文字不再需要挂证据。"""
     config_fact = "只配置了这三套（来自配置）"
-
-    def unlinked(call: ModelCall) -> list[Any]:
-        ids = evidence_in(call)
-        assert len(ids) == 3
-        return answer(ids, "", inferences=[{"text": config_fact, "evidence_ids": []}])
-
-    def repaired(call: ModelCall) -> list[Any]:
-        assert call.tools == []
-        assert "未通过原因：分析必须引用本回答选择的证据" in call.instructions
-        ids = evidence_in(call)
-        return answer(ids, "", inferences=[{"text": config_fact, "evidence_ids": ids}])
-
     message = env.scripts.add(
         "三套集群详情",
         tool_call("order_total", region="east"),
         tool_call("order_total", region="west"),
         tool_call("order_total", region="north"),
-        unlinked,
-        repaired,
+        lambda call: answer(evidence_in(call), config_fact),
     )
     with all_logs() as records:
         delivered = await env.deliver(env.ctx(turn="three"), message)
     output = "\n".join(r.getMessage() for r in records)
     assert len(delivered.evidence_ids) == 3 and config_fact in delivered.content
-    assert "stage=answer_repair reason=inference_unlinked" in output
-    assert env.tool_ids() == [TOTAL_TOOL] * 3  # 改写不重放工具
-    assert len(env.scripts.calls[message]) == 5
-    assert await env.state() == ("active", 1)
+    assert "stage=answer_repair" not in output
+    assert env.tool_ids() == [TOTAL_TOOL] * 3
+    assert len(env.scripts.calls[message]) == 4
 
 
-async def test_partially_cited_repeat_query_is_repaired_with_missing_ids(env: Env) -> None:
-    """生产形态（两次读取告警）：同一查询工具成功两次，回答只引用了一次。"""
+async def test_partially_cited_repeat_query_completes_the_rest(env: Env) -> None:
+    """生产形态（两次读取告警）：回答只引用了第二次，第一次按产生顺序补为其余结果。"""
+    seen: list[list[str]] = []
 
     def partial(call: ModelCall) -> list[Any]:
         ids = evidence_in(call)
-        assert len(ids) == 2
+        seen.append(ids)
         return answer(ids[1:], "只看了第二次")
-
-    def repaired(call: ModelCall) -> list[Any]:
-        ids = evidence_in(call)
-        assert call.tools == [] and f"还缺：{ids[0]}" in call.instructions
-        return answer(ids, "两次结果")
 
     message = env.scripts.add(
         "两次查询",
         tool_call("run_query", region="east"),
         tool_call("run_query", region="west"),
         partial,
-        repaired,
     )
     with all_logs() as records:
         delivered = await env.deliver(env.ctx(turn="twice"), message)
-    output = "\n".join(r.getMessage() for r in records)
-    assert len(delivered.evidence_ids) == 2
-    assert "stage=answer_repair reason=uncited_query" in output
+    (ids,) = seen
+    assert "stage=answer_repair" not in "\n".join(r.getMessage() for r in records)
+    assert delivered.evidence_ids == (ids[1], ids[0])
+    assert [f.section for f in delivered.facts] == ["body", "remaining"]
+    assert delivered.result_label(ids[0]) == "结果 2"
     assert env.tool_ids() == [QUERY_TOOL, QUERY_TOOL]
-    assert len(env.scripts.calls[message]) == 4
+    assert len(env.scripts.calls[message]) == 3
 
 
 async def test_brief_view_of_new_fact_is_shown_in_full_without_repair(env: Env) -> None:
@@ -1575,18 +1566,23 @@ async def test_brief_view_of_new_fact_is_shown_in_full_without_repair(env: Env) 
 async def test_duplicate_citations_are_normalized_without_repair(env: Env) -> None:
     seed = env.scripts.add("取得依据", tool_call("order_total", region="east"), cite())
     evidence_id = (await env.app.run_turn(env.ctx(turn="seed"), seed)).answer.evidence_ids[0]
-    views = [{"evidence_id": evidence_id, "view": v} for v in ("brief", "full", "brief")]
-    message = env.scripts.add(
-        "重复引用",
-        lambda call: answer([evidence_id, evidence_id], "沿用", fact_views=views),
-    )
+    blocks = [
+        {"type": "fact", "evidence_id": evidence_id, "view": "brief"},
+        {"type": "text", "text": "  \n "},
+        {"type": "text", "text": "沿用"},
+        {"type": "fact", "evidence_id": evidence_id, "view": "full"},
+        {"type": "fact", "evidence_id": evidence_id, "view": "brief"},
+    ]
+    message = env.scripts.add("重复引用", lambda call: answer([], blocks=blocks))
     with all_logs() as records:
         result = await env.app.run_turn(env.ctx(turn="dup"), message)
     assert "stage=answer_repair" not in "\n".join(r.getMessage() for r in records)
     assert len(env.scripts.calls[message]) == 1
-    # 保存的是归一化后的回答；冲突的显示方式取完整展示。
-    assert result.answer.evidence_ids == (evidence_id,)
-    assert [(v.evidence_id, v.view) for v in result.answer.fact_views] == [(evidence_id, "full")]
+    # 保存的是归一化后的回答：空白块丢弃，重复引用留首个位置，冲突的显示方式取完整。
+    assert list(result.answer.model_dump()["blocks"]) == [
+        {"type": "fact", "evidence_id": evidence_id, "view": "full"},
+        {"type": "text", "text": "沿用"},
+    ]
     delivery = await env.governed.evidence.validate_answer(result, env.ctx(turn="dup"))
     assert [f.view for f in delivery.facts] == ["full"]
     assert await env.state() == ("active", 2)
@@ -1614,17 +1610,16 @@ async def test_unfinished_query_is_its_own_system_failure(
     assert await env.stored() == []
 
 
-async def test_report_on_web_logs_its_own_code(env: Env) -> None:
+async def test_report_on_web_is_delivered_with_code_notice(env: Env) -> None:
     message = env.scripts.add(
         "要文件",
-        *[lambda call: answer([], "", advice="建议先确认地区", report_format="md")] * 2,
+        lambda call: answer([], "", advice="建议先确认地区", report_format="md"),
     )
-    with all_logs() as records, pytest.raises(TurnError) as failed:
-        await env.app.run_turn(env.ctx(turn="report"), message)
-    output = "\n".join(r.getMessage() for r in records)
-    assert failed.value.reason == "answer_rejected"
-    assert "stage=answer_repair reason=report_unsupported" in output
-    assert "answer_reject=report_unsupported" in output
+    with all_logs() as records:
+        delivery = await env.deliver(env.ctx(turn="report"), message)
+    assert "stage=answer_repair" not in "\n".join(r.getMessage() for r in records)
+    assert delivery.report_notice == evidence_module.UNSUPPORTED_FILE_NOTICE
+    assert delivery.report_format is None and delivery.texts == ("建议先确认地区",)
 
 
 async def test_valid_answer_costs_no_extra_model_call(env: Env) -> None:
@@ -1645,19 +1640,22 @@ async def test_must_cite_rule_lists_exactly_the_checked_query_tools(env: Env) ->
     await env.app.run_turn(env.ctx(turn="rule"), env.scripts.add("看规则", finish))
     (rule,) = [line for line in seen[0].splitlines() if line.startswith("以下工具本轮每次成功")]
     names = rule.partition("：")[2].partition("。")[0].split("、")
-    # 提示清单与最终校验同源：查询工具在内，诊断工具不在。
+    # 提示清单与补全范围同源：查询工具在内，诊断工具不在。
     assert names == ["run_query"]
-    assert set(names) == {app_module._model_tool_name(t) for t in env.app._queries}
+    assert set(names) == {app_module._model_tool_name(t) for t in env.app._results}
 
 
-def test_turn_schema_is_the_plain_sdk_schema() -> None:
-    turn = app_module._AnswerSchema(lambda answer: None)
+def test_turn_schema_sends_single_value_enum_and_parses_by_type() -> None:
+    turn = app_module.AnswerSchema(lambda answer: None)
     plain = AgentOutputSchema(AgentAnswer)
-    assert (turn.json_schema(), turn.name(), turn.is_strict_json_schema()) == (
-        plain.json_schema(),
+    sent = json.dumps(turn.json_schema())
+    assert '"const"' not in sent and '"const"' in json.dumps(plain.json_schema())
+    assert (turn.name(), turn.is_strict_json_schema()) == (
         plain.name(),
         plain.is_strict_json_schema(),
     )
+    with pytest.raises(ModelBehaviorError):
+        turn.validate_json(json.dumps(answer_body([], blocks=[{"type": "fact", "text": "x"}])))
 
 
 async def test_max_turns_gets_one_tool_free_final_answer_from_visible_evidence(env: Env) -> None:
@@ -1681,12 +1679,12 @@ async def test_max_turns_gets_one_tool_free_final_answer_from_visible_evidence(e
     assert await env.state() == ("active", 1)
 
 
-async def test_max_turns_final_prompt_lists_all_current_query_evidence(env: Env) -> None:
+async def test_max_turns_final_answer_may_cite_part_and_the_rest_is_completed(env: Env) -> None:
     final_instructions: list[str] = []
 
     def finish(call: ModelCall) -> list[Any]:
         final_instructions.append(call.instructions)
-        return answer(evidence_in(call), "只根据已有查询结果回答")
+        return answer(evidence_in(call)[:1], "只根据已有查询结果回答")
 
     message = env.scripts.add(
         "先汇总再做两次查询后收尾",
@@ -1697,56 +1695,20 @@ async def test_max_turns_final_prompt_lists_all_current_query_evidence(env: Env)
     )
     ctx = _with_turns(env.ctx(turn="query-prompt", max_tool_calls=3), 3)
     result = await env.app.run_turn(ctx, message)
-    ids = result.answer.evidence_ids
-    assert len(ids) == 3 and len(set(ids)) == 3
-    assert len(final_instructions) == 1
-    assert "本轮查询证据编号" in final_instructions[0]
-    assert "、".join(ids[1:]) in final_instructions[0]
-    assert ids[0] not in final_instructions[0]
+    delivery = await env.governed.evidence.validate_answer(result, ctx)
+    assert len(final_instructions) == 1 and "系统会补全" in final_instructions[0]
+    assert result.limit_reached and delivery.limit_notice == evidence_module.LIMIT_NOTICE
+    # 汇总工具不是需交付的业务查询；两次查询中未引用的一次补为其余结果。
+    assert [f.section for f in delivery.facts] == ["body", "remaining", "remaining"]
     assert env.tool_ids() == [TOTAL_TOOL, QUERY_TOOL, QUERY_TOOL]
 
 
-async def test_max_turns_partial_query_citation_keeps_rejection_and_rescue_counts(
-    env: Env,
-) -> None:
-    env.adapter.truncated = True
-
-    def finish(call: ModelCall) -> list[Any]:
-        ids = evidence_in(call)
-        assert len(ids) == 2
-        return answer(ids[:1], MODEL_SECRET)
-
-    message = env.scripts.add(
-        "部分引用 " + SYNTHETIC_SQL,
-        tool_call("run_query", region="east"),
-        tool_call("run_query", region="west"),
-        finish,
-        finish,  # 收尾回答改写一次仍只引用部分
-    )
-    ctx = _with_turns(env.ctx(turn="rescue-partial", max_tool_calls=2), 2)
-    with all_logs() as records, pytest.raises(TurnError) as failed:
-        await env.app.run_turn(ctx, message)
-
-    output = "\n".join(r.getMessage() for r in records if r.name == "xiaowei.app")
-    assert failed.value.reason == "answer_rejected"
-    assert "reason=answer_rejected" in output and "answer_reject=uncited_query" in output
-    assert "limit_rescue=failed" in output
-    assert "tool_calls=2 executed=2 truncated=2 rejected=0" in output
-    assert all(_STAGE.fullmatch(r.getMessage()) for r in records if r.name == "xiaowei.app")
-    assert MODEL_SECRET not in "\n".join(r.getMessage() for r in records)
-    assert SYNTHETIC_SQL not in "\n".join(r.getMessage() for r in records)
-    assert env.tool_ids() == [QUERY_TOOL, QUERY_TOOL] and await env.stored() == []
-
-
-async def test_limit_rescue_answer_gets_the_same_one_repair(env: Env) -> None:
-    def partial(call: ModelCall) -> list[Any]:
-        return answer(evidence_in(call)[:1], "收尾只引用一条")
-
+async def test_limit_rescue_invalid_answer_gets_the_same_one_repair(env: Env) -> None:
     message = env.scripts.add(
         "收尾后改写",
         tool_call("run_query", region="east"),
         tool_call("run_query", region="west"),
-        partial,
+        lambda call: answer(["ev_forged"], "收尾伪造"),
         cite("收尾改写引用全部"),
     )
     ctx = _with_turns(env.ctx(turn="rescue-repair", max_tool_calls=2), 2)
@@ -1835,12 +1797,7 @@ async def test_vertex_limit_rescue_replays_signed_call_without_offering_tools(
             if "functionResponse" in part
         ]
         assert len(evidence_ids) == 1
-        final = {
-            "evidence_ids": evidence_ids,
-            "inferences": [],
-            "clarification": None,
-            "advice": None,
-        }
+        final = answer_body(evidence_ids, "")
         return httpx2.Response(200, json=_body([{"text": json.dumps(final)}]))
 
     monkeypatch.setenv(VERTEX.api_key_ref.removeprefix("env:"), FAKE_MODEL_KEY)

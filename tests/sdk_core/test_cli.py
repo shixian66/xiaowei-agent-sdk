@@ -727,11 +727,20 @@ CHECK_TOOL = "model_check_lookup"  # 固定合成工具名：命令与模型之�
 CHECK_LEAK = "xw-check-canary-5d1a"  # 只出现在模型返回的正文与工具参数中
 VERTEX_KEY_ENV = VERTEX.api_key_ref.removeprefix("env:")
 UNRELATED_ENV = (DB_ENV, KEY_ENV, SR_ENV, FEISHU_ENV, *TEMPLATE_ENV, "XW_POSTGRES_PASSWORD")
-ADVICE = {"evidence_ids": [], "inferences": [], "clarification": None}
 
 
-def _check_answer(**overrides: Any) -> dict[str, Any]:
-    body = {**ADVICE, "advice": f"合成数值为 42 {CHECK_LEAK}", **overrides}
+def _check_answer(
+    text: str | None = f"合成数值为 42 {CHECK_LEAK}",
+    *,
+    facts: tuple[str, ...] = (),
+    extra_text: str | None = None,
+    awaiting_user: bool = False,
+) -> dict[str, Any]:
+    blocks: list[dict[str, Any]] = [
+        {"type": "fact", "evidence_id": e, "view": "full"} for e in facts
+    ]
+    blocks += [{"type": "text", "text": t} for t in (text, extra_text) if t is not None]
+    body = {"blocks": blocks, "report_format": None, "awaiting_user": awaiting_user}
     return _body([{"text": json.dumps(body, ensure_ascii=False)}])
 
 
@@ -925,21 +934,22 @@ async def _timeout(request: httpx2.Request) -> httpx2.Response:
         ),
         pytest.param([_check_call(name="run_readonly_query")], "model_failed", id="wrong-tool"),
         pytest.param([_check_call(), _body([{"text": "not json"}])], "model_failed", id="not-json"),
-        pytest.param([_check_call(), _check_answer(advice=None)], "answer_invalid", id="no-advice"),
+        pytest.param([_check_call(), _check_answer(None)], "answer_invalid", id="no-text"),
+        pytest.param([_check_call(), _check_answer("   ")], "answer_invalid", id="blank-text"),
         pytest.param(
-            [_check_call(), _check_answer(evidence_ids=["ev-1"])],
+            [_check_call(), _check_answer(facts=("ev-1",))],
             "answer_invalid",
             id="evidence",
         ),
         pytest.param(
-            [_check_call(), _check_answer(inferences=[{"text": "推断", "evidence_ids": []}])],
+            [_check_call(), _check_answer(extra_text="推断")],
             "answer_invalid",
-            id="inference",
+            id="two-texts",
         ),
         pytest.param(
-            [_check_call(), _check_answer(clarification="请说明")],
+            [_check_call(), _check_answer(awaiting_user=True)],
             "answer_invalid",
-            id="clarification",
+            id="awaiting-user",
         ),
     ],
 )

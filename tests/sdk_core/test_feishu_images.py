@@ -10,7 +10,7 @@ import httpx2
 import pytest
 from PIL import Image
 from sqlalchemy import text
-from tests.sdk_core.synthetic_tools import QUERY_TOOL, TARGET, TOTAL_TOOL
+from tests.sdk_core.synthetic_tools import QUERY_TOOL, TARGET, TOTAL_TOOL, s3_answer
 from tests.sdk_core.test_channel_service import Env, app_config
 from tests.sdk_core.test_channel_service import env as env
 from tests.sdk_core.test_feishu import Feishu, Outbox, config
@@ -64,11 +64,10 @@ async def test_authorized_image_and_followup_replay_original_through_runner_vert
                             "parts": [
                                 {
                                     "text": json.dumps(
-                                        {
-                                            "evidence_ids": [],
-                                            "inferences": [],
-                                            "clarification": "请说明希望分析截图中的哪一处。",
-                                        },
+                                        s3_answer(
+                                            text="请说明希望分析截图中的哪一处。",
+                                            awaiting_user=True,
+                                        ),
                                         ensure_ascii=False,
                                     )
                                 }

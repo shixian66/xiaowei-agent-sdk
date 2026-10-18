@@ -15,6 +15,7 @@ from typing import Any
 import httpx2
 import pytest
 from tests.sdk_core.dialogue_gate import TABLE, DialogueStarRocks, Scenario, configuration
+from tests.sdk_core.synthetic_tools import s3_answer
 from tests.sdk_core.test_gate0 import (
     VertexLikeEndpoint,
     _vertex_body,
@@ -96,11 +97,7 @@ def finish(contents: list[dict[str, Any]]) -> dict[str, Any]:
     current = _vertex_envelopes(contents[last_user + 1 :])
     selected = current or envelopes[-1:]
     ids = [e["evidence_id"] for e in selected]
-    answer = {
-        "evidence_ids": ids,
-        "inferences": [{"text": "合成说明：仅解释当前证据。", "evidence_ids": ids}],
-        "clarification": None,
-    }
+    answer = s3_answer(ids, "合成说明：仅解释当前证据。")
     return _vertex_body([{"text": json.dumps(answer, ensure_ascii=False)}])
 
 

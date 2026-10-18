@@ -527,7 +527,8 @@ async def test_formal_assembly_rejects_out_of_scope_explain_without_io(env: Env)
         body = (await served.turn(message)).json()
         # 越权 SQL 在任何连接之前被拒绝，拒绝原因交给模型；没有可用证据时只返回澄清。
         assert body["state"] == "completed"
-        assert body["delivery"]["facts"] == [] and "需要澄清" in body["delivery"]["content"]
+        assert body["delivery"]["facts"] == []
+        assert [b["kind"] for b in body["delivery"]["blocks"]] == ["text"]
         assert env.drv.attempts == 0
         assert await served.finish() == 0
     assert await env.scalar("SELECT count(*) FROM xiaowei_evidence") == 0
@@ -592,7 +593,8 @@ async def test_formal_assembly_rejects_layout_of_unlisted_tables_without_io(env:
         )
         body = (await served.turn(message)).json()
         assert body["state"] == "completed"
-        assert body["delivery"]["facts"] == [] and "需要澄清" in body["delivery"]["content"]
+        assert body["delivery"]["facts"] == []
+        assert [b["kind"] for b in body["delivery"]["blocks"]] == ["text"]
         assert env.drv.attempts == 0
         assert await served.finish() == 0
     assert await env.scalar("SELECT count(*) FROM xiaowei_evidence") == 0
@@ -814,9 +816,10 @@ def _vertex_cite_seen(contents: list[dict[str, Any]]) -> dict[str, Any]:
         if "functionResponse" in part
     ]
     body = {
-        "evidence_ids": ids,
-        "inferences": [{"text": "数据平稳", "evidence_ids": ids}],
-        "clarification": None,
+        "blocks": [{"type": "fact", "evidence_id": e, "view": "full"} for e in ids]
+        + [{"type": "text", "text": "数据平稳"}],
+        "report_format": None,
+        "awaiting_user": False,
     }
     return _vertex_body([{"text": json.dumps(body, ensure_ascii=False)}])
 
@@ -915,7 +918,11 @@ async def test_startup_recovers_interrupted_requests_before_serving(env: Env) ->
 
 # ---- model check：既有 Provider 走同一条窄装配 -------------------------------------------
 
-CHECK_ADVICE = {"evidence_ids": [], "inferences": [], "clarification": None, "advice": "数值为 42"}
+CHECK_ADVICE = {
+    "blocks": [{"type": "text", "text": "数值为 42"}],
+    "report_format": None,
+    "awaiting_user": False,
+}
 
 
 def _check_config(profile: ModelProfile) -> runtime.ServeConfig:

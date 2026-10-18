@@ -72,6 +72,8 @@ class ReviewVerdict(BaseModel):
     execution_allowed: StrictBool | None = None
     object_selection_correct: StrictBool | None = None
     evidence_consistent: StrictBool | None = None
+    conclusion_matches_all_results: StrictBool | None = None
+    """S3：结论与本轮全部交付结果（含代码补全的其余结果）一致；完整交付不代表结论正确。"""
     clarification_appropriate: StrictBool | None = None
     limitations_stated: StrictBool | None = None
     history_delivery_claim_correct: StrictBool | None = None
@@ -1020,6 +1022,9 @@ async def run_dialogue(
                                             "target": f.target_id,
                                             "rows": len(f.rows),
                                             "view": getattr(f, "view", "full"),
+                                            # 模型放置（body/action）与代码补全（remaining）分列，
+                                            # 补全不计为模型引用。
+                                            "section": getattr(f, "section", "body"),
                                             "truncated": f.truncated,
                                             "has_cursor": f.metadata.get("next_cursor") is not None,
                                         }

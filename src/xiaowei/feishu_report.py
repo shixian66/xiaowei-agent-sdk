@@ -10,7 +10,7 @@ from dataclasses import dataclass, replace
 from typing import Literal
 
 from xiaowei.feishu_render import display_text, fact_limit_notices
-from xiaowei.models import Delivery, DeliveryFact
+from xiaowei.models import Delivery, DeliveryFact, DeliveryFactRef
 
 ReportFormat = Literal["md", "html"]
 MAX_REPORT_BYTES = 400_000
@@ -116,32 +116,40 @@ def _fact_section(fact: DeliveryFact, label: str, *, expand_brief: bool) -> _Sec
 
 
 def _sections(delivery: Delivery, *, expand_brief: bool) -> list[_Section]:
+    """按正文块顺序填入现有模板：模型文字转义为说明段落，事实章节由代码生成并带来源；
+    其余结果在后；动作区域不进入附件（只在消息中完整展示）。"""
     parts: list[_Section] = []
-    if not delivery.facts:
-        parts.append(
-            _Section(
-                "answer",
-                "答复",
-                delivery.feishu_text if delivery.feishu_text is not None else delivery.content,
-                "模型生成，未经系统核实",
+    facts = {fact.evidence_id: fact for fact in delivery.facts}
+    for block in delivery.blocks:
+        if isinstance(block, DeliveryFactRef):
+            if block.evidence_id not in facts:
+                continue  # 动作材料不进附件
+            fact = facts[block.evidence_id]
+            parts.append(
+                _fact_section(
+                    fact, delivery.result_label(fact.evidence_id), expand_brief=expand_brief
+                )
             )
-        )
+        else:
+            parts.append(_Section("answer", "模型说明", block.text, "模型生成，未经系统核实"))
+    placed = {b.evidence_id for b in delivery.blocks if isinstance(b, DeliveryFactRef)}
     parts.extend(
         _fact_section(fact, delivery.result_label(fact.evidence_id), expand_brief=expand_brief)
-        for fact in delivery.facts
+        for fact in delivery.section("body")
+        if fact.evidence_id not in placed
     )
+    parts.extend(
+        _fact_section(
+            fact,
+            "其余结果 · " + delivery.result_label(fact.evidence_id),
+            expand_brief=expand_brief,
+        )
+        for fact in delivery.section("remaining")
+    )
+    if delivery.limit_notice:
+        parts.append(_Section("notice", "完整性说明", delivery.limit_notice))
     if delivery.monitoring_notice:
         parts.append(_Section("notice", "未核实来源", delivery.monitoring_notice))
-    for inference in delivery.analysis:
-        parts.append(
-            _Section(
-                "analysis",
-                "分析与建议",
-                inference.text,
-                "模型推断，未经系统核实；依据："
-                + "、".join(map(delivery.result_label, inference.evidence_ids)),
-            )
-        )
     if delivery.session_notice:
         parts.append(_Section("session", "会话提示", delivery.session_notice))
     if delivery.basis:
@@ -440,7 +448,12 @@ def build_reports(delivery: Delivery, *, expand_brief: bool = True) -> tuple[Rep
     shared_notice = (
         "\n".join(
             dict.fromkeys(
-                [notice for fact in delivery.facts for notice in fact_limit_notices(fact)]
+                [
+                    notice
+                    for fact in delivery.facts
+                    if fact.section != "action"
+                    for notice in fact_limit_notices(fact)
+                ]
                 + ([delivery.monitoring_notice] if delivery.monitoring_notice else [])
             )
         )

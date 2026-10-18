@@ -21,7 +21,7 @@ from xiaowei.channel import AccessDeniedError, RequestRef
 from xiaowei.channel_store import RequestUnavailableError
 from xiaowei.feishu import send_delivery
 from xiaowei.feishu_report import ReportCapacityError, ReportFile, build_report, build_reports
-from xiaowei.models import AnswerInference
+from xiaowei.models import DeliveryFactRef, DeliveryText
 from xiaowei.storage import Readiness, hold_instance_lock
 
 pytestmark = pytest.mark.loopback
@@ -333,14 +333,16 @@ def test_automatic_file_keeps_brief_and_complete_analysis_without_expanding_hist
             "metadata": {"sql": "HISTORICAL_SQL_CANARY"},
         }
     )
-    facts = (brief, delivery.facts[0]) if mixed else (brief,)
+    current = delivery.facts[0].model_copy(update={"evidence_id": "ev_report_current"})
+    facts = (brief, current) if mixed else (brief,)
     # 新语义按平台限制：分析合计超过 30,000 字节才需要自动附件。
     analyses = [f"完整分析{i}" + "分析内容" * 490 for i in range(6)]
     delivery = delivery.model_copy(
         update={
             "facts": facts,
-            "analysis": tuple(
-                AnswerInference(text=text, evidence_ids=delivery.evidence_ids) for text in analyses
+            "blocks": (
+                *(DeliveryText(text=text) for text in analyses),
+                *(DeliveryFactRef(evidence_id=f.evidence_id) for f in facts),
             ),
         }
     )

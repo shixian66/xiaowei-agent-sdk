@@ -433,8 +433,6 @@ async def test_native_lark_raw_event_downloads_document_and_sends_one_post(
     assert paths.count("/open-apis/im/v1/messages/om_doc/resources/file_test") == 1
     assert len(sent) == 1 and sent[0]["msg_type"] == "post"
     post = json.loads(sent[0]["content"])["zh_cn"]
-    assert post["content"] == [
-        [{"tag": "text", "text": "需要澄清"}],
-        [{"tag": "text", "text": "文件中出现 E42。"}],
-    ]
+    # S3：纯模型文字 post 不再套“需要澄清”标题。
+    assert post["content"] == [[{"tag": "text", "text": "文件中出现 E42。"}]]
     assert env.model_calls(body) == 1 and env.adapter.calls == []

@@ -60,10 +60,11 @@ from xiaowei.governance import (
 )
 from xiaowei.models import (
     AgentAnswer,
-    AnswerInference,
     Budget,
+    FactBlock,
     Identity,
     RunContext,
+    TextBlock,
     ToolRequest,
     TurnAnswer,
 )
@@ -310,7 +311,9 @@ async def test_raw_ddl_governed_delivery_and_real_revocation(instance: Instance)
         result = await governed.invoke(ctx, request, execute)
         answer = TurnAnswer(
             answer=AgentAnswer(
-                evidence_ids=(result.evidence_id,), inferences=(), clarification=None
+                blocks=(FactBlock(type="fact", evidence_id=result.evidence_id, view="full"),),
+                report_format=None,
+                awaiting_user=False,
             ),
             context_evidence=(result.evidence_id,),
         )
@@ -817,9 +820,12 @@ async def test_governed_query_tool_end_to_end(
             tools.executes[(RUN_QUERY, "sr-real")],
         )
         answer = AgentAnswer(
-            evidence_ids=(result.evidence_id,),
-            inferences=[AnswerInference(text="查询结果", evidence_ids=(result.evidence_id,))],
-            clarification=None,
+            blocks=(
+                FactBlock(type="fact", evidence_id=result.evidence_id, view="full"),
+                TextBlock(type="text", text="查询结果"),
+            ),
+            report_format=None,
+            awaiting_user=False,
         )
         turn = TurnAnswer(answer=answer, context_evidence=(result.evidence_id,))
         delivery = await evidence.validate_answer(turn, ctx)
@@ -1237,11 +1243,12 @@ async def test_order_by_facts_keep_the_original_binding(instance: Instance) -> N
                 )
                 result = await governed.invoke(ctx, request, tools.executes[(tool_id, "sr-real")])
                 answer = AgentAnswer(
-                    evidence_ids=(result.evidence_id,),
-                    inferences=[
-                        AnswerInference(text="合成数据", evidence_ids=(result.evidence_id,))
-                    ],
-                    clarification=None,
+                    blocks=(
+                        FactBlock(type="fact", evidence_id=result.evidence_id, view="full"),
+                        TextBlock(type="text", text="合成数据"),
+                    ),
+                    report_format=None,
+                    awaiting_user=False,
                 )
                 turn = TurnAnswer(answer=answer, context_evidence=(result.evidence_id,))
                 (fact,) = (await evidence.validate_answer(turn, ctx)).facts

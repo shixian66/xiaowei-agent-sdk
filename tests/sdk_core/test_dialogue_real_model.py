@@ -85,10 +85,20 @@ from tests.sdk_core.test_app import Scripts, cite, tool_call
 from tests.sdk_core.test_model_api import OPENAI as PROFILE
 command.load_profile = lambda _: PROFILE
 command.check_postgres = lambda: None
+from agents.testing import assistant_message
+from tests.sdk_core.test_app import evidence_in
+from xiaowei import models
 scripts = Scripts()
+def cite_for_source(call):
+    # 基线源码早于 S3，只接受旧回答格式；当前源码只接受新格式。
+    if hasattr(models, "LegacyAnswer"):
+        return cite()(call)
+    ids = evidence_in(call)
+    body = {"evidence_ids": ids, "inferences": [], "clarification": None}
+    return [assistant_message(json.dumps(body))]
 message = scripts.add(
     "SOURCE_BINDING_SENTINEL",
-    tool_call("list_databases", cluster="pre", cursor=None, page_size=20), cite(),
+    tool_call("list_databases", cluster="pre", cursor=None, page_size=20), cite_for_source,
 )
 async def offline_run(profile, url, network, **kwargs):
     return await run_dialogue(
@@ -191,7 +201,7 @@ async def test_interactive_review_has_live_answer_and_only_fixed_verdict(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    monkeypatch.setattr(command.sys, "stdin", io.StringIO("bad\ny\nn\na\na\ny\ny\na\n"))
+    monkeypatch.setattr(command.sys, "stdin", io.StringIO("bad\ny\nn\na\na\na\ny\ny\na\n"))
     sample = ReviewSample(
         scenario="offline",
         repeat=1,
@@ -217,7 +227,7 @@ async def test_env_review_shows_selected_environment_and_asks_two_more_items(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    monkeypatch.setattr(command.sys, "stdin", io.StringIO("y\n" * 7 + "n\na\n"))
+    monkeypatch.setattr(command.sys, "stdin", io.StringIO("y\n" * 8 + "n\na\n"))
     sample = ReviewSample(
         scenario="env_select_followup_switch",
         repeat=1,

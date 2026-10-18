@@ -529,12 +529,15 @@ class SampleResult:
     outcome: Literal["delivered", "clarification", "failed"]
     reason: str | None
     evidence_ids: tuple[str, ...]
+    """交付的全部事实（含代码补全的其余结果）；不代表模型引用或结论正确。"""
     sales_calls: int
     regions_calls: int
     elapsed_ms: int
     requests: list[RequestObservation]
     checks: dict[str, bool] = field(default_factory=dict)
     gate: bool = False
+    model_cited: tuple[str, ...] = ()
+    """模型显式放进正文的证据；补全的结果不计入，避免虚增模型成绩。"""
 
     @property
     def passed(self) -> bool:
@@ -551,7 +554,8 @@ class SampleResult:
             "checks": self.checks,
             "outcome": self.outcome,
             "reason": self.reason,
-            "cited_evidence": len(self.evidence_ids),
+            "delivered_evidence": len(self.evidence_ids),
+            "model_cited_evidence": len(self.model_cited),
             "sales_calls": self.sales_calls,
             "regions_calls": self.regions_calls,
             "elapsed_ms": self.elapsed_ms,
@@ -587,13 +591,16 @@ async def run_samples(gate: Gate0, samples: Sequence[Sample] = SAMPLES) -> list[
         outcome: Literal["delivered", "clarification", "failed"]
         reason: str | None = None
         cited: tuple[str, ...] = ()
+        model_cited: tuple[str, ...] = ()
         ctx = _context(sample, gate.app, run)
         try:
             # 渠道的做法：完成一轮后按接收渠道与当前权限生成交付内容。
             answer = await gate.app.run_turn(ctx, sample.message)
             delivery = await gate.evidence.validate_answer(answer, ctx)
             cited = delivery.evidence_ids
-            outcome = "delivered" if cited else "clarification"
+            model_cited = answer.blocks_answer.evidence_ids
+            # 等待用户或没有任何事实时按澄清计；补全的事实不能把澄清记成交付。
+            outcome = "delivered" if cited and not delivery.awaiting_user else "clarification"
         except TurnError as exc:
             outcome, reason = "failed", exc.reason
         except AnswerRejectedError:
@@ -610,6 +617,7 @@ async def run_samples(gate: Gate0, samples: Sequence[Sample] = SAMPLES) -> list[
                 elapsed_ms=int((time.monotonic() - started) * 1000),
                 requests=gate.observer.observations[first_request:],
                 gate=sample.gate,
+                model_cited=model_cited,
             )
         )
     judge(results)
@@ -626,7 +634,8 @@ def judge(results: list[SampleResult]) -> None:
             result.checks = {
                 "delivered": result.outcome == "delivered",
                 "tool_executed_once": result.sales_calls == 1,
-                "cites_evidence": bool(result.evidence_ids),
+                # 结果完整交付可由代码保证（含补全），不证明模型引用或结论正确。
+                "result_delivered": bool(result.evidence_ids),
                 "model_saw_total_and_rows": any(
                     wanted <= set(r.tool_result_fields) for r in requests
                 ),
@@ -1010,6 +1019,7 @@ class DiagnosisResult:
     cited_tools: tuple[str, ...]
     """回答引用的事实来自哪些工具（按交付事实的顺序）。"""
     inferences: int
+    """模型文字块数（S3 起无“分析须挂证据”的形状）。"""
     statements: tuple[tuple[StatementKind, str], ...]
     """本样例到达驱动的语句；只供判定，不写入报告。"""
     elapsed_ms: int
@@ -1178,16 +1188,19 @@ async def run_diagnosis(
         try:
             turn = await diagnosis.app.run_turn(ctx, message)
             delivery = await diagnosis.evidence.validate_answer(turn, ctx)
-            answer = turn.answer
+            # 诊断用途的元数据、EXPLAIN、审计不进“其余结果”，交付的事实即模型所选；查询用途
+            # 的补全结果计入交付但不代表模型解释了它们。
             if delivery.channel == "web":  # 用户实际收到的结构化事实
                 cited = tuple(fact.tool_id for fact in delivery.facts)
             else:
                 cited = await _cited_tools(diagnosis.engine, delivery.evidence_ids)
-            inferences = len(answer.inferences)
-            if delivery.evidence_ids:
+            inferences = len(delivery.texts)
+            if delivery.awaiting_user:
+                outcome = "clarification"
+            elif delivery.evidence_ids:
                 outcome = "delivered"
             else:
-                outcome = "advice" if answer.advice is not None else "clarification"
+                outcome = "advice"
         except TurnError as exc:
             outcome, reason = "failed", exc.reason
         except AnswerRejectedError:

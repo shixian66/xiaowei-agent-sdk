@@ -69,7 +69,16 @@
 | 审查修正 | 独立审查（`87556b5`）发现 P2：审批材料拆出后，查询卡折叠标题仍按拆分后位置编号（正文“结果 2”、折叠“结果 1”）。折叠标题改用 `result_label`；新增拆分发送回归（正文、分析引用、折叠标题、报告编号一致），修复前失败、修复后通过；渲染/报告/交付相关 234 passed，ruff、mypy 通过 |
 | 未验证 | 真实模型、真实飞书客户端排版；S2 起的工作未开始 |
 
-**S2 协议与恢复离线验证（分支 `claude/answer-s2`，本地，未改产品代码，等待定向复审）：** 结论、边界与基线区分见提案 [8.1](docs/superpowers/plans/2026-10-17-free-answer-structure.md)。
+**S3 新回答契约（分支 `claude/answer-s3`，基线 `897ee83`，本地提交，等待 Codex 独立审核）：** 实施步骤见提案 [8.2](docs/superpowers/plans/2026-10-17-free-answer-structure.md)，契约写入 ARCHITECTURE。
+
+| 项 | 状态 |
+| --- | --- |
+| 改动 | `AgentAnswer` 改为有序 `TextBlock \| FactBlock` + `report_format` + `awaiting_user`（16,000 字节 / 64 块，类型校验）；`LegacyAnswer` 严格解析旧记录，`TurnAnswer.answer_version` 由代码写入（缺失只进旧格式，未知/损坏/新格式缺字段拒绝）；`app.AnswerSchema` 发送单值 `enum`；归一化（空白块、重复引用取完整、本轮 brief 升完整）供预检/提交/交付共用；拒绝码只剩 `unknown_evidence`、`empty_answer`、`evidence_unavailable`；`EvidenceStore.validate_answer` 生成动作区域（policy 路由，`get_action_status` 不获完整保护）、正文、其余结果（原执行轮次、需交付类别、同一批授权复核）；暂停材料 `material_only` 只列请求执行的动作；收尾 `limit_reached` 由代码说明；飞书卡片/post/纯文本、MD/HTML、Web 按来源分区（代码标签“模型说明（未经系统核实）”，post 只用于纯模型文字），动作区域不进附件；非飞书文件请求代码说明；提示词、模型检查、`gate0`/`dialogue_gate`、Skill 已适配 |
+| 审批方案 | 方案 1 经正式群入口成立（旧格式会话历史 + 旧格式暂停材料：批准写一次并按新格式保存、拒绝零写、重复批准不重放、并发批准只写一次、发起人离群零模型零写），未触发方案 2 |
+| 证据 | 隔离 PostgreSQL 55432：`tests/sdk_core tests/p1b tests/spike` 第二次全量 3755 passed、8 failed（均为旧 spike 回答格式，修后 `tests/spike` 107 passed）；其余目录 2123 passed、152 skipped，11 项失败中 10 项为并行跑两套时日志捕获干扰（单独重跑通过），1 项维护探针需兼容升级前镜像（修后真实 Docker 升级用例通过）；真 Chrome 浏览器 21 passed，3 项因本机 8501 被既有容器占用无法启动；ruff、mypy（33 文件）通过。新增 `tests/sdk_core/test_s3_answer.py`（38）、`test_s3_legacy_resume.py`（4）与 Web 浏览器用例 |
+| 未验证 | 真实 Vertex 是否接受对象之间的 `anyOf`；真实模型遵守率、自然度与任务质量；真实飞书客户端排版（只做离线结构检查）；Web 大规模事实的专项压测；未部署 |
+
+**S2 协议与恢复离线验证：已随 PR #113 合入（`897ee83`）；以下为当时记录。** 结论、边界与基线区分见提案 [8.1](docs/superpowers/plans/2026-10-17-free-answer-structure.md)。
 
 | 项 | 状态 |
 | --- | --- |

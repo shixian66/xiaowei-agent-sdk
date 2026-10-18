@@ -128,12 +128,12 @@ async def test_formal_profile_protocol_accepts_history_brief(
                 if provider == "chat_completions"
                 else [e["evidence_id"] for e in _vertex_envelopes(body["contents"])]
             )
-            answer_body = {"evidence_ids": ids, "inferences": [], "clarification": None}
-            answer_body["fact_views"] = (
-                [{"evidence_id": e, "view": "brief"} for e in answer_body["evidence_ids"]]
-                if len(requests) == 3
-                else []
-            )
+            view = "brief" if len(requests) == 3 else "full"
+            answer_body = {
+                "blocks": [{"type": "fact", "evidence_id": e, "view": view} for e in ids],
+                "report_format": None,
+                "awaiting_user": False,
+            }
             text = json.dumps(answer_body)
             response = _chat_text(text) if provider == "chat_completions" else _answer(text)
         return httpx2.Response(200, json=response)

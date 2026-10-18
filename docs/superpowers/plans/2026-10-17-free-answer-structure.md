@@ -368,6 +368,16 @@
 
 **真实 provider / 模型待验证（S4，需批准凭据）：** 真实 Vertex 是否接受对象之间的 `anyOf`；真实模型遵守率、改写率与任务质量。先在真实评测基线 `9231f45` 上跑第 9 节 E 项样例取基准（基线部署待安排），再与用户定阈值，新版同批对比；复用 `scripts/dialogue_real_model.py` 与 `scripts/gate0_real_model.py` 的执行方式，评分口径按第 7 节改为“结论与全部结果一致”。
 
+### 8.2 S3 实施步骤（基线 `897ee83`）
+
+每步可运行、可测试；阶段结果不称为整个 S3 完成。
+
+1. **契约与解析**：`models.AgentAnswer`（块 + `report_format` + `awaiting_user`，16,000 字节 / 64 块在类型中校验）、`LegacyAnswer` 与 `legacy_blocks`、`TurnAnswer.answer_version`（缺失只进旧格式，未知/损坏/新格式缺字段拒绝）；`app.AnswerSchema`（单值 `const` → `enum`）；`evidence.normalize_answer` / `citation_error`（只剩 `unknown_evidence`）供预检、Session 提交、交付共用。
+2. **正式审批恢复（方案 1）**：旧格式会话历史 + 旧格式暂停材料经正式群入口批准、拒绝、重复批准、并发批准、发起人失效（`tests/sdk_core/test_s3_legacy_resume.py`）。
+3. **交付**：`EvidenceStore.validate_answer` 计算动作区域、正文、其余结果（原执行轮次、需交付类别、同一批复核）；飞书卡片 / post / 纯文本、MD/HTML 报告、Web 四类渲染按来源分区；动作区域不进附件；`awaiting_user` 只改载体与超容量行为。
+   - Web 容量（代码核实，非专项压测）：Web 单次响应完整渲染、无附件、无截断；规模上界 = 模型文字 ≤16,000 字节 + 展示事实数 ×（每条证据 `projection_bytes["web"]`），事实数 ≤ 模型块（≤64）+ 本轮动作与其余结果（≤本轮 `max_tool_calls`）；保存时另受 `max_answer_bytes` 约束（超出即 `result_not_saved`，不交付）。没有新增 Web 降级路径。
+4. **提示词与评测**：回答指令、补全说明、改写与收尾提示、模型检查入口；`gate0.py` 区分交付事实与模型显式引用，`dialogue_gate.py` 增“结论与全部结果一致”并按区域记录事实；Skill 措辞。
+
 ## 9. 测试与评测
 
 **离线（T）：** 第 4 节每个 T 项至少一例；生产两种失败形态直接交付；四类输出中的仿写标识；6.5、6.9 列出的反例；6.6 全部动作状态；6.11 每种兼容情形；现有安全测试全量保留。

@@ -42,15 +42,16 @@ def tools(*, effect="read") -> ToolCatalog:
 
 
 def selected(ids, entries=None, **extra) -> TurnAnswer:
-    body = {
-        "evidence_ids": ids,
-        "inferences": [],
-        "clarification": None,
-        "fact_views": [{"evidence_id": e, "view": "brief"} for e in ids]
-        if entries is None
-        else entries,
-        **extra,
-    }
+    """S3：显示方式写在事实块上；同一证据的多个块由归一化去重（冲突取完整）。"""
+    entries = [{"evidence_id": e, "view": "brief"} for e in ids] if entries is None else entries
+    blocks = [
+        {"type": "fact", **entry}
+        for e in ids
+        for entry in (
+            [x for x in entries if x["evidence_id"] == e] or [{"evidence_id": e, "view": "full"}]
+        )
+    ] + [{"type": "fact", **x} for x in entries if x["evidence_id"] not in ids]
+    body = {"blocks": blocks, "report_format": None, "awaiting_user": False, **extra}
     return TurnAnswer(answer=AgentAnswer.model_validate(body), context_evidence=tuple(ids))
 
 
@@ -163,7 +164,8 @@ async def test_display_entries_must_be_cited(postgres_url: URL, entries):
             await evidence.validate_answer(
                 selected([result.evidence_id], entries), context(turn="next")
             )
-        assert caught.value.code == "invalid_fact_view"
+        # 显示方式不再是独立列表：选择不可见证据就是引用不可见证据。
+        assert caught.value.code == "unknown_evidence"
 
 
 async def test_brief_does_not_make_invisible_evidence_readable(postgres_url: URL):
@@ -231,15 +233,13 @@ async def test_proposals_cannot_be_compacted(postgres_url: URL):
 def test_sdk_closed_display_schema_and_old_default():
     schema = AgentOutputSchema(AgentAnswer).json_schema()
     assert schema["additionalProperties"] is False
-    assert "fact_views" in schema["required"]
-    assert schema["$defs"]["AnswerFactView"]["properties"]["view"]["enum"] == ["full", "brief"]
-    assert schema["$defs"]["AnswerFactView"]["additionalProperties"] is False
+    assert schema["$defs"]["FactBlock"]["properties"]["view"]["enum"] == ["full", "brief"]
+    assert schema["$defs"]["FactBlock"]["additionalProperties"] is False
     with pytest.raises(ValidationError):
         AgentAnswer.model_validate(
             {
-                "evidence_ids": ["ev1"],
-                "inferences": [],
-                "clarification": None,
-                "fact_views": [{"evidence_id": "ev1", "view": "brief", "count": 123}],
+                "blocks": [{"type": "fact", "evidence_id": "ev1", "view": "brief", "count": 123}],
+                "report_format": None,
+                "awaiting_user": False,
             }
         )

@@ -225,7 +225,7 @@ async def test_manual_review_reads_validated_turn_before_cleanup_without_leaking
             async with e.connect() as conn:
                 assert await conn.scalar(text("SELECT count(*) FROM xiaowei_request")) == 1
         assert sample.delivery is not None and len(sample.delivery.facts[0].rows) == 5
-        assert sample.delivery.analysis[0].text == "REVIEW_ANSWER_SENTINEL"
+        assert sample.delivery.texts[-1] == "REVIEW_ANSWER_SENTINEL"
         assert sample.message == message
         assert [(target, kind) for target, kind, _ in sample.statements if kind == "query"] == [
             ("fat", "query")

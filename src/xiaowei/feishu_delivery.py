@@ -46,17 +46,10 @@ def _preview(
     delivery: Delivery, max_chars: int, chat_id: str, reply_to: str | None, notice: str
 ) -> Message:
     # 复用渲染器的整行预览：回答优先，预览范围与“结果行未展示”出自同一预算，不先截事实。
-    if delivery.facts:
-        candidate = delivery.model_copy(update={"report_notice": notice + "\n结果预览。"})
-    else:
-        candidate = delivery.model_copy(
-            update={
-                "content": notice + "\n" + delivery.content,
-                "feishu_text": (notice + "\n" + delivery.feishu_text)
-                if delivery.feishu_text is not None
-                else None,
-            }
-        )
+    # 交付说明是代码说明，放在系统说明区，不与模型文字拼进同一段。
+    candidate = delivery.model_copy(
+        update={"report_notice": notice + ("\n结果预览。" if delivery.facts else "")}
+    )
     try:
         message = build_feishu_message(
             candidate, max_chars, chat_id, reply_to=reply_to, platform_limits=True
@@ -65,6 +58,9 @@ def _preview(
         message = None
     if message is not None and message != capacity_notice(delivery.session_notice):
         return message
+    if delivery.section("action"):
+        # 动作区域不进入附件，放不进正文就明确失败，不以说明代替。
+        raise MessageCapacityError("动作区域无法在本消息容量内完整展示")
     text = notice + "\n预览无法在本消息容量内展示。"
     limits = list(
         dict.fromkeys(
@@ -84,7 +80,7 @@ def _preview(
 def _data_parts(
     delivery: Delivery, sequence: int, max_chars: int, chat_id: str, reply_to: str | None
 ) -> tuple[DeliveryPart, ...]:
-    if delivery.report_format is None or delivery.is_clarification:
+    if delivery.report_format is None or delivery.awaiting_user:
         try:
             message = build_feishu_message(
                 delivery,
@@ -96,7 +92,7 @@ def _data_parts(
             )
             return (_message_part(sequence, "body", message),)
         except MessageCapacityError:
-            if delivery.is_clarification:
+            if delivery.awaiting_user:
                 raise
     reports = build_reports(
         delivery.model_copy(update={"report_format": delivery.report_format or "md"}),
@@ -190,7 +186,7 @@ async def send_complete_delivery(
         material = delivery.model_copy(
             update={
                 "facts": materials,
-                "analysis": (),
+                "blocks": (),
                 "report_format": None,
                 "report_notice": None,
             }
@@ -205,19 +201,9 @@ async def send_complete_delivery(
             material_failed = True
         else:
             material_parts = (_message_part(0, "approval", message),)
+    # 审批材料独立发送后，剩余正文（模型文字、其余结果与系统说明）照常分区渲染；
+    # 编号沿用整条交付的展示顺序。
     data_delivery = delivery.model_copy(update={"facts": data, "requires_complete": False})
-    if materials and not data:
-        data_delivery = data_delivery.model_copy(
-            update={
-                "content": "分析与建议（模型推断）\n"
-                + "\n".join(
-                    f"{i.text}（依据：{'、'.join(map(delivery.result_label, i.evidence_ids))}）"
-                    for i in delivery.analysis
-                )
-                + ("\n" + delivery.monitoring_notice if delivery.monitoring_notice else ""),
-                "feishu_text": None,
-            }
-        )
 
     async def hint(reason: str) -> None:
         # 提醒尽力一次，非必需分项；失锁/到期/readiness关闭不再外发。
@@ -227,9 +213,8 @@ async def send_complete_delivery(
         try:
             hint_delivery = data_delivery
             if not data:
-                hint_delivery = data_delivery.model_copy(
-                    update={"content": "", "feishu_text": None}
-                )
+                # 提醒是代码说明：不带模型文字，只用纯文本或系统说明。
+                hint_delivery = data_delivery.model_copy(update={"content": "", "blocks": ()})
             preview = await asyncio.to_thread(
                 _preview,
                 hint_delivery,
@@ -317,7 +302,7 @@ async def send_complete_delivery(
     except (ReportCapacityError, MessageCapacityError):
         return capacity_refusal()
     outcomes.extend([await send_part(p) for p in approvals])
-    needs_data = bool(data or delivery.analysis or not materials)
+    needs_data = bool(data or delivery.texts or not materials)
     try:
         if needs_data and not data_parts:
             data_parts = await asyncio.to_thread(

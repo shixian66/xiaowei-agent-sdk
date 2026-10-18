@@ -43,6 +43,7 @@ from xiaowei.governance import (
     normalize_arguments,
 )
 from xiaowei.models import (
+    ACTION_STATUS_POLICY,
     AUDIENCES,
     Audience,
     Identity,
@@ -58,7 +59,7 @@ if TYPE_CHECKING:
 
 APPROVAL_WINDOW = timedelta(minutes=15)
 ACTION_SETTLE_TIMEOUT_SECONDS = 5
-STATUS_POLICY = "monitoring.action_status"
+STATUS_POLICY = ACTION_STATUS_POLICY
 _PROPOSAL_FIELDS = (
     "action_id",
     "action",

@@ -4,7 +4,7 @@
 """
 
 import json
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Sequence
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
@@ -38,6 +38,28 @@ PRIVATE_NOTE = "synthetic-private-note"
 START = datetime(2026, 9, 29, 8, 0, tzinfo=UTC)
 RETENTION_SECONDS = 3600
 TEST_DIGEST_KEY = SecretStr("sdk-core-test-digest-key")
+
+
+def s3_answer(
+    evidence_ids: Sequence[str] = (),
+    text: str | None = None,
+    *,
+    awaiting_user: bool = False,
+    report_format: str | None = None,
+    **extra: object,
+) -> dict[str, object]:
+    """脚本模型提交的 S3 回答 JSON：引用的事实块在前，一段文字（如有）在后。"""
+    blocks: list[dict[str, object]] = [
+        {"type": "fact", "evidence_id": e, "view": "full"} for e in evidence_ids
+    ]
+    if text is not None:
+        blocks.append({"type": "text", "text": text})
+    return {
+        "blocks": blocks,
+        "report_format": report_format,
+        "awaiting_user": awaiting_user,
+        **extra,
+    }
 
 
 def cited(answer: AgentAnswer) -> TurnAnswer:

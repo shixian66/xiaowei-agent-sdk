@@ -60,6 +60,7 @@ from sqlalchemy.ext.asyncio import AsyncEngine
 from xiaowei.actions import ActionService, action_status_catalog, execution_requests
 from xiaowei.alertmanager import AlertmanagerAdapter, AlertmanagerConfig, alertmanager_catalog
 from xiaowei.app import (
+    AnswerSchema,
     AppConfig,
     Application,
     BusinessContext,
@@ -111,6 +112,7 @@ from xiaowei.models import (
     Identity,
     Label,
     Owner,
+    TextBlock,
     ToolContract,
     ToolId,
 )
@@ -574,8 +576,8 @@ _CHECK_TOOL = "model_check_lookup"
 _CHECK_MAX_TURNS = 3  # 调用工具、收到结果后作答只需 2 步；多出的一步用于识别重复调用
 _CHECK_INSTRUCTIONS = (
     "这是模型配置检查。先调用一次 model_check_lookup 工具（region 填 east），只调用一次；"
-    "然后给出最终回答：evidence_ids 为空列表，inferences 为空列表，clarification 为 null，"
-    "advice 用一句话说明工具返回的数值。"
+    "然后给出最终回答：blocks 只含一个 text 块，用一句话说明工具返回的数值；"
+    "不放 fact 块，report_format 为 null，awaiting_user 为 false。"
 )
 _CHECK_INPUT = "请完成模型配置检查。"
 
@@ -605,8 +607,9 @@ async def check_model(
     """用固定合成指令与一个进程内无 I/O 工具，经与 ``serve`` 相同的模型装配完成一次工具往返。
 
     不连接 PostgreSQL、StarRocks 或飞书，不写 Session、请求或 Evidence；会产生真实模型请求与用量。
-    最终回答必须是无证据的 ``advice`` 分支：本命令没有 Evidence，所以不运行 Evidence 校验，也不接受
-    形状正确但混用分支的回答。模型客户端打开或关闭失败同样只报告固定类别（``model_failed``），
+    最终回答使用与正式轮次相同的输出 schema（``AnswerSchema``），且必须是只有一段非空文字的
+    回答：本命令没有 Evidence，所以不运行 Evidence 校验，也不接受带事实块、文件或等待用户的回答。
+    模型客户端打开或关闭失败同样只报告固定类别（``model_failed``），
     不报告为通过。
     """
     configure_runtime()
@@ -628,7 +631,7 @@ async def check_model(
                 model=binding.model,
                 model_settings=binding.settings,
                 tools=[lookup],
-                output_type=AgentAnswer,
+                output_type=AnswerSchema(),
             )
             result = await Runner.run(
                 agent, _CHECK_INPUT, max_turns=_CHECK_MAX_TURNS, run_config=safe_run_config()
@@ -647,10 +650,11 @@ def _check_result(calls: int, answer: object) -> None:
         raise ModelCheckError("tool_repeated")
     if not (
         isinstance(answer, AgentAnswer)
-        and answer.evidence_ids == ()
-        and answer.inferences == []
-        and answer.clarification is None
-        and answer.advice
+        and len(answer.blocks) == 1
+        and isinstance(answer.blocks[0], TextBlock)
+        and answer.blocks[0].text.strip()
+        and answer.report_format is None
+        and not answer.awaiting_user
     ):
         raise ModelCheckError("answer_invalid")
 
