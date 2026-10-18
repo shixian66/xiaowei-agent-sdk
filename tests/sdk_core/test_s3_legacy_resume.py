@@ -2,8 +2,12 @@
 
 正式群网关 → Application.resume_action（Action claim、Evidence、PolicySession、当前权限）→
 隔离 PostgreSQL；模型与远端写为替身。旧格式由真实保存位置的数据构造：会话中的助手回答改为
-S3 之前的 JSON，暂停请求的保存回答改为没有版本字段的旧 ``TurnAnswer``；RunState 不保存输出
-类型（S2），暂停快照的输入历史因此同样带着旧回答。
+S3 之前的 JSON，暂停请求的保存回答改为基线 897ee83 的旧 ``TurnAnswer`` 信封；RunState 不保存
+输出类型（S2），暂停快照的输入历史因此同样带着旧回答。
+
+旧数据按基线的结构与语义构造（见 ``_assert_baseline_legal``），不以当前 ``LegacyAnswer`` 能解析
+为准：信封只有 ``answer``、``context_evidence``、``monitoring_failures``、``run_turn_id``；有证据
+的回答只带引用这些证据的 ``inferences``，不混入 ``advice``（基线以 mixed_kinds 拒绝）。
 """
 
 import asyncio
@@ -18,11 +22,35 @@ from tests.sdk_core.test_group_gateway import running
 from tests.sdk_core.test_group_identity import A, B, group_ref
 
 from xiaowei.feishu import attributed
-from xiaowei.models import LegacyAnswer, TurnAnswer
+from xiaowei.models import AnswerInference, LegacyAnswer, TurnAnswer
 
 pytestmark = pytest.mark.loopback
 
 LEGACY_TEXT = "旧格式回答：东区平稳"
+# 基线 897ee83 ``TurnAnswer`` 序列化的全部字段（``session_state`` 不进入 JSON）。
+BASELINE_ENVELOPE = {"answer", "context_evidence", "monitoring_failures", "run_turn_id"}
+
+
+def _baseline(turn: TurnAnswer, legacy: LegacyAnswer) -> dict[str, object]:
+    stored = turn.model_dump(mode="json", include=BASELINE_ENVELOPE - {"answer"})
+    stored["answer"] = legacy.model_dump(mode="json")
+    _assert_baseline_legal(stored)
+    return stored
+
+
+def _assert_baseline_legal(stored: dict[str, object]) -> None:
+    """基线 ``TurnAnswer`` 字段与 ``citation_error`` 的规则（897ee83 evidence.py）逐条转写。"""
+    assert set(stored) == BASELINE_ENVELOPE
+    answer = stored["answer"]
+    assert isinstance(answer, dict)
+    cited = set(answer["evidence_ids"])
+    unverified = [answer[k] for k in ("clarification", "advice") if answer[k] is not None]
+    if unverified:  # 澄清或建议不与证据、分析、显示方式或彼此混用
+        assert not (cited or answer["inferences"] or answer["fact_views"]) and len(unverified) == 1
+        return
+    assert cited and cited <= set(stored["context_evidence"])  # type: ignore[arg-type]
+    assert {v["evidence_id"] for v in answer["fact_views"]} <= cited
+    assert all(i["evidence_ids"] and set(i["evidence_ids"]) <= cited for i in answer["inferences"])
 
 
 async def _legacy_history(actions: Actions, group) -> None:
@@ -34,14 +62,14 @@ async def _legacy_history(actions: Actions, group) -> None:
         "SELECT answer FROM xiaowei_request WHERE reply_message_id='om_legacy_seed'"
     )
     turn = TurnAnswer.model_validate_json(raw)
+    cited = turn.blocks_answer.evidence_ids
     legacy = LegacyAnswer(
-        evidence_ids=turn.answer.evidence_ids,
-        inferences=[],
+        evidence_ids=cited,
+        inferences=[AnswerInference(text=LEGACY_TEXT, evidence_ids=cited)],
         clarification=None,
-        advice=LEGACY_TEXT,
+        advice=None,
     )
-    stored = turn.model_dump(mode="json", exclude={"answer_version", "answer"})
-    stored["answer"] = legacy.model_dump(mode="json")
+    stored = _baseline(turn, legacy)
     async with env.engine.begin() as conn:
         rows = (
             await conn.execute(text("SELECT id, message_data FROM agent_messages ORDER BY id"))
@@ -79,15 +107,18 @@ async def _legacy_pause(actions: Actions, group) -> tuple[str, object]:
         if isinstance(item, dict) and item.get("role") == "assistant"
     ]
     assert any(LEGACY_TEXT in json.dumps(c, ensure_ascii=False) for c in replayed)
-    # 暂停材料按旧格式保存：没有版本字段、旧回答结构。
+    # 暂停材料按基线保存：引用本次请求执行的动作材料与本轮读取结果，无分析。本轮没有读取
+    # 查询，基线的材料引用因此正是当前材料列出的动作证据。
     ((raw,),) = await env.rows(
         "SELECT answer FROM xiaowei_request WHERE reply_message_id='om_sdk_origin'"
     )
     material = TurnAnswer.model_validate_json(raw)
-    stored = material.model_dump(mode="json", exclude={"answer_version", "answer"})
-    stored["answer"] = LegacyAnswer(
-        evidence_ids=material.answer.evidence_ids, inferences=[], clarification=None
-    ).model_dump(mode="json")
+    stored = _baseline(
+        material,
+        LegacyAnswer(
+            evidence_ids=material.blocks_answer.evidence_ids, inferences=[], clarification=None
+        ),
+    )
     async with env.engine.begin() as conn:
         await conn.execute(
             text("UPDATE xiaowei_request SET answer=:a WHERE reply_message_id='om_sdk_origin'"),
@@ -143,11 +174,11 @@ async def test_legacy_pause_rejection_writes_nothing_and_answers_in_new_format(a
     assert actions.adapter.calls == []
     ((state,),) = await env.rows("SELECT state FROM xiaowei_action")
     assert state == "rejected"
-    rows = await env.rows(
-        "SELECT answer FROM xiaowei_request WHERE reply_message_id='om_sdk_reject'"
+    ((state, saved),) = await env.rows(
+        "SELECT state, answer FROM xiaowei_request WHERE reply_message_id='om_sdk_reject'"
     )
-    if rows and rows[0][0] is not None:
-        assert TurnAnswer.model_validate_json(rows[0][0]).answer_version == 2
+    assert state == "completed" and saved is not None
+    assert TurnAnswer.model_validate_json(saved).answer_version == 2
 
 
 async def test_concurrent_legacy_approvals_write_at_most_once(actions):

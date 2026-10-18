@@ -146,7 +146,11 @@ class Env:
         self.service = ChannelService(self.app, self.results(self.store))
 
     def channel_store(
-        self, cls: type[ChannelStore] = ChannelStore, readiness: Readiness | None = None
+        self,
+        cls: type[ChannelStore] = ChannelStore,
+        readiness: Readiness | None = None,
+        *,
+        max_answer_bytes: int = 4000,
     ) -> ChannelStore:
         return cls(
             self.engine,
@@ -156,7 +160,7 @@ class Env:
             request_retention_seconds=RETENTION_SECONDS,
             session_retention_seconds=7200,
             evidence_retention_seconds=RETENTION_SECONDS,
-            max_answer_bytes=4000,
+            max_answer_bytes=max_answer_bytes,
         )
 
     def results(self, store: ChannelStore | None = None) -> ResultDelivery:

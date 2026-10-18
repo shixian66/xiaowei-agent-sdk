@@ -272,6 +272,7 @@
 | v0 `sent` | 不追认为“完整结果已交付”；现有审批前提中 v0 `sent` 视为材料已送达（`channel_store.py:1916`）的规则不变 |
 | 最早期只存 `AgentAnswer`、无 `context_evidence` | 继续拒绝交付（`channel.py:454`） |
 | 缺版本字段 | 只进入严格旧格式解析，不接受任意缺版本数据 |
+| 旧版合法但超出新输出预算的旧回答（如三段各 2,000 字分析、64 段分析） | 照常交付；16,000 字节 / 64 块只约束新模型输出，`legacy_blocks` 投影适配不套用（审查修复）。旧格式结构、证据、权限与渠道容量照常检查 |
 | 未知版本、损坏 JSON、已知新版本缺必需字段 | 拒绝；新版本解析失败不回退旧版本 |
 
 需要兼容的读取路径（“不迁移历史数据”不等于不需要兼容解析）：
@@ -372,9 +373,9 @@
 
 每步可运行、可测试；阶段结果不称为整个 S3 完成。
 
-1. **契约与解析**：`models.AgentAnswer`（块 + `report_format` + `awaiting_user`，16,000 字节 / 64 块在类型中校验）、`LegacyAnswer` 与 `legacy_blocks`、`TurnAnswer.answer_version`（缺失只进旧格式，未知/损坏/新格式缺字段拒绝）；`app.AnswerSchema`（单值 `const` → `enum`）；`evidence.normalize_answer` / `citation_error`（只剩 `unknown_evidence`）供预检、Session 提交、交付共用。
-2. **正式审批恢复（方案 1）**：旧格式会话历史 + 旧格式暂停材料经正式群入口批准、拒绝、重复批准、并发批准、发起人失效（`tests/sdk_core/test_s3_legacy_resume.py`）。
-3. **交付**：`EvidenceStore.validate_answer` 计算动作区域、正文、其余结果（原执行轮次、需交付类别、同一批复核）；飞书卡片 / post / 纯文本、MD/HTML 报告、Web 四类渲染按来源分区；动作区域不进附件；`awaiting_user` 只改载体与超容量行为。
+1. **契约与解析**：`models.AgentAnswer`（块 + `report_format` + `awaiting_user`，16,000 字节 / 64 块在类型中校验）、`LegacyAnswer` 与 `legacy_blocks`、`TurnAnswer.answer_version`（缺失只进旧格式，未知/损坏/新格式缺字段拒绝）；旧回答的块投影不套用新输出预算；`app.AnswerSchema`（单值 `const` → `enum`）；`evidence.normalize_answer` / `citation_error`（只剩 `unknown_evidence`）供预检、Session 提交、交付共用。
+2. **正式审批恢复（方案 1）**：旧格式会话历史 + 旧格式暂停材料经正式群入口批准、拒绝、重复批准、并发批准、发起人失效（`tests/sdk_core/test_s3_legacy_resume.py`）。旧数据按基线 `897ee83` 的信封字段与引用规则构造并逐条断言（有证据的回答只带关联分析，不混入建议）；拒绝分支无条件断言请求完成并保存新格式答案。
+3. **交付**：`EvidenceStore.validate_answer` 计算动作区域、正文、其余结果（原执行轮次、需交付类别、同一批复核）；飞书卡片 / post / 纯文本、MD/HTML 报告、Web 四类渲染按来源分区；动作区域不进附件；`awaiting_user` 只改载体与超容量行为。v0 纯文字卡片截断时，截断说明属于代码内容，模型文字同样带来源标签，标签计入容量。
    - Web 容量（代码核实，非专项压测）：Web 单次响应完整渲染、无附件、无截断；规模上界 = 模型文字 ≤16,000 字节 + 展示事实数 ×（每条证据 `projection_bytes["web"]`），事实数 ≤ 模型块（≤64）+ 本轮动作与其余结果（≤本轮 `max_tool_calls`）；保存时另受 `max_answer_bytes` 约束（超出即 `result_not_saved`，不交付）。没有新增 Web 降级路径。
 4. **提示词与评测**：回答指令、补全说明、改写与收尾提示、模型检查入口；`gate0.py` 区分交付事实与模型显式引用，`dialogue_gate.py` 增“结论与全部结果一致”并按区域记录事实；Skill 措辞。
 

@@ -277,8 +277,9 @@ class AgentAnswer(_Answer):
 
     回答结构、顺序与语气由模型决定；可信事实、动作材料、本轮未引用的获准结果（“其余结果”）与
     系统说明由代码生成（``EvidenceStore.validate_answer``）。块的字段组合由类型约束；文字累计
-    字节与块数在这里校验，超限属于可改写的格式错误。``awaiting_user`` 为真时忽略
-    ``report_format``，只交付普通消息。
+    字节与块数在这里校验，超限属于可改写的格式错误；这一预算只约束新模型输出，旧记录经
+    ``legacy_blocks`` 适配，不受此限。``awaiting_user`` 为真时忽略 ``report_format``，只交付
+    普通消息。
     """
 
     blocks: tuple[AnswerBlock, ...]
@@ -335,9 +336,14 @@ class LegacyAnswer(_Answer):
 
 
 def legacy_blocks(answer: LegacyAnswer) -> AgentAnswer:
-    """旧回答按原语义转为块：澄清即等待用户；引用的事实在前、分析文字在后。"""
+    """旧回答按原语义转为块：澄清即等待用户；引用的事实在前、分析文字在后。
+
+    这是已保存记录的投影适配，不是新的模型输出：旧回答已按旧版结构严格解析，每个块也逐一
+    校验，但不再套用 ``AgentAnswer`` 的新输出预算（文字字节与块数），否则旧版合法的长分析
+    或多段分析会在历史读取时失效。证据、权限与各渠道容量仍由交付链路照常检查。
+    """
     if answer.clarification is not None:
-        return AgentAnswer(
+        return AgentAnswer.model_construct(
             blocks=(TextBlock(type="text", text=answer.clarification),),
             report_format=None,
             awaiting_user=True,
@@ -350,7 +356,7 @@ def legacy_blocks(answer: LegacyAnswer) -> AgentAnswer:
     blocks.extend(TextBlock(type="text", text=i.text) for i in answer.inferences)
     if answer.advice is not None:
         blocks.append(TextBlock(type="text", text=answer.advice))
-    return AgentAnswer(
+    return AgentAnswer.model_construct(
         blocks=tuple(blocks), report_format=answer.report_format, awaiting_user=False
     )
 

@@ -443,10 +443,13 @@ def _prose_card(
     formatted: bool = False,
     basis: tuple[tuple[str, str], ...] = (),
 ) -> Message:
-    """只有文字的回答：系统说明与模型文字分区，有代码内容时模型文字带代码标签。"""
+    """只有文字的回答：系统说明与模型文字分区，有代码内容时模型文字带代码标签。
+
+    截断说明也是代码内容；标签在候选卡片内生成，调用方的容量检查已计入它。
+    """
     text = display_text(raw)
     elements = [_div(n) for n in notices]
-    if notices or basis:
+    if notices or basis or clipped:
         elements.append(_div(MODEL_TEXT_LABEL))
     elements.extend(format_prose(text) if formatted else [_div(text)])
     if clipped:
