@@ -1,4 +1,0 @@
-services:
-  worker:
-    environment:
-      XIAOWEI_SMOKE_STEP_BARRIER: "true"

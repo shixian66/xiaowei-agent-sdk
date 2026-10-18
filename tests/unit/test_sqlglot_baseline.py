@@ -1,19 +1,9 @@
-"""sqlglot 的方言与 AST 行为必须是断言，不是假设。
-
-旧项目 core/sql_guard.py::_sqlglot_dialect() 把 starrocks/tidb 都映射成 mysql，
-说明历史上踩过方言支持不足的坑。M3 直接用 starrocks 方言，因此必须先证明它存在
-且能解析我们的模板——否则 T6 会在写完全部规则后才发现地基不对。
-
-本文件同时把 §9.2 每一条规则所依赖的 AST 事实钉死：规则若基于错误的 AST 认知，
-它在攻击矩阵下依然"全绿"，因为拒绝的理由碰巧也是拒绝。
-"""
+"""StarRocks SQL 解析依赖的方言与 AST 行为；样本只解析，不执行查询。"""
 
 import pytest
 from sqlglot import exp, parse, parse_one
 
-# 这两条是**样本**，用于证明方言能解析我们打算生成的形状；真正的模板由 T4 的
-# 编译器以 sqlglot 表达式树构造，不经字符串拼接。此处逐字写出而不用 f-string 拼
-# 接表名，是为了让样本本身也不出现"用变量拼 SQL"的写法。
+# 审计查询样本用于验证方言解析；不作为产品执行模板。
 _LIST_SQL = (
     "SELECT `queryId`, `timestamp`, `queryTime`, `scanRows`, `returnRows`, "
     "`scanBytes`, `memCostBytes`, `pendingTimeMs`, `cpuCostNs`, `state`, "

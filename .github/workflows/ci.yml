@@ -33,7 +33,7 @@ jobs:
   integration:
     name: integration
     runs-on: ubuntu-24.04
-    # SDK 测试数据库与本地一致；旧数据库集成测试维持本地默认跳过行为。
+    # 使用与本地一致的隔离 SDK 测试数据库。
     env:
       SDK_TEST_POSTGRES_URL: postgresql+asyncpg://postgres@127.0.0.1:55432/postgres
     steps:
@@ -58,22 +58,6 @@ jobs:
           trap cleanup EXIT
           docker compose -p "$project" -f compose.sdk-test.yml up -d --wait
           python -m pytest -q
-
-  compose-smoke:
-    name: compose-smoke
-    runs-on: ubuntu-24.04
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
-        with:
-          persist-credentials: false
-      - uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9
-        with:
-          version: "0.12.8"
-          python-version: "3.11"
-          enable-cache: false
-          activate-environment: true
-      - run: uv sync --extra dev --frozen
-      - run: python -m scripts.compose_smoke
 
   p3-release:
     name: p3-release
