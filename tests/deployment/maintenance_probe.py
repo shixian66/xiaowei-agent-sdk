@@ -22,7 +22,12 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncEngine
 
 from xiaowei.channel_store import ChannelStore
-from xiaowei.models import AgentAnswer, Owner, TurnAnswer
+from xiaowei.models import Owner, TurnAnswer
+
+try:  # 升级后镜像：S3 之前的回答以 LegacyAnswer 严格解析
+    from xiaowei.models import LegacyAnswer
+except ImportError:  # 升级前镜像：同一结构即当时的 AgentAnswer
+    from xiaowei.models import AgentAnswer as LegacyAnswer  # type: ignore[assignment]
 from xiaowei.storage import (
     Readiness,
     check_digest_key,
@@ -52,7 +57,8 @@ _GROUP = {
     "owner": _GROUP_OWNER,
 }
 _ANSWER = TurnAnswer(
-    answer=AgentAnswer(
+    # 升级前保存的结果：S3 之前的回答格式（缺答案版本），升级后按严格旧格式解析。
+    answer=LegacyAnswer(
         evidence_ids=(),
         inferences=[],
         clarification=None,

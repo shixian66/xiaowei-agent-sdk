@@ -6,7 +6,7 @@
 
 import json
 from datetime import datetime
-from typing import Annotated, Literal
+from typing import Annotated, Final, Literal
 
 from pydantic import (
     AwareDatetime,
@@ -56,6 +56,8 @@ ALERTMANAGER_READ_POLICIES = frozenset(
         "alertmanager.get_status",
     }
 )
+ACTION_STATUS_POLICY = "monitoring.action_status"
+"""动作状态查询：结果进入动作区域，不进“其余结果”；不因此获得完整审批材料保护。"""
 MONITORING_READ_POLICIES = (
     PROMETHEUS_READ_POLICIES | GRAFANA_READ_POLICIES | ALERTMANAGER_READ_POLICIES
 )
@@ -245,6 +247,67 @@ class _Answer(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid")
 
 
+ANSWER_VERSION: Final = 2
+"""``TurnAnswer`` 中由可信代码写入的答案版本；模型不输出版本。缺失表示旧 ``LegacyAnswer``。"""
+MAX_ANSWER_TEXT_BYTES: Final = 16_000
+"""模型文字累计上限（UTF-8 字节）；只约束模型输出规模，不保证卡片、报告或 Session 放得下。"""
+MAX_ANSWER_BLOCKS: Final = 64
+
+
+class TextBlock(_Answer):
+    """模型自由文字：结论、解释、建议、追问或闲聊；不获得系统已核实事实的身份。"""
+
+    type: Literal["text"]
+    text: str
+
+
+class FactBlock(_Answer):
+    """模型只选择一条可见证据与展示方式；事实内容由代码从获准投影生成。"""
+
+    type: Literal["fact"]
+    evidence_id: str
+    view: Literal["full", "brief"]
+
+
+AnswerBlock = TextBlock | FactBlock
+
+
+class AgentAnswer(_Answer):
+    """SDK ``output_type``：按顺序排列的文字与事实块，外加文件格式与“等待用户”声明。
+
+    回答结构、顺序与语气由模型决定；可信事实、动作材料、本轮未引用的获准结果（“其余结果”）与
+    系统说明由代码生成（``EvidenceStore.validate_answer``）。块的字段组合由类型约束；文字累计
+    字节与块数在这里校验，超限属于可改写的格式错误；这一预算只约束新模型输出，旧记录经
+    ``legacy_blocks`` 适配，不受此限。``awaiting_user`` 为真时忽略 ``report_format``，只交付
+    普通消息。
+    """
+
+    blocks: tuple[AnswerBlock, ...]
+    report_format: Literal["md", "html"] | None
+    """飞书用户明确要结果或解释/建议文件时选定格式；``awaiting_user`` 为真时忽略。"""
+    awaiting_user: bool
+    """本条在等待用户补充信息：只决定载体与超容量行为，不跳过验证、补全或动作置顶。"""
+
+    @property
+    def evidence_ids(self) -> tuple[str, ...]:
+        """模型显式放进正文的证据，按块顺序（不含交付时补全的动作与其余结果）。"""
+        return tuple(b.evidence_id for b in self.blocks if isinstance(b, FactBlock))
+
+    @property
+    def text(self) -> str:
+        """全部模型文字，按块顺序以空行连接。"""
+        return "\n\n".join(b.text for b in self.blocks if isinstance(b, TextBlock))
+
+    @model_validator(mode="after")
+    def _bounded(self) -> "AgentAnswer":
+        if len(self.blocks) > MAX_ANSWER_BLOCKS:
+            raise ValueError(f"回答块数超出上限 {MAX_ANSWER_BLOCKS}")
+        size = sum(len(b.text.encode()) for b in self.blocks if isinstance(b, TextBlock))
+        if size > MAX_ANSWER_TEXT_BYTES:
+            raise ValueError(f"回答文字累计超出 {MAX_ANSWER_TEXT_BYTES} 字节")
+        return self
+
+
 class AnswerInference(_Answer):
     text: str = Field(min_length=1, max_length=2000)
     evidence_ids: tuple[str, ...]
@@ -257,31 +320,44 @@ class AnswerFactView(_Answer):
     view: Literal["full", "brief"]
 
 
-class AgentAnswer(_Answer):
-    """SDK ``output_type``：模型只选择引用并给出分析；事实区域由代码从 Evidence 生成。
+class LegacyAnswer(_Answer):
+    """S3 之前保存的回答格式，只为严格解析历史记录；新轮次不再生成。
 
-    三种回答互斥（见 ``EvidenceStore.validate_answer``）：引用证据的回答（可带分析）、澄清、
-    无成功查询证据的建议（``advice``：只解释、只写 SQL、不要执行或监控源读取失败后的
-    未验证排查建议，不含已核实的查询事实）。
-    ``advice`` 有默认值，只为解析此前保存、没有该字段的回答（它们没有可信的上下文证据记录，
-    不再交付，见 ``ChannelStore``）；SDK 严格模式下模型仍须显式给出它（可为 null）。
+    交付时由 ``legacy_blocks`` 转为当前块结构，再走同一验证与投影。``advice`` 的默认值只为
+    解析更早、没有该字段的回答（它们没有上下文证据记录，不再交付，见 ``ChannelStore``）。
     """
 
     evidence_ids: tuple[str, ...]
     fact_views: tuple[AnswerFactView, ...] = ()
-    """未指定的引用默认 full；brief 仅用于已有可见历史事实，由 Evidence 校验。"""
     inferences: list[AnswerInference]
     clarification: Annotated[str, Field(min_length=1, max_length=2000)] | None
     advice: Annotated[str, Field(min_length=1, max_length=4000)] | None = None
     report_format: Literal["md", "html"] | None = None
-    """飞书用户明确要结果或解释/建议文件时选定格式；澄清时忽略。"""
 
 
-def answer_kinds_mixed(answer: AgentAnswer) -> bool:
-    """澄清或建议与证据、分析、显示方式或彼此混用：三种回答互斥的唯一判定。"""
-    unverified = [text for text in (answer.clarification, answer.advice) if text is not None]
-    return bool(unverified) and bool(
-        answer.evidence_ids or answer.inferences or answer.fact_views or len(unverified) > 1
+def legacy_blocks(answer: LegacyAnswer) -> AgentAnswer:
+    """旧回答按原语义转为块：澄清即等待用户；引用的事实在前、分析文字在后。
+
+    这是已保存记录的投影适配，不是新的模型输出：旧回答已按旧版结构严格解析，每个块也逐一
+    校验，但不再套用 ``AgentAnswer`` 的新输出预算（文字字节与块数），否则旧版合法的长分析
+    或多段分析会在历史读取时失效。证据、权限与各渠道容量仍由交付链路照常检查。
+    """
+    if answer.clarification is not None:
+        return AgentAnswer.model_construct(
+            blocks=(TextBlock(type="text", text=answer.clarification),),
+            report_format=None,
+            awaiting_user=True,
+        )
+    views = {item.evidence_id: item.view for item in answer.fact_views}
+    blocks: list[AnswerBlock] = [
+        FactBlock(type="fact", evidence_id=e, view=views.get(e, "full"))
+        for e in answer.evidence_ids
+    ]
+    blocks.extend(TextBlock(type="text", text=i.text) for i in answer.inferences)
+    if answer.advice is not None:
+        blocks.append(TextBlock(type="text", text=answer.advice))
+    return AgentAnswer.model_construct(
+        blocks=tuple(blocks), report_format=answer.report_format, awaiting_user=False
     )
 
 
@@ -359,16 +435,53 @@ class TurnAnswer(_Trusted):
     """一轮的最终回答与本轮模型可见的证据；后者由可信代码记录，不来自模型。
 
     ``context_evidence`` 是本轮交给模型的全部工具证据：回放的会话历史与本轮工具结果。模型文字
-    （分析、澄清、建议）可能复述其中任何一条，因此回答只能引用其中的证据，每次交付都按当前权限
-    复核全部这些证据；只展示 ``answer`` 引用的事实，任一条确定不可读时整条回答不交付。
+    可能复述其中任何一条，因此回答只能引用其中的证据，每次交付都按当前权限复核全部这些证据；
+    任一条确定不可读时整条回答不交付。
+
+    ``answer_version`` 由可信代码写入：``2`` 只接受 ``AgentAnswer``；缺失只接受严格的旧
+    ``LegacyAnswer``；其他取值、两者不符或新格式解析失败都拒绝，不回退旧格式。代码直接以
+    ``AgentAnswer`` 对象构造时自动写入当前版本；JSON 输入不补版本。
     """
 
-    answer: AgentAnswer
+    answer: AgentAnswer | LegacyAnswer
+    answer_version: Literal[2] | None = None
     context_evidence: tuple[Label, ...]
     monitoring_failures: tuple[MonitoringFailure, ...] = ()
     run_turn_id: Label | None = None
+    limit_reached: bool = False
+    """可信账本记录：步数用完后由无工具收尾生成本回答；交付时由代码说明可能不完整。"""
+    material_only: bool = False
+    """暂停材料：动作区域只含显式列出的（本次请求执行的）动作，不补全同轮其他提案。"""
     session_state: SessionSnapshot | None = Field(default=None, exclude=True)
     """成功提交后由应用附加；请求表单独保存，不进入回答 JSON 或 SDK Session。"""
+
+    @model_validator(mode="before")
+    @classmethod
+    def _version_for_code(cls, data: object) -> object:
+        if (
+            isinstance(data, dict)
+            and isinstance(data.get("answer"), AgentAnswer)
+            and "answer_version" not in data
+        ):
+            return {**data, "answer_version": ANSWER_VERSION}
+        return data
+
+    @model_validator(mode="after")
+    def _version_matches(self) -> "TurnAnswer":
+        expected = AgentAnswer if self.answer_version == ANSWER_VERSION else LegacyAnswer
+        if type(self.answer) is not expected:
+            raise ValueError("回答版本与内容不符")
+        return self
+
+    @property
+    def blocks_answer(self) -> AgentAnswer:
+        """当前块结构：新回答原样，旧回答按原语义转换。"""
+        if isinstance(self.answer, AgentAnswer):
+            return self.answer
+        return legacy_blocks(self.answer)
+
+
+FactSection = Literal["action", "body", "remaining"]
 
 
 class DeliveryFact(_Trusted):
@@ -394,45 +507,100 @@ class DeliveryFact(_Trusted):
     view: Literal["full", "brief"] = "full"
     summary: str | None = None
     """代码从当前渠道投影生成的摘要；原表与 JSON 保留，仍占同一展示预算。"""
+    section: FactSection = "body"
+    """展示区域：动作区域置顶，正文由模型放置，其余结果由代码补全。"""
+
+
+class DeliveryText(_Trusted):
+    """一段模型文字（已去除空白块）；渠道按模型说明呈现，不获得系统事实区域的身份。"""
+
+    kind: Literal["text"] = "text"
+    text: str
+
+
+class DeliveryFactRef(_Trusted):
+    """正文中由模型放置的一条代码事实；内容见 ``Delivery.facts`` 中同一编号的事实。"""
+
+    kind: Literal["fact"] = "fact"
+    evidence_id: str
+
+
+DeliveryBlock = Annotated[DeliveryText | DeliveryFactRef, Field(discriminator="kind")]
 
 
 class Delivery(_Trusted):
-    """通过验证、按接收渠道自身投影生成的输出。"""
+    """通过验证、按接收渠道自身投影生成的输出。
+
+    ``facts`` 按展示顺序排列：动作区域（置顶，模型块不能移除或改位）→ 正文中模型放置的事实
+    （与 ``blocks`` 的顺序一致）→ “其余结果”（本轮未引用的获准查询结果，按产生顺序由代码补全）。
+    ``blocks`` 只含正文：模型文字与正文事实的引用。系统说明在固定字段中，由代码生成。
+    """
 
     content: str
     evidence_ids: tuple[str, ...]
     channel: Channel
     facts: tuple[DeliveryFact, ...] = ()
-    analysis: tuple[AnswerInference, ...] = ()
-    """独立渲染的模型分析；仅由证据验证后的回答生成，不在事实表格中混排。"""
+    blocks: tuple[DeliveryBlock, ...] = ()
     monitoring_notice: str | None = None
+    """系统按可信失败记录生成的未核实源说明；Web 与飞书均须展示。"""
     session_notice: str | None = None
     """当前身份读取后，由可信请求状态生成的固定系统提示；不来自模型。"""
+    report_notice: str | None = None
+    """报告不能作为文件交付或需要说明载体时的可信固定说明（含非飞书渠道的文件请求）。"""
+    limit_notice: str | None = None
+    """步数用完后收尾生成的回答：代码说明结果可能不完整，不写进模型文字。"""
     requires_complete: bool = Field(default=False, exclude=True)
     """包含待批准动作时，所有代码生成的材料必须完整发送；容量提示不算动作送达。"""
-    """系统按可信失败记录生成的未核实源说明；Web 与飞书均须展示。"""
-    web_text: str | None = None
-    """Web 澄清或未执行建议的原文。"""
-    feishu_text: str | None = Field(default=None, exclude=True)
-    """飞书澄清或建议的原文；不进入 Web 序列化，不能从转义 content 反解。"""
-    is_clarification: bool = Field(default=False, exclude=True)
-    """由已验证回答种类生成；澄清只发普通消息，容量不足也不转附件。"""
+    awaiting_user: bool = Field(default=False, exclude=True)
+    """由已验证回答生成；等待用户补充时只发普通消息，容量不足也不转附件。"""
     report_format: Literal["md", "html"] | None = Field(default=None, exclude=True)
     """模型在本轮选择的飞书报告格式；事实和文件内容仍由代码生成。"""
     request_state: Literal["completed", "paused"] | None = Field(default=None, exclude=True)
     """发送时由已保存请求附加，供报告文件与卡片选择；不进入回答或渠道 JSON。"""
-    report_notice: str | None = Field(default=None, exclude=True)
-    """报告不能作为文件交付时的可信固定说明，只进入本次飞书卡片。"""
     delivery_attempt: str | None = Field(default=None, exclude=True)
     delivery_version: int = Field(default=0, exclude=True)
     """渠道取得的投递权；不进入模型、Session 或 Web 输出。"""
     basis: tuple[tuple[str, str], ...] = Field(default=(), exclude=True)
-    """未引用的本轮成功调查：仅工具/对象，不附原值。"""
+    """未展示的本轮其他成功调查（诊断、发现读取）：仅工具/对象，不附原值。"""
     content_expires_at: datetime | None = Field(default=None, exclude=True)
     """本次已复核内容的最早保留期限，供投递途中廉价检查。"""
 
     def result_label(self, evidence_id: str) -> str:
-        """用户可见的结果编号：按本次引用顺序，拆分审批材料后仍不变；不展示内部证据编号。"""
+        """用户可见的结果编号：按展示顺序，拆分审批材料后仍不变；不展示内部证据编号。"""
         if evidence_id in self.evidence_ids:
             return f"结果 {self.evidence_ids.index(evidence_id) + 1}"
         return "历史结果"
+
+    @property
+    def texts(self) -> tuple[str, ...]:
+        """正文中的模型文字，按顺序。"""
+        return tuple(b.text for b in self.blocks if isinstance(b, DeliveryText))
+
+    def section(self, name: FactSection) -> tuple[DeliveryFact, ...]:
+        return tuple(f for f in self.facts if f.section == name)
+
+    @property
+    def notices(self) -> tuple[str, ...]:
+        """代码生成的固定说明，按展示顺序。"""
+        return tuple(
+            n
+            for n in (
+                self.report_notice,
+                self.limit_notice,
+                self.monitoring_notice,
+                self.session_notice,
+            )
+            if n
+        )
+
+    @property
+    def has_system_content(self) -> bool:
+        """是否含任何代码生成的内容：事实、动作、补全结果或系统说明。"""
+        return bool(
+            self.facts
+            or self.monitoring_notice
+            or self.session_notice
+            or self.report_notice
+            or self.limit_notice
+            or self.basis
+        )

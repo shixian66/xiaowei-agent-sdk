@@ -57,6 +57,7 @@ from xiaowei.models import (
     ApprovedAction,
     Channel,
     Identity,
+    LegacyAnswer,
     MonitoringFailure,
     Owner,
     SessionSnapshot,
@@ -368,7 +369,8 @@ class RequestRecord:
     mode: Mode
     state: RequestState
     delivery: DeliveryState
-    answer: AgentAnswer | None
+    answer: AgentAnswer | LegacyAnswer | None
+    """``TurnAnswer.answer`` 按其可信版本严格解析的结果；新旧格式不互相回退。"""
     context_evidence: tuple[str, ...] | None
     """回答保存时记录的本轮模型可见证据（``TurnAnswer``）；此前格式保存的回答没有，为 ``None``。"""
     monitoring_failures: tuple[MonitoringFailure, ...]
@@ -380,6 +382,8 @@ class RequestRecord:
     session_state: SessionSnapshot | None = None
     run_turn_id: str | None = None
     delivery_version: int = 0
+    limit_reached: bool = False
+    material_only: bool = False
 
 
 @dataclass(frozen=True)
@@ -828,6 +832,8 @@ class ChannelStore:
             monitoring_failures=turn.monitoring_failures,
             session_state=turn.session_state,
             run_turn_id=turn.run_turn_id,
+            limit_reached=turn.limit_reached,
+            material_only=turn.material_only,
         )
 
     async def fail(
@@ -1796,6 +1802,8 @@ class ChannelStore:
             context_evidence=pause.material.context_evidence,
             monitoring_failures=pause.material.monitoring_failures,
             run_turn_id=pause.context.identity.turn_id,
+            limit_reached=pause.material.limit_reached,
+            material_only=pause.material.material_only,
         )
 
     async def _native_session(self, conn: AsyncConnection, identity: Identity) -> bool:
@@ -1999,17 +2007,20 @@ class ChannelStore:
         return None if row is None else dict(row)
 
     def _record(self, row: Mapping[str, Any]) -> RequestRecord:
-        answer, context, run_turn_id = None, None, None
+        answer: AgentAnswer | LegacyAnswer | None = None
+        context, run_turn_id, limit_reached, material_only = None, None, False, False
         monitoring_failures: tuple[MonitoringFailure, ...] = ()
         if row["answer"] is not None:
             raw = row["answer"]
             if len(raw.encode()) > self._max_answer_bytes:
                 raise RequestUnavailableError
-            answer, context, monitoring_failures = _saved_answer(raw)
-            try:
-                run_turn_id = TurnAnswer.model_validate_json(raw).run_turn_id
-            except ValidationError:
-                pass  # 已由_saved_answer验证的旧AgentAnswer格式。
+            saved = _saved_answer(raw)
+            if isinstance(saved, TurnAnswer):
+                answer, context = saved.answer, saved.context_evidence
+                monitoring_failures, run_turn_id = saved.monitoring_failures, saved.run_turn_id
+                limit_reached, material_only = saved.limit_reached, saved.material_only
+            else:
+                answer = saved
         if row["failure_code"] is not None and row["failure_code"] not in _FAILURE_CODES:
             raise RequestUnavailableError
         snapshot = _read_session_state(row["session_state"], row["state"], row["failure_code"])
@@ -2035,6 +2046,8 @@ class ChannelStore:
             session_state=snapshot,
             run_turn_id=run_turn_id,
             delivery_version=row.get("delivery_version", 0),
+            limit_reached=limit_reached,
+            material_only=material_only,
         )
 
     def _owner(
@@ -2148,19 +2161,18 @@ def _session_state(
     return raw
 
 
-def _saved_answer(
-    raw: str,
-) -> tuple[AgentAnswer, tuple[str, ...] | None, tuple[MonitoringFailure, ...]]:
-    """读取保存的回答：``TurnAnswer`` JSON，或此前只保存 ``AgentAnswer`` 的格式（没有上下文证据
-    记录，交付方据此拒绝）。两者都不是时按不可用处理。"""
+def _saved_answer(raw: str) -> TurnAnswer | LegacyAnswer:
+    """读取保存的回答：``TurnAnswer`` JSON（按可信版本严格解析新旧回答），或最早只保存旧回答
+    的格式（没有上下文证据记录，交付方据此拒绝）。缺版本只进入旧格式；未知版本、损坏或新版本
+    缺字段都按不可用处理，不回退旧格式。"""
     try:
-        turn = TurnAnswer.model_validate_json(raw)
+        return TurnAnswer.model_validate_json(raw)
     except ValidationError:
-        try:
-            return AgentAnswer.model_validate_json(raw), None, ()
-        except ValidationError:
-            raise RequestUnavailableError from None
-    return turn.answer, turn.context_evidence, turn.monitoring_failures
+        pass
+    try:
+        return LegacyAnswer.model_validate_json(raw)
+    except ValidationError:
+        raise RequestUnavailableError from None
 
 
 def _keys(record: RequestRecord) -> dict[str, object]:

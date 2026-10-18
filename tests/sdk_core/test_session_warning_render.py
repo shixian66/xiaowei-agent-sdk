@@ -8,7 +8,7 @@ from tests.sdk_core.test_feishu_render import delivery, fact, size, text_parts
 
 from xiaowei.feishu import send_delivery
 from xiaowei.feishu_render import CAPACITY_NOTICE, build_feishu_message
-from xiaowei.models import Delivery
+from xiaowei.models import Delivery, DeliveryText
 
 NOTICE = "本轮结束时会话已用 80/100 次；历史容量接近上限。发送 /新建；关键线索请自行保存。"
 
@@ -24,7 +24,8 @@ def test_notice_visible_once_with_existing_business_container(kind: str) -> None
             channel="feishu",
             evidence_ids=(),
             content="需要澄清" if kind == "clarification" else "原有说明",
-            feishu_text=None if kind == "receipt" else "第一行\n**第二行**",
+            blocks=() if kind == "receipt" else (DeliveryText(text="第一行\n**第二行**"),),
+            awaiting_user=kind == "clarification",
             session_notice=NOTICE,
         )
     message = build_feishu_message(value, 4000, "oc_test")
@@ -155,12 +156,18 @@ async def test_native_sdk_warning_wire_body_is_single_and_matches_budget(
     assert len(raw) <= 30_000
 
 
-def test_full_warning_post_can_fit_even_if_fallback_text_is_larger() -> None:
+def test_warning_with_model_text_is_a_partitioned_card_within_budget() -> None:
+    """S3：会话提示是代码说明，与模型文字同时出现时用分区卡片，不进同一 post。"""
     value = Delivery(
-        channel="feishu", evidence_ids=(), content="建议", feishu_text="OK", session_notice=NOTICE
+        channel="feishu",
+        evidence_ids=(),
+        content="建议",
+        blocks=(DeliveryText(text="OK"),),
+        session_notice=NOTICE,
     )
     message = build_feishu_message(value, 80, "oc_test")
-    assert "post" in message
+    assert "card" in message
     assert sum(len(part) for part in text_parts(message)) <= 80
-    assert NOTICE in "\n".join(text_parts(message, folded=False))
+    visible = text_parts(message, folded=False)
+    assert visible.index(NOTICE) < visible.index("OK")
     assert size(message) <= 30_000

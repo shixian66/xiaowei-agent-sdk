@@ -39,16 +39,24 @@ from tests.sdk_core.synthetic_tools import (
     store,
 )
 
-from xiaowei.evidence import AnswerRejectedError, EvidenceStore, EvidenceUnavailableError
+from xiaowei.evidence import (
+    UNSUPPORTED_FILE_NOTICE,
+    AnswerRejectedError,
+    EvidenceStore,
+    EvidenceUnavailableError,
+)
 from xiaowei.governance import GovernedTools, Projection, ToolCatalog, ToolPolicy
 from xiaowei.models import (
     AgentAnswer,
-    AnswerInference,
     Audience,
     Channel,
+    FactBlock,
+    LegacyAnswer,
     RunContext,
+    TextBlock,
     ToolCall,
     ToolObservation,
+    legacy_blocks,
 )
 from xiaowei.storage import (
     APP_TABLES,
@@ -64,8 +72,7 @@ from xiaowei.storage import (
 pytestmark = pytest.mark.loopback
 
 _FACTS_HEADER = "工具结果"
-_ANALYSIS_HEADER = "分析建议"
-_ADVICE_HEADER = "建议（本轮未执行业务查询；模型生成，未经系统核实）"
+_TEXT_HEADER = "模型说明（未经系统核实）"
 
 
 async def _record(
@@ -223,7 +230,7 @@ async def test_forged_foreign_expired_evidence_is_denied(postgres_url: URL) -> N
         with pytest.raises(EvidenceUnavailableError) as excinfo:
             await evidence.project(evidence_id, owner, "web")
         messages.add(str(excinfo.value))
-        answer = AgentAnswer(evidence_ids=(evidence_id,), inferences=[], clarification=None)
+        answer = _answer((evidence_id,))
         with pytest.raises(AnswerRejectedError):
             await evidence.validate_answer(cited(answer), owner)
 
@@ -247,81 +254,90 @@ def _answer(
     clarification: str | None = None,
     advice: str | None = None,
 ) -> AgentAnswer:
+    """S3 回答：引用的事实块在前，文字块（推断、建议、澄清）在后；澄清即等待用户。"""
+    blocks: list[FactBlock | TextBlock] = [
+        FactBlock(type="fact", evidence_id=e, view="full") for e in ids
+    ]
+    blocks += [TextBlock(type="text", text=t) for t, _ in inferences]
+    blocks += [TextBlock(type="text", text=t) for t in (advice, clarification) if t is not None]
     return AgentAnswer(
-        evidence_ids=ids,
-        inferences=[AnswerInference(text=t, evidence_ids=refs) for t, refs in inferences],
-        clarification=clarification,
-        advice=advice,
+        blocks=tuple(blocks), report_format=None, awaiting_user=clarification is not None
     )
 
 
-async def test_query_claim_without_evidence_is_denied(postgres_url: URL) -> None:
+async def test_forged_or_empty_answer_is_denied_and_text_only_is_allowed(
+    postgres_url: URL,
+) -> None:
+    """S3：引用不可见证据或归一化后无任何内容才拒绝；纯文字与事实混排都可交付。"""
     grants, clock = Grants(), Clock()
     grants.grant("alice", TOTAL_TOOL)
     async with ready_engine(postgres_url) as engine:
         evidence = store(engine, grants, clock)
         real = await _record(evidence)
         forged = "ev_" + "f" * 32
-        rejected = [
-            _answer(inferences=(("东区订单总数是 200", ()),)),
-            _answer((real,), (("东区订单总数是 200", ()),)),
-            _answer((real,), (("东区订单总数是 200", (forged,)),)),
-            _answer((forged,), (("东区订单总数是 200", (forged,)),)),
+        for answer in (
+            _answer((forged,), (("东区订单总数是 200", ()),)),
             _answer(),
-            _answer((real,), clarification="请说明地区"),
-            _answer(inferences=(("可能是重复计数", ()),), clarification="请说明地区"),
-        ]
-        for answer in rejected:
+            _answer(advice="  \n "),
+        ):
             with pytest.raises(AnswerRejectedError):
                 await evidence.validate_answer(cited(answer), context())
+
+        # 纯文字不再被当作“缺证据”拒绝；模型文字只是说明，不出现事实区。
+        claim = await evidence.validate_answer(
+            cited(_answer(inferences=(("东区订单总数是 200", ()),))), context()
+        )
+        assert claim.facts == () and claim.texts == ("东区订单总数是 200",)
+        assert _FACTS_HEADER not in claim.content and _TEXT_HEADER in claim.content
 
         # 重复引用由代码去重后交付，不拒绝。
         deduped = await evidence.validate_answer(cited(_answer((real, real))), context())
         assert deduped.evidence_ids == (real,) and len(deduped.facts) == 1
 
-        # 澄清：没有实际查询，也不展示任何结果。
+        # 带事实的追问：不新增“等待用户就不能带事实”的互斥。
+        asked = await evidence.validate_answer(
+            cited(_answer((real,), clarification="请说明地区")), context()
+        )
+        assert asked.awaiting_user and asked.evidence_ids == (real,)
+
+        # 澄清：没有实际查询，也不展示任何结果，不套错位标题。
         delivery = await evidence.validate_answer(
             cited(_answer(clarification="请说明地区")), context()
         )
-        assert delivery.evidence_ids == ()
-        assert "请说明地区" in delivery.content
-        assert delivery.web_text == "请说明地区"
+        assert delivery.evidence_ids == () and delivery.texts == ("请说明地区",)
+        assert delivery.awaiting_user
+        assert "需要澄清" not in delivery.content and "本轮未执行业务查询" not in delivery.content
         assert _FACTS_HEADER not in delivery.content
 
 
-async def test_advice_is_a_separate_answer_without_facts(postgres_url: URL) -> None:
-    """未执行建议（P2.5 Task 7）：与澄清、证据回答互斥，单独标明未执行查询、未经核实。"""
+async def test_text_and_facts_mix_and_text_keeps_model_identity(postgres_url: URL) -> None:
+    """建议、SQL 草稿与事实可以同轮出现；模型文字在 content 中只以模型说明出现。"""
     grants, clock = Grants(), Clock()
     grants.grant("alice", TOTAL_TOOL)
     async with ready_engine(postgres_url) as engine:
         evidence = store(engine, grants, clock)
         real = await _record(evidence)
         sql = "SELECT region, SUM(total) AS total\nFROM shop.sales GROUP BY region"
-        for mixed in (
-            _answer((real,), advice=sql),
-            _answer(inferences=(("按地区汇总", ()),), advice=sql),
-            _answer(clarification="请说明地区", advice=sql),
-        ):
-            with pytest.raises(AnswerRejectedError):
-                await evidence.validate_answer(cited(mixed), context())
+        mixed = await evidence.validate_answer(cited(_answer((real,), advice=sql)), context())
+        assert mixed.evidence_ids == (real,) and mixed.texts == (sql,)
 
         for channel in ("web", "feishu"):
             ctx = context(channel=channel, session=f"{channel}-advice")
             delivery = await evidence.validate_answer(cited(_answer(advice=sql)), ctx)
             first, *rest = delivery.content.split("\n")
-            assert first == _ADVICE_HEADER and "未执行业务查询" in first and "未经系统核实" in first
-            # 建议原文保持在一行内（换行写成转义），不能伪造标题或事实区。
+            assert first == _TEXT_HEADER
+            # 原文保持在一行内（换行写成转义），不能伪造标题或事实区。
             assert rest == ["SELECT region, SUM(total) AS total\\nFROM shop.sales GROUP BY region"]
-            assert delivery.web_text == (sql if channel == "web" else None)
-            assert getattr(delivery, "feishu_text", None) == (sql if channel == "feishu" else None)
+            assert delivery.texts == (sql,)
             assert set(delivery.model_dump(exclude={"channel"})) == {
                 "content",
                 "evidence_ids",
                 "facts",
-                "analysis",
+                "blocks",
                 "monitoring_notice",
                 "session_notice",
-                "web_text",
+                "report_notice",
+                "limit_notice",
             }
             assert delivery.session_notice is None
             assert (delivery.evidence_ids, delivery.facts) == ((), ())
@@ -329,7 +345,7 @@ async def test_advice_is_a_separate_answer_without_facts(postgres_url: URL) -> N
 
 
 @pytest.mark.parametrize("kind", ["advice", "clarification"])
-async def test_unverified_advice_can_be_a_file_but_clarification_ignores_format(
+async def test_unverified_advice_can_be_a_file_but_awaiting_user_ignores_format(
     postgres_url: URL,
     kind: str,
 ) -> None:
@@ -342,23 +358,20 @@ async def test_unverified_advice_can_be_a_file_but_clarification_ignores_format(
             cited(answer), context(channel="feishu", session="document-advice")
         )
         assert delivery.report_format == ("html" if kind == "advice" else None)
-        assert delivery.feishu_text == text
+        assert delivery.texts == (text,) and delivery.report_notice is None
         assert delivery.facts == () and delivery.evidence_ids == ()
-        if kind == "advice":
-            with pytest.raises(AnswerRejectedError):
-                await evidence.validate_answer(
-                    cited(answer), context(channel="web", session="document-advice-web")
-                )
-        else:
-            web = await evidence.validate_answer(
-                cited(answer), context(channel="web", session="document-clarification-web")
-            )
-            assert web.report_format is None and web.web_text == text
+        web = await evidence.validate_answer(
+            cited(answer), context(channel="web", session=f"document-{kind}-web")
+        )
+        # 非飞书渠道不拒绝：正文照常交付；只有真的要文件时才由代码说明不支持。
+        assert web.report_format is None and web.texts == (text,)
+        assert web.report_notice == (UNSUPPORTED_FILE_NOTICE if kind == "advice" else None)
 
 
 def test_answers_saved_before_advice_existed_still_load() -> None:
     old = '{"evidence_ids": [], "inferences": [], "clarification": "请说明地区"}'
-    assert AgentAnswer.model_validate_json(old).advice is None
+    assert LegacyAnswer.model_validate_json(old).advice is None
+    assert legacy_blocks(LegacyAnswer.model_validate_json(old)).awaiting_user
 
 
 async def test_feishu_structured_fact_reads_only_its_own_projection(postgres_url: URL) -> None:
@@ -398,7 +411,7 @@ async def test_feishu_structured_fact_reads_only_its_own_projection(postgres_url
         assert fact.metadata == {"total": 100, "feishu_only": "own-channel"}
         assert json.loads(fact.result_json or "null") == fact.metadata
         assert "WEB_ONLY_SENTINEL" not in delivery.model_dump_json()
-        assert delivery.web_text is None
+        assert delivery.texts == ()
 
 
 def _cite_evidence(inference: str, **extra: object) -> ModelStep:
@@ -410,9 +423,12 @@ def _cite_evidence(inference: str, **extra: object) -> ModelStep:
         outputs = [i for i in items if i.get("type") == "function_call_output"]
         evidence_id = json.loads(outputs[-1]["output"])["evidence_id"]
         answer = {
-            "evidence_ids": [evidence_id],
-            "inferences": [{"text": inference, "evidence_ids": [evidence_id]}],
-            "clarification": None,
+            "blocks": [
+                {"type": "fact", "evidence_id": evidence_id, "view": "full"},
+                {"type": "text", "text": inference},
+            ],
+            "report_format": None,
+            "awaiting_user": False,
             **extra,
         }
         return [assistant_message(json.dumps(answer, ensure_ascii=False))]
@@ -462,16 +478,14 @@ async def test_facts_are_rendered_from_evidence(
                 context=context(turn="t2"),
             )
 
-    facts, analysis = delivery.content.split(_ANALYSIS_HEADER)
+    facts, analysis = delivery.content.split(_TEXT_HEADER)
     assert facts.startswith(_FACTS_HEADER)
     assert '"total": 100' in facts
     assert '"total": 200' not in facts and "重复计数" not in facts
     assert delivery.facts[0].result_json is not None
     assert json.loads(delivery.facts[0].result_json)["total"] == 100
-    assert inference in analysis and "推断" in analysis
-    assert len(delivery.analysis) == 1 and delivery.analysis[0].text == inference
-    assert delivery.analysis[0].evidence_ids == result.final_output.evidence_ids
-    assert result.final_output.evidence_ids[0] in analysis
+    assert inference in analysis and '"total"' not in analysis
+    assert delivery.texts == (inference,)
     assert delivery.channel == "web"
     assert delivery.evidence_ids == result.final_output.evidence_ids
     assert PRIVATE_NOTE not in delivery.content
@@ -488,14 +502,14 @@ def _copy_tool_output(into: str) -> ModelStep:
         assert isinstance(items, list)
         raw = [i for i in items if i.get("type") == "function_call_output"][-1]["output"]
         evidence_id = json.loads(raw)["evidence_id"]
+        blocks: list[dict[str, Any]] = [{"type": "text", "text": raw}]
         if into == "inference":
-            answer = {
-                "evidence_ids": [evidence_id],
-                "inferences": [{"text": raw, "evidence_ids": [evidence_id]}],
-                "clarification": None,
-            }
-        else:
-            answer = {"evidence_ids": [], "inferences": [], "clarification": None, into: raw}
+            blocks.insert(0, {"type": "fact", "evidence_id": evidence_id, "view": "full"})
+        answer = {
+            "blocks": blocks,
+            "report_format": None,
+            "awaiting_user": into == "clarification",
+        }
         return [assistant_message(json.dumps(answer, ensure_ascii=False))]
 
     return ModelStep.respond(respond)
@@ -589,10 +603,7 @@ async def test_stored_evidence_follows_current_policy(
 
     # 重建引擎与存储对象（相当于重启或恢复）后读取。
     async with open_engine(secret(postgres_url)) as engine:
-        answer = {
-            ch: AgentAnswer(evidence_ids=(eid,), inferences=[], clarification=None)
-            for ch, eid in saved.items()
-        }
+        answer = {ch: _answer((eid,)) for ch, eid in saved.items()}
         cases: list[tuple[RunContext, str, Audience]] = [
             (web, saved["web"], "model"),
             (web, saved["web"], "session"),

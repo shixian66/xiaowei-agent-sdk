@@ -60,6 +60,7 @@ from tests.sdk_core.synthetic_tools import (
     cited,
     context,
     ready_engine,
+    s3_answer,
     sdk_tool,
     store,
 )
@@ -269,18 +270,14 @@ def seen(model: ScriptedModel) -> str:
 def cite() -> ModelStep:
     def respond(call_: ModelCall) -> Any:
         evidence_id = json.loads(outputs(call_)[-1])["evidence_id"]
-        answer = {
-            "evidence_ids": [evidence_id],
-            "inferences": [{"text": "记录正常", "evidence_ids": [evidence_id]}],
-            "clarification": None,
-        }
+        answer = s3_answer([evidence_id], "记录正常")
         return [assistant_message(json.dumps(answer, ensure_ascii=False))]
 
     return ModelStep.respond(respond)
 
 
 def clarify() -> ModelStep:
-    answer = {"evidence_ids": [], "inferences": [], "clarification": "暂时无法取得数据"}
+    answer = s3_answer(text="暂时无法取得数据", awaiting_user=True)
     return ModelStep(output=[assistant_message(json.dumps(answer, ensure_ascii=False))])
 
 

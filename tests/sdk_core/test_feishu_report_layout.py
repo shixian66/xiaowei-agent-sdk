@@ -9,7 +9,7 @@ from markdown_it import MarkdownIt
 from tests.sdk_core.test_feishu_reports import _delivery
 
 from xiaowei.feishu_report import build_report
-from xiaowei.models import AnswerInference, Delivery
+from xiaowei.models import Delivery, DeliveryFactRef, DeliveryText
 
 
 def test_html_report_uses_real_table_and_preserves_values_without_duplicate_json() -> None:
@@ -92,7 +92,7 @@ def test_no_fact_advice_preserves_lines_and_invalid_projection_stays_literal() -
         content="解释第一段。\n第二段。",
         channel="feishu",
         evidence_ids=(),
-        feishu_text="解释第一段。\n第二段。",
+        blocks=(DeliveryText(text="解释第一段。\n第二段。"),),
     )
     html = build_report(advice.model_copy(update={"report_format": "html"})).content.decode()
     md = build_report(advice.model_copy(update={"report_format": "md"})).content.decode()
@@ -196,7 +196,7 @@ def test_md_prose_preserves_visible_lines_indentation_and_literal_markup(section
         delivery = Delivery(
             channel="feishu",
             content=original,
-            feishu_text=original,
+            blocks=(DeliveryText(text=original),),
             evidence_ids=(),
             report_format="md",
         )
@@ -204,11 +204,7 @@ def test_md_prose_preserves_visible_lines_indentation_and_literal_markup(section
         delivery = _delivery("md")
         if section == "analysis":
             delivery = delivery.model_copy(
-                update={
-                    "analysis": (
-                        AnswerInference(text=original, evidence_ids=delivery.evidence_ids),
-                    )
-                }
+                update={"blocks": (*delivery.blocks, DeliveryText(text=original))}
             )
         else:
             delivery = delivery.model_copy(
@@ -235,7 +231,9 @@ def _md_body(result: dict) -> str:
     fact = delivery.facts[0].model_copy(
         update={"result_json": json.dumps(result, ensure_ascii=False)}
     )
-    return build_report(delivery.model_copy(update={"facts": (fact,)})).content.decode()
+    # 只放事实块：表下明细即文件中最先出现的围栏。
+    only_fact = {"facts": (fact,), "blocks": (DeliveryFactRef(evidence_id=fact.evidence_id),)}
+    return build_report(delivery.model_copy(update=only_fact)).content.decode()
 
 
 def _md_html(body: str) -> str:
@@ -316,7 +314,7 @@ def test_md_detail_keeps_strings_that_display_would_rewrite_lossless() -> None:
     values = ["x\r\ny", "x\\r\ny", "s" * 130 + "\x00", "s" * 130 + "\\u0000"]
     body = _md_body({"columns": ["v"], "rows": [{"v": v} for v in values]})
     fences = [t for t in MarkdownIt("default").enable("table").parse(body) if t.type == "fence"]
-    # 表下明细按行顺序排在分析章节之前。
+    # 表下明细按行顺序排列。
     decoded = [
         json.loads(t.content) if t.info == "json" else t.content.removesuffix("\n")
         for t in fences[: len(values)]

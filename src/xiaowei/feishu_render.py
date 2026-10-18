@@ -2,6 +2,10 @@
 
 JSON 2.0 要求客户端 >=7.20。纯文本表格最多五个，额外/宽表用纯文本字段；所有组件和
 折叠文字均计入预算。完整 HTTP 请求预算包括 SDK 的内层 JSON 字符串与外层再次转义。
+
+来源区分：事实、动作、补全结果与系统说明是代码生成的组件；模型文字只经白名单格式器转换，
+在含任何代码内容的卡片中由代码加注“模型说明”标签。post 只用于纯模型文字；模型文字伴随任何
+代码说明时用卡片分区，代码说明与模型文字不在同一 post 或纯文本中混排。
 """
 
 import json
@@ -12,12 +16,14 @@ from collections.abc import Set as AbstractSet
 from typing import Any, Final
 
 from xiaowei.feishu_markdown import format_prose, prose_post
-from xiaowei.models import AnswerInference, Delivery, DeliveryFact, JsonScalar
+from xiaowei.models import Delivery, DeliveryFact, DeliveryFactRef, JsonScalar
 
 MAX_REQUEST_BYTES: Final = 30_000
 CAPACITY_NOTICE: Final = "结果未展示：单消息容量不足。可缩小问题范围后重新提问；本次仅发送此说明。"
 FACTS_CLIPPED: Final = "事实展示已截断，未展示全部结果。"
-ANALYSIS_CLIPPED: Final = "分析展示已截断，未展示全部模型分析。"
+ANALYSIS_CLIPPED: Final = "模型说明展示已截断，未展示全部模型说明。"
+MODEL_TEXT_LABEL: Final = "模型说明（未经系统核实）"
+REMAINING_LABEL: Final = "其余结果（系统补全本轮获准结果）"
 TEXT_CLIPPED: Final = "（内容超过单消息上限，已截断）"
 BRIEF_ORIGINAL_OMITTED: Final = "获准原文未展示（单消息容量限制）；如需原文请明确提出。"
 RAW_OMITTED: Final = "原文 JSON 与上方展示的值逐项一致，未重复展示；如需原文可要求 MD/HTML 文件。"
@@ -196,7 +202,7 @@ def _card(
     delivery: Delivery,
     counts: Sequence[int],
     sqls: set[int],
-    analysis: Sequence[AnswerInference],
+    texts: Sequence[str],
     technical: set[int],
     *,
     omissions: bool = True,
@@ -204,26 +210,17 @@ def _card(
     raw_hidden: AbstractSet[int] = frozenset(),
     preview: bool = False,
 ) -> Message:
-    elements: list[Message] = []
-    if delivery.report_notice:
-        elements.append(_div(delivery.report_notice))
-    if delivery.monitoring_notice:
-        elements.append(_div(delivery.monitoring_notice))
-    if delivery.session_notice:
-        elements.append(_div(delivery.session_notice))
-    if analysis:
-        elements.append(_div("分析与建议（模型推断）"))
-        for item in analysis:
-            prose = format_prose(display_text(item.text)) if formatted else [_div(item.text)]
-            elements.extend(prose)
-            references = "、".join(delivery.result_label(eid) for eid in item.evidence_ids)
-            elements.append(_div(f"（依据：{references}）"))
-    if omissions and tuple(analysis) != delivery.analysis:
-        elements.append(_div(ANALYSIS_CLIPPED))
-    if analysis:
-        elements.append({"tag": "hr"})
+    """系统说明 → 动作区域 → 正文（模型块顺序）→ 其余结果 → 折叠依据。
+
+    ``texts`` 是本卡展示的正文文字（按顺序，最后一段可能截断）；``counts`` 按 ``facts`` 下标。
+    """
+    elements: list[Message] = [_div(notice) for notice in delivery.notices]
     tables = 0
-    for index, fact in enumerate(delivery.facts):
+    index_of = {fact.evidence_id: i for i, fact in enumerate(delivery.facts)}
+
+    def fact_elements(index: int) -> None:
+        nonlocal tables
+        fact = delivery.facts[index]
         columns, all_rows = _data(fact)
         rows = all_rows[: counts[index]]
         if fact.requires_complete:
@@ -261,7 +258,7 @@ def _card(
             for key, value in fact.metadata.items():
                 text = display_text(value) if isinstance(value, str) else _cell({key: value}, key)
                 elements.append(_div(f"{_ACTION_LABELS.get(key, key)}：{text}"))
-            continue
+            return
         if fact.columns:
             elements.extend(
                 _div(f"{key}: {_cell({key: value}, key)}")
@@ -287,7 +284,7 @@ def _card(
             elements.append(_div(fact.summary or "摘要不可用。"))
             if omissions and fact.result_json is not None and index not in technical:
                 elements.append(_div(BRIEF_ORIGINAL_OMITTED))
-            continue
+            return
         if not rows:
             if not all_rows:
                 absent = not fact.columns and not fact.metadata and fact.result_json is None
@@ -322,6 +319,40 @@ def _card(
             elements.extend(
                 _div("\n".join(f"{name}: {_cell(row, name)}" for name in columns)) for row in rows
             )
+
+    for index, fact in enumerate(delivery.facts):
+        if fact.section == "action":
+            fact_elements(index)
+    shown_texts = 0
+    labelled = False
+    for block in delivery.blocks:
+        if isinstance(block, DeliveryFactRef):
+            # 拆分发送时动作材料已独立成分项，本消息不含它；其余事实都在本消息中。
+            if block.evidence_id in index_of:
+                labelled = False
+                fact_elements(index_of[block.evidence_id])
+            continue
+        if shown_texts >= len(texts):
+            continue
+        if not labelled:
+            # 代码加注的来源标签：模型文字不能移除，也不能借文字取得事实区域的身份。
+            elements.append(_div(MODEL_TEXT_LABEL))
+            labelled = True
+        text = texts[shown_texts]
+        elements.extend(format_prose(display_text(text)) if formatted else [_div(text)])
+        shown_texts += 1
+    if omissions and tuple(texts) != delivery.texts:
+        elements.append(_div(ANALYSIS_CLIPPED))
+    placed = {b.evidence_id for b in delivery.blocks if isinstance(b, DeliveryFactRef)}
+    for index, fact in enumerate(delivery.facts):
+        # 正文事实都应由块放置；任何未被放置的事实仍完整展示，不静默丢弃。
+        if fact.section == "body" and fact.evidence_id not in placed:
+            fact_elements(index)
+    remaining = [i for i, f in enumerate(delivery.facts) if f.section == "remaining"]
+    if remaining:
+        elements.append(_div(REMAINING_LABEL))
+        for index in remaining:
+            fact_elements(index)
     if omissions and any(
         not f.requires_complete and n < len(_data(f)[1])
         for f, n in zip(delivery.facts, counts, strict=True)
@@ -405,18 +436,21 @@ def _basis_panels(basis: tuple[tuple[str, str], ...]) -> list[Message]:
 
 
 def _prose_card(
-    prefix: str,
     raw: str,
     *,
-    notice: str | None = None,
+    notices: Sequence[str] = (),
     clipped: bool = False,
     formatted: bool = False,
     basis: tuple[tuple[str, str], ...] = (),
 ) -> Message:
+    """只有文字的回答：系统说明与模型文字分区，有代码内容时模型文字带代码标签。
+
+    截断说明也是代码内容；标签在候选卡片内生成，调用方的容量检查已计入它。
+    """
     text = display_text(raw)
-    elements = [_div(prefix)] if prefix else []
-    if notice:
-        elements.append(_div(notice))
+    elements = [_div(n) for n in notices]
+    if notices or basis or clipped:
+        elements.append(_div(MODEL_TEXT_LABEL))
     elements.extend(format_prose(text) if formatted else [_div(text)])
     if clipped:
         elements.append(_div(TEXT_CLIPPED))
@@ -466,66 +500,65 @@ def build_feishu_message(
             raise ValueError("单消息预算无法保留容量说明")
         return notice
 
-    if not delivery.facts:
-        if delivery.session_notice is not None and delivery.feishu_text is None:
-            # 固定会话回执必须完整保留原因和操作方法；预算不足记明确发送失败，不裁掉限制。
-            receipt = {
-                "text": mention_safe(
-                    display_text(delivery.content + "\n" + delivery.session_notice)
+    if not delivery.facts and not delivery.texts:
+        # 只有代码内容（固定回执、系统说明）：纯文本，不含模型文字。
+        code_text = "\n".join(
+            dict.fromkeys(
+                part
+                for part in (
+                    delivery.content,
+                    *(n for n in delivery.notices if n not in delivery.content),
                 )
-            }
+                if part
+            )
+        )
+        if delivery.session_notice is not None:
+            # 固定会话回执必须完整保留原因和操作方法；预算不足记明确发送失败，不裁掉限制。
+            receipt = {"text": mention_safe(display_text(code_text))}
             if not fits(receipt):
                 raise ValueError("单消息预算无法保留会话回执")
             return receipt
-        if delivery.feishu_text is None:
-            raw, prefix = delivery.content, ""
-        else:
-            raw = delivery.feishu_text
-            if delivery.monitoring_notice:
-                # Evidence 的原文字段包含这条系统说明；独立保留，不把限制送进模型格式器。
-                raw = raw.removeprefix(delivery.monitoring_notice + "\n")
-            title = (
-                delivery.content.partition("\n")[0]
-                if delivery.monitoring_notice
-                else (
-                    "需要澄清"
-                    if delivery.content.startswith("需要澄清")
-                    else "建议（未执行查询，模型生成，未经系统核实）"
-                )
-            )
-            prefix = title
+
+        def code_message(text: str, *, clipped: bool = False) -> Message:
+            return {
+                "text": mention_safe(display_text(text)) + ("\n" + TEXT_CLIPPED if clipped else "")
+            }
+
+        full_code = code_message(code_text)
+        if fits(full_code):
+            return full_code
+        if not allow_preview:
+            raise MessageCapacityError("完整正文超过单消息容量")
+        low, high = 0, len(code_text)
+        while low < high:
+            mid = (low + high + 1) // 2
+            if fits(code_message(code_text[:mid], clipped=True)):
+                low = mid
+            else:
+                high = mid - 1
+        clipped_code = code_message(code_text[:low], clipped=True)
+        return clipped_code if fits(clipped_code) else omitted_message()
+
+    if not delivery.facts:
+        raw = "\n\n".join(delivery.texts)
+        system = delivery.has_system_content
 
         def prose_message(text: str, *, clipped: bool = False, formatted: bool = False) -> Message:
-            if delivery.feishu_text is None:
-                # 固定回执没有模型原文字段；保持原来的文本消息，不按关键词猜业务类型。
-                shown = mention_safe(display_text(text))
-                return {"text": shown + ("\n" + TEXT_CLIPPED if clipped else "")}
             return _prose_card(
-                prefix,
                 text,
-                notice="\n".join(
-                    n
-                    for n in (delivery.monitoring_notice, delivery.session_notice)
-                    if n is not None
-                )
-                or None,
+                notices=delivery.notices,
                 clipped=clipped,
                 formatted=formatted,
                 basis=delivery.basis,
             )
 
         shown = display_text(raw)
-        if delivery.feishu_text is not None and not delivery.basis:
+        if not system:
+            # post 只用于纯模型文字：没有任何代码说明、事实或调查依据。
             post = prose_post(shown)
             if post is not None:
-                leading = [
-                    n for n in (prefix, delivery.monitoring_notice, delivery.session_notice) if n
-                ]
-                post["post"]["zh_cn"]["content"][:0] = [
-                    [{"tag": "text", "text": display_text(n)}] for n in leading
-                ]
                 # SDK 降级直接拼接 text runs，不经过 Transport 的 mention_safe。
-                # 转换可将 <**at** 拼成 <at，故检查完整 AST 的潜在降级文字（含系统说明）。
+                # 转换可将 <**at** 拼成 <at，故检查完整 AST 的潜在降级文字。
                 fallback_text = "\n".join(
                     "".join(node["text"] for node in row)
                     for row in post["post"]["zh_cn"]["content"]
@@ -553,6 +586,8 @@ def build_feishu_message(
         return formatted if fits(formatted) else clipped
 
     totals = [len(_data(f)[1]) for f in delivery.facts]
+    # 动作区域的事实不预览截断：要么完整展示，要么本消息放不下。
+    fixed = {i for i, f in enumerate(delivery.facts) if f.section == "action"}
     all_sql = {
         i
         for i, f in enumerate(delivery.facts)
@@ -568,7 +603,7 @@ def build_feishu_message(
     def card(
         counts: Sequence[int],
         sqls: set[int],
-        analysis: Sequence[AnswerInference],
+        texts: Sequence[str],
         technical: set[int],
         *,
         omissions: bool = True,
@@ -578,7 +613,7 @@ def build_feishu_message(
             delivery,
             counts,
             sqls,
-            analysis,
+            texts,
             technical,
             omissions=omissions,
             formatted=formatted,
@@ -586,74 +621,73 @@ def build_feishu_message(
             preview=platform_limits,
         )
 
-    full = card(totals, all_sql, delivery.analysis, all_technical)
+    full = card(totals, all_sql, delivery.texts, all_technical)
     if fits(full):
-        formatted = card(totals, all_sql, delivery.analysis, all_technical, formatted=True)
+        formatted = card(totals, all_sql, delivery.texts, all_technical, formatted=True)
         return formatted if fits(formatted) else full
     if not allow_preview:
         # 历史brief的小原文可折叠展示；放不下则只交付已选择的摘要，不因此自动导出原值。
         if any(f.view == "brief" for f in delivery.facts):
             brief_technical = {i for i, f in enumerate(delivery.facts) if f.view != "brief"}
             brief_sql = all_sql & brief_technical
-            brief = card(totals, brief_sql, delivery.analysis, brief_technical)
+            brief = card(totals, brief_sql, delivery.texts, brief_technical)
             if fits(brief):
                 return brief
         raise MessageCapacityError("完整结果超过单消息容量")
-    analysis: list[AnswerInference] = []
+    texts: list[str] = []
     technical: set[int] = set()
 
     def fitting_prefix(sqls: set[int]) -> list[int] | None:
-        counts = [0] * len(totals)
-        best = counts.copy() if fits(card(counts, sqls, analysis, technical)) else None
+        counts = [totals[i] if i in fixed else 0 for i in range(len(totals))]
+        best = counts.copy() if fits(card(counts, sqls, texts, technical)) else None
         # 零行占位与截断提示可能比完整短结果更大；只用不含这些提示的下界提前结束搜索。
         # 下界永不交付，实际候选必须包含所有必要的未展示/截断说明。
-        if not fits(card(counts, sqls, analysis, technical, omissions=False)):
+        if not fits(card(counts, sqls, texts, technical, omissions=False)):
             return best
         for index, total in enumerate(totals):
-            if total == 0:
+            if total == 0 or index in fixed:
                 continue
             # 完整端点可能移除截断提示，零行端点可能移除/增加占位，不能混进二分区间。
             counts[index] = total
-            if fits(card(counts, sqls, analysis, technical)):
+            if fits(card(counts, sqls, texts, technical)):
                 best = counts.copy()
                 continue
             low, high = 0, total - 1
             while low < high:
                 mid = (low + high + 1) // 2
                 counts[index] = mid
-                if fits(card(counts, sqls, analysis, technical)):
+                if fits(card(counts, sqls, texts, technical)):
                     low = mid
                     best = counts.copy()
                 else:
                     high = mid - 1
             counts[index] = total
-            if not fits(card(counts, sqls, analysis, technical, omissions=False)):
+            if not fits(card(counts, sqls, texts, technical, omissions=False)):
                 return best
             # 此端点不合容量但下界合容量：后续短事实可能移除更大的占位，继续检查。
         return best
 
     sqls: set[int] = set()
 
-    def fit_analysis(counts: list[int]) -> None:
-        for item in delivery.analysis:
-            if fits(card(counts, sqls, [*analysis, item], technical)):
-                analysis.append(item)
+    def fit_texts(counts: list[int]) -> None:
+        for text in delivery.texts:
+            if fits(card(counts, sqls, [*texts, text], technical)):
+                texts.append(text)
                 continue
-            low, high = 0, len(item.text)
+            low, high = 0, len(text)
             while low < high:
                 mid = (low + high + 1) // 2
-                short = item.model_copy(update={"text": item.text[:mid]})
-                if fits(card(counts, sqls, [*analysis, short], technical)):
+                if fits(card(counts, sqls, [*texts, text[:mid]], technical)):
                     low = mid
                 else:
                     high = mid - 1
             if low:
-                analysis.append(item.model_copy(update={"text": item.text[:low]}))
+                texts.append(text[:low])
             break
 
     if platform_limits:
-        # 正文先回答：分析先占预算，fitting_prefix 经闭包读取 analysis 再放整行与 SQL。
-        fit_analysis([0] * len(totals))
+        # 正文先回答：模型文字先占预算，fitting_prefix 经闭包读取 texts 再放整行与 SQL。
+        fit_texts([totals[i] if i in fixed else 0 for i in range(len(totals))])
     counts = fitting_prefix(sqls)
     if counts is None:
         return omitted_message()
@@ -664,11 +698,11 @@ def build_feishu_message(
             sqls.add(index)
             counts = selected_counts
     if not platform_limits:
-        fit_analysis(counts)
+        fit_texts(counts)
     for index in range(len(totals)):
-        candidate = card(counts, sqls, analysis, technical | {index})
+        candidate = card(counts, sqls, texts, technical | {index})
         if fits(candidate):
             technical.add(index)
-    plain = card(counts, sqls, analysis, technical)
-    formatted = card(counts, sqls, analysis, technical, formatted=True)
+    plain = card(counts, sqls, texts, technical)
+    formatted = card(counts, sqls, texts, technical, formatted=True)
     return formatted if fits(formatted) else plain

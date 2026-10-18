@@ -19,6 +19,7 @@ from agents.testing import assistant_message
 from asyncmy.errors import OperationalError
 from pydantic import SecretStr
 from sqlalchemy import text
+from tests.sdk_core.synthetic_tools import s3_answer
 from tests.sdk_core.test_app import (
     SEARCH_ALL,
     ModelCall,
@@ -41,13 +42,15 @@ from xiaowei.storage import open_engine
 
 pytestmark = pytest.mark.loopback
 
-ADVICE_HEADER = "建议（本轮未执行业务查询；模型生成，未经系统核实）"
+# S3：只有文字的回答在 content 中只以模型说明出现，不再套“本轮未执行业务查询”标题。
+ADVICE_HEADER = "模型说明（未经系统核实）"
+REMAINING = "其余结果（系统补全本轮获准结果）"
 QUERY = "run_readonly_query"
 SALES_SQL = "SELECT region, total FROM shop.sales"
 
 
 def advise(text: str = "SELECT region, SUM(total) AS total FROM shop.sales GROUP BY region") -> Any:
-    body = {"evidence_ids": [], "inferences": [], "clarification": None, "advice": text}
+    body = s3_answer(text=text)
     return lambda call: [assistant_message(json.dumps(body, ensure_ascii=False))]
 
 
@@ -203,19 +206,21 @@ async def test_a_forced_query_in_a_do_not_run_message_is_still_guarded(env: Env)
         assert ran.startswith("SELECT") and "LIMIT" in ran  # 经 SQLGuard 规范化、加了行数上限
 
 
-async def test_advice_cannot_close_a_turn_that_ran_a_query(env: Env) -> None:
+async def test_text_after_a_query_still_delivers_the_query_result(env: Env) -> None:
+    """S3：查过业务数据后只写文字（建议或追问）不再失败；查询结果由代码补为其余结果。"""
     async with env.opened(env.config()) as rt:
         for request_id, finish in (("om_1", advise()), ("om_2", clarify())):
-            # 改写一次仍不引用：整轮失败。
-            message = env.scripts.add(f"查了却不引用 {request_id}", run_query(), finish, finish)
+            message = env.scripts.add(f"查了只写文字 {request_id}", run_query(), finish)
             record = await turn(env, rt, message, request_id)
-            # “本轮未执行业务查询”必须属实：开始过业务查询的轮次不能以建议或澄清收尾。
-            assert (record.state, record.failure_code) == ("failed", "evidence_failed")
-        # 元数据工具不是业务查询：查过表结构后仍可澄清。
+            assert record.state == "completed", record.failure_code
+            assert REMAINING in await delivered(rt, request_id)
+            assert len(env.scripts.calls[message]) == 2  # 不再要求改写引用
+        # 元数据工具不是需交付结果：查过表结构后的澄清不补全事实。
         searched = env.scripts.add(
             "哪张表有地区", tool_call("list_tables", cluster="sr-test", **SEARCH_ALL), clarify()
         )
         assert (await turn(env, rt, searched, "om_3")).state == "completed"
+        assert REMAINING not in await delivered(rt, "om_3")
 
 
 # ---- 回答分支的交付、回放与历史 ----------------------------------------------------------------
@@ -231,7 +236,7 @@ async def test_advice_and_clarification_are_delivered_apart_and_replayed(env: En
 
         advice, question = await delivered(rt, "om_1"), await delivered(rt, "om_2")
         assert advice.splitlines()[0] == ADVICE_HEADER and "GROUP BY region" in advice
-        assert question.splitlines()[0] == "需要澄清（本轮未执行业务查询）"
+        assert question.splitlines()[0] == ADVICE_HEADER
         # 历史读取得到同样的内容。
         assert (await rt.service.results.view(ref("om_1"))).delivery.content == advice
 
@@ -277,16 +282,18 @@ def search_sales() -> Any:
 
 
 async def test_a_query_cannot_be_masked_by_other_current_evidence(env: Env) -> None:
+    """只引用搜表结果时，本轮查询结果仍由代码补全交付，不能被遮住。"""
     async with env.opened(env.config()) as rt:
         message = env.scripts.add(
             "查销售额，最后只给搜表结果",
             run_query(),
             search_sales(),
             cite_only(lambda seen: seen[-1]),  # 只引用 list_tables
-            cite_only(lambda seen: seen[-1]),  # 改写一次仍只引用 list_tables
         )
         record = await turn(env, rt, message, "om_1")
-        assert (record.state, record.failure_code) == ("failed", "evidence_failed")
+        assert record.state == "completed", record.failure_code
+        content = await delivered(rt, "om_1")
+        assert REMAINING in content and content.index(REMAINING) > 0
         assert len(env.db.business()) == 1
 
 
@@ -295,27 +302,22 @@ async def test_a_query_cannot_be_masked_by_history_evidence(env: Env) -> None:
         first = env.scripts.add("昨天销售额", run_query(), cite())
         assert (await turn(env, rt, first, "om_1")).state == "completed"
         again = env.scripts.add(
-            "再查一次，但只引用上一轮",
-            run_query(),
-            cite_only(lambda seen: seen[0]),
-            cite_only(lambda seen: seen[0]),  # 改写一次仍只引用上一轮
+            "再查一次，但只引用上一轮", run_query(), cite_only(lambda seen: seen[0])
         )
         record = await turn(env, rt, again, "om_2")
-        assert (record.state, record.failure_code) == ("failed", "evidence_failed")
+        assert record.state == "completed", record.failure_code
+        assert REMAINING in await delivered(rt, "om_2")  # 本轮新结果补全，不被历史遮住
 
 
-async def test_every_successful_query_must_be_cited(env: Env) -> None:
+async def test_every_successful_query_is_delivered_even_if_cited_once(env: Env) -> None:
     async with env.opened(env.config()) as rt:
         partial = env.scripts.add(
-            "两次查询只引用第一次",
-            run_query(),
-            run_query(UNION),
-            cite_only(lambda s: s[0]),
-            cite_only(lambda s: s[0]),  # 改写一次仍只引用第一次
+            "两次查询只引用第一次", run_query(), run_query(UNION), cite_only(lambda s: s[0])
         )
         record = await turn(env, rt, partial, "om_1")
-        assert (record.state, record.failure_code) == ("failed", "evidence_failed")
-        # 成功对照：两次查询都引用。
+        assert record.state == "completed", record.failure_code
+        view = await rt.service.results.view(ref("om_1"))
+        assert [f.section for f in view.delivery.facts] == ["body", "remaining"]
         both = env.scripts.add("两次查询都引用", run_query(), run_query(UNION), cite())
         assert (await turn(env, rt, both, "om_2")).state == "completed"
         assert len(env.db.business()) == 4
@@ -331,13 +333,14 @@ async def test_a_refused_query_before_io_still_allows_advice(env: Env) -> None:
         record = await turn(env, rt, message, "om_1")
         assert record.state == "completed", record.failure_code
         assert env.db.business() == []
-        assert record.answer is not None and record.answer.advice is not None
+        assert record.answer is not None and record.answer.text
 
 
 async def test_unseen_evidence_cannot_be_cited(env: Env) -> None:
     async with env.opened(env.config()) as rt:
         # 失败轮次的证据已保存，但没有进入会话历史：下一轮模型看不到它。
-        failed = env.scripts.add("查了却只给建议", run_query(), advise(), advise())
+        forged = lambda call: answer(["ev_" + "f" * 32])  # noqa: E731
+        failed = env.scripts.add("查了却引用伪造编号", run_query(), forged, forged)
         assert (await turn(env, rt, failed, "om_1")).state == "failed"
         orphan = await env.scalar("SELECT evidence_id FROM xiaowei_evidence")
         pasted = env.scripts.add(
@@ -433,7 +436,7 @@ async def test_unchanged_access_delivers_advice_and_clarification_after_search(e
         content = await delivered(rt, "om_1")
         assert content.startswith(ADVICE_HEADER) and SALES_FACT in content
         assert "工具结果" not in content  # 依赖只复核，不作为事实展示
-        assert (await delivered(rt, "om_2")).startswith("需要澄清")
+        assert (await delivered(rt, "om_2")).startswith(ADVICE_HEADER)
         assert env.db.business() == []
     result, sends = await env.resend(config, "om_1")
     assert result == "sent" and len(sends) == 1

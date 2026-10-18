@@ -46,6 +46,8 @@
   const factTable = (fact, label) => {
     const box = el("div", "fact");
     const brief = fact.view === "brief";
+    // 系统区域的标识只由代码在这里添加；模型文字中的同样字样只是普通段落。
+    box.append(el("p", "meta fact-source", `${label} · 系统根据证据生成`));
     const details = el("details", "evidence");
     details.append(el("summary", "", brief ? "查看获准原文与查询信息" : "查看依据与查询信息"));
     box.append(el("p", "meta", `采集于 ${fact.captured_at}`));
@@ -92,32 +94,52 @@
     item.append(el("p", "meta", `${label} · 编号 ${item.dataset.requestId}`));
     if (data.error) item.append(el("p", "content", data.error));
     if (data.delivery) {
-      if (data.delivery.session_notice) {
-        item.append(el("p", "note session-notice", data.delivery.session_notice));
+      const delivery = data.delivery;
+      const facts = delivery.facts || [];
+      const blocks = delivery.blocks || [];
+      const notices = [delivery.report_notice, delivery.limit_notice, delivery.monitoring_notice];
+      if (delivery.session_notice) {
+        item.append(el("p", "note session-notice", delivery.session_notice));
       }
-      if (data.delivery.facts.length) {
-        if (data.delivery.monitoring_notice) {
-          item.append(el("p", "meta", data.delivery.monitoring_notice));
-        }
-        for (const fact of data.delivery.facts) {
-          item.append(factTable(fact, resultLabel(data.delivery, fact.evidence_id)));
-        }
-        if (data.delivery.analysis.length) {
-          const analysis = el("section", "analysis");
-          analysis.append(el("p", "meta", "分析与建议（模型推断）"));
-          for (const inference of data.delivery.analysis) {
-            analysis.append(el("p", "content", inference.text));
-            const basis = inference.evidence_ids.map((id) => resultLabel(data.delivery, id));
-            analysis.append(el("p", "meta", `依据：${basis.join("、")}`));
-          }
-          item.append(analysis);
-        }
-      } else if (data.delivery.web_text !== null && data.delivery.web_text !== undefined) {
-        item.append(el("p", "meta", data.delivery.content.split("\n", 1)[0]));
-        item.append(el("p", "content reply-text", data.delivery.web_text));
-      } else {
-        item.append(el("p", "content", data.delivery.content));
+      if (!facts.length && !blocks.length) {
+        // 固定回执与只有系统说明的结果：全部是代码文字。
+        item.append(el("p", "content", delivery.content));
+        return;
       }
+      for (const text of notices) if (text) item.append(el("p", "meta system-notice", text));
+      const system = facts.length > 0 || notices.some(Boolean) || Boolean(delivery.session_notice);
+      const byId = new Map(facts.map((fact) => [fact.evidence_id, fact]));
+      const section = (name, title) => {
+        const chosen = facts.filter((fact) => fact.section === name);
+        if (!chosen.length) return;
+        const box = el("section", `facts ${name}`);
+        box.append(el("p", "meta", title));
+        for (const fact of chosen) box.append(factTable(fact, resultLabel(delivery, fact.evidence_id)));
+        item.append(box);
+      };
+      section("action", "动作（系统根据记录生成）");
+      let labelled = false;
+      for (const block of blocks) {
+        if (block.kind === "fact") {
+          labelled = false;
+          const fact = byId.get(block.evidence_id);
+          if (fact) item.append(factTable(fact, resultLabel(delivery, fact.evidence_id)));
+          continue;
+        }
+        if (system && !labelled) {
+          item.append(el("p", "meta model-label", "模型说明（未经系统核实）"));
+          labelled = true;
+        }
+        item.append(el("p", "content reply-text", block.text));
+      }
+      const placed = new Set(blocks.filter((b) => b.kind === "fact").map((b) => b.evidence_id));
+      for (const fact of facts) {
+        // 正文事实都应由块放置；未被放置的仍完整展示，不静默丢弃。
+        if (fact.section === "body" && !placed.has(fact.evidence_id)) {
+          item.append(factTable(fact, resultLabel(delivery, fact.evidence_id)));
+        }
+      }
+      section("remaining", "其余结果（系统补全本轮获准结果）");
     }
   };
 

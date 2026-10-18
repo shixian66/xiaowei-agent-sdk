@@ -459,6 +459,8 @@ class ResultDelivery:
             answer=record.answer,
             context_evidence=record.context_evidence,
             monitoring_failures=record.monitoring_failures,
+            limit_reached=record.limit_reached,
+            material_only=record.material_only,
         )
         try:
             delivery = await self._evidence.validate_answer(

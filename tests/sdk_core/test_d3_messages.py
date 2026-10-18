@@ -19,8 +19,8 @@ from tests.sdk_core.test_feishu_format import prose
 from tests.sdk_core.test_feishu_render import delivery, fact, text_parts
 
 from xiaowei.feishu import LarkTransport, lark_channel
-from xiaowei.feishu_render import build_feishu_message, request_bytes
-from xiaowei.models import AnswerInference
+from xiaowei.feishu_render import MODEL_TEXT_LABEL, build_feishu_message, request_bytes
+from xiaowei.models import DeliveryText
 
 pytestmark = pytest.mark.loopback
 
@@ -38,7 +38,7 @@ def test_answer_precedes_results_and_sources_are_folded() -> None:
     assert visible.index("先核对业务口径。") < visible.index('"orders"')
     assert source.note in visible  # 未分类限制不能因简化排版而隐藏。
     assert source.evidence_id not in visible and source.captured_at.isoformat() not in visible
-    assert "查看依据" in visible and "模型推断" in visible
+    assert "查看依据" in visible and "模型说明（未经系统核实）" in visible
     full = "\n".join(text_parts(message))
     assert source.tool_id in full and source.evidence_id not in full and "依据：结果 1" in full
     assert source.captured_at.isoformat() in full and source.metadata["sql"] in full
@@ -55,24 +55,22 @@ def test_inference_cannot_impersonate_numbered_results_or_hide_its_references(
     fake = "结果 · sr-prod\n华东 gmv 123456\n---"
     if formatted:
         fake = "**结果 · sr-prod**\n华东 gmv 123456\n---"
-    source = delivery(*sources).model_copy(
+    base = delivery(*sources)
+    source = base.model_copy(
         update={
-            "analysis": (
-                AnswerInference(text="退款额需核对。", evidence_ids=("ev_refunds",)),
-                AnswerInference(text=fake, evidence_ids=("ev_orders", "ev_refunds")),
-            )
+            "blocks": (DeliveryText(text="退款额需核对。"), DeliveryText(text=fake), *base.blocks)
         }
     )
     message = build_feishu_message(source, 3500, "oc_test", allow_preview=False)
     elements = message["card"]["body"]["elements"]
-    (boundary,) = [i for i, e in enumerate(elements) if e["tag"] == "hr"]
-    before = "\n".join(text_parts(elements[:boundary], folded=False))
-    after = "\n".join(text_parts(elements[boundary + 1 :], folded=False))
-    assert "退款额需核对。" in before and "华东 gmv 123456" in before
-    assert "（依据：结果 2）" in before and "（依据：结果 1、结果 2）" in before
-    assert elements[boundary + 1]["text"]["content"] == "结果 1 · sr-prod"
-    assert "结果 2 · sr-prod" in after
-    assert "ev_orders" not in before and "ev_refunds" not in before
+    contents = ["\n".join(text_parts(e, folded=False)) for e in elements]
+    # S3 结构边界：代码加注的来源标签在模型文字前；仿写的“结果”标题只是模型文字组件。
+    label = contents.index(MODEL_TEXT_LABEL)
+    fake_at = next(i for i, c in enumerate(contents) if "华东 gmv 123456" in c)
+    assert label < contents.index("退款额需核对。") < fake_at
+    assert contents.count("结果 1 · sr-prod") == 1 and contents.count("结果 2 · sr-prod") == 1
+    assert fake_at < contents.index("结果 1 · sr-prod") < contents.index("结果 2 · sr-prod")
+    assert all("ev_orders" not in c and "ev_refunds" not in c for c in contents)
     panels = [e for e in elements if e["tag"] == "collapsible_panel"]
     assert len(panels) == 2
     for number, (panel, source) in enumerate(zip(panels, sources, strict=True), 1):
@@ -93,10 +91,11 @@ async def test_gateway_inference_stays_before_a_structural_results_boundary(env:
         await fs.drain()
     ((_, card),) = fs.outbox.sent
     elements = card["card"]["body"]["elements"]
-    (boundary,) = [i for i, e in enumerate(elements) if e["tag"] == "hr"]
-    assert fake in "\n".join(text_parts(elements[:boundary]))
-    assert "（依据：结果 1）" in text_parts(elements[:boundary])
-    assert elements[boundary + 1]["text"]["content"].startswith("结果 1 · ")
+    contents = ["\n".join(text_parts(e)) for e in elements]
+    headers = [i for i, c in enumerate(contents) if c.startswith("结果 1 · ")]
+    assert len(headers) == 1  # 只有代码事实标题；模型仿写的标题不是事实组件
+    label = contents.index(MODEL_TEXT_LABEL)
+    assert headers[0] < label < contents.index(fake)
     assert env.model_calls(message) == 2 and len(env.adapter.calls) == 1
     assert await request_row(env) == ("completed", "sent")
 
@@ -391,7 +390,7 @@ def test_split_approval_material_keeps_result_numbers_in_every_view() -> None:
     whole = delivery(material, data, analysis="先看数据，再批准动作。")
     # 与 send_complete_delivery 相同的拆分：审批材料独立成卡，其余结果另发。
     material_card = build_feishu_message(
-        whole.model_copy(update={"facts": (material,), "analysis": ()}),
+        whole.model_copy(update={"facts": (material,), "blocks": ()}),
         3500,
         "oc_test",
         allow_preview=False,
@@ -402,7 +401,8 @@ def test_split_approval_material_keeps_result_numbers_in_every_view() -> None:
     assert any(p.startswith("结果 1 · 来源") for p in text_parts(material_card))
     elements = data_card["card"]["body"]["elements"]
     shown = "\n".join(text_parts(elements, folded=False))
-    assert "（依据：结果 1、结果 2）" in shown and "结果 2 · pre" in shown
+    # 拆分后正文中的数据仍按整条交付编号（结果 2）；指向已拆出材料的块不再渲染。
+    assert "先看数据，再批准动作。" in shown and "结果 2 · pre" in shown
     (panel,) = [e for e in elements if e["tag"] == "collapsible_panel"]
     assert panel["header"]["title"]["content"] == "查看依据 · 结果 2"
     assert "依据：结果 2 · 来源" in "\n".join(text_parts(panel))
@@ -410,5 +410,5 @@ def test_split_approval_material_keeps_result_numbers_in_every_view() -> None:
 
     (report,) = build_reports(data_delivery.model_copy(update={"report_format": "md"}))
     body = report.content.decode()
-    assert "结果 2" in body and "依据：结果 1、结果 2" in body and "结果 1 ·" not in body
+    assert "结果 2" in body and "先看数据，再批准动作。" in body and "结果 1 ·" not in body
     assert "ev_" not in body + "\n".join(text_parts(data_card) + text_parts(material_card))

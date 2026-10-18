@@ -12,7 +12,7 @@ import pytest
 from agents.testing import ModelStep, ScriptedModel, assistant_message, function_call
 from pydantic import TypeAdapter
 from sqlalchemy import text
-from tests.sdk_core.synthetic_tools import TOTAL_TOOL, catalog, context
+from tests.sdk_core.synthetic_tools import TOTAL_TOOL, catalog, context, s3_answer
 from tests.sdk_core.test_group_actions import SHARED
 from tests.sdk_core.test_group_actions import SOURCE as AM_SOURCE
 from tests.sdk_core.test_group_actions import actions as actions
@@ -51,11 +51,7 @@ def cite_all(call):
         if item.get("type") == "function_call_output"
         and "evidence_id" in (envelope := json.loads(item["output"]))
     ]
-    return [
-        assistant_message(
-            json.dumps({"evidence_ids": ids, "inferences": [], "clarification": None})
-        )
-    ]
+    return [assistant_message(json.dumps(s3_answer(ids)))]
 
 
 async def gated_c2(_ctx, _arguments, call_id):

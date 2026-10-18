@@ -42,7 +42,10 @@ from tests.sdk_core.test_vertex_model import KEY, VERTEX, Endpoint, _answer
 from xiaowei.app import safe_run_config
 from xiaowei.feishu_render import MAX_REQUEST_BYTES, build_feishu_message, request_bytes
 from xiaowei.model_api import open_model
-from xiaowei.models import AgentAnswer, AnswerInference, Delivery
+from xiaowei.models import Delivery, DeliveryFactRef, DeliveryText
+
+# S2 对比的“现有生产 schema”是 S3 之前的回答格式，S3 后以 LegacyAnswer 保留。
+from xiaowei.models import LegacyAnswer as AgentAnswer
 
 # 初始资源上限，只约束模型输出规模（提案 8.1）。能否内联发送由完整渲染后的请求字节与组件数
 # 决定；Session 容量按实际序列化历史与配置上限计算；放不下时转附件或明确失败由 S3 交付链验证。
@@ -368,13 +371,17 @@ def test_block_count_limit(cand: Candidate, count: int, fits: bool) -> None:
 # ---- 容量反例：输出上限不保证内联交付（现有渲染器） ------------------------------------------
 
 
-def _delivery(facts: tuple[Any, ...], analysis: tuple[AnswerInference, ...] = ()) -> Delivery:
+def _delivery(facts: tuple[Any, ...], texts: tuple[str, ...] = ()) -> Delivery:
+    # S3 后渲染器读取正文块：文字在前，事实按块放置。
     return Delivery(
         content="x",
         channel="feishu",
         evidence_ids=tuple(f.evidence_id for f in facts),
         facts=facts,
-        analysis=analysis,
+        blocks=(
+            *(DeliveryText(text=t) for t in texts),
+            *(DeliveryFactRef(evidence_id=f.evidence_id) for f in facts),
+        ),
     )
 
 
@@ -395,10 +402,8 @@ def _render(delivery: Delivery, max_bytes: int = MAX_REQUEST_BYTES) -> dict[str,
 def test_text_within_budget_can_exceed_the_card_request_limit() -> None:
     """16_000 字节双引号文字 + 一条事实：JSON 两次转义与请求包装使请求远超 30_000 字节。"""
     fact = render_fact()
-    quotes = tuple(
-        AnswerInference(text='"' * 2_000, evidence_ids=(fact.evidence_id,)) for _ in range(8)
-    )
-    assert sum(len(q.text.encode()) for q in quotes) == MAX_TEXT_BYTES
+    quotes = tuple('"' * 2_000 for _ in range(8))
+    assert sum(len(q.encode()) for q in quotes) == MAX_TEXT_BYTES
     unbounded = _render(_delivery((fact,), quotes), max_bytes=10**7)
     assert request_bytes(unbounded, "oc_test") > 2 * MAX_REQUEST_BYTES
     # 现有渲染器在真实上限下降级，不发超限请求；新契约的降级与说明由 S3 验证。

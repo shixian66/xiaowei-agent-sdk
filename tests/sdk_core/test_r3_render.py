@@ -2,10 +2,12 @@
 
 import json
 
+import pytest
+from pydantic import ValidationError
 from tests.sdk_core.test_feishu_render import delivery, fact, text_parts
 
 from xiaowei.feishu_render import build_feishu_message
-from xiaowei.models import AgentAnswer, DeliveryFact
+from xiaowei.models import DeliveryFact, LegacyAnswer, legacy_blocks
 
 
 def brief_fact(**values):
@@ -40,10 +42,15 @@ def test_brief_card_summary_visible_original_folded():
 
 
 def test_old_answer_defaults_to_full_without_relaxing_extra_fields():
-    old = AgentAnswer.model_validate(
+    old = LegacyAnswer.model_validate(
         {"evidence_ids": ["ev_old"], "inferences": [], "clarification": None}
     )
     assert old.fact_views == ()
+    assert legacy_blocks(old).blocks[0].view == "full"  # type: ignore[union-attr]
+    with pytest.raises(ValidationError):
+        LegacyAnswer.model_validate(
+            {"evidence_ids": [], "inferences": [], "clarification": None, "summary": "1"}
+        )
 
 
 def test_brief_original_omission_is_visible_when_capacity_cannot_hold_json():

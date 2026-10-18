@@ -58,8 +58,8 @@ CHANNELS = ["web", "feishu"]
 SLOW_SQL = "SELECT region, SUM(total) AS total FROM sales GROUP BY region"
 UNAPPROVED_SQL = "SELECT region, secret FROM sales"
 FACTS_HEADER = "工具结果（系统根据证据生成）"
-ANALYSIS_HEADER = "分析建议（模型推断，未经系统核实）"
-CLARIFICATION_HEADER = "需要澄清（本轮未执行业务查询）"
+# S3：模型文字在含代码内容的展示中由代码加注同一标签；不再有“需要澄清”等错位标题。
+ANALYSIS_HEADER = "模型说明（未经系统核实）"
 FACTS_TRUNCATED = "（工具结果超过飞书单条上限，已截断）"
 TRUNCATED = "（内容超过飞书单条消息上限，已截断）"
 EVIDENCE_FAILED = (
@@ -237,13 +237,10 @@ async def test_slow_query_to_plan_and_layout(diag: Env, channel: str) -> None:
     assert content.count(f"{prefix}{AUDIT_NOTE}") == 1
     assert content.count(f"{prefix}{PLAN_NOTE}") == 1
     if reply.files:
-        assert any(line.endswith(". 分析与建议") for line in content)
-        assert any("模型推断，未经系统核实" in line for line in content)
+        assert any(line.endswith(". 模型说明") for line in content)
+        assert any("未经系统核实" in line for line in content)
     else:
-        assert any(
-            (ANALYSIS_HEADER if channel == "web" else "分析与建议（模型推断") in line
-            for line in content
-        )
+        assert any(ANALYSIS_HEADER in line for line in content)
     assert "全表扫描 30 个分区" in reply.content
     # 固定说明只在交付中出现：模型收到的工具结果不含它们，限制表达由诊断指令要求。
     for output in tool_outputs(env.scripts.calls[message][-1]):
@@ -312,13 +309,10 @@ async def test_previous_query_is_explained_without_running_it_again(
     content = visible_lines(reply)
     assert sum(line.removeprefix("说明：") == PLAN_NOTE for line in content) == 1
     if reply.files:
-        assert any(line.endswith(". 分析与建议") for line in content)
-        assert any("模型推断，未经系统核实" in line for line in content)
+        assert any(line.endswith(". 模型说明") for line in content)
+        assert any("未经系统核实" in line for line in content)
     else:
-        assert any(
-            (ANALYSIS_HEADER if channel == "web" else "分析与建议（模型推断") in line
-            for line in content
-        )
+        assert any(ANALYSIS_HEADER in line for line in content)
     if reply.facts is not None:
         query, columns, plan = reply.facts
         assert [query["tool_id"], plan["tool_id"]] == [RUN_QUERY, EXPLAIN_QUERY]
@@ -361,8 +355,8 @@ async def test_audit_only_answer_when_the_plan_is_rejected(diag: Env, channel: s
     # 保留审计事实并照常给出分析；没有计划事实与计划说明，也不是澄清。
     notes = [line.removeprefix("说明：") for line in content]
     assert AUDIT_NOTE in notes and PLAN_NOTE not in notes
-    assert (ANALYSIS_HEADER if channel == "web" else "分析与建议（模型推断）") in content
-    assert CLARIFICATION_HEADER not in content
+    assert ANALYSIS_HEADER in content
+    assert not any("需要澄清" in line for line in content)
     if reply.facts is not None:
         assert [f["tool_id"] for f in reply.facts] == [SLOW_QUERIES]
 
@@ -384,20 +378,19 @@ async def test_no_evidence_is_a_pure_clarification(diag: Env, channel: str) -> N
     assert reply.state == "completed" and env.drv.attempts == 0
     content = lines(reply)
     if channel == "web":
-        assert content[0] == CLARIFICATION_HEADER
+        assert content[0] == ANALYSIS_HEADER
     else:
-        # D3 澄清用单条普通 post；问题、零 I/O/Evidence 与无附件边界仍须成立。
+        # 纯模型文字用单条普通 post，不套错位标题；零 I/O/Evidence 与无附件边界仍须成立。
         assert reply.post is not None and reply.card is None and reply.files == ()
-        assert content == ["需要澄清", "secret 列不在可查看范围内，请换成获准的列"]
-    assert FACTS_HEADER not in content and ANALYSIS_HEADER not in content
+        assert content == ["secret 列不在可查看范围内，请换成获准的列"]
+    assert FACTS_HEADER not in content
     assert reply.facts in (None, [])
     assert await evidence_rows(env) == 0
 
 
 @pytest.mark.parametrize("channel", CHANNELS)
-async def test_evidence_mixed_with_clarification_twice_is_not_delivered(
-    diag: Env, channel: str
-) -> None:
+async def test_evidence_with_a_followup_question_is_delivered(diag: Env, channel: str) -> None:
+    """S3：带事实的追问不再按“三选一”拒绝；事实与追问一起交付，不改写。"""
     env = diag
 
     def mixed(call: ModelCall) -> Any:
@@ -413,7 +406,6 @@ async def test_evidence_mixed_with_clarification_twice_is_not_delivered(
             database=None,
         ),
         mixed,
-        mixed,  # 一次无工具改写后仍混用
     )
     running, feishu = serving(env, channel)
     async with running as served:
@@ -421,14 +413,9 @@ async def test_evidence_mixed_with_clarification_twice_is_not_delivered(
         reply = await Turns(env, served, channel, feishu).ask(message)
         assert await served.finish() == 0
 
-    # 回答不保存、不发送：渠道只收到固定回执，没有任何事实或分析。
-    assert reply.state == "failed" and "扫描量大" not in reply.content
-    assert SLOW_SQL not in reply.content and reply.facts in (None, [])
-    assert (
-        await env.scalar("SELECT failure_code FROM xiaowei_request WHERE state = 'failed'")
-        == "evidence_failed"  # 回答规则不合格：answer_rejected(mixed_kinds)
-    )
-    assert len(env.scripts.calls[message]) == 3
+    assert reply.state == "completed" and "扫描量大" in reply.content
+    assert "要看哪个时间段？" in reply.content
+    assert len(env.scripts.calls[message]) == 2
 
 
 @pytest.mark.parametrize("channel", CHANNELS)
@@ -492,7 +479,7 @@ async def test_instructions_inside_audit_sql_and_plans_change_nothing(
 
         tokens = MarkdownIt().parse(reply.content)
         headings = [tokens[i + 1].content for i, t in enumerate(tokens) if t.type == "heading_open"]
-        assert sum(h.endswith(". 分析与建议") for h in headings) == 1
+        assert sum(h.endswith(". 模型说明") for h in headings) == 1
         assert ANALYSIS_HEADER not in headings and "已执行原查询" not in headings
         data_blocks = [t.content for t in tokens if t.type == "fence"]
         assert any(INJECTION in block and ANALYSIS_HEADER in block for block in data_blocks)
@@ -503,7 +490,7 @@ async def test_instructions_inside_audit_sql_and_plans_change_nothing(
         # 原文可含换行；它只能是纯文本单元格，不能新增分析组件或驱动 Agent 执行。
         assert (
             sum(
-                t["tag"] == "div" and t.get("text", {}).get("content") == "分析与建议（模型推断）"
+                t["tag"] == "div" and t.get("text", {}).get("content") == ANALYSIS_HEADER
                 for t in reply.card["card"]["body"]["elements"]
             )
             == 1
@@ -623,7 +610,7 @@ async def test_feishu_cut_with_forged_headers_uses_only_structured_sections(diag
     )
     assert (
         sum(
-            t["tag"] == "div" and t.get("text", {}).get("content") == "分析与建议（模型推断）"
+            t["tag"] == "div" and t.get("text", {}).get("content") == ANALYSIS_HEADER
             for t in elements
         )
         <= 1
@@ -674,7 +661,7 @@ MODEL_INSTRUCTIONS = _instructions(
         "不得声称已执行或已验证",
         # 有可引用证据时不退回纯澄清；被拒绝或失败的工具结果没有 evidence_id，不算取得
         # （validate_answer 拒绝既不澄清又不引用证据的回答）。
-        "可引用的 evidence_id",
+        "本轮可见的 evidence_id",
         "工具被拒绝或失败的结果没有 evidence_id",
     ],
 )
@@ -684,10 +671,10 @@ def test_default_instructions_state_the_diagnosis_rules(required: str) -> None:
 
 
 def test_analysis_instructions_do_not_repeat_program_rendered_facts() -> None:
-    assert "事实区会由系统完整展示工具结果" in DEFAULT_INSTRUCTIONS
-    assert "inferences 不要重画表格" in DEFAULT_INSTRUCTIONS
+    assert "事实内容由系统根据证据生成" in DEFAULT_INSTRUCTIONS
+    assert "不要重画表格" in DEFAULT_INSTRUCTIONS
     assert "不要逐行或逐列复述结果" in DEFAULT_INSTRUCTIONS
-    assert "只写结论、口径说明、限制和建议" in DEFAULT_INSTRUCTIONS
+    assert "结论、解释、口径说明、限制、建议" in DEFAULT_INSTRUCTIONS
 
 
 def test_default_instructions_bound_retries_and_followup_evidence() -> None:
@@ -700,7 +687,7 @@ def test_default_instructions_bound_retries_and_followup_evidence() -> None:
         "不改查其他环境代替",
         "本轮可见证据",
         "证据编号照原样引用",
-        "澄清或建议不要与证据、分析混用",
+        "可以只有文字",
     ):
         assert required in MODEL_INSTRUCTIONS
     assert "无需反问或穷举发现" not in MODEL_INSTRUCTIONS

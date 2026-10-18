@@ -438,6 +438,7 @@ class PolicySession:
         context_evidence: Sequence[str],
         *,
         monitoring_failures: Sequence[MonitoringFailure] = (),
+        limit_reached: bool = False,
     ) -> SessionSnapshot:
         """校验本轮最终回答与完整历史后写入底层 Session；任何失败都不保留本轮暂存项。
 
@@ -446,7 +447,9 @@ class PolicySession:
         self._phase = "before_commit"
         self._bytes = None
         pending, self._pending = _without_superseded_answers(self._pending), []
-        await self._validate_final_answer(pending, context_evidence, monitoring_failures)
+        await self._validate_final_answer(
+            pending, context_evidence, monitoring_failures, limit_reached
+        )
         turns = await self._open()
         if turns >= self._limits.max_history_turns:
             raise self._limit("history_turn_limit")
@@ -483,8 +486,13 @@ class PolicySession:
         pending: list[TResponseInputItem],
         context_evidence: Sequence[str],
         monitoring_failures: Sequence[MonitoringFailure],
+        limit_reached: bool,
     ) -> None:
-        """最终持久化复用 Evidence 回答验证器：最后一项须是通过校验的 ``AgentAnswer``。"""
+        """最终持久化复用 Evidence 回答验证器：最后一项须是通过校验的当前格式 ``AgentAnswer``。
+
+        新轮次只接受当前格式；回放历史中的旧格式助手消息照常作为模型历史，不在这里校验。
+        归一化、补全与授权复核与交付同一函数，提交与交付看到同一结果。
+        """
         final = pending[-1] if pending else None
         if final is None or _role(final) != "assistant":
             raise SessionItemRejectedError("本轮没有可提交的最终回答")
@@ -494,6 +502,7 @@ class PolicySession:
                 answer=answer,
                 context_evidence=tuple(context_evidence),
                 monitoring_failures=tuple(monitoring_failures),
+                limit_reached=limit_reached,
             )
             await self._evidence.validate_answer(turn, self._ctx)
         except (ValidationError, AnswerRejectedError):

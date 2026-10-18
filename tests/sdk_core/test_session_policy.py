@@ -39,6 +39,7 @@ from tests.sdk_core.synthetic_tools import (
     context,
     ready_engine,
     request,
+    s3_answer,
     sdk_tool,
     store,
 )
@@ -104,19 +105,14 @@ def _cite(**extra: object) -> ModelStep:
         assert isinstance(items, list)
         output = [i for i in items if i.get("type") == "function_call_output"][-1]["output"]
         evidence_id = json.loads(output)["evidence_id"]
-        answer = {
-            "evidence_ids": [evidence_id],
-            "inferences": [{"text": "东区订单平稳", "evidence_ids": [evidence_id]}],
-            "clarification": None,
-            **extra,
-        }
+        answer = s3_answer([evidence_id], "东区订单平稳", **extra)
         return [assistant_message(json.dumps(answer, ensure_ascii=False))]
 
     return ModelStep.respond(respond)
 
 
 def _forged() -> ModelStep:
-    answer = {"evidence_ids": ["ev_forged"], "inferences": [], "clarification": None}
+    answer = s3_answer(["ev_forged"])
     return ModelStep(output=[assistant_message(json.dumps(answer))])
 
 
@@ -545,7 +541,7 @@ async def test_tool_errors_are_stored_as_fixed_text(postgres_url: URL) -> None:
     """治理拒绝的工具输出不含证据：以固定文字保存与回放，不保留原始错误文本。"""
     async with harness(postgres_url) as h:
         h.grants.revoke_all()
-        clarify = {"evidence_ids": [], "inferences": [], "clarification": "请确认地区"}
+        clarify = s3_answer(text="请确认地区", awaiting_user=True)
         steps = [_call(), ModelStep(output=[assistant_message(json.dumps(clarify))])]
         first, _ = await h.turn(context(), steps)
         followup, _ = await h.turn(
@@ -603,7 +599,7 @@ async def test_staging_rejects_evidence_outside_this_session(postgres_url: URL) 
 @pytest.mark.parametrize("intruder", ["other-subject", "other-channel"])
 async def test_history_without_evidence_is_still_owned(postgres_url: URL, intruder: str) -> None:
     """只有文字的历史（用户输入、澄清）同样只属于创建它的身份与渠道。"""
-    clarify = {"evidence_ids": [], "inferences": [], "clarification": "请确认地区"}
+    clarify = s3_answer(text="请确认地区", awaiting_user=True)
     async with harness(postgres_url) as h:
         await h.turn(context(), [ModelStep(output=[assistant_message(json.dumps(clarify))])])
         h.grants.grant("mallory", TOTAL_TOOL)
@@ -640,11 +636,7 @@ def _copy_everything(next_call: str | None) -> ModelStep:
                 function_call("order_total", {"region": seen}, call_id=next_call),
             ]
         evidence_id = json.loads(_outputs(call.input)[-1])["evidence_id"]
-        answer = {
-            "evidence_ids": [evidence_id],
-            "inferences": [{"text": seen, "evidence_ids": [evidence_id]}],
-            "clarification": None,
-        }
+        answer = s3_answer([evidence_id], seen)
         return [assistant_message(json.dumps(answer, ensure_ascii=False))]
 
     return ModelStep.respond(respond)

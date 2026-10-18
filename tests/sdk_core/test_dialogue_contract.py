@@ -40,8 +40,8 @@ async def test_delivered_rules_distinguish_pages_snapshots_and_delivery(env: Env
     assert "续页不是重跑" in rules
     assert "结构采集 SQL 模板" in rules
     assert "不证明已送达或已读" in rules
-    assert "inferences/advice/clarification 不写" in rules
-    assert "在 inferences 中提问" in rules
+    assert "文字中不写‘已发送附件’" in rules
+    assert "需要用户补充信息才能继续时 awaiting_user 为 true" in rules
 
 
 async def test_describe_tool_accepts_user_supplied_names_without_search(env: Env) -> None:
@@ -60,7 +60,8 @@ async def test_describe_tool_accepts_user_supplied_names_without_search(env: Env
     (fact,) = result["delivery"]["facts"]
     assert fact["tool_id"] == "local/describe_table"
     assert {r["name"] for r in fact["rows"]} >= {"region", "total"}
-    assert result["delivery"]["analysis"][0]["text"].endswith("统计？")
+    texts = [b["text"] for b in result["delivery"]["blocks"] if b["kind"] == "text"]
+    assert texts[-1].endswith("统计？")
     assert not executed_sql(env.drv)
     descriptions = {t["name"]: t["description"] for t in env.scripts.tool_specs[0]}
     assert "用户提供的准确库表名" in descriptions["describe_table"]

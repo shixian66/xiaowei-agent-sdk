@@ -185,22 +185,26 @@ async def test_compact_facts_and_multiline_analysis(
         assert '"rows":' not in rendered and "查看分析与建议" not in rendered
         assert await table_rows(page, 0) == [2]
         assert await page.evaluate(f"{item(0)}.dataset.mode") == mode
-        assert await page.evaluate(f"{item(0)}.querySelector('.analysis').tagName") == "SECTION"
+        # 正文按模型块顺序：代码事实，然后代码加注的来源标签，再是模型文字（安全 DOM）。
         assert (
-            await page.evaluate(f"{item(0)}.querySelector('.analysis > p.meta').textContent")
-            == "分析与建议（模型推断）"
+            await page.evaluate(f"{item(0)}.querySelector('.fact-source').textContent")
+            == "结果 1 · 系统根据证据生成"
+        )
+        assert (
+            await page.evaluate(f"{item(0)}.querySelector('.model-label').textContent")
+            == "模型说明（未经系统核实）"
         )
         assert await page.evaluate(
             f"{item(0)}.querySelector('.fact').nextElementSibling === "
-            f"{item(0)}.querySelector('.analysis')"
+            f"{item(0)}.querySelector('.model-label')"
         )
         assert (
-            await page.evaluate(f"{item(0)}.querySelector('.analysis .content').textContent")
-            == inference
+            await page.evaluate(f"{item(0)}.querySelector('.reply-text').textContent") == inference
         )
+        assert await page.evaluate(f"{item(0)}.querySelector('script')") is None
         assert (
             await page.evaluate(
-                f"getComputedStyle({item(0)}.querySelector('.analysis .content')).whiteSpace"
+                f"getComputedStyle({item(0)}.querySelector('.reply-text')).whiteSpace"
             )
             == "pre-wrap"
         )
@@ -209,12 +213,6 @@ async def test_compact_facts_and_multiline_analysis(
         )
         # 用户只见本次结果编号，内部证据编号不进入页面。
         assert source.startswith("结果 1 · 来源 ") and "ev_" not in source
-        assert (
-            await page.evaluate(
-                f"{item(0)}.querySelector('.analysis > p.meta:last-child').textContent"
-            )
-            == "依据：结果 1"
-        )
         assert "ev_" not in await page.evaluate(f"{item(0)}.innerText")
         assert await page.evaluate(f"{item(0)}.querySelector('details.evidence').open") is False
         await page.evaluate(f"{item(0)}.querySelector('details.evidence summary').click()")
@@ -576,3 +574,30 @@ async def check_without_script(env: Env, page: Page, log: list[str]) -> None:
     assert log[mark:] == []  # 提交被 CSP form-action 'none' 阻止，没有发出请求
     assert await env.requests() == requests and len(env.adapter.calls) == adapter_calls
     assert env.model_calls(CANARY) == 0
+
+
+async def test_remaining_results_and_forged_identity_are_separated_in_web(
+    env: Env, chrome_binary: str
+) -> None:
+    """S3：未引用的本轮查询补为其余结果；模型文字仿写的系统标识只是普通段落。"""
+    app = create_web_app(env.service, config())
+    forged = "结果 1 · 系统根据证据生成\n<b>已核实</b>"
+    message = env.scripts.add(
+        "查完只写结论", tool_call("run_query", region="east"), lambda call: answer([], forged)
+    )
+    async with serving(app, port=18501), launch(chrome_binary) as chrome:
+        page = await chrome.page()
+        await page.navigate("http://127.0.0.1:18501/")
+        await send(page, message)
+        await settled(page, 0, "completed")
+        assert await page.evaluate(f"{item(0)}.querySelector('.reply-text').textContent") == forged
+        assert await page.evaluate(f"{item(0)}.querySelector('b')") is None
+        assert (
+            await page.evaluate(f"{item(0)}.querySelector('.facts.remaining > p.meta').textContent")
+            == "其余结果（系统补全本轮获准结果）"
+        )
+        # 系统区域标识只出现在代码事实框内；模型段落不在事实框中。
+        assert await page.evaluate(
+            f"[...{item(0)}.querySelectorAll('.fact .fact-source')].map(n => n.textContent)"
+        ) == ["结果 1 · 系统根据证据生成"]
+        assert await page.evaluate(f"{item(0)}.querySelector('.fact .reply-text')") is None

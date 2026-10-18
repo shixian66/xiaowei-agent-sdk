@@ -239,12 +239,14 @@ async def test_silence_read_cannot_return_another_valid_id(env: Env) -> None:
                 "核对已知静默 ID",
                 tool_call(f"{SOURCE}__get_silence", **CALLS["get_silence"]),
                 cite(),
-                cite(),  # 没有证据可引用：改写一次仍缺引用
             )
-            assert (await served.turn(message, "query")).json()["state"] == "failed"
+            body = (await served.turn(message, "query")).json()
+            # S3：只有文字的回答可以交付；不符的读回从不成为事实，由代码标明未核实。
+            assert body["state"] == "completed", body
+            assert body["delivery"]["facts"] == []
+            assert "未核实" in (body["delivery"]["monitoring_notice"] or "")
             assert len(state.requests) == 1
             assert await env.scalar("SELECT count(*) FROM xiaowei_evidence") == 0
-            assert await env.scalar("SELECT count(*) FROM agent_messages") == 0
 
 
 async def test_last_page_retains_partial_marker_and_original_count(env: Env) -> None:
@@ -1213,7 +1215,8 @@ async def test_expired_silence_keeps_expired_state_without_current_suppression_c
             assert data["status"]["state"] == "expired" and data["matchers"][0]["isEqual"]
 
 
-async def test_successful_read_must_be_cited_not_replaced_by_advice(env: Env) -> None:
+async def test_successful_read_is_completed_not_replaced_by_advice(env: Env) -> None:
+    """S3：读取成功后只写文字，结果由代码补为其余结果，不被文字替代，也不再改写。"""
     with backend() as (url, state):
         async with env.running(env.config(**a4_config(url))) as served:
             await served.page()
@@ -1221,11 +1224,12 @@ async def test_successful_read_must_be_cited_not_replaced_by_advice(env: Env) ->
                 "查告警后漏证据",
                 tool_call(f"{SOURCE}__get_status"),
                 lambda call: answer([], analysis="", advice="只解释不引用"),
-                lambda call: answer([], analysis="", advice="只解释不引用"),  # 改写一次仍漏引
             )
-            assert (await served.turn(message, "query")).json()["state"] == "failed"
+            body = (await served.turn(message, "query")).json()
+            assert body["state"] == "completed", body
+            assert [f["section"] for f in body["delivery"]["facts"]] == ["remaining"]
             assert len(state.requests) == 1
-            assert await env.scalar("SELECT count(*) FROM agent_messages") == 0
+            assert len(env.scripts.calls[message]) == 2
 
 
 async def test_source_authorization_does_not_grant_other_tools(env: Env) -> None:

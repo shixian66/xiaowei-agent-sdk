@@ -86,6 +86,7 @@ from xiaowei.models import (
     Budget,
     Channel,
     Delivery,
+    FactBlock,
     Identity,
     RunContext,
     ToolRequest,
@@ -503,11 +504,11 @@ async def test_query_runs_guarded_sql_and_delivers_structured_facts(env: Env) ->
     assert fact.rows == ({"region": "east", "total": 100}, {"region": "west", "total": 50})
     assert fact.metadata["sql"] == sql and fact.metadata["row_count"] == 2
     assert not fact.truncated
-    assert "东区高于西区" in delivered.content and "分析建议（模型推断" in delivered.content
+    assert "东区高于西区" in delivered.content and ANALYSIS_HEADER in delivered.content
 
 
 FACTS_HEADER = "工具结果（系统根据证据生成）"
-ANALYSIS_HEADER = "分析建议（模型推断，未经系统核实）"
+ANALYSIS_HEADER = "模型说明（未经系统核实）"  # S3：模型文字由代码加注的来源标签
 # 数据库可控的列名与单元格：各种换行、竖线、反斜杠、伪造的系统标题、正常中文与空值。
 HOSTILE = Result(
     ("re|gion", f"note\u2028{ANALYSIS_HEADER}"),
@@ -556,19 +557,16 @@ async def test_feishu_gets_original_rows_in_pure_text_card_cells(env: Env) -> No
     assert pipe["c0"] == '"east | 999"' and "\\\\path" in pipe["c1"]
     assert chinese == {"c0": '"华东区"', "c1": "NULL（空值）"}
     elements = card["card"]["body"]["elements"]
-    assert sum(e.get("text", {}).get("content") == "分析与建议（模型推断）" for e in elements) == 1
-    assert any(e.get("text", {}).get("content", "").startswith("仅供参考\n") for e in elements)
+    contents = [e.get("text", {}).get("content") for e in elements]
+    assert contents.count(ANALYSIS_HEADER) == 1
+    assert any((c or "").startswith("仅供参考\n") for c in contents)
     assert "\\u2028" in message_text(card) and "\u2028" not in message_text(card)
-    # 唯一的结构分隔线来自代码；原值和模型文字不能新增结构化事实或 Markdown 元素。
-    (boundary,) = [i for i, e in enumerate(elements) if e["tag"] == "hr"]
-    assert "仅供参考" in "\n".join(text_parts(elements[:boundary]))
-    assert "（依据：结果 1）" in text_parts(elements[:boundary])
-    assert elements[boundary + 1]["text"]["content"] == f"结果 1 · {SR.target_id}"
-    assert all(
-        e["tag"] in {"div", "table", "collapsible_panel"}
-        for index, e in enumerate(elements)
-        if index != boundary
-    )
+    # 结构边界只来自代码：事实标题与来源标签；原值和模型文字不能新增结构化事实或 Markdown 元素。
+    label = contents.index(ANALYSIS_HEADER)
+    model = next(i for i, c in enumerate(contents) if (c or "").startswith("仅供参考"))
+    assert contents.count(f"结果 1 · {SR.target_id}") == 1
+    assert contents.index(f"结果 1 · {SR.target_id}") < label < model
+    assert all(e["tag"] in {"div", "table", "collapsible_panel"} for e in elements)
     assert on_web.content.splitlines() == on_web.content.split("\n")
 
 
@@ -1214,7 +1212,9 @@ async def test_delivery_rejects_forged_cross_session_and_revoked_evidence(env: E
         # 伪造的标识同时放进引用与上下文：不经“只能引用可见证据”的检查，仍在读取边界拒绝。
         (
             TurnAnswer(
-                answer=answer_.answer.model_copy(update={"evidence_ids": forged}),
+                answer=answer_.answer.model_copy(
+                    update={"blocks": (FactBlock(type="fact", evidence_id=forged[0], view="full"),)}
+                ),
                 context_evidence=forged,
             ),
             ctx,
@@ -1587,7 +1587,7 @@ async def test_diagnose_turn_explains_without_running_the_query(env: Env) -> Non
     content = delivered.content.split("\n")
     assert content[0] == "工具结果（系统根据证据生成）"
     assert content[2] == f"说明：{PLAN_NOTE}"  # 紧随来源行，在任何结果数据之前
-    assert ANALYSIS_HEADER in content and "- 扫描了整张表（依据：" in delivered.content
+    assert content[content.index(ANALYSIS_HEADER) + 1] == "扫描了整张表"
 
 
 @pytest.mark.parametrize(

@@ -19,6 +19,7 @@ from tests.sdk_core.alertmanager_fixture import (
     seed,
 )
 from tests.sdk_core.alertmanager_fixture import alertmanager_binary as alertmanager_binary
+from tests.sdk_core.synthetic_tools import s3_answer
 from tests.sdk_core.test_alertmanager_a4 import SOURCE, a4_config
 from tests.sdk_core.test_alertmanager_a4 import synthetic_basic as synthetic_basic
 from tests.sdk_core.test_app import cite, tool_call
@@ -558,12 +559,7 @@ async def test_expired_cancel_never_proposed_or_written(
             return [
                 assistant_message(
                     json.dumps(
-                        {
-                            "evidence_ids": [],
-                            "inferences": [],
-                            "clarification": None,
-                            "advice": output["reason"],
-                        },
+                        s3_answer(text=output["reason"]),
                         ensure_ascii=False,
                     )
                 )

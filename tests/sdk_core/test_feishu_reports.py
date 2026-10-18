@@ -31,7 +31,7 @@ from xiaowei.channel import AccessDeniedError, RequestRef
 from xiaowei.channel_store import ChannelStore, ChannelStoreUnavailableError, ReportMismatchError
 from xiaowei.feishu import FeishuGateway, LarkTransport, attributed, lark_channel, send_delivery
 from xiaowei.feishu_report import build_report
-from xiaowei.models import AnswerInference, Delivery, DeliveryFact
+from xiaowei.models import Delivery, DeliveryFact, DeliveryFactRef, DeliveryText
 from xiaowei.storage import Readiness, hold_instance_lock
 
 pytestmark = pytest.mark.loopback
@@ -57,7 +57,7 @@ def _delivery(format_: str) -> Delivery:
         evidence_ids=("ev_report",),
         channel="feishu",
         facts=(fact,),
-        analysis=(AnswerInference(text="需要复核", evidence_ids=("ev_report",)),),
+        blocks=(DeliveryText(text="需要复核"), DeliveryFactRef(evidence_id="ev_report")),
     ).model_copy(update={"report_format": format_})
 
 
@@ -69,7 +69,7 @@ def test_report_preserves_evidence_and_has_no_active_content(format_: str) -> No
     assert report.filename == f"xiaowei-report.{format_}"
     assert report.digest and len(report.digest) == 64
     body = report.content.decode("utf-8")
-    assert "结果 1" in body and "依据：结果 1" in body and "fat" in body
+    assert "结果 1" in body and "模型说明" in body and "fat" in body
     assert "ev_report" not in body
     assert "SELECT" in body and "需要复核" in body
     if format_ == "html":
@@ -95,14 +95,21 @@ def test_report_does_not_interpret_source_labels_as_markdown() -> None:
 @pytest.mark.parametrize("format_", ["md", "html"])
 def test_report_displays_invisible_controls_as_literals(format_: str) -> None:
     delivery = _delivery(format_)
-    inference = AnswerInference(text="方向\u202e反转", evidence_ids=("ev_report",))
     fact = delivery.facts[0].model_copy(
         update={
             "result_json": json.dumps({"rows": [{"value": "方向\u202e反转"}]}, ensure_ascii=False)
         }
     )
     body = build_report(
-        delivery.model_copy(update={"facts": (fact,), "analysis": (inference,)})
+        delivery.model_copy(
+            update={
+                "facts": (fact,),
+                "blocks": (
+                    DeliveryText(text="方向\u202e反转"),
+                    DeliveryFactRef(evidence_id="ev_report"),
+                ),
+            }
+        )
     ).content.decode()
     assert "\u202e" not in body
     assert "\\u202e" in body
@@ -176,7 +183,8 @@ def test_report_format_is_not_exposed_in_web_serialization() -> None:
     )
     assert "report_format" not in view
     assert "request_state" not in view
-    assert "report_notice" not in view
+    # S3：载体说明是代码生成的系统说明，Web 也须展示（如非飞书渠道的文件请求）。
+    assert view["report_notice"] == "本轮尚未完成"
 
 
 @pytest.mark.asyncio
@@ -502,15 +510,16 @@ async def test_recovery_during_upload_prevents_stale_file_message(env: Env) -> N
 
 
 @pytest.mark.asyncio
-async def test_web_report_request_is_rejected_after_tool_evidence(env: Env) -> None:
+async def test_web_report_request_is_delivered_with_a_code_notice(env: Env) -> None:
+    """S3：非飞书渠道要文件不再拒绝或改写；正文照常交付，由代码说明当前渠道不支持文件。"""
     message = env.scripts.add(
         "生成东区订单 MD 报告",
         tool_call("order_total", region="east"),
         lambda call: answer(evidence_in(call), report_format="md"),
-        lambda call: answer(evidence_in(call), report_format="md"),  # 改写一次仍要文件
     )
     record = await env.run(message, "web_report", channel="web", conversation="web_report")
-    assert record.state == "failed" and record.failure_code == "evidence_failed"
+    assert record.state == "completed"
+    assert len(env.scripts.calls[message]) == 2
 
 
 @pytest.mark.asyncio

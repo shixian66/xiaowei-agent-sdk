@@ -15,7 +15,7 @@ from tests.sdk_core.test_feishu_render import AT, delivery, fact, size, tables, 
 
 from xiaowei.feishu import LarkTransport, lark_channel, send_delivery
 from xiaowei.feishu_render import TEXT_CLIPPED, build_feishu_message, request_bytes
-from xiaowei.models import Delivery
+from xiaowei.models import Delivery, DeliveryText
 
 pytestmark = pytest.mark.loopback
 
@@ -31,8 +31,13 @@ def markdowns(value: Any) -> list[dict[str, Any]]:
 
 
 def prose(kind: str, text: str) -> Delivery:
+    """S3 纯模型文字：不再套“需要澄清/建议”等错位标题；澄清以 awaiting_user 声明。"""
     return Delivery(
-        channel="feishu", evidence_ids=(), content=kind + "\n旧转义内容", feishu_text=text
+        channel="feishu",
+        evidence_ids=(),
+        content=kind + "\n旧转义内容",
+        blocks=(DeliveryText(text=text),),
+        awaiting_user=kind == "需要澄清",
     )
 
 
@@ -42,9 +47,8 @@ def test_business_prose_is_one_post_with_real_newlines(kind: str) -> None:
     assert set(message) == {"post"}
     shown = "\n".join(text_parts(message))
     assert "第一行\n第二行" in shown and "旧转义内容" not in shown
-    assert kind in shown
-    if kind == "建议":
-        assert "未经系统核实" in shown
+    # S3：纯模型文字不再套“需要澄清/建议（未执行查询）”等错位标题。
+    assert kind not in shown and "未执行" not in shown
 
 
 def test_approved_headings_bold_and_lists_are_generated_not_copied() -> None:
@@ -189,7 +193,7 @@ def test_monitoring_notice_stays_plain_when_model_prose_has_format(model_text: s
         channel="feishu",
         evidence_ids=(),
         content="排查建议（监控读取失败；模型生成，未经数据验证）\n旧转义内容",
-        feishu_text=notice + "\n" + model_text,
+        blocks=(DeliveryText(text=model_text),),
         monitoring_notice=notice,
     )
     message = build_feishu_message(source, 3500, "oc_test")
@@ -211,7 +215,7 @@ def test_monitoring_notice_is_never_clipped_with_model_prose(max_chars: int) -> 
         channel="feishu",
         evidence_ids=(),
         content="排查建议（监控读取失败；模型生成，未经数据验证）\n旧转义内容",
-        feishu_text=notice + "\n" + "**检查采集端**\n" * 1200,
+        blocks=(DeliveryText(text="**检查采集端**\n" * 1200),),
         monitoring_notice=notice,
     )
     message = build_feishu_message(source, max_chars, "oc_test")
@@ -350,7 +354,7 @@ async def test_product_sender_and_real_sdk_send_one_bounded_business_message(
     assert len(raw) == request_bytes(message, "oc_alice", reply_to=reply_to) <= 30_000
     if kind == "SQL草稿":
         # 按已批准的保真回退，含代码的说明整段原文纯文字，仍只发送一张业务卡片。
-        assert markdowns(message) == [] and source.feishu_text in text_parts(message)
+        assert markdowns(message) == [] and source.texts[0] in text_parts(message)
     elif post:
         assert "关键" in text_parts(message)
         assert any(
@@ -458,11 +462,7 @@ def test_structured_post_does_not_charge_escaped_entities_as_visible_text() -> N
     formatted = build_feishu_message(source, 3500, "oc_test")
     assert "post" in formatted
     # SDK 结构化节点保存解码后的原文字，外层序列化容量仍单独核算。
-    plain_chars = (
-        len("小维 · 回复")
-        + len("建议（未执行查询，模型生成，未经系统核实）")
-        + len(source.feishu_text)
-    )
+    plain_chars = len("小维 · 回复") + len(source.texts[0])
     limited = build_feishu_message(source, plain_chars, "oc_test")
     assert "post" in limited and TEXT_CLIPPED not in text_parts(limited)
     assert " [x](https://evil.invalid)" in text_parts(limited)

@@ -262,7 +262,7 @@ async def test_all_monitoring_reads_fail_allows_unverified_advice_with_fixed_sou
             delivery = response["delivery"]
             assert not delivery["facts"] and not delivery["evidence_ids"]
             assert await env.scalar("SELECT count(*) FROM xiaowei_evidence") == 0
-            assert "未经数据验证" in delivery["content"]
+            assert "读取未核实（系统记录）" in delivery["content"]
             assert SOURCE in delivery["content"] and OTHER in delivery["content"]
             assert "本轮未执行业务查询" not in delivery["content"]
             assert first.recorder.tool_calls == [("query", {"query": "up"})]

@@ -23,10 +23,12 @@
 记录、写入 Session、最终校验与提交）在 ``scope_checks`` 中共用一个计数；不在其中的读取（首次
 发送、历史读取、重发）每次单独计数。
 最终回答连同本轮模型可见的全部证据（可信代码记录的 ``TurnAnswer.context_evidence``）一起复核：
-模型文字可能复述其中任何一条，引用之外的证据只复核、不展示，澄清与建议也不例外。
-事实区域由代码从获准投影生成，模型分析单独标注；策略登记了固定说明的工具，说明由代码取自
-当前登记的策略，紧随来源行，不来自证据记录或模型。Web/飞书各得到从本渠道投影生成的
-``DeliveryFact``；飞书使用纯文本组件与单元格构造静态卡片，不解析获准值里的 Markdown。
+模型文字可能复述其中任何一条，纯文字回答也不例外。显式引用、动作区域与“其余结果”来自
+同一批复核通过的记录：动作（提案、执行结果、状态查询）置顶；正文按模型块的顺序；本轮
+需交付类别中未被引用的获准结果由代码按产生顺序补全。事实区域由代码从获准投影生成；策略
+登记了固定说明的工具，说明由代码取自当前登记的策略，不来自证据记录或模型。Web/飞书各得到
+从本渠道投影生成的 ``DeliveryFact``；飞书使用纯文本组件与单元格构造静态卡片，不解析获准值
+里的 Markdown。
 """
 
 import enum
@@ -56,14 +58,20 @@ from xiaowei.governance import (
     schema_shape,
 )
 from xiaowei.models import (
+    ACTION_STATUS_POLICY,
     MONITORING_READ_POLICIES,
     AgentAnswer,
-    AnswerFactView,
+    AnswerBlock,
     Audience,
     Channel,
     Delivery,
+    DeliveryBlock,
     DeliveryFact,
+    DeliveryFactRef,
+    DeliveryText,
     EvidenceRecord,
+    FactBlock,
+    FactSection,
     Identity,
     JsonScalar,
     ObjectDependency,
@@ -75,7 +83,6 @@ from xiaowei.models import (
     ToolRequest,
     ToolResult,
     TurnAnswer,
-    answer_kinds_mixed,
 )
 
 logger = logging.getLogger(__name__)
@@ -128,12 +135,12 @@ _UNAVAILABLE = "证据不存在、已过期或当前无权读取"
 _UNVERIFIABLE = "暂时无法确认证据所依赖的数据当前仍可读，本次未交付"
 # 依赖的保存格式；格式改变时旧格式的记录不可读。
 _DEPENDENCY_FORMAT = 1
+_ACTION_HEADER = "动作（系统根据记录生成）"
 _FACTS_HEADER = "工具结果（系统根据证据生成）"
-_ANALYSIS_HEADER = "分析建议（模型推断，未经系统核实）"
-_CLARIFICATION_HEADER = "需要澄清（本轮未执行业务查询）"
-_ADVICE_HEADER = "建议（本轮未执行业务查询；模型生成，未经系统核实）"
-_UNVERIFIED_ADVICE_HEADER = "排查建议（监控读取失败；模型生成，未经数据验证）"
-_UNVERIFIED_CLARIFICATION_HEADER = "需要澄清（监控读取失败，结果未核实）"
+_TEXT_HEADER = "模型说明（未经系统核实）"
+_REMAINING_HEADER = "其余结果（系统补全本轮获准结果）"
+UNSUPPORTED_FILE_NOTICE = "当前渠道不支持文件，结果以消息展示。"
+LIMIT_NOTICE = "本轮步骤已用完，回答基于已取得的结果，可能不完整。"
 _MONITORING_REASONS = {
     "auth": "上游认证或授权失败",
     "timeout": "读取超时，结果未知",
@@ -209,14 +216,9 @@ class EvidenceUnverifiableError(EvidenceError):
 
 
 class AnswerRejectCode(enum.StrEnum):
-    MIXED_KINDS = "mixed_kinds"
-    MISSING_EVIDENCE = "missing_evidence"
-    REPORT_UNSUPPORTED = "report_unsupported"
     UNKNOWN_EVIDENCE = "unknown_evidence"
-    INFERENCE_UNLINKED = "inference_unlinked"
+    EMPTY_ANSWER = "empty_answer"
     EVIDENCE_UNAVAILABLE = "evidence_unavailable"
-    UNCITED_QUERY = "uncited_query"
-    INVALID_FACT_VIEW = "invalid_fact_view"
 
 
 class AnswerRejectedError(EvidenceError):
@@ -228,56 +230,41 @@ class AnswerRejectedError(EvidenceError):
 
 
 def normalize_answer(answer: AgentAnswer) -> AgentAnswer:
-    """代码可无歧义纠正的形式问题直接归一化，不交模型改写：重复引用按首次出现去重；同一引用
-    的显示方式只保留一项，冲突时取完整展示（不少展示事实）。输出 schema 预检、提交与交付都先经
-    这一步，看到同一份回答。"""
-    cited = tuple(dict.fromkeys(answer.evidence_ids))
-    views: dict[str, AnswerFactView] = {}
-    for item in answer.fact_views:
-        kept = views.get(item.evidence_id)
-        if kept is None or (kept.view == "brief" and item.view == "full"):
-            views[item.evidence_id] = item
-    fact_views = tuple(views.values())
-    if cited == answer.evidence_ids and fact_views == answer.fact_views:
+    """代码可无歧义纠正的形式问题直接归一化，不交模型改写：空白文字块丢弃；同一证据的事实块
+    只保留首次出现的位置，展示方式冲突取完整（不少展示事实）。输出 schema 预检、Session 提交与
+    交付都先经这一步，看到同一份回答。本轮新事实选 brief 在交付时按完整展示（需要证据记录）。"""
+    full = {b.evidence_id for b in answer.blocks if isinstance(b, FactBlock) and b.view == "full"}
+    seen: set[str] = set()
+    blocks: list[AnswerBlock] = []
+    for block in answer.blocks:
+        if isinstance(block, FactBlock):
+            if block.evidence_id in seen:
+                continue
+            seen.add(block.evidence_id)
+            if block.evidence_id in full and block.view != "full":
+                block = block.model_copy(update={"view": "full"})
+        elif not block.text.strip():
+            continue
+        blocks.append(block)
+    if tuple(blocks) == answer.blocks:
         return answer
-    return answer.model_copy(update={"evidence_ids": cited, "fact_views": fact_views})
+    return answer.model_copy(update={"blocks": tuple(blocks)})
 
 
-def citation_error(
-    answer: AgentAnswer, context: Sequence[str], channel: Channel
-) -> AnswerRejectedError | None:
-    """只看回答本身与模型可见证据编号的结构和引用规则，不读存储、不复核权限。
+def citation_error(answer: AgentAnswer, context: Sequence[str]) -> AnswerRejectedError | None:
+    """只看回答本身与模型可见证据编号的引用规则，不读存储、不复核权限。
 
     交付校验与本轮输出 schema 共用这一份规则：后者让模型在 Runner 内改正，前者仍是权威。
-    调用方先经 ``normalize_answer``。
+    调用方先经 ``normalize_answer``。块字段组合与资源上限由 ``AgentAnswer`` 类型校验。
     """
-    unverified = answer.clarification is not None or answer.advice is not None
-    if unverified and answer_kinds_mixed(answer):
-        return AnswerRejectedError(
-            AnswerRejectCode.MIXED_KINDS, "澄清或建议不能与查询结果、分析或彼此混用"
-        )
-    report_format = None if answer.clarification is not None else answer.report_format
-    if report_format is not None and channel != "feishu":
-        return AnswerRejectedError(AnswerRejectCode.REPORT_UNSUPPORTED, "当前渠道不能交付报告文件")
-    if unverified:
-        return None
-    cited = answer.evidence_ids
-    if not cited:
-        return AnswerRejectedError(AnswerRejectCode.MISSING_EVIDENCE, "回答缺少证据引用")
-    if not set(cited) <= set(context):
+    if not set(answer.evidence_ids) <= set(context):
         return AnswerRejectedError(
             AnswerRejectCode.UNKNOWN_EVIDENCE, "回答只能引用本轮模型可见的证据"
         )
-    if not {item.evidence_id for item in answer.fact_views} <= set(cited):
-        return AnswerRejectedError(
-            AnswerRejectCode.INVALID_FACT_VIEW, "显示方式必须属于本回答引用"
-        )
-    for inference in answer.inferences:
-        if not inference.evidence_ids or not set(inference.evidence_ids) <= set(cited):
-            return AnswerRejectedError(
-                AnswerRejectCode.INFERENCE_UNLINKED, "分析必须引用本回答选择的证据"
-            )
     return None
+
+
+EMPTY_ANSWER = "回答没有可交付内容：至少给出一段文字或选择一条可见证据"
 
 
 class EvidenceStore:
@@ -299,6 +286,31 @@ class EvidenceStore:
         self._clock = clock
         self._retention = timedelta(seconds=retention_seconds)
         self._verify_dependencies = verify_dependencies
+        self._results: frozenset[str] = frozenset()
+
+    def configure_results(self, tool_ids: frozenset[str]) -> None:
+        """应用装配时登记“需交付结果”的工具（本轮未引用时由代码补全为其余结果）。
+
+        只来自可信配置，由装配同一存储的 ``Application`` 写入；产品单进程只装配一个应用。
+        按交付时的配置分类是接受的边界：类别调整后历史读取按新类别展示同一批获准证据。
+        未登记时（只装配存储、不装配应用）不补全任何结果。
+        """
+        self._results = frozenset(tool_ids)
+
+    def category(self, record: EvidenceRecord) -> Literal["action", "result"] | None:
+        """按可信登记分类：动作（提案、执行结果、状态查询）、需交付结果，或只复核不补全。
+
+        动作按 policy 判断，不按工具名或 effect=read 猜测；记录已通过读取边界，契约必然存在。
+        """
+        contract = self._catalog.contract(record.tool_id, record.target_id)
+        if contract is None:
+            return None
+        policy = self._catalog.policy_for(contract)
+        if policy.effect in {"propose", "approval"} or contract.policy_id == ACTION_STATUS_POLICY:
+            return "action"
+        if policy.effect == "read" and record.tool_id in self._results:
+            return "result"
+        return None
 
     @property
     def catalog(self) -> ToolCatalog:
@@ -419,123 +431,148 @@ class EvidenceStore:
         """最终回答出口：核对引用关系与当前可读性，再为接收渠道生成内容。
 
         回答只能引用本轮模型可见的证据（``turn.context_evidence``）；这些证据不论是否被引用、
-        回答是否只是澄清或建议，每次都与引用一起按当前权限复核（一批），只展示引用的事实。
+        回答是否只有文字，每次都按当前权限一批复核。复核通过的记录中：动作类证据（显式引用的，
+        与原执行轮次产生的）置顶；正文事实按模型块顺序；原执行轮次中需交付类别、未被引用的结果
+        按产生顺序补为“其余结果”。原执行轮次即 ``ctx.identity.turn_id``（审批恢复与历史读取都
+        传原轮）。归一化与补全后仍没有任何可交付内容时拒绝。
         ``history`` 为真表示历史读取或显式重发；所有证据均复核当前权限与依赖。
         确定不可读抛出 ``AnswerRejectedError``；暂时无法复核时 ``EvidenceUnverifiableError`` 原样
         传播。
         """
-        answer = normalize_answer(turn.answer)
+        answer = normalize_answer(turn.blocks_answer)
         context = tuple(dict.fromkeys(turn.context_evidence))
         channel = ctx.identity.channel
         monitoring_notice = await self._monitoring_failure_notice(turn, ctx)
-        unverified = [
-            (header, text)
-            for header, text in (
-                (_CLARIFICATION_HEADER, answer.clarification),
-                (_ADVICE_HEADER, answer.advice),
-            )
-            if text is not None
-        ]
-        rejected = citation_error(answer, context, channel)
+        rejected = citation_error(answer, context)
         if rejected is not None:
             raise rejected
-        if unverified:
-            # 澄清与建议不引用证据：不能与证据、分析或彼此混用。没有监控失败时，
-            # “本轮未执行业务查询”由 Application 在提交前核实；有监控失败时改用未核实标题。
-            # 模型可能复述可见证据，因此照样复核它们。
-            report_format = None if answer.clarification is not None else answer.report_format
-            records = await self._context_readable(ctx, channel, context, history=history)
-            ((header, text),) = unverified
-            if monitoring_notice is not None:
-                header = (
-                    _UNVERIFIED_ADVICE_HEADER
-                    if answer.advice is not None
-                    else _UNVERIFIED_CLARIFICATION_HEADER
-                )
-            rendered = f"{monitoring_notice}\n{text}" if monitoring_notice else text
-            content = f"{header}\n{_one_line(rendered)}"
-            return Delivery(
-                content=content,
-                evidence_ids=(),
-                channel=channel,
-                monitoring_notice=monitoring_notice,
-                web_text=rendered if channel == "web" else None,
-                feishu_text=rendered if channel == "feishu" else None,
-                report_format=report_format,
-                is_clarification=answer.clarification is not None,
-                basis=_basis(records, ctx),
-                content_expires_at=min((r.expires_at for r in records), default=None),
-            )
-
         cited = answer.evidence_ids
-        views = {item.evidence_id: item.view for item in answer.fact_views}
         unshown = tuple(e for e in context if e not in cited)
         records = await self._context_readable(ctx, channel, (*cited, *unshown), history=history)
+        by_id = {r.evidence_id: r for r in records}
+        views = {b.evidence_id: b.view for b in answer.blocks if isinstance(b, FactBlock)}
+        turn_id = ctx.identity.turn_id
 
-        shown = [_shown(r, channel, self._fact_note(r)) for r in records[: len(cited)]]
-        facts: list[DeliveryFact] = []
-        for item in shown:
-            contract = self._catalog.contract(item.record.tool_id, item.record.target_id)
-            effect = self._catalog.policy_for(contract).effect if contract is not None else "read"
-            # 提案/执行只进入独立动作组件，不能复制为参考数据文件。
-            complete = effect == "propose" or (
-                effect == "approval" and item.record.identity.turn_id == ctx.identity.turn_id
-            )
-            fact = _fact(item, channel).model_copy(
-                update={
-                    "requires_complete": complete,
-                    "note_summary": (
-                        self._catalog.policy_for(contract).fact_note_summary
-                        if contract is not None
-                        else None
-                    ),
-                }
-            )
-            # 本轮新事实总是完整展示：brief 只对可见历史事实生效，不拒绝也不交模型改写。
-            if (
-                views.get(fact.evidence_id) == "brief"
-                and item.record.identity.turn_id != ctx.identity.turn_id
-            ):
-                # 行数只来自接收渠道的获准结果；不是模型所报数值或全表总数。
-                count = (item.data or {}).get("row_count")
-                if (
-                    not complete
-                    and type(count) is int
-                    and count >= 0
-                    and count == len(fact.rows)
-                    and fact.columns
-                ):
-                    fact = fact.model_copy(
-                        update={"view": "brief", "summary": f"本次返回行数：{count}。"}
-                    )
-            facts.append(fact)
-        analysis: tuple[str, ...] = ()
-        if answer.inferences:
-            analysis = (
-                _ANALYSIS_HEADER,
-                *(
-                    f"- {_one_line(i.text)}（依据：{', '.join(i.evidence_ids)}）"
-                    for i in answer.inferences
-                ),
-            )
-        lines = (
-            _FACTS_HEADER,
-            *(line for item in shown for line in _fact_lines(item)),
-            *analysis,
-            *((monitoring_notice,) if monitoring_notice else ()),
-        )
+        def current(evidence_id: str) -> bool:
+            return by_id[evidence_id].identity.turn_id == turn_id
+
+        # 旧格式回答保存时已引用全部须交付的结果与动作（旧规则强制），按原样展示、不补全；
+        # 暂停材料只展示本次请求执行的动作，同轮未请求的提案不进入审批材料。
+        complete = isinstance(turn.answer, AgentAnswer)
+        actions = [e for e in cited if self.category(by_id[e]) == "action"] + [
+            e
+            for e in unshown
+            if complete
+            and not turn.material_only
+            and current(e)
+            and self.category(by_id[e]) == "action"
+        ]
+        # 执行结果（approval）在前，与恢复轮次的既有顺序一致；其余保持引用/产生顺序。
+        actions.sort(key=lambda e: self._effect(by_id[e]) != "approval")
+        body = [e for e in cited if e not in actions]
+        remaining = [
+            e for e in unshown if complete and current(e) and self.category(by_id[e]) == "result"
+        ]
+        facts = [
+            *(self._delivery_fact(by_id[e], "action", views.get(e), ctx) for e in actions),
+            *(self._delivery_fact(by_id[e], "body", views.get(e), ctx) for e in body),
+            *(self._delivery_fact(by_id[e], "remaining", None, ctx) for e in remaining),
+        ]
+        blocks: list[DeliveryBlock] = [
+            DeliveryFactRef(evidence_id=b.evidence_id)
+            if isinstance(b, FactBlock)
+            else DeliveryText(text=b.text)
+            for b in answer.blocks
+            if not isinstance(b, FactBlock) or b.evidence_id in body
+        ]
+        texts = [b.text for b in blocks if isinstance(b, DeliveryText)]
+        if not texts and not facts and monitoring_notice is None:
+            raise AnswerRejectedError(AnswerRejectCode.EMPTY_ANSWER, EMPTY_ANSWER)
+        report_format = None if answer.awaiting_user else answer.report_format
+        report_notice = None
+        if report_format is not None and channel != "feishu":
+            report_format, report_notice = None, UNSUPPORTED_FILE_NOTICE
+        shown_ids = {f.evidence_id for f in facts}
+        shown = {e: _shown(by_id[e], channel, self._fact_note(by_id[e])) for e in shown_ids}
+        limit_notice = LIMIT_NOTICE if turn.limit_reached else None
+        lines: list[str] = []
+        for notice in (report_notice, limit_notice, monitoring_notice):
+            if notice:
+                lines.append(notice)
+        if actions:
+            lines.append(_ACTION_HEADER)
+            lines.extend(line for e in actions for line in _fact_lines(shown[e]))
+        for block in blocks:
+            if isinstance(block, DeliveryText):
+                lines.extend((_TEXT_HEADER, _one_line(block.text)))
+            else:
+                lines.append(_FACTS_HEADER)
+                lines.extend(_fact_lines(shown[block.evidence_id]))
+        if remaining:
+            lines.append(_REMAINING_HEADER)
+            lines.extend(line for e in remaining for line in _fact_lines(shown[e]))
         return Delivery(
             content="\n".join(lines),
-            evidence_ids=cited,
+            evidence_ids=tuple(f.evidence_id for f in facts),
             channel=channel,
             facts=tuple(facts),
-            analysis=tuple(answer.inferences),
+            blocks=tuple(blocks),
             monitoring_notice=monitoring_notice,
+            report_notice=report_notice,
+            limit_notice=limit_notice,
             requires_complete=any(f.requires_complete for f in facts),
-            report_format=answer.report_format,
-            basis=_basis(records[len(cited) :], ctx),
+            awaiting_user=answer.awaiting_user,
+            report_format=report_format,
+            basis=_basis([r for r in records if r.evidence_id not in shown_ids], ctx),
             content_expires_at=min((r.expires_at for r in records), default=None),
         )
+
+    def _effect(self, record: EvidenceRecord) -> str:
+        contract = self._catalog.contract(record.tool_id, record.target_id)
+        return self._catalog.policy_for(contract).effect if contract is not None else "read"
+
+    def _delivery_fact(
+        self,
+        record: EvidenceRecord,
+        section: FactSection,
+        view: Literal["full", "brief"] | None,
+        ctx: RunContext,
+    ) -> DeliveryFact:
+        channel = ctx.identity.channel
+        item = _shown(record, channel, self._fact_note(record))
+        contract = self._catalog.contract(record.tool_id, record.target_id)
+        effect = self._effect(record)
+        # 完整审批材料保护的原有条件：提案（不限轮次），或原执行轮次的执行结果；动作状态查询
+        # 进入动作区域，但不因此获得完整保护。
+        complete = effect == "propose" or (
+            effect == "approval" and record.identity.turn_id == ctx.identity.turn_id
+        )
+        fact = _fact(item, channel).model_copy(
+            update={
+                "requires_complete": complete,
+                "section": section,
+                "note_summary": (
+                    self._catalog.policy_for(contract).fact_note_summary
+                    if contract is not None
+                    else None
+                ),
+            }
+        )
+        # 本轮新事实总是完整展示：brief 只对可见历史事实生效，不拒绝也不交模型改写。
+        if view == "brief" and record.identity.turn_id != ctx.identity.turn_id:
+            # 行数只来自接收渠道的获准结果；不是模型所报数值或全表总数。
+            count = (item.data or {}).get("row_count")
+            if (
+                not complete
+                and type(count) is int
+                and count >= 0
+                and count == len(fact.rows)
+                and fact.columns
+            ):
+                fact = fact.model_copy(
+                    update={"view": "brief", "summary": f"本次返回行数：{count}。"}
+                )
+        return fact
 
     async def _monitoring_failure_notice(self, turn: TurnAnswer, ctx: RunContext) -> str | None:
         """失败源也按当前目标/工具许可复核；任何撤权使整条历史回答不可交付。"""

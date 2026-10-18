@@ -15,7 +15,7 @@ from xiaowei.feishu_render import (
     build_feishu_message,
     request_bytes,
 )
-from xiaowei.models import AnswerInference, Delivery, DeliveryFact
+from xiaowei.models import Delivery, DeliveryFact, DeliveryFactRef, DeliveryText
 
 CHAT = "oc_inline"
 AUDIT = ("queryId", "user", "duration_ms", "sql_text")
@@ -46,7 +46,10 @@ def delivery(*facts, analysis="最慢的查询来自 etl 用户。"):
         evidence_ids=("ev_inline",),
         channel="feishu",
         facts=facts,
-        analysis=(AnswerInference(text=analysis, evidence_ids=("ev_inline",)),) if analysis else (),
+        blocks=(
+            *((DeliveryText(text=analysis),) if analysis else ()),
+            *(DeliveryFactRef(evidence_id=f.evidence_id) for f in facts),
+        ),
     )
 
 

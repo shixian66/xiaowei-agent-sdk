@@ -36,7 +36,7 @@ from tests.sdk_core.gate0 import (
     gate_passed,
     run_samples,
 )
-from tests.sdk_core.synthetic_tools import Clock, ready_engine
+from tests.sdk_core.synthetic_tools import Clock, ready_engine, s3_answer
 from tests.sdk_core.test_model_api import GEMINI
 from tests.sdk_core.test_vertex_model import VERTEX
 
@@ -213,16 +213,12 @@ def cite_all(messages: list[dict[str, Any]]) -> dict[str, Any]:
     if not totals:
         return clarify(messages)
     ids = _evidence(messages)
-    body = {
-        "evidence_ids": ids,
-        "inferences": [{"text": f"总额为 {totals[-1]}", "evidence_ids": ids}],
-        "clarification": None,
-    }
+    body = s3_answer(ids, f"总额为 {totals[-1]}")
     return _chat({"role": "assistant", "content": json.dumps(body, ensure_ascii=False)}, "stop")
 
 
 def clarify(messages: list[dict[str, Any]]) -> dict[str, Any]:
-    body = {"evidence_ids": [], "inferences": [], "clarification": "请说明指哪个数字"}
+    body = s3_answer(text="请说明指哪个数字", awaiting_user=True)
     return _chat({"role": "assistant", "content": json.dumps(body, ensure_ascii=False)}, "stop")
 
 
@@ -607,7 +603,7 @@ def _vertex_envelopes(contents: list[dict[str, Any]]) -> list[dict[str, Any]]:
 
 
 def vertex_clarify(contents: list[dict[str, Any]]) -> dict[str, Any]:
-    body = {"evidence_ids": [], "inferences": [], "clarification": "请说明指哪个数字"}
+    body = s3_answer(text="请说明指哪个数字", awaiting_user=True)
     return _vertex_body([{"text": json.dumps(body, ensure_ascii=False)}])
 
 
@@ -617,11 +613,7 @@ def vertex_cite_all(contents: list[dict[str, Any]]) -> dict[str, Any]:
     if not totals:
         return vertex_clarify(contents)
     ids = [e["evidence_id"] for e in envelopes]
-    body = {
-        "evidence_ids": ids,
-        "inferences": [{"text": f"总额为 {totals[-1]}", "evidence_ids": ids}],
-        "clarification": None,
-    }
+    body = s3_answer(ids, f"总额为 {totals[-1]}")
     return _vertex_body([{"text": json.dumps(body, ensure_ascii=False)}])
 
 
@@ -823,11 +815,7 @@ def diagnose(messages: list[dict[str, Any]]) -> dict[str, Any]:
     ids = [envelope["evidence_id"] for envelope in _tool_results(messages)]
     if not ids:
         return clarify(messages)
-    body = {
-        "evidence_ids": ids,
-        "inferences": [{"text": "依据已取得的结果分析；计划为估算", "evidence_ids": ids}],
-        "clarification": None,
-    }
+    body = s3_answer(ids, "依据已取得的结果分析；计划为估算")
     return _chat({"role": "assistant", "content": json.dumps(body, ensure_ascii=False)}, "stop")
 
 
@@ -1093,12 +1081,7 @@ def test_previous_sql_accepts_the_original_sql_without_the_added_limit() -> None
 
 
 def advise(messages: list[dict[str, Any]]) -> dict[str, Any]:
-    body = {
-        "evidence_ids": [],
-        "inferences": [],
-        "clarification": None,
-        "advice": f"可以这样写（未执行）：{gate0.APPROVED_SQL}",
-    }
+    body = s3_answer(text=f"可以这样写（未执行）：{gate0.APPROVED_SQL}")
     return _chat({"role": "assistant", "content": json.dumps(body, ensure_ascii=False)}, "stop")
 
 
@@ -1167,14 +1150,9 @@ def scripted_intent() -> GeminiLikeEndpoint:
                 {
                     "role": "assistant",
                     "content": json.dumps(
-                        {
-                            "evidence_ids": [],
-                            "inferences": [],
-                            "clarification": None,
-                            "advice": (
-                                "当前工具只支持普通内部表，视图的 SHOW CREATE VIEW 原文尚未开放。"
-                            ),
-                        },
+                        s3_answer(
+                            text="当前工具只支持普通内部表，视图的 SHOW CREATE VIEW 原文尚未开放。"
+                        ),
                         ensure_ascii=False,
                     ),
                 },

@@ -7,6 +7,7 @@ from typing import Any
 
 import httpx2
 import pytest
+from tests.sdk_core.synthetic_tools import s3_answer
 from tests.sdk_core.test_channel_service import app_config
 from tests.sdk_core.test_feishu import Outbox
 from tests.sdk_core.test_feishu_images import _png
@@ -35,9 +36,7 @@ async def test_group_image_requires_mention_and_member_then_b_can_replay(
 
     def endpoint(request: httpx2.Request) -> httpx2.Response:
         calls.append(json.loads(request.content))
-        answer = json.dumps(
-            {"evidence_ids": [], "inferences": [], "clarification": "请说明截图问题。"}
-        )
+        answer = json.dumps(s3_answer(text="请说明截图问题。", awaiting_user=True))
         return httpx2.Response(
             200,
             json={

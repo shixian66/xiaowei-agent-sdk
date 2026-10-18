@@ -4,7 +4,7 @@ import json
 from dataclasses import replace
 
 import pytest
-from tests.sdk_core.synthetic_tools import QUERY_TOOL, TOTAL_TOOL
+from tests.sdk_core.synthetic_tools import QUERY_TOOL, TOTAL_TOOL, s3_answer
 from tests.sdk_core.test_app import cite, clarify, tool_call, upstream_error
 from tests.sdk_core.test_group_actions import SOURCE, WRITE, Actions, request_execution
 from tests.sdk_core.test_group_actions import actions as actions
@@ -1760,17 +1760,7 @@ async def test_vertex_signature_is_forwarded_after_native_resume(actions, monkey
                     }
                 ]
             else:
-                parts = [
-                    {
-                        "text": json.dumps(
-                            {
-                                "evidence_ids": [e["evidence_id"] for e in envelopes],
-                                "inferences": [],
-                                "clarification": None,
-                            }
-                        )
-                    }
-                ]
+                parts = [{"text": json.dumps(s3_answer([e["evidence_id"] for e in envelopes]))}]
         return httpx2.Response(200, json=_body(parts))
 
     monkeypatch.setenv(VERTEX.api_key_ref.removeprefix("env:"), "synthetic-sdk-a-key")
