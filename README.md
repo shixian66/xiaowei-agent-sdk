@@ -58,7 +58,7 @@ P1–P3 的 StarRocks 能力不执行数据修改、配置变更或优化建议�
 
 ## 怎样开始
 
-唯一正式命令是 `xiaowei`（`python -m xiaowei` 相同）。它已用测试 PostgreSQL、脚本模型与替身完成离线验证；P3-A 和 P3-B 已通过独立审查并合入，升级、回退和隔离恢复在本机 Linux/arm64 容器环境验证。amd64 发行包由手动发布流程生成，应用镜像以离线文件随包交付；真实模型、用户 StarRocks、真实飞书与公司服务器实战仍未完成（见 handoff）。旧 CLI、Worker 或旧 Compose 命令不是产品入口。
+唯一正式命令是 `xiaowei`（`python -m xiaowei` 相同）。它已用测试 PostgreSQL、脚本模型与替身完成离线验证；P3-A 和 P3-B 已通过独立审查并合入，升级、回退和隔离恢复在本机 Linux/arm64 容器环境验证。amd64 发行包由手动发布流程生成，应用镜像以离线文件随包交付；真实模型、用户 StarRocks、真实飞书与公司服务器的实战验收仍未完成（见 handoff）。旧 CLI、Worker 或旧 Compose 命令不是产品入口。
 
 实施时需要：
 
