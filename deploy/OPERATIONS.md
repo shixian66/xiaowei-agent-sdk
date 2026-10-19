@@ -135,7 +135,7 @@ docker compose --env-file .env run --rm --no-deps xiaowei model check
 | 0，`model check valid profile=… model=…` | 模型完成了一次工具调用并给出合规的最终回答 |
 | 2，字段路径与说明 | 配置或 Key 问题（未设置、为空、仍是模板），按提示修改后重试，没有发出模型请求 |
 | 1，`model check failed: auth_failed` | Key 无效或无权使用该模型 |
-| 1，`model check failed: rate_limited` / `upstream_error` / `unreachable` | 限流、模型服务错误、超时或连不上；稍后重试，不会自动重试 |
+| 1，`model check failed: rate_limited` / `upstream_error` / `unreachable` | 限流、模型服务错误、超时或连不上；429/503 已按现有策略最多再试 3 次，仍失败时可稍后重试；超时及连接错误不自动重试 |
 | 1，`model check failed: tool_not_called` / `tool_repeated` / `answer_invalid` / `model_failed` | 模型没按要求调用工具、重复调用、最终回答不合规、响应不符合协议，或模型客户端打开/关闭失败；该 Profile 不应投入使用 |
 
 通过只说明这个 Profile 能完成合成数据上的工具往返和结构化回答，不代表正式提示词下的工具选择
@@ -941,7 +941,8 @@ docker compose --env-file .env -f compose.next.yaml run --rm --no-deps xiaowei c
 docker compose --env-file .env -f compose.next.yaml run --rm --no-deps xiaowei model check
 ```
 
-`model check` 会产生一次模型调用；模型配置没有变化且不想产生用量时可以省略。预检失败时按提示
+`model check` 会运行一次检查任务；成功的工具往返至少发起两次模型 HTTP 请求，429/503 重试
+可能增加次数。模型配置没有变化且不想产生用量时可以省略。预检失败时按提示
 修改 `XW_CONFIG_FILE` 指向的 JSON 后重新预检，旧服务继续运行（它只在启动时读取
 配置）。预检通过后只重建小维；PostgreSQL 容器和命名卷不重建：
 
