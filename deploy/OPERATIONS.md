@@ -1112,7 +1112,7 @@ quota metric 仅接受 `aiplatform.googleapis.com/` 下的无数字小写指标�
 `rate_kind=quota` 表示明确的配额详情，`no_quota_detail` 只表示
 `RESOURCE_EXHAUSTED` 且未见配额详情，不能据此断定共享容量不足。`retry_after` 只记录合法数字秒
 并按现有 20 秒采信上限截断，`retry_delay_s` 来自 `RetryInfo` 且同样最多记录 20 秒，
-二者均不改变 SDK 重试。
+二者均不改变现有重试策略。
 每次 Vertex 轮次结束另有一行 `turn=... stage=model_summary`，记录 HTTP 尝试数、429 数、
 实际重试次数、最大请求字节和成功响应的输入/输出 token 合计；任一成功响应缺少必要 usage 时
 对应合计写 `unknown`。有 429 时只附最后一次的安全分类与字段。审批暂停及后续恢复各按该次
