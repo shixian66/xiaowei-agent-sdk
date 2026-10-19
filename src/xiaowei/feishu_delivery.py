@@ -228,7 +228,7 @@ async def send_complete_delivery(
     # 编号沿用整条交付的展示顺序。
     data_delivery = delivery.model_copy(update={"facts": data, "requires_complete": False})
 
-    async def hint(reason: str) -> None:
+    async def hint(reason: str, recovery: str = "请联系操作员手动补发；不会重新查询。") -> None:
         # 提醒尽力一次，非必需分项；失锁/到期/readiness关闭不再外发。
         nonlocal last_group_send_at
         await pace_group_send(file_count)
@@ -244,10 +244,7 @@ async def send_complete_delivery(
                 max_chars,
                 chat_id,
                 reply_to,
-                "完整结果尚未交付。"
-                + reason
-                + f"原请求编号：{ref.request_id}。"
-                + "请联系操作员手动补发；不会重新查询。",
+                "完整结果尚未交付。" + reason + f"原请求编号：{ref.request_id}。" + recovery,
             )
             # 线程渲染期间 readiness 可能关闭、请求可能过期：发送前再复核一次。
             await store.check_delivery_attempt(claim)
@@ -333,7 +330,7 @@ async def send_complete_delivery(
             )
         _check_capacity(data_parts, max_chars, chat_id, reply_to, platform_limits=True)
     except ReportContentError:
-        await hint("报告正文不符合静态格式要求，请简化后重新提出。")
+        await hint("报告正文不符合静态格式要求。", recovery="请简化后重新提出。")
         return "failed"
     except (ReportCapacityError, MessageCapacityError):
         capacity_failed = True

@@ -89,7 +89,7 @@ def test_opening_only_markdown_fence_cannot_capture_next_fact() -> None:
 
     from xiaowei.report_content import markdown_content
 
-    body = markdown_content("~~~") + "\n\n## 系统事实\n\n原值\n"
+    body = markdown_content("~~~").body + "\n\n## 系统事实\n\n原值\n"
     tokens = MarkdownIt().parse(body)
     assert any(t.type == "inline" and t.content == "系统事实" for t in tokens)
 
@@ -99,20 +99,57 @@ def test_unclosed_nested_markdown_fence_is_not_rewritten_into_a_new_fence() -> N
 
     with pytest.raises(ReportContentError):
         markdown_content("> ~~~sql\n> SELECT 1")
-    assert markdown_content("> ~~~sql\n> SELECT 1\n> ~~~")
+    source = "> ~~~sql\n> SELECT 1\n> ~~~"
+    assert markdown_content(source).body == source
 
 
 def test_markdown_reference_definitions_in_code_remain_literal() -> None:
     from xiaowei.report_content import markdown_content
 
     source = "~~~md\n[asset]: https://invalid.example/example\n~~~"
-    assert markdown_content(source) == source
+    assert markdown_content(source).body == source
 
 
-@pytest.mark.parametrize(
-    "source", ["~~~\r\n正文\r~~~", "- 项目\n    ~~~\n    正文\n    ~~~"]
-)
+@pytest.mark.parametrize("source", ["~~~\r\n正文\r~~~", "- 项目\n    ~~~\n    正文\n    ~~~"])
 def test_closed_markdown_fences_keep_their_original_content(source: str) -> None:
     from xiaowei.report_content import markdown_content
 
-    assert markdown_content(source) == source
+    assert markdown_content(source).body == source
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        "# 标题\r\n\r\nARRAY<INT>\r\n\r\n## 结论\r\n\r\n继续观察",
+        "> [a]: https://invalid.example/a\n> [a]: https://invalid.example/b",
+        "- 注意\n  - ![图](https://invalid.example/a)\n\n继续观察",
+        "<script>~~~\nalert(1)\n~~~</script>",
+        "<script>\n~~~\n![图](https://invalid.example/image)\n~~~\n</script>",
+        "前言\u2028ARRAY<INT>\x0b正文\n\n结论",
+    ],
+)
+def test_markdown_literal_blocks_keep_source_and_cannot_capture_following_fact(source: str) -> None:
+    from markdown_it import MarkdownIt
+
+    from xiaowei.report_content import prepare_content
+
+    prepared = prepare_content(source, "md")
+    final = prepared.body + "\n\n## 系统事实\n\n获准事实\n"
+    env_: dict = {}
+    tokens = MarkdownIt("commonmark", {"html": True}).parse(final, env_)
+    assert prepared.changed and prepared.text == source
+    assert not env_.get("references")
+    assert any(t.type == "inline" and t.content == "系统事实" for t in tokens)
+    assert not any(
+        t.type in {"html_block", "html_inline", "link_open", "image"}
+        or any(c.type in {"html_inline", "link_open", "image"} for c in t.children or ())
+        for t in tokens
+    )
+
+
+@pytest.mark.parametrize("type_name", ["ARRAY<INT>", "MAP<STRING,INT>", "List<String>"])
+def test_escaped_html_type_names_keep_all_text_even_inside_code(type_name: str) -> None:
+    from html import escape
+
+    prepared = prepare(f"<p>列类型 <code>{escape(type_name)}</code></p>")
+    assert prepared.text == "列类型 " + type_name and not prepared.changed

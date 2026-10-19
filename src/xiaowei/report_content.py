@@ -1,6 +1,7 @@
 """Static model prose only; trusted Evidence values never pass through this module."""
 
 import math
+import re
 from dataclasses import dataclass
 from html.parser import HTMLParser
 from typing import Any, Literal
@@ -24,18 +25,25 @@ class ReportContentError(ValueError):
     """A report cannot preserve readable content within its static format contract."""
 
 
-def markdown_content(value: str) -> str:
-    """Keep native Markdown, rejecting active constructs outside literal code."""
-    env: dict[str, Any] = {}
-    tokens = MarkdownIt("commonmark", {"html": True}).enable("table").parse(value, env)
-    forbidden = {"html_block", "html_inline", "image", "link_open"}
-    if env.get("references") or any(
-        token.type in forbidden or any(c.type in forbidden for c in token.children or ())
-        for token in tokens
-    ):
-        raise ReportContentError("报告不支持原始 HTML、图片或链接，请使用文字或代码围栏")
+def markdown_content(value: str) -> ReportContent:
+    """Keep native blocks; unsupported markup becomes literal text, never active content."""
+    original = value
+    # Definition tokens include duplicate references and retain their source maps.
+    tokens = (
+        MarkdownIt("commonmark", {"html": True, "inline_definitions": True})
+        .enable("table")
+        .parse(value)
+    )
+    literal = {"html_block", "html_inline", "image", "link_open", "definition"}
+    regions: set[tuple[int, int]] = set()
+    root = (0, 0)
+    closing = ""
     # An unterminated model fence must not capture the following code-owned fact block.
     for token in tokens:
+        if token.level == 0 and token.map:
+            root = (token.map[0], token.map[1])
+        if token.type in literal or any(c.type in literal for c in token.children or ()):
+            regions.add(root)
         if token.type == "fence" and token.map:
             # Public token content excludes opening/closing lines. Count LF only,
             # as CommonMark does; reparsing source indentation/Unicode can disagree.
@@ -46,8 +54,19 @@ def markdown_content(value: str) -> str:
             if not closed:
                 if token.level:
                     raise ReportContentError("列表或引用中的代码围栏须完整闭合")
-                value += "\n" + token.markup + "\n"
-    return value
+                closing = token.markup
+    if regions:
+        # Maps count CommonMark LF lines, not Python's broader Unicode splitlines.
+        lines = value.replace("\r\n", "\n").replace("\r", "\n").split("\n")
+        for start, end in sorted(regions, reverse=True):
+            source = "\n".join(lines[start:end])
+            width = max([3, *(len(m.group()) + 1 for m in re.finditer(r"~+", source))])
+            marker = "~" * width
+            lines[start:end] = [f"{marker}text", source, marker, ""]
+        value = "\n".join(lines)
+    if closing:
+        value += "\n" + closing + "\n"
+    return ReportContent(value, original, bool(regions))
 
 
 _TAGS = {
@@ -296,7 +315,7 @@ class _Text(HTMLParser):
 def prepare_content(value: str, format_: Literal["md", "html"]) -> ReportContent:
     """Prepare a model block once for both file bytes and readable message preview."""
     if format_ == "md":
-        return ReportContent(markdown_content(value), value)
+        return markdown_content(value)
     inspector = _Text()
     inspector.feed(value)
     changed = inspector.removed

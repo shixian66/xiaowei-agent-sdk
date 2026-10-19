@@ -5,6 +5,7 @@ import json
 from pathlib import Path
 
 import pytest
+from markdown_it import MarkdownIt
 from tests.sdk_core.browser import launch
 from tests.sdk_core.test_feishu_reports import _delivery
 
@@ -12,6 +13,43 @@ from xiaowei.feishu_report import build_report
 from xiaowei.models import DeliveryText
 
 pytestmark = pytest.mark.browser
+
+
+async def test_normalized_md_is_literal_and_network_free_in_commonmark_reader(
+    chrome_binary: str, tmp_path: Path
+) -> None:
+    source = (
+        "# 巡检\n\nARRAY<INT>、MAP<STRING,INT>、List<String>\n\n"
+        "| 说明 |\n| --- |\n| 第一行<br>第二行 |\n\n"
+        "[文档](https://invalid.example/doc)\n\n"
+        "![图片](https://invalid.example/image)\n\n"
+        "<script>window.reportAttack=true</script>"
+    )
+    delivery = _delivery("md")
+    delivery = delivery.model_copy(
+        update={"report_native": True, "blocks": (DeliveryText(text=source), *delivery.blocks[1:])}
+    )
+    content = build_report(delivery).content.decode()
+    rendered = MarkdownIt("commonmark", {"html": True}).enable("table").render(content)
+    path = tmp_path / "md-reader.html"
+    path.write_text("<!doctype html><meta charset=utf-8><body>" + rendered + "</body>")
+    async with launch(chrome_binary) as chrome:
+        page = await chrome.page()
+        # Catch attempted I/O without permitting a regression to reach external servers.
+        await page.send("Network.setBlockedURLs", {"urls": ["https://*", "http://*"]})
+        mark = len(chrome.events)
+        await page.navigate(path.as_uri())
+        assert await page.evaluate("window.reportAttack === undefined") is True
+        assert await page.evaluate("document.querySelectorAll('script,img,a,iframe').length") == 0
+        visible = await page.evaluate("document.body.innerText")
+        for value in ("ARRAY<INT>", "MAP<STRING,INT>", "List<String>", "第一行<br>第二行"):
+            assert value in visible
+        assert "来源" in visible and "部分不支持的格式已移除" in visible
+        assert not [
+            event
+            for event in page.events("Network.requestWillBeSent", mark)
+            if event["request"]["url"] != path.as_uri()
+        ]
 
 
 @pytest.mark.parametrize("width", [1200, 390])
@@ -78,12 +116,15 @@ async def test_native_html_is_readable_isolated_and_network_free(
         assert (
             await page.evaluate("document.querySelector('.model-label').offsetHeight > 0") is True
         )
-        assert await page.evaluate("""(() => {
+        assert (
+            await page.evaluate("""(() => {
           const p = Array.from(document.querySelectorAll('.model-prose p'))
             .find(e => e.textContent === '必须阅读的报告结论');
           const style = getComputedStyle(p);
           return parseFloat(style.fontSize) >= 12 && style.color !== 'rgba(0, 0, 0, 0)';
-        })()""") is True
+        })()""")
+            is True
+        )
         assert (
             await page.evaluate(
                 "Array.from(document.querySelectorAll('.card pre code'))"
