@@ -1,11 +1,16 @@
 """进度设计的锁版 SDK 实验；不实现产品观察器，不访问模型、数据库或飞书。"""
 
 import asyncio
+import json
 
 import pytest
 from agents import Agent, RunHooks, Runner, function_tool
 from agents.exceptions import UserError
 from agents.testing import ScriptedModel, assistant_message, function_call
+from lark_channel import FeishuChannel
+from lark_channel.api.im.v1.model.patch_message_request import PatchMessageRequest
+from lark_channel.api.im.v1.model.patch_message_request_body import PatchMessageRequestBody
+from lark_channel.api.im.v1.model.patch_message_response import PatchMessageResponse
 
 
 def scripted_agent(tool, calls):
@@ -152,3 +157,39 @@ async def test_approval_pause_does_not_mean_the_tool_has_started():
     assert resumed.final_output == "finished"
     assert started == ["approval-c1"]
     assert executed == ["applied"]
+
+
+@pytest.mark.parametrize("details", [{}, {"msg": "success"}])
+async def test_card_update_loses_missing_code_but_public_response_preserves_it(
+    monkeypatch, details
+):
+    synthetic_value = "synthetic-progress-probe"
+    channel = FeishuChannel(app_id=synthetic_value, app_secret=synthetic_value)
+    card = {"elements": []}
+    request = (
+        PatchMessageRequest.builder()
+        .message_id("synthetic-message")
+        .request_body(PatchMessageRequestBody.builder().content(json.dumps(card)).build())
+        .build()
+    )
+    payload = {}
+
+    async def apatch(sent_request):
+        assert sent_request.message_id == "synthetic-message"
+        assert json.loads(sent_request.request_body.content) == card
+        return PatchMessageResponse(payload)
+
+    # 只替换公开 HTTP 调用边界；真实 Channel 归一化与响应类型仍运行。
+    monkeypatch.setattr(channel.client.im.v1.message, "apatch", apatch)
+    normalized = []
+    typed = []
+    for payload in ({"code": 0, **details}, details):
+        typed.append(await channel.client.im.v1.message.apatch(request))
+        assert typed[-1].code == payload.get("code")
+        normalized.append(await channel.update_card("synthetic-message", card))
+
+    assert normalized[0].raw == normalized[1].raw
+    assert all(result.success for result in normalized)
+    assert all(result.message_id == "synthetic-message" for result in normalized)
+    assert typed[0].code == 0 and typed[0].success()
+    assert typed[1].code is None and not typed[1].success()
