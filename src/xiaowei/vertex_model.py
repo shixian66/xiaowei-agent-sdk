@@ -78,6 +78,9 @@ _RPC_CODES = frozenset(
     "UNIMPLEMENTED INTERNAL UNAVAILABLE DATA_LOSS UNAUTHENTICATED".split()
 )
 _QUOTA_REASONS = frozenset({"QUOTA_EXCEEDED", "RATE_LIMIT_EXCEEDED"})
+_SAFE_DOMAINS = frozenset({"googleapis.com", "aiplatform.googleapis.com"})
+_SAFE_QUOTA_METRICS = frozenset({"aiplatform.googleapis.com/predict_requests"})
+_SAFE_QUOTA_IDS = frozenset({"PredictRequestsPerMinute"})
 _DURATION = re.compile(r"(\d{1,20})(?:\.(\d{1,9}))?s\Z")
 _RETRY_AFTER_NUMBER = re.compile(r"\d{1,4}(?:\.\d{1,3})?\Z")
 logger = logging.getLogger(__name__)
@@ -143,12 +146,16 @@ class VertexTurnMetrics:
 active_vertex_metrics: ContextVar[VertexTurnMetrics | None] = ContextVar(
     "active_vertex_metrics", default=None
 )
+active_vertex_turn: ContextVar[str | None] = ContextVar("active_vertex_turn", default=None)
 
 
-def _safe_field(value: object) -> str:
+def _safe_field(value: object, allowed: frozenset[str]) -> str:
     if value is None:
         return "unknown"
-    return value if isinstance(value, str) and _SAFE_FIELD.fullmatch(value) else "other"
+    # 仅检查字符/长度仍会放行 projects/项目号或类 Key 值；只输出已知的公开字段值。
+    if isinstance(value, str) and _SAFE_FIELD.fullmatch(value) and value in allowed:
+        return value
+    return "other"
 
 
 def _retry_delay(value: object) -> float | None:
@@ -194,7 +201,8 @@ def _rate_detail(content: bytes, headers: Mapping[str, str]) -> RateDetail:
             break
         kind = detail.get("@type")
         if kind == "type.googleapis.com/google.rpc.ErrorInfo":
-            reason, domain = _safe_field(detail.get("reason")), _safe_field(detail.get("domain"))
+            reason = _safe_field(detail.get("reason"), _QUOTA_REASONS)
+            domain = _safe_field(detail.get("domain"), _SAFE_DOMAINS)
             malformed |= "other" in (reason, domain)
             metadata = detail.get("metadata", {})
             if not isinstance(metadata, dict):
@@ -214,8 +222,8 @@ def _rate_detail(content: bytes, headers: Mapping[str, str]) -> RateDetail:
                 if not isinstance(first, dict):
                     malformed = True
                     break
-                quota_metric = _safe_field(first.get("quotaMetric"))
-                quota_id = _safe_field(first.get("quotaId"))
+                quota_metric = _safe_field(first.get("quotaMetric"), _SAFE_QUOTA_METRICS)
+                quota_id = _safe_field(first.get("quotaId"), _SAFE_QUOTA_IDS)
         elif kind == "type.googleapis.com/google.rpc.RetryInfo":
             delay = _retry_delay(detail.get("retryDelay"))
             malformed |= delay is None
@@ -232,6 +240,25 @@ def _rate_detail(content: bytes, headers: Mapping[str, str]) -> RateDetail:
 def _token_count(metadata: object, key: str) -> int | None:
     value = metadata.get(key) if isinstance(metadata, dict) else None
     return value if isinstance(value, int) and not isinstance(value, bool) and value >= 0 else None
+
+
+def vertex_http_sent(request_bytes: int) -> None:
+    """受控 transport 完成请求检查后，记录实际发往底层 transport 的尝试。"""
+    if metrics := active_vertex_metrics.get():
+        metrics.attempt(request_bytes)
+
+
+def vertex_response_rejected(status: int, request_bytes: int) -> None:
+    """响应被受控 transport 拒绝时，仍记录已经收到的状态码，不读取正文。"""
+    if metrics := active_vertex_metrics.get():
+        metrics.failure(status, RateDetail() if status == 429 else None)
+    logger.info(
+        "vertex_http http_status=%d request_bytes=%d outcome=rejected rate_kind=%s turn=%s",
+        status,
+        request_bytes,
+        "unknown" if status == 429 else "-",
+        active_vertex_turn.get() or "-",
+    )
 
 
 class ModelAPIStatusError(ModelAPIRejectedError):
@@ -317,21 +344,27 @@ class VertexModel(Model):
         request = self._client.build_request("POST", self._endpoint, json=body)
         request_bytes = len(request.content)
         metrics = active_vertex_metrics.get()
-        if metrics is not None:
-            metrics.attempt(request_bytes)
         try:
             response = await self._client.send(request)
         except httpx2.TimeoutException:
-            logger.info("vertex_http http_status=- request_bytes=%d outcome=timeout", request_bytes)
+            logger.info(
+                "vertex_http http_status=- request_bytes=%d outcome=timeout turn=%s",
+                request_bytes,
+                active_vertex_turn.get() or "-",
+            )
             raise ModelAPITimeoutError("模型请求超时") from None
         except httpx2.TransportError:
             logger.info(
-                "vertex_http http_status=- request_bytes=%d outcome=connection", request_bytes
+                "vertex_http http_status=- request_bytes=%d outcome=connection turn=%s",
+                request_bytes,
+                active_vertex_turn.get() or "-",
             )
             raise ModelAPITransportError("模型服务连接失败") from None
-        except ModelAPIRejectedError:
+        except ModelRequestRejectedError:
             logger.info(
-                "vertex_http http_status=- request_bytes=%d outcome=rejected", request_bytes
+                "vertex_request_rejected request_bytes=%d turn=%s",
+                request_bytes,
+                active_vertex_turn.get() or "-",
             )
             raise
         if not httpx2.codes.is_success(response.status_code):
@@ -346,7 +379,7 @@ class VertexModel(Model):
                 logger.info(
                     "vertex_http http_status=429 request_bytes=%d rate_kind=%s status=%s"
                     " reason=%s domain=%s quota_metric=%s quota_id=%s retry_delay_s=%s"
-                    " retry_after=%s",
+                    " retry_after=%s turn=%s",
                     request_bytes,
                     detail.rate_kind,
                     detail.status,
@@ -356,12 +389,14 @@ class VertexModel(Model):
                     detail.quota_id,
                     detail.retry_delay_s if detail.retry_delay_s is not None else "unknown",
                     detail.retry_after,
+                    active_vertex_turn.get() or "-",
                 )
             else:
                 logger.info(
-                    "vertex_http http_status=%d request_bytes=%d",
+                    "vertex_http http_status=%d request_bytes=%d turn=%s",
                     response.status_code,
                     request_bytes,
+                    active_vertex_turn.get() or "-",
                 )
             raise ModelAPIStatusError(response.status_code, response.headers) from None
         # 受控 transport 已确认是 JSON；这里再拒绝非有限数字，避免它们进入工具参数或下一步请求。
@@ -374,12 +409,13 @@ class VertexModel(Model):
             metrics.success(prompt, candidates, thoughts)
         logger.info(
             "vertex_http http_status=%d request_bytes=%d prompt_tokens=%s"
-            " candidates_tokens=%s thoughts_tokens=%s",
+            " candidates_tokens=%s thoughts_tokens=%s turn=%s",
             response.status_code,
             request_bytes,
             prompt if prompt is not None else "unknown",
             candidates if candidates is not None else "unknown",
             thoughts if thoughts is not None else "unknown",
+            active_vertex_turn.get() or "-",
         )
         if payload is None:
             _reject_response("模型成功响应不是严格 JSON", ResponseRejectReason.INVALID_JSON)

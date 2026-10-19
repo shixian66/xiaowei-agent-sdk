@@ -946,6 +946,8 @@ async def test_vertex_turn_summary_after_retry_success(
     assert "model_requests=2 http_429=1 retries=1" in summaries[0]
     assert "input_tokens=13 output_tokens=8" in summaries[0]
     assert "rate_kind=no_quota_detail status=RESOURCE_EXHAUSTED" in summaries[0]
+    attempts = [r.getMessage() for r in records if "vertex_http" in r.getMessage()]
+    assert all("turn=vertex-retry-ok" in entry for entry in attempts)
     assert calls == 2
 
 
@@ -1037,6 +1039,9 @@ async def test_vertex_concurrent_turn_summaries_do_not_share_counts(
     assert "input_tokens=3 output_tokens=3" in summaries["turn=first"]
     assert "model_requests=1 http_429=0 retries=0" in summaries["turn=second"]
     assert "input_tokens=5 output_tokens=3" in summaries["turn=second"]
+    attempts = [r.getMessage() for r in records if "vertex_http" in r.getMessage()]
+    assert sum("turn=first" in entry for entry in attempts) == 2
+    assert sum("turn=second" in entry for entry in attempts) == 1
 
 
 async def test_vertex_repair_subrun_is_in_same_summary(

@@ -1101,9 +1101,12 @@ HTTP 错误，`connection`/`model_timeout` 是连接/模型调用超时，`inval
 拒答；运行配置错误另有固定分类，`unexpected_error` 仍是未分类异常，不能据此认定
 模型服务故障。状态码缺失记 `-`。这些分类只改善排查，不引入自动重试，也不记录异常正文。
 
-Vertex 路径额外记录每次 HTTP 尝试的 `vertex_http` INFO 行：状态、请求字节数；成功时记录
+Vertex 路径额外记录每次通过请求校验、发往底层 transport 的 HTTP 尝试 `vertex_http` INFO 行：
+`turn`、状态、请求字节数；本地请求拒绝单列为 `vertex_request_rejected`，不计 HTTP 尝试。成功时记录
 `prompt_tokens`、`candidates_tokens`、`thoughts_tokens`，缺失写 `unknown`。429 只从结构化错误
-详情提取固定字段；`rate_kind=quota` 表示明确的配额详情，`no_quota_detail` 只表示
+详情提取固定字段；项目号可能占用合法字符，reason、domain、quota metric/id 只输出已知公开值，
+其余写 `other`。响应在 transport 被拒绝时仍计收到的 429，但正文详情写 `unknown`。
+`rate_kind=quota` 表示明确的配额详情，`no_quota_detail` 只表示
 `RESOURCE_EXHAUSTED` 且未见配额详情，不能据此断定共享容量不足。`retry_after` 只记录合法数字秒
 并按现有 20 秒采信上限截断，`retry_delay_s` 来自 `RetryInfo`，二者均不改变 SDK 重试。
 每次 Vertex 轮次结束另有一行 `turn=... stage=model_summary`，记录 HTTP 尝试数、429 数、

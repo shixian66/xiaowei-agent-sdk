@@ -6,10 +6,20 @@ from dataclasses import replace
 
 import httpx2
 import pytest
-from agents import RetryDecision, RetryPolicyContext
-from tests.sdk_core.test_vertex_model import KEY, Endpoint, _answer, _body, _call_part, _run
+from agents import RetryDecision, RetryPolicyContext, Runner
+from tests.sdk_core.test_vertex_model import (
+    KEY,
+    VERTEX,
+    Endpoint,
+    _agent,
+    _answer,
+    _body,
+    _call_part,
+    _run,
+)
 
 from xiaowei import model_api
+from xiaowei.model_api import ModelRequestRejectedError, ModelResponseRejectedError, open_model
 from xiaowei.vertex_model import ModelAPIStatusError, VertexTurnMetrics, active_vertex_metrics
 
 
@@ -100,6 +110,73 @@ async def test_429_without_quota_detail_is_not_misclassified_as_quota(
         with pytest.raises(ModelAPIStatusError):
             await _observed(Endpoint([_error()] * 4))
     assert "rate_kind=no_quota_detail" in caplog.text
+
+
+async def test_429_allowed_fields_cannot_log_project_or_key(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    response = _error(
+        details=[
+            {
+                "@type": "type.googleapis.com/google.rpc.ErrorInfo",
+                "reason": "123456789012",
+                "domain": "projects/123456789012",
+            },
+            {
+                "@type": "type.googleapis.com/google.rpc.QuotaFailure",
+                "violations": [
+                    {
+                        "quotaMetric": "projects/123456789012",
+                        "quotaId": "sk-test-secret",
+                    }
+                ],
+            },
+        ]
+    )
+    with caplog.at_level(logging.INFO):
+        with pytest.raises(ModelAPIStatusError):
+            await _observed(Endpoint([response] * 4))
+    assert "reason=other domain=other quota_metric=other quota_id=other" in caplog.text
+    assert "123456789012" not in caplog.text
+    assert "sk-test-secret" not in caplog.text
+
+
+async def test_request_rejected_before_transport_is_not_an_http_attempt(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    profile = VERTEX.model_copy(update={"max_request_bytes": 2_000})
+    endpoint = Endpoint([_answer()])
+    metrics = VertexTurnMetrics()
+    token = active_vertex_metrics.set(metrics)
+    try:
+        with caplog.at_level(logging.INFO):
+            async with open_model(profile, transport=endpoint.transport) as binding:
+                with pytest.raises(ModelRequestRejectedError):
+                    await Runner.run(_agent(binding, []), "x" * 5_000)
+    finally:
+        active_vertex_metrics.reset(token)
+    assert endpoint.requests == []
+    assert metrics.model_requests == metrics.http_429 == metrics.request_bytes_max == 0
+    assert "vertex_http" not in caplog.text
+
+
+async def test_rejected_429_response_still_counts_http_status(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    endpoint = Endpoint([httpx2.Response(429, headers={"content-encoding": "gzip"}, content=b"x")])
+    metrics = VertexTurnMetrics()
+    token = active_vertex_metrics.set(metrics)
+    try:
+        with caplog.at_level(logging.INFO):
+            async with open_model(VERTEX, transport=endpoint.transport) as binding:
+                with pytest.raises(ModelResponseRejectedError):
+                    await Runner.run(_agent(binding, []), "合成诊断")
+    finally:
+        active_vertex_metrics.reset(token)
+    assert len(endpoint.requests) == 1
+    assert (metrics.model_requests, metrics.http_429) == (1, 1)
+    assert "vertex_http http_status=429" in caplog.text
+    assert "rate_kind=unknown" in caplog.text
 
 
 async def test_error_info_quota_reason_is_quota_without_violation(

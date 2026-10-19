@@ -126,6 +126,7 @@ from xiaowei.vertex_model import (
     ModelAPITransportError,
     VertexTurnMetrics,
     active_vertex_metrics,
+    active_vertex_turn,
 )
 
 logger = logging.getLogger(__name__)
@@ -547,6 +548,7 @@ class Application:
         self._active.add(session_id)
         metrics = VertexTurnMetrics() if self._model.profile.provider == "vertex" else None
         token = active_vertex_metrics.set(metrics) if metrics is not None else None
+        turn_token = active_vertex_turn.set(turn) if metrics is not None else None
         try:
             # 证据依赖的检查次数整轮共用一个计数（回放、工具记录、最终校验与提交）。
             with scope_checks() as checks:
@@ -582,6 +584,8 @@ class Application:
             self._active.discard(session_id)
             if token is not None and metrics is not None:
                 active_vertex_metrics.reset(token)
+                if turn_token is not None:
+                    active_vertex_turn.reset(turn_token)
                 _model_summary(turn, started, metrics)
         _stage(turn, "paused" if isinstance(answer, PausedTurn) else "completed", started)
         return answer
@@ -1106,6 +1110,9 @@ class Application:
         started = time.monotonic()
         metrics = VertexTurnMetrics() if self._model.profile.provider == "vertex" else None
         token = active_vertex_metrics.set(metrics) if metrics is not None else None
+        turn_token = (
+            active_vertex_turn.set(original.identity.turn_id) if metrics is not None else None
+        )
         claimed = None
         try:
             with scope_checks(native.scope_checks) as checks:
@@ -1283,6 +1290,8 @@ class Application:
             self._active.discard(session_id)
             if token is not None and metrics is not None:
                 active_vertex_metrics.reset(token)
+                if turn_token is not None:
+                    active_vertex_turn.reset(turn_token)
                 _model_summary(original.identity.turn_id, started, metrics)
 
     def _tools_for(
