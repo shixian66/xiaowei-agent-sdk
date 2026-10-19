@@ -523,6 +523,7 @@ class EvidenceStore:
             requires_complete=any(f.requires_complete for f in facts),
             awaiting_user=answer.awaiting_user,
             report_format=report_format,
+            report_native=turn.answer_version == 3 and report_format is not None,
             basis=_basis([r for r in records if r.evidence_id not in shown_ids], ctx),
             content_expires_at=min((r.expires_at for r in records), default=None),
         )

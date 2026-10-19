@@ -384,6 +384,7 @@ class RequestRecord:
     delivery_version: int = 0
     limit_reached: bool = False
     material_only: bool = False
+    answer_version: Literal[2, 3] | None = None
 
 
 @dataclass(frozen=True)
@@ -828,6 +829,7 @@ class ChannelStore:
             record,
             state="completed",
             answer=turn.answer,
+            answer_version=turn.answer_version,
             context_evidence=turn.context_evidence,
             monitoring_failures=turn.monitoring_failures,
             session_state=turn.session_state,
@@ -2009,6 +2011,7 @@ class ChannelStore:
     def _record(self, row: Mapping[str, Any]) -> RequestRecord:
         answer: AgentAnswer | LegacyAnswer | None = None
         context, run_turn_id, limit_reached, material_only = None, None, False, False
+        answer_version: Literal[2, 3] | None = None
         monitoring_failures: tuple[MonitoringFailure, ...] = ()
         if row["answer"] is not None:
             raw = row["answer"]
@@ -2017,6 +2020,7 @@ class ChannelStore:
             saved = _saved_answer(raw)
             if isinstance(saved, TurnAnswer):
                 answer, context = saved.answer, saved.context_evidence
+                answer_version = saved.answer_version
                 monitoring_failures, run_turn_id = saved.monitoring_failures, saved.run_turn_id
                 limit_reached, material_only = saved.limit_reached, saved.material_only
             else:
@@ -2036,6 +2040,7 @@ class ChannelStore:
             state=row["state"],
             delivery=row["delivery"],
             answer=answer,
+            answer_version=answer_version,
             context_evidence=context,
             monitoring_failures=monitoring_failures,
             failure_code=row["failure_code"],

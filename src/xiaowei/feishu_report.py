@@ -11,6 +11,7 @@ from typing import Literal
 
 from xiaowei.feishu_render import display_text, fact_limit_notices
 from xiaowei.models import Delivery, DeliveryFact, DeliveryFactRef
+from xiaowei.report_content import FORMAT_NOTICE, ReportContent, prepare_content
 
 ReportFormat = Literal["md", "html"]
 MAX_REPORT_BYTES = 400_000
@@ -37,6 +38,7 @@ class _Section:
     notices: tuple[str, ...] = ()
     fact: DeliveryFact | None = None
     first_row: int = 1
+    native: bool = False
 
 
 _STYLE = """
@@ -84,6 +86,17 @@ footer{max-width:1100px;margin:8px auto 32px;padding:0 24px;color:#718095;font-s
 @media print{.hero{border-bottom:2px solid #17617c}.card{box-shadow:none;break-inside:avoid}}
 """
 
+_NATIVE_STYLE = """
+.model-block{margin:0 0 18px;border:1px solid #dce5ef;border-radius:12px;background:#fff}
+.model-label{padding:10px 16px;margin:0;color:#52647b;font-size:12px}
+.model-label{border-bottom:1px solid #dce5ef}
+.model-prose{contain:layout paint;padding:16px;min-width:0;overflow-wrap:anywhere}
+.model-prose *{box-sizing:border-box;max-width:100%!important;min-width:0!important}
+.model-prose pre,.model-prose table{overflow:auto;white-space:pre-wrap}
+.model-prose table{display:block}.report-nav{margin:12px 0;display:flex;gap:12px;flex-wrap:wrap}
+.report-nav a{color:#c8f4ff;text-decoration:underline}
+"""
+
 
 def _fact_json(fact: DeliveryFact) -> str:
     if fact.result_json is not None:
@@ -115,10 +128,21 @@ def _fact_section(fact: DeliveryFact, label: str, *, expand_brief: bool) -> _Sec
     return _Section("fact", label, _fact_json(fact), meta, notices, fact)
 
 
-def _sections(delivery: Delivery, *, expand_brief: bool) -> list[_Section]:
+def prepare_prose(delivery: Delivery) -> tuple[ReportContent, ...]:
+    """One preparation per model block; files and message preview reuse the result."""
+    format_ = delivery.report_format
+    if not delivery.report_native or format_ is None or delivery.awaiting_user:
+        return ()
+    return tuple(prepare_content(value, format_) for value in delivery.texts)
+
+
+def _sections(
+    delivery: Delivery, *, expand_brief: bool, prose: tuple[ReportContent, ...] | None = None
+) -> list[_Section]:
     """按正文块顺序填入现有模板：模型文字转义为说明段落，事实章节由代码生成并带来源；
     其余结果在后；动作区域不进入附件（只在消息中完整展示）。"""
     parts: list[_Section] = []
+    content = iter(prepare_prose(delivery) if prose is None else prose)
     facts = {fact.evidence_id: fact for fact in delivery.facts}
     for block in delivery.blocks:
         if isinstance(block, DeliveryFactRef):
@@ -131,7 +155,17 @@ def _sections(delivery: Delivery, *, expand_brief: bool) -> list[_Section]:
                 )
             )
         else:
-            parts.append(_Section("answer", "模型说明", block.text, "模型生成，未经系统核实"))
+            prepared = next(content, None)
+            parts.append(
+                _Section(
+                    "answer",
+                    "模型说明",
+                    prepared.body if prepared else block.text,
+                    "模型生成，未经系统核实",
+                    (FORMAT_NOTICE,) if prepared and prepared.changed else (),
+                    native=prepared is not None,
+                )
+            )
     placed = {b.evidence_id for b in delivery.blocks if isinstance(b, DeliveryFactRef)}
     parts.extend(
         _fact_section(fact, delivery.result_label(fact.evidence_id), expand_brief=expand_brief)
@@ -375,41 +409,73 @@ def _render(
             content = (
                 _md_fact(section.value, section.first_row)
                 if section.fact
+                else section.value
+                if section.native
                 else _fence(section.value)
             )
             meta = f"\n\n{_inline_code(display_text(section.meta))}" if section.meta else ""
             notes = "".join(f"\n\n> {_md_escape(note)}" for note in section.notices)
-            blocks.append(f"## {index}. {_md_escape(section.title)}{meta}{notes}\n\n{content}")
+            if section.native:
+                blocks.append(f"{meta.strip()}{notes}\n\n{content}")
+            else:
+                blocks.append(f"## {index}. {_md_escape(section.title)}{meta}{notes}\n\n{content}")
         prefix = "# " + document_title + "\n\n"
         if notice:
             prefix += f"> 范围说明：{_md_escape(notice)}\n\n"
         body = prefix + "\n\n".join(blocks) + "\n"
     else:
+        native = any(s.native for s in sections)
         html_blocks = []
         for index, section in enumerate(sections, 1):
+            if section.native:
+                notes = "".join(
+                    f'<p class="notice">{_escaped(item)}</p>' for item in section.notices
+                )
+                html_blocks.append(
+                    '<section class="model-block"><p class="model-label">模型生成，未经系统核实</p>'
+                    f'{notes}<div class="model-prose">{section.value}</div></section>'
+                )
+                continue
             detail = _html_fact(section.value) if section.fact else _html_prose(section.value)
             meta = f'<p class="meta">{_escaped(section.meta)}</p>' if section.meta else ""
             notes = "".join(f'<p class="notice">{_escaped(item)}</p>' for item in section.notices)
             html_blocks.append(
-                '<section class="card"><div class="card-head">'
-                f'<span class="number">{index:02}</span>'
+                (
+                    '<section class="card"'
+                    + (f' id="report-section-{index}"' if native else "")
+                    + '><div class="card-head">'
+                )
+                + f'<span class="number">{index:02}</span>'
                 f"<h2>{_escaped(section.title)}</h2></div>{meta}{notes}{detail}</section>"
             )
         fact_count = sum(s.kind == "fact" for s in sections)
         summary = f"本文件包含 {fact_count} 项结果" if fact_count else "本轮答复与说明"
         if label:
             summary += f'<span class="part">{_escaped(label)}</span>'
+        nav = ""
+        if native:
+            nav = (
+                '<nav class="report-nav" aria-label="系统事实">'
+                + "".join(
+                    f'<a href="#report-section-{i}">{_escaped(s.title)}</a>'
+                    for i, s in enumerate(sections, 1)
+                    if s.fact
+                )
+                + "</nav>"
+            )
         body = (
             '<!doctype html><html lang="zh"><head><meta charset="utf-8">'
             '<meta name="viewport" content="width=device-width,initial-scale=1">'
             '<meta http-equiv="Content-Security-Policy" '
             "content=\"default-src 'none'; style-src 'unsafe-inline'; script-src 'none'; "
             "base-uri 'none'; form-action 'none'\">"
-            f"<title>{_escaped(document_title)}</title><style>{_STYLE}</style></head><body>"
+            f"<title>{_escaped(document_title)}</title><style>{_STYLE}"
+            + (_NATIVE_STYLE if native else "")
+            + "</style></head><body>"
             '<header class="hero"><div class="hero-inner">'
             '<div class="eyebrow">小维 · 结果文件</div>'
             f"<h1>{_escaped(document_title)}</h1>"
-            f'<p class="summary">{summary}</p></div></header><main>'
+            f'<p class="summary">{summary}</p>{nav}</div></header><main>'
             + (f'<p class="notice">范围说明：{_escaped(notice)}</p>' if notice else "")
             + "".join(html_blocks)
             + "</main><footer>由小维生成 · 静态离线文件</footer></body></html>"
@@ -417,34 +483,48 @@ def _render(
     return body.encode("utf-8")
 
 
-def build_report(delivery: Delivery, *, expand_brief: bool = True) -> ReportFile:
-    """全量构造一个有界 MD 或 HTML 文件；放不下时整体失败，不裁掉事实或限制。"""
-    format_: ReportFormat | None = delivery.report_format
-    if delivery.channel != "feishu" or format_ not in ("md", "html"):
+def _report_sections(
+    delivery: Delivery, expand_brief: bool, prose: tuple[ReportContent, ...] | None
+) -> list[_Section]:
+    if delivery.channel != "feishu" or delivery.report_format not in ("md", "html"):
         raise ValueError("当前交付没有获准的报告格式")
     if delivery.requires_complete:
         raise ValueError("当前回答不能作为只读事实报告交付")
-    content = _render(format_, _sections(delivery, expand_brief=expand_brief))
+    return _sections(delivery, expand_brief=expand_brief, prose=prose)
+
+
+def _single_report(format_: ReportFormat, sections: list[_Section]) -> ReportFile:
+    content = _render(format_, sections)
     if len(content) > MAX_REPORT_BYTES:
         raise ReportCapacityError("报告超过当前文件容量")
     return ReportFile(
-        format=format_,
-        filename=f"xiaowei-report.{format_}",
-        content=content,
-        digest=hashlib.sha256(content).hexdigest(),
+        format_, f"xiaowei-report.{format_}", content, hashlib.sha256(content).hexdigest()
     )
 
 
-def build_reports(delivery: Delivery, *, expand_brief: bool = True) -> tuple[ReportFile, ...]:
+def build_report(delivery: Delivery, *, expand_brief: bool = True) -> ReportFile:
+    """全量构造一个有界 MD 或 HTML 文件；放不下时整体失败，不裁掉事实或限制。"""
+    sections = _report_sections(delivery, expand_brief, None)
+    if delivery.report_format is None:
+        raise ValueError("当前交付没有获准的报告格式")
+    return _single_report(delivery.report_format, sections)
+
+
+def build_reports(
+    delivery: Delivery,
+    *,
+    expand_brief: bool = True,
+    prose: tuple[ReportContent, ...] | None = None,
+) -> tuple[ReportFile, ...]:
     """在编码后容量内，按整章节或整行交付本次获准内容。"""
-    try:
-        return (build_report(delivery, expand_brief=expand_brief),)
-    except ReportCapacityError:
-        pass
+    sections = _report_sections(delivery, expand_brief, prose)
     format_ = delivery.report_format
     if format_ not in ("md", "html"):
         raise ValueError("当前交付没有获准的报告格式")
-    sections = _sections(delivery, expand_brief=expand_brief)
+    try:
+        return (_single_report(format_, sections),)
+    except ReportCapacityError:
+        pass
     shared_notice = (
         "\n".join(
             dict.fromkeys(

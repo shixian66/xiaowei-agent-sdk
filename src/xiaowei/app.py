@@ -859,6 +859,8 @@ class Application:
             if ctx.identity.channel == "feishu"
             else "\n当前渠道不支持报告文件；report_format 为 null，结果以消息展示。"
         )
+        if ctx.identity.channel == "feishu":
+            report_note += "\n" + _REPORT_SKILL
         return Agent[RunContext](
             name="xiaowei",
             instructions=(
@@ -1404,6 +1406,10 @@ _DATABASE_SKILLS = tuple(
     files("xiaowei").joinpath("skills", name).read_text(encoding="utf-8").strip()
     for name in ("database_query.md", "database_diagnosis.md")
 )
+
+_REPORT_SKILL = files("xiaowei").joinpath("skills", "report_writing.md").read_text(
+    encoding="utf-8"
+).strip()
 
 
 def _instructions(

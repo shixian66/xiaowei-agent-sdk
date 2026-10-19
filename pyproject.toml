@@ -30,6 +30,8 @@ dependencies = [
     "lark-channel-sdk==1.4.0",
     "markdown-it-py>=4.2,<5",  # 飞书受限格式使用公开 token API，不直接发送模型 Markdown
     "pillow>=11,<13",
+    "nh3==0.3.7",
+    "tinycss2==1.5.1",
 ]
 
 [project.scripts]
@@ -85,4 +87,8 @@ warn_unused_configs = true
 # 本仓库代码仍按 strict 检查，SDK 返回值在 feishu.py 中显式核对类型。
 [[tool.mypy.overrides]]
 module = ["lark_channel.*"]
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+module = ["tinycss2.*"]
 ignore_missing_imports = true

@@ -22,8 +22,15 @@ from xiaowei.feishu_render import (
     fact_limit_notices,
     request_bytes,
 )
-from xiaowei.feishu_report import MAX_REPORT_BYTES, ReportCapacityError, ReportFile, build_reports
-from xiaowei.models import Delivery
+from xiaowei.feishu_report import (
+    MAX_REPORT_BYTES,
+    ReportCapacityError,
+    ReportFile,
+    build_reports,
+    prepare_prose,
+)
+from xiaowei.models import Delivery, DeliveryText
+from xiaowei.report_content import ReportContentError
 
 if TYPE_CHECKING:
     from xiaowei.channel import RequestRef, ResultDelivery
@@ -94,11 +101,26 @@ def _data_parts(
         except MessageCapacityError:
             if delivery.awaiting_user:
                 raise
+    prose = prepare_prose(delivery)
     reports = build_reports(
         delivery.model_copy(update={"report_format": delivery.report_format or "md"}),
         expand_brief=delivery.report_format is not None,
+        prose=prose,
     )
-    body = _preview(delivery, max_chars, chat_id, reply_to, "本次完整结果见附件。")
+    preview = delivery
+    if prose:
+        texts = iter(prose)
+        preview = delivery.model_copy(
+            update={
+                "blocks": tuple(
+                    b.model_copy(update={"text": next(texts).text})
+                    if isinstance(b, DeliveryText)
+                    else b
+                    for b in delivery.blocks
+                )
+            }
+        )
+    body = _preview(preview, max_chars, chat_id, reply_to, "本次完整结果见附件。")
     parts = [
         DeliveryPart(sequence + index, report.format, report.content)
         for index, report in enumerate(reports)
@@ -170,6 +192,7 @@ async def send_complete_delivery(
     capacity_failed = False
     material_failed = False
     last_group_send_at: float | None = None
+    file_count = 0
 
     def capacity_refusal() -> Literal["failed"]:
         logger.warning("容量不足，不能重发")
@@ -212,7 +235,7 @@ async def send_complete_delivery(
         await store.check_delivery_attempt(claim)
         try:
             hint_delivery = data_delivery
-            if not data:
+            if not data or data_delivery.report_native:
                 # 提醒是代码说明：不带模型文字，只用纯文本或系统说明。
                 hint_delivery = data_delivery.model_copy(update={"content": "", "blocks": ()})
             preview = await asyncio.to_thread(
@@ -309,6 +332,9 @@ async def send_complete_delivery(
                 _data_parts, data_delivery, 1 if materials else 0, max_chars, chat_id, reply_to
             )
         _check_capacity(data_parts, max_chars, chat_id, reply_to, platform_limits=True)
+    except ReportContentError:
+        await hint("报告正文不符合静态格式要求，请简化后重新提出。")
+        return "failed"
     except (ReportCapacityError, MessageCapacityError):
         capacity_failed = True
         if resend:

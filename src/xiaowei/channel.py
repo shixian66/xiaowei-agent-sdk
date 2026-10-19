@@ -457,6 +457,7 @@ class ResultDelivery:
             raise ResultUnavailableError
         turn = TurnAnswer(
             answer=record.answer,
+            answer_version=record.answer_version,
             context_evidence=record.context_evidence,
             monitoring_failures=record.monitoring_failures,
             limit_reached=record.limit_reached,

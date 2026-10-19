@@ -247,8 +247,8 @@ class _Answer(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid")
 
 
-ANSWER_VERSION: Final = 2
-"""``TurnAnswer`` 中由可信代码写入的答案版本；模型不输出版本。缺失表示旧 ``LegacyAnswer``。"""
+ANSWER_VERSION: Final = 3
+"""可信保存版本：3 开放原生报告，2 保持旧文字语义；模型不输出，缺失只表示 LegacyAnswer。"""
 MAX_ANSWER_TEXT_BYTES: Final = 16_000
 """模型文字累计上限（UTF-8 字节）；只约束模型输出规模，不保证卡片、报告或 Session 放得下。"""
 MAX_ANSWER_BLOCKS: Final = 64
@@ -438,13 +438,13 @@ class TurnAnswer(_Trusted):
     可能复述其中任何一条，因此回答只能引用其中的证据，每次交付都按当前权限复核全部这些证据；
     任一条确定不可读时整条回答不交付。
 
-    ``answer_version`` 由可信代码写入：``2`` 只接受 ``AgentAnswer``；缺失只接受严格的旧
+    ``answer_version`` 由可信代码写入：``2/3`` 只接受 ``AgentAnswer``；缺失只接受严格的旧
     ``LegacyAnswer``；其他取值、两者不符或新格式解析失败都拒绝，不回退旧格式。代码直接以
     ``AgentAnswer`` 对象构造时自动写入当前版本；JSON 输入不补版本。
     """
 
     answer: AgentAnswer | LegacyAnswer
-    answer_version: Literal[2] | None = None
+    answer_version: Literal[2, 3] | None = None
     context_evidence: tuple[Label, ...]
     monitoring_failures: tuple[MonitoringFailure, ...] = ()
     run_turn_id: Label | None = None
@@ -468,7 +468,7 @@ class TurnAnswer(_Trusted):
 
     @model_validator(mode="after")
     def _version_matches(self) -> "TurnAnswer":
-        expected = AgentAnswer if self.answer_version == ANSWER_VERSION else LegacyAnswer
+        expected = AgentAnswer if self.answer_version in (2, 3) else LegacyAnswer
         if type(self.answer) is not expected:
             raise ValueError("回答版本与内容不符")
         return self
@@ -555,6 +555,8 @@ class Delivery(_Trusted):
     """由已验证回答生成；等待用户补充时只发普通消息，容量不足也不转附件。"""
     report_format: Literal["md", "html"] | None = Field(default=None, exclude=True)
     """模型在本轮选择的飞书报告格式；事实和文件内容仍由代码生成。"""
+    report_native: bool = Field(default=False, exclude=True)
+    """可信保存版本允许原生报告文字；旧纯文本和自动附件不能由内容猜测升级。"""
     request_state: Literal["completed", "paused"] | None = Field(default=None, exclude=True)
     """发送时由已保存请求附加，供报告文件与卡片选择；不进入回答或渠道 JSON。"""
     delivery_attempt: str | None = Field(default=None, exclude=True)

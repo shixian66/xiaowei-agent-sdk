@@ -94,7 +94,7 @@ async def test_explicit_html_advice_file_uses_verified_no_query_delivery(env: En
     platform = Platform()
     assert await env.service.results.send(ref, transmit(env, ref, platform)) == "sent"
     assert len(platform.files) == 1 and len(platform.sent) == 2
-    assert b'<p class="prose">' in platform.files[0]
+    assert b'<div class="model-prose">' in platform.files[0]
     assert draft.encode() in platform.files[0]
     assert "本次完整结果见附件" in str(platform.sent[-1][0])
     assert "结果预览" not in str(platform.sent[-1][0])

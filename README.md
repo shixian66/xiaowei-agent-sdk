@@ -99,6 +99,8 @@ uv run --locked xiaowei --config xiaowei.json requests resend --subject <发起�
 
 飞书结果按容量交付：短结果完整发送一条消息；完整结果放不进消息时，自动生成完整 MD 文件并发送正文。明确要求 HTML 时使用静态离线页面；普通短回答不附文件。用户明确要解释或未执行建议的 HTML/MD 文件时，无业务事实也可按所选格式生成，不能因此多查数据。同时要求 MD 和 HTML 仍先询问格式。文件与正文分别保存平台回执，缺少任何必需部分都不记为完整送达。单文件超过 400,000 字节时按整行或章节拆成标号文件；单行、字段或章节仍放不下时给预览并说明未完整交付。生产审批卡独立先发，参考数据失败不影响已确认材料的批准。真实模型、飞书和客户端尚待验收；代码合入不代表已经部署。使用、留存和手动补发见[报告文件说明](deploy/OPERATIONS.md#飞书报告文件)，契约见[ARCHITECTURE §7](ARCHITECTURE.md#result-delivery)。
 
+**模型自主报告（本地候选）。** 显式报告由同一个 Agent 通过原有文字/事实块组织：MD 原生显示标题、列表和表格；HTML 支持独立片段和受限内联样式，分析与代码生成的可信事实就近排列。主消息提取可读预览，不发送布局源码；报告指南随包按飞书渠道加载，无 StarRocks 目标也可用。文字仍受 16,000 字节和模型输出 token 限制；脚本、外部资源和任意网页执行不开放。新回答按可信版本 3 保存，旧版本/已绑定附件保持原语义；不改模型输出 schema 或数据库 v12。离线 SDK/治理/存储及 Chrome 检查不能证明真实模型的报告质量、真实飞书实收或部署效果，见[实施计划](docs/superpowers/plans/2026-10-19-model-authored-reports.md)。
+
 **监控曲线。** 暂不实现，监控结果以文本/表格交付。[计划 D4.0](docs/superpowers/plans/2026-10-14-result-delivery-documents.md#d40-协议前置结果与最小修订提案2026-10-15)保留已完成的协议核验、反例与候选路径对比，供以后明确重启时参考。
 
 飞书默认不读取图片、文件或富文本 post：合法且当前获准的消息获得固定说明。可显式开启 `feishu.document_input_enabled` 接收 UTF-8 TXT/MD；截图还须同时开启 `feishu.image_input_enabled` 和 Vertex 模型 Profile 的 `image_input_enabled`，仅接收单张不超过 2 MiB 的 PNG/JPEG，每会话最多 12 张，后续提问回放原图。指定群仍要求同一条消息的平台 @本机器人及当前成员资格；未 @ 的附件、post 内的 at 标签不会触发。真实 Lark 图片事件、模型识图及 12 图请求尚未验收；配置、容量和回退见[运维说明](deploy/OPERATIONS.md#飞书-pngjpeg-输入)。
