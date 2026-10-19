@@ -141,6 +141,35 @@ async def test_429_allowed_fields_cannot_log_project_or_key(
     assert "sk-test-secret" not in caplog.text
 
 
+async def test_unknown_reason_does_not_hide_explicit_quota_failure(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    response = _error(
+        details=[
+            {
+                "@type": "type.googleapis.com/google.rpc.ErrorInfo",
+                "reason": "NEW_PUBLIC_REASON",
+                "domain": "googleapis.com",
+            },
+            {
+                "@type": "type.googleapis.com/google.rpc.QuotaFailure",
+                "violations": [
+                    {
+                        "quotaMetric": "aiplatform.googleapis.com/predict_requests",
+                        "quotaId": "PredictRequestsPerMinute",
+                    }
+                ],
+            },
+        ]
+    )
+    with caplog.at_level(logging.INFO):
+        with pytest.raises(ModelAPIStatusError):
+            await _observed(Endpoint([response] * 4))
+    assert "rate_kind=quota" in caplog.text
+    assert "reason=other" in caplog.text
+    assert "NEW_PUBLIC_REASON" not in caplog.text
+
+
 async def test_request_rejected_before_transport_is_not_an_http_attempt(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
@@ -212,6 +241,21 @@ async def test_retry_after_cannot_log_a_secret_shaped_header(
             await _observed(Endpoint([response] * 4))
     assert "retry_after=other" in caplog.text
     assert "sk-test-secret" not in caplog.text
+
+
+async def test_retry_delay_does_not_log_a_project_shaped_number(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    response = _error(
+        details=[
+            {"@type": "type.googleapis.com/google.rpc.RetryInfo", "retryDelay": "123456789012s"}
+        ]
+    )
+    with caplog.at_level(logging.INFO):
+        with pytest.raises(ModelAPIStatusError):
+            await _observed(Endpoint([response] * 4))
+    assert "retry_delay_s=20" in caplog.text
+    assert "123456789012" not in caplog.text
 
 
 @pytest.mark.parametrize(

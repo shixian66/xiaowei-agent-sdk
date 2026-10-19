@@ -45,6 +45,7 @@ from openai.types.responses.response_prompt_param import ResponsePromptParam
 from openai.types.responses.response_usage import OutputTokensDetails
 
 from xiaowei.model_api import (
+    MODEL_RETRY_AFTER_CAP_SECONDS,
     ModelAPIRejectedError,
     ModelRequestRejectedError,
     ModelResponseRejectedError,
@@ -162,7 +163,9 @@ def _retry_delay(value: object) -> float | None:
     if not isinstance(value, str) or _DURATION.fullmatch(value) is None:
         return None
     delay = float(value[:-1])
-    return delay if math.isfinite(delay) and delay >= 0 else None
+    if not math.isfinite(delay) or delay < 0:
+        return None
+    return min(delay, MODEL_RETRY_AFTER_CAP_SECONDS)
 
 
 def _safe_retry_after(value: str | None) -> str:
@@ -171,7 +174,7 @@ def _safe_retry_after(value: str | None) -> str:
     # SDK 可读原始头；诊断只记有界的数字秒，HTTP-date/任意文本不进入日志。
     if not _RETRY_AFTER_NUMBER.fullmatch(value):
         return "other"
-    return f"{min(float(value), 20):g}"
+    return f"{min(float(value), MODEL_RETRY_AFTER_CAP_SECONDS):g}"
 
 
 def _rate_detail(content: bytes, headers: Mapping[str, str]) -> RateDetail:
@@ -195,6 +198,7 @@ def _rate_detail(content: bytes, headers: Mapping[str, str]) -> RateDetail:
     delay: float | None = None
     quota = False
     malformed = False
+    unrecognized_field = False
     for detail in details:
         if not isinstance(detail, dict):
             malformed = True
@@ -203,7 +207,7 @@ def _rate_detail(content: bytes, headers: Mapping[str, str]) -> RateDetail:
         if kind == "type.googleapis.com/google.rpc.ErrorInfo":
             reason = _safe_field(detail.get("reason"), _QUOTA_REASONS)
             domain = _safe_field(detail.get("domain"), _SAFE_DOMAINS)
-            malformed |= "other" in (reason, domain)
+            unrecognized_field |= "other" in (reason, domain)
             metadata = detail.get("metadata", {})
             if not isinstance(metadata, dict):
                 malformed = True
@@ -232,7 +236,7 @@ def _rate_detail(content: bytes, headers: Mapping[str, str]) -> RateDetail:
     if not malformed:
         if quota:
             rate_kind = "quota"
-        elif status == "RESOURCE_EXHAUSTED":
+        elif status == "RESOURCE_EXHAUSTED" and not unrecognized_field:
             rate_kind = "no_quota_detail"
     return RateDetail(rate_kind, status, reason, domain, quota_metric, quota_id, delay, retry_after)
 
