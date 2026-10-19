@@ -79,9 +79,10 @@ _RPC_CODES = frozenset(
     "UNIMPLEMENTED INTERNAL UNAVAILABLE DATA_LOSS UNAUTHENTICATED".split()
 )
 _QUOTA_REASONS = frozenset({"QUOTA_EXCEEDED", "RATE_LIMIT_EXCEEDED"})
-_SAFE_DOMAINS = frozenset({"googleapis.com", "aiplatform.googleapis.com"})
-_SAFE_QUOTA_METRICS = frozenset({"aiplatform.googleapis.com/predict_requests"})
-_SAFE_QUOTA_IDS = frozenset({"PredictRequestsPerMinute"})
+_SAFE_REASON = re.compile(r"[A-Z][A-Z_]{1,63}\Z")
+_SAFE_DOMAIN = re.compile(r"(?:googleapis\.com|aiplatform\.googleapis\.com)\Z")
+_SAFE_QUOTA_METRIC = re.compile(r"aiplatform\.googleapis\.com/[a-z]+(?:_[a-z]+)*\Z")
+_SAFE_QUOTA_ID = re.compile(r"[A-Z][A-Za-z]{1,100}\Z")
 _DURATION = re.compile(r"(\d{1,20})(?:\.(\d{1,9}))?s\Z")
 _RETRY_AFTER_NUMBER = re.compile(r"\d{1,4}(?:\.\d{1,3})?\Z")
 logger = logging.getLogger(__name__)
@@ -150,11 +151,11 @@ active_vertex_metrics: ContextVar[VertexTurnMetrics | None] = ContextVar(
 active_vertex_turn: ContextVar[str | None] = ContextVar("active_vertex_turn", default=None)
 
 
-def _safe_field(value: object, allowed: frozenset[str]) -> str:
+def _safe_field(value: object, pattern: re.Pattern[str]) -> str:
     if value is None:
         return "unknown"
-    # 仅检查字符/长度仍会放行 projects/项目号或类 Key 值；只输出已知的公开字段值。
-    if isinstance(value, str) and _SAFE_FIELD.fullmatch(value) and value in allowed:
+    # 字符与字段形状共同约束，避免把项目路径、数字标识或常见 Key 写入日志。
+    if isinstance(value, str) and _SAFE_FIELD.fullmatch(value) and pattern.fullmatch(value):
         return value
     return "other"
 
@@ -205,8 +206,8 @@ def _rate_detail(content: bytes, headers: Mapping[str, str]) -> RateDetail:
             break
         kind = detail.get("@type")
         if kind == "type.googleapis.com/google.rpc.ErrorInfo":
-            reason = _safe_field(detail.get("reason"), _QUOTA_REASONS)
-            domain = _safe_field(detail.get("domain"), _SAFE_DOMAINS)
+            reason = _safe_field(detail.get("reason"), _SAFE_REASON)
+            domain = _safe_field(detail.get("domain"), _SAFE_DOMAIN)
             unrecognized_field |= "other" in (reason, domain)
             metadata = detail.get("metadata", {})
             if not isinstance(metadata, dict):
@@ -226,8 +227,8 @@ def _rate_detail(content: bytes, headers: Mapping[str, str]) -> RateDetail:
                 if not isinstance(first, dict):
                     malformed = True
                     break
-                quota_metric = _safe_field(first.get("quotaMetric"), _SAFE_QUOTA_METRICS)
-                quota_id = _safe_field(first.get("quotaId"), _SAFE_QUOTA_IDS)
+                quota_metric = _safe_field(first.get("quotaMetric"), _SAFE_QUOTA_METRIC)
+                quota_id = _safe_field(first.get("quotaId"), _SAFE_QUOTA_ID)
         elif kind == "type.googleapis.com/google.rpc.RetryInfo":
             delay = _retry_delay(detail.get("retryDelay"))
             malformed |= delay is None

@@ -1104,8 +1104,10 @@ HTTP 错误，`connection`/`model_timeout` 是连接/模型调用超时，`inval
 Vertex 路径额外记录每次通过请求校验、发往底层 transport 的 HTTP 尝试 `vertex_http` INFO 行：
 `turn`、状态、请求字节数；本地请求拒绝单列为 `vertex_request_rejected`，不计 HTTP 尝试。成功时记录
 `prompt_tokens`、`candidates_tokens`、`thoughts_tokens`，缺失写 `unknown`。429 只从结构化错误
-详情提取固定字段；项目号可能占用合法字符，reason、domain、quota metric/id 只输出已知公开值，
-其余写 `other`。响应在 transport 被拒绝时仍计收到的 429，但正文详情写 `unknown`。
+详情提取固定字段；`reason` 仅接受大写字母/下划线，`domain` 仅接受指定 Google 域名，
+quota metric 仅接受 `aiplatform.googleapis.com/` 下的无数字小写指标名，quota ID 仅接受
+无数字的字母名；各字段仍限 128 字符，其余写 `other`。响应在 transport 被拒绝时仍计收到的 429，
+但正文详情写 `unknown`。
 `rate_kind=quota` 表示明确的配额详情，`no_quota_detail` 只表示
 `RESOURCE_EXHAUSTED` 且未见配额详情，不能据此断定共享容量不足。`retry_after` 只记录合法数字秒
 并按现有 20 秒采信上限截断，`retry_delay_s` 来自 `RetryInfo` 且同样最多记录 20 秒，

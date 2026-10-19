@@ -141,6 +141,63 @@ async def test_429_allowed_fields_cannot_log_project_or_key(
     assert "sk-test-secret" not in caplog.text
 
 
+@pytest.mark.parametrize(
+    "metric_name,quota_id",
+    [
+        (
+            "generate_content_requests_per_minute_per_project_per_base_model",
+            "GenerateContentRequestsPerMinutePerProjectPerBaseModel",
+        ),
+        (
+            "generate_content_input_tokens_per_minute_per_project_per_base_model",
+            "GenerateContentInputTokensPerMinutePerProjectPerBaseModel",
+        ),
+    ],
+)
+async def test_vertex_generate_content_quota_names_are_logged(
+    metric_name: str, quota_id: str, caplog: pytest.LogCaptureFixture
+) -> None:
+    metric = f"aiplatform.googleapis.com/{metric_name}"
+    response = _error(
+        details=[
+            {
+                "@type": "type.googleapis.com/google.rpc.QuotaFailure",
+                "violations": [{"quotaMetric": metric, "quotaId": quota_id}],
+            }
+        ]
+    )
+    with caplog.at_level(logging.INFO):
+        with pytest.raises(ModelAPIStatusError):
+            await _observed(Endpoint([response] * 4))
+    assert "rate_kind=quota status=RESOURCE_EXHAUSTED" in caplog.text
+    assert f"quota_metric={metric} quota_id={quota_id}" in caplog.text
+
+
+@pytest.mark.parametrize(
+    "metric,quota_id",
+    [
+        ("aiplatform.googleapis.com/generate_content_requests2_per_minute", "GenerateContent2"),
+        ("projects/myproject", "AIzaSyD123456789"),
+    ],
+)
+async def test_quota_names_with_digits_or_project_path_are_other(
+    metric: str, quota_id: str, caplog: pytest.LogCaptureFixture
+) -> None:
+    response = _error(
+        details=[
+            {
+                "@type": "type.googleapis.com/google.rpc.QuotaFailure",
+                "violations": [{"quotaMetric": metric, "quotaId": quota_id}],
+            }
+        ]
+    )
+    with caplog.at_level(logging.INFO):
+        with pytest.raises(ModelAPIStatusError):
+            await _observed(Endpoint([response] * 4))
+    assert "quota_metric=other quota_id=other" in caplog.text
+    assert metric not in caplog.text and quota_id not in caplog.text
+
+
 async def test_unknown_reason_does_not_hide_explicit_quota_failure(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
@@ -166,8 +223,27 @@ async def test_unknown_reason_does_not_hide_explicit_quota_failure(
         with pytest.raises(ModelAPIStatusError):
             await _observed(Endpoint([response] * 4))
     assert "rate_kind=quota" in caplog.text
-    assert "reason=other" in caplog.text
-    assert "NEW_PUBLIC_REASON" not in caplog.text
+    assert "reason=NEW_PUBLIC_REASON" in caplog.text
+
+
+async def test_unlisted_well_formed_reason_keeps_no_quota_detail(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    response = _error(
+        details=[
+            {
+                "@type": "type.googleapis.com/google.rpc.ErrorInfo",
+                "reason": "SHARED_CAPACITY",
+                "domain": "googleapis.com",
+            }
+        ]
+    )
+    with caplog.at_level(logging.INFO):
+        with pytest.raises(ModelAPIStatusError):
+            await _observed(Endpoint([response] * 4))
+    assert (
+        "rate_kind=no_quota_detail status=RESOURCE_EXHAUSTED reason=SHARED_CAPACITY" in caplog.text
+    )
 
 
 async def test_request_rejected_before_transport_is_not_an_http_attempt(
