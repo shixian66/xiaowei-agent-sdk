@@ -1101,7 +1101,8 @@ HTTP 错误，`connection`/`model_timeout` 是连接/模型调用超时，`inval
 拒答；运行配置错误另有固定分类，`unexpected_error` 仍是未分类异常，不能据此认定
 模型服务故障。状态码缺失记 `-`。这些分类只改善排查，不引入自动重试，也不记录异常正文。
 
-Vertex 路径额外记录每次通过请求校验、发往底层 transport 的 HTTP 尝试 `vertex_http` INFO 行：
+正式运行的 Vertex 路径额外记录每次通过请求校验、发往底层 transport 的 HTTP 尝试
+`vertex_http` INFO 行；`model check` 保持固定命令输出，不展示尝试日志：
 `turn`、状态、请求字节数；本地请求拒绝单列为 `vertex_request_rejected`，不计 HTTP 尝试。成功时记录
 `prompt_tokens`、`candidates_tokens`、`thoughts_tokens`，缺失写 `unknown`。429 只从结构化错误
 详情提取固定字段；`reason` 仅接受大写字母/下划线，`domain` 仅接受指定 Google 域名，
