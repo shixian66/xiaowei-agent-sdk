@@ -1,6 +1,6 @@
 # 小维：当前交接
 
-> 更新：2026-10-18，Asia/Shanghai。本文维护当前代码状态、有效证据、缺口与下一项工作。产品契约见 [ARCHITECTURE.md](ARCHITECTURE.md)，阶段与退出条件见 [DEVELOPMENT_PLAN.md](DEVELOPMENT_PLAN.md)，使用与运维见 [README.md](README.md) 和 [OPERATIONS.md](deploy/OPERATIONS.md)。
+> 更新：2026-10-19，Asia/Shanghai。本文维护当前代码状态、有效证据、缺口与下一项工作。产品契约见 [ARCHITECTURE.md](ARCHITECTURE.md)，阶段与退出条件见 [DEVELOPMENT_PLAN.md](DEVELOPMENT_PLAN.md)，使用与运维见 [README.md](README.md) 和 [OPERATIONS.md](deploy/OPERATIONS.md)。
 
 **OpenAI Agents SDK 负责 Agent Loop；小维负责权限、受治理工具执行、证据真实性和数据边界。**
 
@@ -9,13 +9,15 @@
 | 项目 | 已核对事实 |
 | --- | --- |
 | 仓库 | [shixian66/xiaowei-agent-sdk](https://github.com/shixian66/xiaowei-agent-sdk) |
-| 产品代码基线 | 主线 `6c585d0db713c0c0618bcf546dd3123058e1a32b`（PR #114，S3 自由回答结构） |
+| 产品代码基线 | 报告开发基线为 `b89d4ee71cb5082adcde396f3dece12fd169af48`，源分支 `codex/model-authored-reports`；报告交付状态：**已复核、已合并**（随本 PR squash 合入 `main` 生效；未部署） |
 | 源码与检查 | 当前源码仅保留 `src/xiaowei`；旧工程及专属测试、Compose、迁移入口、`compose-smoke` CI 和 Alembic 依赖已移除。保留产品测试、公共检查与旧回答兼容路径；旧工程历史可从 Git 查回 |
-| 当前存储与回答 | 应用 schema v12；`TurnAnswer.answer_version=2` 为新回答，缺失只按严格旧格式解析；新请求用分项交付，旧请求保留 v0 语义。正式启动不自动迁移 |
-| 锁定依赖 | `openai-agents 0.22.3`、`mcp 2.2.0`、`sqlglot 30.17.0` |
+| 当前存储与回答 | 应用 schema v12 不变；候选用可信 `answer_version=3` 开放原生报告，2/Legacy 保留旧文字；模型输出 schema 不变。新请求用分项交付，旧请求保留 v0 语义 |
+| 锁定依赖 | SDK `0.22.3`、MCP `2.2.0`、sqlglot `30.17.0`；报告候选增加 `nh3 0.3.7`、`tinycss2 1.5.1` |
 | 正式入口 | `xiaowei serve`、`config check`、`model check`、`storage init/upgrade/cleanup`、`requests resend`；命令与环境准备以 README 为准 |
 | 最近有记录的公司部署 | 既有交接记录称 PR #110 / `4e0ab86` 已部署，并记录了部署后的回答拒收反馈。该历史记录不证明当前镜像、配置或健康状态，也不证明 #111–#114 已部署 |
-| 当前验收结论 | S1–S3 代码已合入，离线证据见下文；真实 provider 对新 schema 的接受情况、模型任务质量、真实客户端表现和生产效果仍未验收，不能由合入推定通过 |
+| 当前验收结论 | S1–S3 已合入；报告候选 a56f07ac 的 MD 拒收 P1 已修复于 1271517a；文档候选 9cb2e37b 独立复审通过。N1 文案修复为 `b8a9143e`，本轮用户已确认交付；报告已复核、已合并（随本 PR 合入 `main` 生效），见 §5。历史完整回归不等于当前修复 SHA 全量通过。真实 provider 格式接受、报告 token/长度/截断、任务质量、真实平台/客户端与部署仍未验收 |
+
+报告的“已合并”记录随本 PR 合入 `main` 生效；PR 尚未合并时仍是候选，实际合并 SHA 和最终 CI 结果以 GitHub PR 记录为准。合并前须核对最终 head 的远端 CI 全部成功；若 CI 失败产生修复，按用户要求先增量复核再合并。
 
 本文件的状态以表中的核对基线为限。接手者先核对实际 HEAD、工作区及用户新指令；合入、独立审查、离线测试、真实运行、部署与用户接受分别记录，不互相替代。
 
@@ -53,7 +55,9 @@ P1-B、P2、P2.5 与飞书单群的基础切片已有离线交付记录；P3-A/B
 
 ### 当前回答结构与主要证据
 
-当前有效计划为[自由回答结构](docs/superpowers/plans/2026-10-17-free-answer-structure.md)。其中 S2 的“留 S3”等阶段文字是当时记录，当前合入状态以上表为准。
+已合入的回答结构见[自由回答结构计划](docs/superpowers/plans/2026-10-17-free-answer-structure.md)。其中 S2 的“留 S3”等阶段文字是当时记录，当前合入状态以上表为准。
+
+当前开发切片为[模型自主 HTML/MD 报告 v3](docs/superpowers/plans/2026-10-19-model-authored-reports.md)：复用 blocks 和现有治理/交付；MD 原生排版、独立 HTML 片段与短 Skill，事实就近由代码填入，主消息提取文字。版本 3 贯穿保存/读取，解决旧纯文本在升级时未绑定字节的兼容问题；旧 HTML 基线字节回归保持一致。禁止脚本/外部资源，解析 CSS 值控制布局，文件/试排/预览只清理一次。A1 仍保留通用模型失败回执，未扩大数据/权限或 SQL 取数限额。
 
 S3 的源码事实：`AgentAnswer` 为有序 `TextBlock | FactBlock`，另含 `report_format` 与 `awaiting_user`；模型文字累计上限为 16,000 UTF-8 字节、最多 64 块。归一化、输出预检、Session 提交与交付复用同一规则；本轮新事实的 brief 改完整展示，重复引用取完整，不新增模型调用。符合补全类别的本轮结果进入“其余结果”，历史结果与未引用的诊断/发现原值不补全。动作区域置顶且不进附件；暂停材料显式引用本次请求执行的动作及本轮动作状态，不自动补入其他未请求执行的提案，暂停前已取得的需交付只读结果仍由交付补全。
 
@@ -66,7 +70,9 @@ S3 的源码事实：`AgentAnswer` 为有序 `TextBlock | FactBlock`，另含 `r
 3. 沿已有测试与脚本补齐评测准备即可，不新建评测平台。旧 `dialogue_real_model.py` 的 StarRocks 场景不能替代 Alertmanager/Prometheus 等新样例；U1/R3 首条消息需明确环境。环境选择套件按 E1–E15 各 3 次的既定口径记录新取数越界与被拒尝试，实际调用仍须具备对应授权。
 4. 真实飞书、Web 与生产验证按下表逐项留证。已有 U1/R3/R4/R7 等切片记录的真实模型例外只覆盖当时获准范围，不自动扩展到 S3/S4 或新增监控写。
 
-暂缓：监控曲线、自由 HTML/CSS 报告、数据库 MCP 及未批准的其他写动作。数据源密码私聊命令有设计但未实施；这些事项不因“继续开发”自动进入当前任务。
+报告 P1 修复为 `1271517a9b05a5f9381b45465e7596904180af03`，文档候选 `9cb2e37b6e89847a5b6254b8d9ac9fc75b8b0b49` 已经独立复审通过。N1 已在 `b8a9143ebb5a216ee244a7976e1d6583681268fb` 修复：MD 格式处理提示改为“部分不支持的格式已按原文展示”，HTML 保留“已移除”；本轮用户已确认交付并授权推送、对 `main` 开 PR、等待 CI 全绿后 squash 合并，状态记为已复核、已合并（随本 PR 合入 `main` 生效）。下一项为另行获准的公司内网能力验收，不重新开启已闭合问题。a56f07ac 的 MD 局部格式整体拒收已改为保留原文的静态代码段和说明，事实正常交付，原字节补发机制不变。HTML Skill 补类型转义，正式渠道补 Vertex 截断回执。历史审查关闭的可见性反例仅指零/极小字号及完全透明前景色，不保证任意配色对比度；详细根因与当前证据见报告计划 §9。用户明确本轮只做离线验证、不等待真实模型；provider 格式接受、典型报告 token/长度/截断仍未验证。候选经另行批准部署公司环境后，由用户在内网运行合成数据测试（≤60 次实际请求、≤5 美元）。不据此视为 R3 通过或取得部署授权；真实飞书实收另需对应授权。
+
+暂缓：监控曲线、SQL 大结果限额调整、任意全局 HTML/CSS/交互页面、数据库 MCP 及其他未批准写动作。数据源密码私聊命令有设计但未实施。
 
 ## 4. 实测环境与兼容性缺口
 
@@ -98,6 +104,9 @@ S3 的源码事实：`AgentAnswer` 为有序 `TextBlock | FactBlock`，另含 `r
 
 | 对应工作 / 版本 | 保留的证据与限制 |
 | --- | --- |
+| N1 文案增量 / 基于 `9cb2e37b…` | 仅在既有渲染单点区分 MD 原文展示与 HTML 移除提示，内容处理及绑定字节机制不变；本次定向 **35 passed**、Chrome **5 passed**、文档 **2 passed**，Ruff/mypy/diff 检查通过；本轮用户已确认交付，已复核、已合并（随本 PR 合入 `main` 生效）。没有重跑全量或真实服务，命令与复现见报告计划 §9 |
+| MD 审查修复 / `1271517a…` | 内容/正式链 **72 passed**、相关交付/兼容 **162 passed**、Chrome **5 passed**、公共安全门 **63 passed**；Ruff、mypy 34 文件、diff 检查通过。先有失败用例再修复，跨块定义和围栏变异反例已检查；独立复审无阻断，另运行 37 项测试及 1936 组解析探针。本次未重跑全量，不把下一行历史结果复用为该 SHA 全量通过；无真实服务调用，详见报告计划 §9 |
+| 原生报告历史候选 / `3ddcb40…` | 默认完整回归 **4329 passed、235 skipped、75 deselected**；报告 Chrome **4 passed**、公共安全门 **63 passed**；ruff、mypy（34 文件）、依赖审计、生产 wheel 入口与 Git 历史敏感信息扫描通过。产品及测试树已独立复审，无遗留阻断；命令与审查覆盖见报告计划 §9。本地结果不代表远端 CI、真实模型或部署通过 |
 | 旧工程清理 / 基于 `0bd68f2` 的差异 | 本地默认完整回归 **4270 passed、235 skipped、73 deselected**，含隔离 PostgreSQL 与 Docker 发行用例；恢复公共检查后的定向验证 **92 passed**。ruff、mypy（33 文件）、锁文件与 diff 检查通过，独立复审通过。产品源码及旧回答兼容路径无差异；跳过/未选中项、远端 CI、真实模型与公司服务不计通过 |
 | S3 / #114 最终复审、CI 与合入 | [PR #114](https://github.com/shixian66/xiaowei-agent-sdk/pull/114) 记录 Codex 对 `eff89960b71fb660d4d264f3d70f5faba7e2cd22` 独立复审通过；该 head 的 [CI run 39131473170](https://github.com/shixian66/xiaowei-agent-sdk/actions/runs/39131473170) **10 项全部通过**（含 integration、p3-release），`run_attempt=1`，无重跑。以该 head 做 squash 合并为 `6c585d0`，Git 文件树与候选相同；不据此认定真实模型、公司服务或部署已验收 |
 | S3 本地定向回归（合入前） | 原审查版本 `73246593` 的三项发现已在 `eff89960` 修复：旧格式不套新预算、v0 截断卡片来源标签、旧审批测试数据与拒绝断言。修复后 16 个受影响文件 **680 passed**，ruff、mypy（33 文件）、diff 检查通过；作者本地未重跑全量与浏览器，最终 CI 另见上一行 |

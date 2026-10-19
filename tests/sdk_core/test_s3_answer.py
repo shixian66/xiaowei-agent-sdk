@@ -296,7 +296,7 @@ def test_saved_answer_versions_parse_strictly(raw: str, kind: type) -> None:
     [
         json.dumps(_turn_json(LEGACY.model_dump(mode="json"), answer_version=2)),  # 版本与内容不符
         json.dumps(_turn_json(CURRENT.model_dump(mode="json"))),  # 新格式缺版本
-        json.dumps(_turn_json(CURRENT.model_dump(mode="json"), answer_version=3)),  # 未知版本
+        json.dumps(_turn_json(CURRENT.model_dump(mode="json"), answer_version=4)),  # 未知版本
         json.dumps(
             _turn_json(
                 {"blocks": [{"type": "text", "text": "x"}], "report_format": None},

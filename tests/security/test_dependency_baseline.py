@@ -29,6 +29,8 @@ _EXPECTED_RUNTIME_DEPENDENCIES = frozenset(
         "lark-channel-sdk",
         "markdown-it-py",
         "pillow",
+        "nh3",
+        "tinycss2",
     }
 )
 
@@ -199,14 +201,17 @@ def test_the_type_ignore_detector_ignores_docstrings_and_catches_comments() -> N
     assert _type_ignore_comment_lines("x = 1  # type: ignore[arg-type]\n") == [1]
 
 
-def test_mypy_relaxation_is_limited_to_the_untyped_feishu_sdk() -> None:
-    """唯一的 mypy 放宽：``lark-channel-sdk`` 1.4.0 没有 ``py.typed``，而飞书入口必须导入它。
+def test_mypy_relaxation_is_limited_to_approved_untyped_dependencies() -> None:
+    """飞书 SDK 与报告 CSS 解析器没有 ``py.typed``，仅允许这两个依赖的缺失存根。
 
-    只允许对 ``lark_channel.*`` 关闭缺少类型信息的报错；全局仍是 strict，新增任何放宽都要改这里。
+    全局仍是 strict，新增任何放宽都要改这里；依赖增加类型声明后应删除对应 override。
     """
     mypy = _pyproject()["tool"]
     assert isinstance(mypy, dict)
     config = mypy["mypy"]
     assert isinstance(config, dict)
     assert config["strict"] is True
-    assert config["overrides"] == [{"module": ["lark_channel.*"], "ignore_missing_imports": True}]
+    assert config["overrides"] == [
+        {"module": ["lark_channel.*"], "ignore_missing_imports": True},
+        {"module": ["tinycss2.*"], "ignore_missing_imports": True},
+    ]
