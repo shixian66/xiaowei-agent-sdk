@@ -287,6 +287,42 @@ def test_native_markdown_closes_model_fence_before_fact() -> None:
     assert "来源" not in code.content
 
 
+@pytest.mark.parametrize("reference", ["![leak][asset]", "[leak][asset]"])
+def test_markdown_cannot_activate_a_reference_across_fact_blocks(reference: str) -> None:
+    from xiaowei.report_content import ReportContentError
+
+    delivery = _delivery("md")
+    delivery = delivery.model_copy(
+        update={
+            "blocks": (
+                DeliveryText(text=reference),
+                *delivery.blocks[1:],
+                DeliveryText(text="[asset]: https://invalid.example/leak"),
+            ),
+            "report_native": True,
+        }
+    )
+    with pytest.raises(ReportContentError):
+        build_report(delivery)
+
+
+@pytest.mark.parametrize(
+    "closing", ["    ~~~", "\t~~~", "~~~\u2028a", "~~~\x0ba", "~~~\u00a0"]
+)
+def test_markdown_invalid_fence_closer_cannot_capture_fact_identity(closing: str) -> None:
+    delivery = _delivery("md")
+    delivery = delivery.model_copy(
+        update={
+            "blocks": (DeliveryText(text="~~~\n" + closing), *delivery.blocks[1:]),
+            "report_native": True,
+        }
+    )
+    tokens = MarkdownIt().parse(build_report(delivery).content.decode())
+    assert any(t.type == "inline" and t.content == "2. 结果 1" for t in tokens)
+    first_code = next(t for t in tokens if t.type == "fence")
+    assert "来源" not in first_code.content and "SQL 原文" not in first_code.content
+
+
 @pytest.mark.parametrize("legacy", [True, False])
 async def test_pending_html_upgrade_retains_literal_or_native_semantics(
     env: Env, legacy: bool

@@ -26,34 +26,27 @@ class ReportContentError(ValueError):
 
 def markdown_content(value: str) -> str:
     """Keep native Markdown, rejecting active constructs outside literal code."""
-    tokens = MarkdownIt("commonmark", {"html": True}).enable("table").parse(value)
+    env: dict[str, Any] = {}
+    tokens = MarkdownIt("commonmark", {"html": True}).enable("table").parse(value, env)
     forbidden = {"html_block", "html_inline", "image", "link_open"}
-    if any(
+    if env.get("references") or any(
         token.type in forbidden or any(c.type in forbidden for c in token.children or ())
         for token in tokens
     ):
         raise ReportContentError("报告不支持原始 HTML、图片或链接，请使用文字或代码围栏")
     # An unterminated model fence must not capture the following code-owned fact block.
-    quotes = 0
-    lines = value.splitlines()
     for token in tokens:
-        if token.type == "blockquote_open":
-            quotes += 1
-        elif token.type == "blockquote_close":
-            quotes -= 1
         if token.type == "fence" and token.map:
-            final = lines[token.map[1] - 1].strip()
-            for _ in range(quotes):
-                final = final.removeprefix(">").lstrip()
-            closed = (
-                token.map[1] - token.map[0] >= 2
-                and len(final) >= len(token.markup)
-                and set(final) == {token.markup[0]}
+            # Public token content excludes opening/closing lines. Count LF only,
+            # as CommonMark does; reparsing source indentation/Unicode can disagree.
+            content_lines = token.content.count("\n") + bool(
+                token.content and not token.content.endswith("\n")
             )
+            closed = token.map[1] - token.map[0] == content_lines + 2
             if not closed:
                 if token.level:
                     raise ReportContentError("列表或引用中的代码围栏须完整闭合")
-                value = value.rstrip() + "\n" + token.markup + "\n"
+                value += "\n" + token.markup + "\n"
     return value
 
 
@@ -254,7 +247,17 @@ def _css(value: str) -> tuple[str, bool]:
         name = declaration.lower_name
         valid = name in _PROPERTIES and not declaration.important
         if valid and name in _COLORS:
-            valid = parse_color(tinycss2.serialize(declaration.value).strip()) is not None
+            color = parse_color(tinycss2.serialize(declaration.value).strip())
+            valid = color is not None and (
+                name != "color" or isinstance(color, str) or color.alpha > 0
+            )
+        elif valid and name == "font-size":
+            values = [t for t in declaration.value if t.type != "whitespace"]
+            valid = len(values) == 1 and values[0].type == "dimension"
+            if valid:
+                size = values[0]
+                pixels = size.value * (16 if size.lower_unit == "rem" else 1)
+                valid = size.lower_unit in {"px", "rem"} and 12 <= pixels <= 64
         elif valid:
             valid = _css_tokens(declaration.value, name)
             if name in _KEYWORDS and name != "font-weight":

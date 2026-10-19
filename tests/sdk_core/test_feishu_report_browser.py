@@ -24,6 +24,7 @@ async def test_native_html_is_readable_isolated_and_network_free(
         "position:fixed;margin:-999999px;width:999999999px;"
         'background-image:url(https://invalid.example/resource)">'
         "<h1>集群巡检 · 科技风</h1><p>在获准范围内分析，不代表全量健康。</p>"
+        '<p style="font-size:0;color:transparent">必须阅读的报告结论</p>'
         "<pre><code>SELECT a&lt;b &amp; 1; &lt;table&gt;</code></pre>"
         '<img src="file:///private/forbidden"><script>window.reportAttack=true</script>'
         '<iframe src="https://invalid.example/frame">hidden</iframe></section>'
@@ -77,6 +78,12 @@ async def test_native_html_is_readable_isolated_and_network_free(
         assert (
             await page.evaluate("document.querySelector('.model-label').offsetHeight > 0") is True
         )
+        assert await page.evaluate("""(() => {
+          const p = Array.from(document.querySelectorAll('.model-prose p'))
+            .find(e => e.textContent === '必须阅读的报告结论');
+          const style = getComputedStyle(p);
+          return parseFloat(style.fontSize) >= 12 && style.color !== 'rgba(0, 0, 0, 0)';
+        })()""") is True
         assert (
             await page.evaluate(
                 "Array.from(document.querySelectorAll('.card pre code'))"

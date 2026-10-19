@@ -37,6 +37,11 @@ def test_html_keeps_design_and_literal_sql_without_layout_source_preview() -> No
         "transform:scale(9999)",
         "padding:999999rem",
         "color:red!important",
+        "font-size:0",
+        "font-size:0px",
+        "font-size:0.001rem",
+        "color:transparent",
+        "color:rgba(0,0,0,0)",
     ],
 )
 def test_html_removes_unbounded_or_active_css_values(style: str) -> None:
@@ -95,3 +100,19 @@ def test_unclosed_nested_markdown_fence_is_not_rewritten_into_a_new_fence() -> N
     with pytest.raises(ReportContentError):
         markdown_content("> ~~~sql\n> SELECT 1")
     assert markdown_content("> ~~~sql\n> SELECT 1\n> ~~~")
+
+
+def test_markdown_reference_definitions_in_code_remain_literal() -> None:
+    from xiaowei.report_content import markdown_content
+
+    source = "~~~md\n[asset]: https://invalid.example/example\n~~~"
+    assert markdown_content(source) == source
+
+
+@pytest.mark.parametrize(
+    "source", ["~~~\r\n正文\r~~~", "- 项目\n    ~~~\n    正文\n    ~~~"]
+)
+def test_closed_markdown_fences_keep_their_original_content(source: str) -> None:
+    from xiaowei.report_content import markdown_content
+
+    assert markdown_content(source) == source
