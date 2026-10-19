@@ -135,7 +135,7 @@ docker compose --env-file .env run --rm --no-deps xiaowei model check
 | 0，`model check valid profile=… model=…` | 模型完成了一次工具调用并给出合规的最终回答 |
 | 2，字段路径与说明 | 配置或 Key 问题（未设置、为空、仍是模板），按提示修改后重试，没有发出模型请求 |
 | 1，`model check failed: auth_failed` | Key 无效或无权使用该模型 |
-| 1，`model check failed: rate_limited` / `upstream_error` / `unreachable` | 限流、模型服务错误、超时或连不上；稍后重试，不会自动重试 |
+| 1，`model check failed: rate_limited` / `upstream_error` / `unreachable` | 限流、模型服务错误、超时或连不上；429/503 已按现有策略最多再试 3 次，仍失败时可稍后重试；超时及连接错误不自动重试 |
 | 1，`model check failed: tool_not_called` / `tool_repeated` / `answer_invalid` / `model_failed` | 模型没按要求调用工具、重复调用、最终回答不合规、响应不符合协议，或模型客户端打开/关闭失败；该 Profile 不应投入使用 |
 
 通过只说明这个 Profile 能完成合成数据上的工具往返和结构化回答，不代表正式提示词下的工具选择
@@ -941,7 +941,8 @@ docker compose --env-file .env -f compose.next.yaml run --rm --no-deps xiaowei c
 docker compose --env-file .env -f compose.next.yaml run --rm --no-deps xiaowei model check
 ```
 
-`model check` 会产生一次模型调用；模型配置没有变化且不想产生用量时可以省略。预检失败时按提示
+`model check` 会运行一次检查任务；成功的工具往返至少发起两次模型 HTTP 请求，429/503 重试
+可能增加次数。模型配置没有变化且不想产生用量时可以省略。预检失败时按提示
 修改 `XW_CONFIG_FILE` 指向的 JSON 后重新预检，旧服务继续运行（它只在启动时读取
 配置）。预检通过后只重建小维；PostgreSQL 容器和命名卷不重建：
 
@@ -1100,5 +1101,23 @@ HTTP 错误，`connection`/`model_timeout` 是连接/模型调用超时，`inval
 最终输出契约，`request_rejected`/`response_rejected` 是模型请求/响应边界拒绝，`model_refusal` 是模型
 拒答；运行配置错误另有固定分类，`unexpected_error` 仍是未分类异常，不能据此认定
 模型服务故障。状态码缺失记 `-`。这些分类只改善排查，不引入自动重试，也不记录异常正文。
+
+正式运行的 Vertex 路径额外记录每次通过请求校验、发往底层 transport 的 HTTP 尝试
+`vertex_http` INFO 行；`model check` 保持固定命令输出，不展示尝试日志：
+`turn`、状态、请求字节数；本地请求拒绝单列为 `vertex_request_rejected`，不计 HTTP 尝试。成功时记录
+`prompt_tokens`、`candidates_tokens`、`thoughts_tokens`，缺失写 `unknown`。429 只从结构化错误
+详情提取固定字段；`reason` 仅接受大写字母/下划线，`domain` 仅接受指定 Google 域名，
+quota metric 仅接受 `aiplatform.googleapis.com/` 下的无数字小写指标名，quota ID 仅接受
+含 `RequestsPer` 或 `TokensPer` 的 CamelCase 配额名；各字段仍限 128 字符，其余写 `other`。
+响应在 transport 被拒绝时仍计收到的 429，
+但正文详情写 `unknown`。
+`rate_kind=quota` 表示明确的配额详情，`no_quota_detail` 只表示
+`RESOURCE_EXHAUSTED` 且未见配额详情，不能据此断定共享容量不足。`retry_after` 只记录合法数字秒
+并按现有 20 秒采信上限截断，`retry_delay_s` 来自 `RetryInfo` 且同样最多记录 20 秒，
+二者均不改变现有重试策略。
+每次 Vertex 轮次结束另有一行 `turn=... stage=model_summary`，记录 HTTP 尝试数、429 数、
+实际重试次数、最大请求字节和成功响应的输入/输出 token 合计；任一成功响应缺少必要 usage 时
+对应合计写 `unknown`。有 429 时只附最后一次的安全分类与字段。审批暂停及后续恢复各按该次
+运行记汇总，使用相同原轮编号；真实生产 429 样本尚待观察验证。
 
 PostgreSQL 16 同一大版本内更换镜像 digest 不在本轮验证范围，须另做备份、兼容和回退演练。

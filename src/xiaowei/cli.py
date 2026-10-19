@@ -99,7 +99,7 @@ def _main(argv: Sequence[str] | None, *, container: bool) -> int:
     if args.command == "storage" and args.action == "cleanup" and not 0 < args.batch_size <= 10_000:
         print("--batch-size 必须在 1 到 10000 之间", file=sys.stderr)
         return 2
-    configure_logging(args.log_level)
+    configure_logging(args.log_level, model_check=args.command == "model")
     # 惰性导入：此时 SDK 日志开关已强制关闭，且尚未进入事件循环。
     from xiaowei import runtime
 
@@ -214,7 +214,7 @@ async def _serve(config: "ServeConfig", *, container: bool = False) -> int:
             loop.remove_signal_handler(sig)
 
 
-def configure_logging(level: str) -> None:
+def configure_logging(level: str, *, model_check: bool = False) -> None:
     """正式日志只输出本产品的 ``xiaowei`` 日志，级别由 ``--log-level`` 决定；第三方日志一律不输出。
 
     第三方日志在任何级别都可能带出完整端点、连接地址、请求选项或原始异常：INFO/DEBUG 如 httpx2 的
@@ -224,7 +224,10 @@ def configure_logging(level: str) -> None:
     """
     handler = logging.StreamHandler(sys.stderr)
     handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(name)s %(message)s"))
-    handler.addFilter(lambda record: _own(record.name))
+    handler.addFilter(
+        lambda record: _own(record.name)
+        and not (model_check and record.name == "xiaowei.vertex_model")
+    )
     root = logging.getLogger()
     root.addHandler(handler)
     root.setLevel(logging.WARNING)

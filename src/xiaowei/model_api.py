@@ -325,6 +325,9 @@ async def open_model(
     """
     api_key = resolve_secret_ref(profile.api_key_ref)
     vertex = profile.provider == "vertex"
+    if vertex:
+        from xiaowei.vertex_model import vertex_http_sent, vertex_response_rejected
+
     guarded = _GuardedTransport(
         # 证书与代理不从环境读取；外层 AsyncClient 的 trust_env 不作用于这里创建的 transport。
         transport or httpx2.AsyncHTTPTransport(retries=0, trust_env=False),
@@ -344,6 +347,8 @@ async def open_model(
             if profile.api_mode == "chat_completions"
             else None
         ),
+        on_send=vertex_http_sent if vertex else None,
+        on_response_rejected=vertex_response_rejected if vertex else None,
     )
     timeout = httpx2.Timeout(profile.request_timeout_seconds)
     http_client = httpx2.AsyncClient(
@@ -450,6 +455,8 @@ class _GuardedTransport(httpx2.AsyncBaseTransport):
         image_input_enabled: bool,
         max_response_bytes: int,
         check_success: Callable[[object], None] | None,
+        on_send: Callable[[int], None] | None = None,
+        on_response_rejected: Callable[[int, int], None] | None = None,
     ) -> None:
         self._inner = inner
         self._auth_header = auth_header
@@ -457,6 +464,8 @@ class _GuardedTransport(httpx2.AsyncBaseTransport):
         self._image_input_enabled = image_input_enabled
         self._max_response_bytes = max_response_bytes
         self._check_success = check_success
+        self._on_send = on_send
+        self._on_response_rejected = on_response_rejected
 
     async def handle_async_request(self, request: httpx2.Request) -> httpx2.Response:
         body = await request.aread()
@@ -479,13 +488,20 @@ class _GuardedTransport(httpx2.AsyncBaseTransport):
             extensions=request.extensions,
         )
 
+        if self._on_send is not None:
+            self._on_send(len(body))
         response = await self._inner.handle_async_request(forwarded)
         try:
-            content = await self._read_bounded(response)
-        finally:
-            await response.aclose()
-        if httpx2.codes.is_success(response.status_code):
-            self._check_success_body(content)
+            try:
+                content = await self._read_bounded(response)
+            finally:
+                await response.aclose()
+            if httpx2.codes.is_success(response.status_code):
+                self._check_success_body(content)
+        except ModelResponseRejectedError:
+            if self._on_response_rejected is not None:
+                self._on_response_rejected(response.status_code, len(body))
+            raise
         headers = [
             (k, v)
             for k, v in response.headers.multi_items()

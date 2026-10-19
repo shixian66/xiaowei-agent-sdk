@@ -13,9 +13,13 @@
 import base64
 import binascii
 import json
+import logging
 import math
+import re
 import uuid
 from collections.abc import AsyncIterator, Mapping
+from contextvars import ContextVar
+from dataclasses import dataclass
 from typing import Any, NoReturn
 
 import httpx2
@@ -41,6 +45,7 @@ from openai.types.responses.response_prompt_param import ResponsePromptParam
 from openai.types.responses.response_usage import OutputTokensDetails
 
 from xiaowei.model_api import (
+    MODEL_RETRY_AFTER_CAP_SECONDS,
     ModelAPIRejectedError,
     ModelRequestRejectedError,
     ModelResponseRejectedError,
@@ -66,6 +71,201 @@ _USAGE_COUNTS = (
     "thoughtsTokenCount",
     "totalTokenCount",
 )
+_SAFE_FIELD = re.compile(r"[A-Za-z0-9._/-]{1,128}\Z")
+# google.rpc.Code；只记录公开的枚举名，不回传任意 provider 字符串。
+_RPC_CODES = frozenset(
+    "OK CANCELLED UNKNOWN INVALID_ARGUMENT DEADLINE_EXCEEDED NOT_FOUND ALREADY_EXISTS "
+    "PERMISSION_DENIED RESOURCE_EXHAUSTED FAILED_PRECONDITION ABORTED OUT_OF_RANGE "
+    "UNIMPLEMENTED INTERNAL UNAVAILABLE DATA_LOSS UNAUTHENTICATED".split()
+)
+_QUOTA_REASONS = frozenset({"QUOTA_EXCEEDED", "RATE_LIMIT_EXCEEDED"})
+_SAFE_REASON = re.compile(r"[A-Z][A-Z_]{1,63}\Z")
+_SAFE_DOMAIN = re.compile(r"(?:googleapis\.com|aiplatform\.googleapis\.com)\Z")
+_SAFE_QUOTA_METRIC = re.compile(r"aiplatform\.googleapis\.com/[a-z]+(?:_[a-z]+)*\Z")
+_SAFE_QUOTA_ID = re.compile(
+    r"(?=.{2,101}\Z)(?:[A-Z][a-z]+)+(?:Requests|Tokens)Per(?:[A-Z][a-z]+)+\Z"
+)
+_DURATION = re.compile(r"(\d{1,20})(?:\.(\d{1,9}))?s\Z")
+_RETRY_AFTER_NUMBER = re.compile(r"\d{1,4}(?:\.\d{1,3})?\Z")
+logger = logging.getLogger(__name__)
+
+
+@dataclass(frozen=True)
+class RateDetail:
+    rate_kind: str = "unknown"
+    status: str = "unknown"
+    reason: str = "unknown"
+    domain: str = "unknown"
+    quota_metric: str = "unknown"
+    quota_id: str = "unknown"
+    retry_delay_s: float | None = None
+    retry_after: str = "unknown"
+
+
+@dataclass
+class VertexTurnMetrics:
+    """单轮 Vertex HTTP 计数；不保存请求/响应内容或服务依赖。"""
+
+    model_requests: int = 0
+    http_429: int = 0
+    retries: int = 0
+    request_bytes_max: int = 0
+    input_tokens: int | None = None
+    output_tokens: int | None = None
+    last_429: RateDetail | None = None
+    _retry_pending: bool = False
+    _successes: int = 0
+
+    def attempt(self, request_bytes: int) -> None:
+        if self._retry_pending:
+            self.retries += 1
+        self._retry_pending = False
+        self.model_requests += 1
+        self.request_bytes_max = max(self.request_bytes_max, request_bytes)
+
+    def failure(self, status: int, detail: RateDetail | None = None) -> None:
+        self._retry_pending = status in (429, 503)
+        if status == 429:
+            self.http_429 += 1
+            self.last_429 = detail
+
+    def success(self, prompt: int | None, candidates: int | None, thoughts: int | None) -> None:
+        output = candidates + thoughts if candidates is not None and thoughts is not None else None
+        if self._successes == 0:
+            self.input_tokens, self.output_tokens = prompt, output
+        else:
+            self.input_tokens = (
+                self.input_tokens + prompt
+                if self.input_tokens is not None and prompt is not None
+                else None
+            )
+            self.output_tokens = (
+                self.output_tokens + output
+                if self.output_tokens is not None and output is not None
+                else None
+            )
+        self._successes += 1
+
+
+active_vertex_metrics: ContextVar[VertexTurnMetrics | None] = ContextVar(
+    "active_vertex_metrics", default=None
+)
+active_vertex_turn: ContextVar[str | None] = ContextVar("active_vertex_turn", default=None)
+
+
+def _safe_field(value: object, pattern: re.Pattern[str]) -> str:
+    if value is None:
+        return "unknown"
+    # 字符与字段形状共同约束，避免把项目路径、数字标识或常见 Key 写入日志。
+    if isinstance(value, str) and _SAFE_FIELD.fullmatch(value) and pattern.fullmatch(value):
+        return value
+    return "other"
+
+
+def _retry_delay(value: object) -> float | None:
+    if not isinstance(value, str) or _DURATION.fullmatch(value) is None:
+        return None
+    delay = float(value[:-1])
+    if not math.isfinite(delay) or delay < 0:
+        return None
+    return min(delay, MODEL_RETRY_AFTER_CAP_SECONDS)
+
+
+def _safe_retry_after(value: str | None) -> str:
+    if value is None:
+        return "unknown"
+    # SDK 可读原始头；诊断只记有界的数字秒，HTTP-date/任意文本不进入日志。
+    if not _RETRY_AFTER_NUMBER.fullmatch(value):
+        return "other"
+    return f"{min(float(value), MODEL_RETRY_AFTER_CAP_SECONDS):g}"
+
+
+def _rate_detail(content: bytes, headers: Mapping[str, str]) -> RateDetail:
+    retry_after = _safe_retry_after(headers.get("retry-after"))
+    payload = _strict_json(content)
+    error = payload.get("error") if isinstance(payload, dict) else None
+    if not isinstance(error, dict):
+        return RateDetail(retry_after=retry_after)
+    raw_status = error.get("status")
+    status = (
+        raw_status
+        if isinstance(raw_status, str) and raw_status in _RPC_CODES
+        else "unknown"
+        if raw_status is None
+        else "other"
+    )
+    details = error.get("details", [])
+    if not isinstance(details, list):
+        return RateDetail(retry_after=retry_after)
+    reason = domain = quota_metric = quota_id = "unknown"
+    delay: float | None = None
+    quota = False
+    malformed = False
+    unrecognized_field = False
+    for detail in details:
+        if not isinstance(detail, dict):
+            malformed = True
+            break
+        kind = detail.get("@type")
+        if kind == "type.googleapis.com/google.rpc.ErrorInfo":
+            reason = _safe_field(detail.get("reason"), _SAFE_REASON)
+            domain = _safe_field(detail.get("domain"), _SAFE_DOMAIN)
+            unrecognized_field |= "other" in (reason, domain)
+            metadata = detail.get("metadata", {})
+            if not isinstance(metadata, dict):
+                malformed = True
+                break
+            quota |= reason in _QUOTA_REASONS or any(
+                key in metadata for key in ("quota_metric", "quota_limit", "quotaMetric", "quotaId")
+            )
+        elif kind == "type.googleapis.com/google.rpc.QuotaFailure":
+            violations = detail.get("violations", [])
+            if not isinstance(violations, list):
+                malformed = True
+                break
+            quota = True
+            if violations:
+                first = violations[0]
+                if not isinstance(first, dict):
+                    malformed = True
+                    break
+                quota_metric = _safe_field(first.get("quotaMetric"), _SAFE_QUOTA_METRIC)
+                quota_id = _safe_field(first.get("quotaId"), _SAFE_QUOTA_ID)
+        elif kind == "type.googleapis.com/google.rpc.RetryInfo":
+            delay = _retry_delay(detail.get("retryDelay"))
+            malformed |= delay is None
+        # 其他 google.rpc detail（如 Help）不采集任何字段。
+    rate_kind = "unknown"
+    if not malformed:
+        if quota:
+            rate_kind = "quota"
+        elif status == "RESOURCE_EXHAUSTED" and not unrecognized_field:
+            rate_kind = "no_quota_detail"
+    return RateDetail(rate_kind, status, reason, domain, quota_metric, quota_id, delay, retry_after)
+
+
+def _token_count(metadata: object, key: str) -> int | None:
+    value = metadata.get(key) if isinstance(metadata, dict) else None
+    return value if isinstance(value, int) and not isinstance(value, bool) and value >= 0 else None
+
+
+def vertex_http_sent(request_bytes: int) -> None:
+    """受控 transport 完成请求检查后，记录实际发往底层 transport 的尝试。"""
+    if metrics := active_vertex_metrics.get():
+        metrics.attempt(request_bytes)
+
+
+def vertex_response_rejected(status: int, request_bytes: int) -> None:
+    """响应被受控 transport 拒绝时，仍记录已经收到的状态码，不读取正文。"""
+    if metrics := active_vertex_metrics.get():
+        metrics.failure(status, RateDetail() if status == 429 else None)
+    logger.info(
+        "vertex_http http_status=%d request_bytes=%d outcome=rejected rate_kind=%s turn=%s",
+        status,
+        request_bytes,
+        "unknown" if status == 429 else "-",
+        active_vertex_turn.get() or "-",
+    )
 
 
 class ModelAPIStatusError(ModelAPIRejectedError):
@@ -148,16 +348,82 @@ class VertexModel(Model):
         )
 
     async def _post(self, body: dict[str, Any]) -> object:
+        request = self._client.build_request("POST", self._endpoint, json=body)
+        request_bytes = len(request.content)
+        metrics = active_vertex_metrics.get()
         try:
-            response = await self._client.post(self._endpoint, json=body)
+            response = await self._client.send(request)
         except httpx2.TimeoutException:
+            logger.info(
+                "vertex_http http_status=- request_bytes=%d outcome=timeout turn=%s",
+                request_bytes,
+                active_vertex_turn.get() or "-",
+            )
             raise ModelAPITimeoutError("模型请求超时") from None
         except httpx2.TransportError:
+            logger.info(
+                "vertex_http http_status=- request_bytes=%d outcome=connection turn=%s",
+                request_bytes,
+                active_vertex_turn.get() or "-",
+            )
             raise ModelAPITransportError("模型服务连接失败") from None
+        except ModelRequestRejectedError:
+            logger.info(
+                "vertex_request_rejected request_bytes=%d turn=%s",
+                request_bytes,
+                active_vertex_turn.get() or "-",
+            )
+            raise
         if not httpx2.codes.is_success(response.status_code):
+            detail = (
+                _rate_detail(response.content, response.headers)
+                if response.status_code == 429
+                else None
+            )
+            if metrics is not None:
+                metrics.failure(response.status_code, detail)
+            if detail is not None:
+                logger.info(
+                    "vertex_http http_status=429 request_bytes=%d rate_kind=%s status=%s"
+                    " reason=%s domain=%s quota_metric=%s quota_id=%s retry_delay_s=%s"
+                    " retry_after=%s turn=%s",
+                    request_bytes,
+                    detail.rate_kind,
+                    detail.status,
+                    detail.reason,
+                    detail.domain,
+                    detail.quota_metric,
+                    detail.quota_id,
+                    detail.retry_delay_s if detail.retry_delay_s is not None else "unknown",
+                    detail.retry_after,
+                    active_vertex_turn.get() or "-",
+                )
+            else:
+                logger.info(
+                    "vertex_http http_status=%d request_bytes=%d turn=%s",
+                    response.status_code,
+                    request_bytes,
+                    active_vertex_turn.get() or "-",
+                )
             raise ModelAPIStatusError(response.status_code, response.headers) from None
         # 受控 transport 已确认是 JSON；这里再拒绝非有限数字，避免它们进入工具参数或下一步请求。
         payload = _strict_json(response.content)
+        metadata = payload.get("usageMetadata") if isinstance(payload, dict) else None
+        prompt = _token_count(metadata, "promptTokenCount")
+        candidates = _token_count(metadata, "candidatesTokenCount")
+        thoughts = _token_count(metadata, "thoughtsTokenCount")
+        if metrics is not None:
+            metrics.success(prompt, candidates, thoughts)
+        logger.info(
+            "vertex_http http_status=%d request_bytes=%d prompt_tokens=%s"
+            " candidates_tokens=%s thoughts_tokens=%s turn=%s",
+            response.status_code,
+            request_bytes,
+            prompt if prompt is not None else "unknown",
+            candidates if candidates is not None else "unknown",
+            thoughts if thoughts is not None else "unknown",
+            active_vertex_turn.get() or "-",
+        )
         if payload is None:
             _reject_response("模型成功响应不是严格 JSON", ResponseRejectReason.INVALID_JSON)
         return payload
