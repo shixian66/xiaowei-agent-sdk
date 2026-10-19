@@ -59,7 +59,7 @@ P1-B、P2、P2.5 与飞书单群的基础切片已有离线交付记录；P3-A/B
 
 当前开发切片为[模型自主 HTML/MD 报告 v3](docs/superpowers/plans/2026-10-19-model-authored-reports.md)：复用 blocks 和现有治理/交付；MD 原生排版、独立 HTML 片段与短 Skill，事实就近由代码填入，主消息提取文字。版本 3 贯穿保存/读取，解决旧纯文本在升级时未绑定字节的兼容问题；旧 HTML 基线字节回归保持一致。禁止脚本/外部资源，解析 CSS 值控制布局，文件/试排/预览只清理一次。A1 仍保留通用模型失败回执，未扩大数据/权限或 SQL 取数限额。
 
-并行诊断候选 `codex/vertex-429-diagnostics` 从 `f7eabe6` 起步，只给 Vertex HTTP 尝试和轮次增加安全计数、429 结构化分类与 usage 日志；SDK 重试、模型/工具行为及 OpenAI 协议族不变。`main` 在开工时已到 `b89d4ee`，指定的 `model_api.py`、`vertex_model.py`、`runtime.py` 与 `f7eabe6` 无差异。按 `1d7edb0` 独立复审意见，已将 quota metric/id 与 ErrorInfo.reason 的单值白名单改为限定格式，保留配额类型与无配额详情分类；相关合成响应与应用测试 **342 passed**，ruff、mypy（34 文件）通过。新提交仍需精确复审；真实 429 样本、公司环境和部署仍未验证。报告集成另按授权节奏处理。
+并行诊断候选 `codex/vertex-429-diagnostics` 从 `f7eabe6` 起步，只给 Vertex HTTP 尝试和轮次增加安全计数、429 结构化分类与 usage 日志；SDK 重试、模型/工具行为及 OpenAI 协议族不变。`main` 在开工时已到 `b89d4ee`，指定的 `model_api.py`、`vertex_model.py`、`runtime.py` 与 `f7eabe6` 无差异。quota metric 与 ErrorInfo.reason 按限定格式记录；`quotaId` 增加 `RequestsPer`/`TokensPer` 的配额名形状，修复 `cd9442e` 复审发现的纯字母类 Key 泄漏。相关合成响应与应用测试 **344 passed**，ruff、mypy（34 文件）通过。新提交仍需精确复审；真实 429 样本、公司环境和部署仍未验证。报告集成另按授权节奏处理。
 
 S3 的源码事实：`AgentAnswer` 为有序 `TextBlock | FactBlock`，另含 `report_format` 与 `awaiting_user`；模型文字累计上限为 16,000 UTF-8 字节、最多 64 块。归一化、输出预检、Session 提交与交付复用同一规则；本轮新事实的 brief 改完整展示，重复引用取完整，不新增模型调用。符合补全类别的本轮结果进入“其余结果”，历史结果与未引用的诊断/发现原值不补全。动作区域置顶且不进附件；暂停材料显式引用本次请求执行的动作及本轮动作状态，不自动补入其他未请求执行的提案，暂停前已取得的需交付只读结果仍由交付补全。
 

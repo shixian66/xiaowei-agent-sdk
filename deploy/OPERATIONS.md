@@ -1106,7 +1106,8 @@ Vertex 路径额外记录每次通过请求校验、发往底层 transport 的 H
 `prompt_tokens`、`candidates_tokens`、`thoughts_tokens`，缺失写 `unknown`。429 只从结构化错误
 详情提取固定字段；`reason` 仅接受大写字母/下划线，`domain` 仅接受指定 Google 域名，
 quota metric 仅接受 `aiplatform.googleapis.com/` 下的无数字小写指标名，quota ID 仅接受
-无数字的字母名；各字段仍限 128 字符，其余写 `other`。响应在 transport 被拒绝时仍计收到的 429，
+含 `RequestsPer` 或 `TokensPer` 的 CamelCase 配额名；各字段仍限 128 字符，其余写 `other`。
+响应在 transport 被拒绝时仍计收到的 429，
 但正文详情写 `unknown`。
 `rate_kind=quota` 表示明确的配额详情，`no_quota_detail` 只表示
 `RESOURCE_EXHAUSTED` 且未见配额详情，不能据此断定共享容量不足。`retry_after` 只记录合法数字秒

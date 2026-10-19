@@ -198,6 +198,32 @@ async def test_quota_names_with_digits_or_project_path_are_other(
     assert metric not in caplog.text and quota_id not in caplog.text
 
 
+@pytest.mark.parametrize("quota_id", ["AIza" + "a" * 35, "SecretTokenWithoutQuota"])
+async def test_quota_id_without_quota_shape_is_other(
+    quota_id: str, caplog: pytest.LogCaptureFixture
+) -> None:
+    response = _error(
+        details=[
+            {
+                "@type": "type.googleapis.com/google.rpc.QuotaFailure",
+                "violations": [
+                    {
+                        "quotaMetric": (
+                            "aiplatform.googleapis.com/generate_content_requests_per_minute"
+                        ),
+                        "quotaId": quota_id,
+                    }
+                ],
+            }
+        ]
+    )
+    with caplog.at_level(logging.INFO):
+        with pytest.raises(ModelAPIStatusError):
+            await _observed(Endpoint([response] * 4))
+    assert "quota_id=other" in caplog.text
+    assert quota_id not in caplog.text
+
+
 async def test_unknown_reason_does_not_hide_explicit_quota_failure(
     caplog: pytest.LogCaptureFixture,
 ) -> None:

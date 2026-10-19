@@ -82,7 +82,9 @@ _QUOTA_REASONS = frozenset({"QUOTA_EXCEEDED", "RATE_LIMIT_EXCEEDED"})
 _SAFE_REASON = re.compile(r"[A-Z][A-Z_]{1,63}\Z")
 _SAFE_DOMAIN = re.compile(r"(?:googleapis\.com|aiplatform\.googleapis\.com)\Z")
 _SAFE_QUOTA_METRIC = re.compile(r"aiplatform\.googleapis\.com/[a-z]+(?:_[a-z]+)*\Z")
-_SAFE_QUOTA_ID = re.compile(r"[A-Z][A-Za-z]{1,100}\Z")
+_SAFE_QUOTA_ID = re.compile(
+    r"(?=.{2,101}\Z)(?:[A-Z][a-z]+)+(?:Requests|Tokens)Per(?:[A-Z][a-z]+)+\Z"
+)
 _DURATION = re.compile(r"(\d{1,20})(?:\.(\d{1,9}))?s\Z")
 _RETRY_AFTER_NUMBER = re.compile(r"\d{1,4}(?:\.\d{1,3})?\Z")
 logger = logging.getLogger(__name__)
