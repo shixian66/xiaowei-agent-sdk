@@ -44,7 +44,7 @@ async def test_normalized_md_is_literal_and_network_free_in_commonmark_reader(
         visible = await page.evaluate("document.body.innerText")
         for value in ("ARRAY<INT>", "MAP<STRING,INT>", "List<String>", "第一行<br>第二行"):
             assert value in visible
-        assert "来源" in visible and "部分不支持的格式已移除" in visible
+        assert "来源" in visible and "部分不支持的格式已按原文展示" in visible
         assert not [
             event
             for event in page.events("Network.requestWillBeSent", mark)

@@ -86,7 +86,8 @@ async def test_raw_md_common_markup_keeps_facts_and_resends_original_parts(
     assert len(files) == 1
     content = files[0].decode()
     assert source in content
-    assert ("部分不支持的格式已移除" in content) is notice
+    assert ("部分不支持的格式已按原文展示" in content) is notice
+    assert "部分不支持的格式已移除" not in content
     tokens = MarkdownIt("commonmark", {"html": True}).enable("table").parse(content)
     forbidden = {"html_inline", "html_block", "link_open", "image"}
     assert not any(
@@ -337,7 +338,7 @@ async def test_previously_failed_unbound_md_can_be_resent_without_new_query(env:
     )
     assert len(platform.files) == 1
     assert "ARRAY<INT>" in platform.files[0].decode()
-    assert "部分不支持的格式已移除" in platform.files[0].decode()
+    assert "部分不支持的格式已按原文展示" in platform.files[0].decode()
     assert len(env.adapter.calls) == 1 and env.model_calls(message) == 2
 
 
@@ -346,7 +347,7 @@ async def test_raw_feishu_entry_native_report_or_bounded_failure(env: Env, case:
     source = (
         "<script>upstream-secret</script>"
         if case == "unsafe"
-        else '<h1 style="color:navy">巡检发现</h1><p>解释与建议</p>'
+        else '<h1 style="color:navy" onclick="bad()">巡检发现</h1><p>解释与建议</p>'
         if case == "html"
         else PROSE
     )
@@ -385,6 +386,9 @@ async def test_raw_feishu_entry_native_report_or_bounded_failure(env: Env, case:
             assert not any(t.type == "fence" and PROSE in t.content for t in tokens)
         else:
             assert '<h1 style="color:navy">巡检发现</h1>' in uploaded[0].decode()
+            assert "部分不支持的格式已移除" in uploaded[0].decode()
+            assert "部分不支持的格式已按原文展示" not in uploaded[0].decode()
+            assert "onclick" not in uploaded[0].decode()
             assert "style=" not in str(outbox.sent)
 
 
@@ -445,7 +449,7 @@ def test_native_markdown_keeps_unsupported_constructs_literal(content: str) -> N
     body = build_report(delivery).content.decode()
     tokens = MarkdownIt("commonmark", {"html": True}).parse(body)
     assert any(t.type == "fence" and content in t.content for t in tokens)
-    assert "部分不支持的格式已移除" in body
+    assert "部分不支持的格式已按原文展示" in body
     assert not any(
         t.type in {"html_block", "html_inline", "link_open", "image"}
         or any(c.type in {"html_inline", "link_open", "image"} for c in t.children or ())
@@ -488,7 +492,7 @@ def test_markdown_cannot_activate_a_reference_across_fact_blocks(reference: str)
     tokens = MarkdownIt("commonmark", {"html": True}).parse(body, env_)
     assert not env_.get("references")
     assert not any(c.type in {"image", "link_open"} for t in tokens for c in t.children or ())
-    assert "部分不支持的格式已移除" in body and "来源" in body
+    assert "部分不支持的格式已按原文展示" in body and "来源" in body
     assert "https://invalid.example/duplicate" in body
 
 

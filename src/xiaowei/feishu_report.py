@@ -143,6 +143,9 @@ def _sections(
     其余结果在后；动作区域不进入附件（只在消息中完整展示）。"""
     parts: list[_Section] = []
     content = iter(prepare_prose(delivery) if prose is None else prose)
+    format_notice = (
+        "部分不支持的格式已按原文展示" if delivery.report_format == "md" else FORMAT_NOTICE
+    )
     facts = {fact.evidence_id: fact for fact in delivery.facts}
     for block in delivery.blocks:
         if isinstance(block, DeliveryFactRef):
@@ -162,7 +165,7 @@ def _sections(
                     "模型说明",
                     prepared.body if prepared else block.text,
                     "模型生成，未经系统核实",
-                    (FORMAT_NOTICE,) if prepared and prepared.changed else (),
+                    (format_notice,) if prepared and prepared.changed else (),
                     native=prepared is not None,
                 )
             )
