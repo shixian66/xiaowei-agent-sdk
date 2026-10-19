@@ -816,6 +816,15 @@ _STAGE = re.compile(
     r"(?: tool_calls=\d+ executed=\d+ truncated=\d+ rejected=\d+)?"
     r"(?: limit_rescue=failed)?"
 )
+_MODEL_SUMMARY = re.compile(
+    r"turn=\S+ stage=model_summary reason=- elapsed_ms=\d+ model_requests=\d+ http_429=\d+"
+    r" retries=\d+ request_bytes_max=\d+ input_tokens=(?:\d+|unknown)"
+    r" output_tokens=(?:\d+|unknown)"
+    r"(?: rate_kind=(?:quota|no_quota_detail|unknown) status=[A-Z_]+"
+    r" reason=[A-Za-z0-9._/-]+ domain=[A-Za-z0-9._/-]+"
+    r" quota_metric=[A-Za-z0-9._/-]+ quota_id=[A-Za-z0-9._/-]+"
+    r" retry_delay_s=(?:\d+(?:\.\d+)?|unknown) retry_after=[A-Za-z0-9._/-]+)?"
+)
 
 
 @pytest.mark.parametrize(
@@ -906,6 +915,157 @@ async def test_vertex_failure_uses_the_same_safe_log_categories(
     assert calls == (4 if case in {"429", "503"} else 1)
     assert f"error_kind={kind} http_status={status}" in output
     assert all(value not in output for value in (MODEL_SECRET, SYNTHETIC_SQL, FAKE_MODEL_KEY))
+
+
+async def test_vertex_turn_summary_after_retry_success(
+    env: Env, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    calls = 0
+
+    def respond(request: httpx2.Request) -> httpx2.Response:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            return httpx2.Response(429, json={"error": {"status": "RESOURCE_EXHAUSTED"}})
+        return httpx2.Response(
+            200,
+            json=_body(
+                [{"text": json.dumps(answer_body([], "完成"))}],
+                usage={"promptTokenCount": 13, "candidatesTokenCount": 5, "thoughtsTokenCount": 3},
+            ),
+        )
+
+    monkeypatch.setenv(VERTEX.api_key_ref.removeprefix("env:"), FAKE_MODEL_KEY)
+    profile = VERTEX.model_copy(update={"data_policy_id": PROFILE.data_policy_id})
+    async with open_model(profile, transport=httpx2.MockTransport(respond)) as binding:
+        vertex_env = replace(env, binding=binding)
+        with all_logs() as records:
+            await vertex_env.app.run_turn(vertex_env.ctx(turn="vertex-retry-ok"), "合成诊断")
+    summaries = [r.getMessage() for r in records if "stage=model_summary" in r.getMessage()]
+    assert len(summaries) == 1
+    assert "model_requests=2 http_429=1 retries=1" in summaries[0]
+    assert "input_tokens=13 output_tokens=8" in summaries[0]
+    assert "rate_kind=no_quota_detail status=RESOURCE_EXHAUSTED" in summaries[0]
+    assert calls == 2
+
+
+async def test_vertex_failed_turn_summary_keeps_earlier_success_usage(
+    env: Env, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    calls = 0
+
+    def respond(request: httpx2.Request) -> httpx2.Response:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            return httpx2.Response(
+                200,
+                json=_body(
+                    [_call_part(name="order_total")],
+                    usage={
+                        "promptTokenCount": 11,
+                        "candidatesTokenCount": 7,
+                        "thoughtsTokenCount": 2,
+                    },
+                ),
+            )
+        return httpx2.Response(429, json={"error": {"status": "RESOURCE_EXHAUSTED"}})
+
+    monkeypatch.setenv(VERTEX.api_key_ref.removeprefix("env:"), FAKE_MODEL_KEY)
+    profile = VERTEX.model_copy(update={"data_policy_id": PROFILE.data_policy_id})
+    async with open_model(profile, transport=httpx2.MockTransport(respond)) as binding:
+        vertex_env = replace(env, binding=binding)
+        with all_logs() as records, pytest.raises(TurnError) as failed:
+            await vertex_env.app.run_turn(vertex_env.ctx(turn="vertex-retry-fail"), "合成诊断")
+    assert failed.value.reason == "model_failed" and calls == 5
+    summaries = [r.getMessage() for r in records if "stage=model_summary" in r.getMessage()]
+    assert len(summaries) == 1
+    assert "model_requests=5 http_429=4 retries=3" in summaries[0]
+    assert "input_tokens=11 output_tokens=9" in summaries[0]
+
+
+async def test_vertex_concurrent_turn_summaries_do_not_share_counts(
+    env: Env, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    first_waiting = asyncio.Event()
+    release_first = asyncio.Event()
+    first_calls = 0
+
+    async def respond(request: httpx2.Request) -> httpx2.Response:
+        nonlocal first_calls
+        if b"first" in request.content:
+            first_calls += 1
+            if first_calls == 1:
+                first_waiting.set()
+                await release_first.wait()
+                return httpx2.Response(429, json={"error": {"status": "RESOURCE_EXHAUSTED"}})
+            prompt = 3
+        else:
+            await first_waiting.wait()
+            release_first.set()
+            prompt = 5
+        return httpx2.Response(
+            200,
+            json=_body(
+                [{"text": json.dumps(answer_body([], "完成"))}],
+                usage={
+                    "promptTokenCount": prompt,
+                    "candidatesTokenCount": 2,
+                    "thoughtsTokenCount": 1,
+                },
+            ),
+        )
+
+    monkeypatch.setenv(VERTEX.api_key_ref.removeprefix("env:"), FAKE_MODEL_KEY)
+    profile = VERTEX.model_copy(update={"data_policy_id": PROFILE.data_policy_id})
+    async with open_model(profile, transport=httpx2.MockTransport(respond)) as binding:
+        vertex_env = replace(env, binding=binding)
+        with all_logs() as records:
+            await asyncio.gather(
+                vertex_env.app.run_turn(vertex_env.ctx(session="s-first", turn="first"), "first"),
+                vertex_env.app.run_turn(
+                    vertex_env.ctx(session="s-second", turn="second"), "second"
+                ),
+            )
+    summaries = {
+        r.getMessage().split(" ", 1)[0]: r.getMessage()
+        for r in records
+        if "stage=model_summary" in r.getMessage()
+    }
+    assert len(summaries) == 2
+    assert "model_requests=2 http_429=1 retries=1" in summaries["turn=first"]
+    assert "input_tokens=3 output_tokens=3" in summaries["turn=first"]
+    assert "model_requests=1 http_429=0 retries=0" in summaries["turn=second"]
+    assert "input_tokens=5 output_tokens=3" in summaries["turn=second"]
+
+
+async def test_vertex_repair_subrun_is_in_same_summary(
+    env: Env, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    calls = 0
+
+    def respond(request: httpx2.Request) -> httpx2.Response:
+        nonlocal calls
+        calls += 1
+        text = "{}" if calls == 1 else json.dumps(answer_body([], "修正完成"))
+        return httpx2.Response(
+            200,
+            json=_body(
+                [{"text": text}],
+                usage={"promptTokenCount": 4, "candidatesTokenCount": 2, "thoughtsTokenCount": 1},
+            ),
+        )
+
+    monkeypatch.setenv(VERTEX.api_key_ref.removeprefix("env:"), FAKE_MODEL_KEY)
+    profile = VERTEX.model_copy(update={"data_policy_id": PROFILE.data_policy_id})
+    async with open_model(profile, transport=httpx2.MockTransport(respond)) as binding:
+        vertex_env = replace(env, binding=binding)
+        with all_logs() as records:
+            await vertex_env.app.run_turn(vertex_env.ctx(turn="vertex-repair"), "合成诊断")
+    summary = [r.getMessage() for r in records if "stage=model_summary" in r.getMessage()]
+    assert len(summary) == 1 and calls == 2
+    assert "model_requests=2 http_429=0 retries=0" in summary[0]
+    assert "input_tokens=8 output_tokens=6" in summary[0]
 
 
 @pytest.mark.parametrize(
@@ -1000,6 +1160,7 @@ async def test_vertex_rejection_logs_only_fixed_reason(
     assert env.adapter.calls == []
     assert all(
         _STAGE.fullmatch(record.getMessage()) is not None
+        or _MODEL_SUMMARY.fullmatch(record.getMessage()) is not None
         for record in records
         if record.name == "xiaowei.app"
     )
@@ -1805,10 +1966,13 @@ async def test_vertex_limit_rescue_replays_signed_call_without_offering_tools(
     async with open_model(profile, transport=httpx2.MockTransport(respond)) as binding:
         vertex_env = replace(env, binding=binding)
         ctx = _with_turns(vertex_env.ctx(turn="vertex-rescue", max_tool_calls=1), 1)
-        result = await vertex_env.app.run_turn(ctx, "查合成总数")
+        with all_logs() as records:
+            result = await vertex_env.app.run_turn(ctx, "查合成总数")
         delivery = await vertex_env.app.evidence.validate_answer(result, ctx)
 
     assert len(requests) == 2 and env.tool_ids() == [TOTAL_TOOL]
     assert len(result.answer.evidence_ids) == 1
     assert "步骤已用完" in delivery.content
     assert await env.state() == ("active", 1)
+    summaries = [r.getMessage() for r in records if "stage=model_summary" in r.getMessage()]
+    assert len(summaries) == 1 and "model_requests=2" in summaries[0]

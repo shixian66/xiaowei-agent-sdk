@@ -120,7 +120,13 @@ from xiaowei.session import (
 from xiaowei.starrocks import StarRocksErrorCode
 from xiaowei.storage import StorageError, check_storage
 from xiaowei.tools import governed_function_tool, routed_function_tool
-from xiaowei.vertex_model import ModelAPIStatusError, ModelAPITimeoutError, ModelAPITransportError
+from xiaowei.vertex_model import (
+    ModelAPIStatusError,
+    ModelAPITimeoutError,
+    ModelAPITransportError,
+    VertexTurnMetrics,
+    active_vertex_metrics,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -539,6 +545,8 @@ class Application:
         if len(self._active) >= self._config.max_concurrent_turns:
             raise self._refuse(turn, started, "busy")
         self._active.add(session_id)
+        metrics = VertexTurnMetrics() if self._model.profile.provider == "vertex" else None
+        token = active_vertex_metrics.set(metrics) if metrics is not None else None
         try:
             # 证据依赖的检查次数整轮共用一个计数（回放、工具记录、最终校验与提交）。
             with scope_checks() as checks:
@@ -572,6 +580,9 @@ class Application:
         finally:
             self._governance.end_turn(ctx.identity)
             self._active.discard(session_id)
+            if token is not None and metrics is not None:
+                active_vertex_metrics.reset(token)
+                _model_summary(turn, started, metrics)
         _stage(turn, "paused" if isinstance(answer, PausedTurn) else "completed", started)
         return answer
 
@@ -1093,6 +1104,8 @@ class Application:
             raise TurnError("session_busy")
         self._active.add(session_id)
         started = time.monotonic()
+        metrics = VertexTurnMetrics() if self._model.profile.provider == "vertex" else None
+        token = active_vertex_metrics.set(metrics) if metrics is not None else None
         claimed = None
         try:
             with scope_checks(native.scope_checks) as checks:
@@ -1268,6 +1281,9 @@ class Application:
         finally:
             self._governance.end_turn(original.identity)
             self._active.discard(session_id)
+            if token is not None and metrics is not None:
+                active_vertex_metrics.reset(token)
+                _model_summary(original.identity.turn_id, started, metrics)
 
     def _tools_for(
         self, ctx: RunContext, approval_requests: dict[str, int] | None = None
@@ -1539,4 +1555,38 @@ def _stage(
         )
     if stage == "failed" and recorded.limit_rescue_started:
         message += " limit_rescue=failed"
+    logger.info(message, *fields)
+
+
+def _model_summary(turn: str, started: float, metrics: VertexTurnMetrics) -> None:
+    """Vertex 一次运行的安全计数；SDK 异常没有 run_data 时仍保留先前用量。"""
+    message = (
+        "turn=%s stage=model_summary reason=- elapsed_ms=%d model_requests=%d http_429=%d"
+        " retries=%d request_bytes_max=%d input_tokens=%s output_tokens=%s"
+    )
+    fields: tuple[object, ...] = (
+        turn,
+        int((time.monotonic() - started) * 1000),
+        metrics.model_requests,
+        metrics.http_429,
+        metrics.retries,
+        metrics.request_bytes_max,
+        metrics.input_tokens if metrics.input_tokens is not None else "unknown",
+        metrics.output_tokens if metrics.output_tokens is not None else "unknown",
+    )
+    if detail := metrics.last_429:
+        message += (
+            " rate_kind=%s status=%s reason=%s domain=%s quota_metric=%s quota_id=%s"
+            " retry_delay_s=%s retry_after=%s"
+        )
+        fields += (
+            detail.rate_kind,
+            detail.status,
+            detail.reason,
+            detail.domain,
+            detail.quota_metric,
+            detail.quota_id,
+            detail.retry_delay_s if detail.retry_delay_s is not None else "unknown",
+            detail.retry_after,
+        )
     logger.info(message, *fields)
