@@ -159,6 +159,8 @@ P4 的已批准范围只在 [ARCHITECTURE §5「监控接入」](ARCHITECTURE.md
 
 **自然回答与完整结果交付。** 当前契约见 [ARCHITECTURE §7–§8](ARCHITECTURE.md#result-delivery)，交付链切片见[结果交付计划](docs/superpowers/plans/2026-10-14-result-delivery-documents.md)，S0–S4 的回答结构、基线与真实模型评测见[自由回答结构计划](docs/superpowers/plans/2026-10-17-free-answer-structure.md)。新契约替代旧的漏引拒收、固定回答栏目等要求；旧请求按兼容规则读取，不恢复旧约束。当前进度与证据集中在 handoff。监控曲线已决定暂缓，重启时才按 D4 协议前置结论评估；真实模型、平台与客户端验收不由离线测试替代。
 
+**自主调查与进度观察。** 在已有原生报告基础上，按[实施计划 v1](docs/superpowers/plans/2026-10-20-agent-autonomy-progress.md)细化本次设计；T1–T5 在计划、开发、审查和用户验收沿用。新增进度契约只见[架构提案](ARCHITECTURE.md#progress-observation)，不增加产品阶段或另一个 Agent Loop；当前授权与验证状态只看 handoff，设计不代表功能已实现。
+
 P4 之外再根据实际使用决定：多群管理、跨渠道身份与会话、正式多人 Web、导出、后台长任务、新 transport/认证方式、多 Agent、TiDB/MySQL 或数据库 MCP。多个 StarRocks 集群已在 P2.5，单群在其后、P3 前；审计慢查询已在 P2，不能重复列为未来交付。数据库 MCP 的重评条件见 ARCHITECTURE §5。其他生产写动作（含原生 Prometheus 规则文件、Grafana 托管规则、StarRocks DDL/DML、重启与发布）不因 P4 的审批能力自动获准，逐项按 §4 的 Action 契约另行决定。
 
 此前“DDL 是首个写场景、通过独立写 MCP Server 执行”的预想已被监控写需求取代；DDL 仍待独立决定。群批准改用 SDK needs_approval/interruptions/RunState，替代“不跨消息恢复”的旧设计；小维保留确定 Action、当前身份/权限、材料送达、原子防重、对象版本及执行/Evidence事实，详细契约只看 ARCHITECTURE §5。SDK整改的正式闭环与原会话失效分支未验证前，不开放对应生产写。
