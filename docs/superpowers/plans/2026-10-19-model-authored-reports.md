@@ -1,6 +1,6 @@
 # 模型自主 HTML/MD 报告最小开发方案
 
-> 状态：v3 已获准开发，R0/R1/R2 离线实现进行中，最终完整检查与独立代码审查待记录；R3 未验收。日期：2026-10-19，Asia/Shanghai。代码基线：`b89d4ee71cb5082adcde396f3dece12fd169af48`；开发分支 `codex/model-authored-reports`。未调用真实模型或公司服务，未部署。
+> 状态：R0/R1/R2 离线实现、完整回归和独立复审已完成，可供本地审阅；R3 按用户决定留待公司内网验证，未验收。日期：2026-10-19，Asia/Shanghai。代码基线：`b89d4ee71cb5082adcde396f3dece12fd169af48`；开发分支 `codex/model-authored-reports`。未调用真实模型或公司服务，未部署。
 >
 > 已按用户连续开发授权串行推进，采用 `superpowers:executing-plans` 与 TDD；高风险差异须针对具体候选版本独立审查。真实 Profile/数据/预算仍须明确授权，本文件不将离线通过晋级为真实能力验收。
 
@@ -131,7 +131,9 @@ HTML 报告的预览从同一次准备所得的安全片段提取可读文字，
 
 模型可用标题、段落、强调、列表、代码围栏和表格，不再把全部文字套入代码围栏。复用现有解析器处理明确静态子集；原始 HTML、图片和链接不能变成可执行或自动加载内容，代码围栏内的 HTML/SQL 作为文字保留。不承诺控制任意第三方阅读器插件。
 
-实现中补到了两个真实围栏反例：只有开头标记时不能把它当闭合；引用中的未闭合围栏不能在根级补一个新围栏，否则会包住后续事实。现以 markdown-it 的层级和块范围核对结束标记：顶层缺闭合可补齐，列表/引用内缺闭合则明确未完成，完整嵌套围栏仍支持。不重建 Markdown 渲染引擎。
+实现及独立审查复现了跨块引用和围栏反例：引用定义可激活其他块中的图片/链接；宽泛 `splitlines()/strip()` 会把缩进或 Unicode 空白误认为闭合围栏，吞入后续事实。现用同一次 markdown-it 解析的 `env.references` 拒绝围栏外引用定义；以公开 Token 的源行跨度与正文 LF 行数判断真正闭合，不重写一套缩进规则。顶层缺闭合可补齐，保留原空白；列表/引用内缺闭合则明确未完成，完整嵌套围栏仍支持。
+
+可见性反例 `font-size:0`、极小字号和完全透明前景色同样纳入移除并提示的范围。字号只接受 12–64px 或等价 rem，以现有报告正文可读性为依据；背景透明仍允许。真实浏览器核对这些具体反例，不据此声称能自动保证任意配色对比度或模型设计质量。
 
 安全处理不得删除代码事实、来源或限制。正常内容和目标排版被规范化后能否保留须实际验证；不支持的构造提供有限、可操作的说明。不改 SDK 私有历史或把片段送入普通聊天 DOM，文件绑定后不在重发时另做“自动修好”。
 
@@ -189,7 +191,7 @@ Skill 明确片段/CSS 子集、正文与事实的不同身份，不把返回行
 - [x] **A2/A3：** 先写安全/视觉/预览行为测试，再接 R0 选定处理方式；覆盖比较符、SQL、尖括号、实体、未转义反例及各清理分类。每个模型片段独立闭合，来源标记与事实在片段外；历史兼容结论落实后才开放。
 - [x] 允许片段内自行排版，验证正常文字/表格未被清理吞掉；主消息有可读预览、不泄露布局源码且保留有意展示的代码文字，附件/试排/预览复用一次安全结果，不额外生成摘要、清理流程或查询。
 - [x] 复用按块/事实整行分卷及不可变字节；仅补新片段导致的容量、来源、部分交付回归，旧 unknown/回执链路以相关既有回归覆盖。
-- [ ] 真实浏览器验证安全与目标设计同时成立，针对实际候选差异独立审查；阻断未关闭前不开放 HTML 入口。同步受影响的架构、handoff、README/运维说明。
+- [x] 真实浏览器验证安全与目标设计同时成立，针对实际候选差异独立审查；阻断未关闭前不开放 HTML 入口。同步受影响的架构、handoff、README/运维说明。
 
 **退出：** HTML/MD 复用同一治理与交付链，片段设计、事实可达和无未授权 I/O 有离线/浏览器证据；真实模型、公司数据和飞书实收另记。
 
@@ -235,15 +237,21 @@ PYTHONDONTWRITEBYTECODE=1 .venv/bin/python -m pytest \
   -q -p no:cacheprovider
 ```
 
-当前已实现新正文、安全处理、预览、可信版本和随包 Skill；未调整查询限额或报告文字预算。已核实证据如下，最终候选仍须完成完整检查与独立代码审查：
+当前已实现新正文、安全处理、预览、可信版本和随包 Skill；未调整查询限额或报告文字预算。产品候选为 `dbf249590f1b3e2289d8d755b3b765ea61bfda84`，测试基线补齐于 `3ddcb4066a991ff3473637a0d6bf089ccf491f71`；最终检查对应同一产品/测试树，后续仅更新本文等交付文档。以下均为本地证据：
 
 | 检查 | 当前证据与限制 |
 | --- | --- |
-| 新内容与正式链回归 | `SDK_TEST_POSTGRES_URL=postgresql+asyncpg://postgres@127.0.0.1:55432/postgres .venv/bin/python -m pytest tests/sdk_core/test_model_reports.py tests/sdk_core/test_report_content.py -q`：39 passed；真实 Runner/治理/PostgreSQL，原始飞书事件的 MD/HTML 成功、截断/不安全正文失败、澄清、撤权、升级与分卷；外部模型/平台为替身 |
+| 默认完整回归 | `SDK_TEST_POSTGRES_URL=postgresql+asyncpg://postgres@127.0.0.1:55432/postgres .venv/bin/python -m pytest -q`：**4329 passed、235 skipped、75 deselected**，耗时 1465.32 秒；含真实 SDK/隔离 PostgreSQL 与 Docker 发行/迁移/备份恢复。5 项 warning 来自预期的网络拒绝测试；跳过和未选中不计通过，真实外部服务不计验收 |
+| 新内容与正式链回归 | `SDK_TEST_POSTGRES_URL=postgresql+asyncpg://postgres@127.0.0.1:55432/postgres .venv/bin/python -m pytest tests/sdk_core/test_model_reports.py tests/sdk_core/test_report_content.py -q`：54 passed；真实 Runner/治理/PostgreSQL，原始飞书事件的 MD/HTML 成功、截断/不安全正文失败、澄清、撤权、升级与分卷；外部模型/平台为替身 |
 | Chrome | `SDK_TEST_CHROME='/Applications/Google Chrome.app/Contents/MacOS/Google Chrome' .venv/bin/python -m pytest tests/sdk_core/test_feishu_report_browser.py -m browser -q -s`：4 passed；桌面/390px/打印、事实可达、SQL 复制与无外部请求，合成报告截图已查看 |
-| 静态检查 | `.venv/bin/ruff check .` 及 `.venv/bin/mypy src` 通过，后者 34 个源文件；完整仓库检查另记，不拼接零散结果伪称全绿 |
-| 构建/依赖 | 项目 wheel 构建并核对模块/Skill 入包；Linux amd64 目标的新增依赖二进制包可安装；锁定依赖审计无已知漏洞 |
+| 静态检查 | `.venv/bin/ruff check .`、`.venv/bin/mypy src`、`git diff --check` 通过，mypy 覆盖 34 个源文件；受影响文档检查 2 passed |
+| 构建/依赖 | 项目 wheel 构建并在仓库外的纯生产依赖环境验证两个正式入口及模块/Skill；Linux amd64 目标的新增依赖二进制包可安装；从锁文件导出后 `pip-audit --strict -r` 无已知漏洞 |
+| 公共安全门 | `.venv/bin/python -m pytest -m security -q`：63 passed、4576 deselected。初次两项依赖基线失败后，仅将已批准的 `nh3/tinycss2` 和缺少存根的 `tinycss2.*` 记入精确白名单；集合相等、全局 strict、禁止源码忽略和全局豁免不变 |
+| 敏感信息扫描 | Gitleaks 8.30.0 官方 macOS 发行包经校验和核对；诱饵与豁免窄度自测通过，`gitleaks git --log-opts='--all' --redact --no-banner .` 完整 Git 历史无泄漏；不是远端 CI 证据 |
+| 独立代码审查 | 基线 `b89d4ee…` 至 `e76b4f5…` 首审发现跨块引用 P1、围栏身份和隐藏正文 P2；经 RED/GREEN 修复后，`dbf2495…` 只读复审三项关闭、检查范围内无新增阻断。审查者独立运行 43 passed / 11 deselected、Chrome 4 passed；864 个围栏组合探针未吞入后续事实。`3ddcb40…` 仅同步依赖基线，独立增量复核 12 passed、无新增发现。均不代替完整套件和真实任务验收 |
 | 真实能力 | 没有真实 provider、公司查询或真实飞书发送；R3 的任务质量、步数、耗时/用量、平台实收与客户端验收仍缺，不能由脚本模型或本地截图替代 |
+
+R3 执行安排（用户明确决定）：本轮与公司环境隔离，只做离线验证，不做真实模型调用，也不为此等待凭据或阻塞本地交付。**真实 provider 的格式接受、典型报告 token/长度/截断及思考 token 口径均未验证。** 待候选版本经另行批准部署到公司环境后，由操作者在内网运行合成数据测试，最多 60 次实际模型 HTTP 请求（含重试）、费用不超过 5 美元；届时核对实际生产 Profile 和安全引用。此安排不代表 R3 通过，也不授予本轮部署或公司数据访问权限。
 
 ## 10. 调研依据与重评条件
 
