@@ -132,12 +132,17 @@ def _data_parts(
             }
         )
     # 用途写入同一绑定正文与文件内标题；不新增持久化 filename/role 字段。
-    index = "；".join(
+    file_index = "；".join(
         f"文件 {i}：{'证据明细' if report.filename.startswith('xiaowei-details') else '报告正文'}"
         for i, report in enumerate(reports, 1)
     )
     body = _preview(
-        preview, max_chars, chat_id, reply_to, f"本次完整结果见附件。{index}。", attachment=True
+        preview,
+        max_chars,
+        chat_id,
+        reply_to,
+        f"本次完整结果见附件。{file_index}。",
+        attachment=True,
     )
     parts = [
         DeliveryPart(sequence + index, report.format, report.content)

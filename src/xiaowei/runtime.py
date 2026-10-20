@@ -1002,6 +1002,7 @@ def _monitoring_catalog(
         },
         required=("query", "result", "warnings"),
         fact_note="Prometheus MCP 返回的结果为服务端排版文本；采集时间不是指标求值时间。",
+        fact_note_summary="即时指标求值；采集时间不是指标求值时间。",
     )
     windows = (
         "时间为 Unix 秒、含时区 RFC3339，或 now/-15m/-1h/-7d；窗宽最多31天。"
@@ -1081,6 +1082,14 @@ def _monitoring_catalog(
             },
             required=fields,
             fact_note=note,
+            fact_note_summary={
+                "query_range": "仅代表本次求值窗口，不代表未查范围。",
+                "label_names": "窗口内发现的标签名称，不是实时健康检查。",
+                "label_values": "标签值仅证明窗口内存在序列，不证明当前健康或配置。",
+                "series": "仅为序列标签，不是实时指标或资产清单。",
+                "metric_metadata": "仅指标元数据，未返回上游警告，不证明健康或完整。",
+                "list_rules": "规则定义及求值状态，不代表主机健康；未返回上游警告。",
+            }.get(name),
         )
         descriptions[name] = description
     grafana = (
@@ -1161,9 +1170,12 @@ def _monitoring_catalog(
             required=required,
             fact_note=note,
             fact_note_summary=(
-                "仪表盘配置摘要；默认时间窗不是已执行的指标查询，未返回单位/阈值。"
-                if name == "get_dashboard_summary"
-                else None
+                {
+                    "get_dashboard_summary": "仪表盘配置快照，不是实时指标；未返回单位/阈值。",
+                    "search_dashboards": "仪表盘定义目录；total 是本页数量，不是全源计数。",
+                    "get_dashboard_panel_queries": "面板查询配置快照，未执行查询，不是实时指标。",
+                    "get_annotations": "窗口内标记记录，不证明因果或主机健康。",
+                }.get(name)
             ),
         )
         descriptions[name] = description

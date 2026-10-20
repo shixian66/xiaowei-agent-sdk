@@ -407,6 +407,7 @@ def alertmanager_catalog(
                         else "历史快照不证明当前状态。"
                     )
                 ),
+                fact_note_summary="告警采集快照，不证明通知发送或主机健康；分页只覆盖本次响应。",
             )
             contracts.append(
                 ToolContract(

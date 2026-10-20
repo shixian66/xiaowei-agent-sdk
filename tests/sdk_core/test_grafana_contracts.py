@@ -224,7 +224,9 @@ async def test_one_grafana_schema_drift_hides_only_that_tool(env: Env) -> None:
             message = env.scripts.add(
                 "兼容工具仍可读", tool_call(f"{SOURCE}__get_dashboard_summary", uid="host"), cite()
             )
-            assert (await served.turn(message, "query")).json()["state"] == "completed"
+            body = (await served.turn(message, "query")).json()
+            assert body["state"] == "completed"
+            assert "配置快照，不是实时指标" in body["delivery"]["facts"][0]["note_summary"]
             visible = env.scripts.tools_seen(message)[0]
             assert f"{SOURCE}__get_dashboard_summary" in visible
             assert f"{SOURCE}__get_dashboard_panel_queries" not in visible

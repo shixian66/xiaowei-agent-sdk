@@ -9,7 +9,7 @@ import re
 from dataclasses import dataclass, replace
 from typing import Literal
 
-from xiaowei.feishu_render import _fold_details, display_text, fact_limit_notices
+from xiaowei.feishu_render import display_text, fact_limit_notices, fold_details
 from xiaowei.models import Delivery, DeliveryFact, DeliveryFactRef
 from xiaowei.report_content import FORMAT_NOTICE, ReportContent, prepare_content
 
@@ -126,7 +126,11 @@ def _fact_section(fact: DeliveryFact, label: str, *, expand_brief: bool) -> _Sec
             label,
             fact.summary or "",
             meta,
-            (*notices, "获准原文未展示；如需原文请明确提出。"),
+            (
+                *filter(None, (fact.note_summary,)),
+                *fact_limit_notices(fact),
+                "获准原文未展示；如需原文请明确提出。",
+            ),
         )
     # 显式文件可在当前权限下展开原值；自动换载体保持所选摘要语义。
     return _Section("fact", label, _fact_json(fact), meta, notices, fact)
@@ -144,8 +148,12 @@ def _sections(
     delivery: Delivery, *, expand_brief: bool, prose: tuple[ReportContent, ...] | None = None
 ) -> list[_Section]:
     """按正文块顺序填入现有模板：模型文字转义为说明段落，事实章节由代码生成并带来源；
-    其余结果在后；动作区域不进入附件（只在消息中完整展示）。"""
-    parts: list[_Section] = []
+    其余结果在后；完整审批材料由发送端剥离，动作状态在报告中完整展示。"""
+    parts: list[_Section] = [
+        _fact_section(fact, delivery.result_label(fact.evidence_id), expand_brief=True)
+        for fact in delivery.facts
+        if fact.section == "action"
+    ]
     content = iter(prepare_prose(delivery) if prose is None else prose)
     format_notice = (
         "部分不支持的格式已按原文展示" if delivery.report_format == "md" else FORMAT_NOTICE
@@ -156,6 +164,8 @@ def _sections(
             if block.evidence_id not in facts:
                 continue  # 动作材料不进附件
             fact = facts[block.evidence_id]
+            if fact.section == "action":
+                continue
             parts.append(
                 _fact_section(
                     fact, delivery.result_label(fact.evidence_id), expand_brief=expand_brief
@@ -465,16 +475,17 @@ def _render(
             detail = _html_fact(section.value) if section.fact else _html_prose(section.value)
             meta = f'<p class="meta">{_escaped(section.meta)}</p>' if section.meta else ""
             notes = "".join(f'<p class="notice">{_escaped(item)}</p>' for item in section.notices)
-            if natural and section.fact is not None:
+            if natural and section.fact is not None and section.fact.section != "action":
                 fact = section.fact
                 limits = "".join(
-                    f'<p class="notice">{_escaped(item)}</p>' for item in fact_limit_notices(fact)
+                    f'<p class="notice">{_escaped(item)}</p>'
+                    for item in filter(None, (fact.note_summary, *fact_limit_notices(fact)))
                 )
                 inline = (
                     _html_prose(fact.summary)
                     if fact.historical_brief and fact.summary is not None
                     else ""
-                    if _fold_details(fact)
+                    if fold_details(fact)
                     else _html_fact(_table_json(fact, section.value))
                 )
                 html_blocks.append(
@@ -609,7 +620,7 @@ def build_reports(
     body, details = [], []
     for section in sections:
         fact = section.fact
-        if fact is None:
+        if fact is None or fact.section == "action":
             body.append(section)
             continue
         details.append(section)
@@ -617,11 +628,11 @@ def build_reports(
             replace(
                 section,
                 value=(fact.summary or "完整原值见证据明细文件。")
-                if _fold_details(fact)
+                if fold_details(fact)
                 else _table_json(fact),
-                fact=None if _fold_details(fact) else fact,
+                fact=None if fold_details(fact) else fact,
                 meta=None,
-                notices=fact_limit_notices(fact),
+                notices=tuple(filter(None, (fact.note_summary, *fact_limit_notices(fact)))),
             )
         )
     return (

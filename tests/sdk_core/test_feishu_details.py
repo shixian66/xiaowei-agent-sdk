@@ -197,6 +197,7 @@ def test_folded_monitoring_keeps_warning_visible_and_actual_parameters_in_detail
     )
     visible = "\n".join(text_parts(message, folded=False))
     assert "1792440000" not in visible and "step:" not in visible
+    assert "查询窗口（北京时间）" in visible and "步长 60 秒" in visible
     assert "数据源返回警告" in visible
     assert "up{instance=host1}" not in visible
     complete = "\n".join(text_parts(message))

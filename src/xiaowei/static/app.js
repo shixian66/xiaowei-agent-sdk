@@ -57,12 +57,8 @@
     const meta = [`来源 ${fact.tool_id}`, `目标 ${fact.target_id}`];
     (action ? box : details).append(el("p", "meta", `${label} · ${meta.join(" · ")}`));
     if (brief && fact.summary) box.append(el("p", "content fact-summary", fact.summary));
-    if (fact.truncated) box.append(el("p", "note", "结果已截断，当前显示的不是全部结果"));
     if (fact.note) (action ? box : details).append(el("p", "note", `说明：${fact.note}`));
     if (!action && fact.note_summary) box.append(el("p", "note", fact.note_summary));
-    const warnings = fact.metadata?.warnings;
-    if (warnings != null && !["", "[]", "null"].includes(String(warnings)))
-      box.append(el("p", "note", "数据源返回警告，详见依据。"));
     for (const [key, value] of Object.entries(fact.metadata || {})) {
       // 普通 metadata 完整留在依据中；动作材料保持原专用展示。
       (action ? box : details).append(el("p", "content", `${key}: ${cellText(value)}`));

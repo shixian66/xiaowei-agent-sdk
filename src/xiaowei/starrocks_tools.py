@@ -324,6 +324,15 @@ def starrocks_tools(
             required=fields,
             data_scope=scope,
             fact_note=fact_note,
+            fact_note_summary={
+                "list_slow_queries": "仅列获准候选；审计有入库延迟，为空不代表没有慢查询。",
+                "explain_query": "执行计划为估算，未实际运行；不能单凭计划确认慢因。",
+                "list_databases": "仅含当前可读对象的元数据快照，不含空库及系统库。",
+                "list_tables": "当前可读对象的元数据快照，不代表实时业务状态。",
+                "describe_table": "字段结构快照，不含完整建表定义或主键信息。",
+                "describe_table_layout": "表布局摘要；分区键不代表粒度，桶数 0 不能确认实际桶数。",
+                "show_create_table": "采集时的服务器表定义；分区定义不代表当前分区状态。",
+            }.get(name),
         )
 
     query_context = (

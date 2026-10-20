@@ -510,6 +510,7 @@ async def test_formal_assembly_diagnoses_with_a_plan_and_never_runs_the_query(en
         assert sent.startswith(EXPLAIN_PREFIX) and "LIMIT" not in sent
         (fact,) = body["delivery"]["facts"]
         assert fact["tool_id"] == "local/explain_query" and fact["note"] == PLAN_NOTE
+        assert "执行计划为估算，未实际运行" in fact["note_summary"]
         assert fact["rows"] == [{"plan": "- Output => [1:region]"}, {"plan": "    - SCAN [sales]"}]
         assert f"说明：{PLAN_NOTE}" in body["delivery"]["content"]
         assert await served.finish() == 0

@@ -559,6 +559,14 @@ class EvidenceStore:
                 ),
             }
         )
+        if record.identity.turn_id != ctx.identity.turn_id and section != "action":
+            fact = fact.model_copy(
+                update={
+                    "note_summary": "；".join(
+                        filter(None, (fact.note_summary, "采集时结果，不代表当前状态。"))
+                    )
+                }
+            )
         # 当前 brief 仅收起，summary 留空；历史摘要仍受原有行数语义限制。
         if view == "brief" and not complete and section != "action":
             if record.identity.turn_id == ctx.identity.turn_id:

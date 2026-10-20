@@ -13,7 +13,9 @@ import re
 import unicodedata
 from collections.abc import Sequence
 from collections.abc import Set as AbstractSet
+from datetime import datetime
 from typing import Any, Final
+from zoneinfo import ZoneInfo
 
 from xiaowei.feishu_markdown import format_prose, prose_post
 from xiaowei.models import Delivery, DeliveryFact, DeliveryFactRef, JsonScalar
@@ -64,16 +66,65 @@ def display_text(text: str) -> str:
 
 
 def fact_limit_notices(fact: DeliveryFact) -> tuple[str, ...]:
-    """区分分页未完与真实截断，供卡片和报告沿用同一事实口径。"""
+    """从获准投影生成影响结论的简短范围和完整性提醒，供各渠道复用。"""
     cursor = fact.metadata.get("next_cursor")
     notices = []
-    if cursor is not None:
+    if (
+        cursor is not None
+        or fact.metadata.get("has_more") is True
+        or fact.metadata.get("hasMore") is True
+    ):
         notices.append("还有后续页，本页不是全部结果。")
     if fact.truncated and not (fact.tool_id in _PAGED and cursor is not None):
         notices.append("工具结果已截断，不能据此声称完整。")
     warnings = fact.metadata.get("warnings")
     if warnings not in (None, "", "[]", "null"):
         notices.append("数据源返回警告，详见依据。")
+    metadata = fact.metadata
+    filtered = sum(
+        value
+        for key in ("omitted_sqlguard", "omitted_self", "omitted_revoked")
+        if isinstance(value := metadata.get(key), int)
+    )
+    capacity = sum(
+        value
+        for key in (
+            "omitted_statement_too_long",
+            "omitted_value_too_large",
+            "omitted_result_too_large",
+        )
+        if isinstance(value := metadata.get(key), int)
+    )
+    unchecked = metadata.get("unchecked_candidates", 0) or 0
+    if filtered or capacity or unchecked or metadata.get("more_candidates"):
+        notices.append(
+            f"候选未完全列出：规则或权限过滤 {filtered} 条、容量省略 {capacity} 条、"
+            f"未检查 {unchecked} 条。"
+            + ("还有未读取候选，数量未知。" if metadata.get("more_candidates") else "")
+        )
+    window_keys = ("start_time", "end_time")
+    scale = 1
+    if metadata.get("from") is not None and metadata.get("to") is not None:
+        window_keys, scale = ("from", "to"), 1000  # Grafana annotations use Unix milliseconds.
+    if all(metadata.get(key) is not None for key in window_keys):
+        try:
+            window = [
+                datetime.fromtimestamp(
+                    float(str(metadata[key])) / scale, ZoneInfo("Asia/Shanghai")
+                ).isoformat(sep=" ")
+                for key in window_keys
+            ]
+        except (ValueError, OverflowError, OSError):
+            notices.append("查询窗口见依据（时间格式无法显示）。")
+        else:
+            step = metadata.get("step")
+            notices.append(
+                f"查询窗口（北京时间）：{window[0]} 至 {window[1]}。"
+                + (f"步长 {step} 秒。" if step is not None else "")
+            )
+    applied = metadata.get("applied_limit")
+    if applied is not None and metadata.get("requested_limit") != applied:
+        notices.append(f"返回量受限：实际 LIMIT {applied}，多取 1 行用于判断截断。")
     return tuple(notices)
 
 
@@ -170,7 +221,7 @@ def _row_text(fact: DeliveryFact, rows: Sequence[dict[str, JsonScalar]]) -> str:
     )
 
 
-def _fold_details(fact: DeliveryFact) -> bool:
+def fold_details(fact: DeliveryFact) -> bool:
     """只决定展开密度，不限制结果；动作与历史摘要沿既有契约。
 
     十行沿现有表格 page_size；2 KiB 文本避免单行长 SQL/监控值铺满正文。
@@ -277,12 +328,14 @@ def _card(
             elements.append(_div(f"{delivery.result_label(fact.evidence_id)} · {fact.target_id}"))
         elif index not in folded and not fact.historical_brief:
             elements.append(_div(f"数据 · {fact.target_id}"))
-        if fact.note is not None and (not preview or fact.section == "action" or fact.note_summary):
+        if fact.note_summary or (
+            fact.note is not None and (not preview or fact.section == "action")
+        ):
             elements.append(
                 _div(
                     f"说明：{fact.note}"
                     if fact.requires_complete
-                    else fact.note_summary or fact.note
+                    else fact.note_summary or fact.note or ""
                 )
             )
         if fact.requires_complete:
@@ -681,7 +734,7 @@ def build_feishu_message(
     folded = frozenset(
         i
         for i, fact in enumerate(delivery.facts)
-        if platform_limits and _fold_details(fact) and not fact.historical_brief
+        if platform_limits and fold_details(fact) and not fact.historical_brief
     )
     # 附件已接收完整 Delivery，主消息不再复制被收起的大段原值。
     totals = [
