@@ -1439,11 +1439,9 @@ async def test_formal_thousand_rows_complete_single_or_split_files(
             ]
             assert len(values) == 1000
             assert values[-1] == {"region": "row999", "total": 999}
-            (shown_rows,) = findall(r"预览 (\d+)／本次返回 1000 行", str(channel.sends[1][1]))
-            assert 0 < int(shown_rows) < 1000
-            preview = channel.sends[1][1]["card"]["body"]["elements"]
-            (table,) = [e for e in preview if e.get("tag") == "table"]
-            assert len(table["rows"]) == int(shown_rows)
+            preview = json.dumps(channel.sends[1][1], ensure_ascii=False)
+            assert "本次返回 1000 行" in preview and "明细与查询信息见附件" in preview
+            assert "row0" not in preview and "row999" not in preview
         else:
             from html import unescape
             from re import DOTALL, findall
@@ -1470,8 +1468,8 @@ async def test_formal_thousand_rows_complete_single_or_split_files(
                         )
             assert seen == [{"region": f"{region}{i}", "total": i} for i in range(1000)]
             shown = str(channel.sends[-1][1])
-            (shown_rows,) = findall(r"预览 (\d+)／本次返回 1000 行", shown)
-            assert 0 < int(shown_rows) < 1000
+            assert "本次返回 1000 行" in shown and "明细与查询信息见附件" in shown
+            assert region not in shown
             assert "完整结果见附件" in shown and "总共" not in shown
         assert len(env.scripts.calls[question]) == 2
         assert await served.finish() == 0
@@ -1633,6 +1631,12 @@ async def test_feishu_start_failure_logs_only_safe_codes(
 
         async def upload_file(self, report: object) -> str:
             raise AssertionError("启动失败时不应上传报告")
+
+        async def create_progress(self, *args: Any, **kwargs: Any) -> None:
+            raise AssertionError("启动失败时不应创建进度消息")
+
+        async def update_progress(self, *args: Any, **kwargs: Any) -> bool:
+            raise AssertionError("启动失败时不应更新进度消息")
 
     config = runtime.ServeConfig.model_validate(serve_config(18501, feishu=feishu_config()))
     service = SimpleNamespace(
