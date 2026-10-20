@@ -710,9 +710,9 @@ class DialogueStarRocks(SyntheticStarRocks):
         return kind
 
     def result(self, kind: Any, sql: str, args: Any) -> Any:
-        if self.autonomy and kind == "query" and "biz.orders" in sql:
-            # 仅此基本聚合夹具借用内存 SQLite，不用常量正确答案掩盖错误日期条件。
-            # StarRocks 特有语法/优化器和真实权限仍须公司环境验收。
+        if self.autonomy and kind == "query":
+            # 一个数据集直接执行 SQL，反引号、CTE、JOIN 不按文本路由到固定结果。
+            # 仅覆盖可移植子集；真实 StarRocks 语义另验。
             connection = sqlite3.connect(":memory:")
             try:
                 connection.execute("ATTACH DATABASE ':memory:' AS biz")
@@ -723,16 +723,8 @@ class DialogueStarRocks(SyntheticStarRocks):
                     for _ in range(count)
                 ] + [("paid", "2026-10-18 23:59:59"), ("pending", "2026-10-20 00:00:00")]
                 connection.executemany("INSERT INTO biz.orders VALUES (?, ?)", records)
-                cursor = connection.execute(sql)
-                return tuple(column[0] for column in cursor.description), cursor.fetchall()
-            finally:
-                connection.close()
-        if self.autonomy and kind == "query" and self.target.audit is not None:
-            audit = self.target.audit
-            if f"{audit.database}.{audit.table}" in sql:
-                # 实际执行过滤、排序和 LIMIT，不按问题名称返回预制 Top 3。
-                connection = sqlite3.connect(":memory:")
-                try:
+                audit = self.target.audit
+                if audit is not None:
                     connection.execute(f"ATTACH DATABASE ':memory:' AS {audit.database}")
                     connection.execute(
                         f"CREATE TABLE {audit.database}.{audit.table} "
@@ -742,10 +734,10 @@ class DialogueStarRocks(SyntheticStarRocks):
                         f"INSERT INTO {audit.database}.{audit.table} VALUES (?, ?, ?, ?)",  # noqa: S608 -- validated synthetic identifiers
                         AUDIT_RECORDS,
                     )
-                    cursor = connection.execute(sql)
-                    return tuple(column[0] for column in cursor.description), cursor.fetchall()
-                finally:
-                    connection.close()
+                cursor = connection.execute(sql)
+                return tuple(column[0] for column in cursor.description), cursor.fetchall()
+            finally:
+                connection.close()
         if self.autonomy and kind == "audit":
             columns, rows = super().result(kind, sql, args)
             # 第一个更慢、第二个更晚；顺序仍沿真实 Adapter 的指标排序语义。

@@ -15,7 +15,7 @@
 | 锁定依赖 | SDK `0.22.3`、Lark Channel `1.4.0`、MCP `2.2.0`、sqlglot `30.17.0`、`nh3 0.3.7`、`tinycss2 1.5.1` |
 | 正式入口 | `xiaowei serve`、`config check`、`model check`、`storage init/upgrade/cleanup`、`requests resend`；命令与环境准备以 README 为准 |
 | 最近有记录的公司部署 | 既有交接记录称 PR #110 / `4e0ab86` 已部署，并记录了部署后的回答拒收反馈。该历史记录不证明当前镜像、配置或健康状态，也不证明 #111–#114 已部署 |
-| 当前验收结论 | 本次 P2 精确审计取数的相关离线回归 **451 passed（46.89 秒）**；ruff、mypy（35 文件）通过，待候选 SHA 独立审查。默认全量套件运行中；真实模型、公司 StarRocks 和飞书未验收 |
+| 当前验收结论 | 本次 P2 精确审计取数的相关离线回归 **676 passed（54.89 秒）**；ruff、mypy（35 文件）通过，修订候选待独立复审。首候选默认全量因审查修订中断（1352 passed、1 skipped、76 deselected），不计全量通过；真实模型、公司 StarRocks 和飞书未验收 |
 | 当前任务授权 | 用户批准计划 v1.2（SHA-256 `fe6323fdaea5cdd7da900f34304369ac9c05e3bb5e96d74d3376fd3edf371443`）：串行 P2 → P1a/P1b/P1d，每片提交并独立审查；不部署、不调用真实模型及公司服务。P3/P1c 不在本轮范围 |
 
 原工作目录仍在 `codex/model-authored-report-plan@b89d4ee`，未提交 ARCHITECTURE、旧报告计划与公司配置均保留；未读取公司配置。本次在 `/Users/kloenguyen/.codex/worktrees/answer-query-repair/agent-SDK` 实施，复制了校验一致的[批准计划 v1.2](docs/superpowers/plans/2026-10-20-production-dialogue-answer-repair.md)；计划是批准时快照，后续授权及实施状态以本页为准。
@@ -73,7 +73,9 @@ S3 的源码事实：`AgentAnswer` 为有序 `TextBlock | FactBlock`，另含 `r
 
 ### 下一项工作与开放条件
 
-本次：P2 已补默认北京时间、精确查询/失败规则和按集群安全元数据，真实 SDK/隔离 PostgreSQL/SQLite 查询用例区分耗时、日期、条数、重复执行与审计撤权。先完成 P2 候选独立审查及检查，再实施 P1a/P1b/P1d；A1 的目标 StarRocks 时钟函数验证及 P4 真实模型/平台任务验收保持开放。既有自主调查与进度工作仍保留以下验收条件，不据本次取数测试关闭。
+本次：P2 首候选 `5db62d114d743d1a61e0dcc664aff071518c9bf9` 独立审查发现合法反引号 SQL 被测试夹具误路由及普通 naive DATETIME 错标会话偏移；两项均补 RED→GREEN 回归，修订候选待复审。普通查询保留无偏移墙上时间，aware 时间及已知来源模板不变。旧历史/绑定附件可能保留原先错误偏移，本次不追溯修正、不批量失效旧 Evidence。
+
+本次 P2 已补默认北京时间、精确查询/失败规则和按集群安全元数据，真实 SDK/隔离 PostgreSQL/SQLite 查询用例区分耗时、日期、条数、重复执行与审计撤权。先完成 P2 候选独立审查及检查，再实施 P1a/P1b/P1d；A1 的目标 StarRocks 时钟函数验证及 P4 真实模型/平台任务验收保持开放。既有自主调查与进度工作仍保留以下验收条件，不据本次取数测试关闭。
 
 1. P1 的审查修复只调整正常在途发送的顺序收尾、暂停结果投影与测试同步；失败/超时/取消仍停用，正式回复不等待进度。P1、P2、M1a、M1b 的离线证据见[实施计划 v1.7](docs/superpowers/plans/2026-10-20-agent-autonomy-progress.md) §7。下一项是由用户在公司环境沿同一 T1–T5 执行 P3，核对真实模型任务质量、平台权限、修复后的收尾与客户端体验；已批准产品取舍不重开。
 2. M1b 的七项验收已有离线证据，折叠、依据去重、附件完整与失败/未知恢复已覆盖；真实桌面/手机上的明细可达、代码复制及表现仍须 P3 验收。不改 brief/schema，不为布局增加查询。

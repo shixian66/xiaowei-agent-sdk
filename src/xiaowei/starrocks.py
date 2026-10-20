@@ -470,6 +470,7 @@ class _ReadLimits:
     max_bytes: int
     max_value: int
     zone: ZoneInfo
+    infer_naive_zone: bool = True
 
 
 class _SessionMismatchError(Exception):
@@ -558,10 +559,13 @@ class StarRocksAdapter:
         self._target = target
         self._connect = connect
         self._clock = clock
-        # 会话 time_zone 已设为目标时区，驱动返回的无时区值即目标时区的本地时间。
+        # 连接时区不能证明普通 DATETIME 的写入时区；只有代码已知来源的模板可补时区。
         self._zone = ZoneInfo(target.time_zone)
         self._limits = _ReadLimits(
-            max_bytes=target.max_result_bytes, max_value=target.max_value_bytes, zone=self._zone
+            max_bytes=target.max_result_bytes,
+            max_value=target.max_value_bytes,
+            zone=self._zone,
+            infer_naive_zone=False,
         )
         self._slots = asyncio.Semaphore(target.pool_size)
 
@@ -1122,7 +1126,10 @@ class StarRocksAdapter:
                 raise _ResultContractError
             if len(rows) == max_rows:
                 return rows, True
-            row = {name: _scalar(v, limits.zone) for name, v in zip(columns, raw, strict=True)}
+            row = {
+                name: _scalar(v, limits.zone, infer_naive_zone=limits.infer_naive_zone)
+                for name, v in zip(columns, raw, strict=True)
+            }
             for name, value in row.items():
                 if _json_size(value) <= limits.max_value:
                     continue
@@ -1153,7 +1160,7 @@ class StarRocksAdapter:
                 conn.abort()
 
 
-def _scalar(value: object, zone: ZoneInfo) -> Scalar:
+def _scalar(value: object, zone: ZoneInfo, *, infer_naive_zone: bool = True) -> Scalar:
     if value is None or isinstance(value, bool | int | str):
         return value
     if isinstance(value, float):
@@ -1165,6 +1172,8 @@ def _scalar(value: object, zone: ZoneInfo) -> Scalar:
             raise _ResultContractError
         return format(value, "f")
     if isinstance(value, datetime):
+        if value.tzinfo is None and not infer_naive_zone:
+            return value.isoformat()
         aware = value.replace(tzinfo=zone) if value.tzinfo is None else value
         return aware.astimezone(zone).isoformat()
     if isinstance(value, date):

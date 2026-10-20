@@ -149,6 +149,17 @@ TOP3_SQL = (
     [
         (TOP3_SQL, ["slow-a", "slow-b", "third"]),
         (
+            TOP3_SQL.replace(
+                "starrocks_audit_db__.starrocks_audit_tbl__",
+                "`starrocks_audit_db__`.`starrocks_audit_tbl__`",
+            ),
+            ["slow-a", "slow-b", "third"],
+        ),
+        (
+            "WITH audit_rows AS (" + TOP3_SQL + ") SELECT * FROM audit_rows LIMIT 3",  # noqa: S608 -- synthetic SQL
+            ["slow-a", "slow-b", "third"],
+        ),
+        (
             TOP3_SQL.replace("queryTime DESC, queryId", "timestamp DESC"),
             ["latest", "third", "slow-b"],
         ),

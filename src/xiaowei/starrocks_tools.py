@@ -326,7 +326,10 @@ def starrocks_tools(
             fact_note=fact_note,
         )
 
-    query_context = f"查询会话时区：{target.time_zone}。"
+    query_context = (
+        f"查询会话时区：{target.time_zone}。普通 DATETIME 保留无偏移墙上值，"
+        "不能据连接时区推测写入时区；有时区值按会话时区转换。"
+    )
     if target.audit is not None:
         query_context += (
             f"已配置审计表：{target.audit.database}.{target.audit.table}；"
@@ -909,7 +912,8 @@ def scope_canonical(target: StarRocksTarget) -> str:
       上限、服务端 ``query_timeout_seconds`` 与 ``query_mem_limit_bytes``、客户端
       ``client_timeout_seconds``、
       结构快照的容量与期限（``schema_limits``）。它们决定能读到多少数据、哪些查询能完成。
-    - 事实形态：``time_zone``（时间值按它转换）、固定 ``sql_mode``、审计源（未配置为 ``null``）。
+    - 事实形态：``time_zone``（有时区值按它转换，普通无时区 DATETIME 不猜偏移）、
+      固定 ``sql_mode``、审计源（未配置为 ``null``）。
 
     不纳入：密码引用（凭据）、``tls_ca_file``（信任链文件位置，不改变数据）、
     ``connect_timeout_seconds`` 与 ``pool_size``（只影响能否、何时取得连接，不影响一次读取的范围与
