@@ -323,11 +323,22 @@ def _card(
                 detailed_rows = rows if fact.columns else tuple(
                     row for row in rows if row["字段"] not in visible_metadata
                 )
-                row_details[index] = _row_text(fact, detailed_rows) or "（无数据行）"
+                shown = len(rows) if fact.columns else len(
+                    {row["字段"] for row in rows} | visible_metadata.keys()
+                )
+                row_details[index] = _row_text(fact, detailed_rows) or (
+                    "（无数据行）" if not all_rows else (
+                        "字段已在上方展示。" if shown == len(all_rows)
+                        else "结果行未展示。" if fact.columns else "结果字段未展示。"
+                    )
+                )
                 if fact.tool_id in _ACTUAL_SQL and index not in sqls:
                     elements.append(_div("SQL 未展示。"))
-                if omissions and len(rows) < len(all_rows):
-                    elements.append(_div(f"展示 {len(rows)}／本次返回 {len(all_rows)} 行"))
+                if omissions and shown < len(all_rows):
+                    elements.append(_div(
+                        f"展示 {shown}／本次返回 {len(all_rows)} 行" if fact.columns
+                        else f"展示 {shown}／共 {len(all_rows)} 个字段"
+                    ))
             return
         if fact.tool_id == "local/run_readonly_query" and index not in sqls:
             elements.append(_div("SQL 未展示。"))

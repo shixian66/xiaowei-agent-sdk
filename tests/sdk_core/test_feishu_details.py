@@ -169,20 +169,29 @@ def test_fold_dedup_does_not_remove_raw_fields_missing_from_visible_values() -> 
     assert "原文 JSON:" in shown and "逐项一致" not in shown
 
 
-def test_folded_monitoring_keeps_actual_window_and_warnings_outside_details() -> None:
+@pytest.mark.parametrize("section", ["body", "remaining"])
+@pytest.mark.parametrize("attachment", [False, True])
+def test_folded_monitoring_keeps_actual_window_and_warnings_outside_details(
+    section: str, attachment: bool,
+) -> None:
     source = fact(
         tool_id="prometheus/range_query", columns=(), rows=(),
+        section=section,
         metadata={
             "result": "up{instance=host1} 0\n" * 140,
             "start_time": "1792440000", "end_time": "1792443600", "step": "60",
             "warnings": '["partial series returned"]',
         },
     )
-    message = build_feishu_message(answer_with(source), 3500, "oc_test", platform_limits=True)
+    message = build_feishu_message(
+        answer_with(source), 3500, "oc_test", platform_limits=True, attachment_preview=attachment
+    )
     visible = "\n".join(text_parts(message, folded=False))
     assert "1792440000" in visible and "1792443600" in visible and "step: " in visible
     assert "partial series returned" in visible
     assert "up{instance=host1}" not in visible
+    complete = "\n".join(text_parts(message))
+    assert ("up{instance=host1}" in complete) is not attachment
 
 
 def test_failure_hint_for_single_card_does_not_claim_an_attachment() -> None:
@@ -193,3 +202,20 @@ def test_failure_hint_for_single_card_does_not_claim_an_attachment() -> None:
     visible = "\n".join(text_parts(message, folded=False))
     assert "见附件" not in visible
     assert "row-011" in "\n".join(text_parts(message))
+
+
+def test_non_table_failure_hint_counts_visible_constraints_and_omitted_values() -> None:
+    source = fact(
+        tool_id="prometheus/range_query", columns=(), rows=(),
+        metadata={
+            "result": "host1 0\n" * 8000,
+            "start_time": "1792440000", "end_time": "1792443600", "step": "60",
+            "warnings": "partial series returned",
+        },
+    )
+    message = _preview(answer_with(source), 3500, "oc_test", None, "完整结果尚未交付。")
+    visible = "\n".join(text_parts(message, folded=False))
+    assert "partial series returned" in visible and "1792440000" in visible
+    assert "展示 4／共 5 个字段" in visible
+    assert "结果字段未展示。" in "\n".join(text_parts(message))
+    assert "（无数据行）" not in "\n".join(text_parts(message))
