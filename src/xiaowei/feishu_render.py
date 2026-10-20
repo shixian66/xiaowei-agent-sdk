@@ -69,13 +69,10 @@ def fact_limit_notices(fact: DeliveryFact) -> tuple[str, ...]:
     """从获准投影生成影响结论的简短范围和完整性提醒，供各渠道复用。"""
     cursor = fact.metadata.get("next_cursor")
     notices = []
-    if (
-        cursor is not None
-        or fact.metadata.get("has_more") is True
-        or fact.metadata.get("hasMore") is True
-    ):
+    paged = fact.metadata.get("has_more") is True or fact.metadata.get("hasMore") is True
+    if cursor is not None or paged:
         notices.append("还有后续页，本页不是全部结果。")
-    if fact.truncated and not (fact.tool_id in _PAGED and cursor is not None):
+    if fact.truncated and not (paged or (fact.tool_id in _PAGED and cursor is not None)):
         notices.append("工具结果已截断，不能据此声称完整。")
     warnings = fact.metadata.get("warnings")
     if warnings not in (None, "", "[]", "null"):
@@ -123,7 +120,7 @@ def fact_limit_notices(fact: DeliveryFact) -> tuple[str, ...]:
                 + (f"步长 {step} 秒。" if step is not None else "")
             )
     applied = metadata.get("applied_limit")
-    if applied is not None and metadata.get("requested_limit") != applied:
+    if fact.truncated and applied is not None and metadata.get("requested_limit") != applied:
         notices.append(f"返回量受限：实际 LIMIT {applied}，多取 1 行用于判断截断。")
     return tuple(notices)
 

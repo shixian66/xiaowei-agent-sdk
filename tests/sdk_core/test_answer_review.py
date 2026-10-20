@@ -9,8 +9,10 @@ from tests.sdk_core.test_grafana_g3 import g3_config
 from tests.sdk_core.test_monitoring_r1a import monitoring_config
 from tests.sdk_core.test_runtime import serve_config
 
-from xiaowei.feishu_render import build_feishu_message
+from xiaowei.feishu_delivery import _data_parts
+from xiaowei.feishu_render import MessageCapacityError, build_feishu_message, fact_limit_notices
 from xiaowei.feishu_report import build_reports
+from xiaowei.models import DeliveryFactRef, DeliveryText
 from xiaowei.runtime import ServeConfig, _monitoring_catalog
 
 
@@ -59,12 +61,47 @@ def test_filtered_candidates_are_visible_without_truncated_flag(channel):
     assert "omitted_sqlguard" in reports[-1].content.decode()
 
 
-@pytest.mark.parametrize("complete", [False, True])
-def test_action_fields_are_complete_in_md_body(complete):
-    reports = build_reports(reviewed_delivery(action=True, complete=complete))
-    body = reports[0].content.decode()
-    assert "ACTION_CANARY" in body and "ac_review" in body and "executed" in body
-    assert "0 行" not in body and len(reports) == 1
+def action_with_large_result(format_):
+    value = reviewed_delivery(format_, action=True, complete=False)
+    data = _delivery(format_).facts[0]
+    rows = tuple({"value": f"row-{i:03d}-" + "x" * 500} for i in range(100))
+    data = data.model_copy(
+        update={
+            "evidence_id": "ev_large_result",
+            "rows": rows,
+            "result_json": json.dumps({"columns": ["value"], "rows": rows}),
+        }
+    )
+    return value.model_copy(
+        update={
+            "facts": (*value.facts, data),
+            "evidence_ids": (*value.evidence_ids, data.evidence_id),
+            "blocks": (
+                DeliveryText(text="需要复核"),
+                DeliveryFactRef(evidence_id=data.evidence_id),
+            ),
+            "report_native": True,
+        }
+    )
+
+
+@pytest.mark.parametrize("format_", ["md", "html"])
+def test_action_status_stays_once_in_message_and_out_of_every_data_file(format_):
+    value = action_with_large_result(format_)
+    assert all(
+        b.kind != "fact" or b.evidence_id != value.facts[0].evidence_id for b in value.blocks
+    )
+    with pytest.raises(MessageCapacityError):
+        build_feishu_message(value, 3500, "oc_review", allow_preview=False, platform_limits=True)
+    parts = _data_parts(value, 0, 3500, "oc_review", None)
+    files = [p.body.decode() for p in parts if p.kind in {"md", "html"}]
+    bodies = [json.loads(p.body) for p in parts if p.kind == "body"]
+    visible = "\n".join(part for body in bodies for part in text_parts(body, folded=False))
+    assert files and bodies
+    for field in ("ACTION_CANARY", "ac_review", "executed"):
+        assert visible.count(field) == 1
+        assert all(field not in content for content in files)
+    assert all(f"row-{i:03d}" in "\n".join(files) for i in range(100))
 
 
 def test_note_summary_is_visible_in_md_body_but_full_note_is_details_only():
@@ -184,3 +221,20 @@ def test_actual_monitoring_catalog_caveats_reach_main_view(channel, name, policy
     else:
         visible = build_reports(delivery)[0].content.decode()
     assert expected in visible
+
+
+@pytest.mark.parametrize("truncated", [False, True])
+def test_limit_notice_only_claims_restriction_when_the_result_is_truncated(truncated):
+    value = reviewed_delivery()
+    fact = value.facts[0].model_copy(
+        update={"truncated": truncated, "metadata": {"requested_limit": None, "applied_limit": 100}}
+    )
+    assert any("实际 LIMIT 100" in note for note in fact_limit_notices(fact)) is truncated
+
+
+@pytest.mark.parametrize("key", ["hasMore", "has_more"])
+def test_pagination_and_truncation_share_one_incompleteness_reminder(key):
+    value = reviewed_delivery()
+    fact = value.facts[0].model_copy(update={"truncated": True, "metadata": {key: True}})
+    notes = fact_limit_notices(fact)
+    assert len(notes) == 1 and "还有后续页" in notes[0]

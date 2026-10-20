@@ -148,12 +148,8 @@ def _sections(
     delivery: Delivery, *, expand_brief: bool, prose: tuple[ReportContent, ...] | None = None
 ) -> list[_Section]:
     """按正文块顺序填入现有模板：模型文字转义为说明段落，事实章节由代码生成并带来源；
-    其余结果在后；完整审批材料由发送端剥离，动作状态在报告中完整展示。"""
-    parts: list[_Section] = [
-        _fact_section(fact, delivery.result_label(fact.evidence_id), expand_brief=True)
-        for fact in delivery.facts
-        if fact.section == "action"
-    ]
+    其余结果在后；动作区域不进入附件（只在消息中完整展示）。"""
+    parts: list[_Section] = []
     content = iter(prepare_prose(delivery) if prose is None else prose)
     format_notice = (
         "部分不支持的格式已按原文展示" if delivery.report_format == "md" else FORMAT_NOTICE
@@ -164,8 +160,6 @@ def _sections(
             if block.evidence_id not in facts:
                 continue  # 动作材料不进附件
             fact = facts[block.evidence_id]
-            if fact.section == "action":
-                continue
             parts.append(
                 _fact_section(
                     fact, delivery.result_label(fact.evidence_id), expand_brief=expand_brief
@@ -475,7 +469,7 @@ def _render(
             detail = _html_fact(section.value) if section.fact else _html_prose(section.value)
             meta = f'<p class="meta">{_escaped(section.meta)}</p>' if section.meta else ""
             notes = "".join(f'<p class="notice">{_escaped(item)}</p>' for item in section.notices)
-            if natural and section.fact is not None and section.fact.section != "action":
+            if natural and section.fact is not None:
                 fact = section.fact
                 limits = "".join(
                     f'<p class="notice">{_escaped(item)}</p>'
@@ -620,7 +614,7 @@ def build_reports(
     body, details = [], []
     for section in sections:
         fact = section.fact
-        if fact is None or fact.section == "action":
+        if fact is None:
             body.append(section)
             continue
         details.append(section)

@@ -107,7 +107,7 @@ async def test_html_report_hides_short_metadata_and_keeps_every_original(chrome_
         assert "RAW_METRICS_CANARY" in complete and "1792440000" in complete
 
 
-@pytest.mark.parametrize("kind", ["audit", "action", "complete_action"])
+@pytest.mark.parametrize("kind", ["audit", "action"])
 async def test_html_review_notices_and_action_fields_are_visible(chrome_binary, kind):
     from urllib.parse import quote
 
@@ -115,7 +115,7 @@ async def test_html_review_notices_and_action_fields_are_visible(chrome_binary, 
 
     from xiaowei.feishu_report import build_reports
 
-    value = reviewed_delivery("html", action=kind != "audit", complete=kind == "complete_action")
+    value = reviewed_delivery("html", action=kind != "audit", complete=False)
     (report,) = build_reports(value)
     async with launch(chrome_binary) as chrome:
         page = await chrome.page()
@@ -125,8 +125,8 @@ async def test_html_review_notices_and_action_fields_are_visible(chrome_binary, 
             assert "规则或权限过滤 17 条" in visible
             assert "omitted_sqlguard" not in visible
         else:
-            assert "ACTION_CANARY" in visible and "ac_review" in visible
-            assert "0 行" not in visible
+            assert "ACTION_CANARY" not in visible and "ac_review" not in visible
+            assert "ACTION_CANARY" not in report.content.decode()
 
 
 async def test_web_filtered_candidates_and_historical_warning_are_visible(env, chrome_binary):
@@ -199,3 +199,89 @@ async def test_html_fixed_caveats_remain_visible_with_original_in_details(chrome
         assert summary in visible and "FULL_NOTE_CANARY" not in visible
         await page.evaluate("document.querySelector('details').open = true")
         assert "FULL_NOTE_CANARY" in await page.evaluate("document.body.innerText")
+
+
+@pytest.mark.parametrize("kind", ["action", "multiline"])
+async def test_web_view_shows_status_projection_limits_and_note_linebreaks(chrome_binary, kind):
+    """Web component: actual status projection and _view response, browser fetch is synthetic."""
+    import json
+    from pathlib import Path
+    from urllib.parse import quote
+
+    from tests.sdk_core.synthetic_tools import Clock
+    from tests.sdk_core.test_answer_review import reviewed_delivery
+
+    from xiaowei.actions import action_status_catalog
+    from xiaowei.channel import RequestView
+    from xiaowei.evidence import _project
+    from xiaowei.models import ToolObservation
+    from xiaowei.storage import Readiness
+    from xiaowei.web import _view
+
+    value = reviewed_delivery(action=kind == "action", complete=False)
+    fact = value.facts[0]
+    if kind == "action":
+        contracts, policies = action_status_catalog(["monitoring"], 10_000)
+        contract = next(c for c in contracts if c.tool_id.endswith("/get_action_status"))
+        policy = next(p for p in policies if p.policy_id == contract.policy_id)
+        spec = policy.projections["web"]
+        projected, truncated = _project(
+            fact.evidence_id,
+            ToolObservation(
+                payload={
+                    "action_id": "00000000-0000-4000-8000-000000000001",
+                    "state": "succeeded",
+                    "result": "r" * 9000,
+                    "parameters": "OMITTED_STATUS_PARAMETERS_CANARY" * 100,
+                },
+                captured_at=Clock().now,
+                truncated=False,
+            ),
+            spec.fields,
+            spec.max_bytes,
+            policy.required,
+        )
+        assert truncated and "parameters" not in json.loads(projected)["data"]
+        fact = fact.model_copy(
+            update={
+                "tool_id": contract.tool_id,
+                "metadata": json.loads(projected)["data"],
+                "truncated": truncated,
+                "note": policy.fact_note,
+                "result_json": json.dumps(json.loads(projected)["data"]),
+            }
+        )
+    else:
+        fact = fact.model_copy(update={"truncated": True})
+    value = value.model_copy(update={"facts": (fact,), "channel": "web", "report_format": None})
+    response = _view("component-result", RequestView("completed", value), Readiness())
+    assets = Path(__file__).resolve().parents[2] / "src/xiaowei/static"
+    markup = (assets / "index.html").read_text()
+    markup = markup.replace('<script src="/assets/app.js" defer></script>', "")
+    markup = markup.replace(
+        '<link rel="stylesheet" href="/assets/app.css">',
+        "<style>" + (assets / "app.css").read_text() + "</style>",
+    )
+    async with launch(chrome_binary) as chrome:
+        page = await chrome.page()
+        await page.navigate("data:text/html;charset=utf-8," + quote(markup))
+        await page.evaluate(
+            "window.fetch = async () => ({status: 200, json: async () => ("
+            + response.body.decode()
+            + ")});"
+        )
+        await page.evaluate((assets / "app.js").read_text())
+        await send(page, "查看已获准结果", "query")
+        await settled(page, 0, "completed")
+        visible = await page.evaluate(f"{item(0)}.innerText")
+        if kind == "action":
+            assert "工具结果已截断，不能据此声称完整。" in visible
+            assert "OMITTED_STATUS_PARAMETERS_CANARY" not in visible
+            assert await page.evaluate(
+                f"{item(0)}.querySelector('.action').innerText.includes('succeeded')"
+            )
+        else:
+            assert "工具结果已截断" in visible and "规则或权限过滤 17 条" in visible
+            assert await page.evaluate(
+                f"{item(0)}.querySelector('.note').innerText.includes(String.fromCharCode(10))"
+            )
