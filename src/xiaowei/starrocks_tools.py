@@ -326,6 +326,13 @@ def starrocks_tools(
             fact_note=fact_note,
         )
 
+    query_context = f"查询会话时区：{target.time_zone}。"
+    if target.audit is not None:
+        query_context += (
+            f"已配置审计表：{target.audit.database}.{target.audit.table}；"
+            f"审计写入时区：{target.audit.time_zone}。库表配置不代表读取授权；列未知时用结构工具。"
+        )
+
     def contract(tool_id: str, tool_policy: ToolPolicy, description: str) -> ToolContract:
         return ToolContract(
             tool_id=tool_id,
@@ -334,6 +341,7 @@ def starrocks_tools(
             policy_id=tool_policy.policy_id,
             description=(
                 description
+                + (query_context if tool_id in {RUN_QUERY, SLOW_QUERIES} else "")
                 + " 集群须是用户在本会话明确选定的环境，未选定时先澄清。"
                 + (
                     "搜索命中不等于用户选源，未匹配不证明不存在。"
@@ -748,7 +756,9 @@ def starrocks_tools(
             "函数；* 按快照检查依赖，结果列数与列头容量有上限。表达式列可不写 AS，"
             "结果列名以 StarRocks 返回为准，重名时拒绝。SQL 经审核后按原文执行，"
             "仅可能去尾分号、追加或下调顶层 LIMIT；事实区说明原始与实际 LIMIT。"
-            "结果行数有上限，超过时返回的结果标记为截断。审计表与其他可读表同样可查；"
+            "结果行数有上限，超过时返回的结果标记为截断。精确日期、Top N、统计或字段要求可直接"
+            "生成获准审计 SQL，无需用户先提供 SQL；日期、排序、聚合和 LIMIT 在数据库执行。"
+            "直查失败不能改用候选并宣称精确成功。审计表与其他可读表同样可查；"
             "长文本单值可能按容量截短，需完整 SQL 原文时检查截短标记。",
         ),
         contract(
@@ -850,12 +860,14 @@ def starrocks_tools(
             contract(
                 SLOW_QUERIES,
                 audit_policy,
-                "列出最近一段时间内所选集群实际运行过的慢查询（来自审计表），按所选指标降序，"
+                "快捷诊断的受限审计候选：只读 isQuery=1，不设慢耗时阈值，按所选指标降序，"
                 "不按开始时间排序，首行不等于最新；候选不完整时不能确认全量最新。只列出"
                 "引用对象全部获准的查询，给出实测耗时、扫描量、CPU、内存、排队时间、执行时的当前库"
                 "与 SQL 原文；结果另给已检查、各原因未列出、未检查候选的数量及候选截断标记。"
-                "不含身份列，也不能代替用户指定的审计 SQL。"
-                f"时间窗为 1 到 {limit} 分钟；"
+                "不含身份列；omitted_self 是引用审计表的记录，不等同于小维自身查询。"
+                f"本集群最多输出 {audit.max_rows} 条（由配置决定，非固定 100），"
+                f"时间窗为 1 到 {limit} 分钟，相对分钟窗不等于业务自然日；"
+                "精确日期、Top N、统计或字段应直接查询获准审计表，不能用候选冒充全量结果；"
                 "database 为 null 时读取所有库的记录，"
                 "否则只读执行时当前库为它的记录。",
             )

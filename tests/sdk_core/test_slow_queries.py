@@ -470,3 +470,18 @@ async def test_audit_scope_change_invalidates_audit_evidence(
             await later.evidence.project(evidence_id, ctx, audience)
     with pytest.raises(AnswerRejectedError):
         await later.evidence.validate_answer(answer, ctx)
+
+
+async def test_selected_cluster_query_metadata_reaches_the_model_without_connection_details(env):
+    system = await audited(env)
+    env.scripts.add("fat 今天最慢三条", clarify())
+    await system.app.run_turn(system.ctx(mode="query"), "fat 今天最慢三条")
+    specs = {s["name"]: s["description"] for s in env.scripts.tool_specs[0]}
+    query = specs["run_readonly_query"]
+    assert AUDIT_TARGET.time_zone in query
+    assert AUDIT_TARGET.audit.database in query
+    assert AUDIT_TARGET.audit.table in query
+    assert AUDIT_TARGET.audit.time_zone in query
+    assert AUDIT_TARGET.host not in query
+    assert AUDIT_TARGET.password_ref not in query
+    assert "Asia/Shanghai" in env.scripts.instructions[0]

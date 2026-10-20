@@ -9,16 +9,16 @@
 | 项目 | 已核对事实 |
 | --- | --- |
 | 仓库 | [shixian66/xiaowei-agent-sdk](https://github.com/shixian66/xiaowei-agent-sdk) |
-| 产品代码基线 | `76850bf5765850d1aa14fb887bf3c4dbce3321f7`，用户指定 main 与本地 `origin/main` 一致；含 `f7eabe6`（#116 原生报告）、`76850bf`（#117 Vertex 诊断）。本轮远端即时查询因本机代理不可用未成功 |
+| 产品代码基线 | 本次从最新 `origin/main@bb0b1e75ead3e12e608e17eeeb83285dd7feb90d` 建立 `codex/answer-query-repair`；2026-10-20 拉取核对成功。旧工作区未提交修改未带入 |
 | 源码与检查 | 当前源码仅保留 `src/xiaowei`；旧工程及专属测试、Compose、迁移入口、`compose-smoke` CI 和 Alembic 依赖已移除。保留产品测试、公共检查与旧回答兼容路径；旧工程历史可从 Git 查回 |
 | 当前存储与回答 | 应用 schema v12；可信 `answer_version=3` 开放原生报告，2/Legacy 保留旧文字；模型输出 schema 不变。新请求用分项交付，旧请求保留 v0 语义 |
 | 锁定依赖 | SDK `0.22.3`、Lark Channel `1.4.0`、MCP `2.2.0`、sqlglot `30.17.0`、`nh3 0.3.7`、`tinycss2 1.5.1` |
 | 正式入口 | `xiaowei serve`、`config check`、`model check`、`storage init/upgrade/cleanup`、`requests resend`；命令与环境准备以 README 为准 |
 | 最近有记录的公司部署 | 既有交接记录称 PR #110 / `4e0ab86` 已部署，并记录了部署后的回答拒收反馈。该历史记录不证明当前镜像、配置或健康状态，也不证明 #111–#114 已部署 |
-| 当前验收结论 | 用户确认计划 `fbced821` 审核通过。Claude 对 `6649ff1` 指出的进度正常收尾及测试时序缺陷已核实并修复为 `acdef2328bd39762fc2bf83d4ad23a376c81156a`；当前独立复审与验证见计划 §7。P2/M1a、M1b 和模型/证据/审批契约未改动。既有 `27cd9b5` 全量证据不提升为本次修复后的全量通过；分支保留本地，真实 Agent 能力与服务未验收 |
-| 当前任务授权 | 批准范围内连续完成实现、测试与常规修复，沿 T1–T5 验收并本地提交；产品或权限边界变化仍需明确处理。用户确认没有可用于本轮评测的真实模型，先完成离线工作，后续由用户到公司部署验证。表情回执及跨重启同卡恢复暂不做；本轮不自行部署或调用公司服务 |
+| 当前验收结论 | 本次 P2 精确审计取数的相关离线回归 **451 passed（46.89 秒）**；ruff、mypy（35 文件）通过，待候选 SHA 独立审查。默认全量套件运行中；真实模型、公司 StarRocks 和飞书未验收 |
+| 当前任务授权 | 用户批准计划 v1.2（SHA-256 `fe6323fdaea5cdd7da900f34304369ac9c05e3bb5e96d74d3376fd3edf371443`）：串行 P2 → P1a/P1b/P1d，每片提交并独立审查；不部署、不调用真实模型及公司服务。P3/P1c 不在本轮范围 |
 
-原工作目录仍在 `codex/model-authored-report-plan@b89d4ee`，保留未跟踪的旧报告计划与公司配置；本次文档位于从 `76850bf` 建立的 `codex/agent-autonomy-progress` 独立工作树，未读取公司配置。当前新增规范及任务样例见[实施计划](docs/superpowers/plans/2026-10-20-agent-autonomy-progress.md)，不从旧分支状态推断当前主线能力。
+原工作目录仍在 `codex/model-authored-report-plan@b89d4ee`，未提交 ARCHITECTURE、旧报告计划与公司配置均保留；未读取公司配置。本次在 `/Users/kloenguyen/.codex/worktrees/answer-query-repair/agent-SDK` 实施，复制了校验一致的[批准计划 v1.2](docs/superpowers/plans/2026-10-20-production-dialogue-answer-repair.md)；计划是批准时快照，后续授权及实施状态以本页为准。
 
 本文件的状态以表中的核对基线为限。接手者先核对实际 HEAD、工作区及用户新指令；合入、独立审查、离线测试、真实运行、部署与用户接受分别记录，不互相替代。
 
@@ -72,6 +72,8 @@ S3 的源码事实：`AgentAnswer` 为有序 `TextBlock | FactBlock`，另含 `r
 `repair_final_output` 已通过 Runner 的 `invalid_final_output` 接入一次无工具改写；失败时不重放工具，被拒的原回答不进入后续历史。旧回答投影不套新输出预算，已绑定报告与分项重发复用原字节。方案 1 已有正式群入口的离线恢复证据：旧历史/暂停材料的批准、拒绝、重复/并发批准、发起人失效；无需据旧阶段描述重新实现恢复方案。
 
 ### 下一项工作与开放条件
+
+本次：P2 已补默认北京时间、精确查询/失败规则和按集群安全元数据，真实 SDK/隔离 PostgreSQL/SQLite 查询用例区分耗时、日期、条数、重复执行与审计撤权。先完成 P2 候选独立审查及检查，再实施 P1a/P1b/P1d；A1 的目标 StarRocks 时钟函数验证及 P4 真实模型/平台任务验收保持开放。既有自主调查与进度工作仍保留以下验收条件，不据本次取数测试关闭。
 
 1. P1 的审查修复只调整正常在途发送的顺序收尾、暂停结果投影与测试同步；失败/超时/取消仍停用，正式回复不等待进度。P1、P2、M1a、M1b 的离线证据见[实施计划 v1.7](docs/superpowers/plans/2026-10-20-agent-autonomy-progress.md) §7。下一项是由用户在公司环境沿同一 T1–T5 执行 P3，核对真实模型任务质量、平台权限、修复后的收尾与客户端体验；已批准产品取舍不重开。
 2. M1b 的七项验收已有离线证据，折叠、依据去重、附件完整与失败/未知恢复已覆盖；真实桌面/手机上的明细可达、代码复制及表现仍须 P3 验收。不改 brief/schema，不为布局增加查询。
