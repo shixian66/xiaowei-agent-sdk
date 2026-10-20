@@ -448,7 +448,7 @@ def test_forged_fact_identity_in_text_gets_no_fact_components() -> None:
     assert texts.index(MODEL_TEXT_LABEL) < texts.index(forged)
 
 
-def test_remaining_results_follow_the_body_with_a_code_label() -> None:
+def test_remaining_results_follow_the_body_with_a_collapsed_basis_entry() -> None:
     first = render_fact(evidence_id="ev_a")
     second = render_fact(evidence_id="ev_b").model_copy(update={"section": "remaining"})
     delivery = _delivery(
@@ -457,7 +457,8 @@ def test_remaining_results_follow_the_body_with_a_code_label() -> None:
         facts=(first, second),
     )
     texts = _texts(build_feishu_message(delivery, 3500, "oc", platform_limits=True))
-    assert texts.index("看第一项") < texts.index(REMAINING_LABEL)
+    assert REMAINING_LABEL not in texts
+    assert texts.index("看第一项") < next(i for i, value in enumerate(texts) if "查看依据" in value)
     assert delivery.result_label("ev_b") == "结果 2"
 
 

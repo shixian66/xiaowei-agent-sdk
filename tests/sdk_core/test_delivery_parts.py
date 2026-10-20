@@ -20,6 +20,7 @@ from tests.sdk_core.test_feishu_reports import _delivery
 from xiaowei.channel import AccessDeniedError, RequestRef
 from xiaowei.channel_store import RequestUnavailableError
 from xiaowei.feishu import send_delivery
+from xiaowei.feishu_delivery import _data_parts
 from xiaowei.feishu_report import ReportCapacityError, ReportFile, build_report, build_reports
 from xiaowei.models import DeliveryFactRef, DeliveryText
 from xiaowei.storage import Readiness, hold_instance_lock
@@ -139,12 +140,15 @@ def test_split_report_preserves_every_typed_row_and_labels_each_file(
     recovered = []
     for index, report in enumerate(files, 1):
         assert len(report.content) <= limit
-        assert report.filename == f"xiaowei-report-{index}-of-{len(files)}.{format_}"
         body = report.content.decode()
-        assert f"{index}/{len(files)}" in body
+        assert "报告正文" in body or "证据明细" in body
+        assert report.filename.startswith(("xiaowei-report", "xiaowei-details"))
+        if format_ == "html":
+            assert report.filename == f"xiaowei-report-{index}-of-{len(files)}.{format_}"
+            assert f"{index}/{len(files)}" in body
         assert "工具结果已截断" in body
         if format_ == "md":
-            assert "> 范围说明：" in body
+            assert "范围说明" in body or "未核实来源" in body
         else:
             assert "<img src=x>" not in body
         if format_ == "html":
@@ -198,13 +202,23 @@ def test_report_splits_when_encoded_file_exceeds_boundary_by_one_byte(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     delivery = _delivery("md")
-    complete = build_report(delivery)
-    monkeypatch.setattr("xiaowei.feishu_report.MAX_REPORT_BYTES", len(complete.content))
-    assert build_reports(delivery) == (complete,)
-    monkeypatch.setattr("xiaowei.feishu_report.MAX_REPORT_BYTES", len(complete.content) - 1)
+    rows = [{"value": f"row-{i}-" + "x" * 100} for i in range(12)]
+    fact = delivery.facts[0].model_copy(
+        update={
+            "rows": tuple(rows),
+            "result_json": json.dumps({"columns": ["value"], "rows": rows}),
+        }
+    )
+    delivery = delivery.model_copy(update={"facts": (fact,)})
+    complete = build_reports(delivery)
+    limit = max(len(report.content) for report in complete)
+    monkeypatch.setattr("xiaowei.feishu_report.MAX_REPORT_BYTES", limit)
+    assert build_reports(delivery) == complete
+    monkeypatch.setattr("xiaowei.feishu_report.MAX_REPORT_BYTES", limit - 1)
     pieces = build_reports(delivery)
-    assert len(pieces) > 1
-    assert all(len(piece.content) <= len(complete.content) - 1 for piece in pieces)
+    assert len(pieces) > len(complete)
+    assert all(len(piece.content) <= limit - 1 for piece in pieces)
+    assert all(row["value"] in "\n".join(p.content.decode() for p in pieces) for row in rows)
 
 
 def test_automatic_split_keeps_historical_brief_without_exporting_raw_values(
@@ -255,10 +269,11 @@ async def test_explicit_file_is_followed_by_confirmed_body(env: Env) -> None:
         ref=ref,
     )
     assert await env.service.results.send(ref, transmit) == "sent"
-    assert len(platform.files) == 1
-    assert len(platform.sent) == 2
+    assert len(platform.files) == 2
+    assert len(platform.sent) == 3
     assert isinstance(platform.sent[0][0], OutboundFile)
-    assert "完整结果" in json.dumps(platform.sent[1][0], ensure_ascii=False)
+    assert isinstance(platform.sent[1][0], OutboundFile)
+    assert "完整结果" in json.dumps(platform.sent[2][0], ensure_ascii=False)
     assert all(uuid for _, uuid in platform.sent)
 
 
@@ -281,7 +296,7 @@ async def test_report_render_does_not_block_other_requests(
     monkeypatch.setattr("xiaowei.feishu_delivery.build_reports", delayed_render)
     assert await env.service.results.send(ref, transmit(env, ref, platform)) == "sent"
     assert probe_lag and probe_lag[0] < 0.2
-    assert len(platform.files) == 1 and len(platform.sent) == 2
+    assert len(platform.files) == 2 and len(platform.sent) == 3
 
 
 @pytest.mark.asyncio
@@ -346,9 +361,11 @@ def test_automatic_file_keeps_brief_and_complete_analysis_without_expanding_hist
             ),
         }
     )
-    file, body = _data_parts(delivery, 0, 600, "oc_d1a", None)
-    report = file.body.decode()
-    assert file.kind == "md" and body.kind == "body"
+    files_and_body = _data_parts(delivery, 0, 600, "oc_d1a", None)
+    body = files_and_body[-1]
+    report = "\n".join(p.body.decode() for p in files_and_body[:-1])
+    assert all(p.kind == "md" for p in files_and_body[:-1]) and body.kind == "body"
+    assert "原文未展示" in report
     assert "历史摘要：本次返回一行" in report and all(text in report for text in analyses)
     assert "HISTORICAL_ORIGINAL_CANARY" not in report
     assert "HISTORICAL_SQL_CANARY" not in report
@@ -506,9 +523,9 @@ async def test_part_storage_failure_never_claims_delivery_or_sends_remaining_par
     assert not env.store.readiness.ok
     assert len(platform.files) == len(platform.sent) == (0 if stage == "bind" else 1)
     if stage == "receipt":
-        file, body = await parts(env, ref)
+        file, detail, body = await parts(env, ref)
         assert file.upload_state == "uploaded" and file.send_state == "unknown"
-        assert file.message_id is None and body.send_state == "pending"
+        assert file.message_id is None and detail.send_state == body.send_state == "pending"
     record = await env.store.get("feishu", "alice", ref.conversation_id, ref.request_id)
     assert record.delivery == "unknown"
 
@@ -521,11 +538,15 @@ async def test_resend_only_missing_body_preserves_bytes_and_uuid(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     ref = await request(env)
-    platform = Platform(outcomes=[SendResult.ok(message_id="om_file"), first])
+    platform = Platform(
+        outcomes=[SendResult.ok(message_id="om_file"), SendResult.ok(message_id="om_detail"), first]
+    )
     expected = "failed" if not first.success else "unknown"
     assert await env.service.results.send(ref, transmit(env, ref, platform)) == expected
     before = await parts(env, ref)
-    assert before[0].send_state == "sent" and before[1].send_state == expected
+    assert (
+        before[0].send_state == before[1].send_state == "sent" and before[-1].send_state == expected
+    )
     calls = len(env.adapter.calls)
 
     def changed(*_args, **_kwargs):
@@ -539,8 +560,8 @@ async def test_resend_only_missing_body_preserves_bytes_and_uuid(
     after = await parts(env, ref)
     assert [p.body for p in after] == [p.body for p in before]
     assert [p.uuid for p in after] == [p.uuid for p in before]
-    assert platform.sent[-1][1] == before[1].uuid
-    assert len(platform.files) == 1 and len(env.adapter.calls) == calls
+    assert platform.sent[-1][1] == before[-1].uuid
+    assert len(platform.files) == 2 and len(env.adapter.calls) == calls
 
 
 @pytest.mark.asyncio
@@ -549,13 +570,15 @@ async def test_unknown_file_message_can_be_manually_resent_using_existing_upload
     platform = Platform(outcomes=[SendResult.ok(message_id="")])
     assert await env.service.results.send(ref, transmit(env, ref, platform)) == "unknown"
     first = await parts(env, ref)
-    assert first[0].upload_state == "uploaded" and first[1].send_state == "pending"
+    assert first[0].upload_state == "uploaded" and first[1].send_state == "sent"
+    assert first[-1].send_state == "pending"
     assert (
         await env.service.results.send(ref, transmit(env, ref, platform, resend=True), resend=True)
         == "sent"
     )
-    assert len(platform.files) == 1
-    assert platform.sent[0][1] == platform.sent[2][1] == first[0].uuid
+    assert len(platform.files) == 2
+    file_uuids = [uuid for value, uuid in platform.sent if isinstance(value, OutboundFile)]
+    assert file_uuids == [first[0].uuid, first[1].uuid, first[0].uuid]
 
 
 @pytest.mark.asyncio
@@ -599,7 +622,8 @@ async def test_upload_unknown_never_reuploads_or_announces_delivered_attachment(
         await env.service.results.send(ref, transmit(env, ref, platform, resend=True), resend=True)
         == "unknown"
     )
-    assert len(platform.files) == 1
+    assert len(platform.files) == 2
+    assert len(set(platform.files)) == 2  # 两份不同文件分别未知，不是重复上传
     assert all(uuid is None for _, uuid in platform.sent)
     assert all(
         "完整结果尚未交付" in json.dumps(message, ensure_ascii=False)
@@ -628,7 +652,7 @@ async def test_one_permission_snapshot_per_attempt_and_revocation_blocks_next_at
     assert len(platform.sent) == 3
     with pytest.raises(AccessDeniedError):
         await env.service.results.send(ref, transmit(env, ref, platform, resend=True), resend=True)
-    assert len(platform.sent) == 3 and len(platform.files) == 1
+    assert len(platform.sent) == 3 and len(platform.files) == 2
 
 
 @pytest.mark.asyncio
@@ -790,7 +814,7 @@ async def test_real_channel_sdk_passes_saved_uuid_and_keeps_each_part_one_messag
     async def sent(request):
         messages.append(await request.json())
         # 缺ID的真实SDK响应不能算确认；随后手动恢复同一正文部分。
-        data = {} if len(messages) == 2 else {"message_id": f"om_sdk_{len(messages)}"}
+        data = {} if len(messages) == 3 else {"message_id": f"om_sdk_{len(messages)}"}
         return JSONResponse({"code": 0, "data": data})
 
     def endpoint(_):
@@ -818,17 +842,18 @@ async def test_real_channel_sdk_passes_saved_uuid_and_keeps_each_part_one_messag
             )
             assert await env.service.results.send(ref, transmit_sdk) == "unknown"
             first = await parts(env, ref)
-            assert len(messages) == 3  # 文件、正文、一次非必需提醒；没有SDK隐式分段。
+            assert len(messages) == 4  # 正文文件、明细文件、消息正文、一次非必需提醒。
             assert (
                 await env.service.results.send(ref, partial(transmit_sdk, resend=True), resend=True)
                 == "sent"
             )
         finally:
             channel.stop(join_timeout=5)
-    assert len(uploads) == 1 and len(messages) == 4
+    assert len(uploads) == 2 and len(messages) == 5
     assert messages[0]["msg_type"] == "file"
     assert messages[0]["uuid"] == first[0].uuid
-    assert messages[1]["uuid"] == messages[3]["uuid"] == first[1].uuid
+    assert messages[1]["msg_type"] == "file" and messages[1]["uuid"] == first[1].uuid
+    assert messages[2]["uuid"] == messages[4]["uuid"] == first[-1].uuid
 
 
 @pytest.mark.asyncio
@@ -920,3 +945,108 @@ async def test_hint_rechecks_attempt_after_thread_render(
         if not task.done():
             task.cancel()
             await asyncio.gather(task, return_exceptions=True)
+
+
+def test_mixed_automatic_report_keeps_new_brief_but_never_exports_historical_brief():
+    delivery = _delivery("md")
+    original = delivery.facts[0]
+    current = original.model_copy(
+        update={
+            "view": "brief",
+            "summary": None,
+            "result_json": '{"raw":"NEW_ORIGINAL_CANARY"}',
+        }
+    )
+    history = original.model_copy(
+        update={
+            "evidence_id": "ev_history",
+            "view": "brief",
+            "summary": "历史返回一行",
+            "result_json": '{"raw":"HISTORICAL_ORIGINAL_CANARY"}',
+        }
+    )
+    delivery = delivery.model_copy(
+        update={
+            "facts": (current, history),
+            "evidence_ids": (current.evidence_id, history.evidence_id),
+            "blocks": (
+                DeliveryFactRef(evidence_id=current.evidence_id),
+                DeliveryFactRef(evidence_id=history.evidence_id),
+            ),
+        }
+    )
+    reports = build_reports(delivery, expand_brief=False)
+    content = "\n".join(report.content.decode() for report in reports)
+    assert "NEW_ORIGINAL_CANARY" in content
+    assert "HISTORICAL_ORIGINAL_CANARY" not in content
+    assert "历史返回一行" in content and "原文未展示" in content
+
+
+def test_md_body_and_evidence_are_separate_and_identifiable():
+    delivery = _delivery("md")
+    source = delivery.facts[0].model_copy(
+        update={
+            "view": "brief",
+            "summary": None,
+            "columns": (),
+            "rows": (),
+            "metadata": {
+                "start_time": "1792440000",
+                "result": "RAW_METRICS_CANARY",
+                "warnings": None,
+            },
+            "result_json": (
+                '{"start_time":"1792440000","result":"RAW_METRICS_CANARY","warnings":null}'
+            ),
+        }
+    )
+    delivery = delivery.model_copy(update={"facts": (source,)})
+    reports = build_reports(delivery)
+    assert len(reports) >= 2
+    body = reports[0].content.decode()
+    details = "\n".join(report.content.decode() for report in reports[1:])
+    assert "报告正文" in body and "需要复核" in body
+    assert "start_time" not in body and "RAW_METRICS_CANARY" not in body and "warnings" not in body
+    assert "证据明细" in details and "RAW_METRICS_CANARY" in details
+    parts = _data_parts(delivery, 0, 3500, "oc_test", None)
+    index = parts[-1].body.decode()
+    assert "文件 1" in index and "报告正文" in index and "证据明细" in index
+
+
+def test_explicit_historical_brief_keeps_summary_in_body_and_original_in_detail_file():
+    delivery = _delivery("md")
+    source = delivery.facts[0].model_copy(update={"view": "brief", "summary": "历史已返回一行"})
+    reports = build_reports(delivery.model_copy(update={"facts": (source,)}))
+    body = reports[0].content.decode()
+    details = "\n".join(report.content.decode() for report in reports[1:])
+    assert "历史已返回一行" in body
+    assert "<at id=all>" not in body and "<at id=all>" in details
+
+
+def test_split_html_inline_table_contains_only_rows_in_its_file(monkeypatch):
+    import re
+
+    delivery = _delivery("html")
+    rows = ({"value": "ROW_FIRST"}, {"value": "ROW_SECOND"})
+    source = delivery.facts[0].model_copy(
+        update={"rows": rows, "result_json": json.dumps({"columns": ["value"], "rows": rows})}
+    )
+    delivery = delivery.model_copy(
+        update={"facts": (source,), "blocks": (DeliveryFactRef(evidence_id=source.evidence_id),)}
+    )
+    size = len(build_reports(delivery)[0].content)
+    monkeypatch.setattr("xiaowei.feishu_report.MAX_REPORT_BYTES", size - 1)
+    files = build_reports(delivery)
+    assert len(files) >= 2
+    seen = []
+    for report in files:
+        for inline, detail in re.findall(
+            r'<section class="card"[^>]*>(.*?)<details[^>]*>(.*?)</details>',
+            report.content.decode(),
+            re.S,
+        ):
+            inline_rows = re.findall(r"ROW_(?:FIRST|SECOND)", inline)
+            detail_rows = re.findall(r"ROW_(?:FIRST|SECOND)", detail)
+            assert inline_rows == detail_rows
+            seen.extend(detail_rows)
+    assert seen == ["ROW_FIRST", "ROW_SECOND"]

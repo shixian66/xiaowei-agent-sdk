@@ -83,7 +83,8 @@ async def test_raw_md_common_markup_keeps_facts_and_resends_original_parts(
         task.cancel()
         with pytest.raises(asyncio.CancelledError):
             await task
-    assert len(files) == 1
+    assert len(files) == 2
+    assert "报告正文" in files[0].decode() and "证据明细" in files[1].decode()
     content = files[0].decode()
     assert source in content
     assert ("部分不支持的格式已按原文展示" in content) is notice
@@ -95,11 +96,15 @@ async def test_raw_md_common_markup_keeps_facts_and_resends_original_parts(
     )
     assert any(t.type == "inline" and t.content == "巡检发现" for t in tokens)
     assert any(t.type == "inline" and t.content == "后续建议" for t in tokens)
-    assert [json.loads(t.content) for t in tokens if t.type == "fence" and t.info == "json"] == [
+    detail_tokens = MarkdownIt().parse(files[1].decode())
+    assert [
+        json.loads(t.content) for t in detail_tokens if t.type == "fence" and t.info == "json"
+    ] == [
         "east",
         100,
     ]
-    assert "来源 local/order_total" in content and "private_note" not in content
+    assert "来源 local/order_total" in files[1].decode()
+    assert "private_note" not in content + files[1].decode()
     ref = RequestRef(
         channel="feishu", subject_id="alice", conversation_id="oc_alice", request_id="raw_md_markup"
     )
@@ -135,7 +140,13 @@ async def test_raw_md_common_markup_keeps_facts_and_resends_original_parts(
         (p.kind, p.body, p.uuid, p.file_key) for p in before
     ]
     assert all(p.send_state == "sent" for p in after)
-    assert len(files) == 1 and len(env.adapter.calls) == 1 and env.model_calls(message) == 2
+    assert len(files) == 2
+    assert (
+        "报告正文" in files[0].decode()
+        and "证据明细" in files[1].decode()
+        and len(env.adapter.calls) == 1
+        and env.model_calls(message) == 2
+    )
 
 
 def test_legacy_html_bytes_match_the_main_baseline() -> None:
@@ -183,7 +194,7 @@ async def test_formal_report_success_and_original_byte_resend(env: Env) -> None:
     ref, message = await report_request(env)
     platform = Platform()
     assert await env.service.results.send(ref, transmit(env, ref, platform)) == "sent"
-    assert len(platform.files) == 1
+    assert len(platform.files) == 2
     tokens = MarkdownIt().parse(platform.files[0].decode())
     assert not any(t.type == "fence" and PROSE in t.content for t in tokens)
     assert "报告" in env.scripts.calls[message][-1].instructions
@@ -336,7 +347,7 @@ async def test_previously_failed_unbound_md_can_be_resent_without_new_query(env:
         await env.service.results.send(ref, transmit(env, ref, platform, resend=True), resend=True)
         == "sent"
     )
-    assert len(platform.files) == 1
+    assert len(platform.files) == 2
     assert "ARRAY<INT>" in platform.files[0].decode()
     assert "部分不支持的格式已按原文展示" in platform.files[0].decode()
     assert len(env.adapter.calls) == 1 and env.model_calls(message) == 2

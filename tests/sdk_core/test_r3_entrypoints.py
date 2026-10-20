@@ -40,7 +40,7 @@ async def test_formal_history_brief_preserves_result_without_querying_again(env:
         assert len(statements(env.drv)) == 1
 
 
-async def test_formal_current_result_cannot_be_hidden_by_brief(
+async def test_formal_current_brief_keeps_complete_values(
     env: Env, caplog: pytest.LogCaptureFixture
 ) -> None:
     caplog.set_level("INFO", logger="xiaowei.app")
@@ -49,13 +49,15 @@ async def test_formal_current_result_cannot_be_hidden_by_brief(
         tool_call(
             "run_readonly_query", cluster=SR.target_id, sql="SELECT region FROM shop.sales LIMIT 5"
         ),
-        brief,  # 本轮新事实设为简要：代码按完整展示，不拒绝、不改写
+        brief,  # 本轮新事实收起，但原值完整；不触发回答改写
     )
     async with env.running(env.config()) as served:
         await served.page()
         body = (await served.turn(message, "query", "r3-full")).json()
         assert body["state"] == "completed", body
-        assert [f["view"] for f in body["delivery"]["facts"]] == ["full"]
+        assert [f["view"] for f in body["delivery"]["facts"]] == ["brief"]
+        assert body["delivery"]["facts"][0]["summary"] is None
+        assert body["delivery"]["facts"][0]["rows"]
         assert body["delivery"]["facts"][0]["summary"] is None
         assert "stage=answer_repair" not in caplog.text
         assert len(statements(env.drv)) == 1

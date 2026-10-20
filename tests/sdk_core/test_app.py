@@ -1716,7 +1716,7 @@ async def test_partially_cited_repeat_query_completes_the_rest(env: Env) -> None
     assert len(env.scripts.calls[message]) == 3
 
 
-async def test_brief_view_of_new_fact_is_shown_in_full_without_repair(env: Env) -> None:
+async def test_brief_view_of_new_fact_keeps_complete_values_without_repair(env: Env) -> None:
     def brief(call: ModelCall) -> list[Any]:
         ids = evidence_in(call)
         return answer(ids, "简要", fact_views=[{"evidence_id": ids[0], "view": "brief"}])
@@ -1726,7 +1726,9 @@ async def test_brief_view_of_new_fact_is_shown_in_full_without_repair(env: Env) 
         delivery = await env.deliver(env.ctx(turn="brief"), message)
     assert "stage=answer_repair" not in "\n".join(r.getMessage() for r in records)
     assert len(env.scripts.calls[message]) == 2
-    assert [f.view for f in delivery.facts] == ["full"]
+    assert [f.view for f in delivery.facts] == ["brief"]
+    assert delivery.facts[0].summary is None
+    assert delivery.facts[0].rows and delivery.facts[0].result_json
 
 
 async def test_duplicate_citations_are_normalized_without_repair(env: Env) -> None:

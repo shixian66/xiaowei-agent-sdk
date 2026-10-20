@@ -67,3 +67,41 @@ async def test_real_chrome_brief_and_explicit_full_history(env: Env, chrome_bina
             == 1
         )
         assert len(statements(env.drv)) == 1
+
+
+@pytest.mark.parametrize("view", ["full", "brief"])
+async def test_html_report_hides_short_metadata_and_keeps_every_original(chrome_binary, view):
+    from urllib.parse import quote
+
+    from tests.sdk_core.test_feishu_reports import _delivery
+
+    from xiaowei.feishu_report import build_reports
+
+    delivery = _delivery("html")
+    source = delivery.facts[0].model_copy(
+        update={
+            "view": view,
+            "summary": None,
+            "columns": (),
+            "rows": (),
+            "metadata": {
+                "result": "RAW_METRICS_CANARY",
+                "start_time": "1792440000",
+                "warnings": None,
+            },
+            "result_json": (
+                '{"result":"RAW_METRICS_CANARY","start_time":"1792440000","warnings":null}'
+            ),
+        }
+    )
+    (report,) = build_reports(delivery.model_copy(update={"facts": (source,)}))
+    async with launch(chrome_binary) as chrome:
+        page = await chrome.page()
+        await page.navigate("data:text/html;charset=utf-8," + quote(report.content.decode()))
+        visible = await page.evaluate("document.body.innerText")
+        assert "需要复核" in visible
+        assert "RAW_METRICS_CANARY" not in visible and "start_time" not in visible
+        assert await page.evaluate("document.querySelector('details').open") is False
+        await page.evaluate("document.querySelector('details').open = true")
+        complete = await page.evaluate("document.body.innerText")
+        assert "RAW_METRICS_CANARY" in complete and "1792440000" in complete
