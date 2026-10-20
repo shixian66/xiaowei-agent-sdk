@@ -4,7 +4,7 @@ JSON 2.0 要求客户端 >=7.20。纯文本表格最多五个，额外/宽表用
 折叠文字均计入预算。完整 HTTP 请求预算包括 SDK 的内层 JSON 字符串与外层再次转义。
 
 来源区分：事实、动作、补全结果与系统说明是代码生成的组件；模型文字只经白名单格式器转换，
-在含任何代码内容的卡片中由代码加注“模型说明”标签。post 只用于纯模型文字；模型文字伴随任何
+由代码按区域标为“AI 分析与建议”或“系统事实”。post 只用于纯模型文字；模型文字伴随任何
 代码说明时用卡片分区，代码说明与模型文字不在同一 post 或纯文本中混排。
 """
 
@@ -22,7 +22,8 @@ MAX_REQUEST_BYTES: Final = 30_000
 CAPACITY_NOTICE: Final = "结果未展示：单消息容量不足。可缩小问题范围后重新提问；本次仅发送此说明。"
 FACTS_CLIPPED: Final = "事实展示已截断，未展示全部结果。"
 ANALYSIS_CLIPPED: Final = "模型说明展示已截断，未展示全部模型说明。"
-MODEL_TEXT_LABEL: Final = "模型说明（未经系统核实）"
+MODEL_TEXT_LABEL: Final = "AI 分析与建议"
+FACT_LABEL: Final = "系统事实"
 REMAINING_LABEL: Final = "其余结果（系统补全本轮获准结果）"
 TEXT_CLIPPED: Final = "（内容超过单消息上限，已截断）"
 BRIEF_ORIGINAL_OMITTED: Final = "获准原文未展示（单消息容量限制）；如需原文请明确提出。"
@@ -216,11 +217,15 @@ def _card(
     """
     elements: list[Message] = [_div(notice) for notice in delivery.notices]
     tables = 0
+    region: str | None = None
     index_of = {fact.evidence_id: i for i, fact in enumerate(delivery.facts)}
 
     def fact_elements(index: int) -> None:
-        nonlocal tables
+        nonlocal tables, region
         fact = delivery.facts[index]
+        if region != fact.section:
+            elements.append(_div("动作材料" if fact.section == "action" else FACT_LABEL))
+        region = fact.section
         columns, all_rows = _data(fact)
         rows = all_rows[: counts[index]]
         if fact.requires_complete:
@@ -324,20 +329,18 @@ def _card(
         if fact.section == "action":
             fact_elements(index)
     shown_texts = 0
-    labelled = False
     for block in delivery.blocks:
         if isinstance(block, DeliveryFactRef):
             # 拆分发送时动作材料已独立成分项，本消息不含它；其余事实都在本消息中。
             if block.evidence_id in index_of:
-                labelled = False
                 fact_elements(index_of[block.evidence_id])
             continue
         if shown_texts >= len(texts):
             continue
-        if not labelled:
+        if region != "model":
             # 代码加注的来源标签：模型文字不能移除，也不能借文字取得事实区域的身份。
             elements.append(_div(MODEL_TEXT_LABEL))
-            labelled = True
+            region = "model"
         text = texts[shown_texts]
         elements.extend(format_prose(display_text(text)) if formatted else [_div(text)])
         shown_texts += 1
@@ -406,7 +409,12 @@ def _card(
             )
     elements.extend(_basis_panels(delivery.basis))
     return _static_card(
-        elements, "小维 · 工具结果" if any(f.requires_complete for f in delivery.facts) else "小维"
+        elements,
+        (
+            "小维 · 工具结果"
+            if any(f.requires_complete for f in delivery.facts)
+            else "小维 · AI 运维助手"
+        ),
     )
 
 
