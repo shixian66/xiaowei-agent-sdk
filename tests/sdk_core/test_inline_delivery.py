@@ -131,7 +131,7 @@ def test_preview_keeps_answer_first_and_states_exact_range() -> None:
     text = shown(build_feishu_message(d, 3500, CHAT, platform_limits=True))
     assert "结论：三条都是 etl 的批量写入。" in text
     shown_rows = text.count("S" * 12_000)
-    assert shown_rows < 3 and f"预览 {shown_rows}／本次返回 3 行" in text
+    assert shown_rows < 3 and f"展示 {shown_rows}／本次返回 3 行" in text
     assert "（无数据行）" not in text
 
 
@@ -139,7 +139,7 @@ def test_zero_row_preview_never_claims_no_data() -> None:
     d = delivery(fact(("sql_text",), ({"sql_text": "S" * 40_000},)), analysis=None)
     text = shown(build_feishu_message(d, 3500, CHAT, platform_limits=True))
     assert "（无数据行）" not in text
-    assert "预览 0／本次返回 1 行" in text and "结果行未展示。" in text
+    assert "展示 0／本次返回 1 行" in text and "结果行未展示。" in text
 
 
 def test_metadata_fact_preview_counts_fields() -> None:
@@ -149,7 +149,8 @@ def test_metadata_fact_preview_counts_fields() -> None:
         analysis=None,
     )
     text = shown(build_feishu_message(d, 3500, CHAT, platform_limits=True))
-    assert "／共 12 个字段" in text and "预览" in text
+    count = text.count("v" * 3000)
+    assert f"展示 {count}／共 12 个字段" in text
 
 
 def test_single_large_metadata_field_preview_is_honest_but_empty() -> None:
@@ -158,7 +159,7 @@ def test_single_large_metadata_field_preview_is_honest_but_empty() -> None:
     raw = json.dumps({"dashboards": json.loads(metadata["dashboards"])})
     d = delivery(fact((), (), metadata=metadata, raw=raw, tool_id="grafana/search"), analysis=None)
     text = shown(build_feishu_message(d, 3500, CHAT, platform_limits=True))
-    assert "预览 0／共 1 个字段" in text and "结果行未展示。" in text
+    assert "展示 0／共 1 个字段" in text and "结果字段未展示。" in text
     assert "（无数据行）" not in text
 
 
@@ -174,10 +175,13 @@ def test_oversized_result_gets_file_and_body_with_answer_and_exact_preview() -> 
     assert [f.kind for f in files] == ["md"]
     text = body.body.decode()
     assert "本次完整结果见附件。" in text and "结论：三条都是 etl 的批量写入。" in text
-    assert "（无数据行）" not in text and "／本次返回 3 行" in text
+    assert "（无数据行）" not in text and "本次返回 3 行" in text
+    assert "明细与查询信息见附件" in text and "S" * 12_000 not in text
+    report = files[0].body.decode()
+    assert all(f"q-{i}" in report for i in range(3)) and report.count("S" * 12_000) >= 3
 
 
-def test_preview_of_metadata_fact_shows_some_fields() -> None:
+def test_failure_preview_of_metadata_fact_shows_some_fields() -> None:
     metadata = {f"host{i}": f"10.0.0.{i}" for i in range(400)}
     metadata["dashboards"] = "D" * 40_000
     d = delivery(
@@ -185,7 +189,7 @@ def test_preview_of_metadata_fact_shows_some_fields() -> None:
         analysis=None,
     )
     message = _preview(
-        d.model_copy(update={"report_format": "md"}), 3500, CHAT, None, "本次完整结果见附件。"
+        d, 3500, CHAT, None, "完整结果尚未交付。"
     )
     text = shown(message)
     assert "预览无法在本消息容量内展示" not in text and "10.0.0.0" in text
@@ -291,7 +295,7 @@ def test_raw_json_kept_when_card_does_not_show_everything(case: str) -> None:
 
 def test_preview_never_claims_raw_json_matches_partial_rows() -> None:
     d = delivery(fact(AUDIT, audit_rows(10, 3000)), analysis=None)
-    message = _preview(d.model_copy(update={"report_format": "md"}), 3500, CHAT, None, "见附件")
+    message = _preview(d, 3500, CHAT, None, "完整结果尚未交付。")
     text = shown(message)
     assert "／本次返回 10 行" in text and RAW_OMITTED not in text
 
@@ -309,7 +313,7 @@ def test_preview_with_all_rows_but_hidden_sql_keeps_raw_claim_honest() -> None:
         sql = "SELECT " + "x" * size
         d = delivery(fact(("v",), ({"v": 1},), metadata={"sql": sql}), analysis=None)
         text = shown(
-            _preview(d.model_copy(update={"report_format": "md"}), 3500, CHAT, None, "见附件")
+            _preview(d, 3500, CHAT, None, "完整结果尚未交付。")
         )
         if "SQL 未展示。" in text:
             assert RAW_OMITTED not in text
