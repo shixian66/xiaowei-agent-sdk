@@ -392,6 +392,42 @@ async def test_short_complete_reply_has_one_receipt_and_no_attachment(env: Env) 
     assert p.kind == "body" and p.message_id and p.send_state == "sent"
 
 
+@pytest.mark.parametrize("outcome", ["sent", "failed", "unknown"])
+async def test_folded_remaining_through_saved_delivery_and_manual_recovery(env: Env, outcome):
+    from tests.sdk_core.test_feishu_render import text_parts
+
+    message = env.scripts.add(
+        "查询东区订单，先给结论，明细收起",
+        tool_call("run_query", region="east"),
+        lambda call: answer([], "**结论** 当前结果已取得，范围以事实为准。"),
+    )
+    record = await env.run(message, "om_d1a", channel="feishu", conversation="oc_d1a")
+    assert record.state == "completed"
+    ref = RequestRef(
+        channel="feishu", subject_id="alice", conversation_id="oc_d1a", request_id="om_d1a"
+    )
+    platform = Platform(
+        outcomes=[] if outcome == "sent" else [rejected() if outcome == "failed" else "unknown"]
+    )
+    assert await env.service.results.send(ref, transmit(env, ref, platform)) == outcome
+    value, uuid = platform.sent[0]
+    assert "结论" in "\n".join(text_parts(value, folded=False))
+    assert '"east"' not in "\n".join(text_parts(value, folded=False))
+    assert '"east"' in "\n".join(text_parts(value)) and platform.files == []
+    (bound,) = await parts(env, ref)
+    assert bound.send_state == outcome
+    if outcome != "sent":
+        assert "完整结果尚未交付" in str(platform.sent[-1][0])
+        result = await env.service.results.send(
+            ref, transmit(env, ref, platform, resend=True), resend=True
+        )
+        assert result == "sent"
+        assert platform.sent[-1] == (value, uuid)
+        (resent,) = await parts(env, ref)
+        assert resent.body == bound.body and resent.uuid == bound.uuid
+    assert len(env.adapter.calls) == 1 and env.model_calls(message) == 2
+
+
 @pytest.mark.asyncio
 async def test_plain_clarification_send_failure_has_nonempty_incomplete_hint(env: Env) -> None:
     question = env.scripts.add("需要补充目标", clarify("请说明目标集群"))

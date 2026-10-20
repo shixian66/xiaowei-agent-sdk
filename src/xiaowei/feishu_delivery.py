@@ -59,7 +59,8 @@ def _preview(
     )
     try:
         message = build_feishu_message(
-            candidate, max_chars, chat_id, reply_to=reply_to, platform_limits=True
+            candidate, max_chars, chat_id, reply_to=reply_to,
+            platform_limits=True, attachment_preview=True,
         )
     except (MessageCapacityError, ValueError):
         message = None
