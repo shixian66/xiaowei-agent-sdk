@@ -16,6 +16,7 @@ from pathlib import Path
 
 import httpx2
 from tests.sdk_core.dialogue_gate import (
+    AUTONOMY_SCENARIOS,
     E6_SCENARIOS,
     ENV_SCENARIOS,
     R3_SCENARIOS,
@@ -46,7 +47,13 @@ ENV_REVIEW_LABELS = {
     "environment_scope_correct": "只在用户当时明确的环境取数，未选时先问",
     "diagnosis_basis_sufficient": "诊断依据充分，或如实说明缺少什么",
 }
-SUITES = {"r3": R3_SCENARIOS, "r7": R7_SCENARIOS, "e6": E6_SCENARIOS, "env": ENV_SCENARIOS}
+SUITES = {
+    "r3": R3_SCENARIOS,
+    "r7": R7_SCENARIOS,
+    "e6": E6_SCENARIOS,
+    "env": ENV_SCENARIOS,
+    "autonomy": AUTONOMY_SCENARIOS,
+}
 
 
 async def review_sample(sample: ReviewSample) -> ReviewVerdict:

@@ -159,6 +159,14 @@ docker compose -p xiaowei-sdk-test -f compose.sdk-test.yml down -v
 
 `SDK_TEST_POSTGRES_URL` 只能是上面这一个测试地址；未设置时数据库用例明确失败而不是跳过。CI 的 integration job 以同样方式运行完整测试。
 
+自主调查与普通消息沿[同一 T1–T5 样例](docs/superpowers/plans/2026-10-20-agent-autonomy-progress.md)验收。已有交互评测脚本增加 `autonomy` 集：T1/普通消息订单统计、T2 慢查询候选和 T4 缺环境，复用正式 runtime、治理及合成数据；T3 部分监控源失败复用 `test_monitoring_read_recovery.py` 的正式入口。离线夹具的基础订单聚合使用内存 SQLite，不能证明 StarRocks 方言或优化器行为。获得模型 Profile 和费用授权后，在交互终端设置 `XW_EVAL_PROFILE` 为其文件绝对路径，再运行以下命令；本轮没有可用真实模型，尚未执行此评测：
+
+```bash
+uv run --locked --extra dev python -m scripts.dialogue_real_model --profile "$XW_EVAL_PROFILE" --suite autonomy --repeats 3
+```
+
+脚本记录选择、I/O、耗时和可取得的用量，逐项人工核对结论、取证、澄清及限制；不以固定调用顺序或脚本模型通过代替 Agent 能力验收。T3 及实际飞书效果仍在获准的目标环境按同一业务样例验收。
+
 P3-A 与 P3-B 已经独立审查并合入；精简发行包、两容器 Compose、配置预检、首次初始化与停止步骤见 [deploy/OPERATIONS.md](deploy/OPERATIONS.md)。小维连接已有 StarRocks 和模型 API，不要求在服务器部署模型；应用配置、`.env`、CA 与 PostgreSQL 命名卷由操作者保留。amd64 发行包自带应用镜像文件（`docker load` 导入，不需要镜像仓库）；公司服务器与真实服务验收仍待 P3-C。正式镜像使用 `Dockerfile.runtime`，部署使用 `deploy/compose.yaml`；根目录 `compose.sdk-test.yml` 只供隔离测试。
 
 ## 设计与开发

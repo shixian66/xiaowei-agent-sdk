@@ -90,7 +90,9 @@ def two_sources(first: str, second: str) -> dict[str, Any]:
     return values
 
 
-def cite_last_success(call: ModelCall) -> list[Any]:
+def cite_last_success(
+    call: ModelCall, analysis: str = "第二个源有指标；第一个源未核实"
+) -> list[Any]:
     outputs = [
         json.loads(item["output"])
         for item in call.input
@@ -98,7 +100,23 @@ def cite_last_success(call: ModelCall) -> list[Any]:
     ]
     assert outputs[0]["status"] == "unverified"
     assert outputs[0]["retry_this_turn"] is False
-    return answer([outputs[-1]["evidence_id"]], analysis="第二个源有指标；第一个源未核实")
+    return answer([outputs[-1]["evidence_id"]], analysis=analysis)
+
+
+def unhealthy_sample(recorder: Recorder, sampled_at: int) -> ASGIApp:
+    server = MCPServer("T3-synthetic-monitoring")
+
+    @server.tool(structured_output=False)
+    def query(query: str) -> str:
+        recorder.tool_calls.append(("query", {"query": query}))
+        return json.dumps(
+            {
+                "result": f'up{{instance="host1"}} => 0 @[{sampled_at}]',
+                "warnings": ["instant sample only"],
+            }
+        )
+
+    return recording(server.streamable_http_app(host=LOOPBACK), recorder, token=None)
 
 
 @pytest.mark.parametrize(
@@ -147,26 +165,45 @@ def test_only_typed_transport_failures_are_source_local() -> None:
     assert _read_transport_failure(ValueError("secret")) is None
 
 
+@pytest.mark.parametrize(
+    "question", ["查主机为何告警", "结合监控源判断今天是否健康；服务 host1，时区 Asia/Shanghai"]
+)
 async def test_upstream_401_does_not_block_other_authorized_source_and_is_saved(
     env: Env,
+    question: str,
 ) -> None:
     error = (
         "failed making query api call: failed to execute instant query: "
         "client_error: client error: 401"
     )
-    with serve(lambda r: error_server(r, error)) as first, serve(query_server) as second:
+    t3 = question.startswith("结合监控源")
+    with (
+        serve(lambda r: error_server(r, error)) as first,
+        serve(
+            (lambda r: unhealthy_sample(r, int(env.clock().timestamp()))) if t3 else query_server
+        ) as second,
+    ):
         async with env.running(env.config(**two_sources(first.url, second.url))) as served:
             await served.page()
             message = env.scripts.add(
-                "查主机为何告警",
+                question,
                 tool_call(f"{SOURCE}__query", query="up"),
                 tool_call(f"{OTHER}__query", query="up"),
-                cite_last_success,
+                (
+                    lambda call: cite_last_success(
+                        call, "当前采样 up 为 0，存在异常；另一源未核实，不能确认今天整体健康。"
+                    )
+                )
+                if t3
+                else cite_last_success,
             )
             response = (await served.turn(message, "query")).json()
             assert response["state"] == "completed"
             delivery = response["delivery"]
             assert [fact["target_id"] for fact in delivery["facts"]] == [OTHER]
+            if t3:
+                assert "=> 0" in delivery["facts"][0]["metadata"]["result"]
+                assert "instant sample only" in delivery["facts"][0]["metadata"]["warnings"]
             assert await env.scalar("SELECT count(*) FROM xiaowei_evidence") == 1
             assert SOURCE in delivery["content"] and "未核实" in delivery["content"]
             assert error not in delivery["content"]

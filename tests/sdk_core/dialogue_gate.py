@@ -8,6 +8,7 @@ import asyncio
 import json
 import os
 import secrets
+import sqlite3
 import time
 from collections.abc import Awaitable, Callable, Iterator
 from contextlib import contextmanager
@@ -57,6 +58,8 @@ class Scenario:
     new_session_at: frozenset[int] = frozenset()
     feishu: bool = False
     environments: tuple[frozenset[str], ...] = ()
+    autonomy: bool = False
+    now: datetime = NOW
     """每轮用户当时明确的数据库环境；为空集表示用户尚未选定。只用于统计越界调用。"""
 
     def __post_init__(self) -> None:
@@ -263,6 +266,44 @@ R7_SCENARIOS = (
 
 NONE: frozenset[str] = frozenset()
 FAT, PRE = frozenset({"fat"}), frozenset({"pre"})
+AUTONOMY_SCENARIOS = (
+    Scenario(
+        "T1",
+        (("query", "用 fat 统计昨天 biz.orders 按创建时间的各状态订单数，做深色 HTML 报告"),),
+        multi=True,
+        feishu=True,
+        autonomy=True,
+        environments=(FAT,),
+        now=datetime(2026, 10, 20, 4, tzinfo=UTC),
+    ),
+    Scenario(
+        "T1-chat",
+        (("query", "统计 fat 昨天 biz.orders 按创建时间的各状态订单数，直接在消息里说明"),),
+        multi=True,
+        feishu=True,
+        autonomy=True,
+        environments=(FAT,),
+        now=datetime(2026, 10, 20, 4, tzinfo=UTC),
+    ),
+    Scenario(
+        "T2-chat",
+        (("query", "分析 fat 最近一小时耗时超过 5 秒的最近一条慢 SQL，直接给建议和 SQL 草稿"),),
+        multi=True,
+        feishu=True,
+        autonomy=True,
+        environments=(FAT,),
+        now=datetime(2026, 10, 20, 4, tzinfo=UTC),
+    ),
+    Scenario(
+        "T4",
+        (("query", "帮我查订单并出报告"),),
+        multi=True,
+        feishu=True,
+        autonomy=True,
+        environments=(NONE,),
+        now=datetime(2026, 10, 20, 4, tzinfo=UTC),
+    ),
+)
 SLOW_SQL = f"SELECT region, SUM(amount) FROM data_center.{TABLE} GROUP BY region"  # noqa: S608 -- 固定样例文本，不执行
 
 # 环境选择（数据库工作方法第一步）：每轮标注用户当时明确的环境，越界调用由报告计数。
@@ -611,6 +652,7 @@ async def _synthetic_members(actors: frozenset[str], checks: list[str], _: str, 
 
 @dataclass
 class DialogueStarRocks(SyntheticStarRocks):
+    autonomy: bool = False
     raw_chars: int = 100
     deny_middle: bool = False
     unavailable: bool = False
@@ -648,6 +690,30 @@ class DialogueStarRocks(SyntheticStarRocks):
         return kind
 
     def result(self, kind: Any, sql: str, args: Any) -> Any:
+        if self.autonomy and kind == "query" and "biz.orders" in sql:
+            # 仅此基本聚合夹具借用内存 SQLite，不用常量正确答案掩盖错误日期条件。
+            # StarRocks 特有语法/优化器和真实权限仍须公司环境验收。
+            connection = sqlite3.connect(":memory:")
+            try:
+                connection.execute("ATTACH DATABASE ':memory:' AS biz")
+                connection.execute("CREATE TABLE biz.orders (status TEXT, created_at TEXT)")
+                records = [
+                    (status, "2026-10-19 12:00:00")
+                    for status, count in (("paid", 70), ("cancelled", 20), ("pending", 10))
+                    for _ in range(count)
+                ] + [("paid", "2026-10-18 23:59:59"), ("pending", "2026-10-20 00:00:00")]
+                connection.executemany("INSERT INTO biz.orders VALUES (?, ?)", records)
+                cursor = connection.execute(sql)
+                return tuple(column[0] for column in cursor.description), cursor.fetchall()
+            finally:
+                connection.close()
+        if self.autonomy and kind == "audit":
+            columns, rows = super().result(kind, sql, args)
+            # 第一个更慢、第二个更晚；顺序仍沿真实 Adapter 的指标排序语义。
+            return columns, [
+                (row[0], row[1] + timedelta(minutes=index * 10), *row[2:])
+                for index, row in enumerate(rows)
+            ]
         if (
             kind == "probe"
             and self.deny_middle
@@ -722,6 +788,11 @@ def configuration(profile: ModelProfile, scenario: Scenario) -> ServeConfig:
         if scenario.known_time
         else None
     )
+    if scenario.autonomy:
+        target["business_context"]["text"] = (
+            "业务时区 Asia/Shanghai；biz.orders 一行是一笔订单，created_at 为创建时间，"
+            "status 为 paid/cancelled/pending。时间口径已明确，不代表用户已选定数据库环境。"
+        )
     sr = target["starrocks"]
     sr.update(
         target_id="pre", host="synthetic.invalid", database="data_center", time_zone="Asia/Shanghai"
@@ -799,6 +870,8 @@ async def run_dialogue(
                         if scenario.ambiguous_database:
                             tables["other_center", TABLE] = tables["data_center", TABLE]
                         tables["data_center", "quota_other"] = ("region",)
+                        if scenario.autonomy:
+                            tables["biz", "orders"] = ("status", "created_at")
                         if scenario.pages:
                             tables = {("data_center", f"t{i:03}"): ("region",) for i in range(401)}
                         drivers[target.target_id] = DialogueStarRocks(
@@ -806,10 +879,18 @@ async def run_dialogue(
                             tables=tables,
                             raw_chars=scenario.raw_chars,
                             raw_field=scenario.raw_field,
+                            autonomy=scenario.autonomy,
                             unavailable=target.target_id == scenario.unavailable,
-                            audit=(SLOW_SQL, FILTERED_AUDIT_SQL),
+                            audit=(
+                                (
+                                    "SELECT status FROM biz.orders",
+                                    "SELECT created_at FROM biz.orders",
+                                )
+                                if scenario.autonomy
+                                else (SLOW_SQL, FILTERED_AUDIT_SQL)
+                            ),
                             audit_database="data_center",
-                            audit_started=NOW.astimezone(
+                            audit_started=scenario.now.astimezone(
                                 ZoneInfo(target.starrocks.time_zone)
                             ).replace(tzinfo=None)
                             - timedelta(minutes=30),
@@ -841,7 +922,7 @@ async def run_dialogue(
 
                     async with open_runtime(
                         config,
-                        clock=lambda: NOW,
+                        clock=lambda now=scenario.now: now,
                         model_transport=_WindowTransport(observer, window),
                         starrocks_connect=drivers,
                         members=members,
@@ -886,7 +967,7 @@ async def run_dialogue(
                                     group=group,
                                     mode=mode,
                                     message=message,
-                                    received_at=NOW,
+                                    received_at=scenario.now,
                                 )
                             )
                             try:
