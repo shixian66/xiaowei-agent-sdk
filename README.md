@@ -171,6 +171,24 @@ uv run --locked --extra dev python -m scripts.dialogue_real_model --profile "$XW
 
 脚本记录选择、I/O、耗时和可取得的用量，逐项人工核对结论、取证、澄清及限制；不以固定调用顺序或脚本模型通过代替 Agent 能力验收。SQLite 不支持的合法 StarRocks 语法（例如带 INTERVAL 的 DATE_SUB）记为“替身不支持”，不能计为 Agent 失败或要求模型改用固定 SQL；在实际 StarRocks 上复核。T3 及实际飞书效果仍在获准的目标环境按同一业务样例验收。
 
+回答修复计划 P4 复用上述采集器的 `p4` 集，加入原始六轮对话、精确查询失败/仅候选能力、去重/用户统计、时区覆盖、监控双源局部失败、本轮与历史 brief 混合及 MD/HTML 交付。用真实 SDK、正式 runtime、隔离 PostgreSQL、loopback MCP 和现有分项绑定/回执路径，外部模型与渠道 I/O 在离线测试中使用替身。相关离线和 Chrome 检查：
+
+```bash
+SDK_TEST_POSTGRES_URL=postgresql+asyncpg://postgres@127.0.0.1:55432/postgres \
+  uv run --locked --extra dev python -m pytest tests/sdk_core/test_answer_repair_eval.py tests/sdk_core/test_dialogue_real_model.py tests/sdk_core/test_autonomy_tasks.py tests/sdk_core/test_dialogue_contract.py -q
+SDK_TEST_POSTGRES_URL=postgresql+asyncpg://postgres@127.0.0.1:55432/postgres \
+SDK_TEST_CHROME="/Applications/Google Chrome.app/Contents/MacOS/Google Chrome" \
+  uv run --locked --extra dev python -m pytest tests/sdk_core/test_answer_repair_eval.py -m browser -q
+```
+
+另行取得具体 Profile、端点/模型和费用授权后，才能运行真实模型采集；当前未运行：
+
+```bash
+uv run --locked --extra dev python -m scripts.dialogue_real_model --profile "$XW_EVAL_PROFILE" --suite p4 --repeats 3
+```
+
+基线/候选须使用相同 harness 和输入，分别至少三次；不得给旧源码额外注入新时区或 view 指引。标准输出报告仅含版本、固定计数、用量/耗时与人工判定；实际 SQL/PromQL、正文和文件只在交互终端即时核对，不存入该报告。`first_body_ack_ms` 是已绑定正文的合成回执时刻，`complete_delivery_ms` 是全部分项回执确认时刻，两者都不能证明真实客户端可见。loopback MCP 只支持有限的合成表达式；未支持表达式与 SQLite 执行错误单独计数，交由人工在真实目标复核，不自动判为 Agent 失败。空人工结论不会被计作通过。真实模型自主选择、StarRocks 日期/时区语义、飞书桌面/手机多附件与用户验收仍开放。
+
 P3-A 与 P3-B 已经独立审查并合入；精简发行包、两容器 Compose、配置预检、首次初始化与停止步骤见 [deploy/OPERATIONS.md](deploy/OPERATIONS.md)。小维连接已有 StarRocks 和模型 API，不要求在服务器部署模型；应用配置、`.env`、CA 与 PostgreSQL 命名卷由操作者保留。amd64 发行包自带应用镜像文件（`docker load` 导入，不需要镜像仓库）；公司服务器与真实服务验收仍待 P3-C。正式镜像使用 `Dockerfile.runtime`，部署使用 `deploy/compose.yaml`；根目录 `compose.sdk-test.yml` 只供隔离测试。
 
 ## 设计与开发

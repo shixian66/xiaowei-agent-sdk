@@ -16,14 +16,17 @@ from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, timedelta
 from functools import partial
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 from zoneinfo import ZoneInfo
 
 import httpx2
 from asyncmy.errors import OperationalError
 from pydantic import BaseModel, ConfigDict, StrictBool
 from sqlalchemy.engine import URL
+from tests.sdk_core.dialogue_monitoring import SOURCE as MONITOR_SOURCE
+from tests.sdk_core.dialogue_monitoring import SUPPORTED_QUERIES
 from tests.sdk_core.gate0 import ObservingTransport, SyntheticStarRocks
+from tests.sdk_core.mcp_fixture import Recorder
 from tests.sdk_core.synthetic_tools import TEST_DIGEST_KEY, ready_engine
 
 from xiaowei.channel import GroupScope, InboundRequest, RequestRef
@@ -33,6 +36,10 @@ from xiaowei.models import Delivery
 from xiaowei.runtime import ServeConfig, open_runtime
 from xiaowei.starrocks import StarRocksError, StarRocksErrorCode, show_create_sql
 from xiaowei.starrocks_tools import AUDIT_TOOLS, QUERY_TOOLS
+
+if TYPE_CHECKING:
+    from tests.sdk_core.dialogue_delivery import ChannelDelivery
+
 
 NOW = datetime(2026, 10, 10, 12, tzinfo=UTC)
 OPERATOR = "u1-synthetic-operator"
@@ -54,6 +61,7 @@ class Scenario:
     raw_field: str = "raw"
     unavailable: str | None = None
     busy_target: str | None = None
+    denied_audit_target: str | None = None
     actors: tuple[str, ...] = ()
     new_session_at: frozenset[int] = frozenset()
     feishu: bool = False
@@ -82,6 +90,9 @@ class ReviewVerdict(BaseModel):
     history_delivery_claim_correct: StrictBool | None = None
     environment_scope_correct: StrictBool | None = None
     diagnosis_basis_sufficient: StrictBool | None = None
+    query_constraints_preserved: StrictBool | None = None
+    answer_focused: StrictBool | None = None
+    history_reuse_correct: StrictBool | None = None
 
 
 @dataclass(frozen=True)
@@ -97,6 +108,9 @@ class ReviewSample:
     failure: str | None
     delivery: Delivery | None
     statements: tuple[tuple[str, str, str], ...]
+    channel_delivery: "ChannelDelivery | None" = None
+    monitoring_calls: tuple[tuple[str, str, dict[str, Any]], ...] = ()
+    fixture_limits: dict[str, int] = field(default_factory=dict)
 
 
 SCENARIOS = (
@@ -266,16 +280,16 @@ R7_SCENARIOS = (
 
 NONE: frozenset[str] = frozenset()
 FAT, PRE = frozenset({"fat"}), frozenset({"pre"})
-AUDIT_COLUMNS = ("queryId", "timestamp", "queryTime", "stmt")
+AUDIT_COLUMNS = ("queryId", "timestamp", "queryTime", "stmt", "user")
 # UTC 审计时间；跨北京时间自然日，耗时与时间排序不同，重复 SQL 是不同执行。
 AUDIT_RECORDS = (
-    ("yesterday", "2026-10-19 15:59:59", 50000, "SELECT hidden FROM restricted.secret"),
-    ("midnight", "2026-10-19 16:00:00", 8000, "SELECT 1"),
-    ("slow-a", "2026-10-19 16:10:00", 20000, "SELECT hidden FROM restricted.secret"),
-    ("slow-b", "2026-10-19 16:20:00", 20000, "SELECT hidden FROM restricted.secret"),
-    ("third", "2026-10-19 17:20:00", 10000, "DROP TABLE restricted.secret"),
-    ("latest", "2026-10-20 03:59:00", 6000, "SELECT 2"),
-    ("tomorrow", "2026-10-20 16:00:00", 90000, "SELECT 3"),
+    ("yesterday", "2026-10-19 15:59:59", 50000, "SELECT hidden FROM restricted.secret", "history"),
+    ("midnight", "2026-10-19 16:00:00", 8000, "SELECT 1", "analyst"),
+    ("slow-a", "2026-10-19 16:10:00", 20000, "SELECT hidden FROM restricted.secret", "analyst"),
+    ("slow-b", "2026-10-19 16:20:00", 20000, "SELECT hidden FROM restricted.secret", "analyst"),
+    ("third", "2026-10-19 17:20:00", 10000, "DROP TABLE restricted.secret", "batch"),
+    ("latest", "2026-10-20 03:59:00", 6000, "SELECT 2", "batch"),
+    ("tomorrow", "2026-10-20 16:00:00", 90000, "SELECT 3", "future"),
 )
 AUTONOMY_SCENARIOS = (
     Scenario(
@@ -455,7 +469,8 @@ def environment_scope(
     """
     if allowed is None:
         return None
-    calls = [target for tool, target in choices if tool != "other-tool"]
+    database_tools = {t.partition("/")[2] for t in QUERY_TOOLS | AUDIT_TOOLS}
+    calls = [target for tool, target in choices if tool in database_tools]
     return {
         "allowed": sorted(allowed),
         "starrocks_calls": len(calls),
@@ -560,7 +575,115 @@ E6_SCENARIOS = (
 )
 
 
-def tool_choices(body: bytes, targets: frozenset[str]) -> list[tuple[str, str]]:
+_P4_BASE = AUTONOMY_SCENARIOS[0]
+P4_ORIGINAL = (
+    ("query", "用 fat"),
+    _P4_BASE.messages[0],
+    ("query", "为什么查了 100 行？"),
+    ("query", "只给 fat 三台主机的 IP 和主机名"),
+    ("query", "不要原始指标，只给 IP 和主机名"),
+    ("query", "改成每台一行，只要这两个字段"),
+)
+P4_SCENARIOS = (
+    replace(_P4_BASE, name="p4_original_dialogue", messages=P4_ORIGINAL, environments=(FAT,) * 6),
+    replace(
+        _P4_BASE,
+        name="p4_original_web",
+        messages=P4_ORIGINAL,
+        environments=(FAT,) * 6,
+        feishu=False,
+    ),
+    *(
+        replace(s, name=f"p4_{s.name}")
+        for s in AUTONOMY_SCENARIOS
+        if s.name in {"T1-chat", "T2-chat", "T4"}
+    ),
+    replace(
+        _P4_BASE,
+        name="p4_user_stats",
+        now=datetime(2026, 10, 20, 4, tzinfo=UTC),
+        messages=(("query", "统计 fat 今天各用户的审计执行记录数，按数量从高到低展示"),),
+    ),
+    replace(
+        _P4_BASE,
+        name="p4_deduplicated_top3",
+        now=datetime(2026, 10, 20, 4, tzinfo=UTC),
+        messages=(
+            (
+                "query",
+                "查询 fat 今天最慢的 3 条不同 SQL，按 SQL 原文去重，每条取最大耗时；说明口径",
+            ),
+        ),
+    ),
+    replace(
+        _P4_BASE,
+        name="p4_timezone_override",
+        now=datetime(2026, 10, 20, 3, 30, tzinfo=UTC),
+        messages=(
+            ("query", "本会话按 America/New_York 计算今天。查询 fat 今天最慢的 3 条，保留执行记录"),
+        ),
+    ),
+    replace(
+        _P4_BASE,
+        name="p4_partial_sources",
+        now=datetime(2026, 10, 19, 17, 30, tzinfo=UTC),
+        messages=(
+            (
+                "query",
+                "分别检查 prometheus-prod 和 prometheus-denied 中 fat 节点的可用性，"
+                "区分已核实与未核实，不能只凭一个源断言所有节点健康",
+            ),
+        ),
+    ),
+    replace(_P4_BASE, name="p4_exact_busy", busy_target="fat"),
+    replace(_P4_BASE, name="p4_exact_denied", denied_audit_target="fat"),
+    replace(_P4_BASE, name="p4_candidates_only"),
+    replace(
+        _P4_BASE,
+        name="p4_mixed_auto",
+        messages=(
+            _P4_BASE.messages[0],
+            (
+                "query",
+                "再查 fat 三台主机的 IP 和主机名；正文只给对应关系，完整指标放证据。"
+                "上一轮只要返回行数，不重查 SQL",
+            ),
+        ),
+        environments=(FAT, FAT),
+    ),
+    *(
+        replace(
+            _P4_BASE,
+            name=f"p4_mixed_report_{format_}",
+            messages=(
+                _P4_BASE.messages[0],
+                (
+                    "query",
+                    f"再查 fat 三台主机的 IP 和主机名，给我 {format_.upper()} 报告；"
+                    "上一轮只要返回行数，新指标原文放完整证据，不重查 SQL",
+                ),
+            ),
+            environments=(FAT, FAT),
+        )
+        for format_ in ("md", "html")
+    ),
+    replace(
+        _P4_BASE,
+        name="p4_monitoring_original",
+        messages=(P4_ORIGINAL[3], ("query", "给我刚才完整的指标原文，保留可复制入口，不重新查询")),
+        environments=(FAT, FAT),
+    ),
+    *(
+        replace(s, name="p4_raw_over_limit", feishu=True)
+        for s in SCENARIOS
+        if s.name == "raw_over_limit"
+    ),
+)
+
+
+def tool_choices(
+    body: bytes, targets: frozenset[str], mcp_targets: dict[str, str] | None = None
+) -> list[tuple[str, str]]:
     """Only retain known tool/target labels; never copy arbitrary identifiers or arguments."""
     try:
         data = json.loads(body)
@@ -596,6 +719,10 @@ def tool_choices(body: bytes, targets: frozenset[str]) -> list[tuple[str, str]]:
     selected = []
     known_tools = {t.partition("/")[2] for t in QUERY_TOOLS | AUDIT_TOOLS}
     for call in calls:
+        name = call.get("name")
+        if isinstance(name, str) and mcp_targets is not None and name in mcp_targets:
+            selected.append((name, mcp_targets[name]))
+            continue
         args = call.get("args", call.get("arguments"))
         if isinstance(args, str):
             try:
@@ -658,9 +785,14 @@ def _observe_rejections(window: _ToolWindow) -> Iterator[None]:
 
 
 def _record_choices(
-    choices: list[tuple[str, str]], targets: frozenset[str], window: _ToolWindow, body: bytes
+    choices: list[tuple[str, str]],
+    targets: frozenset[str],
+    window: _ToolWindow,
+    body: bytes,
+    *,
+    mcp_targets: dict[str, str] | None = None,
 ) -> None:
-    called = tool_choices(body, targets)
+    called = tool_choices(body, targets, mcp_targets)
     choices.extend(called)
     window.open = bool(called)
 
@@ -673,6 +805,8 @@ async def _synthetic_members(actors: frozenset[str], checks: list[str], _: str, 
 @dataclass
 class DialogueStarRocks(SyntheticStarRocks):
     autonomy: bool = False
+    audit_denied: bool = False
+    fixture_sql_errors: int = 0
     raw_chars: int = 100
     deny_middle: bool = False
     unavailable: bool = False
@@ -710,6 +844,14 @@ class DialogueStarRocks(SyntheticStarRocks):
         return kind
 
     def result(self, kind: Any, sql: str, args: Any) -> Any:
+        if (
+            self.audit_denied
+            and kind in {"query", "audit"}
+            and self.target.audit is not None
+            and self.target.audit.table.casefold() in sql.casefold()
+        ):
+            # Execution-time revocation after discovery/probes; real DB ACL semantics remain A1.
+            raise OperationalError(1142, "SELECT denied on synthetic audit source")
         if self.autonomy and kind == "query":
             # 一个数据集直接执行 SQL，反引号、CTE、JOIN 不按文本路由到固定结果。
             # 仅覆盖可移植子集；真实 StarRocks 语义另验。
@@ -728,13 +870,17 @@ class DialogueStarRocks(SyntheticStarRocks):
                     connection.execute(f"ATTACH DATABASE ':memory:' AS {audit.database}")
                     connection.execute(
                         f"CREATE TABLE {audit.database}.{audit.table} "
-                        "(queryId TEXT, timestamp TEXT, queryTime INTEGER, stmt TEXT)"
+                        "(queryId TEXT, timestamp TEXT, queryTime INTEGER, stmt TEXT, user TEXT)"
                     )
                     connection.executemany(
-                        f"INSERT INTO {audit.database}.{audit.table} VALUES (?, ?, ?, ?)",  # noqa: S608 -- validated synthetic identifiers
+                        f"INSERT INTO {audit.database}.{audit.table} VALUES (?, ?, ?, ?, ?)",  # noqa: S608 -- validated synthetic identifiers
                         AUDIT_RECORDS,
                     )
-                cursor = connection.execute(sql)
+                try:
+                    cursor = connection.execute(sql)
+                except sqlite3.Error:
+                    self.fixture_sql_errors += 1
+                    raise
                 return tuple(column[0] for column in cursor.description), cursor.fetchall()
             finally:
                 connection.close()
@@ -777,7 +923,9 @@ class DialogueStarRocks(SyntheticStarRocks):
         return super().result(kind, sql, args)
 
 
-def configuration(profile: ModelProfile, scenario: Scenario) -> ServeConfig:
+def configuration(
+    profile: ModelProfile, scenario: Scenario, monitoring: dict[str, Recorder] | None = None
+) -> ServeConfig:
     """只沿用部署数值限额，所有身份、目标与环境引用都替换为隔离样例。"""
     values = json.loads((ROOT / "examples/xiaowei.example.json").read_text())
     values["storage"]["database_url_ref"] = f"env:{DB_ENV}"
@@ -808,6 +956,24 @@ def configuration(profile: ModelProfile, scenario: Scenario) -> ServeConfig:
             "connect_timeout_seconds": 5,
             "stop_timeout_seconds": 10,
         }
+    if monitoring is not None:
+        values["mcp_servers"] = [
+            {
+                "server_id": source,
+                "url": recorder.url,
+                "auth_ref": None,
+                "timeout_seconds": 2,
+                "max_response_bytes": 64000,
+                "allowed_tools": {"query": "prometheus.query"},
+            }
+            for source, recorder in monitoring.items()
+        ]
+        for source in monitoring:
+            tool = f"{source}/query"
+            values["data_policy"]["model_tools"].append(tool)
+            for tools in values["access"]["grants"].values():
+                if tool not in tools:
+                    tools.append(tool)
     target = values["targets"][0]
     target["description"] = "合成订单库，仅供 U1 模型对照，禁止操作公司集群"
     target["business_context"] = (
@@ -823,6 +989,11 @@ def configuration(profile: ModelProfile, scenario: Scenario) -> ServeConfig:
         target["business_context"]["text"] = (
             "业务时区 Asia/Shanghai；biz.orders 一行是一笔订单，created_at 为创建时间，"
             "status 为 paid/cancelled/pending。时间口径已明确，不代表用户已选定数据库环境。"
+        )
+    if scenario.name.startswith("p4_"):
+        target["business_context"]["text"] = (
+            "biz.orders 一行是一笔订单，created_at 为创建时间，status 为 paid/cancelled/pending。"
+            "监控源仅含合成 fat 节点；不提供公司数据。"
         )
     sr = target["starrocks"]
     sr.update(
@@ -864,6 +1035,11 @@ def configuration(profile: ModelProfile, scenario: Scenario) -> ServeConfig:
                 "wait_check_seconds": 1,
             },
         }
+    if scenario.name == "p4_candidates_only":
+        values["data_policy"]["model_tools"].remove("local/run_readonly_query")
+        for tools in values["access"]["grants"].values():
+            if "local/run_readonly_query" in tools:
+                tools.remove("local/run_readonly_query")
     return ServeConfig.model_validate(values)
 
 
@@ -875,6 +1051,7 @@ async def run_dialogue(
     scenarios: tuple[Scenario, ...] = SCENARIOS,
     repeats: int = 3,
     manual_review: Callable[[ReviewSample], Awaitable[ReviewVerdict]] | None = None,
+    monitoring: dict[str, Recorder] | None = None,
 ) -> list[dict[str, Any]]:
     """报告用于新旧逐项比较；成功不自动批准合入，所有失败都保留。"""
     previous = {name: os.environ.get(name) for name in (DB_ENV, KEY_ENV)}
@@ -885,7 +1062,7 @@ async def run_dialogue(
         async with ready_engine(url):
             for repeat in range(repeats):
                 for scenario in scenarios:
-                    config = configuration(profile, scenario)
+                    config = configuration(profile, scenario, monitoring)
                     drivers: dict[str, DialogueStarRocks] = {}
                     window = _ToolWindow()
                     for target in config.targets:
@@ -941,7 +1118,15 @@ async def run_dialogue(
                     observer = ObservingTransport(
                         network(),
                         observe_response=partial(
-                            _record_choices, choices, frozenset(drivers), window
+                            _record_choices,
+                            choices,
+                            frozenset(drivers),
+                            window,
+                            mcp_targets={
+                                server.sdk_tool_name(remote): server.server_id
+                                for server in config.mcp_servers
+                                for remote in server.allowed_tools
+                            },
                         ),
                     )
 
@@ -970,6 +1155,7 @@ async def run_dialogue(
                         for drv in drivers.values():
                             drv.deny_middle = scenario.pages
                             drv.busy = drv.target.target_id == scenario.busy_target
+                            drv.audit_denied = drv.target.target_id == scenario.denied_audit_target
                         conversation = (
                             group.chat_id if group is not None else f"u1-{secrets.token_hex(8)}"
                         )
@@ -991,11 +1177,17 @@ async def run_dialogue(
                                 )
                             first = len(observer.observations)
                             first_choice = len(choices)
+                            first_monitor = {
+                                k: len(r.tool_calls) for k, r in (monitoring or {}).items()
+                            }
                             before_fetches = {k: len(d.fetches) for k, d in drivers.items()}
                             window.open, window.rejected = False, 0
                             first_members = len(member_checks)
                             before_connections = {k: d.attempts for k, d in drivers.items()}
                             before_timeouts = {k: d.slot_timeouts for k, d in drivers.items()}
+                            before_sql_errors = {
+                                k: d.fixture_sql_errors for k, d in drivers.items()
+                            }
                             before = {k: len(d.statements) for k, d in drivers.items()}
                             started = time.monotonic()
                             receipt = await runtime.service.accept(
@@ -1025,6 +1217,21 @@ async def run_dialogue(
                                 ),
                                 first=True,
                             )
+                            captured = None
+                            if scenario.name.startswith("p4_") and channel == "feishu":
+                                from tests.sdk_core.dialogue_delivery import capture_delivery
+
+                                captured = await capture_delivery(
+                                    runtime.service.results,
+                                    RequestRef(
+                                        channel=channel,
+                                        subject_id=subject,
+                                        conversation_id=conversation,
+                                        group=group,
+                                        request_id=f"r{index}",
+                                    ),
+                                    started,
+                                )
                             facts = () if view.delivery is None else view.delivery.facts
                             statements = [
                                 (k, kind, sql)
@@ -1041,6 +1248,21 @@ async def run_dialogue(
                                 for k, drv in drivers.items()
                                 if drv.fetches[before_fetches[k] :]
                             }
+                            mcp_calls = tuple(
+                                (source, name, args)
+                                for source, recorder in (monitoring or {}).items()
+                                for name, args in recorder.tool_calls[first_monitor[source] :]
+                            )
+                            sql_fixture_errors = {
+                                k: d.fixture_sql_errors - before_sql_errors[k]
+                                for k, d in drivers.items()
+                                if d.fixture_sql_errors != before_sql_errors[k]
+                            }
+                            unsupported_mcp_calls = sum(
+                                source == MONITOR_SOURCE
+                                and args.get("query") not in SUPPORTED_QUERIES
+                                for source, _, args in mcp_calls
+                            )
                             elapsed_ms = int((time.monotonic() - started) * 1000)
                             verdict = (
                                 None
@@ -1056,6 +1278,14 @@ async def run_dialogue(
                                         failure=record.failure_code,
                                         delivery=view.delivery,
                                         statements=tuple(statements),
+                                        channel_delivery=captured,
+                                        monitoring_calls=mcp_calls,
+                                        fixture_limits={
+                                            "sql_execution_errors": sum(
+                                                sql_fixture_errors.values()
+                                            ),
+                                            "unsupported_mcp_calls": unsupported_mcp_calls,
+                                        },
                                     )
                                 )
                             )
@@ -1073,6 +1303,7 @@ async def run_dialogue(
                                         else getattr(view.delivery, "report_format", None)
                                     ),
                                     "elapsed_ms": elapsed_ms,
+                                    **({"delivery": captured.metrics()} if captured else {}),
                                     "requests": [vars(r) for r in observer.observations[first:]],
                                     "tool_choices_by_target": {
                                         target: {
@@ -1115,6 +1346,36 @@ async def run_dialogue(
                                         window.rejected,
                                     ),
                                     "fetch_by_target": fetched,
+                                    **(
+                                        {"fixture_unsupported_mcp_calls": unsupported_mcp_calls}
+                                        if monitoring is not None
+                                        else {}
+                                    ),
+                                    **(
+                                        {"fixture_sql_errors_by_target": sql_fixture_errors}
+                                        if scenario.name.startswith("p4_")
+                                        else {}
+                                    ),
+                                    **(
+                                        {
+                                            "mcp_fetches": {
+                                                source: {
+                                                    name: sum(
+                                                        s == source and n == name
+                                                        for s, n, _ in mcp_calls
+                                                    )
+                                                    for name in sorted(
+                                                        {n for s, n, _ in mcp_calls if s == source}
+                                                    )
+                                                }
+                                                for source in sorted({s for s, _, _ in mcp_calls})
+                                            }
+                                            if mcp_calls
+                                            else {}
+                                        }
+                                        if monitoring is not None
+                                        else {}
+                                    ),
                                     "membership_checks_for_actor": member_checks[
                                         first_members:
                                     ].count(subject),
@@ -1142,6 +1403,7 @@ async def run_dialogue(
                                             "tool": f.tool_id,
                                             "target": f.target_id,
                                             "rows": len(f.rows),
+                                            "bytes": len(f.result_json.encode()),
                                             "view": getattr(f, "view", "full"),
                                             # 模型放置（body/action）与代码补全（remaining）分列，
                                             # 补全不计为模型引用。
@@ -1159,8 +1421,11 @@ async def run_dialogue(
                                         for token in ("SUBSTRING(", "LEFT(", "SUBSTR(")
                                     ),
                                     "review": None if verdict is None else verdict.model_dump(),
-                                    "manual_review_required": verdict is None,
-                                    "delivery_failure_simulated": False,
+                                    "manual_review_required": verdict is None
+                                    or not verdict.model_fields_set,
+                                    "delivery_failure_simulated": bool(
+                                        captured and captured.failure_simulated
+                                    ),
                                 }
                             )
     finally:
