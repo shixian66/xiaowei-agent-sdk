@@ -20,7 +20,7 @@
 | 可信事实与完整交付 | Evidence 复核、来源/限制、其余结果、文件分卷、不可变字节与显式重发；当前新事实的 `brief` 被完整展开，补全结果也直接渲染 | M1b 保留完整必交集合，分离正文展示与明细交付；完整仅指当前获准的已取得数据，不包含工具未返回内容 |
 | 报告兼容 | 可信回答版本 3，旧 2/Legacy 保留旧渲染；保存后未绑定窗口已处理；数据库 schema v12 | M1b 只改布局时保留现有版本，核验未绑定回答内容完整、历史 brief 不扩大导出及旧程序回退；不预设新增版本或重做报告能力 |
 | 诊断与用量 | Vertex 安全 429 诊断、HTTP 尝试和轮次 usage 日志已合入 | 用于离线/后续实测分析，不把日志或原始 usage 推到进度卡；其他 provider 缺失项如实记未知 |
-| 进度 | 阶段日志、群排队通知已存在；产品 Runner 未接 hooks，Transport 未暴露卡片更新 | P1 增加每次运行的只读观察和薄飞书更新适配，复用现有生命周期；展示策略已确认，尚未实施 |
+| 进度 | 阶段日志、群排队通知已存在；产品 Runner 未接 hooks，Transport 未暴露卡片更新 | P1 增加每次运行的只读观察和薄飞书更新适配，复用现有生命周期；P1 已接入，离线证据见 §7；真实服务留 P3 |
 
 本次不增加数据源/工具权限、查询或文字预算、生产写动作、自动重试类别、全局任意 HTML/CSS、图表、Web 下载/进度、流式输出和持久任务系统；不做表情回执或跨重启同卡恢复。报告支持与边界以当前架构为准，不另设计报告协议。
 
@@ -140,12 +140,12 @@ M1 对象是未请求文件的正常业务正文；显式 HTML/MD 报告继续�
 | `ToolContext.tool_call_id` | 可关联同轮并发调用，仅供内存关联、不输出或保存。hook 不读取参数、模型输入/响应和工具结果 |
 | 原生审批/错误处理器 | `Application._turn` 的主运行、无工具收尾、无工具改写，以及 `resume_action` 复用同一可选观察；不重建 RunState 或错误分类 |
 | 现有 MCP 工具 | 经 `MCPIntegration._function_tool` → `governed_function_tool` → SDK FunctionTool，能复用相同工具事件，不另接 MCP 调度 |
-| Lark Channel SDK 1.4.0 `send` / `client.im.v1.message.apatch` / `schedule` | 复用同一客户端公开 IM 消息 PATCH，不依赖 CardKit。`apatch` 的 typed response 保留实际 `code` 和原始响应；其余接入仍用现有调度。实际应用权限和客户端仍待后续验收 |
+| Lark Channel SDK 1.4.0 `client.im.v1.message.acreate/areply/apatch` / `schedule` | 复用同一客户端公开 IM 创建/回复/PATCH，不依赖 CardKit。公开 typed response 保留实际 `code`、创建 ID 和原始响应；其余接入仍用现有调度。实际应用权限和客户端仍待后续验收 |
 | 普通消息 `markdown_to_post_ast(..., tag_md_mode="structured")` | 已由 `feishu_markdown.prose_post` 使用；锁版转换器有 code/引用等能力，但也可生成链接/@，且有 strip、有限围栏/列表解析，不能直接传入未筛选模型全文。M1 先验证白名单组件、精确保真及 SDK 文本降级，不改用已知会丢内容的 native md 路线 |
 
 有两个已证实的接入风险：SDK 等待 hook，异常会包装为 `UserError` 中止运行；Lark 的 `update_card` 在返回前已把缺失 `code` 归一为 `0`，update 的 message_id 又来自入参，无法在其返回边界恢复回执完整性。两组公开接口合成探针复现：`{}` 与 `{"code": 0}`（有/无相同 msg）得到相同成功结果；同一客户端的公开 `apatch` 返回类型仍能区分实际 `code=0` 和缺失值。
 
-因此进度创建复用 `send` 并核对响应中的实际消息 ID；进度更新使用同一 `channel.client.im.v1.message.apatch`、公开请求类型与原 `schedule`。在归一化前按 typed/raw response 判定明确成功、明确拒绝或未知，缺失/不完整不能按成功处理；不调用私有 driver，不新建客户端/认证，也不修改既有正式发送路径。P1 仍须通过真实 SDK HTTP 替身和调度验证回执、超时与取消；当前探针只证明信息保留位置。
+P1 代码独立审查进一步复现：创建高层 `send` 同样会把缺失 `code` 当成功，即使返回了消息 ID 也不能据此确认成功。因此进度创建/群回复和更新统一复用同一 `channel.client.im.v1.message.acreate/areply/apatch`、公开请求类型与原 `schedule`。归一化前须有明确整数 `code=0`，创建还须实际非空消息 ID；群回复只发原消息，不 fallback 到新消息。缺失/不完整即停用观察，不调用私有 driver、不新建客户端/认证、不修改正式发送路径。产品级真实 SDK HTTP/跨线程替身覆盖成功、缺 code、带 ID 缺 code、缺 ID 和明确拒绝；真实平台仍待验收。
 
 ### 4.2 关键调用链与跨层契约
 
@@ -159,7 +159,7 @@ FeishuGateway._consume
   → ResultDelivery.send → send_delivery → 正式消息/文件及回执
 
 实际生命周期 / SDK hooks
-  → 本次请求的安全内存快照 → 独立飞书发送任务 → send / 公开 apatch
+  → 本次请求的安全内存快照 → 独立飞书发送任务 → 公开 acreate/areply/apatch
 ```
 
 - **观察入口：** `process/approve` 和 `run_turn/resume_action` 只需增加可选、每次运行独立的观察参数；关闭时不构造观察。依赖由应用/渠道装配，不放进 `RunContext`、模型工具或共享 Agent，不用全局可变 observer。事件不接管返回值、调用顺序或异常处理。
@@ -175,7 +175,7 @@ FeishuGateway._consume
 | 选择 | 推荐、备选及复查条件 |
 | --- | --- |
 | 观察接口 | 采用公开 RunHooks + 少量真实应用事件；`run_streamed` 要改消费方式且当前 Vertex 非流式，纯日志解析缺少可靠生命周期，不采用。SDK 升级改变事件覆盖时重验 |
-| 更新传输 | 同一客户端的公开 IM `apatch`；高层 `update_card` 丢失缺失状态码信息，不能满足完整回执契约。无需 CardKit、token streaming 或新连接。目标应用无法更新、或 SDK 升级修复信息丢失时重新评估，不自动换成多条进度消息 |
+| 进度传输 | 同一客户端的公开 IM 创建/回复/PATCH；高层 `send/update_card` 丢失缺失状态码信息，不能满足完整回执契约。无需 CardKit、token streaming 或新连接。目标应用无法更新、或 SDK 升级修复信息丢失时重新评估，不自动换成多条进度消息 |
 | 状态范围 | 每请求临时展示快照；持久进度恢复会引入保存/接管/旧消息归属等契约，当前没有此需求。需要跨重启准确收尾才重评 |
 | 调查与报告 | 复用现有 Skill、工具描述、blocks、安全渲染；新增固定流程或报告协议没有当前缺口支持。只有 T1–T4 失败且根因明确时做最小修订 |
 | 普通消息排版 | 复用 markdown-it、已有格式器、SDK 公共结构化消息与卡片容器；不让模型输出卡片 JSON/HTML，不把普通消息全部改成报告附件。先局部保真回退；仅在已有解析/组件无法保留样例语义时重新评估支持集合，不新造通用渲染框架 |
@@ -260,7 +260,7 @@ FeishuGateway._consume
 
 ## 7. 当前验证证据与审查输入
 
-**设计审核与当前实施：** 用户确认精确 `fbced821391fbc1390986160cc329e0e4596cc99` 审核通过，新增两项非阻断验收已进入 §5，并明确授权离线实施。P1 当前候选已接入主运行/收尾/改写/审批恢复、授权后启动及独立 SDK 传输；代码独立审查待进行。P2/M1a/M1b 尚待完成；设计通过不代表这些功能或 P3 已验收。
+**设计审核与当前实施：** 用户确认精确 `fbced821391fbc1390986160cc329e0e4596cc99` 审核通过，新增两项非阻断验收已进入 §5，并明确授权离线实施。P1 当前候选已接入主运行/收尾/改写/审批恢复、授权后启动及独立 SDK 传输；首轮代码独立审查发现的创建缺码问题已修复，待复核。P2/M1a/M1b 尚待完成；设计通过不代表这些功能或 P3 已验收。
 
 | 当前有效证据 | 版本、结果与限制 |
 | --- | --- |
@@ -268,6 +268,7 @@ FeishuGateway._consume
 | 当前渲染与附件基线 | `15572b9` 独立复审报告文档检查 **2 passed**、remaining 渲染及历史 brief 自动附件各 **1 passed**，共 **4 passed**；增量 `git diff --check` 通过。只覆盖现有源码行为，不证明新的折叠布局或 Agent 能力；作者本轮未重复跑未变化的功能检查 |
 | 未覆盖项 | `test_only_current_turn_query_results_are_completed` 与 `test_revocation_blocks_completed_results_like_explicit_ones` 需要隔离 PG。作者此前因缺 `SDK_TEST_POSTGRES_URL` 在 fixture 阶段报错，独立复审也未执行；不记通过。全量、Chrome、真实模型/飞书/公司服务及 M1a 格式器逐项复核未由这次复审覆盖；文本折叠后的实际容量和目标客户端展示仍属实现验收 |
 | P1 当前代码候选 | 专用 `xiaowei-sdk-test` PostgreSQL（fixture 校验 cluster_name，每用例独立数据库），合成模型/业务工具及 SDK HTTP 替身。应用/渠道/飞书/进度组 **354 passed**；补齐后的进度/群审批/群入口/队列组 **124 passed**；两组有重叠不合计。Ruff、mypy **35 个源文件**与差异检查通过。进度开/关、成功/未知/慢创建的真实入口对照均为同一业务结果、一次工具执行和两次模型调用；未启用真实模型或服务 |
+| P1 独立审查修复 | 精确 `e9c9f959127e3fea0b71215bb9b785988260a238` 独立审查发现创建回执缺 code 仍接受 ID。产品 SDK HTTP 反例先失败后通过，改为同客户端公开创建/回复 API；补产品群暂停及批准/拒绝恢复的独立观察与原消息绑定。修复后进度与锁版探针 **26 passed**、Ruff/mypy 通过，精确修复提交待独立复核。独立首轮另运行 **23 passed**，无真实服务 |
 | P1 已修复失败与验证范围 | 短任务观察原先仍等待阈值，新增反例先失败后通过；关闭观察时传入 progress=None 曾使原双参数包装器报错，旧组 **43 failed / 81 passed**，根因修复后完整相关组 **124 passed**。另一次命令误写不存在的测试文件、未执行用例，已改为实际群审批文件；不计通过。初次 lint/type 缓存受工作树权限限制，改为禁用 Ruff 缓存及专用临时 mypy 缓存后正常运行。尚未做当前候选全量、真实客户端或公司环境验证 |
 
 上述 **4 项**的复现命令（现有独立工作树锁版环境；本版不重复执行未变化的功能检查）：

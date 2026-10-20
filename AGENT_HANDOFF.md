@@ -15,7 +15,7 @@
 | 锁定依赖 | SDK `0.22.3`、Lark Channel `1.4.0`、MCP `2.2.0`、sqlglot `30.17.0`、`nh3 0.3.7`、`tinycss2 1.5.1` |
 | 正式入口 | `xiaowei serve`、`config check`、`model check`、`storage init/upgrade/cleanup`、`requests resend`；命令与环境准备以 README 为准 |
 | 最近有记录的公司部署 | 既有交接记录称 PR #110 / `4e0ab86` 已部署，并记录了部署后的回答拒收反馈。该历史记录不证明当前镜像、配置或健康状态，也不证明 #111–#114 已部署 |
-| 当前验收结论 | 用户确认计划 `fbced821` 审核通过，新增折叠原文去重与附件预览载体一致验收。P1 已接入实际 Runner、渠道与传输路径，定向离线检查通过，相关群回归已通过，独立代码审查待进行；P2/M1a/M1b 接续实施，均不据设计审核视为完成。证据只在计划 §7 维护，未作真实服务验收 |
+| 当前验收结论 | 用户确认计划 `fbced821` 审核通过，新增折叠原文去重与附件预览载体一致验收。P1 已接入实际 Runner、渠道与传输路径，定向离线检查通过，相关群回归已通过，首轮代码独立审查发现的创建缺码问题已修复，待精确 SHA 复核；P2/M1a/M1b 接续实施，均不据设计审核视为完成。证据只在计划 §7 维护，未作真实服务验收 |
 | 当前任务授权 | 批准范围内连续完成实现、测试与常规修复，沿 T1–T5 验收并本地提交；产品或权限边界变化仍需明确处理。用户确认没有可用于本轮评测的真实模型，先完成离线工作，后续由用户到公司部署验证。表情回执及跨重启同卡恢复暂不做；本轮不自行部署或调用公司服务 |
 
 原工作目录仍在 `codex/model-authored-report-plan@b89d4ee`，保留未跟踪的旧报告计划与公司配置；本次文档位于从 `76850bf` 建立的 `codex/agent-autonomy-progress` 独立工作树，未读取公司配置。当前新增规范及任务样例见[实施计划](docs/superpowers/plans/2026-10-20-agent-autonomy-progress.md)，不从旧分支状态推断当前主线能力。
@@ -30,7 +30,7 @@
 - 普通消息由单 Agent 判断是否查询；显式诊断入口才确定性隐藏并拒绝实际查询。环境选择目前依靠会话历史与随包 Skill，执行层没有“用户选定环境”硬校验；接受风险与第二步触发条件见 [R7](ARCHITECTURE.md#r7-targets)。
 - SQLGuard 检查业务 SQL 原文，物理表必须带库名；唯一候选可由 Agent 补全后重试，不能把旧的自动补库或 AST 重打印恢复为当前行为。查询资源边界和已接受的视图、审计数据范围见 [§6](ARCHITECTURE.md#6-只读查询保护)。
 - S3 允许模型组织文字与事实块；需交付结果漏引时由代码补全，不再用 `uncited_query` 拒收。权限、Evidence、未完成执行和存储边界仍生效；模型文字真实性通过任务评测检查，不能把结构通过当作结论正确。见 [结果交付](ARCHITECTURE.md#result-delivery)与 §8–§9。
-- 进度的单聊/群聊差异延迟、仅真实变化更新、正常收尾及异常陈旧已由用户确认，详见[进度契约](ARCHITECTURE.md#progress-observation)；尚未实施。普通消息的区域身份及正文/明细分工见[普通消息契约](ARCHITECTURE.md#ordinary-feishu-expression)，不能由 HTML/MD 报告完成推定达标。
+- 进度的单聊/群聊差异延迟、仅真实变化更新、正常收尾及异常陈旧已由用户确认，详见[进度契约](ARCHITECTURE.md#progress-observation)；P1 已有离线实现，当前证据见计划 §7。普通消息的区域身份及正文/明细分工见[普通消息契约](ARCHITECTURE.md#ordinary-feishu-expression)，不能由 HTML/MD 报告完成推定达标。
 - 监控写仅限已批准动作，使用 SDK 原生审批暂停/恢复及既有 Action 治理；生产开放仍须满足对应源和群审批门槛。Grafana 数据源密码私聊命令尚未实现，目前由管理员在 Grafana UI 填写。见 [监控边界](ARCHITECTURE.md#monitoring-mcp)。
 - 内网 Web 无登录、访问者共用操作者权限；目标账号、网络、Grafana 插件/写端及数据源更新竞争窗口等已接受取舍按架构执行。
 
@@ -73,7 +73,7 @@ S3 的源码事实：`AgentAnswer` 为有序 `TextBlock | FactBlock`，另含 `r
 
 ### 下一项工作与开放条件
 
-1. 按[实施计划 v1.6](docs/superpowers/plans/2026-10-20-agent-autonomy-progress.md)接续：先对 P1 当前候选做精确 SHA 独立审查，再沿 P2、M1a、M1b 串行推进；已批准产品取舍不重开。
+1. 按[实施计划 v1.6](docs/superpowers/plans/2026-10-20-agent-autonomy-progress.md)接续：先复核 P1 创建回执修复的精确 SHA，再沿 P2、M1a、M1b 串行推进；已批准产品取舍不重开。
 2. M1b 的新增验收已并入原表：折叠行/SQL 计入完整展示，避免依据重复整份 JSON；附件预览的提示与载体相符，且不复制大段完整明细。沿既有 Delivery/渲染器实施，不改 brief/schema、不丢唯一诊断依据、不为布局增加查询。
 3. 报告 R3、S4 的真实 provider/schema、模型质量及界面验收继续开放，执行时复用 T1–T5 和已有评测，不另建平台。原 S0 指定 `9231f45` 的历史基准安排不由本计划自动改变；本次进度对照基线为 `76850bf`，两种对照须明确差异与用途。
 4. 真实 Profile、数据/接收范围、预算与安全引用须具体获准。已有模型、公司部署或监控写的历史授权不扩展到本轮；缺环境仅保留对应验证缺口。

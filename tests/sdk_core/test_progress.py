@@ -296,23 +296,98 @@ async def test_raw_feishu_entry_keeps_governance_and_delivery_when_progress_is_u
 
 
 from tests.sdk_core.test_channel_service import env as env  # noqa: E402
+from tests.sdk_core.test_group_actions import actions as actions  # noqa: E402
 
 
-async def test_transport_uses_real_sdk_http_and_schedule_and_rejects_missing_code(monkeypatch):
+@pytest.mark.loopback
+@pytest.mark.parametrize("approve", [True, False])
+async def test_group_pause_and_new_approval_or_rejection_have_separate_observations(
+    actions,
+    monkeypatch,
+    approve,
+):
+    from tests.sdk_core.test_app import after, cite, tool_call
+    from tests.sdk_core.test_group_actions import request_execution
+    from tests.sdk_core.test_group_gateway import running
+    from tests.sdk_core.test_group_identity import CHAT, A, B
+
+    from xiaowei import feishu
+    from xiaowei.progress import Progress
+
+    class FastProgress(Progress):
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, **kwargs, delay=0.01, interval=0.02)
+
+    monkeypatch.setattr(feishu, "Progress", FastProgress)
+    env = actions.env
+    sink, destinations = Sink(), []
+    resumed_card = asyncio.Event()
+
+    async def create(chat_id, card, reply_to):
+        destinations.append((chat_id, reply_to))
+        await sink.create(card)
+        if len(sink.cards) == 2:
+            resumed_card.set()
+        return f"progress-{len(sink.cards)}"
+
+    first_release, resume_release = asyncio.Event(), asyncio.Event()
+    message = env.scripts.add(
+        feishu.attributed(A, "改为 after"),
+        after(first_release, tool_call("am-synthetic__propose_change", value="after")),
+        request_execution,
+        after(resume_release, cite("已根据审批结果收尾")),
+    )
+    async with running(
+        env, max_reply_chars=3500, progress_create=create, progress_update=sink.update
+    ) as group:
+        asking = asyncio.create_task(group.ask("改为 after", message_id="om_proposal"))
+        await asyncio.wait_for(sink.created.wait(), 2)
+        first_release.set()
+        await asyncio.wait_for(asking, 3)
+        assert actions.adapter.calls == []
+        action_id = await actions.one()
+        command = f"/{'批准' if approve else '拒绝'} {action_id}"
+        asking = asyncio.create_task(group.ask(command, sender=B, message_id="om_resume"))
+        await asyncio.wait_for(resumed_card.wait(), 2)
+        resume_release.set()
+        await asyncio.wait_for(asking, 3)
+        await group.ask(command, sender=B, message_id="om_resume")
+        assert len(actions.adapter.calls) == int(approve)
+        assert env.model_calls(message) == 3
+        assert destinations == [(CHAT, "om_proposal"), (CHAT, "om_resume")]
+        assert len(sink.cards) == 2
+        assert all(message_id in {"progress-1", "progress-2"} for message_id, _ in sink.updates)
+        assert action_id not in json.dumps([sink.cards, sink.updates], ensure_ascii=False)
+        assert await env.rows(
+            "SELECT state, delivery FROM xiaowei_request WHERE reply_message_id=:id", id="om_resume"
+        ) == [("completed", "sent")]
+
+
+@pytest.mark.parametrize("reply_to", [None, "original-message"])
+async def test_transport_uses_real_sdk_http_and_schedule_and_rejects_missing_code(
+    monkeypatch, reply_to
+):
     import httpx
     from lark_channel import FeishuChannel
-    from lark_channel.channel.types import SendResult
     from lark_channel.core.token import TokenManager
     from tests.sdk_core.test_feishu import FakeChannel, config
 
     from xiaowei.feishu import LarkTransport
 
     payloads = iter([{"code": 0}, {}, {"code": 230006}])
+    creates = iter(
+        [
+            {"code": 0, "data": {"message_id": "om_created"}},
+            {"code": 0, "data": {}},
+            {"data": {"message_id": "om_missing_code"}},
+            {"code": 230006, "data": {"message_id": "om_rejected"}},
+        ]
+    )
     requests = []
 
     def respond(request):
         requests.append(request)
-        return httpx.Response(200, json=next(payloads))
+        return httpx.Response(200, json=next(payloads if request.method == "PATCH" else creates))
 
     client_type = httpx.AsyncClient
     monkeypatch.setattr(TokenManager, "get_self_tenant_token", lambda config: "synthetic-token")
@@ -327,22 +402,22 @@ async def test_transport_uses_real_sdk_http_and_schedule_and_rejects_missing_cod
     channel = FeishuChannel(app_id=synthetic_value, app_secret=synthetic_value)
     fake = FakeChannel()
     fake.client = channel.client
+    fake.send = channel.send
     transport = LarkTransport(fake, config())
     card = {"card": {"schema": "2.0", "body": {"elements": []}}}
     try:
         await transport.start(lambda payload: asyncio.sleep(0))
-        assert (
-            await transport.create_progress("original-chat", card, "original-message") == "om_sent"
-        )
-        fake.result = SendResult.ok(message_id="")
-        assert await transport.create_progress("original-chat", card, None) is None
+        assert await transport.create_progress("original-chat", card, reply_to) == "om_created"
+        for _ in range(3):
+            assert await transport.create_progress("original-chat", card, reply_to) is None
         assert [await transport.update_progress("returned-id", card) for _ in range(3)] == [
             True,
             False,
             False,
         ]
-        assert all(r.method == "PATCH" and r.url.path.endswith("/returned-id") for r in requests)
+        assert all(r.url.path.endswith("/returned-id") for r in requests if r.method == "PATCH")
         assert all(json.loads(json.loads(r.content)["content"]) == card["card"] for r in requests)
-        assert fake.sends[0][2]["reply_to"] == "original-message"
+        assert requests[0].url.path.endswith("/original-message/reply" if reply_to else "/messages")
+        assert sum(request.method == "POST" for request in requests) == 4
     finally:
         assert await transport.stop()

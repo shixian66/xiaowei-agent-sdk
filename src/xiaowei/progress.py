@@ -9,7 +9,7 @@ from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime
 from typing import Literal
 
-from agents import Agent, ModelResponse, RunContextWrapper, RunHooks, Tool, TResponseInputItem
+from agents import Agent, RunContextWrapper, RunHooks, Tool, TResponseInputItem
 
 from xiaowei.feishu_render import Message
 from xiaowei.models import RunContext
@@ -20,12 +20,10 @@ Stage = Literal[
     "tools",
     "saving",
     "saved",
-    "awaiting",
     "approval",
     "delivery",
     "sent",
     "unsent",
-    "failed",
 ]
 _LABELS: dict[Stage, str] = {
     "preparing": "准备工具",
@@ -33,12 +31,10 @@ _LABELS: dict[Stage, str] = {
     "tools": "工具请求",
     "saving": "保存结果",
     "saved": "结果已保存，准备交付",
-    "awaiting": "等待补充信息",
     "approval": "等待审批",
     "delivery": "准备正式回复",
     "sent": "正式回复已送达",
     "unsent": "正式回复尚未确认送达",
-    "failed": "本次调查未完成",
 }
 logger = logging.getLogger(__name__)
 
@@ -216,14 +212,6 @@ class _Hooks(RunHooks[RunContext]):
         input_items: list[TResponseInputItem],
     ) -> None:
         self._progress.mark("model")
-
-    async def on_llm_end(
-        self,
-        context: RunContextWrapper[RunContext],
-        agent: Agent[RunContext],
-        response: ModelResponse,
-    ) -> None:
-        pass  # 模型结束不等于保存或交付成功。
 
     async def on_tool_start(
         self,

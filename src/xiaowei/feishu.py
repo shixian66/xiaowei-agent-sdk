@@ -1418,14 +1418,48 @@ class LarkTransport:
     async def create_progress(
         self, chat_id: str, message: Message, reply_to: str | None
     ) -> str | None:
-        """独立观察任务负责 3 秒期限；只接受平台实际返回的创建 ID。"""
-        opts = {"receive_id_type": "chat_id"}
+        """独立观察任务负责期限；在高层归一化前核对 code 和创建 ID。"""
+        from lark_channel.api.im.v1.model.create_message_request import CreateMessageRequest
+        from lark_channel.api.im.v1.model.create_message_request_body import (
+            CreateMessageRequestBody,
+        )
+        from lark_channel.api.im.v1.model.reply_message_request import ReplyMessageRequest
+        from lark_channel.api.im.v1.model.reply_message_request_body import ReplyMessageRequestBody
+
+        content = json.dumps(message["card"], ensure_ascii=False)
+        messages = self._channel.client.im.v1.message
         if reply_to is not None:
-            opts |= {"reply_to": reply_to, "reply_target_gone": "fail"}
-        future = self._channel.schedule(self._channel.send(chat_id, message, opts))
-        result = await asyncio.wrap_future(future)
-        if isinstance(result, SendResult) and result.success and result.message_id:
-            return str(result.message_id)
+            request = (
+                ReplyMessageRequest.builder()
+                .message_id(reply_to)
+                .request_body(
+                    ReplyMessageRequestBody.builder()
+                    .content(content)
+                    .msg_type("interactive")
+                    .build()
+                )
+                .build()
+            )
+            sending = messages.areply(request)
+        else:
+            request = (
+                CreateMessageRequest.builder()
+                .receive_id_type("chat_id")
+                .request_body(
+                    CreateMessageRequestBody.builder()
+                    .content(content)
+                    .msg_type("interactive")
+                    .receive_id(chat_id)
+                    .build()
+                )
+                .build()
+            )
+            sending = messages.acreate(request)
+        response = await asyncio.wrap_future(self._channel.schedule(sending))
+        code = getattr(response, "code", None)
+        message_id = getattr(getattr(response, "data", None), "message_id", None)
+        if type(code) is int and code == 0 and isinstance(message_id, str) and message_id:
+            return message_id
         return None
 
     async def update_progress(self, message_id: str, message: Message) -> bool:
