@@ -9,7 +9,7 @@ import re
 from dataclasses import dataclass, replace
 from typing import Literal
 
-from xiaowei.feishu_render import display_text, fact_limit_notices
+from xiaowei.feishu_render import display_text, fact_limit_notices, fold_details
 from xiaowei.models import Delivery, DeliveryFact, DeliveryFactRef
 from xiaowei.report_content import FORMAT_NOTICE, ReportContent, prepare_content
 
@@ -120,10 +120,18 @@ def _fence(value: str, language: str = "text") -> str:
 def _fact_section(fact: DeliveryFact, label: str, *, expand_brief: bool) -> _Section:
     meta = f"来源 {fact.tool_id} · 目标 {fact.target_id} · 采集于 {fact.captured_at.isoformat()}"
     notices = tuple(([f"说明：{fact.note}"] if fact.note else []) + list(fact_limit_notices(fact)))
-    if fact.view == "brief" and not expand_brief:
-        if fact.summary is None:
-            raise ValueError("历史摘要缺失")
-        return _Section("fact", label, fact.summary, meta, notices)
+    if fact.historical_brief and not expand_brief:
+        return _Section(
+            "fact",
+            label,
+            fact.summary or "",
+            meta,
+            (
+                *filter(None, (fact.note_summary,)),
+                *fact_limit_notices(fact),
+                "获准原文未展示；如需原文请明确提出。",
+            ),
+        )
     # 显式文件可在当前权限下展开原值；自动换载体保持所选摘要语义。
     return _Section("fact", label, _fact_json(fact), meta, notices, fact)
 
@@ -402,10 +410,16 @@ def _render(
     *,
     label: str | None = None,
     notice: str | None = None,
+    purpose: str | None = None,
 ) -> bytes:
-    document_title = ("小维结果" if any(s.kind == "fact" for s in sections) else "小维答复") + (
-        f" {label}" if label else ""
-    )
+    natural = purpose is not None
+    document_title = (
+        f"小维 · {purpose}"
+        if natural
+        else "小维结果"
+        if any(s.kind == "fact" for s in sections)
+        else "小维答复"
+    ) + (f" {label}" if label else "")
     if format_ == "md":
         blocks = []
         for index, section in enumerate(sections, start=1):
@@ -414,12 +428,25 @@ def _render(
                 if section.fact
                 else section.value
                 if section.native
+                else _md_escape(section.value)
+                if natural and section.kind == "fact"
                 else _fence(section.value)
             )
-            meta = f"\n\n{_inline_code(display_text(section.meta))}" if section.meta else ""
+            meta = (
+                f"\n\n{_inline_code(display_text(section.meta))}"
+                if section.meta and (not natural or purpose == "证据明细")
+                else ""
+            )
             notes = "".join(f"\n\n> {_md_escape(note)}" for note in section.notices)
             if section.native:
                 blocks.append(f"{meta.strip()}{notes}\n\n{content}")
+            elif (
+                natural
+                and purpose == "报告正文"
+                and section.kind == "fact"
+                and section.fact is None
+            ):
+                blocks.append(f"{_md_escape(section.title)}：{content}{notes}")
             else:
                 blocks.append(f"## {index}. {_md_escape(section.title)}{meta}{notes}\n\n{content}")
         prefix = "# " + document_title + "\n\n"
@@ -442,6 +469,29 @@ def _render(
             detail = _html_fact(section.value) if section.fact else _html_prose(section.value)
             meta = f'<p class="meta">{_escaped(section.meta)}</p>' if section.meta else ""
             notes = "".join(f'<p class="notice">{_escaped(item)}</p>' for item in section.notices)
+            if natural and section.fact is not None:
+                fact = section.fact
+                limits = "".join(
+                    f'<p class="notice">{_escaped(item)}</p>'
+                    for item in filter(None, (fact.note_summary, *fact_limit_notices(fact)))
+                )
+                inline = (
+                    _html_prose(fact.summary)
+                    if fact.historical_brief and fact.summary is not None
+                    else ""
+                    if fold_details(fact)
+                    else _html_fact(_table_json(fact, section.value))
+                )
+                html_blocks.append(
+                    f'<section class="card" id="report-section-{index}">{inline}{limits}'
+                    '<details class="evidence"><summary>'
+                    f"{_escaped(section.title)} · 查看原值与来源</summary>"
+                    f"{meta}{notes}{detail}</details></section>"
+                )
+                continue
+            if natural and section.kind == "answer":
+                meta = '<p class="model-label">AI 说明</p>'
+
             html_blocks.append(
                 (
                     '<section class="card"'
@@ -452,7 +502,13 @@ def _render(
                 f"<h2>{_escaped(section.title)}</h2></div>{meta}{notes}{detail}</section>"
             )
         fact_count = sum(s.kind == "fact" for s in sections)
-        summary = f"本文件包含 {fact_count} 项结果" if fact_count else "本轮答复与说明"
+        summary = (
+            "任务答复与可核对依据"
+            if natural
+            else f"本文件包含 {fact_count} 项结果"
+            if fact_count
+            else "本轮答复与说明"
+        )
         if label:
             summary += f'<span class="part">{_escaped(label)}</span>'
         nav = ""
@@ -496,17 +552,26 @@ def _report_sections(
     return _sections(delivery, expand_brief=expand_brief, prose=prose)
 
 
-def _single_report(format_: ReportFormat, sections: list[_Section]) -> ReportFile:
-    content = _render(format_, sections)
+def _single_report(
+    format_: ReportFormat,
+    sections: list[_Section],
+    *,
+    purpose: str | None = None,
+    notice: str | None = None,
+) -> ReportFile:
+    content = _render(format_, sections, purpose=purpose, notice=notice)
     if len(content) > MAX_REPORT_BYTES:
         raise ReportCapacityError("报告超过当前文件容量")
     return ReportFile(
-        format_, f"xiaowei-report.{format_}", content, hashlib.sha256(content).hexdigest()
+        format_,
+        f"xiaowei-{'details' if purpose == '证据明细' else 'report'}.{format_}",
+        content,
+        hashlib.sha256(content).hexdigest(),
     )
 
 
 def build_report(delivery: Delivery, *, expand_brief: bool = True) -> ReportFile:
-    """全量构造一个有界 MD 或 HTML 文件；放不下时整体失败，不裁掉事实或限制。"""
+    """旧 v0 绑定使用的单文件布局；新交付由 build_reports 完整分包。"""
     sections = _report_sections(delivery, expand_brief, None)
     if delivery.report_format is None:
         raise ValueError("当前交付没有获准的报告格式")
@@ -524,10 +589,6 @@ def build_reports(
     format_ = delivery.report_format
     if format_ not in ("md", "html"):
         raise ValueError("当前交付没有获准的报告格式")
-    try:
-        return (_single_report(format_, sections),)
-    except ReportCapacityError:
-        pass
     shared_notice = (
         "\n".join(
             dict.fromkeys(
@@ -542,6 +603,52 @@ def build_reports(
         )
         or None
     )
+    sections = [
+        replace(section, title=section.title.replace("其余结果 · ", "").replace("结果 ", "依据 "))
+        if section.kind == "fact"
+        else section
+        for section in sections
+    ]
+    if format_ == "html":
+        return _pack_reports(format_, sections, "报告正文", shared_notice)
+    body, details = [], []
+    for section in sections:
+        fact = section.fact
+        if fact is None:
+            body.append(section)
+            continue
+        details.append(section)
+        body.append(
+            replace(
+                section,
+                value=(fact.summary or "完整原值见证据明细文件。")
+                if fold_details(fact)
+                else _table_json(fact),
+                fact=None if fold_details(fact) else fact,
+                meta=None,
+                notices=tuple(filter(None, (fact.note_summary, *fact_limit_notices(fact)))),
+            )
+        )
+    return (
+        *_pack_reports(format_, body, "报告正文", shared_notice),
+        *(_pack_reports(format_, details, "证据明细", shared_notice) if details else ()),
+    )
+
+
+def _table_json(fact: DeliveryFact, fragment: str | None = None) -> str:
+    """正文仅排版获准列及当前分片的行，完整原值单独交付。"""
+    table = _table(_decoded(fragment)) if fragment is not None else None
+    rows = table[1] if table is not None else fact.rows
+    return json.dumps({"columns": fact.columns, "rows": rows}, ensure_ascii=False, allow_nan=False)
+
+
+def _pack_reports(
+    format_: ReportFormat, sections: list[_Section], purpose: str, shared_notice: str | None
+) -> tuple[ReportFile, ...]:
+    try:
+        return (_single_report(format_, sections, purpose=purpose, notice=shared_notice),)
+    except ReportCapacityError:
+        pass
 
     def pack(estimated_total: int) -> list[list[_Section]]:
         files: list[list[_Section]] = []
@@ -555,6 +662,7 @@ def build_reports(
                         candidate,
                         label=f"{len(files) + 1}/{estimated_total}",
                         notice=shared_notice,
+                        purpose=purpose,
                     )
                 )
                 <= MAX_REPORT_BYTES
@@ -633,12 +741,14 @@ def build_reports(
         estimate = len(grouped)
     total = len(grouped)
     reports = []
+    file_stem = "xiaowei-details" if purpose == "证据明细" else "xiaowei-report"
     for index, group in enumerate(grouped, 1):
         content = _render(
             format_,
             group,
             label=f"{index}/{total}" if total > 1 else None,
             notice=shared_notice if total > 1 else None,
+            purpose=purpose,
         )
         if len(content) > MAX_REPORT_BYTES:
             raise ReportCapacityError("报告超过当前文件容量")
@@ -646,9 +756,9 @@ def build_reports(
             ReportFile(
                 format_,
                 (
-                    f"xiaowei-report-{index}-of-{total}.{format_}"
+                    f"{file_stem}-{index}-of-{total}.{format_}"
                     if total > 1
-                    else f"xiaowei-report.{format_}"
+                    else f"{file_stem}.{format_}"
                 ),
                 content,
                 hashlib.sha256(content).hexdigest(),

@@ -31,7 +31,12 @@ from tests.p1b.test_starrocks_adapter import (
 )
 
 from xiaowei import starrocks
-from xiaowei.sqlguard import QueryPolicy, audit_references, guard_explain_query
+from xiaowei.sqlguard import (
+    QueryPolicy,
+    audit_references,
+    guard_explain_query,
+    guard_readonly_query,
+)
 from xiaowei.starrocks import (
     AUDIT_COLUMNS,
     AUDIT_ORDER_COLUMNS,
@@ -659,3 +664,24 @@ async def test_audit_client_deadline_disconnects_without_retry() -> None:
     failed = await failure(adapter(drv).slow_queries(60, "query_time", SCOPE))
     assert failed.code is Code.TIMEOUT
     assert only(drv).aborted
+
+
+async def test_direct_audit_datetime_preserves_wall_time_without_guessing_session_zone() -> None:
+    # 审计 UTC 与连接 Asia/Shanghai 不同，输出别名不提供来源时区。
+    sql = (
+        "SELECT timestamp AS observed_at, stmt FROM "
+        "starrocks_audit_db__.starrocks_audit_tbl__ LIMIT 3"
+    )
+    drv = driver(
+        Result(
+            ("observed_at", "stmt"),
+            [(datetime(2026, 10, 19, 16, 10), "SELECT hidden FROM restricted.secret")],
+        )
+    )
+    result = await adapter(drv).run_query(guard_readonly_query(sql, SCOPE))
+    assert result.rows == (
+        {
+            "observed_at": "2026-10-19T16:10:00",
+            "stmt": "SELECT hidden FROM restricted.secret",
+        },
+    )

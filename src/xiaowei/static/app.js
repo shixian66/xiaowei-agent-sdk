@@ -45,21 +45,23 @@
   };
   const factTable = (fact, label) => {
     const box = el("div", "fact");
-    const brief = fact.view === "brief";
+    const action = fact.section === "action";
+    const brief = !action && fact.view === "brief";
+    const folded = !action && (brief || fact.section === "remaining" || !fact.columns.length ||
+      fact.rows.length > 10 || new TextEncoder().encode(JSON.stringify(fact.rows)).length > 2048);
     // 系统区域的标识只由代码在这里添加；模型文字中的同样字样只是普通段落。
-    box.append(el("p", "meta fact-source", `${label} · 系统根据证据生成`));
+    if (!folded) box.append(el("p", "meta fact-source", `数据 · ${fact.target_id}`));
     const details = el("details", "evidence");
-    details.append(el("summary", "", brief ? "查看获准原文与查询信息" : "查看依据与查询信息"));
-    box.append(el("p", "meta", `采集于 ${fact.captured_at}`));
+    details.append(el("summary", "", `查看依据 · ${fact.target_id}`));
+    (action ? box : details).append(el("p", "meta", `采集于 ${fact.captured_at}`));
     const meta = [`来源 ${fact.tool_id}`, `目标 ${fact.target_id}`];
-    (brief ? box : details).append(el("p", "meta", `${label} · ${meta.join(" · ")}`));
+    (action ? box : details).append(el("p", "meta", `${label} · ${meta.join(" · ")}`));
     if (brief && fact.summary) box.append(el("p", "content fact-summary", fact.summary));
-    if (fact.truncated) box.append(el("p", "note", "结果已截断，当前显示的不是全部结果"));
-    if (fact.note) box.append(el("p", "note", `说明：${fact.note}`));
+    if (fact.note) (action ? box : details).append(el("p", "note", `说明：${fact.note}`));
+    if (fact.note_summary) box.append(el("p", "note", fact.note_summary));
     for (const [key, value] of Object.entries(fact.metadata || {})) {
-      // 查询/续取信息折叠；其余获准字段完整显示，嵌套值由服务端编码为 JSON 文本。
-      const technical = ["sql", "next_cursor", "row_count", "elapsed_ms"].includes(key);
-      (technical ? details : box).append(el("p", "content", `${key}: ${cellText(value)}`));
+      // 普通 metadata 完整留在依据中；动作材料保持原专用展示。
+      (action ? box : details).append(el("p", "content", `${key}: ${cellText(value)}`));
     }
     if (fact.columns.length) {
       const table = el("table");
@@ -75,8 +77,8 @@
       }
       const wrap = el("div", "table-wrap");
       wrap.append(table);
-      (brief ? details : box).append(wrap);
-      if (!fact.rows.length) (brief ? details : box).append(el("p", "content", "未返回数据行"));
+      (folded ? details : box).append(wrap);
+      if (!fact.rows.length) (folded ? details : box).append(el("p", "content", "未返回数据行"));
     }
     if (fact.result_json !== null && fact.result_json !== undefined) {
       details.append(el("p", "meta", "本次结果原文（仅含获准展示字段；分页或截断范围见上方提示）"));
@@ -113,22 +115,21 @@
         const chosen = facts.filter((fact) => fact.section === name);
         if (!chosen.length) return;
         const box = el("section", `facts ${name}`);
-        box.append(el("p", "meta", title));
+        if (name === "action") box.append(el("p", "meta", title));
         for (const fact of chosen) box.append(factTable(fact, resultLabel(delivery, fact.evidence_id)));
         item.append(box);
       };
       section("action", "动作（系统根据记录生成）");
-      let labelled = false;
+      let modelLabelled = false;
       for (const block of blocks) {
         if (block.kind === "fact") {
-          labelled = false;
           const fact = byId.get(block.evidence_id);
           if (fact) item.append(factTable(fact, resultLabel(delivery, fact.evidence_id)));
           continue;
         }
-        if (system && !labelled) {
-          item.append(el("p", "meta model-label", "模型说明（未经系统核实）"));
-          labelled = true;
+        if (system && !modelLabelled) {
+          item.append(el("p", "meta model-label", "AI 说明"));
+          modelLabelled = true;
         }
         item.append(el("p", "content reply-text", block.text));
       }

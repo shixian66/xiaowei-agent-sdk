@@ -1740,7 +1740,9 @@ async def test_hostile_plan_lines_cannot_forge_sections(env: Env) -> None:
     assert all(c["data_type"] == "text" for c in table["columns"])
     elements = card["card"]["body"]["elements"]
     divs = [e["text"]["content"] for e in elements if e.get("tag") == "div"]
-    assert divs.count(PLAN_NOTE) == 1
+    assert divs.count("执行计划为估算，未实际运行；不能单凭计划确认慢因。") == 1
+    assert PLAN_NOTE not in divs and PLAN_NOTE in "\n".join(text_parts(card))
+    assert not any("已执行原查询" in text for text in divs)
     assert not any(text.startswith("说明：") for text in divs)
 
 

@@ -266,7 +266,27 @@ R7_SCENARIOS = (
 
 NONE: frozenset[str] = frozenset()
 FAT, PRE = frozenset({"fat"}), frozenset({"pre"})
+AUDIT_COLUMNS = ("queryId", "timestamp", "queryTime", "stmt")
+# UTC 审计时间；跨北京时间自然日，耗时与时间排序不同，重复 SQL 是不同执行。
+AUDIT_RECORDS = (
+    ("yesterday", "2026-10-19 15:59:59", 50000, "SELECT hidden FROM restricted.secret"),
+    ("midnight", "2026-10-19 16:00:00", 8000, "SELECT 1"),
+    ("slow-a", "2026-10-19 16:10:00", 20000, "SELECT hidden FROM restricted.secret"),
+    ("slow-b", "2026-10-19 16:20:00", 20000, "SELECT hidden FROM restricted.secret"),
+    ("third", "2026-10-19 17:20:00", 10000, "DROP TABLE restricted.secret"),
+    ("latest", "2026-10-20 03:59:00", 6000, "SELECT 2"),
+    ("tomorrow", "2026-10-20 16:00:00", 90000, "SELECT 3"),
+)
 AUTONOMY_SCENARIOS = (
+    Scenario(
+        "audit-top3",
+        (("query", "查询 fat 今天执行时间最慢的 3 条，保留 SQL 原文"),),
+        multi=True,
+        feishu=True,
+        autonomy=True,
+        environments=(FAT,),
+        now=datetime(2026, 10, 19, 17, 30, tzinfo=UTC),
+    ),
     Scenario(
         "T1",
         (("query", "用 fat 统计昨天 biz.orders 按创建时间的各状态订单数，做深色 HTML 报告"),),
@@ -690,9 +710,9 @@ class DialogueStarRocks(SyntheticStarRocks):
         return kind
 
     def result(self, kind: Any, sql: str, args: Any) -> Any:
-        if self.autonomy and kind == "query" and "biz.orders" in sql:
-            # 仅此基本聚合夹具借用内存 SQLite，不用常量正确答案掩盖错误日期条件。
-            # StarRocks 特有语法/优化器和真实权限仍须公司环境验收。
+        if self.autonomy and kind == "query":
+            # 一个数据集直接执行 SQL，反引号、CTE、JOIN 不按文本路由到固定结果。
+            # 仅覆盖可移植子集；真实 StarRocks 语义另验。
             connection = sqlite3.connect(":memory:")
             try:
                 connection.execute("ATTACH DATABASE ':memory:' AS biz")
@@ -703,6 +723,17 @@ class DialogueStarRocks(SyntheticStarRocks):
                     for _ in range(count)
                 ] + [("paid", "2026-10-18 23:59:59"), ("pending", "2026-10-20 00:00:00")]
                 connection.executemany("INSERT INTO biz.orders VALUES (?, ?)", records)
+                audit = self.target.audit
+                if audit is not None:
+                    connection.execute(f"ATTACH DATABASE ':memory:' AS {audit.database}")
+                    connection.execute(
+                        f"CREATE TABLE {audit.database}.{audit.table} "
+                        "(queryId TEXT, timestamp TEXT, queryTime INTEGER, stmt TEXT)"
+                    )
+                    connection.executemany(
+                        f"INSERT INTO {audit.database}.{audit.table} VALUES (?, ?, ?, ?)",  # noqa: S608 -- validated synthetic identifiers
+                        AUDIT_RECORDS,
+                    )
                 cursor = connection.execute(sql)
                 return tuple(column[0] for column in cursor.description), cursor.fetchall()
             finally:
@@ -797,6 +828,8 @@ def configuration(profile: ModelProfile, scenario: Scenario) -> ServeConfig:
     sr.update(
         target_id="pre", host="synthetic.invalid", database="data_center", time_zone="Asia/Shanghai"
     )
+    if scenario.autonomy:
+        sr["audit"]["time_zone"] = "UTC"
     sr["password_ref"] = "env:U1_UNUSED_PASSWORD"  # noqa: S105 -- env reference; synthetic driver.
     # 固定部署边界；不要借 400KB 投影掩盖原始单值/总结果容量。
     sr.update(max_value_bytes=4000, max_result_bytes=200000, pool_size=4)
@@ -872,6 +905,9 @@ async def run_dialogue(
                         tables["data_center", "quota_other"] = ("region",)
                         if scenario.autonomy:
                             tables["biz", "orders"] = ("status", "created_at")
+                            audit = target.starrocks.audit
+                            if audit is not None:
+                                tables[audit.database, audit.table] = AUDIT_COLUMNS
                         if scenario.pages:
                             tables = {("data_center", f"t{i:03}"): ("region",) for i in range(401)}
                         drivers[target.target_id] = DialogueStarRocks(
@@ -891,7 +927,11 @@ async def run_dialogue(
                             ),
                             audit_database="data_center",
                             audit_started=scenario.now.astimezone(
-                                ZoneInfo(target.starrocks.time_zone)
+                                ZoneInfo(
+                                    target.starrocks.audit.time_zone
+                                    if target.starrocks.audit
+                                    else target.starrocks.time_zone
+                                )
                             ).replace(tzinfo=None)
                             - timedelta(minutes=30),
                             plan=DIALOGUE_PLAN,

@@ -45,6 +45,7 @@ from xiaowei.channel_store import (
     SessionBusyError,
 )
 from xiaowei.config import WebConfig
+from xiaowei.feishu_render import fact_limit_notices
 from xiaowei.storage import Readiness
 
 COOKIE = "xiaowei_web"
@@ -179,6 +180,10 @@ def _view(request_id: str, view: RequestView, readiness: Readiness) -> JSONRespo
     delivery = None
     if view.delivery is not None:
         delivery = view.delivery.model_dump(mode="json", exclude={"channel"})
+        for shown, fact in zip(delivery["facts"], view.delivery.facts, strict=True):
+            shown["note_summary"] = (
+                "\n".join(filter(None, (fact.note_summary, *fact_limit_notices(fact)))) or None
+            )
     status = 202 if unfinished else 200
     body = {"request_id": request_id, "state": view.state, "delivery": delivery}
     return JSONResponse(body, status_code=status)

@@ -1,6 +1,7 @@
 """T1/T2/T4 的正式 runtime 离线材料；脚本输出不证明 Agent 自主质量。T3 复用监控入口。"""
 
 import pytest
+from asyncmy.errors import ProgrammingError
 from tests.sdk_core import dialogue_gate
 from tests.sdk_core.test_app import Scripts, answer, cite, clarify, evidence_in, tool_call
 from tests.sdk_core.test_model_api import OPENAI as PROFILE
@@ -77,7 +78,7 @@ async def test_t1_order_status_counts_keep_business_window_and_evidence(
     assert report["review"]["evidence_consistent"] is None
 
 
-async def test_t2_newest_visible_candidate_differs_from_slowest_without_executing_sql(
+async def test_t2_candidate_diagnosis_does_not_execute_the_original_business_sql(
     postgres_url,
     monkeypatch,
 ):
@@ -132,3 +133,117 @@ async def test_t1_fixture_exposes_a_wrong_time_window_instead_of_returning_expec
     )
     assert list(sample.delivery.facts[0].rows) == [{"status": "paid", "n": 1}]
     assert report["review"]["evidence_consistent"] is None
+
+
+TOP3_SQL = (
+    "SELECT queryId, timestamp, queryTime, stmt FROM "
+    "starrocks_audit_db__.starrocks_audit_tbl__ "
+    "WHERE timestamp >= '2026-10-19 16:00:00' "
+    "AND timestamp < '2026-10-20 16:00:00' "
+    "ORDER BY queryTime DESC, queryId LIMIT 3"
+)
+
+
+@pytest.mark.parametrize(
+    ("sql", "ids"),
+    [
+        (TOP3_SQL, ["slow-a", "slow-b", "third"]),
+        (
+            TOP3_SQL.replace(
+                "starrocks_audit_db__.starrocks_audit_tbl__",
+                "`starrocks_audit_db__`.`starrocks_audit_tbl__`",
+            ),
+            ["slow-a", "slow-b", "third"],
+        ),
+        (
+            "WITH audit_rows AS (" + TOP3_SQL + ") SELECT * FROM audit_rows LIMIT 3",  # noqa: S608 -- synthetic SQL
+            ["slow-a", "slow-b", "third"],
+        ),
+        (
+            TOP3_SQL.replace("queryTime DESC, queryId", "timestamp DESC"),
+            ["latest", "third", "slow-b"],
+        ),
+        (TOP3_SQL.replace("LIMIT 3", "LIMIT 2"), ["slow-a", "slow-b"]),
+        (
+            TOP3_SQL.replace("2026-10-19 16:00:00", "2026-10-18 16:00:00").replace(
+                "2026-10-20 16:00:00", "2026-10-19 16:00:00"
+            ),
+            ["yesterday"],
+        ),
+        (
+            TOP3_SQL.replace("2026-10-19 16:00:00", "2026-10-21 16:00:00").replace(
+                "2026-10-20 16:00:00", "2026-10-22 16:00:00"
+            ),
+            [],
+        ),
+    ],
+)
+async def test_exact_audit_sql_executes_window_order_and_limit(postgres_url, monkeypatch, sql, ids):
+    sample, report = await collect_case(
+        postgres_url,
+        monkeypatch,
+        "audit-top3",
+        [tool_call("run_readonly_query", cluster="fat", sql=sql), cite("需人工核对口径")],
+    )
+    assert report["state"] == "completed"
+    fact = sample.delivery.facts[0]
+    assert [row["queryId"] for row in fact.rows] == ids
+    assert fact.metadata["applied_limit"] == (2 if "LIMIT 2" in sql else 3)
+    assert fact.metadata["requested_limit"] == fact.metadata["applied_limit"]
+    assert report["io_counts"]["query"] == 1
+    assert report["io_counts"].get("audit", 0) == 0
+    assert report["io_counts"].get("explain", 0) == 0
+    # stmt 是返回值，既不执行也不以其中的受限对象过滤审计表结果。
+    queries = [s for _, kind, s in sample.statements if kind == "query"]
+    assert queries == [sql]
+    if ids == ["slow-a", "slow-b", "third"]:
+        assert fact.rows[0]["stmt"] == fact.rows[1]["stmt"]
+        assert fact.rows[2]["stmt"] == "DROP TABLE restricted.secret"
+
+
+async def test_t2_exact_latest_reads_audit_but_never_executes_the_diagnosed_sql(
+    postgres_url,
+    monkeypatch,
+):
+    sql = (
+        "SELECT queryId, timestamp, queryTime, stmt FROM "
+        "starrocks_audit_db__.starrocks_audit_tbl__ "
+        "WHERE timestamp >= '2026-10-20 03:00:00' "
+        "AND timestamp < '2026-10-20 04:00:00' "
+        "AND queryTime > 5000 ORDER BY timestamp DESC LIMIT 1"
+    )
+    sample, report = await collect_case(
+        postgres_url,
+        monkeypatch,
+        "T2-chat",
+        [tool_call("run_readonly_query", cluster="fat", sql=sql), cite("需人工核对建议")],
+    )
+    assert report["state"] == "completed"
+    assert [row["queryId"] for row in sample.delivery.facts[0].rows] == ["latest"]
+    assert [s for _, kind, s in sample.statements if kind == "query"] == [sql]
+    assert report["io_counts"].get("explain", 0) == 0
+
+
+async def test_revoked_audit_read_stops_exact_query_without_candidate_fallback(
+    postgres_url, monkeypatch
+):
+    original = dialogue_gate.DialogueStarRocks.result
+
+    def result(self, kind, sql, args):
+        if kind == "query" and "starrocks_audit_db__.starrocks_audit_tbl__" in sql:
+            raise ProgrammingError(1142, "SELECT denied on synthetic audit table")
+        return original(self, kind, sql, args)
+
+    monkeypatch.setattr(dialogue_gate.DialogueStarRocks, "result", result)
+    sample, report = await collect_case(
+        postgres_url,
+        monkeypatch,
+        "audit-top3",
+        [tool_call("run_readonly_query", cluster="fat", sql=TOP3_SQL)],
+    )
+    assert report["state"] == "failed"
+    assert sample.delivery is not None
+    assert sample.delivery.facts == () and sample.delivery.evidence_ids == ()
+    assert "未交付" in sample.delivery.content
+    assert report["io_counts"].get("audit", 0) == 0
+    assert [s for _, kind, s in sample.statements if kind == "query"] == [TOP3_SQL]

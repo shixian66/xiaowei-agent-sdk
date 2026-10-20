@@ -37,7 +37,7 @@ from tests.sdk_core.test_runtime import (
     until,
 )
 from tests.sdk_core.test_runtime import env as env  # pytest fixture
-from tests.sdk_core.test_web_browser import send, settled
+from tests.sdk_core.test_web_browser import item, send, settled
 
 from xiaowei import runtime
 from xiaowei.channel import ResultUnavailableError
@@ -260,7 +260,12 @@ async def test_formal_web_ui_shows_monitoring_evidence(env: Env, chrome_binary: 
             await send(page, message, "query")
             displayed = await settled(page, 0, "completed")
             assert SOURCE in displayed and "采集于" in displayed
-            assert "up" in displayed and "host1" in displayed and "partial" in displayed
+            visible = await page.evaluate(f"{item(0)}.innerText")
+            assert "host1" not in visible and "warnings:" not in visible and "query:" not in visible
+            assert "数据源返回警告" in visible
+            await page.evaluate(f"{item(0)}.querySelector('details.evidence').open = true")
+            expanded = await page.evaluate(f"{item(0)}.innerText")
+            assert "up" in expanded and "host1" in expanded and "partial" in expanded
         assert upstream.recorder.tool_calls == [("query", {"query": "up"})]
 
 

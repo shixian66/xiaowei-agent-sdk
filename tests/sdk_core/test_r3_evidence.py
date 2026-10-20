@@ -94,6 +94,7 @@ async def test_brief_uses_only_receiving_channel_and_keeps_original(postgres_url
         )
         assert fact.rows == ({"value": 100}, {"value": 200})
         assert fact.note == "R3_FIXED_NOTE"
+        assert "采集时结果，不代表当前状态" in (fact.note_summary or "")
         assert json.loads(fact.result_json)["row_count"] == 2
         assert ("R3_WEB_ONLY" in fact.result_json) == (channel == "web")
         assert ("web_only" in fact.metadata) == (channel == "web")
@@ -243,3 +244,23 @@ def test_sdk_closed_display_schema_and_old_default():
                 "awaiting_user": False,
             }
         )
+
+
+async def test_current_brief_has_no_summary_and_replay_keeps_original_turn_semantics(postgres_url):
+    grants, clock = Grants(), Clock()
+    grants.grant("alice", TOTAL_TOOL)
+    async with ready_engine(postgres_url) as engine:
+        evidence = store(engine, grants, clock, tools())
+        ctx = context()
+        result = await recorded(evidence, ctx)
+        turn = selected([result.evidence_id])
+        for history in (False, True):
+            shown = await evidence.validate_answer(turn, ctx, history=history)
+            assert shown.facts[0].view == "brief" and shown.facts[0].summary is None
+            assert shown.facts[0].rows == ({"value": 100}, {"value": 200})
+        followup = await evidence.validate_answer(turn, context(turn="next"))
+        assert followup.facts[0].summary == "本次返回行数：2。"
+        (record,) = await evidence._readable(ctx, "web", [result.evidence_id], history=False)
+        status = evidence._delivery_fact(record, "action", "brief", ctx)
+        assert status.section == "action" and not status.requires_complete
+        assert status.view == "full" and status.rows

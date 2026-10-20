@@ -13,7 +13,9 @@ import re
 import unicodedata
 from collections.abc import Sequence
 from collections.abc import Set as AbstractSet
+from datetime import datetime
 from typing import Any, Final
+from zoneinfo import ZoneInfo
 
 from xiaowei.feishu_markdown import format_prose, prose_post
 from xiaowei.models import Delivery, DeliveryFact, DeliveryFactRef, JsonScalar
@@ -31,11 +33,6 @@ RAW_OMITTED: Final = "原文 JSON 与上方展示的值逐项一致，未重复�
 _TECHNICAL = frozenset({"sql", "row_count", "elapsed_ms", "next_cursor"})
 _PAGED = frozenset({"local/list_databases", "local/list_tables", "local/describe_table"})
 _ACTUAL_SQL = frozenset({"local/run_readonly_query", "local/explain_query"})
-# 现有监控投影中的范围/分页/限制字段（runtime 的公开工具契约）；不能随结果值收起。
-_VISIBLE_LIMITS = frozenset({
-    "start_time", "end_time", "step", "warnings", "from", "to", "timeRange",
-    "limit", "offset", "page", "total", "hasMore",
-})
 _ACTION_LABELS = {
     "action_id": "Action ID",
     "action": "动作",
@@ -69,13 +66,62 @@ def display_text(text: str) -> str:
 
 
 def fact_limit_notices(fact: DeliveryFact) -> tuple[str, ...]:
-    """区分分页未完与真实截断，供卡片和报告沿用同一事实口径。"""
+    """从获准投影生成影响结论的简短范围和完整性提醒，供各渠道复用。"""
     cursor = fact.metadata.get("next_cursor")
     notices = []
-    if cursor is not None:
+    paged = fact.metadata.get("has_more") is True or fact.metadata.get("hasMore") is True
+    if cursor is not None or paged:
         notices.append("还有后续页，本页不是全部结果。")
-    if fact.truncated and not (fact.tool_id in _PAGED and cursor is not None):
+    if fact.truncated and not (paged or (fact.tool_id in _PAGED and cursor is not None)):
         notices.append("工具结果已截断，不能据此声称完整。")
+    warnings = fact.metadata.get("warnings")
+    if warnings not in (None, "", "[]", "null"):
+        notices.append("数据源返回警告，详见依据。")
+    metadata = fact.metadata
+    filtered = sum(
+        value
+        for key in ("omitted_sqlguard", "omitted_self", "omitted_revoked")
+        if isinstance(value := metadata.get(key), int)
+    )
+    capacity = sum(
+        value
+        for key in (
+            "omitted_statement_too_long",
+            "omitted_value_too_large",
+            "omitted_result_too_large",
+        )
+        if isinstance(value := metadata.get(key), int)
+    )
+    unchecked = metadata.get("unchecked_candidates", 0) or 0
+    if filtered or capacity or unchecked or metadata.get("more_candidates"):
+        notices.append(
+            f"候选未完全列出：规则或权限过滤 {filtered} 条、容量省略 {capacity} 条、"
+            f"未检查 {unchecked} 条。"
+            + ("还有未读取候选，数量未知。" if metadata.get("more_candidates") else "")
+        )
+    window_keys = ("start_time", "end_time")
+    scale = 1
+    if metadata.get("from") is not None and metadata.get("to") is not None:
+        window_keys, scale = ("from", "to"), 1000  # Grafana annotations use Unix milliseconds.
+    if all(metadata.get(key) is not None for key in window_keys):
+        try:
+            window = [
+                datetime.fromtimestamp(
+                    float(str(metadata[key])) / scale, ZoneInfo("Asia/Shanghai")
+                ).isoformat(sep=" ")
+                for key in window_keys
+            ]
+        except (ValueError, OverflowError, OSError):
+            notices.append("查询窗口见依据（时间格式无法显示）。")
+        else:
+            step = metadata.get("step")
+            notices.append(
+                f"查询窗口（北京时间）：{window[0]} 至 {window[1]}。"
+                + (f"步长 {step} 秒。" if step is not None else "")
+            )
+    applied = metadata.get("applied_limit")
+    if fact.truncated and applied is not None and metadata.get("requested_limit") != applied:
+        notices.append(f"返回量受限：实际 LIMIT {applied}，多取 1 行用于判断截断。")
     return tuple(notices)
 
 
@@ -111,7 +157,7 @@ def _raw_redundant(fact: DeliveryFact) -> bool:
     只按卡片实际渲染的内容判定：名称经显示转义后不变、列与原文一致、无隐藏的空值字段，
     且实际 SQL 是可展示的字符串；任何不确定都保留原文。
     """
-    if fact.result_json is None or fact.view == "brief":
+    if fact.result_json is None or fact.historical_brief:
         return False
     data = json.loads(fact.result_json)
     if not isinstance(data, dict):
@@ -149,7 +195,7 @@ def _raw_redundant(fact: DeliveryFact) -> bool:
 
 
 def _data(fact: DeliveryFact) -> tuple[tuple[str, ...], tuple[dict[str, JsonScalar], ...]]:
-    if fact.view == "brief":
+    if fact.historical_brief:
         return (), ()
     if fact.columns:
         return fact.columns, fact.rows
@@ -161,8 +207,10 @@ def _data(fact: DeliveryFact) -> tuple[tuple[str, ...], tuple[dict[str, JsonScal
 def _row_text(fact: DeliveryFact, rows: Sequence[dict[str, JsonScalar]]) -> str:
     columns, _ = _data(fact)
     return "\n\n".join(
-        f"第 {index} 行\n" + "\n".join(
-            str(row[name]) if name == "ddl" and fact.tool_id == "local/show_create_table"
+        f"第 {index} 行\n"
+        + "\n".join(
+            str(row[name])
+            if name == "ddl" and fact.tool_id == "local/show_create_table"
             else f"{name}: {_cell(row, name)}"
             for name in columns
         )
@@ -170,14 +218,16 @@ def _row_text(fact: DeliveryFact, rows: Sequence[dict[str, JsonScalar]]) -> str:
     )
 
 
-def _fold_details(fact: DeliveryFact) -> bool:
+def fold_details(fact: DeliveryFact) -> bool:
     """只决定展开密度，不限制结果；动作与历史摘要沿既有契约。
 
     十行沿现有表格 page_size；2 KiB 文本避免单行长 SQL/监控值铺满正文。
     请求是否容纳仍按最终组件及字节试排，折叠没有压缩或删减内容。
     """
-    if fact.section == "action" or fact.view == "brief":
+    if fact.section == "action" or fact.requires_complete:
         return False
+    if fact.view == "brief" or not fact.columns:
+        return True
     _, rows = _data(fact)
     details = _row_text(fact, rows) + "\n" + str(fact.metadata.get("sql", ""))
     return fact.section == "remaining" or len(rows) > 10 or len(details.encode()) > 2048
@@ -244,7 +294,7 @@ def _card(
     folded: AbstractSet[int] = frozenset(),
     attachment: bool = False,
 ) -> Message:
-    """系统说明 → 动作区域 → 正文（模型块顺序）→ 其余结果 → 折叠依据。
+    """系统说明 → 动作区域 → 正文与就地依据 → 其余结果；旧 v0 仍将依据置后。
 
     ``texts`` 是本卡展示的正文文字（按顺序，最后一段可能截断）；``counts`` 按 ``facts`` 下标。
     """
@@ -257,7 +307,7 @@ def _card(
     def fact_elements(index: int) -> None:
         nonlocal tables, region
         fact = delivery.facts[index]
-        if region != fact.section:
+        if region != fact.section and (fact.section == "action" or not preview):
             elements.append(_div("动作材料" if fact.section == "action" else FACT_LABEL))
         region = fact.section
         columns, all_rows = _data(fact)
@@ -271,14 +321,18 @@ def _card(
                     f"采集于 {fact.captured_at.isoformat()}"
                 )
             )
-        else:
+        elif not preview or fact.section == "action":
             elements.append(_div(f"{delivery.result_label(fact.evidence_id)} · {fact.target_id}"))
-        if fact.note is not None:
+        elif index not in folded and not fact.historical_brief:
+            elements.append(_div(f"数据 · {fact.target_id}"))
+        if fact.note_summary or (
+            fact.note is not None and (not preview or fact.section == "action")
+        ):
             elements.append(
                 _div(
                     f"说明：{fact.note}"
                     if fact.requires_complete
-                    else fact.note_summary or fact.note
+                    else fact.note_summary or fact.note or ""
                 )
             )
         if fact.requires_complete:
@@ -298,13 +352,15 @@ def _card(
                 text = display_text(value) if isinstance(value, str) else _cell({key: value}, key)
                 elements.append(_div(f"{_ACTION_LABELS.get(key, key)}：{text}"))
             return
-        visible_metadata = {
-            key: value for key, value in fact.metadata.items()
-            if key not in _TECHNICAL and (
-                (bool(fact.columns) and value is not None)
-                or (index in folded and key in _VISIBLE_LIMITS)
-            )
-        }
+        visible_metadata = (
+            {
+                key: value
+                for key, value in fact.metadata.items()
+                if key not in _TECHNICAL and fact.columns and value is not None
+            }
+            if not preview or fact.section == "action"
+            else {}
+        )
         if visible_metadata:
             elements.extend(
                 _div(f"{key}: {_cell({key: value}, key)}")
@@ -312,37 +368,24 @@ def _card(
             )
         elements.extend(_div(notice) for notice in fact_limit_notices(fact))
         if index in folded:
-            # 标题、范围、固定限制保持在主消息；完整行与依据合用一个面板。
-            amount = (
-                f"本次返回 {len(all_rows)} 行" if fact.columns else f"共 {len(all_rows)} 个字段"
-            )
-            elements.append(
-                _div(amount + ("；明细与查询信息见附件。" if attachment else "；展开查看明细。"))
-            )
             if not attachment:
-                detailed_rows = rows if fact.columns else tuple(
-                    row for row in rows if row["字段"] not in visible_metadata
-                )
-                shown = len(rows) if fact.columns else len(
-                    {row["字段"] for row in rows} | visible_metadata.keys()
-                )
-                row_details[index] = _row_text(fact, detailed_rows) or (
-                    "（无数据行）" if not all_rows else (
-                        "字段已在上方展示。" if shown == len(all_rows)
-                        else "结果行未展示。" if fact.columns else "结果字段未展示。"
-                    )
+                row_details[index] = _row_text(fact, rows) or (
+                    "明细未展示。" if all_rows else "（无数据行）"
                 )
                 if fact.tool_id in _ACTUAL_SQL and index not in sqls:
                     elements.append(_div("SQL 未展示。"))
-                if omissions and shown < len(all_rows):
-                    elements.append(_div(
-                        f"展示 {shown}／本次返回 {len(all_rows)} 行" if fact.columns
-                        else f"展示 {shown}／共 {len(all_rows)} 个字段"
-                    ))
+                if omissions and len(rows) < len(all_rows):
+                    elements.append(
+                        _div(
+                            f"展示 {len(rows)}／本次返回 {len(all_rows)} 行"
+                            if fact.columns
+                            else "部分明细未展示；完整原值尚未交付。"
+                        )
+                    )
             return
         if fact.tool_id == "local/run_readonly_query" and index not in sqls:
             elements.append(_div("SQL 未展示。"))
-        if omissions and fact.view != "brief" and len(rows) < len(all_rows):
+        if omissions and not fact.historical_brief and len(rows) < len(all_rows):
             elements.append(
                 _div(
                     # 新语义预览旁有完整附件；旧 v0 截断卡片没有附件，只说“展示”。
@@ -354,8 +397,8 @@ def _card(
                     )
                 )
             )
-        if fact.view == "brief":
-            elements.append(_div(fact.summary or "摘要不可用。"))
+        if fact.historical_brief:
+            elements.append(_div(fact.summary or ""))
             if omissions and fact.result_json is not None and index not in technical:
                 elements.append(_div(BRIEF_ORIGINAL_OMITTED))
             return
@@ -394,45 +437,10 @@ def _card(
                 _div("\n".join(f"{name}: {_cell(row, name)}" for name in columns)) for row in rows
             )
 
-    for index, fact in enumerate(delivery.facts):
-        if fact.section == "action":
-            fact_elements(index)
-    shown_texts = 0
-    for block in delivery.blocks:
-        if isinstance(block, DeliveryFactRef):
-            # 拆分发送时动作材料已独立成分项，本消息不含它；其余事实都在本消息中。
-            if block.evidence_id in index_of:
-                fact_elements(index_of[block.evidence_id])
-            continue
-        if shown_texts >= len(texts):
-            continue
-        if region != "model":
-            # 代码加注的来源标签：模型文字不能移除，也不能借文字取得事实区域的身份。
-            elements.append(_div(MODEL_TEXT_LABEL))
-            region = "model"
-        text = texts[shown_texts]
-        elements.extend(format_prose(display_text(text)) if formatted else [_div(text)])
-        shown_texts += 1
-    if omissions and tuple(texts) != delivery.texts:
-        elements.append(_div(ANALYSIS_CLIPPED))
-    placed = {b.evidence_id for b in delivery.blocks if isinstance(b, DeliveryFactRef)}
-    for index, fact in enumerate(delivery.facts):
-        # 正文事实都应由块放置；任何未被放置的事实仍完整展示，不静默丢弃。
-        if fact.section == "body" and fact.evidence_id not in placed:
-            fact_elements(index)
-    remaining = [i for i, f in enumerate(delivery.facts) if f.section == "remaining"]
-    if remaining:
-        elements.append(_div(REMAINING_LABEL))
-        for index in remaining:
-            fact_elements(index)
-    if omissions and any(
-        not f.requires_complete and n < len(_data(f)[1]) and not (attachment and i in folded)
-        for i, (f, n) in enumerate(zip(delivery.facts, counts, strict=True))
-    ):
-        elements.append(_div(FACTS_CLIPPED))
-    for index, fact in enumerate(delivery.facts):
+    def fact_details(index: int) -> None:
+        fact = delivery.facts[index]
         if fact.requires_complete:
-            continue
+            return
         details: list[Message] = [
             _div(
                 f"依据：{delivery.result_label(fact.evidence_id)} · 来源 {fact.tool_id}"
@@ -440,7 +448,7 @@ def _card(
                 f"采集于 {fact.captured_at.isoformat()}"
             )
         ]
-        if fact.note_summary and fact.note:
+        if fact.note and (preview or fact.note_summary):
             details.append(_div(fact.note))
         if index in row_details:
             details.append(_div(row_details[index]))
@@ -448,9 +456,9 @@ def _card(
             details.append(_div(f"实际 SQL:\n{fact.metadata['sql']}"))
         if index in technical and not (attachment and index in folded):
             for key, value in fact.metadata.items():
-                if key in _TECHNICAL and not (
-                    key == "sql" and fact.tool_id in _ACTUAL_SQL
-                ):
+                if (
+                    key in _TECHNICAL or (preview and (fact.columns or index not in row_details))
+                ) and not (key == "sql" and fact.tool_id in _ACTUAL_SQL):
                     label = "结构采集 SQL 模板" if key == "sql" and fact.tool_id in _PAGED else key
                     details.append(_div(f"{label}: {_cell({key: value}, key)}"))
             if fact.result_json is not None:
@@ -471,14 +479,68 @@ def _card(
                     "expanded": False,
                     "header": {
                         "title": _plain(
-                            ("查看明细与依据" if index in row_details else "查看依据")
-                            + f" · {delivery.result_label(fact.evidence_id)}"
-                            + (" · 获准原文与查询信息" if fact.view == "brief" else "")
+                            (
+                                f"查看依据 · {fact.target_id}"
+                                if preview
+                                else ("查看明细与依据" if index in row_details else "查看依据")
+                                + f" · {delivery.result_label(fact.evidence_id)}"
+                            )
+                            + (
+                                " · 获准原文与查询信息"
+                                if fact.historical_brief and index in technical
+                                else ""
+                            )
                         )
                     },
                     "elements": details,
                 }
             )
+
+    def place_fact(index: int) -> None:
+        fact_elements(index)
+        if preview:
+            fact_details(index)
+
+    for index, fact in enumerate(delivery.facts):
+        if fact.section == "action":
+            place_fact(index)
+    shown_texts = 0
+    for block in delivery.blocks:
+        if isinstance(block, DeliveryFactRef):
+            # 拆分发送时动作材料已独立成分项，本消息不含它；其余事实都在本消息中。
+            if block.evidence_id in index_of:
+                place_fact(index_of[block.evidence_id])
+            continue
+        if shown_texts >= len(texts):
+            continue
+        if region != "model" and (not preview or shown_texts == 0):
+            # 代码加注的来源标签：模型文字不能移除，也不能借文字取得事实区域的身份。
+            elements.append(_div(MODEL_TEXT_LABEL))
+            region = "model"
+        text = texts[shown_texts]
+        elements.extend(format_prose(display_text(text)) if formatted else [_div(text)])
+        shown_texts += 1
+    if omissions and tuple(texts) != delivery.texts:
+        elements.append(_div(ANALYSIS_CLIPPED))
+    placed = {b.evidence_id for b in delivery.blocks if isinstance(b, DeliveryFactRef)}
+    for index, fact in enumerate(delivery.facts):
+        # 正文事实都应由块放置；任何未被放置的事实仍完整展示，不静默丢弃。
+        if fact.section == "body" and fact.evidence_id not in placed:
+            place_fact(index)
+    remaining = [i for i, f in enumerate(delivery.facts) if f.section == "remaining"]
+    if remaining:
+        if not preview:
+            elements.append(_div(REMAINING_LABEL))
+        for index in remaining:
+            place_fact(index)
+    if omissions and any(
+        not f.requires_complete and n < len(_data(f)[1]) and not (attachment and i in folded)
+        for i, (f, n) in enumerate(zip(delivery.facts, counts, strict=True))
+    ):
+        elements.append(_div(FACTS_CLIPPED))
+    if not preview:
+        for index in range(len(delivery.facts)):
+            fact_details(index)
     elements.extend(_basis_panels(delivery.basis))
     return _static_card(
         elements,
@@ -667,7 +729,9 @@ def build_feishu_message(
         return formatted if fits(formatted) else clipped
 
     folded = frozenset(
-        i for i, fact in enumerate(delivery.facts) if platform_limits and _fold_details(fact)
+        i
+        for i, fact in enumerate(delivery.facts)
+        if platform_limits and fold_details(fact) and not fact.historical_brief
     )
     # 附件已接收完整 Delivery，主消息不再复制被收起的大段原值。
     totals = [
@@ -679,7 +743,8 @@ def build_feishu_message(
     all_sql = {
         i
         for i, f in enumerate(delivery.facts)
-        if f.tool_id in _ACTUAL_SQL and isinstance(f.metadata.get("sql"), str)
+        if f.tool_id in _ACTUAL_SQL
+        and isinstance(f.metadata.get("sql"), str)
         and not (attachment_preview and i in folded)
     }
     all_technical = set(range(len(delivery.facts)))
@@ -718,8 +783,8 @@ def build_feishu_message(
         return formatted if fits(formatted) else full
     if not allow_preview:
         # 历史brief的小原文可折叠展示；放不下则只交付已选择的摘要，不因此自动导出原值。
-        if any(f.view == "brief" for f in delivery.facts):
-            brief_technical = {i for i, f in enumerate(delivery.facts) if f.view != "brief"}
+        if any(f.historical_brief for f in delivery.facts):
+            brief_technical = {i for i, f in enumerate(delivery.facts) if not f.historical_brief}
             brief_sql = all_sql & brief_technical
             brief = card(totals, brief_sql, delivery.texts, brief_technical)
             if fits(brief):

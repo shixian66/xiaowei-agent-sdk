@@ -232,7 +232,7 @@ class AnswerRejectedError(EvidenceError):
 def normalize_answer(answer: AgentAnswer) -> AgentAnswer:
     """代码可无歧义纠正的形式问题直接归一化，不交模型改写：空白文字块丢弃；同一证据的事实块
     只保留首次出现的位置，展示方式冲突取完整（不少展示事实）。输出 schema 预检、Session 提交与
-    交付都先经这一步，看到同一份回答。本轮新事实选 brief 在交付时按完整展示（需要证据记录）。"""
+    交付都先经这一步，看到同一份回答。本轮新事实选 brief 收起显示，仍完整交付（需要证据记录）。"""
     full = {b.evidence_id for b in answer.blocks if isinstance(b, FactBlock) and b.view == "full"}
     seen: set[str] = set()
     blocks: list[AnswerBlock] = []
@@ -559,17 +559,20 @@ class EvidenceStore:
                 ),
             }
         )
-        # 本轮新事实总是完整展示：brief 只对可见历史事实生效，不拒绝也不交模型改写。
-        if view == "brief" and record.identity.turn_id != ctx.identity.turn_id:
-            # 行数只来自接收渠道的获准结果；不是模型所报数值或全表总数。
+        if record.identity.turn_id != ctx.identity.turn_id and section != "action":
+            fact = fact.model_copy(
+                update={
+                    "note_summary": "；".join(
+                        filter(None, (fact.note_summary, "采集时结果，不代表当前状态。"))
+                    )
+                }
+            )
+        # 当前 brief 仅收起，summary 留空；历史摘要仍受原有行数语义限制。
+        if view == "brief" and not complete and section != "action":
+            if record.identity.turn_id == ctx.identity.turn_id:
+                return fact.model_copy(update={"view": "brief"})
             count = (item.data or {}).get("row_count")
-            if (
-                not complete
-                and type(count) is int
-                and count >= 0
-                and count == len(fact.rows)
-                and fact.columns
-            ):
+            if type(count) is int and count >= 0 and count == len(fact.rows) and fact.columns:
                 fact = fact.model_copy(
                     update={"view": "brief", "summary": f"本次返回行数：{count}。"}
                 )

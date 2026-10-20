@@ -7,7 +7,7 @@ from tests.sdk_core.test_feishu_render import delivery, fact, size, tables, text
 
 from xiaowei.feishu_delivery import _data_parts, _preview
 from xiaowei.feishu_render import build_feishu_message
-from xiaowei.models import Delivery, DeliveryFact, DeliveryText
+from xiaowei.models import Delivery, DeliveryFact, DeliveryFactRef, DeliveryText
 
 
 def answer_with(source: DeliveryFact) -> Delivery:
@@ -34,7 +34,7 @@ def test_folded_facts_keep_limits_visible_and_every_value_reachable(section: str
     message = build_feishu_message(answer_with(source), 3500, "oc_test", platform_limits=True)
     visible, complete = ("\n".join(text_parts(message, folded=f)) for f in (False, True))
     assert "工具结果已截断，不能据此声称完整。" in visible
-    assert "本次返回 12 行" in visible and "系统事实" in visible
+    assert "查看依据" in visible and "系统事实" not in visible
     assert "row-000" not in visible and "row-011" not in visible
     assert tables(message) == []
     for row in source.rows:
@@ -85,8 +85,8 @@ def test_t2_single_long_diagnostic_sql_is_traceable_in_place() -> None:
     )
     message = build_feishu_message(answer_with(source), 3500, "oc_test", platform_limits=True)
     visible = "\n".join(text_parts(message, folded=False))
-    assert "结果 1" in visible and "工具结果已截断" in visible
-    assert "fat，最近一小时" in visible
+    assert "查看依据" in visible and "工具结果已截断" in visible
+    assert "fat，最近一小时" in "\n".join(text_parts(message))
     assert "SCAN biz.orders" not in visible and "SELECT status" not in visible
     assert sql in "\n".join(text_parts(message))
 
@@ -102,8 +102,12 @@ def test_action_status_without_complete_flag_never_folds() -> None:
 def test_folded_raw_dedup_retains_single_message_at_capacity_boundary() -> None:
     source = query_rows(30, width=180)
     message = build_feishu_message(
-        answer_with(source), 3500, "oc_test", max_bytes=10_000,
-        allow_preview=False, platform_limits=True,
+        answer_with(source),
+        3500,
+        "oc_test",
+        max_bytes=10_000,
+        allow_preview=False,
+        platform_limits=True,
     )
     assert size(message) <= 10_000
     complete = "\n".join(text_parts(message))
@@ -117,8 +121,8 @@ def test_folded_raw_dedup_retains_single_message_at_capacity_boundary() -> None:
 def test_attachment_preview_has_no_duplicate_large_detail_and_preserves_files(section: str) -> None:
     source = query_rows(100, width=450, section=section, truncated=True)
     parts = _data_parts(answer_with(source), 0, 3500, "oc_test", None)
-    assert [p.kind for p in parts] == ["md", "body"]
-    report = parts[0].body.decode()
+    assert [p.kind for p in parts] == ["md", "md", "body"]
+    report = "\n".join(p.body.decode() for p in parts if p.kind == "md")
     for row in source.rows:
         assert row["name"] in report
     assert metadata_sql(source) in report
@@ -136,8 +140,8 @@ def test_actual_folded_text_size_selects_file_instead_of_table_estimate() -> Non
     rows = tuple(dict.fromkeys(names, n) for n in range(40))
     source = fact(columns=names, rows=rows, metadata={})
     parts = _data_parts(answer_with(source), 0, 3500, "oc_test", None)
-    assert [p.kind for p in parts] == ["md", "body"]
-    assert all(name in parts[0].body.decode() for name in names)
+    assert [p.kind for p in parts] == ["md", "md", "body"]
+    assert all(name in parts[1].body.decode() for name in names)
 
 
 def test_explicit_attachment_preview_does_not_offer_collapsed_full_details() -> None:
@@ -150,7 +154,7 @@ def test_explicit_attachment_preview_does_not_offer_collapsed_full_details() -> 
 
 
 def test_diagnostic_actual_sql_keeps_quotes_backslashes_and_newlines() -> None:
-    sql = 'SELECT "name", \'\\_%\'\nFROM biz.orders'
+    sql = "SELECT \"name\", '\\_%'\nFROM biz.orders"
     source = query_rows(12).model_copy(
         update={"tool_id": "local/explain_query", "metadata": {"sql": sql}, "result_json": None}
     )
@@ -171,15 +175,20 @@ def test_fold_dedup_does_not_remove_raw_fields_missing_from_visible_values() -> 
 
 @pytest.mark.parametrize("section", ["body", "remaining"])
 @pytest.mark.parametrize("attachment", [False, True])
-def test_folded_monitoring_keeps_actual_window_and_warnings_outside_details(
-    section: str, attachment: bool,
+def test_folded_monitoring_keeps_warning_visible_and_actual_parameters_in_details(
+    section: str,
+    attachment: bool,
 ) -> None:
     source = fact(
-        tool_id="prometheus/range_query", columns=(), rows=(),
+        tool_id="prometheus/range_query",
+        columns=(),
+        rows=(),
         section=section,
         metadata={
             "result": "up{instance=host1} 0\n" * 140,
-            "start_time": "1792440000", "end_time": "1792443600", "step": "60",
+            "start_time": "1792440000",
+            "end_time": "1792443600",
+            "step": "60",
             "warnings": '["partial series returned"]',
         },
     )
@@ -187,11 +196,14 @@ def test_folded_monitoring_keeps_actual_window_and_warnings_outside_details(
         answer_with(source), 3500, "oc_test", platform_limits=True, attachment_preview=attachment
     )
     visible = "\n".join(text_parts(message, folded=False))
-    assert "1792440000" in visible and "1792443600" in visible and "step: " in visible
-    assert "partial series returned" in visible
+    assert "1792440000" not in visible and "step:" not in visible
+    assert "查询窗口（北京时间）" in visible and "步长 60 秒" in visible
+    assert "数据源返回警告" in visible
     assert "up{instance=host1}" not in visible
     complete = "\n".join(text_parts(message))
     assert ("up{instance=host1}" in complete) is not attachment
+    for original in ("1792440000", "1792443600", "partial series returned"):
+        assert (original in complete) is not attachment
 
 
 def test_failure_hint_for_single_card_does_not_claim_an_attachment() -> None:
@@ -204,18 +216,108 @@ def test_failure_hint_for_single_card_does_not_claim_an_attachment() -> None:
     assert "row-011" in "\n".join(text_parts(message))
 
 
-def test_non_table_failure_hint_counts_visible_constraints_and_omitted_values() -> None:
+def test_non_table_failure_hint_states_missing_values_without_field_log() -> None:
     source = fact(
-        tool_id="prometheus/range_query", columns=(), rows=(),
+        tool_id="prometheus/range_query",
+        columns=(),
+        rows=(),
         metadata={
             "result": "host1 0\n" * 8000,
-            "start_time": "1792440000", "end_time": "1792443600", "step": "60",
+            "start_time": "1792440000",
+            "end_time": "1792443600",
+            "step": "60",
             "warnings": "partial series returned",
         },
     )
     message = _preview(answer_with(source), 3500, "oc_test", None, "完整结果尚未交付。")
     visible = "\n".join(text_parts(message, folded=False))
-    assert "partial series returned" in visible and "1792440000" in visible
-    assert "展示 4／共 5 个字段" in visible
-    assert "结果字段未展示。" in "\n".join(text_parts(message))
+    assert "数据源返回警告" in visible and "完整结果尚未交付" in visible
+    assert "部分明细未展示" in visible
+    assert "个字段" not in visible and "1792440000" not in visible
     assert "（无数据行）" not in "\n".join(text_parts(message))
+
+
+@pytest.mark.parametrize("view", ["full", "brief"])
+def test_short_monitoring_metadata_is_details_only_even_below_old_density_limit(view):
+    value = "up{instance=host1} 1\nup{instance=host2} 1"
+    source = fact(
+        tool_id="prometheus/range_query",
+        columns=(),
+        rows=(),
+        view=view,
+        metadata={"result": value, "start_time": "1792440000", "warnings": None},
+    )
+    message = build_feishu_message(answer_with(source), 3500, "oc_test", platform_limits=True)
+    visible = "\n".join(text_parts(message, folded=False))
+    for unwanted in (
+        "up{instance",
+        "start_time",
+        "warnings",
+        "共 3 个字段",
+        "系统事实",
+        "其余结果",
+    ):
+        assert unwanted not in visible
+    assert value in "\n".join(text_parts(message))
+
+
+def test_current_brief_small_table_folds_but_remains_complete():
+    source = query_rows(3).model_copy(update={"view": "brief", "summary": None})
+    message = build_feishu_message(
+        answer_with(source), 3500, "oc_test", platform_limits=True, allow_preview=False
+    )
+    visible = "\n".join(text_parts(message, folded=False))
+    assert "row-000" not in visible and "摘要不可用" not in visible
+    for row in source.rows:
+        assert row["name"] in "\n".join(text_parts(message))
+
+
+def test_current_brief_capacity_cannot_take_the_historical_summary_shortcut():
+    source = query_rows(100, width=450).model_copy(update={"view": "brief", "summary": None})
+    parts = _data_parts(answer_with(source), 0, 3500, "oc_test", None)
+    files = [part.body.decode() for part in parts if part.kind == "md"]
+    assert files and all(row["name"] in "\n".join(files) for row in source.rows)
+    assert "历史摘要缺失" not in "\n".join(files)
+
+
+@pytest.mark.parametrize("complete", [False, True])
+def test_actions_ignore_brief_including_unprotected_status(complete):
+    source = query_rows(3, section="action", requires_complete=complete).model_copy(
+        update={"view": "brief", "summary": None}
+    )
+    message = build_feishu_message(answer_with(source), 3500, "oc_test", platform_limits=True)
+    visible = "\n".join(text_parts(message, folded=False))
+    if not complete:
+        assert "row-000" in visible and "row-002" in visible
+    else:
+        assert "实际 SQL" in visible or "sql" in visible
+
+
+@pytest.mark.parametrize("view", ["full", "brief"])
+def test_folded_entry_keeps_its_position_between_model_blocks(view):
+    source = fact(
+        columns=(),
+        rows=(),
+        metadata={"result": "RAW_POSITION_CANARY"},
+        result_json='{"result":"RAW_POSITION_CANARY"}',
+        view=view,
+    )
+    value = delivery(source).model_copy(
+        update={
+            "blocks": (
+                DeliveryText(text="前面的结论"),
+                DeliveryFactRef(evidence_id=source.evidence_id),
+                DeliveryText(text="后面的建议"),
+            )
+        }
+    )
+    message = build_feishu_message(
+        value, 3500, "oc_test", platform_limits=True, allow_preview=False
+    )
+    elements = message["card"]["body"]["elements"]
+    before = next(i for i, e in enumerate(elements) if "前面的结论" in "\n".join(text_parts(e)))
+    panel = next(i for i, e in enumerate(elements) if e["tag"] == "collapsible_panel")
+    after = next(i for i, e in enumerate(elements) if "后面的建议" in "\n".join(text_parts(e)))
+    assert before < panel < after
+    assert "RAW_POSITION_CANARY" not in "\n".join(text_parts(message, folded=False))
+    assert "RAW_POSITION_CANARY" in "\n".join(text_parts(elements[panel]))

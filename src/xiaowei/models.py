@@ -506,9 +506,19 @@ class DeliveryFact(_Trusted):
     requires_complete: bool = Field(default=False, exclude=True)
     view: Literal["full", "brief"] = "full"
     summary: str | None = None
-    """代码从当前渠道投影生成的摘要；原表与 JSON 保留，仍占同一展示预算。"""
+    """仅历史 brief 的代码计数摘要；本轮 brief 不带摘要，原表与 JSON 保留。"""
     section: FactSection = "body"
     """展示区域：动作区域置顶，正文由模型放置，其余结果由代码补全。"""
+
+    @property
+    def historical_brief(self) -> bool:
+        """只有代码生成的历史摘要可省略原值；普通本轮 brief 不带 summary。"""
+        return (
+            self.view == "brief"
+            and self.summary is not None
+            and self.section != "action"
+            and not self.requires_complete
+        )
 
 
 class DeliveryText(_Trusted):

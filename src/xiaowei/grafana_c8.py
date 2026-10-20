@@ -436,6 +436,7 @@ def datasource_catalog(
             result=_WriteResult,
             required=("result_json",),
             fact_note="数据源配置快照，健康检查未验证；秘密字段不会进入结果。",
+            fact_note_summary="数据源配置快照，健康检查未验证。",
         ),
         "create_datasource": ToolPolicy(
             "grafana.create_datasource",

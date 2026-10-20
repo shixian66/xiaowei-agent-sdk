@@ -493,7 +493,7 @@ async def test_query_keeps_whole_row_truncation_when_even_marker_cannot_fit() ->
         (Decimal("1E+3"), "1000"),
         (Decimal("-0.00012"), "-0.00012"),
         (date(2026, 9, 1), "2026-09-01"),
-        (datetime(2026, 9, 1, 8, 30), "2026-09-01T08:30:00+08:00"),  # 会话时区即目标时区
+        (datetime(2026, 9, 1, 8, 30), "2026-09-01T08:30:00"),  # 无时区值不推测来源时区
         (datetime(2026, 9, 1, 0, 30, tzinfo=UTC), "2026-09-01T08:30:00+08:00"),
         (
             datetime(2026, 9, 1, 8, 30, tzinfo=timezone(timedelta(hours=8))),

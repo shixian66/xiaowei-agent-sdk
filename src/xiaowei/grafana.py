@@ -317,6 +317,7 @@ def dashboard_catalog(
             effect="write" if name == "update_dashboard" else "read",
             group_only=name == "update_dashboard",
             fact_note="Dashboard定义/保存版本快照，不是实时指标；写结果只在确认回读后交付。",
+            fact_note_summary="仪表盘定义或版本快照，不是实时指标。",
         )
         for name, args in models.items()
     ]
