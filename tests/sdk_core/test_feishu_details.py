@@ -142,7 +142,9 @@ def test_actual_folded_text_size_selects_file_instead_of_table_estimate() -> Non
 
 def test_explicit_attachment_preview_does_not_offer_collapsed_full_details() -> None:
     source = query_rows(12)
-    message = _preview(answer_with(source), 3500, "oc_test", None, "本次完整结果见附件。")
+    message = _preview(
+        answer_with(source), 3500, "oc_test", None, "本次完整结果见附件。", attachment=True
+    )
     assert "row-000" not in "\n".join(text_parts(message))
     assert "见附件" in "\n".join(text_parts(message, folded=False))
 
@@ -165,3 +167,29 @@ def test_fold_dedup_does_not_remove_raw_fields_missing_from_visible_values() -> 
     shown = "\n".join(text_parts(message))
     assert '"not_represented"' in shown and "9223372036854775807" in shown
     assert "原文 JSON:" in shown and "逐项一致" not in shown
+
+
+def test_folded_monitoring_keeps_actual_window_and_warnings_outside_details() -> None:
+    source = fact(
+        tool_id="prometheus/range_query", columns=(), rows=(),
+        metadata={
+            "result": "up{instance=host1} 0\n" * 140,
+            "start_time": "1792440000", "end_time": "1792443600", "step": "60",
+            "warnings": '["partial series returned"]',
+        },
+    )
+    message = build_feishu_message(answer_with(source), 3500, "oc_test", platform_limits=True)
+    visible = "\n".join(text_parts(message, folded=False))
+    assert "1792440000" in visible and "1792443600" in visible and "step: " in visible
+    assert "partial series returned" in visible
+    assert "up{instance=host1}" not in visible
+
+
+def test_failure_hint_for_single_card_does_not_claim_an_attachment() -> None:
+    source = query_rows(12)
+    message = _preview(
+        answer_with(source), 3500, "oc_test", None, "完整结果尚未交付。请联系操作员。"
+    )
+    visible = "\n".join(text_parts(message, folded=False))
+    assert "见附件" not in visible
+    assert "row-011" in "\n".join(text_parts(message))

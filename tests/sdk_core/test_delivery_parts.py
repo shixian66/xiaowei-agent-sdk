@@ -418,6 +418,7 @@ async def test_folded_remaining_through_saved_delivery_and_manual_recovery(env: 
     assert bound.send_state == outcome
     if outcome != "sent":
         assert "完整结果尚未交付" in str(platform.sent[-1][0])
+        assert "见附件" not in str(platform.sent[-1][0])
         result = await env.service.results.send(
             ref, transmit(env, ref, platform, resend=True), resend=True
         )
@@ -893,11 +894,11 @@ async def test_hint_rechecks_attempt_after_thread_render(
     original = module._preview
     entered, release = threading.Event(), threading.Event()
 
-    def paused_preview(delivery, max_chars, chat_id, reply_to, notice):
+    def paused_preview(delivery, max_chars, chat_id, reply_to, notice, **kwargs):
         if notice.startswith("完整结果尚未交付。"):
             entered.set()
             assert release.wait(8), "测试屏障超时"
-        return original(delivery, max_chars, chat_id, reply_to, notice)
+        return original(delivery, max_chars, chat_id, reply_to, notice, **kwargs)
 
     monkeypatch.setattr(module, "_preview", paused_preview)
     task = asyncio.create_task(env.service.results.send(ref, transmit(env, ref, platform)))

@@ -31,6 +31,11 @@ RAW_OMITTED: Final = "原文 JSON 与上方展示的值逐项一致，未重复�
 _TECHNICAL = frozenset({"sql", "row_count", "elapsed_ms", "next_cursor"})
 _PAGED = frozenset({"local/list_databases", "local/list_tables", "local/describe_table"})
 _ACTUAL_SQL = frozenset({"local/run_readonly_query", "local/explain_query"})
+# 现有监控投影中的范围/分页/限制字段（runtime 的公开工具契约）；不能随结果值收起。
+_VISIBLE_LIMITS = frozenset({
+    "start_time", "end_time", "step", "warnings", "from", "to", "timeRange",
+    "limit", "offset", "page", "total", "hasMore",
+})
 _ACTION_LABELS = {
     "action_id": "Action ID",
     "action": "动作",
@@ -293,11 +298,17 @@ def _card(
                 text = display_text(value) if isinstance(value, str) else _cell({key: value}, key)
                 elements.append(_div(f"{_ACTION_LABELS.get(key, key)}：{text}"))
             return
-        if fact.columns:
+        visible_metadata = {
+            key: value for key, value in fact.metadata.items()
+            if key not in _TECHNICAL and (
+                (bool(fact.columns) and value is not None)
+                or (index in folded and key in _VISIBLE_LIMITS)
+            )
+        }
+        if visible_metadata:
             elements.extend(
                 _div(f"{key}: {_cell({key: value}, key)}")
-                for key, value in fact.metadata.items()
-                if key not in _TECHNICAL and value is not None
+                for key, value in visible_metadata.items()
             )
         elements.extend(_div(notice) for notice in fact_limit_notices(fact))
         if index in folded:
@@ -309,7 +320,10 @@ def _card(
                 _div(amount + ("；明细与查询信息见附件。" if attachment else "；展开查看明细。"))
             )
             if not attachment:
-                row_details[index] = _row_text(fact, rows) or "（无数据行）"
+                detailed_rows = rows if fact.columns else tuple(
+                    row for row in rows if row["字段"] not in visible_metadata
+                )
+                row_details[index] = _row_text(fact, detailed_rows) or "（无数据行）"
                 if fact.tool_id in _ACTUAL_SQL and index not in sqls:
                     elements.append(_div("SQL 未展示。"))
                 if omissions and len(rows) < len(all_rows):
