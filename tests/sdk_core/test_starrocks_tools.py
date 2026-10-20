@@ -70,7 +70,7 @@ from xiaowei.evidence import (
     EvidenceStoreError,
     EvidenceUnavailableError,
 )
-from xiaowei.feishu_render import build_feishu_message
+from xiaowei.feishu_render import MODEL_TEXT_LABEL, build_feishu_message
 from xiaowei.governance import (
     GovernedTools,
     Prechecked,
@@ -558,11 +558,11 @@ async def test_feishu_gets_original_rows_in_pure_text_card_cells(env: Env) -> No
     assert chinese == {"c0": '"华东区"', "c1": "NULL（空值）"}
     elements = card["card"]["body"]["elements"]
     contents = [e.get("text", {}).get("content") for e in elements]
-    assert contents.count(ANALYSIS_HEADER) == 1
+    assert contents.count(MODEL_TEXT_LABEL) == 1
     assert any((c or "").startswith("仅供参考\n") for c in contents)
     assert "\\u2028" in message_text(card) and "\u2028" not in message_text(card)
     # 结构边界只来自代码：事实标题与来源标签；原值和模型文字不能新增结构化事实或 Markdown 元素。
-    label = contents.index(ANALYSIS_HEADER)
+    label = contents.index(MODEL_TEXT_LABEL)
     model = next(i for i, c in enumerate(contents) if (c or "").startswith("仅供参考"))
     assert contents.count(f"结果 1 · {SR.target_id}") == 1
     assert contents.index(f"结果 1 · {SR.target_id}") < label < model
