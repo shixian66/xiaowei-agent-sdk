@@ -1083,7 +1083,7 @@ def _monitoring_catalog(
             required=fields,
             fact_note=note,
             fact_note_summary={
-                "query_range": "仅代表本次求值窗口，不代表未查范围。",
+                "range_query": "仅代表本次求值窗口，不代表未查范围。",
                 "label_names": "窗口内发现的标签名称，不是实时健康检查。",
                 "label_values": "标签值仅证明窗口内存在序列，不证明当前健康或配置。",
                 "series": "仅为序列标签，不是实时指标或资产清单。",
@@ -1175,6 +1175,7 @@ def _monitoring_catalog(
                     "search_dashboards": "仪表盘定义目录；total 是本页数量，不是全源计数。",
                     "get_dashboard_panel_queries": "面板查询配置快照，未执行查询，不是实时指标。",
                     "get_annotations": "窗口内标记记录，不证明因果或主机健康。",
+                    "list_datasources": "数据源目录，不证明连接可用或对应外部 Prometheus 源。",
                 }.get(name)
             ),
         )

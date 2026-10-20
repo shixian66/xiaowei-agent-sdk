@@ -15,7 +15,7 @@
 | 锁定依赖 | SDK `0.22.3`、Lark Channel `1.4.0`、MCP `2.2.0`、sqlglot `30.17.0`、`nh3 0.3.7`、`tinycss2 1.5.1` |
 | 正式入口 | `xiaowei serve`、`config check`、`model check`、`storage init/upgrade/cleanup`、`requests resend`；命令与环境准备以 README 为准 |
 | 最近有记录的公司部署 | 既有交接记录称 PR #110 / `4e0ab86` 已部署，并记录了部署后的回答拒收反馈。该历史记录不证明当前镜像、配置或健康状态，也不证明 #111–#114 已部署 |
-| 当前验收结论 | 本轮按用户批准修复 edab4c7 审查 B1/B2：跨渠道主视图保留可信短提醒，动作报告不拆分或收起。相关检查、Chrome、隔离变异及最终完整运行的命令和结果入口见 §5。最终路径检查 50 passed、Chrome 12 passed、五组隔离变异均捕获、文档及 Ruff/mypy 通过；最终默认全量与独立复审以链接的精确版本日志为准，不将分次结果拼接。真实模型、公司服务与用户验收未完成 |
+| 当前验收结论 | 本轮按用户批准修复 edab4c7 审查 B1/B2：跨渠道主视图保留可信短提醒，动作报告不拆分或收起。相关检查、Chrome、隔离变异及最终完整运行的命令和结果入口见 §5。路径检查与 Chrome 通过、五组隔离变异均捕获、文档及 Ruff/mypy 通过；独立复审发现的 Prometheus `range_query` 注册键及 Grafana `list_datasources` 短口径遗漏已补实际 catalog 到主视图回归；最终默认全量与独立复审以链接的精确版本日志为准，不将分次结果拼接。真实模型、公司服务与用户验收未完成 |
 | 当前任务授权 | 用户批准计划 v1.2（SHA-256 `fe6323fdaea5cdd7da900f34304369ac9c05e3bb5e96d74d3376fd3edf371443`）：串行 P2 → P1a/P1b/P1d，每片提交并独立审查；不部署、不调用真实模型及公司服务。P3/P1c 不在本轮范围 |
 
 原工作目录仍在 `codex/model-authored-report-plan@b89d4ee`，未提交 ARCHITECTURE、旧报告计划与公司配置均保留；未读取公司配置。本次在 `/Users/kloenguyen/.codex/worktrees/answer-query-repair/agent-SDK` 实施，复制了校验一致的[批准计划 v1.2](docs/superpowers/plans/2026-10-20-production-dialogue-answer-repair.md)；计划是批准时快照，后续授权及实施状态以本页为准。

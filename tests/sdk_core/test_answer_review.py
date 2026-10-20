@@ -5,9 +5,13 @@ import json
 import pytest
 from tests.sdk_core.test_feishu_render import text_parts
 from tests.sdk_core.test_feishu_reports import _delivery
+from tests.sdk_core.test_grafana_g3 import g3_config
+from tests.sdk_core.test_monitoring_r1a import monitoring_config
+from tests.sdk_core.test_runtime import serve_config
 
 from xiaowei.feishu_render import build_feishu_message
 from xiaowei.feishu_report import build_reports
+from xiaowei.runtime import ServeConfig, _monitoring_catalog
 
 
 def reviewed_delivery(format_="md", *, action=False, complete=False):
@@ -146,3 +150,37 @@ def test_other_monitoring_windows_and_pagination_keep_their_scope_visible(metada
         value.model_copy(update={"facts": (fact,)}), 3500, "oc_review", platform_limits=True
     )
     assert expected in "\n".join(text_parts(card, folded=False))
+
+
+@pytest.mark.parametrize("channel", ["card", "md"])
+@pytest.mark.parametrize(
+    "name,policy_id,expected",
+    [
+        ("range_query", "prometheus.range_query", "不代表未查范围"),
+        ("list_datasources", "grafana.list_datasources", "不证明连接可用或对应外部 Prometheus 源"),
+    ],
+)
+def test_actual_monitoring_catalog_caveats_reach_main_view(channel, name, policy_id, expected):
+    configure = monitoring_config if policy_id.startswith("prometheus.") else g3_config
+    values = configure("http://127.0.0.1:9999/mcp")
+    values["mcp_servers"][0]["allowed_tools"][name] = policy_id
+    contracts, policies = _monitoring_catalog(
+        ServeConfig.model_validate(serve_config(8501, **values))
+    )
+    policy = next(p for p in policies if p.policy_id == policy_id)
+    delivery = reviewed_delivery()
+    fact = delivery.facts[0].model_copy(
+        update={
+            "tool_id": next(c.tool_id for c in contracts if c.policy_id == policy_id),
+            "metadata": {},
+            "note": policy.fact_note,
+            "note_summary": policy.fact_note_summary,
+        }
+    )
+    delivery = delivery.model_copy(update={"facts": (fact,)})
+    if channel == "card":
+        message = build_feishu_message(delivery, 3500, "oc_review", platform_limits=True)
+        visible = "\n".join(text_parts(message, folded=False))
+    else:
+        visible = build_reports(delivery)[0].content.decode()
+    assert expected in visible
