@@ -20,10 +20,13 @@ class Sink:
     updated: bool = True
     block_update: asyncio.Event | None = None
     update_started: asyncio.Event = field(default_factory=asyncio.Event)
+    tools_shown: asyncio.Event = field(default_factory=asyncio.Event)
     times: list[float] = field(default_factory=list)
 
     async def create(self, message):
         self.cards.append(message)
+        if "工具请求" in json.dumps(message, ensure_ascii=False):
+            self.tools_shown.set()
         self.created.set()
         if self.block is not None:
             await self.block.wait()
@@ -31,6 +34,8 @@ class Sink:
 
     async def update(self, message_id, message):
         self.updates.append((message_id, message))
+        if "工具请求" in json.dumps(message, ensure_ascii=False):
+            self.tools_shown.set()
         self.times.append(time.monotonic())
         self.update_started.set()
         if self.block_update is not None:
@@ -114,38 +119,97 @@ async def test_unknown_creation_or_failed_update_stops_observation(failed_at):
     assert len(sink.updates) == (0 if failed_at == "create" else 1)
 
 
-async def test_finish_cancels_inflight_creation_without_waiting_or_late_terminal():
-    sink = Sink(block=asyncio.Event())
+@pytest.mark.parametrize("inflight", ["create", "update"])
+@pytest.mark.parametrize(
+    ("stage", "label"), [("sent", "正式回复已送达"), ("unsent", "正式回复尚未确认送达")]
+)
+async def test_finish_returns_immediately_then_sends_one_terminal_after_success(
+    inflight, stage, label
+):
+    release = asyncio.Event()
+    sink = Sink(
+        block=release if inflight == "create" else None,
+        block_update=release if inflight == "update" else None,
+    )
     progress = observer(sink)
-    progress.start()
-    await sink.created.wait()
-    progress.finish("sent")
-    await asyncio.sleep(0)
-    await settled(progress)
-    assert sink.updates == []
-    assert progress.task.done()
-
-
-async def test_finish_during_update_never_sends_a_competing_terminal_or_later_snapshot():
-    sink = Sink(block_update=asyncio.Event())
-    progress = observer(sink)
-    progress.start()
-    await sink.created.wait()
     progress.mark("model")
-    await sink.update_started.wait()
-    progress.finish("sent")
-    await settled(progress)
-    progress.mark("saving")
-    sink.block_update.set()
-    await asyncio.sleep(0)
-    assert len(sink.updates) == 1
-    assert "正式回复已送达" not in json.dumps(sink.updates, ensure_ascii=False)
+    progress.start()
+    try:
+        await asyncio.wait_for(sink.created.wait(), 0.3)
+        if inflight == "update":
+            progress.mark("saving")
+            await asyncio.wait_for(sink.update_started.wait(), 0.3)
+        previous = len(sink.updates)
+        progress.finish(stage)
+        progress.finish("approval")  # 已结束的观察不能被后续事件改写。
+        progress.mark("tools")
+        await asyncio.sleep(0)
+        assert not progress.task.done()
+        assert len(sink.updates) == previous  # 在途请求明确返回前不能并发收尾。
+        release.set()
+        await settled(progress)
+        assert len(sink.cards) == 1
+        assert len(sink.updates) == previous + 1
+        assert label in json.dumps(sink.updates[-1], ensure_ascii=False)
+        assert sum(label in json.dumps(card, ensure_ascii=False) for _, card in sink.updates) == 1
+    finally:
+        progress.stop()
+        await asyncio.gather(progress.task, return_exceptions=True)
+
+
+@pytest.mark.parametrize("inflight", ["create", "update"])
+@pytest.mark.parametrize("outcome", ["failed", "timeout", "error", "cancelled"])
+async def test_finish_during_unsuccessful_io_never_sends_a_terminal_or_retries(inflight, outcome):
+    release = asyncio.Event()
+    sink = Sink(
+        block=release if inflight == "create" else None,
+        block_update=release if inflight == "update" else None,
+        create_id=None if inflight == "create" else "message-one",
+        updated=False,
+    )
+
+    async def create(card):
+        result = await sink.create(card)
+        if outcome == "error" and inflight == "create":
+            raise RuntimeError("PRIVATE_FAILURE")
+        return result
+
+    async def update(message_id, card):
+        result = await sink.update(message_id, card)
+        if outcome == "error" and inflight == "update":
+            raise RuntimeError("PRIVATE_FAILURE")
+        return result
+
+    from xiaowei.progress import Progress
+
+    progress = Progress(create, update, grouped=False, delay=0.01, interval=0.04, io_timeout=0.1)
+    progress.start()
+    try:
+        await asyncio.wait_for(sink.created.wait(), 0.3)
+        if inflight == "update":
+            progress.mark("saving")
+            await asyncio.wait_for(sink.update_started.wait(), 0.3)
+        progress.finish("sent")
+        if outcome == "cancelled":
+            progress.stop()
+        elif outcome != "timeout":
+            release.set()
+        await settled(progress)
+        progress.mark("model")
+        release.set()  # 超时/取消后即使平台稍后完成，也不再对该卡补发。
+        await asyncio.sleep(0)
+        assert len(sink.cards) == 1
+        assert len(sink.updates) == (0 if inflight == "create" else 1)
+        assert "正式回复已送达" not in json.dumps([sink.cards, sink.updates], ensure_ascii=False)
+    finally:
+        progress.stop()
+        await asyncio.gather(progress.task, return_exceptions=True)
 
 
 async def test_slow_progress_stays_within_global_sender_bound_and_cleans_up():
     slots = asyncio.Semaphore(2)
     sink = Sink(block=asyncio.Event())
-    observations = [observer(sink, slots=slots) for _ in range(12)]
+    observations = [observer(sink, slots=slots, io_timeout=0.1) for _ in range(12)]
     for progress in observations:
         progress.start()
     await asyncio.sleep(0.04)
@@ -182,10 +246,12 @@ async def test_real_runner_hooks_keep_parallel_tools_and_never_leak_payloads():
         if len(entered) == 2:
             barrier.set()
         await barrier.wait()
-        await sink.created.wait()
+        await sink.tools_shown.wait()
         return "PRIVATE_RESULT"
 
+    progress.mark("model")
     progress.start()
+    await sink.created.wait()  # 建卡可以早于工具阶段；不能把它当作工具已展示。
     model = ScriptedModel(
         [
             [
@@ -195,10 +261,13 @@ async def test_real_runner_hooks_keep_parallel_tools_and_never_leak_payloads():
             [assistant_message("PRIVATE_MODEL")],
         ]
     )
-    result = await Runner.run(
-        Agent(name="private-agent", model=model, tools=[inspect_synthetic]),
-        "PRIVATE_INPUT",
-        hooks=progress.hooks,
+    result = await asyncio.wait_for(
+        Runner.run(
+            Agent(name="private-agent", model=model, tools=[inspect_synthetic]),
+            "PRIVATE_INPUT",
+            hooks=progress.hooks,
+        ),
+        2,
     )
     progress.finish("sent")
     await settled(progress)
@@ -300,11 +369,15 @@ from tests.sdk_core.test_group_actions import actions as actions  # noqa: E402
 
 
 @pytest.mark.loopback
-@pytest.mark.parametrize("approve", [True, False])
+@pytest.mark.parametrize(
+    ("approve", "first_outcome"),
+    [(True, "sent"), (False, "sent"), (None, "failed"), (None, "unknown")],
+)
 async def test_group_pause_and_new_approval_or_rejection_have_separate_observations(
     actions,
     monkeypatch,
     approve,
+    first_outcome,
 ):
     from tests.sdk_core.test_app import after, cite, tool_call
     from tests.sdk_core.test_group_actions import request_execution
@@ -340,11 +413,23 @@ async def test_group_pause_and_new_approval_or_rejection_have_separate_observati
     async with running(
         env, max_reply_chars=3500, progress_create=create, progress_update=sink.update
     ) as group:
+        group.outbox.outcomes.append(first_outcome)
         asking = asyncio.create_task(group.ask("改为 after", message_id="om_proposal"))
         await asyncio.wait_for(sink.created.wait(), 2)
         first_release.set()
         await asyncio.wait_for(asking, 3)
         assert actions.adapter.calls == []
+        await asyncio.wait_for(asyncio.gather(*tuple(group.gateway._progress_tasks)), 1)
+        first_cards = [card for message_id, card in sink.updates if message_id == "progress-1"]
+        label = "等待审批" if first_outcome == "sent" else "正式回复尚未确认送达"
+        assert label in json.dumps(first_cards[-1], ensure_ascii=False)
+        assert "正式回复已送达" not in json.dumps(first_cards, ensure_ascii=False)
+        assert await env.rows(
+            "SELECT state, delivery FROM xiaowei_request WHERE reply_message_id=:id",
+            id="om_proposal",
+        ) == [("paused", first_outcome)]
+        if first_outcome != "sent":
+            return
         action_id = await actions.one()
         command = f"/{'批准' if approve else '拒绝'} {action_id}"
         asking = asyncio.create_task(group.ask(command, sender=B, message_id="om_resume"))

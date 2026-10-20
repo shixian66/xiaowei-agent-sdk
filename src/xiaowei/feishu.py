@@ -1079,11 +1079,12 @@ class FeishuGateway:
                 progress = self._progress_for(job)
                 observe = {} if progress is None else {"progress": progress}
                 try:
+                    record = None
                     try:
                         if job.action_id is None:
-                            await self._service.process(job.receipt, **observe)
+                            record = await self._service.process(job.receipt, **observe)
                         else:
-                            await self._service.approve(
+                            record = await self._service.approve(
                                 job.receipt, job.action_id, approve=job.approve, **observe
                             )
                     except ResultNotSavedError:
@@ -1092,7 +1093,10 @@ class FeishuGateway:
                         progress.mark("delivery")
                     outcome = await self._deliver(job)
                     if progress is not None:
-                        progress.finish("sent" if outcome == "sent" else "unsent")
+                        if outcome == "sent" and record is not None and record.state == "paused":
+                            progress.finish("approval")
+                        else:
+                            progress.finish("sent" if outcome == "sent" else "unsent")
                 except asyncio.CancelledError:
                     # 本条可能已保存却未落定投递：不再开放新工作，交给重启恢复。
                     self._readiness.lock("feishu_consumer_cancelled")

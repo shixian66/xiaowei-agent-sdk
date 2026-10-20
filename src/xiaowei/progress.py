@@ -61,7 +61,7 @@ class Progress:
         self._stage: Stage = "preparing"
         self._observed = datetime.now(UTC)
         self._active: set[str] = set()
-        self._finished = self._disabled = self._sending = False
+        self._finished = self._disabled = False
         self._started = time.monotonic()
         self.task: asyncio.Task[None] | None = None
         self.hooks = _Hooks(self)
@@ -97,13 +97,11 @@ class Progress:
             self._changed.set()
 
     def finish(self, stage: Stage) -> None:
-        """不等待网络；在途发送取消后不补终态，避免旧更新覆盖收尾。"""
+        """不等待网络；在途成功返回后由同一发送任务顺序补齐收尾。"""
         if self._finished:
             return
         self.mark(stage)
         self._finished = True
-        if self._sending:
-            self.stop()
         self._changed.set()
 
     def stop(self) -> None:
@@ -157,10 +155,8 @@ class Progress:
                 acquired = True
             self._changed.clear()
             sent_stage = self._stage
-            self._sending = True
             async with asyncio.timeout(self._timeout):
                 message_id = await self._create(self._card())
-            self._sending = False
             if not message_id:
                 return
             sent_at = time.monotonic()
@@ -180,14 +176,12 @@ class Progress:
                 self._changed.clear()
                 if self._stage != sent_stage:
                     sent_stage = self._stage
-                    self._sending = True
                     async with asyncio.timeout(self._timeout):
                         success = await self._update(message_id, self._card())
-                    self._sending = False
                     if not success:
                         return
                     sent_at = time.monotonic()
-                if self._finished:
+                if self._finished and self._stage == sent_stage:
                     return
         except asyncio.CancelledError:
             return  # 只取消独立观察任务，不转换业务任务的取消。
