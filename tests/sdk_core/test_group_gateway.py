@@ -184,6 +184,8 @@ async def running(
     *,
     bot: str | None = BOT,
     upload_file: Any = None,
+    progress_create: Any = None,
+    progress_update: Any = None,
     **overrides: Any,
 ) -> AsyncIterator[Group]:
     outbox = outbox or Outbox()
@@ -194,6 +196,8 @@ async def running(
         clock=env.clock,
         bot_open_id=lambda: bot,
         upload_file=upload_file,
+        progress_create=progress_create,
+        progress_update=progress_update,
     )
     task = asyncio.create_task(gateway.run())
     try:

@@ -67,6 +67,7 @@ from xiaowei.models import (
     TurnAnswer,
     group_owner,
 )
+from xiaowei.progress import Progress
 
 logger = logging.getLogger(__name__)
 
@@ -746,7 +747,9 @@ class ChannelService:
             budget=self._results.budget,
         )
 
-    async def process(self, receipt: RequestReceipt) -> RequestRecord:
+    async def process(
+        self, receipt: RequestReceipt, *, progress: Progress | None = None
+    ) -> RequestRecord:
         """运行新接受的请求并保存终态，返回保存后的记录；重复请求直接返回原记录。
 
         开始运行前按当前授权重新解析（群请求以记录的 owner 判断，并重新确认成员资格），再由
@@ -774,6 +777,8 @@ class ChannelService:
             )
             if record.state != "running":
                 return record
+            if progress is not None:
+                progress.start()
             try:
                 await self._app.prepare_tools(
                     record.mode,
@@ -781,7 +786,11 @@ class ChannelService:
                     decision.target_ids,
                     timeout_seconds=self._results.budget.timeout_seconds,
                 )
-                answer = await self._app.run_turn(self._context(record, decision), receipt.message)
+                answer = await self._app.run_turn(
+                    self._context(record, decision),
+                    receipt.message,
+                    **({} if progress is None else {"progress": progress}),
+                )
             except TurnError as exc:
                 return await self._store.fail(
                     record, _FAILURE_CODES[exc.reason], session_state=exc.session_state
@@ -791,8 +800,13 @@ class ChannelService:
                 self._store.readiness.lock("turn_cancelled")
                 raise
             if isinstance(answer, PausedTurn):
+                if progress is not None:
+                    progress.mark("approval")
                 return await self._store.save_pause(record, answer)
-            return await self._store.complete(record, answer)
+            saved = await self._store.complete(record, answer)
+            if progress is not None:
+                progress.mark("saved")
+            return saved
         finally:
             # 终态保存失败时 readiness 已锁低：会话保持封闭，等待停止并重启。
             if self._store.readiness.ok:
@@ -805,7 +819,12 @@ class ChannelService:
         return await self._store.fail(receipt.record, "busy")
 
     async def approve(
-        self, receipt: RequestReceipt, action_id: str, *, approve: bool = True
+        self,
+        receipt: RequestReceipt,
+        action_id: str,
+        *,
+        approve: bool = True,
+        progress: Progress | None = None,
     ) -> RequestRecord:
         """确定性批准事件恢复原SDK轮次；入口身份、去重、回执仍属本请求。"""
         from xiaowei.feishu import attributed
@@ -835,6 +854,8 @@ class ChannelService:
             )
             if record.state != "running":
                 return record
+            if progress is not None:
+                progress.start()
             executed = False
 
             async def fail_approval(code: CallerFailureCode) -> RequestRecord:
@@ -843,7 +864,10 @@ class ChannelService:
             try:
                 async with asyncio.timeout(self._results.budget.timeout_seconds):
                     answer = await self._app.resume_action(
-                        action_id, self._context(record, decision), approve=approve
+                        action_id,
+                        self._context(record, decision),
+                        approve=approve,
+                        **({} if progress is None else {"progress": progress}),
                     )
                     executed = True
                     if not isinstance(answer, PausedTurn):

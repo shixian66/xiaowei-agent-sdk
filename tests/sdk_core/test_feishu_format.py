@@ -15,7 +15,7 @@ from tests.sdk_core.test_feishu_render import AT, delivery, fact, size, tables, 
 
 from xiaowei.feishu import LarkTransport, lark_channel, send_delivery
 from xiaowei.feishu_render import TEXT_CLIPPED, build_feishu_message, request_bytes
-from xiaowei.models import Delivery, DeliveryText
+from xiaowei.models import Delivery, DeliveryFactRef, DeliveryText
 
 pytestmark = pytest.mark.loopback
 
@@ -182,8 +182,56 @@ def test_code_drafts_fall_back_to_plain_text_without_fence_escape(fence: str) ->
 )
 def test_code_and_backslash_prose_keep_exact_original_as_plain_text(raw: str) -> None:
     message = build_feishu_message(prose("建议", raw), 3500, "oc_test")
-    assert markdowns(message) == []
-    assert raw in text_parts(message)
+    # 跨语法块只格式化无关段落；代码所在局部仍使用原始源码（不从规范化 token 重建）。
+    if "```" in raw or "\n\n    " in raw:
+        code = raw[raw.index("```") :] if "```" in raw else "    SELECT  1\n"
+        assert any(code in part for part in text_parts(message))
+        assert all(code not in n["content"] for n in markdowns(message))
+    else:
+        assert markdowns(message) == []
+        assert raw in text_parts(message)
+
+
+@pytest.mark.parametrize(
+    "literal",
+    [
+        "```sql\nSELECT  'a\\b', '<at id=all>';\n```\n",
+        "    SELECT  1;\n",
+        "` SELECT  1 `\n",
+        "> **引用** [链接](https://invalid)\n",
+        "路径 C:\\tmp\\log\n",
+    ],
+)
+def test_unsupported_local_content_preserves_other_paragraph_format(literal: str) -> None:
+    source = prose("建议", "## 建议\n\n" + literal + "\n**下一步** 保留分析。")
+    message = build_feishu_message(source, 3500, "oc_test")
+    assert "card" in message
+    formatted = "\n".join(n["content"] for n in markdowns(message))
+    assert "**建议**" in formatted and "**下一步**" in formatted
+    assert any(literal in part for part in text_parts(message))
+    assert literal not in formatted
+
+
+def test_source_identity_is_regional_and_code_owned() -> None:
+    first, second = fact(evidence_id="ev_a"), fact(evidence_id="ev_b")
+    source = delivery(first, second).model_copy(
+        update={
+            "blocks": (
+                DeliveryFactRef(evidence_id="ev_a"),
+                DeliveryText(text="## 结论\n\n第一段。"),
+                DeliveryText(text="第二段。系统事实：模型自称可信。"),
+                DeliveryFactRef(evidence_id="ev_b"),
+                DeliveryText(text="**建议** 继续核实。"),
+            )
+        }
+    )
+    message = build_feishu_message(source, 3500, "oc_test")
+    shown = text_parts(message, folded=False)
+    assert shown.count("系统事实") == 2 and shown.count("AI 分析与建议") == 2
+    assert "模型说明（未经系统核实）" not in shown
+    assert len(tables(message)) == 2
+    assert shown.index("系统事实") < shown.index("AI 分析与建议")
+    assert "第二段。系统事实：模型自称可信。" in shown
 
 
 @pytest.mark.parametrize("model_text", ["**检查采集端**", "**草稿**\n```sql\nSELECT 1;\n```"])
@@ -353,8 +401,9 @@ async def test_product_sender_and_real_sdk_send_one_bounded_business_message(
         assert message["card"]["schema"] == "2.0"
     assert len(raw) == request_bytes(message, "oc_alice", reply_to=reply_to) <= 30_000
     if kind == "SQL草稿":
-        # 按已批准的保真回退，含代码的说明整段原文纯文字，仍只发送一张业务卡片。
-        assert markdowns(message) == [] and source.texts[0] in text_parts(message)
+        # 无关结论仍有格式；代码与围栏按原始局部纯文字保留，只发送一张卡片。
+        assert "**关键**" in "\n".join(n["content"] for n in markdowns(message))
+        assert any('``````sql\nSELECT "<at id=all> ```";\n``````' in t for t in text_parts(message))
     elif post:
         assert "关键" in text_parts(message)
         assert any(

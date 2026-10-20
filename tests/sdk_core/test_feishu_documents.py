@@ -321,6 +321,13 @@ async def test_runtime_start_wires_enabled_document_download_into_gateway(
         async def upload_file(self, report: object) -> str:
             raise AssertionError("文档输入不应上传报告")
 
+        async def create_progress(self, *args: Any, **kwargs: Any) -> None:
+            # 仅文档入口的传输替身：不确认进度消息，不影响正式回复。
+            return None
+
+        async def update_progress(self, *args: Any, **kwargs: Any) -> bool:
+            return False
+
         def bot_open_id(self) -> None:
             return None
 

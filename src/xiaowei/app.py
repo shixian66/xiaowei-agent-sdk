@@ -42,6 +42,7 @@ from typing import TYPE_CHECKING, Literal, cast
 if TYPE_CHECKING:
     from xiaowei.actions import ActionService
     from xiaowei.channel_store import CallerFailureCode
+    from xiaowei.progress import Progress
 
 from agents import (
     Agent,
@@ -151,15 +152,21 @@ DEFAULT_INSTRUCTIONS = (
     "text 块写结论、解释、口径说明、限制、建议、追问或闲聊；"
     "fact 块只选一个本轮可见的 evidence_id 和展示方式，事实内容由系统根据证据生成。"
     "可以只有文字（问候、能力或配置说明、解释、SQL 草稿、澄清），也可以文字与事实交错。"
-    "本轮成功的查询结果系统会完整交付：正文只放需要重点说明的结果，"
+    "按任务优先给出用户需要的结论；正文只引用需要重点说明或追溯的结果。"
+    "本轮必交的查询结果系统会完整交付："
     "没放进正文的由系统作为“其余结果”补全，不必为了完整逐个列出。"
+    "普通飞书消息中，引用保留事实及位置，小结果展开，大明细就地收起，"
+    "其余结果默认收起；完整内容由系统用详情或附件交付。"
+    "诊断和发现类结果未引用时只列工具与对象，不补交原值；"
+    "用户所需 SQL、DDL 或结构的唯一依据在这些结果中时，须保留能追溯它的 fact 引用，"
+    "不要为了缩短正文漏引，也不要仅为排版额外调用 EXPLAIN 或重查。"
     "text 只是你的说明，不会成为系统核实的事实：不要声称系统已核实，不要重画表格，"
     "不要逐行或逐列复述结果、复制 DDL 原文或把字段、库表列表再写一遍，需要时点名个别关键"
     "字段或数值。动作提案、审批和执行状态由系统组件置顶展示，以系统组件为准，"
     "不能凭历史提案声称执行成功。"
     "需要用户补充信息才能继续时 awaiting_user 为 true（此时系统不生成文件）；否则为 false。"
     "fact 块的 view：本轮新证据、索要原文、完整结果或具体字段值时用 full；"
-    "不要用 brief 隐藏本轮新查询结果（系统会改为完整展示）。"
+    "不要用 brief 隐藏本轮新查询结果（系统仍完整交付，收起由渠道布局决定）。"
     "简短追问已有可见历史结果的返回条数时，可对所需历史证据选择 brief，"
     "系统会显示本次返回行数并保留可展开的获准原文；不支持的摘要自动回 full。"
     "本次返回行数不是全表总数，也不是 COUNT 等聚合字段的值；问聚合值时保留 full。"
@@ -530,7 +537,9 @@ class Application:
                 eligible, target_scope=target_scope, turn_timeout_seconds=timeout_seconds
             )
 
-    async def run_turn(self, ctx: RunContext, message: str) -> TurnAnswer | PausedTurn:
+    async def run_turn(
+        self, ctx: RunContext, message: str, *, progress: Progress | None = None
+    ) -> TurnAnswer | PausedTurn:
         """执行一轮，返回已校验并已提交 Session 的回答；失败抛出 ``TurnError``，取消照常传播。
 
         回答连同本轮模型可见的证据返回，不是可直接发送的内容：调用方保存二者，在每次发送前用
@@ -553,7 +562,9 @@ class Application:
             # 证据依赖的检查次数整轮共用一个计数（回放、工具记录、最终校验与提交）。
             with scope_checks() as checks:
                 async with asyncio.timeout(ctx.budget.timeout_seconds):
-                    answer = await self._turn(ctx, message, started, scope_count=checks)
+                    answer = await self._turn(
+                        ctx, message, started, scope_count=checks, progress=progress
+                    )
         except TurnError as exc:
             _stage(
                 turn,
@@ -602,6 +613,7 @@ class Application:
         prior_interruptions: frozenset[tuple[str, str]] = frozenset(),
         approval_requests: dict[str, int] | None = None,
         scope_count: ScopeChecks | None = None,
+        progress: Progress | None = None,
     ) -> TurnAnswer | PausedTurn:
         turn = ctx.identity.turn_id
         if not ctx.tool_scope <= self._model_tools():
@@ -690,6 +702,7 @@ class Application:
                 max_turns=1,
                 run_config=self._run_config,
                 error_handlers={"invalid_final_output": repair_final_output},
+                hooks=None if progress is None else progress.hooks,
             )
             return RunErrorHandlerResult(
                 final_output=final.final_output_as(AgentAnswer, raise_if_incorrect_type=True)
@@ -724,6 +737,7 @@ class Application:
                     context=ctx,
                     max_turns=1,
                     run_config=self._run_config,
+                    hooks=None if progress is None else progress.hooks,
                 )
             except ModelBehaviorError:
                 return None  # SDK 重新抛出原校验错误，按 invalid_output 记录
@@ -738,6 +752,7 @@ class Application:
             session=None if native is not None else session,
             max_turns=ctx.budget.max_turns,
             run_config=self._run_config,
+            hooks=None if progress is None else progress.hooks,
             error_handlers={
                 "max_turns": finish_on_limit,
                 "invalid_final_output": repair_final_output,
@@ -765,9 +780,7 @@ class Application:
             ]
             await session.add_items(cast(list[TResponseInputItem], items))
         _stage(turn, "answered", started)
-        answer = normalize_answer(
-            result.final_output_as(AgentAnswer, raise_if_incorrect_type=True)
-        )
+        answer = normalize_answer(result.final_output_as(AgentAnswer, raise_if_incorrect_type=True))
         runs = self._governance.turn_runs(ctx.identity)
         # 已开始的查询（可信记录）都须有去向：成功证据、明确分类的监控读取失败，或明确未形成
         # Action 的准备拒绝。I/O 前被拒绝的调用不算开始。去向不明是系统失败，与引用无关，
@@ -792,6 +805,8 @@ class Application:
             limit_reached=runs.limit_rescue_started,
         )
         # 先单独校验回答，使拒绝原因明确；提交时 Session 仍会用同一验证器再校验一次。
+        if progress is not None:
+            progress.mark("saving")
         await self._evidence.validate_answer(validated, ctx)
         snapshot = await session.commit_validated(
             validated.context_evidence,
@@ -1070,7 +1085,12 @@ class Application:
         )
 
     async def resume_action(
-        self, action_id: str, approval_ctx: RunContext, *, approve: bool = True
+        self,
+        action_id: str,
+        approval_ctx: RunContext,
+        *,
+        approve: bool = True,
+        progress: Progress | None = None,
     ) -> TurnAnswer | PausedTurn:
         """审批新请求只承载身份/回执，SDK恢复原轮；所有前置检查在模型/写I/O之前。"""
         from pydantic import TypeAdapter
@@ -1251,6 +1271,7 @@ class Application:
                         prior_interruptions=prior_interruptions,
                         approval_requests=approval_requests,
                         scope_count=checks,
+                        progress=progress,
                     )
                     return result
         except BaseException as exc:
@@ -1432,9 +1453,9 @@ _DATABASE_SKILLS = tuple(
     for name in ("database_query.md", "database_diagnosis.md")
 )
 
-_REPORT_SKILL = files("xiaowei").joinpath("skills", "report_writing.md").read_text(
-    encoding="utf-8"
-).strip()
+_REPORT_SKILL = (
+    files("xiaowei").joinpath("skills", "report_writing.md").read_text(encoding="utf-8").strip()
+)
 
 
 def _instructions(

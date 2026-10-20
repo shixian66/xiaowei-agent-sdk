@@ -99,6 +99,8 @@ uv run --locked xiaowei --config xiaowei.json requests resend --subject <发起�
 
 飞书结果按容量交付：短结果完整发送一条消息；完整结果放不进消息时，自动生成完整 MD 文件并发送正文。明确要求 HTML 时使用静态离线页面；普通短回答不附文件。用户明确要解释或未执行建议的 HTML/MD 文件时，无业务事实也可按所选格式生成，不能因此多查数据。同时要求 MD 和 HTML 仍先询问格式。文件与正文分别保存平台回执，缺少任何必需部分都不记为完整送达。单文件超过 400,000 字节时按整行或章节拆成标号文件；单行、字段或章节仍放不下时给预览并说明未完整交付。生产审批卡独立先发，参考数据失败不影响已确认材料的批准。真实模型、飞书和客户端尚待验收；代码合入不代表已经部署。使用、留存和手动补发见[报告文件说明](deploy/OPERATIONS.md#飞书报告文件)，契约见[ARCHITECTURE §7](ARCHITECTURE.md#result-delivery)。
 
+**自主调查与普通消息（本地候选）。** 连续模型段落使用轻量区域身份；引用的大明细原位折叠，未引用的必交结果从“其余结果”展开，范围与截断默认可见。展开面板和附件保留获准内容，模型文字仍是分析或建议。代码草稿局部保持原文，其余段落继续排版。飞书进度在单聊约 2 秒、指定群约 5 秒后显示，只按真实状态变化尽力更新；短任务没有过程卡，异常可能留下旧卡，正式结果承担交付。真实 Agent、客户端折叠/复制、平台权限及限频由后续公司环境验收，详见[实施与验证](docs/superpowers/plans/2026-10-20-agent-autonomy-progress.md)。
+
 **模型自主报告（本地候选）。** 显式报告由同一个 Agent 通过原有文字/事实块组织：MD 原生显示标题、列表和表格；HTML 支持独立片段和受限内联样式，分析与代码生成的可信事实就近排列。主消息提取可读预览，不发送布局源码；报告指南随包按飞书渠道加载，无 StarRocks 目标也可用。文字仍受 16,000 字节和模型输出 token 限制；脚本、外部资源和任意网页执行不开放。新回答按可信版本 3 保存，旧版本/已绑定附件保持原语义；不改模型输出 schema 或数据库 v12。离线 SDK/治理/存储及 Chrome 检查不能证明真实模型的报告质量、真实飞书实收或部署效果，见[实施计划](docs/superpowers/plans/2026-10-19-model-authored-reports.md)。
 
 **监控曲线。** 暂不实现，监控结果以文本/表格交付。[计划 D4.0](docs/superpowers/plans/2026-10-14-result-delivery-documents.md#d40-协议前置结果与最小修订提案2026-10-15)保留已完成的协议核验、反例与候选路径对比，供以后明确重启时参考。
@@ -158,6 +160,14 @@ docker compose -p xiaowei-sdk-test -f compose.sdk-test.yml down -v
 ```
 
 `SDK_TEST_POSTGRES_URL` 只能是上面这一个测试地址；未设置时数据库用例明确失败而不是跳过。CI 的 integration job 以同样方式运行完整测试。
+
+自主调查与普通消息沿[同一 T1–T5 样例](docs/superpowers/plans/2026-10-20-agent-autonomy-progress.md)验收。已有交互评测脚本增加 `autonomy` 集：T1/普通消息订单统计、T2 慢查询候选和 T4 缺环境，复用正式 runtime、治理及合成数据；T3 部分监控源失败复用 `test_monitoring_read_recovery.py` 的正式入口。离线夹具的基础订单聚合使用内存 SQLite，不能证明 StarRocks 方言或优化器行为。获得模型 Profile 和费用授权后，在交互终端设置 `XW_EVAL_PROFILE` 为其文件绝对路径，再运行以下命令；本轮没有可用真实模型，尚未执行此评测：
+
+```bash
+uv run --locked --extra dev python -m scripts.dialogue_real_model --profile "$XW_EVAL_PROFILE" --suite autonomy --repeats 3
+```
+
+脚本记录选择、I/O、耗时和可取得的用量，逐项人工核对结论、取证、澄清及限制；不以固定调用顺序或脚本模型通过代替 Agent 能力验收。SQLite 不支持的合法 StarRocks 语法（例如带 INTERVAL 的 DATE_SUB）记为“替身不支持”，不能计为 Agent 失败或要求模型改用固定 SQL；在实际 StarRocks 上复核。T3 及实际飞书效果仍在获准的目标环境按同一业务样例验收。
 
 P3-A 与 P3-B 已经独立审查并合入；精简发行包、两容器 Compose、配置预检、首次初始化与停止步骤见 [deploy/OPERATIONS.md](deploy/OPERATIONS.md)。小维连接已有 StarRocks 和模型 API，不要求在服务器部署模型；应用配置、`.env`、CA 与 PostgreSQL 命名卷由操作者保留。amd64 发行包自带应用镜像文件（`docker load` 导入，不需要镜像仓库）；公司服务器与真实服务验收仍待 P3-C。正式镜像使用 `Dockerfile.runtime`，部署使用 `deploy/compose.yaml`；根目录 `compose.sdk-test.yml` 只供隔离测试。
 

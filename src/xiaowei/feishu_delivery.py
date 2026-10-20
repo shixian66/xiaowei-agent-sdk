@@ -50,7 +50,8 @@ def _message_part(
 
 
 def _preview(
-    delivery: Delivery, max_chars: int, chat_id: str, reply_to: str | None, notice: str
+    delivery: Delivery, max_chars: int, chat_id: str, reply_to: str | None, notice: str,
+    *, attachment: bool = False,
 ) -> Message:
     # 复用渲染器的整行预览：回答优先，预览范围与“结果行未展示”出自同一预算，不先截事实。
     # 交付说明是代码说明，放在系统说明区，不与模型文字拼进同一段。
@@ -59,7 +60,8 @@ def _preview(
     )
     try:
         message = build_feishu_message(
-            candidate, max_chars, chat_id, reply_to=reply_to, platform_limits=True
+            candidate, max_chars, chat_id, reply_to=reply_to,
+            platform_limits=True, attachment_preview=attachment,
         )
     except (MessageCapacityError, ValueError):
         message = None
@@ -120,7 +122,9 @@ def _data_parts(
                 )
             }
         )
-    body = _preview(preview, max_chars, chat_id, reply_to, "本次完整结果见附件。")
+    body = _preview(
+        preview, max_chars, chat_id, reply_to, "本次完整结果见附件。", attachment=True
+    )
     parts = [
         DeliveryPart(sequence + index, report.format, report.content)
         for index, report in enumerate(reports)

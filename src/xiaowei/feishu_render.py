@@ -4,7 +4,7 @@ JSON 2.0 要求客户端 >=7.20。纯文本表格最多五个，额外/宽表用
 折叠文字均计入预算。完整 HTTP 请求预算包括 SDK 的内层 JSON 字符串与外层再次转义。
 
 来源区分：事实、动作、补全结果与系统说明是代码生成的组件；模型文字只经白名单格式器转换，
-在含任何代码内容的卡片中由代码加注“模型说明”标签。post 只用于纯模型文字；模型文字伴随任何
+由代码按区域标为“AI 分析与建议”或“系统事实”。post 只用于纯模型文字；模型文字伴随任何
 代码说明时用卡片分区，代码说明与模型文字不在同一 post 或纯文本中混排。
 """
 
@@ -22,13 +22,20 @@ MAX_REQUEST_BYTES: Final = 30_000
 CAPACITY_NOTICE: Final = "结果未展示：单消息容量不足。可缩小问题范围后重新提问；本次仅发送此说明。"
 FACTS_CLIPPED: Final = "事实展示已截断，未展示全部结果。"
 ANALYSIS_CLIPPED: Final = "模型说明展示已截断，未展示全部模型说明。"
-MODEL_TEXT_LABEL: Final = "模型说明（未经系统核实）"
+MODEL_TEXT_LABEL: Final = "AI 分析与建议"
+FACT_LABEL: Final = "系统事实"
 REMAINING_LABEL: Final = "其余结果（系统补全本轮获准结果）"
 TEXT_CLIPPED: Final = "（内容超过单消息上限，已截断）"
 BRIEF_ORIGINAL_OMITTED: Final = "获准原文未展示（单消息容量限制）；如需原文请明确提出。"
 RAW_OMITTED: Final = "原文 JSON 与上方展示的值逐项一致，未重复展示；如需原文可要求 MD/HTML 文件。"
 _TECHNICAL = frozenset({"sql", "row_count", "elapsed_ms", "next_cursor"})
 _PAGED = frozenset({"local/list_databases", "local/list_tables", "local/describe_table"})
+_ACTUAL_SQL = frozenset({"local/run_readonly_query", "local/explain_query"})
+# 现有监控投影中的范围/分页/限制字段（runtime 的公开工具契约）；不能随结果值收起。
+_VISIBLE_LIMITS = frozenset({
+    "start_time", "end_time", "step", "warnings", "from", "to", "timeRange",
+    "limit", "offset", "page", "total", "hasMore",
+})
 _ACTION_LABELS = {
     "action_id": "Action ID",
     "action": "动作",
@@ -113,7 +120,7 @@ def _raw_redundant(fact: DeliveryFact) -> bool:
     if any(display_text(name) != name or "\n" in name or ": " in name for name in names):
         return False  # 转义或“名: 值”文字排版可能使不同名称显示相同
     # 实际 SQL 与 DDL 直接以文字展示：必须是字符串，且显示转义不改写（如 U+2028 与字面 \u2028）。
-    if fact.tool_id == "local/run_readonly_query":
+    if fact.tool_id in _ACTUAL_SQL:
         sql = fact.metadata.get("sql")
         if not isinstance(sql, str) or display_text(sql) != sql:
             return False
@@ -149,6 +156,31 @@ def _data(fact: DeliveryFact) -> tuple[tuple[str, ...], tuple[dict[str, JsonScal
     # 非表格 MCP/标量结果也展示获准事实，技术字段留在折叠区。
     rows = tuple({"字段": k, "值": v} for k, v in fact.metadata.items() if k not in _TECHNICAL)
     return ("字段", "值"), rows
+
+
+def _row_text(fact: DeliveryFact, rows: Sequence[dict[str, JsonScalar]]) -> str:
+    columns, _ = _data(fact)
+    return "\n\n".join(
+        f"第 {index} 行\n" + "\n".join(
+            str(row[name]) if name == "ddl" and fact.tool_id == "local/show_create_table"
+            else f"{name}: {_cell(row, name)}"
+            for name in columns
+        )
+        for index, row in enumerate(rows, 1)
+    )
+
+
+def _fold_details(fact: DeliveryFact) -> bool:
+    """只决定展开密度，不限制结果；动作与历史摘要沿既有契约。
+
+    十行沿现有表格 page_size；2 KiB 文本避免单行长 SQL/监控值铺满正文。
+    请求是否容纳仍按最终组件及字节试排，折叠没有压缩或删减内容。
+    """
+    if fact.section == "action" or fact.view == "brief":
+        return False
+    _, rows = _data(fact)
+    details = _row_text(fact, rows) + "\n" + str(fact.metadata.get("sql", ""))
+    return fact.section == "remaining" or len(rows) > 10 or len(details.encode()) > 2048
 
 
 def request_bytes(message: Message, chat_id: str, *, reply_to: str | None = None) -> int:
@@ -209,6 +241,8 @@ def _card(
     formatted: bool = False,
     raw_hidden: AbstractSet[int] = frozenset(),
     preview: bool = False,
+    folded: AbstractSet[int] = frozenset(),
+    attachment: bool = False,
 ) -> Message:
     """系统说明 → 动作区域 → 正文（模型块顺序）→ 其余结果 → 折叠依据。
 
@@ -216,11 +250,16 @@ def _card(
     """
     elements: list[Message] = [_div(notice) for notice in delivery.notices]
     tables = 0
+    region: str | None = None
+    row_details: dict[int, str] = {}
     index_of = {fact.evidence_id: i for i, fact in enumerate(delivery.facts)}
 
     def fact_elements(index: int) -> None:
-        nonlocal tables
+        nonlocal tables, region
         fact = delivery.facts[index]
+        if region != fact.section:
+            elements.append(_div("动作材料" if fact.section == "action" else FACT_LABEL))
+        region = fact.section
         columns, all_rows = _data(fact)
         rows = all_rows[: counts[index]]
         if fact.requires_complete:
@@ -259,13 +298,48 @@ def _card(
                 text = display_text(value) if isinstance(value, str) else _cell({key: value}, key)
                 elements.append(_div(f"{_ACTION_LABELS.get(key, key)}：{text}"))
             return
-        if fact.columns:
+        visible_metadata = {
+            key: value for key, value in fact.metadata.items()
+            if key not in _TECHNICAL and (
+                (bool(fact.columns) and value is not None)
+                or (index in folded and key in _VISIBLE_LIMITS)
+            )
+        }
+        if visible_metadata:
             elements.extend(
                 _div(f"{key}: {_cell({key: value}, key)}")
-                for key, value in fact.metadata.items()
-                if key not in _TECHNICAL and value is not None
+                for key, value in visible_metadata.items()
             )
         elements.extend(_div(notice) for notice in fact_limit_notices(fact))
+        if index in folded:
+            # 标题、范围、固定限制保持在主消息；完整行与依据合用一个面板。
+            amount = (
+                f"本次返回 {len(all_rows)} 行" if fact.columns else f"共 {len(all_rows)} 个字段"
+            )
+            elements.append(
+                _div(amount + ("；明细与查询信息见附件。" if attachment else "；展开查看明细。"))
+            )
+            if not attachment:
+                detailed_rows = rows if fact.columns else tuple(
+                    row for row in rows if row["字段"] not in visible_metadata
+                )
+                shown = len(rows) if fact.columns else len(
+                    {row["字段"] for row in rows} | visible_metadata.keys()
+                )
+                row_details[index] = _row_text(fact, detailed_rows) or (
+                    "（无数据行）" if not all_rows else (
+                        "字段已在上方展示。" if shown == len(all_rows)
+                        else "结果行未展示。" if fact.columns else "结果字段未展示。"
+                    )
+                )
+                if fact.tool_id in _ACTUAL_SQL and index not in sqls:
+                    elements.append(_div("SQL 未展示。"))
+                if omissions and shown < len(all_rows):
+                    elements.append(_div(
+                        f"展示 {shown}／本次返回 {len(all_rows)} 行" if fact.columns
+                        else f"展示 {shown}／共 {len(all_rows)} 个字段"
+                    ))
+            return
         if fact.tool_id == "local/run_readonly_query" and index not in sqls:
             elements.append(_div("SQL 未展示。"))
         if omissions and fact.view != "brief" and len(rows) < len(all_rows):
@@ -324,20 +398,18 @@ def _card(
         if fact.section == "action":
             fact_elements(index)
     shown_texts = 0
-    labelled = False
     for block in delivery.blocks:
         if isinstance(block, DeliveryFactRef):
             # 拆分发送时动作材料已独立成分项，本消息不含它；其余事实都在本消息中。
             if block.evidence_id in index_of:
-                labelled = False
                 fact_elements(index_of[block.evidence_id])
             continue
         if shown_texts >= len(texts):
             continue
-        if not labelled:
+        if region != "model":
             # 代码加注的来源标签：模型文字不能移除，也不能借文字取得事实区域的身份。
             elements.append(_div(MODEL_TEXT_LABEL))
-            labelled = True
+            region = "model"
         text = texts[shown_texts]
         elements.extend(format_prose(display_text(text)) if formatted else [_div(text)])
         shown_texts += 1
@@ -354,8 +426,8 @@ def _card(
         for index in remaining:
             fact_elements(index)
     if omissions and any(
-        not f.requires_complete and n < len(_data(f)[1])
-        for f, n in zip(delivery.facts, counts, strict=True)
+        not f.requires_complete and n < len(_data(f)[1]) and not (attachment and i in folded)
+        for i, (f, n) in enumerate(zip(delivery.facts, counts, strict=True))
     ):
         elements.append(_div(FACTS_CLIPPED))
     for index, fact in enumerate(delivery.facts):
@@ -370,12 +442,14 @@ def _card(
         ]
         if fact.note_summary and fact.note:
             details.append(_div(fact.note))
+        if index in row_details:
+            details.append(_div(row_details[index]))
         if index in sqls:
             details.append(_div(f"实际 SQL:\n{fact.metadata['sql']}"))
-        if index in technical:
+        if index in technical and not (attachment and index in folded):
             for key, value in fact.metadata.items():
                 if key in _TECHNICAL and not (
-                    key == "sql" and fact.tool_id == "local/run_readonly_query"
+                    key == "sql" and fact.tool_id in _ACTUAL_SQL
                 ):
                     label = "结构采集 SQL 模板" if key == "sql" and fact.tool_id in _PAGED else key
                     details.append(_div(f"{label}: {_cell({key: value}, key)}"))
@@ -383,7 +457,7 @@ def _card(
                 # 只有可由可见值无损替代的原文才会列入 raw_hidden，并如实说明是主动省略。
                 # 只在本卡完整展示该事实（全部行与实际 SQL）时才算重复，否则不能称“逐项一致”。
                 complete = counts[index] >= len(_data(fact)[1]) and (
-                    fact.tool_id != "local/run_readonly_query" or index in sqls
+                    fact.tool_id not in _ACTUAL_SQL or index in sqls
                 )
                 details.append(
                     _div(RAW_OMITTED)
@@ -397,7 +471,8 @@ def _card(
                     "expanded": False,
                     "header": {
                         "title": _plain(
-                            f"查看依据 · {delivery.result_label(fact.evidence_id)}"
+                            ("查看明细与依据" if index in row_details else "查看依据")
+                            + f" · {delivery.result_label(fact.evidence_id)}"
                             + (" · 获准原文与查询信息" if fact.view == "brief" else "")
                         )
                     },
@@ -406,7 +481,12 @@ def _card(
             )
     elements.extend(_basis_panels(delivery.basis))
     return _static_card(
-        elements, "小维 · 工具结果" if any(f.requires_complete for f in delivery.facts) else "小维"
+        elements,
+        (
+            "小维 · 工具结果"
+            if any(f.requires_complete for f in delivery.facts)
+            else "小维 · AI 运维助手"
+        ),
     )
 
 
@@ -471,6 +551,7 @@ def build_feishu_message(
     max_bytes: int = MAX_REQUEST_BYTES,
     allow_preview: bool = True,
     platform_limits: bool = False,
+    attachment_preview: bool = False,
 ) -> Message:
     """生成受控 post 或结果卡片：必要提醒、回答、完整事实与折叠依据。
 
@@ -585,13 +666,21 @@ def build_feishu_message(
         formatted = prose_message(raw[:low], clipped=True, formatted=True)
         return formatted if fits(formatted) else clipped
 
-    totals = [len(_data(f)[1]) for f in delivery.facts]
+    folded = frozenset(
+        i for i, fact in enumerate(delivery.facts) if platform_limits and _fold_details(fact)
+    )
+    # 附件已接收完整 Delivery，主消息不再复制被收起的大段原值。
+    totals = [
+        0 if attachment_preview and i in folded else len(_data(f)[1])
+        for i, f in enumerate(delivery.facts)
+    ]
     # 动作区域的事实不预览截断：要么完整展示，要么本消息放不下。
     fixed = {i for i, f in enumerate(delivery.facts) if f.section == "action"}
     all_sql = {
         i
         for i, f in enumerate(delivery.facts)
-        if f.tool_id == "local/run_readonly_query" and isinstance(f.metadata.get("sql"), str)
+        if f.tool_id in _ACTUAL_SQL and isinstance(f.metadata.get("sql"), str)
+        and not (attachment_preview and i in folded)
     }
     all_technical = set(range(len(delivery.facts)))
     hidden = (
@@ -619,6 +708,8 @@ def build_feishu_message(
             formatted=formatted,
             raw_hidden=hidden,
             preview=platform_limits,
+            folded=folded,
+            attachment=attachment_preview,
         )
 
     full = card(totals, all_sql, delivery.texts, all_technical)

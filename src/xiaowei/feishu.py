@@ -110,6 +110,7 @@ from xiaowei.image_input import (
     validate_image,
 )
 from xiaowei.models import Delivery
+from xiaowei.progress import Progress
 
 logger = logging.getLogger(__name__)
 
@@ -624,6 +625,8 @@ class FeishuGateway:
         bot_open_id: BotOpenId = lambda: None,
         download_resource: DownloadResource | None = None,
         upload_file: UploadFile | None = None,
+        progress_create: Callable[[str, Message, str | None], Awaitable[str | None]] | None = None,
+        progress_update: Callable[[str, Message], Awaitable[bool]] | None = None,
     ) -> None:
         if config.consumer_count > service.max_concurrent_turns:
             raise ValueError("consumer_count 不得超过应用的全局并发上限")
@@ -638,6 +641,10 @@ class FeishuGateway:
         self._bot = bot_open_id
         self._download_resource = download_resource
         self._upload_file = upload_file
+        self._progress_create = progress_create
+        self._progress_update = progress_update
+        self._progress_slots = asyncio.Semaphore(service.max_concurrent_turns)
+        self._progress_tasks: set[asyncio.Task[None]] = set()
         self._readiness = service.results.store.readiness
         # 尚未开始的群请求（含下一条将运行的队头）都留在群 FIFO 中，始终受等待期限管理。群空闲且
         # 队头的排队提示尝试已结束时，共享队列中放入一个“群可运行”标记（None，另占一个保留槽，
@@ -862,6 +869,10 @@ class FeishuGateway:
                     group.create_task(self._sweep(self._config.group.wait_check_seconds))
         finally:
             self._tasks = None
+            for task in tuple(self._progress_tasks):
+                task.cancel()
+            if self._progress_tasks:
+                await asyncio.gather(*self._progress_tasks, return_exceptions=True)
             if (
                 not self._queue.empty()
                 or self._group_waiting
@@ -1065,17 +1076,27 @@ class FeishuGateway:
                     continue  # 标记已无可运行的队头
                 if item is not None:
                     self._plain -= 1
+                progress = self._progress_for(job)
+                observe = {} if progress is None else {"progress": progress}
                 try:
+                    record = None
                     try:
                         if job.action_id is None:
-                            await self._service.process(job.receipt)
+                            record = await self._service.process(job.receipt, **observe)
                         else:
-                            await self._service.approve(
-                                job.receipt, job.action_id, approve=job.approve
+                            record = await self._service.approve(
+                                job.receipt, job.action_id, approve=job.approve, **observe
                             )
                     except ResultNotSavedError:
                         pass  # 保存失败路径已处理状态；下方投递仍需就绪与权限复核
-                    await self._deliver(job)
+                    if progress is not None:
+                        progress.mark("delivery")
+                    outcome = await self._deliver(job)
+                    if progress is not None:
+                        if outcome == "sent" and record is not None and record.state == "paused":
+                            progress.finish("approval")
+                        else:
+                            progress.finish("sent" if outcome == "sent" else "unsent")
                 except asyncio.CancelledError:
                     # 本条可能已保存却未落定投递：不再开放新工作，交给重启恢复。
                     self._readiness.lock("feishu_consumer_cancelled")
@@ -1085,6 +1106,12 @@ class FeishuGateway:
                 except Exception:
                     self._readiness.lock("feishu_consumer_failed")
                     raise
+                finally:
+                    if progress is not None and progress.task is not None:
+                        if not progress.finished:
+                            progress.stop()
+                        self._progress_tasks.add(progress.task)
+                        progress.task.add_done_callback(self._progress_tasks.discard)
                 if task is not None and task.cancelling():
                     # 取消已到达，却被下层转换成了普通失败（本条已按失败处理）：不交接下一条、不创建
                     # 到期任务（任务组正在关闭），也不再取下一项；剩余请求交给重启恢复。
@@ -1098,7 +1125,18 @@ class FeishuGateway:
             finally:
                 self._queue.task_done()
 
-    async def _deliver(self, job: _Job) -> None:
+    def _progress_for(self, job: _Job) -> Progress | None:
+        create, update = self._progress_create, self._progress_update
+        if create is None or update is None:
+            return None
+        return Progress(
+            lambda card: create(job.chat_id, card, job.reply_to),
+            update,
+            grouped=job.receipt.group is not None,
+            slots=self._progress_slots,
+        )
+
+    async def _deliver(self, job: _Job) -> SendOutcome | None:
         """首次发送：结果已决定不交付时只记录；投递状态未能落定时锁低 readiness 并原样传播。"""
 
         transmit = partial(
@@ -1115,13 +1153,14 @@ class FeishuGateway:
             outcome = await self._service.results.send(job.ref, transmit)
         except _WITHHELD as exc:
             logger.warning("飞书结果不交付：%s", type(exc).__name__)
-            return
+            return None
         except BaseException:
             # 结果可能仍是 completed/pending，且回复目的地只在本进程内：不能以正常状态继续接活。
             self._readiness.lock("feishu_delivery_unsettled")
             raise
         if outcome is not None and outcome != "sent":
             logger.warning("飞书结果发送未成功：%s", outcome)
+        return outcome
 
     async def _new_session(self, message: _Message) -> None:
         if not self._first(message):
@@ -1216,6 +1255,8 @@ def _trim(index: OrderedDict[Any, Any]) -> None:
 
 class LarkChannel(Protocol):
     """``LarkTransport`` 使用的 ``FeishuChannel`` 公开方法。"""
+
+    client: Any
 
     def on(self, name: str, handler: Callable[..., Any]) -> Callable[[], None]: ...
 
@@ -1377,6 +1418,73 @@ class LarkTransport:
         return (
             result if uuid is not None and isinstance(result, SendResult) else send_outcome(result)
         )
+
+    async def create_progress(
+        self, chat_id: str, message: Message, reply_to: str | None
+    ) -> str | None:
+        """独立观察任务负责期限；在高层归一化前核对 code 和创建 ID。"""
+        from lark_channel.api.im.v1.model.create_message_request import CreateMessageRequest
+        from lark_channel.api.im.v1.model.create_message_request_body import (
+            CreateMessageRequestBody,
+        )
+        from lark_channel.api.im.v1.model.reply_message_request import ReplyMessageRequest
+        from lark_channel.api.im.v1.model.reply_message_request_body import ReplyMessageRequestBody
+
+        content = json.dumps(message["card"], ensure_ascii=False)
+        messages = self._channel.client.im.v1.message
+        if reply_to is not None:
+            request = (
+                ReplyMessageRequest.builder()
+                .message_id(reply_to)
+                .request_body(
+                    ReplyMessageRequestBody.builder()
+                    .content(content)
+                    .msg_type("interactive")
+                    .build()
+                )
+                .build()
+            )
+            sending = messages.areply(request)
+        else:
+            request = (
+                CreateMessageRequest.builder()
+                .receive_id_type("chat_id")
+                .request_body(
+                    CreateMessageRequestBody.builder()
+                    .content(content)
+                    .msg_type("interactive")
+                    .receive_id(chat_id)
+                    .build()
+                )
+                .build()
+            )
+            sending = messages.acreate(request)
+        response = await asyncio.wrap_future(self._channel.schedule(sending))
+        code = getattr(response, "code", None)
+        message_id = getattr(getattr(response, "data", None), "message_id", None)
+        if type(code) is int and code == 0 and isinstance(message_id, str) and message_id:
+            return message_id
+        return None
+
+    async def update_progress(self, message_id: str, message: Message) -> bool:
+        """在 SDK 归一化前检查公开 PATCH 响应，不把缺失 code 当成功。"""
+        from lark_channel.api.im.v1.model.patch_message_request import PatchMessageRequest
+        from lark_channel.api.im.v1.model.patch_message_request_body import PatchMessageRequestBody
+
+        request = (
+            PatchMessageRequest.builder()
+            .message_id(message_id)
+            .request_body(
+                PatchMessageRequestBody.builder()
+                .content(json.dumps(message["card"], ensure_ascii=False))
+                .build()
+            )
+            .build()
+        )
+        future = self._channel.schedule(self._channel.client.im.v1.message.apatch(request))
+        response = await asyncio.wrap_future(future)
+        code = getattr(response, "code", None)
+        return type(code) is int and code == 0
 
     async def upload_file(self, report: ReportFile) -> str:
         """用 SDK 公开上传接口上传有界报告；超时后结果未知，由请求状态禁止再上传。"""

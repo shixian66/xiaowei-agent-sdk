@@ -12,7 +12,6 @@ ChannelService、Web 与飞书适配器）+ 隔离的真实 PostgreSQL。只替�
 
 import asyncio
 import json
-import re
 from dataclasses import dataclass
 from typing import Any
 
@@ -23,7 +22,7 @@ from tests.p1b.test_starrocks_adapter import TARGET as SR
 from tests.sdk_core.gate0 import INJECTION, PLAN_LINES, SyntheticStarRocks
 from tests.sdk_core.test_app import ModelCall, answer, cite, clarify, evidence_in, tool_call
 from tests.sdk_core.test_feishu import FakeChannel
-from tests.sdk_core.test_feishu_render import tables, text_parts
+from tests.sdk_core.test_feishu_render import text_parts
 from tests.sdk_core.test_runtime import (
     Env,
     Served,
@@ -37,7 +36,7 @@ from tests.sdk_core.test_starrocks_tools import RecordingScripts, tool_outputs
 
 from xiaowei import runtime
 from xiaowei.app import DEFAULT_INSTRUCTIONS, TargetInfo, _instructions
-from xiaowei.feishu_render import _elements, request_bytes
+from xiaowei.feishu_render import MODEL_TEXT_LABEL, _elements, request_bytes
 from xiaowei.models import AUDIENCES
 from xiaowei.sqlguard import guard_explain_query
 from xiaowei.starrocks import EXPLAIN_PREFIX
@@ -240,7 +239,8 @@ async def test_slow_query_to_plan_and_layout(diag: Env, channel: str) -> None:
         assert any(line.endswith(". 模型说明") for line in content)
         assert any("未经系统核实" in line for line in content)
     else:
-        assert any(ANALYSIS_HEADER in line for line in content)
+        label = MODEL_TEXT_LABEL if channel == "feishu" else ANALYSIS_HEADER
+        assert any(label in line for line in content)
     assert "全表扫描 30 个分区" in reply.content
     # 固定说明只在交付中出现：模型收到的工具结果不含它们，限制表达由诊断指令要求。
     for output in tool_outputs(env.scripts.calls[message][-1]):
@@ -312,7 +312,8 @@ async def test_previous_query_is_explained_without_running_it_again(
         assert any(line.endswith(". 模型说明") for line in content)
         assert any("未经系统核实" in line for line in content)
     else:
-        assert any(ANALYSIS_HEADER in line for line in content)
+        label = MODEL_TEXT_LABEL if channel == "feishu" else ANALYSIS_HEADER
+        assert any(label in line for line in content)
     if reply.facts is not None:
         query, columns, plan = reply.facts
         assert [query["tool_id"], plan["tool_id"]] == [RUN_QUERY, EXPLAIN_QUERY]
@@ -355,7 +356,7 @@ async def test_audit_only_answer_when_the_plan_is_rejected(diag: Env, channel: s
     # 保留审计事实并照常给出分析；没有计划事实与计划说明，也不是澄清。
     notes = [line.removeprefix("说明：") for line in content]
     assert AUDIT_NOTE in notes and PLAN_NOTE not in notes
-    assert ANALYSIS_HEADER in content
+    assert (MODEL_TEXT_LABEL if channel == "feishu" else ANALYSIS_HEADER) in content
     assert not any("需要澄清" in line for line in content)
     if reply.facts is not None:
         assert [f["tool_id"] for f in reply.facts] == [SLOW_QUERIES]
@@ -490,7 +491,7 @@ async def test_instructions_inside_audit_sql_and_plans_change_nothing(
         # 原文可含换行；它只能是纯文本单元格，不能新增分析组件或驱动 Agent 执行。
         assert (
             sum(
-                t["tag"] == "div" and t.get("text", {}).get("content") == ANALYSIS_HEADER
+                t["tag"] == "div" and t.get("text", {}).get("content") == MODEL_TEXT_LABEL
                 for t in reply.card["card"]["body"]["elements"]
             )
             == 1
@@ -562,9 +563,8 @@ async def feishu_diagnosis(env: Env, plan: tuple[str, ...]) -> tuple[Reply, str]
     return reply, ", ".join(evidence_in(final))
 
 
-async def test_feishu_preview_answers_first_then_whole_fact_rows_at_real_caps(diag: Env) -> None:
-    # 2026-10-16 用户确认：新语义转附件时正文先给回答，再按剩余容量放整行事实；
-    # 旧“事实优先”只约束 v0 请求。完整事实在附件中。
+async def test_feishu_preview_keeps_large_details_only_in_files(diag: Env) -> None:
+    # M1b：附件正文先给回答与限制，大明细不在预览中重复，完整事实在附件中。
     # 计划足够长（不超过投影的 500 行），完整结果超过飞书单消息 30,000 字节，才需要附件与预览。
     plan = tuple(f"    - EXCHANGE SHUFFLE[{i}] => [2:region, 3:total]" for i in range(480))
     reply, cited = await feishu_diagnosis(diag, plan)
@@ -579,14 +579,12 @@ async def test_feishu_preview_answers_first_then_whole_fact_rows_at_real_caps(di
     # 完整文件保留分析及其引用的每条证据。
     labels = [f"结果 {n}" for n in range(1, len(cited.split(", ")) + 1)]
     assert all(label in reply.content for label in labels) and "ev_" not in reply.content
-    # 两条事实的来源行与说明行都保留，计划行从前往后保留、末尾的被截掉。
+    # 文件中两条事实的来源与必要说明保留，全部计划行完整交付。
     assert reply.content.count("来源 ") == 2
     assert f"说明：{AUDIT_NOTE}" in content and f"说明：{PLAN_NOTE}" in content
-    plan_table = tables(reply.card)[1]
-    kept = [row["c0"] for row in plan_table["rows"]]
-    assert 0 < len(kept) < len(plan)
-    assert kept == ['"' + row + '"' for row in plan[: len(kept)]]
-    assert re.search(rf"预览 {len(kept)}／本次返回 \d+ 行", visible)
+    assert all(row in reply.content for row in plan)
+    assert "EXCHANGE SHUFFLE" not in "\n".join(text_parts(reply.card))
+    assert "明细与查询信息见附件" in visible
 
 
 async def test_feishu_cut_with_forged_headers_uses_only_structured_sections(diag: Env) -> None:

@@ -1888,6 +1888,8 @@ async def _start_feishu(
         bot_open_id=transport.bot_open_id,
         download_resource=downloader,
         upload_file=transport.upload_file,
+        progress_create=transport.create_progress,
+        progress_update=transport.update_progress,
     )
     consumers = asyncio.create_task(gateway.run(), name="xiaowei-feishu")
     starting = asyncio.create_task(transport.start(gateway.receive), name="xiaowei-feishu-start")

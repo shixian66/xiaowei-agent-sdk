@@ -112,13 +112,13 @@ def test_facts_visible_once_analysis_multiline_and_details_folded() -> None:
     assert "ev_original" not in "\n".join(text_parts(message))
     assert "依据：结果 1 · 来源" in "\n".join(text_parts(message))
     assert source.note in visible
-    assert "模型说明（未经系统核实）" in visible and "第一行\n第二行" in visible
+    assert "AI 分析与建议" in visible and "第一行\n第二行" in visible
     assert visible.count('"orders"') == 1
     assert "SELECT name" not in visible and "next_cursor" not in visible
     all_text = "\n".join(text_parts(message))
     assert "SELECT name FROM shop.orders LIMIT 5" in all_text
     assert "依据：结果 1 · 来源" in all_text and "ev_original" not in all_text
-    assert visible.index("模型说明") < visible.index('"orders"')
+    assert visible.index("AI 分析与建议") < visible.index('"orders"')
     assert "旧转义文字" not in all_text
 
 
@@ -432,7 +432,7 @@ def test_monitoring_failure_notice_is_visible_in_fact_card_and_advice() -> None:
     # 代码说明与模型文字同时出现时用分区卡片，不进同一 post。
     assert "card" in text_message
     visible = text_parts(text_message, folded=False)
-    assert visible.index(notice) < visible.index("模型说明（未经系统核实）")
+    assert visible.index(notice) < visible.index("AI 分析与建议")
     assert "未经数据验证：检查采集端。" in visible
 
 

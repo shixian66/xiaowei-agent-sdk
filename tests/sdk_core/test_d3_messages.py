@@ -38,7 +38,7 @@ def test_answer_precedes_results_and_sources_are_folded() -> None:
     assert visible.index("先核对业务口径。") < visible.index('"orders"')
     assert source.note in visible  # 未分类限制不能因简化排版而隐藏。
     assert source.evidence_id not in visible and source.captured_at.isoformat() not in visible
-    assert "查看依据" in visible and "模型说明（未经系统核实）" in visible
+    assert "查看依据" in visible and "AI 分析与建议" in visible and "系统事实" in visible
     full = "\n".join(text_parts(message))
     assert source.tool_id in full and source.evidence_id not in full and "依据：结果 1" in full
     assert source.captured_at.isoformat() in full and source.metadata["sql"] in full
