@@ -317,7 +317,7 @@ def test_grafana_summary_registration_and_visible_configuration_label() -> None:
         delivery(source, analysis="找到这个看板。"), 3500, "oc_test", allow_preview=False
     )
     visible = "\n".join(text_parts(message, folded=False))
-    assert "仪表盘配置摘要" in visible and "不是已执行的指标查询" in visible
+    assert "仪表盘配置快照" in visible and "不是实时指标" in visible
     assert "未返回单位/阈值" in visible and "24" in visible
     assert source.tool_id not in visible and policy.fact_note not in visible
     assert policy.fact_note in "\n".join(text_parts(message))
