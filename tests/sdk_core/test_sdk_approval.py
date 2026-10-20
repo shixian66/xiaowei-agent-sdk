@@ -311,9 +311,10 @@ async def test_second_large_file_failure_recovers_only_that_message(actions, sec
         assert [(p.kind, p.send_state) for p in before] == [
             ("md", "sent"),
             ("md", second),
+            ("md", "sent"),
             ("body", "pending"),
         ]
-        assert len(uploads) == 2
+        assert len(uploads) == 3
         assert not any(
             "完整结果见附件" in json.dumps(msg, ensure_ascii=False)
             for _, msg in group.outbox.sent
@@ -334,7 +335,7 @@ async def test_second_large_file_failure_recovers_only_that_message(actions, sec
         assert await env.results.send(ref, transmit, resend=True) == "sent"
         after = await env.store.delivery_parts(record)
         assert all(p.send_state == "sent" and p.message_id for p in after)
-        assert len(uploads) == 2 and len(group.outbox.sent) == sent + 2
+        assert len(uploads) == 3 and len(group.outbox.sent) == sent + 2
         assert isinstance(group.outbox.sent[sent][1], OutboundFile)
         assert uuids[sent] == before[1].uuid == after[1].uuid
         assert "完整结果见附件" in json.dumps(group.outbox.sent[-1][1], ensure_ascii=False)
@@ -372,11 +373,12 @@ async def test_second_large_upload_unknown_blocks_body_and_never_reuploads(actio
         ref = group_ref("om_large_upload_unknown", A)
         record = await env.store.get("feishu", A, GROUP.chat_id, ref.request_id, owner=GROUP.owner)
         before = await env.store.delivery_parts(record)
-        assert len(before) == 3
+        assert len(before) == 4
         assert before[0].send_state == "sent"
         assert before[1].upload_state == "unknown" and before[1].send_state == "pending"
-        assert before[2].kind == "body" and before[2].send_state == "pending"
-        assert len(uploads) == 2
+        assert before[2].kind == "md" and before[2].send_state == "sent"
+        assert before[3].kind == "body" and before[3].send_state == "pending"
+        assert len(uploads) == 3
         sent = len(group.outbox.sent)
         transmit = partial(
             send_delivery,
@@ -390,7 +392,7 @@ async def test_second_large_upload_unknown_blocks_body_and_never_reuploads(actio
             resend=True,
         )
         assert await env.results.send(ref, transmit, resend=True) == "unknown"
-        assert len(uploads) == 2
+        assert len(uploads) == 3
         assert all(
             "完整结果见附件" not in json.dumps(msg, ensure_ascii=False)
             for _, msg in group.outbox.sent[sent:]
@@ -424,7 +426,7 @@ async def test_large_files_sent_but_final_body_failure_resends_only_body(actions
     )
     async with running(
         env,
-        outbox=Outbox(["sent", "sent", "failed"]),
+        outbox=Outbox(["sent", "sent", "sent", "failed"]),
         upload_file=upload,
         max_reply_chars=3500,
     ) as group:
@@ -432,8 +434,8 @@ async def test_large_files_sent_but_final_body_failure_resends_only_body(actions
         ref = group_ref("om_large_body_failed", A)
         record = await env.store.get("feishu", A, GROUP.chat_id, ref.request_id, owner=GROUP.owner)
         before = await env.store.delivery_parts(record)
-        assert [p.send_state for p in before] == ["sent", "sent", "failed"]
-        assert len(uploads) == 2
+        assert [p.send_state for p in before] == ["sent", "sent", "sent", "failed"]
+        assert len(uploads) == 3
         sent = len(group.outbox.sent)
         transmit = partial(
             send_delivery,
@@ -447,7 +449,7 @@ async def test_large_files_sent_but_final_body_failure_resends_only_body(actions
             resend=True,
         )
         assert await env.results.send(ref, transmit, resend=True) == "sent"
-        assert len(uploads) == 2 and len(group.outbox.sent) == sent + 1
+        assert len(uploads) == 3 and len(group.outbox.sent) == sent + 1
         assert not isinstance(group.outbox.sent[-1][1], OutboundFile)
         assert (await env.store.delivery_parts(record))[-1].uuid == before[-1].uuid
 
@@ -488,7 +490,7 @@ async def test_multi_file_delivery_holds_the_following_same_group_request(action
         release.set()
         await asyncio.gather(first, following)
         assert env.model_calls(later) == 1
-        assert uploads == 2
+        assert uploads == 3
 
 
 async def test_resend_still_checks_saved_approval_capacity_before_sending(actions):

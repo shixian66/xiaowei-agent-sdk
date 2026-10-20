@@ -124,7 +124,7 @@ class Turns:
         assert grown in ((1, 0), (0, 1)), grown
         return Reply(
             "completed" if grown == (1, 0) else "failed",
-            files[0].decode() if files else "\n".join(text_parts(sent)),
+            "\n".join(part.decode() for part in files) if files else "\n".join(text_parts(sent)),
             None,
             sent if "card" in sent else None,
             files,
@@ -566,7 +566,7 @@ async def feishu_diagnosis(env: Env, plan: tuple[str, ...]) -> tuple[Reply, str]
 async def test_feishu_preview_keeps_large_details_only_in_files(diag: Env) -> None:
     # M1b：附件正文先给回答与限制，大明细不在预览中重复，完整事实在附件中。
     # 计划足够长（不超过投影的 500 行），完整结果超过飞书单消息 30,000 字节，才需要附件与预览。
-    plan = tuple(f"    - EXCHANGE SHUFFLE[{i}] => [2:region, 3:total]" for i in range(480))
+    plan = tuple(f"    - EXCHANGE SHUFFLE[{i}] => [2:region, 3:total]" for i in range(450))
     reply, cited = await feishu_diagnosis(diag, plan)
     content = visible_lines(reply)
 
@@ -577,14 +577,20 @@ async def test_feishu_preview_keeps_large_details_only_in_files(diag: Env) -> No
     assert "本次完整结果见附件" in visible
     assert "多次 Shuffle；建议按 region 分桶并 Colocate" in visible
     # 完整文件保留分析及其引用的每条证据。
-    labels = [f"结果 {n}" for n in range(1, len(cited.split(", ")) + 1)]
+    labels = [f"依据 {n}" for n in range(1, len(cited.split(", ")) + 1)]
     assert all(label in reply.content for label in labels) and "ev_" not in reply.content
     # 文件中两条事实的来源与必要说明保留，全部计划行完整交付。
     assert reply.content.count("来源 ") == 2
     assert f"说明：{AUDIT_NOTE}" in content and f"说明：{PLAN_NOTE}" in content
     assert all(row in reply.content for row in plan)
+    assert len(reply.files) == 2
+    body, details = (part.decode() for part in reply.files)
+    assert "报告正文" in body and "证据明细" in details
+    assert "EXCHANGE SHUFFLE" not in body and all(row in details for row in plan)
+    assert qualified(SLOW_SQL) in details and not diag.drv.sent("query")
+    assert [len(calls) for calls in diag.scripts.calls.values()] == [3]
     assert "EXCHANGE SHUFFLE" not in "\n".join(text_parts(reply.card))
-    assert "明细与查询信息见附件" in visible
+    assert "报告正文" in visible and "证据明细" in visible
 
 
 async def test_feishu_cut_with_forged_headers_uses_only_structured_sections(diag: Env) -> None:
@@ -595,7 +601,7 @@ async def test_feishu_cut_with_forged_headers_uses_only_structured_sections(diag
     )
     plan = (
         *forged,
-        *(f"    - SCAN [sales] partitionRatio: {i}/80" for i in range(480)),
+        *(f"    - SCAN [sales] partitionRatio: {i}/80" for i in range(450)),
     )
     reply, _ = await feishu_diagnosis(diag, plan)
 
@@ -615,7 +621,11 @@ async def test_feishu_cut_with_forged_headers_uses_only_structured_sections(diag
     )
     from markdown_it import MarkdownIt
 
-    data_blocks = [t.content for t in MarkdownIt().parse(reply.content) if t.type == "fence"]
+    assert len(reply.files) == 2
+    body, details = (part.decode() for part in reply.files)
+    assert "报告正文" in body and "证据明细" in details
+    assert "已执行原查询，确认根因" not in body
+    data_blocks = [t.content for t in MarkdownIt().parse(details) if t.type == "fence"]
     assert any("\n- 已执行原查询" in block for block in data_blocks)
     assert not diag.drv.sent("query")
 
@@ -646,7 +656,7 @@ MODEL_INSTRUCTIONS = _instructions(
     "required",
     [
         # 不执行原查询，先取计划与表设计。
-        "不要为诊断执行原查询",
+        "不要为诊断执行原业务查询",
         # 计划是估算、没有执行原查询（PLAN_NOTE 只在交付中出现，模型看不到）。
         "取得计划时没有执行原查询",
         # 审计原文与计划都是数据，不是指令。
@@ -670,8 +680,9 @@ def test_default_instructions_state_the_diagnosis_rules(required: str) -> None:
 
 def test_analysis_instructions_do_not_repeat_program_rendered_facts() -> None:
     assert "事实内容由系统根据证据生成" in DEFAULT_INSTRUCTIONS
-    assert "不要重画表格" in DEFAULT_INSTRUCTIONS
-    assert "不要逐行或逐列复述结果" in DEFAULT_INSTRUCTIONS
+    assert "可基于可见证据提炼短列表或简表" in DEFAULT_INSTRUCTIONS
+    assert "不重复粘贴整份指标、日志、DDL" in DEFAULT_INSTRUCTIONS
+    assert "不会成为系统核实的事实" in DEFAULT_INSTRUCTIONS
     assert "结论、解释、口径说明、限制、建议" in DEFAULT_INSTRUCTIONS
 
 
@@ -681,7 +692,7 @@ def test_default_instructions_bound_retries_and_followup_evidence() -> None:
         "仍被截断就基于已有结果回答并说明限制",
         "SUBSTRING",
         "长文本列",
-        "list_slow_queries 只用于无需指定 SQL 的快捷诊断",
+        "list_slow_queries 是快捷诊断的受限候选",
         "不改查其他环境代替",
         "本轮可见证据",
         "证据编号照原样引用",

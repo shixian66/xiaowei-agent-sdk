@@ -246,7 +246,7 @@ def _card(
     folded: AbstractSet[int] = frozenset(),
     attachment: bool = False,
 ) -> Message:
-    """系统说明 → 动作区域 → 正文（模型块顺序）→ 其余结果 → 折叠依据。
+    """系统说明 → 动作区域 → 正文与就地依据 → 其余结果；旧 v0 仍将依据置后。
 
     ``texts`` 是本卡展示的正文文字（按顺序，最后一段可能截断）；``counts`` 按 ``facts`` 下标。
     """
@@ -387,46 +387,10 @@ def _card(
                 _div("\n".join(f"{name}: {_cell(row, name)}" for name in columns)) for row in rows
             )
 
-    for index, fact in enumerate(delivery.facts):
-        if fact.section == "action":
-            fact_elements(index)
-    shown_texts = 0
-    for block in delivery.blocks:
-        if isinstance(block, DeliveryFactRef):
-            # 拆分发送时动作材料已独立成分项，本消息不含它；其余事实都在本消息中。
-            if block.evidence_id in index_of:
-                fact_elements(index_of[block.evidence_id])
-            continue
-        if shown_texts >= len(texts):
-            continue
-        if region != "model" and (not preview or shown_texts == 0):
-            # 代码加注的来源标签：模型文字不能移除，也不能借文字取得事实区域的身份。
-            elements.append(_div(MODEL_TEXT_LABEL))
-            region = "model"
-        text = texts[shown_texts]
-        elements.extend(format_prose(display_text(text)) if formatted else [_div(text)])
-        shown_texts += 1
-    if omissions and tuple(texts) != delivery.texts:
-        elements.append(_div(ANALYSIS_CLIPPED))
-    placed = {b.evidence_id for b in delivery.blocks if isinstance(b, DeliveryFactRef)}
-    for index, fact in enumerate(delivery.facts):
-        # 正文事实都应由块放置；任何未被放置的事实仍完整展示，不静默丢弃。
-        if fact.section == "body" and fact.evidence_id not in placed:
-            fact_elements(index)
-    remaining = [i for i, f in enumerate(delivery.facts) if f.section == "remaining"]
-    if remaining:
-        if not preview:
-            elements.append(_div(REMAINING_LABEL))
-        for index in remaining:
-            fact_elements(index)
-    if omissions and any(
-        not f.requires_complete and n < len(_data(f)[1]) and not (attachment and i in folded)
-        for i, (f, n) in enumerate(zip(delivery.facts, counts, strict=True))
-    ):
-        elements.append(_div(FACTS_CLIPPED))
-    for index, fact in enumerate(delivery.facts):
+    def fact_details(index: int) -> None:
+        fact = delivery.facts[index]
         if fact.requires_complete:
-            continue
+            return
         details: list[Message] = [
             _div(
                 f"依据：{delivery.result_label(fact.evidence_id)} · 来源 {fact.tool_id}"
@@ -481,6 +445,52 @@ def _card(
                     "elements": details,
                 }
             )
+
+    def place_fact(index: int) -> None:
+        fact_elements(index)
+        if preview:
+            fact_details(index)
+
+    for index, fact in enumerate(delivery.facts):
+        if fact.section == "action":
+            place_fact(index)
+    shown_texts = 0
+    for block in delivery.blocks:
+        if isinstance(block, DeliveryFactRef):
+            # 拆分发送时动作材料已独立成分项，本消息不含它；其余事实都在本消息中。
+            if block.evidence_id in index_of:
+                place_fact(index_of[block.evidence_id])
+            continue
+        if shown_texts >= len(texts):
+            continue
+        if region != "model" and (not preview or shown_texts == 0):
+            # 代码加注的来源标签：模型文字不能移除，也不能借文字取得事实区域的身份。
+            elements.append(_div(MODEL_TEXT_LABEL))
+            region = "model"
+        text = texts[shown_texts]
+        elements.extend(format_prose(display_text(text)) if formatted else [_div(text)])
+        shown_texts += 1
+    if omissions and tuple(texts) != delivery.texts:
+        elements.append(_div(ANALYSIS_CLIPPED))
+    placed = {b.evidence_id for b in delivery.blocks if isinstance(b, DeliveryFactRef)}
+    for index, fact in enumerate(delivery.facts):
+        # 正文事实都应由块放置；任何未被放置的事实仍完整展示，不静默丢弃。
+        if fact.section == "body" and fact.evidence_id not in placed:
+            place_fact(index)
+    remaining = [i for i, f in enumerate(delivery.facts) if f.section == "remaining"]
+    if remaining:
+        if not preview:
+            elements.append(_div(REMAINING_LABEL))
+        for index in remaining:
+            place_fact(index)
+    if omissions and any(
+        not f.requires_complete and n < len(_data(f)[1]) and not (attachment and i in folded)
+        for i, (f, n) in enumerate(zip(delivery.facts, counts, strict=True))
+    ):
+        elements.append(_div(FACTS_CLIPPED))
+    if not preview:
+        for index in range(len(delivery.facts)):
+            fact_details(index)
     elements.extend(_basis_panels(delivery.basis))
     return _static_card(
         elements,

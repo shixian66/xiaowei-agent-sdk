@@ -7,7 +7,7 @@ from tests.sdk_core.test_feishu_render import delivery, fact, size, tables, text
 
 from xiaowei.feishu_delivery import _data_parts, _preview
 from xiaowei.feishu_render import build_feishu_message
-from xiaowei.models import Delivery, DeliveryFact, DeliveryText
+from xiaowei.models import Delivery, DeliveryFact, DeliveryFactRef, DeliveryText
 
 
 def answer_with(source: DeliveryFact) -> Delivery:
@@ -290,3 +290,33 @@ def test_actions_ignore_brief_including_unprotected_status(complete):
         assert "row-000" in visible and "row-002" in visible
     else:
         assert "实际 SQL" in visible or "sql" in visible
+
+
+@pytest.mark.parametrize("view", ["full", "brief"])
+def test_folded_entry_keeps_its_position_between_model_blocks(view):
+    source = fact(
+        columns=(),
+        rows=(),
+        metadata={"result": "RAW_POSITION_CANARY"},
+        result_json='{"result":"RAW_POSITION_CANARY"}',
+        view=view,
+    )
+    value = delivery(source).model_copy(
+        update={
+            "blocks": (
+                DeliveryText(text="前面的结论"),
+                DeliveryFactRef(evidence_id=source.evidence_id),
+                DeliveryText(text="后面的建议"),
+            )
+        }
+    )
+    message = build_feishu_message(
+        value, 3500, "oc_test", platform_limits=True, allow_preview=False
+    )
+    elements = message["card"]["body"]["elements"]
+    before = next(i for i, e in enumerate(elements) if "前面的结论" in "\n".join(text_parts(e)))
+    panel = next(i for i, e in enumerate(elements) if e["tag"] == "collapsible_panel")
+    after = next(i for i, e in enumerate(elements) if "后面的建议" in "\n".join(text_parts(e)))
+    assert before < panel < after
+    assert "RAW_POSITION_CANARY" not in "\n".join(text_parts(message, folded=False))
+    assert "RAW_POSITION_CANARY" in "\n".join(text_parts(elements[panel]))

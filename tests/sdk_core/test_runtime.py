@@ -715,8 +715,8 @@ async def test_formal_web_executes_requested_audit_sql_with_all_requested_column
         body = response.json()
         assert body["state"] == "completed"
         instructions = env.scripts.calls[message][0].instructions
-        assert "用户提供针对审计表的 SQL 并明确要求执行" in instructions
-        assert "list_slow_queries 只用于无需指定 SQL 的快捷诊断" in instructions
+        assert "可以直接生成 SQL，用 run_readonly_query 查询获准审计表" in instructions
+        assert "list_slow_queries 是快捷诊断的受限候选" in instructions
         (fact,) = body["delivery"]["facts"]
         assert fact["tool_id"] == "local/run_readonly_query"
         assert fact["rows"] == [
@@ -1364,19 +1364,21 @@ async def test_formal_feishu_file_body_receipts_and_failure(env: Env, reject_bod
     )
     async with env.running(env.config(feishu=feishu_config()), feishu_channel=channel) as served:
         channel.emit_raw_from_sdk_thread(feishu_event(env, script, "om_formal_delivery"))
-        await until(lambda: len(channel.sends) >= (3 if reject_body else 2))
+        await until(lambda: len(channel.sends) >= (4 if reject_body else 3))
         async with asyncio.timeout(20):
             while await env.scalar("SELECT delivery FROM xiaowei_request") == "sending":
                 await asyncio.sleep(0.02)
         assert await env.scalar("SELECT delivery FROM xiaowei_request") == (
             "failed" if reject_body else "sent"
         )
-        assert len(channel.uploads) == 1
-        assert await env.scalar("SELECT count(*) FROM xiaowei_delivery_part") == 2
+        assert len(channel.uploads) == 2
+        assert "报告正文" in channel.uploads[0].decode()
+        assert "证据明细" in channel.uploads[1].decode()
+        assert await env.scalar("SELECT count(*) FROM xiaowei_delivery_part") == 3
         assert await env.scalar(
             "SELECT count(*) FROM xiaowei_delivery_part WHERE message_id IS NOT NULL"
-        ) == (1 if reject_body else 2)
-        assert channel.sends[0][2]["uuid"] and channel.sends[1][2]["uuid"]
+        ) == (2 if reject_body else 3)
+        assert all(item[2]["uuid"] for item in channel.sends[:3])
         if reject_body:
             assert "完整结果尚未交付" in json.dumps(channel.sends[-1][1], ensure_ascii=False)
         assert await served.finish() == 0
@@ -1429,8 +1431,10 @@ async def test_formal_thousand_rows_complete_single_or_split_files(
         }
         if format_ is None:
             assert await env.scalar("SELECT delivery FROM xiaowei_request") == "sent"
-            assert len(channel.uploads) == 1 and len(channel.sends) == 2
-            document = channel.uploads[0].decode()
+            assert len(channel.uploads) == 2 and len(channel.sends) == 3
+            body, document = (part.decode() for part in channel.uploads)
+            assert "报告正文" in body and "证据明细" in document
+            assert "row0" not in body and "row999" not in body
             from re import MULTILINE, findall
 
             values = [
@@ -1439,8 +1443,8 @@ async def test_formal_thousand_rows_complete_single_or_split_files(
             ]
             assert len(values) == 1000
             assert values[-1] == {"region": "row999", "total": 999}
-            preview = json.dumps(channel.sends[1][1], ensure_ascii=False)
-            assert "本次返回 1000 行" in preview and "明细与查询信息见附件" in preview
+            preview = json.dumps(channel.sends[-1][1], ensure_ascii=False)
+            assert "报告正文" in preview and "证据明细" in preview
             assert "row0" not in preview and "row999" not in preview
         else:
             from html import unescape
@@ -1468,7 +1472,7 @@ async def test_formal_thousand_rows_complete_single_or_split_files(
                         )
             assert seen == [{"region": f"{region}{i}", "total": i} for i in range(1000)]
             shown = str(channel.sends[-1][1])
-            assert "本次返回 1000 行" in shown and "明细与查询信息见附件" in shown
+            assert "完整结果见附件" in shown and "报告正文" in shown
             assert region not in shown
             assert "完整结果见附件" in shown and "总共" not in shown
         assert len(env.scripts.calls[question]) == 2

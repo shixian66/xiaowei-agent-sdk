@@ -11,6 +11,7 @@ from starlette.requests import Request
 from starlette.responses import JSONResponse, Response
 from starlette.routing import Route
 from tests.sdk_core.mcp_fixture import serve
+from tests.sdk_core.synthetic_tools import TARGET
 from tests.sdk_core.test_app import answer, cite, tool_call
 from tests.sdk_core.test_channel_service import Env
 from tests.sdk_core.test_channel_service import env as env
@@ -92,10 +93,12 @@ async def test_gateway_inference_stays_before_a_structural_results_boundary(env:
     ((_, card),) = fs.outbox.sent
     elements = card["card"]["body"]["elements"]
     contents = ["\n".join(text_parts(e)) for e in elements]
-    headers = [i for i, c in enumerate(contents) if c.startswith("结果 1 · ")]
-    assert len(headers) == 1  # 只有代码事实标题；模型仿写的标题不是事实组件
+    panels = [e for e in elements if e["tag"] == "collapsible_panel"]
+    assert len(panels) == 1 and "依据：结果 1 · 来源" in "\n".join(text_parts(panels[0]))
+    assert panels[0]["header"]["title"]["content"] == f"查看依据 · {TARGET}"
     label = contents.index(MODEL_TEXT_LABEL)
-    assert headers[0] < label < contents.index(fake)
+    assert elements.index(panels[0]) < label < contents.index(fake)
+    assert fake not in "\n".join(text_parts(panels[0]))
     assert env.model_calls(message) == 2 and len(env.adapter.calls) == 1
     assert await request_row(env) == ("completed", "sent")
 
@@ -408,7 +411,14 @@ def test_split_approval_material_keeps_result_numbers_in_every_view() -> None:
     assert "依据：结果 2 · 来源" in "\n".join(text_parts(panel))
     assert "结果 1 · " not in "\n".join(text_parts(data_card))
 
-    (report,) = build_reports(data_delivery.model_copy(update={"report_format": "md"}))
-    body = report.content.decode()
-    assert "结果 2" in body and "先看数据，再批准动作。" in body and "结果 1 ·" not in body
-    assert "ev_" not in body + "\n".join(text_parts(data_card) + text_parts(material_card))
+    body_report, details_report = build_reports(
+        data_delivery.model_copy(update={"report_format": "md"})
+    )
+    body = body_report.content.decode()
+    details = details_report.content.decode()
+    assert "报告正文" in body and "证据明细" in details
+    assert "依据 2" in details and "先看数据，再批准动作。" in body
+    assert "ac_1" not in body + details and "结果 1 ·" not in body + details
+    assert "ev_" not in body + details + "\n".join(
+        text_parts(data_card) + text_parts(material_card)
+    )

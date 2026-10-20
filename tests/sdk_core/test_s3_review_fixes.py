@@ -157,9 +157,17 @@ async def test_legacy_resend_reuses_saved_part_and_report_bytes(
     _roomy(env)
     turn_id = await _feishu_request(env, "om_d1a", format_="md")
     ref = _ref("om_d1a")
-    platform = Platform(outcomes=[SendResult.ok(message_id="om_file"), rejected()])
+    platform = Platform(
+        outcomes=[
+            SendResult.ok(message_id="om_body_file"),
+            SendResult.ok(message_id="om_detail_file"),
+            rejected(),
+        ]
+    )
     assert await env.service.results.send(ref, transmit(env, ref, platform)) == "failed"
     before = await parts(env, ref)
+    uploaded = tuple(platform.files)
+    assert len(uploaded) == 2
     await _store_legacy(env, turn_id, _analysis(SHAPES["18000_bytes"], "md"))
     calls = len(env.adapter.calls)
 
@@ -174,7 +182,7 @@ async def test_legacy_resend_reuses_saved_part_and_report_bytes(
     after = await parts(env, ref)
     assert [p.body for p in after] == [p.body for p in before]
     assert [p.uuid for p in after] == [p.uuid for p in before]
-    assert len(platform.files) == 1 and len(env.adapter.calls) == calls
+    assert tuple(platform.files) == uploaded and len(env.adapter.calls) == calls
 
 
 async def test_big_legacy_answer_is_still_refused_without_current_permission(env: Env) -> None:

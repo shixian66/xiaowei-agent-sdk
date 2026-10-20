@@ -15,7 +15,7 @@
 | 锁定依赖 | SDK `0.22.3`、Lark Channel `1.4.0`、MCP `2.2.0`、sqlglot `30.17.0`、`nh3 0.3.7`、`tinycss2 1.5.1` |
 | 正式入口 | `xiaowei serve`、`config check`、`model check`、`storage init/upgrade/cleanup`、`requests resend`；命令与环境准备以 README 为准 |
 | 最近有记录的公司部署 | 既有交接记录称 PR #110 / `4e0ab86` 已部署，并记录了部署后的回答拒收反馈。该历史记录不证明当前镜像、配置或健康状态，也不证明 #111–#114 已部署 |
-| 当前验收结论 | P2 `1c06a89d` 已独立复审通过，相关离线 **676 passed**。P1a/P1b/P1d 相关回归 **344 passed（103.81 秒）**、真实 Chrome **4 passed**、文档 **2 passed**，Ruff/mypy（35 文件）通过；默认全量与 P1 独立审查尚未结束。首候选默认全量中断，不计全量通过；真实模型、公司 StarRocks 和飞书未验收 |
+| 当前验收结论 | P2 `1c06a89d` 已独立复审通过，相关离线 **676 passed**。P1 修订的扩展回归 **478 passed（140.78 秒）**、另补位置回归 **2 passed**、Ruff/mypy（35 文件）通过；修订候选待独立复审。默认全量首轮 **4446 passed、26 failed、235 skipped、78 deselected**：26 项涉及旧显示/文件/提示词假设及测试请求容量；后续反伪造核对又发现折叠入口位置遗漏，已补 RED→GREEN 修复。失败项已在扩展回归复验，不拼成一次全量全绿；最终源码未重跑默认全量。真实模型、公司 StarRocks 和飞书未验收 |
 | 当前任务授权 | 用户批准计划 v1.2（SHA-256 `fe6323fdaea5cdd7da900f34304369ac9c05e3bb5e96d74d3376fd3edf371443`）：串行 P2 → P1a/P1b/P1d，每片提交并独立审查；不部署、不调用真实模型及公司服务。P3/P1c 不在本轮范围 |
 
 原工作目录仍在 `codex/model-authored-report-plan@b89d4ee`，未提交 ARCHITECTURE、旧报告计划与公司配置均保留；未读取公司配置。本次在 `/Users/kloenguyen/.codex/worktrees/answer-query-repair/agent-SDK` 实施，复制了校验一致的[批准计划 v1.2](docs/superpowers/plans/2026-10-20-production-dialogue-answer-repair.md)；计划是批准时快照，后续授权及实施状态以本页为准。
@@ -75,9 +75,9 @@ S3 的源码事实：`AgentAnswer` 为有序 `TextBlock | FactBlock`，另含 `r
 
 本次 P2 已在 `1c06a89d633753f70fb6e5829c0cc4fc5992cbfd` 独立复审通过，两个阻断（合法反引号 SQL 的夹具路由、普通 naive DATETIME 错标会话偏移）已补回归并修复。普通查询保留无偏移墙上时间，aware 时间及已知来源模板不变。旧历史/绑定附件可能保留原先错误偏移，本次不追溯修正、不批量失效旧 Evidence。
 
-P1a/P1b/P1d 的完整交付与历史兼容正在形成候选。已逐项核对批准计划 A2 的 Evidence 归一化与投影、`_raw_redundant`、`_data`、`_fold_details`、卡片摘要/技术详情/容量捷径、自动报告参数、报告事实章节及 Web metadata；共用 `historical_brief` 只读属性据已有 summary 判定，不参与序列化。新 `brief` 无摘要仍有原值；显式历史导出正文保留摘要、原值放详情；自动历史摘要缺原文时有明确提示。
+P1a/P1b/P1d 首候选 `aa95773` 曾通过独立审查；后续反伪造反例发现折叠入口统一置后，未保留事实块位置，原通过结论随此反例收窄。修订将既有详情构造就地调用，旧 v0 仍置后；作者 36 种及独立审查者 22 种 v0 差分输出均一致。原字节重发、权限、审批与容量路径由扩展回归覆盖。已逐项核对批准计划 A2 的 Evidence 归一化与投影、`_raw_redundant`、`_data`、`_fold_details`、卡片摘要/技术详情/容量捷径、自动报告参数、报告事实章节及 Web metadata；共用 `historical_brief` 只读属性据已有 summary 判定，不参与序列化。新 `brief` 无摘要仍有原值；显式历史导出正文保留摘要、原值放详情；自动历史摘要缺原文时有明确提示。
 
-下一步提交 P1 候选，完成独立审查与默认全量检查；不推送、不合并、不部署。A1 目标 StarRocks 的 `CURDATE()/NOW()`、时区与 DATETIME 语义、P4 真实模型任务能力、飞书桌面/手机详情和附件验收仍开放。P3、P1c 不在本次范围。既有自主调查与进度工作仍保留以下验收条件，不据本次查询和布局测试关闭。
+下一步提交修订 P1 候选做 exact SHA 独立复审，记录最终结论；不推送、不合并、不部署。A1 目标 StarRocks 的 `CURDATE()/NOW()`、时区与 DATETIME 语义、P4 真实模型任务能力、飞书桌面/手机详情和附件验收仍开放。P3、P1c 不在本次范围。既有自主调查与进度工作仍保留以下验收条件，不据本次查询和布局测试关闭。
 
 1. P1 的审查修复只调整正常在途发送的顺序收尾、暂停结果投影与测试同步；失败/超时/取消仍停用，正式回复不等待进度。P1、P2、M1a、M1b 的离线证据见[实施计划 v1.7](docs/superpowers/plans/2026-10-20-agent-autonomy-progress.md) §7。下一项是由用户在公司环境沿同一 T1–T5 执行 P3，核对真实模型任务质量、平台权限、修复后的收尾与客户端体验；已批准产品取舍不重开。
 2. M1b 的七项验收已有离线证据，折叠、依据去重、附件完整与失败/未知恢复已覆盖；真实桌面/手机上的明细可达、代码复制及表现仍须 P3 验收。不改 brief/schema，不为布局增加查询。
