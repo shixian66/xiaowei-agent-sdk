@@ -263,7 +263,9 @@ PYTHONDONTWRITEBYTECODE=1 .venv/bin/python -m pytest \
   -q -p no:cacheprovider
 ```
 
-实际结果 **4 passed、2 errors**，2.33 秒：文档命令检查 2 项、remaining 渲染和历史 brief 自动附件基线各 1 项通过；另两项在 `test_postgres` fixture 因未设置 `SDK_TEST_POSTGRES_URL` 而未执行，不记为边界通过，也未为本次文档启动/借用数据库。四份文档 **72 个本地链接/锚点**及 `git diff --check` 通过。原图按字节核对一致，197,160 字节，SHA-256 `4a9fa02a9086512ee471a1b8141ccc0c74820ae26ddd1751f529ba5d967d1776`。这些只证明文档与注明的现有基线；M1a/M1b、新进度、真实模型与平台尚未实现或验收。当前文档候选待按精确 SHA 独立审查，重点为展示/完整性交界及旧 brief 兼容。
+实际结果 **4 passed、2 errors**，2.33 秒：文档命令检查 2 项、remaining 渲染和历史 brief 自动附件基线各 1 项通过；另两项在 `test_postgres` fixture 因未设置 `SDK_TEST_POSTGRES_URL` 而未执行，不记为边界通过，也未为本次文档启动/借用数据库。四份文档 **72 个本地链接/锚点**及 `git diff --check` 通过。原图按字节核对一致，197,160 字节，SHA-256 `4a9fa02a9086512ee471a1b8141ccc0c74820ae26ddd1751f529ba5d967d1776`。这些只证明文档与注明的现有基线；M1a/M1b、新进度、真实模型与平台尚未实现或验收。
+
+v1.3 独立审查覆盖 `e4c34fc647e618907de4146040eedf224bbb2f83 → 75a2b540832b2b584e0c3049a5288194df5f3ddf` 的四份文档、原图和直接相关 Evidence/渲染/附件路径，未发现可证实的阻断问题。审查方独立核对源码、图和 diff，复用上述 4 项通过、2 项缺环境的证据，未声称独立重跑测试；`git diff --check` 通过。未复审不变的进度方案。M1b 的可信版本、保存未绑定和回退仍是实施前置条件；随后仅同步本节与 handoff 的审查状态，不能据此宣称功能实现或真实客户端验收通过。
 
 ### v1.2 已有证据与审查范围（本次未重跑）
 
