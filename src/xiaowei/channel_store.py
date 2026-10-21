@@ -84,6 +84,7 @@ CallerFailureCode = Literal[
     "action_feedback_failed",
     "action_unknown",
     "action_rejected",
+    "reminder_time_passed",
     "action_requester_invalid",
     "action_session_invalid",
     "action_upgrade_invalidated",

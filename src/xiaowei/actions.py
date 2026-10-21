@@ -58,6 +58,7 @@ if TYPE_CHECKING:
     from xiaowei.channel import AccessPolicy
 
 APPROVAL_WINDOW = timedelta(minutes=15)
+REMINDER_TIME_PASSED = "提醒时间已过，未激活，请重新创建"
 ACTION_SETTLE_TIMEOUT_SECONDS = 5
 STATUS_POLICY = ACTION_STATUS_POLICY
 _PROPOSAL_FIELDS = (
@@ -116,6 +117,15 @@ class ActionWriteRejectedError(Exception):
 
     仅由当前批准执行捕获为 rejected；不进入 Runner，也不放宽治理的异常处理。
     """
+
+    def __init__(
+        self,
+        message: str = "",
+        *,
+        code: Literal["action_rejected", "reminder_time_passed"] = "action_rejected",
+    ) -> None:
+        super().__init__(message)
+        self.code = code
 
 
 class ActionOutcomeError(ToolExecutionError):
@@ -485,7 +495,9 @@ class ActionService:
                     if action.approver_id
                     else "尚未批准"
                 ),
-                "result": action.result or "尚无执行结果",
+                "result": REMINDER_TIME_PASSED
+                if action.failure_code == "reminder_time_passed"
+                else action.result or "尚无执行结果",
             },
             captured_at=self._clock(),
             truncated=False,
@@ -626,8 +638,9 @@ class ActionService:
                 observation = await (
                     b.execute.run(prepared) if isinstance(b.execute, Prechecked) else b.execute(req)
                 )
-            except ActionWriteRejectedError:
+            except ActionWriteRejectedError as exc:
                 write_rejected = True
+                reason = exc.code
                 raise
             projected = action_result_projection(
                 self.governance.catalog.policy_for(b.write), observation

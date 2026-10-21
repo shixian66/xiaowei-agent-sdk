@@ -43,7 +43,7 @@ A 已通过独立复审并合入 [PR #123](https://github.com/shixian66/xiaowei-
 
 B 复用真 Runner、SDK 原生暂停/批准恢复与 ActionBinding，确认一次后持久化不可变 job。固定提醒到期直接走原有 GovernedTools notify、相同 HTTP 适配和发送记录，不调用模型，不重建 Agent Loop。状态/暂停/取消由创建者或个人 grant 管理员且当前原群成员操作，已知 ID 查询；不提供列表/编辑/恢复工具。起草支持模型修正日期格式，未知目标/接收权限不足明确拒绝；低风险管理拒绝只返回安全状态，不中断整轮、不伪称未发送。
 
-新增 schema14、默认关闭的同进程到期检查及唯一 job 发送关联；复用全局槽、实例锁、readiness、A 的共享未知门槛及关键回执交付。只对未开始且窗口内的提醒再核验；已占用后超时或重启恢复为 unknown，不重 POST。定义依赖由实时 replayed 回调冻结，按原身份/Session 归属和当前源/接收权限复核；数据期限同步约束任务正文、Action/恢复材料、派生 Evidence、模型历史与请求缓存，显式清理不自动新建上下文。
+新增 schema14、默认关闭的同进程到期检查及唯一 job 发送关联；复用全局槽、实例锁、readiness 及 A 的关键回执交付；共享未知门槛只拦即时通知，不拦分别批准的固定提醒。只对未开始且窗口内的提醒再核验；已占用后超时或重启恢复为 unknown，不重 POST。定义依赖由实时 replayed 回调冻结，按原身份/Session 归属和当前源/接收权限复核；数据期限同步约束任务正文、Action/恢复材料、派生 Evidence、模型历史与请求缓存，显式清理不自动新建上下文。
 
 本轮同时修复两项实际兼容问题：通知准入必须检查 InstanceLock.admits 返回值及 readiness；发行元数据不能硬编码 schema12，改从源码唯一 APP_SCHEMA_VERSION 读取，保持打包脚本仅用标准库。
 
@@ -140,27 +140,31 @@ B1 的短口径主视图修复已成立；原 B2 因复现形状不符合真实 
 
 ## 5. 验证记录与限制
 
-### 2026-10-21–22 B 离线候选验证
+### 2026-10-22 B 独立审查修复
 
-基线 `9284688bb8907c9968e84d5e49c23e551c53ac58`。产品实现及修复为 `3c82342`、`a2509aa735d7d901bfdd03894da6baec72739c45`；测试兼容修复提交 `44c746253ae39e7564549843b54c43c1290ad484` 后产品源码仍与 a2509aa 相同。独立整片审查发现的3项P2已关闭：定义撤权遗漏 AnswerRejectedError、风险提示误入发送停止账本、control-only 未交付风险却确认门槛。纯文字期限的额外限制也已移除；有定义依赖的数据 TTL/接收范围不放宽。
+主线基线 `9284688bb8907c9968e84d5e49c23e551c53ac58`；本次审查输入 `52f7b0e6d968c249241d83e59957671824ec8970`。按 B1/C1/N1–N3 修复，用户本轮批准的两项契约已同步 [ARCHITECTURE](ARCHITECTURE.md#scheduled-agent-tasks)：分别批准的提醒不受其他 unknown 门槛拦截，但自身 unknown 仍阻断即时通知；批准达到或超过提醒时间拒绝激活。生产写、当前权限、接收范围、数据 TTL 与 Evidence 验证不放宽。
 
-Python3.11.16 / SDK0.22.3 / httpx2 2.13.1 / 隔离 PostgreSQL。正式入口为 FeishuGateway → ChannelService → Application → 真 SDK Runner/Action → GovernedTools → HTTP MockTransport；模型、成员目录、数据库驱动和外部 HTTP 为合成替身。没有真实模型、Webhook、飞书或公司源调用，没有读取公司配置/凭据，没有推送、合并或部署 B。
+- B1：`scheduled_tasks.propose` 将正文期限改为依赖的最早数据期限；发送截止另由 run_at＋lateness 计算，tick/claim 各在自己的状态变化边界核对。七天历史＋近时提醒过发送窗口仍可回放，数据到期仍清理派生副本。没有新增期限列。
+- C1：固定提醒 claim 不再读取即时风险门槛；同任务唯一 attempt 和发送前持久化不变。正式入口分别创建/批准两份任务，先 unknown 不作废后者，即时发送仍先提示。
+- N1：激活事务取得准入锁后检查当前时间；固定安全码 `reminder_time_passed` 进入 Action 记录、状态结果与渠道回执，原始异常不外发。014 在本片内同步两表安全码约束。确认材料明确批准时限与已激活任务的补发条件。
+- N2：控制与 claim 锁定同一 job，提交后新语句检查 NOT EXISTS attempt；已准入不改状态并明确“发送已准入，未暂停/取消”。实际锁等待覆盖旧快照竞争。
+- N3：通知启动恢复在同一条 UPDATE 将 sending 改为 unknown/response_unknown，任务恢复沿用真实原因，不复制 pending。
 
-| 检查 | 实际结果、版本及范围 |
+**兼容：** B 未发布，应用仍为 schema14；旧候选 v14 的约束及错误短期限不自动改写，也不延长已保存数据或重开群会话。可丢弃试验库重建；需保留时按 README 停服隔离并恢复升级前 v13 配对备份后用更新的014升级。正式 v13→v14、回退和配对恢复由现有维护测试验证，不直接操作 SDK 表。
+
+Python3.11.16 / SDK0.22.3 / httpx2 2.13.1 / 隔离 PostgreSQL。正式入口 FeishuGateway → ChannelService → Application → 真 SDK Runner/Action → GovernedTools → HTTP MockTransport；模型、成员目录、数据库驱动和外部 HTTP 为合成替身。不调用真实服务、不读取公司配置/凭据、不推送/建PR/部署，不混入原目录工作。
+
+| 检查 | 本次证据 |
 | --- | --- |
-| 受影响检查 | 修复后单次 **220 passed，180.02秒**：scheduled_tasks、cli、deployment/release、docs_command_consistency；`/tmp/xiaowei-b-review-fix-related.log`。B专项55项包含正式U5确认/一次激活、源会话独立、截止/撤权、暂停竞争、无权零I/O、轮换、重启/unknown和风险交付。U5另验 approval_id/approver_id 实际保存，1 passed |
-| 独立复审 | 精确产品版本 **a2509aa** 增量通过，无新阻断；审查者独立 **15 passed /40 deselected，17.08秒**，`/tmp/b-review-a2509aa-incremental.log`。后续两份v14历史夹具及超时探针参数转交均另作窄静态复核，保护断言未改 |
-| 发行 gate | 仅修正v14旧版本夹具后，单次 **84 passed，449.88秒**：`tests/deployment/test_{release,compose,maintenance,release_workflow}.py`；`/tmp/xiaowei-b-p3-release-fixture-fix.log`。含正式容器启动、信号、历史迁移、数据保留、旧程序拒绝和成对恢复 |
-| 其余产品检查 | `SDK_TEST_POSTGRES_URL=postgresql+asyncpg://postgres@127.0.0.1:55432/postgres PYTHONDONTWRITEBYTECODE=1 .venv/bin/python -m pytest -q -p no:cacheprovider --ignore=tests/deployment`：**4562 passed、1 failed、235 skipped、89 deselected、5 warnings，1153.49秒**，`/tmp/xiaowei-b-product-44c7462.log`。唯一失败是旧SDK超时探针 wrapper 未接收新 replayed 关键字，尚未进入目标分支；已按公开签名转交，不改0.1秒和实际一次写/unknown/禁止重放断言 |
-| 探针修复回归 | 单次 **97 passed，64.71秒**：`tests/spike/test_sdk_hitl_reuse.py tests/sdk_core/test_sdk_approval.py tests/sdk_core/test_actions_runtime.py`，`/tmp/xiaowei-b-hitl-compatibility.log`。包含原失败目标及完整HITL/审批路径；没有重跑全部其余产品检查 |
-| 生产镜像兼容 | 当前源码构建成功，禁用容器网络、不安装dev依赖，实际导入提醒模块、验证默认业务时区/配置及014迁移文件存在；`/tmp/xiaowei-b-runtime-package.log`。只清理本命令临时镜像；不证明真实通知可达 |
-| 静态与秘密 | ruff全仓、mypy37源文件、受影响Python格式与diff检查通过。产品依赖/uv.lock/秘密规则与A相同，沿用同输入已过CI审计。a2509aa全历史700次提交gitleaks无泄漏；后续最终扫描结果在交付命令记录。全仓format发现9份既有文件/Markdown代码块差异，未混入 |
+| RED | `/tmp/xiaowei-b-review-red.log`：9 failed；B1/发送截止/N2/N3 到达目标断言。修正 C1 夹具的历史接收范围及 N1 断言顺序后，`/tmp/xiaowei-b-review-contract-red.log`：4 failed，分别复现第二份提醒被门槛作废及到时/过时批准被激活，不算通过 |
+| 最小闭环 | 正式入口合同回归6 passed，5.33秒，`/tmp/xiaowei-b-review-contract-green.log`：两次单独批准、unknown 与即时门槛、到时/过时拒绝及状态结果、真实数据库锁等待 |
+| 隔离变异 | 六种各单独进程、每种目标测试1 failed（预期）：恢复 min 数据期限、移除 claim 发送截止、恢复定时 warning_seen、移除激活时间检查、移除控制 attempt 守卫、移除控制行锁。`/tmp/xiaowei-b-mutation-{data_ttl,send_deadline,unknown_gate,activation,control,control_lock}.log`；产品源码未被变异插件修改，正式检查不加载插件 |
+| 关联回归 | 待记录本轮 B/Evidence/Session/Action/渠道/通知及文档检查结果；不沿用旧版本计数 |
+| 静态检查 | ruff 全仓、六份受影响 Python format、mypy 37源文件及 diff 检查通过 |
+| 精确版本复审 | 待冻结本次产品提交后独立审查；自行复查不算独立审查 |
+| 单次完整全套 | 尚待本轮执行；旧版本分批结果不相加称全套通过 |
 
-**记录边界：** 最新没有单次完整全套通过记录；发行、其余产品和探针回归不相加称为单次全套。235项skip/89项deselected、真实模型自然语言行为/成本、真实Webhook/飞书接受及群内到达、公司服务、部署/用户验收均未关闭。正式检查未加载诊断/变异插件。
-
-关键RED与故障证据已保留：共享历史冻结、派生TTL/历史/请求缓存清理、维护重发撤权、实例锁/readiness、可修正日期、无权控制局部拒绝、占用后超时unknown、迟到清理、风险提示消费及交付。隔离变异移除起草历史依赖，原冻结测试按预期失败，源码未改（`/tmp/xiaowei-b-dependency-mutation.log`）。旧全套3c82342停止时8 failed/1916 passed；a2509aa停止时3 failed/1351 passed，均不算完成或通过：Docker满盘、旧版本夹具及文档约束已修复；并行诊断时有过一次30秒容器停止超时，原因未确证，保持原阈值，后续串行发行原用例通过。
-
-资源清理仅限用户另批的84项清单，逐个复核无标签/无容器引用、非强制删除84项；保留全部标签镜像、容器和卷，Docker根盘恢复约12GB可用。清单与结果 `/tmp/xiaowei-b-docker-cleanup-{candidates,result}.json`；此前78项授权清单已清完，没有扩成任意prune。
+**剩余验收：** 真实 U5（模型日期理解、必要澄清、工具选择、成本及真实平台闭环）未验收；单次完整全套结果待记录。其他版本的旧检查记录由 Git 保留，不当作当前候选证据。下一步按本轮授权完成离线验证和精确 SHA 复审，仅本地提交；C/D 不在本轮实施。
 
 ### 已合入 A 的有效验证
 

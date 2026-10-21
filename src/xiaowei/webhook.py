@@ -360,7 +360,10 @@ class WebhookNotifications:
             if not self._lock.readiness.ok or not await self._lock.admits(conn):
                 raise StorageUnavailableError("实例锁已失效，未执行通知恢复")
             await conn.execute(
-                sql("UPDATE xiaowei_notification_attempt SET state='unknown' WHERE state='sending'")
+                sql(
+                    "UPDATE xiaowei_notification_attempt SET state='unknown', "
+                    "reason='response_unknown' WHERE state='sending'"
+                )
             )
 
     def tool(self, ctx: RunContext, replayed: Callable[[], Sequence[str]]) -> FunctionTool:

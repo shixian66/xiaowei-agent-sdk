@@ -701,6 +701,11 @@ async def test_started_occurrence_recovers_as_unknown_and_blocks_unwarned_immedi
         await rt.scheduled_tasks.tick()
         assert requests == []
         assert await env.scalar("SELECT state FROM xiaowei_notification_attempt") == "unknown"
+        assert (
+            await env.scalar("SELECT reason FROM xiaowei_notification_attempt")
+            == "response_unknown"
+        )
+        assert await env.scalar("SELECT reason FROM xiaowei_scheduled_job") == "response_unknown"
         await group.ask("/新建", message_id="om_after_crash_new")
         for number in (1, 2):
             message = "再发一次汇报提醒" + str(number)
@@ -1048,6 +1053,274 @@ async def test_plain_reminder_deadline_does_not_shorten_shared_session(env, monk
         await group.ask(message)
         assert len(env.scripts.calls[attributed(A, message)]) == 1
         assert "你好" in message_text(group.outbox.sent[-1][1])
+        assert requests == []
+
+
+async def test_reminder_send_deadline_preserves_valid_history_and_data_ttl(env, monkeypatch):
+    from xiaowei.session import cleanup_expired
+
+    data = task_config(env).model_dump(mode="json")
+    data["session_limits"]["retention_seconds"] = 604800
+    data["storage"]["request_retention_seconds"] = 604800
+    data["storage"]["evidence_retention_seconds"] = 604800
+    async with webhook_running(
+        env, monkeypatch, config=runtime.ServeConfig.model_validate(data)
+    ) as (group, requests, rt):
+        evidence = await history(env, group)
+        expiry = await env.scalar("SELECT expires_at FROM xiaowei_evidence")
+        await reminder(env, group, seconds=600)
+        env.clock.advance(4201)  # 发送窗口已过，但历史数据仍有效。
+        await cleanup_expired(rt.engine, now=env.clock(), batch_size=100)
+        await rt.scheduled_tasks.tick()
+        assert await env.scalar("SELECT state FROM xiaowei_scheduled_job") == "missed"
+        assert await env.scalar("SELECT expires_at FROM xiaowei_session") == expiry
+        assert await env.scalar("SELECT content_expires_at FROM xiaowei_scheduled_job") == expiry
+        assert await env.scalar("SELECT text FROM xiaowei_scheduled_job") == "汇报提醒"
+        assert not await env.scalar("SELECT task_content_purged FROM xiaowei_session")
+        message = "继续查看刚才的销售"
+        env.scripts.add(attributed(A, message), cite())
+        await group.ask(message)
+        assert evidence in evidence_in(env.scripts.calls[attributed(A, message)][0])
+        assert "会话历史不能安全继续" not in message_text(group.outbox.sent[-1][1])
+        env.clock.advance((expiry - env.clock()).total_seconds() + 1)
+        await cleanup_expired(rt.engine, now=env.clock(), batch_size=100)
+        assert await env.scalar("SELECT text FROM xiaowei_scheduled_job") is None
+        assert await env.scalar("SELECT state FROM xiaowei_session") == "closed"
+        assert requests == []
+
+
+async def test_send_deadline_is_rechecked_at_atomic_claim(env, monkeypatch):
+    data = task_config(env).model_dump(mode="json")
+    data["storage"]["evidence_retention_seconds"] = 604800
+    data["session_limits"]["retention_seconds"] = 604800
+    data["storage"]["request_retention_seconds"] = 604800
+    async with webhook_running(
+        env, monkeypatch, config=runtime.ServeConfig.model_validate(data)
+    ) as (group, requests, rt):
+        await history(env, group)
+        await reminder(env, group)
+        claim = rt.scheduled_tasks._claim
+
+        async def delayed_claim(*args):
+            env.clock.advance(3600)
+            return await claim(*args)
+
+        monkeypatch.setattr(rt.scheduled_tasks, "_claim", delayed_claim)
+        env.clock.advance(60)
+        await rt.scheduled_tasks.tick()
+        assert await env.scalar("SELECT state FROM xiaowei_scheduled_job") == "missed"
+        assert await env.scalar("SELECT reason FROM xiaowei_scheduled_job") == "lateness_exceeded"
+        assert await env.scalar("SELECT count(*) FROM xiaowei_notification_attempt") == 0
+        assert requests == []
+
+
+async def test_approved_reminders_ignore_other_unknown_but_immediate_send_still_warns(
+    env, monkeypatch
+):
+    async def response(_request):
+        if len(requests) == 1:
+            raise httpx2.ReadTimeout("synthetic")
+        return httpx2.Response(200, json={"code": 0})
+
+    async with webhook_running(env, monkeypatch, config=task_config(env), response=response) as (
+        group,
+        requests,
+        rt,
+    ):
+        jobs = []
+        for i in (1, 2):
+            message = f"设置第{i}条提醒"
+            env.scripts.add(
+                attributed(A, message),
+                tool_call(
+                    "scheduled__propose_reminder",
+                    bot_alias="ops_alert_bot",
+                    text=f"提醒{i}",
+                    evidence_ids=[],
+                    at=(env.clock() + timedelta(seconds=60 * i)).isoformat(),
+                ),
+                request_execution,
+                cite(),
+            )
+            await group.ask(message)
+            async with rt.engine.connect() as conn:
+                job_id, action = (
+                    await conn.execute(
+                        text(
+                            "SELECT j.job_id,a.action_id FROM xiaowei_scheduled_job j "
+                            "JOIN xiaowei_action a ON "
+                            "a.plan::jsonb #>> '{plan,parameters,job_id}'=j.job_id "
+                            "WHERE j.text=:body"
+                        ),
+                        {"body": f"提醒{i}"},
+                    )
+                ).one()
+            await group.ask(f"/批准 {action}")
+            jobs.append(job_id)
+            if i == 1:
+                await group.ask("/新建")  # 两个独立批准版本，不让上一份提案成为新正文依赖。
+        assert (
+            await env.scalar("SELECT count(*) FROM xiaowei_scheduled_job WHERE state='active'") == 2
+        )
+        env.clock.advance(60)
+        await rt.scheduled_tasks.tick()
+        assert (
+            await env.scalar("SELECT state FROM xiaowei_notification_attempt WHERE state='unknown'")
+            == "unknown"
+        )
+        env.clock.advance(60)
+        await rt.scheduled_tasks.tick()
+        await rt.scheduled_tasks.tick()
+        assert len(requests) == 2
+        assert [json.loads(r.content)["content"]["text"] for r in requests] == ["提醒1", "提醒2"]
+        assert await env.scalar("SELECT count(*) FROM xiaowei_notification_attempt") == 2
+        await group.ask("/新建")  # 即时文字发送不携带任务管理材料；风险门槛仍按原群共享。
+        message = "立即发送另一条提醒"
+        env.scripts.add(
+            attributed(A, message),
+            tool_call(
+                "send_webhook_message",
+                bot_alias="ops_alert_bot",
+                text="另一条提醒",
+                evidence_ids=[],
+            ),
+            cite(),
+        )
+        await group.ask(message)
+        assert len(requests) == 2
+        assert "重发可能重复" in message_text(group.outbox.sent[-1][1])
+        async with rt.engine.connect() as conn:
+            assert (
+                await conn.scalar(
+                    text("SELECT state FROM xiaowei_notification_attempt WHERE job_id=:id"),
+                    {"id": jobs[0]},
+                )
+                == "unknown"
+            )
+
+
+@pytest.mark.parametrize("offset", [60, 61, 300])
+async def test_approval_at_or_after_due_time_rejects_activation(env, monkeypatch, offset):
+    async with webhook_running(env, monkeypatch, config=task_config(env)) as (group, requests, rt):
+        await reminder(env, group, confirm=False)
+        material = message_text(group.outbox.sent[-1][1])
+        action = await env.scalar("SELECT action_id FROM xiaowei_action")
+        env.clock.advance(offset)
+        await group.ask(f"/批准 {action}")
+        assert await env.scalar("SELECT state FROM xiaowei_scheduled_job") == "draft"
+        assert await env.scalar("SELECT state FROM xiaowei_action") == "rejected"
+        assert await env.scalar("SELECT failure_code FROM xiaowei_action") == "reminder_time_passed"
+        assert "提醒时间已过，未激活，请重新创建" in message_text(group.outbox.sent[-1][1])
+        assert "提醒时间之前批准" in material
+        assert "已激活" in material
+        message = "查询过时批准的结果"
+        env.scripts.add(
+            attributed(A, message),
+            tool_call("scheduled__get_action_status", action_id=action),
+            cite(),
+        )
+        await group.ask(message)
+        assert "提醒时间已过，未激活，请重新创建" in message_text(group.outbox.sent[-1][1])
+        await rt.scheduled_tasks.tick()
+        assert requests == []
+
+
+@pytest.mark.parametrize("operation", ["pause", "cancel"])
+async def test_control_after_claim_reports_send_already_admitted(env, monkeypatch, operation):
+    entered, release = asyncio.Event(), asyncio.Event()
+
+    async def response(_request):
+        entered.set()
+        await release.wait()
+        return httpx2.Response(200, json={"code": 0})
+
+    async with webhook_running(env, monkeypatch, config=task_config(env), response=response) as (
+        group,
+        requests,
+        rt,
+    ):
+        job = await reminder(env, group)
+        env.clock.advance(100)
+        due = asyncio.create_task(rt.scheduled_tasks.tick())
+        try:
+            await asyncio.wait_for(entered.wait(), 5)
+            message = f"现在{operation}这个提醒"
+            env.scripts.add(
+                attributed(A, message),
+                tool_call("scheduled__control_task", job_id=job, operation=operation),
+                cite(),
+            )
+            await group.ask(message)
+            assert await env.scalar("SELECT state FROM xiaowei_scheduled_job") == "active"
+            assert "发送已准入，未暂停/取消" in message_text(group.outbox.sent[-1][1])
+        finally:
+            release.set()
+            await due
+        assert await env.scalar("SELECT state FROM xiaowei_scheduled_job") == "completed"
+        await rt.scheduled_tasks.tick()
+        assert len(requests) == 1
+
+
+async def test_control_waits_for_claim_commit_before_deciding(env, monkeypatch):
+    from sqlalchemy.ext.asyncio import AsyncConnection
+    from tests.sdk_core.test_channel_store import waiting_on_locks
+
+    entered, release = asyncio.Event(), asyncio.Event()
+    execute = AsyncConnection.execute
+
+    async def hold_claim_commit(conn, statement, *args, **kwargs):
+        result = await execute(conn, statement, *args, **kwargs)
+        if str(statement).startswith("INSERT INTO xiaowei_notification_attempt "):
+            entered.set()
+            await release.wait()
+        return result
+
+    async with webhook_running(env, monkeypatch, config=task_config(env)) as (group, requests, rt):
+        job = await reminder(env, group)
+        env.clock.advance(100)
+        monkeypatch.setattr(AsyncConnection, "execute", hold_claim_commit)
+        due = asyncio.create_task(rt.scheduled_tasks.tick())
+        control = None
+        try:
+            await asyncio.wait_for(entered.wait(), 5)
+            message = "占用事务尚未提交时暂停"
+            env.scripts.add(
+                attributed(A, message),
+                tool_call("scheduled__control_task", job_id=job, operation="pause"),
+                cite(),
+            )
+            control = asyncio.create_task(group.ask(message))
+            assert await waiting_on_locks(rt.engine, 1)
+        finally:
+            release.set()
+            await due
+            if control is not None:
+                await control
+        assert await env.scalar("SELECT state FROM xiaowei_scheduled_job") == "completed"
+        assert "发送已准入，未暂停/取消" in message_text(group.outbox.sent[-1][1])
+        assert len(requests) == 1
+
+
+async def test_activation_rechecks_time_after_waiting_for_admission_lock(env, monkeypatch):
+    from tests.sdk_core.test_channel_store import waiting_on_locks
+
+    async with webhook_running(env, monkeypatch, config=task_config(env)) as (group, requests, rt):
+        await reminder(env, group, confirm=False)
+        action = await env.scalar("SELECT action_id FROM xiaowei_action")
+        approval = None
+        async with rt.engine.begin() as conn:
+            await conn.execute(text("LOCK TABLE xiaowei_scheduled_job IN SHARE ROW EXCLUSIVE MODE"))
+            try:
+                approval = asyncio.create_task(group.ask(f"/批准 {action}"))
+                assert await waiting_on_locks(rt.engine, 1)
+                env.clock.advance(60)
+            finally:
+                await conn.commit()
+                if approval is not None:
+                    await approval
+        assert await env.scalar("SELECT state FROM xiaowei_scheduled_job") == "draft"
+        assert "提醒时间已过，未激活，请重新创建" in message_text(group.outbox.sent[-1][1])
+        await rt.scheduled_tasks.tick()
         assert requests == []
 
 

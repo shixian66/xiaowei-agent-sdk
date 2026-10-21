@@ -32,7 +32,7 @@ from typing import Protocol
 
 from pydantic import AwareDatetime, BaseModel, ConfigDict, Field, model_validator
 
-from xiaowei.actions import ACTION_SETTLE_TIMEOUT_SECONDS, ActionOutcomeError
+from xiaowei.actions import ACTION_SETTLE_TIMEOUT_SECONDS, REMINDER_TIME_PASSED, ActionOutcomeError
 from xiaowei.app import Application, Mode, PausedTurn, ResumeRejectedError, TurnError, TurnReason
 from xiaowei.channel_store import (
     CallerFailureCode,
@@ -99,6 +99,7 @@ _ACTION_FAILURE_CODES: Mapping[str, CallerFailureCode] = {
     "rejected": "action_rejected",
 }
 _RECEIPTS: Mapping[FailureCode, str] = {
+    "reminder_time_passed": REMINDER_TIME_PASSED,
     "action_requester_invalid": "发起人已不在群或权限已变化，未执行，请重新提出",
     "action_session_invalid": (
         "原会话不可继续，未执行；暂停前调查未形成最终报告、未入历史，请新建会话重新调查并提出"
@@ -940,8 +941,10 @@ class ChannelService:
                     raise NotReadyError from None
                 code = await self._approval_failure(action_id, self._context(record, decision))
                 return await fail_approval(code)
-            except ActionOutcomeError as exc:
-                return await fail_approval(_ACTION_FAILURE_CODES[exc.state])
+            except ActionOutcomeError:
+                return await fail_approval(
+                    await self._approval_failure(action_id, self._context(record, decision))
+                )
             except (ToolRejectedError, RequestUnavailableError):
                 return await fail_approval("action_not_approvable")
             except (ToolExecutionError, AnswerRejectedError, EvidenceStoreError):

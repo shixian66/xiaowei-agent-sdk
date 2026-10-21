@@ -362,16 +362,19 @@ class ScheduledTasks:
         zone = ZoneInfo(self.config.timezone)
         at = job["run_at"].astimezone(zone).isoformat()
         expiry = job["content_expires_at"].astimezone(zone).isoformat()
+        deadline = (job["run_at"] + timedelta(seconds=job["lateness_seconds"])).astimezone(zone)
         return ActionPlan(
             parameters={"job_id": job["job_id"]},
             revision="1",
             change=(
                 f"一次性提醒 {job['job_id']}\n{at}（{self.config.timezone}）\n"
                 f"机器人：{job['bot_alias']}\n内容：\n{job['text']}\n"
-                f"允许迟到：{self.config.lateness_seconds / 3600:g}小时；最多发送一次；"
+                "必须在提醒时间之前批准；到时或之后批准不激活，请重新创建。\n"
+                f"已激活任务遇停机、繁忙或临时核验失败，允许迟到："
+                f"{job['lateness_seconds'] / 3600:g}小时；最多发送一次；"
                 f"最远提前 {self.config.max_advance_seconds / 86400:g}天；"
                 f"活动任务上限 {self.config.max_active_jobs}个。\n"
-                f"本任务将于 {expiry} 时失效。"
+                f"发送截止：{deadline.isoformat()}。本任务将于 {expiry} 时失效（正文期限）。"
                 + (
                     "起草时包含历史 Evidence，不能续期；如需无旧依赖版本，"
                     "用户可显式 /新建 后完整重述，"
@@ -443,10 +446,7 @@ class ScheduledTasks:
             raise ProposalRejectedError("证据未核实", code="authorization_unavailable") from None
         except (EvidenceUnavailableError, AnswerRejectedError):
             raise ProposalRejectedError("证据不可用", code="not_allowed") from None
-        expiry = min(
-            at + timedelta(seconds=self.config.lateness_seconds),
-            delivery.content_expires_at or at + timedelta(seconds=self.config.lateness_seconds),
-        )
+        expiry = delivery.content_expires_at or at + timedelta(seconds=self.config.lateness_seconds)
         if at >= expiry:
             raise ProposalRejectedError(
                 "发送时间晚于定义依赖的数据期限", code="not_allowed", hint="reminder_expiry"
@@ -497,6 +497,8 @@ class ScheduledTasks:
         async with self.engine.begin() as conn:
             await self._admit(conn)
             await conn.execute(sql("LOCK TABLE xiaowei_scheduled_job IN SHARE ROW EXCLUSIVE MODE"))
+            if self.clock() >= job["run_at"]:
+                raise ActionWriteRejectedError(code="reminder_time_passed")
             active = await conn.scalar(
                 sql("SELECT count(*) FROM xiaowei_scheduled_job WHERE state='active'")
             )
@@ -610,14 +612,26 @@ class ScheduledTasks:
                     state = "paused" if request.arguments["operation"] == "pause" else "cancelled"
                     async with self.engine.begin() as conn:
                         await self._admit(conn)
+                        # 与 claim 先锁同一 job；等待提交后，用新语句快照检查 attempt。
                         await conn.execute(
                             sql(
-                                "UPDATE xiaowei_scheduled_job SET state=:state "
-                                "WHERE job_id=:id AND state IN ('draft','active','paused')"
+                                "SELECT job_id FROM xiaowei_scheduled_job "
+                                "WHERE job_id=:id FOR UPDATE"
+                            ),
+                            {"id": job["job_id"]},
+                        )
+                        changed = await conn.execute(
+                            sql(
+                                "UPDATE xiaowei_scheduled_job j SET state=:state "
+                                "WHERE job_id=:id AND state IN ('draft','active','paused') "
+                                "AND NOT EXISTS (SELECT 1 FROM xiaowei_notification_attempt n "
+                                "WHERE n.job_id=j.job_id)"
                             ),
                             {"id": job["job_id"], "state": state},
                         )
                     job = await self.definitions.get(job["job_id"])
+                    if changed.rowcount == 0 and job.get("receipt_id") is not None:
+                        job = {**job, "reason": "发送已准入，未暂停/取消"}
                 if job.get("notification_state") in {"unknown", "sending"}:
                     await self.notifications.record_task_warning(ctx.identity, job["receipt_id"])
                 try:
@@ -657,6 +671,15 @@ class ScheduledTasks:
             ).scalar_one()
             if current != "active":
                 return "none", "not_sent", "task_not_active", False
+            if self.clock() >= job["run_at"] + timedelta(seconds=job["lateness_seconds"]):
+                await conn.execute(
+                    sql(
+                        "UPDATE xiaowei_scheduled_job SET state='missed', "
+                        "reason='lateness_exceeded' WHERE job_id=:id"
+                    ),
+                    {"id": job["job_id"]},
+                )
+                return "none", "not_sent", "lateness_exceeded", False
             if self.clock() >= job["content_expires_at"]:
                 await conn.execute(
                     sql(
@@ -677,11 +700,8 @@ class ScheduledTasks:
             ).first()
             if old is not None:
                 return old.receipt_id, old.state, old.reason, False
-            permitted = await self.notifications.warning_seen(conn, job["owner_id"], job["bot_id"])
             receipt = uuid4().hex
-            state, reason = (
-                ("sending", "pending") if permitted else ("not_sent", "duplicate_warning")
-            )
+            state, reason = "sending", "pending"
             await conn.execute(
                 sql(
                     "INSERT INTO xiaowei_notification_attempt "
@@ -709,10 +729,10 @@ class ScheduledTasks:
                     "id": job["job_id"],
                     "reason": reason,
                     "now": self.clock(),
-                    "state": "active" if permitted else "completed",
+                    "state": "active",
                 },
             )
-            return receipt, state, reason, permitted
+            return receipt, state, reason, True
 
     async def _settle(self, job_id: str, receipt: str, state: str, reason: str) -> None:
         try:
