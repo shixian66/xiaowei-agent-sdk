@@ -17,6 +17,7 @@
 """
 
 import copy
+import hashlib
 import json
 import logging
 from collections.abc import Awaitable, Callable, Mapping
@@ -275,9 +276,9 @@ def _function_tool(
         except ToolRejectedError as exc:
             governance.note_rejected(tool_ctx.context.identity)
             logger.info(
-                "tool_rejected turn=%s call_id=%s tool=%s code=%s",
+                "tool_rejected turn=%s call_ref=%s tool=%s code=%s",
                 tool_ctx.context.identity.turn_id,
-                tool_ctx.tool_call_id,
+                hashlib.sha256(tool_ctx.tool_call_id.encode()).hexdigest()[:16],
                 name,
                 exc.code,
             )

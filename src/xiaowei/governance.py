@@ -16,6 +16,7 @@ JSON schema）。实际执行与证据都只使用规范化后的有效参数；
 from __future__ import annotations
 
 import enum
+import hashlib
 import json
 import logging
 import math
@@ -723,10 +724,10 @@ class GovernedTools:
                         current, monitoring_failures=(*current.monitoring_failures, failure)
                     )
                     logger.info(
-                        "monitoring_read turn=%s call_id=%s tool_id=%s target_id=%s "
+                        "monitoring_read turn=%s call_ref=%s tool_id=%s target_id=%s "
                         "status=%s correction_allowed=%s",
                         ctx.identity.turn_id,
-                        request.call_id,
+                        hashlib.sha256(request.call_id.encode()).hexdigest()[:16],
                         contract.tool_id,
                         target,
                         exc.reason,
