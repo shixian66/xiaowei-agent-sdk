@@ -570,7 +570,7 @@ PostgreSQL 使用持久卷；SDK 表由锁定版本的 SQLAlchemySession 契约�
 <a id="scheduled-agent-tasks"></a>
 ### 通知与定时 Agent 任务增量
 
-**状态（2026-10-21）：方向及 v1.4 的 A 审查修订已确认，当前授权实现、测试及常规修复；按 A→B→C→D 串行交付，先实施 A。** 真实模型、公司源、真实 Webhook、部署及合入仍未授权。技术依据见[设计 v1.4](docs/superpowers/specs/2026-10-21-scheduled-agent-tasks.md)，分片与退出条件见[实施计划](docs/superpowers/plans/2026-10-21-scheduled-agent-tasks.md)。本节是该增量产品、权限与数据边界的唯一权威来源；代码和验证状态在 handoff 维护。
+**状态（2026-10-21）：方向及 v1.4 的 A 审查修订已确认，A 复审通过后用户已授权推送、创建 PR 并在检查通过后合并；按 A→B→C→D 串行交付。** 真实模型、公司源、真实 Webhook和部署仍未授权。技术依据见[设计 v1.4](docs/superpowers/specs/2026-10-21-scheduled-agent-tasks.md)，分片与退出条件见[实施计划](docs/superpowers/plans/2026-10-21-scheduled-agent-tasks.md)。本节是该增量产品、权限与数据边界的唯一权威来源；代码和验证状态在 handoff 维护。
 
 用户已确认的范围：
 

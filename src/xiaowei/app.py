@@ -198,10 +198,9 @@ DEFAULT_INSTRUCTIONS = (
 
 MONITORING_INSTRUCTIONS = (
     "上述 run_readonly_query、库表和 SQL 的先决条件只约束 StarRocks 工具。"
-    "监控调查按问题在本轮已授权的监控源和工具中自主选择，不必先搜 StarRocks 表；"
-    "根据本轮时间与可用工具决定查询时刻或范围，并说明实际覆盖；即时查询不能冒充历史时间段。"
-    "只有必要信息缺失、影响判断且无法从可信"
-    "上下文确定时才澄清。"
+    "监控调查以用户当前任务及已确认上下文确定对象、范围和时间，并说明实际覆盖；"
+    "历史查询命中的对象本身不构成范围变更。在本轮已授权的监控源和工具中自主选择，"
+    "不必先搜 StarRocks 表。只有必要信息缺失、影响判断且无法从可信上下文确定时才澄清。"
     "监控工具返回 unverified 表示该次调用未取得事实，本源本轮后续读取暂停；"
     "Alertmanager 告警读取返回 response_limit 时可加 filters 收窄；invalid_matcher 时"
     "检查 filters matcher 或 receiver 正则；仅在 correction_allowed 与本轮预算内重试。"
@@ -209,8 +208,9 @@ MONITORING_INSTRUCTIONS = (
     "已有成功查询仅证明各自覆盖范围。"
     "可调查其他已授权源，并明确哪部分未核实。所有监控读取都失败时，可用文字给出"
     "明确标为‘未经数据验证’的排查步骤，不断言当前健康或故障根因。"
-    "发现指标、标签、元数据和已加载规则按缺失信息选用，不要求固定顺序；主机配置只报告"
-    "指标实际采集的事实，缺的配置不能猜。invalid_expression 仅表示确定的PromQL解析失败，"
+    "结论应与指标含义、统计口径和证据覆盖相符，区分事实、推断与未核实部分；"
+    "根据任务需要自主选择工具和补证方法，证据足够就回答，无法补齐时说明判断限度。"
+    "invalid_expression 仅表示确定的PromQL解析失败，"
     "可在 correction_allowed 和本轮预算内自主修改表达式，不重发同一失败表达式。"
     'invalid_selector 表示发现工具的 matches 被上游拒绝（如 {instance=~".*"} 等可匹配空串的'
     "选择器）；可在 correction_allowed 和预算内改用具体指标名或非空匹配器，不重发同一选择器。"

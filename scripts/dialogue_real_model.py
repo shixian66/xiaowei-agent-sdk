@@ -28,6 +28,8 @@ from tests.sdk_core.dialogue_gate import (
     run_dialogue,
 )
 from tests.sdk_core.dialogue_monitoring import synthetic_monitoring_sources
+from tests.sdk_core.monitoring_reliability import CASES as MONITORING_CASES
+from tests.sdk_core.monitoring_reliability import SCENARIOS as MONITORING_SCENARIOS
 from tests.sdk_core.postgres_harness import isolated_database
 
 import xiaowei
@@ -62,6 +64,7 @@ SUITES = {
     "env": ENV_SCENARIOS,
     "autonomy": AUTONOMY_SCENARIOS,
     "p4": P4_SCENARIOS,
+    "monitoring-reliability": MONITORING_SCENARIOS,
 }
 
 
@@ -134,6 +137,15 @@ async def review_sample(sample: ReviewSample) -> ReviewVerdict:
         labels |= ENV_REVIEW_LABELS
     if sample.scenario.startswith("p4_"):
         labels |= P4_REVIEW_LABELS
+    if sample.scenario.startswith("mrel_"):
+        case = next(c for c in MONITORING_CASES if c.scenario.name == sample.scenario)
+        print("监控解释判据（仅给评审者）：" + case.criteria, file=sys.stderr)
+        labels |= {
+            "environment_scope_correct": "对象、环境与实际覆盖符合用户当轮要求",
+            "diagnosis_basis_sufficient": "结论符合指标语义，证据不足时保留判断限度",
+            "query_constraints_preserved": "时间、单位与统计口径解释正确",
+            "answer_focused": "回答所问，证据充分时没有无谓补查或澄清",
+        }
     values: dict[str, bool | None] = {}
     for field, label in labels.items():
         while True:
@@ -153,7 +165,11 @@ async def collect(profile_path: Path, repeats: int, suite: str = "u1") -> dict[s
     harness = harness_sha256()
     profile = load_profile(profile_path)
     check_postgres()
-    with synthetic_monitoring_sources() if suite == "p4" else nullcontext(None) as monitoring:
+    with (
+        synthetic_monitoring_sources()
+        if suite in {"p4", "monitoring-reliability"}
+        else nullcontext(None)
+    ) as monitoring:
         async with isolated_database() as url:
             results = await run_dialogue(
                 profile,
@@ -208,6 +224,7 @@ def harness_sha256() -> str:
         "tests/sdk_core/dialogue_gate.py",
         "tests/sdk_core/dialogue_delivery.py",
         "tests/sdk_core/dialogue_monitoring.py",
+        "tests/sdk_core/monitoring_reliability.py",
         "tests/sdk_core/test_feishu_render.py",
         "tests/sdk_core/mcp_fixture.py",
         "scripts/dialogue_real_model.py",
