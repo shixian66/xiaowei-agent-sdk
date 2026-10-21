@@ -43,7 +43,7 @@ from xiaowei.models import (
     ToolRequest,
     TurnAnswer,
 )
-from xiaowei.storage import InstanceLock
+from xiaowei.storage import InstanceLock, StorageUnavailableError
 from xiaowei.tools import governed_function_tool
 
 TOOL = "notifications/send_webhook_message"
@@ -238,7 +238,8 @@ class WebhookNotifications:
 
     async def recover(self) -> None:
         async with self._engine.begin() as conn:
-            await self._lock.admits(conn)
+            if not await self._lock.admits(conn):
+                raise StorageUnavailableError("实例锁已失效，未执行通知恢复")
             await conn.execute(
                 sql("UPDATE xiaowei_notification_attempt SET state='unknown' WHERE state='sending'")
             )
@@ -362,7 +363,8 @@ class WebhookNotifications:
             "id": uuid.uuid4().hex,
         }
         async with self._engine.begin() as conn:
-            await self._lock.admits(conn)
+            if not await self._lock.admits(conn):
+                raise StorageUnavailableError("实例锁已失效，未占用发送机会")
             # 请求归属来自已运行的服务端请求，不接受模型伪造 turn/session。
             request = (
                 await conn.execute(
