@@ -15,7 +15,7 @@
 | 锁定依赖 | SDK `0.22.3`、Lark Channel `1.4.0`、MCP `2.2.0`、sqlglot `30.17.0`、`nh3 0.3.7`、`tinycss2 1.5.1` |
 | 正式入口 | `xiaowei serve`、`config check`、`model check`、`storage init/upgrade/cleanup`、`requests resend`；命令与环境准备以 README 为准 |
 | 最近有记录的公司部署 | 既有交接记录称 PR #110 / `4e0ab86` 已部署，并记录了部署后的回答拒收反馈。该历史记录不证明当前镜像、配置或健康状态，也不证明 #111–#114 已部署 |
-| 当前验收结论 | 监控说明修订仅替换三处文字，补充9场景/12轮证据解释样例及离线契约回归；外部审查指出的旧断言失败已复现并修正，补充回归220项通过，尚待冻结版本复审。最终状态见下方“本次监控可靠性修订”。不能据脚本模型认定真实巡检质量通过 |
+| 当前验收结论 | 监控说明修订仅替换三处文字，补充9场景/12轮证据解释样例及离线契约回归；外部审查指出的旧断言失败已复现并修正，补充回归220项通过，冻结修订独立复审确认P1关闭、无阻断。最终状态见下方“本次监控可靠性修订”。不能据脚本模型认定真实巡检质量通过 |
 | 当前任务授权 | 用户授权独立工作树实施三处文字替换、代表性评测、离线验证和审查。不新增 Skill、固定调用流程，不改 Agent Loop、权限、Evidence 或交付契约；不合并、不部署、不调用真实模型或公司服务 |
 
 本次使用 `/Users/kloenguyen/.codex/worktrees/monitoring-evidence-reliability/agent-SDK`；不修改 `scheduled-agent-design/agent-SDK`。具体样例、依据及验证边界见[监控可靠性评测说明](docs/monitoring-reliability-evaluation.md)。下方旧回答修复计划与证据只作既有工作的接续资料，不扩大本次范围。
@@ -44,9 +44,11 @@
 
 同时补齐history的单点up反例、scope扩围后的fat1资源未核实判据，并在评测文档说明复用字段的本套件含义。现为9场景/12轮；相对 `23c7185`，`src` 与采集器执行逻辑未改，产品仍仅三处文字替换。
 
-补充回归：`test_monitoring_read_recovery`、`test_monitoring_reliability`、`test_dialogue_real_model`、`test_prometheus_p2`、`test_database_skills`、`test_dialogue_contract`、`test_app`、文档命令检查合计 **220 passed、27 skipped、3 deselected**；27项均因官方 MCP 二进制未配置跳过，3项browser未选。`ruff check --no-cache .`、`mypy src`（35文件）、`git diff --check` 通过。尚待本次冻结修订的独立复审；没有新的全仓测试、CI或真实模型证据。
+补充回归：`test_monitoring_read_recovery`、`test_monitoring_reliability`、`test_dialogue_real_model`、`test_prometheus_p2`、`test_database_skills`、`test_dialogue_contract`、`test_app`、文档命令检查合计 **220 passed、27 skipped、3 deselected**；27项均因官方 MCP 二进制未配置跳过，3项browser未选。`ruff check --no-cache .`、`mypy src`（35文件）、`git diff --check` 通过。没有新的全仓测试、CI或真实模型证据。
 
-下一项：完成本次审查反馈的补充验证与复审后，停在本地候选交用户审阅；真实模型对比仍需另获 Profile、端点/模型与费用授权。本套固定导出解释题不能替代自主查询、补证及真实源/飞书验收；求值窗口展示标签的问题也未在本次修复。不合并、不部署。
+独立复审重新检查 `23c7185..759c644790f280fc1cc7771502d6ed3d2195d699`，另复验30项通过（含原失败的两个参数用例），确认旧断言删除没有削弱必要行为检查，P1关闭、当前修订无阻断。文字引用搜索和测试字符串AST对照未发现其他直接依赖被删文字的遗漏。复审后只更新本交接记录，产品、采集器和测试未再变更。
+
+下一项：补充验证与复审已完成，停在本地候选交用户审阅；真实模型对比仍需另获 Profile、端点/模型与费用授权。本套固定导出解释题不能替代自主查询、补证及真实源/飞书验收；求值窗口展示标签的问题也未在本次修复。不合并、不部署。
 
 ### 已合入的相关工作
 
