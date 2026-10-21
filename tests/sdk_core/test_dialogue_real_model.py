@@ -311,7 +311,7 @@ async def test_collector_binds_worktree_and_profile_without_content_report(
     )
 
 
-@pytest.mark.parametrize("suite", ["u1", "p4"])
+@pytest.mark.parametrize("suite", ["u1", "p4", "monitoring-reliability"])
 def test_noninteractive_cli_refuses_before_loading_profile_or_calling_model(
     monkeypatch: pytest.MonkeyPatch,
     suite: str,
@@ -322,6 +322,27 @@ def test_noninteractive_cli_refuses_before_loading_profile_or_calling_model(
     )
     monkeypatch.setattr(command, "load_profile", lambda _: pytest.fail("不能触发模型前提读取"))
     assert command.main() == 2
+
+
+async def test_monitoring_review_shows_case_criteria_without_injecting_them(monkeypatch, capsys):
+    from tests.sdk_core.monitoring_reliability import CASES, SCENARIOS
+
+    assert command.SUITES["monitoring-reliability"] == SCENARIOS
+    case = CASES[0]
+    monkeypatch.setattr(command.sys, "stdin", io.StringIO("a\n" * 8 + "y\nn\ny\na\n"))
+    sample = ReviewSample(
+        scenario=case.scenario.name, repeat=1, turn=1, mode="query",
+        message=case.scenario.messages[0][1], state="completed", failure=None,
+        delivery=None, statements=(),
+    )
+    verdict = await command.review_sample(sample)
+    shown = capsys.readouterr()
+    assert shown.out == "" and case.criteria in shown.err
+    assert verdict.environment_scope_correct is True
+    assert verdict.diagnosis_basis_sufficient is False
+    assert verdict.query_constraints_preserved is True
+    assert verdict.answer_focused is None
+    assert case.criteria not in json.dumps(verdict.model_dump())
 
 
 async def test_p4_review_shows_actual_channel_material_and_separate_quality_questions(
