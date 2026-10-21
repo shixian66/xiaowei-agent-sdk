@@ -1553,14 +1553,18 @@ def _delivery(
         retention_seconds=storage.evidence_retention_seconds,
         verify_dependencies=DependencyCheck({t: s.adapter for t, s in schemas.items()}),
     )
+
+    async def notification_status(identity: Identity) -> str | None:
+        if await access.authorize_evidence(identity, NOTIFY_TARGET, NOTIFY_TOOL):
+            return await receipt_notice(engine, identity)
+        return None
+
     results = ResultDelivery(
         store,
         evidence,
         access,
         budget=config.budget,
-        notification_status=(lambda identity: receipt_notice(engine, identity))
-        if config.webhook_bots
-        else None,
+        notification_status=notification_status if config.webhook_bots else None,
     )
     return _Delivery(store, evidence, results, tools)
 

@@ -445,14 +445,13 @@ class ResultDelivery:
     ) -> Delivery:
         ctx = self._context(record, decision)
         notice = None
-        if self._notification_status is not None and await self._access.authorize(
-            ctx.identity, "notifications", "notifications/send_webhook_message"
-        ):
+        if self._notification_status is not None:
             notice = await self._notification_status(ctx.identity)
         try:
             delivery = (
                 await self._validated(record, decision, history=history)
-                if record.state in {"completed", "paused"} else self._receipt(record)
+                if record.state in {"completed", "paused"}
+                else self._receipt(record)
             )
         except ResultUnavailableError:
             if notice is None:
@@ -461,9 +460,12 @@ class ResultDelivery:
                 content="后续回答无法交付。", evidence_ids=(), channel=record.channel
             )
         if notice:
-            delivery = delivery.model_copy(update={
-                "notification_notice": notice, "content": notice + "\n" + delivery.content,
-            })
+            delivery = delivery.model_copy(
+                update={
+                    "notification_notice": notice,
+                    "content": notice + "\n" + delivery.content,
+                }
+            )
         return delivery
 
     async def _load(self, ref: RequestRef) -> tuple[RequestRecord, AccessDecision]:

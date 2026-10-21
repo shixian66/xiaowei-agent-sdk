@@ -229,7 +229,11 @@ async def test_receipt_read_failure_reports_unverifiable_without_stopping_servic
             intercepted.append(statement)
             raise SQLAlchemyError("synthetic receipt read failure")
 
-    async with running(env, monkeypatch) as (group, requests, rt):
+    async with running(env, monkeypatch, response=httpx2.ReadTimeout("lost")) as (
+        group,
+        requests,
+        rt,
+    ):
         event.listen(rt.engine.sync_engine, "before_cursor_execute", fail_receipt)
         try:
             await group.ask(request)
@@ -237,7 +241,32 @@ async def test_receipt_read_failure_reports_unverifiable_without_stopping_servic
             event.remove(rt.engine.sync_engine, "before_cursor_execute", fail_receipt)
         assert intercepted and len(requests) == 1
         assert "发送状态暂无法核验" in message_text(group.outbox.sent[-1][1])
+        assert "重发可能重复" in message_text(group.outbox.sent[-1][1])
         assert rt.readiness.ok
+
+
+async def test_revoked_sender_can_still_see_unknown_warning_in_original_group(env, monkeypatch):
+    access = []
+
+    def revoke_and_fail(call):
+        access[0]._grants = {}  # 模拟后续交付时已撤销个人发送许可
+        return upstream_error(call)
+
+    request = script(
+        env,
+        "结果未知后撤销发送权，不能把安全回执一起隐藏",
+        tool_call("send_webhook_message", bot_alias="ops_alert_bot", text=TEXT, evidence_ids=[]),
+        revoke_and_fail,
+    )
+    async with running(env, monkeypatch, response=httpx2.ReadTimeout("lost")) as (
+        group,
+        requests,
+        rt,
+    ):
+        access.append(rt.service.results.access)
+        await group.ask(request)
+        assert len(requests) == 1
+        assert "重发可能重复" in message_text(group.outbox.sent[-1][1])
 
 
 async def test_current_group_membership_is_checked_before_post(env, monkeypatch):

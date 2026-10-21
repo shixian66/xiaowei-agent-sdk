@@ -451,7 +451,10 @@ async def receipt_notice(engine: AsyncEngine, identity: Identity) -> str | None:
                 .all()
             )
     except (OSError, SQLAlchemyError):
-        return "通知发送状态暂无法核验，不能据此判断已发送或未发送；不要自动重发。"
+        return (
+            "通知发送状态暂无法核验，不能据此判断已发送或未发送；"
+            "消息可能已发出，重发可能重复；不要自动重发。"
+        )
     lines = []
     for row in rows:
         state = row["state"]
