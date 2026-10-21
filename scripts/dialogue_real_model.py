@@ -12,6 +12,7 @@ import json
 import shutil
 import subprocess
 import sys
+from contextlib import nullcontext
 from pathlib import Path
 
 import httpx2
@@ -19,12 +20,14 @@ from tests.sdk_core.dialogue_gate import (
     AUTONOMY_SCENARIOS,
     E6_SCENARIOS,
     ENV_SCENARIOS,
+    P4_SCENARIOS,
     R3_SCENARIOS,
     R7_SCENARIOS,
     ReviewSample,
     ReviewVerdict,
     run_dialogue,
 )
+from tests.sdk_core.dialogue_monitoring import synthetic_monitoring_sources
 from tests.sdk_core.postgres_harness import isolated_database
 
 import xiaowei
@@ -47,12 +50,18 @@ ENV_REVIEW_LABELS = {
     "environment_scope_correct": "只在用户当时明确的环境取数，未选时先问",
     "diagnosis_basis_sufficient": "诊断依据充分，或如实说明缺少什么",
 }
+P4_REVIEW_LABELS = {
+    "query_constraints_preserved": "日期、时区、排序、LIMIT、去重或统计口径符合请求",
+    "answer_focused": "实际正文围绕所问关键事实，没有日志式原值或虚构100行",
+    "history_reuse_correct": "排版追问复用获准历史，不新增取数或冒称刷新",
+}
 SUITES = {
     "r3": R3_SCENARIOS,
     "r7": R7_SCENARIOS,
     "e6": E6_SCENARIOS,
     "env": ENV_SCENARIOS,
     "autonomy": AUTONOMY_SCENARIOS,
+    "p4": P4_SCENARIOS,
 }
 
 
@@ -70,13 +79,45 @@ async def review_sample(sample: ReviewSample) -> ReviewVerdict:
         )
     print("按目标记录的实际 I/O：", file=sys.stderr)
     print(json.dumps(sample.statements, ensure_ascii=False, indent=2), file=sys.stderr)
-    print("已校验的交付：", file=sys.stderr)
-    print(
-        "无交付"
-        if sample.delivery is None
-        else json.dumps(sample.delivery.model_dump(mode="json"), ensure_ascii=False, indent=2),
-        file=sys.stderr,
-    )
+    if sample.channel_delivery is None:
+        print("已校验的交付：", file=sys.stderr)
+        print(
+            "无交付"
+            if sample.delivery is None
+            else json.dumps(sample.delivery.model_dump(mode="json"), ensure_ascii=False, indent=2),
+            file=sys.stderr,
+        )
+    else:
+        captured = sample.channel_delivery
+        print("实际渠道状态/回执（I/O替身，不证明真实客户端可见时间）：", file=sys.stderr)
+        print(json.dumps(captured.metrics(), ensure_ascii=False), file=sys.stderr)
+        print(
+            "默认卡片正文（按协议结构）：" + json.dumps(captured.visible_text, ensure_ascii=False),
+            file=sys.stderr,
+        )
+        print(
+            "完整卡片/详情：" + json.dumps(captured.messages, ensure_ascii=False), file=sys.stderr
+        )
+        for report in captured.files:
+            print(
+                "文件即时核对："
+                + json.dumps(
+                    {"filename": report.filename, "content": report.content.decode()},
+                    ensure_ascii=False,
+                ),
+                file=sys.stderr,
+            )
+    if sample.monitoring_calls:
+        print(
+            "实际合成 MCP 调用：" + json.dumps(sample.monitoring_calls, ensure_ascii=False),
+            file=sys.stderr,
+        )
+    if any(sample.fixture_limits.values()):
+        print(
+            "夹具限制（需核对真实语义，不能据此判 Agent 失败）："
+            + json.dumps(sample.fixture_limits, ensure_ascii=False),
+            file=sys.stderr,
+        )
     if sample.scenario.startswith("e6_"):
         format_ = (
             None if sample.delivery is None else getattr(sample.delivery, "report_format", None)
@@ -91,6 +132,8 @@ async def review_sample(sample: ReviewSample) -> ReviewVerdict:
         allowed = "、".join(sorted(scenario.environments[sample.turn - 1])) or "未选定"
         print(f"本轮用户明确的环境：{allowed}", file=sys.stderr)
         labels |= ENV_REVIEW_LABELS
+    if sample.scenario.startswith("p4_"):
+        labels |= P4_REVIEW_LABELS
     values: dict[str, bool | None] = {}
     for field, label in labels.items():
         while True:
@@ -110,15 +153,17 @@ async def collect(profile_path: Path, repeats: int, suite: str = "u1") -> dict[s
     harness = harness_sha256()
     profile = load_profile(profile_path)
     check_postgres()
-    async with isolated_database() as url:
-        results = await run_dialogue(
-            profile,
-            url,
-            lambda: httpx2.AsyncHTTPTransport(retries=0, trust_env=False),
-            repeats=repeats,
-            **({"scenarios": SUITES[suite]} if suite in SUITES else {}),
-            manual_review=review_sample,
-        )
+    with synthetic_monitoring_sources() if suite == "p4" else nullcontext(None) as monitoring:
+        async with isolated_database() as url:
+            results = await run_dialogue(
+                profile,
+                url,
+                lambda: httpx2.AsyncHTTPTransport(retries=0, trust_env=False),
+                repeats=repeats,
+                **({"scenarios": SUITES[suite]} if suite in SUITES else {}),
+                **({"monitoring": monitoring} if monitoring is not None else {}),
+                manual_review=review_sample,
+            )
     if source_sha() != sha or harness_sha256() != harness:
         raise ConfigurationError("运行期间产品或评估框架版本发生变化，不生成合入证据")
     return {
@@ -161,6 +206,10 @@ def harness_sha256() -> str:
     for path in (
         "tests/sdk_core/gate0.py",
         "tests/sdk_core/dialogue_gate.py",
+        "tests/sdk_core/dialogue_delivery.py",
+        "tests/sdk_core/dialogue_monitoring.py",
+        "tests/sdk_core/test_feishu_render.py",
+        "tests/sdk_core/mcp_fixture.py",
         "scripts/dialogue_real_model.py",
     ):
         harness.update((ROOT / path).read_bytes())

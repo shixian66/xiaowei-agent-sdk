@@ -24,14 +24,14 @@ pytestmark = pytest.mark.loopback
 BASE = "8503099fb403afb2cc5bc4da0eab3b22618606f2"
 
 
-def _source_tree(path: Path, *, baseline: bool = False) -> str:
+def _source_tree(path: Path, *, baseline: bool = False, revision: str | None = None) -> str:
     """真实 Git 源码树；产品来自基线/候选，评估框架仍只使用同一份。"""
     path.mkdir()
     git = shutil.which("git")
     assert git is not None
-    if baseline:
+    if baseline or revision is not None:
         archive = subprocess.check_output(  # noqa: S603 -- fixed Git archive; no shell.
-            [git, "archive", BASE, "src"], cwd=command.ROOT
+            [git, "archive", revision or BASE, "src"], cwd=command.ROOT
         )
         with tarfile.open(fileobj=io.BytesIO(archive)) as bundle:
             bundle.extractall(path, filter="data")
@@ -311,10 +311,99 @@ async def test_collector_binds_worktree_and_profile_without_content_report(
     )
 
 
+@pytest.mark.parametrize("suite", ["u1", "p4"])
 def test_noninteractive_cli_refuses_before_loading_profile_or_calling_model(
     monkeypatch: pytest.MonkeyPatch,
+    suite: str,
 ) -> None:
     monkeypatch.setattr(command.sys, "stdin", io.StringIO())
-    monkeypatch.setattr(command.sys, "argv", ["dialogue_real_model", "--profile", "unused.json"])
+    monkeypatch.setattr(
+        command.sys, "argv", ["dialogue_real_model", "--profile", "unused.json", "--suite", suite]
+    )
     monkeypatch.setattr(command, "load_profile", lambda _: pytest.fail("不能触发模型前提读取"))
     assert command.main() == 2
+
+
+async def test_p4_review_shows_actual_channel_material_and_separate_quality_questions(
+    monkeypatch, capsys
+):
+    from tests.sdk_core.dialogue_delivery import ChannelDelivery
+
+    from xiaowei.feishu_report import ReportFile
+
+    captured = ChannelDelivery(0, messages=[{"text": "VISIBLE_SENTINEL"}], state="unknown")
+    captured.files.append(ReportFile("md", "p4.md", b"FILE_SENTINEL", "0" * 64))
+    sample = ReviewSample(
+        scenario="p4_original_dialogue",
+        repeat=1,
+        turn=1,
+        mode="query",
+        message="REQUEST_SENTINEL",
+        state="completed",
+        failure=None,
+        delivery=Delivery(content="INTERNAL_SENTINEL", channel="feishu", evidence_ids=()),
+        statements=(("fat", "query", "SQL_SENTINEL"),),
+        channel_delivery=captured,
+        monitoring_calls=(("prometheus-prod", "query", {"query": "PROMQL_SENTINEL"}),),
+    )
+    monkeypatch.setattr(command.sys, "stdin", io.StringIO("a\n" * 8 + "y\nn\na\n"))
+    verdict = await command.review_sample(sample)
+    shown = capsys.readouterr()
+    assert shown.out == ""
+    assert all(
+        value in shown.err
+        for value in (
+            "VISIBLE_SENTINEL",
+            "FILE_SENTINEL",
+            "SQL_SENTINEL",
+            "PROMQL_SENTINEL",
+            "unknown",
+        )
+    )
+    assert verdict.query_constraints_preserved is True
+    assert verdict.answer_focused is False
+    assert verdict.history_reuse_correct is None
+    assert "SENTINEL" not in json.dumps(verdict.model_dump())
+
+
+def test_p4_collector_runs_same_harness_on_repair_baseline_and_candidate(tmp_path):
+    program = """
+import asyncio, json
+from scripts import dialogue_real_model as command
+from dataclasses import replace
+from tests.sdk_core.dialogue_gate import P4_SCENARIOS, run_dialogue
+from tests.sdk_core.test_app import Scripts, answer, evidence_in, tool_call
+from tests.sdk_core.test_autonomy_tasks import TOP3_SQL
+from tests.sdk_core.test_model_api import OPENAI as PROFILE
+command.load_profile = lambda _: PROFILE
+command.check_postgres = lambda: None
+case = next(s for s in P4_SCENARIOS if s.name == "p4_original_dialogue")
+case = replace(case, messages=(case.messages[1],), environments=(case.environments[1],))
+scripts = Scripts()
+scripts.add(case.messages[0][1],
+    tool_call("run_readonly_query", cluster="fat", sql=TOP3_SQL),
+    lambda call: answer(evidence_in(call), "HARNESS_SENTINEL", report_format="md"))
+async def offline_run(profile, url, network, **kwargs):
+    kwargs["scenarios"] = (case,)
+    return await run_dialogue(profile, url, scripts.transport, **kwargs)
+command.run_dialogue = offline_run
+command.review_sample = lambda sample: asyncio.sleep(0, result=command.ReviewVerdict())
+print(json.dumps(asyncio.run(command.collect(None, 1, "p4"))))
+"""
+    reports = []
+    for label, revision in (
+        ("baseline", "bb0b1e75ead3e12e608e17eeeb83285dd7feb90d"),
+        ("candidate", None),
+    ):
+        path = tmp_path / label
+        sha = _source_tree(path, revision=revision)
+        report = _probe(path, program)
+        sample = report["samples"][0]
+        assert report["source_sha"] == sha
+        assert sample["state"] == "completed" and sample["delivery"]["state"] == "sent"
+        assert sample["delivery"]["file_count"] >= 1
+        assert sample["manual_review_required"] is True
+        assert "HARNESS_SENTINEL" not in json.dumps(report)
+        reports.append(report)
+    assert reports[0]["source_sha"] != reports[1]["source_sha"]
+    assert reports[0]["harness_sha256"] == reports[1]["harness_sha256"]
