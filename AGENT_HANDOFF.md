@@ -15,7 +15,7 @@
 | 锁定依赖 | SDK `0.22.3`、Lark Channel `1.4.0`、MCP `2.2.0`、sqlglot `30.17.0`、`nh3 0.3.7`、`tinycss2 1.5.1`、Pillow `13.0.0`、certifi `2026.10.19`（后两项为严格审计发现的既有漏洞定向升级） |
 | 正式入口 | `xiaowei serve`、`config check`、`model check`、`storage init/upgrade/cleanup`、`requests resend`；命令与环境准备以 README 为准 |
 | 最近有记录的公司部署 | 既有交接记录称 PR #110 / `4e0ab86` 已部署，并记录了部署后的回答拒收反馈。该历史记录不证明当前镜像、配置或健康状态，也不证明 #111–#114 已部署 |
-| 当前验收结论 | A 实施中：正式群入口、SDK/治理与隔离 PG 的成功和拒绝路径已建立，边界与回归仍在执行；最终结果按本次交付记录。B–D 未实现，不继承旧 CI 或设计复审为功能证据 |
+| 当前验收结论 | A 本地实现与分批离线验证通过，独立复审覆盖产品源码 `18159b0`；真实模型/机器人未验收。B–D 未实现，不继承旧 CI 或设计复审为功能证据 |
 | 当前任务授权 | 用户已授权按批准范围连续实现、测试和常规修复；当前串行完成 A。真实模型、公司源、真实 Webhook、部署/合入未授权；生产写仍逐次审批。独立环境按锁文件安装，测试使用仓库标识的隔离 PostgreSQL |
 
 原工作目录的 ARCHITECTURE 差异与未跟踪计划/公司配置保留，未复制到本工作树；本次未读取公司配置凭据。旧回答修复计划及验证记录保留为历史证据，不能作为本次定时任务的实施授权。当前任务只按下面的新设计/计划接续。
@@ -37,13 +37,15 @@
 
 ## 3. 当前计划与下一项工作
 
-### 通知与定时任务：当前 A 片实施
+### 通知与定时任务：A 离线候选已交付
 
 [设计 v1.3](docs/superpowers/specs/2026-10-21-scheduled-agent-tasks.md)维护技术依据与固定 U1–U7；[A–D 计划 v1.3](docs/superpowers/plans/2026-10-21-scheduled-agent-tasks.md)维护切片验收。本次已同步 ARCHITECTURE 的旧草案，以批准的规范化定义、Evidence 依赖/期限和创建者＋原群权限口径接续。A 即时多机器人通知 → B 一次性固定提醒 → C 通用独立 Agent 周期任务 → D Node 核心巡检。
 
 A 已增加窄 notify effect，独立发送许可不扩展数据库/生产写权限。后续源码缺口：原 Action 是短期单次批准，B 须验证激活独立 job 授权；现有 Prometheus MCP 文本丢失结构化信息，D 不能猜解析，届时再补必要的受治理结构化读取。
 
-当前 A 专项36项通过，覆盖真实群事件→正式 runtime/Application→SDK Runner→治理→隔离 PG→HTTP 替身；源/工具接收范围、个人发送权、并发/重复、签名、超时、落库失败与重启均有用例。ruff 全仓及 mypy（36源文件）通过；首次全套4521通过、2处 CLI 旧版本断言失败，已按新迁移更新为13并在真实 CLI 两用例通过。最终完整回归和具体候选独立审查待记录，不把首次混合运行作为最终候选通过。接续先完成 A，不同时实现 B–D。真实模型/机器人、Node API 及部署未授权，旧实战缺口不因此关闭。
+A 已实现：静态多机器人、安全凭据引用、个人发送许可、notify 治理、全可见 Evidence/接收范围复核、显式事实纯文本渲染、先落库后 POST 与独立回执。发送权限与安全群回执读取分开；普通查询仍完整交付，外发不自动补上未选择结果。unknown/回执暂不可核验均告知重复风险，不自动重发；已 accepted 不因后续模型/Session 失败变成未发。
+
+接续项是 B 的一次性固定提醒，先验证现有 ActionBinding 激活独立授权、定义 Evidence 依赖/TTL 和直接暂停/取消；不同时实现 C/D。A 的真实 U1–U4 仍须先获模型 Profile、费用及测试机器人授权，不得把离线通过当作真实能力、群内实收或生产开放。
 
 ### 已合入的相关工作
 
@@ -122,17 +124,24 @@ B1 的短口径主视图修复已成立；原 B2 因复现形状不符合真实 
 
 ## 5. 验证记录与限制
 
-### 2026-10-21 通知/定时任务文档核验
+### 2026-10-21 A 通知候选验证
 
-基于 `691804424f8bf3ed04c32f806a291cfafa053266`，只修改四份根文档、新增设计与 A–D 计划；产品源码、配置、依赖及数据库未改。使用本仓库既有 Python 环境，显式 `PYTHONPATH=src`，SDK `0.22.3`、httpx2 `2.13.1`；无网络脚本模型测试及文档检查 **4 passed**：`tests/security/test_docs_command_consistency.py`，及 `tests/sdk_core/test_sdk_contract.py` 的 `test_real_runner_calls_tool_and_returns_typed_answer`、`test_default_tracing_has_no_export`。执行 `python -m pytest -q -p no:cacheprovider` 并明确选择上述文件/节点；禁字节码/pytest 缓存。
+实现基线为批准设计 `71398cf8e7f076e6bc3c840a6566ca49a7709f00`，分支 `codex/webhook-notifications`。最终产品源码/依赖及独立复审版本为 `18159b0fb4237ac9e3b8b11883f5925f8a361dea`；`09450830a1a798ff9ca282381717da76cedf4fc6` 仅同步测试预期并补直接 v12→v13 升级。原工作目录的 HEAD、已有修改与公司配置保持不动。使用本工作树独立 `.venv`、Python 3.11.16、SDK 0.22.3、仓库标识的隔离 PostgreSQL；只替换模型、成员目录、数据库驱动及 Webhook HTTP，无真实模型/飞书/公司源调用。
 
-在最终设计候选 `40eed6c4092dc8b872e2f3d603428eef127d91b7` 再跑文档命令检查 **2 passed**，本次六份文件的 **134 个本地链接路径均存在**、U1–U7 索引和架构显式锚点存在，`git diff --check` 通过；未做全仓锚点/外网链接可用性检查。首次链接检查发现旧 handoff 指向未入库的本机记录，下文已注明当前不可复核。本轮没有跑 PostgreSQL/完整审批恢复、全套产品回归或真实模型/指标/Webhook，未部署，检查不证明新功能可用。
+| 检查 | 实际结果与边界 |
+| --- | --- |
+| 正式群事件→runtime/Application→真 SDK→治理→隔离 PG→HTTP 替身 | 通知专项 **44 passed**；包括 U1–U4、并发/新 call_id、防重、签名、接收工具/源、无权用户/渠道、历史回放、未选数据不外发、未展示风险禁重发、取消/落库/Session 故障与凭据轮换。脚本模型不证明自然语言自主能力 |
+| 产品完整回归（排除单独执行的 deployment） | 在 `18159b0` 执行 `python -m pytest -q -p no:cacheprovider --ignore=tests/deployment`：**4470 passed、13 failed、235 skipped、89 deselected**。13项全为当前版本/新回执字段的旧预期；不是全套通过 |
+| 失败修正后的受影响模块 | `python -m pytest -q -p no:cacheprovider tests/sdk_core/test_storage_v2.py tests/sdk_core/test_runtime.py tests/sdk_core/test_evidence.py tests/sdk_core/test_webhook_notification.py`：**290 passed**，包含全部13个原失败及新增直接 v12→v13 保留历史测试。仅改测试，产品源码与上述完整运行相同；据此记录分批覆盖通过，未重跑单次完整全绿 |
+| 发行必需检查 | `python -m pytest -q -x -p no:cacheprovider tests/deployment/test_release.py tests/deployment/test_compose.py tests/deployment/test_maintenance.py tests/deployment/test_release_workflow.py`：**84 passed**，真实本机隔离容器、升级/回退及配套备份恢复。不是公司部署 |
+| 依赖与正式包 | 严格 `pip-audit --strict` 通过；审计发现的既有 Pillow/certifi 漏洞仅定向升级到13.0.0/2026.10.19，Python 3.11兼容，图片/CLI相关145项通过。最新 wheel 在无dev依赖环境的 `xiaowei --help`、`python -m xiaowei --help` 通过，含新迁移，不含测试/公司配置 |
+| 静态与秘密 | `ruff check --no-cache .`、`mypy --cache-dir=/tmp/xiaowei-webhook-mypy src`（36文件）、`git diff --check` 通过。gitleaks8.30.0官方校验、自测及全历史扫描通过（产品候选676提交，无泄漏）；未弱化 allowlist。文档命令2项、139个本地路径及定时章节锚点通过，未验证外网链接/全仓锚点 |
 
-补充公开 SDK 核验：尝试运行 `test_sdk_hitl_reuse.py` 两个无存储节点时，因既有本地环境缺少新主线依赖 `nh3` 而在收集阶段失败；没有安装依赖或修改产品。随后直接使用 SDK 0.22.3 的 Agent/Runner/needs_approval/RunState/ScriptedModel 做纯内存实验（关闭 tracing/export processors）：暂停前零执行、批准后执行、拒绝不执行；同一快照重复批准恢复会执行两次。这只证明 SDK 本身不提供业务防重，支持设计中原子 run/attempt 的必要性，不算完整 Action/PG 通过或产品缺陷。
+上述 PG 命令均设置隔离 `SDK_TEST_POSTGRES_URL`，禁字节码并关闭pytest缓存。失败完整运行和后续分批通过分开保留；本机日志 `/tmp/xiaowei-webhook-final-product-suite.log`、`/tmp/xiaowei-webhook-post-suite-fixes.log`、`/tmp/xiaowei-webhook-p3-after-cleanup.log` 是临时证据，不能假称远端 CI 或永久附件。发行早期失败除旧 schema 夹具/预期外，曾由 Docker 30G 数据盘耗尽导致；捕获 initdb 的 `No space left on device`。用户明确批准后，逐个复核并非强制清理清单内78个无标签/无容器引用旧构建镜像，保留全部有标签镜像、容器和卷，恢复约1.8GiB再跑发行全套通过。
 
-独立只读设计审查覆盖 base `691804424f8bf3ed04c32f806a291cfafa053266` → head `79053c4c851f4f83b8ee2ea7ca3a08a129aa2d31` 六份 Markdown，并核对治理、Action、Application、StaticAccess、Evidence、渠道、Prometheus 结果/协议及本地 SDK 公开接口；未运行服务/测试。发现两项 P2：长期任务正文的历史事实缺少来源/期限约束，Node 选择器硬权限表述与既有按源共享契约冲突；无 P1。对 `53f300bfe2bbf86d5f668476f835467fc3def23c` 增量复核已关闭 Node 问题，仍保留“自由正文缺少可执行来源边界”P2。最终修订限定服务端绑定的用户原文和可信参数，不保存模型自由 brief，不要求自然语言来源分类器；历史业务事实到点重新取证，U3 即时转发保留。
+独立审查对 `1dfbc62` 曾发现未选择结果自动外发、共享会话被个人发送权阻断、回执读取异常三项问题，修复前回归先失败。对 `7763447` 增量复审关闭旧项，后续对 `18159b0` 的回执读取/撤权风险提示增量再审通过，并独立运行4项拒绝/主动重发回归；其余全部检查由作者执行。后续测试与文档同步不修改产品源码，普通文档修订不冒称再次独立审查。批准的 v1.3 取代旧“限定用户原文”的设计关闭机制；B/C 仍须验证完整定义依赖、源归属和最早期限。
 
-对 `53f300b…→40eed6c4092dc8b872e2f3d603428eef127d91b7` 的旧复核曾以“限定原文”关闭 P2；该机制已被批准的 v1.3 替代，此关闭结论不再覆盖当前方案。独立复审对 `37574e96eb759000f059574ec2dc07e57fa3be6e` 的设计差异无开工阻断，四项实施验收已纳入 v1.3。B/C 须验证完整模型可见定义依赖、源归属和最早期限；无旧依赖定义独立于原 Session，带依赖内容不能延长数据 TTL。本地 Action、长期授权/恢复与真实模型/源/Webhook 仍保留各片门槛，设计审查不代表功能验收。
+真实 U1–U4 的意图选择、答案质量、实际工具数/耗时/用量、机器人关键词/IP/签名/限流、群成员实收及部署均未验证。B–D未实现；长期任务 ActionBinding、清理/权限/TTL 与 Node API 结构化数据仍按各片门槛接续，不因 A 完成豁免。
 
 既有 #120 的 P4 记录曾保存在原工作树 `.superpowers/sdd/2026-10-20-production-dialogue-answer-repair/p4-results.md`，当前工作树不含该本机文件；源码差异可从 `6918044` 查回，不能据未随 Git 保存的材料新增实测结论。该切片只更改测试、采集脚本和相关文档；不关闭 A1、真实 P4 或客户端验收。采集器的首个正文回执指标不等于用户实际看见答案；完整交付依赖全部绑定分项确认。有限 PromQL 与 SQLite 夹具的能力限制单列，不能凭脚本模型给自然语言任务打通过分。
 
