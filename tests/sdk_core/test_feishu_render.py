@@ -301,6 +301,38 @@ def test_capacity_notice_preserves_no_fragment_of_mandatory_provenance() -> None
     assert len(message["text"]) <= 200 and size(message) <= 30_000
 
 
+@pytest.mark.parametrize("status", ["accepted", "failed", "unknown"])
+def test_capacity_fallback_preserves_notification_outcome(status: str) -> None:
+    notice = f"通知 {status}；结果未知时可能已发送，重发可能重复。"
+    output = delivery(fact(note="必要限制" * 400)).model_copy(
+        update={"notification_notice": notice}
+    )
+    message = build_feishu_message(output, 400, "oc_test")
+    assert message == {"text": CAPACITY_NOTICE + "\n" + notice}
+    with pytest.raises(ValueError):
+        build_feishu_message(output, len(CAPACITY_NOTICE + "\n" + notice) - 1, "oc_test")
+
+
+def test_report_preview_fallback_preserves_notification_warning() -> None:
+    from xiaowei.feishu_delivery import _preview
+
+    warning = "上一条结果未知，可能已经发过，重发可能重复。"
+    output = delivery(
+        *(fact(evidence_id=f"ev_{i}", note="必要限制" * 400) for i in range(8))
+    ).model_copy(update={"notification_notice": warning})
+    message = _preview(output, 400, "oc_test", None, "完整结果见附件。", attachment=True)
+    assert "预览无法" in message["text"] and warning in message["text"]
+
+
+def test_code_only_notification_outcome_is_not_clipped_to_look_sent() -> None:
+    warning = "上一条结果未知，可能已经发过，重发可能重复。"
+    output = Delivery(
+        content="后续回答失败。", evidence_ids=(), channel="feishu", notification_notice=warning
+    )
+    with pytest.raises(ValueError):
+        build_feishu_message(output, 25, "oc_test")
+
+
 def test_pagination_is_not_reported_as_loss_but_real_value_loss_is() -> None:
     paged = fact(tool_id="local/list_tables", truncated=True, metadata={"next_cursor": "cursor"})
     shown = "\n".join(

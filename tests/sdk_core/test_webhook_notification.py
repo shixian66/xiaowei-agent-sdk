@@ -70,7 +70,9 @@ def configured(env, *, sender=True, bots=None):
 
 
 @asynccontextmanager
-async def running(env, monkeypatch, *, sender=True, response=None, member_check=None, bots=None):
+async def running(
+    env, monkeypatch, *, sender=True, response=None, member_check=None, bots=None, config=None
+):
     monkeypatch.setenv("XW_TEST_WEBHOOK_URL", URL)
     requests = []
 
@@ -87,7 +89,7 @@ async def running(env, monkeypatch, *, sender=True, response=None, member_check=
             return await member_check(chat, subject)
         return chat == CHAT and subject == A
 
-    cfg = configured(env, sender=sender, bots=bots)
+    cfg = config or configured(env, sender=sender, bots=bots)
     async with runtime.open_runtime(
         cfg,
         clock=env.clock,
@@ -155,6 +157,30 @@ async def test_same_text_with_new_call_id_still_posts_once(env, monkeypatch):
     async with running(env, monkeypatch) as (group, requests, _rt):
         await group.ask(request)
         assert len(requests) == 1
+
+
+async def test_u1_multiline_text_is_exact_after_unrelated_query_history(env, monkeypatch):
+    query = script(
+        env,
+        "先查一次销售",
+        tool_call(
+            "run_readonly_query", cluster=SR.target_id, sql="SELECT region, total FROM shop.sales"
+        ),
+        cite(),
+    )
+    message = "第一行：22:00 检查\r\n第二行：23:00 复核"
+    send = script(
+        env,
+        "给机器人发两行文字",
+        tool_call("send_webhook_message", bot_alias="ops_alert_bot", text=message, evidence_ids=[]),
+        tool_call("send_webhook_message", bot_alias="ops_alert_bot", text=message, evidence_ids=[]),
+        cite(),
+    )
+    async with running(env, monkeypatch) as (group, requests, _rt):
+        await group.ask(query)
+        await group.ask(send)
+        assert len(requests) == 1
+        assert json.loads(requests[0].content)["content"]["text"] == message.replace("\r\n", "\n")
 
 
 async def test_text_notification_does_not_forward_unselected_current_query(env, monkeypatch):
@@ -349,7 +375,7 @@ async def test_u3_historical_facts_use_code_rendering(env, monkeypatch):
         return tool_call(
             "send_webhook_message",
             bot_alias="ops_alert_bot",
-            text="巡检说明",
+            text="巡检说明第一行\n第二行结论",
             evidence_ids=evidence_in(call),
         )(call)
 
@@ -362,6 +388,8 @@ async def test_u3_historical_facts_use_code_rendering(env, monkeypatch):
         assert "工具结果（系统根据证据生成）" in content
         assert "模型说明（未经系统核实）" in content
         assert "100" in content and "east" in content
+        assert "巡检说明第一行\n第二行结论" in content
+        assert "ev_" not in content and '"rows"' not in content
 
 
 async def test_unreferenced_historical_data_still_requires_recipient_permission(env, monkeypatch):
@@ -452,6 +480,92 @@ async def test_unknown_with_undelivered_warning_does_not_post_in_next_turn(env, 
         await group.ask(again)
         assert len(requests) == 1
         assert "本轮未发送" in message_text(group.outbox.sent[-1][1])
+
+
+async def test_unknown_capacity_failed_parent_preserves_warning_and_blocks_resend(env, monkeypatch):
+    from functools import partial
+
+    from xiaowei import feishu_delivery
+
+    monkeypatch.setattr(
+        feishu_delivery,
+        "build_feishu_message",
+        partial(feishu_delivery.build_feishu_message, max_bytes=1000),
+    )
+    first = script(
+        env,
+        "发送后只有容量提示能放下",
+        tool_call("send_webhook_message", bot_alias="ops_alert_bot", text=TEXT, evidence_ids=[]),
+        cite(),
+    )
+    again = script(
+        env,
+        "仍然要再发一次",
+        tool_call("send_webhook_message", bot_alias="ops_alert_bot", text=TEXT, evidence_ids=[]),
+        cite(),
+    )
+
+    async with running(env, monkeypatch, response=httpx2.ReadTimeout("lost")) as (
+        group,
+        requests,
+        _rt,
+    ):
+        await group.ask(first)
+        first_reply = message_text(group.outbox.sent[-1][1])
+        assert "预览无法" in first_reply and "重发可能重复" in first_reply
+        # 必需文件未交付，预览只能尽力提示；整个父交付仍失败，不能解除风险门槛。
+        assert await env.scalar("SELECT delivery FROM xiaowei_request") == "failed"
+        await group.ask(again)
+        assert (
+            await env.scalar(
+                "SELECT reason FROM xiaowei_notification_attempt ORDER BY sequence DESC LIMIT 1"
+            )
+            == "duplicate_warning"
+        )
+        assert len(requests) == 1  # 已证明父交付失败；原成功交付后的二次 POST 用例另行保持。
+
+
+async def test_unknown_gate_is_shared_across_group_senders(env, monkeypatch):
+    first = script(
+        env,
+        "A发出但警告未送达",
+        tool_call("send_webhook_message", bot_alias="ops_alert_bot", text=TEXT, evidence_ids=[]),
+        cite(),
+    )
+    second = "B要求发同一条"
+    third = "风险已提示，B仍明确要求发送"
+    for message in (second, third):
+        env.scripts.add(
+            attributed(B, message),
+            tool_call(
+                "send_webhook_message", bot_alias="ops_alert_bot", text=TEXT, evidence_ids=[]
+            ),
+            cite(),
+        )
+
+    async def members(chat, subject):
+        return chat == CHAT and subject in {A, B}
+
+    cfg = configured(env)
+    cfg = cfg.model_copy(
+        update={
+            "access": cfg.access.model_copy(
+                update={
+                    "grants": {**cfg.access.grants, B: frozenset({TOOL})},
+                }
+            )
+        }
+    )
+    async with running(
+        env, monkeypatch, config=cfg, member_check=members, response=httpx2.ReadTimeout("lost")
+    ) as (group, requests, _rt):
+        group.outbox.outcomes.append("failed")
+        await group.ask(first)
+        await group.ask(second, sender=B)
+        assert len(requests) == 1
+        assert "本轮未发送" in message_text(group.outbox.sent[-1][1])
+        await group.ask(third, sender=B)
+        assert len(requests) == 2
 
 
 async def test_accepted_survives_evidence_record_failure(env, monkeypatch):
@@ -562,6 +676,45 @@ async def test_post_started_but_unsettled_recovers_as_unknown_without_retry(
             assert (
                 await conn.execute(sql("SELECT state FROM xiaowei_notification_attempt"))
             ).scalar_one() == "unknown"
+
+
+async def test_inactive_group_request_is_not_sent_without_aborting_tool(env, monkeypatch):
+    from agents.tool_context import ToolContext
+
+    from xiaowei.models import Budget, Identity, RunContext
+
+    async with running(env, monkeypatch) as (_group, requests, rt):
+        ctx = RunContext(
+            identity=Identity(
+                subject_id=A,
+                session_id="inactive",
+                turn_id="inactive",
+                channel="feishu",
+                owner=GROUP.owner,
+            ),
+            tool_scope=frozenset({TOOL}),
+            target_scope=frozenset({"notifications"}),
+            budget=Budget(max_turns=2, max_tool_calls=2, timeout_seconds=5, max_scope_checks=10),
+        )
+        notifications = rt.service._app.notifications
+        assert notifications is not None
+        tool = notifications.tool(ctx, lambda: ())
+        arguments = json.dumps({"bot_alias": "ops_alert_bot", "text": TEXT, "evidence_ids": []})
+        result = json.loads(
+            await tool.on_invoke_tool(
+                ToolContext(
+                    context=ctx,
+                    tool_name=tool.name,
+                    tool_call_id="inactive",
+                    tool_arguments=arguments,
+                ),
+                arguments,
+            )
+        )
+        assert result["data"]["status"] == "not_sent"
+        assert result["data"]["reason"] == "request_not_active"
+        assert requests == []
+        assert await env.scalar("SELECT count(*) FROM xiaowei_notification_attempt") == 0
 
 
 async def test_same_target_credential_rotation_does_not_reset_attempts(env, monkeypatch):

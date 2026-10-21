@@ -23,6 +23,7 @@ from sqlalchemy.ext.asyncio import AsyncEngine
 
 from xiaowei.config import is_secret_ref, resolve_secret_ref
 from xiaowei.evidence import RecipientRejectedError
+from xiaowei.feishu_render import display_text, fact_limit_notices
 from xiaowei.governance import GovernedTools, Projection, ToolPolicy
 from xiaowei.models import (
     AUDIENCES,
@@ -30,6 +31,9 @@ from xiaowei.models import (
     MAX_ANSWER_TEXT_BYTES,
     AgentAnswer,
     Audience,
+    Delivery,
+    DeliveryFact,
+    DeliveryText,
     FactBlock,
     Identity,
     RunContext,
@@ -46,6 +50,7 @@ TOOL = "notifications/send_webhook_message"
 TARGET = "notifications"
 MAX_BODY_BYTES = 20_000
 UNKNOWN_NOTICE = "上一条结果未知，可能已经发过，重发可能重复。"
+APPROVAL_NOTICE = "批准后不会自动通知，完成后请另发通知要求。"
 _URL = re.compile(r"https://open\.feishu\.cn/open-apis/bot/v2/hook/[A-Za-z0-9_-]+\Z")
 
 
@@ -87,6 +92,8 @@ def catalog(
         "不接受 URL。text 是明确文字或模型说明；转发业务事实时 evidence_ids 选实际可见证据，"
         "代码生成事实并独立校验接收权限，不能把原始结果抄进 text 绕过。"
         "未引用的全部可见证据同样受接收许可约束。"
+        "recipient_not_authorized 表示含机器人不能接收的可见历史；换字不能消除依赖。"
+        "可请用户显式 /新建 后重新完整提出纯文字要求，但须说明会切换全群共享上下文；不能自动新建。"
         "text 最多16000 UTF-8字节，复用现有回答容量；完整请求最多20000字节，"
         "超限为 not_sent，请缩短说明、减少事实或重新取得有界摘要，不静默截断。"
         "accepted 仅表示接口接受，failed 为明确失败，unknown 可能已发送，均不可自动重试；"
@@ -159,6 +166,41 @@ def _body(bot: _Bot, content: str, clock: Callable[[], datetime]) -> bytes:
             timestamp=stamp, sign=base64.b64encode(hmac.digest(key, b"", "sha256")).decode("ascii")
         )
     return json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode()
+
+
+def _notification_text(delivery: Delivery, text: str) -> str:
+    """只渲染已校验的飞书事实；不把 Web 的转义 content 当通知正文。"""
+    if not delivery.facts:
+        return text
+
+    def fact_lines(fact: DeliveryFact) -> list[str]:
+        lines = [
+            "工具结果（系统根据证据生成）",
+            f"来源 {fact.tool_id} · 目标 {fact.target_id} · 采集于 {fact.captured_at.isoformat()}",
+            *([fact.note] if fact.note else []),
+            *fact_limit_notices(fact),
+        ]
+        for key, value in fact.metadata.items():
+            shown = value if isinstance(value, str) else json.dumps(value, ensure_ascii=False)
+            lines.append(f"{key}: {shown}")
+        for index, row in enumerate(fact.rows, 1):
+            lines.append(f"第 {index} 行")
+            for column in fact.columns:
+                value = row.get(column)
+                shown = value if isinstance(value, str) else json.dumps(value, ensure_ascii=False)
+                lines.append(f"{column}: {shown}" if column in row else f"{column}: （未提供）")
+        return [display_text(line) for line in lines]
+
+    facts = {f.evidence_id: f for f in delivery.facts}
+    lines = list(delivery.notices)
+    for fact in delivery.section("action"):
+        lines.extend(fact_lines(fact))
+    for block in delivery.blocks:
+        if isinstance(block, DeliveryText):
+            lines.extend(("模型说明（未经系统核实）", block.text))
+        else:
+            lines.extend(fact_lines(facts[block.evidence_id]))
+    return "\n".join(lines)
 
 
 class WebhookNotifications:
@@ -258,7 +300,7 @@ class WebhookNotifications:
                     )
                 except RecipientRejectedError:
                     return self._observation(args.bot_alias, "not_sent", "recipient_not_authorized")
-                content = delivery.content if delivery.context_tools - {TOOL} else args.text
+                content = _notification_text(delivery, args.text)
                 content = content.replace("\r\n", "\n").replace("\r", "\n")
                 body = _body(bot, content, self._clock)
                 if len(body) > MAX_BODY_BYTES:
@@ -331,7 +373,11 @@ class WebhookNotifications:
                 )
             ).first()
             if request is None:
-                raise RuntimeError("通知请求归属不符")
+                return {
+                    "state": "not_sent",
+                    "reason": "request_not_active",
+                    "receipt_id": "none",
+                }, False
             old = (
                 (
                     await conn.execute(
@@ -361,7 +407,7 @@ class WebhookNotifications:
                         "SELECT max(n.sequence) FROM xiaowei_notification_attempt n "
                         "JOIN xiaowei_request r ON r.turn_id=n.turn_id "
                         "WHERE n.bot_id=:bot AND n.state IN ('unknown','sending') "
-                        "AND r.subject_id=:subject AND r.owner_id=:owner"
+                        "AND r.owner_id=:owner"
                     ),
                     params,
                 )
@@ -375,7 +421,6 @@ class WebhookNotifications:
                                 "SELECT 1 FROM xiaowei_notification_attempt n "
                                 "JOIN xiaowei_request r ON r.turn_id=n.turn_id "
                                 "WHERE n.bot_id=:bot AND n.sequence>=:sequence "
-                                "AND r.subject_id=:subject "
                                 "AND r.owner_id=:owner AND r.delivery='sent' "
                                 "AND (n.state='unknown' OR n.reason='duplicate_warning') LIMIT 1"
                             ),

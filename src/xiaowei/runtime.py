@@ -346,6 +346,9 @@ class ServeConfig(_Config):
     @model_validator(mode="after")
     def _consistent(self) -> "ServeConfig":
         registered = _registered_tools(self)
+        source_ids = [s.server_id for s in self.mcp_servers] + [
+            s.server_id for s in self.alertmanager_sources
+        ]
         if self.webhook_bots:
             if self.feishu is None or self.feishu.group is None:
                 raise ValueError("Webhook 通知必须配置指定飞书群")
@@ -361,13 +364,12 @@ class ServeConfig(_Config):
             )
             if NOTIFY_TARGET in targets:
                 raise ValueError("notifications 是通知工具保留目标")
-            if any(not b.receive_tools <= registered - {NOTIFY_TOOL} for b in self.webhook_bots):
+            # 同源 SDK 执行请求产生独立结果证据；接收方仍须显式登记该工具。
+            receipt_tools = execution_requests(registered, source_ids) - {NOTIFY_TOOL}
+            if any(not b.receive_tools <= receipt_tools for b in self.webhook_bots):
                 raise ValueError("Webhook receive_tools 只能包含已登记的业务工具")
             if any(not b.receive_targets <= targets for b in self.webhook_bots):
                 raise ValueError("Webhook receive_targets 只能包含已登记的业务源")
-        source_ids = [s.server_id for s in self.mcp_servers] + [
-            s.server_id for s in self.alertmanager_sources
-        ]
         if len(set(source_ids)) != len(source_ids):
             raise ValueError("监控源 ID 不能重复")
         if set(source_ids) & {target.target_id for target in self.targets}:

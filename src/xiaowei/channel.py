@@ -68,6 +68,8 @@ from xiaowei.models import (
     group_owner,
 )
 from xiaowei.progress import Progress
+from xiaowei.webhook import APPROVAL_NOTICE
+from xiaowei.webhook import TOOL as NOTIFY_TOOL
 
 logger = logging.getLogger(__name__)
 
@@ -459,6 +461,12 @@ class ResultDelivery:
             delivery = Delivery(
                 content="后续回答无法交付。", evidence_ids=(), channel=record.channel
             )
+        if (
+            self._notification_status is not None
+            and record.state == "paused"
+            and NOTIFY_TOOL in decision.authorized_tools
+        ):
+            notice = "\n".join(n for n in (notice, APPROVAL_NOTICE) if n)
         if notice:
             delivery = delivery.model_copy(
                 update={
