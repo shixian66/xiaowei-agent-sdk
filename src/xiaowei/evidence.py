@@ -229,6 +229,10 @@ class AnswerRejectedError(EvidenceError):
         self.code = code
 
 
+class RecipientRejectedError(AnswerRejectedError):
+    """源数据可读，但显式外发接收范围不允许；尚未发送，可报告固定拒绝原因。"""
+
+
 def normalize_answer(answer: AgentAnswer) -> AgentAnswer:
     """代码可无歧义纠正的形式问题直接归一化，不交模型改写：空白文字块丢弃；同一证据的事实块
     只保留首次出现的位置，展示方式冲突取完整（不少展示事实）。输出 schema 预检、Session 提交与
@@ -277,12 +281,14 @@ class EvidenceStore:
         clock: Callable[[], datetime],
         retention_seconds: int,
         verify_dependencies: DependencyVerifier | None = None,
+        authorize_read: Authorizer | None = None,
     ) -> None:
         if retention_seconds <= 0:
             raise ValueError("证据保留期必须为正数")
         self._engine = engine
         self._catalog = catalog
         self._authorize = authorize
+        self._authorize_read = authorize_read or authorize
         self._clock = clock
         self._retention = timedelta(seconds=retention_seconds)
         self._verify_dependencies = verify_dependencies
@@ -426,7 +432,14 @@ class EvidenceStore:
         return _arguments_digest(effective)
 
     async def validate_answer(
-        self, turn: TurnAnswer, ctx: RunContext, *, history: bool = False
+        self,
+        turn: TurnAnswer,
+        ctx: RunContext,
+        *,
+        history: bool = False,
+        recipient_tools: frozenset[str] | None = None,
+        recipient_targets: frozenset[str] | None = None,
+        include_remaining_results: bool = True,
     ) -> Delivery:
         """最终回答出口：核对引用关系与当前可读性，再为接收渠道生成内容。
 
@@ -436,6 +449,8 @@ class EvidenceStore:
         按产生顺序补为“其余结果”。原执行轮次即 ``ctx.identity.turn_id``（审批恢复与历史读取都
         传原轮）。归一化与补全后仍没有任何可交付内容时拒绝。
         ``history`` 为真表示历史读取或显式重发；所有证据均复核当前权限与依赖。
+        通知外发将 ``include_remaining_results`` 设为假，只输出显式选择的事实；
+        全部模型可见证据仍须通过数据权限和接收权限复核。
         确定不可读抛出 ``AnswerRejectedError``；暂时无法复核时 ``EvidenceUnverifiableError`` 原样
         传播。
         """
@@ -449,6 +464,14 @@ class EvidenceStore:
         cited = answer.evidence_ids
         unshown = tuple(e for e in context if e not in cited)
         records = await self._context_readable(ctx, channel, (*cited, *unshown), history=history)
+        if any(
+            (recipient_tools is not None and r.tool_id not in recipient_tools)
+            or (recipient_targets is not None and r.target_id not in recipient_targets)
+            for r in records
+        ):
+            raise RecipientRejectedError(
+                AnswerRejectCode.EVIDENCE_UNAVAILABLE, "目标机器人无权接收本轮可见数据"
+            )
         by_id = {r.evidence_id: r for r in records}
         views = {b.evidence_id: b.view for b in answer.blocks if isinstance(b, FactBlock)}
         turn_id = ctx.identity.turn_id
@@ -471,7 +494,12 @@ class EvidenceStore:
         actions.sort(key=lambda e: self._effect(by_id[e]) != "approval")
         body = [e for e in cited if e not in actions]
         remaining = [
-            e for e in unshown if complete and current(e) and self.category(by_id[e]) == "result"
+            e
+            for e in unshown
+            if complete
+            and include_remaining_results
+            and current(e)
+            and self.category(by_id[e]) == "result"
         ]
         facts = [
             *(self._delivery_fact(by_id[e], "action", views.get(e), ctx) for e in actions),
@@ -717,7 +745,7 @@ class EvidenceStore:
 
     async def _currently_authorized(self, identity: Identity, record: EvidenceRecord) -> bool:
         try:
-            return await self._authorize(identity, record.target_id, record.tool_id) is True
+            return await self._authorize_read(identity, record.target_id, record.tool_id) is True
         except Exception:
             # 授权查询失败时不放行已保存内容；统一按不可读报告。
             raise EvidenceUnavailableError from None

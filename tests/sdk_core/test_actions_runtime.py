@@ -3,6 +3,7 @@
 import asyncio
 from typing import Any
 
+import httpx2
 import pytest
 from tests.p1b.test_starrocks_adapter import TARGET as SR
 from tests.sdk_core.test_app import cite, tool_call
@@ -37,11 +38,22 @@ from xiaowei.starrocks_tools import QUERY_TOOLS
 pytestmark = pytest.mark.loopback
 
 
-@pytest.mark.parametrize("interruption", [None, "preclaim", "read", "write", "feedback"])
+@pytest.mark.parametrize(
+    ("interruption", "notify"),
+    [
+        (None, False),
+        ("preclaim", False),
+        ("read", False),
+        ("write", False),
+        ("feedback", False),
+        pytest.param(None, True, id="notify_after_approval"),
+    ],
+)
 async def test_formal_serve_proposes_approves_and_refuses_non_approver(
     runtime_env: Env,
     monkeypatch: pytest.MonkeyPatch,
     interruption: str | None,
+    notify: bool,
 ) -> None:
     env = runtime_env
     adapter = ActionAdapter(env.clock)
@@ -129,6 +141,37 @@ async def test_formal_serve_proposes_approves_and_refuses_non_approver(
     monkeypatch.setattr(runtime, "FeishuGateway", observe_gateway)
     feishu = runtime_group(tools=[PROPOSE, STATUS])
     feishu["max_reply_chars"] = 3500
+    notification = "notifications/send_webhook_message"
+    requests = []
+    options = {}
+    if notify:
+        monkeypatch.setenv(
+            "XW_TEST_WEBHOOK_URL", "https://open.feishu.cn/open-apis/bot/v2/hook/synthetic"
+        )
+        feishu["group"]["tools"].append(notification)
+        options["webhook_bots"] = [
+            {
+                "bot_id": "ops",
+                "alias": "ops_alert_bot",
+                "description": "运维告警机器人",
+                "target_version": "v1",
+                "url_ref": "env:XW_TEST_WEBHOOK_URL",
+                "signing_secret_ref": None,
+                "receive_targets": [SOURCE],
+                "receive_tools": [PROPOSE, STATUS, f"{SOURCE}/request_action_execution"],
+            }
+        ]
+        opened = runtime.open_runtime
+
+        async def post(request):
+            assert len(adapter.calls) == 1  # 必须先经真实审批执行，随后才通知
+            requests.append(request)
+            return httpx2.Response(200, json={"code": 0})
+
+        def with_webhook(*args, **kwargs):
+            return opened(*args, **kwargs, webhook_transport=httpx2.MockTransport(post))
+
+        monkeypatch.setattr(runtime, "open_runtime", with_webhook)
     config = env.config(
         alertmanager_sources=[
             {
@@ -142,38 +185,85 @@ async def test_formal_serve_proposes_approves_and_refuses_non_approver(
             }
         ],
         feishu=feishu,
-        access={"policy_version": "w5", "grants": {B: [WRITE], OPERATOR: sorted(QUERY_TOOLS)}},
+        access={
+            "policy_version": "w5",
+            "grants": {
+                B: [WRITE],
+                **({A: [notification]} if notify else {}),
+                OPERATOR: sorted(QUERY_TOOLS),
+            },
+        },
         data_policy={
             "input": {"max_bytes": 2000},
-            "model_tools": [PROPOSE, STATUS, *sorted(QUERY_TOOLS)],
+            "model_tools": [
+                PROPOSE,
+                STATUS,
+                *sorted(QUERY_TOOLS),
+                *([notification] if notify else []),
+            ],
         },
-        budget={**BUDGET_CONFIG, "timeout_seconds": 1 if interruption else 30},
+        budget={
+            **BUDGET_CONFIG,
+            "timeout_seconds": 1 if interruption else 30,
+        },
+        **options,
     )
     channel = GroupChannel()
+
+    def resumed(call):
+        assert "send_webhook_message" not in call.tools
+        assert "批准后不会自动通知，完成后请另发通知要求" in call.instructions
+        return cite("动作已执行；未发送通知，完成后请另发通知要求。")(call)
+
     asked = env.scripts.add(
         attributed(A, "提出"),
         tool_call("am-synthetic__propose_change", value="after"),
         request_execution,
-        cite("等待批准"),
+        resumed if notify else cite("等待批准"),
     )
     async with env.running(config, feishu_channel=channel) as served:
         channel.emit_raw_from_sdk_thread(raw_group_event(env, "提出", "om_p"))
         await until(lambda: len(channel.sends) >= 1)
         await gateways[0].idle()
         assert len(channel.sends) == 1
+        if notify:
+            assert "批准后不会自动通知，完成后请另发通知要求" in message_text(channel.sends[0][1])
         action_id = await env.scalar("SELECT action_id FROM xiaowei_action")
         assert action_id is not None and adapter.calls == []
+        offset = 0
+        if notify:
+            # 普通 completed 轮次也可展示仍可批准的材料，不能只在 paused 轮加提示。
+            status_question = "查看待批准动作"
+            env.scripts.add(
+                attributed(A, status_question),
+                tool_call("am-synthetic__get_action_status", action_id=action_id),
+                cite("仍待批准"),
+            )
+            channel.emit_raw_from_sdk_thread(raw_group_event(env, status_question, "om_status"))
+            await until(lambda: len(channel.sends) > 1)
+            await gateways[0].idle()
+            assert (
+                await env.scalar(
+                    "SELECT state FROM xiaowei_request WHERE reply_message_id='om_status'"
+                )
+                == "completed"
+            )
+            assert "批准后不会自动通知，完成后请另发通知要求" in "\n".join(
+                message_text(message) for _, message, _ in channel.sends[1:]
+            )
+            assert requests == []
+            offset = len(channel.sends) - 1
         channel.emit_raw_from_sdk_thread(raw_group_event(env, f"/批准 {action_id}", "om_denied", A))
-        await until(lambda: len(channel.sends) >= 2)
+        await until(lambda: len(channel.sends) >= 2 + offset)
         await gateways[0].idle()
-        assert len(channel.sends) == 2
+        assert len(channel.sends) == 2 + offset
         assert adapter.calls == []
         if interruption == "read":
             adapter.read_release = asyncio.Event()
         elif interruption == "write":
             adapter.release = asyncio.Event()
         channel.emit_raw_from_sdk_thread(raw_group_event(env, f"/批准 {action_id}", "om_ok", B))
-        expected_sends = 4 if interruption is None else 3
+        expected_sends = (4 if interruption is None else 3) + offset
         await until(lambda: len(channel.sends) >= expected_sends)
         await gateways[0].idle()
         assert len(channel.sends) == expected_sends
@@ -193,8 +283,29 @@ async def test_formal_serve_proposes_approves_and_refuses_non_approver(
             }[interruption]
         )
         assert len(env.scripts.calls[asked]) == (3 if interruption is None else 2)
-        assert len(env.scripts.calls) == 1  # 非名单不调用模型；批准恢复原任务的模型脚本。
+        if notify:
+            assert requests == []
+            assert "未发送通知" in message_text(channel.sends[-1][1])
+        assert len(env.scripts.calls) == (2 if notify else 1)  # 批准恢复原任务的模型脚本。
         assert (await served.ready())["status"] == "ready"
+        if notify:
+            env.scripts.add(
+                attributed(A, "通知 ops_alert_bot"),
+                tool_call(
+                    "send_webhook_message",
+                    bot_alias="ops_alert_bot",
+                    text="动作已执行",
+                    evidence_ids=[],
+                ),
+                cite(),
+            )
+            channel.emit_raw_from_sdk_thread(
+                raw_group_event(env, "通知 ops_alert_bot", "om_notify")
+            )
+            await until(lambda: len(channel.sends) >= expected_sends + 1)
+            await gateways[0].idle()
+            assert len(requests) == 1
+            assert await env.scalar("SELECT state FROM xiaowei_notification_attempt") == "accepted"
         if interruption:
             receipt = message_text(channel.sends[-1][1])
             assert "工具执行失败" not in receipt

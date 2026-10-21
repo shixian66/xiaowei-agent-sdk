@@ -129,6 +129,8 @@ from xiaowei.vertex_model import (
     active_vertex_metrics,
     active_vertex_turn,
 )
+from xiaowei.webhook import APPROVAL_NOTICE, WebhookNotifications
+from xiaowei.webhook import TOOL as NOTIFY_TOOL
 
 logger = logging.getLogger(__name__)
 
@@ -416,6 +418,7 @@ class Application:
         clock: Callable[[], datetime],
         actions: ActionService | None = None,
         images: SessionImageStore | None = None,
+        notifications: WebhookNotifications | None = None,
     ) -> None:
         if not isinstance(model, ModelBinding):
             raise TypeError("应用配置：模型必须是 open_model 生成的运行绑定")
@@ -483,6 +486,7 @@ class Application:
         self._mcp = mcp
         self._clock = clock
         self.images = images
+        self.notifications = notifications
         self._run_config = safe_run_config()
         self._active: set[str] = set()
 
@@ -505,7 +509,8 @@ class Application:
         """当前实际可用的工具：本地工具与已连接并核对通过的 MCP 工具。"""
         remote = self._mcp.available_tool_ids if self._mcp is not None else frozenset()
         action_tools = self.actions.available_tool_ids if self.actions is not None else frozenset()
-        return frozenset(self._local) | remote | action_tools
+        notify = frozenset({NOTIFY_TOOL}) if self.notifications is not None else frozenset()
+        return frozenset(self._local) | remote | action_tools | notify
 
     def scope_for_turn(
         self, mode: Mode, authorized_tools: frozenset[str], available_tools: frozenset[str]
@@ -881,6 +886,8 @@ class Application:
                 "调查顺序和是否提出由你根据本轮问题与证据决定。"
                 "需要确认已提动作的执行结果时可按 ID 查状态，不能凭历史提案声称执行成功。"
             )
+            if self.notifications is not None and NOTIFY_TOOL in ctx.tool_scope:
+                action_note += APPROVAL_NOTICE + "审批恢复轮不提供通知工具，须如实说明未发送。"
         report_note = (
             "\n当前为飞书渠道。用户明确要求把获准结果、解释或未执行建议做成文件时，"
             "设置 report_format：默认 md，明确只要 HTML 时为 html。"
@@ -905,7 +912,7 @@ class Application:
             ),
             model=self._model.model,
             model_settings=self._model.settings,
-            tools=self._tools_for(ctx, approval_requests),
+            tools=self._tools_for(ctx, approval_requests, replayed=replayed),
             output_type=AnswerSchema(self._answer_check(ctx, replayed)),
         )
 
@@ -1321,14 +1328,23 @@ class Application:
                 _model_summary(original.identity.turn_id, started, metrics)
 
     def _tools_for(
-        self, ctx: RunContext, approval_requests: dict[str, int] | None = None
+        self,
+        ctx: RunContext,
+        approval_requests: dict[str, int] | None = None,
+        *,
+        replayed: Callable[[], Sequence[str]] | None = None,
     ) -> list[Tool]:
         """本轮 Agent 的工具：可信范围内的本地工具与 MCP 工具，列表只属于这一轮。"""
         allowed = {contract.tool_id for contract in self._governance.allowed_contracts(ctx)}
         local = [tool for tool_id, tool in self._local.items() if tool_id in allowed]
         remote = self._mcp.tools_for(ctx) if self._mcp is not None else []
         actions = self.actions.tools_for(ctx, approval_requests) if self.actions is not None else []
-        return [*local, *remote, *actions]
+        notify = (
+            [self.notifications.tool(ctx, replayed)]
+            if self.notifications is not None and NOTIFY_TOOL in allowed and replayed is not None
+            else []
+        )
+        return [*local, *remote, *actions, *notify]
 
     @staticmethod
     def _refuse(turn: str, started: float, reason: TurnReason) -> TurnError:

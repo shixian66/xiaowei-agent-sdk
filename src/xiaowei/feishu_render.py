@@ -125,9 +125,11 @@ def fact_limit_notices(fact: DeliveryFact) -> tuple[str, ...]:
     return tuple(notices)
 
 
-def capacity_notice(session_notice: str | None = None) -> Message:
+def capacity_notice(
+    session_notice: str | None = None, *, notification_notice: str | None = None
+) -> Message:
     """容量回执同条保留必要系统提醒；也供发送端识别省略结果的消息。"""
-    text = CAPACITY_NOTICE + ("\n" + session_notice if session_notice is not None else "")
+    text = "\n".join(n for n in (CAPACITY_NOTICE, session_notice, notification_notice) if n)
     return {"text": mention_safe(display_text(text))}
 
 
@@ -635,7 +637,9 @@ def build_feishu_message(
             and request_bytes(message, chat_id, reply_to=reply_to) <= max_bytes
         )
 
-    notice = capacity_notice(delivery.session_notice)
+    notice = capacity_notice(
+        delivery.session_notice, notification_notice=delivery.notification_notice
+    )
 
     def omitted_message() -> Message:
         # 完整消息可能比容量回执更短；只在确实需要回执时检查它是否可发送。
@@ -655,7 +659,7 @@ def build_feishu_message(
                 if part
             )
         )
-        if delivery.session_notice is not None:
+        if delivery.session_notice is not None or delivery.notification_notice is not None:
             # 固定会话回执必须完整保留原因和操作方法；预算不足记明确发送失败，不裁掉限制。
             receipt = {"text": mention_safe(display_text(code_text))}
             if not fits(receipt):

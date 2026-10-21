@@ -557,6 +557,8 @@ class Delivery(_Trusted):
     """当前身份读取后，由可信请求状态生成的固定系统提示；不来自模型。"""
     report_notice: str | None = None
     """报告不能作为文件交付或需要说明载体时的可信固定说明（含非飞书渠道的文件请求）。"""
+    notification_notice: str | None = None
+    """代码生成的通知回执或审批后通知限制；后续失败不抹掉已发送事实。"""
     limit_notice: str | None = None
     """步数用完后收尾生成的回答：代码说明结果可能不完整，不写进模型文字。"""
     requires_complete: bool = Field(default=False, exclude=True)
@@ -598,6 +600,7 @@ class Delivery(_Trusted):
             n
             for n in (
                 self.report_notice,
+                self.notification_notice,
                 self.limit_notice,
                 self.monitoring_notice,
                 self.session_notice,
@@ -610,6 +613,7 @@ class Delivery(_Trusted):
         """是否含任何代码生成的内容：事实、动作、补全结果或系统说明。"""
         return bool(
             self.facts
+            or self.notification_notice
             or self.monitoring_notice
             or self.session_notice
             or self.report_notice

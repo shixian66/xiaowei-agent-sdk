@@ -19,6 +19,8 @@
 
 **监控能力（P4）。** 同一 Agent 可调查获准的 Prometheus 指标/标签/规则和范围结果、Grafana 仪表盘/面板/数据源/标记，以及独立 Alertmanager 的告警/分组/静默/接收器/状态；Grafana 定义与实时指标分开，不执行 Grafana 代理查询。指定群可选配逐次批准的静默创建/取消、经典 Dashboard 创建/修改、数据源非秘密字段创建/修改和 Annotation 创建，使用 SDK 原生暂停/恢复；这些实现不代表公司生产写已开放。数据源密码目前由管理员在 Grafana UI 配置，私聊密码命令尚未实现。主配置默认不启用监控源；选配、认证、迁移与开放门槛见 [Prometheus](deploy/OPERATIONS.md#选配-prometheus-监控源)、[Grafana](deploy/OPERATIONS.md#选配-grafana-监控源)、[Alertmanager](deploy/OPERATIONS.md#选配-alertmanager-监控源)、[Dashboard 写](deploy/OPERATIONS.md#选配经典-dashboard-创建和修改)和[群审批说明](deploy/OPERATIONS.md#监控群审批底座)。产品边界见 [ARCHITECTURE](ARCHITECTURE.md#monitoring-mcp)，合入版本、验证证据与缺口集中在 [handoff](AGENT_HANDOFF.md)。
 
+多机器人即时通知 A 已有本地候选，可在指定飞书群通过已授权别名发送文字和获准事实，配置见[Webhook 通知](#webhook-notifications)。一次性提醒、定时独立 Agent 和 Node 巡检 B–D 尚未实现，仍按[设计](docs/superpowers/specs/2026-10-21-scheduled-agent-tasks.md)及 [A–D 计划](docs/superpowers/plans/2026-10-21-scheduled-agent-tasks.md)接续。离线结果不代表真实模型、机器人实收或部署验收，当前证据见 handoff。
+
 ## 最小产品形态
 
 | 项目 | 首版设计 |
@@ -101,7 +103,7 @@ uv run --locked xiaowei --config xiaowei.json requests resend --subject <发起�
 
 **自主调查与普通消息（本地候选）。** 连续模型段落使用轻量区域身份；本轮 brief 原位收起并完整交付，未引用的必交结果与普通 metadata 默认收起；历史 brief 保留计数摘要，未展示原文时明确提示，不自动导出历史原值。必要范围、数据源警告与截断仍可见。展开面板和附件保留获准内容，模型文字仍是分析或建议。代码草稿局部保持原文，其余段落继续排版。飞书进度在单聊约 2 秒、指定群约 5 秒后显示，只按真实状态变化尽力更新；短任务没有过程卡，异常可能留下旧卡，正式结果承担交付。真实 Agent、客户端折叠/复制、平台权限及限频由后续公司环境验收，详见[实施与验证](docs/superpowers/plans/2026-10-20-agent-autonomy-progress.md)。
 
-**模型自主报告（本地候选）。** 显式报告由同一个 Agent 通过原有文字/事实块组织：MD 原生显示标题、列表和表格；HTML 支持独立片段和受限内联样式，分析与代码生成的可信事实就近排列。主消息提取可读预览，不发送布局源码；报告指南随包按飞书渠道加载，无 StarRocks 目标也可用。文字仍受 16,000 字节和模型输出 token 限制；脚本、外部资源和任意网页执行不开放。新回答按可信版本 3 保存，旧版本/已绑定附件保持原语义；不改模型输出 schema 或数据库 v12。离线 SDK/治理/存储及 Chrome 检查不能证明真实模型的报告质量、真实飞书实收或部署效果，见[实施计划](docs/superpowers/plans/2026-10-19-model-authored-reports.md)。
+**模型自主报告（本地候选）。** 显式报告由同一个 Agent 通过原有文字/事实块组织：MD 原生显示标题、列表和表格；HTML 支持独立片段和受限内联样式，分析与代码生成的可信事实就近排列。主消息提取可读预览，不发送布局源码；报告指南随包按飞书渠道加载，无 StarRocks 目标也可用。文字仍受 16,000 字节和模型输出 token 限制；脚本、外部资源和任意网页执行不开放。新回答按可信版本 3 保存，旧版本/已绑定附件保持原语义；该报告改动不改模型输出 schema 或当时的数据库 v12；当前版本见下文。离线 SDK/治理/存储及 Chrome 检查不能证明真实模型的报告质量、真实飞书实收或部署效果，见[实施计划](docs/superpowers/plans/2026-10-19-model-authored-reports.md)。
 
 **监控曲线。** 暂不实现，监控结果以文本/表格交付。[计划 D4.0](docs/superpowers/plans/2026-10-14-result-delivery-documents.md#d40-协议前置结果与最小修订提案2026-10-15)保留已完成的协议核验、反例与候选路径对比，供以后明确重启时参考。
 
@@ -111,7 +113,7 @@ uv run --locked xiaowei --config xiaowei.json requests resend --subject <发起�
 
 **SQL 语义与升级。** 小维连接固定 SQL 模式，`||` 表示逻辑 OR；完整约定见 [ARCHITECTURE §6](ARCHITECTURE.md#6-只读查询保护)。D1/D2 修复把 StarRocks 证据摘要升为 v3，P2.5 Task 3（跨库与复杂 SQL）再升为 v4，Task 6（搜表分页与多库慢查询）升为 v5；每次升级前保存的 StarRocks 证据一次性失效，引用它们的旧会话须新建并重新查询，历史与重发也不能继续交付旧事实。其他工具的证据指纹不变。P2.5 Task 7 起，每条回答随结果保存模型本轮看过的证据，交付时一并按当前权限复核；升级前保存的回答没有这项记录，历史读取与 `requests resend` 不再交付（包括澄清与建议），不需要迁移表结构。
 
-**应用表版本 12、升级与恢复。** 版本 5 保存个人/群 owner 与群回复目的地；版本 6 把数据库与 `XW_DIGEST_KEY` 的不可逆指纹绑定；版本 7 新增监控 Action 表；v8 新增请求会话状态，v9 新增飞书会话原图表，v10 保存 SDK 暂停/恢复检查点与专用 Action 作废原因，v11 新增原请求绑定的飞书报告文件表，v12 新增最小交付分项与父请求语义版本，SDK 历史表不变。v8/v9 的旧待批 Action 升级后作废、需重新提出，成功/未知事实保留。`serve`、升级、清理和重发遇到错密钥都会在业务 I/O 前拒绝。v1–v5 只有在操作者确认 `.env` 仍是原部署密钥并已完成配套备份后，才可执行 `storage upgrade --bind-existing-digest-key`；程序不能替操作者证明旧密钥来源。v6–v11 升到 v12 使用普通 `storage upgrade`，必须保留原密钥绑定，缺失或错配不会自动修补。普通启动不建表、不迁移，旧程序也拒绝新 schema。回退到不认识新 schema 的旧程序时，须使用旧镜像、旧配置和迁移前备份恢复出的隔离数据库，不在原库降级。容器首次安装、普通升级/回退、原子 `pg_dump`、隔离 `pg_restore`、主机重启后的启动和排障命令统一见 [容器运维说明](deploy/OPERATIONS.md)。运行镜像与发行归档不包含根文档、源码测试或开发工具。
+**应用表版本 13、升级与恢复。** 版本 5 保存个人/群 owner 与群回复目的地；版本 6 把数据库与 `XW_DIGEST_KEY` 的不可逆指纹绑定；版本 7 新增监控 Action 表；v8 新增请求会话状态，v9 新增飞书会话原图表，v10 保存 SDK 暂停/恢复检查点与专用 Action 作废原因，v11 新增原请求绑定的飞书报告文件表，v12 新增最小交付分项与父请求语义版本，v13 新增通知发送机会/回执，SDK 历史表不变。v8/v9 的旧待批 Action 升级后作废、需重新提出，成功/未知事实保留。`serve`、升级、清理和重发遇到错密钥都会在业务 I/O 前拒绝。v1–v5 只有在操作者确认 `.env` 仍是原部署密钥并已完成配套备份后，才可执行 `storage upgrade --bind-existing-digest-key`；程序不能替操作者证明旧密钥来源。v6–v12 升到 v13 使用普通 `storage upgrade`，必须保留原密钥绑定，缺失或错配不会自动修补。普通启动不建表、不迁移，旧程序也拒绝新 schema。回退到不认识新 schema 的旧程序时，须使用旧镜像、旧配置和迁移前备份恢复出的隔离数据库，不在原库降级。容器首次安装、普通升级/回退、原子 `pg_dump`、隔离 `pg_restore`、主机重启后的启动和排障命令统一见 [容器运维说明](deploy/OPERATIONS.md)。运行镜像与发行归档不包含根文档、源码测试或开发工具。
 
 **数据范围（自动发现）。** 不再配置表与列：小维每隔 `schema_limits.refresh_seconds` 读取一次 `information_schema` 中全部用户库的表、视图与列，并对每个对象做一次不返回数据的 `SELECT 1 … WHERE 1 = 0` 探测，只有只读账号确实能 SELECT 的对象才进入范围。查询与执行计划可引用其中任何库的对象并跨库 JOIN：工具 SQL 中的物理表必须写成 `库名.表名`，不使用连接默认库或唯一匹配隐式补全。用户可以在提问中简写；工具收到未限定表名时先拒绝并返回有限候选，唯一候选可由 Agent 补库名后重试并告知用户，多个候选须澄清。`list_tables`、`describe_table`、`describe_table_layout` 在返回前会再次确认对象仍可读。
 
@@ -148,6 +150,35 @@ uv run --locked xiaowei --config xiaowei.json requests resend --subject <发起�
 - `max_window_minutes` / `max_rows` / `candidate_rows` / `candidate_bytes`：可查的最长时间窗、最多列出的行数，以及一次取出并检查的候选行数与字节上限。
 
 没有任何集群配置 `audit` 时不提供 `list_slow_queries`，配置开放或授予它会在启动时报错；只给部分集群配置时，只有这些集群可以使用它，其他集群的调用在连接前拒绝。读取该集群所有库的审计记录，`database` 参数不为 null 时只读执行时当前库为它的记录。原文中未写库名的表按该记录执行时的当前库（结果中的 `database` 列）解析，与 StarRocks 执行时相同；当时没有当前库的记录只接受写明库名的原文。只列出原文引用的对象、列与函数全部获准的查询，列表可能少于上限，为空也不代表没有慢查询；结果给出 `checked_candidates`、各 `omitted_*` 原因和 `unchecked_candidates`，`row_count` 仍仅表示实际返回行数。计数只覆盖本次已读取候选，`more_candidates=true` 表示候选读取已截断、之外数量未知；数据库侧 `isQuery` 与 catalog 过滤的条数也未知，需要完整审计口径时直接查询获准审计表。结果标记截断表示列表不完整：候选读满 `candidate_rows` 仍有剩余、候选达到字节上限、已列满 `max_rows` 而还有未检查的候选（即使它们最终可能都不获准），或获准的记录因单值或结果字节上限没有列出。插件刚安装后首批记录可能缺失；审计表任一行格式异常（如时间为空、指标不是整数）时整个工具失败，而不是返回部分结果。候选读取与原文检查各有一个客户端期限，最坏总耗时约为 2 倍 `client_timeout_seconds`。审计证据字段变更会使旧慢查询证据失效，无需数据库迁移。
+
+<a id="webhook-notifications"></a>
+
+**Webhook 通知（A 候选，真实平台尚未验收）。** 默认 `webhook_bots=[]`，不开放通知工具。启用时须有现有指定飞书群，并在 `data_policy.model_tools`、`feishu.group.tools` 和获准发送者的个人 `access.grants` 三处加入 `notifications/send_webhook_message`；只会查询数据库的群成员不会自动取得发送权。工具仅在普通群消息中开放，无登录 Web、私聊与显式诊断入口均不开放。
+
+管理员增加以下机器人登记，`fat` 和工具名按实际已登记源/工具替换；支持多项。凭据只在服务端环境变量中配置，不粘贴到对话、配置值或日志：
+
+```json
+"webhook_bots": [{
+  "bot_id": "ops",
+  "alias": "ops_alert_bot",
+  "description": "运维告警机器人",
+  "target_version": "v1",
+  "url_ref": "env:XW_OPS_WEBHOOK_URL",
+  "signing_secret_ref": null,
+  "receive_targets": ["fat"],
+  "receive_tools": ["local/run_readonly_query"]
+}]
+```
+
+URL 仅允许飞书官方 HTTPS 自定义机器人端点，不允许用户 URL、跳转、代理环境变量或其他主机。启用签名时填写签名密钥的 `env:NAME` 引用；关键词与出口 IP 白名单由管理员在真实机器人上匹配，接口拒绝时不自动加词或重试。管理员须确认 `bot_id` 对应的实际接收群；同目标密钥轮换保持目标版本，实际换群/机器人须改版本并重新授权，不清除发送记录。
+
+群内可说“给 ops_alert_bot 发消息：今晚 22:00 检查 StarRocks。”；发送历史业务结论时，代码复核全部模型可见 Evidence 的当前权限、TTL 及机器人可接收的源/工具，事实沿 feishu 投影生成，模型说明单列。不提供主动 @所有人或成员功能；最终正文统一将 `<at …>` 的开头改为 `＜at …>`，普通文字和换行保留。外发动作事实省略只能在原群使用的 `approval_command`，原群审批材料不变。文字沿现有回答上限为16000 UTF-8字节，完成标签中和后含签名的完整请求最多20000字节；超限明确未发送，缩短内容或重新取得必要摘要，不悄悄截断。适配器使用已有 httpx2，单次总期限10秒、响应读取最多4096字节。[飞书官方请求/签名契约](https://open.feishu.cn/document/client-docs/bot-v3/add-custom-bot)是接口依据；真实关键词、IP、签名和平台限流仍须实测。
+
+状态区分 `accepted`（接口接受）、`failed`（明确失败）、`unknown`（可能已发送）和 `not_sent`（未发送）。同轮同机器人相同正文只发一次，不同且明确要求的正文可分别发送；failed/unknown 后不自动再发，重启也不重放。unknown 后用户新一轮主动要求重发，须先有重复风险提示；门槛由原群＋机器人共享，其他成员也不能绕过，未确认提示送达时可能先暂缓一次。原回执保留 unknown；容量降级也保留发送结果及风险，父交付失败不解除门槛。发送回执独立保存，后续模型/回答失败也不能抹掉已提交事实。API 接受不等于成员收到或阅读。
+
+A 不在生产动作审批恢复轮自动通知；等待批准材料会提示“批准后不会自动通知，完成后请另发通知要求”。动作完成后在群里另说“通知 ops_alert_bot”，走普通通知权限和回执链。若要外发动作结果，管理员须按实际可见证据显式登记对应源的提出/状态/`request_action_execution` 接收许可；配置接收许可不授予执行写操作的权限。目的地无权接收当前查询历史时不会发送，即使发送的是纯文字；用户可显式 `/新建` 后完整重述纯文字，但这会轮换全群共享上下文，小维不会自动执行此操作。
+
+此片新增应用 schema v13；按既有 `storage upgrade` 维护流程停服备份后升级，不改 SDK 表，不在启动时自动迁移。旧镜像不兼容 v13，回退须隔离入站并按备份恢复流程处理，不能恢复后自动重发旧消息。一次性提醒、周期 Agent 和 Node 巡检属于后续 B–D，当前 A 不提供调度。
 
 **开发验证**（只用合成数据、脚本模型、替身与隔离的测试 PostgreSQL；发行测试需要本机 Docker 构建镜像，不调用真实模型或公司服务）：
 

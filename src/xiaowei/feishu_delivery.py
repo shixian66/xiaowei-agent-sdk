@@ -74,7 +74,9 @@ def _preview(
         )
     except (MessageCapacityError, ValueError):
         message = None
-    if message is not None and message != capacity_notice(delivery.session_notice):
+    if message is not None and message != capacity_notice(
+        delivery.session_notice, notification_notice=delivery.notification_notice
+    ):
         return message
     if delivery.section("action"):
         # 动作区域不进入附件，放不进正文就明确失败，不以说明代替。
@@ -83,7 +85,15 @@ def _preview(
     limits = list(
         dict.fromkeys(
             [n for f in delivery.facts for n in fact_limit_notices(f)]
-            + [n for n in (delivery.monitoring_notice, delivery.session_notice) if n]
+            + [
+                n
+                for n in (
+                    delivery.monitoring_notice,
+                    delivery.session_notice,
+                    delivery.notification_notice,
+                )
+                if n
+            ]
         )
     )
     message = {"text": text + ("\n" + "\n".join(limits) if limits else "")}

@@ -338,6 +338,7 @@ async def test_text_and_facts_mix_and_text_keeps_model_identity(postgres_url: UR
                 "session_notice",
                 "report_notice",
                 "limit_notice",
+                "notification_notice",
             }
             assert delivery.session_notice is None
             assert (delivery.evidence_ids, delivery.facts) == ((), ())

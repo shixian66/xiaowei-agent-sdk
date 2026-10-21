@@ -153,6 +153,8 @@ Web 宿主发布地址由 `.env` 的 `XW_WEB_BIND_ADDRESS` 决定，缺省 `0.0.
 
 ## 8. P4 监控增量与之后的扩展
 
+**通知与定时任务增量（2026-10-21，A 审查修复离线通过）：** 范围与权限唯一维护于 [ARCHITECTURE](ARCHITECTURE.md#scheduled-agent-tasks)，技术依据见[设计 v1.4](docs/superpowers/specs/2026-10-21-scheduled-agent-tasks.md)，按 [A–D 计划](docs/superpowers/plans/2026-10-21-scheduled-agent-tasks.md)串行交付：即时多机器人通知 → 一次性固定提醒 → 独立 Agent 周期任务 → Node 核心巡检。A 具体修复版本、独立复审与分批离线证据见 handoff，B–D 未实现；真实模型/服务、部署与用户接受分别记证。生产写逐次审批、指定操作群及既有实战退出条件不变。
+
 实战对话与飞书展示的修复依据见[修复实施计划](docs/superpowers/plans/2026-10-09-agent-dialogue-feishu-repair.md)。监控工具、SDK 原生审批及连接生命周期复用的切片与验收见[监控计划 §3.1–§3.7](docs/superpowers/plans/2026-10-09-monitoring-mcp.md)，合入与验证证据集中在 handoff。真实模型调查能力、Prometheus 服务端限额、Grafana 组织/版本/权限、Alertmanager 版本/认证/容量/HA 和群写审批按具体源分别验收；既有真实模型例外不自动覆盖新增切片。
 
 P4 的已批准范围只在 [ARCHITECTURE §5「监控接入」](ARCHITECTURE.md#monitoring-mcp) 定义；任务、门槛与验收见 [监控 MCP 增量实施计划](docs/superpowers/plans/2026-10-09-monitoring-mcp.md)。共用协议验证可在 P3 真实环境验收期间独立推进；每项生产写开放须先完成对应源的读取、群 Action 批准闭环与该源真实环境验证，不要求其他监控源先完成。P4 不回写 P1–P3 的 StarRocks 只读验收结论，监控代码/离线检查、真实三源、公司部署与用户接受分别记证。
