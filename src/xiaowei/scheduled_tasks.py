@@ -324,12 +324,15 @@ class TaskDefinitions:
         if job_id is None and "parameters" in data:
             job_id = json.loads(data["parameters"]).get("job_id")
         if job_id is not None and data.get("text", "") is not None:
-            await self.validate(
-                await self.get(job_id),
-                ctx,
-                recipient_tools=recipient_tools,
-                recipient_targets=recipient_targets,
-            )
+            job = await self.get(job_id)
+            # 纯文字的历史副本沿普通 Evidence 保留；迟到窗口不是整群会话的数据期限。
+            if json.loads(job["definition_evidence_ids"]):
+                await self.validate(
+                    job,
+                    ctx,
+                    recipient_tools=recipient_tools,
+                    recipient_targets=recipient_targets,
+                )
 
 
 class ScheduledTasks:
@@ -379,7 +382,9 @@ class ScheduledTasks:
             ),
             impact="确认后由创建者＋原群的当前权限到期发送一次；不执行生产写，不启动模型。",
             rollback="创建者或当前群成员管理员可直接暂停/取消；已准入发送不能撤回。",
-            content_expires_at=job["content_expires_at"],
+            content_expires_at=job["content_expires_at"]
+            if json.loads(job["definition_evidence_ids"])
+            else None,
         )
 
     async def propose(
@@ -557,7 +562,9 @@ class ScheduledTasks:
             ),
             captured_at=self.clock(),
             truncated=False,
-            content_expires_at=job["content_expires_at"] if body else None,
+            content_expires_at=job["content_expires_at"]
+            if body and json.loads(job["definition_evidence_ids"])
+            else None,
         )
 
     def tools_for(self, ctx: RunContext) -> list[FunctionTool]:
@@ -615,7 +622,7 @@ class ScheduledTasks:
                     await self.notifications.record_task_warning(ctx.identity, job["receipt_id"])
                 try:
                     await self.definitions.validate(job, ctx)
-                except (EvidenceUnavailableError, EvidenceUnverifiableError):
+                except (EvidenceUnavailableError, EvidenceUnverifiableError, AnswerRejectedError):
                     return self._observation(job, body=False)
                 return self._observation(job)
 

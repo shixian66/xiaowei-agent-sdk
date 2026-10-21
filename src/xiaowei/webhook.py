@@ -507,7 +507,7 @@ class WebhookNotifications:
                     await conn.execute(
                         sql(
                             "SELECT * FROM xiaowei_notification_attempt "
-                            "WHERE turn_id=:turn AND bot_id=:bot "
+                            "WHERE turn_id=:turn AND bot_id=:bot AND reason<>'task_risk_warning' "
                             "ORDER BY sequence DESC"
                         ),
                         params,

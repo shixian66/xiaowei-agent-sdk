@@ -33,7 +33,7 @@
 - 进度的单聊/群聊差异延迟、仅真实变化更新、正常收尾及异常陈旧已由用户确认，详见[进度契约](ARCHITECTURE.md#progress-observation)；P1 已有离线实现，当前证据见计划 §7。普通消息的区域身份及正文/明细分工见[普通消息契约](ARCHITECTURE.md#ordinary-feishu-expression)，不能由 HTML/MD 报告完成推定达标。
 - 监控写仅限已批准动作，使用 SDK 原生审批暂停/恢复及既有 Action 治理；生产开放仍须满足对应源和群审批门槛。Grafana 数据源密码私聊命令尚未实现，目前由管理员在 Grafana UI 填写。见 [监控边界](ARCHITECTURE.md#monitoring-mcp)。
 - 内网 Web 无登录、访问者共用操作者权限；目标账号、网络、Grafana 插件/写端及数据源更新竞争窗口等已接受取舍按架构执行。
-- 通知及定时任务的方向与待审权限增量见 [ARCHITECTURE](ARCHITECTURE.md#scheduled-agent-tasks)：多个目的群不扩大操作入口，任务独立于原聊天，创建及每次执行复核权限，生产写不能继承周期批准。A 已有本地候选与离线证据，B–D 未实现。
+- 通知及定时任务的方向与待审权限增量见 [ARCHITECTURE](ARCHITECTURE.md#scheduled-agent-tasks)：多个目的群不扩大操作入口，任务独立于原聊天，创建及每次执行复核权限，生产写不能继承周期批准。A 已合入主线，B 为当前离线候选，C/D 未实现。
 
 ## 3. 当前计划与下一项工作
 
@@ -142,9 +142,15 @@ B1 的短口径主视图修复已成立；原 B2 因复现形状不符合真实 
 
 ### 2026-10-21 B 候选验证
 
-当前精确代码版本、独立审查与最终检查结果将在候选冻结后补齐。使用 Python3.11.16 / SDK0.22.3 / httpx2 2.13.1 / 隔离 PostgreSQL。正式入口为 FeishuGateway → ChannelService → Application → 真 SDK Runner/Action → GovernedTools → HTTP MockTransport；模型、成员目录、数据库驱动及外部 HTTP 为合成替身。脚本模型不能证明自然语言选择、澄清或答案质量；HTTP 替身不能证明飞书实际接受、群内到达或真实密钥配置。
+首候选 `3c82342cc3d53a3a21ec84dd0e43c9bae609ff3f` 相对 `9284688..` 已独立审查，发现3项 P2：定义撤权漏接 AnswerRejectedError、纯风险提示误入同轮停止账本、control-only 配置漏掉关键风险交付。修复按两类根因在原读取降级/回执路径落实；另去掉纯文字迟到窗误缩整群 Session 的实现额外限制，有依赖 TTL 不放宽。修复增量与最新检查将在冻结后补齐。使用 Python3.11.16 / SDK0.22.3 / httpx2 2.13.1 / 隔离 PostgreSQL。正式入口为 FeishuGateway → ChannelService → Application → 真 SDK Runner/Action → GovernedTools → HTTP MockTransport；模型、成员目录、数据库驱动及外部 HTTP 为合成替身。脚本模型不能证明自然语言选择、澄清或答案质量；HTTP 替身不能证明飞书实际接受、群内到达或真实密钥配置。
 
 已观察的 RED 覆盖：SDK 激活、派生 TTL/历史/缓存清理、维护重发撤权、激活回执正文重复、失锁/未就绪准入、日期可修正反馈、无权控制的局部拒绝、发送中超时落定及迟到清理一致性。正式检查不加载临时诊断或变异插件。分批结果不相加称为单次全套；最新完整记录以最终表为准。
+
+旧候选完整检查已于发现失败后停止：`3c82342` 的单次记录为 **8 failed、1916 passed、16 skipped、89 deselected，519.92秒**。其中4项发行容器失败定位 Docker 根盘100%，两项运维文档违反发行包自包含/去框架词约束，两项 CLI 断言残留 schema13；后四项按真实 schema14/发行契约修复，保留原断言含义。该次不是全套完成或通过。用户另批准精确清单84个无标签且无容器引用镜像，逐项复核并非强制删除84项，保留全部标签镜像/容器/卷，Docker根盘恢复约12GB可用。清单及结果 `/tmp/xiaowei-b-docker-cleanup-{candidates,result}.json`。
+
+隔离变异：测试进程移除起草可见历史依赖，`test_history_is_frozen_even_without_explicit_fact_reference` 按预期失败（1 failed），源码不变，日志 `/tmp/xiaowei-b-dependency-mutation.log`。先前50项提醒/文档专项通过不代表最新整套；ruff全仓、受影响文件format、mypy37源文件和diff检查通过，699次提交全历史gitleaks无泄漏。全仓format另发现9份已有文件/Markdown代码块差异，未混入无关修改。
+
+修复后单次关联检查 **220 passed，180.02秒**：`tests/sdk_core/test_scheduled_tasks.py tests/sdk_core/test_cli.py tests/deployment/test_release.py tests/security/test_docs_command_consistency.py`，日志 `/tmp/xiaowei-b-review-fix-related.log`。其中三项审查问题与纯文字期限先观察到4失败/1成功对照，再修复5通过；control-only提示另先2失败。此记录包含真SDK、PG、正式CLI子进程和发行包约束，尚不包含全部发行容器与完整全套。
 
 ### 已合入 A 的有效验证
 

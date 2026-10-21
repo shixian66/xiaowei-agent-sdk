@@ -945,3 +945,153 @@ async def test_old_task_risk_notice_cannot_acknowledge_a_later_unknown_send(env,
                 group.outbox.outcomes.append("failed")  # 新 unknown 的提示未送达。
             await group.ask(message)
         assert len(requests) == 2  # 旧回执提示不确认后来出现的新 unknown。
+
+
+@pytest.mark.parametrize("control", [False, True])
+async def test_revoked_definition_returns_safe_status_and_control_outcome(
+    env, monkeypatch, control
+):
+    config = task_config(env)
+    async with webhook_running(env, monkeypatch, config=config) as (group, _requests, _rt):
+        await history(env, group)
+        job = await reminder(env, group, content="模型解释保密正文")
+        await group.ask("/新建")
+    data = config.model_dump(mode="json")
+    data["feishu"]["group"]["tools"].remove("local/run_readonly_query")
+    async with webhook_running(
+        env, monkeypatch, config=runtime.ServeConfig.model_validate(data)
+    ) as (group, requests, _rt):
+        message = "管理已撤权任务"
+
+        def checked(call):
+            values = [
+                json.loads(i["output"])
+                for i in call.input
+                if i.get("type") == "function_call_output"
+            ]
+            assert any(item["data"].get("text") is None for item in values)
+            assert "模型解释保密正文" not in json.dumps(call.input, ensure_ascii=False)
+            return cite()(call)
+
+        env.scripts.add(
+            attributed(A, message),
+            tool_call(
+                "scheduled__control_task" if control else "scheduled__get_task",
+                job_id=job,
+                **({"operation": "pause"} if control else {}),
+            ),
+            checked,
+        )
+        await group.ask(message, message_id="om_revoked_task")
+        assert len(env.scripts.calls[attributed(A, message)]) == 2
+        assert await env.scalar("SELECT state FROM xiaowei_scheduled_job") == (
+            "paused" if control else "active"
+        )
+        assert requests == []
+
+
+@pytest.mark.parametrize("already_warned", [False, True])
+async def test_status_does_not_consume_the_send_turn(env, monkeypatch, already_warned):
+    data = task_config(env).model_dump(mode="json")
+    data["webhook_bots"][0]["receive_tools"].append("scheduled/get_task")
+    data["webhook_bots"][0]["receive_targets"].append("scheduled")
+    async with webhook_running(
+        env,
+        monkeypatch,
+        config=runtime.ServeConfig.model_validate(data),
+        response=httpx2.ReadTimeout("synthetic"),
+    ) as (group, requests, rt):
+        job = await reminder(env, group)
+        env.clock.advance(100)
+        await rt.scheduled_tasks.tick()
+        await group.ask("/新建")
+        if already_warned:
+            message = "先查发送状态"
+            env.scripts.add(
+                attributed(A, message), tool_call("scheduled__get_task", job_id=job), cite()
+            )
+            await group.ask(message)
+        message = "查这个任务状态并明确再发一次"
+        env.scripts.add(
+            attributed(A, message),
+            tool_call("scheduled__get_task", job_id=job),
+            tool_call(
+                "send_webhook_message", bot_alias="ops_alert_bot", text="汇报提醒", evidence_ids=[]
+            ),
+            cite(),
+        )
+        await group.ask(message)
+        assert len(env.scripts.calls[attributed(A, message)]) == 3
+        assert len(requests) == (2 if already_warned else 1)
+
+
+async def test_plain_reminder_deadline_does_not_shorten_shared_session(env, monkeypatch):
+    from xiaowei.session import cleanup_expired
+
+    data = task_config(env).model_dump(mode="json")
+    data["session_limits"]["retention_seconds"] = 86400
+    data["storage"]["request_retention_seconds"] = 86400
+    data["storage"]["evidence_retention_seconds"] = 86400
+    async with webhook_running(
+        env, monkeypatch, config=runtime.ServeConfig.model_validate(data)
+    ) as (group, requests, rt):
+        await reminder(env, group)
+        assert await env.scalar(
+            "SELECT expires_at FROM xiaowei_session"
+        ) == env.clock() + timedelta(days=1)
+        env.clock.advance(3661)
+        await cleanup_expired(rt.engine, now=env.clock(), batch_size=100)
+        message = "你好"
+        env.scripts.add(attributed(A, message), cite("你好"))
+        await group.ask(message)
+        assert len(env.scripts.calls[attributed(A, message)]) == 1
+        assert "你好" in message_text(group.outbox.sent[-1][1])
+        assert requests == []
+
+
+@pytest.mark.parametrize("delivered", [False, True])
+async def test_control_only_risk_notice_requires_actual_delivery(env, monkeypatch, delivered):
+    data = task_config(env).model_dump(mode="json")
+    data["webhook_bots"][0]["receive_tools"].append("scheduled/control_task")
+    data["webhook_bots"][0]["receive_targets"].append("scheduled")
+    async with webhook_running(
+        env,
+        monkeypatch,
+        config=runtime.ServeConfig.model_validate(data),
+        response=httpx2.ReadTimeout("synthetic"),
+    ) as (group, _requests, rt):
+        job = await reminder(env, group)
+        env.clock.advance(100)
+        await rt.scheduled_tasks.tick()
+        await group.ask("/新建")
+    data["feishu"]["group"]["tools"].remove("notifications/send_webhook_message")
+    data["feishu"]["group"]["tools"].remove("scheduled/get_task")
+    data["scheduled_tasks"]["enabled"] = False
+    async with webhook_running(
+        env, monkeypatch, config=runtime.ServeConfig.model_validate(data)
+    ) as (group, requests, _rt):
+        message = "取消这个未知结果任务"
+        env.scripts.add(
+            attributed(A, message),
+            tool_call("scheduled__control_task", job_id=job, operation="cancel"),
+            cite(),
+        )
+        if not delivered:
+            group.outbox.outcomes.append("failed")
+        await group.ask(message, message_id="om_control_only_risk")
+        assert "重发可能重复" in message_text(group.outbox.sent[-1][1])
+        assert requests == []
+    data["feishu"]["group"]["tools"].append("notifications/send_webhook_message")
+    async with webhook_running(
+        env, monkeypatch, config=runtime.ServeConfig.model_validate(data)
+    ) as (group, requests, _rt):
+        message = "明确再发一次汇报提醒"
+        env.scripts.add(
+            attributed(A, message),
+            tool_call(
+                "send_webhook_message", bot_alias="ops_alert_bot", text="汇报提醒", evidence_ids=[]
+            ),
+            cite(),
+        )
+        await group.ask(message, message_id="om_after_control_risk")
+        assert len(requests) == (1 if delivered else 0)

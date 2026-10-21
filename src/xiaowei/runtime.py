@@ -1622,8 +1622,9 @@ def _delivery(
     async def notification_status(identity: Identity) -> str | None:
         if await access.authorize_evidence(identity, NOTIFY_TARGET, NOTIFY_TOOL):
             return await receipt_notice(engine, identity)
-        if definitions is not None and await access.authorize_evidence(
-            identity, "scheduled", "scheduled/get_task"
+        if definitions is not None and (
+            await access.authorize_evidence(identity, "scheduled", "scheduled/get_task")
+            or await access.authorize_evidence(identity, "scheduled", TASK_CONTROL)
         ):
             return await receipt_notice(
                 engine,

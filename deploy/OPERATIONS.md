@@ -1125,10 +1125,10 @@ PostgreSQL 16 同一大版本内更换镜像 digest 不在本轮验证范围，�
 
 ## 一次性提醒的启停和恢复（B 候选）
 
-配置与权限见 [README](../README.md#one-time-reminders)，产品边界见 ARCHITECTURE，不在本节重复默认值。仅在获准环境启用；本轮离线替身不证明真实提醒可达。
+应用配置增加 `scheduled_tasks`，默认不启用。最小启用项为 `{"enabled":true,"timezone":"Asia/Shanghai"}`；管理员可配置 `max_advance_seconds`、`lateness_seconds`、`poll_seconds` 和 `max_active_jobs`。须在模型数据策略和指定群工具中登记 `scheduled/propose_reminder`、`scheduled/get_action_status`、`scheduled/get_task`、`scheduled/control_task` 及执行许可 `scheduled/activate_reminder`；创建者保留个人通知 grant，确认者取得个人 `scheduled/activate_reminder`，管理员管理别人任务另需个人 `scheduled/control_task` 且是当前原群成员。确认材料显示实际时间、正文、机器人、期限与预算；未确认不激活。仅在获准环境启用，本轮离线替身不证明真实提醒可达。
 
-使用既有显式 `storage upgrade` 升到应用 schema14（SDK 表不变）。普通重启只对尚未占用发送机会且在迟到窗口内的 active 任务补检查；已占用 sending 恢复为 unknown，accepted/failed/unknown 均不重复 POST。静态授权确定撤销或真实接收目标版本改变会停用；成员目录失败/partial/False 暂时保留未开始，至迟到窗口结束。通过授权任务状态查询排查连续未核实次数和原因，不能切换成批准者身份绕过。
+使用既有显式 `storage upgrade` 升到应用 schema14（会话私表不变）。普通重启只对尚未占用发送机会且在迟到窗口内的 active 任务补检查；已占用 sending 恢复为 unknown，accepted/failed/unknown 均不重复 POST。静态授权确定撤销或真实接收目标版本改变会停用；成员目录失败/partial/False 暂时保留未开始，至迟到窗口结束。通过授权任务状态查询排查连续未核实次数和原因，不能切换成批准者身份绕过。
 
-隔离备份恢复须先断开真实入站并设置 `scheduled_tasks.enabled=false`，核对数据库恢复点、任务未来时刻、机器人目标版本及未知记录后再决定启用；这个开关只禁后台任务准入/发送，不禁止原有启动检查或 A 显式通知。丢失实例锁/readiness 后不再新占用机会，已准入请求可能未知，不能声称已撤回。跨 schema 回退按成对备份恢复，不在原库降级、不修改 SDK 私表。
+隔离备份恢复须先断开真实入站并设置 `scheduled_tasks.enabled=false`，核对数据库恢复点、任务未来时刻、机器人目标版本及未知记录后再决定启用；这个开关只禁后台任务准入/发送，不禁止原有启动检查或 A 显式通知。丢失实例锁/readiness 后不再新占用机会，已准入请求可能未知，不能声称已撤回。跨 schema 回退按成对备份恢复，不在原库降级、不修改 会话私表。
 
 任务正文及派生 Evidence/Session/请求缓存不超过原数据期限；沿已有 `storage cleanup` 显式维护，过期正文不再展示/发送。当前群上下文受依赖期限影响关闭时，由用户显式 `/新建` 开新群上下文，清理不会悄悄重建。已发出请求的安全回执仍保留，不能通过删除记录重置 unknown 门槛。
