@@ -242,9 +242,12 @@ async def test_formal_serve_proposes_approves_and_refuses_non_approver(
             channel.emit_raw_from_sdk_thread(raw_group_event(env, status_question, "om_status"))
             await until(lambda: len(channel.sends) > 1)
             await gateways[0].idle()
-            assert await env.scalar(
-                "SELECT state FROM xiaowei_request WHERE reply_message_id='om_status'"
-            ) == "completed"
+            assert (
+                await env.scalar(
+                    "SELECT state FROM xiaowei_request WHERE reply_message_id='om_status'"
+                )
+                == "completed"
+            )
             assert "批准后不会自动通知，完成后请另发通知要求" in "\n".join(
                 message_text(message) for _, message, _ in channel.sends[1:]
             )

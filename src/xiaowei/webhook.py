@@ -23,7 +23,7 @@ from sqlalchemy.ext.asyncio import AsyncEngine
 
 from xiaowei.config import is_secret_ref, resolve_secret_ref
 from xiaowei.evidence import RecipientRejectedError
-from xiaowei.feishu_render import display_text, fact_limit_notices
+from xiaowei.feishu_render import display_text, fact_limit_notices, mention_safe
 from xiaowei.governance import GovernedTools, Projection, ToolPolicy
 from xiaowei.models import (
     AUDIENCES,
@@ -181,6 +181,8 @@ def _notification_text(delivery: Delivery, text: str) -> str:
             *fact_limit_notices(fact),
         ]
         for key, value in fact.metadata.items():
+            if key == "approval_command":  # 目的群不能批准原群动作，不转发无效命令。
+                continue
             shown = value if isinstance(value, str) else json.dumps(value, ensure_ascii=False)
             lines.append(f"{key}: {shown}")
         for index, row in enumerate(fact.rows, 1):
@@ -301,7 +303,8 @@ class WebhookNotifications:
                 except RecipientRejectedError:
                     return self._observation(args.bot_alias, "not_sent", "recipient_not_authorized")
                 content = _notification_text(delivery, args.text)
-                content = content.replace("\r\n", "\n").replace("\r", "\n")
+                # 纯文本传输边界统一中和 @ 标签，再构造请求并计算防重摘要。
+                content = mention_safe(content.replace("\r\n", "\n").replace("\r", "\n"))
                 body = _body(bot, content, self._clock)
                 if len(body) > MAX_BODY_BYTES:
                     return self._observation(args.bot_alias, "not_sent", "content_too_large")

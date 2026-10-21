@@ -4,6 +4,7 @@
 """
 
 import asyncio
+import hashlib
 import json
 import logging
 from contextlib import asynccontextmanager
@@ -13,6 +14,7 @@ import httpx2
 import pytest
 from sqlalchemy import text as sql
 from tests.p1b.test_starrocks_adapter import TARGET as SR
+from tests.p1b.test_starrocks_adapter import Result, driver
 from tests.sdk_core.test_app import cite, evidence_in, tool_call, upstream_error
 from tests.sdk_core.test_feishu import Outbox
 from tests.sdk_core.test_feishu_render import message_text
@@ -181,6 +183,88 @@ async def test_u1_multiline_text_is_exact_after_unrelated_query_history(env, mon
         await group.ask(send)
         assert len(requests) == 1
         assert json.loads(requests[0].content)["content"]["text"] == message.replace("\r\n", "\n")
+
+
+@pytest.mark.parametrize("origin", ["text", "facts", "model"])
+async def test_webhook_text_neutralizes_mentions_before_deduplication(env, monkeypatch, origin):
+    tags = '<at user_id="all">所有人</at> <AT user_id="ou_member">成员</AT>'
+    safe_tags = '＜at user_id="all">所有人</at> ＜AT user_id="ou_member">成员</AT>'
+    text = "第一行：检查\r\n" + tags + "\n第二行：复核"
+    if origin == "facts":
+        env.drv = driver(Result(("region", "note"), [("east", tags)]))
+    if origin != "text":
+        sql_text = (
+            "SELECT region, "
+            """'<at user_id="all">所有人</at> <AT user_id="ou_member">成员</AT>' AS note """
+            "FROM shop.sales"
+            if origin == "facts"
+            else "SELECT region, total FROM shop.sales"
+        )
+        query = script(
+            env,
+            "先取得待转发事实",
+            tool_call("run_readonly_query", cluster=SR.target_id, sql=sql_text),
+            cite(),
+        )
+
+    def send(call):
+        # 后一次模型调用也看见首个通知回执，但本次始终选择同一份业务事实。
+        selected = evidence_in(call)[:1] if origin != "text" else []
+        return tool_call(
+            "send_webhook_message",
+            bot_alias="ops_alert_bot",
+            text="巡检结果\n请复核" if origin == "facts" else text,
+            evidence_ids=selected,
+        )(call)
+
+    request = script(env, "发送一次含特殊文字的消息", send, send, cite())
+    async with running(env, monkeypatch) as (group, requests, _rt):
+        if origin != "text":
+            await group.ask(query)
+        await group.ask(request)
+        assert len(requests) == 1
+        content = json.loads(requests[0].content)["content"]["text"]
+        assert safe_tags in content
+        assert "<at" not in content.lower()
+        if origin == "text":
+            assert content == "第一行：检查\n" + safe_tags + "\n第二行：复核"
+        elif origin == "model":
+            assert "模型说明（未经系统核实）\n第一行：检查\n" + safe_tags in content
+        else:
+            assert "note: " + safe_tags in content and "巡检结果\n请复核" in content
+        assert await env.scalar("SELECT count(*) FROM xiaowei_notification_attempt") == 1
+        assert (
+            await env.scalar("SELECT content_digest FROM xiaowei_notification_attempt")
+            == hashlib.sha256(content.encode()).hexdigest()
+        )
+
+
+def test_webhook_action_material_omits_foreign_group_approval_command():
+    from tests.sdk_core.test_feishu_render import fact
+
+    from xiaowei.models import Delivery
+    from xiaowei.webhook import _notification_text
+
+    pending = fact(
+        section="action",
+        metadata={
+            "action_id": "act_example",
+            "state": "pending",
+            "impact": "仅合成对象",
+            "approval_command": "@小维 /批准 act_example",
+        },
+    )
+    material = Delivery(
+        content="",
+        channel="feishu",
+        evidence_ids=(pending.evidence_id,),
+        facts=(pending,),
+    )
+    content = _notification_text(material, "")
+    assert "approval_command" not in content and "/批准" not in content
+    assert "action_id: act_example" in content and "state: pending" in content
+    assert "impact: 仅合成对象" in content
+    assert pending.metadata["approval_command"] == "@小维 /批准 act_example"
 
 
 async def test_text_notification_does_not_forward_unselected_current_query(env, monkeypatch):
@@ -929,6 +1013,22 @@ async def test_large_content_is_not_sent_and_can_be_explained(env, monkeypatch):
         await group.ask(request)
         assert requests == []
         assert "未发送" in message_text(group.outbox.sent[-1][1])
+
+
+async def test_mention_expansion_is_counted_before_request_size_admission(env, monkeypatch):
+    request = script(
+        env,
+        "中和后的消息也须满足容量上限",
+        tool_call(
+            "send_webhook_message", bot_alias="ops_alert_bot", text="<at>" * 3400, evidence_ids=[]
+        ),
+        cite("消息超过容量，未发送；请缩短内容。"),
+    )
+    async with running(env, monkeypatch) as (group, requests, _rt):
+        await group.ask(request)
+        assert requests == []
+        assert "未发送" in message_text(group.outbox.sent[-1][1])
+        assert await env.scalar("SELECT count(*) FROM xiaowei_notification_attempt") == 0
 
 
 async def test_attempt_persistence_failure_has_zero_http(env, monkeypatch):
