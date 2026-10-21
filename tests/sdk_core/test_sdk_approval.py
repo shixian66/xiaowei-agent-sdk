@@ -1359,8 +1359,9 @@ async def test_migrated_old_action_has_dedicated_receipt_and_no_resume_or_write(
 
 
 @pytest.mark.parametrize("failure", ["syntax", "unavailable"])
+@pytest.mark.parametrize("old_ledger", [False, True])
 async def test_restart_keeps_monitoring_failures_and_failed_expression_without_replay(
-    actions, failure
+    actions, failure, old_ledger
 ):
     from tests.sdk_core.synthetic_tools import TARGET
     from tests.sdk_core.test_monitoring_r1a import SOURCE as PROM_SOURCE
@@ -1470,6 +1471,19 @@ async def test_restart_keeps_monitoring_failures_and_failed_expression_without_r
         await group.ask("故障期间申请", message_id="om_fail_origin")
     assert calls == ["bad("] and actions.adapter.calls == []
     aid = await actions.one()
+    if old_ledger:
+        from sqlalchemy import text
+
+        ((raw,),) = await env.rows("SELECT ledger FROM xiaowei_action_run")
+        legacy = json.loads(raw)
+        legacy["runs"].pop("grafana_missing")
+        for prefix in ("promql", "selector", "alertmanager"):
+            legacy["runs"][prefix + "_pending"] = []
+            legacy["runs"][prefix + "_repairs"] = []
+        async with env.engine.begin() as conn:
+            await conn.execute(
+                text("UPDATE xiaowei_action_run SET ledger=:ledger"), {"ledger": json.dumps(legacy)}
+            )
     fresh()  # 新GovernedTools模拟进程重启，不能借旧内存账本通过。
     async with running(env, max_reply_chars=3500) as group:
         await group.ask(f"/批准 {aid}", sender=B, message_id="om_fail_resume")
@@ -1588,8 +1602,10 @@ async def test_waiting_releases_group_and_resume_commits_after_other_investigati
     )
 
 
+@pytest.mark.parametrize("old_ledger", [False, True])
 async def test_native_binding_keeps_execution_actor_separate_and_snapshot_contains_no_raw_result(
     actions,
+    old_ledger,
 ):
     env = actions.env
     async with running(env, max_reply_chars=3500) as group:
@@ -1602,7 +1618,22 @@ async def test_native_binding_keeps_execution_actor_separate_and_snapshot_contai
         assert json.loads(ledger)["used"] == 1
         assert 0 < context["budget"]["timeout_seconds"] < env.results.budget.timeout_seconds
         assert "api_key" not in saved_ctx and "must-not-save" not in state
+        if old_ledger:
+            from sqlalchemy import text
+
+            legacy = json.loads(ledger)
+            legacy["runs"].pop("grafana_missing")
+            for prefix in ("promql", "selector", "alertmanager"):
+                legacy["runs"][prefix + "_pending"] = []
+                legacy["runs"][prefix + "_repairs"] = []
+            async with env.engine.begin() as conn:
+                await conn.execute(
+                    text("UPDATE xiaowei_action_run SET ledger=:ledger"),
+                    {"ledger": json.dumps(legacy)},
+                )
         await group.ask(f"/批准 {aid}", sender=B)
+        await group.ask(f"/批准 {aid}", sender=B, message_id="om_duplicate_legacy_approval")
+        assert len(actions.adapter.calls) == 1
     assert await env.rows(
         "SELECT subject_id FROM xiaowei_evidence WHERE tool_id=:tool", tool=WRITE
     ) == [(B,)]

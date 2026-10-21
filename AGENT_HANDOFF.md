@@ -9,16 +9,16 @@
 | 项目 | 已核对事实 |
 | --- | --- |
 | 仓库 | [shixian66/xiaowei-agent-sdk](https://github.com/shixian66/xiaowei-agent-sdk) |
-| 产品代码基线 | A 从 `main@691804424f8bf3ed04c32f806a291cfafa053266`（PR #120）开始，批准设计 v1.3 为 `71398cf8e7f076e6bc3c840a6566ca49a7709f00`；当前合入 `main@143c4c8641be636c41c130329ce1639a36b59c27`（#121、#122）做 PR 验证。工作树 `scheduled-agent-design/agent-SDK`，分支 `codex/webhook-notifications`；原目录已有修改保留 |
+| 产品代码基线 | 当前监控补查候选从最新 `main@9284688bb8907c9968e84d5e49c23e551c53ac58`（#123）独立开始；工作树 `monitoring-read-recovery/agent-SDK`、分支 `codex/monitoring-read-recovery`。通知/定时任务工作区未修改 |
 | 源码与检查 | 当前源码仅保留 `src/xiaowei`；旧工程及专属测试、Compose、迁移入口、`compose-smoke` CI 和 Alembic 依赖已移除。保留产品测试、公共检查与旧回答兼容路径；旧工程历史可从 Git 查回 |
-| 当前存储与回答 | A 候选应用 schema v13（主线 v12），新增独立通知发送记录；SDK 表不变。可信 `answer_version=3`、2/Legacy 与分项交付兼容契约不变 |
+| 当前存储与回答 | 沿用主线应用 schema v13，无数据库迁移；SDK 表、可信 answer_version=3、2/Legacy 与分项交付不变。失败原因闭集新增 `object_missing`，旧镜像读取新原因不保证兼容 |
 | 锁定依赖 | SDK `0.22.3`、Lark Channel `1.4.0`、MCP `2.2.0`、sqlglot `30.17.0`、`nh3 0.3.7`、`tinycss2 1.5.1`、Pillow `13.0.0`、certifi `2026.10.19`（后两项为严格审计发现的既有漏洞定向升级） |
 | 正式入口 | `xiaowei serve`、`config check`、`model check`、`storage init/upgrade/cleanup`、`requests resend`；命令与环境准备以 README 为准 |
-| 最近有记录的公司部署 | 既有交接记录称 PR #110 / `4e0ab86` 已部署，并记录了部署后的回答拒收反馈。该历史记录不证明当前镜像、配置或健康状态，也不证明 #111–#114 已部署 |
-| 当前验收结论 | A 的 N1 通知标签修复代码为 `105c26179133f1ca3921f1d33893b1ede43a080a`，531项关联回归及具体版本独立复审通过；原三项阻断及补充 P2 的历史关闭记录见 §5。真实模型/机器人未验收，B–D 未实现 |
-| 当前任务授权 | 用户已确认 A 复审通过，授权推送、创建 PR 并在检查通过后合并。真实模型、公司源、真实 Webhook和部署仍未授权；生产写逐次审批。隔离环境按锁文件安装，测试使用仓库标识的隔离 PostgreSQL |
+| 最近有记录的公司部署 | 用户本次提供线上镜像 `xiaowei:143c4c8641be636c41c130329ce1639a36b59c27` 及新会话巡检日志；这是用户提供的部署证据，未独立核验当前服务器状态。本候选未部署 |
+| 当前验收结论 | 产品 `0da5d9f` 独立复审通过，两项日志P2关闭。本轮F1/F2仅修订文档，基线回退路径及成功对照4项通过；本地是否满足开PR条件只取本轮最终HEAD的全仓、发行和静态检查实际结果，记录方式见§3，不继承旧回归数字 |
+| 当前任务授权 | 仅本地处理F1/F2文档意见并完成最终HEAD验证；不改schema、不加兼容层、不改旧镜像行为或定时任务工作区。暂不推送、不开PR、不合并、不部署；本地门槛通过后仍由用户决定下一步。未授权真实模型、公司源或真实消息发送 |
 
-原工作目录的 ARCHITECTURE 差异与未跟踪计划/公司配置保留，未复制到本工作树；本次未读取公司配置凭据。旧回答修复计划及验证记录保留为历史证据，不能作为本次定时任务的实施授权。当前任务只按下面的新设计/计划接续。
+原工作目录的 ARCHITECTURE 差异与未跟踪计划/公司配置保留，未复制到本工作树；本次未读取公司配置凭据。旧通知/定时任务和回答修复记录保留为历史证据，不能作为本监控候选的范围扩展授权。
 
 本文件的状态以表中的核对基线为限。接手者先核对实际 HEAD、工作区及用户新指令；合入、独立审查、离线测试、真实运行、部署与用户接受分别记录，不互相替代。
 
@@ -36,6 +36,47 @@
 - 通知及定时任务的方向与待审权限增量见 [ARCHITECTURE](ARCHITECTURE.md#scheduled-agent-tasks)：多个目的群不扩大操作入口，任务独立于原聊天，创建及每次执行复核权限，生产写不能继承周期批准。A 已有本地候选与离线证据，B–D 未实现。
 
 ## 3. 当前计划与下一项工作
+
+### 当前独立候选：监控补查修复
+
+本轮接收针对 `9284688..0dda020` 的审查意见，按共同根因处理：
+
+- **F1（文档残留）成立并修订：** 删除本文“子集重试仍受两次修正额度约束”的半句，保留不推导选择器子集语义的边界。未修改实际配额、治理或测试。
+- **F2（已接受的回退限制）成立并修订：** 使用基线 `9284688` 的实际模块、SDK及隔离PostgreSQL复现；新原因在旧账本解析时拒绝，暂停未消费、两次批准及到期检查均零写入；历史读取/重发在 `_saved_answer` 拒绝，发送替身零调用，记录原值保留。含正常批准、旧原因可解析对照共4项通过；当前候选的账本/回答解析能接受新原因。操作员说明已补入 [OPERATIONS](deploy/OPERATIONS.md#监控补查修订的回退限制)，按用户决定只补文档，不改schema或增加兼容层。
+- **F2细节纠正：** 基线内部由 `app.py` 的账本 `ValidationError` 映射为 `model_failed`，但正式渠道 `channel.py` 的 `TurnError → _approval_failure` 路径会对仍待批的动作返回 `action_not_approvable`。实测内部日志与渠道请求失败码分别如此；审查所述“最终只得到笼统轮次失败而非action_not_approvable”不成立，不据此增加错误处理。
+- **Docker空间及清理：** 用户提供的审查证据确认此前VM磁盘用满，`initdb` 的 `pg_wal` 创建报No space left on device；基线/候选同样失败。本轮只读盘点已变为29.4GB总量、16.0GB已用、11.8GB可用（58%）。未执行空间清理、未请求删除授权；当前建议不删除已有资源。镜像/容器/卷逐项清单含大小、运行引用和推测来源，保存于本轮本地验证目录。无引用不代表无数据或已获删除授权。
+
+为满足“最终HEAD全仓回归”，先选择性提交上述文档并冻结HEAD，再执行以下检查，不在检查后为写入自身SHA追加提交。**最终SHA、实际通过/失败/跳过数及是否具备开PR条件，按本轮最终交付回复与本地 `final-report.md` / JUnit 原始记录核对，不预填通过。** 本轮本地验证目录：`/var/folders/r1/9lhtpjbj4qdbl4g3py9myqs40000gn/T/xw-monitoring-f1f2-ti8k8vhw/`；原始运行记录不作为发布包或业务数据提交。
+
+```sh
+SDK_TEST_POSTGRES_URL=postgresql+asyncpg://postgres@127.0.0.1:55432/postgres PYTHONDONTWRITEBYTECODE=1 .venv/bin/python -m pytest -q -p no:cacheprovider --tb=short --junitxml="$XW_REVIEW_OUTPUT/full.xml"
+SDK_TEST_POSTGRES_URL=postgresql+asyncpg://postgres@127.0.0.1:55432/postgres PYTHONDONTWRITEBYTECODE=1 .venv/bin/python -m pytest tests/deployment/test_release.py tests/deployment/test_compose.py tests/deployment/test_maintenance.py tests/deployment/test_release_workflow.py -q -p no:cacheprovider --tb=short --junitxml="$XW_REVIEW_OUTPUT/release.xml"
+.venv/bin/ruff check --no-cache .
+.venv/bin/mypy src
+git diff --check
+```
+
+`XW_REVIEW_OUTPUT` 仅为上述本地验证目录，不是产品配置。测试使用现有隔离实例并保留harness标识核对，不运行共享实例的启动/停止/重建/清理命令；发行测试仅使用其本轮新建的隔离项目和资源。既有资源不做空间回收；若再次空间不足，先给用户列出具体可回收项再确认，不使用prune、不降低门槛。
+
+官方Alertmanager/Grafana二进制协议、本轮真实模型自主补证及结论限定、公司监控源、飞书仍未验证；脚本回放不是能力验收。
+
+下面保留产品候选及早先验证的版本记录；不能将其数字当成本轮最终HEAD的结果。
+
+用户授权在 `monitoring-read-recovery/agent-SDK`、分支 `codex/monitoring-read-recovery` 从最新 `main@9284688` 独立实施，不动定时任务工作区；只做离线验证与独立审查，不合并、不部署。下面通知/定时任务段是主线已有交接，不能据此扩展本候选范围。
+
+本候选移除三类源内共享两次修正配额，保留总预算和失败请求去重；静默列表可修正读取错误不再停止整源；Grafana 当前 UID 明确 NotFound 只停止同一对象的摘要/面板重发。新错误原因 `object_missing` 是失败反馈契约的窄增量，旧镜像读取该原因不保证兼容；成功 Evidence、权限、写审批、Session 数据边界、报告交付与 SDK Loop 不变。方案、回归与真实验证边界见[监控评测说明](docs/monitoring-reliability-evaluation.md#监控补查修复候选2026-10-21)。
+
+产品冻结于 `0da5d9f0f64bec4c8056e7fca7ea57d22160730a`，独立审查及增量复审通过。原始供应商调用ID日志泄露、未知目标路由拒绝时摘要编码异常两项P2均已用真实路径复现并修复：日志只输出固定摘要，业务ID不变，不增加校验或策略。最终复审独立验证了SDK实验的两个恢复参数，确认失败去重、正确补查、整源停止、失败交付及预算均保留；早先独立复验12项及最终日志反例3项也通过，各轮有重叠，不相加。
+
+离线验证按版本记录，不自动晋级为最终SHA全套通过：
+
+- 基线关联123 passed、1 skipped、1 deselected；8个新核心反例先失败后通过。
+- `a662eb6` 关联回归298 passed、28 skipped、4 deselected；跳过为未配置的官方MCP/服务，浏览器未选。最终摘要编码变更后治理/日志89 passed；旧SDK实验及源失败/日志30 passed、1 skipped、1 deselected。最后两组有重叠。
+- 日志修订前启动的完整回归：4599 passed、4 failed、235 skipped、89 deselected、5项预期网络拒绝警告，1256.72秒。它不是最终SHA全套验证。其中SDK实验旧 `promql_pending` 断言失败已改为可观察恢复行为，模块9 passed，独立复验2 passed。源码、全部测试和脚本已搜索，无已删字段的实际依赖。
+- 剩余3项均为未改动的历史发行维护：`test_different_image_upgrade_rollback_and_paired_restore`（487行）、`test_container_migration_v4_to_v5_to_v6_and_old_program_refusal`（741行）、`test_feishu_users_upgrade_rollback_restores_the_config_the_old_image_reads`（993行），都在初始 `postgres --wait` 报容器 unhealthy，尚未进入应用路径。第一项已单独复现（15.15秒）；当时未定位具体容器根因；本轮审查补充及空间变化见上文，不据此直接核销三项失败，须由最终HEAD实测确认。
+- 最终产品 `ruff check --no-cache .`、`mypy src`（36文件）、`git diff --check` 通过。成功Evidence、权限、SDK Loop、Session及交付源码没有变更，失败原因新增及固定标签除外；应用schema仍为13。
+
+新增解释样例共11场景14轮；不把脚本回放算为诊断能力。未调用真实模型、公司源或飞书，未推送、开PR、合并或部署。下一步是用户审阅本候选后决定PR/CI安排，发行维护和真实模型自主补证/结论质量仍须分别验证；不据此关闭线上整体安全结论问题。
 
 ### 通知与定时任务：A 审查修复离线通过
 
@@ -227,7 +268,7 @@ Web 动作提示的可达依据：`action_status_catalog` 只要求 action_id/st
 ### 仍需保留的限制
 
 - 改写调用自身失败时，锁定 SDK 的脱敏错误包装可能把日志原因归为 `sdk_configuration`，用户仍见 `model_failed`；该诊断缺口仍待处理。
-- OpenAI 协议族的 SDK 内置 `conversation_locked` 重试不经过应用的 429/503 策略；Vertex 不触发。选择器组合失败后的子集重试不做语义推导，仍受两次修正额度约束；均为已有记录的边界。
+- OpenAI 协议族的 SDK 内置 `conversation_locked` 重试不经过应用的 429/503 策略；Vertex 不触发。选择器组合失败后的子集重试不做语义推导；均为已有记录的边界。
 - C8 数据源写前摘要比对不等于原子版本控制，真实环境开放前须按架构核对竞争窗口；Annotation 回读 `limit=100` 边缘情况未关闭。未知插件普通字段中无法识别的凭据风险与写端令牌范围按既有取舍处理，不增加插件白名单。
 - 单个大字段超限时预览仍可能没有条目；监控工具返回格式与客户端显示缺口不能用模型编造数据补齐。图形 D4 暂缓，保留已完成的协议核验供明确重启时使用。
 - 历史 secret-scan 随机样本不稳定、Grafana 群重发整文件失败及 C8 取消落定偶发失败有记录；单次重跑通过不能核销原因，旧失败记录也不证明当前版本必然复现。

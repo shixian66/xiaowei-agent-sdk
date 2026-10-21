@@ -371,6 +371,7 @@ MonitoringFailureReason = Literal[
     "response_limit",
     "invalid_matcher",
     "silence_missing",
+    "object_missing",
     "unclassified",
 ]
 

@@ -16,7 +16,7 @@ pytestmark = pytest.mark.loopback
 
 
 @pytest.mark.parametrize("repair_in_flight", [False, True])
-async def test_older_success_cannot_clear_later_syntax_failure(
+async def test_older_success_preserves_failed_expression_dedupe_without_blocking_new_queries(
     postgres_url: URL, repair_in_flight: bool
 ) -> None:
     config = ServeConfig.model_validate(
@@ -66,18 +66,17 @@ async def test_older_success_cannot_clear_later_syntax_failure(
             release.set()
             assert (await pending).evidence_id
             runs = governed.turn_runs(ctx.identity)
-            assert runs.promql_pending == frozenset({SOURCE})
-            if repair_in_flight:
-                assert runs.promql_repairs == (SOURCE, SOURCE)
-                with pytest.raises(ToolRejectedError, match="两次PromQL修正机会已用完"):
-                    await governed.invoke(ctx, request("new_query"), execute)
-                assert calls == ["bad_first(", "older_success", "bad_later("]
-            else:
-                assert runs.promql_repairs == ()
-                assert (await governed.invoke(ctx, request("new_query"), execute)).evidence_id
-                assert governed.turn_runs(ctx.identity).promql_repairs == (SOURCE,)
-                assert not governed.turn_runs(ctx.identity).promql_pending
-                assert calls == ["older_success", "bad_later(", "new_query"]
+            assert (SOURCE, "bad_later(") in runs.promql_errors
+            before = list(calls)
+            with pytest.raises(ToolRejectedError):
+                await governed.invoke(ctx, request("bad_later("), execute)
+            assert calls == before
+            assert (await governed.invoke(ctx, request("new_query"), execute)).evidence_id
+            assert calls == (["bad_first("] if repair_in_flight else []) + [
+                "older_success",
+                "bad_later(",
+                "new_query",
+            ]
         finally:
             release.set()
             await pending

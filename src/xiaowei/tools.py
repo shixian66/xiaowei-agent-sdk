@@ -17,7 +17,9 @@
 """
 
 import copy
+import hashlib
 import json
+import logging
 from collections.abc import Awaitable, Callable, Mapping
 from typing import Any
 
@@ -29,6 +31,7 @@ from xiaowei.governance import (
     AlertmanagerCorrectionError,
     Execute,
     GovernedTools,
+    GrafanaObjectMissingError,
     MonitoringReadError,
     PrometheusSelectorError,
     PromQLExpressionError,
@@ -41,6 +44,7 @@ from xiaowei.models import ToolContract, ToolRequest, ToolResult
 from xiaowei.sqlguard import REJECTION_MESSAGES, QueryRejectionCode
 
 _UNKNOWN_CLUSTER = "目标未确认，未执行；请核实本轮明确目标，不猜选其他集群"
+logger = logging.getLogger(__name__)
 
 _REJECTION_FEEDBACK: dict[ToolRejectCode, tuple[str, bool]] = {
     "object_not_readable": (
@@ -72,8 +76,7 @@ _REJECTION_FEEDBACK: dict[ToolRejectCode, tuple[str, bool]] = {
     "authorization_unavailable": ("权限检查失败，未执行工具；停止该操作，不绕过权限复核", False),
     "budget_exhausted": ("本轮工具调用次数已用完；停止调用，用已有证据说明限制或澄清", False),
     "source_stopped": (
-        "该监控源读取已失败或修正机会已用完；停止被拒绝的操作，可调查其他已授权源；"
-        "PromQL 情形仍可按原契约读取发现信息",
+        "该监控源本轮读取已失败；停止本源调用，可调查其他已授权源并说明未核实范围",
         False,
     ),
     "schema_unavailable": (
@@ -171,14 +174,7 @@ _REJECTION_HINTS: dict[ToolRejectHint, str] = {
     "alertmanager_change_request": (
         "本轮同一请求已失败，未重发；请修改 filters 或核对静默 ID，勿重复相同参数"
     ),
-    "alertmanager_alerts_exhausted": (
-        "本源告警/分组读取的两次修正机会已用完；停止本类读取。"
-        "仍可按任务需要读取本源静默或状态，以及其他已授权源"
-    ),
-    "alertmanager_silence_exhausted": (
-        "本源指定静默 ID 读取的两次修正机会已用完；停止本类读取。"
-        "仍可按任务需要读取本源告警/分组或状态，以及其他已授权源"
-    ),
+    "grafana_change_object": "指定 Dashboard UID 本轮已确认不存在；可核对 UID 或读取其他获准对象",
 }
 
 
@@ -278,6 +274,15 @@ def _function_tool(
             return _rejection_feedback(exc, name)
         except ToolRejectedError as exc:
             governance.note_rejected(tool_ctx.context.identity)
+            logger.info(
+                "tool_rejected turn=%s call_ref=%s tool=%s code=%s",
+                tool_ctx.context.identity.turn_id,
+                hashlib.sha256(
+                    tool_ctx.tool_call_id.encode("utf-8", errors="surrogatepass")
+                ).hexdigest()[:16],
+                name,
+                exc.code,
+            )
             return _rejection_feedback(exc, name)
         except PromQLExpressionError as exc:
             return json.dumps(
@@ -307,7 +312,7 @@ def _function_tool(
         except AlertmanagerCorrectionError as exc:
             reasons = {
                 "response_limit": (
-                    "告警数量过多，响应超过接收上限；请加 filters 按 alertname、instance、"
+                    "告警或静默列表响应超过接收上限；可加 filters 按 alertname、instance、"
                     "severity 或 job 收窄后重试"
                 ),
                 "invalid_matcher": (
@@ -323,6 +328,16 @@ def _function_tool(
                     "source": contract.target_id,
                     "correction_allowed": exc.correction_allowed,
                     "reason": reasons[exc.reason],
+                },
+                ensure_ascii=False,
+            )
+        except GrafanaObjectMissingError as exc:
+            return json.dumps(
+                {
+                    "status": "object_missing",
+                    "source": contract.target_id,
+                    "correction_allowed": exc.correction_allowed,
+                    "reason": "指定 Dashboard UID 未找到；可核对 UID 或读取其他获准对象",
                 },
                 ensure_ascii=False,
             )

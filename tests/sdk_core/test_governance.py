@@ -1072,6 +1072,32 @@ def _three_adapters() -> dict[str, RecordingAdapter]:
     return {c: RecordingAdapter(rows=i + 1) for i, c in enumerate(CLUSTERS)}
 
 
+async def test_route_rejection_preserves_feedback_with_non_utf8_call_id(
+    postgres_url: URL, caplog: pytest.LogCaptureFixture
+) -> None:
+    import json
+    import logging
+
+    from agents.tool_context import ToolContext
+
+    caplog.set_level(logging.INFO, logger="xiaowei.tools")
+    adapters, grants = _three_adapters(), _routed_grants(*CLUSTERS)
+    async with ready_engine(postgres_url) as engine:
+        governed = GovernedTools(store(engine, grants, Clock(), _routed_catalog()))
+        tool = routed_function_tool(
+            ROUTED_TOOL, governed, {c: a.execute for c, a in adapters.items()}
+        )
+        arguments = json.dumps({"cluster": "unknown", "region": "east"})
+        ctx = ToolContext(
+            _routed_ctx(), tool_name=tool.name, tool_call_id="\ud800", tool_arguments=arguments
+        )
+        output = json.loads(await tool.on_invoke_tool(ctx, arguments))
+        assert output["code"] == "unknown_target" and output["retry_this_turn"] is True
+        assert governed.turn_runs(ctx.context.identity).rejected == 1
+        assert not grants.checks and all(not adapter.calls for adapter in adapters.values())
+        assert "call_ref=" in caplog.text and "\ud800" not in caplog.text
+
+
 async def test_one_tool_routes_each_call_to_the_named_target(postgres_url: URL) -> None:
     adapters, grants = _three_adapters(), _routed_grants(*CLUSTERS)
     async with ready_engine(postgres_url) as engine:
