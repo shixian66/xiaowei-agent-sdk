@@ -31,7 +31,7 @@ from xiaowei.governance import (
     ToolRejectedError,
     TurnRuns,
 )
-from xiaowei.models import RunContext, ToolRequest, TurnAnswer
+from xiaowei.models import RunContext, ToolObservation, ToolRequest, TurnAnswer
 from xiaowei.runtime import ServeConfig, _monitoring_catalog
 from xiaowei.session import SessionItemRejectedError
 from xiaowei.tools import governed_function_tool
@@ -275,6 +275,16 @@ async def test_failures_before_pause_survive_restart_and_reach_delivery(postgres
             expression = request.arguments["query"]
             calls.append(expression)
             if failure == "syntax":
+                if expression == "up":
+                    return ToolObservation(
+                        payload={
+                            "query": expression,
+                            "result": "up => 1 @[1720000000]",
+                            "warnings": None,
+                        },
+                        captured_at=h.clock(),
+                        truncated=False,
+                    )
                 raise PromQLExpressionError(1, 4)
             raise MonitoringReadError("unavailable")
 
@@ -302,19 +312,29 @@ async def test_failures_before_pause_survive_restart_and_reach_delivery(postgres
         retried = function_call(f"{SOURCE}__query", {"query": "bad("}, call_id="c3")
         resumed_agent = agent_for(
             h,
-            ScriptedModel([[retried], ModelStep(responder=cite_all)]),
+            ScriptedModel(
+                [
+                    [retried],
+                    [function_call(f"{SOURCE}__query", {"query": "up"}, call_id="c4")],
+                    ModelStep(responder=cite_all),
+                ]
+            ),
             [monitor_tool()],
         )
         state = await restore(resumed_agent, saved, restored)
         state.approve(state.get_interruptions()[0], always_approve=False)
         result = await run(resumed_agent, state)
-        assert calls == ["bad("]  # 拒绝同一失败表达式/已停止源，未产生第二次 I/O。
+        # 重复失败表达式不重发；语法可修正时允许正确补查，整源不可达则仍拒绝。
+        assert calls == (["bad(", "up"] if failure == "syntax" else ["bad("])
         runs = h.governed.turn_runs(restored.identity)
         assert len(runs.monitoring_failures) == 1
         assert runs.monitoring_failures[0].target_id == SOURCE
         if failure == "syntax":
             assert runs.promql_errors == ((SOURCE, "bad("),)
-            assert runs.promql_pending == frozenset({SOURCE})
+            assert any(tool == TOOL for tool, _ in runs.produced)
+        else:
+            assert all(tool != TOOL for tool, _ in runs.produced)
+        assert h.governed._used[key(restored)] == (4 if failure == "syntax" else 3)
         delivered = await commit_result(h, restored, result, "源失败后继续调查")
         assert SOURCE in delivered.content and "未核实" in delivered.content
         assert len(h.adapter.calls) == 2

@@ -76,8 +76,7 @@ _REJECTION_FEEDBACK: dict[ToolRejectCode, tuple[str, bool]] = {
     "authorization_unavailable": ("权限检查失败，未执行工具；停止该操作，不绕过权限复核", False),
     "budget_exhausted": ("本轮工具调用次数已用完；停止调用，用已有证据说明限制或澄清", False),
     "source_stopped": (
-        "该监控源读取已失败或修正机会已用完；停止被拒绝的操作，可调查其他已授权源；"
-        "PromQL 情形仍可按原契约读取发现信息",
+        "该监控源本轮读取已失败；停止本源调用，可调查其他已授权源并说明未核实范围",
         False,
     ),
     "schema_unavailable": (
