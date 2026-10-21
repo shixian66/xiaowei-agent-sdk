@@ -75,6 +75,7 @@ async def _install_v1(engine: AsyncEngine, *, through: str = "001_initial.sql") 
         "010_sdk_approval.sql",
         "011_feishu_reports.sql",
         "012_delivery_parts.sql",
+        "013_notification_attempt.sql",
     ]
     async with engine.begin() as conn:
         for name in names[: names.index(through) + 1]:
@@ -108,9 +109,10 @@ def test_v2_migration_only_touches_application_tables() -> None:
         "010_sdk_approval.sql",
         "011_feishu_reports.sql",
         "012_delivery_parts.sql",
+        "013_notification_attempt.sql",
     ):
         assert "agent_" not in _migration(name)
-    assert APP_SCHEMA_VERSION == 12
+    assert APP_SCHEMA_VERSION == 13
     assert _V2_TABLES <= APP_TABLES
     assert all(name.startswith("xiaowei_") for name in APP_TABLES)
 
@@ -138,6 +140,25 @@ async def test_fresh_initialization_binds_the_digest_key(postgres_url: URL) -> N
 
         # 错配只拒绝，不能覆盖首次绑定；原密钥仍可通过。
         await initialize_storage(engine, digest_key=key)
+
+
+async def test_direct_v12_upgrade_adds_only_notification_table_and_preserves_history(
+    postgres_url: URL,
+) -> None:
+    async with open_engine(secret(postgres_url)) as engine:
+        await _install_v1(engine, through="012_delivery_parts.sql")
+        async with engine.begin() as conn:
+            await storage_module._write_digest_key_binding(conn, _DIGEST_KEY)
+        session = SQLAlchemySession("v12-history", engine=engine)
+        await session.add_items([{"role": "user", "content": "retained v12 history"}])
+        before = await _tables(engine)
+        with pytest.raises(StorageVersionMismatchError):
+            await check_storage(engine)
+        assert await upgrade_storage(engine, digest_key=_DIGEST_KEY) == 13
+        assert await _tables(engine) == before | {"xiaowei_notification_attempt"}
+        assert await session.get_items() == [{"role": "user", "content": "retained v12 history"}]
+        await check_digest_key(engine, _DIGEST_KEY)
+        await check_storage(engine)
 
 
 async def test_existing_v5_needs_an_explicit_first_digest_key_binding(postgres_url: URL) -> None:
@@ -206,7 +227,7 @@ async def test_v6_to_v9_upgrade_to_v11_preserves_binding_rows_and_sdk_history(
         with pytest.raises(StorageVersionMismatchError):
             await check_storage(engine)
         assert await _version(engine) in (6, 7, 8, 9)
-        assert await upgrade_storage(engine, digest_key=_DIGEST_KEY) == 12
+        assert await upgrade_storage(engine, digest_key=_DIGEST_KEY) == 13
         # 升级与新版启动是不同进程；丢弃 ALTER TABLE 前准备的 SELECT * 查询缓存。
         await engine.dispose()
         assert "xiaowei_action" in await _tables(engine)
@@ -273,7 +294,7 @@ async def test_v10_sdk_approval_upgrade_to_v11_keeps_paused_request_and_action_r
             run_before = (await conn.execute(text("SELECT * FROM xiaowei_action_run"))).one()
         with pytest.raises(StorageVersionMismatchError):
             await check_storage(engine)
-        assert await upgrade_storage(engine, digest_key=_DIGEST_KEY) == 12
+        assert await upgrade_storage(engine, digest_key=_DIGEST_KEY) == 13
         await engine.dispose()
         async with engine.connect() as conn:
             assert (await conn.execute(text("SELECT * FROM xiaowei_request"))).one() == (
@@ -320,7 +341,7 @@ async def test_direct_v11_upgrade_and_isolated_dump_restore_preserve_unknown_rep
             """),
                 {"body": body, "digest": hashlib.sha256(body).hexdigest()},
             )
-        assert await upgrade_storage(engine, digest_key=_DIGEST_KEY) == 12
+        assert await upgrade_storage(engine, digest_key=_DIGEST_KEY) == 13
         async with engine.connect() as conn:
             assert (
                 await conn.execute(text("SELECT delivery,delivery_version FROM xiaowei_request"))
@@ -454,7 +475,7 @@ async def test_initialization_advances_the_schema_version(postgres_url: URL) -> 
     """全新初始化推进到当前版本。旧程序只接受各自版本由基线源码保证，这里不复制旧实现。"""
     async with open_engine(secret(postgres_url)) as engine:
         await initialize_storage(engine, digest_key=_DIGEST_KEY)
-        assert await _version(engine) == APP_SCHEMA_VERSION == 12
+        assert await _version(engine) == APP_SCHEMA_VERSION == 13
 
 
 async def test_failed_upgrade_rolls_back_completely(postgres_url: URL) -> None:
@@ -845,7 +866,7 @@ async def test_v8_v9_upgrade_invalidates_only_pending_and_recovery_does_not_repl
                 r.action_id: tuple(r)
                 for r in await conn.execute(text("SELECT * FROM xiaowei_action"))
             }
-        assert await upgrade_storage(engine, digest_key=_DIGEST_KEY) == 12
+        assert await upgrade_storage(engine, digest_key=_DIGEST_KEY) == 13
         await engine.dispose()
         async with engine.connect() as conn:
             after = {
@@ -858,7 +879,7 @@ async def test_v8_v9_upgrade_invalidates_only_pending_and_recovery_does_not_repl
         )
         for state in ("succeeded", "unknown", "executing"):
             assert after[state][:-1] == before[state] and after[state][-1] is None
-        assert await upgrade_storage(engine, digest_key=_DIGEST_KEY) == 12
+        assert await upgrade_storage(engine, digest_key=_DIGEST_KEY) == 13
         ready = Readiness()
         store = ChannelStore(
             engine,
