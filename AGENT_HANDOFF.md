@@ -15,7 +15,7 @@
 | 锁定依赖 | SDK `0.22.3`、Lark Channel `1.4.0`、MCP `2.2.0`、sqlglot `30.17.0`、`nh3 0.3.7`、`tinycss2 1.5.1`、Pillow `13.0.0`、certifi `2026.10.19`（后两项为严格审计发现的既有漏洞定向升级） |
 | 正式入口 | `xiaowei serve`、`config check`、`model check`、`storage init/upgrade/cleanup`、`requests resend`；命令与环境准备以 README 为准 |
 | 最近有记录的公司部署 | 既有交接记录称 PR #110 / `4e0ab86` 已部署，并记录了部署后的回答拒收反馈。该历史记录不证明当前镜像、配置或健康状态，也不证明 #111–#114 已部署 |
-| 当前验收结论 | A 的 v1.4 修复已分批离线通过，独立复审关闭原三项阻断和补充 P2，代码版本 `79e03aba214389a90cf2e359d86d1683c13a3c94`。真实模型/机器人未验收，B–D 未实现 |
+| 当前验收结论 | A 的 N1 通知标签修复代码为 `105c26179133f1ca3921f1d33893b1ede43a080a`，531项关联回归及具体版本独立复审通过；原三项阻断及补充 P2 的历史关闭记录见 §5。真实模型/机器人未验收，B–D 未实现 |
 | 当前任务授权 | 用户已授权按批准范围连续实现、测试和常规修复；当前串行完成 A。真实模型、公司源、真实 Webhook、部署/合入未授权；生产写仍逐次审批。独立环境按锁文件安装，测试使用仓库标识的隔离 PostgreSQL |
 
 原工作目录的 ARCHITECTURE 差异与未跟踪计划/公司配置保留，未复制到本工作树；本次未读取公司配置凭据。旧回答修复计划及验证记录保留为历史证据，不能作为本次定时任务的实施授权。当前任务只按下面的新设计/计划接续。
@@ -126,9 +126,23 @@ B1 的短口径主视图修复已成立；原 B2 因复现形状不符合真实 
 
 ### 2026-10-21 A 通知候选验证
 
-实现基线为批准设计 `71398cf8e7f076e6bc3c840a6566ca49a7709f00`，分支 `codex/webhook-notifications`。本次修复差异为 `d42b999a254b0c39383c2a02a5a90b062236eafb..79e03aba214389a90cf2e359d86d1683c13a3c94`；主修复 `af05350`，增量修复 `79e03ab`。文档为 v1.4；独立复审对两版本分别检查并关闭补充 P2，另重跑渲染5项及正式入口1项。原工作目录已有修改与公司配置保持不动。使用本工作树独立 `.venv`、Python 3.11.16、SDK 0.22.3、仓库标识的隔离 PostgreSQL；外部模型、成员目录、数据库驱动及 Webhook 使用替身，无真实模型/飞书/公司源调用。
+当前 N1 修复差异为 `fb47d46303fd31a1b022fa7e8e22946bc3544f8e..105c26179133f1ca3921f1d33893b1ede43a080a`，分支 `codex/webhook-notifications`。N1 已复核成立：本地 Webhook 绕过普通飞书发送的 `mention_safe`，SQL/事实行、模型说明及明确文字均可带原始 at 标签。根因在纯文本外发边界；现仅在 `webhook.py` 的最终正文归一化处统一中和，再构造请求、检查最终20000字节和计算去重摘要，不在各事实行重复处理。其他外发链已检查：Webhook notices 包含在同一最终正文中；应用机器人容量/预览 notices 最终经过既有 `LarkTransport.send`，未新增重复防护。
 
-本次实际验证（均为分批证据，未重跑单次完整产品全套）：PG 命令使用 `SDK_TEST_POSTGRES_URL=postgresql+asyncpg://postgres@127.0.0.1:55432/postgres` 和 `PYTHONDONTWRITEBYTECODE=1`。
+两项非阻断建议均采纳：通知渲染省略目的群不可用的 `approval_command` metadata，保留 Action ID/状态/影响及原 Evidence/原群审批材料；`test_actions_runtime.py` 原245行按 ruff format 整理。无依赖、迁移、权限或审批契约变化；五项已批准取舍保持不变，不开放主动 @所有人或成员。
+
+| 本轮检查 | 实际结果与范围 |
+| --- | --- |
+| 修复前 RED | 新增纯文字、事实、模型说明和审批命令4项均失败，见 `/tmp/xiaowei-webhook-n1-red.log`。首次修复回归92通过/1失败，事实用例的驱动固定返回 sales 而没有 note；已改为实际含标签的结构化行，保留行断言，日志 `/tmp/xiaowei-webhook-n1-green.log` |
+| 隔离变异 | 临时 pytest 插件仅在该进程把 `webhook.mention_safe` 换为恒等函数，三种来源及中和后容量准入4项全部失败；源码不变。日志 `/tmp/xiaowei-webhook-n1-mutation.log`，插件 `/tmp/xiaowei_n1_unguarded.py` |
+| 最终相关回归 | **531 passed**，134.13秒；命令 `.venv/bin/python -m pytest -q -p no:cacheprovider tests/sdk_core/test_{webhook_notification,feishu_render,feishu,feishu_format,feishu_reports,delivery_parts,actions_runtime,group_actions,sdk_approval}.py`。真实群入口/SDK/治理/隔离PG/HTTP替身验证两类成员标签中和、普通文字与换行、换 call_id 只发一次、摘要匹配实际HTTP正文，以及中和扩张超限零HTTP/零attempt。日志 `/tmp/xiaowei-webhook-n1-related.log` |
+| 静态与文档 | ruff全仓、mypy 36源文件、3份受影响Python文件的ruff format检查、diff检查、文档命令2项通过；gitleaks全历史无泄漏，规则未变，日志 `/tmp/xiaowei-webhook-n1-gitleaks.log` |
+| 独立复审 | 对 `fb47d46..105c26179133f1ca3921f1d33893b1ede43a080a` 复审通过，无阻断。审查者另重跑 **9 passed**，5.29秒，覆盖三来源、命令省略、扩张容量、普通换行、签名、跨成员unknown门槛及正式审批恢复/另轮通知。确认 notices 经过相同最终出口，无独立分支，不额外造测试或重复防护；未以旧候选审查替代 |
+
+本轮未运行单次完整产品全套、发行容器或真实服务，不能把531项与旧分批检查相加称为全套通过。SDK为0.22.3，Python为3.11.16；PG命令设置 `SDK_TEST_POSTGRES_URL=postgresql+asyncpg://postgres@127.0.0.1:55432/postgres`、`PYTHONDONTWRITEBYTECODE=1`，正式测试不加载变异插件。旧发送记录不改写，凭据/原目录已有修改不读取或混入。真实模型自主能力、飞书实际标签解释/群内表现及公司环境仍未验证；本次只证明离线请求正文及治理边界。
+
+以下保留上一候选的有效证据，均不是本轮 N1 修复后的完整检查：实现起点为批准设计 `71398cf8e7f076e6bc3c840a6566ca49a7709f00`，上一修复差异为 `d42b999a254b0c39383c2a02a5a90b062236eafb..79e03aba214389a90cf2e359d86d1683c13a3c94`；主修复 `af05350`，增量修复 `79e03ab`。文档为 v1.4；独立复审分别检查并关闭当时的补充 P2，另重跑渲染5项及正式入口1项。使用独立 `.venv` 和隔离 PostgreSQL，无真实模型/飞书/公司源调用。
+
+上一候选分批验证（未重跑单次完整产品全套）：
 
 | 检查 | 结果与版本 |
 | --- | --- |
