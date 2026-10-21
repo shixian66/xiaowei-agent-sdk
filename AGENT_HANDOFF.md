@@ -152,6 +152,12 @@ B1 的短口径主视图修复已成立；原 B2 因复现形状不符合真实 
 
 修复后单次关联检查 **220 passed，180.02秒**：`tests/sdk_core/test_scheduled_tasks.py tests/sdk_core/test_cli.py tests/deployment/test_release.py tests/security/test_docs_command_consistency.py`，日志 `/tmp/xiaowei-b-review-fix-related.log`。其中三项审查问题与纯文字期限先观察到4失败/1成功对照，再修复5通过；control-only提示另先2失败。此记录包含真SDK、PG、正式CLI子进程和发行包约束，尚不包含全部发行容器与完整全套。
 
+最新产品源码为 `a2509aa735d7d901bfdd03894da6baec72739c45`，相对首候选增量独立复审通过，3项P2关闭，无新阻断。审查者独立 **15 passed /40 deselected，17.08秒**，覆盖撤权安全状态、风险门槛、定义TTL/清理、转发接收范围、维护重发及后来新unknown；日志 `/tmp/b-review-a2509aa-incremental.log`。
+
+`a2509aa` 的再次完整运行发现发行夹具残留，停止时 **3 failed、1351 passed、1 skipped、89 deselected，585.22秒**：旧v5形状残留014结构、保留数据断言仍期待13，另有并行诊断下错误密钥容器停止30秒超时，后者原因未确证、未放宽阈值。仅修正前两项夹具后，单独串行 **P3-release 84 passed，449.88秒**，日志 `/tmp/xiaowei-b-p3-release-fixture-fix.log`；包括同一停止用例、Compose正式入口、历史迁移、成对恢复、错误密钥拒绝及信号。两份夹具差异独立静态复核通过，产品源码不变；U5另断言任务实际保存 approval_id/approver_id，**1 passed，1.57秒**。
+
+剩余产品回归将以 `--ignore=tests/deployment` 单独记录，不重复同输入发行构建。最新尚无单次完整全套通过记录；不把发行与其他批次相加称为单次全套。真实模型/服务、部署和用户验收仍未进行。依赖、锁文件和秘密扫描规则与A主线相同，沿用同输入的已过CI审计；最新700次提交全历史gitleaks无泄漏，ruff全仓、mypy37源文件及受影响文件format/diff通过。
+
 ### 已合入 A 的有效验证
 
 A 候选 `d0db9c35105b14f1dbf615df9d85bcee1ef512bf` 已经 [PR #123](https://github.com/shixian66/xiaowei-agent-sdk/pull/123) 合并为 `9284688bb8907c9968e84d5e49c23e551c53ac58`，树相同；[CI](https://github.com/shixian66/xiaowei-agent-sdk/actions/runs/39597464188) 9/9 首次通过。integration 单次4588 passed/235 skipped/89 deselected，p3-release84 passed，non-SDK1182 passed，security63 passed。该记录只证明 A 的精确版本；不代表 B、真实服务、部署或用户验收。A 的 N1 最终正文统一 mention_safe、审批命令省略及531项本地关联回归已获独立复审，无新依赖或权限扩大。

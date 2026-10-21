@@ -155,6 +155,8 @@ async def test_u5_formal_entry_confirms_then_sends_once_without_model_at_due_tim
         action_id = await env.scalar("SELECT action_id FROM xiaowei_action")
         await group.ask(f"/批准 {action_id}", sender=A)
         assert await env.scalar("SELECT state FROM xiaowei_scheduled_job") == "active"
+        assert await env.scalar("SELECT approval_id FROM xiaowei_scheduled_job") == action_id
+        assert await env.scalar("SELECT approver_id FROM xiaowei_scheduled_job") == A
         assert requests == []
         calls = len(env.scripts.calls)
         env.clock.advance((at - env.clock()).total_seconds())
