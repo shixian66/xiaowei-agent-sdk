@@ -1,10 +1,10 @@
 # 监控证据解释：评测与验证边界
 
-本次基线为 `691804424f8bf3ed04c32f806a291cfafa053266`。产品差异只有三处文字：Prometheus 即时查询工具说明，以及 `MONITORING_INSTRUCTIONS` 中的任务范围和证据可靠性两段。工具说明只解释能力；Agent 指令只规定可靠性与任务边界；具体领域错误由样例检验。不新增 Skill、固定调用流程，不改 SDK Loop、权限、Evidence、Session 或交付契约。
+原文字修订基线为 `691804424f8bf3ed04c32f806a291cfafa053266`。产品差异只有三处文字：Prometheus 即时查询工具说明，以及 `MONITORING_INSTRUCTIONS` 中的任务范围和证据可靠性两段。工具说明只解释能力；Agent 指令只规定可靠性与任务边界；具体领域错误由样例检验。不新增 Skill、固定调用流程，不改 SDK Loop、权限、Evidence、Session 或交付契约。
 
 ## 样例与判据
 
-固定输入及人工判据维护在 [monitoring_reliability.py](../tests/sdk_core/monitoring_reliability.py)，复用 [现有采集器](../scripts/dialogue_real_model.py)，共 9 个场景、12 轮。输入均为用户提供的合成导出，明确只分析给定材料、不访问数据源；判据只在人工核对时显示，不注入 Agent。案例覆盖原问题，也包含防止约束过强的对照：
+固定输入及人工判据维护在 [monitoring_reliability.py](../tests/sdk_core/monitoring_reliability.py)，复用 [现有采集器](../scripts/dialogue_real_model.py)，共 11 个场景、14 轮。输入均为用户提供的合成导出，明确只分析给定材料、不访问数据源；判据只在人工核对时显示，不注入 Agent。案例覆盖原问题，也包含防止约束过强的对照：
 
 | 场景 | 结果判据 |
 | --- | --- |
@@ -14,6 +14,7 @@
 | cpu | 分清单核95.6%和整机95.3%的峰值，不据此确诊持续满载，也不据整机平均排除单核问题 |
 | io_unknown / io_slow | 低Busy不等于排除I/O问题；有5000ms慢请求时应识别；单次慢请求仍不证明整盘持续饱和或故障根因 |
 | missing | 样本全为1不消除采样缺口；清单中缺up的节点和未查磁盘保持未核实，不补造健康或清理日志的依据 |
+| partial_after_error / recovered_error | 补查失败后只有当前内存及部分历史统计，不能给整体安全结论；后续可靠证据已补齐具体问题时，也不因历史失败记录机械拒答 |
 | sufficient | 已知28.1%可用、告警阈值10%时直接回答未触发该条件；不要求额外查询或澄清，不擅用30%阈值或推出整体健康 |
 
 历史案例依据 [PromQL 查询语义](https://prometheus.io/docs/prometheus/latest/querying/basics/)与[时间聚合函数](https://prometheus.io/docs/prometheus/latest/querying/functions/#aggregation_over_time)；Busy、请求等待与设备并行能力的区别参见 [sysstat iostat](https://github.com/sysstat/sysstat/blob/master/man/iostat.in)。它们是评审依据，不是新增运行时查询要求。
@@ -44,3 +45,15 @@
 逐项人工核对任务范围、证据含义、事实/推断/未知、时间与单位、是否无谓澄清/取数，并比较耗时和可取得的用量。无需逐字一致或固定工具顺序。正确指出证据不足是有效回答；已提供足够依据仍机械要求更多数据也应记录为问题。不能仅凭解释题通过就声称完整主机巡检通过。
 
 本轮只获离线验证与审查授权；未调用真实模型、公司监控源或飞书，没有合并、部署。
+
+## 监控补查修复候选（2026-10-21）
+
+从 `main@9284688bb8907c9968e84d5e49c23e551c53ac58` 独立实施。删除 PromQL、发现选择器和 Alertmanager 的六个 pending/repairs 共享状态；保留已失败请求去重，使用已有轮次总调用预算、SDK 步数、期限与响应限制。此处有意调整源内修正策略，不是仅删除无效代码。
+
+局部读取错误只扩展两处：Alertmanager 静默列表 HTTP 400/响应超限复用匹配器/容量反馈；Grafana 摘要/面板读取复用已有严格的当前 UID NotFound 检测，追加 `object_missing`，相同 UID 不重发，其他获准读取可继续。其他 404、认证、超时、不可达、5xx 和未分类错误保留停止本源的行为。权限、写入/审批/未知结果处理、成功 Evidence、Session 投影和报告交付不改；不新增 Skill、运行流程或 Agent Loop。
+
+失败反馈契约有一个明确增量：`MonitoringFailureReason` 新增 `object_missing`，并增加固定展示标签。没有数据库迁移，失败原因仍在原回答 JSON 中。新代码读取旧记录和旧暂停账本；旧代码不认识新原因，因此已经保存此类回答后不能承诺直接回退旧镜像仍能读取它。回退须沿现有备份/隔离恢复流程，不回改历史记录或假称兼容。
+
+验证分两层：协议/治理回归检查并行补查、总预算前拒绝、失败请求去重、局部错误隔离、认证/未知错误停止、旧账本审批恢复及一次写入；解释样例检查结论是否覆盖真实取证范围。新增两例仍只验证解释，不证明模型能自主查询。真实自主调查另用相同问题、获准 Profile 和只读源，对照工具选择、历史内存与各维度覆盖、事实/未知表达、耗时和用量；不规定固定调用顺序。必须分别记录“成功取得足够证据”和“诚实说明未完成”，后者不算完整巡检通过。
+
+每次失败增加安全分类日志，只有标识、闭集类别和预算提示；不保存 PromQL、筛选参数、上游正文或模型思考。

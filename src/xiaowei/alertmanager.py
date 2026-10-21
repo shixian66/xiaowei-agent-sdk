@@ -779,12 +779,16 @@ class AlertmanagerAdapter:
             self.status = "unavailable"
             raise MonitoringReadError("unavailable") from None
         except _ResponseLimitError:
-            if name in {"get_alerts", "get_alert_groups"}:
+            if name in {"get_alerts", "get_alert_groups", "get_silences"}:
                 raise AlertmanagerCorrectionError("response_limit") from None
             self.status = "unavailable"
             raise
         except _RequestStatusError as exc:
-            if exc.status_code == 400 and name in {"get_alerts", "get_alert_groups"}:
+            if exc.status_code == 400 and name in {
+                "get_alerts",
+                "get_alert_groups",
+                "get_silences",
+            }:
                 raise AlertmanagerCorrectionError("invalid_matcher") from None
             if exc.status_code == 404 and name == "get_silence":
                 raise AlertmanagerCorrectionError("silence_missing") from None

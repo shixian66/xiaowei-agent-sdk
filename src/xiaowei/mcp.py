@@ -42,6 +42,7 @@ from xiaowei.config import MCPServerConfig, resolve_secret_ref
 from xiaowei.governance import (
     Execute,
     GovernedTools,
+    GrafanaObjectMissingError,
     MonitoringReadError,
     Prechecked,
     PrometheusSelectorError,
@@ -52,6 +53,7 @@ from xiaowei.governance import (
 )
 from xiaowei.grafana import (
     D7_POLICIES,
+    _missing,
     prepare_dashboard,
     schema_matches,
     wire_arguments,
@@ -533,6 +535,8 @@ class MCPIntegration:
                     raise MonitoringReadError(reason)
             if binding.contract.policy_id in GRAFANA_READ_POLICIES and result.is_error:
                 reason = _grafana_read_failure(result, binding.remote_name, request.arguments)
+                if reason == "object_missing":
+                    raise GrafanaObjectMissingError()
                 if reason is not None:
                     raise MonitoringReadError(reason)
             if binding.contract.policy_id in D7_POLICIES:
@@ -820,6 +824,9 @@ def _grafana_read_failure(
         )
         path, operation, typed = "/search", "search", "search"
     elif tool_name in {"get_dashboard_summary", "get_dashboard_panel_queries"}:
+        prefix = "get dashboard by uid: "
+        if text.startswith(prefix) and _missing(text[len(prefix) :], arguments["uid"]):
+            return "object_missing"
         namespace = re.fullmatch(
             r"get dashboard by uid: resolve grafana namespace from /api/frontend/settings: "
             r"frontend settings returned HTTP (401|403|5[0-9][0-9])",

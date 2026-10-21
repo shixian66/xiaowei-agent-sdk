@@ -80,17 +80,22 @@ class Prechecked(Generic[Prepared]):
 Execute = Callable[[ToolRequest], Awaitable[ToolObservation]] | Prechecked[Any]
 """应用绑定的实际 I/O：只在治理通过后以校验、规范化后的请求调用。"""
 
-_ALERTMANAGER_REPAIR_CATEGORY = {
+_ALERTMANAGER_READ_CATEGORY = {
     "alertmanager.get_alerts": "alerts",
     "alertmanager.get_alert_groups": "alerts",
     "alertmanager.get_silence": "silence",
+    "alertmanager.get_silences": "silences",
 }
 
 
 def _alertmanager_request_digest(policy_id: str, arguments: Mapping[str, object]) -> str:
     from xiaowei.evidence import arguments_digest
 
-    if policy_id in {"alertmanager.get_alerts", "alertmanager.get_alert_groups"}:
+    if policy_id in {
+        "alertmanager.get_alerts",
+        "alertmanager.get_alert_groups",
+        "alertmanager.get_silences",
+    }:
         arguments = {
             key: value for key, value in arguments.items() if key not in {"limit", "offset"}
         }
@@ -161,8 +166,7 @@ ToolRejectHint = Literal[
     "datasource_field_type",
     "datasource_no_schema",
     "alertmanager_change_request",
-    "alertmanager_alerts_exhausted",
-    "alertmanager_silence_exhausted",
+    "grafana_change_object",
 ]
 """可信拒绝点提供的固定修正/限制提示标识；不携带参数或异常原文。"""
 
@@ -220,7 +224,7 @@ class MonitoringReadError(Exception):
 
 
 class PromQLExpressionError(MonitoringReadError):
-    """锁版协议确认的查询语法失败；只交回位置，修正额度由治理层决定。"""
+    """锁版协议确认的查询语法失败；只交回位置，修正受轮次总预算限制。"""
 
     def __init__(self, line: int, column: int) -> None:
         super().__init__("invalid_expression")
@@ -230,7 +234,7 @@ class PromQLExpressionError(MonitoringReadError):
 
 
 class PrometheusSelectorError(MonitoringReadError):
-    """锁版协议确认的发现工具 400 bad_data（选择器/参数被拒）；修正额度由治理层决定。
+    """锁版协议确认的发现工具 400 bad_data（选择器/参数被拒）；修正受轮次总预算限制。
 
     ``matches_rejected`` 表示上游说明明确指向 match[]：同一组选择器换工具、label 或时间窗
     也不会成功；否则只拒绝重发完全相同的请求。
@@ -249,6 +253,14 @@ class AlertmanagerCorrectionError(MonitoringReadError):
         self, reason: Literal["response_limit", "invalid_matcher", "silence_missing"]
     ) -> None:
         super().__init__(reason)
+        self.correction_allowed = False
+
+
+class GrafanaObjectMissingError(MonitoringReadError):
+    """锁版返回已明确绑定当前 UID 不存在；允许读取其他获准对象。"""
+
+    def __init__(self) -> None:
+        super().__init__("object_missing")
         self.correction_allowed = False
 
 
@@ -404,14 +416,9 @@ class TurnRuns:
     proposal_rejections: tuple[str, ...] = ()  # 已完成只读准备、明确未形成 Action 的调用。
     monitoring_failures: tuple[MonitoringFailure, ...] = ()
     promql_errors: tuple[tuple[str, str], ...] = ()  # 目标、已失败表达式，跨 query/range 禁止重发。
-    promql_pending: frozenset[str] = frozenset()
-    promql_repairs: tuple[str, ...] = ()  # 每源整轮最多两项，不随成功复位。
     selector_errors: tuple[tuple[str, str], ...] = ()  # 目标、已被拒的发现请求摘要。
-    selector_pending: frozenset[str] = frozenset()
-    selector_repairs: tuple[str, ...] = ()  # 每源整轮最多两项，不随成功复位。
     alertmanager_errors: tuple[tuple[str, str, str, str], ...] = ()  # 源、类别、工具、摘要。
-    alertmanager_pending: frozenset[tuple[str, str]] = frozenset()
-    alertmanager_repairs: tuple[tuple[str, str], ...] = ()
+    grafana_missing: tuple[tuple[str, str], ...] = ()  # 源、确认不存在的 Dashboard UID。
     truncated: int = 0
     rejected: int = 0
     limit_rescue_started: bool = False
@@ -542,6 +549,7 @@ class GovernedTools:
                 "response_limit",
                 "invalid_matcher",
                 "silence_missing",
+                "object_missing",
             }
             for failure in self._runs.get(_turn_key(ctx.identity), TurnRuns()).monitoring_failures
         ):
@@ -560,23 +568,12 @@ class GovernedTools:
         ):
             raise ToolRejectedError("系统繁忙，本轮该集群再试已用完", code="busy")
         slot_retry = target in runs.slot_busy
-        repair_from: int | None = None
-        alertmanager_repair_from: int | None = None
-        alertmanager_repair_key: tuple[str, str] | None = None
         if contract.policy_id in PROMETHEUS_QUERY_POLICIES:
             if (contract.target_id, str(arguments["query"])) in runs.promql_errors:
                 raise ToolRejectedError(
                     "该表达式本轮已解析失败，未重发；请修改表达式", hint="change_promql"
                 )
-            if contract.target_id in runs.promql_pending:
-                if runs.promql_repairs.count(contract.target_id) >= 2:
-                    raise ToolRejectedError(
-                        "本源本轮两次PromQL修正机会已用完；可读取发现信息或其他源",
-                        code="source_stopped",
-                    )
-                repair_from = sum(target == contract.target_id for target, _ in runs.promql_errors)
         selector_keys: tuple[str | None, str] | None = None
-        selector_repair_from: int | None = None
         if contract.policy_id in PROMETHEUS_SELECTOR_POLICIES:
             selector_keys = _selector_keys(contract.policy_id, arguments)
             if (target, selector_keys[0]) in runs.selector_errors:
@@ -589,15 +586,7 @@ class GovernedTools:
                     "同一请求本轮已被上游拒绝，未重发；请修改选择器或参数",
                     hint="change_discovery_request",
                 )
-            if target in runs.selector_pending:
-                if runs.selector_repairs.count(target) >= 2:
-                    raise ToolRejectedError(
-                        "本源本轮两次选择器修正机会已用完；可用其他发现方式或其他源",
-                        code="source_stopped",
-                    )
-                selector_repair_from = sum(t == target for t, _ in runs.selector_errors)
-        if contract.policy_id in _ALERTMANAGER_REPAIR_CATEGORY:
-            alertmanager_repair_key = (target, _ALERTMANAGER_REPAIR_CATEGORY[contract.policy_id])
+        if contract.policy_id in _ALERTMANAGER_READ_CATEGORY:
             digest = _alertmanager_request_digest(contract.policy_id, arguments)
             if any(
                 source == target and tool_id == contract.tool_id and failed_digest == digest
@@ -607,19 +596,13 @@ class GovernedTools:
                     "本轮同一参数已失败，未重发；请修改 filters 或静默 ID",
                     hint="alertmanager_change_request",
                 )
-            if alertmanager_repair_key in runs.alertmanager_pending:
-                if runs.alertmanager_repairs.count(alertmanager_repair_key) >= 2:
-                    raise ToolRejectedError(
-                        "本源本类读取两次修正机会已用完；可调查其他已授权源",
-                        code="source_stopped",
-                        hint=(
-                            "alertmanager_alerts_exhausted"
-                            if alertmanager_repair_key[1] == "alerts"
-                            else "alertmanager_silence_exhausted"
-                        ),
-                    )
-                alertmanager_repair_from = sum(
-                    item[:2] == alertmanager_repair_key for item in runs.alertmanager_errors
+        if contract.policy_id in {
+            "grafana.get_dashboard_summary",
+            "grafana.get_dashboard_panel_queries",
+        }:
+            if (target, str(arguments["uid"])) in runs.grafana_missing:
+                raise ToolRejectedError(
+                    "该 Dashboard UID 本轮已确认不存在，未重发", hint="grafana_change_object"
                 )
         self._reserve(ctx)
         self._runs[key] = replace(
@@ -627,21 +610,6 @@ class GovernedTools:
             started=(*runs.started, contract.tool_id),
             slot_retries=runs.slot_retries | {target} if slot_retry else runs.slot_retries,
             slot_retrying=runs.slot_retrying | {target} if slot_retry else runs.slot_retrying,
-            promql_repairs=(
-                (*runs.promql_repairs, contract.target_id)
-                if repair_from is not None
-                else runs.promql_repairs
-            ),
-            selector_repairs=(
-                (*runs.selector_repairs, target)
-                if selector_repair_from is not None
-                else runs.selector_repairs
-            ),
-            alertmanager_repairs=(
-                (*runs.alertmanager_repairs, alertmanager_repair_key)
-                if alertmanager_repair_from is not None and alertmanager_repair_key is not None
-                else runs.alertmanager_repairs
-            ),
         )
 
         try:
@@ -679,10 +647,6 @@ class GovernedTools:
                                 *current.promql_errors,
                                 (contract.target_id, str(arguments["query"])),
                             ),
-                            promql_pending=current.promql_pending | {contract.target_id},
-                        )
-                        exc.correction_allowed = (
-                            current.promql_repairs.count(contract.target_id) < 2
                         )
                     elif isinstance(exc, PrometheusSelectorError):
                         if selector_keys is None:
@@ -696,14 +660,16 @@ class GovernedTools:
                         current = replace(
                             current,
                             selector_errors=(*current.selector_errors, (target, failed)),
-                            selector_pending=current.selector_pending | {target},
                         )
-                        exc.correction_allowed = current.selector_repairs.count(target) < 2
                     elif isinstance(exc, AlertmanagerCorrectionError):
                         allowed = (
                             exc.reason in {"response_limit", "invalid_matcher"}
                             and contract.policy_id
-                            in {"alertmanager.get_alerts", "alertmanager.get_alert_groups"}
+                            in {
+                                "alertmanager.get_alerts",
+                                "alertmanager.get_alert_groups",
+                                "alertmanager.get_silences",
+                            }
                         ) or (
                             exc.reason == "silence_missing"
                             and contract.policy_id == "alertmanager.get_silence"
@@ -712,7 +678,7 @@ class GovernedTools:
                             raise ToolExecutionError() from None
                         repair_key = (
                             contract.target_id,
-                            _ALERTMANAGER_REPAIR_CATEGORY[contract.policy_id],
+                            _ALERTMANAGER_READ_CATEGORY[contract.policy_id],
                         )
                         current = replace(
                             current,
@@ -724,16 +690,47 @@ class GovernedTools:
                                     _alertmanager_request_digest(contract.policy_id, arguments),
                                 ),
                             ),
-                            alertmanager_pending=current.alertmanager_pending | {repair_key},
                         )
-                        exc.correction_allowed = current.alertmanager_repairs.count(repair_key) < 2
+                    elif isinstance(exc, GrafanaObjectMissingError):
+                        if contract.policy_id not in {
+                            "grafana.get_dashboard_summary",
+                            "grafana.get_dashboard_panel_queries",
+                        }:
+                            raise ToolExecutionError() from None
+                        current = replace(
+                            current,
+                            grafana_missing=(
+                                *current.grafana_missing,
+                                (target, str(arguments["uid"])),
+                            ),
+                        )
                     elif exc.reason == "invalid_expression":
                         raise ToolExecutionError() from None
+                    if isinstance(
+                        exc,
+                        (
+                            PromQLExpressionError,
+                            PrometheusSelectorError,
+                            AlertmanagerCorrectionError,
+                            GrafanaObjectMissingError,
+                        ),
+                    ):
+                        exc.correction_allowed = self._used.get(key, 0) < ctx.budget.max_tool_calls
                     failure = MonitoringFailure(
                         tool_id=contract.tool_id, target_id=contract.target_id, reason=exc.reason
                     )
                     self._runs[key] = replace(
                         current, monitoring_failures=(*current.monitoring_failures, failure)
+                    )
+                    logger.info(
+                        "monitoring_read turn=%s call_id=%s tool_id=%s target_id=%s "
+                        "status=%s correction_allowed=%s",
+                        ctx.identity.turn_id,
+                        request.call_id,
+                        contract.tool_id,
+                        target,
+                        exc.reason,
+                        getattr(exc, "correction_allowed", False),
                     )
                     raise
                 except Exception as exc:
@@ -785,22 +782,6 @@ class GovernedTools:
             result = await self._evidence.record(evidence_ctx, effective, observation)
             # 同一轮的并行调用可能已更新记录：取当前值再追加（两步之间没有 await）。
             runs = self._runs.get(key, TurnRuns())
-            if repair_from is not None and repair_from == sum(
-                target == contract.target_id for target, _ in runs.promql_errors
-            ):
-                runs = replace(runs, promql_pending=runs.promql_pending - {contract.target_id})
-            if selector_repair_from is not None and selector_repair_from == sum(
-                t == target for t, _ in runs.selector_errors
-            ):
-                runs = replace(runs, selector_pending=runs.selector_pending - {target})
-            if alertmanager_repair_key is not None and alertmanager_repair_from is not None:
-                if alertmanager_repair_from == sum(
-                    item[:2] == alertmanager_repair_key for item in runs.alertmanager_errors
-                ):
-                    runs = replace(
-                        runs,
-                        alertmanager_pending=runs.alertmanager_pending - {alertmanager_repair_key},
-                    )
             produced = (*runs.produced, (contract.tool_id, result.evidence_id))
             self._runs[key] = replace(
                 runs,

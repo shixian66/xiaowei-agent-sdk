@@ -37,6 +37,14 @@
 
 ## 3. 当前计划与下一项工作
 
+### 当前独立候选：监控补查修复
+
+用户授权在 `monitoring-read-recovery/agent-SDK`、分支 `codex/monitoring-read-recovery` 从最新 `main@9284688` 独立实施，不动定时任务工作区；只做离线验证与独立审查，不合并、不部署。下面通知/定时任务段是主线已有交接，不能据此扩展本候选范围。
+
+本候选移除三类源内共享两次修正配额，保留总预算和失败请求去重；静默列表可修正读取错误不再停止整源；Grafana 当前 UID 明确 NotFound 只停止同一对象的摘要/面板重发。新错误原因 `object_missing` 是失败反馈契约的窄增量，旧镜像读取该原因不保证兼容；成功 Evidence、权限、写审批、Session 数据边界、报告交付与 SDK Loop 不变。方案、回归与真实验证边界见[监控评测说明](docs/monitoring-reliability-evaluation.md#监控补查修复候选2026-10-21)。
+
+已复现旧实现的8个核心反例，候选已使其通过；基线关联测试123 passed、1 skipped、1 deselected。完整候选测试及独立审查仍在进行，完成后更新本段。新增解释样例共11场景14轮，未运行真实模型或公司源，不能声称线上整体安全结论问题已验收。
+
 ### 通知与定时任务：A 审查修复离线通过
 
 [设计 v1.4](docs/superpowers/specs/2026-10-21-scheduled-agent-tasks.md)维护技术依据与固定 U1–U7；[A–D 计划 v1.4](docs/superpowers/plans/2026-10-21-scheduled-agent-tasks.md)维护切片验收。沿用批准的规范化定义、Evidence 依赖/期限和创建者＋原群权限口径。A 即时多机器人通知 → B 一次性固定提醒 → C 通用独立 Agent 周期任务 → D Node 核心巡检。
