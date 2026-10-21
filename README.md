@@ -151,6 +151,31 @@ uv run --locked xiaowei --config xiaowei.json requests resend --subject <发起�
 
 没有任何集群配置 `audit` 时不提供 `list_slow_queries`，配置开放或授予它会在启动时报错；只给部分集群配置时，只有这些集群可以使用它，其他集群的调用在连接前拒绝。读取该集群所有库的审计记录，`database` 参数不为 null 时只读执行时当前库为它的记录。原文中未写库名的表按该记录执行时的当前库（结果中的 `database` 列）解析，与 StarRocks 执行时相同；当时没有当前库的记录只接受写明库名的原文。只列出原文引用的对象、列与函数全部获准的查询，列表可能少于上限，为空也不代表没有慢查询；结果给出 `checked_candidates`、各 `omitted_*` 原因和 `unchecked_candidates`，`row_count` 仍仅表示实际返回行数。计数只覆盖本次已读取候选，`more_candidates=true` 表示候选读取已截断、之外数量未知；数据库侧 `isQuery` 与 catalog 过滤的条数也未知，需要完整审计口径时直接查询获准审计表。结果标记截断表示列表不完整：候选读满 `candidate_rows` 仍有剩余、候选达到字节上限、已列满 `max_rows` 而还有未检查的候选（即使它们最终可能都不获准），或获准的记录因单值或结果字节上限没有列出。插件刚安装后首批记录可能缺失；审计表任一行格式异常（如时间为空、指标不是整数）时整个工具失败，而不是返回部分结果。候选读取与原文检查各有一个客户端期限，最坏总耗时约为 2 倍 `client_timeout_seconds`。审计证据字段变更会使旧慢查询证据失效，无需数据库迁移。
 
+**Webhook 通知（A 候选，真实平台尚未验收）。** 默认 `webhook_bots=[]`，不开放通知工具。启用时须有现有指定飞书群，并在 `data_policy.model_tools`、`feishu.group.tools` 和获准发送者的个人 `access.grants` 三处加入 `notifications/send_webhook_message`；只会查询数据库的群成员不会自动取得发送权。工具仅在普通群消息中开放，无登录 Web、私聊与显式诊断入口均不开放。
+
+管理员增加以下机器人登记，`fat` 和工具名按实际已登记源/工具替换；支持多项。凭据只在服务端环境变量中配置，不粘贴到对话、配置值或日志：
+
+```json
+"webhook_bots": [{
+  "bot_id": "ops",
+  "alias": "ops_alert_bot",
+  "description": "运维告警机器人",
+  "target_version": "v1",
+  "url_ref": "env:XW_OPS_WEBHOOK_URL",
+  "signing_secret_ref": null,
+  "receive_targets": ["fat"],
+  "receive_tools": ["local/run_readonly_query"]
+}]
+```
+
+URL 仅允许飞书官方 HTTPS 自定义机器人端点，不允许用户 URL、跳转、代理环境变量或其他主机。启用签名时填写签名密钥的 `env:NAME` 引用；关键词与出口 IP 白名单由管理员在真实机器人上匹配，接口拒绝时不自动加词或重试。管理员须确认 `bot_id` 对应的实际接收群；同目标密钥轮换保持目标版本，实际换群/机器人须改版本并重新授权，不清除发送记录。
+
+群内可说“给 ops_alert_bot 发消息：今晚 22:00 检查 StarRocks。”；发送历史业务结论时，代码复核全部模型可见 Evidence 的当前权限、TTL 及机器人可接收的源/工具，事实沿 feishu 投影生成，模型说明单列。文字沿现有回答上限为16000 UTF-8字节，含签名的完整请求最多20000字节；超限明确未发送，缩短内容或重新取得必要摘要，不悄悄截断。适配器使用已有 httpx2，单次总期限10秒、响应读取最多4096字节。[飞书官方请求/签名契约](https://open.feishu.cn/document/client-docs/bot-v3/add-custom-bot)是接口依据；真实关键词、IP、签名和平台限流仍须实测。
+
+状态区分 `accepted`（接口接受）、`failed`（明确失败）、`unknown`（可能已发送）和 `not_sent`（未发送）。同轮同机器人相同正文只发一次，不同且明确要求的正文可分别发送；failed/unknown 后不自动再发，重启也不重放。unknown 后用户新一轮主动要求重发，须先有重复风险提示；原回执保留 unknown。发送回执独立保存，后续模型/回答失败也不能抹掉已提交事实。API 接受不等于成员收到或阅读。
+
+此片新增应用 schema v13；按既有 `storage upgrade` 维护流程停服备份后升级，不改 SDK 表，不在启动时自动迁移。旧镜像不兼容 v13，回退须隔离入站并按备份恢复流程处理，不能恢复后自动重发旧消息。一次性提醒、周期 Agent 和 Node 巡检属于后续 B–D，当前 A 不提供调度。
+
 **开发验证**（只用合成数据、脚本模型、替身与隔离的测试 PostgreSQL；发行测试需要本机 Docker 构建镜像，不调用真实模型或公司服务）：
 
 ```bash

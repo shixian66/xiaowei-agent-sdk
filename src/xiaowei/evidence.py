@@ -229,6 +229,10 @@ class AnswerRejectedError(EvidenceError):
         self.code = code
 
 
+class RecipientRejectedError(AnswerRejectedError):
+    """源数据可读，但显式外发接收范围不允许；尚未发送，可报告固定拒绝原因。"""
+
+
 def normalize_answer(answer: AgentAnswer) -> AgentAnswer:
     """代码可无歧义纠正的形式问题直接归一化，不交模型改写：空白文字块丢弃；同一证据的事实块
     只保留首次出现的位置，展示方式冲突取完整（不少展示事实）。输出 schema 预检、Session 提交与
@@ -426,7 +430,9 @@ class EvidenceStore:
         return _arguments_digest(effective)
 
     async def validate_answer(
-        self, turn: TurnAnswer, ctx: RunContext, *, history: bool = False
+        self, turn: TurnAnswer, ctx: RunContext, *, history: bool = False,
+        recipient_tools: frozenset[str] | None = None,
+        recipient_targets: frozenset[str] | None = None,
     ) -> Delivery:
         """最终回答出口：核对引用关系与当前可读性，再为接收渠道生成内容。
 
@@ -449,6 +455,14 @@ class EvidenceStore:
         cited = answer.evidence_ids
         unshown = tuple(e for e in context if e not in cited)
         records = await self._context_readable(ctx, channel, (*cited, *unshown), history=history)
+        if any(
+            (recipient_tools is not None and r.tool_id not in recipient_tools)
+            or (recipient_targets is not None and r.target_id not in recipient_targets)
+            for r in records
+        ):
+            raise RecipientRejectedError(
+                AnswerRejectCode.EVIDENCE_UNAVAILABLE, "目标机器人无权接收本轮可见数据"
+            )
         by_id = {r.evidence_id: r for r in records}
         views = {b.evidence_id: b.view for b in answer.blocks if isinstance(b, FactBlock)}
         turn_id = ctx.identity.turn_id
@@ -526,6 +540,7 @@ class EvidenceStore:
             report_native=turn.answer_version == 3 and report_format is not None,
             basis=_basis([r for r in records if r.evidence_id not in shown_ids], ctx),
             content_expires_at=min((r.expires_at for r in records), default=None),
+            context_tools=frozenset(r.tool_id for r in records),
         )
 
     def _effect(self, record: EvidenceRecord) -> str:

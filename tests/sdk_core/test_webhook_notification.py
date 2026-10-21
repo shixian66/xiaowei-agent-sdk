@@ -1,0 +1,618 @@
+"""A：真实群入口/SDK/治理/隔离 PG；只替换模型、成员目录、数据库驱动及 HTTP。
+
+脚本模型不证明自然语言选择能力；MockTransport 不证明真实飞书接口或群内到达。
+"""
+
+import asyncio
+import json
+import logging
+from contextlib import asynccontextmanager
+from types import SimpleNamespace
+
+import httpx2
+import pytest
+from sqlalchemy import text as sql
+from tests.p1b.test_starrocks_adapter import TARGET as SR
+from tests.sdk_core.test_app import cite, evidence_in, tool_call, upstream_error
+from tests.sdk_core.test_feishu import Outbox
+from tests.sdk_core.test_feishu_render import message_text
+from tests.sdk_core.test_group_gateway import BOT, Group, group_config
+from tests.sdk_core.test_group_identity import APP, CHAT, A
+from tests.sdk_core.test_runtime import env as env  # pytest fixture
+from tests.sdk_core.test_runtime import feishu_config, serve_config
+
+from xiaowei import runtime
+from xiaowei.evidence import EvidenceStoreError
+from xiaowei.feishu import FeishuGateway, attributed
+from xiaowei.starrocks_tools import QUERY_TOOLS
+from xiaowei.webhook import resolve_bot
+
+pytestmark = pytest.mark.loopback
+TOOL = "notifications/send_webhook_message"
+URL = "https://open.feishu.cn/open-apis/bot/v2/hook/synthetic-webhook-token"
+TEXT = "今晚 22:00 检查 StarRocks。"
+
+
+def script(env, message, *steps):
+    env.scripts.add(attributed(A, message), *steps)
+    return message
+
+
+def configured(env, *, sender=True, bots=None):
+    data = serve_config(
+        env.port,
+        feishu=feishu_config(
+            app_id=APP,
+            users={},
+            stop_timeout_seconds=7,
+            group={
+                **group_config().group.model_dump(mode="json"),
+                "tools": sorted(QUERY_TOOLS | {TOOL}),
+            },
+        ),
+        webhook_bots=bots
+        or [
+            {
+                "bot_id": "ops",
+                "alias": "ops_alert_bot",
+                "description": "运维告警机器人",
+                "target_version": "v1",
+                "url_ref": "env:XW_TEST_WEBHOOK_URL",
+                "signing_secret_ref": None,
+                "receive_tools": sorted(QUERY_TOOLS),
+                "receive_targets": [SR.target_id],
+            }
+        ],
+    )
+    data["data_policy"]["model_tools"].append(TOOL)
+    data["access"]["grants"][A] = [TOOL] if sender else sorted(QUERY_TOOLS)
+    return runtime.ServeConfig.model_validate(data)
+
+
+@asynccontextmanager
+async def running(env, monkeypatch, *, sender=True, response=None, member_check=None, bots=None):
+    monkeypatch.setenv("XW_TEST_WEBHOOK_URL", URL)
+    requests = []
+
+    async def post(request):
+        requests.append(request)
+        if callable(response):
+            return await response(request)
+        if isinstance(response, Exception):
+            raise response
+        return response or httpx2.Response(200, json={"code": 0, "msg": "success"})
+
+    async def member(chat, subject):
+        if member_check:
+            return await member_check(chat, subject)
+        return chat == CHAT and subject == A
+
+    cfg = configured(env, sender=sender, bots=bots)
+    async with runtime.open_runtime(
+        cfg,
+        clock=env.clock,
+        model_transport=env.scripts.transport(),
+        starrocks_connect=env.connect(cfg),
+        members=member,
+        webhook_transport=httpx2.MockTransport(post),
+    ) as rt:
+        outbox = Outbox()
+        gateway = FeishuGateway(
+            rt.service,
+            cfg.feishu,
+            outbox,
+            clock=env.clock,
+            bot_open_id=lambda: BOT,
+        )
+        task = asyncio.create_task(gateway.run())
+        group = Group(SimpleNamespace(clock=env.clock), gateway, outbox)
+        try:
+            yield group, requests, rt
+        finally:
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+
+
+async def test_u1_group_entry_posts_once_and_reports_api_acceptance(env, monkeypatch):
+    request = script(
+        env,
+        "给 ops_alert_bot 发消息：" + TEXT,
+        tool_call("send_webhook_message", bot_alias="ops_alert_bot", text=TEXT, evidence_ids=[]),
+        cite("Webhook 接口已接受消息。"),
+    )
+    async with running(env, monkeypatch) as (group, requests, _rt):
+        event = await group.ask(request)
+        await group.gateway.receive(event)  # 平台重投不新增请求/POST
+        await group.gateway.idle()
+        assert len(requests) == 1
+        assert json.loads(requests[0].content) == {"msg_type": "text", "content": {"text": TEXT}}
+        assert "accepted" in message_text(group.outbox.sent[-1][1])
+
+
+@pytest.mark.parametrize("alias", ["unknown_bot", "http://127.0.0.1/private"])
+async def test_u2_unknown_bot_or_url_is_rejected_before_http(env, monkeypatch, alias):
+    request = script(
+        env,
+        "发到未登记目标 " + alias,
+        tool_call("send_webhook_message", bot_alias=alias, text=TEXT, evidence_ids=[]),
+        cite("该机器人尚未配置或授权，未发送消息。"),
+    )
+    async with running(env, monkeypatch) as (group, requests, _rt):
+        await group.ask(request)
+        assert requests == []
+        assert "未发送" in message_text(group.outbox.sent[-1][1])
+
+
+async def test_same_text_with_new_call_id_still_posts_once(env, monkeypatch):
+    request = script(
+        env,
+        "同一条消息发一次",
+        tool_call("send_webhook_message", bot_alias="ops_alert_bot", text=TEXT, evidence_ids=[]),
+        tool_call("send_webhook_message", bot_alias="ops_alert_bot", text=TEXT, evidence_ids=[]),
+        cite(),
+    )
+    async with running(env, monkeypatch) as (group, requests, _rt):
+        await group.ask(request)
+        assert len(requests) == 1
+
+
+async def test_current_group_membership_is_checked_before_post(env, monkeypatch):
+    current_member = [True]
+
+    async def member(chat, subject):
+        return current_member[0]
+
+    def send_after_departure(call):
+        current_member[0] = False  # 真 Runner 已开始，工具尚未执行
+        return tool_call(
+            "send_webhook_message", bot_alias="ops_alert_bot", text=TEXT, evidence_ids=[]
+        )(call)
+
+    request = script(
+        env,
+        "开始后离群，不得发送",
+        send_after_departure,
+        cite(),
+    )
+    async with running(env, monkeypatch, member_check=member) as (group, requests, _rt):
+        await group.ask(request)
+        assert env.scripts.calls
+        assert requests == []
+
+
+@pytest.mark.parametrize(
+    ("response", "status"),
+    [
+        (httpx2.Response(200, json={"code": 19021}), "failed"),
+        (httpx2.Response(403, json={"code": 19022}), "failed"),
+        (httpx2.Response(302, headers={"location": "http://127.0.0.1/private"}), "failed"),
+        (httpx2.Response(500), "unknown"),
+        (httpx2.Response(200, json={"code": False}), "unknown"),
+        (httpx2.Response(200, content=b"broken response"), "unknown"),
+        (httpx2.ReadTimeout("synthetic-token-must-not-leak"), "unknown"),
+        (httpx2.ConnectError("synthetic-token-must-not-leak"), "failed"),
+    ],
+)
+async def test_u4_outcome_is_truthful_and_does_not_retry(env, monkeypatch, response, status):
+    request = script(
+        env,
+        "发送一条测试消息",
+        tool_call("send_webhook_message", bot_alias="ops_alert_bot", text=TEXT, evidence_ids=[]),
+        cite(),
+    )
+    async with running(env, monkeypatch, response=response) as (group, requests, _rt):
+        await group.ask(request)
+        assert len(requests) == 1
+        reply = message_text(group.outbox.sent[-1][1])
+        assert status in reply
+        if status == "unknown":
+            assert "可能已经发过" in reply
+
+
+async def test_accepted_is_visible_after_model_failure(env, monkeypatch):
+    request = script(
+        env,
+        "发完后模型故障",
+        tool_call("send_webhook_message", bot_alias="ops_alert_bot", text=TEXT, evidence_ids=[]),
+        upstream_error,
+    )
+    async with running(env, monkeypatch) as (group, requests, _rt):
+        await group.ask(request)
+        assert len(requests) == 1
+        assert "消息已提交" in message_text(group.outbox.sent[-1][1])
+
+
+async def test_u3_historical_facts_use_code_rendering(env, monkeypatch):
+    query = script(
+        env,
+        "查销售",
+        tool_call(
+            "run_readonly_query", cluster=SR.target_id, sql="SELECT region, total FROM shop.sales"
+        ),
+        cite(),
+    )
+
+    def forward(call):
+        return tool_call(
+            "send_webhook_message",
+            bot_alias="ops_alert_bot",
+            text="巡检说明",
+            evidence_ids=evidence_in(call),
+        )(call)
+
+    send = script(env, "把刚才结果发到运维机器人", forward, cite())
+    async with running(env, monkeypatch) as (group, requests, _rt):
+        await group.ask(query)
+        await group.ask(send)
+        assert len(requests) == 1
+        content = json.loads(requests[0].content)["content"]["text"]
+        assert "工具结果（系统根据证据生成）" in content
+        assert "模型说明（未经系统核实）" in content
+        assert "100" in content and "east" in content
+
+
+async def test_unreferenced_historical_data_still_requires_recipient_permission(env, monkeypatch):
+    bots = [configured(env).webhook_bots[0].model_copy(update={"receive_tools": frozenset()})]
+    query = script(
+        env,
+        "查销售历史",
+        tool_call(
+            "run_readonly_query", cluster=SR.target_id, sql="SELECT region, total FROM shop.sales"
+        ),
+        cite(),
+    )
+    send = script(
+        env,
+        "发一段说明",
+        tool_call("send_webhook_message", bot_alias="ops_alert_bot", text=TEXT, evidence_ids=[]),
+        cite("接收范围不允许，未发送消息。"),
+    )
+    async with running(env, monkeypatch, bots=bots) as (group, requests, _rt):
+        await group.ask(query)
+        await group.ask(send)
+        assert requests == []
+        assert "未发送" in message_text(group.outbox.sent[-1][1])
+
+
+async def test_sender_permission_is_independent_and_hidden(env, monkeypatch):
+    def probe(call):
+        assert "send_webhook_message" not in call.tools
+        return cite(
+            "没有发送权限，未发送消息。",
+        )(call)
+
+    request = script(env, "帮我发一条", probe)
+    async with running(env, monkeypatch, sender=False) as (group, requests, _rt):
+        await group.ask(request)
+        assert requests == []
+
+
+async def test_unknown_allows_explicit_new_turn_after_delivered_warning(env, monkeypatch):
+    count = []
+
+    async def post(request):
+        count.append(request)
+        if len(count) == 1:
+            raise httpx2.ReadTimeout("synthetic failure")
+        return httpx2.Response(200, json={"code": 0})
+
+    first = script(
+        env,
+        "发测试消息",
+        tool_call("send_webhook_message", bot_alias="ops_alert_bot", text=TEXT, evidence_ids=[]),
+        cite(),
+    )
+    again = script(
+        env,
+        "再发一次",
+        tool_call("send_webhook_message", bot_alias="ops_alert_bot", text=TEXT, evidence_ids=[]),
+        cite(),
+    )
+    async with running(env, monkeypatch, response=post) as (group, requests, _rt):
+        await group.ask(first)
+        assert "重发可能重复" in message_text(group.outbox.sent[-1][1])
+        await group.ask(again)
+        assert len(requests) == 2
+        assert "accepted" in message_text(group.outbox.sent[-1][1])
+
+
+async def test_unknown_with_undelivered_warning_does_not_post_in_next_turn(env, monkeypatch):
+    first = script(
+        env,
+        "发后回执也丢失",
+        tool_call("send_webhook_message", bot_alias="ops_alert_bot", text=TEXT, evidence_ids=[]),
+        cite(),
+    )
+    again = script(
+        env,
+        "请再发一次",
+        tool_call("send_webhook_message", bot_alias="ops_alert_bot", text=TEXT, evidence_ids=[]),
+        cite(),
+    )
+    async with running(env, monkeypatch, response=httpx2.ReadTimeout("lost")) as (
+        group,
+        requests,
+        _rt,
+    ):
+        group.outbox.outcomes.append("failed")
+        await group.ask(first)
+        await group.ask(again)
+        assert len(requests) == 1
+        assert "本轮未发送" in message_text(group.outbox.sent[-1][1])
+
+
+async def test_accepted_survives_evidence_record_failure(env, monkeypatch):
+    request = script(
+        env,
+        "发送后证据落库故障",
+        tool_call("send_webhook_message", bot_alias="ops_alert_bot", text=TEXT, evidence_ids=[]),
+    )
+    async with running(env, monkeypatch) as (group, requests, rt):
+        evidence = rt.service.results.evidence
+        original = evidence.record
+
+        async def fail_record(ctx, request, observation):
+            if request.tool_id == TOOL:
+                raise EvidenceStoreError("synthetic evidence failure")
+            return await original(ctx, request, observation)
+
+        monkeypatch.setattr(evidence, "record", fail_record)
+        await group.ask(request)
+        assert len(requests) == 1
+        assert "消息已提交" in message_text(group.outbox.sent[-1][1])
+
+
+async def test_credentials_are_absent_from_model_history_logs_and_answer(env, monkeypatch, caplog):
+    caplog.set_level(logging.INFO)
+    request = script(
+        env,
+        "发送安全检查消息",
+        tool_call("send_webhook_message", bot_alias="ops_alert_bot", text=TEXT, evidence_ids=[]),
+        cite(),
+    )
+    async with running(env, monkeypatch) as (group, _requests, rt):
+        await group.ask(request)
+        async with rt.engine.connect() as conn:
+            history = (await conn.execute(sql("SELECT message_data FROM agent_messages"))).all()
+            evidence = (
+                await conn.execute(
+                    sql("SELECT model_content,session_content,feishu_content FROM xiaowei_evidence")
+                )
+            ).all()
+        combined = str(history) + str(evidence) + str(env.scripts.calls) + caplog.text
+        combined += str(group.outbox.sent)
+        assert "synthetic-webhook-token" not in combined
+        assert URL not in combined
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "http://open.feishu.cn/open-apis/bot/v2/hook/token",
+        "https://127.0.0.1/open-apis/bot/v2/hook/token",
+        "https://open.feishu.cn.evil.test/open-apis/bot/v2/hook/token",
+        "https://open.feishu.cn/open-apis/bot/v2/hook/token?redirect=private",
+        "https://user@open.feishu.cn/open-apis/bot/v2/hook/token",
+    ],
+)
+def test_ssrf_config_rejected_without_io(env, monkeypatch, url):
+    monkeypatch.setenv("XW_TEST_WEBHOOK_URL", url)
+    bot = configured(env).webhook_bots[0]
+    with pytest.raises(ValueError) as rejected:
+        resolve_bot(bot)
+    assert url not in str(rejected.value)
+
+
+async def test_two_explicit_messages_and_concurrent_identical_calls(env, monkeypatch):
+    second = "明早检查数据备份。"
+
+    def simultaneous(call):
+        return tool_call(
+            "send_webhook_message", bot_alias="ops_alert_bot", text=TEXT, evidence_ids=[]
+        )(call) + tool_call(
+            "send_webhook_message", bot_alias="ops_alert_bot", text=TEXT, evidence_ids=[]
+        )(call)
+
+    request = script(
+        env,
+        "给机器人发两条不同提醒",
+        simultaneous,
+        tool_call("send_webhook_message", bot_alias="ops_alert_bot", text=second, evidence_ids=[]),
+        cite(),
+    )
+    async with running(env, monkeypatch) as (group, requests, _rt):
+        await group.ask(request)
+        assert [json.loads(r.content)["content"]["text"] for r in requests] == [TEXT, second]
+
+
+async def test_unknown_then_changed_text_in_same_turn_never_posts_again(env, monkeypatch):
+    request = script(
+        env,
+        "测试发送失败不能自动重试",
+        tool_call("send_webhook_message", bot_alias="ops_alert_bot", text=TEXT, evidence_ids=[]),
+        tool_call(
+            "send_webhook_message", bot_alias="ops_alert_bot", text=TEXT + "!", evidence_ids=[]
+        ),
+        cite(),
+    )
+    async with running(env, monkeypatch, response=httpx2.ReadTimeout("lost")) as (
+        group,
+        requests,
+        _rt,
+    ):
+        await group.ask(request)
+        assert len(requests) == 1
+        assert "unknown" in message_text(group.outbox.sent[-1][1])
+
+
+async def test_multiple_bots_route_to_distinct_configured_targets(env, monkeypatch):
+    first = configured(env).webhook_bots[0]
+    second = first.model_copy(
+        update={
+            "bot_id": "bigdata",
+            "alias": "bigdata_bot",
+            "description": "大数据群",
+            "url_ref": "env:XW_TEST_SECOND_WEBHOOK_URL",
+        }
+    )
+    monkeypatch.setenv("XW_TEST_SECOND_WEBHOOK_URL", URL + "-second")
+    request = script(
+        env,
+        "分别通知运维群和大数据群",
+        tool_call("send_webhook_message", bot_alias="ops_alert_bot", text=TEXT, evidence_ids=[]),
+        tool_call("send_webhook_message", bot_alias="bigdata_bot", text=TEXT, evidence_ids=[]),
+        cite(),
+    )
+    async with running(env, monkeypatch, bots=[first, second]) as (group, requests, _rt):
+        await group.ask(request)
+        assert [str(r.url) for r in requests] == [URL, URL + "-second"]
+
+
+async def test_allowed_tool_does_not_allow_an_unapproved_source(env, monkeypatch):
+    bot = configured(env).webhook_bots[0].model_copy(update={"receive_targets": frozenset()})
+    query = script(
+        env,
+        "先读合法源",
+        tool_call(
+            "run_readonly_query", cluster=SR.target_id, sql="SELECT region, total FROM shop.sales"
+        ),
+        cite(),
+    )
+    request = script(
+        env,
+        "该机器人未获准此源数据",
+        tool_call("send_webhook_message", bot_alias="ops_alert_bot", text=TEXT, evidence_ids=[]),
+        cite(),
+    )
+    async with running(env, monkeypatch, bots=[bot]) as (group, requests, _rt):
+        await group.ask(query)
+        await group.ask(request)
+        assert requests == []
+
+
+async def test_signature_uses_official_timestamp_secret_empty_message_contract(env, monkeypatch):
+    import base64
+    import hmac
+
+    secret = "synthetic-signing-secret"  # noqa: S105 - 公开的合成签名夹具
+    monkeypatch.setenv("XW_TEST_SIGNING_SECRET", secret)
+    bot = (
+        configured(env)
+        .webhook_bots[0]
+        .model_copy(
+            update={
+                "signing_secret_ref": "env:XW_TEST_SIGNING_SECRET",
+            }
+        )
+    )
+    request = script(
+        env,
+        "发送签名消息",
+        tool_call("send_webhook_message", bot_alias="ops_alert_bot", text=TEXT, evidence_ids=[]),
+        cite(),
+    )
+    async with running(env, monkeypatch, bots=[bot]) as (group, requests, _rt):
+        await group.ask(request)
+        body = json.loads(requests[0].content)
+        stamp = str(int(env.clock().timestamp()))
+        expected = base64.b64encode(
+            hmac.digest(f"{stamp}\n{secret}".encode(), b"", "sha256")
+        ).decode()
+        assert body["timestamp"] == stamp and body["sign"] == expected
+        assert secret not in str(env.scripts.calls) + str(group.outbox.sent)
+
+
+async def test_large_content_is_not_sent_and_can_be_explained(env, monkeypatch):
+    request = script(
+        env,
+        "发一条超大文本",
+        tool_call(
+            "send_webhook_message", bot_alias="ops_alert_bot", text="大" * 7000, evidence_ids=[]
+        ),
+        cite("消息超过容量，未发送；请缩短内容。"),
+    )
+    async with running(env, monkeypatch) as (group, requests, _rt):
+        await group.ask(request)
+        assert requests == []
+        assert "未发送" in message_text(group.outbox.sent[-1][1])
+
+
+async def test_attempt_persistence_failure_has_zero_http(env, monkeypatch):
+    from sqlalchemy import event
+    from sqlalchemy.exc import SQLAlchemyError
+
+    request = script(
+        env,
+        "发送机会不能落库时不得发送",
+        tool_call("send_webhook_message", bot_alias="ops_alert_bot", text=TEXT, evidence_ids=[]),
+    )
+    intercepted = []
+
+    def fail_insert(conn, cursor, statement, parameters, context, executemany):
+        if statement.startswith("INSERT INTO xiaowei_notification_attempt"):
+            intercepted.append(statement)
+            raise SQLAlchemyError("synthetic attempt store failure")
+
+    async with running(env, monkeypatch) as (group, requests, rt):
+        event.listen(rt.engine.sync_engine, "before_cursor_execute", fail_insert)
+        try:
+            await group.ask(request)
+        finally:
+            event.remove(rt.engine.sync_engine, "before_cursor_execute", fail_insert)
+        assert intercepted and requests == []
+
+
+async def test_unknown_receipt_survives_restart_without_http(env, monkeypatch):
+    request = script(
+        env,
+        "响应丢失后重启不得补发",
+        tool_call("send_webhook_message", bot_alias="ops_alert_bot", text=TEXT, evidence_ids=[]),
+        cite(),
+    )
+    async with running(env, monkeypatch, response=httpx2.ReadTimeout("lost")) as (
+        group,
+        requests,
+        _rt,
+    ):
+        await group.ask(request)
+        assert len(requests) == 1
+    async with running(env, monkeypatch) as (_group, requests, rt):
+        assert requests == []
+        async with rt.engine.connect() as conn:
+            states = (
+                await conn.execute(sql("SELECT state FROM xiaowei_notification_attempt"))
+            ).all()
+        assert states == [("unknown",)]
+
+
+@pytest.mark.parametrize("channel", ["web", "feishu"])
+async def test_notification_governance_rejects_forged_personal_scope(env, monkeypatch, channel):
+    from xiaowei.governance import GovernedTools, ToolRejectedError
+    from xiaowei.models import Budget, Identity, RunContext, ToolRequest
+
+    async with running(env, monkeypatch) as (_group, requests, rt):
+        governed = GovernedTools(rt.service.results.evidence)
+        ctx = RunContext(
+            identity=Identity(subject_id=A, session_id="forged", turn_id="forged", channel=channel),
+            tool_scope=frozenset({TOOL}),
+            target_scope=frozenset({"notifications"}),
+            budget=Budget(max_turns=2, max_tool_calls=2, timeout_seconds=5, max_scope_checks=10),
+        )
+
+        async def forbidden(request):
+            pytest.fail("unauthorized I/O boundary was reached")
+
+        with pytest.raises(ToolRejectedError):
+            await governed.invoke(
+                ctx,
+                ToolRequest(
+                    tool_id=TOOL,
+                    target_id="notifications",
+                    call_id="forged",
+                    tool_name="send_webhook_message",
+                    arguments={"bot_alias": "ops_alert_bot", "text": TEXT, "evidence_ids": []},
+                ),
+                forbidden,
+            )
+        assert requests == []

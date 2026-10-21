@@ -556,6 +556,8 @@ class Delivery(_Trusted):
     session_notice: str | None = None
     """当前身份读取后，由可信请求状态生成的固定系统提示；不来自模型。"""
     report_notice: str | None = None
+    notification_notice: str | None = None
+    """代码从独立通知回执生成；后续模型/Session 失败不抹掉已发送事实。"""
     """报告不能作为文件交付或需要说明载体时的可信固定说明（含非飞书渠道的文件请求）。"""
     limit_notice: str | None = None
     """步数用完后收尾生成的回答：代码说明结果可能不完整，不写进模型文字。"""
@@ -576,6 +578,8 @@ class Delivery(_Trusted):
     """未展示的本轮其他成功调查（诊断、发现读取）：仅工具/对象，不附原值。"""
     content_expires_at: datetime | None = Field(default=None, exclude=True)
     """本次已复核内容的最早保留期限，供投递途中廉价检查。"""
+    context_tools: frozenset[str] = Field(default=frozenset(), exclude=True)
+    """本次已复核上下文的来源工具；区分业务事实与纯通知回执，不进入模型/渠道 JSON。"""
 
     def result_label(self, evidence_id: str) -> str:
         """用户可见的结果编号：按展示顺序，拆分审批材料后仍不变；不展示内部证据编号。"""
@@ -598,6 +602,7 @@ class Delivery(_Trusted):
             n
             for n in (
                 self.report_notice,
+                self.notification_notice,
                 self.limit_notice,
                 self.monitoring_notice,
                 self.session_notice,
@@ -610,6 +615,7 @@ class Delivery(_Trusted):
         """是否含任何代码生成的内容：事实、动作、补全结果或系统说明。"""
         return bool(
             self.facts
+            or self.notification_notice
             or self.monitoring_notice
             or self.session_notice
             or self.report_notice

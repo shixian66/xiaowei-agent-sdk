@@ -342,6 +342,7 @@ class ResultDelivery:
         access: AccessPolicy,
         *,
         budget: Budget,
+        notification_status: Callable[[Identity], Awaitable[str | None]] | None = None,
     ) -> None:
         if not _bound_to(evidence.authorize, access):
             raise ValueError("Evidence 的授权必须来自同一个 AccessPolicy")
@@ -349,6 +350,7 @@ class ResultDelivery:
         self._evidence = evidence
         self._access = access
         self._budget = budget
+        self._notification_status = notification_status
 
     @property
     def store(self) -> ChannelStore:
@@ -375,10 +377,12 @@ class ResultDelivery:
         record, decision = await self._load(ref)
         if record.state in {"completed", "paused"}:
             return RequestView(
-                record.state, await self._validated(record, decision, history=not first)
+                record.state, await self._display(record, decision, history=not first)
             )
         if record.state in ("failed", "interrupted"):
-            return RequestView(record.state, self._receipt(record))
+            return RequestView(
+                record.state, await self._display(record, decision, history=not first)
+            )
         return RequestView(record.state, None)
 
     async def send(
@@ -403,11 +407,11 @@ class ResultDelivery:
         delivery: Delivery | None = None
         if record.state in {"completed", "paused"}:
             try:
-                delivery = await self._validated(record, decision, history=resend)
+                delivery = await self._display(record, decision, history=resend)
             except ResultUnavailableError as exc:
                 refused = exc
         elif record.state in ("failed", "interrupted") and not resend:
-            delivery = self._receipt(record)
+            delivery = await self._display(record, decision, history=resend)
         else:
             return None
         claim = await self._store.claim_send(record, resend=resend)
@@ -435,6 +439,32 @@ class ResultDelivery:
                 raise exc from lost
             raise
         return await self._store.finish_send(claim, outcome)
+
+    async def _display(
+        self, record: RequestRecord, decision: AccessDecision, *, history: bool
+    ) -> Delivery:
+        ctx = self._context(record, decision)
+        notice = None
+        if self._notification_status is not None and await self._access.authorize(
+            ctx.identity, "notifications", "notifications/send_webhook_message"
+        ):
+            notice = await self._notification_status(ctx.identity)
+        try:
+            delivery = (
+                await self._validated(record, decision, history=history)
+                if record.state in {"completed", "paused"} else self._receipt(record)
+            )
+        except ResultUnavailableError:
+            if notice is None:
+                raise
+            delivery = Delivery(
+                content="后续回答无法交付。", evidence_ids=(), channel=record.channel
+            )
+        if notice:
+            delivery = delivery.model_copy(update={
+                "notification_notice": notice, "content": notice + "\n" + delivery.content,
+            })
+        return delivery
 
     async def _load(self, ref: RequestRef) -> tuple[RequestRecord, AccessDecision]:
         """先按当前授权解析（群请求在这里查一次当前成员资格），再按同一身份读取请求。"""

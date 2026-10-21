@@ -294,7 +294,7 @@ class ToolPolicy:
     fact_note: str | None = None
     # 可信业务摘要；只有显式登记时才可将完整说明折叠。未分类说明原样可见。
     fact_note_summary: str | None = None
-    effect: Literal["read", "propose", "approval", "write"] = "read"
+    effect: Literal["read", "propose", "approval", "write", "notify"] = "read"
     group_only: bool = False
 
 

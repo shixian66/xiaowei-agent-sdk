@@ -146,6 +146,10 @@ from xiaowei.storage import (
 )
 from xiaowei.vertex_model import ModelAPIStatusError, ModelAPITransportError
 from xiaowei.web import create_web_app
+from xiaowei.webhook import TARGET as NOTIFY_TARGET
+from xiaowei.webhook import TOOL as NOTIFY_TOOL
+from xiaowei.webhook import WebhookBotConfig, WebhookNotifications, receipt_notice, resolve_bot
+from xiaowei.webhook import catalog as notification_catalog
 
 logger = logging.getLogger(__name__)
 
@@ -253,6 +257,7 @@ class ServeConfig(_Config):
     targets: tuple[TargetConfig, ...] = Field(min_length=1)
     mcp_servers: tuple[MCPServerConfig, ...] = ()
     alertmanager_sources: tuple[AlertmanagerConfig, ...] = ()
+    webhook_bots: tuple[WebhookBotConfig, ...] = ()
     projection_bytes: dict[Audience, Annotated[int, Field(gt=0)]]
     access: AccessConfig
     web: WebConfig
@@ -341,6 +346,21 @@ class ServeConfig(_Config):
     @model_validator(mode="after")
     def _consistent(self) -> "ServeConfig":
         registered = _registered_tools(self)
+        if self.webhook_bots:
+            if self.feishu is None or self.feishu.group is None:
+                raise ValueError("Webhook 通知必须配置指定飞书群")
+            if any(len({getattr(b, key) for b in self.webhook_bots}) != len(self.webhook_bots)
+                   for key in ("bot_id", "alias")):
+                raise ValueError("Webhook bot_id 和 alias 均不能重复")
+            targets = ({t.target_id for t in self.targets}
+                       | {s.server_id for s in self.mcp_servers}
+                       | {s.server_id for s in self.alertmanager_sources})
+            if NOTIFY_TARGET in targets:
+                raise ValueError("notifications 是通知工具保留目标")
+            if any(not b.receive_tools <= registered - {NOTIFY_TOOL} for b in self.webhook_bots):
+                raise ValueError("Webhook receive_tools 只能包含已登记的业务工具")
+            if any(not b.receive_targets <= targets for b in self.webhook_bots):
+                raise ValueError("Webhook receive_targets 只能包含已登记的业务源")
         source_ids = [s.server_id for s in self.mcp_servers] + [
             s.server_id for s in self.alertmanager_sources
         ]
@@ -540,8 +560,17 @@ def validate_config(
     )
     if config.feishu is not None:
         refs.append(("feishu.app_secret_ref", config.feishu.app_secret_ref))
+    for index, bot in enumerate(config.webhook_bots):
+        refs.append((f"webhook_bots.{index}.url_ref", bot.url_ref))
+        if bot.signing_secret_ref is not None:
+            refs.append((f"webhook_bots.{index}.signing_secret_ref", bot.signing_secret_ref))
     for path, ref in refs:
         _resolve_checked(path, ref)
+    for bot in config.webhook_bots:
+        try:
+            resolve_bot(bot)
+        except (ValueError, SecretRefError):
+            raise ConfigError("Webhook 安全引用或官方 HTTPS 地址不合约") from None
     if os.environ.get(_POSTGRES_PASSWORD_ENV) in _ENV_TEMPLATE_VALUES:
         raise ConfigError(f"{_POSTGRES_PASSWORD_ENV}: 仍是 .env 模板占位符，请替换为实际值")
 
@@ -732,7 +761,8 @@ def _registered_tools(config: ServeConfig) -> frozenset[str]:
             *[s.server_id for s in config.alertmanager_sources],
         )
     }
-    return QUERY_TOOLS | (AUDIT_TOOLS if audited else frozenset()) | monitoring
+    notify = {NOTIFY_TOOL} if config.webhook_bots else set()
+    return QUERY_TOOLS | (AUDIT_TOOLS if audited else frozenset()) | monitoring | notify
 
 
 class _PrometheusQueryArgs(BaseModel):
@@ -1267,10 +1297,11 @@ def _app_config(config: ServeConfig) -> AppConfig:
         for name in ("create_datasource", "update_datasource")
         if name in s.allowed_tools
     }
-    audit = _registered_tools(config) - QUERY_TOOLS - monitoring - write_tools
+    notify = frozenset({NOTIFY_TOOL}) if config.webhook_bots else frozenset()
+    audit = _registered_tools(config) - QUERY_TOOLS - monitoring - write_tools - notify
     return AppConfig(
         purposes={
-            "query": QUERY_TOOLS | audit | monitoring,
+            "query": QUERY_TOOLS | audit | monitoring | notify,
             "diagnose": DIAGNOSE_TOOLS | audit,
         },
         data_policies={config.model.data_policy_id: config.data_policy},
@@ -1321,12 +1352,14 @@ class StaticAccess:
         group: GroupAccess | None = None,
         *,
         write_tools: frozenset[str] = frozenset(),
+        personal_tools: frozenset[str] = frozenset(),
     ) -> None:
         self._grants: Mapping[str, frozenset[str]] = dict(config.grants)
         self._version = config.policy_version
         self._targets = target_ids
         self._group = group
         self._write_tools = write_tools
+        self._personal_tools = personal_tools
 
     async def resolve(self, channel: Channel, subject_id: str) -> AccessDecision | None:
         tools = self._grants.get(subject_id)
@@ -1353,7 +1386,8 @@ class StaticAccess:
             owner=group.owner,
             target_ids=self._targets,
             authorized_tools=execution_requests(
-                shared.tools, {t.partition("/")[0] for t in self._write_tools}
+                shared.tools - (self._personal_tools - self._grants.get(subject_id, frozenset())),
+                {t.partition("/")[0] for t in self._write_tools}
             ),
             policy_version=self._version,
         )
@@ -1371,7 +1405,7 @@ class StaticAccess:
             tool_id = f"{target_id}/get_action_status"
         if owner.kind == "group":
             shared = self._group
-            if tool_id in self._write_tools:
+            if tool_id in self._write_tools | self._personal_tools:
                 return (
                     shared is not None
                     and owner == shared.scope.owner
@@ -1458,6 +1492,9 @@ def _delivery(
     for other in others:
         tools += other
     monitoring_contracts, monitoring_policies = _monitoring_catalog(config)
+    notify_contracts, notify_policies = notification_catalog(
+        config.webhook_bots, config.projection_bytes
+    )
     api_contracts, api_policies = alertmanager_catalog(
         config.alertmanager_sources, config.projection_bytes
     )
@@ -1465,14 +1502,16 @@ def _delivery(
         frozenset(schemas)
         | {server.server_id for server in config.mcp_servers}
         | {source.server_id for source in config.alertmanager_sources}
+        | ({NOTIFY_TARGET} if config.webhook_bots else set())
     )
     action_contracts, action_policies = action_status_catalog(
-        targets - frozenset(schemas),
+        targets - frozenset(schemas) - {NOTIFY_TARGET},
         config.projection_bytes,
     )
     catalog = ToolCatalog(
-        (*tools.contracts, *monitoring_contracts, *api_contracts, *action_contracts),
-        (*tools.policies, *monitoring_policies, *api_policies, *action_policies),
+        (*tools.contracts, *monitoring_contracts, *api_contracts,
+         *action_contracts, *notify_contracts),
+        (*tools.policies, *monitoring_policies, *api_policies, *action_policies, *notify_policies),
     )
     access = StaticAccess(
         config.access,
@@ -1481,6 +1520,7 @@ def _delivery(
         write_tools=frozenset(
             c.tool_id for c in catalog.contracts if catalog.policy_for(c).effect == "write"
         ),
+        personal_tools=frozenset({NOTIFY_TOOL}) if config.webhook_bots else frozenset(),
     )
     evidence = EvidenceStore(
         engine,
@@ -1490,7 +1530,11 @@ def _delivery(
         retention_seconds=storage.evidence_retention_seconds,
         verify_dependencies=DependencyCheck({t: s.adapter for t, s in schemas.items()}),
     )
-    results = ResultDelivery(store, evidence, access, budget=config.budget)
+    results = ResultDelivery(
+        store, evidence, access, budget=config.budget,
+        notification_status=(lambda identity: receipt_notice(engine, identity))
+        if config.webhook_bots else None,
+    )
     return _Delivery(store, evidence, results, tools)
 
 
@@ -1535,6 +1579,7 @@ async def open_runtime(
     model_transport: httpx2.AsyncBaseTransport | None = None,
     starrocks_connect: Mapping[str, Connector] | None = None,
     members: MemberCheck | None = None,
+    webhook_transport: httpx2.AsyncBaseTransport | None = None,
 ) -> AsyncIterator[Runtime]:
     """按唯一顺序装配；退出或任一步失败时逆序关闭并释放实例锁。
 
@@ -1569,6 +1614,24 @@ async def open_runtime(
         await stack.enter_async_context(_refreshing(schemas))
         model = await stack.enter_async_context(open_model(config.model, transport=model_transport))
         governance = GovernedTools(parts.evidence)
+        notifications = None
+        if config.webhook_bots:
+            async def verify_notification_sender(identity: Identity) -> bool:
+                shared = _group_access(config, members)
+                if shared is None:
+                    return False
+                decision = await parts.results.access.resolve_group(
+                    shared.scope, identity.subject_id, verify_member=True,
+                )
+                return decision is not None and NOTIFY_TOOL in decision.authorized_tools
+
+            notifications = WebhookNotifications(
+                config.webhook_bots, governance, engine, lock, clock=clock,
+                verify_sender=verify_notification_sender,
+                transport=webhook_transport,
+            )
+            stack.push_async_callback(notifications.aclose)
+            await notifications.recover()
         mcp = (
             await stack.enter_async_context(
                 MCPIntegration(config.mcp_servers, governance, clock=clock)
@@ -1624,6 +1687,7 @@ async def open_runtime(
             images=SessionImageStore(engine, clock=clock)
             if config.model.image_input_enabled
             else None,
+            notifications=notifications,
         )
         service = ChannelService(app, parts.results)
         yield Runtime(engine, lock, readiness, recovery, service, mcp, alertmanagers)
