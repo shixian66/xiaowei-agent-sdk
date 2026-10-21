@@ -128,6 +128,10 @@ B1 的短口径主视图修复已成立；原 B2 因复现形状不符合真实 
 
 另检查本次六份文件的 **133 个本地链接路径均存在**、U1–U7 索引和架构显式锚点存在，`git diff --check` 通过；未做全仓锚点/外网链接可用性检查。首次链接检查发现旧 handoff 指向未入库的本机记录，下文已注明当前不可复核。精确文档版本独立审查结论待冻结后补充。本轮没有跑 PostgreSQL/完整审批恢复、全套产品回归或真实模型/指标/Webhook，未部署，检查不证明新功能可用。
 
+补充公开 SDK 核验：尝试运行 `test_sdk_hitl_reuse.py` 两个无存储节点时，因既有本地环境缺少新主线依赖 `nh3` 而在收集阶段失败；没有安装依赖或修改产品。随后直接使用 SDK 0.22.3 的 Agent/Runner/needs_approval/RunState/ScriptedModel 做纯内存实验（关闭 tracing/export processors）：暂停前零执行、批准后执行、拒绝不执行；同一快照重复批准恢复会执行两次。这只证明 SDK 本身不提供业务防重，支持设计中原子 run/attempt 的必要性，不算完整 Action/PG 通过或产品缺陷。
+
+独立只读设计审查覆盖 base `691804424f8bf3ed04c32f806a291cfafa053266` → head `79053c4c851f4f83b8ee2ea7ca3a08a129aa2d31` 六份 Markdown，并核对治理、Action、Application、StaticAccess、Evidence、渠道、Prometheus 结果/协议及本地 SDK 公开接口；未运行服务/测试。发现两项 P2：长期任务正文的历史事实缺少来源/期限约束，Node 选择器硬权限表述与既有按源共享契约冲突；无 P1。修订建议首版不保存历史业务快照到定时正文，保持即时 U3，未来业务事实到点重新取证；Node 选择器只定义业务覆盖，不建新指标 ACL。修订后的精确版本待复核，不能称初稿已通过。设计 §8 保留相关产品范围建议和环境门槛。
+
 既有 #120 的 P4 记录曾保存在原工作树 `.superpowers/sdd/2026-10-20-production-dialogue-answer-repair/p4-results.md`，当前工作树不含该本机文件；源码差异可从 `6918044` 查回，不能据未随 Git 保存的材料新增实测结论。该切片只更改测试、采集脚本和相关文档；不关闭 A1、真实 P4 或客户端验收。采集器的首个正文回执指标不等于用户实际看见答案；完整交付依赖全部绑定分项确认。有限 PromQL 与 SQLite 夹具的能力限制单列，不能凭脚本模型给自然语言任务打通过分。
 
 P2/P1 的 [PR #119](https://github.com/shixian66/xiaowei-agent-sdk/pull/119) 由候选 `425a52c13bfc6e1bc9cf441e314db6435885ca98` squash 合入 `821ee8d9d89c1a28dda5c9b2c97d8506a3e0407d`，文件树一致。[CI 39456492469](https://github.com/shixian66/xiaowei-agent-sdk/actions/runs/39456492469) 的 9 项检查全部通过、attempt=1：integration **4500 passed、235 skipped、87 deselected**；p3-release **84 passed**。这是该合入版本证据，不自动当作本次 P4 候选的全量结果。
