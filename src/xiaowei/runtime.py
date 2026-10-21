@@ -349,12 +349,16 @@ class ServeConfig(_Config):
         if self.webhook_bots:
             if self.feishu is None or self.feishu.group is None:
                 raise ValueError("Webhook 通知必须配置指定飞书群")
-            if any(len({getattr(b, key) for b in self.webhook_bots}) != len(self.webhook_bots)
-                   for key in ("bot_id", "alias")):
+            if any(
+                len({getattr(b, key) for b in self.webhook_bots}) != len(self.webhook_bots)
+                for key in ("bot_id", "alias")
+            ):
                 raise ValueError("Webhook bot_id 和 alias 均不能重复")
-            targets = ({t.target_id for t in self.targets}
-                       | {s.server_id for s in self.mcp_servers}
-                       | {s.server_id for s in self.alertmanager_sources})
+            targets = (
+                {t.target_id for t in self.targets}
+                | {s.server_id for s in self.mcp_servers}
+                | {s.server_id for s in self.alertmanager_sources}
+            )
             if NOTIFY_TARGET in targets:
                 raise ValueError("notifications 是通知工具保留目标")
             if any(not b.receive_tools <= registered - {NOTIFY_TOOL} for b in self.webhook_bots):
@@ -1387,7 +1391,7 @@ class StaticAccess:
             target_ids=self._targets,
             authorized_tools=execution_requests(
                 shared.tools - (self._personal_tools - self._grants.get(subject_id, frozenset())),
-                {t.partition("/")[0] for t in self._write_tools}
+                {t.partition("/")[0] for t in self._write_tools},
             ),
             policy_version=self._version,
         )
@@ -1415,6 +1419,19 @@ class StaticAccess:
         return owner.id == identity.subject_id and tool_id in self._grants.get(
             identity.subject_id, frozenset()
         )
+
+    async def authorize_evidence(self, identity: Identity, target_id: str, tool_id: str) -> bool:
+        """共享群可读最小通知回执；个人发送许可仍由 authorize 独立核对。"""
+        if target_id == "notifications" and tool_id == NOTIFY_TOOL:
+            shared = self._group
+            return (
+                target_id in self._targets
+                and identity.channel == "feishu"
+                and shared is not None
+                and identity.owner == shared.scope.owner
+                and tool_id in shared.tools
+            )
+        return await self.authorize(identity, target_id, tool_id)
 
 
 # ---- 装配 ----------------------------------------------------------------------------
@@ -1509,8 +1526,13 @@ def _delivery(
         config.projection_bytes,
     )
     catalog = ToolCatalog(
-        (*tools.contracts, *monitoring_contracts, *api_contracts,
-         *action_contracts, *notify_contracts),
+        (
+            *tools.contracts,
+            *monitoring_contracts,
+            *api_contracts,
+            *action_contracts,
+            *notify_contracts,
+        ),
         (*tools.policies, *monitoring_policies, *api_policies, *action_policies, *notify_policies),
     )
     access = StaticAccess(
@@ -1526,14 +1548,19 @@ def _delivery(
         engine,
         catalog,
         authorize=access.authorize,
+        authorize_read=access.authorize_evidence,
         clock=clock,
         retention_seconds=storage.evidence_retention_seconds,
         verify_dependencies=DependencyCheck({t: s.adapter for t, s in schemas.items()}),
     )
     results = ResultDelivery(
-        store, evidence, access, budget=config.budget,
+        store,
+        evidence,
+        access,
+        budget=config.budget,
         notification_status=(lambda identity: receipt_notice(engine, identity))
-        if config.webhook_bots else None,
+        if config.webhook_bots
+        else None,
     )
     return _Delivery(store, evidence, results, tools)
 
@@ -1616,17 +1643,24 @@ async def open_runtime(
         governance = GovernedTools(parts.evidence)
         notifications = None
         if config.webhook_bots:
+
             async def verify_notification_sender(identity: Identity) -> bool:
                 shared = _group_access(config, members)
                 if shared is None:
                     return False
                 decision = await parts.results.access.resolve_group(
-                    shared.scope, identity.subject_id, verify_member=True,
+                    shared.scope,
+                    identity.subject_id,
+                    verify_member=True,
                 )
                 return decision is not None and NOTIFY_TOOL in decision.authorized_tools
 
             notifications = WebhookNotifications(
-                config.webhook_bots, governance, engine, lock, clock=clock,
+                config.webhook_bots,
+                governance,
+                engine,
+                lock,
+                clock=clock,
                 verify_sender=verify_notification_sender,
                 transport=webhook_transport,
             )

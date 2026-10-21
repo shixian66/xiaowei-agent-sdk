@@ -18,6 +18,7 @@ import httpx2
 from agents import FunctionTool
 from pydantic import BaseModel, ConfigDict, Field, SecretStr, field_validator
 from sqlalchemy import text as sql
+from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncEngine
 
 from xiaowei.config import is_secret_ref, resolve_secret_ref
@@ -253,6 +254,7 @@ class WebhookNotifications:
                         ctx,
                         recipient_tools=bot.config.receive_tools | {TOOL},
                         recipient_targets=bot.config.receive_targets | {TARGET},
+                        include_remaining_results=False,
                     )
                 except RecipientRejectedError:
                     return self._observation(args.bot_alias, "not_sent", "recipient_not_authorized")
@@ -433,20 +435,23 @@ class WebhookNotifications:
 
 async def receipt_notice(engine: AsyncEngine, identity: Identity) -> str | None:
     """仅在渠道已复核请求归属/当前通知权限后读取；内容不依赖模型回答或 Evidence 落库。"""
-    async with engine.connect() as conn:
-        rows = (
-            (
-                await conn.execute(
-                    sql(
-                        "SELECT bot_alias,state,reason FROM xiaowei_notification_attempt "
-                        "WHERE turn_id=:turn ORDER BY sequence"
-                    ),
-                    {"turn": identity.turn_id},
+    try:
+        async with engine.connect() as conn:
+            rows = (
+                (
+                    await conn.execute(
+                        sql(
+                            "SELECT bot_alias,state,reason FROM xiaowei_notification_attempt "
+                            "WHERE turn_id=:turn ORDER BY sequence"
+                        ),
+                        {"turn": identity.turn_id},
+                    )
                 )
+                .mappings()
+                .all()
             )
-            .mappings()
-            .all()
-        )
+    except (OSError, SQLAlchemyError):
+        return "通知发送状态暂无法核验，不能据此判断已发送或未发送；不要自动重发。"
     lines = []
     for row in rows:
         state = row["state"]

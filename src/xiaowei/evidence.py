@@ -281,12 +281,14 @@ class EvidenceStore:
         clock: Callable[[], datetime],
         retention_seconds: int,
         verify_dependencies: DependencyVerifier | None = None,
+        authorize_read: Authorizer | None = None,
     ) -> None:
         if retention_seconds <= 0:
             raise ValueError("证据保留期必须为正数")
         self._engine = engine
         self._catalog = catalog
         self._authorize = authorize
+        self._authorize_read = authorize_read or authorize
         self._clock = clock
         self._retention = timedelta(seconds=retention_seconds)
         self._verify_dependencies = verify_dependencies
@@ -430,9 +432,14 @@ class EvidenceStore:
         return _arguments_digest(effective)
 
     async def validate_answer(
-        self, turn: TurnAnswer, ctx: RunContext, *, history: bool = False,
+        self,
+        turn: TurnAnswer,
+        ctx: RunContext,
+        *,
+        history: bool = False,
         recipient_tools: frozenset[str] | None = None,
         recipient_targets: frozenset[str] | None = None,
+        include_remaining_results: bool = True,
     ) -> Delivery:
         """最终回答出口：核对引用关系与当前可读性，再为接收渠道生成内容。
 
@@ -442,6 +449,8 @@ class EvidenceStore:
         按产生顺序补为“其余结果”。原执行轮次即 ``ctx.identity.turn_id``（审批恢复与历史读取都
         传原轮）。归一化与补全后仍没有任何可交付内容时拒绝。
         ``history`` 为真表示历史读取或显式重发；所有证据均复核当前权限与依赖。
+        通知外发将 ``include_remaining_results`` 设为假，只输出显式选择的事实；
+        全部模型可见证据仍须通过数据权限和接收权限复核。
         确定不可读抛出 ``AnswerRejectedError``；暂时无法复核时 ``EvidenceUnverifiableError`` 原样
         传播。
         """
@@ -485,7 +494,12 @@ class EvidenceStore:
         actions.sort(key=lambda e: self._effect(by_id[e]) != "approval")
         body = [e for e in cited if e not in actions]
         remaining = [
-            e for e in unshown if complete and current(e) and self.category(by_id[e]) == "result"
+            e
+            for e in unshown
+            if complete
+            and include_remaining_results
+            and current(e)
+            and self.category(by_id[e]) == "result"
         ]
         facts = [
             *(self._delivery_fact(by_id[e], "action", views.get(e), ctx) for e in actions),
@@ -732,7 +746,7 @@ class EvidenceStore:
 
     async def _currently_authorized(self, identity: Identity, record: EvidenceRecord) -> bool:
         try:
-            return await self._authorize(identity, record.target_id, record.tool_id) is True
+            return await self._authorize_read(identity, record.target_id, record.tool_id) is True
         except Exception:
             # 授权查询失败时不放行已保存内容；统一按不可读报告。
             raise EvidenceUnavailableError from None

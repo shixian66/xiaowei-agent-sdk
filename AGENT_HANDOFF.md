@@ -12,7 +12,7 @@
 | 产品代码基线 | `main@691804424f8bf3ed04c32f806a291cfafa053266`（PR #120，含 #119）；批准设计 v1.3 为 `71398cf8e7f076e6bc3c840a6566ca49a7709f00`。A 实施复用隔离工作树 `scheduled-agent-design/agent-SDK`，分支 `codex/webhook-notifications`；原目录未提交修改未带入 |
 | 源码与检查 | 当前源码仅保留 `src/xiaowei`；旧工程及专属测试、Compose、迁移入口、`compose-smoke` CI 和 Alembic 依赖已移除。保留产品测试、公共检查与旧回答兼容路径；旧工程历史可从 Git 查回 |
 | 当前存储与回答 | A 候选应用 schema v13（主线 v12），新增独立通知发送记录；SDK 表不变。可信 `answer_version=3`、2/Legacy 与分项交付兼容契约不变 |
-| 锁定依赖 | SDK `0.22.3`、Lark Channel `1.4.0`、MCP `2.2.0`、sqlglot `30.17.0`、`nh3 0.3.7`、`tinycss2 1.5.1` |
+| 锁定依赖 | SDK `0.22.3`、Lark Channel `1.4.0`、MCP `2.2.0`、sqlglot `30.17.0`、`nh3 0.3.7`、`tinycss2 1.5.1`、Pillow `13.0.0`、certifi `2026.10.19`（后两项为严格审计发现的既有漏洞定向升级） |
 | 正式入口 | `xiaowei serve`、`config check`、`model check`、`storage init/upgrade/cleanup`、`requests resend`；命令与环境准备以 README 为准 |
 | 最近有记录的公司部署 | 既有交接记录称 PR #110 / `4e0ab86` 已部署，并记录了部署后的回答拒收反馈。该历史记录不证明当前镜像、配置或健康状态，也不证明 #111–#114 已部署 |
 | 当前验收结论 | A 实施中：正式群入口、SDK/治理与隔离 PG 的成功和拒绝路径已建立，边界与回归仍在执行；最终结果按本次交付记录。B–D 未实现，不继承旧 CI 或设计复审为功能证据 |
@@ -33,7 +33,7 @@
 - 进度的单聊/群聊差异延迟、仅真实变化更新、正常收尾及异常陈旧已由用户确认，详见[进度契约](ARCHITECTURE.md#progress-observation)；P1 已有离线实现，当前证据见计划 §7。普通消息的区域身份及正文/明细分工见[普通消息契约](ARCHITECTURE.md#ordinary-feishu-expression)，不能由 HTML/MD 报告完成推定达标。
 - 监控写仅限已批准动作，使用 SDK 原生审批暂停/恢复及既有 Action 治理；生产开放仍须满足对应源和群审批门槛。Grafana 数据源密码私聊命令尚未实现，目前由管理员在 Grafana UI 填写。见 [监控边界](ARCHITECTURE.md#monitoring-mcp)。
 - 内网 Web 无登录、访问者共用操作者权限；目标账号、网络、Grafana 插件/写端及数据源更新竞争窗口等已接受取舍按架构执行。
-- 通知及定时任务的方向与待审权限增量见 [ARCHITECTURE](ARCHITECTURE.md#scheduled-agent-tasks)：多个目的群不扩大操作入口，任务独立于原聊天，创建及每次执行复核权限，生产写不能继承周期批准。目前均未实现。
+- 通知及定时任务的方向与待审权限增量见 [ARCHITECTURE](ARCHITECTURE.md#scheduled-agent-tasks)：多个目的群不扩大操作入口，任务独立于原聊天，创建及每次执行复核权限，生产写不能继承周期批准。A 已有本地候选与离线证据，B–D 未实现。
 
 ## 3. 当前计划与下一项工作
 
@@ -41,7 +41,7 @@
 
 [设计 v1.3](docs/superpowers/specs/2026-10-21-scheduled-agent-tasks.md)维护技术依据与固定 U1–U7；[A–D 计划 v1.3](docs/superpowers/plans/2026-10-21-scheduled-agent-tasks.md)维护切片验收。本次已同步 ARCHITECTURE 的旧草案，以批准的规范化定义、Evidence 依赖/期限和创建者＋原群权限口径接续。A 即时多机器人通知 → B 一次性固定提醒 → C 通用独立 Agent 周期任务 → D Node 核心巡检。
 
-关键源码缺口：现有 effect 没有通知语义；原 Action 是短期单次批准，不能作为长期任务授权；现有 Prometheus MCP 文本丢失结构化信息，D 不能猜解析。建议窄 notify、本地任务 Action 激活独立 job 授权、受治理结构化 Prometheus 读取；这三项均需对应切片验证，不能写成已支持。
+A 已增加窄 notify effect，独立发送许可不扩展数据库/生产写权限。后续源码缺口：原 Action 是短期单次批准，B 须验证激活独立 job 授权；现有 Prometheus MCP 文本丢失结构化信息，D 不能猜解析，届时再补必要的受治理结构化读取。
 
 当前 A 专项36项通过，覆盖真实群事件→正式 runtime/Application→SDK Runner→治理→隔离 PG→HTTP 替身；源/工具接收范围、个人发送权、并发/重复、签名、超时、落库失败与重启均有用例。ruff 全仓及 mypy（36源文件）通过；首次全套4521通过、2处 CLI 旧版本断言失败，已按新迁移更新为13并在真实 CLI 两用例通过。最终完整回归和具体候选独立审查待记录，不把首次混合运行作为最终候选通过。接续先完成 A，不同时实现 B–D。真实模型/机器人、Node API 及部署未授权，旧实战缺口不因此关闭。
 

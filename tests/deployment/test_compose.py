@@ -537,7 +537,7 @@ def test_formal_compose_entry_success_failure_network_and_signal(
             "upgrade",
             "--bind-existing-digest-key",
         )
-        assert restored.returncode == 0 and restored.stdout.strip() == "storage version 12"
+        assert restored.returncode == 0 and restored.stdout.strip() == "storage version 13"
         upgrade_process = None
 
         wrong_key = "wrong digest $ # space ' quote"

@@ -17,7 +17,7 @@ from tests.sdk_core.test_app import cite, evidence_in, tool_call, upstream_error
 from tests.sdk_core.test_feishu import Outbox
 from tests.sdk_core.test_feishu_render import message_text
 from tests.sdk_core.test_group_gateway import BOT, Group, group_config
-from tests.sdk_core.test_group_identity import APP, CHAT, A
+from tests.sdk_core.test_group_identity import APP, CHAT, GROUP, A, B
 from tests.sdk_core.test_runtime import env as env  # pytest fixture
 from tests.sdk_core.test_runtime import feishu_config, serve_config
 
@@ -155,6 +155,89 @@ async def test_same_text_with_new_call_id_still_posts_once(env, monkeypatch):
     async with running(env, monkeypatch) as (group, requests, _rt):
         await group.ask(request)
         assert len(requests) == 1
+
+
+async def test_text_notification_does_not_forward_unselected_current_query(env, monkeypatch):
+    request = script(
+        env,
+        "先查销售留在本群，然后给机器人只发一条提醒",
+        tool_call(
+            "run_readonly_query", cluster=SR.target_id, sql="SELECT region, total FROM shop.sales"
+        ),
+        tool_call("send_webhook_message", bot_alias="ops_alert_bot", text=TEXT, evidence_ids=[]),
+        cite(),
+    )
+    async with running(env, monkeypatch) as (group, requests, _rt):
+        await group.ask(request)
+        assert len(requests) == 1
+        content = json.loads(requests[0].content)["content"]["text"]
+        assert TEXT in content
+        assert "east" not in content and "SELECT" not in content
+        # 原群的正常结果交付仍完整，通知只改变自己选择外发的内容。
+        assert "east" in message_text(group.outbox.sent[-1][1])
+
+
+async def test_non_sender_can_query_after_shared_notification_but_cannot_send(env, monkeypatch):
+    first = script(
+        env,
+        "发一条提醒",
+        tool_call("send_webhook_message", bot_alias="ops_alert_bot", text=TEXT, evidence_ids=[]),
+        cite(),
+    )
+    second = "继续查询销售"
+
+    def query_without_send_tool(call):
+        assert "send_webhook_message" not in call.tools
+        return tool_call(
+            "run_readonly_query", cluster=SR.target_id, sql="SELECT region, total FROM shop.sales"
+        )(call)
+
+    env.scripts.add(attributed(B, second), query_without_send_tool, cite("查询继续完成"))
+
+    async def members(chat, subject):
+        return chat == CHAT and subject in {A, B}
+
+    async with running(env, monkeypatch, member_check=members) as (group, requests, rt):
+        await group.ask(first)
+        await group.ask(second, sender=B)
+        reply = message_text(group.outbox.sent[-1][1])
+        assert "查询继续完成" in reply and "east" in reply
+        assert len(requests) == 1
+        # 可读共享回执绝不授予实际发送权限。
+        from xiaowei.models import Identity
+
+        actor = Identity(
+            subject_id=B, session_id="test", turn_id="test", channel="feishu", owner=GROUP.owner
+        )
+        assert not await rt.service.results.access.authorize(actor, "notifications", TOOL)
+
+
+async def test_receipt_read_failure_reports_unverifiable_without_stopping_service(env, monkeypatch):
+    from sqlalchemy import event
+    from sqlalchemy.exc import SQLAlchemyError
+
+    request = script(
+        env,
+        "消息发完后回执查询暂时失败",
+        tool_call("send_webhook_message", bot_alias="ops_alert_bot", text=TEXT, evidence_ids=[]),
+        cite(),
+    )
+    intercepted = []
+
+    def fail_receipt(conn, cursor, statement, parameters, context, executemany):
+        if statement.startswith("SELECT bot_alias,state,reason FROM xiaowei_notification_attempt"):
+            intercepted.append(statement)
+            raise SQLAlchemyError("synthetic receipt read failure")
+
+    async with running(env, monkeypatch) as (group, requests, rt):
+        event.listen(rt.engine.sync_engine, "before_cursor_execute", fail_receipt)
+        try:
+            await group.ask(request)
+        finally:
+            event.remove(rt.engine.sync_engine, "before_cursor_execute", fail_receipt)
+        assert intercepted and len(requests) == 1
+        assert "发送状态暂无法核验" in message_text(group.outbox.sent[-1][1])
+        assert rt.readiness.ok
 
 
 async def test_current_group_membership_is_checked_before_post(env, monkeypatch):
@@ -361,6 +444,134 @@ async def test_accepted_survives_evidence_record_failure(env, monkeypatch):
         await group.ask(request)
         assert len(requests) == 1
         assert "消息已提交" in message_text(group.outbox.sent[-1][1])
+
+
+async def test_accepted_survives_session_commit_failure(env, monkeypatch):
+    from xiaowei.session import PolicySession, SessionStoreError
+
+    request = script(
+        env,
+        "发送后会话提交失败",
+        tool_call("send_webhook_message", bot_alias="ops_alert_bot", text=TEXT, evidence_ids=[]),
+        cite(),
+    )
+
+    async def fail_commit(self, *args, **kwargs):
+        raise SessionStoreError("synthetic session commit failure")
+
+    monkeypatch.setattr(PolicySession, "commit_validated", fail_commit)
+    async with running(env, monkeypatch) as (group, requests, _rt):
+        await group.ask(request)
+        assert len(requests) == 1
+        assert "消息已提交" in message_text(group.outbox.sent[-1][1])
+
+
+@pytest.mark.parametrize("failure", ["cancel", "settle"])
+async def test_post_started_but_unsettled_recovers_as_unknown_without_retry(
+    env, monkeypatch, failure
+):
+    from sqlalchemy import event
+    from sqlalchemy.exc import SQLAlchemyError
+
+    from xiaowei.channel import InboundRequest
+
+    entered = asyncio.Event()
+    release = asyncio.Event()
+
+    async def post(request):
+        entered.set()
+        if failure == "cancel":
+            await release.wait()
+        return httpx2.Response(200, json={"code": 0})
+
+    def fail_settle(conn, cursor, statement, parameters, context, executemany):
+        if statement.startswith("UPDATE xiaowei_notification_attempt SET state="):
+            raise SQLAlchemyError("synthetic settlement failure")
+
+    message = script(
+        env,
+        "发送开始后中断",
+        tool_call("send_webhook_message", bot_alias="ops_alert_bot", text=TEXT, evidence_ids=[]),
+        cite(),
+    )
+    async with running(env, monkeypatch, response=post) as (_group, requests, rt):
+        receipt = await rt.service.accept(
+            InboundRequest(
+                channel="feishu",
+                channel_request_id="om_fault",
+                subject_id=A,
+                conversation_id=CHAT,
+                mode="query",
+                message=attributed(A, message),
+                received_at=env.clock(),
+                group=GROUP,
+            )
+        )
+        if failure == "settle":
+            event.listen(rt.engine.sync_engine, "before_cursor_execute", fail_settle)
+        task = asyncio.create_task(rt.service.process(receipt))
+        try:
+            await asyncio.wait_for(entered.wait(), 5)
+            if failure == "cancel":
+                task.cancel()
+                with pytest.raises(asyncio.CancelledError):
+                    await task
+            else:
+                record = await task
+                assert record.state == "failed"
+        finally:
+            if failure == "settle":
+                event.remove(rt.engine.sync_engine, "before_cursor_execute", fail_settle)
+        assert len(requests) == 1 and not rt.readiness.ok
+        async with rt.engine.connect() as conn:
+            assert (
+                await conn.execute(sql("SELECT state FROM xiaowei_notification_attempt"))
+            ).scalar_one() == "sending"
+    async with running(env, monkeypatch) as (_group, requests, rt):
+        assert requests == []
+        async with rt.engine.connect() as conn:
+            assert (
+                await conn.execute(sql("SELECT state FROM xiaowei_notification_attempt"))
+            ).scalar_one() == "unknown"
+
+
+async def test_same_target_credential_rotation_does_not_reset_attempts(env, monkeypatch):
+    message = script(
+        env,
+        "轮换前发送",
+        tool_call("send_webhook_message", bot_alias="ops_alert_bot", text=TEXT, evidence_ids=[]),
+        cite(),
+    )
+    async with running(env, monkeypatch, response=httpx2.ReadTimeout("lost")) as (
+        group,
+        requests,
+        rt,
+    ):
+        await group.ask(message)
+        assert len(requests) == 1
+        async with rt.engine.connect() as conn:
+            before = (
+                await conn.execute(
+                    sql(
+                        "SELECT receipt_id,content_digest,target_version,state "
+                        "FROM xiaowei_notification_attempt"
+                    )
+                )
+            ).all()
+    rotated = configured(env).webhook_bots[0].model_copy(update={"url_ref": "env:XW_ROTATED_URL"})
+    monkeypatch.setenv("XW_ROTATED_URL", URL + "-rotated")
+    async with running(env, monkeypatch, bots=[rotated]) as (_group, requests, rt):
+        assert requests == []
+        async with rt.engine.connect() as conn:
+            after = (
+                await conn.execute(
+                    sql(
+                        "SELECT receipt_id,content_digest,target_version,state "
+                        "FROM xiaowei_notification_attempt"
+                    )
+                )
+            ).all()
+        assert before == after
 
 
 async def test_credentials_are_absent_from_model_history_logs_and_answer(env, monkeypatch, caplog):
