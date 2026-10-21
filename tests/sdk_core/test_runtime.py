@@ -988,6 +988,7 @@ async def test_uninitialized_database_is_refused(
 ) -> None:
     secret = SecretStr(env.url.render_as_string(hide_password=False))
     async with open_engine(secret) as engine, engine.begin() as conn:
+        await conn.execute(text("DROP TABLE xiaowei_notification_attempt"))
         await conn.execute(text("DROP TABLE xiaowei_image"))
         await conn.execute(text("DROP TABLE xiaowei_delivery_part"))
         await conn.execute(text("DROP TABLE xiaowei_report"))
