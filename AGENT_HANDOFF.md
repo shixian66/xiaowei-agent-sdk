@@ -40,9 +40,11 @@
 
 产品只改 `app.py` 的两段监控指令和 `runtime.py` 的即时查询说明；未修改执行逻辑、治理策略、Evidence/Session 或交付。评测复用现有 `scripts.dialogue_real_model`，新增 `monitoring-reliability` 集；领域判据只展示给评审者，不进入 Agent 指令。
 
-离线契约测试先在旧说明上得到2项预期失败，确认新范围/可靠性说明尚未进入模型请求；修订后新样例与采集器入口的定向检查7项通过。受影响回归（`test_monitoring_reliability`、`test_dialogue_real_model`、`test_prometheus_p2`、`test_dialogue_contract`、`test_app`、文档命令检查）**180 passed、26 skipped、2 deselected**；官方 MCP 二进制未配置，browser 未选。`ruff check --no-cache .`、`mypy src`（35文件）及 `git diff --check` 通过。AST 对照确认产品差异仅为两处字符串常量值（监控指令整体常量及查询说明），无执行逻辑变更。尚待冻结版本的独立审查。
+离线契约测试先在旧说明上得到2项预期失败，确认新范围/可靠性说明尚未进入模型请求；修订后新样例与采集器入口的定向检查7项通过。受影响回归（`test_monitoring_reliability`、`test_dialogue_real_model`、`test_prometheus_p2`、`test_dialogue_contract`、`test_app`、文档命令检查）**180 passed、26 skipped、2 deselected**；官方 MCP 二进制未配置，browser 未选。`ruff check --no-cache .`、`mypy src`（35文件）及 `git diff --check` 通过。AST 对照确认产品差异仅为两处字符串常量值（监控指令整体常量及查询说明），无执行逻辑变更。
 
-下一项：完成离线检查及独立审查后停在本地候选，交用户审阅；真实模型对比仍需另获 Profile、端点/模型与费用授权。本套固定导出解释题不能替代自主查询、补证及真实源/飞书验收；求值窗口展示标签的问题也未在本次修复。不合并、不部署。
+独立审查覆盖基线 `6918044` 至候选 `43b91e3dcfcd576a7ee3fd1e3f82b4b6737df42c`，复验22项通过（含固定 Evidence 指纹），无阻断；发现P3为scope判据将输入的“旧查询”额外称作up查询。修订 `52cfe0ed1222505b0646f53767fa3bf0328af136` 仅改两行评测文案，作者定向3项通过，独立复核确认P3关闭、仍无阻断。此后仅更新本交接记录，产品与测试未再变更。没有新的CI或真实模型证据。
+
+下一项：离线检查及独立审查已完成，停在本地候选交用户审阅；真实模型对比仍需另获 Profile、端点/模型与费用授权。本套固定导出解释题不能替代自主查询、补证及真实源/飞书验收；求值窗口展示标签的问题也未在本次修复。不合并、不部署。
 
 ### 已合入的相关工作
 
