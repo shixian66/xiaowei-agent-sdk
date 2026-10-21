@@ -1070,7 +1070,10 @@ def _monitoring_catalog(
         ),
     )
     policies = {"query": query_policy}
-    descriptions = {"query": "只读 PromQL 即时查询；由 Server 即时求值，不代表历史窗口。"}
+    descriptions = {
+        "query": "只读 PromQL 即时查询，在单个时刻求值；表达式可以计算历史统计，"
+        "历史范围和统计含义由 PromQL 决定。"
+    }
     for name, arguments, result, fields, description, note in specifications:
         policies[name] = ToolPolicy(
             policy_id=f"prometheus.{name}",

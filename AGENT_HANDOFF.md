@@ -9,16 +9,16 @@
 | 项目 | 已核对事实 |
 | --- | --- |
 | 仓库 | [shixian66/xiaowei-agent-sdk](https://github.com/shixian66/xiaowei-agent-sdk) |
-| 产品代码基线 | P2/P1 已由 PR #119 squash 合入 `main@821ee8d9d89c1a28dda5c9b2c97d8506a3e0407d`。本次从该最新主线复用隔离工作树建立 `codex/answer-delivery-eval`；旧工作区未提交修改未带入 |
+| 产品代码基线 | 本次从 `main@691804424f8bf3ed04c32f806a291cfafa053266`（PR #120）新建 `monitoring-evidence-reliability/agent-SDK`，分支 `codex/monitoring-evidence-reliability`；原工作区和定时任务工作树的修改未带入 |
 | 源码与检查 | 当前源码仅保留 `src/xiaowei`；旧工程及专属测试、Compose、迁移入口、`compose-smoke` CI 和 Alembic 依赖已移除。保留产品测试、公共检查与旧回答兼容路径；旧工程历史可从 Git 查回 |
 | 当前存储与回答 | 应用 schema v12；可信 `answer_version=3` 开放原生报告，2/Legacy 保留旧文字；模型输出 schema 不变。新请求用分项交付，旧请求保留 v0 语义 |
 | 锁定依赖 | SDK `0.22.3`、Lark Channel `1.4.0`、MCP `2.2.0`、sqlglot `30.17.0`、`nh3 0.3.7`、`tinycss2 1.5.1` |
 | 正式入口 | `xiaowei serve`、`config check`、`model check`、`storage init/upgrade/cleanup`、`requests resend`；命令与环境准备以 README 为准 |
 | 最近有记录的公司部署 | 既有交接记录称 PR #110 / `4e0ab86` 已部署，并记录了部署后的回答拒收反馈。该历史记录不证明当前镜像、配置或健康状态，也不证明 #111–#114 已部署 |
-| 当前验收结论 | P2/P1 的 B1 短提醒及 N1 动作不进数据附件修复已合入，PR #119 的 CI 9/9 通过。本次仅补 P4 离线联合重放和真实模型采集入口，不修改产品 schema、存储、权限或交付契约；检查与独立审查见 §5。真实模型任务能力、公司服务和用户验收未完成 |
-| 当前任务授权 | 用户要求在批准范围内继续开发；推进 v1.2 的 P4 离线验收及必要采集器接入，提交并独立审查。P3/P1c 不在本轮范围；不部署，不调用真实模型、公司服务或飞书。真实 Profile、端点与费用仍须具体获准 |
+| 当前验收结论 | 监控说明修订仅替换三处文字，补充9场景/11轮证据解释样例及离线契约回归；检查和审查状态见下方“本次监控可靠性修订”。不能据脚本模型认定真实巡检质量通过 |
+| 当前任务授权 | 用户授权独立工作树实施三处文字替换、代表性评测、离线验证和审查。不新增 Skill、固定调用流程，不改 Agent Loop、权限、Evidence 或交付契约；不合并、不部署、不调用真实模型或公司服务 |
 
-原工作目录的未提交 ARCHITECTURE、计划和公司配置未读取或混入。本次继续使用 `/Users/kloenguyen/.codex/worktrees/answer-query-repair/agent-SDK`；[批准计划 v1.2](docs/superpowers/plans/2026-10-20-production-dialogue-answer-repair.md) SHA-256 仍为 `fe6323fdaea5cdd7da900f34304369ac9c05e3bb5e96d74d3376fd3edf371443`。计划是批准时快照，后续授权及实施状态以本页为准。
+本次使用 `/Users/kloenguyen/.codex/worktrees/monitoring-evidence-reliability/agent-SDK`；不修改 `scheduled-agent-design/agent-SDK`。具体样例、依据及验证边界见[监控可靠性评测说明](docs/monitoring-reliability-evaluation.md)。下方旧回答修复计划与证据只作既有工作的接续资料，不扩大本次范围。
 
 本文件的状态以表中的核对基线为限。接手者先核对实际 HEAD、工作区及用户新指令；合入、独立审查、离线测试、真实运行、部署与用户接受分别记录，不互相替代。
 
@@ -35,6 +35,14 @@
 - 内网 Web 无登录、访问者共用操作者权限；目标账号、网络、Grafana 插件/写端及数据源更新竞争窗口等已接受取舍按架构执行。
 
 ## 3. 当前计划与下一项工作
+
+### 本次监控可靠性修订
+
+产品只改 `app.py` 的两段监控指令和 `runtime.py` 的即时查询说明；未修改执行逻辑、治理策略、Evidence/Session 或交付。评测复用现有 `scripts.dialogue_real_model`，新增 `monitoring-reliability` 集；领域判据只展示给评审者，不进入 Agent 指令。
+
+离线契约测试先在旧说明上得到2项预期失败，确认新范围/可靠性说明尚未进入模型请求；修订后新样例与采集器入口的定向检查7项通过。受影响回归（`test_monitoring_reliability`、`test_dialogue_real_model`、`test_prometheus_p2`、`test_dialogue_contract`、`test_app`、文档命令检查）**180 passed、26 skipped、2 deselected**；官方 MCP 二进制未配置，browser 未选。`ruff check --no-cache .`、`mypy src`（35文件）及 `git diff --check` 通过。AST 对照确认产品差异仅为两处字符串常量值（监控指令整体常量及查询说明），无执行逻辑变更。尚待冻结版本的独立审查。
+
+下一项：完成离线检查及独立审查后停在本地候选，交用户审阅；真实模型对比仍需另获 Profile、端点/模型与费用授权。本套固定导出解释题不能替代自主查询、补证及真实源/飞书验收；求值窗口展示标签的问题也未在本次修复。不合并、不部署。
 
 ### 已合入的相关工作
 
