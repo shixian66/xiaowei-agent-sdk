@@ -230,17 +230,37 @@ async def test_formal_serve_proposes_approves_and_refuses_non_approver(
             assert "批准后不会自动通知，完成后请另发通知要求" in message_text(channel.sends[0][1])
         action_id = await env.scalar("SELECT action_id FROM xiaowei_action")
         assert action_id is not None and adapter.calls == []
+        offset = 0
+        if notify:
+            # 普通 completed 轮次也可展示仍可批准的材料，不能只在 paused 轮加提示。
+            status_question = "查看待批准动作"
+            env.scripts.add(
+                attributed(A, status_question),
+                tool_call("am-synthetic__get_action_status", action_id=action_id),
+                cite("仍待批准"),
+            )
+            channel.emit_raw_from_sdk_thread(raw_group_event(env, status_question, "om_status"))
+            await until(lambda: len(channel.sends) > 1)
+            await gateways[0].idle()
+            assert await env.scalar(
+                "SELECT state FROM xiaowei_request WHERE reply_message_id='om_status'"
+            ) == "completed"
+            assert "批准后不会自动通知，完成后请另发通知要求" in "\n".join(
+                message_text(message) for _, message, _ in channel.sends[1:]
+            )
+            assert requests == []
+            offset = len(channel.sends) - 1
         channel.emit_raw_from_sdk_thread(raw_group_event(env, f"/批准 {action_id}", "om_denied", A))
-        await until(lambda: len(channel.sends) >= 2)
+        await until(lambda: len(channel.sends) >= 2 + offset)
         await gateways[0].idle()
-        assert len(channel.sends) == 2
+        assert len(channel.sends) == 2 + offset
         assert adapter.calls == []
         if interruption == "read":
             adapter.read_release = asyncio.Event()
         elif interruption == "write":
             adapter.release = asyncio.Event()
         channel.emit_raw_from_sdk_thread(raw_group_event(env, f"/批准 {action_id}", "om_ok", B))
-        expected_sends = 4 if interruption is None else 3
+        expected_sends = (4 if interruption is None else 3) + offset
         await until(lambda: len(channel.sends) >= expected_sends)
         await gateways[0].idle()
         assert len(channel.sends) == expected_sends
@@ -263,7 +283,7 @@ async def test_formal_serve_proposes_approves_and_refuses_non_approver(
         if notify:
             assert requests == []
             assert "未发送通知" in message_text(channel.sends[-1][1])
-        assert len(env.scripts.calls) == 1  # 非名单不调用模型；批准恢复原任务的模型脚本。
+        assert len(env.scripts.calls) == (2 if notify else 1)  # 批准恢复原任务的模型脚本。
         assert (await served.ready())["status"] == "ready"
         if notify:
             env.scripts.add(

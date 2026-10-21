@@ -463,8 +463,11 @@ class ResultDelivery:
             )
         if (
             self._notification_status is not None
-            and record.state == "paused"
             and NOTIFY_TOOL in decision.authorized_tools
+            and (
+                record.state == "paused"
+                or any("approval_command" in f.metadata for f in delivery.section("action"))
+            )
         ):
             notice = "\n".join(n for n in (notice, APPROVAL_NOTICE) if n)
         if notice:
