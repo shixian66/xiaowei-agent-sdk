@@ -928,7 +928,27 @@ async def cleanup_expired(engine: AsyncEngine, *, now: datetime, batch_size: int
         raise ValueError("清理批次必须为正数")
     params: dict[str, object] = {"now": now, "limit": batch_size}
     try:
+        await _purge_task_copies(engine, now=now, limit=batch_size)
         async with engine.begin() as conn:
+            await conn.execute(
+                text(
+                    "UPDATE xiaowei_scheduled_job j SET text=NULL, "
+                    "reason=CASE WHEN state='active' AND run_at+"
+                    "lateness_seconds*interval '1 second'<=:now "
+                    "THEN 'lateness_exceeded' WHEN state IN ('draft','active','paused') "
+                    "THEN 'definition_expired' ELSE reason END, "
+                    "state=CASE WHEN state='active' AND run_at+"
+                    "lateness_seconds*interval '1 second'<=:now "
+                    "THEN 'missed' WHEN state IN ('draft','activ"
+                    "e','paused') THEN 'disabled' ELSE state END "
+                    "WHERE job_id IN (SELECT job_id FROM xiaowei_scheduled_job "
+                    "WHERE content_expires_at<=:now AND text IS NOT NULL "
+                    "ORDER BY content_expires_at,job_id LIMIT :limit) AND NOT EXISTS "
+                    "(SELECT 1 FROM xiaowei_notification_attempt n "
+                    "WHERE n.job_id=j.job_id AND n.state='sending')"
+                ),
+                params,
+            )
             await conn.execute(_DELETE_EXPIRED_RUNS, params)
             await conn.execute(_DELETE_EXPIRED_ACTIONS, params)
             await conn.execute(
@@ -965,6 +985,56 @@ async def cleanup_expired(engine: AsyncEngine, *, now: datetime, batch_size: int
     if remaining > 0:
         unregistered = await _cleanup_unregistered(engine, now=now, limit=remaining)
     return CleanupReport(sessions=cleaned, unregistered=unregistered)
+
+
+async def _purge_task_copies(engine: AsyncEngine, *, now: datetime, limit: int) -> None:
+    """派生任务期限可能短于共享会话；关闭并清除 SDK 副本，保留 current 映射/关闭元数据。
+
+    应用标志只记录公共 clear_session 已完成，失败可重试；不直接删除 SDK 私表。
+    """
+    eligible = """
+        s.expires_at<=:now AND NOT s.task_content_purged
+        AND EXISTS (SELECT 1 FROM xiaowei_channel_session c
+                    WHERE c.session_id=s.session_id AND c.state='current')
+        AND EXISTS (SELECT 1 FROM xiaowei_evidence e
+                    WHERE e.session_id=s.session_id AND e.target_id='scheduled')
+        AND NOT EXISTS (SELECT 1 FROM xiaowei_request r WHERE r.session_id=s.session_id
+                        AND (r.state IN ('accepted','running') OR r.delivery='sending'))
+    """
+    async with engine.connect() as conn:
+        sessions = (
+            (
+                await conn.execute(
+                    text(
+                        "SELECT s.session_id FROM xiaowei_session s WHERE "  # noqa: S608 - 固定谓词
+                        + eligible
+                        + " ORDER BY s.expires_at,s.session_id LIMIT :limit"
+                    ),
+                    {"now": now, "limit": limit},
+                )
+            )
+            .scalars()
+            .all()
+        )
+    for session_id in sessions:
+        async with engine.begin() as conn:
+            changed = await conn.execute(
+                text(
+                    "UPDATE xiaowei_session s SET state='closed' WHERE s.session_id=:id AND "  # noqa: S608 - 固定谓词
+                    + eligible
+                ),
+                {"id": session_id, "now": now},
+            )
+            if changed.rowcount != 1:
+                continue
+        await SQLAlchemySession(session_id, engine=engine).clear_session()
+        async with engine.begin() as conn:
+            await conn.execute(_DELETE_EXPIRED_REQUESTS, {"session_id": session_id, "now": now})
+            await conn.execute(_DELETE_EXPIRED_EVIDENCE, {"session_id": session_id, "now": now})
+            await conn.execute(
+                text("UPDATE xiaowei_session SET task_content_purged=true WHERE session_id=:id"),
+                {"id": session_id},
+            )
 
 
 async def _cleanup_unregistered(engine: AsyncEngine, *, now: datetime, limit: int) -> int:

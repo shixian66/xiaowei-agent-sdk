@@ -19,7 +19,7 @@ from agents import FunctionTool
 from pydantic import BaseModel, ConfigDict, Field, SecretStr, field_validator
 from sqlalchemy import text as sql
 from sqlalchemy.exc import SQLAlchemyError
-from sqlalchemy.ext.asyncio import AsyncEngine
+from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine
 
 from xiaowei.config import is_secret_ref, resolve_secret_ref
 from xiaowei.evidence import RecipientRejectedError
@@ -51,6 +51,7 @@ TARGET = "notifications"
 MAX_BODY_BYTES = 20_000
 UNKNOWN_NOTICE = "上一条结果未知，可能已经发过，重发可能重复。"
 APPROVAL_NOTICE = "批准后不会自动通知，完成后请另发通知要求。"
+REMINDER_APPROVAL_NOTICE = "本轮不立即发送；确认后按计划到期发送一次，不需要另发即时通知要求。"
 _URL = re.compile(r"https://open\.feishu\.cn/open-apis/bot/v2/hook/[A-Za-z0-9_-]+\Z")
 
 
@@ -168,6 +169,11 @@ def _body(bot: _Bot, content: str, clock: Callable[[], datetime]) -> bytes:
     return json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode()
 
 
+def _message_text(content: str) -> str:
+    """预估容量、发送和摘要使用同一份最终纯文本规范。"""
+    return mention_safe(content.replace("\r\n", "\n").replace("\r", "\n"))
+
+
 def _notification_text(delivery: Delivery, text: str) -> str:
     """只渲染已校验的飞书事实；不把 Web 的转义 content 当通知正文。"""
     if not delivery.facts:
@@ -236,9 +242,122 @@ class WebhookNotifications:
     async def aclose(self) -> None:
         await self._client.aclose()
 
+    def bot_config(self, alias: str) -> WebhookBotConfig | None:
+        bot = self._bots.get(alias)
+        return bot.config if bot is not None else None
+
+    def fixed_message_fits(self, alias: str, content: str) -> bool:
+        bot = self._bots.get(alias)
+        return (
+            bot is not None
+            and len(_body(bot, _message_text(content), self._clock)) <= MAX_BODY_BYTES
+        )
+
+    async def send_fixed(
+        self,
+        ctx: RunContext,
+        alias: str,
+        content: str,
+        claim: Callable[[str], Awaitable[tuple[str, str, str, bool]]],
+        settle: Callable[[str, str, str], Awaitable[None]],
+    ) -> None:
+        """可信一次性任务交付：同一 notify 治理/HTTP，发送占用由任务事务负责。
+
+        不注册为模型工具；模型不能提供 claim/settle，也不能跳过获批定义检查。
+        """
+        bot = self._bots.get(alias)
+        if bot is None:
+            raise ValueError("机器人未配置")
+        request = ToolRequest(
+            tool_id=TOOL,
+            target_id=TARGET,
+            call_id=ctx.identity.turn_id,
+            tool_name="fixed-reminder",
+            arguments={"bot_alias": alias, "text": content, "evidence_ids": []},
+        )
+
+        async def execute(_request: ToolRequest) -> ToolObservation:
+            async with self._locks[bot.config.bot_id]:
+                if not await self._verify_sender(ctx.identity):
+                    raise ValueError("当前发送主体不可核验")
+                normalized = _message_text(content)
+                body = _body(bot, normalized, self._clock)
+                if len(body) > MAX_BODY_BYTES:
+                    raise ValueError("完整通知超过20000字节")
+                receipt, status, reason, claimed = await claim(normalized)
+                if claimed:
+                    status, reason = await self._post(bot, body)
+                    await settle(receipt, status, reason)
+                return self._observation(alias, status, reason, receipt)
+
+        await self._governance.invoke(ctx, request, execute)
+
+    async def warning_seen(self, conn: AsyncConnection, owner: str, bot_id: str) -> bool:
+        """原群＋稳定机器人共用未知结果门槛，定时/即时占用同一序列。"""
+        params = {"owner": owner, "bot": bot_id}
+        unknown = await conn.scalar(
+            sql(
+                "SELECT max(n.sequence) FROM xiaowei_notification_attempt n "
+                "LEFT JOIN xiaowei_request r ON r.turn_id=n.turn_id "
+                "LEFT JOIN xiaowei_scheduled_job j ON j.job_id=n.job_id "
+                "WHERE n.bot_id=:bot AND n.state IN ('unknown','sending') "
+                "AND COALESCE(r.owner_id,j.owner_id)=:owner"
+            ),
+            params,
+        )
+        if unknown is None:
+            return True
+        return bool(
+            (
+                await conn.execute(
+                    sql(
+                        "SELECT 1 FROM xiaowei_notification_attempt n "
+                        "JOIN xiaowei_request r ON r.turn_id=n.turn_id "
+                        "WHERE n.bot_id=:bot "
+                        "AND r.owner_id=:owner AND r.delivery='sent' "
+                        "AND ((n.sequence>=:sequence AND (n.state='"
+                        "unknown' OR n.reason='duplicate_warning')) "
+                        "OR (n.reason='task_risk_warning' AND "
+                        "n.warning_sequence=:sequence)) LIMIT 1"
+                    ),
+                    {**params, "sequence": unknown},
+                )
+            ).first()
+        )
+
+    async def record_task_warning(self, identity: Identity, receipt: str) -> None:
+        """只记录已授权任务状态查询应交付的风险提示；不占用发送机会、不发 HTTP。"""
+        async with self._engine.begin() as conn:
+            if not self._lock.readiness.ok or not await self._lock.admits(conn):
+                raise StorageUnavailableError("实例未就绪，无法记录任务回执提示")
+            await conn.execute(
+                sql(
+                    "INSERT INTO xiaowei_notification_attempt "
+                    "(receipt_id,turn_id,bot_id,bot_alias,target_versi"
+                    "on,content_digest,state,reason,warning_sequence) "
+                    "SELECT :id,r.turn_id,n.bot_id,n.bot_alias,n.target_version,:digest,'not_sent',"
+                    "'task_risk_warning',n.sequence FROM xiaowei_notification_attempt n "
+                    "JOIN xiaowei_scheduled_job j ON j.job_id=n.job_id "
+                    "JOIN xiaowei_request r ON r.turn_id=:turn "
+                    "WHERE n.receipt_id=:receipt AND n.state IN ('unknown','sending') "
+                    "AND j.owner_id=:owner AND r.session_id=:session AND r.subject_id=:subject "
+                    "AND r.owner_kind='group' AND r.owner_id=:owner AND r.channel='feishu' "
+                    "AND r.state='running' ON CONFLICT DO NOTHING"
+                ),
+                dict(
+                    id=uuid.uuid4().hex,
+                    turn=identity.turn_id,
+                    session=identity.session_id,
+                    subject=identity.subject_id,
+                    owner=identity.owner.id,
+                    receipt=receipt,
+                    digest=hashlib.sha256(("task-risk:" + receipt).encode()).hexdigest(),
+                ),
+            )
+
     async def recover(self) -> None:
         async with self._engine.begin() as conn:
-            if not await self._lock.admits(conn):
+            if not self._lock.readiness.ok or not await self._lock.admits(conn):
                 raise StorageUnavailableError("实例锁已失效，未执行通知恢复")
             await conn.execute(
                 sql("UPDATE xiaowei_notification_attempt SET state='unknown' WHERE state='sending'")
@@ -305,7 +424,7 @@ class WebhookNotifications:
                     return self._observation(args.bot_alias, "not_sent", "recipient_not_authorized")
                 content = _notification_text(delivery, args.text)
                 # 纯文本传输边界统一中和 @ 标签，再构造请求并计算防重摘要。
-                content = mention_safe(content.replace("\r\n", "\n").replace("\r", "\n"))
+                content = _message_text(content)
                 body = _body(bot, content, self._clock)
                 if len(body) > MAX_BODY_BYTES:
                     return self._observation(args.bot_alias, "not_sent", "content_too_large")
@@ -363,7 +482,7 @@ class WebhookNotifications:
             "id": uuid.uuid4().hex,
         }
         async with self._engine.begin() as conn:
-            if not await self._lock.admits(conn):
+            if not self._lock.readiness.ok or not await self._lock.admits(conn):
                 raise StorageUnavailableError("实例锁已失效，未占用发送机会")
             # 请求归属来自已运行的服务端请求，不接受模型伪造 turn/session。
             request = (
@@ -406,33 +525,7 @@ class WebhookNotifications:
             if any(r["state"] != "accepted" for r in old):
                 return {"state": "not_sent", "reason": "turn_stopped", "receipt_id": "none"}, False
             # 新轮次的主动重发：上次 unknown 风险须已由原渠道回执展示。
-            unknown = (
-                await conn.execute(
-                    sql(
-                        "SELECT max(n.sequence) FROM xiaowei_notification_attempt n "
-                        "JOIN xiaowei_request r ON r.turn_id=n.turn_id "
-                        "WHERE n.bot_id=:bot AND n.state IN ('unknown','sending') "
-                        "AND r.owner_id=:owner"
-                    ),
-                    params,
-                )
-            ).scalar_one()
-            warning_seen = True
-            if unknown is not None:
-                warning_seen = bool(
-                    (
-                        await conn.execute(
-                            sql(
-                                "SELECT 1 FROM xiaowei_notification_attempt n "
-                                "JOIN xiaowei_request r ON r.turn_id=n.turn_id "
-                                "WHERE n.bot_id=:bot AND n.sequence>=:sequence "
-                                "AND r.owner_id=:owner AND r.delivery='sent' "
-                                "AND (n.state='unknown' OR n.reason='duplicate_warning') LIMIT 1"
-                            ),
-                            {**params, "sequence": unknown},
-                        )
-                    ).first()
-                )
+            warning_seen = await self.warning_seen(conn, params["owner"], params["bot"])
             params.update(
                 state="sending" if warning_seen else "not_sent",
                 reason="pending" if warning_seen else "duplicate_warning",
@@ -483,7 +576,9 @@ class WebhookNotifications:
             return "unknown", "response_unknown"
 
 
-async def receipt_notice(engine: AsyncEngine, identity: Identity) -> str | None:
+async def receipt_notice(
+    engine: AsyncEngine, identity: Identity, *, tasks_only: bool = False, task_admin: bool = False
+) -> str | None:
     """仅在渠道已复核请求归属/当前通知权限后读取；内容不依赖模型回答或 Evidence 落库。"""
     try:
         async with engine.connect() as conn:
@@ -491,10 +586,22 @@ async def receipt_notice(engine: AsyncEngine, identity: Identity) -> str | None:
                 (
                     await conn.execute(
                         sql(
-                            "SELECT bot_alias,state,reason FROM xiaowei_notification_attempt "
-                            "WHERE turn_id=:turn ORDER BY sequence"
+                            "SELECT n.bot_alias,n.state,n.reason,s.receipt_id AS source_receipt "
+                            "FROM xiaowei_notification_attempt n "
+                            "LEFT JOIN xiaowei_notification_attemp"
+                            "t s ON s.sequence=n.warning_sequence "
+                            "LEFT JOIN xiaowei_scheduled_job j ON j.job_id=s.job_id "
+                            "WHERE n.turn_id=:turn AND (NOT :tasks_only OR "
+                            "(n.reason='task_risk_warning' AND j.owner_id=:owner "
+                            "AND (j.creator_id=:subject OR :admin))) ORDER BY n.sequence"
                         ),
-                        {"turn": identity.turn_id},
+                        {
+                            "turn": identity.turn_id,
+                            "tasks_only": tasks_only,
+                            "owner": identity.owner.id,
+                            "subject": identity.subject_id,
+                            "admin": task_admin,
+                        },
                     )
                 )
                 .mappings()
@@ -508,7 +615,13 @@ async def receipt_notice(engine: AsyncEngine, identity: Identity) -> str | None:
     lines = []
     for row in rows:
         state = row["state"]
-        if state == "accepted":
+        if row["reason"] == "task_risk_warning":
+            result = (
+                f"任务发送回执 {row['source_receipt']}："
+                + UNKNOWN_NOTICE
+                + "未自动重发（unknown）。"
+            )
+        elif state == "accepted":
             result = "消息已提交，Webhook 接口返回成功（accepted），不表示成员已阅读。"
         elif state in {"unknown", "sending"}:
             result = UNKNOWN_NOTICE + "未自动重发（unknown）。"

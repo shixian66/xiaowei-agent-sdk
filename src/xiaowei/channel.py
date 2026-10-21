@@ -68,7 +68,7 @@ from xiaowei.models import (
     group_owner,
 )
 from xiaowei.progress import Progress
-from xiaowei.webhook import APPROVAL_NOTICE
+from xiaowei.webhook import APPROVAL_NOTICE, REMINDER_APPROVAL_NOTICE
 from xiaowei.webhook import TOOL as NOTIFY_TOOL
 
 logger = logging.getLogger(__name__)
@@ -469,7 +469,16 @@ class ResultDelivery:
                 or any("approval_command" in f.metadata for f in delivery.section("action"))
             )
         ):
-            notice = "\n".join(n for n in (notice, APPROVAL_NOTICE) if n)
+            pending = [f for f in delivery.section("action") if "approval_command" in f.metadata]
+            reminders = [
+                f for f in pending if f.metadata.get("action") == "scheduled/activate_reminder"
+            ]
+            messages = [notice]
+            if reminders:
+                messages.append(REMINDER_APPROVAL_NOTICE)
+            if not pending or len(reminders) != len(pending):
+                messages.append(APPROVAL_NOTICE)
+            notice = "\n".join(n for n in messages if n)
         if notice:
             delivery = delivery.model_copy(
                 update={

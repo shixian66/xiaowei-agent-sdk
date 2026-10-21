@@ -33,16 +33,19 @@ import hashlib
 import json
 import logging
 import time
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Iterator, Mapping, Sequence
+from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from importlib.resources import files
 from typing import TYPE_CHECKING, Literal, cast
+from uuid import uuid4
 
 if TYPE_CHECKING:
     from xiaowei.actions import ActionService
     from xiaowei.channel_store import CallerFailureCode
     from xiaowei.progress import Progress
+    from xiaowei.scheduled_tasks import ScheduledTasks
 
 from agents import (
     Agent,
@@ -419,6 +422,7 @@ class Application:
         actions: ActionService | None = None,
         images: SessionImageStore | None = None,
         notifications: WebhookNotifications | None = None,
+        scheduled_tasks: ScheduledTasks | None = None,
     ) -> None:
         if not isinstance(model, ModelBinding):
             raise TypeError("应用配置：模型必须是 open_model 生成的运行绑定")
@@ -487,6 +491,7 @@ class Application:
         self._clock = clock
         self.images = images
         self.notifications = notifications
+        self.scheduled_tasks = scheduled_tasks
         self._run_config = safe_run_config()
         self._active: set[str] = set()
 
@@ -500,6 +505,19 @@ class Application:
         """全局并发上限：所有渠道的轮次共同受此约束。"""
         return self._config.max_concurrent_turns
 
+    @contextmanager
+    def background_slot(self) -> Iterator[bool]:
+        """固定提醒占同一并发池；忙时未开始，后续到期检查可再准入。"""
+        if len(self._active) >= self._config.max_concurrent_turns:
+            yield False
+            return
+        slot = "reminder-" + uuid4().hex
+        self._active.add(slot)
+        try:
+            yield True
+        finally:
+            self._active.discard(slot)
+
     def admits_input(self, text: str) -> bool:
         """渠道在创建请求前复用本模型 Profile 的文字输入策略。"""
         return self._data_policy.input.admits(text)
@@ -510,7 +528,12 @@ class Application:
         remote = self._mcp.available_tool_ids if self._mcp is not None else frozenset()
         action_tools = self.actions.available_tool_ids if self.actions is not None else frozenset()
         notify = frozenset({NOTIFY_TOOL}) if self.notifications is not None else frozenset()
-        return frozenset(self._local) | remote | action_tools | notify
+        scheduled = (
+            frozenset({"scheduled/get_task", "scheduled/control_task"})
+            if self.scheduled_tasks is not None
+            else frozenset()
+        )
+        return frozenset(self._local) | remote | action_tools | notify | scheduled
 
     def scope_for_turn(
         self, mode: Mode, authorized_tools: frozenset[str], available_tools: frozenset[str]
@@ -528,7 +551,10 @@ class Application:
             if mode == "query"
             else self._config.purposes[mode]
         )
-        return purpose & self._model_tools() & authorized_tools & available_tools
+        scope = purpose & self._model_tools() & authorized_tools & available_tools
+        if self.scheduled_tasks is not None and NOTIFY_TOOL not in authorized_tools:
+            scope -= {"scheduled/propose_reminder", "scheduled/request_action_execution"}
+        return scope
 
     async def prepare_tools(
         self,
@@ -887,7 +913,11 @@ class Application:
                 "需要确认已提动作的执行结果时可按 ID 查状态，不能凭历史提案声称执行成功。"
             )
             if self.notifications is not None and NOTIFY_TOOL in ctx.tool_scope:
-                action_note += APPROVAL_NOTICE + "审批恢复轮不提供通知工具，须如实说明未发送。"
+                action_note += (
+                    "生产动作："
+                    + APPROVAL_NOTICE
+                    + "审批恢复轮不提供即时通知工具，须如实说明未即时发送。"
+                )
         report_note = (
             "\n当前为飞书渠道。用户明确要求把获准结果、解释或未执行建议做成文件时，"
             "设置 report_format：默认 md，明确只要 HTML 时为 html。"
@@ -903,6 +933,17 @@ class Application:
         )
         if ctx.identity.channel == "feishu":
             report_note += "\n" + _REPORT_SKILL
+        if self.scheduled_tasks is not None:
+            tasks = self.scheduled_tasks.config
+            report_note += (
+                f"\n固定提醒默认业务时区为 {tasks.timezone}；用户明确指定时区时优先按用户要求解释，"
+                "明天等相对时间按本轮当前时间计算，再换成绝对日期。"
+                f"最多提前 {tasks.max_advance_seconds / 86400:g} 天，允许迟到 "
+                f"{tasks.lateness_seconds / 3600:g} 小时；一次提醒最多一次 POST，"
+                "结果未知不自动重试。"
+                "本版只支持一次性固定提醒，任务激活复用本地 Action 确认；"
+                "到期不调用模型、不巡检、不执行生产写。暂停/取消直接使用任务控制工具。"
+            )
         return Agent[RunContext](
             name="xiaowei",
             instructions=(
@@ -1057,7 +1098,7 @@ class Application:
             monitoring_failures=runs.monitoring_failures,
             run_turn_id=ctx.identity.turn_id,
         )
-        await self._evidence.validate_answer(material, ctx)
+        checked_material = await self._evidence.validate_answer(material, ctx)
         remaining = ctx.budget.timeout_seconds - (time.monotonic() - started)
         if remaining <= 0:
             raise TimeoutError
@@ -1090,7 +1131,7 @@ class Application:
             message,
             self._native_binding(ctx),
             checks.used if checks is not None else 0,
-            max(expires),
+            min(max(expires), checked_material.content_expires_at or max(expires)),
             tuple(action_ids),
             prior_version,
             prior_binding,
@@ -1338,13 +1379,18 @@ class Application:
         allowed = {contract.tool_id for contract in self._governance.allowed_contracts(ctx)}
         local = [tool for tool_id, tool in self._local.items() if tool_id in allowed]
         remote = self._mcp.tools_for(ctx) if self._mcp is not None else []
-        actions = self.actions.tools_for(ctx, approval_requests) if self.actions is not None else []
+        actions = (
+            self.actions.tools_for(ctx, approval_requests, replayed=replayed)
+            if self.actions is not None
+            else []
+        )
         notify = (
             [self.notifications.tool(ctx, replayed)]
             if self.notifications is not None and NOTIFY_TOOL in allowed and replayed is not None
             else []
         )
-        return [*local, *remote, *actions, *notify]
+        scheduled = self.scheduled_tasks.tools_for(ctx) if self.scheduled_tasks is not None else []
+        return [*local, *remote, *actions, *notify, *scheduled]
 
     @staticmethod
     def _refuse(turn: str, started: float, reason: TurnReason) -> TurnError:

@@ -19,6 +19,8 @@ import pytest
 import yaml
 from tests.deployment.conftest import docker
 
+from xiaowei.storage import APP_SCHEMA_VERSION
+
 ROOT = Path(__file__).resolve().parents[2]
 SCRIPT = ROOT / "scripts/package_release.py"
 POSTGRES_IMAGE = "postgres:16.15-bookworm@sha256:" + "b" * 64
@@ -237,9 +239,9 @@ def test_release_archive_has_only_the_deployment_contract(tmp_path: Path) -> Non
         "format_version": 2,
         "code_sha": CODE_SHA,
         "platform": "linux/arm64",
-        "schema_version": 12,
-        "direct_start_schema_versions": [12],
-        "upgrade_schema_versions": [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11],
+        "schema_version": APP_SCHEMA_VERSION,
+        "direct_start_schema_versions": [APP_SCHEMA_VERSION],
+        "upgrade_schema_versions": list(range(1, APP_SCHEMA_VERSION)),
         "config_migration": "none",
         "images": {"xiaowei": APP_IMAGE, "postgres": POSTGRES_IMAGE},
         "image_file": IMAGE_FILE,

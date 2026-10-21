@@ -36,7 +36,8 @@ URL = "https://open.feishu.cn/open-apis/bot/v2/hook/synthetic-webhook-token"
 TEXT = "今晚 22:00 检查 StarRocks。"
 
 
-async def test_lost_database_instance_lock_prevents_claim_and_http(env, monkeypatch):
+@pytest.mark.parametrize("fault", ["released_lock", "readiness_locked"])
+async def test_unavailable_instance_prevents_claim_and_http(env, monkeypatch, fault):
     request = script(
         env,
         "给 ops_alert_bot 发一条提醒",
@@ -48,8 +49,11 @@ async def test_lost_database_instance_lock_prevents_claim_and_http(env, monkeypa
 
         async def lose_lock_before_claim(self, *args):
             # 已完成入口授权，但准入事务前真实释放数据库锁；不是模拟 False 返回值。
-            await rt.lock.connection.execute(sql("SELECT pg_advisory_unlock_all()"))
-            await rt.lock.connection.commit()
+            if fault == "released_lock":
+                await rt.lock.connection.execute(sql("SELECT pg_advisory_unlock_all()"))
+                await rt.lock.connection.commit()
+            else:
+                rt.readiness.lock("synthetic_consistency_failure")
             return await claim(self, *args)
 
         monkeypatch.setattr(WebhookNotifications, "_claim", lose_lock_before_claim)
@@ -379,7 +383,9 @@ async def test_receipt_read_failure_reports_unverifiable_without_stopping_servic
     intercepted = []
 
     def fail_receipt(conn, cursor, statement, parameters, context, executemany):
-        if statement.startswith("SELECT bot_alias,state,reason FROM xiaowei_notification_attempt"):
+        if statement.startswith(
+            "SELECT n.bot_alias,n.state,n.reason,s.receipt_id AS source_receipt"
+        ):
             intercepted.append(statement)
             raise SQLAlchemyError("synthetic receipt read failure")
 

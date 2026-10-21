@@ -19,7 +19,7 @@
 
 **监控能力（P4）。** 同一 Agent 可调查获准的 Prometheus 指标/标签/规则和范围结果、Grafana 仪表盘/面板/数据源/标记，以及独立 Alertmanager 的告警/分组/静默/接收器/状态；Grafana 定义与实时指标分开，不执行 Grafana 代理查询。指定群可选配逐次批准的静默创建/取消、经典 Dashboard 创建/修改、数据源非秘密字段创建/修改和 Annotation 创建，使用 SDK 原生暂停/恢复；这些实现不代表公司生产写已开放。数据源密码目前由管理员在 Grafana UI 配置，私聊密码命令尚未实现。主配置默认不启用监控源；选配、认证、迁移与开放门槛见 [Prometheus](deploy/OPERATIONS.md#选配-prometheus-监控源)、[Grafana](deploy/OPERATIONS.md#选配-grafana-监控源)、[Alertmanager](deploy/OPERATIONS.md#选配-alertmanager-监控源)、[Dashboard 写](deploy/OPERATIONS.md#选配经典-dashboard-创建和修改)和[群审批说明](deploy/OPERATIONS.md#监控群审批底座)。产品边界见 [ARCHITECTURE](ARCHITECTURE.md#monitoring-mcp)，合入版本、验证证据与缺口集中在 [handoff](AGENT_HANDOFF.md)。
 
-多机器人即时通知 A 已有本地候选，可在指定飞书群通过已授权别名发送文字和获准事实，配置见[Webhook 通知](#webhook-notifications)。一次性提醒、定时独立 Agent 和 Node 巡检 B–D 尚未实现，仍按[设计](docs/superpowers/specs/2026-10-21-scheduled-agent-tasks.md)及 [A–D 计划](docs/superpowers/plans/2026-10-21-scheduled-agent-tasks.md)接续。离线结果不代表真实模型、机器人实收或部署验收，当前证据见 handoff。
+多机器人即时通知 A 已合入主线，可在指定飞书群通过已授权别名发送文字和获准事实，配置见[Webhook 通知](#webhook-notifications)。一次性固定提醒 B 已有离线候选，定时独立 Agent 和 Node 巡检 C/D 尚未实现，仍按[设计](docs/superpowers/specs/2026-10-21-scheduled-agent-tasks.md)及 [A–D 计划](docs/superpowers/plans/2026-10-21-scheduled-agent-tasks.md)接续。离线结果不代表真实模型、机器人实收或部署验收，当前证据见 handoff。
 
 ## 最小产品形态
 
@@ -153,7 +153,7 @@ uv run --locked xiaowei --config xiaowei.json requests resend --subject <发起�
 
 <a id="webhook-notifications"></a>
 
-**Webhook 通知（A 候选，真实平台尚未验收）。** 默认 `webhook_bots=[]`，不开放通知工具。启用时须有现有指定飞书群，并在 `data_policy.model_tools`、`feishu.group.tools` 和获准发送者的个人 `access.grants` 三处加入 `notifications/send_webhook_message`；只会查询数据库的群成员不会自动取得发送权。工具仅在普通群消息中开放，无登录 Web、私聊与显式诊断入口均不开放。
+**Webhook 通知（A 已合入，真实平台尚未验收）。** 默认 `webhook_bots=[]`，不开放通知工具。启用时须有现有指定飞书群，并在 `data_policy.model_tools`、`feishu.group.tools` 和获准发送者的个人 `access.grants` 三处加入 `notifications/send_webhook_message`；只会查询数据库的群成员不会自动取得发送权。工具仅在普通群消息中开放，无登录 Web、私聊与显式诊断入口均不开放。
 
 管理员增加以下机器人登记，`fat` 和工具名按实际已登记源/工具替换；支持多项。凭据只在服务端环境变量中配置，不粘贴到对话、配置值或日志：
 
@@ -178,7 +178,30 @@ URL 仅允许飞书官方 HTTPS 自定义机器人端点，不允许用户 URL�
 
 A 不在生产动作审批恢复轮自动通知；等待批准材料会提示“批准后不会自动通知，完成后请另发通知要求”。动作完成后在群里另说“通知 ops_alert_bot”，走普通通知权限和回执链。若要外发动作结果，管理员须按实际可见证据显式登记对应源的提出/状态/`request_action_execution` 接收许可；配置接收许可不授予执行写操作的权限。目的地无权接收当前查询历史时不会发送，即使发送的是纯文字；用户可显式 `/新建` 后完整重述纯文字，但这会轮换全群共享上下文，小维不会自动执行此操作。
 
-此片新增应用 schema v13；按既有 `storage upgrade` 维护流程停服备份后升级，不改 SDK 表，不在启动时自动迁移。旧镜像不兼容 v13，回退须隔离入站并按备份恢复流程处理，不能恢复后自动重发旧消息。一次性提醒、周期 Agent 和 Node 巡检属于后续 B–D，当前 A 不提供调度。
+当前候选应用 schema v14（A 主线为 v13）；按既有 `storage upgrade` 维护流程停服、成对备份后显式升级，不改 SDK 表，不在启动时自动迁移。旧镜像不兼容新 schema，回退须隔离入站并按备份恢复流程处理，不能恢复后自动重发旧消息。
+
+<a id="one-time-reminders"></a>
+
+**一次性固定提醒（B 离线候选，真实平台/模型未验收）。** 在已配置上面的机器人和指定操作群后，添加：
+
+```json
+"scheduled_tasks": {
+  "enabled": true,
+  "timezone": "Asia/Shanghai",
+  "max_advance_seconds": 2592000,
+  "lateness_seconds": 3600,
+  "poll_seconds": 5,
+  "max_active_jobs": 32
+}
+```
+
+默认关闭。模型数据策略和群工具中加入 `scheduled/propose_reminder`、`scheduled/get_action_status`、`scheduled/get_task`、`scheduled/control_task` 及执行许可 `scheduled/activate_reminder`。创建者仍须单独取得 `notifications/send_webhook_message` 的个人 grant；确认者按现有个人 grant/群成员规则取得 `scheduled/activate_reminder`。仅要管理别人任务的管理员额外配置个人 grant `scheduled/control_task`，同时必须是当前可核验的原群成员；其他群成员不能仅凭 ID 操作。
+
+示例：“明天上午10点向 ops_alert_bot 发消息：需要做汇报。”小维展示绝对日期、时区、正文、目标、有效期和迟到/容量限制，用户以现有 `/批准 <Action ID>` 材料中的实际命令确认；未确认不发送。批准后任务有独立 ID，可问“小维，查询/暂停/取消任务〈ID〉”；暂停/取消不再次审批，不能撤回已准入的 HTTP。本片无列表、编辑、恢复工具，无周期和到点 Agent 调查。
+
+到期不调用模型；原 Session 过期不影响无历史数据依赖的提醒。若起草时已有群查询历史，全部模型可见 Evidence 都形成依赖，确认不会续期，材料展示最早失效时间。需要无旧依赖版本时由用户显式 `/新建` 后完整重述；这会轮换全群共享上下文，不能自动清除。机器人接收范围独立校验，不能把查询结果抄成提醒文字绕过。
+
+`enabled=false` 阻止新任务起草和后台发送准入，保留状态/暂停/取消及 A 的即时通知；它不是整个服务的无网络启动模式。未开始的提醒在迟到窗口内可重新核验，超窗记错过；开始后结果失败/未知均不自动重发。查询可见任务与发送状态、末次原因、连续未核实计数及时间；unknown 提示须实际送达，用户下一轮明确重发仍可能重复。定期沿已有显式 `storage cleanup` 清理到期正文和派生副本，不新增清理 Worker。
 
 **开发验证**（只用合成数据、脚本模型、替身与隔离的测试 PostgreSQL；发行测试需要本机 Docker 构建镜像，不调用真实模型或公司服务）：
 

@@ -116,6 +116,23 @@ from xiaowei.models import (
     ToolContract,
     ToolId,
 )
+from xiaowei.scheduled_tasks import (
+    CONTROL as TASK_CONTROL,
+)
+from xiaowei.scheduled_tasks import (
+    TARGET as TASK_TARGET,
+)
+from xiaowei.scheduled_tasks import (
+    TOOLS as TASK_TOOLS,
+)
+from xiaowei.scheduled_tasks import (
+    ScheduledConfig,
+    ScheduledTasks,
+    TaskDefinitions,
+)
+from xiaowei.scheduled_tasks import (
+    catalog as task_catalog,
+)
 from xiaowei.session import CleanupReport, SessionLimits, cleanup_expired
 from xiaowei.starrocks import (
     Connector,
@@ -258,6 +275,7 @@ class ServeConfig(_Config):
     mcp_servers: tuple[MCPServerConfig, ...] = ()
     alertmanager_sources: tuple[AlertmanagerConfig, ...] = ()
     webhook_bots: tuple[WebhookBotConfig, ...] = ()
+    scheduled_tasks: ScheduledConfig | None = None
     projection_bytes: dict[Audience, Annotated[int, Field(gt=0)]]
     access: AccessConfig
     web: WebConfig
@@ -349,6 +367,11 @@ class ServeConfig(_Config):
         source_ids = [s.server_id for s in self.mcp_servers] + [
             s.server_id for s in self.alertmanager_sources
         ]
+        if self.scheduled_tasks is not None:
+            if not self.webhook_bots or self.feishu is None or self.feishu.group is None:
+                raise ValueError("定时提醒须配置 Webhook 和指定飞书群")
+            if TASK_TARGET in {t.target_id for t in self.targets} | set(source_ids):
+                raise ValueError("scheduled 是任务工具保留目标")
         if self.webhook_bots:
             if self.feishu is None or self.feishu.group is None:
                 raise ValueError("Webhook 通知必须配置指定飞书群")
@@ -361,11 +384,15 @@ class ServeConfig(_Config):
                 {t.target_id for t in self.targets}
                 | {s.server_id for s in self.mcp_servers}
                 | {s.server_id for s in self.alertmanager_sources}
+                | ({TASK_TARGET} if self.scheduled_tasks is not None else set())
             )
             if NOTIFY_TARGET in targets:
                 raise ValueError("notifications 是通知工具保留目标")
             # 同源 SDK 执行请求产生独立结果证据；接收方仍须显式登记该工具。
-            receipt_tools = execution_requests(registered, source_ids) - {NOTIFY_TOOL}
+            receipt_tools = execution_requests(
+                registered,
+                [*source_ids, *([TASK_TARGET] if self.scheduled_tasks is not None else [])],
+            ) - {NOTIFY_TOOL}
             if any(not b.receive_tools <= receipt_tools for b in self.webhook_bots):
                 raise ValueError("Webhook receive_tools 只能包含已登记的业务工具")
             if any(not b.receive_targets <= targets for b in self.webhook_bots):
@@ -768,7 +795,13 @@ def _registered_tools(config: ServeConfig) -> frozenset[str]:
         )
     }
     notify = {NOTIFY_TOOL} if config.webhook_bots else set()
-    return QUERY_TOOLS | (AUDIT_TOOLS if audited else frozenset()) | monitoring | notify
+    return (
+        QUERY_TOOLS
+        | (AUDIT_TOOLS if audited else frozenset())
+        | monitoring
+        | notify
+        | (TASK_TOOLS if config.scheduled_tasks is not None else frozenset())
+    )
 
 
 class _PrometheusQueryArgs(BaseModel):
@@ -1307,10 +1340,11 @@ def _app_config(config: ServeConfig) -> AppConfig:
         if name in s.allowed_tools
     }
     notify = frozenset({NOTIFY_TOOL}) if config.webhook_bots else frozenset()
-    audit = _registered_tools(config) - QUERY_TOOLS - monitoring - write_tools - notify
+    scheduled = TASK_TOOLS if config.scheduled_tasks is not None else frozenset()
+    audit = _registered_tools(config) - QUERY_TOOLS - monitoring - write_tools - notify - scheduled
     return AppConfig(
         purposes={
-            "query": QUERY_TOOLS | audit | monitoring | notify,
+            "query": QUERY_TOOLS | audit | monitoring | notify | scheduled,
             "diagnose": DIAGNOSE_TOOLS | audit,
         },
         data_policies={config.model.data_policy_id: config.data_policy},
@@ -1457,6 +1491,7 @@ class Runtime:
     service: ChannelService
     mcp: MCPIntegration | None = None
     alertmanagers: Mapping[str, AlertmanagerAdapter] = field(default_factory=dict)
+    scheduled_tasks: ScheduledTasks | None = None
 
 
 @dataclass(frozen=True)
@@ -1465,6 +1500,7 @@ class _Delivery:
     evidence: EvidenceStore
     results: ResultDelivery
     tools: StarRocksTools
+    task_definitions: TaskDefinitions | None = None
 
 
 def _group_access(config: ServeConfig, members: MemberCheck | None) -> GroupAccess | None:
@@ -1517,6 +1553,9 @@ def _delivery(
     notify_contracts, notify_policies = notification_catalog(
         config.webhook_bots, config.projection_bytes
     )
+    task_contracts, task_policies = (
+        task_catalog(config.projection_bytes) if config.scheduled_tasks is not None else ((), ())
+    )
     api_contracts, api_policies = alertmanager_catalog(
         config.alertmanager_sources, config.projection_bytes
     )
@@ -1525,6 +1564,7 @@ def _delivery(
         | {server.server_id for server in config.mcp_servers}
         | {source.server_id for source in config.alertmanager_sources}
         | ({NOTIFY_TARGET} if config.webhook_bots else set())
+        | ({TASK_TARGET} if config.scheduled_tasks is not None else set())
     )
     action_contracts, action_policies = action_status_catalog(
         targets - frozenset(schemas) - {NOTIFY_TARGET},
@@ -1537,8 +1577,16 @@ def _delivery(
             *api_contracts,
             *action_contracts,
             *notify_contracts,
+            *task_contracts,
         ),
-        (*tools.policies, *monitoring_policies, *api_policies, *action_policies, *notify_policies),
+        (
+            *tools.policies,
+            *monitoring_policies,
+            *api_policies,
+            *action_policies,
+            *notify_policies,
+            *task_policies,
+        ),
     )
     access = StaticAccess(
         config.access,
@@ -1558,10 +1606,32 @@ def _delivery(
         retention_seconds=storage.evidence_retention_seconds,
         verify_dependencies=DependencyCheck({t: s.adapter for t, s in schemas.items()}),
     )
+    definitions = None
+    if config.scheduled_tasks is not None:
+        definitions = TaskDefinitions(
+            engine,
+            evidence,
+            access,
+            {bot.alias: bot for bot in config.webhook_bots},
+            clock,
+            config.budget,
+            execution_requests(config.data_policy.model_tools),
+        )
+        evidence.configure_content_check(definitions.check_content)
 
     async def notification_status(identity: Identity) -> str | None:
         if await access.authorize_evidence(identity, NOTIFY_TARGET, NOTIFY_TOOL):
             return await receipt_notice(engine, identity)
+        if definitions is not None and await access.authorize_evidence(
+            identity, "scheduled", "scheduled/get_task"
+        ):
+            return await receipt_notice(
+                engine,
+                identity,
+                tasks_only=True,
+                task_admin=TASK_CONTROL
+                in config.access.grants.get(identity.subject_id, frozenset()),
+            )
         return None
 
     results = ResultDelivery(
@@ -1571,7 +1641,7 @@ def _delivery(
         budget=config.budget,
         notification_status=notification_status if config.webhook_bots else None,
     )
-    return _Delivery(store, evidence, results, tools)
+    return _Delivery(store, evidence, results, tools, definitions)
 
 
 @asynccontextmanager
@@ -1691,6 +1761,21 @@ async def open_runtime(
         executes = dict(parts.tools.executes)
         for adapter in alertmanagers.values():
             executes.update(adapter.executes)
+        scheduled = None
+        if config.scheduled_tasks is not None and notifications is not None:
+            assert parts.task_definitions is not None  # noqa: S101 - _delivery 已按同一配置装配
+            scheduled = ScheduledTasks(
+                config.scheduled_tasks,
+                governance,
+                engine,
+                lock,
+                parts.task_definitions,
+                notifications,
+                is_admin=lambda subject: (
+                    TASK_CONTROL in config.access.grants.get(subject, frozenset())
+                ),
+            )
+            await scheduled.recover()
         app = Application(
             _app_config(config),
             model=model,
@@ -1704,6 +1789,7 @@ async def open_runtime(
                 parts.store,
                 parts.results.access,
                 bindings=[
+                    *([scheduled.binding()] if scheduled is not None else []),
                     *[
                         binding
                         for adapter in alertmanagers.values()
@@ -1731,9 +1817,27 @@ async def open_runtime(
             if config.model.image_input_enabled
             else None,
             notifications=notifications,
+            scheduled_tasks=scheduled,
         )
         service = ChannelService(app, parts.results)
-        yield Runtime(engine, lock, readiness, recovery, service, mcp, alertmanagers)
+        if scheduled is not None:
+            scheduled.run_slot = app.background_slot
+        if scheduled is not None and scheduled.config.enabled:
+            loop = asyncio.create_task(scheduled.run(), name="xiaowei-reminder-loop")
+
+            async def close_scheduled() -> None:
+                loop.cancel()
+                done, _ = await asyncio.wait({loop}, timeout=config.shutdown_timeout_seconds)
+                if not done:
+                    readiness.lock("scheduled_close_timeout")
+                    raise RuntimeCloseError("定时检查关闭超时")
+                try:
+                    loop.result()
+                except asyncio.CancelledError:
+                    pass
+
+            stack.push_async_callback(close_scheduled)
+        yield Runtime(engine, lock, readiness, recovery, service, mcp, alertmanagers, scheduled)
 
 
 # ---- serve ---------------------------------------------------------------------------
