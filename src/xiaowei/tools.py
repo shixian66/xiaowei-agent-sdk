@@ -278,7 +278,9 @@ def _function_tool(
             logger.info(
                 "tool_rejected turn=%s call_ref=%s tool=%s code=%s",
                 tool_ctx.context.identity.turn_id,
-                hashlib.sha256(tool_ctx.tool_call_id.encode()).hexdigest()[:16],
+                hashlib.sha256(
+                    tool_ctx.tool_call_id.encode("utf-8", errors="surrogatepass")
+                ).hexdigest()[:16],
                 name,
                 exc.code,
             )
