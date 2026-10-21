@@ -4,12 +4,12 @@
 
 ## 样例与判据
 
-固定输入及人工判据维护在 [monitoring_reliability.py](../tests/sdk_core/monitoring_reliability.py)，复用 [现有采集器](../scripts/dialogue_real_model.py)，共 9 个场景、11 轮。输入均为用户提供的合成导出，明确只分析给定材料、不访问数据源；判据只在人工核对时显示，不注入 Agent。案例覆盖原问题，也包含防止约束过强的对照：
+固定输入及人工判据维护在 [monitoring_reliability.py](../tests/sdk_core/monitoring_reliability.py)，复用 [现有采集器](../scripts/dialogue_real_model.py)，共 9 个场景、12 轮。输入均为用户提供的合成导出，明确只分析给定材料、不访问数据源；判据只在人工核对时显示，不注入 Agent。案例覆盖原问题，也包含防止约束过强的对照：
 
 | 场景 | 结果判据 |
 | --- | --- |
-| scope，3轮 | 混合 fat/fat1 历史命中不自动扩围；旧查询/资源查询覆盖不一致及完整清单未知须说明；用户明确扩围后正常跟随 |
-| history | 即时历史聚合及 start=end 的历史表达式都可回看3小时；区分回看窗口、求值网格与样本覆盖；北京时间13:06:34–16:06:34 |
+| scope，3轮 | 混合 fat/fat1 历史命中不自动扩围；旧查询/资源查询覆盖不一致及完整清单未知须说明；明确扩围后正常跟随，同时说明fat1只有命中记录、资源状况未核实 |
+| history，2轮 | 即时历史聚合及 start=end 的历史表达式都可回看3小时；区分回看窗口、求值网格与样本覆盖；北京时间13:06:34–16:06:34；另一轮单点up=1不能证明过去3小时连续采集或整体健康 |
 | peak_only / sustained | 单独81.6%峰值不证明持续或泄漏；可信45分钟告警事件可证明持续，无须机械索要曲线，仍不证明泄漏/OOM |
 | cpu | 分清单核95.6%和整机95.3%的峰值，不据此确诊持续满载，也不据整机平均排除单核问题 |
 | io_unknown / io_slow | 低Busy不等于排除I/O问题；有5000ms慢请求时应识别；单次慢请求仍不证明整盘持续饱和或故障根因 |
@@ -17,6 +17,17 @@
 | sufficient | 已知28.1%可用、告警阈值10%时直接回答未触发该条件；不要求额外查询或澄清，不擅用30%阈值或推出整体健康 |
 
 历史案例依据 [PromQL 查询语义](https://prometheus.io/docs/prometheus/latest/querying/basics/)与[时间聚合函数](https://prometheus.io/docs/prometheus/latest/querying/functions/#aggregation_over_time)；Busy、请求等待与设备并行能力的区别参见 [sysstat iostat](https://github.com/sysstat/sysstat/blob/master/man/iostat.in)。它们是评审依据，不是新增运行时查询要求。
+
+本套件复用现有报告字段，须结合 `suite=monitoring-reliability` 解释，不把数据库套件的口径直接套入：
+
+| 字段 | 本套件含义 |
+| --- | --- |
+| environment_scope_correct | 对象、环境与实际覆盖是否符合用户当轮要求；扩围不等于新数据已经查得 |
+| diagnosis_basis_sufficient | 结论是否符合指标语义，证据不足时是否保留判断限度 |
+| query_constraints_preserved | 对给定表达式和结果的时间、单位与统计口径解释是否正确，不要求执行查询 |
+| answer_focused | 是否围绕所问回答，证据充分时没有无谓补查或澄清 |
+
+通用项仍按其原意记录：`object_selection_correct` 看对象选择，`clarification_appropriate` 看澄清行为；与上述项相关时可同时判定，不相关时选不适用。`execution_allowed` 核对是否违反本题不访问数据源的要求，`history_delivery_claim_correct` 核对是否虚构投递状态；没有对应行为时可选不适用，不预填通过或改变报告 schema。
 
 ## 如何解读离线结果
 

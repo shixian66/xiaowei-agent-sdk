@@ -215,7 +215,6 @@ async def test_upstream_401_does_not_block_other_authorized_source_and_is_saved(
             instructions = env.scripts.calls[message][0].instructions
             assert "只约束 StarRocks 工具" in instructions
             assert "不必先搜 StarRocks 表" in instructions
-            assert "即时查询不能冒充历史时间段" in instructions
             # 原目标头的“不换集群”规则迁入数据库查询 Skill。
             assert "不改查其他环境代替" in instructions
 

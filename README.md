@@ -191,7 +191,7 @@ uv run --locked --extra dev python -m scripts.dialogue_real_model --profile "$XW
 
 P3-A 与 P3-B 已经独立审查并合入；精简发行包、两容器 Compose、配置预检、首次初始化与停止步骤见 [deploy/OPERATIONS.md](deploy/OPERATIONS.md)。小维连接已有 StarRocks 和模型 API，不要求在服务器部署模型；应用配置、`.env`、CA 与 PostgreSQL 命名卷由操作者保留。amd64 发行包自带应用镜像文件（`docker load` 导入，不需要镜像仓库）；公司服务器与真实服务验收仍待 P3-C。正式镜像使用 `Dockerfile.runtime`，部署使用 `deploy/compose.yaml`；根目录 `compose.sdk-test.yml` 只供隔离测试。
 
-监控可靠性修订另有 `monitoring-reliability` 集，共9个场景、11轮，使用给定合成导出检验范围、历史统计、峰值/持续性、CPU口径、I/O与缺测解释，并包含证据充分及明确扩围的对照。它不证明自主取证或补查质量；[样例判据与验证边界](docs/monitoring-reliability-evaluation.md)单列。离线回归命令：
+监控可靠性修订另有 `monitoring-reliability` 集，共9个场景、12轮，使用给定合成导出检验范围、历史统计、峰值/持续性、CPU口径、I/O与缺测解释，并包含证据充分及明确扩围的对照。它不证明自主取证或补查质量；[样例判据与验证边界](docs/monitoring-reliability-evaluation.md)单列。离线回归命令：
 
 ```bash
 SDK_TEST_POSTGRES_URL=postgresql+asyncpg://postgres@127.0.0.1:55432/postgres \

@@ -15,7 +15,7 @@
 | 锁定依赖 | SDK `0.22.3`、Lark Channel `1.4.0`、MCP `2.2.0`、sqlglot `30.17.0`、`nh3 0.3.7`、`tinycss2 1.5.1` |
 | 正式入口 | `xiaowei serve`、`config check`、`model check`、`storage init/upgrade/cleanup`、`requests resend`；命令与环境准备以 README 为准 |
 | 最近有记录的公司部署 | 既有交接记录称 PR #110 / `4e0ab86` 已部署，并记录了部署后的回答拒收反馈。该历史记录不证明当前镜像、配置或健康状态，也不证明 #111–#114 已部署 |
-| 当前验收结论 | 监控说明修订仅替换三处文字，补充9场景/11轮证据解释样例及离线契约回归；检查和审查状态见下方“本次监控可靠性修订”。不能据脚本模型认定真实巡检质量通过 |
+| 当前验收结论 | 监控说明修订仅替换三处文字，补充9场景/12轮证据解释样例及离线契约回归；外部审查指出的旧断言失败已复现并修正，补充回归220项通过，尚待冻结版本复审。最终状态见下方“本次监控可靠性修订”。不能据脚本模型认定真实巡检质量通过 |
 | 当前任务授权 | 用户授权独立工作树实施三处文字替换、代表性评测、离线验证和审查。不新增 Skill、固定调用流程，不改 Agent Loop、权限、Evidence 或交付契约；不合并、不部署、不调用真实模型或公司服务 |
 
 本次使用 `/Users/kloenguyen/.codex/worktrees/monitoring-evidence-reliability/agent-SDK`；不修改 `scheduled-agent-design/agent-SDK`。具体样例、依据及验证边界见[监控可靠性评测说明](docs/monitoring-reliability-evaluation.md)。下方旧回答修复计划与证据只作既有工作的接续资料，不扩大本次范围。
@@ -40,11 +40,13 @@
 
 产品只改 `app.py` 的两段监控指令和 `runtime.py` 的即时查询说明；未修改执行逻辑、治理策略、Evidence/Session 或交付。评测复用现有 `scripts.dialogue_real_model`，新增 `monitoring-reliability` 集；领域判据只展示给评审者，不进入 Agent 指令。
 
-离线契约测试先在旧说明上得到2项预期失败，确认新范围/可靠性说明尚未进入模型请求；修订后新样例与采集器入口的定向检查7项通过。受影响回归（`test_monitoring_reliability`、`test_dialogue_real_model`、`test_prometheus_p2`、`test_dialogue_contract`、`test_app`、文档命令检查）**180 passed、26 skipped、2 deselected**；官方 MCP 二进制未配置，browser 未选。`ruff check --no-cache .`、`mypy src`（35文件）及 `git diff --check` 通过。AST 对照确认产品差异仅为两处字符串常量值（监控指令整体常量及查询说明），无执行逻辑变更。
+外部审查在 `23c7185f38ade6c89d5a2fecfc93f60916db952d` 发现 `test_monitoring_read_recovery.py` 仍断言已删除的旧句，作者复现该测试的两个参数用例均失败。初版180项通过的记录漏了这个直接检查监控指令的文件，初次独立审查的“无阻断”结论也被该反例推翻，不能作为当前候选通过依据。本次只删除已有新契约测试覆盖的旧句断言，保留故障源隔离、成功证据保存和历史读取等行为断言，不把旧句加回产品说明。
 
-独立审查覆盖基线 `6918044` 至候选 `43b91e3dcfcd576a7ee3fd1e3f82b4b6737df42c`，复验22项通过（含固定 Evidence 指纹），无阻断；发现P3为scope判据将输入的“旧查询”额外称作up查询。修订 `52cfe0ed1222505b0646f53767fa3bf0328af136` 仅改两行评测文案，作者定向3项通过，独立复核确认P3关闭、仍无阻断。此后仅更新本交接记录，产品与测试未再变更。没有新的CI或真实模型证据。
+同时补齐history的单点up反例、scope扩围后的fat1资源未核实判据，并在评测文档说明复用字段的本套件含义。现为9场景/12轮；相对 `23c7185`，`src` 与采集器执行逻辑未改，产品仍仅三处文字替换。
 
-下一项：离线检查及独立审查已完成，停在本地候选交用户审阅；真实模型对比仍需另获 Profile、端点/模型与费用授权。本套固定导出解释题不能替代自主查询、补证及真实源/飞书验收；求值窗口展示标签的问题也未在本次修复。不合并、不部署。
+补充回归：`test_monitoring_read_recovery`、`test_monitoring_reliability`、`test_dialogue_real_model`、`test_prometheus_p2`、`test_database_skills`、`test_dialogue_contract`、`test_app`、文档命令检查合计 **220 passed、27 skipped、3 deselected**；27项均因官方 MCP 二进制未配置跳过，3项browser未选。`ruff check --no-cache .`、`mypy src`（35文件）、`git diff --check` 通过。尚待本次冻结修订的独立复审；没有新的全仓测试、CI或真实模型证据。
+
+下一项：完成本次审查反馈的补充验证与复审后，停在本地候选交用户审阅；真实模型对比仍需另获 Profile、端点/模型与费用授权。本套固定导出解释题不能替代自主查询、补证及真实源/飞书验收；求值窗口展示标签的问题也未在本次修复。不合并、不部署。
 
 ### 已合入的相关工作
 
