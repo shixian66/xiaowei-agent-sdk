@@ -9,16 +9,16 @@
 | 项目 | 已核对事实 |
 | --- | --- |
 | 仓库 | [shixian66/xiaowei-agent-sdk](https://github.com/shixian66/xiaowei-agent-sdk) |
-| 产品代码基线 | P2/P1 已由 PR #119 squash 合入 `main@821ee8d9d89c1a28dda5c9b2c97d8506a3e0407d`。本次从该最新主线复用隔离工作树建立 `codex/answer-delivery-eval`；旧工作区未提交修改未带入 |
+| 产品代码基线 | 本次核对 `main@691804424f8bf3ed04c32f806a291cfafa053266`（PR #120，P4 对话及完整交付离线评测）；包含 #119 的 P2/P1。文档工作位于独立工作树 `scheduled-agent-design/agent-SDK`、分支 `codex/scheduled-agent-design`；原目录未提交修改未带入 |
 | 源码与检查 | 当前源码仅保留 `src/xiaowei`；旧工程及专属测试、Compose、迁移入口、`compose-smoke` CI 和 Alembic 依赖已移除。保留产品测试、公共检查与旧回答兼容路径；旧工程历史可从 Git 查回 |
 | 当前存储与回答 | 应用 schema v12；可信 `answer_version=3` 开放原生报告，2/Legacy 保留旧文字；模型输出 schema 不变。新请求用分项交付，旧请求保留 v0 语义 |
 | 锁定依赖 | SDK `0.22.3`、Lark Channel `1.4.0`、MCP `2.2.0`、sqlglot `30.17.0`、`nh3 0.3.7`、`tinycss2 1.5.1` |
 | 正式入口 | `xiaowei serve`、`config check`、`model check`、`storage init/upgrade/cleanup`、`requests resend`；命令与环境准备以 README 为准 |
 | 最近有记录的公司部署 | 既有交接记录称 PR #110 / `4e0ab86` 已部署，并记录了部署后的回答拒收反馈。该历史记录不证明当前镜像、配置或健康状态，也不证明 #111–#114 已部署 |
-| 当前验收结论 | P2/P1 的 B1 短提醒及 N1 动作不进数据附件修复已合入，PR #119 的 CI 9/9 通过。本次仅补 P4 离线联合重放和真实模型采集入口，不修改产品 schema、存储、权限或交付契约；检查与独立审查见 §5。真实模型任务能力、公司服务和用户验收未完成 |
-| 当前任务授权 | 用户要求在批准范围内继续开发；推进 v1.2 的 P4 离线验收及必要采集器接入，提交并独立审查。P3/P1c 不在本轮范围；不部署，不调用真实模型、公司服务或飞书。真实 Profile、端点与费用仍须具体获准 |
+| 当前验收结论 | P2/P1 及 #120 已在上述主线中；历史证据和真实缺口保留于后文。本次新增通知/定时任务设计与 A–D 计划，尚无功能实现；本轮检查及审查见 §5，不继承旧 CI 为新增设计的功能证据 |
+| 当前任务授权 | 只写必要设计、实施计划和文档，可作有边界离线核验；不写产品功能代码，不改配置/依赖/数据库，不调用真实模型、公司源或 Webhook，不部署。产品方向为多机器人、一次性提醒、通用独立 Agent 定时任务及 Node 巡检；生产写仍逐次审批 |
 
-原工作目录的未提交 ARCHITECTURE、计划和公司配置未读取或混入。本次继续使用 `/Users/kloenguyen/.codex/worktrees/answer-query-repair/agent-SDK`；[批准计划 v1.2](docs/superpowers/plans/2026-10-20-production-dialogue-answer-repair.md) SHA-256 仍为 `fe6323fdaea5cdd7da900f34304369ac9c05e3bb5e96d74d3376fd3edf371443`。计划是批准时快照，后续授权及实施状态以本页为准。
+原工作目录的 ARCHITECTURE 差异与未跟踪计划/公司配置保留，未复制到本工作树；本次未读取公司配置凭据。旧回答修复计划及验证记录保留为历史证据，不能作为本次定时任务的实施授权。当前任务只按下面的新设计/计划接续。
 
 本文件的状态以表中的核对基线为限。接手者先核对实际 HEAD、工作区及用户新指令；合入、独立审查、离线测试、真实运行、部署与用户接受分别记录，不互相替代。
 
@@ -33,8 +33,17 @@
 - 进度的单聊/群聊差异延迟、仅真实变化更新、正常收尾及异常陈旧已由用户确认，详见[进度契约](ARCHITECTURE.md#progress-observation)；P1 已有离线实现，当前证据见计划 §7。普通消息的区域身份及正文/明细分工见[普通消息契约](ARCHITECTURE.md#ordinary-feishu-expression)，不能由 HTML/MD 报告完成推定达标。
 - 监控写仅限已批准动作，使用 SDK 原生审批暂停/恢复及既有 Action 治理；生产开放仍须满足对应源和群审批门槛。Grafana 数据源密码私聊命令尚未实现，目前由管理员在 Grafana UI 填写。见 [监控边界](ARCHITECTURE.md#monitoring-mcp)。
 - 内网 Web 无登录、访问者共用操作者权限；目标账号、网络、Grafana 插件/写端及数据源更新竞争窗口等已接受取舍按架构执行。
+- 通知及定时任务的方向与待审权限增量见 [ARCHITECTURE](ARCHITECTURE.md#scheduled-agent-tasks)：多个目的群不扩大操作入口，任务独立于原聊天，创建及每次执行复核权限，生产写不能继承周期批准。目前均未实现。
 
 ## 3. 当前计划与下一项工作
+
+### 通知与定时任务：当前文档交付
+
+[设计 v1.0](docs/superpowers/specs/2026-10-21-scheduled-agent-tasks.md)维护源码复用、SDK/治理接口、固定 U1–U7 样例、Agent 自主选择/信息/修错与停止行为、状态/恢复和未决事项；[A–D 计划 v1.0](docs/superpowers/plans/2026-10-21-scheduled-agent-tasks.md)维护独立切片与验收。A 即时多机器人通知 → B 一次性固定提醒 → C 通用独立 Agent 周期任务 → D Node 巡检；不实现特定 Node 调度器，不恢复旧 Worker/DSL 平台。
+
+关键源码缺口：现有 effect 没有通知语义；原 Action 是短期单次批准，不能作为长期任务授权；现有 Prometheus MCP 文本丢失结构化信息，D 不能猜解析。建议窄 notify、本地任务 Action 激活独立 job 授权、受治理结构化 Prometheus 读取；这三项均需对应切片验证，不能写成已支持。
+
+下一步由用户审阅设计 §8 的默认值/取舍及独立审查结论，再明确是否授权 A 的产品实现；本轮不开始 A。API 网络/Node 指标口径只在另获只读服务授权后核对，真实模型/机器人验收需另定具体范围与费用。旧回答/进度/报告的真实缺口继续保留，不被本次文档关闭。
 
 ### 已合入的相关工作
 
@@ -113,13 +122,19 @@ B1 的短口径主视图修复已成立；原 B2 因复现形状不符合真实 
 
 ## 5. 验证记录与限制
 
-当前 P4 候选的执行证据和判定保存在工作树 `.superpowers/sdd/2026-10-20-production-dialogue-answer-repair/p4-results.md`，后续 PR 对外记录 base/head、检查命令与结果。此切片只更改测试、采集脚本和相关文档；不关闭 A1、真实 P4 或客户端验收。采集器的首个正文回执指标不等于用户实际看见答案；完整交付依赖全部绑定分项确认。有限 PromQL 与 SQLite 夹具的能力限制单列，不能凭脚本模型给自然语言任务打通过分。
+### 2026-10-21 通知/定时任务文档核验
+
+基于 `691804424f8bf3ed04c32f806a291cfafa053266`，只修改四份根文档、新增设计与 A–D 计划；产品源码、配置、依赖及数据库未改。使用本仓库既有 Python 环境，显式 `PYTHONPATH=src`，SDK `0.22.3`、httpx2 `2.13.1`；无网络脚本模型测试及文档检查 **4 passed**：`tests/security/test_docs_command_consistency.py`，及 `tests/sdk_core/test_sdk_contract.py` 的 `test_real_runner_calls_tool_and_returns_typed_answer`、`test_default_tracing_has_no_export`。执行 `python -m pytest -q -p no:cacheprovider` 并明确选择上述文件/节点；禁字节码/pytest 缓存。
+
+另检查本次六份文件的 **133 个本地链接路径均存在**、U1–U7 索引和架构显式锚点存在，`git diff --check` 通过；未做全仓锚点/外网链接可用性检查。首次链接检查发现旧 handoff 指向未入库的本机记录，下文已注明当前不可复核。精确文档版本独立审查结论待冻结后补充。本轮没有跑 PostgreSQL/完整审批恢复、全套产品回归或真实模型/指标/Webhook，未部署，检查不证明新功能可用。
+
+既有 #120 的 P4 记录曾保存在原工作树 `.superpowers/sdd/2026-10-20-production-dialogue-answer-repair/p4-results.md`，当前工作树不含该本机文件；源码差异可从 `6918044` 查回，不能据未随 Git 保存的材料新增实测结论。该切片只更改测试、采集脚本和相关文档；不关闭 A1、真实 P4 或客户端验收。采集器的首个正文回执指标不等于用户实际看见答案；完整交付依赖全部绑定分项确认。有限 PromQL 与 SQLite 夹具的能力限制单列，不能凭脚本模型给自然语言任务打通过分。
 
 P2/P1 的 [PR #119](https://github.com/shixian66/xiaowei-agent-sdk/pull/119) 由候选 `425a52c13bfc6e1bc9cf441e314db6435885ca98` squash 合入 `821ee8d9d89c1a28dda5c9b2c97d8506a3e0407d`，文件树一致。[CI 39456492469](https://github.com/shixian66/xiaowei-agent-sdk/actions/runs/39456492469) 的 9 项检查全部通过、attempt=1：integration **4500 passed、235 skipped、87 deselected**；p3-release **84 passed**。这是该合入版本证据，不自动当作本次 P4 候选的全量结果。
 
 ### 有效证据摘要
 
-本轮 N1 修复后的最终 SHA、带 PostgreSQL 默认全量命令/退出码/统计、独立复审结论记录在[本地最终验证记录](.superpowers/sdd/2026-10-20-production-dialogue-answer-repair/review-final-results.md)，本轮完整原始输出见同目录 `n1-default-full.log`；原 03c75a3 输出仍保留在 `review-default-full.log`。这些是本机证据，不替代 CI 或真实环境验收；本轮提交冻结后不改源码或测试，不将分次结果拼作默认全量通过。
+原交接曾引用 N1 的本机最终验证记录及全量日志，位于未随 Git 保存的 `.superpowers/sdd/2026-10-20-production-dialogue-answer-repair/`；本工作树无法复核，不提供失效链接或据此新增通过结论。已可查的 #119 合入/CI 证据见上文；下文较早本地统计保留其注明范围，不替代 CI 或真实环境验收，也不能拼作本次默认全量通过。
 
 B1 根因是布局规则误把“长原值收起”扩大成“影响结论的说明也收起”。动态候选过滤/未检查/容量和实际窗口由 `fact_limit_notices` 生成；固定口径复用 ToolPolicy.fact_note_summary，经 Evidence 到各渠道，不新增模型或持久化字段。计划、审计、Grafana 配置、历史引用、结构快照/布局、DDL、告警及数据源配置的语义会影响推断，保留短提醒；完整细则只在详情。普通查询仅在结果确实截断且 LIMIT 被系统调整时提示返回量限制；分页与通用截断合并为一个不完整提醒，原字段继续可核对。原 B2 已撤回，动作状态由消息正文展示，不收集为报告章节；N1 的 MD/HTML `_data_parts` 回归同时验证动作恰好一次、所有附件无动作字段、普通大结果完整交付。原来支持动作进报告的两组变异结论作废；N1 按用户要求不新增隔离变异。
 

@@ -1,0 +1,105 @@
+# 多机器人通知与定时 Agent 任务实施计划
+
+> **For agentic workers:** 实施时使用 `superpowers:executing-plans`，按仓库规则默认串行完成一个可独立验证的切片；本轮仅设计和文档，不开始实施。
+
+**Goal:** 让小维能向获准的多个飞书机器人即时/定时发送消息，并独立执行每 3 小时 Node 巡检；底座允许以后逐项接入已授权的只读任务。
+
+**Architecture:** 单进程 asyncio 到期检查、现有 PostgreSQL、每次新 Session 和现有 `Application.run_turn`/SDK Runner。通知使用本地受治理 httpx2 Adapter；任务激活复用现有 Action/SDK 确认，后台不继承生产写批准。
+
+**Tech Stack:** Python 3.11、Agents SDK 0.22.3、SQLAlchemy/asyncpg、httpx2；以实施时 pyproject/uv.lock 为准。当前不新增调度依赖、MCP Server 或服务。
+
+**Spec:** [设计 v1.0](../specs/2026-10-21-scheduled-agent-tasks.md)。本计划 v1.0，2026-10-21；基线 `691804424f8bf3ed04c32f806a291cfafa053266`。产品权限唯一维护于 [ARCHITECTURE](../../../ARCHITECTURE.md#scheduled-agent-tasks)，U1–U7 的操作及验收逐字意图沿用设计 §3，不另定义成功标准。
+
+## Global Constraints
+
+- 本轮不写产品代码、改配置/依赖/数据库、调用真实模型/公司源/Webhook 或部署；以下均是未来获准实施后的步骤。
+- 每片先核对当前 SDK/源码，先证明关键公开扩展点可用；普通内部函数、私有签名和文件拆分由实施者决定，不为未来预建平台。
+- 先治理再 I/O；任务创建、每次运行及发送时核对当前权限，生产写逐次 Action 审批不变。详见架构，不能把计划当执行授权。
+- 原聊天 Session 不是任务授权；运行、结果保存、通知接受分开记录；结果未知不自动重试/重放。
+- 固定样例 U1–U7 是任务能力验收；零未授权 I/O、秘密隔离、单次尝试是边界验收，两者分别通过。
+
+## Review Focus
+
+- 同一自然语言发送意图被模型换 call_id 再次调用、并发调用或重新恢复时，只得到原回执；A 负责。
+- 管理员改变 env 引用背后的实际 Webhook 或源/模型绑定，旧任务不能悄悄继续发送；A/B/C 负责。
+- 原聊天到期、数据库清理、进程停在占用/POST/落库之间或恢复旧备份，不能重放已开始通知；B/C 负责。
+- 部分目标 down、缺指标/样本、重复实例、warnings/截断，不得报告全部健康；D 负责。
+- 停用/撤权与执行并发、后台意外提出写动作或等待审批，不能越过已准入边界或自动批准；B/C 负责。
+
+## 1. 模块分工、环境与顺序
+
+A → B → C → D。A 可独立交付即时通知；B 可独立交付不调用模型的一次性提醒；C 用合成只读工具证明通用独立 Agent 周期执行；D 才接真实 Node 口径。每片结束独立冻结/审查/验证，不提前实现后片脚手架。
+
+预计新增小模块 `src/xiaowei/webhook.py`（配置、HTTP 与安全回执）、`scheduled_tasks.py`（任务定义、授权、存储、到期准入）和 D 所需 `prometheus_read.py`（结构化只读适配）。这是职责边界建议，允许实施时按直接消费者调整；不建工厂、插件注册平台或流程引擎。修改现有 governance/tools/runtime/app/actions/channel/evidence/session/storage 的范围按各片列明。
+
+环境沿 README：本仓库 Python 3.11 环境及锁文件；存储、审批、恢复测试使用显式隔离 PostgreSQL，默认禁网，协议测试只放行 loopback。不要读取公司配置或 env 凭据值作为测试输入。已有 SDK 公共能力核验可用无网络 `agents.testing.ScriptedModel` 和真 Runner。真实验证另获具体 Profile、数据/机器人与次数/费用授权，不把本机端口或测试替身当公司服务。
+
+建议新增测试文件是未来交付物，当前并不存在；以下命令只在对应文件实现后执行。每片按顺序：可复现失败/缺口 → 最小实现 → 定向检查 → 精确 SHA 独立审查 → 选择性提交/交接，不批量扩展到全部阶段。
+
+## 2. A：即时多机器人通知闭环
+
+**交付与接口：** U1–U4。设计 §4 的发送输入、安全许可和回执成为 B/C 的唯一发送入口；即时请求绑定一次 intent，不由模型 ID 决定。支持明确文本与获准 Evidence 摘要，不能退化成只支持手写文字。
+
+**影响文件：** 新增 webhook.py、下一号应用迁移及 `tests/sdk_core/test_webhook_notification.py`；修改 config.py/runtime.py（静态登记、安全引用、装配/关闭）、governance.py/tools.py/models.py（窄 notify/可信许可）、app.py（工具集合与明确发送意图）、evidence.py（接收投影）、storage.py（通知记录）。channel/feishu_delivery 只按实际复用需要窄改，不能把应用机器人传输直接套在 Webhook 上。
+
+- [ ] **先核对并验证 SDK 和 HTTPX2 扩展点。** 用真 Runner+脚本模型、httpx2 MockTransport 建合成发送调用链，默认禁网；验证准入拒绝在 transport 前。核实 notify 只影响指定本地工具，现有 read/write/approval 路径不变。记录当前 SDK、锁文件和精确调用链，不新增第二 Loop。
+- [ ] **定义行为测试并先观察失败。** 在新测试中覆盖 U1 正确目标/内容/一次发送，U3 原 Evidence/模型可见相关事实全部获准才发送；重复 call_id、不同 call_id、并行调用同一 intent 只一次 transport。测试保留给模型的摘要与实际发送文本可核对，不用“测试 helper 返回成功”代替真实工具链。
+- [ ] **实现最小配置/许可、通知 attempt 与 Adapter。** 输入别名；明确文字必须从真实获准请求绑定，不能接受模型任意冒充原文；业务摘要来自获准 Evidence/分析投影。记录后单次 HTTP，响应分类和所有秘密处理按设计 §4–§6。不暴露 requests resend 或自动重试入口。
+- [ ] **补齐拒绝/失败反例。** U2 任意 URL/未知别名、无权限用户/渠道、目的地不允许该源、凭据缺失、接收方被替换、证据撤权/过期、超长/提及注入均零 HTTP I/O。HTTP 200+非零 code、4xx/429、5xx、坏 JSON/错误类型、签名/关键词/IP 拒绝、写/读超时、取消与发送后落库失败分别断言状态和无重发。凭据哨兵扫描模型请求、Session items、Evidence、数据库任务/回执正文、日志、最终回答；不只检查单个返回字符串。
+- [ ] **检查与独立审查。** 新文件定向测试及现有 test_governance.py、test_r7_governance.py、test_evidence.py/test_evidence_scope.py、test_group_actions.py、test_runtime.py、test_channel_service.py 的受影响路径；`ruff check .`、`mypy src`。冻结 SHA 审查 effect、许可来源、跨接收权限、HTTP 和崩溃窗口；新增秘密或未授权 I/O 是阻断，不以测试统计替代。
+- [ ] **更新事实并提交。** README 只写已验证的静态配置/使用方法，OPERATIONS 写实际启用/禁用与状态核对，handoff 记离线/真实缺口。真实验收另获授权后用专用机器人执行 U1–U4，界面人工观察与 API accepted 分开记。
+
+**退出：** 上述离线链路和关键反例通过，可独立演示即时消息及获准摘要；未做真实模型/机器人则仅标“离线实现”，不宣称 UAT 完成。B 不得建立在未解决的 notify 权限缺陷上。
+
+## 3. B：一次性固定提醒与任务授权
+
+**依赖/接口：** 依赖 A 的许可、一次发送及回执。新增 job/run schema、at 触发、任务管理和批准的独立授权；执行只消费不可变固定文本，不用模型，不依赖原 Session。产出的 job/run 契约供 C 添加 agent_task 和 interval，不预建 Node 字段。
+
+**影响文件：** 新增 scheduled_tasks.py、下一号迁移、`tests/sdk_core/test_scheduled_tasks.py`；修改 actions.py/runtime.py（本地任务 Action 绑定/权限）、app.py/channel.py（既有审批入口）、storage.py/session.py（存储/保留/恢复引用）。只增加一个到期循环与生命周期，不新增 CLI/API/后台服务。
+
+- [ ] **先做本地 Action 可复用性门槛。** 在隔离 PG 与真 Runner 上提出固定提醒、展示完整材料、通过既有 `/批准` 暂停/恢复激活一次，回读 job 状态。原审批过期仍按旧规则拒绝；有效激活后的 job 到点可运行且不会继承原会话寿命。若只能靠改监控 Action 的生产写规则或伪造绑定打通，停止，回到设计 §4 重新评估。
+- [ ] **先写失败场景。** U5 的明天10点解析为明确日期/时区；存在歧义先澄清，确认前无 job 激活/HTTP。确认材料变化、重复/并发批准、发起者/审批者失效、任务无通知权限必须拒绝。通知/任务管理不是监控写权限的别名。
+- [ ] **实现固定任务闭环。** 按已确定默认值保存自包含定义、接收方实际绑定、期限/次数和授权版本，原子占用 occurrence 及 A 的 intent。查询状态、暂停、取消按管理权限，扩大/恢复重批；不能删记录后复用 ID。时钟注入用于测试，生产用可信当前时间。
+- [ ] **验证时间与持久恢复。** 假时钟覆盖未来/过去时刻、60秒边界、时区转换、重启错过、同 job 不重叠、占用前后崩溃及 POST 后回执丢失。原群 `/新建`、原 Session 到期/清理不删除 job；活动 run 引用不被 cleanup_expired 误清。暂停/撤权竞争按准入边界拒绝未来 I/O，不宣称取消已发出的请求。
+- [ ] **验证迁移/兼容/恢复。** 按现有部署测试框架验证 v12→新版本（或届时最新 schema）、空配置关闭时旧功能照常运行、显式初始化/升级、备份隔离恢复。恢复备份默认禁用所有定时发送，管理员核对恢复点后从将来时刻显式恢复；不能仅因备份中状态为 pending 就重发。旧镜像不能读新 schema 时不得直接回退服务，按备份整体恢复演练。
+- [ ] **检查、审查并提交。** 新文件定向测试，加 test_sdk_approval.py、test_actions_runtime.py、test_group_actions.py、test_channel_store.py、会话清理/迁移与部署维护的受影响用例；lint/type。冻结 SHA 独立审查授权寿命、状态机/并发与恢复，再更新 README/OPERATIONS/handoff。真实测试使用未来几分钟的单次合成提醒代替等待一天，仍以 U5 的时间/目标/内容/单次标准验收。
+
+**退出：** 不调用模型完成“确认→存储→到点→一次发送→可查状态”，以及离线重启/过期/撤权/恢复边界。默认值未定或本地 Action 门槛未过不启用真实任务。
+
+## 4. C：定时触发一次独立 Agent 任务
+
+**依赖/接口：** 依赖 B 的任务授权/at/occurrence 和 A 通知。增加 interval 和 agent_task，自包含 brief、approved read scope、Model Profile 绑定及每次新 Session；不增加其他调度模式。
+
+**影响文件：** scheduled_tasks.py/app.py/runtime.py（运行准入、工具集合、正式 run_turn）、models.py/evidence.py/session.py（小型可信元数据、接收复核与保留）；新增 `tests/sdk_core/test_scheduled_agent.py`。治理当前 authorize 核心继续共用，不新建定时专用权限表引擎。
+
+- [ ] **先验证独立任务与 SDK 主链。** 真 Runner+脚本模型+隔离 PG+合成 read 工具，两个 occurrence 用不同 Session，完整调用工具、生成事实、保存和通知。验证 Profile/策略不兼容拒绝，不直接调用底层 Runner 绕过 Application；固定消息仍不启动模型。
+- [ ] **定义 Agent 的任务/信息/修错验收。** 沿 U7 与 U6 的通用阶段验证选择已授权工具/源、编写查询、缺信息澄清、合理补证和停止；参数可修正时给具体有限提示，预算不重置。动态工具隐藏与治理层拒绝分别测试；示例顺序不得固化成业务 dispatcher。
+- [ ] **实现最小 interval 与后台执行准入。** 可信主体保持真实创建者和原操作群；每次当前成员/范围核验。按锚点计算下一次，持久化单任务互斥、一个后台槽及现有全局限额；保存任务批准上界和每次实际消耗，不复制聊天历史。
+- [ ] **证明写边界与故障自处。** Agent 可见集合只有获准自动 read；手工构造 propose/approval/write、任务管理/创建、未获准 notify 仍在 I/O 前拒绝。意外 SDK interruption/awaiting_user、身份或契约改变记需要处理，不 autoapprove、不保存等待永久恢复的 RunState。源失败可在原范围调查其他源；证据/Session/存储失败不发成功摘要；工具已发生但保存失败不重跑。
+- [ ] **证明独立性与接收边界。** 原 Session 到期、清理、新建、原聊天被改写不改变任务定义；已批准 brief 不得保留依赖过期 Evidence 的含混指代。每次只把获准必要事实送模型；发送校验全部相关模型可见 Evidence 的当前读/接收权。新一次不继承旧结果为“最新”；Model Profile 或接收实际绑定变化暂停，恢复要重批。
+- [ ] **检查、审查并提交。** 新文件定向测试与现有 test_app.py、test_sdk_contract.py、test_sdk_approval.py、test_monitoring_read_recovery.py、Evidence/Session/治理/飞书主路径；lint/type。冻结 SHA 独立审查授权交集、预算、Session/恢复和 read→write 拒绝；更新文档。具体模型获准后沿 U7 做固定任务能力评测，记录工具选择/事实/耗时/调用数/用量，不拿脚本模型代替。
+
+**退出：** 两种不同合成只读任务在同一调度主链运行，证明未写死 Node；原聊天失效不影响，生产写/扩权始终零 I/O。真实业务接入仍逐项验收，不能宣称小维所有能力均可定时。
+
+## 5. D：Node Exporter 每三小时巡检并发送
+
+**依赖/接口：** C 的通用独立 Agent 任务；新增结构化 Prometheus read 契约及 Node 调查方法。调度器、通知输入和生产写守卫不因 Node 改变。
+
+**影响文件：** 推荐新增 prometheus_read.py（或已有模块内最小等价实现）、源配置/装配/治理策略/Evidence 投影；新增 `tests/sdk_core/test_node_inspection.py` 和结构化协议用例，必要时一个窄 Node 方法 Skill。不要在 scheduled_tasks.py 添加指标公式/Node 模式分支。
+
+- [ ] **先完成结构化取数门槛。** 只用合成 API/loopback 核实 resultType、labels、数值/时间、warnings、targets 与样本上限。公司实际 API 路径/认证/网络及与 MCP 一致性需另获只读授权后确认；缺该能力则 D 阻塞，不解析有歧义 MCP 文本。复核锁定 Prometheus/Node 版本；现有 MCP/数据库工具仍按原路径工作。
+- [ ] **定口径再写测试。** 按设计 §6 列出的真实指标、单位、目标分母、过滤/标签、窗口/充分采样、阈值及规模预检固化口径版本。仅获得均值/峰值就只报告该统计，不虚构持续15分钟。为健康、CPU/内存/容量/网络异常、IO 趋势、down/缺测各造可手算样本与期望事实。
+- [ ] **实现最小基础覆盖与 Agent 方法。** 获取范围→基础事实→必要局部补证→有界结论是可组合方法，不是调度逻辑。PromQL 可由 Agent 在批准范围内选择/调整，业务完成检查确保 U6 基础项有结果或明确缺项。内部每个 HTTP 请求/series/字节/期限也受预算，指标不全不视为零。
+- [ ] **覆盖关键反例。** 重复实例/多 exporter、counter reset、NaN/Inf、乱序/缺窗口、未知网卡速率、虚拟接口/临时盘、API warnings、规模超限/截断、源错误和全部目标不可用。逐一断言覆盖/异常/未检查数，原始 scrape URL/秘密不出服务端；健康与失败各只发送一次有界摘要，不拆成多 POST。
+- [ ] **验证真实 SDK 的完整离线用户任务。** 沿 U6 从自然语言提出→规范化并批准→两个假时钟时点的独立调查→摘要/回执；包括成功、局部未完成、未知通知和尝试自动修复被拒绝。再用另一类合成只读任务证明调度未耦合 Node。
+- [ ] **检查、独立审查与真实验收。** 新/受影响用例、既有 Prometheus MCP、Grafana、数据库只读、审批、Channel/交付和安全回归；本片作为阶段集成点在冻结 SHA 跑 README/CI 的默认完整检查并记录 skip/未选中原因，禁止拼接分次结果冒充全绿。获准模型/Profile 与专用机器人后，在公司只读源验证 U1–U7 中相关任务、指标口径、数据范围和人工群内观察；离线/真实模型/真实源/真实发送/部署/用户接受分栏记录。
+
+**退出：** 每3小时完整 U6 在获准环境实际成立；无规则、缺样本、不适用阈值及部分失败均准确表达。未做真实服务则仅离线通过，不关闭用户验收。
+
+## 6. 运维恢复与交接
+
+功能默认不启用，空机器人/空任务配置不影响当前数据库/监控/飞书入口。启用前通过当前正式 config/storage 检查，建立专用测试接收方、明确原操作群/审批人/源/模型与预算；不写未实现的新命令作为现有使用方法。
+
+关闭调度先停止新 run 准入，保留任务/occurrence/attempt 供核对；已开始 I/O 有界收尾并如实落定。停用机器人使未准入通知拒绝，不删除回执重置发送机会。普通重启跳过错过的时点、不重放开始过的运行/通知。备份恢复不同于普通重启：数据库可能遗失已发消息的记录，必须以发送默认禁用方式隔离启动、人工核对恢复点，再显式从未来时点恢复；不能承诺外部消息回滚。schema 回退按实际兼容窗口或完整备份恢复，不改 SDK 私表。
+
+每片 handoff 只记实际版本、检查/独立审查、未覆盖与下一片门槛。设计/权限事实只改 ARCHITECTURE，跨层契约及取舍改 spec，步骤状态改本计划，使用/恢复命令按实现写 README/OPERATIONS。设计 §8 的未决产品默认值、实际身份配置、结构化 API/Node 口径和真实费用授权不得被测试默认值悄悄代替。
