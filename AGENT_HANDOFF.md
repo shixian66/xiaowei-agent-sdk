@@ -15,7 +15,7 @@
 | 锁定依赖 | SDK `0.22.3`、Lark Channel `1.4.0`、MCP `2.2.0`、sqlglot `30.17.0`、`nh3 0.3.7`、`tinycss2 1.5.1`、Pillow `13.0.0`、certifi `2026.10.19`（后两项为严格审计发现的既有漏洞定向升级） |
 | 正式入口 | `xiaowei serve`、`config check`、`model check`、`storage init/upgrade/cleanup`、`requests resend`；命令与环境准备以 README 为准 |
 | 最近有记录的公司部署 | 主线交接记录含用户提供的 `xiaowei:143c4c8641be636c41c130329ce1639a36b59c27` 镜像及巡检日志；未独立核验当前服务器状态。B 本轮未部署 |
-| 当前验收结论 | A/B/C 已合入主线；代理正在单独离线验证与独立复审，真实 U5/U6/U7 未验收，D 暂停且未实现。具体版本与证据见 §5 |
+| 当前验收结论 | A/B/C 已合入主线；代理离线候选 163d2ac 的独立复审及单次完整默认全套通过，真实 U5/U6/U7 未验收，D 暂停且未实现。具体版本与证据见 §5 |
 | 当前任务授权 | 代理新分支可改源码/测试/必要文档并本地提交；不得推送、PR、合并、部署或调用真实代理/飞书/模型/公司源，不读取公司配置及凭据正文；D 暂停、不提交 |
 
 原工作目录的 ARCHITECTURE 差异与未跟踪计划/公司配置保留，未复制到本工作树；本次未读取公司配置凭据。旧监控和回答修复记录保留为注明版本的证据，不作为本轮代理范围扩展授权。
@@ -39,7 +39,7 @@
 
 ### 当前：自建飞书代理（C 公司验收前置）
 
-C 已由 #126 合入 be8c155，批准的通用调度/只读边界不变；本轮只增加 Webhook 的 feishu_proxy 协议，详见 [ARCHITECTURE](ARCHITECTURE.md#scheduled-agent-tasks)。在独立代理分支本地实现、测试和提交后，交具体 SHA 的独立复审；不推送、不调用真实服务。D 的 Node 研究/未提交改动保留在原隔离工作树，不混入代理分支，也不继续请求其认证信息。
+C 已由 #126 合入 be8c155，批准的通用调度/只读边界不变；本轮只增加 Webhook 的 feishu_proxy 协议，详见 [ARCHITECTURE](ARCHITECTURE.md#scheduled-agent-tasks)。代理功能冻结于 163d2ac，独立审查和单次完整默认全套通过；当前仅本地候选，后续推送/合入和真实验收须用户另行授权。D 的 Node 研究/未提交改动保留在原隔离工作树，不混入代理分支，也不继续请求其认证信息。
 
 用户最新决定取消代理协议原文的固定 `<at id=all></at>`，不加开关；不带 at 能否正常投递、响应业务协议与群内实收须线上验收。下一步由用户决定代理的后续集成/部署及 C 公司验收授权；真实 U5/U6/U7、30任务并发/成本仍开放。
 
@@ -138,7 +138,7 @@ B1 的短口径主视图修复已成立；原 B2 因复现形状不符合真实 
 
 ### 自建代理本地交付（本轮）
 
-基线 be8c155638c4fa0c4eece912f8ff79fbef1c41ef；分支 codex/feishu-proxy-webhook。最新冻结 SHA、验证日志和独立审查结论待本轮检查后据实补齐。前候选 4f43d95 的独立审查发现 B/C get_task 未明确代理 HTTP 成功的界限，已补两类正式入口 RED，读取持久化 notification_reason 后提示“群内投递未确认”，重载为官方协议并更新目标版本后仍按历史回执说明。
+基线 be8c155638c4fa0c4eece912f8ff79fbef1c41ef；分支 codex/feishu-proxy-webhook。功能/测试冻结 SHA **163d2acb9ce4b1154d7cb3f995261c4075982c37**，文件树 **3b6b848ed689e172e9dac8c79a956678b8d0fbb3**；后续提交只补文档，不以新 SHA 冒充重跑全套。前候选 4f43d95 的独立审查发现 B/C get_task 未明确代理 HTTP 成功的界限，已补两类正式入口 RED，读取持久化 notification_reason 后提示“群内投递未确认”，重载为官方协议并更新目标版本后仍按历史回执说明。
 
 产品改动为 webhook.py 的机器人协议配置/固定字段校验、保密 HTTP 请求格式/代理结果原因及回执，runtime.py 的安全配置诊断措辞；独立审查要求补齐 scheduled_tasks.py 的任务状态回执说明，仅从实际 attempt.reason 映射提示，不改调度/权限或输出 schema。现有本地 Tool、claim/settle、主体核验、接收范围、unknown 门槛和调度不变，不新增依赖/迁移。代理字段增加后发现固定超限说明也可能被固定 title/openUrl 撑过20000字节，先补正式 C 入口失败用例，再在 send_fixed 的最终请求处拒绝；正常容量说明仍使用本次唯一机会。
 
@@ -147,9 +147,23 @@ B1 的短口径主视图修复已成立；原 B2 因复现形状不符合真实 
 
 当前离线证据：代理专项 **36 passed**（/tmp/xiaowei-proxy-task-status-green.log）；含最小闭环、B/C 回执新旧协议归因。无 at/open_url 的 RED **8 failed/14 passed**（/tmp/xiaowei-proxy-no-at-red.log）；固定说明仍超限 RED **1 failed**（/tmp/xiaowei-proxy-capacity-red.log）；B/C 状态 RED **2 failed**（/tmp/xiaowei-proxy-task-status-red.log），均在对应修复前命中目标断言。初次相关回归 **443 passed/1 failed** 为切换虚拟环境期间找不到证书文件，独立环境定点重跑 **1 passed**（/tmp/xiaowei-proxy-runtime-env-recheck.log）；不将分批相加为全套。
 
-前候选 4f43d95 的全套在 /private/tmp 目录出现四项 Docker bind 源不存在的环境失败，为节省重复成本中止，**4 failed/1339 passed/1 skipped/89 deselected，EXIT_CODE=2，版本始终 clean/未变**（/tmp/xiaowei-proxy-full-4f43d95.log）；不是完整通过。已移动同一分支至上表 /Users 工作树，用离线缓存重建本项目独立 .venv，原失败的正式 Compose 入口 **1 passed/64.62秒**（/tmp/xiaowei-proxy-compose-after-move.log）。最终候选完整默认全套尚待新冻结后记录。
+前候选 4f43d95 的全套在 /private/tmp 目录出现四项 Docker bind 源不存在的环境失败，为节省重复成本中止，**4 failed/1339 passed/1 skipped/89 deselected，EXIT_CODE=2，版本始终 clean/未变**（/tmp/xiaowei-proxy-full-4f43d95.log）；不是完整通过。已移动同一分支至上表 /Users 工作树，用离线缓存重建本项目独立 .venv，原失败的正式 Compose 入口 **1 passed/64.62秒**（/tmp/xiaowei-proxy-compose-after-move.log）。冻结 163d2ac 的完整默认全套结果如下。
 
 ruff check、mypy（37源文件）、4个改动 Python 文件 format 和 diff 检查通过。扩大到 src/tests/scripts 的 format 检查报告4个基线已存在文件（cli.py、test_dialogue_real_model.py、test_monitoring_reliability.py、test_progress_sdk_contract.py），与 be8c155 无差异，本轮不混入格式整理；不宣称全仓 format 通过。
+
+**最终有效证据（同一冻结版本，不拼接）：**
+
+| 检查 | 命令/证据及结果 |
+| --- | --- |
+| 完整默认全套 | `PYTHONDONTWRITEBYTECODE=1 SDK_TEST_POSTGRES_URL=<本机隔离PG> .venv/bin/python /tmp/xiaowei_run_versioned_check.py /tmp/xiaowei-proxy-full-163d2ac.log .venv/bin/python -m pytest -q -p no:cacheprovider`；**4780 passed、235 skipped、89 deselected、5 warnings，1769.24秒**。日志起止 HEAD 均为163d2acb9ce4b1154d7cb3f995261c4075982c37，起止clean，EXIT_CODE=0、VERSION_UNCHANGED=True；覆盖受影响 A/B/C、Action/渠道、Evidence/Session、配置、迁移与部署维护。默认未选的浏览器及需显式环境的跳过项不算验收；5项warning来自网络拒绝测试的预期socket拦截 |
+| 代理专项 | `.venv/bin/python -m pytest tests/sdk_core/test_webhook_proxy.py -q -p no:cacheprovider`（同上本机PG及禁字节码环境）；**36 passed**。正式群/SDK/治理/隔离PG保持，模型/HTTP/飞书/业务驱动为合成替身；不能证明真实自主选择或公司接口 |
+| 静态/文档 | `.venv/bin/ruff check --no-cache .`、`.venv/bin/mypy --cache-dir=/tmp/xiaowei-proxy-mypy src`（37文件）、`.venv/bin/ruff format --check src/xiaowei/webhook.py src/xiaowei/runtime.py src/xiaowei/scheduled_tasks.py tests/sdk_core/test_webhook_proxy.py`、`git diff --check`通过；受影响文档相对文件链接存在；默认全套包含文档命令检查 |
+| 隔离变异 | /tmp/xiaowei_proxy_mutations.py 以163d2ac独立复制src，覆盖 mention 屏蔽、代理2xx响应分支、固定说明容量门槛、持久化回执原因；**4/4被杀死**，各命中目标断言、非setup错误。日志 /tmp/xiaowei-proxy-mutation-{mention,response,capacity,receipt}.log 含基线SHA、源码副本及文件摘要；未改真实工作树 |
+| 独立审查 | be8c155..4f43d95发现任务状态回执P2；增量4f43d95..163d2ac只读复审关闭P2、无新增阻断。检查实际调用路径与新测试/RED/GREEN日志，未重跑重型全套；不是本线程自行复查冒充独立审查 |
+
+关键回归名称：`test_proxy_formal_entry_preserves_query_json_and_truthful_http_receipt`（含POST前已落库sending及秘密哨兵）、`test_proxy_same_intent_deduplicates_after_mention_sanitization`、`test_proxy_unknown_gate_requires_delivered_warning_before_explicit_resend`、`test_proxy_sender_recheck_prevents_claim_and_http`、`test_proxy_unapproved_receiver_has_zero_http`、`test_proxy_fixed_reminder_uses_same_once_only_path`、`test_proxy_scheduled_agent_delivers_facts_or_one_capacity_notice`、`test_proxy_static_fields_cannot_make_capacity_notice_exceed_limit`、`test_proxy_task_status_explains_persisted_http_receipt_even_after_config_change`、`test_official_and_proxy_bots_keep_distinct_wire_contracts`。
+
+仍未覆盖：真实代理对“不带at”的兼容、业务响应协议及真实飞书群实收；真实模型U5/U6/U7与成本、30任务并发实测。没有推送/PR/远端CI/合并/部署，也没有真实服务调用或公司配置/凭据读取；D保持暂停。代理不新增迁移或依赖，C主线v15的停服/备份升级边界仍按README，不因本次通过而取得部署授权。
 
 ### C 收尾修复与验证
 
