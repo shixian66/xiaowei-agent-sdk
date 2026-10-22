@@ -3,14 +3,12 @@ ALTER TABLE xiaowei_scheduled_job ADD COLUMN kind text NOT NULL DEFAULT 'fixed_m
     CHECK (kind IN ('fixed_message','agent_task'));
 ALTER TABLE xiaowei_scheduled_job ADD COLUMN agent_spec text;
 ALTER TABLE xiaowei_scheduled_job ALTER COLUMN content_expires_at DROP NOT NULL;
-ALTER TABLE xiaowei_scheduled_job ADD COLUMN revision integer NOT NULL DEFAULT 1 CHECK(revision>0);
 ALTER TABLE xiaowei_scheduled_job ADD COLUMN last_long_notice_at timestamptz;
 ALTER TABLE xiaowei_scheduled_job ADD COLUMN notice_id text;
 ALTER TABLE xiaowei_scheduled_job ADD COLUMN notice_reason text;
 ALTER TABLE xiaowei_scheduled_job ADD COLUMN notice_state text
-    CHECK(notice_state IN ('pending','sending','sent','failed','unknown','suppressed'));
+    CHECK(notice_state IN ('pending','sending','sent','failed','unknown'));
 ALTER TABLE xiaowei_scheduled_job ADD COLUMN next_run timestamptz;
-ALTER TABLE xiaowei_scheduled_job ADD COLUMN run_count integer NOT NULL DEFAULT 0 CHECK (run_count>=0);
 UPDATE xiaowei_scheduled_job SET next_run=run_at;
 CREATE TABLE xiaowei_scheduled_run (
     run_id text PRIMARY KEY,
@@ -22,12 +20,7 @@ CREATE TABLE xiaowei_scheduled_run (
     reason text NOT NULL,
     queued_at timestamptz NOT NULL,
     started_at timestamptz,
-    skipped_count integer NOT NULL DEFAULT 0 CHECK(skipped_count>=0),
     finished_at timestamptz,
-    duration_seconds double precision,
-    usage text,
-    answer text,
-    answer_expires_at timestamptz,
     UNIQUE(job_id,scheduled_at)
 );
 ALTER TABLE xiaowei_notification_attempt ADD COLUMN run_id text UNIQUE REFERENCES xiaowei_scheduled_run(run_id);

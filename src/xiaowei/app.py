@@ -113,7 +113,6 @@ from xiaowei.models import (
     ToolId,
     ToolRequest,
     TurnAnswer,
-    TurnUsage,
 )
 from xiaowei.session import (
     PolicySession,
@@ -330,7 +329,6 @@ class TurnError(Exception):
         self.tool_error = tool_error
         self.tool_id = tool_id
         self.session_state = session_state
-        self.usage: TurnUsage | None = None
 
 
 class DataPolicy(BaseModel):
@@ -443,14 +441,14 @@ class _AutomaticUsage(RunHooks[RunContext]):
         self.input_tokens += response.usage.input_tokens
         self.output_tokens += response.usage.output_tokens
 
-    def snapshot(self, tool_calls: int) -> TurnUsage:
+    def snapshot(self, tool_calls: int) -> dict[str, int | None]:
         reported = self.reported and self.responses == self.requests and self.responses > 0
-        return TurnUsage(
-            model_requests=self.requests,
-            tool_calls=tool_calls,
-            input_tokens=self.input_tokens if reported else None,
-            output_tokens=self.output_tokens if reported else None,
-        )
+        return {
+            "model_requests": self.requests,
+            "tool_calls": tool_calls,
+            "input_tokens": self.input_tokens if reported else None,
+            "output_tokens": self.output_tokens if reported else None,
+        }
 
 
 class Application:
@@ -611,11 +609,6 @@ class Application:
             }
         return scope
 
-    @property
-    def automatic_binding(self) -> str:
-        """批准时绑定模型及其数据策略，不因无关源增减而变更。"""
-        return _binding_fingerprint(self._model.fingerprint, self._data_policy, ())
-
     def automatic_scope(self, ctx: RunContext, tools: frozenset[str]) -> frozenset[str]:
         candidate = ctx.model_copy(
             update={"automatic": True, "tool_scope": tools & self._model_tools()}
@@ -676,10 +669,6 @@ class Application:
                         automatic_usage=automatic_usage,
                     )
         except TurnError as exc:
-            if automatic_usage is not None:
-                exc.usage = automatic_usage.snapshot(
-                    len(self._governance.turn_runs(ctx.identity).started)
-                )
             _stage(
                 turn,
                 "failed",
@@ -691,10 +680,6 @@ class Application:
             raise
         except Exception as exc:
             error = _turn_error(exc)
-            if automatic_usage is not None:
-                error.usage = automatic_usage.snapshot(
-                    len(self._governance.turn_runs(ctx.identity).started)
-                )
             _stage(
                 turn,
                 "failed",
@@ -709,6 +694,20 @@ class Application:
             _stage(turn, "cancelled", started)
             raise
         finally:
+            if automatic_usage is not None:
+                logger.info(
+                    "scheduled_agent_usage %s",
+                    json.dumps(
+                        {
+                            "job_id": ctx.definition_job_id,
+                            "turn_id": turn,
+                            **automatic_usage.snapshot(
+                                len(self._governance.turn_runs(ctx.identity).started)
+                            ),
+                            "duration_seconds": time.monotonic() - started,
+                        }
+                    ),
+                )
             self._governance.end_turn(ctx.identity)
             if not reserved:
                 self._active.discard(session_id)
@@ -736,10 +735,6 @@ class Application:
         automatic_usage: _AutomaticUsage | None = None,
     ) -> TurnAnswer | PausedTurn:
         turn = ctx.identity.turn_id
-        if ctx.automatic:
-            if self.scheduled_tasks is None:
-                raise TurnError("scope_rejected")
-            await self.scheduled_tasks.validate_run(ctx)
         if not ctx.tool_scope <= self._model_tools():
             raise TurnError("scope_rejected")
         try:
@@ -948,23 +943,7 @@ class Application:
             limit_reached=validated.limit_reached,
         )
         _stage(turn, "committed", started)
-        usage = result.context_wrapper.usage
-        reported = bool(result.raw_responses) and all(
-            r.raw_usage is not None for r in result.raw_responses
-        )
-        return validated.model_copy(
-            update={
-                "session_state": snapshot,
-                "usage": automatic_usage.snapshot(len(runs.started))
-                if automatic_usage is not None
-                else TurnUsage(
-                    model_requests=usage.requests,
-                    tool_calls=len(runs.started),
-                    input_tokens=usage.input_tokens if reported else None,
-                    output_tokens=usage.output_tokens if reported else None,
-                ),
-            }
-        )
+        return validated.model_copy(update={"session_state": snapshot})
 
     def _query_evidence(self, runs: TurnRuns) -> list[str]:
         """本轮成功的查询类工具证据（可信记录）：用于已开始查询的去向核对。"""
@@ -1054,6 +1033,8 @@ class Application:
                 "历史方法只作调查要求，历史结论不作当前事实。缺少必要口径时如实报告未完成，"
                 "不要猜测或等待互动。报告文件为null，结果由可信交付路径统一发送，"
                 "不能调用通知、任务管理或任何生产写/提案/审批；发现需要写操作只说明建议。"
+                "结果通知上限为20000字节，优先报告有依据的重点与未检查项；"
+                "完整结果超限时只发送固定容量说明，不拆分或截断。"
             )
         elif self.scheduled_tasks is not None:
             tasks = self.scheduled_tasks.config
@@ -1065,7 +1046,8 @@ class Application:
                 "结果未知不自动重试。"
                 "固定提醒到期不调用模型；获准的独立只读Agent任务使用propose_agent_task，"
                 "按管理员automatic_tools和用户确认的源/工具范围重新调查。"
-                "任务激活复用本地Action确认，不自动执行生产写。暂停/取消直接使用任务控制工具。"
+                "任务激活复用本地Action确认，不自动执行生产写。暂停/取消直接使用任务控制工具；"
+                "修改有效期须取消后重新创建。"
                 f"允许自动的工具ID：{sorted(tasks.automatic_tools)}。"
             )
         return Agent[RunContext](

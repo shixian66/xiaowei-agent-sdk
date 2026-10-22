@@ -939,7 +939,7 @@ async def cleanup_expired(engine: AsyncEngine, *, now: datetime, batch_size: int
                     "UPDATE xiaowei_scheduled_job j SET text=NULL, "
                     "notice_id=CASE WHEN kind='agent_task' "
                     "AND state IN ('draft','active','paused') "
-                    "THEN md5(job_id || '-data-expired-' || revision::text) ELSE notice_id END, "
+                    "THEN md5(job_id || '-data-expired-') ELSE notice_id END, "
                     "notice_reason=CASE WHEN kind='agent_task' AND state IN ('active','paused') "
                     "THEN 'definition_expired' ELSE notice_reason END, "
                     "notice_state=CASE WHEN kind='agent_task' AND state IN ('active','paused') "
@@ -957,15 +957,6 @@ async def cleanup_expired(engine: AsyncEngine, *, now: datetime, batch_size: int
                     "ORDER BY content_expires_at,job_id LIMIT :limit) AND NOT EXISTS "
                     "(SELECT 1 FROM xiaowei_notification_attempt n "
                     "WHERE n.job_id=j.job_id AND n.state='sending')"
-                ),
-                params,
-            )
-            await conn.execute(
-                text(
-                    "UPDATE xiaowei_scheduled_run SET answer=NULL WHERE run_id IN "
-                    "(SELECT run_id FROM xiaowei_scheduled_run WHERE answer_expires_at<=:now "
-                    "AND answer IS NOT NULL AND state<>'running' "
-                    "ORDER BY answer_expires_at,run_id LIMIT :limit)"
                 ),
                 params,
             )

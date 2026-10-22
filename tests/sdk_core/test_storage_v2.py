@@ -986,6 +986,23 @@ async def test_v14_upgrade_preserves_fixed_reminder_and_sdk_session(postgres_url
             )
         assert row["text"] == "fixed text" and row["state"] == "active"
         assert row["kind"] == "fixed_message" and row["agent_spec"] is None
-        assert row["next_run"] == row["run_at"] and row["run_count"] == 0
+        assert row["next_run"] == row["run_at"]
+        assert "run_count" not in row and "revision" not in row
+        async with engine.connect() as conn:
+            columns = set(
+                (
+                    await conn.execute(
+                        text(
+                            "SELECT column_name FROM information_schema.columns "
+                            "WHERE table_schema=current_schema() "
+                            "AND table_name='xiaowei_scheduled_run'"
+                        )
+                    )
+                ).scalars()
+            )
+        assert (
+            not {"answer", "answer_expires_at", "usage", "duration_seconds", "skipped_count"}
+            & columns
+        )
         migration = _migration("015_scheduled_agent.sql")
         assert SDK_SESSIONS_TABLE not in migration and SDK_MESSAGES_TABLE not in migration

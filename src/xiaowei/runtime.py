@@ -1787,7 +1787,6 @@ async def open_runtime(
                 lock,
                 parts.task_definitions,
                 notifications,
-                max_answer_bytes=config.storage.max_answer_bytes,
                 is_admin=lambda subject: (
                     TASK_CONTROL in config.access.grants.get(subject, frozenset())
                 ),
@@ -1810,7 +1809,6 @@ async def open_runtime(
                         [
                             scheduled.binding(),
                             scheduled.binding("scheduled/propose_agent_task"),
-                            scheduled.binding("scheduled/propose_task_expiry"),
                         ]
                         if scheduled is not None
                         else []

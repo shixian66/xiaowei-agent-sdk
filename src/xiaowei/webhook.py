@@ -55,6 +55,12 @@ REMINDER_APPROVAL_NOTICE = "本轮不立即发送；确认后按计划到期发�
 _URL = re.compile(r"https://open\.feishu\.cn/open-apis/bot/v2/hook/[A-Za-z0-9_-]+\Z")
 
 
+@dataclass(frozen=True)
+class FixedSendOutcome:
+    status: str
+    reason: str
+
+
 class WebhookBotConfig(BaseModel):
     """可信管理员登记；同群凭据轮换不改 bot_id/target_version，换接收目标须改版本。"""
 
@@ -265,7 +271,9 @@ class WebhookNotifications:
         content: str,
         claim: Callable[[str], Awaitable[tuple[str, str, str, bool]]],
         settle: Callable[[str, str, str], Awaitable[None]],
-    ) -> None:
+        *,
+        oversize_notice: str | None = None,
+    ) -> FixedSendOutcome:
         """可信一次性任务交付：同一 notify 治理/HTTP，发送占用由任务事务负责。
 
         不注册为模型工具；模型不能提供 claim/settle，也不能跳过获批定义检查。
@@ -281,21 +289,34 @@ class WebhookNotifications:
             arguments={"bot_alias": alias, "text": content, "evidence_ids": []},
         )
 
+        outcome: FixedSendOutcome | None = None
+
         async def execute(_request: ToolRequest) -> ToolObservation:
+            nonlocal outcome
             async with self._locks[bot.config.bot_id]:
                 if not await self._verify_sender(ctx.identity):
-                    raise ValueError("当前发送主体不可核验")
+                    outcome = FixedSendOutcome("not_sent", "sender_not_authorized")
+                    return self._observation(alias, outcome.status, outcome.reason)
                 normalized = _message_text(content)
                 body = _body(bot, normalized, self._clock)
-                if len(body) > MAX_BODY_BYTES:
-                    raise ValueError("完整通知超过20000字节")
+                oversized = len(body) > MAX_BODY_BYTES
+                if oversized:
+                    if oversize_notice is None:
+                        outcome = FixedSendOutcome("not_sent", "content_too_large")
+                        return self._observation(alias, outcome.status, outcome.reason)
+                    # 仅可信调用方提供有界固定说明；同一次治理调用、同一发送机会。
+                    normalized = _message_text(oversize_notice)
+                    body = _body(bot, normalized, self._clock)
                 receipt, status, reason, claimed = await claim(normalized)
                 if claimed:
                     status, reason = await self._post(bot, body)
                     await settle(receipt, status, reason)
+                outcome = FixedSendOutcome(status, "content_too_large" if oversized else reason)
                 return self._observation(alias, status, reason, receipt)
 
         await self._governance.invoke(ctx, request, execute)
+        assert outcome is not None  # noqa: S101 - 受治理执行成功返回即已设置结果。
+        return outcome
 
     async def warning_seen(self, conn: AsyncConnection, owner: str, bot_id: str) -> bool:
         """原群＋稳定机器人共用未知结果门槛，定时/即时占用同一序列。"""
