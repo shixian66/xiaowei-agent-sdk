@@ -5,11 +5,19 @@ from typing import Any
 
 import pytest
 from tests.sdk_core.test_app import cite, tool_call
+from tests.sdk_core.test_feishu_group_images import image_group as image_group
 from tests.sdk_core.test_group_gateway import BOT, KEY, Group, running, states
 from tests.sdk_core.test_group_identity import A, Env
 from tests.sdk_core.test_group_identity import env as env
 
 from xiaowei.feishu import attributed
+
+INVALID_POST = "这条富文本未处理：结构或文字不合法，请改为文字或单张 PNG/JPEG 图文。"
+UNSUPPORTED_POST = (
+    "这条富文本未处理：包含不支持的媒体、附件或节点，请改为文字或单张 PNG/JPEG 图文。"
+)
+MULTIPLE_IMAGES = "这条图文未处理：只支持一张图片，请分次发送。"
+INVALID_IMAGE_KEY = "这条图文未处理：图片资源标识不合法，请重新发送原图。"
 
 
 def content(text: str, *, bot_id: str = KEY, **extra: Any) -> str:
@@ -94,7 +102,6 @@ def raw_post(value: dict[str, Any]) -> dict[str, Any]:
         (
             {
                 "zh_cn": {"content": [[{"tag": "text", "text": "中文"}]]},
-                "en_us": {"content": [[{"tag": "img", "image_key": "img_unselected"}]]},
             },
             "中文",
             None,
@@ -189,53 +196,161 @@ def test_structured_bot_mention_is_removed_before_command_parsing(bot_id):
     assert not parsed.unsupported and parsed.text == "/查询 东区订单？"
 
 
+@pytest.mark.parametrize(
+    ("value", "notice"),
+    [
+        (
+            {
+                "zh_cn": {"content": [[{"tag": "text", "text": "中文"}]]},
+                "en_us": {"content": [[{"tag": "img", "image_key": "img_unselected"}]]},
+            },
+            INVALID_POST,
+        ),
+        (
+            {
+                "content": [[{"tag": "text", "text": "外层正文"}]],
+                "zh_cn": {"content": [[{"tag": "img", "image_key": "img_unselected"}]]},
+            },
+            INVALID_POST,
+        ),
+        (
+            {"content": [[{"tag": "img", "image_key": "https://canary.invalid/image"}]]},
+            INVALID_IMAGE_KEY,
+        ),
+        (
+            {
+                "content": [
+                    [{"tag": "img", "image_key": "img_one"}, {"tag": "img", "image_key": "img_two"}]
+                ]
+            },
+            MULTIPLE_IMAGES,
+        ),
+    ],
+    ids=["two_locales", "outer_and_locale", "invalid_image_key", "multiple_images"],
+)
+def test_post_parser_rejects_invalid_input_with_specific_notice(value, notice):
+    from xiaowei.feishu_post import PostInputError, parse_post
+
+    with pytest.raises(PostInputError) as exc:
+        parse_post(value, bot_mentions=frozenset({BOT, KEY}), max_chars=10000)
+    assert exc.value.notice == notice
+
+
 @pytest.mark.loopback
 @pytest.mark.parametrize(
-    "value",
+    ("value", "notice"),
     [
-        {
-            "content": [
-                [{"tag": "img", "image_key": "img_one"}, {"tag": "img", "image_key": "img_two"}]
-            ]
-        },
-        {"content": [[{"tag": "md", "text": "![x](https://canary.invalid/image)"}]]},
-        {"content": [[{"tag": "text", "text": "正文"}]], "files": [{"file_key": "file_canary"}]},
-        {"content": [[{"tag": "media", "file_key": "media_canary"}]]},
-        {"content": [[{"tag": "unknown", "text": "NODE_CANARY"}]]},
-        {"content": [[{"tag": "img", "image_key": "https://canary.invalid/image"}]]},
-        {"content": [{"tag": "text", "text": "PARAGRAPH_CANARY"}]},
-        {"content": [[{"tag": "text", "text": "不得回退"}]], "content_v2": None},
-        {"content": [[{"tag": "md", "text": '<img src="https://canary.invalid/image">'}]]},
+        pytest.param(
+            {
+                "content": [
+                    [{"tag": "img", "image_key": "img_one"}, {"tag": "img", "image_key": "img_two"}]
+                ]
+            },
+            MULTIPLE_IMAGES,
+            id="multiple_images",
+        ),
+        pytest.param(
+            {"content": [[{"tag": "md", "text": "![x](https://canary.invalid/image)"}]]},
+            UNSUPPORTED_POST,
+            id="markdown_image",
+        ),
+        pytest.param(
+            {
+                "content": [[{"tag": "text", "text": "正文"}]],
+                "files": [{"file_key": "file_canary"}],
+            },
+            UNSUPPORTED_POST,
+            id="files",
+        ),
+        pytest.param(
+            {"content": [[{"tag": "media", "file_key": "media_canary"}]]},
+            UNSUPPORTED_POST,
+            id="media",
+        ),
+        pytest.param(
+            {"content": [[{"tag": "unknown", "text": "NODE_CANARY"}]]},
+            UNSUPPORTED_POST,
+            id="unknown_node",
+        ),
+        pytest.param(
+            {"content": [[{"tag": "img", "image_key": "https://canary.invalid/image"}]]},
+            INVALID_IMAGE_KEY,
+            id="invalid_image_key",
+        ),
+        pytest.param(
+            {"content": [{"tag": "text", "text": "PARAGRAPH_CANARY"}]},
+            INVALID_POST,
+            id="invalid_paragraph",
+        ),
+        pytest.param(
+            {"content": [[{"tag": "text", "text": "不得回退"}]], "content_v2": None},
+            INVALID_POST,
+            id="invalid_v2",
+        ),
+        pytest.param(
+            {"content": [[{"tag": "md", "text": '<img src="https://canary.invalid/image">'}]]},
+            UNSUPPORTED_POST,
+            id="markdown_html",
+        ),
+        pytest.param(
+            {
+                "zh_cn": {"content": [[{"tag": "text", "text": "中文"}]]},
+                "en_us": {"content": [[{"tag": "img", "image_key": "img_unselected"}]]},
+            },
+            INVALID_POST,
+            id="two_locales",
+        ),
+        pytest.param(
+            {
+                "content": [[{"tag": "text", "text": "外层正文"}]],
+                "zh_cn": {"content": [[{"tag": "img", "image_key": "img_unselected"}]]},
+            },
+            INVALID_POST,
+            id="outer_and_locale",
+        ),
     ],
 )
-async def test_unsupported_post_is_rejected_whole_before_download_or_model(env: Env, value, caplog):
-    from tests.sdk_core.test_feishu import Outbox
-    from tests.sdk_core.test_group_gateway import group_config
-
-    from xiaowei.feishu import FeishuGateway
-
-    downloads = []
-
-    async def download(*args, **kwargs):
-        downloads.append((args, kwargs))
-        raise AssertionError("拒绝的 post 不应下载")
-
-    outbox = Outbox()
-    gateway = FeishuGateway(
-        env.service,
-        group_config(image_input_enabled=True),
-        outbox,
-        clock=env.clock,
-        bot_open_id=lambda: BOT,
-        download_resource=download,
-    )
+async def test_unsupported_post_is_rejected_whole_before_download_or_model(
+    env: Env, image_group, value, notice, caplog
+):
+    group, calls, downloads = image_group
     event = raw_post(value)
     event["event"]["message"]["create_time"] = str(int(env.clock().timestamp() * 1000))
-    await gateway.receive(event)
-    assert downloads == [] and env.scripts.calls == {} and env.adapter.calls == []
+    await group.gateway.receive(event)
+    await group.gateway.idle()
+    assert downloads == [] and calls == [] and env.adapter.calls == []
     assert await env.rows("SELECT count(*) FROM xiaowei_request") == [(0,)]
-    assert len(outbox.sent) == 1 and "未处理" in outbox.texts()[0]
-    assert "CANARY" not in caplog.text and "canary.invalid" not in str(outbox.sent)
+    assert group.outbox.texts() == [notice]
+    assert "CANARY" not in caplog.text and "canary.invalid" not in str(group.outbox.sent)
+
+
+@pytest.mark.loopback
+async def test_invalid_posts_each_receive_one_member_authorized_notice(env: Env):
+    value = {"content": [[{"tag": "media", "file_key": "file_canary"}]]}
+    async with running(env) as group:
+        for mid in ("om_bad_one", "om_bad_two"):
+            event = group.event(
+                "ignored",
+                message_id=mid,
+                content=json.dumps(value),
+                event__message__message_type="post",
+            )
+            await group.gateway.receive(event)
+            await group.gateway.receive(event)
+        assert group.outbox.texts() == [UNSUPPORTED_POST, UNSUPPORTED_POST]
+        assert group.outbox.replies == ["om_bad_one", "om_bad_two"]
+        env.members.current.remove(A)
+        await group.gateway.receive(
+            group.event(
+                "ignored",
+                message_id="om_bad_revoked",
+                content=json.dumps(value),
+                event__message__message_type="post",
+            )
+        )
+    assert group.outbox.texts() == [UNSUPPORTED_POST, UNSUPPORTED_POST]
+    assert env.scripts.calls == {} and env.adapter.calls == []
+    assert await env.rows("SELECT count(*) FROM xiaowei_request") == [(0,)]
 
 
 @pytest.mark.loopback

@@ -30,7 +30,8 @@ async def test_addressed_member_gets_one_receipt_to_original_message(env: Env, k
     notice = fs.outbox.texts()[0]
     assert ("未处理" if kind == "post" else "暂不支持") in notice and "文字" in notice
     assert fs.outbox.replies == [value["event"]["message"]["message_id"]]
-    assert env.members.checks == [("oc_group", A)]
+    # post 输入错误每次先核当前成员再按消息去重，其他类型仍先占原提示窗口。
+    assert env.members.checks == [("oc_group", A)] * (2 if kind == "post" else 1)
     assert calls == [] and env.scripts.calls == {} and env.adapter.calls == []
 
 

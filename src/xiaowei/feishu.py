@@ -760,12 +760,16 @@ class FeishuGateway:
                 await self._send_notice(message)
             return
         try:
+            if message.input_notice is not None:
+                # post 输入错误按消息提示，避免窗口吞掉用户下一次修正的结果。
+                await self._service.authorize_notice(self._ref(message))
+                if self._first(message):
+                    await self._notify(message, message.input_notice)
+                return
             if message.unsupported:
                 if self._reserve_notice(message):
                     await self._service.authorize_notice(self._ref(message))
-                    notice = message.input_notice or (
-                        UNSUPPORTED_FILE if message.unsupported_file else UNSUPPORTED_INPUT
-                    )
+                    notice = UNSUPPORTED_FILE if message.unsupported_file else UNSUPPORTED_INPUT
                     await self._notify(message, notice)
                 return
             if message.file_key is not None:

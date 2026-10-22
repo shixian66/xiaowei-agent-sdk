@@ -15,8 +15,8 @@
 | 锁定依赖 | SDK `0.22.3`、Lark Channel `1.4.0`、MCP `2.2.0`、sqlglot `30.17.0`、`nh3 0.3.7`、`tinycss2 1.5.1`、Pillow `13.0.0`、certifi `2026.10.19`（后两项为严格审计发现的既有漏洞定向升级） |
 | 正式入口 | `xiaowei serve`、`config check`、`model check`、`storage init/upgrade/cleanup`、`requests resend`；命令与环境准备以 README 为准 |
 | 最近有记录的公司部署 | 主线交接记录含用户提供的 `xiaowei:143c4c8641be636c41c130329ce1639a36b59c27` 镜像及巡检日志；未独立核验当前服务器状态。本次未部署 |
-| 当前验收结论 | A/B/C 已合入主线；代理离线候选 163d2ac 的独立复审及单次完整默认全套通过；当前 S0 已闭合、S2 本地全套通过但待独立审查，真实输入/识图与 U5/U6/U7 未验收，D 暂停且未实现。具体版本与证据见 §5 |
-| 当前任务授权 | 起点 d4b3420：按用户决定修订三份文档至 v1.4 并单独提交，完成本地 S0 离线门槛和 S2 post 输入、测试及提交。S1 仅方案；不新增依赖/迁移、不推送/PR/合并/部署、不调用真实服务/模型或读取公司配置凭据，D 暂停 |
+| 当前验收结论 | A/B/C 已合入主线；代理离线候选 163d2ac 的独立复审及单次完整默认全套通过；S0 已闭合、S2 在 9e04edd 独立审查有条件通过；当前仅修复审查差异、待窄范围复核，真实输入/识图与 U5/U6/U7 未验收，D 暂停且未实现。具体版本与证据见 §5 |
+| 当前任务授权 | 起点 9e04edd：仅修复 S2 多文档静默丢图及拒绝测试缺口，可选局部提示修正；只改相关代码/测试及计划 v1.4、handoff 并本地提交。不实施 S1/v4/D，不新增依赖/迁移、不推送/PR/合并/部署、不调用真实服务/模型或读取公司配置凭据 |
 
 原工作目录的 ARCHITECTURE 差异与未跟踪计划/公司配置保留，未复制到本工作树；本次未读取公司配置凭据。旧监控和回答修复记录保留为注明版本的证据，不作为本轮输入或展示范围扩展授权。
 
@@ -39,11 +39,11 @@
 
 ### 当前：群输入修复 S0/S2；展示 S1 仅方案
 
-起点 d4b3420c689a8aeced78902849877b08760f365f（v1.3 独立复审通过）；产品代码基线 main@1a92c58，原目录与 D 工作树不动。用户已确认的交付/B2 取舍归入 [ARCHITECTURE 长期规则](ARCHITECTURE.md#user-delivery-and-history)，本地实施按[计划 v1.4](docs/superpowers/plans/2026-10-22-feishu-input-presentation-repair.md)串行推进，不再做文档复审。单折叠区不改模型 schema；B2 已选一次无工具改写。v4 保存语义和回退限制须另行确认，S1 不实施。
+当前修复起点 9e04edd85bc2868ef9de2e7bbb2eede38dec48e8（S2 独立审查有条件通过），分支 codex/feishu-input-presentation-plan，原目录与 D 工作树不动。按[计划 v1.4](docs/superpowers/plans/2026-10-22-feishu-input-presentation-repair.md)仅修多文档选择和拒绝测试有效性；已采纳局部错误回执按消息提示，未改空 post 准入。长期交付规则及 v4 方案不变，S1 未实施。
 
-进度：v1.4 文档已单独提交 7cb98e20a74f658cc39414e7a1cf8d133d1f85bc；S0 的解析样例、v4 贯穿/回退方案及暂停可见性实测已完成，S2 入口、图文与命令/拒绝链已 RED→GREEN；开发期宽回归706项、最终专项37项及冻结版本单次完整默认全套通过（§5）；S2 等待独立审查。保留既有 raw 事件授权、平台 mentions、图片开关/Vertex/容量、diagnose 与图片回放，不新增权限、依赖或迁移。验收精简为计划指定的 4 格版本行为（留 S1）、一次资源键隔离变异；JSON 容器预算不改。
+进度：多文档在解析层和正式入口均已 RED→GREEN；局部 57 项通过。两组指定变异均在临时副本命中解析/入口测试，各 2 failed，恢复后各 2 passed，副本已删除，工作树未被变异。最终指定回归与静态检查待冻结后记录于 §5；本次按授权不重跑完整默认全套。
 
-只读/脚本模型和隔离 PG/浏览器可用；真实模型、飞书、代理和公司源均不授权。下一项是将 S2 精确 SHA 交 Claude 独立审查；S1 等待用户确认 v4 回退限制及后续开发授权。代码/离线/真实能力/部署不互相替代。S2 尚未独立审查或真实验收，进展与检查见 §5。
+下一项是完成上述检查、本地提交后将精确 SHA 交 Claude 仅复核本次差异及两组变异，不重做整轮 S2。S1 仍等待用户确认 v4 回退限制及后续开发授权，D 暂停。真实模型、飞书、代理和公司源不授权；离线证据不能替代真实输入/识图/客户端验收。
 
 ### 已合入的监控可靠性修订（PR #121）
 
@@ -138,25 +138,21 @@ B1 的短口径主视图修复已成立；原 B2 因复现形状不符合真实 
 
 ## 5. 验证记录与限制
 
-### 群输入 S0/S2（v1.4，本地候选，待独立审查）
+### 群输入 S0/S2（v1.4，局部审查修复，待窄范围复核）
 
-起点 d4b3420，文档单独提交 7cb98e20a74f658cc39414e7a1cf8d133d1f85bc。当前产品只改 Feishu 群 post 白名单和图文问题传递，不改模型 schema、保存版本或 S1 展示。S0 的 v4 方案与回退限制见计划；旧程序不能读 v4，备份恢复会回退发送/Action 账本，须保留新库并核对期间副作用。本轮没有备份/恢复操作，v4 待用户确认。
+起点 9e04edd 已获独立审查“有条件通过”。本次修复位于 feishu_post.parse_post 的文档选择：仅一个可选文档时接纳，多 locale 或外层正文与 locale 并存整条按 invalid 拒绝；单文档 content_v2 优先且不回退旧值。invalid 表示无法确定唯一完整输入，不新增提示种类。模型 schema、保存版本、S1 展示与既有图片/权限边界未变。
 
-S0 可见性用正式群入口、真 SDK 与隔离 PG 实测 3 项：未恢复/过期后的普通轮看不到暂停查询；拒绝经 SDK 恢复提交后可见。测试用受治理的查询类工具和合成数据，无重查、零生产写。13 个纯解析禁网样例验证同源文本/图片、两种 at、长消息、链接目标与键隔离；S2 图文问题先做当前输入准入，绑定说明加入后再按实际输入检查，未放宽任何限额。
+拒绝测试改用已开启 SessionImageStore 和 Vertex 图片开关的 image_group 装配，逐项精确断言固定说明：多图→images，非法键→image_key；md 图片/files/media/未知节点/md HTML→unsupported；非法段落/非法 v2/多个文档→invalid。每项都断言零下载、零模型、零请求。纯解析层另有四项反例；旧多语言丢图“成功”夹具已换成单 locale 成功对照。当前纯解析用例 17 项。
 
-RED 记录：入口 text 成功/post 拒绝（1 failed/1 passed）；解析 9 failed；图文问题丢失（1 failed/1 passed）；链接目标丢失及完整绑定输入未在存储前拒绝（2 failed）。随后补深层非法 JSON 的解析错误分类和其他成员 at 原值保留的 RED；最终 S0/S2 专项同次 **37 passed**（不是全套）。资源键隔离仅做一次定向变异：临时把 img 键加入正文，指定 canary 测试失败；finally 精确恢复源码，复验 **1 passed**。临时日志在 `/tmp/xiaowei-post-s2/`，只含合成数据，详细执行命令记录于各日志/本次工具输出。
+RED：review-fix-red.log 中 5 failed、11 passed，失败分别为两种多文档各在解析/正式入口失守，以及两条错误 post 仅获一条说明；不是环境失败。最小修复后的局部回归 review-fix-green.log 为 57 passed。
 
-开发期宽回归 **706 passed**（18 个相关模块，日志 related.log，记录基线 SHA 与未冻结工作区），其后补深层非法 JSON 受控拒绝及其他成员 at 保真回归；下述单次全套覆盖最终代码，不以分批相加称全套。Ruff/format 与 mypy（38 源文件）、文档命令检查（2 passed）、安全门禁（63 passed）及 diff 检查通过；单次全套证据如下。五份受影响文档的本地链接检查覆盖 118 项，本片相关链接/锚点有效；另发现运维文档既有 §3.5 计划链接锚点漂移，基线已存在、未混入本片修复。README 与运维仅修正当前群 post 的输入说明，未改运维命令。真实模型、飞书、代理和公司源未调用，tracing 关闭；脚本模型不证明任务理解/识图能力。S1、D 未实施，未新增依赖/迁移，未读取公司配置凭据。
+两组变异分别在临时源码副本完成，先验证四项基线通过并记录实际加载的模块路径/hash：多图拒绝改为 continue，解析和正式入口共 2 failed；精确恢复后 2 passed。删除键正则同样 2 failed→恢复后 2 passed。日志为 `/tmp/xiaowei-post-s2/review-fix-mutant-multiple-images.log`、`review-fix-restored-multiple-images.log`、`review-fix-mutant-image-key.log`、`review-fix-restored-image-key.log`；临时副本已删除、工作树源码未被变异。初次副本缺 scripts 导致的装配错误单存 review-fix-mutation-setup-error.log，补齐已存在依赖后重跑，不把装配错误算作变异命中。
 
-**冻结代码与单次完整默认全套。** 本地代码提交 `9f109374e57b89548b0aed2cd67e0a07f9819282`，在同一干净 SHA 上完整运行一次，**4818 passed、235 skipped、89 deselected、5 warnings，1705.96 秒，EXIT_CODE=0**；开始/结束 SHA 相同，BEGIN_CLEAN/END_CLEAN/VERSION_UNCHANGED 均为 true。UTC 开始 2026-10-22T15:49:26，结束 16:17:57（跨 Asia/Shanghai 自然日）。235 项保留既有集成环境跳过；默认未选浏览器、真实 StarRocks/AuditLoader 用例，共 89 项。5 个警告来自预期的禁网反例。不把这些跳过/未选部分或离线通过表述为真实服务验收。完整日志：`/tmp/xiaowei-post-s2/full-9f10937.log`。此后只更新本交接记录，代码/测试未再改。
+可选项 1 已做：仅 post 的 input_notice 先核当前成员，再沿 _first 按消息去重，避免十分钟窗口吞掉下一条修正失败的说明。新增连续错误/重复投递/撤权反例；真正未支持类型与身份提示仍用原窗口。对应旧 post 测试按新顺序复核两次成员，其他类型仍只复核一次。可选项 2 未做：只 @ 机器人的 post 仍返回 invalid，与 text 的 EMPTY_COMMAND 文案不同；本次不扩大空输入准入或改动空命令路径。
 
-实际完整命令（固定隔离测试 PG，无公司凭据）：
+最终受影响回归、ruff/format/mypy/文档及 diff 检查：待冻结后记录。本次不重跑完整默认全套；旧 4818 passed、235 skipped、89 deselected 的单次全套只覆盖 9f109374e57b89548b0aed2cd67e0a07f9819282（日志 full-9f10937.log），不能当成本次修复通过证据。早期 706/37 项记录及资源键隔离变异同样不替代本次检查，原始日志仍在 /tmp/xiaowei-post-s2/。
 
-```bash
-UV_OFFLINE=1 SDK_TEST_POSTGRES_URL=postgresql+asyncpg://postgres@127.0.0.1:55432/postgres uv run --locked --extra dev python -m pytest -q
-```
-
-静态与专项命令：`uv run --locked --extra dev ruff check .`、对 7 个修改 Python 文件执行 `ruff format --check`、`uv run --locked --extra dev mypy src`、`uv run --locked --extra dev python -m pytest -m security -q`、`PYTHONDONTWRITEBYTECODE=1 .venv/bin/python -m pytest -q -p no:cacheprovider tests/security/test_docs_command_consistency.py`、`git diff --check`，均通过。最终 37 项专项为 `test_feishu_post.py`、`test_feishu_group_images.py` 与 `test_sdk_approval.py::test_paused_query_visibility_in_later_normal_turn` 同次运行（隔离 PG）；相关 18 模块的完整命令在 related.log，不另复制命令清单。
+S0 的 v4 贯穿/回退方案仍仅方案；原三项 Gateway→SDK→隔离 PG 暂停可见性结论不变：未恢复/过期后普通轮不可见，拒绝经恢复提交后可见，零重查/生产写。未实施 S1/v4/D，未新增依赖/迁移，未读取公司配置凭据或调用真实服务。未覆盖真实平台 post/mentions/md 形态（md 中 <at> 会被当 HTML 整条拒绝）、真实识图和客户端展示。下一步只交精确 SHA 做本次差异及两组变异的独立复核。
 
 ### 群输入与按需详情计划 v1.3（仅文档）
 

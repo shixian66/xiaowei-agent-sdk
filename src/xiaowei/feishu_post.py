@@ -75,13 +75,15 @@ def _text_node(node: dict[str, Any], bot_mentions: frozenset[str]) -> str:
 def parse_post(
     content: dict[str, Any], *, bot_mentions: frozenset[str], max_chars: int
 ) -> PostInput:
-    """选首个文档；有 v2 即选 v2，同组段落同时取得正文和结构化图片。"""
+    """仅接单一文档；有 v2 即选 v2，同组段落同时取得正文和结构化图片。"""
     if "files" in content:
         raise PostInputError("unsupported")
+    documents = [value for value in content.values() if isinstance(value, dict)]
     if "content" in content or "content_v2" in content:
-        doc = content
-    else:
-        doc = next((value for value in content.values() if isinstance(value, dict)), {})
+        documents.insert(0, content)
+    if len(documents) != 1:
+        raise PostInputError("invalid")
+    doc = documents[0]
     if "files" in doc:
         raise PostInputError("unsupported")
     paragraphs = doc.get("content_v2") if "content_v2" in doc else doc.get("content")
