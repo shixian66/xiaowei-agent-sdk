@@ -378,7 +378,7 @@ class TaskDefinitions:
         ctx = source.model_copy(
             update={"identity": identity, "target_scope": decision.target_ids, "budget": budget}
         )
-        if viewer is not None:
+        if viewer is not None or automatic:
             recipient_tools = self.model_tools & (
                 recipient_tools if recipient_tools is not None else self.model_tools
             )
@@ -830,7 +830,7 @@ class ScheduledTasks:
             raise
 
     async def _claim_agent_send(
-        self, job: Mapping[str, Any], run_id: str, content: str, *, long_notice: bool = False
+        self, job: Mapping[str, Any], run_id: str, content: str, *, long_notice: str | None = None
     ) -> tuple[str, str, str, bool]:
         async with self.engine.begin() as conn:
             await self._admit(conn)
@@ -879,7 +879,7 @@ class ScheduledTasks:
                     digest=hashlib.sha256(content.encode()).hexdigest(),
                 ),
             )
-            if long_notice:
+            if long_notice is not None and content.endswith(long_notice):
                 await conn.execute(
                     sql(
                         "UPDATE xiaowei_scheduled_job SET last_long_notice_at=:now WHERE job_id=:id"
@@ -1062,17 +1062,18 @@ class ScheduledTasks:
                             until = deadline.astimezone(ZoneInfo(self.config.timezone)).isoformat()
                             content += f"\n本次为到期前最后一次计划运行；任务将于{until}到期停止。"
                         since = job.get("last_long_notice_at") or job["approved_at"]
-                        long_notice = bool(
+                        long_notice = None
+                        if (
                             spec.interval_seconds
                             and spec.expires_at is None
                             and self.clock() - since >= timedelta(days=30)
-                        )
-                        if long_notice:
+                        ):
                             days = (self.clock() - job["approved_at"]).days
-                            content += (
-                                f"\n本任务已长期运行 {days} 天，"
+                            long_notice = (
+                                f"本任务已长期运行 {days} 天，"
                                 f"不再需要请 @小维 取消任务〈{job['job_id']}〉"
                             )
+                            content += "\n" + long_notice
                         sending = ctx.model_copy(
                             update={
                                 "automatic": False,
@@ -1694,7 +1695,8 @@ class ScheduledTasks:
                         job = {
                             **job,
                             "reason": "任务已停止"
-                            if job["state"] not in {"draft", "active", "paused"}
+                            if job.get("kind") == "agent_task"
+                            and job["state"] not in {"draft", "active", "paused"}
                             else "发送已准入，未暂停/取消",
                         }
                 if job.get("notification_state") in {"unknown", "sending"}:

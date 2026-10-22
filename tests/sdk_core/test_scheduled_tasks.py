@@ -1546,3 +1546,21 @@ async def test_control_only_risk_notice_requires_actual_delivery(env, monkeypatc
         )
         await group.ask(message, message_id="om_after_control_risk")
         assert len(requests) == (1 if delivered else 0)
+
+
+async def test_completed_fixed_reminder_keeps_admitted_control_reason(env, monkeypatch):
+    async with webhook_running(env, monkeypatch, config=task_config(env)) as (group, requests, rt):
+        job = await reminder(env, group)
+        env.clock.advance(100)
+        await rt.scheduled_tasks.tick()
+        assert await env.scalar("SELECT state FROM xiaowei_scheduled_job") == "completed"
+        message = "暂停已发出的一次性提醒"
+        env.scripts.add(
+            attributed(A, message),
+            tool_call("scheduled__control_task", job_id=job, operation="pause"),
+            cite(),
+        )
+        await group.ask(message)
+        assert "发送已准入，未暂停/取消" in message_text(group.outbox.sent[-1][1])
+        assert await env.scalar("SELECT state FROM xiaowei_scheduled_job") == "completed"
+        assert len(requests) == 1

@@ -1743,11 +1743,14 @@ async def open_runtime(
                 shared = _group_access(config, members)
                 if shared is None:
                     return False
-                decision = await parts.results.access.resolve_group(
-                    shared.scope,
-                    identity.subject_id,
-                    verify_member=True,
-                )
+                try:
+                    decision = await parts.results.access.resolve_group(
+                        shared.scope,
+                        identity.subject_id,
+                        verify_member=True,
+                    )
+                except Exception:
+                    return False  # 成员请求故障仅表示本次不可核验；取消仍按原语义传播。
                 return decision is not None and NOTIFY_TOOL in decision.authorized_tools
 
             notifications = WebhookNotifications(

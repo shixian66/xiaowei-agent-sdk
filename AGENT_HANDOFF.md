@@ -148,14 +148,17 @@ B1 的短口径主视图修复已成立；原 B2 因复现形状不符合真实 
 
 | 根因/精简 | 修复及关键验证 |
 | --- | --- |
-| B1 发送前拒绝被普通异常吞成execution_failed | send_fixed返回typed结果；主体未核实零POST并递增计数；容量超限同一机会改发固定说明，回执独立保留真实状态。`test_large_agent_result_sends_capacity_notice_once_then_next_period_runs`、`test_send_time_member_unverified_preserves_count_then_success_resets` |
+| B1 发送前拒绝被普通异常吞成execution_failed | send_fixed返回typed结果；真实成员回调Exception也在runtime授权边界转不可核验，保留CancelledError；主体未核实零POST并递增计数；容量超限同一机会改发固定说明，回执独立保留真实状态。`test_large_agent_result_sends_capacity_notice_once_then_next_period_runs`、`test_send_time_member_unverified_preserves_count_then_success_resets` |
 | B2 一个任务异常取消整批 | gather收集逐项异常、安全日志；普通异常隔离，就绪丢失才取消同批。`test_one_job_scan_error_isolated_unless_readiness_lost` 两分支 |
 | 无消费方的持久化/传递 | 删除run.answer/answer_expires_at/usage/duration_seconds及清理副本、job.run_count/run.skipped_count；错过时点只更新原因/next_run。删TurnUsage层层传递，保留SDK硬调用预算，finally日志含模型/业务工具数、token未知值及耗时，不含正文 |
 | 续期/模型绑定 | 删除revision/续期工具和ActionBinding、suppressed/复活分支、model_binding/automatic_binding；删除三个续期专项测试，保留TTL/当前权限及新配置实际执行回归 |
 | 重复核验 | 开始前统一当前范围/接收方/TTL/三态成员；保存前仅状态/期限，发送前主体核验；Evidence与锁内准入保留。`test_only_start_and_send_check_membership` |
-| 首跑/停止反馈 | 已过去显式周期首跑返回agent_task_time；停止后有历史回执的pause/cancel仍说明“任务已停止”。对应新行为测试覆盖 |
+| 当前模型策略/容量尾注 | 后台旧定义依赖同样取当前model_tools交集；兼容策略改变可继续，依赖工具撤出则模型前拒绝。容量替代说明不消耗正常结果的30天提示机会。`test_definition_dependencies_obey_current_model_policy_before_background_run`（成功/拒绝）及千行结果回归 |
+| 首跑/停止反馈 | 已过去显式周期首跑返回agent_task_time；停止后有历史回执的pause/cancel仍说明“任务已停止”。对应新行为测试覆盖；新停止反馈仅限agent_task，B固定提醒完成后仍保留原发送已准入原因 |
 
-RED：`/tmp/xiaowei-c-trim-large-red.log` 为真实千行结果超限（未改常量）失败；`/tmp/xiaowei-c-trim-red.log` 的成员核验/同批异常为失败反例，其中早期大结果夹具KeyError不作为根因证据。GREEN及冻结版本检查待本轮补录，不引用旧版本全套替代。
+B兼容：完整相关回归暴露停止反馈误影响固定提醒，`/tmp/xiaowei-c-trim-fixed-control-red.log` 确定性复现后把新分支限定agent_task，旧B锁等待断言不改。
+
+RED：`/tmp/xiaowei-c-trim-large-red.log` 为真实千行结果超限（未改常量）失败；`/tmp/xiaowei-c-trim-red.log` 的成员核验/同批异常为失败反例，其中早期大结果夹具KeyError不作为根因证据。GREEN及冻结版本检查待本轮补录，不引用旧版本全套替代。4e7523c独立复审另发现当前模型策略未约束旧定义依赖、真实成员异常分类遗漏及容量说明消耗30天尾注；分别补RED（`/tmp/xiaowei-c-trim-review-red.log` 两失败、`/tmp/xiaowei-c-trim-long-tail-red.log` 一失败）后修复：后台定义同样按当前model_tools交集校验；runtime成员resolve异常统一转不可核验、保留取消传播；仅实际正文含固定尾注才推进提示时间。4e7523c默认全套主动中断（11 passed、89 deselected、exit2，版本未变），不算全套通过。
 
 迁移015尚未发布，直接修订，不为旧试装v15作兼容层；v14→v15须保留B任务及SDK历史。重建试验库或恢复v14备份按README处理。
 

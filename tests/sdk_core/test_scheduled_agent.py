@@ -1149,6 +1149,13 @@ async def test_large_agent_result_sends_capacity_notice_once_then_next_period_ru
         rt,
     ):
         await activate(env, group, interval=3600)
+        from sqlalchemy import text
+
+        async with rt.engine.begin() as conn:
+            await conn.execute(
+                text("UPDATE xiaowei_scheduled_job SET approved_at=:old"),
+                {"old": env.clock() - timedelta(days=30)},
+            )
         env.clock.advance(60)
         await rt.scheduled_tasks.tick()
         await rt.scheduled_tasks.tick()
@@ -1158,11 +1165,16 @@ async def test_large_agent_result_sends_capacity_notice_once_then_next_period_ru
         assert "本次结果超过通知容量，未发送正文" in sent
         assert "PRIVATE_RESULT" not in sent
         assert await env.scalar("SELECT count(*) FROM xiaowei_notification_attempt") == 1
+        assert await env.scalar("SELECT last_long_notice_at FROM xiaowei_scheduled_job") is None
         env.drv.make = driver(Result(("region", "total"), [("next_period", 10)])).make
         env.clock.advance(3600)
         await rt.scheduled_tasks.tick()
         assert len(requests) == 2
         assert "next_period" in json.loads(requests[1].content)["content"]["text"]
+        assert "本任务已长期运行 30 天" in json.loads(requests[1].content)["content"]["text"]
+        assert (
+            await env.scalar("SELECT last_long_notice_at FROM xiaowei_scheduled_job") == env.clock()
+        )
         assert (
             await env.scalar("SELECT count(*) FROM xiaowei_scheduled_run WHERE state='completed'")
             == 1
@@ -1432,3 +1444,107 @@ async def test_pause_during_model_prevents_history_commit_and_send(env, monkeypa
         assert await env.scalar("SELECT state FROM xiaowei_scheduled_run") == "failed"
         assert await env.scalar("SELECT count(*) FROM xiaowei_notification_attempt") == 0
         assert requests == []
+
+
+@pytest.mark.parametrize("dependency_allowed", [False, True])
+async def test_definition_dependencies_obey_current_model_policy_before_background_run(
+    env, monkeypatch, dependency_allowed
+):
+    cfg = agent_config(env)
+    task = "刚才查到sales表，请读取销售统计并总结。"
+    async with running(env, monkeypatch, config=cfg) as (group, _requests, _rt):
+        message = "查一下销售表"
+        env.scripts.add(
+            attributed(A, message),
+            tool_call(
+                "list_tables",
+                cluster=SR.target_id,
+                keyword=".",
+                database="shop",
+                page_size=5,
+                cursor=None,
+            ),
+            cite(),
+        )
+        await group.ask(message)
+        evidence = await env.scalar("SELECT evidence_id FROM xiaowei_evidence")
+        await activate(env, group, interval=3600, task=task)
+        ids = json.loads(
+            await env.scalar("SELECT definition_evidence_ids FROM xiaowei_scheduled_job")
+        )
+        assert evidence in ids
+    data = cfg.model_dump(mode="json")
+    if not dependency_allowed:
+        data["data_policy"]["model_tools"].remove("local/list_tables")
+    else:
+        data["data_policy"]["input"]["max_bytes"] += 100
+    env.scripts.add(
+        task,
+        tool_call(
+            "run_readonly_query", cluster=SR.target_id, sql="SELECT region,total FROM shop.sales"
+        ),
+        cite(),
+    )
+    async with running(env, monkeypatch, config=runtime.ServeConfig.model_validate(data)) as (
+        _group,
+        requests,
+        rt,
+    ):
+        env.clock.advance(60)
+        await rt.scheduled_tasks.tick()
+        assert len(requests) == (1 if dependency_allowed else 0)
+        assert await env.scalar("SELECT state FROM xiaowei_scheduled_job") == (
+            "active" if dependency_allowed else "disabled"
+        )
+        if not dependency_allowed:
+            assert env.scripts.calls.get(task, []) == []
+            assert (
+                await env.scalar("SELECT count(*) FROM xiaowei_scheduled_run WHERE state='running'")
+                == 0
+            )
+
+
+async def test_runtime_sender_timeout_is_unverified_without_replacing_sender_check(
+    env, monkeypatch, caplog
+):
+    from sqlalchemy import text
+
+    blocked = False
+
+    async def members(chat, subject):
+        if blocked:
+            raise TimeoutError("private_member_failure")
+        return True
+
+    async def start_member(chat, subject):
+        return True
+
+    query = tool_call(
+        "run_readonly_query", cluster=SR.target_id, sql="SELECT region,total FROM shop.sales"
+    )
+    env.scripts.add(TASK, query, cite(), query, cite())
+    async with running(env, monkeypatch, config=agent_config(env), member_check=members) as (
+        group,
+        requests,
+        rt,
+    ):
+        await activate(env, group, interval=3600)
+        object.__setattr__(rt.scheduled_tasks.definitions, "member_status", start_member)
+        async with rt.engine.begin() as conn:
+            await conn.execute(text("UPDATE xiaowei_scheduled_job SET unverified_count=2"))
+        blocked = True
+        env.clock.advance(60)
+        await rt.scheduled_tasks.tick()
+        assert requests == []
+        assert await env.scalar("SELECT count(*) FROM xiaowei_notification_attempt") == 0
+        assert (
+            await env.scalar("SELECT reason FROM xiaowei_scheduled_run")
+            == "authorization_unverified"
+        )
+        assert await env.scalar("SELECT unverified_count FROM xiaowei_scheduled_job") == 3
+        assert "private_member_failure" not in caplog.text
+        blocked = False
+        env.clock.advance(3600)
+        await rt.scheduled_tasks.tick()
+        assert len(requests) == 1
+        assert await env.scalar("SELECT unverified_count FROM xiaowei_scheduled_job") == 0
