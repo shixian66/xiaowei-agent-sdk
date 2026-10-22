@@ -26,8 +26,9 @@ async def test_delivered_rules_allow_needed_evidence_and_preserve_intent(env: En
     assert "需要时间条件时" in rules
     assert "用户请求原文时不要主动截短" in rules
     assert "不要调用 run_readonly_query" in rules
-    (cite_all,) = [line for line in rules.splitlines() if line.startswith("以下工具本轮每次成功")]
-    assert "run_readonly_query" in cite_all
+    assert "用户需要的查询和取证结果须放进 fact 块" in rules
+    assert "未引用结果不会自动补交" in rules
+    assert "没有可信行数时自动回到 full" in rules
 
 
 async def test_delivered_rules_distinguish_pages_snapshots_and_delivery(env: Env) -> None:

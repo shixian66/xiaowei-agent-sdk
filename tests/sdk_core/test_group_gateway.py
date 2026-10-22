@@ -235,7 +235,7 @@ async def test_a_mentioned_member_gets_one_reply_to_the_original_message(env: En
     assert all(QUERY_NAME in seen for seen in env.scripts.tools_seen(asked))
     ((chat_id, text),) = group.outbox.sent
     assert chat_id == CHAT and group.outbox.replies == ["om_1"]
-    assert "来源 local/order_total" in message_text(text)
+    assert "local/order_total" in message_text(text)
     assert await request_rows(env) == [
         (True, "group", A, "query", "completed", "sent", CHAT, "om_1")
     ]
@@ -526,7 +526,7 @@ async def test_a_pending_result_is_delivered_once_on_redelivery_after_a_membersh
             await group.gateway.receive(event)
             await group.gateway.idle()
     assert group.outbox.replies == ["om_left", "om_outsider"]
-    assert "来源 local/order_total" in group.outbox.texts()[0]
+    assert "local/order_total" in group.outbox.texts()[0]
     assert "未能确认你当前的使用权限或群成员身份" in group.outbox.texts()[1]
     assert await states(env) == {
         "om_left": ("completed", "sent"),

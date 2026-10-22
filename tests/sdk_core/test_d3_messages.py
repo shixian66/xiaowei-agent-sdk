@@ -94,10 +94,17 @@ async def test_gateway_inference_stays_before_a_structural_results_boundary(env:
     elements = card["card"]["body"]["elements"]
     contents = ["\n".join(text_parts(e)) for e in elements]
     panels = [e for e in elements if e["tag"] == "collapsible_panel"]
-    assert len(panels) == 1 and "依据：结果 1 · 来源" in "\n".join(text_parts(panels[0]))
-    assert panels[0]["header"]["title"]["content"] == f"查看依据 · {TARGET}"
+    assert len(panels) == 1 and "local/order_total" in "\n".join(text_parts(panels[0]))
+    assert panels[0]["header"]["title"]["content"] == "技术详情"
+    assert panels[0]["expanded"] is False
     label = contents.index(MODEL_TEXT_LABEL)
-    assert elements.index(panels[0]) < label < contents.index(fake)
+    scope = next(
+        i
+        for i, e in enumerate(elements)
+        if e["tag"] != "collapsible_panel" and f"数据范围：{TARGET}" in contents[i]
+    )
+    assert scope < label < contents.index(fake) < elements.index(panels[0])
+    assert "local/order_total" not in "\n".join(text_parts(card, folded=False))
     assert fake not in "\n".join(text_parts(panels[0]))
     assert env.model_calls(message) == 2 and len(env.adapter.calls) == 1
     assert await request_row(env) == ("completed", "sent")

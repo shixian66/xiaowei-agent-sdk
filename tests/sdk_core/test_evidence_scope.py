@@ -1000,7 +1000,7 @@ async def test_history_reads_and_resends_have_their_own_limit(env: Env) -> None:
         assert (await rt.service.results.view(ref("om_1"))).delivery is not None
     env.db.forget()
     result, sends = await env.resend(config, "om_1")
-    assert result == "sent" and len(sends) == 3  # 正文文件、明细文件与消息共用一次权限复核
+    assert result == "sent" and len(sends) == 2  # 单业务文件与消息共用一次权限复核
     assert len(env.db.probes()) == 6
 
 

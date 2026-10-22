@@ -168,7 +168,7 @@ async def test_members_share_one_task_across_clusters_diagnosis_clarification_an
         await ask("sr-a 东区销售额", "om_1", A, sends=1)
         (ran_a,) = statements(drivers["sr-a"])
         assert len(env.scripts.calls[first]) == 2 and drivers["sr-b"].attempts == 0
-        assert replies(channel)[-1][0] == "om_1" and "目标 sr-a" in replies(channel)[-1][1]
+        assert replies(channel)[-1][0] == "om_1" and "数据范围：sr-a" in replies(channel)[-1][1]
         assert len(channel.member_calls) == 2
 
         # 2. B 追问并查 sr-b：模型输入回放 A 的一轮；sr-a 只有回放证据时的零行权限探测。
@@ -176,7 +176,7 @@ async def test_members_share_one_task_across_clusters_diagnosis_clarification_an
         assert user_turns(env, follow) == [first, follow]
         (ran_b,) = statements(drivers["sr-b"])
         assert statements(drivers["sr-a"]) == [ran_a]
-        assert replies(channel)[-1][0] == "om_2" and "目标 sr-b" in replies(channel)[-1][1]
+        assert replies(channel)[-1][0] == "om_2" and "数据范围：sr-b" in replies(channel)[-1][1]
         assert len(channel.member_calls) == 4
 
         # 3. A /诊断：查询工具不可见，只取 B 那条实际 SQL 的计划，不再执行业务 SQL。
@@ -197,7 +197,9 @@ async def test_members_share_one_task_across_clusters_diagnosis_clarification_an
         # 引用两轮结果的回答在飞书平台限制内：直接在对话中完整展示，不转附件。
         await ask("sr-a，按地区汇总", "om_5", B, sends=5)
         assert channel.uploads == [] and "本次完整结果见附件" not in reply_to(channel, "om_5")
-        assert "目标 sr-a" in reply_to(channel, "om_5") and "目标 sr-b" in reply_to(channel, "om_5")
+        assert "数据范围：sr-a" in reply_to(channel, "om_5") and "数据范围：sr-b" in reply_to(
+            channel, "om_5"
+        )
         assert user_turns(env, answer)[-2:] == [vague, answer]
         assert statements(drivers["sr-a"]) == [ran_a, ran_a]
         assert len(channel.member_calls) == 10
@@ -227,7 +229,7 @@ async def test_members_share_one_task_across_clusters_diagnosis_clarification_an
     ((to, text),) = replies(restarted)
     assert to == "om_6"
     assert "本次完整结果见附件" not in text
-    assert "sr-a 较低" in text and "目标 sr-a" in text and "目标 sr-b" in text
+    assert "sr-a 较低" in text and "数据范围：sr-a" in text and "数据范围：sr-b" in text
     assert restarted.uploads == [] and len(restarted.sends) == 1
     assert len(restarted.member_calls) == 2
     assert (await rows(env))["om_6"] == DONE
@@ -294,7 +296,7 @@ async def test_simultaneous_questions_overload_redelivery_and_revocation(
     sent = replies(channel)
     assert sent[0] == ("om_b", QUEUED)
     assert [to for to, _ in sent] == ["om_b", "om_c", "om_a"]
-    assert BUSY in sent[1][1] and "目标 sr-a" in sent[2][1]
+    assert BUSY in sent[1][1] and "数据范围：sr-a" in sent[2][1]
     assert await rows(env) == {
         "om_a": ("completed", "sent", None),
         "om_b": ("failed", "pending", "access_denied"),

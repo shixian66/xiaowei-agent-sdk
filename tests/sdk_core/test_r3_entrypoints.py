@@ -87,7 +87,7 @@ async def test_formal_feishu_short_answer_uses_card_without_repeating_query(env:
         message = channel.sends[1][1]
         visible = "\n".join(text_parts(message, folded=False))
         assert "\u672c\u6b21\u8fd4\u56de\u884c\u6570\uff1a2\u3002" in visible
-        assert "\u91c7\u96c6\u4e8e" not in visible and "local/run_readonly_query" not in visible
+        assert "\u91c7\u96c6\u4e8e" in visible and "local/run_readonly_query" not in visible
         full = "\n".join(text_parts(message))
         assert "\u91c7\u96c6\u4e8e" in full and "local/run_readonly_query" in full
         assert "east" not in visible and "west" not in visible

@@ -548,18 +548,8 @@ class EvidenceStore:
             and self.category(by_id[e]) == "result"
         ]
         facts = [
-            *(
-                self._delivery_fact(
-                    by_id[e], "action", views.get(e), ctx, modern=turn.answer_version == 4
-                )
-                for e in actions
-            ),
-            *(
-                self._delivery_fact(
-                    by_id[e], "body", views.get(e), ctx, modern=turn.answer_version == 4
-                )
-                for e in body
-            ),
+            *(self._delivery_fact(by_id[e], "action", views.get(e), ctx) for e in actions),
+            *(self._delivery_fact(by_id[e], "body", views.get(e), ctx) for e in body),
             *(self._delivery_fact(by_id[e], "remaining", None, ctx) for e in remaining),
         ]
         blocks: list[DeliveryBlock] = [
@@ -639,8 +629,6 @@ class EvidenceStore:
         section: FactSection,
         view: Literal["full", "brief"] | None,
         ctx: RunContext,
-        *,
-        modern: bool = False,
     ) -> DeliveryFact:
         channel = ctx.identity.channel
         item = _shown(record, channel, self._fact_note(record))
@@ -679,9 +667,6 @@ class EvidenceStore:
                 fact = fact.model_copy(
                     update={"view": "brief", "summary": f"本次返回行数：{count}。"}
                 )
-            elif modern:
-                # 无可信行数时只改变展开密度，不生成/缩减历史事实。
-                fact = fact.model_copy(update={"view": "brief"})
         return fact
 
     async def _monitoring_failure_notice(self, turn: TurnAnswer, ctx: RunContext) -> str | None:

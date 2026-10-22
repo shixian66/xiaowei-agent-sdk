@@ -72,7 +72,7 @@ from xiaowei.storage import (
 pytestmark = pytest.mark.loopback
 
 _FACTS_HEADER = "工具结果"
-_TEXT_HEADER = "模型说明（未经系统核实）"
+_TEXT_HEADER = "AI 分析与建议"
 
 
 async def _record(
@@ -326,10 +326,12 @@ async def test_text_and_facts_mix_and_text_keeps_model_identity(postgres_url: UR
             delivery = await evidence.validate_answer(cited(_answer(advice=sql)), ctx)
             first, *rest = delivery.content.split("\n")
             assert first == _TEXT_HEADER
-            # 原文保持在一行内（换行写成转义），不能伪造标题或事实区。
+            # 内容摘要保留单行编码，结构化文字保留原换行；模型不能生成系统事实块。
             assert rest == ["SELECT region, SUM(total) AS total\\nFROM shop.sales GROUP BY region"]
             assert delivery.texts == (sql,)
+            assert delivery.answer_version == 4
             assert set(delivery.model_dump(exclude={"channel"})) == {
+                "answer_version",
                 "content",
                 "evidence_ids",
                 "facts",
@@ -480,9 +482,8 @@ async def test_facts_are_rendered_from_evidence(
             )
 
     facts, analysis = delivery.content.split(_TEXT_HEADER)
-    assert facts.startswith(_FACTS_HEADER)
-    assert '"total": 100' in facts
-    assert '"total": 200' not in facts and "重复计数" not in facts
+    assert _FACTS_HEADER not in facts and "total: 100" in facts
+    assert "total: 200" not in facts and "重复计数" not in facts
     assert delivery.facts[0].result_json is not None
     assert json.loads(delivery.facts[0].result_json)["total"] == 100
     assert inference in analysis and '"total"' not in analysis

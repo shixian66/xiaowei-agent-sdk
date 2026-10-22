@@ -221,7 +221,7 @@ async def test_plain_text_is_a_default_turn_answered_once(env: Env) -> None:
     assert all(QUERY_NAME in seen for seen in env.scripts.tools_seen(message))
     assert env.model_calls(message) == 2 and len(env.adapter.calls) == 1
     ((chat_id, _message),) = fs.outbox.sent
-    assert chat_id == "oc_alice" and "来源 local/order_total" in fs.outbox.texts()[0]
+    assert chat_id == "oc_alice" and "local/order_total" in fs.outbox.texts()[0]
     async with env.engine.connect() as conn:
         from sqlalchemy import text as sql
 
@@ -1654,4 +1654,4 @@ async def test_real_sdk_dispatcher_feeds_the_gateway_through_the_raw_bridge(
                 await consumers
     assert env.model_calls(message) == 2 and env.model_calls(ignored) == 0
     ((chat_id, _message),) = outbox.sent
-    assert chat_id == "oc_alice" and "来源 local/order_total" in outbox.texts()[0]
+    assert chat_id == "oc_alice" and "local/order_total" in outbox.texts()[0]

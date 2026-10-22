@@ -112,8 +112,9 @@ async def test_brief_uses_only_receiving_channel_and_keeps_original(postgres_url
         (10, None, "full"),
     ],
 )
+@pytest.mark.parametrize("answer_version", [3, 4])
 async def test_only_supported_returned_row_count_is_summarized(
-    postgres_url: URL, count, rows, expected
+    postgres_url: URL, count, rows, expected, answer_version
 ):
     grants = Grants()
     grants.grant("alice", TOTAL_TOOL)
@@ -121,7 +122,12 @@ async def test_only_supported_returned_row_count_is_summarized(
         evidence = store(engine, grants, Clock(), tools())
         result = await recorded(evidence, context(), count=count, rows=rows)
         fact = (
-            await evidence.validate_answer(selected([result.evidence_id]), context(turn="followup"))
+            await evidence.validate_answer(
+                selected([result.evidence_id]).model_copy(
+                    update={"answer_version": answer_version}
+                ),
+                context(turn="followup"),
+            )
         ).facts[0]
         assert fact.view == expected
         if expected == "brief":
