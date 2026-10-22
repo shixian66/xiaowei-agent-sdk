@@ -55,7 +55,7 @@ A 已新增 `src/xiaowei/webhook.py` 与 `tests/sdk_core/test_webhook_notificati
 
 ### A 增量：C 公司验收前置——自建飞书代理
 
-用户调整顺序：C 已合入 #126/main@be8c155；D 暂停，独立分支 codex/feishu-proxy-webhook 仅实现代理请求/响应及配置，协议和产品边界唯一见 [ARCHITECTURE](../../../ARCHITECTURE.md#scheduled-agent-tasks)，配置见 README。不改任务、Agent Loop 或存储结构。
+用户调整顺序：C 已合入 #126/main@be8c155；D 暂停，独立分支 codex/feishu-proxy-webhook 仅实现代理请求/响应及配置，协议和产品边界唯一见 [ARCHITECTURE](../../../ARCHITECTURE.md#scheduled-agent-tasks)，配置见 README。不改任务调度、Agent Loop 或存储结构。
 
 - 正式群入口＋真 SDK＋治理＋隔离 PG，HTTP/模型为合成替身；覆盖精确字段/查询参数、无 at、官方/代理回执区别、20000字节与固定说明、主体及接收许可、claim/settle、unknown 风险提示和不重试；B 固定提醒和 C Agent 结果均复用同一路径。
 - 代理专项与受影响 A/B/C、配置/渲染回归，ruff/format/mypy/diff；冻结 SHA 后单次完整默认全套，日志记录开始/结束 SHA、clean 与 EXIT_CODE；具体结果在 handoff，不拼接分批结果。

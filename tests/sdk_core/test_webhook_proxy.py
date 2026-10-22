@@ -503,3 +503,67 @@ async def test_official_and_proxy_bots_keep_distinct_wire_contracts(env, monkeyp
             )
             == "api_accepted"
         )
+
+
+@pytest.mark.parametrize("kind", ["reminder", "agent_task"])
+async def test_proxy_task_status_explains_persisted_http_receipt_even_after_config_change(
+    env, monkeypatch, kind
+):
+    from tests.sdk_core.test_group_identity import A
+    from tests.sdk_core.test_starrocks_tools import tool_outputs
+
+    from xiaowei.feishu import attributed
+
+    monkeypatch.setenv("XW_TEST_PROXY_URL", PROXY)
+    config = proxy_config(env, agent_config(env) if kind == "agent_task" else task_config(env))
+    if kind == "agent_task":
+        env.scripts.add(
+            TASK,
+            tool_call(
+                "run_readonly_query",
+                cluster=SR.target_id,
+                sql="SELECT region,total FROM shop.sales",
+            ),
+            cite(),
+        )
+
+    async def check(group, message, job_id, message_id):
+        script(
+            env, message, tool_call("scheduled__get_task", job_id=job_id), cite("任务状态如下。")
+        )
+        await group.ask(message, message_id=message_id)
+        outputs = tool_outputs(env.scripts.calls[attributed(A, message)][-1])
+        assert "群内投递未确认" in str(outputs)
+        reply = message_text(group.outbox.sent[-1][1])
+        assert "代理返回 HTTP 2xx" in reply and "群内投递未确认" in reply
+
+    async with running(env, monkeypatch, config=config) as (group, requests, rt):
+        if kind == "agent_task":
+            job_id = await activate(env, group)
+        else:
+            job_id = await reminder(env, group)
+        env.clock.advance(60)
+        await rt.scheduled_tasks.tick()
+        assert len(requests) == 1
+        await check(group, "查询刚才任务的发送状态", job_id, "om_proxy_current_status")
+    # 管理员切换协议并更新目标版本后，旧回执仍必须按保存的实际原因解释。
+    data = config.model_dump(mode="json")
+    data["webhook_bots"][0].update(
+        protocol="feishu",
+        title=None,
+        open_url=None,
+        url_ref="env:XW_TEST_WEBHOOK_URL",
+        target_version="v2",
+    )
+    async with running(env, monkeypatch, config=runtime.ServeConfig.model_validate(data)) as (
+        group,
+        requests,
+        _,
+    ):
+        await group.ask("/新建", message_id="om_proxy_new_session")
+        await check(group, "查询旧任务的发送状态", job_id, "om_proxy_old_status")
+        assert not requests
+        assert (
+            await env.scalar("SELECT reason FROM xiaowei_notification_attempt")
+            == "proxy_http_success"
+        )
