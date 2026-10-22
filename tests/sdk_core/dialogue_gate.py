@@ -84,7 +84,7 @@ class ReviewVerdict(BaseModel):
     object_selection_correct: StrictBool | None = None
     evidence_consistent: StrictBool | None = None
     conclusion_matches_all_results: StrictBool | None = None
-    """S3：结论与本轮全部交付结果（含代码补全的其余结果）一致；完整交付不代表结论正确。"""
+    """结论须符合已取得的全部事实，且不漏答用户所需结果；不要求附送未引用的内部结果。"""
     clarification_appropriate: StrictBool | None = None
     limitations_stated: StrictBool | None = None
     history_delivery_claim_correct: StrictBool | None = None

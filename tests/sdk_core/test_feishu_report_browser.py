@@ -243,3 +243,28 @@ async def test_generic_html_report_is_readable_on_phone_and_copies_ddl_exactly(
             if event["request"]["url"].startswith(("http:", "https:"))
         ]
         assert outgoing == []
+
+
+async def test_v4_report_has_visible_business_scope_and_no_technical_fold(
+    chrome_binary: str, tmp_path: Path
+) -> None:
+    from xiaowei.feishu_report import build_reports
+
+    delivery = _delivery("html").model_copy(update={"answer_version": 4, "report_native": True})
+    (report,) = build_reports(delivery)
+    path = tmp_path / "v4-business-report.html"
+    path.write_bytes(report.content)
+    async with launch(chrome_binary) as chrome:
+        page = await chrome.page()
+        await page.send("Network.setBlockedURLs", {"urls": ["https://*", "http://*"]})
+        mark = len(chrome.events)
+        await page.navigate(path.as_uri())
+        visible = await page.evaluate("document.body.innerText")
+        assert "数据范围：" in visible and "采集于" in visible
+        assert await page.evaluate("document.querySelectorAll('details').length") == 0
+        assert "查看依据" not in visible and "ev_" not in visible
+        assert not [
+            event
+            for event in page.events("Network.requestWillBeSent", mark)
+            if event["request"]["url"] != path.as_uri()
+        ]

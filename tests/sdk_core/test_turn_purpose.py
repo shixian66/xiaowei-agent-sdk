@@ -43,7 +43,7 @@ from xiaowei.storage import open_engine
 pytestmark = pytest.mark.loopback
 
 # S3：只有文字的回答在 content 中只以模型说明出现，不再套“本轮未执行业务查询”标题。
-ADVICE_HEADER = "模型说明（未经系统核实）"
+ADVICE_HEADER = "AI 分析与建议"
 REMAINING = "其余结果（系统补全本轮获准结果）"
 QUERY = "run_readonly_query"
 SALES_SQL = "SELECT region, total FROM shop.sales"
@@ -210,11 +210,11 @@ async def test_text_after_a_query_still_delivers_the_query_result(env: Env) -> N
     """S3：查过业务数据后只写文字（建议或追问）不再失败；查询结果由代码补为其余结果。"""
     async with env.opened(env.config()) as rt:
         for request_id, finish in (("om_1", advise()), ("om_2", clarify())):
-            message = env.scripts.add(f"查了只写文字 {request_id}", run_query(), finish)
+            message = env.scripts.add(f"查了只写文字 {request_id}", run_query(), finish, cite())
             record = await turn(env, rt, message, request_id)
             assert record.state == "completed", record.failure_code
-            assert REMAINING in await delivered(rt, request_id)
-            assert len(env.scripts.calls[message]) == 2  # 不再要求改写引用
+            assert REMAINING not in await delivered(rt, request_id)
+            assert len(env.scripts.calls[message]) == 3  # v4 一次无工具改写补引用
         # 元数据工具不是需交付结果：查过表结构后的澄清不补全事实。
         searched = env.scripts.add(
             "哪张表有地区", tool_call("list_tables", cluster="sr-test", **SEARCH_ALL), clarify()
@@ -293,7 +293,9 @@ async def test_a_query_cannot_be_masked_by_other_current_evidence(env: Env) -> N
         record = await turn(env, rt, message, "om_1")
         assert record.state == "completed", record.failure_code
         content = await delivered(rt, "om_1")
-        assert REMAINING in content and content.index(REMAINING) > 0
+        assert REMAINING not in content
+        view = await rt.service.results.view(ref("om_1"))
+        assert [f.tool_id for f in view.delivery.facts] == ["local/list_tables"]
         assert len(env.db.business()) == 1
 
 
@@ -306,7 +308,9 @@ async def test_a_query_cannot_be_masked_by_history_evidence(env: Env) -> None:
         )
         record = await turn(env, rt, again, "om_2")
         assert record.state == "completed", record.failure_code
-        assert REMAINING in await delivered(rt, "om_2")  # 本轮新结果补全，不被历史遮住
+        assert REMAINING not in await delivered(rt, "om_2")
+        view = await rt.service.results.view(ref("om_2"))
+        assert len(view.delivery.facts) == 1  # v4 按选择展示；全部可见证据仍复核。
 
 
 async def test_every_successful_query_is_delivered_even_if_cited_once(env: Env) -> None:
@@ -317,7 +321,7 @@ async def test_every_successful_query_is_delivered_even_if_cited_once(env: Env) 
         record = await turn(env, rt, partial, "om_1")
         assert record.state == "completed", record.failure_code
         view = await rt.service.results.view(ref("om_1"))
-        assert [f.section for f in view.delivery.facts] == ["body", "remaining"]
+        assert [f.section for f in view.delivery.facts] == ["body"]
         both = env.scripts.add("两次查询都引用", run_query(), run_query(UNION), cite())
         assert (await turn(env, rt, both, "om_2")).state == "completed"
         assert len(env.db.business()) == 4

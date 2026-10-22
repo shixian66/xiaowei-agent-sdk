@@ -66,6 +66,15 @@ async def _feishu_request(env: Env, request_id: str, *, format_: str | None) -> 
         lambda call: answer(evidence_in(call), report_format=format_),
     )
     record = await env.run(message, request_id, channel="feishu", conversation=CHAT)
+    async with env.engine.begin() as conn:
+        raw = await conn.scalar(
+            text("SELECT answer FROM xiaowei_request WHERE turn_id=:t"), {"t": record.turn_id}
+        )
+        saved = TurnAnswer.model_validate_json(raw).model_copy(update={"answer_version": 3})
+        await conn.execute(
+            text("UPDATE xiaowei_request SET answer=:a WHERE turn_id=:t"),
+            {"a": saved.model_dump_json(), "t": record.turn_id},
+        )
     return record.turn_id
 
 

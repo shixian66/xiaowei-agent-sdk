@@ -24,7 +24,7 @@ from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine
 
 from xiaowei.config import is_secret_ref, resolve_secret_ref
 from xiaowei.evidence import RecipientRejectedError
-from xiaowei.feishu_render import display_text, fact_limit_notices, mention_safe
+from xiaowei.feishu_render import business_text, display_text, fact_limit_notices, mention_safe
 from xiaowei.governance import GovernedTools, Projection, ToolPolicy
 from xiaowei.models import (
     AUDIENCES,
@@ -233,6 +233,8 @@ def _notification_text(delivery: Delivery, text: str, *, include_remaining: bool
     """只渲染已校验的飞书事实；不把 Web 的转义 content 当通知正文。"""
     if not delivery.facts and not include_remaining:
         return text
+    if delivery.answer_version == 4:
+        return business_text(delivery, include_approval_command=False, plain_transport=True)
 
     def fact_lines(fact: DeliveryFact) -> list[str]:
         lines = [

@@ -162,11 +162,10 @@ DEFAULT_INSTRUCTIONS = (
     "fact 块只选一个本轮可见的 evidence_id 和展示方式，事实内容由系统根据证据生成。"
     "可以只有文字（问候、能力或配置说明、解释、SQL 草稿、澄清），也可以文字与事实交错。"
     "按任务优先给出用户需要的结论；正文只引用需要重点说明或追溯的结果。"
-    "本轮必交的查询结果系统会完整交付："
-    "没放进正文的由系统作为“其余结果”补全，不必为了完整逐个列出。"
-    "消息及文件正文只回答当前任务，引用保留依据入口。需要直接读的结构化结果可用 full，"
-    "补充原值选 brief；其余结果和普通非表格 metadata 默认收起，完整内容由详情或明细文件交付。"
-    "诊断和发现类结果未引用时只列工具与对象，不补交原值；"
+    "用户需要的查询和取证结果须放进 fact 块；未引用结果不会自动补交。"
+    "消息及文件只回答当前任务，不附内部工具过程或证据编号。"
+    "技术信息统一放在代码生成的技术详情区；事实与必要范围、限制、状态直接交付。"
+    "诊断和发现类结果未引用时不补交原值；"
     "用户所需 SQL、DDL 或结构的唯一依据在这些结果中时，须保留能追溯它的 fact 引用，"
     "不要为了缩短正文漏引，也不要仅为排版额外调用 EXPLAIN 或重查。"
     "text 是模型说明，不会成为系统核实的事实，不声称系统已核实。用户只要少量字段、"
@@ -176,15 +175,17 @@ DEFAULT_INSTRUCTIONS = (
     "不能凭历史提案声称执行成功。"
     "需要用户补充信息才能继续时 awaiting_user 为 true（此时系统不生成文件）；否则为 false。"
     "fact 块的 view：full 用于用户需要直接阅读的结构化结果；brief 用于补充依据与长原值。"
-    "本轮 brief 收起但完整交付，不省略原值。用户明确索要原文或完整历史结果时用 full，"
-    "非表格原文仍经详情或明细文件交付，正文说明入口，不为展开重查。"
+    "本轮 full/brief 均保留业务事实，技术信息统一收起。用户明确索要原文或完整历史结果时用 full，"
+    "明确索要的内容须交付，必要时选择文件；不为展示旧结果重查。"
     "简短追问已有可见历史结果的返回条数时，可对所需历史证据选择 brief，"
-    "系统显示本次返回行数，原文放得下可展开，未展示会明确提示；不自动导出历史明细，"
-    "不支持的历史摘要自动回 full。"
+    "系统显示本次返回行数，原文保留在技术详情；不自动导出历史明细，"
+    "没有可信行数时只收起原值，不编造摘要。"
     "本次返回行数不是全表总数，也不是 COUNT 等聚合字段的值；问聚合值时保留 full。"
     "无需为这些历史短问再查询，只有用户要求刷新或现有证据不足时按任务补充取证。"
     "昨天等相对时间依据本轮时间与业务时区，金额单位、状态口径不明时先澄清。"
-    "追问需要的事实不在本轮可见证据中时调用工具重新获取，不要凭记忆作答；"
+    "用户索要历史细节时只引用当前实际可见的获准证据；当前看不到时说明无法提供，不猜缺失原因，"
+    "不为补旧资料重新执行原任务。用户明确要求刷新时按新任务取证并标明新结果。"
+    "调查当前问题缺少必要证据时可在权限和预算内补证，不冒充旧数据恢复；"
     "引用历史证据时，证据编号照原样引用。"
     "集群清单、业务口径等可信配置不是工具证据，需要说明时写在文字中并注明来自配置。"
     "历史回答只证明结果已生成，不证明已送达或已读；没有可信投递依据不要说已发给用户。"
@@ -514,7 +515,7 @@ class Application:
         self._queries -= frozenset(
             c.tool_id for c in catalog.contracts if catalog.policy_for(c).effect == "write"
         )
-        # 需交付结果：只读业务查询，不含动作状态查询（进入动作区域）；未引用时由交付补全。
+        # 查询结果集合：v4 漏引改写及旧版补全同源，不含动作状态查询（进入动作区域）。
         self._results = self._read_queries - frozenset(
             c.tool_id for c in catalog.contracts if c.policy_id == ACTION_STATUS_POLICY
         )
@@ -809,7 +810,8 @@ class Application:
                 instructions=(
                     f"{agent.instructions}\n本轮步骤已用完；只基于上面已有的结果，"
                     "现在给出最终回答，不再调用工具。fact 块只能引用实际可见的 evidence_id；"
-                    "未放进正文的本轮查询结果系统会补全。无成功结果时只用文字说明未经数据验证，"
+                    "用户需要的结果须放进 fact 块，未引用结果不会补交。"
+                    "无成功结果时只用文字说明未经数据验证，"
                     "不作健康或根因结论。"
                 ),
             )
@@ -911,7 +913,7 @@ class Application:
         runs = self._governance.turn_runs(ctx.identity)
         # 已开始的查询（可信记录）都须有去向：成功证据、明确分类的监控读取失败，或明确未形成
         # Action 的准备拒绝。I/O 前被拒绝的调用不算开始。去向不明是系统失败，与引用无关，
-        # 不交模型改写。成功结果不要求被引用：交付校验把未引用的补为“其余结果”。
+        # 不交模型改写。v4 选择所需事实，不补交未引用结果；全部可见证据仍保存并复核。
         queried = self._query_evidence(runs)
         failed_queries = sum(f.tool_id in self._queries for f in runs.monitoring_failures)
         rejected_proposals = sum(t in self._queries for t in runs.proposal_rejections)
@@ -956,8 +958,8 @@ class Application:
         检查模型自己能改正的规则；证据可读性与当前权限仍只在交付时复核，不能改写修正。
 
         ``replayed`` 为 None 表示审批恢复：可见历史即 ``ctx.evidence_ids``，账本含暂停前的
-        证据。空白块、重复引用、本轮新事实选 brief 等由代码归一化，不在这里拒绝；本轮有成功
-        结果或监控失败说明时，即使没有文字也有可交付内容。
+        证据。空白块和重复引用由代码归一化；空回答或本轮成功查询后没有任何 fact 的回答，
+        沿 SDK 现有机制无工具改写一次，不放宽权限或重放查询。
         """
 
         def check(answer: AgentAnswer) -> AnswerRejectedError | None:
@@ -968,9 +970,15 @@ class Application:
             rejected = citation_error(answer, (*history, *current))
             if rejected is not None:
                 return rejected
-            produced = self._query_evidence(runs)
-            if not answer.blocks and not runs.monitoring_failures and not produced:
+            # 完成性账本 _queries 还含动作；漏引改写仅适用于成功的只读查询结果。
+            produced = [e for tool, e in runs.produced if tool in self._results]
+            if not answer.blocks:
                 return AnswerRejectedError(AnswerRejectCode.EMPTY_ANSWER, EMPTY_ANSWER)
+            if produced and not answer.evidence_ids:
+                return AnswerRejectedError(
+                    AnswerRejectCode.EMPTY_ANSWER,
+                    "本轮已有成功查询；用户需要的结果须放入 fact 块，不能只有文字。",
+                )
             return None
 
         return check
@@ -1183,8 +1191,7 @@ class Application:
             > ctx.budget.max_tool_calls
         ):
             raise TurnError("action_unresumable")
-        # 暂停材料：动作材料显式列出（置于动作区域）；暂停前本轮成功的只读结果由交付补全，
-        # 动作状态查询同样进入动作区域。均按原执行轮次 ``ctx.identity.turn_id`` 计算。
+        # v4 暂停仅交付动作材料/状态；只读结果保留在恢复上下文，恢复后由最终回答选择。
         material = TurnAnswer(
             answer=AgentAnswer(
                 blocks=tuple(
@@ -1569,14 +1576,13 @@ def _model_tool_name(tool_id: str) -> str:
 
 
 def _citation_rule(results: frozenset[str]) -> str:
-    """补全范围的说明由交付补全所用的同一集合生成，提示与代码不会各说各的。"""
+    """查询类指引与成功查询账本复用同一工具集合。"""
     if not results:
         return ""
     names = "、".join(sorted({_model_tool_name(t) for t in results}))
     return (
-        f"\n以下工具本轮每次成功的结果系统都会完整交付：{names}。"
-        "正文选重点放 fact 块即可，没放进正文的由系统作为“其余结果”补全；"
-        "补全不代表你已解释它们，结论须与全部结果一致。"
+        f"\n以下是查询类工具：{names}。本轮成功查询后须引用用户需要的 fact。"
+        "用户需要的结果须放进 fact 块，未引用结果不会补交；结论须与已获事实一致。"
     )
 
 

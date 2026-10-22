@@ -385,7 +385,7 @@ class RequestRecord:
     delivery_version: int = 0
     limit_reached: bool = False
     material_only: bool = False
-    answer_version: Literal[2, 3] | None = None
+    answer_version: Literal[2, 3, 4] | None = None
 
 
 @dataclass(frozen=True)
@@ -2012,7 +2012,7 @@ class ChannelStore:
     def _record(self, row: Mapping[str, Any]) -> RequestRecord:
         answer: AgentAnswer | LegacyAnswer | None = None
         context, run_turn_id, limit_reached, material_only = None, None, False, False
-        answer_version: Literal[2, 3] | None = None
+        answer_version: Literal[2, 3, 4] | None = None
         monitoring_failures: tuple[MonitoringFailure, ...] = ()
         if row["answer"] is not None:
             raw = row["answer"]

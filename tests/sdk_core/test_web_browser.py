@@ -601,3 +601,39 @@ async def test_remaining_results_and_forged_identity_are_separated_in_web(
             f"[...{item(0)}.querySelectorAll('.fact .fact-source')].map(n => n.textContent)"
         ) == ["结果 1 · 系统根据证据生成"]
         assert await page.evaluate(f"{item(0)}.querySelector('.fact .reply-text')") is None
+
+
+async def test_v4_business_values_visible_with_one_closed_technical_area(
+    env: Env, chrome_binary: str
+) -> None:
+    """实际 DOM：技术区收起不影响用户需要的表格、目标和历史时间。"""
+    message = env.scripts.add(
+        "两项结果自然交付",
+        tool_call("run_query", region="east"),
+        tool_call("run_query", region="west"),
+        cite("继续关注"),
+    )
+    plain = env.scripts.add("只解释概念", clarify("这是未执行的说明"))
+    async with (
+        serving(create_web_app(env.service, config()), port=8517),
+        launch(chrome_binary) as chrome,
+    ):
+        page = await chrome.page()
+        await page.navigate("http://127.0.0.1:8517/")
+        await send(page, message)
+        await settled(page, 0, "completed")
+        assert await page.evaluate(f"{item(0)}.querySelectorAll('details').length") == 1
+        assert await page.evaluate(f"{item(0)}.querySelector('summary').textContent") == "技术详情"
+        assert await page.evaluate(f"{item(0)}.querySelector('details').open") is False
+        visible = await page.evaluate(f"{item(0)}.innerText")
+        assert "east" in visible and "west" in visible and "继续关注" in visible
+        assert "采集于" in visible and "数据范围" in visible
+        assert await page.evaluate(f"{item(0)}.dataset.requestId") not in visible
+        assert all(word not in visible for word in ("查看依据", "ev_", "SELECT", "elapsed_ms"))
+        assert await table_rows(page, 0) == [2, 2]
+        await page.evaluate(f"{item(0)}.querySelector('details').open = true")
+        assert "local/run_query" in await page.evaluate(f"{item(0)}.innerText")
+        await send(page, plain)
+        await settled(page, 1, "completed")
+        assert await page.evaluate(f"{item(1)}.querySelectorAll('details').length") == 0
+        assert len(env.adapter.calls) == 2

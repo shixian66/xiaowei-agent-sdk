@@ -145,7 +145,7 @@ async def test_legacy_history_and_material_resume_on_approval_into_new_format(ac
             "SELECT answer FROM xiaowei_request WHERE reply_message_id='om_sdk_approve'"
         )
         resumed = TurnAnswer.model_validate_json(saved)
-        assert resumed.answer_version == 3
+        assert resumed.answer_version == 4
         ((origin_turn,),) = await env.rows(
             "SELECT turn_id FROM xiaowei_request WHERE reply_message_id='om_sdk_origin'"
         )
@@ -178,7 +178,7 @@ async def test_legacy_pause_rejection_writes_nothing_and_answers_in_new_format(a
         "SELECT state, answer FROM xiaowei_request WHERE reply_message_id='om_sdk_reject'"
     )
     assert state == "completed" and saved is not None
-    assert TurnAnswer.model_validate_json(saved).answer_version == 3
+    assert TurnAnswer.model_validate_json(saved).answer_version == 4
 
 
 async def test_concurrent_legacy_approvals_write_at_most_once(actions):

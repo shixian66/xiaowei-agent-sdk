@@ -244,7 +244,7 @@ async def send_complete_delivery(
                 "facts": materials,
                 "blocks": (),
                 "report_format": None,
-                "report_notice": None,
+                "report_notice": delivery.report_notice if delivery.answer_version == 4 else None,
             }
         )
         try:

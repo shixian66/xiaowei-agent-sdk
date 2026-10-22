@@ -31,6 +31,18 @@ TEXT_CLIPPED: Final = "（内容超过单消息上限，已截断）"
 BRIEF_ORIGINAL_OMITTED: Final = "获准原文未展示（单消息容量限制）；如需原文请明确提出。"
 RAW_OMITTED: Final = "原文 JSON 与上方展示的值逐项一致，未重复展示；如需原文可要求 MD/HTML 文件。"
 _TECHNICAL = frozenset({"sql", "row_count", "elapsed_ms", "next_cursor"})
+# 只控制展示，不改变 Evidence 投影、接收许可或保存期限。
+_BUSINESS_HIDDEN = _TECHNICAL | frozenset(
+    {
+        "query",
+        "expression",
+        "receipt_id",
+        "checked_at",
+        "last_success_at",
+        "requested_limit",
+        "applied_limit",
+    }
+)
 _PAGED = frozenset({"local/list_databases", "local/list_tables", "local/describe_table"})
 _ACTUAL_SQL = frozenset({"local/run_readonly_query", "local/explain_query"})
 _ACTION_LABELS = {
@@ -55,11 +67,12 @@ def mention_safe(text: str) -> str:
     return _AT_TAG.sub("＜", text)
 
 
-def display_text(text: str) -> str:
+def display_text(text: str, *, multiline: bool = True) -> str:
     """保留真实换行/缩进；将双向、零宽等不可见控制符显示为转义，不改证据原值。"""
     return "".join(
         json.dumps(c)[1:-1]
-        if c not in ("\n", "\t") and unicodedata.category(c) in {"Cc", "Cf", "Zl", "Zp"}
+        if (not multiline or c not in ("\n", "\t"))
+        and unicodedata.category(c) in {"Cc", "Cf", "Zl", "Zp"}
         else c
         for c in text
     )
@@ -205,7 +218,105 @@ def _raw_redundant(fact: DeliveryFact) -> bool:
     return same(data, fact.metadata)
 
 
-def _data(fact: DeliveryFact) -> tuple[tuple[str, ...], tuple[dict[str, JsonScalar], ...]]:
+def business_fact(fact: DeliveryFact) -> DeliveryFact:
+    """用户所需事实的展示视图；实际 SQL 保留在单一技术区，动作批准材料完整保留。"""
+    if fact.requires_complete:
+        return fact
+    return fact.model_copy(
+        update={
+            "metadata": {
+                k: v
+                for k, v in fact.metadata.items()
+                if k not in _BUSINESS_HIDDEN
+                and (k != "warnings" or v not in (None, "", "[]", "null"))
+            },
+            "result_json": None,
+        }
+    )
+
+
+def fact_scope(fact: DeliveryFact) -> str:
+    """业务来源与快照时间不属于可隐藏的技术包装。"""
+    source = (
+        "任务记录"
+        if fact.target_id == "scheduled"
+        else ("通知状态" if fact.target_id == "notifications" else f"数据范围：{fact.target_id}")
+    )
+    return f"{source} · 采集于 {fact.captured_at.isoformat()}"
+
+
+def business_text(
+    delivery: Delivery, *, include_approval_command: bool = True, plain_transport: bool = False
+) -> str:
+    """各纯文本出口复用的业务正文；不读存储、不改投影、不附技术详情。"""
+
+    def rendered(value: str) -> str:
+        return display_text(value, multiline=plain_transport)
+
+    def lines(fact: DeliveryFact) -> list[str]:
+        source = business_fact(fact)
+        result = [
+            fact_scope(fact),
+            *(
+                [
+                    "说明："
+                    + rendered(
+                        (fact.note_summary or fact.note or "")
+                        if plain_transport
+                        else (fact.note or fact.note_summary or "")
+                    )
+                ]
+                if fact.note_summary or fact.note
+                else []
+            ),
+            *fact_limit_notices(fact),
+        ]
+        if fact.historical_brief:
+            return [*result, fact.summary or ""]
+        for key, value in source.metadata.items():
+            if key != "approval_command" or include_approval_command:
+                shown = (
+                    value
+                    if plain_transport and isinstance(value, str)
+                    else json.dumps(value, ensure_ascii=False)
+                )
+                result.append(f"{_ACTION_LABELS.get(key, key)}: {rendered(shown)}")
+        if source.columns:
+            if not source.rows:
+                result.append("（无数据行）")
+            for index, row in enumerate(source.rows, 1):
+                result.append(f"第 {index} 行")
+                for key in source.columns:
+                    value = row.get(key)
+                    shown = (
+                        value
+                        if plain_transport and isinstance(value, str)
+                        else json.dumps(value, ensure_ascii=False)
+                    )
+                    result.append(
+                        rendered(f"{key}: {shown}" if key in row else f"{key}: （未提供）")
+                    )
+        return result
+
+    facts = {f.evidence_id: f for f in delivery.facts}
+    result = list(delivery.notices)
+    result.extend(line for f in delivery.section("action") for line in lines(f))
+    for block in delivery.blocks:
+        if isinstance(block, DeliveryFactRef):
+            if block.evidence_id in facts:
+                result.extend(lines(facts[block.evidence_id]))
+        else:
+            result.extend(
+                (MODEL_TEXT_LABEL, block.text if plain_transport else rendered(block.text))
+            )
+    return "\n".join(result)
+
+
+def _data(
+    fact: DeliveryFact, *, business: bool = False
+) -> tuple[tuple[str, ...], tuple[dict[str, JsonScalar], ...]]:
+    if business:
+        fact = business_fact(fact)
     if fact.historical_brief:
         return (), ()
     if fact.columns:
@@ -309,6 +420,8 @@ def _card(
 
     ``texts`` 是本卡展示的正文文字（按顺序，最后一段可能截断）；``counts`` 按 ``facts`` 下标。
     """
+    modern = delivery.answer_version == 4
+    details_area: list[Message] = []
     elements: list[Message] = [_div(notice) for notice in delivery.notices]
     tables = 0
     region: str | None = None
@@ -318,10 +431,10 @@ def _card(
     def fact_elements(index: int) -> None:
         nonlocal tables, region
         fact = delivery.facts[index]
-        if region != fact.section and (fact.section == "action" or not preview):
+        if not modern and region != fact.section and (fact.section == "action" or not preview):
             elements.append(_div("动作材料" if fact.section == "action" else FACT_LABEL))
         region = fact.section
-        columns, all_rows = _data(fact)
+        columns, all_rows = _data(fact, business=modern)
         rows = all_rows[: counts[index]]
         if fact.requires_complete:
             # 独立审批材料保留原来的完整来源、说明和正文。
@@ -332,12 +445,14 @@ def _card(
                     f"采集于 {fact.captured_at.isoformat()}"
                 )
             )
+        elif modern:
+            elements.append(_div(fact_scope(fact)))
         elif not preview or fact.section == "action":
             elements.append(_div(f"{delivery.result_label(fact.evidence_id)} · {fact.target_id}"))
         elif index not in folded and not fact.historical_brief:
             elements.append(_div(f"数据 · {fact.target_id}"))
         if fact.note_summary or (
-            fact.note is not None and (not preview or fact.section == "action")
+            fact.note is not None and (modern or not preview or fact.section == "action")
         ):
             elements.append(
                 _div(
@@ -366,10 +481,12 @@ def _card(
         visible_metadata = (
             {
                 key: value
-                for key, value in fact.metadata.items()
+                for key, value in (
+                    business_fact(fact).metadata if modern else fact.metadata
+                ).items()
                 if key not in _TECHNICAL and fact.columns and value is not None
             }
-            if not preview or fact.section == "action"
+            if modern or not preview or fact.section == "action"
             else {}
         )
         if visible_metadata:
@@ -379,11 +496,13 @@ def _card(
             )
         elements.extend(_div(notice) for notice in fact_limit_notices(fact))
         if index in folded:
+            if modern and index not in technical and not attachment:
+                elements.append(_div(BRIEF_ORIGINAL_OMITTED))
             if not attachment:
                 row_details[index] = _row_text(fact, rows) or (
                     "明细未展示。" if all_rows else "（无数据行）"
                 )
-                if fact.tool_id in _ACTUAL_SQL and index not in sqls:
+                if not modern and fact.tool_id in _ACTUAL_SQL and index not in sqls:
                     elements.append(_div("SQL 未展示。"))
                 if omissions and len(rows) < len(all_rows):
                     elements.append(
@@ -394,7 +513,7 @@ def _card(
                         )
                     )
             return
-        if fact.tool_id == "local/run_readonly_query" and index not in sqls:
+        if not modern and fact.tool_id == "local/run_readonly_query" and index not in sqls:
             elements.append(_div("SQL 未展示。"))
         if omissions and not fact.historical_brief and len(rows) < len(all_rows):
             elements.append(
@@ -450,7 +569,24 @@ def _card(
 
     def fact_details(index: int) -> None:
         fact = delivery.facts[index]
-        if fact.requires_complete:
+        if fact.requires_complete or (modern and (attachment or index not in technical)):
+            return
+        if modern:
+            details_area.append(_div(f"{fact.tool_id} · {fact.evidence_id}\n{fact_scope(fact)}"))
+            details_area.extend(
+                _div(
+                    f"实际 SQL:\n{value}" if key == "sql" else f"{key}: {_cell({key: value}, key)}"
+                )
+                for key, value in fact.metadata.items()
+                if key in _BUSINESS_HIDDEN
+            )
+            if fact.note and fact.note_summary:
+                details_area.append(_div(fact.note))
+            if index in row_details:
+                details_area.append(_div(row_details[index]))
+            if fact.result_json is not None and (fact.historical_brief or not _raw_redundant(fact)):
+                # 不能由已展示值保真替代时，原始获准投影仍可在同一区核对。
+                details_area.append(_div(fact.result_json))
             return
         details: list[Message] = [
             _div(
@@ -509,7 +645,7 @@ def _card(
 
     def place_fact(index: int) -> None:
         fact_elements(index)
-        if preview:
+        if preview and not modern:
             fact_details(index)
 
     for index, fact in enumerate(delivery.facts):
@@ -545,18 +681,31 @@ def _card(
         for index in remaining:
             place_fact(index)
     if omissions and any(
-        not f.requires_complete and n < len(_data(f)[1]) and not (attachment and i in folded)
+        not f.requires_complete
+        and n < len(_data(f, business=modern)[1])
+        and not (attachment and i in folded)
         for i, (f, n) in enumerate(zip(delivery.facts, counts, strict=True))
     ):
         elements.append(_div(FACTS_CLIPPED))
-    if not preview:
+    if not preview or modern:
         for index in range(len(delivery.facts)):
             fact_details(index)
-    elements.extend(_basis_panels(delivery.basis))
+    if modern:
+        if details_area:
+            elements.append(
+                {
+                    "tag": "collapsible_panel",
+                    "expanded": False,
+                    "header": {"title": _plain("技术详情")},
+                    "elements": details_area,
+                }
+            )
+    else:
+        elements.extend(_basis_panels(delivery.basis))
     return _static_card(
         elements,
         (
-            "小维 · 工具结果"
+            ("小维 · 动作确认" if modern else "小维 · 工具结果")
             if any(f.requires_complete for f in delivery.facts)
             else "小维 · AI 运维助手"
         ),
@@ -705,7 +854,7 @@ def build_feishu_message(
                 notices=delivery.notices,
                 clipped=clipped,
                 formatted=formatted,
-                basis=delivery.basis,
+                basis=() if delivery.answer_version == 4 else delivery.basis,
             )
 
         shown = display_text(raw)
@@ -741,14 +890,17 @@ def build_feishu_message(
         formatted = prose_message(raw[:low], clipped=True, formatted=True)
         return formatted if fits(formatted) else clipped
 
+    modern = delivery.answer_version == 4
     folded = frozenset(
         i
         for i, fact in enumerate(delivery.facts)
-        if platform_limits and fold_details(fact) and not fact.historical_brief
+        if (fact.view == "brief" if modern else platform_limits and fold_details(fact))
+        and not fact.historical_brief
+        and fact.section != "action"
     )
     # 附件已接收完整 Delivery，主消息不再复制被收起的大段原值。
     totals = [
-        0 if attachment_preview and i in folded else len(_data(f)[1])
+        0 if attachment_preview and i in folded else len(_data(f, business=modern)[1])
         for i, f in enumerate(delivery.facts)
     ]
     # 动作区域的事实不预览截断：要么完整展示，要么本消息放不下。
@@ -756,11 +908,12 @@ def build_feishu_message(
     all_sql = {
         i
         for i, f in enumerate(delivery.facts)
-        if f.tool_id in _ACTUAL_SQL
+        if not modern
+        and f.tool_id in _ACTUAL_SQL
         and isinstance(f.metadata.get("sql"), str)
         and not (attachment_preview and i in folded)
     }
-    all_technical = set(range(len(delivery.facts)))
+    all_technical = set() if attachment_preview else set(range(len(delivery.facts)))
     hidden = (
         frozenset(i for i, f in enumerate(delivery.facts) if _raw_redundant(f))
         if platform_limits
@@ -794,6 +947,24 @@ def build_feishu_message(
     if fits(full):
         formatted = card(totals, all_sql, delivery.texts, all_technical, formatted=True)
         return formatted if fits(formatted) else full
+    if modern and not attachment_preview:
+        # 大段技术原值不单独导出；如实说明该部分未附，用户可明确要求原文文件。
+        delivery = delivery.model_copy(
+            update={
+                "report_notice": "\n".join(
+                    filter(
+                        None,
+                        (
+                            delivery.report_notice,
+                            "技术详情超出消息容量，未附；可明确索要获准详情文件。",
+                        ),
+                    )
+                )
+            }
+        )
+        business_only = card(totals, set(), delivery.texts, set(), formatted=True)
+        if fits(business_only):
+            return business_only
     if not allow_preview:
         # 历史brief的小原文可折叠展示；放不下则只交付已选择的摘要，不因此自动导出原值。
         if any(f.historical_brief for f in delivery.facts):

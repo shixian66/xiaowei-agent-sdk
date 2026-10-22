@@ -43,25 +43,37 @@
     const index = delivery.evidence_ids.indexOf(id);
     return index < 0 ? "历史结果" : `结果 ${index + 1}`;
   };
-  const factTable = (fact, label) => {
+  const technicalKeys = new Set(["sql", "row_count", "elapsed_ms", "next_cursor", "query",
+    "expression", "receipt_id", "checked_at", "last_success_at", "requested_limit", "applied_limit"]);
+  const factTable = (fact, label, modern = false, technical = null) => {
     const box = el("div", "fact");
     const action = fact.section === "action";
     const brief = !action && fact.view === "brief";
-    const folded = !action && (brief || fact.section === "remaining" || !fact.columns.length ||
-      fact.rows.length > 10 || new TextEncoder().encode(JSON.stringify(fact.rows)).length > 2048);
+    const folded = !action && (modern ? brief : (brief || fact.section === "remaining" || !fact.columns.length ||
+      fact.rows.length > 10 || new TextEncoder().encode(JSON.stringify(fact.rows)).length > 2048));
     // 系统区域的标识只由代码在这里添加；模型文字中的同样字样只是普通段落。
-    if (!folded) box.append(el("p", "meta fact-source", `数据 · ${fact.target_id}`));
+    if (modern) {
+      const source = fact.target_id === "scheduled" ? "任务记录" :
+        fact.target_id === "notifications" ? "通知状态" : `数据范围：${fact.target_id}`;
+      box.append(el("p", "meta fact-source", `${source} · 采集于 ${fact.captured_at}`));
+      if (!action && technical) {
+        technical.append(el("p", "meta", `${fact.tool_id} · ${fact.evidence_id}`));
+      }
+    } else if (!folded) box.append(el("p", "meta fact-source", `数据 · ${fact.target_id}`));
     const details = el("details", "evidence");
     details.append(el("summary", "", `查看依据 · ${fact.target_id}`));
-    (action ? box : details).append(el("p", "meta", `采集于 ${fact.captured_at}`));
+    if (!modern) (action ? box : details).append(el("p", "meta", `采集于 ${fact.captured_at}`));
     const meta = [`来源 ${fact.tool_id}`, `目标 ${fact.target_id}`];
-    (action ? box : details).append(el("p", "meta", `${label} · ${meta.join(" · ")}`));
+    if (!modern) (action ? box : details).append(el("p", "meta", `${label} · ${meta.join(" · ")}`));
     if (brief && fact.summary) box.append(el("p", "content fact-summary", fact.summary));
-    if (fact.note) (action ? box : details).append(el("p", "note", `说明：${fact.note}`));
+    if (fact.note) (modern || action ? box : details).append(el("p", "note", `说明：${fact.note}`));
     if (fact.note_summary) box.append(el("p", "note", fact.note_summary));
     for (const [key, value] of Object.entries(fact.metadata || {})) {
+      if (modern && key === "warnings" && [null, "", "[]", "null"].includes(value)) continue;
       // 普通 metadata 完整留在依据中；动作材料保持原专用展示。
-      (action ? box : details).append(el("p", "content", `${key}: ${cellText(value)}`));
+      const target = modern ? (action || (!folded && !technicalKeys.has(key)) ? box : technical) :
+        (action ? box : details);
+      if (target) target.append(el("p", "content", `${key}: ${cellText(value)}`));
     }
     if (fact.columns.length) {
       const table = el("table");
@@ -77,14 +89,23 @@
       }
       const wrap = el("div", "table-wrap");
       wrap.append(table);
-      (folded ? details : box).append(wrap);
-      if (!fact.rows.length) (folded ? details : box).append(el("p", "content", "未返回数据行"));
+      (modern && folded ? technical : folded ? details : box).append(wrap);
+      if (!fact.rows.length) (modern && folded ? technical : folded ? details : box).append(el("p", "content", "未返回数据行"));
     }
-    if (fact.result_json !== null && fact.result_json !== undefined) {
+    if ((!modern || brief) && fact.result_json !== null && fact.result_json !== undefined) {
       details.append(el("p", "meta", "本次结果原文（仅含获准展示字段；分页或截断范围见上方提示）"));
       details.append(el("pre", "content original", fact.result_json));
     }
-    box.append(details);
+    if (modern) {
+      if (fact.truncated) box.append(el("p", "note", "工具结果已截断，不能据此声称完整。"));
+      const m = fact.metadata || {};
+      if (m.next_cursor != null || m.has_more || m.hasMore) {
+        box.append(el("p", "note", "还有后续页，本页不是全部结果。"));
+      }
+      if (brief && fact.summary && technical) {
+        while (details.children.length > 1) technical.append(details.children[1]);
+      }
+    } else box.append(details);
     return box;
   };
 
@@ -93,13 +114,17 @@
     item.className = `turn ${data.state || ""}`;
     const label = { accepted: "已接收", running: "处理中", completed: "已回复", failed: "失败",
       interrupted: "已中断" }[data.state] || "错误";
-    item.append(el("p", "meta", `${label} · 编号 ${item.dataset.requestId}`));
+    const legacy = [2, 3].includes(data.delivery?.answer_version);
+    item.append(el("p", "meta", legacy ? `${label} · 编号 ${item.dataset.requestId}` : label));
     if (data.error) item.append(el("p", "content", data.error));
     if (data.delivery) {
       const delivery = data.delivery;
+      const modern = delivery.answer_version === 4;
+      const technical = el("details", "evidence technical-details");
+      technical.append(el("summary", "", "技术详情"));
       const facts = delivery.facts || [];
       const blocks = delivery.blocks || [];
-      const notices = [delivery.report_notice, delivery.limit_notice, delivery.monitoring_notice];
+      const notices = [delivery.report_notice, delivery.limit_notice, delivery.monitoring_notice, delivery.notification_notice];
       if (delivery.session_notice) {
         item.append(el("p", "note session-notice", delivery.session_notice));
       }
@@ -116,7 +141,7 @@
         if (!chosen.length) return;
         const box = el("section", `facts ${name}`);
         if (name === "action") box.append(el("p", "meta", title));
-        for (const fact of chosen) box.append(factTable(fact, resultLabel(delivery, fact.evidence_id)));
+        for (const fact of chosen) box.append(factTable(fact, resultLabel(delivery, fact.evidence_id), modern, technical));
         item.append(box);
       };
       section("action", "动作（系统根据记录生成）");
@@ -124,7 +149,7 @@
       for (const block of blocks) {
         if (block.kind === "fact") {
           const fact = byId.get(block.evidence_id);
-          if (fact) item.append(factTable(fact, resultLabel(delivery, fact.evidence_id)));
+          if (fact) item.append(factTable(fact, resultLabel(delivery, fact.evidence_id), modern, technical));
           continue;
         }
         if (system && !modelLabelled) {
@@ -137,10 +162,11 @@
       for (const fact of facts) {
         // 正文事实都应由块放置；未被放置的仍完整展示，不静默丢弃。
         if (fact.section === "body" && !placed.has(fact.evidence_id)) {
-          item.append(factTable(fact, resultLabel(delivery, fact.evidence_id)));
+          item.append(factTable(fact, resultLabel(delivery, fact.evidence_id), modern, technical));
         }
       }
       section("remaining", "其余结果（系统补全本轮获准结果）");
+      if (modern && technical.childElementCount > 1) item.append(technical);
     }
   };
 
@@ -173,7 +199,7 @@
     item.dataset.requestId = requestId;
     item.dataset.question = question;
     item.dataset.mode = mode;
-    item.append(el("p", "question", question), el("p", "meta", `处理中 · 编号 ${requestId}`));
+    item.append(el("p", "question", question), el("p", "meta", "处理中"));
     turns.append(item);
     return item;
   };
