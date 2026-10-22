@@ -775,7 +775,7 @@ StatementKind = Literal[
 # 交付前的零行探测是列表与表结构共同的证据；快照刷新（schema）与证据依赖的版本读取
 # （dependency）不属于任何样例。证据依赖复核也发零行探测，与工具的探测语句相同。
 KIND_TOOLS: dict[StatementKind, frozenset[str]] = {
-    "audit": frozenset({SLOW_QUERIES}),
+    "audit": frozenset({SLOW_QUERIES, "local/inspect_audit_security"}),
     "explain": frozenset({EXPLAIN_QUERY}),
     "layout": frozenset({LAYOUT_TOOL}),
     "ddl": frozenset({SHOW_CREATE_TABLE}),

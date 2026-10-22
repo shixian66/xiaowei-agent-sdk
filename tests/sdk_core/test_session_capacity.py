@@ -1,6 +1,7 @@
 """S1: actual runtime limits, not an autonomous-model quality evaluation."""
 
 import json
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
@@ -8,6 +9,7 @@ import pytest
 from sqlalchemy.engine import URL
 from tests.sdk_core.dialogue_gate import ROOT
 from tests.sdk_core.mcp_fixture import serve
+from tests.sdk_core.postgres_harness import isolated_database
 from tests.sdk_core.session_capacity import (
     PROFILE,
     CapacityRecorder,
@@ -15,9 +17,9 @@ from tests.sdk_core.session_capacity import (
     drivers,
     sequence,
 )
-from tests.sdk_core.synthetic_tools import context
+from tests.sdk_core.synthetic_tools import TEST_DIGEST_KEY, context, ready_engine
 from tests.sdk_core.test_monitoring_r1a import query_server
-from tests.sdk_core.test_runtime import Env
+from tests.sdk_core.test_runtime import DB_ENV, KEY_ENV, Env
 from tests.sdk_core.test_runtime import env as env
 from tests.sdk_core.test_session_policy import _call, _cite, harness
 
@@ -161,9 +163,32 @@ async def test_raising_turn_limit_continues_active_history_but_not_sealed_or_clo
 async def test_oversized_serialized_request_is_rejected_before_that_http_io(
     env: Env, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, when: str
 ) -> None:
+    cap = 500
+    if when == "after_tool":
+        # 用实际 SDK 请求校准中间阈值；提示词增长不能把“工具后拒绝”变成首次拒绝。
+        async with isolated_database() as probe_url:
+            with monkeypatch.context() as calibration:
+                calibration.setenv(DB_ENV, probe_url.render_as_string(hide_password=False))
+                calibration.setenv(KEY_ENV, TEST_DIGEST_KEY.get_secret_value())
+                async with ready_engine(probe_url):
+                    probe = CapacityRecorder(scenario="multi_query")
+                    probe.install(calibration)
+                    probe_env = replace(env, url=probe_url)
+                    probe_config = capacity_config(probe_env)
+                    async with probe_env.running(
+                        probe_config,
+                        model_transport=probe.network(sequence(1, scenario="multi_query")),
+                        starrocks_connect=drivers(probe_config, rows=45),
+                    ) as served:
+                        await served.page()
+                        probe_result = await probe.turn(served, 1)
+                    assert len(probe.current.requests) >= 2, (probe_result, probe.current.requests)
+                    assert probe.current.requests[1]["tool_outputs"] == 3
+                    first, second = (r["bytes"] for r in probe.current.requests[:2])
+                    assert second > first
+                    cap = (first + second) // 2
     recorder = CapacityRecorder(scenario="multi_query")
     recorder.install(monkeypatch)
-    cap = 500 if when == "first" else 30000
     config = capacity_config(env, model={"max_request_bytes": cap})
     connectors = drivers(config, rows=45)
     async with env.running(

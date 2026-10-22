@@ -25,6 +25,10 @@ from pydantic import BaseModel, ConfigDict, StrictBool
 from sqlalchemy.engine import URL
 from tests.sdk_core.dialogue_monitoring import SOURCE as MONITOR_SOURCE
 from tests.sdk_core.dialogue_monitoring import SUPPORTED_QUERIES
+from tests.sdk_core.dialogue_security import COLUMNS as SECURITY_SOURCE_COLUMNS
+from tests.sdk_core.dialogue_security import NOW as SECURITY_NOW
+from tests.sdk_core.dialogue_security import QUESTIONS as SECURITY_QUESTIONS
+from tests.sdk_core.dialogue_security import result as security_result
 from tests.sdk_core.gate0 import ObservingTransport, SyntheticStarRocks
 from tests.sdk_core.mcp_fixture import Recorder
 from tests.sdk_core.synthetic_tools import TEST_DIGEST_KEY, ready_engine
@@ -42,6 +46,7 @@ if TYPE_CHECKING:
 
 
 NOW = datetime(2026, 10, 10, 12, tzinfo=UTC)
+SECURITY_TOOL = "local/inspect_audit_security"
 OPERATOR = "u1-synthetic-operator"
 DB_ENV, KEY_ENV = "XW_U1_TEST_DATABASE_URL", "XW_U1_TEST_DIGEST_KEY"
 TABLE = "quota_virtual_account_quasi_rt"
@@ -67,6 +72,7 @@ class Scenario:
     feishu: bool = False
     environments: tuple[frozenset[str], ...] = ()
     autonomy: bool = False
+    security_case: int | None = None
     now: datetime = NOW
     """每轮用户当时明确的数据库环境；为空集表示用户尚未选定。只用于统计越界调用。"""
 
@@ -112,6 +118,14 @@ class ReviewSample:
     monitoring_calls: tuple[tuple[str, str, dict[str, Any]], ...] = ()
     fixture_limits: dict[str, int] = field(default_factory=dict)
 
+
+SECURITY_SCENARIOS = tuple(
+    Scenario(
+        f"security_s{i}", (("query", question),), security_case=i, now=SECURITY_NOW,
+        environments=(frozenset({"pre"}),),
+    )
+    for i, question in enumerate(SECURITY_QUESTIONS, 1)
+)
 
 SCENARIOS = (
     Scenario("desc_single", (("query", f"desc {TABLE}"),)),
@@ -469,7 +483,7 @@ def environment_scope(
     """
     if allowed is None:
         return None
-    database_tools = {t.partition("/")[2] for t in QUERY_TOOLS | AUDIT_TOOLS}
+    database_tools = {t.partition("/")[2] for t in QUERY_TOOLS | AUDIT_TOOLS | {SECURITY_TOOL}}
     calls = [target for tool, target in choices if tool in database_tools]
     return {
         "allowed": sorted(allowed),
@@ -805,6 +819,7 @@ async def _synthetic_members(actors: frozenset[str], checks: list[str], _: str, 
 @dataclass
 class DialogueStarRocks(SyntheticStarRocks):
     autonomy: bool = False
+    security_case: int | None = None
     audit_denied: bool = False
     fixture_sql_errors: int = 0
     raw_chars: int = 100
@@ -832,6 +847,12 @@ class DialogueStarRocks(SyntheticStarRocks):
             if sql in {show_create_sql(db, name) for db, name in self.tables}
             else super().classify(sql, args)
         )
+        if self.security_case is not None and self.target.audit is not None:
+            # 仅新套件需要新采集模板，旧套件仍可用同一采集器比较旧产品基线。
+            from xiaowei.starrocks import _security_sql
+
+            if sql in _security_sql(self.target.audit):
+                kind = "audit"
         task = asyncio.current_task()
         refreshing = task is not None and task.get_name().startswith("xiaowei-schema-")
         if (
@@ -852,6 +873,12 @@ class DialogueStarRocks(SyntheticStarRocks):
         ):
             # Execution-time revocation after discovery/probes; real DB ACL semantics remain A1.
             raise OperationalError(1142, "SELECT denied on synthetic audit source")
+        if self.security_case is not None and kind in {"query", "audit"}:
+            try:
+                return security_result(self.target, self.security_case, sql, args)
+            except sqlite3.Error:
+                self.fixture_sql_errors += 1
+                raise
         if self.autonomy and kind == "query":
             # 一个数据集直接执行 SQL，反引号、CTE、JOIN 不按文本路由到固定结果。
             # 仅覆盖可移植子集；真实 StarRocks 语义另验。
@@ -1001,6 +1028,12 @@ def configuration(
     )
     if scenario.autonomy:
         sr["audit"]["time_zone"] = "UTC"
+    if scenario.security_case is not None:
+        sr["audit"].update(time_zone="UTC", candidate_rows=200, max_rows=20)
+        values["data_policy"]["model_tools"] = sorted(
+            {*values["data_policy"]["model_tools"], SECURITY_TOOL}
+        )
+        values["access"]["grants"][OPERATOR] = values["data_policy"]["model_tools"]
     sr["password_ref"] = "env:U1_UNUSED_PASSWORD"  # noqa: S105 -- env reference; synthetic driver.
     # 固定部署边界；不要借 400KB 投影掩盖原始单值/总结果容量。
     sr.update(max_value_bytes=4000, max_result_bytes=200000, pool_size=4)
@@ -1085,6 +1118,10 @@ async def run_dialogue(
                             audit = target.starrocks.audit
                             if audit is not None:
                                 tables[audit.database, audit.table] = AUDIT_COLUMNS
+                        if scenario.security_case is not None:
+                            audit = target.starrocks.audit
+                            assert audit is not None
+                            tables[audit.database, audit.table] = SECURITY_SOURCE_COLUMNS
                         if scenario.pages:
                             tables = {("data_center", f"t{i:03}"): ("region",) for i in range(401)}
                         drivers[target.target_id] = DialogueStarRocks(
@@ -1093,6 +1130,7 @@ async def run_dialogue(
                             raw_chars=scenario.raw_chars,
                             raw_field=scenario.raw_field,
                             autonomy=scenario.autonomy,
+                            security_case=scenario.security_case,
                             unavailable=target.target_id == scenario.unavailable,
                             audit=(
                                 (
@@ -1353,7 +1391,7 @@ async def run_dialogue(
                                     ),
                                     **(
                                         {"fixture_sql_errors_by_target": sql_fixture_errors}
-                                        if scenario.name.startswith("p4_")
+                                        if scenario.name.startswith("p4_") or scenario.security_case
                                         else {}
                                     ),
                                     **(

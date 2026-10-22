@@ -423,6 +423,14 @@ class AuditResult(QueryResult):
     counts: dict[str, int | bool]
 
 
+class SecurityAuditResult(QueryResult):
+    """安全审计候选；三个窗口计数来自独立的服务端全窗聚合。"""
+
+    window_rows: int
+    window_failed_rows: int
+    window_oversize_rows: int
+
+
 @dataclass(frozen=True)
 class SchemaRows:
     """``read_schema`` 的原始结果（已转为 JSON 标量）；``truncated`` 表示任一读取超限。"""
@@ -550,6 +558,66 @@ _AUDIT_CANDIDATES: Final = (
     "ORDER BY {order} DESC LIMIT %s"
 )
 _AUDIT_DB_FILTER: Final = " AND db = %s"
+
+SECURITY_SOURCE_COLUMNS: Final = (
+    "timestamp", "queryId", "stmt", "state", "queryTime", "user", "clientIp", "db", "pendingTimeMs",
+)
+_SECURITY_COLUMNS: Final = (*SECURITY_SOURCE_COLUMNS, "stmt_present")
+_SECURITY_TOTALS: Final = ("window_rows", "window_failed_rows", "window_oversize_rows")
+# 仅普通注释；不尝试解释可执行注释或实现 SQL 解析器。
+_SECURITY_GAP: Final = (
+    r"([[:space:]]|/\*([^*]|\*+[^*/])*\*+/|"
+    r"--[^\r\n]*(\r\n|\r|\n|$)|#[^\r\n]*(\r\n|\r|\n|$))"
+)
+SECURITY_OR_PATTERN: Final = r'''(^|[^A-Z_])OR([[:space:]]|[(])*[0-9'"]'''
+SECURITY_MULTIPLE_PATTERN: Final = r";([[:space:]]|;)*[^[:space:];]"
+SECURITY_OPERATION_PATTERN: Final = (
+    f"^{_SECURITY_GAP}*("
+    r"(GRANT|REVOKE|EXPORT)([^A-Z_]|$)|"
+    f"(CREATE|ALTER|DROP){_SECURITY_GAP}+(USER|ROLE)([^A-Z_]|$)|"
+    f"SET{_SECURITY_GAP}+PASSWORD([^A-Z_]|$)|"
+    f"DROP{_SECURITY_GAP}+(TABLE|DATABASE)([^A-Z_]|$)|"
+    f"TRUNCATE{_SECURITY_GAP}+TABLE([^A-Z_]|$)|"
+    f"INSERT{_SECURITY_GAP}+OVERWRITE([^A-Z_]|$))"
+)
+SECURITY_DELETE_PATTERN: Final = f"^{_SECURITY_GAP}*DELETE([^A-Z_]|$)"
+
+
+def security_window(
+    start: datetime, end: datetime, audit: AuditSource
+) -> tuple[datetime, datetime]:
+    """绝对半开时间窗转成审计时区的绑定值；供 I/O 前参数检查复用。"""
+    if (start.utcoffset() is None or end.utcoffset() is None
+            or not timedelta(0) < end - start <= timedelta(minutes=audit.max_window_minutes)):
+        raise ValueError(
+            f"须提供带时区的起止时间，窗口为正且不超过 {audit.max_window_minutes} 分钟"
+        )
+    zone = ZoneInfo(audit.time_zone)
+    return start.astimezone(zone).replace(tzinfo=None), end.astimezone(zone).replace(tzinfo=None)
+
+
+def _security_sql(audit: AuditSource) -> tuple[str, str]:
+    # 库表名仅取自 AuditSource 已校验标识符；时间、规则和限额全部绑定。
+    aggregate = (
+        "SELECT COUNT(*) AS window_rows, "
+        "COUNT(CASE WHEN state = 'ERR' THEN 1 END) AS window_failed_rows, "
+        "COUNT(CASE WHEN LENGTH(stmt) > %s THEN 1 END) AS window_oversize_rows "
+        "FROM `{database}`.`{table}` WHERE `timestamp` >= %s AND `timestamp` < %s"
+    )
+    candidates = (
+        "SELECT `timestamp`, queryId, CASE WHEN LENGTH(stmt) <= %s THEN stmt END AS stmt, "
+        "state, queryTime, `user`, clientIp, db, pendingTimeMs, "
+        "(stmt IS NOT NULL AND stmt <> '') AS stmt_present "
+        "FROM `{database}`.`{table}` WHERE `timestamp` >= %s AND `timestamp` < %s AND ("
+        "REGEXP(UPPER(stmt), %s) OR UPPER(stmt) LIKE %s OR REGEXP(stmt, %s) "
+        "OR REGEXP(UPPER(stmt), %s) "
+        "OR (REGEXP(UPPER(stmt), %s) AND UPPER(stmt) NOT LIKE %s)) "
+        "ORDER BY `timestamp`, queryId LIMIT %s"
+    )
+    return (
+        aggregate.format(database=audit.database, table=audit.table),
+        candidates.format(database=audit.database, table=audit.table),
+    )
 
 
 class StarRocksAdapter:
@@ -823,6 +891,76 @@ class StarRocksAdapter:
             collected_at=candidates.collected_at,
             elapsed_ms=candidates.elapsed_ms + round((time.monotonic() - started) * 1000),
             counts={**counts, "more_candidates": candidates.truncated},
+        )
+
+    async def security_audit(self, start_time: datetime, end_time: datetime) -> SecurityAuditResult:
+        """同一只读连接依次聚合全窗、读取粗筛候选；不执行或 EXPLAIN 被审计 SQL。"""
+        audit = self._target.audit
+        if audit is None:
+            raise ValueError("未配置审计源")
+        start, end = security_window(start_time, end_time, audit)
+        aggregate, candidates = _security_sql(audit)
+        window_args = (self._target.policy.max_sql_bytes, start, end)
+        candidate_args = (
+            *window_args, SECURITY_OR_PATTERN, "%SLEEP%", SECURITY_MULTIPLE_PATTERN,
+            SECURITY_OPERATION_PATTERN, SECURITY_DELETE_PATTERN, "%WHERE%",
+            audit.candidate_rows + 1,
+        )
+        limits = _ReadLimits(
+            max_bytes=audit.candidate_bytes, max_value=_audit_value_bound(self._target),
+            zone=ZoneInfo(audit.time_zone),
+        )
+        started = time.monotonic()
+        conn = await self._acquire()
+        complete = False
+        code: StarRocksErrorCode | None = None
+        stage = _Code.SESSION_SETUP_FAILED
+        try:
+            async with asyncio.timeout(self._target.client_timeout_seconds):
+                await self._prepare_session(conn)
+                stage = _Code.QUERY_FAILED
+                totals = await self._rows(
+                    conn, aggregate, window_args, _SECURITY_TOTALS, self._limits
+                )
+                if len(totals) != 1 or any(
+                    type(value) is not int or value < 0 for value in totals[0].values()
+                ):
+                    raise _ResultContractError
+                if await conn.execute(candidates, candidate_args) != _SECURITY_COLUMNS:
+                    raise _ResultContractError
+                rows, truncated = await self._read(
+                    conn, _SECURITY_COLUMNS, audit.candidate_rows, False, limits
+                )
+                for row in rows:
+                    for name in SECURITY_SOURCE_COLUMNS:
+                        value = row[name]
+                        if name in {"queryTime", "pendingTimeMs"}:
+                            row[name] = _metric(value)
+                        elif value is not None and not isinstance(value, str):
+                            raise _ResultContractError
+                    if row["stmt_present"] not in (0, 1):
+                        raise _ResultContractError
+            complete = not truncated
+        except TimeoutError:
+            code = _Code.TIMEOUT
+        except _SessionMismatchError:
+            code = _Code.SESSION_SETUP_FAILED
+        except _ResultContractError:
+            code = _Code.RESULT_CONTRACT
+        except (MySQLError, OSError) as error:
+            code = _query_code(error, stage)
+        finally:
+            try:
+                await self._release(conn, complete=complete)
+            finally:
+                self._slots.release()
+        if code is not None:
+            raise StarRocksError(code)
+        return SecurityAuditResult(
+            target_id=self._target.target_id, sql=candidates, columns=_SECURITY_COLUMNS,
+            rows=tuple(rows), row_count=len(rows), truncated=truncated, collected_at=self._clock(),
+            elapsed_ms=round((time.monotonic() - started) * 1000),
+            **cast(dict[str, int], totals[0]),
         )
 
     def _listed(
@@ -1343,7 +1481,9 @@ def metadata_sql_bytes() -> int:
     )
 
 
-def fitting_rows(rows: Sequence[dict[str, Scalar]], max_rows: int, target: StarRocksTarget) -> int:
+def fitting_rows(
+    rows: Sequence[Mapping[str, object]], max_rows: int, target: StarRocksTarget
+) -> int:
     """开头有多少行能一起放进一个结果：规则与查询读取相同，行数、单值与总字节（生产 JSON 编码）
     任一超限即停。"""
     count, size = 0, 2  # "[]"

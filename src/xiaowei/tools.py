@@ -134,6 +134,10 @@ _REJECTION_HINTS: dict[ToolRejectHint, str] = {
     "database_required": ("列出全部表须指定 database；库名不明确先核实，列库请用 list_databases"),
     "page_size": "page_size 须为正整数且不超过工具说明中的页大小上限；修改后再调用",
     "audit_window": "时间窗须为正整数分钟且不超过工具说明中的审计窗口上限；请缩小或核实窗口",
+    "security_window": (
+        "start_time/end_time 须为带 UTC offset 的 ISO 8601 绝对时刻，起点早于终点，"
+        "窗口不超过工具说明的上限；请修正时间或缩小窗口"
+    ),
     "audit_order": "order_by 只允许工具schema列出的排序方式；修改后再调用",
     "internal_ddl_only": (
         "原始 DDL 未读取：只支持普通内部表，视图和物化视图尚未开放；已停止该操作，告诉用户能力限制"

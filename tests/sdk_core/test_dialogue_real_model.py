@@ -311,7 +311,7 @@ async def test_collector_binds_worktree_and_profile_without_content_report(
     )
 
 
-@pytest.mark.parametrize("suite", ["u1", "p4", "monitoring-reliability"])
+@pytest.mark.parametrize("suite", ["u1", "p4", "monitoring-reliability", "security"])
 def test_noninteractive_cli_refuses_before_loading_profile_or_calling_model(
     monkeypatch: pytest.MonkeyPatch,
     suite: str,
@@ -322,6 +322,30 @@ def test_noninteractive_cli_refuses_before_loading_profile_or_calling_model(
     )
     monkeypatch.setattr(command, "load_profile", lambda _: pytest.fail("不能触发模型前提读取"))
     assert command.main() == 2
+
+
+@pytest.mark.parametrize(("suite", "expected"), [("security", 1), ("u1", 3)])
+def test_security_suite_defaults_to_one_run_without_changing_old_suites(
+    monkeypatch, suite, expected,
+):
+    class Terminal(io.StringIO):
+        def isatty(self):
+            return True
+
+    seen = []
+
+    async def collect(path, repeats, name):
+        seen.append((repeats, name))
+        return {"samples": []}
+
+    monkeypatch.setattr(command.sys, "stdin", Terminal())
+    monkeypatch.setattr(command.sys, "stderr", Terminal())
+    monkeypatch.setattr(command.sys, "argv", [
+        "dialogue_real_model", "--profile", "unused.json", "--suite", suite,
+    ])
+    monkeypatch.setattr(command, "collect", collect)
+    assert command.main() == 0
+    assert seen == [(expected, suite)]
 
 
 async def test_monitoring_review_shows_case_criteria_without_injecting_them(monkeypatch, capsys):

@@ -37,6 +37,18 @@
 
 ## 3. 当前计划与下一项工作
 
+### 手动 StarRocks 安全巡检（2026-10-23，离线候选）
+
+[当前计划](docs/superpowers/plans/2026-10-22-manual-starrocks-security-inspection.md)在 `codex/manual-starrocks-security`、`/Users/kloenguyen/.codex/worktrees/manual-starrocks-security/agent-SDK`，基线 `1a92c58`；与「定时任务」对话工作树隔离。用户确认计划 blob 340af95 复审通过并授权输入/计数及 A1b。现已实现一个只读 inspect_audit_security、短 database_security Skill、全窗聚合/粗筛两条 SQL、纯分析与既有 SDK/治理/Evidence/报告接线，不改表结构、不接定时任务。
+
+运行时完整性只看候选是否截断及是否全部可判定；全窗超长数单列，非候选超长不触发 truncated。OR 夹注释、DELETE 等已知缺口保留；两条查询不承诺同一快照。样本两列多值特征转为文本以复用 Web 事实表，内部仍按列表/集合去重。新增 security 真实模型采集套件复用既有入口与同一 S1–S5，默认各一次；本地只用脚本模型，不是 Agent 自主能力验收。
+
+当前证据：纯分析/采集及粗筛离线包含关系 93 项通过；最新受影响路径回归 595 项通过，含真 SDK、采集器、已启动 Web 的成功/拒绝、HTML/MD/飞书渲染及原生 SDK 暂停实验。首次全套 4883 passed、235 skipped、89 deselected、3 failed；两项为提示词增长使测试固定容量阈值先触发，已按测试目的校准夹具且相关检查通过，生产限额/拒绝断言未放宽。原生 SDK 暂停 spike 单项复验通过，全套失败根因未证实，保留 CI 复核。完整默认套件尚无修订后全绿记录，独立代码审查和远端 CI 待关闭，不把阶段记录当最终全绿。
+
+公司验收仍开放：用户/DBA 回传 3.5.14-23a56ec / AuditLoader 5.0.0、固定列存在、一小时 237398/ERR3/按16000超长135、旧粗筛117、单次延迟约18秒。来源集群/账号安全引用、时区/截断配置、实际 SQL/候选字节限额、脱敏、多语句拆行和隔离测试环境仍待绑定。3.5.14 最终 LIKE/REGEXP 合成字面量验证、真实候选容量及两条查询成本是验收门槛，证据记在[公司侧清单](docs/starrocks-security-company-checklist.md)，不作运行时标记；4.1.4/Python/SQLite 不替代。
+
+下一步：冻结具体候选做独立代码审查，完成仓库检查、选择性提交/PR和现有格式候选发行包。A0/A1b 真实验证与 A3 由用户/DBA 在公司执行，本地不连公司 StarRocks 或模型 API。已选 A，仅在公司隔离测试环境生成无害样本，生产不回放；真实模型、渠道实收、部署和用户验收未开始。
+
 ### 当前：自建飞书代理（C 公司验收前置）
 
 C 已由 #126 合入 be8c155，批准的通用调度/只读边界不变；本轮只增加 Webhook 的 feishu_proxy 协议，详见 [ARCHITECTURE](ARCHITECTURE.md#scheduled-agent-tasks)。代理功能冻结于 163d2ac，独立审查和单次完整默认全套通过；Claude 对本地交付 HEAD 1b1a78dee2df5e467315997304222879e0ba849e 的审查已由用户确认无阻断。用户现已授权推送、开 PR、远端 CI 全绿后合并；本次仅同步集成授权与状态文案，未修改源码、测试或依赖。PR 的实际 head、CI 与合并结果以 GitHub 记录为准。D 的 Node 研究/未提交改动保留在原隔离工作树，不混入代理分支，也不继续请求其认证信息。
