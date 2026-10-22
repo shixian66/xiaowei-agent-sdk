@@ -266,3 +266,33 @@ async def test_sample_capacity_uses_actual_scalar_cells_not_internal_lists(
         (fact,) = delivery.facts
         assert len(fact.rows) == 1 and not fact.truncated
         assert all(len(json.dumps(v).encode()) <= 70 for v in fact.rows[0].values())
+
+
+@pytest.mark.parametrize("max_result_bytes", [20_000, 1200])
+async def test_s4_sample_limits_preserve_late_operation_representatives(
+    postgres_url, monkeypatch, max_result_bytes,
+):
+    target = type(AUDIT_TARGET).model_validate({
+        **AUDIT_TARGET.model_dump(), "max_value_bytes": 500,
+        "max_result_bytes": max_result_bytes,
+        "audit": {**AUDIT.model_dump(), "max_rows": 20, "candidate_rows": 200},
+    })
+    rows = [record("TRUNCATE TABLE t", queryId=f"q{i}") for i in range(25)]
+    rows.append(record("GRANT SELECT ON t TO u", queryId="q25"))
+    drv = security_driver(*rows, totals=(26, 0, 0))
+    async with assembled(postgres_url, monkeypatch, drv, target) as env:
+        enabled(env)
+        message = env.scripts.add("检查权限和 ETL 操作", tool_call(
+            "inspect_audit_security", **ARGS,
+        ), cite())
+        delivery = await env.deliver(env.ctx(authorized=TOOLS), message)
+        (fact,) = delivery.facts
+        data = json.loads(fact.result_json)
+        assert data["matched_rows"] == data["signal_counts"]["high_risk_operation"] == 26
+        assert data["operation_counts"]["grant"] == 1
+        assert data["operation_counts"]["truncate"] == 25
+        assert {row["operations"] for row in data["rows"]} == {"grant", "truncate"}
+        assert "q25" in {row["query_id"] for row in data["rows"]}
+        assert data["coverage"]["omitted_samples"] == 26 - len(data["rows"])
+        assert data["coverage"]["match_counts_complete"] and fact.truncated
+        assert len(json.dumps(data["rows"], ensure_ascii=False).encode()) <= max_result_bytes

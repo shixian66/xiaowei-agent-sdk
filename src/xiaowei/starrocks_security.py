@@ -119,21 +119,22 @@ def analyze_security_rows(
         for kind in ("operations", "signals"):
             for value in cast(list[str], sample[kind]):
                 representatives.setdefault((kind, value), i)
-    chosen: set[int] = set()
+    # 保留代表优先的顺序，后续输出字节裁剪才不会被前置的大量同类样本挤占。
+    chosen: dict[int, None] = {}
     for kind, values in (("operations", OPERATIONS), ("signals", SIGNALS)):
         for value in values:
             index = representatives.get((kind, value))
             if index is not None and len(chosen) < sample_limit:
-                chosen.add(index)
+                chosen.setdefault(index, None)
     for i in range(len(matched)):
         if len(chosen) >= sample_limit:
             break
-        chosen.add(i)
+        chosen.setdefault(i, None)
     return SecurityInspection(
         scanned_rows=result.window_rows,
         failed_rows=result.window_failed_rows,
         matched_rows=len(matched), signal_counts=counts, operation_counts=operations,
-        rows=tuple(matched[i] for i in sorted(chosen)), scan_limited=result.truncated,
+        rows=tuple(matched[i] for i in chosen), scan_limited=result.truncated,
         scanned_through=result.rows[-1]["timestamp"] if result.rows else None,
         checked_candidate_rows=result.row_count, window_oversize_rows=result.window_oversize_rows,
         unclassified_candidate_rows=uninspected, omitted_samples=len(matched) - len(chosen),

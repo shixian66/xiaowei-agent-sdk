@@ -89,6 +89,8 @@ Agent 对长窗口可优先选约一小时的半开子窗，并在原环境、�
 
 样本行包含：`query_id`、`timestamp`、`state`、`query_time_ms`、`user/client_ip/database/pending_time_ms`、`signals`、`operations`。指标未知用 `null`，不能补零。`operations` 内部为去重后的闭集列表：`grant/revoke/account/password/drop/truncate/export/insert_overwrite/delete_no_where`；没有高风险操作时为空。为复用现有 Web 事实表的标量单元格契约，工具样本中的 signals/operations 序列化为保留全部值的逗号分隔文本，内部计数与去重仍用列表/集合；不改渲染组件。一行可含多条语句和多种操作，因此不用会丢信息的单值 `operation`。延迟样本保留 `requested_delay_seconds`，供 S2 比较请求参数与实际耗时：仅在恰好一个 `SLEEP` 调用且参数为单个数字常量时取值，否则为 `null`，不做表达式求值，也不据此推断条件分支、有效等待时长或“攻击成功率”。
 
+样本按操作/信号代表优先排列，再补其他命中；行数和字节裁剪保持这个顺序，不承诺样本按时间排序。S4 同时覆盖字节上限只能容纳少量样本、但足够容纳各类代表的情况，避免晚出现的 GRANT 被大量前置 ETL 样本挤掉。
+
 `signals` 与 `operations` 已表达线索类型，不另生成 SQL 形状摘要。新工具不返回原始 `stmt`、注释、字符串值、错误原文或任意拼接的 SQL 前缀；用 Query ID 供 DBA 回查。无需新增通用 SQL 脱敏器，也避免通过新工具把口令语句或日志中的指令传进模型。
 
 **原文边界：** 现有 `run_readonly_query` 已可能读取获准审计表的 `stmt`。新工具不返回原文，不代表整个 Agent 无法通过其他获准工具读取原文；本期不改变这项权限契约。用户明确索要原文时按现有查询能力和数据授权处理，已有授权足够不重复确认。Skill 指导巡检不要自动补取原文，不能把这条指南当作执行层的全局禁读保证，也不为此新增权限框架。无论从哪里取得可疑 SQL，都不得执行或 EXPLAIN 来验证攻击。
