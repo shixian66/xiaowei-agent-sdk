@@ -41,7 +41,7 @@
 
 当前修复起点 9e04edd85bc2868ef9de2e7bbb2eede38dec48e8（S2 独立审查有条件通过），分支 codex/feishu-input-presentation-plan，原目录与 D 工作树不动。按[计划 v1.4](docs/superpowers/plans/2026-10-22-feishu-input-presentation-repair.md)仅修多文档选择和拒绝测试有效性；已采纳局部错误回执按消息提示，未改空 post 准入。长期交付规则及 v4 方案不变，S1 未实施。
 
-进度：多文档在解析层和正式入口均已 RED→GREEN；局部 57 项通过。两组指定变异均在临时副本命中解析/入口测试，各 2 failed，恢复后各 2 passed，副本已删除，工作树未被变异。最终指定回归与静态检查待冻结后记录于 §5；本次按授权不重跑完整默认全套。
+进度：多文档在解析层和正式入口均已 RED→GREEN；局部 57 项通过。两组指定变异均在临时副本命中解析/入口测试，各 2 failed，恢复后各 2 passed，副本已删除，工作树未被变异。冻结代码 d750a41 的指定及受影响回归 395 passed，ruff/format/mypy、文档与 diff 检查通过，证据见 §5；本次按授权不重跑完整默认全套。
 
 下一项是完成上述检查、本地提交后将精确 SHA 交 Claude 仅复核本次差异及两组变异，不重做整轮 S2。S1 仍等待用户确认 v4 回退限制及后续开发授权，D 暂停。真实模型、飞书、代理和公司源不授权；离线证据不能替代真实输入/识图/客户端验收。
 
@@ -146,13 +146,13 @@ B1 的短口径主视图修复已成立；原 B2 因复现形状不符合真实 
 
 RED：review-fix-red.log 中 5 failed、11 passed，失败分别为两种多文档各在解析/正式入口失守，以及两条错误 post 仅获一条说明；不是环境失败。最小修复后的局部回归 review-fix-green.log 为 57 passed。
 
-两组变异分别在临时源码副本完成，先验证四项基线通过并记录实际加载的模块路径/hash：多图拒绝改为 continue，解析和正式入口共 2 failed；精确恢复后 2 passed。删除键正则同样 2 failed→恢复后 2 passed。日志为 `/tmp/xiaowei-post-s2/review-fix-mutant-multiple-images.log`、`review-fix-restored-multiple-images.log`、`review-fix-mutant-image-key.log`、`review-fix-restored-image-key.log`；临时副本已删除、工作树源码未被变异。初次副本缺 scripts 导致的装配错误单存 review-fix-mutation-setup-error.log，补齐已存在依赖后重跑，不把装配错误算作变异命中。
+两组变异分别在临时源码副本完成，先验证四项基线通过并记录实际加载的模块路径/hash：多图拒绝改为 continue，解析和正式入口共 2 failed；精确恢复后 2 passed。删除键正则同样 2 failed→恢复后 2 passed。日志为 `/tmp/xiaowei-post-s2/review-fix-mutant-multiple-images.log`、`review-fix-restored-multiple-images.log`、`review-fix-mutant-image-key.log`、`review-fix-restored-image-key.log`；临时副本已删除、工作树源码未被变异；基线及两组恢复后的 SOURCE_SHA256 均与冻结代码 d750a41 的 feishu_post.py 一致。初次副本缺 scripts 导致的装配错误单存 review-fix-mutation-setup-error.log，补齐已存在依赖后重跑，不把装配错误算作变异命中。
 
 可选项 1 已做：仅 post 的 input_notice 先核当前成员，再沿 _first 按消息去重，避免十分钟窗口吞掉下一条修正失败的说明。新增连续错误/重复投递/撤权反例；真正未支持类型与身份提示仍用原窗口。对应旧 post 测试按新顺序复核两次成员，其他类型仍只复核一次。可选项 2 未做：只 @ 机器人的 post 仍返回 invalid，与 text 的 EMPTY_COMMAND 文案不同；本次不扩大空输入准入或改动空命令路径。
 
-最终受影响回归、ruff/format/mypy/文档及 diff 检查：待冻结后记录。本次不重跑完整默认全套；旧 4818 passed、235 skipped、89 deselected 的单次全套只覆盖 9f109374e57b89548b0aed2cd67e0a07f9819282（日志 full-9f10937.log），不能当成本次修复通过证据。早期 706/37 项记录及资源键隔离变异同样不替代本次检查，原始日志仍在 /tmp/xiaowei-post-s2/。
+最终代码冻结于 `d750a41bfb5466d70c7092b9c2346b2436e9fe40`。同次相关回归 **395 passed，83.95 秒，EXIT_CODE=0**，BEGIN/END_SHA 相同且 BEGIN/END_CLEAN、VERSION_UNCHANGED 均为 true；日志 `/tmp/xiaowei-post-s2/review-fix-regression-d750a41.log` 记录完整命令。覆盖用户指定的 6 个模块，加身份提示/真正未支持类型/群身份及原生批准恢复对照；不是完整默认全套。Ruff check、5 个相关 Python 文件 format、mypy（38 源文件）、文档命令检查（2 passed）、提交范围 diff 检查均通过。冻结后仅更新本记录及计划中 `<at>` 的 Markdown 转义，源码和测试未变。本次不重跑完整默认全套；旧 4818 passed、235 skipped、89 deselected 的单次全套只覆盖 9f109374e57b89548b0aed2cd67e0a07f9819282（日志 full-9f10937.log），不能当成本次修复通过证据。早期 706/37 项记录及资源键隔离变异同样不替代本次检查，原始日志仍在 /tmp/xiaowei-post-s2/。
 
-S0 的 v4 贯穿/回退方案仍仅方案；原三项 Gateway→SDK→隔离 PG 暂停可见性结论不变：未恢复/过期后普通轮不可见，拒绝经恢复提交后可见，零重查/生产写。未实施 S1/v4/D，未新增依赖/迁移，未读取公司配置凭据或调用真实服务。未覆盖真实平台 post/mentions/md 形态（md 中 <at> 会被当 HTML 整条拒绝）、真实识图和客户端展示。下一步只交精确 SHA 做本次差异及两组变异的独立复核。
+S0 的 v4 贯穿/回退方案仍仅方案；原三项 Gateway→SDK→隔离 PG 暂停可见性结论不变：未恢复/过期后普通轮不可见，拒绝经恢复提交后可见，零重查/生产写。未实施 S1/v4/D，未新增依赖/迁移，未读取公司配置凭据或调用真实服务。未覆盖真实平台 post/mentions/md 形态（md 中 `<at>` 会被当 HTML 整条拒绝）、真实识图和客户端展示。下一步只交精确 SHA 做本次差异及两组变异的独立复核。
 
 ### 群输入与按需详情计划 v1.3（仅文档）
 
