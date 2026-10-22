@@ -15,7 +15,7 @@
 | 锁定依赖 | SDK `0.22.3`、Lark Channel `1.4.0`、MCP `2.2.0`、sqlglot `30.17.0`、`nh3 0.3.7`、`tinycss2 1.5.1`、Pillow `13.0.0`、certifi `2026.10.19`（后两项为严格审计发现的既有漏洞定向升级） |
 | 正式入口 | `xiaowei serve`、`config check`、`model check`、`storage init/upgrade/cleanup`、`requests resend`；命令与环境准备以 README 为准 |
 | 最近有记录的公司部署 | 既有交接记录称 PR #110 / `4e0ab86` 已部署，并记录了部署后的回答拒收反馈。该历史记录不证明当前镜像、配置或健康状态，也不证明 #111–#114 已部署 |
-| 当前验收结论 | A 已合并且 CI 9/9；B 的B1/C1/N1–N3已关闭，新增R1在修复验证中，当前证据见§5；真实U5未验收，C/D 未实现 |
+| 当前验收结论 | A 已合并且 CI 9/9；B 的B1/C1/N1–N3已关闭，R1修复通过本次差异独立复审及版本化检查，当前证据见§5；真实U5未验收，C/D 未实现 |
 | 当前任务授权 | A 推送/PR/合并已完成；本轮仅授权 B 审查修复、离线测试和本地提交；不推送、建PR、合并或部署。真实模型、公司源、真实 Webhook和部署仍未授权；生产写逐次审批。隔离环境按锁文件安装，测试使用仓库标识的隔离 PostgreSQL |
 
 原工作目录的 ARCHITECTURE 差异与未跟踪计划/公司配置保留，未复制到本工作树；本次未读取公司配置凭据。旧回答修复计划及验证记录保留为历史证据，不能作为本次定时任务的实施授权。当前任务只按下面的新设计/计划接续。
@@ -142,17 +142,19 @@ B1 的短口径主视图修复已成立；原 B2 因复现形状不符合真实 
 
 ### 2026-10-22 B：R1 连续使用修复
 
-主线基线 `9284688bb8907c9968e84d5e49c23e551c53ac58`；本轮输入 `e055ca943e77030107ffdd37d802f27b9fb23d74`。外部复审已确认 B1/C1/N1/N2/N3 关闭；对应实现和测试映射保存在 `git show e055ca9:AGENT_HANDOFF.md`，不能用其535项/4657项结果证明本轮 R1。
+主线基线 `9284688bb8907c9968e84d5e49c23e551c53ac58`；本轮输入 `e055ca943e77030107ffdd37d802f27b9fb23d74`，产品修复 `6864bb758b76371ff1fb10acfc24f9a5291899fa`；`369435d9e961db5c669f85c44b688496a6719037` 仅补 README 扩权版本提醒，源码与测试不变，单次全套在369435d执行。后续只更新交接/计划状态。外部复审已确认 B1/C1/N1/N2/N3 关闭；对应实现和测试映射保存在 `git show e055ca9:AGENT_HANDOFF.md`，不能用其535项/4657项结果证明本轮 R1。
 
 **R1 已确认：** 原 README 只给业务查询接收范围，B 起草/激活/状态 Evidence 进入共享历史后，下一次即时通知或提醒因缺 scheduled 接收许可被拒。原 C1 测试两次 /新建 掩盖了此问题，这是验证遗漏。修复采用管理员显式配置（README 的最小完整列表），不自动给 scheduled 授权，也不跳过全部模型可见证据、定义依赖或业务源检查。缺配时模型工具说明、起草拒绝及通知的代码事实提醒指出 receive_tools/receive_targets 和 scheduled 依赖；不扩大结果 schema 或修改历史证据指纹。
 
 | 检查 | 当前证据 |
 | --- | --- |
 | TDD 工作区复现 | `/tmp/xiaowei-b-r1-red.log`：3 failed、1 passed，复现确认后即时通知被挡、第二次提醒被挡及缺配无指导；修改前未带版本头，不作为精确提交的正式QA记录 |
-| 工作区最小闭环 | `/tmp/xiaowei-b-r1-green.log`：6 passed，8.22秒。公开README策略直接进入真实群/SDK/治理/隔离PG/HTTP替身；两条提醒各发送一次、即时通知、C1共享门槛全程不 /新建；原业务源直接/传递拒绝保留。此记录不替代冻结版本检查 |
-| 冻结版本关联检查 | 待记录带 HEAD/树和工作区前后校验的 B、通知、展示、治理及文档回归 |
-| 单次完整默认全套 | 待在本轮精确版本执行；旧54a2716的4657项日志无内嵌SHA，仅保留为历史，不用于宣称覆盖R1 |
-| 独立复审 | 待冻结SHA后审查 R1 实际差异及接收依赖，不以自行复查替代 |
+| 工作区最小闭环 | `/tmp/xiaowei-b-r1-green.log`：6 passed，8.22秒。公开README策略直接进入正式群处理链/真SDK/治理/隔离PG/HTTP替身；两条提醒各发送一次、即时通知、C1共享门槛全程不 /新建；原业务源直接/传递拒绝保留。此记录不替代冻结版本检查 |
+| 冻结版本关联检查 | **476 passed，129.39秒**，`/tmp/xiaowei-b-r1-related.log`；B专项68项、通知、feishu_render、治理、飞书协议、Evidence范围及文档。HEAD=6864bb7，开始/结束均clean、版本不变。静态日志 `/tmp/xiaowei-b-r1-{lint,format,mypy,diff}.log` 同SHA，四项0退出，mypy37源文件 |
+| 单次完整默认全套 | **4660 passed, 235 skipped, 89 deselected, 5 warnings in 1576.51s (0:26:16)**，`/tmp/xiaowei-b-r1-full.log`；HEAD=369435d，开始/结束SHA相同、工作树clean、EXIT_CODE=0、VERSION_UNCHANGED=True。无变异插件；旧无版本头日志不用于覆盖R1，跳过/未选中项不算能力验收 |
+| 独立复审 | **6864bb7 本次差异复审通过，R1关闭**；独立8 passed，9.57秒（3新增、C1、传递False/True、2项TTL），差异检查通过、版本/工作区未变。唯一P3文档提醒已在369435d补齐：既有接收范围扩大须更新target_version并重新授权；非执行层变更 |
+
+**隔离变异：** `/tmp/xiaowei-b-r1-mutation-transitive.log` 移除 `TaskDefinitions.check_content` 后，原 `source_allowed=False` 由零POST变为一次POST，目标1 failed；`/tmp/xiaowei-b-r1-mutation-implicit.log` 自动补六项scheduled接收范围及目标后，缺配回归目标1 failed。两种均仅进程内变异，HEAD=6864bb7、前后clean/版本不变；预期失败不计为正式通过。
 
 正式检查使用本机 `/tmp/xiaowei_run_versioned_check.py`，开始记录 HEAD_SHA/TREE_SHA/WORKTREE_STATUS/COMMAND，结束记录 END_HEAD_SHA/END_WORKTREE_STATUS/EXIT_CODE/VERSION_UNCHANGED；要求干净工作树且版本不变，不输出环境变量全集或任何凭据。旧日志不会补写成当时已捕获SHA的新证据。
 
@@ -160,7 +162,14 @@ B1 的短口径主视图修复已成立；原 B2 因复现形状不符合真实 
 
 两项非阻断建议暂不扩展：过时批准的 Action/用户回执已确定拒绝、draft 不可再激活，不为 R1 改生命周期；旧v14自动探测不新增，沿 README 已接受的重建或恢复v13配对备份路径。应用仍schema14，本轮无迁移/依赖变更。
 
-**边界与下一步：** 仍仅本地修复、测试、文档和提交，不推送/建PR/合并/部署；不读取公司配置/凭据，不调用真实模型、Webhook、飞书或公司源。离线脚本模型不证明真实 Agent 能力。真实 U5（日期理解、澄清、工具选择、成本及平台闭环）未验收；本轮单次完整全套结果待记录。C/D 不实施，原目录修改保留。
+可复现命令（在本工作树；pytest前缀为 `SDK_TEST_POSTGRES_URL=postgresql+asyncpg://postgres@127.0.0.1:55432/postgres PYTHONDONTWRITEBYTECODE=1`）：
+
+- 关联：`.venv/bin/python -m pytest -q -p no:cacheprovider tests/sdk_core/test_{scheduled_tasks,webhook_notification,feishu_render,governance,feishu,evidence_scope}.py tests/security/test_docs_command_consistency.py`。
+- 单次完整默认全套：`.venv/bin/python -m pytest -q -p no:cacheprovider`。
+- 静态：`.venv/bin/ruff check --no-cache .`；`.venv/bin/ruff format --check src/xiaowei/{feishu_render,tools,webhook}.py tests/sdk_core/test_scheduled_tasks.py`；`.venv/bin/mypy --cache-dir=/tmp/xiaowei-b-r1-mypy src`；`git diff --check e055ca9..HEAD`。
+- 这些命令由临时版本记录器包裹运行，实际展开的COMMAND保存在各日志；变异另加 `-p xiaowei_b_r1_mutations`，以 `XW_R1_MUTATION=transitive_scope/implicit_task_scope` 选择保护，插件路径 `/tmp/xiaowei_b_r1_mutations.py`。日志已写明MUTATION类别，不混入正式全套。
+
+**边界与下一步：** 仍仅本地修复、测试、文档和提交，不推送/建PR/合并/部署；不读取公司配置/凭据，不调用真实模型、Webhook、飞书或公司源。离线脚本模型不证明真实 Agent 能力。真实 U5（日期理解、澄清、工具选择、成本及平台闭环）未验收；本轮单次完整默认全套已执行通过，精确结果见上表。C/D 不实施，原目录修改保留。
 
 ### 已合入 A 的有效验证
 
