@@ -1196,3 +1196,33 @@ async def test_later_permission_checks_preserve_revoked_vs_unverified(
         env.clock.advance(3600)
         await rt.scheduled_tasks.tick()
         assert len(requests) == (0 if membership is False else 1)
+
+
+async def test_consecutive_later_unverified_checks_accumulate_until_confirmed_run(env, monkeypatch):
+    query = tool_call(
+        "run_readonly_query", cluster=SR.target_id, sql="SELECT region,total FROM shop.sales"
+    )
+    env.scripts.add(TASK, query, cite())
+    async with running(env, monkeypatch, config=agent_config(env)) as (group, requests, rt):
+        await activate(env, group, interval=3600)
+        checks = 0
+        recovered = False
+
+        async def member_status(chat, subject):
+            nonlocal checks
+            checks += 1
+            return True if recovered or checks % 2 else None
+
+        object.__setattr__(rt.scheduled_tasks.definitions, "member_status", member_status)
+        env.clock.advance(60)
+        for count in range(1, 4):
+            await rt.scheduled_tasks.tick()
+            assert await env.scalar("SELECT unverified_count FROM xiaowei_scheduled_job") == count
+            assert requests == []
+            assert env.scripts.calls.get(TASK, []) == []
+            env.clock.advance(3600)
+        recovered = True
+        await rt.scheduled_tasks.tick()
+        assert len(requests) == 1
+        assert await env.scalar("SELECT unverified_count FROM xiaowei_scheduled_job") == 0
+        assert await env.scalar("SELECT count(*) FROM xiaowei_scheduled_run") == 4

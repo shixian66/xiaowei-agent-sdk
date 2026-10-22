@@ -1386,7 +1386,7 @@ class ScheduledTasks:
             await conn.execute(
                 sql(
                     "UPDATE xiaowei_scheduled_job SET next_run=:next,run_count=run_count+1,"
-                    "unverified_count=0,checked_at=:now WHERE job_id=:id"
+                    "checked_at=:now WHERE job_id=:id"
                 ),
                 {
                     "id": job["job_id"],
