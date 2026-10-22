@@ -148,9 +148,10 @@ _MONITORING_REASONS = {
     "upstream_5xx": "上游服务错误",
     "invalid_expression": "查询表达式解析失败",
     "invalid_selector": "发现选择器被上游拒绝",
-    "response_limit": "告警响应超出接收上限",
-    "invalid_matcher": "告警匹配条件被上游拒绝",
+    "response_limit": "告警或静默列表响应超出接收上限",
+    "invalid_matcher": "告警或静默列表匹配条件被上游拒绝",
     "silence_missing": "指定静默 ID 未找到",
+    "object_missing": "指定 Dashboard UID 未找到",
     "unclassified": "读取失败，原因未分类",
 }
 

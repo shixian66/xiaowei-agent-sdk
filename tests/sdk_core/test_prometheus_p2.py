@@ -564,7 +564,7 @@ async def test_non_selector_rejection_does_not_block_the_same_selector_elsewhere
         assert repeated["code"] == "invalid_arguments" and "同一发现请求" in repeated["reason"]
 
 
-async def test_parallel_selector_repairs_reserve_only_two_slots(env: Env) -> None:
+async def test_parallel_selector_corrections_do_not_block_valid_discovery(env: Env) -> None:
     bad = [EMPTY_MATCHING, '{job=~".*"}', '{nodename=~".*"}']
 
     def repairs(call: ModelCall) -> list[Any]:
@@ -574,38 +574,55 @@ async def test_parallel_selector_repairs_reserve_only_two_slots(env: Env) -> Non
         ]
 
     with serve(p2_server) as source:
-        async with env.running(env.config(**p2_config(source.url))) as served:
+        values = p2_config(source.url)
+        values["budget"] = {
+            "max_tool_calls": 4,
+            "max_turns": 8,
+            "timeout_seconds": 30,
+            "max_scope_checks": 1000,
+        }
+        async with env.running(env.config(**values)) as served:
             await served.page()
             message = env.scripts.add(
-                "并行修正只占两次额度",
+                "并行修正仍可取得正确发现结果",
                 tool_call(f"{SOURCE}__series", **WINDOW, matches=[bad[0]]),
                 repairs,
-                lambda call: answer([], analysis="", advice="未经数据验证"),
+                cite(),
             )
             assert (await served.turn(message, "query")).json()["state"] == "completed"
-        assert [a["matches"] for _, a in source.recorder.tool_calls] == [[m] for m in bad]
-        assert await env.scalar("SELECT count(*) FROM xiaowei_evidence") == 0
+        assert [a["matches"] for _, a in source.recorder.tool_calls] == [
+            [m] for m in [*bad, "node_uname_info"]
+        ]
+        assert await env.scalar("SELECT count(*) FROM xiaowei_evidence") == 1
 
 
-async def test_selector_repairs_are_capped_per_source(env: Env) -> None:
+async def test_selector_corrections_allow_valid_request_after_three_failures(env: Env) -> None:
     bad = [EMPTY_MATCHING, '{job=~".*"}', '{nodename=~".*"}']
     with serve(p2_server) as source:
-        async with env.running(env.config(**p2_config(source.url))) as served:
+        values = p2_config(source.url)
+        values["budget"] = {
+            "max_tool_calls": 4,
+            "max_turns": 8,
+            "timeout_seconds": 30,
+            "max_scope_checks": 1000,
+        }
+        async with env.running(env.config(**values)) as served:
             await served.page()
             message = env.scripts.add(
-                "选择器修正有上限",
+                "三项选择器错误后仍可修正",
                 *[tool_call(f"{SOURCE}__series", **WINDOW, matches=[m]) for m in bad],
                 tool_call(f"{SOURCE}__series", **WINDOW, matches=["node_uname_info"]),
-                lambda call: answer([], analysis="", advice="未经数据验证，请提供主机标签"),
+                cite(),
             )
             body = (await served.turn(message, "query")).json()
             assert body["state"] == "completed"
         calls = env.scripts.calls[message]
-        assert [last_output(c)["correction_allowed"] for c in calls[1:4]] == [True, True, False]
-        stopped = last_output(calls[4])
-        assert stopped["code"] == "source_stopped" and stopped["retry_this_turn"] is False
-        assert [a["matches"] for _, a in source.recorder.tool_calls] == [[m] for m in bad]
-        assert await env.scalar("SELECT count(*) FROM xiaowei_evidence") == 0
+        assert [last_output(c)["correction_allowed"] for c in calls[1:4]] == [True, True, True]
+        assert last_output(calls[4])["evidence_id"]
+        assert [a["matches"] for _, a in source.recorder.tool_calls] == [
+            [m] for m in [*bad, "node_uname_info"]
+        ]
+        assert await env.scalar("SELECT count(*) FROM xiaowei_evidence") == 1
 
 
 async def test_selector_error_does_not_stop_other_reads_of_the_source(env: Env) -> None:
@@ -723,7 +740,7 @@ async def test_failed_expression_is_not_replayed_across_query_tools(env: Env) ->
         assert "修改括号" in rejected["reason"]
 
 
-async def test_parallel_initial_errors_and_two_repair_slots_have_exact_io_counts(env: Env) -> None:
+async def test_parallel_initial_errors_and_corrections_have_exact_io_counts(env: Env) -> None:
     def parallel(expressions: list[str]) -> Any:
         return lambda call: [
             function_call(f"{SOURCE}__query", {"query": q}, call_id=f"p2-{q}") for q in expressions
@@ -742,7 +759,7 @@ async def test_parallel_initial_errors_and_two_repair_slots_have_exact_io_counts
         async with env.running(env.config(**values)) as served:
             await served.page()
             message = env.scripts.add(
-                "并行修正不要超额",
+                "并行独立修正都进入 I/O",
                 parallel(initial),
                 parallel(repairs),
                 lambda call: answer([], analysis="", advice="未经数据验证，表达式仍需检查"),
@@ -750,9 +767,9 @@ async def test_parallel_initial_errors_and_two_repair_slots_have_exact_io_counts
             body = (await served.turn(message, "query")).json()
             assert body["state"] == "completed"
         queries = [a["query"] for _, a in source.recorder.tool_calls]
-        assert len(queries) == 6
+        assert len(queries) == 8
         assert set(initial) <= set(queries)
-        assert len(set(repairs) & set(queries)) == 2
+        assert set(repairs) <= set(queries)
         assert await env.scalar("SELECT count(*) FROM xiaowei_evidence") == 0
 
 
@@ -1003,9 +1020,11 @@ def test_expression_error_requires_complete_single_text_locked_shape() -> None:
     assert _promql_error_position(result, "range_query") is None
 
 
-async def test_successful_repair_does_not_reset_quota_and_new_turn_resets_it(env: Env) -> None:
+async def test_successful_corrections_do_not_limit_other_metrics_and_new_turn_can_retry(
+    env: Env,
+) -> None:
     def last_failed(call: ModelCall) -> list[Any]:
-        assert last_output(call)["correction_allowed"] is False
+        assert last_output(call)["correction_allowed"] is True
         return tool_call(f"{SOURCE}__query", query="up2")(call)
 
     with serve(p2_server) as source:
@@ -1019,7 +1038,7 @@ async def test_successful_repair_does_not_reset_quota_and_new_turn_resets_it(env
         async with env.running(env.config(**values)) as served:
             await served.page()
             message = env.scripts.add(
-                "两次修正成功也不重置额度",
+                "多项指标可各自修正",
                 tool_call(f"{SOURCE}__query", query="bad0("),
                 tool_call(f"{SOURCE}__query", query="up0"),
                 tool_call(f"{SOURCE}__query", query="bad1("),
@@ -1035,6 +1054,7 @@ async def test_successful_repair_does_not_reset_quota_and_new_turn_resets_it(env
                 "bad1(",
                 "up1",
                 "bad2(",
+                "up2",
             ]
             next_turn = env.scripts.add(
                 "新轮次有新额度",

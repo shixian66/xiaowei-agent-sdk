@@ -10,7 +10,7 @@ from tests.sdk_core.mcp_fixture import Recorder, recording, serve
 from tests.sdk_core.test_app import advise_unverified, tool_call
 from tests.sdk_core.test_grafana_g3 import SOURCE, g3_config
 from tests.sdk_core.test_grafana_g3 import synthetic_token as synthetic_token
-from tests.sdk_core.test_prometheus_p2 import cite
+from tests.sdk_core.test_prometheus_p2 import cite, last_output
 from tests.sdk_core.test_runtime import Env, serve_config
 from tests.sdk_core.test_runtime import env as env
 
@@ -18,6 +18,123 @@ from xiaowei.mcp import _accepts_input, _grafana_read_failure
 from xiaowei.runtime import ServeConfig, _monitoring_catalog
 
 pytestmark = pytest.mark.loopback
+
+
+def missing_dashboard(uid: str) -> str:
+    return (
+        f'get dashboard by uid: get dashboard "{uid}" via k8s api: '
+        "kubernetes API error: 404 Not Found (HTTP 404): "
+        + json.dumps(
+            {
+                "code": 404,
+                "status": "Failure",
+                "reason": "NotFound",
+                "details": {
+                    "name": uid,
+                    "group": "dashboard.grafana.app",
+                    "kind": "dashboards",
+                },
+            }
+        )
+    )
+
+
+@pytest.mark.parametrize("name", ["get_dashboard_summary", "get_dashboard_panel_queries"])
+def test_bound_dashboard_missing_is_local_to_object(name: str) -> None:
+    result = CallToolResult(
+        is_error=True,
+        content=[
+            TextContent(type="text", text=missing_dashboard("host")),
+        ],
+    )
+    assert _grafana_read_failure(result, name, {"uid": "host"}) == "object_missing"
+    assert _grafana_read_failure(result, name, {"uid": "other"}) is None
+    for changed in (
+        {"is_error": False},
+        {"structured_content": {}},
+        {"content": [*result.content, TextContent(type="text", text="extra")]},
+    ):
+        assert (
+            _grafana_read_failure(result.model_copy(update=changed), name, {"uid": "host"}) is None
+        )
+
+
+async def test_missing_dashboard_allows_other_uid_but_deduplicates_missing_uid(env: Env) -> None:
+    def factory(recorder: Recorder) -> Any:
+        server = MCPServer("g3-missing")
+
+        @server.tool(structured_output=False)
+        def get_dashboard_summary(uid: str) -> CallToolResult:
+            recorder.tool_calls.append(("get_dashboard_summary", {"uid": uid}))
+            if uid == "missing":
+                return CallToolResult(
+                    is_error=True,
+                    content=[
+                        TextContent(type="text", text=missing_dashboard(uid)),
+                    ],
+                )
+            return CallToolResult(
+                content=[
+                    TextContent(
+                        type="text",
+                        text=json.dumps(
+                            {
+                                "uid": uid,
+                                "title": "Host CPU",
+                                "panelCount": 0,
+                                "panels": [],
+                                "timeRange": {"from": "now-1h", "to": "now"},
+                            }
+                        ),
+                    )
+                ]
+            )
+
+        @server.tool(structured_output=False)
+        def get_dashboard_panel_queries(uid: str, panelId: int) -> CallToolResult:  # noqa: N803
+            recorder.tool_calls.append(
+                ("get_dashboard_panel_queries", {"uid": uid, "panelId": panelId})
+            )
+            return CallToolResult(
+                is_error=True,
+                content=[
+                    TextContent(type="text", text=missing_dashboard(uid)),
+                ],
+            )
+
+        return recording(server.streamable_http_app(), recorder, token="synthetic-mcp-token")  # noqa: S106
+
+    def repeat(call: Any) -> Any:
+        output = last_output(call)
+        assert output["status"] == "object_missing"
+        assert output["correction_allowed"] is True
+        return tool_call(f"{SOURCE}__get_dashboard_summary", uid="missing")(call)
+
+    def other(call: Any) -> Any:
+        assert last_output(call)["status"] == "rejected"
+        return tool_call(f"{SOURCE}__get_dashboard_summary", uid="healthy")(call)
+
+    def cross_tool(call: Any) -> Any:
+        assert last_output(call)["status"] == "rejected"
+        return tool_call(f"{SOURCE}__get_dashboard_panel_queries", uid="missing", panelId=1)(call)
+
+    with serve(factory) as source:
+        async with env.running(env.config(**g3_config(source.url))) as served:
+            await served.page()
+            message = env.scripts.add(
+                "定义缺失时查看其他对象并保留缺口",
+                tool_call(f"{SOURCE}__get_dashboard_summary", uid="missing"),
+                repeat,
+                cross_tool,
+                other,
+                cite(),
+            )
+            body = (await served.turn(message, "query")).json()
+            assert body["state"] == "completed"
+            assert len(body["delivery"]["facts"]) == 1
+            assert "指定 Dashboard UID 未找到" in body["delivery"]["monitoring_notice"]
+        assert [args["uid"] for _, args in source.recorder.tool_calls] == ["missing", "healthy"]
+        assert await env.scalar("SELECT count(*) FROM xiaowei_evidence") == 1
 
 
 def test_all_selected_schema_shapes_match_locked_official_schema() -> None:
