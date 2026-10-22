@@ -212,6 +212,8 @@ class ToolObservation(_Trusted):
     captured_at: AwareDatetime
     truncated: bool
     dependencies: tuple[ObjectDependency, ...] | None = None
+    content_expires_at: AwareDatetime | None = None
+    """可信派生内容的最早截止；只能缩短 Evidence 保留期，不能续期。"""
 
 
 class EvidenceRecord(_Trusted):

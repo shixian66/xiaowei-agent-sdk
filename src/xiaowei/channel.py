@@ -32,7 +32,7 @@ from typing import Protocol
 
 from pydantic import AwareDatetime, BaseModel, ConfigDict, Field, model_validator
 
-from xiaowei.actions import ACTION_SETTLE_TIMEOUT_SECONDS, ActionOutcomeError
+from xiaowei.actions import ACTION_SETTLE_TIMEOUT_SECONDS, REMINDER_TIME_PASSED, ActionOutcomeError
 from xiaowei.app import Application, Mode, PausedTurn, ResumeRejectedError, TurnError, TurnReason
 from xiaowei.channel_store import (
     CallerFailureCode,
@@ -68,7 +68,7 @@ from xiaowei.models import (
     group_owner,
 )
 from xiaowei.progress import Progress
-from xiaowei.webhook import APPROVAL_NOTICE
+from xiaowei.webhook import APPROVAL_NOTICE, REMINDER_APPROVAL_NOTICE
 from xiaowei.webhook import TOOL as NOTIFY_TOOL
 
 logger = logging.getLogger(__name__)
@@ -99,6 +99,7 @@ _ACTION_FAILURE_CODES: Mapping[str, CallerFailureCode] = {
     "rejected": "action_rejected",
 }
 _RECEIPTS: Mapping[FailureCode, str] = {
+    "reminder_time_passed": REMINDER_TIME_PASSED,
     "action_requester_invalid": "发起人已不在群或权限已变化，未执行，请重新提出",
     "action_session_invalid": (
         "原会话不可继续，未执行；暂停前调查未形成最终报告、未入历史，请新建会话重新调查并提出"
@@ -469,7 +470,16 @@ class ResultDelivery:
                 or any("approval_command" in f.metadata for f in delivery.section("action"))
             )
         ):
-            notice = "\n".join(n for n in (notice, APPROVAL_NOTICE) if n)
+            pending = [f for f in delivery.section("action") if "approval_command" in f.metadata]
+            reminders = [
+                f for f in pending if f.metadata.get("action") == "scheduled/activate_reminder"
+            ]
+            messages = [notice]
+            if reminders:
+                messages.append(REMINDER_APPROVAL_NOTICE)
+            if not pending or len(reminders) != len(pending):
+                messages.append(APPROVAL_NOTICE)
+            notice = "\n".join(n for n in messages if n)
         if notice:
             delivery = delivery.model_copy(
                 update={
@@ -931,8 +941,10 @@ class ChannelService:
                     raise NotReadyError from None
                 code = await self._approval_failure(action_id, self._context(record, decision))
                 return await fail_approval(code)
-            except ActionOutcomeError as exc:
-                return await fail_approval(_ACTION_FAILURE_CODES[exc.state])
+            except ActionOutcomeError:
+                return await fail_approval(
+                    await self._approval_failure(action_id, self._context(record, decision))
+                )
             except (ToolRejectedError, RequestUnavailableError):
                 return await fail_approval("action_not_approvable")
             except (ToolExecutionError, AnswerRejectedError, EvidenceStoreError):

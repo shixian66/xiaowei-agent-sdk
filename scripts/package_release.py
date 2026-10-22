@@ -305,13 +305,22 @@ def _members(args: argparse.Namespace) -> dict[str, bytes | Path]:
     if compose.count(_APP_TOKEN) != 1 or compose.count(_POSTGRES_TOKEN) != 1:
         raise ValueError("Compose 镜像占位符不唯一")
     compose = compose.replace(_APP_TOKEN, image).replace(_POSTGRES_TOKEN, args.postgres_image)
+    # 保持脚本仅依赖标准库；版本取产品唯一常量，不另维护发行版本副本。
+    schema = re.search(
+        r"^APP_SCHEMA_VERSION = ([1-9][0-9]*)$",
+        (ROOT / "src/xiaowei/storage.py").read_text(encoding="utf-8"),
+        re.MULTILINE,
+    )
+    if schema is None:
+        raise ValueError("无法读取产品应用表版本")
+    schema_version = int(schema[1])
     release = {
         "format_version": 2,
         "code_sha": args.code_sha,
         "platform": args.platform,
-        "schema_version": 12,
-        "direct_start_schema_versions": [12],
-        "upgrade_schema_versions": [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11],
+        "schema_version": schema_version,
+        "direct_start_schema_versions": [schema_version],
+        "upgrade_schema_versions": list(range(1, schema_version)),
         "config_migration": "none",
         "images": {"xiaowei": image, "postgres": args.postgres_image},
         "image_file": IMAGE_FILE,

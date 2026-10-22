@@ -10,14 +10,14 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
-from collections.abc import Awaitable, Callable, Iterable, Mapping
+from collections.abc import Awaitable, Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, replace
 from datetime import datetime, timedelta
 from typing import TYPE_CHECKING, Annotated, Any, Literal
 from uuid import UUID, uuid4
 
 from agents import FunctionTool, RunContextWrapper, UserError
-from pydantic import AfterValidator, BaseModel, ConfigDict, Field
+from pydantic import AfterValidator, AwareDatetime, BaseModel, ConfigDict, Field
 
 from xiaowei.channel_store import (
     ActionAdmissionRejectedError,
@@ -58,6 +58,7 @@ if TYPE_CHECKING:
     from xiaowei.channel import AccessPolicy
 
 APPROVAL_WINDOW = timedelta(minutes=15)
+REMINDER_TIME_PASSED = "提醒时间已过，未激活，请重新创建"
 ACTION_SETTLE_TIMEOUT_SECONDS = 5
 STATUS_POLICY = ACTION_STATUS_POLICY
 _PROPOSAL_FIELDS = (
@@ -82,6 +83,7 @@ class ActionPlan(BaseModel):
     change: str = Field(min_length=1, max_length=32_000)
     impact: str = Field(min_length=1, max_length=4000)
     rollback: str = Field(min_length=1, max_length=32_000)
+    content_expires_at: AwareDatetime | None = Field(default=None, strict=False)
 
 
 @dataclass(frozen=True)
@@ -98,6 +100,11 @@ class ActionBinding:
     """动作切片的零 I/O 提出检查；复用 Prechecked，拒绝可在本轮修正。"""
     available: Callable[[], bool] | None = None
     """选中MCP写切片的当前核约可用性；不探测、不授予权限。"""
+    prepare_proposal: (
+        Callable[[RunContext, ToolRequest, Sequence[str]], Awaitable[ActionPlan]] | None
+    ) = None
+    """本地任务草拟入口：由应用冻结模型实际可见的证据，不让模型选择依赖。"""
+    check_material: Callable[[RunContext, ActionRecord], Awaitable[None]] | None = None
 
 
 class ActionStatusArgs(BaseModel):
@@ -110,6 +117,15 @@ class ActionWriteRejectedError(Exception):
 
     仅由当前批准执行捕获为 rejected；不进入 Runner，也不放宽治理的异常处理。
     """
+
+    def __init__(
+        self,
+        message: str = "",
+        *,
+        code: Literal["action_rejected", "reminder_time_passed"] = "action_rejected",
+    ) -> None:
+        super().__init__(message)
+        self.code = code
 
 
 class ActionOutcomeError(ToolExecutionError):
@@ -259,7 +275,11 @@ class ActionService:
         )
 
     def tools_for(
-        self, ctx: RunContext, approval_requests: dict[str, int] | None = None
+        self,
+        ctx: RunContext,
+        approval_requests: dict[str, int] | None = None,
+        *,
+        replayed: Callable[[], Sequence[str]] | None = None,
     ) -> list[FunctionTool]:
         tools = []
         requested = approval_requests if approval_requests is not None else {}
@@ -274,7 +294,19 @@ class ActionService:
                 ) -> ToolObservation:
                     if b is None:
                         raise ToolRejectedError("动作不可用")
-                    return await self._propose(ctx, req, b)
+                    visible = tuple(
+                        dict.fromkeys(
+                            (
+                                *(ctx.evidence_ids if replayed is None else replayed()),
+                                *(
+                                    e
+                                    for t, e in self.governance.turn_runs(ctx.identity).produced
+                                    if t in ctx.tool_scope
+                                ),
+                            )
+                        )
+                    )
+                    return await self._propose(ctx, req, b, visible)
 
                 execute: Execute = (
                     Prechecked(binding.precheck, propose) if binding.precheck else propose
@@ -364,12 +396,17 @@ class ActionService:
         ctx: RunContext,
         request: ToolRequest,
         binding: ActionBinding,
+        visible: Sequence[str] = (),
     ) -> ToolObservation:
         # 调用来自 GovernedTools；只有当前群有提出权才会回读。
         record = await self._store.proposal_request_for_turn(
             ctx.identity, approval=ctx.approved_action
         )
-        plan = await binding.prepare(request)
+        plan = await (
+            binding.prepare_proposal(ctx, request, visible)
+            if binding.prepare_proposal is not None
+            else binding.prepare(request)
+        )
         normalized = normalize_arguments(
             self.governance.catalog.policy_for(binding.write), plan.parameters
         )
@@ -387,7 +424,7 @@ class ActionService:
             target_id=binding.write.target_id,
             binding=self._binding_hash(binding),
             plan=json.dumps(
-                {"proposal_arguments": request.arguments, "plan": plan.model_dump()},
+                {"proposal_arguments": request.arguments, "plan": plan.model_dump(mode="json")},
                 ensure_ascii=False,
                 allow_nan=False,
                 sort_keys=True,
@@ -399,11 +436,18 @@ class ActionService:
             result=None,
             created_at=now,
             updated_at=now,
-            approval_expires_at=min(now + APPROVAL_WINDOW, record.expires_at),
-            expires_at=record.expires_at,
+            approval_expires_at=min(
+                now + APPROVAL_WINDOW,
+                record.expires_at,
+                plan.content_expires_at or record.expires_at,
+            ),
+            expires_at=min(record.expires_at, plan.content_expires_at or record.expires_at),
         )
         observation = ToolObservation(
-            payload=self._material(action), captured_at=now, truncated=False
+            payload=self._material(action),
+            captured_at=now,
+            truncated=False,
+            content_expires_at=plan.content_expires_at,
         )
         check_projection_capacity(self.governance.catalog.policy_for(binding.proposal), observation)
         await self._store.propose_action(action, approval=ctx.approved_action)
@@ -437,6 +481,9 @@ class ActionService:
                 truncated=False,
             )
         state = action.state
+        binding = self._bindings.get((action.proposal_tool_id, action.target_id))
+        if binding is not None and binding.check_material is not None:
+            await binding.check_material(ctx, action)
         if state == "pending" and self._clock() >= action.approval_expires_at:
             state = "expired"
         return ToolObservation(
@@ -448,10 +495,15 @@ class ActionService:
                     if action.approver_id
                     else "尚未批准"
                 ),
-                "result": action.result or "尚无执行结果",
+                "result": REMINDER_TIME_PASSED
+                if action.failure_code == "reminder_time_passed"
+                else action.result or "尚无执行结果",
             },
             captured_at=self._clock(),
             truncated=False,
+            content_expires_at=ActionPlan.model_validate(
+                json.loads(action.plan)["plan"]
+            ).content_expires_at,
         )
 
     async def verify_material(self, action: ActionRecord, ctx: RunContext, runs: TurnRuns) -> str:
@@ -586,8 +638,9 @@ class ActionService:
                 observation = await (
                     b.execute.run(prepared) if isinstance(b.execute, Prechecked) else b.execute(req)
                 )
-            except ActionWriteRejectedError:
+            except ActionWriteRejectedError as exc:
                 write_rejected = True
+                reason = exc.code
                 raise
             projected = action_result_projection(
                 self.governance.catalog.policy_for(b.write), observation

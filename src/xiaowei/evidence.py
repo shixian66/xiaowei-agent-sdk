@@ -294,6 +294,23 @@ class EvidenceStore:
         self._retention = timedelta(seconds=retention_seconds)
         self._verify_dependencies = verify_dependencies
         self._results: frozenset[str] = frozenset()
+        self._content_check: (
+            Callable[
+                [EvidenceRecord, RunContext, frozenset[str] | None, frozenset[str] | None],
+                Awaitable[None],
+            ]
+            | None
+        ) = None
+
+    def configure_content_check(
+        self,
+        check: Callable[
+            [EvidenceRecord, RunContext, frozenset[str] | None, frozenset[str] | None],
+            Awaitable[None],
+        ],
+    ) -> None:
+        """可信装配为本地任务派生材料增加读取复核；不改变四种投影。"""
+        self._content_check = check
 
     def configure_results(self, tool_ids: frozenset[str]) -> None:
         """应用装配时登记“需交付结果”的工具（本轮未引用时由代码补全为其余结果）。
@@ -377,7 +394,10 @@ class EvidenceStore:
             "policy_fingerprint": _policy_fingerprint(contract, policy),
             "captured_at": observation.captured_at,
             "recorded_at": recorded_at,
-            "expires_at": recorded_at + self._retention,
+            "expires_at": min(
+                recorded_at + self._retention,
+                observation.content_expires_at or recorded_at + self._retention,
+            ),
             "truncated": observation.truncated,
             **{_COLUMNS[a]: content for a, (content, _) in projected.items()},
             "dependencies": _dump_dependencies(observation.dependencies),
@@ -385,6 +405,21 @@ class EvidenceStore:
         try:
             async with self._engine.begin() as conn:
                 await conn.execute(_INSERT, row)
+                if observation.content_expires_at is not None:
+                    # 派生材料可能同时成为 SDK 调用参数/解释或请求缓存；这些副本也不能续期。
+                    for table in ("xiaowei_session", "xiaowei_request"):
+                        await conn.execute(
+                            text(
+                                f"UPDATE {table} SET expires_at=LEAST(expires_at,:expires) "  # noqa: S608 - 固定表名
+                                "WHERE session_id=:session AND owner_id=:owner AND channel=:channel"
+                            ),
+                            {
+                                "expires": row["expires_at"],
+                                "session": identity.session_id,
+                                "owner": identity.owner.id,
+                                "channel": identity.channel,
+                            },
+                        )
         except (OSError, SQLAlchemyError):
             raise EvidenceStoreError("证据保存失败，工具结果未交给模型") from None
         (record,) = await self._readable(ctx, "model", [evidence_id], history=False)
@@ -464,7 +499,14 @@ class EvidenceStore:
             raise rejected
         cited = answer.evidence_ids
         unshown = tuple(e for e in context if e not in cited)
-        records = await self._context_readable(ctx, channel, (*cited, *unshown), history=history)
+        records = await self._context_readable(
+            ctx,
+            channel,
+            (*cited, *unshown),
+            history=history,
+            recipient_tools=recipient_tools,
+            recipient_targets=recipient_targets,
+        )
         if any(
             (recipient_tools is not None and r.tool_id not in recipient_tools)
             or (recipient_targets is not None and r.target_id not in recipient_targets)
@@ -645,22 +687,46 @@ class EvidenceStore:
         )
 
     async def _context_readable(
-        self, ctx: RunContext, channel: Channel, evidence_ids: Sequence[str], *, history: bool
+        self,
+        ctx: RunContext,
+        channel: Channel,
+        evidence_ids: Sequence[str],
+        *,
+        history: bool,
+        recipient_tools: frozenset[str] | None = None,
+        recipient_targets: frozenset[str] | None = None,
     ) -> list[EvidenceRecord]:
         """回答引用或依赖的证据按渠道一批复核；确定不可读时拒绝整条回答。"""
         try:
-            return await self._readable(ctx, channel, evidence_ids, history=history)
+            return await self._readable(
+                ctx,
+                channel,
+                evidence_ids,
+                history=history,
+                recipient_tools=recipient_tools,
+                recipient_targets=recipient_targets,
+            )
         except EvidenceUnavailableError:
             raise AnswerRejectedError(
                 AnswerRejectCode.EVIDENCE_UNAVAILABLE, "回答引用或依赖的证据不可用"
             ) from None
 
     async def _readable(
-        self, ctx: RunContext, audience: Audience, evidence_ids: Sequence[str], *, history: bool
+        self,
+        ctx: RunContext,
+        audience: Audience,
+        evidence_ids: Sequence[str],
+        *,
+        history: bool,
+        recipient_tools: frozenset[str] | None = None,
+        recipient_targets: frozenset[str] | None = None,
     ) -> list[EvidenceRecord]:
         """一批记录的读取边界：先逐条做不需要数据库 I/O 的检查，再合并依赖复核一次。"""
         records = [await self._checked(e, ctx, audience, history=history) for e in evidence_ids]
         await self._verify(records, ctx.budget.max_scope_checks)
+        if self._content_check is not None:
+            for record in records:
+                await self._content_check(record, ctx, recipient_tools, recipient_targets)
         return records
 
     async def _checked(

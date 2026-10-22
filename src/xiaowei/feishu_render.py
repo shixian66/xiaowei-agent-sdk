@@ -69,6 +69,15 @@ def fact_limit_notices(fact: DeliveryFact) -> tuple[str, ...]:
     """从获准投影生成影响结论的简短范围和完整性提醒，供各渠道复用。"""
     cursor = fact.metadata.get("next_cursor")
     notices = []
+    if (
+        fact.tool_id == "notifications/send_webhook_message"
+        and fact.metadata.get("reason") == "recipient_not_authorized"
+    ):
+        notices.append(
+            "未发送：请管理员核对机器人的 receive_tools/receive_targets。"
+            "群内用过提醒时，还须显式配置 scheduled 任务记录及其依赖业务源的接收许可；"
+            "不能自动扩大授权。"
+        )
     paged = fact.metadata.get("has_more") is True or fact.metadata.get("hasMore") is True
     if cursor is not None or paged:
         notices.append("还有后续页，本页不是全部结果。")

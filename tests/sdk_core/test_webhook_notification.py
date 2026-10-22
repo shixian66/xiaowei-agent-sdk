@@ -27,12 +27,60 @@ from xiaowei import runtime
 from xiaowei.evidence import EvidenceStoreError
 from xiaowei.feishu import FeishuGateway, attributed
 from xiaowei.starrocks_tools import QUERY_TOOLS
-from xiaowei.webhook import resolve_bot
+from xiaowei.storage import StorageUnavailableError
+from xiaowei.webhook import WebhookNotifications, resolve_bot
 
 pytestmark = pytest.mark.loopback
 TOOL = "notifications/send_webhook_message"
 URL = "https://open.feishu.cn/open-apis/bot/v2/hook/synthetic-webhook-token"
 TEXT = "今晚 22:00 检查 StarRocks。"
+
+
+@pytest.mark.parametrize("fault", ["released_lock", "readiness_locked"])
+async def test_unavailable_instance_prevents_claim_and_http(env, monkeypatch, fault):
+    request = script(
+        env,
+        "给 ops_alert_bot 发一条提醒",
+        tool_call("send_webhook_message", bot_alias="ops_alert_bot", text=TEXT, evidence_ids=[]),
+        cite(),
+    )
+    async with running(env, monkeypatch) as (group, requests, rt):
+        claim = WebhookNotifications._claim
+
+        async def lose_lock_before_claim(self, *args):
+            # 已完成入口授权，但准入事务前真实释放数据库锁；不是模拟 False 返回值。
+            if fault == "released_lock":
+                await rt.lock.connection.execute(sql("SELECT pg_advisory_unlock_all()"))
+                await rt.lock.connection.commit()
+            else:
+                rt.readiness.lock("synthetic_consistency_failure")
+            return await claim(self, *args)
+
+        monkeypatch.setattr(WebhookNotifications, "_claim", lose_lock_before_claim)
+        await group.ask(request)
+        assert requests == []
+        assert await env.scalar("SELECT count(*) FROM xiaowei_notification_attempt") == 0
+        assert not rt.readiness.ok
+
+
+async def test_notification_recovery_requires_database_instance_lock(env, monkeypatch):
+    request = script(
+        env,
+        "给 ops_alert_bot 发一条提醒",
+        tool_call("send_webhook_message", bot_alias="ops_alert_bot", text=TEXT, evidence_ids=[]),
+        cite(),
+    )
+    async with running(env, monkeypatch) as (group, requests, rt):
+        await group.ask(request)
+        assert len(requests) == 1  # 成功对照，同时创建具有真实请求归属的发送记录。
+        async with rt.engine.begin() as conn:
+            await conn.execute(sql("UPDATE xiaowei_notification_attempt SET state='sending'"))
+        await rt.lock.connection.execute(sql("SELECT pg_advisory_unlock_all()"))
+        await rt.lock.connection.commit()
+        with pytest.raises(StorageUnavailableError):
+            await rt.service._app.notifications.recover()
+        assert await env.scalar("SELECT state FROM xiaowei_notification_attempt") == "sending"
+        assert len(requests) == 1
 
 
 def script(env, message, *steps):
@@ -335,7 +383,9 @@ async def test_receipt_read_failure_reports_unverifiable_without_stopping_servic
     intercepted = []
 
     def fail_receipt(conn, cursor, statement, parameters, context, executemany):
-        if statement.startswith("SELECT bot_alias,state,reason FROM xiaowei_notification_attempt"):
+        if statement.startswith(
+            "SELECT n.bot_alias,n.state,n.reason,s.receipt_id AS source_receipt"
+        ):
             intercepted.append(statement)
             raise SQLAlchemyError("synthetic receipt read failure")
 

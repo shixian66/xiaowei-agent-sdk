@@ -1,6 +1,6 @@
 # 小维：当前交接
 
-> 更新：2026-10-21，Asia/Shanghai。本文维护当前代码状态、有效证据、缺口与下一项工作。产品契约见 [ARCHITECTURE.md](ARCHITECTURE.md)，阶段与退出条件见 [DEVELOPMENT_PLAN.md](DEVELOPMENT_PLAN.md)，使用与运维见 [README.md](README.md) 和 [OPERATIONS.md](deploy/OPERATIONS.md)。
+> 更新：2026-10-22，Asia/Shanghai。本文维护当前代码状态、有效证据、缺口与下一项工作。产品契约见 [ARCHITECTURE.md](ARCHITECTURE.md)，阶段与退出条件见 [DEVELOPMENT_PLAN.md](DEVELOPMENT_PLAN.md)，使用与运维见 [README.md](README.md) 和 [OPERATIONS.md](deploy/OPERATIONS.md)。
 
 **OpenAI Agents SDK 负责 Agent Loop；小维负责权限、受治理工具执行、证据真实性和数据边界。**
 
@@ -9,16 +9,16 @@
 | 项目 | 已核对事实 |
 | --- | --- |
 | 仓库 | [shixian66/xiaowei-agent-sdk](https://github.com/shixian66/xiaowei-agent-sdk) |
-| 产品代码基线 | 当前监控补查候选从最新 `main@9284688bb8907c9968e84d5e49c23e551c53ac58`（#123）独立开始；工作树 `monitoring-read-recovery/agent-SDK`、分支 `codex/monitoring-read-recovery`。通知/定时任务工作区未修改 |
+| 产品代码基线 | B 从已合并 A 的 `9284688bb8907c9968e84d5e49c23e551c53ac58`（PR #123）开发；合并交付前同步 `main@de93ed183257d96a294376c166d6d18199b01020`（PR #124）；隔离工作树 `scheduled-agent-design/agent-SDK`，分支 `codex/one-time-reminders`；原目录已有修改保留 |
 | 源码与检查 | 当前源码仅保留 `src/xiaowei`；旧工程及专属测试、Compose、迁移入口、`compose-smoke` CI 和 Alembic 依赖已移除。保留产品测试、公共检查与旧回答兼容路径；旧工程历史可从 Git 查回 |
-| 当前存储与回答 | 沿用主线应用 schema v13，无数据库迁移；SDK 表、可信 answer_version=3、2/Legacy 与分项交付不变。失败原因闭集新增 `object_missing`，旧镜像读取新原因不保证兼容 |
+| 当前存储与回答 | B 候选应用 schema v14（主线 v13），新增一次性任务、唯一发送关联和派生保留标记；SDK 表不变。可信 `answer_version=3`、2/Legacy 与分项交付兼容契约不变 |
 | 锁定依赖 | SDK `0.22.3`、Lark Channel `1.4.0`、MCP `2.2.0`、sqlglot `30.17.0`、`nh3 0.3.7`、`tinycss2 1.5.1`、Pillow `13.0.0`、certifi `2026.10.19`（后两项为严格审计发现的既有漏洞定向升级） |
 | 正式入口 | `xiaowei serve`、`config check`、`model check`、`storage init/upgrade/cleanup`、`requests resend`；命令与环境准备以 README 为准 |
-| 最近有记录的公司部署 | 用户本次提供线上镜像 `xiaowei:143c4c8641be636c41c130329ce1639a36b59c27` 及新会话巡检日志；这是用户提供的部署证据，未独立核验当前服务器状态。本候选未部署 |
-| 当前验收结论 | 产品 `0da5d9f` 独立复审通过，两项日志P2关闭。本轮F1/F2仅修订文档，基线回退路径及成功对照4项通过；本地是否满足开PR条件只取本轮最终HEAD的全仓、发行和静态检查实际结果，记录方式见§3，不继承旧回归数字 |
-| 当前任务授权 | 仅本地处理F1/F2文档意见并完成最终HEAD验证；不改schema、不加兼容层、不改旧镜像行为或定时任务工作区。暂不推送、不开PR、不合并、不部署；本地门槛通过后仍由用户决定下一步。未授权真实模型、公司源或真实消息发送 |
+| 最近有记录的公司部署 | 主线交接记录含用户提供的 `xiaowei:143c4c8641be636c41c130329ce1639a36b59c27` 镜像及巡检日志；未独立核验当前服务器状态。B 本轮未部署 |
+| 当前验收结论 | A 已合并且 CI 9/9；B 的B1/C1/N1–N3已关闭，R1修复通过本次差异独立复审及版本化检查，当前证据见§5；真实U5未验收，C/D 未实现 |
+| 当前任务授权 | A 推送/PR/合并已完成；B 外部复审通过，用户已授权推送、建PR、远端CI全绿后合并。真实模型、公司源、真实 Webhook和部署仍未授权；生产写逐次审批。隔离环境按锁文件安装，测试使用仓库标识的隔离 PostgreSQL |
 
-原工作目录的 ARCHITECTURE 差异与未跟踪计划/公司配置保留，未复制到本工作树；本次未读取公司配置凭据。旧通知/定时任务和回答修复记录保留为历史证据，不能作为本监控候选的范围扩展授权。
+原工作目录的 ARCHITECTURE 差异与未跟踪计划/公司配置保留，未复制到本工作树；本次未读取公司配置凭据。旧监控和回答修复记录保留为注明版本的证据，不作为本轮 B 范围扩展授权。
 
 本文件的状态以表中的核对基线为限。接手者先核对实际 HEAD、工作区及用户新指令；合入、独立审查、离线测试、真实运行、部署与用户接受分别记录，不互相替代。
 
@@ -33,60 +33,19 @@
 - 进度的单聊/群聊差异延迟、仅真实变化更新、正常收尾及异常陈旧已由用户确认，详见[进度契约](ARCHITECTURE.md#progress-observation)；P1 已有离线实现，当前证据见计划 §7。普通消息的区域身份及正文/明细分工见[普通消息契约](ARCHITECTURE.md#ordinary-feishu-expression)，不能由 HTML/MD 报告完成推定达标。
 - 监控写仅限已批准动作，使用 SDK 原生审批暂停/恢复及既有 Action 治理；生产开放仍须满足对应源和群审批门槛。Grafana 数据源密码私聊命令尚未实现，目前由管理员在 Grafana UI 填写。见 [监控边界](ARCHITECTURE.md#monitoring-mcp)。
 - 内网 Web 无登录、访问者共用操作者权限；目标账号、网络、Grafana 插件/写端及数据源更新竞争窗口等已接受取舍按架构执行。
-- 通知及定时任务的方向与待审权限增量见 [ARCHITECTURE](ARCHITECTURE.md#scheduled-agent-tasks)：多个目的群不扩大操作入口，任务独立于原聊天，创建及每次执行复核权限，生产写不能继承周期批准。A 已有本地候选与离线证据，B–D 未实现。
+- 通知及定时任务的方向与待审权限增量见 [ARCHITECTURE](ARCHITECTURE.md#scheduled-agent-tasks)：多个目的群不扩大操作入口，任务独立于原聊天，创建及每次执行复核权限，生产写不能继承周期批准。A 已合入主线，B 为当前离线候选，C/D 未实现。
 
 ## 3. 当前计划与下一项工作
 
-### 当前独立候选：监控补查修复
+### 通知与定时任务：B 一次性提醒候选
 
-本轮接收针对 `9284688..0dda020` 的审查意见，按共同根因处理：
+A 已通过独立复审并合入 [PR #123](https://github.com/shixian66/xiaowei-agent-sdk/pull/123)，B 仅在隔离分支开发。产品与默认值唯一来源为 [ARCHITECTURE 通知与定时任务](ARCHITECTURE.md#scheduled-agent-tasks)，批准设计/实施计划仍为 v1.4。当前不提前实现 C/D，不调用真实模型、Webhook、飞书、公司源，不读取公司配置或凭据。
 
-- **F1（文档残留）成立并修订：** 删除本文“子集重试仍受两次修正额度约束”的半句，保留不推导选择器子集语义的边界。未修改实际配额、治理或测试。
-- **F2（已接受的回退限制）成立并修订：** 使用基线 `9284688` 的实际模块、SDK及隔离PostgreSQL复现；新原因在旧账本解析时拒绝，暂停未消费、两次批准及到期检查均零写入；历史读取/重发在 `_saved_answer` 拒绝，发送替身零调用，记录原值保留。含正常批准、旧原因可解析对照共4项通过；当前候选的账本/回答解析能接受新原因。操作员说明已补入 [OPERATIONS](deploy/OPERATIONS.md#监控补查修订的回退限制)，按用户决定只补文档，不改schema或增加兼容层。
-- **F2细节纠正：** 基线内部由 `app.py` 的账本 `ValidationError` 映射为 `model_failed`，但正式渠道 `channel.py` 的 `TurnError → _approval_failure` 路径会对仍待批的动作返回 `action_not_approvable`。实测内部日志与渠道请求失败码分别如此；审查所述“最终只得到笼统轮次失败而非action_not_approvable”不成立，不据此增加错误处理。
-- **Docker空间及清理：** 用户提供的审查证据确认此前VM磁盘用满，`initdb` 的 `pg_wal` 创建报No space left on device；基线/候选同样失败。本轮只读盘点已变为29.4GB总量、16.0GB已用、11.8GB可用（58%）。未执行空间清理、未请求删除授权；当前建议不删除已有资源。镜像/容器/卷逐项清单含大小、运行引用和推测来源，保存于本轮本地验证目录。无引用不代表无数据或已获删除授权。
+B 复用真 Runner、SDK 原生暂停/批准恢复与 ActionBinding，确认一次后持久化不可变 job。固定提醒到期直接走原有 GovernedTools notify、相同 HTTP 适配和发送记录，不调用模型，不重建 Agent Loop。状态/暂停/取消由创建者或个人 grant 管理员且当前原群成员操作，已知 ID 查询；不提供列表/编辑/恢复工具。起草支持模型修正日期格式，未知目标/接收权限不足明确拒绝；低风险管理拒绝只返回安全状态，不中断整轮、不伪称未发送。
 
-为满足“最终HEAD全仓回归”，先选择性提交上述文档并冻结HEAD，再执行以下检查，不在检查后为写入自身SHA追加提交。**最终SHA、实际通过/失败/跳过数及是否具备开PR条件，按本轮最终交付回复与本地 `final-report.md` / JUnit 原始记录核对，不预填通过。** 本轮本地验证目录：`/var/folders/r1/9lhtpjbj4qdbl4g3py9myqs40000gn/T/xw-monitoring-f1f2-ti8k8vhw/`；原始运行记录不作为发布包或业务数据提交。
+新增 schema14、默认关闭的同进程到期检查及唯一 job 发送关联；复用全局槽、实例锁、readiness 及 A 的关键回执交付；共享未知门槛只拦即时通知，不拦分别批准的固定提醒。只对未开始且窗口内的提醒再核验；已占用后超时或重启恢复为 unknown，不重 POST。定义依赖由实时 replayed 回调冻结，按原身份/Session 归属和当前源/接收权限复核；数据期限同步约束任务正文、Action/恢复材料、派生 Evidence、模型历史与请求缓存，显式清理不自动新建上下文。
 
-```sh
-SDK_TEST_POSTGRES_URL=postgresql+asyncpg://postgres@127.0.0.1:55432/postgres PYTHONDONTWRITEBYTECODE=1 .venv/bin/python -m pytest -q -p no:cacheprovider --tb=short --junitxml="$XW_REVIEW_OUTPUT/full.xml"
-SDK_TEST_POSTGRES_URL=postgresql+asyncpg://postgres@127.0.0.1:55432/postgres PYTHONDONTWRITEBYTECODE=1 .venv/bin/python -m pytest tests/deployment/test_release.py tests/deployment/test_compose.py tests/deployment/test_maintenance.py tests/deployment/test_release_workflow.py -q -p no:cacheprovider --tb=short --junitxml="$XW_REVIEW_OUTPUT/release.xml"
-.venv/bin/ruff check --no-cache .
-.venv/bin/mypy src
-git diff --check
-```
-
-`XW_REVIEW_OUTPUT` 仅为上述本地验证目录，不是产品配置。测试使用现有隔离实例并保留harness标识核对，不运行共享实例的启动/停止/重建/清理命令；发行测试仅使用其本轮新建的隔离项目和资源。既有资源不做空间回收；若再次空间不足，先给用户列出具体可回收项再确认，不使用prune、不降低门槛。
-
-官方Alertmanager/Grafana二进制协议、本轮真实模型自主补证及结论限定、公司监控源、飞书仍未验证；脚本回放不是能力验收。
-
-下面保留产品候选及早先验证的版本记录；不能将其数字当成本轮最终HEAD的结果。
-
-用户授权在 `monitoring-read-recovery/agent-SDK`、分支 `codex/monitoring-read-recovery` 从最新 `main@9284688` 独立实施，不动定时任务工作区；只做离线验证与独立审查，不合并、不部署。下面通知/定时任务段是主线已有交接，不能据此扩展本候选范围。
-
-本候选移除三类源内共享两次修正配额，保留总预算和失败请求去重；静默列表可修正读取错误不再停止整源；Grafana 当前 UID 明确 NotFound 只停止同一对象的摘要/面板重发。新错误原因 `object_missing` 是失败反馈契约的窄增量，旧镜像读取该原因不保证兼容；成功 Evidence、权限、写审批、Session 数据边界、报告交付与 SDK Loop 不变。方案、回归与真实验证边界见[监控评测说明](docs/monitoring-reliability-evaluation.md#监控补查修复候选2026-10-21)。
-
-产品冻结于 `0da5d9f0f64bec4c8056e7fca7ea57d22160730a`，独立审查及增量复审通过。原始供应商调用ID日志泄露、未知目标路由拒绝时摘要编码异常两项P2均已用真实路径复现并修复：日志只输出固定摘要，业务ID不变，不增加校验或策略。最终复审独立验证了SDK实验的两个恢复参数，确认失败去重、正确补查、整源停止、失败交付及预算均保留；早先独立复验12项及最终日志反例3项也通过，各轮有重叠，不相加。
-
-离线验证按版本记录，不自动晋级为最终SHA全套通过：
-
-- 基线关联123 passed、1 skipped、1 deselected；8个新核心反例先失败后通过。
-- `a662eb6` 关联回归298 passed、28 skipped、4 deselected；跳过为未配置的官方MCP/服务，浏览器未选。最终摘要编码变更后治理/日志89 passed；旧SDK实验及源失败/日志30 passed、1 skipped、1 deselected。最后两组有重叠。
-- 日志修订前启动的完整回归：4599 passed、4 failed、235 skipped、89 deselected、5项预期网络拒绝警告，1256.72秒。它不是最终SHA全套验证。其中SDK实验旧 `promql_pending` 断言失败已改为可观察恢复行为，模块9 passed，独立复验2 passed。源码、全部测试和脚本已搜索，无已删字段的实际依赖。
-- 剩余3项均为未改动的历史发行维护：`test_different_image_upgrade_rollback_and_paired_restore`（487行）、`test_container_migration_v4_to_v5_to_v6_and_old_program_refusal`（741行）、`test_feishu_users_upgrade_rollback_restores_the_config_the_old_image_reads`（993行），都在初始 `postgres --wait` 报容器 unhealthy，尚未进入应用路径。第一项已单独复现（15.15秒）；当时未定位具体容器根因；本轮审查补充及空间变化见上文，不据此直接核销三项失败，须由最终HEAD实测确认。
-- 最终产品 `ruff check --no-cache .`、`mypy src`（36文件）、`git diff --check` 通过。成功Evidence、权限、SDK Loop、Session及交付源码没有变更，失败原因新增及固定标签除外；应用schema仍为13。
-
-新增解释样例共11场景14轮；不把脚本回放算为诊断能力。未调用真实模型、公司源或飞书，未推送、开PR、合并或部署。下一步是用户审阅本候选后决定PR/CI安排，发行维护和真实模型自主补证/结论质量仍须分别验证；不据此关闭线上整体安全结论问题。
-
-### 通知与定时任务：A 审查修复离线通过
-
-[设计 v1.4](docs/superpowers/specs/2026-10-21-scheduled-agent-tasks.md)维护技术依据与固定 U1–U7；[A–D 计划 v1.4](docs/superpowers/plans/2026-10-21-scheduled-agent-tasks.md)维护切片验收。沿用批准的规范化定义、Evidence 依赖/期限和创建者＋原群权限口径。A 即时多机器人通知 → B 一次性固定提醒 → C 通用独立 Agent 周期任务 → D Node 核心巡检。
-
-A 已增加窄 notify effect，独立发送许可不扩展数据库/生产写权限。后续源码缺口：原 Action 是短期单次批准，B 须验证激活独立 job 授权；现有 Prometheus MCP 文本丢失结构化信息，D 不能猜解析，届时再补必要的受治理结构化读取。
-
-A 已实现：静态多机器人、安全凭据引用、个人发送许可、notify 治理、全可见 Evidence/接收范围复核、显式事实纯文本渲染、先落库后 POST 与独立回执。发送权限与安全群回执读取分开；普通查询仍完整交付，外发不自动补上未选择结果。unknown/回执暂不可核验均告知重复风险，不自动重发；已 accepted 不因后续模型/Session 失败变成未发。
-
-对 `d42b999` 的三项阻断及后续 P2 已修复并独立复审：正文改由 blocks/facts 渲染；容量提示保留通知结果/风险；隐藏审批恢复轮通知，等待批准及普通请求中仍可批准的材料由代码提示完成后另提要求；未知门槛按原群＋机器人共享。A 超限整条不发，不实现自动裁剪；机器人可显式登记实际 SDK 执行请求证据接收范围，不增加写权限。本次止于 A 修复；B 接续时仍先验证 ActionBinding 激活独立授权、定义 Evidence 依赖/TTL 和直接暂停/取消，不同时实现 C/D。真实 U1–U4 仍须先获模型 Profile、费用及测试机器人授权，不得把离线通过当作真实能力、群内实收或生产开放。
+B 已包含两项兼容修复：通知准入必须检查 InstanceLock.admits 返回值及 readiness；发行元数据不能硬编码 schema12，改从源码唯一 APP_SCHEMA_VERSION 读取，保持打包脚本仅用标准库。
 
 ### 已合入的监控可靠性修订（PR #121）
 
@@ -140,6 +99,8 @@ S3 的源码事实：`AgentAnswer` 为有序 `TextBlock | FactBlock`，另含 `r
 
 ### 下一项工作与开放条件
 
+B 的当前离线单元已交付；真实 U5 的日期解释、工具选择、答案质量、调用/耗时/用量及测试机器人接受/群内表现仍须具体授权后验证。保持默认关闭，不自动部署或把 C/D 当作已经实现。下一切片是 C 的独立受治理 Agent 任务；以下为并存的旧业务实战缺口，不作为 B 已验收证据。
+
 本次 P2 已在 `1c06a89d633753f70fb6e5829c0cc4fc5992cbfd` 独立复审通过，两个阻断（合法反引号 SQL 的夹具路由、普通 naive DATETIME 错标会话偏移）已补回归并修复。普通查询保留无偏移墙上时间，aware 时间及已知来源模板不变。旧历史/绑定附件可能保留原先错误偏移，本次不追溯修正、不批量失效旧 Evidence。
 
 P1a/P1b/P1d 首候选 `aa95773` 曾通过独立审查；后续反伪造反例发现折叠入口统一置后，未保留事实块位置，原通过结论随此反例收窄。修订将既有详情构造就地调用，旧 v0 仍置后；作者 36 种及独立审查者 22 种 v0 差分输出均一致。原字节重发、权限、审批与容量路径由扩展回归覆盖。已逐项核对批准计划 A2 的 Evidence 归一化与投影、`_raw_redundant`、`_data`、`fold_details`、卡片摘要/技术详情/容量捷径、自动报告参数、报告事实章节及 Web metadata；共用 `historical_brief` 只读属性据已有 summary 判定，不参与序列化。新 `brief` 无摘要仍有原值；显式历史导出正文保留摘要、原值放详情；自动历史摘要缺原文时有明确提示。
@@ -179,56 +140,44 @@ B1 的短口径主视图修复已成立；原 B2 因复现形状不符合真实 
 
 ## 5. 验证记录与限制
 
-### 2026-10-21 A 通知候选验证
+### 合并交付前主线集成
 
-当前 N1 修复差异为 `fb47d46303fd31a1b022fa7e8e22946bc3544f8e..105c26179133f1ca3921f1d33893b1ede43a080a`，分支 `codex/webhook-notifications`。N1 已复核成立：本地 Webhook 绕过普通飞书发送的 `mention_safe`，SQL/事实行、模型说明及明确文字均可带原始 at 标签。根因在纯文本外发边界；现仅在 `webhook.py` 的最终正文归一化处统一中和，再构造请求、检查最终20000字节和计算去重摘要，不在各事实行重复处理。其他外发链已检查：Webhook notices 包含在同一最终正文中；应用机器人容量/预览 notices 最终经过既有 `LarkTransport.send`，未新增重复防护。
+B 已审查候选为 `815c00f7bff6212990748eb5abc370f8ee57c129`。交付前同步主线 PR #124（`de93ed183257d96a294376c166d6d18199b01020`）；源码自动合并，仅本交接快照冲突，保留 B 状态并更新授权。监控补查修复的有效说明、失败分类与真实验证缺口继续由 [监控评测说明](docs/monitoring-reliability-evaluation.md#监控补查修复候选2026-10-21) 和 [回退限制](deploy/OPERATIONS.md#监控补查修订的回退限制) 维护；不重复保留其已过期的“待用户授权”状态。合并后的精确SHA、检查结果和CI链接记录在本次PR；下列本地证据仍只覆盖注明SHA，不自动覆盖合并树。
 
-两项非阻断建议均采纳：通知渲染省略目的群不可用的 `approval_command` metadata，保留 Action ID/状态/影响及原 Evidence/原群审批材料；`test_actions_runtime.py` 原245行按 ruff format 整理。无依赖、迁移、权限或审批契约变化；五项已批准取舍保持不变，不开放主动 @所有人或成员。
+### 2026-10-22 B：R1 连续使用修复
 
-| 本轮检查 | 实际结果与范围 |
+主线基线 `9284688bb8907c9968e84d5e49c23e551c53ac58`；本轮输入 `e055ca943e77030107ffdd37d802f27b9fb23d74`，产品修复 `6864bb758b76371ff1fb10acfc24f9a5291899fa`；`369435d9e961db5c669f85c44b688496a6719037` 仅补 README 扩权版本提醒，源码与测试不变，单次全套在369435d执行。后续只更新交接/计划状态。外部复审已确认 B1/C1/N1/N2/N3 关闭；对应实现和测试映射保存在 `git show e055ca9:AGENT_HANDOFF.md`，不能用其535项/4657项结果证明本轮 R1。
+
+**R1 已确认：** 原 README 只给业务查询接收范围，B 起草/激活/状态 Evidence 进入共享历史后，下一次即时通知或提醒因缺 scheduled 接收许可被拒。原 C1 测试两次 /新建 掩盖了此问题，这是验证遗漏。修复采用管理员显式配置（README 的最小完整列表），不自动给 scheduled 授权，也不跳过全部模型可见证据、定义依赖或业务源检查。缺配时模型工具说明、起草拒绝及通知的代码事实提醒指出 receive_tools/receive_targets 和 scheduled 依赖；不扩大结果 schema 或修改历史证据指纹。
+
+| 检查 | 当前证据 |
 | --- | --- |
-| 修复前 RED | 新增纯文字、事实、模型说明和审批命令4项均失败，见 `/tmp/xiaowei-webhook-n1-red.log`。首次修复回归92通过/1失败，事实用例的驱动固定返回 sales 而没有 note；已改为实际含标签的结构化行，保留行断言，日志 `/tmp/xiaowei-webhook-n1-green.log` |
-| 隔离变异 | 临时 pytest 插件仅在该进程把 `webhook.mention_safe` 换为恒等函数，三种来源及中和后容量准入4项全部失败；源码不变。日志 `/tmp/xiaowei-webhook-n1-mutation.log`，插件 `/tmp/xiaowei_n1_unguarded.py` |
-| 最终相关回归 | **531 passed**，134.13秒；命令 `.venv/bin/python -m pytest -q -p no:cacheprovider tests/sdk_core/test_{webhook_notification,feishu_render,feishu,feishu_format,feishu_reports,delivery_parts,actions_runtime,group_actions,sdk_approval}.py`。真实群入口/SDK/治理/隔离PG/HTTP替身验证两类成员标签中和、普通文字与换行、换 call_id 只发一次、摘要匹配实际HTTP正文，以及中和扩张超限零HTTP/零attempt。日志 `/tmp/xiaowei-webhook-n1-related.log` |
-| 静态与文档 | ruff全仓、mypy 36源文件、3份受影响Python文件的ruff format检查、diff检查、文档命令2项通过；gitleaks全历史无泄漏，规则未变，日志 `/tmp/xiaowei-webhook-n1-gitleaks.log` |
-| 独立复审 | 对 `fb47d46..105c26179133f1ca3921f1d33893b1ede43a080a` 复审通过，无阻断。审查者另重跑 **9 passed**，5.29秒，覆盖三来源、命令省略、扩张容量、普通换行、签名、跨成员unknown门槛及正式审批恢复/另轮通知。确认 notices 经过相同最终出口，无独立分支，不额外造测试或重复防护；未以旧候选审查替代 |
+| TDD 工作区复现 | `/tmp/xiaowei-b-r1-red.log`：3 failed、1 passed，复现确认后即时通知被挡、第二次提醒被挡及缺配无指导；修改前未带版本头，不作为精确提交的正式QA记录 |
+| 工作区最小闭环 | `/tmp/xiaowei-b-r1-green.log`：6 passed，8.22秒。公开README策略直接进入正式群处理链/真SDK/治理/隔离PG/HTTP替身；两条提醒各发送一次、即时通知、C1共享门槛全程不 /新建；原业务源直接/传递拒绝保留。此记录不替代冻结版本检查 |
+| 冻结版本关联检查 | **476 passed，129.39秒**，`/tmp/xiaowei-b-r1-related.log`；B专项68项、通知、feishu_render、治理、飞书协议、Evidence范围及文档。HEAD=6864bb7，开始/结束均clean、版本不变。静态日志 `/tmp/xiaowei-b-r1-{lint,format,mypy,diff}.log` 同SHA，四项0退出，mypy37源文件 |
+| 单次完整默认全套 | **4660 passed, 235 skipped, 89 deselected, 5 warnings in 1576.51s (0:26:16)**，`/tmp/xiaowei-b-r1-full.log`；HEAD=369435d，开始/结束SHA相同、工作树clean、EXIT_CODE=0、VERSION_UNCHANGED=True。无变异插件；旧无版本头日志不用于覆盖R1，跳过/未选中项不算能力验收 |
+| 独立复审 | **6864bb7 本次差异复审通过，R1关闭**；独立8 passed，9.57秒（3新增、C1、传递False/True、2项TTL），差异检查通过、版本/工作区未变。唯一P3文档提醒已在369435d补齐：既有接收范围扩大须更新target_version并重新授权；非执行层变更 |
 
-本轮未运行单次完整产品全套、发行容器或真实服务，不能把531项与旧分批检查相加称为全套通过。SDK为0.22.3，Python为3.11.16；PG命令设置 `SDK_TEST_POSTGRES_URL=postgresql+asyncpg://postgres@127.0.0.1:55432/postgres`、`PYTHONDONTWRITEBYTECODE=1`，正式测试不加载变异插件。旧发送记录不改写，凭据/原目录已有修改不读取或混入。真实模型自主能力、飞书实际标签解释/群内表现及公司环境仍未验证；本次只证明离线请求正文及治理边界。
+**隔离变异：** `/tmp/xiaowei-b-r1-mutation-transitive.log` 移除 `TaskDefinitions.check_content` 后，原 `source_allowed=False` 由零POST变为一次POST，目标1 failed；`/tmp/xiaowei-b-r1-mutation-implicit.log` 自动补六项scheduled接收范围及目标后，缺配回归目标1 failed。两种均仅进程内变异，HEAD=6864bb7、前后clean/版本不变；预期失败不计为正式通过。
 
-以下保留上一候选的有效证据，均不是本轮 N1 修复后的完整检查：实现起点为批准设计 `71398cf8e7f076e6bc3c840a6566ca49a7709f00`，上一修复差异为 `d42b999a254b0c39383c2a02a5a90b062236eafb..79e03aba214389a90cf2e359d86d1683c13a3c94`；主修复 `af05350`，增量修复 `79e03ab`。文档为 v1.4；独立复审分别检查并关闭当时的补充 P2，另重跑渲染5项及正式入口1项。使用独立 `.venv` 和隔离 PostgreSQL，无真实模型/飞书/公司源调用。
+正式检查使用本机 `/tmp/xiaowei_run_versioned_check.py`，开始记录 HEAD_SHA/TREE_SHA/WORKTREE_STATUS/COMMAND，结束记录 END_HEAD_SHA/END_WORKTREE_STATUS/EXIT_CODE/VERSION_UNCHANGED；要求干净工作树且版本不变，不输出环境变量全集或任何凭据。旧日志不会补写成当时已捕获SHA的新证据。
 
-上一候选分批验证（未重跑单次完整产品全套）：
+新增/加强用例：`test_documented_receiver_supports_consecutive_reminders_and_immediate_send`、`test_missing_task_receiver_permission_explains_configuration_without_http`、`test_task_receiver_permission_never_inherits_business_source_permission`；原 `test_approved_reminders_ignore_other_unknown_but_immediate_send_still_warns` 改为同 Session 且读取公开配置，删除两次 /新建，不削弱断言。原跨任务材料传递的 source_allowed=False/True 对照继续保留。
 
-| 检查 | 结果与版本 |
-| --- | --- |
-| 通知/容量/正式审批最小闭环 | 首轮88 passed；后续补齐非活动请求检查及普通 pending 状态材料回归，纳入以下检查 |
-| 关联回归 | **929 passed**，198.68秒；17模块：SDK core 的 webhook_notification、actions_runtime、feishu_render、channel_service、channel_store、feishu、feishu_reports、delivery_parts、inline_delivery、group_actions、governance、evidence、evidence_scope、runtime、session_policy、session_warning_render，以及 security/docs_command_consistency。普通提示最后移位后另跑 actions_runtime/channel_service **51 passed**。测试命令均为 `.venv/bin/python -m pytest -q -p no:cacheprovider` 加对应 `tests/.../test_*.py`，设置下述隔离 PG URL |
-| 独立复审补充 P2 的 RED→GREEN | `test_actions_runtime.py -k notify_after_approval` 在普通 completed 动作状态材料缺提示时先失败；修复后 `test_actions_runtime.py test_channel_service.py test_group_actions.py test_sdk_approval.py` **124 passed**，81.50秒，覆盖最新 `79e03ab` |
-| 发行 | `af05350` 的 `tests/deployment/test_{release,compose,maintenance,release_workflow}.py` **84 passed**，397.96秒；最新增量只改上述提示条件和回归，重新离线构建 wheel、无dev测试运行器的临时生产环境两个 CLI 入口及013迁移检查通过。非公司部署 |
-| 静态、秘密、文档 | 最后代码版 ruff 全仓、mypy 36源文件、diff检查通过；gitleaks全历史无泄漏，配置/allowlist未变；130个本地路径及定时章节锚点通过。依赖未再变更，沿用下表严格审计 |
+两项非阻断建议暂不扩展：过时批准的 Action/用户回执已确定拒绝、draft 不可再激活，不为 R1 改生命周期；旧v14自动探测不新增，沿 README 已接受的重建或恢复v13配对备份路径。应用仍schema14，本轮无迁移/依赖变更。
 
-本次日志为 `/tmp/xiaowei-claude-fixes-connected-final.log`、`/tmp/xiaowei-prepared-material-{red,green}.log`、`/tmp/xiaowei-claude-fixes-release.log` 和 `/tmp/xiaowei-claude-fixes-gitleaks-final.log`，均是本机临时证据，不是远端 CI 或永久附件。关联首轮928通过/1失败为新增夹具误用 SDK 上下文，后续已用公开 ToolContext 修正；误移的旧恢复断言也原位保留并通过，没有删除断言或放宽重发行为。
+可复现命令（在本工作树；pytest前缀为 `SDK_TEST_POSTGRES_URL=postgresql+asyncpg://postgres@127.0.0.1:55432/postgres PYTHONDONTWRITEBYTECODE=1`）：
 
-下表为先前候选 `18159b0` / `d42b999` 的有效历史证据，不能代替本次产品源码修复后的验证。`0945083` 仅同步旧测试预期并补直接 v12→v13 升级。
+- 关联：`.venv/bin/python -m pytest -q -p no:cacheprovider tests/sdk_core/test_{scheduled_tasks,webhook_notification,feishu_render,governance,feishu,evidence_scope}.py tests/security/test_docs_command_consistency.py`。
+- 单次完整默认全套：`.venv/bin/python -m pytest -q -p no:cacheprovider`。
+- 静态：`.venv/bin/ruff check --no-cache .`；`.venv/bin/ruff format --check src/xiaowei/{feishu_render,tools,webhook}.py tests/sdk_core/test_scheduled_tasks.py`；`.venv/bin/mypy --cache-dir=/tmp/xiaowei-b-r1-mypy src`；`git diff --check e055ca9..HEAD`。
+- 这些命令由临时版本记录器包裹运行，实际展开的COMMAND保存在各日志；变异另加 `-p xiaowei_b_r1_mutations`，以 `XW_R1_MUTATION=transitive_scope/implicit_task_scope` 选择保护，插件路径 `/tmp/xiaowei_b_r1_mutations.py`。日志已写明MUTATION类别，不混入正式全套。
 
-| 检查 | 实际结果与边界 |
-| --- | --- |
-| 正式群事件→runtime/Application→真 SDK→治理→隔离 PG→HTTP 替身 | 通知专项 **44 passed**；包括 U1–U4、并发/新 call_id、防重、签名、接收工具/源、无权用户/渠道、历史回放、未选数据不外发、未展示风险禁重发、取消/落库/Session 故障与凭据轮换。脚本模型不证明自然语言自主能力 |
-| 产品完整回归（排除单独执行的 deployment） | 在 `18159b0` 执行 `python -m pytest -q -p no:cacheprovider --ignore=tests/deployment`：**4470 passed、13 failed、235 skipped、89 deselected**。13项全为当前版本/新回执字段的旧预期；不是全套通过 |
-| 失败修正后的受影响模块 | `python -m pytest -q -p no:cacheprovider tests/sdk_core/test_storage_v2.py tests/sdk_core/test_runtime.py tests/sdk_core/test_evidence.py tests/sdk_core/test_webhook_notification.py`：**290 passed**，包含全部13个原失败及新增直接 v12→v13 保留历史测试。仅改测试，产品源码与上述完整运行相同；据此记录分批覆盖通过，未重跑单次完整全绿 |
-| 发行必需检查 | `python -m pytest -q -x -p no:cacheprovider tests/deployment/test_release.py tests/deployment/test_compose.py tests/deployment/test_maintenance.py tests/deployment/test_release_workflow.py`：**84 passed**，真实本机隔离容器、升级/回退及配套备份恢复。不是公司部署 |
-| 依赖与正式包 | 严格 `pip-audit --strict` 通过；审计发现的既有 Pillow/certifi 漏洞仅定向升级到13.0.0/2026.10.19，Python 3.11兼容，图片/CLI相关145项通过。最新 wheel 在无dev依赖环境的 `xiaowei --help`、`python -m xiaowei --help` 通过，含新迁移，不含测试/公司配置 |
-| 静态与秘密 | `ruff check --no-cache .`、`mypy --cache-dir=/tmp/xiaowei-webhook-mypy src`（36文件）、`git diff --check` 通过。gitleaks8.30.0官方校验、自测及全历史扫描通过（产品候选676提交，无泄漏）；未弱化 allowlist。文档命令2项、139个本地路径及定时章节锚点通过，未验证外网链接/全仓锚点 |
+**边界与下一步：** B 外部复审已通过，用户已授权推送、建PR并在远端CI全绿后合并；尚未部署；不读取公司配置/凭据，不调用真实模型、Webhook、飞书或公司源。离线脚本模型不证明真实 Agent 能力。真实 U5（日期理解、澄清、工具选择、成本及平台闭环）未验收；本轮单次完整默认全套已执行通过，精确结果见上表。C/D 不实施，原目录修改保留。
 
-上述 PG 命令均设置隔离 `SDK_TEST_POSTGRES_URL`，禁字节码并关闭pytest缓存。失败完整运行和后续分批通过分开保留；本机日志 `/tmp/xiaowei-webhook-final-product-suite.log`、`/tmp/xiaowei-webhook-post-suite-fixes.log`、`/tmp/xiaowei-webhook-p3-after-cleanup.log` 是临时证据，不能假称远端 CI 或永久附件。发行早期失败除旧 schema 夹具/预期外，曾由 Docker 30G 数据盘耗尽导致；捕获 initdb 的 `No space left on device`。用户明确批准后，逐个复核并非强制清理清单内78个无标签/无容器引用旧构建镜像，保留全部有标签镜像、容器和卷，恢复约1.8GiB再跑发行全套通过。
+### 已合入 A 的有效验证
 
-早期独立审查对 `1dfbc62` 曾发现未选择结果自动外发、共享会话被个人发送权阻断、回执读取异常，修复后对 `18159b0` 增量再审通过；该结论被 Claude 对 `d42b999` 发现的三项具体阻断补充，不能当作当前交付通过。正文/容量丢失已先复现；审批恢复原请求仍 paused，不能直接放开，因为原请求 sent 仅证明审批材料的交付。用户明确选择恢复轮不通知及群共享门槛，产品边界唯一见 ARCHITECTURE。旧“限定用户原文”机制仍不恢复；B/C 须验证完整定义依赖、源归属和最早期限。
-
-真实 U1–U4 的意图选择、答案质量、实际工具数/耗时/用量、机器人关键词/IP/签名/限流、群成员实收及部署均未验证。B–D未实现；长期任务 ActionBinding、清理/权限/TTL 与 Node API 结构化数据仍按各片门槛接续，不因 A 完成豁免。
-
-既有 #120 的 P4 记录曾保存在原工作树 `.superpowers/sdd/2026-10-20-production-dialogue-answer-repair/p4-results.md`，当前工作树不含该本机文件；源码差异可从 `6918044` 查回，不能据未随 Git 保存的材料新增实测结论。该切片只更改测试、采集脚本和相关文档；不关闭 A1、真实 P4 或客户端验收。采集器的首个正文回执指标不等于用户实际看见答案；完整交付依赖全部绑定分项确认。有限 PromQL 与 SQLite 夹具的能力限制单列，不能凭脚本模型给自然语言任务打通过分。
-
-P2/P1 的 [PR #119](https://github.com/shixian66/xiaowei-agent-sdk/pull/119) 由候选 `425a52c13bfc6e1bc9cf441e314db6435885ca98` squash 合入 `821ee8d9d89c1a28dda5c9b2c97d8506a3e0407d`，文件树一致。[CI 39456492469](https://github.com/shixian66/xiaowei-agent-sdk/actions/runs/39456492469) 的 9 项检查全部通过、attempt=1：integration **4500 passed、235 skipped、87 deselected**；p3-release **84 passed**。这是该合入版本证据，不自动当作本次 P4 候选的全量结果。
+A 候选 `d0db9c35105b14f1dbf615df9d85bcee1ef512bf` 已经 [PR #123](https://github.com/shixian66/xiaowei-agent-sdk/pull/123) 合并为 `9284688bb8907c9968e84d5e49c23e551c53ac58`，树相同；[CI](https://github.com/shixian66/xiaowei-agent-sdk/actions/runs/39597464188) 9/9 首次通过。integration 单次4588 passed/235 skipped/89 deselected，p3-release84 passed，non-SDK1182 passed，security63 passed。该记录只证明 A 的精确版本；不代表 B、真实服务、部署或用户验收。A 的 N1 最终正文统一 mention_safe、审批命令省略及531项本地关联回归已获独立复审，无新依赖或权限扩大。
 
 ### 有效证据摘要
 

@@ -1079,7 +1079,7 @@ docker compose --env-file .env up -d --no-deps --force-recreate xiaowei --wait
 v8 只新增请求的独立会话快照列；旧请求为 NULL，Action 表及失败码 CHECK 不改。
 v8→v9 新增按会话/请求绑定的 PNG/JPEG 原图应用表，旧会话和请求不重写；须确认当前应用镜像支持 v9，再按上面的升级步骤执行。v9 备份包含原图，按原数据库备份的访问限制保存。
 v9→v10 新增原生审批暂停检查点表与 Action 作废原因，旧 pending Action 作废、需重新提出；v8 可一次升级到 v10。
-v10→v11 新增飞书报告文件表；v11→v12 新增最小交付分项与请求语义版本，旧记录仍按旧送达语义读取。v12→v13 新增通知发送机会/回执表，不改历史会话；v1–v12可按当前发行清单显式升级到v13，只有v13可直接启动当前候选镜像。
+v10→v11 新增飞书报告文件表；v11→v12 新增最小交付分项与请求语义版本，旧记录仍按旧送达语义读取。v12→v13 新增通知发送机会/回执表，不改历史会话；v13→v14 新增一次性任务、通知关联和派生保留标记；v1–v13可按当前发行清单显式升级到v14，只有v14可直接启动当前候选镜像。
 迁移在一个事务内完成；普通 `serve` 遇到旧、未知或更高 schema 会以 1 退出，不会自动迁移。
 
 迁移提交后若必须回到不认识新 schema 的旧程序，不能把原库原地降级：按“恢复到隔离数据库”把
@@ -1099,7 +1099,7 @@ docker compose --env-file .env run --rm --no-deps xiaowei requests resend \
 ```
 
 Action 同样由 `storage cleanup` 按自身保留期分批清理；执行中记录先由启动恢复记为 unknown，
-不能在执行中删除。不新增定时任务；正常升级前继续成对备份数据库与配置。
+不能在执行中删除。清理仍由显式维护命令执行，不新增自动清理任务；正常升级前继续成对备份数据库与配置。
 
 重发只处理已保存的 failed/unknown 结果，重新检查当前权限和群成员资格，不重跑模型或原业务
 SQL。未完成请求在启动恢复时记为中断，同样不自动重跑。日志只记录安全状态、原因码和请求编号；
@@ -1132,3 +1132,14 @@ quota metric 仅接受 `aiplatform.googleapis.com/` 下的无数字小写指标�
 运行记汇总，使用相同原轮编号；真实生产 429 样本尚待观察验证。
 
 PostgreSQL 16 同一大版本内更换镜像 digest 不在本轮验证范围，须另做备份、兼容和回退演练。
+
+
+## 一次性提醒的启停和恢复（B 候选）
+
+应用配置增加 `scheduled_tasks`，默认不启用。最小启用项为 `{"enabled":true,"timezone":"Asia/Shanghai"}`；管理员可配置 `max_advance_seconds`、`lateness_seconds`、`poll_seconds` 和 `max_active_jobs`。须在模型数据策略和指定群工具中登记 `scheduled/propose_reminder`、`scheduled/get_action_status`、`scheduled/get_task`、`scheduled/control_task` 及执行许可 `scheduled/activate_reminder`；创建者保留个人通知 grant，确认者取得个人 `scheduled/activate_reminder`，管理员管理别人任务另需个人 `scheduled/control_task` 且是当前原群成员。确认材料显示实际时间、正文、机器人、期限与预算；未确认不激活。仅在获准环境启用，本轮离线替身不证明真实提醒可达。
+
+使用既有显式 `storage upgrade` 升到应用 schema14（会话私表不变）。普通重启只对尚未占用发送机会且在迟到窗口内的 active 任务补检查；已占用 sending 恢复为 unknown，accepted/failed/unknown 均不重复 POST。静态授权确定撤销或真实接收目标版本改变会停用；成员目录失败/partial/False 暂时保留未开始，至迟到窗口结束。通过授权任务状态查询排查连续未核实次数和原因，不能切换成批准者身份绕过。
+
+隔离备份恢复须先断开真实入站并设置 `scheduled_tasks.enabled=false`，核对数据库恢复点、任务未来时刻、机器人目标版本及未知记录后再决定启用；这个开关只禁后台任务准入/发送，不禁止原有启动检查或 A 显式通知。丢失实例锁/readiness 后不再新占用机会，已准入请求可能未知，不能声称已撤回。跨 schema 回退按成对备份恢复，不在原库降级、不修改 会话私表。
+
+任务正文及派生 Evidence/Session/请求缓存不超过原数据期限；沿已有 `storage cleanup` 显式维护，过期正文不再展示/发送。当前群上下文受依赖期限影响关闭时，由用户显式 `/新建` 开新群上下文，清理不会悄悄重建。已发出请求的安全回执仍保留，不能通过删除记录重置 unknown 门槛。

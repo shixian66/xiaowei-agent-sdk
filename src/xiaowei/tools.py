@@ -91,6 +91,27 @@ _REJECTION_FEEDBACK: dict[ToolRejectCode, tuple[str, bool]] = {
 
 
 _REJECTION_HINTS: dict[ToolRejectHint, str] = {
+    "reminder_time": (
+        "未创建提醒；at 须为配置范围内的未来绝对 ISO 时间且包含时区。"
+        "依据当前时间和已明确的业务时区修正格式，不改变用户要求的时间；日期有歧义时先问用户"
+    ),
+    "reminder_target": (
+        "未创建提醒；仅支持已登记且获准的机器人别名，不接受 URL，不擅自替换用户指定的接收方"
+    ),
+    "reminder_content": (
+        "未创建提醒；文字或当前可见证据不能为空，文字与证据块须在容量范围内；"
+        "完整通知超过20000字节时整条不发，不截断事实冒充完整"
+    ),
+    "reminder_recipient": (
+        "未创建提醒；起草上下文中的数据不在机器人接收范围内。"
+        "请管理员核对该机器人的 receive_tools/receive_targets；"
+        "群内用过提醒时，还须显式配置 scheduled 任务记录及其依赖业务源的接收许可。"
+        "不能抄成文字或自行新建上下文绕过接收限制"
+    ),
+    "reminder_expiry": (
+        "未创建提醒；发送时间已超出定义所依赖的数据期限，确认不会延长期限。"
+        "到点重新调查属于后续定时 Agent 能力，本版只支持固定提醒"
+    ),
     "action_request": (
         "只有本轮已提出、证据可读且尚未请求过执行的Action ID可申请群审批；"
         "请核对ID并避免重复调用。同一轮须为执行请求和写入保留两次工具额度"
