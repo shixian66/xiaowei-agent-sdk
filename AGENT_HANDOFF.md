@@ -15,7 +15,7 @@
 | 锁定依赖 | SDK `0.22.3`、Lark Channel `1.4.0`、MCP `2.2.0`、sqlglot `30.17.0`、`nh3 0.3.7`、`tinycss2 1.5.1`、Pillow `13.0.0`、certifi `2026.10.19`（后两项为严格审计发现的既有漏洞定向升级） |
 | 正式入口 | `xiaowei serve`、`config check`、`model check`、`storage init/upgrade/cleanup`、`requests resend`；命令与环境准备以 README 为准 |
 | 最近有记录的公司部署 | 主线交接记录含用户提供的 `xiaowei:143c4c8641be636c41c130329ce1639a36b59c27` 镜像及巡检日志；未独立核验当前服务器状态。B 本轮未部署 |
-| 当前验收结论 | A/B 已合入主线；C 首个冻结候选初审发现5项，已补反例修复、待新版本复核；真实 U5/U6/U7 未验收，D 未实现。具体证据见 §5 |
+| 当前验收结论 | A/B 已合入主线；C 离线候选已实现、独立复审通过、单次完整默认全套通过；真实 U5/U6/U7 未验收，D 未实现。具体版本与证据见 §5 |
 | 当前任务授权 | C 的实现、测试、常规修复、文档及本地提交；不推送/建 PR/合并/部署，不调用真实模型、Webhook、飞书或公司源，不读取公司配置及凭据正文。真 SDK＋合成替身＋隔离 PG 已授权 |
 
 原工作目录的 ARCHITECTURE 差异与未跟踪计划/公司配置保留，未复制到本工作树；本次未读取公司配置凭据。旧监控和回答修复记录保留为注明版本的证据，不作为本轮 C 范围扩展授权。
@@ -45,7 +45,7 @@
 
 SDK公开 RunHooks 计数主调用和无工具收尾/修正，共享已批准的模型调用上限；缺失供应商usage保持未知，不伪造0。后台无生产写、提案/审批、通知、管理工具；治理层手工伪造调用也拒绝。当前成员分页必须保留完整性：原便捷接口丢弃该标记，C 使用同一飞书SDK公开 Client.request 在工作线程读取，完整名单缺席才停用；部分/失败为未核实。
 
-下一步：完成版本化回归、关键隔离变异和具体SHA独立审查，再交付本地候选。真实U6/U7的能力、耗时/费用和30任务实际并发/成本需另行授权；排队默认15分钟仍是待用户确认的暂用配置。
+下一步：交付本地C候选，等待具体的真实U6/U7环境、范围及费用授权；离线结果不代替能力验收。排队默认15分钟待用户确认，30任务实际并发/成本需实测；未获授权不推送、建PR或部署，也不继续实现D。
 
 ### 已合入的监控可靠性修订（PR #121）
 
@@ -99,7 +99,7 @@ S3 的源码事实：`AgentAnswer` 为有序 `TextBlock | FactBlock`，另含 `r
 
 ### 下一项工作与开放条件
 
-B 的当前离线单元已交付；真实 U5 的日期解释、工具选择、答案质量、调用/耗时/用量及测试机器人接受/群内表现仍须具体授权后验证。保持默认关闭，不自动部署或把 C/D 当作已经实现。下一切片是 C 的独立受治理 Agent 任务；以下为并存的旧业务实战缺口，不作为 B 已验收证据。
+B 的当前离线单元已交付；真实 U5 的日期解释、工具选择、答案质量、调用/耗时/用量及测试机器人接受/群内表现仍须具体授权后验证。保持默认关闭，不自动部署，不把离线候选当作真实验收；D 未实现。C 的独立受治理 Agent 任务已形成离线候选，版本与未覆盖项见 §5；以下为并存的旧业务实战缺口，不作为 B/C 的真实验收证据。
 
 本次 P2 已在 `1c06a89d633753f70fb6e5829c0cc4fc5992cbfd` 独立复审通过，两个阻断（合法反引号 SQL 的夹具路由、普通 naive DATETIME 错标会话偏移）已补回归并修复。普通查询保留无偏移墙上时间，aware 时间及已知来源模板不变。旧历史/绑定附件可能保留原先错误偏移，本次不追溯修正、不批量失效旧 Evidence。
 
@@ -142,13 +142,34 @@ B1 的短口径主视图修复已成立；原 B2 因复现形状不符合真实 
 
 ### C 本地候选与验证
 
-第一冻结候选 `92f4d31066f3b54208292fb3c38e08eb46e2b080`，基线 B 合并 `2bee11fe573ab67b054a6195f1444abfcae748b2`。其版本化静态检查通过（`/tmp/xiaowei-c-92f4d31-static.log`）；5项/tmp独立副本变异都先原版通过再杀死变异：后台手工调用守卫、含收尾的SDK调用预算、派生Session TTL、排队窗口、开始后重启不重放，详见 `/tmp/xiaowei-c-mutations-summary.json` 及对应日志。源码事实、离线边界、真实能力分别记证；没有调用真实模型/公司源/飞书/Webhook。
+本地候选 `eea17e42bac3b7e62a4e7c0818d39cbcd1d58cd9`（产品源码与已审查187d568完全相同），基线 B 合并 `2bee11fe573ab67b054a6195f1444abfcae748b2`，分支 `codex/scheduled-agent-tasks`，仅本地。后续交付记录提交只更新文档，产品和测试以该候选为准。C 已实现，不含 D；没有真实服务、推送、PR或部署。
 
-该候选独立审查发现5项实际缺陷，不能交付：长运行挡后续时点；暂停任务占满扫描；最后结果遗漏更早数据TTL；旧运行误停新批准期限；后续鉴权丢失确定退群分类。这些分别由正式群/真SDK/隔离PG的反例确认：`/tmp/xiaowei-c-poll-red.log`（1失败）、`/tmp/xiaowei-c-review-red.log`（10失败）。修复在同一C批准范围内：缩小扫描锁，保留进程内任务所有权/退出取消，不加Worker或Loop；暂停仅实际到期参选并优先到期活动任务；统一实际deadline；停止事务锁当前job重算期限；各次定义鉴权保留确定失效/暂不可核实。修复后C专项50项通过（`/tmp/xiaowei-c-review-green.log`），新冻结版本与独立增量复核待补。
+正式群入口起草/确认后，每个时点通过正式 Application.run_turn/公开 SDK Runner、新 Session 执行批准的只读工具，再由可信代码复用 A 的通知路径。已覆盖两类只读能力、两个时点、合法查询修正/待澄清的部分结果、长期/指定期限、队列、列表/仅有效期变更和原群固定停止说明。后台工具隐藏与治理层伪造调用拒绝分别验证；任务能力的这些合成链路证据不能替代真实模型自主表现。
 
-首次单次默认全套在92f4d31中止（`/tmp/xiaowei-c-92f4d31-full.log`，前后SHA/工作区不变，2失败、10通过、89排除、exit2；不是全套通过）。中止前还击中部署夹具旧schema假设：重建v5须先移除新增run的FK依赖，当前升级输出须为15。保留原版本拒绝、备份恢复和网络/信号行为断言，更新夹具后需重新完整执行。旧的95项C/通知、142项B/C/存储、188项阶段结果不相加成全套。
+首候选92f4d31独立审查发现5项，222e80b与187d568修复，均已增量独立复审关闭：
 
-计量口径：`scheduled_run.usage`记SDK模型和业务工具调用，可信通知从attempt单独统计；硬预算包含预留的通知调用，供应商usage缺失保持未知。真实U6/U7的工具选择、答案质量、耗时/费用与飞书实收未验收；排队900秒为待确认暂用默认，30任务真实并发/费用仍需实测。D未实施。
+| 根因及最小修复 | 关键回归 |
+| --- | --- |
+| 长运行占用扫描循环：扫描只登记进程内在途任务，锁外等待；轮询不等待上一批结束，退出取消/等待其子任务，不增加Worker | `test_poll_loop_admits_later_due_job_while_prior_run_is_waiting`；独立合成关闭诊断确认登记清空、锁释放、run/attempt=unknown、仅一次POST |
+| 暂停的长期任务占满扫描：暂停只在实际到期时参选，活动到期优先 | `test_paused_long_job_cannot_starve_new_active_job` |
+| 最后结果只看用户期限：按用户期限与定义数据TTL的较早者标明 | `test_last_result_marks_earlier_definition_expiry`（两种用户期限配置） |
+| 旧运行误停续期版本：停止事务锁当前job，重算当前期限 | `test_old_run_cannot_expire_newly_approved_validity` |
+| 后续鉴权丢失确定退群/未核实分类，且开始时提前清零连续计数：各次核验保留分类，轮次落定才更新计数 | `test_later_permission_checks_preserve_revoked_vs_unverified`（六分支）；`test_consecutive_later_unverified_checks_accumulate_until_confirmed_run`（1/2/3，成功后0） |
+
+TDD反例日志：`/tmp/xiaowei-c-poll-red.log` 1失败、`/tmp/xiaowei-c-review-red.log` 10失败、`/tmp/xiaowei-c-unverified-red.log` 第二周期实际1、预期2。修复后C专项51 passed（41.81秒，`/tmp/xiaowei-c-unverified-green.log`）；该专项为提交前工作区证据，冻结版本以以下记录为准。
+
+| 冻结版本检查 | 证据与范围 |
+| --- | --- |
+| 独立复审 | 对eea17e4增量复核通过，继承d6260a1/187d568/222e80b已核实路径；原5项全部关闭、无新增阻断。独立运行计数回归1 passed（1.70秒），前后HEAD相同、clean；不是全套 |
+| 单次完整默认全套 | 4730 passed, 235 skipped, 89 deselected, 5 warnings in 1583.95s (0:26:23)；`/tmp/xiaowei-c-eea17e4-full.log`，HEAD=eea17e4，前后SHA相同、工作树clean、EXIT_CODE=0、VERSION_UNCHANGED=True。包括C、A/B、Action、Evidence/Session、渠道、存储/发行；跳过及未选项不算验收 |
+| 静态 | `/tmp/xiaowei-c-eea17e4-static.log`：`ruff check --no-cache .`、相对2bee11f的17个Python文件`ruff format --check`、`mypy --cache-dir=/tmp/xiaowei-c-mypy-cache src`（37文件）、`git diff --check 2bee11f..HEAD`；均通过，前后版本不变且clean |
+| 隔离变异 | `/tmp/xiaowei-c-mutations-summary.json`与`/tmp/xiaowei-c-mutation-*.log`，BASE_SHA=187d568；8项均原版通过、变异失败：后台手工调用守卫、含收尾的SDK调用预算、派生Session TTL、排队窗口、开始后重启不重放、连续未核实计数、轮询不等待长运行、续期采用当前期限。只修改/tmp的git archive副本 |
+
+复现：在本隔离工作树执行，pytest前缀为`SDK_TEST_POSTGRES_URL=postgresql+asyncpg://postgres@127.0.0.1:55432/postgres PYTHONDONTWRITEBYTECODE=1`。专项`.venv/bin/python -m pytest -q -p no:cacheprovider tests/sdk_core/test_scheduled_agent.py`；默认全套`.venv/bin/python -m pytest -q -p no:cacheprovider`。版本记录器`/tmp/xiaowei_run_versioned_check.py LOG COMMAND...`记录SHA、树、命令、工作区及结束状态；变异入口`/tmp/xiaowei_c_mutations.py`不属于产品。
+
+全套暴露的测试适配遗漏已修正：schema15的部署夹具常量/外键移除顺序、发行运维文案及安全日志测试的简化服务接口；保留数据数量、旧程序拒绝、备份恢复、精确日志/哨兵脱敏、密钥错配拒绝与零业务I/O断言。发行专项68 passed（14.60秒，`/tmp/xiaowei-c-release-green.log`）；`/tmp/xiaowei-c-runtime-{red,green}.log` 为6失败→6通过（1.41秒）。此前 `/tmp/xiaowei-c-{92f4d31,187d568,d6260a1}-full.log` 分别是中止/失败记录，不作为通过证据；d6260a1为6 failed、4724 passed、235 skipped、89 deselected、5 warnings（28:02、exit1）。分批结果不相加成全套。
+
+计量口径：scheduled_run.usage记SDK模型和业务工具调用，可信通知从attempt单独统计；硬预算包含预留的通知调用，供应商usage缺失保持未知。剩余三项：排队900秒为待用户确认的暂用默认；真实U6/U7的自主工具选择、答案质量、耗时/费用与飞书实收未验收；30任务真实并发/费用需实测。D未实施。继续保持默认关闭，真实模型/来源/接收范围和费用须另获授权，不自行豁免验收门槛。
 
 ### 合并交付前主线集成
 
