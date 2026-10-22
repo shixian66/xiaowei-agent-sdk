@@ -1,6 +1,6 @@
 # 小维：当前交接
 
-> 更新：2026-10-22，Asia/Shanghai。本文维护当前代码状态、有效证据、缺口与下一项工作。产品契约见 [ARCHITECTURE.md](ARCHITECTURE.md)，阶段与退出条件见 [DEVELOPMENT_PLAN.md](DEVELOPMENT_PLAN.md)，使用与运维见 [README.md](README.md) 和 [OPERATIONS.md](deploy/OPERATIONS.md)。
+> 更新：2026-10-23，Asia/Shanghai。本文维护当前代码状态、有效证据、缺口与下一项工作。产品契约见 [ARCHITECTURE.md](ARCHITECTURE.md)，阶段与退出条件见 [DEVELOPMENT_PLAN.md](DEVELOPMENT_PLAN.md)，使用与运维见 [README.md](README.md) 和 [OPERATIONS.md](deploy/OPERATIONS.md)。
 
 **OpenAI Agents SDK 负责 Agent Loop；小维负责权限、受治理工具执行、证据真实性和数据边界。**
 
@@ -9,16 +9,16 @@
 | 项目 | 已核对事实 |
 | --- | --- |
 | 仓库 | [shixian66/xiaowei-agent-sdk](https://github.com/shixian66/xiaowei-agent-sdk) |
-| 产品代码基线 | `main@1a92c58da5a47db755fb3213c9fd9e0393511e01`（自建飞书代理由 #127 合入）；复用代理隔离工作树，文档分支 `codex/feishu-input-presentation-plan`；D 的 codex/node-exporter-core 工作树及原目录修改均保留 |
+| 产品代码基线 | `main@1a92c58da5a47db755fb3213c9fd9e0393511e01`（自建飞书代理由 #127 合入）；复用代理隔离工作树，分支 `codex/feishu-input-presentation-plan`；D 的 codex/node-exporter-core 工作树及原目录修改均保留 |
 | 源码与检查 | 当前源码仅保留 `src/xiaowei`；旧工程及专属测试、Compose、迁移入口、`compose-smoke` CI 和 Alembic 依赖已移除。保留产品测试、公共检查与旧回答兼容路径；旧工程历史可从 Git 查回 |
 | 当前存储与回答 | 主线应用 schema v15，代理不新增迁移；C 扩展已有 job、逐次 run/通知关联；014 已发布不改，015 显式升级。SDK 表、回答版本及既有交付兼容保持 |
 | 锁定依赖 | SDK `0.22.3`、Lark Channel `1.4.0`、MCP `2.2.0`、sqlglot `30.17.0`、`nh3 0.3.7`、`tinycss2 1.5.1`、Pillow `13.0.0`、certifi `2026.10.19`（后两项为严格审计发现的既有漏洞定向升级） |
 | 正式入口 | `xiaowei serve`、`config check`、`model check`、`storage init/upgrade/cleanup`、`requests resend`；命令与环境准备以 README 为准 |
-| 最近有记录的公司部署 | 主线交接记录含用户提供的 `xiaowei:143c4c8641be636c41c130329ce1639a36b59c27` 镜像及巡检日志；未独立核验当前服务器状态。B 本轮未部署 |
-| 当前验收结论 | A/B/C 已合入主线；代理离线候选 163d2ac 的独立复审及单次完整默认全套通过，真实 U5/U6/U7 未验收，D 暂停且未实现。具体版本与证据见 §5 |
+| 最近有记录的公司部署 | 主线交接记录含用户提供的 `xiaowei:143c4c8641be636c41c130329ce1639a36b59c27` 镜像及巡检日志；未独立核验当前服务器状态。本次未部署 |
+| 当前验收结论 | A/B/C 已合入主线；代理离线候选 163d2ac 的独立复审及单次完整默认全套通过；当前 S0 已闭合、S2 本地全套通过但待独立审查，真实输入/识图与 U5/U6/U7 未验收，D 暂停且未实现。具体版本与证据见 §5 |
 | 当前任务授权 | 起点 d4b3420：按用户决定修订三份文档至 v1.4 并单独提交，完成本地 S0 离线门槛和 S2 post 输入、测试及提交。S1 仅方案；不新增依赖/迁移、不推送/PR/合并/部署、不调用真实服务/模型或读取公司配置凭据，D 暂停 |
 
-原工作目录的 ARCHITECTURE 差异与未跟踪计划/公司配置保留，未复制到本工作树；本次未读取公司配置凭据。旧监控和回答修复记录保留为注明版本的证据，不作为本轮代理范围扩展授权。
+原工作目录的 ARCHITECTURE 差异与未跟踪计划/公司配置保留，未复制到本工作树；本次未读取公司配置凭据。旧监控和回答修复记录保留为注明版本的证据，不作为本轮输入或展示范围扩展授权。
 
 本文件的状态以表中的核对基线为限。接手者先核对实际 HEAD、工作区及用户新指令；合入、独立审查、离线测试、真实运行、部署与用户接受分别记录，不互相替代。
 
@@ -33,7 +33,7 @@
 - 进度的单聊/群聊差异延迟、仅真实变化更新、正常收尾及异常陈旧已由用户确认，详见[进度契约](ARCHITECTURE.md#progress-observation)；P1 已有离线实现，当前证据见计划 §7。普通消息的区域身份及正文/明细分工见[普通消息契约](ARCHITECTURE.md#ordinary-feishu-expression)，不能由 HTML/MD 报告完成推定达标。
 - 监控写仅限已批准动作，使用 SDK 原生审批暂停/恢复及既有 Action 治理；生产开放仍须满足对应源和群审批门槛。Grafana 数据源密码私聊命令尚未实现，目前由管理员在 Grafana UI 填写。见 [监控边界](ARCHITECTURE.md#monitoring-mcp)。
 - 内网 Web 无登录、访问者共用操作者权限；目标账号、网络、Grafana 插件/写端及数据源更新竞争窗口等已接受取舍按架构执行。
-- 通知及定时任务的方向与待审权限增量见 [ARCHITECTURE](ARCHITECTURE.md#scheduled-agent-tasks)：多个目的群不扩大操作入口，任务独立于原聊天，创建及每次执行复核权限，生产写不能继承周期批准。A/B/C 已合入主线，当前先交付自建代理适配，D 暂停且未实现。
+- 通知及定时任务的方向与待审权限增量见 [ARCHITECTURE](ARCHITECTURE.md#scheduled-agent-tasks)：多个目的群不扩大操作入口，任务独立于原聊天，创建及每次执行复核权限，生产写不能继承周期批准。A/B/C 与自建代理适配已合入主线；当前交付群输入修复，展示仅方案，D 暂停且未实现。
 
 ## 3. 当前计划与下一项工作
 
@@ -41,9 +41,9 @@
 
 起点 d4b3420c689a8aeced78902849877b08760f365f（v1.3 独立复审通过）；产品代码基线 main@1a92c58，原目录与 D 工作树不动。用户已确认的交付/B2 取舍归入 [ARCHITECTURE 长期规则](ARCHITECTURE.md#user-delivery-and-history)，本地实施按[计划 v1.4](docs/superpowers/plans/2026-10-22-feishu-input-presentation-repair.md)串行推进，不再做文档复审。单折叠区不改模型 schema；B2 已选一次无工具改写。v4 保存语义和回退限制须另行确认，S1 不实施。
 
-进度：v1.4 文档已单独提交 7cb98e20a74f658cc39414e7a1cf8d133d1f85bc；S0 的解析样例、v4 贯穿/回退方案及暂停可见性实测已完成，S2 入口、图文与命令/拒绝链已 RED→GREEN；开发期宽回归706项及最终专项37项通过，正在冻结版本做完整默认全套。保留既有 raw 事件授权、平台 mentions、图片开关/Vertex/容量、diagnose 与图片回放，不新增权限、依赖或迁移。验收精简为计划指定的 4 格版本行为（留 S1）、一次资源键隔离变异；JSON 容器预算不改。
+进度：v1.4 文档已单独提交 7cb98e20a74f658cc39414e7a1cf8d133d1f85bc；S0 的解析样例、v4 贯穿/回退方案及暂停可见性实测已完成，S2 入口、图文与命令/拒绝链已 RED→GREEN；开发期宽回归706项、最终专项37项及冻结版本单次完整默认全套通过（§5）；S2 等待独立审查。保留既有 raw 事件授权、平台 mentions、图片开关/Vertex/容量、diagnose 与图片回放，不新增权限、依赖或迁移。验收精简为计划指定的 4 格版本行为（留 S1）、一次资源键隔离变异；JSON 容器预算不改。
 
-只读/脚本模型和隔离 PG/浏览器可用；真实模型、飞书、代理和公司源均不授权。S2 完成后交精确 SHA 给 Claude 独立审查；代码/离线/真实能力/部署不互相替代。S2 尚未独立审查或真实验收，进展与检查见 §5。
+只读/脚本模型和隔离 PG/浏览器可用；真实模型、飞书、代理和公司源均不授权。下一项是将 S2 精确 SHA 交 Claude 独立审查；S1 等待用户确认 v4 回退限制及后续开发授权。代码/离线/真实能力/部署不互相替代。S2 尚未独立审查或真实验收，进展与检查见 §5。
 
 ### 已合入的监控可靠性修订（PR #121）
 
@@ -142,11 +142,21 @@ B1 的短口径主视图修复已成立；原 B2 因复现形状不符合真实 
 
 起点 d4b3420，文档单独提交 7cb98e20a74f658cc39414e7a1cf8d133d1f85bc。当前产品只改 Feishu 群 post 白名单和图文问题传递，不改模型 schema、保存版本或 S1 展示。S0 的 v4 方案与回退限制见计划；旧程序不能读 v4，备份恢复会回退发送/Action 账本，须保留新库并核对期间副作用。本轮没有备份/恢复操作，v4 待用户确认。
 
-S0 可见性用正式群入口、真 SDK 与隔离 PG 实测 3 项：未恢复/过期后的普通轮看不到暂停查询；拒绝经 SDK 恢复提交后可见。测试使用真正查询类工具，无重查、零生产写。13 个纯解析禁网样例验证同源文本/图片、两种 at、长消息、链接目标与键隔离；S2 图文问题先做当前输入准入，绑定说明加入后再按实际输入检查，未放宽任何限额。
+S0 可见性用正式群入口、真 SDK 与隔离 PG 实测 3 项：未恢复/过期后的普通轮看不到暂停查询；拒绝经 SDK 恢复提交后可见。测试用受治理的查询类工具和合成数据，无重查、零生产写。13 个纯解析禁网样例验证同源文本/图片、两种 at、长消息、链接目标与键隔离；S2 图文问题先做当前输入准入，绑定说明加入后再按实际输入检查，未放宽任何限额。
 
 RED 记录：入口 text 成功/post 拒绝（1 failed/1 passed）；解析 9 failed；图文问题丢失（1 failed/1 passed）；链接目标丢失及完整绑定输入未在存储前拒绝（2 failed）。随后补深层非法 JSON 的解析错误分类和其他成员 at 原值保留的 RED；最终 S0/S2 专项同次 **37 passed**（不是全套）。资源键隔离仅做一次定向变异：临时把 img 键加入正文，指定 canary 测试失败；finally 精确恢复源码，复验 **1 passed**。临时日志在 `/tmp/xiaowei-post-s2/`，只含合成数据，详细执行命令记录于各日志/本次工具输出。
 
-开发期宽回归 **706 passed**（18 个相关模块，日志 related.log，记录基线 SHA 与未冻结工作区），其后补深层非法 JSON 受控拒绝及其他成员 at 保真回归；最终冻结版本全套另记，不以分批相加称全套。Ruff/format 与 mypy（38 源文件）、文档命令检查（2 passed）、安全门禁（63 passed）及 diff 检查通过；冻结全套结果待执行后记录，不提前判通过。五份受影响文档的本地链接检查覆盖 118 项，本片相关链接/锚点有效；另发现运维文档既有 §3.5 计划链接锚点漂移，基线已存在、未混入本片修复。README 与运维仅修正当前群 post 的输入说明，未改运维命令。真实模型、飞书、代理和公司源未调用，tracing 关闭；脚本模型不证明任务理解/识图能力。S1、D 未实施，未新增依赖/迁移，未读取公司配置凭据。
+开发期宽回归 **706 passed**（18 个相关模块，日志 related.log，记录基线 SHA 与未冻结工作区），其后补深层非法 JSON 受控拒绝及其他成员 at 保真回归；下述单次全套覆盖最终代码，不以分批相加称全套。Ruff/format 与 mypy（38 源文件）、文档命令检查（2 passed）、安全门禁（63 passed）及 diff 检查通过；单次全套证据如下。五份受影响文档的本地链接检查覆盖 118 项，本片相关链接/锚点有效；另发现运维文档既有 §3.5 计划链接锚点漂移，基线已存在、未混入本片修复。README 与运维仅修正当前群 post 的输入说明，未改运维命令。真实模型、飞书、代理和公司源未调用，tracing 关闭；脚本模型不证明任务理解/识图能力。S1、D 未实施，未新增依赖/迁移，未读取公司配置凭据。
+
+**冻结代码与单次完整默认全套。** 本地代码提交 `9f109374e57b89548b0aed2cd67e0a07f9819282`，在同一干净 SHA 上完整运行一次，**4818 passed、235 skipped、89 deselected、5 warnings，1705.96 秒，EXIT_CODE=0**；开始/结束 SHA 相同，BEGIN_CLEAN/END_CLEAN/VERSION_UNCHANGED 均为 true。UTC 开始 2026-10-22T15:49:26，结束 16:17:57（跨 Asia/Shanghai 自然日）。235 项保留既有集成环境跳过；默认未选浏览器、真实 StarRocks/AuditLoader 用例，共 89 项。5 个警告来自预期的禁网反例。不把这些跳过/未选部分或离线通过表述为真实服务验收。完整日志：`/tmp/xiaowei-post-s2/full-9f10937.log`。此后只更新本交接记录，代码/测试未再改。
+
+实际完整命令（固定隔离测试 PG，无公司凭据）：
+
+```bash
+UV_OFFLINE=1 SDK_TEST_POSTGRES_URL=postgresql+asyncpg://postgres@127.0.0.1:55432/postgres uv run --locked --extra dev python -m pytest -q
+```
+
+静态与专项命令：`uv run --locked --extra dev ruff check .`、对 7 个修改 Python 文件执行 `ruff format --check`、`uv run --locked --extra dev mypy src`、`uv run --locked --extra dev python -m pytest -m security -q`、`PYTHONDONTWRITEBYTECODE=1 .venv/bin/python -m pytest -q -p no:cacheprovider tests/security/test_docs_command_consistency.py`、`git diff --check`，均通过。最终 37 项专项为 `test_feishu_post.py`、`test_feishu_group_images.py` 与 `test_sdk_approval.py::test_paused_query_visibility_in_later_normal_turn` 同次运行（隔离 PG）；相关 18 模块的完整命令在 related.log，不另复制命令清单。
 
 ### 群输入与按需详情计划 v1.3（仅文档）
 
