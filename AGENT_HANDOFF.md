@@ -15,7 +15,7 @@
 | 锁定依赖 | SDK `0.22.3`、Lark Channel `1.4.0`、MCP `2.2.0`、sqlglot `30.17.0`、`nh3 0.3.7`、`tinycss2 1.5.1`、Pillow `13.0.0`、certifi `2026.10.19`（后两项为严格审计发现的既有漏洞定向升级） |
 | 正式入口 | `xiaowei serve`、`config check`、`model check`、`storage init/upgrade/cleanup`、`requests resend`；命令与环境准备以 README 为准 |
 | 最近有记录的公司部署 | 主线交接记录含用户提供的 `xiaowei:143c4c8641be636c41c130329ce1639a36b59c27` 镜像及巡检日志；未独立核验当前服务器状态。B 本轮未部署 |
-| 当前验收结论 | A/B 已合入主线；C 本轮精简/修复完成，功能版本1a5605d独立复审及单次完整默认全套通过；真实 U5/U6/U7 未验收，D 未实现。具体版本与证据见 §5 |
+| 当前验收结论 | A/B 已合入主线；C 收尾 F1/F2 已修复，功能版本 `69820b1` 的两处差异独立复审及单次完整默认全套通过；真实 U5/U6/U7 未验收，D 未实现。具体版本与证据见 §5 |
 | 当前任务授权 | C 的实现、测试、常规修复、文档及本地提交；不推送/建 PR/合并/部署，不调用真实模型、Webhook、飞书或公司源，不读取公司配置及凭据正文。真 SDK＋合成替身＋隔离 PG 已授权 |
 
 原工作目录的 ARCHITECTURE 差异与未跟踪计划/公司配置保留，未复制到本工作树；本次未读取公司配置凭据。旧监控和回答修复记录保留为注明版本的证据，不作为本轮 C 范围扩展授权。
@@ -140,38 +140,30 @@ B1 的短口径主视图修复已成立；原 B2 因复现形状不符合真实 
 
 ## 5. 验证记录与限制
 
-### C 精简修复与验证
+### C 收尾修复与验证
 
-功能冻结版本 `1a5605d33e0fdee3d395de95b5930d4ae9a92c20`，本轮比较基线 `a8a7603c8320e5d025911891a08ac56567654bfd`；C最初基于B合并 `2bee11fe573ab67b054a6195f1444abfcae748b2`。分支 `codex/scheduled-agent-tasks`，只在隔离工作树本地提交；原目录的保留修改未混入。没有真实模型、Webhook、飞书或公司源调用，也未推送、建PR、合并或部署。
+功能冻结版本 `69820b1e2809139117494294e5e0a15eb6b3b73f`，本轮比较基线 `c7b1412eb27669a6da19d89123fb398a864e66e4`；分支 `codex/scheduled-agent-tasks`。本轮仅修复 F1/F2 的用户提示，不改变权限、Evidence、审批、核验次数或调度契约。C 此前精简、B1/B2 关闭及删减/变异记录见 `git show c7b1412:AGENT_HANDOFF.md`；本轮独立复审只覆盖这两处差异，不能解释为重新审查全部 C。
 
-用户本轮决定及唯一产品边界见 [ARCHITECTURE](ARCHITECTURE.md#scheduled-agent-tasks)：删除有效期修改/续期、删除模型绑定、确认可配置的900秒排队。创建仍复用既有Action，暂停/取消直接控制；修改定义须取消重建。正式群入口→Action确认→独立Application.run_turn/SDK→治理只读工具/Evidence→可信通知链路保持。
-
-| 根因或删减 | 修复及关键行为回归 |
+| 根因 | 修复与行为证据 |
 | --- | --- |
-| B1 发送前拒绝被异常吞成execution_failed | send_fixed返回typed结果；runtime成员resolve的Exception只表示本次不可核验，保留取消传播。主体未核实零POST、连续计数2→3，后续成功归零。`test_send_time_member_unverified_preserves_count_then_success_resets`、`test_runtime_sender_timeout_is_unverified_without_replacing_sender_check` |
-| B1 容量超限 | 真实千行合成结果、不改20000常量；同一机会只发固定无数据说明，run.reason=content_too_large，下一周期发送新事实。不消耗未展示的30天尾注，下一正常结果补提示。`test_large_agent_result_sends_capacity_notice_once_then_next_period_runs` |
-| B2 一个普通异常取消整批 | gather收集逐项异常、安全日志；普通异常隔离，实例失去readiness才取消同批并保留原异常传播。`test_one_job_scan_error_isolated_unless_readiness_lost` 两分支；原B丢锁测试保持 |
-| 续期和模型绑定 | 删除job.revision、续期工具/参数/ActionBinding、suppressed及复活分支、model_binding/automatic_binding。现有通用ActionPlan.revision不删除。兼容模型/策略调整继续，旧定义依赖若撤出当前model_tools则在模型前拒绝。`test_model_and_compatible_policy_change_use_current_config_without_stopping_job`、`test_definition_dependencies_obey_current_model_policy_before_background_run`（成功/拒绝） |
-| 无读取方的数据 | 删除run.answer/answer_expires_at/usage/duration_seconds、job.run_count/run.skipped_count及回答副本清理SQL；错过历史时点只更新job.reason/next_run。删除TurnUsage层层传递。SDK模型总调用硬上限保留，安全日志记录调用/token未知/耗时 |
-| 重复核验 | 开始前统一当前授权/目标/TTL/三态成员；保存前仅任务状态/期限；发送前核验主体。Evidence当前数据/接收范围与锁内active/期限保留。`test_only_start_and_send_check_membership`、`test_pause_during_model_prevents_history_commit_and_send`、`test_current_config_revocation_stops_before_model_and_business_post` |
-| 首跑与控制反馈 | 已过去显式周期首跑返回agent_task_time。已停止Agent有旧回执仍说明“任务已停止”；这个新分支仅限agent_task，B固定提醒完成后保留“发送已准入”。`test_past_explicit_periodic_start_rejected_before_draft`、`test_stopped_agent_control_reports_stopped_despite_historical_receipt`、`test_completed_fixed_reminder_keeps_admitted_control_reason` |
+| F1 后台静态授权撤销与定义失效共用异常，被误报为 definition_unavailable | TaskDefinitions.validate 用窄义 AuthorizationRevokedError 区分当前通知/工具/目标授权缺失；_current_definition 映射 authorization_revoked。不增加核验调用。`test_current_config_revocation_stops_before_model_and_business_post` 覆盖通知、查询工具、目标及 automatic_tools 撤销，断言具体停止原因/原群说明、零模型调用及零业务 POST；目标版本变化仍 recipient_changed。`test_definition_dependencies_obey_current_model_policy_before_background_run` 保留定义失效的 definition_unavailable 反例及允许对照 |
+| F2 控制更新未改变任何行时，未发送的 B 提醒也被覆盖为“发送已准入” | control_task 仅在 receipt_id 非空时显示发送已准入；已停止 Agent 仍显示任务已停止。新增 `test_cancelled_fixed_reminder_repeat_cancel_does_not_claim_send_admission`：正式群入口批准后连续取消两次，保持 cancelled，回复无发送准入、无 attempt/POST，到点也不发送；原 `test_completed_fixed_reminder_keeps_admitted_control_reason` 已发送对照保留 |
 
-删除的三个续期测试：`test_expiry_change_is_code_authored_approved_version_without_resetting_history`、`test_expiry_change_cannot_extend_definition_dependency_ttl`、`test_old_run_cannot_expire_newly_approved_validity`，因对应功能已撤销。旧多轮次成员核验测试改为一次开始三态、发送前False/真实TimeoutError、连续计数和恰好两处成员核验；旧数据库usage/回答缓存断言改为日志与真实Session/Evidence清理，不削弱TTL、权限或写审批。
+**B 兼容说明：** c7b1412 已有的 send_fixed 类型结果也用于 B 固定提醒。发送前主体核验暂时失败（包括成员接口异常）返回 not_sent/sender_not_authorized，由提醒执行路径记 authorization_unverified、unverified_count 加 1，零 POST；不再抛普通异常。尚未占用发送机会的 active 提醒可在迟到窗口内再次核验；已占用或 unknown 的机会绝不自动重发。本轮仅补录此事实，没有新增重试或授权范围。
 
-| 冻结版本验证 | 证据及范围 |
+| 检查 | 当前证据 |
 | --- | --- |
-| 单次完整默认全套 | **4741 passed, 235 skipped, 89 deselected, 5 warnings in 1661.83s (0:27:41)**；`/tmp/xiaowei-c-trim-1a5605d-full.log`，开始/结束均为上述SHA，工作树clean、EXIT_CODE=0、VERSION_UNCHANGED=True。包含C、A/B、Action/群审批、Session/Evidence、v14→v15迁移及Docker部署维护。跳过和未选项不算验收；不是分批加总 |
-| 静态 | `/tmp/xiaowei-c-trim-1a5605d-static.log`：全仓ruff、9个受影响Python文件format、mypy src（37文件）、本轮diff检查全部通过；前后SHA相同且clean |
-| 独立复审 | 1a5605d增量复核通过，覆盖本轮a8a7603..1a5605d已审链路，4e7523c发现的三项均关闭、B兼容保持。复审者独立运行5项通过（5.75秒），前后HEAD相同/clean；无文件日志，工具会话42688。不是自行复查，也不代表真实能力验收 |
-| 隔离变异 | `/tmp/xiaowei-c-trim-final-mutations-summary.json`，BASE_SHA=1a5605d；9项均原版exit0、变异exit1：发送主体类型结果、容量说明、普通异常隔离、保存前状态、SDK含收尾总预算、派生TTL、当前模型策略、真实成员异常、实际30天尾注。仅改/tmp的git archive副本。模型策略首试定位到无关分支，已修正定位后单项重跑；未改产品或断言 |
+| RED 先复现 | `/tmp/xiaowei-c-f1f2-red.log`：4 failed、4 passed，复现三类静态撤销原因及重复取消误报；产品源码当时仍为 c7b1412。该记录含测试工作区变更，不作冻结 SHA 的全套证据 |
+| C/B 相关回归 | **133 passed，115.88秒**，`/tmp/xiaowei-c-f1f2-green.log`；两个 scheduled 测试文件，正式入口、真 SDK、脚本模型、隔离 PG/传输替身。提交前局部检查，不拼作全套 |
+| 冻结版本单次完整默认全套 | **4744 passed, 235 skipped, 89 deselected, 5 warnings in 1732.13s (0:28:52)**；`/tmp/xiaowei-c-f1f2-69820b1-full.log`。开始/结束均为 `69820b1e2809139117494294e5e0a15eb6b3b73f`，工作树 clean、EXIT_CODE=0、VERSION_UNCHANGED=True。包含受影响 C/B/A、Action/群审批、Evidence/Session、迁移及本地 Docker 部署维护回归；跳过和未选项不算验收 |
+| 冻结版本静态 | `/tmp/xiaowei-c-f1f2-69820b1-static.log`：全仓 ruff、3 个受影响 Python 文件 format、mypy src（37 文件）、基线差异检查全部通过；同 SHA、前后 clean、EXIT_CODE=0 |
+| F1/F2 独立复审 | `69820b1e2809139117494294e5e0a15eb6b3b73f` 相对 c7b1412 的两处修复通过、无阻断；复审者另跑 **9 passed，10.82秒**，覆盖五类当前配置撤销、定义策略允许/拒绝和 B 未发送/已发送控制对照。`/tmp/xiaowei-c-f1f2-independent-69820b1.log` 保存 pytest 输出；前后 SHA/clean 由复审工具会话核对，该文件没有版本头，与冻结全套日志分别记录 |
 
-正式全套命令：前缀 `SDK_TEST_POSTGRES_URL=postgresql+asyncpg://postgres@127.0.0.1:55432/postgres PYTHONDONTWRITEBYTECODE=1`，执行 `.venv/bin/python -m pytest -q -p no:cacheprovider`；版本记录器 `/tmp/xiaowei_run_versioned_check.py LOG COMMAND...` 写入SHA/树/命令/工作区/结束码。独立5项使用同一隔离PG，精确命令为 `.venv/bin/python -m pytest -q tests/sdk_core/test_scheduled_agent.py::test_definition_dependencies_obey_current_model_policy_before_background_run tests/sdk_core/test_scheduled_agent.py::test_runtime_sender_timeout_is_unverified_without_replacing_sender_check tests/sdk_core/test_scheduled_agent.py::test_large_agent_result_sends_capacity_notice_once_then_next_period_runs tests/sdk_core/test_scheduled_tasks.py::test_completed_fixed_reminder_keeps_admitted_control_reason`。提交前64项定向通过（49.28秒）只作局部证据。全套后仅同步交付/版本文档，`/tmp/xiaowei-c-trim-final-docs.log` 的4项文档/维护静态检查及ruff/diff通过，源码、测试和依赖相对冻结版本无差异。
+命令均在本工作树运行。pytest 使用 `SDK_TEST_POSTGRES_URL=postgresql+asyncpg://postgres@127.0.0.1:55432/postgres PYTHONDONTWRITEBYTECODE=1`，相关检查执行 `.venv/bin/python -m pytest -q -p no:cacheprovider tests/sdk_core/test_scheduled_agent.py tests/sdk_core/test_scheduled_tasks.py`；完整默认全套执行 `.venv/bin/python -m pytest -q -p no:cacheprovider`。冻结检查由 `/tmp/xiaowei_run_versioned_check.py LOG COMMAND...` 记录 SHA/树/clean/退出码。静态执行 `.venv/bin/ruff check --no-cache .`、`.venv/bin/ruff format --check src/xiaowei/scheduled_tasks.py tests/sdk_core/test_scheduled_agent.py tests/sdk_core/test_scheduled_tasks.py`、`.venv/bin/mypy --cache-dir=/tmp/xiaowei-c-f1f2-mypy src`、`git diff --check c7b1412..HEAD`。
 
-RED反例：`/tmp/xiaowei-c-trim-large-red.log`（千行超限）、`/tmp/xiaowei-c-trim-red.log`（主体分类/同批取消）、`/tmp/xiaowei-c-trim-review-red.log`（当前策略/真实成员异常两失败）、`/tmp/xiaowei-c-trim-long-tail-red.log`、`/tmp/xiaowei-c-trim-fixed-control-red.log`。中间相关回归的B兼容失败已修复，旧4e7523c全套主动中断exit2；它们不作为最终通过证据。
+全套结束后仅更新本交接；文档命令一致性检查 2 passed（0.14秒），git diff --check 通过，git diff --exit-code 69820b1 -- src tests pyproject.toml uv.lock 确认源码、测试和依赖相对冻结版本无差异，不为文档提交重复运行重型全套。本轮未新增隔离变异：差异仅为原因分类/反馈，RED 已分别击中原错误，原治理与并发保护未改。
 
-计量口径：scheduled_agent_usage在进入Application.run_turn的后台SDK轮次finally记录；tool_calls为治理账本已准入业务工具数，token缺失为null，耗时覆盖该SDK轮次；可信通知从attempt另计，完整run起止仍在运行记录中。保留一次通知的硬预算。迁移015尚未发布，已直接修订，不为旧试装v15加兼容层；重建试验库或恢复v14备份按README处理。
-
-剩余缺口：真实U6/U7的自主选择/调查/答案质量及模型耗时费用、真实飞书实收、30任务实际并发/成本。D未实现。继续默认关闭，真实环境和费用须另获授权。
+剩余缺口：真实 U6/U7 的自主选择/调查/答案质量及模型耗时费用、真实飞书实收、30 任务实际并发/成本。D 未实现。继续默认关闭，真实环境和费用须另获授权。本轮只在隔离工作树本地提交；未推送、建 PR、合并、部署，未调用真实模型/Webhook/飞书/公司源，未读取公司配置或凭据正文；原目录修改未混入。
 
 ### 合并交付前主线集成
 
