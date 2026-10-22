@@ -163,7 +163,9 @@ async def test_oversized_serialized_request_is_rejected_before_that_http_io(
 ) -> None:
     recorder = CapacityRecorder(scenario="multi_query")
     recorder.install(monkeypatch)
-    cap = 500 if when == "first" else 30000
+    # 40KB 容纳当前首请求的提示词/工具声明，三份真实结果使下一请求超限。
+    # 这是测试门槛，不改变产品默认 1MB；下方仍断言超限发生前后的准确 I/O。
+    cap = 500 if when == "first" else 40000
     config = capacity_config(env, model={"max_request_bytes": cap})
     connectors = drivers(config, rows=45)
     async with env.running(
@@ -177,6 +179,9 @@ async def test_oversized_serialized_request_is_rejected_before_that_http_io(
         rejected = recorder.current.requests[-1]
         assert rejected["bytes"] > cap and rejected["sent"] is False
         assert len(recorder.current.requests) == (1 if when == "first" else 2)
+        if when == "after_tool":
+            first = recorder.current.requests[0]
+            assert first["bytes"] <= cap and first["sent"] is True
         assert recorder.report(config, connectors)["io"]["query"] == (0 if when == "first" else 3)
         assert await env.scalar("SELECT count(*) FROM agent_messages") == 0
     save_report(tmp_path, recorder.report(config, connectors))
