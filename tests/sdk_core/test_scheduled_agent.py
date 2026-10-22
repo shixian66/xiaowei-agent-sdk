@@ -1376,9 +1376,18 @@ async def test_missed_start_updates_job_without_run_or_io(env, monkeypatch):
         assert requests == [] and TASK not in env.scripts.calls
 
 
-@pytest.mark.parametrize("revoked", ["notify", "automatic_tools", "recipient_version"])
+@pytest.mark.parametrize(
+    "revoked,reason,notice",
+    [
+        ("notify", "authorization_revoked", "创建者当前权限已撤销"),
+        ("query_tools", "authorization_revoked", "创建者当前权限已撤销"),
+        ("targets", "authorization_revoked", "创建者当前权限已撤销"),
+        ("automatic_tools", "authorization_revoked", "创建者当前权限已撤销"),
+        ("recipient_version", "recipient_changed", "机器人接收目标已变化"),
+    ],
+)
 async def test_current_config_revocation_stops_before_model_and_business_post(
-    env, monkeypatch, revoked
+    env, monkeypatch, revoked, reason, notice
 ):
     cfg = agent_config(env)
     async with running(env, monkeypatch, config=cfg) as (group, _requests, _rt):
@@ -1386,6 +1395,11 @@ async def test_current_config_revocation_stops_before_model_and_business_post(
     data = cfg.model_dump(mode="json")
     if revoked == "notify":
         data["access"]["grants"][A].remove("notifications/send_webhook_message")
+    elif revoked == "query_tools":
+        data["feishu"]["group"]["tools"].remove(QUERY)
+    elif revoked == "targets":
+        data["targets"][0]["starrocks"]["target_id"] = "sr-current"
+        data["webhook_bots"][0]["receive_targets"].remove(SR.target_id)
     elif revoked == "automatic_tools":
         data["scheduled_tasks"]["automatic_tools"] = []
     else:
@@ -1399,7 +1413,10 @@ async def test_current_config_revocation_stops_before_model_and_business_post(
         await rt.scheduled_tasks.tick()
         assert await env.scalar("SELECT state FROM xiaowei_scheduled_job") == "disabled"
         assert requests == [] and TASK not in env.scripts.calls
-        assert "停止" in message_text(group.outbox.sent[-1][1])
+        assert await env.scalar("SELECT reason FROM xiaowei_scheduled_job") == reason
+        body = message_text(group.outbox.sent[-1][1])
+        assert "已停止：" + notice in body
+        assert "定义依赖当前不可用" not in body
 
 
 async def test_pause_during_model_prevents_history_commit_and_send(env, monkeypatch):
@@ -1486,7 +1503,7 @@ async def test_definition_dependencies_obey_current_model_policy_before_backgrou
         cite(),
     )
     async with running(env, monkeypatch, config=runtime.ServeConfig.model_validate(data)) as (
-        _group,
+        group,
         requests,
         rt,
     ):
@@ -1497,6 +1514,11 @@ async def test_definition_dependencies_obey_current_model_policy_before_backgrou
             "active" if dependency_allowed else "disabled"
         )
         if not dependency_allowed:
+            assert (
+                await env.scalar("SELECT reason FROM xiaowei_scheduled_job")
+                == "definition_unavailable"
+            )
+            assert "已停止：定义依赖当前不可用" in message_text(group.outbox.sent[-1][1])
             assert env.scripts.calls.get(task, []) == []
             assert (
                 await env.scalar("SELECT count(*) FROM xiaowei_scheduled_run WHERE state='running'")

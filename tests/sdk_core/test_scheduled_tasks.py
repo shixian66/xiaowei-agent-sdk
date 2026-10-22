@@ -1564,3 +1564,27 @@ async def test_completed_fixed_reminder_keeps_admitted_control_reason(env, monke
         assert "发送已准入，未暂停/取消" in message_text(group.outbox.sent[-1][1])
         assert await env.scalar("SELECT state FROM xiaowei_scheduled_job") == "completed"
         assert len(requests) == 1
+
+
+async def test_cancelled_fixed_reminder_repeat_cancel_does_not_claim_send_admission(
+    env, monkeypatch
+):
+    async with webhook_running(env, monkeypatch, config=task_config(env)) as (group, requests, rt):
+        job = await reminder(env, group, seconds=600)
+        message = "取消这条提醒"
+        for index in range(2):
+            env.scripts.add(
+                attributed(A, message),
+                tool_call("scheduled__control_task", job_id=job, operation="cancel"),
+                cite("任务已取消。"),
+            )
+            await group.ask(message, message_id=f"om_repeat_cancel_{index}")
+            assert await env.scalar("SELECT state FROM xiaowei_scheduled_job") == "cancelled"
+            body = message_text(group.outbox.sent[-1][1])
+            assert "发送已准入" not in body
+            assert "cancelled" in body
+            assert await env.scalar("SELECT count(*) FROM xiaowei_notification_attempt") == 0
+            assert requests == []
+        env.clock.advance(600)
+        await rt.scheduled_tasks.tick()
+        assert requests == []

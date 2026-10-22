@@ -269,6 +269,10 @@ def catalog(
     return tuple(contracts), tuple(policies)
 
 
+class AuthorizationRevokedError(EvidenceUnavailableError):
+    """后台静态授权已撤销；与定义证据不可用分开。"""
+
+
 class CreatorAbsentError(EvidenceUnavailableError):
     """完整当前成员目录证明创建者已退群。"""
 
@@ -345,18 +349,19 @@ class TaskDefinitions:
         automatic = viewer is None and job.get("kind") == "agent_task"
         decision = await self.decision(identity, member=viewer is None and not automatic)
         if decision is None:
-            if viewer is not None or automatic:
+            if automatic:
+                raise AuthorizationRevokedError
+            if viewer is not None:
                 raise EvidenceUnavailableError
             raise EvidenceUnverifiableError
-        if viewer is None and NOTIFY not in decision.authorized_tools:
-            raise EvidenceUnavailableError
         if automatic:
             spec = AgentSpec.model_validate_json(job["agent_spec"])
             if (
-                not spec.tools <= decision.authorized_tools
+                NOTIFY not in decision.authorized_tools
+                or not spec.tools <= decision.authorized_tools
                 or not spec.targets <= decision.target_ids
             ):
-                raise EvidenceUnavailableError
+                raise AuthorizationRevokedError
             if self.member_status is not None:
                 _app, _tenant, chat = json.loads(identity.owner.id)
                 try:
@@ -369,6 +374,8 @@ class TaskDefinitions:
                     raise EvidenceUnverifiableError
             elif await self.decision(identity, member=True) is None:
                 raise EvidenceUnverifiableError
+        elif viewer is None and NOTIFY not in decision.authorized_tools:
+            raise EvidenceUnavailableError
         budget = source.budget.model_copy(
             update={
                 name: min(getattr(source.budget, name), getattr(self.budget, name))
@@ -914,9 +921,11 @@ class ScheduledTasks:
             if self.application is None or spec.tools != self.application.automatic_scope(
                 current, spec.tools & self.config.automatic_tools
             ):
-                await self._stop_agent(job, "authorization_revoked")
-                raise TurnError("scope_rejected")
+                raise AuthorizationRevokedError
             return current
+        except AuthorizationRevokedError:
+            await self._stop_agent(job, "authorization_revoked")
+            raise TurnError("scope_rejected") from None
         except CreatorAbsentError:
             await self._stop_agent(job, "member_absent")
             raise TurnError("scope_rejected") from None
@@ -1692,13 +1701,14 @@ class ScheduledTasks:
                             )
                     job = await self.definitions.get(job["job_id"])
                     if changed.rowcount == 0:
-                        job = {
-                            **job,
-                            "reason": "任务已停止"
-                            if job.get("kind") == "agent_task"
-                            and job["state"] not in {"draft", "active", "paused"}
-                            else "发送已准入，未暂停/取消",
-                        }
+                        if job.get("kind") == "agent_task" and job["state"] not in {
+                            "draft",
+                            "active",
+                            "paused",
+                        }:
+                            job["reason"] = "任务已停止"
+                        elif job.get("receipt_id") is not None:
+                            job["reason"] = "发送已准入，未暂停/取消"
                 if job.get("notification_state") in {"unknown", "sending"}:
                     await self.notifications.record_task_warning(ctx.identity, job["receipt_id"])
                 try:
