@@ -1,4 +1,4 @@
-"""一次性固定提醒；确认复用 Action/SDK，到期不调用模型。"""
+"""同进程固定提醒与独立只读 Agent 任务；复用 Action、SDK 和受治理通知。"""
 
 from __future__ import annotations
 
@@ -6,7 +6,8 @@ import asyncio
 import hashlib
 import json
 import logging
-from collections.abc import Callable, Mapping, Sequence
+import time
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from contextlib import AbstractContextManager, nullcontext
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
@@ -16,7 +17,7 @@ from uuid import uuid4
 from zoneinfo import ZoneInfo
 
 from agents import FunctionTool
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import AwareDatetime, BaseModel, ConfigDict, Field, field_validator
 from sqlalchemy import text as sql
 from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine
 
@@ -65,15 +66,32 @@ from xiaowei.webhook import TOOL as NOTIFY
 from xiaowei.webhook import WebhookBotConfig, WebhookNotifications, _notification_text
 
 if TYPE_CHECKING:
+    from xiaowei.app import Application
     from xiaowei.channel import AccessDecision, AccessPolicy
     from xiaowei.channel_store import ActionRecord
 
 TARGET = "scheduled"
+LIST_TASKS = f"{TARGET}/list_tasks"
+EXPIRY_PROPOSE = f"{TARGET}/propose_task_expiry"
+CHANGE_EXPIRY = f"{TARGET}/change_task_expiry"
+AGENT_PROPOSE = f"{TARGET}/propose_agent_task"
 PROPOSE = f"{TARGET}/propose_reminder"
 ACTIVATE = f"{TARGET}/activate_reminder"
 STATUS = f"{TARGET}/get_task"
 CONTROL = f"{TARGET}/control_task"
-TOOLS = frozenset({PROPOSE, ACTIVATE, STATUS, CONTROL, f"{TARGET}/get_action_status"})
+TOOLS = frozenset(
+    {
+        PROPOSE,
+        AGENT_PROPOSE,
+        EXPIRY_PROPOSE,
+        CHANGE_EXPIRY,
+        LIST_TASKS,
+        ACTIVATE,
+        STATUS,
+        CONTROL,
+        f"{TARGET}/get_action_status",
+    }
+)
 logger = logging.getLogger(__name__)
 
 
@@ -85,6 +103,10 @@ class ScheduledConfig(BaseModel):
     lateness_seconds: int = Field(default=3600, gt=0)
     poll_seconds: float = Field(default=5, gt=0, le=60)
     max_active_jobs: int = Field(default=32, gt=0)
+    automatic_tools: frozenset[str] = frozenset()
+    queue_timeout_seconds: int = Field(default=900, gt=0)
+    start_tolerance_seconds: float = Field(default=60, gt=0)
+    max_long_jobs_per_group: int = Field(default=30, gt=0, le=30)
 
     @field_validator("timezone")
     @classmethod
@@ -101,9 +123,45 @@ class ReminderArgs(BaseModel):
     at: str
 
 
+class AgentTaskArgs(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+    bot_alias: str
+    task: str
+    target_ids: list[str]
+    tool_ids: list[str]
+    at: str | None
+    interval_seconds: int | None = Field(ge=3600)
+    expires_at: str | None
+
+
+class AgentSpec(BaseModel):
+    model_config = ConfigDict(frozen=True, extra="forbid")
+    tools: frozenset[str]
+    targets: frozenset[str]
+    interval_seconds: int | None
+    expires_at: AwareDatetime | None
+    explicit_start: bool
+    model_binding: str
+
+
 class JobArgs(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True)
     job_id: str
+
+
+class TaskExpiryArgs(JobArgs):
+    expires_at: str | None
+
+
+class ChangeExpiryArgs(TaskExpiryArgs):
+    revision: int = Field(gt=0)
+
+
+class TaskListArgs(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+    limit: int = Field(ge=1, le=30)
+    after_id: str | None
+    include_text: bool
 
 
 class ControlArgs(JobArgs):
@@ -138,6 +196,41 @@ def catalog(
             "不能抄写结果洗掉依赖。代码展示最终时间、时区、内容、目标及迟到策略，"
             "随后请求本源 Action 执行，等待有权用户确认。",
         ),
+        (
+            AGENT_PROPOSE,
+            AgentTaskArgs,
+            "propose",
+            "起草到期独立执行的只读Agent任务，不能立即执行。task为用户可确认的规范化说明；"
+            "target_ids为已授权源，tool_ids为管理员允许自动执行的只读工具ID。"
+            "at为有时区绝对ISO时间；interval_seconds为固定周期，单次任务为null。"
+            "周期首跑未指定时at=null，激活即首跑；周期至少1小时。expires_at为带时区的绝对到期时间，"
+            "仅周期任务可填；未指定则null长期。先澄清缺少的业务口径；"
+            "可从可信上下文确定的不重复问。代码冻结全部可见Evidence依赖、显示期限/权限/预算，"
+            "再经现有Action确认。后台重新取证，不沿用历史结论、不执行生产写。",
+        ),
+        (
+            EXPIRY_PROPOSE,
+            TaskExpiryArgs,
+            "propose",
+            "仅修改本群已知周期任务的有效期。expires_at为带时区绝对日期，null表示长期；"
+            "代码读取保存的正文/范围生成新批准版本，不让模型"
+            "重写。须复用本源Action等待有权群成员确认。"
+            "不编辑其他内容、不恢复取消任务、不延长历史数据TTL，原运行/发送记录不清空。",
+        ),
+        (
+            CHANGE_EXPIRY,
+            ChangeExpiryArgs,
+            "write",
+            "仅执行本次已批准的有效期修改，不直接提供给模型。",
+        ),
+        (
+            LIST_TASKS,
+            TaskListArgs,
+            "read",
+            "列出本群当前用户可见的任务及期限、下次运行等元数据。limit为1至30；"
+            "next_cursor非空时可用after_id继续，未列全须说明。include_text仅确需正文时为true，"
+            "正文仍按当前数据权限核对；大正文可逐ID get_task，管理员管理权不授予业务数据读取权。",
+        ),
         (ACTIVATE, JobArgs, "write", "仅本次已批准的任务激活，由 Action 执行，不直接提供给模型。"),
         (
             STATUS,
@@ -150,7 +243,8 @@ def catalog(
             CONTROL,
             ControlArgs,
             "task_control",
-            "直接暂停或取消本群已知任务，不需要生产动作审批。仅当前可核验群成员中的创建者或管理员；不恢复、不创建、不改内容，不撤回已准入发送。",
+            "直接暂停或取消本群已知任务，不需要生产动作审批。仅当前可核验群成"
+            "员中的创建者或管理员；不恢复、不创建、不改内容，不撤回已准入发送。",
         ),
     ):
         policy_id = name.replace("/", ".") + "/1"
@@ -162,13 +256,14 @@ def catalog(
                 args,
                 {a: Projection(fields, limits[a]) for a in AUDIENCES},
                 effect="write"
-                if name == ACTIVATE
+                if name in {ACTIVATE, CHANGE_EXPIRY}
                 else "task_control"
                 if name == CONTROL
                 else "read",
                 group_only=True,
                 fact_note=(
-                    "任务状态与发送回执分别读取。accepted仅表示接口接受；unknown或sending可能已发出，"
+                    "任务状态与发送回执分别读取。accepted仅表示"
+                    "接口接受；unknown或sending可能已发出，"
                     "不能自动重发。unavailable不证明未发送；请求的管理操作未执行。"
                 ),
                 required=(
@@ -181,6 +276,15 @@ def catalog(
                 ),
             )
         )
+        if name == LIST_TASKS:
+            policy = ToolPolicy(
+                policy_id,
+                args,
+                {a: Projection(("tasks", "next_cursor"), limits[a]) for a in AUDIENCES},
+                effect="read",
+                group_only=True,
+                required=("tasks", "next_cursor"),
+            )
         contracts.append(
             ToolContract(
                 tool_id=name,
@@ -194,6 +298,10 @@ def catalog(
     return tuple(contracts), tuple(policies)
 
 
+class CreatorAbsentError(EvidenceUnavailableError):
+    """完整当前成员目录证明创建者已退群。"""
+
+
 @dataclass(frozen=True)
 class TaskDefinitions:
     """本地任务材料的读取边界；在线与维护入口共用，不解析凭据或创建发送客户端。"""
@@ -205,6 +313,7 @@ class TaskDefinitions:
     clock: Callable[[], datetime]
     budget: Budget
     model_tools: frozenset[str]
+    member_status: Callable[[str, str], Awaitable[bool | None]] | None = None
 
     async def decision(self, identity: Identity, *, member: bool = True) -> AccessDecision | None:
         from xiaowei.channel import GroupScope
@@ -230,8 +339,13 @@ class TaskDefinitions:
                     await conn.execute(
                         sql(
                             "SELECT j.*, n.state AS notification_state, n.receipt_id "
-                            "FROM xiaowei_scheduled_job j LEFT JOIN xiaowei_notification_attempt n "
-                            "ON n.job_id=j.job_id WHERE j.job_id=:id"
+                            "FROM xiaowei_scheduled_job j LEFT JOIN LATERAL "
+                            "(SELECT a.state,a.receipt_id FROM xiaowei_notification_attempt a "
+                            "LEFT JOIN xiaowei_scheduled_run r ON r.run_id=a.run_id "
+                            "WHERE "
+                            "COALESCE(a.job_id,r.job_id)=j.job_id "
+                            "ORDER BY a.sequence DESC LIMIT 1) n "
+                            "ON TRUE WHERE j.job_id=:id"
                         ),
                         {"id": job_id},
                     )
@@ -258,7 +372,19 @@ class TaskDefinitions:
                 raise EvidenceUnavailableError
             identity = identity.model_copy(update={"subject_id": viewer.identity.subject_id})
         # 普通读取/回放沿用入口已核实的本轮成员资格；后台准入另做当前目录核验。
-        decision = await self.decision(identity, member=viewer is None)
+        checked = False
+        if viewer is None and job.get("kind") == "agent_task" and self.member_status is not None:
+            _app, _tenant, chat = json.loads(identity.owner.id)
+            try:
+                status = await self.member_status(chat, identity.subject_id)
+            except Exception:
+                status = None
+            if status is False:
+                raise CreatorAbsentError
+            if status is not True:
+                raise EvidenceUnverifiableError
+            checked = True
+        decision = await self.decision(identity, member=viewer is None and not checked)
         if decision is None:
             if viewer is not None:
                 raise EvidenceUnavailableError
@@ -278,7 +404,9 @@ class TaskDefinitions:
             recipient_tools = self.model_tools & (
                 recipient_tools if recipient_tools is not None else self.model_tools
             )
-        if job["text"] is None or self.clock() >= job["content_expires_at"]:
+        if job["text"] is None or (
+            job["content_expires_at"] is not None and self.clock() >= job["content_expires_at"]
+        ):
             raise EvidenceUnavailableError
         bot = self.bots.get(job["bot_alias"])
         if bot is None or (bot.bot_id, bot.target_version) != (
@@ -320,6 +448,14 @@ class TaskDefinitions:
         if record.target_id != TARGET:
             return
         data = json.loads(record.projections["model"])["data"]
+        for item in data.get("tasks", []):
+            if item.get("text") is not None:
+                await self.validate(
+                    await self.get(item["job_id"]),
+                    ctx,
+                    recipient_tools=recipient_tools,
+                    recipient_targets=recipient_targets,
+                )
         job_id = data.get("job_id")
         if job_id is None and "parameters" in data:
             job_id = json.loads(data["parameters"]).get("job_id")
@@ -346,19 +482,26 @@ class ScheduledTasks:
         notifications: WebhookNotifications,
         *,
         is_admin: Callable[[str], bool],
+        max_answer_bytes: int = 1000000,
     ) -> None:
         self.config, self.governance, self.engine = config, governance, engine
         self.lock, self.definitions, self.notifications = lock, definitions, notifications
         self.clock, self.is_admin = definitions.clock, is_admin
         self.budget = definitions.budget
+        self.max_answer_bytes = max_answer_bytes
         self._tick_lock = asyncio.Lock()
-        self.run_slot: Callable[[], AbstractContextManager[bool]] = lambda: nullcontext(False)
+        self.run_slot: Callable[[str | None], AbstractContextManager[bool]]
+        self.run_slot = lambda _session: nullcontext(False)
+        self.application: Application | None = None
+        self.notice_sender: Callable[[str, str, str], Awaitable[str]] | None = None
 
     async def _admit(self, conn: AsyncConnection) -> None:
         if not self.lock.readiness.ok or not await self.lock.admits(conn):
             raise StorageUnavailableError("实例未就绪，定时任务未准入")
 
     def _plan(self, job: Mapping[str, Any]) -> ActionPlan:
+        if job.get("kind") == "agent_task":
+            return self._agent_plan(job)
         zone = ZoneInfo(self.config.timezone)
         at = job["run_at"].astimezone(zone).isoformat()
         expiry = job["content_expires_at"].astimezone(zone).isoformat()
@@ -486,6 +629,1056 @@ class ScheduledTasks:
             )
         return self._plan(job)
 
+    def _agent_plan(self, job: Mapping[str, Any]) -> ActionPlan:
+        spec = AgentSpec.model_validate_json(job["agent_spec"])
+        zone = ZoneInfo(self.config.timezone)
+        start = job["run_at"].astimezone(zone).isoformat() if spec.explicit_start else "确认后尽快"
+        deadline = self._agent_deadline(job)
+        expiry = (
+            deadline.astimezone(zone).isoformat() if deadline else "长期，直到取消或权限/数据失效"
+        )
+        budget = RunContext.model_validate_json(job["source_context"]).budget
+        interval = f"{spec.interval_seconds}秒" if spec.interval_seconds else "仅一次"
+        dependency_note = (
+            "起草含历史Evidence，实际失效时间受最早数据期限限制，不能续期旧数据；"
+            "如需无旧依赖版本，用户可显式 /新建 后完整重述，会轮换全群共享上下文，不能自动新建。"
+            if json.loads(job["definition_evidence_ids"])
+            else "每次新Session独立取证，不沿用原聊天历史。"
+        )
+        tolerance = max(self.config.start_tolerance_seconds, self.config.poll_seconds)
+        long_limit = self.config.max_long_jobs_per_group
+        return ActionPlan(
+            parameters={"job_id": job["job_id"]},
+            revision=str(job.get("revision", 1)),
+            change=(
+                f"独立只读Agent任务 {job['job_id']}\n首次：{start}（{self.config.timezone}）\n"
+                f"周期：{interval}；机器人：{job['bot_alias']}\n任务：{job['text']}\n"
+                f"获准源：{sorted(spec.targets)}\n自动只读工具上界：{sorted(spec.tools)}\n"
+                f"每次预算：最多{budget.max_turns}轮、{budget.max_tool_calls}次工具（含一次通知）、"
+                f"{budget.timeout_seconds:g}秒、{budget.max_scope_checks}次数据范围核验。\n"
+                f"错过不补跑；准点容差{tolerance:g}秒；"
+                f"并发满同一时点可排队{self.config.queue_timeout_seconds}秒，超时skipped。"
+                "周期按激活/指定锚点，不随结束时间漂移；"
+                f"每群最多{long_limit}个长期任务。\n"
+                f"本任务将于 {expiry} 时失效。" + dependency_note
+            ),
+            impact="创建者＋原群当前权限执行独立只读Agent任务；可信路径通知，不授予生产写。",
+            rollback="创建者或当前群成员管理员可暂停/取消；已准入请求不能撤回。",
+            content_expires_at=job["content_expires_at"]
+            if json.loads(job["definition_evidence_ids"])
+            else None,
+        )
+
+    async def propose_agent(
+        self, ctx: RunContext, request: ToolRequest, visible: Sequence[str]
+    ) -> ActionPlan:
+        if not self.config.enabled or not self.config.automatic_tools or self.application is None:
+            raise ProposalRejectedError("自动只读任务未配置或未启用", code="not_allowed")
+        args = AgentTaskArgs.model_validate(request.arguments)
+        now = self.clock()
+        try:
+            at = datetime.fromisoformat(args.at) if args.at is not None else now
+        except ValueError:
+            raise ProposalRejectedError("无效日期", hint="agent_task_time") from None
+        if (
+            at.tzinfo is None
+            or (args.interval_seconds is None and at <= now)
+            or (args.at is None and args.interval_seconds is None)
+        ):
+            raise ProposalRejectedError("无效日期", hint="agent_task_time")
+        bot = self.notifications.bot_config(args.bot_alias)
+        if bot is None:
+            raise ProposalRejectedError("机器人尚未配置或授权", hint="reminder_target")
+        decision = await self.definitions.decision(ctx.identity)
+        tools, targets = frozenset(args.tool_ids), frozenset(args.target_ids)
+        selected = ctx.model_copy(update={"target_scope": targets})
+        if (
+            decision is None
+            or NOTIFY not in decision.authorized_tools
+            or not tools
+            or not targets
+            or not targets <= decision.target_ids
+            or not tools <= self.config.automatic_tools
+            or not tools <= decision.authorized_tools
+            or tools != self.application.automatic_scope(selected, tools)
+        ):
+            raise ProposalRejectedError("任务范围没有获准自动只读权限，未创建", code="not_allowed")
+        if not tools <= bot.receive_tools or not targets <= bot.receive_targets:
+            raise ProposalRejectedError(
+                "机器人未获准接收任务所选源/工具", hint="reminder_recipient"
+            )
+        if (
+            not args.task.strip()
+            or len(args.task.encode()) > MAX_ANSWER_TEXT_BYTES
+            or not self.application.admits_input(args.task)
+            or ctx.budget.max_tool_calls < 2
+        ):
+            raise ProposalRejectedError("任务说明不合规或工具预算不足", code="not_allowed")
+        try:
+            delivery = await self.governance.evidence.validate_answer(
+                TurnAnswer(
+                    answer=AgentAnswer(
+                        blocks=(TextBlock(type="text", text=args.task),),
+                        report_format=None,
+                        awaiting_user=False,
+                    ),
+                    context_evidence=tuple(visible),
+                    material_only=True,
+                ),
+                ctx,
+                recipient_tools=bot.receive_tools | {NOTIFY},
+                recipient_targets=bot.receive_targets | {"notifications"},
+                include_remaining_results=False,
+            )
+        except RecipientRejectedError:
+            raise ProposalRejectedError(
+                "接收范围不允许", code="not_allowed", hint="reminder_recipient"
+            ) from None
+        except EvidenceUnverifiableError:
+            raise ProposalRejectedError("证据未核实", code="authorization_unavailable") from None
+        except (EvidenceUnavailableError, AnswerRejectedError):
+            raise ProposalRejectedError("证据不可用", code="not_allowed") from None
+        try:
+            until = datetime.fromisoformat(args.expires_at) if args.expires_at is not None else None
+        except ValueError:
+            raise ProposalRejectedError(
+                "有效期须为绝对日期和时区", hint="agent_task_time"
+            ) from None
+        if until is not None and (
+            args.interval_seconds is None or until.tzinfo is None or until <= max(now, at)
+        ):
+            raise ProposalRejectedError(
+                "周期任务有效期无效；一次任务无需有效期", hint="agent_task_time"
+            )
+        expiry = delivery.content_expires_at
+        if expiry is not None and max(now, at) >= expiry:
+            raise ProposalRejectedError(
+                "首次执行晚于定义期限", code="not_allowed", hint="reminder_expiry"
+            )
+        spec = AgentSpec(
+            tools=tools,
+            targets=targets,
+            interval_seconds=args.interval_seconds,
+            expires_at=until,
+            explicit_start=args.at is not None,
+            model_binding=self.application.automatic_binding,
+        )
+        job = dict(
+            job_id=uuid4().hex,
+            owner_id=ctx.identity.owner.id,
+            creator_id=ctx.identity.subject_id,
+            bot_id=bot.bot_id,
+            bot_alias=bot.alias,
+            target_version=bot.target_version,
+            run_at=at.astimezone(UTC),
+            content_expires_at=expiry,
+            text=args.task,
+            definition_evidence_ids=json.dumps(tuple(visible)),
+            source_context=ctx.model_copy(
+                update={
+                    "budget": ctx.budget.model_copy(
+                        update={
+                            "max_turns": min(ctx.budget.max_turns, 30),
+                            "max_tool_calls": min(ctx.budget.max_tool_calls, 30),
+                            "timeout_seconds": min(ctx.budget.timeout_seconds, 600),
+                        }
+                    )
+                }
+            ).model_dump_json(),
+            lateness_seconds=int(
+                max(self.config.start_tolerance_seconds, self.config.poll_seconds)
+            ),
+            agent_spec=spec.model_dump_json(),
+            kind="agent_task",
+        )
+        async with self.engine.begin() as conn:
+            await self._admit(conn)
+            await conn.execute(
+                sql(
+                    "INSERT INTO xiaowei_scheduled_job "
+                    "(job_id,owner_id,creator_id,bot_id,bot_alias,"
+                    "target_version,run_at,next_run,content_"
+                    "expires_at,text,definition_evidence_ids,"
+                    "source_context,lateness_seconds,kind,agent_spec,state) VALUES "
+                    "(:job_id,:owner_id,:creator_id,:bot_id,:b"
+                    "ot_alias,:target_version,:run_at,:run_at,"
+                    ":content_expires_at,:text,:definition_evid"
+                    "ence_ids,:source_context,:lateness_seconds,"
+                    ":kind,:agent_spec,'draft')"
+                ),
+                job,
+            )
+        return self._plan(job)
+
+    async def _finish_agent(
+        self, job: Mapping[str, Any], run_id: str, state: str, reason: str
+    ) -> None:
+        spec = AgentSpec.model_validate_json(job["agent_spec"])
+        try:
+            async with self.engine.begin() as conn:
+                await self._admit(conn)
+                await conn.execute(
+                    sql(
+                        "UPDATE xiaowei_scheduled_run SET "
+                        "state=:state,reason=:reason,finished_at=:now "
+                        "WHERE run_id=:id"
+                    ),
+                    dict(id=run_id, state=state, reason=reason, now=self.clock()),
+                )
+                await conn.execute(
+                    sql(
+                        "UPDATE xiaowei_scheduled_job SET reason=:reason,checked_at=:now,"
+                        "state=CASE WHEN :once THEN 'completed' ELSE state END,"
+                        "last_success_at=CASE WHEN :success THEN :now ELSE last_success_at END,"
+                        "unverified_count=CASE WHEN :unverified THEN unverified_count+1 ELSE 0 END,"
+                        "next_run=CASE WHEN :unstarted THEN :next ELSE next_run END "
+                        "WHERE job_id=:id AND state='active'"
+                    ),
+                    dict(
+                        id=job["job_id"],
+                        reason=reason,
+                        now=self.clock(),
+                        once=spec.interval_seconds is None,
+                        success=state == "completed",
+                        unverified=reason == "authorization_unverified",
+                        unstarted=state == "skipped",
+                        next=job["next_run"] + timedelta(seconds=spec.interval_seconds)
+                        if spec.interval_seconds
+                        else None,
+                    ),
+                )
+        except BaseException:
+            self.lock.readiness.lock("scheduled_run_settle_failed")
+            raise
+
+    async def _claim_agent_send(
+        self, job: Mapping[str, Any], run_id: str, content: str, *, long_notice: bool = False
+    ) -> tuple[str, str, str, bool]:
+        async with self.engine.begin() as conn:
+            await self._admit(conn)
+            current = (
+                (
+                    await conn.execute(
+                        sql("SELECT * FROM xiaowei_scheduled_job WHERE job_id=:id FOR UPDATE"),
+                        {"id": job["job_id"]},
+                    )
+                )
+                .mappings()
+                .one()
+            )
+            active = current["state"]
+            deadline = self._agent_deadline(dict(current))
+            if (
+                not self.config.enabled
+                or active != "active"
+                or (deadline is not None and self.clock() >= deadline)
+            ):
+                return "none", "not_sent", "task_not_active", False
+            old = (
+                await conn.execute(
+                    sql(
+                        "SELECT receipt_id,state,reason FROM "
+                        "xiaowei_notification_attempt WHERE run_id=:id"
+                    ),
+                    {"id": run_id},
+                )
+            ).first()
+            if old is not None:
+                return old.receipt_id, old.state, old.reason, False
+            receipt = uuid4().hex
+            await conn.execute(
+                sql(
+                    "INSERT INTO xiaowei_notification_attempt (receipt_id,run_id,bot_id,bot_alias,"
+                    "target_version,content_digest,state,reason) VALUES "
+                    "(:receipt,:run,:bot,:alias,:version,:digest,'sending','pending')"
+                ),
+                dict(
+                    receipt=receipt,
+                    run=run_id,
+                    bot=job["bot_id"],
+                    alias=job["bot_alias"],
+                    version=job["target_version"],
+                    digest=hashlib.sha256(content.encode()).hexdigest(),
+                ),
+            )
+            if long_notice:
+                await conn.execute(
+                    sql(
+                        "UPDATE xiaowei_scheduled_job SET last_long_notice_at=:now WHERE job_id=:id"
+                    ),
+                    {"id": job["job_id"], "now": self.clock()},
+                )
+            return receipt, "sending", "pending", True
+
+    async def _settle_agent_send(self, run_id: str, receipt: str, state: str, reason: str) -> None:
+        try:
+            async with self.engine.begin() as conn:
+                result = await conn.execute(
+                    sql(
+                        "UPDATE xiaowei_notification_attempt SET state=:state,reason=:reason "
+                        "WHERE receipt_id=:receipt AND state='sending'"
+                    ),
+                    dict(state=state, reason=reason, receipt=receipt),
+                )
+                if result.rowcount != 1:
+                    raise StorageUnavailableError("定时Agent通知无法落定")
+        except BaseException:
+            self.lock.readiness.lock("scheduled_settle_failed")
+            raise
+
+    async def validate_run(self, ctx: RunContext) -> None:
+        if ctx.definition_job_id is None:
+            raise EvidenceUnavailableError
+        job = await self.definitions.get(ctx.definition_job_id)
+        spec = AgentSpec.model_validate_json(job["agent_spec"])
+        deadline = self._agent_deadline(job)
+        current = await self.definitions.validate(job)
+        decision = await self.definitions.decision(current.identity, member=False)
+        if (
+            job["state"] != "active"
+            or (deadline is not None and self.clock() >= deadline)
+            or decision is None
+            or not spec.tools <= decision.authorized_tools
+            or not spec.tools <= self.config.automatic_tools
+            or not spec.targets <= current.target_scope
+            or not ctx.tool_scope <= spec.tools
+            or self.application is None
+            or spec.model_binding != self.application.automatic_binding
+        ):
+            raise EvidenceUnavailableError
+
+    async def _run_agent(self, job: Mapping[str, Any]) -> None:
+        from xiaowei.app import PausedTurn, TurnError
+
+        if self.application is None:
+            raise RuntimeError("后台Agent未装配")
+        spec = AgentSpec.model_validate_json(job["agent_spec"])
+        deadline = self._agent_deadline(job)
+        if deadline is not None and self.clock() >= deadline:
+            await self._stop_agent(
+                job,
+                "definition_expired"
+                if job["content_expires_at"] is not None
+                and self.clock() >= job["content_expires_at"]
+                else "validity_expired",
+            )
+            return
+        if job["state"] != "active":
+            return
+        if job["next_run"] is None or job["next_run"] > self.clock():
+            return
+        original = RunContext.model_validate_json(job["source_context"])
+        configured = await self.definitions.decision(original.identity, member=False)
+        if (
+            configured is None
+            or NOTIFY not in configured.authorized_tools
+            or not spec.tools <= configured.authorized_tools
+            or not spec.targets <= configured.target_ids
+            or not spec.tools <= self.config.automatic_tools
+        ):
+            await self._stop_agent(job, "authorization_revoked")
+            return
+        bot = self.notifications.bot_config(job["bot_alias"])
+        if bot is None or (bot.bot_id, bot.target_version) != (
+            job["bot_id"],
+            job["target_version"],
+        ):
+            await self._stop_agent(job, "recipient_changed")
+            return
+        if spec.model_binding != self.application.automatic_binding:
+            await self._stop_agent(job, "model_binding_changed")
+            return
+        due = await self._schedule_agent(job)
+        if due is None:
+            return
+        job, run = due
+        with self.run_slot(run["session_id"]) as reserved:
+            if not reserved:
+                return
+            try:
+                ctx = await self.definitions.validate(job)
+            except CreatorAbsentError:
+                await self._stop_agent(job, "member_absent")
+                return
+            except EvidenceUnverifiableError:
+                await self._finish_agent(job, run["run_id"], "skipped", "authorization_unverified")
+                return
+            except (EvidenceUnavailableError, AnswerRejectedError):
+                await self._stop_agent(job, "definition_unavailable")
+                return
+            if ctx.budget.max_tool_calls < 2:
+                await self._stop_agent(job, "budget_unavailable")
+                return
+            identity = ctx.identity.model_copy(
+                update={"session_id": run["session_id"], "turn_id": run["turn_id"]}
+            )
+            budget = ctx.budget.model_copy(
+                update={
+                    "max_tool_calls": min(ctx.budget.max_tool_calls, 30) - 1,
+                    "max_turns": min(ctx.budget.max_turns, 30),
+                    "timeout_seconds": min(ctx.budget.timeout_seconds, 600),
+                }
+            )
+            if deadline is not None:
+                budget = budget.model_copy(
+                    update={
+                        "timeout_seconds": min(
+                            budget.timeout_seconds,
+                            max(0.001, (deadline - self.clock()).total_seconds()),
+                        )
+                    }
+                )
+            ctx = ctx.model_copy(
+                update={
+                    "identity": identity,
+                    "automatic": True,
+                    "definition_job_id": job["job_id"],
+                    "content_expires_at": deadline,
+                    "target_scope": spec.targets,
+                    "tool_scope": spec.tools,
+                    "budget": budget,
+                    "evidence_ids": (),
+                    "approved_action": None,
+                }
+            )
+            if not await self._start_agent_run(job, run):
+                return
+            started = time.monotonic()
+            try:
+                with scope_checks():
+                    async with asyncio.timeout(ctx.budget.timeout_seconds):
+                        await self.application.prepare_tools(
+                            "query",
+                            ctx.tool_scope,
+                            ctx.target_scope,
+                            timeout_seconds=ctx.budget.timeout_seconds,
+                        )
+                        answer = await self.application.run_turn(ctx, job["text"])
+                        if isinstance(answer, PausedTurn):
+                            raise TurnError("scope_rejected")
+                        await self.definitions.validate(job)
+                        delivery = await self.governance.evidence.validate_answer(
+                            answer,
+                            ctx,
+                            recipient_tools=bot.receive_tools | {NOTIFY},
+                            recipient_targets=bot.receive_targets | {"notifications"},
+                        )
+                        encoded = answer.model_dump_json()
+                        if len(encoded.encode()) > self.max_answer_bytes:
+                            raise TurnError("storage_failed")
+                        limits = [
+                            d
+                            for d in (
+                                deadline,
+                                delivery.content_expires_at,
+                                answer.session_state.expires_at if answer.session_state else None,
+                            )
+                            if d is not None
+                        ]
+                        expiry = min(limits) if limits else self.clock()
+                        async with self.engine.begin() as conn:
+                            await self._admit(conn)
+                            await conn.execute(
+                                sql(
+                                    "UPDATE xiaowei_scheduled_run SET "
+                                    "answer=:answer,answer_expires_at=:expiry,"
+                                    "usage=:usage,duration_seconds=:duration WHERE run_id=:id"
+                                ),
+                                dict(
+                                    id=run["run_id"],
+                                    answer=encoded,
+                                    expiry=expiry,
+                                    usage=answer.usage.model_dump_json() if answer.usage else None,
+                                    duration=time.monotonic() - started,
+                                ),
+                            )
+                        incomplete = (
+                            isinstance(answer.answer, AgentAnswer) and answer.answer.awaiting_user
+                        ) or answer.limit_reached
+                        content = _notification_text(delivery, "", include_remaining=True)
+                        if incomplete:
+                            content = (
+                                "本次任务未完成；以下为预算内已获得的结果或待澄清问题。\n" + content
+                            )
+                        if (
+                            spec.expires_at is not None
+                            and spec.interval_seconds
+                            and run["scheduled_at"] + timedelta(seconds=spec.interval_seconds)
+                            >= spec.expires_at
+                        ):
+                            until = spec.expires_at.astimezone(
+                                ZoneInfo(self.config.timezone)
+                            ).isoformat()
+                            content += f"\n本次为到期前最后一次计划运行；任务将于{until}到期停止。"
+                        since = job.get("last_long_notice_at") or job["approved_at"]
+                        long_notice = bool(
+                            spec.interval_seconds
+                            and spec.expires_at is None
+                            and self.clock() - since >= timedelta(days=30)
+                        )
+                        if long_notice:
+                            days = (self.clock() - job["approved_at"]).days
+                            content += (
+                                f"\n本任务已长期运行 {days} 天，"
+                                f"不再需要请 @小维 取消任务〈{job['job_id']}〉"
+                            )
+                        sending = ctx.model_copy(
+                            update={
+                                "automatic": False,
+                                "tool_scope": frozenset({NOTIFY}),
+                                "target_scope": frozenset({"notifications"}),
+                                "budget": ctx.budget.model_copy(update={"max_tool_calls": 1}),
+                            }
+                        )
+                        await self.notifications.send_fixed(
+                            sending,
+                            job["bot_alias"],
+                            content,
+                            partial(
+                                self._claim_agent_send, job, run["run_id"], long_notice=long_notice
+                            ),
+                            partial(self._settle_agent_send, run["run_id"]),
+                        )
+                        incomplete = (
+                            isinstance(answer.answer, AgentAnswer) and answer.answer.awaiting_user
+                        ) or answer.limit_reached
+                        await self._finish_agent(
+                            job,
+                            run["run_id"],
+                            "failed" if incomplete else "completed",
+                            "incomplete" if incomplete else "execution_completed",
+                        )
+            except BaseException as exc:
+                logger.error("定时Agent未完成：job=%s error=%s", job["job_id"], type(exc).__name__)
+                if not self.lock.readiness.ok:
+                    raise
+                async with self.engine.begin() as conn:
+                    await self._admit(conn)
+                    await conn.execute(
+                        sql(
+                            "UPDATE xiaowei_notification_attempt SET "
+                            "state='unknown',reason='response_unknown' "
+                            "WHERE run_id=:id AND state='sending'"
+                        ),
+                        {"id": run["run_id"]},
+                    )
+                if isinstance(exc, TurnError) and exc.usage is not None:
+                    async with self.engine.begin() as conn:
+                        await conn.execute(
+                            sql(
+                                "UPDATE xiaowei_scheduled_run SET "
+                                "usage=:usage,duration_seconds=:duration WHERE run_id=:id"
+                            ),
+                            dict(
+                                id=run["run_id"],
+                                usage=exc.usage.model_dump_json(),
+                                duration=time.monotonic() - started,
+                            ),
+                        )
+                await self._finish_agent(
+                    job,
+                    run["run_id"],
+                    "unknown" if isinstance(exc, asyncio.CancelledError) else "failed",
+                    exc.reason if isinstance(exc, TurnError) else "execution_failed",
+                )
+                if isinstance(exc, asyncio.CancelledError):
+                    raise
+            finally:
+                self.governance.end_turn(identity)
+            if deadline is not None and self.clock() >= deadline:
+                await self._stop_agent(
+                    job,
+                    "definition_expired"
+                    if job["content_expires_at"] is not None
+                    and self.clock() >= job["content_expires_at"]
+                    else "validity_expired",
+                )
+
+    def _agent_deadline(self, job: Mapping[str, Any]) -> datetime | None:
+        spec = AgentSpec.model_validate_json(job["agent_spec"])
+        limits = [
+            value for value in (job["content_expires_at"], spec.expires_at) if value is not None
+        ]
+        return min(limits) if limits else None
+
+    async def _new_agent_run(
+        self,
+        conn: AsyncConnection,
+        job: Mapping[str, Any],
+        at: datetime,
+        state: str,
+        reason: str,
+        *,
+        skipped_count: int = 0,
+    ) -> dict[str, Any]:
+        run = dict(
+            run_id=uuid4().hex,
+            job_id=job["job_id"],
+            scheduled_at=at,
+            session_id=uuid4().hex,
+            turn_id=uuid4().hex,
+            state=state,
+            reason=reason,
+            queued_at=self.clock(),
+            skipped_count=skipped_count,
+            finished_at=self.clock() if state == "skipped" else None,
+        )
+        await conn.execute(
+            sql(
+                "INSERT INTO xiaowei_scheduled_run (run_id,job_id,scheduled_at,session_id,turn_id,"
+                "state,reason,queued_at,skipped_count,finished_at) VALUES "
+                "(:run_id,:job_id,:scheduled_at,:session_id,:turn_id,:state,:reason,:queued_at,"
+                ":skipped_count,:finished_at)"
+            ),
+            run,
+        )
+        return run
+
+    async def _schedule_agent(
+        self, job: Mapping[str, Any]
+    ) -> tuple[dict[str, Any], dict[str, Any]] | None:
+        async with self.engine.begin() as conn:
+            await self._admit(conn)
+            row = (
+                (
+                    await conn.execute(
+                        sql("SELECT * FROM xiaowei_scheduled_job WHERE job_id=:id FOR UPDATE"),
+                        {"id": job["job_id"]},
+                    )
+                )
+                .mappings()
+                .one()
+            )
+            job = dict(row)
+            if not self.config.enabled or job["state"] != "active":
+                return None
+            spec = AgentSpec.model_validate_json(job["agent_spec"])
+            runs = (
+                (
+                    await conn.execute(
+                        sql(
+                            "SELECT * FROM xiaowei_scheduled_run WHERE job_id=:id "
+                            "AND state IN ('queued','running') ORDER BY queued_at LIMIT 1"
+                        ),
+                        {"id": job["job_id"]},
+                    )
+                )
+                .mappings()
+                .first()
+            )
+            if runs is not None:
+                if runs["state"] == "running":
+                    return None
+                if self.clock() < runs["queued_at"] + timedelta(
+                    seconds=self.config.queue_timeout_seconds
+                ):
+                    return job, dict(runs)
+                await conn.execute(
+                    sql(
+                        "UPDATE xiaowei_scheduled_run SET state='skipped',"
+                        "reason='queue_timeout',finished_at=:now WHERE run_id=:id"
+                    ),
+                    {"id": runs["run_id"], "now": self.clock()},
+                )
+                following = (
+                    runs["scheduled_at"] + timedelta(seconds=spec.interval_seconds)
+                    if spec.interval_seconds
+                    else None
+                )
+                await conn.execute(
+                    sql(
+                        "UPDATE xiaowei_scheduled_job SET next_run=:next,reason='queue_timeout',"
+                        "state=CASE WHEN :once THEN 'completed' ELSE state END WHERE job_id=:id"
+                    ),
+                    {"id": job["job_id"], "next": following, "once": spec.interval_seconds is None},
+                )
+                return None
+            at = job["next_run"]
+            if at is None or at > self.clock():
+                return None
+            if spec.interval_seconds is not None:
+                skipped = int((self.clock() - at).total_seconds() // spec.interval_seconds)
+                if skipped:
+                    await self._new_agent_run(
+                        conn, job, at, "skipped", "missed_occurrences", skipped_count=skipped
+                    )
+                    at += timedelta(seconds=skipped * spec.interval_seconds)
+                    await conn.execute(
+                        sql("UPDATE xiaowei_scheduled_job SET next_run=:at WHERE job_id=:id"),
+                        {"id": job["job_id"], "at": at},
+                    )
+                    job = {**job, "next_run": at}
+            if self.clock() > at + timedelta(
+                seconds=max(self.config.start_tolerance_seconds, self.config.poll_seconds)
+            ):
+                await self._new_agent_run(
+                    conn, job, at, "skipped", "start_time_missed", skipped_count=1
+                )
+                await conn.execute(
+                    sql(
+                        "UPDATE xiaowei_scheduled_job SET "
+                        "next_run=:next,reason='start_time_missed',"
+                        "state=CASE WHEN :once THEN 'completed' ELSE state END WHERE job_id=:id"
+                    ),
+                    {
+                        "id": job["job_id"],
+                        "next": at + timedelta(seconds=spec.interval_seconds)
+                        if spec.interval_seconds
+                        else None,
+                        "once": spec.interval_seconds is None,
+                    },
+                )
+                return None
+            run = await self._new_agent_run(conn, job, at, "queued", "waiting_for_slot")
+            return job, run
+
+    async def _start_agent_run(self, job: Mapping[str, Any], run: Mapping[str, Any]) -> bool:
+        async with self.engine.begin() as conn:
+            await self._admit(conn)
+            active = await conn.scalar(
+                sql("SELECT state FROM xiaowei_scheduled_job WHERE job_id=:id FOR UPDATE"),
+                {"id": job["job_id"]},
+            )
+            deadline = self._agent_deadline(job)
+            if (
+                not self.config.enabled
+                or active != "active"
+                or (deadline and self.clock() >= deadline)
+            ):
+                return False
+            changed = await conn.execute(
+                sql(
+                    "UPDATE xiaowei_scheduled_run SET state='running',started_at=:now,"
+                    "reason='pending' WHERE run_id=:id AND state='queued' "
+                    "AND queued_at+:seconds*interval '1 second'>:now"
+                ),
+                {
+                    "id": run["run_id"],
+                    "now": self.clock(),
+                    "seconds": self.config.queue_timeout_seconds,
+                },
+            )
+            if changed.rowcount != 1:
+                return False
+            spec = AgentSpec.model_validate_json(job["agent_spec"])
+            await conn.execute(
+                sql(
+                    "UPDATE xiaowei_scheduled_job SET next_run=:next,run_count=run_count+1,"
+                    "unverified_count=0,checked_at=:now WHERE job_id=:id"
+                ),
+                {
+                    "id": job["job_id"],
+                    "now": self.clock(),
+                    "next": run["scheduled_at"] + timedelta(seconds=spec.interval_seconds)
+                    if spec.interval_seconds
+                    else None,
+                },
+            )
+            return True
+
+    async def _stop_agent(self, job: Mapping[str, Any], reason: str) -> None:
+        async with self.engine.begin() as conn:
+            await self._admit(conn)
+            changed = await conn.execute(
+                sql(
+                    "UPDATE xiaowei_scheduled_job SET state=:state,reason=:reason,"
+                    "notice_id=:notice,notice_reason=:reason"
+                    ",notice_state='pending',checked_at=:now "
+                    "WHERE job_id=:id AND state IN ('active','paused')"
+                ),
+                dict(
+                    id=job["job_id"],
+                    state="completed" if reason == "validity_expired" else "disabled",
+                    reason=reason,
+                    notice=uuid4().hex,
+                    now=self.clock(),
+                ),
+            )
+            if changed.rowcount:
+                await conn.execute(
+                    sql(
+                        "UPDATE xiaowei_scheduled_run SET state='skipped',reason=:reason,"
+                        "finished_at=:now WHERE job_id=:id AND state='queued'"
+                    ),
+                    dict(id=job["job_id"], reason=reason, now=self.clock()),
+                )
+
+    async def list_tasks(self, ctx: RunContext, request: ToolRequest) -> ToolObservation:
+        args = TaskListArgs.model_validate(request.arguments)
+        decision = await self.definitions.decision(ctx.identity, member=False)
+        if decision is None:
+            raise ToolRejectedError("当前群身份不可核验", code="not_allowed")
+        async with self.engine.connect() as conn:
+            rows = (
+                (
+                    await conn.execute(
+                        sql(
+                            "SELECT job_id FROM xiaowei_scheduled_job WHERE owner_id=:owner "
+                            "AND (creator_id=:subject OR :admin) AND job_id>:after "
+                            "ORDER BY job_id LIMIT :limit"
+                        ),
+                        dict(
+                            owner=ctx.identity.owner.id,
+                            subject=ctx.identity.subject_id,
+                            admin=self.is_admin(ctx.identity.subject_id),
+                            after=args.after_id or "",
+                            limit=args.limit + 1,
+                        ),
+                    )
+                )
+                .scalars()
+                .all()
+            )
+        items = []
+        deadlines = []
+        for job_id in rows[: args.limit]:
+            job = await self.definitions.get(job_id)
+            spec = (
+                AgentSpec.model_validate_json(job["agent_spec"])
+                if job["kind"] == "agent_task"
+                else None
+            )
+            text = None
+            if args.include_text:
+                try:
+                    await self.definitions.validate(job, ctx)
+                    text = job["text"]
+                    if (
+                        json.loads(job["definition_evidence_ids"])
+                        and job["content_expires_at"] is not None
+                    ):
+                        deadlines.append(job["content_expires_at"])
+                except (EvidenceUnavailableError, EvidenceUnverifiableError, AnswerRejectedError):
+                    pass  # 元数据管理可见不代表正文可读。
+            deadline = self._agent_deadline(job) if spec else job["content_expires_at"]
+            items.append(
+                dict(
+                    job_id=job_id,
+                    kind=job["kind"],
+                    interval_seconds=spec.interval_seconds if spec else None,
+                    next_run=job["next_run"].isoformat() if job["next_run"] else None,
+                    state=job["state"],
+                    expires_at=deadline.isoformat() if deadline else None,
+                    running_days=max(0, (self.clock() - job["approved_at"]).days)
+                    if job["approved_at"]
+                    else 0,
+                    text=text,
+                )
+            )
+        return ToolObservation(
+            payload=dict(
+                tasks=items, next_cursor=rows[args.limit - 1] if len(rows) > args.limit else None
+            ),
+            captured_at=self.clock(),
+            truncated=len(rows) > args.limit,
+            content_expires_at=min(deadlines) if deadlines else None,
+        )
+
+    async def _expiry_plan(
+        self, job: Mapping[str, Any], expires_at: str | None, revision: int
+    ) -> ActionPlan:
+        if job["kind"] != "agent_task" or job["state"] not in {"active", "paused", "completed"}:
+            raise ProposalRejectedError("仅可修改未取消的周期任务有效期", code="not_allowed")
+        spec = AgentSpec.model_validate_json(job["agent_spec"])
+        if spec.interval_seconds is None or job["revision"] != revision:
+            raise ProposalRejectedError("任务类型或批准版本已变化，未修改", code="not_allowed")
+        if job["state"] == "completed" and job["reason"] != "validity_expired":
+            raise ProposalRejectedError("该任务不能通过续期恢复", code="not_allowed")
+        await self.definitions.validate(job)
+        original = RunContext.model_validate_json(job["source_context"])
+        current = await self.definitions.decision(original.identity, member=False)
+        if (
+            current is None
+            or NOTIFY not in current.authorized_tools
+            or not spec.tools <= current.authorized_tools
+            or not spec.targets <= current.target_ids
+            or not spec.tools <= self.config.automatic_tools
+            or self.application is None
+            or self.application.automatic_binding != spec.model_binding
+        ):
+            raise ProposalRejectedError("创建者当前自动只读或通知权限已失效", code="not_allowed")
+        try:
+            until = datetime.fromisoformat(expires_at) if expires_at is not None else None
+        except ValueError:
+            raise ProposalRejectedError(
+                "有效期须含绝对日期与时区", hint="agent_task_time"
+            ) from None
+        if until is not None and (until.tzinfo is None or until <= self.clock()):
+            raise ProposalRejectedError("有效期已过或缺少时区", hint="agent_task_time")
+        if job["content_expires_at"] is not None and (
+            until is None or until > job["content_expires_at"]
+        ):
+            raise ProposalRejectedError(
+                "旧数据依赖不能续期；请在原数据期限内修改，或显式新建并完整重述", code="not_allowed"
+            )
+        candidate = {
+            **job,
+            "agent_spec": spec.model_copy(update={"expires_at": until}).model_dump_json(),
+        }
+        plan = self._agent_plan(candidate)
+        return plan.model_copy(
+            update=dict(
+                parameters=dict(
+                    job_id=job["job_id"],
+                    revision=revision,
+                    expires_at=until.isoformat() if until else None,
+                ),
+                change="仅修改有效期；原正文、源、工具、机器人和运行/发送记录保持。\n"
+                + plan.change,
+                impact="批准后保存新的任务授权版本，不重跑已执行时点，不恢复已取消任务。",
+            )
+        )
+
+    async def propose_expiry(
+        self, ctx: RunContext, request: ToolRequest, visible: Sequence[str]
+    ) -> ActionPlan:
+        args = TaskExpiryArgs.model_validate(request.arguments)
+        job = await self.definitions.get(args.job_id)
+        if job["owner_id"] != ctx.identity.owner.id or (
+            job["creator_id"] != ctx.identity.subject_id
+            and not self.is_admin(ctx.identity.subject_id)
+        ):
+            raise ProposalRejectedError("当前无权修改此任务", code="not_allowed")
+        await self.definitions.validate(job, ctx)
+        return await self._expiry_plan(job, args.expires_at, job["revision"])
+
+    async def prepare_expiry(self, request: ToolRequest) -> ActionPlan:
+        args = ChangeExpiryArgs.model_validate(request.arguments)
+        return await self._expiry_plan(
+            await self.definitions.get(args.job_id), args.expires_at, args.revision
+        )
+
+    async def change_expiry(self, request: ToolRequest) -> ToolObservation:
+        args = ChangeExpiryArgs.model_validate(request.arguments)
+        job = await self.definitions.get(args.job_id)
+        await self._expiry_plan(job, args.expires_at, args.revision)
+        spec = AgentSpec.model_validate_json(job["agent_spec"])
+        until = datetime.fromisoformat(args.expires_at) if args.expires_at else None
+        candidate = spec.model_copy(update={"expires_at": until})
+        async with self.engine.begin() as conn:
+            await self._admit(conn)
+            await conn.execute(sql("LOCK TABLE xiaowei_scheduled_job IN SHARE ROW EXCLUSIVE MODE"))
+            if until is None:
+                count = await conn.scalar(
+                    sql(
+                        "SELECT count(*) FROM "
+                        "xiaowei_scheduled_job WHERE owner_id=:owner AND job_id<>:id "
+                        "AND kind='agent_task' AND state IN ('active','paused') "
+                        "AND agent_spec::jsonb ->> 'interval_seconds' IS NOT NULL "
+                        "AND agent_spec::jsonb ->> 'expires_at' IS NULL"
+                    ),
+                    dict(owner=job["owner_id"], id=job["job_id"]),
+                )
+                if count >= self.config.max_long_jobs_per_group:
+                    raise ActionWriteRejectedError("本群长期任务已达上限，未修改")
+            if job["state"] == "completed":
+                active = await conn.scalar(
+                    sql("SELECT count(*) FROM xiaowei_scheduled_job WHERE state='active'")
+                )
+                if active >= self.config.max_active_jobs:
+                    raise ActionWriteRejectedError("活动任务已达配置上限，未修改")
+            assert spec.interval_seconds is not None  # noqa: S101 - _expiry_plan已核对周期类型
+            next_at = job["run_at"] + timedelta(
+                seconds=(
+                    max(
+                        0,
+                        int(
+                            (self.clock() - job["run_at"]).total_seconds() // spec.interval_seconds
+                        ),
+                    )
+                    + 1
+                )
+                * spec.interval_seconds
+            )
+            changed = await conn.execute(
+                sql(
+                    "UPDATE xiaowei_scheduled_job SET agent_spec=:spec,revision=revision+1,"
+                    "state=CASE WHEN state='completed' THEN 'active' ELSE state END,"
+                    "next_run=CASE WHEN state='completed' THEN :next ELSE next_run END,"
+                    "reason='expiry_changed',notice_state=CASE WHEN "
+                    "notice_state='pending' THEN 'suppressed' ELSE notice_state END "
+                    "WHERE job_id=:id AND revision=:revision "
+                    "AND state IN ('active','paused','completed') "
+                    "AND (state<>'completed' OR reason='validity_expired')"
+                ),
+                dict(
+                    id=job["job_id"],
+                    revision=args.revision,
+                    spec=candidate.model_dump_json(),
+                    next=next_at,
+                ),
+            )
+            if changed.rowcount != 1:
+                raise ActionWriteRejectedError("任务批准版本或状态已变化，未修改")
+        return self._observation(await self.definitions.get(job["job_id"]))
+
+    async def _deliver_task_notices(self) -> None:
+        if self.notice_sender is None:
+            return
+        async with self.engine.connect() as conn:
+            jobs = (
+                (
+                    await conn.execute(
+                        sql(
+                            "SELECT * FROM xiaowei_scheduled_job WHERE notice_state='pending' "
+                            "ORDER BY checked_at,job_id LIMIT :limit"
+                        ),
+                        {"limit": self.config.max_active_jobs},
+                    )
+                )
+                .mappings()
+                .all()
+            )
+        reasons = {
+            "authorization_revoked": "创建者当前权限已撤销",
+            "member_absent": "创建者已不在原操作群",
+            "recipient_changed": "机器人接收目标已变化",
+            "definition_expired": "定义依赖数据已到期",
+            "definition_unavailable": "定义依赖当前不可用",
+            "model_binding_changed": "批准的模型或数据策略已变化",
+            "budget_unavailable": "当前预算不足以完成获准任务",
+        }
+        for job in jobs:
+            with self.run_slot(None) as reserved:
+                if not reserved:
+                    return
+                async with self.engine.begin() as conn:
+                    await self._admit(conn)
+                    claimed = await conn.execute(
+                        sql(
+                            "UPDATE xiaowei_scheduled_job SET notice_state='sending' "
+                            "WHERE job_id=:id AND notice_id=:notice AND "
+                            "notice_state='pending' AND state<>'cancelled'"
+                        ),
+                        dict(id=job["job_id"], notice=job["notice_id"]),
+                    )
+                if claimed.rowcount != 1:
+                    continue
+                if job["notice_reason"] == "validity_expired":
+                    until = AgentSpec.model_validate_json(job["agent_spec"]).expires_at
+                    at = (until or self.clock()).astimezone(ZoneInfo(self.config.timezone))
+                    body = f"任务〈{job['job_id']}〉已于 {at.isoformat()} 到期停止。"
+                else:
+                    reason = reasons.get(job["notice_reason"], "当前授权条件不再满足")
+                    body = f"任务〈{job['job_id']}〉已停止：{reason}。"
+                try:
+                    outcome = await self.notice_sender(job["owner_id"], job["notice_id"], body)
+                    if outcome not in {"sent", "failed", "unknown"}:
+                        outcome = "unknown"
+                except Exception as exc:
+                    logger.warning(
+                        "任务停止说明结果未知：job=%s error=%s", job["job_id"], type(exc).__name__
+                    )
+                    outcome = "unknown"
+                async with self.engine.begin() as conn:
+                    await conn.execute(
+                        sql(
+                            "UPDATE xiaowei_scheduled_job SET notice_state=:state "
+                            "WHERE job_id=:id AND notice_id=:notice AND notice_state='sending'"
+                        ),
+                        dict(state=outcome, id=job["job_id"], notice=job["notice_id"]),
+                    )
+
     async def prepare(self, request: ToolRequest) -> ActionPlan:
         job = await self.definitions.get(str(request.arguments["job_id"]))
         await self.definitions.validate(job)
@@ -497,8 +1690,37 @@ class ScheduledTasks:
         async with self.engine.begin() as conn:
             await self._admit(conn)
             await conn.execute(sql("LOCK TABLE xiaowei_scheduled_job IN SHARE ROW EXCLUSIVE MODE"))
-            if self.clock() >= job["run_at"]:
+            spec = (
+                AgentSpec.model_validate_json(job["agent_spec"])
+                if job.get("kind") == "agent_task"
+                else None
+            )
+            if (spec is None or spec.interval_seconds is None) and self.clock() >= job["run_at"]:
                 raise ActionWriteRejectedError(code="reminder_time_passed")
+            if spec is not None:
+                deadline = self._agent_deadline(job)
+                if deadline is not None and self.clock() >= deadline:
+                    raise ActionWriteRejectedError("任务有效期已过，未激活")
+                if spec.interval_seconds is not None and spec.expires_at is None:
+                    count = await conn.scalar(
+                        sql(
+                            "SELECT count(*) FROM xiaowei_scheduled_job WHERE owner_id=:owner "
+                            "AND kind='agent_task' AND state IN ('active','paused') "
+                            "AND agent_spec::jsonb ->> 'interval_seconds' IS NOT NULL "
+                            "AND agent_spec::jsonb ->> 'expires_at' IS NULL"
+                        ),
+                        {"owner": job["owner_id"]},
+                    )
+                    if count >= self.config.max_long_jobs_per_group:
+                        raise ActionWriteRejectedError("本群长期任务已达上限，未激活")
+                if not spec.explicit_start:
+                    job = {**job, "run_at": self.clock(), "next_run": self.clock()}
+                await conn.execute(
+                    sql(
+                        "UPDATE xiaowei_scheduled_job SET run_at=:at,next_run=:at WHERE job_id=:id"
+                    ),
+                    {"id": job["job_id"], "at": job["run_at"]},
+                )
             active = await conn.scalar(
                 sql("SELECT count(*) FROM xiaowei_scheduled_job WHERE state='active'")
             )
@@ -524,18 +1746,36 @@ class ScheduledTasks:
             )
         return self._observation(job, "active", body=False)
 
-    def binding(self) -> ActionBinding:
+    def binding(self, proposal_id: str = PROPOSE) -> ActionBinding:
+        if proposal_id == EXPIRY_PROPOSE:
+            cat = self.governance.catalog
+            proposal = cat.contract(EXPIRY_PROPOSE, TARGET)
+            write = cat.contract(CHANGE_EXPIRY, TARGET)
+            assert proposal is not None and write is not None  # noqa: S101 - 可信目录
+            return ActionBinding(
+                proposal,
+                write,
+                self.prepare_expiry,
+                self.change_expiry,
+                target_binding="scheduled-expiry/1",
+                available=lambda: self.config.enabled,
+                prepare_proposal=self.propose_expiry,
+                check_material=self.check_material,
+            )
         cat = self.governance.catalog
-        proposal, write = cat.contract(PROPOSE, TARGET), cat.contract(ACTIVATE, TARGET)
+        proposal, write = cat.contract(proposal_id, TARGET), cat.contract(ACTIVATE, TARGET)
         assert proposal is not None and write is not None  # noqa: S101 - 可信装配已登记
         return ActionBinding(
             proposal,
             write,
             self.prepare,
             self.activate,
-            target_binding="fixed-reminder/1",
-            available=lambda: self.config.enabled,
-            prepare_proposal=self.propose,
+            target_binding="fixed-reminder/1" if proposal_id == PROPOSE else "scheduled-agent/1",
+            available=lambda: (
+                self.config.enabled
+                and (proposal_id == PROPOSE or bool(self.config.automatic_tools))
+            ),
+            prepare_proposal=self.propose if proposal_id == PROPOSE else self.propose_agent,
             check_material=self.check_material,
         )
 
@@ -546,13 +1786,23 @@ class ScheduledTasks:
     def _observation(
         self, job: Mapping[str, Any], state: str | None = None, *, body: bool = True
     ) -> ToolObservation:
+        deadline = (
+            self._agent_deadline(job)
+            if job.get("kind") == "agent_task"
+            else job["content_expires_at"]
+        )
         return ToolObservation(
             payload=dict(
                 job_id=job["job_id"],
                 state=state or job["state"],
-                at=job["run_at"].isoformat(),
-                expires_at=job["content_expires_at"].isoformat(),
-                reason=job.get("reason", "pending"),
+                at=(job.get("next_run") or job["run_at"]).isoformat(),
+                expires_at=deadline.isoformat() if deadline else "长期",
+                reason=(
+                    f"{job.get('reason', 'pending')}；原群停止说明={job['notice_state']}"
+                    + ("（不会自动重发）" if job["notice_state"] == "unknown" else "")
+                    if job.get("notice_state") is not None
+                    else job.get("reason", "pending")
+                ),
                 unverified_count=job.get("unverified_count", 0),
                 text=job["text"] if body else None,
                 notification_state=job.get("notification_state") or "not_sent",
@@ -572,6 +1822,16 @@ class ScheduledTasks:
     def tools_for(self, ctx: RunContext) -> list[FunctionTool]:
         tools = []
         for contract in self.governance.allowed_contracts(ctx):
+            if contract.tool_id == LIST_TASKS:
+                tools.append(
+                    governed_function_tool(
+                        contract.tool_id.replace("/", "__"),
+                        contract,
+                        self.governance,
+                        partial(self.list_tasks, ctx),
+                    )
+                )
+                continue
             if contract.tool_id not in {STATUS, CONTROL}:
                 continue
 
@@ -625,10 +1885,21 @@ class ScheduledTasks:
                                 "UPDATE xiaowei_scheduled_job j SET state=:state "
                                 "WHERE job_id=:id AND state IN ('draft','active','paused') "
                                 "AND NOT EXISTS (SELECT 1 FROM xiaowei_notification_attempt n "
-                                "WHERE n.job_id=j.job_id)"
+                                "WHERE n.job_id=j.job_id OR (n.run_id IN "
+                                "(SELECT run_id FROM xiaowei_scheduled_run WHERE job_id=j.job_id) "
+                                "AND n.state='sending'))"
                             ),
                             {"id": job["job_id"], "state": state},
                         )
+                        if changed.rowcount:
+                            await conn.execute(
+                                sql(
+                                    "UPDATE xiaowei_scheduled_run SET "
+                                    "state='skipped',reason='task_controlled',finished_at=:now "
+                                    "WHERE job_id=:id AND state='queued'"
+                                ),
+                                {"id": job["job_id"], "now": self.clock()},
+                            )
                     job = await self.definitions.get(job["job_id"])
                     if changed.rowcount == 0 and job.get("receipt_id") is not None:
                         job = {**job, "reason": "发送已准入，未暂停/取消"}
@@ -650,6 +1921,28 @@ class ScheduledTasks:
     async def recover(self) -> None:
         async with self.engine.begin() as conn:
             await self._admit(conn)
+            await conn.execute(
+                sql(
+                    "UPDATE xiaowei_scheduled_run SET state='unknown',reason='execution_unknown',"
+                    "finished_at=:now WHERE state='running'"
+                ),
+                {"now": self.clock()},
+            )
+            await conn.execute(
+                sql(
+                    "UPDATE xiaowei_scheduled_job SET "
+                    "notice_state='unknown' WHERE notice_state='sending'"
+                )
+            )
+            await conn.execute(
+                sql(
+                    "UPDATE xiaowei_scheduled_job j SET "
+                    "state='completed',reason='execution_unknown' "
+                    "WHERE kind='agent_task' AND state='active' AND next_run IS NULL "
+                    "AND EXISTS(SELECT 1 FROM xiaowei_scheduled_run "
+                    "r WHERE r.job_id=j.job_id AND r.state='unknown')"
+                )
+            )
             await conn.execute(
                 sql(
                     "UPDATE xiaowei_scheduled_job j SET state='completed', reason=n.reason "
@@ -770,7 +2063,10 @@ class ScheduledTasks:
                         await conn.execute(
                             sql(
                                 "SELECT j.* FROM xiaowei_scheduled_job j "
-                                "WHERE j.state='active' AND j.run_at<=:now AND NOT EXISTS "
+                                "WHERE (j.state='active' OR "
+                                "(j.kind='agent_task' AND j.state='paused')) AND "
+                                "(j.kind='fixed_message' OR j.next_run IS NOT NULL) "
+                                "AND (j.kind='agent_task' OR j.run_at<=:now) AND NOT EXISTS "
                                 "(SELECT 1 FROM xiaowei_notification_attempt n "
                                 "WHERE n.job_id=j.job_id) "
                                 "ORDER BY run_at,job_id LIMIT :limit"
@@ -781,17 +2077,22 @@ class ScheduledTasks:
                     .mappings()
                     .all()
                 )
-            for row in jobs:
-                job = dict(row)
+
+            async def process(job: Mapping[str, Any]) -> None:
                 if not self.lock.readiness.ok:
                     return
-                if self.clock() >= job["run_at"] + timedelta(seconds=job["lateness_seconds"]):
+                if job.get("kind") != "agent_task" and self.clock() >= job["run_at"] + timedelta(
+                    seconds=job["lateness_seconds"]
+                ):
                     await self._mark(job, "missed", "lateness_exceeded")
-                    continue
-                with self.run_slot() as reserved:
+                    return
+                if job.get("kind") == "agent_task":
+                    await self._run_agent(job)
+                    return
+                with self.run_slot(None) as reserved:
                     if not reserved:
                         await self._mark(job, "active", "busy")
-                        continue
+                        return
                     try:
                         with scope_checks():
                             approved_budget = RunContext.model_validate_json(
@@ -808,6 +2109,16 @@ class ScheduledTasks:
                         if not self.lock.readiness.ok:
                             raise
                         await self._mark(job, "active", "execution_unverified", unverified=True)
+
+            pending = [asyncio.create_task(process(dict(row))) for row in jobs]
+            try:
+                await asyncio.gather(*pending)
+            finally:
+                for task in pending:
+                    if not task.done():
+                        task.cancel()
+                await asyncio.gather(*pending, return_exceptions=True)
+            await self._deliver_task_notices()
 
     async def _run_job(self, job: Mapping[str, Any]) -> None:
         original = RunContext.model_validate_json(job["source_context"])

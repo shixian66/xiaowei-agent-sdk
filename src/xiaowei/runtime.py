@@ -1522,6 +1522,7 @@ def _delivery(
     clock: Callable[[], datetime],
     sender: Backend | None = None,
     members: MemberCheck | None = None,
+    member_status: Callable[[str, str], Awaitable[bool | None]] | None = None,
 ) -> _Delivery:
     """请求存储、工具目录、唯一授权来源、Evidence 与交付；serve 与显式重发共用同一装配。
 
@@ -1588,6 +1589,16 @@ def _delivery(
             *task_policies,
         ),
     )
+    if config.scheduled_tasks is not None:
+        automatic = config.scheduled_tasks.automatic_tools
+        allowed = {
+            c.tool_id
+            for c in catalog.contracts
+            if catalog.policy_for(c).effect == "read"
+            and c.target_id not in {TASK_TARGET, NOTIFY_TARGET}
+        }
+        if not automatic <= allowed or not automatic <= config.data_policy.model_tools:
+            raise ValueError("automatic_tools 必须是当前模型获准的已登记业务只读工具")
     access = StaticAccess(
         config.access,
         frozenset(targets),
@@ -1616,6 +1627,7 @@ def _delivery(
             clock,
             config.budget,
             execution_requests(config.data_policy.model_tools),
+            member_status=member_status,
         )
         evidence.configure_content_check(definitions.check_content)
 
@@ -1686,6 +1698,7 @@ async def open_runtime(
     model_transport: httpx2.AsyncBaseTransport | None = None,
     starrocks_connect: Mapping[str, Connector] | None = None,
     members: MemberCheck | None = None,
+    member_status: Callable[[str, str], Awaitable[bool | None]] | None = None,
     webhook_transport: httpx2.AsyncBaseTransport | None = None,
 ) -> AsyncIterator[Runtime]:
     """按唯一顺序装配；退出或任一步失败时逆序关闭并释放实例锁。
@@ -1710,7 +1723,9 @@ async def open_runtime(
             )
             for t in config.targets
         }
-        parts = _delivery(config, engine, schemas, readiness, clock, members=members)
+        parts = _delivery(
+            config, engine, schemas, readiness, clock, members=members, member_status=member_status
+        )
         recovery = await parts.store.recover(lock)
         logger.info(
             "启动恢复：interrupted=%d unknown=%d unsent=%d",
@@ -1772,6 +1787,7 @@ async def open_runtime(
                 lock,
                 parts.task_definitions,
                 notifications,
+                max_answer_bytes=config.storage.max_answer_bytes,
                 is_admin=lambda subject: (
                     TASK_CONTROL in config.access.grants.get(subject, frozenset())
                 ),
@@ -1790,7 +1806,15 @@ async def open_runtime(
                 parts.store,
                 parts.results.access,
                 bindings=[
-                    *([scheduled.binding()] if scheduled is not None else []),
+                    *(
+                        [
+                            scheduled.binding(),
+                            scheduled.binding("scheduled/propose_agent_task"),
+                            scheduled.binding("scheduled/propose_task_expiry"),
+                        ]
+                        if scheduled is not None
+                        else []
+                    ),
                     *[
                         binding
                         for adapter in alertmanagers.values()
@@ -1823,6 +1847,7 @@ async def open_runtime(
         service = ChannelService(app, parts.results)
         if scheduled is not None:
             scheduled.run_slot = app.background_slot
+            scheduled.application = app
         if scheduled is not None and scheduled.config.enabled:
             loop = asyncio.create_task(scheduled.run(), name="xiaowei-reminder-loop")
 
@@ -1958,6 +1983,7 @@ async def _serve_bound(
             model_transport=model_transport,
             starrocks_connect=starrocks_connect,
             members=None if transport is None else transport.is_member,
+            member_status=None if transport is None else transport.member_status,
         )
         try:
             async with _open_runtime_until_stop(context, stop) as runtime:

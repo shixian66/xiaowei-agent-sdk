@@ -141,6 +141,9 @@ class RunContext(_Trusted):
     budget: Budget
     evidence_ids: tuple[Label, ...] = ()
     approved_action: ApprovedAction | None = None
+    automatic: bool = False
+    definition_job_id: Label | None = None
+    content_expires_at: AwareDatetime | None = None
 
 
 class ToolContract(_Trusted):
@@ -434,6 +437,13 @@ class SessionSnapshot(_Trusted):
         return self
 
 
+class TurnUsage(_Trusted):
+    model_requests: int = Field(ge=0)
+    tool_calls: int = Field(ge=0)
+    input_tokens: int | None = Field(default=None, ge=0)
+    output_tokens: int | None = Field(default=None, ge=0)
+
+
 class TurnAnswer(_Trusted):
     """一轮的最终回答与本轮模型可见的证据；后者由可信代码记录，不来自模型。
 
@@ -455,6 +465,7 @@ class TurnAnswer(_Trusted):
     """可信账本记录：步数用完后由无工具收尾生成本回答；交付时由代码说明可能不完整。"""
     material_only: bool = False
     """暂停材料：动作区域只含显式列出的（本次请求执行的）动作，不补全同轮其他提案。"""
+    usage: TurnUsage | None = Field(default=None, exclude=True)
     session_state: SessionSnapshot | None = Field(default=None, exclude=True)
     """成功提交后由应用附加；请求表单独保存，不进入回答 JSON 或 SDK Session。"""
 

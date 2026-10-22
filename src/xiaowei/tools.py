@@ -91,6 +91,11 @@ _REJECTION_FEEDBACK: dict[ToolRejectCode, tuple[str, bool]] = {
 
 
 _REJECTION_HINTS: dict[ToolRejectHint, str] = {
+    "agent_task_time": (
+        "任务时间无效，未创建或修改；使用带时区的绝对ISO时间，不改变用户要求的时间。"
+        "单次须指定未来时刻；周期未指定首跑可填null，激活即首跑；有效期仅用于周期，"
+        "未指定为null长期，不设时长上限。日期或业务时区确有歧义时才问用户"
+    ),
     "reminder_time": (
         "未创建提醒；at 须为配置范围内的未来绝对 ISO 时间且包含时区。"
         "依据当前时间和已明确的业务时区修正格式，不改变用户要求的时间；日期有歧义时先问用户"
@@ -110,7 +115,7 @@ _REJECTION_HINTS: dict[ToolRejectHint, str] = {
     ),
     "reminder_expiry": (
         "未创建提醒；发送时间已超出定义所依赖的数据期限，确认不会延长期限。"
-        "到点重新调查属于后续定时 Agent 能力，本版只支持固定提醒"
+        "固定提醒不会到点重新调查；定时Agent需用户明确要求并另行确认"
     ),
     "action_request": (
         "只有本轮已提出、证据可读且尚未请求过执行的Action ID可申请群审批；"

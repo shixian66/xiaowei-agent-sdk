@@ -397,6 +397,7 @@ class EvidenceStore:
             "expires_at": min(
                 recorded_at + self._retention,
                 observation.content_expires_at or recorded_at + self._retention,
+                ctx.content_expires_at or recorded_at + self._retention,
             ),
             "truncated": observation.truncated,
             **{_COLUMNS[a]: content for a, (content, _) in projected.items()},

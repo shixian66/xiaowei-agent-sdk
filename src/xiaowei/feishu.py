@@ -637,6 +637,7 @@ class FeishuGateway:
         self._service = service
         self._config = config
         self._send = send
+        service.bind_scheduled_notices(self._send_task_notice)
         self._clock = clock
         self._bot = bot_open_id
         self._download_resource = download_resource
@@ -689,6 +690,17 @@ class FeishuGateway:
         if kind == "new" or kind == "approve" or kind == "reject" or not body:
             return None
         return self._request(message, kind, body)
+
+    async def _send_task_notice(self, owner_id: str, notice_id: str, body: str) -> str:
+        group = self._config.group
+        if group is None or json.loads(owner_id) != [
+            self._config.app_id,
+            self._config.tenant_key,
+            group.chat_id,
+        ]:
+            return "failed"
+        result = await self._send(group.chat_id, body, uuid=notice_id)
+        return result if result in ("sent", "failed", "unknown") else send_outcome(result)
 
     async def receive(self, event: object) -> None:
         """处理一条 raw 事件。SDK 已经 ack：这里的任何拒绝或失败都只记录安全原因码。"""
@@ -1511,6 +1523,62 @@ class LarkTransport:
         if getattr(identity, "app_id", None) != self._config.app_id or not isinstance(open_id, str):
             return None
         return open_id if _OPEN_ID.fullmatch(open_id) else None
+
+    async def member_status(self, chat_id: str, open_id: str) -> bool | None:
+        """C 的三态成员证据：完整名单未找到为 False；部分名单/故障为 None。
+
+        既有 SDK 成员便捷接口丢弃分页完整性；此处复用其公开 Client.request，
+        在工作线程执行有界的只读分页，不访问 SDK 私有成员。取消不保证停止在途目录读取。
+        """
+        from lark_channel.core.enum import AccessTokenType, HttpMethod
+        from lark_channel.core.model.base_request import BaseRequest
+
+        group = self._config.group
+        if group is None or chat_id != group.chat_id:
+            return None
+        token = ""
+        seen: set[str] = set()
+        try:
+            async with asyncio.timeout(group.member_timeout_seconds):
+                for _ in range(group.member_max_pages):
+                    request = BaseRequest()
+                    request.http_method = HttpMethod.GET
+                    request.uri = "/open-apis/im/v1/chats/:chat_id/members"
+                    request.paths = {"chat_id": chat_id}
+                    request.token_types = {AccessTokenType.TENANT}
+                    request.queries = [
+                        ("member_id_type", "open_id"),
+                        ("page_size", str(group.member_page_size)),
+                    ]
+                    if token:
+                        request.queries.append(("page_token", token))
+                    response = await asyncio.to_thread(self._channel.client.request, request)
+                    if response.code != 0 or response.raw is None:
+                        return None
+                    payload = json.loads(response.raw.content)
+                    data = payload.get("data", {})
+                    items = data.get("items")
+                    if not isinstance(items, list) or any(
+                        not isinstance(item, dict) or not isinstance(item.get("member_id"), str)
+                        for item in items
+                    ):
+                        return None
+                    if any(item["member_id"] == open_id for item in items):
+                        return True
+                    if data.get("has_more") is False:
+                        return False
+                    token = data.get("page_token")
+                    if (
+                        data.get("has_more") is not True
+                        or not isinstance(token, str)
+                        or not token
+                        or token in seen
+                    ):
+                        return None
+                    seen.add(token)
+        except Exception:
+            return None
+        return None
 
     async def is_member(self, chat_id: str, open_id: str) -> bool:
         """当前成员资格：SDK ``get_chat_members(force=True)`` 绕过缓存，按配置的页数与期限查询。

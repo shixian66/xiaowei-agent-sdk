@@ -176,9 +176,9 @@ def _message_text(content: str) -> str:
     return mention_safe(content.replace("\r\n", "\n").replace("\r", "\n"))
 
 
-def _notification_text(delivery: Delivery, text: str) -> str:
+def _notification_text(delivery: Delivery, text: str, *, include_remaining: bool = False) -> str:
     """只渲染已校验的飞书事实；不把 Web 的转义 content 当通知正文。"""
-    if not delivery.facts:
+    if not delivery.facts and not include_remaining:
         return text
 
     def fact_lines(fact: DeliveryFact) -> list[str]:
@@ -210,6 +210,9 @@ def _notification_text(delivery: Delivery, text: str) -> str:
             lines.extend(("模型说明（未经系统核实）", block.text))
         else:
             lines.extend(fact_lines(facts[block.evidence_id]))
+    if include_remaining:
+        for fact in delivery.section("remaining"):
+            lines.extend(fact_lines(fact))
     return "\n".join(lines)
 
 
@@ -301,7 +304,8 @@ class WebhookNotifications:
             sql(
                 "SELECT max(n.sequence) FROM xiaowei_notification_attempt n "
                 "LEFT JOIN xiaowei_request r ON r.turn_id=n.turn_id "
-                "LEFT JOIN xiaowei_scheduled_job j ON j.job_id=n.job_id "
+                "LEFT JOIN xiaowei_scheduled_run sr ON sr.run_id=n.run_id "
+                "LEFT JOIN xiaowei_scheduled_job j ON j.job_id=COALESCE(n.job_id,sr.job_id) "
                 "WHERE n.bot_id=:bot AND n.state IN ('unknown','sending') "
                 "AND COALESCE(r.owner_id,j.owner_id)=:owner"
             ),
@@ -339,7 +343,8 @@ class WebhookNotifications:
                     "on,content_digest,state,reason,warning_sequence) "
                     "SELECT :id,r.turn_id,n.bot_id,n.bot_alias,n.target_version,:digest,'not_sent',"
                     "'task_risk_warning',n.sequence FROM xiaowei_notification_attempt n "
-                    "JOIN xiaowei_scheduled_job j ON j.job_id=n.job_id "
+                    "LEFT JOIN xiaowei_scheduled_run sr ON sr.run_id=n.run_id "
+                    "JOIN xiaowei_scheduled_job j ON j.job_id=COALESCE(n.job_id,sr.job_id) "
                     "JOIN xiaowei_request r ON r.turn_id=:turn "
                     "WHERE n.receipt_id=:receipt AND n.state IN ('unknown','sending') "
                     "AND j.owner_id=:owner AND r.session_id=:session AND r.subject_id=:subject "
@@ -595,7 +600,9 @@ async def receipt_notice(
                             "FROM xiaowei_notification_attempt n "
                             "LEFT JOIN xiaowei_notification_attemp"
                             "t s ON s.sequence=n.warning_sequence "
-                            "LEFT JOIN xiaowei_scheduled_job j ON j.job_id=s.job_id "
+                            "LEFT JOIN xiaowei_scheduled_run sr ON sr.run_id=s.run_id "
+                            "LEFT JOIN xiaowei_scheduled_job j ON "
+                            "j.job_id=COALESCE(s.job_id,sr.job_id) "
                             "WHERE n.turn_id=:turn AND (NOT :tasks_only OR "
                             "(n.reason='task_risk_warning' AND j.owner_id=:owner "
                             "AND (j.creator_id=:subject OR :admin))) ORDER BY n.sequence"

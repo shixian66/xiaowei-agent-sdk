@@ -51,10 +51,12 @@ from agents import (
     Agent,
     AgentOutputSchema,
     MaxTurnsExceeded,
+    ModelResponse,
     RunConfig,
     RunContextWrapper,
     RunErrorHandlerInput,
     RunErrorHandlerResult,
+    RunHooks,
     Runner,
     RunResult,
     RunState,
@@ -111,6 +113,7 @@ from xiaowei.models import (
     ToolId,
     ToolRequest,
     TurnAnswer,
+    TurnUsage,
 )
 from xiaowei.session import (
     PolicySession,
@@ -327,6 +330,7 @@ class TurnError(Exception):
         self.tool_error = tool_error
         self.tool_id = tool_id
         self.session_state = session_state
+        self.usage: TurnUsage | None = None
 
 
 class DataPolicy(BaseModel):
@@ -404,6 +408,49 @@ class ResumeRejectedError(Exception):
     def __init__(self, code: CallerFailureCode) -> None:
         self.code = code
         super().__init__("候选不可恢复，未执行")
+
+
+class _AutomaticUsage(RunHooks[RunContext]):
+    """所有公开 Runner 调用共用一次预算；包含 SDK 收尾/修正，不另建 Loop。"""
+
+    def __init__(self, limit: int) -> None:
+        self.limit = limit
+        self.requests = 0
+        self.responses = 0
+        self.input_tokens = 0
+        self.output_tokens = 0
+        self.reported = True
+
+    async def on_llm_start(
+        self,
+        context: RunContextWrapper[RunContext],
+        agent: Agent[RunContext],
+        system_prompt: str | None,
+        input_items: list[TResponseInputItem],
+    ) -> None:
+        if self.requests >= self.limit:
+            raise TurnError("turn_limit")
+        self.requests += 1
+
+    async def on_llm_end(
+        self,
+        context: RunContextWrapper[RunContext],
+        agent: Agent[RunContext],
+        response: ModelResponse,
+    ) -> None:
+        self.responses += 1
+        self.reported = self.reported and response.raw_usage is not None
+        self.input_tokens += response.usage.input_tokens
+        self.output_tokens += response.usage.output_tokens
+
+    def snapshot(self, tool_calls: int) -> TurnUsage:
+        reported = self.reported and self.responses == self.requests and self.responses > 0
+        return TurnUsage(
+            model_requests=self.requests,
+            tool_calls=tool_calls,
+            input_tokens=self.input_tokens if reported else None,
+            output_tokens=self.output_tokens if reported else None,
+        )
 
 
 class Application:
@@ -494,6 +541,7 @@ class Application:
         self.scheduled_tasks = scheduled_tasks
         self._run_config = safe_run_config()
         self._active: set[str] = set()
+        self._background_reserved: set[str] = set()
 
     @property
     def evidence(self) -> EvidenceStore:
@@ -506,17 +554,20 @@ class Application:
         return self._config.max_concurrent_turns
 
     @contextmanager
-    def background_slot(self) -> Iterator[bool]:
+    def background_slot(self, session_id: str | None = None) -> Iterator[bool]:
         """固定提醒占同一并发池；忙时未开始，后续到期检查可再准入。"""
         if len(self._active) >= self._config.max_concurrent_turns:
             yield False
             return
-        slot = "reminder-" + uuid4().hex
+        slot = session_id or "reminder-" + uuid4().hex
         self._active.add(slot)
+        if session_id is not None:
+            self._background_reserved.add(slot)
         try:
             yield True
         finally:
             self._active.discard(slot)
+            self._background_reserved.discard(slot)
 
     def admits_input(self, text: str) -> bool:
         """渠道在创建请求前复用本模型 Profile 的文字输入策略。"""
@@ -529,7 +580,7 @@ class Application:
         action_tools = self.actions.available_tool_ids if self.actions is not None else frozenset()
         notify = frozenset({NOTIFY_TOOL}) if self.notifications is not None else frozenset()
         scheduled = (
-            frozenset({"scheduled/get_task", "scheduled/control_task"})
+            frozenset({"scheduled/get_task", "scheduled/control_task", "scheduled/list_tasks"})
             if self.scheduled_tasks is not None
             else frozenset()
         )
@@ -553,8 +604,23 @@ class Application:
         )
         scope = purpose & self._model_tools() & authorized_tools & available_tools
         if self.scheduled_tasks is not None and NOTIFY_TOOL not in authorized_tools:
-            scope -= {"scheduled/propose_reminder", "scheduled/request_action_execution"}
+            scope -= {
+                "scheduled/propose_reminder",
+                "scheduled/propose_agent_task",
+                "scheduled/request_action_execution",
+            }
         return scope
+
+    @property
+    def automatic_binding(self) -> str:
+        """批准时绑定模型及其数据策略，不因无关源增减而变更。"""
+        return _binding_fingerprint(self._model.fingerprint, self._data_policy, ())
+
+    def automatic_scope(self, ctx: RunContext, tools: frozenset[str]) -> frozenset[str]:
+        candidate = ctx.model_copy(
+            update={"automatic": True, "tool_scope": tools & self._model_tools()}
+        )
+        return frozenset(c.tool_id for c in self._governance.allowed_contracts(candidate))
 
     async def prepare_tools(
         self,
@@ -584,11 +650,14 @@ class Application:
         turn = ctx.identity.turn_id
         session_id = ctx.identity.session_id
         started = time.monotonic()
+        automatic_usage = _AutomaticUsage(ctx.budget.max_turns) if ctx.automatic else None
         _stage(turn, "received", started)
         # 检查与登记之间没有 await：同会话的并发请求不能同时通过。
-        if session_id in self._active:
+        reserved = session_id in self._background_reserved
+        self._background_reserved.discard(session_id)
+        if not reserved and session_id in self._active:
             raise self._refuse(turn, started, "session_busy")
-        if len(self._active) >= self._config.max_concurrent_turns:
+        if not reserved and len(self._active) >= self._config.max_concurrent_turns:
             raise self._refuse(turn, started, "busy")
         self._active.add(session_id)
         metrics = VertexTurnMetrics() if self._model.profile.provider == "vertex" else None
@@ -599,9 +668,18 @@ class Application:
             with scope_checks() as checks:
                 async with asyncio.timeout(ctx.budget.timeout_seconds):
                     answer = await self._turn(
-                        ctx, message, started, scope_count=checks, progress=progress
+                        ctx,
+                        message,
+                        started,
+                        scope_count=checks,
+                        progress=progress,
+                        automatic_usage=automatic_usage,
                     )
         except TurnError as exc:
+            if automatic_usage is not None:
+                exc.usage = automatic_usage.snapshot(
+                    len(self._governance.turn_runs(ctx.identity).started)
+                )
             _stage(
                 turn,
                 "failed",
@@ -613,6 +691,10 @@ class Application:
             raise
         except Exception as exc:
             error = _turn_error(exc)
+            if automatic_usage is not None:
+                error.usage = automatic_usage.snapshot(
+                    len(self._governance.turn_runs(ctx.identity).started)
+                )
             _stage(
                 turn,
                 "failed",
@@ -628,7 +710,8 @@ class Application:
             raise
         finally:
             self._governance.end_turn(ctx.identity)
-            self._active.discard(session_id)
+            if not reserved:
+                self._active.discard(session_id)
             if token is not None and metrics is not None:
                 active_vertex_metrics.reset(token)
                 if turn_token is not None:
@@ -650,8 +733,13 @@ class Application:
         approval_requests: dict[str, int] | None = None,
         scope_count: ScopeChecks | None = None,
         progress: Progress | None = None,
+        automatic_usage: _AutomaticUsage | None = None,
     ) -> TurnAnswer | PausedTurn:
         turn = ctx.identity.turn_id
+        if ctx.automatic:
+            if self.scheduled_tasks is None:
+                raise TurnError("scope_rejected")
+            await self.scheduled_tasks.validate_run(ctx)
         if not ctx.tool_scope <= self._model_tools():
             raise TurnError("scope_rejected")
         try:
@@ -738,7 +826,9 @@ class Application:
                 max_turns=1,
                 run_config=self._run_config,
                 error_handlers={"invalid_final_output": repair_final_output},
-                hooks=None if progress is None else progress.hooks,
+                hooks=automatic_usage
+                if automatic_usage is not None
+                else (None if progress is None else progress.hooks),
             )
             return RunErrorHandlerResult(
                 final_output=final.final_output_as(AgentAnswer, raise_if_incorrect_type=True)
@@ -773,7 +863,9 @@ class Application:
                     context=ctx,
                     max_turns=1,
                     run_config=self._run_config,
-                    hooks=None if progress is None else progress.hooks,
+                    hooks=automatic_usage
+                    if automatic_usage is not None
+                    else (None if progress is None else progress.hooks),
                 )
             except ModelBehaviorError:
                 return None  # SDK 重新抛出原校验错误，按 invalid_output 记录
@@ -788,12 +880,16 @@ class Application:
             session=None if native is not None else session,
             max_turns=ctx.budget.max_turns,
             run_config=self._run_config,
-            hooks=None if progress is None else progress.hooks,
+            hooks=automatic_usage
+            if automatic_usage is not None
+            else (None if progress is None else progress.hooks),
             error_handlers={
                 "max_turns": finish_on_limit,
                 "invalid_final_output": repair_final_output,
             },
         )
+        if result.interruptions and ctx.automatic:
+            raise TurnError("scope_rejected")
         if result.interruptions:
             return await self._paused(
                 ctx,
@@ -844,13 +940,31 @@ class Application:
         if progress is not None:
             progress.mark("saving")
         await self._evidence.validate_answer(validated, ctx)
+        if ctx.automatic and self.scheduled_tasks is not None:
+            await self.scheduled_tasks.validate_run(ctx)
         snapshot = await session.commit_validated(
             validated.context_evidence,
             monitoring_failures=validated.monitoring_failures,
             limit_reached=validated.limit_reached,
         )
         _stage(turn, "committed", started)
-        return validated.model_copy(update={"session_state": snapshot})
+        usage = result.context_wrapper.usage
+        reported = bool(result.raw_responses) and all(
+            r.raw_usage is not None for r in result.raw_responses
+        )
+        return validated.model_copy(
+            update={
+                "session_state": snapshot,
+                "usage": automatic_usage.snapshot(len(runs.started))
+                if automatic_usage is not None
+                else TurnUsage(
+                    model_requests=usage.requests,
+                    tool_calls=len(runs.started),
+                    input_tokens=usage.input_tokens if reported else None,
+                    output_tokens=usage.output_tokens if reported else None,
+                ),
+            }
+        )
 
     def _query_evidence(self, runs: TurnRuns) -> list[str]:
         """本轮成功的查询类工具证据（可信记录）：用于已开始查询的去向核对。"""
@@ -933,7 +1047,15 @@ class Application:
         )
         if ctx.identity.channel == "feishu":
             report_note += "\n" + _REPORT_SKILL
-        if self.scheduled_tasks is not None:
+        if ctx.automatic:
+            report_note = (
+                "\n本轮是已确认的独立定时只读任务，无原聊天历史。按获准工具和源自主调查、"
+                "编写或修正查询、补证并在事实或预算足够时结束；工具示例不是固定顺序。"
+                "历史方法只作调查要求，历史结论不作当前事实。缺少必要口径时如实报告未完成，"
+                "不要猜测或等待互动。报告文件为null，结果由可信交付路径统一发送，"
+                "不能调用通知、任务管理或任何生产写/提案/审批；发现需要写操作只说明建议。"
+            )
+        elif self.scheduled_tasks is not None:
             tasks = self.scheduled_tasks.config
             report_note += (
                 f"\n固定提醒默认业务时区为 {tasks.timezone}；用户明确指定时区时优先按用户要求解释，"
@@ -941,8 +1063,10 @@ class Application:
                 f"最多提前 {tasks.max_advance_seconds / 86400:g} 天，允许迟到 "
                 f"{tasks.lateness_seconds / 3600:g} 小时；一次提醒最多一次 POST，"
                 "结果未知不自动重试。"
-                "本版只支持一次性固定提醒，任务激活复用本地 Action 确认；"
-                "到期不调用模型、不巡检、不执行生产写。暂停/取消直接使用任务控制工具。"
+                "固定提醒到期不调用模型；获准的独立只读Agent任务使用propose_agent_task，"
+                "按管理员automatic_tools和用户确认的源/工具范围重新调查。"
+                "任务激活复用本地Action确认，不自动执行生产写。暂停/取消直接使用任务控制工具。"
+                f"允许自动的工具ID：{sorted(tasks.automatic_tools)}。"
             )
         return Agent[RunContext](
             name="xiaowei",

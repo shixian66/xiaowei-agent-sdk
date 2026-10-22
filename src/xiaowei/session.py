@@ -701,7 +701,11 @@ class PolicySession:
             **self._owner(),
             "profile_fingerprint": self._profile,
             "created_at": now,
-            "expires_at": now + timedelta(seconds=self._limits.retention_seconds),
+            "expires_at": min(
+                now + timedelta(seconds=self._limits.retention_seconds),
+                self._ctx.content_expires_at
+                or now + timedelta(seconds=self._limits.retention_seconds),
+            ),
         }
 
 
@@ -933,11 +937,18 @@ async def cleanup_expired(engine: AsyncEngine, *, now: datetime, batch_size: int
             await conn.execute(
                 text(
                     "UPDATE xiaowei_scheduled_job j SET text=NULL, "
-                    "reason=CASE WHEN state='active' AND run_at+"
+                    "notice_id=CASE WHEN kind='agent_task' "
+                    "AND state IN ('draft','active','paused') "
+                    "THEN md5(job_id || '-data-expired-' || revision::text) ELSE notice_id END, "
+                    "notice_reason=CASE WHEN kind='agent_task' AND state IN ('active','paused') "
+                    "THEN 'definition_expired' ELSE notice_reason END, "
+                    "notice_state=CASE WHEN kind='agent_task' AND state IN ('active','paused') "
+                    "THEN 'pending' ELSE notice_state END, "
+                    "reason=CASE WHEN kind='fixed_message' AND state='active' AND run_at+"
                     "lateness_seconds*interval '1 second'<=:now "
                     "THEN 'lateness_exceeded' WHEN state IN ('draft','active','paused') "
                     "THEN 'definition_expired' ELSE reason END, "
-                    "state=CASE WHEN state='active' AND run_at+"
+                    "state=CASE WHEN kind='fixed_message' AND state='active' AND run_at+"
                     "lateness_seconds*interval '1 second'<=:now "
                     "THEN 'missed' WHEN state IN ('draft','activ"
                     "e','paused') THEN 'disabled' ELSE state END "
@@ -946,6 +957,15 @@ async def cleanup_expired(engine: AsyncEngine, *, now: datetime, batch_size: int
                     "ORDER BY content_expires_at,job_id LIMIT :limit) AND NOT EXISTS "
                     "(SELECT 1 FROM xiaowei_notification_attempt n "
                     "WHERE n.job_id=j.job_id AND n.state='sending')"
+                ),
+                params,
+            )
+            await conn.execute(
+                text(
+                    "UPDATE xiaowei_scheduled_run SET answer=NULL WHERE run_id IN "
+                    "(SELECT run_id FROM xiaowei_scheduled_run WHERE answer_expires_at<=:now "
+                    "AND answer IS NOT NULL AND state<>'running' "
+                    "ORDER BY answer_expires_at,run_id LIMIT :limit)"
                 ),
                 params,
             )

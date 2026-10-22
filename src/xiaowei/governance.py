@@ -131,6 +131,7 @@ ToolRejectCode = Literal[
 
 
 ToolRejectHint = Literal[
+    "agent_task_time",
     "reminder_time",
     "reminder_target",
     "reminder_content",
@@ -469,6 +470,10 @@ class GovernedTools:
             c
             for c in self._catalog.contracts
             if _in_scope(ctx, c)
+            and (
+                not ctx.automatic
+                or (self._catalog.policy_for(c).effect == "read" and c.target_id != "scheduled")
+            )
             and self._catalog.policy_for(c).effect != "write"
             and (
                 not (
@@ -498,6 +503,8 @@ class GovernedTools:
         if not _in_scope(ctx, contract):
             raise ToolRejectedError("本轮不允许使用该工具", code="not_allowed")
         policy = self._catalog.policy_for(contract)
+        if ctx.automatic and (policy.effect != "read" or contract.target_id == "scheduled"):
+            raise ToolRejectedError("后台任务只允许获准的自动只读工具", code="not_allowed")
         if (policy.group_only or policy.effect != "read") and not _group_context(ctx):
             raise ToolRejectedError("仅指定飞书群可使用此工具", code="not_allowed")
         arguments = normalize_arguments(policy, request.arguments)
