@@ -19,7 +19,7 @@
 
 **监控能力（P4）。** 同一 Agent 可调查获准的 Prometheus 指标/标签/规则和范围结果、Grafana 仪表盘/面板/数据源/标记，以及独立 Alertmanager 的告警/分组/静默/接收器/状态；Grafana 定义与实时指标分开，不执行 Grafana 代理查询。指定群可选配逐次批准的静默创建/取消、经典 Dashboard 创建/修改、数据源非秘密字段创建/修改和 Annotation 创建，使用 SDK 原生暂停/恢复；这些实现不代表公司生产写已开放。数据源密码目前由管理员在 Grafana UI 配置，私聊密码命令尚未实现。主配置默认不启用监控源；选配、认证、迁移与开放门槛见 [Prometheus](deploy/OPERATIONS.md#选配-prometheus-监控源)、[Grafana](deploy/OPERATIONS.md#选配-grafana-监控源)、[Alertmanager](deploy/OPERATIONS.md#选配-alertmanager-监控源)、[Dashboard 写](deploy/OPERATIONS.md#选配经典-dashboard-创建和修改)和[群审批说明](deploy/OPERATIONS.md#监控群审批底座)。产品边界见 [ARCHITECTURE](ARCHITECTURE.md#monitoring-mcp)，合入版本、验证证据与缺口集中在 [handoff](AGENT_HANDOFF.md)。
 
-多机器人即时通知 A 已合入主线，可在指定飞书群通过已授权别名发送文字和获准事实，配置见[Webhook 通知](#webhook-notifications)。一次性固定提醒 B 已合入主线；通用定时 Agent C 为当前离线开发候选，Node 巡检 D 尚未实现，仍按[设计](docs/superpowers/specs/2026-10-21-scheduled-agent-tasks.md)及 [A–D 计划](docs/superpowers/plans/2026-10-21-scheduled-agent-tasks.md)接续。离线结果不代表真实模型、机器人实收或部署验收，当前证据见 handoff。
+多机器人即时通知 A 已合入主线，可在指定飞书群通过已授权别名发送文字和获准事实，配置见[Webhook 通知](#webhook-notifications)。一次性固定提醒 B、通用定时 Agent C 已合入主线（C 为 #126）；自建飞书代理正在单独离线交付，Node 巡检 D 暂停且尚未实现，仍按[设计](docs/superpowers/specs/2026-10-21-scheduled-agent-tasks.md)及 [A–D 计划](docs/superpowers/plans/2026-10-21-scheduled-agent-tasks.md)接续。离线结果不代表真实模型、机器人实收或部署验收，当前证据见 handoff。
 
 ## 最小产品形态
 
@@ -170,15 +170,27 @@ uv run --locked xiaowei --config xiaowei.json requests resend --subject <发起�
 }]
 ```
 
-URL 仅允许飞书官方 HTTPS 自定义机器人端点，不允许用户 URL、跳转、代理环境变量或其他主机。启用签名时填写签名密钥的 `env:NAME` 引用；关键词与出口 IP 白名单由管理员在真实机器人上匹配，接口拒绝时不自动加词或重试。管理员须确认 `bot_id` 对应的实际接收群；同目标密钥轮换保持目标版本，实际换群/机器人须改版本并重新授权，不清除发送记录。
+默认 `protocol="feishu"`，URL 仅允许飞书官方 HTTPS 自定义机器人端点；自建代理须显式选择下述协议。两条路径均不允许用户 URL、跳转或代理环境变量。启用签名时填写签名密钥的 `env:NAME` 引用；关键词与出口 IP 白名单由管理员在真实机器人上匹配，接口拒绝时不自动加词或重试。管理员须确认 `bot_id` 对应的实际接收群；同目标密钥轮换保持目标版本，实际换群/机器人须改版本并重新授权，不清除发送记录。
 
-群内可说“给 ops_alert_bot 发消息：今晚 22:00 检查 StarRocks。”；发送历史业务结论时，代码复核全部模型可见 Evidence 的当前权限、TTL 及机器人可接收的源/工具，事实沿 feishu 投影生成，模型说明单列。不提供主动 @所有人或成员功能；最终正文统一将 `<at …>` 的开头改为 `＜at …>`，普通文字和换行保留。外发动作事实省略只能在原群使用的 `approval_command`，原群审批材料不变。文字沿现有回答上限为16000 UTF-8字节，完成标签中和后含签名的完整请求最多20000字节；超限明确未发送，缩短内容或重新取得必要摘要，不悄悄截断。适配器使用已有 httpx2，单次总期限10秒、响应读取最多4096字节。[飞书官方请求/签名契约](https://open.feishu.cn/document/client-docs/bot-v3/add-custom-bot)是接口依据；真实关键词、IP、签名和平台限流仍须实测。
+群内可说“给 ops_alert_bot 发消息：今晚 22:00 检查 StarRocks。”；发送历史业务结论时，代码复核全部模型可见 Evidence 的当前权限、TTL 及机器人可接收的源/工具，事实沿 feishu 投影生成，模型说明单列。不提供主动 @所有人或成员功能；最终正文统一将 `<at …>` 的开头改为 `＜at …>`，普通文字和换行保留。外发动作事实省略只能在原群使用的 `approval_command`，原群审批材料不变。文字沿现有回答上限为16000 UTF-8字节，完成标签中和后含签名的完整请求最多20000字节；超限明确未发送，缩短内容或重新取得必要摘要，不悄悄截断。适配器使用已有 httpx2，单次总期限10秒；官方响应读取最多4096字节，代理不解析未确认的响应体。[飞书官方请求/签名契约](https://open.feishu.cn/document/client-docs/bot-v3/add-custom-bot)是接口依据；真实关键词、IP、签名和平台限流仍须实测。
 
-状态区分 `accepted`（接口接受）、`failed`（明确失败）、`unknown`（可能已发送）和 `not_sent`（未发送）。同轮同机器人相同正文只发一次，不同且明确要求的正文可分别发送；failed/unknown 后不自动再发，重启也不重放。unknown 后用户新一轮主动要求重发，须先有重复风险提示；门槛由原群＋机器人共享，其他成员也不能绕过，未确认提示送达时可能先暂缓一次。原回执保留 unknown；容量降级也保留发送结果及风险，父交付失败不解除门槛。发送回执独立保存，后续模型/回答失败也不能抹掉已提交事实。API 接受不等于成员收到或阅读。
+**自建告警代理。** 同一个机器人登记项显式添加以下字段，`signing_secret_ref` 必须为 null，`url_ref` 改指管理员保存的完整代理 URL（包含唯一非空 groupId 及其他原始查询参数）；不要把 URL 或 Token 写进对话。机器人 alias、发送授权、receive_tools/receive_targets 的配置仍与上例相同。
+
+```json
+"protocol": "feishu_proxy",
+"title": "小维任务通知",
+"open_url": "https://dashboard.example.test/"
+```
+
+配置 title/open_url 为固定字符串，open_url 只接受 HTTP(S) 页面地址。实际请求键严格为 title/message/**openUrl**，Content-Type 为 `application/json; charset=utf-8`；不会发官方 msg_type/content 或签名。端点可使用可信内网 HTTP(S)，HTTP 的传输保密由部署网络保证；查询参数不改写/重排。切换协议、groupId 接收群或扩大接收范围时同步更新 target_version；仅同目标密钥轮换不改版本、不清空旧回执。
+
+代理 2xx 记 accepted/proxy_http_success，只表示“代理返回成功状态，群内投递未确认”，不解析 code/errcode，不声称成员收到。响应体的业务成功协议仍未知；非2xx、超时和重定向沿同一失败/unknown 分类。用户已明确取消协议原文要求的固定 at 标签，不追加、不设开关；**不带 at 标签能否正常投递须在线上核实**。字段和路由要求来自用户提供的协议；本地20000字节上限及失败分类沿用已有契约，不能当作代理服务能力证明。后台正文超限时只发固定说明；若固定 title/openUrl 连说明也撑大到超限，则零 POST，状态可查 content_too_large，请管理员缩短固定字段。
+
+状态区分 `accepted`（官方接口接受；代理仅 HTTP 2xx）、`failed`（明确失败）、`unknown`（可能已发送）和 `not_sent`（未发送）。同轮同机器人相同正文只发一次，不同且明确要求的正文可分别发送；failed/unknown 后不自动再发，重启也不重放。unknown 后用户新一轮主动要求重发，须先有重复风险提示；门槛由原群＋机器人共享，其他成员也不能绕过，未确认提示送达时可能先暂缓一次。原回执保留 unknown；容量降级也保留发送结果及风险，父交付失败不解除门槛。发送回执独立保存，后续模型/回答失败也不能抹掉已提交事实。API 接受不等于成员收到或阅读。
 
 A 不在生产动作审批恢复轮自动通知；等待批准材料会提示“批准后不会自动通知，完成后请另发通知要求”。动作完成后在群里另说“通知 ops_alert_bot”，走普通通知权限和回执链。若要外发动作结果，管理员须按实际可见证据显式登记对应源的提出/状态/`request_action_execution` 接收许可；配置接收许可不授予执行写操作的权限。目的地无权接收当前查询历史时不会发送，即使发送的是纯文字；用户可显式 `/新建` 后完整重述纯文字，但这会轮换全群共享上下文，小维不会自动执行此操作。
 
-当前 C 候选应用 schema v15，B 主线为 v14；014 保持已发布内容，015 只扩展应用表。按既有 `storage upgrade` 流程停服、成对备份后显式升级，不改 SDK 表，不在启动时自动迁移。旧镜像不能直接读新 schema，回退需隔离入站并恢复升级前配对备份，恢复时 `scheduled_tasks.enabled=false`。曾试装旧 B 候选 v14 的试验库仍须按已知限制重建或恢复 v13 配对备份，不能只换程序；未发布的 C/v15 试验库也不作为长期兼容基线。
+当前主线应用 schema v15（C），代理增量不改变 schema；B 历史为 v14；014 保持已发布内容，015 只扩展应用表。按既有 `storage upgrade` 流程停服、成对备份后显式升级，不改 SDK 表，不在启动时自动迁移。旧镜像不能直接读新 schema，回退需隔离入站并恢复升级前配对备份，恢复时 `scheduled_tasks.enabled=false`。曾试装旧 B 候选 v14 的试验库仍须按已知限制重建或恢复 v13 配对备份，不能只换程序；未发布的 C/v15 试验库也不作为长期兼容基线。
 
 <a id="one-time-reminders"></a>
 

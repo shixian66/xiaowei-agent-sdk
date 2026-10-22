@@ -603,7 +603,7 @@ def validate_config(
         try:
             resolve_bot(bot)
         except (ValueError, SecretRefError):
-            raise ConfigError("Webhook 安全引用或官方 HTTPS 地址不合约") from None
+            raise ConfigError("Webhook 安全引用或所选协议端点不合约") from None
     if os.environ.get(_POSTGRES_PASSWORD_ENV) in _ENV_TEMPLATE_VALUES:
         raise ConfigError(f"{_POSTGRES_PASSWORD_ENV}: 仍是 .env 模板占位符，请替换为实际值")
 

@@ -12,11 +12,12 @@ import uuid
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Any
+from typing import Any, Literal
+from urllib.parse import parse_qs, urlsplit
 
 import httpx2
 from agents import FunctionTool
-from pydantic import BaseModel, ConfigDict, Field, SecretStr, field_validator
+from pydantic import BaseModel, ConfigDict, Field, SecretStr, field_validator, model_validator
 from sqlalchemy import text as sql
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine
@@ -70,6 +71,9 @@ class WebhookBotConfig(BaseModel):
     description: str = Field(min_length=1, max_length=200)
     target_version: str = Field(min_length=1, max_length=64)
     url_ref: str
+    protocol: Literal["feishu", "feishu_proxy"] = "feishu"
+    title: str | None = None
+    open_url: str | None = None
     signing_secret_ref: str | None
     receive_tools: frozenset[str]
     receive_targets: frozenset[str]
@@ -80,6 +84,18 @@ class WebhookBotConfig(BaseModel):
         if value is not None and not is_secret_ref(value):
             raise ValueError("Webhook 凭据必须使用 env:NAME 安全引用")
         return value
+
+    @model_validator(mode="after")
+    def _protocol_fields(self) -> WebhookBotConfig:
+        if self.protocol == "feishu_proxy":
+            if self.title is None or self.open_url is None or self.signing_secret_ref is not None:
+                raise ValueError("自建代理须配置字符串 title/open_url，不能套用官方签名")
+            page = urlsplit(self.open_url)
+            if page.scheme not in {"http", "https"} or not page.hostname:
+                raise ValueError("代理 open_url 须为 HTTP(S) 页面地址")
+        elif self.title is not None or self.open_url is not None:
+            raise ValueError("title/open_url 仅用于自建代理协议")
+        return self
 
 
 class SendArgs(BaseModel):
@@ -110,6 +126,11 @@ def catalog(
         "not_sent 表示未发送；修正未知别名或内容容量后须仍属于用户要求，不能换字重试 unknown。"
         "可用机器人：" + "；".join(f"{b.alias}（{b.description}）" for b in bots)
     )
+    if any(bot.protocol == "feishu_proxy" for bot in bots):
+        description += (
+            "自建代理不附加 @ 标签；proxy_http_success 仅表示代理返回 HTTP 2xx，"
+            "响应业务协议未确认，群内投递未确认；不能解释为飞书群已收到。"
+        )
     fields = ("receipt_id", "bot_alias", "status", "reason")
     policy = ToolPolicy(
         policy_id="notification.feishu_text",
@@ -139,8 +160,22 @@ class _Bot:
 
 def resolve_bot(config: WebhookBotConfig) -> _Bot:
     url = resolve_secret_ref(config.url_ref)
-    if not _URL.fullmatch(url.get_secret_value()):
-        raise ValueError("Webhook 地址须为飞书官方 HTTPS 自定义机器人端点，不能含查询或跳转")
+    if config.protocol == "feishu":
+        if not _URL.fullmatch(url.get_secret_value()):
+            raise ValueError("Webhook 地址须为飞书官方 HTTPS 自定义机器人端点，不能含查询或跳转")
+    else:
+        parts = urlsplit(url.get_secret_value())
+        groups = parse_qs(parts.query, keep_blank_values=True).get("groupId", [])
+        if (
+            parts.scheme not in {"http", "https"}
+            or not parts.hostname
+            or parts.username is not None
+            or parts.password is not None
+            or parts.fragment
+            or len(groups) != 1
+            or not groups[0]
+        ):
+            raise ValueError("自建代理须为可信 HTTP(S) 地址，含唯一非空 groupId，无用户信息或片段")
     signing = resolve_secret_ref(config.signing_secret_ref) if config.signing_secret_ref else None
     return _Bot(config, url, signing)
 
@@ -157,7 +192,11 @@ class _PrivateTransport(httpx2.AsyncBaseTransport):
         forwarded = httpx2.Request(
             "POST",
             bot.url.get_secret_value(),
-            headers={"Content-Type": "application/json"},
+            headers={
+                "Content-Type": "application/json; charset=utf-8"
+                if bot.config.protocol == "feishu_proxy"
+                else "application/json"
+            },
             content=await request.aread(),
         )
         return await self._inner.handle_async_request(forwarded)
@@ -167,7 +206,15 @@ class _PrivateTransport(httpx2.AsyncBaseTransport):
 
 
 def _body(bot: _Bot, content: str, clock: Callable[[], datetime]) -> bytes:
-    payload: dict[str, object] = {"msg_type": "text", "content": {"text": content}}
+    payload: dict[str, object]
+    if bot.config.protocol == "feishu_proxy":
+        payload = {
+            "title": bot.config.title,
+            "message": content,
+            "openUrl": bot.config.open_url,
+        }
+    else:
+        payload = {"msg_type": "text", "content": {"text": content}}
     if bot.signing is not None:
         stamp = str(int(clock().timestamp()))
         key = f"{stamp}\n{bot.signing.get_secret_value()}".encode()
@@ -307,6 +354,9 @@ class WebhookNotifications:
                     # 仅可信调用方提供有界固定说明；同一次治理调用、同一发送机会。
                     normalized = _message_text(oversize_notice)
                     body = _body(bot, normalized, self._clock)
+                    if len(body) > MAX_BODY_BYTES:
+                        outcome = FixedSendOutcome("not_sent", "content_too_large")
+                        return self._observation(alias, outcome.status, outcome.reason)
                 receipt, status, reason, claimed = await claim(normalized)
                 if claimed:
                     status, reason = await self._post(bot, body)
@@ -591,6 +641,9 @@ class WebhookNotifications:
                         return "failed", "redirect_rejected"
                     if not 200 <= response.status_code < 300:
                         return "unknown", "http_unconfirmed"
+                    if bot.config.protocol == "feishu_proxy":
+                        # 未约定响应体，仅记录代理 HTTP 成功状态，不推断业务码或群内到达。
+                        return "accepted", "proxy_http_success"
                     data = bytearray()
                     async for chunk in response.aiter_bytes():
                         if len(data) + len(chunk) > 4096:
@@ -655,7 +708,11 @@ async def receipt_notice(
                 + "未自动重发（unknown）。"
             )
         elif state == "accepted":
-            result = "消息已提交，Webhook 接口返回成功（accepted），不表示成员已阅读。"
+            result = (
+                "代理返回 HTTP 2xx 成功状态（accepted），群内投递未确认。"
+                if row["reason"] == "proxy_http_success"
+                else "消息已提交，Webhook 接口返回成功（accepted），不表示成员已阅读。"
+            )
         elif state in {"unknown", "sending"}:
             result = UNKNOWN_NOTICE + "未自动重发（unknown）。"
         elif row["reason"] == "duplicate_warning":
