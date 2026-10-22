@@ -137,6 +137,98 @@ async def test_only_supported_returned_row_count_is_summarized(
             assert fact.summary is None
 
 
+@pytest.mark.parametrize("answer_version", [3, 4])
+@pytest.mark.parametrize("view", ["full", "brief"])
+@pytest.mark.parametrize(
+    "policy_id", ["prometheus.query", "prometheus.range_query", "synthetic.region"]
+)
+async def test_only_prometheus_opaque_history_keeps_v4_brief_without_inventing_summary(
+    postgres_url: URL, answer_version, view, policy_id
+):
+    grants = Grants()
+    grants.grant("alice", TOTAL_TOOL)
+    policy = ToolPolicy(
+        policy_id,
+        RegionArgs,
+        {a: Projection((*FIELDS, "result"), 5000) for a in AUDIENCES},
+    )
+    catalog = ToolCatalog((CONTRACTS[0].model_copy(update={"policy_id": policy_id}),), (policy,))
+    async with ready_engine(postgres_url) as engine:
+        evidence = store(engine, grants, Clock(), catalog)
+        result = await recorded(
+            evidence, context(), count=None, rows=[], columns=[], result="host => 1"
+        )
+        turn = selected(
+            [result.evidence_id], [{"evidence_id": result.evidence_id, "view": view}]
+        ).model_copy(update={"answer_version": answer_version})
+        (fact,) = (await evidence.validate_answer(turn, context(turn="followup"))).facts
+        compact = policy_id.startswith("prometheus.") and answer_version == 4 and view == "brief"
+        assert fact.view == ("brief" if compact else "full")
+        assert fact.summary is None and not fact.historical_brief
+        assert fact.metadata["result"] == "host => 1"
+        assert json.loads(fact.result_json)["result"] == "host => 1"
+        assert fact.columns == () and fact.rows == ()
+
+
+@pytest.mark.parametrize("history", [False, True])
+@pytest.mark.parametrize(
+    "tool,policy_id,target,effect,status",
+    [
+        ("scheduled/get_task", "scheduled.get_task", "scheduled", "read", {"state": "paused"}),
+        (
+            "notifications/send_webhook_message",
+            "notification.feishu_text",
+            "notifications",
+            "notify",
+            {"status": "unknown"},
+        ),
+    ],
+)
+async def test_v4_task_and_notification_states_stay_visible_even_when_brief(
+    postgres_url: URL, history, tool, policy_id, target, effect, status
+):
+    from tests.sdk_core.test_feishu_render import text_parts
+
+    from xiaowei.feishu_render import build_feishu_message
+
+    grants = Grants()
+    grants.grant("alice", tool, target=target)
+    fields = (*status, "reason")
+    policy = ToolPolicy(
+        policy_id,
+        RegionArgs,
+        {a: Projection(fields, 5000) for a in AUDIENCES},
+        effect=effect,
+    )
+    contract = CONTRACTS[0].model_copy(
+        update={"tool_id": tool, "target_id": target, "policy_id": policy_id}
+    )
+    ctx = context(channel="feishu", tools=frozenset({tool}), targets=frozenset({target}))
+    async with ready_engine(postgres_url) as engine:
+        evidence = store(engine, grants, Clock(), ToolCatalog((contract,), (policy,)))
+        result = await evidence.record(
+            ctx,
+            request().model_copy(update={"tool_id": tool, "target_id": target}),
+            ToolObservation(
+                payload={**status, "reason": "response_unknown"},
+                captured_at=Clock().now,
+                truncated=False,
+            ),
+        )
+        read = (
+            ctx.model_copy(
+                update={"identity": ctx.identity.model_copy(update={"turn_id": "followup"})}
+            )
+            if history
+            else ctx
+        )
+        output = await evidence.validate_answer(selected([result.evidence_id]), read)
+        (fact,) = output.facts
+        assert fact.view == "full" and fact.summary is None
+        visible = "\n".join(text_parts(build_feishu_message(output, 3500, "oc"), folded=False))
+        assert next(iter(status.values())) in visible and "response_unknown" in visible
+
+
 async def test_conflicting_display_entries_normalize_to_full(postgres_url: URL):
     grants = Grants()
     grants.grant("alice", TOTAL_TOOL)

@@ -60,6 +60,7 @@ from xiaowei.governance import (
 from xiaowei.models import (
     ACTION_STATUS_POLICY,
     MONITORING_READ_POLICIES,
+    PROMETHEUS_QUERY_POLICIES,
     AgentAnswer,
     AnswerBlock,
     Audience,
@@ -548,8 +549,18 @@ class EvidenceStore:
             and self.category(by_id[e]) == "result"
         ]
         facts = [
-            *(self._delivery_fact(by_id[e], "action", views.get(e), ctx) for e in actions),
-            *(self._delivery_fact(by_id[e], "body", views.get(e), ctx) for e in body),
+            *(
+                self._delivery_fact(
+                    by_id[e], "action", views.get(e), ctx, modern=turn.answer_version == 4
+                )
+                for e in actions
+            ),
+            *(
+                self._delivery_fact(
+                    by_id[e], "body", views.get(e), ctx, modern=turn.answer_version == 4
+                )
+                for e in body
+            ),
             *(self._delivery_fact(by_id[e], "remaining", None, ctx) for e in remaining),
         ]
         blocks: list[DeliveryBlock] = [
@@ -629,6 +640,8 @@ class EvidenceStore:
         section: FactSection,
         view: Literal["full", "brief"] | None,
         ctx: RunContext,
+        *,
+        modern: bool = False,
     ) -> DeliveryFact:
         channel = ctx.identity.channel
         item = _shown(record, channel, self._fact_note(record))
@@ -658,9 +671,18 @@ class EvidenceStore:
                     )
                 }
             )
-        # 当前 brief 仅收起，summary 留空；历史摘要仍受原有行数语义限制。
+        # 必要执行状态不能因 brief 隐藏；旧版本和已绑定内容保持原语义。
+        if modern and record.target_id in {"scheduled", "notifications"}:
+            return fact
+        # 仅当前结果和 v4 Prometheus 非表格补充原文可只收起、不生成计数摘要。
+        # 结构化历史没有可信计数时仍回 full，不能把业务行误收进技术区。
         if view == "brief" and not complete and section != "action":
-            if record.identity.turn_id == ctx.identity.turn_id:
+            if record.identity.turn_id == ctx.identity.turn_id or (
+                modern
+                and not fact.columns
+                and contract is not None
+                and contract.policy_id in PROMETHEUS_QUERY_POLICIES
+            ):
                 return fact.model_copy(update={"view": "brief"})
             count = (item.data or {}).get("row_count")
             if type(count) is int and count >= 0 and count == len(fact.rows) and fact.columns:
