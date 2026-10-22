@@ -15,7 +15,7 @@
 | 锁定依赖 | SDK `0.22.3`、Lark Channel `1.4.0`、MCP `2.2.0`、sqlglot `30.17.0`、`nh3 0.3.7`、`tinycss2 1.5.1`、Pillow `13.0.0`、certifi `2026.10.19`（后两项为严格审计发现的既有漏洞定向升级） |
 | 正式入口 | `xiaowei serve`、`config check`、`model check`、`storage init/upgrade/cleanup`、`requests resend`；命令与环境准备以 README 为准 |
 | 最近有记录的公司部署 | 主线交接记录含用户提供的 `xiaowei:143c4c8641be636c41c130329ce1639a36b59c27` 镜像及巡检日志；未独立核验当前服务器状态。B 本轮未部署 |
-| 当前验收结论 | A/B 已合入主线；C 相对a8a7603精简与修复中，旧审查及全套不覆盖本轮；须新SHA验证及独立复审；真实 U5/U6/U7 未验收，D 未实现。具体版本与证据见 §5 |
+| 当前验收结论 | A/B 已合入主线；C 本轮精简/修复完成，功能版本1a5605d独立复审及单次完整默认全套通过；真实 U5/U6/U7 未验收，D 未实现。具体版本与证据见 §5 |
 | 当前任务授权 | C 的实现、测试、常规修复、文档及本地提交；不推送/建 PR/合并/部署，不调用真实模型、Webhook、飞书或公司源，不读取公司配置及凭据正文。真 SDK＋合成替身＋隔离 PG 已授权 |
 
 原工作目录的 ARCHITECTURE 差异与未跟踪计划/公司配置保留，未复制到本工作树；本次未读取公司配置凭据。旧监控和回答修复记录保留为注明版本的证据，不作为本轮 C 范围扩展授权。
@@ -45,7 +45,7 @@
 
 SDK公开 RunHooks 计数主调用和无工具收尾/修正，共享已批准的模型调用上限；缺失供应商usage保持未知，不伪造0。后台无生产写、提案/审批、通知、管理工具；治理层手工伪造调用也拒绝。当前成员分页必须保留完整性：原便捷接口丢弃该标记，C 使用同一飞书SDK公开 Client.request 在工作线程读取，完整名单缺席才停用；部分/失败为未核实。
 
-下一步：交付本地C候选，等待具体的真实U6/U7环境、范围及费用授权；离线结果不代替能力验收。排队默认900秒已确认；30任务实际并发/成本需实测；未获授权不推送、建PR或部署，也不继续实现D。
+下一步：本轮C离线交付完成，等待真实U6/U7的具体环境、范围及费用授权；离线结果不代替能力验收。排队默认900秒已确认；30任务实际并发/成本需实测；未获授权不推送、建PR或部署，也不继续实现D。
 
 ### 已合入的监控可靠性修订（PR #121）
 
@@ -142,27 +142,36 @@ B1 的短口径主视图修复已成立；原 B2 因复现形状不符合真实 
 
 ### C 精简修复与验证
 
-本轮基于 `a8a7603c8320e5d025911891a08ac56567654bfd`，分支 `codex/scheduled-agent-tasks`，C最初基线为B合并 `2bee11fe573ab67b054a6195f1444abfcae748b2`。仅修改隔离工作树、本地提交；原目录保留修改未混入，无真实服务、推送/PR/部署。正式群入口→Action确认→独立Application.run_turn/SDK→治理只读工具/Evidence→可信通知链路保持。
+功能冻结版本 `1a5605d33e0fdee3d395de95b5930d4ae9a92c20`，本轮比较基线 `a8a7603c8320e5d025911891a08ac56567654bfd`；C最初基于B合并 `2bee11fe573ab67b054a6195f1444abfcae748b2`。分支 `codex/scheduled-agent-tasks`，只在隔离工作树本地提交；原目录的保留修改未混入。没有真实模型、Webhook、飞书或公司源调用，也未推送、建PR、合并或部署。
 
-用户本轮确认：删除有效期修改/续期、删除模型绑定、排队默认900秒（可配置）。取消重建替代修改审批；模型/兼容数据策略变化不单独停用，仍按当前配置复核。产品边界唯一维护于ARCHITECTURE，不再复制数值决定。
+用户本轮决定及唯一产品边界见 [ARCHITECTURE](ARCHITECTURE.md#scheduled-agent-tasks)：删除有效期修改/续期、删除模型绑定、确认可配置的900秒排队。创建仍复用既有Action，暂停/取消直接控制；修改定义须取消重建。正式群入口→Action确认→独立Application.run_turn/SDK→治理只读工具/Evidence→可信通知链路保持。
 
-| 根因/精简 | 修复及关键验证 |
+| 根因或删减 | 修复及关键行为回归 |
 | --- | --- |
-| B1 发送前拒绝被普通异常吞成execution_failed | send_fixed返回typed结果；真实成员回调Exception也在runtime授权边界转不可核验，保留CancelledError；主体未核实零POST并递增计数；容量超限同一机会改发固定说明，回执独立保留真实状态。`test_large_agent_result_sends_capacity_notice_once_then_next_period_runs`、`test_send_time_member_unverified_preserves_count_then_success_resets` |
-| B2 一个任务异常取消整批 | gather收集逐项异常、安全日志；普通异常隔离，就绪丢失才取消同批。`test_one_job_scan_error_isolated_unless_readiness_lost` 两分支 |
-| 无消费方的持久化/传递 | 删除run.answer/answer_expires_at/usage/duration_seconds及清理副本、job.run_count/run.skipped_count；错过时点只更新原因/next_run。删TurnUsage层层传递，保留SDK硬调用预算，finally日志含模型/业务工具数、token未知值及耗时，不含正文 |
-| 续期/模型绑定 | 删除revision/续期工具和ActionBinding、suppressed/复活分支、model_binding/automatic_binding；删除三个续期专项测试，保留TTL/当前权限及新配置实际执行回归 |
-| 重复核验 | 开始前统一当前范围/接收方/TTL/三态成员；保存前仅状态/期限，发送前主体核验；Evidence与锁内准入保留。`test_only_start_and_send_check_membership` |
-| 当前模型策略/容量尾注 | 后台旧定义依赖同样取当前model_tools交集；兼容策略改变可继续，依赖工具撤出则模型前拒绝。容量替代说明不消耗正常结果的30天提示机会。`test_definition_dependencies_obey_current_model_policy_before_background_run`（成功/拒绝）及千行结果回归 |
-| 首跑/停止反馈 | 已过去显式周期首跑返回agent_task_time；停止后有历史回执的pause/cancel仍说明“任务已停止”。对应新行为测试覆盖；新停止反馈仅限agent_task，B固定提醒完成后仍保留原发送已准入原因 |
+| B1 发送前拒绝被异常吞成execution_failed | send_fixed返回typed结果；runtime成员resolve的Exception只表示本次不可核验，保留取消传播。主体未核实零POST、连续计数2→3，后续成功归零。`test_send_time_member_unverified_preserves_count_then_success_resets`、`test_runtime_sender_timeout_is_unverified_without_replacing_sender_check` |
+| B1 容量超限 | 真实千行合成结果、不改20000常量；同一机会只发固定无数据说明，run.reason=content_too_large，下一周期发送新事实。不消耗未展示的30天尾注，下一正常结果补提示。`test_large_agent_result_sends_capacity_notice_once_then_next_period_runs` |
+| B2 一个普通异常取消整批 | gather收集逐项异常、安全日志；普通异常隔离，实例失去readiness才取消同批并保留原异常传播。`test_one_job_scan_error_isolated_unless_readiness_lost` 两分支；原B丢锁测试保持 |
+| 续期和模型绑定 | 删除job.revision、续期工具/参数/ActionBinding、suppressed及复活分支、model_binding/automatic_binding。现有通用ActionPlan.revision不删除。兼容模型/策略调整继续，旧定义依赖若撤出当前model_tools则在模型前拒绝。`test_model_and_compatible_policy_change_use_current_config_without_stopping_job`、`test_definition_dependencies_obey_current_model_policy_before_background_run`（成功/拒绝） |
+| 无读取方的数据 | 删除run.answer/answer_expires_at/usage/duration_seconds、job.run_count/run.skipped_count及回答副本清理SQL；错过历史时点只更新job.reason/next_run。删除TurnUsage层层传递。SDK模型总调用硬上限保留，安全日志记录调用/token未知/耗时 |
+| 重复核验 | 开始前统一当前授权/目标/TTL/三态成员；保存前仅任务状态/期限；发送前核验主体。Evidence当前数据/接收范围与锁内active/期限保留。`test_only_start_and_send_check_membership`、`test_pause_during_model_prevents_history_commit_and_send`、`test_current_config_revocation_stops_before_model_and_business_post` |
+| 首跑与控制反馈 | 已过去显式周期首跑返回agent_task_time。已停止Agent有旧回执仍说明“任务已停止”；这个新分支仅限agent_task，B固定提醒完成后保留“发送已准入”。`test_past_explicit_periodic_start_rejected_before_draft`、`test_stopped_agent_control_reports_stopped_despite_historical_receipt`、`test_completed_fixed_reminder_keeps_admitted_control_reason` |
 
-B兼容：完整相关回归暴露停止反馈误影响固定提醒，`/tmp/xiaowei-c-trim-fixed-control-red.log` 确定性复现后把新分支限定agent_task，旧B锁等待断言不改。
+删除的三个续期测试：`test_expiry_change_is_code_authored_approved_version_without_resetting_history`、`test_expiry_change_cannot_extend_definition_dependency_ttl`、`test_old_run_cannot_expire_newly_approved_validity`，因对应功能已撤销。旧多轮次成员核验测试改为一次开始三态、发送前False/真实TimeoutError、连续计数和恰好两处成员核验；旧数据库usage/回答缓存断言改为日志与真实Session/Evidence清理，不削弱TTL、权限或写审批。
 
-RED：`/tmp/xiaowei-c-trim-large-red.log` 为真实千行结果超限（未改常量）失败；`/tmp/xiaowei-c-trim-red.log` 的成员核验/同批异常为失败反例，其中早期大结果夹具KeyError不作为根因证据。GREEN及冻结版本检查待本轮补录，不引用旧版本全套替代。4e7523c独立复审另发现当前模型策略未约束旧定义依赖、真实成员异常分类遗漏及容量说明消耗30天尾注；分别补RED（`/tmp/xiaowei-c-trim-review-red.log` 两失败、`/tmp/xiaowei-c-trim-long-tail-red.log` 一失败）后修复：后台定义同样按当前model_tools交集校验；runtime成员resolve异常统一转不可核验、保留取消传播；仅实际正文含固定尾注才推进提示时间。4e7523c默认全套主动中断（11 passed、89 deselected、exit2，版本未变），不算全套通过。
+| 冻结版本验证 | 证据及范围 |
+| --- | --- |
+| 单次完整默认全套 | **4741 passed, 235 skipped, 89 deselected, 5 warnings in 1661.83s (0:27:41)**；`/tmp/xiaowei-c-trim-1a5605d-full.log`，开始/结束均为上述SHA，工作树clean、EXIT_CODE=0、VERSION_UNCHANGED=True。包含C、A/B、Action/群审批、Session/Evidence、v14→v15迁移及Docker部署维护。跳过和未选项不算验收；不是分批加总 |
+| 静态 | `/tmp/xiaowei-c-trim-1a5605d-static.log`：全仓ruff、9个受影响Python文件format、mypy src（37文件）、本轮diff检查全部通过；前后SHA相同且clean |
+| 独立复审 | 1a5605d增量复核通过，覆盖本轮a8a7603..1a5605d已审链路，4e7523c发现的三项均关闭、B兼容保持。复审者独立运行5项通过（5.75秒），前后HEAD相同/clean；无文件日志，工具会话42688。不是自行复查，也不代表真实能力验收 |
+| 隔离变异 | `/tmp/xiaowei-c-trim-final-mutations-summary.json`，BASE_SHA=1a5605d；9项均原版exit0、变异exit1：发送主体类型结果、容量说明、普通异常隔离、保存前状态、SDK含收尾总预算、派生TTL、当前模型策略、真实成员异常、实际30天尾注。仅改/tmp的git archive副本。模型策略首试定位到无关分支，已修正定位后单项重跑；未改产品或断言 |
 
-迁移015尚未发布，直接修订，不为旧试装v15作兼容层；v14→v15须保留B任务及SDK历史。重建试验库或恢复v14备份按README处理。
+正式全套命令：前缀 `SDK_TEST_POSTGRES_URL=postgresql+asyncpg://postgres@127.0.0.1:55432/postgres PYTHONDONTWRITEBYTECODE=1`，执行 `.venv/bin/python -m pytest -q -p no:cacheprovider`；版本记录器 `/tmp/xiaowei_run_versioned_check.py LOG COMMAND...` 写入SHA/树/命令/工作区/结束码。独立5项使用同一隔离PG，精确命令为 `.venv/bin/python -m pytest -q tests/sdk_core/test_scheduled_agent.py::test_definition_dependencies_obey_current_model_policy_before_background_run tests/sdk_core/test_scheduled_agent.py::test_runtime_sender_timeout_is_unverified_without_replacing_sender_check tests/sdk_core/test_scheduled_agent.py::test_large_agent_result_sends_capacity_notice_once_then_next_period_runs tests/sdk_core/test_scheduled_tasks.py::test_completed_fixed_reminder_keeps_admitted_control_reason`。提交前64项定向通过（49.28秒）只作局部证据。全套后仅同步交付/版本文档，`/tmp/xiaowei-c-trim-final-docs.log` 的4项文档/维护静态检查及ruff/diff通过，源码、测试和依赖相对冻结版本无差异。
 
-旧eea17e4的4730项单次全套及增量审查仅属旧版本，a8a7603的外部审查已发现B1/B2，不能称为当前通过证据。剩余缺口：真实U6/U7自主行为与模型耗时/费用、真实飞书实收、30任务真实并发/成本；D未实现。
+RED反例：`/tmp/xiaowei-c-trim-large-red.log`（千行超限）、`/tmp/xiaowei-c-trim-red.log`（主体分类/同批取消）、`/tmp/xiaowei-c-trim-review-red.log`（当前策略/真实成员异常两失败）、`/tmp/xiaowei-c-trim-long-tail-red.log`、`/tmp/xiaowei-c-trim-fixed-control-red.log`。中间相关回归的B兼容失败已修复，旧4e7523c全套主动中断exit2；它们不作为最终通过证据。
+
+计量口径：scheduled_agent_usage在进入Application.run_turn的后台SDK轮次finally记录；tool_calls为治理账本已准入业务工具数，token缺失为null，耗时覆盖该SDK轮次；可信通知从attempt另计，完整run起止仍在运行记录中。保留一次通知的硬预算。迁移015尚未发布，已直接修订，不为旧试装v15加兼容层；重建试验库或恢复v14备份按README处理。
+
+剩余缺口：真实U6/U7的自主选择/调查/答案质量及模型耗时费用、真实飞书实收、30任务实际并发/成本。D未实现。继续默认关闭，真实环境和费用须另获授权。
 
 ### 合并交付前主线集成
 
