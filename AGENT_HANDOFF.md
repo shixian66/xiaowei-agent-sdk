@@ -16,7 +16,7 @@
 | 正式入口 | `xiaowei serve`、`config check`、`model check`、`storage init/upgrade/cleanup`、`requests resend`；命令与环境准备以 README 为准 |
 | 最近有记录的公司部署 | 主线交接记录含用户提供的 `xiaowei:143c4c8641be636c41c130329ce1639a36b59c27` 镜像及巡检日志；未独立核验当前服务器状态。B 本轮未部署 |
 | 当前验收结论 | A/B/C 已合入主线；代理离线候选 163d2ac 的独立复审及单次完整默认全套通过，真实 U5/U6/U7 未验收，D 暂停且未实现。具体版本与证据见 §5 |
-| 当前任务授权 | 代理新分支可改源码/测试/必要文档并本地提交；不得推送、PR、合并、部署或调用真实代理/飞书/模型/公司源，不读取公司配置及凭据正文；D 暂停、不提交 |
+| 当前任务授权 | 用户确认 Claude 审查无阻断，已授权推送代理分支、创建 PR，远端 CI 全绿后合并；仍不部署、不调用真实代理/飞书/模型/公司源、不读取公司配置及凭据正文；D 继续暂停 |
 
 原工作目录的 ARCHITECTURE 差异与未跟踪计划/公司配置保留，未复制到本工作树；本次未读取公司配置凭据。旧监控和回答修复记录保留为注明版本的证据，不作为本轮代理范围扩展授权。
 
@@ -39,9 +39,9 @@
 
 ### 当前：自建飞书代理（C 公司验收前置）
 
-C 已由 #126 合入 be8c155，批准的通用调度/只读边界不变；本轮只增加 Webhook 的 feishu_proxy 协议，详见 [ARCHITECTURE](ARCHITECTURE.md#scheduled-agent-tasks)。代理功能冻结于 163d2ac，独立审查和单次完整默认全套通过；当前仅本地候选，后续推送/合入和真实验收须用户另行授权。D 的 Node 研究/未提交改动保留在原隔离工作树，不混入代理分支，也不继续请求其认证信息。
+C 已由 #126 合入 be8c155，批准的通用调度/只读边界不变；本轮只增加 Webhook 的 feishu_proxy 协议，详见 [ARCHITECTURE](ARCHITECTURE.md#scheduled-agent-tasks)。代理功能冻结于 163d2ac，独立审查和单次完整默认全套通过；Claude 对本地交付 HEAD 1b1a78dee2df5e467315997304222879e0ba849e 的审查已由用户确认无阻断。用户现已授权推送、开 PR、远端 CI 全绿后合并；本次仅同步集成授权与状态文案，未修改源码、测试或依赖。PR 的实际 head、CI 与合并结果以 GitHub 记录为准。D 的 Node 研究/未提交改动保留在原隔离工作树，不混入代理分支，也不继续请求其认证信息。
 
-用户最新决定取消代理协议原文的固定 `<at id=all></at>`，不加开关；不带 at 能否正常投递、响应业务协议与群内实收须线上验收。下一步由用户决定代理的后续集成/部署及 C 公司验收授权；真实 U5/U6/U7、30任务并发/成本仍开放。
+用户最新决定取消代理协议原文的固定 `<at id=all></at>`，不加开关；不带 at 能否正常投递、响应业务协议与群内实收须线上验收。下一步按本次授权完成 PR 与全绿后合并；部署及 C 公司验收仍须另获授权，真实 U5/U6/U7、30任务并发/成本仍开放。
 
 ### 已合入的监控可靠性修订（PR #121）
 
@@ -163,7 +163,7 @@ ruff check、mypy（37源文件）、4个改动 Python 文件 format 和 diff �
 
 关键回归名称：`test_proxy_formal_entry_preserves_query_json_and_truthful_http_receipt`（含POST前已落库sending及秘密哨兵）、`test_proxy_same_intent_deduplicates_after_mention_sanitization`、`test_proxy_unknown_gate_requires_delivered_warning_before_explicit_resend`、`test_proxy_sender_recheck_prevents_claim_and_http`、`test_proxy_unapproved_receiver_has_zero_http`、`test_proxy_fixed_reminder_uses_same_once_only_path`、`test_proxy_scheduled_agent_delivers_facts_or_one_capacity_notice`、`test_proxy_static_fields_cannot_make_capacity_notice_exceed_limit`、`test_proxy_task_status_explains_persisted_http_receipt_even_after_config_change`、`test_official_and_proxy_bots_keep_distinct_wire_contracts`。
 
-仍未覆盖：真实代理对“不带at”的兼容、业务响应协议及真实飞书群实收；真实模型U5/U6/U7与成本、30任务并发实测。没有推送/PR/远端CI/合并/部署，也没有真实服务调用或公司配置/凭据读取；D保持暂停。代理不新增迁移或依赖，C主线v15的停服/备份升级边界仍按README，不因本次通过而取得部署授权。
+仍未覆盖：真实代理对“不带at”的兼容、业务响应协议及真实飞书群实收；真实模型U5/U6/U7与成本、30任务并发实测。上述本地交付记录产生时尚无推送/PR/远端CI/合并/部署证据，也没有真实服务调用或公司配置/凭据读取；当前新增的 GitHub 集成授权见 §1/§3，D保持暂停。代理不新增迁移或依赖，C主线v15的停服/备份升级边界仍按README，不因本次通过而取得部署授权。
 
 ### C 收尾修复与验证
 
