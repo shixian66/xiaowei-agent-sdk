@@ -101,6 +101,8 @@ _REJECTION_HINTS: dict[ToolRejectHint, str] = {
     ),
     "reminder_recipient": (
         "未创建提醒；起草上下文中的数据不在机器人接收范围内。"
+        "请管理员核对该机器人的 receive_tools/receive_targets；"
+        "群内用过提醒时，还须显式配置 scheduled 任务记录及其依赖业务源的接收许可。"
         "不能抄成文字或自行新建上下文绕过接收限制"
     ),
     "reminder_expiry": (

@@ -197,6 +197,23 @@ A 不在生产动作审批恢复轮自动通知；等待批准材料会提示“
 
 默认关闭。模型数据策略和群工具中加入 `scheduled/propose_reminder`、`scheduled/get_action_status`、`scheduled/get_task`、`scheduled/control_task` 及执行许可 `scheduled/activate_reminder`。创建者仍须单独取得 `notifications/send_webhook_message` 的个人 grant；确认者按现有个人 grant/群成员规则取得 `scheduled/activate_reminder`。仅要管理别人任务的管理员额外配置个人 grant `scheduled/control_task`，同时必须是当前可核验的原群成员；其他群成员不能仅凭 ID 操作。
 
+**接收配置同样需要补齐。** 管理员若批准这个机器人在同一群会话里接收提醒、后续即时消息及任务材料，须在该机器人的登记中显式追加以下接收策略（保留实际获准的业务源/工具；`fat` 按实际替换）：
+
+```json
+"receive_targets": ["fat", "scheduled"],
+"receive_tools": [
+  "local/run_readonly_query",
+  "scheduled/propose_reminder",
+  "scheduled/request_action_execution",
+  "scheduled/activate_reminder",
+  "scheduled/get_action_status",
+  "scheduled/get_task",
+  "scheduled/control_task"
+]
+```
+
+这些是接收许可，不授予调用、管理或生产写权限。提醒的提案、批准结果和状态会进入共享会话，因此只填 A 示例的业务查询许可不足以连续使用；缺少许可时拒绝并提示管理员核对，不自动扩大范围，也不要求日常连续操作清空全群上下文。显式允许 `scheduled` 仍不代表允许它引用的业务数据：发送和历史读取继续递归核对原数据源、工具、当前权限及 TTL。不同机器人分别配置；未获准接收某业务源的机器人仍不能接收携带该依赖的消息。
+
 示例：“明天上午10点向 ops_alert_bot 发消息：需要做汇报。”小维展示绝对日期、时区、正文、目标、有效期和迟到/容量限制，用户以现有 `/批准 <Action ID>` 材料中的实际命令确认；必须早于提醒时间，到时或之后批准会明确拒绝激活，需重新创建；未确认不发送。批准后任务有独立 ID，可问“小维，查询/暂停/取消任务〈ID〉”；暂停/取消不再次审批，不能撤回已准入的 HTTP。本片无列表、编辑、恢复工具，无周期和到点 Agent 调查。
 
 到期不调用模型；原 Session 过期不影响无历史数据依赖的提醒。若起草时已有群查询历史，全部模型可见 Evidence 都形成依赖，确认不会续期，材料展示最早失效时间。需要无旧依赖版本时由用户显式 `/新建` 后完整重述；这会轮换全群共享上下文，不能自动清除。机器人接收范围独立校验，不能把查询结果抄成提醒文字绕过。

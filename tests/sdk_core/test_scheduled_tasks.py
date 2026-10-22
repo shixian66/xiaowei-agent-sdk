@@ -2,7 +2,9 @@
 
 import asyncio
 import json
+import re
 from datetime import timedelta
+from pathlib import Path
 
 import httpx2
 import pytest
@@ -39,6 +41,25 @@ def task_config(env, *, enabled=True, approve=True, admins=(), **options):
         data["access"]["grants"][A].append("scheduled/activate_reminder")
     for subject in admins:
         data["access"]["grants"][subject] = ["scheduled/control_task"]
+    return runtime.ServeConfig.model_validate(data)
+
+
+def documented_task_config(env):
+    """读取公开示例的接收策略；保留合成凭据与源，不自动补任何许可。"""
+    readme = (Path(__file__).resolve().parents[2] / "README.md").read_text()
+    section = readme.split('<a id="webhook-notifications"></a>', 1)[1].split("**开发验证**", 1)[0]
+    config = task_config(env)
+    data = config.model_dump(mode="json")
+    for block in re.findall(r"```json\n(.*?)\n```", section, re.S):
+        values = json.loads("{" + block + "}")
+        receiver = values.get("webhook_bots", [{}])[0] if "webhook_bots" in values else values
+        for key in ("receive_tools", "receive_targets"):
+            if key in receiver:
+                data["webhook_bots"][0][key] = receiver[key]
+    data["webhook_bots"][0]["receive_targets"] = [
+        config.targets[0].target_id if target == "fat" else target
+        for target in data["webhook_bots"][0]["receive_targets"]
+    ]
     return runtime.ServeConfig.model_validate(data)
 
 
@@ -1114,6 +1135,162 @@ async def test_send_deadline_is_rechecked_at_atomic_claim(env, monkeypatch):
         assert requests == []
 
 
+async def test_documented_receiver_supports_consecutive_reminders_and_immediate_send(
+    env, monkeypatch
+):
+    async with webhook_running(env, monkeypatch, config=documented_task_config(env)) as (
+        group,
+        requests,
+        rt,
+    ):
+        jobs = []
+        for i in (1, 2):
+            message = f"同群设置第{i}条提醒"
+            env.scripts.add(
+                attributed(A, message),
+                tool_call(
+                    "scheduled__propose_reminder",
+                    bot_alias="ops_alert_bot",
+                    text=f"提醒{i}",
+                    evidence_ids=[],
+                    at=(env.clock() + timedelta(seconds=60 * i)).isoformat(),
+                ),
+                request_execution,
+                cite(),
+            )
+            await group.ask(message)
+            async with rt.engine.connect() as conn:
+                job, action = (
+                    await conn.execute(
+                        text(
+                            "SELECT j.job_id,a.action_id FROM xiaowei_scheduled_job j "
+                            "JOIN xiaowei_action a ON "
+                            "a.plan::jsonb #>> '{plan,parameters,job_id}'=j.job_id "
+                            "WHERE j.text=:body"
+                        ),
+                        {"body": f"提醒{i}"},
+                    )
+                ).one()
+            await group.ask(f"/批准 {action}")
+            jobs.append(job)
+            if i == 1:
+                session = await env.scalar("SELECT session_id FROM xiaowei_channel_session")
+                message = "马上发今晚22点检查"
+                env.scripts.add(
+                    attributed(A, message),
+                    tool_call(
+                        "send_webhook_message",
+                        bot_alias="ops_alert_bot",
+                        text="今晚22点检查",
+                        evidence_ids=[],
+                    ),
+                    cite(),
+                )
+                await group.ask(message)
+                assert len(requests) == 1
+        assert (
+            await env.scalar("SELECT count(*) FROM xiaowei_scheduled_job WHERE state='active'") == 2
+        )
+        for _ in (1, 2):
+            env.clock.advance(60)
+            await rt.scheduled_tasks.tick()
+        await rt.scheduled_tasks.tick()
+        assert [json.loads(r.content)["content"]["text"] for r in requests] == [
+            "今晚22点检查",
+            "提醒1",
+            "提醒2",
+        ]
+        assert await env.scalar("SELECT session_id FROM xiaowei_channel_session") == session
+        async with rt.engine.connect() as conn:
+            ids = await conn.scalar(
+                text("SELECT definition_evidence_ids FROM xiaowei_scheduled_job WHERE job_id=:id"),
+                {"id": jobs[1]},
+            )
+        assert json.loads(ids)  # 第二份定义保留真实的历史依赖，没有过滤任务记录。
+
+
+async def test_missing_task_receiver_permission_explains_configuration_without_http(
+    env, monkeypatch
+):
+    async with webhook_running(env, monkeypatch, config=task_config(env)) as (group, requests, _rt):
+        await reminder(env, group)
+        message = "先发一条检查消息"
+        env.scripts.add(
+            attributed(A, message),
+            tool_call(
+                "send_webhook_message", bot_alias="ops_alert_bot", text="检查", evidence_ids=[]
+            ),
+            cite(),
+        )
+        await group.ask(message)
+        shown = message_text(group.outbox.sent[-1][1])
+        assert "管理员" in shown and "receive_tools" in shown and "scheduled" in shown
+        message = "再设一条提醒"
+
+        def check_feedback(call):
+            rejected = [
+                json.loads(i["output"])
+                for i in call.input
+                if i.get("type") == "function_call_output"
+            ]
+            assert any(
+                i.get("status") == "rejected"
+                and "管理员" in i["reason"]
+                and "receive_tools" in i["reason"]
+                and "scheduled" in i["reason"]
+                for i in rejected
+            )
+            return cite("未创建提醒")(call)
+
+        env.scripts.add(
+            attributed(A, message),
+            tool_call(
+                "scheduled__propose_reminder",
+                bot_alias="ops_alert_bot",
+                text="提醒2",
+                evidence_ids=[],
+                at=(env.clock() + timedelta(seconds=120)).isoformat(),
+            ),
+            check_feedback,
+        )
+        await group.ask(message)
+        assert await env.scalar("SELECT count(*) FROM xiaowei_scheduled_job") == 1
+        assert await env.scalar("SELECT count(*) FROM xiaowei_notification_attempt") == 0
+        assert requests == []
+
+
+async def test_task_receiver_permission_never_inherits_business_source_permission(env, monkeypatch):
+    data = documented_task_config(env).model_dump(mode="json")
+    other = dict(data["webhook_bots"][0])
+    other.update(
+        bot_id="other",
+        alias="other_bot",
+        receive_targets=["scheduled"],
+        receive_tools=[t for t in other["receive_tools"] if t.startswith("scheduled/")],
+    )
+    data["webhook_bots"].append(other)
+    async with webhook_running(
+        env, monkeypatch, config=runtime.ServeConfig.model_validate(data)
+    ) as (
+        group,
+        requests,
+        _rt,
+    ):
+        await history(env, group)
+        await reminder(env, group, select=True)
+        message = "把结果提醒发给另一个机器人"
+        env.scripts.add(
+            attributed(A, message),
+            tool_call(
+                "send_webhook_message", bot_alias="other_bot", text="结果提醒", evidence_ids=[]
+            ),
+            cite(),
+        )
+        await group.ask(message)
+        assert requests == []
+        assert await env.scalar("SELECT count(*) FROM xiaowei_notification_attempt") == 0
+
+
 async def test_approved_reminders_ignore_other_unknown_but_immediate_send_still_warns(
     env, monkeypatch
 ):
@@ -1122,7 +1299,9 @@ async def test_approved_reminders_ignore_other_unknown_but_immediate_send_still_
             raise httpx2.ReadTimeout("synthetic")
         return httpx2.Response(200, json={"code": 0})
 
-    async with webhook_running(env, monkeypatch, config=task_config(env), response=response) as (
+    async with webhook_running(
+        env, monkeypatch, config=documented_task_config(env), response=response
+    ) as (
         group,
         requests,
         rt,
@@ -1157,8 +1336,6 @@ async def test_approved_reminders_ignore_other_unknown_but_immediate_send_still_
                 ).one()
             await group.ask(f"/批准 {action}")
             jobs.append(job_id)
-            if i == 1:
-                await group.ask("/新建")  # 两个独立批准版本，不让上一份提案成为新正文依赖。
         assert (
             await env.scalar("SELECT count(*) FROM xiaowei_scheduled_job WHERE state='active'") == 2
         )
@@ -1174,7 +1351,6 @@ async def test_approved_reminders_ignore_other_unknown_but_immediate_send_still_
         assert len(requests) == 2
         assert [json.loads(r.content)["content"]["text"] for r in requests] == ["提醒1", "提醒2"]
         assert await env.scalar("SELECT count(*) FROM xiaowei_notification_attempt") == 2
-        await group.ask("/新建")  # 即时文字发送不携带任务管理材料；风险门槛仍按原群共享。
         message = "立即发送另一条提醒"
         env.scripts.add(
             attributed(A, message),
