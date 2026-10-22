@@ -109,7 +109,7 @@ U1–U4 沿用原验收，U5–U7 沿用后续确认的任务，不以安全检�
 | POST 之前未准入/存储不可用 | not_sent，零 HTTP；不能先发再补记意图 |
 | API 明确拒绝或可证明请求未发出 | failed；本期仍不自动重试 POST |
 | POST 可能已到达、超时/响应损坏、占用后崩溃或接受后落库不明 | unknown，不自动再次 POST、不重跑 Agent。补执行仅适用于从未开始/未占用发送机会的提醒，不适用于该状态 |
-| 接口合法成功并落库 | accepted，只表示 API 接受，不表示群成员收到/阅读 |
+| 接口合法成功并落库 | accepted；官方为 API 接受，feishu_proxy 仅为代理 HTTP 2xx（proxy_http_success），群内投递未确认，不表示群成员收到/阅读 |
 
 **不能永久静默：** 经授权的任务状态查询显示最近核验/成功时间、末次原因、连续未核实次数（可由运行记录取得）和下一计划时间；连续未核实在现有安全日志中可见。partial 名单始终找不到创建者时保持不执行，由管理员据状态处理成员目录覆盖或任务归属，不能改用批准者身份继续。不能为了告知故障而绕过当前权限给 Webhook 额外发消息，不新增通知渠道或固定失败次数自动解禁。
 
@@ -121,7 +121,7 @@ U1–U4 沿用原验收，U5–U7 沿用后续确认的任务，不以安全检�
 
 ## 6. Webhook 与 Node 的首批边界
 
-Webhook 复用 httpx2.AsyncClient、TLS 校验、有界超时/响应和生命周期；可信静态官方 HTTPS 目标，不接受用户 URL、不跟随重定向、不隐式继承环境代理，不自动重试。只发 text，最终 JSON（含签名）不超过官方大小限制；后台超限用同一发送机会发固定容量说明，run 记 content_too_large，不新增截断或拆分；发送主体暂不可核验返回带类型结果，零POST、run记 authorization_unverified，连续计数递增，不能归为 execution_failed；密钥、URL、原始异常/响应不进模型、Session、Evidence 或日志。严格检查 HTTP 和合法业务 code=0，关键词/IP/签名按真实配置验证；不新增多厂商、卡片、@all、自动拆分文件或通用 HTTP 功能。既有飞书应用机器人 uuid/message_id 不用作自定义 Webhook 保证。[飞书官方参考](https://open.feishu.cn/document/client-docs/bot-v3/add-custom-bot)、[HTTPX2](https://pypi.org/project/httpx2/)。
+Webhook 复用 httpx2.AsyncClient、TLS 校验、有界超时/响应和生命周期；可信静态目标（默认官方 HTTPS；用户另批准的 feishu_proxy 协议、固定字段与无 @ 决定唯一见 [ARCHITECTURE](../../../ARCHITECTURE.md#scheduled-agent-tasks)），不接受用户 URL、不跟随重定向、不隐式继承环境代理，不自动重试。只发 text，完整 JSON 不超过本地20000字节限制（官方含签名；代理含固定字段）；后台超限用同一发送机会发固定容量说明，run 记 content_too_large，不新增截断或拆分；发送主体暂不可核验返回带类型结果，零POST、run记 authorization_unverified，连续计数递增，不能归为 execution_failed；密钥、URL、原始异常/响应不进模型、Session、Evidence 或日志。官方路径严格检查 HTTP 和合法业务 code=0；代理只确认 HTTP 2xx，不解析未知业务响应，回执明确群内投递未确认。关键词/IP/签名按真实配置验证；不新增多厂商、卡片、@all、自动拆分文件或通用 HTTP 功能。既有飞书应用机器人 uuid/message_id 不用作自定义 Webhook 保证。[飞书官方参考](https://open.feishu.cn/document/client-docs/bot-v3/add-custom-bot)、[HTTPX2](https://pypi.org/project/httpx2/)。
 
 D 先复核实际 MCP 版本/结果与现有协议反例：若能完整保留 resultType、标签、样本值/时间、warnings 和目标覆盖，复用该契约；若仍是锁版有歧义的文本，沿已证实缺口补最少结构化读取。需要新增 HTTP 时仍经治理、同一个获准 Prometheus，端点/认证另取服务端安全配置，不把 MCP 地址当 Prometheus API；A–C 不依赖此接入。不能为了避免 Adapter 就让模型猜解析歧义文本，也不把支持 structured_content 等同于保真样本。
 

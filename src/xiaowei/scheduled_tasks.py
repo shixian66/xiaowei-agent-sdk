@@ -313,9 +313,11 @@ class TaskDefinitions:
                 (
                     await conn.execute(
                         sql(
-                            "SELECT j.*, n.state AS notification_state, n.receipt_id "
+                            "SELECT j.*, n.state AS notification_state, n.receipt_id, "
+                            "n.reason AS notification_reason "
                             "FROM xiaowei_scheduled_job j LEFT JOIN LATERAL "
-                            "(SELECT a.state,a.receipt_id FROM xiaowei_notification_attempt a "
+                            "(SELECT a.state,a.receipt_id,a.reason FROM "
+                            "xiaowei_notification_attempt a "
                             "LEFT JOIN xiaowei_scheduled_run r ON r.run_id=a.run_id "
                             "WHERE "
                             "COALESCE(a.job_id,r.job_id)=j.job_id "
@@ -1585,6 +1587,16 @@ class ScheduledTasks:
     def _observation(
         self, job: Mapping[str, Any], state: str | None = None, *, body: bool = True
     ) -> ToolObservation:
+        reason = job.get("reason", "pending")
+        if job.get("notice_state") is not None:
+            reason += f"；原群停止说明={job['notice_state']}"
+            if job["notice_state"] == "unknown":
+                reason += "（不会自动重发）"
+        if (
+            job.get("notification_state") == "accepted"
+            and job.get("notification_reason") == "proxy_http_success"
+        ):
+            reason += "；代理返回 HTTP 2xx 成功状态，群内投递未确认"
         deadline = (
             self._agent_deadline(job)
             if job.get("kind") == "agent_task"
@@ -1596,12 +1608,7 @@ class ScheduledTasks:
                 state=state or job["state"],
                 at=(job.get("next_run") or job["run_at"]).isoformat(),
                 expires_at=deadline.isoformat() if deadline else "长期",
-                reason=(
-                    f"{job.get('reason', 'pending')}；原群停止说明={job['notice_state']}"
-                    + ("（不会自动重发）" if job["notice_state"] == "unknown" else "")
-                    if job.get("notice_state") is not None
-                    else job.get("reason", "pending")
-                ),
+                reason=reason,
                 unverified_count=job.get("unverified_count", 0),
                 text=job["text"] if body else None,
                 notification_state=job.get("notification_state") or "not_sent",

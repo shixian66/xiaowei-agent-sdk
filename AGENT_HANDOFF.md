@@ -9,16 +9,16 @@
 | 项目 | 已核对事实 |
 | --- | --- |
 | 仓库 | [shixian66/xiaowei-agent-sdk](https://github.com/shixian66/xiaowei-agent-sdk) |
-| 产品代码基线 | C 基于 B 合并 `2bee11fe573ab67b054a6195f1444abfcae748b2`（PR #125）；隔离工作树 `scheduled-agent-design/agent-SDK`，分支 `codex/scheduled-agent-tasks`；原目录修改保留 |
+| 产品代码基线 | `main@be8c155638c4fa0c4eece912f8ff79fbef1c41ef`（C 已由 #126 合入）；代理独立工作树 `/Users/kloenguyen/.codex/worktrees/feishu-proxy-webhook/agent-SDK`，分支 `codex/feishu-proxy-webhook`；D 的 codex/node-exporter-core 工作树及原目录修改均保留 |
 | 源码与检查 | 当前源码仅保留 `src/xiaowei`；旧工程及专属测试、Compose、迁移入口、`compose-smoke` CI 和 Alembic 依赖已移除。保留产品测试、公共检查与旧回答兼容路径；旧工程历史可从 Git 查回 |
-| 当前存储与回答 | C 候选应用 schema v15，扩展已有 job、逐次 run/通知关联；014 已发布不改，015 显式升级。SDK 表、回答版本及既有交付兼容保持 |
+| 当前存储与回答 | 主线应用 schema v15，代理不新增迁移；C 扩展已有 job、逐次 run/通知关联；014 已发布不改，015 显式升级。SDK 表、回答版本及既有交付兼容保持 |
 | 锁定依赖 | SDK `0.22.3`、Lark Channel `1.4.0`、MCP `2.2.0`、sqlglot `30.17.0`、`nh3 0.3.7`、`tinycss2 1.5.1`、Pillow `13.0.0`、certifi `2026.10.19`（后两项为严格审计发现的既有漏洞定向升级） |
 | 正式入口 | `xiaowei serve`、`config check`、`model check`、`storage init/upgrade/cleanup`、`requests resend`；命令与环境准备以 README 为准 |
 | 最近有记录的公司部署 | 主线交接记录含用户提供的 `xiaowei:143c4c8641be636c41c130329ce1639a36b59c27` 镜像及巡检日志；未独立核验当前服务器状态。B 本轮未部署 |
-| 当前验收结论 | A/B 已合入主线；C 收尾 F1/F2 已修复，功能版本 `69820b1` 的两处差异独立复审及单次完整默认全套通过；真实 U5/U6/U7 未验收，D 未实现。具体版本与证据见 §5 |
-| 当前任务授权 | 用户已确认 Claude 的 F1/F2 复审无阻断，授权 C 片推送、建 PR，并在远端 CI 全绿后合并；暂不部署，不调用真实模型、Webhook、飞书或公司源，不读取公司配置及凭据正文 |
+| 当前验收结论 | A/B/C 已合入主线；代理离线候选 163d2ac 的独立复审及单次完整默认全套通过，真实 U5/U6/U7 未验收，D 暂停且未实现。具体版本与证据见 §5 |
+| 当前任务授权 | 用户确认 Claude 审查无阻断，已授权推送代理分支、创建 PR，远端 CI 全绿后合并；仍不部署、不调用真实代理/飞书/模型/公司源、不读取公司配置及凭据正文；D 继续暂停 |
 
-原工作目录的 ARCHITECTURE 差异与未跟踪计划/公司配置保留，未复制到本工作树；本次未读取公司配置凭据。旧监控和回答修复记录保留为注明版本的证据，不作为本轮 C 范围扩展授权。
+原工作目录的 ARCHITECTURE 差异与未跟踪计划/公司配置保留，未复制到本工作树；本次未读取公司配置凭据。旧监控和回答修复记录保留为注明版本的证据，不作为本轮代理范围扩展授权。
 
 本文件的状态以表中的核对基线为限。接手者先核对实际 HEAD、工作区及用户新指令；合入、独立审查、离线测试、真实运行、部署与用户接受分别记录，不互相替代。
 
@@ -33,19 +33,15 @@
 - 进度的单聊/群聊差异延迟、仅真实变化更新、正常收尾及异常陈旧已由用户确认，详见[进度契约](ARCHITECTURE.md#progress-observation)；P1 已有离线实现，当前证据见计划 §7。普通消息的区域身份及正文/明细分工见[普通消息契约](ARCHITECTURE.md#ordinary-feishu-expression)，不能由 HTML/MD 报告完成推定达标。
 - 监控写仅限已批准动作，使用 SDK 原生审批暂停/恢复及既有 Action 治理；生产开放仍须满足对应源和群审批门槛。Grafana 数据源密码私聊命令尚未实现，目前由管理员在 Grafana UI 填写。见 [监控边界](ARCHITECTURE.md#monitoring-mcp)。
 - 内网 Web 无登录、访问者共用操作者权限；目标账号、网络、Grafana 插件/写端及数据源更新竞争窗口等已接受取舍按架构执行。
-- 通知及定时任务的方向与待审权限增量见 [ARCHITECTURE](ARCHITECTURE.md#scheduled-agent-tasks)：多个目的群不扩大操作入口，任务独立于原聊天，创建及每次执行复核权限，生产写不能继承周期批准。A/B 已合入主线，C 为当前实现与离线验证切片，D 未实现。
+- 通知及定时任务的方向与待审权限增量见 [ARCHITECTURE](ARCHITECTURE.md#scheduled-agent-tasks)：多个目的群不扩大操作入口，任务独立于原聊天，创建及每次执行复核权限，生产写不能继承周期批准。A/B/C 已合入主线，当前先交付自建代理适配，D 暂停且未实现。
 
 ## 3. 当前计划与下一项工作
 
-### 通知与定时任务：C 通用定时 Agent
+### 当前：自建飞书代理（C 公司验收前置）
 
-当前只做 C，不做 D。产品决定唯一维护于 [ARCHITECTURE](ARCHITECTURE.md#scheduled-agent-tasks)，对应[计划 §4](docs/superpowers/plans/2026-10-21-scheduled-agent-tasks.md#4-c通用独立-agent-定时任务)。复用 B 的定义/Action/控制和实例锁、A 的受治理通知；独立业务调查走正式 Application.run_turn/SDK Runner、新 Session。没有第二 Loop、调度依赖或 Node 分派。
+C 已由 #126 合入 be8c155，批准的通用调度/只读边界不变；本轮只增加 Webhook 的 feishu_proxy 协议，详见 [ARCHITECTURE](ARCHITECTURE.md#scheduled-agent-tasks)。代理功能冻结于 163d2ac，独立审查和单次完整默认全套通过；Claude 对本地交付 HEAD 1b1a78dee2df5e467315997304222879e0ba849e 的审查已由用户确认无阻断。用户现已授权推送、开 PR、远端 CI 全绿后合并；本次仅同步集成授权与状态文案，未修改源码、测试或依赖。PR 的实际 head、CI 与合并结果以 GitHub 记录为准。D 的 Node 研究/未提交改动保留在原隔离工作树，不混入代理分支，也不继续请求其认证信息。
 
-用户已确认长期/自定有效期、激活首跑与锚点周期、预算及群长期上限、列表和自动停止说明；2026-10-22本轮明确删除续期/有效期修改与模型绑定，排队默认900秒已确认。最新确认：最后一次正常结果标明到期时间；到期不跑模型、原操作群固定说明最多一次，unknown不重发、不受其他unknown门槛阻断，主动取消不发。原群说明复用现有应用机器人传输，持久化占用及回执；B 的“最多一次”语义不等于把原群说明误发到另一个 Webhook 目的群。
-
-SDK公开 RunHooks 计数主调用和无工具收尾/修正，共享已批准的模型调用上限；缺失供应商usage保持未知，不伪造0。后台无生产写、提案/审批、通知、管理工具；治理层手工伪造调用也拒绝。当前成员分页必须保留完整性：原便捷接口丢弃该标记，C 使用同一飞书SDK公开 Client.request 在工作线程读取，完整名单缺席才停用；部分/失败为未核实。
-
-下一步：按用户最新授权推送 C、创建 PR，远端 CI 全绿后合并，PR 记录最终 base/head、CI 和合入状态。Claude 已复审通过 F1/F2；源码不再变更。暂不部署，也不继续实现 D；真实 U6/U7 的具体环境、范围及费用仍须另获授权，离线结果不代替能力验收。排队默认900秒已确认，30任务实际并发/成本需实测。
+用户最新决定取消代理协议原文的固定 `<at id=all></at>`，不加开关；不带 at 能否正常投递、响应业务协议与群内实收须线上验收。下一步按本次授权完成 PR 与全绿后合并；部署及 C 公司验收仍须另获授权，真实 U5/U6/U7、30任务并发/成本仍开放。
 
 ### 已合入的监控可靠性修订（PR #121）
 
@@ -139,6 +135,35 @@ B1 的短口径主视图修复已成立；原 B2 因复现形状不符合真实 
 凭据仅在获准环境通过安全引用配置，不索要或粘贴明文。未提供环境信息不等于授权连接任意端点。上述实际软件/协议测试不等于公司服务验收，已有运行反馈也不能再总括为“从未运行”。
 
 ## 5. 验证记录与限制
+
+### 自建代理本地交付（本轮）
+
+基线 be8c155638c4fa0c4eece912f8ff79fbef1c41ef；分支 codex/feishu-proxy-webhook。功能/测试冻结 SHA **163d2acb9ce4b1154d7cb3f995261c4075982c37**，文件树 **3b6b848ed689e172e9dac8c79a956678b8d0fbb3**；后续提交只补文档，不以新 SHA 冒充重跑全套。前候选 4f43d95 的独立审查发现 B/C get_task 未明确代理 HTTP 成功的界限，已补两类正式入口 RED，读取持久化 notification_reason 后提示“群内投递未确认”，重载为官方协议并更新目标版本后仍按历史回执说明。
+
+产品改动为 webhook.py 的机器人协议配置/固定字段校验、保密 HTTP 请求格式/代理结果原因及回执，runtime.py 的安全配置诊断措辞；独立审查要求补齐 scheduled_tasks.py 的任务状态回执说明，仅从实际 attempt.reason 映射提示，不改调度/权限或输出 schema。现有本地 Tool、claim/settle、主体核验、接收范围、unknown 门槛和调度不变，不新增依赖/迁移。代理字段增加后发现固定超限说明也可能被固定 title/openUrl 撑过20000字节，先补正式 C 入口失败用例，再在 send_fixed 的最终请求处拒绝；正常容量说明仍使用本次唯一机会。
+
+协议来源：用户提供 POST、JSON字符集、groupId 查询路由、title/message/openUrl 字符串及未知响应协议；用户最新决定不追加 at 标签。HTTP(S) 可信配置/唯一 groupId 校验、默认官方向后兼容和代理 2xx 的本地 reason 是落实既有接收与状态边界的实现选择，不是对真实代理行为的验证。不带 at 的实际兼容性、业务响应、飞书实收、真实模型 U5/U6/U7 及成本、30任务并发仍未覆盖。
+
+
+当前离线证据：代理专项 **36 passed**（/tmp/xiaowei-proxy-task-status-green.log）；含最小闭环、B/C 回执新旧协议归因。无 at/open_url 的 RED **8 failed/14 passed**（/tmp/xiaowei-proxy-no-at-red.log）；固定说明仍超限 RED **1 failed**（/tmp/xiaowei-proxy-capacity-red.log）；B/C 状态 RED **2 failed**（/tmp/xiaowei-proxy-task-status-red.log），均在对应修复前命中目标断言。初次相关回归 **443 passed/1 failed** 为切换虚拟环境期间找不到证书文件，独立环境定点重跑 **1 passed**（/tmp/xiaowei-proxy-runtime-env-recheck.log）；不将分批相加为全套。
+
+前候选 4f43d95 的全套在 /private/tmp 目录出现四项 Docker bind 源不存在的环境失败，为节省重复成本中止，**4 failed/1339 passed/1 skipped/89 deselected，EXIT_CODE=2，版本始终 clean/未变**（/tmp/xiaowei-proxy-full-4f43d95.log）；不是完整通过。已移动同一分支至上表 /Users 工作树，用离线缓存重建本项目独立 .venv，原失败的正式 Compose 入口 **1 passed/64.62秒**（/tmp/xiaowei-proxy-compose-after-move.log）。冻结 163d2ac 的完整默认全套结果如下。
+
+ruff check、mypy（37源文件）、4个改动 Python 文件 format 和 diff 检查通过。扩大到 src/tests/scripts 的 format 检查报告4个基线已存在文件（cli.py、test_dialogue_real_model.py、test_monitoring_reliability.py、test_progress_sdk_contract.py），与 be8c155 无差异，本轮不混入格式整理；不宣称全仓 format 通过。
+
+**最终有效证据（同一冻结版本，不拼接）：**
+
+| 检查 | 命令/证据及结果 |
+| --- | --- |
+| 完整默认全套 | `PYTHONDONTWRITEBYTECODE=1 SDK_TEST_POSTGRES_URL=<本机隔离PG> .venv/bin/python /tmp/xiaowei_run_versioned_check.py /tmp/xiaowei-proxy-full-163d2ac.log .venv/bin/python -m pytest -q -p no:cacheprovider`；**4780 passed、235 skipped、89 deselected、5 warnings，1769.24秒**。日志起止 HEAD 均为163d2acb9ce4b1154d7cb3f995261c4075982c37，起止clean，EXIT_CODE=0、VERSION_UNCHANGED=True；覆盖受影响 A/B/C、Action/渠道、Evidence/Session、配置、迁移与部署维护。默认未选的浏览器及需显式环境的跳过项不算验收；5项warning来自网络拒绝测试的预期socket拦截 |
+| 代理专项 | `.venv/bin/python -m pytest tests/sdk_core/test_webhook_proxy.py -q -p no:cacheprovider`（同上本机PG及禁字节码环境）；**36 passed**。正式群/SDK/治理/隔离PG保持，模型/HTTP/飞书/业务驱动为合成替身；不能证明真实自主选择或公司接口 |
+| 静态/文档 | `.venv/bin/ruff check --no-cache .`、`.venv/bin/mypy --cache-dir=/tmp/xiaowei-proxy-mypy src`（37文件）、`.venv/bin/ruff format --check src/xiaowei/webhook.py src/xiaowei/runtime.py src/xiaowei/scheduled_tasks.py tests/sdk_core/test_webhook_proxy.py`、`git diff --check`通过；受影响文档相对文件链接存在；默认全套包含文档命令检查 |
+| 隔离变异 | /tmp/xiaowei_proxy_mutations.py 以163d2ac独立复制src，覆盖 mention 屏蔽、代理2xx响应分支、固定说明容量门槛、持久化回执原因；**4/4被杀死**，各命中目标断言、非setup错误。日志 /tmp/xiaowei-proxy-mutation-{mention,response,capacity,receipt}.log 含基线SHA、源码副本及文件摘要；未改真实工作树 |
+| 独立审查 | be8c155..4f43d95发现任务状态回执P2；增量4f43d95..163d2ac只读复审关闭P2、无新增阻断。检查实际调用路径与新测试/RED/GREEN日志，未重跑重型全套；不是本线程自行复查冒充独立审查 |
+
+关键回归名称：`test_proxy_formal_entry_preserves_query_json_and_truthful_http_receipt`（含POST前已落库sending及秘密哨兵）、`test_proxy_same_intent_deduplicates_after_mention_sanitization`、`test_proxy_unknown_gate_requires_delivered_warning_before_explicit_resend`、`test_proxy_sender_recheck_prevents_claim_and_http`、`test_proxy_unapproved_receiver_has_zero_http`、`test_proxy_fixed_reminder_uses_same_once_only_path`、`test_proxy_scheduled_agent_delivers_facts_or_one_capacity_notice`、`test_proxy_static_fields_cannot_make_capacity_notice_exceed_limit`、`test_proxy_task_status_explains_persisted_http_receipt_even_after_config_change`、`test_official_and_proxy_bots_keep_distinct_wire_contracts`。
+
+仍未覆盖：真实代理对“不带at”的兼容、业务响应协议及真实飞书群实收；真实模型U5/U6/U7与成本、30任务并发实测。上述本地交付记录产生时尚无推送/PR/远端CI/合并/部署证据，也没有真实服务调用或公司配置/凭据读取；当前新增的 GitHub 集成授权见 §1/§3，D保持暂停。代理不新增迁移或依赖，C主线v15的停服/备份升级边界仍按README，不因本次通过而取得部署授权。
 
 ### C 收尾修复与验证
 
