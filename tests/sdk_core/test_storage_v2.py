@@ -114,7 +114,7 @@ def test_v2_migration_only_touches_application_tables() -> None:
         "014_scheduled_reminders.sql",
     ):
         assert "agent_" not in _migration(name)
-    assert APP_SCHEMA_VERSION == 14
+    assert APP_SCHEMA_VERSION == 15
     assert _V2_TABLES <= APP_TABLES
     assert all(name.startswith("xiaowei_") for name in APP_TABLES)
 
@@ -194,10 +194,11 @@ async def test_direct_v12_upgrade_adds_notification_and_reminder_tables_and_pres
         before = await _tables(engine)
         with pytest.raises(StorageVersionMismatchError):
             await check_storage(engine)
-        assert await upgrade_storage(engine, digest_key=_DIGEST_KEY) == 14
+        assert await upgrade_storage(engine, digest_key=_DIGEST_KEY) == APP_SCHEMA_VERSION
         assert await _tables(engine) == before | {
             "xiaowei_notification_attempt",
             "xiaowei_scheduled_job",
+            "xiaowei_scheduled_run",
         }
         assert await session.get_items() == [{"role": "user", "content": "retained v12 history"}]
         await check_digest_key(engine, _DIGEST_KEY)
@@ -270,7 +271,7 @@ async def test_v6_to_v9_upgrade_to_v11_preserves_binding_rows_and_sdk_history(
         with pytest.raises(StorageVersionMismatchError):
             await check_storage(engine)
         assert await _version(engine) in (6, 7, 8, 9)
-        assert await upgrade_storage(engine, digest_key=_DIGEST_KEY) == 14
+        assert await upgrade_storage(engine, digest_key=_DIGEST_KEY) == APP_SCHEMA_VERSION
         # 升级与新版启动是不同进程；丢弃 ALTER TABLE 前准备的 SELECT * 查询缓存。
         await engine.dispose()
         assert "xiaowei_action" in await _tables(engine)
@@ -337,7 +338,7 @@ async def test_v10_sdk_approval_upgrade_to_v11_keeps_paused_request_and_action_r
             run_before = (await conn.execute(text("SELECT * FROM xiaowei_action_run"))).one()
         with pytest.raises(StorageVersionMismatchError):
             await check_storage(engine)
-        assert await upgrade_storage(engine, digest_key=_DIGEST_KEY) == 14
+        assert await upgrade_storage(engine, digest_key=_DIGEST_KEY) == APP_SCHEMA_VERSION
         await engine.dispose()
         async with engine.connect() as conn:
             assert (await conn.execute(text("SELECT * FROM xiaowei_request"))).one() == (
@@ -384,7 +385,7 @@ async def test_direct_v11_upgrade_and_isolated_dump_restore_preserve_unknown_rep
             """),
                 {"body": body, "digest": hashlib.sha256(body).hexdigest()},
             )
-        assert await upgrade_storage(engine, digest_key=_DIGEST_KEY) == 14
+        assert await upgrade_storage(engine, digest_key=_DIGEST_KEY) == APP_SCHEMA_VERSION
         async with engine.connect() as conn:
             assert (
                 await conn.execute(text("SELECT delivery,delivery_version FROM xiaowei_request"))
@@ -518,7 +519,7 @@ async def test_initialization_advances_the_schema_version(postgres_url: URL) -> 
     """全新初始化推进到当前版本。旧程序只接受各自版本由基线源码保证，这里不复制旧实现。"""
     async with open_engine(secret(postgres_url)) as engine:
         await initialize_storage(engine, digest_key=_DIGEST_KEY)
-        assert await _version(engine) == APP_SCHEMA_VERSION == 14
+        assert await _version(engine) == APP_SCHEMA_VERSION == 15
 
 
 async def test_failed_upgrade_rolls_back_completely(postgres_url: URL) -> None:
@@ -909,7 +910,7 @@ async def test_v8_v9_upgrade_invalidates_only_pending_and_recovery_does_not_repl
                 r.action_id: tuple(r)
                 for r in await conn.execute(text("SELECT * FROM xiaowei_action"))
             }
-        assert await upgrade_storage(engine, digest_key=_DIGEST_KEY) == 14
+        assert await upgrade_storage(engine, digest_key=_DIGEST_KEY) == APP_SCHEMA_VERSION
         await engine.dispose()
         async with engine.connect() as conn:
             after = {
@@ -922,7 +923,7 @@ async def test_v8_v9_upgrade_invalidates_only_pending_and_recovery_does_not_repl
         )
         for state in ("succeeded", "unknown", "executing"):
             assert after[state][:-1] == before[state] and after[state][-1] is None
-        assert await upgrade_storage(engine, digest_key=_DIGEST_KEY) == 14
+        assert await upgrade_storage(engine, digest_key=_DIGEST_KEY) == APP_SCHEMA_VERSION
         ready = Readiness()
         store = ChannelStore(
             engine,
@@ -949,3 +950,59 @@ async def test_v8_v9_upgrade_invalidates_only_pending_and_recovery_does_not_repl
                         )
                     ).one()
                     assert tuple(actual) == after[state]
+
+
+async def test_v14_upgrade_preserves_fixed_reminder_and_sdk_session(postgres_url: URL) -> None:
+    async with open_engine(secret(postgres_url)) as engine:
+        await _install_v1(engine, through="014_scheduled_reminders.sql")
+        async with engine.begin() as conn:
+            await storage_module._write_digest_key_binding(conn, _DIGEST_KEY)
+            await conn.execute(
+                text(
+                    "INSERT INTO xiaowei_scheduled_job "
+                    "(job_id,owner_id,creator_id,bot_alias,bot_id,"
+                    "target_version,run_at,content_expires_at,text,definition_evidence_ids,"
+                    "source_context,"
+                    "lateness_seconds,state) VALUES "
+                    "('old-job','old-group','old-user','old-alias','bot',"
+                    "'v1',now()+interval '1 day',now()+interval '2 days',"
+                    "'fixed text','[]','{}',3600,'active')"
+                )
+            )
+        session = SQLAlchemySession("v14-history", engine=engine)
+        await session.add_items([{"role": "user", "content": "retained v14 history"}])
+        assert await upgrade_storage(engine, digest_key=_DIGEST_KEY) == 15
+        await check_storage(engine)
+        assert await session.get_items() == [{"role": "user", "content": "retained v14 history"}]
+        async with engine.connect() as conn:
+            row = (
+                (
+                    await conn.execute(
+                        text("SELECT * FROM xiaowei_scheduled_job WHERE job_id='old-job'")
+                    )
+                )
+                .mappings()
+                .one()
+            )
+        assert row["text"] == "fixed text" and row["state"] == "active"
+        assert row["kind"] == "fixed_message" and row["agent_spec"] is None
+        assert row["next_run"] == row["run_at"]
+        assert "run_count" not in row and "revision" not in row
+        async with engine.connect() as conn:
+            columns = set(
+                (
+                    await conn.execute(
+                        text(
+                            "SELECT column_name FROM information_schema.columns "
+                            "WHERE table_schema=current_schema() "
+                            "AND table_name='xiaowei_scheduled_run'"
+                        )
+                    )
+                ).scalars()
+            )
+        assert (
+            not {"answer", "answer_expires_at", "usage", "duration_seconds", "skipped_count"}
+            & columns
+        )
+        migration = _migration("015_scheduled_agent.sql")
+        assert SDK_SESSIONS_TABLE not in migration and SDK_MESSAGES_TABLE not in migration

@@ -680,6 +680,10 @@ class ChannelService:
         """应用的全局并发上限；渠道的消费者数不得超过它。"""
         return self._app.max_concurrent_turns
 
+    def bind_scheduled_notices(self, sender: Callable[[str, str, str], Awaitable[str]]) -> None:
+        if self._app.scheduled_tasks is not None:
+            self._app.scheduled_tasks.notice_sender = sender
+
     def admits_input(self, text: str) -> bool:
         """附件准入仍使用当前应用的数据策略；持久化和模型前调用。"""
         return self._app.admits_input(text)

@@ -55,6 +55,12 @@ REMINDER_APPROVAL_NOTICE = "本轮不立即发送；确认后按计划到期发�
 _URL = re.compile(r"https://open\.feishu\.cn/open-apis/bot/v2/hook/[A-Za-z0-9_-]+\Z")
 
 
+@dataclass(frozen=True)
+class FixedSendOutcome:
+    status: str
+    reason: str
+
+
 class WebhookBotConfig(BaseModel):
     """可信管理员登记；同群凭据轮换不改 bot_id/target_version，换接收目标须改版本。"""
 
@@ -176,9 +182,9 @@ def _message_text(content: str) -> str:
     return mention_safe(content.replace("\r\n", "\n").replace("\r", "\n"))
 
 
-def _notification_text(delivery: Delivery, text: str) -> str:
+def _notification_text(delivery: Delivery, text: str, *, include_remaining: bool = False) -> str:
     """只渲染已校验的飞书事实；不把 Web 的转义 content 当通知正文。"""
-    if not delivery.facts:
+    if not delivery.facts and not include_remaining:
         return text
 
     def fact_lines(fact: DeliveryFact) -> list[str]:
@@ -210,6 +216,9 @@ def _notification_text(delivery: Delivery, text: str) -> str:
             lines.extend(("模型说明（未经系统核实）", block.text))
         else:
             lines.extend(fact_lines(facts[block.evidence_id]))
+    if include_remaining:
+        for fact in delivery.section("remaining"):
+            lines.extend(fact_lines(fact))
     return "\n".join(lines)
 
 
@@ -262,7 +271,9 @@ class WebhookNotifications:
         content: str,
         claim: Callable[[str], Awaitable[tuple[str, str, str, bool]]],
         settle: Callable[[str, str, str], Awaitable[None]],
-    ) -> None:
+        *,
+        oversize_notice: str | None = None,
+    ) -> FixedSendOutcome:
         """可信一次性任务交付：同一 notify 治理/HTTP，发送占用由任务事务负责。
 
         不注册为模型工具；模型不能提供 claim/settle，也不能跳过获批定义检查。
@@ -278,21 +289,34 @@ class WebhookNotifications:
             arguments={"bot_alias": alias, "text": content, "evidence_ids": []},
         )
 
+        outcome: FixedSendOutcome | None = None
+
         async def execute(_request: ToolRequest) -> ToolObservation:
+            nonlocal outcome
             async with self._locks[bot.config.bot_id]:
                 if not await self._verify_sender(ctx.identity):
-                    raise ValueError("当前发送主体不可核验")
+                    outcome = FixedSendOutcome("not_sent", "sender_not_authorized")
+                    return self._observation(alias, outcome.status, outcome.reason)
                 normalized = _message_text(content)
                 body = _body(bot, normalized, self._clock)
-                if len(body) > MAX_BODY_BYTES:
-                    raise ValueError("完整通知超过20000字节")
+                oversized = len(body) > MAX_BODY_BYTES
+                if oversized:
+                    if oversize_notice is None:
+                        outcome = FixedSendOutcome("not_sent", "content_too_large")
+                        return self._observation(alias, outcome.status, outcome.reason)
+                    # 仅可信调用方提供有界固定说明；同一次治理调用、同一发送机会。
+                    normalized = _message_text(oversize_notice)
+                    body = _body(bot, normalized, self._clock)
                 receipt, status, reason, claimed = await claim(normalized)
                 if claimed:
                     status, reason = await self._post(bot, body)
                     await settle(receipt, status, reason)
+                outcome = FixedSendOutcome(status, "content_too_large" if oversized else reason)
                 return self._observation(alias, status, reason, receipt)
 
         await self._governance.invoke(ctx, request, execute)
+        assert outcome is not None  # noqa: S101 - 受治理执行成功返回即已设置结果。
+        return outcome
 
     async def warning_seen(self, conn: AsyncConnection, owner: str, bot_id: str) -> bool:
         """原群＋稳定机器人共用未知结果门槛，定时/即时占用同一序列。"""
@@ -301,7 +325,8 @@ class WebhookNotifications:
             sql(
                 "SELECT max(n.sequence) FROM xiaowei_notification_attempt n "
                 "LEFT JOIN xiaowei_request r ON r.turn_id=n.turn_id "
-                "LEFT JOIN xiaowei_scheduled_job j ON j.job_id=n.job_id "
+                "LEFT JOIN xiaowei_scheduled_run sr ON sr.run_id=n.run_id "
+                "LEFT JOIN xiaowei_scheduled_job j ON j.job_id=COALESCE(n.job_id,sr.job_id) "
                 "WHERE n.bot_id=:bot AND n.state IN ('unknown','sending') "
                 "AND COALESCE(r.owner_id,j.owner_id)=:owner"
             ),
@@ -339,7 +364,8 @@ class WebhookNotifications:
                     "on,content_digest,state,reason,warning_sequence) "
                     "SELECT :id,r.turn_id,n.bot_id,n.bot_alias,n.target_version,:digest,'not_sent',"
                     "'task_risk_warning',n.sequence FROM xiaowei_notification_attempt n "
-                    "JOIN xiaowei_scheduled_job j ON j.job_id=n.job_id "
+                    "LEFT JOIN xiaowei_scheduled_run sr ON sr.run_id=n.run_id "
+                    "JOIN xiaowei_scheduled_job j ON j.job_id=COALESCE(n.job_id,sr.job_id) "
                     "JOIN xiaowei_request r ON r.turn_id=:turn "
                     "WHERE n.receipt_id=:receipt AND n.state IN ('unknown','sending') "
                     "AND j.owner_id=:owner AND r.session_id=:session AND r.subject_id=:subject "
@@ -595,7 +621,9 @@ async def receipt_notice(
                             "FROM xiaowei_notification_attempt n "
                             "LEFT JOIN xiaowei_notification_attemp"
                             "t s ON s.sequence=n.warning_sequence "
-                            "LEFT JOIN xiaowei_scheduled_job j ON j.job_id=s.job_id "
+                            "LEFT JOIN xiaowei_scheduled_run sr ON sr.run_id=s.run_id "
+                            "LEFT JOIN xiaowei_scheduled_job j ON "
+                            "j.job_id=COALESCE(s.job_id,sr.job_id) "
                             "WHERE n.turn_id=:turn AND (NOT :tasks_only OR "
                             "(n.reason='task_risk_warning' AND j.owner_id=:owner "
                             "AND (j.creator_id=:subject OR :admin))) ORDER BY n.sequence"

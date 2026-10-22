@@ -141,6 +141,9 @@ class RunContext(_Trusted):
     budget: Budget
     evidence_ids: tuple[Label, ...] = ()
     approved_action: ApprovedAction | None = None
+    automatic: bool = False
+    definition_job_id: Label | None = None
+    content_expires_at: AwareDatetime | None = None
 
 
 class ToolContract(_Trusted):

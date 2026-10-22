@@ -9,16 +9,16 @@
 | 项目 | 已核对事实 |
 | --- | --- |
 | 仓库 | [shixian66/xiaowei-agent-sdk](https://github.com/shixian66/xiaowei-agent-sdk) |
-| 产品代码基线 | B 从已合并 A 的 `9284688bb8907c9968e84d5e49c23e551c53ac58`（PR #123）开发；合并交付前同步 `main@de93ed183257d96a294376c166d6d18199b01020`（PR #124）；隔离工作树 `scheduled-agent-design/agent-SDK`，分支 `codex/one-time-reminders`；原目录已有修改保留 |
+| 产品代码基线 | C 基于 B 合并 `2bee11fe573ab67b054a6195f1444abfcae748b2`（PR #125）；隔离工作树 `scheduled-agent-design/agent-SDK`，分支 `codex/scheduled-agent-tasks`；原目录修改保留 |
 | 源码与检查 | 当前源码仅保留 `src/xiaowei`；旧工程及专属测试、Compose、迁移入口、`compose-smoke` CI 和 Alembic 依赖已移除。保留产品测试、公共检查与旧回答兼容路径；旧工程历史可从 Git 查回 |
-| 当前存储与回答 | B 候选应用 schema v14（主线 v13），新增一次性任务、唯一发送关联和派生保留标记；SDK 表不变。可信 `answer_version=3`、2/Legacy 与分项交付兼容契约不变 |
+| 当前存储与回答 | C 候选应用 schema v15，扩展已有 job、逐次 run/通知关联；014 已发布不改，015 显式升级。SDK 表、回答版本及既有交付兼容保持 |
 | 锁定依赖 | SDK `0.22.3`、Lark Channel `1.4.0`、MCP `2.2.0`、sqlglot `30.17.0`、`nh3 0.3.7`、`tinycss2 1.5.1`、Pillow `13.0.0`、certifi `2026.10.19`（后两项为严格审计发现的既有漏洞定向升级） |
 | 正式入口 | `xiaowei serve`、`config check`、`model check`、`storage init/upgrade/cleanup`、`requests resend`；命令与环境准备以 README 为准 |
 | 最近有记录的公司部署 | 主线交接记录含用户提供的 `xiaowei:143c4c8641be636c41c130329ce1639a36b59c27` 镜像及巡检日志；未独立核验当前服务器状态。B 本轮未部署 |
-| 当前验收结论 | A 已合并且 CI 9/9；B 的B1/C1/N1–N3已关闭，R1修复通过本次差异独立复审及版本化检查，当前证据见§5；真实U5未验收，C/D 未实现 |
-| 当前任务授权 | A 推送/PR/合并已完成；B 外部复审通过，用户已授权推送、建PR、远端CI全绿后合并。真实模型、公司源、真实 Webhook和部署仍未授权；生产写逐次审批。隔离环境按锁文件安装，测试使用仓库标识的隔离 PostgreSQL |
+| 当前验收结论 | A/B 已合入主线；C 收尾 F1/F2 已修复，功能版本 `69820b1` 的两处差异独立复审及单次完整默认全套通过；真实 U5/U6/U7 未验收，D 未实现。具体版本与证据见 §5 |
+| 当前任务授权 | 用户已确认 Claude 的 F1/F2 复审无阻断，授权 C 片推送、建 PR，并在远端 CI 全绿后合并；暂不部署，不调用真实模型、Webhook、飞书或公司源，不读取公司配置及凭据正文 |
 
-原工作目录的 ARCHITECTURE 差异与未跟踪计划/公司配置保留，未复制到本工作树；本次未读取公司配置凭据。旧监控和回答修复记录保留为注明版本的证据，不作为本轮 B 范围扩展授权。
+原工作目录的 ARCHITECTURE 差异与未跟踪计划/公司配置保留，未复制到本工作树；本次未读取公司配置凭据。旧监控和回答修复记录保留为注明版本的证据，不作为本轮 C 范围扩展授权。
 
 本文件的状态以表中的核对基线为限。接手者先核对实际 HEAD、工作区及用户新指令；合入、独立审查、离线测试、真实运行、部署与用户接受分别记录，不互相替代。
 
@@ -33,19 +33,19 @@
 - 进度的单聊/群聊差异延迟、仅真实变化更新、正常收尾及异常陈旧已由用户确认，详见[进度契约](ARCHITECTURE.md#progress-observation)；P1 已有离线实现，当前证据见计划 §7。普通消息的区域身份及正文/明细分工见[普通消息契约](ARCHITECTURE.md#ordinary-feishu-expression)，不能由 HTML/MD 报告完成推定达标。
 - 监控写仅限已批准动作，使用 SDK 原生审批暂停/恢复及既有 Action 治理；生产开放仍须满足对应源和群审批门槛。Grafana 数据源密码私聊命令尚未实现，目前由管理员在 Grafana UI 填写。见 [监控边界](ARCHITECTURE.md#monitoring-mcp)。
 - 内网 Web 无登录、访问者共用操作者权限；目标账号、网络、Grafana 插件/写端及数据源更新竞争窗口等已接受取舍按架构执行。
-- 通知及定时任务的方向与待审权限增量见 [ARCHITECTURE](ARCHITECTURE.md#scheduled-agent-tasks)：多个目的群不扩大操作入口，任务独立于原聊天，创建及每次执行复核权限，生产写不能继承周期批准。A 已合入主线，B 为当前离线候选，C/D 未实现。
+- 通知及定时任务的方向与待审权限增量见 [ARCHITECTURE](ARCHITECTURE.md#scheduled-agent-tasks)：多个目的群不扩大操作入口，任务独立于原聊天，创建及每次执行复核权限，生产写不能继承周期批准。A/B 已合入主线，C 为当前实现与离线验证切片，D 未实现。
 
 ## 3. 当前计划与下一项工作
 
-### 通知与定时任务：B 一次性提醒候选
+### 通知与定时任务：C 通用定时 Agent
 
-A 已通过独立复审并合入 [PR #123](https://github.com/shixian66/xiaowei-agent-sdk/pull/123)，B 仅在隔离分支开发。产品与默认值唯一来源为 [ARCHITECTURE 通知与定时任务](ARCHITECTURE.md#scheduled-agent-tasks)，批准设计/实施计划仍为 v1.4。当前不提前实现 C/D，不调用真实模型、Webhook、飞书、公司源，不读取公司配置或凭据。
+当前只做 C，不做 D。产品决定唯一维护于 [ARCHITECTURE](ARCHITECTURE.md#scheduled-agent-tasks)，对应[计划 §4](docs/superpowers/plans/2026-10-21-scheduled-agent-tasks.md#4-c通用独立-agent-定时任务)。复用 B 的定义/Action/控制和实例锁、A 的受治理通知；独立业务调查走正式 Application.run_turn/SDK Runner、新 Session。没有第二 Loop、调度依赖或 Node 分派。
 
-B 复用真 Runner、SDK 原生暂停/批准恢复与 ActionBinding，确认一次后持久化不可变 job。固定提醒到期直接走原有 GovernedTools notify、相同 HTTP 适配和发送记录，不调用模型，不重建 Agent Loop。状态/暂停/取消由创建者或个人 grant 管理员且当前原群成员操作，已知 ID 查询；不提供列表/编辑/恢复工具。起草支持模型修正日期格式，未知目标/接收权限不足明确拒绝；低风险管理拒绝只返回安全状态，不中断整轮、不伪称未发送。
+用户已确认长期/自定有效期、激活首跑与锚点周期、预算及群长期上限、列表和自动停止说明；2026-10-22本轮明确删除续期/有效期修改与模型绑定，排队默认900秒已确认。最新确认：最后一次正常结果标明到期时间；到期不跑模型、原操作群固定说明最多一次，unknown不重发、不受其他unknown门槛阻断，主动取消不发。原群说明复用现有应用机器人传输，持久化占用及回执；B 的“最多一次”语义不等于把原群说明误发到另一个 Webhook 目的群。
 
-新增 schema14、默认关闭的同进程到期检查及唯一 job 发送关联；复用全局槽、实例锁、readiness 及 A 的关键回执交付；共享未知门槛只拦即时通知，不拦分别批准的固定提醒。只对未开始且窗口内的提醒再核验；已占用后超时或重启恢复为 unknown，不重 POST。定义依赖由实时 replayed 回调冻结，按原身份/Session 归属和当前源/接收权限复核；数据期限同步约束任务正文、Action/恢复材料、派生 Evidence、模型历史与请求缓存，显式清理不自动新建上下文。
+SDK公开 RunHooks 计数主调用和无工具收尾/修正，共享已批准的模型调用上限；缺失供应商usage保持未知，不伪造0。后台无生产写、提案/审批、通知、管理工具；治理层手工伪造调用也拒绝。当前成员分页必须保留完整性：原便捷接口丢弃该标记，C 使用同一飞书SDK公开 Client.request 在工作线程读取，完整名单缺席才停用；部分/失败为未核实。
 
-B 已包含两项兼容修复：通知准入必须检查 InstanceLock.admits 返回值及 readiness；发行元数据不能硬编码 schema12，改从源码唯一 APP_SCHEMA_VERSION 读取，保持打包脚本仅用标准库。
+下一步：按用户最新授权推送 C、创建 PR，远端 CI 全绿后合并，PR 记录最终 base/head、CI 和合入状态。Claude 已复审通过 F1/F2；源码不再变更。暂不部署，也不继续实现 D；真实 U6/U7 的具体环境、范围及费用仍须另获授权，离线结果不代替能力验收。排队默认900秒已确认，30任务实际并发/成本需实测。
 
 ### 已合入的监控可靠性修订（PR #121）
 
@@ -99,7 +99,7 @@ S3 的源码事实：`AgentAnswer` 为有序 `TextBlock | FactBlock`，另含 `r
 
 ### 下一项工作与开放条件
 
-B 的当前离线单元已交付；真实 U5 的日期解释、工具选择、答案质量、调用/耗时/用量及测试机器人接受/群内表现仍须具体授权后验证。保持默认关闭，不自动部署或把 C/D 当作已经实现。下一切片是 C 的独立受治理 Agent 任务；以下为并存的旧业务实战缺口，不作为 B 已验收证据。
+B 的当前离线单元已交付；真实 U5 的日期解释、工具选择、答案质量、调用/耗时/用量及测试机器人接受/群内表现仍须具体授权后验证。保持默认关闭，不自动部署，不把离线候选当作真实验收；D 未实现。C 的独立受治理 Agent 任务已形成离线候选，版本与未覆盖项见 §5；以下为并存的旧业务实战缺口，不作为 B/C 的真实验收证据。
 
 本次 P2 已在 `1c06a89d633753f70fb6e5829c0cc4fc5992cbfd` 独立复审通过，两个阻断（合法反引号 SQL 的夹具路由、普通 naive DATETIME 错标会话偏移）已补回归并修复。普通查询保留无偏移墙上时间，aware 时间及已知来源模板不变。旧历史/绑定附件可能保留原先错误偏移，本次不追溯修正、不批量失效旧 Evidence。
 
@@ -139,6 +139,31 @@ B1 的短口径主视图修复已成立；原 B2 因复现形状不符合真实 
 凭据仅在获准环境通过安全引用配置，不索要或粘贴明文。未提供环境信息不等于授权连接任意端点。上述实际软件/协议测试不等于公司服务验收，已有运行反馈也不能再总括为“从未运行”。
 
 ## 5. 验证记录与限制
+
+### C 收尾修复与验证
+
+功能冻结版本 `69820b1e2809139117494294e5e0a15eb6b3b73f`，本轮比较基线 `c7b1412eb27669a6da19d89123fb398a864e66e4`；分支 `codex/scheduled-agent-tasks`。本轮仅修复 F1/F2 的用户提示，不改变权限、Evidence、审批、核验次数或调度契约。C 此前精简、B1/B2 关闭及删减/变异记录见 `git show c7b1412:AGENT_HANDOFF.md`；本轮独立复审只覆盖这两处差异，不能解释为重新审查全部 C。
+
+| 根因 | 修复与行为证据 |
+| --- | --- |
+| F1 后台静态授权撤销与定义失效共用异常，被误报为 definition_unavailable | TaskDefinitions.validate 用窄义 AuthorizationRevokedError 区分当前通知/工具/目标授权缺失；_current_definition 映射 authorization_revoked。不增加核验调用。`test_current_config_revocation_stops_before_model_and_business_post` 覆盖通知、查询工具、目标及 automatic_tools 撤销，断言具体停止原因/原群说明、零模型调用及零业务 POST；目标版本变化仍 recipient_changed。`test_definition_dependencies_obey_current_model_policy_before_background_run` 保留定义失效的 definition_unavailable 反例及允许对照 |
+| F2 控制更新未改变任何行时，未发送的 B 提醒也被覆盖为“发送已准入” | control_task 仅在 receipt_id 非空时显示发送已准入；已停止 Agent 仍显示任务已停止。新增 `test_cancelled_fixed_reminder_repeat_cancel_does_not_claim_send_admission`：正式群入口批准后连续取消两次，保持 cancelled，回复无发送准入、无 attempt/POST，到点也不发送；原 `test_completed_fixed_reminder_keeps_admitted_control_reason` 已发送对照保留 |
+
+**B 兼容说明：** c7b1412 已有的 send_fixed 类型结果也用于 B 固定提醒。发送前主体核验暂时失败（包括成员接口异常）返回 not_sent/sender_not_authorized，由提醒执行路径记 authorization_unverified、unverified_count 加 1，零 POST；不再抛普通异常。尚未占用发送机会的 active 提醒可在迟到窗口内再次核验；已占用或 unknown 的机会绝不自动重发。本轮仅补录此事实，没有新增重试或授权范围。
+
+| 检查 | 当前证据 |
+| --- | --- |
+| RED 先复现 | `/tmp/xiaowei-c-f1f2-red.log`：4 failed、4 passed，复现三类静态撤销原因及重复取消误报；产品源码当时仍为 c7b1412。该记录含测试工作区变更，不作冻结 SHA 的全套证据 |
+| C/B 相关回归 | **133 passed，115.88秒**，`/tmp/xiaowei-c-f1f2-green.log`；两个 scheduled 测试文件，正式入口、真 SDK、脚本模型、隔离 PG/传输替身。提交前局部检查，不拼作全套 |
+| 冻结版本单次完整默认全套 | **4744 passed, 235 skipped, 89 deselected, 5 warnings in 1732.13s (0:28:52)**；`/tmp/xiaowei-c-f1f2-69820b1-full.log`。开始/结束均为 `69820b1e2809139117494294e5e0a15eb6b3b73f`，工作树 clean、EXIT_CODE=0、VERSION_UNCHANGED=True。包含受影响 C/B/A、Action/群审批、Evidence/Session、迁移及本地 Docker 部署维护回归；跳过和未选项不算验收 |
+| 冻结版本静态 | `/tmp/xiaowei-c-f1f2-69820b1-static.log`：全仓 ruff、3 个受影响 Python 文件 format、mypy src（37 文件）、基线差异检查全部通过；同 SHA、前后 clean、EXIT_CODE=0 |
+| F1/F2 独立复审 | `69820b1e2809139117494294e5e0a15eb6b3b73f` 相对 c7b1412 的两处修复通过、无阻断；复审者另跑 **9 passed，10.82秒**，覆盖五类当前配置撤销、定义策略允许/拒绝和 B 未发送/已发送控制对照。`/tmp/xiaowei-c-f1f2-independent-69820b1.log` 保存 pytest 输出；前后 SHA/clean 由复审工具会话核对，该文件没有版本头，与冻结全套日志分别记录 |
+
+命令均在本工作树运行。pytest 使用 `SDK_TEST_POSTGRES_URL=postgresql+asyncpg://postgres@127.0.0.1:55432/postgres PYTHONDONTWRITEBYTECODE=1`，相关检查执行 `.venv/bin/python -m pytest -q -p no:cacheprovider tests/sdk_core/test_scheduled_agent.py tests/sdk_core/test_scheduled_tasks.py`；完整默认全套执行 `.venv/bin/python -m pytest -q -p no:cacheprovider`。冻结检查由 `/tmp/xiaowei_run_versioned_check.py LOG COMMAND...` 记录 SHA/树/clean/退出码。静态执行 `.venv/bin/ruff check --no-cache .`、`.venv/bin/ruff format --check src/xiaowei/scheduled_tasks.py tests/sdk_core/test_scheduled_agent.py tests/sdk_core/test_scheduled_tasks.py`、`.venv/bin/mypy --cache-dir=/tmp/xiaowei-c-f1f2-mypy src`、`git diff --check c7b1412..HEAD`。
+
+全套结束后仅更新本交接；文档命令一致性检查 2 passed（0.14秒），git diff --check 通过，git diff --exit-code 69820b1 -- src tests pyproject.toml uv.lock 确认源码、测试和依赖相对冻结版本无差异，不为文档提交重复运行重型全套。本轮未新增隔离变异：差异仅为原因分类/反馈，RED 已分别击中原错误，原治理与并发保护未改。
+
+用户已确认 Claude 对 `a6113eb57079e195341ef705ad20956ef376d967` 的 F1/F2 复审通过、无阻断，并授权推送、建 PR、远端 CI 全绿后合并；本次授权同步只修改交接，功能仍为上述冻结 SHA。远端 CI 和合入状态统一记录在 PR。剩余缺口：真实 U6/U7 的自主选择/调查/答案质量及模型耗时费用、真实飞书实收、30 任务实际并发/成本。D 未实现。继续默认关闭，暂不部署；真实环境和费用须另获授权。未调用真实模型/Webhook/飞书/公司源，未读取公司配置或凭据正文，原目录修改未混入。
 
 ### 合并交付前主线集成
 
