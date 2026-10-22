@@ -107,7 +107,7 @@ uv run --locked xiaowei --config xiaowei.json requests resend --subject <发起�
 
 **监控曲线。** 暂不实现，监控结果以文本/表格交付。[计划 D4.0](docs/superpowers/plans/2026-10-14-result-delivery-documents.md#d40-协议前置结果与最小修订提案2026-10-15)保留已完成的协议核验、反例与候选路径对比，供以后明确重启时参考。
 
-飞书默认不读取图片、文件或富文本 post：合法且当前获准的消息获得固定说明。可显式开启 `feishu.document_input_enabled` 接收 UTF-8 TXT/MD；截图还须同时开启 `feishu.image_input_enabled` 和 Vertex 模型 Profile 的 `image_input_enabled`，仅接收单张不超过 2 MiB 的 PNG/JPEG，每会话最多 12 张，后续提问回放原图。指定群仍要求同一条消息的平台 @本机器人及当前成员资格；未 @ 的附件、post 内的 at 标签不会触发。真实 Lark 图片事件、模型识图及 12 图请求尚未验收；配置、容量和回退见[运维说明](deploy/OPERATIONS.md#飞书-pngjpeg-输入)。
+指定群的纯文字富文本 post 与 text 共用提问及 `/查询`、`/批准`、`/新建` 入口，仍要求同一条消息的平台 @本机器人及当前成员资格；仅有正文 at 标签不授予入口资格，私聊 post 尚未开放。图片和文件默认关闭；可显式开启 `feishu.document_input_enabled` 接收 UTF-8 TXT/MD，截图还须同时开启 `feishu.image_input_enabled` 和 Vertex Profile 的 `image_input_enabled`。独立图片或一图 post 只接受单张不超过 2 MiB 的 PNG/JPEG，每会话最多 12 张，保留同条问题并在后续提问回放原图。带图那一轮只作诊断、不实时查询，图文中的命令不执行；多图、嵌入媒体/附件或非法结构整条说明未处理，不截短或只取第一图。post/mentions 的真实平台形态、模型识图、客户端和 12 图请求尚未验收；配置、容量和回退见[运维说明](deploy/OPERATIONS.md#飞书-pngjpeg-输入)。
 
 **目标（`targets`）。** 每项为 `type`（目前只能是 `starrocks`）、`description`（集群用途说明，帮助用户和模型识别环境；会原样交给模型，不代表默认或已选择，不要写“默认用此集群”“可跨环境查找”之类的话）、`business_context`（该集群的业务口径 `{"version", "text"}`，没有则写 `null`）与 `starrocks`（连接、限额、函数闭集与结构快照上限）。集群 ID 就是 `starrocks.target_id`，只能用 1–32 位小写字母、数字、`_`、`-`，不能重复；连接地址、账号与凭据引用不交给模型。授权表按工具授予，获准用户可用全部已配置集群；模型每次调用数据工具都必须给出 `cluster`，未知集群在连接前拒绝，不会改查其他集群。旧版顶层 `starrocks`/`business_context` 会在启动时报错并给出迁移方式：把原 `starrocks` 放进 `targets` 的一项，原 `business_context` 去掉 `target_id` 后放到同一项。新增、删除集群或修改口径后，旧会话需要新建；已保存的 StarRocks 结果在本次升级后一次失效。
 

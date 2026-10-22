@@ -645,7 +645,8 @@ async def test_runner_cancellation_waits_for_started_write_to_settle_once(
     assert len(actions.adapter.calls) == 1
 
 
-async def test_native_pause_resume_writes_once_and_commits_paired_history(actions: Actions):
+@pytest.mark.parametrize("kind", ["text", "post"])
+async def test_native_pause_resume_writes_once_and_commits_paired_history(actions: Actions, kind):
     env = actions.env
     # 发起人有群读取/提出权限，没有写权限；B才是本次写的批准主体。
     env.access._grants = {**env.access._grants, A: env.access._grants[A] - {WRITE}}
@@ -654,7 +655,14 @@ async def test_native_pause_resume_writes_once_and_commits_paired_history(action
         assert env.model_calls(script) == 2
         assert all(GATE in names for names in env.scripts.tools_seen(script))
         assert all(f"{SOURCE}__change" not in names for names in env.scripts.tools_seen(script))
-        await group.ask(f"/批准 {action_id}", sender=B, message_id="om_sdk_approve")
+        from tests.sdk_core.test_feishu_post import content as post_content
+
+        kwargs = (
+            {"content": post_content(f"/批准 {action_id}"), "event__message__message_type": "post"}
+            if kind == "post"
+            else {}
+        )
+        await group.ask(f"/批准 {action_id}", sender=B, message_id="om_sdk_approve", **kwargs)
         assert await env.rows(
             "SELECT state, delivery FROM xiaowei_request WHERE reply_message_id='om_sdk_approve'"
         ) == [("completed", "sent")]
@@ -2204,3 +2212,47 @@ async def test_revoking_unused_read_tool_keeps_partial_approval_resumable(action
         ("succeeded",),
     ]
     assert await env.rows("SELECT turns FROM xiaowei_session") == [(1,)]
+
+
+@pytest.mark.parametrize(
+    ("outcome", "visible"), [("pending", False), ("rejected", True), ("expired", False)]
+)
+async def test_paused_query_visibility_in_later_normal_turn(actions, outcome, visible):
+    """S0 实测：恢复上下文有证据，并不等于未恢复轮已经提交 SDK Session。"""
+    from tests.sdk_core.test_app import evidence_in
+
+    env = actions.env
+    async with running(env, max_reply_chars=3500) as group:
+        script = env.scripts.add(
+            attributed(A, "S0 查询后暂停"),
+            tool_call("run_query", region="east"),
+            tool_call(f"{SOURCE}__propose_change", value="after"),
+            request_execution,
+            cite("根据实际执行结果反馈"),
+        )
+        await group.ask("S0 查询后暂停")
+        action_id = await actions.one()
+        ((query_id,),) = await env.rows(
+            "SELECT evidence_id FROM xiaowei_evidence WHERE tool_id=:tool", tool=QUERY_TOOL
+        )
+        if outcome == "rejected":
+            await group.ask(f"/拒绝 {action_id}", sender=B)
+        elif outcome == "expired":
+            from xiaowei.session import cleanup_expired
+
+            env.clock.advance(16 * 60)
+            await cleanup_expired(env.engine, now=env.clock(), batch_size=10)
+        observed = []
+
+        def inspect_context(call):
+            observed.append(query_id in evidence_in(call))
+            return clarify("请说明需要查看的结果")(call)
+
+        followup = env.scripts.add(attributed(A, "刚才的查询结果能看吗？"), inspect_context)
+        await group.ask("刚才的查询结果能看吗？", message_id="om_visibility")
+        assert observed == [visible] and env.model_calls(followup) == 1
+        assert await env.rows(
+            "SELECT state FROM xiaowei_request WHERE reply_message_id='om_visibility'"
+        ) == [("completed",)]
+    assert len(env.adapter.calls) == 1 and actions.adapter.calls == []
+    assert env.model_calls(script) == (4 if outcome == "rejected" else 3)
