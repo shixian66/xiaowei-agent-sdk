@@ -986,3 +986,213 @@ async def test_background_can_correct_query_and_delivers_partial_when_clarificat
         assert len(requests) == 1
         body = json.loads(requests[0].content)["content"]["text"]
         assert "本次任务未完成" in body and "100" in body
+
+
+async def test_poll_loop_admits_later_due_job_while_prior_run_is_waiting(env, monkeypatch):
+    import asyncio
+
+    import httpx2
+
+    first_started, second_started, release = asyncio.Event(), asyncio.Event(), asyncio.Event()
+
+    async def post(request):
+        if not first_started.is_set():
+            first_started.set()
+            await release.wait()
+        return httpx2.Response(200, json={"code": 0})
+
+    cfg = agent_config(env, poll_seconds=0.05).model_copy(update={"max_concurrent_turns": 2})
+    second_task = TASK + "后到期的独立任务。"
+    query = tool_call(
+        "run_readonly_query", cluster=SR.target_id, sql="SELECT region,total FROM shop.sales"
+    )
+
+    def second_query(call):
+        second_started.set()
+        return query(call)
+
+    env.scripts.add(TASK, query, cite())
+    env.scripts.add(second_task, second_query, cite())
+    async with running(env, monkeypatch, config=cfg, response=post) as (group, requests, _rt):
+        await activate(env, group, interval=3600)
+        env.clock.advance(1)
+        await activate(
+            env, group, task=second_task, interval=3600, at=env.clock() + timedelta(seconds=120)
+        )
+        env.clock.advance(60)
+        try:
+            await asyncio.wait_for(first_started.wait(), 5)
+            env.clock.advance(60)
+            await asyncio.wait_for(second_started.wait(), 2)
+        finally:
+            release.set()
+
+        async def completed():
+            while (
+                await env.scalar(
+                    "SELECT count(*) FROM xiaowei_scheduled_run WHERE state='completed'"
+                )
+                != 2
+            ):
+                await asyncio.sleep(0.01)
+
+        await asyncio.wait_for(completed(), 5)
+        assert len(requests) == 2
+
+
+@pytest.mark.parametrize("user_expiry", [False, True])
+async def test_last_result_marks_earlier_definition_expiry(env, monkeypatch, user_expiry):
+    from zoneinfo import ZoneInfo
+
+    from sqlalchemy import text
+    from tests.sdk_core.test_scheduled_tasks import history
+
+    async with running(env, monkeypatch, config=agent_config(env)) as (group, requests, rt):
+        old = await history(env, group)
+        expiry = env.clock() + timedelta(seconds=120)
+        async with rt.engine.begin() as conn:
+            await conn.execute(
+                text("UPDATE xiaowei_evidence SET expires_at=:expiry WHERE evidence_id=:id"),
+                {"expiry": expiry, "id": old},
+            )
+        env.scripts.add(
+            TASK,
+            tool_call(
+                "run_readonly_query",
+                cluster=SR.target_id,
+                sql="SELECT region,total FROM shop.sales",
+            ),
+            cite(),
+        )
+        await activate(
+            env,
+            group,
+            interval=3600,
+            expires_at=env.clock() + timedelta(days=1) if user_expiry else None,
+        )
+        env.clock.advance(60)
+        await rt.scheduled_tasks.tick()
+        body = json.loads(requests[0].content)["content"]["text"]
+        assert "本次为到期前最后一次" in body
+        assert expiry.astimezone(ZoneInfo("Asia/Shanghai")).isoformat() in body
+
+
+async def test_old_run_cannot_expire_newly_approved_validity(env, monkeypatch):
+    import asyncio
+
+    import httpx2
+
+    started, release = asyncio.Event(), asyncio.Event()
+
+    async def post(request):
+        started.set()
+        await release.wait()
+        return httpx2.Response(200, json={"code": 0})
+
+    env.scripts.add(
+        TASK,
+        tool_call(
+            "run_readonly_query", cluster=SR.target_id, sql="SELECT region,total FROM shop.sales"
+        ),
+        cite(),
+    )
+    cfg = managed_config(env).model_copy(update={"max_concurrent_turns": 2})
+    async with running(env, monkeypatch, config=cfg, response=post) as (group, requests, rt):
+        job = await activate(
+            env, group, interval=3600, expires_at=env.clock() + timedelta(seconds=90)
+        )
+        env.clock.advance(60)
+        tick = asyncio.create_task(rt.scheduled_tasks.tick())
+        try:
+            await asyncio.wait_for(started.wait(), 5)
+            env.clock.advance(1)
+            until = env.clock() + timedelta(days=1)
+            message = "延长该任务到明天"
+            env.scripts.add(
+                attributed(A, message),
+                tool_call(
+                    "scheduled__propose_task_expiry", job_id=job, expires_at=until.isoformat()
+                ),
+                request_execution,
+                cite(),
+            )
+            await group.ask(message)
+            action = await env.scalar(
+                "SELECT action_id FROM xiaowei_action "
+                "WHERE write_tool_id='scheduled/change_task_expiry'"
+            )
+            await group.ask(f"/批准 {action}")
+            assert await env.scalar("SELECT revision FROM xiaowei_scheduled_job") == 2
+            env.clock.advance(31)
+        finally:
+            release.set()
+            await tick
+        assert len(requests) == 1
+        assert await env.scalar("SELECT state FROM xiaowei_scheduled_job") == "active"
+        assert await env.scalar("SELECT notice_state FROM xiaowei_scheduled_job") is None
+
+
+async def test_paused_long_job_cannot_starve_new_active_job(env, monkeypatch):
+    data = agent_config(env, max_active_jobs=1).model_dump(mode="json")
+    data["webhook_bots"][0]["receive_tools"].append("scheduled/control_task")
+    env.scripts.add(
+        TASK,
+        tool_call(
+            "run_readonly_query", cluster=SR.target_id, sql="SELECT region,total FROM shop.sales"
+        ),
+        cite(),
+    )
+    async with running(env, monkeypatch, config=runtime.ServeConfig.model_validate(data)) as (
+        group,
+        requests,
+        rt,
+    ):
+        job = await activate(env, group, interval=3600)
+        message = "暂停第一条任务"
+        env.scripts.add(
+            attributed(A, message),
+            tool_call("scheduled__control_task", job_id=job, operation="pause"),
+            cite(),
+        )
+        await group.ask(message)
+        env.clock.advance(1)
+        await activate(env, group, interval=3600)
+        assert (
+            await env.scalar("SELECT count(*) FROM xiaowei_scheduled_job WHERE state='active'") == 1
+        )
+        env.clock.advance(60)
+        await rt.scheduled_tasks.tick()
+        assert len(requests) == 1
+
+
+@pytest.mark.parametrize("failure_at", [2, 3, 4])
+@pytest.mark.parametrize("membership", [False, None])
+async def test_later_permission_checks_preserve_revoked_vs_unverified(
+    env, monkeypatch, failure_at, membership
+):
+    query = tool_call(
+        "run_readonly_query", cluster=SR.target_id, sql="SELECT region,total FROM shop.sales"
+    )
+    env.scripts.add(TASK, query, cite(), query, cite())
+    async with running(env, monkeypatch, config=agent_config(env)) as (group, requests, rt):
+        await activate(env, group, interval=3600)
+        checks = 0
+
+        async def member_status(chat, subject):
+            nonlocal checks
+            checks += 1
+            return membership if checks == failure_at else True
+
+        object.__setattr__(rt.scheduled_tasks.definitions, "member_status", member_status)
+        env.clock.advance(60)
+        await rt.scheduled_tasks.tick()
+        assert requests == []
+        if membership is False:
+            assert await env.scalar("SELECT state FROM xiaowei_scheduled_job") == "disabled"
+            assert await env.scalar("SELECT reason FROM xiaowei_scheduled_job") == "member_absent"
+        else:
+            assert await env.scalar("SELECT state FROM xiaowei_scheduled_job") == "active"
+            assert await env.scalar("SELECT unverified_count FROM xiaowei_scheduled_job") == 1
+        env.clock.advance(3600)
+        await rt.scheduled_tasks.tick()
+        assert len(requests) == (0 if membership is False else 1)

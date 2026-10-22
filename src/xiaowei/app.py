@@ -939,9 +939,9 @@ class Application:
         # 先单独校验回答，使拒绝原因明确；提交时 Session 仍会用同一验证器再校验一次。
         if progress is not None:
             progress.mark("saving")
-        await self._evidence.validate_answer(validated, ctx)
         if ctx.automatic and self.scheduled_tasks is not None:
             await self.scheduled_tasks.validate_run(ctx)
+        await self._evidence.validate_answer(validated, ctx)
         snapshot = await session.commit_validated(
             validated.context_evidence,
             monitoring_failures=validated.monitoring_failures,

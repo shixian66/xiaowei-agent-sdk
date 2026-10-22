@@ -438,6 +438,8 @@ class SessionSnapshot(_Trusted):
 
 
 class TurnUsage(_Trusted):
+    """SDK模型和业务工具用量；可信通知另从attempt统计，硬预算仍包含通知。"""
+
     model_requests: int = Field(ge=0)
     tool_calls: int = Field(ge=0)
     input_tokens: int | None = Field(default=None, ge=0)

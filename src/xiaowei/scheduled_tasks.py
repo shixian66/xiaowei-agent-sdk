@@ -490,6 +490,7 @@ class ScheduledTasks:
         self.budget = definitions.budget
         self.max_answer_bytes = max_answer_bytes
         self._tick_lock = asyncio.Lock()
+        self._running_jobs: dict[str, asyncio.Task[None]] = {}
         self.run_slot: Callable[[str | None], AbstractContextManager[bool]]
         self.run_slot = lambda _session: nullcontext(False)
         self.application: Application | None = None
@@ -926,13 +927,28 @@ class ScheduledTasks:
             self.lock.readiness.lock("scheduled_settle_failed")
             raise
 
+    async def _current_definition(self, job: Mapping[str, Any]) -> RunContext:
+        """各次当前鉴权统一保留确定失效/暂不可核实，不能因 SDK 错误映射而自动复活。"""
+        from xiaowei.app import TurnError
+
+        try:
+            return await self.definitions.validate(job)
+        except CreatorAbsentError:
+            await self._stop_agent(job, "member_absent")
+            raise TurnError("scope_rejected") from None
+        except EvidenceUnverifiableError:
+            raise TurnError("scope_unverifiable") from None
+        except (EvidenceUnavailableError, AnswerRejectedError):
+            await self._stop_agent(job, "definition_unavailable")
+            raise TurnError("scope_rejected") from None
+
     async def validate_run(self, ctx: RunContext) -> None:
         if ctx.definition_job_id is None:
             raise EvidenceUnavailableError
         job = await self.definitions.get(ctx.definition_job_id)
         spec = AgentSpec.model_validate_json(job["agent_spec"])
         deadline = self._agent_deadline(job)
-        current = await self.definitions.validate(job)
+        current = await self._current_definition(job)
         decision = await self.definitions.decision(current.identity, member=False)
         if (
             job["state"] != "active"
@@ -945,7 +961,13 @@ class ScheduledTasks:
             or self.application is None
             or spec.model_binding != self.application.automatic_binding
         ):
-            raise EvidenceUnavailableError
+            if deadline is not None and self.clock() >= deadline:
+                await self._stop_agent(job, "validity_expired")
+            elif job["state"] == "active":
+                await self._stop_agent(job, "authorization_revoked")
+            from xiaowei.app import TurnError
+
+            raise TurnError("scope_rejected")
 
     async def _run_agent(self, job: Mapping[str, Any]) -> None:
         from xiaowei.app import PausedTurn, TurnError
@@ -996,15 +1018,12 @@ class ScheduledTasks:
             if not reserved:
                 return
             try:
-                ctx = await self.definitions.validate(job)
-            except CreatorAbsentError:
-                await self._stop_agent(job, "member_absent")
-                return
-            except EvidenceUnverifiableError:
-                await self._finish_agent(job, run["run_id"], "skipped", "authorization_unverified")
-                return
-            except (EvidenceUnavailableError, AnswerRejectedError):
-                await self._stop_agent(job, "definition_unavailable")
+                ctx = await self._current_definition(job)
+            except TurnError as exc:
+                if exc.reason == "scope_unverifiable":
+                    await self._finish_agent(
+                        job, run["run_id"], "skipped", "authorization_unverified"
+                    )
                 return
             if ctx.budget.max_tool_calls < 2:
                 await self._stop_agent(job, "budget_unavailable")
@@ -1056,7 +1075,7 @@ class ScheduledTasks:
                         answer = await self.application.run_turn(ctx, job["text"])
                         if isinstance(answer, PausedTurn):
                             raise TurnError("scope_rejected")
-                        await self.definitions.validate(job)
+                        await self.validate_run(ctx)
                         delivery = await self.governance.evidence.validate_answer(
                             answer,
                             ctx,
@@ -1101,14 +1120,12 @@ class ScheduledTasks:
                                 "本次任务未完成；以下为预算内已获得的结果或待澄清问题。\n" + content
                             )
                         if (
-                            spec.expires_at is not None
+                            deadline is not None
                             and spec.interval_seconds
                             and run["scheduled_at"] + timedelta(seconds=spec.interval_seconds)
-                            >= spec.expires_at
+                            >= deadline
                         ):
-                            until = spec.expires_at.astimezone(
-                                ZoneInfo(self.config.timezone)
-                            ).isoformat()
+                            until = deadline.astimezone(ZoneInfo(self.config.timezone)).isoformat()
                             content += f"\n本次为到期前最后一次计划运行；任务将于{until}到期停止。"
                         since = job.get("last_long_notice_at") or job["approved_at"]
                         long_notice = bool(
@@ -1175,11 +1192,16 @@ class ScheduledTasks:
                                 duration=time.monotonic() - started,
                             ),
                         )
+                unverified = isinstance(exc, TurnError) and exc.reason == "scope_unverifiable"
                 await self._finish_agent(
                     job,
                     run["run_id"],
-                    "unknown" if isinstance(exc, asyncio.CancelledError) else "failed",
-                    exc.reason if isinstance(exc, TurnError) else "execution_failed",
+                    "unknown"
+                    if isinstance(exc, asyncio.CancelledError)
+                    else ("skipped" if unverified else "failed"),
+                    "authorization_unverified"
+                    if unverified
+                    else (exc.reason if isinstance(exc, TurnError) else "execution_failed"),
                 )
                 if isinstance(exc, asyncio.CancelledError):
                     raise
@@ -1379,6 +1401,26 @@ class ScheduledTasks:
     async def _stop_agent(self, job: Mapping[str, Any], reason: str) -> None:
         async with self.engine.begin() as conn:
             await self._admit(conn)
+            current = (
+                (
+                    await conn.execute(
+                        sql("SELECT * FROM xiaowei_scheduled_job WHERE job_id=:id FOR UPDATE"),
+                        {"id": job["job_id"]},
+                    )
+                )
+                .mappings()
+                .one()
+            )
+            if reason in {"validity_expired", "definition_expired"}:
+                deadline = self._agent_deadline(dict(current))
+                if deadline is None or self.clock() < deadline:
+                    return
+                reason = (
+                    "definition_expired"
+                    if current["content_expires_at"] is not None
+                    and self.clock() >= current["content_expires_at"]
+                    else "validity_expired"
+                )
             changed = await conn.execute(
                 sql(
                     "UPDATE xiaowei_scheduled_job SET state=:state,reason=:reason,"
@@ -2064,12 +2106,15 @@ class ScheduledTasks:
                             sql(
                                 "SELECT j.* FROM xiaowei_scheduled_job j "
                                 "WHERE (j.state='active' OR "
-                                "(j.kind='agent_task' AND j.state='paused')) AND "
+                                "(j.kind='agent_task' AND j.state='paused' "
+                                "AND LEAST(j.content_expires_at,"
+                                "(j.agent_spec::jsonb->>'expires_at')::timestamptz)<=:now)) AND "
                                 "(j.kind='fixed_message' OR j.next_run IS NOT NULL) "
                                 "AND (j.kind='agent_task' OR j.run_at<=:now) AND NOT EXISTS "
                                 "(SELECT 1 FROM xiaowei_notification_attempt n "
                                 "WHERE n.job_id=j.job_id) "
-                                "ORDER BY run_at,job_id LIMIT :limit"
+                                "ORDER BY CASE WHEN j.state='active' AND j.next_run<=:now THEN 0 "
+                                "WHEN j.state='paused' THEN 1 ELSE 2 END,run_at,job_id LIMIT :limit"
                             ),
                             {"now": self.clock(), "limit": self.config.max_active_jobs},
                         )
@@ -2110,15 +2155,27 @@ class ScheduledTasks:
                             raise
                         await self._mark(job, "active", "execution_unverified", unverified=True)
 
-            pending = [asyncio.create_task(process(dict(row))) for row in jobs]
-            try:
-                await asyncio.gather(*pending)
-            finally:
-                for task in pending:
-                    if not task.done():
-                        task.cancel()
-                await asyncio.gather(*pending, return_exceptions=True)
-            await self._deliver_task_notices()
+            pending = []
+            for row in jobs:
+                job_id = row["job_id"]
+                if job_id in self._running_jobs:
+                    continue
+                task = asyncio.create_task(process(dict(row)))
+                self._running_jobs[job_id] = task
+
+                def release(done: asyncio.Task[None], key: str = job_id) -> None:
+                    self._running_jobs.pop(key, None)
+
+                task.add_done_callback(release)
+                pending.append(task)
+        try:
+            await asyncio.gather(*pending)
+        finally:
+            for task in pending:
+                if not task.done():
+                    task.cancel()
+            await asyncio.gather(*pending, return_exceptions=True)
+        await self._deliver_task_notices()
 
     async def _run_job(self, job: Mapping[str, Any]) -> None:
         original = RunContext.model_validate_json(job["source_context"])
@@ -2216,10 +2273,26 @@ class ScheduledTasks:
             logger.warning("定时任务当前权限未核实：job=%s", job["job_id"])
 
     async def run(self) -> None:
-        while True:
+        scans: set[asyncio.Task[None]] = set()
+
+        def completed(task: asyncio.Task[None]) -> None:
+            scans.discard(task)
             try:
-                await self.tick()
+                task.result()
+            except asyncio.CancelledError:
+                pass
             except Exception as exc:
-                # 一次失败不重放已占用的 occurrence，也不记录任务正文或上游异常原文。
                 logger.error("定时检查失败：error=%s", type(exc).__name__)
-            await asyncio.sleep(self.config.poll_seconds)
+
+        try:
+            while True:
+                if not self._tick_lock.locked():
+                    scan = asyncio.create_task(self.tick())
+                    scans.add(scan)
+                    scan.add_done_callback(completed)
+                await asyncio.sleep(self.config.poll_seconds)
+        finally:
+            pending = tuple(scans)
+            for scan in pending:
+                scan.cancel()
+            await asyncio.gather(*pending, return_exceptions=True)
