@@ -92,18 +92,16 @@
       (modern && folded ? technical : folded ? details : box).append(wrap);
       if (!fact.rows.length) (modern && folded ? technical : folded ? details : box).append(el("p", "content", "未返回数据行"));
     }
-    if ((!modern || brief) && fact.result_json !== null && fact.result_json !== undefined) {
-      details.append(el("p", "meta", "本次结果原文（仅含获准展示字段；分页或截断范围见上方提示）"));
-      details.append(el("pre", "content original", fact.result_json));
+    const original = modern ? (action ? null : technical) : details;
+    if (original && fact.result_json !== null && fact.result_json !== undefined) {
+      original.append(el("p", "meta", "本次结果原文（仅含获准展示字段；分页或截断范围见上方提示）"));
+      original.append(el("pre", "content original", fact.result_json));
     }
     if (modern) {
       if (fact.truncated) box.append(el("p", "note", "工具结果已截断，不能据此声称完整。"));
       const m = fact.metadata || {};
       if (m.next_cursor != null || m.has_more || m.hasMore) {
         box.append(el("p", "note", "还有后续页，本页不是全部结果。"));
-      }
-      if (brief && fact.summary && technical) {
-        while (details.children.length > 1) technical.append(details.children[1]);
       }
     } else box.append(details);
     return box;

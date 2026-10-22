@@ -126,3 +126,29 @@ def test_v4_automatic_business_file_keeps_nested_value_types() -> None:
     content = file.content.decode()
     assert '"nested": 1' in content and '"checked": true' in content
     assert '\\"nested\\"' not in content and "SELECT nested" not in content
+
+
+@pytest.mark.parametrize(
+    "tool,sql,label",
+    [
+        ("local/list_databases", "objects", "结构采集 SQL 模板"),
+        ("local/list_tables", "objects", "结构采集 SQL 模板"),
+        ("local/describe_table", "columns", "结构采集 SQL 模板"),
+        ("local/run_readonly_query", "SELECT name\nFROM shop.orders", "实际 SQL"),
+    ],
+)
+def test_v4_distinguishes_schema_templates_from_actual_sql(tool: str, sql: str, label: str) -> None:
+    from xiaowei.starrocks import SCHEMA_COLUMNS_SQL, SCHEMA_OBJECTS_SQL
+
+    actual = {"objects": SCHEMA_OBJECTS_SQL, "columns": SCHEMA_COLUMNS_SQL}.get(sql, sql)
+    message = build_feishu_message(
+        business(fact(tool_id=tool, metadata={"sql": actual})),
+        3500,
+        "oc",
+        platform_limits=True,
+    )
+    assert actual not in "\n".join(text_parts(message, folded=False))
+    detail = "\n".join(text_parts(message))
+    assert f"{label}:\n{actual}" in detail
+    if label == "结构采集 SQL 模板":
+        assert "实际 SQL" not in detail

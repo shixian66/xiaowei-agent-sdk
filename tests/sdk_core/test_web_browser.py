@@ -32,6 +32,7 @@ from tests.sdk_core.test_app import (
     answer,
     cite,
     clarify,
+    evidence_in,
     tool_call,
     upstream_error,
 )
@@ -409,8 +410,9 @@ async def test_multiline_clarification_and_sql_advice_are_readable_in_web(
 
 
 @pytest.mark.parametrize("nested_rows", [False, True])
+@pytest.mark.parametrize("view", ["full", "brief"])
 async def test_compact_preserves_exact_values(
-    env: Env, chrome_binary: str, monkeypatch: pytest.MonkeyPatch, nested_rows: bool
+    env: Env, chrome_binary: str, monkeypatch: pytest.MonkeyPatch, nested_rows: bool, view: str
 ) -> None:
     big = 9007199254740993
     values = {
@@ -429,12 +431,26 @@ async def test_compact_preserves_exact_values(
     }
     monkeypatch.setattr(synthetic_tools, "payload", lambda *args: payload)
     app = create_web_app(env.service, config())
-    message = env.scripts.add("订单号与空值", tool_call("order_total", region="east"), cite(""))
+    message = env.scripts.add(
+        "订单号与空值",
+        tool_call("order_total", region="east"),
+        lambda call: answer(
+            evidence_in(call),
+            "",
+            fact_views=[{"evidence_id": e, "view": view} for e in evidence_in(call)],
+        ),
+    )
     async with serving(app, port=18501), launch(chrome_binary) as chrome:
         page = await chrome.page()
         await page.navigate("http://127.0.0.1:18501/")
         await send(page, message)
         await settled(page, 0, "completed")
+        assert await page.evaluate(f"{item(0)}.querySelectorAll('details').length") == 1
+        assert await page.evaluate(f"{item(0)}.querySelector('details').open") is False
+        assert (
+            await page.evaluate(f"Boolean({item(0)}.querySelector('details pre.original'))") is True
+        )
+        await page.evaluate(f"{item(0)}.querySelector('details').open = true")
         rendered = await page.evaluate(f"{item(0)}.innerText")
         assert f"total: {big}" in rendered
         assert f'"ids": [{big}]' in rendered

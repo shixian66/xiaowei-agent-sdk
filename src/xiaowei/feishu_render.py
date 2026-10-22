@@ -573,13 +573,23 @@ def _card(
             return
         if modern:
             details_area.append(_div(f"{fact.tool_id} · {fact.evidence_id}\n{fact_scope(fact)}"))
-            details_area.extend(
-                _div(
-                    f"实际 SQL:\n{value}" if key == "sql" else f"{key}: {_cell({key: value}, key)}"
+            for key, value in fact.metadata.items():
+                if key not in _BUSINESS_HIDDEN:
+                    continue
+                label = (
+                    "结构采集 SQL 模板"
+                    if key == "sql" and fact.tool_id in _PAGED
+                    else "实际 SQL"
+                    if key == "sql" and fact.tool_id in _ACTUAL_SQL
+                    else key
                 )
-                for key, value in fact.metadata.items()
-                if key in _BUSINESS_HIDDEN
-            )
+                details_area.append(
+                    _div(
+                        f"{label}:\n{value}"
+                        if key == "sql"
+                        else f"{label}: {_cell({key: value}, key)}"
+                    )
+                )
             if fact.note and fact.note_summary:
                 details_area.append(_div(fact.note))
             if index in row_details:

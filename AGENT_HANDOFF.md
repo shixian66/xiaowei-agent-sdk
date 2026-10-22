@@ -148,6 +148,10 @@ B1 的短口径主视图修复已成立；原 B2 因复现形状不符合真实 
 
 当前最小闭环 candidate-smoke.log 为 20 passed；包含 v3 空/部分引用保存读取、v4 选择/未展示证据单独撤权、空/无 fact 单次改写及再次拒收、原字节重发、嵌套值类型、正式审批暂停/恢复。browser-v4-candidate.log 为 2 passed：真实 Chrome/Uvicorn 8517 的可见业务表格/单技术区/无默认内部编号，离线 v4 HTML 的范围时间/零技术折叠/零外部请求。真实 SDK/隔离 PG 保留，模型和外部服务为替身；调用次数证明链路，不证明真实自主完成或成本。日志均在 /tmp/xiaowei-presentation-s1/，冻结版本及后续全套/变异/审查结果待完成后据实更新。
 
+独立审查针对 f2c310b 发现 Web v4 full/当前 brief 的获准原文节点丢失，以及飞书结构采集模板误标实际 SQL；两项均按根因修复，不增加面板、投影或 I/O。新增 RED：web-originals-red.log 为 5 failed（full/brief×嵌套值、DDL 原文不可达），sql-template-red.log 为 3 failed/1 passed（模板与实际查询对照）；修复后 web-originals-green.log 为 7 passed、review-render-green.log 为 47 passed。两次 RED 的 shell 收尾误用了 zsh 只读变量 status；pytest 的目标断言与上述失败汇总已完整保存，后续统一用 check_exit，不将 shell 错误当测试命中。
+
+四组隔离变异在 f2c310b 的临时副本完成：v4-remaining、unshown-permission、missing-fact、approval-notice 均基线 0→变异 1→恢复 0，逐个记录加载路径/hash，精确恢复并删除副本；根工作树未变异。日志 mutation-*-{baseline,mutant,restored}.log 和 mutations-summary.log 在同目录。它们针对的 Python 保护在后续 Web/模板修复中未改。旧候选 full-f2c310b.log 主动中止于 12 passed/91 deselected、EXIT_CODE=2，HEAD/clean 未变，不作为完整全套。
+
 仍未覆盖：获准真实模型固定任务（工具选择、漏答/澄清/修正、事实与推断质量、耗时与用量）；真实平台 post/mentions/md、识图、桌面/手机显示及飞书/代理实收。真实模型未授权，本地继续验证但不豁免验收门槛。D、30 任务并发/公司成本不在本片验证范围。下一项：冻结 SHA、单次完整默认全套及关键保护变异，再做精确版本独立审查；审核验收后另获授权才集成。
 
 ### 群输入 S0/S2（v1.4，局部修复独立复审通过）
