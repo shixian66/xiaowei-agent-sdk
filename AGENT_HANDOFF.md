@@ -15,7 +15,7 @@
 | 锁定依赖 | SDK `0.22.3`、Lark Channel `1.4.0`、MCP `2.2.0`、sqlglot `30.17.0`、`nh3 0.3.7`、`tinycss2 1.5.1`、Pillow `13.0.0`、certifi `2026.10.19`（后两项为严格审计发现的既有漏洞定向升级） |
 | 正式入口 | `xiaowei serve`、`config check`、`model check`、`storage init/upgrade/cleanup`、`requests resend`；命令与环境准备以 README 为准 |
 | 最近有记录的公司部署 | 主线交接记录含用户提供的 `xiaowei:143c4c8641be636c41c130329ce1639a36b59c27` 镜像及巡检日志；未独立核验当前服务器状态。本次未部署 |
-| 当前验收结论 | A/B/C 与代理已合入主线；S0/S2 已通过独立复审。S1 首版 c44bbdf 全套通过；Claude 对 ac93a74 条件通过，P1/P2 已本地修复，定向验证及独立增量代码审查通过、等待 Claude 复核；真实模型、平台输入/识图、客户端与 U5/U6/U7 仍未验收，D 暂停且未实现。精确版本和证据见 §5 |
+| 当前验收结论 | A/B/C 与代理已合入主线；S0/S2 已通过独立复审。S1 首版 c44bbdf 全套通过；Claude 对 d29c2f0（受测 af797c0）确认 P1/P2(b) 通过，P2(a) 附件回答优先级回归已在 b08c042 本地修复并定向验证，等待增量复核；真实模型、平台输入/识图、客户端与 U5/U6/U7 仍未验收，D 暂停且未实现。精确版本和证据见 §5 |
 | 当前任务授权 | 起点 b2761c8：用户接受 v4 前向修复、不恢复旧备份，授权 S1 本地实现、测试与提交，完成后交独立审查；不推进 D，不推送/PR/合并/部署，不调用真实服务/模型或读取公司配置凭据 |
 
 原工作目录的 ARCHITECTURE 差异与未跟踪计划/公司配置保留，未复制到本工作树；本次未读取公司配置凭据。旧监控和回答修复记录保留为注明版本的证据，不作为本轮输入或展示范围扩展授权。
@@ -41,7 +41,7 @@
 
 S2 独立复审结论保留，审查版本 44b0d5d、受测代码 d750a41，具体证据见 §5。用户已确认 v4 回退限制并授权本地 S1，依据[计划 v1.5](docs/superpowers/plans/2026-10-22-feishu-input-presentation-repair.md)实现默认业务回答、单技术区与版本兼容，模型 schema 不变。D 及原目录工作保持不动。
 
-下一项：交最终本地 SHA 给 Claude，只复核 ac93a74 之后的 P1/P2 差异及对应证据；源码/测试冻结于 af797c0，后续仅文档同步。c44bbdf 是修复前的完整全套，不冒充修复后证据。审核验收后另获授权才推送/PR。真实模型、平台、公司源及部署不在当前授权内。v4 升级/前向修复的唯一权威契约见 [ARCHITECTURE](ARCHITECTURE.md#user-delivery-and-history)。
+下一项：交最终本地 SHA 给 Claude，只复核 d29c2f0 之后的 P2(a) 附件回答优先级差异及对应证据；源码/测试冻结于 b08c042，后续仅文档同步。P1/P2(b) 已通过，不重做整轮 S1。c44bbdf 是修复前的完整全套，不冒充修复后证据。审核验收后另获授权才推送/PR。真实模型、平台、公司源及部署不在当前授权内。v4 升级/前向修复的唯一权威契约见 [ARCHITECTURE](ARCHITECTURE.md#user-delivery-and-history)。
 
 ### 已合入的监控可靠性修订（PR #121）
 
@@ -136,37 +136,34 @@ B1 的短口径主视图修复已成立；原 B2 因复现形状不符合真实 
 
 ## 5. 验证记录与限制
 
-### S1/v4 P1/P2 收尾（离线验证与独立增量代码审查通过，等待 Claude 复核）
+### S1/v4 P2(a) 附件回答优先级（离线验证与增量代码审查通过，待 Claude 复核）
 
-审查起点 ac93a742bdf629444483cb3bb15872ecbb2506fb，分支/工作树见 §1。Claude 对该版本条件通过，复跑三个 v4 模块 23 passed，但发现任务时间隐藏、附件正文技术区缺失/文件默认附技术元数据的两个未覆盖分支。旧“无遗留阻断”的内部审查结论随此反例收窄，不代替本次修复验收。
+本次起点 d29c2f0d7cff3365ffe9da02f97b97808999a7a0；Claude 对 ac93a74..d29c2f0（源码/测试 af797c09ef140c3ec5129b15dd3415be57c3e426）确认 P1 任务时间可见和 P2(b) 业务文件通过，但指出 P2(a) 新路径先给完整技术区留位、再截模型文字，违背回答优先。这一反例收窄了此前内部“P1/P2 无新增阻断”的结论。本次只修该根因，不重做 S1 或扩大范围。
 
-用户确认 P2(b)：显式 MD/HTML 与自动附件默认只交业务内容，保真业务原值/嵌套类型；技术元数据只放正文唯一技术区，放不下说明未附。已撤回 ARCHITECTURE 的显式完整文件原文例外，唯一权威规则在长期交付一节；README 和计划仅同步用法/落点。模型 schema、回答保存版本、数据库 v15、依赖、投影、保留期及权限/审批/unknown 边界未改；不推送/PR/合并/部署，不调用真实服务、不读公司配置凭据，D 保持暂停。
+feishu_render.build_feishu_message 的 v4 附件分支先试完整回答、必需说明和完整技术区，复用既有整行搜索安排业务预览；不能共存时整体去掉技术区，显示“技术详情超出消息容量，未附。”，再走既有回答优先路径。短技术区仍保留一个默认收起的面板；普通 v4、v2/v3/Legacy、已绑定内容原字节、权限/TTL/审批/unknown、模型与数据库版本不变。ARCHITECTURE 的长期规则已覆盖该优先级，无需新增契约。
 
-| 根因 | 最小修复与行为 |
+新增 test_v4_attachment_keeps_complete_answer_before_technical_details 经真实 _data_parts 自动附件路径，400 行事实与先通过 AgentAnswer 校验的 15,915 UTF-8 字节模型文字：短 SQL 保留面板，5,000 个带引号字符/13,000 个普通字符的长 SQL 整区省略，完整回答、附件索引与事实限制均可见。审查示例约 8,000 汉字超过当前 16,000 字节模型文字上限，因此使用预算内样本复现，不放宽限额。
+
+test_v4_attachment_uses_real_layout_when_empty_placeholders_are_larger 保留零行占位比完整行更大的边界，改为 22 条短事实、400 行大事实和 8,000 字节完整文字；旧样本的 16,000 字节文字原先被截断，不能再以保技术区为通过条件。新样本同时断言完整回答与面板可共存，并以独立变异确认遗漏下界搜索会失败，未删除该保护。
+
+同根因的无技术区回退也保留完整回答试放：test_v4_attachment_without_technical_details_keeps_answer_with_many_short_facts 使用 34 条普通单行事实、短 SQL 和合法 8,000 字节回答，断言正文全文与末行可见、面板为 0 且明确未附。实际完整布局仅 17,020 字节/138 个组件，零行占位却有 213 个组件，不能先按占位截文字。该分支由增量审查指出后先补 RED，再在同一附件分支修复；独立复核 b08c042 已确认关闭，无新增阻断。结论只覆盖本次实际差异，Claude 对最终 SHA 的复核仍待进行。
+
+源码/测试冻结 SHA：b08c042ad739ba5038999c9743bee8cc872f4875。以下正式检查均记录开始/结束 SHA 相同、工作区 clean、EXIT_CODE=0、VERSION_UNCHANGED=True；后续仅同步文档。日志目录 /tmp/xiaowei-s1-attachment-priority/：
+
+| 检查 | 证据与实际结果 |
 | --- | --- |
-| P1 将 last_success_at、checked_at 当技术元数据 | 从飞书 _BUSINESS_HIDDEN 与 Web technicalKeys 移除；同一 scheduled/get_task 事实的两个时间在卡片正文、实际 Chrome DOM 和 A 通知可见，receipt_id 仍隐藏。不改变字段准入或接收权限 |
-| P2 附件预览关闭技术区、显式文件回退整份原文 | v4 附件正文沿既有容量/整行算法容纳唯一技术区；放不下或降为纯说明时明确未附。显式/自动报告统一复用业务视图，从获准原文还原业务字段类型，不附技术 metadata JSON；业务结果自身的 SQL 列保留。v2/v3/Legacy 和已绑定内容的旧路径保持 |
+| 目标 RED | red.log：2 failed、1 passed，两种长 SQL 均在“完整回答可见”断言失败，短 SQL 成功；many-facts-red.log：1 failed，命中多事实回退丢失回答（先用 32 条事实加长 SQL 复现，最终采用 34 条短事实的更小反例）。最终通过证据见冻结回归 |
+| 冻结版本相关回归 | related-b08c042.log：199 passed，29.99 秒；包含渲染、附件/报告、分项恢复、inline、v4/旧记录交付；命令全文在日志 |
+| 技术区优先回退变异 | mutations-b08c042/technical-first-*.log：基线 3 passed → 变异 2 failed/1 passed → 恢复 3 passed；两例均因回答被截断而失败 |
+| 零行占位提前拒收变异 | mutations-b08c042/zero-placeholder-rejection-*.log：基线 1 passed → 变异 1 failed → 恢复 1 passed；完整回答可保留的技术区被错删，命中面板数断言 |
+| 无技术区完整回答回退变异 | mutations-b08c042/no-technical-full-answer-*.log：基线 1 passed → 变异 1 failed → 恢复 1 passed；撤掉第二次完整回答试放即命中全文丢失断言 |
+| 静态与文档 | static-b08c042.log：全仓 Ruff、2 个修改 Python 文件 format、mypy 38 源文件、文档检查 2 passed、d29c2f0..HEAD 的 diff 检查通过 |
 
-新增/扩展回归：test_v4_task_status_times_are_visible_without_opening_details、test_v4_task_status_times_are_visible_in_web_body；test_v4_automatic_attachment_keeps_one_technical_area_or_explicit_omission、test_v4_report_contains_business_not_duplicate_technical_files、test_v4_business_file_keeps_nested_value_types_without_technical_metadata、test_v4_attachment_fallback_explicitly_reports_omitted_technical_details。Web 时间用例是实际 _view 输出与 Chrome DOM、fetch 为组件替身，不证明 Web 开放任务工具授权。
+三组变异均在临时副本中运行；加载路径、源码 hash、退出码在日志，恢复后 hash 与冻结工作树一致，副本已删除。旧 af797c0 的 512 项相关回归、37 项浏览器及六组变异保留在 /tmp/xiaowei-s1-review-fixes/，仅证明该旧版本，不用来替代本次新增边界。P1/P2(b) 未改，按 Claude 已通过结论保留。
 
-日志目录 /tmp/xiaowei-s1-review-fixes/：p1-p2a-red.log 为 5 failed，分别击中飞书/通知/Web 隐藏时间与自动附件缺技术区/未附说明；p2b-red.log 为 4 failed、2 passed，击中显式 MD/HTML 附技术元数据并保留自动附件成功对照；p2-fallback-red.log 为 1 failed，实际降为纯说明后缺未附提示。均为目标行为失败，不是环境失败。final-local-green.log 为 21 passed；含业务 SQL 列和嵌套值保真、短技术区与长技术区超限的对照，属于工作区局部检查，不拼作全套。
+完整默认全套最后一次仍仅覆盖 c44bbdfce6a111784e435716820a71c670991d20：4873 passed、235 skipped、93 deselected、5 warnings，日志 /tmp/xiaowei-presentation-s1/full-c44bbdf.log。本次遵用户指令只跑受影响检查，不重跑或拼接称作全套通过。
 
-最终源码/测试冻结 SHA 为 af797c09ef140c3ec5129b15dd3415be57c3e426；开始/结束 HEAD 相同、工作区 clean、EXIT_CODE=0、VERSION_UNCHANGED=True。后续仅同步文档，不以文档提交冒充重跑。独立增量代码审查确认 P1/P2 已关闭，无新增阻断；结论限定本次实际差异，不等于真实验收。
-
-| 检查 | 冻结版本证据（目录均为 /tmp/xiaowei-s1-review-fixes/） |
-| --- | --- |
-| 相关回归 | related-af797c0.log：512 passed，239.68 秒；覆盖 A/B/C、报告/分项恢复、审批、v3/v4 保存读取、未展示 Evidence 撤权及当前修复 |
-| 完整的三个相关浏览器模块 | browser-af797c0.log：37 passed，36.09 秒；Chrome + 本地应用/协议替身，包括两个旧用例的 v3/v4 对照和同一任务事实的默认可见时间。不是完整默认全套 |
-| 六组隔离变异 | mutations-summary-af797c0.log、mutations-af797c0/*：p1-python（2 failed）、p1-web（1 failed）、p2-preview（2 failed）、p2-report（2 failed/2 passed）、p2-fallback（1 failed）、p2-lower-bound（1 failed）。均基线0→变异1→恢复0，失败为目标断言；加载路径/hash 已记录，恢复与工作树一致，临时副本删除 |
-| 静态检查 | static-af797c0.log：全仓 Ruff、5 个修改 Python 文件 format、mypy 38 源文件、文档检查 2 passed、ac93a74..HEAD 的 diff 检查通过 |
-
-P2 容量预判另有 RED：p2-placeholder-red.log 为 1 failed，24 个一行事实加合法 16,000 字节模型文字。零行占位比完整行更占组件，现用既有 omissions=False 下界，实际发送仍经完整布局/整行搜索，不新增容量常量或算法；capacity-and-browser-green.log 为 26 passed。p2-lower-bound 变异撤掉这一关键字后真实 _data_parts 再次失败。
-
-浏览器首轮 browser-9b47d19.log 为 33 passed/2 failed，两条旧 R3 默认布局断言在 ac93a74 临时副本亦为 2 failed（r3-baseline-ac93a74.log）。已保留 v3 原隐藏/展开/零重查断言并增加 v4 对照；技术区移到回复根节点后不再从表格回找 fact 容器，业务范围计数按批准规则可见。首次诊断漏配隔离 PG 的 2 个装配错误单存 r3-baseline-setup-error.log，不作为缺陷或变异命中。
-
-首版全套仍仅覆盖 c44bbdfce6a111784e435716820a71c670991d20：4873 passed、235 skipped、93 deselected、5 warnings，full-c44bbdf.log 在 /tmp/xiaowei-presentation-s1/；c44bbdf..ac93a74 仅文档，但本次有产品改动，不能沿用为当前全套通过。本轮按复审范围不重跑完整默认全套。
-
-仍未覆盖：真实模型的取证后澄清/SQL 草稿与补引用改写的自然度、调用/耗时/用量；拒绝审批恢复后的条件提示理解；真实 post/mentions/md、识图、桌面/手机折叠与飞书/代理实收。离线脚本模型不证明任务能力；不豁免真实验收。非阻断的失败编号、警告入口文案及 brief 区内标注未扩大进本次 P1/P2 修复；不据此修改旧版本/默认内部编号规则。下一项为 Claude 对最终本地 SHA 的 P1/P2 增量复核。
+未覆盖：真实模型的取证后澄清/SQL 草稿与补引用改写的自然度、调用/耗时/用量；拒绝审批恢复后的条件提示理解；真实 post/mentions/md、识图、桌面/手机折叠与飞书/代理实收。离线测试不证明真实任务能力，现有真实验收门槛保留。未推送/PR/合并/部署，未调用真实服务或读取公司配置凭据，D 保持暂停。
 
 ### 群输入 S0/S2（v1.4，局部修复独立复审通过）
 
