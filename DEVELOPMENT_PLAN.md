@@ -153,7 +153,7 @@ Web 宿主发布地址由 `.env` 的 `XW_WEB_BIND_ADDRESS` 决定，缺省 `0.0.
 
 ## 8. P4 监控增量与之后的扩展
 
-**CloudCanal 一期（2026-10-23，计划 v1.2）：** 范围、数据边界及 D1 见 [ARCHITECTURE](ARCHITECTURE.md#cloudcanal-mcp)。按[一期计划](docs/superpowers/plans/2026-10-23-cloudcanal-phase1.md)推进 CC0 实际 MCP 核约 → CC1 任务/状态/指标 → CC2 日志与交叉排查 → CC3 真实验收；固定 C1—C5、分层验证与退出条件均在该计划维护。当前授权、版本及验证证据见 [handoff](AGENT_HANDOFF.md#cloudcanal-phase1-status)。
+**CloudCanal 一期（2026-10-24，计划 v1.3）：** 范围、数据边界及 D1 见 [ARCHITECTURE](ARCHITECTURE.md#cloudcanal-mcp)。按[一期计划](docs/superpowers/plans/2026-10-23-cloudcanal-phase1.md)推进 CC0 实际 MCP 核约 → CC1 任务/状态/指标 → CC2 日志与交叉排查 → CC3 真实验收；固定 C1—C5、分层验证与退出条件均在该计划维护。当前授权、版本及验证证据见 [handoff](AGENT_HANDOFF.md#cloudcanal-phase1-status)。
 
 **通知与定时任务增量（2026-10-22，A/B/C 已合入，C 为 #126/main@be8c155）：** 范围与权限唯一维护于 [ARCHITECTURE](ARCHITECTURE.md#scheduled-agent-tasks)，技术依据见[设计 v1.4](docs/superpowers/specs/2026-10-21-scheduled-agent-tasks.md)，按 [A–D 计划](docs/superpowers/plans/2026-10-21-scheduled-agent-tasks.md)串行交付：即时多机器人通知 → 一次性固定提醒 → 独立 Agent 周期任务 → Node 核心巡检。A 合并及 B 具体候选版本、独立复审和离线证据见 handoff，C 已合入，真实U6/U7仍开放；先单独交付自建飞书代理作为 C 公司验收前置，D 暂停且未实现；真实模型/服务、部署与用户接受分别记证。生产写逐次审批、指定操作群及既有实战退出条件不变。
 

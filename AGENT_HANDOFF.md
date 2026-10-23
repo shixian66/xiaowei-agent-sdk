@@ -1,6 +1,6 @@
 # 小维：当前交接
 
-> 更新：2026-10-23，Asia/Shanghai。本文维护当前代码状态、有效证据、缺口与下一项工作。产品契约见 [ARCHITECTURE.md](ARCHITECTURE.md)，阶段与退出条件见 [DEVELOPMENT_PLAN.md](DEVELOPMENT_PLAN.md)，使用与运维见 [README.md](README.md) 和 [OPERATIONS.md](deploy/OPERATIONS.md)。
+> 更新：2026-10-24，Asia/Shanghai。本文维护当前代码状态、有效证据、缺口与下一项工作。产品契约见 [ARCHITECTURE.md](ARCHITECTURE.md)，阶段与退出条件见 [DEVELOPMENT_PLAN.md](DEVELOPMENT_PLAN.md)，使用与运维见 [README.md](README.md) 和 [OPERATIONS.md](deploy/OPERATIONS.md)。
 
 **OpenAI Agents SDK 负责 Agent Loop；小维负责权限、受治理工具执行、证据真实性和数据边界。**
 
@@ -15,7 +15,7 @@
 | 锁定依赖 | SDK `0.22.3`、Lark Channel `1.4.0`、MCP `2.2.0`、sqlglot `30.17.0`、`nh3 0.3.7`、`tinycss2 1.5.1`、Pillow `13.0.0`、certifi `2026.10.19`（后两项为严格审计发现的既有漏洞定向升级） |
 | 正式入口 | `xiaowei serve`、`config check`、`model check`、`storage init/upgrade/cleanup`、`requests resend`；命令与环境准备以 README 为准 |
 | 最近有记录的公司部署 | 用户本次回报 fat 镜像 `729f960d`，一小时全窗 29,232 / ERR 6 / 多语句 1，与 DBA 回查一致；未独立核验服务器。本次未部署 |
-| 当前验收结论 | CloudCanal 尚未接入；当前为计划 v1.2 审查意见修订。用户提供的独立审查只覆盖 d1cc7b9，新增修订尚待复审；既有 SDK/协议证据不代表真实模型、目标 MCP、公司服务或用户验收 |
+| 当前验收结论 | CloudCanal 尚未接入；当前为计划 v1.3 审查意见修订。用户提供的独立审查只覆盖 d1cc7b9，新增修订尚待复审；既有 SDK/协议证据不代表真实模型、目标 MCP、公司服务或用户验收 |
 | 当前任务授权 | CloudCanal 一期需求与 D1 选择 A 已确认；仅编写必要设计、计划与文档，并作有界离线验证。未授权产品功能代码、真实模型/公司服务、发布、合并或部署 |
 
 原工作目录的 ARCHITECTURE 差异与未跟踪计划/公司配置保留，未复制到本工作树；本次未读取公司配置凭据。旧监控和回答修复记录保留为注明版本的证据，不作为本轮输入或展示范围扩展授权。
@@ -41,21 +41,21 @@
 
 ### 当前：CloudCanal 一期设计与计划
 
-[实施计划 v1.2](docs/superpowers/plans/2026-10-23-cloudcanal-phase1.md)落实独立审查的容量/期限核实、完整策略接线、身份/业务错误与接收范围验收，并分配共同变体的主验证层。C1—C5 与 [ARCHITECTURE 的 D1](ARCHITECTURE.md#cloudcanal-mcp)保持原文；原 L1 改记既有机制复用，L2/L4 明确前置可修正拒绝与执行后超限停源的区别。
+[实施计划 v1.3](docs/superpowers/plans/2026-10-23-cloudcanal-phase1.md)落实独立审查的容量/期限核实、完整策略接线、身份/业务错误与接收范围验收，并分配共同变体的主验证层。C1—C5 与 [ARCHITECTURE 的 D1](ARCHITECTURE.md#cloudcanal-mcp)保持原文；原 L1 改记既有机制复用，L2/L4 明确前置可修正拒绝与执行后超限停源的区别。
 
 用户提供的 Claude 独立审查针对 `d1cc7b9a21d24daffec057c9b6ec3225fa71ccc8`，结论为有条件通过：CC0 可继续，CC1/CC2 须解决各自依赖工具的 B1。源码已核实超限停源及策略集合的使用链；本次文档修正不关闭远端容量缺口，也未批准 CloudCanal 超限修正类别。CC3 次数/阈值与预算仍待运行前决定，见计划 §6。
 
-审查原文 A2 末段/A3 开头缺失，已请求补充；可见的命名、认证及只读效果核实要求已写入计划 §4.1/CC0，未声称覆盖未收到的部分。A1 的“只配置 CloudCanal”按本轮仅该工具集可见验收；`ServeConfig.targets` 现须至少一项，零 StarRocks 配置启动不在本次增量中。
+A2/A3 完整原文已核实并落实到计划 §4.1/CC0：认证前缀的源码依据、命名/认证不兼容时的单独取舍，以及只读探查范围均已补齐；实际远端契约仍待 CC0 确认。A1 的“只配置 CloudCanal”按本轮仅该工具集可见验收；`ServeConfig.targets` 现须至少一项，零 StarRocks 配置启动不在本次增量中。
 
 已知既有说明问题（N5）：`config.py:152` 称群 tools 仅 StarRocks，实际 `runtime.py:432` 接纳所有已登记工具；本次不改源码，在 CC1 启用 CloudCanal 群配置时更正注释并核对说明，执行授权沿用现状。
 
 既有 SDK 证据（v1.0，`3e53966da1b05c496175ab30a78adccb8f0eb96b`）：独立环境核对 Python 3.11.16、SDK 0.22.3、MCP 2.2.0、OpenAI 3.20.0、httpx2 2.13.1 公开签名；现有 SDK/协议用例 **10 passed，10.52 秒**，覆盖真 Runner + ScriptedModel、临时 loopback MCP、Manager 生命周期、默认 tracing 无外发及空配置零网络，日志 `/private/tmp/xw-cloudcanal-plan-20261023/sdk.log`。未用真实模型、公司源或测试 PostgreSQL；本次未改 SDK 版本或调用方式，直接复用证据。
 
-本次差异基线为独立审查的 d1cc7b9，范围为计划、架构索引、阶段索引与 handoff 四份 Markdown；完整目标 SHA 随交付提供。新增差异只有作者自查，不沿用旧版的审查结论。
+供复审的累计差异基线为独立审查的 d1cc7b9，范围为计划、架构索引、阶段索引与 handoff 四份 Markdown；完整目标 SHA 随交付提供。新增差异只有作者自查，不沿用旧版的审查结论。
 
-本次文档命令一致性检查 **2 passed，0.13 秒**；相关本地链接/锚点 **6 项通过**，差异检查通过。比对确认固定 C1—C5 和架构 CloudCanal/D1 契约原文未变；无产品/测试/依赖文件变更，未运行真实模型、公司服务或业务测试。
+本次文档命令一致性检查 **2 passed，0.14 秒**；相关本地链接/锚点 **9 项通过**，差异检查通过。比对确认固定 C1—C5 和架构 CloudCanal/D1 契约原文未变；无产品/测试/依赖文件变更，未运行真实模型、公司服务或业务测试。
 
-下一项：补齐截断的审查原文；用户补版本与连接方式后按 CC0 核实实际工具、响应容量/期限与数据范围，真实调用仍需对应授权。当前文档授权不启动 CC1/CC2 功能开发；保留全部实战缺口，不打包、不部署。
+下一项：用户补版本与连接方式后按 CC0 核实实际工具、认证、响应容量/期限与数据范围，真实调用仍需对应授权。当前文档授权不启动 CC1/CC2 功能开发；保留全部实战缺口，不打包、不部署。
 
 ### 安全巡检报告呈现（PR #132，合入前证据）
 
