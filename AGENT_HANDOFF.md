@@ -11,11 +11,11 @@
 | 仓库 | [shixian66/xiaowei-agent-sdk](https://github.com/shixian66/xiaowei-agent-sdk) |
 | 产品代码基线 | `main@1a92c58da5a47db755fb3213c9fd9e0393511e01`（自建飞书代理由 #127 合入）；复用代理隔离工作树，分支 `codex/feishu-input-presentation-plan`；D 的 codex/node-exporter-core 工作树及原目录修改均保留 |
 | 源码与检查 | 当前源码仅保留 `src/xiaowei`；旧工程及专属测试、Compose、迁移入口、`compose-smoke` CI 和 Alembic 依赖已移除。保留产品测试、公共检查与旧回答兼容路径；旧工程历史可从 Git 查回 |
-| 当前存储与回答 | 主线应用 schema v15，代理不新增迁移；C 扩展已有 job、逐次 run/通知关联；014 已发布不改，015 显式升级。SDK 表、回答版本及既有交付兼容保持 |
+| 当前存储与回答 | 应用 schema v15 不变；C 扩展已有 job、逐次 run/通知关联；014 已发布不改，015 显式升级。当前本地新回答保存 v4，旧 v2/v3/Legacy 与已绑定交付保持原语义，SDK 表不改 |
 | 锁定依赖 | SDK `0.22.3`、Lark Channel `1.4.0`、MCP `2.2.0`、sqlglot `30.17.0`、`nh3 0.3.7`、`tinycss2 1.5.1`、Pillow `13.0.0`、certifi `2026.10.19`（后两项为严格审计发现的既有漏洞定向升级） |
 | 正式入口 | `xiaowei serve`、`config check`、`model check`、`storage init/upgrade/cleanup`、`requests resend`；命令与环境准备以 README 为准 |
 | 最近有记录的公司部署 | 主线交接记录含用户提供的 `xiaowei:143c4c8641be636c41c130329ce1639a36b59c27` 镜像及巡检日志；未独立核验当前服务器状态。本次未部署 |
-| 当前验收结论 | A/B/C 已合入主线；代理离线候选 163d2ac 的独立复审及单次完整默认全套通过；S0 已闭合、S2 局部修复已通过 Claude 独立复审（44b0d5d，受测代码 d750a41），真实输入/识图与 U5/U6/U7 未验收，D 暂停且未实现。具体版本与证据见 §5 |
+| 当前验收结论 | A/B/C 与代理已合入主线；S0/S2 已通过独立复审。S1 本地实现、独立代码审查及 c44bbdf 单次完整默认全套通过，等待用户外部复核；真实模型、平台输入/识图、客户端与 U5/U6/U7 仍未验收，D 暂停且未实现。精确版本和证据见 §5 |
 | 当前任务授权 | 起点 b2761c8：用户接受 v4 前向修复、不恢复旧备份，授权 S1 本地实现、测试与提交，完成后交独立审查；不推进 D，不推送/PR/合并/部署，不调用真实服务/模型或读取公司配置凭据 |
 
 原工作目录的 ARCHITECTURE 差异与未跟踪计划/公司配置保留，未复制到本工作树；本次未读取公司配置凭据。旧监控和回答修复记录保留为注明版本的证据，不作为本轮输入或展示范围扩展授权。
@@ -33,15 +33,15 @@
 - 进度的单聊/群聊差异延迟、仅真实变化更新、正常收尾及异常陈旧已由用户确认，详见[进度契约](ARCHITECTURE.md#progress-observation)；P1 已有离线实现，当前证据见计划 §7。普通消息的区域身份及正文/明细分工见[普通消息契约](ARCHITECTURE.md#ordinary-feishu-expression)，不能由 HTML/MD 报告完成推定达标。
 - 监控写仅限已批准动作，使用 SDK 原生审批暂停/恢复及既有 Action 治理；生产开放仍须满足对应源和群审批门槛。Grafana 数据源密码私聊命令尚未实现，目前由管理员在 Grafana UI 填写。见 [监控边界](ARCHITECTURE.md#monitoring-mcp)。
 - 内网 Web 无登录、访问者共用操作者权限；目标账号、网络、Grafana 插件/写端及数据源更新竞争窗口等已接受取舍按架构执行。
-- 通知及定时任务的方向与待审权限增量见 [ARCHITECTURE](ARCHITECTURE.md#scheduled-agent-tasks)：多个目的群不扩大操作入口，任务独立于原聊天，创建及每次执行复核权限，生产写不能继承周期批准。A/B/C 与自建代理适配已合入主线；群输入已通过独立复审，当前实施 S1 展示，D 暂停且未实现。
+- 通知及定时任务的方向与待审权限增量见 [ARCHITECTURE](ARCHITECTURE.md#scheduled-agent-tasks)：多个目的群不扩大操作入口，任务独立于原聊天，创建及每次执行复核权限，生产写不能继承周期批准。A/B/C 与自建代理适配已合入主线；群输入已通过独立复审，S1 展示已完成本地实现与离线验证、等待外部复核，D 暂停且未实现。
 
 ## 3. 当前计划与下一项工作
 
-### 当前：S1 本地实施与验证
+### 当前：S1 本地交付，等待外部独立复核
 
 S2 独立复审结论保留，审查版本 44b0d5d、受测代码 d750a41，具体证据见 §5。用户已确认 v4 回退限制并授权本地 S1，依据[计划 v1.5](docs/superpowers/plans/2026-10-22-feishu-input-presentation-repair.md)实现默认业务回答、单技术区与版本兼容，模型 schema 不变。D 及原目录工作保持不动。
 
-下一项：完成 S1 本地实现、相关验证与提交，交精确 SHA 独立审查；审核验收后另获授权才推送/PR。真实模型、平台、公司源及部署不在当前授权内。v4 升级/前向修复的唯一权威契约见 [ARCHITECTURE](ARCHITECTURE.md#user-delivery-and-history)。
+下一项：交最终本地 SHA 给 Claude 只读复核；受测代码/测试 c44bbdf，后续仅文档同步。审核验收后另获授权才推送/PR。真实模型、平台、公司源及部署不在当前授权内。v4 升级/前向修复的唯一权威契约见 [ARCHITECTURE](ARCHITECTURE.md#user-delivery-and-history)。
 
 ### 已合入的监控可靠性修订（PR #121）
 
@@ -79,9 +79,9 @@ S2 独立复审结论保留，审查版本 44b0d5d、受测代码 d750a41，具�
 
 P1-B、P2、P2.5 与飞书单群的基础切片已有离线交付记录；P3-A/B 部署维护代码已合入。P1 Task 9、P2 诊断、P2.5 环境行为及单群的真实退出条件仍按 P3 分项验收，不把这些阶段统称为全部完成。
 
-### 当前回答结构与主要证据
+### 主线旧回答结构与历史证据（版本 ≤3）
 
-已合入的回答结构见[自由回答结构计划](docs/superpowers/plans/2026-10-17-free-answer-structure.md)。其中 S2 的“留 S3”等阶段文字是当时记录，当前合入状态以上表为准。
+以下记录版本 ≤3 的已合入行为，不覆盖本地 v4；当前差异和验证见 §5 S1，产品契约见长期交付规则。已合入的回答结构见[自由回答结构计划](docs/superpowers/plans/2026-10-17-free-answer-structure.md)。其中 S2 的“留 S3”等阶段文字是当时记录，当前合入状态以上表为准。
 
 已合入的[模型自主 HTML/MD 报告](docs/superpowers/plans/2026-10-19-model-authored-reports.md)复用 blocks 和现有治理/交付；MD 原生排版、独立 HTML 片段与短 Skill，事实就近由代码填入，主消息提取文字。版本 3 贯穿保存/读取，解决旧纯文本在升级时未绑定字节的兼容问题；旧 HTML 基线字节回归保持一致。禁止脚本/外部资源，解析 CSS 值控制布局，文件/试排/预览只清理一次。A1 仍保留通用模型失败回执，未扩大数据/权限或 SQL 取数限额。
 
@@ -136,23 +136,35 @@ B1 的短口径主视图修复已成立；原 B2 因复现形状不符合真实 
 
 ## 5. 验证记录与限制
 
-### S1 业务交付与 v4（本地候选，待冻结全套及独立审查）
+### S1 业务交付与 v4（本地实现与独立代码审查通过，真实验收开放）
 
-起点 b2761c8c9f9d3072c392336093571c209693a296，产品基线 main@1a92c58；分支/工作树见 §1。用户已接受 v4 前向修复、不恢复旧备份，只授权本地实现、验证和提交。模型 AgentAnswer/FactBlock schema、依赖、应用 schema v15、数据投影和保留策略均不变；不实现 D、不推送/PR/部署，不调用真实模型/飞书/代理/公司源，不读公司配置凭据。
+实施起点 b2761c8c9f9d3072c392336093571c209693a296，产品基线 main@1a92c58；冻结源码为 8396965ea2310bae780f97c5a8d0806ef178b88d，最终受测代码/测试为 c44bbdfce6a111784e435716820a71c670991d20（只增加容量测试装配修正，产品源码相同）。后续仅更新文档，不据文档提交宣称重跑全套。模型 AgentAnswer/FactBlock schema、锁定依赖、应用 schema v15、数据投影和保留策略未改；v4 前向修复决定及当前授权见 §1/§2。
 
-代码落点：TurnAnswer/RequestRecord/Delivery 贯穿可信保存版本 4，v2/v3 保留补全和原布局；当前回答只渲染选择的事实，全部可见 Evidence 仍复核。Web/飞书统一单收起技术区，通知无技术区，容量文件不另造技术明细；显式完整文件沿既有获准原文语义，原值不能由展示保真替代时在同一区保留获准 JSON。技术原值超限只说明未附，不独立触发文件。任务 ID 及目标、时间、截断、unknown/未核实等业务信息保留；默认 Web 状态不附内部请求编号。
+TurnAnswer/RequestRecord/Delivery 贯穿可信保存版本；v2/v3 的补全和布局、Legacy 语义保留。v4 普通事实只交所选内容，全部可见 Evidence 仍先核对当前权限、TTL、归属和接收范围。Web/飞书正文至多一个收起技术区；审批卡、文件及通知不另附技术明细。业务范围、历史时间、限制、失败和 unknown 保持可见，任务 ID 可供查看/取消；技术原值超限明确未附，不独立触发文件。显式完整文件保留获准原值，自动业务文件保留值类型；已绑定字节、键、uuid 和 claim/settle 恢复未改。
 
-新执行轮空回答/成功只读查询无 fact 沿现有 SDK invalid_final_output 无工具改写一次；使用既有 _results，只读之外的动作仍按原完成性账本核对，不误加改写。三处指引同步，不承诺自动补交，不为历史详情重跑任务。SDK 暂停只交材料/状态，保留条件提示；ResultDelivery 读回原 run_turn_id，审批分项保留“查询结果尚未交付”提示。新暂停正式入口测试覆盖获准恢复后交原证据、查询不重跑。旧 C7 分项测试明确构造 v3 生产版本，保留未知/回执/审批断言；v4 单业务文件测试更新数量，原字节/键/uuid及禁止重传保护保留，不靠删安全断言过关。
+新执行轮空回答/成功只读查询无 fact，复用 SDK invalid_final_output 一次无工具改写，仍不合格受控失败，保留原时间与调用预算、不重查。三处指引同步；动作完成性账本不误当只读漏引。暂停仅交完整动作材料/状态，并说明只读结果尚未交付及恢复条件；ResultDelivery 保留原 run_turn_id，正式群入口验证获准恢复后使用原证据、查询不重跑。历史详情沿已保存且当前可读内容交付，不新增历史搜索或读取权限。
 
-离线 RED：version-red.log 为 3 failed/3 passed（v4 选择与空/漏引未修正），render-red.log 为 6 failed（逐条技术入口、通知包装、技术信息触发附件等旧行为）。repair-and-pause.log 进一步命中真实暂停材料丢提示，修正原轮次贯穿和审批分项保留。阶段性业务回归 business-second.log 为 252 passed/1 failed，残余仅 content 的旧 JSON 布局断言，已改成结构化事实核对。recovery-second.log 为 203 passed/7 failed，残余为同一双文件旧文案断言；model-reports-green.log 已定点 8 passed。它们是开发诊断，不拼成全套。
+结构化历史缺少可信计数时继续 full 回退；仅 v4、无 columns、可信 Prometheus query/range_query 的补充历史 brief 保持收起，不猜样本或生成计数。任务/通知的已选事实保持 full，避免必要状态被 brief 隐藏。两项只影响展示，不扩大事实集合、数据投影或权限；原获准 JSON 在单技术区可达。结构采集模板与实际执行 SQL 分别标注，不把模板冒充已执行语句。
 
-当前最小闭环 candidate-smoke.log 为 20 passed；包含 v3 空/部分引用保存读取、v4 选择/未展示证据单独撤权、空/无 fact 单次改写及再次拒收、原字节重发、嵌套值类型、正式审批暂停/恢复。browser-v4-candidate.log 为 2 passed：真实 Chrome/Uvicorn 8517 的可见业务表格/单技术区/无默认内部编号，离线 v4 HTML 的范围时间/零技术折叠/零外部请求。真实 SDK/隔离 PG 保留，模型和外部服务为替身；调用次数证明链路，不证明真实自主完成或成本。日志均在 /tmp/xiaowei-presentation-s1/，冻结版本及后续全套/变异/审查结果待完成后据实更新。
+| 检查 | 精确证据 |
+| --- | --- |
+| 单次完整默认全套 | **4873 passed, 235 skipped, 93 deselected, 5 warnings in 1600.38s (0:26:40)**；full-c44bbdf.log，首尾均 c44bbdf、clean、EXIT_CODE=0、VERSION_UNCHANGED=True。包含 A/B/C、审批/恢复、Evidence/Session、容量及本地部署维护；skipped/deselected 不算验收 |
+| 最终相关回归 | 606 passed、2 deselected、172.65 秒；related-8396965.log，首尾 8396965/clean/EXIT_CODE=0。覆盖原 P4 六轮历史追问、结构化计数反例、状态可见性及实际消费者 |
+| 浏览器 | 两个完整浏览器模块共 22 passed、27.63 秒；browser-8396965.log，真实 Chrome + 本地 Uvicorn/HTML、外部模型/平台为替身。全套默认未选 browser，单独记录；未动既有占用端口的服务 |
+| 容量测试修正 | capacity-fixture-green.log：15 passed、31.43 秒。新提示词令原 30KB 测试门槛在首请求 30,013B 提前拒绝；测试用 40KB 容纳首请求，保留第二请求超限零发送、准确 2 请求/3 查询及零 Session 写，另断言首请求确已发送；产品默认 1MB 与拒绝代码未改 |
+| 六组隔离变异 | mutations-8396965/summary.log 及 mutation-*-baseline/mutant/restored.log：v4-remaining、unshown-permission、missing-fact、approval-notice、opaque-policy、status-visible 全部 0→1→0。逐组记录加载路径/hash，恢复 hash 与工作树一致、临时副本已删除；无环境或提前权限失败冒充命中 |
+| 静态检查 | static-c44bbdf.log：全仓 Ruff、45 个修改 Python 文件 format、mypy 38 源文件、文档命令检查 2 passed、提交范围 diff 全通过；首尾 c44bbdf/clean/EXIT_CODE=0 |
+| 独立审查 | Codex 独立审查者对初始全差异及后续精确增量复核；8396965 展示边界与六组变异证据通过，c44bbdf 容量测试装配修正通过，无遗留阻断。该结论不冒称 Claude 外部复核或真实验收 |
 
-独立审查针对 f2c310b 发现 Web v4 full/当前 brief 的获准原文节点丢失，以及飞书结构采集模板误标实际 SQL；两项均按根因修复，不增加面板、投影或 I/O。新增 RED：web-originals-red.log 为 5 failed（full/brief×嵌套值、DDL 原文不可达），sql-template-red.log 为 3 failed/1 passed（模板与实际查询对照）；修复后 web-originals-green.log 为 7 passed、review-render-green.log 为 47 passed。两次 RED 的 shell 收尾误用了 zsh 只读变量 status；pytest 的目标断言与上述失败汇总已完整保存，后续统一用 check_exit，不将 shell 错误当测试命中。
+日志目录为 /tmp/xiaowei-presentation-s1/。冻结检查使用 /tmp/xiaowei_run_versioned_check.py LOG COMMAND；完整命令为 UV_OFFLINE=1 PYTHONDONTWRITEBYTECODE=1 SDK_TEST_POSTGRES_URL=postgresql+asyncpg://postgres@127.0.0.1:55432/postgres uv run --locked --extra dev python /tmp/xiaowei_run_versioned_check.py LOG .venv/bin/python -m pytest -q -p no:cacheprovider。相关模块/Chrome/静态的展开 COMMAND 见各日志；变异在临时副本运行，保留真 SDK 和隔离 PG。
 
-四组隔离变异在 f2c310b 的临时副本完成：v4-remaining、unshown-permission、missing-fact、approval-notice 均基线 0→变异 1→恢复 0，逐个记录加载路径/hash，精确恢复并删除副本；根工作树未变异。日志 mutation-*-{baseline,mutant,restored}.log 和 mutations-summary.log 在同目录。它们针对的 Python 保护在后续 Web/模板修复中未改。旧候选 full-f2c310b.log 主动中止于 12 passed/91 deselected、EXIT_CODE=2，HEAD/clean 未变，不作为完整全套。
+RED 与修复依据保留：version-red.log 3 failed/3 passed，render-red.log 6 failed；正式暂停曾命中条件提示丢失。独立审查发现的 Web 原文不可达、SQL 模板误标分别由 web-originals-red.log（5 failed）和 sql-template-red.log（3 failed/1 passed）复现后修正。原 P4 六轮追问暴露不透明历史结果默认展开，最终以可信 Prometheus 分类收窄，保留结构化 full 对照。status-visible 变异命中 fact.view 的 full 断言，不宣称直接命中后续可见文案；早期状态夹具因缺授权提前拒绝的日志不是保护证据，修正夹具后 87 项通过，最终变异验证目标分支。
 
-仍未覆盖：获准真实模型固定任务（工具选择、漏答/澄清/修正、事实与推断质量、耗时与用量）；真实平台 post/mentions/md、识图、桌面/手机显示及飞书/代理实收。真实模型未授权，本地继续验证但不豁免验收门槛。D、30 任务并发/公司成本不在本片验证范围。下一项：冻结 SHA、单次完整默认全套及关键保护变异，再做精确版本独立审查；审核验收后另获授权才集成。
+以前的完整/中止记录不冒充通过：full-0aa473e.log 为 23 failed/4827 passed；full-921dbd3-interrupted.log 为 1 failed/1757 passed、EXIT_CODE=2；full-8396965.log 为 1 failed/4872 passed、EXIT_CODE=1（上述容量装配）。它们暴露的问题已在最终候选回归；分批数量不相加称全套。较早变异/局部记录不替代最终表格。
+
+全套后仅同步本交接、计划及 ARCHITECTURE 的旧版本描述；文档命令检查 2 passed（0.13 秒），63 个本地链接/锚点有效，diff 检查通过。git diff --exit-code c44bbdf -- src tests scripts pyproject.toml uv.lock 通过，未以文档提交冒充重新运行全套。
+
+仍未覆盖：获准真实模型固定任务（工具选择、漏答/澄清/修正、事实与推断质量、耗时及用量）、真实平台 post/mentions/md、识图、桌面/手机显示及飞书/代理实收。脚本模型只能证明调用链、预算和边界，不证明真实 Agent 自主完成或成本；不豁免真实验收门槛。D、30 任务并发/公司成本不在本片范围。下一项：Claude 对最终本地 SHA 只读复核；真实模型/平台与集成均另获授权。
 
 ### 群输入 S0/S2（v1.4，局部修复独立复审通过）
 
@@ -170,7 +182,7 @@ Claude 复审确认两种多文档在 _parse 阶段整条拒绝、零下载/模�
 
 最终代码冻结于 `d750a41bfb5466d70c7092b9c2346b2436e9fe40`。同次相关回归 **395 passed，83.95 秒，EXIT_CODE=0**，BEGIN/END_SHA 相同且 BEGIN/END_CLEAN、VERSION_UNCHANGED 均为 true；日志 `/tmp/xiaowei-post-s2/review-fix-regression-d750a41.log` 记录完整命令。覆盖用户指定的 6 个模块，加身份提示/真正未支持类型/群身份及原生批准恢复对照；不是完整默认全套。Ruff check、5 个相关 Python 文件 format、mypy（38 源文件）、文档命令检查（2 passed）、提交范围 diff 检查均通过。冻结后仅更新验证/复审记录和计划提示文案，源码和测试未变。本次不重跑完整默认全套；旧 4818 passed、235 skipped、89 deselected 的单次全套只覆盖 9f109374e57b89548b0aed2cd67e0a07f9819282（日志 full-9f10937.log），不能当成本次修复通过证据。早期 706/37 项记录及资源键隔离变异同样不替代本次检查，原始日志仍在 /tmp/xiaowei-post-s2/。
 
-以上 S2 受测版本中，S0 的 v4 贯穿/回退方案仅为方案；原三项 Gateway→SDK→隔离 PG 暂停可见性结论不变：未恢复/过期后普通轮不可见，拒绝经恢复提交后可见，零重查/生产写。未实施 S1/v4/D，未新增依赖/迁移，未读取公司配置凭据或调用真实服务。未覆盖真实平台 post/mentions/md 形态：md 中 HTML 形式的 `<at>` 会整条拒绝，外层其他字典字段也会按多文档拒绝；两者偏安全但可能阻断合法使用，须在另获授权的真实验收中确认。真实识图、客户端展示和真实模型能力未验收。完整默认全套最后一次仅针对 9f10937，本次局部修复的 395 项相关回归与变异不能合称全套。v4 回退限制及 S1 本地开发已获后续授权，当前状态见 §1/§3；这些 S2 证据不证明 S1。
+以上 S2 受测版本中，S0 的 v4 贯穿/回退方案仅为方案；原三项 Gateway→SDK→隔离 PG 暂停可见性结论不变：未恢复/过期后普通轮不可见，拒绝经恢复提交后可见，零重查/生产写。未实施 S1/v4/D，未新增依赖/迁移，未读取公司配置凭据或调用真实服务。未覆盖真实平台 post/mentions/md 形态：md 中 HTML 形式的 `<at>` 会整条拒绝，外层其他字典字段也会按多文档拒绝；两者偏安全但可能阻断合法使用，须在另获授权的真实验收中确认。真实识图、客户端展示和真实模型能力未验收。截至该 S2 局部交付时，完整默认全套最后一次仅针对 9f10937；395 项相关回归与变异不能合称全套。后续 S1 的独立全套见本节 S1 记录。v4 回退限制及 S1 本地开发已获后续授权，当前状态见 §1/§3；这些 S2 证据不证明 S1。
 
 ### 群输入与按需详情计划 v1.3（仅文档）
 
