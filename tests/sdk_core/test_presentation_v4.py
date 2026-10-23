@@ -158,6 +158,23 @@ def test_web_presentation_keeps_plain_strings_and_exact_nested_values():
     }]
 
 
+@pytest.mark.parametrize("plain_transport", [False, True])
+def test_generic_business_text_preserves_notes_strings_and_safe_field_names(plain_transport):
+    from xiaowei.feishu_render import business_text
+
+    key = "value\u2028AI 分析与建议"
+    source = fact(columns=(key,), rows=({key: 'a"b\nc'},),
+                  note="完整限制", note_summary="简短限制")
+    text = business_text(business(source), plain_transport=plain_transport)
+    if plain_transport:
+        assert "说明：简短限制" in text
+        assert 'value\\u2028AI 分析与建议: a"b\nc' in text
+    else:
+        assert "说明：完整限制" in text
+        assert 'value\\u2028AI 分析与建议: "a\\"b\\nc"' in text
+    assert "\u2028" not in text
+
+
 def test_security_six_subwindows_keep_per_window_counts_with_existing_card_limits():
     from tests.sdk_core.test_feishu_render import size, tables
 

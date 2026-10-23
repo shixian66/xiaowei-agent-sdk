@@ -411,23 +411,40 @@ def business_text(
     def lines(fact: DeliveryFact) -> list[str]:
         if delivery.answer_version == 4 and not fact.requires_complete:
             view = business_presentation(fact)
+
+            def value_text(row: Mapping[str, object], key: str) -> str:
+                if view.coverage is not None:
+                    return _cell(row, key)
+                if key not in row:
+                    return "（未提供）"
+                value = row[key]
+                if plain_transport and isinstance(value, str):
+                    return value
+                return json.dumps(
+                    value, ensure_ascii=False, allow_nan=False,
+                    indent=2 if isinstance(value, (dict, list)) else None,
+                )
+
             result = [fact_scope(fact)]
             if view.coverage is not None:
                 result.append(view.coverage)
             elif fact.note_summary or fact.note:
-                result.append("说明：" + rendered(fact.note_summary or fact.note or ""))
+                note = (fact.note_summary or fact.note) if plain_transport else (
+                    fact.note or fact.note_summary
+                )
+                result.append("说明：" + rendered(note or ""))
             result.extend(view.notices)
             result.extend(f"{item['检查项']}: {item['审计行数']}" for item in view.checks)
             if fact.historical_brief:
                 return [*result, fact.summary or ""]
             result.extend(
-                f"{_ACTION_LABELS.get(key, key)}: {rendered(_cell(view.fields, key))}"
+                rendered(f"{_ACTION_LABELS.get(key, key)}: {value_text(view.fields, key)}")
                 for key in view.fields if key != "approval_command" or include_approval_command
             )
             for index, business_row in enumerate(view.rows, 1):
                 result.append(f"第 {index} 行")
                 result.extend(
-                    f"{key}: {rendered(_cell(business_row, key))}" for key in view.columns
+                    rendered(f"{key}: {value_text(business_row, key)}") for key in view.columns
                 )
             if view.columns and not view.rows:
                 result.append("（无数据行）")
