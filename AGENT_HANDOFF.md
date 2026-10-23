@@ -51,6 +51,8 @@
 
 修复前 `/tmp/xw-review-red.log`：**6 failed、4 passed / 6.60s**，分别命中通知材料误判、两种失败无日志、定时前缀位置；真正审批暂停对照通过。修复后 `/tmp/xw-review-green.log`：通知、失败交付两个完整文件和安全通知路径完整文件，加真实 SDK 暂停对照，共 **92 passed / 39.99s**；该日志包含实际命令、基准 HEAD 和工作区差异哈希，不能冒充旧 HEAD 的干净版本测试。前次 B 的 379 项没有覆盖通知去重，不作为此缺陷已验证的依据。Ruff 和 mypy（39 源文件）通过，新增测试修改范围 format 通过。
 
+首次完整默认回归在修复提交 `46b9134fe33b36340b9a475c463807217a6179e7` 的干净工作区发现一项旧契约断言遗漏：`test_evidence.py::test_text_and_facts_mix_and_text_keeps_model_identity` 未登记 B 新增的 `inspection_notice` 字段；单节点复现 **1 failed / 0.72s**（`/tmp/xw-review-extra-red.log`）。本次只补字段并明确断言普通 Web/飞书回答该值为 None，其余严格断言保留，不改交付逻辑。已知失败后受控中断首次全量以尽早修正，实际结果 **1 failed、2808 passed、16 skipped、98 deselected / 1059.99s**，退出码 2（`/tmp/xw-review-full-46b9134-interrupted.log`），不记为全量通过。补正后的 Evidence 完整文件与文档检查 **24 passed / 5.65s**（`/tmp/xw-review-evidence-green.log`），Ruff/diff 通过；仍须从新提交重新完整运行。
+
 本轮额外门槛为**提交后在最终干净 HEAD 运行完整默认回归**：`SDK_TEST_POSTGRES_URL=postgresql+asyncpg://postgres@127.0.0.1:55432/postgres uv run --locked --extra dev python -m pytest -q`。精确执行 HEAD、工作区差异哈希、完整命令、汇总和退出码统一记录在本地 `/tmp/xw-review-full.log`，以该记录确认结果，不以分阶段子集代替。日志设置 UV_OFFLINE=1；真实模型/公司源不在本轮范围。若完整测试失败，交付须报告具体失败并继续诊断，不能因子集通过豁免。
 
 A 沿原通知授权和逐次账本发送固定失败状态，超时/取消不补发，保留真实执行原因。B 的已分类源失败仅对安全只读工具交回模型，成功仍复用原 Evidence；SDK Session 保存最小来源依赖，审批恢复复核暂停账本，撤权不进模型。有效 Evidence 的分类不完整不等于未巡检；漏调用目标自动检测明确延期，没有新增必查字段、成功账本、任务表或证据版本。
