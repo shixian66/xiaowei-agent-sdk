@@ -1,6 +1,6 @@
 # 切片 A：定时 Agent 首跑故障与失败可见性
 
-> 状态：已获用户批准离线实施，首跑与固定失败通知已实现，相关回归 42 passed，补充图片/日志/文档检查 15 passed，lint/type 通过；待独立审查。A → [B](2026-10-23-security-inspection-incomplete-results.md) → [C](2026-10-23-security-plain-notification.md) 各自分支、差异和审查；不调用真实模型或公司服务，不合并、打包或部署。
+> 状态：已获用户批准离线实施，首跑与固定失败通知已实现，相关回归 42 passed，补充图片/日志/文档检查 15 passed，lint/type 通过；独立审查两项 P2 已复现并修复，修复后相关 150 passed，待修复增量复审。A → [B](2026-10-23-security-inspection-incomplete-results.md) → [C](2026-10-23-security-plain-notification.md) 各自分支、差异和审查；不调用真实模型或公司服务，不合并、打包或部署。
 
 ## 1. 目标、基线与交付
 

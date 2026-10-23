@@ -206,3 +206,63 @@ async def test_settlement_failure_never_sends_an_additional_status(env, monkeypa
             await rt.scheduled_tasks.tick()
         assert len(requests) == int(after_send)
         assert not rt.readiness.ok
+
+
+async def test_content_rejected_after_query_does_not_claim_unexecuted(env, monkeypatch):
+    from tests.sdk_core.test_app import cite
+
+    from xiaowei.session import PolicySession, SessionItemRejectedError
+
+    env.scripts.add(
+        TASK,
+        tool_call(
+            "run_readonly_query", cluster=SR.target_id, sql="SELECT region,total FROM shop.sales"
+        ),
+        cite(),
+    )
+    async with running(env, monkeypatch, config=agent_config(env)) as (group, requests, rt):
+        await activate(env, group)
+        original = PolicySession._stored_form
+
+        async def reject_tool_result(self, item):
+            if self._ctx.automatic and item.get("type") == "function_call_output":
+                raise SessionItemRejectedError("本轮工具结果无法保存到会话")
+            return await original(self, item)
+
+        monkeypatch.setattr(PolicySession, "_stored_form", reject_tool_result)
+        env.clock.advance(60)
+        await rt.scheduled_tasks.tick()
+        assert len(requests) == 1
+        assert await env.scalar("SELECT reason FROM xiaowei_scheduled_run") == "content_rejected"
+        content = json.loads(requests[0].content)["content"]["text"]
+        assert "本轮未执行" not in content and "输入内容" not in content
+
+
+@pytest.mark.parametrize("cancelled", [False, True])
+async def test_interrupted_failure_notice_settles_unknown_and_next_occurrence_runs(
+    env, monkeypatch, caplog, cancelled
+):
+    import asyncio
+
+    async def interrupted_response(request):
+        if cancelled:
+            raise asyncio.CancelledError
+        await asyncio.sleep(11)
+
+    env.scripts.add(TASK, upstream_error, upstream_error)
+    async with running(
+        env, monkeypatch, config=agent_config(env), response=interrupted_response
+    ) as (group, requests, rt):
+        await activate(env, group, interval=3600)
+        env.clock.advance(60)
+        await rt.scheduled_tasks.tick()
+        assert len(requests) == 1
+        assert await env.scalar("SELECT reason FROM xiaowei_scheduled_run") == "model_failed"
+        assert await env.scalar("SELECT state FROM xiaowei_scheduled_run") == "failed"
+        assert await env.scalar("SELECT state FROM xiaowei_notification_attempt") == "unknown"
+        assert "reason=not_sent" not in caplog.text
+        # The cancelled notice must not strand the periodic job behind a running occurrence.
+        env.clock.advance(3600)
+        await rt.scheduled_tasks.tick()
+        assert await env.scalar("SELECT count(*) FROM xiaowei_scheduled_run") == 2
+        assert len(requests) == 2

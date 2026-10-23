@@ -260,7 +260,7 @@ _MESSAGES: Mapping[TurnReason, str] = {
     "scope_rejected": "本轮工具范围超出模型数据策略，未执行",
     "storage_unavailable": "存储未就绪，本轮未执行",
     "session_unavailable": "当前会话暂不可用，本轮未完成，请稍后重试",
-    "content_rejected": "输入内容未通过检查，本轮未执行，请调整后重试",
+    "content_rejected": "本轮内容未通过检查，未能完成，请核对后重试",
     "storage_failed": "本轮存储操作失败，未能完成交付，请稍后核对状态",
     "answer_rejected": "回答未通过证据校验，本轮未保存也未发送",
     "query_unfinished": "本轮有已开始的查询没有结果也没有失败记录，未保存也未发送；不会自动重试",

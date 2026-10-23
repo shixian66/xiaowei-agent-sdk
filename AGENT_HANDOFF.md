@@ -41,7 +41,7 @@
 
 [A 计划](docs/superpowers/plans/2026-10-23-scheduled-agent-first-run-recovery.md)首跑与失败可见性正在验证：补齐默认原因消息；可信 automatic 任务不读用户图片；固定失败通知沿现有当前定义、治理与发送账本，仍保留原失败原因。合法 Vertex 图片 Profile + 协议替身已跑通真实 Application/SDK/隔离 PostgreSQL 的定时任务；外部源与发送均为替身。
 
-A 新回归先复现缺文案、图片会话 KeyError、缺失败通知和准备阶段缺零模型请求日志；当前相关回归 **42 passed、47 deselected（23.41s）**，日志 `/tmp/xw-a-final-regression.log`；普通图片权限、应用日志及文档检查 **15 passed（6.95s）**，日志 `/tmp/xw-a-image-logs.log`。Ruff、改动文件 format、mypy（39 源文件）与 diff 检查通过；独立审查待完成，没有本次 CI、真实模型或公司验收证据。
+A 新回归先复现缺文案、图片会话 KeyError、缺失败通知和准备阶段缺零模型请求日志；当前相关回归 **42 passed、47 deselected（23.41s）**，日志 `/tmp/xw-a-final-regression.log`；普通图片权限、应用日志及文档检查 **15 passed（6.95s）**，日志 `/tmp/xw-a-image-logs.log`。Ruff、改动文件 format、mypy（39 源文件）与 diff 检查通过；独立审查发现通知中断未收尾、内容拒绝误称未执行两项 P2，均先补回归复现并修复：通知中断落定 unknown、保留原执行原因并传播取消，文案改为阶段中性。修复后定时/通知/文档相关 **150 passed（107.01s）**，日志 `/tmp/xw-a-review-regression.log`；Ruff、format、mypy（39 源文件）、diff 通过，待修复增量复审。没有本次 CI、真实模型或公司验收证据。
 
 下一项按 [B 计划](docs/superpowers/plans/2026-10-23-security-inspection-incomplete-results.md)、[C 计划](docs/superpowers/plans/2026-10-23-security-plain-notification.md)推进。B/C 尚未实现；取到有效 Evidence 但覆盖不完整不等于未巡检，漏调用检测明确延期。各片按实际增量审查，不把新分支复制为新平台。
 

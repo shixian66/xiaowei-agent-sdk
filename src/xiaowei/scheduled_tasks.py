@@ -1193,6 +1193,24 @@ class ScheduledTasks:
                 )
                 if not self.lock.readiness.ok:
                     raise
+                cancelled = isinstance(exc, asyncio.CancelledError)
+                if stage not in {"send", "settle"} and not isinstance(exc, asyncio.CancelledError):
+                    description = (
+                        str(TurnError(exc.reason))
+                        if isinstance(exc, TurnError)
+                        else (str(TurnError("timeout")) if reason == "timeout" else "任务执行失败")
+                    )
+                    try:
+                        await self._send_agent_failure(job, run, ctx, reason, description)
+                    except (Exception, asyncio.CancelledError) as notice_error:
+                        cancelled = cancelled or isinstance(notice_error, asyncio.CancelledError)
+                        logger.warning(
+                            "scheduled_agent_failure_notice job=%s run=%s "
+                            "reason=unconfirmed error=%s",
+                            job["job_id"],
+                            run["run_id"],
+                            type(notice_error).__name__,
+                        )
                 async with self.engine.begin() as conn:
                     await self._admit(conn)
                     await conn.execute(
@@ -1203,21 +1221,6 @@ class ScheduledTasks:
                         ),
                         {"id": run["run_id"]},
                     )
-                if stage not in {"send", "settle"} and not isinstance(exc, asyncio.CancelledError):
-                    description = (
-                        str(TurnError(exc.reason))
-                        if isinstance(exc, TurnError)
-                        else (str(TurnError("timeout")) if reason == "timeout" else "任务执行失败")
-                    )
-                    try:
-                        await self._send_agent_failure(job, run, ctx, reason, description)
-                    except Exception as notice_error:
-                        logger.warning(
-                            "scheduled_agent_failure_notice job=%s run=%s reason=not_sent error=%s",
-                            job["job_id"],
-                            run["run_id"],
-                            type(notice_error).__name__,
-                        )
                 unverified = isinstance(exc, TurnError) and exc.reason == "scope_unverifiable"
                 await self._finish_agent(
                     job,
@@ -1227,8 +1230,8 @@ class ScheduledTasks:
                     else ("skipped" if unverified else "failed"),
                     "authorization_unverified" if unverified else reason,
                 )
-                if isinstance(exc, asyncio.CancelledError):
-                    raise
+                if cancelled:
+                    raise asyncio.CancelledError from None
             finally:
                 self.governance.end_turn(identity)
             if deadline is not None and self.clock() >= deadline:
