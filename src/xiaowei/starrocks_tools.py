@@ -223,8 +223,12 @@ SECURITY_LIMITATIONS: Final = (
     "全窗超长数与无法判定候选数范围不同，不能相加；样本省略不改变分类计数。",
 )
 SECURITY_NOTE: Final = (
-    "scanned_rows/failed_rows 为服务端全窗聚合；matched_rows/分类数来自候选精判，"
+    "scanned_rows/failed_rows 为读取时服务端全窗聚合；matched_rows/分类数来自候选精判，"
     "match_counts_complete=false 时仅是已确认下界；true 也不消除规则或晚到日志缺口。"
+    "window_oversize_rows 是全窗超长记录数，unclassified_candidate_rows 才是无法判定候选数。"
+    "coverage.scanned_through=null 表示不提供扫描水位，不表示未扫描；"
+    "范围和完整性看 window 与 coverage。"
+    "ERR 只表示执行失败，未提供错误原因或集中程度；多语句线索不说明业务用途。"
     "统计单位为审计行，不能相加分类数当独立请求。样本只给 Query ID 和最小特征，不含审计原文。"
 )
 # JSON 转义膨胀最大的单字节字符：控制字符写作 \u00XX，一个字节变六个。
@@ -989,7 +993,7 @@ def starrocks_tools(
             "columns": list(SECURITY_COLUMNS), "rows": worst.payload["rows"],
             "coverage": {
                 "scan_limited": False, "checked_candidate_rows": _WIDEST_INT,
-                "scanned_through": datetime.max.replace(tzinfo=UTC).isoformat(),
+                "scanned_through": None,
                 "window_oversize_rows": _WIDEST_INT, "unclassified_candidate_rows": _WIDEST_INT,
                 "match_counts_complete": False, "omitted_samples": _WIDEST_INT,
             },
@@ -1001,6 +1005,7 @@ def starrocks_tools(
             "手动数据库安全巡检：读取获准审计表，统计全窗总行数/ERR/超长数，"
             "粗筛后精判布尔探测、SLEEP 调用、多语句与指定高风险操作，返回分类计数与代表 Query ID。"
             "信号不等于攻击成功；不执行或 EXPLAIN 被审计 SQL。"
+            f"{SECURITY_NOTE}"
             "start_time/end_time 必须是带 UTC offset 的 ISO 8601 绝对时刻，半开窗口 [start,end)，"
             f"窗口须为正且不超过 {limit} 分钟；长窗口可按预算分小时子窗取证，分别引用，不相加。",
         ))

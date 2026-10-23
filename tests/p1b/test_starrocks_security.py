@@ -156,7 +156,17 @@ def test_s5_distinguishes_absent_text_from_unread_sql_and_reports_scan_end():
     assert result.unclassified_candidate_rows == 2
     assert result.scan_limited and result.truncated
     assert not result.match_counts_complete
-    assert result.scanned_through == "2026-10-23T10:00:02+00:00"
+    assert result.scanned_through is None
+
+
+@pytest.mark.parametrize("truncated", [False, True])
+def test_candidate_time_does_not_claim_a_scan_watermark(truncated):
+    result = analyze(batch("SELECT SLEEP(5)", truncated=truncated, totals={
+        "window_rows": 29232, "window_failed_rows": 6, "window_oversize_rows": 3,
+    }))
+    assert result.as_payload()["coverage"]["scanned_through"] is None
+    assert (result.scanned_rows, result.failed_rows, result.matched_rows) == (29232, 6, 1)
+    assert result.match_counts_complete is not truncated
 
 
 def test_empty_window_has_no_invented_scan_end():
