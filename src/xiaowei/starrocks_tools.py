@@ -61,9 +61,9 @@ import json
 import re
 import time
 from collections.abc import Iterable, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime
-from typing import Annotated, Final, Literal, TypeGuard
+from typing import Annotated, Final, Literal, TypeGuard, cast
 
 from pydantic import BaseModel, ConfigDict, StringConstraints
 
@@ -92,6 +92,7 @@ from xiaowei.starrocks import (
     EXPLAIN_PREFIX,
     SCHEMA_COLUMNS_SQL,
     SCHEMA_OBJECTS_SQL,
+    SECURITY_SOURCE_COLUMNS,
     SQL_MODE,
     QueryResult,
     Scalar,
@@ -102,6 +103,7 @@ from xiaowei.starrocks import (
     audit_sql_bytes,
     fitting_rows,
     metadata_sql_bytes,
+    security_window,
     show_create_sql,
 )
 from xiaowei.starrocks_schema import (
@@ -113,6 +115,13 @@ from xiaowei.starrocks_schema import (
     SchemaUnavailableError,
     listed_dependency,
     read_dependency,
+)
+from xiaowei.starrocks_security import (
+    OPERATIONS,
+    SECURITY_COLUMNS,
+    SECURITY_TOOL,
+    SIGNALS,
+    analyze_security_rows,
 )
 
 LIST_TABLES: Final = "local/list_tables"
@@ -203,6 +212,21 @@ PAGED_FIELDS: Final = (*RESULT_FIELDS, "next_cursor")
 _DATABASE_PROBE_LIMIT: Final = 32
 _DATABASE_FALLBACK_BATCH: Final = 8
 DDL_FIELDS: Final = (*RESULT_FIELDS, "message")
+SECURITY_FIELDS: Final = (
+    "window", "source", "rules_version", "scanned_rows", "failed_rows", "matched_rows",
+    "signal_counts", "operation_counts", "columns", "rows", "row_count", "coverage", "limitations",
+)
+SECURITY_LIMITATIONS: Final = (
+    "仅为有限规则的安全线索，不证明 SQL 注入入口、攻击成功或维护未经授权。",
+    "审计存在晚到与采集缺口；聚合、候选是两次读取，不保证同一快照或近期窗口已收齐。",
+    "OR 到常量间夹注释、全文含 WHERE 的无根 WHERE DELETE、WITH…DELETE、可执行注释未全覆盖。",
+    "全窗超长数与无法判定候选数范围不同，不能相加；样本省略不改变分类计数。",
+)
+SECURITY_NOTE: Final = (
+    "scanned_rows/failed_rows 为服务端全窗聚合；matched_rows/分类数来自候选精判，"
+    "match_counts_complete=false 时仅是已确认下界；true 也不消除规则或晚到日志缺口。"
+    "统计单位为审计行，不能相加分类数当独立请求。样本只给 Query ID 和最小特征，不含审计原文。"
+)
 # JSON 转义膨胀最大的单字节字符：控制字符写作 \u00XX，一个字节变六个。
 _WIDEST_CHAR: Final = "\x01"
 # 有符号 64 位整数中十进制写法最长的值。
@@ -270,6 +294,14 @@ class ListSlowQueriesArgs(BaseModel):
     database: Annotated[str, StringConstraints(min_length=1, max_length=256)] | None
 
 
+class InspectAuditSecurityArgs(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    cluster: ClusterArg
+    start_time: str
+    end_time: str
+
+
 class ExplainQueryArgs(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -326,6 +358,7 @@ def starrocks_tools(
             fact_note=fact_note,
             fact_note_summary={
                 "list_slow_queries": "仅列获准候选；审计有入库延迟，为空不代表没有慢查询。",
+                "inspect_audit_security": "有限规则安全线索；保留候选/文本、规则和晚到日志缺口。",
                 "explain_query": "执行计划为估算，未实际运行；不能单凭计划确认慢因。",
                 "list_databases": "仅含当前可读对象的元数据快照，不含空库及系统库。",
                 "list_tables": "当前可读对象的元数据快照，不代表实时业务状态。",
@@ -353,7 +386,7 @@ def starrocks_tools(
             policy_id=tool_policy.policy_id,
             description=(
                 description
-                + (query_context if tool_id in {RUN_QUERY, SLOW_QUERIES} else "")
+                + (query_context if tool_id in {RUN_QUERY, SLOW_QUERIES, SECURITY_TOOL} else "")
                 + " 集群须是用户在本会话明确选定的环境，未选定时先澄清。"
                 + (
                     "搜索命中不等于用户选源，未匹配不证明不存在。"
@@ -887,6 +920,92 @@ def starrocks_tools(
         policies.append(audit_policy)
         executes[(SLOW_QUERIES, key)] = Prechecked(check=check_window, run=slow_queries)
 
+        def check_security(request: ToolRequest) -> _SecurityWindow:
+            try:
+                start = datetime.fromisoformat(str(request.arguments["start_time"]))
+                end = datetime.fromisoformat(str(request.arguments["end_time"]))
+                security_window(start, end, audit)
+            except ValueError:
+                raise ToolRejectedError(
+                    "安全巡检起止时间不符合工具窗口契约", hint="security_window"
+                ) from None
+            found = current().object(audit.database, audit.table)
+            if found is None:
+                raise ToolRejectedError("审计源不在当前可读结构中", code="object_not_readable")
+            if not set(SECURITY_SOURCE_COLUMNS) <= found.column_names:
+                raise ToolRejectedError(
+                    "审计源缺少安全巡检固定列，须管理员核对", code="unsupported"
+                )
+            return _SecurityWindow(start, end, read_dependency(found, SECURITY_SOURCE_COLUMNS))
+
+        def security_metadata(start: str, end: str) -> dict[str, object]:
+            return {
+                "window": {"start_time": start, "end_time": end, "time_zone": audit.time_zone},
+                "source": f"{audit.database}.{audit.table}",
+                "limitations": list(SECURITY_LIMITATIONS),
+            }
+
+        async def inspect_security(checked: _SecurityWindow) -> ToolObservation:
+            result = await adapter.security_audit(checked.start, checked.end)
+            timeout = target.client_timeout_seconds
+            failed = False
+            try:
+                async with asyncio.timeout(timeout):
+                    analysis = await asyncio.to_thread(
+                        analyze_security_rows, result, sample_limit=audit.max_rows,
+                        deadline=time.monotonic() + timeout,
+                    )
+            except TimeoutError:
+                failed = True
+            if failed:
+                raise StarRocksError(StarRocksErrorCode.TIMEOUT)
+            displayed = cast(list[dict[str, object]], analysis.as_payload()["rows"])
+            count = fitting_rows(displayed, len(displayed), target)
+            if count < len(analysis.rows):
+                analysis = replace(
+                    analysis, rows=analysis.rows[:count],
+                    omitted_samples=analysis.omitted_samples + len(analysis.rows) - count,
+                )
+            return ToolObservation(
+                payload={
+                    **analysis.as_payload(),
+                    **security_metadata(checked.start.isoformat(), checked.end.isoformat()),
+                },
+                captured_at=result.collected_at, truncated=analysis.truncated,
+                dependencies=(checked.dependency,),
+            )
+
+        security_policy = policy(
+            "inspect_audit_security", InspectAuditSecurityArgs, SECURITY_NOTE, SECURITY_FIELDS
+        )
+        payload = {
+            **security_metadata(*([datetime.max.replace(tzinfo=UTC).isoformat()] * 2)),
+            "rules_version": "manual-security-v1",
+            **dict.fromkeys(
+                ("scanned_rows", "failed_rows", "matched_rows", "row_count"), _WIDEST_INT
+            ),
+            "signal_counts": dict.fromkeys(SIGNALS, _WIDEST_INT),
+            "operation_counts": dict.fromkeys(OPERATIONS, _WIDEST_INT),
+            "columns": list(SECURITY_COLUMNS), "rows": worst.payload["rows"],
+            "coverage": {
+                "scan_limited": False, "checked_candidate_rows": _WIDEST_INT,
+                "scanned_through": datetime.max.replace(tzinfo=UTC).isoformat(),
+                "window_oversize_rows": _WIDEST_INT, "unclassified_candidate_rows": _WIDEST_INT,
+                "match_counts_complete": False, "omitted_samples": _WIDEST_INT,
+            },
+        }
+        check_projection_capacity(security_policy, worst.model_copy(update={"payload": payload}))
+        policies.append(security_policy)
+        contracts.append(contract(
+            SECURITY_TOOL, security_policy,
+            "手动数据库安全巡检：读取获准审计表，统计全窗总行数/ERR/超长数，"
+            "粗筛后精判布尔探测、SLEEP 调用、多语句与指定高风险操作，返回分类计数与代表 Query ID。"
+            "信号不等于攻击成功；不能用于定时任务，不执行或 EXPLAIN 被审计 SQL。"
+            "start_time/end_time 必须是带 UTC offset 的 ISO 8601 绝对时刻，半开窗口 [start,end)，"
+            f"窗口须为正且不超过 {limit} 分钟；长窗口可按预算分小时子窗取证，分别引用，不相加。",
+        ))
+        executes[(SECURITY_TOOL, key)] = Prechecked(check=check_security, run=inspect_security)
+
     return StarRocksTools(contracts=tuple(contracts), policies=tuple(policies), executes=executes)
 
 
@@ -1009,6 +1128,13 @@ class _SlowQueries:
     order: str
     database: str | None
     snapshot: SchemaSnapshot
+
+
+@dataclass(frozen=True)
+class _SecurityWindow:
+    start: datetime
+    end: datetime
+    dependency: ObjectDependency
 
 
 @dataclass(frozen=True)

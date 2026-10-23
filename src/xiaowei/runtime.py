@@ -141,6 +141,7 @@ from xiaowei.starrocks import (
     open_starrocks,
 )
 from xiaowei.starrocks_schema import DependencyCheck, SchemaCache
+from xiaowei.starrocks_security import SECURITY_TOOL
 from xiaowei.starrocks_tools import (
     AUDIT_TOOLS,
     DIAGNOSE_TOOLS,
@@ -798,6 +799,7 @@ def _registered_tools(config: ServeConfig) -> frozenset[str]:
     return (
         QUERY_TOOLS
         | (AUDIT_TOOLS if audited else frozenset())
+        | ({SECURITY_TOOL} if audited else frozenset())
         | monitoring
         | notify
         | (TASK_TOOLS if config.scheduled_tasks is not None else frozenset())
@@ -1341,10 +1343,14 @@ def _app_config(config: ServeConfig) -> AppConfig:
     }
     notify = frozenset({NOTIFY_TOOL}) if config.webhook_bots else frozenset()
     scheduled = TASK_TOOLS if config.scheduled_tasks is not None else frozenset()
-    audit = _registered_tools(config) - QUERY_TOOLS - monitoring - write_tools - notify - scheduled
+    security = _registered_tools(config) & {SECURITY_TOOL}
+    audit = (
+        _registered_tools(config) - QUERY_TOOLS - monitoring - write_tools - notify - scheduled
+        - security
+    )
     return AppConfig(
         purposes={
-            "query": QUERY_TOOLS | audit | monitoring | notify | scheduled,
+            "query": QUERY_TOOLS | audit | security | monitoring | notify | scheduled,
             "diagnose": DIAGNOSE_TOOLS | audit,
         },
         data_policies={config.model.data_policy_id: config.data_policy},
@@ -1591,6 +1597,8 @@ def _delivery(
     )
     if config.scheduled_tasks is not None:
         automatic = config.scheduled_tasks.automatic_tools
+        if SECURITY_TOOL in automatic:
+            raise ValueError("automatic_tools 不支持 inspect_audit_security：该工具仅支持手动巡检")
         allowed = {
             c.tool_id
             for c in catalog.contracts

@@ -778,6 +778,8 @@ docker compose --env-file .env ps
 | `audit.max_window_minutes` | 10080（7 天） | 更早的审计记录不在可查询窗口内 |
 | `audit.candidate_bytes` | 8388608（8 MiB） | 一次候选读取达到字节上限时结果截断；调大也会增加内存占用 |
 
+手动安全巡检沿用已有 `audit` 配置和只读账号，不增加字段、表或迁移。管理员按获准范围开放 `local/inspect_audit_security`：加入 `data_policy.model_tools`，个人加入 `access.grants`，指定群加入 `feishu.group.tools`；不要加入 `scheduled_tasks.automatic_tools`。模型数据策略改变后需新建受影响会话。先按本次交接单独提供的公司侧清单在 3.5.14 验证最终粗筛字面量、候选行/字节、两条查询成本及时间口径，再按 S1–S5 手动验收；不因旧粗筛 117 条而自动调大预算。没有新增审计原文访问授权；已有通用查询仍可能返回获准原文，口令脱敏结论须如实记录。真实模型、渠道实收和用户验收分别留证。
+
 审计表直查时，`timestamp` 按 `audit.time_zone`（FE 系统时区）写入，`NOW()` 按目标的会话 `time_zone` 计算；两者不同会让时间比较偏移，部署时须分别核对。时间条件只建议给大表查询，不是程序强制要求；无条件查询仍受已配置的超时和内存上限约束。`list_slow_queries` 与直接查询的口径不同，前者不列身份字段和审计表自身读取。
 
 `query_mem_limit_bytes`、`max_rows`、`max_value_bytes` 保持原值：前者保护公司集群，后两者控制单次

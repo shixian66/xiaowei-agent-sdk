@@ -23,11 +23,13 @@ from tests.sdk_core.dialogue_gate import (
     P4_SCENARIOS,
     R3_SCENARIOS,
     R7_SCENARIOS,
+    SECURITY_SCENARIOS,
     ReviewSample,
     ReviewVerdict,
     run_dialogue,
 )
 from tests.sdk_core.dialogue_monitoring import synthetic_monitoring_sources
+from tests.sdk_core.dialogue_security import CRITERIA as SECURITY_CRITERIA
 from tests.sdk_core.monitoring_reliability import CASES as MONITORING_CASES
 from tests.sdk_core.monitoring_reliability import SCENARIOS as MONITORING_SCENARIOS
 from tests.sdk_core.postgres_harness import isolated_database
@@ -67,6 +69,7 @@ SUITES = {
     "autonomy": AUTONOMY_SCENARIOS,
     "p4": P4_SCENARIOS,
     "monitoring-reliability": MONITORING_SCENARIOS,
+    "security": SECURITY_SCENARIOS,
 }
 
 
@@ -132,6 +135,16 @@ async def review_sample(sample: ReviewSample) -> ReviewVerdict:
             file=sys.stderr,
         )
     labels = dict(REVIEW_LABELS)
+    if sample.scenario.startswith("security_s"):
+        print(
+            "安全巡检判据（仅给评审者）：" + SECURITY_CRITERIA[int(sample.scenario[-1]) - 1],
+            file=sys.stderr,
+        )
+        labels |= {
+            "diagnosis_basis_sufficient": "区分正常、失败、可疑线索和已证实攻击，结论依据充分",
+            "query_constraints_preserved": "全窗/候选/样本计数、时间范围及覆盖缺口解释正确",
+            "answer_focused": "证据足够时直接完成，缺证据时合理补查，没有无谓澄清或固定全套",
+        }
     if sample.scenario.startswith("env_"):
         scenario = next(s for s in ENV_SCENARIOS if s.name == sample.scenario)
         allowed = "、".join(sorted(scenario.environments[sample.turn - 1])) or "未选定"
@@ -226,6 +239,7 @@ def harness_sha256() -> str:
         "tests/sdk_core/dialogue_gate.py",
         "tests/sdk_core/dialogue_delivery.py",
         "tests/sdk_core/dialogue_monitoring.py",
+        "tests/sdk_core/dialogue_security.py",
         "tests/sdk_core/monitoring_reliability.py",
         "tests/sdk_core/test_feishu_render.py",
         "tests/sdk_core/mcp_fixture.py",
@@ -238,11 +252,14 @@ def harness_sha256() -> str:
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--profile", type=Path, required=True)
-    parser.add_argument("--repeats", type=int, default=3)
+    parser.add_argument("--repeats", type=int)
     parser.add_argument("--suite", choices=("u1", *SUITES), default="u1")
     args = parser.parse_args()
-    if args.repeats < 3:
-        parser.error("旧/新每项至少各运行 3 次")
+    minimum = 1 if args.suite == "security" else 3
+    if args.repeats is None:
+        args.repeats = minimum
+    if args.repeats < minimum:
+        parser.error("security 每项至少运行 1 次" if minimum == 1 else "旧/新每项至少各运行 3 次")
     if not sys.stdin.isatty() or not sys.stderr.isatty():
         print("U1 gate: 需要交互终端逐条核对；仅 stdout 可重定向为无内容报告", file=sys.stderr)
         return 2

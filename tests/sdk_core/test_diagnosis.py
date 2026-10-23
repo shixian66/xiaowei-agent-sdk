@@ -149,10 +149,15 @@ def diag(env: Env) -> Env:
     return env
 
 
-def serving(env: Env, channel: str, projection: int = 60_000, **starrocks: object) -> Any:
+def serving(
+    env: Env, channel: str, projection: int = 60_000,
+    *, model_request_bytes: int | None = None, **starrocks: object,
+) -> Any:
     values = audit_config(env.port)
     values["targets"][0]["starrocks"] |= starrocks
     values["projection_bytes"] = dict.fromkeys(AUDIENCES, projection)
+    if model_request_bytes is not None:
+        values["model"]["max_request_bytes"] = model_request_bytes
     if channel == "feishu":
         # 飞书单条消息允许配置的最大字符数；诊断的三类事实接近这一上限。
         values["feishu"] = feishu_config(max_reply_chars=3_500)
@@ -555,7 +560,8 @@ async def feishu_diagnosis(env: Env, plan: tuple[str, ...]) -> tuple[Reply, str]
         explain_listed,
         cite("多次 Shuffle；建议按 region 分桶并 Colocate"),
     )
-    running, feishu = serving(env, "feishu", 400_000, **REAL_SIZED)
+    # 此处验附件/预览，给脚本模型足够预算容纳完整计划；请求容量拒绝由独立用例验证。
+    running, feishu = serving(env, "feishu", 400_000, model_request_bytes=400_000, **REAL_SIZED)
     async with running as served:
         reply = await Turns(env, served, "feishu", feishu).ask(message)
         assert await served.finish() == 0
