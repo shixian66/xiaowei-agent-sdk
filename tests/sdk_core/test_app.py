@@ -403,8 +403,11 @@ async def test_local_and_mcp_followup_through_real_runner(env: Env) -> None:
 
     assert env.scripts.tools_seen(first) == [set(SDK_NAMES.values())] * 3
     assert len(delivered.evidence_ids) == 2 and delivered.channel == "web"
-    assert "local/order_total" in delivered.content and "fixture/lookup" in delivered.content
-    assert '"rows"' in delivered.content and INJECTION in delivered.content
+    assert {f.tool_id for f in delivered.facts} == {TOTAL_TOOL, LOOKUP}
+    assert (
+        "local/order_total" not in delivered.content and "fixture/lookup" not in delivered.content
+    )
+    assert delivered.facts[0].rows and INJECTION in delivered.content
     assert "两者都来自本轮工具" in delivered.content
     assert env.tool_ids() == [TOTAL_TOOL]
     assert [name for name, _ in env.fixture.recorder.tool_calls] == ["lookup"]
@@ -427,7 +430,8 @@ async def test_local_and_mcp_followup_through_real_runner(env: Env) -> None:
     )
     other = await env.deliver(env.ctx(session="s2", turn="t3", channel="feishu"), feishu)
     assert other.channel == "feishu" and len(other.evidence_ids) == 2
-    assert '"total": 100' in other.content and '"value": 7' in other.content
+    assert {f.tool_id: f.metadata for f in other.facts}[TOTAL_TOOL]["total"] == 100
+    assert {f.tool_id: f.metadata for f in other.facts}[LOOKUP]["value"] == 7
     assert '"rows"' not in other.content and INJECTION not in other.content
     for content in (delivered.content, again.content, other.content):
         assert PRIVATE_NOTE not in content and PRIVATE not in content
@@ -457,8 +461,8 @@ async def test_concurrent_sessions_are_isolated(env: Env) -> None:
     assert env.scripts.tools_seen(b_message) == [{"order_total", "fixture__lookup"}] * 2
     # 预算按轮隔离：两轮的上限都是 1，各自执行一次。
     assert sorted(str(r.arguments["region"]) for r in env.adapter.calls) == ["east", "west"]
-    assert '"region": "east"' in a.content and "west" not in a.content
-    assert '"region": "west"' in b.content and "east" not in b.content
+    assert a.facts[0].metadata["region"] == "east" and "west" not in a.content
+    assert b.facts[0].metadata["region"] == "west" and "east" not in b.content
     assert not set(a.evidence_ids) & set(b.evidence_ids)
 
     # 证据不跨会话：B 引用 A 的证据被拒绝。
@@ -1657,16 +1661,19 @@ async def test_repaired_answer_replaces_the_rejected_one_in_history(env: Env, in
     assert await env.state() == ("active", 2)
 
 
-async def test_uncited_query_results_are_completed_as_remaining(env: Env) -> None:
-    """模型只写文字、不引用本轮查询：不再拒绝或改写，代码补全为其余结果。"""
+async def test_uncited_query_gets_one_tool_free_repair(env: Env) -> None:
+    """v4：成功查询后只有文字，改写一次补引用，不重放查询。"""
     message = env.scripts.add(
-        "只写文字", tool_call("run_query", region="east"), clarify("还要看西区吗？")
+        "只写文字",
+        tool_call("run_query", region="east"),
+        clarify("还要看西区吗？"),
+        lambda c: answer(evidence_in(c), analysis="", clarification="还要看西区吗？"),
     )
     with all_logs() as records:
         delivery = await env.deliver(env.ctx(turn="uncited"), message)
-    assert "stage=answer_repair" not in "\n".join(r.getMessage() for r in records)
-    assert len(env.scripts.calls[message]) == 2
-    assert [f.section for f in delivery.facts] == ["remaining"]
+    assert "stage=answer_repair" in "\n".join(r.getMessage() for r in records)
+    assert len(env.scripts.calls[message]) == 3
+    assert [f.section for f in delivery.facts] == ["body"]
     assert delivery.texts == ("还要看西区吗？",) and delivery.awaiting_user
     assert env.tool_ids() == [QUERY_TOOL]
 
@@ -1709,9 +1716,9 @@ async def test_partially_cited_repeat_query_completes_the_rest(env: Env) -> None
         delivered = await env.deliver(env.ctx(turn="twice"), message)
     (ids,) = seen
     assert "stage=answer_repair" not in "\n".join(r.getMessage() for r in records)
-    assert delivered.evidence_ids == (ids[1], ids[0])
-    assert [f.section for f in delivered.facts] == ["body", "remaining"]
-    assert delivered.result_label(ids[0]) == "结果 2"
+    assert delivered.evidence_ids == (ids[1],)
+    assert [f.section for f in delivered.facts] == ["body"]
+    assert ids[0] not in delivered.evidence_ids
     assert env.tool_ids() == [QUERY_TOOL, QUERY_TOOL]
     assert len(env.scripts.calls[message]) == 3
 
@@ -1806,7 +1813,7 @@ async def test_must_cite_rule_lists_exactly_the_checked_query_tools(env: Env) ->
         return clarify()(call)
 
     await env.app.run_turn(env.ctx(turn="rule"), env.scripts.add("看规则", finish))
-    (rule,) = [line for line in seen[0].splitlines() if line.startswith("以下工具本轮每次成功")]
+    (rule,) = [line for line in seen[0].splitlines() if line.startswith("以下是查询类工具")]
     names = rule.partition("：")[2].partition("。")[0].split("、")
     # 提示清单与补全范围同源：查询工具在内，诊断工具不在。
     assert names == ["run_query"]
@@ -1864,10 +1871,10 @@ async def test_max_turns_final_answer_may_cite_part_and_the_rest_is_completed(en
     ctx = _with_turns(env.ctx(turn="query-prompt", max_tool_calls=3), 3)
     result = await env.app.run_turn(ctx, message)
     delivery = await env.governed.evidence.validate_answer(result, ctx)
-    assert len(final_instructions) == 1 and "系统会补全" in final_instructions[0]
+    assert len(final_instructions) == 1 and "未引用结果不会补交" in final_instructions[0]
     assert result.limit_reached and delivery.limit_notice == evidence_module.LIMIT_NOTICE
     # 汇总工具不是需交付的业务查询；两次查询中未引用的一次补为其余结果。
-    assert [f.section for f in delivery.facts] == ["body", "remaining", "remaining"]
+    assert [f.section for f in delivery.facts] == ["body"]
     assert env.tool_ids() == [TOTAL_TOOL, QUERY_TOOL, QUERY_TOOL]
 
 

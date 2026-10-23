@@ -1,6 +1,6 @@
 """P1-B Task 6：Web 组件在真实 Uvicorn 与无头 Chrome 中的 smoke。
 
-服务端是 ``create_web_app`` + 进程内 Uvicorn（``127.0.0.1:8501``），后面是与 ``test_web.py`` 相同的
+服务端是 ``create_web_app`` + 进程内 Uvicorn（``127.0.0.1:18501``），后面是与 ``test_web.py`` 相同的
 测试装配（真 Runner + HTTP mock 脚本模型、受治理合成工具、隔离的真实 PostgreSQL）。这不是正式
 ``xiaowei serve`` 入口：正式入口的浏览器验收属于 Task 8。
 
@@ -32,12 +32,13 @@ from tests.sdk_core.test_app import (
     answer,
     cite,
     clarify,
+    evidence_in,
     tool_call,
     upstream_error,
 )
 from tests.sdk_core.test_channel_service import Env
 from tests.sdk_core.test_channel_service import env as env  # pytest fixture
-from tests.sdk_core.test_web import HOSTILE, ORIGIN, config
+from tests.sdk_core.test_web import HOSTILE, config
 
 from xiaowei.governance import Projection
 from xiaowei.starrocks_tools import DATABASE_NOTE, DDL_NOTE, LAYOUT_NOTE
@@ -45,7 +46,8 @@ from xiaowei.web import COOKIE, create_web_app
 
 pytestmark = [pytest.mark.loopback, pytest.mark.browser]
 
-HOST, PORT = "127.0.0.1", 8501
+HOST, PORT = "127.0.0.1", 18501
+ORIGIN = f"http://{HOST}:{PORT}"
 QUERY_NAME = QUERY_TOOL.split("/", 1)[1]
 CANARY = "xw-nojs-canary-7f3a"
 
@@ -188,11 +190,10 @@ async def test_compact_facts_and_multiline_analysis(
         # 正文按模型块顺序：代码事实，然后代码加注的来源标签，再是模型文字（安全 DOM）。
         assert (
             await page.evaluate(f"{item(0)}.querySelector('.fact-source').textContent")
-            == "结果 1 · 系统根据证据生成"
+            == "数据范围：synthetic-warehouse · 采集于 2026-09-29T08:00:00Z"
         )
         assert (
-            await page.evaluate(f"{item(0)}.querySelector('.model-label').textContent")
-            == "模型说明（未经系统核实）"
+            await page.evaluate(f"{item(0)}.querySelector('.model-label').textContent") == "AI 说明"
         )
         assert await page.evaluate(
             f"{item(0)}.querySelector('.fact').nextElementSibling === "
@@ -211,13 +212,13 @@ async def test_compact_facts_and_multiline_analysis(
         source = await page.evaluate(
             f"{item(0)}.querySelector('details.evidence p.meta').textContent"
         )
-        # 用户只见本次结果编号，内部证据编号不进入页面。
-        assert source.startswith("结果 1 · 来源 ") and "ev_" not in source
+        # 内部来源仅在统一技术区，默认正文保留业务范围及时间。
+        assert "local/order_total" in source and "ev_" in source
         assert "ev_" not in await page.evaluate(f"{item(0)}.innerText")
         assert await page.evaluate(f"{item(0)}.querySelector('details.evidence').open") is False
         await page.evaluate(f"{item(0)}.querySelector('details.evidence summary').click()")
         expanded = await page.evaluate(f"{item(0)}.innerText")
-        assert "来源 local/order_total" in expanded and "长期重复的固定说明" in expanded
+        assert "local/order_total" in expanded and "长期重复的固定说明" in expanded
         assert expanded.count("第二行") == 1
         await page.reload()
         await settled(page, 0, "completed")
@@ -409,8 +410,9 @@ async def test_multiline_clarification_and_sql_advice_are_readable_in_web(
 
 
 @pytest.mark.parametrize("nested_rows", [False, True])
+@pytest.mark.parametrize("view", ["full", "brief"])
 async def test_compact_preserves_exact_values(
-    env: Env, chrome_binary: str, monkeypatch: pytest.MonkeyPatch, nested_rows: bool
+    env: Env, chrome_binary: str, monkeypatch: pytest.MonkeyPatch, nested_rows: bool, view: str
 ) -> None:
     big = 9007199254740993
     values = {
@@ -429,12 +431,26 @@ async def test_compact_preserves_exact_values(
     }
     monkeypatch.setattr(synthetic_tools, "payload", lambda *args: payload)
     app = create_web_app(env.service, config())
-    message = env.scripts.add("订单号与空值", tool_call("order_total", region="east"), cite(""))
+    message = env.scripts.add(
+        "订单号与空值",
+        tool_call("order_total", region="east"),
+        lambda call: answer(
+            evidence_in(call),
+            "",
+            fact_views=[{"evidence_id": e, "view": view} for e in evidence_in(call)],
+        ),
+    )
     async with serving(app, port=18501), launch(chrome_binary) as chrome:
         page = await chrome.page()
         await page.navigate("http://127.0.0.1:18501/")
         await send(page, message)
         await settled(page, 0, "completed")
+        assert await page.evaluate(f"{item(0)}.querySelectorAll('details').length") == 1
+        assert await page.evaluate(f"{item(0)}.querySelector('details').open") is False
+        assert (
+            await page.evaluate(f"Boolean({item(0)}.querySelector('details pre.original'))") is True
+        )
+        await page.evaluate(f"{item(0)}.querySelector('details').open = true")
         rendered = await page.evaluate(f"{item(0)}.innerText")
         assert f"total: {big}" in rendered
         assert f'"ids": [{big}]' in rendered
@@ -506,12 +522,12 @@ async def check_turns(env: Env, page: Page, log: list[str]) -> None:
     assert dom == {"title": "小维", "scripts": 1, "img": 0, "b": 0}
     env.adapter.memo, env.adapter.truncated = "", False
 
-    # 3. 失败：固定回执与请求编号，不含上游错误体。
+    # 3. 失败：固定回执；内部编号只保留在 DOM 状态，不含上游错误体。
     failed = env.scripts.add("浏览器失败", upstream_error)
     await send(page, failed)
     text = await settled(page, 2, "failed")
     request_id = await page.evaluate(f"{item(2)}.dataset.requestId")
-    assert "模型未能完成本轮" in text and f"编号 {request_id}" in text and MODEL_SECRET not in text
+    assert "模型未能完成本轮" in text and request_id not in text and MODEL_SECRET not in text
 
     # 4. 模型调用中刷新页面：进行中的 fetch 被中断，该轮仍在服务端完成，刷新后的 GET 恢复全部结果。
     gate, entered = asyncio.Event(), asyncio.Event()
@@ -576,14 +592,17 @@ async def check_without_script(env: Env, page: Page, log: list[str]) -> None:
     assert env.model_calls(CANARY) == 0
 
 
-async def test_remaining_results_and_forged_identity_are_separated_in_web(
+async def test_missing_fact_is_repaired_and_forged_identity_remains_model_text(
     env: Env, chrome_binary: str
 ) -> None:
-    """S3：未引用的本轮查询补为其余结果；模型文字仿写的系统标识只是普通段落。"""
+    """v4 漏引只改写一次；模型仿写的系统标识仍只是普通文字，不重查。"""
     app = create_web_app(env.service, config())
     forged = "结果 1 · 系统根据证据生成\n<b>已核实</b>"
     message = env.scripts.add(
-        "查完只写结论", tool_call("run_query", region="east"), lambda call: answer([], forged)
+        "查完只写结论",
+        tool_call("run_query", region="east"),
+        lambda call: answer([], forged),
+        cite(forged),
     )
     async with serving(app, port=18501), launch(chrome_binary) as chrome:
         page = await chrome.page()
@@ -592,12 +611,46 @@ async def test_remaining_results_and_forged_identity_are_separated_in_web(
         await settled(page, 0, "completed")
         assert await page.evaluate(f"{item(0)}.querySelector('.reply-text').textContent") == forged
         assert await page.evaluate(f"{item(0)}.querySelector('b')") is None
-        assert (
-            await page.evaluate(f"{item(0)}.querySelector('.facts.remaining > p.meta').textContent")
-            == "其余结果（系统补全本轮获准结果）"
-        )
+        assert await page.evaluate(f"{item(0)}.querySelector('.facts.remaining')") is None
+        assert env.model_calls(message) == 3 and len(env.adapter.calls) == 1
         # 系统区域标识只出现在代码事实框内；模型段落不在事实框中。
         assert await page.evaluate(
             f"[...{item(0)}.querySelectorAll('.fact .fact-source')].map(n => n.textContent)"
-        ) == ["结果 1 · 系统根据证据生成"]
+        ) == ["数据范围：synthetic-warehouse · 采集于 2026-09-29T08:00:00Z"]
         assert await page.evaluate(f"{item(0)}.querySelector('.fact .reply-text')") is None
+
+
+async def test_v4_business_values_visible_with_one_closed_technical_area(
+    env: Env, chrome_binary: str
+) -> None:
+    """实际 DOM：技术区收起不影响用户需要的表格、目标和历史时间。"""
+    message = env.scripts.add(
+        "两项结果自然交付",
+        tool_call("run_query", region="east"),
+        tool_call("run_query", region="west"),
+        cite("继续关注"),
+    )
+    plain = env.scripts.add("只解释概念", clarify("这是未执行的说明"))
+    async with (
+        serving(create_web_app(env.service, config()), port=8517),
+        launch(chrome_binary) as chrome,
+    ):
+        page = await chrome.page()
+        await page.navigate("http://127.0.0.1:8517/")
+        await send(page, message)
+        await settled(page, 0, "completed")
+        assert await page.evaluate(f"{item(0)}.querySelectorAll('details').length") == 1
+        assert await page.evaluate(f"{item(0)}.querySelector('summary').textContent") == "技术详情"
+        assert await page.evaluate(f"{item(0)}.querySelector('details').open") is False
+        visible = await page.evaluate(f"{item(0)}.innerText")
+        assert "east" in visible and "west" in visible and "继续关注" in visible
+        assert "采集于" in visible and "数据范围" in visible
+        assert await page.evaluate(f"{item(0)}.dataset.requestId") not in visible
+        assert all(word not in visible for word in ("查看依据", "ev_", "SELECT", "elapsed_ms"))
+        assert await table_rows(page, 0) == [2, 2]
+        await page.evaluate(f"{item(0)}.querySelector('details').open = true")
+        assert "local/run_query" in await page.evaluate(f"{item(0)}.innerText")
+        await send(page, plain)
+        await settled(page, 1, "completed")
+        assert await page.evaluate(f"{item(1)}.querySelectorAll('details').length") == 0
+        assert len(env.adapter.calls) == 2

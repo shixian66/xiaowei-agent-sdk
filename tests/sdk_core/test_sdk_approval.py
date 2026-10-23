@@ -17,6 +17,15 @@ pytestmark = pytest.mark.loopback
 GATE = f"{SOURCE}__request_action_execution"
 
 
+@pytest.fixture
+def legacy_v3_answers(monkeypatch):
+    """构造既有 v3 暂停/交付记录；不改 SDK、治理或存储，覆盖旧 C7 数据分项兼容。
+
+    v4 不在暂停轮发送只读结果；新行为见本模块 test_v4_pause...。
+    """
+    monkeypatch.setattr("xiaowei.models.ANSWER_VERSION", 3)
+
+
 async def paused(actions: Actions, group, *, investigate=False):
     env = actions.env
     steps = [tool_call("order_total", region="east")] if investigate else []
@@ -37,7 +46,8 @@ async def paused(actions: Actions, group, *, investigate=False):
 
 @pytest.mark.parametrize("failed_part", ["approval", "data"])
 @pytest.mark.parametrize("failure", ["failed", "unknown"])
-async def test_mixed_round_material_receipt_independently_controls_approval(
+@pytest.mark.usefixtures("legacy_v3_answers")
+async def test_legacy_v3_mixed_round_material_receipt_independently_controls_approval(
     actions, failed_part, failure
 ):
     from sqlalchemy import text
@@ -77,7 +87,8 @@ async def test_mixed_round_material_receipt_independently_controls_approval(
 
 
 @pytest.mark.parametrize("actions", [400_000], indirect=True)
-async def test_resend_confirms_unknown_approval_even_when_reference_row_is_indivisible(
+@pytest.mark.usefixtures("legacy_v3_answers")
+async def test_legacy_v3_resend_confirms_unknown_approval_even_when_reference_row_is_indivisible(
     actions, monkeypatch
 ):
     from functools import partial
@@ -311,10 +322,9 @@ async def test_second_large_file_failure_recovers_only_that_message(actions, sec
         assert [(p.kind, p.send_state) for p in before] == [
             ("md", "sent"),
             ("md", second),
-            ("md", "sent"),
             ("body", "pending"),
         ]
-        assert len(uploads) == 3
+        assert len(uploads) == 2
         assert not any(
             "完整结果见附件" in json.dumps(msg, ensure_ascii=False)
             for _, msg in group.outbox.sent
@@ -335,7 +345,7 @@ async def test_second_large_file_failure_recovers_only_that_message(actions, sec
         assert await env.results.send(ref, transmit, resend=True) == "sent"
         after = await env.store.delivery_parts(record)
         assert all(p.send_state == "sent" and p.message_id for p in after)
-        assert len(uploads) == 3 and len(group.outbox.sent) == sent + 2
+        assert len(uploads) == 2 and len(group.outbox.sent) == sent + 2
         assert isinstance(group.outbox.sent[sent][1], OutboundFile)
         assert uuids[sent] == before[1].uuid == after[1].uuid
         assert "完整结果见附件" in json.dumps(group.outbox.sent[-1][1], ensure_ascii=False)
@@ -373,12 +383,11 @@ async def test_second_large_upload_unknown_blocks_body_and_never_reuploads(actio
         ref = group_ref("om_large_upload_unknown", A)
         record = await env.store.get("feishu", A, GROUP.chat_id, ref.request_id, owner=GROUP.owner)
         before = await env.store.delivery_parts(record)
-        assert len(before) == 4
+        assert len(before) == 3
         assert before[0].send_state == "sent"
         assert before[1].upload_state == "unknown" and before[1].send_state == "pending"
-        assert before[2].kind == "md" and before[2].send_state == "sent"
-        assert before[3].kind == "body" and before[3].send_state == "pending"
-        assert len(uploads) == 3
+        assert before[2].kind == "body" and before[2].send_state == "pending"
+        assert len(uploads) == 2
         sent = len(group.outbox.sent)
         transmit = partial(
             send_delivery,
@@ -392,7 +401,7 @@ async def test_second_large_upload_unknown_blocks_body_and_never_reuploads(actio
             resend=True,
         )
         assert await env.results.send(ref, transmit, resend=True) == "unknown"
-        assert len(uploads) == 3
+        assert len(uploads) == 2
         assert all(
             "完整结果见附件" not in json.dumps(msg, ensure_ascii=False)
             for _, msg in group.outbox.sent[sent:]
@@ -426,7 +435,7 @@ async def test_large_files_sent_but_final_body_failure_resends_only_body(actions
     )
     async with running(
         env,
-        outbox=Outbox(["sent", "sent", "sent", "failed"]),
+        outbox=Outbox(["sent", "sent", "failed"]),
         upload_file=upload,
         max_reply_chars=3500,
     ) as group:
@@ -434,8 +443,8 @@ async def test_large_files_sent_but_final_body_failure_resends_only_body(actions
         ref = group_ref("om_large_body_failed", A)
         record = await env.store.get("feishu", A, GROUP.chat_id, ref.request_id, owner=GROUP.owner)
         before = await env.store.delivery_parts(record)
-        assert [p.send_state for p in before] == ["sent", "sent", "sent", "failed"]
-        assert len(uploads) == 3
+        assert [p.send_state for p in before] == ["sent", "sent", "failed"]
+        assert len(uploads) == 2
         sent = len(group.outbox.sent)
         transmit = partial(
             send_delivery,
@@ -449,7 +458,7 @@ async def test_large_files_sent_but_final_body_failure_resends_only_body(actions
             resend=True,
         )
         assert await env.results.send(ref, transmit, resend=True) == "sent"
-        assert len(uploads) == 3 and len(group.outbox.sent) == sent + 1
+        assert len(uploads) == 2 and len(group.outbox.sent) == sent + 1
         assert not isinstance(group.outbox.sent[-1][1], OutboundFile)
         assert (await env.store.delivery_parts(record))[-1].uuid == before[-1].uuid
 
@@ -490,7 +499,7 @@ async def test_multi_file_delivery_holds_the_following_same_group_request(action
         release.set()
         await asyncio.gather(first, following)
         assert env.model_calls(later) == 1
-        assert uploads == 3
+        assert uploads == 2
 
 
 async def test_resend_still_checks_saved_approval_capacity_before_sending(actions):
@@ -528,7 +537,8 @@ async def test_resend_still_checks_saved_approval_capacity_before_sending(action
         assert actions.adapter.calls == []
 
 
-async def test_material_capacity_failure_does_not_block_independent_query_data(actions):
+@pytest.mark.usefixtures("legacy_v3_answers")
+async def test_legacy_v3_material_capacity_failure_does_not_block_independent_query_data(actions):
     from functools import partial
 
     from tests.sdk_core.test_group_identity import GROUP
@@ -645,7 +655,8 @@ async def test_runner_cancellation_waits_for_started_write_to_settle_once(
     assert len(actions.adapter.calls) == 1
 
 
-async def test_native_pause_resume_writes_once_and_commits_paired_history(actions: Actions):
+@pytest.mark.parametrize("kind", ["text", "post"])
+async def test_native_pause_resume_writes_once_and_commits_paired_history(actions: Actions, kind):
     env = actions.env
     # 发起人有群读取/提出权限，没有写权限；B才是本次写的批准主体。
     env.access._grants = {**env.access._grants, A: env.access._grants[A] - {WRITE}}
@@ -654,7 +665,14 @@ async def test_native_pause_resume_writes_once_and_commits_paired_history(action
         assert env.model_calls(script) == 2
         assert all(GATE in names for names in env.scripts.tools_seen(script))
         assert all(f"{SOURCE}__change" not in names for names in env.scripts.tools_seen(script))
-        await group.ask(f"/批准 {action_id}", sender=B, message_id="om_sdk_approve")
+        from tests.sdk_core.test_feishu_post import content as post_content
+
+        kwargs = (
+            {"content": post_content(f"/批准 {action_id}"), "event__message__message_type": "post"}
+            if kind == "post"
+            else {}
+        )
+        await group.ask(f"/批准 {action_id}", sender=B, message_id="om_sdk_approve", **kwargs)
         assert await env.rows(
             "SELECT state, delivery FROM xiaowei_request WHERE reply_message_id='om_sdk_approve'"
         ) == [("completed", "sent")]
@@ -2204,3 +2222,76 @@ async def test_revoking_unused_read_tool_keeps_partial_approval_resumable(action
         ("succeeded",),
     ]
     assert await env.rows("SELECT turns FROM xiaowei_session") == [(1,)]
+
+
+@pytest.mark.parametrize(
+    ("outcome", "visible"), [("pending", False), ("rejected", True), ("expired", False)]
+)
+async def test_paused_query_visibility_in_later_normal_turn(actions, outcome, visible):
+    """S0 实测：恢复上下文有证据，并不等于未恢复轮已经提交 SDK Session。"""
+    from tests.sdk_core.test_app import evidence_in
+
+    env = actions.env
+    async with running(env, max_reply_chars=3500) as group:
+        script = env.scripts.add(
+            attributed(A, "S0 查询后暂停"),
+            tool_call("run_query", region="east"),
+            tool_call(f"{SOURCE}__propose_change", value="after"),
+            request_execution,
+            cite("根据实际执行结果反馈"),
+        )
+        await group.ask("S0 查询后暂停")
+        action_id = await actions.one()
+        ((query_id,),) = await env.rows(
+            "SELECT evidence_id FROM xiaowei_evidence WHERE tool_id=:tool", tool=QUERY_TOOL
+        )
+        if outcome == "rejected":
+            await group.ask(f"/拒绝 {action_id}", sender=B)
+        elif outcome == "expired":
+            from xiaowei.session import cleanup_expired
+
+            env.clock.advance(16 * 60)
+            await cleanup_expired(env.engine, now=env.clock(), batch_size=10)
+        observed = []
+
+        def inspect_context(call):
+            observed.append(query_id in evidence_in(call))
+            return clarify("请说明需要查看的结果")(call)
+
+        followup = env.scripts.add(attributed(A, "刚才的查询结果能看吗？"), inspect_context)
+        await group.ask("刚才的查询结果能看吗？", message_id="om_visibility")
+        assert observed == [visible] and env.model_calls(followup) == 1
+        assert await env.rows(
+            "SELECT state FROM xiaowei_request WHERE reply_message_id='om_visibility'"
+        ) == [("completed",)]
+    assert len(env.adapter.calls) == 1 and actions.adapter.calls == []
+    assert env.model_calls(script) == (4 if outcome == "rejected" else 3)
+
+
+async def test_v4_pause_defers_readonly_results_then_delivers_them_after_approval(actions):
+    """新暂停只交材料与可信条件提示；恢复最终选原证据，不重查。"""
+    env = actions.env
+    script = env.scripts.add(
+        attributed(A, "查询后申请动作，结论在恢复后交付"),
+        tool_call("run_query", region="east"),
+        tool_call(f"{SOURCE}__propose_change", value="after"),
+        request_execution,
+        cite("按已取得的查询与执行结果反馈"),
+    )
+    async with running(env, max_reply_chars=3500) as group:
+        await group.ask("查询后申请动作，结论在恢复后交付", message_id="om_v4_pause")
+        action_id = await actions.one()
+        view = await env.results.view(group_ref("om_v4_pause", A), first=True)
+        assert view.delivery.answer_version == 4
+        assert not view.delivery.section("body") and not view.delivery.section("remaining")
+        assert "本次查询结果尚未交付" in view.delivery.report_notice
+        assert "获准并恢复" in view.delivery.report_notice
+        shown = group.outbox.texts()[0]
+        assert "本次查询结果尚未交付" in shown and "/批准" in shown
+        assert len(env.adapter.calls) == 1 and not actions.adapter.calls
+        await group.ask(f"/批准 {action_id}", sender=B, message_id="om_v4_resume")
+        assert await env.rows("SELECT state FROM xiaowei_action") == [("succeeded",)]
+        assert len(env.adapter.calls) == 1 and len(actions.adapter.calls) == 1
+        assert env.model_calls(script) == 4
+        restored = await env.results.view(group_ref("om_v4_resume", B))
+        assert any(f.tool_id == QUERY_TOOL for f in restored.delivery.facts)

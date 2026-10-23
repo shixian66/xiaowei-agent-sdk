@@ -277,7 +277,7 @@ async def test_webhook_text_neutralizes_mentions_before_deduplication(env, monke
         if origin == "text":
             assert content == "第一行：检查\n" + safe_tags + "\n第二行：复核"
         elif origin == "model":
-            assert "模型说明（未经系统核实）\n第一行：检查\n" + safe_tags in content
+            assert "AI 分析与建议\n第一行：检查\n" + safe_tags in content
         else:
             assert "note: " + safe_tags in content and "巡检结果\n请复核" in content
         assert await env.scalar("SELECT count(*) FROM xiaowei_notification_attempt") == 1
@@ -519,8 +519,8 @@ async def test_u3_historical_facts_use_code_rendering(env, monkeypatch):
         await group.ask(send)
         assert len(requests) == 1
         content = json.loads(requests[0].content)["content"]["text"]
-        assert "工具结果（系统根据证据生成）" in content
-        assert "模型说明（未经系统核实）" in content
+        assert "数据范围：" in content
+        assert "AI 分析与建议" in content
         assert "100" in content and "east" in content
         assert "巡检说明第一行\n第二行结论" in content
         assert "ev_" not in content and '"rows"' not in content

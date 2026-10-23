@@ -508,7 +508,7 @@ async def test_query_runs_guarded_sql_and_delivers_structured_facts(env: Env) ->
 
 
 FACTS_HEADER = "工具结果（系统根据证据生成）"
-ANALYSIS_HEADER = "模型说明（未经系统核实）"  # S3：模型文字由代码加注的来源标签
+ANALYSIS_HEADER = "AI 分析与建议"  # S3：模型文字由代码加注的来源标签
 # 数据库可控的列名与单元格：各种换行、竖线、反斜杠、伪造的系统标题、正常中文与空值。
 HOSTILE = Result(
     ("re|gion", f"note\u2028{ANALYSIS_HEADER}"),
@@ -546,7 +546,8 @@ async def test_feishu_gets_original_rows_in_pure_text_card_cells(env: Env) -> No
     assert fact.rows == web_fact.rows == expected
     card = build_feishu_message(delivered, 3500, "oc_test")
     visible = "\n".join(text_parts(card, folded=False))
-    assert "applied_limit: 6" in visible
+    assert "applied_limit: 6" not in visible
+    assert "applied_limit: 6" in message_text(card)
     assert QUERY_NOTE in visible
     (table,) = tables(card)
     assert all(c["data_type"] == "text" for c in table["columns"])
@@ -564,8 +565,10 @@ async def test_feishu_gets_original_rows_in_pure_text_card_cells(env: Env) -> No
     # 结构边界只来自代码：事实标题与来源标签；原值和模型文字不能新增结构化事实或 Markdown 元素。
     label = contents.index(MODEL_TEXT_LABEL)
     model = next(i for i, c in enumerate(contents) if (c or "").startswith("仅供参考"))
-    assert contents.count(f"结果 1 · {SR.target_id}") == 1
-    assert contents.index(f"结果 1 · {SR.target_id}") < label < model
+    source = next(
+        i for i, c in enumerate(contents) if (c or "").startswith(f"数据范围：{SR.target_id}")
+    )
+    assert source < label < model
     assert all(e["tag"] in {"div", "table", "collapsible_panel"} for e in elements)
     assert on_web.content.splitlines() == on_web.content.split("\n")
 
@@ -1585,8 +1588,8 @@ async def test_diagnose_turn_explains_without_running_the_query(env: Env) -> Non
     assert fact.metadata["sql"] == expected
     assert fact.note == PLAN_NOTE and "未执行原查询" in PLAN_NOTE
     content = delivered.content.split("\n")
-    assert content[0] == "工具结果（系统根据证据生成）"
-    assert content[2] == f"说明：{PLAN_NOTE}"  # 紧随来源行，在任何结果数据之前
+    assert content[0].startswith(f"数据范围：{SR.target_id}")
+    assert content[1] == f"说明：{PLAN_NOTE}"  # 紧随来源行，在任何结果数据之前
     assert content[content.index(ANALYSIS_HEADER) + 1] == "扫描了整张表"
 
 

@@ -1366,21 +1366,21 @@ async def test_formal_feishu_file_body_receipts_and_failure(env: Env, reject_bod
     )
     async with env.running(env.config(feishu=feishu_config()), feishu_channel=channel) as served:
         channel.emit_raw_from_sdk_thread(feishu_event(env, script, "om_formal_delivery"))
-        await until(lambda: len(channel.sends) >= (4 if reject_body else 3))
+        await until(lambda: len(channel.sends) >= (3 if reject_body else 2))
         async with asyncio.timeout(20):
             while await env.scalar("SELECT delivery FROM xiaowei_request") == "sending":
                 await asyncio.sleep(0.02)
         assert await env.scalar("SELECT delivery FROM xiaowei_request") == (
             "failed" if reject_body else "sent"
         )
-        assert len(channel.uploads) == 2
+        assert len(channel.uploads) == 1
         assert "报告正文" in channel.uploads[0].decode()
-        assert "证据明细" in channel.uploads[1].decode()
-        assert await env.scalar("SELECT count(*) FROM xiaowei_delivery_part") == 3
+        assert "证据明细" not in channel.uploads[0].decode()
+        assert await env.scalar("SELECT count(*) FROM xiaowei_delivery_part") == 2
         assert await env.scalar(
             "SELECT count(*) FROM xiaowei_delivery_part WHERE message_id IS NOT NULL"
-        ) == (2 if reject_body else 3)
-        assert all(item[2]["uuid"] for item in channel.sends[:3])
+        ) == (1 if reject_body else 2)
+        assert all(item[2]["uuid"] for item in channel.sends[:2])
         if reject_body:
             assert "完整结果尚未交付" in json.dumps(channel.sends[-1][1], ensure_ascii=False)
         assert await served.finish() == 0
@@ -1433,10 +1433,9 @@ async def test_formal_thousand_rows_complete_single_or_split_files(
         }
         if format_ is None:
             assert await env.scalar("SELECT delivery FROM xiaowei_request") == "sent"
-            assert len(channel.uploads) == 2 and len(channel.sends) == 3
-            body, document = (part.decode() for part in channel.uploads)
-            assert "报告正文" in body and "证据明细" in document
-            assert "row0" not in body and "row999" not in body
+            assert len(channel.uploads) == 1 and len(channel.sends) == 2
+            document = channel.uploads[0].decode()
+            assert "报告正文" in document and "证据明细" not in document
             from re import MULTILINE, findall
 
             values = [
@@ -1446,8 +1445,8 @@ async def test_formal_thousand_rows_complete_single_or_split_files(
             assert len(values) == 1000
             assert values[-1] == {"region": "row999", "total": 999}
             preview = json.dumps(channel.sends[-1][1], ensure_ascii=False)
-            assert "报告正文" in preview and "证据明细" in preview
-            assert "row0" not in preview and "row999" not in preview
+            assert "报告正文" in preview and "证据明细" not in preview
+            assert "row0" in preview and "row999" not in preview
         else:
             from html import unescape
             from re import DOTALL, findall
@@ -1475,7 +1474,7 @@ async def test_formal_thousand_rows_complete_single_or_split_files(
             assert seen == [{"region": f"{region}{i}", "total": i} for i in range(1000)]
             shown = str(channel.sends[-1][1])
             assert "完整结果见附件" in shown and "报告正文" in shown
-            assert region not in shown
+            assert f"{region}0" in shown and f"{region}999" not in shown
             assert "完整结果见附件" in shown and "总共" not in shown
         assert len(env.scripts.calls[question]) == 2
         assert await served.finish() == 0
@@ -3111,7 +3110,7 @@ async def test_a_cluster_failing_mid_task_changes_nothing_on_the_others(env: Env
         from tests.sdk_core.test_feishu_render import text_parts
 
         text = "\n".join(text_parts(channel.sends[0][1]))
-        assert "目标 sr-c" in text
+        assert "数据范围：sr-c" in text
         from tests.sdk_core.test_feishu_render import tables
 
         assert tables(channel.sends[0][1])[0]["rows"] == [{"c0": '"east"', "c1": "3"}]

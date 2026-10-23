@@ -12,7 +12,11 @@ from tests.sdk_core.test_web_browser import item, send, settled
 pytestmark = [pytest.mark.loopback, pytest.mark.browser]
 
 
-async def test_real_chrome_brief_and_explicit_full_history(env: Env, chrome_binary: str):
+@pytest.mark.parametrize("version", [3, 4])
+async def test_real_chrome_brief_and_explicit_full_history(
+    env: Env, chrome_binary: str, monkeypatch: pytest.MonkeyPatch, version: int
+):
+    monkeypatch.setattr("xiaowei.models.ANSWER_VERSION", version)
     assert env.port != 8501
     full = env.scripts.add(
         "Read five sales",
@@ -43,7 +47,7 @@ async def test_real_chrome_brief_and_explicit_full_history(env: Env, chrome_bina
         visibility = await page.evaluate(
             f"(() => {{ const n = {item(1)}.querySelector('.table-wrap'); "
             "return {rects: n.getClientRects().length, visible: n.checkVisibility(), "
-            "closed: !n.closest('details').open, text: n.closest('.fact').innerText}; })()"
+            f"closed: !n.closest('details').open, text: {item(1)}.innerText}}; }})()"
         )
         assert visibility["visible"] is False and visibility["closed"] is True, visibility
         assert await page.evaluate(f"{item(1)}.querySelector('.evidence').open") is False
@@ -129,7 +133,11 @@ async def test_html_review_notices_and_action_fields_are_visible(chrome_binary, 
             assert "ACTION_CANARY" not in report.content.decode()
 
 
-async def test_web_filtered_candidates_and_historical_warning_are_visible(env, chrome_binary):
+@pytest.mark.parametrize("version", [3, 4])
+async def test_web_filtered_candidates_and_historical_warning_are_visible(
+    env, chrome_binary, monkeypatch, version
+):
+    monkeypatch.setattr("xiaowei.models.ANSWER_VERSION", version)
     from tests.sdk_core.gate0 import SyntheticStarRocks
     from tests.sdk_core.test_diagnosis import SLOW_SQL, UNAPPROVED_SQL
     from tests.sdk_core.test_runtime import audit_config
@@ -164,9 +172,15 @@ async def test_web_filtered_candidates_and_historical_warning_are_visible(env, c
         await settled(page, 0, "completed")
         visible = await page.evaluate(f"{item(0)}.innerText")
         assert "规则或权限过滤 17 条" in visible and "仅列获准候选" in visible
-        assert "omitted_sqlguard" not in visible and "结果已截断" not in visible
+        assert "结果已截断" not in visible
+        if version == 3:
+            assert "omitted_sqlguard" not in visible
+        else:
+            assert "omitted_sqlguard: 17" in visible
+        assert "local/list_slow_queries" not in visible
         await page.evaluate(f"{item(0)}.querySelector('details').open = true")
         assert "omitted_sqlguard" in await page.evaluate(f"{item(0)}.innerText")
+        assert "local/list_slow_queries" in await page.evaluate(f"{item(0)}.innerText")
         await send(page, followup, "query")
         await settled(page, 1, "completed")
         assert "采集时结果，不代表当前状态" in await page.evaluate(f"{item(1)}.innerText")
@@ -285,3 +299,42 @@ async def test_web_view_shows_status_projection_limits_and_note_linebreaks(chrom
             assert await page.evaluate(
                 f"{item(0)}.querySelector('.note').innerText.includes(String.fromCharCode(10))"
             )
+
+
+async def test_v4_task_status_times_are_visible_in_web_body(chrome_binary: str) -> None:
+    """同一已验证任务事实的实际 DOM；fetch 为组件替身，不证明 Web 任务授权。"""
+    from pathlib import Path
+    from urllib.parse import quote
+
+    from tests.sdk_core.test_presentation_v4 import task_status_delivery
+
+    from xiaowei.channel import RequestView
+    from xiaowei.storage import Readiness
+    from xiaowei.web import _view
+
+    value = task_status_delivery().model_copy(update={"channel": "web"})
+    response = _view("task-status", RequestView("completed", value), Readiness())
+    assets = Path(__file__).resolve().parents[2] / "src/xiaowei/static"
+    markup = (assets / "index.html").read_text()
+    markup = markup.replace('<script src="/assets/app.js" defer></script>', "")
+    markup = markup.replace(
+        '<link rel="stylesheet" href="/assets/app.css">',
+        "<style>" + (assets / "app.css").read_text() + "</style>",
+    )
+    async with launch(chrome_binary) as chrome:
+        page = await chrome.page()
+        await page.navigate("data:text/html;charset=utf-8," + quote(markup))
+        await page.evaluate(
+            "window.fetch = async () => ({status: 200, json: async () => ("
+            + response.body.decode()
+            + ")});"
+        )
+        await page.evaluate((assets / "app.js").read_text())
+        await send(page, "这个任务上次何时成功？", "query")
+        await settled(page, 0, "completed")
+        assert await page.evaluate(f"{item(0)}.querySelectorAll('details').length") == 1
+        assert await page.evaluate(f"{item(0)}.querySelector('details').open") is False
+        visible = await page.evaluate(f"{item(0)}.innerText")
+        assert "2026-10-09T10:05:00+00:00" in visible
+        assert "2026-10-09T10:06:00+00:00" in visible
+        assert "nr_internal" not in visible

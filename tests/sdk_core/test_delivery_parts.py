@@ -22,7 +22,7 @@ from xiaowei.channel_store import RequestUnavailableError
 from xiaowei.feishu import send_delivery
 from xiaowei.feishu_delivery import _data_parts
 from xiaowei.feishu_report import ReportCapacityError, ReportFile, build_report, build_reports
-from xiaowei.models import DeliveryFactRef, DeliveryText
+from xiaowei.models import DeliveryFactRef, DeliveryText, TurnAnswer
 from xiaowei.storage import Readiness, hold_instance_lock
 
 pytestmark = pytest.mark.loopback
@@ -68,7 +68,17 @@ async def request(env: Env, *, format_: str | None = "md") -> RequestRef:
         tool_call("order_total", region="east"),
         lambda call: answer(evidence_in(call), report_format=format_),
     )
-    await env.run(message, "om_d1a", channel="feishu", conversation="oc_d1a")
+    record = await env.run(message, "om_d1a", channel="feishu", conversation="oc_d1a")
+    async with env.engine.begin() as conn:
+        raw = await conn.scalar(
+            text("SELECT answer FROM xiaowei_request WHERE turn_id=:t"), {"t": record.turn_id}
+        )
+        saved = TurnAnswer.model_validate_json(raw).model_copy(update={"answer_version": 3})
+        await conn.execute(
+            text("UPDATE xiaowei_request SET answer=:a WHERE turn_id=:t"),
+            {"a": saved.model_dump_json(), "t": record.turn_id},
+        )
+    # D1/C8 测试旧双文件布局的恢复；v4 单文件/原字节另有正式链路回归。
     return RequestRef(
         channel="feishu", subject_id="alice", conversation_id="oc_d1a", request_id="om_d1a"
     )
@@ -416,7 +426,11 @@ async def test_folded_remaining_through_saved_delivery_and_manual_recovery(env: 
     message = env.scripts.add(
         "查询东区订单，先给结论，明细收起",
         tool_call("run_query", region="east"),
-        lambda call: answer([], "**结论** 当前结果已取得，范围以事实为准。"),
+        lambda call: answer(
+            evidence_in(call),
+            "**结论** 当前结果已取得，范围以事实为准。",
+            fact_views=[{"evidence_id": e, "view": "brief"} for e in evidence_in(call)],
+        ),
     )
     record = await env.run(message, "om_d1a", channel="feishu", conversation="oc_d1a")
     assert record.state == "completed"
@@ -477,7 +491,8 @@ async def test_uncited_auxiliary_index_has_only_tool_object_and_never_raw_values
     assert await env.service.results.send(ref, transmit(env, ref, platform)) == "sent"
     assert platform.files == [] and len(platform.sent) == 1
     shown = json.dumps(platform.sent[0][0], ensure_ascii=False)
-    assert "查看依据" in shown and "local/order_total" in shown
+    assert "查看依据" not in shown and "local/order_total" not in shown
+    assert "技术详情" in shown
     assert "aux_value_do_not_display" not in shown
 
 

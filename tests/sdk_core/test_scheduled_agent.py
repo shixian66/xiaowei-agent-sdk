@@ -616,13 +616,18 @@ async def test_due_jobs_do_not_wait_for_unrelated_webhook_to_finish(env, monkeyp
         )
 
 
-async def test_nested_sdk_limit_finish_cannot_exceed_approved_model_call_budget(env, monkeypatch):
+@pytest.mark.parametrize("empty_final", [False, True])
+async def test_nested_sdk_limit_finish_cannot_exceed_approved_model_call_budget(
+    env, monkeypatch, empty_final
+):
     cfg = agent_config(env)
     cfg = cfg.model_copy(update={"budget": cfg.budget.model_copy(update={"max_turns": 2})})
     query = tool_call(
         "run_readonly_query", cluster=SR.target_id, sql="SELECT region,total FROM shop.sales"
     )
-    env.scripts.add(TASK, query, query, cite())
+    from tests.sdk_core.test_app import answer
+
+    env.scripts.add(TASK, query, (lambda c: answer([], "")) if empty_final else query, cite())
     async with running(env, monkeypatch, config=cfg) as (group, _requests, rt):
         await activate(env, group)
         env.clock.advance(60)
@@ -918,7 +923,7 @@ async def test_second_readonly_capability_uses_same_scheduler_without_business_d
 async def test_background_can_correct_query_and_delivers_partial_when_clarification_needed(
     env, monkeypatch
 ):
-    from tests.sdk_core.test_app import clarify
+    from tests.sdk_core.test_app import answer, clarify, evidence_in
 
     env.scripts.add(
         TASK,
@@ -927,6 +932,9 @@ async def test_background_can_correct_query_and_delivers_partial_when_clarificat
             "run_readonly_query", cluster=SR.target_id, sql="SELECT region,total FROM shop.sales"
         ),
         clarify("另外一个统计缺少日期，请补充。"),
+        lambda c: answer(
+            evidence_in(c), analysis="", clarification="另外一个统计缺少日期，请补充。"
+        ),
     )
     async with running(env, monkeypatch, config=agent_config(env)) as (group, requests, rt):
         await activate(env, group)

@@ -44,7 +44,9 @@ REVIEW_LABELS = {
     "execution_allowed": "没有违背禁止执行的要求",
     "object_selection_correct": "选择了正确集群与对象",
     "evidence_consistent": "事实与依据一致",
-    "conclusion_matches_all_results": "结论与全部交付结果一致（含系统补全的其余结果）",
+    "conclusion_matches_all_results": (
+        "结论与已获事实一致，用户所需结果没有漏答；不要求附送未引用的内部结果"
+    ),
     "clarification_appropriate": "澄清与是否执行合理",
     "limitations_stated": "表达了口径、分页或结果限制",
     "history_delivery_claim_correct": "没有把历史生成说成已发送或已读",

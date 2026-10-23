@@ -59,7 +59,9 @@ def enabled(env):
 
 @pytest.mark.parametrize("cite_fact", [True, False])
 async def test_s1_formal_sdk_path_keeps_totals_samples_dependencies_and_no_raw_text(
-    postgres_url, monkeypatch, cite_fact,
+    postgres_url,
+    monkeypatch,
+    cite_fact,
 ):
     drv = security_driver(
         record("SELECT 0 OR 1=1", queryId="q0"),
@@ -68,11 +70,20 @@ async def test_s1_formal_sdk_path_keeps_totals_samples_dependencies_and_no_raw_t
     )
     async with assembled(postgres_url, monkeypatch, drv, AUDIT_TARGET) as env:
         enabled(env)
-        finish = (cite("发现需核查的安全线索，尚不能确认攻击成功") if cite_fact
-                  else lambda call: answer([], "已检查，请核对系统事实"))
-        message = env.scripts.add("检查测试环境本窗数据库安全情况", tool_call(
-            "inspect_audit_security", **ARGS,
-        ), finish)
+        finish = (
+            cite("发现需核查的安全线索，尚不能确认攻击成功")
+            if cite_fact
+            else lambda call: answer([], "已检查，请核对系统事实")
+        )
+        steps = [tool_call("inspect_audit_security", **ARGS), finish]
+        if not cite_fact:
+
+            def repaired(call):
+                assert call.tools == []
+                return cite("补充本轮已取得的安全线索，尚不能确认攻击成功")(call)
+
+            steps.append(repaired)
+        message = env.scripts.add("检查测试环境本窗数据库安全情况", *steps)
         delivery = await env.deliver(env.ctx(authorized=TOOLS), message)
         assert delivery.facts, tool_outputs(env.scripts.calls[message][1])
         (fact,) = delivery.facts
@@ -86,6 +97,8 @@ async def test_s1_formal_sdk_path_keeps_totals_samples_dependencies_and_no_raw_t
         assert "security-raw-canary" not in fact.result_json
         assert "stmt" not in data and "sql" not in data
         assert await env.evidence_rows() == 1
+        assert len(env.scripts.calls[message]) == (2 if cite_fact else 3)
+        assert sum("AS window_rows" in sql for c in drv.connections for sql, _ in c.executed) == 1
 
 
 @pytest.mark.parametrize("case", ["wrong_window", "missing_column", "denied"])

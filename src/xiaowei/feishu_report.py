@@ -9,7 +9,13 @@ import re
 from dataclasses import dataclass, replace
 from typing import Literal
 
-from xiaowei.feishu_render import display_text, fact_limit_notices, fold_details
+from xiaowei.feishu_render import (
+    business_fact,
+    display_text,
+    fact_limit_notices,
+    fact_scope,
+    fold_details,
+)
 from xiaowei.models import Delivery, DeliveryFact, DeliveryFactRef
 from xiaowei.report_content import FORMAT_NOTICE, ReportContent, prepare_content
 
@@ -39,6 +45,7 @@ class _Section:
     fact: DeliveryFact | None = None
     first_row: int = 1
     native: bool = False
+    business: bool = False
 
 
 _STYLE = """
@@ -117,7 +124,39 @@ def _fence(value: str, language: str = "text") -> str:
     return f"{marker}{language}\n{value}\n{marker}"
 
 
-def _fact_section(fact: DeliveryFact, label: str, *, expand_brief: bool) -> _Section:
+def _fact_section(
+    fact: DeliveryFact, label: str, *, expand_brief: bool, business: bool = False
+) -> _Section:
+    if business:
+        shown = business_fact(fact)
+        values: dict[str, object] = dict(shown.metadata)
+        if shown.columns:
+            values.update(columns=shown.columns, rows=shown.rows)
+        # 文件只保留业务字段，从获准原文恢复其值类型，不附技术元数据。
+        if fact.result_json is not None:
+            original = json.loads(fact.result_json)
+            if isinstance(original, dict):
+                values = {key: original[key] for key in values if key in original}
+        value = json.dumps(values, ensure_ascii=False, allow_nan=False)
+        return _Section(
+            "fact",
+            fact_scope(fact),
+            (fact.summary or "补充原值未附；如需原文请明确提出。")
+            if fact.historical_brief and not expand_brief
+            else value,
+            notices=tuple(
+                filter(
+                    None,
+                    (
+                        fact.note if expand_brief else fact.note_summary or fact.note,
+                        *fact_limit_notices(fact),
+                    ),
+                )
+            ),
+            fact=None if fact.historical_brief and not expand_brief else shown,
+            business=True,
+        )
+
     meta = f"来源 {fact.tool_id} · 目标 {fact.target_id} · 采集于 {fact.captured_at.isoformat()}"
     notices = tuple(([f"说明：{fact.note}"] if fact.note else []) + list(fact_limit_notices(fact)))
     if fact.historical_brief and not expand_brief:
@@ -162,7 +201,10 @@ def _sections(
             fact = facts[block.evidence_id]
             parts.append(
                 _fact_section(
-                    fact, delivery.result_label(fact.evidence_id), expand_brief=expand_brief
+                    fact,
+                    delivery.result_label(fact.evidence_id),
+                    expand_brief=expand_brief,
+                    business=delivery.answer_version == 4,
                 )
             )
         else:
@@ -179,7 +221,12 @@ def _sections(
             )
     placed = {b.evidence_id for b in delivery.blocks if isinstance(b, DeliveryFactRef)}
     parts.extend(
-        _fact_section(fact, delivery.result_label(fact.evidence_id), expand_brief=expand_brief)
+        _fact_section(
+            fact,
+            delivery.result_label(fact.evidence_id),
+            expand_brief=expand_brief,
+            business=delivery.answer_version == 4,
+        )
         for fact in delivery.section("body")
         if fact.evidence_id not in placed
     )
@@ -197,7 +244,7 @@ def _sections(
         parts.append(_Section("notice", "未核实来源", delivery.monitoring_notice))
     if delivery.session_notice:
         parts.append(_Section("session", "会话提示", delivery.session_notice))
-    if delivery.basis:
+    if delivery.basis and delivery.answer_version != 4:
         parts.append(
             _Section("basis", "查看依据", "\n".join(f"{t} · {o}" for t, o in delivery.basis))
         )
@@ -469,7 +516,7 @@ def _render(
             detail = _html_fact(section.value) if section.fact else _html_prose(section.value)
             meta = f'<p class="meta">{_escaped(section.meta)}</p>' if section.meta else ""
             notes = "".join(f'<p class="notice">{_escaped(item)}</p>' for item in section.notices)
-            if natural and section.fact is not None:
+            if natural and section.fact is not None and not section.business:
                 fact = section.fact
                 limits = "".join(
                     f'<p class="notice">{_escaped(item)}</p>'
@@ -609,7 +656,7 @@ def build_reports(
         else section
         for section in sections
     ]
-    if format_ == "html":
+    if delivery.answer_version == 4 or format_ == "html":
         return _pack_reports(format_, sections, "报告正文", shared_notice)
     body, details = [], []
     for section in sections:

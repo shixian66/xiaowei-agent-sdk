@@ -235,7 +235,7 @@ async def test_a_mentioned_member_gets_one_reply_to_the_original_message(env: En
     assert all(QUERY_NAME in seen for seen in env.scripts.tools_seen(asked))
     ((chat_id, text),) = group.outbox.sent
     assert chat_id == CHAT and group.outbox.replies == ["om_1"]
-    assert "来源 local/order_total" in message_text(text)
+    assert "local/order_total" in message_text(text)
     assert await request_rows(env) == [
         (True, "group", A, "query", "completed", "sent", CHAT, "om_1")
     ]
@@ -308,14 +308,22 @@ async def test_a_bare_mention_gets_one_hint_and_no_request(env: Env) -> None:
     assert await request_rows(env) == [] and env.scripts.calls == {}
 
 
-async def test_new_session_rotates_the_group_for_every_member(env: Env) -> None:
+@pytest.mark.parametrize("kind", ["text", "post"])
+async def test_new_session_rotates_the_group_for_every_member(env: Env, kind: str) -> None:
     async with running(env) as group:
         first = env.scripts.add(
             attributed(A, "东区订单？"), tool_call("order_total", region="east"), cite()
         )
         await group.ask("东区订单？")
         await group.ask("/新建", sender=C, message_id="om_outsider")  # C 不是成员：不轮换
-        await group.ask("/新建", sender=B, message_id="om_new")
+        from tests.sdk_core.test_feishu_post import content as post_content
+
+        kwargs = (
+            {"content": post_content("/新建"), "event__message__message_type": "post"}
+            if kind == "post"
+            else {}
+        )
+        await group.ask("/新建", sender=B, message_id="om_new", **kwargs)
         after = env.scripts.add(attributed(A, "接着说"), clarify())
         await group.ask("接着说")
     assert group.outbox.texts()[1] == NEW_GROUP_SESSION
@@ -518,7 +526,7 @@ async def test_a_pending_result_is_delivered_once_on_redelivery_after_a_membersh
             await group.gateway.receive(event)
             await group.gateway.idle()
     assert group.outbox.replies == ["om_left", "om_outsider"]
-    assert "来源 local/order_total" in group.outbox.texts()[0]
+    assert "local/order_total" in group.outbox.texts()[0]
     assert "未能确认你当前的使用权限或群成员身份" in group.outbox.texts()[1]
     assert await states(env) == {
         "om_left": ("completed", "sent"),

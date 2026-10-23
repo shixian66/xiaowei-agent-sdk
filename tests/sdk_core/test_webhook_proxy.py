@@ -240,9 +240,9 @@ async def test_proxy_evidence_and_model_text_neutralize_mentions(env, monkeypatc
         payload = json.loads(requests[0].content)
         assert "<at" not in requests[0].content.decode().lower()
         assert tags.replace("<at", "＜at").replace("<AT", "＜AT") in payload["message"]
-        assert "工具结果（系统根据证据生成）" in payload["message"]
+        assert "数据范围：" in payload["message"]
         if origin == "model":
-            assert "模型说明（未经系统核实）" in payload["message"]
+            assert "AI 分析与建议" in payload["message"]
         assert await env.scalar("SELECT count(*) FROM xiaowei_notification_attempt") == 1
 
 

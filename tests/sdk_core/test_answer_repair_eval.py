@@ -283,8 +283,8 @@ async def test_mixed_report_delivers_current_values_without_exporting_history(
             for f in captured.files
             if f.content.startswith("# 小维 · 报告正文".encode())
         ]
-        assert bodies and all("slow-a" not in text for text in bodies)
-        assert any("本次返回行数：3" in text for text in bodies)
+        assert bodies and any("slow-a" in text for text in bodies)
+        assert len(captured.files) == 1  # v4 所选业务事实直接进入文件，不另造技术明细附件。
     assert METRICS in file_text or json.dumps(METRICS) in file_text
     assert "原文未展示" not in file_text
     assert "node_uname_info" not in captured.visible_text
@@ -507,9 +507,8 @@ async def test_busy_before_sql_can_reply_without_changing_query_constraints(
 
 async def test_automatic_capacity_report_keeps_history_summary_only(postgres_url, monkeypatch):
     from functools import partial
-    from html import unescape
 
-    from tests.sdk_core.dialogue_monitoring import METRICS, SOURCE
+    from tests.sdk_core.dialogue_monitoring import SOURCE
 
     from xiaowei.feishu_render import build_feishu_message
 
@@ -545,11 +544,12 @@ async def test_automatic_capacity_report_keeps_history_summary_only(postgres_url
         [(r["state"], r["failure"], r.get("delivery")) for r in reports],
         captured.visible_text,
     )
-    assert captured.files and reports[1]["delivery"]["confirmed_parts"] == len(captured.files) + 1
-    file_text = unescape("\n".join(f.content.decode() for f in captured.files))
-    assert "slow-a" not in file_text and "restricted.secret" not in file_text
-    assert "本次返回行数：3" in file_text and "原文未展示" in file_text
-    assert METRICS in file_text or json.dumps(METRICS) in file_text
+    assert captured.files == [] and reports[1]["delivery"]["confirmed_parts"] == 1
+    # v4 补充原值不单独触发附件；短业务回答及必要范围/容量说明可直接交付。
+    visible = captured.visible_text
+    assert "slow-a" not in visible and "restricted.secret" not in visible
+    assert "本次返回行数：3" in visible
+    assert "192.0.2.11" in visible and "fat-be-1" in visible
     assert reports[1]["io_counts"].get("query", 0) == 0
     assert reports[1]["mcp_fetches"] == {SOURCE: {"query": 1}}
 
@@ -674,7 +674,7 @@ async def test_p4_partial_monitoring_failure_preserves_other_source_without_fixe
         outputs = [
             json.loads(i["output"]) for i in call.input if i.get("type") == "function_call_output"
         ]
-        ids = [o["evidence_id"] for o in outputs if o.get("status") == "ok"]
+        ids = [o["evidence_id"] for o in outputs if "evidence_id" in o]
         return answer(ids, "有不可用采样，拒绝源未核实；不能判断所有节点健康。")
 
     samples, reports = await run_p4_case(

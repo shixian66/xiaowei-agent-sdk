@@ -450,3 +450,31 @@ async def test_official_prometheus_401_403_500_each_call_once_through_web(env: E
                     assert reason in result["delivery"]["monitoring_notice"]
                     assert result["delivery"]["evidence_ids"] == []
                     assert await env.scalar("SELECT count(*) FROM xiaowei_evidence") == 0
+
+
+async def test_v4_empty_monitoring_failure_answer_is_rewritten_once_without_fetch_retry(
+    env: Env,
+) -> None:
+    detail = (
+        "failed making query api call: failed to execute instant query: "
+        "client_error: client error: 401"
+    )
+    with serve(lambda r: error_server(r, detail)) as first:
+        async with env.running(env.config(**monitoring_config(first.url))) as served:
+            await served.page()
+
+            def repaired(call):
+                assert call.tools == []
+                return answer([], "来源不可用，未完成巡检，不能判断健康。")
+
+            message = env.scripts.add(
+                "监控失败不能空答",
+                tool_call(f"{SOURCE}__query", query="up"),
+                lambda c: answer([], ""),
+                repaired,
+            )
+            response = (await served.turn(message, "query")).json()
+            assert response["state"] == "completed"
+            assert "未核实" in response["delivery"]["monitoring_notice"]
+            assert len(env.scripts.calls[message]) == 3
+            assert first.recorder.tool_calls == [("query", {"query": "up"})]

@@ -15,6 +15,7 @@ from lark_channel.channel.types import MediaSource, OutboundFile, SendResult
 from xiaowei.channel_store import DeliveryClaim, DeliveryPart, SendOutcome
 from xiaowei.feishu_render import (
     MAX_REQUEST_BYTES,
+    TECHNICAL_OMITTED,
     Message,
     MessageCapacityError,
     build_feishu_message,
@@ -82,6 +83,8 @@ def _preview(
         # 动作区域不进入附件，放不进正文就明确失败，不以说明代替。
         raise MessageCapacityError("动作区域无法在本消息容量内完整展示")
     text = notice + "\n预览无法在本消息容量内展示。"
+    if delivery.answer_version == 4 and delivery.facts:
+        text += "\n" + TECHNICAL_OMITTED
     limits = list(
         dict.fromkeys(
             [n for f in delivery.facts for n in fact_limit_notices(f)]
@@ -244,7 +247,7 @@ async def send_complete_delivery(
                 "facts": materials,
                 "blocks": (),
                 "report_format": None,
-                "report_notice": None,
+                "report_notice": delivery.report_notice if delivery.answer_version == 4 else None,
             }
         )
         try:

@@ -18,13 +18,20 @@ pytestmark = pytest.mark.loopback
 async def test_addressed_member_gets_one_receipt_to_original_message(env: Env, kind: str) -> None:
     async with running(env) as fs:
         value = media_event(fs, kind)
+        if kind == "post":
+            # 普通文字 post 已获支持，这里验证真实的不支持媒体，而非一律拒绝 post。
+            value["event"]["message"]["content"] = json.dumps(
+                {"content": [[{"tag": "media", "file_key": "file_canary"}]]}
+            )
         with pg_calls(env.engine) as calls:
             await fs.gateway.receive(value)
             await fs.gateway.receive(value)
     assert len(fs.outbox.sent) == 1 and fs.outbox.sent[0][0] == "oc_group"
-    assert "暂不支持" in fs.outbox.texts()[0] and "文字" in fs.outbox.texts()[0]
+    notice = fs.outbox.texts()[0]
+    assert ("未处理" if kind == "post" else "暂不支持") in notice and "文字" in notice
     assert fs.outbox.replies == [value["event"]["message"]["message_id"]]
-    assert env.members.checks == [("oc_group", A)]
+    # post 输入错误每次先核当前成员再按消息去重，其他类型仍先占原提示窗口。
+    assert env.members.checks == [("oc_group", A)] * (2 if kind == "post" else 1)
     assert calls == [] and env.scripts.calls == {} and env.adapter.calls == []
 
 

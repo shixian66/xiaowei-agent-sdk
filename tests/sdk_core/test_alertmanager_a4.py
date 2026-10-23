@@ -181,8 +181,10 @@ async def test_alerts_without_muted_by_are_read_as_unknown_not_unmuted(env: Env)
         assert '"mutedBy": []' not in model_content
 
 
-async def test_repeat_alert_read_cited_once_is_repaired_without_rereading(env: Env) -> None:
-    """生产形态：两次 get_alerts 都成功、回答只引用一次；提示清单含该工具，改写后两条都展示。"""
+async def test_repeat_alert_read_only_selected_result_is_delivered_without_rereading(
+    env: Env,
+) -> None:
+    """生产形态：两次 get_alerts 都成功、回答选择第二次；不强制补交或改写其余结果。"""
     seen: list[str] = []
 
     def partial(call: ModelCall) -> list[Any]:
@@ -190,11 +192,6 @@ async def test_repeat_alert_read_cited_once_is_repaired_without_rereading(env: E
         ids = evidence_in(call)
         assert len(ids) == 2
         return answer(ids[1:], "只引用了第二次读取")
-
-    def repaired(call: ModelCall) -> list[Any]:
-        ids = evidence_in(call)
-        assert call.tools == [] and f"还缺：{ids[0]}" in call.instructions
-        return answer(ids, "两次读取的采集快照")
 
     with backend() as (url, state):
         async with env.running(env.config(**a4_config(url))) as served:
@@ -204,13 +201,13 @@ async def test_repeat_alert_read_cited_once_is_repaired_without_rereading(env: E
                 tool_call(f"{SOURCE}__get_alerts", **CALLS["get_alerts"]),
                 tool_call(f"{SOURCE}__get_alerts", **{**CALLS["get_alerts"], "silenced": False}),
                 partial,
-                repaired,
             )
             body = (await served.turn(message, "query")).json()
             assert body["state"] == "completed"
-            assert len(body["delivery"]["facts"]) == 2
+            assert len(body["delivery"]["facts"]) == 1
+            assert len(env.scripts.calls[message]) == 3
             assert len(state.requests) == 2  # 改写不重读 Alertmanager
-    (rule,) = [line for line in seen[0].splitlines() if line.startswith("以下工具本轮每次成功")]
+    (rule,) = [line for line in seen[0].splitlines() if line.startswith("以下是查询类工具")]
     assert f"{SOURCE}__get_alerts" in rule
 
 
@@ -1274,12 +1271,13 @@ async def test_successful_read_is_completed_not_replaced_by_advice(env: Env) -> 
                 "查告警后漏证据",
                 tool_call(f"{SOURCE}__get_status"),
                 lambda call: answer([], analysis="", advice="只解释不引用"),
+                cite("补充用户所需事实"),
             )
             body = (await served.turn(message, "query")).json()
             assert body["state"] == "completed", body
-            assert [f["section"] for f in body["delivery"]["facts"]] == ["remaining"]
+            assert [f["section"] for f in body["delivery"]["facts"]] == ["body"]
             assert len(state.requests) == 1
-            assert len(env.scripts.calls[message]) == 2
+            assert len(env.scripts.calls[message]) == 3
 
 
 async def test_source_authorization_does_not_grant_other_tools(env: Env) -> None:

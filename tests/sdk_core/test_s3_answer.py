@@ -14,11 +14,9 @@ from tests.sdk_core.synthetic_tools import QUERY_TOOL
 from tests.sdk_core.test_app import (
     MODEL_SECRET,
     Env,
-    all_logs,
     answer,
     answer_body,
     cite,
-    clarify,
     evidence_in,
     tool_call,
 )
@@ -73,7 +71,7 @@ async def test_only_current_turn_query_results_are_completed(env: Env) -> None:
     message = env.scripts.add(
         "再查西区，只写结论",
         tool_call("run_query", region="west"),
-        lambda call: answer([], "西区也平稳"),
+        lambda call: answer(evidence_in(call)[-1:], "西区也平稳"),
     )
     ctx = env.ctx(turn="next")
     result = await env.app.run_turn(ctx, message)
@@ -82,7 +80,7 @@ async def test_only_current_turn_query_results_are_completed(env: Env) -> None:
     # 历史结果在上下文中被复核但不补全；本轮结果补为其余结果。
     assert history in result.context_evidence
     assert delivery.evidence_ids == (current,)
-    assert [f.section for f in delivery.facts] == ["remaining"]
+    assert [f.section for f in delivery.facts] == ["body"]
     assert delivery.texts == ("西区也平稳",)
 
 
@@ -95,12 +93,20 @@ async def test_diagnose_shared_results_are_not_completed(env: Env) -> None:
 
 
 async def test_completion_uses_the_original_turn_not_a_later_request(env: Env) -> None:
-    message = env.scripts.add(
-        "只查不说", tool_call("run_query", region="east"), clarify("还要吗？")
-    )
+    message = env.scripts.add("只查不说", tool_call("run_query", region="east"), cite())
     ctx = env.ctx(turn="original")
     result = await env.app.run_turn(ctx, message)
     store = env.governed.evidence
+    result = result.model_copy(
+        update={
+            "answer_version": 3,
+            "answer": AgentAnswer(
+                blocks=(TextBlock(type="text", text="还要吗？"),),
+                report_format=None,
+                awaiting_user=False,
+            ),
+        }
+    )
     original = await store.validate_answer(result, ctx, history=True)
     assert [f.section for f in original.facts] == ["remaining"]
     # 用另一请求的 turn ID（如审批请求的新编号）计算会丢掉原轮结果：交付必须传原执行轮次。
@@ -108,14 +114,8 @@ async def test_completion_uses_the_original_turn_not_a_later_request(env: Env) -
     assert other.facts == () and other.texts == ("还要吗？",)
 
 
-async def test_empty_blocks_with_completed_results_are_delivered(env: Env) -> None:
-    message = env.scripts.add(
-        "只要结果", tool_call("run_query", region="east"), lambda call: answer([], "")
-    )
-    with all_logs() as records:
-        delivery = await env.deliver(env.ctx(turn="empty"), message)
-    assert "stage=answer_repair" not in "\n".join(r.getMessage() for r in records)
-    assert delivery.blocks == () and [f.section for f in delivery.facts] == ["remaining"]
+# v3 空 blocks 的保存记录兼容与 v4 空回答的单次改写见 test_delivery_v4.py；
+# 不再用当前 Runner 生成旧版允许的漏答来测试补全。
 
 
 # ---- 授权：显式引用、补全结果与纯文字回答走同一条复核 -----------------------------------------
@@ -135,7 +135,7 @@ async def test_text_only_answer_still_rechecks_every_visible_evidence(env: Env) 
 
 
 async def test_revocation_blocks_completed_results_like_explicit_ones(env: Env) -> None:
-    message = env.scripts.add("只查", tool_call("run_query", region="east"), clarify("还要吗？"))
+    message = env.scripts.add("只查", tool_call("run_query", region="east"), cite())
     ctx = env.ctx(turn="remaining")
     result = await env.app.run_turn(ctx, message)
     env.grants.revoke_all()
@@ -145,7 +145,7 @@ async def test_revocation_blocks_completed_results_like_explicit_ones(env: Env) 
 
 
 async def test_other_session_cannot_deliver_the_turn(env: Env) -> None:
-    message = env.scripts.add("只查", tool_call("run_query", region="east"), clarify("还要吗？"))
+    message = env.scripts.add("只查", tool_call("run_query", region="east"), cite())
     result = await env.app.run_turn(env.ctx(turn="mine"), message)
     with pytest.raises(AnswerRejectedError):
         await env.governed.evidence.validate_answer(
@@ -296,7 +296,7 @@ def test_saved_answer_versions_parse_strictly(raw: str, kind: type) -> None:
     [
         json.dumps(_turn_json(LEGACY.model_dump(mode="json"), answer_version=2)),  # 版本与内容不符
         json.dumps(_turn_json(CURRENT.model_dump(mode="json"))),  # 新格式缺版本
-        json.dumps(_turn_json(CURRENT.model_dump(mode="json"), answer_version=4)),  # 未知版本
+        json.dumps(_turn_json(CURRENT.model_dump(mode="json"), answer_version=5)),  # 未知版本
         json.dumps(
             _turn_json(
                 {"blocks": [{"type": "text", "text": "x"}], "report_format": None},

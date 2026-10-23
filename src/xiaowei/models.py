@@ -252,8 +252,8 @@ class _Answer(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid")
 
 
-ANSWER_VERSION: Final = 3
-"""可信保存版本：3 开放原生报告，2 保持旧文字语义；模型不输出，缺失只表示 LegacyAnswer。"""
+ANSWER_VERSION: Final = 4
+"""可信保存版本：4 选择所需事实，3/2 保留旧补全；模型不输出，缺失只表示 LegacyAnswer。"""
 MAX_ANSWER_TEXT_BYTES: Final = 16_000
 """模型文字累计上限（UTF-8 字节）；只约束模型输出规模，不保证卡片、报告或 Session 放得下。"""
 MAX_ANSWER_BLOCKS: Final = 64
@@ -280,8 +280,8 @@ AnswerBlock = TextBlock | FactBlock
 class AgentAnswer(_Answer):
     """SDK ``output_type``：按顺序排列的文字与事实块，外加文件格式与“等待用户”声明。
 
-    回答结构、顺序与语气由模型决定；可信事实、动作材料、本轮未引用的获准结果（“其余结果”）与
-    系统说明由代码生成（``EvidenceStore.validate_answer``）。块的字段组合由类型约束；文字累计
+    回答结构、顺序与语气由模型决定；可信事实、动作材料与系统说明由代码生成；旧 v2/v3
+    另补全未引用结果（``EvidenceStore.validate_answer``）。块的字段组合由类型约束；文字累计
     字节与块数在这里校验，超限属于可改写的格式错误；这一预算只约束新模型输出，旧记录经
     ``legacy_blocks`` 适配，不受此限。``awaiting_user`` 为真时忽略 ``report_format``，只交付
     普通消息。
@@ -444,13 +444,13 @@ class TurnAnswer(_Trusted):
     可能复述其中任何一条，因此回答只能引用其中的证据，每次交付都按当前权限复核全部这些证据；
     任一条确定不可读时整条回答不交付。
 
-    ``answer_version`` 由可信代码写入：``2/3`` 只接受 ``AgentAnswer``；缺失只接受严格的旧
+    ``answer_version`` 由可信代码写入：``2/3/4`` 只接受 ``AgentAnswer``；缺失只接受严格的旧
     ``LegacyAnswer``；其他取值、两者不符或新格式解析失败都拒绝，不回退旧格式。代码直接以
     ``AgentAnswer`` 对象构造时自动写入当前版本；JSON 输入不补版本。
     """
 
     answer: AgentAnswer | LegacyAnswer
-    answer_version: Literal[2, 3] | None = None
+    answer_version: Literal[2, 3, 4] | None = None
     context_evidence: tuple[Label, ...]
     monitoring_failures: tuple[MonitoringFailure, ...] = ()
     run_turn_id: Label | None = None
@@ -474,7 +474,7 @@ class TurnAnswer(_Trusted):
 
     @model_validator(mode="after")
     def _version_matches(self) -> "TurnAnswer":
-        expected = AgentAnswer if self.answer_version in (2, 3) else LegacyAnswer
+        expected = AgentAnswer if self.answer_version in (2, 3, 4) else LegacyAnswer
         if type(self.answer) is not expected:
             raise ValueError("回答版本与内容不符")
         return self
@@ -548,10 +548,12 @@ class Delivery(_Trusted):
     """通过验证、按接收渠道自身投影生成的输出。
 
     ``facts`` 按展示顺序排列：动作区域（置顶，模型块不能移除或改位）→ 正文中模型放置的事实
-    （与 ``blocks`` 的顺序一致）→ “其余结果”（本轮未引用的获准查询结果，按产生顺序由代码补全）。
+    （与 ``blocks`` 的顺序一致）；旧 v2/v3 另有代码补全的“其余结果”。
     ``blocks`` 只含正文：模型文字与正文事实的引用。系统说明在固定字段中，由代码生成。
     """
 
+    answer_version: Literal[2, 3, 4] | None = None
+    """可信保存语义，贯穿重发和渲染；缺失仍为旧布局。"""
     content: str
     evidence_ids: tuple[str, ...]
     channel: Channel
@@ -624,5 +626,5 @@ class Delivery(_Trusted):
             or self.session_notice
             or self.report_notice
             or self.limit_notice
-            or self.basis
+            or (self.basis and self.answer_version != 4)
         )

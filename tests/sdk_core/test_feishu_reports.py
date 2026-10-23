@@ -645,7 +645,7 @@ async def test_report_capacity_falls_back_to_card_and_resend_without_upload(
     assert len(outbox.sent) == 2
     assert outbox.texts()[0] == outbox.texts()[1]
     assert "报告超过文件容量，已改用消息展示" in outbox.texts()[0]
-    assert "来源 local/order_total" in outbox.texts()[0]
+    assert "数据范围：" in outbox.texts()[0]
 
 
 @pytest.mark.asyncio
@@ -965,7 +965,7 @@ async def test_real_sdk_sends_one_file_after_one_upload_to_local_endpoint(
             channel.stop(join_timeout=5)
     assert len(uploads) == len(messages) == 1
     assert b"xiaowei-report.html" in uploads[0]
-    assert "结果 1".encode() in uploads[0] and b"ev_" not in uploads[0]
+    assert "数据范围：".encode() in uploads[0] and b"ev_" not in uploads[0]
     path, sent_body = messages[0]
     assert path == (
         "/open-apis/im/v1/messages/om_origin/reply" if reply_to else "/open-apis/im/v1/messages"

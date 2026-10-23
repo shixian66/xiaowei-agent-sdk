@@ -25,7 +25,7 @@
 最终回答连同本轮模型可见的全部证据（可信代码记录的 ``TurnAnswer.context_evidence``）一起复核：
 模型文字可能复述其中任何一条，纯文字回答也不例外。显式引用、动作区域与“其余结果”来自
 同一批复核通过的记录：动作（提案、执行结果、状态查询）置顶；正文按模型块的顺序；本轮
-需交付类别中未被引用的获准结果由代码按产生顺序补全。事实区域由代码从获准投影生成；策略
+需交付类别中未被引用的结果仅按旧 v2/v3 语义补全；v4 不补交。事实区域由代码从获准投影生成；策略
 登记了固定说明的工具，说明由代码取自当前登记的策略，不来自证据记录或模型。Web/飞书各得到
 从本渠道投影生成的 ``DeliveryFact``；飞书使用纯文本组件与单元格构造静态卡片，不解析获准值
 里的 Markdown。
@@ -36,7 +36,6 @@ import hashlib
 import json
 import logging
 import secrets
-import unicodedata
 from collections.abc import Awaitable, Callable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from contextvars import ContextVar
@@ -49,6 +48,7 @@ from sqlalchemy import text
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncEngine
 
+from xiaowei.feishu_render import business_text, display_text
 from xiaowei.governance import (
     Authorizer,
     ToolCatalog,
@@ -60,6 +60,7 @@ from xiaowei.governance import (
 from xiaowei.models import (
     ACTION_STATUS_POLICY,
     MONITORING_READ_POLICIES,
+    PROMETHEUS_QUERY_POLICIES,
     AgentAnswer,
     AnswerBlock,
     Audience,
@@ -476,21 +477,23 @@ class EvidenceStore:
         history: bool = False,
         recipient_tools: frozenset[str] | None = None,
         recipient_targets: frozenset[str] | None = None,
-        include_remaining_results: bool = True,
+        include_remaining_results: bool | None = None,
     ) -> Delivery:
         """最终回答出口：核对引用关系与当前可读性，再为接收渠道生成内容。
 
         回答只能引用本轮模型可见的证据（``turn.context_evidence``）；这些证据不论是否被引用、
         回答是否只有文字，每次都按当前权限一批复核。复核通过的记录中：动作类证据（显式引用的，
         与原执行轮次产生的）置顶；正文事实按模型块顺序；原执行轮次中需交付类别、未被引用的结果
-        按产生顺序补为“其余结果”。原执行轮次即 ``ctx.identity.turn_id``（审批恢复与历史读取都
-        传原轮）。归一化与补全后仍没有任何可交付内容时拒绝。
+        仅在旧 v2/v3 中按产生顺序补为“其余结果”，v4 默认只选择所需事实。原执行轮次即
+        ``ctx.identity.turn_id``（审批恢复与历史读取都传原轮）。归一化与补全后仍没有任何可交付内容时拒绝。
         ``history`` 为真表示历史读取或显式重发；所有证据均复核当前权限与依赖。
-        通知外发将 ``include_remaining_results`` 设为假，只输出显式选择的事实；
+        默认 None 按可信保存版本选择补全；通知显式设为假，只输出选择的事实；
         全部模型可见证据仍须通过数据权限和接收权限复核。
         确定不可读抛出 ``AnswerRejectedError``；暂时无法复核时 ``EvidenceUnverifiableError`` 原样
         传播。
         """
+        if include_remaining_results is None:
+            include_remaining_results = turn.answer_version in (2, 3)
         answer = normalize_answer(turn.blocks_answer)
         context = tuple(dict.fromkeys(turn.context_evidence))
         channel = ctx.identity.channel
@@ -546,8 +549,18 @@ class EvidenceStore:
             and self.category(by_id[e]) == "result"
         ]
         facts = [
-            *(self._delivery_fact(by_id[e], "action", views.get(e), ctx) for e in actions),
-            *(self._delivery_fact(by_id[e], "body", views.get(e), ctx) for e in body),
+            *(
+                self._delivery_fact(
+                    by_id[e], "action", views.get(e), ctx, modern=turn.answer_version == 4
+                )
+                for e in actions
+            ),
+            *(
+                self._delivery_fact(
+                    by_id[e], "body", views.get(e), ctx, modern=turn.answer_version == 4
+                )
+                for e in body
+            ),
             *(self._delivery_fact(by_id[e], "remaining", None, ctx) for e in remaining),
         ]
         blocks: list[DeliveryBlock] = [
@@ -564,26 +577,39 @@ class EvidenceStore:
         report_notice = None
         if report_format is not None and channel != "feishu":
             report_format, report_notice = None, UNSUPPORTED_FILE_NOTICE
+        if (
+            turn.answer_version == 4
+            and turn.material_only
+            and turn.run_turn_id is not None
+            and any(current(e) and self.category(by_id[e]) != "action" for e in unshown)
+        ):
+            # SDK 暂停材料（不是通知工具构造的发送正文）。未提交普通 Session，不能承诺可检索。
+            report_notice = (
+                "本次查询结果尚未交付；获准并恢复后随最终回答交付，仍受当前权限和有效期限制。"
+            )
         shown_ids = {f.evidence_id for f in facts}
-        shown = {e: _shown(by_id[e], channel, self._fact_note(by_id[e])) for e in shown_ids}
         limit_notice = LIMIT_NOTICE if turn.limit_reached else None
         lines: list[str] = []
-        for notice in (report_notice, limit_notice, monitoring_notice):
-            if notice:
-                lines.append(notice)
-        if actions:
-            lines.append(_ACTION_HEADER)
-            lines.extend(line for e in actions for line in _fact_lines(shown[e]))
-        for block in blocks:
-            if isinstance(block, DeliveryText):
-                lines.extend((_TEXT_HEADER, _one_line(block.text)))
-            else:
-                lines.append(_FACTS_HEADER)
-                lines.extend(_fact_lines(shown[block.evidence_id]))
-        if remaining:
-            lines.append(_REMAINING_HEADER)
-            lines.extend(line for e in remaining for line in _fact_lines(shown[e]))
-        return Delivery(
+        if turn.answer_version != 4:
+            # 旧保存语义的 content；v4 不生成再丢弃一份完整 JSON/内部包装。
+            shown = {e: _shown(by_id[e], channel, self._fact_note(by_id[e])) for e in shown_ids}
+            for notice in (report_notice, limit_notice, monitoring_notice):
+                if notice:
+                    lines.append(notice)
+            if actions:
+                lines.append(_ACTION_HEADER)
+                lines.extend(line for e in actions for line in _fact_lines(shown[e]))
+            for block in blocks:
+                if isinstance(block, DeliveryText):
+                    lines.extend((_TEXT_HEADER, _one_line(block.text)))
+                else:
+                    lines.append(_FACTS_HEADER)
+                    lines.extend(_fact_lines(shown[block.evidence_id]))
+            if remaining:
+                lines.append(_REMAINING_HEADER)
+                lines.extend(line for e in remaining for line in _fact_lines(shown[e]))
+        delivery = Delivery(
+            answer_version=turn.answer_version,
             content="\n".join(lines),
             evidence_ids=tuple(f.evidence_id for f in facts),
             channel=channel,
@@ -595,10 +621,14 @@ class EvidenceStore:
             requires_complete=any(f.requires_complete for f in facts),
             awaiting_user=answer.awaiting_user,
             report_format=report_format,
-            report_native=turn.answer_version == 3 and report_format is not None,
+            report_native=turn.answer_version in (3, 4) and report_format is not None,
             basis=_basis([r for r in records if r.evidence_id not in shown_ids], ctx),
             content_expires_at=min((r.expires_at for r in records), default=None),
         )
+
+        if turn.answer_version == 4:
+            delivery = delivery.model_copy(update={"content": business_text(delivery)})
+        return delivery
 
     def _effect(self, record: EvidenceRecord) -> str:
         contract = self._catalog.contract(record.tool_id, record.target_id)
@@ -610,6 +640,8 @@ class EvidenceStore:
         section: FactSection,
         view: Literal["full", "brief"] | None,
         ctx: RunContext,
+        *,
+        modern: bool = False,
     ) -> DeliveryFact:
         channel = ctx.identity.channel
         item = _shown(record, channel, self._fact_note(record))
@@ -639,9 +671,18 @@ class EvidenceStore:
                     )
                 }
             )
-        # 当前 brief 仅收起，summary 留空；历史摘要仍受原有行数语义限制。
+        # 必要执行状态不能因 brief 隐藏；旧版本和已绑定内容保持原语义。
+        if modern and record.target_id in {"scheduled", "notifications"}:
+            return fact
+        # 仅当前结果和 v4 Prometheus 非表格补充原文可只收起、不生成计数摘要。
+        # 结构化历史没有可信计数时仍回 full，不能把业务行误收进技术区。
         if view == "brief" and not complete and section != "action":
-            if record.identity.turn_id == ctx.identity.turn_id:
+            if record.identity.turn_id == ctx.identity.turn_id or (
+                modern
+                and not fact.columns
+                and contract is not None
+                and contract.policy_id in PROMETHEUS_QUERY_POLICIES
+            ):
                 return fact.model_copy(update={"view": "brief"})
             count = (item.data or {}).get("row_count")
             if type(count) is int and count >= 0 and count == len(fact.rows) and fact.columns:
@@ -1126,14 +1167,6 @@ def _table(
     return columns, tuple(rows)
 
 
-# JSON 在 ``ensure_ascii=False`` 时仍原样输出的分行与不可见字符：C1 控制字符（含 U+0085）、
-# DEL、行与段分隔符（U+2028/U+2029），以及可改变显示顺序的格式字符。
-_LINE_UNSAFE = frozenset({"Cc", "Zl", "Zp", "Cf"})
-
-
 def _one_line(content: str) -> str:
-    """把会另起一行或不可见的字符写成 JSON 转义；JSON 文本转换后仍是含义相同的 JSON。"""
-    return "".join(
-        json.dumps(char)[1:-1] if unicodedata.category(char) in _LINE_UNSAFE else char
-        for char in content
-    )
+    """旧 content 契约也复用纯文字控制符编码，不改变已有保存语义。"""
+    return display_text(content, multiline=False)

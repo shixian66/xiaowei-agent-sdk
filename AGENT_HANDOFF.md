@@ -1,6 +1,6 @@
 # 小维：当前交接
 
-> 更新：2026-10-22，Asia/Shanghai。本文维护当前代码状态、有效证据、缺口与下一项工作。产品契约见 [ARCHITECTURE.md](ARCHITECTURE.md)，阶段与退出条件见 [DEVELOPMENT_PLAN.md](DEVELOPMENT_PLAN.md)，使用与运维见 [README.md](README.md) 和 [OPERATIONS.md](deploy/OPERATIONS.md)。
+> 更新：2026-10-23，Asia/Shanghai。本文维护当前代码状态、有效证据、缺口与下一项工作。产品契约见 [ARCHITECTURE.md](ARCHITECTURE.md)，阶段与退出条件见 [DEVELOPMENT_PLAN.md](DEVELOPMENT_PLAN.md)，使用与运维见 [README.md](README.md) 和 [OPERATIONS.md](deploy/OPERATIONS.md)。
 
 **OpenAI Agents SDK 负责 Agent Loop；小维负责权限、受治理工具执行、证据真实性和数据边界。**
 
@@ -9,16 +9,16 @@
 | 项目 | 已核对事实 |
 | --- | --- |
 | 仓库 | [shixian66/xiaowei-agent-sdk](https://github.com/shixian66/xiaowei-agent-sdk) |
-| 产品代码基线 | `main@be8c155638c4fa0c4eece912f8ff79fbef1c41ef`（C 已由 #126 合入）；代理独立工作树 `/Users/kloenguyen/.codex/worktrees/feishu-proxy-webhook/agent-SDK`，分支 `codex/feishu-proxy-webhook`；D 的 codex/node-exporter-core 工作树及原目录修改均保留 |
+| 产品代码基线 | 已审查分支 ce52831 基于 `main@1a92c58`；PR 集成更新至 `main@96c965ceb32a898bbd805df9d7d525beb9b0000b`（#127 代理、#128 手动安全巡检均保留）；复用代理隔离工作树，分支 `codex/feishu-input-presentation-plan`；D 的 codex/node-exporter-core 工作树及原目录修改均保留 |
 | 源码与检查 | 当前源码仅保留 `src/xiaowei`；旧工程及专属测试、Compose、迁移入口、`compose-smoke` CI 和 Alembic 依赖已移除。保留产品测试、公共检查与旧回答兼容路径；旧工程历史可从 Git 查回 |
-| 当前存储与回答 | 主线应用 schema v15，代理不新增迁移；C 扩展已有 job、逐次 run/通知关联；014 已发布不改，015 显式升级。SDK 表、回答版本及既有交付兼容保持 |
+| 当前存储与回答 | 应用 schema v15 不变；C 扩展已有 job、逐次 run/通知关联；014 已发布不改，015 显式升级。当前本地新回答保存 v4，旧 v2/v3/Legacy 与已绑定交付保持原语义，SDK 表不改 |
 | 锁定依赖 | SDK `0.22.3`、Lark Channel `1.4.0`、MCP `2.2.0`、sqlglot `30.17.0`、`nh3 0.3.7`、`tinycss2 1.5.1`、Pillow `13.0.0`、certifi `2026.10.19`（后两项为严格审计发现的既有漏洞定向升级） |
 | 正式入口 | `xiaowei serve`、`config check`、`model check`、`storage init/upgrade/cleanup`、`requests resend`；命令与环境准备以 README 为准 |
-| 最近有记录的公司部署 | 主线交接记录含用户提供的 `xiaowei:143c4c8641be636c41c130329ce1639a36b59c27` 镜像及巡检日志；未独立核验当前服务器状态。B 本轮未部署 |
-| 当前验收结论 | A/B/C 已合入主线；代理离线候选 163d2ac 的独立复审及单次完整默认全套通过，真实 U5/U6/U7 未验收，D 暂停且未实现。具体版本与证据见 §5 |
-| 当前任务授权 | 用户确认 Claude 审查无阻断，已授权推送代理分支、创建 PR，远端 CI 全绿后合并；仍不部署、不调用真实代理/飞书/模型/公司源、不读取公司配置及凭据正文；D 继续暂停 |
+| 最近有记录的公司部署 | 主线交接记录含用户提供的 `xiaowei:143c4c8641be636c41c130329ce1639a36b59c27` 镜像及巡检日志；未独立核验当前服务器状态。本次未部署 |
+| 当前验收结论 | A/B/C 与代理已合入主线；S0/S2 已通过独立复审。S1 首版 c44bbdf 全套通过；Claude 对 d29c2f0（受测 af797c0）确认 P1/P2(b) 通过，P2(a) 附件回答优先级回归已在 b08c042 本地修复并定向验证，用户确认 ce52831 复审通过；真实模型、平台输入/识图、客户端与 U5/U6/U7 仍未验收，D 暂停且未实现。精确版本和证据见 §5 |
+| 当前任务授权 | 起点 b2761c8：用户接受 v4 前向修复、不恢复旧备份，授权 S1 本地实现、测试与提交；用户已确认 ce52831 复审通过并授权推送、开 PR、CI 全绿后合并。保留最新 main，常规集成冲突在隔离分支解决；不推进 D、不部署，不调用真实服务/模型或读取公司配置凭据 |
 
-原工作目录的 ARCHITECTURE 差异与未跟踪计划/公司配置保留，未复制到本工作树；本次未读取公司配置凭据。旧监控和回答修复记录保留为注明版本的证据，不作为本轮代理范围扩展授权。
+原工作目录的 ARCHITECTURE 差异与未跟踪计划/公司配置保留，未复制到本工作树；本次未读取公司配置凭据。旧监控和回答修复记录保留为注明版本的证据，不作为本轮输入或展示范围扩展授权。
 
 本文件的状态以表中的核对基线为限。接手者先核对实际 HEAD、工作区及用户新指令；合入、独立审查、离线测试、真实运行、部署与用户接受分别记录，不互相替代。
 
@@ -29,11 +29,11 @@
 - 一个业务 Agent、SDK 唯一 Loop、SDK Session + PostgreSQL、受治理执行与四种数据边界，见 [ARCHITECTURE §3–§9](ARCHITECTURE.md)。StarRocks 继续本地 Adapter 直连，数据库 MCP 暂缓。
 - 普通消息由单 Agent 判断是否查询；显式诊断入口才确定性隐藏并拒绝实际查询。环境选择目前依靠会话历史与随包 Skill，执行层没有“用户选定环境”硬校验；接受风险与第二步触发条件见 [R7](ARCHITECTURE.md#r7-targets)。
 - SQLGuard 检查业务 SQL 原文，物理表必须带库名；唯一候选可由 Agent 补全后重试，不能把旧的自动补库或 AST 重打印恢复为当前行为。查询资源边界和已接受的视图、审计数据范围见 [§6](ARCHITECTURE.md#6-只读查询保护)。
-- S3 允许模型组织文字与事实块；需交付结果漏引时由代码补全，不再用 `uncited_query` 拒收。权限、Evidence、未完成执行和存储边界仍生效；模型文字真实性通过任务评测检查，不能把结构通过当作结论正确。见 [结果交付](ARCHITECTURE.md#result-delivery)与 §8–§9。
+- 当前 v4 选择所需事实，不自动补交未引用结果；v2/v3 保留保存语义，均按[长期交付规则](ARCHITECTURE.md#user-delivery-and-history)管理，不恢复旧 `uncited_query`。权限、Evidence、未完成执行和存储边界保留；模型文字真实性仍须任务评测，结构正确不代表结论正确。
 - 进度的单聊/群聊差异延迟、仅真实变化更新、正常收尾及异常陈旧已由用户确认，详见[进度契约](ARCHITECTURE.md#progress-observation)；P1 已有离线实现，当前证据见计划 §7。普通消息的区域身份及正文/明细分工见[普通消息契约](ARCHITECTURE.md#ordinary-feishu-expression)，不能由 HTML/MD 报告完成推定达标。
 - 监控写仅限已批准动作，使用 SDK 原生审批暂停/恢复及既有 Action 治理；生产开放仍须满足对应源和群审批门槛。Grafana 数据源密码私聊命令尚未实现，目前由管理员在 Grafana UI 填写。见 [监控边界](ARCHITECTURE.md#monitoring-mcp)。
 - 内网 Web 无登录、访问者共用操作者权限；目标账号、网络、Grafana 插件/写端及数据源更新竞争窗口等已接受取舍按架构执行。
-- 通知及定时任务的方向与待审权限增量见 [ARCHITECTURE](ARCHITECTURE.md#scheduled-agent-tasks)：多个目的群不扩大操作入口，任务独立于原聊天，创建及每次执行复核权限，生产写不能继承周期批准。A/B/C 已合入主线，当前先交付自建代理适配，D 暂停且未实现。
+- 通知及定时任务的方向与待审权限增量见 [ARCHITECTURE](ARCHITECTURE.md#scheduled-agent-tasks)：多个目的群不扩大操作入口，任务独立于原聊天，创建及每次执行复核权限，生产写不能继承周期批准。A/B/C 与自建代理适配已合入主线；群输入已通过独立复审，S1 展示已完成本地实现、离线验证及独立复审，用户授权 PR 集成，D 暂停且未实现。
 
 ## 3. 当前计划与下一项工作
 
@@ -53,13 +53,13 @@
 
 公司验收仍开放：用户/DBA 回传 3.5.14-23a56ec / AuditLoader 5.0.0、固定列存在、一小时 237398/ERR3/按16000超长135、旧粗筛117、单次延迟约18秒。来源集群/账号安全引用、时区/截断配置、实际 SQL/候选字节限额、脱敏、多语句拆行和隔离测试环境仍待绑定。3.5.14 最终 LIKE/REGEXP 合成字面量验证、真实候选容量及两条查询成本是验收门槛，证据记在[公司侧清单](docs/starrocks-security-company-checklist.md)，不作运行时标记；4.1.4/Python/SQLite 不替代。
 
-候选 [PR #128](https://github.com/shixian66/xiaowei-agent-sdk/pull/128) 保持 draft；CI 结果以对应 head 的检查为准，amd64 候选发行包按现有流程制作，SHA/镜像及归档摘要见随包 release.json 与 SHA256SUMS。下一项工作为按公司清单完成真实验证；本地代码审查通过不豁免这些门槛。A0/A1b 真实验证与 A3 由用户/DBA 在公司执行，本地不连公司 StarRocks 或模型 API。已选 A，仅在公司隔离测试环境生成无害样本，生产不回放；真实模型、渠道实收、部署和用户验收未开始。未授权合并或部署。
+[PR #128](https://github.com/shixian66/xiaowei-agent-sdk/pull/128) 已合入 main@96c965c；以下候选验证/发行记录不等于公司验收或部署授权。CI 结果以对应 head 的检查为准，amd64 候选发行包按现有流程制作，SHA/镜像及归档摘要见随包 release.json 与 SHA256SUMS。下一项工作为按公司清单完成真实验证；本地代码审查通过不豁免这些门槛。A0/A1b 真实验证与 A3 由用户/DBA 在公司执行，本地不连公司 StarRocks 或模型 API。已选 A，仅在公司隔离测试环境生成无害样本，生产不回放；真实模型、渠道实收、部署和用户验收未开始。未授权部署。
 
-### 当前：自建飞书代理（C 公司验收前置）
+### 当前：S1 已复审通过，准备 PR 集成
 
-C 已由 #126 合入 be8c155，批准的通用调度/只读边界不变；本轮只增加 Webhook 的 feishu_proxy 协议，详见 [ARCHITECTURE](ARCHITECTURE.md#scheduled-agent-tasks)。代理功能冻结于 163d2ac，独立审查和单次完整默认全套通过；Claude 对本地交付 HEAD 1b1a78dee2df5e467315997304222879e0ba849e 的审查已由用户确认无阻断。用户现已授权推送、开 PR、远端 CI 全绿后合并；本次仅同步集成授权与状态文案，未修改源码、测试或依赖。PR 的实际 head、CI 与合并结果以 GitHub 记录为准。D 的 Node 研究/未提交改动保留在原隔离工作树，不混入代理分支，也不继续请求其认证信息。
+S2 独立复审结论保留，审查版本 44b0d5d、受测代码 d750a41，具体证据见 §5。用户已确认 v4 回退限制并授权本地 S1，依据[计划 v1.5](docs/superpowers/plans/2026-10-22-feishu-input-presentation-repair.md)实现默认业务回答、单技术区与版本兼容，模型 schema 不变。D 及原目录工作保持不动。
 
-用户最新决定取消代理协议原文的固定 `<at id=all></at>`，不加开关；不带 at 能否正常投递、响应业务协议与群内实收须线上验收。下一步按本次授权完成 PR 与全绿后合并；部署及 C 公司验收仍须另获授权，真实 U5/U6/U7、30任务并发/成本仍开放。
+下一项：按用户授权推送主题分支、创建 PR，确认远端 CI 全绿及 head 未变后合并；PR 记录精确 base/head、审查版本和集成证据。P1/P2 与 S2 均已独立复审通过，不重做整轮审查。已审查版本 ce52831 的源码/测试冻结于 b08c042；与最新 main 的唯一测试冲突保留主线实际请求容量校准，生产限额和前后 I/O 断言不变。c44bbdf 是集成前完整全套，不冒充集成后证据。真实模型、平台、公司源及部署不在当前授权内。v4 升级/前向修复的唯一权威契约见 [ARCHITECTURE](ARCHITECTURE.md#user-delivery-and-history)。
 
 ### 已合入的监控可靠性修订（PR #121）
 
@@ -97,9 +97,9 @@ C 已由 #126 合入 be8c155，批准的通用调度/只读边界不变；本轮
 
 P1-B、P2、P2.5 与飞书单群的基础切片已有离线交付记录；P3-A/B 部署维护代码已合入。P1 Task 9、P2 诊断、P2.5 环境行为及单群的真实退出条件仍按 P3 分项验收，不把这些阶段统称为全部完成。
 
-### 当前回答结构与主要证据
+### 主线旧回答结构与历史证据（版本 ≤3）
 
-已合入的回答结构见[自由回答结构计划](docs/superpowers/plans/2026-10-17-free-answer-structure.md)。其中 S2 的“留 S3”等阶段文字是当时记录，当前合入状态以上表为准。
+以下记录版本 ≤3 的已合入行为，不覆盖本地 v4；当前差异和验证见 §5 S1，产品契约见长期交付规则。已合入的回答结构见[自由回答结构计划](docs/superpowers/plans/2026-10-17-free-answer-structure.md)。其中 S2 的“留 S3”等阶段文字是当时记录，当前合入状态以上表为准。
 
 已合入的[模型自主 HTML/MD 报告](docs/superpowers/plans/2026-10-19-model-authored-reports.md)复用 blocks 和现有治理/交付；MD 原生排版、独立 HTML 片段与短 Skill，事实就近由代码填入，主消息提取文字。版本 3 贯穿保存/读取，解决旧纯文本在升级时未绑定字节的兼容问题；旧 HTML 基线字节回归保持一致。禁止脚本/外部资源，解析 CSS 值控制布局，文件/试排/预览只清理一次。A1 仍保留通用模型失败回执，未扩大数据/权限或 SQL 取数限额。
 
@@ -154,7 +154,66 @@ B1 的短口径主视图修复已成立；原 B2 因复现形状不符合真实 
 
 ## 5. 验证记录与限制
 
-### 自建代理本地交付（本轮）
+### S1/v4 P2(a) 附件回答优先级（用户确认独立复审通过）
+
+本次起点 d29c2f0d7cff3365ffe9da02f97b97808999a7a0；Claude 对 ac93a74..d29c2f0（源码/测试 af797c09ef140c3ec5129b15dd3415be57c3e426）确认 P1 任务时间可见和 P2(b) 业务文件通过，但指出 P2(a) 新路径先给完整技术区留位、再截模型文字，违背回答优先。这一反例收窄了此前内部“P1/P2 无新增阻断”的结论。本次只修该根因，不重做 S1 或扩大范围。
+
+feishu_render.build_feishu_message 的 v4 附件分支先试完整回答、必需说明和完整技术区，复用既有整行搜索安排业务预览；不能共存时整体去掉技术区，显示“技术详情超出消息容量，未附。”，再走既有回答优先路径。短技术区仍保留一个默认收起的面板；普通 v4、v2/v3/Legacy、已绑定内容原字节、权限/TTL/审批/unknown、模型与数据库版本不变。ARCHITECTURE 的长期规则已覆盖该优先级，无需新增契约。
+
+新增 test_v4_attachment_keeps_complete_answer_before_technical_details 经真实 _data_parts 自动附件路径，400 行事实与先通过 AgentAnswer 校验的 15,915 UTF-8 字节模型文字：短 SQL 保留面板，5,000 个带引号字符/13,000 个普通字符的长 SQL 整区省略，完整回答、附件索引与事实限制均可见。审查示例约 8,000 汉字超过当前 16,000 字节模型文字上限，因此使用预算内样本复现，不放宽限额。
+
+test_v4_attachment_uses_real_layout_when_empty_placeholders_are_larger 保留零行占位比完整行更大的边界，改为 22 条短事实、400 行大事实和 8,000 字节完整文字；旧样本的 16,000 字节文字原先被截断，不能再以保技术区为通过条件。新样本同时断言完整回答与面板可共存，并以独立变异确认遗漏下界搜索会失败，未删除该保护。
+
+同根因的无技术区回退也保留完整回答试放：test_v4_attachment_without_technical_details_keeps_answer_with_many_short_facts 使用 34 条普通单行事实、短 SQL 和合法 8,000 字节回答，断言正文全文与末行可见、面板为 0 且明确未附。实际完整布局仅 17,020 字节/138 个组件，零行占位却有 213 个组件，不能先按占位截文字。该分支由增量审查指出后先补 RED，再在同一附件分支修复；独立复核 b08c042 已确认关闭，无新增阻断。结论只覆盖本次实际差异，用户已确认 Claude 对 ce52831 的复审无问题，授权 PR 集成。
+
+源码/测试冻结 SHA：b08c042ad739ba5038999c9743bee8cc872f4875。以下正式检查均记录开始/结束 SHA 相同、工作区 clean、EXIT_CODE=0、VERSION_UNCHANGED=True；后续仅同步文档。日志目录 /tmp/xiaowei-s1-attachment-priority/：
+
+| 检查 | 证据与实际结果 |
+| --- | --- |
+| 目标 RED | red.log：2 failed、1 passed，两种长 SQL 均在“完整回答可见”断言失败，短 SQL 成功；many-facts-red.log：1 failed，命中多事实回退丢失回答（先用 32 条事实加长 SQL 复现，最终采用 34 条短事实的更小反例）。最终通过证据见冻结回归 |
+| 冻结版本相关回归 | related-b08c042.log：199 passed，29.99 秒；包含渲染、附件/报告、分项恢复、inline、v4/旧记录交付；命令全文在日志 |
+| 技术区优先回退变异 | mutations-b08c042/technical-first-*.log：基线 3 passed → 变异 2 failed/1 passed → 恢复 3 passed；两例均因回答被截断而失败 |
+| 零行占位提前拒收变异 | mutations-b08c042/zero-placeholder-rejection-*.log：基线 1 passed → 变异 1 failed → 恢复 1 passed；完整回答可保留的技术区被错删，命中面板数断言 |
+| 无技术区完整回答回退变异 | mutations-b08c042/no-technical-full-answer-*.log：基线 1 passed → 变异 1 failed → 恢复 1 passed；撤掉第二次完整回答试放即命中全文丢失断言 |
+| 静态与文档 | static-b08c042.log：全仓 Ruff、2 个修改 Python 文件 format、mypy 38 源文件、文档检查 2 passed、d29c2f0..HEAD 的 diff 检查通过 |
+
+三组变异均在临时副本中运行；加载路径、源码 hash、退出码在日志，恢复后 hash 与冻结工作树一致，副本已删除。旧 af797c0 的 512 项相关回归、37 项浏览器及六组变异保留在 /tmp/xiaowei-s1-review-fixes/，仅证明该旧版本，不用来替代本次新增边界。P1/P2(b) 未改，按 Claude 已通过结论保留。
+
+完整默认全套最后一次仍仅覆盖 c44bbdfce6a111784e435716820a71c670991d20：4873 passed、235 skipped、93 deselected、5 warnings，日志 /tmp/xiaowei-presentation-s1/full-c44bbdf.log。本次遵用户指令只跑受影响检查，不重跑或拼接称作全套通过。
+
+未覆盖：真实模型的取证后澄清/SQL 草稿与补引用改写的自然度、调用/耗时/用量；拒绝审批恢复后的条件提示理解；真实 post/mentions/md、识图、桌面/手机折叠与飞书/代理实收。离线测试不证明真实任务能力，现有真实验收门槛保留。未推送/PR/合并/部署，未调用真实服务或读取公司配置凭据，D 保持暂停。
+
+PR 集成以 main@96c965c 为基线，保留 #128；仅 handoff 与容量测试发生文本冲突，容量测试保留主线按真实请求校准的版本，不回退到硬编码 40KB。54 项交集检查覆盖首请求/工具后容量拒绝、数据库 Skill、正式手动巡检及自动工具拒绝、v4 展示和文档；lint、format、mypy（39 源文件）通过。精确集成 head、远端 CI 与合并结果写入 PR，不把旧候选全套当作集成后证据。PR #129 首轮 CI 39892841592（head 0aad449）8/9 通过，完整集成为 5008 passed、1 failed、1 teardown error、235 skipped、96 deselected：同一安全巡检参数 cite_fact=False 的脚本仍依赖 v3 自动补全，v4 无工具补引用多出一次模型调用导致耗尽。已在隔离 PG 复现同一 RED；仅给该参数补一次无工具引用回复，保留全部事实/脱敏断言，并新增准确模型次数与采集仅一次的断言。安全巡检/v4/Skill/正式入口/自动范围共 54 项局部回归通过（security-v4-green.log），生产代码、权限和 v4 规则未改；修复后远端完整 CI 仍须全绿。
+
+### 群输入 S0/S2（v1.4，局部修复独立复审通过）
+
+Claude 对 44b0d5d57ff94dc0d425d0df4c94715a8302fc55 的独立复审结论由用户提供：**通过，无仍须修复的问题**。受测代码为 d750a41bfb5466d70c7092b9c2346b2436e9fe40，其后至审查版本只改文档，395 项回归证据适用于该版本。本轮只修文档提示前缀并记录结论，不新增业务验证。已通过的修复位于 feishu_post.parse_post 的文档选择：仅一个可选文档时接纳，多 locale 或外层正文与 locale 并存整条按 invalid 拒绝；单文档 content_v2 优先且不回退旧值。invalid 表示无法确定唯一完整输入，不新增提示种类。模型 schema、保存版本、S1 展示与既有图片/权限边界未变。
+
+拒绝测试改用已开启 SessionImageStore 和 Vertex 图片开关的 image_group 装配，逐项精确断言固定说明：多图→images，非法键→image_key；md 图片/files/media/未知节点/md HTML→unsupported；非法段落/非法 v2/多个文档→invalid。每项都断言零下载、零模型、零请求。纯解析层另有四项反例；旧多语言丢图“成功”夹具已换成单 locale 成功对照。当前纯解析用例 17 项。
+
+RED：review-fix-red.log 中 5 failed、11 passed，失败分别为两种多文档各在解析/正式入口失守，以及两条错误 post 仅获一条说明；不是环境失败。最小修复后的局部回归 review-fix-green.log 为 57 passed。
+
+两组变异分别在临时源码副本完成，先验证四项基线通过并记录实际加载的模块路径/hash：多图拒绝改为 continue，解析和正式入口共 2 failed；精确恢复后 2 passed。删除键正则同样 2 failed→恢复后 2 passed。日志为 `/tmp/xiaowei-post-s2/review-fix-mutant-multiple-images.log`、`review-fix-restored-multiple-images.log`、`review-fix-mutant-image-key.log`、`review-fix-restored-image-key.log`；临时副本已删除、工作树源码未被变异；基线及两组恢复后的 SOURCE_SHA256 均与冻结代码 d750a41 的 feishu_post.py 一致。初次副本缺 scripts 导致的装配错误单存 review-fix-mutation-setup-error.log，补齐已存在依赖后重跑，不把装配错误算作变异命中。
+
+Claude 复审确认两种多文档在 _parse 阶段整条拒绝、零下载/模型/请求，11 项入口测试精确说明且不受容量/存储提前失败误导；本地两组变异因目标行为被破坏而命中，恢复源码 hash 与审查版本一致。审查方报告追加六组变异均被测试发现：多文档改取首个、多图只取首张、去键正则、post 错误回执去成员核对、去按消息去重、改回十分钟窗口。本轮仅记录审查方结论，未重跑这些变异。
+
+可选项 1 已做：仅 post 的 input_notice 先核当前成员，再沿 _first 按消息去重，避免十分钟窗口吞掉下一条修正失败的说明。新增连续错误/重复投递/撤权反例；真正未支持类型与身份提示仍用原窗口。复审接受两条非阻断记录，不再调整：①同一错误 post 重复投递，每次先查成员目录再去重，与既有图片/文件顺序一致；②只 @ 机器人的 post 仍提示 invalid，与 text 的 EMPTY_COMMAND 不同，保留空输入准入及空命令路径。
+
+最终代码冻结于 `d750a41bfb5466d70c7092b9c2346b2436e9fe40`。同次相关回归 **395 passed，83.95 秒，EXIT_CODE=0**，BEGIN/END_SHA 相同且 BEGIN/END_CLEAN、VERSION_UNCHANGED 均为 true；日志 `/tmp/xiaowei-post-s2/review-fix-regression-d750a41.log` 记录完整命令。覆盖用户指定的 6 个模块，加身份提示/真正未支持类型/群身份及原生批准恢复对照；不是完整默认全套。Ruff check、5 个相关 Python 文件 format、mypy（38 源文件）、文档命令检查（2 passed）、提交范围 diff 检查均通过。冻结后仅更新验证/复审记录和计划提示文案，源码和测试未变。本次不重跑完整默认全套；旧 4818 passed、235 skipped、89 deselected 的单次全套只覆盖 9f109374e57b89548b0aed2cd67e0a07f9819282（日志 full-9f10937.log），不能当成本次修复通过证据。早期 706/37 项记录及资源键隔离变异同样不替代本次检查，原始日志仍在 /tmp/xiaowei-post-s2/。
+
+以上 S2 受测版本中，S0 的 v4 贯穿/回退方案仅为方案；原三项 Gateway→SDK→隔离 PG 暂停可见性结论不变：未恢复/过期后普通轮不可见，拒绝经恢复提交后可见，零重查/生产写。未实施 S1/v4/D，未新增依赖/迁移，未读取公司配置凭据或调用真实服务。未覆盖真实平台 post/mentions/md 形态：md 中 HTML 形式的 `<at>` 会整条拒绝，外层其他字典字段也会按多文档拒绝；两者偏安全但可能阻断合法使用，须在另获授权的真实验收中确认。真实识图、客户端展示和真实模型能力未验收。截至该 S2 局部交付时，完整默认全套最后一次仅针对 9f10937；395 项相关回归与变异不能合称全套。后续 S1 的独立全套见本节 S1 记录。v4 回退限制及 S1 本地开发已获后续授权，当前状态见 §1/§3；这些 S2 证据不证明 S1。
+
+### 群输入与按需详情计划 v1.3（仅文档）
+
+v1.2 冻结版本 c37631f5bc0ec76b3cb01198d7fe7f92fab3314c 已获独立文档复审通过；结论只覆盖该版本。复审新增 R1 经本轮静态核实成立：ResultDelivery 从保存版本重建回答并调用当前 validate_answer；旧 v3 的空 blocks 或部分引用依赖默认补全。必须按可信保存版本保留旧语义，与 Provider schema 是否变化无关；TurnAnswer 严格解析只接受 2/3，RequestRecord 类型声明也仅覆盖 2/3，旧程序会拒绝新版本。原生报告也有版本 3 消费点，已纳入方案/回归要求。仅改计划与 handoff，ARCHITECTURE 及源码/测试/依赖不变。
+
+另核实 _paused 会 discard_pending，恢复上下文中的 Evidence 不等于普通 Session 已回放；计划要求实测未恢复/拒绝/过期后的索要路径，不可见时用可信材料说明尚未交付及条件，不承诺自动补发。仅监控失败的空回答、步骤用尽后的空收尾，需在实现时记录新增改写的实际调用与总预算约束；按版本的重发/历史矩阵已列入未来 RED，本轮未实施。
+
+v1.2 准备阶段的 5 项零网络 post 合成诊断与 39 项旧渲染记录仍仅证明原基线，本轮未重跑或把其计作新功能证据。R1 本轮为源码静态核实，尚无新版本实现、隔离 PG 重发测试或真实模型证据。
+
+文档检查：`PYTHONDONTWRITEBYTECODE=1 .venv/bin/python -m pytest -q -p no:cacheprovider tests/security/test_docs_command_consistency.py` 为 **2 passed**，`git diff --check` 通过；56 个本地链接/锚点有效，仅计划与 handoff 有差异，ARCHITECTURE/源码/测试/依赖未改。没有运行新功能测试、完整全套或真实模型/飞书/代理/公司源；未读取公司配置凭据。新 SHA 以本地交付 Git 输出为准，不为自写 SHA 再追加提交。
+
+### 自建代理本地交付（已合入）
 
 基线 be8c155638c4fa0c4eece912f8ff79fbef1c41ef；分支 codex/feishu-proxy-webhook。功能/测试冻结 SHA **163d2acb9ce4b1154d7cb3f995261c4075982c37**，文件树 **3b6b848ed689e172e9dac8c79a956678b8d0fbb3**；后续提交只补文档，不以新 SHA 冒充重跑全套。前候选 4f43d95 的独立审查发现 B/C get_task 未明确代理 HTTP 成功的界限，已补两类正式入口 RED，读取持久化 notification_reason 后提示“群内投递未确认”，重载为官方协议并更新目标版本后仍按历史回执说明。
 

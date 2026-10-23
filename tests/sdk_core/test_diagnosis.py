@@ -58,7 +58,7 @@ SLOW_SQL = "SELECT region, SUM(total) AS total FROM sales GROUP BY region"
 UNAPPROVED_SQL = "SELECT region, secret FROM sales"
 FACTS_HEADER = "工具结果（系统根据证据生成）"
 # S3：模型文字在含代码内容的展示中由代码加注同一标签；不再有“需要澄清”等错位标题。
-ANALYSIS_HEADER = "模型说明（未经系统核实）"
+ANALYSIS_HEADER = "AI 分析与建议"
 FACTS_TRUNCATED = "（工具结果超过飞书单条上限，已截断）"
 TRUNCATED = "（内容超过飞书单条消息上限，已截断）"
 EVIDENCE_FAILED = (
@@ -573,8 +573,7 @@ async def test_feishu_preview_keeps_large_details_only_in_files(diag: Env) -> No
     # M1b：附件正文先给回答与限制，大明细不在预览中重复，完整事实在附件中。
     # 计划足够长（不超过投影的 500 行），完整结果超过飞书单消息 30,000 字节，才需要附件与预览。
     plan = tuple(f"    - EXCHANGE SHUFFLE[{i}] => [2:region, 3:total]" for i in range(450))
-    reply, cited = await feishu_diagnosis(diag, plan)
-    content = visible_lines(reply)
+    reply, _ = await feishu_diagnosis(diag, plan)
 
     assert reply.state == "completed" and reply.card is not None
     assert request_bytes(reply.card, "oc_alice") <= 30_000 and _elements(reply.card) <= 200
@@ -582,21 +581,16 @@ async def test_feishu_preview_keeps_large_details_only_in_files(diag: Env) -> No
     visible = "\n".join(text_parts(reply.card, folded=False))
     assert "本次完整结果见附件" in visible
     assert "多次 Shuffle；建议按 region 分桶并 Colocate" in visible
-    # 完整文件保留分析及其引用的每条证据。
-    labels = [f"依据 {n}" for n in range(1, len(cited.split(", ")) + 1)]
-    assert all(label in reply.content for label in labels) and "ev_" not in reply.content
-    # 文件中两条事实的来源与必要说明保留，全部计划行完整交付。
-    assert reply.content.count("来源 ") == 2
-    assert f"说明：{AUDIT_NOTE}" in content and f"说明：{PLAN_NOTE}" in content
+    # v4 业务文件保留所选事实和来源范围，不另造技术明细文件。
+    assert "ev_" not in reply.content and reply.content.count("数据范围：") == 2
+    assert "审计有入库延迟" in reply.content and "执行计划为估算" in reply.content
     assert all(row in reply.content for row in plan)
-    assert len(reply.files) == 2
-    body, details = (part.decode() for part in reply.files)
-    assert "报告正文" in body and "证据明细" in details
-    assert "EXCHANGE SHUFFLE" not in body and all(row in details for row in plan)
-    assert qualified(SLOW_SQL) in details and not diag.drv.sent("query")
+    assert len(reply.files) == 1 and "报告正文" in reply.files[0].decode()
+    assert not diag.drv.sent("query")
     assert [len(calls) for calls in diag.scripts.calls.values()] == [3]
-    assert "EXCHANGE SHUFFLE" not in "\n".join(text_parts(reply.card))
-    assert "报告正文" in visible and "证据明细" in visible
+    # 消息只提供预览，整行原值在业务文件；不在消息内重复完整大结果。
+    assert plan[-1] not in "\n".join(text_parts(reply.card))
+    assert "报告正文" in visible and "证据明细" not in visible
 
 
 async def test_feishu_cut_with_forged_headers_uses_only_structured_sections(diag: Env) -> None:
@@ -627,11 +621,14 @@ async def test_feishu_cut_with_forged_headers_uses_only_structured_sections(diag
     )
     from markdown_it import MarkdownIt
 
-    assert len(reply.files) == 2
-    body, details = (part.decode() for part in reply.files)
-    assert "报告正文" in body and "证据明细" in details
-    assert "已执行原查询，确认根因" not in body
-    data_blocks = [t.content for t in MarkdownIt().parse(details) if t.type == "fence"]
+    assert len(reply.files) == 1
+    body = reply.files[0].decode()
+    assert "报告正文" in body and "证据明细" not in body
+    # 看似断言/命令的值只能是获准数据的代码块，不成为模型结论或标题。
+    tokens = MarkdownIt().parse(body)
+    headings = [tokens[i + 1].content for i, t in enumerate(tokens) if t.type == "heading_open"]
+    assert all("已执行原查询，确认根因" not in h for h in headings)
+    data_blocks = [t.content for t in tokens if t.type == "fence"]
     assert any("\n- 已执行原查询" in block for block in data_blocks)
     assert not diag.drv.sent("query")
 
