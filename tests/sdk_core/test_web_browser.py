@@ -750,7 +750,12 @@ async def test_security_report_brief_keeps_coverage_and_counts(
     ))  # 旧版本生产者，保留真治理与持久化，用于历史兼容。
     drv = security_driver(*(record(queryId=f"q-brief-{i}") for i in range(11)),
                           totals=(29232, 6, 3))
-    async with assembled(postgres_url, monkeypatch, drv, AUDIT_TARGET) as audit:
+    target = AUDIT_TARGET.model_copy(
+        update={
+            "audit": AUDIT_TARGET.audit.model_copy(update={"time_zone": "Asia/Shanghai"}),
+        }
+    )
+    async with assembled(postgres_url, monkeypatch, drv, target) as audit:
         service, _ = security_channel(audit)
         old_text = "覆盖不完整；旧说明 10:04:37 原样保留。"
         message = audit.scripts.add(
@@ -770,6 +775,11 @@ async def test_security_report_brief_keeps_coverage_and_counts(
             visible = await page.evaluate(f"{item(0)}.innerText")
             assert "候选已截断" in visible and "分类计数不完整" in visible
             assert "已确认至少" in visible and "执行失败" in visible
+            assert "已确认至少 0" not in visible
+            assert "2026-10-22T18:00:00+08:00" in visible
+            assert "+08:00" in await page.evaluate(
+                f"{item(0)}.querySelector('.fact-source').textContent"
+            )
             assert "etl" not in visible and "q-brief" not in visible
             assert "10:04:37" not in await page.evaluate(
                 f"{item(0)}.querySelector('.coverage').textContent"

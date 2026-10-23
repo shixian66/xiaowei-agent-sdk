@@ -13,6 +13,7 @@ from xiaowei.feishu_render import (
     business_fact,
     business_presentation,
     display_text,
+    fact_capture_time,
     fact_limit_notices,
     fact_scope,
     fold_details,
@@ -187,7 +188,7 @@ def _fact_sections(
     if not fact.historical_brief or expand_brief:
         samples = {
             "覆盖": view.coverage,
-            "采集于": fact.captured_at.isoformat(),
+            "采集于": fact_capture_time(fact),
             "columns": view.columns,
             "rows": view.rows,
         }

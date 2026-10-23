@@ -9,13 +9,13 @@
 | 项目 | 已核对事实 |
 | --- | --- |
 | 仓库 | [shixian66/xiaowei-agent-sdk](https://github.com/shixian66/xiaowei-agent-sdk) |
-| 产品代码基线 | 已 fetch 核对 `main@1de7b79d61e0c934c5235a522dceb96ccd28aaf5`（含 #132）；本地 `codex/scheduled-agent-first-run-recovery` 在原隔离工作树串行开发 A/B/C，桌面原目录及其他任务修改保留 |
+| 产品代码基线 | 已 fetch 核对 `main@1de7b79d61e0c934c5235a522dceb96ccd28aaf5`（含 #132）；原隔离工作树按 A→B→C 堆叠独立主题分支，当前为 `codex/security-plain-notification`，桌面原目录及其他任务修改保留 |
 | 源码与检查 | 当前源码仅保留 `src/xiaowei`；旧工程及专属测试、Compose、迁移入口、`compose-smoke` CI 和 Alembic 依赖已移除。保留产品测试、公共检查与旧回答兼容路径；旧工程历史可从 Git 查回 |
-| 当前存储与回答 | 应用 schema v15 不变；C 扩展已有 job、逐次 run/通知关联；014 已发布不改，015 显式升级。当前本地新回答保存 v4，旧 v2/v3/Legacy 与已绑定交付保持原语义，SDK 表不改 |
+| 当前存储与回答 | 应用 schema v15 不变；本次可信失败元数据沿已有 JSON 保存，不改表或迁移。当前新回答保存 v4，旧 v2/v3/Legacy 与已绑定交付保持原语义，SDK 表不改 |
 | 锁定依赖 | SDK `0.22.3`、Lark Channel `1.4.0`、MCP `2.2.0`、sqlglot `30.17.0`、`nh3 0.3.7`、`tinycss2 1.5.1`、Pillow `13.0.0`、certifi `2026.10.19`（后两项为严格审计发现的既有漏洞定向升级） |
 | 正式入口 | `xiaowei serve`、`config check`、`model check`、`storage init/upgrade/cleanup`、`requests resend`；命令与环境准备以 README 为准 |
 | 最近有记录的公司部署 | 用户回报 `main@1de7b79`（前一版 `729f960d`）；此前 fat 一小时全窗 29,232 / ERR 6 / 多语句 1 与 DBA 回查一致；未独立核验服务器。本次未部署 |
-| 当前验收结论 | A/B/C 与代理已合入主线；S0/S2 已通过独立复审。S1 首版 c44bbdf 全套通过；Claude 对 d29c2f0（受测 af797c0）确认 P1/P2(b) 通过，P2(a) 附件回答优先级回归已在 b08c042 本地修复并定向验证，用户确认 ce52831 复审通过；真实模型、平台输入/识图、客户端与 U5/U6/U7 仍未验收，D 暂停且未实现。精确版本和证据见 §5 |
+| 当前验收结论 | 旧通知/定时初版及代理已合入主线；S0/S2 已通过独立复审。S1 首版 c44bbdf 全套通过；Claude 对 d29c2f0（受测 af797c0）确认 P1/P2(b) 通过，P2(a) 附件回答优先级回归已在 b08c042 本地修复并定向验证，用户确认 ce52831 复审通过；真实模型、平台输入/识图、客户端与 U5/U6/U7 仍未验收，D 暂停且未实现。精确版本和证据见 §5 |
 | 当前任务授权 | 用户已批准修订后的三份计划，授权 A→B→C 串行离线实现、测试和常规修复；分别主题分支、本地提交和独立审查。漏调用目标检测延期，不新增必查字段；不调用真实模型或公司服务，不合并、打包或部署；推送/PR 留待后续授权 |
 
 原工作目录的 ARCHITECTURE 差异与未跟踪计划/公司配置保留，未复制到本工作树；本次未读取公司配置凭据。旧监控和回答修复记录保留为注明版本的证据，不作为本轮输入或展示范围扩展授权。
@@ -33,21 +33,27 @@
 - 进度的单聊/群聊差异延迟、仅真实变化更新、正常收尾及异常陈旧已由用户确认，详见[进度契约](ARCHITECTURE.md#progress-observation)；P1 已有离线实现，当前证据见计划 §7。普通消息的区域身份及正文/明细分工见[普通消息契约](ARCHITECTURE.md#ordinary-feishu-expression)，不能由 HTML/MD 报告完成推定达标。
 - 监控写仅限已批准动作，使用 SDK 原生审批暂停/恢复及既有 Action 治理；生产开放仍须满足对应源和群审批门槛。Grafana 数据源密码私聊命令尚未实现，目前由管理员在 Grafana UI 填写。见 [监控边界](ARCHITECTURE.md#monitoring-mcp)。
 - 内网 Web 无登录、访问者共用操作者权限；目标账号、网络、Grafana 插件/写端及数据源更新竞争窗口等已接受取舍按架构执行。
-- 通知及定时任务的方向与待审权限增量见 [ARCHITECTURE](ARCHITECTURE.md#scheduled-agent-tasks)：多个目的群不扩大操作入口，任务独立于原聊天，创建及每次执行复核权限，生产写不能继承周期批准。A/B/C 与自建代理适配已合入主线；群输入已通过独立复审，S1 展示已完成本地实现、离线验证及独立复审，用户授权 PR 集成，D 暂停且未实现。
+- 通知及定时任务的方向与待审权限增量见 [ARCHITECTURE](ARCHITECTURE.md#scheduled-agent-tasks)：多个目的群不扩大操作入口，任务独立于原聊天，创建及每次执行复核权限，生产写不能继承周期批准。旧通知/定时初版及自建代理适配已合入主线；群输入已通过独立复审，S1 展示已完成本地实现、离线验证及独立复审，用户授权 PR 集成，D 暂停且未实现。
 
 ## 3. 当前计划与下一项工作
 
 ### 当前：安全巡检 A/B/C 修复（离线实施）
 
-[A 计划](docs/superpowers/plans/2026-10-23-scheduled-agent-first-run-recovery.md)首跑与失败可见性正在验证：补齐默认原因消息；可信 automatic 任务不读用户图片；固定失败通知沿现有当前定义、治理与发送账本，仍保留原失败原因。合法 Vertex 图片 Profile + 协议替身已跑通真实 Application/SDK/隔离 PostgreSQL 的定时任务；外部源与发送均为替身。
+三片以独立主题分支串行堆叠，不曾推送、开 PR、合并、打包或部署；桌面原目录修改保留。下面只记录本片版本与有效验证，正式服务和模型仍未验收。
 
-A 新回归先复现缺文案、图片会话 KeyError、缺失败通知和准备阶段缺零模型请求日志；当前相关回归 **42 passed、47 deselected（23.41s）**，日志 `/tmp/xw-a-final-regression.log`；普通图片权限、应用日志及文档检查 **15 passed（6.95s）**，日志 `/tmp/xw-a-image-logs.log`。Ruff、改动文件 format、mypy（39 源文件）与 diff 检查通过；独立审查发现通知中断未收尾、内容拒绝误称未执行两项 P2，均先补回归复现并修复：通知中断落定 unknown、保留原执行原因并传播取消，文案改为阶段中性。修复后定时/通知/文档相关 **150 passed（107.01s）**，日志 `/tmp/xw-a-review-regression.log`；Ruff、format、mypy（39 源文件）、diff 通过，独立复审 `6370f9e..445b4558` 已关闭两项 P2，独立 3 passed（24.19s），A 最终 HEAD `445b4558bf302aa58ca3ba912bf96bc6dc6aa1f9`。没有本次 CI、真实模型或公司验收证据。
+| 切片 / 分支 | 精确基线与当前本地版本 | 验证与状态 |
+| --- | --- | --- |
+| [A 首跑/失败通知](docs/superpowers/plans/2026-10-23-scheduled-agent-first-run-recovery.md) / `codex/scheduled-agent-first-run-recovery` | base `1de7b79d61e0c934c5235a522dceb96ccd28aaf5` → head `445b4558bf302aa58ca3ba912bf96bc6dc6aa1f9` | 定时、通知及文档 **150 passed / 107.01s**（`/tmp/xw-a-review-regression.log`）；图片/日志补充 15 passed。独立复审关闭两项 P2，独立 3 passed / 24.19s。 |
+| [B 部分失败可信交付](docs/superpowers/plans/2026-10-23-security-inspection-incomplete-results.md) / `codex/security-inspection-incomplete-results` | base 为 A head → head `0f7097d1c6d04b1889b334eb2ae33db0d3a9946a` | 初实现 `10ea26ff` 相关 **379 passed / 87.97s**（`/tmp/xw-b-final-regression.log`）；Session 修复相关 **106 passed / 35.29s**（`/tmp/xw-b-replay-regression.log`），最终暂停恢复修复 **39 passed / 15.09s**（`/tmp/xw-b-pause-green.log`）。独立复审关闭 Session/暂停来源两项 P1，独立 5 passed / 2.90s。 |
+| [C 纯文本通知](docs/superpowers/plans/2026-10-23-security-plain-notification.md) / `codex/security-plain-notification` | base 为 B head；当前待独立审查的本地提交见 Git | 最终相关 **88 passed / 4.07s**（`/tmp/xw-c-final-regression.log`）；指定真实 Chrome brief/本地时间/历史不重取 **1 passed / 3.37s**（`/tmp/xw-c-browser.log`）。Ruff、修改范围 format、mypy（39 源文件）、文档和 diff 检查通过。 |
 
-B 从 A 的上述 HEAD 建立 `codex/security-inspection-incomplete-results`。已接通快照无名诊断、缺表一次共享刷新、只对巡检工具已分类源失败返回可信记录、保存/历史/外发/定时与固定前缀；成功仍复用原 Evidence。新回归先复现缺表无法恢复与整轮中止，正式入口又复现交付 context 无执行 Tool Scope 的重复校验，已删除该检查并保留当前授权/接收权限。正式群通知、定时状态和多目标回归已有通过证据；最终受影响回归 **379 passed（87.97s）**，日志 `/tmp/xw-b-final-regression.log`；Ruff、mypy（39 源文件）、文档检查与 diff 通过，独立审查 `445b4558..10ea26ff` 发现无 Evidence 的失败文字可在撤权后经 SDK Session 回放（P1），已先补反例确认，再补最小目标来源标记和当前授权复核；普通非法窗口不产生额外来源依赖。修复相关回归 **106 passed（35.29s）**，日志 `/tmp/xw-b-replay-regression.log`；lint/type/diff 通过，增量复审确认已提交 Session 路径修好，另复现审批暂停 RunState 的同类来源缺口；已补暂停后撤权反例和恢复前同一授权复核，修复相关 **39 passed（15.09s）**，日志 `/tmp/xw-b-pause-green.log`，lint/type/diff 通过，待增量复审。没有新增必查字段、成功账本、任务表或 Evidence 版本。
+A 沿原通知授权和逐次账本发送固定失败状态，超时/取消不补发，保留真实执行原因。B 的已分类源失败仅对安全只读工具交回模型，成功仍复用原 Evidence；SDK Session 保存最小来源依赖，审批恢复复核暂停账本，撤权不进模型。有效 Evidence 的分类不完整不等于未巡检；漏调用目标自动检测明确延期，没有新增必查字段、成功账本、任务表或证据版本。
 
-下一项按 [B 计划](docs/superpowers/plans/2026-10-23-security-inspection-incomplete-results.md)、[C 计划](docs/superpowers/plans/2026-10-23-security-plain-notification.md)推进。B 已实现待独立审查，C 尚未实现；取到有效 Evidence 但覆盖不完整不等于未巡检，漏调用检测明确延期。各片按实际增量审查，不把新分支复制为新平台。
+C 的纯文本不逐行列样本，检查计数、覆盖和追问提示保留，模型自主概括；Web、卡片、文件与历史 facts 原值保留。窗口/采集时间使用证据中的审计时区。61 样本合成 Profile 使用有限 256KB 模型请求预算，生产配置不改，不能据此确认公司容量；不调用真实模型，不证明其概括或归因质量。
 
-此前报告呈现已随 PR #132 合入上述主线，旧“CI 待验证/下一步合并”的任务状态不再适用。其范围及公司验收项继续见[报告呈现计划](docs/superpowers/plans/2026-10-23-security-inspection-report-presentation.md)和[公司清单](docs/starrocks-security-company-checklist.md#4-报告呈现验收另获部署授权后执行)；A0/A3 与真实模型、渠道验收仍开放。
+下一项：完成 C 精确增量独立审查，交用户复审；推送/PR/合并/部署等待对应授权，没有新 CI 链接。公司验收及截图见[公司清单](docs/starrocks-security-company-checklist.md#5-ab-故障恢复验收另获部署授权后执行)与[C 计划 §7](docs/superpowers/plans/2026-10-23-security-plain-notification.md#7-沿用的业务验收样例与公司缺口)。A0/A3、真实 3.5.14 语义/容量、真实模型和渠道实收仍开放；代理省略 openUrl 行为未知，必填协议保持。
+
+此前报告呈现已随 PR #132 合入 main，范围与公司验收仍见[原报告计划](docs/superpowers/plans/2026-10-23-security-inspection-report-presentation.md)；不以本轮离线修复关闭这些验收项。
 
 ### CI 小范围优化（PR #131）
 

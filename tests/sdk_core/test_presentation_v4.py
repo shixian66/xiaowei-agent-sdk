@@ -88,7 +88,8 @@ def test_security_incomplete_counts_are_lower_bounds_but_err_is_read_time_aggreg
     ))
     assert ("候选已截断" in visible) is limited
     assert "分类计数不完整" in visible
-    assert "已确认至少 1" in visible and "已确认至少 0" in visible
+    assert "已确认至少 1" in visible
+    assert ("未发现（另有 2 条无法判定）" if unclassified else "已读取候选中未发现") in visible
     assert "九项均未命中" not in visible
     plain = _notification_text(value, "")
     assert "全窗聚合（读取时）" in plain and "执行失败" in plain
@@ -301,7 +302,11 @@ def test_split_security_sample_sections_keep_their_own_scope_and_capture_time(
             assert "fat" in section
             assert f"2026-10-23T{hour:02}:00:00+08:00" in section
             assert f"2026-10-23T{hour+1:02}:00:00+08:00" in section
-            assert facts[hour].captured_at.isoformat() in section
+            from zoneinfo import ZoneInfo
+
+            assert (
+                facts[hour].captured_at.astimezone(ZoneInfo("Asia/Shanghai")).isoformat() in section
+            )
     assert seen == set(range(len(facts)))
 
 
@@ -673,3 +678,175 @@ def test_v4_attachment_uses_real_layout_when_empty_placeholders_are_larger() -> 
     assert len(panels(message)) == 1
     assert "技术详情超出消息容量，未附" not in visible
     assert "SELECT x" in "\n".join(text_parts(message))
+
+
+def many_security_samples(*, count=61, **changes):
+    from datetime import UTC, datetime
+
+    data = json.loads(security_fact().result_json)
+    rows = [
+        {
+            **data["rows"][0],
+            "query_id": f"q-plain-{i}",
+            "user": "etl-reader",
+            "signals": "high_risk_operation",
+            "operations": "insert_overwrite",
+        }
+        for i in range(count)
+    ]
+    return security_fact(
+        captured_at=datetime(2026, 10, 23, 8, tzinfo=UTC),
+        payload_updates={
+            "rows": rows,
+            "row_count": count,
+            "matched_rows": count,
+            "signal_counts": {
+                **dict.fromkeys(data["signal_counts"], 0),
+                "high_risk_operation": count,
+            },
+            "operation_counts": {**data["operation_counts"], "insert_overwrite": count},
+            "window": {
+                "start_time": "2026-10-23T07:00:00+00:00",
+                "end_time": "2026-10-23T08:00:00+00:00",
+                "time_zone": "Asia/Shanghai",
+            },
+        },
+        coverage={"checked_candidate_rows": count},
+        **changes,
+    )
+
+
+@pytest.mark.parametrize("view", ["full", "brief"])
+@pytest.mark.parametrize("plain_transport", [False, True])
+def test_security_plain_61_samples_only_shows_counts_and_one_followup_hint(view, plain_transport):
+    from xiaowei.feishu_render import business_text
+    from xiaowei.models import DeliveryFactRef, DeliveryText
+
+    source = many_security_samples(view=view)
+    before, after = "🟡 需核对变更记录。", "本次代表样本中有同类覆盖写入，归纳为模型说明。"
+    value = business(
+        source,
+        blocks=(
+            DeliveryText(text=before),
+            DeliveryFactRef(evidence_id=source.evidence_id),
+            DeliveryText(text=after),
+        ),
+        inspection_notice="⚪ 本次另一个集群未完成",
+    )
+    result = business_text(value, plain_transport=plain_transport)
+    assert result.startswith(value.inspection_notice)
+    assert result.index(before) < result.index("数据范围") < result.index(after)
+    assert "覆盖写入 61" in result and "代表样本 61 条未在消息中列出，可在会话中继续追问" in result
+    assert "全窗聚合（读取时）29,232" in result
+    assert "第 1 行" not in result and "etl-reader" not in result and "q-plain" not in result
+    assert '"' not in result and '\\"' not in result
+    assert len(value.facts[0].rows) == len(json.loads(value.facts[0].result_json)["rows"]) == 61
+
+
+def test_security_plain_historical_brief_and_zero_samples():
+    from xiaowei.feishu_render import business_text
+
+    old = many_security_samples(view="brief", summary="本次返回行数：61。")
+    assert old.historical_brief
+    text = business_text(business(old), plain_transport=True)
+    assert "代表样本 61 条未在消息中列出" in text
+    assert "本次返回行数" not in text and "etl-reader" not in text
+    zero = business_text(business(many_security_samples(count=0)), plain_transport=True)
+    assert "代表样本" not in zero and "高风险操作（审计行）: 0" in zero
+
+
+@pytest.mark.parametrize(
+    "zone,start,captured",
+    [
+        ("Asia/Shanghai", "2026-10-23T15:00:00+08:00", "2026-10-23T16:00:00+08:00"),
+        ("America/New_York", "2026-10-23T03:00:00-04:00", "2026-10-23T04:00:00-04:00"),
+    ],
+)
+def test_security_display_uses_the_audit_zone_for_window_and_capture(zone, start, captured):
+    from xiaowei.channel import RequestView
+    from xiaowei.feishu_render import business_presentation, fact_scope
+    from xiaowei.feishu_report import build_report
+    from xiaowei.storage import Readiness
+    from xiaowei.web import _view
+
+    data = json.loads(many_security_samples().result_json)
+    data["window"]["time_zone"] = zone
+    source = many_security_samples().model_copy(update={"result_json": json.dumps(data)})
+    shown = business_presentation(source)
+    assert start in shown.coverage and zone in shown.coverage
+    assert captured in fact_scope(source)
+    value = business(source)
+    api = json.loads(
+        _view("request", RequestView(state="completed", delivery=value), Readiness()).body
+    )
+    assert api["delivery"]["facts"][0]["captured_at"] == captured
+    for format_ in ("md", "html"):
+        report = build_report(value.model_copy(update={"report_format": format_}))
+        assert captured in report.content.decode() and "etl-reader" in report.content.decode()
+
+
+@pytest.mark.parametrize(
+    "unclassified,limited,expected",
+    [
+        (2, False, "未发现（另有 2 条无法判定）"),
+        (0, True, "已读取候选中未发现"),
+        (None, False, "未提供"),
+    ],
+)
+def test_security_zero_lower_bound_is_readable_and_does_not_invent_unknown_rows(
+    unclassified,
+    limited,
+    expected,
+):
+    from xiaowei.feishu_render import business_presentation
+
+    shown = business_presentation(
+        security_fact(
+            coverage={
+                "match_counts_complete": False,
+                "unclassified_candidate_rows": unclassified,
+                "scan_limited": limited,
+            }
+        )
+    )
+    assert expected in shown.checks[0]["审计行数"]
+    assert "至少 0" not in str(shown.checks) and "另有 0" not in str(shown.checks)
+    assert shown.checks[-1]["审计行数"] == "6"
+
+
+def test_security_historical_missing_zone_keeps_original_time_and_api_iso():
+    from datetime import datetime
+
+    from xiaowei.channel import RequestView
+    from xiaowei.feishu_render import business_presentation
+    from xiaowei.storage import Readiness
+    from xiaowei.web import _view
+
+    source = many_security_samples(view="brief")
+    data = json.loads(source.result_json)
+    del data["window"]["time_zone"]
+    source = source.model_copy(update={"result_json": json.dumps(data)})
+    shown = business_presentation(source)
+    assert "2026-10-23T07:00:00+00:00" in shown.coverage
+    assert "审计时区不可换算" in shown.coverage
+    assert "2026-10-23T15:00:00+08:00" not in shown.coverage
+    api = json.loads(
+        _view("old", RequestView(state="completed", delivery=business(source)), Readiness()).body
+    )
+    captured = api["delivery"]["facts"][0]["captured_at"]
+    assert captured == source.captured_at.isoformat()
+    assert datetime.fromisoformat(captured) == source.captured_at
+
+
+def test_security_plain_sample_hint_counts_authorized_rows_not_total_matches():
+    from xiaowei.feishu_render import business_text
+
+    source = many_security_samples()
+    data = json.loads(source.result_json)
+    data["matched_rows"] = data["signal_counts"]["high_risk_operation"] = 999
+    data["operation_counts"]["insert_overwrite"] = 999
+    data["coverage"]["omitted_samples"] = 938
+    source = source.model_copy(update={"result_json": json.dumps(data), "truncated": True})
+    text = business_text(business(source), plain_transport=True)
+    assert "覆盖写入 999" in text and "代表样本 61 条未在消息中列出" in text
+    assert "代表样本 999" not in text and "分类计数完整" in text

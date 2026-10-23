@@ -154,3 +154,74 @@ async def test_paused_failure_rechecks_source_before_runner_and_activation(
                 == "action_requester_invalid"
             )
         assert requests == []
+
+
+@pytest.mark.parametrize("proxy", [False, True])
+async def test_61_security_samples_notification_is_short_and_history_retains_rows(
+    env, monkeypatch, proxy
+):
+    from tests.sdk_core.test_group_identity import CHAT, GROUP
+    from tests.sdk_core.test_starrocks_tools import tool_outputs
+    from tests.sdk_core.test_webhook_proxy import PROXY, proxy_config
+
+    from xiaowei.channel import RequestRef
+
+    env.drv = security_driver(
+        *(
+            record("INSERT OVERWRITE t SELECT 1", queryId=f"q-plain-{i}", user="etl-reader")
+            for i in range(61)
+        ),
+        totals=(61, 0, 0),
+    )
+    data = security_config(env).model_dump(mode="json")
+    data["targets"][0]["starrocks"]["audit"].update(max_rows=100, candidate_rows=200)
+    data["model"]["max_request_bytes"] = 256_000  # 61 条样本的合成 Profile；不修改生产配置。
+    cfg = runtime.ServeConfig.model_validate(data)
+    if proxy:
+        monkeypatch.setenv("XW_TEST_PROXY_URL", PROXY)
+        cfg = proxy_config(env, cfg)
+    summary = (
+        "🟡 核对变更。本次代表样本中 etl-reader 有61次覆盖写入，归纳数字为模型说明；"
+        "建议对照发布记录。"
+    )
+
+    def notify(call):
+        outputs = [json.loads(v) for v in tool_outputs(call)]
+        assert all("evidence_id" in value for value in outputs), [
+            (value.get("status"), value.get("code"), value.get("reason")) for value in outputs
+        ]
+        ids = [value["evidence_id"] for value in outputs]
+        return tool_call(
+            "send_webhook_message", bot_alias="ops_alert_bot", text=summary, evidence_ids=ids
+        )(call)
+
+    message = script(
+        env,
+        "巡检后发送简短报告",
+        tool_call("inspect_audit_security", **ARGS),
+        notify,
+        cite_results(),
+    )
+    async with running(env, monkeypatch, config=cfg) as (group, requests, rt):
+        await group.ask(message, message_id="om_plain_61")
+        assert len(requests) == 1, [len(calls) for calls in env.scripts.calls.values()]
+        body = json.loads(requests[0].content)
+        sent = body["message"] if proxy else body["content"]["text"]
+        assert summary in sent and sent.count("etl-reader") == 1
+        assert "代表样本 61 条未在消息中列出" in sent and "覆盖写入 61" in sent
+        assert "第 1 行" not in sent and "q-plain-" not in sent
+        if proxy:
+            assert body["openUrl"] == cfg.webhook_bots[0].open_url
+        view = await rt.service.results.view(
+            RequestRef(
+                channel="feishu",
+                subject_id=A,
+                conversation_id=CHAT,
+                group=GROUP,
+                request_id="om_plain_61",
+            )
+        )
+        source = next(f for f in view.delivery.facts if f.tool_id == SECURITY_TOOL)
+        assert len(source.rows) == len(json.loads(source.result_json)["rows"]) == 61
+        assert "第 1 行" not in view.delivery.content
+        assert await env.scalar("SELECT count(*) FROM xiaowei_notification_attempt") == 1

@@ -45,7 +45,8 @@ from xiaowei.channel_store import (
     SessionBusyError,
 )
 from xiaowei.config import WebConfig
-from xiaowei.feishu_render import business_presentation, fact_limit_notices
+from xiaowei.feishu_render import business_presentation, fact_capture_time, fact_limit_notices
+from xiaowei.starrocks_security import SECURITY_TOOL
 from xiaowei.storage import Readiness
 
 COOKIE = "xiaowei_web"
@@ -186,6 +187,8 @@ def _view(request_id: str, view: RequestView, readiness: Readiness) -> JSONRespo
             )
             if view.delivery.answer_version == 4 and not fact.requires_complete:
                 shown["presentation"] = business_presentation(fact).for_web()
+                if fact.tool_id == SECURITY_TOOL:
+                    shown["captured_at"] = fact_capture_time(fact)
     status = 202 if unfinished else 200
     body = {"request_id": request_id, "state": view.state, "delivery": delivery}
     return JSONResponse(body, status_code=status)
