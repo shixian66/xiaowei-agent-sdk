@@ -263,17 +263,37 @@ A 不在生产动作审批恢复轮自动通知；等待批准材料会提示“
 
 **开发验证**（只用合成数据、脚本模型、替身与隔离的测试 PostgreSQL；发行测试需要本机 Docker 构建镜像，不调用真实模型或公司服务）：
 
+选用哪种验证见 [AGENTS.md §6](AGENTS.md#6-按风险验证与交付)；日常改动不必本地全量，合并前由 CI 执行完整的默认测试集合。
+
+环境准备：
+
 ```bash
 uv sync --locked --extra dev
 docker compose -p xiaowei-sdk-test -f compose.sdk-test.yml up -d --wait   # 或独立的 docker-compose
-SDK_TEST_POSTGRES_URL=postgresql+asyncpg://postgres@127.0.0.1:55432/postgres \
-  uv run --locked --extra dev python -m pytest -q
+export SDK_TEST_POSTGRES_URL=postgresql+asyncpg://postgres@127.0.0.1:55432/postgres
+```
+
+相关测试示例（替换为受影响的测试文件，也可用 `文件路径::用例名` 选择单个用例）、lint 和 type：
+
+```bash
+uv run --locked --extra dev python -m pytest -q tests/security/test_workflow_policy.py tests/security/test_docs_command_consistency.py
 uv run --locked --extra dev ruff check .
 uv run --locked --extra dev mypy src
+```
+
+完整回归：
+
+```bash
+uv run --locked --extra dev python -m pytest -q
+```
+
+结束后清理测试实例：
+
+```bash
 docker compose -p xiaowei-sdk-test -f compose.sdk-test.yml down -v
 ```
 
-`SDK_TEST_POSTGRES_URL` 只能是上面这一个测试地址；未设置时数据库用例明确失败而不是跳过。CI 的 integration job 以同样方式运行完整测试。
+`SDK_TEST_POSTGRES_URL` 只能是上面这一个测试地址；未设置时数据库用例明确失败而不是跳过。CI 的 integration job 使用同一隔离测试数据库，执行 `tests/deployment` 之外的默认测试；p3-release job 负责整个 `tests/deployment` 目录。两者共同覆盖完整默认测试集合。
 
 自主调查与普通消息沿[同一 T1–T5 样例](docs/superpowers/plans/2026-10-20-agent-autonomy-progress.md)验收。已有交互评测脚本增加 `autonomy` 集：T1/普通消息订单统计、T2 慢查询候选和 T4 缺环境，复用正式 runtime、治理及合成数据；T3 部分监控源失败复用 `test_monitoring_read_recovery.py` 的正式入口。离线夹具的基础订单聚合使用内存 SQLite，不能证明 StarRocks 方言或优化器行为。获得模型 Profile 和费用授权后，在交互终端设置 `XW_EVAL_PROFILE` 为其文件绝对路径，再运行以下命令；本轮没有可用真实模型，尚未执行此评测：
 

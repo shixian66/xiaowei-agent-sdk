@@ -48,7 +48,7 @@ jobs:
           enable-cache: false
           activate-environment: true
       - run: uv sync --extra dev --frozen
-      - name: Run full suite with isolated SDK PostgreSQL
+      - name: Run non-deployment suite with isolated SDK PostgreSQL
         run: |
           set -euo pipefail
           project=xiaowei-sdk-test
@@ -57,7 +57,7 @@ jobs:
           }
           trap cleanup EXIT
           docker compose -p "$project" -f compose.sdk-test.yml up -d --wait
-          python -m pytest -q
+          python -m pytest -q --ignore=tests/deployment --durations=30
 
   p3-release:
     name: p3-release
@@ -74,7 +74,7 @@ jobs:
           enable-cache: false
           activate-environment: true
       - run: uv sync --extra dev --frozen
-      - run: python -m pytest tests/deployment/test_release.py tests/deployment/test_compose.py tests/deployment/test_maintenance.py tests/deployment/test_release_workflow.py -q
+      - run: python -m pytest -q tests/deployment --durations=30
 
   # 正式入口：wheel 在不含 dev 依赖的干净环境中安装，两个入口都只指向新包（P1-B Task 8）。
   product-entry:

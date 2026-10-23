@@ -85,7 +85,7 @@ _EXPECTED_JOBS = (
 # 「多出的东西」，挡不住删除必需命令、重复摘要顶替、把配置挪到无关 action 下、
 # 或加 `continue-on-error` 让 gate 形同虚设。整文件摘要是唯一能覆盖全部
 # 增/删/改/移位的锚点；合法修改 workflow 时必须显式更新此常量。
-_WORKFLOW_SHA256 = "73a7380e9cef543e14311b6962cc39a0114666df92eafb1f95785d6d1bf9c7b7"
+_WORKFLOW_SHA256 = "b9ef416b333f6708abcdbd161e7a977db7062bd20b795b335b5a820208822f27"
 
 # ---- 闭集白名单：改动 ci.yml 必须同步更新此处，否则测试变红 ----------------
 _ALLOWED_EXPRESSIONS = {"github.ref"}
@@ -101,7 +101,7 @@ _ALLOWED_RUN_BLOCK_DIGESTS = {
     "a9ec197626434d3802970c0f251a57194b6bdaa92541a5bdf94df440fe472957",  # scanner self-test
     # allowlist narrowness self-test
     "f345b83890f552ba8896c95847ff50893f80369fb64d0e6873b6b595152ec44c",
-    "28ac15963a97048c3ef875b67c01f1d1525928d052c4ea96b7d3aa4797494467",  # SDK test harness
+    "947c3f06267bb21abdbeb698f8f09a97f66602f03d2c862ee7c10d082af0d3fb",  # SDK test harness
     "e292c40ec636bdd26c85ecf53c85e70d28b4ee3b4c831c4c6e505a8396edb079",  # install product wheel
     "0547ae72dfd9441178e20b33269112011779bb7b941999027763294ce92c6077",  # product entries
 }
@@ -194,17 +194,12 @@ def test_single_line_run_commands_match_exactly() -> None:
     expected = Counter(
         {
             "uv sync --extra dev --frozen": 7,
-            # 无数据库 job 排除 SDK 与 spike；两者在 integration 的 PostgreSQL 全量命令中运行。
+            # 无数据库 job 排除 SDK 与 spike；两者在 integration 的隔离 PostgreSQL 中运行。
             (
                 "python -m pytest -q --ignore=tests/sdk_core "
                 "--ignore=tests/deployment --ignore=tests/spike"
             ): 1,
-            (
-                "python -m pytest tests/deployment/test_release.py "
-                "tests/deployment/test_compose.py "
-                "tests/deployment/test_maintenance.py "
-                "tests/deployment/test_release_workflow.py -q"
-            ): 1,
+            "python -m pytest -q tests/deployment --durations=30": 1,
             "python -m pytest -m security -q": 1,
             "ruff check .": 1,
             "mypy src": 1,
@@ -327,7 +322,7 @@ def test_sdk_postgres_compose_image_is_digest_pinned() -> None:
 
 
 def test_the_integration_job_runs_no_extra_command() -> None:
-    """unit 与全套路径各有一条精确 pytest 命令；integration 包含全套路径。"""
+    """普通与集成路径各有一条精确 pytest 命令；发行目录由 p3-release 负责。"""
     assert (
         _TEXT.count(
             "- run: python -m pytest -q --ignore=tests/sdk_core "
@@ -335,7 +330,12 @@ def test_the_integration_job_runs_no_extra_command() -> None:
         )
         == 1
     )
-    assert _job_text("integration").count("python -m pytest -q\n") == 1
+    assert (
+        _job_text("integration").count(
+            "python -m pytest -q --ignore=tests/deployment --durations=30\n"
+        )
+        == 1
+    )
     assert "compose.sdk-test.yml up -d --wait" in _job_text("integration")
     assert "compose.sdk-test.yml down -v" in _job_text("integration")
 
@@ -350,10 +350,12 @@ def test_all_gates_present_with_stable_names() -> None:
         assert re.search(rf"(?m)^    name: {re.escape(job)}$", _TEXT), f"缺少 check 名 {job}"
 
 
-def test_gates_run_adr008_commands_verbatim() -> None:
-    assert "python -m pytest -q\n" in _job_text("integration")
+def test_gates_run_approved_commands_verbatim() -> None:
+    assert "python -m pytest -q --ignore=tests/deployment --durations=30\n" in _job_text(
+        "integration"
+    )
     for cmd in ("python -m pytest -m security -q", "ruff check .", "mypy src"):
-        assert f"- run: {cmd}\n" in _TEXT, f"未原样执行 ADR-008 命令: {cmd}"
+        assert f"- run: {cmd}\n" in _TEXT, f"未原样执行批准的门禁命令: {cmd}"
 
 
 def test_secret_scan_uses_full_history_and_pinned_checksum() -> None:
