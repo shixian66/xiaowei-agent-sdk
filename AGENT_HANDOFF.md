@@ -39,19 +39,19 @@
 
 ### 当前：安全巡检报告呈现（本地候选，待用户复审）
 
-[批准计划](docs/superpowers/plans/2026-10-23-security-inspection-report-presentation.md)原 blob 已原字节保存于本分支首提交 `3893ed823a914d01c9ab7e6c6b1b5f68185f4a56`；主体实现 `2a97d2e45b1e3bda4411a7d742ade3cbdb6c8fa8` 经独立审查后，两项修复及回归固定于源码/测试提交 `a936a5eed890270ca673645d1499d866a1b83757`。后续仅同步本文及计划状态，最终本地 HEAD 交用户复审。范围和长期契约只在 [ARCHITECTURE §6–§7](ARCHITECTURE.md#6-只读查询保护) 维护，本文记录交付状态，不复制规则表。
+[批准计划](docs/superpowers/plans/2026-10-23-security-inspection-report-presentation.md)原 blob 已原字节保存于本分支首提交 `3893ed823a914d01c9ab7e6c6b1b5f68185f4a56`。Claude 已复审 `729f960d..5a75be3f825c7e9b3aa042c4438fb07e374ccd80`，指出通用 Web 的 B1/B2 两项回归；当前局部修复及测试固定于 `4d34f33548affd05faaabb446d3283b41c17a010`，后续仅同步文档，最终本地 HEAD 待复审修复差异和 Web 调用链。范围和长期契约只在 [ARCHITECTURE §6–§7](ARCHITECTURE.md#6-只读查询保护) 维护，本文记录交付状态，不复制规则表。
 
 已实现水位置空、字段语义说明、共用原值恢复与轻量业务展示、巡检中文计数及样本映射、Web 即时 presentation、飞书/纯文本/MD/HTML 接线与短 Skill 的结论先行指导。保留 SDK Loop、检测和取数、权限、Evidence/Session/投影版本、已有容量与绑定恢复机制；未新增依赖、模型 schema、拒绝条件或固定调查顺序。
 
-离线证据（源码与测试固定于 `a936a5e`）：
+本次 Web 修复的离线证据（源码与测试固定于 `4d34f33`）：
 
-- 计划指定相关测试及审计采集回归 **311 passed，29.32 秒**，含 S1–S5、正常/拒绝、撤权、读取时聚合、无法判定与样本省略区分、非巡检嵌套类型、六个子窗、长样本换载体、MD/HTML、历史 brief 折叠、文件分片归属和旧巡检 v4 的原字节/key/UUID 恢复。命令按计划 §7，实际使用本工作树 `.venv/bin/python`、同一 `SDK_TEST_POSTGRES_URL`；没有跑本地全量。日志 `/tmp/xw-security-report-final-regression.log`。
-- 计划选定三个 Uvicorn/Chrome 场景 **3 passed，15 deselected，4.98 秒**：完整巡检、brief 不完整及历史回放、非巡检嵌套结果。真实 SDK、治理和隔离 PostgreSQL 保留，记录型 StarRocks 驱动、脚本模型和外部飞书发送为替身。日志 `/tmp/xw-security-report-final-browser.log`。
-- `ruff check --no-cache src/xiaowei tests/p1b/test_starrocks_security.py tests/sdk_core`、`mypy src/xiaowei`（39 源文件，缓存移至 `/tmp`）及 `git diff --check` 通过。无新依赖或锁文件变化。
-- 水位、中文呈现、文件、空窗和仅省略样本的文件范围提示均先用反例复现再修复。历史/重发核对无新增审计聚合/候选或模型调用；必要的当前权限/依赖 I/O 保留，不能以总连接数不变作验收条件。
-- 另用合成数据生成并查看实际 Web 页面截图 `/tmp/xw-security-report-web-preview.png`；只证明本地布局，不能证明真实模型按此成文或真实飞书客户端展示。
+- `test_web.py`、`test_presentation_v4.py`：**91 passed，13.61 秒**。API 精确断言普通字符串、空串、NULL、缺失、大整数及嵌套值；日志 `/tmp/xw-security-web-review-regression.log`。
+- 整个 `test_web_browser.py -m browser`：**18 passed，24.01 秒**，含两个巡检场景及加强后的通用 v4 用例。真 Uvicorn/Chrome 验证展开技术区后多行 SQL 原文、游标/限额/耗时独立可读，表格日期/中文字符串不加外层引号，空值标记保持；日志 `/tmp/xw-security-web-review-browsers.log`。
+- `ruff check --no-cache src/xiaowei tests/sdk_core/test_web.py tests/sdk_core/test_web_browser.py tests/sdk_core/test_presentation_v4.py`、`mypy src/xiaowei`（39 源文件，缓存移至 `/tmp`）、受影响文档检查（**2 passed**）及 `git diff --check` 通过。无新依赖或锁文件变化。
+- 新 API 用例和加强后的浏览器用例先分别失败，日志 `/tmp/xw-security-web-review-unit-red.log`、`/tmp/xw-security-web-review-browser-red.log`；B1 修复后 SQL 断言通过，浏览器继续停在 B2 外层引号差异，最终两项回归均通过。没有放宽断言或生产投影。
+- 前版 `a936a5e` 的计划相关测试 **311 passed，29.32 秒** 保留为该版本证据（日志 `/tmp/xw-security-report-final-regression.log`），含 S1–S5、拒绝/撤权、统计、容量、文件和历史重发。本次按实际 Web 差异收窄重跑范围，不将这 311 项写成最终 HEAD 的新运行，也未跑本地全量。必要的当前权限/依赖 I/O 保留，不能以总连接数不变作验收条件。
 
-独立代码审查覆盖 `729f960d..2a97d2e` 的实际差异与调用链，发现 **0 Critical、2 Important**：历史巡检 brief 在飞书及纯文本默认展开样本；分文件/整行分片后的样本章节可能缺目标和时间窗。四个反例在旧代码上均失败（日志 `/tmp/xw-security-report-review-red.log`），随后仅修正已有折叠条件/纯文本摘要路径，并在样本章节复用覆盖与采集时间；四项回归及上述相关检查均通过。未改分片算法、容量或权限；修复版本尚待用户独立复审，不将作者回归称为独立批准。**CI：未触发，无本次链接**，本轮用户要求不开 PR/不推送；旧 CI 不作为本次候选验证。
+Claude 确认巡检覆盖/计数、历史 brief 和文件分片等路径无问题，阻断为 **B1：Web presentation 早退丢失独立 SQL 等技术字段；B2：共用卡片格式化让 Web 字符串多出外层引号**。B1 直接复用 Web 已有获准 metadata 与 technicalKeys，不另加重复 technical payload；B2 采用推荐 A，恢复原 Web 标量显示，仅嵌套值和大整数服务端格式化，飞书显示不改。原内部审查修复的历史 brief/样本分片保持。未改治理、投影、版本、容量或取数；修复版本仍待独立复审，不将作者回归称为独立批准。**CI：未触发，无本次链接**，本轮用户要求不开 PR/不推送；旧 CI 不作为本次候选验证。
 
 下一项：交最终本地 HEAD 给用户复审；获后续授权后才创建 PR 并由 CI 完成默认全量。真实 Agent 的自主选色/结论先行/原因解读、公司 3.5.14 审计源与真实飞书呈现仍待公司验收，截图项见[公司清单 §4](docs/starrocks-security-company-checklist.md#4-报告呈现验收另获部署授权后执行)。不据本次呈现修复关闭旧 A0/A3 的其他开放事项。
 
