@@ -9,14 +9,14 @@
 | 项目 | 已核对事实 |
 | --- | --- |
 | 仓库 | [shixian66/xiaowei-agent-sdk](https://github.com/shixian66/xiaowei-agent-sdk) |
-| 产品代码基线 | 已 fetch 核对 `main@729f960d758160e2417f4195c3ea850c85a5e000`（含 #131）；当前本地分支 `codex/security-inspection-report` 复用本任务干净隔离工作树 `/Users/kloenguyen/.codex/worktrees/manual-starrocks-security/agent-SDK`，桌面原目录及其他任务修改保留 |
+| 产品代码基线 | 已通过远端 main 与本地引用核对 `1de7b79d61e0c934c5235a522dceb96ccd28aaf5`（含 #132）；当前仅文档分支 `codex/cloudcanal-phase1-plan`，隔离工作树 `/Users/kloenguyen/.codex/worktrees/cloudcanal-phase1-plan/agent-SDK`；桌面原目录及其他任务修改保留 |
 | 源码与检查 | 当前源码仅保留 `src/xiaowei`；旧工程及专属测试、Compose、迁移入口、`compose-smoke` CI 和 Alembic 依赖已移除。保留产品测试、公共检查与旧回答兼容路径；旧工程历史可从 Git 查回 |
 | 当前存储与回答 | 应用 schema v15 不变；C 扩展已有 job、逐次 run/通知关联；014 已发布不改，015 显式升级。当前本地新回答保存 v4，旧 v2/v3/Legacy 与已绑定交付保持原语义，SDK 表不改 |
 | 锁定依赖 | SDK `0.22.3`、Lark Channel `1.4.0`、MCP `2.2.0`、sqlglot `30.17.0`、`nh3 0.3.7`、`tinycss2 1.5.1`、Pillow `13.0.0`、certifi `2026.10.19`（后两项为严格审计发现的既有漏洞定向升级） |
 | 正式入口 | `xiaowei serve`、`config check`、`model check`、`storage init/upgrade/cleanup`、`requests resend`；命令与环境准备以 README 为准 |
 | 最近有记录的公司部署 | 用户本次回报 fat 镜像 `729f960d`，一小时全窗 29,232 / ERR 6 / 多语句 1，与 DBA 回查一致；未独立核验服务器。本次未部署 |
-| 当前验收结论 | A/B/C 与代理已合入主线；S0/S2 已通过独立复审。S1 首版 c44bbdf 全套通过；Claude 对 d29c2f0（受测 af797c0）确认 P1/P2(b) 通过，P2(a) 附件回答优先级回归已在 b08c042 本地修复并定向验证，用户确认 ce52831 复审通过；真实模型、平台输入/识图、客户端与 U5/U6/U7 仍未验收，D 暂停且未实现。精确版本和证据见 §5 |
-| 当前任务授权 | 用户已确认 `44071d4` 修复复审通过，授权创建 PR #132 并在最终 CI 通过后合并；首轮 CI 暴露的同范围回归继续修复。仍不调用真实模型或公司服务，不打包、不部署 |
+| 当前验收结论 | CloudCanal 尚未接入；本轮仅核实通用 SDK/已有模块及文档，不作真实模型、目标 MCP、公司服务或用户验收结论。既有功能的分版本证据与实战缺口保留于后文 |
+| 当前任务授权 | CloudCanal 一期需求与 D1 选择 A 已确认；仅编写必要设计、计划与文档，并作有界离线验证。未授权产品功能代码、真实模型/公司服务、发布、合并或部署 |
 
 原工作目录的 ARCHITECTURE 差异与未跟踪计划/公司配置保留，未复制到本工作树；本次未读取公司配置凭据。旧监控和回答修复记录保留为注明版本的证据，不作为本轮输入或展示范围扩展授权。
 
@@ -37,7 +37,21 @@
 
 ## 3. 当前计划与下一项工作
 
-### 当前：安全巡检报告呈现（PR #132，CI 修复候选）
+<a id="cloudcanal-phase1-status"></a>
+
+### 当前：CloudCanal 一期设计与计划
+
+[实施计划 v1.0](docs/superpowers/plans/2026-10-23-cloudcanal-phase1.md)沿用已确认 C1—C5，拆为 CC0 实际契约核实、CC1 任务/状态/指标、CC2 日志与交叉排查、CC3 真实验收。产品范围及用户选择的 D1 唯一见 [ARCHITECTURE](ARCHITECTURE.md#cloudcanal-mcp)；新增限制集中登记于计划 §5.2。版本、连接/认证、实际工具与返回、只读效果、日志覆盖、对象关联、数据/接收范围均待核实；不据通用 SDK 成功关闭 CC0。
+
+本轮以主线基线在独立工作树离线安装锁文件环境，核对 Python 3.11.16、SDK 0.22.3、MCP 2.2.0、OpenAI 3.20.0、httpx2 2.13.1 的实际公开签名。计划 §7 所列现有 SDK/协议用例 **10 passed，10.52 秒**：真 Runner + ScriptedModel、临时 loopback MCP 的公开拦截与过滤、Manager 生命周期/连接代际、默认 tracing 无外发及空配置零网络；日志 `/private/tmp/xw-cloudcanal-plan-20261023/sdk.log`。未调用真实模型、公司源或测试 PostgreSQL；没有新增产品或测试代码，不作 CloudCanal 能力证明。
+
+本轮文档命令一致性检查 **2 passed**；新增文档链接/锚点 **12 项通过**，差异检查通过，变更范围仅四份 Markdown，无产品/测试/依赖文件变更。未跑全仓业务套件。作者自查不称独立审查；交付以本主题分支的精确提交 SHA 固定文档版本，后续 MCP/权限/数据切片需按最终差异独立审查。
+
+下一项：用户补版本与连接方式后，按 CC0 核实实际工具与数据范围；真实调用仍需对应授权。当前文档授权不启动 CC1/CC2 功能开发；保留全部实战缺口，不打包、不部署。
+
+### 安全巡检报告呈现（PR #132，合入前证据）
+
+#132 已合入主线 `1de7b79`；以下保留原候选的分版本证据，旧 PR 授权不作为 CloudCanal 的实施授权。最终集成记录见 [PR #132](https://github.com/shixian66/xiaowei-agent-sdk/pull/132)。
 
 [批准计划](docs/superpowers/plans/2026-10-23-security-inspection-report-presentation.md)原 blob 已原字节保存于 `3893ed823a914d01c9ab7e6c6b1b5f68185f4a56`。用户已确认 Claude 对 Web B1/B2 修复的复审通过，并授权 PR #132 与合并；原获批 HEAD `44071d4d1e5bff04077ac285332a221c8a5d25ef` 的首轮 CI 暴露通用纯文本回归，当前修复源码/测试固定于 `d1f8d82ee184c19731e10d67e21fad556b9bfcf6`，仅对该增量独立复核通过，最终 CI 待验证。范围和长期契约见 [ARCHITECTURE §6–§7](ARCHITECTURE.md#6-只读查询保护)，本文只记录状态与证据。
 
@@ -57,7 +71,7 @@ Claude 确认巡检覆盖/计数、历史 brief 和文件分片等路径无问�
 
 独立复核只覆盖 `44071d4..d1f8d82`，**0 Critical / 0 Important / 0 Minor**；只读探针确认巡检 full/brief/历史/不完整 × 两种文本模式 8 组与修复前一致，普通值与说明优先级 20 组恢复原主线语义，嵌套值、字段名、动作及摘要/审批命令过滤保留。未把自查或首轮失败 CI 当作最终通过。
 
-下一项：推送最终 HEAD 并等待完整 CI，通过后按用户已有授权 squash 合并 #132，CI 与合并证据集中记入 PR，不为追记结果另触发一次全量。真实 Agent 的自主选色/结论先行/原因解读、公司 3.5.14 审计源与真实飞书呈现仍待公司验收，截图项见[公司清单 §4](docs/starrocks-security-company-checklist.md#4-报告呈现验收另获部署授权后执行)。不据本次修复关闭旧 A0/A3，不打包、不部署。
+后续实战缺口：真实 Agent 的自主选色/结论先行/原因解读、公司 3.5.14 审计源与真实飞书呈现仍待公司验收，截图项见[公司清单 §4](docs/starrocks-security-company-checklist.md#4-报告呈现验收另获部署授权后执行)。#132 的合入不关闭旧 A0/A3，CloudCanal 本轮不处理这些验收或部署。
 
 ### CI 小范围优化（PR #131）
 
