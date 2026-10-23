@@ -964,6 +964,7 @@ def build_feishu_message(
                 set(),
                 (),
                 all_technical,
+                omissions=False,
             )
         )
     ):

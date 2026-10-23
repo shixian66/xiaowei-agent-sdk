@@ -231,3 +231,33 @@ def test_v4_attachment_fallback_explicitly_reports_omitted_technical_details() -
     assert "技术详情" in visible and "未附" in visible
     assert "SELECT name" not in visible
     assert "限制说明" in parts[0].body.decode()
+
+
+def test_v4_attachment_uses_real_layout_when_empty_placeholders_are_larger() -> None:
+    from xiaowei.models import DeliveryText
+
+    sources = tuple(
+        fact(
+            evidence_id=f"ev_{i}",
+            rows=({"name": f"orders-{i}-" + "x" * 80},),
+            metadata={"sql": "SELECT x"},
+            note=None,
+        )
+        for i in range(24)
+    )
+    value = business(*sources, report_format="md")
+    # 实际完整行卡片能放下；零行占位/截断提示不一定更小，不能拿来提前删技术区。
+    witness = value.model_copy(update={"blocks": value.blocks[1:]})
+    message = build_feishu_message(
+        witness, 3500, "oc", platform_limits=True, allow_preview=False, attachment_preview=True
+    )
+    assert len(panels(message)) == 1
+    value = value.model_copy(
+        update={"blocks": (DeliveryText(text="x" * 16_000), *value.blocks[1:])}
+    )
+    parts = _data_parts(value, 0, 3500, "oc", None)
+    assert [p.kind for p in parts] == ["md", "body"]
+    message = json.loads(parts[-1].body)
+    assert len(panels(message)) == 1
+    assert "技术详情超出消息容量，未附" not in "\n".join(text_parts(message, folded=False))
+    assert "SELECT x" in "\n".join(text_parts(message))
