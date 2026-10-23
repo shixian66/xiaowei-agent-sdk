@@ -336,6 +336,44 @@ SDK_TEST_POSTGRES_URL=postgresql+asyncpg://postgres@127.0.0.1:55432/postgres \
 uv run --locked --extra dev python -m scripts.dialogue_real_model --profile "$XW_EVAL_PROFILE" --suite monitoring-reliability --repeats 3
 ```
 
+<a id="cloudcanal-cc0"></a>
+
+### CloudCanal CC0：公司现场只读契约检查
+
+`scripts/cloudcanal_cc0.py` 是独立取证脚本，不进入 `xiaowei` 产品入口，不启动 Agent、模型或数据库。目标为用户确认的 CloudCanal 6.4.0.2；当前只实现 HTTP(S) Streamable HTTP，支持该协议的 JSON/SSE 响应。使用本仓库 Python 3.11 与锁定依赖（Agents SDK 0.22.3、MCP 2.2.0），在含该脚本的仓库副本根目录运行。
+
+**运行前确认点见[计划 §4.1](docs/superpowers/plans/2026-10-23-cloudcanal-phase1.md#41-连接与运行前置)。** 用户先确认链接格式、只读账号能否获取及实际权限；若只有主账号链接，先决定是否接受权限扩大或其他办法，不默认使用。整条链接按密码保管，不贴到对话、命令参数或仓库。若令牌另行提供、链接要求其他协议或重定向，先报告差异，不自行改写链接或尝试账号密码/OpenAPI。
+
+以下为 **Bash** 用法。默认仅初始化连接、`tools/list`（含 SDK 目录分页）及协议会话关闭，**不会调用任何业务工具**。先关闭 shell 命令回显，用隐藏输入设置环境变量；文件放临时私有目录，带回前人工复核：
+
+```bash
+set +x
+umask 077
+IFS= read -r -s -p 'MCP 链接（不回显）: ' CLOUDCANAL_MCP_URL
+printf '\n'
+export CLOUDCANAL_MCP_URL
+CC0_DIR="$(mktemp -d "${TMPDIR:-/tmp}/cloudcanal-cc0.XXXXXX")"
+uv run --locked python -m scripts.cloudcanal_cc0 > "$CC0_DIR/tools.redacted.json"
+```
+
+读完目录后，用户结合厂商文档/现场权限核实具体工具无业务副作用，再指定 **一个准确工具名和一个参数文件**。`--read-tool` 表示操作者的只读选择，不是脚本按名字或 `readOnlyHint` 自动判定安全；启停、重跑、修复及效果不明的工具不列入此次调用。参数文件为 JSON 对象，无参数也写 `{}`；文件仅留在公司，按秘密/业务材料保管，不带回原参数。
+
+```bash
+uv run --locked python -m scripts.cloudcanal_cc0 \
+  --read-tool '实际已确认只读的工具名' \
+  --arguments /安全目录/cc0-args.json \
+  --timeout 60 --max-response-bytes 1048576 > "$CC0_DIR/read.redacted.json"
+unset CLOUDCANAL_MCP_URL
+```
+
+每次最多调用该工具一次，不自动重试、不自动调用其他工具、不获取资源链接。默认总期限 60 秒、每个 HTTP 响应 1 MiB；这只是现场探查参数，不是产品配额或远端容量保证。超限/超时后记录固定原因并退出，不能据此认为远端未执行或已停止；用户按实际契约缩小参数后取新样例，不能原样自动重放。返回中只记录固定错误类别，不打印 URL、HTTP 头、参数、异常正文或堆栈；不跟随跳转、不读取环境代理、不关闭 TLS 校验。
+
+输出含工具准确名称、脱敏后的参数/输出 schema、结构摘要、耗时和大小：`wire_bytes_observed` 是该阶段观察到的响应体字节（含 JSON/SSE 封装，非完整 HTTP 包大小）；失败记录为累计观察量，超限时可能包含越过限额的最后一块。`result_json_bytes` 是客户端完整 MCP 结果重新序列化的字节数，不是原始包长度。`received` 仅表示协议结果已收到，不证明 `code/data` 业务成功；`mcp_error` 是远端声明的工具错误。
+
+业务叶子值、日志正文、schema 描述/示例/默认值/枚举和未知扩展字段不输出；结果仅保留 schema 已声明的字段名，其他动态键隐藏。数组最多展示前 3 项的结构、深度到 8 层会标记省略，因此摘要不等于完整 schema 或完整数据。工具名和声明的字段名仍属于返回材料，带回前须人工检查；缺失的字段名、单位、状态/错误码、分页/窗口语义及只读效果，在公司用不含业务值的说明补齐。不要把自动打码当作所有内容均可外传的保证。
+
+退出码：`0` 为所选协议操作完成；`1` 为连接/读取/MCP 错误或容量/期限失败（保留已完成的目录）；`2` 为配置/参数文件错误；`130` 为人工中断、结果可能未知。只有打码报告和经批准的语义说明带回本地。账号任务/日志对全部 Web 访问者与指定群全员的可见范围、链接过期/作废/重生成方式一起确认；真实工具功能验证和 CC3 模型验收在另获授权的公司部署后进行。
+
 ## 设计与开发
 
 采用 AI 辅助的小步开发：给出本次目标和完成判据，按当前计划实现、验证、审查、更新交接，再继续下一项。开发规则和风险分级统一见 [AGENTS.md](AGENTS.md)，不需要为每次改动重复填写五份文档。
