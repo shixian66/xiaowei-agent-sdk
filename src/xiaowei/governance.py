@@ -597,7 +597,9 @@ class GovernedTools:
         except SecurityInspectionError as exc:
             if contract.tool_id != "local/inspect_audit_security":
                 raise ToolExecutionError() from None
-            self._inspection_failed(ctx, contract, exc.scope, exc.reason, counted=False)
+            self._inspection_failed(
+                ctx, contract, exc.scope, exc.reason, call_id=effective.call_id, counted=False
+            )
             raise
         key = _turn_key(ctx.identity)
         runs = self._runs.get(key, TurnRuns())
@@ -607,7 +609,14 @@ class GovernedTools:
             target in runs.slot_busy and target in runs.slot_retries
         ):
             if inspection_scope is not None:
-                self._inspection_failed(ctx, contract, inspection_scope, "busy", counted=False)
+                self._inspection_failed(
+                    ctx,
+                    contract,
+                    inspection_scope,
+                    "busy",
+                    call_id=effective.call_id,
+                    counted=False,
+                )
             raise ToolRejectedError("系统繁忙，本轮该集群再试已用完", code="busy")
         slot_retry = target in runs.slot_busy
         if contract.policy_id in PROMETHEUS_QUERY_POLICIES:
@@ -651,7 +660,12 @@ class GovernedTools:
         except ToolRejectedError:
             if inspection_scope is not None:
                 self._inspection_failed(
-                    ctx, contract, inspection_scope, "budget_exhausted", counted=False
+                    ctx,
+                    contract,
+                    inspection_scope,
+                    "budget_exhausted",
+                    call_id=effective.call_id,
+                    counted=False,
                 )
             raise
         self._runs[key] = replace(
@@ -807,6 +821,7 @@ class GovernedTools:
                             contract,
                             inspection_scope,
                             cast(SecurityFailureReason, reason),
+                            call_id=effective.call_id,
                             counted=True,
                             sql_started=trace.audit_started,
                         )
@@ -845,7 +860,10 @@ class GovernedTools:
                 current = self._runs[key]
                 self._runs[key] = replace(current, slot_busy=current.slot_busy | {target})
                 if inspection_scope is not None:
-                    self._inspection_failed(ctx, contract, inspection_scope, "busy", counted=False)
+                    self._inspection_failed(
+                        ctx, contract, inspection_scope, "busy",
+                        call_id=effective.call_id, counted=False,
+                    )
                 remaining: Literal[0, 1] = 0 if target in current.slot_retries else 1
                 raise ToolRejectedError(
                     "系统繁忙，可稍后再试", code="busy", remaining_retries=remaining
@@ -885,6 +903,7 @@ class GovernedTools:
         scope: SecurityInspectionScope,
         reason: SecurityFailureReason,
         *,
+        call_id: str,
         counted: bool,
         sql_started: bool = False,
     ) -> SecurityInspectionFailure:
@@ -892,6 +911,7 @@ class GovernedTools:
         runs = self._runs.get(key, TurnRuns())
         failure = SecurityInspectionFailure(
             target_id=contract.target_id,
+            call_id=call_id,
             start=scope.start,
             end=scope.end,
             time_zone=scope.time_zone,

@@ -461,6 +461,7 @@ class SecurityInspectionFailure(_Trusted):
 
     tool_id: Literal["local/inspect_audit_security"] = "local/inspect_audit_security"
     target_id: Label
+    call_id: Label
     start: AwareDatetime
     end: AwareDatetime
     time_zone: str

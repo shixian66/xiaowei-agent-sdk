@@ -64,6 +64,7 @@ _MAX_SIGNATURE_BYTES = 65_536
 # 不含可回放证据的工具输出（治理拒绝、执行失败等）以固定文字保存，不保留原始错误文本。
 NO_EVIDENCE_OUTPUT = "工具未返回可回放的证据"
 _EVIDENCE_REF = "xiaowei_evidence_ref"
+_INSPECTION_REF = "xiaowei_inspection_target_ref"
 _DROPPED_TYPES = frozenset({"reasoning"})
 
 _INSERT_IF_ABSENT = text(
@@ -452,6 +453,14 @@ class PolicySession:
         await self._validate_final_answer(
             pending, context_evidence, monitoring_failures, inspection_failures, limit_reached
         )
+        # 只给可信的实际失败调用保存来源依赖，不存失败原文或完整 TurnAnswer；
+        # 回放仍向模型返回原有无 Evidence 占位。
+        sources = {failure.call_id: failure.target_id for failure in inspection_failures}
+        for index, item in enumerate(pending):
+            raw = cast(dict[str, Any], item)
+            target = sources.get(raw.get("call_id", ""))
+            if raw.get("type") == "function_call_output" and target is not None:
+                pending[index] = _output(raw["call_id"], json.dumps({_INSPECTION_REF: target}))
         turns = await self._open()
         if turns >= self._limits.max_history_turns:
             raise self._limit("history_turn_limit")
@@ -617,6 +626,7 @@ class PolicySession:
         replay: list[TResponseInputItem] = []
         self._bytes = None  # 本次完整回放尚未成功，不能沿用另一观察阶段的字节计数。
         references: list[tuple[int, str, ToolCall]] = []
+        inspection_sources: list[str] = []
         open_calls: dict[str, dict[str, Any]] = {}
         closed_calls: set[str] = set()
         try:
@@ -638,7 +648,19 @@ class PolicySession:
                     call = _tool_call(open_calls.pop(call_id))
                     closed_calls.add(call_id)
                     output = raw.get("output")
-                    if output != NO_EVIDENCE_OUTPUT:
+                    dependency = _json_object(output)
+                    if dependency is not None and set(dependency) == {_INSPECTION_REF}:
+                        target = dependency[_INSPECTION_REF]
+                        if (
+                            not isinstance(target, str)
+                            or not target
+                            or call is None
+                            or call.tool_name != "inspect_audit_security"
+                            or call.arguments.get("cluster") != target
+                        ):
+                            raise self._unavailable()
+                        inspection_sources.append(target)
+                    elif output != NO_EVIDENCE_OUTPUT:
                         evidence_id = _reference(output)
                         if evidence_id is None or call is None:
                             raise self._unavailable()
@@ -650,6 +672,12 @@ class PolicySession:
             raise self._unavailable() from None
         if open_calls:
             raise self._unavailable()
+        try:
+            await self._evidence.validate_inspection_sources(inspection_sources, self._ctx)
+        except AnswerRejectedError:
+            raise self._unavailable() from None
+        except EvidenceUnverifiableError:
+            raise SessionUnverifiableError from None
         for (index, _, _), content in zip(references, await self._project(references), strict=True):
             replay[index] = _output(cast(dict[str, Any], replay[index])["call_id"], content)
         if seen is not None:

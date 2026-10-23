@@ -699,6 +699,38 @@ class EvidenceStore:
                 )
         return fact
 
+    async def validate_inspection_sources(
+        self,
+        targets: Sequence[str],
+        ctx: RunContext,
+        *,
+        recipient_tools: frozenset[str] | None = None,
+        recipient_targets: frozenset[str] | None = None,
+    ) -> None:
+        """失败信息同样有来源依赖；交付及 Session 回放共用当前授权边界。"""
+        from xiaowei.starrocks_security import SECURITY_TOOL
+
+        for target in dict.fromkeys(targets):
+            contract = self._catalog.contract(SECURITY_TOOL, target)
+            if contract is None or target not in ctx.target_scope:
+                raise AnswerRejectedError(
+                    AnswerRejectCode.EVIDENCE_UNAVAILABLE, "巡检失败来源当前不可读"
+                )
+            if (recipient_tools is not None and SECURITY_TOOL not in recipient_tools) or (
+                recipient_targets is not None and target not in recipient_targets
+            ):
+                raise RecipientRejectedError(
+                    AnswerRejectCode.EVIDENCE_UNAVAILABLE, "目标机器人无权接收巡检失败来源"
+                )
+            try:
+                authorized = await self._authorize(ctx.identity, target, SECURITY_TOOL)
+            except Exception:
+                raise EvidenceUnverifiableError from None
+            if authorized is not True:
+                raise AnswerRejectedError(
+                    AnswerRejectCode.EVIDENCE_UNAVAILABLE, "巡检失败来源当前不可读"
+                )
+
     async def _inspection_failure_notice(
         self,
         turn: TurnAnswer,
@@ -716,26 +748,13 @@ class EvidenceStore:
         order = {e: i for i, e in enumerate(turn.context_evidence)}
         run_turn = turn.run_turn_id or ctx.identity.turn_id
         missing: list[str] = []
+        await self.validate_inspection_sources(
+            tuple(f.target_id for f in turn.inspection_failures),
+            ctx,
+            recipient_tools=recipient_tools,
+            recipient_targets=recipient_targets,
+        )
         for failure in turn.inspection_failures:
-            contract = self._catalog.contract(failure.tool_id, failure.target_id)
-            if contract is None or failure.target_id not in ctx.target_scope:
-                raise AnswerRejectedError(
-                    AnswerRejectCode.EVIDENCE_UNAVAILABLE, "巡检失败来源当前不可读"
-                )
-            if (recipient_tools is not None and failure.tool_id not in recipient_tools) or (
-                recipient_targets is not None and failure.target_id not in recipient_targets
-            ):
-                raise RecipientRejectedError(
-                    AnswerRejectCode.EVIDENCE_UNAVAILABLE, "目标机器人无权接收巡检失败来源"
-                )
-            try:
-                authorized = await self._authorize(ctx.identity, failure.target_id, failure.tool_id)
-            except Exception:
-                raise EvidenceUnverifiableError from None
-            if authorized is not True:
-                raise AnswerRejectedError(
-                    AnswerRejectCode.EVIDENCE_UNAVAILABLE, "巡检失败来源当前不可读"
-                )
             after = order.get(failure.after_evidence_id, -1) if failure.after_evidence_id else -1
             restored = False
             for eid, record in records.items():

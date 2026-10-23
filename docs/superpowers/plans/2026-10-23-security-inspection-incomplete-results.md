@@ -67,11 +67,11 @@
 
 “取得结果”指本轮该目标/窗口已有成功保存且通过当前权限校验的 Evidence；“分类计数完整”仍只由 coverage 声明，二者不等价。候选截断、无法判定或只省略样本但已返回有效 Evidence，均不作为取数失败记录。
 
-仅增加 `SecurityInspectionFailure`（可信内部类型，模型不能填写），保留未取得可交付结果的调用之工具、规范化目标、绝对起止、采集时审计时区、审计 SQL 是否已发出（不含共享结构刷新）、固定原因码；关联沿用本轮既有调用标识/顺序与请求归属。不含 SQL、账号、样本或异常正文，不保存成功记录或成功 Evidence 的镜像。成功继续使用既有 produced 与 Evidence，取其目标、window、coverage 和采集元数据。
+仅增加 `SecurityInspectionFailure`（可信内部类型，模型不能填写），保留未取得可交付结果的调用之工具、规范化目标、绝对起止、采集时审计时区、审计 SQL 是否已发出（不含共享结构刷新）、固定原因码与 SDK call_id（提交时绑定来源依赖）；关联沿用本轮既有调用顺序与请求归属。不含 SQL、账号、样本或异常正文，不保存成功记录或成功 Evidence 的镜像。成功继续使用既有 produced 与 Evidence，取其目标、window、coverage 和采集元数据。
 
 仅为已确认路由和窗口的准备拒绝、busy、budget_exhausted 与源失败补记录；不能把未知目标或未通过窗口解析的任意模型字符串升格为可信范围。开始后失败纳入原 started/produced/failed 对账，准备阶段拒绝不伪装成成功，也不制造 query_unfinished。SDK 步数用完时，`finish_on_limit` 的现有判断须认安全巡检失败，复用已有无工具收尾；补“只有该失败、没有 produced、步骤用完”的正式 SDK 回归，固定说明不能丢失。
 
-成功证据复用交付层本次已经完成权限校验的全部上下文记录，并按原执行轮次筛选，不仅看模型选入 blocks 的事实；不另读一遍 Evidence，不复制成功目标/窗口/计数到新类型。失败记录沿 `TurnRuns → TurnAnswer → PolicySession.commit_validated 的校验 → 交付` 传递；提交前从账本复制，轮末照常清理。手动请求沿现有请求 JSON 保存/读取与 ResultDelivery 重建；定时任务仍用已有独立 Session、run 状态和通知账本，不另保存一份完整回答或任务报告仓库。Session 提交校验携带可信记录，不等于把整个 TurnAnswer 再存进 SDK Session；失败工具输出继续沿现有无 Evidence 输出过滤。历史读取、外发和重发复核这些来源的当前工具/目标与接收许可、归属和期限，不能因为失败没有 Evidence 就省略边界；固定原因文本重新从码映射，不采信保存的模型原因说明。
+成功证据复用交付层本次已经完成权限校验的全部上下文记录，并按原执行轮次筛选，不仅看模型选入 blocks 的事实；不另读一遍 Evidence，不复制成功目标/窗口/计数到新类型。失败记录沿 `TurnRuns → TurnAnswer → PolicySession.commit_validated 的校验 → 交付` 传递；提交前从账本复制，轮末照常清理。手动请求沿现有请求 JSON 保存/读取与 ResultDelivery 重建；定时任务仍用已有独立 Session、run 状态和通知账本，不另保存一份完整回答或任务报告仓库。Session 提交校验携带可信记录，不等于把整个 TurnAnswer 再存进 SDK Session；Session 为实际可信失败对应的工具输出仅保存目标来源标记（工具由固定标记及原调用绑定），回放前复用交付层当前授权复核，仍向模型给无 Evidence 占位；不存失败原文/窗口/原因副本。历史读取、外发和重发复核这些来源的当前工具/目标与接收许可、归属和期限，不能因为失败没有 Evidence 就省略边界；固定原因文本重新从码映射，不采信保存的模型原因说明。
 
 `Delivery` 增加一个默认空的 `inspection_notice`，仅依据本轮仍未恢复的实际调用失败生成，接入现有 notices/has_system_content 及 Web、卡片、纯文本、报告预览的系统说明区域，位于模型 blocks 之前。已取得有效 Evidence 的覆盖不完整不进入该前缀，不重排正文。
 

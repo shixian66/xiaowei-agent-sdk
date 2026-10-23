@@ -500,6 +500,7 @@ def test_checkpoint_defaults_and_new_failure_round_trip():
     assert old.runs.inspection_failures == ()
     failure = SecurityInspectionFailure(
         target_id=ARGS["cluster"],
+        call_id="checkpoint-failure",
         start=ARGS["start_time"],
         end=ARGS["end_time"],
         time_zone="UTC",
@@ -509,3 +510,51 @@ def test_checkpoint_defaults_and_new_failure_round_trip():
     )
     ledger = TurnLedger(0, TurnRuns(inspection_failures=(failure,)))
     assert parser.validate_json(parser.dump_json(ledger), strict=True) == ledger
+
+
+@pytest.mark.parametrize("revoked", [False, True])
+async def test_next_sdk_turn_rechecks_failure_sources_before_model(
+    postgres_url, monkeypatch, revoked
+):
+    from xiaowei.app import TurnError
+    from xiaowei.starrocks_security import SECURITY_TOOL
+
+    async with opened(postgres_url, monkeypatch, missing=("stmt",)) as (env, _):
+        first = env.scripts.add(
+            "检查此前窗口",
+            tool_call("inspect_audit_security", **ARGS),
+            clarify("敏感故障摘要：本集群的审计源缺少 stmt，指定窗口未完成"),
+        )
+        await env.app.run_turn(env.ctx(authorized=TOOLS), first)
+        if revoked:
+            env.grants.allowed.discard(("alice", ARGS["cluster"], SECURITY_TOOL))
+        second = env.scripts.add("继续", clarify("继续说明"))
+        ctx = env.ctx(turn="t2", authorized=TOOLS - {SECURITY_TOOL})
+        if revoked:
+            with pytest.raises(TurnError, match="会话"):
+                await env.app.run_turn(ctx, second)
+            assert second not in env.scripts.calls
+        else:
+            await env.app.run_turn(ctx, second)
+            history = json.dumps(env.scripts.calls[second][0].input, ensure_ascii=False)
+            assert "敏感故障摘要" in history
+            assert "inspection_target_ref" not in history
+
+
+async def test_invalid_window_does_not_create_a_new_replay_permission_dependency(
+    postgres_url, monkeypatch
+):
+    from xiaowei.starrocks_security import SECURITY_TOOL
+
+    async with opened(postgres_url, monkeypatch) as (env, _):
+        first = env.scripts.add(
+            "窗口写错",
+            tool_call("inspect_audit_security", **{**ARGS, "end_time": ARGS["start_time"]}),
+            clarify("请确认时间范围"),
+        )
+        turn = await env.app.run_turn(env.ctx(authorized=TOOLS), first)
+        assert turn.inspection_failures == ()
+        env.grants.allowed.discard(("alice", ARGS["cluster"], SECURITY_TOOL))
+        second = env.scripts.add("换个话题", clarify("请说明问题"))
+        await env.app.run_turn(env.ctx(turn="t2", authorized=TOOLS - {SECURITY_TOOL}), second)
+        assert len(env.scripts.calls[second]) == 1
