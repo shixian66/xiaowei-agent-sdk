@@ -1039,19 +1039,21 @@ def build_feishu_message(
         texts.extend(delivery.texts)
         technical.update(all_technical)
         selected_counts = fitting_prefix(set())
+        if selected_counts is None:
+            technical.clear()
+            delivery = delivery.model_copy(
+                update={
+                    "report_notice": "\n".join(
+                        filter(None, (delivery.report_notice, TECHNICAL_OMITTED))
+                    )
+                }
+            )
+            selected_counts = fitting_prefix(set())
         if selected_counts is not None:
             plain = card(selected_counts, set(), texts, technical)
             formatted = card(selected_counts, set(), texts, technical, formatted=True)
             return formatted if fits(formatted) else plain
         texts.clear()
-        technical.clear()
-        delivery = delivery.model_copy(
-            update={
-                "report_notice": "\n".join(
-                    filter(None, (delivery.report_notice, TECHNICAL_OMITTED))
-                )
-            }
-        )
 
     if platform_limits:
         # 正文先回答：模型文字先占预算，fitting_prefix 经闭包读取 texts 再放整行与 SQL。

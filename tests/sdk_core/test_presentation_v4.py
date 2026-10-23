@@ -265,6 +265,41 @@ def test_v4_attachment_keeps_complete_answer_before_technical_details(
         assert source.metadata["sql"] not in "\n".join(text_parts(message))
 
 
+def test_v4_attachment_without_technical_details_keeps_answer_with_many_short_facts() -> None:
+    from xiaowei.models import AgentAnswer, DeliveryText, FactBlock, TextBlock
+
+    answer = "x" * 8000
+    sources = tuple(
+        fact(
+            evidence_id=f"ev_{i}",
+            rows=({"name": f"orders-{i}"},),
+            metadata={"sql": "SELECT x"},
+            note=None,
+        )
+        for i in range(34)
+    )
+    AgentAnswer(
+        blocks=(
+            TextBlock(type="text", text=answer),
+            *(FactBlock(type="fact", evidence_id=f.evidence_id, view="full") for f in sources),
+        ),
+        report_format="md",
+        awaiting_user=False,
+    )
+    value = business(*sources, report_format="md")
+    value = value.model_copy(update={"blocks": (DeliveryText(text=answer), *value.blocks[1:])})
+    parts = _data_parts(value, 0, 3500, "oc", None)
+    assert [p.kind for p in parts] == ["md", "body"]
+    assert "orders-33" in parts[0].body.decode()
+    message = json.loads(parts[-1].body)
+    visible = "\n".join(text_parts(message, folded=False))
+    assert answer in visible
+    assert "orders-33" in visible
+    assert "模型说明展示已截断" not in visible
+    assert len(panels(message)) == 0
+    assert "技术详情超出消息容量，未附。" in visible
+
+
 def test_v4_attachment_fallback_explicitly_reports_omitted_technical_details() -> None:
     source = fact(note="限制说明 " * 5000)
     parts = _data_parts(business(source, report_format="md"), 0, 3500, "oc", None)
