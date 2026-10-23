@@ -208,6 +208,9 @@ def _delays(tokens: Sequence[Token]) -> list[float | None]:
 
 
 def _operations(tokens: Sequence[Token], sql: str) -> tuple[set[str], bool]:
+    tokens = [token for token in tokens if token.token_type != TokenType.HINT]
+    if not tokens:
+        return set(), False
     first = tokens[0]
     if first.token_type in {TokenType.STRING, TokenType.IDENTIFIER}:
         return set(), False

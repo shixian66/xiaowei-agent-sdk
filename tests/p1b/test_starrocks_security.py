@@ -59,6 +59,8 @@ SIGNAL_CASES = [
     ("TRUNCATE TABLE shop.t", "high_risk_operation", {"truncate"}),
     ("EXPORT TABLE shop.t TO 'dummy'", "high_risk_operation", {"export"}),
     ("INSERT OVERWRITE shop.t SELECT 1", "high_risk_operation", {"insert_overwrite"}),
+    ("INSERT /*+ SET_VAR(a=1) */ OVERWRITE t SELECT 1",
+     "high_risk_operation", {"insert_overwrite"}),
     ("DELETE FROM shop.t", "high_risk_operation", {"delete_no_where"}),
     ("WITH x AS (SELECT id FROM shop.t WHERE id>0) DELETE FROM shop.t",
      "high_risk_operation", {"delete_no_where"}),
@@ -71,12 +73,14 @@ def test_explainable_signals(sql, signal, operations):
     assert result.matched_rows == 1
     assert signal in result.rows[0]["signals"]
     assert set(result.rows[0]["operations"]) == operations
+    assert result.unclassified_candidate_rows == 0 and result.match_counts_complete
 
 
 @pytest.mark.parametrize("sql", [
     "SELECT 1 UNION ALL SELECT 2", "SELECT * FROM shop.t WHERE 1=1",
     "SELECT 'sleep(5); DROP TABLE shop.t; OR 1=1'",
     "SELECT 1 /* sleep(5); DROP TABLE shop.t; OR 1=1 */",
+    "/*+ SET_VAR(a=1) */",
     "-- sleep(5); DROP TABLE shop.t; OR 1=1\nSELECT 1",
     "SELECT 1;", "SELECT ';'", "SELECT `SLEEP` FROM shop.t",
     "DELETE FROM shop.t WHERE id=1", "INSERT INTO shop.t SELECT 1",

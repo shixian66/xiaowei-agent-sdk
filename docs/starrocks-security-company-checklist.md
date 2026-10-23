@@ -31,7 +31,7 @@ WHERE `timestamp` >= '2026-10-23 10:00:00' AND `timestamp` < '2026-10-23 11:00:0
 | `SELECT 1OR 1=1`；OR 后换行/空白/多层左括号再接数字或引号常量 | OR 分支 1 |
 | `SELECT floor(1)`；`SELECT 0 OR column_a=1` | OR 分支 0 |
 | `SELECT 0 OR/**/(1=1)` | OR 分支 0，首版已知缺口，不当作包含关系通过正例 |
-| 前导普通注释后的 GRANT；`INSERT/*a*/OVERWRITE t SELECT 1` | 管理前缀分支 1 |
+| 前导普通注释后的 GRANT；`INSERT/*a*/OVERWRITE t SELECT 1`；`INSERT /*+ SET_VAR(a=1) */ OVERWRITE t SELECT 1` | 管理前缀分支 1 |
 | `ALTER TABLE t DROP PARTITION p`；`CREATE TABLE t AS SELECT 1` | 管理前缀分支 0；无其他信号时并集 0 |
 | `SELECT 1; /*a*/ DROP TABLE t`；`SELECT 1; DELETE FROM t` | 管理/DELETE 前缀分支 0，多语句分支及并集 1 |
 | `/*a*/ DELETE FROM t` | DELETE 分支 1；全文含 WHERE 或 WITH…DELETE 仍按计划列为缺口 |
