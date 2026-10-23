@@ -621,9 +621,28 @@ async def test_missing_fact_is_repaired_and_forged_identity_remains_model_text(
 
 
 async def test_v4_business_values_visible_with_one_closed_technical_area(
-    env: Env, chrome_binary: str
+    env: Env, chrome_binary: str, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """实际 DOM：技术区收起不影响用户需要的表格、目标和历史时间。"""
+    from tests.sdk_core.test_presentation_v4 import annotations_fact
+
+    catalog = env.evidence._catalog
+    policy = catalog._policies["synthetic.region"]
+    web = policy.projections["web"]
+    monkeypatch.setitem(catalog._policies, "synthetic.region", replace(
+        policy, projections={**policy.projections, "web": Projection(
+            (*web.fields, "sql", "applied_limit", "elapsed_ms", "next_cursor"), web.max_bytes,
+        )},
+    ))
+    sql = "SELECT city,\n COUNT(*) AS n\nFROM shop.orders\nGROUP BY city"
+    original = synthetic_tools.payload
+    annotations = json.loads(annotations_fact().result_json)
+    monkeypatch.setattr(synthetic_tools, "payload", lambda region, *args: {
+        **original(region, *args), "region": {"name": region, **annotations},
+        "rows": [{**row, "city": "北京", "empty": "", "null": None}
+                 for row in original(region, *args)["rows"]],
+        "sql": sql, "applied_limit": 2, "elapsed_ms": 17, "next_cursor": None,
+    })
     message = env.scripts.add(
         "两项结果自然交付",
         tool_call("run_query", region="east"),
@@ -644,13 +663,121 @@ async def test_v4_business_values_visible_with_one_closed_technical_area(
         assert await page.evaluate(f"{item(0)}.querySelector('details').open") is False
         visible = await page.evaluate(f"{item(0)}.innerText")
         assert "east" in visible and "west" in visible and "继续关注" in visible
+        assert '"text": "null"' in visible and '"tags": null' in visible
+        assert '\\"tags\\"' not in visible
+        assert "<script>literal</script>" in visible
+        assert await page.evaluate("document.scripts.length") == 1
         assert "采集于" in visible and "数据范围" in visible
         assert await page.evaluate(f"{item(0)}.dataset.requestId") not in visible
         assert all(word not in visible for word in ("查看依据", "ev_", "SELECT", "elapsed_ms"))
         assert await table_rows(page, 0) == [2, 2]
         await page.evaluate(f"{item(0)}.querySelector('details').open = true")
         assert "local/run_query" in await page.evaluate(f"{item(0)}.innerText")
+        technical = await page.evaluate(
+            f"[...{item(0)}.querySelectorAll('details p.content')].map(n => n.textContent)"
+        )
+        assert technical.count(f"sql: {sql}") == 2
+        assert "applied_limit: 2" in technical and "elapsed_ms: 17" in technical
+        assert "next_cursor: NULL（空值）" in technical
+        assert await page.evaluate(
+            f"[...{item(0)}.querySelector('.fact tbody tr').cells].map(n => n.textContent)"
+        ) == ["2026-09-01", "50", "北京", "（空字符串）", "NULL（空值）"]
         await send(page, plain)
         await settled(page, 1, "completed")
         assert await page.evaluate(f"{item(1)}.querySelectorAll('details').length") == 0
         assert len(env.adapter.calls) == 2
+
+
+async def test_security_report_default_view(postgres_url, monkeypatch, chrome_binary):
+    from tests.p1b.test_starrocks_audit import AUDIT_TARGET
+    from tests.p1b.test_starrocks_security_audit import record
+    from tests.sdk_core.test_security_inspection_eval import ARGS, security_channel, security_driver
+    from tests.sdk_core.test_starrocks_tools import assembled
+
+    drv = security_driver(record("SHOW VARIABLES; SELECT 1", queryId="q-browser"),
+                          totals=(29232, 6, 3))
+    async with assembled(postgres_url, monkeypatch, drv, AUDIT_TARGET) as audit:
+        service, _ = security_channel(audit)
+        message = audit.scripts.add(
+            "本窗安全报告", tool_call("inspect_audit_security", **ARGS),
+            lambda call: answer(evidence_in(call), blocks=[
+                {"type": "text", "text": "🟡 有需核查线索，多语句用途待核对。"},
+                *({"type": "fact", "evidence_id": e, "view": "full"} for e in evidence_in(call)),
+            ]),
+        )
+        async with (
+            serving(create_web_app(service, config()), port=8518), launch(chrome_binary) as chrome,
+        ):
+            page = await chrome.page()
+            await page.navigate("http://127.0.0.1:8518/")
+            await send(page, message)
+            await settled(page, 0, "completed")
+            visible = await page.evaluate(f"{item(0)}.innerText")
+            assert "🟡 有需核查线索" in visible and "29,232" in visible
+            assert "分类计数完整" in visible and "无法判定候选 0" in visible
+            assert "执行失败" in visible and "多语句" in visible and "etl" in visible
+            assert all(key not in visible for key in (
+                "rules_version", "q-browser", "signal_counts",
+            ))
+            assert await table_rows(page, 0) == [5, 1]
+            assert await page.evaluate(f"{item(0)}.querySelectorAll('details').length") == 1
+            assert await page.evaluate(f"{item(0)}.querySelector('details').open") is False
+            await page.evaluate(f"{item(0)}.querySelector('details').open = true")
+            assert "q-browser" in await page.evaluate(f"{item(0)}.innerText")
+            assert len(audit.scripts.calls[message]) == 2
+
+
+async def test_security_report_brief_keeps_coverage_and_counts(
+    postgres_url, monkeypatch, chrome_binary,
+):
+    from dataclasses import replace
+
+    from tests.p1b.test_starrocks_audit import AUDIT_TARGET
+    from tests.p1b.test_starrocks_security_audit import record
+    from tests.sdk_core.test_security_inspection_eval import (
+        ARGS,
+        audit_reads,
+        security_channel,
+        security_driver,
+    )
+    from tests.sdk_core.test_starrocks_tools import assembled
+
+    from xiaowei import starrocks_tools
+
+    original = starrocks_tools.analyze_security_rows
+    monkeypatch.setattr(starrocks_tools, "analyze_security_rows", lambda *args, **kwargs: replace(
+        original(*args, **kwargs), scanned_through="2026-10-22T10:04:37+00:00",
+    ))  # 旧版本生产者，保留真治理与持久化，用于历史兼容。
+    drv = security_driver(*(record(queryId=f"q-brief-{i}") for i in range(11)),
+                          totals=(29232, 6, 3))
+    async with assembled(postgres_url, monkeypatch, drv, AUDIT_TARGET) as audit:
+        service, _ = security_channel(audit)
+        old_text = "覆盖不完整；旧说明 10:04:37 原样保留。"
+        message = audit.scripts.add(
+            "brief 安全报告", tool_call("inspect_audit_security", **ARGS),
+            lambda call: answer(evidence_in(call), blocks=[
+                {"type": "text", "text": old_text},
+                *({"type": "fact", "evidence_id": e, "view": "brief"} for e in evidence_in(call)),
+            ]),
+        )
+        async with (
+            serving(create_web_app(service, config()), port=8519), launch(chrome_binary) as chrome,
+        ):
+            page = await chrome.page()
+            await page.navigate("http://127.0.0.1:8519/")
+            await send(page, message)
+            await settled(page, 0, "completed")
+            visible = await page.evaluate(f"{item(0)}.innerText")
+            assert "候选已截断" in visible and "分类计数不完整" in visible
+            assert "已确认至少" in visible and "执行失败" in visible
+            assert "etl" not in visible and "q-brief" not in visible
+            assert "10:04:37" not in await page.evaluate(
+                f"{item(0)}.querySelector('.coverage').textContent"
+            )
+            assert await page.evaluate(f"{item(0)}.querySelector('details').open") is False
+            assert await page.evaluate(f"{item(0)}.querySelectorAll('.fact table').length") == 1
+            collected = audit_reads(drv)
+            await page.navigate("http://127.0.0.1:8519/")  # 由保存请求重新生成历史 Web 展示。
+            await settled(page, 0, "completed")
+            assert old_text in await page.evaluate(f"{item(0)}.innerText")
+            assert audit_reads(drv) == collected and len(audit.scripts.calls[message]) == 2

@@ -11,6 +11,7 @@ from typing import Literal
 
 from xiaowei.feishu_render import (
     business_fact,
+    business_presentation,
     display_text,
     fact_limit_notices,
     fact_scope,
@@ -46,6 +47,7 @@ class _Section:
     first_row: int = 1
     native: bool = False
     business: bool = False
+    presented: bool = False
 
 
 _STYLE = """
@@ -129,14 +131,10 @@ def _fact_section(
 ) -> _Section:
     if business:
         shown = business_fact(fact)
-        values: dict[str, object] = dict(shown.metadata)
-        if shown.columns:
-            values.update(columns=shown.columns, rows=shown.rows)
-        # 文件只保留业务字段，从获准原文恢复其值类型，不附技术元数据。
-        if fact.result_json is not None:
-            original = json.loads(fact.result_json)
-            if isinstance(original, dict):
-                values = {key: original[key] for key in values if key in original}
+        view = business_presentation(fact)
+        values: dict[str, object] = dict(view.fields)
+        if view.columns:
+            values.update(columns=view.columns, rows=view.rows)
         value = json.dumps(values, ensure_ascii=False, allow_nan=False)
         return _Section(
             "fact",
@@ -175,6 +173,31 @@ def _fact_section(
     return _Section("fact", label, _fact_json(fact), meta, notices, fact)
 
 
+def _fact_sections(
+    fact: DeliveryFact, label: str, *, expand_brief: bool, business: bool = False
+) -> list[_Section]:
+    view = business_presentation(fact) if business else None
+    if view is None or view.coverage is None:
+        return [_fact_section(fact, label, expand_brief=expand_brief, business=business)]
+    checks = {"覆盖": view.coverage, "columns": ["检查项", "审计行数"], "rows": view.checks}
+    parts = [_Section(
+        "fact", fact_scope(fact), json.dumps(checks, ensure_ascii=False),
+        notices=view.notices, fact=fact, business=True, presented=True,
+    )]
+    if not fact.historical_brief or expand_brief:
+        samples = {
+            "覆盖": view.coverage,
+            "采集于": fact.captured_at.isoformat(),
+            "columns": view.columns,
+            "rows": view.rows,
+        }
+        parts.append(_Section(
+            "fact", "需要核查 · 代表样本", json.dumps(samples, ensure_ascii=False),
+            fact=fact, business=True,
+        ))
+    return parts
+
+
 def prepare_prose(delivery: Delivery) -> tuple[ReportContent, ...]:
     """One preparation per model block; files and message preview reuse the result."""
     format_ = delivery.report_format
@@ -199,8 +222,8 @@ def _sections(
             if block.evidence_id not in facts:
                 continue  # 动作材料不进附件
             fact = facts[block.evidence_id]
-            parts.append(
-                _fact_section(
+            parts.extend(
+                _fact_sections(
                     fact,
                     delivery.result_label(fact.evidence_id),
                     expand_brief=expand_brief,
@@ -220,24 +243,18 @@ def _sections(
                 )
             )
     placed = {b.evidence_id for b in delivery.blocks if isinstance(b, DeliveryFactRef)}
-    parts.extend(
-        _fact_section(
-            fact,
-            delivery.result_label(fact.evidence_id),
-            expand_brief=expand_brief,
-            business=delivery.answer_version == 4,
-        )
-        for fact in delivery.section("body")
-        if fact.evidence_id not in placed
-    )
-    parts.extend(
-        _fact_section(
+    for fact in delivery.section("body"):
+        if fact.evidence_id not in placed:
+            parts.extend(_fact_sections(
+                fact, delivery.result_label(fact.evidence_id), expand_brief=expand_brief,
+                business=delivery.answer_version == 4,
+            ))
+    for fact in delivery.section("remaining"):
+        parts.extend(_fact_sections(
             fact,
             "其余结果 · " + delivery.result_label(fact.evidence_id),
             expand_brief=expand_brief,
-        )
-        for fact in delivery.section("remaining")
-    )
+        ))
     if delivery.limit_notice:
         parts.append(_Section("notice", "完整性说明", delivery.limit_notice))
     if delivery.monitoring_notice:
@@ -287,7 +304,7 @@ def _json_value(value: object, *, indent: int | None = None) -> str:
     return json.dumps(value, ensure_ascii=False, allow_nan=False, indent=indent)
 
 
-def _html_fact(value: str) -> str:
+def _html_fact(value: str, *, presented: bool = False) -> str:
     data = _decoded(value)
     if data is _INVALID:
         return f'<pre class="raw-code"><code>{_escaped(value)}</code></pre>'
@@ -309,7 +326,8 @@ def _html_fact(value: str) -> str:
         else:
             fields.append(
                 f'<div class="field"><div class="field-name">{_escaped(str(key))}</div>'
-                f'<code class="field-value">{_escaped(_json_value(item))}</code></div>'
+                f'<code class="field-value">'
+                f'{_escaped(str(item) if presented else _json_value(item))}</code></div>'
             )
     body = '<div class="field-grid">' + "".join(fields) + "</div>" if fields else ""
     if table is None:
@@ -328,7 +346,7 @@ def _html_fact(value: str) -> str:
                         f'<td><pre class="sql-code"><code>{_escaped(item)}</code></pre></td>'
                     )
                 else:
-                    rendered = _escaped(_json_value(row[column]))
+                    rendered = _escaped(str(row[column]) if presented else _json_value(row[column]))
                     values.append(f'<td><code class="cell">{rendered}</code></td>')
             cells.append("<tr>" + "".join(values) + "</tr>")
         body += (
@@ -357,9 +375,9 @@ def _safe_md_cell(value: str) -> bool:
 _MD_CELL_MAX = 120
 
 
-def _md_cell(value: object) -> str | None:
+def _md_cell(value: object, *, presented: bool = False) -> str | None:
     """表格单元格：简单值直出，其余放代码片段；多行或过长值返回 None，放表下明细。"""
-    text = _json_value(value)
+    text = str(value) if presented else _json_value(value)
     if (isinstance(value, str) and ("\n" in value or "\r" in value)) or len(text) > _MD_CELL_MAX:
         return None
     if _safe_md_cell(text):
@@ -378,7 +396,7 @@ def _md_label(name: str) -> str:
     return _inline_code(display_text(_json_value(name)))
 
 
-def _md_fact(value: str, first_row: int = 1) -> str:
+def _md_fact(value: str, first_row: int = 1, *, presented: bool = False) -> str:
     data = _decoded(value)
     if data is _INVALID:
         return _fence(display_text(value))
@@ -394,6 +412,8 @@ def _md_fact(value: str, first_row: int = 1) -> str:
         if key in _RAW_FIELDS and isinstance(item, str):
             language = "text" if key == "plan" else "sql"
             blocks.append(f"**{key.upper()} 原文**\n\n{_fence(item, language)}")
+        elif presented:
+            blocks.append(f"**{_md_label(key)}**\n\n{_md_escape(str(item))}")
         else:
             blocks.append(f"**{_md_label(key)}**\n\n{_fence(_json_value(item, indent=2), 'json')}")
     if table is not None:
@@ -413,7 +433,7 @@ def _md_fact(value: str, first_row: int = 1) -> str:
                         cells.append("（未提供）")
                         continue
                     item = row[column]
-                    cell = None if column in _RAW_FIELDS else _md_cell(item)
+                    cell = None if column in _RAW_FIELDS else _md_cell(item, presented=presented)
                     if cell is not None:
                         cells.append(cell)
                         continue
@@ -471,7 +491,7 @@ def _render(
         blocks = []
         for index, section in enumerate(sections, start=1):
             content = (
-                _md_fact(section.value, section.first_row)
+                _md_fact(section.value, section.first_row, presented=section.presented)
                 if section.fact
                 else section.value
                 if section.native
@@ -513,7 +533,10 @@ def _render(
                     f'{notes}<div class="model-prose">{section.value}</div></section>'
                 )
                 continue
-            detail = _html_fact(section.value) if section.fact else _html_prose(section.value)
+            detail = (
+                _html_fact(section.value, presented=section.presented)
+                if section.fact else _html_prose(section.value)
+            )
             meta = f'<p class="meta">{_escaped(section.meta)}</p>' if section.meta else ""
             notes = "".join(f'<p class="notice">{_escaped(item)}</p>' for item in section.notices)
             if natural and section.fact is not None and not section.business:
@@ -643,7 +666,10 @@ def build_reports(
                     notice
                     for fact in delivery.facts
                     if fact.section != "action"
-                    for notice in fact_limit_notices(fact)
+                    for notice in (
+                        business_presentation(fact).notices
+                        if delivery.answer_version == 4 else fact_limit_notices(fact)
+                    )
                 ]
                 + ([delivery.monitoring_notice] if delivery.monitoring_notice else [])
             )

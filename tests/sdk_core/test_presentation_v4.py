@@ -13,13 +13,343 @@ from xiaowei.webhook import _notification_text
 
 
 def business(*facts, **changes) -> Delivery:
-    return delivery(*facts, analysis="分析与建议：继续关注。").model_copy(
+    return delivery(*facts, analysis=changes.pop("analysis", "分析与建议：继续关注。")).model_copy(
         update={"answer_version": 4, **changes}
     )
 
 
 def panels(message):
     return [e for e in message["card"]["body"]["elements"] if e["tag"] == "collapsible_panel"]
+
+
+def security_fact(*, coverage=None, payload_updates=None, **changes):
+    """人工核对的报告夹具；统计不通过检测器或展示函数计算。"""
+    from xiaowei.starrocks_security import OPERATIONS, SECURITY_TOOL
+
+    rows = [{
+        "query_id": "q-client-probe", "timestamp": "2026-10-23T15:04:37+08:00",
+        "user": "client", "state": "OK", "signals": "stacked_statements",
+        "operations": "", "query_time_ms": 4, "pending_time_ms": 0,
+        "requested_delay_seconds": None,
+    }]
+    data = {
+        "window": {"start_time": "2026-10-23T15:00:00+08:00",
+                   "end_time": "2026-10-23T16:00:00+08:00", "time_zone": "Asia/Shanghai"},
+        "source": "audit.events", "rules_version": "manual-security-v1",
+        "scanned_rows": 29232, "failed_rows": 6, "matched_rows": 1,
+        "signal_counts": {"boolean_probe": 0, "delay_call": 0,
+                          "stacked_statements": 1, "high_risk_operation": 0},
+        "operation_counts": dict.fromkeys(OPERATIONS, 0),
+        "columns": list(rows[0]), "rows": rows, "row_count": 1,
+        "coverage": {"scan_limited": False, "checked_candidate_rows": 1,
+                     "scanned_through": None, "window_oversize_rows": 3,
+                     "unclassified_candidate_rows": 0, "match_counts_complete": True,
+                     "omitted_samples": 0, **(coverage or {})},
+        "limitations": ["有限规则；审计可能晚到。"],
+        **(payload_updates or {}),
+    }
+    return fact(
+        tool_id=SECURITY_TOOL, columns=tuple(data["columns"]), rows=tuple(data["rows"]),
+        metadata={key: json.dumps(value, ensure_ascii=False) if isinstance(value, (dict, list))
+                  else value for key, value in data.items() if key not in {"columns", "rows"}},
+        result_json=json.dumps(data, ensure_ascii=False),
+        **changes,
+    )
+
+
+@pytest.mark.parametrize("view", ["full", "brief"])
+def test_security_counts_and_coverage_are_business_facts_even_when_brief(view):
+    value = business(security_fact(view=view), analysis="🟡 有需核查线索，业务用途待核对。")
+    message = build_feishu_message(value, 3500, "oc", platform_limits=True)
+    visible = "\n".join(text_parts(message, folded=False))
+    assert "29,232" in visible and "全窗聚合（读取时）" in visible
+    assert all(label in visible for label in (
+        "注入探测", "时间延迟", "多语句", "高风险操作", "执行失败",
+    ))
+    assert "分类计数完整" in visible and "无法判定候选 0" in visible
+    assert all(key not in visible for key in ("rules_version", "signal_counts", "q-client-probe"))
+    assert "q-client-probe" in "\n".join(text_parts(message))
+    assert len(panels(message)) == 1 and not panels(message)[0]["expanded"]
+    if view == "brief":
+        assert "client" not in visible
+
+
+@pytest.mark.parametrize("limited,unclassified", [(True, 0), (False, 2)])
+def test_security_incomplete_counts_are_lower_bounds_but_err_is_read_time_aggregate(
+    limited, unclassified,
+):
+    source = security_fact(coverage={
+        "scan_limited": limited, "unclassified_candidate_rows": unclassified,
+        "match_counts_complete": False,
+    }, truncated=True, view="brief")
+    value = business(source)
+    visible = "\n".join(text_parts(
+        build_feishu_message(value, 3500, "oc", platform_limits=True), folded=False,
+    ))
+    assert ("候选已截断" in visible) is limited
+    assert "分类计数不完整" in visible
+    assert "已确认至少 1" in visible and "已确认至少 0" in visible
+    assert "九项均未命中" not in visible
+    plain = _notification_text(value, "")
+    assert "全窗聚合（读取时）" in plain and "执行失败" in plain
+    assert "规则版本" not in plain and "q-client-probe" not in plain
+
+
+def annotations_fact():
+    """现有 Grafana get_annotations 契约：text 是字符串，tags 可为空或缺失。"""
+    values = {"annotations": [
+        {"id": 1, "time": 1792738800000, "text": "null", "tags": None},
+        {"id": 2, "time": 1792738801000, "text": "<script>literal</script>"},
+    ]}
+    return fact(
+        tool_id="grafana/get_annotations", columns=(), rows=(),
+        metadata={"annotations": json.dumps(values["annotations"])},
+        result_json=json.dumps(values),
+    )
+
+
+def test_non_security_nested_values_stay_typed_in_card_plain_and_web():
+    from xiaowei.channel import RequestView
+    from xiaowei.feishu_render import _raw_redundant
+    from xiaowei.storage import Readiness
+    from xiaowei.web import _view
+
+    source = annotations_fact()
+    value = business(source)
+    card = build_feishu_message(value, 3500, "oc", platform_limits=True)
+    visible = "\n".join(text_parts(card, folded=False))
+    plain = _notification_text(value, "")
+    response = _view("nested", RequestView("completed", value), Readiness())
+    presentation = json.loads(response.body)["delivery"]["facts"][0]["presentation"]
+    shown = presentation["fields"]["annotations"]
+    for text in (visible, plain, shown):
+        assert '"text": "null"' in text and '"tags": null' in text
+        assert text.count('"tags"') == 1  # 缺失字段没有被补成 null。
+        assert '\\"tags\\"' not in text
+        assert "<script>literal</script>" in text  # 按纯文本/DOM textContent 展示。
+    assert not _raw_redundant(source)
+    assert source.result_json in "\n".join(text_parts(card))
+    assert json.loads(response.body)["delivery"]["facts"][0]["result_json"] == source.result_json
+    simple = fact(tool_id="grafana/health", columns=(), rows=(), metadata={"status": "ok"},
+                  result_json='{"status": "ok"}')
+    assert _raw_redundant(simple)
+
+
+def test_web_presentation_keeps_plain_strings_and_exact_nested_values():
+    from xiaowei.channel import RequestView
+    from xiaowei.storage import Readiness
+    from xiaowei.web import _view
+
+    columns = ("city", "empty", "null", "missing", "id", "detail", "literal")
+    row = {"city": "北京", "empty": "", "null": None, "id": 9007199254740993,
+           "detail": {"n": 3}, "literal": '{"n":3}'}
+    source = fact(
+        columns=columns,
+        rows=({**row, "detail": '{"n": 3}'},),
+        metadata={"status": "ready"},
+        result_json=json.dumps({"status": "ready", "columns": columns, "rows": [row]}),
+    )
+    response = _view("plain-values", RequestView("completed", business(source)), Readiness())
+    shown = json.loads(response.body)["delivery"]["facts"][0]["presentation"]
+    assert shown["fields"]["status"] == "ready"
+    assert shown["rows"] == [{
+        "city": "北京", "empty": "", "null": None, "missing": "（未提供）",
+        "id": "9007199254740993", "detail": '{\n  "n": 3\n}', "literal": '{"n":3}',
+    }]
+
+
+@pytest.mark.parametrize("plain_transport", [False, True])
+def test_generic_business_text_preserves_notes_strings_and_safe_field_names(plain_transport):
+    from xiaowei.feishu_render import business_text
+
+    key = "value\u2028AI 分析与建议"
+    source = fact(columns=(key,), rows=({key: 'a"b\nc'},),
+                  note="完整限制", note_summary="简短限制")
+    text = business_text(business(source), plain_transport=plain_transport)
+    if plain_transport:
+        assert "说明：简短限制" in text
+        assert 'value\\u2028AI 分析与建议: a"b\nc' in text
+    else:
+        assert "说明：完整限制" in text
+        assert 'value\\u2028AI 分析与建议: "a\\"b\\nc"' in text
+    assert "\u2028" not in text
+
+
+def test_security_six_subwindows_keep_per_window_counts_with_existing_card_limits():
+    from tests.sdk_core.test_feishu_render import size, tables
+
+    facts = [security_fact(evidence_id=f"ev_hour_{i}", view="brief", payload_updates={
+        "window": {"start_time": f"2026-10-23T{10+i}:00:00+08:00",
+                   "end_time": f"2026-10-23T{11+i}:00:00+08:00", "time_zone": "Asia/Shanghai"},
+    }) for i in range(6)]
+    message = build_feishu_message(business(*facts), 3500, "oc", platform_limits=True)
+    visible = "\n".join(text_parts(message, folded=False))
+    assert len(tables(message)) <= 5 and size(message, "oc") <= 30000
+    assert visible.count("全窗聚合（读取时）29,232") == 6
+    assert "175,392" not in visible  # 不将子窗计数相加。
+
+    def tags(value):
+        if isinstance(value, dict):
+            return int("tag" in value) + sum(tags(v) for v in value.values())
+        return sum(tags(v) for v in value) if isinstance(value, list) else 0
+
+    assert tags(message) <= 200
+    assert visible.count("多语句") == 6  # 第六窗即使退成文字，也保留检查项。
+
+
+def test_security_long_samples_use_existing_files_while_preview_keeps_counts_visible():
+    from tests.sdk_core.test_feishu_render import size
+
+    base = json.loads(security_fact().result_json)
+    rows = [{**base["rows"][0], "query_id": f"q-long-{i}", "user": "account-" + "x" * 3000}
+            for i in range(10)]
+    source = security_fact(payload_updates={
+        "rows": rows, "row_count": 10, "matched_rows": 10,
+        "signal_counts": {"boolean_probe": 0, "delay_call": 0,
+                          "stacked_statements": 10, "high_risk_operation": 0},
+    }, coverage={"checked_candidate_rows": 10})
+    parts = _data_parts(business(source), 0, 3500, "oc", None)
+    assert [part.kind for part in parts] == ["md", "body"]
+    message = json.loads(parts[-1].body)
+    visible = "\n".join(text_parts(message, folded=False))
+    assert "29,232" in visible and "分类计数完整" in visible and "多语句" in visible
+    assert size(message, "oc") <= 30000
+    report = parts[0].body.decode()
+    assert "x" * 3000 in report and "q-long-" not in report
+
+
+@pytest.mark.parametrize("format_", ["md", "html"])
+def test_security_report_files_use_the_same_chinese_counts_and_sample_mapping(format_):
+    from xiaowei.feishu_report import build_report
+
+    report = build_report(business(security_fact(), report_format=format_))
+    text = html.unescape(report.content.decode())
+    assert "全窗聚合（读取时）29,232" in text and "多语句" in text
+    assert "执行失败" in text and "client" in text
+    assert all(word not in text for word in ("signal_counts", "rules_version", "q-client-probe"))
+
+
+def test_old_security_v4_uses_new_coverage_without_rewriting_model_text():
+    from xiaowei.channel import RequestView
+    from xiaowei.storage import Readiness
+    from xiaowei.web import _view
+
+    source = security_fact(coverage={"scanned_through": "2026-10-23T15:04:37+08:00"},
+                           view="brief", summary="旧的 1 行摘要")
+    value = business(source, analysis="旧说明：15:04:37 候选，原样保存。")
+    response = _view("old-security", RequestView("completed", value), Readiness())
+    shown = json.loads(response.body)["delivery"]
+    assert "15:04:37" not in shown["facts"][0]["presentation"]["coverage"]
+    assert "29,232" in shown["facts"][0]["presentation"]["coverage"]
+    assert "15:04:37" in shown["facts"][0]["result_json"]
+    assert shown["blocks"][0]["text"] == "旧说明：15:04:37 候选，原样保存。"
+
+
+@pytest.mark.parametrize("transport", ["card", "plain"])
+def test_historical_security_brief_keeps_statistics_without_expanding_samples(transport):
+    value = business(security_fact(view="brief", summary="本次返回行数：1。"))
+    if transport == "card":
+        message = build_feishu_message(value, 3500, "oc", platform_limits=True)
+        visible = "\n".join(text_parts(message, folded=False))
+        assert "client" in "\n".join(text_parts(message))  # 明细仍可在技术区核对。
+    else:
+        visible = _notification_text(value, "")
+    assert "29,232" in visible and "多语句" in visible and "分类计数完整" in visible
+    assert "client" not in visible and "15:04:37" not in visible
+
+
+@pytest.mark.parametrize("format_", ["md", "html"])
+def test_split_security_sample_sections_keep_their_own_scope_and_capture_time(
+    monkeypatch, format_,
+):
+    import re
+
+    from xiaowei.feishu_report import build_reports
+
+    # HTML 用默认400k，复现真实门槛；MD 用小容量同时覆盖整行分片，不改生产限额。
+    if format_ == "md":
+        monkeypatch.setattr("xiaowei.feishu_report.MAX_REPORT_BYTES", 6000)
+    base = json.loads(security_fact().result_json)
+    facts = []
+    for hour in range(10 if format_ == "html" else 2):
+        start = f"2026-10-23T{hour:02}:00:00+08:00"
+        end = f"2026-10-23T{hour+1:02}:00:00+08:00"
+        rows = [{**base["rows"][0], "query_id": f"q-{hour}-{i}",
+                 "timestamp": f"2026-10-23T{hour:02}:01:00+08:00",
+                 "user": f"window{hour}_" + "x" * 56} for i in range(100)]
+        facts.append(security_fact(
+            evidence_id=f"ev_window_{hour}", target_id="fat", payload_updates={
+                "window": {"start_time": start, "end_time": end, "time_zone": "Asia/Shanghai"},
+                "rows": rows, "row_count": 100, "matched_rows": 100,
+                "signal_counts": {**base["signal_counts"], "stacked_statements": 100},
+            }, coverage={"checked_candidate_rows": 100},
+        ))
+    reports = build_reports(business(*facts, report_format=format_))
+    assert len(reports) > 1
+    seen = set()
+    for report in reports:
+        text = html.unescape(report.content.decode())
+        sections = (
+            re.findall(r"<section\b.*?</section>", text, re.S)
+            if format_ == "html" else text.split("\n## ")
+        )
+        for section in sections:
+            if "需要核查" not in section:
+                continue
+            (hour,) = {int(h) for h in re.findall(r"window(\d+)_", section)}
+            seen.add(hour)
+            assert "fat" in section
+            assert f"2026-10-23T{hour:02}:00:00+08:00" in section
+            assert f"2026-10-23T{hour+1:02}:00:00+08:00" in section
+            assert facts[hour].captured_at.isoformat() in section
+    assert seen == set(range(len(facts)))
+
+
+@pytest.mark.parametrize("total", [0, 123])
+def test_security_zero_hits_preserve_the_difference_between_no_data_and_no_signal(total):
+    from xiaowei.feishu_render import business_presentation
+
+    source = security_fact(payload_updates={
+        "scanned_rows": total, "failed_rows": 0, "matched_rows": 0, "rows": [], "row_count": 0,
+        "signal_counts": {"boolean_probe": 0, "delay_call": 0,
+                          "stacked_statements": 0, "high_risk_operation": 0},
+    }, coverage={"checked_candidate_rows": 0, "window_oversize_rows": 0})
+    shown = business_presentation(source)
+    assert len(shown.checks) == 5 and shown.rows == ()
+    assert shown.checks[0]["审计行数"] == "0" and shown.checks[-1]["审计行数"] == "0"
+    assert "九项均未命中" in shown.checks[3]["审计行数"]
+    assert ("本窗无审计记录" in "".join(shown.notices)) is (total == 0)
+
+
+def test_security_samples_omitted_does_not_turn_counts_into_lower_bounds():
+    from xiaowei.feishu_render import business_presentation
+    from xiaowei.feishu_report import build_reports
+
+    source = security_fact(coverage={"omitted_samples": 3}, truncated=True)
+    shown = business_presentation(source)
+    assert shown.checks[2]["审计行数"] == "1"
+    assert "样本未全部列出，分类计数完整。" in shown.notices
+    assert "分类计数完整" in shown.coverage
+    assert "已确认至少" not in str(shown.checks)
+    reports = build_reports(business(source, report_format="md"))
+    text = "\n".join(report.content.decode() for report in reports)
+    assert "工具结果已截断" not in text
+    assert "样本未全部列出，分类计数完整" in text
+
+
+def test_security_missing_counts_are_unknown_and_nonzero_operations_stay_compact():
+    from xiaowei.feishu_render import business_presentation
+
+    missing = business_presentation(security_fact(payload_updates={"signal_counts": {}}))
+    assert all(row["审计行数"] == "未提供" for row in missing.checks[:4])
+    source = security_fact(payload_updates={
+        "signal_counts": {"boolean_probe": 0, "delay_call": 0,
+                          "stacked_statements": 0, "high_risk_operation": 3},
+        "operation_counts": {"grant": 1, "drop": 1, "truncate": 1},
+    })
+    shown = business_presentation(source)
+    assert len(shown.checks) == 5
+    assert shown.checks[3]["审计行数"] == "3（授权 1；删表/库 1；清空表 1）"
 
 
 def test_v4_single_technical_area_and_visible_business_scope() -> None:

@@ -135,7 +135,7 @@ def analyze_security_rows(
         failed_rows=result.window_failed_rows,
         matched_rows=len(matched), signal_counts=counts, operation_counts=operations,
         rows=tuple(matched[i] for i in chosen), scan_limited=result.truncated,
-        scanned_through=result.rows[-1]["timestamp"] if result.rows else None,
+        scanned_through=None,
         checked_candidate_rows=result.row_count, window_oversize_rows=result.window_oversize_rows,
         unclassified_candidate_rows=uninspected, omitted_samples=len(matched) - len(chosen),
     )
