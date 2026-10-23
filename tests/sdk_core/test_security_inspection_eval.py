@@ -47,6 +47,12 @@ def security_driver(*rows, totals=(12, 2, 0), missing=()):
     return drv
 
 
+def audit_reads(drv):
+    """仅审计聚合/候选；当前权限和依赖复核的 I/O 不属于重新取数。"""
+    return [(sql, args) for c in drv.connections for sql, args in c.executed
+            if "AS window_rows" in sql or "stmt_present" in sql]
+
+
 def enabled(env):
     env.grants.grant("alice", SECURITY_TOOL, target=AUDIT_TARGET.target_id)
     env.app = env.application(app_config(
@@ -55,6 +61,46 @@ def enabled(env):
             input=SessionInputPolicy(max_bytes=2000), model_tools=TOOLS,
         )},
     ))
+
+
+def security_channel(env):
+    """复用本地 StarRocks 装配，入口与 Evidence 使用同一授权来源。"""
+    from pydantic import SecretStr
+    from tests.sdk_core.test_channel_service import Access
+
+    from xiaowei.channel import AccessDecision, ChannelService, ResultDelivery
+    from xiaowei.channel_store import ChannelStore
+    from xiaowei.evidence import EvidenceStore
+    from xiaowei.governance import GovernedTools
+    from xiaowei.starrocks_schema import DependencyCheck
+    from xiaowei.storage import Readiness
+
+    class AuditAccess(Access):
+        async def resolve(self, channel, subject_id):
+            tools = frozenset(t for s, target, t in self.grants.allowed
+                              if s == subject_id and target == AUDIT_TARGET.target_id)
+            return AccessDecision(
+                subject_id=subject_id, target_ids=frozenset({AUDIT_TARGET.target_id}),
+                authorized_tools=tools, policy_version="p1",
+            ) if tools else None
+
+    access = AuditAccess(env.grants)
+    evidence = EvidenceStore(
+        env.engine, env.evidence.catalog, authorize=access.authorize, clock=env.clock,
+        retention_seconds=3600,
+        verify_dependencies=DependencyCheck({AUDIT_TARGET.target_id: env.adapter}),
+    )
+    env.governed = GovernedTools(evidence)
+    enabled(env)
+    store = ChannelStore(
+        env.engine, key=SecretStr("synthetic-security-channel-key"), clock=env.clock,
+        readiness=Readiness(),
+        request_retention_seconds=3600, session_retention_seconds=7200,
+        evidence_retention_seconds=3600, max_answer_bytes=4000,
+    )
+    return ChannelService(env.app, ResultDelivery(
+        store, evidence, access, budget=env.ctx(authorized=TOOLS).budget,
+    )), store
 
 
 @pytest.mark.parametrize("cite_fact", [True, False])
@@ -174,13 +220,21 @@ async def test_s2_s4_business_facts_use_the_same_sdk_and_evidence_path(
         )
         delivery = await env.deliver(env.ctx(authorized=TOOLS), message)
         data = json.loads(delivery.facts[0].result_json)
+        from xiaowei.feishu_render import business_presentation
+
+        shown = business_presentation(delivery.facts[0])
         assert data["matched_rows"] == matched
         assert {k: v for k, v in data["signal_counts"].items() if v} == signal_counts
         if case == "S4":
             assert data["operation_counts"]["drop"] == 1
             assert next(row for row in data["rows"] if row["query_id"] == "q1")["state"] == "ERR"
+            assert {row["操作"]: row["执行状态"] for row in shown.rows} == {
+                "授权": "OK", "删表/库": "ERR", "清空表": "OK",
+            }
         if case == "S2":
             assert all(row["requested_delay_seconds"] == 5 for row in data["rows"])
+            assert all(row["请求延迟（s）"] == 5 and row["排队时间（ms）"] == 0
+                       and row["实际耗时（ms）"] == 5 for row in shown.rows)
 
 
 async def test_security_facts_render_with_existing_report_and_feishu_components(
@@ -200,8 +254,9 @@ async def test_security_facts_render_with_existing_report_and_feishu_components(
         for format_ in ("md", "html"):
             report = build_report(delivery.model_copy(update={"report_format": format_}))
             body = report.content.decode()
-            assert "q-security-report" in body and "scanned_rows" in body
-            assert "match_counts_complete" in body and "unclassified_candidate_rows" in body
+            assert "全窗聚合（读取时）12" in body and "授权" in body
+            assert "无法判定候选 0" in body
+            assert "q-security-report" not in body and "scanned_rows" not in body
 
 
 @pytest.mark.parametrize("case", [1, 2, 3, 4, 5])
@@ -249,6 +304,34 @@ async def test_global_oversize_rows_do_not_create_a_truncated_fact(postgres_url,
         assert data["coverage"]["window_oversize_rows"] == 135
         assert data["coverage"]["unclassified_candidate_rows"] == 0
         assert data["coverage"]["match_counts_complete"] and not fact.truncated
+
+
+@pytest.mark.parametrize("incomplete", [False, True], ids=["R1-complete", "R4-lower-bound"])
+async def test_report_presentation_through_formal_sdk_and_channel_projection(
+    postgres_url, monkeypatch, incomplete,
+):
+    from xiaowei.channel import RequestView
+    from xiaowei.storage import Readiness
+    from xiaowei.web import _view
+
+    rows = [record("SHOW VARIABLES; SELECT 1 /* raw-report-canary */", queryId=f"q-report-{i}")
+            for i in range(11 if incomplete else 1)]
+    drv = security_driver(*rows, totals=(29232, 6, 3))
+    async with assembled(postgres_url, monkeypatch, drv, AUDIT_TARGET) as env:
+        enabled(env)
+        message = env.scripts.add("本窗报告", tool_call("inspect_audit_security", **ARGS), cite())
+        delivery = await env.deliver(env.ctx(authorized=TOOLS), message)
+        response = _view("security-report", RequestView(state="completed", delivery=delivery),
+                         Readiness())
+        shown = json.loads(response.body)["delivery"]["facts"][0]["presentation"]
+        assert "29,232" in shown["coverage"] and "无法判定候选 0" in shown["coverage"]
+        assert ("分类计数不完整" in shown["coverage"]) is incomplete
+        assert len(shown["checks"]) == 5
+        assert shown["checks"][-1]["审计行数"] == "6"
+        assert ("已确认至少" in shown["checks"][2]["审计行数"]) is incomplete
+        assert "raw-report-canary" not in response.body.decode()
+        assert len(env.scripts.calls[message]) == 2 and await env.evidence_rows() == 1
+        assert sum("AS window_rows" in sql for c in drv.connections for sql, _ in c.executed) == 1
 
 
 async def test_sdk_can_correct_window_after_precheck_without_a_custom_retry_loop(

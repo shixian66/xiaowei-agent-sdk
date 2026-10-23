@@ -11,14 +11,16 @@ JSON 2.0 要求客户端 >=7.20。纯文本表格最多五个，额外/宽表用
 import json
 import re
 import unicodedata
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from collections.abc import Set as AbstractSet
+from dataclasses import dataclass
 from datetime import datetime
-from typing import Any, Final
+from typing import Any, Final, cast
 from zoneinfo import ZoneInfo
 
 from xiaowei.feishu_markdown import format_prose, prose_post
-from xiaowei.models import Delivery, DeliveryFact, DeliveryFactRef, JsonScalar
+from xiaowei.models import Delivery, DeliveryFact, DeliveryFactRef
+from xiaowei.starrocks_security import SECURITY_TOOL
 
 MAX_REQUEST_BYTES: Final = 30_000
 CAPACITY_NOTICE: Final = "结果未展示：单消息容量不足。可缩小问题范围后重新提问；本次仅发送此说明。"
@@ -162,7 +164,7 @@ def _div(text: str) -> Message:
     return {"tag": "div", "text": _plain(text)}
 
 
-def _cell(row: dict[str, JsonScalar], name: str) -> str:
+def _cell(row: Mapping[str, object], name: str) -> str:
     if name not in row:
         return "（未提供）"
     value = row[name]
@@ -171,7 +173,151 @@ def _cell(row: dict[str, JsonScalar], name: str) -> str:
     if isinstance(value, str):
         # 字符串加引号，保留类型区别；先转义字面反斜杠/引号，再显示不可见控制符。
         return '"' + display_text(value.replace("\\", "\\\\").replace('"', '\\"')) + '"'
-    return json.dumps(value, ensure_ascii=False, allow_nan=False)
+    return display_text(json.dumps(
+        value, ensure_ascii=False, allow_nan=False,
+        indent=2 if isinstance(value, (dict, list)) else None,
+    ))
+
+
+@dataclass(frozen=True)
+class FactPresentation:
+    """从当前渠道获准事实即时派生；不保存、不授予权限，也不进入模型。"""
+
+    fields: dict[str, object]
+    columns: tuple[str, ...]
+    rows: tuple[dict[str, object], ...]
+    coverage: str | None = None
+    checks: tuple[dict[str, str], ...] = ()
+    notices: tuple[str, ...] = ()
+
+    def for_web(self) -> dict[str, object]:
+        """服务端保真格式化，避免浏览器损失大整数或猜测 JSON 字符串。"""
+        return {
+            "fields": {key: _cell(self.fields, key) for key in self.fields},
+            "columns": self.columns,
+            "rows": [{key: _cell(row, key) for key in self.columns} for row in self.rows],
+            "coverage": self.coverage, "checks": self.checks, "notices": self.notices,
+        }
+
+
+def fact_values(fact: DeliveryFact) -> dict[str, object]:
+    """只恢复同一 DeliveryFact 的获准原值；不解析长得像 JSON 的业务字符串。"""
+    if fact.result_json is not None:
+        original = json.loads(fact.result_json)
+        if isinstance(original, dict):
+            return cast(dict[str, object], original)
+    values: dict[str, object] = dict(fact.metadata)
+    if fact.columns:
+        values.update(columns=fact.columns, rows=fact.rows)
+    return values
+
+
+_SIGNAL_LABELS: Final = {
+    "boolean_probe": "注入探测（OR 同值常量线索）",
+    "delay_call": "时间延迟调用线索",
+    "stacked_statements": "多语句",
+    "high_risk_operation": "高风险操作（审计行）",
+}
+_OPERATION_LABELS: Final = {
+    "grant": "授权", "revoke": "撤权", "account": "账号/角色", "password": "口令修改",
+    "drop": "删表/库", "truncate": "清空表", "export": "导出",
+    "insert_overwrite": "覆盖写入", "delete_no_where": "无 WHERE DELETE",
+}
+
+
+def _security_presentation(fact: DeliveryFact, data: dict[str, object]) -> FactPresentation:
+    coverage = data.get("coverage")
+    window = data.get("window")
+    signals = data.get("signal_counts")
+    operations = data.get("operation_counts")
+    cov = coverage if isinstance(coverage, dict) else {}
+    win = window if isinstance(window, dict) else {}
+    counts = signals if isinstance(signals, dict) else {}
+    ops = operations if isinstance(operations, dict) else {}
+    complete = cov.get("match_counts_complete") is True
+
+    def number(value: object) -> str:
+        return f"{value:,}" if isinstance(value, int) else "未提供"
+
+    def count(value: object) -> str:
+        shown = number(value)
+        return f"已确认至少 {shown} 条" if not complete and isinstance(value, int) else shown
+
+    checks = []
+    for key, label in _SIGNAL_LABELS.items():
+        shown = count(counts.get(key))
+        if key == "high_risk_operation":
+            details = [f"{name} {count(ops.get(op))}" for op, name in _OPERATION_LABELS.items()
+                       if isinstance(ops.get(op), int) and ops[op] != 0]
+            if details:
+                shown += "（" + "；".join(details) + "）"
+            elif complete and counts.get(key) == 0 and all(
+                ops.get(op) == 0 for op in _OPERATION_LABELS
+            ):
+                shown += "（授权、删表、清表等九项均未命中）"
+        checks.append({"检查项": label, "审计行数": shown})
+    checks.append({"检查项": "执行失败（ERR，全窗聚合，读取时）",
+                   "审计行数": number(data.get("failed_rows"))})
+
+    limited = cov.get("scan_limited")
+    scope = (
+        f"{fact.target_id} · [{win.get('start_time', '未提供')}, {win.get('end_time', '未提供')})"
+        f"（{win.get('time_zone', '时区未提供')}）｜全窗聚合（读取时）"
+        f"{number(data.get('scanned_rows'))} 条｜"
+        + ("候选已截断" if limited is True else
+           "候选未截断" if limited is False else "候选范围未提供")
+        + ("｜分类计数完整" if complete else "｜分类计数不完整")
+        + f"｜全窗超长记录 {number(cov.get('window_oversize_rows'))} 条"
+        + f"｜无法判定候选 {number(cov.get('unclassified_candidate_rows'))} 条"
+    )
+    notices = ["仅为有限规则的安全线索；审计可能晚到，采集与规则覆盖存在缺口，"
+               "不证明攻击成功或维护未经授权。"]
+    if data.get("scanned_rows") == 0:
+        notices.insert(0, "本窗无审计记录，无法据此判断。")
+    omitted = cov.get("omitted_samples")
+    if isinstance(omitted, int) and omitted > 0:
+        notices.append("样本未全部列出，分类计数完整。" if complete else "样本未全部列出。")
+
+    def labels(value: object, names: dict[str, str]) -> str:
+        if isinstance(value, str):
+            keys = value.split(", ") if value else []
+        else:
+            keys = cast(list[str], value) if isinstance(value, list) else []
+        return "、".join(names.get(key, key) for key in keys) or "无"
+
+    source_rows = cast(Sequence[dict[str, object]], data.get("rows", fact.rows))
+    columns: tuple[str, ...] = ("样本", "时间", "账号", "信号", "操作", "执行状态")
+    delay = any("delay_call" in str(row.get("signals", "")) for row in source_rows)
+    if delay:
+        columns += ("实际耗时（ms）", "排队时间（ms）", "请求延迟（s）")
+    rows = []
+    for index, row in enumerate(source_rows, 1):
+        shown_row: dict[str, object] = {"样本": index}
+        for name, key in (("时间", "timestamp"), ("账号", "user"), ("执行状态", "state"),
+                          ("实际耗时（ms）", "query_time_ms"),
+                          ("排队时间（ms）", "pending_time_ms"),
+                          ("请求延迟（s）", "requested_delay_seconds")):
+            if name in columns and key in row:
+                shown_row[name] = row[key]
+        shown_row["信号"] = labels(row.get("signals"), _SIGNAL_LABELS)
+        shown_row["操作"] = labels(row.get("operations"), _OPERATION_LABELS)
+        rows.append(shown_row)
+    return FactPresentation({}, columns, tuple(rows), scope, tuple(checks), tuple(notices))
+
+
+def business_presentation(fact: DeliveryFact) -> FactPresentation:
+    """各渠道共享业务选择与原值，工具专属口径只在这里维护。"""
+    data = fact_values(fact)
+    if fact.tool_id == SECURITY_TOOL:
+        return _security_presentation(fact, data)
+    shown = business_fact(fact)
+    return FactPresentation(
+        {key: data[key] for key in shown.metadata if key in data},
+        shown.columns,
+        tuple(cast(Sequence[dict[str, object]], data.get("rows", shown.rows)))
+        if shown.columns else (),
+        notices=fact_limit_notices(fact),
+    )
 
 
 def _raw_redundant(fact: DeliveryFact) -> bool:
@@ -253,6 +399,29 @@ def business_text(
         return display_text(value, multiline=plain_transport)
 
     def lines(fact: DeliveryFact) -> list[str]:
+        if delivery.answer_version == 4 and not fact.requires_complete:
+            view = business_presentation(fact)
+            result = [fact_scope(fact)]
+            if view.coverage is not None:
+                result.append(view.coverage)
+            elif fact.note_summary or fact.note:
+                result.append("说明：" + rendered(fact.note_summary or fact.note or ""))
+            result.extend(view.notices)
+            if fact.historical_brief and not view.checks:
+                return [*result, fact.summary or ""]
+            result.extend(f"{item['检查项']}: {item['审计行数']}" for item in view.checks)
+            result.extend(
+                f"{_ACTION_LABELS.get(key, key)}: {rendered(_cell(view.fields, key))}"
+                for key in view.fields if key != "approval_command" or include_approval_command
+            )
+            for index, business_row in enumerate(view.rows, 1):
+                result.append(f"第 {index} 行")
+                result.extend(
+                    f"{key}: {rendered(_cell(business_row, key))}" for key in view.columns
+                )
+            if view.columns and not view.rows:
+                result.append("（无数据行）")
+            return result
         source = business_fact(fact)
         result = [
             fact_scope(fact),
@@ -313,20 +482,29 @@ def business_text(
 
 def _data(
     fact: DeliveryFact, *, business: bool = False
-) -> tuple[tuple[str, ...], tuple[dict[str, JsonScalar], ...]]:
+) -> tuple[tuple[str, ...], tuple[dict[str, object], ...]]:
     if business:
-        fact = business_fact(fact)
+        shown = business_presentation(fact)
+        if fact.historical_brief and not shown.checks:
+            return (), ()
+        if shown.columns:
+            return shown.columns, shown.rows
+        return ("字段", "值"), tuple({"字段": k, "值": v} for k, v in shown.fields.items())
     if fact.historical_brief:
         return (), ()
     if fact.columns:
-        return fact.columns, fact.rows
+        return fact.columns, tuple(dict(row) for row in fact.rows)
     # 非表格 MCP/标量结果也展示获准事实，技术字段留在折叠区。
-    rows = tuple({"字段": k, "值": v} for k, v in fact.metadata.items() if k not in _TECHNICAL)
+    rows: tuple[dict[str, object], ...] = tuple(
+        {"字段": k, "值": v} for k, v in fact.metadata.items() if k not in _TECHNICAL
+    )
     return ("字段", "值"), rows
 
 
-def _row_text(fact: DeliveryFact, rows: Sequence[dict[str, JsonScalar]]) -> str:
-    columns, _ = _data(fact)
+def _row_text(
+    fact: DeliveryFact, rows: Sequence[dict[str, object]], *, business: bool = False
+) -> str:
+    columns, _ = _data(fact, business=business)
     return "\n\n".join(
         f"第 {index} 行\n"
         + "\n".join(
@@ -427,12 +605,37 @@ def _card(
     row_details: dict[int, str] = {}
     index_of = {fact.evidence_id: i for i, fact in enumerate(delivery.facts)}
 
+    def add_table(
+        columns: tuple[str, ...], rows: Sequence[Mapping[str, object]], *, formatted: bool = False
+    ) -> None:
+        nonlocal tables
+
+        def cell(row: Mapping[str, object], name: str) -> str:
+            return display_text(str(row[name])) if formatted else _cell(row, name)
+
+        if len(columns) <= 50 and tables < 5:
+            elements.append({
+                "tag": "table", "page_size": 10, "row_height": "auto",
+                "columns": [
+                    {"name": f"c{i}", "display_name": display_text(name), "data_type": "text"}
+                    for i, name in enumerate(columns)
+                ],
+                "rows": [
+                    {f"c{i}": cell(row, name) for i, name in enumerate(columns)} for row in rows
+                ],
+            })
+            tables += 1
+        else:
+            elements.extend(_div("\n".join(f"{name}: {cell(row, name)}" for name in columns))
+                            for row in rows)
+
     def fact_elements(index: int) -> None:
         nonlocal tables, region
         fact = delivery.facts[index]
         if not modern and region != fact.section and (fact.section == "action" or not preview):
             elements.append(_div("动作材料" if fact.section == "action" else FACT_LABEL))
         region = fact.section
+        shown = business_presentation(fact) if modern and not fact.requires_complete else None
         columns, all_rows = _data(fact, business=modern)
         rows = all_rows[: counts[index]]
         if fact.requires_complete:
@@ -450,9 +653,9 @@ def _card(
             elements.append(_div(f"{delivery.result_label(fact.evidence_id)} · {fact.target_id}"))
         elif index not in folded and not fact.historical_brief:
             elements.append(_div(f"数据 · {fact.target_id}"))
-        if fact.note_summary or (
+        if not (shown and shown.coverage) and (fact.note_summary or (
             fact.note is not None and (modern or not preview or fact.section == "action")
-        ):
+        )):
             elements.append(
                 _div(
                     f"说明：{fact.note}"
@@ -477,13 +680,16 @@ def _card(
                 text = display_text(value) if isinstance(value, str) else _cell({key: value}, key)
                 elements.append(_div(f"{_ACTION_LABELS.get(key, key)}：{text}"))
             return
+        if shown is not None and shown.coverage is not None:
+            elements.append(_div(shown.coverage))
+            add_table(("检查项", "审计行数"), shown.checks, formatted=True)
         visible_metadata = (
             {
                 key: value
                 for key, value in (
-                    business_fact(fact).metadata if modern else fact.metadata
+                    shown.fields if shown is not None else fact.metadata
                 ).items()
-                if key not in _TECHNICAL and fact.columns and value is not None
+                if key not in _TECHNICAL and fact.columns and (modern or value is not None)
             }
             if modern or not preview or fact.section == "action"
             else {}
@@ -493,12 +699,14 @@ def _card(
                 _div(f"{key}: {_cell({key: value}, key)}")
                 for key, value in visible_metadata.items()
             )
-        elements.extend(_div(notice) for notice in fact_limit_notices(fact))
+        elements.extend(_div(notice) for notice in (
+            shown.notices if shown is not None else fact_limit_notices(fact)
+        ))
         if index in folded:
             if modern and index not in technical and not attachment:
                 elements.append(_div(BRIEF_ORIGINAL_OMITTED))
             if not attachment:
-                row_details[index] = _row_text(fact, rows) or (
+                row_details[index] = _row_text(fact, rows, business=modern) or (
                     "明细未展示。" if all_rows else "（无数据行）"
                 )
                 if not modern and fact.tool_id in _ACTUAL_SQL and index not in sqls:
@@ -526,7 +734,7 @@ def _card(
                     )
                 )
             )
-        if fact.historical_brief:
+        if fact.historical_brief and not (shown and shown.checks):
             elements.append(_div(fact.summary or ""))
             if omissions and fact.result_json is not None and index not in technical:
                 elements.append(_div(BRIEF_ORIGINAL_OMITTED))
@@ -544,27 +752,8 @@ def _card(
                     elements.append(
                         _div(str(row[name]) if name == "ddl" else f"{name}: {_cell(row, name)}")
                     )
-        elif len(columns) <= 50 and tables < 5:
-            elements.append(
-                {
-                    "tag": "table",
-                    "page_size": 10,
-                    "row_height": "auto",
-                    "columns": [
-                        {"name": f"c{i}", "display_name": display_text(name), "data_type": "text"}
-                        for i, name in enumerate(columns)
-                    ],
-                    "rows": [
-                        {f"c{i}": _cell(row, name) for i, name in enumerate(columns)}
-                        for row in rows
-                    ],
-                }
-            )
-            tables += 1
         else:
-            elements.extend(
-                _div("\n".join(f"{name}: {_cell(row, name)}" for name in columns)) for row in rows
-            )
+            add_table(columns, rows)
 
     def fact_details(index: int) -> None:
         fact = delivery.facts[index]

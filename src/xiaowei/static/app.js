@@ -65,6 +65,43 @@
     if (!modern) (action ? box : details).append(el("p", "meta", `采集于 ${fact.captured_at}`));
     const meta = [`来源 ${fact.tool_id}`, `目标 ${fact.target_id}`];
     if (!modern) (action ? box : details).append(el("p", "meta", `${label} · ${meta.join(" · ")}`));
+    if (modern && !action && fact.presentation) {
+      const shown = fact.presentation;
+      const table = (columns, rows, target) => {
+        if (!target || !columns.length) return;
+        const node = el("table");
+        const head = node.createTHead().insertRow();
+        for (const column of columns) head.append(el("th", "", column));
+        const body = node.createTBody();
+        for (const row of rows) {
+          const tr = body.insertRow();
+          for (const column of columns) tr.append(el("td", "", row[column]));
+        }
+        const wrap = el("div", "table-wrap");
+        wrap.append(node);
+        target.append(wrap);
+        if (!rows.length) target.append(el("p", "content", "未返回数据行"));
+      };
+      if (shown.coverage) {
+        box.append(el("p", "content coverage", shown.coverage));
+        table(Object.keys(shown.checks[0] || {}), shown.checks, box);
+        for (const text of shown.notices) box.append(el("p", "note", text));
+      } else {
+        if (fact.note) box.append(el("p", "note", `说明：${fact.note}`));
+        if (fact.note_summary) box.append(el("p", "note", fact.note_summary));
+        if (brief && fact.summary) box.append(el("p", "content fact-summary", fact.summary));
+      }
+      const target = folded ? technical : box;
+      for (const [key, value] of Object.entries(shown.fields)) {
+        if (target) target.append(el("p", "content", `${key}: ${value}`));
+      }
+      table(shown.columns, shown.rows, target);
+      if (technical && fact.result_json != null) {
+        technical.append(el("p", "meta", "本次结果原文（仅含获准展示字段）"));
+        technical.append(el("pre", "content original", fact.result_json));
+      }
+      return box;
+    }
     if (brief && fact.summary) box.append(el("p", "content fact-summary", fact.summary));
     if (fact.note) (modern || action ? box : details).append(el("p", "note", `说明：${fact.note}`));
     if (fact.note_summary) box.append(el("p", "note", fact.note_summary));
