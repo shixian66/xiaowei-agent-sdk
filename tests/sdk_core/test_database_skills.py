@@ -139,7 +139,6 @@ def test_security_skill_is_short_and_only_loaded_for_registered_security_capabil
     capabilities["pre"].append("local/inspect_audit_security")
     assert body in _instructions(DEFAULT_INSTRUCTIONS, TARGETS, capabilities)
     assert body not in assembled()
-    assert "专用安全巡检能力未登记" in assembled()
     assert body not in _instructions(DEFAULT_INSTRUCTIONS, (), {})
     for rule in ("match_counts_complete", "已确认下界", "不相加", "不固定", "EXPLAIN", "正常"):
         assert rule in body

@@ -1597,8 +1597,6 @@ def _delivery(
     )
     if config.scheduled_tasks is not None:
         automatic = config.scheduled_tasks.automatic_tools
-        if SECURITY_TOOL in automatic:
-            raise ValueError("automatic_tools 不支持 inspect_audit_security：该工具仅支持手动巡检")
         allowed = {
             c.tool_id
             for c in catalog.contracts

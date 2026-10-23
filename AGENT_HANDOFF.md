@@ -9,14 +9,14 @@
 | 项目 | 已核对事实 |
 | --- | --- |
 | 仓库 | [shixian66/xiaowei-agent-sdk](https://github.com/shixian66/xiaowei-agent-sdk) |
-| 产品代码基线 | 已审查分支 ce52831 基于 `main@1a92c58`；PR 集成更新至 `main@96c965ceb32a898bbd805df9d7d525beb9b0000b`（#127 代理、#128 手动安全巡检均保留）；复用代理隔离工作树，分支 `codex/feishu-input-presentation-plan`；D 的 codex/node-exporter-core 工作树及原目录修改均保留 |
+| 产品代码基线 | `main@b7d033caa36b47cae1d9cfab5bc099c0f46911b4`（含 #128 安全巡检及 #129 输入/展示）；安全巡检分支 `codex/manual-starrocks-security` 已 rebase 至此且无冲突，工作树 `/Users/kloenguyen/.codex/worktrees/manual-starrocks-security/agent-SDK`；原目录及其他对话工作树均保留 |
 | 源码与检查 | 当前源码仅保留 `src/xiaowei`；旧工程及专属测试、Compose、迁移入口、`compose-smoke` CI 和 Alembic 依赖已移除。保留产品测试、公共检查与旧回答兼容路径；旧工程历史可从 Git 查回 |
 | 当前存储与回答 | 应用 schema v15 不变；C 扩展已有 job、逐次 run/通知关联；014 已发布不改，015 显式升级。当前本地新回答保存 v4，旧 v2/v3/Legacy 与已绑定交付保持原语义，SDK 表不改 |
 | 锁定依赖 | SDK `0.22.3`、Lark Channel `1.4.0`、MCP `2.2.0`、sqlglot `30.17.0`、`nh3 0.3.7`、`tinycss2 1.5.1`、Pillow `13.0.0`、certifi `2026.10.19`（后两项为严格审计发现的既有漏洞定向升级） |
 | 正式入口 | `xiaowei serve`、`config check`、`model check`、`storage init/upgrade/cleanup`、`requests resend`；命令与环境准备以 README 为准 |
 | 最近有记录的公司部署 | 主线交接记录含用户提供的 `xiaowei:143c4c8641be636c41c130329ce1639a36b59c27` 镜像及巡检日志；未独立核验当前服务器状态。本次未部署 |
 | 当前验收结论 | A/B/C 与代理已合入主线；S0/S2 已通过独立复审。S1 首版 c44bbdf 全套通过；Claude 对 d29c2f0（受测 af797c0）确认 P1/P2(b) 通过，P2(a) 附件回答优先级回归已在 b08c042 本地修复并定向验证，用户确认 ce52831 复审通过；真实模型、平台输入/识图、客户端与 U5/U6/U7 仍未验收，D 暂停且未实现。精确版本和证据见 §5 |
-| 当前任务授权 | 起点 b2761c8：用户接受 v4 前向修复、不恢复旧备份，授权 S1 本地实现、测试与提交；用户已确认 ce52831 复审通过并授权推送、开 PR、CI 全绿后合并。保留最新 main，常规集成冲突在隔离分支解决；不推进 D、不部署，不调用真实服务/模型或读取公司配置凭据 |
+| 当前任务授权 | 用户批准两项范围调整：安全巡检移除重复限制；AGENTS 防过度防御规则。分两个提交，推送并等待 CI 后交用户独立复审；#128 已合并，新增差异需后续 PR。本轮不合并、不打包、不部署，不调用公司服务或真实模型，不读取公司配置凭据 |
 
 原工作目录的 ARCHITECTURE 差异与未跟踪计划/公司配置保留，未复制到本工作树；本次未读取公司配置凭据。旧监控和回答修复记录保留为注明版本的证据，不作为本轮输入或展示范围扩展授权。
 
@@ -39,13 +39,13 @@
 
 ### 手动 StarRocks 安全巡检（2026-10-23，离线候选）
 
-[当前计划](docs/superpowers/plans/2026-10-22-manual-starrocks-security-inspection.md)在 `codex/manual-starrocks-security`、`/Users/kloenguyen/.codex/worktrees/manual-starrocks-security/agent-SDK`，基线 `1a92c58`；与「定时任务」对话工作树隔离。用户确认计划 blob 340af95 复审通过并授权输入/计数及 A1b。现已实现一个只读 inspect_audit_security、短 database_security Skill、全窗聚合/粗筛两条 SQL、纯分析与既有 SDK/治理/Evidence/报告接线，不改表结构、不接定时任务。
+[当前计划](docs/superpowers/plans/2026-10-22-manual-starrocks-security-inspection.md)在 `codex/manual-starrocks-security`、`/Users/kloenguyen/.codex/worktrees/manual-starrocks-security/agent-SDK`，原始基线 `1a92c58`，本次已 rebase 至 `main@b7d033caa36b47cae1d9cfab5bc099c0f46911b4`，无冲突；与「定时任务」对话工作树隔离。用户确认计划 blob 340af95 复审通过并授权输入/计数及 A1b。现已实现一个只读 inspect_audit_security、短 database_security Skill、全窗聚合/粗筛两条 SQL、纯分析与既有 SDK/治理/Evidence/报告接线，不改表结构。本次按用户批准移除将未开发/未验收误作禁止的自动工具拒绝及未登记能力提示词禁令；复用既有配置、权限和自动执行治理，保留 Skill 的不自动补取原文/口令/错误全文。产品规则唯一见 [ARCHITECTURE §6](ARCHITECTURE.md#6-只读查询保护)。
 
 运行时完整性只看候选是否截断及是否全部可判定；全窗超长数单列，非候选超长不触发 truncated。OR 夹注释、DELETE 等已知缺口保留；两条查询不承诺同一快照。样本两列多值特征转为文本以复用 Web 事实表，内部仍按列表/集合去重。新增 security 真实模型采集套件复用既有入口与同一 S1–S5，默认各一次；本地只用脚本模型，不是 Agent 自主能力验收。
 
 当前验证分版本记录：3988aefd92b45e2e68b7907c583e489a3fa3e08e 的 [CI 39834325687](https://github.com/shixian66/xiaowei-agent-sdk/actions/runs/39834325687) 9/9 通过，完整套件 4900 passed、235 skipped、89 deselected、5 warnings；这是修复前版本的证据。早期三项失败中的两项容量夹具已校准且未放宽生产限额/拒绝断言，SDK 暂停 spike 的早期偶发根因仍未证实。
 
-3988aef 的后续独立复审发现唯一阻断：SQLGlot 30.17.0 将 INSERT 后的优化器提示词分成 HINT，导致 INSERT /*+ SET_VAR(a=1) */ OVERWRITE 漏判。已先复现精判和粗筛包含关系两项失败，再仅在 _operations 取首/次关键字前过滤 HINT；保留仅含 Hint 的正常反例，避免空列表。共享 SIGNAL_CASES 同时覆盖精判与粗筛包含关系，公司清单已补同一条字面量。局部分析/采集及文档检查 98 项、相关 lint、mypy 38 文件和 diff 检查通过；修复代码 cb9dca32601a5ca2aeef7301732dc73af52f9077 已仅针对相对 3988aef 的差异独立复核通过，审查者独立复现旧版两项失败、当前两份相关测试 96 项通过，未发现新增阻断。3988aef 发行包不含此修复，不能当作修复后的验收包；本次不重做整套方案审查、不合并或部署。
+3988aef 的后续独立复审发现唯一阻断：SQLGlot 30.17.0 将 INSERT 后的优化器提示词分成 HINT，导致 INSERT /*+ SET_VAR(a=1) */ OVERWRITE 漏判。已先复现精判和粗筛包含关系两项失败，再仅在 _operations 取首/次关键字前过滤 HINT；保留仅含 Hint 的正常反例，避免空列表。共享 SIGNAL_CASES 同时覆盖精判与粗筛包含关系，公司清单已补同一条字面量。局部分析/采集及文档检查 98 项、相关 lint、mypy 38 文件和 diff 检查通过；修复代码 cb9dca32601a5ca2aeef7301732dc73af52f9077 已仅针对相对 3988aef 的差异独立复核通过，审查者独立复现旧版两项失败、当前两份相关测试 96 项通过，未发现新增阻断。3988aef 发行包不含此修复，不能当作修复后的验收包；该局部修复已随 #128 合入；本次新增两项调整仍须按最终 HEAD 独立复审，不合并、不打包、不部署。
 
 独立审查 5b51059 发现 S4 字节裁剪会丢掉本来放得下的晚出现操作代表；已沿正式 SDK/Evidence 入口先复现再修复。分析结果保持代表优先顺序，让既有字节裁剪保留各类样本，不增加容量或第二套选择器。修复版本 a451f573836df6c7be247035ab2bbd3cf7dc0057 已经独立复核，无其他阻断项；新增行数/字节两个配置的反例，作者与审查者分别运行分析/采集 93 项、正式入口 21 项全部通过，lint/type/diff 检查通过。
 
@@ -53,7 +53,7 @@
 
 公司验收仍开放：用户/DBA 回传 3.5.14-23a56ec / AuditLoader 5.0.0、固定列存在、一小时 237398/ERR3/按16000超长135、旧粗筛117、单次延迟约18秒。来源集群/账号安全引用、时区/截断配置、实际 SQL/候选字节限额、脱敏、多语句拆行和隔离测试环境仍待绑定。3.5.14 最终 LIKE/REGEXP 合成字面量验证、真实候选容量及两条查询成本是验收门槛，证据记在[公司侧清单](docs/starrocks-security-company-checklist.md)，不作运行时标记；4.1.4/Python/SQLite 不替代。
 
-[PR #128](https://github.com/shixian66/xiaowei-agent-sdk/pull/128) 已合入 main@96c965c；以下候选验证/发行记录不等于公司验收或部署授权。CI 结果以对应 head 的检查为准，amd64 候选发行包按现有流程制作，SHA/镜像及归档摘要见随包 release.json 与 SHA256SUMS。下一项工作为按公司清单完成真实验证；本地代码审查通过不豁免这些门槛。A0/A1b 真实验证与 A3 由用户/DBA 在公司执行，本地不连公司 StarRocks 或模型 API。已选 A，仅在公司隔离测试环境生成无害样本，生产不回放；真实模型、渠道实收、部署和用户验收未开始。未授权部署。
+[PR #128](https://github.com/shixian66/xiaowei-agent-sdk/pull/128) 已合入 main@96c965c；以下候选验证/发行记录不等于公司验收或部署授权。CI 结果以对应 head 的检查为准，本次不打包；旧 3988aef 包不能用于验收，后续获准合并后须按最终 SHA 重新打包。本次离线验证：新增配置用例先复现 2 failed，修改后 runtime 安全巡检 3 passed、既有审计相关 10 passed；指定 Skill、S1–S5、定时 Agent/任务、分析/采集及文档回归 276 passed（`/tmp/xiaowei-security-scope-regression.log`），额外文档核对 2 passed，ruff 全仓、mypy 39 源文件及 diff 检查通过。这些是分组离线结果，不作完整套件或真实模型证明；下一项为推送两个独立提交并等待 CI，由用户复审新增差异，之后按公司清单完成真实验证；本地代码审查通过不豁免这些门槛。A0/A1b 真实验证与 A3 由用户/DBA 在公司执行，本地不连公司 StarRocks 或模型 API。已选 A，仅在公司隔离测试环境生成无害样本，生产不回放；真实模型、渠道实收、部署和用户验收未开始。未授权部署。
 
 ### 当前：S1 已复审通过，准备 PR 集成
 
