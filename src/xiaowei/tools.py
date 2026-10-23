@@ -4,6 +4,7 @@
 ``ToolRequest``，经 ``GovernedTools.invoke`` 执行由应用绑定的 ``execute``。模型只能提供参数，
 不能提供执行路径。
 
+安全巡检固定只读采集的已分类失败沿专属可信记录交回，其他工具不继承该例外。
 只有确定发生在 I/O 之前的治理拒绝（``ToolRejectedError``）按 SDK 公开的
 ``FunctionTool`` 返回固定结构反馈交给模型（不读取异常原文）。提出工具的只读准备可通过
 专用的 ``ProposalRejectedError`` 返回明确拒绝：无 Action、无业务写入，已开始的调用计预算。
@@ -36,19 +37,21 @@ from xiaowei.governance import (
     PrometheusSelectorError,
     PromQLExpressionError,
     ProposalRejectedError,
+    SecurityInspectionError,
     ToolRejectCode,
     ToolRejectedError,
     ToolRejectHint,
 )
 from xiaowei.models import ToolContract, ToolRequest, ToolResult
 from xiaowei.sqlguard import REJECTION_MESSAGES, QueryRejectionCode
+from xiaowei.starrocks_security import SECURITY_FAILURE_REASONS
 
 _UNKNOWN_CLUSTER = "目标未确认，未执行；请核实本轮明确目标，不猜选其他集群"
 logger = logging.getLogger(__name__)
 
 _REJECTION_FEEDBACK: dict[ToolRejectCode, tuple[str, bool]] = {
     "object_not_readable": (
-        "对象不在可读的表结构中，未执行；可在已确认目标搜索或核实库表名，未匹配不证明不存在，不改查其他集群",
+        "对象不在可读的表结构中，未执行；可在已确认目标搜索或核实库表名，未匹配不证明不存在；不得用其他集群替代本集群，用户明确要求的其他集群照常调查",
         True,
     ),
     "invalid_arguments": (
@@ -80,7 +83,7 @@ _REJECTION_FEEDBACK: dict[ToolRejectCode, tuple[str, bool]] = {
         False,
     ),
     "schema_unavailable": (
-        "该集群表结构暂不可用，未执行；本轮不要立即重试或等待刷新，不要改查其他集群；可后续重新提问",
+        "该集群表结构暂不可用，未执行；本轮不要立即重试或等待刷新；不得用其他集群替代本集群，用户明确要求的其他集群照常调查；可后续重新提问",
         False,
     ),
     "busy": (
@@ -235,6 +238,10 @@ def _rejection_feedback(exc: ToolRejectedError, name: str) -> str:
             more=exc.more,
         )
     if exc.code == "busy":
+        if name == "inspect_audit_security":
+            feedback["reason"] = (
+                "审计连接槽位繁忙，未发出审计SQL；按剩余再试配额、预算及期限决定是否再试"
+            )
         feedback.update(
             remaining_retries=exc.remaining_retries, retry_this_turn=exc.remaining_retries == 1
         )
@@ -368,6 +375,22 @@ def _function_tool(
                     "source": contract.target_id,
                     "correction_allowed": exc.correction_allowed,
                     "reason": "指定 Dashboard UID 未找到；可核对 UID 或读取其他获准对象",
+                },
+                ensure_ascii=False,
+            )
+        except SecurityInspectionError as exc:
+            return json.dumps(
+                {
+                    "status": "incomplete",
+                    "code": exc.reason,
+                    "reason": SECURITY_FAILURE_REASONS[exc.reason],
+                    "target": contract.target_id,
+                    "window": {
+                        "start_time": exc.scope.start.isoformat(),
+                        "end_time": exc.scope.end.isoformat(),
+                        "time_zone": exc.scope.time_zone,
+                    },
+                    "retry_this_turn": False,
                 },
                 ensure_ascii=False,
             )

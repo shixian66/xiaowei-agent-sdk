@@ -16,7 +16,7 @@ from collections.abc import Set as AbstractSet
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any, Final, cast
-from zoneinfo import ZoneInfo
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from xiaowei.feishu_markdown import format_prose, prose_post
 from xiaowei.models import Delivery, DeliveryFact, DeliveryFactRef
@@ -210,6 +210,18 @@ class FactPresentation:
         }
 
 
+def audit_local_time(value: object, time_zone: object, *, annotate: bool = True) -> str:
+    """只转换已有带时区时刻；历史缺失/损坏保留原值并明确不能换算。"""
+    try:
+        moment = value if isinstance(value, datetime) else datetime.fromisoformat(str(value))
+        if moment.tzinfo is None or not isinstance(time_zone, str):
+            raise ValueError
+        return moment.astimezone(ZoneInfo(time_zone)).isoformat()
+    except (ValueError, OverflowError, ZoneInfoNotFoundError):
+        original = value.isoformat() if isinstance(value, datetime) else str(value)
+        return f"{original}（原时刻，审计时区不可换算）" if annotate else original
+
+
 def fact_values(fact: DeliveryFact) -> dict[str, object]:
     """只恢复同一 DeliveryFact 的获准原值；不解析长得像 JSON 的业务字符串。"""
     if fact.result_json is not None:
@@ -251,7 +263,16 @@ def _security_presentation(fact: DeliveryFact, data: dict[str, object]) -> FactP
 
     def count(value: object) -> str:
         shown = number(value)
-        return f"已确认至少 {shown} 条" if not complete and isinstance(value, int) else shown
+        if complete or not isinstance(value, int):
+            return shown
+        if value > 0:
+            return f"已确认至少 {shown} 条"
+        unknown = cov.get("unclassified_candidate_rows")
+        if not isinstance(unknown, int):
+            return "已判定部分未发现（无法判定数未提供）"
+        if unknown > 0:
+            return f"未发现（另有 {unknown:,} 条无法判定）"
+        return "已读取候选中未发现" if cov.get("scan_limited") else "已判定部分未发现"
 
     checks = []
     for key, label in _SIGNAL_LABELS.items():
@@ -271,11 +292,18 @@ def _security_presentation(fact: DeliveryFact, data: dict[str, object]) -> FactP
 
     limited = cov.get("scan_limited")
     scope = (
-        f"{fact.target_id} · [{win.get('start_time', '未提供')}, {win.get('end_time', '未提供')})"
+        f"{fact.target_id} · ["
+        f"{audit_local_time(win.get('start_time', '未提供'), win.get('time_zone'))}, "
+        f"{audit_local_time(win.get('end_time', '未提供'), win.get('time_zone'))})"
         f"（{win.get('time_zone', '时区未提供')}）｜全窗聚合（读取时）"
         f"{number(data.get('scanned_rows'))} 条｜"
-        + ("候选已截断" if limited is True else
-           "候选未截断" if limited is False else "候选范围未提供")
+        + (
+            "候选已截断"
+            if limited is True
+            else "候选未截断"
+            if limited is False
+            else "候选范围未提供"
+        )
         + ("｜分类计数完整" if complete else "｜分类计数不完整")
         + f"｜全窗超长记录 {number(cov.get('window_oversize_rows'))} 条"
         + f"｜无法判定候选 {number(cov.get('unclassified_candidate_rows'))} 条"
@@ -390,6 +418,15 @@ def business_fact(fact: DeliveryFact) -> DeliveryFact:
     )
 
 
+def fact_capture_time(fact: DeliveryFact) -> str:
+    """安全事实沿采集时审计时区显示；缺失时保留 ISO，覆盖行说明未换算。"""
+    if fact.tool_id == SECURITY_TOOL:
+        window = fact_values(fact).get("window")
+        zone = window.get("time_zone") if isinstance(window, dict) else None
+        return audit_local_time(fact.captured_at, zone, annotate=False)
+    return fact.captured_at.isoformat()
+
+
 def fact_scope(fact: DeliveryFact) -> str:
     """业务来源与快照时间不属于可隐藏的技术包装。"""
     source = (
@@ -397,7 +434,7 @@ def fact_scope(fact: DeliveryFact) -> str:
         if fact.target_id == "scheduled"
         else ("通知状态" if fact.target_id == "notifications" else f"数据范围：{fact.target_id}")
     )
-    return f"{source} · 采集于 {fact.captured_at.isoformat()}"
+    return f"{source} · 采集于 {fact_capture_time(fact)}"
 
 
 def business_text(
@@ -413,8 +450,6 @@ def business_text(
             view = business_presentation(fact)
 
             def value_text(row: Mapping[str, object], key: str) -> str:
-                if view.coverage is not None:
-                    return _cell(row, key)
                 if key not in row:
                     return "（未提供）"
                 value = row[key]
@@ -433,6 +468,12 @@ def business_text(
                     fact.note or fact.note_summary
                 )
                 result.append("说明：" + rendered(note or ""))
+            if fact.tool_id == SECURITY_TOOL:
+                result.extend(f"{item['检查项']}: {item['审计行数']}" for item in view.checks)
+                result.extend(view.notices)
+                if view.rows:
+                    result.append(f"代表样本 {len(view.rows)} 条未在消息中列出，可在会话中继续追问")
+                return result
             result.extend(view.notices)
             result.extend(f"{item['检查项']}: {item['审计行数']}" for item in view.checks)
             if fact.historical_brief:

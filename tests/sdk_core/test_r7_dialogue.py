@@ -61,7 +61,8 @@ async def test_unknown_or_unavailable_target_feedback_does_not_suggest_a_substit
         assert "核实" in output["reason"] and "不猜" in output["reason"]
     else:
         assert output["retry_this_turn"] is False
-        assert "不要改查其他集群" in output["reason"]
+        assert "不得用其他集群替代本集群" in output["reason"]
+        assert "用户明确要求的其他集群照常调查" in output["reason"]
     assert env.drv.attempts == 0
     assert await env.evidence_rows() == 0
 

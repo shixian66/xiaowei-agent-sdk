@@ -68,7 +68,15 @@ from typing import Annotated, Final, Literal, TypeGuard, cast
 from pydantic import BaseModel, ConfigDict, StringConstraints
 
 from xiaowei.evidence import check_projection_capacity
-from xiaowei.governance import Execute, Prechecked, Projection, ToolPolicy, ToolRejectedError
+from xiaowei.governance import (
+    Execute,
+    Prechecked,
+    Projection,
+    SecurityInspectionError,
+    SecurityInspectionScope,
+    ToolPolicy,
+    ToolRejectedError,
+)
 from xiaowei.models import (
     AUDIENCES,
     Audience,
@@ -933,14 +941,20 @@ def starrocks_tools(
                 raise ToolRejectedError(
                     "安全巡检起止时间不符合工具窗口契约", hint="security_window"
                 ) from None
-            found = current().object(audit.database, audit.table)
-            if found is None:
-                raise ToolRejectedError("审计源不在当前可读结构中", code="object_not_readable")
-            if not set(SECURITY_SOURCE_COLUMNS) <= found.column_names:
-                raise ToolRejectedError(
-                    "审计源缺少安全巡检固定列，须管理员核对", code="unsupported"
-                )
-            return _SecurityWindow(start, end, read_dependency(found, SECURITY_SOURCE_COLUMNS))
+            scope = SecurityInspectionScope(start, end, audit.time_zone)
+            try:
+                snapshot = current()
+            except ToolRejectedError:
+                raise SecurityInspectionError(scope, "schema_unavailable") from None
+            found = snapshot.object(audit.database, audit.table)
+            if found is not None and not set(SECURITY_SOURCE_COLUMNS) <= found.column_names:
+                raise SecurityInspectionError(scope, "unsupported")
+            return _SecurityWindow(
+                start,
+                end,
+                audit.time_zone,
+                read_dependency(found, SECURITY_SOURCE_COLUMNS) if found is not None else None,
+            )
 
         def security_metadata(start: str, end: str) -> dict[str, object]:
             return {
@@ -950,6 +964,22 @@ def starrocks_tools(
             }
 
         async def inspect_security(checked: _SecurityWindow) -> ToolObservation:
+            dependency = checked.dependency
+            if dependency is None:
+                try:
+                    snapshot = schema.current()
+                    found = snapshot.object(audit.database, audit.table)
+                    if found is None:
+                        if not await schema.refresh():
+                            raise SecurityInspectionError(checked, "schema_unavailable")
+                        found = schema.current().object(audit.database, audit.table)
+                except SchemaUnavailableError:
+                    raise SecurityInspectionError(checked, "schema_unavailable") from None
+                if found is None:
+                    raise SecurityInspectionError(checked, "object_not_readable")
+                if not set(SECURITY_SOURCE_COLUMNS) <= found.column_names:
+                    raise SecurityInspectionError(checked, "unsupported")
+                dependency = read_dependency(found, SECURITY_SOURCE_COLUMNS)
             result = await adapter.security_audit(checked.start, checked.end)
             timeout = target.client_timeout_seconds
             failed = False
@@ -975,8 +1005,9 @@ def starrocks_tools(
                     **analysis.as_payload(),
                     **security_metadata(checked.start.isoformat(), checked.end.isoformat()),
                 },
-                captured_at=result.collected_at, truncated=analysis.truncated,
-                dependencies=(checked.dependency,),
+                captured_at=result.collected_at,
+                truncated=analysis.truncated,
+                dependencies=(dependency,),
             )
 
         security_policy = policy(
@@ -1136,10 +1167,8 @@ class _SlowQueries:
 
 
 @dataclass(frozen=True)
-class _SecurityWindow:
-    start: datetime
-    end: datetime
-    dependency: ObjectDependency
+class _SecurityWindow(SecurityInspectionScope):
+    dependency: ObjectDependency | None
 
 
 @dataclass(frozen=True)
