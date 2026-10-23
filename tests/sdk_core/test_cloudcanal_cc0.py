@@ -1,5 +1,6 @@
 """CC0 独立脚本：真 SDK + 临时 loopback MCP，无模型或公司服务。"""
 
+import asyncio
 import json
 import os
 import subprocess
@@ -9,6 +10,8 @@ from pathlib import Path
 import pytest
 from mcp.server.mcpserver import MCPServer
 from pydantic import BaseModel, Field
+from starlette.requests import Request
+from starlette.responses import JSONResponse, Response, StreamingResponse
 from tests.sdk_core.mcp_fixture import recording, redirecting, serve
 
 pytestmark = pytest.mark.loopback
@@ -178,3 +181,111 @@ def test_bad_arguments_fail_before_connection(tmp_path):
         assert result.returncode == 2
         assert json.loads(result.stdout)["failure"]["reason"] == "invalid_configuration"
         assert running.recorder.requests == []
+
+
+def test_malformed_secret_link_does_not_escape_as_traceback():
+    result = cli(f"http://127.0.0.1:{TOKEN}/mcp")
+    assert result.returncode == 2
+    assert json.loads(result.stdout)["failure"]["reason"] == "invalid_configuration"
+    assert TOKEN not in result.stdout + result.stderr
+    assert "Traceback" not in result.stderr
+
+
+def fault_app(recorder, mode):
+    """最小 MCP 协议反例：可续接的 SSE 超限，或期限后的慢 DELETE。"""
+    call_id = None
+
+    async def stream():
+        if mode == "overflow":
+            yield (
+                b'id: checkpoint\nretry: 1\nevent: message\ndata: {"jsonrpc":"2.0",'
+                b'"method":"notifications/tools/list_changed"}\n\n'
+            )
+            await asyncio.sleep(0.02)
+            yield b"data: " + b"x" * 20000 + b"\n\n"
+        else:
+            for _ in range(20):
+                await asyncio.sleep(0.05)
+                yield b" "
+
+    async def app(scope, receive, send):
+        nonlocal call_id
+        if scope["type"] != "http":
+            return
+        request = Request(scope, receive)
+        if request.method == "GET":
+            if request.headers.get("last-event-id"):
+                recorder.tool_calls.append(("unexpected_resume", {}))
+                payload = {"jsonrpc": "2.0", "id": call_id, "result": {"content": []}}
+                response = Response(
+                    f"event: message\ndata: {json.dumps(payload)}\n\n",
+                    media_type="text/event-stream",
+                )
+            else:
+                response = Response(status_code=405)
+        elif request.method == "DELETE":
+            response = StreamingResponse(stream()) if mode == "timeout" else Response()
+        else:
+            body = await request.json()
+            method = body["method"]
+            if method == "server/discover":
+                await JSONResponse(
+                    {
+                        "jsonrpc": "2.0",
+                        "id": body["id"],
+                        "error": {"code": -32601, "message": "Method not found"},
+                    }
+                )(scope, receive, send)
+                return
+            if method == "initialize":
+                result = {
+                    "protocolVersion": "2025-03-26",
+                    "capabilities": {"tools": {}},
+                    "serverInfo": {"name": "cc0-fixture", "version": "1"},
+                }
+            elif method == "tools/list":
+                result = {"tools": [{"name": "read", "inputSchema": {"type": "object"}}]}
+            elif method == "tools/call":
+                call_id = body["id"]
+                recorder.tool_calls.append(("read", {}))
+                if mode == "timeout":
+                    await asyncio.sleep(1)
+                await StreamingResponse(stream(), media_type="text/event-stream")(
+                    scope, receive, send
+                )
+                return
+            else:
+                await Response(status_code=202)(scope, receive, send)
+                return
+            response = JSONResponse(
+                {"jsonrpc": "2.0", "id": body["id"], "result": result},
+                headers={"mcp-session-id": "fixture-session"},
+            )
+        await response(scope, receive, send)
+
+    return recording(app, recorder, token=None)
+
+
+@pytest.mark.parametrize("mode", ["overflow", "timeout"])
+def test_sdk_stream_resume_and_cleanup_cannot_bypass_failed_boundary(tmp_path, mode):
+    arguments = tmp_path / "args.json"
+    arguments.write_text("{}")
+    with serve(lambda recorder: fault_app(recorder, mode)) as running:
+        result = cli(
+            running.recorder.url,
+            "--read-tool",
+            "read",
+            "--arguments",
+            str(arguments),
+            "--max-response-bytes",
+            "12000",
+            "--timeout",
+            "0.3" if mode == "timeout" else "3",
+        )
+        assert result.returncode == 1
+        report = json.loads(result.stdout)
+        assert report["failure"]["reason"] == ("timeout" if mode == "timeout" else "response_limit")
+        assert "call" not in report
+        assert running.recorder.tool_calls == [("read", {})]
+        if mode == "timeout":
+            assert "DELETE" not in running.recorder.methods()

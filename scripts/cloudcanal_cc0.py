@@ -18,7 +18,7 @@ import time
 from collections.abc import AsyncIterator
 from importlib.metadata import version
 from pathlib import Path
-from typing import Any, Never
+from typing import Any, Never, cast
 from urllib.parse import parse_qsl, unquote, urlsplit
 
 import httpx2
@@ -77,18 +77,27 @@ class SafeParser(argparse.ArgumentParser):
 
 
 class BoundedStream(httpx2.AsyncByteStream):
-    def __init__(self, inner: httpx2.AsyncByteStream, transport: "ProbeTransport") -> None:
+    def __init__(
+        self, inner: httpx2.AsyncByteStream, transport: "ProbeTransport", *, closing: bool
+    ) -> None:
         self.inner, self.transport = inner, transport
+        self.closing = closing
 
     async def __aiter__(self) -> AsyncIterator[bytes]:
         received = 0
-        async for chunk in self.inner:
-            received += len(chunk)
-            self.transport.received += len(chunk)
-            if received > self.transport.limit:
-                self.transport.failure = "response_limit"
-                raise ProbeError("response_limit")
-            yield chunk
+        try:
+            async with asyncio.timeout_at(self.transport.deadline):
+                async for chunk in self.inner:
+                    self.transport.check(closing=self.closing)
+                    received += len(chunk)
+                    self.transport.received += len(chunk)
+                    if received > self.transport.limit:
+                        self.transport.failure = self.transport.failure or "response_limit"
+                        raise ProbeError(self.transport.failure)
+                    yield chunk
+        except TimeoutError:
+            self.transport.failure = self.transport.failure or "timeout"
+            raise ProbeError(self.transport.failure) from None
 
     async def aclose(self) -> None:
         await self.inner.aclose()
@@ -97,18 +106,34 @@ class BoundedStream(httpx2.AsyncByteStream):
 class ProbeTransport(httpx2.AsyncHTTPTransport):
     """SDK 可跟随同源跳转；在实际发送边界固定完整端点并限制实际接收字节。"""
 
-    def __init__(self, url: str, limit: int) -> None:
+    def __init__(self, url: str, limit: int, deadline: float) -> None:
         super().__init__(trust_env=False, retries=0)
         self.endpoint, self.limit = httpx2.URL(url), limit
         self.received = 0
         self.failure: str | None = None
+        self.deadline = deadline
+
+    def check(self, *, closing: bool = False) -> None:
+        if asyncio.get_running_loop().time() >= self.deadline:
+            self.failure = self.failure or "timeout"
+            raise ProbeError(self.failure)
+        if self.failure and not closing:
+            raise ProbeError(self.failure)
 
     async def handle_async_request(self, request: httpx2.Request) -> httpx2.Response:
+        # MCP 的 SSE 续接不受工具零重试控制；失败后只允许期限内同端点的会话关闭。
+        closing = request.method == "DELETE"
+        self.check(closing=closing)
         if request.url != self.endpoint:
             self.failure = "endpoint_changed"
             raise ProbeError("endpoint_changed")
         request.headers["accept-encoding"] = "identity"
-        response = await super().handle_async_request(request)
+        try:
+            async with asyncio.timeout_at(self.deadline):
+                response = await super().handle_async_request(request)
+        except TimeoutError:
+            self.failure = self.failure or "timeout"
+            raise ProbeError(self.failure) from None
         if (
             response.is_redirect
             or response.headers.get("content-encoding", "identity") != "identity"
@@ -116,13 +141,12 @@ class ProbeTransport(httpx2.AsyncHTTPTransport):
             self.failure = "redirect_or_encoding_rejected"
             await response.aclose()
             raise ProbeError(self.failure)
-        if not isinstance(response.stream, httpx2.AsyncByteStream):
-            await response.aclose()
-            raise ProbeError("invalid_stream")
         return httpx2.Response(
             response.status_code,
             headers=response.headers,
-            stream=BoundedStream(response.stream, self),
+            stream=BoundedStream(
+                cast(httpx2.AsyncByteStream, response.stream), self, closing=closing
+            ),
             extensions=response.extensions,
         )
 
@@ -208,7 +232,8 @@ def hide_link(value: object, secrets: list[str]) -> object:
 
 
 async def probe(url: str, args: argparse.Namespace, arguments: dict[str, Any]) -> dict[str, Any]:
-    transport = ProbeTransport(url, args.max_response_bytes)
+    deadline = asyncio.get_running_loop().time() + args.timeout
+    transport = ProbeTransport(url, args.max_response_bytes, deadline)
 
     def client_factory(
         headers: dict[str, str] | None = None, timeout: object = None, auth: object = None
@@ -223,7 +248,7 @@ async def probe(url: str, args: argparse.Namespace, arguments: dict[str, Any]) -
 
     report: dict[str, Any] = {
         "format": "cloudcanal-cc0-v1",
-        "cloudcanal_version": "6.4.0.2",
+        "declared_cloudcanal_version": "6.4.0.2",
         "client_versions": {name: version(name) for name in ("openai-agents", "mcp", "httpx2")},
         "schema_omissions": sorted(SCHEMA_OMISSIONS),
         "status": "ok",
@@ -231,7 +256,7 @@ async def probe(url: str, args: argparse.Namespace, arguments: dict[str, Any]) -
     phase, started = "connect", time.monotonic()
     try:
         async with (
-            asyncio.timeout(args.timeout),
+            asyncio.timeout_at(deadline),
             MCPServerStreamableHttp(
                 params={
                     "url": url,
@@ -243,9 +268,11 @@ async def probe(url: str, args: argparse.Namespace, arguments: dict[str, Any]) -
                 max_retry_attempts=0,
             ) as server,
         ):
+            transport.check()
             report["connect_ms"] = round((time.monotonic() - started) * 1000, 2)
             phase, started, before = "catalog", time.monotonic(), transport.received
             tools = await server.list_tools()
+            transport.check()
             report["catalog"] = {
                 "elapsed_ms": round((time.monotonic() - started) * 1000, 2),
                 "wire_bytes_observed": transport.received - before,
@@ -264,6 +291,7 @@ async def probe(url: str, args: argparse.Namespace, arguments: dict[str, Any]) -
                     raise ProbeError("tool_not_listed")
                 phase, started, before = "call", time.monotonic(), transport.received
                 result = await server.call_tool(tool.name, arguments)
+                transport.check()
                 payload = result.model_dump(mode="json", by_alias=True, exclude_none=True)
                 fields = schema_fields(CallToolResult.model_json_schema()) | schema_fields(
                     tool.output_schema
@@ -279,6 +307,7 @@ async def probe(url: str, args: argparse.Namespace, arguments: dict[str, Any]) -
                 if result.is_error:
                     report["status"] = "failed"
             phase = "close"
+        transport.check()
     except Exception as exc:
         report["status"] = "failed"
         report["failure"] = {
@@ -306,7 +335,7 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument("--read-tool", help="用户已确认无业务副作用的准确工具名；省略则只列目录")
     parser.add_argument("--arguments", type=Path, help="该工具的 JSON 参数对象文件；不输出参数值")
-    parser.add_argument("--timeout", type=float, default=60, help="整个探查的秒数上限，默认 60")
+    parser.add_argument("--timeout", type=float, default=60, help="连接/读取/关闭的总秒数，默认 60")
     parser.add_argument(
         "--max-response-bytes", type=int, default=1048576, help="每个 HTTP 响应的接收上限"
     )
@@ -341,7 +370,7 @@ def main(argv: list[str] | None = None) -> int:
             reverse=True,
         )
         report = asyncio.run(probe(url, args, arguments))
-    except (ValueError, OSError, ProbeError):
+    except (ValueError, OSError, ProbeError, httpx2.InvalidURL):
         print(json.dumps({"status": "failed", "failure": {"reason": "invalid_configuration"}}))
         return 2
     except KeyboardInterrupt:

@@ -9,7 +9,7 @@
 | 项目 | 已核对事实 |
 | --- | --- |
 | 仓库 | [shixian66/xiaowei-agent-sdk](https://github.com/shixian66/xiaowei-agent-sdk) |
-| 产品代码基线 | 已通过远端 main 与本地引用核对 `1de7b79d61e0c934c5235a522dceb96ccd28aaf5`（含 #132）；当前仅文档分支 `codex/cloudcanal-phase1-plan`，隔离工作树 `/Users/kloenguyen/.codex/worktrees/cloudcanal-phase1-plan/agent-SDK`；桌面原目录及其他任务修改保留 |
+| 产品代码基线 | 已通过远端 main 与本地引用核对 `1de7b79d61e0c934c5235a522dceb96ccd28aaf5`（含 #132）；当前文档及独立取证脚本分支 `codex/cloudcanal-phase1-plan`，隔离工作树 `/Users/kloenguyen/.codex/worktrees/cloudcanal-phase1-plan/agent-SDK`；桌面原目录及其他任务修改保留 |
 | 源码与检查 | 当前源码仅保留 `src/xiaowei`；旧工程及专属测试、Compose、迁移入口、`compose-smoke` CI 和 Alembic 依赖已移除。保留产品测试、公共检查与旧回答兼容路径；旧工程历史可从 Git 查回 |
 | 当前存储与回答 | 应用 schema v15 不变；C 扩展已有 job、逐次 run/通知关联；014 已发布不改，015 显式升级。当前本地新回答保存 v4，旧 v2/v3/Legacy 与已绑定交付保持原语义，SDK 表不改 |
 | 锁定依赖 | SDK `0.22.3`、Lark Channel `1.4.0`、MCP `2.2.0`、sqlglot `30.17.0`、`nh3 0.3.7`、`tinycss2 1.5.1`、Pillow `13.0.0`、certifi `2026.10.19`（后两项为严格审计发现的既有漏洞定向升级） |
@@ -51,9 +51,9 @@
 
 已有 SDK 证据（v1.0，`3e53966da1b05c496175ab30a78adccb8f0eb96b`）：公开签名及现有 SDK/协议 **10 passed，10.52 秒**，日志 `/private/tmp/xw-cloudcanal-plan-20261023/sdk.log`。它只证明原锁定接入路径，不替代新脚本或真实 CloudCanal 验证。
 
-本次检查：`tests/sdk_core/test_cloudcanal_cc0.py` **8 passed，8.39 秒**；`tests/security/test_docs_command_consistency.py` **2 passed，0.13 秒**；脚本/测试 Ruff 与脚本 mypy 通过，`git diff --check` 通过。首次用例在脚本缺失时失败；补充反例曾抓到 schema 扩展业务值泄漏和固定错误码被过度打码，修正后全部通过。测试覆盖 query/路径令牌、JSON/SSE、目录零调用、指定读取单次执行、MCP 错误/超限无重放、跳转拒绝及本地参数错误零网络。
+本次检查：`tests/sdk_core/test_cloudcanal_cc0.py` **11 passed，11.86 秒**；`tests/security/test_docs_command_consistency.py` **2 passed**；脚本/测试 Ruff 与格式检查、脚本 mypy、相关链接、两段 Bash 示例语法及 `git diff --check` 通过。C1—C5 和共同变体与批准基线逐字一致。首次用例在脚本缺失时失败，新增 SSE 超限续接与期限后关闭两个反例也先复现失败再修正。覆盖 query/路径令牌、JSON/SSE、目录零调用、指定读取单次执行、MCP 错误/超限无重放、跳转拒绝、本地参数错误零网络、错误链接不泄漏，以及 SDK 续接/关闭不能绕过上限。
 
-审查基线为 `5e0c119467013d4673aba0e909922e739ce70248`，增量只有五份文档、一个独立脚本及其测试；完整目标 SHA 随交付提供。产品源码、依赖与锁文件未改；本次增量的独立审查尚待完成，不能沿用 v1.3 的通过结论。
+独立审查针对 `5e0c119467013d4673aba0e909922e739ce70248 → 2e1011323cecae20607794b93cecb3455e3ff47d`，指出 SSE 超限仍续接、非法链接异常泄漏与超时清理超出期限，均已修复并补反例；目标版本字段改为用户声明，删除由锁定 HTTP transport 契约保证的多余流类型防御。修订版待精确 SHA 复审，不能沿用 v1.3 的通过结论。增量仍只有五份文档、独立脚本及测试，产品源码、依赖与锁文件未改。
 
 下一项：按计划 §4.1 在配置/真实连接节点确认链接格式、只读子账号链接能力及权限，再由用户在公司运行 CC0，带回打码结果并确认任务/日志接收范围与链接生命周期。取得真实目录、参数与样例后再确认 CC1 开发授权；真实工具/模型/渠道验收在另获授权的公司部署后进行，模型、预算、次数和阈值届时决定。
 
