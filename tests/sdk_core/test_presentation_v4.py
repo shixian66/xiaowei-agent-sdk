@@ -205,6 +205,66 @@ def test_old_security_v4_uses_new_coverage_without_rewriting_model_text():
     assert shown["blocks"][0]["text"] == "旧说明：15:04:37 候选，原样保存。"
 
 
+@pytest.mark.parametrize("transport", ["card", "plain"])
+def test_historical_security_brief_keeps_statistics_without_expanding_samples(transport):
+    value = business(security_fact(view="brief", summary="本次返回行数：1。"))
+    if transport == "card":
+        message = build_feishu_message(value, 3500, "oc", platform_limits=True)
+        visible = "\n".join(text_parts(message, folded=False))
+        assert "client" in "\n".join(text_parts(message))  # 明细仍可在技术区核对。
+    else:
+        visible = _notification_text(value, "")
+    assert "29,232" in visible and "多语句" in visible and "分类计数完整" in visible
+    assert "client" not in visible and "15:04:37" not in visible
+
+
+@pytest.mark.parametrize("format_", ["md", "html"])
+def test_split_security_sample_sections_keep_their_own_scope_and_capture_time(
+    monkeypatch, format_,
+):
+    import re
+
+    from xiaowei.feishu_report import build_reports
+
+    # HTML 用默认400k，复现真实门槛；MD 用小容量同时覆盖整行分片，不改生产限额。
+    if format_ == "md":
+        monkeypatch.setattr("xiaowei.feishu_report.MAX_REPORT_BYTES", 6000)
+    base = json.loads(security_fact().result_json)
+    facts = []
+    for hour in range(10 if format_ == "html" else 2):
+        start = f"2026-10-23T{hour:02}:00:00+08:00"
+        end = f"2026-10-23T{hour+1:02}:00:00+08:00"
+        rows = [{**base["rows"][0], "query_id": f"q-{hour}-{i}",
+                 "timestamp": f"2026-10-23T{hour:02}:01:00+08:00",
+                 "user": f"window{hour}_" + "x" * 56} for i in range(100)]
+        facts.append(security_fact(
+            evidence_id=f"ev_window_{hour}", target_id="fat", payload_updates={
+                "window": {"start_time": start, "end_time": end, "time_zone": "Asia/Shanghai"},
+                "rows": rows, "row_count": 100, "matched_rows": 100,
+                "signal_counts": {**base["signal_counts"], "stacked_statements": 100},
+            }, coverage={"checked_candidate_rows": 100},
+        ))
+    reports = build_reports(business(*facts, report_format=format_))
+    assert len(reports) > 1
+    seen = set()
+    for report in reports:
+        text = html.unescape(report.content.decode())
+        sections = (
+            re.findall(r"<section\b.*?</section>", text, re.S)
+            if format_ == "html" else text.split("\n## ")
+        )
+        for section in sections:
+            if "需要核查" not in section:
+                continue
+            (hour,) = {int(h) for h in re.findall(r"window(\d+)_", section)}
+            seen.add(hour)
+            assert "fat" in section
+            assert f"2026-10-23T{hour:02}:00:00+08:00" in section
+            assert f"2026-10-23T{hour+1:02}:00:00+08:00" in section
+            assert facts[hour].captured_at.isoformat() in section
+    assert seen == set(range(len(facts)))
+
+
 @pytest.mark.parametrize("total", [0, 123])
 def test_security_zero_hits_preserve_the_difference_between_no_data_and_no_signal(total):
     from xiaowei.feishu_render import business_presentation

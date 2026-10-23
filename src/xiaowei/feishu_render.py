@@ -407,9 +407,9 @@ def business_text(
             elif fact.note_summary or fact.note:
                 result.append("说明：" + rendered(fact.note_summary or fact.note or ""))
             result.extend(view.notices)
-            if fact.historical_brief and not view.checks:
-                return [*result, fact.summary or ""]
             result.extend(f"{item['检查项']}: {item['审计行数']}" for item in view.checks)
+            if fact.historical_brief:
+                return [*result, fact.summary or ""]
             result.extend(
                 f"{_ACTION_LABELS.get(key, key)}: {rendered(_cell(view.fields, key))}"
                 for key in view.fields if key != "approval_command" or include_approval_command
@@ -1093,7 +1093,7 @@ def build_feishu_message(
         i
         for i, fact in enumerate(delivery.facts)
         if (fact.view == "brief" if modern else platform_limits and fold_details(fact))
-        and not fact.historical_brief
+        and (not fact.historical_brief or (modern and fact.tool_id == SECURITY_TOOL))
         and fact.section != "action"
     )
     # 附件已接收完整 Delivery，主消息不再复制被收起的大段原值。

@@ -185,7 +185,12 @@ def _fact_sections(
         notices=view.notices, fact=fact, business=True, presented=True,
     )]
     if not fact.historical_brief or expand_brief:
-        samples = {"columns": view.columns, "rows": view.rows}
+        samples = {
+            "覆盖": view.coverage,
+            "采集于": fact.captured_at.isoformat(),
+            "columns": view.columns,
+            "rows": view.rows,
+        }
         parts.append(_Section(
             "fact", "需要核查 · 代表样本", json.dumps(samples, ensure_ascii=False),
             fact=fact, business=True,
