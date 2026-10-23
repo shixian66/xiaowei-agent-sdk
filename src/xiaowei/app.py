@@ -805,7 +805,7 @@ class Application:
             # 根据已获准的模型历史收尾。两次运行都受外层整轮期限约束，工具与证据不会重放。
             # “可能不完整”由代码据可信账本说明（``TurnAnswer.limit_reached``），不写进模型文字。
             runs = self._governance.turn_runs(ctx.identity)
-            if not runs.produced and not runs.monitoring_failures:
+            if not runs.produced and not runs.monitoring_failures and not runs.inspection_failures:
                 return None
             self._governance.note_limit_rescue(ctx.identity)
             final_agent = agent.clone(
@@ -921,6 +921,7 @@ class Application:
         # 不交模型改写。v4 选择所需事实，不补交未引用结果；全部可见证据仍保存并复核。
         queried = self._query_evidence(runs)
         failed_queries = sum(f.tool_id in self._queries for f in runs.monitoring_failures)
+        failed_queries += sum(f.counted for f in runs.inspection_failures)
         rejected_proposals = sum(t in self._queries for t in runs.proposal_rejections)
         if len(queried) + failed_queries + rejected_proposals != sum(
             t in self._queries for t in runs.started
@@ -935,6 +936,7 @@ class Application:
             answer=answer,
             context_evidence=tuple(dict.fromkeys(context)),
             monitoring_failures=runs.monitoring_failures,
+            inspection_failures=runs.inspection_failures,
             run_turn_id=ctx.identity.turn_id,
             limit_reached=runs.limit_rescue_started,
         )
@@ -947,6 +949,7 @@ class Application:
         snapshot = await session.commit_validated(
             validated.context_evidence,
             monitoring_failures=validated.monitoring_failures,
+            inspection_failures=validated.inspection_failures,
             limit_reached=validated.limit_reached,
         )
         _stage(turn, "committed", started)
@@ -1214,6 +1217,7 @@ class Application:
             material_only=True,
             context_evidence=context_evidence,
             monitoring_failures=runs.monitoring_failures,
+            inspection_failures=runs.inspection_failures,
             run_turn_id=ctx.identity.turn_id,
         )
         checked_material = await self._evidence.validate_answer(material, ctx)

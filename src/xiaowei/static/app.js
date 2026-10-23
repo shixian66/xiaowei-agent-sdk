@@ -169,7 +169,7 @@
       technical.append(el("summary", "", "技术详情"));
       const facts = delivery.facts || [];
       const blocks = delivery.blocks || [];
-      const notices = [delivery.report_notice, delivery.limit_notice, delivery.monitoring_notice, delivery.notification_notice];
+      const notices = [delivery.inspection_notice, delivery.report_notice, delivery.limit_notice, delivery.monitoring_notice, delivery.notification_notice];
       if (delivery.session_notice) {
         item.append(el("p", "note session-notice", delivery.session_notice));
       }

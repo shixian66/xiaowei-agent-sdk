@@ -23,6 +23,7 @@ import math
 import types
 from collections.abc import Awaitable, Callable, Iterable, Mapping
 from dataclasses import dataclass, replace
+from datetime import datetime
 from typing import (
     TYPE_CHECKING,
     Annotated,
@@ -31,6 +32,7 @@ from typing import (
     Literal,
     TypeVar,
     Union,
+    cast,
     get_args,
     get_origin,
 )
@@ -46,6 +48,8 @@ from xiaowei.models import (
     MonitoringFailure,
     MonitoringFailureReason,
     RunContext,
+    SecurityFailureReason,
+    SecurityInspectionFailure,
     ToolContract,
     ToolObservation,
     ToolRequest,
@@ -204,6 +208,21 @@ class ToolRejectedError(Exception):
         self.unqualified_tables = unqualified_tables
         self.missing_tables = missing_tables
         self.more = more
+
+
+@dataclass(frozen=True)
+class SecurityInspectionScope:
+    start: datetime
+    end: datetime
+    time_zone: str
+
+
+class SecurityInspectionError(Exception):
+    """本只读工具的明确未完成结果；不生成 Evidence，也不适用于其他执行。"""
+
+    def __init__(self, scope: SecurityInspectionScope, reason: SecurityFailureReason) -> None:
+        super().__init__(reason)
+        self.scope, self.reason = scope, reason
 
 
 class ProposalRejectedError(ToolRejectedError):
@@ -423,6 +442,7 @@ class TurnRuns:
     produced: tuple[tuple[str, str], ...] = ()
     proposal_rejections: tuple[str, ...] = ()  # 已完成只读准备、明确未形成 Action 的调用。
     monitoring_failures: tuple[MonitoringFailure, ...] = ()
+    inspection_failures: tuple[SecurityInspectionFailure, ...] = ()
     promql_errors: tuple[tuple[str, str], ...] = ()  # 目标、已失败表达式，跨 query/range 禁止重发。
     selector_errors: tuple[tuple[str, str], ...] = ()  # 目标、已被拒的发现请求摘要。
     alertmanager_errors: tuple[tuple[str, str, str, str], ...] = ()  # 源、类别、工具、摘要。
@@ -572,7 +592,13 @@ class GovernedTools:
             )
         # 授权回调之后、执行之前不再 await：前置检查与计数在同一步完成，并行调用不能同时越过
         # 上限；前置检查拒绝时尚未占用预算。
-        run = _bind(execute, effective)
+        try:
+            run, inspection_scope = _bind(execute, effective)
+        except SecurityInspectionError as exc:
+            if contract.tool_id != "local/inspect_audit_security":
+                raise ToolExecutionError() from None
+            self._inspection_failed(ctx, contract, exc.scope, exc.reason, counted=False)
+            raise
         key = _turn_key(ctx.identity)
         runs = self._runs.get(key, TurnRuns())
         # 在授权 await 之后、进入 Adapter 之前同步决定准入和占用配额。
@@ -580,6 +606,8 @@ class GovernedTools:
         if target in runs.slot_retrying or (
             target in runs.slot_busy and target in runs.slot_retries
         ):
+            if inspection_scope is not None:
+                self._inspection_failed(ctx, contract, inspection_scope, "busy", counted=False)
             raise ToolRejectedError("系统繁忙，本轮该集群再试已用完", code="busy")
         slot_retry = target in runs.slot_busy
         if contract.policy_id in PROMETHEUS_QUERY_POLICIES:
@@ -618,7 +646,14 @@ class GovernedTools:
                 raise ToolRejectedError(
                     "该 Dashboard UID 本轮已确认不存在，未重发", hint="grafana_change_object"
                 )
-        self._reserve(ctx)
+        try:
+            self._reserve(ctx)
+        except ToolRejectedError:
+            if inspection_scope is not None:
+                self._inspection_failed(
+                    ctx, contract, inspection_scope, "budget_exhausted", counted=False
+                )
+            raise
         self._runs[key] = replace(
             runs,
             started=(*runs.started, contract.tool_id),
@@ -755,6 +790,29 @@ class GovernedTools:
                         and not trace.started
                     ):
                         busy_before_sql = True
+                    elif inspection_scope is not None and (
+                        isinstance(exc, SecurityInspectionError)
+                        or (
+                            isinstance(exc, StarRocksError)
+                            and exc.code.value in get_args(SecurityFailureReason)
+                        )
+                    ):
+                        reason = (
+                            exc.reason
+                            if isinstance(exc, SecurityInspectionError)
+                            else exc.code.value
+                        )
+                        inspection_failure = self._inspection_failed(
+                            ctx,
+                            contract,
+                            inspection_scope,
+                            cast(SecurityFailureReason, reason),
+                            counted=True,
+                            sql_started=trace.audit_started,
+                        )
+                        raise SecurityInspectionError(
+                            inspection_scope, inspection_failure.reason
+                        ) from None
                     elif contract.policy_id in MONITORING_READ_POLICIES:
                         # 只读监控读取没有副作用：分类不明（远端错误形态未知、结果不合约、
                         # 响应超限等）也按“本源未核实”交回模型，本源本轮停止，不中止整轮。
@@ -786,6 +844,8 @@ class GovernedTools:
                 self._refund_before_io(key, contract.tool_id)
                 current = self._runs[key]
                 self._runs[key] = replace(current, slot_busy=current.slot_busy | {target})
+                if inspection_scope is not None:
+                    self._inspection_failed(ctx, contract, inspection_scope, "busy", counted=False)
                 remaining: Literal[0, 1] = 0 if target in current.slot_retries else 1
                 raise ToolRejectedError(
                     "系统繁忙，可稍后再试", code="busy", remaining_retries=remaining
@@ -817,6 +877,31 @@ class GovernedTools:
                     self._runs[key] = replace(
                         pending, slot_retrying=pending.slot_retrying - {target}
                     )
+
+    def _inspection_failed(
+        self,
+        ctx: RunContext,
+        contract: ToolContract,
+        scope: SecurityInspectionScope,
+        reason: SecurityFailureReason,
+        *,
+        counted: bool,
+        sql_started: bool = False,
+    ) -> SecurityInspectionFailure:
+        key = _turn_key(ctx.identity)
+        runs = self._runs.get(key, TurnRuns())
+        failure = SecurityInspectionFailure(
+            target_id=contract.target_id,
+            start=scope.start,
+            end=scope.end,
+            time_zone=scope.time_zone,
+            reason=reason,
+            counted=counted,
+            sql_started=sql_started,
+            after_evidence_id=runs.produced[-1][1] if runs.produced else None,
+        )
+        self._runs[key] = replace(runs, inspection_failures=(*runs.inspection_failures, failure))
+        return failure
 
     def note_rejected(self, identity: Identity) -> None:
         """SDK 包装层报告一次 I/O 前拒绝；不占工具执行预算。"""
@@ -898,12 +983,17 @@ def _selector_keys(policy_id: str, arguments: Mapping[str, object]) -> tuple[str
     return selectors, request
 
 
-def _bind(execute: Execute, request: ToolRequest) -> Callable[[], Awaitable[ToolObservation]]:
+def _bind(
+    execute: Execute,
+    request: ToolRequest,
+) -> tuple[Callable[[], Awaitable[ToolObservation]], SecurityInspectionScope | None]:
     if not isinstance(execute, Prechecked):
-        return lambda: execute(request)
+        return (lambda: execute(request)), None
     rejected: ToolRejectedError | None = None
     try:
         prepared = execute.check(request)
+    except SecurityInspectionError:
+        raise
     except ToolRejectedError as exc:
         rejected = exc
     except Exception:
@@ -911,7 +1001,9 @@ def _bind(execute: Execute, request: ToolRequest) -> Callable[[], Awaitable[Tool
     if rejected is not None:
         # 在 except 之外抛出：拒绝不带下层异常的上下文。
         raise rejected
-    return lambda: execute.run(prepared)
+    return (lambda: execute.run(prepared)), (
+        prepared if isinstance(prepared, SecurityInspectionScope) else None
+    )
 
 
 def schema_shape(node: object, *, ignore_extra_flags: bool = False) -> object:

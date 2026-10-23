@@ -16,7 +16,7 @@ from collections.abc import Set as AbstractSet
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any, Final, cast
-from zoneinfo import ZoneInfo
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from xiaowei.feishu_markdown import format_prose, prose_post
 from xiaowei.models import Delivery, DeliveryFact, DeliveryFactRef
@@ -208,6 +208,17 @@ class FactPresentation:
             "rows": [{key: _web_cell(row, key) for key in self.columns} for row in self.rows],
             "coverage": self.coverage, "checks": self.checks, "notices": self.notices,
         }
+
+
+def audit_local_time(value: object, time_zone: object) -> str:
+    """只转换已有带时区时刻；历史缺失/损坏保留原值并明确不能换算。"""
+    try:
+        moment = value if isinstance(value, datetime) else datetime.fromisoformat(str(value))
+        if moment.tzinfo is None or not isinstance(time_zone, str):
+            raise ValueError
+        return moment.astimezone(ZoneInfo(time_zone)).isoformat()
+    except (ValueError, OverflowError, ZoneInfoNotFoundError):
+        return f"{value}（原时刻，审计时区不可换算）"
 
 
 def fact_values(fact: DeliveryFact) -> dict[str, object]:

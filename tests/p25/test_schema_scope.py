@@ -655,3 +655,33 @@ async def test_runtime_cancelled_during_the_first_refresh_leaves_no_refresh_runn
         await task
     assert cache._inflight is not None and cache._inflight.done()
     assert drv.connections[-1].aborted
+
+
+async def test_schema_diagnostics_count_discarded_objects_without_names(caplog):
+    from xiaowei.starrocks import SchemaRows
+
+    world, clock = World(), Clock()
+    _, cache = cache_for(world.driver(), clock)
+    objects = tuple({"db": db, "name": name, "type": "BASE TABLE", "comment": None,
+                     "created": None} for db, name in
+                    (("hidden_db", "no_columns"), ("hidden_db", "bad`identifier"),
+                     ("hidden_db", "normal"), ("hidden_db", "collision")))
+    columns = tuple({"db": "hidden_db", "name": name, "col": col, "type": "int",
+                     "nullable": "YES", "comment": None} for name, col in
+                    (("normal", "id"), ("collision", "Id"), ("collision", "id")))
+    with caplog.at_level(logging.INFO):
+        candidates = cache._candidates(SchemaRows(objects, columns, (), False))
+    assert set(candidates) == {("hidden_db", "normal")}
+    assert "object_rows=4 column_objects=2" in caplog.text
+    assert "dropped_no_columns=1 dropped_unsafe=1 dropped_column_conflict=1" in caplog.text
+    assert "hidden_db" not in caplog.text and "no_columns" not in caplog.text.split("dropped_")[0]
+
+
+async def test_shared_refresh_does_not_mutate_callers_sql_trace():
+    from xiaowei.starrocks import trace_sql_io
+
+    world, clock = World(), Clock()
+    _, cache = cache_for(world.driver(), clock)
+    with trace_sql_io() as trace:
+        assert await cache.refresh()
+        assert not trace.started and not trace.audit_started

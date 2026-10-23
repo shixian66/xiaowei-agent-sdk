@@ -219,6 +219,7 @@ class SqlIOTrace:
     """一个受治理工具调用是否已向 StarRocks 发出 SQL；并行调用按 task 隔离。"""
 
     started: bool = False
+    audit_started: bool = False
 
 
 _SQL_IO_TRACE: ContextVar[SqlIOTrace | None] = ContextVar("starrocks_sql_io", default=None)
@@ -919,6 +920,9 @@ class StarRocksAdapter:
             async with asyncio.timeout(self._target.client_timeout_seconds):
                 await self._prepare_session(conn)
                 stage = _Code.QUERY_FAILED
+                trace = _SQL_IO_TRACE.get()
+                if trace is not None:
+                    trace.audit_started = True
                 totals = await self._rows(
                     conn, aggregate, window_args, _SECURITY_TOTALS, self._limits
                 )

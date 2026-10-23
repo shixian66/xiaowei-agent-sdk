@@ -48,6 +48,7 @@ from xiaowei.models import (
     MonitoringFailure,
     Owner,
     RunContext,
+    SecurityInspectionFailure,
     SessionRejectReason,
     SessionSnapshot,
     ToolCall,
@@ -438,6 +439,7 @@ class PolicySession:
         context_evidence: Sequence[str],
         *,
         monitoring_failures: Sequence[MonitoringFailure] = (),
+        inspection_failures: Sequence[SecurityInspectionFailure] = (),
         limit_reached: bool = False,
     ) -> SessionSnapshot:
         """校验本轮最终回答与完整历史后写入底层 Session；任何失败都不保留本轮暂存项。
@@ -448,7 +450,7 @@ class PolicySession:
         self._bytes = None
         pending, self._pending = _without_superseded_answers(self._pending), []
         await self._validate_final_answer(
-            pending, context_evidence, monitoring_failures, limit_reached
+            pending, context_evidence, monitoring_failures, inspection_failures, limit_reached
         )
         turns = await self._open()
         if turns >= self._limits.max_history_turns:
@@ -486,6 +488,7 @@ class PolicySession:
         pending: list[TResponseInputItem],
         context_evidence: Sequence[str],
         monitoring_failures: Sequence[MonitoringFailure],
+        inspection_failures: Sequence[SecurityInspectionFailure],
         limit_reached: bool,
     ) -> None:
         """最终持久化复用 Evidence 回答验证器：最后一项须是通过校验的当前格式 ``AgentAnswer``。
@@ -502,6 +505,7 @@ class PolicySession:
                 answer=answer,
                 context_evidence=tuple(context_evidence),
                 monitoring_failures=tuple(monitoring_failures),
+                inspection_failures=tuple(inspection_failures),
                 limit_reached=limit_reached,
             )
             await self._evidence.validate_answer(turn, self._ctx)

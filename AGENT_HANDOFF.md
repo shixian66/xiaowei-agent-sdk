@@ -9,12 +9,12 @@
 | 项目 | 已核对事实 |
 | --- | --- |
 | 仓库 | [shixian66/xiaowei-agent-sdk](https://github.com/shixian66/xiaowei-agent-sdk) |
-| 产品代码基线 | 已 fetch 核对 `main@1de7b79d61e0c934c5235a522dceb96ccd28aaf5`（含 #132）；本地 `codex/scheduled-agent-first-run-recovery` 在原隔离工作树开发 A，桌面原目录及其他任务修改保留 |
+| 产品代码基线 | 已 fetch 核对 `main@1de7b79d61e0c934c5235a522dceb96ccd28aaf5`（含 #132）；本地 `codex/scheduled-agent-first-run-recovery` 在原隔离工作树串行开发 A/B/C，桌面原目录及其他任务修改保留 |
 | 源码与检查 | 当前源码仅保留 `src/xiaowei`；旧工程及专属测试、Compose、迁移入口、`compose-smoke` CI 和 Alembic 依赖已移除。保留产品测试、公共检查与旧回答兼容路径；旧工程历史可从 Git 查回 |
 | 当前存储与回答 | 应用 schema v15 不变；C 扩展已有 job、逐次 run/通知关联；014 已发布不改，015 显式升级。当前本地新回答保存 v4，旧 v2/v3/Legacy 与已绑定交付保持原语义，SDK 表不改 |
 | 锁定依赖 | SDK `0.22.3`、Lark Channel `1.4.0`、MCP `2.2.0`、sqlglot `30.17.0`、`nh3 0.3.7`、`tinycss2 1.5.1`、Pillow `13.0.0`、certifi `2026.10.19`（后两项为严格审计发现的既有漏洞定向升级） |
 | 正式入口 | `xiaowei serve`、`config check`、`model check`、`storage init/upgrade/cleanup`、`requests resend`；命令与环境准备以 README 为准 |
-| 最近有记录的公司部署 | 用户本次回报 fat 镜像 `729f960d`，一小时全窗 29,232 / ERR 6 / 多语句 1，与 DBA 回查一致；未独立核验服务器。本次未部署 |
+| 最近有记录的公司部署 | 用户回报 `main@1de7b79`（前一版 `729f960d`）；此前 fat 一小时全窗 29,232 / ERR 6 / 多语句 1 与 DBA 回查一致；未独立核验服务器。本次未部署 |
 | 当前验收结论 | A/B/C 与代理已合入主线；S0/S2 已通过独立复审。S1 首版 c44bbdf 全套通过；Claude 对 d29c2f0（受测 af797c0）确认 P1/P2(b) 通过，P2(a) 附件回答优先级回归已在 b08c042 本地修复并定向验证，用户确认 ce52831 复审通过；真实模型、平台输入/识图、客户端与 U5/U6/U7 仍未验收，D 暂停且未实现。精确版本和证据见 §5 |
 | 当前任务授权 | 用户已批准修订后的三份计划，授权 A→B→C 串行离线实现、测试和常规修复；分别主题分支、本地提交和独立审查。漏调用目标检测延期，不新增必查字段；不调用真实模型或公司服务，不合并、打包或部署；推送/PR 留待后续授权 |
 
@@ -41,9 +41,11 @@
 
 [A 计划](docs/superpowers/plans/2026-10-23-scheduled-agent-first-run-recovery.md)首跑与失败可见性正在验证：补齐默认原因消息；可信 automatic 任务不读用户图片；固定失败通知沿现有当前定义、治理与发送账本，仍保留原失败原因。合法 Vertex 图片 Profile + 协议替身已跑通真实 Application/SDK/隔离 PostgreSQL 的定时任务；外部源与发送均为替身。
 
-A 新回归先复现缺文案、图片会话 KeyError、缺失败通知和准备阶段缺零模型请求日志；当前相关回归 **42 passed、47 deselected（23.41s）**，日志 `/tmp/xw-a-final-regression.log`；普通图片权限、应用日志及文档检查 **15 passed（6.95s）**，日志 `/tmp/xw-a-image-logs.log`。Ruff、改动文件 format、mypy（39 源文件）与 diff 检查通过；独立审查发现通知中断未收尾、内容拒绝误称未执行两项 P2，均先补回归复现并修复：通知中断落定 unknown、保留原执行原因并传播取消，文案改为阶段中性。修复后定时/通知/文档相关 **150 passed（107.01s）**，日志 `/tmp/xw-a-review-regression.log`；Ruff、format、mypy（39 源文件）、diff 通过，待修复增量复审。没有本次 CI、真实模型或公司验收证据。
+A 新回归先复现缺文案、图片会话 KeyError、缺失败通知和准备阶段缺零模型请求日志；当前相关回归 **42 passed、47 deselected（23.41s）**，日志 `/tmp/xw-a-final-regression.log`；普通图片权限、应用日志及文档检查 **15 passed（6.95s）**，日志 `/tmp/xw-a-image-logs.log`。Ruff、改动文件 format、mypy（39 源文件）与 diff 检查通过；独立审查发现通知中断未收尾、内容拒绝误称未执行两项 P2，均先补回归复现并修复：通知中断落定 unknown、保留原执行原因并传播取消，文案改为阶段中性。修复后定时/通知/文档相关 **150 passed（107.01s）**，日志 `/tmp/xw-a-review-regression.log`；Ruff、format、mypy（39 源文件）、diff 通过，独立复审 `6370f9e..445b4558` 已关闭两项 P2，独立 3 passed（24.19s），A 最终 HEAD `445b4558bf302aa58ca3ba912bf96bc6dc6aa1f9`。没有本次 CI、真实模型或公司验收证据。
 
-下一项按 [B 计划](docs/superpowers/plans/2026-10-23-security-inspection-incomplete-results.md)、[C 计划](docs/superpowers/plans/2026-10-23-security-plain-notification.md)推进。B/C 尚未实现；取到有效 Evidence 但覆盖不完整不等于未巡检，漏调用检测明确延期。各片按实际增量审查，不把新分支复制为新平台。
+B 从 A 的上述 HEAD 建立 `codex/security-inspection-incomplete-results`。已接通快照无名诊断、缺表一次共享刷新、只对巡检工具已分类源失败返回可信记录、保存/历史/外发/定时与固定前缀；成功仍复用原 Evidence。新回归先复现缺表无法恢复与整轮中止，正式入口又复现交付 context 无执行 Tool Scope 的重复校验，已删除该检查并保留当前授权/接收权限。正式群通知、定时状态和多目标回归已有通过证据；最终受影响回归 **379 passed（87.97s）**，日志 `/tmp/xw-b-final-regression.log`；Ruff、mypy（39 源文件）、文档检查与 diff 通过，待独立审查。没有新增必查字段、成功账本、任务表或 Evidence 版本。
+
+下一项按 [B 计划](docs/superpowers/plans/2026-10-23-security-inspection-incomplete-results.md)、[C 计划](docs/superpowers/plans/2026-10-23-security-plain-notification.md)推进。B 已实现待独立审查，C 尚未实现；取到有效 Evidence 但覆盖不完整不等于未巡检，漏调用检测明确延期。各片按实际增量审查，不把新分支复制为新平台。
 
 此前报告呈现已随 PR #132 合入上述主线，旧“CI 待验证/下一步合并”的任务状态不再适用。其范围及公司验收项继续见[报告呈现计划](docs/superpowers/plans/2026-10-23-security-inspection-report-presentation.md)和[公司清单](docs/starrocks-security-company-checklist.md#4-报告呈现验收另获部署授权后执行)；A0/A3 与真实模型、渠道验收仍开放。
 

@@ -231,7 +231,7 @@ def _message_text(content: str) -> str:
 
 def _notification_text(delivery: Delivery, text: str, *, include_remaining: bool = False) -> str:
     """只渲染已校验的飞书事实；不把 Web 的转义 content 当通知正文。"""
-    if not delivery.facts and not include_remaining:
+    if not delivery.facts and not include_remaining and not delivery.inspection_notice:
         return text
     if delivery.answer_version == 4:
         return business_text(delivery, include_approval_command=False, plain_transport=True)
@@ -493,6 +493,8 @@ class WebhookNotifications:
                         awaiting_user=False,
                     ),
                     context_evidence=visible,
+                    inspection_failures=self._governance.turn_runs(ctx.identity).inspection_failures,
+                    run_turn_id=ctx.identity.turn_id,
                     material_only=True,
                 )
                 try:

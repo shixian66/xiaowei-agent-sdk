@@ -1109,8 +1109,10 @@ class ScheduledTasks:
                             recipient_targets=bot.receive_targets | {"notifications"},
                         )
                         incomplete = (
-                            isinstance(answer.answer, AgentAnswer) and answer.answer.awaiting_user
-                        ) or answer.limit_reached
+                            (isinstance(answer.answer, AgentAnswer) and answer.answer.awaiting_user)
+                            or answer.limit_reached
+                            or bool(delivery.inspection_notice)
+                        )
                         stage = "render"
                         content = _notification_text(delivery, "", include_remaining=True)
                         if incomplete:
