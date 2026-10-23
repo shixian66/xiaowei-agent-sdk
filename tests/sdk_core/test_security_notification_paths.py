@@ -108,3 +108,49 @@ async def test_manual_failure_only_notification_keeps_code_prefix_and_receiver_c
         assert "本次巡检未全部完成" in message_text(group.outbox.sent[-1][1])
         saved = json.loads(await env.scalar("SELECT answer FROM xiaowei_request"))
         assert saved["inspection_failures"][0]["reason"] == "unsupported"
+
+
+@pytest.mark.parametrize("revoked", [False, True])
+async def test_paused_failure_rechecks_source_before_runner_and_activation(
+    env, monkeypatch, revoked
+):
+    from datetime import timedelta
+
+    from tests.sdk_core.test_group_actions import request_execution
+
+    from xiaowei.feishu import attributed
+
+    env.drv = security_driver(record(), missing=("stmt",))
+    message = "先巡检，然后创建提醒"
+    key = attributed(A, message)
+    env.scripts.add(
+        key,
+        tool_call("inspect_audit_security", **ARGS),
+        tool_call(
+            "scheduled__propose_reminder",
+            bot_alias="ops_alert_bot",
+            text="提醒",
+            evidence_ids=[],
+            at=(env.clock() + timedelta(seconds=60)).isoformat(),
+        ),
+        request_execution,
+        cite_results("完成"),
+    )
+    async with running(env, monkeypatch, config=security_config(env)) as (group, requests, rt):
+        await group.ask(message)
+        action = await env.scalar("SELECT action_id FROM xiaowei_action")
+        assert action is not None and len(env.scripts.calls[key]) == 3
+        if revoked:
+            access = rt.service._access
+            access._group = replace(access._group, tools=access._group.tools - {SECURITY_TOOL})
+        await group.ask(f"/批准 {action}")
+        assert len(env.scripts.calls[key]) == (3 if revoked else 4)
+        assert await env.scalar("SELECT state FROM xiaowei_scheduled_job") == (
+            "draft" if revoked else "active"
+        )
+        if revoked:
+            assert (
+                await env.scalar("SELECT failure_code FROM xiaowei_action")
+                == "action_requester_invalid"
+            )
+        assert requests == []

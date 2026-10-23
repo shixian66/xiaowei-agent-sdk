@@ -1350,6 +1350,13 @@ class Application:
                         await store.reject_native(action, "action_expired")
                         raise ResumeRejectedError("action_expired")
                     ledger = TypeAdapter(TurnLedger).validate_json(native.ledger, strict=True)
+                    try:
+                        await self._evidence.validate_inspection_sources(
+                            tuple(f.target_id for f in ledger.runs.inspection_failures), ctx
+                        )
+                    except AnswerRejectedError:
+                        await store.reject_native(action, "action_requester_invalid")
+                        raise ResumeRejectedError("action_requester_invalid") from None
                     await self.actions.verify_material(action, ctx, ledger.runs)
                     if ledger.used + (2 if approve else 1) > ctx.budget.max_tool_calls:
                         raise ResumeRejectedError("action_not_approvable")
