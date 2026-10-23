@@ -221,6 +221,50 @@ def test_v4_automatic_attachment_keeps_one_technical_area_or_explicit_omission(
         assert "技术详情" in visible and "未附" in visible
 
 
+@pytest.mark.parametrize(
+    "sql_value,keep_technical",
+    [("x" * 80, True), ('"' * 5000, False), ("x" * 13_000, False)],
+    ids=["short-sql", "long-escaped-sql", "long-sql"],
+)
+def test_v4_attachment_keeps_complete_answer_before_technical_details(
+    sql_value: str, keep_technical: bool
+) -> None:
+    from xiaowei.models import AgentAnswer, DeliveryText, FactBlock, TextBlock
+
+    answer = "巡检结论：" + "巡" * 5300
+    # 先验证回答符合真实模型输出的字节预算，不能用越界文字制造容量缺陷。
+    AgentAnswer(
+        blocks=(
+            TextBlock(type="text", text=answer),
+            FactBlock(type="fact", evidence_id="ev_original", view="full"),
+        ),
+        report_format=None,
+        awaiting_user=False,
+    )
+    source = fact(
+        rows=tuple({"name": f"orders-{i}-" + "x" * 80} for i in range(400)),
+        metadata={"sql": "SELECT '" + sql_value + "' AS value LIMIT 1", "elapsed_ms": 42},
+    )
+    value = business(source)
+    value = value.model_copy(update={"blocks": (DeliveryText(text=answer), *value.blocks[1:])})
+    parts = _data_parts(value, 0, 3500, "oc", None)
+    assert [p.kind for p in parts] == ["md", "body"]
+    assert "orders-399-" in parts[0].body.decode()
+    message = json.loads(parts[-1].body)
+    visible = "\n".join(text_parts(message, folded=False))
+    assert answer in visible
+    assert "模型说明展示已截断" not in visible
+    assert "本次完整结果见附件" in visible
+    assert "采集时的结果，历史不代表当前状态。" in visible
+    assert len(panels(message)) == int(keep_technical)
+    if keep_technical:
+        assert source.metadata["sql"] in "\n".join(text_parts(message))
+        assert "技术详情超出消息容量，未附。" not in visible
+    else:
+        assert "技术详情超出消息容量，未附。" in visible
+        assert source.metadata["sql"] not in "\n".join(text_parts(message))
+
+
 def test_v4_attachment_fallback_explicitly_reports_omitted_technical_details() -> None:
     source = fact(note="限制说明 " * 5000)
     parts = _data_parts(business(source, report_format="md"), 0, 3500, "oc", None)
@@ -243,21 +287,24 @@ def test_v4_attachment_uses_real_layout_when_empty_placeholders_are_larger() -> 
             metadata={"sql": "SELECT x"},
             note=None,
         )
-        for i in range(24)
+        for i in range(22)
     )
-    value = business(*sources, report_format="md")
-    # 实际完整行卡片能放下；零行占位/截断提示不一定更小，不能拿来提前删技术区。
-    witness = value.model_copy(update={"blocks": value.blocks[1:]})
-    message = build_feishu_message(
-        witness, 3500, "oc", platform_limits=True, allow_preview=False, attachment_preview=True
+    large = fact(
+        evidence_id="ev_large",
+        rows=tuple({"name": f"large-{i}-" + "x" * 80} for i in range(400)),
+        metadata={"sql": "SELECT name"},
+        note=None,
     )
-    assert len(panels(message)) == 1
-    value = value.model_copy(
-        update={"blocks": (DeliveryText(text="x" * 16_000), *value.blocks[1:])}
-    )
+    value = business(*sources, large)
+    answer = "x" * 8000
+    # 完整回答、短事实与技术区能共存；零行占位反而超出组件预算，不能作为拒收依据。
+    value = value.model_copy(update={"blocks": (DeliveryText(text=answer), *value.blocks[1:])})
     parts = _data_parts(value, 0, 3500, "oc", None)
     assert [p.kind for p in parts] == ["md", "body"]
+    assert "large-399-" in parts[0].body.decode()
     message = json.loads(parts[-1].body)
+    visible = "\n".join(text_parts(message, folded=False))
+    assert answer in visible
     assert len(panels(message)) == 1
-    assert "技术详情超出消息容量，未附" not in "\n".join(text_parts(message, folded=False))
+    assert "技术详情超出消息容量，未附" not in visible
     assert "SELECT x" in "\n".join(text_parts(message))

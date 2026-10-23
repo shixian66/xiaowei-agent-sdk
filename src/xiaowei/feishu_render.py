@@ -956,18 +956,7 @@ def build_feishu_message(
     if fits(full):
         formatted = card(totals, all_sql, delivery.texts, all_technical, formatted=True)
         return formatted if fits(formatted) else full
-    if modern and (
-        not attachment_preview
-        or not fits(
-            card(
-                [totals[i] if i in fixed else 0 for i in range(len(totals))],
-                set(),
-                (),
-                all_technical,
-                omissions=False,
-            )
-        )
-    ):
+    if modern and not attachment_preview:
         # 技术区放不下时明确未附；不导出技术附件，也不挤掉必需业务说明。
         delivery = delivery.model_copy(
             update={
@@ -985,8 +974,6 @@ def build_feishu_message(
         business_only = card(totals, set(), delivery.texts, set(), formatted=True)
         if fits(business_only):
             return business_only
-        if attachment_preview:
-            all_technical = set()
     if not allow_preview:
         # 历史brief的小原文可折叠展示；放不下则只交付已选择的摘要，不因此自动导出原值。
         if any(f.historical_brief for f in delivery.facts):
@@ -997,8 +984,7 @@ def build_feishu_message(
                 return brief
         raise MessageCapacityError("完整结果超过单消息容量")
     texts: list[str] = []
-    # 附件正文先为完整技术区留位，再用既有整行算法安排业务预览。
-    technical: set[int] = set(all_technical) if modern and attachment_preview else set()
+    technical: set[int] = set()
 
     def fitting_prefix(sqls: set[int]) -> list[int] | None:
         counts = [totals[i] if i in fixed else 0 for i in range(len(totals))]
@@ -1047,6 +1033,25 @@ def build_feishu_message(
             if low:
                 texts.append(text[:low])
             break
+
+    if modern and attachment_preview:
+        # 技术区只使用完整回答与必需说明之外的容量；业务预览行可以让位。
+        texts.extend(delivery.texts)
+        technical.update(all_technical)
+        selected_counts = fitting_prefix(set())
+        if selected_counts is not None:
+            plain = card(selected_counts, set(), texts, technical)
+            formatted = card(selected_counts, set(), texts, technical, formatted=True)
+            return formatted if fits(formatted) else plain
+        texts.clear()
+        technical.clear()
+        delivery = delivery.model_copy(
+            update={
+                "report_notice": "\n".join(
+                    filter(None, (delivery.report_notice, TECHNICAL_OMITTED))
+                )
+            }
+        )
 
     if platform_limits:
         # 正文先回答：模型文字先占预算，fitting_prefix 经闭包读取 texts 再放整行与 SQL。
