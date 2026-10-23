@@ -15,7 +15,7 @@
 | 锁定依赖 | SDK `0.22.3`、Lark Channel `1.4.0`、MCP `2.2.0`、sqlglot `30.17.0`、`nh3 0.3.7`、`tinycss2 1.5.1`、Pillow `13.0.0`、certifi `2026.10.19`（后两项为严格审计发现的既有漏洞定向升级） |
 | 正式入口 | `xiaowei serve`、`config check`、`model check`、`storage init/upgrade/cleanup`、`requests resend`；命令与环境准备以 README 为准 |
 | 最近有记录的公司部署 | 用户本次回报 fat 镜像 `729f960d`，一小时全窗 29,232 / ERR 6 / 多语句 1，与 DBA 回查一致；未独立核验服务器。本次未部署 |
-| 当前验收结论 | CloudCanal 尚未接入；本轮仅核实通用 SDK/已有模块及文档，不作真实模型、目标 MCP、公司服务或用户验收结论。既有功能的分版本证据与实战缺口保留于后文 |
+| 当前验收结论 | CloudCanal 尚未接入；当前为计划 v1.1 文档修订。既有 SDK/协议证据不代表真实模型、目标 MCP、公司服务或用户验收；其他功能的分版本证据与实战缺口保留于后文 |
 | 当前任务授权 | CloudCanal 一期需求与 D1 选择 A 已确认；仅编写必要设计、计划与文档，并作有界离线验证。未授权产品功能代码、真实模型/公司服务、发布、合并或部署 |
 
 原工作目录的 ARCHITECTURE 差异与未跟踪计划/公司配置保留，未复制到本工作树；本次未读取公司配置凭据。旧监控和回答修复记录保留为注明版本的证据，不作为本轮输入或展示范围扩展授权。
@@ -41,11 +41,13 @@
 
 ### 当前：CloudCanal 一期设计与计划
 
-[实施计划 v1.0](docs/superpowers/plans/2026-10-23-cloudcanal-phase1.md)沿用已确认 C1—C5，拆为 CC0 实际契约核实、CC1 任务/状态/指标、CC2 日志与交叉排查、CC3 真实验收。产品范围及用户选择的 D1 唯一见 [ARCHITECTURE](ARCHITECTURE.md#cloudcanal-mcp)；新增限制集中登记于计划 §5.2。版本、连接/认证、实际工具与返回、只读效果、日志覆盖、对象关联、数据/接收范围均待核实；不据通用 SDK 成功关闭 CC0。
+[实施计划 v1.1](docs/superpowers/plans/2026-10-23-cloudcanal-phase1.md)收窄 CC0 工具调查范围、删除不必要的日志/文件读取前置要求、分层验证并去除重复流程说明；C1—C5 与 [ARCHITECTURE 的 D1](ARCHITECTURE.md#cloudcanal-mcp)保持原文，必要治理边界保留，新增限制仍集中于计划 §5.2。版本、连接/认证、实际工具、数据/接收范围等疑点仍按计划 §8 待核实。
 
-本轮以主线基线在独立工作树离线安装锁文件环境，核对 Python 3.11.16、SDK 0.22.3、MCP 2.2.0、OpenAI 3.20.0、httpx2 2.13.1 的实际公开签名。计划 §7 所列现有 SDK/协议用例 **10 passed，10.52 秒**：真 Runner + ScriptedModel、临时 loopback MCP 的公开拦截与过滤、Manager 生命周期/连接代际、默认 tracing 无外发及空配置零网络；日志 `/private/tmp/xw-cloudcanal-plan-20261023/sdk.log`。未调用真实模型、公司源或测试 PostgreSQL；没有新增产品或测试代码，不作 CloudCanal 能力证明。
+既有 SDK 证据（v1.0，`3e53966da1b05c496175ab30a78adccb8f0eb96b`）：独立环境核对 Python 3.11.16、SDK 0.22.3、MCP 2.2.0、OpenAI 3.20.0、httpx2 2.13.1 公开签名；现有 SDK/协议用例 **10 passed，10.52 秒**，覆盖真 Runner + ScriptedModel、临时 loopback MCP、Manager 生命周期、默认 tracing 无外发及空配置零网络，日志 `/private/tmp/xw-cloudcanal-plan-20261023/sdk.log`。未用真实模型、公司源或测试 PostgreSQL；本次未改 SDK 版本或调用方式，直接复用证据。
 
-本轮文档命令一致性检查 **2 passed**；新增文档链接/锚点 **12 项通过**，差异检查通过，变更范围仅四份 Markdown，无产品/测试/依赖文件变更。未跑全仓业务套件。作者自查不称独立审查；交付以本主题分支的精确提交 SHA 固定文档版本，后续 MCP/权限/数据切片需按最终差异独立审查。
+本次范围为计划、阶段索引与 handoff 三份 Markdown。审查基线为上述 v1.0 提交，目标版本由主题分支的新提交固定，完整 SHA 随交付提供；当前仅作者自查，后续审查按 AGENTS.md。
+
+本次文档命令一致性检查 **2 passed，0.12 秒**；计划及相关改动的本地链接/锚点 **6 项通过**，差异检查通过。比对确认固定样例、失败处理表及完整 ARCHITECTURE 与基线一致；无产品/测试/依赖文件变更，未重跑 SDK 或业务测试。
 
 下一项：用户补版本与连接方式后，按 CC0 核实实际工具与数据范围；真实调用仍需对应授权。当前文档授权不启动 CC1/CC2 功能开发；保留全部实战缺口，不打包、不部署。
 
