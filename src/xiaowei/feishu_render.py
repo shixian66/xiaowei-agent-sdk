@@ -179,6 +179,16 @@ def _cell(row: Mapping[str, object], name: str) -> str:
     ))
 
 
+def _web_cell(row: Mapping[str, object], name: str) -> str | None:
+    if name in row:
+        value = row[name]
+        if value is None:
+            return None
+        if isinstance(value, str):
+            return display_text(value)
+    return _cell(row, name)
+
+
 @dataclass(frozen=True)
 class FactPresentation:
     """从当前渠道获准事实即时派生；不保存、不授予权限，也不进入模型。"""
@@ -191,11 +201,11 @@ class FactPresentation:
     notices: tuple[str, ...] = ()
 
     def for_web(self) -> dict[str, object]:
-        """服务端保真格式化，避免浏览器损失大整数或猜测 JSON 字符串。"""
+        """保留 Web 标量显示；嵌套值和大整数在服务端保真格式化。"""
         return {
-            "fields": {key: _cell(self.fields, key) for key in self.fields},
+            "fields": {key: _web_cell(self.fields, key) for key in self.fields},
             "columns": self.columns,
-            "rows": [{key: _cell(row, key) for key in self.columns} for row in self.rows],
+            "rows": [{key: _web_cell(row, key) for key in self.columns} for row in self.rows],
             "coverage": self.coverage, "checks": self.checks, "notices": self.notices,
         }
 

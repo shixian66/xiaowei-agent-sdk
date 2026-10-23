@@ -135,6 +135,29 @@ def test_non_security_nested_values_stay_typed_in_card_plain_and_web():
     assert _raw_redundant(simple)
 
 
+def test_web_presentation_keeps_plain_strings_and_exact_nested_values():
+    from xiaowei.channel import RequestView
+    from xiaowei.storage import Readiness
+    from xiaowei.web import _view
+
+    columns = ("city", "empty", "null", "missing", "id", "detail", "literal")
+    row = {"city": "北京", "empty": "", "null": None, "id": 9007199254740993,
+           "detail": {"n": 3}, "literal": '{"n":3}'}
+    source = fact(
+        columns=columns,
+        rows=({**row, "detail": '{"n": 3}'},),
+        metadata={"status": "ready"},
+        result_json=json.dumps({"status": "ready", "columns": columns, "rows": [row]}),
+    )
+    response = _view("plain-values", RequestView("completed", business(source)), Readiness())
+    shown = json.loads(response.body)["delivery"]["facts"][0]["presentation"]
+    assert shown["fields"]["status"] == "ready"
+    assert shown["rows"] == [{
+        "city": "北京", "empty": "", "null": None, "missing": "（未提供）",
+        "id": "9007199254740993", "detail": '{\n  "n": 3\n}', "literal": '{"n":3}',
+    }]
+
+
 def test_security_six_subwindows_keep_per_window_counts_with_existing_card_limits():
     from tests.sdk_core.test_feishu_render import size, tables
 

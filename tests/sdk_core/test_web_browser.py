@@ -626,10 +626,22 @@ async def test_v4_business_values_visible_with_one_closed_technical_area(
     """实际 DOM：技术区收起不影响用户需要的表格、目标和历史时间。"""
     from tests.sdk_core.test_presentation_v4 import annotations_fact
 
+    catalog = env.evidence._catalog
+    policy = catalog._policies["synthetic.region"]
+    web = policy.projections["web"]
+    monkeypatch.setitem(catalog._policies, "synthetic.region", replace(
+        policy, projections={**policy.projections, "web": Projection(
+            (*web.fields, "sql", "applied_limit", "elapsed_ms", "next_cursor"), web.max_bytes,
+        )},
+    ))
+    sql = "SELECT city,\n COUNT(*) AS n\nFROM shop.orders\nGROUP BY city"
     original = synthetic_tools.payload
     annotations = json.loads(annotations_fact().result_json)
     monkeypatch.setattr(synthetic_tools, "payload", lambda region, *args: {
         **original(region, *args), "region": {"name": region, **annotations},
+        "rows": [{**row, "city": "北京", "empty": "", "null": None}
+                 for row in original(region, *args)["rows"]],
+        "sql": sql, "applied_limit": 2, "elapsed_ms": 17, "next_cursor": None,
     })
     message = env.scripts.add(
         "两项结果自然交付",
@@ -661,6 +673,15 @@ async def test_v4_business_values_visible_with_one_closed_technical_area(
         assert await table_rows(page, 0) == [2, 2]
         await page.evaluate(f"{item(0)}.querySelector('details').open = true")
         assert "local/run_query" in await page.evaluate(f"{item(0)}.innerText")
+        technical = await page.evaluate(
+            f"[...{item(0)}.querySelectorAll('details p.content')].map(n => n.textContent)"
+        )
+        assert technical.count(f"sql: {sql}") == 2
+        assert "applied_limit: 2" in technical and "elapsed_ms: 17" in technical
+        assert "next_cursor: NULL（空值）" in technical
+        assert await page.evaluate(
+            f"[...{item(0)}.querySelector('.fact tbody tr').cells].map(n => n.textContent)"
+        ) == ["2026-09-01", "50", "北京", "（空字符串）", "NULL（空值）"]
         await send(page, plain)
         await settled(page, 1, "completed")
         assert await page.evaluate(f"{item(1)}.querySelectorAll('details').length") == 0

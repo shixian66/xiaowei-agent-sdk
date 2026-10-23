@@ -75,7 +75,10 @@
         const body = node.createTBody();
         for (const row of rows) {
           const tr = body.insertRow();
-          for (const column of columns) tr.append(el("td", "", row[column]));
+          for (const column of columns) {
+            const value = row[column];
+            tr.append(el("td", value === null ? "null-value" : "", cellText(value)));
+          }
         }
         const wrap = el("div", "table-wrap");
         wrap.append(node);
@@ -93,9 +96,16 @@
       }
       const target = folded ? technical : box;
       for (const [key, value] of Object.entries(shown.fields)) {
-        if (target) target.append(el("p", "content", `${key}: ${value}`));
+        if (target) target.append(el("p", "content", `${key}: ${cellText(value)}`));
       }
       table(shown.columns, shown.rows, target);
+      if (technical) {
+        for (const [key, value] of Object.entries(fact.metadata || {})) {
+          if (technicalKeys.has(key)) {
+            technical.append(el("p", "content", `${key}: ${cellText(value)}`));
+          }
+        }
+      }
       if (technical && fact.result_json != null) {
         technical.append(el("p", "meta", "本次结果原文（仅含获准展示字段）"));
         technical.append(el("pre", "content original", fact.result_json));
