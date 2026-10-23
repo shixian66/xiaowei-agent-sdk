@@ -138,6 +138,46 @@ async def test_known_source_failure_returns_fixed_reason_and_commits(postgres_ur
         assert delivery.facts == () and await env.evidence_rows() == 0
 
 
+@pytest.mark.parametrize("phase", ["prepare", "execute"])
+async def test_inspection_failure_logs_only_trusted_identifiers(
+    postgres_url, monkeypatch, caplog, phase
+):
+    import hashlib
+    import logging
+
+    sentinel = "SELECT secret_payload FROM password_sentinel"
+    async with opened(
+        postgres_url, monkeypatch, missing=("stmt",) if phase == "prepare" else ()
+    ) as (env, _):
+        if phase == "execute":
+
+            async def failed(*args):
+                exc = StarRocksError(StarRocksErrorCode.SERVER_TIMEOUT)
+                exc.args = (sentinel,)
+                raise exc
+
+            monkeypatch.setattr(env.adapter, "security_audit", failed)
+        caplog.set_level(logging.INFO, logger="xiaowei.governance")
+        message = env.scripts.add(
+            "巡检失败日志不包含数据或异常正文",
+            tool_call("inspect_audit_security", **ARGS),
+            clarify("未取得巡检结果"),
+        )
+        ctx = env.ctx(authorized=TOOLS)
+        turn = await env.app.run_turn(ctx, message)
+        failure = turn.inspection_failures[0]
+        entries = [
+            r.getMessage() for r in caplog.records if r.msg.startswith("security_inspection ")
+        ]
+        assert entries == [
+            f"security_inspection turn={ctx.identity.turn_id} "
+            f"call_ref={hashlib.sha256(failure.call_id.encode()).hexdigest()[:16]} "
+            f"target={failure.target_id} reason={failure.reason} "
+            f"counted={failure.counted} sql_started={failure.sql_started}"
+        ]
+        assert "SELECT" not in caplog.text and sentinel not in caplog.text
+
+
 @asynccontextmanager
 async def multi_opened(postgres_url, monkeypatch):
     from xiaowei.app import TargetInfo

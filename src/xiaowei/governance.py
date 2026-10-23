@@ -595,8 +595,6 @@ class GovernedTools:
         try:
             run, inspection_scope = _bind(execute, effective)
         except SecurityInspectionError as exc:
-            if contract.tool_id != "local/inspect_audit_security":
-                raise ToolExecutionError() from None
             self._inspection_failed(
                 ctx, contract, exc.scope, exc.reason, call_id=effective.call_id, counted=False
             )
@@ -921,6 +919,16 @@ class GovernedTools:
             after_evidence_id=runs.produced[-1][1] if runs.produced else None,
         )
         self._runs[key] = replace(runs, inspection_failures=(*runs.inspection_failures, failure))
+        logger.info(
+            "security_inspection turn=%s call_ref=%s target=%s reason=%s "
+            "counted=%s sql_started=%s",
+            ctx.identity.turn_id,
+            hashlib.sha256(call_id.encode()).hexdigest()[:16],
+            contract.target_id,
+            reason,
+            counted,
+            sql_started,
+        )
         return failure
 
     def note_rejected(self, identity: Identity) -> None:

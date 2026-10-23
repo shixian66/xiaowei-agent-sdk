@@ -69,6 +69,9 @@ async def test_scheduled_inspection_only_source_failure_marks_run_incomplete(
         assert await env.scalar("SELECT state FROM xiaowei_scheduled_run") == expected
         sent = json.loads(requests[0].content)["content"]["text"]
         assert ("本次巡检未全部完成" in sent) == (case == "failed")
+        if case == "failed":
+            assert sent.startswith("⚪ 本次巡检未全部完成")
+            assert "预算内" not in sent
         assert "scheduled_agent_failure_notice" not in sent
         assert await env.scalar("SELECT count(*) FROM xiaowei_notification_attempt") == 1
 

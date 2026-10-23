@@ -1115,10 +1115,8 @@ class ScheduledTasks:
                         )
                         stage = "render"
                         content = _notification_text(delivery, "", include_remaining=True)
-                        if incomplete:
-                            content = (
-                                "本次任务未完成；以下为预算内已获得的结果或待澄清问题。\n" + content
-                            )
+                        if incomplete and not delivery.inspection_notice:
+                            content = "本次任务未完成；以下为已取得的结果或待澄清问题。\n" + content
                         if (
                             deadline is not None
                             and spec.interval_seconds

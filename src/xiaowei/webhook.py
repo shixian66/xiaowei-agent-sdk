@@ -494,7 +494,6 @@ class WebhookNotifications:
                     ),
                     context_evidence=visible,
                     inspection_failures=self._governance.turn_runs(ctx.identity).inspection_failures,
-                    run_turn_id=ctx.identity.turn_id,
                     material_only=True,
                 )
                 try:

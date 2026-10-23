@@ -280,6 +280,7 @@ async def test_webhook_text_neutralizes_mentions_before_deduplication(env, monke
         if origin != "text":
             await group.ask(query)
         await group.ask(request)
+        assert all("本次查询结果尚未交付" not in r.content.decode() for r in requests)
         assert len(requests) == 1
         content = json.loads(requests[0].content)["content"]["text"]
         assert safe_tags in content
@@ -295,6 +296,32 @@ async def test_webhook_text_neutralizes_mentions_before_deduplication(env, monke
             await env.scalar("SELECT content_digest FROM xiaowei_notification_attempt")
             == hashlib.sha256(content.encode()).hexdigest()
         )
+
+
+async def test_webhook_subset_of_current_facts_does_not_gain_pause_notice_or_resend(
+    env, monkeypatch
+):
+    def send(call):
+        return tool_call(
+            "send_webhook_message",
+            bot_alias="ops_alert_bot",
+            text="只发送所选查询结果",
+            evidence_ids=evidence_in(call)[:1],
+        )(call)
+
+    query = tool_call(
+        "run_readonly_query", cluster=SR.target_id, sql="SELECT region, total FROM shop.sales"
+    )
+    message = script(
+        env, "两次查询后只转发第一份，重复请求相同通知", query, query, send, send, cite()
+    )
+    async with running(env, monkeypatch) as (group, requests, _rt):
+        await group.ask(message)
+        assert all("本次查询结果尚未交付" not in r.content.decode() for r in requests)
+        assert len(requests) == 1
+        content = json.loads(requests[0].content)["content"]["text"]
+        assert content.count("region: east") == 1 and "total: 100" in content
+        assert await env.scalar("SELECT count(*) FROM xiaowei_notification_attempt") == 1
 
 
 def test_webhook_action_material_omits_foreign_group_approval_command():

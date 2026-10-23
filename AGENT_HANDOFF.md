@@ -45,13 +45,19 @@
 | --- | --- | --- |
 | [A 首跑/失败通知](docs/superpowers/plans/2026-10-23-scheduled-agent-first-run-recovery.md) / `codex/scheduled-agent-first-run-recovery` | base `1de7b79d61e0c934c5235a522dceb96ccd28aaf5` → head `445b4558bf302aa58ca3ba912bf96bc6dc6aa1f9` | 定时、通知及文档 **150 passed / 107.01s**（`/tmp/xw-a-review-regression.log`）；图片/日志补充 15 passed。独立复审关闭两项 P2，独立 3 passed / 24.19s。 |
 | [B 部分失败可信交付](docs/superpowers/plans/2026-10-23-security-inspection-incomplete-results.md) / `codex/security-inspection-incomplete-results` | base 为 A head → head `0f7097d1c6d04b1889b334eb2ae33db0d3a9946a` | 初实现 `10ea26ff` 相关 **379 passed / 87.97s**（`/tmp/xw-b-final-regression.log`）；Session 修复相关 **106 passed / 35.29s**（`/tmp/xw-b-replay-regression.log`），最终暂停恢复修复 **39 passed / 15.09s**（`/tmp/xw-b-pause-green.log`）。独立复审关闭 Session/暂停来源两项 P1，独立 5 passed / 2.90s。 |
-| [C 纯文本通知](docs/superpowers/plans/2026-10-23-security-plain-notification.md) / `codex/security-plain-notification` | base 为 B head；已独立审查代码 head `2c8e90d2d375b9b0312c655faaaa3a722ab687fb`，最终仅补交接文档，当前 HEAD 见 Git | 最终相关 **88 passed / 4.07s**（`/tmp/xw-c-final-regression.log`）；指定真实 Chrome brief/本地时间/历史不重取 **1 passed / 3.37s**（`/tmp/xw-c-browser.log`）。Ruff、修改范围 format、mypy（39 源文件）、文档和 diff 检查通过；独立复审通过，独立 **14 passed、44 deselected / 0.54s**。 |
+| [C 纯文本通知](docs/superpowers/plans/2026-10-23-security-plain-notification.md) / `codex/security-plain-notification` | base 为 B head；已独立审查代码 head `2c8e90d2d375b9b0312c655faaaa3a722ab687fb`，原 C 交付最终仅补交接文档；集成复审修复后的当前 HEAD 见 Git | 最终相关 **88 passed / 4.07s**（`/tmp/xw-c-final-regression.log`）；指定真实 Chrome brief/本地时间/历史不重取 **1 passed / 3.37s**（`/tmp/xw-c-browser.log`）。Ruff、修改范围 format、mypy（39 源文件）、文档和 diff 检查通过；独立复审通过，独立 **14 passed、44 deselected / 0.54s**。 |
+
+**集成复审修复（基于 `6f4c272ab1209d9ac6e8b990be30b46d96c2440e`，仅本地提交）：** B-1 移除通知发送材料误加的 `run_turn_id`；该字段只在真实 SDK 暂停材料触发未交付说明，通知失败提示继续由当前上下文兜底。新增“同轮两次查询只发第一份、重复通知”回归，断言无暂停说明、只一条 POST/通知账本；原 mention 去重用例加强相同断言，真实 SDK 暂停对照保持。B-2 在治理统一 `_inspection_failed` 入口只记 turn、call_ref（call_id 哈希前 16 位）、target、reason、counted、sql_started，准备及执行两分支均断言日志存在且无 SQL/异常敏感哨兵。删除不可达的非巡检异常防护；定时已有 ⚪ 提示时不叠通用未完成前缀，其他未完成文案移除“预算内”。“先成功后失败”保留原时序口径，理由及只建任务的 Skill 限制已登记 B 计划，不新增执行限制。
+
+修复前 `/tmp/xw-review-red.log`：**6 failed、4 passed / 6.60s**，分别命中通知材料误判、两种失败无日志、定时前缀位置；真正审批暂停对照通过。修复后 `/tmp/xw-review-green.log`：通知、失败交付两个完整文件和安全通知路径完整文件，加真实 SDK 暂停对照，共 **92 passed / 39.99s**；该日志包含实际命令、基准 HEAD 和工作区差异哈希，不能冒充旧 HEAD 的干净版本测试。前次 B 的 379 项没有覆盖通知去重，不作为此缺陷已验证的依据。Ruff 和 mypy（39 源文件）通过，新增测试修改范围 format 通过。
+
+本轮额外门槛为**提交后在最终干净 HEAD 运行完整默认回归**：`SDK_TEST_POSTGRES_URL=postgresql+asyncpg://postgres@127.0.0.1:55432/postgres uv run --locked --extra dev python -m pytest -q`。精确执行 HEAD、工作区差异哈希、完整命令、汇总和退出码统一记录在本地 `/tmp/xw-review-full.log`，以该记录确认结果，不以分阶段子集代替。日志设置 UV_OFFLINE=1；真实模型/公司源不在本轮范围。若完整测试失败，交付须报告具体失败并继续诊断，不能因子集通过豁免。
 
 A 沿原通知授权和逐次账本发送固定失败状态，超时/取消不补发，保留真实执行原因。B 的已分类源失败仅对安全只读工具交回模型，成功仍复用原 Evidence；SDK Session 保存最小来源依赖，审批恢复复核暂停账本，撤权不进模型。有效 Evidence 的分类不完整不等于未巡检；漏调用目标自动检测明确延期，没有新增必查字段、成功账本、任务表或证据版本。
 
 C 的纯文本不逐行列样本，检查计数、覆盖和追问提示保留，模型自主概括；Web、卡片、文件与历史 facts 原值保留。窗口/采集时间使用证据中的审计时区。61 样本合成 Profile 使用有限 256KB 模型请求预算，生产配置不改，不能据此确认公司容量；不调用真实模型，不证明其概括或归因质量。
 
-下一项：A/B/C 已分别独立审查通过，交用户复审；推送/PR/合并/部署等待对应授权，没有新 CI 链接。公司验收及截图见[公司清单](docs/starrocks-security-company-checklist.md#5-ab-故障恢复验收另获部署授权后执行)与[C 计划 §7](docs/superpowers/plans/2026-10-23-security-plain-notification.md#7-沿用的业务验收样例与公司缺口)。A0/A3、真实 3.5.14 语义/容量、真实模型和渠道实收仍开放；代理省略 openUrl 行为未知，必填协议保持。
+下一项：原 A/B/C 分片已分别审查；针对 `6f4c272` 的集成审查修复待用户按新提交独立复审，旧通过结论不覆盖该修复。推送/PR/合并/部署等待对应授权，没有新 CI 链接。公司验收及截图见[公司清单](docs/starrocks-security-company-checklist.md#5-ab-故障恢复验收另获部署授权后执行)与[C 计划 §7](docs/superpowers/plans/2026-10-23-security-plain-notification.md#7-沿用的业务验收样例与公司缺口)。A0/A3、真实 3.5.14 语义/容量、真实模型和渠道实收仍开放；代理省略 openUrl 行为未知，必填协议保持。
 
 此前报告呈现已随 PR #132 合入 main，范围与公司验收仍见[原报告计划](docs/superpowers/plans/2026-10-23-security-inspection-report-presentation.md)；不以本轮离线修复关闭这些验收项。
 
