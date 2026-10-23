@@ -2256,7 +2256,66 @@ def test_slow_queries_can_only_be_opened_with_an_audit_source(tmp_path: Path) ->
     config = runtime.load_config(file)
     purposes = runtime._app_config(config).purposes
     assert purposes["diagnose"] == DIAGNOSE_TOOLS | AUDIT_TOOLS
-    assert purposes["query"] == QUERY_TOOLS | AUDIT_TOOLS
+    assert purposes["query"] == QUERY_TOOLS | AUDIT_TOOLS | {"local/inspect_audit_security"}
+
+
+async def test_security_tool_cannot_be_configured_as_automatic_even_when_model_allows_it(
+    env: Env,
+) -> None:
+    from tests.sdk_core.test_scheduled_agent import agent_config
+
+    tool = "local/inspect_audit_security"
+    data = agent_config(env).model_dump(mode="json")
+    data["targets"][0]["starrocks"]["audit"] = AUDIT_CONFIG
+    data["data_policy"]["model_tools"].append(tool)
+    data["scheduled_tasks"]["automatic_tools"] = [tool]
+    config = runtime.ServeConfig.model_validate(data)
+    target = config.targets[0].starrocks
+    adapter = StarRocksAdapter(target, connect=env.drv, clock=env.clock)
+    schema = SchemaCache(adapter, clock=env.clock)
+    async with runtime._engine(config) as engine:
+        with pytest.raises(ValueError, match=r"automatic_tools.*仅支持手动巡检"):
+            runtime._delivery(config, engine, {target.target_id: schema}, Readiness(), env.clock)
+
+
+async def test_security_manual_report_through_started_web_entry(env: Env) -> None:
+    from tests.p1b.test_starrocks_audit import AUDIT_TARGET
+    from tests.p1b.test_starrocks_security_audit import END, START, record
+    from tests.sdk_core.test_security_inspection_eval import security_driver
+
+    tool = "local/inspect_audit_security"
+    data = audit_config(env.port)
+    data["targets"][0]["starrocks"] = AUDIT_TARGET.model_dump(mode="json")
+    data["data_policy"]["model_tools"].append(tool)
+    data["access"]["grants"][OPERATOR].append(tool)
+    config = runtime.ServeConfig.model_validate(data)
+    env.drv = security_driver(record(), totals=(12, 2, 0))
+    args = {"cluster": SR.target_id, "start_time": START.isoformat(), "end_time": END.isoformat()}
+    async with env.running(config) as served:
+        await served.page()
+        question = env.scripts.add(
+            "检查测试环境本窗安全情况", tool_call("inspect_audit_security", **args), cite(),
+        )
+        body = (await served.turn(question, "query", "security-success")).json()
+        assert body["state"] == "completed"
+        (fact,) = body["delivery"]["facts"]
+        result = json.loads(fact["result_json"])
+        assert (result["scanned_rows"], result["matched_rows"], result["failed_rows"]) == (12, 1, 2)
+        assert fact["rows"][0]["query_id"] == "q1" and not fact["truncated"]
+        collections = sum(
+            "AS window_rows" in sql for conn in env.drv.connections for sql, _ in conn.executed
+        )
+        bad = env.scripts.add(
+            "错误时间窗",
+            tool_call("inspect_audit_security", **{**args, "end_time": args["start_time"]}),
+            clarify(),
+        )
+        refused = (await served.turn(bad, "query", "security-refused")).json()
+        assert refused["state"] == "completed"
+        assert "rejected" in " ".join(tool_outputs(env.scripts.calls[bad][1]))
+        assert sum(
+            "AS window_rows" in sql for conn in env.drv.connections for sql, _ in conn.executed
+        ) == collections
 
 
 @pytest.mark.parametrize(

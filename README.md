@@ -151,6 +151,12 @@ uv run --locked xiaowei --config xiaowei.json requests resend --subject <发起�
 
 没有任何集群配置 `audit` 时不提供 `list_slow_queries`，配置开放或授予它会在启动时报错；只给部分集群配置时，只有这些集群可以使用它，其他集群的调用在连接前拒绝。读取该集群所有库的审计记录，`database` 参数不为 null 时只读执行时当前库为它的记录。原文中未写库名的表按该记录执行时的当前库（结果中的 `database` 列）解析，与 StarRocks 执行时相同；当时没有当前库的记录只接受写明库名的原文。只列出原文引用的对象、列与函数全部获准的查询，列表可能少于上限，为空也不代表没有慢查询；结果给出 `checked_candidates`、各 `omitted_*` 原因和 `unchecked_candidates`，`row_count` 仍仅表示实际返回行数。计数只覆盖本次已读取候选，`more_candidates=true` 表示候选读取已截断、之外数量未知；数据库侧 `isQuery` 与 catalog 过滤的条数也未知，需要完整审计口径时直接查询获准审计表。结果标记截断表示列表不完整：候选读满 `candidate_rows` 仍有剩余、候选达到字节上限、已列满 `max_rows` 而还有未检查的候选（即使它们最终可能都不获准），或获准的记录因单值或结果字节上限没有列出。插件刚安装后首批记录可能缺失；审计表任一行格式异常（如时间为空、指标不是整数）时整个工具失败，而不是返回部分结果。候选读取与原文检查各有一个客户端期限，最坏总耗时约为 2 倍 `client_timeout_seconds`。审计证据字段变更会使旧慢查询证据失效，无需数据库迁移。
 
+**手动数据库安全巡检（公司验收待完成）。** 新增只读 `inspect_audit_security` 与短安全巡检 Skill。配置审计源后，由管理员将 `local/inspect_audit_security` 明确加入 `data_policy.model_tools`；个人入口加入相应 `access.grants`，指定群加入 `feishu.group.tools`。已有查询授权不自动扩大。修改模型数据策略后新建会话；无审计源不登记工具，显式诊断入口和 `automatic_tools` 不开放此能力。
+
+在普通对话明确环境及窗口，例如：“检查 pre 的 2026-10-22 10:00–11:00（北京时间）数据库安全情况。”需要附件时再说明 Markdown 或 HTML，沿用现有报告交付。首版按小时级窗口验收，长窗可由 Agent 在预算内分窗、分别引用依据，不相加总数。工具做全窗统计、保守粗筛与有限规则精判；报告给可疑线索、高风险操作、代表 Query ID 和覆盖限制，不证明注入成功或数据库安全。超限、无法判定和样本省略会说明；全窗超长数单列，非候选超长不误报截断。新工具不输出审计原文，既有 `run_readonly_query` 的获准原文访问契约不变。
+
+本地已用合成驱动/脚本模型验证调用链；公司 StarRocks 3.5.14 的谓词、容量和真实模型/渠道验收仍须按[公司侧清单](docs/starrocks-security-company-checklist.md)执行，不能用此前 4.1.4 的验证代替。检测与数据边界见 [ARCHITECTURE §6](ARCHITECTURE.md#6-只读查询保护)。
+
 <a id="webhook-notifications"></a>
 
 **Webhook 通知（A 已合入，真实平台尚未验收）。** 默认 `webhook_bots=[]`，不开放通知工具。启用时须有现有指定飞书群，并在 `data_policy.model_tools`、`feishu.group.tools` 和获准发送者的个人 `access.grants` 三处加入 `notifications/send_webhook_message`；只会查询数据库的群成员不会自动取得发送权。工具仅在普通群消息中开放，无登录 Web、私聊与显式诊断入口均不开放。

@@ -144,6 +144,7 @@ ToolRejectHint = Literal[
     "database_required",
     "page_size",
     "audit_window",
+    "security_window",
     "audit_order",
     "internal_ddl_only",
     "database_capacity",

@@ -197,7 +197,7 @@ jobs:
         run: |
           set -uo pipefail
           tmp="$(mktemp -d)"
-          printf 'aws_secret_access_key = "%s"\n' "$(head -c 30 /dev/urandom | base64 | tr -d '=+/' | head -c 40)" > "$tmp/bait.tf"
+          printf 'aws_secret_access_key = "%s"\n' "$(head -c 30 /dev/urandom | base64 | tr -d '\n')" > "$tmp/bait.tf"
           set +e
           ./gitleaks dir --redact --no-banner "$tmp"
           rc=$?
@@ -220,7 +220,7 @@ jobs:
           cp .gitleaks.toml "$tmp/"
           mkdir -p "$tmp/tests/security"
           printf 'y = "token=%s"\n' \
-            "$(head -c 30 /dev/urandom | base64 | tr -d '=+/' | head -c 40)" \
+            "$(head -c 30 /dev/urandom | base64 | tr -d '\n')" \
             > "$tmp/tests/security/test_trace_event_redaction.py"
           set +e
           ./gitleaks dir --redact --no-banner "$tmp"

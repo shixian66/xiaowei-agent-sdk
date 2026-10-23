@@ -1625,6 +1625,9 @@ _DATABASE_SKILLS = tuple(
     files("xiaowei").joinpath("skills", name).read_text(encoding="utf-8").strip()
     for name in ("database_query.md", "database_diagnosis.md")
 )
+_SECURITY_SKILL = (
+    files("xiaowei").joinpath("skills", "database_security.md").read_text(encoding="utf-8").strip()
+)
 
 _REPORT_SKILL = (
     files("xiaowei").joinpath("skills", "report_writing.md").read_text(encoding="utf-8").strip()
@@ -1639,6 +1642,14 @@ def _instructions(
     lines = [base, ""]
     for skill in _DATABASE_SKILLS:
         lines += [skill, ""]
+    if any("local/inspect_audit_security" in names for names in capabilities.values()):
+        lines += [_SECURITY_SKILL, ""]
+    else:
+        lines += [
+            "专用安全巡检能力未登记。用户要求此类巡检时说明能力未开放，"
+            "不自行重写规则或自动取原文替代；用户独立提出的一般审计查询按现有授权处理。",
+            "",
+        ]
     lines.append(_TARGETS_HEADER)
     for target in sorted(targets, key=lambda t: t.target_id):
         names = "、".join(sorted(t.partition("/")[2] for t in capabilities[target.target_id]))
