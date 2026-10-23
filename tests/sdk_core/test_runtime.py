@@ -2258,23 +2258,41 @@ def test_slow_queries_can_only_be_opened_with_an_audit_source(tmp_path: Path) ->
     assert purposes["query"] == QUERY_TOOLS | AUDIT_TOOLS | {"local/inspect_audit_security"}
 
 
-async def test_security_tool_cannot_be_configured_as_automatic_even_when_model_allows_it(
-    env: Env,
+@pytest.mark.parametrize("model_allowed", [True, False])
+async def test_security_tool_automatic_configuration_uses_existing_read_scope(
+    env: Env, model_allowed: bool,
 ) -> None:
+    from tests.sdk_core.synthetic_tools import context
     from tests.sdk_core.test_scheduled_agent import agent_config
+
+    from xiaowei.governance import GovernedTools
 
     tool = "local/inspect_audit_security"
     data = agent_config(env).model_dump(mode="json")
     data["targets"][0]["starrocks"]["audit"] = AUDIT_CONFIG
-    data["data_policy"]["model_tools"].append(tool)
+    if model_allowed:
+        data["data_policy"]["model_tools"].append(tool)
     data["scheduled_tasks"]["automatic_tools"] = [tool]
     config = runtime.ServeConfig.model_validate(data)
     target = config.targets[0].starrocks
     adapter = StarRocksAdapter(target, connect=env.drv, clock=env.clock)
     schema = SchemaCache(adapter, clock=env.clock)
     async with runtime._engine(config) as engine:
-        with pytest.raises(ValueError, match=r"automatic_tools.*仅支持手动巡检"):
-            runtime._delivery(config, engine, {target.target_id: schema}, Readiness(), env.clock)
+        if not model_allowed:
+            with pytest.raises(
+                ValueError, match="automatic_tools 必须是当前模型获准的已登记业务只读工具",
+            ):
+                runtime._delivery(
+                    config, engine, {target.target_id: schema}, Readiness(), env.clock,
+                )
+            return
+        parts = runtime._delivery(
+            config, engine, {target.target_id: schema}, Readiness(), env.clock,
+        )
+        assert parts.task_definitions is not None
+        ctx = context(tools=frozenset({tool}), targets=frozenset({target.target_id}))
+        ctx = ctx.model_copy(update={"automatic": True})
+        assert tool in {c.tool_id for c in GovernedTools(parts.evidence).allowed_contracts(ctx)}
 
 
 async def test_security_manual_report_through_started_web_entry(env: Env) -> None:

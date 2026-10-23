@@ -64,7 +64,7 @@ ORDER BY `timestamp`, queryId LIMIT 20;
 
 ## 3. A1b 定稿、发行包明确后部署与实战（当前待执行）
 
-沿 [既有安装、升级与回退流程](../deploy/OPERATIONS.md) 核对发行包 SHA/镜像摘要，先在隔离测试环境部署；保留公司配置、凭据和数据卷。显式加入 `data_policy.model_tools`；个人配 `access.grants`，群配 `feishu.group.tools`。受影响的数据策略需新建会话。新工具不加入 automatic_tools，不改定时任务配置；tracing 维持关闭。
+沿 [既有安装、升级与回退流程](../deploy/OPERATIONS.md) 核对发行包 SHA/镜像摘要，先在隔离测试环境部署；保留公司配置、凭据和数据卷。显式加入 `data_policy.model_tools`；个人配 `access.grants`，群配 `feishu.group.tools`。受影响的数据策略需新建会话。定时复用规则见 [ARCHITECTURE §6](../ARCHITECTURE.md#6-只读查询保护)；tracing 维持关闭。
 
 每条问题先明确环境与上述绝对时间窗；替换下表的“本窗/这些记录”，不把固定工具调用顺序当验收条件。
 

@@ -1000,7 +1000,7 @@ def starrocks_tools(
             SECURITY_TOOL, security_policy,
             "手动数据库安全巡检：读取获准审计表，统计全窗总行数/ERR/超长数，"
             "粗筛后精判布尔探测、SLEEP 调用、多语句与指定高风险操作，返回分类计数与代表 Query ID。"
-            "信号不等于攻击成功；不能用于定时任务，不执行或 EXPLAIN 被审计 SQL。"
+            "信号不等于攻击成功；不执行或 EXPLAIN 被审计 SQL。"
             "start_time/end_time 必须是带 UTC offset 的 ISO 8601 绝对时刻，半开窗口 [start,end)，"
             f"窗口须为正且不超过 {limit} 分钟；长窗口可按预算分小时子窗取证，分别引用，不相加。",
         ))
