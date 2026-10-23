@@ -9,14 +9,14 @@
 | 项目 | 已核对事实 |
 | --- | --- |
 | 仓库 | [shixian66/xiaowei-agent-sdk](https://github.com/shixian66/xiaowei-agent-sdk) |
-| 产品代码基线 | `main@7a790c36b9be29080fdc896a48a6ed02aa79d332`（含 #128、#129、#130）；当前分支 `codex/ci-small-optimization` 复用已隔离工作树 `/Users/kloenguyen/.codex/worktrees/manual-starrocks-security/agent-SDK`，原目录及其他任务修改保留 |
+| 产品代码基线 | 已 fetch 核对 `main@729f960d758160e2417f4195c3ea850c85a5e000`（含 #131）；当前本地分支 `codex/security-inspection-report` 复用本任务干净隔离工作树 `/Users/kloenguyen/.codex/worktrees/manual-starrocks-security/agent-SDK`，桌面原目录及其他任务修改保留 |
 | 源码与检查 | 当前源码仅保留 `src/xiaowei`；旧工程及专属测试、Compose、迁移入口、`compose-smoke` CI 和 Alembic 依赖已移除。保留产品测试、公共检查与旧回答兼容路径；旧工程历史可从 Git 查回 |
 | 当前存储与回答 | 应用 schema v15 不变；C 扩展已有 job、逐次 run/通知关联；014 已发布不改，015 显式升级。当前本地新回答保存 v4，旧 v2/v3/Legacy 与已绑定交付保持原语义，SDK 表不改 |
 | 锁定依赖 | SDK `0.22.3`、Lark Channel `1.4.0`、MCP `2.2.0`、sqlglot `30.17.0`、`nh3 0.3.7`、`tinycss2 1.5.1`、Pillow `13.0.0`、certifi `2026.10.19`（后两项为严格审计发现的既有漏洞定向升级） |
 | 正式入口 | `xiaowei serve`、`config check`、`model check`、`storage init/upgrade/cleanup`、`requests resend`；命令与环境准备以 README 为准 |
-| 最近有记录的公司部署 | 主线交接记录含用户提供的 `xiaowei:143c4c8641be636c41c130329ce1639a36b59c27` 镜像及巡检日志；未独立核验当前服务器状态。本次未部署 |
+| 最近有记录的公司部署 | 用户本次回报 fat 镜像 `729f960d`，一小时全窗 29,232 / ERR 6 / 多语句 1，与 DBA 回查一致；未独立核验服务器。本次未部署 |
 | 当前验收结论 | A/B/C 与代理已合入主线；S0/S2 已通过独立复审。S1 首版 c44bbdf 全套通过；Claude 对 d29c2f0（受测 af797c0）确认 P1/P2(b) 通过，P2(a) 附件回答优先级回归已在 b08c042 本地修复并定向验证，用户确认 ce52831 复审通过；真实模型、平台输入/识图、客户端与 U5/U6/U7 仍未验收，D 暂停且未实现。精确版本和证据见 §5 |
-| 当前任务授权 | 用户批准 CI 小范围优化：README 仅维护命令并引用 AGENTS §6、发行测试去重、耗时统计和相应策略/交接文档；本地按计划定向检查、推送 PR 后验证最终 CI。不增加并行、缓存或路径筛选，不合并、不打包、不部署 |
+| 当前任务授权 | 按呈现计划批准 blob `8b2ab4ab15cac8c274689364431b4b238b1022ad` 离线实现、测试并本地提交，最终 HEAD 交用户复审；不推送、不开 PR、不调用真实模型或公司服务，不合并、不打包、不部署 |
 
 原工作目录的 ARCHITECTURE 差异与未跟踪计划/公司配置保留，未复制到本工作树；本次未读取公司配置凭据。旧监控和回答修复记录保留为注明版本的证据，不作为本轮输入或展示范围扩展授权。
 
@@ -37,6 +37,24 @@
 
 ## 3. 当前计划与下一项工作
 
+### 当前：安全巡检报告呈现（本地候选，待用户复审）
+
+[批准计划](docs/superpowers/plans/2026-10-23-security-inspection-report-presentation.md)原 blob 已原字节保存于本分支首提交 `3893ed823a914d01c9ab7e6c6b1b5f68185f4a56`；主体实现 `2a97d2e45b1e3bda4411a7d742ade3cbdb6c8fa8` 经独立审查后，两项修复及回归固定于源码/测试提交 `a936a5eed890270ca673645d1499d866a1b83757`。后续仅同步本文及计划状态，最终本地 HEAD 交用户复审。范围和长期契约只在 [ARCHITECTURE §6–§7](ARCHITECTURE.md#6-只读查询保护) 维护，本文记录交付状态，不复制规则表。
+
+已实现水位置空、字段语义说明、共用原值恢复与轻量业务展示、巡检中文计数及样本映射、Web 即时 presentation、飞书/纯文本/MD/HTML 接线与短 Skill 的结论先行指导。保留 SDK Loop、检测和取数、权限、Evidence/Session/投影版本、已有容量与绑定恢复机制；未新增依赖、模型 schema、拒绝条件或固定调查顺序。
+
+离线证据（源码与测试固定于 `a936a5e`）：
+
+- 计划指定相关测试及审计采集回归 **311 passed，29.32 秒**，含 S1–S5、正常/拒绝、撤权、读取时聚合、无法判定与样本省略区分、非巡检嵌套类型、六个子窗、长样本换载体、MD/HTML、历史 brief 折叠、文件分片归属和旧巡检 v4 的原字节/key/UUID 恢复。命令按计划 §7，实际使用本工作树 `.venv/bin/python`、同一 `SDK_TEST_POSTGRES_URL`；没有跑本地全量。日志 `/tmp/xw-security-report-final-regression.log`。
+- 计划选定三个 Uvicorn/Chrome 场景 **3 passed，15 deselected，4.98 秒**：完整巡检、brief 不完整及历史回放、非巡检嵌套结果。真实 SDK、治理和隔离 PostgreSQL 保留，记录型 StarRocks 驱动、脚本模型和外部飞书发送为替身。日志 `/tmp/xw-security-report-final-browser.log`。
+- `ruff check --no-cache src/xiaowei tests/p1b/test_starrocks_security.py tests/sdk_core`、`mypy src/xiaowei`（39 源文件，缓存移至 `/tmp`）及 `git diff --check` 通过。无新依赖或锁文件变化。
+- 水位、中文呈现、文件、空窗和仅省略样本的文件范围提示均先用反例复现再修复。历史/重发核对无新增审计聚合/候选或模型调用；必要的当前权限/依赖 I/O 保留，不能以总连接数不变作验收条件。
+- 另用合成数据生成并查看实际 Web 页面截图 `/tmp/xw-security-report-web-preview.png`；只证明本地布局，不能证明真实模型按此成文或真实飞书客户端展示。
+
+独立代码审查覆盖 `729f960d..2a97d2e` 的实际差异与调用链，发现 **0 Critical、2 Important**：历史巡检 brief 在飞书及纯文本默认展开样本；分文件/整行分片后的样本章节可能缺目标和时间窗。四个反例在旧代码上均失败（日志 `/tmp/xw-security-report-review-red.log`），随后仅修正已有折叠条件/纯文本摘要路径，并在样本章节复用覆盖与采集时间；四项回归及上述相关检查均通过。未改分片算法、容量或权限；修复版本尚待用户独立复审，不将作者回归称为独立批准。**CI：未触发，无本次链接**，本轮用户要求不开 PR/不推送；旧 CI 不作为本次候选验证。
+
+下一项：交最终本地 HEAD 给用户复审；获后续授权后才创建 PR 并由 CI 完成默认全量。真实 Agent 的自主选色/结论先行/原因解读、公司 3.5.14 审计源与真实飞书呈现仍待公司验收，截图项见[公司清单 §4](docs/starrocks-security-company-checklist.md#4-报告呈现验收另获部署授权后执行)。不据本次呈现修复关闭旧 A0/A3 的其他开放事项。
+
 ### CI 小范围优化（PR #131）
 
 [批准计划](docs/superpowers/plans/2026-10-23-ci-small-optimization.md)已落实为发行目录归属调整及耗时统计，README 只保留命令和权威规则引用。现有九个 CI job 名称、触发、权限与失败退出语义保留，产品代码和业务测试断言未改。基线及最终 head、独立审查、远端 pytest/job/workflow 耗时、排队时间和慢用例集中记录在 [PR #131 的运行证据](https://github.com/shixian66/xiaowei-agent-sdk/pull/131)，避免为追记 CI 结果再提交文档触发全量。
@@ -45,7 +63,7 @@
 
 用户提供的历史本地实测为 **2028 秒（33分48秒）、4900 个用例**，未提供提交 SHA；只作历史参照，不作同版本性能对比。远端历史与收益估算见计划，最终收益仅按 PR 的实测记录报告，不把各并行 job 耗时相加为等待时间。
 
-**剩余慢点／下一步：** integration 当前按单进程顺序执行测试；本轮采集 `--durations=30`，主要慢点及其耗时见上述 PR。下一步主要候选是 **pytest-xdist**：结合这些数据，从少量 worker 验证耗时、共享资源竞争和稳定性，再决定是否采用及 worker 数量。本轮未安装或启用并行；当前测试运行不能证明并行适配、真实模型或公司服务可用。用户复核最终 PR 后另行决定合并。
+**剩余慢点／下一步：** integration 当前按单进程顺序执行测试；本轮采集 `--durations=30`，主要慢点及其耗时见上述 PR。下一步主要候选是 **pytest-xdist**：结合这些数据，从少量 worker 验证耗时、共享资源竞争和稳定性，再决定是否采用及 worker 数量。#131 未安装或启用并行；已由用户授权合入 `main@729f960d`，不代表真实模型或公司服务可用。
 
 ### 手动 StarRocks 安全巡检（2026-10-23，离线候选）
 

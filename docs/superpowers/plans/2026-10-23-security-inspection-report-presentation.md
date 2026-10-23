@@ -1,15 +1,15 @@
 # StarRocks 安全巡检结果报告化：最小修复计划
 
-> 状态：blob `20ac70f0188d0e5b825d10b41ad4f08aaa21aa32` 已获独立复审通过，无开工前阻断；本文落实四项实施验收要求，保留精简后的验证和公司验收范围。本轮用户明确仍只修订计划，未修改功能代码、建立分支或提交；实施启动另待用户授权。
+> 状态：按批准 blob `8b2ab4ab15cac8c274689364431b4b238b1022ad` 完成本地离线实现；原批准文本保存在提交 `3893ed8`。主体 `2a97d2e` 的独立代码审查发现两项问题，修复及回归固定于 `a936a5e`，待用户复审最终本地 HEAD。当前不推送、不开 PR、不调用真实模型或公司服务，不合并、打包或部署。运行证据和下一步见 AGENT_HANDOFF。
 
 ## 1. 目标、基线与授权
 
 让 `inspect_audit_security` 的新巡检回答在飞书和 Web 中先给结论，再给覆盖与检查计数，最后给代表样本、解读和必要详情。计数来自代码，风险判断和建议保持模型说明身份。
 
 - 调查基线：公司部署及核对时的远端 `main` 均为 `729f960d758160e2417f4195c3ea850c85a5e000`。实际读取现有干净工作树 `codex/ci-small-optimization@12e6ffdbf4e753b3352d3844ef793b08a1cdbc80`；两者文件树均为 `0a38f5d41a4c176acf29db1bd9bfbe2dc85b0811`，源码相同。
-- 主目录仍为 `codex/model-authored-report-plan@b89d4ee`，有已有修改；不以该旧源码判断当前行为，不改写或清理这些修改。本文单独保存在主目录，供用户审阅和后续选择性带入实施分支。
+- 主目录仍为 `codex/model-authored-report-plan@b89d4ee`，有已有修改；不以该旧源码判断当前行为，不改写或清理这些修改。主目录保留原批准文本，本文在隔离实施分支同步实际状态。
 - 公司事实来自用户回报：fat、2026-10-23 15:00–16:00，全窗 29,232 条、ERR 6 条、多语句 1 条、全窗超长 3 条、无法判定候选 0 条；本地未重新连接公司核实。完整模型输入输出、其他信号计数及实际发送载体未提供，不补猜。
-- 当前授权仅修订本文。后续获准实施时采用独立分支和 PR，只用合成数据、脚本模型和本地隔离测试设施；不调用真实模型或公司服务，不合并、打包或部署。公司截图验收由用户在另行安排的环境中执行。
+- 当前授权为独立分支内的离线实现、测试及本地提交，只用合成数据、脚本模型和本地隔离测试设施；用户要求最终 HEAD 先复审，本轮不推送或创建 PR，不调用真实模型或公司服务，不合并、打包或部署。后续 PR/CI 与公司截图验收按用户另行授权执行。
 - 本期不扩展检测规则、粗筛/取数、调度、风险评分、报告模板平台、前端框架或 Agent 输出 schema。这是本次范围，不是给现有能力新增禁令。
 
 ## 2. 调查结论：可复用什么，缺什么
@@ -109,7 +109,7 @@
 - 已绑定消息/文件重发仍使用旧字节、键、UUID；旧卡片可能仍保留旧显示，这是有意保留的恢复边界，不重跑模型或审计来改外观。用户另行请求历史详情时才按现有路径提供，不能默认扩大附件内容。
 - 实现若发现必须更改 Evidence 字段集合、投影或类型，须先局部修订这一节并复审影响；不借展示修复直接提高全局 `_PROJECTION_RULE`、迁移会话或批量失效其他工具证据。
 
-## 6. 实施文件与顺序（确认后执行）
+## 6. 实施文件与顺序（本地已落实）
 
 | 文件 | 最小改动职责 |
 | --- | --- |
@@ -122,10 +122,10 @@
 | 现有相关测试（见 §7） | 补可复现反例、双端与历史/容量边界；不新建评测平台 |
 | `ARCHITECTURE.md`、`AGENT_HANDOFF.md`、公司清单 | 实施后只更新确实变化的字段解释、展示约定、证据与截图项；不复制 README/AGENTS 的验证规则 |
 
-- [ ] **确认后接手：** 复核最新远端 main、HEAD、工作区及与调查基线的相关差异，建立或复用独立主题分支，选择性带入本计划；不从主目录旧分支继续功能开发。
-- [ ] **P1：先修字段解释。** 先用“有候选但已读完”和“候选截断”复现假水位，再置空并核对计数原样；把字段语义写到模型实际看到的工具说明。退出：新旧数据的覆盖解释明确，未增加取数或模型调用。
-- [ ] **P2：跑通一个报告成功与关键失败。** 实现共用业务视图并接飞书/Web，以 §7 R1 和 R4 经过真 SDK、Governance、Evidence、实际隔离 PostgreSQL、脚本模型和渠道装配跑通；失败场景是“不完整但不得展示为完整/无风险”。先证明代码事实和交付链，再补其他渲染边界。
-- [ ] **P3：补成文方法、文件与兼容验证。** 接 MD/HTML 和短 Skill，补样本/类型/容量/历史回归；独立审查精确 base/head 差异及受影响调用链，随后推送 PR，等待完整默认 CI。CI 或审查发现问题，只在批准范围内常规修复。
+- [x] **确认后接手：** 已 fetch 核对 `main@729f960d`，复用本任务干净隔离工作树并建立 `codex/security-inspection-report`；仅带入批准计划，保留桌面目录所有原修改。
+- [x] **P1：先修字段解释。** 已先复现候选时间假水位，再置空并核对计数原样；字段语义进入模型实际使用的工具说明。新旧数据覆盖解释不依赖候选时间，未增加取数或模型调用。
+- [x] **P2：跑通一个报告成功与关键失败。** 共用视图已接飞书/Web；§7 R1/R4 经真 SDK、治理、Evidence、隔离 PostgreSQL 和脚本模型验证，另以真实本地 Web/Chrome 验完整与 brief 不完整展示。
+- [x] **P3：补成文方法、文件与兼容验证。** MD/HTML、短 Skill 与样本/类型/容量/历史回归已完成；独立审查 `729f960d..2a97d2e` 后，历史 brief 默认展开与样本分片缺归属两项问题已先复现再修复，相关检查通过。按最新用户指令，本轮只本地提交，修复后的最终 HEAD 先交用户复审；不推送 PR 或触发 CI。后续获准创建 PR 后再跑完整默认 CI，公司验收仍开放。
 
 ## 7. 固定场景与离线验证
 
@@ -147,13 +147,13 @@
 - **渠道接入层**（`test_feishu_render.py`、`test_web.py`）：分别验证正常和不完整结果的实际接入、可见业务区与默认关闭的唯一技术区。飞书用 R5 六个子窗、检查表与样本共同参与实际请求容量试排，检查最多五张原生表格、30,000 请求字节/200 组件及超限后的可读交付；复用既有整行裁剪测试，不重建容量矩阵或阈值。转义、mention、CSP、身份和权限继续跑受影响的现有回归。
 - **一个非巡检嵌套结果**（共用展示、飞书、Web 现有测试）：采用现有 Grafana `get_annotations` 的嵌套记录形状，合成数据遵循 `runtime.py` 中 `_Annotation` 的现有契约；在卡片、`business_text(..., plain_transport=True)` 和 Web 三个出口检查可读且无二次转义，并覆盖字符串 `"null"`、真实 null 与字段缺失的类型区别。卡片/Web 检查获准原始 JSON 在不能由可见值无损替代时仍保留在技术区，补 `_raw_redundant()` 对可替代/不可替代两种情况的最小断言；纯文本仅验业务文本，不附技术 JSON。不新增工具或扩大其字段权限，也不复制整套类型矩阵。
 - **真实浏览器层**（`test_web_browser.py`）：新增两个代表 DOM 用例，`test_security_report_default_view` 验 R1 正常报告和折叠详情；`test_security_report_brief_keeps_coverage_and_counts` 验 R4 在 brief 下仍可见覆盖/下界计数、样本明细收起，并加载一条旧巡检 v4 验历史覆盖行。已有 `test_v4_business_values_visible_with_one_closed_technical_area` 加强为上述非巡检嵌套夹具，覆盖通用改动，不另增一组浏览器矩阵。无命中、多样本、超长和完整类型矩阵在前述函数/API 层覆盖；仅出现浏览器独有的新分支时追加对应最小用例，不在浏览器重跑全部 R1–R5。
-- **文件和历史层**（`test_model_reports.py`、`test_result_delivery_v4.py`、`test_presentation_v4.py`）：MD/HTML 各补一个共用业务表的代表用例，正文不夹带技术 JSON；新增一条有非空 `scanned_through` 的旧巡检 v4 回归，断言新覆盖行不使用候选时间、Web 页面不报错、已存模型文字不改写。候选时间仍可合法出现在技术 JSON、样本或旧模型文字中，不断言整页消失。用该巡检夹具补已绑定飞书消息/文件按原字节、键和 UUID 恢复的断言，确认无模型或业务重查；其余旧布局与恢复流程复用现有回归。
+- **文件和历史层**（`test_model_reports.py`、`test_result_delivery_v4.py`、`test_presentation_v4.py`）：MD/HTML 各补一个共用业务表的代表用例，正文不夹带技术 JSON；新增一条有非空 `scanned_through` 的旧巡检 v4 回归，断言新覆盖行不使用候选时间、Web 页面不报错、已存模型文字不改写。候选时间仍可合法出现在技术 JSON、样本或旧模型文字中，不断言整页消失。历史 brief 的卡片/纯文本保留覆盖和计数，不默认展开样本；文件样本独立拆分后仍带目标、时间窗和采集时间。用该巡检夹具补已绑定飞书消息/文件按原字节、键和 UUID 恢复的断言，确认无模型或业务重查；其余旧布局与恢复流程复用现有回归。
 - `test_database_skills.py`：模型实际收到新 description 和短 Skill；保留登记条件及原指纹稳定性回归。脚本模型只能证明接线、事实及展示，不能证明真实 Agent 自主选色、准确解读或一定结论先行。
 
-实施时复用 README 的隔离 PostgreSQL 准备命令，使用同一个 `SDK_TEST_POSTGRES_URL`；只跑相关测试和 lint/type，本地不全量。以下是实施后的验证命令，其中两个新增浏览器用例尚未落地：
+实施复用 README 的隔离 PostgreSQL 准备命令，使用同一个 `SDK_TEST_POSTGRES_URL`；只跑相关测试和 lint/type，本地不全量。以下验证入口及两个新增浏览器用例均已落实，实际结果见 AGENT_HANDOFF：
 
 ```bash
-uv run --locked --extra dev python -m pytest -q tests/p1b/test_starrocks_security.py tests/sdk_core/test_security_inspection_eval.py tests/sdk_core/test_presentation_v4.py tests/sdk_core/test_feishu_render.py tests/sdk_core/test_web.py tests/sdk_core/test_model_reports.py tests/sdk_core/test_result_delivery_v4.py tests/sdk_core/test_database_skills.py tests/security/test_docs_command_consistency.py
+uv run --locked --extra dev python -m pytest -q tests/p1b/test_starrocks_security.py tests/p1b/test_starrocks_security_audit.py tests/sdk_core/test_security_inspection_eval.py tests/sdk_core/test_presentation_v4.py tests/sdk_core/test_feishu_render.py tests/sdk_core/test_web.py tests/sdk_core/test_model_reports.py tests/sdk_core/test_result_delivery_v4.py tests/sdk_core/test_database_skills.py tests/security/test_docs_command_consistency.py
 uv run --locked --extra dev python -m pytest -q tests/sdk_core/test_web_browser.py -m browser -k 'security_report or v4_business_values_visible_with_one_closed_technical_area'
 uv run --locked --extra dev ruff check src/xiaowei tests/p1b/test_starrocks_security.py tests/sdk_core
 uv run --locked --extra dev mypy src/xiaowei
@@ -166,10 +166,10 @@ git diff --check
 
 以下四项来自本次独立复审，实施 PR 逐项附对应测试与结果；具体口径以上述章节为准，不另定验收标准：
 
-- [ ] **紧凑计数与多子窗：** §3.2 的五行检查表、非零操作分项及完整性表述落实；§7 R5 的六个子窗通过飞书表格数、实际容量及可读交付检查。
-- [ ] **读取时聚合口径：** 覆盖和 ERR 按 §3.2 表述，不宣称最终“准确数量”；候选截断不把 ERR 降成分类下界。
-- [ ] **通用嵌套值回归：** 上述同一非巡检夹具覆盖卡片、纯文本与 Web，类型区别和 `_raw_redundant()` 的无损替代依据成立；技术 JSON 只按现有渠道契约保留。
-- [ ] **旧巡检 v4 兼容：** 新 Web 覆盖行不用旧候选时间、旧模型文字不改写，绑定消息/文件按旧字节恢复且无重查；有巡检专属断言，不能只引用通用历史测试。
+- [x] **紧凑计数与多子窗：** §3.2 的五行检查表、非零操作分项及完整性表述落实；§7 R5 的六个子窗通过飞书表格数、实际容量及可读交付检查。
+- [x] **读取时聚合口径：** 覆盖和 ERR 按 §3.2 表述，不宣称最终“准确数量”；候选截断不把 ERR 降成分类下界。
+- [x] **通用嵌套值回归：** 上述同一非巡检夹具覆盖卡片、纯文本与 Web，类型区别和 `_raw_redundant()` 的无损替代依据成立；技术 JSON 只按现有渠道契约保留。
+- [x] **旧巡检 v4 兼容：** 新 Web 覆盖行不用旧候选时间、旧模型文字不改写，绑定消息/文件按旧字节恢复且无重查；有巡检专属断言，不能只引用通用历史测试。
 
 ## 8. 公司验收截图与交付
 
