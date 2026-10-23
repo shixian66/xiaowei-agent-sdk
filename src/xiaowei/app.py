@@ -259,6 +259,9 @@ _MESSAGES: Mapping[TurnReason, str] = {
     "busy": "当前处理中的请求过多，本轮未执行，请稍后再试",
     "scope_rejected": "本轮工具范围超出模型数据策略，未执行",
     "storage_unavailable": "存储未就绪，本轮未执行",
+    "session_unavailable": "当前会话暂不可用，本轮未完成，请稍后重试",
+    "content_rejected": "输入内容未通过检查，本轮未执行，请调整后重试",
+    "storage_failed": "本轮存储操作失败，未能完成交付，请稍后核对状态",
     "answer_rejected": "回答未通过证据校验，本轮未保存也未发送",
     "query_unfinished": "本轮有已开始的查询没有结果也没有失败记录，未保存也未发送；不会自动重试",
     "scope_unverifiable": "暂时无法确认数据当前权限，本轮未交付；会话保留，请稍后重试",
@@ -750,7 +753,7 @@ class Application:
         # 恢复只沿用暂停时的 RunState；有图会话不提供执行请求，因此不会有含原图的检查点。
         saved_images = (
             await self.images.load(ctx.identity)
-            if self.images is not None and native is None
+            if self.images is not None and native is None and not ctx.automatic
             else []
         )
         if saved_images and not self._model.profile.image_input_enabled:

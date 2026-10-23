@@ -9,14 +9,14 @@
 | 项目 | 已核对事实 |
 | --- | --- |
 | 仓库 | [shixian66/xiaowei-agent-sdk](https://github.com/shixian66/xiaowei-agent-sdk) |
-| 产品代码基线 | 已 fetch 核对 `main@729f960d758160e2417f4195c3ea850c85a5e000`（含 #131）；当前本地分支 `codex/security-inspection-report` 复用本任务干净隔离工作树 `/Users/kloenguyen/.codex/worktrees/manual-starrocks-security/agent-SDK`，桌面原目录及其他任务修改保留 |
+| 产品代码基线 | 已 fetch 核对 `main@1de7b79d61e0c934c5235a522dceb96ccd28aaf5`（含 #132）；本地 `codex/scheduled-agent-first-run-recovery` 在原隔离工作树开发 A，桌面原目录及其他任务修改保留 |
 | 源码与检查 | 当前源码仅保留 `src/xiaowei`；旧工程及专属测试、Compose、迁移入口、`compose-smoke` CI 和 Alembic 依赖已移除。保留产品测试、公共检查与旧回答兼容路径；旧工程历史可从 Git 查回 |
 | 当前存储与回答 | 应用 schema v15 不变；C 扩展已有 job、逐次 run/通知关联；014 已发布不改，015 显式升级。当前本地新回答保存 v4，旧 v2/v3/Legacy 与已绑定交付保持原语义，SDK 表不改 |
 | 锁定依赖 | SDK `0.22.3`、Lark Channel `1.4.0`、MCP `2.2.0`、sqlglot `30.17.0`、`nh3 0.3.7`、`tinycss2 1.5.1`、Pillow `13.0.0`、certifi `2026.10.19`（后两项为严格审计发现的既有漏洞定向升级） |
 | 正式入口 | `xiaowei serve`、`config check`、`model check`、`storage init/upgrade/cleanup`、`requests resend`；命令与环境准备以 README 为准 |
 | 最近有记录的公司部署 | 用户本次回报 fat 镜像 `729f960d`，一小时全窗 29,232 / ERR 6 / 多语句 1，与 DBA 回查一致；未独立核验服务器。本次未部署 |
 | 当前验收结论 | A/B/C 与代理已合入主线；S0/S2 已通过独立复审。S1 首版 c44bbdf 全套通过；Claude 对 d29c2f0（受测 af797c0）确认 P1/P2(b) 通过，P2(a) 附件回答优先级回归已在 b08c042 本地修复并定向验证，用户确认 ce52831 复审通过；真实模型、平台输入/识图、客户端与 U5/U6/U7 仍未验收，D 暂停且未实现。精确版本和证据见 §5 |
-| 当前任务授权 | 用户已确认 `44071d4` 修复复审通过，授权创建 PR #132 并在最终 CI 通过后合并；首轮 CI 暴露的同范围回归继续修复。仍不调用真实模型或公司服务，不打包、不部署 |
+| 当前任务授权 | 用户已批准修订后的三份计划，授权 A→B→C 串行离线实现、测试和常规修复；分别主题分支、本地提交和独立审查。漏调用目标检测延期，不新增必查字段；不调用真实模型或公司服务，不合并、打包或部署；推送/PR 留待后续授权 |
 
 原工作目录的 ARCHITECTURE 差异与未跟踪计划/公司配置保留，未复制到本工作树；本次未读取公司配置凭据。旧监控和回答修复记录保留为注明版本的证据，不作为本轮输入或展示范围扩展授权。
 
@@ -37,27 +37,15 @@
 
 ## 3. 当前计划与下一项工作
 
-### 当前：安全巡检报告呈现（PR #132，CI 修复候选）
+### 当前：安全巡检 A/B/C 修复（离线实施）
 
-[批准计划](docs/superpowers/plans/2026-10-23-security-inspection-report-presentation.md)原 blob 已原字节保存于 `3893ed823a914d01c9ab7e6c6b1b5f68185f4a56`。用户已确认 Claude 对 Web B1/B2 修复的复审通过，并授权 PR #132 与合并；原获批 HEAD `44071d4d1e5bff04077ac285332a221c8a5d25ef` 的首轮 CI 暴露通用纯文本回归，当前修复源码/测试固定于 `d1f8d82ee184c19731e10d67e21fad556b9bfcf6`，仅对该增量独立复核通过，最终 CI 待验证。范围和长期契约见 [ARCHITECTURE §6–§7](ARCHITECTURE.md#6-只读查询保护)，本文只记录状态与证据。
+[A 计划](docs/superpowers/plans/2026-10-23-scheduled-agent-first-run-recovery.md)首跑与失败可见性正在验证：补齐默认原因消息；可信 automatic 任务不读用户图片；固定失败通知沿现有当前定义、治理与发送账本，仍保留原失败原因。合法 Vertex 图片 Profile + 协议替身已跑通真实 Application/SDK/隔离 PostgreSQL 的定时任务；外部源与发送均为替身。
 
-已实现水位置空、字段语义说明、共用原值恢复与轻量业务展示、巡检中文计数及样本映射、Web 即时 presentation、飞书/纯文本/MD/HTML 接线与短 Skill 的结论先行指导。保留 SDK Loop、检测和取数、权限、Evidence/Session/投影版本、已有容量与绑定恢复机制；未新增依赖、模型 schema、拒绝条件或固定调查顺序。
+A 新回归先复现缺文案、图片会话 KeyError、缺失败通知和准备阶段缺零模型请求日志；当前相关回归 **42 passed、47 deselected（23.41s）**，日志 `/tmp/xw-a-final-regression.log`；普通图片权限、应用日志及文档检查 **15 passed（6.95s）**，日志 `/tmp/xw-a-image-logs.log`。Ruff、改动文件 format、mypy（39 源文件）与 diff 检查通过；独立审查待完成，没有本次 CI、真实模型或公司验收证据。
 
-Web B1/B2 修复的既有离线证据（对应 `4d34f33`；本次 CI 修复证据另列）：
+下一项按 [B 计划](docs/superpowers/plans/2026-10-23-security-inspection-incomplete-results.md)、[C 计划](docs/superpowers/plans/2026-10-23-security-plain-notification.md)推进。B/C 尚未实现；取到有效 Evidence 但覆盖不完整不等于未巡检，漏调用检测明确延期。各片按实际增量审查，不把新分支复制为新平台。
 
-- `test_web.py`、`test_presentation_v4.py`：**91 passed，13.61 秒**。API 精确断言普通字符串、空串、NULL、缺失、大整数及嵌套值；日志 `/tmp/xw-security-web-review-regression.log`。
-- 整个 `test_web_browser.py -m browser`：**18 passed，24.01 秒**，含两个巡检场景及加强后的通用 v4 用例。真 Uvicorn/Chrome 验证展开技术区后多行 SQL 原文、游标/限额/耗时独立可读，表格日期/中文字符串不加外层引号，空值标记保持；日志 `/tmp/xw-security-web-review-browsers.log`。
-- `ruff check --no-cache src/xiaowei tests/sdk_core/test_web.py tests/sdk_core/test_web_browser.py tests/sdk_core/test_presentation_v4.py`、`mypy src/xiaowei`（39 源文件，缓存移至 `/tmp`）、受影响文档检查（**2 passed**）及 `git diff --check` 通过。无新依赖或锁文件变化。
-- 新 API 用例和加强后的浏览器用例先分别失败，日志 `/tmp/xw-security-web-review-unit-red.log`、`/tmp/xw-security-web-review-browser-red.log`；B1 修复后 SQL 断言通过，浏览器继续停在 B2 外层引号差异，最终两项回归均通过。没有放宽断言或生产投影。
-- 前版 `a936a5e` 的计划相关测试 **311 passed，29.32 秒** 保留为该版本证据（日志 `/tmp/xw-security-report-final-regression.log`），含 S1–S5、拒绝/撤权、统计、容量、文件和历史重发。本次按实际 Web 差异收窄重跑范围，不将这 311 项写成最终 HEAD 的新运行，也未跑本地全量。必要的当前权限/依赖 I/O 保留，不能以总连接数不变作验收条件。
-
-Claude 确认巡检覆盖/计数、历史 brief 和文件分片等路径无问题，原 Web 阻断为 **B1：presentation 早退丢失独立 SQL 等技术字段；B2：共用卡片格式化让 Web 字符串多出外层引号**。B1 复用已有获准 metadata 与 technicalKeys；B2 采用推荐 A 恢复 Web 标量显示。该版本已获用户复审通过，原内部修复的历史 brief/样本分片保持。
-
-**PR #132 首次 CI 与修复：** [运行 39939600203](https://github.com/shixian66/xiaowei-agent-sdk/actions/runs/39939600203) 的其他 8 项通过，integration 为 **12 failed、4939 passed、235 skipped、98 deselected、5 warnings，1446.85 秒**，未合并。失败均在本地原断言复现（12 failed / 6.50 秒，`/tmp/xw-security-report-ci-repro-red.log`）：通用 `business_text` 错用短说明、把普通 Webhook 字符串套上卡片引号、未转义字段名控制字符。本次仅恢复原载体契约，保留当前渠道嵌套值和巡检映射，不改权限或断言；新增两个纯函数反例先 RED，原 12 项加呈现回归 **58 passed，7.59 秒**（`/tmp/xw-security-report-ci-repair-green.log`）。补跑诊断、runtime、慢查询、StarRocks 工具、Webhook 通知/代理、卡片、呈现、交付、巡检、Web API 与报告的 12 个相关文件，**634 passed，160.56 秒**（`/tmp/xw-security-report-ci-repair-regression.log`）；Ruff/mypy 39 文件及 diff 检查通过，未跑本地全仓。
-
-独立复核只覆盖 `44071d4..d1f8d82`，**0 Critical / 0 Important / 0 Minor**；只读探针确认巡检 full/brief/历史/不完整 × 两种文本模式 8 组与修复前一致，普通值与说明优先级 20 组恢复原主线语义，嵌套值、字段名、动作及摘要/审批命令过滤保留。未把自查或首轮失败 CI 当作最终通过。
-
-下一项：推送最终 HEAD 并等待完整 CI，通过后按用户已有授权 squash 合并 #132，CI 与合并证据集中记入 PR，不为追记结果另触发一次全量。真实 Agent 的自主选色/结论先行/原因解读、公司 3.5.14 审计源与真实飞书呈现仍待公司验收，截图项见[公司清单 §4](docs/starrocks-security-company-checklist.md#4-报告呈现验收另获部署授权后执行)。不据本次修复关闭旧 A0/A3，不打包、不部署。
+此前报告呈现已随 PR #132 合入上述主线，旧“CI 待验证/下一步合并”的任务状态不再适用。其范围及公司验收项继续见[报告呈现计划](docs/superpowers/plans/2026-10-23-security-inspection-report-presentation.md)和[公司清单](docs/starrocks-security-company-checklist.md#4-报告呈现验收另获部署授权后执行)；A0/A3 与真实模型、渠道验收仍开放。
 
 ### CI 小范围优化（PR #131）
 

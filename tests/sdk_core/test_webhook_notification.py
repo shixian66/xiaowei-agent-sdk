@@ -121,7 +121,16 @@ def configured(env, *, sender=True, bots=None):
 
 @asynccontextmanager
 async def running(
-    env, monkeypatch, *, sender=True, response=None, member_check=None, bots=None, config=None
+    env,
+    monkeypatch,
+    *,
+    sender=True,
+    response=None,
+    member_check=None,
+    bots=None,
+    config=None,
+    model_transport=None,
+    download_resource=None,
 ):
     monkeypatch.setenv("XW_TEST_WEBHOOK_URL", URL)
     requests = []
@@ -143,7 +152,7 @@ async def running(
     async with runtime.open_runtime(
         cfg,
         clock=env.clock,
-        model_transport=env.scripts.transport(),
+        model_transport=model_transport if model_transport is not None else env.scripts.transport(),
         starrocks_connect=env.connect(cfg),
         members=member,
         webhook_transport=httpx2.MockTransport(post),
@@ -155,6 +164,7 @@ async def running(
             outbox,
             clock=env.clock,
             bot_open_id=lambda: BOT,
+            download_resource=download_resource,
         )
         task = asyncio.create_task(gateway.run())
         group = Group(SimpleNamespace(clock=env.clock), gateway, outbox)
