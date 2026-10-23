@@ -45,7 +45,7 @@ Agent 可以理解自然语言、生成 SQL、选择工具、根据工具结果�
 | Web | 对话页，显示消息、执行提示、SQL、有限结果与诊断回答；原生入口默认只监听本机，Compose 部署默认发布到宿主机所有地址供公司内网访问（§10 Web 绑定），无登录、共用 `operator_id` |
 | 飞书 | 保留获准单聊；P2.5 后、P3 前增加一个指定群，@ 才触发，全员同权、群内共享上下文与结果（§7） |
 | 会话 | 同一入口可连续追问；Web 与飞书分别持有会话 |
-| 工具接入 | StarRocks 走受治理 function tools 与本地 Adapter；通用 MCP Client Integration 保留用于其他能力，数据库 MCP 暂缓（§5） |
+| 工具接入 | StarRocks 走受治理 function tools 与本地 Adapter；通用 MCP Client Integration 保留用于其他能力，数据库 MCP 暂缓（§5）；CloudCanal 一期接入计划见 [§5](#cloudcanal-mcp) |
 | 运行 | Docker Compose 管理一个小维应用容器和一个 PostgreSQL 容器；应用单进程，SDK Session 使用 SQLAlchemySession，应用记录独立存储；飞书优先长连接 |
 | P1–P3 暂缓 | StarRocks 写操作、自动执行优化建议、任意数据导出与任意类型文件上传、多群管理、跨渠道账号绑定、多人公网 Web、多租户、多 Agent 协作、后台任务平台、数据库 MCP、TiDB/MySQL；飞书限定的输入附件与 MD/HTML 报告文件按 §7 单独批准，监控增量单独规划于 §5 |
 
