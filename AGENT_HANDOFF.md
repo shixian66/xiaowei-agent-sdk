@@ -45,13 +45,13 @@
 | --- | --- | --- |
 | [A 首跑/失败通知](docs/superpowers/plans/2026-10-23-scheduled-agent-first-run-recovery.md) / `codex/scheduled-agent-first-run-recovery` | base `1de7b79d61e0c934c5235a522dceb96ccd28aaf5` → head `445b4558bf302aa58ca3ba912bf96bc6dc6aa1f9` | 定时、通知及文档 **150 passed / 107.01s**（`/tmp/xw-a-review-regression.log`）；图片/日志补充 15 passed。独立复审关闭两项 P2，独立 3 passed / 24.19s。 |
 | [B 部分失败可信交付](docs/superpowers/plans/2026-10-23-security-inspection-incomplete-results.md) / `codex/security-inspection-incomplete-results` | base 为 A head → head `0f7097d1c6d04b1889b334eb2ae33db0d3a9946a` | 初实现 `10ea26ff` 相关 **379 passed / 87.97s**（`/tmp/xw-b-final-regression.log`）；Session 修复相关 **106 passed / 35.29s**（`/tmp/xw-b-replay-regression.log`），最终暂停恢复修复 **39 passed / 15.09s**（`/tmp/xw-b-pause-green.log`）。独立复审关闭 Session/暂停来源两项 P1，独立 5 passed / 2.90s。 |
-| [C 纯文本通知](docs/superpowers/plans/2026-10-23-security-plain-notification.md) / `codex/security-plain-notification` | base 为 B head；当前待独立审查的本地提交见 Git | 最终相关 **88 passed / 4.07s**（`/tmp/xw-c-final-regression.log`）；指定真实 Chrome brief/本地时间/历史不重取 **1 passed / 3.37s**（`/tmp/xw-c-browser.log`）。Ruff、修改范围 format、mypy（39 源文件）、文档和 diff 检查通过。 |
+| [C 纯文本通知](docs/superpowers/plans/2026-10-23-security-plain-notification.md) / `codex/security-plain-notification` | base 为 B head；已独立审查代码 head `2c8e90d2d375b9b0312c655faaaa3a722ab687fb`，最终仅补交接文档，当前 HEAD 见 Git | 最终相关 **88 passed / 4.07s**（`/tmp/xw-c-final-regression.log`）；指定真实 Chrome brief/本地时间/历史不重取 **1 passed / 3.37s**（`/tmp/xw-c-browser.log`）。Ruff、修改范围 format、mypy（39 源文件）、文档和 diff 检查通过；独立复审通过，独立 **14 passed、44 deselected / 0.54s**。 |
 
 A 沿原通知授权和逐次账本发送固定失败状态，超时/取消不补发，保留真实执行原因。B 的已分类源失败仅对安全只读工具交回模型，成功仍复用原 Evidence；SDK Session 保存最小来源依赖，审批恢复复核暂停账本，撤权不进模型。有效 Evidence 的分类不完整不等于未巡检；漏调用目标自动检测明确延期，没有新增必查字段、成功账本、任务表或证据版本。
 
 C 的纯文本不逐行列样本，检查计数、覆盖和追问提示保留，模型自主概括；Web、卡片、文件与历史 facts 原值保留。窗口/采集时间使用证据中的审计时区。61 样本合成 Profile 使用有限 256KB 模型请求预算，生产配置不改，不能据此确认公司容量；不调用真实模型，不证明其概括或归因质量。
 
-下一项：完成 C 精确增量独立审查，交用户复审；推送/PR/合并/部署等待对应授权，没有新 CI 链接。公司验收及截图见[公司清单](docs/starrocks-security-company-checklist.md#5-ab-故障恢复验收另获部署授权后执行)与[C 计划 §7](docs/superpowers/plans/2026-10-23-security-plain-notification.md#7-沿用的业务验收样例与公司缺口)。A0/A3、真实 3.5.14 语义/容量、真实模型和渠道实收仍开放；代理省略 openUrl 行为未知，必填协议保持。
+下一项：A/B/C 已分别独立审查通过，交用户复审；推送/PR/合并/部署等待对应授权，没有新 CI 链接。公司验收及截图见[公司清单](docs/starrocks-security-company-checklist.md#5-ab-故障恢复验收另获部署授权后执行)与[C 计划 §7](docs/superpowers/plans/2026-10-23-security-plain-notification.md#7-沿用的业务验收样例与公司缺口)。A0/A3、真实 3.5.14 语义/容量、真实模型和渠道实收仍开放；代理省略 openUrl 行为未知，必填协议保持。
 
 此前报告呈现已随 PR #132 合入 main，范围与公司验收仍见[原报告计划](docs/superpowers/plans/2026-10-23-security-inspection-report-presentation.md)；不以本轮离线修复关闭这些验收项。
 

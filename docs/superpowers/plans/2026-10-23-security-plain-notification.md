@@ -1,6 +1,6 @@
 # 切片 C：安全巡检纯文本通知保持报告组织
 
-> 状态：B 已独立复审通过，本片从 `0f7097d1c6d04b1889b334eb2ae33db0d3a9946a` 在 `codex/security-plain-notification` 离线实现；相关回归 88 passed、指定真实 Chrome 1 passed，lint/type/修改范围 format/diff 通过，待独立审查。不调用真实模型或公司服务，不合并、打包或部署。前置计划：[A](2026-10-23-scheduled-agent-first-run-recovery.md)、[B](2026-10-23-security-inspection-incomplete-results.md)。
+> 状态：B 已独立复审通过，本片从 `0f7097d1c6d04b1889b334eb2ae33db0d3a9946a` 在 `codex/security-plain-notification` 离线实现；相关回归 88 passed、指定真实 Chrome 1 passed，lint/type/修改范围 format/diff 通过；代码 head `2c8e90d2d375b9b0312c655faaaa3a722ab687fb` 已独立审查通过，独立 14 passed / 0.54s，最终只补交接文档。不调用真实模型或公司服务，不合并、打包或部署。前置计划：[A](2026-10-23-scheduled-agent-first-run-recovery.md)、[B](2026-10-23-security-inspection-incomplete-results.md)。
 
 ## 1. 目标与基线
 
@@ -129,7 +129,7 @@ Evidence 字段、各渠道投影、规则版本、回答版本和数据库 sche
 - [x] 给 §3.4 的已知 N、截断但 N=0、正下界、缺失数值补行为断言；复用已有“超长数不等于无法判定数”“只省略样本时计数完整”和 ERR 全窗断言。更新旧的“至少 0”断言，不放宽完整性要求。
 - [x] 调整短 Skill，沿 `test_database_skills.py` 验证现有装配和自主组织契约。脚本模型只提供固定概括用来测交付，不以此证明真实 Agent 会正确概括。
 - [x] 沿现有 `test_presentation_v4.py`、`test_web.py`、`test_model_reports.py` 选择安全呈现相关节点，复用同一事实核对 §2 全部 content 使用方：纯文本精简后请求重建仍保留 61 条 facts 原值、固定回执不受影响，Web/卡片/MD/HTML 明细可追溯，brief 覆盖和计数仍可见。通用字符串与实际 SQL 保留既有轻量回归；本片未改通用渲染或 JS 时不追加其浏览器用例。不另跑同义的 SDK 呈现闭环或全载体 × 全场景矩阵。
-- [ ] 运行相关检查，记录精确命令/版本/结果；对实际差异审查后交付，完整默认回归留给后续获准 PR 的 CI。
+- [x] 运行相关检查，记录精确命令/版本/结果；对实际差异审查后交付，完整默认回归留给后续获准 PR 的 CI。
 
 验证去重沿 [A §5](2026-10-23-scheduled-agent-first-run-recovery.md#5-实施与验证)。上述文件是相关用例的位置，不是整文件全量门槛；实施时记录选中的节点与对应行为。T1 已覆盖正式通知路径，不再把 `test_security_inspection_eval.py::test_report_presentation_through_formal_sdk_and_channel_projection` 作为重复必跑项；仅实际修改其独有投影/SDK 接线时再选入。不改取数或检测，不重跑整套数据库规则、A/B 的完整边界矩阵或发行测试。
 
