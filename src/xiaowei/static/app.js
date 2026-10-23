@@ -44,7 +44,7 @@
     return index < 0 ? "历史结果" : `结果 ${index + 1}`;
   };
   const technicalKeys = new Set(["sql", "row_count", "elapsed_ms", "next_cursor", "query",
-    "expression", "receipt_id", "checked_at", "last_success_at", "requested_limit", "applied_limit"]);
+    "expression", "receipt_id", "requested_limit", "applied_limit"]);
   const factTable = (fact, label, modern = false, technical = null) => {
     const box = el("div", "fact");
     const action = fact.section === "action";

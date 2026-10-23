@@ -132,16 +132,12 @@ def _fact_section(
         values: dict[str, object] = dict(shown.metadata)
         if shown.columns:
             values.update(columns=shown.columns, rows=shown.rows)
-        # 显式文件沿用获准原文；自动附件只保留业务字段，但不把嵌套 JSON 改成字符串。
+        # 文件只保留业务字段，从获准原文恢复其值类型，不附技术元数据。
         if fact.result_json is not None:
             original = json.loads(fact.result_json)
             if isinstance(original, dict):
                 values = {key: original[key] for key in values if key in original}
-        value = (
-            _fact_json(fact)
-            if expand_brief
-            else json.dumps(values, ensure_ascii=False, allow_nan=False)
-        )
+        value = json.dumps(values, ensure_ascii=False, allow_nan=False)
         return _Section(
             "fact",
             fact_scope(fact),

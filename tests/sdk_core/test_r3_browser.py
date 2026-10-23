@@ -285,3 +285,42 @@ async def test_web_view_shows_status_projection_limits_and_note_linebreaks(chrom
             assert await page.evaluate(
                 f"{item(0)}.querySelector('.note').innerText.includes(String.fromCharCode(10))"
             )
+
+
+async def test_v4_task_status_times_are_visible_in_web_body(chrome_binary: str) -> None:
+    """同一已验证任务事实的实际 DOM；fetch 为组件替身，不证明 Web 任务授权。"""
+    from pathlib import Path
+    from urllib.parse import quote
+
+    from tests.sdk_core.test_presentation_v4 import task_status_delivery
+
+    from xiaowei.channel import RequestView
+    from xiaowei.storage import Readiness
+    from xiaowei.web import _view
+
+    value = task_status_delivery().model_copy(update={"channel": "web"})
+    response = _view("task-status", RequestView("completed", value), Readiness())
+    assets = Path(__file__).resolve().parents[2] / "src/xiaowei/static"
+    markup = (assets / "index.html").read_text()
+    markup = markup.replace('<script src="/assets/app.js" defer></script>', "")
+    markup = markup.replace(
+        '<link rel="stylesheet" href="/assets/app.css">',
+        "<style>" + (assets / "app.css").read_text() + "</style>",
+    )
+    async with launch(chrome_binary) as chrome:
+        page = await chrome.page()
+        await page.navigate("data:text/html;charset=utf-8," + quote(markup))
+        await page.evaluate(
+            "window.fetch = async () => ({status: 200, json: async () => ("
+            + response.body.decode()
+            + ")});"
+        )
+        await page.evaluate((assets / "app.js").read_text())
+        await send(page, "这个任务上次何时成功？", "query")
+        await settled(page, 0, "completed")
+        assert await page.evaluate(f"{item(0)}.querySelectorAll('details').length") == 1
+        assert await page.evaluate(f"{item(0)}.querySelector('details').open") is False
+        visible = await page.evaluate(f"{item(0)}.innerText")
+        assert "2026-10-09T10:05:00+00:00" in visible
+        assert "2026-10-09T10:06:00+00:00" in visible
+        assert "nr_internal" not in visible

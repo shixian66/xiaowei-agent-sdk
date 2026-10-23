@@ -30,6 +30,7 @@ REMAINING_LABEL: Final = "其余结果（系统补全本轮获准结果）"
 TEXT_CLIPPED: Final = "（内容超过单消息上限，已截断）"
 BRIEF_ORIGINAL_OMITTED: Final = "获准原文未展示（单消息容量限制）；如需原文请明确提出。"
 RAW_OMITTED: Final = "原文 JSON 与上方展示的值逐项一致，未重复展示；如需原文可要求 MD/HTML 文件。"
+TECHNICAL_OMITTED: Final = "技术详情超出消息容量，未附。"
 _TECHNICAL = frozenset({"sql", "row_count", "elapsed_ms", "next_cursor"})
 # 只控制展示，不改变 Evidence 投影、接收许可或保存期限。
 _BUSINESS_HIDDEN = _TECHNICAL | frozenset(
@@ -37,8 +38,6 @@ _BUSINESS_HIDDEN = _TECHNICAL | frozenset(
         "query",
         "expression",
         "receipt_id",
-        "checked_at",
-        "last_success_at",
         "requested_limit",
         "applied_limit",
     }
@@ -569,7 +568,7 @@ def _card(
 
     def fact_details(index: int) -> None:
         fact = delivery.facts[index]
-        if fact.requires_complete or (modern and (attachment or index not in technical)):
+        if fact.requires_complete or (modern and index not in technical):
             return
         if modern:
             details_area.append(_div(f"{fact.tool_id} · {fact.evidence_id}\n{fact_scope(fact)}"))
@@ -923,7 +922,7 @@ def build_feishu_message(
         and isinstance(f.metadata.get("sql"), str)
         and not (attachment_preview and i in folded)
     }
-    all_technical = set() if attachment_preview else set(range(len(delivery.facts)))
+    all_technical = set(range(len(delivery.facts))) if modern or not attachment_preview else set()
     hidden = (
         frozenset(i for i, f in enumerate(delivery.facts) if _raw_redundant(f))
         if platform_limits
@@ -957,8 +956,18 @@ def build_feishu_message(
     if fits(full):
         formatted = card(totals, all_sql, delivery.texts, all_technical, formatted=True)
         return formatted if fits(formatted) else full
-    if modern and not attachment_preview:
-        # 大段技术原值不单独导出；如实说明该部分未附，用户可明确要求原文文件。
+    if modern and (
+        not attachment_preview
+        or not fits(
+            card(
+                [totals[i] if i in fixed else 0 for i in range(len(totals))],
+                set(),
+                (),
+                all_technical,
+            )
+        )
+    ):
+        # 技术区放不下时明确未附；不导出技术附件，也不挤掉必需业务说明。
         delivery = delivery.model_copy(
             update={
                 "report_notice": "\n".join(
@@ -966,7 +975,7 @@ def build_feishu_message(
                         None,
                         (
                             delivery.report_notice,
-                            "技术详情超出消息容量，未附；可明确索要获准详情文件。",
+                            TECHNICAL_OMITTED,
                         ),
                     )
                 )
@@ -975,6 +984,8 @@ def build_feishu_message(
         business_only = card(totals, set(), delivery.texts, set(), formatted=True)
         if fits(business_only):
             return business_only
+        if attachment_preview:
+            all_technical = set()
     if not allow_preview:
         # 历史brief的小原文可折叠展示；放不下则只交付已选择的摘要，不因此自动导出原值。
         if any(f.historical_brief for f in delivery.facts):
@@ -985,7 +996,8 @@ def build_feishu_message(
                 return brief
         raise MessageCapacityError("完整结果超过单消息容量")
     texts: list[str] = []
-    technical: set[int] = set()
+    # 附件正文先为完整技术区留位，再用既有整行算法安排业务预览。
+    technical: set[int] = set(all_technical) if modern and attachment_preview else set()
 
     def fitting_prefix(sqls: set[int]) -> list[int] | None:
         counts = [totals[i] if i in fixed else 0 for i in range(len(totals))]
@@ -1049,10 +1061,11 @@ def build_feishu_message(
             counts = selected_counts
     if not platform_limits:
         fit_texts(counts)
-    for index in range(len(totals)):
-        candidate = card(counts, sqls, texts, technical | {index})
-        if fits(candidate):
-            technical.add(index)
+    if not (modern and attachment_preview):
+        for index in range(len(totals)):
+            candidate = card(counts, sqls, texts, technical | {index})
+            if fits(candidate):
+                technical.add(index)
     plain = card(counts, sqls, texts, technical)
     formatted = card(counts, sqls, texts, technical, formatted=True)
     return formatted if fits(formatted) else plain

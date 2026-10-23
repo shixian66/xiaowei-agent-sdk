@@ -1,5 +1,6 @@
 """新交付默认：可见业务事实、单一技术区、无技术附件或通知包装。"""
 
+import html
 import json
 
 import pytest
@@ -77,8 +78,12 @@ def test_v4_report_contains_business_not_duplicate_technical_files(format_: str)
     assert [p.kind for p in parts] == [format_, "body"]
     report = parts[0].body.decode()
     assert "orders" in report and "pre" in report and "2026-10-09" in report
-    for word in ("ev_original", "查看依据", "<details", "证据明细"):
+    for word in ("ev_original", "查看依据", "<details", "证据明细", "elapsed_ms", "SELECT name"):
         assert word not in report
+    message = json.loads(parts[-1].body)
+    assert len(panels(message)) == 1
+    assert "SELECT name FROM shop.orders LIMIT 5" in "\n".join(text_parts(message))
+    assert "SELECT name" not in "\n".join(text_parts(message, folded=False))
 
 
 def test_v4_notification_omits_technical_metadata_and_approval_command() -> None:
@@ -107,25 +112,30 @@ def test_v4_brief_monitoring_value_uses_the_single_technical_area() -> None:
     assert len(panels(message)) == 1
 
 
-def test_v4_automatic_business_file_keeps_nested_value_types() -> None:
+@pytest.mark.parametrize("format_", ["md", "html"])
+@pytest.mark.parametrize("expand_brief", [False, True], ids=["automatic", "explicit"])
+def test_v4_business_file_keeps_nested_value_types_without_technical_metadata(
+    format_: str, expand_brief: bool
+) -> None:
     from xiaowei.feishu_report import build_reports
 
     original = {
-        "columns": ["value"],
-        "rows": [{"value": {"nested": 1}}],
+        "columns": ["value", "sql"],
+        "rows": [{"value": {"nested": 1}, "sql": "SELECT business_row"}],
         "sql": "SELECT nested",
         "status": {"checked": True},
     }
     source = fact(
-        columns=("value",),
-        rows=({"value": '{"nested": 1}'},),
+        columns=("value", "sql"),
+        rows=({"value": '{"nested": 1}', "sql": "SELECT business_row"},),
         metadata={"sql": "SELECT nested", "status": '{"checked": true}'},
         result_json=json.dumps(original),
     )
-    (file,) = build_reports(business(source, report_format="md"), expand_brief=False)
-    content = file.content.decode()
+    (file,) = build_reports(business(source, report_format=format_), expand_brief=expand_brief)
+    content = html.unescape(file.content.decode())
     assert '"nested": 1' in content and '"checked": true' in content
     assert '\\"nested\\"' not in content and "SELECT nested" not in content
+    assert "SELECT business_row" in content
 
 
 @pytest.mark.parametrize(
@@ -152,3 +162,72 @@ def test_v4_distinguishes_schema_templates_from_actual_sql(tool: str, sql: str, 
     assert f"{label}:\n{actual}" in detail
     if label == "结构采集 SQL 模板":
         assert "实际 SQL" not in detail
+
+
+def task_status_delivery() -> Delivery:
+    """各载体使用同一任务事实；两个状态时间不同于采集时间。"""
+    return business(
+        fact(
+            tool_id="scheduled/get_task",
+            target_id="scheduled",
+            columns=(),
+            rows=(),
+            metadata={
+                "task_id": "job_status",
+                "state": "active",
+                "last_success_at": "2026-10-09T10:05:00+00:00",
+                "checked_at": "2026-10-09T10:06:00+00:00",
+                "receipt_id": "nr_internal",
+            },
+        )
+    )
+
+
+@pytest.mark.parametrize("carrier", ["feishu", "notification"])
+def test_v4_task_status_times_are_visible_without_opening_details(carrier: str) -> None:
+    value = task_status_delivery()
+    if carrier == "feishu":
+        message = build_feishu_message(value, 3500, "oc", platform_limits=True)
+        visible = "\n".join(text_parts(message, folded=False))
+        assert len(panels(message)) <= 1
+    else:
+        visible = _notification_text(value, "")
+    assert "2026-10-09T10:05:00+00:00" in visible
+    assert "2026-10-09T10:06:00+00:00" in visible
+    assert "nr_internal" not in visible
+
+
+@pytest.mark.parametrize("sql_bytes", [80, 40_000])
+def test_v4_automatic_attachment_keeps_one_technical_area_or_explicit_omission(
+    sql_bytes: int,
+) -> None:
+    source = fact(
+        rows=tuple({"name": f"orders-{i}-" + "x" * 80} for i in range(400)),
+        metadata={"sql": "SELECT '" + "x" * sql_bytes + "'", "elapsed_ms": 42},
+    )
+    parts = _data_parts(business(source), 0, 3500, "oc", None)
+    assert [p.kind for p in parts] == ["md", "body"]
+    report = parts[0].body.decode()
+    assert "orders-399-" in report
+    assert "elapsed_ms" not in report and "SELECT '" not in report
+    message = json.loads(parts[-1].body)
+    assert len(panels(message)) <= 1
+    visible = "\n".join(text_parts(message, folded=False))
+    if sql_bytes == 80:
+        assert len(panels(message)) == 1
+        assert source.metadata["sql"] in "\n".join(text_parts(message))
+        assert source.metadata["sql"] not in visible
+    else:
+        assert "技术详情" in visible and "未附" in visible
+
+
+def test_v4_attachment_fallback_explicitly_reports_omitted_technical_details() -> None:
+    source = fact(note="限制说明 " * 5000)
+    parts = _data_parts(business(source, report_format="md"), 0, 3500, "oc", None)
+    assert [p.kind for p in parts] == ["md", "body"]
+    message = json.loads(parts[-1].body)
+    visible = "\n".join(text_parts(message, folded=False))
+    assert "预览无法在本消息容量内展示" in visible
+    assert "技术详情" in visible and "未附" in visible
+    assert "SELECT name" not in visible
+    assert "限制说明" in parts[0].body.decode()

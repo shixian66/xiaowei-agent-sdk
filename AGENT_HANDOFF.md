@@ -15,7 +15,7 @@
 | 锁定依赖 | SDK `0.22.3`、Lark Channel `1.4.0`、MCP `2.2.0`、sqlglot `30.17.0`、`nh3 0.3.7`、`tinycss2 1.5.1`、Pillow `13.0.0`、certifi `2026.10.19`（后两项为严格审计发现的既有漏洞定向升级） |
 | 正式入口 | `xiaowei serve`、`config check`、`model check`、`storage init/upgrade/cleanup`、`requests resend`；命令与环境准备以 README 为准 |
 | 最近有记录的公司部署 | 主线交接记录含用户提供的 `xiaowei:143c4c8641be636c41c130329ce1639a36b59c27` 镜像及巡检日志；未独立核验当前服务器状态。本次未部署 |
-| 当前验收结论 | A/B/C 与代理已合入主线；S0/S2 已通过独立复审。S1 本地实现、独立代码审查及 c44bbdf 单次完整默认全套通过，等待用户外部复核；真实模型、平台输入/识图、客户端与 U5/U6/U7 仍未验收，D 暂停且未实现。精确版本和证据见 §5 |
+| 当前验收结论 | A/B/C 与代理已合入主线；S0/S2 已通过独立复审。S1 首版 c44bbdf 全套通过；Claude 对 ac93a74 条件通过，P1/P2 已本地修复、待定向验证与增量复核；真实模型、平台输入/识图、客户端与 U5/U6/U7 仍未验收，D 暂停且未实现。精确版本和证据见 §5 |
 | 当前任务授权 | 起点 b2761c8：用户接受 v4 前向修复、不恢复旧备份，授权 S1 本地实现、测试与提交，完成后交独立审查；不推进 D，不推送/PR/合并/部署，不调用真实服务/模型或读取公司配置凭据 |
 
 原工作目录的 ARCHITECTURE 差异与未跟踪计划/公司配置保留，未复制到本工作树；本次未读取公司配置凭据。旧监控和回答修复记录保留为注明版本的证据，不作为本轮输入或展示范围扩展授权。
@@ -41,7 +41,7 @@
 
 S2 独立复审结论保留，审查版本 44b0d5d、受测代码 d750a41，具体证据见 §5。用户已确认 v4 回退限制并授权本地 S1，依据[计划 v1.5](docs/superpowers/plans/2026-10-22-feishu-input-presentation-repair.md)实现默认业务回答、单技术区与版本兼容，模型 schema 不变。D 及原目录工作保持不动。
 
-下一项：交最终本地 SHA 给 Claude 只读复核；受测代码/测试 c44bbdf，后续仅文档同步。审核验收后另获授权才推送/PR。真实模型、平台、公司源及部署不在当前授权内。v4 升级/前向修复的唯一权威契约见 [ARCHITECTURE](ARCHITECTURE.md#user-delivery-and-history)。
+下一项：完成 P1/P2 冻结版本的相关回归、Chrome 与隔离变异，交新 SHA 给 Claude 只复核本次差异。c44bbdf 是修复前的完整全套，不冒充修复后证据。审核验收后另获授权才推送/PR。真实模型、平台、公司源及部署不在当前授权内。v4 升级/前向修复的唯一权威契约见 [ARCHITECTURE](ARCHITECTURE.md#user-delivery-and-history)。
 
 ### 已合入的监控可靠性修订（PR #121）
 
@@ -136,35 +136,24 @@ B1 的短口径主视图修复已成立；原 B2 因复现形状不符合真实 
 
 ## 5. 验证记录与限制
 
-### S1 业务交付与 v4（本地实现与独立代码审查通过，真实验收开放）
+### S1/v4 P1/P2 收尾（本地修复，待冻结验证与增量复核）
 
-实施起点 b2761c8c9f9d3072c392336093571c209693a296，产品基线 main@1a92c58；冻结源码为 8396965ea2310bae780f97c5a8d0806ef178b88d，最终受测代码/测试为 c44bbdfce6a111784e435716820a71c670991d20（只增加容量测试装配修正，产品源码相同）。后续仅更新文档，不据文档提交宣称重跑全套。模型 AgentAnswer/FactBlock schema、锁定依赖、应用 schema v15、数据投影和保留策略未改；v4 前向修复决定及当前授权见 §1/§2。
+审查起点 ac93a742bdf629444483cb3bb15872ecbb2506fb，分支/工作树见 §1。Claude 对该版本条件通过，复跑三个 v4 模块 23 passed，但发现任务时间隐藏、附件正文技术区缺失/文件默认附技术元数据的两个未覆盖分支。旧“无遗留阻断”的内部审查结论随此反例收窄，不代替本次修复验收。
 
-TurnAnswer/RequestRecord/Delivery 贯穿可信保存版本；v2/v3 的补全和布局、Legacy 语义保留。v4 普通事实只交所选内容，全部可见 Evidence 仍先核对当前权限、TTL、归属和接收范围。Web/飞书正文至多一个收起技术区；审批卡、文件及通知不另附技术明细。业务范围、历史时间、限制、失败和 unknown 保持可见，任务 ID 可供查看/取消；技术原值超限明确未附，不独立触发文件。显式完整文件保留获准原值，自动业务文件保留值类型；已绑定字节、键、uuid 和 claim/settle 恢复未改。
+用户确认 P2(b)：显式 MD/HTML 与自动附件默认只交业务内容，保真业务原值/嵌套类型；技术元数据只放正文唯一技术区，放不下说明未附。已撤回 ARCHITECTURE 的显式完整文件原文例外，唯一权威规则在长期交付一节；README 和计划仅同步用法/落点。模型 schema、回答保存版本、数据库 v15、依赖、投影、保留期及权限/审批/unknown 边界未改；不推送/PR/合并/部署，不调用真实服务、不读公司配置凭据，D 保持暂停。
 
-新执行轮空回答/成功只读查询无 fact，复用 SDK invalid_final_output 一次无工具改写，仍不合格受控失败，保留原时间与调用预算、不重查。三处指引同步；动作完成性账本不误当只读漏引。暂停仅交完整动作材料/状态，并说明只读结果尚未交付及恢复条件；ResultDelivery 保留原 run_turn_id，正式群入口验证获准恢复后使用原证据、查询不重跑。历史详情沿已保存且当前可读内容交付，不新增历史搜索或读取权限。
-
-结构化历史缺少可信计数时继续 full 回退；仅 v4、无 columns、可信 Prometheus query/range_query 的补充历史 brief 保持收起，不猜样本或生成计数。任务/通知的已选事实保持 full，避免必要状态被 brief 隐藏。两项只影响展示，不扩大事实集合、数据投影或权限；原获准 JSON 在单技术区可达。结构采集模板与实际执行 SQL 分别标注，不把模板冒充已执行语句。
-
-| 检查 | 精确证据 |
+| 根因 | 最小修复与行为 |
 | --- | --- |
-| 单次完整默认全套 | **4873 passed, 235 skipped, 93 deselected, 5 warnings in 1600.38s (0:26:40)**；full-c44bbdf.log，首尾均 c44bbdf、clean、EXIT_CODE=0、VERSION_UNCHANGED=True。包含 A/B/C、审批/恢复、Evidence/Session、容量及本地部署维护；skipped/deselected 不算验收 |
-| 最终相关回归 | 606 passed、2 deselected、172.65 秒；related-8396965.log，首尾 8396965/clean/EXIT_CODE=0。覆盖原 P4 六轮历史追问、结构化计数反例、状态可见性及实际消费者 |
-| 浏览器 | 两个完整浏览器模块共 22 passed、27.63 秒；browser-8396965.log，真实 Chrome + 本地 Uvicorn/HTML、外部模型/平台为替身。全套默认未选 browser，单独记录；未动既有占用端口的服务 |
-| 容量测试修正 | capacity-fixture-green.log：15 passed、31.43 秒。新提示词令原 30KB 测试门槛在首请求 30,013B 提前拒绝；测试用 40KB 容纳首请求，保留第二请求超限零发送、准确 2 请求/3 查询及零 Session 写，另断言首请求确已发送；产品默认 1MB 与拒绝代码未改 |
-| 六组隔离变异 | mutations-8396965/summary.log 及 mutation-*-baseline/mutant/restored.log：v4-remaining、unshown-permission、missing-fact、approval-notice、opaque-policy、status-visible 全部 0→1→0。逐组记录加载路径/hash，恢复 hash 与工作树一致、临时副本已删除；无环境或提前权限失败冒充命中 |
-| 静态检查 | static-c44bbdf.log：全仓 Ruff、45 个修改 Python 文件 format、mypy 38 源文件、文档命令检查 2 passed、提交范围 diff 全通过；首尾 c44bbdf/clean/EXIT_CODE=0 |
-| 独立审查 | Codex 独立审查者对初始全差异及后续精确增量复核；8396965 展示边界与六组变异证据通过，c44bbdf 容量测试装配修正通过，无遗留阻断。该结论不冒称 Claude 外部复核或真实验收 |
+| P1 将 last_success_at、checked_at 当技术元数据 | 从飞书 _BUSINESS_HIDDEN 与 Web technicalKeys 移除；同一 scheduled/get_task 事实的两个时间在卡片正文、实际 Chrome DOM 和 A 通知可见，receipt_id 仍隐藏。不改变字段准入或接收权限 |
+| P2 附件预览关闭技术区、显式文件回退整份原文 | v4 附件正文沿既有容量/整行算法容纳唯一技术区；放不下或降为纯说明时明确未附。显式/自动报告统一复用业务视图，从获准原文还原业务字段类型，不附技术 metadata JSON；业务结果自身的 SQL 列保留。v2/v3/Legacy 和已绑定内容的旧路径保持 |
 
-日志目录为 /tmp/xiaowei-presentation-s1/。冻结检查使用 /tmp/xiaowei_run_versioned_check.py LOG COMMAND；完整命令为 UV_OFFLINE=1 PYTHONDONTWRITEBYTECODE=1 SDK_TEST_POSTGRES_URL=postgresql+asyncpg://postgres@127.0.0.1:55432/postgres uv run --locked --extra dev python /tmp/xiaowei_run_versioned_check.py LOG .venv/bin/python -m pytest -q -p no:cacheprovider。相关模块/Chrome/静态的展开 COMMAND 见各日志；变异在临时副本运行，保留真 SDK 和隔离 PG。
+新增/扩展回归：test_v4_task_status_times_are_visible_without_opening_details、test_v4_task_status_times_are_visible_in_web_body；test_v4_automatic_attachment_keeps_one_technical_area_or_explicit_omission、test_v4_report_contains_business_not_duplicate_technical_files、test_v4_business_file_keeps_nested_value_types_without_technical_metadata、test_v4_attachment_fallback_explicitly_reports_omitted_technical_details。Web 时间用例是实际 _view 输出与 Chrome DOM、fetch 为组件替身，不证明 Web 开放任务工具授权。
 
-RED 与修复依据保留：version-red.log 3 failed/3 passed，render-red.log 6 failed；正式暂停曾命中条件提示丢失。独立审查发现的 Web 原文不可达、SQL 模板误标分别由 web-originals-red.log（5 failed）和 sql-template-red.log（3 failed/1 passed）复现后修正。原 P4 六轮追问暴露不透明历史结果默认展开，最终以可信 Prometheus 分类收窄，保留结构化 full 对照。status-visible 变异命中 fact.view 的 full 断言，不宣称直接命中后续可见文案；早期状态夹具因缺授权提前拒绝的日志不是保护证据，修正夹具后 87 项通过，最终变异验证目标分支。
+日志目录 /tmp/xiaowei-s1-review-fixes/：p1-p2a-red.log 为 5 failed，分别击中飞书/通知/Web 隐藏时间与自动附件缺技术区/未附说明；p2b-red.log 为 4 failed、2 passed，击中显式 MD/HTML 附技术元数据并保留自动附件成功对照；p2-fallback-red.log 为 1 failed，实际降为纯说明后缺未附提示。均为目标行为失败，不是环境失败。final-local-green.log 为 21 passed；含业务 SQL 列和嵌套值保真、短技术区与长技术区超限的对照，属于工作区局部检查，不拼作全套。
 
-以前的完整/中止记录不冒充通过：full-0aa473e.log 为 23 failed/4827 passed；full-921dbd3-interrupted.log 为 1 failed/1757 passed、EXIT_CODE=2；full-8396965.log 为 1 failed/4872 passed、EXIT_CODE=1（上述容量装配）。它们暴露的问题已在最终候选回归；分批数量不相加称全套。较早变异/局部记录不替代最终表格。
+待冻结运行：相关 A/B/C、报告/分项恢复、审批、Evidence/Session、Web/浏览器回归，P1/P2 隔离变异，Ruff/format/mypy、文档及 diff 检查。首版全套仍仅覆盖 c44bbdfce6a111784e435716820a71c670991d20：4873 passed、235 skipped、93 deselected、5 warnings，full-c44bbdf.log 在 /tmp/xiaowei-presentation-s1/；c44bbdf..ac93a74 仅文档，但本次有产品改动，不能沿用为当前全套通过。本轮按复审范围不重跑完整默认全套。
 
-全套后仅同步本交接、计划及 ARCHITECTURE 的旧版本描述；文档命令检查 2 passed（0.13 秒），63 个本地链接/锚点有效，diff 检查通过。git diff --exit-code c44bbdf -- src tests scripts pyproject.toml uv.lock 通过，未以文档提交冒充重新运行全套。
-
-仍未覆盖：获准真实模型固定任务（工具选择、漏答/澄清/修正、事实与推断质量、耗时及用量）、真实平台 post/mentions/md、识图、桌面/手机显示及飞书/代理实收。脚本模型只能证明调用链、预算和边界，不证明真实 Agent 自主完成或成本；不豁免真实验收门槛。D、30 任务并发/公司成本不在本片范围。下一项：Claude 对最终本地 SHA 只读复核；真实模型/平台与集成均另获授权。
+仍未覆盖：真实模型的取证后澄清/SQL 草稿与补引用改写的自然度、调用/耗时/用量；拒绝审批恢复后的条件提示理解；真实 post/mentions/md、识图、桌面/手机折叠与飞书/代理实收。离线脚本模型不证明任务能力；不豁免真实验收。非阻断的失败编号、警告入口文案及 brief 区内标注未扩大进本次 P1/P2 修复；不据此修改旧版本/默认内部编号规则。下一项为冻结验证后交精确 SHA 增量复核。
 
 ### 群输入 S0/S2（v1.4，局部修复独立复审通过）
 
