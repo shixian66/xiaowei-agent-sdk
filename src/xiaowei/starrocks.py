@@ -208,10 +208,17 @@ ERROR_MESSAGES: Final[Mapping[StarRocksErrorCode, str]] = {
 class StarRocksError(Exception):
     """StarRocks 访问失败；消息只有固定说明。"""
 
-    def __init__(self, code: StarRocksErrorCode, *, slot_wait: bool = False) -> None:
+    def __init__(
+        self,
+        code: StarRocksErrorCode,
+        *,
+        slot_wait: bool = False,
+        parse_position: tuple[int | None, int | None] | None = None,
+    ) -> None:
         super().__init__(ERROR_MESSAGES[code])
         self.code = code
         self.slot_wait = slot_wait and code is _Code.POOL_TIMEOUT
+        self.parse_position = parse_position
 
 
 @dataclass
@@ -561,7 +568,15 @@ _AUDIT_CANDIDATES: Final = (
 _AUDIT_DB_FILTER: Final = " AND db = %s"
 
 SECURITY_SOURCE_COLUMNS: Final = (
-    "timestamp", "queryId", "stmt", "state", "queryTime", "user", "clientIp", "db", "pendingTimeMs",
+    "timestamp",
+    "queryId",
+    "stmt",
+    "state",
+    "queryTime",
+    "user",
+    "clientIp",
+    "db",
+    "pendingTimeMs",
 )
 _SECURITY_COLUMNS: Final = (*SECURITY_SOURCE_COLUMNS, "stmt_present")
 _SECURITY_TOTALS: Final = ("window_rows", "window_failed_rows", "window_oversize_rows")
@@ -570,7 +585,7 @@ _SECURITY_GAP: Final = (
     r"([[:space:]]|/\*([^*]|\*+[^*/])*\*+/|"
     r"--[^\r\n]*(\r\n|\r|\n|$)|#[^\r\n]*(\r\n|\r|\n|$))"
 )
-SECURITY_OR_PATTERN: Final = r'''(^|[^A-Z_])OR([[:space:]]|[(])*[0-9'"]'''
+SECURITY_OR_PATTERN: Final = r"""(^|[^A-Z_])OR([[:space:]]|[(])*[0-9'"]"""
 SECURITY_MULTIPLE_PATTERN: Final = r";([[:space:]]|;)*[^[:space:];]"
 SECURITY_OPERATION_PATTERN: Final = (
     f"^{_SECURITY_GAP}*("
@@ -588,8 +603,11 @@ def security_window(
     start: datetime, end: datetime, audit: AuditSource
 ) -> tuple[datetime, datetime]:
     """绝对半开时间窗转成审计时区的绑定值；供 I/O 前参数检查复用。"""
-    if (start.utcoffset() is None or end.utcoffset() is None
-            or not timedelta(0) < end - start <= timedelta(minutes=audit.max_window_minutes)):
+    if (
+        start.utcoffset() is None
+        or end.utcoffset() is None
+        or not timedelta(0) < end - start <= timedelta(minutes=audit.max_window_minutes)
+    ):
         raise ValueError(
             f"须提供带时区的起止时间，窗口为正且不超过 {audit.max_window_minutes} 分钟"
         )
@@ -903,12 +921,18 @@ class StarRocksAdapter:
         aggregate, candidates = _security_sql(audit)
         window_args = (self._target.policy.max_sql_bytes, start, end)
         candidate_args = (
-            *window_args, SECURITY_OR_PATTERN, "%SLEEP%", SECURITY_MULTIPLE_PATTERN,
-            SECURITY_OPERATION_PATTERN, SECURITY_DELETE_PATTERN, "%WHERE%",
+            *window_args,
+            SECURITY_OR_PATTERN,
+            "%SLEEP%",
+            SECURITY_MULTIPLE_PATTERN,
+            SECURITY_OPERATION_PATTERN,
+            SECURITY_DELETE_PATTERN,
+            "%WHERE%",
             audit.candidate_rows + 1,
         )
         limits = _ReadLimits(
-            max_bytes=audit.candidate_bytes, max_value=_audit_value_bound(self._target),
+            max_bytes=audit.candidate_bytes,
+            max_value=_audit_value_bound(self._target),
             zone=ZoneInfo(audit.time_zone),
         )
         started = time.monotonic()
@@ -961,8 +985,13 @@ class StarRocksAdapter:
         if code is not None:
             raise StarRocksError(code)
         return SecurityAuditResult(
-            target_id=self._target.target_id, sql=candidates, columns=_SECURITY_COLUMNS,
-            rows=tuple(rows), row_count=len(rows), truncated=truncated, collected_at=self._clock(),
+            target_id=self._target.target_id,
+            sql=candidates,
+            columns=_SECURITY_COLUMNS,
+            rows=tuple(rows),
+            row_count=len(rows),
+            truncated=truncated,
+            collected_at=self._clock(),
             elapsed_ms=round((time.monotonic() - started) * 1000),
             **cast(dict[str, int], totals[0]),
         )
@@ -1034,13 +1063,13 @@ class StarRocksAdapter:
         started = time.monotonic()
         conn = await self._acquire()
         try:
-            rows, truncated, columns, code = await self._query(
+            rows, truncated, columns, error = await self._query(
                 conn, sql, args, max_rows, plan, limits or self._limits, clip_values
             )
         finally:
             self._slots.release()
-        if code is not None:
-            raise StarRocksError(code)
+        if error is not None:
+            raise error
         return QueryResult(
             target_id=self._target.target_id,
             sql=sql,
@@ -1188,8 +1217,8 @@ class StarRocksAdapter:
         plan: bool,
         limits: _ReadLimits,
         clip_values: bool,
-    ) -> tuple[list[dict[str, Scalar]], bool, tuple[str, ...], StarRocksErrorCode | None]:
-        """执行并读取；返回错误码而不是抛出，使错误在离开 ``except`` 后由调用方抛出。
+    ) -> tuple[list[dict[str, Scalar]], bool, tuple[str, ...], StarRocksError | None]:
+        """执行并读取；返回受控错误而不是抛出，使错误在离开 ``except`` 后由调用方抛出。
 
         ``plan`` 为真时结果必须恰好一列文本，列名换为 ``PLAN_COLUMN``；服务端列名不外传。
         """
@@ -1199,7 +1228,21 @@ class StarRocksAdapter:
             async with asyncio.timeout(self._target.client_timeout_seconds):
                 await self._prepare_session(conn)
                 stage = _Code.QUERY_FAILED
-                columns = await conn.execute(sql, args)
+                try:
+                    columns = await conn.execute(sql, args)
+                except MySQLError as error:
+                    position = _parse_position(error)
+                    if position is None:
+                        raise
+                    # EXPLAIN 前缀只影响第一行；省略该列号，保留模型原文的后续行位置。
+                    if plan and position[0] == 1:
+                        position = (1, None)
+                    return (
+                        [],
+                        False,
+                        (),
+                        StarRocksError(_Code.QUERY_FAILED, parse_position=position),
+                    )
                 if (
                     any(not isinstance(name, str) for name in columns)
                     or len({name.casefold() for name in columns}) != len(columns)
@@ -1216,13 +1259,13 @@ class StarRocksAdapter:
             complete = not truncated
             return rows, truncated, columns, None
         except TimeoutError:
-            return [], False, (), _Code.TIMEOUT
+            return [], False, (), StarRocksError(_Code.TIMEOUT)
         except _SessionMismatchError:
-            return [], False, (), _Code.SESSION_SETUP_FAILED
+            return [], False, (), StarRocksError(_Code.SESSION_SETUP_FAILED)
         except _ResultContractError:
-            return [], False, (), _Code.RESULT_CONTRACT
+            return [], False, (), StarRocksError(_Code.RESULT_CONTRACT)
         except (MySQLError, OSError) as error:
-            return [], False, (), _query_code(error, stage)
+            return [], False, (), StarRocksError(_query_code(error, stage))
         finally:
             await self._release(conn, complete=complete)
 
@@ -1504,6 +1547,26 @@ def fitting_rows(
 
 def _json_size(value: object) -> int:
     return len(json.dumps(value, ensure_ascii=False, allow_nan=False).encode())
+
+
+# StarRocks 3.5.14 ParsingException / ParserErrorMsg；1064 同时用于其他错误，必须匹配开头。
+_PARSE_ERROR = re.compile(
+    r"\AGetting syntax error"
+    r"(?: at line (?P<line>[0-9]+), column (?P<column>[0-9]+)"
+    r"| from line (?P<range_line>[0-9]+), column (?P<range_column>[0-9]+)"
+    r" to line [0-9]+, column [0-9]+)?"
+    r"(?:\. Detail message: |\Z)"
+)
+
+
+def _parse_position(error: MySQLError) -> tuple[int | None, int | None] | None:
+    if _error_number(error) != 1064 or len(error.args) < 2 or not isinstance(error.args[1], str):
+        return None
+    match = _PARSE_ERROR.match(error.args[1])
+    if match is None:
+        return None
+    line, column = match["line"] or match["range_line"], match["column"] or match["range_column"]
+    return (int(line), int(column)) if line is not None and column is not None else (None, None)
 
 
 def _error_number(error: BaseException) -> int | None:

@@ -1368,3 +1368,60 @@ def test_max_plan_lines_must_be_positive() -> None:
     assert TARGET.max_plan_lines == 500
     with pytest.raises(ValidationError):
         StarRocksTarget.model_validate({**TARGET.model_dump(), "max_plan_lines": 0})
+
+
+@pytest.mark.parametrize(
+    ("message", "position"),
+    [
+        ("Getting syntax error. Detail message: Unexpected input 'rows'.", (None, None)),
+        (
+            "Getting syntax error at line 2, column 7. Detail message: Unexpected input 'rows'.",
+            (2, 7),
+        ),
+        (
+            "Getting syntax error from line 2, column 7 to line 2, column 10. "
+            "Detail message: bad token.",
+            (2, 7),
+        ),
+    ],
+)
+async def test_parse_error_returns_only_safe_diagnostic(
+    message: str, position: tuple[int | None, int | None]
+) -> None:
+    drv = driver(ProgrammingError(1064, message))
+    error = await failure(adapter(drv).run_query(guarded()))
+    assert error.code is Code.QUERY_FAILED
+    assert error.parse_position == position
+    assert only(drv).aborted
+
+
+@pytest.mark.parametrize(
+    "message",
+    [
+        "mem limit exceeded",
+        "query timeout",
+        "runtime error: Getting syntax error at line 2, column 7. Detail message: embedded text.",
+        "Getting syntax errorish runtime failure",
+    ],
+)
+async def test_parse_signature_does_not_recover_other_1064_errors(message: str) -> None:
+    drv = driver(OperationalError(1064, message))
+    error = await failure(adapter(drv).run_query(guarded()))
+    assert error.code is Code.QUERY_FAILED
+    assert error.parse_position is None
+
+
+@pytest.mark.parametrize("phase", ["session", "fetch"])
+async def test_parse_signature_is_not_recovered_outside_sql_execute(phase: str) -> None:
+    message = "Getting syntax error at line 1, column 5. Detail message: wrong phase."
+    if phase == "session":
+        drv = driver(results={SESSION_SET: ProgrammingError(1064, message)})
+    else:
+        drv = driver(
+            Result(("region",), [("east",)]),
+            fail_read_at=0,
+            read_error=ProgrammingError(1064, message),
+        )
+    error = await failure(adapter(drv).run_query(guarded()))
+    assert error.parse_position is None
+    assert only(drv).aborted
