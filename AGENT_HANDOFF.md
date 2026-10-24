@@ -2,6 +2,8 @@
 
 > 更新：2026-10-25，Asia/Shanghai。本文维护当前代码状态、有效证据、缺口与下一项工作。产品契约见 [ARCHITECTURE.md](ARCHITECTURE.md)，阶段与退出条件见 [DEVELOPMENT_PLAN.md](DEVELOPMENT_PLAN.md)，使用与运维见 [README.md](README.md) 和 [OPERATIONS.md](deploy/OPERATIONS.md)。
 
+> TiDB 计划局部更新：2026-10-24。下述原产品快照未作全面复核；TiDB 调查基线、当前授权与验证缺口单列在 §3，不以旧快照或新计划推定公司部署状态。
+
 **OpenAI Agents SDK 负责 Agent Loop；小维负责权限、受治理工具执行、证据真实性和数据边界。**
 
 ## 1. 当前快照
@@ -36,6 +38,16 @@
 - 通知及定时任务的方向与待审权限增量见 [ARCHITECTURE](ARCHITECTURE.md#scheduled-agent-tasks)：多个目的群不扩大操作入口，任务独立于原聊天，创建及每次执行复核权限，生产写不能继承周期批准。旧通知/定时初版及自建代理适配已合入主线；群输入已通过独立复审，S1 展示已完成本地实现、离线验证及独立复审，用户授权 PR 集成，D 暂停且未实现。
 
 ## 3. 当前计划与下一项工作
+
+### TiDB 查询与诊断（2026-10-24，仅文档）
+
+[A/B/C 计划](docs/superpowers/plans/2026-10-24-tidb-query-diagnosis.md)：**已补充视图探测逐对象错误分类及复审验收事项，待复审**。契约见 [ARCHITECTURE](ARCHITECTURE.md#tidb-query-diagnosis)，退出条件见 [DEVELOPMENT_PLAN](DEVELOPMENT_PLAN.md#tidb-abc)。A/B/C、T1—T8 成功/失败标准与数据库失败中止规则保持；本次仅提交四份文档的 TiDB 差异，不合并、不开 PR、不开发或部署。
+
+本地纯离线；[公司验收清单](docs/superpowers/plans/2026-10-24-tidb-query-diagnosis.md#tidb-company-acceptance)分两次，第一次 A、3 集群冒烟及两版校准，第二次 B/C，B4 单独退出。视图保留分版本探测，1345/1356 仅在对象探测中分类；C02 核对 SHOW VIEW、C03 留 GLOBAL/SESSION 模式证据，T4 按每次实际运行开始时间定窗口并由 DBA 独立取基准，细则见计划。
+
+尚无 TiDB 功能、真实工具/模型、正式入口、部署或用户验收证据；视图预执行风险仍为源码推断，错误码与输出待现场核对，scheduled_tasks 未覆盖。缺等待/故障样本时 T6/T7、T8 UPDATE 等保持开放，C 上线不证明可靠或完整退出；公司前仅有源码/离线依据的阶段风险已获用户接受。
+
+计划 hash-object：`e1ae4629a4f9d91fe2284196f836d0226ede5c49`。文档验证：一致性测试 2 项通过，131 个本地链接/锚点有效，`git diff --check` 通过；固定验收表、数据库失败规则及 TiDB 以外内容未变。下一项：针对新提交独立复审；功能开发与公司部署仍待后续授权。原工作区其他任务修改保留。
 
 <a id="sql-parse-recovery-status"></a>
 
