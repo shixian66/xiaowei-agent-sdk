@@ -488,7 +488,7 @@ def load_config(path: Path) -> ServeConfig:
         return ServeConfig.model_validate_json(raw)
     except ValidationError as exc:
         problems = [
-            f"{_error_path(error['loc'])}: {_reason(error)}"
+            f"{_error_path(error['loc'], error_type=error['type'])}: {_reason(error)}"
             for error in exc.errors(include_url=False, include_input=False)
         ]
         raise ConfigError("配置不符合要求：" + "；".join(dict.fromkeys(problems))) from None
@@ -498,7 +498,16 @@ def load_config(path: Path) -> ServeConfig:
 _IDENTITY_KEYED = frozenset({("feishu", "users")})
 
 
-def _error_path(loc: tuple[int | str, ...]) -> str:
+def _error_path(loc: tuple[int | str, ...], *, error_type: str = "") -> str:
+    # Discriminator labels identify a schema branch, not a JSON field.
+    if len(loc) >= 3 and loc[0] == "targets" and isinstance(loc[1], int):
+        if loc[2] in {"starrocks", "tidb"}:
+            loc = (*loc[:2], *loc[3:])
+    if (
+        len(loc) == 2 and loc[0] == "targets"
+        and error_type in {"union_tag_invalid", "union_tag_not_found"}
+    ):
+        loc = (*loc, "type")
     for keyed in _IDENTITY_KEYED:
         if loc[: len(keyed)] == keyed:
             loc = keyed
@@ -786,7 +795,9 @@ def minimum_stop_grace_seconds(config: ServeConfig) -> int:
 
 
 def _reason(error: Mapping[str, object]) -> str:
-    """Pydantic 内置错误的说明不含输入值；自定义校验只给固定文字。"""
+    """联合类型标签错误会包含输入值，改为固定说明；其他内置与自定义校验沿用既有说明。"""
+    if error.get("type") in {"union_tag_invalid", "union_tag_not_found"}:
+        return "类型缺失或不受支持"
     if error.get("type") == "value_error":
         context = error.get("ctx")
         cause = context.get("error") if isinstance(context, Mapping) else None

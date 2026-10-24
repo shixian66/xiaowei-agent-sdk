@@ -217,3 +217,68 @@ def test_documented_tidb_target_loads_in_formal_config() -> None:
     assert config.targets[-1].type == "tidb"
     assert config.targets[-1].tidb.tls
     assert config.targets[-1].tidb.audit is None
+
+
+@pytest.mark.loopback
+async def test_three_tidb_clusters_and_starrocks_route_only_to_the_selected_target(
+    env: Env,
+) -> None:
+    from tests.p1b.test_starrocks_adapter import driver as sr_driver
+    from tests.sdk_core.test_runtime import SALES
+
+    targets = [tidb_config(f"tidb-{name}") for name in "abc"]
+    for target in targets:
+        target["tidb"]["database"] = "app"
+    drivers = {
+        "tidb-a": adapter(schema_results("7.5.3"))[1],
+        "tidb-b": adapter(schema_results("6.5.5"))[1],
+        "tidb-c": adapter(schema_results("7.5.3"))[1],
+        "sr-test": sr_driver(SALES),
+    }
+    config = env.config(targets=[target_config(), *targets])
+    async with env.running(config, starrocks_connect=drivers) as served:
+        await served.page()
+        message = env.scripts.add(
+            "在 tidb-b 执行 SELECT id FROM orders LIMIT 3",
+            tool_call("run_readonly_query", cluster="tidb-b", sql=QUERY),
+            cite(),
+        )
+        body = (await served.turn(message, "query")).json()
+        assert body["state"] == "completed"
+        assert {fact["target_id"] for fact in body["delivery"]["facts"]} == {"tidb-b"}
+        assert statements(drivers["tidb-b"]).count(QUERY) == 1
+        assert all(drivers[name].attempts == 0 for name in ("tidb-a", "tidb-c", "sr-test"))
+        assert await served.finish() == 0
+
+
+@pytest.mark.security
+@pytest.mark.parametrize("missing", [False, True])
+def test_unknown_target_type_reports_only_the_real_field_without_echoing_its_value(
+    tmp_path, missing
+) -> None:
+    from xiaowei.runtime import ConfigError, load_config
+
+    target = tidb_config()
+    if missing:
+        target.pop("type")
+    else:
+        target["type"] = "canary-private-type"
+    path = tmp_path / "xiaowei.json"
+    path.write_text(json.dumps(serve_config(8501, targets=[target])))
+    with pytest.raises(ConfigError) as rejected:
+        load_config(path)
+    assert "targets.0.type" in str(rejected.value)
+    assert "canary" not in str(rejected.value)
+
+
+def test_tidb_config_error_points_to_the_actual_connection_field(tmp_path) -> None:
+    from xiaowei.runtime import ConfigError, load_config
+
+    target = tidb_config()
+    target["tidb"]["host"] = ""
+    path = tmp_path / "xiaowei.json"
+    path.write_text(json.dumps(serve_config(8501, targets=[target])))
+    with pytest.raises(ConfigError) as rejected:
+        load_config(path)
+    assert "targets.0.tidb.host" in str(rejected.value)
+    assert "targets.0.tidb.tidb" not in str(rejected.value)
