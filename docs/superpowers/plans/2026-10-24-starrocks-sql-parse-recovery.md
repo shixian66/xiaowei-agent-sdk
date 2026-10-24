@@ -1,12 +1,12 @@
 # StarRocks SQL 解析失败的预算内自主修正计划
 
-状态：待独立审查；仅完成调查和计划，本文件不代表实施、真实服务调用、推送、PR、合并或部署授权。
+状态：批准 blob `01363706e852f36ab192652b67f52d9e2419c828` 已获离线实施授权，P0 → P1 → P2 的代码与检查已完成，最终差异待用户独立审查。实际版本、验证与公司缺口见 [handoff](../../../AGENT_HANDOFF.md#sql-parse-recovery-status)；不代表真实兼容、推送、PR、合并或部署通过。
 
 **目标：** 用户要求排查告警时，模型提交的只读 SQL 被 FE 明确拒绝解析后，小维返回安全、可操作的工具反馈，由同一个 SDK Runner 在现有预算内继续调查；失败本身不生成成功 Evidence，也不抹掉已有的有效结果。
 
-**版本与依据：** 公司运行镜像标签及本地 `origin/main` 为 `3aad626b42fc4ef2f37cafe342cf1826d453ca30`；调查工作树为 `/Users/kloenguyen/.codex/worktrees/manual-starrocks-security/agent-SDK`，分支 `codex/security-plain-notification`，HEAD 为 `e56eb24fc8d609134a5d0670ebb970e01ec70f9a`，两者 Git tree 均为 `572710d262ba2dfe859b8468bb33d55a50e7ca5d`。创建本计划前工作区干净；不改 `/Users/kloenguyen/Desktop/agent-SDK`。锁定依赖为 Agents SDK 0.22.3、asyncmy 0.2.15、SQLGlot 30.17.0。
+**计划编写时的版本与依据：** 公司运行镜像标签及本地 `origin/main` 为 `3aad626b42fc4ef2f37cafe342cf1826d453ca30`；调查工作树为 `/Users/kloenguyen/.codex/worktrees/manual-starrocks-security/agent-SDK`，分支 `codex/security-plain-notification`，HEAD 为 `e56eb24fc8d609134a5d0670ebb970e01ec70f9a`，两者 Git tree 均为 `572710d262ba2dfe859b8468bb33d55a50e7ca5d`。创建本计划前工作区干净；不改 `/Users/kloenguyen/Desktop/agent-SDK`。锁定依赖为 Agents SDK 0.22.3、asyncmy 0.2.15、SQLGlot 30.17.0。
 
-**执行方式：** 计划通过审查并另获实施授权后，按 P0 → P1 → P2 串行实施（executing-plans）。届时核对最新 main，建立独立分支；本轮不建实施分支、不提交。需求和设计集中在本计划，不另建重复规格文档。
+**执行方式：** 按用户后续授权，基于最新已 fetch 的 `origin/main@b208b2c377986a0e7da819590c38bea8000dbb19`，在独立分支 `codex/sql-parse-recovery` 按 P0 → P1 → P2 串行离线实施并本地提交；不调用真实模型或公司服务，不推送、开 PR、合并、打包或部署。以下任务清单保留批准时的设计，实际完成证据集中在 handoff，不另建重复规格文档。
 
 ## 1. 已确认事实与根因
 
