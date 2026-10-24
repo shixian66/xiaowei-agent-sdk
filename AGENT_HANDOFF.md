@@ -41,23 +41,13 @@
 
 ### TiDB 查询与诊断（2026-10-24，仅文档）
 
-[A/B/C 实施计划](docs/superpowers/plans/2026-10-24-tidb-query-diagnosis.md)：**已补充 sql_mode、视图探测、诊断对象范围及验证方式，待复审**。产品契约见 [ARCHITECTURE](ARCHITECTURE.md#tidb-query-diagnosis)，阶段退出见 [DEVELOPMENT_PLAN](DEVELOPMENT_PLAN.md#tidb-abc)。A/B/C 结构与 T1—T8 成功/失败标准保持；B 的 T3/T4 独立交付，B4 单独验收 T8，C 只增加一个 UPDATE 等待变体。SQL 发出后的失败中止本轮且不自动重放。
+[A/B/C 计划](docs/superpowers/plans/2026-10-24-tidb-query-diagnosis.md)：**已补充视图探测逐对象错误分类及复审验收事项，待复审**。契约见 [ARCHITECTURE](ARCHITECTURE.md#tidb-query-diagnosis)，退出条件见 [DEVELOPMENT_PLAN](DEVELOPMENT_PLAN.md#tidb-abc)。A/B/C、T1—T8 成功/失败标准与数据库失败中止规则保持；本次仅提交四份文档的 TiDB 差异，不合并、不开 PR、不开发或部署。
 
-用户确认 3 个二进制自部署生产集群（两个 v7.5.3、一个 v6.5.5），有 TiFlash；使用者/诊断范围同 StarRocks，获准诊断数据可进入模型。共用一套 Prometheus / Grafana，目标说明给出源与集群标签，T7 验收失败才评估代码层方案。没有默认集群，含糊的“订单库”请求先澄清；查询原文只允许既定 LIMIT 调整，普通查询不强制 EXPLAIN，评估不扩大写权限。
+本地纯离线；[公司验收清单](docs/superpowers/plans/2026-10-24-tidb-query-diagnosis.md#tidb-company-acceptance)分两次，第一次 A、3 集群冒烟及两版校准，第二次 B/C，B4 单独退出。视图保留分版本探测，1345/1356 仅在对象探测中分类；C02 核对 SHOW VIEW、C03 留 GLOBAL/SESSION 模式证据，T4 按每次实际运行开始时间定窗口并由 DBA 独立取基准，细则见计划。
 
-本地纯离线，真实工具/模型/入口由用户带候选包到公司只读验收。[12 项公司清单](docs/superpowers/plans/2026-10-24-tidb-query-diagnosis.md#tidb-company-acceptance)分两次：第一次 A、3 集群冒烟及两版校准；第二次 B/C。DBA 在每个 T 前给出关键事实清单，T4 用同一时间窗含 INSTANCE 的独立 SQL Top 3 作基准；T2/T3/T4/T8.1/T8.2 各 2 次、其余 1 次，任一次不可接受结果即失败。B4 是 7 个变体共 9 个主版本会话，6.5.5 复用 T3；C 的单一 UPDATE 变体跑 2 次，正式入口仍只选一个代表样例。
+尚无 TiDB 功能、真实工具/模型、正式入口、部署或用户验收证据；视图预执行风险仍为源码推断，错误码与输出待现场核对，scheduled_tasks 未覆盖。缺等待/故障样本时 T6/T7、T8 UPDATE 等保持开放，C 上线不证明可靠或完整退出；公司前仅有源码/离线依据的阶段风险已获用户接受。
 
-已核实锁定 SQLGlot 30.17.0 的 sql_mode 反例及五个 Anonymous 函数解析，复用既有闭集校验；固定 SESSION 模式与回读在 A1/A2 落实。A3 把视图保护提前用于结构刷新及证据复核，B1 复用；6.5.5 不把可读定义等同 SELECT 权限，7.5.3 保护探测遵守 SHOW VIEW 等权限。query_diagnostics 限已登记诊断表，业务表/JOIN 在 I/O 前拒绝，业务快照排除四类系统库。
-
-两版普通视图零行探测的预执行风险来自精确 tag 的视图展开/子查询源码推断，仍待现场验证。C04 由 DBA 手工做至少 2 行小表的 1242 对照与 EXISTS 计划形状校准，另做普通零行派生表对照；它会读取小表，不能称零负载，派生表也不冒充真视图端到端证据。产品保持保护变量设置/回读失败不发 EXPLAIN，6.5.5 受限结构离线零 I/O。公司前仅有源码和离线依据的阶段风险由用户接受，设置 ON 本身不证明行为可靠。
-
-缺自然或 DBA 准备的锁等待时，T6/T8 UPDATE 保持开放；缺已知故障样本时 T7 仍开放。生产只读条件下 T6/T7 正常诊断能力可能长期无法完成验收，C 上线不等于可靠或完整退出；缺轻量超时中止证据等也不虚报通过。各切片本地仅记“离线完成，待公司验收”，退出仍需独立审查及对应公司证据。
-
-源码调查基线 `3aad626b42fc4ef2f37cafe342cf1826d453ca30`，本轮分支 codex/tidb-query-diagnosis-docs 的修订/提交基线 `b208b2c377986a0e7da819590c38bea8000dbb19`；所引产品源码及行号未变。计划 git hash-object 为 `6153ea739e9c288636b3feac7c9702759913bcb0`。当前无 TiDB 功能、真实工具/模型、正式入口、部署或用户验收证据，scheduled_tasks 未覆盖。
-
-文档验证：`tests/security/test_docs_command_consistency.py` 2 项通过，四份文档 131 个本地链接/锚点有效，`git diff --check` 及未跟踪计划的空白检查通过。新官方引用与精确 tag 源码已核对；TiDB 以外段落、T1—T8 全部验收表行及数据库失败规则与审查输入一致。以上为作者核对，不代替独立复审或真实验收。
-
-本轮仅修订并提交计划及三份根文档中的 TiDB 差异，不合并、不开 PR；不写功能代码、不调用真实模型或数据库、不部署，原工作区其他任务修改保留。下一项是对提交版本独立复审；功能开发和公司部署仍待后续授权，按公司清单准备安全引用、只读账号/资源、轻量对象、监控标签、慢日志及模型预算。
+计划 hash-object：`e1ae4629a4f9d91fe2284196f836d0226ede5c49`。文档验证：一致性测试 2 项通过，131 个本地链接/锚点有效，`git diff --check` 通过；固定验收表、数据库失败规则及 TiDB 以外内容未变。下一项：针对新提交独立复审；功能开发与公司部署仍待后续授权。原工作区其他任务修改保留。
 
 <a id="cloudcanal-phase1-status"></a>
 

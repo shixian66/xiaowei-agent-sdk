@@ -93,13 +93,14 @@
 - **[V13]** [v7.5 临时表](https://docs.pingcap.com/tidb/v7.5/temporary-tables/#types-of-temporary-tables)：本地临时表仅当前会话可见，全局临时表的数据仅当前事务可见；跨会话锁等待样本使用 DBA 可丢弃的普通测试表。
 - **[V14]** [v6.5 SQL Mode 官方源码](https://github.com/pingcap/docs/blob/release-6.5/sql-mode.md)、[v7.5 SQL Mode 官方源码](https://github.com/pingcap/docs/blob/release-7.5/sql-mode.md)：两版默认模式及反斜杠、双引号、`||` 的语义。A1 固定会话模式，不跟随目标全局设置。
 - **[V15]** [v7.5 Metrics Schema](https://docs.pingcap.com/tidb/v7.5/metrics-schema/)、[v7.5.3 指标读取源码](https://github.com/pingcap/tidb/blob/v7.5.3/pkg/executor/metrics_reader.go)：TiDB 取得 Prometheus 地址后直接调用其 HTTP API，不将这类外部读取混入业务结构快照。
-- **[V16]** [v6.5.5 视图展开](https://github.com/pingcap/tidb/blob/v6.5.5/planner/core/logical_plan_builder.go#L5163)、[v7.5.3 视图展开](https://github.com/pingcap/tidb/blob/v7.5.3/pkg/planner/core/logical_plan_builder.go#L5704)：视图定义交给同一 PlanBuilder 构建；结合 [V1] 推断普通零行探测仍有子查询预执行路径。7.5.3 视图 EXPLAIN 另收集 SHOW VIEW 权限；源码不替代目标环境验证。
+- **[V16]** [v6.5.5 视图展开](https://github.com/pingcap/tidb/blob/v6.5.5/planner/core/logical_plan_builder.go#L5163)、[v7.5.3 视图展开](https://github.com/pingcap/tidb/blob/v7.5.3/pkg/planner/core/logical_plan_builder.go#L5704)：视图定义交给同一 PlanBuilder 构建；结合 [V1] 推断普通零行探测仍有子查询预执行路径。两版视图 EXPLAIN 均收集 SHOW VIEW 权限；源码不替代目标环境验证。
+- **[V17]** 两版错误码定义（[v6.5.5](https://github.com/pingcap/tidb/blob/v6.5.5/parser/mysql/errcode.go#L365)、[v7.5.3](https://github.com/pingcap/tidb/blob/v7.5.3/pkg/parser/mysql/errcode.go#L365)）包含 1345 ErrViewNoExplain、1356 ErrViewInvalid；结合 [V16] 的权限/失效路径，A3 按对象分类，现场仍核对实际错误码。VIEWS 定义读取按对象权限筛选，不单独要求 SHOW VIEW（[v6.5.5](https://github.com/pingcap/tidb/blob/v6.5.5/executor/infoschema_reader.go#L1265)、[v7.5.3](https://github.com/pingcap/tidb/blob/v7.5.3/pkg/executor/infoschema_reader.go#L1146)）；定义可见不证明 SELECT 可读。
 
 ## 4. 固定验收样例 T1—T8
 
 以下问题、成功标准和不可接受结果共同用于计划、开发、审查、真实模型评测和用户验收。订单等对象在本地用离线夹具，公司只读验收映射到 DBA 确认的已有对象；不为验收创建业务负载或注入故障。正常样例必须提供足以回答的证据，不能靠一律回复“不确定”通过；缺少真实样本的验收项保持开放，成功/失败标准不变。
 
-**判定基准与次数：** 每个 T 运行前，由 DBA 写好预期关键事实清单，例如 T1 主键列及顺序、T4 同一时间窗含 INSTANCE 的 Top 3、T6 等待方向；不以 Agent 输出建立或回填基准。按既有版本/变体分配，T2、T3、T4、T8.1、T8.2 各跑 2 次真实模型，其余各 1 次；复跑使用新会话和同一输入口径，动态事实按本次采样核对。任一次出现表中“不能接受的结果”即失败，两次均须达到原成功标准；样本不足记开放，不降低标准。公司清单与交付沿用这一判定方式。
+**判定基准与次数：** 每个 T 运行前，由 DBA 写好预期关键事实清单和判定口径，例如 T1 主键列及顺序、T6 等待方向；T4 预先确定阈值、节点覆盖及时间口径，Top 3 具体值在每次运行后按 C08 的绝对窗口独立取得。不以 Agent 输出建立或回填基准。按既有版本/变体分配，T2、T3、T4、T8.1、T8.2 各跑 2 次真实模型，其余各 1 次；复跑使用新会话和同一输入口径，动态事实按本次采样核对。任一次出现表中“不能接受的结果”即失败，两次均须达到原成功标准；样本不足记开放，不降低标准。公司清单与交付沿用这一判定方式。
 
 | ID / 切片 | 用户操作 → 系统行为 → 用户看到的结果 | 成功标准 | 不能接受的结果 |
 | --- | --- | --- | --- |
@@ -193,12 +194,15 @@
 
 - [ ] 实现表/视图、字段、注释、复合主键及有序索引列；按需读获准 DDL，不把内部表 ID 或 StarRocks 视图身份规则直接套入 TiDB。
 - [ ] 业务结构快照排除 INFORMATION_SCHEMA、PERFORMANCE_SCHEMA、METRICS_SCHEMA、mysql 等系统库，不照搬 StarRocks 的系统库集合；排除发生在逐对象探测前。诊断列发现走已登记表的元数据读取，不把诊断表补回业务快照。METRICS_SCHEMA 会触发 Prometheus HTTP 访问 [V15]，监控仍走已有受治理入口。
-- [ ] 结构刷新和证据复核均替换无条件视图零行探测（基线 `starrocks.py:539/1166`）：普通表保留 `SELECT 1 FROM 对象 WHERE 1=0`；7.5.3 视图使用同一连接上保护变量 ON 且回读成功后的 `EXPLAIN SELECT 1 FROM v WHERE 1=0`，受实际视图权限（含 SHOW VIEW）约束，不退回普通 SELECT 或自行扩权。6.5.5 先读取 information_schema.VIEWS 定义，复用 B1 的保守语法规则；含标量/EXISTS、引用其他视图，或定义不可得/无法解析时标“可读性未知”，不入快照、不发普通探测；确认不含受限结构的定义才做零行 SELECT 权限探测，定义可读不等于 SELECT 可读。权限/SQL 失败沿既有分类，不新增吞错或重试。
-- [ ] 视图保护所需会话设置与语法判断在 A3 实现，B1 复用同一实现，避免 A 依赖尚未完成的 B。两版离线加入含非相关标量子查询的视图夹具，覆盖快照刷新和证据复核，断言没有对该视图发普通 SELECT；7.5.3 只发受保护计划、6.5.5 标未知。非 EXPLAIN 预执行是 [V1][V16] 的源码推断，实际数据库行为留 C04 验证。
+- [ ] 结构刷新和证据复核均替换无条件视图零行探测（基线 `starrocks.py:539/1166`）：普通表保留 `SELECT 1 FROM 对象 WHERE 1=0`；7.5.3 视图使用同一连接上保护变量 ON 且回读成功后的 `EXPLAIN SELECT 1 FROM v WHERE 1=0`，受实际视图权限（含 SHOW VIEW）约束，不退回普通 SELECT 或自行扩权。6.5.5 先读取 information_schema.VIEWS 定义，复用 B1 的保守语法规则；含标量/EXISTS、引用其他视图，或定义不可得/无法解析时标“可读性未知”，不入快照、不发普通探测；确认不含受限结构的定义才做零行 SELECT 权限探测，定义可读不等于 SELECT 可读。视图探测按对象分类错误码：1345 ErrViewNoExplain 记该视图“可读性未知”，1356 ErrViewInvalid 记不可读，均只排除该对象，不让整批刷新失败；基线 `starrocks.py:541/1166` 尚未分类这两个码，不能原样复用。其他已知探测拒绝沿既有分类，其他未知错误仍按既有规则失败，不吞错或重试；错误码以现场为准 [V17]。此分类仅用于对象可读性探测，不改变用户 SQL 等执行失败中止本轮的规则。
+- [ ] TiDB Adapter 只保留一个按对象类型/版本分支的 `probe` 实现，覆盖结构刷新、Evidence 复核及 `list_databases` / `list_tables` / `describe_table` / 引用过滤等全部调用方（基线 `starrocks_tools.py:512/595/640/880`），不只修后台刷新。视图保护所需会话设置与语法判断在 A3 实现，B1 复用，避免 A 依赖尚未完成的 B。
+- [ ] 两版离线加入含非相关标量子查询的视图夹具，覆盖快照刷新和证据复核，断言没有对该视图发普通 SELECT；7.5.3 只发受保护计划、6.5.5 标未知。另补 7.5.3 视图探测返回 1345 的混合对象夹具，断言该视图标未知且不入快照、其他可读对象仍入快照，至少贯通一条 `list_tables` 工具路径；同组覆盖 1356 仅排除该视图、未知错误仍失败。非 EXPLAIN 预执行是 [V1][V16] 的源码推断，实际数据库行为留 C04 验证。
 - [ ] 接入有效期、权限变化、对象/列变化及历史复核；A 用一个端到端撤权追问测试验证旧事实不泄漏，B2 再覆盖一个诊断源撤权追问。仅 TiDB 代码修改回放或重发具体逻辑时补对应测试，其他路径复用已有验证；结构暂不可用按现有规则停止。
 - [ ] 用真 SDK Runner、recording Adapter 和既有离线存储测试验证目标/工具路由、四层投影及正常/拒绝路径；保持 `runtime.py:1347` 的 `audit` 差集、用途组合及 `app.py:510` 的结果分类算法。断言诊断用途不含任何业务执行工具，业务执行继续使用 `QUERY_TOOLS` 中的入口，避免新 ID 意外落入 `audit`。A 覆盖已开放入口，B2 补诊断 SELECT；回归 StarRocks 和既有监控交付，不新增路由或证据框架。
 - [ ] 改造基线中的直接 StarRocks 类型假设：`runtime.py:769` 的 `audited`、`:1723` / `:2284` 的 `open_starrocks`（启动/重发），以及 `app.py:328` / `:1764` 的 `StarRocksErrorCode`（错误类型/日志）。只处理 TiDB 实际消费者；`scheduled_tasks` 路径记为未覆盖，不扩为本片新任务。
 - [ ] 按第 9 节分配 T1/T2/T5 的离线、真实工具、模型及入口验证；T5 不按数据库版本重复。未获准环境可保留缺口，不将离线通过改称阶段验收。
+
+**视图方案取舍：** 本期保留分版本探测。两版统一“VIEWS 定义筛查 + 零行 SELECT”可省掉 SHOW VIEW 依赖和探测版本分支 [V17]，但会把 7.5.3 含子查询及嵌套视图也标为未知，缩小已有设计的可读范围；7.5.3 的受保护 EXPLAIN 本来就供 B1 复用。先按对象处理权限缺口，是否授予 SHOW VIEW 由 DBA 决定，不增加自动兜底。若现场无法授予且接受这部分视图不可用，再复查统一方案。
 
 **A 退出：** T1/T2/T5 正常与失败变体达标；公司两版资源/权限和代表性 SQL 保真有证据，其余边界有离线证据；精确候选版本的 SQL/数据边界独立审查通过，StarRocks 无相关回归。本地完成不等于退出。
 
@@ -217,7 +221,7 @@
 ### B2：可组合的诊断 SELECT 与慢源
 
 - [ ] 增加最小诊断 SELECT 入口；可信来源只登记 `SLOW_QUERY` / `CLUSTER_SLOW_QUERY`、T3 所需的 `TIFLASH_REPLICA` 等表名，不等待 C 才提供副本证据。列与权限复用既有结构元数据读取能力发现，诊断对象范围只含登记表、独立于业务快照，只选择实际可用字段；版本矩阵只留文档，不写成代码中的列映射，也不靠执行失败后反复试 SQL。
-- [ ] query_diagnostics 的所有实际对象依赖只能来自已登记诊断表；业务表、与业务表 JOIN，以及 CTE/子查询中的业务表均在 I/O 前拒绝，不因数据库账号可读而放行。复用 SQLGuard 的对象依赖/范围校验，不增加新执行路径。反例：`SELECT q.Query_time FROM information_schema.CLUSTER_SLOW_QUERY AS q JOIN app.orders AS o ON 1=1 LIMIT 1`，断言零 I/O；普通业务取证仍走业务查询入口，显式诊断用途不包含它。
+- [ ] query_diagnostics 的所有实际对象依赖只能来自已登记诊断表；业务表、与业务表 JOIN，以及 CTE/子查询中的业务表均在 I/O 前拒绝，不因数据库账号可读而放行。复用 SQLGuard 的对象依赖/范围校验，不增加新执行路径；诊断物理表按完整库/表身份匹配登记项，不凭短表名或 CTE 名放行。拒绝反例均断言零 I/O：`SELECT q.Query_time FROM information_schema.CLUSTER_SLOW_QUERY AS q JOIN app.orders AS o ON 1=1 LIMIT 1`；未限定的 `SELECT * FROM SLOW_QUERY LIMIT 1`（不隐式补为 information_schema）；`WITH SLOW_QUERY AS (SELECT id FROM app.orders) SELECT * FROM SLOW_QUERY`（同名 CTE 不能掩盖实际业务表依赖）。普通业务取证仍走业务查询入口，显式诊断用途不包含它。
 - [ ] 校验时间窗、Query_time 等单位、单节点/全群覆盖、原 SQL/计划截断、日志未保留及采集配置；按 T4 做来源端过滤/排序/Top N。
 - [ ] 日志 SQL/用户/地址是已获准诊断事实，不再按日志中提到的业务表逐行缩小已批准读取范围；若要取该 SQL 的计划，仍独立验证其真实对象、函数和当前权限。已有计划解码只使用审查过的只读函数。
 - [ ] 用返回的 `INSTANCE` 列和收集到的数据库警告说明节点来源与限制；成功空结果、SQL 截断、历史缺失分别表达，不把受限候选集称为全窗排名。T4 缺源变体按 §4 区分 I/O 前已知缺口、成功部分结果和 SQL 报错，后两条路径离线覆盖。
@@ -275,7 +279,7 @@
 | --- | --- | --- |
 | 本地离线 | 真 SDK Runner、recording Adapter、既有可离线运行的存储测试；T2 全边界、6.5.5 EXPLAIN 拒绝、7.5.3 设置/回读失败、数据库警告/报错；A/B 各一个撤权追问 | 证明应用调用链和拒绝，不证明实际 TiDB 输出、负载、权限或 Agent 任务质量 |
 | 公司只读工具 | 3 集群逐一冒烟；两版校准 EXPLAIN、列定义、版本和固定 sql_mode 等会话变量；C04 轻量只读对照；T2 只跑 §4 代表子集 | 用户或 DBA 手工执行、脱敏回传；不新建采集工具，不制造压力或集群故障；小表读取仍有实际开销 |
-| 公司真实模型 | v7.5.3 主版本完成 T1—T8；v6.5.5 只补 T3 及实际影响解释的 T6/T7 等差异，不按集群重复；T8.1 引用 T3 的 6.5.5 证据；重复次数按 §4 | DBA 预先给出关键事实基准，指定样例各 2 次、其余 1 次；任一次不可接受结果即失败，无样本保持开放 |
+| 公司真实模型 | v7.5.3 主版本完成 T1—T8；v6.5.5 只补 T3 及实际影响解释的 T6/T7 等差异，不按集群重复；T8.1 引用 T3 的 6.5.5 证据；重复次数按 §4 | DBA 预先给出事实清单/判定口径，T4 的具体基准按 C08 在每次运行后独立取得；指定样例各 2 次、其余 1 次；任一次不可接受结果即失败，无样本保持开放 |
 | 公司正式入口 | Web / 飞书分别覆盖代表查询、诊断、大结果及失败交付，结合追问；T8 只选一个正式入口跑一个代表样例 | 可合并场景，不逐版本/集群重跑；A/B 撤权追问用离线端到端证据，只有具体改到回放/重发才补对应测试 |
 
 T8 基础评估保留 7 个固定变体，T8.1/T8.2 各跑 2 次，其余各 1 次，共 9 个主版本会话；成对 SQL 与小范围追问并入对应会话。C 仍只有一个 UPDATE 等待变体，按 T8.2 跑 2 次，复用 T6 证据。T2 回归也按 §4 跑 2 次，不增加输入变体；正式入口仍复用一个代表样例。DBA 在每个 T 前提供关键事实清单，判定不依赖 Agent 自报正确。各次验证沿用现有评测输出格式，另加数据库版本和集群 ID；注明缺口，不另建记录 schema。
@@ -295,13 +299,13 @@ T8 基础评估保留 7 个固定变体，T8.1/T8.2 各跑 2 次，其余各 1 �
 | 编号 / 批次 | 公司要做的事 | 通过证据 / 保留项 |
 | --- | --- | --- |
 | C01 / 第一次 | 核对候选发行包及公司模型配置；列出三个集群 ID、两个 7.5.3 / 一个 6.5.5；各目标说明写共用数据源名称和标签值 | 凭据只用安全引用；工具调用指定 cluster、没有默认集群；“查一下订单库”的多集群歧义先澄清，不跨集群找表 |
-| C02 / 第一次，3 集群各一次 | 连接、TLS、实际 SELECT 权限、PROCESS、资源设置回读、已有慢日志可读性冒烟；DBA 核实账号无业务写权限 | 只回各项通过/失败/未知及脱敏错误；不靠执行写语句证明只读，不把空日志当不可读或无慢 SQL |
-| C03 / 第一次，两版 | 执行下方版本、会话变量（含实际 SESSION sql_mode）、计划所需系统表列及普通 EXPLAIN 采集 | sql_mode 与架构固定模式集合相等，三种冲突模式均不含；脱敏实际输出校准夹具，记录版本/集群，未校准不称真实兼容 |
+| C02 / 第一次，3 集群各一次 | 连接、TLS、实际 SELECT 权限、PROCESS、资源设置回读、已有慢日志可读性冒烟；核对账号对需查询视图的 SHOW VIEW 权限，是否授予由 DBA 决定；DBA 核实账号无业务写权限 | 只回各项通过/失败/未知及脱敏错误，视图探测的 1345/1356 按 A3 分类并核对现场错误码；不靠执行写语句证明只读，不把空日志当不可读或无慢 SQL |
+| C03 / 第一次，两版 | 执行下方版本、会话变量（含实际 SESSION sql_mode）、@@GLOBAL.sql_mode、计划所需系统表列及普通 EXPLAIN 采集 | SESSION sql_mode 与架构固定模式集合相等，三种冲突模式均不含；GLOBAL 仅记录原配置，不要求两者相同、不修改全局值；脱敏输出校准夹具，记录版本/集群，未校准不称真实兼容 |
 | C04 / 第一次 | DBA 选至少 2 行的已有小表，7.5.3 按 §10.2 对比保护 OFF 的预期 1242 与 ON 后同一 EXPLAIN 正常计划；EXISTS 看形状；两版补普通零行派生表对照 | 错误码/文本与计划均留证；ON 回读失败不发保护组计划。普通 SELECT 预执行仍是待验证推断，派生表不能替代真视图路径；6.5.5 不尝试受限 EXPLAIN，B1 工具贯通留第二次 |
 | C05 / 第一次，两版 | DBA 同意后调低专用会话 max_execution_time，对事先选定的轻量只读查询做一次验证，随后恢复或关闭该会话 | 回读值及服务端中止证据；精度约 100ms，查询先完成就保留未验证，不为触发超时扩大扫描、并发或循环 |
 | C06 / 第一次 | A 的 T1/T2/T5：7.5.3 跑模型任务，T2 按 §4 跑 2 次；两版跑 T2 真实库代表子集，Web / 飞书覆盖代表交付 | DBA 预先给出主键/索引及 SQL 结果基准，T5 本任务零数据库调用；A 撤权追问引用离线端到端测试，成功/失败标准保持 |
 | C07 / 第一次回传 | 脱敏版本、列、变量、计划及实际问题，修正本地夹具，核对 A 独立审查与待验收项 | 无阻断问题可继续离线 B/C；A 只在必要证据齐全后退出，不把资料采集当功能通过 |
-| C08 / 第二次 | 候选 B1 工具及 T3/T4 各 2 次真实模型，含 TiFlash 与已有慢日志；6.5.5 补 T3 差异。DBA 预先用独立 SQL 取得同账号、同一绝对时间窗、阈值和节点覆盖的慢 SQL Top 3（含 INSTANCE） | 与 DBA 基准逐项核对，不以 Agent 结果作基准；原工作负载不执行，任一次不可接受结果即失败；缺日志/警告/SQL 报错按 §4，B 撤权追问引用离线证据 |
+| C08 / 第二次 | 候选 B1 工具及 T3/T4 各 2 次真实模型，含 TiFlash 与已有慢日志；6.5.5 补 T3 差异。每次 T4 开始时由 DBA/评测记录开始时间 t0；该次运行后，DBA 用独立 SQL 按绝对窗口 [t0−1 小时, t0)、同账号、阈值和节点覆盖取得慢 SQL Top 3（含 INSTANCE） | 与该次 DBA 基准逐项核对，窗口来自实际运行开始时间，不采用 Agent 自报窗口或结果；原工作负载不执行，任一次不可接受结果即失败；缺日志/警告/SQL 报错按 §4，B 撤权追问引用离线证据 |
 | C09 / 第二次 | T8 的 7 个固定变体共 9 个会话（T8.1/T8.2 各 2 次），普通 T2 回归 2 次，正式入口一个代表样例；DBA 先列关键事实 | 引用已取计划/证据，任一次不可接受结果即失败；普通查询无新增前置步骤；6.5.5 复用 T3，缺样本保持开放 |
 | C10 / 第二次，有样本才做 | T6 跑 1 次，T8 UPDATE 同一等待变体跑 2 次；共用自然或 DBA 在可丢弃普通表准备的等待，DBA 预先记录等待方向和采样时间 | 小维只查询，等待方向/时长对照 DBA 基准，建议随证据改变；无样本保持开放。建表、写入和清理由 DBA 独立操作，不经过小维 |
 | C11 / 第二次 | T7 正常情况、已有缺源变体，以及三个集群共用数据源时选对目标标签的真实模型变体；记录全群系统表正常采集耗时 | 不借其他集群指标下结论，不把缺源当健康；标签变体失败才评估代码层措施。已知故障判断保持开放，不在生产制造故障 |
@@ -317,6 +321,7 @@ SELECT @@SESSION.max_execution_time AS max_execution_time_ms,
        @@SESSION.tidb_mem_quota_query AS memory_quota_bytes,
        @@SESSION.time_zone AS time_zone,
        @@SESSION.sql_mode AS sql_mode,
+       @@GLOBAL.sql_mode AS global_sql_mode,
        @@SESSION.character_set_connection AS connection_charset,
        @@SESSION.collation_connection AS connection_collation;
 SELECT TABLE_NAME, COLUMN_NAME, COLUMN_TYPE, IS_NULLABLE
