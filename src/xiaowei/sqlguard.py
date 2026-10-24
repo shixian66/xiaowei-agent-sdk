@@ -3,7 +3,8 @@
 ``guard_readonly_query`` 与 ``guard_explain_query`` 产生互不兼容的封存类型。范围来自
 ``QueryPolicy.tables``（当前可读快照）；不查询元数据、不取连接。先按 UTF-8 限长、分词并拒绝
 注释、hint、多语句及非 SELECT/WITH 开头，再用锁定的 sqlglot 检查语法闭集、函数、对象、列和
-物理依赖。业务 SQL 的物理表须写明库；拒绝可附当前可读快照中的有限同名候选，不回显输入 SQL。
+物理依赖。StarRocks 物理表须写明库；TiDB 可继承可信目标的默认库。拒绝可附当前可读快照中的
+有限同名候选，不回显输入 SQL。
 AST 的限定列名与星号展开只用于权限和依赖分析，不作为执行文本。审计原文不执行，仍按记录的
 会话当前库解析，沿用原来的可打印性过滤。
 
@@ -22,10 +23,11 @@ AST 的限定列名与星号展开只用于权限和依赖分析，不作为执�
 from __future__ import annotations
 
 import enum
+import re
 from collections.abc import Callable, Mapping
 from dataclasses import InitVar, dataclass
 from itertools import pairwise
-from typing import Annotated, Final, NoReturn, TypeVar
+from typing import Annotated, Final, Literal, NoReturn, TypeVar
 
 from pydantic import (
     BaseModel,
@@ -42,7 +44,6 @@ from sqlglot.optimizer.qualify import qualify
 from sqlglot.optimizer.scope import Scope, traverse_scope
 
 DIALECT: Final = "starrocks"
-_DIALECT = Dialect.get_or_raise(DIALECT)
 
 _Name = Annotated[str, StringConstraints(min_length=1)]
 
@@ -59,6 +60,9 @@ class QueryRejectionCode(enum.StrEnum):
     FUNCTION_NOT_ALLOWED = "function_not_allowed"
     AMBIGUOUS_REFERENCE = "ambiguous_reference"
     COMMENT_NOT_ALLOWED = "comment_not_allowed"
+    EXECUTABLE_COMMENT = "executable_comment"
+    HINT_NOT_ALLOWED = "hint_not_allowed"
+    INVALID_LIMIT = "invalid_limit"
     TOO_MANY_COLUMNS = "too_many_columns"
     UNSUPPORTED_LIMIT = "unsupported_limit"
 
@@ -80,6 +84,9 @@ REJECTION_MESSAGES: Final[Mapping[QueryRejectionCode, str]] = {
     _Code.FUNCTION_NOT_ALLOWED: "使用了未获准的函数",
     _Code.AMBIGUOUS_REFERENCE: "列引用或结果列名有歧义，请用表名限定列，或为输出列设置唯一别名",
     _Code.COMMENT_NOT_ALLOWED: "SQL 含注释，请删除注释后重试",
+    _Code.EXECUTABLE_COMMENT: "SQL 含可执行注释，无法在只读边界内安全支持",
+    _Code.HINT_NOT_ALLOWED: "hint 不在允许的计划类清单中，未执行",
+    _Code.INVALID_LIMIT: "LIMIT 与 OFFSET 只接受非负整数字面量",
     _Code.TOO_MANY_COLUMNS: "结果列数或列名总长超过上限，请只选择需要的列",
     _Code.UNSUPPORTED_LIMIT: "LIMIT 只接受非负整数字面量，不支持 OFFSET",
 }
@@ -107,14 +114,16 @@ class QueryPolicy(BaseModel):
     """一个查询目标的可信范围；来自结构快照与静态配置，不来自模型或用户。
 
     ``tables`` 是 库 → 对象 → 按序的列（星号按此顺序展开）；每个对象至少一列，同一对象的列名
-    不区分大小写也不重复（StarRocks 列名不区分大小写）。业务查询不继承连接的默认库：未限定
-    物理表名须拒绝（审计原文另按记录的会话当前库，见 ``audit_references``）。函数名统一
-    为大写。
+    不区分大小写也不重复。StarRocks 业务查询拒绝未限定物理表；TiDB 仅按可信
+    ``default_database`` 解析，不跨库猜测。审计原文另按记录的当前库，见 ``audit_references``。
+    函数名统一为大写。
     """
 
     model_config = ConfigDict(frozen=True, extra="forbid")
 
     target_id: _Name
+    database_type: Literal["starrocks", "tidb"] = "starrocks"
+    default_database: _Name | None = None
     tables: Mapping[_Name, Mapping[_Name, tuple[_Name, ...]]]
     allowed_functions: frozenset[_Name]
     max_rows: int = Field(ge=1)
@@ -192,7 +201,7 @@ def guard_readonly_query(sql: str, policy: QueryPolicy) -> GuardedQuery:
     root, objects, columns, tokens, header_extra = _guard(sql, policy)
     _check_result_columns(root, policy, header_extra)
     executed, requested, applied = _edit_limit(sql, tokens, root, policy)
-    if executed != _without_terminator(sql):
+    if executed != _execution_sql(sql, tokens, policy):
         checked, checked_objects, checked_columns, _, checked_header_extra = _guard(
             executed, policy
         )
@@ -223,10 +232,10 @@ def guard_explain_query(sql: str, policy: QueryPolicy) -> ExplainQuery:
 
     :raises QueryRejectedError: 任一规则不通过；只带原因码与固定说明。
     """
-    _, objects, columns, _, _ = _guard(sql, policy)
+    _, objects, columns, tokens, _ = _guard(sql, policy)
     return ExplainQuery(
         target_id=policy.target_id,
-        executed_sql=_without_terminator(sql),
+        executed_sql=_execution_sql(sql, tokens, policy),
         referenced_objects=objects,
         referenced_columns=columns,
         _seal=_SEAL,
@@ -258,20 +267,22 @@ def _guard(
 ) -> tuple[exp.Query, _Objects, _Columns, list[Token], int]:
     """三个公开函数共用的校验：返回完整限定后的语法树与引用的对象、列。
 
-    ``current_database`` 只由审计原文给出（见 ``_bind_table``）。
+    ``current_database`` 来自审计原文；TiDB 业务 SQL 使用策略中的可信默认库。
     """
     if _utf8_size(sql) > policy.max_sql_bytes:
         _reject(_Code.INPUT_TOO_LARGE)
-    root, tokens = _parse(sql)
+    root, tokens = _parse(sql, policy)
     _check_nodes(root, policy)
     # 无 AS 的表达式由数据库命名。sqlglot 在 qualify 时会生成短 _col_N，不能拿它
     # 低估原文表达式的列头；使用原始解析树表达式的长度，运行时仍复核数据库实返列头。
     leftmost = _leftmost(root)
     header_extra = sum(
-        _expression_header_bytes(projection)
+        _expression_header_bytes(projection, policy)
         for projection in (leftmost.expressions if leftmost is not None else ())
         if not isinstance(projection, exp.Alias | exp.Column | exp.Star)
     )
+    if current_database is None and policy.database_type == "tidb":
+        current_database = policy.default_database
     _bind_tables(root, policy, current_database)
     # 名字推导与 sqlglot 一样按作用域递归；过深的嵌套是预期的输入失败，映射为固定原因码。
     _attempt(lambda: _bind_columns(root, policy), _Code.UNSUPPORTED_SYNTAX)
@@ -281,8 +292,15 @@ def _guard(
     return qualified, objects, columns, tokens, header_extra
 
 
-def _expression_header_bytes(projection: exp.Expression) -> int:
-    return len(_attempt(lambda: projection.sql(dialect=DIALECT), _Code.UNSUPPORTED_SYNTAX).encode())
+def _dialect_name(policy: QueryPolicy) -> str:
+    return "mysql" if policy.database_type == "tidb" else DIALECT
+
+
+def _expression_header_bytes(projection: exp.Expression, policy: QueryPolicy) -> int:
+    return len(
+        _attempt(lambda: projection.sql(dialect=_dialect_name(policy)), _Code.UNSUPPORTED_SYNTAX)
+        .encode()
+    )
 
 
 def _normalize(root: exp.Query, policy: QueryPolicy) -> str:
@@ -301,7 +319,9 @@ def _normalize(root: exp.Query, policy: QueryPolicy) -> str:
 
     printable = root.transform(canonical_date, copy=True)
     normalized = _attempt(
-        lambda: printable.sql(dialect=DIALECT, unsupported_level=ErrorLevel.RAISE, comments=False),
+        lambda: printable.sql(
+            dialect=_dialect_name(policy), unsupported_level=ErrorLevel.RAISE, comments=False
+        ),
         _Code.UNSUPPORTED_SYNTAX,
     )
     if _utf8_size(normalized) > policy.max_sql_bytes:
@@ -344,12 +364,65 @@ _DATE_CALLS: Final = frozenset(
 _FUNCTION_NAME_TOKENS: Final = frozenset({TokenType.VAR, TokenType.IDENTIFIER})
 
 
-def _parse(sql: str) -> tuple[exp.Query, list[Token]]:
-    tokens: list[Token] = _attempt(lambda: _DIALECT.tokenize(sql), _Code.UNPARSABLE)
+# 只检查词元之间的实际注释；字符串和标识符中的注释字样不参与。
+_COMMENTS: Final = re.compile(r"/\*[\s\S]*?\*/|--[^\n]*|#[^\n]*")
+_TIDB_PLAN_HINTS: Final = frozenset(
+    {"USE_INDEX", "IGNORE_INDEX", "HASH_JOIN", "MERGE_JOIN", "INL_JOIN", "READ_FROM_STORAGE"}
+)
+
+
+def _tidb_comments(sql: str, tokens: list[Token]) -> None:
+    start = 0
+    for token in [*tokens, None]:
+        end = token.start if token is not None else len(sql)
+        gap = sql[start:end]
+        for match in _COMMENTS.finditer(gap):
+            comment = match.group()
+            if comment.startswith(("/*!", "/*T!")):
+                _reject(_Code.EXECUTABLE_COMMENT)
+            if comment.startswith(("--", "#")):
+                # TiDB 的 -- 后须空白；两种行注释均到 LF 结束。SQLGlot 也会认 --1 / CR。
+                if comment.startswith("--") and len(comment) > 2 and not comment[2].isspace():
+                    _reject(_Code.UNSUPPORTED_SYNTAX)
+                if end < len(sql) and "\n" not in gap[match.end():]:
+                    _reject(_Code.UNSUPPORTED_SYNTAX)
+        if token is not None:
+            start = token.end + 1
+
+
+def _tidb_hints(root: exp.Query, tokens: list[Token]) -> None:
+    hints = list(root.find_all(exp.Hint))
+    if len(hints) != sum(token.token_type is TokenType.HINT for token in tokens):
+        _reject(_Code.HINT_NOT_ALLOWED)
+    for hint in hints:
+        if not isinstance(hint.parent, exp.Select) or hint.arg_key != "hint":
+            _reject(_Code.HINT_NOT_ALLOWED)
+        for expression in hint.expressions:
+            if (
+                not isinstance(expression, exp.Anonymous)
+                or expression.name.upper() not in _TIDB_PLAN_HINTS
+            ):
+                _reject(_Code.HINT_NOT_ALLOWED)
+            for node in expression.walk():
+                if type(node) not in {exp.Anonymous, exp.Column, exp.Identifier, exp.Bracket}:
+                    _reject(_Code.HINT_NOT_ALLOWED)
+                if isinstance(node, exp.Anonymous) and node is not expression:
+                    _reject(_Code.HINT_NOT_ALLOWED)
+        # hint 参数是优化器对象，不是业务列/函数；原 SQL 中仍完整保留。
+        hint.parent.set("hint", None)
+
+
+def _parse(sql: str, policy: QueryPolicy) -> tuple[exp.Query, list[Token]]:
+    dialect = Dialect.get_or_raise(_dialect_name(policy))
+    tokens: list[Token] = _attempt(lambda: dialect.tokenize(sql), _Code.UNPARSABLE)
+    original_tokens = tokens
+    tidb = policy.database_type == "tidb"
+    if tidb:
+        _tidb_comments(sql, tokens)
     # 尾部注释附着在最后的分号词元上：先检查全部词元，再去掉可选的尾部分号。
-    if any(token.token_type is TokenType.HINT for token in tokens):
+    if not tidb and any(token.token_type is TokenType.HINT for token in tokens):
         _reject(_Code.UNSUPPORTED_SYNTAX)
-    if any(token.comments for token in tokens):
+    if not tidb and any(token.comments for token in tokens):
         hint = sql.find("/*+")
         while hint >= 0 and any(token.start <= hint <= token.end for token in tokens):
             hint = sql.find("/*+", hint + 3)
@@ -374,7 +447,7 @@ def _parse(sql: str) -> tuple[exp.Query, list[Token]]:
     ):
         _reject(_Code.FUNCTION_NOT_ALLOWED)
     _check_date_arity(tokens)
-    parser = _DIALECT.parser(error_level=ErrorLevel.RAISE)
+    parser = dialect.parser(error_level=ErrorLevel.RAISE)
     parse_error: QueryRejectionCode | None = None
     try:
         statements = parser.parse(tokens, "")
@@ -387,7 +460,10 @@ def _parse(sql: str) -> tuple[exp.Query, list[Token]]:
         _reject(parse_error)
     if len(statements) != 1 or statements[0] is None:
         _reject(_Code.MULTIPLE_STATEMENTS)
-    return _query_root(statements[0]), tokens
+    root = _query_root(statements[0])
+    if tidb:
+        _tidb_hints(root, tokens)
+    return root, original_tokens if tidb else tokens
 
 
 def _check_date_arity(tokens: list[Token]) -> None:
@@ -480,9 +556,14 @@ def _check_nodes(root: exp.Query, policy: QueryPolicy) -> None:
             if not _star_allowed(node):
                 _reject(_Code.STAR_PROJECTION)
         elif isinstance(node, exp.Offset):
-            _reject(_Code.UNSUPPORTED_LIMIT)
+            if policy.database_type != "tidb":
+                _reject(_Code.UNSUPPORTED_LIMIT)
+            _limit_value(node, _Code.INVALID_LIMIT)
         elif isinstance(node, exp.Limit):
-            _limit_value(node)
+            _limit_value(
+                node,
+                _Code.INVALID_LIMIT if policy.database_type == "tidb" else _Code.UNSUPPORTED_LIMIT,
+            )
         elif isinstance(node, exp.Table):
             if not isinstance(node.this, exp.Identifier):
                 _reject(_Code.UNSUPPORTED_SYNTAX)  # 表函数、FILES()、TABLE(...) 等
@@ -564,10 +645,12 @@ def _check_date_function(
             _reject(_Code.UNSUPPORTED_SYNTAX)
 
 
-def _limit_value(limit: exp.Limit) -> int:
+def _limit_value(
+    limit: exp.Limit | exp.Offset, code: QueryRejectionCode = _Code.UNSUPPORTED_LIMIT
+) -> int:
     literal = limit.expression
     if not isinstance(literal, exp.Literal) or literal.is_string or not literal.is_int:
-        _reject(_Code.UNSUPPORTED_LIMIT)
+        _reject(code)
     return int(literal.name)
 
 
@@ -964,7 +1047,7 @@ def _qualify(root: exp.Query, policy: QueryPolicy) -> exp.Query:
         lambda: qualify(
             root,
             schema=schema,
-            dialect=DIALECT,
+            dialect=_dialect_name(policy),
             validate_qualify_columns=True,
             identify=True,
         ),
@@ -1081,6 +1164,15 @@ def _without_terminator(sql: str) -> str:
     return stripped[:-1] if stripped.endswith(";") else sql
 
 
+def _execution_sql(sql: str, tokens: list[Token], policy: QueryPolicy) -> str:
+    if policy.database_type != "tidb":
+        return _without_terminator(sql)
+    if tokens and tokens[-1].token_type is TokenType.SEMICOLON:
+        terminal = tokens[-1]
+        return sql[:terminal.start] + sql[terminal.end + 1:]
+    return sql
+
+
 def _root_limit(root: exp.Query) -> int | None:
     limit = root.args.get("limit")
     return _limit_value(limit) if isinstance(limit, exp.Limit) else None
@@ -1102,10 +1194,13 @@ def _edit_limit(
             if limit_token is not None or index + 1 == len(tokens):
                 _reject(_Code.UNSUPPORTED_SYNTAX)
             limit_token, number = token, tokens[index + 1]
+            if (policy.database_type == "tidb" and index + 3 < len(tokens)
+                    and tokens[index + 2].token_type is TokenType.COMMA):
+                number = tokens[index + 3]
     requested = _root_limit(root)
     if (limit_token is None) != (requested is None):
         _reject(_Code.UNSUPPORTED_SYNTAX)
-    base = _without_terminator(sql)
+    base = _execution_sql(sql, tokens, policy)
     applied = min(requested, policy.max_rows) if requested is not None else policy.max_rows + 1
     if requested is not None:
         if (
@@ -1119,6 +1214,10 @@ def _edit_limit(
         if requested > policy.max_rows:
             applied = policy.max_rows + 1
             base = base[: number.start] + str(applied) + base[number.end + 1 :]
+    elif policy.database_type == "tidb":
+        body_tokens = tokens[:-1] if tokens[-1].token_type is TokenType.SEMICOLON else tokens
+        end = body_tokens[-1].end + 1
+        base = base[:end] + f" LIMIT {applied}" + base[end:]
     else:
         base = f"{base.rstrip()} LIMIT {applied}"
     if _utf8_size(base) > policy.max_sql_bytes:
