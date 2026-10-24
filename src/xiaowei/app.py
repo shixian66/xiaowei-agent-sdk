@@ -200,7 +200,8 @@ DEFAULT_INSTRUCTIONS = (
     "预算耗尽或本源停止时停止相关操作，不绕过检查。结构暂不可用时本轮不等待刷新、不立即"
     "重试，不要改查其他集群。busy仅表示确认未发出任何SQL的槽位超时，按remaining_retries"
     "选择至多一次再试或结束；换工具/参数不增加配额，成功也不复位。执行后失败或结果不明"
-    "保持整轮中止、不自动重放。拒绝或失败不说已经查到，不伪造Evidence。"
+    "保持整轮中止、不自动重放；明确的SQL解析失败可在correction_allowed和本轮预算内修正。"
+    "拒绝或失败不说已经查到，不伪造Evidence。"
     "工具被拒绝或失败的结果没有 evidence_id，不算取得，不能放进 fact 块。"
 )
 
@@ -805,7 +806,12 @@ class Application:
             # 根据已获准的模型历史收尾。两次运行都受外层整轮期限约束，工具与证据不会重放。
             # “可能不完整”由代码据可信账本说明（``TurnAnswer.limit_reached``），不写进模型文字。
             runs = self._governance.turn_runs(ctx.identity)
-            if not runs.produced and not runs.monitoring_failures and not runs.inspection_failures:
+            if (
+                not runs.produced
+                and not runs.monitoring_failures
+                and not runs.inspection_failures
+                and not runs.sql_parse_failures
+            ):
                 return None
             self._governance.note_limit_rescue(ctx.identity)
             final_agent = agent.clone(
@@ -922,6 +928,7 @@ class Application:
         queried = self._query_evidence(runs)
         failed_queries = sum(f.tool_id in self._queries for f in runs.monitoring_failures)
         failed_queries += sum(f.counted for f in runs.inspection_failures)
+        failed_queries += sum(tool in self._queries for tool in runs.sql_parse_failures)
         rejected_proposals = sum(t in self._queries for t in runs.proposal_rejections)
         if len(queried) + failed_queries + rejected_proposals != sum(
             t in self._queries for t in runs.started

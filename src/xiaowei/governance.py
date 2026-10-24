@@ -242,6 +242,17 @@ class ToolExecutionError(Exception):
         self.tool_id: str | None = None
 
 
+class SqlParseError(Exception):
+    """明确未通过解析的用户 SQL；只有安全位置和当前工具额度状态。"""
+
+    def __init__(
+        self, position: tuple[int | None, int | None], *, correction_allowed: bool
+    ) -> None:
+        super().__init__("SQL未通过解析")
+        self.line, self.column = position
+        self.correction_allowed = correction_allowed
+
+
 class MonitoringReadError(Exception):
     """已执行的监控读取明确失败；可修正子类除外，本源本轮不可再读。"""
 
@@ -440,6 +451,7 @@ class TurnRuns:
 
     started: tuple[str, ...] = ()
     produced: tuple[tuple[str, str], ...] = ()
+    sql_parse_failures: tuple[str, ...] = ()  # 每次用户 SQL 解析失败的工具 ID，不是成功证据。
     proposal_rejections: tuple[str, ...] = ()  # 已完成只读准备、明确未形成 Action 的调用。
     monitoring_failures: tuple[MonitoringFailure, ...] = ()
     inspection_failures: tuple[SecurityInspectionFailure, ...] = ()
@@ -797,6 +809,35 @@ class GovernedTools:
                 except Exception as exc:
                     if (
                         isinstance(exc, StarRocksError)
+                        and exc.parse_position is not None
+                        and contract.tool_id in {"local/run_readonly_query", "local/explain_query"}
+                    ):
+                        current = self._runs.get(key, TurnRuns())
+                        self._runs[key] = replace(
+                            current,
+                            sql_parse_failures=(*current.sql_parse_failures, contract.tool_id),
+                            slot_busy=current.slot_busy - {target}
+                            if slot_retry
+                            else current.slot_busy,
+                        )
+                        parse_failure = SqlParseError(
+                            exc.parse_position,
+                            correction_allowed=self._used.get(key, 0) < ctx.budget.max_tool_calls,
+                        )
+                        logger.info(
+                            "sql_parse turn=%s call_ref=%s tool=%s target=%s code=invalid_sql "
+                            "line=%s column=%s correction_allowed=%s",
+                            ctx.identity.turn_id,
+                            hashlib.sha256(request.call_id.encode()).hexdigest()[:16],
+                            contract.tool_id,
+                            target,
+                            parse_failure.line,
+                            parse_failure.column,
+                            parse_failure.correction_allowed,
+                        )
+                        raise parse_failure from None
+                    elif (
+                        isinstance(exc, StarRocksError)
                         and exc.code is StarRocksErrorCode.POOL_TIMEOUT
                         and exc.slot_wait
                         and not trace.started
@@ -859,8 +900,12 @@ class GovernedTools:
                 self._runs[key] = replace(current, slot_busy=current.slot_busy | {target})
                 if inspection_scope is not None:
                     self._inspection_failed(
-                        ctx, contract, inspection_scope, "busy",
-                        call_id=effective.call_id, counted=False,
+                        ctx,
+                        contract,
+                        inspection_scope,
+                        "busy",
+                        call_id=effective.call_id,
+                        counted=False,
                     )
                 remaining: Literal[0, 1] = 0 if target in current.slot_retries else 1
                 raise ToolRejectedError(
@@ -920,8 +965,7 @@ class GovernedTools:
         )
         self._runs[key] = replace(runs, inspection_failures=(*runs.inspection_failures, failure))
         logger.info(
-            "security_inspection turn=%s call_ref=%s target=%s reason=%s "
-            "counted=%s sql_started=%s",
+            "security_inspection turn=%s call_ref=%s target=%s reason=%s counted=%s sql_started=%s",
             ctx.identity.turn_id,
             hashlib.sha256(call_id.encode()).hexdigest()[:16],
             contract.target_id,

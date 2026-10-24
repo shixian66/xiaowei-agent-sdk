@@ -121,7 +121,7 @@ def evidence_in(call: ModelCall) -> list[str]:
             envelope = json.loads(item["output"])
         except ValueError:
             continue
-        if envelope.get("status") == "rejected":
+        if envelope.get("status") in {"rejected", "invalid_sql"}:
             assert "evidence_id" not in envelope  # R7 fixed feedback is not a success result.
             continue
         found.append(envelope["evidence_id"])
