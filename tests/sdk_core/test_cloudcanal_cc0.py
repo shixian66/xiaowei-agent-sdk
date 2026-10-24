@@ -222,12 +222,19 @@ def test_common_link_fragments_preserve_names_and_shape(tmp_path):
         assert BUSINESS not in result.stdout + result.stderr
 
 
-@pytest.mark.parametrize("secret", [TOKEN, 'escaped-"token-0123'])
-def test_secret_in_metadata_fails_without_exporting_report(secret):
+@pytest.mark.parametrize(
+    ("secret", "reflected_name"),
+    [
+        (TOKEN, TOKEN),
+        ('escaped-"token-0123', 'escaped-"token-0123'),
+        ("synthetic/secret-1234", "synthetic%2Fsecret-1234"),
+    ],
+)
+def test_secret_in_metadata_fails_without_exporting_report(secret, reflected_name):
     def build(recorder):
         server = MCPServer("cc0-secret-fixture")
 
-        @server.tool(name=f"reflected_{secret}")
+        @server.tool(name=f"reflected_{reflected_name}")
         def reflected() -> str:
             recorder.tool_calls.append(("should-not-run", {}))
             return "unused"

@@ -338,7 +338,11 @@ def main(argv: list[str] | None = None) -> int:
         # 短片段常是 mcp/json 等协议词，不据此拒绝报告；仍须人工复核。
         secret_parts.update(
             text
-            for part in (*parsed.path.split("/"), *(v for _, v in parse_qsl(parsed.query)))
+            for part in (
+                *parsed.path.split("/"),
+                *(pair.partition("=")[2] for pair in parsed.query.split("&")),
+                *(v for _, v in parse_qsl(parsed.query)),
+            )
             for text in (part, unquote(part))
             if len(text) >= 8
         )
