@@ -259,6 +259,9 @@ _MESSAGES: Mapping[TurnReason, str] = {
     "busy": "当前处理中的请求过多，本轮未执行，请稍后再试",
     "scope_rejected": "本轮工具范围超出模型数据策略，未执行",
     "storage_unavailable": "存储未就绪，本轮未执行",
+    "session_unavailable": "当前会话暂不可用，本轮未完成，请稍后重试",
+    "content_rejected": "本轮内容未通过检查，未能完成，请核对后重试",
+    "storage_failed": "本轮存储操作失败，未能完成交付，请稍后核对状态",
     "answer_rejected": "回答未通过证据校验，本轮未保存也未发送",
     "query_unfinished": "本轮有已开始的查询没有结果也没有失败记录，未保存也未发送；不会自动重试",
     "scope_unverifiable": "暂时无法确认数据当前权限，本轮未交付；会话保留，请稍后重试",
@@ -750,7 +753,7 @@ class Application:
         # 恢复只沿用暂停时的 RunState；有图会话不提供执行请求，因此不会有含原图的检查点。
         saved_images = (
             await self.images.load(ctx.identity)
-            if self.images is not None and native is None
+            if self.images is not None and native is None and not ctx.automatic
             else []
         )
         if saved_images and not self._model.profile.image_input_enabled:
@@ -802,7 +805,7 @@ class Application:
             # 根据已获准的模型历史收尾。两次运行都受外层整轮期限约束，工具与证据不会重放。
             # “可能不完整”由代码据可信账本说明（``TurnAnswer.limit_reached``），不写进模型文字。
             runs = self._governance.turn_runs(ctx.identity)
-            if not runs.produced and not runs.monitoring_failures:
+            if not runs.produced and not runs.monitoring_failures and not runs.inspection_failures:
                 return None
             self._governance.note_limit_rescue(ctx.identity)
             final_agent = agent.clone(
@@ -918,6 +921,7 @@ class Application:
         # 不交模型改写。v4 选择所需事实，不补交未引用结果；全部可见证据仍保存并复核。
         queried = self._query_evidence(runs)
         failed_queries = sum(f.tool_id in self._queries for f in runs.monitoring_failures)
+        failed_queries += sum(f.counted for f in runs.inspection_failures)
         rejected_proposals = sum(t in self._queries for t in runs.proposal_rejections)
         if len(queried) + failed_queries + rejected_proposals != sum(
             t in self._queries for t in runs.started
@@ -932,6 +936,7 @@ class Application:
             answer=answer,
             context_evidence=tuple(dict.fromkeys(context)),
             monitoring_failures=runs.monitoring_failures,
+            inspection_failures=runs.inspection_failures,
             run_turn_id=ctx.identity.turn_id,
             limit_reached=runs.limit_rescue_started,
         )
@@ -944,6 +949,7 @@ class Application:
         snapshot = await session.commit_validated(
             validated.context_evidence,
             monitoring_failures=validated.monitoring_failures,
+            inspection_failures=validated.inspection_failures,
             limit_reached=validated.limit_reached,
         )
         _stage(turn, "committed", started)
@@ -1211,6 +1217,7 @@ class Application:
             material_only=True,
             context_evidence=context_evidence,
             monitoring_failures=runs.monitoring_failures,
+            inspection_failures=runs.inspection_failures,
             run_turn_id=ctx.identity.turn_id,
         )
         checked_material = await self._evidence.validate_answer(material, ctx)
@@ -1343,6 +1350,13 @@ class Application:
                         await store.reject_native(action, "action_expired")
                         raise ResumeRejectedError("action_expired")
                     ledger = TypeAdapter(TurnLedger).validate_json(native.ledger, strict=True)
+                    try:
+                        await self._evidence.validate_inspection_sources(
+                            tuple(f.target_id for f in ledger.runs.inspection_failures), ctx
+                        )
+                    except AnswerRejectedError:
+                        await store.reject_native(action, "action_requester_invalid")
+                        raise ResumeRejectedError("action_requester_invalid") from None
                     await self.actions.verify_material(action, ctx, ledger.runs)
                     if ledger.used + (2 if approve else 1) > ctx.budget.max_tool_calls:
                         raise ResumeRejectedError("action_not_approvable")

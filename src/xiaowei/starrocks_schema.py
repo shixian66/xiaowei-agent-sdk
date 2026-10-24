@@ -32,6 +32,7 @@ import asyncio
 import logging
 import secrets
 from collections.abc import Callable, Collection, Mapping, Sequence
+from contextvars import Context
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from typing import Final
@@ -146,7 +147,9 @@ class SchemaCache:
         """刷新一次并返回是否成功；并发调用共享同一次刷新。失败只记录原因代码，不抛出。"""
         task = self._inflight
         if task is None or task.done():
-            task = asyncio.create_task(self._refresh(), name=f"xiaowei-schema-{self.target_id}")
+            task = asyncio.create_task(
+                self._refresh(), name=f"xiaowei-schema-{self.target_id}", context=Context()
+            )
             self._inflight = task
         return await asyncio.shield(task)
 
@@ -228,13 +231,19 @@ class SchemaCache:
                 raise _SchemaContractError
             ids[(_text(row["db"]), _text(row["name"]))] = table_id
         candidates: dict[tuple[str, str], ObjectInfo] = {}
+        unsafe = no_columns = conflicting_columns = 0
         for row in rows.objects:
             database, name = _text(row["db"]), _text(row["name"])
             key = (database, name)
             if not (safe_identifier(database) and safe_identifier(name)):
+                unsafe += 1
                 continue
             names = [c.name.casefold() for c in columns.get(key, ())]
-            if not names or len(set(names)) != len(names):  # 无列，或列名只差大小写（无法唯一引用）
+            if not names:
+                no_columns += 1
+                continue
+            if len(set(names)) != len(names):
+                conflicting_columns += 1
                 continue
             candidates[key] = ObjectInfo(
                 database=database,
@@ -245,6 +254,17 @@ class SchemaCache:
                 table_id=ids.get(key),
                 columns=tuple(columns[key]),
             )
+        logger.info(
+            "结构候选统计：target=%s object_rows=%d column_objects=%d "
+            "dropped_no_columns=%d dropped_unsafe=%d dropped_column_conflict=%d candidates=%d",
+            self.target_id,
+            len(rows.objects),
+            len(columns),
+            no_columns,
+            unsafe,
+            conflicting_columns,
+            len(candidates),
+        )
         return candidates
 
     def _query_policy(self, readable: Mapping[tuple[str, str], ObjectInfo]) -> QueryPolicy:

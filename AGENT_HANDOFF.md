@@ -1,6 +1,6 @@
 # 小维：当前交接
 
-> 更新：2026-10-24，Asia/Shanghai。本文维护当前代码状态、有效证据、缺口与下一项工作。产品契约见 [ARCHITECTURE.md](ARCHITECTURE.md)，阶段与退出条件见 [DEVELOPMENT_PLAN.md](DEVELOPMENT_PLAN.md)，使用与运维见 [README.md](README.md) 和 [OPERATIONS.md](deploy/OPERATIONS.md)。
+> 更新：2026-10-23，Asia/Shanghai。本文维护当前代码状态、有效证据、缺口与下一项工作。产品契约见 [ARCHITECTURE.md](ARCHITECTURE.md)，阶段与退出条件见 [DEVELOPMENT_PLAN.md](DEVELOPMENT_PLAN.md)，使用与运维见 [README.md](README.md) 和 [OPERATIONS.md](deploy/OPERATIONS.md)。
 
 **OpenAI Agents SDK 负责 Agent Loop；小维负责权限、受治理工具执行、证据真实性和数据边界。**
 
@@ -9,14 +9,14 @@
 | 项目 | 已核对事实 |
 | --- | --- |
 | 仓库 | [shixian66/xiaowei-agent-sdk](https://github.com/shixian66/xiaowei-agent-sdk) |
-| 产品代码基线 | 已通过远端 main 与本地引用核对 `1de7b79d61e0c934c5235a522dceb96ccd28aaf5`（含 #132）；当前文档及独立取证脚本分支 `codex/cloudcanal-phase1-plan`，隔离工作树 `/Users/kloenguyen/.codex/worktrees/cloudcanal-phase1-plan/agent-SDK`；桌面原目录及其他任务修改保留 |
+| 产品代码基线 | 已 fetch 核对 `main@3aad626b42fc4ef2f37cafe342cf1826d453ca30`（含 #133），合入当前计划与独立 CC0 脚本分支 `codex/cloudcanal-phase1-plan`；使用隔离工作树，桌面原目录及其他任务修改保留 |
 | 源码与检查 | 当前源码仅保留 `src/xiaowei`；旧工程及专属测试、Compose、迁移入口、`compose-smoke` CI 和 Alembic 依赖已移除。保留产品测试、公共检查与旧回答兼容路径；旧工程历史可从 Git 查回 |
-| 当前存储与回答 | 应用 schema v15 不变；C 扩展已有 job、逐次 run/通知关联；014 已发布不改，015 显式升级。当前本地新回答保存 v4，旧 v2/v3/Legacy 与已绑定交付保持原语义，SDK 表不改 |
+| 当前存储与回答 | 应用 schema v15 不变；安全巡检可信失败元数据沿已有 JSON 保存，不改表或迁移。当前新回答保存 v4，旧 v2/v3/Legacy 与已绑定交付保持原语义，SDK 表不改 |
 | 锁定依赖 | SDK `0.22.3`、Lark Channel `1.4.0`、MCP `2.2.0`、sqlglot `30.17.0`、`nh3 0.3.7`、`tinycss2 1.5.1`、Pillow `13.0.0`、certifi `2026.10.19`（后两项为严格审计发现的既有漏洞定向升级） |
 | 正式入口 | `xiaowei serve`、`config check`、`model check`、`storage init/upgrade/cleanup`、`requests resend`；命令与环境准备以 README 为准 |
-| 最近有记录的公司部署 | 用户本次回报 fat 镜像 `729f960d`，一小时全窗 29,232 / ERR 6 / 多语句 1，与 DBA 回查一致；未独立核验服务器。本次未部署 |
-| 当前验收结论 | CloudCanal 尚未接入；`118a31111bb996daa12693f703e892dc74e7ec23` 的计划 v1.5 与 CC0 脚本已复审通过。当前 v1.7 补充 CC1 的 MCP 超限验收和实现约束，不代表产品已支持该路径 |
-| 当前任务授权 | 2026-10-24：仅修订 CC1 计划及相关文档；不改产品代码、测试或 CC0 脚本，不调用真实服务，不合并、不部署 |
+| 最近有记录的公司部署 | 用户回报 `main@1de7b79`（前一版 `729f960d`）；此前 fat 一小时全窗 29,232 / ERR 6 / 多语句 1 与 DBA 回查一致；未独立核验服务器。本次未部署 |
+| 当前验收结论 | 安全巡检 A/B/C 已随 #133 合入，离线与 CI 通过，真实模型、公司源及渠道实收仍待验收；CloudCanal v1.7 计划已审查通过，等待 §4.1 现场确认和 CC0 实测结果；CC1 尚未授权开发。其他既有验收缺口见 §5，D 暂停且未实现 |
+| 当前任务授权 | 2026-10-24：同步最新 origin/main、解决文档冲突、运行指定检查、推送并创建 PR；不自行合并 PR，不开发 CC1，不调用真实服务，不打包、不部署 |
 
 原工作目录的 ARCHITECTURE 差异与未跟踪计划/公司配置保留，未复制到本工作树；本次未读取公司配置凭据。旧监控和回答修复记录保留为注明版本的证据，不作为本轮输入或展示范围扩展授权。
 
@@ -33,51 +33,35 @@
 - 进度的单聊/群聊差异延迟、仅真实变化更新、正常收尾及异常陈旧已由用户确认，详见[进度契约](ARCHITECTURE.md#progress-observation)；P1 已有离线实现，当前证据见计划 §7。普通消息的区域身份及正文/明细分工见[普通消息契约](ARCHITECTURE.md#ordinary-feishu-expression)，不能由 HTML/MD 报告完成推定达标。
 - 监控写仅限已批准动作，使用 SDK 原生审批暂停/恢复及既有 Action 治理；生产开放仍须满足对应源和群审批门槛。Grafana 数据源密码私聊命令尚未实现，目前由管理员在 Grafana UI 填写。见 [监控边界](ARCHITECTURE.md#monitoring-mcp)。
 - 内网 Web 无登录、访问者共用操作者权限；目标账号、网络、Grafana 插件/写端及数据源更新竞争窗口等已接受取舍按架构执行。
-- 通知及定时任务的方向与待审权限增量见 [ARCHITECTURE](ARCHITECTURE.md#scheduled-agent-tasks)：多个目的群不扩大操作入口，任务独立于原聊天，创建及每次执行复核权限，生产写不能继承周期批准。A/B/C 与自建代理适配已合入主线；群输入已通过独立复审，S1 展示已完成本地实现、离线验证及独立复审，用户授权 PR 集成，D 暂停且未实现。
+- 通知及定时任务的方向与待审权限增量见 [ARCHITECTURE](ARCHITECTURE.md#scheduled-agent-tasks)：多个目的群不扩大操作入口，任务独立于原聊天，创建及每次执行复核权限，生产写不能继承周期批准。旧通知/定时初版及自建代理适配已合入主线；群输入已通过独立复审，S1 展示已完成本地实现、离线验证及独立复审，用户授权 PR 集成，D 暂停且未实现。
 
 ## 3. 当前计划与下一项工作
 
 <a id="cloudcanal-phase1-status"></a>
 
-### 当前：CloudCanal 一期设计与计划
+### 当前：CloudCanal 一期计划与 CC0 探查
 
-[实施计划 v1.7](docs/superpowers/plans/2026-10-23-cloudcanal-phase1.md)固定于 **`ac01bb12c1fa1ba4563e06c5e3ce9c518a58f6c6`**，基线为 `60bf9e408e92efdd5a94913a98a00ae766675fd7`。改动位置：CC1 的 P1/P2、对应 L4 与 §4.4 源码前提；[阶段索引](DEVELOPMENT_PLAN.md#8-p4-监控增量与之后的扩展)仅同步版本。[ARCHITECTURE](ARCHITECTURE.md#cloudcanal-mcp)、C1—C5、Agent 失败契约及 D1 原文未改；本轮没有实现新增的验收要求。
+[实施计划 v1.7](docs/superpowers/plans/2026-10-23-cloudcanal-phase1.md)已审查通过，等待[§4.1 现场确认](docs/superpowers/plans/2026-10-23-cloudcanal-phase1.md#41-连接与运行前置)和 CC0 实测结果；CC1 尚未授权开发。已审计划内容固定于 `21c6ef75a36bbc3404efcffffa8e663bae475f8b`，本次同步不改 C1—C5、D1 或 P1/P2。
 
-[CC0 脚本](scripts/cloudcanal_cc0.py)和 [README 用法](README.md#cloudcanal-cc0)保持已审基线；疑似秘密检测的误拒/短片段漏检边界不变。本次不重跑脚本或产品回归，不把旧证据计为本轮功能验证。
+[CC0 脚本](scripts/cloudcanal_cc0.py)仅供用户在公司独立探查，未接入产品，使用方法见 [README](README.md#cloudcanal-cc0)；脚本及测试保持已审内容。本 PR 只交付计划、文档和探查脚本，不代表 CloudCanal 产品能力已实现，也不授予 CC1 开发、真实连接或部署权限。
 
-已沿本地适配器、产品 MCP 和锁定 MCP 2.2.0 源码核对：Alertmanager 超限修正不走 MCP；JSON/SSE 会转写或丢失超限异常，产品缺少本次调用的可信标记。SSE 事件编号触发续接是条件风险，官方 Prometheus/Grafana MCP 是否发送编号及产品是否实际误报成功仍未知；本轮未做可选的产品 loopback 风险复现，不将其登记为已复现缺陷。P1 要求的同会话 JSON/SSE 修正及禁止续接等测试留待开发后执行。
+本次同步检查：文档一致性 2 项与 CC0 临时 loopback MCP 测试 16 项合计 **18 passed / 16.13s**；`ruff check --no-cache .` 和 `git diff --check` 通过。ARCHITECTURE 保留主线安全巡检契约与 CloudCanal/MCP 接入方向，仅去除一处重复首句；相对 main 的差异仅为计划、文档和独立脚本/测试，没有产品源码或依赖变更。未扩大全仓测试，未调用真实模型或公司服务。
 
-本次仅改一期计划、阶段索引与本文三份文档；产品源码、脚本、测试、依赖及锁文件均未改动，不访问真实模型、公司服务或数据库。
+下一项：用户完成 §4.1 现场确认，运行 CC0 并带回打码结果；按真实工具契约确认 CC1 开发授权。MCP 超限标记、同会话修正及禁止续接仍是 CC1 待实现的验收要求，当前产品是否会在带事件编号的 SSE 超限后续接成功尚未复现；官方 Prometheus/Grafana 是否发送事件编号仍未知。
 
-已知既有说明问题（N5）：`config.py:152` 称群 tools 仅 StarRocks，实际 `runtime.py:432` 接纳所有已登记工具；本次不改源码，在 CC1 启用 CloudCanal 群配置时更正注释并核对说明，执行授权沿用现状。
+已知既有说明问题（N5）：`config.py:152` 称群 tools 仅 StarRocks，实际 `runtime.py:432` 接纳所有已登记工具；在 CC1 启用 CloudCanal 群配置时更正注释并核对说明，执行授权沿用现状。
 
-本次检查：文档一致性 **2 passed**，相关链接/锚点与 `git diff --check` 通过；与批准基线逐字比较 C1—C5、共同变体、Agent 失败契约及 D1 原文均相同。既有 CC0 证据保留：脚本 **16 passed，16.42 秒**，内部独立复审的三项秘密输出回归 **3 passed，3.06 秒**，以及 Ruff/mypy、传输和输出边界检查；这些均为已审脚本的历史证据，本次未重跑。
+### 安全巡检 A/B/C 修复（PR #133，已合入）
 
-下一项：按[计划 §4.1](docs/superpowers/plans/2026-10-23-cloudcanal-phase1.md#41-连接与运行前置)取得公司 CC0 的真实工具与数据契约，再确认 CC1 开发授权；通用机制的边界、超限例外复查及 P1/P2 按 CC1 处理。本次只记录要求，不是 CC1 开工或部署授权。
+[PR #133](https://github.com/shixian66/xiaowei-agent-sdk/pull/133) 已合入 `main@3aad626b42fc4ef2f37cafe342cf1826d453ca30`，已审候选为 `e56eb24fc8d609134a5d0670ebb970e01ec70f9a`。最终状态：
 
-### 安全巡检报告呈现（PR #132，合入前证据）
+- [A 首跑/失败通知](docs/superpowers/plans/2026-10-23-scheduled-agent-first-run-recovery.md)：可信 automatic 文本任务跳过用户图片加载；失败沿当前授权与逐次账本尝试一次固定未完成通知，保留真实失败状态，超时、取消、unknown 不追加 POST。
+- [B 部分失败可信交付](docs/superpowers/plans/2026-10-23-security-inspection-incomplete-results.md)：仅安全只读工具的已分类源失败交回 Agent，其他明确请求的目标可继续，成功复用原 Evidence；失败来源在 Session 回放、历史交付及 SDK 审批恢复前复核权限，未完成状态由代码如实呈现。缺审计源时复用获准刷新；通知去重和安全失败日志已修复。漏调用目标检测仍延期，无新增必查字段、成功账本、表或 Evidence 版本。
+- [C 纯文本通知](docs/superpowers/plans/2026-10-23-security-plain-notification.md)：保留范围、覆盖、检查计数及必要提示，不逐行列样本；模型自主概括，Web、卡片、文件和历史 facts 保留明细，窗口及采集时间使用证据审计时区。
 
-#132 已合入主线 `1de7b79`；以下保留原候选的分版本证据，旧 PR 授权不作为 CloudCanal 的实施授权。最终集成记录见 [PR #132](https://github.com/shixian66/xiaowei-agent-sdk/pull/132)。
+上述已审候选的有效证据：本地完整默认回归 **5114 passed、235 skipped、98 deselected、5 warnings / 1691.67s**；[CI 39989625721](https://github.com/shixian66/xiaowei-agent-sdk/actions/runs/39989625721) **9/9 job 通过**，其中 integration **5030 passed**、p3-release **84 passed**。Ruff、mypy、文档及 diff 检查通过；展示代码版本 `2c8e90d` 的真实 Chrome brief、本地时间和历史不重取用例通过，该展示代码随后未变。这些是 #133 的既有证据，本次 CloudCanal 同步不重跑其完整套件。
 
-[批准计划](docs/superpowers/plans/2026-10-23-security-inspection-report-presentation.md)原 blob 已原字节保存于 `3893ed823a914d01c9ab7e6c6b1b5f68185f4a56`。用户已确认 Claude 对 Web B1/B2 修复的复审通过，并授权 PR #132 与合并；原获批 HEAD `44071d4d1e5bff04077ac285332a221c8a5d25ef` 的首轮 CI 暴露通用纯文本回归，当前修复源码/测试固定于 `d1f8d82ee184c19731e10d67e21fad556b9bfcf6`，仅对该增量独立复核通过，最终 CI 待验证。范围和长期契约见 [ARCHITECTURE §6–§7](ARCHITECTURE.md#6-只读查询保护)，本文只记录状态与证据。
-
-已实现水位置空、字段语义说明、共用原值恢复与轻量业务展示、巡检中文计数及样本映射、Web 即时 presentation、飞书/纯文本/MD/HTML 接线与短 Skill 的结论先行指导。保留 SDK Loop、检测和取数、权限、Evidence/Session/投影版本、已有容量与绑定恢复机制；未新增依赖、模型 schema、拒绝条件或固定调查顺序。
-
-Web B1/B2 修复的既有离线证据（对应 `4d34f33`；本次 CI 修复证据另列）：
-
-- `test_web.py`、`test_presentation_v4.py`：**91 passed，13.61 秒**。API 精确断言普通字符串、空串、NULL、缺失、大整数及嵌套值；日志 `/tmp/xw-security-web-review-regression.log`。
-- 整个 `test_web_browser.py -m browser`：**18 passed，24.01 秒**，含两个巡检场景及加强后的通用 v4 用例。真 Uvicorn/Chrome 验证展开技术区后多行 SQL 原文、游标/限额/耗时独立可读，表格日期/中文字符串不加外层引号，空值标记保持；日志 `/tmp/xw-security-web-review-browsers.log`。
-- `ruff check --no-cache src/xiaowei tests/sdk_core/test_web.py tests/sdk_core/test_web_browser.py tests/sdk_core/test_presentation_v4.py`、`mypy src/xiaowei`（39 源文件，缓存移至 `/tmp`）、受影响文档检查（**2 passed**）及 `git diff --check` 通过。无新依赖或锁文件变化。
-- 新 API 用例和加强后的浏览器用例先分别失败，日志 `/tmp/xw-security-web-review-unit-red.log`、`/tmp/xw-security-web-review-browser-red.log`；B1 修复后 SQL 断言通过，浏览器继续停在 B2 外层引号差异，最终两项回归均通过。没有放宽断言或生产投影。
-- 前版 `a936a5e` 的计划相关测试 **311 passed，29.32 秒** 保留为该版本证据（日志 `/tmp/xw-security-report-final-regression.log`），含 S1–S5、拒绝/撤权、统计、容量、文件和历史重发。本次按实际 Web 差异收窄重跑范围，不将这 311 项写成最终 HEAD 的新运行，也未跑本地全量。必要的当前权限/依赖 I/O 保留，不能以总连接数不变作验收条件。
-
-Claude 确认巡检覆盖/计数、历史 brief 和文件分片等路径无问题，原 Web 阻断为 **B1：presentation 早退丢失独立 SQL 等技术字段；B2：共用卡片格式化让 Web 字符串多出外层引号**。B1 复用已有获准 metadata 与 technicalKeys；B2 采用推荐 A 恢复 Web 标量显示。该版本已获用户复审通过，原内部修复的历史 brief/样本分片保持。
-
-**PR #132 首次 CI 与修复：** [运行 39939600203](https://github.com/shixian66/xiaowei-agent-sdk/actions/runs/39939600203) 的其他 8 项通过，integration 为 **12 failed、4939 passed、235 skipped、98 deselected、5 warnings，1446.85 秒**，未合并。失败均在本地原断言复现（12 failed / 6.50 秒，`/tmp/xw-security-report-ci-repro-red.log`）：通用 `business_text` 错用短说明、把普通 Webhook 字符串套上卡片引号、未转义字段名控制字符。本次仅恢复原载体契约，保留当前渠道嵌套值和巡检映射，不改权限或断言；新增两个纯函数反例先 RED，原 12 项加呈现回归 **58 passed，7.59 秒**（`/tmp/xw-security-report-ci-repair-green.log`）。补跑诊断、runtime、慢查询、StarRocks 工具、Webhook 通知/代理、卡片、呈现、交付、巡检、Web API 与报告的 12 个相关文件，**634 passed，160.56 秒**（`/tmp/xw-security-report-ci-repair-regression.log`）；Ruff/mypy 39 文件及 diff 检查通过，未跑本地全仓。
-
-独立复核只覆盖 `44071d4..d1f8d82`，**0 Critical / 0 Important / 0 Minor**；只读探针确认巡检 full/brief/历史/不完整 × 两种文本模式 8 组与修复前一致，普通值与说明优先级 20 组恢复原主线语义，嵌套值、字段名、动作及摘要/审批命令过滤保留。未把自查或首轮失败 CI 当作最终通过。
-
-后续实战缺口：真实 Agent 的自主选色/结论先行/原因解读、公司 3.5.14 审计源与真实飞书呈现仍待公司验收，截图项见[公司清单 §4](docs/starrocks-security-company-checklist.md#4-报告呈现验收另获部署授权后执行)。#132 的合入不关闭旧 A0/A3，CloudCanal 本轮不处理这些验收或部署。
+公司验收见[公司清单 §5–§6](docs/starrocks-security-company-checklist.md#5-ab-故障恢复验收另获部署授权后执行)和 [C 计划 §7](docs/superpowers/plans/2026-10-23-security-plain-notification.md#7-沿用的业务验收样例与公司缺口)。A0/A3、真实 3.5.14 语义/容量、真实模型自主取证/归因/概括、渠道实收仍开放；代理省略 openUrl 行为未知，必填协议保持。此前报告呈现已随 [PR #132](https://github.com/shixian66/xiaowei-agent-sdk/pull/132) 合入，范围与公司验收见[原报告计划](docs/superpowers/plans/2026-10-23-security-inspection-report-presentation.md)。本次不打包、不部署，也不以离线或 CI 通过关闭这些验收项。
 
 ### CI 小范围优化（PR #131）
 

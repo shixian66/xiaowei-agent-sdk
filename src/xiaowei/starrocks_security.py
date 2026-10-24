@@ -15,6 +15,23 @@ from sqlglot.errors import ParseError, TokenError
 from xiaowei.starrocks import Scalar, SecurityAuditResult
 
 SECURITY_TOOL: Final = "local/inspect_audit_security"
+SECURITY_FAILURE_REASONS: Final = {
+    "object_not_readable": "已刷新复核，当前可读结构仍缺审计源",
+    "schema_unavailable": "结构暂不可用或刷新失败，未能复核审计源",
+    "unsupported": "审计源缺少安全巡检必需字段",
+    "busy": "审计连接槽位繁忙，未发出审计 SQL",
+    "budget_exhausted": "本轮工具预算已用完",
+    "connect_failed": "审计源连接失败",
+    "auth_failed": "审计源身份认证失败",
+    "session_setup_failed": "只读采集会话设置失败",
+    "permission_denied": "审计源读取权限被拒绝",
+    "object_missing": "读取时审计源对象缺失",
+    "object_unreadable": "读取时审计源对象不可读",
+    "query_failed": "审计读取失败，未取得可交付巡检结果",
+    "server_timeout": "服务端因超时终止审计读取",
+    "timeout": "读取或分析超时，未取得可交付巡检结果",
+    "connection_lost": "连接中断，读取结果未知",
+}
 SIGNALS: Final = ("boolean_probe", "stacked_statements", "delay_call", "high_risk_operation")
 OPERATIONS: Final = (
     "grant", "revoke", "account", "password", "drop", "truncate", "export",

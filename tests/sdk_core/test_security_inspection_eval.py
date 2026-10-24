@@ -164,7 +164,7 @@ async def test_s5_rejection_has_no_collection_io_or_success_evidence(
         assert result.answer.awaiting_user
         assert drv.attempts == 0 and await env.evidence_rows() == 0
         output = " ".join(tool_outputs(env.scripts.calls[message][1]))
-        assert "rejected" in output
+        assert ("incomplete" if case == "missing_column" else "rejected") in output
 
 
 async def test_explicit_diagnose_entry_rejects_security_before_collection(

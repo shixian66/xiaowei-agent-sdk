@@ -91,6 +91,7 @@ def _preview(
             + [
                 n
                 for n in (
+                    delivery.inspection_notice,
                     delivery.monitoring_notice,
                     delivery.session_notice,
                     delivery.notification_notice,

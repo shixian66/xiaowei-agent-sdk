@@ -60,6 +60,7 @@ from xiaowei.models import (
     LegacyAnswer,
     MonitoringFailure,
     Owner,
+    SecurityInspectionFailure,
     SessionSnapshot,
     TurnAnswer,
 )
@@ -378,6 +379,7 @@ class RequestRecord:
     failure_code: FailureCode | None
     created_at: datetime
     expires_at: datetime
+    inspection_failures: tuple[SecurityInspectionFailure, ...] = ()
     reply_chat_id: str | None = None
     reply_message_id: str | None = None
     session_state: SessionSnapshot | None = None
@@ -833,6 +835,7 @@ class ChannelStore:
             answer_version=turn.answer_version,
             context_evidence=turn.context_evidence,
             monitoring_failures=turn.monitoring_failures,
+            inspection_failures=turn.inspection_failures,
             session_state=turn.session_state,
             run_turn_id=turn.run_turn_id,
             limit_reached=turn.limit_reached,
@@ -1804,6 +1807,7 @@ class ChannelStore:
             answer=pause.material.answer,
             context_evidence=pause.material.context_evidence,
             monitoring_failures=pause.material.monitoring_failures,
+            inspection_failures=pause.material.inspection_failures,
             run_turn_id=pause.context.identity.turn_id,
             limit_reached=pause.material.limit_reached,
             material_only=pause.material.material_only,
@@ -2014,6 +2018,7 @@ class ChannelStore:
         context, run_turn_id, limit_reached, material_only = None, None, False, False
         answer_version: Literal[2, 3, 4] | None = None
         monitoring_failures: tuple[MonitoringFailure, ...] = ()
+        inspection_failures: tuple[SecurityInspectionFailure, ...] = ()
         if row["answer"] is not None:
             raw = row["answer"]
             if len(raw.encode()) > self._max_answer_bytes:
@@ -2023,6 +2028,7 @@ class ChannelStore:
                 answer, context = saved.answer, saved.context_evidence
                 answer_version = saved.answer_version
                 monitoring_failures, run_turn_id = saved.monitoring_failures, saved.run_turn_id
+                inspection_failures = saved.inspection_failures
                 limit_reached, material_only = saved.limit_reached, saved.material_only
             else:
                 answer = saved
@@ -2044,6 +2050,7 @@ class ChannelStore:
             answer_version=answer_version,
             context_evidence=context,
             monitoring_failures=monitoring_failures,
+            inspection_failures=inspection_failures,
             failure_code=row["failure_code"],
             created_at=row["created_at"],
             expires_at=row["expires_at"],

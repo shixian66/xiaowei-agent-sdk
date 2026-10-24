@@ -964,6 +964,55 @@ class ScheduledTasks:
                 await self._stop_agent(job, reason)
             raise TurnError("scope_rejected")
 
+    async def _send_agent_failure(
+        self,
+        job: Mapping[str, Any],
+        run: Mapping[str, Any],
+        ctx: RunContext,
+        reason: str,
+        description: str,
+    ) -> None:
+        """执行失败的一次固定状态发送；仍经当前定义与原通知账本。"""
+        async with asyncio.timeout(10):
+            with scope_checks():
+                current = await self._current_definition(job)
+                targets = ", ".join(
+                    sorted(AgentSpec.model_validate_json(job["agent_spec"]).targets)
+                )
+                scheduled = (
+                    run["scheduled_at"].astimezone(ZoneInfo(self.config.timezone)).isoformat()
+                )
+                content = (
+                    f"⚪ 本次定时巡检未完成。任务〈{job['job_id']}〉；任务获准目标：{targets}；"
+                    f"计划时刻：{scheduled}；实际查询时间窗：未取得；"
+                    f"原因：{reason}（{description}）。请核对后单独补查。"
+                )
+                sending = current.model_copy(
+                    update={
+                        "identity": ctx.identity,
+                        "automatic": False,
+                        "tool_scope": frozenset({NOTIFY}),
+                        "target_scope": frozenset({"notifications"}),
+                        "content_expires_at": self._agent_deadline(job),
+                        "evidence_ids": (),
+                        "budget": current.budget.model_copy(update={"max_tool_calls": 1}),
+                    }
+                )
+                outcome = await self.notifications.send_fixed(
+                    sending,
+                    job["bot_alias"],
+                    content,
+                    partial(self._claim_agent_send, job, run["run_id"]),
+                    partial(self._settle_agent_send, run["run_id"]),
+                )
+                logger.info(
+                    "scheduled_agent_failure_notice job=%s run=%s status=%s reason=%s",
+                    job["job_id"],
+                    run["run_id"],
+                    outcome.status,
+                    outcome.reason,
+                )
+
     async def _run_agent(self, job: Mapping[str, Any]) -> None:
         from xiaowei.app import PausedTurn, TurnError
 
@@ -1038,6 +1087,7 @@ class ScheduledTasks:
             )
             if not await self._start_agent_run(job, run):
                 return
+            stage = "prepare_tools"
             try:
                 with scope_checks():
                     async with asyncio.timeout(ctx.budget.timeout_seconds):
@@ -1047,9 +1097,11 @@ class ScheduledTasks:
                             ctx.target_scope,
                             timeout_seconds=ctx.budget.timeout_seconds,
                         )
+                        stage = "run_turn"
                         answer = await self.application.run_turn(ctx, job["text"])
                         if isinstance(answer, PausedTurn):
                             raise TurnError("scope_rejected")
+                        stage = "validate_delivery"
                         delivery = await self.governance.evidence.validate_answer(
                             answer,
                             ctx,
@@ -1057,13 +1109,14 @@ class ScheduledTasks:
                             recipient_targets=bot.receive_targets | {"notifications"},
                         )
                         incomplete = (
-                            isinstance(answer.answer, AgentAnswer) and answer.answer.awaiting_user
-                        ) or answer.limit_reached
+                            (isinstance(answer.answer, AgentAnswer) and answer.answer.awaiting_user)
+                            or answer.limit_reached
+                            or bool(delivery.inspection_notice)
+                        )
+                        stage = "render"
                         content = _notification_text(delivery, "", include_remaining=True)
-                        if incomplete:
-                            content = (
-                                "本次任务未完成；以下为预算内已获得的结果或待澄清问题。\n" + content
-                            )
+                        if incomplete and not delivery.inspection_notice:
+                            content = "本次任务未完成；以下为已取得的结果或待澄清问题。\n" + content
                         if (
                             deadline is not None
                             and spec.interval_seconds
@@ -1093,6 +1146,7 @@ class ScheduledTasks:
                                 "budget": ctx.budget.model_copy(update={"max_tool_calls": 1}),
                             }
                         )
+                        stage = "send"
                         outcome = await self.notifications.send_fixed(
                             sending,
                             job["bot_alias"],
@@ -1112,6 +1166,7 @@ class ScheduledTasks:
                         else:
                             state = "failed" if incomplete else "completed"
                             reason = "incomplete" if incomplete else "execution_completed"
+                        stage = "settle"
                         await self._finish_agent(
                             job,
                             run["run_id"],
@@ -1119,9 +1174,43 @@ class ScheduledTasks:
                             reason,
                         )
             except BaseException as exc:
-                logger.error("定时Agent未完成：job=%s error=%s", job["job_id"], type(exc).__name__)
+                reason = (
+                    exc.reason
+                    if isinstance(exc, TurnError)
+                    else ("timeout" if isinstance(exc, TimeoutError) else "execution_failed")
+                )
+                logger.error(
+                    "定时Agent未完成：job=%s run=%s turn=%s stage=%s reason=%s error=%s "
+                    "tool_error=%s model_requests=%s",
+                    job["job_id"],
+                    run["run_id"],
+                    identity.turn_id,
+                    stage,
+                    reason,
+                    type(exc).__name__,
+                    exc.tool_error if isinstance(exc, TurnError) else "-",
+                    "0" if stage == "prepare_tools" else "-",
+                )
                 if not self.lock.readiness.ok:
                     raise
+                cancelled = isinstance(exc, asyncio.CancelledError)
+                if stage not in {"send", "settle"} and not isinstance(exc, asyncio.CancelledError):
+                    description = (
+                        str(TurnError(exc.reason))
+                        if isinstance(exc, TurnError)
+                        else (str(TurnError("timeout")) if reason == "timeout" else "任务执行失败")
+                    )
+                    try:
+                        await self._send_agent_failure(job, run, ctx, reason, description)
+                    except (Exception, asyncio.CancelledError) as notice_error:
+                        cancelled = cancelled or isinstance(notice_error, asyncio.CancelledError)
+                        logger.warning(
+                            "scheduled_agent_failure_notice job=%s run=%s "
+                            "reason=unconfirmed error=%s",
+                            job["job_id"],
+                            run["run_id"],
+                            type(notice_error).__name__,
+                        )
                 async with self.engine.begin() as conn:
                     await self._admit(conn)
                     await conn.execute(
@@ -1139,12 +1228,10 @@ class ScheduledTasks:
                     "unknown"
                     if isinstance(exc, asyncio.CancelledError)
                     else ("skipped" if unverified else "failed"),
-                    "authorization_unverified"
-                    if unverified
-                    else (exc.reason if isinstance(exc, TurnError) else "execution_failed"),
+                    "authorization_unverified" if unverified else reason,
                 )
-                if isinstance(exc, asyncio.CancelledError):
-                    raise
+                if cancelled:
+                    raise asyncio.CancelledError from None
             finally:
                 self.governance.end_turn(identity)
             if deadline is not None and self.clock() >= deadline:

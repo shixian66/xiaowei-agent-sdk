@@ -437,6 +437,41 @@ class SessionSnapshot(_Trusted):
         return self
 
 
+SecurityFailureReason = Literal[
+    "object_not_readable",
+    "schema_unavailable",
+    "unsupported",
+    "busy",
+    "budget_exhausted",
+    "connect_failed",
+    "auth_failed",
+    "session_setup_failed",
+    "permission_denied",
+    "object_missing",
+    "object_unreadable",
+    "query_failed",
+    "server_timeout",
+    "timeout",
+    "connection_lost",
+]
+
+
+class SecurityInspectionFailure(_Trusted):
+    """实际巡检调用的可信失败；没有成功事实、SQL 或异常正文。"""
+
+    tool_id: Literal["local/inspect_audit_security"] = "local/inspect_audit_security"
+    target_id: Label
+    call_id: Label
+    start: AwareDatetime
+    end: AwareDatetime
+    time_zone: str
+    reason: SecurityFailureReason
+    sql_started: bool
+    counted: bool
+    after_evidence_id: Label | None = None
+    """失败前最后一个成功 Evidence；恢复时复用原产生顺序，不另建成功账本。"""
+
+
 class TurnAnswer(_Trusted):
     """一轮的最终回答与本轮模型可见的证据；后者由可信代码记录，不来自模型。
 
@@ -453,6 +488,7 @@ class TurnAnswer(_Trusted):
     answer_version: Literal[2, 3, 4] | None = None
     context_evidence: tuple[Label, ...]
     monitoring_failures: tuple[MonitoringFailure, ...] = ()
+    inspection_failures: tuple[SecurityInspectionFailure, ...] = ()
     run_turn_id: Label | None = None
     limit_reached: bool = False
     """可信账本记录：步数用完后由无工具收尾生成本回答；交付时由代码说明可能不完整。"""
@@ -559,6 +595,8 @@ class Delivery(_Trusted):
     channel: Channel
     facts: tuple[DeliveryFact, ...] = ()
     blocks: tuple[DeliveryBlock, ...] = ()
+    inspection_notice: str | None = None
+    """可信巡检失败生成，置于模型正文前。"""
     monitoring_notice: str | None = None
     """系统按可信失败记录生成的未核实源说明；Web 与飞书均须展示。"""
     session_notice: str | None = None
@@ -607,6 +645,7 @@ class Delivery(_Trusted):
         return tuple(
             n
             for n in (
+                self.inspection_notice,
                 self.report_notice,
                 self.notification_notice,
                 self.limit_notice,
@@ -621,6 +660,7 @@ class Delivery(_Trusted):
         """是否含任何代码生成的内容：事实、动作、补全结果或系统说明。"""
         return bool(
             self.facts
+            or self.inspection_notice
             or self.notification_notice
             or self.monitoring_notice
             or self.session_notice

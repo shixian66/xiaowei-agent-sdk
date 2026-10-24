@@ -520,6 +520,13 @@ class EvidenceStore:
                 AnswerRejectCode.EVIDENCE_UNAVAILABLE, "目标机器人无权接收本轮可见数据"
             )
         by_id = {r.evidence_id: r for r in records}
+        inspection_notice = await self._inspection_failure_notice(
+            turn,
+            ctx,
+            by_id,
+            recipient_tools=recipient_tools,
+            recipient_targets=recipient_targets,
+        )
         views = {b.evidence_id: b.view for b in answer.blocks if isinstance(b, FactBlock)}
         turn_id = ctx.identity.turn_id
 
@@ -571,7 +578,7 @@ class EvidenceStore:
             if not isinstance(b, FactBlock) or b.evidence_id in body
         ]
         texts = [b.text for b in blocks if isinstance(b, DeliveryText)]
-        if not texts and not facts and monitoring_notice is None:
+        if not texts and not facts and monitoring_notice is None and inspection_notice is None:
             raise AnswerRejectedError(AnswerRejectCode.EMPTY_ANSWER, EMPTY_ANSWER)
         report_format = None if answer.awaiting_user else answer.report_format
         report_notice = None
@@ -593,7 +600,7 @@ class EvidenceStore:
         if turn.answer_version != 4:
             # 旧保存语义的 content；v4 不生成再丢弃一份完整 JSON/内部包装。
             shown = {e: _shown(by_id[e], channel, self._fact_note(by_id[e])) for e in shown_ids}
-            for notice in (report_notice, limit_notice, monitoring_notice):
+            for notice in (inspection_notice, report_notice, limit_notice, monitoring_notice):
                 if notice:
                     lines.append(notice)
             if actions:
@@ -616,6 +623,7 @@ class EvidenceStore:
             facts=tuple(facts),
             blocks=tuple(blocks),
             monitoring_notice=monitoring_notice,
+            inspection_notice=inspection_notice,
             report_notice=report_notice,
             limit_notice=limit_notice,
             requires_complete=any(f.requires_complete for f in facts),
@@ -690,6 +698,110 @@ class EvidenceStore:
                     update={"view": "brief", "summary": f"本次返回行数：{count}。"}
                 )
         return fact
+
+    async def validate_inspection_sources(
+        self,
+        targets: Sequence[str],
+        ctx: RunContext,
+        *,
+        recipient_tools: frozenset[str] | None = None,
+        recipient_targets: frozenset[str] | None = None,
+    ) -> None:
+        """失败信息同样有来源依赖；交付及 Session 回放共用当前授权边界。"""
+        from xiaowei.starrocks_security import SECURITY_TOOL
+
+        for target in dict.fromkeys(targets):
+            contract = self._catalog.contract(SECURITY_TOOL, target)
+            if contract is None or target not in ctx.target_scope:
+                raise AnswerRejectedError(
+                    AnswerRejectCode.EVIDENCE_UNAVAILABLE, "巡检失败来源当前不可读"
+                )
+            if (recipient_tools is not None and SECURITY_TOOL not in recipient_tools) or (
+                recipient_targets is not None and target not in recipient_targets
+            ):
+                raise RecipientRejectedError(
+                    AnswerRejectCode.EVIDENCE_UNAVAILABLE, "目标机器人无权接收巡检失败来源"
+                )
+            try:
+                authorized = await self._authorize(ctx.identity, target, SECURITY_TOOL)
+            except Exception:
+                raise EvidenceUnverifiableError from None
+            if authorized is not True:
+                raise AnswerRejectedError(
+                    AnswerRejectCode.EVIDENCE_UNAVAILABLE, "巡检失败来源当前不可读"
+                )
+
+    async def _inspection_failure_notice(
+        self,
+        turn: TurnAnswer,
+        ctx: RunContext,
+        records: Mapping[str, EvidenceRecord],
+        *,
+        recipient_tools: frozenset[str] | None,
+        recipient_targets: frozenset[str] | None,
+    ) -> str | None:
+        from xiaowei.feishu_render import audit_local_time
+        from xiaowei.starrocks_security import SECURITY_FAILURE_REASONS, SECURITY_TOOL
+
+        if not turn.inspection_failures:
+            return None
+        order = {e: i for i, e in enumerate(turn.context_evidence)}
+        run_turn = turn.run_turn_id or ctx.identity.turn_id
+        missing: list[str] = []
+        await self.validate_inspection_sources(
+            tuple(f.target_id for f in turn.inspection_failures),
+            ctx,
+            recipient_tools=recipient_tools,
+            recipient_targets=recipient_targets,
+        )
+        for failure in turn.inspection_failures:
+            after = order.get(failure.after_evidence_id, -1) if failure.after_evidence_id else -1
+            restored = False
+            for eid, record in records.items():
+                if (
+                    record.tool_id != SECURITY_TOOL
+                    or record.target_id != failure.target_id
+                    or record.identity.turn_id != run_turn
+                    or order[eid] <= after
+                ):
+                    continue
+                window = json.loads(record.projections[ctx.identity.channel])["data"].get("window")
+                if isinstance(window, dict):
+                    try:
+                        restored = (
+                            datetime.fromisoformat(window["start_time"]) == failure.start
+                            and datetime.fromisoformat(window["end_time"]) == failure.end
+                        )
+                    except (KeyError, TypeError, ValueError):
+                        pass
+                if restored:
+                    break
+            if restored:
+                continue
+            stage = (
+                "结果未知"
+                if failure.reason == "connection_lost"
+                else "未取得巡检结果"
+                if failure.reason == "timeout"
+                else "读取失败"
+                if failure.sql_started
+                else "未执行"
+            )
+            local = (
+                f"[{audit_local_time(failure.start, failure.time_zone)}, "
+                f"{audit_local_time(failure.end, failure.time_zone)})"
+            )
+            missing.append(
+                f"{failure.target_id} {local} {stage}（{failure.reason}："
+                f"{SECURITY_FAILURE_REASONS[failure.reason]}）"
+            )
+        if not missing:
+            return None
+        return (
+            "⚪ 本次巡检未全部完成："
+            + "；".join(dict.fromkeys(missing))
+            + "。未完成部分不代表无风险，请稍后单独补查同一时间窗。"
+        )
 
     async def _monitoring_failure_notice(self, turn: TurnAnswer, ctx: RunContext) -> str | None:
         """失败源也按当前目标/工具许可复核；任何撤权使整条历史回答不可交付。"""

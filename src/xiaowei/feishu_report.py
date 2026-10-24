@@ -13,6 +13,7 @@ from xiaowei.feishu_render import (
     business_fact,
     business_presentation,
     display_text,
+    fact_capture_time,
     fact_limit_notices,
     fact_scope,
     fold_details,
@@ -187,7 +188,7 @@ def _fact_sections(
     if not fact.historical_brief or expand_brief:
         samples = {
             "覆盖": view.coverage,
-            "采集于": fact.captured_at.isoformat(),
+            "采集于": fact_capture_time(fact),
             "columns": view.columns,
             "rows": view.rows,
         }
@@ -212,6 +213,8 @@ def _sections(
     """按正文块顺序填入现有模板：模型文字转义为说明段落，事实章节由代码生成并带来源；
     其余结果在后；动作区域不进入附件（只在消息中完整展示）。"""
     parts: list[_Section] = []
+    if delivery.inspection_notice:
+        parts.append(_Section("notice", "巡检未完成", delivery.inspection_notice))
     content = iter(prepare_prose(delivery) if prose is None else prose)
     format_notice = (
         "部分不支持的格式已按原文展示" if delivery.report_format == "md" else FORMAT_NOTICE
@@ -668,10 +671,12 @@ def build_reports(
                     if fact.section != "action"
                     for notice in (
                         business_presentation(fact).notices
-                        if delivery.answer_version == 4 else fact_limit_notices(fact)
+                        if delivery.answer_version == 4
+                        else fact_limit_notices(fact)
                     )
                 ]
                 + ([delivery.monitoring_notice] if delivery.monitoring_notice else [])
+                + ([delivery.inspection_notice] if delivery.inspection_notice else [])
             )
         )
         or None

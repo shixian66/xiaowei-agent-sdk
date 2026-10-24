@@ -337,11 +337,13 @@ async def test_text_and_facts_mix_and_text_keeps_model_identity(postgres_url: UR
                 "facts",
                 "blocks",
                 "monitoring_notice",
+                "inspection_notice",
                 "session_notice",
                 "report_notice",
                 "limit_notice",
                 "notification_notice",
             }
+            assert delivery.inspection_notice is None
             assert delivery.session_notice is None
             assert (delivery.evidence_ids, delivery.facts) == ((), ())
             assert _FACTS_HEADER not in delivery.content

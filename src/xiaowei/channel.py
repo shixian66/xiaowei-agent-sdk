@@ -515,6 +515,7 @@ class ResultDelivery:
             context_evidence=record.context_evidence,
             run_turn_id=record.run_turn_id,
             monitoring_failures=record.monitoring_failures,
+            inspection_failures=record.inspection_failures,
             limit_reached=record.limit_reached,
             material_only=record.material_only,
         )
