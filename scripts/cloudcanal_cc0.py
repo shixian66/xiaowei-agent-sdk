@@ -3,16 +3,12 @@
 用法见 README 的 CloudCanal CC0 小节。本脚本不进入产品入口、不调用模型。
 """
 
-import os
-
-os.environ["OPENAI_AGENTS_DONT_LOG_MODEL_DATA"] = "1"
-os.environ["OPENAI_AGENTS_DONT_LOG_TOOL_DATA"] = "1"
-
 import argparse
 import asyncio
 import json
 import logging
 import math
+import os
 import sys
 import time
 from collections.abc import AsyncIterator
@@ -26,17 +22,6 @@ from agents import set_tracing_disabled
 from agents.mcp import MCPServerStreamableHttp
 from mcp.types import CallToolResult
 
-SCHEMA_OMISSIONS = {
-    "title",
-    "description",
-    "default",
-    "examples",
-    "example",
-    "enum",
-    "const",
-    "pattern",
-    "$id",
-}
 SCHEMA_KEYS = {
     "type",
     "properties",
@@ -219,18 +204,6 @@ def shape(value: object, fields: set[str], depth: int = 0) -> dict[str, Any]:
     }
 
 
-def hide_link(value: object, secrets: list[str]) -> object:
-    if isinstance(value, str):
-        for secret in secrets:
-            value = value.replace(secret, "<redacted>")
-        return value
-    if isinstance(value, list):
-        return [hide_link(item, secrets) for item in value]
-    if isinstance(value, dict):
-        return {hide_link(key, secrets): hide_link(item, secrets) for key, item in value.items()}
-    return value
-
-
 async def probe(url: str, args: argparse.Namespace, arguments: dict[str, Any]) -> dict[str, Any]:
     deadline = asyncio.get_running_loop().time() + args.timeout
     transport = ProbeTransport(url, args.max_response_bytes, deadline)
@@ -250,7 +223,6 @@ async def probe(url: str, args: argparse.Namespace, arguments: dict[str, Any]) -
         "format": "cloudcanal-cc0-v1",
         "declared_cloudcanal_version": "6.4.0.2",
         "client_versions": {name: version(name) for name in ("openai-agents", "mcp", "httpx2")},
-        "schema_omissions": sorted(SCHEMA_OMISSIONS),
         "status": "ok",
     }
     phase, started = "connect", time.monotonic()
@@ -301,7 +273,6 @@ async def probe(url: str, args: argparse.Namespace, arguments: dict[str, Any]) -
                     "status": "mcp_error" if result.is_error else "received",
                     "elapsed_ms": round((time.monotonic() - started) * 1000, 2),
                     "wire_bytes_observed": transport.received - before,
-                    "result_json_bytes": len(json.dumps(payload, ensure_ascii=False).encode()),
                     "shape": shape(payload, fields),
                 }
                 if result.is_error:
@@ -361,13 +332,15 @@ def main(argv: list[str] | None = None) -> int:
         secret_parts = {
             url,
             unquote(url),
-            *parsed.path.split("/"),
-            *(value for _, value in parse_qsl(parsed.query)),
+            parsed.query,
+            unquote(parsed.query),
         }
-        secrets = sorted(
-            {text for raw in secret_parts for text in (raw, unquote(raw)) if text},
-            key=len,
-            reverse=True,
+        # 短片段常是 mcp/json 等协议词，不据此拒绝报告；仍须人工复核。
+        secret_parts.update(
+            text
+            for part in (*parsed.path.split("/"), *(v for _, v in parse_qsl(parsed.query)))
+            for text in (part, unquote(part))
+            if len(text) >= 8
         )
         report = asyncio.run(probe(url, args, arguments))
     except (ValueError, OSError, ProbeError, httpx2.InvalidURL):
@@ -376,12 +349,15 @@ def main(argv: list[str] | None = None) -> int:
     except KeyboardInterrupt:
         print(json.dumps({"status": "failed", "failure": {"reason": "interrupted_result_unknown"}}))
         return 130
-    if "catalog" in report:
-        report["catalog"]["tools"] = hide_link(report["catalog"]["tools"], secrets)
-    if "call" in report:
-        for key in ("tool", "shape"):
-            report["call"][key] = hide_link(report["call"][key], secrets)
-    print(json.dumps(report, ensure_ascii=False, indent=2))
+    output = json.dumps(report, ensure_ascii=False, indent=2)
+    if any(
+        json.dumps(fragment, ensure_ascii=False)[1:-1] in output
+        for fragment in secret_parts
+        if fragment
+    ):
+        print(json.dumps({"status": "failed", "failure": {"reason": "secret_in_output"}}))
+        return 1
+    print(output)
     return 0 if report["status"] == "ok" else 1
 
 

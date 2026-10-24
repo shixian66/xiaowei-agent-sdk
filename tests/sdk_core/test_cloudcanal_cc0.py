@@ -6,13 +6,14 @@ import os
 import subprocess
 import sys
 from pathlib import Path
+from urllib.parse import quote
 
 import pytest
 from mcp.server.mcpserver import MCPServer
 from pydantic import BaseModel, Field
 from starlette.requests import Request
 from starlette.responses import JSONResponse, Response, StreamingResponse
-from tests.sdk_core.mcp_fixture import recording, redirecting, serve
+from tests.sdk_core.mcp_fixture import gzipped, recording, redirecting, serve
 
 pytestmark = pytest.mark.loopback
 ROOT = Path(__file__).resolve().parents[2]
@@ -51,6 +52,11 @@ def fixture_app(recorder, *, path="/mcp", json_response=True):
     def failedRead() -> str:  # noqa: N802
         recorder.tool_calls.append(("failedRead", {}))
         raise ValueError(TOKEN + BUSINESS)
+
+    @server.tool()
+    def mcp_x(v1_flag: str) -> str:
+        recorder.tool_calls.append(("mcp_x", {"v1_flag": v1_flag}))
+        return json.dumps({BUSINESS: TOKEN})
 
     return recording(
         server.streamable_http_app(streamable_http_path=path, json_response=json_response),
@@ -107,7 +113,7 @@ def test_explicit_read_once_exports_shape_not_business_values(tmp_path, link_kin
         report = json.loads(result.stdout)
         assert running.recorder.tool_calls == [("queryJob", {"job_id": BUSINESS})]
         assert report["call"]["status"] == "received"
-        assert report["call"]["result_json_bytes"] > 0
+        assert report["call"]["wire_bytes_observed"] > 0
         assert report["call"]["shape"]["fields"]["structuredContent"]["fields"]["delay"] == {
             "type": "integer"
         }
@@ -189,6 +195,64 @@ def test_malformed_secret_link_does_not_escape_as_traceback():
     assert json.loads(result.stdout)["failure"]["reason"] == "invalid_configuration"
     assert TOKEN not in result.stdout + result.stderr
     assert "Traceback" not in result.stderr
+
+
+def test_common_link_fragments_preserve_names_and_shape(tmp_path):
+    arguments = tmp_path / "args.json"
+    arguments.write_text(json.dumps({"v1_flag": BUSINESS}))
+    path = "/api/v1/mcp"
+    with serve(lambda recorder: fixture_app(recorder, path=path), path=path) as running:
+        result = cli(
+            running.recorder.url + f"?token={TOKEN}&format=json&flag=true&page=1",
+            "--read-tool",
+            "mcp_x",
+            "--arguments",
+            str(arguments),
+        )
+        assert result.returncode == 0, result.stderr
+        report = json.loads(result.stdout)
+        tools = {tool["name"]: tool for tool in report["catalog"]["tools"]}
+        assert tools["mcp_x"]["input_schema"]["properties"]["v1_flag"]["type"] == "string"
+        assert tools["mcp_x"]["input_schema"]["required"] == ["v1_flag"]
+        assert report["call"]["tool"] == "mcp_x"
+        content = report["call"]["shape"]["fields"]["content"]["items"][0]
+        assert content["fields"]["text"]["json_shape"]["fields"]["<field-1>"]["type"] == "string"
+        assert running.recorder.tool_calls == [("mcp_x", {"v1_flag": BUSINESS})]
+        assert TOKEN not in result.stdout + result.stderr
+        assert BUSINESS not in result.stdout + result.stderr
+
+
+@pytest.mark.parametrize("secret", [TOKEN, 'escaped-"token-0123'])
+def test_secret_in_metadata_fails_without_exporting_report(secret):
+    def build(recorder):
+        server = MCPServer("cc0-secret-fixture")
+
+        @server.tool(name=f"reflected_{secret}")
+        def reflected() -> str:
+            recorder.tool_calls.append(("should-not-run", {}))
+            return "unused"
+
+        return recording(server.streamable_http_app(), recorder, token=None)
+
+    with serve(build) as running:
+        result = cli(running.recorder.url + "?token=" + quote(secret, safe=""))
+        assert result.returncode == 1
+        assert json.loads(result.stdout) == {
+            "status": "failed",
+            "failure": {"reason": "secret_in_output"},
+        }
+        assert secret not in result.stdout + result.stderr
+        assert "reflected_" not in result.stdout + result.stderr
+        assert running.recorder.tool_calls == []
+
+
+def test_compressed_response_is_rejected_before_tool_calls():
+    with serve(lambda recorder: gzipped(fixture_app(recorder))) as running:
+        result = cli(running.recorder.url + "?token=" + TOKEN)
+        assert result.returncode == 1
+        assert json.loads(result.stdout)["failure"]["reason"] == "redirect_or_encoding_rejected"
+        assert running.recorder.tool_calls == []
+        assert TOKEN not in result.stdout + result.stderr
 
 
 def fault_app(recorder, mode):

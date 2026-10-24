@@ -15,7 +15,7 @@
 | 锁定依赖 | SDK `0.22.3`、Lark Channel `1.4.0`、MCP `2.2.0`、sqlglot `30.17.0`、`nh3 0.3.7`、`tinycss2 1.5.1`、Pillow `13.0.0`、certifi `2026.10.19`（后两项为严格审计发现的既有漏洞定向升级） |
 | 正式入口 | `xiaowei serve`、`config check`、`model check`、`storage init/upgrade/cleanup`、`requests resend`；命令与环境准备以 README 为准 |
 | 最近有记录的公司部署 | 用户本次回报 fat 镜像 `729f960d`，一小时全窗 29,232 / ERR 6 / 多语句 1，与 DBA 回查一致；未独立核验服务器。本次未部署 |
-| 当前验收结论 | CloudCanal 尚未接入；用户确认计划 v1.3 / `5e0c119467013d4673aba0e909922e739ce70248` 已复审通过。本次为 v1.4 新决定与独立 CC0 脚本；离线检查不代表公司 MCP、真实模型或用户验收 |
+| 当前验收结论 | CloudCanal 尚未接入；计划 v1.3 / `5e0c119467013d4673aba0e909922e739ce70248` 已复审通过。当前为 v1.5 与 CC0 脚本审查修订；离线检查不代表公司 MCP、真实模型或用户验收 |
 | 当前任务授权 | 2026-10-24：更新设计/计划/说明，编写独立 CC0 只读检查脚本和最小 loopback 测试；不写 CloudCanal 产品功能，不调用真实模型/公司服务，不合并、不部署 |
 
 原工作目录的 ARCHITECTURE 差异与未跟踪计划/公司配置保留，未复制到本工作树；本次未读取公司配置凭据。旧监控和回答修复记录保留为注明版本的证据，不作为本轮输入或展示范围扩展授权。
@@ -41,21 +41,17 @@
 
 ### 当前：CloudCanal 一期设计与计划
 
-[实施计划 v1.4](docs/superpowers/plans/2026-10-23-cloudcanal-phase1.md)基于已复审的 `5e0c119467013d4673aba0e909922e739ce70248` 记录用户新决定。C1—C5 原文不变；[ARCHITECTURE 的 D1](ARCHITECTURE.md#cloudcanal-mcp)按 2026-10-24 决定修订，B1 的产品取舍已解决，实际缩小参数、产品接线与回归仍待 CC0/CC1。连接与权限的节点确认、公司取证及部署后 CC3 安排只在计划维护。
+[实施计划 v1.5](docs/superpowers/plans/2026-10-23-cloudcanal-phase1.md)保留已批准 C1—C5 和 [D1](ARCHITECTURE.md#cloudcanal-mcp)。本轮修订 Claude 对 `ed3ff3488be7c49f253dda039b29825f53a57d44` 的有条件通过意见：B1 名称失真改为疑似秘密命中时仅报 `secret_in_output`；A1/A2 已纳入 CC0 参数核实及 CC1 超限验收，A3 确认节点保持。片段检测的误拒与短片段漏检风险见 README。
 
-新增 [CC0 脚本](scripts/cloudcanal_cc0.py)及 [README 用法](README.md#cloudcanal-cc0)：公开 SDK 完成连接/目录分页/指定单次读取，脚本仅补固定端点、限额与安全输出。默认目录零业务调用；整个链接从环境变量读取，输出脱敏 schema/结构/大小/耗时，无模型、产品入口、Session 或 Evidence 写入。工具效果由公司现场核实，脚本不按名称/annotations 自动认定只读，不实现产品 D1 的自动修正。
+[CC0 脚本](scripts/cloudcanal_cc0.py)使用公开 SDK，默认目录零业务调用，显式已核实读取最多一次；复用固定端点、接收上限和绝对期限。已删除名称替换、重复日志环境开关、省略清单和重新序列化大小字段；保留关闭日志/tracing 与 8 层结构摘要。非阻断建议 N2/N3/N4 已补协议说明、压缩回归及系统 CA 排查说明；N1 annotations 输出、N5 畸形 schema 错误细分暂不增加。用法见 [README](README.md#cloudcanal-cc0)。
 
-所用 SDK 仍为 Agents 0.22.3 / MCP 2.2.0 / httpx2 2.13.1；脚本按锁定 MCP 的公开 `input_schema/output_schema/is_error` 字段实现，无兼容层或依赖变更。仅临时 127.0.0.1 MCP 使用合成链接、工具和业务哨兵；未读取公司凭据，未启动 PostgreSQL，未影响旁边“注入巡检”的工作树。
+锁定 Agents 0.22.3 / MCP 2.2.0 / httpx2 2.13.1 不变。产品源码、依赖与锁文件未改，无模型、产品入口、Session 或 Evidence 写入；只使用合成数据和临时 127.0.0.1 MCP，不访问公司服务或其他任务工作树。
 
 已知既有说明问题（N5）：`config.py:152` 称群 tools 仅 StarRocks，实际 `runtime.py:432` 接纳所有已登记工具；本次不改源码，在 CC1 启用 CloudCanal 群配置时更正注释并核对说明，执行授权沿用现状。
 
-已有 SDK 证据（v1.0，`3e53966da1b05c496175ab30a78adccb8f0eb96b`）：公开签名及现有 SDK/协议 **10 passed，10.52 秒**，日志 `/private/tmp/xw-cloudcanal-plan-20261023/sdk.log`。它只证明原锁定接入路径，不替代新脚本或真实 CloudCanal 验证。
+当前脚本离线回归 **15 passed，15.33 秒**，包括名称保真、含 JSON 转义的秘密命中整份报告拒绝、压缩拒绝、SSE 超限不续接及期限后零关闭请求；新拒绝分支先复现失败再修正。文档检查 **2 passed，0.13 秒**；脚本/测试 Ruff 及格式检查、脚本 mypy、9 个相关链接/锚点、两段 Bash 示例语法及 `git diff --check` 通过。C1—C5 与共同变体和批准基线逐字一致；当前修订待精确 SHA 独立复审，不能沿用前版结论。
 
-本次检查：`tests/sdk_core/test_cloudcanal_cc0.py` **11 passed，11.86 秒**；`tests/security/test_docs_command_consistency.py` **2 passed**；脚本/测试 Ruff 与格式检查、脚本 mypy、相关链接、两段 Bash 示例语法及 `git diff --check` 通过。C1—C5 和共同变体与批准基线逐字一致。首次用例在脚本缺失时失败，新增 SSE 超限续接与期限后关闭两个反例也先复现失败再修正。覆盖 query/路径令牌、JSON/SSE、目录零调用、指定读取单次执行、MCP 错误/超限无重放、跳转拒绝、本地参数错误零网络、错误链接不泄漏，以及 SDK 续接/关闭不能绕过上限。
-
-独立审查针对 `5e0c119467013d4673aba0e909922e739ce70248 → 2e1011323cecae20607794b93cecb3455e3ff47d`，指出 SSE 超限仍续接、非法链接异常泄漏与超时清理超出期限，均已修复并补反例；目标版本字段改为用户声明，删除由锁定 HTTP transport 契约保证的多余流类型防御。修复增量 `2e1011323cecae20607794b93cecb3455e3ff47d → 67271487329952a1a96dc1a62ece0c17e0ac3559` **独立复审通过**：三项缺陷和两项建议全部已解决，复审者独立运行新增回归 **3 passed，3.65 秒**，精确差异检查通过。后续提交仅补本文的审查记录，不改变已审脚本、测试和产品契约。总增量仍只有五份文档、独立脚本及测试，产品源码、依赖与锁文件未改。
-
-下一项：按计划 §4.1 在配置/真实连接节点确认链接格式、只读子账号链接能力及权限，再由用户在公司运行 CC0，带回打码结果并确认任务/日志接收范围与链接生命周期。取得真实目录、参数与样例后再确认 CC1 开发授权；真实工具/模型/渠道验收在另获授权的公司部署后进行，模型、预算、次数和阈值届时决定。
+下一项：完成本次脚本复审，再按[计划 §4.1](docs/superpowers/plans/2026-10-23-cloudcanal-phase1.md#41-连接与运行前置)推进公司 CC0 与后续授权；未知真实契约不以离线通过代替。
 
 ### 安全巡检报告呈现（PR #132，合入前证据）
 
