@@ -186,6 +186,8 @@ P1–P3 仍不暴露业务写工具；监控写工具只有满足 §5 的群审�
 
 首版由 SDK 官方接入对象承担协议工作，小维只做薄的配置与治理装配。不自研 MCP 协议，不建设通用 Gateway、DSL、插件市场或配置管理平台，也不按领域分别实现 Client。
 
+**MCP 接入方向（2026-10-24 用户确认）。** 只读官方 MCP 的长期目标是优先通过连接配置、必要权限和数据契约登记供 Agent 自主使用，仅为 SDK 或 MCP Server 不能保证的能力补 Python 代码，如调用前权限复核、预算、失败处理、Evidence 真实性和接收方字段投影。复用按 [AGENTS §5](AGENTS.md#5-python-实现与代码复用) 执行，通用部分随真实重复逐步抽取，不预建通用登记格式或注册机制，写操作仍按具体 Action 实现、不做成纯配置；这是方向而非当前能力，当前仍依赖 [models.py](src/xiaowei/models.py) 的分源策略集合及 [runtime.py](src/xiaowei/runtime.py) 第 313—316 行的封闭准入。
+
 | 职责 | 首版边界 |
 | --- | --- |
 | Server Registry | 静态可信配置：server_id、固定端点、启用状态、认证引用、超时、tool allowlist 和治理映射；默认空集合 |
