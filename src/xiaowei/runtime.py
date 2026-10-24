@@ -162,6 +162,7 @@ from xiaowei.storage import (
     open_engine,
     upgrade_storage,
 )
+from xiaowei.tidb import TiDBAdapter, TiDBTarget, open_tidb
 from xiaowei.vertex_model import ModelAPIStatusError, ModelAPITransportError
 from xiaowei.web import create_web_app
 from xiaowei.webhook import TARGET as NOTIFY_TARGET
@@ -226,7 +227,7 @@ class AccessConfig(_Config):
 
 
 class TargetConfig(_Config):
-    """一个查询目标：类型（首版只有 ``starrocks``）、交给模型的用途说明与业务口径、连接与范围。
+    """StarRocks 查询目标：交给模型的用途说明与业务口径、连接与范围。
 
     集群 ID 就是 ``starrocks.target_id``；连接地址、账号与凭据引用只用于装配，不交给模型。
     """
@@ -240,6 +241,10 @@ class TargetConfig(_Config):
     def target_id(self) -> str:
         return self.starrocks.target_id
 
+    @property
+    def connection(self) -> StarRocksTarget:
+        return self.starrocks
+
     @field_validator("starrocks")
     @classmethod
     def _cluster_id(cls, value: StarRocksTarget) -> StarRocksTarget:
@@ -251,6 +256,29 @@ class TargetConfig(_Config):
             ) from None
         return value
 
+
+class TiDBTargetConfig(_Config):
+    type: Literal["tidb"]
+    description: str = Field(min_length=1, max_length=500)
+    business_context: BusinessContext | None
+    tidb: TiDBTarget
+
+    @property
+    def target_id(self) -> str:
+        return self.tidb.target_id
+
+    @property
+    def connection(self) -> TiDBTarget:
+        return self.tidb
+
+    @field_validator("tidb")
+    @classmethod
+    def _cluster_id(cls, value: TiDBTarget) -> TiDBTarget:
+        TargetConfig._cluster_id(value)
+        return value
+
+
+DatabaseTargetConfig = Annotated[TargetConfig | TiDBTargetConfig, Field(discriminator="type")]
 
 _CLUSTER_ID: TypeAdapter[str] = TypeAdapter(ClusterId)
 
@@ -272,7 +300,7 @@ class ServeConfig(_Config):
     session_limits: SessionLimits
     budget: Budget
     max_concurrent_turns: int = Field(gt=0)
-    targets: tuple[TargetConfig, ...] = Field(min_length=1)
+    targets: tuple[DatabaseTargetConfig, ...] = Field(min_length=1)
     mcp_servers: tuple[MCPServerConfig, ...] = ()
     alertmanager_sources: tuple[AlertmanagerConfig, ...] = ()
     webhook_bots: tuple[WebhookBotConfig, ...] = ()
@@ -295,7 +323,9 @@ class ServeConfig(_Config):
 
     @field_validator("targets")
     @classmethod
-    def _distinct_targets(cls, value: tuple[TargetConfig, ...]) -> tuple[TargetConfig, ...]:
+    def _distinct_targets(
+        cls, value: tuple[DatabaseTargetConfig, ...]
+    ) -> tuple[DatabaseTargetConfig, ...]:
         ids = [t.target_id for t in value]
         if len(set(ids)) != len(ids):
             raise ValueError("targets 中的集群 ID 不能重复")
@@ -435,7 +465,7 @@ class ServeConfig(_Config):
                 raise ValueError("feishu.group.max_wait_seconds 必须短于请求保留期")
         # 一轮新列表的每个对象在工具记录、写入 Session、最终校验、提交时的校验与提交前的整段回放
         # 中各复核一次；上限容不下最大一页时，满页的列表必然在提交前因次数用完而失败。
-        page = max(t.starrocks.policy.max_rows for t in self.targets)
+        page = max(t.connection.policy.max_rows for t in self.targets)
         if self.budget.max_scope_checks < _CHECKS_PER_LISTED_OBJECT * page:
             raise ValueError(
                 "budget.max_scope_checks 至少为最大 policy.max_rows 的 "
@@ -575,7 +605,7 @@ def validate_config(
         ("model.api_key_ref", config.model.api_key_ref),
     ]
     refs.extend(
-        (f"targets.{index}.starrocks.password_ref", target.starrocks.password_ref)
+        (f"targets.{index}.{target.type}.password_ref", target.connection.password_ref)
         for index, target in enumerate(config.targets)
     )
     refs.extend(
@@ -609,14 +639,14 @@ def validate_config(
         raise ConfigError(f"{_POSTGRES_PASSWORD_ENV}: 仍是 .env 模板占位符，请替换为实际值")
 
     for index, target in enumerate(config.targets):
-        ca_file = target.starrocks.tls_ca_file
+        ca_file = target.connection.tls_ca_file
         if ca_file is None:
             continue
         try:
             with Path(ca_file).open("rb") as stream:
                 stream.read(1)
         except OSError:
-            raise ConfigError(f"targets.{index}.starrocks.tls_ca_file: CA 文件不可读") from None
+            raise ConfigError(f"targets.{index}.{target.type}.tls_ca_file: CA 文件不可读") from None
 
     if container_port is not None:
         if not 1 <= container_port <= 65535 or container_port != config.listen_port:
@@ -766,7 +796,7 @@ def _reason(error: Mapping[str, object]) -> str:
 
 def _registered_tools(config: ServeConfig) -> frozenset[str]:
     """装配时会登记的工具；监控只登记可信配置选中的已核约工具。"""
-    audited = any(t.starrocks.audit is not None for t in config.targets)
+    audited = any(t.connection.audit is not None for t in config.targets)
     monitoring = {
         server.tool_id(name) for server in config.mcp_servers for name in server.allowed_tools
     } | {source.tool_id(name) for source in config.alertmanager_sources for name in source.tools}
@@ -1348,10 +1378,16 @@ def _app_config(config: ServeConfig) -> AppConfig:
         _registered_tools(config) - QUERY_TOOLS - monitoring - write_tools - notify - scheduled
         - security
     )
+    # A 未开放 TiDB 用户计划工具；用途只保留至少一个目标实际提供的能力。
+    unavailable = frozenset({"local/explain_query"}) if all(
+        target.type == "tidb" for target in config.targets
+    ) else frozenset()
     return AppConfig(
         purposes={
-            "query": QUERY_TOOLS | audit | security | monitoring | notify | scheduled,
-            "diagnose": DIAGNOSE_TOOLS | audit,
+            "query": (
+                QUERY_TOOLS | audit | security | monitoring | notify | scheduled
+            ) - unavailable,
+            "diagnose": (DIAGNOSE_TOOLS | audit) - unavailable,
         },
         data_policies={config.model.data_policy_id: config.data_policy},
         session_limits=config.session_limits,
@@ -1359,7 +1395,9 @@ def _app_config(config: ServeConfig) -> AppConfig:
         targets=tuple(
             TargetInfo(
                 target_id=t.target_id,
-                description=t.description,
+                description=(
+                    "数据库类型：TiDB。" + t.description if t.type == "tidb" else t.description
+                ),
                 business_context=t.business_context,
             )
             for t in config.targets
@@ -1696,6 +1734,23 @@ async def _refreshing(schemas: Mapping[str, SchemaCache]) -> AsyncIterator[None]
             raise RuntimeCloseError("结构刷新关闭超时") from None
 
 
+def _database_adapter(
+    target: DatabaseTargetConfig,
+    *,
+    clock: Callable[[], datetime],
+    connects: Mapping[str, Connector] | None,
+) -> StarRocksAdapter:
+    if target.type == "tidb":
+        return (
+            open_tidb(target.tidb, clock=clock) if connects is None
+            else TiDBAdapter(target.tidb, connect=connects[target.target_id], clock=clock)
+        )
+    return (
+        open_starrocks(target.starrocks, clock=clock) if connects is None
+        else StarRocksAdapter(target.starrocks, connect=connects[target.target_id], clock=clock)
+    )
+
+
 @asynccontextmanager
 async def open_runtime(
     config: ServeConfig,
@@ -1720,11 +1775,7 @@ async def open_runtime(
         await check_digest_key(engine, resolve_secret_ref(config.storage.digest_key_ref))
         schemas = {
             t.target_id: SchemaCache(
-                open_starrocks(t.starrocks, clock=clock)
-                if starrocks_connect is None
-                else StarRocksAdapter(
-                    t.starrocks, connect=starrocks_connect[t.target_id], clock=clock
-                ),
+                _database_adapter(t, clock=clock, connects=starrocks_connect),
                 clock=clock,
             )
             for t in config.targets
@@ -2281,11 +2332,7 @@ async def resend(
         # 依赖（零行探测与元数据读取），连接按需建立、用完即关。
         schemas = {
             t.target_id: SchemaCache(
-                open_starrocks(t.starrocks, clock=clock)
-                if starrocks_connect is None
-                else StarRocksAdapter(
-                    t.starrocks, connect=starrocks_connect[t.target_id], clock=clock
-                ),
+                _database_adapter(t, clock=clock, connects=starrocks_connect),
                 clock=clock,
             )
             for t in config.targets

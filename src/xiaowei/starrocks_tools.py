@@ -98,8 +98,6 @@ from xiaowei.sqlguard import (
 from xiaowei.starrocks import (
     AUDIT_ORDER_COLUMNS,
     EXPLAIN_PREFIX,
-    SCHEMA_COLUMNS_SQL,
-    SCHEMA_OBJECTS_SQL,
     SECURITY_SOURCE_COLUMNS,
     SQL_MODE,
     QueryResult,
@@ -131,6 +129,7 @@ from xiaowei.starrocks_security import (
     SIGNALS,
     analyze_security_rows,
 )
+from xiaowei.tidb import SQL_MODE as TIDB_SQL_MODE
 
 LIST_TABLES: Final = "local/list_tables"
 LIST_DATABASES: Final = "local/list_databases"
@@ -348,10 +347,12 @@ def starrocks_tools(
     ``schema`` 是同一目标的结构快照缓存；刷新由装配方负责，这里只读取当前快照。
     """
     target = adapter.target
+    tidb = target.database_type == "tidb"
+    label = "TiDB" if tidb else "StarRocks"
     if set(max_bytes) != set(AUDIENCES):
-        raise ValueError("StarRocks 工具：必须且只能给出四种用途的容量")
+        raise ValueError(f"{label} 工具：必须且只能给出四种用途的容量")
     if schema.target_id != target.target_id:
-        raise ValueError("StarRocks 工具：结构快照必须属于同一目标")
+        raise ValueError(f"{label} 工具：结构快照必须属于同一目标")
     worst = worst_case_observation(adapter)
     scope = data_scope_digest(target)
 
@@ -361,8 +362,15 @@ def starrocks_tools(
         fact_note: str | None = None,
         fields: tuple[str, ...] = RESULT_FIELDS,
     ) -> ToolPolicy:
+        if tidb:
+            fields = (*fields, "warnings", "warnings_truncated")
+            if name == "describe_table_layout":
+                fact_note = (
+                    "TiDB 主键/索引按 seq_in_index 给出列序；"
+                    "结果或警告截断时不能称为完整结构。"
+                )
         return ToolPolicy(
-            policy_id=f"starrocks.{target.target_id}.{name}",
+            policy_id=f"{target.database_type}.{target.target_id}.{name}",
             arguments=arguments,
             projections={a: Projection(fields=fields, max_bytes=max_bytes[a]) for a in AUDIENCES},
             required=fields,
@@ -375,7 +383,11 @@ def starrocks_tools(
                 "list_databases": "仅含当前可读对象的元数据快照，不含空库及系统库。",
                 "list_tables": "当前可读对象的元数据快照，不代表实时业务状态。",
                 "describe_table": "字段结构快照，不含完整建表定义或主键信息。",
-                "describe_table_layout": "表布局摘要；分区键不代表粒度，桶数 0 不能确认实际桶数。",
+                "describe_table_layout": (
+                    "TiDB 主键与索引列序；截断/省略时结构不完整。"
+                    if tidb
+                    else "表布局摘要；分区键不代表粒度，桶数 0 不能确认实际桶数。"
+                ),
                 "show_create_table": "采集时的服务器表定义；分区定义不代表当前分区状态。",
             }.get(name),
         )
@@ -384,6 +396,12 @@ def starrocks_tools(
         f"查询会话时区：{target.time_zone}。普通 DATETIME 保留无偏移墙上值，"
         "不能据连接时区推测写入时区；有时区值按会话时区转换。"
     )
+    if tidb:
+        query_context += (
+            f"TiDB 默认库：{target.database}；双引号表示字符串；"
+            "字符集 utf8mb4，排序规则 utf8mb4_bin。"
+            "数据库警告非空或不完整时，说明结果完整性及已知覆盖限制，不声称全群完整。"
+        )
     if target.audit is not None:
         query_context += (
             f"已配置审计表：{target.audit.database}.{target.audit.table}；"
@@ -391,6 +409,30 @@ def starrocks_tools(
         )
 
     def contract(tool_id: str, tool_policy: ToolPolicy, description: str) -> ToolContract:
+        if tidb:
+            if tool_id == RUN_QUERY:
+                description = (
+                    "执行 TiDB 只读 SELECT/UNION（可含 WITH、窗口和子查询）；"
+                    "只在本轮明确请求取数时调用。"
+                    "未限定表名按配置默认库解析，不跨库猜测，不切库。双引号表示字符串。"
+                    "用户直接提交的 SQL 保留原文，只去尾分号及追加/收紧最外层 LIMIT；"
+                    "OFFSET、内层 LIMIT、普通注释和已支持的计划类 hint 保留。"
+                    "可执行注释、资源类或未支持 hint 拒绝，不删除后执行用户 SQL。"
+                    "表达式、聚合和筛选在数据库执行；有限结果不当全量，LIMIT 不限制扫描资源。"
+                    "只解释或说不要执行时不调用；数据库执行失败停止本轮，不重放。"
+                )
+            elif tool_id == LAYOUT_TOOL:
+                description = (
+                    "查看 TiDB 表的主键、唯一/普通索引及有序列；"
+                    "按 index_name 和 seq_in_index 读取。"
+                    "主键不能按字段名猜测，复合主键列序须完整；不使用 StarRocks 分桶解释。"
+                    "截断或省略时明确不完整；原始 DDL 和默认值用 show_create_table。"
+                )
+            elif tool_id == SHOW_CREATE_TABLE:
+                description = (
+                    "读取获准 TiDB 普通表的完整 SHOW CREATE TABLE 原文，不执行建表或变更。"
+                    "前后核对实际 TiDB 对象 ID 和类型；容量不足时整条省略，不拼接半份 DDL。"
+                )
         return ToolContract(
             tool_id=tool_id,
             target_id=target.target_id,
@@ -435,14 +477,14 @@ def starrocks_tools(
             }
             check_projection_capacity(ddl_policy, worst.model_copy(update={"payload": payload}))
         for paged, sql, columns in (
-            (databases_policy, SCHEMA_OBJECTS_SQL, ("database",)),
-            (list_policy, SCHEMA_OBJECTS_SQL, LIST_COLUMNS),
-            (describe_policy, SCHEMA_COLUMNS_SQL, DESCRIBE_COLUMNS),
+            (databases_policy, adapter.schema_objects_sql, ("database",)),
+            (list_policy, adapter.schema_objects_sql, LIST_COLUMNS),
+            (describe_policy, adapter.schema_columns_sql, DESCRIBE_COLUMNS),
         ):
             payload = {**worst.payload, "sql": sql, "columns": list(columns), "next_cursor": widest}
             check_projection_capacity(paged, worst.model_copy(update={"payload": payload}))
     except ValueError as exc:
-        raise ValueError(f"StarRocks 工具：{exc}") from None
+        raise ValueError(f"{label} 工具：{exc}") from None
     bounds = _Bounds(
         sql=_json_size(worst.payload["sql"]), columns=_json_size(worst.payload["columns"])
     )
@@ -534,7 +576,7 @@ def starrocks_tools(
         )
         result = _from_snapshot(
             page.snapshot,
-            SCHEMA_OBJECTS_SQL,
+            adapter.schema_objects_sql,
             ("database",),
             tuple({"database": db} for db, _ in shown),
             following is not None,
@@ -596,7 +638,8 @@ def starrocks_tools(
         shown = [key for key in page.keys if verdicts[key]]
         rows = tuple(_listed(snapshot.objects[key]) for key in shown)
         result = _from_snapshot(
-            snapshot, SCHEMA_OBJECTS_SQL, LIST_COLUMNS, rows, page.following is not None, started
+            snapshot, adapter.schema_objects_sql, LIST_COLUMNS, rows,
+            page.following is not None, started
         )
         return _observation(
             result,
@@ -638,6 +681,11 @@ def starrocks_tools(
 
     async def readable(found: ObjectInfo) -> None:
         verdicts = await adapter.probe([(found.database, found.name)])
+        if verdicts[(found.database, found.name)] is None:
+            raise ToolRejectedError(
+                "该对象可读性未知，未交付结构；请由 DBA 核对视图权限",
+                code="authorization_unavailable",
+            )
         if not verdicts[(found.database, found.name)]:
             raise StarRocksError(StarRocksErrorCode.OBJECT_UNREADABLE)
 
@@ -646,7 +694,7 @@ def starrocks_tools(
         await readable(page.found)
         result = _from_snapshot(
             page.snapshot,
-            SCHEMA_COLUMNS_SQL,
+            adapter.schema_columns_sql,
             DESCRIBE_COLUMNS,
             page.rows,
             page.following is not None,
@@ -912,7 +960,7 @@ def starrocks_tools(
         try:
             check_projection_capacity(audit_policy, worst.model_copy(update={"payload": payload}))
         except ValueError as exc:
-            raise ValueError(f"StarRocks 工具：{exc}") from None
+            raise ValueError(f"{label} 工具：{exc}") from None
         contracts.append(
             contract(
                 SLOW_QUERIES,
@@ -1042,6 +1090,12 @@ def starrocks_tools(
         ))
         executes[(SECURITY_TOOL, key)] = Prechecked(check=check_security, run=inspect_security)
 
+    if tidb:
+        # A 尚未交付 B1 用户计划工具；内部视图探测不成为模型可调用入口。
+        contracts = [contract for contract in contracts if contract.tool_id != EXPLAIN_QUERY]
+        kept_policies = {contract.policy_id for contract in contracts}
+        policies = [policy for policy in policies if policy.policy_id in kept_policies]
+        executes = {key: execute for key, execute in executes.items() if key[0] != EXPLAIN_QUERY}
     return StarRocksTools(contracts=tuple(contracts), policies=tuple(policies), executes=executes)
 
 
@@ -1086,8 +1140,10 @@ def scope_canonical(target: StarRocksTarget) -> str:
     """
     policy = target.policy
     body = {
-        "format": DATA_SCOPE_FORMAT,
-        "database_type": "starrocks",
+        "format": (
+            "xiaowei.data_scope.tidb/1" if target.database_type == "tidb" else DATA_SCOPE_FORMAT
+        ),
+        "database_type": target.database_type,
         "target_id": target.target_id,
         "host": target.host,
         "port": target.port,
@@ -1106,10 +1162,12 @@ def scope_canonical(target: StarRocksTarget) -> str:
         "query_mem_limit_bytes": target.query_mem_limit_bytes,
         "client_timeout_seconds": target.client_timeout_seconds,
         "time_zone": target.time_zone,
-        "sql_mode": SQL_MODE,
+        "sql_mode": TIDB_SQL_MODE if target.database_type == "tidb" else SQL_MODE,
         "schema_limits": target.schema_limits.model_dump(mode="json"),
         "audit": None if target.audit is None else target.audit.model_dump(mode="json"),
     }
+    if target.database_type == "tidb":
+        body.update(character_set_connection="utf8mb4", collation_connection="utf8mb4_bin")
     return json.dumps(body, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
 
 
@@ -1127,13 +1185,21 @@ def worst_case_observation(adapter: StarRocksAdapter) -> ToolObservation:
     sql_bytes = max(
         target.policy.max_sql_bytes + len(EXPLAIN_PREFIX),
         metadata_sql_bytes(),
+        len(adapter.schema_objects_sql.encode()),
+        len(adapter.schema_columns_sql.encode()),
+        len(adapter.schema_ids_sql.encode()),
         audit_sql_bytes(target),
     )
     column_bytes = target.policy.max_sql_bytes
     names = min(target.policy.max_result_columns, column_bytes)
     columns = [_WIDEST_CHAR] * (names - 1) + [_WIDEST_CHAR * (column_bytes - names + 1)]
+    metadata = (
+        {"warnings": "x" * (target.max_result_bytes - 2), "warnings_truncated": True}
+        if target.database_type == "tidb" else {}
+    )
     return ToolObservation(
         payload={
+            **metadata,
             "sql": _WIDEST_CHAR * sql_bytes,
             "columns": columns,
             "rows": "x" * (target.max_result_bytes - 2),
@@ -1289,6 +1355,8 @@ def _from_snapshot(
         sql=sql,
         columns=columns,
         rows=rows,
+        warnings=snapshot.warnings,
+        warnings_truncated=snapshot.warnings_truncated,
         row_count=len(rows),
         truncated=truncated,
         collected_at=snapshot.collected_at,
@@ -1314,6 +1382,8 @@ def _observation(
             "rows": [dict(row) for row in result.rows],
             "row_count": result.row_count,
             "elapsed_ms": result.elapsed_ms,
+            **({"warnings": list(result.warnings), "warnings_truncated": result.warnings_truncated}
+               if result.warnings is not None else {}),
             **(extra or {}),
         },
         captured_at=result.collected_at,

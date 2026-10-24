@@ -39,17 +39,15 @@
 
 ## 3. 当前计划与下一项工作
 
-### TiDB 查询与诊断（2026-10-24，仅文档）
+### TiDB 查询与诊断（2026-10-25，A 离线候选）
 
-[A/B/C 计划](docs/superpowers/plans/2026-10-24-tidb-query-diagnosis.md)：**已补充视图探测逐对象错误分类及复审验收事项，待复审**。契约见 [ARCHITECTURE](ARCHITECTURE.md#tidb-query-diagnosis)，退出条件见 [DEVELOPMENT_PLAN](DEVELOPMENT_PLAN.md#tidb-abc)。A/B/C、T1—T8 成功/失败标准与数据库失败中止规则保持；本次仅提交四份文档的 TiDB 差异，不合并、不开 PR、不开发或部署。
+用户批准的文档 `f269bf9` 已合入并推送主线 `c501431`；随后在隔离分支 `codex/tidb-query-a` 实现 A1/A2/A3。原用户工作区其他任务改动保留。契约见 [ARCHITECTURE](ARCHITECTURE.md#tidb-query-diagnosis)，固定 T1—T8 与两次公司安排见 [A/B/C 计划](docs/superpowers/plans/2026-10-24-tidb-query-diagnosis.md)，退出条件见 [DEVELOPMENT_PLAN](DEVELOPMENT_PLAN.md#tidb-abc)。未合并实现、未部署。
 
-本地纯离线；[公司验收清单](docs/superpowers/plans/2026-10-24-tidb-query-diagnosis.md#tidb-company-acceptance)分两次，第一次 A、3 集群冒烟及两版校准，第二次 B/C，B4 单独退出。视图保留分版本探测，1345/1356 仅在对象探测中分类；C02 核对 SHOW VIEW、C03 留 GLOBAL/SESSION 模式证据，T4 按每次实际运行开始时间定窗口并由 DBA 独立取基准，细则见计划。
+A 已接入混合目标配置、TiDB 会话/版本回读、原 SQL 与外层 LIMIT、结构/有序主键索引、分版本视图探测及逐对象 1345/1356 分类。复用已有 MySQL 传输/期限/关闭、工具与历史权限链；TiDB 数据库失败始终中止，不继承 StarRocks 解析恢复。工作方法按数据库类型区分。B/C 与 T8 尚未实现，A 不开放用户 EXPLAIN 或诊断系统表入口；scheduled_tasks 路径未覆盖。
 
-尚无 TiDB 功能、真实工具/模型、正式入口、部署或用户验收证据；视图预执行风险仍为源码推断，错误码与输出待现场核对，scheduled_tasks 未覆盖。缺等待/故障样本时 T6/T7、T8 UPDATE 等保持开放，C 上线不证明可靠或完整退出；公司前仅有源码/离线依据的阶段风险已获用户接受。
+离线证据：锁定环境下，相关 SQLGuard/Adapter/schema/runtime 回归 330 项通过；正式 Web → SDK Runner → 治理 → TiDB Adapter → Evidence/真实隔离 PostgreSQL 已跑查询成功、数据库失败中止、可执行注释零 I/O 拒绝、撤权追问及诊断用途边界。TiDB 协议和模型均用替身，不能证明真实版本行为或 Agent 自主能力。Ruff、mypy、文档一致性 2 项通过；完整非部署测试及整分支独立审查进行中，最终结果随后更新。
 
-计划 hash-object：`e1ae4629a4f9d91fe2284196f836d0226ede5c49`。文档验证：一致性测试 2 项通过，131 个本地链接/锚点有效，`git diff --check` 通过；固定验收表、数据库失败规则及 TiDB 以外内容未变。下一项：针对新提交独立复审；功能开发与公司部署仍待后续授权。原工作区其他任务修改保留。
-
-<a id="sql-parse-recovery-status"></a>
+下一项：完成 A 候选独立审查、常规修复和必需检查；公司第一次按 [C01—C07](docs/superpowers/plans/2026-10-24-tidb-query-diagnosis.md#tidb-company-acceptance)核对 3 集群的 TLS/只读账号（含 PROCESS/SHOW VIEW）、会话与资源限制、两版真实输出/视图行为，并跑 T1/T2/T5 的真实模型任务。校准前夹具只来自文档与源码；A 不得据此退出。第一次无阻断问题才继续离线 B/C；不因无锁等待/故障样本关闭 T6/T7 等开放项。真实 TiDB、模型、飞书、部署和用户验收均无本轮证据。
 
 ### 当前：SQL 解析失败的预算内恢复（离线候选）
 

@@ -269,3 +269,11 @@ def test_mysql_double_quotes_are_strings(policy: QueryPolicy) -> None:
     query = guard_readonly_query('SELECT "status" AS value', policy)
     assert query.executed_sql == 'SELECT "status" AS value LIMIT 1001'
     assert not query.referenced_objects
+
+
+@pytest.mark.parametrize("space", ["\u00a0", "\x1c"])
+def test_non_tidb_dash_comment_whitespace_is_rejected(policy: QueryPolicy, space: str) -> None:
+    with pytest.raises(QueryRejectedError):
+        guard_readonly_query(
+            "SELECT 1--" + space + "x FROM app.orders FOR UPDATE", policy  # noqa: S608
+        )

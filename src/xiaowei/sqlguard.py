@@ -61,6 +61,7 @@ class QueryRejectionCode(enum.StrEnum):
     AMBIGUOUS_REFERENCE = "ambiguous_reference"
     COMMENT_NOT_ALLOWED = "comment_not_allowed"
     EXECUTABLE_COMMENT = "executable_comment"
+    COMMENT_SYNTAX = "comment_syntax"
     HINT_NOT_ALLOWED = "hint_not_allowed"
     INVALID_LIMIT = "invalid_limit"
     TOO_MANY_COLUMNS = "too_many_columns"
@@ -85,6 +86,7 @@ REJECTION_MESSAGES: Final[Mapping[QueryRejectionCode, str]] = {
     _Code.AMBIGUOUS_REFERENCE: "列引用或结果列名有歧义，请用表名限定列，或为输出列设置唯一别名",
     _Code.COMMENT_NOT_ALLOWED: "SQL 含注释，请删除注释后重试",
     _Code.EXECUTABLE_COMMENT: "SQL 含可执行注释，无法在只读边界内安全支持",
+    _Code.COMMENT_SYNTAX: "注释的空白或换行写法与 TiDB 不一致，未执行",
     _Code.HINT_NOT_ALLOWED: "hint 不在允许的计划类清单中，未执行",
     _Code.INVALID_LIMIT: "LIMIT 与 OFFSET 只接受非负整数字面量",
     _Code.TOO_MANY_COLUMNS: "结果列数或列名总长超过上限，请只选择需要的列",
@@ -382,10 +384,11 @@ def _tidb_comments(sql: str, tokens: list[Token]) -> None:
                 _reject(_Code.EXECUTABLE_COMMENT)
             if comment.startswith(("--", "#")):
                 # TiDB 的 -- 后须空白；两种行注释均到 LF 结束。SQLGlot 也会认 --1 / CR。
-                if comment.startswith("--") and len(comment) > 2 and not comment[2].isspace():
-                    _reject(_Code.UNSUPPORTED_SYNTAX)
+                if (comment.startswith("--") and len(comment) > 2
+                        and comment[2] not in " \t\r\n\v\f"):
+                    _reject(_Code.COMMENT_SYNTAX)
                 if end < len(sql) and "\n" not in gap[match.end():]:
-                    _reject(_Code.UNSUPPORTED_SYNTAX)
+                    _reject(_Code.COMMENT_SYNTAX)
         if token is not None:
             start = token.end + 1
 
