@@ -323,19 +323,14 @@ def _function_tool(
             )
             return _rejection_feedback(exc, name)
         except SqlParseError as exc:
-            feedback: dict[str, object] = {
+            feedback = {
                 "status": "invalid_sql",
                 "source": contract.target_id,
                 "reason": (
-                    "SQL未通过解析；勿原样重发，可在本轮剩余预算内检查语法并修正，"
-                    "或说明未完成"
+                    "SQL未通过解析；勿原样重发，可在本轮剩余预算内检查语法并修正，或说明未完成"
                 ),
                 "correction_allowed": exc.correction_allowed,
             }
-            if exc.line is not None:
-                feedback["line"] = exc.line
-            if exc.column is not None:
-                feedback["column"] = exc.column
             return json.dumps(feedback, ensure_ascii=False)
         except PromQLExpressionError as exc:
             return json.dumps(

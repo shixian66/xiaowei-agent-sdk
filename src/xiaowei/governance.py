@@ -243,13 +243,10 @@ class ToolExecutionError(Exception):
 
 
 class SqlParseError(Exception):
-    """明确未通过解析的用户 SQL；只有安全位置和当前工具额度状态。"""
+    """明确未通过解析的用户 SQL；只携带当前工具额度状态。"""
 
-    def __init__(
-        self, position: tuple[int | None, int | None], *, correction_allowed: bool
-    ) -> None:
+    def __init__(self, *, correction_allowed: bool) -> None:
         super().__init__("SQL未通过解析")
-        self.line, self.column = position
         self.correction_allowed = correction_allowed
 
 
@@ -809,7 +806,7 @@ class GovernedTools:
                 except Exception as exc:
                     if (
                         isinstance(exc, StarRocksError)
-                        and exc.parse_position is not None
+                        and exc.parse_failed
                         and contract.tool_id in {"local/run_readonly_query", "local/explain_query"}
                     ):
                         current = self._runs.get(key, TurnRuns())
@@ -821,18 +818,15 @@ class GovernedTools:
                             else current.slot_busy,
                         )
                         parse_failure = SqlParseError(
-                            exc.parse_position,
                             correction_allowed=self._used.get(key, 0) < ctx.budget.max_tool_calls,
                         )
                         logger.info(
                             "sql_parse turn=%s call_ref=%s tool=%s target=%s code=invalid_sql "
-                            "line=%s column=%s correction_allowed=%s",
+                            "correction_allowed=%s",
                             ctx.identity.turn_id,
                             hashlib.sha256(request.call_id.encode()).hexdigest()[:16],
                             contract.tool_id,
                             target,
-                            parse_failure.line,
-                            parse_failure.column,
                             parse_failure.correction_allowed,
                         )
                         raise parse_failure from None
@@ -900,12 +894,8 @@ class GovernedTools:
                 self._runs[key] = replace(current, slot_busy=current.slot_busy | {target})
                 if inspection_scope is not None:
                     self._inspection_failed(
-                        ctx,
-                        contract,
-                        inspection_scope,
-                        "busy",
-                        call_id=effective.call_id,
-                        counted=False,
+                        ctx, contract, inspection_scope, "busy",
+                        call_id=effective.call_id, counted=False,
                     )
                 remaining: Literal[0, 1] = 0 if target in current.slot_retries else 1
                 raise ToolRejectedError(
@@ -965,7 +955,8 @@ class GovernedTools:
         )
         self._runs[key] = replace(runs, inspection_failures=(*runs.inspection_failures, failure))
         logger.info(
-            "security_inspection turn=%s call_ref=%s target=%s reason=%s counted=%s sql_started=%s",
+            "security_inspection turn=%s call_ref=%s target=%s reason=%s "
+            "counted=%s sql_started=%s",
             ctx.identity.turn_id,
             hashlib.sha256(call_id.encode()).hexdigest()[:16],
             contract.target_id,
