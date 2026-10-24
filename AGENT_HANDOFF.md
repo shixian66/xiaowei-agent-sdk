@@ -12,11 +12,11 @@
 | 产品代码基线 | 已 fetch 核对 `main@3aad626b42fc4ef2f37cafe342cf1826d453ca30`（含 #133），合入当前计划与独立 CC0 脚本分支 `codex/cloudcanal-phase1-plan`；使用隔离工作树，桌面原目录及其他任务修改保留 |
 | 源码与检查 | 当前源码仅保留 `src/xiaowei`；旧工程及专属测试、Compose、迁移入口、`compose-smoke` CI 和 Alembic 依赖已移除。保留产品测试、公共检查与旧回答兼容路径；旧工程历史可从 Git 查回 |
 | 当前存储与回答 | 应用 schema v15 不变；安全巡检可信失败元数据沿已有 JSON 保存，不改表或迁移。当前新回答保存 v4，旧 v2/v3/Legacy 与已绑定交付保持原语义，SDK 表不改 |
-| 锁定依赖 | SDK `0.22.3`、Lark Channel `1.4.0`、MCP `2.2.0`、sqlglot `30.17.0`、`nh3 0.3.7`、`tinycss2 1.5.1`、Pillow `13.0.0`、certifi `2026.10.19`（后两项为严格审计发现的既有漏洞定向升级） |
+| 锁定依赖 | SDK `0.22.3`、Lark Channel `1.4.0`、MCP `2.2.0`、sqlglot `30.17.0`、`nh3 0.3.7`、`tinycss2 1.5.1`、Pillow `13.0.0`、certifi `2026.10.19`（后两项为严格审计发现的既有漏洞定向升级）；开发工具链传递依赖 filelock `4.2.1`，不进入运行依赖 |
 | 正式入口 | `xiaowei serve`、`config check`、`model check`、`storage init/upgrade/cleanup`、`requests resend`；命令与环境准备以 README 为准 |
 | 最近有记录的公司部署 | 用户回报 `main@1de7b79`（前一版 `729f960d`）；此前 fat 一小时全窗 29,232 / ERR 6 / 多语句 1 与 DBA 回查一致；未独立核验服务器。本次未部署 |
 | 当前验收结论 | 安全巡检 A/B/C 已随 #133 合入，离线与 CI 通过，真实模型、公司源及渠道实收仍待验收；CloudCanal v1.7 计划已审查通过，等待 §4.1 现场确认和 CC0 实测结果；CC1 尚未授权开发。其他既有验收缺口见 §5，D 暂停且未实现 |
-| 当前任务授权 | 2026-10-24：同步最新 origin/main、解决文档冲突、运行指定检查、推送并创建 PR；不自行合并 PR，不开发 CC1，不调用真实服务，不打包、不部署 |
+| 当前任务授权 | 2026-10-24：同步主线并提交 PR #134；用户追加批准仅定向修复开发依赖 filelock，CI 全部通过后合并。不开发 CC1，不调用真实模型或公司服务，不打包、不部署 |
 
 原工作目录的 ARCHITECTURE 差异与未跟踪计划/公司配置保留，未复制到本工作树；本次未读取公司配置凭据。旧监控和回答修复记录保留为注明版本的证据，不作为本轮输入或展示范围扩展授权。
 
@@ -43,9 +43,9 @@
 
 [实施计划 v1.7](docs/superpowers/plans/2026-10-23-cloudcanal-phase1.md)已审查通过，等待[§4.1 现场确认](docs/superpowers/plans/2026-10-23-cloudcanal-phase1.md#41-连接与运行前置)和 CC0 实测结果；CC1 尚未授权开发。已审计划内容固定于 `21c6ef75a36bbc3404efcffffa8e663bae475f8b`，本次同步不改 C1—C5、D1 或 P1/P2。
 
-[CC0 脚本](scripts/cloudcanal_cc0.py)仅供用户在公司独立探查，未接入产品，使用方法见 [README](README.md#cloudcanal-cc0)；脚本及测试保持已审内容。本 PR 只交付计划、文档和探查脚本，不代表 CloudCanal 产品能力已实现，也不授予 CC1 开发、真实连接或部署权限。
+[CC0 脚本](scripts/cloudcanal_cc0.py)仅供用户在公司独立探查，未接入产品，使用方法见 [README](README.md#cloudcanal-cc0)；脚本及测试保持已审内容。本 PR 交付计划、文档和探查脚本，并按用户授权仅定向升级现有开发工具链传递依赖 filelock 至 4.2.1；不代表 CloudCanal 产品能力已实现，也不授予 CC1 开发、真实连接或部署权限。
 
-本次同步检查：文档一致性 2 项与 CC0 临时 loopback MCP 测试 16 项合计 **18 passed / 16.13s**；`ruff check --no-cache .` 和 `git diff --check` 通过。ARCHITECTURE 保留主线安全巡检契约与 CloudCanal/MCP 接入方向，仅去除一处重复首句；相对 main 的差异仅为计划、文档和独立脚本/测试，没有产品源码或依赖变更。未扩大全仓测试，未调用真实模型或公司服务。
+有效验证：同步版本 `f09011a` 的文档一致性 2 项与 CC0 临时 loopback MCP 测试 16 项合计 **18 passed / 16.13s**，Ruff/diff 通过。filelock 修复仅更新 uv.lock 中该包的版本与制品信息，CacheControl 的 FileCache / SeparateBodyFileCache 读写、覆盖、删除兼容检查通过，完整锁定依赖集的 `pip-audit --strict` 未发现已知漏洞；最终 CI 以 [PR #134](https://github.com/shixian66/xiaowei-agent-sdk/pull/134) 的当前 head 为准。ARCHITECTURE 保留主线安全巡检契约与 CloudCanal/MCP 接入方向，仅去除一处重复首句；没有产品源码或运行依赖变更，未新增本地全仓测试，未调用真实模型或公司服务。
 
 下一项：用户完成 §4.1 现场确认，运行 CC0 并带回打码结果；按真实工具契约确认 CC1 开发授权。MCP 超限标记、同会话修正及禁止续接仍是 CC1 待实现的验收要求，当前产品是否会在带事件编号的 SSE 超限后续接成功尚未复现；官方 Prometheus/Grafana 是否发送事件编号仍未知。
 
