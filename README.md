@@ -336,6 +336,46 @@ SDK_TEST_POSTGRES_URL=postgresql+asyncpg://postgres@127.0.0.1:55432/postgres \
 uv run --locked --extra dev python -m scripts.dialogue_real_model --profile "$XW_EVAL_PROFILE" --suite monitoring-reliability --repeats 3
 ```
 
+<a id="cloudcanal-cc0"></a>
+
+### CloudCanal CC0：公司现场只读契约检查
+
+`scripts/cloudcanal_cc0.py` 是独立取证脚本，不进入 `xiaowei` 产品入口，不启动 Agent、模型或数据库。目标为用户确认的 CloudCanal 6.4.0.2；当前只实现 HTTP(S) Streamable HTTP，支持该协议的 JSON/SSE 响应。使用本仓库 Python 3.11 与锁定依赖（Agents SDK 0.22.3、MCP 2.2.0），在含该脚本的仓库副本根目录运行。
+
+**先完成[计划 §4.1 的运行前确认](docs/superpowers/plans/2026-10-23-cloudcanal-phase1.md#41-连接与运行前置)。** 整条链接按密码保管，不贴到对话、命令参数或仓库。
+
+以下为 **Bash** 用法。默认由 SDK 完成连接协商（可能含 `server/discover`、`initialize`）、`tools/list` 分页、GET 监听及协议会话关闭，**不会调用任何业务工具**。先关闭 shell 命令回显，用隐藏输入设置环境变量；文件放临时私有目录，带回前人工复核：
+
+```bash
+set +x
+umask 077
+IFS= read -r -s -p 'MCP 链接（不回显）: ' CLOUDCANAL_MCP_URL
+printf '\n'
+export CLOUDCANAL_MCP_URL
+CC0_DIR="$(mktemp -d "${TMPDIR:-/tmp}/cloudcanal-cc0.XXXXXX")"
+uv run --locked python -m scripts.cloudcanal_cc0 > "$CC0_DIR/tools.redacted.json"
+```
+
+读完目录后，用户结合厂商文档/现场权限核实具体工具无业务副作用，再指定 **一个准确工具名和一个参数文件**。`--read-tool` 表示操作者的只读选择，不是脚本按名字或 `readOnlyHint` 自动判定安全；启停、重跑、修复及效果不明的工具不列入此次调用。参数文件为 JSON 对象，无参数也写 `{}`；文件仅留在公司，按秘密/业务材料保管，不带回原参数。
+
+```bash
+uv run --locked python -m scripts.cloudcanal_cc0 \
+  --read-tool '实际已确认只读的工具名' \
+  --arguments /安全目录/cc0-args.json \
+  --timeout 60 --max-response-bytes 1048576 > "$CC0_DIR/read.redacted.json"
+unset CLOUDCANAL_MCP_URL
+```
+
+每次最多调用该工具一次，不自动重试、不自动调用其他工具、不获取资源链接。默认网络总期限 60 秒、每个 HTTP 响应 1 MiB；连接、读取和会话关闭共用同一截止时间，到期后也不再发送关闭请求。这只是现场探查参数，不是产品配额或远端容量保证。超限后阻止 SDK 自动续接 SSE 流；超限/超时记录固定原因并退出，不能据此认为远端未执行或已停止。用户按实际契约缩小参数后取新样例，不能原样自动重放。返回中只记录固定错误类别，不打印 URL、HTTP 头、参数、异常正文或堆栈；不跟随跳转、不读取环境代理、不关闭 TLS 校验。
+
+输出含工具原名、参数/输出 schema 的结构和约束关键字、返回结构摘要、耗时及 `wire_bytes_observed`（观察到的响应体字节，含 JSON/SSE 封装）。失败记录为累计字节，超限时可能含最后一块的超额部分。`declared_cloudcanal_version` 是用户声明版本；`received` 仅表示协议结果已收到，不证明业务成功，`mcp_error` 是远端工具错误。
+
+业务叶子值和日志正文不输出；结果仅保留 schema 已声明的字段名，其他动态键隐藏。数组取前 3 项结构、深度到 8 层标记省略，摘要不等于完整数据。脚本不改写名称：最终报告若含完整链接/查询串（含解码形式）或至少 8 字符的路径段/查询值，只输出固定失败 `secret_in_output`，不输出原报告或命中片段。片段长度不是秘密识别依据，普通长片段可能误拒；短片段不单独检测。带回前仍须人工复核，并用无业务值的说明补齐单位、状态/错误码、分页/窗口及读取效果等语义。
+
+退出码：`0` 为协议操作完成；`1` 为连接/读取/MCP/容量/期限失败（可保留已完成目录）或 `secret_in_output`（整份报告不输出）；`2` 为配置/参数文件错误；`130` 为人工中断、结果可能未知。只有人工复核后的报告及获准语义说明带回本地。
+
+遇到 `connection_or_protocol_error`，在公司排查地址、网络、认证、协议和证书链。锁定 httpx2 使用系统信任库；脚本的 `trust_env=False` 忽略 `SSL_CERT_FILE`、`SSL_CERT_DIR` 及环境代理，公司 CA 应按公司规范安装到系统信任库，TLS 校验保持开启。
+
 ## 设计与开发
 
 采用 AI 辅助的小步开发：给出本次目标和完成判据，按当前计划实现、验证、审查、更新交接，再继续下一项。开发规则和风险分级统一见 [AGENTS.md](AGENTS.md)，不需要为每次改动重复填写五份文档。

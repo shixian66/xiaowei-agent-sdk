@@ -153,6 +153,8 @@ Web 宿主发布地址由 `.env` 的 `XW_WEB_BIND_ADDRESS` 决定，缺省 `0.0.
 
 ## 8. P4 监控增量与之后的扩展
 
+**CloudCanal 一期（2026-10-24，计划 v1.7）：** 范围、数据边界及修订 D1 见 [ARCHITECTURE](ARCHITECTURE.md#cloudcanal-mcp)。按[一期计划](docs/superpowers/plans/2026-10-23-cloudcanal-phase1.md)推进 CC0 用户在公司核约、带回复核材料 → 获开发授权后 CC1 任务/状态/指标 → CC2 日志与交叉排查 → 获部署授权后在公司做 CC3 真实验收；固定 C1—C5 与节点确认项均在该计划维护。独立 CC0 脚本用法见 [README](README.md#cloudcanal-cc0)，当前授权、版本及验证证据见 [handoff](AGENT_HANDOFF.md#cloudcanal-phase1-status)。
+
 **通知与定时任务增量（2026-10-22，A/B/C 已合入，C 为 #126/main@be8c155）：** 范围与权限唯一维护于 [ARCHITECTURE](ARCHITECTURE.md#scheduled-agent-tasks)，技术依据见[设计 v1.4](docs/superpowers/specs/2026-10-21-scheduled-agent-tasks.md)，按 [A–D 计划](docs/superpowers/plans/2026-10-21-scheduled-agent-tasks.md)串行交付：即时多机器人通知 → 一次性固定提醒 → 独立 Agent 周期任务 → Node 核心巡检。A 合并及 B 具体候选版本、独立复审和离线证据见 handoff，C 已合入，真实U6/U7仍开放；先单独交付自建飞书代理作为 C 公司验收前置，D 暂停且未实现；真实模型/服务、部署与用户接受分别记证。生产写逐次审批、指定操作群及既有实战退出条件不变。
 
 实战对话与飞书展示的修复依据见[修复实施计划](docs/superpowers/plans/2026-10-09-agent-dialogue-feishu-repair.md)。监控工具、SDK 原生审批及连接生命周期复用的切片与验收见[监控计划 §3.1–§3.7](docs/superpowers/plans/2026-10-09-monitoring-mcp.md)，合入与验证证据集中在 handoff。真实模型调查能力、Prometheus 服务端限额、Grafana 组织/版本/权限、Alertmanager 版本/认证/容量/HA 和群写审批按具体源分别验收；既有真实模型例外不自动覆盖新增切片。

@@ -9,14 +9,14 @@
 | 项目 | 已核对事实 |
 | --- | --- |
 | 仓库 | [shixian66/xiaowei-agent-sdk](https://github.com/shixian66/xiaowei-agent-sdk) |
-| 产品代码基线 | 已 fetch 核对 `main@1de7b79d61e0c934c5235a522dceb96ccd28aaf5`（含 #132）；原隔离工作树按 A→B→C 堆叠独立主题分支，当前为 `codex/security-plain-notification`，桌面原目录及其他任务修改保留 |
+| 产品代码基线 | 已 fetch 核对 `main@3aad626b42fc4ef2f37cafe342cf1826d453ca30`（含 #133），合入当前计划与独立 CC0 脚本分支 `codex/cloudcanal-phase1-plan`；使用隔离工作树，桌面原目录及其他任务修改保留 |
 | 源码与检查 | 当前源码仅保留 `src/xiaowei`；旧工程及专属测试、Compose、迁移入口、`compose-smoke` CI 和 Alembic 依赖已移除。保留产品测试、公共检查与旧回答兼容路径；旧工程历史可从 Git 查回 |
-| 当前存储与回答 | 应用 schema v15 不变；本次可信失败元数据沿已有 JSON 保存，不改表或迁移。当前新回答保存 v4，旧 v2/v3/Legacy 与已绑定交付保持原语义，SDK 表不改 |
-| 锁定依赖 | SDK `0.22.3`、Lark Channel `1.4.0`、MCP `2.2.0`、sqlglot `30.17.0`、`nh3 0.3.7`、`tinycss2 1.5.1`、Pillow `13.0.0`、certifi `2026.10.19`（后两项为严格审计发现的既有漏洞定向升级） |
+| 当前存储与回答 | 应用 schema v15 不变；安全巡检可信失败元数据沿已有 JSON 保存，不改表或迁移。当前新回答保存 v4，旧 v2/v3/Legacy 与已绑定交付保持原语义，SDK 表不改 |
+| 锁定依赖 | SDK `0.22.3`、Lark Channel `1.4.0`、MCP `2.2.0`、sqlglot `30.17.0`、`nh3 0.3.7`、`tinycss2 1.5.1`、Pillow `13.0.0`、certifi `2026.10.19`（后两项为严格审计发现的既有漏洞定向升级）；开发工具链传递依赖 filelock `4.2.1`，不进入运行依赖 |
 | 正式入口 | `xiaowei serve`、`config check`、`model check`、`storage init/upgrade/cleanup`、`requests resend`；命令与环境准备以 README 为准 |
 | 最近有记录的公司部署 | 用户回报 `main@1de7b79`（前一版 `729f960d`）；此前 fat 一小时全窗 29,232 / ERR 6 / 多语句 1 与 DBA 回查一致；未独立核验服务器。本次未部署 |
-| 当前验收结论 | 旧通知/定时初版及代理已合入主线；S0/S2 已通过独立复审。S1 首版 c44bbdf 全套通过；Claude 对 d29c2f0（受测 af797c0）确认 P1/P2(b) 通过，P2(a) 附件回答优先级回归已在 b08c042 本地修复并定向验证，用户确认 ce52831 复审通过；真实模型、平台输入/识图、客户端与 U5/U6/U7 仍未验收，D 暂停且未实现。精确版本和证据见 §5 |
-| 当前任务授权 | 用户已批准修订后的三份计划，授权 A→B→C 串行离线实现、测试和常规修复；分别主题分支、本地提交和独立审查。漏调用目标检测延期，不新增必查字段；不调用真实模型或公司服务，不合并、打包或部署；推送/PR 留待后续授权 |
+| 当前验收结论 | 安全巡检 A/B/C 已随 #133 合入，离线与 CI 通过，真实模型、公司源及渠道实收仍待验收；CloudCanal v1.7 计划已审查通过，等待 §4.1 现场确认和 CC0 实测结果；CC1 尚未授权开发。其他既有验收缺口见 §5，D 暂停且未实现 |
+| 当前任务授权 | 2026-10-24：同步主线并提交 PR #134；用户追加批准仅定向修复开发依赖 filelock，CI 全部通过后合并。不开发 CC1，不调用真实模型或公司服务，不打包、不部署 |
 
 原工作目录的 ARCHITECTURE 差异与未跟踪计划/公司配置保留，未复制到本工作树；本次未读取公司配置凭据。旧监控和回答修复记录保留为注明版本的证据，不作为本轮输入或展示范围扩展授权。
 
@@ -37,33 +37,31 @@
 
 ## 3. 当前计划与下一项工作
 
-### 当前：安全巡检 A/B/C 修复（离线实施）
+<a id="cloudcanal-phase1-status"></a>
 
-三片以独立主题分支串行堆叠，不曾推送、开 PR、合并、打包或部署；桌面原目录修改保留。下面只记录本片版本与有效验证，正式服务和模型仍未验收。
+### 当前：CloudCanal 一期计划与 CC0 探查
 
-| 切片 / 分支 | 精确基线与当前本地版本 | 验证与状态 |
-| --- | --- | --- |
-| [A 首跑/失败通知](docs/superpowers/plans/2026-10-23-scheduled-agent-first-run-recovery.md) / `codex/scheduled-agent-first-run-recovery` | base `1de7b79d61e0c934c5235a522dceb96ccd28aaf5` → head `445b4558bf302aa58ca3ba912bf96bc6dc6aa1f9` | 定时、通知及文档 **150 passed / 107.01s**（`/tmp/xw-a-review-regression.log`）；图片/日志补充 15 passed。独立复审关闭两项 P2，独立 3 passed / 24.19s。 |
-| [B 部分失败可信交付](docs/superpowers/plans/2026-10-23-security-inspection-incomplete-results.md) / `codex/security-inspection-incomplete-results` | base 为 A head → head `0f7097d1c6d04b1889b334eb2ae33db0d3a9946a` | 初实现 `10ea26ff` 相关 **379 passed / 87.97s**（`/tmp/xw-b-final-regression.log`）；Session 修复相关 **106 passed / 35.29s**（`/tmp/xw-b-replay-regression.log`），最终暂停恢复修复 **39 passed / 15.09s**（`/tmp/xw-b-pause-green.log`）。独立复审关闭 Session/暂停来源两项 P1，独立 5 passed / 2.90s。 |
-| [C 纯文本通知](docs/superpowers/plans/2026-10-23-security-plain-notification.md) / `codex/security-plain-notification` | base 为 B head；已独立审查代码 head `2c8e90d2d375b9b0312c655faaaa3a722ab687fb`，原 C 交付最终仅补交接文档；集成复审修复后的当前 HEAD 见 Git | 最终相关 **88 passed / 4.07s**（`/tmp/xw-c-final-regression.log`）；指定真实 Chrome brief/本地时间/历史不重取 **1 passed / 3.37s**（`/tmp/xw-c-browser.log`）。Ruff、修改范围 format、mypy（39 源文件）、文档和 diff 检查通过；独立复审通过，独立 **14 passed、44 deselected / 0.54s**。 |
+[实施计划 v1.7](docs/superpowers/plans/2026-10-23-cloudcanal-phase1.md)已审查通过，等待[§4.1 现场确认](docs/superpowers/plans/2026-10-23-cloudcanal-phase1.md#41-连接与运行前置)和 CC0 实测结果；CC1 尚未授权开发。已审计划内容固定于 `21c6ef75a36bbc3404efcffffa8e663bae475f8b`，本次同步不改 C1—C5、D1 或 P1/P2。
 
-**集成复审修复（基于 `6f4c272ab1209d9ac6e8b990be30b46d96c2440e`，仅本地提交）：** B-1 移除通知发送材料误加的 `run_turn_id`；该字段只在真实 SDK 暂停材料触发未交付说明，通知失败提示继续由当前上下文兜底。新增“同轮两次查询只发第一份、重复通知”回归，断言无暂停说明、只一条 POST/通知账本；原 mention 去重用例加强相同断言，真实 SDK 暂停对照保持。B-2 在治理统一 `_inspection_failed` 入口只记 turn、call_ref（call_id 哈希前 16 位）、target、reason、counted、sql_started，准备及执行两分支均断言日志存在且无 SQL/异常敏感哨兵。删除不可达的非巡检异常防护；定时已有 ⚪ 提示时不叠通用未完成前缀，其他未完成文案移除“预算内”。“先成功后失败”保留原时序口径，理由及只建任务的 Skill 限制已登记 B 计划，不新增执行限制。
+[CC0 脚本](scripts/cloudcanal_cc0.py)仅供用户在公司独立探查，未接入产品，使用方法见 [README](README.md#cloudcanal-cc0)；脚本及测试保持已审内容。本 PR 交付计划、文档和探查脚本，并按用户授权仅定向升级现有开发工具链传递依赖 filelock 至 4.2.1；不代表 CloudCanal 产品能力已实现，也不授予 CC1 开发、真实连接或部署权限。
 
-修复前 `/tmp/xw-review-red.log`：**6 failed、4 passed / 6.60s**，分别命中通知材料误判、两种失败无日志、定时前缀位置；真正审批暂停对照通过。修复后 `/tmp/xw-review-green.log`：通知、失败交付两个完整文件和安全通知路径完整文件，加真实 SDK 暂停对照，共 **92 passed / 39.99s**；该日志包含实际命令、基准 HEAD 和工作区差异哈希，不能冒充旧 HEAD 的干净版本测试。前次 B 的 379 项没有覆盖通知去重，不作为此缺陷已验证的依据。Ruff 和 mypy（39 源文件）通过，新增测试修改范围 format 通过。
+有效验证：同步版本 `f09011a` 的文档一致性 2 项与 CC0 临时 loopback MCP 测试 16 项合计 **18 passed / 16.13s**，Ruff/diff 通过。filelock 修复仅更新 uv.lock 中该包的版本与制品信息，CacheControl 的 FileCache / SeparateBodyFileCache 读写、覆盖、删除兼容检查通过，完整锁定依赖集的 `pip-audit --strict` 未发现已知漏洞；最终 CI 以 [PR #134](https://github.com/shixian66/xiaowei-agent-sdk/pull/134) 的当前 head 为准。ARCHITECTURE 保留主线安全巡检契约与 CloudCanal/MCP 接入方向，仅去除一处重复首句；没有产品源码或运行依赖变更，未新增本地全仓测试，未调用真实模型或公司服务。
 
-首次完整默认回归在修复提交 `46b9134fe33b36340b9a475c463807217a6179e7` 的干净工作区发现一项旧契约断言遗漏：`test_evidence.py::test_text_and_facts_mix_and_text_keeps_model_identity` 未登记 B 新增的 `inspection_notice` 字段；单节点复现 **1 failed / 0.72s**（`/tmp/xw-review-extra-red.log`）。本次只补字段并明确断言普通 Web/飞书回答该值为 None，其余严格断言保留，不改交付逻辑。已知失败后受控中断首次全量以尽早修正，实际结果 **1 failed、2808 passed、16 skipped、98 deselected / 1059.99s**，退出码 2（`/tmp/xw-review-full-46b9134-interrupted.log`），不记为全量通过。补正后的 Evidence 完整文件与文档检查 **24 passed / 5.65s**（`/tmp/xw-review-evidence-green.log`），Ruff/diff 通过；仍须从新提交重新完整运行。
+下一项：用户完成 §4.1 现场确认，运行 CC0 并带回打码结果；按真实工具契约确认 CC1 开发授权。MCP 超限标记、同会话修正及禁止续接仍是 CC1 待实现的验收要求，当前产品是否会在带事件编号的 SSE 超限后续接成功尚未复现；官方 Prometheus/Grafana 是否发送事件编号仍未知。
 
-第二次完整默认回归在 `a9e843ef2e774098e2ea9aa89038ee6bc92be0ca` 结束，实际为 **1 failed、5113 passed、235 skipped、98 deselected、5 warnings / 1761.37s**（`/tmp/xw-review-full-a9e843e-failed.log`）。唯一失败是 `test_r7_dialogue.py::test_unknown_or_unavailable_target_feedback_does_not_suggest_a_substitute[unavailable-schema_unavailable]` 仍要求 B 已替换的旧文案；单节点 **1 failed / 1.01s**（`/tmp/xw-review-r7-red.log`）。本次改为同时断言“不得用其他集群替代本集群”和“用户明确要求的其他集群照常调查”，保留 retry_this_turn=false、零数据库 I/O 和零 Evidence；同类旧文案搜索没有其他遗漏。补正后的 R7 完整文件与文档检查 **6 passed / 2.01s**（`/tmp/xw-review-r7-green.log`），Ruff/diff 通过。没有新增产品源码改动。235 项为未配置官方 MCP 二进制等既有条件跳过；5 条 warning 来自安全测试故意触发 socket/DNS 阻断。此次失败不记为完整通过，补正后从新提交完整重跑。
+已知既有说明问题（N5）：`config.py:152` 称群 tools 仅 StarRocks，实际 `runtime.py:432` 接纳所有已登记工具；在 CC1 启用 CloudCanal 群配置时更正注释并核对说明，执行授权沿用现状。
 
-本轮额外门槛为**提交后在最终干净 HEAD 运行完整默认回归**：`SDK_TEST_POSTGRES_URL=postgresql+asyncpg://postgres@127.0.0.1:55432/postgres uv run --locked --extra dev python -m pytest -q`。精确执行 HEAD、工作区差异哈希、完整命令、汇总和退出码统一记录在本地 `/tmp/xw-review-full.log`，以该记录确认结果，不以分阶段子集代替。日志设置 UV_OFFLINE=1；真实模型/公司源不在本轮范围。若完整测试失败，交付须报告具体失败并继续诊断，不能因子集通过豁免。
+### 安全巡检 A/B/C 修复（PR #133，已合入）
 
-A 沿原通知授权和逐次账本发送固定失败状态，超时/取消不补发，保留真实执行原因。B 的已分类源失败仅对安全只读工具交回模型，成功仍复用原 Evidence；SDK Session 保存最小来源依赖，审批恢复复核暂停账本，撤权不进模型。有效 Evidence 的分类不完整不等于未巡检；漏调用目标自动检测明确延期，没有新增必查字段、成功账本、任务表或证据版本。
+[PR #133](https://github.com/shixian66/xiaowei-agent-sdk/pull/133) 已合入 `main@3aad626b42fc4ef2f37cafe342cf1826d453ca30`，已审候选为 `e56eb24fc8d609134a5d0670ebb970e01ec70f9a`。最终状态：
 
-C 的纯文本不逐行列样本，检查计数、覆盖和追问提示保留，模型自主概括；Web、卡片、文件与历史 facts 原值保留。窗口/采集时间使用证据中的审计时区。61 样本合成 Profile 使用有限 256KB 模型请求预算，生产配置不改，不能据此确认公司容量；不调用真实模型，不证明其概括或归因质量。
+- [A 首跑/失败通知](docs/superpowers/plans/2026-10-23-scheduled-agent-first-run-recovery.md)：可信 automatic 文本任务跳过用户图片加载；失败沿当前授权与逐次账本尝试一次固定未完成通知，保留真实失败状态，超时、取消、unknown 不追加 POST。
+- [B 部分失败可信交付](docs/superpowers/plans/2026-10-23-security-inspection-incomplete-results.md)：仅安全只读工具的已分类源失败交回 Agent，其他明确请求的目标可继续，成功复用原 Evidence；失败来源在 Session 回放、历史交付及 SDK 审批恢复前复核权限，未完成状态由代码如实呈现。缺审计源时复用获准刷新；通知去重和安全失败日志已修复。漏调用目标检测仍延期，无新增必查字段、成功账本、表或 Evidence 版本。
+- [C 纯文本通知](docs/superpowers/plans/2026-10-23-security-plain-notification.md)：保留范围、覆盖、检查计数及必要提示，不逐行列样本；模型自主概括，Web、卡片、文件和历史 facts 保留明细，窗口及采集时间使用证据审计时区。
 
-下一项：原 A/B/C 分片已分别审查；针对 `6f4c272` 的集成审查修复待用户按新提交独立复审，旧通过结论不覆盖该修复。推送/PR/合并/部署等待对应授权，没有新 CI 链接。公司验收及截图见[公司清单](docs/starrocks-security-company-checklist.md#5-ab-故障恢复验收另获部署授权后执行)与[C 计划 §7](docs/superpowers/plans/2026-10-23-security-plain-notification.md#7-沿用的业务验收样例与公司缺口)。A0/A3、真实 3.5.14 语义/容量、真实模型和渠道实收仍开放；代理省略 openUrl 行为未知，必填协议保持。
+上述已审候选的有效证据：本地完整默认回归 **5114 passed、235 skipped、98 deselected、5 warnings / 1691.67s**；[CI 39989625721](https://github.com/shixian66/xiaowei-agent-sdk/actions/runs/39989625721) **9/9 job 通过**，其中 integration **5030 passed**、p3-release **84 passed**。Ruff、mypy、文档及 diff 检查通过；展示代码版本 `2c8e90d` 的真实 Chrome brief、本地时间和历史不重取用例通过，该展示代码随后未变。这些是 #133 的既有证据，本次 CloudCanal 同步不重跑其完整套件。
 
-此前报告呈现已随 PR #132 合入 main，范围与公司验收仍见[原报告计划](docs/superpowers/plans/2026-10-23-security-inspection-report-presentation.md)；不以本轮离线修复关闭这些验收项。
+公司验收见[公司清单 §5–§6](docs/starrocks-security-company-checklist.md#5-ab-故障恢复验收另获部署授权后执行)和 [C 计划 §7](docs/superpowers/plans/2026-10-23-security-plain-notification.md#7-沿用的业务验收样例与公司缺口)。A0/A3、真实 3.5.14 语义/容量、真实模型自主取证/归因/概括、渠道实收仍开放；代理省略 openUrl 行为未知，必填协议保持。此前报告呈现已随 [PR #132](https://github.com/shixian66/xiaowei-agent-sdk/pull/132) 合入，范围与公司验收见[原报告计划](docs/superpowers/plans/2026-10-23-security-inspection-report-presentation.md)。本次不打包、不部署，也不以离线或 CI 通过关闭这些验收项。
 
 ### CI 小范围优化（PR #131）
 
