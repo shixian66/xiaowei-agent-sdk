@@ -1,6 +1,6 @@
 # 小维：当前交接
 
-> 更新：2026-10-23，Asia/Shanghai。本文维护当前代码状态、有效证据、缺口与下一项工作。产品契约见 [ARCHITECTURE.md](ARCHITECTURE.md)，阶段与退出条件见 [DEVELOPMENT_PLAN.md](DEVELOPMENT_PLAN.md)，使用与运维见 [README.md](README.md) 和 [OPERATIONS.md](deploy/OPERATIONS.md)。
+> 更新：2026-10-25，Asia/Shanghai。本文维护当前代码状态、有效证据、缺口与下一项工作。产品契约见 [ARCHITECTURE.md](ARCHITECTURE.md)，阶段与退出条件见 [DEVELOPMENT_PLAN.md](DEVELOPMENT_PLAN.md)，使用与运维见 [README.md](README.md) 和 [OPERATIONS.md](deploy/OPERATIONS.md)。
 
 **OpenAI Agents SDK 负责 Agent Loop；小维负责权限、受治理工具执行、证据真实性和数据边界。**
 
@@ -9,14 +9,14 @@
 | 项目 | 已核对事实 |
 | --- | --- |
 | 仓库 | [shixian66/xiaowei-agent-sdk](https://github.com/shixian66/xiaowei-agent-sdk) |
-| 产品代码基线 | 已 fetch 核对 `main@3aad626b42fc4ef2f37cafe342cf1826d453ca30`（含 #133），合入当前计划与独立 CC0 脚本分支 `codex/cloudcanal-phase1-plan`；使用隔离工作树，桌面原目录及其他任务修改保留 |
+| 产品代码基线 | 本片从已 fetch 的 `origin/main@b208b2c377986a0e7da819590c38bea8000dbb19` 新建 `codex/sql-parse-recovery`；隔离工作树 `/Users/kloenguyen/.codex/worktrees/manual-starrocks-security/agent-SDK`。桌面原目录及主线 CC0 内容保留 |
 | 源码与检查 | 当前源码仅保留 `src/xiaowei`；旧工程及专属测试、Compose、迁移入口、`compose-smoke` CI 和 Alembic 依赖已移除。保留产品测试、公共检查与旧回答兼容路径；旧工程历史可从 Git 查回 |
 | 当前存储与回答 | 应用 schema v15 不变；安全巡检可信失败元数据沿已有 JSON 保存，不改表或迁移。当前新回答保存 v4，旧 v2/v3/Legacy 与已绑定交付保持原语义，SDK 表不改 |
 | 锁定依赖 | SDK `0.22.3`、Lark Channel `1.4.0`、MCP `2.2.0`、sqlglot `30.17.0`、`nh3 0.3.7`、`tinycss2 1.5.1`、Pillow `13.0.0`、certifi `2026.10.19`（后两项为严格审计发现的既有漏洞定向升级）；开发工具链传递依赖 filelock `4.2.1`，不进入运行依赖 |
 | 正式入口 | `xiaowei serve`、`config check`、`model check`、`storage init/upgrade/cleanup`、`requests resend`；命令与环境准备以 README 为准 |
-| 最近有记录的公司部署 | 用户回报 `main@1de7b79`（前一版 `729f960d`）；此前 fat 一小时全窗 29,232 / ERR 6 / 多语句 1 与 DBA 回查一致；未独立核验服务器。本次未部署 |
-| 当前验收结论 | 安全巡检 A/B/C 已随 #133 合入，离线与 CI 通过，真实模型、公司源及渠道实收仍待验收；CloudCanal v1.7 计划已审查通过，等待 §4.1 现场确认和 CC0 实测结果；CC1 尚未授权开发。其他既有验收缺口见 §5，D 暂停且未实现 |
-| 当前任务授权 | 2026-10-24：同步主线并提交 PR #134；用户追加批准仅定向修复开发依赖 filelock，CI 全部通过后合并。不开发 CC1，不调用真实模型或公司服务，不打包、不部署 |
+| 最近有记录的公司部署 | 用户回报镜像标签 `3aad626b42fc4ef2f37cafe342cf1826d453ca30`；未独立核验服务器。本次未部署，不据此认定 pre 的 StarRocks 版本 |
+| 当前验收结论 | SQL 解析恢复完成 P0—P2 离线实现和相关检查，最终差异待用户独立审查；pre 版本/实际错误格式、真实模型和公司验收未完成。安全巡检 A/B/C 与 CloudCanal 的既有缺口保留，见下文及 §5 |
+| 当前任务授权 | 按批准计划 P0 → P1 → P2 串行离线实施、相关测试和本地提交；不调用真实模型或公司服务，不推送、开 PR、合并、打包或部署 |
 
 原工作目录的 ARCHITECTURE 差异与未跟踪计划/公司配置保留，未复制到本工作树；本次未读取公司配置凭据。旧监控和回答修复记录保留为注明版本的证据，不作为本轮输入或展示范围扩展授权。
 
@@ -37,9 +37,53 @@
 
 ## 3. 当前计划与下一项工作
 
+<a id="sql-parse-recovery-status"></a>
+
+### 当前：SQL 解析失败的预算内恢复（离线候选）
+
+依据[批准计划](docs/superpowers/plans/2026-10-24-starrocks-sql-parse-recovery.md)，批准 blob 为 `01363706e852f36ab192652b67f52d9e2419c828`。当前分支基线见 §1；本地代码提交：P0 `967fbd933f23c370592a3adc266bc06a150fcf5d`、P1 `a16f12f1bef0a79d69d6e8b8848cf7400a91f097`、P2 **`867c7569517cf024087aadd2f4d5262f2ffe27c2`**。后续交接提交只更新本文与计划状态，不改变这一受测代码/测试版本；最终提交号直接从 Git 读取，不为回填本文自己的 SHA 再提交。
+
+已接通 Adapter → Governance → FunctionTool → 同一个 SDK Runner → Evidence/PolicySession 的窄恢复路径，产品契约见 [ARCHITECTURE §6](ARCHITECTURE.md#sql-parse-recovery)。S1 实际走已有成功查询、解析失败、修正查询和交付，产生两份真实记录的成功 Evidence；S2 只有解析失败且工具/SDK 轮次用尽时，沿既有无工具收尾，零成功 Evidence。S3 的内存/超时、权限、连接中断及未知错误仍停止；元数据模板不交给模型修复。繁忙后解析失败不留下旧 `slot_busy`，再试额度保留；并发的一次失败和一次成功均记账；旧账本缺字段、新账本原生暂停/恢复均不重放 SQL。外部模型和 StarRocks 驱动为替身，SDK、治理、Adapter、Evidence、PolicySession 与隔离 PostgreSQL 为实际路径；不手工制造成功 Evidence。
+
+**P0 依据与位置取舍：** 核对官方 tag 3.5.14 的 [ConnectProcessor](https://github.com/StarRocks/starrocks/blob/3.5.14/fe/fe-core/src/main/java/com/starrocks/qe/ConnectProcessor.java)、[ParsingException](https://github.com/StarRocks/starrocks/blob/3.5.14/fe/fe-core/src/main/java/com/starrocks/sql/parser/ParsingException.java) 与 [MysqlErrPacket](https://github.com/StarRocks/starrocks/blob/3.5.14/fe/fe-core/src/main/java/com/starrocks/mysql/MysqlErrPacket.java)：解析异常转为 AnalysisException，错误包未另设错误码时使用 1064，解析消息以固定签名开头。位置由 [ErrorMsgProxy](https://github.com/StarRocks/starrocks/blob/3.5.14/fe/fe-core/src/main/java/com/starrocks/sql/common/ErrorMsgProxy.java) 使用 Java MessageFormat 生成；其数字采用默认区域格式，可能出现千位分组（[Java 官方说明](https://docs.oracle.com/en/java/javase/17/docs/api/java.base/java/text/MessageFormat.html)）。按计划 §3.1 的省略选项，最终只保留受控 `parse_failed`，不实现位置解析；EXPLAIN 首行及后续行均不返回行列号，因此不会把前缀列偏移交给模型。这里验证的是官方版本源码，不等于已确认公司 pre 的版本和驱动实际返回格式。
+
+**失败先行证据：** P0 新正例在实现前 **9 failed**（`p0-red.log`）；P1 正式入口 S1/S2 在接线前 **2 failed**（`tool_failed`，`p1-red.log`）。位置分组反例在原位置实现下 **1 failed、3 passed**（`p2-position-red.log`），之后采用上述省略方案。普通 Session 的无 Evidence 输出投影不变，失败记账只进入既有 TurnLedger，不升级 Evidence/TurnAnswer 或数据库 schema。
+
+**最终代码验证：** 以下命令在干净的 **`867c7569517cf024087aadd2f4d5262f2ffe27c2`** 执行；完整命令、HEAD、工作区状态与结果保存在 `/tmp/xw-sql-parse-recovery/final-code-checks.log`。测试 PostgreSQL 为现有本地实例，各 fixture 创建/清理自身的隔离数据库；没有运行本地全量。
+
+```sh
+export UV_OFFLINE=1
+export SDK_TEST_POSTGRES_URL=postgresql+asyncpg://postgres@127.0.0.1:55432/postgres
+uv run --locked --extra dev python -m pytest tests/p1b/test_starrocks_adapter.py -k 'parse or query_failures_are_mapped or failures_while_reading or session' -q
+uv run --locked --extra dev python -m pytest \
+  tests/sdk_core/test_sql_parse_recovery.py \
+  tests/sdk_core/test_database_skills.py \
+  tests/security/test_docs_command_consistency.py \
+  tests/sdk_core/test_starrocks_tools.py::test_s1_formal_query_entry_preserves_sql_and_rejects_missing_database \
+  tests/sdk_core/test_starrocks_tools.py::test_schema_refresh_holds_only_slot_and_model_receives_busy_rejection \
+  tests/sdk_core/test_starrocks_tools.py::test_pool_timeout_before_sql_refunds_budget_but_after_sql_stops_turn \
+  tests/sdk_core/test_app.py::test_unfinished_query_is_its_own_system_failure \
+  tests/spike/test_sdk_resume_ledger.py::test_persisted_tool_budget_is_not_reset_after_restart -q
+uv run --locked --extra dev ruff check .
+uv run --locked --extra dev ruff format --check src/xiaowei/app.py src/xiaowei/tools.py tests/p1b/test_starrocks_adapter.py tests/sdk_core/test_app.py tests/sdk_core/test_sql_parse_recovery.py
+uv run --locked --extra dev mypy src/xiaowei
+git diff --check b208b2c377986a0e7da819590c38bea8000dbb19 HEAD
+```
+
+结果：Adapter **32 passed、143 deselected，1.58 秒**；SDK/Skill/文档及既有相关节点 **45 passed，7.12 秒**，合计 **77 passed**（含新恢复文件 15 项）。Ruff、列出的五文件格式检查、mypy **39 源文件**、diff 检查全部通过。`starrocks.py` / `governance.py` 保留未涉及的基线格式，撤去格式化器对原安全巡检代码的顺带重排。
+
+**改动文件清单：**
+
+- 执行与记账：`src/xiaowei/starrocks.py`、`src/xiaowei/governance.py`、`src/xiaowei/tools.py`、`src/xiaowei/app.py`。
+- 模型方法与权威契约：`src/xiaowei/skills/database_query.md`、`ARCHITECTURE.md`。
+- 回归：`tests/p1b/test_starrocks_adapter.py`、`tests/sdk_core/test_sql_parse_recovery.py`、`tests/sdk_core/test_app.py`（既有脚本 cite helper 识别 `invalid_sql` 无证据反馈，保留无 Evidence 的断言）。
+- 计划与交接：上述批准计划（原批准内容随 P0 收入 Git，后续只更新执行状态）、`AGENT_HANDOFF.md`。
+
+**未覆盖与下一步：** 交最终本地差异给用户独立审查；当前没有 PR/CI 链接，完整默认测试留给后续获准 PR 的 CI。公司 pre 的 StarRocks 版本、两条完整驱动异常及签名实际一致性未确认；3.5.14 官方源码、其他集群 A0 结果和离线替身不能替代。真实模型是否正确选择工具、修正而不改变问题语义、保留有效事实并形成合格诊断，仍按计划 S1/S2 在公司另行验收，并记录调用次数、耗时和用量；本地脚本模型不证明自主能力。没有调用公司服务，也未定位原 Compaction 告警根因。原安全巡检 A0/A3、渠道实收、代理 openUrl 行为与漏查目标延期等既有缺口不关闭。
+
 <a id="cloudcanal-phase1-status"></a>
 
-### 当前：CloudCanal 一期计划与 CC0 探查
+### CloudCanal 一期计划与 CC0 探查（既有工作）
 
 [实施计划 v1.7](docs/superpowers/plans/2026-10-23-cloudcanal-phase1.md)已审查通过，等待[§4.1 现场确认](docs/superpowers/plans/2026-10-23-cloudcanal-phase1.md#41-连接与运行前置)和 CC0 实测结果；CC1 尚未授权开发。已审计划内容固定于 `21c6ef75a36bbc3404efcffffa8e663bae475f8b`，本次同步不改 C1—C5、D1 或 P1/P2。
 

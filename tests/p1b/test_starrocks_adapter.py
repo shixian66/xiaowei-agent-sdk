@@ -1368,3 +1368,58 @@ def test_max_plan_lines_must_be_positive() -> None:
     assert TARGET.max_plan_lines == 500
     with pytest.raises(ValidationError):
         StarRocksTarget.model_validate({**TARGET.model_dump(), "max_plan_lines": 0})
+
+
+@pytest.mark.parametrize(
+    "message",
+    [
+        "Getting syntax error. Detail message: Unexpected input 'rows'.",
+        "Getting syntax error at line 1, column 1,273. Detail message: bad token.",
+        "Getting syntax error at line 2, column 7. Detail message: Unexpected input 'rows'.",
+        "Getting syntax error from line 2, column 7 to line 2, column 10. "
+        "Detail message: bad token.",
+    ],
+)
+async def test_parse_error_returns_only_safe_diagnostic(message: str) -> None:
+    drv = driver(ProgrammingError(1064, message))
+    error = await failure(adapter(drv).run_query(guarded()))
+    assert error.code is Code.QUERY_FAILED
+    assert error.parse_failed
+    assert only(drv).aborted
+
+
+@pytest.mark.parametrize(
+    ("number", "message"),
+    [
+        (1064, "mem limit exceeded"),
+        (1064, "query timeout"),
+        (
+            1064,
+            "runtime error: Getting syntax error at line 2, column 7. "
+            "Detail message: embedded text.",
+        ),
+        (1064, "Getting syntax errorish runtime failure"),
+        (1142, "Getting syntax error. Detail message: a different error code."),
+        (2013, "Getting syntax error. Detail message: connection lost."),
+    ],
+)
+async def test_parse_signature_does_not_recover_other_errors(number: int, message: str) -> None:
+    drv = driver(OperationalError(number, message))
+    error = await failure(adapter(drv).run_query(guarded()))
+    assert not error.parse_failed
+
+
+@pytest.mark.parametrize("phase", ["session", "fetch"])
+async def test_parse_signature_is_not_recovered_outside_sql_execute(phase: str) -> None:
+    message = "Getting syntax error at line 1, column 5. Detail message: wrong phase."
+    if phase == "session":
+        drv = driver(results={SESSION_SET: ProgrammingError(1064, message)})
+    else:
+        drv = driver(
+            Result(("region",), [("east",)]),
+            fail_read_at=0,
+            read_error=ProgrammingError(1064, message),
+        )
+    error = await failure(adapter(drv).run_query(guarded()))
+    assert not error.parse_failed
+    assert only(drv).aborted

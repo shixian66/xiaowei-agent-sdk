@@ -208,10 +208,17 @@ ERROR_MESSAGES: Final[Mapping[StarRocksErrorCode, str]] = {
 class StarRocksError(Exception):
     """StarRocks 访问失败；消息只有固定说明。"""
 
-    def __init__(self, code: StarRocksErrorCode, *, slot_wait: bool = False) -> None:
+    def __init__(
+        self,
+        code: StarRocksErrorCode,
+        *,
+        slot_wait: bool = False,
+        parse_failed: bool = False,
+    ) -> None:
         super().__init__(ERROR_MESSAGES[code])
         self.code = code
         self.slot_wait = slot_wait and code is _Code.POOL_TIMEOUT
+        self.parse_failed = parse_failed
 
 
 @dataclass
@@ -1034,13 +1041,13 @@ class StarRocksAdapter:
         started = time.monotonic()
         conn = await self._acquire()
         try:
-            rows, truncated, columns, code = await self._query(
+            rows, truncated, columns, error = await self._query(
                 conn, sql, args, max_rows, plan, limits or self._limits, clip_values
             )
         finally:
             self._slots.release()
-        if code is not None:
-            raise StarRocksError(code)
+        if error is not None:
+            raise error
         return QueryResult(
             target_id=self._target.target_id,
             sql=sql,
@@ -1188,8 +1195,8 @@ class StarRocksAdapter:
         plan: bool,
         limits: _ReadLimits,
         clip_values: bool,
-    ) -> tuple[list[dict[str, Scalar]], bool, tuple[str, ...], StarRocksErrorCode | None]:
-        """执行并读取；返回错误码而不是抛出，使错误在离开 ``except`` 后由调用方抛出。
+    ) -> tuple[list[dict[str, Scalar]], bool, tuple[str, ...], StarRocksError | None]:
+        """执行并读取；返回受控错误而不是抛出，使错误在离开 ``except`` 后由调用方抛出。
 
         ``plan`` 为真时结果必须恰好一列文本，列名换为 ``PLAN_COLUMN``；服务端列名不外传。
         """
@@ -1199,7 +1206,17 @@ class StarRocksAdapter:
             async with asyncio.timeout(self._target.client_timeout_seconds):
                 await self._prepare_session(conn)
                 stage = _Code.QUERY_FAILED
-                columns = await conn.execute(sql, args)
+                try:
+                    columns = await conn.execute(sql, args)
+                except MySQLError as error:
+                    if not _is_parse_error(error):
+                        raise
+                    return (
+                        [],
+                        False,
+                        (),
+                        StarRocksError(_Code.QUERY_FAILED, parse_failed=True),
+                    )
                 if (
                     any(not isinstance(name, str) for name in columns)
                     or len({name.casefold() for name in columns}) != len(columns)
@@ -1216,13 +1233,13 @@ class StarRocksAdapter:
             complete = not truncated
             return rows, truncated, columns, None
         except TimeoutError:
-            return [], False, (), _Code.TIMEOUT
+            return [], False, (), StarRocksError(_Code.TIMEOUT)
         except _SessionMismatchError:
-            return [], False, (), _Code.SESSION_SETUP_FAILED
+            return [], False, (), StarRocksError(_Code.SESSION_SETUP_FAILED)
         except _ResultContractError:
-            return [], False, (), _Code.RESULT_CONTRACT
+            return [], False, (), StarRocksError(_Code.RESULT_CONTRACT)
         except (MySQLError, OSError) as error:
-            return [], False, (), _query_code(error, stage)
+            return [], False, (), StarRocksError(_query_code(error, stage))
         finally:
             await self._release(conn, complete=complete)
 
@@ -1504,6 +1521,20 @@ def fitting_rows(
 
 def _json_size(value: object) -> int:
     return len(json.dumps(value, ensure_ascii=False, allow_nan=False).encode())
+
+
+# StarRocks 3.5.14 ParsingException：1064 也用于运行期错误，须核对固定开头。
+# 行列号通过 Java MessageFormat 的默认区域格式生成，不解析或外传位置。
+_PARSE_ERROR = re.compile(r"\AGetting syntax error(?= at line | from line |\. Detail message: |\Z)")
+
+
+def _is_parse_error(error: MySQLError) -> bool:
+    return (
+        _error_number(error) == 1064
+        and len(error.args) >= 2
+        and isinstance(error.args[1], str)
+        and _PARSE_ERROR.match(error.args[1]) is not None
+    )
 
 
 def _error_number(error: BaseException) -> int | None:

@@ -242,6 +242,14 @@ class ToolExecutionError(Exception):
         self.tool_id: str | None = None
 
 
+class SqlParseError(Exception):
+    """明确未通过解析的用户 SQL；只携带当前工具额度状态。"""
+
+    def __init__(self, *, correction_allowed: bool) -> None:
+        super().__init__("SQL未通过解析")
+        self.correction_allowed = correction_allowed
+
+
 class MonitoringReadError(Exception):
     """已执行的监控读取明确失败；可修正子类除外，本源本轮不可再读。"""
 
@@ -440,6 +448,7 @@ class TurnRuns:
 
     started: tuple[str, ...] = ()
     produced: tuple[tuple[str, str], ...] = ()
+    sql_parse_failures: tuple[str, ...] = ()  # 每次用户 SQL 解析失败的工具 ID，不是成功证据。
     proposal_rejections: tuple[str, ...] = ()  # 已完成只读准备、明确未形成 Action 的调用。
     monitoring_failures: tuple[MonitoringFailure, ...] = ()
     inspection_failures: tuple[SecurityInspectionFailure, ...] = ()
@@ -796,6 +805,32 @@ class GovernedTools:
                     raise
                 except Exception as exc:
                     if (
+                        isinstance(exc, StarRocksError)
+                        and exc.parse_failed
+                        and contract.tool_id in {"local/run_readonly_query", "local/explain_query"}
+                    ):
+                        current = self._runs.get(key, TurnRuns())
+                        self._runs[key] = replace(
+                            current,
+                            sql_parse_failures=(*current.sql_parse_failures, contract.tool_id),
+                            slot_busy=current.slot_busy - {target}
+                            if slot_retry
+                            else current.slot_busy,
+                        )
+                        parse_failure = SqlParseError(
+                            correction_allowed=self._used.get(key, 0) < ctx.budget.max_tool_calls,
+                        )
+                        logger.info(
+                            "sql_parse turn=%s call_ref=%s tool=%s target=%s code=invalid_sql "
+                            "correction_allowed=%s",
+                            ctx.identity.turn_id,
+                            hashlib.sha256(request.call_id.encode()).hexdigest()[:16],
+                            contract.tool_id,
+                            target,
+                            parse_failure.correction_allowed,
+                        )
+                        raise parse_failure from None
+                    elif (
                         isinstance(exc, StarRocksError)
                         and exc.code is StarRocksErrorCode.POOL_TIMEOUT
                         and exc.slot_wait
