@@ -63,8 +63,8 @@ def request(sql, *, tool_id=DIAGNOSTICS, **arguments):
                        target_id="tidb-a", arguments={"cluster": "tidb-a", "sql": sql, **arguments})
 
 
-async def prepared():
-    db, drv = adapter(diagnostic_results())
+async def prepared(outcomes=None):
+    db, drv = adapter(diagnostic_results() if outcomes is None else outcomes)
     cache = SchemaCache(db, clock=lambda: NOW)
     assert await cache.refresh()
     drv.connections.clear()
@@ -96,6 +96,10 @@ async def test_diagnostic_query_uses_only_source_dependencies_and_preserves_log_
     "SELECT q.Query_time FROM information_schema.CLUSTER_SLOW_QUERY AS q "
     "JOIN app.orders AS o ON 1=1 LIMIT 1",
     "SELECT * FROM SLOW_QUERY LIMIT 1",
+    "SELECT * FROM slow_query LIMIT 1",
+    "SELECT q.Query_time FROM information_schema.slow_query AS q "
+    "JOIN app.ORDERS AS o ON 1=1 LIMIT 1",
+    "WITH slow_query AS (SELECT id FROM app.ORDERS) SELECT * FROM slow_query",
     "WITH SLOW_QUERY AS (SELECT id FROM app.orders) SELECT * FROM SLOW_QUERY",
     "SELECT * FROM metrics_schema.tidb_query_duration",
 ])
@@ -117,3 +121,20 @@ async def test_registered_diagnostic_columns_use_existing_describe_table():
     result = await execute.run(execute.check(req))
     assert [r["name"] for r in result.payload["rows"]] == [f[0] for f in FIELDS]
     assert not any(s == SQL for s in statements(drv))
+
+
+@pytest.mark.parametrize("table,canonical", [
+    ("slow_query", "SLOW_QUERY"), ("Data_Lock_Waits", "DATA_LOCK_WAITS")
+])
+async def test_diagnostic_table_case_preserves_sql_and_canonical_dependencies(table, canonical):
+    sql = f"SELECT Query_time FROM information_schema.{table} LIMIT 3"  # noqa: S608 -- 固定离线输入
+    outcomes = diagnostic_results(extra_sources={"DATA_LOCK_WAITS": FIELDS})
+    outcomes[sql] = Result(("Query_time",), [(2.0,)])
+    _, drv, _, tools = await prepared(outcomes)
+    execute = tools.executes[(DIAGNOSTICS, "tidb-a")]
+    result = await execute.run(execute.check(request(sql)))
+    assert result.payload["rows"] == [{"Query_time": 2.0}]
+    assert [(d.database, d.name, d.use) for d in result.dependencies] == [
+        ("INFORMATION_SCHEMA", canonical, "read")
+    ]
+    assert statements(drv).count(sql) == 1

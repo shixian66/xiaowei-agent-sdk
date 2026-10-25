@@ -375,16 +375,22 @@ def diagnostic_config(env: Env):
 
 
 @pytest.mark.loopback
-async def test_tidb_formal_diagnostics_returns_slow_queries_with_source_evidence(env: Env):
+@pytest.mark.parametrize("lowercase", [False, True])
+async def test_tidb_formal_diagnostics_returns_slow_queries_with_source_evidence(
+    env: Env, lowercase
+):
     from tests.tidb.test_diagnostics import SQL, diagnostic_results
 
-    _, drv = adapter(diagnostic_results())
+    sql = SQL.replace("CLUSTER_SLOW_QUERY", "cluster_slow_query") if lowercase else SQL
+    outcomes = diagnostic_results()
+    outcomes[sql] = outcomes[SQL]
+    _, drv = adapter(outcomes)
     env.drv = drv
     async with env.running(diagnostic_config(env)) as served:
         await served.page()
         message = env.scripts.add(
             "在 tidb-a 查询 2026-09-30 15:00 到 16:00 超过一秒、最慢的三次执行，不重跑原 SQL",
-            tool_call("query_diagnostics", cluster="tidb-a", sql=SQL), cite(),
+            tool_call("query_diagnostics", cluster="tidb-a", sql=sql), cite(),
         )
         body = (await served.turn(message, "diagnose")).json()
         assert body["state"] == "completed", body
@@ -392,7 +398,7 @@ async def test_tidb_formal_diagnostics_returns_slow_queries_with_source_evidence
                  if f["tool_id"] == "local/query_diagnostics"]
         assert len(facts) == 1 and facts[0]["rows"][0]["Query_time"] == 9.0
         assert "run_readonly_query" not in env.scripts.tools_seen(message)[0]
-        assert statements(drv).count(SQL) == 1
+        assert statements(drv).count(sql) == 1
         assert not any(s.startswith("SELECT sensitive") for s in statements(drv))
         assert await served.finish() == 0
     assert await env.scalar("SELECT count(*) FROM xiaowei_evidence") == 1

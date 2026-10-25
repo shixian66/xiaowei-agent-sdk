@@ -110,3 +110,29 @@ async def test_explain_database_error_is_terminal_and_not_replayed():
         await db.explain(guard_explain_query(sql, POLICY))
     assert failure.value.code is StarRocksErrorCode.QUERY_FAILED
     assert statements(drv).count("EXPLAIN " + sql) == 1 and sql not in statements(drv)
+
+
+@pytest.mark.parametrize("version", ["6.5.5", "7.5.3"])
+async def test_explain_view_case_uses_snapshot_key_and_retains_version_boundary(version):
+    from tests.tidb.test_diagnostics import prepared, request
+
+    from xiaowei.governance import ToolRejectedError
+    from xiaowei.starrocks_tools import EXPLAIN_QUERY
+
+    sql = "SELECT id FROM app.V LIMIT 3"
+    outcomes = schema_results(version)
+    outcomes["EXPLAIN " + sql] = PLANS
+    _, drv, _, tools = await prepared(outcomes)
+    execute = tools.executes[(EXPLAIN_QUERY, "tidb-a")]
+    req = request(sql, tool_id=EXPLAIN_QUERY)
+    if version == "6.5.5":
+        with pytest.raises(ToolRejectedError):
+            execute.check(req)
+        assert drv.attempts == 0 and statements(drv) == []
+    else:
+        checked = execute.check(req)
+        assert checked[1].referenced_objects == frozenset({("app", "v")})
+        result = await execute.run(checked)
+        assert [(d.database, d.name) for d in result.dependencies] == [("app", "v")]
+        assert statements(drv).count("EXPLAIN " + sql) == 1
+        assert sql not in statements(drv)

@@ -342,7 +342,7 @@ uv run --locked --extra dev python -m scripts.dialogue_real_model --profile "$XW
 
 已接入 TiDB 业务只读查询、结构/索引与现有 Web/飞书装配。B/C 本地候选增加受保护 explain_query、query_diagnostics（慢日志、锁/事务、热点/Region/Store、组件及 TiFlash 来源）和 T8 执行前评估 Skill。已在本地 TiUP 的精确 v6.5.5 / v7.5.3 实例验证 A 查询、结构与视图路径，正式 Web 成功/报错路径使用真实数据库、脚本模型；不含 TiFlash/监控，也不证明公司 TLS/账号/容量。真实模型、公司环境与飞书效果仍按[公司清单](docs/superpowers/plans/2026-10-24-tidb-query-diagnosis.md#tidb-company-acceptance)验收，不表示可上线。
 
-在现有配置的 `targets` 数组中加入 [TiDB 目标示例](examples/tidb-target.example.json)的整个对象。连接字段在 `tidb` 下；版本由 `tidb_version()` 读取，不能配置版本号。为三个集群分别填写唯一 target_id、连接信息、配置默认库和凭据安全引用；`description` / `business_context` 写清共享监控源与该集群标签。所有目标继续受现有工具/数据授权约束，没有默认集群。示例只含安全引用和虚构地址；公司实际参数由用户或 DBA 配置，启动方式沿用本文已有入口。
+在现有配置的 `targets` 数组中加入 [TiDB 目标示例](examples/tidb-target.example.json)的整个对象。示例的 `schema_limits` 容量是业务对象与已登记诊断表及其列的合计，不是仅业务表的预算；应按合计规模配置。连接字段在 `tidb` 下；版本由 `tidb_version()` 读取，不能配置版本号。为三个集群分别填写唯一 target_id、连接信息、配置默认库和凭据安全引用；`description` / `business_context` 写清共享监控源与该集群标签。所有目标继续受现有工具/数据授权约束，没有默认集群。示例只含安全引用和虚构地址；公司实际参数由用户或 DBA 配置，启动方式沿用本文已有入口。
 
 未限定 SQL 表名按配置默认库解析；双引号表示字符串。TiDB 会话固定 sql_mode、utf8mb4 / utf8mb4_bin 并回读，失败不发业务 SQL。用户 SQL 仅按批准规则处理外层 LIMIT，支持 OFFSET、普通注释和允许的计划类 hint；可执行注释、锁定读及资源类 hint 会被拒绝。执行后的数据库错误或未知结果中止整轮。只读账号及 SHOW VIEW 是否授予、PROCESS 与内存保护由 DBA 核实；业务快照排除系统库，不能证明安全可读的视图只排除该对象。诊断表另按登记范围发现列；query_diagnostics 需在 access.grants 与 data_policy.model_tools 中按现有规则授权 local/query_diagnostics，只接受完整限定的登记诊断表，不与业务表 JOIN。已有 describe_table 可查看其列。受保护 EXPLAIN 不运行原查询；6.5.5 的受限子查询/视图不可取计划。
 
