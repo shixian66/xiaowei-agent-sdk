@@ -18,7 +18,8 @@ FIELDS = (("INSTANCE", "varchar(64)"), ("Time", "datetime"), ("Query_time", "dou
           ("Query", "text"), ("Plan", "text"))
 SQL = (
     "SELECT INSTANCE, Query_time, Query FROM information_schema.CLUSTER_SLOW_QUERY "
-    "WHERE Query_time > 1 ORDER BY Query_time DESC LIMIT 3"
+    "WHERE Time >= '2026-09-30 15:00:00' AND Time < '2026-09-30 16:00:00' "
+    "AND Query_time > 1 ORDER BY Query_time DESC LIMIT 3"
 )
 
 

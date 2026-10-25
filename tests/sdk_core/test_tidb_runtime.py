@@ -383,7 +383,7 @@ async def test_tidb_formal_diagnostics_returns_slow_queries_with_source_evidence
     async with env.running(diagnostic_config(env)) as served:
         await served.page()
         message = env.scripts.add(
-            "列出超过一秒、最慢的三次执行，不重跑原 SQL",
+            "在 tidb-a 查询 2026-09-30 15:00 到 16:00 超过一秒、最慢的三次执行，不重跑原 SQL",
             tool_call("query_diagnostics", cluster="tidb-a", sql=SQL), cite(),
         )
         body = (await served.turn(message, "diagnose")).json()
