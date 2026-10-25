@@ -208,7 +208,8 @@ class TiDBAdapter(StarRocksAdapter):
             else:
                 raise _ResultContractError
         limit = self.target.policy.max_rows
-        columns = await conn.execute(f"SHOW WARNINGS LIMIT {limit + 1}", None)
+        # TiDB 不支持 SHOW WARNINGS LIMIT；仍以非缓冲游标按行数/字节/期限有界读取。
+        columns = await conn.execute("SHOW WARNINGS", None)
         if columns != ("Level", "Code", "Message"):
             raise _ResultContractError
         rows, clipped = await self._read(conn, columns, limit, False, self._limits)

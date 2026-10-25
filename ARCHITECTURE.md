@@ -380,9 +380,9 @@ Alertmanager 原生 API v2 若由薄 Adapter 直连，须支持其 Web 配置可
 
 <a id="tidb-query-diagnosis"></a>
 
-### TiDB 查询与诊断（已确认设计，A 离线候选）
+### TiDB 查询与诊断（已确认设计，A 待公司验收）
 
-已确认 **3 个二进制自部署生产集群：两个 v7.5.3、一个 v6.5.5，含 TiFlash**。本地纯离线开发，不运行 TiDB；用户带候选发行包到公司部署，以只读工具和公司模型验收。阶段、版本差异与固定 T1—T8 见 [TiDB A/B/C 计划](docs/superpowers/plans/2026-10-24-tidb-query-diagnosis.md)，两次公司安排见[验收清单](docs/superpowers/plans/2026-10-24-tidb-query-diagnosis.md#tidb-company-acceptance)。A/B/C 结构保持，B4 单独验收 T8，C 复用 T6 等待证据；A 的查询与结构已接入现有执行链，B/C 仍未实现；离线候选不表示阶段退出或部署授权。
+已确认 **3 个二进制自部署生产集群：两个 v7.5.3、一个 v6.5.5，含 TiFlash**。用户已授权本地 TiUP 精确两版真实库测试；生产仍由用户带候选发行包到公司部署，以只读工具和公司模型验收。阶段、版本差异与固定 T1—T8 见 [TiDB A/B/C 计划](docs/superpowers/plans/2026-10-24-tidb-query-diagnosis.md)，两次公司安排见[验收清单](docs/superpowers/plans/2026-10-24-tidb-query-diagnosis.md#tidb-company-acceptance)。A/B/C 结构保持，B4 单独验收 T8，C 复用 T6 等待证据；A 的查询与结构已接入现有执行链，B/C 仍未实现；本地验证不表示阶段退出或生产部署授权。
 
 - **能力分工。** 查询层提供受治理的业务数据、结构、系统表、慢 SQL、锁/事务、热点/Region 和组件状态读取；诊断由现有单 Agent 在预算内自主选择、关联这些证据并解释。复用 SDK Loop、治理、Evidence、Session、渠道及监控，只增加必要 Adapter、工具语义和少量领域 Skill，不增加固定诊断程序、Planner 或驱动注册平台。工具粒度按整体成本判断：先用通用诊断入口，T1—T7 固定任务证明确有收益时可加共用执行链的薄封装，不以通用入口无法完成任务为前提，也不预先铺设专用工具；T8 复用这些工具。
 - **使用者与范围。** 沿用 StarRocks 已批准的用户/群/工具治理和全部配置目标可访问的约定，不新增角色或按用户的目标授权。业务对象按真实只读账号 SELECT 权限发现，不增加手写业务表名单；业务快照排除 INFORMATION_SCHEMA、PERFORMANCE_SCHEMA、METRICS_SCHEMA、mysql 等系统库，METRICS_SCHEMA 的 Prometheus HTTP 读取仍走已有监控治理。query_diagnostics 只访问已登记诊断表，业务表及与业务表 JOIN 等实际依赖在 I/O 前拒绝；诊断列从已登记表的元数据发现，不维护版本/列映射。普通表沿用零行权限探测；视图不能无条件做普通 SELECT：7.5.3 用保护变量 ON 并回读后的 EXPLAIN 零行模板，遵守 SHOW VIEW 等权限；6.5.5 先读 VIEWS 定义，按 B1 同一规则筛查，含受限结构或定义不明标“可读性未知”且不入快照，确认安全的定义才做零行权限探测。TiDB Adapter 的同一个 probe 实现供结构刷新、证据复核及所有结构/引用工具调用。仅在视图可读性探测中按对象分类：1345 ErrViewNoExplain 标“可读性未知”，1356 ErrViewInvalid 标不可读，均只排除该对象，不使整批刷新失败；其他未知错误仍按既有规则失败，错误码以现场为准。未知不冒充不可读或可读；不自动扩权，不以普通 SELECT 兜底受保护探测，也不改变用户 SQL 等执行失败中止规则。依据及验证见计划 A3 / B2 / C04，数据库当前权限仍是实际边界。

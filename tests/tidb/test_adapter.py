@@ -29,7 +29,7 @@ SESSION_READ = (
 VERSION_SQL = "SELECT tidb_version()"
 PROTECTION_SET = "SET SESSION tidb_opt_enable_non_eval_scalar_subquery = ON"
 PROTECTION_READ = "SELECT @@SESSION.tidb_opt_enable_non_eval_scalar_subquery"
-WARNINGS_SQL = "SHOW WARNINGS LIMIT 6"
+WARNINGS_SQL = "SHOW WARNINGS"  # 两版实测均不支持 LIMIT；由非缓冲读取和容量限制截断。
 VALUES = (
     1000,
     1073741824,
