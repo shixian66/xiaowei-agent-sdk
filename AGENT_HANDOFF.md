@@ -2,7 +2,7 @@
 
 > 更新：2026-10-25，Asia/Shanghai。本文维护当前代码状态、有效证据、缺口与下一项工作。产品契约见 [ARCHITECTURE.md](ARCHITECTURE.md)，阶段与退出条件见 [DEVELOPMENT_PLAN.md](DEVELOPMENT_PLAN.md)，使用与运维见 [README.md](README.md) 和 [OPERATIONS.md](deploy/OPERATIONS.md)。
 
-> TiDB 计划局部更新：2026-10-24。下述原产品快照未作全面复核；TiDB 调查基线、当前授权与验证缺口单列在 §3，不以旧快照或新计划推定公司部署状态。
+> TiDB 开发局部更新：2026-10-25。下述原产品快照未作全面复核；TiDB 调查基线、当前授权与验证缺口单列在 §3，不以旧快照或新计划推定公司部署状态。
 
 **OpenAI Agents SDK 负责 Agent Loop；小维负责权限、受治理工具执行、证据真实性和数据边界。**
 
@@ -39,15 +39,15 @@
 
 ## 3. 当前计划与下一项工作
 
-### TiDB 查询与诊断（2026-10-25，A 离线候选）
+### TiDB 查询与诊断（2026-10-25，A 离线完成，待公司验收）
 
-用户批准的文档 `f269bf9` 已合入并推送主线 `c501431`；随后在隔离分支 `codex/tidb-query-a` 实现 A1/A2/A3。原用户工作区其他任务改动保留。契约见 [ARCHITECTURE](ARCHITECTURE.md#tidb-query-diagnosis)，固定 T1—T8 与两次公司安排见 [A/B/C 计划](docs/superpowers/plans/2026-10-24-tidb-query-diagnosis.md)，退出条件见 [DEVELOPMENT_PLAN](DEVELOPMENT_PLAN.md#tidb-abc)。未合并实现、未部署。
+用户批准的文档 f269bf9 已合入并推送主线 c501431（远端 CI 重跑后 9 项通过）；随后在隔离分支 codex/tidb-query-a 实现 A1/A2/A3，未合并实现或部署，原工作区其他任务修改保留。契约见 [ARCHITECTURE](ARCHITECTURE.md#tidb-query-diagnosis)，固定 T1—T8 与两次公司安排见 [A/B/C 计划](docs/superpowers/plans/2026-10-24-tidb-query-diagnosis.md)，退出条件见 [DEVELOPMENT_PLAN](DEVELOPMENT_PLAN.md#tidb-abc)。
 
-A 已接入混合目标配置、TiDB 会话/版本回读、原 SQL 与外层 LIMIT、结构/有序主键索引、分版本视图探测及逐对象 1345/1356 分类。复用已有 MySQL 传输/期限/关闭、工具与历史权限链；TiDB 数据库失败始终中止，不继承 StarRocks 解析恢复。工作方法按数据库类型区分。B/C 与 T8 尚未实现，A 不开放用户 EXPLAIN 或诊断系统表入口；scheduled_tasks 路径未覆盖。
+A 已接入混合目标配置、TiDB 会话/版本回读、原 SQL 与外层 LIMIT、结构/有序主键索引、分版本视图探测及逐对象 1345/1356 分类。复用已有传输/期限/关闭、工具与历史权限链；TiDB 数据库失败始终中止，不继承 StarRocks 解析恢复。B/C 与 T8 尚未实现，A 不开放用户 EXPLAIN 或诊断系统表入口；scheduled_tasks 路径未覆盖。
 
-离线证据：锁定环境下，相关 SQLGuard/Adapter/schema/runtime 回归 330 项通过；正式 Web → SDK Runner → 治理 → TiDB Adapter → Evidence/真实隔离 PostgreSQL 已跑查询成功、数据库失败中止、可执行注释零 I/O 拒绝、撤权追问及诊断用途边界。TiDB 协议和模型均用替身，不能证明真实版本行为或 Agent 自主能力。Ruff、mypy、文档一致性 2 项通过；完整非部署测试及整分支独立审查进行中，最终结果随后更新。
+代码候选 6aed01b：完整非部署回归 5183 passed、235 skipped、98 deselected；安全检查 65 passed，Ruff / mypy（40 模块）通过。正式 Web → SDK Runner → 治理 → TiDB Adapter → Evidence/真实隔离 PostgreSQL 覆盖查询成功、数据库错误中止、可执行注释零 I/O、撤权追问、诊断用途无业务执行工具及三 TiDB + StarRocks 目标路由；协议与模型均为替身。首次完整回归发现 5 项配置错误反馈失败，已修复联合类型标签重复路径及输入值回显，并用真正未知类型替换过时的 tidb 反例；新反例先 RED 后 GREEN。独立审查 c501431..986051f 与补审 986051f..6aed01b 均无已证实的重要问题；独立复跑 TiDB 97 项及配置/脱敏 16 项通过。部署回归 84 项、纯运行依赖 wheel 两入口/Skill 加载在 986051f 通过；依赖未变，审计无已知漏洞。最终文档一致性 2 项、链接/锚点及 diff 检查通过。
 
-下一项：完成 A 候选独立审查、常规修复和必需检查；公司第一次按 [C01—C07](docs/superpowers/plans/2026-10-24-tidb-query-diagnosis.md#tidb-company-acceptance)核对 3 集群的 TLS/只读账号（含 PROCESS/SHOW VIEW）、会话与资源限制、两版真实输出/视图行为，并跑 T1/T2/T5 的真实模型任务。校准前夹具只来自文档与源码；A 不得据此退出。第一次无阻断问题才继续离线 B/C；不因无锁等待/故障样本关闭 T6/T7 等开放项。真实 TiDB、模型、飞书、部署和用户验收均无本轮证据。
+下一项：公司第一次按 [C01—C07](docs/superpowers/plans/2026-10-24-tidb-query-diagnosis.md#tidb-company-acceptance)核对 3 集群 TLS/只读账号（含 PROCESS/SHOW VIEW）、会话与资源限制、两版真实输出/视图行为，并跑 T1/T2/T5 的真实模型任务。校准前夹具只来自文档与源码；A 不据此退出。第一次无阻断问题才继续离线 B/C；不因无锁等待/故障样本关闭 T6/T7 等开放项。真实 TiDB、模型、飞书、生产部署和用户验收均无本轮证据。
 
 ### 当前：SQL 解析失败的预算内恢复（离线候选）
 

@@ -1,6 +1,6 @@
 # TiDB 查询、Agent 诊断与执行前评估：A / B / C 开发计划
 
-> 状态：2026-10-25，审查通过的文档已合入主线，A 离线候选开发中，待独立审查和公司验收。用户已授权合并后连续开发、测试和常规修复；不调用公司数据库/真实模型，不部署。本地纯离线，真实工具和模型仍由用户在公司只读验收。
+> 状态：2026-10-25，审查通过的文档已合入主线，A 离线完成，待公司验收（精确代码版本独立审查及补审通过）。用户已授权合并后连续开发、测试和常规修复；不调用公司数据库/真实模型，不部署。本地纯离线，真实工具和模型仍由用户在公司只读验收。
 
 ## 1. 目标、依据与实施基线
 
@@ -12,9 +12,9 @@
 
 - 已确认环境：3 个生产集群，两个 v7.5.3、一个 v6.5.5，均二进制自部署，有 TiFlash。本地不能运行 TiDB，不用 Docker / tiup，也没有公司隔离测试环境。
 - 使用者、目标和诊断范围沿用 StarRocks；获准诊断数据允许进入模型。三个集群共用一套 Prometheus / Grafana，以标签区分，用户负责接入及提供目标与标签说明。
-- 源码调查基线为 `3aad626b42fc4ef2f37cafe342cf1826d453ca30`；已 fetch 核对迁移基线 `b208b2c377986a0e7da819590c38bea8000dbb19`，所引产品源码、调用链和行号未变。实施前再核对，不以文档证明公司部署状态。
+- 源码调查与下表历史行号对应 `3aad626b42fc4ef2f37cafe342cf1826d453ca30`；实施基线为文档合并提交 `c501431b5bdfaadf77ff25cd4c492555900237df`。已核对其主线增量 `da7f32e` 的 StarRocks 解析恢复：TiDB 不进入该分支，仍按 SQL 发出后失败中止整轮；当前调用链以源码为准，不以历史行号或文档证明公司部署状态。
 - 技术栈沿用 Python 3.11、`openai-agents==0.22.3`、`asyncmy==0.2.15`、`sqlglot==30.17.0`、SQLAlchemySession / PostgreSQL；这是调查基线的依赖，不是已验证的 TiDB 兼容声明。不预先升级依赖或加入新的数据库 SDK。
-- 当前证据包括小维源码、PingCAP 文档、精确版本源码和锁定 SQLGlot 的本地解析实验。真实 TiDB、真实模型、正式 Web / 飞书、部署和用户验收均未进行。
+- 当前证据包括源码、PingCAP 文档、锁定 SQLGlot 实验及 A 离线协议/正式 Web 调用链测试。Web 使用真实应用、治理与隔离存储，但 TiDB 和模型均为替身；真实 TiDB、真实模型、飞书、生产部署和用户验收均未进行。
 
 ## 2. 已有能力与最小新增范围
 
@@ -302,7 +302,7 @@ A 已建立 `tests/tidb/` 与正式 runtime 的离线测试，检查证据统一
 | --- | --- | --- |
 | C01 / 第一次 | 核对候选发行包及公司模型配置；列出三个集群 ID、两个 7.5.3 / 一个 6.5.5；各目标说明写共用数据源名称和标签值 | 凭据只用安全引用；工具调用指定 cluster、没有默认集群；“查一下订单库”的多集群歧义先澄清，不跨集群找表 |
 | C02 / 第一次，3 集群各一次 | 连接、TLS、实际 SELECT 权限、PROCESS、资源设置回读、已有慢日志可读性冒烟；核对账号对需查询视图的 SHOW VIEW 权限，是否授予由 DBA 决定；DBA 核实账号无业务写权限 | 只回各项通过/失败/未知及脱敏错误，视图探测的 1345/1356 按 A3 分类并核对现场错误码；不靠执行写语句证明只读，不把空日志当不可读或无慢 SQL |
-| C03 / 第一次，两版 | 执行下方版本、会话变量（含实际 SESSION sql_mode）、@@GLOBAL.sql_mode、计划所需系统表列及普通 EXPLAIN 采集 | SESSION sql_mode 与架构固定模式集合相等，三种冲突模式均不含；GLOBAL 仅记录原配置，不要求两者相同、不修改全局值；脱敏输出校准夹具，记录版本/集群，未校准不称真实兼容 |
+| C03 / 第一次，两版 | 执行下方版本、会话变量（含实际 SESSION sql_mode、三个字符集变量、collation_connection 和 DATABASE()）、@@GLOBAL.sql_mode、计划所需系统表列及普通 EXPLAIN 采集 | SESSION sql_mode 与架构固定模式集合相等，三种冲突模式均不含；字符集均为 utf8mb4、连接排序规则为 utf8mb4_bin、实际库与配置默认库一致；GLOBAL 仅记录原配置，不要求两者相同、不修改全局值；脱敏输出校准夹具，记录版本/集群，未校准不称真实兼容 |
 | C04 / 第一次 | DBA 选至少 2 行的已有小表，7.5.3 按 §10.2 对比保护 OFF 的预期 1242 与 ON 后同一 EXPLAIN 正常计划；EXISTS 看形状；两版补普通零行派生表对照 | 错误码/文本与计划均留证；ON 回读失败不发保护组计划。普通 SELECT 预执行仍是待验证推断，派生表不能替代真视图路径；6.5.5 不尝试受限 EXPLAIN，B1 工具贯通留第二次 |
 | C05 / 第一次，两版 | DBA 同意后调低专用会话 max_execution_time，对事先选定的轻量只读查询做一次验证，随后恢复或关闭该会话 | 回读值及服务端中止证据；精度约 100ms，查询先完成就保留未验证，不为触发超时扩大扫描、并发或循环 |
 | C06 / 第一次 | A 的 T1/T2/T5：7.5.3 跑模型任务，T2 按 §4 跑 2 次；两版跑 T2 真实库代表子集，Web / 飞书覆盖代表交付 | DBA 预先给出主键/索引及 SQL 结果基准，T5 本任务零数据库调用；A 撤权追问引用离线端到端测试，成功/失败标准保持 |
@@ -315,7 +315,7 @@ A 已建立 `tests/tidb/` 与正式 runtime 的离线测试，检查证据统一
 
 ### 10.1 第一次只读采集 SQL
 
-由 DBA 使用验收只读账号执行，不要求经小维工具开放这些初始化/元数据语句。先在同一会话按架构固定值设置 sql_mode，再回读核对；不能仅记录目标原有默认值。两版各采一次；C02 的连接和权限冒烟仍覆盖全部三个集群。回传时保留列名、类型、计划结构、回读值和错误类别；业务名、常量、地址与身份按公司要求脱敏，凭据和连接串不回传。
+由 DBA 使用验收只读账号执行，不要求经小维工具开放这些初始化/元数据语句。使用目标配置的默认库建立专用连接，在同一会话按架构固定值设置 sql_mode、字符集与连接排序规则，再回读核对；不能仅记录目标原有默认值。两版各采一次；C02 的连接和权限冒烟仍覆盖全部三个集群。回传时保留列名、类型、计划结构、回读值和错误类别；业务名、常量、地址与身份按公司要求脱敏，凭据和连接串不回传。
 
 ```sql
 SELECT tidb_version();
@@ -324,8 +324,11 @@ SELECT @@SESSION.max_execution_time AS max_execution_time_ms,
        @@SESSION.time_zone AS time_zone,
        @@SESSION.sql_mode AS sql_mode,
        @@GLOBAL.sql_mode AS global_sql_mode,
+       @@SESSION.character_set_client AS client_charset,
        @@SESSION.character_set_connection AS connection_charset,
-       @@SESSION.collation_connection AS connection_collation;
+       @@SESSION.character_set_results AS results_charset,
+       @@SESSION.collation_connection AS connection_collation,
+       DATABASE() AS current_database;
 SELECT TABLE_NAME, COLUMN_NAME, COLUMN_TYPE, IS_NULLABLE
 FROM information_schema.COLUMNS
 WHERE LOWER(TABLE_SCHEMA) = 'information_schema'
