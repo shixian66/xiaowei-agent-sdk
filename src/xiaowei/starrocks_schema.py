@@ -116,6 +116,22 @@ class SchemaSnapshot:
     warnings: tuple[dict[str, Scalar], ...] | None = None
     warnings_truncated: bool = False
 
+    diagnostics: Mapping[tuple[str, str], ObjectInfo] = field(default_factory=dict)
+
+    def diagnostic_object(self, database: str, name: str) -> ObjectInfo | None:
+        requested = (database.casefold(), name.casefold())
+        return next(
+            (obj for (db, table), obj in self.diagnostics.items()
+             if (db.casefold(), table.casefold()) == requested), None,
+        )
+
+    @property
+    def diagnostic_query_policy(self) -> QueryPolicy:
+        tables: dict[str, dict[str, tuple[str, ...]]] = {}
+        for (database, name), obj in self.diagnostics.items():
+            tables.setdefault(database, {})[name] = tuple(c.name for c in obj.columns)
+        return self.query_policy.model_copy(update={"tables": tables, "default_database": None})
+
     def object(self, database: str, name: str) -> ObjectInfo | None:
         return self.objects.get((database, name))
 
@@ -177,7 +193,15 @@ class SchemaCache:
                 if rows.truncated:
                     raise _LimitExceededError
                 candidates = self._candidates(rows)
-                verdicts = await self._adapter.probe(sorted(candidates))
+                diagnostics = {
+                    key: obj for key, obj in candidates.items()
+                    if (key[0].casefold(), key[1].casefold()) in self._adapter.diagnostic_sources
+                }
+                business = {
+                    key: obj for key, obj in candidates.items()
+                    if key[0].casefold() not in self._adapter.system_databases
+                }
+                verdicts = await self._adapter.probe(sorted(business.keys() | diagnostics.keys()))
         except StarRocksError as exc:
             reason = exc.code.value
         except TimeoutError:
@@ -191,7 +215,10 @@ class SchemaCache:
         if reason:
             logger.warning("结构快照刷新失败：target=%s reason=%s", self.target_id, reason)
             return False
-        readable = {key: obj for key, obj in candidates.items() if verdicts.get(key) is True}
+        readable = {key: obj for key, obj in business.items() if verdicts.get(key) is True}
+        diagnostic_readable = {
+            key: obj for key, obj in diagnostics.items() if verdicts.get(key) is True
+        }
         previous = self._snapshot
         self._snapshot = SchemaSnapshot(
             target_id=self.target_id,
@@ -199,11 +226,13 @@ class SchemaCache:
             expires_at=started + timedelta(seconds=self._limits.max_age_seconds),
             objects=readable,
             query_policy=self._query_policy(readable),
+            diagnostics=diagnostic_readable,
             warnings=rows.warnings,
             warnings_truncated=rows.warnings_truncated,
             version=(
                 previous.version
-                if previous is not None and previous.objects == readable
+                if (previous is not None and previous.objects == readable
+                    and previous.diagnostics == diagnostic_readable)
                 else secrets.token_hex(8)
             ),
         )

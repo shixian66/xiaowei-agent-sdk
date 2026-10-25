@@ -728,6 +728,15 @@ def _bind_tables(root: exp.Query, policy: QueryPolicy, current_database: str | N
 def _bind_table(table: exp.Table, policy: QueryPolicy, current_database: str | None) -> None:
     """显式库名按快照校验；审计未限定表仅按记录的会话当前库查找。"""
     name, database = table.name, table.text("db")
+    if policy.database_type == "tidb":
+        # TiDB 保留库名大小写但按不区分大小写查找；只规范依赖 AST，不改执行原文。
+        requested = database or current_database
+        matched = next(
+            (db for db in policy.tables if db.casefold() == (requested or "").casefold()), None
+        )
+        if matched is not None:
+            database = matched
+            table.set("db", exp.to_identifier(matched))
     if database:
         if policy.columns(database, name) is None:
             _reject(_Code.OBJECT_NOT_ALLOWED)

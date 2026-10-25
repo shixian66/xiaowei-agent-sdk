@@ -642,6 +642,7 @@ def _security_sql(audit: AuditSource) -> tuple[str, str]:
 class StarRocksAdapter:
     error_type: type[StarRocksError] = StarRocksError
     system_databases: tuple[str, ...] = SYSTEM_DATABASES
+    diagnostic_sources: frozenset[tuple[str, str]] = frozenset()
     schema_objects_sql = SCHEMA_OBJECTS_SQL
     schema_columns_sql = SCHEMA_COLUMNS_SQL
     schema_ids_sql = SCHEMA_IDS_SQL
@@ -1254,7 +1255,7 @@ class StarRocksAdapter:
                 await self._prepare_session(conn)
                 stage = _Code.QUERY_FAILED
                 try:
-                    columns = await conn.execute(sql, args)
+                    columns = await self._execute_statement(conn, sql, args)
                 except MySQLError as error:
                     if not self._parse_failure(error):
                         raise
@@ -1291,6 +1292,11 @@ class StarRocksAdapter:
             return [], False, (), self.error_type(_query_code(error, stage)), {}
         finally:
             await self._release(conn, complete=complete)
+
+    async def _execute_statement(
+        self, conn: Connection, sql: str, args: tuple[object, ...] | None
+    ) -> tuple[str, ...]:
+        return await conn.execute(sql, args)
 
     @staticmethod
     def _parse_failure(error: MySQLError) -> bool:

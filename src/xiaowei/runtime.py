@@ -839,6 +839,7 @@ def _registered_tools(config: ServeConfig) -> frozenset[str]:
     notify = {NOTIFY_TOOL} if config.webhook_bots else set()
     return (
         QUERY_TOOLS
+        | ({"local/query_diagnostics"} if any(t.type == "tidb" for t in config.targets) else set())
         | (AUDIT_TOOLS if audited else frozenset())
         | ({SECURITY_TOOL} if audited else frozenset())
         | monitoring
@@ -1389,16 +1390,12 @@ def _app_config(config: ServeConfig) -> AppConfig:
         _registered_tools(config) - QUERY_TOOLS - monitoring - write_tools - notify - scheduled
         - security
     )
-    # A 未开放 TiDB 用户计划工具；用途只保留至少一个目标实际提供的能力。
-    unavailable = frozenset({"local/explain_query"}) if all(
-        target.type == "tidb" for target in config.targets
-    ) else frozenset()
     return AppConfig(
         purposes={
             "query": (
                 QUERY_TOOLS | audit | security | monitoring | notify | scheduled
-            ) - unavailable,
-            "diagnose": (DIAGNOSE_TOOLS | audit) - unavailable,
+            ),
+            "diagnose": (DIAGNOSE_TOOLS | audit),
         },
         data_policies={config.model.data_policy_id: config.data_policy},
         session_limits=config.session_limits,
