@@ -176,7 +176,7 @@ P4 之外再根据实际使用决定：多群管理、跨渠道身份与会话�
 
 ## 9. TiDB：查询、Agent 诊断与执行前评估增量
 
-用户已批准文档合并并继续开发；A 候选在独立分支实现，并有本地真实库证据，尚未公司验收，B/C 仍按下述依赖推进；未部署。A/B/C 结构保持，T8 仅补 Skill 方法和固定样例，B4 单独退出，C 复用 T6 证据补一个 UPDATE 锁等待变体。范围与数据/执行契约见 [ARCHITECTURE](ARCHITECTURE.md#tidb-query-diagnosis)，版本差异、任务与唯一一组验收标准见 [TiDB A/B/C 计划](docs/superpowers/plans/2026-10-24-tidb-query-diagnosis.md)。面向 3 个二进制自部署生产集群：两个 v7.5.3、一个 v6.5.5，包含 TiFlash；共用一套 Prometheus / Grafana，目标说明给出数据源与集群标签。本地不能运行 TiDB，也没有隔离测试环境；本地纯离线开发，真实工具与模型由用户带候选包到公司只读验收。
+用户已批准文档合并并继续开发；A 候选在独立分支实现，并有本地真实库证据，尚未公司验收，B/C 仍按下述依赖推进；未部署。A/B/C 结构保持，T8 仅补 Skill 方法和固定样例，B4 单独退出，C 复用 T6 证据补一个 UPDATE 锁等待变体。范围与数据/执行契约见 [ARCHITECTURE](ARCHITECTURE.md#tidb-query-diagnosis)，版本差异、任务与唯一一组验收标准见 [TiDB A/B/C 计划](docs/superpowers/plans/2026-10-24-tidb-query-diagnosis.md)。面向 3 个二进制自部署生产集群：两个 v7.5.3、一个 v6.5.5，包含 TiFlash；共用一套 Prometheus / Grafana，目标说明给出数据源与集群标签。用户已授权本地 TiUP 精确两版真实库测试；公司没有隔离测试环境，仍由用户带候选包到公司生产只读验收，真实模型仅在公司调用。
 
 | 切片 | 用户可见交付 | 依赖与退出条件 |
 | --- | --- | --- |
