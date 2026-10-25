@@ -53,6 +53,8 @@ A 已接入混合目标配置、TiDB 会话/版本回读、原 SQL 与外层 LIM
 
 真实验证发现 SHOW WARNINGS LIMIT 不被两版支持，曾使成功查询在读警告时失败；先修正夹具复现，再改用 SHOW WARNINGS，仍由现有非缓冲读取限制行数、字节和期限，不改业务 SQL/权限。两版合成输出与手工脚本位于本机 ~/.local/share/xiaowei-tidb/evidence 和 scripts（不随 Git 发布，不含公司数据；credentials 与 StarRocks 恢复文件禁止上传）。这些是本地合成样本，不能据此关闭公司或真实模型缺口。
 
+6.5.5 视图筛查已修复 IN 父节点的过宽放行：仅 From/Join 或 In.query 属非标量位置，IN 多元素列表和左操作数中的标量子查询不发普通视图 SELECT、不入快照；B1 沿用该判断，尚不实现 B1。两条复审反例先得到 2 failed / 4 passed，再修复；补充普通 IN/FROM/JOIN 正例，TiDB 相关回归 117 passed（TiDB 102、正式 runtime 13、文档一致性 2），Ruff 与 mypy（40 模块）及 diff 检查通过。合并授权限定于修复、独立复核及新 head 远端 CI 全绿后的 A 本地候选，不能据此关闭公司验收或取得生产部署授权。
+
 下一项：公司第一次按 [C01—C07](docs/superpowers/plans/2026-10-24-tidb-query-diagnosis.md#tidb-company-acceptance)核对 3 集群 TLS/实际账号（含 PROCESS/SHOW VIEW）、资源和生产输出差异，并跑 T1/T2/T5 的真实模型任务。本地证据不关闭公司验收、TiFlash/监控、真实模型、飞书或生产部署缺口；第一次无阻断问题才继续 B/C。本次相关回归 112 passed（TiDB 97、正式 runtime 13、文档一致性 2），Ruff 与 mypy（40 模块）通过；独立复审 c64ce27..35ce32e 未发现已证实的重要代码问题，并核对 asyncmy==0.2.15 关闭不排空游标；指出的一处开发计划旧限制文案已修正。
 
 ### 当前：SQL 解析失败的预算内恢复（离线候选）

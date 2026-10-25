@@ -287,7 +287,10 @@ class TiDBAdapter(StarRocksAdapter):
         try:
             root, _ = _parse(sql, policy)
             if root.find(exp.Exists) is not None or any(
-                not isinstance(node.parent, exp.From | exp.Join | exp.In)
+                not (
+                    isinstance(node.parent, exp.From | exp.Join)
+                    or (isinstance(node.parent, exp.In) and node.arg_key == "query")
+                )
                 for node in root.find_all(exp.Subquery)
             ):
                 return None

@@ -121,6 +121,8 @@ async def test_protected_view_keeps_its_actual_tidb_id_in_snapshot_and_verificat
     [
         "SELECT (SELECT id FROM app.orders LIMIT 1) AS id",
         "SELECT EXISTS (SELECT id FROM app.orders) AS id",
+        "SELECT id FROM app.orders WHERE id IN (1, (SELECT id FROM app.items))",
+        "SELECT id FROM app.orders WHERE (SELECT id FROM app.items) IN (1, 2)",
         "SELECT id FROM app.v",
         None,
     ],
@@ -131,6 +133,23 @@ async def test_65_restricted_or_unknown_view_is_never_probed_with_select(definit
     assert await cache.refresh()
     assert set(cache.current().objects) == {("app", "orders")}
     assert not any(sql.startswith("EXPLAIN") or "FROM `app`.`v`" in sql for sql in statements(drv))
+
+
+@pytest.mark.parametrize(
+    "definition",
+    [
+        "SELECT id FROM app.orders WHERE id IN (SELECT id FROM app.items)",
+        "SELECT id FROM (SELECT id FROM app.orders) AS o",
+        "SELECT o.id FROM app.orders AS o JOIN (SELECT id FROM app.items) AS i ON o.id = i.id",
+    ],
+)
+async def test_65_non_scalar_subqueries_keep_zero_row_permission_probe(definition):
+    db, drv = adapter(schema_results("6.5.5", definition=definition))
+    cache = SchemaCache(db, clock=lambda: NOW)
+    assert await cache.refresh()
+    assert set(cache.current().objects) == {("app", "orders"), ("app", "v")}
+    assert "SELECT 1 FROM `app`.`v` WHERE 1 = 0" in statements(drv)
+    assert not any(sql.startswith("EXPLAIN") for sql in statements(drv))
 
 
 async def test_65_safe_view_still_requires_select_permission():
