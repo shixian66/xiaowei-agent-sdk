@@ -110,6 +110,7 @@ async def test_protected_view_keeps_its_actual_tidb_id_in_snapshot_and_verificat
         "SELECT EXISTS (SELECT id FROM app.orders) AS id",
         "SELECT id FROM app.orders WHERE id IN (1, (SELECT id FROM app.items))",
         "SELECT id FROM app.orders WHERE (SELECT id FROM app.items) IN (1, 2)",
+        "SELECT o.id FROM app.orders o JOIN app.orders x ON (SELECT id FROM app.items)",
         "SELECT id FROM app.v",
         None,
     ],

@@ -43,7 +43,7 @@
 
 A 已由 PR #136 合入主线 `22f7446`（受测 head `6050734`，远端 9 项检查通过，integration 5188 passed / p3-release 84 passed）。B 在隔离分支 `codex/tidb-diagnosis-b` 继续，未合并、未部署生产。原工作区其他任务修改保留。契约见 [ARCHITECTURE](ARCHITECTURE.md#tidb-query-diagnosis)，固定 T1—T8 与公司 C01—C12 见 [A/B/C 计划](docs/superpowers/plans/2026-10-24-tidb-query-diagnosis.md)，退出条件见 [DEVELOPMENT_PLAN](DEVELOPMENT_PLAN.md#tidb-abc)。
 
-B 接通受保护 EXPLAIN 和 `local/query_diagnostics`，仅登记慢日志与 TiFlash 副本表，复用原快照发现列、工具治理、Evidence 和撤权路径，业务对象与诊断对象分开。6.5.5 复用 A3 的子查询位置规则并拒绝视图；7.5.3 在实际连接上设置和回读保护变量。实际连接版本与缓存不同也不发受限计划。B3/B4 在现有 Skill 补诊断与 T8 评估方法，无新增评估工具/模式；普通查询无 EXPLAIN 前置，数据库失败仍中止本轮。C 尚未实现；scheduled_tasks 未覆盖。
+B 接通受保护 EXPLAIN 和 `local/query_diagnostics`，仅登记慢日志与 TiFlash 副本表，复用原快照发现列、工具治理、Evidence 和撤权路径，业务对象与诊断对象分开。6.5.5 复用 A3 的子查询位置规则并拒绝视图（From/Join 仅 this 参数非标量，JOIN ON 标量反例先失败后修复）；7.5.3 在实际连接上设置和回读保护变量。实际连接版本与缓存不同也不发受限计划。B3/B4 在现有 Skill 补诊断与 T8 评估方法，无新增评估工具/模式；普通查询无 EXPLAIN 前置，数据库失败仍中止本轮。C 尚未实现；scheduled_tasks 未覆盖。
 
 B 相关回归 977 passed（TiDB、正式 runtime、共用 SQLGuard/结构），另一个 T8 SELECT 正式入口样例通过；Ruff / mypy（40 模块）、文档一致性 2 项及 diff 检查通过。正式 Web → SDK → 治理 → Adapter → Evidence/隔离 PostgreSQL 覆盖计划成功、受限计划零 I/O、诊断取数、诊断源撤权追问、数据库报错整轮中止；协议/模型为替身，只证明调用链。真实 Agent 的 T3/T4/T8 分析质量尚未验收。
 

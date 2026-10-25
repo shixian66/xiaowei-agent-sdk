@@ -217,7 +217,7 @@ A 实现落点：复用 MySQL 传输、期限、读取与关闭；TiDB Adapter �
 ### B1：版本化 EXPLAIN 零工作负载执行验证
 
 - [ ] 明确 TiDB 计划输出 schema、原 SQL/当前库上下文与权限。历史慢 SQL 先使用原文已限定库名的 SQL 或慢日志已有计划；从 Evidence 还原原库、按连接切库的链路延后，T3/T4 实测证明需要时再评估，不自动改写原 SQL 补库名。
-- [ ] 按 [ARCHITECTURE“只取计划”](../../../ARCHITECTURE.md#tidb-query-diagnosis)落实两版分支。离线断言 6.5.5 的标量/EXISTS、CTE 内受限结构和视图不发 EXPLAIN；子查询位置判定复用 A3：仅 From/Join 或 In 的 query 参数属于非标量位置，IN 多元素列表及左操作数中的子查询仍按标量拒绝，纯 IN 查询保留正常路径；7.5.3 在同一实际执行连接上设置、回读失败或非 ON 时不发 EXPLAIN。
+- [ ] 按 [ARCHITECTURE“只取计划”](../../../ARCHITECTURE.md#tidb-query-diagnosis)落实两版分支。离线断言 6.5.5 的标量/EXISTS、CTE 内受限结构和视图不发 EXPLAIN；子查询位置判定复用 A3：仅 From/Join 的 this 参数或 In 的 query 参数属于非标量位置，JOIN ON、IN 多元素列表及左操作数中的子查询仍按标量拒绝，纯 IN 查询保留正常路径；7.5.3 在同一实际执行连接上设置、回读失败或非 ON 时不发 EXPLAIN。
 - [ ] 统一公司验收时由 DBA 在已有且至少 2 行的小表上做 §10.2 的标量子查询对照：7.5.3 保护 OFF 时预期 1242，ON 且回读确认后同一 EXPLAIN 正常返回含 ScalarSubQuery / MaxOneRow 的计划；EXISTS 仍检查独立子查询分支，不用多行报错判断。另用外层 WHERE 1=0 的派生表语句检查普通 SELECT 的规划期预执行；错误码/文本按现场记录。同批贯通候选 B1 工具；6.5.5 受限 EXPLAIN 仍只验离线拒绝。OFF 对照仅由 DBA 手工校准，不进入产品路径；会尝试读取小表，称轻量只读对照，不称零负载。
 
 **B1 证据边界：** 精确版本源码及本地两版 TiUP 语义校准与工具测试分别记证；已有本地 7.5.3 OFF→1242、ON→ScalarSubQuery/MaxOneRow 与 EXISTS 分支对照，不替代本片工具贯通或公司环境验收。设置/回读失败不发 EXPLAIN；回读 ON 不能单独排除数据库行为异常，直接对照或计划形状不符时该能力保持未通过，不试跑业务工作负载。公司统一验收复核版本、设置、轻量对照及实际工具路径。6.5.5 受限结构拒绝断言不发 EXPLAIN，不以普通 SELECT 回退。
