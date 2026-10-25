@@ -39,11 +39,11 @@
 
 ## 3. 当前计划与下一项工作
 
-### TiDB 查询与诊断（2026-10-25，B 本地候选，待独立审查及公司验收）
+### TiDB 查询与诊断（2026-10-25，B/C 本地候选，待最终审查及公司验收）
 
 A 已由 PR #136 合入主线 `22f7446`（受测 head `6050734`，远端 9 项检查通过，integration 5188 passed / p3-release 84 passed）。B 在隔离分支 `codex/tidb-diagnosis-b` 继续，未合并、未部署生产。原工作区其他任务修改保留。契约见 [ARCHITECTURE](ARCHITECTURE.md#tidb-query-diagnosis)，固定 T1—T8 与公司 C01—C12 见 [A/B/C 计划](docs/superpowers/plans/2026-10-24-tidb-query-diagnosis.md)，退出条件见 [DEVELOPMENT_PLAN](DEVELOPMENT_PLAN.md#tidb-abc)。
 
-B 接通受保护 EXPLAIN 和 `local/query_diagnostics`，仅登记慢日志与 TiFlash 副本表，复用原快照发现列、工具治理、Evidence 和撤权路径，业务对象与诊断对象分开。6.5.5 复用 A3 的子查询位置规则并拒绝视图（From/Join 仅 this 参数非标量，JOIN ON 标量反例先失败后修复）；7.5.3 在实际连接上设置和回读保护变量。实际连接版本与缓存不同也不发受限计划。B3/B4 在现有 Skill 补诊断与 T8 评估方法，无新增评估工具/模式；普通查询无 EXPLAIN 前置，数据库失败仍中止本轮。C 尚未实现；scheduled_tasks 未覆盖。
+B 接通受保护 EXPLAIN 和 `local/query_diagnostics`，仅登记慢日志与 TiFlash 副本表，复用原快照发现列、工具治理、Evidence 和撤权路径，业务对象与诊断对象分开。6.5.5 复用 A3 的子查询位置规则并拒绝视图（From/Join 仅 this 参数非标量，JOIN ON 标量反例先失败后修复）；7.5.3 在实际连接上设置和回读保护变量。实际连接版本与缓存不同也不发受限计划。B3/B4 在现有 Skill 补诊断与 T8 评估方法，无新增评估工具/模式；普通查询无 EXPLAIN 前置，数据库失败仍中止本轮。C 复用同一入口扩为 15 个登记来源，增加锁/事务、热点/Region/Store、组件与 TiFlash 表语义；scheduled_tasks 未覆盖。
 
 B 相关回归 977 passed（TiDB、正式 runtime、共用 SQLGuard/结构），另一个 T8 SELECT 正式入口样例通过；Ruff / mypy（40 模块）、文档一致性 2 项及 diff 检查通过。正式 Web → SDK → 治理 → Adapter → Evidence/隔离 PostgreSQL 覆盖计划成功、受限计划零 I/O、诊断取数、诊断源撤权追问、数据库报错整轮中止；协议/模型为替身，只证明调用链。真实 Agent 的 T3/T4/T8 分析质量尚未验收。
 
@@ -51,7 +51,9 @@ B 相关回归 977 passed（TiDB、正式 runtime、共用 SQLGuard/结构），
 
 本地合成输出和手工脚本位于 `~/.local/share/xiaowei-tidb/evidence` / `scripts`，凭据与 StarRocks 恢复信息不入 Git。StarRocks 测试容器及镜像已按授权移除，数据卷保留；未改其他服务。源码/夹具、本地真实工具、模型、渠道、部署与用户验收分别记证。
 
-下一项：B 精确候选独立审查后串行推进 C；全部本地开发、测试与分切片审查后统一公司验收，A 公司验收不阻塞本地 B/C。公司 TLS/实际权限/资源、TiFlash/共享监控、真实模型与飞书保持开放；缺真实锁等待和已知故障样本时对应 T6/T7 不能关闭，不扩大写权限或部署授权。
+B 独立审查发现并关闭 JOIN ON 标量子查询视图误放行；原反例先失败，补审 37 passed、无新增发现。C 新增离线 7 项与正式入口 2 项已通过，真实本地 7.5.3 已校准 15 源、组件/Store/Region 和单行锁等待。等待时长采用 NOW(6)，避免 NOW() 秒级精度造成负值；未知或采样矛盾不得编造时长。
+
+下一项：C 精确候选独立审查、完整回归和候选 PR；全部本地开发、测试与分切片审查后统一公司验收，A 公司验收不阻塞本地 B/C。公司 TLS/实际权限/资源、TiFlash/共享监控、真实模型与飞书保持开放；缺真实锁等待和已知故障样本时对应 T6/T7 不能关闭，不扩大写权限或部署授权。
 
 ### 当前：SQL 解析失败的预算内恢复（离线候选）
 

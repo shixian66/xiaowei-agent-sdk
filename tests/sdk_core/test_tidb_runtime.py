@@ -477,3 +477,68 @@ async def test_tidb_t8_select_assessment_reuses_protected_plan_and_cites_evidenc
         assert facts[0]["metadata"]["sql"] == "EXPLAIN " + sql
         assert sql not in statements(drv) and statements(drv).count("EXPLAIN " + sql) == 1
         assert await served.finish() == 0
+
+
+@pytest.mark.loopback
+async def test_tidb_lock_evidence_supports_t8_followup_without_business_execution(env: Env):
+    from tests.sdk_core.test_app import answer
+    from tests.tidb.test_cluster import LOCK_SQL, cluster_results
+
+    _, drv = adapter(cluster_results())
+    env.drv = drv
+    values = diagnostic_config(env).model_dump(mode="json")
+    values["targets"][0]["tidb"]["policy"]["allowed_functions"] += ["NOW", "UNIX_TIMESTAMP"]
+    async with env.running(ServeConfig.model_validate(values)) as served:
+        await served.page()
+        initial = env.scripts.add(
+            "评估 UPDATE app.orders SET status='closed' WHERE created_at < '2025-01-01'",
+            lambda call: answer([], advice="尚无运行证据，需核实事务与锁等待。"),
+        )
+        assert (await served.turn(initial, "query")).json()["state"] == "completed"
+        follow = env.scripts.add(
+            "订单更新正卡住，当前等待会改变刚才的执行建议吗？集群仍为 tidb-a。",
+            tool_call("query_diagnostics", cluster="tidb-a", sql=LOCK_SQL),
+            cite("当前等待应结合事务确认后再决定执行时机；这不是生产执行批准。"),
+        )
+        body = (await served.turn(follow, "diagnose", "r2")).json()
+        assert body["state"] == "completed", body
+        row = body["delivery"]["facts"][0]["rows"][0]
+        assert row["waiting_trx"] == 222 and row["holding_trx"] == 111
+        assert row["wait_seconds"] == 15.0 and row["CURRENT_SQL_DIGEST_TEXT"] is None
+        assert "run_readonly_query" not in env.scripts.tools_seen(follow)[0]
+        assert statements(drv).count(LOCK_SQL) == 1
+        assert not any(s.startswith("UPDATE") for s in statements(drv))
+        assert await served.finish() == 0
+
+
+@pytest.mark.loopback
+async def test_tidb_cluster_partial_warning_reaches_formal_feishu_delivery(env: Env):
+    from tests.p1b.test_starrocks_adapter import Result
+    from tests.sdk_core.test_feishu_render import tables, text_parts
+    from tests.sdk_core.test_runtime import FakeChannel, feishu_config, feishu_event, until
+    from tests.tidb.test_adapter import WARNINGS_SQL
+    from tests.tidb.test_cluster import REGION_SQL, cluster_results
+
+    outcomes = cluster_results()
+    outcomes[WARNINGS_SQL] = Result(("Level", "Code", "Message"), [
+        ("Warning", 1105, "synthetic node-b missing"),
+    ])
+    _, drv = adapter(outcomes)
+    env.drv = drv
+    values = diagnostic_config(env).model_dump(mode="json")
+    values["feishu"] = feishu_config()
+    channel = FakeChannel()
+    async with env.running(ServeConfig.model_validate(values), feishu_channel=channel) as served:
+        message = env.scripts.add(
+            "在 tidb-a 检查 Region，不能把缺节点当健康",
+            tool_call("query_diagnostics", cluster="tidb-a", sql=REGION_SQL),
+            cite("只有返回节点的部分证据，不能判断全群健康。"),
+        )
+        channel.emit_raw_from_sdk_thread(feishu_event(env, message, "om_tidb_cluster"))
+        await until(lambda: len(channel.sends) >= 1)
+        card = channel.sends[0][1]
+        rendered = "\n".join(text_parts(card))
+        assert "tidb-a" in rendered and "部分证据" in rendered
+        assert tables(card)[0]["rows"] == [{"c0": "8", "c1": "101"}]
+        assert statements(drv).count(REGION_SQL) == 1
+        assert await served.finish() == 0

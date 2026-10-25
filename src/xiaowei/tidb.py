@@ -92,7 +92,12 @@ INDEX_SQL: Final = (
 )
 
 
-DIAGNOSTIC_TABLES: Final = frozenset({"SLOW_QUERY", "CLUSTER_SLOW_QUERY", "TIFLASH_REPLICA"})
+DIAGNOSTIC_TABLES: Final = frozenset({
+    "SLOW_QUERY", "CLUSTER_SLOW_QUERY", "TIFLASH_REPLICA",
+    "DATA_LOCK_WAITS", "TIDB_TRX", "CLUSTER_TIDB_TRX", "DEADLOCKS",
+    "TIDB_HOT_REGIONS", "TIDB_HOT_REGIONS_HISTORY", "TIKV_REGION_STATUS",
+    "TIKV_REGION_PEERS", "TIKV_STORE_STATUS", "CLUSTER_INFO", "TIFLASH_TABLES", "TIFLASH_SEGMENTS",
+})
 DIAGNOSTIC_SOURCES: Final = frozenset(
     ("information_schema", name.casefold()) for name in DIAGNOSTIC_TABLES
 )
@@ -224,7 +229,8 @@ class TiDBAdapter(StarRocksAdapter):
         self, conn: Connection, max_rows: int, truncated: bool
     ) -> _ResultMetadata:
         if truncated:
-            # 所有调用均已有 LIMIT。先在同一客户端期限内有界读到 EOF，避免驱动隐式无限排空。
+            # 查询有 LIMIT；计划行数另受 max_plan_lines 限制。
+            # 先在同一客户端期限内有界读到 EOF，避免驱动隐式无限排空。
             for _ in range(max_rows + 2):
                 if await conn.fetch_row() is None:
                     break

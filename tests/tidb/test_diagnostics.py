@@ -22,13 +22,16 @@ SQL = (
 )
 
 
-def diagnostic_results(version="7.5.3"):
+def diagnostic_results(version="7.5.3", *, extra_sources=None):
     outcomes = schema_results(version)
-    for i, name in enumerate(SOURCES):
+    source_fields = {name: FIELDS for name in SOURCES} | (extra_sources or {})
+    names = tuple(source_fields)
+    for i, name in enumerate(names):
         outcomes[OBJECTS_SQL].rows.append(("INFORMATION_SCHEMA", name, "SYSTEM VIEW", None, None))
         outcomes[IDS_SQL].rows.append(("INFORMATION_SCHEMA", name, 9000 + i))
         outcomes[COLUMNS_SQL].rows.extend(
-            ("INFORMATION_SCHEMA", name, column, kind, "YES", None) for column, kind in FIELDS
+            ("INFORMATION_SCHEMA", name, column, kind, "YES", None)
+            for column, kind in source_fields[name]
         )
         probe = f"SELECT 1 FROM `INFORMATION_SCHEMA`.`{name}` WHERE 1 = 0"  # noqa: S608 — 常量夹具
         outcomes[probe] = Result(("1",))
@@ -39,11 +42,11 @@ def diagnostic_results(version="7.5.3"):
         else original_type(args)
     )
     outcomes[OBJECT_COLUMNS_SQL] = lambda args: (
-        Result(("col", "type"), FIELDS) if args[0] == "INFORMATION_SCHEMA"
+        Result(("col", "type"), source_fields[args[1]]) if args[0] == "INFORMATION_SCHEMA"
         else original_columns(args)
     )
     outcomes[OBJECT_ID_SQL] = lambda args: (
-        Result(("id",), [(9000 + SOURCES.index(args[1]),)]) if args[0] == "INFORMATION_SCHEMA"
+        Result(("id",), [(9000 + names.index(args[1]),)]) if args[0] == "INFORMATION_SCHEMA"
         else original_id(args)
     )
     outcomes[SQL] = Result(("INSTANCE", "Query_time", "Query"), [

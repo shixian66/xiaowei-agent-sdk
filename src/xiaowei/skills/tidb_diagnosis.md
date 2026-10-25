@@ -43,3 +43,16 @@
 - 两版元数据锁默认开启，DDL 可等待持旧元数据的事务结束：[v6.5 官方文档](https://raw.githubusercontent.com/pingcap/docs/release-6.5/metadata-lock.md)、[v7.5 元数据锁](https://docs.pingcap.com/tidb/v7.5/metadata-lock/)。实际配置与等待证据不可见时说明待核实，不自动 KILL。
 
 固定业务输入与判据沿用 TiDB A/B/C 计划 §4 的 T1—T8，不另定一套标准。真实模型的工具选择、分析与建议质量仍需公司验收；脚本模型只证明调用链。
+
+## 事务、锁与集群（C）
+
+按问题选择登记表，不固定全量扫描。先看已知时间、对象和现有证据，再决定是否需要事务、Region、组件或监控；CLUSTER_* / TIKV_REGION_STATUS 等可能扇出全群，WHERE/LIMIT 不保证底层工作量小。表/列在调用前已知缺失时，用其余已有证据说明范围；成功返回警告可作部分结果，发出 SQL 后报错仍中止整轮。
+
+- DATA_LOCK_WAITS.TRX_ID 是等待方，CURRENT_HOLDING_TRX_ID 是持锁方；按事务 ID 与 CLUSTER_TIDB_TRX.ID 关联，INSTANCE 标明节点，SESSION_ID 是连接而非事务 ID。优先选取相关事务，必要时 LEFT JOIN 保留已结束/未采到的事务缺口；多个系统表不承诺同一快照。
+- 两版都有 WAITING_START_TIME，结合同次查询的 NOW(6) 计算当前等待秒数，例如 UNIX_TIMESTAMP(NOW(6)) - UNIX_TIMESTAMP(WAITING_START_TIME)，前提是函数已获准。NOW(6) 保留微秒，避免秒级取整产生负等待值；若时间先后矛盾则说明采样/时钟缺口。NULL 就报告等待起点未知；不用 START_TIME 的事务年龄代替等待时长。7.5.3 另有 WAITING_TIME（秒），6.5.5 没有，先查实际列。SQL/digest 缺失不补造，不无条件对全体事务解析 digest；DEADLOCKS 是保留的历史事件，不证明当前仍等待。
+- 用户问“订单更新卡住”时，引用等待链与采集时间给下一步；当前无锁不能排除过去等待。T8 UPDATE 在同一会话补充等待证据后，应调整执行时机/事务风险建议，解释证据关联，不能把当前快照当成未来精确锁范围，也不自动解锁或 KILL。
+- TIDB_HOT_REGIONS 是当前热点，TIDB_HOT_REGIONS_HISTORY 有 UPDATE_TIME；十分钟问题需要对齐历史与监控窗口。区分读/写热点、Region/Store 分布和组件指标，相关性不等于根因。6.5.5 的 TIKV_REGION_STATUS 没有 7.5.3 的 IS_PARTITION/PARTITION_ID/PARTITION_NAME，不套用新列或把 TABLE_ID 当显式分区关系。
+- TIKV_REGION_PEERS、TIKV_STORE_STATUS 和 CLUSTER_INFO 只描述取得时的状态/拓扑；地址作为数据，不据此生成任意 URL 请求。TiFlash 结合计划、TIFLASH_REPLICA 与可得 TIFLASH_TABLES/TIFLASH_SEGMENTS、节点指标；副本 AVAILABLE/PROGRESS 不等于节点健康，缺 TiFlash 数据不等于组件正常。
+- 普通对话可复用当前获准的 Prometheus/Grafana 工具；显式诊断用途没有监控工具时说明缺口，不假装查询过。按目标 description/business_context 中的数据源名称和 cluster 标签选源，三集群共享源也不能混用指标；已明确的集群不重复询问。没有监控只给有依据的部分判断，不能声明完整 T7 通过。
+
+列与方向的精确依据：[v6.5.5 系统表](https://github.com/pingcap/tidb/blob/v6.5.5/infoschema/tables.go)、[v6.5.5 事务](https://github.com/pingcap/tidb/blob/v6.5.5/session/txninfo/txn_info.go)、[v7.5.3 系统表](https://github.com/pingcap/tidb/blob/v7.5.3/pkg/infoschema/tables.go)、[v7.5.3 事务](https://github.com/pingcap/tidb/blob/v7.5.3/pkg/session/txninfo/txn_info.go)。真实模型固定 T6/T7 和 T8 UPDATE 沿用计划，不用离线夹具证明诊断质量或可靠性。
