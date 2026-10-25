@@ -39,23 +39,23 @@
 
 ## 3. 当前计划与下一项工作
 
-### TiDB 查询与诊断（2026-10-25，A 本地真实库验证，待公司验收）
+### TiDB 查询与诊断（2026-10-25，B/C 本地候选，独立审查通过，待公司验收）
 
-用户批准的文档 f269bf9 已合入并推送主线 c501431（远端 CI 重跑后 9 项通过）；随后在隔离分支 codex/tidb-query-a 实现 A1/A2/A3，未合并实现或部署，原工作区其他任务修改保留。契约见 [ARCHITECTURE](ARCHITECTURE.md#tidb-query-diagnosis)，固定 T1—T8 与两次公司安排见 [A/B/C 计划](docs/superpowers/plans/2026-10-24-tidb-query-diagnosis.md)，退出条件见 [DEVELOPMENT_PLAN](DEVELOPMENT_PLAN.md#tidb-abc)。
+A 已由 PR #136 合入主线 `22f7446`（受测 head `6050734`，远端 9 项检查通过，integration 5188 passed / p3-release 84 passed）。B/C 候选在隔离分支 `codex/tidb-diagnosis-b`，见 [PR #137](https://github.com/shixian66/xiaowei-agent-sdk/pull/137)，未合并、未部署生产。原工作区其他任务修改保留。契约见 [ARCHITECTURE](ARCHITECTURE.md#tidb-query-diagnosis)，固定 T1—T8 与公司 C01—C12 见 [A/B/C 计划](docs/superpowers/plans/2026-10-24-tidb-query-diagnosis.md)，退出条件见 [DEVELOPMENT_PLAN](DEVELOPMENT_PLAN.md#tidb-abc)。
 
-A 已接入混合目标配置、TiDB 会话/版本回读、原 SQL 与外层 LIMIT、结构/有序主键索引、分版本视图探测及逐对象 1345/1356 分类。复用已有传输/期限/关闭、工具与历史权限链；TiDB 数据库失败始终中止，不继承 StarRocks 解析恢复。B/C 与 T8 尚未实现，A 不开放用户 EXPLAIN 或诊断系统表入口；scheduled_tasks 路径未覆盖。
+B 接通受保护 EXPLAIN 和 `local/query_diagnostics`，仅登记慢日志与 TiFlash 副本表，复用原快照发现列、工具治理、Evidence 和撤权路径，业务对象与诊断对象分开。6.5.5 复用 A3 的子查询位置规则并拒绝视图（From/Join 仅 this 参数非标量，JOIN ON 标量反例先失败后修复）；7.5.3 在实际连接上设置和回读保护变量。实际连接版本与缓存不同也不发受限计划。B3/B4 在现有 Skill 补诊断与 T8 评估方法，无新增评估工具/模式；普通查询无 EXPLAIN 前置，数据库失败仍中止本轮。C 复用同一入口扩为 15 个登记来源，增加锁/事务、热点/Region/Store、组件与 TiFlash 表语义；scheduled_tasks 未覆盖。
 
-代码候选 6aed01b：完整非部署回归 5183 passed、235 skipped、98 deselected；安全检查 65 passed，Ruff / mypy（40 模块）通过。正式 Web → SDK Runner → 治理 → TiDB Adapter → Evidence/真实隔离 PostgreSQL 覆盖查询成功、数据库错误中止、可执行注释零 I/O、撤权追问、诊断用途无业务执行工具及三 TiDB + StarRocks 目标路由；协议与模型均为替身。首次完整回归发现 5 项配置错误反馈失败，已修复联合类型标签重复路径及输入值回显，并用真正未知类型替换过时的 tidb 反例；新反例先 RED 后 GREEN。独立审查 c501431..986051f 与补审 986051f..6aed01b 均无已证实的重要问题；独立复跑 TiDB 97 项及配置/脱敏 16 项通过。部署回归 84 项、纯运行依赖 wheel 两入口/Skill 加载在 986051f 通过；依赖未变，审计无已知漏洞。最终文档一致性 2 项、链接/锚点及 diff 检查通过。
+B 共用 SQLGuard/结构与 TiDB/runtime 回归 977 passed；最终 B/C 集中回归 158 passed，含 T8 SELECT 及 C Web 追问/飞书部分结果；Ruff / mypy（40 模块）、文档一致性 2 项及 diff 检查通过。正式 Web → SDK → 治理 → Adapter → Evidence/隔离 PostgreSQL 覆盖计划成功、受限计划零 I/O、诊断取数、诊断源撤权追问、数据库报错整轮中止；协议/模型为替身，只证明调用链。真实 Agent 的 T3/T4/T8 分析质量尚未验收。
 
-用户追加授权本地部署后，已移除 starrocks-test 容器及其镜像，保留 starrocks-be-storage / starrocks-fe-meta 数据卷及私有恢复信息。以独立 TIUP_HOME 在 macOS ARM64 原生顺序运行精确 v7.5.3、v6.5.5，各 1 PD / 1 TiKV / 1 TiDB，仅回环监听；当前运行 v7.5.3，不含 TiFlash/监控，未改 shell 配置或其他服务。
+本地 macOS ARM64 TiUP 精确两版顺序运行，各 1 PD / 1 TiKV / 1 TiDB、仅回环，不含 TiFlash/监控。A 两版已有真实查询/结构/视图/警告及正式 Web 成功/1242 中止证据；B 两版实际发现 3 个诊断来源、普通计划保留原 LIMIT、TIFLASH_REPLICA 空结果，7.5.3 标量子查询受保护计划有 ScalarSubQuery，6.5.5 受限计划被拒。先前 7.5.3 OFF→1242 / ON→ScalarSubQuery 与 EXISTS 形状对照仍有效。SLEEP 资源探测只返回中断值 1，未证明普通查询的服务端超时错误，资源门槛保持开放。
 
-本地两版各验证 5 组实际查询/LIMIT/行值、固定会话设置、结构/有序复合索引、只读账号写拒绝、视图策略及数据库警告 1365；正式 Web/SDK/治理/Evidence/隔离 PostgreSQL 各 2 个真实数据库样例通过（成功、实际 1242 后整轮中止），模型为脚本替身。7.5.3 的保护 OFF→1242、ON→ScalarSubQuery/MaxOneRow 计划及 EXISTS 分支均成立；缺 SHOW VIEW 返回 1345，仅排除对应视图。6.5.5 将标量/EXISTS 视图标未知；两版普通零行派生表返回 1242，实际标量视图返回 1356。SLEEP 轻量资源探测返回中断值 1，未证明普通查询的服务端错误中止，资源门槛继续开放。
+本地合成输出和手工脚本位于 `~/.local/share/xiaowei-tidb/evidence` / `scripts`，凭据与 StarRocks 恢复信息不入 Git。StarRocks 测试容器及镜像已按授权移除，数据卷保留；未改其他服务。源码/夹具、本地真实工具、模型、渠道、部署与用户验收分别记证。
 
-真实验证发现 SHOW WARNINGS LIMIT 不被两版支持，曾使成功查询在读警告时失败；先修正夹具复现，再改用 SHOW WARNINGS，仍由现有非缓冲读取限制行数、字节和期限，不改业务 SQL/权限。两版合成输出与手工脚本位于本机 ~/.local/share/xiaowei-tidb/evidence 和 scripts（不随 Git 发布，不含公司数据；credentials 与 StarRocks 恢复文件禁止上传）。这些是本地合成样本，不能据此关闭公司或真实模型缺口。
+PR #137 大小写审查阻断已修复：TiDB 库/表按 casefold 匹配，依赖 AST 使用快照身份并保留隐式来源名，执行原文不变；StarRocks 不变。补齐小写诊断、业务表大小写、视图 EXPLAIN、三段列/相关引用及诊断拒绝回归。README 已说明示例 schema_limits 含登记诊断表及列。本地 6.5.5 对 15 源逐一 EXPLAIN SELECT 1 … WHERE 1 = 0，均含 rows:0 的 TableDual（部分上有常量 Projection）；证据为 evidence/diagnostic-tabledual-655.json，已恢复原本的 7.5.3 实例。该修复独立补审无新增阻断（17 项通过）；TiDB/正式入口/共用工具与文档回归 287 项、共用 SQLGuard/结构范围 548 项通过，Ruff、mypy（40 模块）及 diff 检查通过。精确 head CI 状态见 PR，不代表公司验收或部署授权。
 
-6.5.5 视图筛查已修复 IN 父节点的过宽放行：仅 From/Join 或 In.query 属非标量位置，IN 多元素列表和左操作数中的标量子查询不发普通视图 SELECT、不入快照；B1 沿用该判断，尚不实现 B1。两条复审反例先得到 2 failed / 4 passed，再修复；补充普通 IN/FROM/JOIN 正例，TiDB 相关回归 117 passed（TiDB 102、正式 runtime 13、文档一致性 2），Ruff 与 mypy（40 模块）及 diff 检查通过。合并授权限定于修复、独立复核及新 head 远端 CI 全绿后的 A 本地候选，不能据此关闭公司验收或取得生产部署授权。
+B 独立审查发现并关闭 JOIN ON 标量子查询视图误放行；原反例先失败，补审 37 passed、无新增发现。C/集成独立审查 `22f7446..7e8d037` 无代码阻断，独立 29 项通过；文档状态残留已修正。C 两版真实本地均已校准 15 源、组件/Store/Region 和单行锁等待。等待时长采用 NOW(6)，避免 NOW() 秒级精度造成负值；未知或采样矛盾不得编造时长。
 
-下一项：公司第一次按 [C01—C07](docs/superpowers/plans/2026-10-24-tidb-query-diagnosis.md#tidb-company-acceptance)核对 3 集群 TLS/实际账号（含 PROCESS/SHOW VIEW）、资源和生产输出差异，并跑 T1/T2/T5 的真实模型任务。本地证据不关闭公司验收、TiFlash/监控、真实模型、飞书或生产部署缺口；第一次无阻断问题才继续 B/C。本次相关回归 112 passed（TiDB 97、正式 runtime 13、文档一致性 2），Ruff 与 mypy（40 模块）通过；独立复审 c64ce27..35ce32e 未发现已证实的重要代码问题，并核对 asyncmy==0.2.15 关闭不排空游标；指出的一处开发计划旧限制文案已修正。
+完整回归曾发现纯 StarRocks 三页样例的模型请求 65,818 字节超过原 64,000 上限：原因是无条件加载变长的 TiDB Skill。已按可信目标类型选择领域 Skill（混合目标保留两类），不提高 Profile 上限；原失败样例及类型选择/正式入口集中回归 51 项通过。完整非部署/发行及远端 CI 的精确版本与最终结果跟踪于 PR #137；本地证据来自合成数据，不含真实模型。下一项：完成候选检查后由用户安排统一公司验收；全部本地开发、测试与分切片审查后统一公司验收，A 公司验收不阻塞本地 B/C。公司 TLS/实际权限/资源、TiFlash/共享监控、真实模型与飞书保持开放；缺真实锁等待和已知故障样本时对应 T6/T7 不能关闭，不扩大写权限或部署授权。
 
 ### 当前：SQL 解析失败的预算内恢复（离线候选）
 

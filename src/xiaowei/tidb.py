@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import re
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from datetime import datetime
 from typing import ClassVar, Final, Literal, cast
 
@@ -23,6 +23,7 @@ from xiaowei.starrocks import (
     ERROR_MESSAGES,
     Connection,
     Connector,
+    ObjectVersion,
     QueryResult,
     Scalar,
     StarRocksAdapter,
@@ -53,19 +54,19 @@ PROTECTION_SET: Final = "SET SESSION tidb_opt_enable_non_eval_scalar_subquery = 
 PROTECTION_READ: Final = "SELECT @@SESSION.tidb_opt_enable_non_eval_scalar_subquery"
 
 SYSTEM_DATABASES: Final = ("information_schema", "performance_schema", "metrics_schema", "mysql")
-SCHEMA_OBJECTS_SQL: Final = (
+_BASE_SCHEMA_OBJECTS_SQL: Final = (
     "SELECT TABLE_SCHEMA AS db, TABLE_NAME AS name, TABLE_TYPE AS type, "
     "LEFT(TABLE_COMMENT, %s) AS comment, CREATE_TIME AS created "
     "FROM information_schema.tables WHERE LOWER(TABLE_SCHEMA) NOT IN (%s, %s, %s, %s) "
     "ORDER BY TABLE_SCHEMA, TABLE_NAME LIMIT %s"
 )
-SCHEMA_COLUMNS_SQL: Final = (
+_BASE_SCHEMA_COLUMNS_SQL: Final = (
     "SELECT TABLE_SCHEMA AS db, TABLE_NAME AS name, COLUMN_NAME AS col, COLUMN_TYPE AS type, "
     "IS_NULLABLE AS nullable, LEFT(COLUMN_COMMENT, %s) AS comment "
     "FROM information_schema.columns WHERE LOWER(TABLE_SCHEMA) NOT IN (%s, %s, %s, %s) "
     "ORDER BY TABLE_SCHEMA, TABLE_NAME, ORDINAL_POSITION LIMIT %s"
 )
-SCHEMA_IDS_SQL: Final = (
+_BASE_SCHEMA_IDS_SQL: Final = (
     "SELECT TABLE_SCHEMA AS db, TABLE_NAME AS name, TIDB_TABLE_ID AS id "
     "FROM information_schema.tables WHERE LOWER(TABLE_SCHEMA) NOT IN (%s, %s, %s, %s) "
     "ORDER BY TABLE_SCHEMA, TABLE_NAME LIMIT %s"
@@ -91,6 +92,32 @@ INDEX_SQL: Final = (
 )
 
 
+DIAGNOSTIC_TABLES: Final = frozenset({
+    "SLOW_QUERY", "CLUSTER_SLOW_QUERY", "TIFLASH_REPLICA",
+    "DATA_LOCK_WAITS", "TIDB_TRX", "CLUSTER_TIDB_TRX", "DEADLOCKS",
+    "TIDB_HOT_REGIONS", "TIDB_HOT_REGIONS_HISTORY", "TIKV_REGION_STATUS",
+    "TIKV_REGION_PEERS", "TIKV_STORE_STATUS", "CLUSTER_INFO", "TIFLASH_TABLES", "TIFLASH_SEGMENTS",
+})
+DIAGNOSTIC_SOURCES: Final = frozenset(
+    ("information_schema", name.casefold()) for name in DIAGNOSTIC_TABLES
+)
+# 只登记表名；列及当前可读性仍由原结构快照在运行时读取。
+_DIAGNOSTIC_FILTER = (
+    "(LOWER(TABLE_SCHEMA) NOT IN (%s, %s, %s, %s) OR "
+    "(LOWER(TABLE_SCHEMA) = 'information_schema' AND UPPER(TABLE_NAME) IN ("
+    + ", ".join("'" + name + "'" for name in sorted(DIAGNOSTIC_TABLES)) + ")))"
+)
+SCHEMA_OBJECTS_SQL: Final = _BASE_SCHEMA_OBJECTS_SQL.replace(
+    "LOWER(TABLE_SCHEMA) NOT IN (%s, %s, %s, %s)", _DIAGNOSTIC_FILTER
+)
+SCHEMA_COLUMNS_SQL: Final = _BASE_SCHEMA_COLUMNS_SQL.replace(
+    "LOWER(TABLE_SCHEMA) NOT IN (%s, %s, %s, %s)", _DIAGNOSTIC_FILTER
+)
+SCHEMA_IDS_SQL: Final = _BASE_SCHEMA_IDS_SQL.replace(
+    "LOWER(TABLE_SCHEMA) NOT IN (%s, %s, %s, %s)", _DIAGNOSTIC_FILTER
+)
+
+
 class TiDBTarget(StarRocksTarget):
     """共用连接/容量配置；TiDB 不使用 StarRocks AuditLoader 配置，不配置服务端版本。"""
 
@@ -111,6 +138,7 @@ class TiDBError(StarRocksError):
 class TiDBAdapter(StarRocksAdapter):
     error_type = TiDBError
     system_databases = SYSTEM_DATABASES
+    diagnostic_sources = DIAGNOSTIC_SOURCES
     schema_objects_sql = SCHEMA_OBJECTS_SQL
     schema_columns_sql = SCHEMA_COLUMNS_SQL
     schema_ids_sql = SCHEMA_IDS_SQL
@@ -201,7 +229,8 @@ class TiDBAdapter(StarRocksAdapter):
         self, conn: Connection, max_rows: int, truncated: bool
     ) -> _ResultMetadata:
         if truncated:
-            # 所有调用均已有 LIMIT。先在同一客户端期限内有界读到 EOF，避免驱动隐式无限排空。
+            # 查询有 LIMIT；计划行数另受 max_plan_lines 限制。
+            # 先在同一客户端期限内有界读到 EOF，避免驱动隐式无限排空。
             for _ in range(max_rows + 2):
                 if await conn.fetch_row() is None:
                     break
@@ -223,6 +252,16 @@ class TiDBAdapter(StarRocksAdapter):
                 raise _ResultContractError
             warnings.append({"level": row["Level"], "code": row["Code"], "message": row["Message"]})
         return {"warnings": tuple(warnings), "warnings_truncated": clipped}
+
+    async def verify_objects(
+        self, objects: Sequence[tuple[str, str]], *, versioned: frozenset[tuple[str, str]]
+    ) -> dict[tuple[str, str], ObjectVersion | bool | None]:
+        # 历史/重发也要受当前登记范围约束，不能仅凭数据库仍可读就交付已撤销的诊断源。
+        for database, name in objects:
+            if (database.casefold() in self.system_databases
+                    and (database.casefold(), name.casefold()) not in self.diagnostic_sources):
+                raise TiDBError(StarRocksErrorCode.OBJECT_NOT_ALLOWED)
+        return await super().verify_objects(objects, versioned=versioned)
 
     async def _probe_one(self, conn: Connection, database: str, name: str) -> bool | None:
         limits = _ReadLimits(
@@ -288,7 +327,7 @@ class TiDBAdapter(StarRocksAdapter):
             root, _ = _parse(sql, policy)
             if root.find(exp.Exists) is not None or any(
                 not (
-                    isinstance(node.parent, exp.From | exp.Join)
+                    (isinstance(node.parent, exp.From | exp.Join) and node.arg_key == "this")
                     or (isinstance(node.parent, exp.In) and node.arg_key == "query")
                 )
                 for node in root.find_all(exp.Subquery)
@@ -324,9 +363,35 @@ class TiDBAdapter(StarRocksAdapter):
             update={"rows": kept, "row_count": len(kept), "truncated": bool(hidden)}
         )
 
+    def can_explain(self, query: ExplainQuery, *, has_view: bool = False) -> bool:
+        return self.server_version == "7.5.3" or (
+            not has_view
+            and self._legacy_view_tables(query.executed_sql, self.target.database) is not None
+        )
+
     async def explain(self, query: ExplainQuery) -> QueryResult:
-        # A 仅使用内部受保护视图探测；用户计划工具在 B1 接入，不能继承 StarRocks 前缀。
-        raise TiDBError(StarRocksErrorCode.OBJECT_NOT_ALLOWED)
+        if not isinstance(query, ExplainQuery):
+            raise TypeError("只对 SQLGuard 产生的 ExplainQuery 取执行计划")
+        if query.target_id != self.target.target_id or not self.can_explain(query):
+            raise TiDBError(StarRocksErrorCode.OBJECT_NOT_ALLOWED)
+        result = await self._run("EXPLAIN " + query.executed_sql, None, self.target.max_plan_lines)
+        if result.columns != ("id", "estRows", "task", "access object", "operator info"):
+            raise TiDBError(StarRocksErrorCode.RESULT_CONTRACT)
+        return result
+
+    async def _execute_statement(
+        self, conn: Connection, sql: str, args: tuple[object, ...] | None
+    ) -> tuple[str, ...]:
+        if sql.startswith("EXPLAIN ") and self._versions.get(id(conn)) != "7.5.3":
+            # 所连节点可能不同于快照采集节点；在实际连接上复核旧版预求值边界。
+            tables = self._legacy_view_tables(sql[len("EXPLAIN "):], self.target.database)
+            if tables is None:
+                raise _SessionMismatchError
+            for key in tables:
+                kinds = await self._rows(conn, self.object_type_sql, key, ("type",), self._limits)
+                if not kinds or kinds[0]["type"] == "VIEW":
+                    raise _SessionMismatchError
+        return await conn.execute(sql, args)
 
     async def _release(self, conn: Connection, *, complete: bool) -> None:
         try:

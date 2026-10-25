@@ -728,6 +728,26 @@ def _bind_tables(root: exp.Query, policy: QueryPolicy, current_database: str | N
 def _bind_table(table: exp.Table, policy: QueryPolicy, current_database: str | None) -> None:
     """显式库名按快照校验；审计未限定表仅按记录的会话当前库查找。"""
     name, database = table.name, table.text("db")
+    if policy.database_type == "tidb":
+        # TiDB 库名和表名按不区分大小写查找；只规范依赖 AST，不改执行原文。
+        requested = database or current_database
+        matched = next(
+            (db for db in policy.tables if db.casefold() == (requested or "").casefold()), None
+        )
+        if matched is not None:
+            database = matched
+            table.set("db", exp.to_identifier(matched))
+            canonical = next(
+                (obj for obj in policy.tables[matched] if obj.casefold() == name.casefold()),
+                None,
+            )
+            if canonical is not None:
+                if canonical != name and not table.alias:
+                    # 保留 orders.id / orders.* 的隐式来源名，仅规范物理对象身份。
+                    table.set("alias", exp.TableAlias(this=exp.to_identifier(name)))
+                    table.meta["implicit_source_name"] = True
+                name = canonical
+                table.set("this", exp.to_identifier(canonical))
     if database:
         if policy.columns(database, name) is None:
             _reject(_Code.OBJECT_NOT_ALLOWED)
@@ -996,7 +1016,11 @@ def _lookup(scope: Scope, name: str) -> exp.Table | Scope | None:
 
 def _check_column_db(column: exp.Column, owner: exp.Table | Scope | None) -> None:
     """``库.表.列``：表名必须是本层未起别名的物理表，且库名一致。"""
-    if not isinstance(owner, exp.Table) or owner.alias or owner.text("db") != column.text("db"):
+    if (
+        not isinstance(owner, exp.Table)
+        or (owner.alias and not owner.meta.get("implicit_source_name"))
+        or owner.text("db") != column.text("db")
+    ):
         _reject(_Code.COLUMN_NOT_ALLOWED)
 
 

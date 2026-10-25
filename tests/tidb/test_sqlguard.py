@@ -277,3 +277,40 @@ def test_non_tidb_dash_comment_whitespace_is_rejected(policy: QueryPolicy, space
         guard_readonly_query(
             "SELECT 1--" + space + "x FROM app.orders FOR UPDATE", policy  # noqa: S608
         )
+
+
+@pytest.mark.parametrize("sql", [
+    "SELECT id FROM app.orders LIMIT 3",
+    "SELECT orders.id FROM app.orders LIMIT 3",
+    "SELECT o.id FROM app.orders AS o LIMIT 3",
+    "SELECT orders.* FROM app.orders LIMIT 3",
+    "SELECT app.orders.id FROM app.orders LIMIT 3",
+    "SELECT app.orders.* FROM app.orders LIMIT 3",
+    "SELECT app.orders.id FROM app.orders WHERE EXISTS "
+    "(SELECT 1 FROM app.orders AS o WHERE o.id = app.orders.id) LIMIT 3",
+])
+@pytest.mark.parametrize("guard", [guard_readonly_query, guard_explain_query])
+def test_tidb_table_case_uses_snapshot_identity_without_editing_sql(sql, guard):
+    policy = tidb_policy().model_copy(update={"tables": {"app": {"Orders": ("id",)}}})
+    query = guard(sql, policy)
+    assert query.executed_sql == sql
+    assert query.referenced_objects == frozenset({("app", "Orders")})
+    assert query.referenced_columns == frozenset({("app", "Orders", "id")})
+
+
+def test_starrocks_table_case_remains_exact():
+    policy = tidb_policy().model_copy(update={
+        "database_type": "starrocks", "tables": {"app": {"Orders": ("id",)}}
+    })
+    with pytest.raises(QueryRejectedError):
+        guard_readonly_query("SELECT id FROM app.orders LIMIT 3", policy)
+
+
+@pytest.mark.parametrize("sql", [
+    "SELECT other.orders.id FROM app.orders LIMIT 3",
+    "SELECT app.orders.id FROM app.orders AS orders LIMIT 3",
+])
+def test_canonical_table_keeps_database_and_explicit_alias_checks(sql):
+    policy = tidb_policy().model_copy(update={"tables": {"app": {"Orders": ("id",)}}})
+    with pytest.raises(QueryRejectedError):
+        guard_readonly_query(sql, policy)

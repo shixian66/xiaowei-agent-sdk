@@ -11,25 +11,12 @@ from xiaowei.models import AUDIENCES, ToolRequest
 from xiaowei.starrocks import OBJECT_COLUMNS_SQL, OBJECT_TYPE_SQL, StarRocksErrorCode
 from xiaowei.starrocks_schema import SchemaCache
 from xiaowei.starrocks_tools import LIST_TABLES, starrocks_tools
+from xiaowei.tidb import SCHEMA_COLUMNS_SQL as COLUMNS_SQL
+from xiaowei.tidb import SCHEMA_IDS_SQL as IDS_SQL
+from xiaowei.tidb import SCHEMA_OBJECTS_SQL as OBJECTS_SQL
 
 SYSTEMS = ("information_schema", "performance_schema", "metrics_schema", "mysql")
-OBJECTS_SQL = (
-    "SELECT TABLE_SCHEMA AS db, TABLE_NAME AS name, TABLE_TYPE AS type, "
-    "LEFT(TABLE_COMMENT, %s) AS comment, CREATE_TIME AS created "
-    "FROM information_schema.tables WHERE LOWER(TABLE_SCHEMA) NOT IN (%s, %s, %s, %s) "
-    "ORDER BY TABLE_SCHEMA, TABLE_NAME LIMIT %s"
-)
-COLUMNS_SQL = (
-    "SELECT TABLE_SCHEMA AS db, TABLE_NAME AS name, COLUMN_NAME AS col, COLUMN_TYPE AS type, "
-    "IS_NULLABLE AS nullable, LEFT(COLUMN_COMMENT, %s) AS comment "
-    "FROM information_schema.columns WHERE LOWER(TABLE_SCHEMA) NOT IN (%s, %s, %s, %s) "
-    "ORDER BY TABLE_SCHEMA, TABLE_NAME, ORDINAL_POSITION LIMIT %s"
-)
-IDS_SQL = (
-    "SELECT TABLE_SCHEMA AS db, TABLE_NAME AS name, TIDB_TABLE_ID AS id "
-    "FROM information_schema.tables WHERE LOWER(TABLE_SCHEMA) NOT IN (%s, %s, %s, %s) "
-    "ORDER BY TABLE_SCHEMA, TABLE_NAME LIMIT %s"
-)
+
 OBJECT_ID_SQL = (
     "SELECT TIDB_TABLE_ID AS id FROM information_schema.tables "
     "WHERE TABLE_SCHEMA = %s AND TABLE_NAME = %s"
@@ -123,6 +110,7 @@ async def test_protected_view_keeps_its_actual_tidb_id_in_snapshot_and_verificat
         "SELECT EXISTS (SELECT id FROM app.orders) AS id",
         "SELECT id FROM app.orders WHERE id IN (1, (SELECT id FROM app.items))",
         "SELECT id FROM app.orders WHERE (SELECT id FROM app.items) IN (1, 2)",
+        "SELECT o.id FROM app.orders o JOIN app.orders x ON (SELECT id FROM app.items)",
         "SELECT id FROM app.v",
         None,
     ],

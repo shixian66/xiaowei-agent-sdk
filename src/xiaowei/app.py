@@ -362,13 +362,14 @@ class BusinessContext(BaseModel):
 
 
 class TargetInfo(BaseModel):
-    """一个已配置目标交给模型的说明：集群 ID、用途说明与可选业务口径；不含连接信息。"""
+    """一个已配置目标的可信类型、集群 ID、用途说明与可选业务口径；不含连接信息。"""
 
     model_config = ConfigDict(frozen=True, extra="forbid")
 
     target_id: ClusterId
     description: str = Field(min_length=1, max_length=500)
     business_context: BusinessContext | None
+    database_type: Literal["starrocks", "tidb"] = "starrocks"
 
 
 class AppConfig(BaseModel):
@@ -1649,7 +1650,7 @@ _TARGETS_HEADER = (
     "列出这些集群不代表用户已选择，按数据库查询工作方法确定本会话的环境。"
 )
 
-# 数据库任务的工作方法（查询、诊断）随包发布，配置了 StarRocks 目标时整份交给模型；
+# 数据库工作方法随包发布；通用查询方法共用，领域方法按可信配置的数据库类型加载。
 # 只改变模型读到的做法，执行、权限与证据仍由治理层落实。
 _DATABASE_SKILLS = tuple(
     files("xiaowei").joinpath("skills", name).read_text(encoding="utf-8").strip()
@@ -1670,14 +1671,25 @@ def _instructions(
     if not targets:
         return base
     lines = [base, ""]
-    for skill in _DATABASE_SKILLS:
-        lines += [skill, ""]
+    query_skill, starrocks_skill, tidb_skill = _DATABASE_SKILLS
+    lines += [query_skill, ""]
+    kinds = {target.database_type for target in targets}
+    if "starrocks" in kinds:
+        lines += [starrocks_skill, ""]
+    if "tidb" in kinds:
+        lines += [tidb_skill, ""]
     if any("local/inspect_audit_security" in names for names in capabilities.values()):
         lines += [_SECURITY_SKILL, ""]
-    lines.append(_TARGETS_HEADER)
+    header = _TARGETS_HEADER
+    if "tidb" in kinds:
+        header = header.replace(" StarRocks 集群", "数据库集群").replace(
+            " StarRocks 数据工具", "数据库工具"
+        )
+    lines.append(header)
     for target in sorted(targets, key=lambda t: t.target_id):
         names = "、".join(sorted(t.partition("/")[2] for t in capabilities[target.target_id]))
-        lines.append(f"- {target.target_id}：{target.description}。可用工具：{names}。")
+        kind = "数据库类型：TiDB。" if target.database_type == "tidb" else ""
+        lines.append(f"- {target.target_id}：{kind}{target.description}。可用工具：{names}。")
         context = target.business_context
         if context is not None:
             lines.append(

@@ -81,7 +81,7 @@ async def test_tidb_formal_web_query_success_preserves_sql_and_evidence(env: Env
         assert len(facts) == 1 and facts[0]["rows"] == [{"id": 7}, {"id": 8}]
         assert facts[0]["metadata"]["sql"] == QUERY
         assert statements(drv).count(QUERY) == 1
-        assert "explain_query" not in env.scripts.tools_seen(message)[0]
+        assert not any(sql.startswith("EXPLAIN ") for sql in statements(drv))
         assert await served.finish() == 0
     assert await env.scalar("SELECT count(*) FROM xiaowei_evidence") == 1
 
@@ -197,7 +197,7 @@ async def test_tidb_diagnose_purpose_has_no_business_execution_tool(env: Env) ->
         assert body["state"] == "completed"
         seen = env.scripts.tools_seen(message)[0]
         assert "run_readonly_query" not in seen
-        assert "explain_query" not in seen
+        assert "explain_query" in seen
         assert not any("propose" in name or "action" in name for name in seen)
         assert drv.attempts == 0
         assert await served.finish() == 0
@@ -282,3 +282,269 @@ def test_tidb_config_error_points_to_the_actual_connection_field(tmp_path) -> No
         load_config(path)
     assert "targets.0.tidb.host" in str(rejected.value)
     assert "targets.0.tidb.tidb" not in str(rejected.value)
+
+
+@pytest.mark.loopback
+@pytest.mark.parametrize("version", ["6.5.5", "7.5.3"])
+async def test_tidb_formal_explain_keeps_limit_and_never_executes_original(env: Env, version):
+    from tests.tidb.test_schema import PLANS
+
+    sql = "SELECT id FROM app.orders LIMIT 123456"
+    outcomes = schema_results(version)
+    outcomes["EXPLAIN " + sql] = PLANS
+    _, drv = adapter(outcomes)
+    env.drv = drv
+    target = tidb_config()
+    target["tidb"]["database"] = "app"
+    async with env.running(env.config(targets=[target])) as served:
+        await served.page()
+        message = env.scripts.add(
+            "为什么这条 SQL 慢？不要执行它：" + sql,
+            tool_call("explain_query", cluster="tidb-a", sql=sql),
+            cite(),
+        )
+        body = (await served.turn(message, "diagnose")).json()
+        assert body["state"] == "completed", body
+        facts = [f for f in body["delivery"]["facts"] if f["tool_id"] == "local/explain_query"]
+        assert len(facts) == 1 and facts[0]["metadata"]["sql"] == "EXPLAIN " + sql
+        assert statements(drv).count("EXPLAIN " + sql) == 1 and sql not in statements(drv)
+        assert "run_readonly_query" not in env.scripts.tools_seen(message)[0]
+        assert await served.finish() == 0
+
+
+@pytest.mark.loopback
+@pytest.mark.parametrize(
+    "sql", ["SELECT EXISTS(SELECT id FROM app.orders) AS n", "SELECT id FROM app.v"]
+)
+async def test_tidb_65_formal_unsafe_plan_refusal_has_no_database_io(env: Env, sql):
+    from tests.sdk_core.test_app import clarify
+
+    _, drv = adapter(schema_results("6.5.5"))
+    env.drv = drv
+    target = tidb_config()
+    target["tidb"]["database"] = "app"
+    async with env.running(env.config(targets=[target])) as served:
+        await served.page()
+        message = env.scripts.add(
+            "只取计划，不执行 SQL：" + sql,
+            tool_call("explain_query", cluster="tidb-a", sql=sql),
+            clarify("该版本不能安全取该计划；请提供已有慢日志计划用于静态分析。"),
+        )
+        body = (await served.turn(message, "diagnose")).json()
+        assert body["state"] == "completed", body
+        assert drv.attempts == 0 and statements(drv) == []
+        assert await served.finish() == 0
+    assert await env.scalar("SELECT count(*) FROM xiaowei_evidence") == 0
+
+
+@pytest.mark.loopback
+async def test_tidb_formal_explain_database_error_stops_the_turn(env: Env):
+    sql = "SELECT id FROM app.orders LIMIT 3"
+    outcomes = schema_results()
+    outcomes["EXPLAIN " + sql] = ProgrammingError(1105, "synthetic plan execution error")
+    _, drv = adapter(outcomes)
+    env.drv = drv
+    target = tidb_config()
+    target["tidb"]["database"] = "app"
+    async with env.running(env.config(targets=[target])) as served:
+        await served.page()
+        message = env.scripts.add(
+            "解释这条 SQL", tool_call("explain_query", cluster="tidb-a", sql=sql)
+        )
+        body = (await served.turn(message, "diagnose")).json()
+        assert body["state"] == "failed", body
+        assert len(env.scripts.calls[message]) == 1
+        assert statements(drv).count("EXPLAIN " + sql) == 1 and sql not in statements(drv)
+        assert await served.finish() == 0
+    assert await env.scalar("SELECT count(*) FROM xiaowei_evidence") == 0
+
+
+def diagnostic_config(env: Env):
+    from tests.sdk_core.test_runtime import OPERATOR
+
+    from xiaowei.starrocks_tools import DIAGNOSTICS_QUERY, QUERY_TOOLS
+
+    allowed = sorted(QUERY_TOOLS | {DIAGNOSTICS_QUERY})
+    target = tidb_config()
+    target["tidb"]["database"] = "app"
+    return env.config(
+        targets=[target],
+        data_policy={"input": {"max_bytes": 2000}, "model_tools": allowed},
+        access={"policy_version": "p1", "grants": {OPERATOR: allowed, "alice": allowed}},
+    )
+
+
+@pytest.mark.loopback
+@pytest.mark.parametrize("lowercase", [False, True])
+async def test_tidb_formal_diagnostics_returns_slow_queries_with_source_evidence(
+    env: Env, lowercase
+):
+    from tests.tidb.test_diagnostics import SQL, diagnostic_results
+
+    sql = SQL.replace("CLUSTER_SLOW_QUERY", "cluster_slow_query") if lowercase else SQL
+    outcomes = diagnostic_results()
+    outcomes[sql] = outcomes[SQL]
+    _, drv = adapter(outcomes)
+    env.drv = drv
+    async with env.running(diagnostic_config(env)) as served:
+        await served.page()
+        message = env.scripts.add(
+            "在 tidb-a 查询 2026-09-30 15:00 到 16:00 超过一秒、最慢的三次执行，不重跑原 SQL",
+            tool_call("query_diagnostics", cluster="tidb-a", sql=sql), cite(),
+        )
+        body = (await served.turn(message, "diagnose")).json()
+        assert body["state"] == "completed", body
+        facts = [f for f in body["delivery"]["facts"]
+                 if f["tool_id"] == "local/query_diagnostics"]
+        assert len(facts) == 1 and facts[0]["rows"][0]["Query_time"] == 9.0
+        assert "run_readonly_query" not in env.scripts.tools_seen(message)[0]
+        assert statements(drv).count(sql) == 1
+        assert not any(s.startswith("SELECT sensitive") for s in statements(drv))
+        assert await served.finish() == 0
+    assert await env.scalar("SELECT count(*) FROM xiaowei_evidence") == 1
+
+
+@pytest.mark.loopback
+async def test_tidb_diagnostic_history_revocation_prevents_model_and_old_delivery(env: Env):
+    from tests.tidb.test_diagnostics import SQL, diagnostic_results
+
+    outcomes = diagnostic_results()
+    _, drv = adapter(outcomes)
+    env.drv = drv
+    async with env.running(diagnostic_config(env)) as served:
+        await served.page()
+        message = env.scripts.add(
+            "取慢 SQL", tool_call("query_diagnostics", cluster="tidb-a", sql=SQL), cite()
+        )
+        body = (await served.turn(message, "diagnose")).json()
+        assert body["state"] == "completed", body
+        probe = "SELECT 1 FROM `INFORMATION_SCHEMA`.`CLUSTER_SLOW_QUERY` WHERE 1 = 0"
+        outcomes[probe] = ProgrammingError(1142, "SELECT denied diagnostic private-canary")
+        follow = env.scripts.add("继续解释刚才的慢 SQL")
+        again = (await served.turn(follow, "diagnose", "r2")).json()
+        assert again["state"] == "failed"
+        assert follow not in env.scripts.calls
+        assert "sensitive" not in json.dumps(again) and "private-canary" not in json.dumps(again)
+        assert statements(drv).count(SQL) == 1
+        assert await served.finish() == 0
+
+
+@pytest.mark.loopback
+async def test_tidb_diagnostics_database_error_is_terminal(env: Env):
+    from tests.tidb.test_diagnostics import SQL, diagnostic_results
+
+    outcomes = diagnostic_results()
+    outcomes[SQL] = ProgrammingError(1105, "one node unreachable synthetic")
+    _, drv = adapter(outcomes)
+    env.drv = drv
+    async with env.running(diagnostic_config(env)) as served:
+        await served.page()
+        message = env.scripts.add(
+            "取慢 SQL", tool_call("query_diagnostics", cluster="tidb-a", sql=SQL)
+        )
+        body = (await served.turn(message, "diagnose")).json()
+        assert body["state"] == "failed"
+        assert len(env.scripts.calls[message]) == 1 and statements(drv).count(SQL) == 1
+        assert await served.finish() == 0
+    assert await env.scalar("SELECT count(*) FROM xiaowei_evidence") == 0
+
+
+@pytest.mark.loopback
+async def test_tidb_t8_select_assessment_reuses_protected_plan_and_cites_evidence(env: Env):
+    from tests.p1b.test_starrocks_adapter import Result
+    from tests.tidb.test_schema import COLUMNS_SQL, PLANS
+
+    from xiaowei.starrocks import OBJECT_COLUMNS_SQL
+
+    sql = "SELECT customer_id, SUM(amount) FROM app.orders GROUP BY customer_id"
+    outcomes = schema_results()
+    outcomes[COLUMNS_SQL].rows.append(("app", "orders", "amount", "decimal", "YES", None))
+    original_columns = outcomes[OBJECT_COLUMNS_SQL]
+    outcomes[OBJECT_COLUMNS_SQL] = lambda args: (
+        Result(("col", "type"), [("id", "bigint"), ("customer_id", "bigint"),
+                                  ("amount", "decimal")])
+        if args[1] == "orders" else original_columns(args)
+    )
+    outcomes["EXPLAIN " + sql] = PLANS
+    _, drv = adapter(outcomes)
+    env.drv = drv
+    target = tidb_config()
+    target["tidb"]["database"] = "app"
+    async with env.running(env.config(targets=[target])) as served:
+        await served.page()
+        message = env.scripts.add(
+            "评估以下 SQL 的执行影响，不执行它：" + sql,
+            tool_call("explain_query", cluster="tidb-a", sql=sql), cite(),
+        )
+        body = (await served.turn(message, "query")).json()
+        assert body["state"] == "completed", body
+        facts = body["delivery"]["facts"]
+        assert len(facts) == 1 and facts[0]["tool_id"] == "local/explain_query"
+        assert facts[0]["metadata"]["sql"] == "EXPLAIN " + sql
+        assert sql not in statements(drv) and statements(drv).count("EXPLAIN " + sql) == 1
+        assert await served.finish() == 0
+
+
+@pytest.mark.loopback
+async def test_tidb_lock_evidence_supports_t8_followup_without_business_execution(env: Env):
+    from tests.sdk_core.test_app import answer
+    from tests.tidb.test_cluster import LOCK_SQL, cluster_results
+
+    _, drv = adapter(cluster_results())
+    env.drv = drv
+    values = diagnostic_config(env).model_dump(mode="json")
+    values["targets"][0]["tidb"]["policy"]["allowed_functions"] += ["NOW", "UNIX_TIMESTAMP"]
+    async with env.running(ServeConfig.model_validate(values)) as served:
+        await served.page()
+        initial = env.scripts.add(
+            "评估 UPDATE app.orders SET status='closed' WHERE created_at < '2025-01-01'",
+            lambda call: answer([], advice="尚无运行证据，需核实事务与锁等待。"),
+        )
+        assert (await served.turn(initial, "query")).json()["state"] == "completed"
+        follow = env.scripts.add(
+            "订单更新正卡住，当前等待会改变刚才的执行建议吗？集群仍为 tidb-a。",
+            tool_call("query_diagnostics", cluster="tidb-a", sql=LOCK_SQL),
+            cite("当前等待应结合事务确认后再决定执行时机；这不是生产执行批准。"),
+        )
+        body = (await served.turn(follow, "diagnose", "r2")).json()
+        assert body["state"] == "completed", body
+        row = body["delivery"]["facts"][0]["rows"][0]
+        assert row["waiting_trx"] == 222 and row["holding_trx"] == 111
+        assert row["wait_seconds"] == 15.0 and row["CURRENT_SQL_DIGEST_TEXT"] is None
+        assert "run_readonly_query" not in env.scripts.tools_seen(follow)[0]
+        assert statements(drv).count(LOCK_SQL) == 1
+        assert not any(s.startswith("UPDATE") for s in statements(drv))
+        assert await served.finish() == 0
+
+
+@pytest.mark.loopback
+async def test_tidb_cluster_partial_warning_reaches_formal_feishu_delivery(env: Env):
+    from tests.p1b.test_starrocks_adapter import Result
+    from tests.sdk_core.test_feishu_render import tables, text_parts
+    from tests.sdk_core.test_runtime import FakeChannel, feishu_config, feishu_event, until
+    from tests.tidb.test_adapter import WARNINGS_SQL
+    from tests.tidb.test_cluster import REGION_SQL, cluster_results
+
+    outcomes = cluster_results()
+    outcomes[WARNINGS_SQL] = Result(("Level", "Code", "Message"), [
+        ("Warning", 1105, "synthetic node-b missing"),
+    ])
+    _, drv = adapter(outcomes)
+    env.drv = drv
+    values = diagnostic_config(env).model_dump(mode="json")
+    values["feishu"] = feishu_config()
+    channel = FakeChannel()
+    async with env.running(ServeConfig.model_validate(values), feishu_channel=channel) as served:
+        message = env.scripts.add(
+            "在 tidb-a 检查 Region，不能把缺节点当健康",
+            tool_call("query_diagnostics", cluster="tidb-a", sql=REGION_SQL),
+            cite("只有返回节点的部分证据，不能判断全群健康。"),
+        )
+        channel.emit_raw_from_sdk_thread(feishu_event(env, message, "om_tidb_cluster"))
+        await until(lambda: len(channel.sends) >= 1)
+        card = channel.sends[0][1]
+        rendered = "\n".join(text_parts(card))
+        assert "tidb-a" in rendered and "部分证据" in rendered
+        assert tables(card)[0]["rows"] == [{"c0": "8", "c1": "101"}]
+        assert statements(drv).count(REGION_SQL) == 1
+        assert await served.finish() == 0
