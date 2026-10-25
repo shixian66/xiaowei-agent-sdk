@@ -3210,7 +3210,7 @@ def test_scope_check_limit_is_required_and_fits_one_listing_turn(
     [
         ([], "targets"),
         ([cluster_config("sr-a"), cluster_config("sr-a")], "集群 ID 不能重复"),
-        ([{**cluster_config("sr-a"), "type": "tidb"}], "targets.0.type"),
+        ([{**cluster_config("sr-a"), "type": "unsupported"}], "targets.0.type"),
         ([cluster_config("Sales DB")], "target_id 必须是"),
         ([{**cluster_config("sr-a"), "host": "10.0.0.1"}], "targets.0.host"),
     ],

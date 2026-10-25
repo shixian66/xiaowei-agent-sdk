@@ -113,6 +113,8 @@ class SchemaSnapshot:
     objects: Mapping[tuple[str, str], ObjectInfo]
     query_policy: QueryPolicy
     version: str = field(default_factory=lambda: secrets.token_hex(8))
+    warnings: tuple[dict[str, Scalar], ...] | None = None
+    warnings_truncated: bool = False
 
     def object(self, database: str, name: str) -> ObjectInfo | None:
         return self.objects.get((database, name))
@@ -197,6 +199,8 @@ class SchemaCache:
             expires_at=started + timedelta(seconds=self._limits.max_age_seconds),
             objects=readable,
             query_policy=self._query_policy(readable),
+            warnings=rows.warnings,
+            warnings_truncated=rows.warnings_truncated,
             version=(
                 previous.version
                 if previous is not None and previous.objects == readable
@@ -274,6 +278,8 @@ class SchemaCache:
             tables.setdefault(database, {})[name] = tuple(c.name for c in obj.columns)
         return QueryPolicy(
             target_id=target.target_id,
+            database_type=target.database_type,
+            default_database=target.database if target.database_type == "tidb" else None,
             tables=tables,
             allowed_functions=target.policy.allowed_functions,
             max_rows=target.policy.max_rows,
@@ -350,12 +356,14 @@ class DependencyCheck:
             return "unverifiable"
         for dependency in dependencies:
             state = current[(dependency.database, dependency.name)]
+            if state is None:
+                return "unverifiable"
             if state is False or (dependency.use == "read" and not _same(dependency, state)):
                 return "invalid"
         return "valid"
 
 
-def _same(dependency: ObjectDependency, state: ObjectVersion | bool) -> bool:
+def _same(dependency: ObjectDependency, state: ObjectVersion | bool | None) -> bool:
     return (
         isinstance(state, ObjectVersion)
         and state.type == dependency.type

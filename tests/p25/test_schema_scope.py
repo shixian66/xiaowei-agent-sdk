@@ -29,7 +29,11 @@ from tests.p1b.test_starrocks_adapter import (
 
 from xiaowei.governance import Prechecked, ToolRejectedError
 from xiaowei.models import AUDIENCES, ToolObservation, ToolRequest
-from xiaowei.sqlguard import QueryPolicy
+from xiaowei.sqlguard import (
+    QueryRejectedError,
+    QueryRejectionCode,
+    guard_readonly_query,
+)
 from xiaowei.starrocks import (
     SCHEMA_COLUMNS_SQL,
     SCHEMA_OBJECTS_SQL,
@@ -142,7 +146,10 @@ async def test_refresh_keeps_only_objects_the_account_can_select() -> None:
         "shop": {"sales": ("region", "total", "note")},
         "crm": {"customers": ("id", "tier")},
     }
-    assert "default_database" not in QueryPolicy.model_fields  # 业务 SQL 不继承连接的默认库
+    # StarRocks 仍拒绝未限定物理表；TiDB 新上下文字段不能改变这一行为。
+    with pytest.raises(QueryRejectedError) as unqualified:
+        guard_readonly_query("SELECT region FROM sales", policy)
+    assert unqualified.value.code is QueryRejectionCode.UNQUALIFIED_TABLE
     assert policy.allowed_functions == TARGET.policy.allowed_functions
     assert policy.max_result_columns == TARGET.policy.max_result_columns
     # 每个候选对象恰好探测一次，全部在同一条连接上。

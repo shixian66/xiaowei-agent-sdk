@@ -1653,7 +1653,7 @@ _TARGETS_HEADER = (
 # 只改变模型读到的做法，执行、权限与证据仍由治理层落实。
 _DATABASE_SKILLS = tuple(
     files("xiaowei").joinpath("skills", name).read_text(encoding="utf-8").strip()
-    for name in ("database_query.md", "database_diagnosis.md")
+    for name in ("database_query.md", "database_diagnosis.md", "tidb_diagnosis.md")
 )
 _SECURITY_SKILL = (
     files("xiaowei").joinpath("skills", "database_security.md").read_text(encoding="utf-8").strip()

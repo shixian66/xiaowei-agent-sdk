@@ -56,7 +56,7 @@ from contextvars import ContextVar
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 from decimal import ROUND_HALF_UP, Decimal
-from typing import Annotated, Final, Literal, Protocol, cast
+from typing import Annotated, ClassVar, Final, Literal, Protocol, TypedDict, cast
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import asyncmy
@@ -348,6 +348,8 @@ class StarRocksTarget(BaseModel):
 
     model_config = ConfigDict(frozen=True, extra="forbid")
 
+    database_type: ClassVar[Literal["starrocks", "tidb"]] = "starrocks"
+
     target_id: _Name
     host: _Name
     port: int = Field(ge=1, le=65535)
@@ -417,12 +419,19 @@ class QueryResult(BaseModel):
     collected_at: datetime
     elapsed_ms: int
     row_count: int
+    warnings: tuple[dict[str, Scalar], ...] | None = Field(default=None, exclude=True)
+    warnings_truncated: bool = Field(default=False, exclude=True)
 
     @model_validator(mode="after")
     def _counted(self) -> QueryResult:
         if self.row_count != len(self.rows):
             raise ValueError("row_count 必须等于已返回行数")
         return self
+
+
+class _ResultMetadata(TypedDict, total=False):
+    warnings: tuple[dict[str, Scalar], ...] | None
+    warnings_truncated: bool
 
 
 class AuditResult(QueryResult):
@@ -447,6 +456,8 @@ class SchemaRows:
     columns: tuple[dict[str, Scalar], ...]
     ids: tuple[dict[str, Scalar], ...]
     truncated: bool
+    warnings: tuple[dict[str, Scalar], ...] | None = None
+    warnings_truncated: bool = False
 
 
 @dataclass(frozen=True)
@@ -629,6 +640,18 @@ def _security_sql(audit: AuditSource) -> tuple[str, str]:
 
 
 class StarRocksAdapter:
+    error_type: type[StarRocksError] = StarRocksError
+    system_databases: tuple[str, ...] = SYSTEM_DATABASES
+    schema_objects_sql = SCHEMA_OBJECTS_SQL
+    schema_columns_sql = SCHEMA_COLUMNS_SQL
+    schema_ids_sql = SCHEMA_IDS_SQL
+    object_type_sql = OBJECT_TYPE_SQL
+    object_id_sql = OBJECT_ID_SQL
+    object_columns_sql = OBJECT_COLUMNS_SQL
+    ddl_identity_sql = DDL_IDENTITY_SQL
+    internal_engines: frozenset[str] = frozenset({"OLAP", "CLOUD_NATIVE"})
+    probe_denied: frozenset[int] = _PROBE_DENIED
+
     def __init__(
         self, target: StarRocksTarget, *, connect: Connector, clock: Callable[[], datetime]
     ) -> None:
@@ -657,7 +680,7 @@ class StarRocksAdapter:
         if not isinstance(query, GuardedQuery):
             raise TypeError("只执行 SQLGuard 产生的 GuardedQuery")
         if query.target_id != self._target.target_id:
-            raise StarRocksError(_Code.OBJECT_NOT_ALLOWED)
+            raise self.error_type(_Code.OBJECT_NOT_ALLOWED)
         return await self._run(query.executed_sql, None, query.max_returned_rows, clip_values=True)
 
     async def explain(self, query: ExplainQuery) -> QueryResult:
@@ -669,7 +692,7 @@ class StarRocksAdapter:
         if not isinstance(query, ExplainQuery):
             raise TypeError("只对 SQLGuard 产生的 ExplainQuery 取执行计划")
         if query.target_id != self._target.target_id:
-            raise StarRocksError(_Code.OBJECT_NOT_ALLOWED)
+            raise self.error_type(_Code.OBJECT_NOT_ALLOWED)
         sql = EXPLAIN_PREFIX + query.executed_sql
         return await self._run(sql, None, self._target.max_plan_lines, plan=True)
 
@@ -683,20 +706,20 @@ class StarRocksAdapter:
         read = _ReadLimits(max_bytes=limits.max_bytes, max_value=limits.max_bytes, zone=self._zone)
         chars = limits.max_comment_chars
         objects = await self._run(
-            SCHEMA_OBJECTS_SQL,
-            (chars, *SYSTEM_DATABASES, limits.max_objects + 1),
+            self.schema_objects_sql,
+            (chars, *self.system_databases, limits.max_objects + 1),
             limits.max_objects,
             limits=read,
         )
         columns = await self._run(
-            SCHEMA_COLUMNS_SQL,
-            (chars, *SYSTEM_DATABASES, limits.max_columns + 1),
+            self.schema_columns_sql,
+            (chars, *self.system_databases, limits.max_columns + 1),
             limits.max_columns,
             limits=read,
         )
         ids = await self._run(
-            SCHEMA_IDS_SQL,
-            (*SYSTEM_DATABASES, limits.max_objects + 1),
+            self.schema_ids_sql,
+            (*self.system_databases, limits.max_objects + 1),
             limits.max_objects,
             limits=read,
         )
@@ -705,15 +728,32 @@ class StarRocksAdapter:
             _SCHEMA_COLUMN_COLUMNS,
             _SCHEMA_ID_COLUMNS,
         ):
-            raise StarRocksError(_Code.RESULT_CONTRACT)
+            raise self.error_type(_Code.RESULT_CONTRACT)
+        warnings: list[dict[str, Scalar]] | None = None
+        warnings_truncated = False
+        if self.target.database_type == "tidb":
+            warnings = []
+            warning_bytes = 2
+            for result in (objects, columns, ids):
+                warnings_truncated |= result.warnings_truncated
+                for warning in result.warnings or ():
+                    added = _json_size(warning) + (2 if warnings else 0)
+                    if (len(warnings) >= self.target.policy.max_rows
+                            or warning_bytes + added > self.target.max_result_bytes):
+                        warnings_truncated = True
+                    else:
+                        warnings.append(warning)
+                        warning_bytes += added
         return SchemaRows(
             objects=objects.rows,
             columns=columns.rows,
             ids=ids.rows,
             truncated=objects.truncated or columns.truncated or ids.truncated,
+            warnings=None if warnings is None else tuple(warnings),
+            warnings_truncated=warnings_truncated,
         )
 
-    async def probe(self, objects: Sequence[tuple[str, str]]) -> dict[tuple[str, str], bool]:
+    async def probe(self, objects: Sequence[tuple[str, str]]) -> dict[tuple[str, str], bool | None]:
         """在同一条连接上逐个零行探测 ``(库, 对象)`` 的当前 SELECT 权限。
 
         ``True`` 可读；``False`` 是数据库给出的确定结论（无权，或对象/库已不存在）。其他任何
@@ -722,11 +762,14 @@ class StarRocksAdapter:
         不拼入 SQL。整批共用一个客户端期限。
         """
         verdicts = await self.verify_objects(objects, versioned=frozenset())
-        return {key: verdict is not False for key, verdict in verdicts.items()}
+        return {
+            key: None if verdict is None else verdict is not False
+            for key, verdict in verdicts.items()
+        }
 
     async def verify_objects(
         self, objects: Sequence[tuple[str, str]], *, versioned: frozenset[tuple[str, str]]
-    ) -> dict[tuple[str, str], ObjectVersion | bool]:
+    ) -> dict[tuple[str, str], ObjectVersion | bool | None]:
         """同 ``probe`` 逐个零行探测；``versioned`` 中可读的对象再读取当前版本。
 
         结论：``False`` 确定不可读（无权、对象或库不存在，或可读却已不在元数据中）；``True`` 可读
@@ -736,7 +779,7 @@ class StarRocksAdapter:
         """
         for database, name in objects:
             if not (safe_identifier(database) and safe_identifier(name)):
-                raise StarRocksError(_Code.OBJECT_NOT_ALLOWED)
+                raise self.error_type(_Code.OBJECT_NOT_ALLOWED)
         if not objects:
             return {}
         conn = await self._acquire()
@@ -745,7 +788,7 @@ class StarRocksAdapter:
         finally:
             self._slots.release()
         if code is not None:
-            raise StarRocksError(code)
+            raise self.error_type(code)
         return verdicts
 
     async def describe_layout(
@@ -760,7 +803,7 @@ class StarRocksAdapter:
         result = await self._run(_DESCRIBE_LAYOUT, (database, name, "VIEW"), 1)
         rows = [_layout_row(row, columns) for row in result.rows]
         if result.columns != LAYOUT_COLUMNS or result.truncated or None in rows:
-            raise StarRocksError(_Code.RESULT_CONTRACT)
+            raise self.error_type(_Code.RESULT_CONTRACT)
         return result.model_copy(update={"rows": tuple(r for r in rows if r is not None)})
 
     async def show_create_table(self, database: str, name: str, table_id: int) -> QueryResult:
@@ -776,25 +819,25 @@ class StarRocksAdapter:
             or table_id <= 0
             or len(sql.encode()) > self._target.policy.max_sql_bytes
         ):
-            raise StarRocksError(_Code.OBJECT_NOT_ALLOWED)
+            raise self.error_type(_Code.OBJECT_NOT_ALLOWED)
         started = time.monotonic()
 
         async def verify_identity() -> str:
-            identity = await self._run(DDL_IDENTITY_SQL, (database, name), 1)
+            identity = await self._run(self.ddl_identity_sql, (database, name), 1)
             if (
                 identity.columns != ("id", "engine", "type")
                 or identity.truncated
                 or len(identity.rows) != 1
                 or type(identity.rows[0]["id"]) is not int
             ):
-                raise StarRocksError(_Code.OBJECT_NOT_ALLOWED)
+                raise self.error_type(_Code.OBJECT_NOT_ALLOWED)
             engine = identity.rows[0]["engine"]
             if (
                 not isinstance(engine, str)
-                or engine not in ("OLAP", "CLOUD_NATIVE")
+                or engine not in self.internal_engines
                 or identity.rows != ({"id": table_id, "engine": engine, "type": "BASE TABLE"},)
             ):
-                raise StarRocksError(_Code.OBJECT_NOT_ALLOWED)
+                raise self.error_type(_Code.OBJECT_NOT_ALLOWED)
             return engine
 
         engine = await verify_identity()
@@ -806,21 +849,21 @@ class StarRocksAdapter:
         result = await self._run(sql, None, 1, limits=limits)
         # 即使内容超限也复核对象，不能把对象替换伪装成容量不足。
         if await verify_identity() != engine:
-            raise StarRocksError(_Code.OBJECT_NOT_ALLOWED)
+            raise self.error_type(_Code.OBJECT_NOT_ALLOWED)
         if result.columns != ("Table", "Create Table"):
-            raise StarRocksError(_Code.RESULT_CONTRACT)
+            raise self.error_type(_Code.RESULT_CONTRACT)
         rows: tuple[dict[str, Scalar], ...] = ()
         if not result.truncated:
             if len(result.rows) != 1:
-                raise StarRocksError(_Code.RESULT_CONTRACT)
+                raise self.error_type(_Code.RESULT_CONTRACT)
             row = result.rows[0]
             ddl = row["Create Table"]
             if row["Table"] != name or not isinstance(ddl, str) or not ddl.strip():
-                raise StarRocksError(_Code.RESULT_CONTRACT)
+                raise self.error_type(_Code.RESULT_CONTRACT)
             rows = ({"ddl": ddl},)
         elif result.rows:
             # 单条原文只有整行丢弃的容量截断；已读到一行还未结束代表服务端返回了多行。
-            raise StarRocksError(_Code.RESULT_CONTRACT)
+            raise self.error_type(_Code.RESULT_CONTRACT)
         return result.model_copy(
             update={
                 "columns": ("ddl",),
@@ -871,7 +914,7 @@ class StarRocksAdapter:
         started = time.monotonic()
         candidates = await self._run(sql, args, audit.candidate_rows, limits=limits)
         if candidates.columns != _AUDIT_SOURCE:
-            raise StarRocksError(_Code.RESULT_CONTRACT)
+            raise self.error_type(_Code.RESULT_CONTRACT)
         code: StarRocksErrorCode | None = None
         try:
             # SQL 解析是同步 CPU 工作：放到线程中，另计一个客户端期限（读取候选已用过一个，
@@ -888,7 +931,7 @@ class StarRocksAdapter:
         except _ResultContractError:
             code = _Code.RESULT_CONTRACT
         if code is not None:
-            raise StarRocksError(code)
+            raise self.error_type(code)
         return AuditResult(
             target_id=self._target.target_id,
             sql=sql,
@@ -966,12 +1009,14 @@ class StarRocksAdapter:
             finally:
                 self._slots.release()
         if code is not None:
-            raise StarRocksError(code)
+            raise self.error_type(code)
         return SecurityAuditResult(
             target_id=self._target.target_id, sql=candidates, columns=_SECURITY_COLUMNS,
             rows=tuple(rows), row_count=len(rows), truncated=truncated, collected_at=self._clock(),
             elapsed_ms=round((time.monotonic() - started) * 1000),
-            **cast(dict[str, int], totals[0]),
+            window_rows=cast(int, totals[0]["window_rows"]),
+            window_failed_rows=cast(int, totals[0]["window_failed_rows"]),
+            window_oversize_rows=cast(int, totals[0]["window_oversize_rows"]),
         )
 
     def _listed(
@@ -1041,7 +1086,7 @@ class StarRocksAdapter:
         started = time.monotonic()
         conn = await self._acquire()
         try:
-            rows, truncated, columns, error = await self._query(
+            rows, truncated, columns, error, metadata = await self._query(
                 conn, sql, args, max_rows, plan, limits or self._limits, clip_values
             )
         finally:
@@ -1054,6 +1099,7 @@ class StarRocksAdapter:
             columns=columns,
             rows=tuple(rows),
             row_count=len(rows),
+            **metadata,
             truncated=truncated,
             collected_at=self._clock(),
             elapsed_ms=round((time.monotonic() - started) * 1000),
@@ -1072,7 +1118,7 @@ class StarRocksAdapter:
         except TimeoutError:
             code = _Code.POOL_TIMEOUT
         if code is not None:
-            raise StarRocksError(code, slot_wait=True)
+            raise self.error_type(code, slot_wait=True)
         try:
             conn, code = await self._open(deadline)
         except BaseException:
@@ -1080,7 +1126,7 @@ class StarRocksAdapter:
             raise
         if conn is None:
             self._slots.release()
-            raise StarRocksError(code or _Code.CONNECT_FAILED)
+            raise self.error_type(code or _Code.CONNECT_FAILED)
         return conn
 
     async def _probe(
@@ -1088,11 +1134,11 @@ class StarRocksAdapter:
         conn: Connection,
         objects: Sequence[tuple[str, str]],
         versioned: frozenset[tuple[str, str]],
-    ) -> tuple[dict[tuple[str, str], ObjectVersion | bool], StarRocksErrorCode | None]:
+    ) -> tuple[dict[tuple[str, str], ObjectVersion | bool | None], StarRocksErrorCode | None]:
         """会话设置后逐个探测（并按需读取版本）；返回错误码而不是抛出（同 ``_query``）。"""
         complete = False
         stage = _Code.SESSION_SETUP_FAILED
-        verdicts: dict[tuple[str, str], ObjectVersion | bool] = {}
+        verdicts: dict[tuple[str, str], ObjectVersion | bool | None] = {}
         try:
             async with asyncio.timeout(self._target.client_timeout_seconds):
                 await self._prepare_session(conn)
@@ -1120,13 +1166,13 @@ class StarRocksAdapter:
         """一个对象的当前版本；元数据中已没有该对象时为 ``None``。结果不合契约时抛出。"""
         limits = self._target.schema_limits
         read = _ReadLimits(max_bytes=limits.max_bytes, max_value=limits.max_bytes, zone=self._zone)
-        kinds = await self._rows(conn, OBJECT_TYPE_SQL, (database, name), ("type",), read)
+        kinds = await self._rows(conn, self.object_type_sql, (database, name), ("type",), read)
         if not kinds:
             return None
-        ids = await self._rows(conn, OBJECT_ID_SQL, (database, name), ("id",), read)
+        ids = await self._rows(conn, self.object_id_sql, (database, name), ("id",), read)
         columns = await self._rows(
             conn,
-            OBJECT_COLUMNS_SQL,
+            self.object_columns_sql,
             (database, name, limits.max_columns + 1),
             ("col", "type"),
             read,
@@ -1167,12 +1213,11 @@ class StarRocksAdapter:
             raise _ResultContractError
         return rows
 
-    @staticmethod
-    async def _probe_one(conn: Connection, database: str, name: str) -> bool:
+    async def _probe_one(self, conn: Connection, database: str, name: str) -> bool | None:
         try:
             await conn.execute(_PROBE.format(db=database, name=name), None)
         except MySQLError as error:
-            if _error_number(error) in _PROBE_DENIED:
+            if _error_number(error) in self.probe_denied:
                 return False
             raise
         if await conn.fetch_row() is not None:
@@ -1195,7 +1240,9 @@ class StarRocksAdapter:
         plan: bool,
         limits: _ReadLimits,
         clip_values: bool,
-    ) -> tuple[list[dict[str, Scalar]], bool, tuple[str, ...], StarRocksError | None]:
+    ) -> tuple[
+        list[dict[str, Scalar]], bool, tuple[str, ...], StarRocksError | None, _ResultMetadata
+    ]:
         """执行并读取；返回受控错误而不是抛出，使错误在离开 ``except`` 后由调用方抛出。
 
         ``plan`` 为真时结果必须恰好一列文本，列名换为 ``PLAN_COLUMN``；服务端列名不外传。
@@ -1209,13 +1256,14 @@ class StarRocksAdapter:
                 try:
                     columns = await conn.execute(sql, args)
                 except MySQLError as error:
-                    if not _is_parse_error(error):
+                    if not self._parse_failure(error):
                         raise
                     return (
                         [],
                         False,
                         (),
-                        StarRocksError(_Code.QUERY_FAILED, parse_failed=True),
+                        self.error_type(_Code.QUERY_FAILED, parse_failed=True),
+                        {},
                     )
                 if (
                     any(not isinstance(name, str) for name in columns)
@@ -1230,18 +1278,28 @@ class StarRocksAdapter:
                 rows, truncated = await self._read(
                     conn, columns, max_rows, plan, limits, clip_values=clip_values
                 )
+                metadata = await self._result_metadata(conn, max_rows, truncated)
             complete = not truncated
-            return rows, truncated, columns, None
+            return rows, truncated, columns, None, metadata
         except TimeoutError:
-            return [], False, (), StarRocksError(_Code.TIMEOUT)
+            return [], False, (), self.error_type(_Code.TIMEOUT), {}
         except _SessionMismatchError:
-            return [], False, (), StarRocksError(_Code.SESSION_SETUP_FAILED)
+            return [], False, (), self.error_type(_Code.SESSION_SETUP_FAILED), {}
         except _ResultContractError:
-            return [], False, (), StarRocksError(_Code.RESULT_CONTRACT)
+            return [], False, (), self.error_type(_Code.RESULT_CONTRACT), {}
         except (MySQLError, OSError) as error:
-            return [], False, (), StarRocksError(_query_code(error, stage))
+            return [], False, (), self.error_type(_query_code(error, stage)), {}
         finally:
             await self._release(conn, complete=complete)
+
+    @staticmethod
+    def _parse_failure(error: MySQLError) -> bool:
+        return _is_parse_error(error)
+
+    async def _result_metadata(
+        self, conn: Connection, max_rows: int, truncated: bool
+    ) -> _ResultMetadata:
+        return {}
 
     async def _prepare_session(self, conn: Connection) -> None:
         t = self._target
@@ -1594,7 +1652,7 @@ class _AsyncmyConnection:
         self._conn.close()
 
 
-def open_starrocks(target: StarRocksTarget, *, clock: Callable[[], datetime]) -> StarRocksAdapter:
+def mysql_connector(target: StarRocksTarget) -> Connector:
     """装配 Adapter：在此解析凭据（缺失即失败），不建立任何连接。"""
     password = resolve_secret_ref(target.password_ref)
     context = tls_context(target)
@@ -1618,4 +1676,8 @@ def open_starrocks(target: StarRocksTarget, *, clock: Callable[[], datetime]) ->
         # asyncmy 的类型存根把 cursor() 标为基类；传入 SSCursor 时返回非缓冲游标。
         return _AsyncmyConnection(conn, cast(SSCursor, conn.cursor(SSCursor)))
 
-    return StarRocksAdapter(target, connect=connect, clock=clock)
+    return connect
+
+
+def open_starrocks(target: StarRocksTarget, *, clock: Callable[[], datetime]) -> StarRocksAdapter:
+    return StarRocksAdapter(target, connect=mysql_connector(target), clock=clock)
