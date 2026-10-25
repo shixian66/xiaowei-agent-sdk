@@ -1403,9 +1403,8 @@ def _app_config(config: ServeConfig) -> AppConfig:
         targets=tuple(
             TargetInfo(
                 target_id=t.target_id,
-                description=(
-                    "数据库类型：TiDB。" + t.description if t.type == "tidb" else t.description
-                ),
+                description=t.description,
+                database_type=t.type,
                 business_context=t.business_context,
             )
             for t in config.targets

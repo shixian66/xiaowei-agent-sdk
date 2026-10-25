@@ -142,3 +142,19 @@ def test_security_skill_is_short_and_only_loaded_for_registered_security_capabil
     assert body not in _instructions(DEFAULT_INSTRUCTIONS, (), {})
     for rule in ("match_counts_complete", "已确认下界", "不相加", "不固定", "EXPLAIN", "正常"):
         assert rule in body
+
+
+@pytest.mark.parametrize("kinds", [("starrocks",), ("tidb",), ("starrocks", "tidb")])
+def test_database_specific_methods_are_loaded_only_for_configured_types(kinds):
+    targets = tuple(
+        TargetInfo(target_id=f"cluster-{i}", database_type=kind,
+                   description="合成目标", business_context=None)
+        for i, kind in enumerate(kinds)
+    )
+    text = _instructions(DEFAULT_INSTRUCTIONS, targets,
+                         {target.target_id: ["local/describe_table"] for target in targets})
+    assert skill("database_query.md").strip() in text
+    assert (skill("database_diagnosis.md").strip() in text) == ("starrocks" in kinds)
+    assert (skill("tidb_diagnosis.md").strip() in text) == ("tidb" in kinds)
+    if "tidb" in kinds:
+        assert "数据库类型：TiDB" in text and "可用数据库集群" in text
