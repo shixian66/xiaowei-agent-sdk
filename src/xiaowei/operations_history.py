@@ -3,7 +3,7 @@
 import json
 from collections.abc import AsyncIterator, Callable, Mapping, Sequence
 from contextlib import asynccontextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 from functools import partial
 from typing import Any
@@ -209,6 +209,14 @@ _ANSWER = text("""
       AND owner_id=:owner AND session_id=:session AND turn_id=:turn AND expires_at>:now
 """)
 
+_RUN_ANSWER = text("""
+    SELECT CASE WHEN r.result_expires_at>:now THEN r.result_snapshot END AS answer,
+           r.result_snapshot IS NOT NULL AS has_result, r.result_expires_at,
+           j.definition_evidence_ids, j.source_context
+    FROM xiaowei_scheduled_run r JOIN xiaowei_scheduled_job j ON j.job_id=r.job_id
+    WHERE r.run_id=:id
+""")
+
 
 @dataclass
 class _Bundle:
@@ -218,6 +226,11 @@ class _Bundle:
     context: RunContext
     expires_at: datetime | None
     turn: TurnAnswer | None = None
+    definition_records: list[tuple[EvidenceRecord, RunContext]] = field(default_factory=list)
+
+    @property
+    def scope_records(self) -> list[EvidenceRecord]:
+        return [*self.records, *(r for r, _ in self.definition_records)]
 
 
 def _objects(records: Sequence[EvidenceRecord]) -> set[tuple[str, str, str]]:
@@ -299,7 +312,14 @@ class OperationHistory:
                 if ids is None
                 else list(ids)
             )
-            answer = await conn.scalar(_ANSWER, params) if not row["run_id"] else None
+            run = (
+                (await conn.execute(_RUN_ANSWER, {"id": row["run_id"], "now": self.clock()}))
+                .mappings()
+                .one()
+                if row["run_id"]
+                else None
+            )
+            answer = run["answer"] if run is not None else await conn.scalar(_ANSWER, params)
         saved = None
         if answer:
             try:
@@ -323,8 +343,30 @@ class OperationHistory:
                 missing = True
                 continue
             records.append(record)
-        # 旧分析的全部依赖必须完整可读；不能删除其中的历史工具或受限来源后复制文字。
-        if turn is not None and (missing or len(_objects(records)) > self.max_rows):
+        definition_records = []
+        if turn is not None and run is not None:
+            try:
+                source = RunContext.model_validate_json(run["source_context"]).identity
+                definition_ctx = ctx.model_copy(
+                    update={
+                        "identity": ctx.identity.model_copy(
+                            update={
+                                "session_id": source.session_id,
+                                "turn_id": source.turn_id,
+                            }
+                        ),
+                    }
+                )
+                for eid in dict.fromkeys(json.loads(run["definition_evidence_ids"])):
+                    record = await self.evidence.inspect(eid, definition_ctx)
+                    if record.tool_id not in self.model_tools or record.tool_id in TOOLS:
+                        raise EvidenceUnavailableError
+                    definition_records.append((record, definition_ctx))
+            except (ValueError, EvidenceUnavailableError):
+                missing = True
+        # 原运行和冻结定义来源都须完整可读，并合并计入单次去重对象上限。
+        scope_records = [*records, *(r for r, _ in definition_records)]
+        if turn is not None and (missing or len(_objects(scope_records)) > self.max_rows):
             fallback = await self._bundle(ctx, row, analysis=False)
             fallback.item["gaps"]["Evidence 不可读" if missing else "truncated"] = True
             return fallback
@@ -341,7 +383,11 @@ class OperationHistory:
                     limited.append(record)
             records = limited
         if saved is None:
-            gaps["回答缺失"] = True
+            gaps[
+                "Evidence 不可读"
+                if run is not None and run["has_result"] and answer is None
+                else "回答缺失"
+            ] = True
         else:
             # 搜索只透传不完整标记，不复制旧文字、失败来源名或旧分析依赖。
             for key in ("limit_reached", "monitoring_failures", "inspection_failures"):
@@ -376,7 +422,9 @@ class OperationHistory:
                 b.text for b in turn.blocks_answer.blocks if isinstance(b, TextBlock)
             )
             item["analysis_kind"] = "历史模型分析，未经因果验证"
-        expires = [r.expires_at for r in records]
+        expires = [r.expires_at for r in scope_records]
+        if turn is not None and run is not None:
+            expires.append(run["result_expires_at"])
         if row["expires_at"] is not None:
             expires.append(row["expires_at"])
         return _Bundle(
@@ -390,6 +438,7 @@ class OperationHistory:
             original,
             min(expires, default=None),
             turn,
+            definition_records,
         )
 
     async def _validate(
@@ -407,6 +456,7 @@ class OperationHistory:
                 history=True,
                 recipient_tools=recipient_tools,
                 recipient_targets=recipient_targets,
+                source_records=b.definition_records,
             )
         else:
             await self.evidence.validate_records(
@@ -441,7 +491,11 @@ class OperationHistory:
                         update={"evidence_ids": tuple(r.evidence_id for r in b.records)}
                     )
                 if (
-                    len(_objects([r for old in bundles for r in old.records] + b.records))
+                    len(
+                        _objects(
+                            [r for old in bundles for r in old.scope_records] + b.scope_records
+                        )
+                    )
                     > self.max_rows
                 ):
                     truncated = True

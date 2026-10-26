@@ -969,7 +969,9 @@ class Application:
             limit_reached=validated.limit_reached,
         )
         _stage(turn, "committed", started)
-        return validated.model_copy(update={"session_state": snapshot})
+        return validated.model_copy(
+            update={"session_state": snapshot, "content_expires_at": session.content_expires_at}
+        )
 
     def _query_evidence(self, runs: TurnRuns) -> list[str]:
         """本轮成功的查询类工具证据（可信记录）：用于已开始查询的去向核对。"""

@@ -944,6 +944,13 @@ async def test_background_can_correct_query_and_delivers_partial_when_clarificat
         assert len(requests) == 1
         body = json.loads(requests[0].content)["content"]["text"]
         assert "本次任务未完成" in body and "100" in body
+        # 未完成/待澄清结果也保存原状态，历史不能把它说成已完成调查。
+        from xiaowei.models import TurnAnswer
+
+        saved = TurnAnswer.model_validate_json(
+            await env.scalar("SELECT result_snapshot FROM xiaowei_scheduled_run")
+        )
+        assert saved.blocks_answer.awaiting_user is True
 
 
 async def test_poll_loop_admits_later_due_job_while_prior_run_is_waiting(env, monkeypatch):
@@ -1467,6 +1474,7 @@ async def test_pause_during_model_prevents_history_commit_and_send(env, monkeypa
         run_session = await env.scalar("SELECT session_id FROM xiaowei_scheduled_run")
         assert await SQLAlchemySession(run_session, engine=rt.engine).get_items() == []
         assert await env.scalar("SELECT state FROM xiaowei_scheduled_run") == "failed"
+        assert await env.scalar("SELECT result_snapshot FROM xiaowei_scheduled_run") is None
         assert await env.scalar("SELECT count(*) FROM xiaowei_notification_attempt") == 0
         assert requests == []
 

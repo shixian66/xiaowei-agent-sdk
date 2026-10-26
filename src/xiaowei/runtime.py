@@ -1880,6 +1880,8 @@ async def open_runtime(
                 lock,
                 parts.task_definitions,
                 notifications,
+                request_retention_seconds=config.storage.request_retention_seconds,
+                max_answer_bytes=config.storage.max_answer_bytes,
                 is_admin=lambda subject: (
                     TASK_CONTROL in config.access.grants.get(subject, frozenset())
                 ),

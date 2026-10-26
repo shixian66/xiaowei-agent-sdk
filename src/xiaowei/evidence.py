@@ -478,7 +478,7 @@ class EvidenceStore:
             for record, _ in entries
         ):
             raise RecipientRejectedError(
-                AnswerRejectCode.EVIDENCE_UNAVAILABLE, "目标机器人无权接收历史来源"
+                AnswerRejectCode.EVIDENCE_UNAVAILABLE, "目标机器人无权接收来源数据"
             )
         if entries:
             await self._verify(
@@ -507,6 +507,7 @@ class EvidenceStore:
         recipient_tools: frozenset[str] | None = None,
         recipient_targets: frozenset[str] | None = None,
         include_remaining_results: bool | None = None,
+        source_records: Sequence[tuple[EvidenceRecord, RunContext]] = (),
     ) -> Delivery:
         """最终回答出口：核对引用关系与当前可读性，再为接收渠道生成内容。
 
@@ -518,6 +519,8 @@ class EvidenceStore:
         ``history`` 为真表示历史读取或显式重发；所有证据均复核当前权限与依赖。
         默认 None 按可信保存版本选择补全；通知显式设为假，只输出选择的事实；
         全部模型可见证据仍须通过数据权限和接收权限复核。
+        ``source_records`` 只接受可信调用方已inspect的附加原始资料及各自语境，与回答依赖同批复核，
+        不作为模型引用或交付事实；用于后台结果的冻结定义来源。
         确定不可读抛出 ``AnswerRejectedError``；暂时无法复核时 ``EvidenceUnverifiableError`` 原样
         传播。
         """
@@ -539,15 +542,8 @@ class EvidenceStore:
             history=history,
             recipient_tools=recipient_tools,
             recipient_targets=recipient_targets,
+            source_records=source_records,
         )
-        if any(
-            (recipient_tools is not None and r.tool_id not in recipient_tools)
-            or (recipient_targets is not None and r.target_id not in recipient_targets)
-            for r in records
-        ):
-            raise RecipientRejectedError(
-                AnswerRejectCode.EVIDENCE_UNAVAILABLE, "目标机器人无权接收本轮可见数据"
-            )
         by_id = {r.evidence_id: r for r in records}
         inspection_notice = await self._inspection_failure_notice(
             turn,
@@ -660,7 +656,9 @@ class EvidenceStore:
             report_format=report_format,
             report_native=turn.answer_version in (3, 4) and report_format is not None,
             basis=_basis([r for r in records if r.evidence_id not in shown_ids], ctx),
-            content_expires_at=min((r.expires_at for r in records), default=None),
+            content_expires_at=min(
+                (r.expires_at for r in [*records, *(r for r, _ in source_records)]), default=None
+            ),
         )
 
         if turn.answer_version == 4:
@@ -878,6 +876,7 @@ class EvidenceStore:
         history: bool,
         recipient_tools: frozenset[str] | None = None,
         recipient_targets: frozenset[str] | None = None,
+        source_records: Sequence[tuple[EvidenceRecord, RunContext]] = (),
     ) -> list[EvidenceRecord]:
         """回答引用或依赖的证据按渠道一批复核；确定不可读时拒绝整条回答。"""
         try:
@@ -888,6 +887,7 @@ class EvidenceStore:
                 history=history,
                 recipient_tools=recipient_tools,
                 recipient_targets=recipient_targets,
+                source_records=source_records,
             )
         except EvidenceUnavailableError:
             raise AnswerRejectedError(
@@ -903,13 +903,15 @@ class EvidenceStore:
         history: bool,
         recipient_tools: frozenset[str] | None = None,
         recipient_targets: frozenset[str] | None = None,
+        source_records: Sequence[tuple[EvidenceRecord, RunContext]] = (),
     ) -> list[EvidenceRecord]:
         """一批记录的读取边界：先逐条做不需要数据库 I/O 的检查，再合并依赖复核一次。"""
         records = [await self._checked(e, ctx, audience, history=history) for e in evidence_ids]
-        await self._verify(records, ctx.budget.max_scope_checks)
-        if self._content_check is not None:
-            for record in records:
-                await self._content_check(record, ctx, recipient_tools, recipient_targets)
+        await self.validate_records(
+            [*((record, ctx) for record in records), *source_records],
+            recipient_tools=recipient_tools,
+            recipient_targets=recipient_targets,
+        )
         return records
 
     async def _checked(

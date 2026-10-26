@@ -364,6 +364,7 @@ class PolicySession:
         self._turns: int | None = None
         self._bytes: int | None = None
         self._expires: datetime | None = None
+        self.content_expires_at: datetime | None = None
 
     def snapshot(self, reason: SessionRejectReason | None = None) -> SessionSnapshot:
         """只观察已有检查记录；不再读取历史或复核 Evidence。"""
@@ -517,7 +518,8 @@ class PolicySession:
                 inspection_failures=tuple(inspection_failures),
                 limit_reached=limit_reached,
             )
-            await self._evidence.validate_answer(turn, self._ctx)
+            delivery = await self._evidence.validate_answer(turn, self._ctx)
+            self.content_expires_at = delivery.content_expires_at
         except ValidationError:
             raise SessionItemRejectedError("最终回答未通过校验，本轮不保存") from None
         except AnswerRejectedError as exc:
@@ -969,6 +971,15 @@ async def cleanup_expired(engine: AsyncEngine, *, now: datetime, batch_size: int
     try:
         await _purge_task_copies(engine, now=now, limit=batch_size)
         async with engine.begin() as conn:
+            await conn.execute(
+                text(
+                    "UPDATE xiaowei_scheduled_run SET result_snapshot=NULL,result_expires_at=NULL "
+                    "WHERE run_id IN (SELECT run_id FROM xiaowei_scheduled_run "
+                    "WHERE result_expires_at<=:now AND result_snapshot IS NOT NULL "
+                    "ORDER BY result_expires_at,run_id LIMIT :limit)"
+                ),
+                params,
+            )
             await conn.execute(
                 text(
                     "UPDATE xiaowei_scheduled_job j SET text=NULL, "

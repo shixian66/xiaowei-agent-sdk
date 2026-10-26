@@ -4,7 +4,7 @@
 
 > TiDB 开发局部更新：2026-10-25。下述原产品快照未作全面复核；TiDB 调查基线、当前授权与验证缺口单列在 §3，不以旧快照或新计划推定公司部署状态。
 
-> 运维历史 H1 局部更新：2026-10-26。已从主线 `9d97d5f` 在独立工作树完成 H1 离线实现，用户确认候选 `a13ba1a` 独立审查通过并授权合并；精确起点、证据与下一项见 §3。H2/H3、真实模型、公司服务与部署未实施；其他任务保持其原核对范围。
+> 运维历史局部更新：2026-10-26。H1已合入，H2按用户新增授权在隔离分支开发及离线验证；精确起点、证据与下一项见§3。H3、真实模型、公司服务与部署未实施；其他任务保持原核对范围。
 
 **OpenAI Agents SDK 负责 Agent Loop；小维负责权限、受治理工具执行、证据真实性和数据边界。**
 
@@ -13,14 +13,14 @@
 | 项目 | 已核对事实 |
 | --- | --- |
 | 仓库 | [shixian66/xiaowei-agent-sdk](https://github.com/shixian66/xiaowei-agent-sdk) |
-| 产品代码基线 | H1 从已 fetch 的 `origin/main@9d97d5fa24232e5db4fe81d87df7bafb5e6ac1c7` 新建 `codex/ops-history-h1`；隔离工作树 `/Users/kloenguyen/.codex/worktrees/ops-history-h1/agent-SDK`，文档起点与候选读取方式见 §3 |
+| 产品代码基线 | H1已合入；H2从已fetch的`origin/main@3d37ac71140d1f7da682346609b1b1c5550a0bb4`新建`codex/ops-history-h2`，复用隔离工作树，精确范围与证据见§3 |
 | 源码与检查 | 当前源码仅保留 `src/xiaowei`；旧工程及专属测试、Compose、迁移入口、`compose-smoke` CI 和 Alembic 依赖已移除。保留产品测试、公共检查与旧回答兼容路径；旧工程历史可从 Git 查回 |
-| 当前存储与回答 | 应用 schema v15 不变；安全巡检可信失败元数据沿已有 JSON 保存，不改表或迁移。当前新回答保存 v4，旧 v2/v3/Legacy 与已绑定交付保持原语义，SDK 表不改 |
+| 当前存储与回答 | H2候选应用schema为16，016只新增定时结果快照与期限；安全巡检可信失败元数据沿已有JSON保存。当前新回答保存 v4，旧 v2/v3/Legacy 与已绑定交付保持原语义，SDK 表不改 |
 | 锁定依赖 | SDK `0.22.3`、Lark Channel `1.4.0`、MCP `2.2.0`、sqlglot `30.17.0`、`nh3 0.3.7`、`tinycss2 1.5.1`、Pillow `13.0.0`、certifi `2026.10.19`（后两项为严格审计发现的既有漏洞定向升级）；开发工具链传递依赖 filelock `4.2.1`，不进入运行依赖 |
 | 正式入口 | `xiaowei serve`、`config check`、`model check`、`storage init/upgrade/cleanup`、`requests resend`；命令与环境准备以 README 为准 |
 | 最近有记录的公司部署 | 用户回报镜像标签 `3aad626b42fc4ef2f37cafe342cf1826d453ca30`；未独立核验服务器。本次未部署，不据此认定 pre 的 StarRocks 版本 |
-| 当前验收结论 | H1 离线实现与相关检查通过，用户确认候选 `a13ba1a` 独立审查通过并授权合并；可控模型只证明接线，真实自主性/因果判断留待 H3。其他任务与公司验收缺口仍见各自记录 |
-| 当前任务授权 | H1 功能开发、真实 SDK/隔离 PG/可控模型验证、本地提交及用户于 2026-10-26 授权的 PR 集成与合并；H2/H3 仍须另行授权。不调用真实模型或公司服务、不改权限配置、不部署 |
+| 当前验收结论 | H1已独立审查并合入；H2本地验证中，结果见§3。可控模型只证明接线，真实自主性/因果判断留待H3。其他任务与公司验收缺口仍见各自记录 |
+| 当前任务授权 | 本轮H2开发、真实SDK/隔离PG/可控模型验证和本地提交；H3、真实模型/公司服务、权限配置变更、合并与部署未授权 |
 
 桌面原目录与独立文档分支保留；文档决定已先提交，再带入 H1 分支。本次未读取公司配置凭据。旧监控和回答修复记录仅为注明版本的证据，不作为本轮输入或展示范围扩展授权。
 
@@ -41,21 +41,17 @@
 
 ## 3. 当前计划与下一项工作
 
-### 跨会话运维事实追溯（H1独立审查通过，用户授权合并）
+### 跨会话运维事实追溯（H1已合入，H2本地验证中）
 
-H1工作树 `/Users/kloenguyen/.codex/worktrees/ops-history-h1/agent-SDK`，分支 `codex/ops-history-h1`；开工fetch确认origin/main为 `9d97d5fa24232e5db4fe81d87df7bafb5e6ac1c7`，先线性带入文档提交 `523bbed0e2cdb4f9b1a420df5e8f59ae681416c9`。文档工作树仍在独立文档分支，没有写产品代码。[R4实施计划](docs/superpowers/plans/2026-10-26-operations-history-and-knowledge.md) 当前blob为 `9588cc2427870555705b67458f853cbf47cd20a5`，D1–D3生效范围只在[ARCHITECTURE](ARCHITECTURE.md#operations-history)维护。用户已授权H1的PR集成与合并；H2迁移/保存点、H3、真实模型/公司源、权限配置变更和部署均未实施。
+H1已由[PR #138](https://github.com/shixian66/xiaowei-agent-sdk/pull/138)合入`main@3d37ac71140d1f7da682346609b1b1c5550a0bb4`，已审产品候选为`a13ba1a`，合并前[CI 40292586264](https://github.com/shixian66/xiaowei-agent-sdk/actions/runs/40292586264)九项通过。D1–D3生效范围只见[ARCHITECTURE](ARCHITECTURE.md#operations-history)；[R4计划](docs/superpowers/plans/2026-10-26-operations-history-and-knowledge.md)当前blob为`813aee9cce9d5f07b8e83d37bd45014f7e8d00ab`。H1既有完整默认回归5376 passed、235 skipped、98 deselected，不能代替H2验证。
 
-R4（计划blob `070c9de011e60b9ff1bb57e9429203fa933f4fec`）的限定独立复审没有设计阻断，提出F1/F2两条意见，审查者未运行测试。F1纠正复审前过早完成的状态；F2已改为单次max_rows对象上限（包含旧分析全部context_evidence），无运行时额度预留。固定跨入口说明与只查PG元数据/工具权限的更早候选标志已落实。
+本轮用户授权H2开发与离线验证。基线为上述主线提交，分支`codex/ops-history-h2`，复用干净隔离工作树`/Users/kloenguyen/.codex/worktrees/ops-history-h1/agent-SDK`及其锁定环境，原H1分支和桌面改动保留。当前不开发H3，不调用真实模型、公司源或真实飞书，不改权限配置，不合并或部署；交本地精确候选供独立审查。
 
-实现复用Runner、现有应用表和Evidence，增加两个受治理只读工具及来源content check，与既有definitions检查串联。交互按可信conversation_key跨generation，后台按创建群读独立原事实；旧分析完整校验，派生副本传递复核原源、期限及当前读者权限，渠道不展示来源绑定。无关键词、游标、独立Action目录、递归历史或新lookup错误类别，无迁移和后台快照。为满足原5倍静态规则，合并同一提交入口重复的最终校验，Session仍完整验证后持久化；成功Evidence的暂存/回放/交付复核保留，原拒绝类别保留。监控失败源授权在Session提交最终校验中只复核一次，随后回放不再次复核该失败源；校验后至写入仍有时间窗，与改动前最后一次Session校验后至写入的窗口相同。
+H2以016给scheduled_run增加两个可空字段：有界TurnAnswer快照及到期时间；Session模型/群结果最终校验和提交通过后保存，早于机器人接收校验。复用已有max_answer_bytes/request_retention，不增加配置。Session已计算的期限仅经非持久化元数据传递，不为保存点重跑校验。冻结定义原数据仍限制期限和详情/派生副本读取，当前读者与各原会话绑定复核；运行和定义来源同批去重计费并共同纳入max_rows。暂停/取消任务或机器人配置变化不代替数据撤权。旧空快照继续只读原事实；到期正文分批清除，运行元数据保留。超限或写入失败不发结果正文，复用固定失败说明及run unknown，不新建错误类别/状态机。
 
-独立复审：用户确认`796398d6a598ff0832adeaab2f8eebf68c49a045`的B1已关闭，指出B2：原事实10份上限误用于包含整段回放的context_evidence，长会话已有结论被省略。当前修复恢复旧分析的完整依赖与去重对象上限，10份仅用于不复制分析的原事实路径；容量退回时重新取原轮次有界事实，保持来源绑定。容量/对象受限只标truncated，来源不可读沿既有缺口，回答缺失只表示不存在或无法解析。B1两个既有测试保持修复后的触发点，并继续纳入验证。用户于2026-10-26确认修复候选`a13ba1aa735f71403e25861864d63d525efdb099`独立审查通过并授权合并；本次收尾只同步文档状态，产品代码与测试保持该已审版本。
+验证进行中：基线8 passed；首个正式入口成功/写失败测试在旧实现2 failed，最小闭环2 passed；冻结定义原源撤权的两个反例先失败、补齐后相关7 passed。核心历史/快照/存储组84 passed；扩大回归478 passed、26 skipped、4 deselected（320.45秒），跳过/未选项不计验收。Ruff通过，mypy 41源码文件通过；最终全量、独立审查与精确候选状态待补。日志在仓库外`/private/tmp/xw-h2-*.log`。可控模型/录制源只证明接线与边界，不能证明真实Agent自主完成任务。
 
-非阻断意见：采纳耗尽标记沿原错误路径终止、本窗has_earlier说明、固定扫描20候选及纯事实路径每条10份原Evidence；旧分析不按份数截断；对应新增边界归计划N4。失败回退额外计费不引入动态额度预留，静态5倍不保证此路径已写入计划§4.3。SearchArgs再校验及_shown工具ID特判保持现状，尚无需要额外接口的当前消费者。
-
-验证环境：独立uv锁定环境、SDK0.22.3、带既有marker的本机Colima隔离PG、可控模型/录制源。B2回归在修复前4 failed、2 passed，修复后历史与B1定向37 passed，包含四轮×四查询的完整结论、容量/对象退回的准确缺口及单轮11份原事实边界。本次完整默认全仓5376 passed、235 skipped、98 deselected、5 warnings，1874.26秒，EXIT_CODE=0，PRODUCT_TEST_UNCHANGED=True。代码/测试摘要为`2f46cfc23813db094f57507e7170734c7c68496112c0360f5ec4f8188488bfdb`，提交时再次匹配。98项是默认未选的浏览器/真实StarRocks专用测试，235项跳过均不算验收；5条warning来自安全测试主动验证socket/DNS拦截。全仓Ruff、mypy 41源码文件通过；文档命令一致性、受影响链接/锚点与git diff --check通过。日志在仓库外：`/private/tmp/xw-h1-b2-red.log`、`/private/tmp/xw-h1-b2-focused.log`、`/private/tmp/xw-h1-b2-full.log`、`/private/tmp/xw-h1-b2-ruff.log`、`/private/tmp/xw-h1-b2-mypy.log`、`/private/tmp/xw-h1-b2-docs.log`；受测差异保存在`/private/tmp/xw-h1-b2-tested.diff`。前候选的5373项结果不代替本次验证；临时日志不作长期测试依赖，自查不是独立审查。
-
-下一项：H1按用户授权通过PR/CI合入主线，合入与CI证据以关联PR为准；H2仍待用户单独确认实施，不自动推进。真实Agent自主选择、复杂因果正确性、公司原始故障材料和渠道实收仍是H3/公司验收缺口；S3真实BE材料未取得，不宣称七场景全部验收。
+下一项：完成H2相关/完整检查并独立审查精确差异，交付本地候选SHA和验证证据。真实模型自主检索/补证/因果判断、公司原始故障材料与渠道实收仍属H3/公司验收缺口，S3真实BE材料未取得。H2不能恢复未记录或已清理的过去结论，不宣称七场景全部验收。
 
 ### TiDB 查询与诊断（2026-10-25，B/C 本地候选，独立审查通过，待公司验收）
 

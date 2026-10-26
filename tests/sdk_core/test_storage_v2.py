@@ -77,6 +77,7 @@ async def _install_v1(engine: AsyncEngine, *, through: str = "001_initial.sql") 
         "012_delivery_parts.sql",
         "013_notification_attempt.sql",
         "014_scheduled_reminders.sql",
+        "015_scheduled_agent.sql",
     ]
     async with engine.begin() as conn:
         for name in names[: names.index(through) + 1]:
@@ -114,7 +115,7 @@ def test_v2_migration_only_touches_application_tables() -> None:
         "014_scheduled_reminders.sql",
     ):
         assert "agent_" not in _migration(name)
-    assert APP_SCHEMA_VERSION == 15
+    assert APP_SCHEMA_VERSION == 16
     assert _V2_TABLES <= APP_TABLES
     assert all(name.startswith("xiaowei_") for name in APP_TABLES)
 
@@ -519,7 +520,7 @@ async def test_initialization_advances_the_schema_version(postgres_url: URL) -> 
     """全新初始化推进到当前版本。旧程序只接受各自版本由基线源码保证，这里不复制旧实现。"""
     async with open_engine(secret(postgres_url)) as engine:
         await initialize_storage(engine, digest_key=_DIGEST_KEY)
-        assert await _version(engine) == APP_SCHEMA_VERSION == 15
+        assert await _version(engine) == APP_SCHEMA_VERSION == 16
 
 
 async def test_failed_upgrade_rolls_back_completely(postgres_url: URL) -> None:
@@ -971,7 +972,7 @@ async def test_v14_upgrade_preserves_fixed_reminder_and_sdk_session(postgres_url
             )
         session = SQLAlchemySession("v14-history", engine=engine)
         await session.add_items([{"role": "user", "content": "retained v14 history"}])
-        assert await upgrade_storage(engine, digest_key=_DIGEST_KEY) == 15
+        assert await upgrade_storage(engine, digest_key=_DIGEST_KEY) == APP_SCHEMA_VERSION
         await check_storage(engine)
         assert await session.get_items() == [{"role": "user", "content": "retained v14 history"}]
         async with engine.connect() as conn:
@@ -1006,3 +1007,43 @@ async def test_v14_upgrade_preserves_fixed_reminder_and_sdk_session(postgres_url
         )
         migration = _migration("015_scheduled_agent.sql")
         assert SDK_SESSIONS_TABLE not in migration and SDK_MESSAGES_TABLE not in migration
+
+
+async def test_v15_upgrade_preserves_runs_and_adds_nullable_result(postgres_url: URL) -> None:
+    """显式升级不能虚构旧结论、丢掉运行记录或改动SDK历史。"""
+    async with open_engine(secret(postgres_url)) as engine:
+        await _install_v1(engine, through="015_scheduled_agent.sql")
+        async with engine.begin() as conn:
+            await storage_module._write_digest_key_binding(conn, _DIGEST_KEY)
+            await conn.execute(text(
+                "INSERT INTO xiaowei_scheduled_job "
+                "(job_id,owner_id,creator_id,bot_alias,bot_id,target_version,run_at,"
+                "content_expires_at,text,definition_evidence_ids,source_context,"
+                "lateness_seconds,state) "
+                "VALUES ('retained-job','group','creator','ops','bot','v1',now(),"
+                "now()+interval '1 hour','retained text','[]','{}',3600,'completed')"
+            ))
+            await conn.execute(text(
+                "INSERT INTO xiaowei_scheduled_run (run_id,job_id,scheduled_at,session_id,turn_id,"
+                "state,reason,queued_at) VALUES ('retained-run','retained-job',now(),"
+                "'retained-session','retained-turn','completed','execution_completed',now())"
+            ))
+        session = SQLAlchemySession("retained-session", engine=engine)
+        await session.add_items([{"role": "assistant", "content": "SDK history is not a snapshot"}])
+        assert await upgrade_storage(engine, digest_key=_DIGEST_KEY) == 16
+        await check_storage(engine)
+        async with engine.connect() as conn:
+            row = (await conn.execute(text(
+                "SELECT run_id,state,result_snapshot,result_expires_at FROM xiaowei_scheduled_run"
+            ))).one()
+            assert tuple(row) == ("retained-run", "completed", None, None)
+            columns = (await conn.execute(text(
+                "SELECT column_name,data_type,is_nullable FROM information_schema.columns "
+                "WHERE table_name='xiaowei_scheduled_run' AND column_name LIKE 'result_%' "
+                "ORDER BY column_name"
+            ))).all()
+            assert columns == [("result_expires_at", "timestamp with time zone", "YES"),
+                               ("result_snapshot", "text", "YES")]
+        assert await session.get_items() == [
+            {"role": "assistant", "content": "SDK history is not a snapshot"}
+        ]

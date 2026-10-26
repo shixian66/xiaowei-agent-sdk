@@ -27,6 +27,7 @@ from xiaowei.actions import (
     ActionWriteRejectedError,
     proposal_policy,
 )
+from xiaowei.channel_store import ResultNotSavedError
 from xiaowei.evidence import (
     AnswerRejectedError,
     EvidenceStore,
@@ -469,11 +470,15 @@ class ScheduledTasks:
         notifications: WebhookNotifications,
         *,
         is_admin: Callable[[str], bool],
+        request_retention_seconds: int,
+        max_answer_bytes: int,
     ) -> None:
         self.config, self.governance, self.engine = config, governance, engine
         self.lock, self.definitions, self.notifications = lock, definitions, notifications
         self.clock, self.is_admin = definitions.clock, is_admin
         self.budget = definitions.budget
+        self._result_retention = timedelta(seconds=request_retention_seconds)
+        self._max_answer_bytes = max_answer_bytes
         self._tick_lock = asyncio.Lock()
         self._running_jobs: dict[str, asyncio.Task[None]] = {}
         self.run_slot: Callable[[str | None], AbstractContextManager[bool]]
@@ -797,6 +802,27 @@ class ScheduledTasks:
             )
         return self._plan(job)
 
+    async def _save_agent_result(
+        self, job: Mapping[str, Any], run_id: str, answer: TurnAnswer
+    ) -> None:
+        content = answer.model_dump_json()
+        if len(content.encode()) > self._max_answer_bytes:
+            raise ResultNotSavedError
+        deadlines = [self.clock() + self._result_retention]
+        if answer.content_expires_at is not None:
+            deadlines.append(answer.content_expires_at)
+        if json.loads(job["definition_evidence_ids"]) and job["content_expires_at"] is not None:
+            deadlines.append(job["content_expires_at"])
+        async with self.engine.begin() as conn:
+            await self._admit(conn)
+            await conn.execute(
+                sql(
+                    "UPDATE xiaowei_scheduled_run SET result_snapshot=:answer,"
+                    "result_expires_at=:expires WHERE run_id=:id AND state='running'"
+                ),
+                dict(id=run_id, answer=content, expires=min(deadlines)),
+            )
+
     async def _finish_agent(
         self, job: Mapping[str, Any], run_id: str, state: str, reason: str
     ) -> None:
@@ -1101,6 +1127,8 @@ class ScheduledTasks:
                         answer = await self.application.run_turn(ctx, job["text"])
                         if isinstance(answer, PausedTurn):
                             raise TurnError("scope_rejected")
+                        stage = "save_result"
+                        await self._save_agent_result(job, run["run_id"], answer)
                         stage = "validate_delivery"
                         delivery = await self.governance.evidence.validate_answer(
                             answer,
