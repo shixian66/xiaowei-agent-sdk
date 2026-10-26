@@ -228,3 +228,60 @@ async def test_61_security_samples_notification_is_short_and_history_retains_row
         assert len(source.rows) == len(json.loads(source.result_json)["rows"]) == 61
         assert "第 1 行" not in view.delivery.content
         assert await env.scalar("SELECT count(*) FROM xiaowei_notification_attempt") == 1
+
+
+@pytest.mark.parametrize("count,unclassified,total", [(52, 0, 113585), (42, 3, 32890)])
+async def test_repeated_scheduled_overwrites_keep_counts_and_coverage(
+    env, monkeypatch, count, unclassified, total
+):
+    """两次真实定时入口均发送；模型替身只证明指引送达，不判定解释质量。"""
+    env.drv = security_driver(
+        *(record("INSERT OVERWRITE t SELECT 1", queryId=f"q-overwrite-{i}") for i in range(count)),
+        *(record("", queryId=f"q-unknown-{i}") for i in range(unclassified)),
+        totals=(total, 0, 0),
+    )
+    data = security_config(env).model_dump(mode="json")
+    data["targets"][0]["starrocks"]["audit"]["candidate_rows"] = 200
+    # 虚拟时钟跳过一小时不会唤醒真实后台刷新；本用例保持测试快照有效。
+    data["targets"][0]["starrocks"]["schema_limits"]["max_age_seconds"] = 7200
+    data["model"]["max_request_bytes"] = 256_000
+    task = "检查本窗审计，报告操作计数、关注理由和覆盖缺口。"
+    env.scripts.add(
+        task,
+        tool_call("inspect_audit_security", **ARGS),
+        cite_results("本窗操作计数及覆盖说明如下。"),
+        tool_call("inspect_audit_security", **ARGS),
+        cite_results("本窗操作计数及覆盖说明如下。"),
+    )
+    async with running(env, monkeypatch, config=runtime.ServeConfig.model_validate(data)) as (
+        group, requests, rt
+    ):
+        await activate(env, group, interval=3600, task=task, tools=[SECURITY_TOOL])
+        env.clock.advance(60)
+        await rt.scheduled_tasks.tick()
+        env.clock.advance(3600)
+        await rt.scheduled_tasks.tick()
+        await rt.scheduled_tasks.tick()
+        assert len(requests) == 2
+        assert await env.scalar(
+            "SELECT count(*) FROM xiaowei_scheduled_run WHERE state='completed'"
+        ) == 2, await env.scalar(
+            "SELECT string_agg(state || ':' || reason, ',') FROM xiaowei_scheduled_run"
+        )
+        assert await env.scalar("SELECT count(*) FROM xiaowei_notification_attempt") == 2
+        for request in requests:
+            sent = json.loads(request.content)["content"]["text"]
+            assert f"{total:,} 条" in sent
+            assert "高风险操作（审计行）" in sent
+            assert ("分类计数不完整" in sent) == bool(unclassified)
+            if unclassified:
+                assert f"覆盖写入 已确认至少 {count} 条" in sent
+                assert "无法判定候选 3 条" in sent
+            else:
+                assert f"覆盖写入 {count}" in sent and "分类计数完整" in sent
+            assert "本次巡检未全部完成" not in sent
+        calls = env.scripts.calls[task]
+        assert len(calls) == 4
+        # 检查真实SDK端点收到的新指引；不把脚本输出当模型自主判断。
+        assert "不因操作类型命中机械要求人工核查" in calls[0].instructions
+        assert "🔴 有高风险操作或注入、延迟信号" not in calls[0].instructions

@@ -256,6 +256,7 @@ async def test_security_facts_render_with_existing_report_and_feishu_components(
             body = report.content.decode()
             assert "全窗聚合（读取时）12" in body and "授权" in body
             assert "无法判定候选 0" in body
+            assert "代表样本" in body and "需要核查 · 代表样本" not in body
             assert "q-security-report" not in body and "scanned_rows" not in body
 
 
