@@ -4,7 +4,7 @@
 
 > TiDB 开发局部更新：2026-10-25。下述原产品快照未作全面复核；TiDB 调查基线、当前授权与验证缺口单列在 §3，不以旧快照或新计划推定公司部署状态。
 
-> 运维历史设计局部更新：2026-10-26。本次在主线 `9d97d5f` 的独立工作树仅修改设计/计划/文档，未写产品功能；本次授权及下一项见 §3。下表其他开发任务快照保持原核对范围，不代表本任务已获实现或公司服务授权。
+> 运维历史 H1 局部更新：2026-10-26。已从主线 `9d97d5f` 在独立工作树完成 H1 离线实现候选，待用户独立代码审查；精确起点、证据与下一项见 §3。H2/H3、真实模型、公司服务、合并与部署未实施；其他任务保持其原核对范围。
 
 **OpenAI Agents SDK 负责 Agent Loop；小维负责权限、受治理工具执行、证据真实性和数据边界。**
 
@@ -13,16 +13,16 @@
 | 项目 | 已核对事实 |
 | --- | --- |
 | 仓库 | [shixian66/xiaowei-agent-sdk](https://github.com/shixian66/xiaowei-agent-sdk) |
-| 产品代码基线 | 本片从已 fetch 的 `origin/main@b208b2c377986a0e7da819590c38bea8000dbb19` 新建 `codex/sql-parse-recovery`；隔离工作树 `/Users/kloenguyen/.codex/worktrees/manual-starrocks-security/agent-SDK`。桌面原目录及主线 CC0 内容保留 |
+| 产品代码基线 | H1 从已 fetch 的 `origin/main@9d97d5fa24232e5db4fe81d87df7bafb5e6ac1c7` 新建 `codex/ops-history-h1`；隔离工作树 `/Users/kloenguyen/.codex/worktrees/ops-history-h1/agent-SDK`，文档起点与候选读取方式见 §3 |
 | 源码与检查 | 当前源码仅保留 `src/xiaowei`；旧工程及专属测试、Compose、迁移入口、`compose-smoke` CI 和 Alembic 依赖已移除。保留产品测试、公共检查与旧回答兼容路径；旧工程历史可从 Git 查回 |
 | 当前存储与回答 | 应用 schema v15 不变；安全巡检可信失败元数据沿已有 JSON 保存，不改表或迁移。当前新回答保存 v4，旧 v2/v3/Legacy 与已绑定交付保持原语义，SDK 表不改 |
 | 锁定依赖 | SDK `0.22.3`、Lark Channel `1.4.0`、MCP `2.2.0`、sqlglot `30.17.0`、`nh3 0.3.7`、`tinycss2 1.5.1`、Pillow `13.0.0`、certifi `2026.10.19`（后两项为严格审计发现的既有漏洞定向升级）；开发工具链传递依赖 filelock `4.2.1`，不进入运行依赖 |
 | 正式入口 | `xiaowei serve`、`config check`、`model check`、`storage init/upgrade/cleanup`、`requests resend`；命令与环境准备以 README 为准 |
 | 最近有记录的公司部署 | 用户回报镜像标签 `3aad626b42fc4ef2f37cafe342cf1826d453ca30`；未独立核验服务器。本次未部署，不据此认定 pre 的 StarRocks 版本 |
-| 当前验收结论 | SQL 解析恢复完成 P0—P2 离线实现和相关检查，最终差异待用户独立审查；pre 版本/实际错误格式、真实模型和公司验收未完成。安全巡检 A/B/C 与 CloudCanal 的既有缺口保留，见下文及 §5 |
-| 当前任务授权 | 按批准计划 P0 → P1 → P2 串行离线实施、相关测试和本地提交；不调用真实模型或公司服务，不推送、开 PR、合并、打包或部署 |
+| 当前验收结论 | H1 离线实现与相关检查通过，待用户按候选 SHA 独立审查；可控模型只证明接线，真实自主性/因果判断留待 H3。其他任务与公司验收缺口仍见各自记录 |
+| 当前任务授权 | 仅 H1 功能开发、真实 SDK/隔离 PG/可控模型验证和本地提交；H2 待 H1 审查后决定。不调用真实模型或公司服务、不改权限配置、不开正式 PR、不合并、不部署 |
 
-原工作目录的 ARCHITECTURE 差异与未跟踪计划/公司配置保留，未复制到本工作树；本次未读取公司配置凭据。旧监控和回答修复记录保留为注明版本的证据，不作为本轮输入或展示范围扩展授权。
+桌面原目录与独立文档分支保留；文档决定已先提交，再带入 H1 分支。本次未读取公司配置凭据。旧监控和回答修复记录仅为注明版本的证据，不作为本轮输入或展示范围扩展授权。
 
 本文件的状态以表中的核对基线为限。接手者先核对实际 HEAD、工作区及用户新指令；合入、独立审查、离线测试、真实运行、部署与用户接受分别记录，不互相替代。
 
@@ -41,15 +41,17 @@
 
 ## 3. 当前计划与下一项工作
 
-### 跨会话运维事实追溯（R4已确认，H1获准）
+### 跨会话运维事实追溯（H1离线候选，待用户独立审查）
 
-文档基线为 `9d97d5fa24232e5db4fe81d87df7bafb5e6ac1c7`，工作树 `/Users/kloenguyen/.codex/worktrees/ops-history-design/agent-SDK`。[R4实施计划](docs/superpowers/plans/2026-10-26-operations-history-and-knowledge.md) 当前blob为 `072e19e60ccdee9e79b8ab210e8b56332c35de53`；D1–D3于2026-10-26用户确认，生效契约已移入[ARCHITECTURE](ARCHITECTURE.md#operations-history)。Web跨浏览器共享未批准，当前仅H1获功能与离线验证授权；H2迁移/保存点暂不开发，H3、真实模型/公司服务、权限配置变更、合并与部署未授权。
+H1工作树 `/Users/kloenguyen/.codex/worktrees/ops-history-h1/agent-SDK`，分支 `codex/ops-history-h1`；开工fetch确认origin/main为 `9d97d5fa24232e5db4fe81d87df7bafb5e6ac1c7`，先线性带入文档提交 `523bbed0e2cdb4f9b1a420df5e8f59ae681416c9`。文档工作树仍在独立文档分支，没有写产品代码。[R4实施计划](docs/superpowers/plans/2026-10-26-operations-history-and-knowledge.md) 当前blob为 `f40091264b5e977cb7e6e42ad3f79f8f73c02e4d`，D1–D3生效范围只在[ARCHITECTURE](ARCHITECTURE.md#operations-history)维护。当前只授权H1；H2迁移/保存点、H3、真实模型/公司源、权限配置变更、合并和部署均未实施。
 
-R4（计划blob `070c9de011e60b9ff1bb57e9429203fa933f4fec`）的限定独立复审没有设计阻断，提出F1/F2两条意见，审查者未运行测试。F1纠正复审前过早写成完成的状态；F2删除运行时最终/提交额度预留，改用单次max_rows对象上限（含旧分析全部context_evidence依赖）及runtime现有5倍配置规则。跨入口说明固定进入工具说明/空结果提示，更早标志只用PG元数据和工具授权。
+R4（计划blob `070c9de011e60b9ff1bb57e9429203fa933f4fec`）的限定独立复审没有设计阻断，提出F1/F2两条意见，审查者未运行测试。F1纠正复审前过早完成的状态；F2已改为单次max_rows对象上限（包含旧分析全部context_evidence），无运行时额度预留。固定跨入口说明与只查PG元数据/工具权限的更早候选标志已落实。
 
-本次文档命令一致性2项、相对链接/锚点及已跟踪/未跟踪空白检查通过；既有88项相关检查和3个调查探针仍仅为此前同源码快照的离线证据，见计划§2.4。S3真实BE材料待补，不作为H3门槛，不宣称七场景全部验收。
+实现复用Runner、现有应用表和Evidence，增加两个受治理只读工具及来源content check，与既有definitions检查串联。交互按可信conversation_key跨generation，后台按创建群读独立原事实；旧分析完整校验，派生副本传递复核原源、期限及当前读者权限，渠道不展示来源绑定。无关键词、游标、独立Action目录、递归历史或新lookup错误类别，无迁移和后台快照。为满足原5倍静态规则，合并同一提交入口重复的最终校验，Session仍完整验证后持久化；保存后回放/交付检查不减，原拒绝类别保留。
 
-下一项：文档选择性提交后，从最新main新建独立主题工作树，先写失败测试再实现H1-1至H1-5，交候选SHA给用户独立审查；不在本文档树写产品代码。
+验证：本工作树独立uv锁定环境，SDK 0.22.3；本机Colima测试PG及每例新库均经既有marker核对。先运行的3个缺口用例因历史工具未登记失败；H1新增28例与对象边界30例合计58通过，涵盖Web真实ASGI cookie/飞书Gateway、新建无旧上下文、群成员结论共享、后台暂停/取消及机器人变化、双hook失效、静态预算、来源撤权/过期/缺失、字节/扫描/原投影截断、旧调查未完成标记、旧分析失效时保留独立事实和PG故障。全仓Ruff及Mypy 41源码文件通过；运行时/SDK审批/渠道/定时Agent兼容组先有549通过、1条旧用途集合断言失败；断言同步已批准的历史用途后在最终59项定向组中复核通过（该组包含上述58项，28.96秒）。两条旧对象计数断言也同步同入口去重，预算不足时零探测拒绝断言保留。文档命令一致性2项、受影响相对链接/锚点19个不同目标、git diff --check及新增文件空白检查均通过。此前88+3调查只证明原基线，不能替代这些H1证据。日志：`/private/tmp/xw-h1-final-focused.log`、`/private/tmp/xw-h1-compat-final.log`、`/private/tmp/xw-h1-ruff-final.log`、`/private/tmp/xw-h1-mypy-final.log`；临时日志不作为长期测试依赖。自查不是独立审查。
+
+下一项：交付H1候选SHA给用户做代码独立审查，审查前不开正式PR、不合并；H2待H1审查后决定。真实Agent自主选择、复杂因果正确性、公司原始故障材料和渠道实收仍是H3/公司验收缺口；S3真实BE材料未取得，不宣称七场景全部验收。
 
 ### TiDB 查询与诊断（2026-10-25，B/C 本地候选，独立审查通过，待公司验收）
 

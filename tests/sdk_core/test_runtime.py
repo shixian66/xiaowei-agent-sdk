@@ -68,6 +68,7 @@ from xiaowei.channel_store import ChannelStore, RequestUnavailableError
 from xiaowei.config import SecretRefError
 from xiaowei.model_api import ModelProfile
 from xiaowei.models import AUDIENCES, Identity
+from xiaowei.operations_history import TOOLS as HISTORY_TOOLS
 from xiaowei.sqlguard import (
     QueryPolicy,
     QueryRejectedError,
@@ -2254,8 +2255,10 @@ def test_slow_queries_can_only_be_opened_with_an_audit_source(tmp_path: Path) ->
     file.write_text(json.dumps(audit_config(8501)), encoding="utf-8")
     config = runtime.load_config(file)
     purposes = runtime._app_config(config).purposes
-    assert purposes["diagnose"] == DIAGNOSE_TOOLS | AUDIT_TOOLS
-    assert purposes["query"] == QUERY_TOOLS | AUDIT_TOOLS | {"local/inspect_audit_security"}
+    assert purposes["diagnose"] == DIAGNOSE_TOOLS | AUDIT_TOOLS | HISTORY_TOOLS
+    assert purposes["query"] == (
+        QUERY_TOOLS | AUDIT_TOOLS | {"local/inspect_audit_security"} | HISTORY_TOOLS
+    )
 
 
 @pytest.mark.parametrize("model_allowed", [True, False])

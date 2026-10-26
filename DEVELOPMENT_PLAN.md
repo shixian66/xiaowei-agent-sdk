@@ -34,7 +34,7 @@
 
 P1 是开发切片，不冒充已经完成首版全部功能；首版在 P1–P3（含 P2.5）通过后才称为可试用。实施顺序为 P2 离线完成 → P2.5 → 飞书单群增量 → P3（用户 2026-10-03 确认）；此前“数据库 MCP 为 P2.5”和“新增需求放到 P3 后”的安排不再适用。P2 的必交项是 SQL/执行计划诊断、表布局元数据与基于已有审计表的慢查询列表；Query Profile 暂不实现。
 
-**已确认增量：跨会话运维事实追溯（2026-10-26）。** D1–D3生效范围只见[ARCHITECTURE](ARCHITECTURE.md#operations-history)，按[R4实施计划](docs/superpowers/plans/2026-10-26-operations-history-and-knowledge.md)串行推进H1读取既有历史→H2补快照→H3业务评测。当前仅H1获功能与真实SDK/隔离PG/可控模型离线验证授权，H2待H1审查后决定，H3和真实模型/公司服务、权限配置变更、合并、部署未授权。Wiki只保留调研；验收与新增限制不在本索引重复。
+**已确认增量：跨会话运维事实追溯（2026-10-26）。** D1–D3生效范围只见[ARCHITECTURE](ARCHITECTURE.md#operations-history)，按[R4实施计划](docs/superpowers/plans/2026-10-26-operations-history-and-knowledge.md)串行推进H1读取既有历史→H2补快照→H3业务评测。当前H1为离线实现候选、待用户独立代码审查（证据见handoff），H2待H1审查后决定，H3和真实模型/公司服务、权限配置变更、合并、部署未授权。Wiki只保留调研；验收与新增限制不在本索引重复。
 
 ## 3. P0：确定设计
 

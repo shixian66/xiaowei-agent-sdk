@@ -58,6 +58,14 @@ P1–P3 的 StarRocks 能力不执行数据修改、配置变更或优化建议�
 
 已接入的监控写按具体 Action 管理；其他数据库修改、配置调整、取消查询、重启与发布仍须单独批准范围。所有生产写操作都先展示目标、改动和影响，取得有审批权限的用户明确确认，再复核权限后执行；目标或关键参数变化需要重新确认。“帮我诊断/优化”不代表同意执行生产变更。
 
+**运维历史（H1 离线候选）。** 新建后可通过 `history/search_operations` 与 `history/read_operation` 找回当前获准的原始事实和调查结论；生效范围只见[运维历史契约](ARCHITECTURE.md#operations-history)。工具仍取现有用途、模型白名单及当前读者授权的交集，不自动增加配置许可。搜索按带时区的绝对窗口、目标、已知任务/运行筛选；固定最多10条，有界扫描和对象/字节上限可能少返回。更早候选不保证内容可读，未找到不证明未发生；可缩小或前移窗口、按已知编号直读，或用获准原源补证。旧分析与原事实分列，来源失效时不交付依赖它的分析；历史状态不证明当前状态，旧批准不授予新写权限。
+
+当前后台只能读取仍有效的独立 Evidence 及运行状态；缺失的后台结论明确说明，不从旧 SDK 消息重建。H2 快照尚未开发。真实模型自主性、公司源、真实渠道实收和因果判断留待 H3/公司验收，本候选未部署。离线接线与边界检查使用下方开发验证的隔离 PostgreSQL，再执行：
+
+```bash
+SDK_TEST_POSTGRES_URL=postgresql+asyncpg://postgres@127.0.0.1:55432/postgres uv run --locked --extra dev python -m pytest tests/sdk_core/test_operations_history.py tests/sdk_core/test_operations_history_tasks.py -q
+```
+
 ## 怎样开始
 
 唯一正式命令是 `xiaowei`（`python -m xiaowei` 相同）。它已用测试 PostgreSQL、脚本模型与替身完成离线验证；P3-A 和 P3-B 已通过独立审查并合入，升级、回退和隔离恢复在本机 Linux/arm64 容器环境验证。amd64 发行包由手动发布流程生成，应用镜像以离线文件随包交付；真实模型、用户 StarRocks、真实飞书与公司服务器的实战验收仍未完成（见 handoff）。旧 CLI、Worker 或旧 Compose 命令不是产品入口。
