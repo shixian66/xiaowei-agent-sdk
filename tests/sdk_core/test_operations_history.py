@@ -591,10 +591,10 @@ async def test_search_keeps_valid_original_facts_and_marks_skipped_record_gap(en
 async def test_candidate_scan_limit_is_reported_when_all_scanned_records_are_unreadable(env):
     from sqlalchemy import text
 
-    config = limited(configured(env), rows=1, checks=1000)
+    config = limited(configured(env), rows=200, checks=1000)
     async with env.opened(config) as rt:
         good = await seed(env, rt, message="较早有效", key="earlier-good")
-        for n in range(11):
+        for n in range(21):
             await seed(env, rt, message=f"新失效{n}", key=f"new-invalid-{n}")
         async with rt.engine.begin() as conn:
             await conn.execute(
@@ -741,3 +741,88 @@ async def test_unreadable_old_analysis_keeps_independently_authorized_facts(env)
         result = await ask(env, rt, "只保留独立历史事实", "analysis-fallback")
         assert result.state == "completed", result.failure_code
         assert env.db.business() == []
+
+
+@pytest.mark.parametrize("exhausted", [True, False])
+async def test_budget_exhaustion_is_not_reported_as_unreadable_source(env, exhausted):
+    from xiaowei.evidence import EvidenceUnverifiableError, scope_checks
+    from xiaowei.models import Identity, RunContext, ToolRequest
+
+    config = configured(env)
+    async with env.opened(config) as rt:
+        old = await seed(env, rt)
+        current = await rt.service.new_session("feishu", "alice", CHAT)
+        history = rt.service._app.history
+        assert history is not None
+        ctx = RunContext(
+            identity=Identity(
+                subject_id="alice",
+                session_id=current.session_id,
+                turn_id="budget-check",
+                channel="feishu",
+                owner=old.owner,
+            ),
+            target_scope=frozenset({"history", SR.target_id}),
+            tool_scope=frozenset(config.data_policy.model_tools),
+            budget=config.budget,
+        )
+        request = ToolRequest(
+            tool_id=READ,
+            target_id="history",
+            call_id="read-budget",
+            tool_name="history__read_operation",
+            arguments={"record_ref": f"turn:{old.turn_id}"},
+        )
+        env.db.forget()
+        env.db.down = not exhausted
+        with scope_checks(used=config.budget.max_scope_checks if exhausted else 0):
+            if exhausted:
+                with pytest.raises(EvidenceUnverifiableError):
+                    await history.execute(ctx, request)
+                assert env.db.probes() == []  # 耗尽在任何源探测之前终止，不能返回假不可读。
+            else:
+                result = await history.execute(ctx, request)
+                assert result.payload["records"] == []
+                assert result.payload["gaps"]["Evidence 不可读"] is True
+        assert env.db.business() == []
+
+
+@pytest.mark.parametrize("read", [False, True])
+async def test_many_original_evidence_are_bounded_independently_of_sql_row_limit(env, read):
+    data = configured(env).model_dump(mode="json")
+    data["budget"].update(max_tool_calls=11, max_turns=13)
+    config = runtime.ServeConfig.model_validate(data)
+    async with env.opened(config) as rt:
+        env.scripts.add(
+            "多次取证的原调查",
+            *(
+                tool_call(
+                    "run_readonly_query",
+                    cluster=SR.target_id,
+                    sql="SELECT region,total FROM shop.sales",
+                )
+                for _ in range(11)
+            ),
+            cite(OLD_ANALYSIS),
+        )
+        old = await ask(env, rt, "多次取证的原调查", "many-originals")
+        assert old.state == "completed", old.failure_code
+        assert len(old.context_evidence) == 11
+        await rt.service.new_session("feishu", "alice", CHAT)
+
+        def finish(call):
+            data = last_output(call)["data"]
+            assert len(data["records"][0]["facts"]) == 10
+            assert data["gaps"]["truncated"] is True
+            assert OLD_ANALYSIS not in str(data)
+            return cite("原始事实较多，本次只交付有界部分")(call)
+
+        env.scripts.add(
+            "读取有界原事实",
+            tool_call("history__read_operation", record_ref=f"turn:{old.turn_id}")
+            if read
+            else search_step(env),
+            finish,
+        )
+        result = await ask(env, rt, "读取有界原事实", "bounded-originals")
+        assert result.state == "completed", result.failure_code

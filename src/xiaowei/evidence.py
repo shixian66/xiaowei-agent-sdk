@@ -211,10 +211,11 @@ class EvidencePermissionError(EvidenceUnavailableError):
 
 
 class EvidenceUnverifiableError(EvidenceError):
-    """暂时无法确认证据依赖的数据当前仍可读；只阻断这一次读取，证据与会话不变。"""
+    """暂时无法确认证据依赖可读；预算耗尽仍走本轮既有终止路径。"""
 
-    def __init__(self) -> None:
+    def __init__(self, *, budget_exhausted: bool = False) -> None:
         super().__init__(_UNVERIFIABLE)
+        self.budget_exhausted = budget_exhausted
 
 
 class AnswerRejectCode(enum.StrEnum):
@@ -962,7 +963,7 @@ class EvidenceStore:
         needed = sum(len({(d.database, d.name) for d in deps}) for deps in merged.values())
         if checks.used + needed > limit:
             logger.warning("证据依赖复核超过检查次数上限：used=%d needed=%d", checks.used, needed)
-            raise EvidenceUnverifiableError
+            raise EvidenceUnverifiableError(budget_exhausted=True)
         checks.used += needed
         unverifiable = False
         for target_id, dependencies in sorted(merged.items()):

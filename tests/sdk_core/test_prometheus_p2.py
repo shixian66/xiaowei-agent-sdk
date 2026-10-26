@@ -848,34 +848,31 @@ async def test_same_source_parallel_success_and_failure_are_not_contradictory(en
 async def test_commit_rechecks_failure_source_authorization(
     env: Env, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    from xiaowei.evidence import EvidenceStore
     from xiaowei.runtime import StaticAccess
 
     original = StaticAccess.authorize
-    validate = EvidenceStore.validate_answer
     revoked = False
 
-    async def revoke_after_final(self: Any, identity: Any, target_id: str, tool_id: str) -> bool:
+    async def current_authorization(self: Any, identity: Any, target_id: str, tool_id: str) -> bool:
         if target_id == SOURCE and revoked:
             return False
         return await original(self, identity, target_id, tool_id)
 
-    async def validated_then_revoked(self: Any, turn: Any, ctx: Any, **kw: Any) -> Any:
+    def revoke_before_commit(call: ModelCall) -> list[Any]:
         nonlocal revoked
-        result = await validate(self, turn, ctx, **kw)
-        if turn.monitoring_failures:
-            revoked = True
-        return result
+        # 工具失败已返回，最终输出进入 Session 唯一的提交校验前撤权。
+        # 不依赖 Application 曾经存在的重复 validate_answer。
+        revoked = True
+        return answer([], analysis="", advice="未经数据验证，源认证待核实")(call)
 
-    monkeypatch.setattr(StaticAccess, "authorize", revoke_after_final)
-    monkeypatch.setattr(EvidenceStore, "validate_answer", validated_then_revoked)
+    monkeypatch.setattr(StaticAccess, "authorize", current_authorization)
     with serve(p2_server) as source:
         async with env.running(env.config(**p2_config(source.url))) as served:
             await served.page()
             message = env.scripts.add(
                 "提交前撤权",
                 tool_call(f"{SOURCE}__query", query="auth"),
-                lambda call: answer([], analysis="", advice="未经数据验证，源认证待核实"),
+                revoke_before_commit,
             )
             body = (await served.turn(message, "query")).json()
             assert await env.scalar("SELECT count(*) FROM agent_messages") == 0

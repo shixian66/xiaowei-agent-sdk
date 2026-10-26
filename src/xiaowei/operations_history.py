@@ -41,6 +41,8 @@ SEARCH = f"{TARGET}/search_operations"
 READ = f"{TARGET}/read_operation"
 TOOLS = frozenset({SEARCH, READ})
 PAGE_SIZE = 10
+SCAN_LIMIT = 20
+EVIDENCE_LIMIT = 10
 SCOPE_NOTICE = (
     "交互历史仅限本对话；定时结果按创建任务的操作群授权。"
     "请在有权限的创建群询问，或使用当前入口获准原源重新调查。"
@@ -100,7 +102,8 @@ def catalog(
             "查本对话旧generation或本操作群的原始运维记录，不带旧模型分析。"
             "start/end为带时区ISO绝对时间，[start,end)；target_ids空列表表示当前获准目标，"
             "job_id/run_id未知填null。时间按请求创建、独立事实采集或后台计划时刻。"
-            "固定最多10条；返回最早时间及更早候选标志，truncated不能当查全。"
+            "固定最多10条、扫描20条候选、每条最多10份原Evidence；返回最早时间及本窗更早候选标志。"
+            "has_earlier不代表窗口起点之前没有记录，truncated不能当查全。"
             "可缩小目标/任务或前移时间窗继续，无关键词或游标。时间/参数错误可修正，"
             "不可读单条跳过并给gaps，空结果不证明未发生。" + SCOPE_NOTICE,
         ),
@@ -109,7 +112,8 @@ def catalog(
             ReadArgs,
             "按搜索返回或已知的record_ref读取原调查事实；编号不授予权限。"
             "旧分析须完整来源复核，与事实分列；缺失、过期或无权时只给可读事实和gaps。"
-            "不重建旧SDK上下文，不递归读取历史工具结果。容量/对象上限时少返回或不复制旧分析。"
+            "不重建旧SDK上下文，不递归读取历史工具结果。最多10份原Evidence，旧分析依赖超过此数不复制。"
+            "容量/对象上限时少返回或不复制旧分析。"
             "可查其他获准记录或原源，不能从空结果推断未发生。" + SCOPE_NOTICE,
         ),
     ):
@@ -264,7 +268,7 @@ class OperationHistory:
                     "run": args.run_id if args else None,
                     "all_targets": not args or not args.target_ids,
                     "targets": args.target_ids if args else [],
-                    "limit": max(PAGE_SIZE, self.max_rows) + 1 if args else 1,
+                    "limit": SCAN_LIMIT + 1 if args else 1,
                 },
             )
             return [dict(row) for row in rows.mappings()]
@@ -287,7 +291,7 @@ class OperationHistory:
                 )
             }
         )
-        params = {**self._params(original), "limit": self.max_rows + 1}
+        params = {**self._params(original), "limit": EVIDENCE_LIMIT + 1}
         async with self._reading() as conn:
             raw_ids = (
                 list((await conn.execute(_EVIDENCE, params)).scalars())
@@ -302,9 +306,12 @@ class OperationHistory:
             except ValidationError:
                 pass
         turn = saved if analysis else None
+        analysis_limited = turn is not None and len(set(turn.context_evidence)) > EVIDENCE_LIMIT
+        if analysis_limited:
+            turn = None  # 不探测超出固定上限的分析依赖，只取有界原事实。
         wanted = tuple(dict.fromkeys(turn.context_evidence)) if turn is not None else tuple(raw_ids)
         records, missing = [], False
-        for eid in wanted:
+        for eid in wanted[:EVIDENCE_LIMIT]:
             try:
                 record = await self.evidence.inspect(eid, original)
                 if record.tool_id not in self.model_tools or record.tool_id in TOOLS:
@@ -323,17 +330,17 @@ class OperationHistory:
         if missing:
             gaps["Evidence 不可读"] = True
         if len(_objects(records)) > self.max_rows or (
-            turn is None and ids is None and len(raw_ids) > self.max_rows
+            turn is None and ids is None and len(raw_ids) > EVIDENCE_LIMIT
         ):
             gaps["truncated"] = True
             limited: list[EvidenceRecord] = []
             for record in records:
-                if (
-                    len(_objects([*limited, record])) <= self.max_rows
-                    and len(limited) < self.max_rows
-                ):
+                if len(_objects([*limited, record])) <= self.max_rows:
                     limited.append(record)
             records = limited
+        if analysis_limited:
+            gaps["truncated"] = True
+            gaps["回答缺失"] = True
         if saved is None:
             gaps["回答缺失"] = True
         else:
@@ -415,10 +422,9 @@ class OperationHistory:
             ctx, args=args, ref=None if args else str(request.arguments["record_ref"])
         )
         bundles: list[_Bundle] = []
-        scan_limit = max(PAGE_SIZE, self.max_rows)
-        truncated = args is not None and len(rows) > scan_limit
+        truncated = args is not None and len(rows) > SCAN_LIMIT
         lookup_gaps: dict[str, bool] = {}
-        for row in rows[:scan_limit]:
+        for row in rows[:SCAN_LIMIT]:
             if len(bundles) >= PAGE_SIZE:
                 truncated = True
                 break
@@ -441,7 +447,7 @@ class OperationHistory:
                 ):
                     truncated = True
                     break
-            except (EvidenceUnavailableError, EvidenceUnverifiableError, AnswerRejectedError):
+            except EvidenceUnavailableError:
                 lookup_gaps["Evidence 不可读"] = True
                 continue
             if not b.records and b.item["gaps"].get("Evidence 不可读"):
@@ -451,7 +457,9 @@ class OperationHistory:
         try:
             # 一批成功候选只探测一次，同对象跨原调查去重，不跨保存/交付缓存结论。
             await self._validate(bundles)
-        except (EvidenceUnavailableError, EvidenceUnverifiableError, AnswerRejectedError):
+        except (EvidenceUnavailableError, EvidenceUnverifiableError, AnswerRejectedError) as exc:
+            if isinstance(exc, EvidenceUnverifiableError) and exc.budget_exhausted:
+                raise
             readable = []
             lookup_gaps["Evidence 不可读"] = True
             # 失败批次逐条定位；单条旧分析失败时，只再查可独立验证的原事实。
@@ -467,7 +475,13 @@ class OperationHistory:
                             continue
                     await self._validate([b])
                     readable.append(b)
-                except (EvidenceUnavailableError, EvidenceUnverifiableError, AnswerRejectedError):
+                except (
+                    EvidenceUnavailableError,
+                    EvidenceUnverifiableError,
+                    AnswerRejectedError,
+                ) as exc:
+                    if isinstance(exc, EvidenceUnverifiableError) and exc.budget_exhausted:
+                        raise
                     continue
             bundles = readable
         contract = self.evidence.catalog.contract(request.tool_id, TARGET)
