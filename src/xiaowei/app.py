@@ -114,6 +114,9 @@ from xiaowei.models import (
     ToolRequest,
     TurnAnswer,
 )
+from xiaowei.operations_history import TOOLS as HISTORY_TOOLS
+from xiaowei.operations_history import WORK_METHOD as HISTORY_METHOD
+from xiaowei.operations_history import OperationHistory
 from xiaowei.session import (
     PolicySession,
     SessionInputPolicy,
@@ -477,6 +480,7 @@ class Application:
         images: SessionImageStore | None = None,
         notifications: WebhookNotifications | None = None,
         scheduled_tasks: ScheduledTasks | None = None,
+        history: OperationHistory | None = None,
     ) -> None:
         if not isinstance(model, ModelBinding):
             raise TypeError("应用配置：模型必须是 open_model 生成的运行绑定")
@@ -546,6 +550,9 @@ class Application:
         self.images = images
         self.notifications = notifications
         self.scheduled_tasks = scheduled_tasks
+        self.history = history
+        if history is not None and HISTORY_TOOLS & data_policy.model_tools:
+            self._instructions += "\n" + HISTORY_METHOD
         self._run_config = safe_run_config()
         self._active: set[str] = set()
         self._background_reserved: set[str] = set()
@@ -591,7 +598,8 @@ class Application:
             if self.scheduled_tasks is not None
             else frozenset()
         )
-        return frozenset(self._local) | remote | action_tools | notify | scheduled
+        history = HISTORY_TOOLS if self.history is not None else frozenset()
+        return frozenset(self._local) | remote | action_tools | notify | scheduled | history
 
     def scope_for_turn(
         self, mode: Mode, authorized_tools: frozenset[str], available_tools: frozenset[str]
@@ -949,12 +957,11 @@ class Application:
             run_turn_id=ctx.identity.turn_id,
             limit_reached=runs.limit_rescue_started,
         )
-        # 先单独校验回答，使拒绝原因明确；提交时 Session 仍会用同一验证器再校验一次。
+        # Session 在同一提交入口完整校验最终回答；不在相同状态重复复核对象。
         if progress is not None:
             progress.mark("saving")
         if ctx.automatic and self.scheduled_tasks is not None:
             await self.scheduled_tasks.validate_run(ctx)
-        await self._evidence.validate_answer(validated, ctx)
         snapshot = await session.commit_validated(
             validated.context_evidence,
             monitoring_failures=validated.monitoring_failures,
@@ -1528,7 +1535,8 @@ class Application:
             else []
         )
         scheduled = self.scheduled_tasks.tools_for(ctx) if self.scheduled_tasks is not None else []
-        return [*local, *remote, *actions, *notify, *scheduled]
+        history = self.history.tools_for(ctx, self._governance) if self.history is not None else []
+        return [*local, *remote, *actions, *notify, *scheduled, *history]
 
     @staticmethod
     def _refuse(turn: str, started: float, reason: TurnReason) -> TurnError:
@@ -1564,8 +1572,6 @@ def _turn_error(exc: Exception) -> TurnError:
     for error in _causes(exc):
         if isinstance(error, SessionUnavailableError):
             return TurnError("session_unavailable", str(error), session_state=error.snapshot)
-    if isinstance(exc, SessionItemRejectedError):
-        return TurnError("content_rejected", str(exc))
     if isinstance(exc, ImageStoreError):
         return TurnError("session_unavailable")
     if isinstance(exc, (SessionStoreError, EvidenceStoreError)):
@@ -1573,6 +1579,8 @@ def _turn_error(exc: Exception) -> TurnError:
     for error in _causes(exc):
         if isinstance(error, AnswerRejectedError):
             return TurnError("answer_rejected", answer_reject=error.code)
+    if isinstance(exc, SessionItemRejectedError):
+        return TurnError("content_rejected", str(exc))
     if isinstance(exc, MaxTurnsExceeded):
         return TurnError("turn_limit")
     # 工具执行开始后的失败：SDK 把工具抛出的异常包装后中止本轮，原异常在原因链上。

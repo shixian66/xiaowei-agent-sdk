@@ -109,13 +109,19 @@ from xiaowei.models import (
     Budget,
     Channel,
     ClusterId,
+    EvidenceRecord,
     Identity,
     Label,
     Owner,
+    RunContext,
     TextBlock,
     ToolContract,
     ToolId,
 )
+from xiaowei.operations_history import TARGET as HISTORY_TARGET
+from xiaowei.operations_history import TOOLS as HISTORY_TOOLS
+from xiaowei.operations_history import OperationHistory
+from xiaowei.operations_history import catalog as history_catalog
 from xiaowei.scheduled_tasks import (
     CONTROL as TASK_CONTROL,
 )
@@ -416,6 +422,7 @@ class ServeConfig(_Config):
                 | {s.server_id for s in self.mcp_servers}
                 | {s.server_id for s in self.alertmanager_sources}
                 | ({TASK_TARGET} if self.scheduled_tasks is not None else set())
+                | {HISTORY_TARGET}
             )
             if NOTIFY_TARGET in targets:
                 raise ValueError("notifications 是通知工具保留目标")
@@ -463,8 +470,8 @@ class ServeConfig(_Config):
                 raise ValueError("feishu.group.tools 只能包含已登记的工具")
             if group is not None and group.max_wait_seconds >= storage.request_retention_seconds:
                 raise ValueError("feishu.group.max_wait_seconds 必须短于请求保留期")
-        # 一轮新列表的每个对象在工具记录、写入 Session、最终校验、提交时的校验与提交前的整段回放
-        # 中各复核一次；上限容不下最大一页时，满页的列表必然在提交前因次数用完而失败。
+        # 普通结果经记录、Session暂存、提交最终校验和整段回放复核；历史读取另验证原来源。
+        # 保留5倍静态规则，单次纳入最多一页对象（含旧分析全部依赖），不做运行时预留。
         page = max(t.connection.policy.max_rows for t in self.targets)
         if self.budget.max_scope_checks < _CHECKS_PER_LISTED_OBJECT * page:
             raise ValueError(
@@ -838,6 +845,7 @@ def _registered_tools(config: ServeConfig) -> frozenset[str]:
     }
     notify = {NOTIFY_TOOL} if config.webhook_bots else set()
     return (
+        HISTORY_TOOLS |
         QUERY_TOOLS
         | ({"local/query_diagnostics"} if any(t.type == "tidb" for t in config.targets) else set())
         | (AUDIT_TOOLS if audited else frozenset())
@@ -1388,14 +1396,14 @@ def _app_config(config: ServeConfig) -> AppConfig:
     security = _registered_tools(config) & {SECURITY_TOOL}
     audit = (
         _registered_tools(config) - QUERY_TOOLS - monitoring - write_tools - notify - scheduled
-        - security
+        - security - HISTORY_TOOLS
     )
     return AppConfig(
         purposes={
             "query": (
-                QUERY_TOOLS | audit | security | monitoring | notify | scheduled
+                QUERY_TOOLS | audit | security | monitoring | notify | scheduled | HISTORY_TOOLS
             ),
-            "diagnose": (DIAGNOSE_TOOLS | audit),
+            "diagnose": (DIAGNOSE_TOOLS | audit | HISTORY_TOOLS),
         },
         data_policies={config.model.data_policy_id: config.data_policy},
         session_limits=config.session_limits,
@@ -1552,6 +1560,7 @@ class _Delivery:
     results: ResultDelivery
     tools: StarRocksTools
     task_definitions: TaskDefinitions | None = None
+    history: OperationHistory | None = None
 
 
 def _group_access(config: ServeConfig, members: MemberCheck | None) -> GroupAccess | None:
@@ -1602,6 +1611,7 @@ def _delivery(
     for other in others:
         tools += other
     monitoring_contracts, monitoring_policies = _monitoring_catalog(config)
+    history_contracts, history_policies = history_catalog(config.projection_bytes)
     notify_contracts, notify_policies = notification_catalog(
         config.webhook_bots, config.projection_bytes
     )
@@ -1612,19 +1622,20 @@ def _delivery(
         config.alertmanager_sources, config.projection_bytes
     )
     targets = (
-        frozenset(schemas)
+        frozenset(schemas) | {HISTORY_TARGET}
         | {server.server_id for server in config.mcp_servers}
         | {source.server_id for source in config.alertmanager_sources}
         | ({NOTIFY_TARGET} if config.webhook_bots else set())
         | ({TASK_TARGET} if config.scheduled_tasks is not None else set())
     )
     action_contracts, action_policies = action_status_catalog(
-        targets - frozenset(schemas) - {NOTIFY_TARGET},
+        targets - frozenset(schemas) - {NOTIFY_TARGET, HISTORY_TARGET},
         config.projection_bytes,
     )
     catalog = ToolCatalog(
         (
             *tools.contracts,
+            *history_contracts,
             *monitoring_contracts,
             *api_contracts,
             *action_contracts,
@@ -1633,6 +1644,7 @@ def _delivery(
         ),
         (
             *tools.policies,
+            *history_policies,
             *monitoring_policies,
             *api_policies,
             *action_policies,
@@ -1680,7 +1692,21 @@ def _delivery(
             execution_requests(config.data_policy.model_tools),
             member_status=member_status,
         )
-        evidence.configure_content_check(definitions.check_content)
+
+    history = OperationHistory(
+        engine, evidence, clock, execution_requests(config.data_policy.model_tools),
+        max(t.connection.policy.max_rows for t in config.targets),
+    )
+
+    async def check_content(
+        record: EvidenceRecord, ctx: RunContext,
+        recipient_tools: frozenset[str] | None, recipient_targets: frozenset[str] | None,
+    ) -> None:
+        if definitions is not None:
+            await definitions.check_content(record, ctx, recipient_tools, recipient_targets)
+        await history.check_content(record, ctx, recipient_tools, recipient_targets)
+
+    evidence.configure_content_check(check_content)
 
     async def notification_status(identity: Identity) -> str | None:
         if await access.authorize_evidence(identity, NOTIFY_TARGET, NOTIFY_TOOL):
@@ -1705,7 +1731,7 @@ def _delivery(
         budget=config.budget,
         notification_status=notification_status if config.webhook_bots else None,
     )
-    return _Delivery(store, evidence, results, tools, definitions)
+    return _Delivery(store, evidence, results, tools, definitions, history)
 
 
 @asynccontextmanager
@@ -1865,6 +1891,7 @@ async def open_runtime(
             engine=engine,
             governance=governance,
             local_tools=executes,
+            history=parts.history,
             mcp=mcp,
             clock=clock,
             actions=ActionService(

@@ -518,8 +518,11 @@ class PolicySession:
                 limit_reached=limit_reached,
             )
             await self._evidence.validate_answer(turn, self._ctx)
-        except (ValidationError, AnswerRejectedError):
+        except ValidationError:
             raise SessionItemRejectedError("最终回答未通过校验，本轮不保存") from None
+        except AnswerRejectedError as exc:
+            # 应用保留原回答拒绝类别；直接Session调用仍得到相同的持久化拒绝。
+            raise SessionItemRejectedError("最终回答未通过校验，本轮不保存") from exc
         except EvidenceUnverifiableError:
             raise SessionUnverifiableError from None
 

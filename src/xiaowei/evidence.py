@@ -211,10 +211,11 @@ class EvidencePermissionError(EvidenceUnavailableError):
 
 
 class EvidenceUnverifiableError(EvidenceError):
-    """暂时无法确认证据依赖的数据当前仍可读；只阻断这一次读取，证据与会话不变。"""
+    """暂时无法确认证据依赖可读；预算耗尽仍走本轮既有终止路径。"""
 
-    def __init__(self) -> None:
+    def __init__(self, *, budget_exhausted: bool = False) -> None:
         super().__init__(_UNVERIFIABLE)
+        self.budget_exhausted = budget_exhausted
 
 
 class AnswerRejectCode(enum.StrEnum):
@@ -458,6 +459,34 @@ class EvidenceStore:
             ):
                 raise EvidenceUnavailableError
         return [record.projections[audience] for record in records]
+
+    async def inspect(self, evidence_id: str, ctx: RunContext) -> EvidenceRecord:
+        """历史候选的归属/策略/当前工具权限检查；尚未验证对象依赖，不可直接交付。"""
+        return await self._checked(evidence_id, ctx, "model", history=True)
+
+    async def validate_records(
+        self,
+        entries: Sequence[tuple[EvidenceRecord, RunContext]],
+        *,
+        recipient_tools: frozenset[str] | None = None,
+        recipient_targets: frozenset[str] | None = None,
+    ) -> None:
+        """历史工具批量验证已检查的候选：跨来源会话合并对象计费，原内容检查仍各用原语境。"""
+        if any(
+            (recipient_tools is not None and record.tool_id not in recipient_tools)
+            or (recipient_targets is not None and record.target_id not in recipient_targets)
+            for record, _ in entries
+        ):
+            raise RecipientRejectedError(
+                AnswerRejectCode.EVIDENCE_UNAVAILABLE, "目标机器人无权接收历史来源"
+            )
+        if entries:
+            await self._verify(
+                [record for record, _ in entries], entries[0][1].budget.max_scope_checks
+            )
+        if self._content_check is not None:
+            for record, ctx in entries:
+                await self._content_check(record, ctx, recipient_tools, recipient_targets)
 
     def _effective_digest(self, record: EvidenceRecord, arguments: dict[str, object]) -> str:
         contract = self._catalog.contract(record.tool_id, record.target_id)
@@ -934,7 +963,7 @@ class EvidenceStore:
         needed = sum(len({(d.database, d.name) for d in deps}) for deps in merged.values())
         if checks.used + needed > limit:
             logger.warning("证据依赖复核超过检查次数上限：used=%d needed=%d", checks.used, needed)
-            raise EvidenceUnverifiableError
+            raise EvidenceUnverifiableError(budget_exhausted=True)
         checks.used += needed
         unverifiable = False
         for target_id, dependencies in sorted(merged.items()):
@@ -1192,6 +1221,15 @@ def _basis(records: Sequence[EvidenceRecord], ctx: RunContext) -> tuple[tuple[st
 def _shown(record: EvidenceRecord, channel: Audience, note: str | None) -> _Shown:
     envelope = json.loads(record.projections[channel])
     data = None if envelope["empty"] else envelope["data"]
+    if data is not None and record.tool_id in {
+        "history/search_operations", "history/read_operation"
+    }:
+        # 来源绑定留在原投影供内部复核；渠道事实只展示业务记录，不展示检索/证据标识。
+        data = {key: value for key, value in data.items() if key != "sources"}
+        data["records"] = [
+            {key: value for key, value in item.items() if key != "record_ref"}
+            for item in data["records"]
+        ]
     return _Shown(record=record, data=data, truncated=bool(envelope["truncated"]), note=note)
 
 

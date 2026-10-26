@@ -937,9 +937,9 @@ async def test_a_turn_succeeds_at_the_check_limit_and_stops_before_io_beyond_it(
     async with env.opened(capped(env, 1000)) as rt:
         assert (await env.turn(rt, wide(env, "量一轮", SR.target_id), "om_0")).state == "completed"
         needed = len(env.db.probes())
-    # 每次复核这 6 个对象各探测一次：工具记录、写入 Session、最终校验、提交时的校验与提交前的
-    # 整段回放。
-    assert needed == 6 * 5
+    # 6个对象各经工具记录、Session暂存、提交时最终校验及提交前整段回放；
+    # 应用不在同一提交入口重复最终校验。上限不足时仍须在探测前拒绝。
+    assert needed == 6 * 4
 
     async with env.opened(capped(env, needed)) as rt:
         await fresh_session(rt)
@@ -1030,7 +1030,7 @@ async def test_the_same_object_on_two_clusters_is_checked_and_counted_on_each(en
 
 async def test_a_full_listing_page_fits_the_smallest_allowed_limit(env: Env) -> None:
     """启动校验的下界（5 × 一页）足够一轮新会话搜出满页：搜表自身对本页对象的探测（至多一页）
-    不计入，证据依赖的 1 个对象在 5 次复核中各计一次。"""
+    不计入，普通列表的1个对象在4次复核中各计一次；历史读取另需一次来源验证。"""
     async with env.opened(capped(env, 5)) as rt:
         page = {**SEARCH_ALL, "page_size": 1}  # capped 把 max_rows 设为 1
         message = env.scripts.add(
@@ -1039,4 +1039,4 @@ async def test_a_full_listing_page_fits_the_smallest_allowed_limit(env: Env) -> 
         record = await env.turn(rt, message, "om_1")
         assert record.state == "completed", record.failure_code
         listed = [sql for sql in env.db.probes() if sql == probe_sql("shop", "regions")]
-        assert len(listed) == 1 + 5
+        assert len(listed) == 1 + 4

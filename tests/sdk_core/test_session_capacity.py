@@ -344,7 +344,9 @@ async def test_scope_checks_can_stop_large_catalog_before_history_or_request_lim
     recorder = CapacityRecorder(scenario="small")
     recorder.install(monkeypatch)
     caplog.set_level("INFO", logger="xiaowei.app")
-    config = capacity_config(env)
+    # 工具记录、Session 暂存、提交最终校验和提交前整段回放共四类复核；
+    # 4 个满页调用在 2048 内已可完成，使用合法的 1600 预算仍能触发复核上限。
+    config = capacity_config(env, budget={"max_scope_checks": 1600})
     connectors = drivers(config)
     connectors["pre"].tables.update(
         {("data_center", f"table{i:03}"): ("region",) for i in range(199)}
@@ -373,4 +375,6 @@ async def test_scope_checks_can_stop_large_catalog_before_history_or_request_lim
         assert report["io"]["query"] == 0 and report["io"]["probe"] > 0
         assert await env.scalar("SELECT count(*) FROM agent_messages") == 0
         report["first_limit"] = "scope_checks"
+        report["workload"] = {"parallel_calls": 4, "objects_per_call": 200}
+        assert report["limits"]["max_scope_checks"] == 1600
         save_report(tmp_path, report)
