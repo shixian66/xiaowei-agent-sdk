@@ -101,6 +101,10 @@ async def test_old_background_facts_survive_task_and_bot_lifecycle_changes(env, 
                 text("UPDATE xiaowei_scheduled_job SET state=:state WHERE job_id=:id"),
                 {"state": state, "id": job},
             )
+            # 模拟升级前运行：没有快照仍可读原事实，不从SDK消息重建结论。
+            await conn.execute(text(
+                "UPDATE xiaowei_scheduled_run SET result_snapshot=NULL,result_expires_at=NULL"
+            ))
         rt.scheduled_tasks.definitions.bots.clear()
 
         def finish(call):

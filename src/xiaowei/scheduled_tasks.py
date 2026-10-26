@@ -27,6 +27,7 @@ from xiaowei.actions import (
     ActionWriteRejectedError,
     proposal_policy,
 )
+from xiaowei.channel_store import ResultNotSavedError
 from xiaowei.evidence import (
     AnswerRejectedError,
     EvidenceStore,
@@ -425,6 +426,27 @@ class TaskDefinitions:
         )
         return ctx
 
+    async def result_sources(
+        self, job: Mapping[str, Any], ctx: RunContext
+    ) -> list[tuple[EvidenceRecord, RunContext]]:
+        """冻结定义仍是结果来源；按当前身份/预算、原会话与原数据范围定位。"""
+        source = RunContext.model_validate_json(job["source_context"])
+        original = source.model_copy(
+            update={
+                "identity": ctx.identity.model_copy(
+                    update={
+                        "session_id": source.identity.session_id,
+                        "turn_id": source.identity.turn_id,
+                    }
+                ),
+                "budget": ctx.budget,
+            }
+        )
+        return [
+            (await self.evidence.inspect(eid, original), original)
+            for eid in dict.fromkeys(json.loads(job["definition_evidence_ids"]))
+        ]
+
     async def check_content(
         self,
         record: EvidenceRecord,
@@ -469,11 +491,15 @@ class ScheduledTasks:
         notifications: WebhookNotifications,
         *,
         is_admin: Callable[[str], bool],
+        request_retention_seconds: int,
+        max_answer_bytes: int,
     ) -> None:
         self.config, self.governance, self.engine = config, governance, engine
         self.lock, self.definitions, self.notifications = lock, definitions, notifications
         self.clock, self.is_admin = definitions.clock, is_admin
         self.budget = definitions.budget
+        self._result_retention = timedelta(seconds=request_retention_seconds)
+        self._max_answer_bytes = max_answer_bytes
         self._tick_lock = asyncio.Lock()
         self._running_jobs: dict[str, asyncio.Task[None]] = {}
         self.run_slot: Callable[[str | None], AbstractContextManager[bool]]
@@ -797,6 +823,25 @@ class ScheduledTasks:
             )
         return self._plan(job)
 
+    async def _save_agent_result(
+        self, job: Mapping[str, Any], run_id: str, answer: TurnAnswer
+    ) -> None:
+        content = answer.model_dump_json()
+        if len(content.encode()) > self._max_answer_bytes:
+            raise ResultNotSavedError
+        deadlines = [self.clock() + self._result_retention]
+        if answer.content_expires_at is not None:
+            deadlines.append(answer.content_expires_at)
+        async with self.engine.begin() as conn:
+            await self._admit(conn)
+            await conn.execute(
+                sql(
+                    "UPDATE xiaowei_scheduled_run SET result_snapshot=:answer,"
+                    "result_expires_at=:expires WHERE run_id=:id AND state='running'"
+                ),
+                dict(id=run_id, answer=content, expires=min(deadlines)),
+            )
+
     async def _finish_agent(
         self, job: Mapping[str, Any], run_id: str, state: str, reason: str
     ) -> None:
@@ -944,8 +989,8 @@ class ScheduledTasks:
             )
             raise TurnError("scope_rejected") from None
 
-    async def validate_run(self, ctx: RunContext) -> None:
-        """保存前仅检查可变任务状态和期限；不重复查成员目录或定义证据。"""
+    async def validate_run(self, ctx: RunContext) -> list[tuple[EvidenceRecord, RunContext]]:
+        """核对可变任务状态/期限，并把定义来源交给Session的唯一最终校验。"""
         from xiaowei.app import TurnError
 
         if ctx.definition_job_id is None:
@@ -963,6 +1008,10 @@ class ScheduledTasks:
                 )
                 await self._stop_agent(job, reason)
             raise TurnError("scope_rejected")
+        try:
+            return await self.definitions.result_sources(job, ctx)
+        except EvidenceUnavailableError:
+            raise TurnError("scope_rejected") from None
 
     async def _send_agent_failure(
         self,
@@ -1101,12 +1150,15 @@ class ScheduledTasks:
                         answer = await self.application.run_turn(ctx, job["text"])
                         if isinstance(answer, PausedTurn):
                             raise TurnError("scope_rejected")
+                        stage = "save_result"
+                        await self._save_agent_result(job, run["run_id"], answer)
                         stage = "validate_delivery"
                         delivery = await self.governance.evidence.validate_answer(
                             answer,
                             ctx,
                             recipient_tools=bot.receive_tools | {NOTIFY},
                             recipient_targets=bot.receive_targets | {"notifications"},
+                            source_records=await self.definitions.result_sources(job, ctx),
                         )
                         incomplete = (
                             (isinstance(answer.answer, AgentAnswer) and answer.answer.awaiting_user)

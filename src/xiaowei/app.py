@@ -960,16 +960,22 @@ class Application:
         # Session 在同一提交入口完整校验最终回答；不在相同状态重复复核对象。
         if progress is not None:
             progress.mark("saving")
-        if ctx.automatic and self.scheduled_tasks is not None:
+        source_records = (
             await self.scheduled_tasks.validate_run(ctx)
+            if ctx.automatic and self.scheduled_tasks is not None
+            else ()
+        )
         snapshot = await session.commit_validated(
             validated.context_evidence,
             monitoring_failures=validated.monitoring_failures,
             inspection_failures=validated.inspection_failures,
             limit_reached=validated.limit_reached,
+            source_records=source_records,
         )
         _stage(turn, "committed", started)
-        return validated.model_copy(update={"session_state": snapshot})
+        return validated.model_copy(
+            update={"session_state": snapshot, "content_expires_at": session.content_expires_at}
+        )
 
     def _query_evidence(self, runs: TurnRuns) -> list[str]:
         """本轮成功的查询类工具证据（可信记录）：用于已开始查询的去向核对。"""
