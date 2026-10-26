@@ -1,8 +1,8 @@
 # 跨会话运维事实追溯与事件关联：最小设计及实施计划
 
-> 版本：2026-10-26 / R4（用户确认及 F1/F2 修订）。调查基线：`9d97d5fa24232e5db4fe81d87df7bafb5e6ac1c7`，应用 schema v15，OpenAI Agents SDK 0.22.3。本文维护实施与验收；D1–D3 已确认，生效产品契约只在 ARCHITECTURE 维护。当前仅授权 H1 功能开发与离线验证，H2/H3 尚未获实施授权。
+> 版本：2026-10-26 / R4（用户确认及 F1/F2 修订）。调查基线：`9d97d5fa24232e5db4fe81d87df7bafb5e6ac1c7`，应用 schema v15，OpenAI Agents SDK 0.22.3。本文维护实施与验收；D1–D3 已确认，生效产品契约只在 ARCHITECTURE 维护。H1 已完成开发与离线验证，用户确认独立审查通过并于 2026-10-26 授权合并；H2/H3 尚未获实施授权。
 >
-> 本轮授权：先修正文档并选择性提交，再从最新 main 在独立主题工作树开发 H1，以真实 SDK、隔离 PostgreSQL、可控模型离线验证。H2 暂不开发，待 H1 审查后再定；不调整权限配置、不合并、不部署、不访问公司源或真实模型，不实施 H3。已有根文档按 [AGENTS.md](../../../AGENTS.md) 分工，生效产品契约以 [ARCHITECTURE.md](../../../ARCHITECTURE.md#operations-history) 为准。
+> 本轮授权：先修正文档并选择性提交，再从最新 main 在独立主题工作树开发 H1，以真实 SDK、隔离 PostgreSQL、可控模型离线验证。H1 独立审查通过后，用户已授权 PR 集成与合并；H2 暂不开发，仍须另行授权。不调整权限配置、不部署、不访问公司源或真实模型，不实施 H3。已有根文档按 [AGENTS.md](../../../AGENTS.md) 分工，生效产品契约以 [ARCHITECTURE.md](../../../ARCHITECTURE.md#operations-history) 为准。
 
 ## 1. 结论与范围
 
