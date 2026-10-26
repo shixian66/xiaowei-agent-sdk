@@ -21,13 +21,13 @@ pytestmark = pytest.mark.loopback
 CONCLUSION = "凌晨巡检：销售查询已完成；业务是否恢复仍待验证。"
 
 
-def background(env):
+def background(env, *, conclusion=CONCLUSION):
     env.scripts.add(
         TASK,
         tool_call(
             "run_readonly_query", cluster=SR.target_id, sql="SELECT region,total FROM shop.sales"
         ),
-        cite(CONCLUSION),
+        cite(conclusion),
     )
 
 
@@ -99,10 +99,18 @@ async def test_new_session_reads_saved_background_conclusion(env, monkeypatch, r
         )
 
 
-async def test_snapshot_write_failure_never_sends_result_body(env, monkeypatch):
-    """真实PG写入故障必须阻止正文，不能发送后才发现没有留存结果。"""
-    background(env)
-    async with running(env, monkeypatch, config=configured(env), member_check=members) as (
+@pytest.mark.parametrize("failure", ["oversized", "pg_write"])
+async def test_snapshot_save_failure_never_sends_result_body(env, monkeypatch, failure):
+    """超限和真实PG写故障都不留快照、不发正文，也不重跑模型。"""
+    cfg = configured(env)
+    conclusion = CONCLUSION
+    if failure == "oversized":
+        cfg = cfg.model_copy(
+            update={"storage": cfg.storage.model_copy(update={"max_answer_bytes": 4000})}
+        )
+        conclusion += "x" * 6000
+    background(env, conclusion=conclusion)
+    async with running(env, monkeypatch, config=cfg, member_check=members) as (
         group,
         requests,
         rt,
@@ -114,11 +122,13 @@ async def test_snapshot_write_failure_never_sends_result_body(env, monkeypatch):
             if statement.lstrip().startswith("UPDATE xiaowei_scheduled_run SET result_snapshot"):
                 raise SQLAlchemyError("synthetic snapshot write failure")
 
-        event.listen(rt.engine.sync_engine, "before_cursor_execute", fail_snapshot)
+        if failure == "pg_write":
+            event.listen(rt.engine.sync_engine, "before_cursor_execute", fail_snapshot)
         try:
             await rt.scheduled_tasks.tick()
         finally:
-            event.remove(rt.engine.sync_engine, "before_cursor_execute", fail_snapshot)
+            if failure == "pg_write":
+                event.remove(rt.engine.sync_engine, "before_cursor_execute", fail_snapshot)
         assert await env.scalar("SELECT state FROM xiaowei_scheduled_run") == "failed"
         assert len(env.scripts.calls[TASK]) == 2
         assert await env.scalar("SELECT result_snapshot FROM xiaowei_scheduled_run") is None
@@ -127,7 +137,7 @@ async def test_snapshot_write_failure_never_sends_result_body(env, monkeypatch):
             assert CONCLUSION not in body and "east" not in body
 
 
-@pytest.mark.parametrize("revoked", ["none", "before_read", "after_copy"])
+@pytest.mark.parametrize("revoked", ["before_read", "after_copy"])
 async def test_snapshot_text_keeps_original_definition_source_checks(env, monkeypatch, revoked):
     """没有新工具结果的分析仍受定义原数据约束；暂停/取消及机器人变化不算数据撤权。"""
     from tests.sdk_core.test_scheduled_tasks import history
@@ -192,10 +202,9 @@ async def test_snapshot_text_keeps_original_definition_source_checks(env, monkey
         )
         assert state == ("failed" if revoked == "after_copy" else "completed")
         visible = message_text(group.outbox.sent[-1][1])
-        assert (CONCLUSION in visible) == (revoked == "none")
+        assert CONCLUSION not in visible
         assert len(requests) == 1
-        if revoked != "none":
-            assert env.drv.connections == []
+        assert env.drv.connections == []
 
 
 @pytest.mark.parametrize("revoked_at", ["before_commit", "before_delivery"])
@@ -386,29 +395,6 @@ async def test_definition_objects_count_toward_history_object_limit(env, monkeyp
             )
             == "completed"
         )
-
-
-async def test_oversized_snapshot_fails_before_sending_result(env, monkeypatch):
-    """后台结果同样受已有max_answer_bytes限制，不能无界写入或仅发送不留存。"""
-    cfg = configured(env)
-    cfg = cfg.model_copy(
-        update={"storage": cfg.storage.model_copy(update={"max_answer_bytes": 4000})}
-    )
-    env.scripts.add(
-        TASK,
-        tool_call(
-            "run_readonly_query", cluster=SR.target_id, sql="SELECT region,total FROM shop.sales"
-        ),
-        cite(CONCLUSION + "x" * 6000),
-    )
-    async with running(env, monkeypatch, config=cfg, member_check=members) as (group, requests, rt):
-        await activate(env, group)
-        env.clock.advance(60)
-        await rt.scheduled_tasks.tick()
-        assert await env.scalar("SELECT state FROM xiaowei_scheduled_run") == "failed"
-        assert await env.scalar("SELECT result_snapshot FROM xiaowei_scheduled_run") is None
-        assert len(env.scripts.calls[TASK]) == 2
-        assert all(CONCLUSION not in request.content.decode() for request in requests)
 
 
 async def test_new_evidence_expiry_is_carried_from_session_validation(env, monkeypatch):

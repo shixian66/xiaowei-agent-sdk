@@ -832,8 +832,6 @@ class ScheduledTasks:
         deadlines = [self.clock() + self._result_retention]
         if answer.content_expires_at is not None:
             deadlines.append(answer.content_expires_at)
-        if json.loads(job["definition_evidence_ids"]) and job["content_expires_at"] is not None:
-            deadlines.append(job["content_expires_at"])
         async with self.engine.begin() as conn:
             await self._admit(conn)
             await conn.execute(
