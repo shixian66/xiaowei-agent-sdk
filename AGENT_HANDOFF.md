@@ -4,7 +4,7 @@
 
 > TiDB 开发局部更新：2026-10-25。下述原产品快照未作全面复核；TiDB 调查基线、当前授权与验证缺口单列在 §3，不以旧快照或新计划推定公司部署状态。
 
-> 局部更新：2026-10-27。已核对H2随PR #139合入；当前为安全巡检关注事项与历史背景复用R2文档修订，报告入口已确认为定时Agent任务，产品未改。精确基线、有效证据、待确认取舍与下一项见§3；其他任务保持原核对范围。
+> 局部更新：2026-10-27。已核对H2随PR #139合入；当前为安全巡检R3文档修订：C1已批准、B1选择(a)，产品未改；用户已明确授权文档提交后开发/离线验证I1。精确基线、有效证据、批准决定与下一项见§3；其他任务保持原核对范围。
 
 **OpenAI Agents SDK 负责 Agent Loop；小维负责权限、受治理工具执行、证据真实性和数据边界。**
 
@@ -19,8 +19,8 @@
 | 锁定依赖 | SDK `0.22.3`、Lark Channel `1.4.0`、MCP `2.2.0`、sqlglot `30.17.0`、`nh3 0.3.7`、`tinycss2 1.5.1`、Pillow `13.0.0`、certifi `2026.10.19`（后两项为严格审计发现的既有漏洞定向升级）；开发工具链传递依赖 filelock `4.2.1`，不进入运行依赖 |
 | 正式入口 | `xiaowei serve`、`config check`、`model check`、`storage init/upgrade/cleanup`、`requests resend`；命令与环境准备以 README 为准 |
 | 最近有记录的公司部署 | 用户回报镜像标签 `3aad626b42fc4ef2f37cafe342cf1826d453ca30`；未独立核验服务器。本次未部署，不据此认定 pre 的 StarRocks 版本 |
-| 当前验收结论 | H1/H2已审查并合入；R1外审提出B1/B2，R2仅修文档，未实现新产品能力。真实自主性/因果判断及公司缺口见§3 |
-| 当前任务授权 | 仅文档修订、文档检查与选择性本地提交；不改产品/测试/配置、不重跑探针或回归，不调用真实模型/公司服务/飞书，不推送、建PR、合并或部署 |
+| 当前验收结论 | H1/H2已审查并合入；R2外部限定复审通过，B1/B2关闭、精简意见落实、无开工前阻断。R3先记录批准决定，I1尚未实现；真实能力与公司缺口见§3 |
+| 当前任务授权 | 先文档修订、检查与本地提交；用户另已确认文末I1开发/离线授权生效，文档提交后从最新main隔离实施，仅I1。I2/I3、真实模型/公司服务/飞书、权限配置、推送、PR、合并及部署未授权 |
 
 桌面原目录的旧分支及未提交材料保留；本次复用干净隔离工作树编写文档，未读取公司配置凭据。旧监控和回答修复记录仅为注明版本的证据，不作为本轮输入或展示范围扩展授权。
 
@@ -41,13 +41,15 @@
 
 ## 3. 当前计划与下一项工作
 
-### 安全巡检关注事项与历史背景复用（R2，待确认）
+### 安全巡检关注事项与历史背景复用（R3，C1已批准、I1待实施）
 
-源码基线`bac5df3d8dd57e1c5a6ec5edd1b338b60ed43837`，被审R1候选`9b9cabb9cf6a2e07ad5cb8ff18aceedeaa436933`、计划blob `e898fd3a039f5e5ae8575d979f9ff8f74b447857`；当前分支`codex/security-inspection-context-plan`，工作目录`/Users/kloenguyen/.codex/worktrees/ops-history-h1/agent-SDK`。[R2计划§9](docs/superpowers/plans/2026-10-23-security-inspection-report-presentation.md#security-context-r2)blob **`ee983efe1452706abbf164962ef10a0898691f03`**。本次只修文档；C1与B1(a)/(b)各自待用户确认，报告入口已确认为定时Agent任务。
+源码基线`bac5df3d8dd57e1c5a6ec5edd1b338b60ed43837`；R2候选`cc9132d660f6044864f7a592472ca513192579e5`、计划blob `ee983efe1452706abbf164962ef10a0898691f03`已通过用户提供的外部限定复审：B1/B2关闭、精简意见落实、无开工前阻断。[R3计划§9](docs/superpowers/plans/2026-10-23-security-inspection-report-presentation.md#security-context-r3)blob **`a53796d0ce79924f8f7fdf8708d996f512ad3da3`**；分支`codex/security-inspection-context-plan`，工作目录`/Users/kloenguyen/.codex/worktrees/ops-history-h1/agent-SDK`。
 
-有效证据：R1基线交互三代探针1项、相关回归9项，仅证明已有通路；外部独立审查提出B1/B2，并报告定时→定时复用及通知Evidence缺口，范围和探针路径见计划§9.9。本轮静态核对现有源码/探针，不重跑、不把外审结果写成本轮执行。R2文档命令检查2项通过，受影响相对链接/锚点20项通过，`git diff --check`通过；日志`/private/tmp/xw-security-context-r2-{docs,links,diff}.log`。
+2026-10-27决定：[C1已批准、实现合入前未生效](ARCHITECTURE.md#security-context-reuse-proposal)；[B1选择(a)、(b)未批准](ARCHITECTURE.md#scheduled-interactive-history-choice)，D1不变。现无修改任务正文工具，取消旧任务、重新提议/批准及冻结来源/期限规则只见该架构决定。报告来自定时Agent任务，历史范围保持同操作群定时运行。
 
-当前方案：C1→I1→I3真实模型基线/候选对比与重复背景查询调查→有收益证据后再决定I2；沿H1 WORK_METHOD，不复制Skill。缺口：调度背景来源/关联不足，I2收益与持续召回未证实；通知Evidence对交互读者的影响、真实模型自主性、公司环境与飞书未验证。下一项：用户分别确认[C1](ARCHITECTURE.md#security-context-reuse-proposal)和[B1范围](ARCHITECTURE.md#scheduled-interactive-history-choice)，随后按授权推进I1/I3；不默认启动I2，不关闭既有H3/A0/A3缺口。
+R1通路及外审探针的有效证据和局限见计划§9.9；R2文档检查2项、链接20项、diff通过，日志`/private/tmp/xw-security-context-r2-{docs,links,diff}.log`。R3文档命令检查2项、受影响相对链接/锚点14项及diff检查通过，日志`/private/tmp/xw-security-context-r3-{docs,links,diff}.log`；本次文档提交没有产品/测试差异，也不重跑探针。
+
+下一项：**I1（用户已明确确认本轮开发/离线授权，文档提交后从最新main建隔离主题分支）→I3（需模型/数据授权）→按§9.7条件决定I2**。缺口：真实模型自主性/措辞效果、调度原源/关联、通知Evidence对交互读者的影响、公司环境及飞书实收未验证；脚本模型不能关闭I3/H3/A0/A3。
 
 ### 跨会话运维事实追溯（H1/H2已合入，H3未实施）
 
