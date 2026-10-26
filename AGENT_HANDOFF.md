@@ -43,19 +43,19 @@
 
 ### 跨会话运维事实追溯（H1离线候选，待用户独立审查）
 
-H1工作树 `/Users/kloenguyen/.codex/worktrees/ops-history-h1/agent-SDK`，分支 `codex/ops-history-h1`；开工fetch确认origin/main为 `9d97d5fa24232e5db4fe81d87df7bafb5e6ac1c7`，先线性带入文档提交 `523bbed0e2cdb4f9b1a420df5e8f59ae681416c9`。文档工作树仍在独立文档分支，没有写产品代码。[R4实施计划](docs/superpowers/plans/2026-10-26-operations-history-and-knowledge.md) 当前blob为 `de4ead88fc1fed81309007a7d9e3d3ad68e0b9f7`，D1–D3生效范围只在[ARCHITECTURE](ARCHITECTURE.md#operations-history)维护。当前只授权H1；H2迁移/保存点、H3、真实模型/公司源、权限配置变更、合并和部署均未实施。
+H1工作树 `/Users/kloenguyen/.codex/worktrees/ops-history-h1/agent-SDK`，分支 `codex/ops-history-h1`；开工fetch确认origin/main为 `9d97d5fa24232e5db4fe81d87df7bafb5e6ac1c7`，先线性带入文档提交 `523bbed0e2cdb4f9b1a420df5e8f59ae681416c9`。文档工作树仍在独立文档分支，没有写产品代码。[R4实施计划](docs/superpowers/plans/2026-10-26-operations-history-and-knowledge.md) 当前blob为 `4c7c619a84199c09a5c2a5d5ac2221d3d9107dba`，D1–D3生效范围只在[ARCHITECTURE](ARCHITECTURE.md#operations-history)维护。当前只授权H1；H2迁移/保存点、H3、真实模型/公司源、权限配置变更、合并和部署均未实施。
 
 R4（计划blob `070c9de011e60b9ff1bb57e9429203fa933f4fec`）的限定独立复审没有设计阻断，提出F1/F2两条意见，审查者未运行测试。F1纠正复审前过早完成的状态；F2已改为单次max_rows对象上限（包含旧分析全部context_evidence），无运行时额度预留。固定跨入口说明与只查PG元数据/工具权限的更早候选标志已落实。
 
 实现复用Runner、现有应用表和Evidence，增加两个受治理只读工具及来源content check，与既有definitions检查串联。交互按可信conversation_key跨generation，后台按创建群读独立原事实；旧分析完整校验，派生副本传递复核原源、期限及当前读者权限，渠道不展示来源绑定。无关键词、游标、独立Action目录、递归历史或新lookup错误类别，无迁移和后台快照。为满足原5倍静态规则，合并同一提交入口重复的最终校验，Session仍完整验证后持久化；成功Evidence的暂存/回放/交付复核保留，原拒绝类别保留。监控失败源授权在Session提交最终校验中只复核一次，随后回放不再次复核该失败源；校验后至写入仍有时间窗，与改动前最后一次Session校验后至写入的窗口相同。
 
-独立审查：用户转述对`23e8c77c72587d6f9ebdf03f0cb4517f63d18556`的全仓结果为2 failed、5367 passed、235 skipped；作者已复现这两个失败。监控失败源测试现改为工具返回后、Session最终校验前撤权，仍断言失败且零消息保存；容量测试以4个200对象调用、合法1600预算验证scope_unverifiable，并在容量报告中记录该输入和实际计数，不恢复Application重复校验。
+独立复审：用户确认`796398d6a598ff0832adeaab2f8eebf68c49a045`的B1已关闭，指出B2：原事实10份上限误用于包含整段回放的context_evidence，长会话已有结论被省略。当前修复恢复旧分析的完整依赖与去重对象上限，10份仅用于不复制分析的原事实路径；容量退回时重新取原轮次有界事实，保持来源绑定。容量/对象受限只标truncated，来源不可读沿既有缺口，回答缺失只表示不存在或无法解析。B1两个既有测试保持修复后的触发点，并继续纳入验证。
 
-非阻断意见：采纳耗尽标记沿原错误路径终止、本窗has_earlier说明、固定扫描20候选/每条10份原Evidence及超量分析不复制；对应新增边界归计划N4。失败回退额外计费不引入动态额度预留，静态5倍不保证此路径已写入计划§4.3。SearchArgs再校验及_shown工具ID特判保持现状，尚无需要额外接口的当前消费者。
+非阻断意见：采纳耗尽标记沿原错误路径终止、本窗has_earlier说明、固定扫描20候选及纯事实路径每条10份原Evidence；旧分析不按份数截断；对应新增边界归计划N4。失败回退额外计费不引入动态额度预留，静态5倍不保证此路径已写入计划§4.3。SearchArgs再校验及_shown工具ID特判保持现状，尚无需要额外接口的当前消费者。
 
-验证环境：本工作树独立uv锁定环境、SDK0.22.3、带既有marker的本机Colima隔离PG、可控模型/录制源。B1旧用例先2 failed、修订后2 passed；新增上限/耗尽反例先4 failed、1 passed，修复后H1与B1定向34 passed。修订版完整默认全仓5373 passed、235 skipped、98 deselected、5 warnings，1818.47秒，EXIT_CODE=0；代码与测试内容摘要前后一致，PRODUCT_TEST_UNCHANGED=True。98项为默认未选的浏览器/真实StarRocks专用测试，235项跳过均不算验收；5条warning来自安全测试主动验证socket/DNS拦截。全仓Ruff、mypy 41源码文件通过；文档命令一致性2项、受影响相对链接/锚点及git diff --check通过。旧59项定向组不含这两个B1用例，不作为全量证据。日志在仓库外：`/private/tmp/xw-h1-review-full.log`、`/private/tmp/xw-h1-review-focused.log`、`/private/tmp/xw-h1-review-ruff.log`、`/private/tmp/xw-h1-review-mypy.log`、`/private/tmp/xw-h1-review-docs.log`；全量受测差异保存在`/private/tmp/xw-h1-review-tested.diff`。容量报告为`/private/tmp/xw-h1-review-full-artifacts/test_scope_checks_can_stop_lar0/capacity.json`，记录4×200输入、scope_checks=1600、零业务查询和未提交状态。临时日志不作为长期测试依赖；自查不是独立审查。
+验证环境：独立uv锁定环境、SDK0.22.3、带既有marker的本机Colima隔离PG、可控模型/录制源。B2回归在修复前4 failed、2 passed，修复后历史与B1定向37 passed，包含四轮×四查询的完整结论、容量/对象退回的准确缺口及单轮11份原事实边界。本次完整默认全仓5376 passed、235 skipped、98 deselected、5 warnings，1874.26秒，EXIT_CODE=0，PRODUCT_TEST_UNCHANGED=True。代码/测试摘要为`2f46cfc23813db094f57507e7170734c7c68496112c0360f5ec4f8188488bfdb`，提交时再次匹配。98项是默认未选的浏览器/真实StarRocks专用测试，235项跳过均不算验收；5条warning来自安全测试主动验证socket/DNS拦截。全仓Ruff、mypy 41源码文件通过；文档命令一致性、受影响链接/锚点与git diff --check通过。日志在仓库外：`/private/tmp/xw-h1-b2-red.log`、`/private/tmp/xw-h1-b2-focused.log`、`/private/tmp/xw-h1-b2-full.log`、`/private/tmp/xw-h1-b2-ruff.log`、`/private/tmp/xw-h1-b2-mypy.log`、`/private/tmp/xw-h1-b2-docs.log`；受测差异保存在`/private/tmp/xw-h1-b2-tested.diff`。前候选的5373项结果不代替本次验证；临时日志不作长期测试依赖，自查不是独立审查。
 
-下一项：交付修订候选SHA、实际差异及全量结果给用户，由原审查者复核B1的两个测试差异与全量证据；审查前不开正式PR、不合并；H2待H1审查后决定。真实Agent自主选择、复杂因果正确性、公司原始故障材料和渠道实收仍是H3/公司验收缺口；S3真实BE材料未取得，不宣称七场景全部验收。
+下一项：交付修订候选SHA、实际差异及全量结果给用户，由原审查者复核B2差异、长会话与原事实边界及全量证据；审查前不开正式PR、不合并；H2待H1审查后决定。真实Agent自主选择、复杂因果正确性、公司原始故障材料和渠道实收仍是H3/公司验收缺口；S3真实BE材料未取得，不宣称七场景全部验收。
 
 ### TiDB 查询与诊断（2026-10-25，B/C 本地候选，独立审查通过，待公司验收）
 

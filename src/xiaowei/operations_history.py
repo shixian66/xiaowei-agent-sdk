@@ -102,7 +102,7 @@ def catalog(
             "查本对话旧generation或本操作群的原始运维记录，不带旧模型分析。"
             "start/end为带时区ISO绝对时间，[start,end)；target_ids空列表表示当前获准目标，"
             "job_id/run_id未知填null。时间按请求创建、独立事实采集或后台计划时刻。"
-            "固定最多10条、扫描20条候选、每条最多10份原Evidence；返回最早时间及本窗更早候选标志。"
+            "固定最多10条、扫描20条候选；不复制分析时每条最多10份原Evidence。返回最早时间及本窗更早候选标志。"
             "has_earlier不代表窗口起点之前没有记录，truncated不能当查全。"
             "可缩小目标/任务或前移时间窗继续，无关键词或游标。时间/参数错误可修正，"
             "不可读单条跳过并给gaps，空结果不证明未发生。" + SCOPE_NOTICE,
@@ -112,7 +112,8 @@ def catalog(
             ReadArgs,
             "按搜索返回或已知的record_ref读取原调查事实；编号不授予权限。"
             "旧分析须完整来源复核，与事实分列；缺失、过期或无权时只给可读事实和gaps。"
-            "不重建旧SDK上下文，不递归读取历史工具结果。最多10份原Evidence，旧分析依赖超过此数不复制。"
+            "不重建旧SDK上下文，不递归读取历史工具结果。复制分析须复核完整会话依赖，按去重对象上限而非证据份数限制。"
+            "不复制分析时每条最多10份原Evidence。回答缺失仅表示原回答不存在或无法解析。"
             "容量/对象上限时少返回或不复制旧分析。"
             "可查其他获准记录或原源，不能从空结果推断未发生。" + SCOPE_NOTICE,
         ),
@@ -306,12 +307,14 @@ class OperationHistory:
             except ValidationError:
                 pass
         turn = saved if analysis else None
-        analysis_limited = turn is not None and len(set(turn.context_evidence)) > EVIDENCE_LIMIT
-        if analysis_limited:
-            turn = None  # 不探测超出固定上限的分析依赖，只取有界原事实。
-        wanted = tuple(dict.fromkeys(turn.context_evidence)) if turn is not None else tuple(raw_ids)
+        # 旧分析可以依赖整段Session回放；10份上限只用于不复制分析的原事实路径。
+        wanted = (
+            tuple(dict.fromkeys(turn.context_evidence))
+            if turn is not None
+            else tuple(raw_ids[:EVIDENCE_LIMIT])
+        )
         records, missing = [], False
-        for eid in wanted[:EVIDENCE_LIMIT]:
+        for eid in wanted:
             try:
                 record = await self.evidence.inspect(eid, original)
                 if record.tool_id not in self.model_tools or record.tool_id in TOOLS:
@@ -324,7 +327,6 @@ class OperationHistory:
         if turn is not None and (missing or len(_objects(records)) > self.max_rows):
             fallback = await self._bundle(ctx, row, analysis=False)
             fallback.item["gaps"]["Evidence 不可读" if missing else "truncated"] = True
-            fallback.item["gaps"]["回答缺失"] = True
             return fallback
         gaps: dict[str, bool] = {}
         if missing:
@@ -338,9 +340,6 @@ class OperationHistory:
                 if len(_objects([*limited, record])) <= self.max_rows:
                     limited.append(record)
             records = limited
-        if analysis_limited:
-            gaps["truncated"] = True
-            gaps["回答缺失"] = True
         if saved is None:
             gaps["回答缺失"] = True
         else:
@@ -470,7 +469,6 @@ class OperationHistory:
                     if b.turn is not None:
                         row = next(r for r in rows if r["record_ref"] == b.source.record_ref)
                         b = await self._bundle(ctx, row, analysis=False)
-                        b.item["gaps"]["回答缺失"] = True
                         if not b.records:
                             continue
                     await self._validate([b])
@@ -526,10 +524,10 @@ class OperationHistory:
                 b = bundles[-1]
                 if b.turn is not None:
                     # 先省略旧模型文字，独立事实仍可使用，不因分析过大丢掉整条事件。
-                    b.turn = None
-                    b.source = b.source.model_copy(update={"analysis": False})
-                    b.item.pop("analysis")
-                    b.item.pop("analysis_kind")
+                    row = next(r for r in rows if r["record_ref"] == b.source.record_ref)
+                    b = await self._bundle(ctx, row, analysis=False)
+                    await self._validate([b])
+                    bundles[-1] = b
                 elif b.records:
                     b.records.pop()
                     b.item["facts"].pop()

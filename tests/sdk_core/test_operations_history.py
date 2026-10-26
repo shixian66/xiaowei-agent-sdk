@@ -549,6 +549,7 @@ async def test_large_old_analysis_is_omitted_while_small_independent_facts_survi
             assert "east" in str(data["records"][0]["facts"])
             assert "analysis" not in data["records"][0]
             assert data["gaps"]["truncated"] is True
+            assert "回答缺失" not in data["gaps"]
             return cite("历史分析超限，仅返回原事实")(call)
 
         env.scripts.add(
@@ -729,7 +730,7 @@ async def test_unreadable_old_analysis_keeps_independently_authorized_facts(env)
             assert "east" in str(data["records"][0]["facts"])
             assert "analysis" not in data["records"][0]
             assert data["gaps"]["monitoring_failures"] is True
-            assert data["gaps"]["回答缺失"] is True
+            assert "回答缺失" not in data["gaps"]  # 回答存在，只是其来源当前不可验证。
             assert OLD_ANALYSIS not in str(data) and "retired-monitor" not in str(data)
             return cite("只有独立历史事实可确认，旧分析无法交付")(call)
 
@@ -789,6 +790,8 @@ async def test_budget_exhaustion_is_not_reported_as_unreadable_source(env, exhau
 
 @pytest.mark.parametrize("read", [False, True])
 async def test_many_original_evidence_are_bounded_independently_of_sql_row_limit(env, read):
+    from sqlalchemy import text
+
     data = configured(env).model_dump(mode="json")
     data["budget"].update(max_tool_calls=11, max_turns=13)
     config = runtime.ServeConfig.model_validate(data)
@@ -808,6 +811,13 @@ async def test_many_original_evidence_are_bounded_independently_of_sql_row_limit
         old = await ask(env, rt, "多次取证的原调查", "many-originals")
         assert old.state == "completed", old.failure_code
         assert len(old.context_evidence) == 11
+        if read:
+            # 详情在原回答无法解析时走纯事实路径；正常分析不受10份计数限制。
+            async with rt.engine.begin() as conn:
+                await conn.execute(
+                    text("UPDATE xiaowei_request SET answer='{}' WHERE turn_id=:turn"),
+                    {"turn": old.turn_id},
+                )
         await rt.service.new_session("feishu", "alice", CHAT)
 
         def finish(call):
@@ -815,6 +825,7 @@ async def test_many_original_evidence_are_bounded_independently_of_sql_row_limit
             assert len(data["records"][0]["facts"]) == 10
             assert data["gaps"]["truncated"] is True
             assert OLD_ANALYSIS not in str(data)
+            assert data["gaps"].get("回答缺失", False) is read
             return cite("原始事实较多，本次只交付有界部分")(call)
 
         env.scripts.add(
@@ -825,4 +836,95 @@ async def test_many_original_evidence_are_bounded_independently_of_sql_row_limit
             finish,
         )
         result = await ask(env, rt, "读取有界原事实", "bounded-originals")
+        assert result.state == "completed", result.failure_code
+
+
+@pytest.mark.parametrize("capacity_limited", [False, True])
+async def test_last_conclusion_after_four_turns_keeps_complete_replayed_context(
+    env, capacity_limited
+):
+    data = configured(env).model_dump(mode="json")
+    data["budget"]["max_tool_calls"] = 4
+    if capacity_limited:
+        data["projection_bytes"] = dict.fromkeys(data["projection_bytes"], 8000)
+        data["targets"][0]["starrocks"]["policy"]["max_sql_bytes"] = 300
+        data["targets"][0]["starrocks"]["max_result_bytes"] = 2000
+        data["targets"][0]["starrocks"]["max_value_bytes"] = 1000
+    config = runtime.ServeConfig.model_validate(data)
+    conclusion = "最后一轮的历史结论" * (500 if capacity_limited else 1)
+    async with env.opened(config) as rt:
+        for n in range(4):
+            message = f"同会话第{n + 1}轮"
+            env.scripts.add(
+                message,
+                *(
+                    tool_call(
+                        "run_readonly_query",
+                        cluster=SR.target_id,
+                        sql="SELECT region,total FROM shop.sales",
+                    )
+                    for _ in range(4)
+                ),
+                cite(conclusion if n == 3 else "先前一轮结论"),
+            )
+            old = await ask(env, rt, message, f"context-turn-{n}")
+            assert old.state == "completed", old.failure_code
+        assert len(old.context_evidence) == 16
+        await rt.service.new_session("feishu", "alice", CHAT)
+        env.db.forget()
+
+        def finish(call):
+            data = last_output(call)["data"]
+            record = data["records"][0]
+            assert "回答缺失" not in data["gaps"]
+            if capacity_limited:
+                assert "analysis" not in record
+                assert len(record["facts"]) == 4  # 超字节后只取原轮次事实，保持来源绑定。
+                assert data["gaps"]["truncated"] is True
+            else:
+                assert record["analysis"] == conclusion
+                assert len(record["facts"]) == 16
+                assert not data["gaps"].get("truncated", False)
+            return cite("历史结论或本次可交付的独立事实")(call)
+
+        env.scripts.add(
+            "新建后读最后一轮",
+            tool_call("history__read_operation", record_ref=f"turn:{old.turn_id}"),
+            finish,
+        )
+        result = await ask(env, rt, "新建后读最后一轮", "last-context")
+        assert result.state == "completed", result.failure_code
+        assert env.db.business() == []
+
+
+async def test_object_limit_omits_analysis_without_claiming_saved_answer_is_missing(env):
+    config = limited(configured(env), rows=1, checks=1000)
+    async with env.opened(config) as rt:
+        for n, sql in enumerate(("SELECT * FROM shop.sales", "SELECT * FROM shop.regions")):
+            message = f"调查对象{n}"
+            env.scripts.add(
+                message,
+                tool_call("run_readonly_query", cluster=SR.target_id, sql=sql),
+                cite(OLD_ANALYSIS),
+            )
+            old = await ask(env, rt, message, f"object-turn-{n}")
+            assert old.state == "completed", old.failure_code
+        assert len(old.context_evidence) == 2
+        await rt.service.new_session("feishu", "alice", CHAT)
+
+        def finish(call):
+            data = last_output(call)["data"]
+            assert "analysis" not in data["records"][0]
+            assert data["gaps"]["truncated"] is True
+            assert "回答缺失" not in data["gaps"]
+            assert "shop.regions" in str(data["records"][0]["facts"])
+            assert "shop.sales" not in str(data["records"][0]["facts"])
+            return cite("完整分析依赖超过对象上限，仅返回当轮独立事实")(call)
+
+        env.scripts.add(
+            "按对象上限读历史",
+            tool_call("history__read_operation", record_ref=f"turn:{old.turn_id}"),
+            finish,
+        )
+        result = await ask(env, rt, "按对象上限读历史", "object-limited-history")
         assert result.state == "completed", result.failure_code
