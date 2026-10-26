@@ -4,7 +4,7 @@
 
 > TiDB 开发局部更新：2026-10-25。下述原产品快照未作全面复核；TiDB 调查基线、当前授权与验证缺口单列在 §3，不以旧快照或新计划推定公司部署状态。
 
-> 局部更新：2026-10-26。已核对H2随PR #139合入；当前为安全巡检关注事项与历史背景复用R1文档设计，产品未改。精确基线、有效证据、待确认取舍与下一项见§3；其他任务保持原核对范围。
+> 局部更新：2026-10-27。已核对H2随PR #139合入；当前为安全巡检关注事项与历史背景复用R2文档修订，报告入口已确认为定时Agent任务，产品未改。精确基线、有效证据、待确认取舍与下一项见§3；其他任务保持原核对范围。
 
 **OpenAI Agents SDK 负责 Agent Loop；小维负责权限、受治理工具执行、证据真实性和数据边界。**
 
@@ -19,8 +19,8 @@
 | 锁定依赖 | SDK `0.22.3`、Lark Channel `1.4.0`、MCP `2.2.0`、sqlglot `30.17.0`、`nh3 0.3.7`、`tinycss2 1.5.1`、Pillow `13.0.0`、certifi `2026.10.19`（后两项为严格审计发现的既有漏洞定向升级）；开发工具链传递依赖 filelock `4.2.1`，不进入运行依赖 |
 | 正式入口 | `xiaowei serve`、`config check`、`model check`、`storage init/upgrade/cleanup`、`requests resend`；命令与环境准备以 README 为准 |
 | 最近有记录的公司部署 | 用户回报镜像标签 `3aad626b42fc4ef2f37cafe342cf1826d453ca30`；未独立核验服务器。本次未部署，不据此认定 pre 的 StarRocks 版本 |
-| 当前验收结论 | H1/H2已审查并合入；R1只验证基线复用通路，尚无产品实现或独立文档审查。可控模型只证明接线，真实自主性/因果判断仍为H3及公司缺口，见§3 |
-| 当前任务授权 | 设计、计划、必要文档及有界离线验证；未授权本增量产品代码、真实模型/公司服务/飞书、权限配置变更、推送、合并或部署 |
+| 当前验收结论 | H1/H2已审查并合入；R1外审提出B1/B2，R2仅修文档，未实现新产品能力。真实自主性/因果判断及公司缺口见§3 |
+| 当前任务授权 | 仅文档修订、文档检查与选择性本地提交；不改产品/测试/配置、不重跑探针或回归，不调用真实模型/公司服务/飞书，不推送、建PR、合并或部署 |
 
 桌面原目录的旧分支及未提交材料保留；本次复用干净隔离工作树编写文档，未读取公司配置凭据。旧监控和回答修复记录仅为注明版本的证据，不作为本轮输入或展示范围扩展授权。
 
@@ -41,15 +41,13 @@
 
 ## 3. 当前计划与下一项工作
 
-### 安全巡检关注事项与历史背景复用（R1，设计待确认）
+### 安全巡检关注事项与历史背景复用（R2，待确认）
 
-源码基线为`bac5df3d8dd57e1c5a6ec5edd1b338b60ed43837`，本次已核对远端main；分支`codex/security-inspection-context-plan`，工作树`/Users/kloenguyen/.codex/worktrees/ops-history-h1/agent-SDK`。设计补入[原报告计划§9](docs/superpowers/plans/2026-10-23-security-inspection-report-presentation.md#security-context-r1)，**R1计划blob `e898fd3a039f5e5ae8575d979f9ff8f74b447857`**；产品取舍只见[ARCHITECTURE C1](ARCHITECTURE.md#security-context-reuse-proposal)，尚未生效。推荐复用SDK、H1/H2与既有源，先调整成文和上下文取用，不新增持久化/工具/调度。
+源码基线`bac5df3d8dd57e1c5a6ec5edd1b338b60ed43837`，被审R1候选`9b9cabb9cf6a2e07ad5cb8ff18aceedeaa436933`、计划blob `e898fd3a039f5e5ae8575d979f9ff8f74b447857`；当前分支`codex/security-inspection-context-plan`，工作目录`/Users/kloenguyen/.codex/worktrees/ops-history-h1/agent-SDK`。[R2计划§9](docs/superpowers/plans/2026-10-23-security-inspection-report-presentation.md#security-context-r2)blob **`ee983efe1452706abbf164962ef10a0898691f03`**。本次只修文档；C1与B1(a)/(b)各自待用户确认，报告入口已确认为定时Agent任务。
 
-有效离线证据均在该基线执行：临时三代会话探针**1 passed / 1.94秒**；选定既有新会话、原源撤权/清理、参数修正与H2快照回归**9 passed / 6.09秒**。证明新Session可直读原依据且不重跑业务查询，也证明仅有历史转述的总结不能再恢复原依据；不证明真实Agent能自主选中记录。脚本与日志：`/private/tmp/xw-security-context-probe/test_context_probe.py`、`/private/tmp/xw-security-context-probe.log`、`/private/tmp/xw-security-context-baseline.log`；命令/版本记录`/private/tmp/xw-security-context-validation.json`。
+有效证据：R1基线交互三代探针1项、相关回归9项，仅证明已有通路；外部独立审查提出B1/B2，并报告定时→定时复用及通知Evidence缺口，范围和探针路径见计划§9.9。本轮静态核对现有源码/探针，不重跑、不把外审结果写成本轮执行。R2文档命令检查2项通过，受影响相对链接/锚点20项通过，`git diff --check`通过；日志`/private/tmp/xw-security-context-r2-{docs,links,diff}.log`。
 
-文档命令一致性 **2 passed**、受影响相对链接/锚点 **19项通过**、`git diff --check`通过；日志`/private/tmp/xw-security-context-{docs,links,diff}.log`。仅设计文档修改，不重跑完整产品回归或Ruff/mypy。
-
-缺口：C1未批准；外部调度作业关联键/版本来源未确认；现有历史有期限、召回上限，用户口头确认不是永久业务事实。真实模型连续巡检自主性、调用成本、公司源和飞书实收未验证；既有H3/A0/A3缺口不关闭。下一项：用精确R1文档版本独立审查并由用户确认C1，再按批准范围实施I1→I2；I3须另获模型/环境授权。自行核对不称独立审查。
+当前方案：C1→I1→I3真实模型基线/候选对比与重复背景查询调查→有收益证据后再决定I2；沿H1 WORK_METHOD，不复制Skill。缺口：调度背景来源/关联不足，I2收益与持续召回未证实；通知Evidence对交互读者的影响、真实模型自主性、公司环境与飞书未验证。下一项：用户分别确认[C1](ARCHITECTURE.md#security-context-reuse-proposal)和[B1范围](ARCHITECTURE.md#scheduled-interactive-history-choice)，随后按授权推进I1/I3；不默认启动I2，不关闭既有H3/A0/A3缺口。
 
 ### 跨会话运维事实追溯（H1/H2已合入，H3未实施）
 
