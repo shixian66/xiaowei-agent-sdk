@@ -960,13 +960,17 @@ class Application:
         # Session 在同一提交入口完整校验最终回答；不在相同状态重复复核对象。
         if progress is not None:
             progress.mark("saving")
-        if ctx.automatic and self.scheduled_tasks is not None:
+        source_records = (
             await self.scheduled_tasks.validate_run(ctx)
+            if ctx.automatic and self.scheduled_tasks is not None
+            else ()
+        )
         snapshot = await session.commit_validated(
             validated.context_evidence,
             monitoring_failures=validated.monitoring_failures,
             inspection_failures=validated.inspection_failures,
             limit_reached=validated.limit_reached,
+            source_records=source_records,
         )
         _stage(turn, "committed", started)
         return validated.model_copy(

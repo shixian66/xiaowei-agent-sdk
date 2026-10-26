@@ -426,6 +426,27 @@ class TaskDefinitions:
         )
         return ctx
 
+    async def result_sources(
+        self, job: Mapping[str, Any], ctx: RunContext
+    ) -> list[tuple[EvidenceRecord, RunContext]]:
+        """冻结定义仍是结果来源；按当前身份/预算、原会话与原数据范围定位。"""
+        source = RunContext.model_validate_json(job["source_context"])
+        original = source.model_copy(
+            update={
+                "identity": ctx.identity.model_copy(
+                    update={
+                        "session_id": source.identity.session_id,
+                        "turn_id": source.identity.turn_id,
+                    }
+                ),
+                "budget": ctx.budget,
+            }
+        )
+        return [
+            (await self.evidence.inspect(eid, original), original)
+            for eid in dict.fromkeys(json.loads(job["definition_evidence_ids"]))
+        ]
+
     async def check_content(
         self,
         record: EvidenceRecord,
@@ -970,8 +991,8 @@ class ScheduledTasks:
             )
             raise TurnError("scope_rejected") from None
 
-    async def validate_run(self, ctx: RunContext) -> None:
-        """保存前仅检查可变任务状态和期限；不重复查成员目录或定义证据。"""
+    async def validate_run(self, ctx: RunContext) -> list[tuple[EvidenceRecord, RunContext]]:
+        """核对可变任务状态/期限，并把定义来源交给Session的唯一最终校验。"""
         from xiaowei.app import TurnError
 
         if ctx.definition_job_id is None:
@@ -989,6 +1010,10 @@ class ScheduledTasks:
                 )
                 await self._stop_agent(job, reason)
             raise TurnError("scope_rejected")
+        try:
+            return await self.definitions.result_sources(job, ctx)
+        except EvidenceUnavailableError:
+            raise TurnError("scope_rejected") from None
 
     async def _send_agent_failure(
         self,
@@ -1135,6 +1160,7 @@ class ScheduledTasks:
                             ctx,
                             recipient_tools=bot.receive_tools | {NOTIFY},
                             recipient_targets=bot.receive_targets | {"notifications"},
+                            source_records=await self.definitions.result_sources(job, ctx),
                         )
                         incomplete = (
                             (isinstance(answer.answer, AgentAnswer) and answer.answer.awaiting_user)

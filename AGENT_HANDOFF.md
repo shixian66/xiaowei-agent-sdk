@@ -43,13 +43,13 @@
 
 ### 跨会话运维事实追溯（H1已合入，H2本地验证中）
 
-H1已由[PR #138](https://github.com/shixian66/xiaowei-agent-sdk/pull/138)合入`main@3d37ac71140d1f7da682346609b1b1c5550a0bb4`，已审产品候选为`a13ba1a`，合并前[CI 40292586264](https://github.com/shixian66/xiaowei-agent-sdk/actions/runs/40292586264)九项通过。D1–D3生效范围只见[ARCHITECTURE](ARCHITECTURE.md#operations-history)；[R4计划](docs/superpowers/plans/2026-10-26-operations-history-and-knowledge.md)当前blob为`813aee9cce9d5f07b8e83d37bd45014f7e8d00ab`。H1既有完整默认回归5376 passed、235 skipped、98 deselected，不能代替H2验证。
+H1已由[PR #138](https://github.com/shixian66/xiaowei-agent-sdk/pull/138)合入`main@3d37ac71140d1f7da682346609b1b1c5550a0bb4`，已审产品候选为`a13ba1a`，合并前[CI 40292586264](https://github.com/shixian66/xiaowei-agent-sdk/actions/runs/40292586264)九项通过。D1–D3生效范围只见[ARCHITECTURE](ARCHITECTURE.md#operations-history)；[R4计划](docs/superpowers/plans/2026-10-26-operations-history-and-knowledge.md)当前blob为`327c335e4b310fdc015edc2b364d790e00af70be`。H1既有完整默认回归5376 passed、235 skipped、98 deselected，不能代替H2验证。
 
 本轮用户授权H2开发与离线验证。基线为上述主线提交，分支`codex/ops-history-h2`，复用干净隔离工作树`/Users/kloenguyen/.codex/worktrees/ops-history-h1/agent-SDK`及其锁定环境，原H1分支和桌面改动保留。当前不开发H3，不调用真实模型、公司源或真实飞书，不改权限配置，不合并或部署；交本地精确候选供独立审查。
 
-H2以016给scheduled_run增加两个可空字段：有界TurnAnswer快照及到期时间；Session模型/群结果最终校验和提交通过后保存，早于机器人接收校验。复用已有max_answer_bytes/request_retention，不增加配置。Session已计算的期限仅经非持久化元数据传递，不为保存点重跑校验。冻结定义原数据仍限制期限和详情/派生副本读取，当前读者与各原会话绑定复核；运行和定义来源同批去重计费并共同纳入max_rows。暂停/取消任务或机器人配置变化不代替数据撤权。旧空快照继续只读原事实；到期正文分批清除，运行元数据保留。超限或写入失败不发结果正文，复用固定失败说明及run unknown，不新建错误类别/状态机。
+H2以016给scheduled_run增加两个可空字段：有界TurnAnswer快照及到期时间；Session模型/群结果最终校验和提交通过后保存，早于机器人接收校验。复用已有max_answer_bytes/request_retention，不增加配置。Session已计算的期限仅经非持久化元数据传递，不为保存点重跑校验。冻结定义原数据接入Session最终校验、机器人交付和详情/派生副本读取，当前身份与各原会话绑定复核；运行和定义来源同批去重计费并共同纳入max_rows。暂停/取消任务或机器人配置变化不代替数据撤权。旧空快照继续只读原事实；到期正文分批清除，运行元数据保留。超限或写入失败不发结果正文，复用固定失败说明及run unknown，不新建错误类别/状态机。
 
-验证进行中：基线8 passed；首个正式入口成功/写失败测试在旧实现2 failed，最小闭环2 passed；冻结定义原源撤权的两个反例先失败、补齐后相关7 passed。核心历史/快照/存储组84 passed；扩大回归478 passed、26 skipped、4 deselected（320.45秒），跳过/未选项不计验收。Ruff通过，mypy 41源码文件通过；最终全量、独立审查与精确候选状态待补。日志在仓库外`/private/tmp/xw-h2-*.log`。可控模型/录制源只证明接线与边界，不能证明真实Agent自主完成任务。
+验证进行中：基线8 passed；首个正式入口成功/写失败测试在旧实现2 failed，最小闭环2 passed；冻结定义原源撤权的两个反例先失败、补齐后相关7 passed。核心历史/快照/存储组84 passed；扩大回归478 passed、26 skipped、4 deselected（320.45秒），跳过/未选项不计验收。Ruff通过，mypy 41源码文件通过；首个候选`74eeae6`的独立子Agent只读审查发现原定义来源在模型期间失效仍可保存的P1；两个正式入口回归先失败，修复与复验进行中。旧候选全量在约半程主动停止，不能算通过；其中旧迁移复合断言仍写15，已按schema16修正。最终全量、修复复审与精确候选状态待补。日志在仓库外`/private/tmp/xw-h2-*.log`。可控模型/录制源只证明接线与边界，不能证明真实Agent自主完成任务。
 
 下一项：完成H2相关/完整检查并独立审查精确差异，交付本地候选SHA和验证证据。真实模型自主检索/补证/因果判断、公司原始故障材料与渠道实收仍属H3/公司验收缺口，S3真实BE材料未取得。H2不能恢复未记录或已清理的过去结论，不宣称七场景全部验收。
 

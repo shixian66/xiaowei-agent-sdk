@@ -161,7 +161,7 @@ H2 通过 `016_scheduled_result.sql` 给 scheduled_run 增加可空 `result_snap
 
 普通快照期限为 `min(群结果 validate_answer 返回的 content_expires_at, now + request_retention)`，None 不参与取小；runtime 已强制 request_retention 不长于 evidence_retention，不再单独比较 Session 截止时间。读取先检查期限，显式 cleanup 分批清掉到期快照，run 元数据保留不延长正文。
 
-**有已冻结定义来源时的必要补充：** 任务文本可以基于历史事实，propose_agent_task 已保存 definition_evidence_ids、source_context 和 content_expires_at；但后台 ctx.evidence_ids 被清空，当前 TurnAnswer.context_evidence 不保证包含这些定义来源。若模型没有新工具结果，Delivery.content_expires_at 可能为 None。因此有定义数据依赖时，快照还须受其已存 content_expires_at 约束，详情/传递读取也按当前权限核验这些冻结来源；不调用 TaskDefinitions.validate 的机器人、文本或活动状态检查。复用已有定义标识，不新存任务文本；来源缺失或为历史工具派生时不返回依赖的旧分析。这是原始数据期限/撤权约束，不是 Session 寿命或任务有效期附加限制。依据：[scheduled_tasks.py](../../../src/xiaowei/scheduled_tasks.py) 的 propose_agent、_run_agent 和 [evidence.py](../../../src/xiaowei/evidence.py) 的 Delivery 构造。
+**有已冻结定义来源时的必要补充：** 任务文本可以基于历史事实，propose_agent_task 已保存 definition_evidence_ids、source_context 和 content_expires_at；后台 ctx.evidence_ids 被清空，当前 TurnAnswer.context_evidence 不保证包含这些定义来源。因此最终 Session validate_answer 把冻结来源作为可信 source_records 与本轮 Evidence 合批复核，保留当前身份/预算及原会话绑定；无新工具结果的文字回答也不例外，模型运行期间原源失效时不提交、不保存快照。机器人发送前再按当前来源及接收范围复核；机器人拒收不反过来阻止已验证群结果的保存。快照期限仍取原数据及已存定义期限的较早值。详情/传递读取按当前读者复核冻结来源，不调用 TaskDefinitions.validate 的机器人、文本或活动状态检查。复用已有定义标识，不新存任务文本；来源缺失或为历史工具派生时不返回依赖的旧分析。这是原始数据期限/撤权约束，不是 Session 寿命或任务有效期附加限制。依据：[scheduled_tasks.py](../../../src/xiaowei/scheduled_tasks.py) 的 propose_agent、_run_agent 和 [evidence.py](../../../src/xiaowei/evidence.py) 的 Delivery 构造。
 
 上述群结果期限须从已有群验证结果及被冻结来源取得；不能用后面的机器人验证结果反过来决定是否保存。复用 PolicySession 最终 validate_answer 的期限，经 TurnAnswer 非持久化元数据传给保存点，不为取期限重跑校验、模型或工具。历史分析的运行来源与冻结定义来源复用 validate_records 同批检查，按当前读者及各自原会话绑定核验，并共同计入单次对象上限和共享预算；不额外分批重复计费。
 
@@ -202,12 +202,12 @@ H2 通过 `016_scheduled_result.sql` 给 scheduled_run 增加可空 `result_snap
 
 <a id="new-history-constraints"></a>
 
-以下落实已确认 D1–D3；N6 仅属未授权实施的 H2，其余 SQLGuard、审批、Session、Tracing 与数据规则引用 ARCHITECTURE，不重复开发。
+以下落实已确认 D1–D3；N6 属本轮已授权实施的 H2，其余 SQLGuard、审批、Session、Tracing 与数据规则引用 ARCHITECTURE，不重复开发。
 
 | 编号 / 限制 | 具体风险；已有机制为何不足 | 最小影响范围 |
 | --- | --- | --- |
 | N1 D1 的可信对话/群范围及当前读者/源/模型许可；模型不可替代身份 | 同 owner/channel 会泄露 Web 其他浏览器历史；新 history 权限及旧收集者许可不能替代当前源权，裸 record_ref 也不证明对话归属 | 两个历史工具及可信来源语境；D2 只决定结论共享。目标筛选未匹配走普通空结果，原Evidence边界仍复核当前目标/源权；复用当前入口/交付鉴权，不新增权限体系 |
-| N2 原始来源绑定、最早期限及传递复核；历史工具 Evidence 不再作检索来源 | 派生记录只有新 policy 会洗掉旧来源撤权/过期；复制含历史工具依赖的分析又引入递归历史链 | 新历史 Evidence 必需引用/期限、既有 content hook 的串联、对应 Session/请求/快照副本；含历史工具依赖的旧分析不复制，只给可独立读取的原业务事实。冻结定义依赖也按原源处理，不受机器人/任务生命周期控制 |
+| N2 原始来源绑定、最早期限及传递复核；历史工具 Evidence 不再作检索来源 | 派生记录只有新 policy 会洗掉旧来源撤权/过期；复制含历史工具依赖的分析又引入递归历史链 | 新历史 Evidence 必需引用/期限、既有 content hook 的串联、对应 Session/请求/快照副本；含历史工具依赖的旧分析不复制，只给可独立读取的原业务事实。冻结定义依赖也按原源处理，接入最终Session/发送校验；历史读取不受机器人/任务生命周期控制 |
 | N3 详情读取旧分析须完整 validate_answer | 旧自由文字可概括当时未引用来源，单条事实可读不能证明整段分析可读 | 仅 read 的旧分析，不用于无模型文字的搜索摘要；复用既有完整回答验证，不另建分析审查器 |
 | N4 固定页大小、有界扫描/字节/单次对象数及真实截断提示 | 单次纳入太多对象（含旧分析全部依赖）会使后续必要复核必败；SQL行数配置不能独立限制历史PG串行读取，可能扫描数千次；无游标时同刻超页不能假称完整 | 两个历史工具固定最多10条、扫描20候选；仅不复制分析的原事实路径每条最多10份原Evidence。旧分析完整复核context_evidence，含会话回放，不按份数截断；容量或对象上限未复制只标truncated，回答不存在或无法解析才标回答缺失。单次去重（目标, 对象）数仍不超过max_rows，复用5倍启动规则，适用反例及回退边界见§4.3；失败回退/跨调用耗尽沿既有收尾。无运行时预留、游标/关键词防护或新配置 |
 | N5 事实/分析/推断及操作阶段区分，证据不足不给确定归因 | 真引用仍不能验证任意根因文字，旧建议可被误述成已执行/恢复 | 工具字段、固定说明、最小工作方法及业务样例；无固定调查顺序/评分/通用文字拦截器 |
@@ -256,7 +256,7 @@ H1 对应实现验收：
 
 H2 对应实现验收：
 
-6. **先存群结果，再校验接收。** 模型及Session校验通过后保存快照，早于机器人receive_tools/receive_targets验证；构造接收拒绝，断言快照仍在、群内有权读者仍可读。另以含旧定义数据但没有新Evidence的合法文本结果，证明原数据期限/撤权仍约束快照；冻结定义来源不依赖任务是否活动或机器人配置。
+6. **先存群结果，再校验接收。** 模型及Session校验通过后保存快照，早于机器人receive_tools/receive_targets验证；构造接收拒绝，断言快照仍在、群内有权读者仍可读。另以含旧定义数据但没有新Evidence的合法文本结果，证明原数据期限/撤权仍约束快照：模型期间原源失效不提交/保存，保存后至发送前失效不发送正文；冻结定义来源的历史读取不依赖任务是否活动或机器人配置。
 
 按新增边界选例，不做场景×源×渠道×模型全组合。Web与飞书各选一条适合其归属的S1贯通；其他渠道差异确有影响再补。发送前当前权和接收范围、SDK/Session等通用保障复用现有测试；只有新增来源传递/装配/保存点有相应新断言。普通文档修正只跑文档检查，不重跑88+3调查、业务全仓或真实模型。
 

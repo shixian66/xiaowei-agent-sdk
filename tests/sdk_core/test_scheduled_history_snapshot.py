@@ -198,6 +198,59 @@ async def test_snapshot_text_keeps_original_definition_source_checks(env, monkey
             assert env.drv.connections == []
 
 
+@pytest.mark.parametrize("revoked_at", ["before_commit", "before_delivery"])
+async def test_text_snapshot_rechecks_definition_source_after_model(env, monkeypatch, revoked_at):
+    """无新Evidence时，模型期间或发送前的原源撤权也须阻断相应保存/正文。"""
+    from tests.sdk_core.test_scheduled_tasks import history
+
+    task = "只用定义中已记录的数据写结论。"
+    async with running(env, monkeypatch, config=configured(env), member_check=members) as (
+        group,
+        requests,
+        rt,
+    ):
+        old = await history(env, group)
+
+        async def revoke():
+            async with rt.engine.begin() as conn:
+                await conn.execute(
+                    text(
+                        "UPDATE xiaowei_evidence SET policy_fingerprint='invalid' "
+                        "WHERE evidence_id=:id"
+                    ),
+                    {"id": old},
+                )
+            env.drv.connections.clear()
+
+        async def finish(call):
+            if revoked_at == "before_commit":
+                await revoke()
+            return cite(CONCLUSION)(call)
+
+        env.scripts.add(task, finish)
+        await activate(env, group, task=task)
+        if revoked_at == "before_delivery":
+            save = rt.scheduled_tasks._save_agent_result
+
+            async def save_then_revoke(*args):
+                await save(*args)
+                await revoke()
+
+            monkeypatch.setattr(rt.scheduled_tasks, "_save_agent_result", save_then_revoke)
+        env.clock.advance(60)
+        await rt.scheduled_tasks.tick()
+        saved = await env.scalar("SELECT result_snapshot FROM xiaowei_scheduled_run")
+        assert (saved is None) == (revoked_at == "before_commit")
+        assert await env.scalar("SELECT state FROM xiaowei_scheduled_run") == "failed"
+        if revoked_at == "before_commit":
+            assert await env.scalar(
+                "SELECT count(*) FROM agent_messages WHERE session_id IN "
+                "(SELECT session_id FROM xiaowei_scheduled_run)"
+            ) == 0
+        assert all(CONCLUSION not in request.content.decode() for request in requests)
+        assert env.drv.connections == []
+
+
 async def test_definition_expiry_bounds_text_only_snapshot_and_cleanup(env, monkeypatch):
     """纯文本结果的Delivery期限为空时，定义原数据仍限制快照，清理仅删除正文。"""
     from tests.sdk_core.test_scheduled_tasks import history

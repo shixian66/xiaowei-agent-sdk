@@ -45,6 +45,7 @@ from xiaowei.evidence import (
 )
 from xiaowei.models import (
     AgentAnswer,
+    EvidenceRecord,
     MonitoringFailure,
     Owner,
     RunContext,
@@ -443,6 +444,7 @@ class PolicySession:
         monitoring_failures: Sequence[MonitoringFailure] = (),
         inspection_failures: Sequence[SecurityInspectionFailure] = (),
         limit_reached: bool = False,
+        source_records: Sequence[tuple[EvidenceRecord, RunContext]] = (),
     ) -> SessionSnapshot:
         """校验本轮最终回答与完整历史后写入底层 Session；任何失败都不保留本轮暂存项。
 
@@ -452,7 +454,8 @@ class PolicySession:
         self._bytes = None
         pending, self._pending = _without_superseded_answers(self._pending), []
         await self._validate_final_answer(
-            pending, context_evidence, monitoring_failures, inspection_failures, limit_reached
+            pending, context_evidence, monitoring_failures, inspection_failures, limit_reached,
+            source_records,
         )
         # 只给可信的实际失败调用保存来源依赖，不存失败原文或完整 TurnAnswer；
         # 回放仍向模型返回原有无 Evidence 占位。
@@ -500,6 +503,7 @@ class PolicySession:
         monitoring_failures: Sequence[MonitoringFailure],
         inspection_failures: Sequence[SecurityInspectionFailure],
         limit_reached: bool,
+        source_records: Sequence[tuple[EvidenceRecord, RunContext]],
     ) -> None:
         """最终持久化复用 Evidence 回答验证器：最后一项须是通过校验的当前格式 ``AgentAnswer``。
 
@@ -518,7 +522,9 @@ class PolicySession:
                 inspection_failures=tuple(inspection_failures),
                 limit_reached=limit_reached,
             )
-            delivery = await self._evidence.validate_answer(turn, self._ctx)
+            delivery = await self._evidence.validate_answer(
+                turn, self._ctx, source_records=source_records
+            )
             self.content_expires_at = delivery.content_expires_at
         except ValidationError:
             raise SessionItemRejectedError("最终回答未通过校验，本轮不保存") from None
