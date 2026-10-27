@@ -193,7 +193,7 @@ def _fact_sections(
             "rows": view.rows,
         }
         parts.append(_Section(
-            "fact", "需要核查 · 代表样本", json.dumps(samples, ensure_ascii=False),
+            "fact", "代表样本", json.dumps(samples, ensure_ascii=False),
             fact=fact, business=True,
         ))
     return parts

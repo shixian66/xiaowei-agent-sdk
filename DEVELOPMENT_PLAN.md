@@ -34,7 +34,9 @@
 
 P1 是开发切片，不冒充已经完成首版全部功能；首版在 P1–P3（含 P2.5）通过后才称为可试用。实施顺序为 P2 离线完成 → P2.5 → 飞书单群增量 → P3（用户 2026-10-03 确认）；此前“数据库 MCP 为 P2.5”和“新增需求放到 P3 后”的安排不再适用。P2 的必交项是 SQL/执行计划诊断、表布局元数据与基于已有审计表的慢查询列表；Query Profile 暂不实现。
 
-**已确认增量：跨会话运维事实追溯（2026-10-26）。** D1–D3生效范围只见[ARCHITECTURE](ARCHITECTURE.md#operations-history)，按[R4实施计划](docs/superpowers/plans/2026-10-26-operations-history-and-knowledge.md)串行推进H1读取既有历史→H2补快照→H3业务评测。H1已由PR #138合入，H2离线候选已完成并经独立子Agent复审，待用户外部复审；精确版本和证据见handoff；H3、真实模型/公司服务、权限配置变更与部署未授权。Wiki只保留调研；验收与新增限制不在本索引重复。
+**已确认增量：跨会话运维事实追溯（2026-10-26）。** D1–D3生效范围只见[ARCHITECTURE](ARCHITECTURE.md#operations-history)，按[R4实施计划](docs/superpowers/plans/2026-10-26-operations-history-and-knowledge.md)串行推进H1读取既有历史→H2补快照→H3业务评测。H1/H2已分别由PR #138/#139合入；精确版本和有效验证见handoff；H3、真实模型/公司服务、权限配置变更与部署未授权。Wiki只保留调研；验收与新增限制不在本索引重复。
+
+**已批准设计：安全巡检关注事项与历史背景复用（R3，2026-10-27）。** [C1已批准、待实现合入](ARCHITECTURE.md#security-context-reuse-proposal)，[B1选择(a)、(b)未批准](ARCHITECTURE.md#scheduled-interactive-history-choice)，D1不变。按[计划§9](docs/superpowers/plans/2026-10-23-security-inspection-report-presentation.md#security-context-r3)推进I1（本轮开发与离线验证已授权）→I3（需模型/数据授权）→按§9.7条件决定I2。R2外部限定复审通过；I1已有本地离线候选、待代码独立审查，真实措辞质量和效果仍待I3。精确实现/验证状态见handoff。
 
 ## 3. P0：确定设计
 

@@ -295,7 +295,7 @@ def test_split_security_sample_sections_keep_their_own_scope_and_capture_time(
             if format_ == "html" else text.split("\n## ")
         )
         for section in sections:
-            if "需要核查" not in section:
+            if "代表样本" not in section:
                 continue
             (hour,) = {int(h) for h in re.findall(r"window(\d+)_", section)}
             seen.add(hour)

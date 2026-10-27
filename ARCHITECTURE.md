@@ -18,7 +18,7 @@
 
 <a id="operations-history-candidate"></a>
 
-**运维历史增量（2026-10-26 已确认）。** 生效范围见[跨会话运维事实追溯](#operations-history)；实施与验收见[R4计划](docs/superpowers/plans/2026-10-26-operations-history-and-knowledge.md)。H1已合入，H2已获开发与离线验证授权；当前实现状态见handoff，H3尚未实施。Wiki仅保留调研。
+**运维历史增量（2026-10-26 已确认）。** 生效范围见[跨会话运维事实追溯](#operations-history)；实施与验收见[R4计划](docs/superpowers/plans/2026-10-26-operations-history-and-knowledge.md)。H1/H2已分别随PR #138/#139合入；当前验证状态与缺口见handoff，H3尚未实施。Wiki仅保留调研。
 
 ## 1. 产品目标
 
@@ -382,6 +382,10 @@ Alertmanager 原生 API v2 若由薄 Adapter 直连，须支持其 Web 配置可
 
 安全巡检 v4 的纯文本出口（即时 webhook、代理、定时通知及纯文本 content）只列数据范围、覆盖与检查计数、必要提示，以及获准代表样本条数的追问提示，不逐行贴样本；正文仍按模型 blocks 顺序，模型在文字中概括样本并说明归纳数字的身份。Web、卡片与文件从原 facts 保留明细；其他工具及旧回答布局不改。窗口和采集时间按证据中的 audit.time_zone 换算，缺失则保留原值并说明；零下界区分已知无法判定数与候选截断。Evidence/规则/回答版本、原始 JSON 和已绑定交付字节不改。
 
+<a id="security-context-reuse-proposal"></a>
+
+**安全巡检成文决定（C1已批准，2026-10-27；实现状态见handoff）。** 仅调整安全Skill的颜色语义、中性“代表样本”标题和工具说明，按本轮证据解释关注理由，不因操作类型命中机械要求人工核查；原计数、覆盖、不完整提示和每次发送规则不变。复用H1/H2，不新增白名单、长期记忆、缓存或权限；按现有D1，定时运行只能检索同操作群定时结果，取不到群聊交互调查，B1已选择(a)维持该范围，见[B1决定](#scheduled-interactive-history-choice)。实施按[计划§9 R3](docs/superpowers/plans/2026-10-23-security-inspection-report-presentation.md#security-context-r3)推进I1→I3→按条件决定I2；实现合入前不替代上文当前成文契约。产品决定、开发授权、真实模型/数据授权和部署分别记录，当前实现与验证见[handoff](AGENT_HANDOFF.md#3-当前计划与下一项工作)。
+
 <a id="tidb-query-diagnosis"></a>
 
 ### TiDB 查询与诊断（A 已合入，B/C 本地候选，待公司验收）
@@ -613,9 +617,16 @@ Web 提供“新建会话”，飞书提供 `/新建`，由入口直接处理，
 
 - **D1：** 新建会话后可通过受治理历史工具读取同 channel、同 owner、同 conversation_key 的旧 generation；可信对话归属由服务端取得。Web 各浏览器 cookie 对话只读自己的历史，共用 operator_id 不构成共享，跨浏览器历史共享未获批准。定时运行结果归创建任务的操作群，不因通知发往其他群而改变归属。
 - **D2：** 群内当前获准成员可读其他发起人的请求调查结论及其他创建者的定时调查结论；按当前读者权限完整复核全部来源。原始 Evidence 事实本已按群归属共享，结论共享不改变请求输入全文、回执、任务管理、审批或通知权限。
-- **D3：** scheduled_run 可保存有界结果快照与期限；期限不超过原数据期限，不延长任何保留期，不保存原始响应。此产品决定已批准，保存点与迁移属于本轮已授权H2，不扩大数据或权限范围。
+- **D3：** scheduled_run 可保存有界结果快照与期限；期限不超过原数据期限，不延长任何保留期，不保存原始响应。此产品决定已由H2落地，不扩大数据或权限范围。
 
 普通 SDK Session 回放和直接 Evidence 引用仍按原会话隔离；历史工具不恢复旧会话上下文。历史来源在检索、派生副本读取、保存及交付时复核当前权限、原策略/对象依赖及期限；缺失、过期或不可核验时只交有效事实及缺口，不复制无法验证的旧分析。历史状态不证明当前状态，历史批准不授予新写许可；根因推断仍需独立证据。实现和固定场景验收只在[R4计划](docs/superpowers/plans/2026-10-26-operations-history-and-knowledge.md)维护。
+
+<a id="scheduled-interactive-history-choice"></a>
+
+**交互→定时历史范围决定（B1，2026-10-27选择(a)，独立于C1）。** 维持现有D1：交互历史限同conversation_key，定时Session没有该映射，只能检索同操作群的agent_task运行结果，不读取群聊交互历史。三集群巡检报告已确认为定时Agent任务。
+
+- **(a) 已选择：** 需要持续提供的背景由用户写入任务正文或可信业务口径，作为用户提供的说明，不自动把聊天或推断保存成长期事实。当前没有修改任务正文的工具；“写入任务正文”须通过既有任务控制取消原任务，再用 `propose_agent_task` 新建并重新批准，冻结定义来源与期限规则随新任务重新生效。
+- **(b) 未批准：** 不扩展为定时运行读取本群交互历史，D1保持不变。
 
 <a id="group-scope"></a>
 
