@@ -82,20 +82,47 @@ def test_protected_approval_is_compact_but_keeps_bound_scope_and_command_in_card
     assert source.requires_complete and source.metadata == data
 
 
-def test_compact_shared_write_material_keeps_actual_parameters_and_important_change():
+@pytest.mark.parametrize("target", ["alertmanager-prod", "notifications", "scheduled"])
+@pytest.mark.parametrize("tool", ["propose_create_silence", "get_action_status"])
+def test_compact_shared_write_material_keeps_actual_parameters_and_important_change(target, tool):
     from xiaowei.feishu_render import business_text
 
     source = fact(
-        target_id="alertmanager-prod", tool_id="alertmanager-prod/propose_silence",
+        target_id=target, tool_id=f"{target}/{tool}",
         columns=(), rows=(), requires_complete=True, section="action",
-        metadata={"parameters": '{"matchers":"service=orders","duration":"30m"}',
-                  "change": "静默 service=orders，从5分钟改为30分钟", "impact": "暂停通知30分钟"},
+        metadata={"action": f"{target}/create_silence",
+                  "parameters": '{"matchers":"service=orders","duration":"30m"}',
+                  "change": "静默 service=orders，从5分钟改为30分钟", "impact": "暂停通知30分钟",
+                  "rollback": "可删除该静默恢复告警", "approve_before": "2026-10-26T13:50:00+08:00",
+                  "approval_command": "@小维 /批准 00000000-0000-4000-8000-000000000001"},
     )
     value = business(source)
     visible = "\n".join(text_parts(build_feishu_message(value, 3500, "oc"), folded=False))
     for text in (visible, business_text(value)):
-        assert "alertmanager-prod" in text and "service=orders" in text
-        assert "5分钟改为30分钟" in text and "暂停通知30分钟" in text
+        assert all(part in text for part in (
+            target, "service=orders", "duration", "5分钟改为30分钟", "暂停通知30分钟",
+            "可删除该静默恢复告警", "2026-10-26T13:50",
+            "@小维 /批准 00000000-0000-4000-8000-000000000001",
+        ))
+        assert "任务记录" not in text
+
+
+def test_scheduled_execution_receipt_shows_local_task_result_without_internal_json():
+    from xiaowei.feishu_render import business_text
+
+    data = {"action_id": "internal-action", "state": "succeeded", "approver": "群成员",
+            "result": json.dumps({"job_id": "internal-job", "state": "active",
+                                  "at": "2026-10-26T14:10:00+08:00", "reason": "activated"})}
+    source = fact(
+        target_id="scheduled", tool_id="scheduled/request_action_execution",
+        columns=(), rows=(), section="action", requires_complete=True,
+        metadata=data, result_json=json.dumps(data),
+    )
+    value = business(source)
+    visible = "\n".join(text_parts(build_feishu_message(value, 3500, "oc"), folded=False))
+    for text in (visible, business_text(value)):
+        assert "已激活" in text and "2026-10-26T14:10" in text
+        assert "internal-job" not in text and '"job_id"' not in text
 
 
 @pytest.mark.parametrize("target", ["scheduled", "notifications"])

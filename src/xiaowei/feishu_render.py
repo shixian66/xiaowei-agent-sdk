@@ -360,11 +360,17 @@ def business_presentation(fact: DeliveryFact) -> FactPresentation:
     )
 
 
-def _control_fact(fact: DeliveryFact) -> bool:
-    return fact.section == "action" or fact.tool_id in {
+def _task_fact(fact: DeliveryFact) -> bool:
+    return fact.tool_id in {
         "scheduled/get_task", "scheduled/control_task", "scheduled/list_tasks",
-        "scheduled/activate_reminder", "notifications/send_webhook_message",
-    }
+        "scheduled/activate_reminder", "scheduled/propose_reminder",
+        "scheduled/propose_agent_task",
+    } or fact.metadata.get("action") == "scheduled/activate_reminder"
+
+
+def _control_fact(fact: DeliveryFact) -> bool:
+    return (fact.section == "action" or _task_fact(fact)
+            or fact.tool_id == "notifications/send_webhook_message")
 
 
 def _control_presentation(fact: DeliveryFact, data: dict[str, object]) -> FactPresentation:
@@ -404,11 +410,13 @@ def _control_presentation(fact: DeliveryFact, data: dict[str, object]) -> FactPr
                       **task_fields(item)} for item in tasks)
         columns = ("任务", "状态", "计划时间", "有效期", "说明")
         return FactPresentation({}, columns, rows, notices=fact_limit_notices(fact))
-    if fact.target_id == "scheduled" and fact.tool_id.endswith(
-        ("/get_task", "/control_task", "/activate_reminder")
-    ):
+    if fact.tool_id in {
+        "scheduled/get_task", "scheduled/control_task", "scheduled/activate_reminder",
+    }:
         return FactPresentation(task_fields(data), (), ())
-    if fact.target_id == "scheduled" and isinstance(data.get("result"), str):
+    if (_task_fact(fact) or fact.tool_id == "scheduled/request_action_execution") and isinstance(
+        data.get("result"), str
+    ):
         # Action.result 是本地执行器固定保存的 JSON，不解析任意业务字符串。
         try:
             result = json.loads(cast(str, data["result"]))
@@ -416,7 +424,7 @@ def _control_presentation(fact: DeliveryFact, data: dict[str, object]) -> FactPr
             result = None
         if isinstance(result, dict) and "job_id" in result:
             return FactPresentation(task_fields(result), (), ())
-    if fact.target_id == "notifications":
+    if fact.tool_id == "notifications/send_webhook_message":
         fields = task_fields({**data, "notification_state": data.get("status")})
         fields.pop("状态", None)
         if "任务" in fields:
@@ -430,7 +438,7 @@ def _control_presentation(fact: DeliveryFact, data: dict[str, object]) -> FactPr
             fields.pop("说明", None)
         return FactPresentation(fields, (), (), notices=fact_limit_notices(fact))
     hidden = {"action_id", "action", "revision"}
-    if fact.target_id == "scheduled":
+    if _task_fact(fact):
         hidden.add("parameters")  # 仅是内部 job_id；其他写动作的实际参数仍须默认可见。
     fields = {key: value for key, value in data.items() if key not in hidden}
     if "state" in fields:
@@ -530,7 +538,7 @@ def business_text(
     def lines(fact: DeliveryFact) -> list[str]:
         if delivery.answer_version == 4 and _control_fact(fact):
             view = business_presentation(fact)
-            title = "任务记录" if fact.target_id == "scheduled" else f"动作目标：{fact.target_id}"
+            title = "任务记录" if _task_fact(fact) else f"动作目标：{fact.target_id}"
             return [title, *(
                 rendered(f"{_ACTION_LABELS.get(key, key)}：{value}")
                 for key, value in view.fields.items()
@@ -796,11 +804,11 @@ def _card(
             title = (
                 "动作执行事实" if fact.requires_complete and "state" in fact.metadata
                 else "待你确认（尚未执行）" if "approval_command" in fact.metadata
-                else "任务记录" if fact.target_id == "scheduled"
+                else "任务记录" if _task_fact(fact)
                 else f"动作状态 · {fact.target_id}"
             )
             elements.append(_div(title))
-            if fact.target_id not in {"scheduled", "notifications"}:
+            if not _task_fact(fact) and fact.tool_id != "notifications/send_webhook_message":
                 elements.append(_div(f"目标：{fact.target_id}"))
             for key, value in control.fields.items():
                 text = display_text(value) if isinstance(value, str) else _cell({key: value}, key)

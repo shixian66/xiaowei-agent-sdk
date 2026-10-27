@@ -41,13 +41,17 @@
 
 ## 3. 当前计划与下一项工作
 
-### 审批与任务回执（2026-10-27，离线候选待独立审查）
+### 审批与任务回执（2026-10-27，离线交付，公司待验）
 
 用户批准[修复计划 §8 v1.5＋R1–R3](docs/superpowers/plans/2026-10-20-production-dialogue-answer-repair.md#approval-task-delivery-repair)的实现、测试和常规修复；本地只用替身/合成数据与真实 SDK、正式运行装配和隔离 PostgreSQL，真实模型由用户在公司隔离环境验证。已重新 fetch main@c1c28a2321e4849d9e3fba0cb4ba8167dbfe341e，分支 codex/approval-task-receipts，独立工作树 /Users/kloenguyen/.codex/worktrees/approval-task-receipts/agent-SDK；原桌面工作区及其未提交内容未动。
 
 候选落实无空格命令、终态不返回批准命令、仅单一作废动作替换矛盾正文、同 Action 展示去重及历史状态时态；任务读取关联现有 Action，只给 draft 追加 reason，有效 pending 优先/否则最新可读。绑定材料保留实际目标/能力/期限和影响，共用卡片/纯文本减少技术包装，内部预算和治理保留。未加 schema、依赖、清理任务、暂停绑定复查或 eval 框架。新材料会受既有 ActionPlan 比较约束，旧待批定时提案升级后可能须重新提出；原绑定发送字节不重写。
 
-离线受影响组366项、共用消费者164项、安全 gate 65项通过；最后收窄控制事实识别，避免业务集群恰好名为 notifications 时误删查询表格，对应反例先失败，展示65项及最终入口/关键边界135项通过。Ruff全仓、mypy 41源码文件及diff检查通过；这些是分组证据，不是一次完整套件。基线对照4项及新增缺陷RED→GREEN日志、精确命令与文件哈希归档 /private/tmp/xw-approval-task-receipts-evidence/validation.json。独立候选审查待完成。首轮未形成暂停的生产唯一原因仍未证实；本地不证明真实模型自主选择、措辞质量、公司数据库或群实收，下一项为公司执行 §8.5 两段业务样例。未推送、合并或部署。
+最终离线受影响组374项通过；前阶段共用消费者164项、安全 gate 65项通过。Ruff全仓、mypy 41源码文件及diff检查通过；这些是分组证据，不是一次完整套件。基线对照及新增缺陷RED→GREEN日志、精确命令与文件哈希归档 /private/tmp/xw-approval-task-receipts-evidence/validation.json。
+
+独立只读审查覆盖 c1c28a2..77551efefa9650ebccb0f877ef223011b71c25ac，独立展示65项通过，发现1项P1：合法监控源名 notifications/scheduled 被误套用控制视图、隐藏审批必要参数。已按实际工具/Action类型收窄，普通及碰撞源的提案/通用状态工具、原生任务执行回执均补反例，展示106项及最终374项回归通过；未新增源名禁令，未另做第二轮独立审查。记录 /private/tmp/xw-approval-task-receipts-evidence/review.md。代码/测试版本由本分支Git提交记录确定，不为回填本文自己的SHA反复提交。
+
+首轮未形成暂停的生产唯一原因仍未证实；本地不证明真实模型自主选择、措辞质量、公司数据库或群实收，下一项为公司执行 §8.5 两段业务样例。未推送、合并或部署。
 
 ### 安全巡检关注事项与历史背景复用（R3／I1本地离线候选）
 
