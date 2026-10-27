@@ -47,9 +47,11 @@ I1基线`bac5df3d8dd57e1c5a6ec5edd1b338b60ed43837`，已审候选`7adc62515585ab
 
 本轮离线起点为上述合入版本，分支`codex/security-inspection-i3-offline`，复用工作目录`/Users/kloenguyen/.codex/worktrees/ops-history-h1/agent-SDK`。产品与测试未改，不重复编写已具备的评测框架。[计划§9.7](docs/superpowers/plans/2026-10-23-security-inspection-report-presentation.md#97-最小切片与启动条件)补齐基线/候选、相同输入与harness、原任务入口和真实材料缺口；产品决定仍只见[ARCHITECTURE C1](ARCHITECTURE.md#security-context-reuse-proposal)及[B1(a)](ARCHITECTURE.md#scheduled-interactive-history-choice)。
 
-锁定SDK0.22.3、隔离PG及脚本模型复核：正式定时入口的52/42审计行、逐次发送、分类不完整/源失败 **5 passed / 5.68秒**；已有采集器和合成安全样例、参数修正 **25 passed / 22.24秒**。文档命令检查 **2 passed**、受影响相对链接/锚点 **15项通过**、`git diff --check`通过；日志`/private/tmp/xw-security-i3-offline-{entry,collector,docs,links,diff}.log`。精确命令、文件哈希与文档检查结果记录于`/private/tmp/xw-security-i3-offline-validation.json`。I1既有本地163项及独立审查记录仍在`/private/tmp/xw-security-i1-validation.json`、`/private/tmp/xw-security-i1-review.md`。本轮仅文档变化，全量与Ruff/mypy引用上述相同产品/测试树的CI，不再重复全量。
+锁定SDK0.22.3、隔离PG及脚本模型复核：正式定时入口的52/42审计行、逐次发送、分类不完整/源失败 **5 passed / 5.68秒**；已有采集器和合成安全样例、参数修正 **25 passed / 22.24秒**。文档命令检查 **2 passed**、受影响相对链接/锚点 **15项通过**、`git diff --check`通过；日志`/private/tmp/xw-security-i3-offline-{entry,collector,docs,links,diff}.log`。该次离线复核与文档候选`59da81d65b42f92dcad6342c5fa3def248e6c6c5`的精确命令、文件哈希和检查结果记录于`/private/tmp/xw-security-i3-offline-validation.json`。I1既有本地163项及独立审查记录仍在`/private/tmp/xw-security-i1-validation.json`、`/private/tmp/xw-security-i1-review.md`。本轮仅文档变化，全量与Ruff/mypy引用上述相同产品/测试树的CI，不再重复全量。
 
-当前`security`套件只有合成S1–S5交互材料；未接入I3所需的脱敏真实三集群材料、两条SQL的模型解释、变化/过期场景或实际调度背景查询。脚本模型只证明通路，未评测真实工具选择、澄清、补证、解释质量及模型耗时/用量；重复背景查询和节省成本均为未测。通知Evidence对交互读者的影响、外部调度来源/关联键、公司环境及飞书实收仍为缺口，既有H3/A0/A3也未关闭。
+离线文档`59da81d`已获Claude限定审查，无阻断；当前仅补计划§9.7的A1验收项、旧规则指引和版本去重，文档命令与差异/链接检查记录于`/private/tmp/xw-security-i3-offline-f1-validation.json`，待外部限定核对F1差异。
+
+当前`security`套件只有合成S1–S5交互材料；未接入I3所需的脱敏真实三集群材料、两条SQL的模型解释、变化/过期场景或实际调度背景查询。脚本模型只证明通路，未评测真实工具选择、澄清、补证、解释质量及模型耗时/用量；重复背景查询和节省成本均为未测；A1（布尔探测/延迟信号被误写为🟢或无依据降低关注）及定时入口真实模型验收方式仍待I3落实。通知Evidence对交互读者的影响、外部调度来源/关联键、公司环境及飞书实收仍为缺口，既有H3/A0/A3也未关闭。
 
 下一项：用户本轮已选择离线，I3真实对比保留为未验收；后续取得模型/材料与费用授权后，按计划§9.7在获准环境对比并核实重复背景查询。I2只有启动条件满足且现有工具仍有具体缺口时再决定，不因离线通过自动开发。新差异仅本地提交；本轮未调用真实模型/公司服务/飞书，未推送、建PR、合并或部署。
 
