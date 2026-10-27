@@ -131,7 +131,7 @@ async def test_approval_expiry_is_rechecked_after_readback(
         assert record.state == "failed"
         assert record.failure_code == "action_expired"
         assert await env.rows("SELECT state, result, failure_code FROM xiaowei_action") == [
-            ("rejected", None, "action_expired")
+            ("rejected", "已作废，未执行", "action_expired")
         ]
         assert await env.rows(
             "SELECT count(*) FROM xiaowei_evidence WHERE turn_id=:turn", turn=record.turn_id

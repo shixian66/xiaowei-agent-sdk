@@ -172,24 +172,28 @@ async def test_only_prometheus_opaque_history_keeps_v4_brief_without_inventing_s
 
 @pytest.mark.parametrize("history", [False, True])
 @pytest.mark.parametrize(
-    "tool,policy_id,target,effect,status",
+    "tool,policy_id,target,effect,status,expected",
     [
-        ("scheduled/get_task", "scheduled.get_task", "scheduled", "read", {"state": "paused"}),
+        (
+            "scheduled/get_task", "scheduled.get_task", "scheduled", "read", {"state": "paused"},
+            "已暂停",
+        ),
         (
             "notifications/send_webhook_message",
             "notification.feishu_text",
             "notifications",
             "notify",
             {"status": "unknown"},
+            "通知结果未知",
         ),
     ],
 )
 async def test_v4_task_and_notification_states_stay_visible_even_when_brief(
-    postgres_url: URL, history, tool, policy_id, target, effect, status
+    postgres_url: URL, history, tool, policy_id, target, effect, status, expected
 ):
     from tests.sdk_core.test_feishu_render import text_parts
 
-    from xiaowei.feishu_render import build_feishu_message
+    from xiaowei.feishu_render import build_feishu_message, business_text
 
     grants = Grants()
     grants.grant("alice", tool, target=target)
@@ -225,8 +229,12 @@ async def test_v4_task_and_notification_states_stay_visible_even_when_brief(
         output = await evidence.validate_answer(selected([result.evidence_id]), read)
         (fact,) = output.facts
         assert fact.view == "full" and fact.summary is None
+        assert all(fact.metadata[key] == value for key, value in status.items())
         visible = "\n".join(text_parts(build_feishu_message(output, 3500, "oc"), folded=False))
-        assert next(iter(status.values())) in visible and "response_unknown" in visible
+        for body in (visible, business_text(output)):
+            assert expected in body and "response_unknown" in body
+            if history and tool == "scheduled/get_task":
+                assert "此前查询时" in body
 
 
 async def test_conflicting_display_entries_normalize_to_full(postgres_url: URL):
