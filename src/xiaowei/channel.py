@@ -595,8 +595,7 @@ class ResultDelivery:
                 f.model_copy(update={"note_summary": "此前查询时"})
                 if f.captured_at <= record.created_at
                 and (
-                    (f.target_id == "scheduled"
-                     and f.tool_id.endswith(("/get_task", "/list_tasks")))
+                    f.tool_id in {"scheduled/get_task", "scheduled/list_tasks"}
                     or f.tool_id.endswith("/get_action_status")
                 )
                 else f for f in result.facts
@@ -607,7 +606,6 @@ class ResultDelivery:
             and facts
             and all(f.metadata.get("action_id") in unresumable for f in facts)
         ):
-            from xiaowei.feishu_render import business_text
             from xiaowei.models import DeliveryText
 
             result = result.model_copy(

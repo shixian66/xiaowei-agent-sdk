@@ -360,7 +360,7 @@ def business_presentation(fact: DeliveryFact) -> FactPresentation:
     )
 
 
-def _task_fact(fact: DeliveryFact) -> bool:
+def is_task_fact(fact: DeliveryFact) -> bool:
     return fact.tool_id in {
         "scheduled/get_task", "scheduled/control_task", "scheduled/list_tasks",
         "scheduled/activate_reminder", "scheduled/propose_reminder",
@@ -369,7 +369,7 @@ def _task_fact(fact: DeliveryFact) -> bool:
 
 
 def _control_fact(fact: DeliveryFact) -> bool:
-    return (fact.section == "action" or _task_fact(fact)
+    return (fact.section == "action" or is_task_fact(fact)
             or fact.tool_id == "notifications/send_webhook_message")
 
 
@@ -377,7 +377,7 @@ def _control_presentation(fact: DeliveryFact, data: dict[str, object]) -> FactPr
     states = {
         "draft": "尚未激活", "active": "已激活", "paused": "已暂停", "cancelled": "已取消",
         "completed": "已结束", "disabled": "已停用", "pending": "等待确认，尚未执行",
-        "executing": "执行中，结果尚未确认", "succeeded": "已执行", "rejected": "未执行，已拒绝",
+        "executing": "执行中，结果尚未确认", "succeeded": "已执行", "rejected": "未执行",
         "unknown": "执行结果未知，不会自动重试", "unavailable": "当前不可核实",
     }
 
@@ -414,7 +414,7 @@ def _control_presentation(fact: DeliveryFact, data: dict[str, object]) -> FactPr
         "scheduled/get_task", "scheduled/control_task", "scheduled/activate_reminder",
     }:
         return FactPresentation(task_fields(data), (), ())
-    if (_task_fact(fact) or fact.tool_id == "scheduled/request_action_execution") and isinstance(
+    if (is_task_fact(fact) or fact.tool_id == "scheduled/request_action_execution") and isinstance(
         data.get("result"), str
     ):
         # Action.result 是本地执行器固定保存的 JSON，不解析任意业务字符串。
@@ -438,7 +438,7 @@ def _control_presentation(fact: DeliveryFact, data: dict[str, object]) -> FactPr
             fields.pop("说明", None)
         return FactPresentation(fields, (), (), notices=fact_limit_notices(fact))
     hidden = {"action_id", "action", "revision"}
-    if _task_fact(fact):
+    if is_task_fact(fact):
         hidden.add("parameters")  # 仅是内部 job_id；其他写动作的实际参数仍须默认可见。
     fields = {key: value for key, value in data.items() if key not in hidden}
     if "state" in fields:
@@ -538,7 +538,7 @@ def business_text(
     def lines(fact: DeliveryFact) -> list[str]:
         if delivery.answer_version == 4 and _control_fact(fact):
             view = business_presentation(fact)
-            title = "任务记录" if _task_fact(fact) else f"动作目标：{fact.target_id}"
+            title = "任务记录" if is_task_fact(fact) else f"动作目标：{fact.target_id}"
             return [title, *(
                 rendered(f"{_ACTION_LABELS.get(key, key)}：{value}")
                 for key, value in view.fields.items()
@@ -804,11 +804,11 @@ def _card(
             title = (
                 "动作执行事实" if fact.requires_complete and "state" in fact.metadata
                 else "待你确认（尚未执行）" if "approval_command" in fact.metadata
-                else "任务记录" if _task_fact(fact)
+                else "任务记录" if is_task_fact(fact)
                 else f"动作状态 · {fact.target_id}"
             )
             elements.append(_div(title))
-            if not _task_fact(fact) and fact.tool_id != "notifications/send_webhook_message":
+            if not is_task_fact(fact) and fact.tool_id != "notifications/send_webhook_message":
                 elements.append(_div(f"目标：{fact.target_id}"))
             for key, value in control.fields.items():
                 text = display_text(value) if isinstance(value, str) else _cell({key: value}, key)

@@ -1505,7 +1505,8 @@ class Application:
                         current = await store.get_action(action_id, approval_ctx.identity)
                         if current.state == "executing":
                             await store.finish_action(
-                                claimed, "rejected", failure_code="action_rejected"
+                                claimed, "rejected", "已作废，未执行",
+                                failure_code="action_rejected",
                             )
                 except BaseException:
                     store.readiness.lock("action_settle_failed")

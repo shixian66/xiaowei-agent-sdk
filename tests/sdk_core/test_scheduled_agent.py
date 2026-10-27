@@ -358,8 +358,9 @@ def managed_config(env):
     return runtime.ServeConfig.model_validate(data)
 
 
+@pytest.mark.parametrize("later_action", [False, True])
 async def test_pending_task_reads_distinguish_orphan_and_append_reason_with_action_precedence(
-    env, monkeypatch,
+    env, monkeypatch, later_action,
 ):
     from uuid import uuid4
 
@@ -394,14 +395,17 @@ async def test_pending_task_reads_distinguish_orphan_and_append_reason_with_acti
                 text("UPDATE xiaowei_scheduled_job SET reason='已有说明' WHERE job_id=:id"),
                 {"id": pending_job},
             )
-            await conn.execute(text(
-                "INSERT INTO xiaowei_action "
-                "SELECT :id,owner_id,requester_id,proposal_session_id,proposal_turn_id,"
-                ":call,proposal_tool_id,write_tool_id,target_id,binding,plan,'rejected',"
-                "NULL,NULL,NULL,NULL,:now,:now,approval_expires_at,expires_at,'action_unresumable' "
-                "FROM xiaowei_action WHERE action_id=:pending"
-            ), {"id": later, "call": "second_activation", "now": env.clock() + timedelta(seconds=1),
-                "pending": pending})
+            if later_action:
+                await conn.execute(text(
+                    "INSERT INTO xiaowei_action "
+                    "SELECT :id,owner_id,requester_id,proposal_session_id,proposal_turn_id,"
+                    ":call,proposal_tool_id,write_tool_id,target_id,binding,plan,'rejected',"
+                    "NULL,NULL,NULL,NULL,:now,:now,approval_expires_at,expires_at,"
+                    "'action_unresumable' "
+                    "FROM xiaowei_action WHERE action_id=:pending"
+                ), {"id": later, "call": "second_activation",
+                    "now": env.clock() + timedelta(seconds=1),
+                    "pending": pending})
 
         message = "创建好，在运行了吗？"
         observed = {}
@@ -442,12 +446,83 @@ async def test_pending_task_reads_distinguish_orphan_and_append_reason_with_acti
         )
         await group.ask("再核对草稿")
         reason = observed["latest"]["reason"]
-        assert reason.startswith("已有说明；") and "已作废" in reason
-        assert later in reason and pending not in reason and "待确认" not in reason
+        assert reason.startswith("已有说明；") and "待确认" not in reason
+        if later_action:
+            assert "已作废" in reason and later in reason and pending not in reason
+        else:
+            assert "审批已过期" in reason and pending in reason
         assert requests == []
         assert await env.scalar(
             "SELECT count(*) FROM xiaowei_scheduled_job WHERE state='active'"
         ) == 0
+
+
+@pytest.mark.parametrize("decision,expected_code,expected_reason", [
+    ("expired", "action_expired", "审批已过期"),
+    ("reject", "action_rejected", "已拒绝"),
+    ("changed", "action_rejected", "已作废，未执行"),
+    ("legacy", "action_rejected", "未执行（拒绝或核验未通过）"),
+])
+async def test_inactive_task_reason_after_native_approval_decision(
+    env, monkeypatch, decision, expected_code, expected_reason,
+):
+    from sqlalchemy import text
+    from tests.sdk_core.test_app import last_output
+
+    async with running(env, monkeypatch, config=managed_config(env)) as (group, requests, rt):
+        message = draft(env, interval=3600, at=env.clock() + timedelta(hours=2))
+        env.scripts.by_message[attributed(A, message)][-1] = cite("本次未执行。")
+        await group.ask(message)
+        action = await env.scalar("SELECT action_id FROM xiaowei_action")
+        job = await env.scalar("SELECT job_id FROM xiaowei_scheduled_job")
+        if decision == "expired":
+            env.clock.now = await env.scalar("SELECT approval_expires_at FROM xiaowei_action")
+        elif decision in {"changed", "legacy"}:
+            original = rt.scheduled_tasks._agent_plan
+            monkeypatch.setattr(
+                rt.scheduled_tasks, "_agent_plan",
+                lambda job: original(job).model_copy(update={"change": "升级后重新生成的审批材料"}),
+            )
+        command = "拒绝" if decision == "reject" else "批准"
+        await group.ask(f"/{command} {action}")
+        if decision == "legacy":
+            async with rt.engine.begin() as conn:
+                await conn.execute(
+                    text("UPDATE xiaowei_action SET result=NULL WHERE action_id=:id"),
+                    {"id": action},
+                )
+        observed = {}
+
+        def read_list(call):
+            observed["list"] = last_output(call)["data"]
+            return tool_call("scheduled__get_task", job_id=job)(call)
+
+        def read_task(call):
+            observed["task"] = last_output(call)["data"]
+            return tool_call("scheduled__get_action_status", action_id=action)(call)
+
+        def read_action(call):
+            observed["action"] = last_output(call)["data"]
+            return cite("本次未执行。")(call)
+
+        env.scripts.add(
+            attributed(A, "在运行了吗"),
+            tool_call("scheduled__list_tasks", limit=30, after_id=None, include_text=True),
+            read_list, read_task, read_action,
+        )
+        await group.ask("在运行了吗")
+        assert set(observed) == {"list", "task", "action"}
+        for reason in (observed["list"]["tasks"][0]["reason"], observed["task"]["reason"]):
+            assert expected_reason in reason and action in reason
+            if decision != "reject":
+                assert "已拒绝" not in reason
+        assert expected_reason in observed["action"]["result"]
+        assert await env.scalar("SELECT failure_code FROM xiaowei_action") == expected_code
+        assert await env.scalar("SELECT state FROM xiaowei_action") == "rejected"
+        assert await env.scalar("SELECT state FROM xiaowei_scheduled_job") == "draft"
+        assert "approval_command" not in observed["action"]
+        assert requests == []
+        assert await env.scalar("SELECT count(*) FROM xiaowei_action") == 1
 
 
 @pytest.mark.parametrize("text_size,complete", [(1000, True), (1900, False)])

@@ -1921,6 +1921,7 @@ class ChannelStore:
                         await conn.execute(
                             text(
                                 "UPDATE xiaowei_action a SET state=:state, failure_code=:cause,"
+                                " result=:result,"
                                 " attempt=:attempt,"
                                 " approver_id=:actor, approval_turn_id=:approval, updated_at=:now"
                                 " WHERE action_id=:id AND owner_id=:owner AND state='pending'"
@@ -1944,6 +1945,7 @@ class ChannelStore:
                                 "attempt": attempt,
                                 "state": "executing" if approve else "rejected",
                                 "cause": None if approve else "action_rejected",
+                                "result": None if approve else "已拒绝，未执行",
                                 "actor": approver.subject_id,
                                 "approval": approver.turn_id,
                                 "now": self._clock(),

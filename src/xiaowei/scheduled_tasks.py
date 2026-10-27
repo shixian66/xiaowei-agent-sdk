@@ -26,6 +26,7 @@ from xiaowei.actions import (
     ActionPlan,
     ActionWriteRejectedError,
     proposal_policy,
+    rejected_action_reason,
 )
 from xiaowei.channel_store import ResultNotSavedError
 from xiaowei.evidence import (
@@ -321,6 +322,7 @@ class TaskDefinitions:
                             "activation.action_id AS activation_id, "
                             "activation.state AS activation_state, "
                             "activation.failure_code AS activation_failure, "
+                            "activation.result AS activation_result, "
                             "activation.approval_expires_at AS activation_deadline "
                             "FROM xiaowei_scheduled_job j LEFT JOIN LATERAL "
                             "(SELECT a.state,a.receipt_id,a.reason FROM "
@@ -330,7 +332,8 @@ class TaskDefinitions:
                             "COALESCE(a.job_id,r.job_id)=j.job_id "
                             "ORDER BY a.sequence DESC LIMIT 1) n "
                             "ON TRUE LEFT JOIN LATERAL "
-                            "(SELECT a.action_id,a.state,a.failure_code,a.approval_expires_at "
+                            "(SELECT a.action_id,a.state,a.failure_code,a.result,"
+                            "a.approval_expires_at "
                             "FROM xiaowei_action a WHERE j.state='draft' "
                             "AND a.owner_id=j.owner_id AND a.target_id='scheduled' "
                             "AND a.write_tool_id=:activate AND a.expires_at>:now "
@@ -1769,9 +1772,12 @@ class ScheduledTasks:
                 reason += f"；待确认〈{action_id}〉，截至 {at}"
             else:
                 status = (
-                    "已作废" if job.get("activation_failure") == "action_unresumable"
+                    rejected_action_reason(
+                        job.get("activation_failure"), job.get("activation_result")
+                    )
+                    if activation == "rejected"
                     else "审批已过期" if activation == "pending"
-                    else {"rejected": "已拒绝", "executing": "执行中", "succeeded": "执行成功",
+                    else {"executing": "执行中", "succeeded": "执行成功",
                           "unknown": "执行结果未知"}.get(str(activation), "不可确认")
                 )
                 reason += f"；原激活提案〈{action_id}〉{status}"

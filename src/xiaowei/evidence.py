@@ -48,7 +48,7 @@ from sqlalchemy import text
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncEngine
 
-from xiaowei.feishu_render import business_text, display_text
+from xiaowei.feishu_render import business_text, display_text, is_task_fact
 from xiaowei.governance import (
     Authorizer,
     ToolCatalog,
@@ -711,7 +711,7 @@ class EvidenceStore:
             }
         )
         if modern and record.identity.turn_id != ctx.identity.turn_id and (
-            record.target_id == "scheduled" or record.policy_id == ACTION_STATUS_POLICY
+            is_task_fact(fact) or record.policy_id == ACTION_STATUS_POLICY
         ):
             fact = fact.model_copy(update={"note_summary": "此前查询时"})
         elif record.identity.turn_id != ctx.identity.turn_id and section != "action":
@@ -723,7 +723,9 @@ class EvidenceStore:
                 }
             )
         # 必要执行状态不能因 brief 隐藏；旧版本和已绑定内容保持原语义。
-        if modern and record.target_id in {"scheduled", "notifications"}:
+        if modern and (
+            is_task_fact(fact) or record.tool_id == "notifications/send_webhook_message"
+        ):
             return fact
         # 仅当前结果和 v4 Prometheus 非表格补充原文可只收起、不生成计数摘要。
         # 结构化历史没有可信计数时仍回 full，不能把业务行误收进技术区。

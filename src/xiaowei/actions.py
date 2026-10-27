@@ -136,6 +136,19 @@ class ActionOutcomeError(ToolExecutionError):
         self.state = state
 
 
+def rejected_action_reason(failure_code: str | None, result: str | None = None) -> str:
+    if failure_code == "action_rejected":
+        # 旧版本同一码兼指人为拒绝和执行前失败，没有明确结果时不猜归因。
+        return (
+            result if result in {"已拒绝，未执行", "已作废，未执行"}
+            else "未执行（拒绝或核验未通过）"
+        )
+    return {
+        "action_expired": "审批已过期",
+        "reminder_time_passed": "提醒时间已过",
+    }.get(failure_code or "", "已作废，未执行")
+
+
 def action_status_catalog(
     source_ids: Iterable[str],
     max_bytes: Mapping[Audience, int] | int,
@@ -490,6 +503,15 @@ class ActionService:
         material = self._material(action)
         if state != "pending":
             material.pop("approval_command")
+        result = action.result or "尚无执行结果"
+        if action.failure_code == "reminder_time_passed":
+            result = REMINDER_TIME_PASSED
+        elif action.failure_code == "action_unresumable":
+            result = ACTION_UNRESUMABLE
+        elif state in {"rejected", "expired"}:
+            result = rejected_action_reason(
+                "action_expired" if state == "expired" else action.failure_code, action.result
+            )
         return ToolObservation(
             payload={
                 **material,
@@ -499,11 +521,7 @@ class ActionService:
                     if action.approver_id
                     else "尚未批准"
                 ),
-                "result": REMINDER_TIME_PASSED
-                if action.failure_code == "reminder_time_passed"
-                else ACTION_UNRESUMABLE
-                if action.failure_code == "action_unresumable"
-                else action.result or "尚无执行结果",
+                "result": result,
             },
             captured_at=self._clock(),
             truncated=False,
@@ -664,6 +682,7 @@ class ActionService:
                         await self._store.finish_action(
                             claimed,
                             "unknown" if write_started and not write_rejected else "rejected",
+                            None if write_started and not write_rejected else "已作废，未执行",
                             failure_code=reason,
                         )
             except BaseException:
@@ -679,7 +698,10 @@ class ActionService:
                 else "unknown"
             )
             if not finished:
-                await self._store.finish_action(claimed, state, failure_code=reason)
+                await self._store.finish_action(
+                    claimed, state, "已作废，未执行" if state == "rejected" else None,
+                    failure_code=reason,
+                )
             raise ActionOutcomeError(state) from None
         return await self.status(
             ctx,

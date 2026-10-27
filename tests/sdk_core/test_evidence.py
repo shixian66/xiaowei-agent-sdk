@@ -3,6 +3,7 @@
 import json
 import secrets
 from collections.abc import Callable
+from dataclasses import replace
 from importlib.resources import files
 from typing import Any
 
@@ -88,6 +89,50 @@ async def _saved_text(engine: AsyncEngine) -> str:
     async with engine.connect() as conn:
         rows = (await conn.execute(text("SELECT * FROM xiaowei_evidence"))).all()
     return json.dumps([[str(v) for v in row] for row in rows], ensure_ascii=False)
+
+
+@pytest.mark.parametrize("view", ["full", "brief"])
+async def test_monitoring_history_named_scheduled_keeps_source_and_snapshot_limits(
+    postgres_url: URL, view: str,
+) -> None:
+    from tests.sdk_core.synthetic_tools import QUERY_TOOL
+
+    from xiaowei.models import TurnAnswer
+
+    contract = CONTRACTS[1].model_copy(update={"target_id": "scheduled"})
+    source_note = "告警采集快照，不证明通知发送或主机健康"
+    policy = replace(
+        POLICIES[0], fact_note_summary=source_note,
+        projections={a: replace(p, fields=(*p.fields, "row_count"))
+                     for a, p in POLICIES[0].projections.items()},
+    )
+    tools = ToolCatalog((contract,), (policy,))
+    grants, clock = Grants(), Clock()
+    grants.grant("alice", QUERY_TOOL, target="scheduled")
+    original = context(targets=frozenset({"scheduled"}))
+    req = request(QUERY_TOOL).model_copy(update={"target_id": "scheduled"})
+    async with ready_engine(postgres_url) as engine:
+        evidence = store(engine, grants, clock, tools)
+        observation = await RecordingAdapter().execute(req)
+        observation = observation.model_copy(
+            update={"payload": {**observation.payload, "row_count": 2}},
+        )
+        recorded = await evidence.record(original, req, observation)
+        followup = original.model_copy(update={"identity": original.identity.model_copy(
+            update={"turn_id": "history-question"},
+        )})
+        answer = TurnAnswer(
+            answer=AgentAnswer(blocks=(FactBlock(
+                type="fact", evidence_id=recorded.evidence_id, view=view,
+            ),), report_format=None, awaiting_user=False),
+            context_evidence=(recorded.evidence_id,), answer_version=4,
+        )
+        delivery = await evidence.validate_answer(answer, followup, history=True)
+    fact = delivery.facts[0]
+    assert source_note in (fact.note_summary or "")
+    assert "采集时结果，不代表当前状态" in (fact.note_summary or "")
+    assert "此前查询时" not in (fact.note_summary or "")
+    assert fact.historical_brief == (view == "brief")
 
 
 def _expected_fields(audience: Audience, channel: Channel) -> set[str]:

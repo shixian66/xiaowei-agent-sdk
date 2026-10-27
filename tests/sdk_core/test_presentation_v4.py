@@ -24,6 +24,7 @@ def panels(message):
 
 @pytest.mark.parametrize("state,expected", [
     ("active", "已激活"), ("draft", "尚未激活"), ("unknown", "结果未知"),
+    ("rejected", "未执行"),
 ])
 def test_task_receipts_show_business_state_and_real_delivery_limit_without_raw_fields(
     state, expected,
@@ -50,6 +51,8 @@ def test_task_receipts_show_business_state_and_real_delivery_limit_without_raw_f
             "internal-job-id", "internal-receipt-id", "notification_state", "字段", "采集于",
             "采集时的结果", "unverified_count",
         ))
+        if state == "rejected":
+            assert "已拒绝" not in text
     assert source.metadata["job_id"] == "internal-job-id"
 
 
