@@ -171,7 +171,7 @@ async def test_61_security_samples_notification_is_short_and_history_retains_row
 
     env.drv = security_driver(
         *(
-            record("INSERT OVERWRITE t SELECT 1", queryId=f"q-plain-{i}", user="etl-reader")
+            record("SHOW VARIABLES; SELECT 1", queryId=f"q-plain-{i}", user="etl-reader")
             for i in range(61)
         ),
         totals=(61, 0, 0),
@@ -184,8 +184,8 @@ async def test_61_security_samples_notification_is_short_and_history_retains_row
         monkeypatch.setenv("XW_TEST_PROXY_URL", PROXY)
         cfg = proxy_config(env, cfg)
     summary = (
-        "🟡 核对变更。本次代表样本中 etl-reader 有61次覆盖写入，归纳数字为模型说明；"
-        "建议对照发布记录。"
+        "🟢 未发现注入或延迟攻击线索。本次代表样本中 etl-reader 有61条多语句，归纳数字为模型说明；"
+        "多语句仅为辅助信息。"
     )
 
     def notify(call):
@@ -211,7 +211,8 @@ async def test_61_security_samples_notification_is_short_and_history_retains_row
         body = json.loads(requests[0].content)
         sent = body["message"] if proxy else body["content"]["text"]
         assert summary in sent and sent.count("etl-reader") == 1
-        assert "代表样本 61 条未在消息中列出" in sent and "覆盖写入 61" in sent
+        assert "代表样本 61 条未在消息中列出" in sent
+        assert "多语句（辅助信息）: 61" in sent and "高风险操作" not in sent
         assert "第 1 行" not in sent and "q-plain-" not in sent
         if proxy:
             assert body["openUrl"] == cfg.webhook_bots[0].open_url
@@ -231,12 +232,12 @@ async def test_61_security_samples_notification_is_short_and_history_retains_row
 
 
 @pytest.mark.parametrize("count,unclassified,total", [(52, 0, 113585), (42, 3, 32890)])
-async def test_repeated_scheduled_overwrites_keep_counts_and_coverage(
+async def test_repeated_scheduled_auxiliary_rows_keep_counts_and_coverage(
     env, monkeypatch, count, unclassified, total
 ):
     """两次真实定时入口均发送；模型替身只证明指引送达，不判定解释质量。"""
     env.drv = security_driver(
-        *(record("INSERT OVERWRITE t SELECT 1", queryId=f"q-overwrite-{i}") for i in range(count)),
+        *(record("SHOW VARIABLES; SELECT 1", queryId=f"q-auxiliary-{i}") for i in range(count)),
         *(record("", queryId=f"q-unknown-{i}") for i in range(unclassified)),
         totals=(total, 0, 0),
     )
@@ -245,13 +246,13 @@ async def test_repeated_scheduled_overwrites_keep_counts_and_coverage(
     # 虚拟时钟跳过一小时不会唤醒真实后台刷新；本用例保持测试快照有效。
     data["targets"][0]["starrocks"]["schema_limits"]["max_age_seconds"] = 7200
     data["model"]["max_request_bytes"] = 256_000
-    task = "检查本窗审计，报告操作计数、关注理由和覆盖缺口。"
+    task = "检查本窗审计，报告保留信号、辅助信息和覆盖缺口。"
     env.scripts.add(
         task,
         tool_call("inspect_audit_security", **ARGS),
-        cite_results("本窗操作计数及覆盖说明如下。"),
+        cite_results("本窗信号及覆盖说明如下。"),
         tool_call("inspect_audit_security", **ARGS),
-        cite_results("本窗操作计数及覆盖说明如下。"),
+        cite_results("本窗信号及覆盖说明如下。"),
     )
     async with running(env, monkeypatch, config=runtime.ServeConfig.model_validate(data)) as (
         group, requests, rt
@@ -272,13 +273,13 @@ async def test_repeated_scheduled_overwrites_keep_counts_and_coverage(
         for request in requests:
             sent = json.loads(request.content)["content"]["text"]
             assert f"{total:,} 条" in sent
-            assert "高风险操作（审计行）" in sent
+            assert "高风险操作" not in sent
             assert ("分类计数不完整" in sent) == bool(unclassified)
             if unclassified:
-                assert f"覆盖写入 已确认至少 {count} 条" in sent
+                assert f"多语句（辅助信息）: 已确认至少 {count} 条" in sent
                 assert "无法判定候选 3 条" in sent
             else:
-                assert f"覆盖写入 {count}" in sent and "分类计数完整" in sent
+                assert f"多语句（辅助信息）: {count}" in sent and "分类计数完整" in sent
             assert "本次巡检未全部完成" not in sent
         calls = env.scripts.calls[task]
         assert len(calls) == 4

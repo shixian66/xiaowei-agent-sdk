@@ -41,6 +41,36 @@
 
 ## 3. 当前计划与下一项工作
 
+### 安全巡检攻击线索收窄（2026-10-28，本地离线候选）
+
+分支 `codex/security-attack-signals`，隔离目录 `/Users/kloenguyen/.codex/worktrees/manual-starrocks-security/agent-SDK`；从 fetch 后的 `origin/main@0b401b2e40e906c240de7bebd4bcacd8da0a10ae` 开始。用户确认[计划](docs/superpowers/plans/2026-10-28-security-inspection-attack-signals.md) blob `1a43823a71ed4a0240d6ba9fc7b51ae4bff6420e` 通过外部审查并授权开始开发；四项删减建议已落实到本工作树计划，桌面原计划及全部已有修改保留。
+
+P1/P2 实现与相关离线验证完成：操作粗筛和精判整组删除，规则标记 v2；多语句作辅助，现有注入/延迟规则保留。共用展示按实际字段选择，v1 不变，无显式版本框架。新旧字段与绑定兼容见 [ARCHITECTURE §6](ARCHITECTURE.md#6-只读查询保护)。没有改 Governance、Evidence、Session、权限、调度器、Web JS 或外发协议；名称与入口不改。
+
+**本轮有效证据（合成源/模型，真 SDK、Adapter、Evidence、PolicySession 和隔离 PostgreSQL）：**
+
+- 基线相关回归：196 passed / 1.46s。先补新范围回归，观察到规则/字段 53 failed、真实 Adapter 模板/参数 14 failed、报告 2 failed，均为预期范围差异；修复后通过。最终源码/测试差异（相对上述基线）的 SHA256：`3f91a449bb26d2491d497ec0833463d470b2490ca164aef6c91d9480b93140eb`，临时日志与一次性对照在 `/tmp/xw-security-attack-signals/`。
+- 正式入口早期闭环 6 passed / 2.63s：S1 成功、S5 拒绝及不可判定候选；最终相关集 **262 passed / 16.37s**，命令如下，日志 `final-related.log`：
+
+```bash
+SDK_TEST_POSTGRES_URL=postgresql+asyncpg://postgres@127.0.0.1:55432/postgres UV_OFFLINE=1 uv run --locked --extra dev python -m pytest tests/p1b/test_starrocks_security.py tests/p1b/test_starrocks_security_audit.py tests/sdk_core/test_security_inspection_eval.py tests/sdk_core/test_presentation_v4.py tests/sdk_core/test_database_skills.py tests/sdk_core/test_security_notification_paths.py tests/security/test_docs_command_consistency.py -q
+```
+
+- 两个已有浏览器用例的断言/夹具受新范围影响，因此实际运行；真实 Uvicorn/Chrome **2 passed / 8.95s**，日志 `final-browser.log`：
+
+```bash
+SDK_TEST_POSTGRES_URL=postgresql+asyncpg://postgres@127.0.0.1:55432/postgres SDK_TEST_CHROME='/Applications/Google Chrome.app/Contents/MacOS/Google Chrome' UV_OFFLINE=1 uv run --locked --extra dev python -m pytest tests/sdk_core/test_web_browser.py::test_security_report_default_view tests/sdk_core/test_web_browser.py::test_security_report_brief_keeps_coverage_and_counts -m browser -q
+```
+
+- `UV_OFFLINE=1 uv run --locked --extra dev ruff check .` 通过；`UV_OFFLINE=1 uv run --locked --extra dev mypy src/xiaowei` 通过（41 文件）；`git diff --check` 通过。仅受影响的检查，未跑本地全量。
+- 一次性同配置指纹：基线与候选均为 `sha256:2281a9e491bf38de07aa4198deea6636a4425235a42e97c4e49c91a752b664eb`（合成 AUDIT_TARGET，四种投影各 400000 字节）。三份 v1 业务 presentation（完整、61 样本、不完整）与基线逐项相等；结果在 `compatibility.json`，一次性复现命令为 `PYTHONPATH=.:src UV_OFFLINE=1 uv run --locked --extra dev python /tmp/xw-security-attack-signals/compare_compatibility.py`，不固化成永久指纹测试。
+- H1 保留一条真实 v1 结构投影写入 PostgreSQL、再用当前 catalog 的新 EvidenceStore 读取；原值不变且不重取审计。通用撤权保障未改，引用既有测试，不新增同边界复测。实际模板另覆盖完整超长 SLEEP 被选入并按 CASE 返回 NULL、完整超长覆盖写被排除；SDK 不可判定路径继续如实给下界。
+- 两次定时运行和普通 webhook/代理通知均沿真实本地应用路径验证：各次发送保留，61 条辅助多语句不展开样本。脚本输出只证明接线与展示，不证明真实模型自主判断。
+
+**审查与未覆盖：** 本地只读独立子 Agent 已核对上述源码/测试补丁：无 Critical/Important/Minor，结论可交外部复审；外部最终复审待用户发起。未推送、无 PR/CI 链接，未打包/部署。真实模型、公司源/客户端/代理实收、既有 A0/A3/H3 与 openUrl/漏查目标缺口继续开放。保留的粗筛表达式未改，不重复增加 DBA 语义任务；原先未完成的语义验证仍未完成。公司后续只测代表小时的新候选行数/字节/耗时和计划 S1–S5，不以旧 117 候选或离线记录代替。
+
+**下一项：** 对当前具体差异独立复审；获准后再推送/PR/CI，不因本地通过自动进入公司验收。
+
 ### 审批与任务回执（2026-10-27，审核通过并获准合并，公司待验）
 
 用户批准[修复计划 §8 v1.5＋R1–R3](docs/superpowers/plans/2026-10-20-production-dialogue-answer-repair.md#approval-task-delivery-repair)的实现、测试和常规修复；本地只用替身/合成数据与真实 SDK、正式运行装配和隔离 PostgreSQL，真实模型由用户在公司隔离环境验证。已重新 fetch main@c1c28a2321e4849d9e3fba0cb4ba8167dbfe341e，分支 codex/approval-task-receipts，独立工作树 /Users/kloenguyen/.codex/worktrees/approval-task-receipts/agent-SDK；原桌面工作区及其未提交内容未动。

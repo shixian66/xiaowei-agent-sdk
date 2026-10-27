@@ -701,7 +701,7 @@ async def test_security_report_default_view(postgres_url, monkeypatch, chrome_bi
         message = audit.scripts.add(
             "本窗安全报告", tool_call("inspect_audit_security", **ARGS),
             lambda call: answer(evidence_in(call), blocks=[
-                {"type": "text", "text": "🟡 有需核查线索，多语句用途待核对。"},
+                {"type": "text", "text": "🟢 本次规则范围内未发现注入或延迟线索，多语句仅作辅助。"},
                 *({"type": "fact", "evidence_id": e, "view": "full"} for e in evidence_in(call)),
             ]),
         )
@@ -713,13 +713,14 @@ async def test_security_report_default_view(postgres_url, monkeypatch, chrome_bi
             await send(page, message)
             await settled(page, 0, "completed")
             visible = await page.evaluate(f"{item(0)}.innerText")
-            assert "🟡 有需核查线索" in visible and "29,232" in visible
+            assert "🟢 本次规则范围内未发现注入或延迟线索" in visible and "29,232" in visible
             assert "分类计数完整" in visible and "无法判定候选 0" in visible
             assert "执行失败" in visible and "多语句" in visible and "etl" in visible
             assert all(key not in visible for key in (
                 "rules_version", "q-browser", "signal_counts",
             ))
-            assert await table_rows(page, 0) == [5, 1]
+            assert await table_rows(page, 0) == [4, 1]
+            assert "多语句（辅助信息）" in visible and "高风险操作" not in visible
             assert await page.evaluate(f"{item(0)}.querySelectorAll('details').length") == 1
             assert await page.evaluate(f"{item(0)}.querySelector('details').open") is False
             await page.evaluate(f"{item(0)}.querySelector('details').open = true")

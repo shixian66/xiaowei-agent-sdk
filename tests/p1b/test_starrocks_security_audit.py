@@ -7,12 +7,10 @@ import pytest
 from asyncmy.errors import ProgrammingError
 from tests.p1b.test_starrocks_adapter import Result, driver, failure, only
 from tests.p1b.test_starrocks_audit import AUDIT_TARGET, adapter, target
-from tests.p1b.test_starrocks_security import SIGNAL_CASES, analyze, batch
+from tests.p1b.test_starrocks_security import OPERATION_CASES, SIGNAL_CASES, analyze, batch
 
 from xiaowei.starrocks import (
-    SECURITY_DELETE_PATTERN,
     SECURITY_MULTIPLE_PATTERN,
-    SECURITY_OPERATION_PATTERN,
     SECURITY_OR_PATTERN,
     StarRocksErrorCode,
     audit_candidate_bound,
@@ -27,7 +25,7 @@ SOURCE = (
 TOTALS = ("window_rows", "window_failed_rows", "window_oversize_rows")
 
 
-def record(stmt="GRANT SELECT ON shop.t TO u", **updates):
+def record(stmt="SELECT SLEEP(1)", **updates):
     row = dict(zip(SOURCE, (
         START.replace(tzinfo=None), "q1", stmt, "OK", 5, "etl", "192.0.2.1", "shop", 0, 1,
     ), strict=True))
@@ -58,7 +56,7 @@ async def test_security_uses_one_prepared_connection_and_two_bounded_templates()
     assert (result.window_rows, result.window_failed_rows, result.window_oversize_rows) == (
         237398, 3, 135,
     )
-    assert result.row_count == 1 and result.rows[0]["stmt"].startswith("GRANT")
+    assert result.row_count == 1 and result.rows[0]["stmt"].startswith("SELECT SLEEP")
     assert result.rows[0]["timestamp"] == START.isoformat()
     assert not result.truncated and conn.closed and not conn.aborted
 
@@ -134,16 +132,12 @@ def regexp(pattern, text):
 def coarse(sql):
     upper = sql.upper()
     return (regexp(SECURITY_OR_PATTERN, upper) or "SLEEP" in upper
-            or regexp(SECURITY_MULTIPLE_PATTERN, sql)
-            or regexp(SECURITY_OPERATION_PATTERN, upper)
-            or (regexp(SECURITY_DELETE_PATTERN, upper) and "WHERE" not in upper))
+            or regexp(SECURITY_MULTIPLE_PATTERN, sql))
 
 
 @pytest.mark.parametrize("sql", [
-    *[sql for sql, _, _ in SIGNAL_CASES if not sql.startswith("WITH")],
+    *[sql for sql, _ in SIGNAL_CASES],
     "SELECT 1OR 1=1", "SELECT 0\nOR\t((1=1))", "SELECT 0 OR \"x\"=\"x\"",
-    "/* head */ GRANT SELECT ON t TO u", "-- head\n/* x */ DELETE FROM t",
-    "# head\nDROP DATABASE d", "CREATE/*x*/ROLE r", "INSERT/*x*/OVERWRITE t SELECT 1",
     "SELECT 1; /* head */ DROP TABLE t", "SELECT 1;;\nDELETE FROM t",
     "SELECT SLEEP /* head */ (1)",
 ])
@@ -155,15 +149,36 @@ def test_coarse_union_includes_declared_program_positives(sql):
 @pytest.mark.parametrize("sql", [
     "SELECT floor(1)", "SELECT 1 OR column_a=1", "CREATE TABLE t AS SELECT 1",
     "ALTER TABLE t DROP PARTITION p", "INSERT INTO t SELECT 1", "SELECT 1;",
+    *OPERATION_CASES,
 ])
 def test_business_keywords_do_not_flood_coarse_candidates(sql):
     assert not coarse(sql)
 
 
-@pytest.mark.parametrize("sql", [
-    "SELECT 0 OR/**/(1=1)", "WITH x AS (SELECT 1) DELETE FROM t",
-    "DELETE FROM t USING (SELECT 1 WHERE 1=1) x", "/* WHERE */ DELETE FROM t",
-])
+@pytest.mark.parametrize("sql", ["SELECT 0 OR/**/(1=1)"])
 def test_known_exclusions_are_not_claimed_as_end_to_end_coverage(sql):
     assert analyze(batch(sql)).matched_rows == 1
     assert not coarse(sql)
+
+
+@pytest.mark.parametrize(("sql", "is_candidate"), [
+    *[(sql, False) for sql in OPERATION_CASES],
+    *[(sql, True) for sql, _ in SIGNAL_CASES],
+    pytest.param("SELECT SLEEP(1), '" + "x" * 1001 + "'", True, id="oversize-sleep"),
+    pytest.param("INSERT OVERWRITE t SELECT '" + "x" * 1001 + "'", False,
+                 id="oversize-overwrite"),
+])
+async def test_real_candidate_template_filters_operations_without_losing_retained_signals(
+    sql, is_candidate, monkeypatch,
+):
+    from tests.sdk_core import dialogue_security
+
+    drv = collected(record(sql))
+    await adapter(drv).security_audit(START, END)
+    candidates, args = only(drv).executed[-1]
+    monkeypatch.setattr(dialogue_security, "records", lambda case: [record(sql)[:-1]])
+    columns, rows = dialogue_security.result(AUDIT_TARGET, 1, candidates, args)
+    assert columns == SOURCE
+    assert len(rows) == int(is_candidate)
+    if rows and len(sql) > AUDIT_TARGET.policy.max_sql_bytes:
+        assert rows[0][2] is None and rows[0][-1] == 1

@@ -134,11 +134,11 @@ async def test_s1_formal_sdk_path_keeps_totals_samples_dependencies_and_no_raw_t
         assert delivery.facts, tool_outputs(env.scripts.calls[message][1])
         (fact,) = delivery.facts
         data = json.loads(fact.result_json)
-        assert (data["scanned_rows"], data["matched_rows"], data["failed_rows"]) == (12, 3, 2)
+        assert (data["scanned_rows"], data["matched_rows"], data["failed_rows"]) == (12, 2, 2)
         assert data["coverage"]["checked_candidate_rows"] == 3
         assert data["coverage"]["match_counts_complete"] and not fact.truncated
-        assert fact.columns and len(fact.rows) == 3  # 正式 Web 事实表可读。
-        assert {r["query_id"] for r in fact.rows} == {"q0", "q1", "q2"}
+        assert fact.columns and len(fact.rows) == 2  # 正式 Web 事实表可读。
+        assert {r["query_id"] for r in fact.rows} == {"q0", "q1"}
         assert "security-raw-canary" not in json.dumps(env.scripts.calls[message], default=str)
         assert "security-raw-canary" not in fact.result_json
         assert "stmt" not in data and "sql" not in data
@@ -203,9 +203,9 @@ async def test_security_evidence_is_blocked_after_revocation_without_recollectio
     ("S2", ["SELECT IF(1=1,SLEEP(5),0)", "SELECT IF(2=2,SLEEP(5),0)",
             "SELECT IF(3=3,SLEEP(5),0)"], 3, {"delay_call": 3}),
     ("S3", ["SELECT 'sleep(5); DROP TABLE t; OR 1=1'", "SELECT 1 /* OR 1=1 */",
-            "SELECT 1 UNION SELECT 2", "TRUNCATE TABLE t"], 1, {"high_risk_operation": 1}),
+            "SELECT 1 UNION SELECT 2", "TRUNCATE TABLE t"], 0, {}),
     ("S4", ["GRANT SELECT ON t TO u", "DROP TABLE t", "TRUNCATE TABLE t"],
-     3, {"high_risk_operation": 3}),
+     0, {}),
 ])
 async def test_s2_s4_business_facts_use_the_same_sdk_and_evidence_path(
     postgres_url, monkeypatch, case, statements, matched, signal_counts,
@@ -226,11 +226,8 @@ async def test_s2_s4_business_facts_use_the_same_sdk_and_evidence_path(
         assert data["matched_rows"] == matched
         assert {k: v for k, v in data["signal_counts"].items() if v} == signal_counts
         if case == "S4":
-            assert data["operation_counts"]["drop"] == 1
-            assert next(row for row in data["rows"] if row["query_id"] == "q1")["state"] == "ERR"
-            assert {row["操作"]: row["执行状态"] for row in shown.rows} == {
-                "授权": "OK", "删表/库": "ERR", "清空表": "OK",
-            }
+            assert data["operation_counts"] == {} and data["rows"] == []
+            assert data["failed_rows"] == 1
         if case == "S2":
             assert all(row["requested_delay_seconds"] == 5 for row in data["rows"])
             assert all(row["请求延迟（s）"] == 5 and row["排队时间（ms）"] == 0
@@ -254,7 +251,7 @@ async def test_security_facts_render_with_existing_report_and_feishu_components(
         for format_ in ("md", "html"):
             report = build_report(delivery.model_copy(update={"report_format": format_}))
             body = report.content.decode()
-            assert "全窗聚合（读取时）12" in body and "授权" in body
+            assert "全窗聚合（读取时）12" in body and "时间延迟调用线索" in body
             assert "无法判定候选 0" in body
             assert "代表样本" in body and "需要核查 · 代表样本" not in body
             assert "q-security-report" not in body and "scanned_rows" not in body
@@ -279,7 +276,7 @@ async def test_real_model_security_suite_uses_the_formal_runtime_with_synthetic_
     async def review(sample):
         assert sample.delivery is not None
         data = json.loads(sample.delivery.facts[0].result_json)
-        expected = ((12, 3, 2), (4, 3, 1), (5, 1, 0), (3, 3, 1), (206, 200, 0))[case - 1]
+        expected = ((12, 2, 2), (4, 3, 1), (5, 0, 0), (3, 0, 1), (206, 200, 0))[case - 1]
         assert (data["scanned_rows"], data["matched_rows"], data["failed_rows"]) == expected
         if case == 5:
             assert data["coverage"]["scan_limited"]
@@ -327,7 +324,7 @@ async def test_report_presentation_through_formal_sdk_and_channel_projection(
         shown = json.loads(response.body)["delivery"]["facts"][0]["presentation"]
         assert "29,232" in shown["coverage"] and "无法判定候选 0" in shown["coverage"]
         assert ("分类计数不完整" in shown["coverage"]) is incomplete
-        assert len(shown["checks"]) == 5
+        assert len(shown["checks"]) == 4
         assert shown["checks"][-1]["审计行数"] == "6"
         assert ("已确认至少" in shown["checks"][2]["审计行数"]) is incomplete
         assert "raw-report-canary" not in response.body.decode()
@@ -366,7 +363,7 @@ async def test_sample_capacity_uses_actual_scalar_cells_not_internal_lists(
 
 
 @pytest.mark.parametrize("max_result_bytes", [20_000, 1200])
-async def test_s4_sample_limits_preserve_late_operation_representatives(
+async def test_sample_limits_preserve_late_attack_representatives(
     postgres_url, monkeypatch, max_result_bytes,
 ):
     target = type(AUDIT_TARGET).model_validate({
@@ -374,22 +371,78 @@ async def test_s4_sample_limits_preserve_late_operation_representatives(
         "max_result_bytes": max_result_bytes,
         "audit": {**AUDIT.model_dump(), "max_rows": 20, "candidate_rows": 200},
     })
-    rows = [record("TRUNCATE TABLE t", queryId=f"q{i}") for i in range(25)]
-    rows.append(record("GRANT SELECT ON t TO u", queryId="q25"))
+    rows = [record("SHOW VARIABLES; SELECT 1", queryId=f"q{i}") for i in range(25)]
+    rows.append(record("SELECT 0 OR 1=1", queryId="q25"))
     drv = security_driver(*rows, totals=(26, 0, 0))
     async with assembled(postgres_url, monkeypatch, drv, target) as env:
         enabled(env)
-        message = env.scripts.add("检查权限和 ETL 操作", tool_call(
+        message = env.scripts.add("检查注入及辅助多语句", tool_call(
             "inspect_audit_security", **ARGS,
         ), cite())
         delivery = await env.deliver(env.ctx(authorized=TOOLS), message)
         (fact,) = delivery.facts
         data = json.loads(fact.result_json)
-        assert data["matched_rows"] == data["signal_counts"]["high_risk_operation"] == 26
-        assert data["operation_counts"]["grant"] == 1
-        assert data["operation_counts"]["truncate"] == 25
-        assert {row["operations"] for row in data["rows"]} == {"grant", "truncate"}
+        assert data["matched_rows"] == 26 and data["signal_counts"]["boolean_probe"] == 1
+        assert data["signal_counts"]["stacked_statements"] == 25
+        assert data["operation_counts"] == {}
+        assert {row["signals"] for row in data["rows"]} == {"boolean_probe", "stacked_statements"}
         assert "q25" in {row["query_id"] for row in data["rows"]}
         assert data["coverage"]["omitted_samples"] == 26 - len(data["rows"])
         assert data["coverage"]["match_counts_complete"] and fact.truncated
         assert len(json.dumps(data["rows"], ensure_ascii=False).encode()) <= max_result_bytes
+
+
+async def test_read_oversize_delay_candidate_is_unclassified_not_a_clean_window(
+    postgres_url, monkeypatch,
+):
+    drv = security_driver(
+        record(None, stmt_present=1), record("SELECT SLEEP(1)"), totals=(100, 0, 1),
+    )
+    async with assembled(postgres_url, monkeypatch, drv, AUDIT_TARGET) as env:
+        enabled(env)
+        message = env.scripts.add(
+            "检查含超长候选的窗口", tool_call("inspect_audit_security", **ARGS), cite(),
+        )
+        delivery = await env.deliver(env.ctx(authorized=TOOLS), message)
+        data = json.loads(delivery.facts[0].result_json)
+        assert data["signal_counts"]["delay_call"] == 1
+        assert data["coverage"]["window_oversize_rows"] == 1
+        assert data["coverage"]["unclassified_candidate_rows"] == 1
+        assert not data["coverage"]["match_counts_complete"] and delivery.facts[0].truncated
+
+
+async def test_saved_v1_evidence_remains_readable_with_current_catalog(postgres_url, monkeypatch):
+    from tests.sdk_core.test_presentation_v4 import security_fact
+
+    from xiaowei.evidence import EvidenceStore
+    from xiaowei.models import ToolObservation
+    from xiaowei.starrocks_schema import DependencyCheck
+
+    async with assembled(postgres_url, monkeypatch, security_driver(), AUDIT_TARGET) as env:
+        enabled(env)
+        ctx = env.ctx(authorized=TOOLS)
+        request = ToolRequest(
+            tool_id=SECURITY_TOOL, target_id=AUDIT_TARGET.target_id,
+            call_id="old-inspection", tool_name="inspect_audit_security", arguments=ARGS,
+        )
+        checked = env.executes[(SECURITY_TOOL, AUDIT_TARGET.target_id)].check(request)
+        payload = json.loads(security_fact().result_json)
+        payload["source"] = f"{AUDIT.database}.{AUDIT.table}"
+        payload["window"] = {"start_time": ARGS["start_time"], "end_time": ARGS["end_time"],
+                             "time_zone": AUDIT.time_zone}
+        payload["rows"][0]["timestamp"] = ARGS["start_time"]
+        saved = await env.evidence.record(ctx, request, ToolObservation(
+            payload=payload, captured_at=env.clock(), truncated=False,
+            dependencies=(checked.dependency,),
+        ))
+        reopened = EvidenceStore(
+            env.engine, env.evidence.catalog, authorize=env.grants,
+            clock=env.clock, retention_seconds=3600,
+            verify_dependencies=DependencyCheck({AUDIT_TARGET.target_id: env.adapter}),
+        )
+        loaded = await reopened.inspect(saved.evidence_id, ctx)
+        assert json.loads(loaded.projections["model"])["data"] == payload
+        assert payload["rules_version"] == "manual-security-v1"
+        assert "high_risk_operation" in payload["signal_counts"]
+        assert "operations" in payload["rows"][0]
+        assert not audit_reads(env.drv)
