@@ -794,6 +794,127 @@ async def test_image_session_offers_no_execution_request_and_proposal_stays_unap
     assert actions.adapter.calls == []
 
 
+@pytest.mark.parametrize("state", ["rejected", "expired"])
+async def test_terminal_action_status_does_not_offer_model_an_approval_command(actions, state):
+    from datetime import timedelta
+
+    from sqlalchemy import text
+    from tests.sdk_core.test_app import last_output
+
+    env = actions.env
+    async with running(env, max_reply_chars=3500) as group:
+        action_id, _script = await paused(actions, group)
+        if state == "rejected":
+            await group.ask(f"/拒绝 {action_id}", sender=B)
+        else:
+            async with env.engine.begin() as conn:
+                await conn.execute(
+                    text("UPDATE xiaowei_action SET approval_expires_at=:past WHERE action_id=:id"),
+                    {"past": env.clock() - timedelta(seconds=1), "id": action_id},
+                )
+
+        observed = []
+
+        def checked(call):
+            observed.append(last_output(call)["data"])
+            return cite()(call)
+
+        message = "核对原动作状态"
+        env.scripts.add(
+            attributed(A, message),
+            tool_call(f"{SOURCE}__get_action_status", action_id=action_id),
+            checked,
+        )
+        await group.ask(message)
+        assert len(observed) == 1
+        assert observed[0]["state"] == state
+        assert "approval_command" not in observed[0]
+    assert actions.adapter.calls == []
+
+
+async def test_unresumable_proposal_replaces_contradictory_model_approval_prompt(actions):
+    env = actions.env
+    env.scripts.add(
+        attributed(A, "未暂停提案"),
+        tool_call(f"{SOURCE}__propose_change", value="after"),
+        cite("请点击批准按钮以激活任务"),
+    )
+    async with running(env, max_reply_chars=3500) as group:
+        await group.ask("未暂停提案", message_id="om_orphan_prompt")
+        rendered = "\n".join(group.outbox.texts())
+        assert "本轮未形成可恢复审批" in rendered
+        assert "请点击批准按钮" not in rendered
+        view = await env.results.view(group_ref("om_orphan_prompt", A), first=True)
+        assert all("请点击批准按钮" not in block.text for block in view.delivery.blocks
+                   if block.kind == "text")
+        assert "请点击批准按钮" not in view.delivery.content
+    assert await env.rows("SELECT state, failure_code FROM xiaowei_action") == [
+        ("rejected", "action_unresumable")
+    ]
+    assert actions.adapter.calls == []
+
+
+async def test_resumed_action_status_snapshot_is_presented_in_past_tense(actions):
+    env = actions.env
+    env.scripts.add(
+        attributed(A, "旧提案"),
+        tool_call(f"{SOURCE}__propose_change", value="old"), cite("未执行"),
+    )
+    async with running(env, max_reply_chars=3500) as group:
+        await group.ask("旧提案")
+        old_id = await actions.one()
+        env.scripts.add(
+            attributed(A, "新提案"),
+            tool_call(f"{SOURCE}__get_action_status", action_id=old_id),
+            tool_call(f"{SOURCE}__propose_change", value="new"),
+            request_execution, cite("此前动作未执行，新动作经你批准已执行。"),
+        )
+        await group.ask("新提案")
+        ((action_id,),) = await env.rows(
+            "SELECT action_id FROM xiaowei_action WHERE state='pending'"
+        )
+        env.clock.advance(10)
+        await group.ask(f"/批准 {action_id}", sender=B, message_id="om_past_status")
+        view = await env.results.view(group_ref("om_past_status", B), first=True)
+        old = [f for f in view.delivery.facts if f.metadata.get("action_id") == old_id
+               and f.tool_id.endswith("/get_action_status")]
+        assert len(old) == 1 and old[0].note_summary == "此前查询时"
+        assert "此前查询时" in "\n".join(group.outbox.texts())
+    assert len(actions.adapter.calls) == 1
+
+
+async def test_execution_receipt_supersedes_same_action_proposal_after_full_resume(actions):
+    env = actions.env
+    async with running(env, max_reply_chars=3500) as group:
+        action_id, _script = await paused(actions, group)
+        await group.ask(f"/批准 {action_id}", sender=B, message_id="om_dedup_execution")
+        view = await env.results.view(group_ref("om_dedup_execution", B), first=True)
+        matching = [f for f in view.delivery.facts if f.metadata.get("action_id") == action_id]
+        assert len(matching) == 1 and matching[0].metadata["state"] == "succeeded"
+        assert (await env.rows(
+            "SELECT count(*) FROM xiaowei_evidence "
+            "WHERE model_content::jsonb #>> '{data,action_id}'=:id", id=action_id,
+        ))[0][0] >= 2
+    assert len(actions.adapter.calls) == 1
+
+
+async def test_orphan_receipt_keeps_mixed_query_result_and_explanation(actions):
+    env = actions.env
+    env.scripts.add(
+        attributed(A, "查询并起草"),
+        tool_call("order_total", region="east"),
+        tool_call(f"{SOURCE}__propose_change", value="after"),
+        cite("查询已完成，动作未执行，需另行提出。"),
+    )
+    async with running(env, max_reply_chars=3500) as group:
+        await group.ask("查询并起草", message_id="om_mixed_orphan")
+        view = await env.results.view(group_ref("om_mixed_orphan", A), first=True)
+        assert any(f.tool_id == TOTAL_TOOL for f in view.delivery.facts)
+        assert "查询已完成" in view.delivery.content
+        assert "查询已完成" in "\n".join(group.outbox.texts())
+    assert actions.adapter.calls == []
+
+
 async def test_proposal_without_sdk_request_is_terminal_and_cannot_be_approved(actions):
     env = actions.env
     env.scripts.add(
@@ -2117,6 +2238,16 @@ async def test_partial_execution_facts_remain_delivered_when_the_other_action_ex
             for row in await env.rows("SELECT action_id FROM xiaowei_action ORDER BY call_id")
         ]
         await group.ask(f"/批准 {ids[0]}", sender=B, message_id="om_partial_fact")
+        current = await env.results.view(group_ref("om_partial_fact", B), first=True)
+        first = [f for f in current.delivery.facts if f.metadata.get("action_id") == ids[0]]
+        second = [f for f in current.delivery.facts if f.metadata.get("action_id") == ids[1]]
+        assert len(first) == 1 and first[0].metadata.get("state") == "succeeded"
+        assert len(second) == 1 and "two" in second[0].metadata["change"]
+        assert "approval_command" in second[0].metadata
+        assert (await env.rows(
+            "SELECT count(*) FROM xiaowei_evidence "
+            "WHERE model_content::jsonb #>> '{data,action_id}'=:id", id=ids[0]
+        ))[0][0] >= 2
         receipt = group.outbox.texts()[-1]
         assert ids[0] in receipt and "succeeded" in receipt and "动作执行事实" in receipt
         env.clock.now += timedelta(minutes=16)

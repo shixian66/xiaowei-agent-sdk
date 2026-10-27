@@ -11,7 +11,7 @@ from contextlib import AbstractContextManager, nullcontext
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from functools import partial
-from typing import TYPE_CHECKING, Any, Literal
+from typing import TYPE_CHECKING, Any, Literal, cast
 from uuid import uuid4
 from zoneinfo import ZoneInfo
 
@@ -192,8 +192,9 @@ def catalog(
             "at为有时区绝对ISO时间；interval_seconds为固定周期，单次任务为null。"
             "周期首跑未指定时at=null，激活即首跑；周期至少1小时。expires_at为带时区的绝对到期时间，"
             "仅周期任务可填；未指定则null长期。先澄清缺少的业务口径；"
-            "可从可信上下文确定的不重复问。代码冻结全部可见Evidence依赖、显示期限/权限/预算，"
-            "再经现有Action确认。后台重新取证，不沿用历史结论、不执行生产写。",
+            "可从可信上下文确定的不重复问。代码冻结全部可见Evidence依赖，显示目标、只读能力与期限。"
+            "用户要求创建/启用时，起草后以返回的Action ID请求执行，由SDK暂停等待群用户确认；"
+            "只起草不代表已进入审批或已激活。后台重新取证，不沿用历史结论、不执行生产写。",
         ),
         (
             LIST_TASKS,
@@ -209,7 +210,8 @@ def catalog(
             JobArgs,
             "read",
             "查询本群已知任务 ID 的状态；仅创建者或当前管理员可管理/查看。"
-            "数据不可读或过期时只返回安全状态，不展示正文。状态为接口接受不代表群成员已读。",
+            "draft的reason区分待确认、原提案失效或审批记录不可用；active仅表示已激活。"
+            "数据不可读或过期时只返回安全状态，不展示正文。接口接受不代表群成员已读。",
         ),
         (
             CONTROL,
@@ -315,7 +317,11 @@ class TaskDefinitions:
                     await conn.execute(
                         sql(
                             "SELECT j.*, n.state AS notification_state, n.receipt_id, "
-                            "n.reason AS notification_reason "
+                            "n.reason AS notification_reason, "
+                            "activation.action_id AS activation_id, "
+                            "activation.state AS activation_state, "
+                            "activation.failure_code AS activation_failure, "
+                            "activation.approval_expires_at AS activation_deadline "
                             "FROM xiaowei_scheduled_job j LEFT JOIN LATERAL "
                             "(SELECT a.state,a.receipt_id,a.reason FROM "
                             "xiaowei_notification_attempt a "
@@ -323,9 +329,17 @@ class TaskDefinitions:
                             "WHERE "
                             "COALESCE(a.job_id,r.job_id)=j.job_id "
                             "ORDER BY a.sequence DESC LIMIT 1) n "
-                            "ON TRUE WHERE j.job_id=:id"
+                            "ON TRUE LEFT JOIN LATERAL "
+                            "(SELECT a.action_id,a.state,a.failure_code,a.approval_expires_at "
+                            "FROM xiaowei_action a WHERE j.state='draft' "
+                            "AND a.owner_id=j.owner_id AND a.target_id='scheduled' "
+                            "AND a.write_tool_id=:activate AND a.expires_at>:now "
+                            "AND a.plan::jsonb #>> '{plan,parameters,job_id}'=j.job_id "
+                            "ORDER BY (a.state='pending' AND a.approval_expires_at>:now) DESC, "
+                            "a.created_at DESC,a.action_id DESC LIMIT 1) activation ON TRUE "
+                            "WHERE j.job_id=:id"
                         ),
-                        {"id": job_id},
+                        {"id": job_id, "activate": ACTIVATE, "now": self.clock()},
                     )
                 )
                 .mappings()
@@ -522,13 +536,11 @@ class ScheduledTasks:
             parameters={"job_id": job["job_id"]},
             revision="1",
             change=(
-                f"一次性提醒 {job['job_id']}\n{at}（{self.config.timezone}）\n"
+                f"一次性提醒\n{at}（{self.config.timezone}）\n"
                 f"机器人：{job['bot_alias']}\n内容：\n{job['text']}\n"
                 "必须在提醒时间之前批准；到时或之后批准不激活，请重新创建。\n"
                 f"已激活任务遇停机、繁忙或临时核验失败，允许迟到："
-                f"{job['lateness_seconds'] / 3600:g}小时；最多发送一次；"
-                f"最远提前 {self.config.max_advance_seconds / 86400:g}天；"
-                f"活动任务上限 {self.config.max_active_jobs}个。\n"
+                f"{job['lateness_seconds'] / 3600:g}小时；最多发送一次。\n"
                 f"发送截止：{deadline.isoformat()}。本任务将于 {expiry} 时失效（正文期限）。"
                 + (
                     "起草时包含历史 Evidence，不能续期；如需无旧依赖版本，"
@@ -649,30 +661,41 @@ class ScheduledTasks:
         expiry = (
             deadline.astimezone(zone).isoformat() if deadline else "长期，直到取消或权限/数据失效"
         )
-        budget = RunContext.model_validate_json(job["source_context"]).budget
-        interval = f"{spec.interval_seconds}秒" if spec.interval_seconds else "仅一次"
+        interval = (
+            f"每{spec.interval_seconds // 3600}小时"
+            if spec.interval_seconds and spec.interval_seconds % 3600 == 0
+            else f"每{spec.interval_seconds}秒" if spec.interval_seconds else "仅一次"
+        )
         dependency_note = (
             "起草含历史Evidence，实际失效时间受最早数据期限限制，不能续期旧数据；"
             "如需无旧依赖版本，用户可显式 /新建 后完整重述，会轮换全群共享上下文，不能自动新建。"
             if json.loads(job["definition_evidence_ids"])
-            else "每次新Session独立取证，不沿用原聊天历史。"
+            else ""
         )
-        tolerance = max(self.config.start_tolerance_seconds, self.config.poll_seconds)
-        long_limit = self.config.max_long_jobs_per_group
+
+        def capability(tool_id: str) -> str:
+            names = {
+                "local/run_readonly_query": "数据库只读查询",
+                "local/inspect_audit_security": "数据库安全巡检",
+            }
+            if tool_id in names:
+                return names[tool_id]
+            return next(
+                (c.description.split("。", 1)[0] for c in self.governance.catalog.contracts
+                 if c.tool_id == tool_id and c.target_id in spec.targets and c.description),
+                tool_id,
+            )
+
         return ActionPlan(
             parameters={"job_id": job["job_id"]},
             revision="1",
             change=(
-                f"独立只读Agent任务 {job['job_id']}\n首次：{start}（{self.config.timezone}）\n"
+                f"只读定时任务\n首次：{start}（{self.config.timezone}）\n"
                 f"周期：{interval}；机器人：{job['bot_alias']}\n任务：{job['text']}\n"
-                f"获准源：{sorted(spec.targets)}\n自动只读工具上界：{sorted(spec.tools)}\n"
-                f"每次预算：最多{budget.max_turns}轮、{budget.max_tool_calls}次工具（含一次通知）、"
-                f"{budget.timeout_seconds:g}秒、{budget.max_scope_checks}次数据范围核验。\n"
-                f"错过不补跑；准点容差{tolerance:g}秒；"
-                f"并发满同一时点可排队{self.config.queue_timeout_seconds}秒，超时skipped。"
-                "周期按激活/指定锚点，不随结束时间漂移；"
-                f"每群最多{long_limit}个长期任务。\n"
-                f"本任务将于 {expiry} 时失效。" + dependency_note
+                f"获准目标：{'、'.join(sorted(spec.targets))}\n"
+                f"只读能力：{'；'.join(capability(t) for t in sorted(spec.tools))}\n"
+                "错过不补跑。\n"
+                f"有效期：{expiry}。" + dependency_note
             ),
             impact="创建者＋原群当前权限执行独立只读Agent任务；可信路径通知，不授予生产写。",
             rollback="创建者或当前群成员管理员可暂停/取消；已准入请求不能撤回。",
@@ -1552,6 +1575,7 @@ class ScheduledTasks:
                     interval_seconds=spec.interval_seconds if spec else None,
                     next_run=job["next_run"].isoformat() if job["next_run"] else None,
                     state=job["state"],
+                    reason=self._reason(job),
                     expires_at=deadline.isoformat() if deadline else None,
                     running_days=max(0, (self.clock() - job["approved_at"]).days)
                     if job["approved_at"]
@@ -1723,10 +1747,8 @@ class ScheduledTasks:
         job_id = json.loads(action.plan)["plan"]["parameters"]["job_id"]
         await self.definitions.validate(await self.definitions.get(job_id), ctx)
 
-    def _observation(
-        self, job: Mapping[str, Any], state: str | None = None, *, body: bool = True
-    ) -> ToolObservation:
-        reason = job.get("reason", "pending")
+    def _reason(self, job: Mapping[str, Any], state: str | None = None) -> str:
+        reason = cast(str, job.get("reason", "pending"))
         if job.get("notice_state") is not None:
             reason += f"；原群停止说明={job['notice_state']}"
             if job["notice_state"] == "unknown":
@@ -1736,6 +1758,28 @@ class ScheduledTasks:
             and job.get("notification_reason") == "proxy_http_success"
         ):
             reason += "；代理返回 HTTP 2xx 成功状态，群内投递未确认"
+        if (state or job["state"]) == "draft":
+            action_id = job.get("activation_id")
+            activation = job.get("activation_state")
+            deadline = cast(datetime, job.get("activation_deadline"))
+            if action_id is None:
+                reason += "；未找到可用审批记录"
+            elif activation == "pending" and self.clock() < deadline:
+                at = deadline.astimezone(ZoneInfo(self.config.timezone)).isoformat()
+                reason += f"；待确认〈{action_id}〉，截至 {at}"
+            else:
+                status = (
+                    "已作废" if job.get("activation_failure") == "action_unresumable"
+                    else "审批已过期" if activation == "pending"
+                    else {"rejected": "已拒绝", "executing": "执行中", "succeeded": "执行成功",
+                          "unknown": "执行结果未知"}.get(str(activation), "不可确认")
+                )
+                reason += f"；原激活提案〈{action_id}〉{status}"
+        return reason
+
+    def _observation(
+        self, job: Mapping[str, Any], state: str | None = None, *, body: bool = True
+    ) -> ToolObservation:
         deadline = (
             self._agent_deadline(job)
             if job.get("kind") == "agent_task"
@@ -1747,7 +1791,7 @@ class ScheduledTasks:
                 state=state or job["state"],
                 at=(job.get("next_run") or job["run_at"]).isoformat(),
                 expires_at=deadline.isoformat() if deadline else "长期",
-                reason=reason,
+                reason=self._reason(job, state),
                 unverified_count=job.get("unverified_count", 0),
                 text=job["text"] if body else None,
                 notification_state=job.get("notification_state") or "not_sent",

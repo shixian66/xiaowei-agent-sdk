@@ -52,7 +52,7 @@ TARGET = "notifications"
 MAX_BODY_BYTES = 20_000
 UNKNOWN_NOTICE = "上一条结果未知，可能已经发过，重发可能重复。"
 APPROVAL_NOTICE = "批准后不会自动通知，完成后请另发通知要求。"
-REMINDER_APPROVAL_NOTICE = "本轮不立即发送；确认后按计划到期发送一次，不需要另发即时通知要求。"
+REMINDER_APPROVAL_NOTICE = "本轮不立即发送；确认后按计划发送，不需要另发即时通知要求。"
 _URL = re.compile(r"https://open\.feishu\.cn/open-apis/bot/v2/hook/[A-Za-z0-9_-]+\Z")
 
 

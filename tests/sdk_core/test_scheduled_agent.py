@@ -75,10 +75,12 @@ async def test_one_time_agent_uses_runner_read_tools_and_fact_delivery(env, monk
     async with running(env, monkeypatch, config=agent_config(env)) as (group, requests, rt):
         await group.ask(message)
         material = message_text(group.outbox.sent[-1][1])
-        assert TASK in material and QUERY in material
+        assert TASK in material and "数据库只读查询" in material
+        spec = json.loads(await env.scalar("SELECT agent_spec FROM xiaowei_scheduled_job"))
+        assert spec["tools"] == [QUERY] and spec["targets"] == [SR.target_id]
         assert requests == []
         action = await env.scalar("SELECT action_id FROM xiaowei_action")
-        await group.ask(f"/批准 {action}")
+        await group.ask(f"/批准{action}")
         assert await env.scalar("SELECT state FROM xiaowei_scheduled_job") == "active"
         env.clock.advance(60)
         await rt.scheduled_tasks.tick()
@@ -354,6 +356,177 @@ def managed_config(env):
     data["data_policy"]["model_tools"].extend(tools)
     data["webhook_bots"][0]["receive_tools"].extend(tools)
     return runtime.ServeConfig.model_validate(data)
+
+
+async def test_pending_task_reads_distinguish_orphan_and_append_reason_with_action_precedence(
+    env, monkeypatch,
+):
+    from uuid import uuid4
+
+    from sqlalchemy import text
+    from tests.sdk_core.test_app import last_output
+
+    async with running(env, monkeypatch, config=managed_config(env)) as (group, requests, rt):
+        jobs = {}
+        for label, pause in (("废草稿", False), ("待确认任务", True)):
+            env.scripts.add(
+                attributed(A, label),
+                tool_call(
+                    "scheduled__propose_agent_task", bot_alias="ops_alert_bot", task=TASK,
+                    target_ids=[SR.target_id], tool_ids=[QUERY],
+                    at=(env.clock() + timedelta(seconds=60)).isoformat(),
+                    interval_seconds=3600, expires_at=None,
+                ),
+                *([request_execution] if pause else []),
+                cite("等待确认"),
+            )
+            await group.ask(label)
+            jobs[label] = await env.scalar(
+                "SELECT job_id FROM xiaowei_scheduled_job WHERE job_id NOT IN "
+                "(SELECT unnest(CAST(:ids AS text[])))", {"ids": list(jobs.values())},
+            )
+        old_job, pending_job = jobs.values()
+        pending = await env.scalar("SELECT action_id FROM xiaowei_action WHERE state='pending'")
+        # 模拟同一 job 又有一个更晚的终态 Action；不能盖过仍有效的待批候选。
+        later = str(uuid4())
+        async with rt.engine.begin() as conn:
+            await conn.execute(
+                text("UPDATE xiaowei_scheduled_job SET reason='已有说明' WHERE job_id=:id"),
+                {"id": pending_job},
+            )
+            await conn.execute(text(
+                "INSERT INTO xiaowei_action "
+                "SELECT :id,owner_id,requester_id,proposal_session_id,proposal_turn_id,"
+                ":call,proposal_tool_id,write_tool_id,target_id,binding,plan,'rejected',"
+                "NULL,NULL,NULL,NULL,:now,:now,approval_expires_at,expires_at,'action_unresumable' "
+                "FROM xiaowei_action WHERE action_id=:pending"
+            ), {"id": later, "call": "second_activation", "now": env.clock() + timedelta(seconds=1),
+                "pending": pending})
+
+        message = "创建好，在运行了吗？"
+        observed = {}
+
+        def inspect_list(call):
+            observed["list"] = last_output(call)["data"]
+            return tool_call("scheduled__get_task", job_id=pending_job)(call)
+
+        def inspect_task(call):
+            observed["task"] = last_output(call)["data"]
+            return cite("新任务仍待你确认，尚未激活。")(call)
+
+        env.scripts.add(
+            attributed(A, message),
+            tool_call("scheduled__list_tasks", limit=30, after_id=None, include_text=True),
+            inspect_list, inspect_task,
+        )
+        await group.ask(message)
+        assert set(observed) == {"list", "task"}
+        items = {item["job_id"]: item for item in observed["list"]["tasks"]}
+        assert "已作废" in items[old_job]["reason"]
+        for reason in (items[pending_job]["reason"], observed["task"]["reason"]):
+            assert reason.startswith("已有说明；") and "待确认" in reason and pending in reason
+            assert later not in reason
+        # 失去有效 pending 后采用最新可读记录，而不是复活原候选。
+        async with rt.engine.begin() as conn:
+            await conn.execute(text(
+                "UPDATE xiaowei_action SET approval_expires_at=:past WHERE action_id=:id"
+            ), {"past": env.clock() - timedelta(seconds=1), "id": pending})
+
+        def inspect_latest(call):
+            observed["latest"] = last_output(call)["data"]
+            return cite()(call)
+
+        env.scripts.add(
+            attributed(A, "再核对草稿"),
+            tool_call("scheduled__get_task", job_id=pending_job), inspect_latest,
+        )
+        await group.ask("再核对草稿")
+        reason = observed["latest"]["reason"]
+        assert reason.startswith("已有说明；") and "已作废" in reason
+        assert later in reason and pending not in reason and "待确认" not in reason
+        assert requests == []
+        assert await env.scalar(
+            "SELECT count(*) FROM xiaowei_scheduled_job WHERE state='active'"
+        ) == 0
+
+
+@pytest.mark.parametrize("text_size,complete", [(1000, True), (1900, False)])
+async def test_full_task_page_keeps_approval_facts_or_fails_without_partial_evidence(
+    env, monkeypatch, text_size, complete,
+):
+    from uuid import uuid4
+
+    from sqlalchemy import MetaData, Table, select
+    from tests.sdk_core.test_app import last_output
+
+    data = managed_config(env).model_dump(mode="json")
+    # 单独触达60KB投影边界，不让脚本模型的较小请求限额先挡住满页。
+    data["model"]["max_request_bytes"] = 2_000_000
+    async with running(env, monkeypatch, config=runtime.ServeConfig.model_validate(data)) as (
+        group, requests, rt,
+    ):
+        await group.ask(draft(env, interval=3600, task="x" * text_size))
+        async with rt.engine.begin() as conn:
+            meta = MetaData()
+            jobs = await conn.run_sync(
+                lambda c: Table("xiaowei_scheduled_job", meta, autoload_with=c)
+            )
+            actions = await conn.run_sync(lambda c: Table("xiaowei_action", meta, autoload_with=c))
+            job = dict((await conn.execute(select(jobs))).mappings().one())
+            action = dict((await conn.execute(select(actions))).mappings().one())
+            for index in range(1, 30):
+                job_id = f"{index:032x}"
+                await conn.execute(jobs.insert(), {**job, "job_id": job_id})
+                plan = json.loads(action["plan"])
+                plan["plan"]["parameters"]["job_id"] = job_id
+                await conn.execute(actions.insert(), {
+                    **action, "action_id": str(uuid4()), "call_id": f"full_page_{index}",
+                    "plan": json.dumps(plan),
+                })
+        observed = []
+
+        def checked(call):
+            observed.append(last_output(call))
+            return cite()(call)
+
+        message = "读取满页任务正文"
+        env.scripts.add(
+            attributed(A, message),
+            tool_call("scheduled__list_tasks", limit=30, after_id=None, include_text=True), checked,
+        )
+        await group.ask(message, message_id="om_full_task_page")
+        if complete:
+            assert len(observed) == 1 and not observed[0]["truncated"]
+            items = observed[0]["data"]["tasks"]
+            assert len(items) == 30
+            assert all("待确认" in item["reason"] and len(item["text"]) == text_size
+                       for item in items)
+        else:
+            assert observed == []
+            assert await env.scalar(
+                "SELECT failure_code FROM xiaowei_request "
+                "WHERE reply_message_id='om_full_task_page'"
+            ) == "evidence_failed"
+            assert await env.scalar(
+                "SELECT count(*) FROM xiaowei_evidence WHERE tool_id='scheduled/list_tasks'"
+            ) == 0
+        assert requests == []
+
+
+async def test_bound_task_material_keeps_targets_and_read_capability_without_internal_budget(
+    env, monkeypatch,
+):
+    async with running(env, monkeypatch, config=agent_config(env)) as (group, requests, _rt):
+        await group.ask(draft(env, interval=3600))
+        plan = json.loads(await env.scalar("SELECT plan FROM xiaowei_action"))["plan"]
+        change = plan["change"]
+        assert SR.target_id in change and "数据库只读查询" in change
+        assert all(label not in change for label in ("每次预算", "工具上界", "排队", "最多30"))
+        assert QUERY not in change
+        material = message_text(group.outbox.sent[-1][1])
+        assert "数据库只读查询" in material and SR.target_id in material
+        assert "确认后按计划发送" in material and "到期发送一次" not in material
+        assert requests == []
 
 
 async def test_group_task_list_exposes_only_visible_jobs_and_permission_checked_body(

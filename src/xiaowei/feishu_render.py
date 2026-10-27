@@ -348,6 +348,8 @@ def business_presentation(fact: DeliveryFact) -> FactPresentation:
     data = fact_values(fact)
     if fact.tool_id == SECURITY_TOOL:
         return _security_presentation(fact, data)
+    if _control_fact(fact):
+        return _control_presentation(fact, data)
     shown = business_fact(fact)
     return FactPresentation(
         {key: data[key] for key in shown.metadata if key in data},
@@ -356,6 +358,86 @@ def business_presentation(fact: DeliveryFact) -> FactPresentation:
         if shown.columns else (),
         notices=fact_limit_notices(fact),
     )
+
+
+def _control_fact(fact: DeliveryFact) -> bool:
+    return fact.section == "action" or fact.tool_id in {
+        "scheduled/get_task", "scheduled/control_task", "scheduled/list_tasks",
+        "scheduled/activate_reminder", "notifications/send_webhook_message",
+    }
+
+
+def _control_presentation(fact: DeliveryFact, data: dict[str, object]) -> FactPresentation:
+    states = {
+        "draft": "尚未激活", "active": "已激活", "paused": "已暂停", "cancelled": "已取消",
+        "completed": "已结束", "disabled": "已停用", "pending": "等待确认，尚未执行",
+        "executing": "执行中，结果尚未确认", "succeeded": "已执行", "rejected": "未执行，已拒绝",
+        "unknown": "执行结果未知，不会自动重试", "unavailable": "当前不可核实",
+    }
+
+    def task_fields(values: Mapping[str, object]) -> dict[str, object]:
+        state = values.get("state")
+        label = states.get(str(state), str(state)) if state is not None else None
+        if label and fact.note_summary == "此前查询时":
+            label = "此前查询时：" + label
+        reason = values.get("reason")
+        if isinstance(reason, str):
+            reason = reason.removeprefix("pending；")
+        notify = values.get("notification_state")
+        return {key: value for key, value in {
+            "任务": values.get("text"), "状态": label,
+            "计划时间": values.get("at", values.get("next_run")),
+            "有效期": values.get("expires_at"),
+            "上次成功时间": values.get("last_success_at"),
+            "最近核验时间": values.get("checked_at"),
+            "说明": reason if reason not in (None, "pending", "") else None,
+            "通知": {
+                "accepted": "通知接口已接受，群内投递未确认",
+                "unknown": "通知结果未知，不会自动重发",
+                "sending": "通知结果尚未确认，不会自动重发", "failed": "通知失败",
+            }.get(str(notify)),
+        }.items() if value is not None}
+
+    if fact.tool_id == "scheduled/list_tasks":
+        tasks = cast(list[dict[str, object]], data.get("tasks", []))
+        rows = tuple({"任务": item.get("text") or item["job_id"],
+                      **task_fields(item)} for item in tasks)
+        columns = ("任务", "状态", "计划时间", "有效期", "说明")
+        return FactPresentation({}, columns, rows, notices=fact_limit_notices(fact))
+    if fact.target_id == "scheduled" and fact.tool_id.endswith(
+        ("/get_task", "/control_task", "/activate_reminder")
+    ):
+        return FactPresentation(task_fields(data), (), ())
+    if fact.target_id == "scheduled" and isinstance(data.get("result"), str):
+        # Action.result 是本地执行器固定保存的 JSON，不解析任意业务字符串。
+        try:
+            result = json.loads(cast(str, data["result"]))
+        except ValueError:
+            result = None
+        if isinstance(result, dict) and "job_id" in result:
+            return FactPresentation(task_fields(result), (), ())
+    if fact.target_id == "notifications":
+        fields = task_fields({**data, "notification_state": data.get("status")})
+        fields.pop("状态", None)
+        if "任务" in fields:
+            fields["内容"] = fields.pop("任务")
+        if data.get("bot_alias") is not None:
+            fields["接收方"] = data["bot_alias"]
+        if data.get("status") == "not_sent":
+            fields["通知"] = "未发送"
+        if data.get("reason") == "proxy_http_success":
+            fields["通知"] = "代理返回 HTTP 2xx 成功状态，群内投递未确认"
+            fields.pop("说明", None)
+        return FactPresentation(fields, (), (), notices=fact_limit_notices(fact))
+    hidden = {"action_id", "action", "revision"}
+    if fact.target_id == "scheduled":
+        hidden.add("parameters")  # 仅是内部 job_id；其他写动作的实际参数仍须默认可见。
+    fields = {key: value for key, value in data.items() if key not in hidden}
+    if "state" in fields:
+        fields["state"] = states.get(str(fields["state"]), fields["state"])
+        if fact.note_summary == "此前查询时":
+            fields["state"] = "此前查询时：" + str(fields["state"])
+    return FactPresentation(fields, (), ())
 
 
 def _raw_redundant(fact: DeliveryFact) -> bool:
@@ -446,6 +528,15 @@ def business_text(
         return display_text(value, multiline=plain_transport)
 
     def lines(fact: DeliveryFact) -> list[str]:
+        if delivery.answer_version == 4 and _control_fact(fact):
+            view = business_presentation(fact)
+            title = "任务记录" if fact.target_id == "scheduled" else f"动作目标：{fact.target_id}"
+            return [title, *(
+                rendered(f"{_ACTION_LABELS.get(key, key)}：{value}")
+                for key, value in view.fields.items()
+                if key != "approval_command" or include_approval_command
+            ), *(rendered("；".join(f"{k}：{row.get(k, '未提供')}" for k in view.columns))
+                 for row in view.rows), *view.notices]
         if delivery.answer_version == 4 and not fact.requires_complete:
             view = business_presentation(fact)
 
@@ -700,6 +791,24 @@ def _card(
     def fact_elements(index: int) -> None:
         nonlocal tables, region
         fact = delivery.facts[index]
+        if modern and _control_fact(fact):
+            control = business_presentation(fact)
+            title = (
+                "动作执行事实" if fact.requires_complete and "state" in fact.metadata
+                else "待你确认（尚未执行）" if "approval_command" in fact.metadata
+                else "任务记录" if fact.target_id == "scheduled"
+                else f"动作状态 · {fact.target_id}"
+            )
+            elements.append(_div(title))
+            if fact.target_id not in {"scheduled", "notifications"}:
+                elements.append(_div(f"目标：{fact.target_id}"))
+            for key, value in control.fields.items():
+                text = display_text(value) if isinstance(value, str) else _cell({key: value}, key)
+                elements.append(_div(f"{_ACTION_LABELS.get(key, key)}：{text}"))
+            if control.columns:
+                add_table(control.columns, control.rows)
+            elements.extend(_div(notice) for notice in control.notices)
+            return
         if not modern and region != fact.section and (fact.section == "action" or not preview):
             elements.append(_div("动作材料" if fact.section == "action" else FACT_LABEL))
         region = fact.section
@@ -825,6 +934,14 @@ def _card(
 
     def fact_details(index: int) -> None:
         fact = delivery.facts[index]
+        if modern and _control_fact(fact):
+            details_area.append(_div(f"{fact.tool_id} · {fact.evidence_id}\n{fact_scope(fact)}"))
+            if fact.note:
+                details_area.append(_div(fact.note))
+            details_area.append(_div(
+                fact.result_json or json.dumps(fact.metadata, ensure_ascii=False)
+            ))
+            return
         if fact.requires_complete or (modern and index not in technical):
             return
         if modern:

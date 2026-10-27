@@ -211,6 +211,7 @@ def proposal_policy(
 
 EXECUTION_POLICY = "action.execution-request/1"
 EXECUTION_SUFFIX = "/request_action_execution"
+ACTION_UNRESUMABLE = "本轮未形成可恢复审批，动作已作废、未执行；请重新提出并明确请求执行"
 
 
 def execution_requests(
@@ -486,9 +487,12 @@ class ActionService:
             await binding.check_material(ctx, action)
         if state == "pending" and self._clock() >= action.approval_expires_at:
             state = "expired"
+        material = self._material(action)
+        if state != "pending":
+            material.pop("approval_command")
         return ToolObservation(
             payload={
-                **self._material(action),
+                **material,
                 "state": state,
                 "approver": (
                     f"群成员 {hashlib.sha256(action.approver_id.encode()).hexdigest()[:8]}"
@@ -497,6 +501,8 @@ class ActionService:
                 ),
                 "result": REMINDER_TIME_PASSED
                 if action.failure_code == "reminder_time_passed"
+                else ACTION_UNRESUMABLE
+                if action.failure_code == "action_unresumable"
                 else action.result or "尚无执行结果",
             },
             captured_at=self._clock(),

@@ -32,7 +32,12 @@ from typing import Protocol
 
 from pydantic import AwareDatetime, BaseModel, ConfigDict, Field, model_validator
 
-from xiaowei.actions import ACTION_SETTLE_TIMEOUT_SECONDS, REMINDER_TIME_PASSED, ActionOutcomeError
+from xiaowei.actions import (
+    ACTION_SETTLE_TIMEOUT_SECONDS,
+    ACTION_UNRESUMABLE,
+    REMINDER_TIME_PASSED,
+    ActionOutcomeError,
+)
 from xiaowei.app import Application, Mode, PausedTurn, ResumeRejectedError, TurnError, TurnReason
 from xiaowei.channel_store import (
     CallerFailureCode,
@@ -106,8 +111,7 @@ _RECEIPTS: Mapping[FailureCode, str] = {
     ),
     "action_upgrade_invalidated": "已因升级作废、未执行，请重新提出",
     "action_unresumable": (
-        "本轮未形成可恢复审批，动作已作废、未执行；请重新提出并明确请求执行"
-        "（含图片的会话不能请求执行，需先发送 /新建 后重新提出）"
+        ACTION_UNRESUMABLE + "（含图片的会话不能请求执行，需先发送 /新建 后重新提出）"
     ),
     "action_expired": "候选已过期，未执行；暂停前调查未形成最终报告、未入历史，请重新调查并提出",
     "busy": "系统繁忙，本轮未执行，请稍后用新消息重试",
@@ -529,6 +533,7 @@ class ResultDelivery:
             raise ResultUnverifiableError from None
         facts = []
         content = delivery.content
+        unresumable = set()
         for fact in delivery.facts:
             command = fact.metadata.get("approval_command")
             action_id = fact.metadata.get("action_id")
@@ -545,10 +550,12 @@ class ResultDelivery:
                 facts.append(fact)
                 continue
             status = (
-                _RECEIPTS["action_unresumable"]
+                ACTION_UNRESUMABLE
                 if failure == "action_unresumable"
                 else "候选当前不可批准；请按 Action ID 查询动作状态"
             )
+            if failure == "action_unresumable":
+                unresumable.add(action_id)
             metadata = {
                 key: value for key, value in fact.metadata.items() if key != "approval_command"
             }
@@ -574,13 +581,43 @@ class ResultDelivery:
                 json.dumps("approval_status") + ": " + json.dumps(status, ensure_ascii=False)
             )
             content = content.replace(original, replacement).replace(command, status)
-        return delivery.model_copy(
+        result = delivery.model_copy(
             update={
                 "facts": tuple(facts),
                 "content": content,
                 "session_notice": self._session_warning(record.session_state, record.channel),
             }
         )
+        if (result.answer_version == 4 and record.run_turn_id is not None
+                and record.run_turn_id != record.turn_id):
+            # 恢复前读取的任务/动作状态沿原执行 turn 保存，但已经是过去的快照。
+            result = result.model_copy(update={"facts": tuple(
+                f.model_copy(update={"note_summary": "此前查询时"})
+                if f.captured_at <= record.created_at
+                and (
+                    (f.target_id == "scheduled"
+                     and f.tool_id.endswith(("/get_task", "/list_tasks")))
+                    or f.tool_id.endswith("/get_action_status")
+                )
+                else f for f in result.facts
+            )})
+        if (
+            result.answer_version == 4
+            and len(unresumable) == 1
+            and facts
+            and all(f.metadata.get("action_id") in unresumable for f in facts)
+        ):
+            from xiaowei.feishu_render import business_text
+            from xiaowei.models import DeliveryText
+
+            result = result.model_copy(
+                update={"blocks": (DeliveryText(text=ACTION_UNRESUMABLE),)}
+            )
+        if result.answer_version == 4:
+            from xiaowei.feishu_render import business_text
+
+            result = result.model_copy(update={"content": business_text(result)})
+        return result
 
     @staticmethod
     def _session_warning(snapshot: SessionSnapshot | None, channel: Channel) -> str | None:

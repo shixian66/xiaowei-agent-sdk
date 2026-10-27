@@ -22,6 +22,96 @@ def panels(message):
     return [e for e in message["card"]["body"]["elements"] if e["tag"] == "collapsible_panel"]
 
 
+@pytest.mark.parametrize("state,expected", [
+    ("active", "已激活"), ("draft", "尚未激活"), ("unknown", "结果未知"),
+])
+def test_task_receipts_show_business_state_and_real_delivery_limit_without_raw_fields(
+    state, expected,
+):
+    from xiaowei.feishu_render import business_text
+
+    data = {
+        "job_id": "internal-job-id", "state": state, "at": "2026-10-26T14:10:00+08:00",
+        "expires_at": "2026-11-23T22:13:00+08:00", "reason": "受最早数据期限限制",
+        "text": None, "notification_state": "accepted", "receipt_id": "internal-receipt-id",
+        "unverified_count": 0, "checked_at": None, "last_success_at": None,
+    }
+    source = fact(
+        target_id="scheduled", tool_id="scheduled/get_task", columns=(), rows=(),
+        metadata=data, result_json=json.dumps(data),
+    )
+    value = business(source)
+    visible = "\n".join(text_parts(build_feishu_message(value, 3500, "oc"), folded=False))
+    plain = business_text(value)
+    for text in (visible, plain):
+        assert expected in text and "2026-11-23" in text and "最早数据期限" in text
+        assert "群内投递未确认" in text
+        assert all(key not in text for key in (
+            "internal-job-id", "internal-receipt-id", "notification_state", "字段", "采集于",
+            "采集时的结果", "unverified_count",
+        ))
+    assert source.metadata["job_id"] == "internal-job-id"
+
+
+def test_protected_approval_is_compact_but_keeps_bound_scope_and_command_in_card_and_plain():
+    from xiaowei.feishu_render import business_text
+
+    data = {
+        "action_id": "00000000-0000-4000-8000-000000000001",
+        "action": "scheduled/activate_reminder", "parameters": '{"job_id":"internal-job-id"}',
+        "revision": "internal-version", "change": "目标 fat；只读能力：数据库安全巡检；每1小时",
+        "impact": "仅只读，按计划通知指定群", "rollback": "可取消；已准入请求不能撤回",
+        "approve_before": "2026-10-26T13:50:00+08:00",
+        "approval_command": "@小维 /批准 00000000-0000-4000-8000-000000000001",
+    }
+    source = fact(
+        target_id="scheduled", tool_id="scheduled/propose_agent_task", columns=(), rows=(),
+        metadata=data, result_json=json.dumps(data), requires_complete=True, section="action",
+    )
+    value = business(source)
+    visible = "\n".join(text_parts(build_feishu_message(value, 3500, "oc"), folded=False))
+    for text in (visible, business_text(value)):
+        assert all(part in text for part in (
+            "fat", "数据库安全巡检", "每1小时", "仅只读", "可取消", "2026-10-26T13:50",
+            "@小维 /批准 00000000-0000-4000-8000-000000000001",
+        ))
+        assert all(part not in text for part in (
+            "internal-job-id", "internal-version", "scheduled/activate_reminder", "采集于",
+            "采集时的结果", "字段", "当前版本",
+        ))
+    assert source.requires_complete and source.metadata == data
+
+
+def test_compact_shared_write_material_keeps_actual_parameters_and_important_change():
+    from xiaowei.feishu_render import business_text
+
+    source = fact(
+        target_id="alertmanager-prod", tool_id="alertmanager-prod/propose_silence",
+        columns=(), rows=(), requires_complete=True, section="action",
+        metadata={"parameters": '{"matchers":"service=orders","duration":"30m"}',
+                  "change": "静默 service=orders，从5分钟改为30分钟", "impact": "暂停通知30分钟"},
+    )
+    value = business(source)
+    visible = "\n".join(text_parts(build_feishu_message(value, 3500, "oc"), folded=False))
+    for text in (visible, business_text(value)):
+        assert "alertmanager-prod" in text and "service=orders" in text
+        assert "5分钟改为30分钟" in text and "暂停通知30分钟" in text
+
+
+@pytest.mark.parametrize("target", ["scheduled", "notifications"])
+def test_cluster_name_does_not_classify_business_query_as_control_receipt(target):
+    from xiaowei.feishu_render import business_text
+
+    source = fact(
+        target_id=target, columns=("region", "total"), rows=({"region": "east", "total": 7},),
+        metadata={}, result_json=None,
+    )
+    value = business(source)
+    visible = "\n".join(text_parts(build_feishu_message(value, 3500, "oc"), folded=False))
+    for text in (visible, business_text(value)):
+        assert "east" in text and "7" in text
+
+
 def security_fact(*, coverage=None, payload_updates=None, **changes):
     """人工核对的报告夹具；统计不通过检测器或展示函数计算。"""
     from xiaowei.starrocks_security import OPERATIONS, SECURITY_TOOL
