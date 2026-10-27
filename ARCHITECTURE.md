@@ -384,7 +384,7 @@ Alertmanager 原生 API v2 若由薄 Adapter 直连，须支持其 Web 配置可
 
 <a id="security-context-reuse-proposal"></a>
 
-**安全巡检成文决定（C1已批准，2026-10-27；实现状态见handoff）。** 仅调整安全Skill的颜色语义、中性“代表样本”标题和工具说明，按本轮证据解释关注理由，不因操作类型命中机械要求人工核查；原计数、覆盖、不完整提示和每次发送规则不变。复用H1/H2，不新增白名单、长期记忆、缓存或权限；按现有D1，定时运行只能检索同操作群定时结果，取不到群聊交互调查，B1已选择(a)维持该范围，见[B1决定](#scheduled-interactive-history-choice)。实施按[计划§9 R3](docs/superpowers/plans/2026-10-23-security-inspection-report-presentation.md#security-context-r3)推进I1→I3→按条件决定I2；实现合入前不替代上文当前成文契约。产品决定、开发授权、真实模型/数据授权和部署分别记录，当前实现与验证见[handoff](AGENT_HANDOFF.md#3-当前计划与下一项工作)。
+**安全巡检成文决定（C1已批准，2026-10-27；实现状态见handoff）。** 仅调整安全Skill的颜色语义、中性“代表样本”标题和工具说明，按本轮证据解释关注理由，不因操作类型命中机械要求人工核查；原计数、覆盖、不完整提示和每次发送规则不变。复用H1/H2，不新增白名单、长期记忆、缓存或权限；按现有D1，定时运行只能检索同操作群定时结果，取不到群聊交互调查，B1已选择(a)维持该范围，见[B1决定](#scheduled-interactive-history-choice)。实施按[计划§9 R3](docs/superpowers/plans/2026-10-23-security-inspection-report-presentation.md#security-context-r3)推进I1→I3→按条件决定I2。C1的成文规则随I1实现合入适用，真实模型效果与部署仍分别验收。产品决定、开发授权、真实模型/数据授权和部署分别记录，当前实现与验证见[handoff](AGENT_HANDOFF.md#3-当前计划与下一项工作)。
 
 <a id="tidb-query-diagnosis"></a>
 

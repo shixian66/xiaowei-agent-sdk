@@ -4,7 +4,7 @@
 
 > TiDB 开发局部更新：2026-10-25。下述原产品快照未作全面复核；TiDB 调查基线、当前授权与验证缺口单列在 §3，不以旧快照或新计划推定公司部署状态。
 
-> 局部更新：2026-10-27。已核对H2随PR #139合入；安全巡检R3文档已提交；I1已有本地离线候选，未合入/部署，真实措辞质量仍待I3。C1已批准，B1维持(a)。精确基线、有效证据、批准决定与下一项见§3；其他任务保持原核对范围。
+> 局部更新：2026-10-27。I1已随PR #140合入，CI 9项全通过，未部署；用户选择下一步仅离线推进I3。C1已批准，B1维持(a)，I2尚未启动。精确版本、有效证据、缺口和下一项见§3；其他任务保持原核对范围。
 
 **OpenAI Agents SDK 负责 Agent Loop；小维负责权限、受治理工具执行、证据真实性和数据边界。**
 
@@ -13,14 +13,14 @@
 | 项目 | 已核对事实 |
 | --- | --- |
 | 仓库 | [shixian66/xiaowei-agent-sdk](https://github.com/shixian66/xiaowei-agent-sdk) |
-| 产品代码基线 | 已fetch最新`origin/main@bac5df3d8dd57e1c5a6ec5edd1b338b60ed43837`；I1分支`codex/security-inspection-i1`复用干净隔离工作树，并带入R3文档；精确范围和证据见§3 |
+| 产品代码基线 | 已fetch确认`origin/main@c1c28a2321e4849d9e3fba0cb4ba8167dbfe341e`；本轮从该版本在已有干净隔离工作树建立`codex/security-inspection-i3-offline`，产品源码和测试不改 |
 | 源码与检查 | 当前源码仅保留 `src/xiaowei`；旧工程及专属测试、Compose、迁移入口、`compose-smoke` CI 和 Alembic 依赖已移除。保留产品测试、公共检查与旧回答兼容路径；旧工程历史可从 Git 查回 |
 | 当前存储与回答 | 已合入H2的应用schema为16，016只新增定时结果快照与期限；安全巡检可信失败元数据沿已有JSON保存。当前新回答保存 v4，旧 v2/v3/Legacy 与已绑定交付保持原语义，SDK 表不改 |
 | 锁定依赖 | SDK `0.22.3`、Lark Channel `1.4.0`、MCP `2.2.0`、sqlglot `30.17.0`、`nh3 0.3.7`、`tinycss2 1.5.1`、Pillow `13.0.0`、certifi `2026.10.19`（后两项为严格审计发现的既有漏洞定向升级）；开发工具链传递依赖 filelock `4.2.1`，不进入运行依赖 |
 | 正式入口 | `xiaowei serve`、`config check`、`model check`、`storage init/upgrade/cleanup`、`requests resend`；命令与环境准备以 README 为准 |
 | 最近有记录的公司部署 | 用户回报镜像标签 `3aad626b42fc4ef2f37cafe342cf1826d453ca30`；未独立核验服务器。本次未部署，不据此认定 pre 的 StarRocks 版本 |
-| 当前验收结论 | R2外部限定复审通过；I1目标回归3项、相关回归163项、Ruff及mypy通过，独立子Agent已审查08831ef、无P0–P2阻断；离线接线不代表I3措辞质量或真实效果验收 |
-| 当前任务授权 | 先文档修订、检查与本地提交；用户另已确认文末I1开发/离线授权生效，文档提交后从最新main隔离实施，仅I1。I2/I3、真实模型/公司服务/飞书、权限配置、推送、PR、合并及部署未授权 |
+| 当前验收结论 | I1外部独立审查已通过，PR #140在已审head上CI 9/9成功后合入；I3当前只完成下述离线通路复核，真实模型质量与收益尚未验收 |
+| 当前任务授权 | 仅离线推进I3，复用现有入口、采集器与隔离PG，必要文档和本地提交；本轮不调用真实模型/公司服务/飞书，不改权限、不启动I2、不推送、建PR、合并或部署新的差异 |
 
 桌面原目录的旧分支及未提交材料保留；本次复用干净隔离工作树编写文档，未读取公司配置凭据。旧监控和回答修复记录仅为注明版本的证据，不作为本轮输入或展示范围扩展授权。
 
@@ -41,17 +41,19 @@
 
 ## 3. 当前计划与下一项工作
 
-### 安全巡检关注事项与历史背景复用（R3／I1本地离线候选）
+### 安全巡检关注事项与历史背景复用（I1已合入，I3仅离线复核）
 
-基线为fetch确认的`origin/main@bac5df3d8dd57e1c5a6ec5edd1b338b60ed43837`；分支`codex/security-inspection-i1`，工作目录`/Users/kloenguyen/.codex/worktrees/ops-history-h1/agent-SDK`。原文档分支保留R3提交`4ec78cf22025479ec909cfaf51036afd0b744cb9`；I1已带入三次文档提交，实施起点为`4fe1fa2d3ea3d5865f298bbf9e5acd398c586961`。[R3计划§9](docs/superpowers/plans/2026-10-23-security-inspection-report-presentation.md#security-context-r3)blob **`a53796d0ce79924f8f7fdf8708d996f512ad3da3`**，R2外部限定复审已通过、B1/B2关闭。[C1](ARCHITECTURE.md#security-context-reuse-proposal)已批准、实现合入前未生效；[B1选择(a)](ARCHITECTURE.md#scheduled-interactive-history-choice)、(b)未批准，D1不变。
+I1基线`bac5df3d8dd57e1c5a6ec5edd1b338b60ed43837`，已审候选`7adc62515585abcb7d7f1456159d97e74c9ad867`随[PR #140](https://github.com/shixian66/xiaowei-agent-sdk/pull/140)合入`c1c28a2321e4849d9e3fba0cb4ba8167dbfe341e`；合并树与候选树一致。Claude外部独立审查通过、无阻断。[CI #410](https://github.com/shixian66/xiaowei-agent-sdk/actions/runs/40430937869)在该候选上9/9成功：非部署完整回归 **5307 passed、235 skipped、98 deselected**，发布包 **84 passed**；基础/安全门禁与这些集合有重复，不相加。Ruff、mypy（41源码文件）、入口、依赖与敏感信息检查均通过。I1只调整安全Skill的关注理由、共用文件中性“代表样本”标题和巡检工具说明；计数、覆盖、检测器、schema、Evidence、配置和H1 WORK_METHOD不变。未部署。
 
-I1只改安全Skill第9行颜色/核查理由、共用文件样本标题为“代表样本”、巡检工具说明（审计行计数及关注理由）；检测器、计数、schema、投影、Evidence指纹、配置和H1 WORK_METHOD均未改。现有分片报告测试同步中性标题识别，保留范围/时间全部断言；现有正式定时入口补52条完整分类与42条+3条无法判定场景，均连续运行两次并逐次发送。
+本轮离线起点为上述合入版本，分支`codex/security-inspection-i3-offline`，复用工作目录`/Users/kloenguyen/.codex/worktrees/ops-history-h1/agent-SDK`。产品与测试未改，不重复编写已具备的评测框架。[计划§9.7](docs/superpowers/plans/2026-10-23-security-inspection-report-presentation.md#97-最小切片与启动条件)补齐基线/候选、相同输入与harness、原任务入口和真实材料缺口；产品决定仍只见[ARCHITECTURE C1](ARCHITECTURE.md#security-context-reuse-proposal)及[B1(a)](ARCHITECTURE.md#scheduled-interactive-history-choice)。
 
-锁定SDK0.22.3、隔离PG/脚本模型与合成审计：目标回归先在旧标题/旧指引处3项失败，再3项通过；相关6文件回归 **163 passed / 23.70秒**，Ruff通过，mypy **41源码文件**通过。测试只确认获准指引到达真实SDK端点及治理/存储/交付，不判定真实解释质量。虚拟时钟跳过后台刷新，测试快照最大年龄设为7200秒，不改生产配置。日志`/private/tmp/xw-security-i1-{red,green,tests,ruff,mypy}.log`，精确命令、文件blob与版本见`/private/tmp/xw-security-i1-validation.json`。
+锁定SDK0.22.3、隔离PG及脚本模型复核：正式定时入口的52/42审计行、逐次发送、分类不完整/源失败 **5 passed / 5.68秒**；已有采集器和合成安全样例、参数修正 **25 passed / 22.24秒**。文档命令检查 **2 passed**、受影响相对链接/锚点 **15项通过**、`git diff --check`通过；日志`/private/tmp/xw-security-i3-offline-{entry,collector,docs,links,diff}.log`。该次离线复核与文档候选`59da81d65b42f92dcad6342c5fa3def248e6c6c5`的精确命令、文件哈希和检查结果记录于`/private/tmp/xw-security-i3-offline-validation.json`。I1既有本地163项及独立审查记录仍在`/private/tmp/xw-security-i1-validation.json`、`/private/tmp/xw-security-i1-review.md`。本轮仅文档变化，全量与Ruff/mypy引用上述相同产品/测试树的CI，不再重复全量。
 
-R3文档检查2项、受影响链接14项及diff通过，日志`/private/tmp/xw-security-context-r3-{docs,links,diff}.log`。I1文档命令检查2项、受影响相对链接/锚点6项及diff检查通过，日志`/private/tmp/xw-security-i1-{docs,links,diff}.log`。独立子Agent只读审查`08831ef65140b7be37c014d71df26c9fd4c5d9ef`相对实施起点的差异，未发现P0–P2阻断或非阻断问题；核对8个文件blob及8份日志哈希，未重跑测试组。记录`/private/tmp/xw-security-i1-review.md`；审查后仅补本文状态，产品/测试保持该版本。未推送、建PR、合并、部署或调用真实模型/公司服务/飞书。
+离线文档`59da81d`已获Claude限定审查，无阻断；当前仅补计划§9.7的A1验收项、旧规则指引和版本去重，文档命令与差异/链接检查记录于`/private/tmp/xw-security-i3-offline-f1-validation.json`，待外部限定核对F1差异。
 
-下一项：交付精确I1候选供用户复核→I3（需模型/数据授权）→按§9.7条件决定I2。真实模型自主性/措辞效果、调度原源/关联、通知Evidence对交互读者的影响、公司环境与飞书实收仍为缺口；脚本模型不能关闭I3/H3/A0/A3。本轮未跑全仓默认回归，验证范围为上述直接受影响节点。
+当前`security`套件只有合成S1–S5交互材料；未接入I3所需的脱敏真实三集群材料、两条SQL的模型解释、变化/过期场景或实际调度背景查询。脚本模型只证明通路，未评测真实工具选择、澄清、补证、解释质量及模型耗时/用量；重复背景查询和节省成本均为未测；A1（布尔探测/延迟信号被误写为🟢或无依据降低关注）及定时入口真实模型验收方式仍待I3落实。通知Evidence对交互读者的影响、外部调度来源/关联键、公司环境及飞书实收仍为缺口，既有H3/A0/A3也未关闭。
+
+下一项：用户本轮已选择离线，I3真实对比保留为未验收；后续取得模型/材料与费用授权后，按计划§9.7在获准环境对比并核实重复背景查询。I2只有启动条件满足且现有工具仍有具体缺口时再决定，不因离线通过自动开发。新差异仅本地提交；本轮未调用真实模型/公司服务/飞书，未推送、建PR、合并或部署。
 
 ### 跨会话运维事实追溯（H1/H2已合入，H3未实施）
 
