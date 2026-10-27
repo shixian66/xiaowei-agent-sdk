@@ -727,7 +727,9 @@ async def test_action_proposal_with_report_request_sends_card_and_resends(
     assert len(outbox.sent) == 2
     assert outbox.texts()[0] == outbox.texts()[1]
     assert "含需完整展示的动作事实" in outbox.texts()[0]
-    assert "动作提案" in outbox.texts()[0]
+    assert "本轮未形成可恢复审批" in outbox.texts()[0]
+    assert "before → after" in outbox.texts()[0] and "/批准" not in outbox.texts()[0]
+    assert actions.adapter.calls == []
 
 
 @pytest.mark.asyncio

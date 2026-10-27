@@ -140,6 +140,8 @@ def test_cluster_name_does_not_classify_business_query_as_control_receipt(target
     visible = "\n".join(text_parts(build_feishu_message(value, 3500, "oc"), folded=False))
     for text in (visible, business_text(value)):
         assert "east" in text and "7" in text
+        assert f"数据范围：{target}" in text
+        assert "任务记录" not in text and "通知状态" not in text
 
 
 def security_fact(*, coverage=None, payload_updates=None, **changes):

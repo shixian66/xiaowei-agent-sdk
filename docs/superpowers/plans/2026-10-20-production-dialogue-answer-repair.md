@@ -1,6 +1,6 @@
 # 生产对话异常修复计划
 
-> 文档版本：v1.7，2026-10-27。[§8 审批与任务回执最小修复](#approval-task-delivery-repair)按已批准 v1.5 和 R1–R3 实施；外部对 c1c28a2..c8a185a 审查发现 B1 状态归因、B2 同名源历史限制丢失，修复后413项离线回归通过、待增量独立复核，公司真实模型与群入口待验。§1—§7 是历史方案与当时证据，不代表最新 main 的实现状态。
+> 文档版本：v1.7，2026-10-27。[§8 审批与任务回执最小修复](#approval-task-delivery-repair)按已批准 v1.5 和 R1–R3 实施；外部 B1/B2 已完成离线修复，增量独立审查指出的来源标题残留已补反例修复，公司真实模型与群入口待验。§1—§7 是历史方案与当时证据，不代表最新 main 的实现状态。
 > 当前状态：用户已授权 §8 实现、测试和常规修复；本地只用合成 I/O 和隔离 PostgreSQL。用户已明确真实模型由公司隔离环境验证，本地不调用模型或公司服务；不要求重做 §1—§7 已合入的工作。
 > 执行：按 AGENTS.md 默认串行实施，每片独立验证；实施时使用 `superpowers:executing-plans`。涉及回答契约、SQL/Evidence 的切片须针对候选完整 SHA 独立审查，不能把作者自查算作独立审查。
 
@@ -392,7 +392,7 @@ uv run --locked --extra dev python -m pytest tests/p1b/test_p1b_sqlguard.py test
 - 草稿状态缺口已由源码确认：app._paused 将当轮保存在 RunState 并 discard_pending，待批 B 不在已提交的 Session 历史；get_task 只返回草稿的 pending 原因，list_tasks 的任务项连 reason 都没有，二者均不带关联审批状态。保留 SDK 提交方式，在任务读取层补事实，不能只靠提示词要求模型认出 B。
 - 缺生产镜像 SHA 与首轮完整工具／SDK 轨迹，首轮为何未形成暂停仍不能唯一归因。当前计划不以猜测 SDK／Provider 故障为前提。
 
-**可重放证据：** 正式回归入口为 test_group_actions 的命令参数化、test_sdk_approval 的 unresumable／execution_receipt／resumed_action_status 检查，以及 test_scheduled_agent 的 pending_task_reads／full_task_page／bound_task_material 检查；环境与规范命令沿 README“开发验证”。本地日志保存在 `/private/tmp/xw-approval-task-receipts-evidence/`，含基线、各反例、修复回归及 lint/type 输出；精确命令与结果由其中 validation.json 索引。旧工作区 nh3 缺口已通过本工作树独立 `uv sync --locked --extra dev --offline` 解决，未借旧环境宣称通过。
+**可重放证据：** 正式回归入口为 test_group_actions 的命令参数化、test_sdk_approval 的 unresumable／execution_receipt／resumed_action_status 检查，以及 test_scheduled_agent 的 pending_task_reads／full_task_page／bound_task_material 检查；环境与规范命令沿 README“开发验证”。首个候选日志保存在 `/private/tmp/xw-approval-task-receipts-evidence/`；本轮B1/B2修复、基线反例和精确验证由 `/private/tmp/xw-approval-review-fixes-evidence/validation.json` 索引，不能混用版本。旧工作区 nh3 缺口已通过本工作树独立 `uv sync --locked --extra dev --offline` 解决，未借旧环境宣称通过。
 
 ### 8.2 用户可见结果
 
@@ -469,7 +469,7 @@ get_task 沿现有 reason 值表达；list_tasks 在现有 tasks 容器内补任
 
 现有不动的图像限制、调度排队／错过补跑、全部成员状态、数据库 SQL、报告全格式与 Web 审批模拟不列为本轮专项门槛。若实现改到了这些保障的共用分支，再增加对应检查；不以省测试为理由跳过实际受影响的失败路径。
 
-**离线交付证据：** 最终受影响组374项、展示共用组106项通过；前阶段消费者164项、安全 gate 65项通过，全仓Ruff、mypy 41源码文件及diff通过。分组有重叠，不相加为唯一用例数或冒充一次全套。独立审查覆盖 c1c28a2..77551ef，发现监控源名与控制目标碰撞会误删审批材料；已补普通/notifications/scheduled 源的真实提案及通用状态工具反例，并保留原生任务执行回执的业务状态。修复按工具与实际Action身份分流，未增加名称禁令；RED→GREEN及最终回归记录在前述证据目录，独立报告为 review.md。没有第二轮独立审查；真实模型仍按下节在公司完成。
+**当前离线证据：** B1/B2校准反例在未修改c8a185a源码上6失败/3通过；修复后受影响组413项、安全65项通过。增量独立审查覆盖 c8a185a..8fe5736，B1无新增阻断，B2来源标题残留已补两别名反例，最后展示/报告/历史消费者161项通过；全仓Ruff、mypy 41源码文件及diff通过。报告消费者旧标题断言在c8也失败，已同步为实际作废语义、完整材料及重发行为。分组有重叠，不相加为唯一用例数或冒充一次全套；精确命令、版本、文件哈希和独立review.md见本轮证据目录。最后标题修复未另做第二轮增量独立审查；真实模型仍按下节在公司完成。
 
 ### 8.5 真实模型 eval 与完成判据
 

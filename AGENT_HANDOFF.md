@@ -41,7 +41,7 @@
 
 ## 3. 当前计划与下一项工作
 
-### 审批与任务回执（2026-10-27，B1/B2离线修复待独立复核）
+### 审批与任务回执（2026-10-27，B1/B2离线修复，公司待验）
 
 用户批准[修复计划 §8 v1.5＋R1–R3](docs/superpowers/plans/2026-10-20-production-dialogue-answer-repair.md#approval-task-delivery-repair)的实现、测试和常规修复；本地只用替身/合成数据与真实 SDK、正式运行装配和隔离 PostgreSQL，真实模型由用户在公司隔离环境验证。已重新 fetch main@c1c28a2321e4849d9e3fba0cb4ba8167dbfe341e，分支 codex/approval-task-receipts，独立工作树 /Users/kloenguyen/.codex/worktrees/approval-task-receipts/agent-SDK；原桌面工作区及其未提交内容未动。
 
@@ -49,7 +49,7 @@
 
 外部对 c1c28a2..c8a185a 的只读审查发现 B1（rejected误指人为拒绝）和B2（同名监控源历史限制丢失）。修复中性状态标签，过期/提醒时间已过按原因说明；Action表失败码闭集不变，复用result区分用户明确拒绝和系统作废，旧记录无明确结果时中性说明。任务reason仍只追加，历史限制和brief行为按实际工具/Action身份处理；删除无用导入，不增加源名禁令、迁移或复核关卡。
 
-新反例在未修改c8a185a源码快照上6失败/3通过，目标组16项通过；另补旧结果未区分的兼容用例。最终受影响组413项通过，全仓Ruff、mypy 41源码文件及文档2项通过，增量独立复核待完成。本轮日志/精确命令归档 /private/tmp/xw-approval-review-fixes-evidence/。前候选374项、消费者164项及安全65项记录仍保存在 /private/tmp/xw-approval-task-receipts-evidence/validation.json，不冒充本轮验证；这些是分组证据，不是一次完整套件。
+新反例在未修改c8a185a源码快照上6失败/3通过，目标组16项通过；最终受影响组413项（含旧结果未区分兼容）、安全65项通过。增量独立审查覆盖 c8a185a..8fe57364456af528bbf6eef4c9eacd3727ad33b6：B1无新增阻断，B2来源标题仍按源名分类，已补两别名反例并统一工具身份；最后展示/报告/历史消费者161项通过。报告测试的旧“动作提案”标题断言在c8a185a也失败，改为断言真实作废说明、材料保留、无批准指令、零写与原字节重发。最后全仓Ruff、mypy 41源码文件及文档检查通过；未另做第二轮增量独立审查。日志、精确命令和文件哈希见 /private/tmp/xw-approval-review-fixes-evidence/validation.json，复核记录为同目录 review.md。前候选证据仍保留，不冒充本轮验证；分组有重叠，不作一次全套或唯一用例数相加。
 
 首轮未形成暂停的生产唯一原因仍未证实；本地不证明真实模型自主选择、措辞质量、公司数据库或群实收。公司按 §8.5 执行两段样例，必须包括B过期后先批准再追问，观察单一作废正文替换的已接受影响，以及升级旧材料作废的表达。未推送、合并或部署。代码/测试版本由本分支Git记录确定，不为回填本文自己的SHA反复提交。
 

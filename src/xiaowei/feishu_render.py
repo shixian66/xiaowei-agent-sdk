@@ -521,8 +521,9 @@ def fact_scope(fact: DeliveryFact) -> str:
     """业务来源与快照时间不属于可隐藏的技术包装。"""
     source = (
         "任务记录"
-        if fact.target_id == "scheduled"
-        else ("通知状态" if fact.target_id == "notifications" else f"数据范围：{fact.target_id}")
+        if is_task_fact(fact)
+        else ("通知状态" if fact.tool_id == "notifications/send_webhook_message"
+              else f"数据范围：{fact.target_id}")
     )
     return f"{source} · 采集于 {fact_capture_time(fact)}"
 
