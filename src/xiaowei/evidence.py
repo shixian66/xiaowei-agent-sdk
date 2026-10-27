@@ -48,7 +48,7 @@ from sqlalchemy import text
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncEngine
 
-from xiaowei.feishu_render import business_text, display_text
+from xiaowei.feishu_render import business_text, display_text, is_task_fact
 from xiaowei.governance import (
     Authorizer,
     ToolCatalog,
@@ -571,7 +571,19 @@ class EvidenceStore:
         ]
         # 执行结果（approval）在前，与恢复轮次的既有顺序一致；其余保持引用/产生顺序。
         actions.sort(key=lambda e: self._effect(by_id[e]) != "approval")
-        body = [e for e in cited if e not in actions]
+        action_evidence = set(actions)
+        if turn.answer_version == 4:
+            # 原证据已全部复核；这里只归并展示，不删除提案或依赖。
+            action_ids = {
+                e: json.loads(by_id[e].projections[channel])["data"].get("action_id")
+                for e in actions
+            }
+            executed = {action_ids[e] for e in actions if self._effect(by_id[e]) == "approval"}
+            actions = [
+                e for e in actions
+                if self._effect(by_id[e]) != "propose" or action_ids[e] not in executed
+            ]
+        body = [e for e in cited if e not in action_evidence]
         remaining = [
             e
             for e in unshown
@@ -698,7 +710,11 @@ class EvidenceStore:
                 ),
             }
         )
-        if record.identity.turn_id != ctx.identity.turn_id and section != "action":
+        if modern and record.identity.turn_id != ctx.identity.turn_id and (
+            is_task_fact(fact) or record.policy_id == ACTION_STATUS_POLICY
+        ):
+            fact = fact.model_copy(update={"note_summary": "此前查询时"})
+        elif record.identity.turn_id != ctx.identity.turn_id and section != "action":
             fact = fact.model_copy(
                 update={
                     "note_summary": "；".join(
@@ -707,7 +723,9 @@ class EvidenceStore:
                 }
             )
         # 必要执行状态不能因 brief 隐藏；旧版本和已绑定内容保持原语义。
-        if modern and record.target_id in {"scheduled", "notifications"}:
+        if modern and (
+            is_task_fact(fact) or record.tool_id == "notifications/send_webhook_message"
+        ):
             return fact
         # 仅当前结果和 v4 Prometheus 非表格补充原文可只收起、不生成计数摘要。
         # 结构化历史没有可信计数时仍回 full，不能把业务行误收进技术区。

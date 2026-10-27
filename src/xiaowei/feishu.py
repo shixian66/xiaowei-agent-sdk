@@ -60,6 +60,7 @@ from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 from functools import partial
 from typing import Any, Literal, Protocol
+from uuid import UUID
 
 from lark_channel.channel import (
     ChannelConfig,
@@ -435,6 +436,13 @@ def _command(text: str) -> tuple[Mode | Literal["new", "approve", "reject"], str
     for name, kind in _COMMANDS.items():
         if text == name or (text.startswith(name) and text[len(name)].isspace()):
             return kind, text[len(name) :].strip()
+        if kind in {"approve", "reject"} and text.startswith(name):
+            body = text[len(name) :]
+            try:
+                UUID(body)
+            except ValueError:
+                continue
+            return kind, body
     return "query", text
 
 
@@ -782,8 +790,6 @@ class FeishuGateway:
             if kind == "new":
                 await self._new_session(message)
             elif kind == "approve" or kind == "reject":
-                from uuid import UUID
-
                 try:
                     action_id = str(UUID(body))
                 except ValueError:

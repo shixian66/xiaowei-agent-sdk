@@ -248,14 +248,41 @@ async def actions(
                 yield Actions(env, action_adapter, governance, lock, binding)
 
 
-async def test_approval_command_never_becomes_a_model_question(env: Env) -> None:
-    command = "/批准 00000000-0000-4000-8000-000000000001"
+@pytest.mark.parametrize("verb", ["批准", "拒绝"])
+@pytest.mark.parametrize("separator", [" ", ""])
+async def test_approval_command_never_becomes_a_model_question(env: Env, verb, separator) -> None:
+    command = f"/{verb}{separator}00000000-0000-4000-8000-000000000001"
     asked = env.scripts.add(attributed(A, command), clarify())
     async with running(env) as group:
+        assert group.gateway.inbound(group.event(command)) is None
         await group.ask(command)
     assert env.model_calls(asked) == 0
     assert env.adapter.calls == []
     assert len(group.outbox.sent) == 1
+
+
+@pytest.mark.parametrize("message", ["/批准了吗", "/批准abc", "/拒绝了吗", "/拒绝abc"])
+async def test_approval_like_question_remains_a_model_question(env: Env, message) -> None:
+    asked = env.scripts.add(attributed(A, message), clarify())
+    async with running(env) as group:
+        assert group.gateway.inbound(group.event(message)) is not None
+        await group.ask(message)
+    assert env.model_calls(asked) == 1
+    assert env.adapter.calls == []
+
+
+@pytest.mark.parametrize("verb", ["批准", "拒绝"])
+@pytest.mark.parametrize("body", ["", " abc", " 00000000-0000-4000-8000-000000000001 extra"])
+async def test_explicit_malformed_approval_returns_format_receipt_without_model(
+    env: Env, verb, body,
+):
+    command = f"/{verb}{body}"
+    asked = env.scripts.add(attributed(A, command), clarify())
+    async with running(env) as group:
+        assert group.gateway.inbound(group.event(command)) is None
+        await group.ask(command)
+    assert env.model_calls(asked) == 0 and env.adapter.calls == []
+    assert "本次未执行" in "\n".join(group.outbox.texts())
 
 
 async def test_propose_pause_approve_once_and_follow_up_with_native_history(

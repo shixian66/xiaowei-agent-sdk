@@ -401,8 +401,10 @@ async def test_rejected_final_answer_after_approval_is_not_saved(actions: Action
     assert "APPROVED-ANSWER" in json.dumps(saved)  # 合格改写照常保存
 
 
-async def test_uncited_proposal_after_approval_is_completed_by_code(actions: Actions) -> None:
-    """审批恢复（native）路径：恢复后的回答只引用执行结果时，提案由代码补入动作区域。"""
+async def test_uncited_proposal_after_approval_is_replaced_by_execution_fact(
+    actions: Actions,
+) -> None:
+    """v4原生恢复只展示同Action的核验执行事实，提案Evidence保留，不重放写。"""
     env = actions.env
     message = attributed(A, "提出")
     env.scripts.add(
@@ -423,8 +425,12 @@ async def test_uncited_proposal_after_approval_is_completed_by_code(actions: Act
         view = await env.results.view(group_ref("om_a", A), first=True)
         assert view.delivery is not None
         sections = [(f.section, f.tool_id.rpartition("/")[2]) for f in view.delivery.facts]
-        assert ("action", "request_action_execution") in sections
-        assert ("action", "propose_change") in sections
+        assert sections == [("action", "request_action_execution")]
+        assert view.delivery.facts[0].metadata["action_id"] == action_id
+        assert view.delivery.facts[0].requires_complete
+        assert await env.rows(
+            "SELECT tool_id FROM xiaowei_evidence WHERE tool_id=:tool", tool=PROPOSE
+        ) == [(PROPOSE,)]
     assert len(env.scripts.calls[message]) == 3  # 不再为漏引提案改写
 
 

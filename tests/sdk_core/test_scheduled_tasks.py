@@ -172,7 +172,7 @@ async def test_u5_formal_entry_confirms_then_sends_once_without_model_at_due_tim
         assert "Asia/Shanghai" in material and "1小时" in material
         assert "上午10点需要做汇报。" in material
         assert "批准后不会自动通知" not in material
-        assert "确认后按计划到期发送一次" in material
+        assert "确认后按计划发送" in material
         action_id = await env.scalar("SELECT action_id FROM xiaowei_action")
         await group.ask(f"/批准 {action_id}", sender=A)
         assert await env.scalar("SELECT state FROM xiaowei_scheduled_job") == "active"
