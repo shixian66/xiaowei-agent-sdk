@@ -165,6 +165,8 @@ uv run --locked xiaowei --config xiaowei.json requests resend --subject <发起�
 
 本地已用合成驱动/脚本模型验证调用链；公司 StarRocks 3.5.14 的谓词、容量和真实模型/渠道验收仍须按[公司侧清单](docs/starrocks-security-company-checklist.md)执行，不能用此前 4.1.4 的验证代替。检测与数据边界见 [ARCHITECTURE §6](ARCHITECTURE.md#6-只读查询保护)。
 
+I1已合入：按本轮证据说明关注理由，不因操作类型命中机械要求人工核查；文件使用中性“代表样本”标题，审计行计数、覆盖、不完整提示和每次发送规则保持。I3的真实模型对比与I2的启动条件见[计划§9.7](docs/superpowers/plans/2026-10-23-security-inspection-report-presentation.md#97-最小切片与启动条件)，当前只完成离线通路复核。
+
 <a id="webhook-notifications"></a>
 
 **Webhook 通知（A 已合入，真实平台尚未验收）。** 默认 `webhook_bots=[]`，不开放通知工具。启用时须有现有指定飞书群，并在 `data_policy.model_tools`、`feishu.group.tools` 和获准发送者的个人 `access.grants` 三处加入 `notifications/send_webhook_message`；只会查询数据库的群成员不会自动取得发送权。工具仅在普通群消息中开放，无登录 Web、私聊与显式诊断入口均不开放。
@@ -302,6 +304,12 @@ docker compose -p xiaowei-sdk-test -f compose.sdk-test.yml down -v
 ```
 
 `SDK_TEST_POSTGRES_URL` 只能是上面这一个测试地址；未设置时数据库用例明确失败而不是跳过。CI 的 integration job 使用同一隔离测试数据库，执行 `tests/deployment` 之外的默认测试；p3-release job 负责整个 `tests/deployment` 目录。两者共同覆盖完整默认测试集合。
+
+安全巡检已有 `security` 采集套件。其五个固定样例位于 `tests/sdk_core/dialogue_security.py`，使用合成审计和交互入口；版本绑定、工具调用、I/O、耗时、可取得的用量及逐项人工判定均复用现有采集器。当前离线检查使用 `tests/sdk_core/test_dialogue_real_model.py`、`test_security_inspection_eval.py` 的采集器用例和 `test_security_notification_paths.py` 的正式定时入口用例，模型与外部业务 I/O 使用替身。以后另获 Profile、模型/数据和费用授权后，可在交互终端运行下列通路预检；尚未执行真实调用，且该合成套件不代替 I3 的脱敏真实材料、定时任务行为或背景复用收益验收：
+
+```bash
+uv run --locked --extra dev python -m scripts.dialogue_real_model --profile "$XW_EVAL_PROFILE" --suite security --repeats 1
+```
 
 自主调查与普通消息沿[同一 T1–T5 样例](docs/superpowers/plans/2026-10-20-agent-autonomy-progress.md)验收。已有交互评测脚本增加 `autonomy` 集：T1/普通消息订单统计、T2 慢查询候选和 T4 缺环境，复用正式 runtime、治理及合成数据；T3 部分监控源失败复用 `test_monitoring_read_recovery.py` 的正式入口。离线夹具的基础订单聚合使用内存 SQLite，不能证明 StarRocks 方言或优化器行为。获得模型 Profile 和费用授权后，在交互终端设置 `XW_EVAL_PROFILE` 为其文件绝对路径，再运行以下命令；本轮没有可用真实模型，尚未执行此评测：
 
