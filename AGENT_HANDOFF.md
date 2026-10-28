@@ -1,548 +1,170 @@
 # 小维：当前交接
 
-> 更新：2026-10-25，Asia/Shanghai。本文维护当前代码状态、有效证据、缺口与下一项工作。产品契约见 [ARCHITECTURE.md](ARCHITECTURE.md)，阶段与退出条件见 [DEVELOPMENT_PLAN.md](DEVELOPMENT_PLAN.md)，使用与运维见 [README.md](README.md) 和 [OPERATIONS.md](deploy/OPERATIONS.md)。
-
-> TiDB 开发局部更新：2026-10-25。下述原产品快照未作全面复核；TiDB 调查基线、当前授权与验证缺口单列在 §3，不以旧快照或新计划推定公司部署状态。
-
-> 局部更新：2026-10-27。已核对H2随PR #139合入；安全巡检R3文档已提交；I1已有本地离线候选，未合入/部署，真实措辞质量仍待I3。C1已批准，B1维持(a)。精确基线、有效证据、批准决定与下一项见§3；其他任务保持原核对范围。
+> 核对日期：2026-10-29，Asia/Shanghai。本文只维护当前代码／计划状态、验证证据、缺口和下一项工作。长期契约见 [ARCHITECTURE.md](ARCHITECTURE.md)，阶段与退出条件见 [DEVELOPMENT_PLAN.md](DEVELOPMENT_PLAN.md)，用法见 [README.md](README.md)／[OPERATIONS.md](deploy/OPERATIONS.md)。
 
 **OpenAI Agents SDK 负责 Agent Loop；小维负责权限、受治理工具执行、证据真实性和数据边界。**
 
 ## 1. 当前快照
 
-| 项目 | 已核对事实 |
+| 项目 | 本次核对事实 |
 | --- | --- |
-| 仓库 | [shixian66/xiaowei-agent-sdk](https://github.com/shixian66/xiaowei-agent-sdk) |
-| 产品代码基线 | 已fetch最新`origin/main@bac5df3d8dd57e1c5a6ec5edd1b338b60ed43837`；I1分支`codex/security-inspection-i1`复用干净隔离工作树，并带入R3文档；精确范围和证据见§3 |
-| 源码与检查 | 当前源码仅保留 `src/xiaowei`；旧工程及专属测试、Compose、迁移入口、`compose-smoke` CI 和 Alembic 依赖已移除。保留产品测试、公共检查与旧回答兼容路径；旧工程历史可从 Git 查回 |
-| 当前存储与回答 | 已合入H2的应用schema为16，016只新增定时结果快照与期限；安全巡检可信失败元数据沿已有JSON保存。当前新回答保存 v4，旧 v2/v3/Legacy 与已绑定交付保持原语义，SDK 表不改 |
-| 锁定依赖 | SDK `0.22.3`、Lark Channel `1.4.0`、MCP `2.2.0`、sqlglot `30.17.0`、`nh3 0.3.7`、`tinycss2 1.5.1`、Pillow `13.0.0`、certifi `2026.10.19`（后两项为严格审计发现的既有漏洞定向升级）；开发工具链传递依赖 filelock `4.2.1`，不进入运行依赖 |
-| 正式入口 | `xiaowei serve`、`config check`、`model check`、`storage init/upgrade/cleanup`、`requests resend`；命令与环境准备以 README 为准 |
-| 最近有记录的公司部署 | 用户回报镜像标签 `3aad626b42fc4ef2f37cafe342cf1826d453ca30`；未独立核验服务器。本次未部署，不据此认定 pre 的 StarRocks 版本 |
-| 当前验收结论 | R2外部限定复审通过；I1目标回归3项、相关回归163项、Ruff及mypy通过，独立子Agent已审查08831ef、无P0–P2阻断；离线接线不代表I3措辞质量或真实效果验收 |
-| 当前任务授权 | 先文档修订、检查与本地提交；用户另已确认文末I1开发/离线授权生效，文档提交后从最新main隔离实施，仅I1。I2/I3、真实模型/公司服务/飞书、权限配置、推送、PR、合并及部署未授权 |
+| 仓库／产品基线 | [shixian66/xiaowei-agent-sdk](https://github.com/shixian66/xiaowei-agent-sdk)，`origin/main@7565c6a73e863fd791878990d0fd23bc3f33560e`，包含 DS PR #145；2026-10-29 另以只读 `git ls-remote origin refs/heads/main` 确认远端同 SHA，未前进 |
+| 当前任务 | 只修订四份根文档，使范围、实现状态、用法和路线与当前主线一致；分支 `codex/docs-architecture-alignment` 从上述主线建立，不改变产品或权限契约 |
+| 隔离与已有工作 | 复用干净隔离工作树；桌面旧 checkout `b89d4ee` 及其三份文档／其他任务未提交材料保持原样，不把旧 checkout 当最新实现 |
+| 源码／入口 | 唯一产品包 `src/xiaowei`；`xiaowei` 与 `python -m xiaowei` 为正式入口。旧 Runtime、Worker、专属测试／迁移入口已移除，兼容旧回答和已绑定交付的路径仍保留 |
+| 存储与回答 | 应用 schema **17**：016 保存有界定时结果快照，017 只新增 `ds_clusters`；新回答为可信 v4，旧 v2/v3/Legacy 和已绑定原字节按原语义读取。SDK 表不改 |
+| 锁定依赖 | Python 3.11；Agents SDK 0.22.3、OpenAI 3.20.0、MCP 2.2.0、Lark Channel 1.4.0、sqlglot 30.17.0、httpx2 2.13.1、nh3 0.3.7、tinycss2 1.5.1、Pillow 13.0.0；以 uv.lock 为准。CI 维护已锁 certifi 2026.10.19、开发链 filelock 4.2.1／msgpack 1.2.3 |
+| 最近完整主线集成证据 | [PR #145](https://github.com/shixian66/xiaowei-agent-sdk/pull/145) 的精确受测树与上述 squash 合并树相同；[CI #421](https://github.com/shixian66/xiaowei-agent-sdk/actions/runs/40721039641) 9/9 成功，详情见 §5 |
+| 已记录发行／公司部署 | 2026-10-28 运维交接记录：用户操作部署 `916f57a26d2bac201b6772a48016f194af7d586e`，config valid、应用／PostgreSQL healthy、schema16；对应[发行运行](https://github.com/shixian66/xiaowei-agent-sdk/actions/runs/40653486879)。这是历史用户回报，本轮未核验服务器现状；不能推定 DS/schema17 已部署或业务已验收 |
+| 本轮授权边界 | 文档核对、修正和必要离线检查；不写功能代码、不改公司配置、不调用真实模型或公司服务、不部署。DS 的既有推送／条件合并授权已完成，不作为本次文档分支的推送／合并授权 |
 
-桌面原目录的旧分支及未提交材料保留；本次复用干净隔离工作树编写文档，未读取公司配置凭据。旧监控和回答修复记录仅为注明版本的证据，不作为本轮输入或展示范围扩展授权。
+接手仍先核对实际 HEAD、工作区和用户新指令。下列“已合入”只描述 Git 事实；独立审查、离线测试、隔离真实软件、公司部署、渠道实收和用户接受分别记证。
 
-本文件的状态以表中的核对基线为限。接手者先核对实际 HEAD、工作区及用户新指令；合入、独立审查、离线测试、真实运行、部署与用户接受分别记录，不互相替代。
+## 2. 当前能力与契约索引
 
-## 2. 已确定的产品边界
+| 能力 | 主线实现与权威契约 | 状态边界 |
+| --- | --- | --- |
+| 数据库查询／诊断 | StarRocks 与 TiDB 本地 Adapter，多目标、真实账号可读范围、SQLGuard、保真 SQL、结构／计划／审计或诊断表；[§6](ARCHITECTURE.md#6-只读查询保护) | 两种方言、默认库、EXPLAIN 与失败规则不同；不互相套用 |
+| 环境选择 | 数据库沿 [R7](ARCHITECTURE.md#r7-targets) 的对话／Skill；DS 另有[可信轮内集合](ARCHITECTURE.md#dolphinscheduler-environment) | 数据库没有 DS 式硬选择校验；DS 自然语言解析仍须真实模型验收 |
+| 监控调查／选中写 | [三源及 Action 契约](ARCHITECTURE.md#monitoring-mcp)，SDK 原生暂停／恢复 | 只开放已登记读工具和逐次批准的写动作；密码私聊命令尚未实现 |
+| 交付与输入 | [v4 按需详情／原生报告](ARCHITECTURE.md#user-delivery-and-history)、[群 post／单图](ARCHITECTURE.md#feishu-input-presentation-repair)、[进度](ARCHITECTURE.md#progress-observation) | 当前可运行；真实模型质量、图片及平台／客户端行为仍有开放项 |
+| 通知与定时 | [A/B/C 与自建代理](ARCHITECTURE.md#scheduled-agent-tasks) | 默认关闭、创建与执行复核、unknown 不重放；Node D 暂停 |
+| 运维历史 | [H1/H2、D1–D3](ARCHITECTURE.md#operations-history) | 新会话可受治理地追溯旧事实和结论；定时任务不读群交互历史，B1(a) 保持 |
+| 安全巡检 | [v2 检测及成文规则](ARCHITECTURE.md#security-context-reuse-proposal) | 注入／延迟线索，多语句仅辅助；旧 v1 事实保持，不能用规则命中证明攻击成功 |
+| CloudCanal | [接入设计](ARCHITECTURE.md#cloudcanal-mcp)和独立 CC0 探针 | 产品 MCP 工具尚未接入；需现场核约再决定 CC1 |
 
-本文只索引仍影响接续工作的决定，不另维护一套架构契约：
-
-- 一个业务 Agent、SDK 唯一 Loop、SDK Session + PostgreSQL、受治理执行与四种数据边界，见 [ARCHITECTURE §3–§9](ARCHITECTURE.md)。StarRocks 继续本地 Adapter 直连，数据库 MCP 暂缓。
-- 普通消息由单 Agent 判断是否查询；显式诊断入口才确定性隐藏并拒绝实际查询。环境选择目前依靠会话历史与随包 Skill，执行层没有“用户选定环境”硬校验；接受风险与第二步触发条件见 [R7](ARCHITECTURE.md#r7-targets)。
-- SQLGuard 检查业务 SQL 原文，物理表必须带库名；唯一候选可由 Agent 补全后重试，不能把旧的自动补库或 AST 重打印恢复为当前行为。查询资源边界和已接受的视图、审计数据范围见 [§6](ARCHITECTURE.md#6-只读查询保护)。
-- 当前 v4 选择所需事实，不自动补交未引用结果；v2/v3 保留保存语义，均按[长期交付规则](ARCHITECTURE.md#user-delivery-and-history)管理，不恢复旧 `uncited_query`。权限、Evidence、未完成执行和存储边界保留；模型文字真实性仍须任务评测，结构正确不代表结论正确。
-- 进度的单聊/群聊差异延迟、仅真实变化更新、正常收尾及异常陈旧已由用户确认，详见[进度契约](ARCHITECTURE.md#progress-observation)；P1 已有离线实现，当前证据见计划 §7。普通消息的区域身份及正文/明细分工见[普通消息契约](ARCHITECTURE.md#ordinary-feishu-expression)，不能由 HTML/MD 报告完成推定达标。
-- 监控写仅限已批准动作，使用 SDK 原生审批暂停/恢复及既有 Action 治理；生产开放仍须满足对应源和群审批门槛。Grafana 数据源密码私聊命令尚未实现，目前由管理员在 Grafana UI 填写。见 [监控边界](ARCHITECTURE.md#monitoring-mcp)。
-- 内网 Web 无登录、访问者共用操作者权限；目标账号、网络、Grafana 插件/写端及数据源更新竞争窗口等已接受取舍按架构执行。
-- 通知及定时任务的方向与待审权限增量见 [ARCHITECTURE](ARCHITECTURE.md#scheduled-agent-tasks)：多个目的群不扩大操作入口，任务独立于原聊天，创建及每次执行复核权限，生产写不能继承周期批准。旧通知/定时初版及自建代理适配已合入主线；群输入已通过独立复审，S1 展示已完成本地实现、离线验证及独立复审，用户授权 PR 集成，D 暂停且未实现。
+当前正式 ServeConfig 的 `targets` 至少包含一个数据库目标；DS／监控为可选源，不能仅凭内部无数据库 Agent 的测试宣称“纯 DS／纯监控部署”已支持。此处记录实际配置限制，不新增限制或改变长期方向。当前 tracing 始终显式关闭，也没有 ServeConfig 开启入口。
 
 ## 3. 当前计划与下一项工作
 
+四份根文档按上述产品基线对齐；针对 `4a91fea` 的独立审查修正文档误写及遗漏，检查见 §5。用户已确认维持原用途、后续从 diagnose 移出 DS；下述源码冲突仍未修复，本次仅记录决定，未改执行路径。下一项是按已确认边界修复代码并完成对应验收，实施待后续明确指令；其他业务工作或公司验收仍由用户选择，不根据旧段落中的“下一步推送／开始开发”自动执行。新增功能、模型／数据授权、发行和部署各按当前明确指令办理。
+
+### 主线合入索引
+
+以下已核对 Git；#129、#135、#137、#140、#142、#143、#145 另核对 GitHub 的 merged 状态。历史 PR 正文中的“待合并”不能覆盖实际合并事实。
+
+| 工作 | 合入版本 | 后续仍需验证 |
+| --- | --- | --- |
+| 群输入与 v4 业务结果交付 | [#129](https://github.com/shixian66/xiaowei-agent-sdk/pull/129)，`b7d033c` | 模型表达、post／mentions／图片、真实客户端与分项实收 |
+| StarRocks 明确解析失败修正 | [#135](https://github.com/shixian66/xiaowei-agent-sdk/pull/135)，`da7f32e` | 公司 pre 版本／驱动签名、真实 Agent 的同义修正与诊断 |
+| TiDB A / B/C | [#136](https://github.com/shixian66/xiaowei-agent-sdk/pull/136) `22f7446`；[#137](https://github.com/shixian66/xiaowei-agent-sdk/pull/137) `9d97d5f` | T1–T8 及三集群公司验收，B4 独立结论 |
+| 历史 H1 / H2 | [#138](https://github.com/shixian66/xiaowei-agent-sdk/pull/138) `3d37ac7`；[#139](https://github.com/shixian66/xiaowei-agent-sdk/pull/139) `bac5df3` | H3 真实检索／背景复用与诊断质量 |
+| 安全巡检 I1 成文 | [#140](https://github.com/shixian66/xiaowei-agent-sdk/pull/140)，`c1c28a2` | I3 的真实措辞／效果；按证据决定 I2 |
+| 审批回执与定时状态归因 | [#142](https://github.com/shixian66/xiaowei-agent-sdk/pull/142)，`0b401b2` | 公司 C1–C4，含旧待批提案与实际批准／送达路径 |
+| 安全巡检攻击线索收窄 | [#143](https://github.com/shixian66/xiaowei-agent-sdk/pull/143)，`916f57a` | 新候选覆盖／容量、A0/A3 与真实 Agent／渠道 |
+| CI 审计与扫描自测维护 | [#144](https://github.com/shixian66/xiaowei-agent-sdk/pull/144)，`350345d` | 已修复当时 msgpack 审计及随机扫描诱饵问题；不再列为未解决缺陷 |
+| DS API 只读 | [#145](https://github.com/shixian66/xiaowei-agent-sdk/pull/145)，`7565c6a` | 两版公司 API、D1–D4／19 变体、长日志负载和用户验收 |
+
+A/B/C 通知与定时已分别随 #123 `9284688`、#125 `2bee11f`、#126 `be8c155` 合入；自建代理 #127 `1a92c58`。原生报告、自主调查、普通消息和进度已在主线，后续 #129 统一了 v4 交付，不能再从旧计划标题推定未实现。手动安全巡检 #128、权限简化 #130、展示 #132 和定时失败通知 #133 同样是当前实现的前序，不是待开发切片。
+
 <a id="dolphinscheduler-implementation"></a>
 
-### DolphinScheduler API 只读实现（2026-10-28，C1／C2 集成验证中）
+### DS：离线交付已合入，实战验收开放
 
-当前授权：在 `codex/ds-readonly-api` 隔离分支实现 C1／C2，基于最新 origin/main rebase，推送／开 PR 并跑完整 CI；CI 及 rebase 冲突复审通过后可合并，不部署、不调用真实模型或公司 DS。工作树 `/Users/kloenguyen/.codex/worktrees/dolphinscheduler-readonly-api/agent-SDK`；本轮起点 `41615ce31165cdfebc06c213b59c549d649becf8`。已 fetch 主线仍为 `916f57a26d2bac201b6772a48016f194af7d586e`，rebase 确认 up to date，无冲突。旧主工作区／其他任务改动未碰。
+产品契约只见 [ARCHITECTURE](ARCHITECTURE.md#dolphinscheduler-environment)，工具、限制和固定 D1–D4／19 变体只见 [DS-RO-P1-r6](docs/superpowers/plans/2026-10-28-dolphinscheduler-readonly-api.md#ds-implementation-plan)。S1–S4 与审查修订、R1 日志业务 JSON 分类、C1 四项身份绑定、C2 删除多余选择字段均已合入；保留 `ds_read_scope` 原边界。schema17 只有 `ds_clusters`，不兼容从未发布的旧 DS 测试候选结构。
 
-产品契约只在 [ARCHITECTURE：DS](ARCHITECTURE.md#dolphinscheduler-environment)；原 r3 设计 blob `ae0598a41b52f2bdfdb76525a8330a1b7232405c` 加用户明确批准的 C1／C2，切片／限制及固定 D1—D4／19 变体见 [r6 计划](docs/superpowers/plans/2026-10-28-dolphinscheduler-readonly-api.md#ds-implementation-plan)。C1 已改四项数据身份绑定；C2 删除 ds_selection_turn／ds_selection_changed，每轮成功提交非空集合，原失败／暂停／撤权边界不变。schema17未发布，迁移只新增 ds_clusters，不改 SDK 表；不额外兼容旧 DS 测试候选。
+PR base `916f57a26d2bac201b6772a48016f194af7d586e`，head `bba19d4ba72c43524211f5afb523b70862ba68f7`。rebase 无冲突；独立 C1/C2 复审覆盖源码候选 `b469b5bcca51335fe40fa799346b886d9bae1061` 及集成路径，无代码阻断，另验 9 项和实际应用绑定 8 种变化。最终 head 只修文档，src/tests 不变；合并树与受测树一致，未部署。
 
-C1/C2 RED：绑定／真实重启历史／重发 5 failed、8 passed；独立16→17反例因多余列失败1项。GREEN：身份矩阵、运维调整后的 Web 历史与沿用、源改变拒绝旧历史、Feishu 正式重发／撤权、真实 PostgreSQL 迁移共15 passed，日志 `/private/tmp/ds-c1c2-{red,green}.log` 和 ds-c2-migration-red.log。初始绑定的默认超时15与显式15.0可能产生不同摘要，C1排除运维字段后也避免该漂移。源码候选 `b469b5bcca51335fe40fa799346b886d9bae1061` 相关回归620 passed／1 skipped／1 deselected（199.83s），精确命令见 `/private/tmp/ds-c1c2-related.log`；Ruff、mypy44源码文件、文档命令2项、225链接／锚点及19变体检查通过；Gitleaks8.30.0扫描874提交无泄漏。独立复审 `/root/ds_c1c2_integration_review` 覆盖 `41615ce..b469b5b` 及主线公共集成路径，另验绑定矩阵／旧TurnLedger 9项与实际应用绑定8种变化，无代码阻断；唯一README旧轮次措辞已删除。源码与测试不再改动，最终文档提交后的精确head、完整CI及条件合并结果以PR记录为准，尚未宣称CI通过。
+用户明确本地只做离线开发，公司模型与 DS 隔离。下一步需由用户在公司按原样例验收：环境自然澄清／切换、失败定位、长日志中间数据库错误、子运行／等待／恢复追问、每源权限／时区／业务码、服务器大日志负载及脱敏延迟、飞书群实收。当前 CI 只能关闭相应离线项，不证明 Agent 自主诊断达标。
 
-既有证据按原 SHA 保留：`41615ce` 的 R1 DS／群相关132 passed、Chrome2 passed，`/private/tmp/ds-r1-final-{ds,browser}.log`；R1 独立复核 `/root/ds_r1_independent_review` 覆盖至源码候选 `3b8962c`，报告 `/private/tmp/ds-r1-review-3b8962c.md`，未发现剩余阻断。更早的 `57e7430` 完整非部署5488 passed、发行／迁移／隔离恢复84 passed；原日志不充当 C1/C2 的新验证。R1 的业务 JSON 分支和深层解析错误、M3每词取消及16／32MiB、凭据投影均保留；上轮过度概括的复核声明已移除。
+<a id="ds-diagnose-contract-gap"></a>
 
-真实模型自主选择／取证／澄清／修正／诊断、两版公司 API／项目权限／时区、服务端日志负载及脱敏延迟、飞书群实收和用户验收仍未通过；CI／合并只证明相应源码与离线层，不自动关闭实战门槛。配置与运维入口见 [README](README.md)。
+### DS 用途边界已确认，源码冲突待修复
 
+**B1 源码冲突，仍未关闭。** 产品基线 `7565c6a` 的 [runtime.py](src/xiaowei/runtime.py) 第1442行在 diagnose 中登记 `ds | selection`；与父提交比较，确为 DS PR #145 新增。图片及 TXT/MD 入口复用 diagnose（[feishu.py](src/xiaowei/feishu.py) 第862、922行），故当前获准 DS 工具可能在这些轮次发出实时 API 请求或下载日志。DS 计划没有批准这一用途扩展；[群输入计划](docs/superpowers/plans/2026-10-22-feishu-input-presentation-repair.md) 第40、117、121、135行仍要求带图轮不做实时查询，并说明“本轮仅分析所附图片，未做实时查询”。既有结构／计划／审计取证与[历史计划](docs/superpowers/plans/2026-10-26-operations-history-and-knowledge.md)第111行的 query/diagnose 历史能力有独立依据，不能据此推导 DS 同样获准。以上行号均对应产品基线，文档修订未改源码。
 
-### 安全巡检攻击线索收窄（2026-10-28，PR #143 待最终 CI）
+`4a91fea` 将该源码事实写成已批准能力的表述已撤回；不代表 DS 零 I/O 已由代码实现。仅诊断或图片入口不能作为当前 DS 隔离保证。现有 C1/C2、范围锁定、权限、HTTP 取舍及读取失败语义不变。
 
-分支 `codex/security-attack-signals`，隔离目录 `/Users/kloenguyen/.codex/worktrees/manual-starrocks-security/agent-SDK`；从 fetch 后的 `origin/main@0b401b2e40e906c240de7bebd4bcacd8da0a10ae` 开始。用户确认[计划](docs/superpowers/plans/2026-10-28-security-inspection-attack-signals.md) blob `1a43823a71ed4a0240d6ba9fc7b51ae4bff6420e` 通过外部审查并授权开始开发；四项删减建议已落实到本工作树计划，桌面原计划及全部已有修改保留。
+**决定已确认（2026-10-29）：** 用户选择“维持原用途，后续移出 DS”，权威契约已写入 [ARCHITECTURE](ARCHITECTURE.md#dolphinscheduler-environment)。后续代码修复及退出条件见 [DEVELOPMENT_PLAN §10](DEVELOPMENT_PLAN.md#10-dsapi-只读诊断增量)。本轮只同步四份文档；产品代码尚未修改，B1 不能据此关闭，真实模型与公司服务仍不调用。
 
-P1/P2 实现与相关离线验证完成：操作粗筛和精判整组删除，规则标记 v2；多语句作辅助，现有注入/延迟规则保留。共用展示按实际字段选择，v1 不变，无显式版本框架。新旧字段与绑定兼容见 [ARCHITECTURE §6](ARCHITECTURE.md#6-只读查询保护)。没有改 Governance、Evidence、Session、权限、调度器、Web JS 或外发协议；名称与入口不改。
+### TiDB、历史与安全巡检
 
-**本轮有效证据（合成源/模型，真 SDK、Adapter、Evidence、PolicySession 和隔离 PostgreSQL）：**
+- **TiDB A/B/C：** 已合入；精确 v6.5.5／v7.5.3 本地 TiUP、15 个诊断来源、结构／视图／计划／锁等待及正式 Web 真实库配脚本模型有证据。公司 3 集群、TiFlash、TLS／资源／权限、模型 T1–T8、真实渠道及用户接受仍按[公司清单](docs/superpowers/plans/2026-10-24-tidb-query-diagnosis.md#tidb-company-acceptance)逐项判断。不能再将 PR #137 写成未合并候选。
+- **H1/H2：** 已合入；有界定时结果快照、失效清理、当前原源复核已落地。H3 的真实取证／因果解释未验收，见[计划](docs/superpowers/plans/2026-10-26-operations-history-and-knowledge.md)。独立分支的离线材料不能自动成为主线或真实评测结果。
+- **I1 与检测 v2：** 已合入；成文遵循当前证据，操作类型检测已删除，OR／延迟保留、多语句辅助。I3 真实措辞和背景复用、I2 触发条件见[计划 §9](docs/superpowers/plans/2026-10-23-security-inspection-report-presentation.md#security-context-r3)。安全巡检公司验证沿[清单](docs/starrocks-security-company-checklist.md)；旧 v1 237398 条／117 候选的公司记录不证明新 v2 候选覆盖，需新代表小时。
 
-- 基线相关回归：196 passed / 1.46s。先补新范围回归，观察到规则/字段 53 failed、真实 Adapter 模板/参数 14 failed、报告 2 failed，均为预期范围差异；修复后通过。最终源码/测试差异（相对上述基线）的 SHA256：`3f91a449bb26d2491d497ec0833463d470b2490ca164aef6c91d9480b93140eb`，临时日志与一次性对照在 `/tmp/xw-security-attack-signals/`。
-- 正式入口早期闭环 6 passed / 2.63s：S1 成功、S5 拒绝及不可判定候选；最终相关集 **262 passed / 16.37s**，命令如下，日志 `final-related.log`：
+<a id="sql-parse-recovery-status"></a>
 
-```bash
-SDK_TEST_POSTGRES_URL=postgresql+asyncpg://postgres@127.0.0.1:55432/postgres UV_OFFLINE=1 uv run --locked --extra dev python -m pytest tests/p1b/test_starrocks_security.py tests/p1b/test_starrocks_security_audit.py tests/sdk_core/test_security_inspection_eval.py tests/sdk_core/test_presentation_v4.py tests/sdk_core/test_database_skills.py tests/sdk_core/test_security_notification_paths.py tests/security/test_docs_command_consistency.py -q
-```
+### StarRocks 解析失败与监控补查
 
-- 两个已有浏览器用例的断言/夹具受新范围影响，因此实际运行；真实 Uvicorn/Chrome **2 passed / 8.95s**，日志 `final-browser.log`：
+[#135](https://github.com/shixian66/xiaowei-agent-sdk/pull/135) 只恢复 Adapter 在业务 execute 阶段明确识别的解析失败，原始异常不外发；其他 SQL 执行错误、未知结果及固定模板按原边界。离线正式链已通过，公司 pre 实际版本、完整驱动形态和真实 Agent S1/S2 保持[原计划](docs/superpowers/plans/2026-10-24-starrocks-sql-parse-recovery.md)门槛。
 
-```bash
-SDK_TEST_POSTGRES_URL=postgresql+asyncpg://postgres@127.0.0.1:55432/postgres SDK_TEST_CHROME='/Applications/Google Chrome.app/Contents/MacOS/Google Chrome' UV_OFFLINE=1 uv run --locked --extra dev python -m pytest tests/sdk_core/test_web_browser.py::test_security_report_default_view tests/sdk_core/test_web_browser.py::test_security_report_brief_keeps_coverage_and_counts -m browser -q
-```
+<a id="当前独立候选监控补查修复"></a>
 
-- `UV_OFFLINE=1 uv run --locked --extra dev ruff check .` 通过；`UV_OFFLINE=1 uv run --locked --extra dev mypy src/xiaowei` 通过（41 文件）；`git diff --check` 通过。仅受影响的检查，未跑本地全量。
-- 一次性同配置指纹：基线与候选均为 `sha256:2281a9e491bf38de07aa4198deea6636a4425235a42e97c4e49c91a752b664eb`（合成 AUDIT_TARGET，四种投影各 400000 字节）。三份 v1 业务 presentation（完整、61 样本、不完整）与基线逐项相等；结果在 `compatibility.json`，一次性复现命令为 `PYTHONPATH=.:src UV_OFFLINE=1 uv run --locked --extra dev python /tmp/xw-security-attack-signals/compare_compatibility.py`，不固化成永久指纹测试。
-- H1 保留一条真实 v1 结构投影写入 PostgreSQL、再用当前 catalog 的新 EvidenceStore 读取；原值不变且不重取审计。通用撤权保障未改，引用既有测试，不新增同边界复测。实际模板另覆盖完整超长 SLEEP 被选入并按 CASE 返回 NULL、完整超长覆盖写被排除；SDK 不可判定路径继续如实给下界。
-- 两次定时运行和普通 webhook/代理通知均沿真实本地应用路径验证：各次发送保留，61 条辅助多语句不展开样本。脚本输出只证明接线与展示，不证明真实模型自主判断。
-
-**审查与未覆盖：** 本地只读独立子 Agent 已核对上述源码/测试补丁：无 Critical/Important/Minor，结论可交外部复审；外部复审已完成、无阻断；本次仅收窄 Skill 的多语句措辞、删除重复参数、补旧事实说明注释并重命名行为测试。已推送并创建 [PR #143](https://github.com/shixian66/xiaowei-agent-sdk/pull/143)；原 CI #416 的两项既有问题由下述维护修复，本次合入最新 main 后重新验证。未打包/部署。真实模型、公司源/客户端/代理实收、既有 A0/A3/H3 与 openUrl/漏查目标缺口继续开放。保留的粗筛表达式未改，不重复增加 DBA 语义任务；原先未完成的语义验证仍未完成。公司后续只测代表小时的新候选行数/字节/耗时和计划 S1–S5，不以旧 117 候选或离线记录代替。
-
-**下一项：** 完成本次更新后的 CI 并回报；#143 保持未合并，等待后续授权，不因 CI 通过自动进入公司验收。
-
-### CI msgpack 与扫描器自测维护（2026-10-28，PR #144 已合入 main）
-
-分支 `codex/ci-msgpack-audit` 从最新 `origin/main@0b401b2e40e906c240de7bebd4bcacd8da0a10ae` 开始，与 PR #143 独立。只定向更新 `uv.lock` 中 msgpack 1.2.2 → 1.2.3，其他包及产品依赖不变；`requirements-audit.txt` 按既有 CI 命令生成且仍被忽略，不新增依赖清单或配置例外。
-
-CI #416 的 secret-scan 单项重跑通过（job `122600947638`），其余任务未请求重跑。官方 Gitleaks 8.30.0 本机二进制复现：同一合成值首字符为 `+`/`/` 时 exit 0，内部 `+` 仍 exit 1；两处自测改为已实测命中的固定合成值分段拼接，保留严格 `rc == 1`、既有扫描规则、豁免及全历史扫描。只同步受批准命令影响的工作流整体摘要和两段命令摘要，不放宽闭集断言。
-
-本地有效证据：`uv export --frozen --no-emit-project --extra dev -o requirements-audit.txt` 后运行 `uv run --locked --extra dev pip-audit --strict -r requirements-audit.txt` 无已知漏洞；`UV_OFFLINE=1 uv run --locked --extra dev python -m pytest tests/security/test_workflow_policy.py tests/security/test_docs_command_consistency.py -q` 为 30 passed；`UV_OFFLINE=1 uv run --locked --extra dev ruff check .`、diff 检查通过。直接执行实际 YAML 两段自测均通过；隔离替身分别返回 0/2 时两段都失败，证明未吞掉漏检或扫描器错误。原始对照与检查日志在 `/tmp/xw-ci-msgpack-audit/`。
-
-[PR #144](https://github.com/shixian66/xiaowei-agent-sdk/pull/144) 的 [CI #417](https://github.com/shixian66/xiaowei-agent-sdk/actions/runs/40623598373) 为 9/9 成功（integration 5351 passed）；用户授权后已合入 main `350345df20bf639c9a1179b6ae8e16be6ba2bc60`，文件树与受测 head `15cca60dd1c6aed145e74d77603057d9ef689823` 一致。本次仅将 main 合入 #143；冲突仅为本文同位置的两段新增记录，均保留并更新状态。下一项归上方 #143，不打包/部署，不调用真实模型、公司服务或飞书；全部公司验收缺口保留。
-
-### 审批与任务回执（2026-10-27，审核通过并获准合并，公司待验）
-
-用户批准[修复计划 §8 v1.5＋R1–R3](docs/superpowers/plans/2026-10-20-production-dialogue-answer-repair.md#approval-task-delivery-repair)的实现、测试和常规修复；本地只用替身/合成数据与真实 SDK、正式运行装配和隔离 PostgreSQL，真实模型由用户在公司隔离环境验证。已重新 fetch main@c1c28a2321e4849d9e3fba0cb4ba8167dbfe341e，分支 codex/approval-task-receipts，独立工作树 /Users/kloenguyen/.codex/worktrees/approval-task-receipts/agent-SDK；原桌面工作区及其未提交内容未动。
-
-候选落实无空格命令、终态不返回批准命令、仅单一作废动作替换矛盾正文、同 Action 展示去重及历史状态时态；任务读取关联现有 Action，只给 draft 追加 reason，有效 pending 优先/否则最新可读。绑定材料保留实际目标/能力/期限和影响，共用卡片/纯文本减少技术包装，内部预算和治理保留。未加 schema、依赖、清理任务、暂停绑定复查或 eval 框架。新材料会受既有 ActionPlan 比较约束，旧待批定时提案升级后可能须重新提出；原绑定发送字节不重写。
-
-外部对 c1c28a2..c8a185a 的只读审查发现 B1（rejected误指人为拒绝）和B2（同名监控源历史限制丢失）。修复中性状态标签，过期/提醒时间已过按原因说明；Action表失败码闭集不变，复用result区分用户明确拒绝和系统作废，旧记录无明确结果时中性说明。任务reason仍只追加，历史限制和brief行为按实际工具/Action身份处理；删除无用导入，不增加源名禁令、迁移或复核关卡。
-
-新反例在未修改c8a185a源码快照上6失败/3通过，目标组16项通过；最终受影响组413项（含旧结果未区分兼容）、安全65项通过。增量独立审查覆盖 c8a185a..8fe57364456af528bbf6eef4c9eacd3727ad33b6：B1无新增阻断，B2来源标题仍按源名分类，已补两别名反例并统一工具身份；最后展示/报告/历史消费者161项通过。报告测试的旧“动作提案”标题断言在c8a185a也失败，改为断言真实作废说明、材料保留、无批准指令、零写与原字节重发。最后全仓Ruff、mypy 41源码文件及文档检查通过；未另做第二轮增量独立审查。日志、精确命令和文件哈希见 /private/tmp/xw-approval-review-fixes-evidence/validation.json，复核记录为同目录 review.md。前候选证据仍保留，不冒充本轮验证；分组有重叠，不作一次全套或唯一用例数相加。
-
-用户已确认最终候选 c59aff7ace78a6585e447f3147ba3e63a9ed1dee 审核通过，授权推送、创建PR及合并；生产源码保持审核版本。[PR #142](https://github.com/shixian66/xiaowei-agent-sdk/pull/142)首轮CI为5346通过/5失败，失败属于三类旧测试契约：同Action提案应被执行事实替代、系统作废有固定result、正文使用业务状态。已仅同步三份测试，保留一次执行/过期零写/原Evidence及原始状态断言，完整三文件107项通过；不改实现或放宽边界。日志在 /private/tmp/xw-approval-merge-evidence/。新HEAD的CI及合并状态以PR/Git记录为准，不为回填本文自己的SHA反复提交。
-
-首轮未形成暂停的生产唯一原因仍未证实；本地不证明真实模型自主选择、措辞质量、公司数据库或群实收。公司按 §8.5 执行两段样例，必须包括B过期后先批准再追问，观察单一作废正文替换的已接受影响，以及升级旧材料作废的表达。未部署；代码合并不关闭公司验收。
-
-### 安全巡检关注事项与历史背景复用（R3／I1本地离线候选）
-
-基线为fetch确认的`origin/main@bac5df3d8dd57e1c5a6ec5edd1b338b60ed43837`；分支`codex/security-inspection-i1`，工作目录`/Users/kloenguyen/.codex/worktrees/ops-history-h1/agent-SDK`。原文档分支保留R3提交`4ec78cf22025479ec909cfaf51036afd0b744cb9`；I1已带入三次文档提交，实施起点为`4fe1fa2d3ea3d5865f298bbf9e5acd398c586961`。[R3计划§9](docs/superpowers/plans/2026-10-23-security-inspection-report-presentation.md#security-context-r3)blob **`a53796d0ce79924f8f7fdf8708d996f512ad3da3`**，R2外部限定复审已通过、B1/B2关闭。[C1](ARCHITECTURE.md#security-context-reuse-proposal)已批准、实现合入前未生效；[B1选择(a)](ARCHITECTURE.md#scheduled-interactive-history-choice)、(b)未批准，D1不变。
-
-I1只改安全Skill第9行颜色/核查理由、共用文件样本标题为“代表样本”、巡检工具说明（审计行计数及关注理由）；检测器、计数、schema、投影、Evidence指纹、配置和H1 WORK_METHOD均未改。现有分片报告测试同步中性标题识别，保留范围/时间全部断言；现有正式定时入口补52条完整分类与42条+3条无法判定场景，均连续运行两次并逐次发送。
-
-锁定SDK0.22.3、隔离PG/脚本模型与合成审计：目标回归先在旧标题/旧指引处3项失败，再3项通过；相关6文件回归 **163 passed / 23.70秒**，Ruff通过，mypy **41源码文件**通过。测试只确认获准指引到达真实SDK端点及治理/存储/交付，不判定真实解释质量。虚拟时钟跳过后台刷新，测试快照最大年龄设为7200秒，不改生产配置。日志`/private/tmp/xw-security-i1-{red,green,tests,ruff,mypy}.log`，精确命令、文件blob与版本见`/private/tmp/xw-security-i1-validation.json`。
-
-R3文档检查2项、受影响链接14项及diff通过，日志`/private/tmp/xw-security-context-r3-{docs,links,diff}.log`。I1文档命令检查2项、受影响相对链接/锚点6项及diff检查通过，日志`/private/tmp/xw-security-i1-{docs,links,diff}.log`。独立子Agent只读审查`08831ef65140b7be37c014d71df26c9fd4c5d9ef`相对实施起点的差异，未发现P0–P2阻断或非阻断问题；核对8个文件blob及8份日志哈希，未重跑测试组。记录`/private/tmp/xw-security-i1-review.md`；审查后仅补本文状态，产品/测试保持该版本。未推送、建PR、合并、部署或调用真实模型/公司服务/飞书。
-
-下一项：交付精确I1候选供用户复核→I3（需模型/数据授权）→按§9.7条件决定I2。真实模型自主性/措辞效果、调度原源/关联、通知Evidence对交互读者的影响、公司环境与飞书实收仍为缺口；脚本模型不能关闭I3/H3/A0/A3。本轮未跑全仓默认回归，验证范围为上述直接受影响节点。
-
-### 跨会话运维事实追溯（H1/H2已合入，H3未实施）
-
-基线为已合入H1的`3d37ac71140d1f7da682346609b1b1c5550a0bb4`；外部独立审查通过的候选为`8999963567bf482211ad6401caf226fbbcb3acaa`。收尾head `7ef835120003efc22f98f9f4d2fac6bd49c80bcb`已随[PR #139](https://github.com/shixian66/xiaowei-agent-sdk/pull/139)合入`bac5df3d8dd57e1c5a6ec5edd1b338b60ed43837`，原分支`codex/ops-history-h2`。D1–D3契约见[ARCHITECTURE](ARCHITECTURE.md#operations-history)，[R4计划](docs/superpowers/plans/2026-10-26-operations-history-and-knowledge.md)blob为`df1786dd7d20999cf2b018760501135d7a568b8a`。
-
-当前H2为schema16：有界定时结果在Session提交后、机器人接收校验前保存；新会话按当前读者与原来源读取，过期清理正文并保留运行元数据。冻结定义来源已进入最终Delivery，快照直接复用该期限与request_retention，不重复取job期限。测试合并保存超限/PG写失败路径，保留撤权及生命周期边界；没有新增配置或校验，完整契约仍见计划§4.4、§6及H2-6。
-
-有效完整回归在`ada55d726be4edf4838ba5cd208db850a6eac738`执行：**5390 passed、235 skipped、98 deselected、5 warnings / 1768.25秒**，退出0；警告来自预期socket/DNS拦截探针。该版本到已审候选8999963仅改文档，源码/测试/pyproject/锁文件SHA256一致，为`cafef708199211fa8d5374b431d107c0f97f2fb5d6fc687d8aba2986b8bcdba6`；此一致性说明不涵盖H2收尾两行源码删除与测试合并。完整日志：`/private/tmp/xw-h2-full.log`。
-
-H2收尾锁定.venv、SDK 0.22.3及隔离PG验证：指定四文件**111 passed / 91.80秒**，包含纯文字定义期限及清理用例；Ruff通过，mypy 41源码文件通过；文档命令2项、受影响相对链接/锚点2个目标及diff空白检查通过。日志：`/private/tmp/xw-h2-final-{tests,ruff,mypy,docs,links,diff}.log`。不重跑全量的依据：产品仅删除已由source_records纳入Delivery的冗余期限分支，相关现有用例已覆盖，其余仅测试和文档精简。
-
-用户提供的外部独立审查结论针对8999963：无阻断，H2-6无需补验收；审查者删除同一期限分支后的77项变异探针通过。该结论与上述收尾检查均不代表真实模型、公司或渠道验收完成。
-
-缺口：235个skipped及98个deselected不计验收；H3、真实Agent自主检索/补证/因果判断、公司故障材料、真实飞书及部署仍未覆盖。纯文字运行的target_ids筛选与清理后的缺口标签按审查取舍留H3评估；S3真实BE材料未取得。可控模型只证明接线和边界，不能恢复未记录或已清理的结论。
-
-下一项：H3在明确模型/环境与材料授权后验收；合入不代表部署或公司验收。当前安全巡检设计按上节范围推进，不扩大H3授权。
-
-### TiDB 查询与诊断（2026-10-25，B/C 本地候选，独立审查通过，待公司验收）
-
-A 已由 PR #136 合入主线 `22f7446`（受测 head `6050734`，远端 9 项检查通过，integration 5188 passed / p3-release 84 passed）。B/C 候选在隔离分支 `codex/tidb-diagnosis-b`，见 [PR #137](https://github.com/shixian66/xiaowei-agent-sdk/pull/137)，未合并、未部署生产。原工作区其他任务修改保留。契约见 [ARCHITECTURE](ARCHITECTURE.md#tidb-query-diagnosis)，固定 T1—T8 与公司 C01—C12 见 [A/B/C 计划](docs/superpowers/plans/2026-10-24-tidb-query-diagnosis.md)，退出条件见 [DEVELOPMENT_PLAN](DEVELOPMENT_PLAN.md#tidb-abc)。
-
-B 接通受保护 EXPLAIN 和 `local/query_diagnostics`，仅登记慢日志与 TiFlash 副本表，复用原快照发现列、工具治理、Evidence 和撤权路径，业务对象与诊断对象分开。6.5.5 复用 A3 的子查询位置规则并拒绝视图（From/Join 仅 this 参数非标量，JOIN ON 标量反例先失败后修复）；7.5.3 在实际连接上设置和回读保护变量。实际连接版本与缓存不同也不发受限计划。B3/B4 在现有 Skill 补诊断与 T8 评估方法，无新增评估工具/模式；普通查询无 EXPLAIN 前置，数据库失败仍中止本轮。C 复用同一入口扩为 15 个登记来源，增加锁/事务、热点/Region/Store、组件与 TiFlash 表语义；scheduled_tasks 未覆盖。
-
-B 共用 SQLGuard/结构与 TiDB/runtime 回归 977 passed；最终 B/C 集中回归 158 passed，含 T8 SELECT 及 C Web 追问/飞书部分结果；Ruff / mypy（40 模块）、文档一致性 2 项及 diff 检查通过。正式 Web → SDK → 治理 → Adapter → Evidence/隔离 PostgreSQL 覆盖计划成功、受限计划零 I/O、诊断取数、诊断源撤权追问、数据库报错整轮中止；协议/模型为替身，只证明调用链。真实 Agent 的 T3/T4/T8 分析质量尚未验收。
-
-本地 macOS ARM64 TiUP 精确两版顺序运行，各 1 PD / 1 TiKV / 1 TiDB、仅回环，不含 TiFlash/监控。A 两版已有真实查询/结构/视图/警告及正式 Web 成功/1242 中止证据；B 两版实际发现 3 个诊断来源、普通计划保留原 LIMIT、TIFLASH_REPLICA 空结果，7.5.3 标量子查询受保护计划有 ScalarSubQuery，6.5.5 受限计划被拒。先前 7.5.3 OFF→1242 / ON→ScalarSubQuery 与 EXISTS 形状对照仍有效。SLEEP 资源探测只返回中断值 1，未证明普通查询的服务端超时错误，资源门槛保持开放。
-
-本地合成输出和手工脚本位于 `~/.local/share/xiaowei-tidb/evidence` / `scripts`，凭据与 StarRocks 恢复信息不入 Git。StarRocks 测试容器及镜像已按授权移除，数据卷保留；未改其他服务。源码/夹具、本地真实工具、模型、渠道、部署与用户验收分别记证。
-
-PR #137 大小写审查阻断已修复：TiDB 库/表按 casefold 匹配，依赖 AST 使用快照身份并保留隐式来源名，执行原文不变；StarRocks 不变。补齐小写诊断、业务表大小写、视图 EXPLAIN、三段列/相关引用及诊断拒绝回归。README 已说明示例 schema_limits 含登记诊断表及列。本地 6.5.5 对 15 源逐一 EXPLAIN SELECT 1 … WHERE 1 = 0，均含 rows:0 的 TableDual（部分上有常量 Projection）；证据为 evidence/diagnostic-tabledual-655.json，已恢复原本的 7.5.3 实例。该修复独立补审无新增阻断（17 项通过）；TiDB/正式入口/共用工具与文档回归 287 项、共用 SQLGuard/结构范围 548 项通过，Ruff、mypy（40 模块）及 diff 检查通过。精确 head CI 状态见 PR，不代表公司验收或部署授权。
-
-B 独立审查发现并关闭 JOIN ON 标量子查询视图误放行；原反例先失败，补审 37 passed、无新增发现。C/集成独立审查 `22f7446..7e8d037` 无代码阻断，独立 29 项通过；文档状态残留已修正。C 两版真实本地均已校准 15 源、组件/Store/Region 和单行锁等待。等待时长采用 NOW(6)，避免 NOW() 秒级精度造成负值；未知或采样矛盾不得编造时长。
-
-完整回归曾发现纯 StarRocks 三页样例的模型请求 65,818 字节超过原 64,000 上限：原因是无条件加载变长的 TiDB Skill。已按可信目标类型选择领域 Skill（混合目标保留两类），不提高 Profile 上限；原失败样例及类型选择/正式入口集中回归 51 项通过。完整非部署/发行及远端 CI 的精确版本与最终结果跟踪于 PR #137；本地证据来自合成数据，不含真实模型。下一项：完成候选检查后由用户安排统一公司验收；全部本地开发、测试与分切片审查后统一公司验收，A 公司验收不阻塞本地 B/C。公司 TLS/实际权限/资源、TiFlash/共享监控、真实模型与飞书保持开放；缺真实锁等待和已知故障样本时对应 T6/T7 不能关闭，不扩大写权限或部署授权。
-
-### 当前：SQL 解析失败的预算内恢复（离线候选）
-
-依据[批准计划](docs/superpowers/plans/2026-10-24-starrocks-sql-parse-recovery.md)，批准 blob 为 `01363706e852f36ab192652b67f52d9e2419c828`。当前分支基线见 §1；本地代码提交：P0 `967fbd933f23c370592a3adc266bc06a150fcf5d`、P1 `a16f12f1bef0a79d69d6e8b8848cf7400a91f097`、P2 **`867c7569517cf024087aadd2f4d5262f2ffe27c2`**。后续交接提交只更新本文与计划状态，不改变这一受测代码/测试版本；最终提交号直接从 Git 读取，不为回填本文自己的 SHA 再提交。
-
-已接通 Adapter → Governance → FunctionTool → 同一个 SDK Runner → Evidence/PolicySession 的窄恢复路径，产品契约见 [ARCHITECTURE §6](ARCHITECTURE.md#sql-parse-recovery)。S1 实际走已有成功查询、解析失败、修正查询和交付，产生两份真实记录的成功 Evidence；S2 只有解析失败且工具/SDK 轮次用尽时，沿既有无工具收尾，零成功 Evidence。S3 的内存/超时、权限、连接中断及未知错误仍停止；元数据模板不交给模型修复。繁忙后解析失败不留下旧 `slot_busy`，再试额度保留；并发的一次失败和一次成功均记账；旧账本缺字段、新账本原生暂停/恢复均不重放 SQL。外部模型和 StarRocks 驱动为替身，SDK、治理、Adapter、Evidence、PolicySession 与隔离 PostgreSQL 为实际路径；不手工制造成功 Evidence。
-
-**P0 依据与位置取舍：** 核对官方 tag 3.5.14 的 [ConnectProcessor](https://github.com/StarRocks/starrocks/blob/3.5.14/fe/fe-core/src/main/java/com/starrocks/qe/ConnectProcessor.java)、[ParsingException](https://github.com/StarRocks/starrocks/blob/3.5.14/fe/fe-core/src/main/java/com/starrocks/sql/parser/ParsingException.java) 与 [MysqlErrPacket](https://github.com/StarRocks/starrocks/blob/3.5.14/fe/fe-core/src/main/java/com/starrocks/mysql/MysqlErrPacket.java)：解析异常转为 AnalysisException，错误包未另设错误码时使用 1064，解析消息以固定签名开头。位置由 [ErrorMsgProxy](https://github.com/StarRocks/starrocks/blob/3.5.14/fe/fe-core/src/main/java/com/starrocks/sql/common/ErrorMsgProxy.java) 使用 Java MessageFormat 生成；其数字采用默认区域格式，可能出现千位分组（[Java 官方说明](https://docs.oracle.com/en/java/javase/17/docs/api/java.base/java/text/MessageFormat.html)）。按计划 §3.1 的省略选项，最终只保留受控 `parse_failed`，不实现位置解析；EXPLAIN 首行及后续行均不返回行列号，因此不会把前缀列偏移交给模型。这里验证的是官方版本源码，不等于已确认公司 pre 的版本和驱动实际返回格式。
-
-**失败先行证据：** P0 新正例在实现前 **9 failed**（`p0-red.log`）；P1 正式入口 S1/S2 在接线前 **2 failed**（`tool_failed`，`p1-red.log`）。位置分组反例在原位置实现下 **1 failed、3 passed**（`p2-position-red.log`），之后采用上述省略方案。普通 Session 的无 Evidence 输出投影不变，失败记账只进入既有 TurnLedger，不升级 Evidence/TurnAnswer 或数据库 schema。
-
-**最终代码验证：** 以下命令在干净的 **`867c7569517cf024087aadd2f4d5262f2ffe27c2`** 执行；完整命令、HEAD、工作区状态与结果保存在 `/tmp/xw-sql-parse-recovery/final-code-checks.log`。测试 PostgreSQL 为现有本地实例，各 fixture 创建/清理自身的隔离数据库；没有运行本地全量。
-
-```sh
-export UV_OFFLINE=1
-export SDK_TEST_POSTGRES_URL=postgresql+asyncpg://postgres@127.0.0.1:55432/postgres
-uv run --locked --extra dev python -m pytest tests/p1b/test_starrocks_adapter.py -k 'parse or query_failures_are_mapped or failures_while_reading or session' -q
-uv run --locked --extra dev python -m pytest \
-  tests/sdk_core/test_sql_parse_recovery.py \
-  tests/sdk_core/test_database_skills.py \
-  tests/security/test_docs_command_consistency.py \
-  tests/sdk_core/test_starrocks_tools.py::test_s1_formal_query_entry_preserves_sql_and_rejects_missing_database \
-  tests/sdk_core/test_starrocks_tools.py::test_schema_refresh_holds_only_slot_and_model_receives_busy_rejection \
-  tests/sdk_core/test_starrocks_tools.py::test_pool_timeout_before_sql_refunds_budget_but_after_sql_stops_turn \
-  tests/sdk_core/test_app.py::test_unfinished_query_is_its_own_system_failure \
-  tests/spike/test_sdk_resume_ledger.py::test_persisted_tool_budget_is_not_reset_after_restart -q
-uv run --locked --extra dev ruff check .
-uv run --locked --extra dev ruff format --check src/xiaowei/app.py src/xiaowei/tools.py tests/p1b/test_starrocks_adapter.py tests/sdk_core/test_app.py tests/sdk_core/test_sql_parse_recovery.py
-uv run --locked --extra dev mypy src/xiaowei
-git diff --check b208b2c377986a0e7da819590c38bea8000dbb19 HEAD
-```
-
-结果：Adapter **32 passed、143 deselected，1.58 秒**；SDK/Skill/文档及既有相关节点 **45 passed，7.12 秒**，合计 **77 passed**（含新恢复文件 15 项）。Ruff、列出的五文件格式检查、mypy **39 源文件**、diff 检查全部通过。`starrocks.py` / `governance.py` 保留未涉及的基线格式，撤去格式化器对原安全巡检代码的顺带重排。
-
-**改动文件清单：**
-
-- 执行与记账：`src/xiaowei/starrocks.py`、`src/xiaowei/governance.py`、`src/xiaowei/tools.py`、`src/xiaowei/app.py`。
-- 模型方法与权威契约：`src/xiaowei/skills/database_query.md`、`ARCHITECTURE.md`。
-- 回归：`tests/p1b/test_starrocks_adapter.py`、`tests/sdk_core/test_sql_parse_recovery.py`、`tests/sdk_core/test_app.py`（既有脚本 cite helper 识别 `invalid_sql` 无证据反馈，保留无 Evidence 的断言）。
-- 计划与交接：上述批准计划（原批准内容随 P0 收入 Git，后续只更新执行状态）、`AGENT_HANDOFF.md`。
-
-**未覆盖与下一步：** 交最终本地差异给用户独立审查；当前没有 PR/CI 链接，完整默认测试留给后续获准 PR 的 CI。公司 pre 的 StarRocks 版本、两条完整驱动异常及签名实际一致性未确认；3.5.14 官方源码、其他集群 A0 结果和离线替身不能替代。真实模型是否正确选择工具、修正而不改变问题语义、保留有效事实并形成合格诊断，仍按计划 S1/S2 在公司另行验收，并记录调用次数、耗时和用量；本地脚本模型不证明自主能力。没有调用公司服务，也未定位原 Compaction 告警根因。原安全巡检 A0/A3、渠道实收、代理 openUrl 行为与漏查目标延期等既有缺口不关闭。
+监控补查已随 [#124](https://github.com/shixian66/xiaowei-agent-sdk/pull/124) `de93ed1` 合入，不再是独立候选。选择器／对象缺失／有界响应修正沿当前监控契约；[11 场景、14 轮评测](docs/monitoring-reliability-evaluation.md)的合成导出只证明给定事实的解释路径，真实自主取证、补查质量和公司监控仍开放。
 
 <a id="cloudcanal-phase1-status"></a>
 
-### CloudCanal 一期计划与 CC0 探查（既有工作）
+### 尚未实现或暂停的方向
 
-[实施计划 v1.7](docs/superpowers/plans/2026-10-23-cloudcanal-phase1.md)已审查通过，等待[§4.1 现场确认](docs/superpowers/plans/2026-10-23-cloudcanal-phase1.md#41-连接与运行前置)和 CC0 实测结果；CC1 尚未授权开发。已审计划内容固定于 `21c6ef75a36bbc3404efcffffa8e663bae475f8b`，本次同步不改 C1—C5、D1 或 P1/P2。
-
-[CC0 脚本](scripts/cloudcanal_cc0.py)仅供用户在公司独立探查，未接入产品，使用方法见 [README](README.md#cloudcanal-cc0)；脚本及测试保持已审内容。本 PR 交付计划、文档和探查脚本，并按用户授权仅定向升级现有开发工具链传递依赖 filelock 至 4.2.1；不代表 CloudCanal 产品能力已实现，也不授予 CC1 开发、真实连接或部署权限。
-
-有效验证：同步版本 `f09011a` 的文档一致性 2 项与 CC0 临时 loopback MCP 测试 16 项合计 **18 passed / 16.13s**，Ruff/diff 通过。filelock 修复仅更新 uv.lock 中该包的版本与制品信息，CacheControl 的 FileCache / SeparateBodyFileCache 读写、覆盖、删除兼容检查通过，完整锁定依赖集的 `pip-audit --strict` 未发现已知漏洞；最终 CI 以 [PR #134](https://github.com/shixian66/xiaowei-agent-sdk/pull/134) 的当前 head 为准。ARCHITECTURE 保留主线安全巡检契约与 CloudCanal/MCP 接入方向，仅去除一处重复首句；没有产品源码或运行依赖变更，未新增本地全仓测试，未调用真实模型或公司服务。
-
-下一项：用户完成 §4.1 现场确认，运行 CC0 并带回打码结果；按真实工具契约确认 CC1 开发授权。MCP 超限标记、同会话修正及禁止续接仍是 CC1 待实现的验收要求，当前产品是否会在带事件编号的 SSE 超限后续接成功尚未复现；官方 Prometheus/Grafana 是否发送事件编号仍未知。
-
-已知既有说明问题（N5）：`config.py:152` 称群 tools 仅 StarRocks，实际 `runtime.py:432` 接纳所有已登记工具；在 CC1 启用 CloudCanal 群配置时更正注释并核对说明，执行授权沿用现状。
-
-### 安全巡检 A/B/C 修复（PR #133，已合入）
-
-[PR #133](https://github.com/shixian66/xiaowei-agent-sdk/pull/133) 已合入 `main@3aad626b42fc4ef2f37cafe342cf1826d453ca30`，已审候选为 `e56eb24fc8d609134a5d0670ebb970e01ec70f9a`。最终状态：
-
-- [A 首跑/失败通知](docs/superpowers/plans/2026-10-23-scheduled-agent-first-run-recovery.md)：可信 automatic 文本任务跳过用户图片加载；失败沿当前授权与逐次账本尝试一次固定未完成通知，保留真实失败状态，超时、取消、unknown 不追加 POST。
-- [B 部分失败可信交付](docs/superpowers/plans/2026-10-23-security-inspection-incomplete-results.md)：仅安全只读工具的已分类源失败交回 Agent，其他明确请求的目标可继续，成功复用原 Evidence；失败来源在 Session 回放、历史交付及 SDK 审批恢复前复核权限，未完成状态由代码如实呈现。缺审计源时复用获准刷新；通知去重和安全失败日志已修复。漏调用目标检测仍延期，无新增必查字段、成功账本、表或 Evidence 版本。
-- [C 纯文本通知](docs/superpowers/plans/2026-10-23-security-plain-notification.md)：保留范围、覆盖、检查计数及必要提示，不逐行列样本；模型自主概括，Web、卡片、文件和历史 facts 保留明细，窗口及采集时间使用证据审计时区。
-
-上述已审候选的有效证据：本地完整默认回归 **5114 passed、235 skipped、98 deselected、5 warnings / 1691.67s**；[CI 39989625721](https://github.com/shixian66/xiaowei-agent-sdk/actions/runs/39989625721) **9/9 job 通过**，其中 integration **5030 passed**、p3-release **84 passed**。Ruff、mypy、文档及 diff 检查通过；展示代码版本 `2c8e90d` 的真实 Chrome brief、本地时间和历史不重取用例通过，该展示代码随后未变。这些是 #133 的既有证据，本次 CloudCanal 同步不重跑其完整套件。
-
-公司验收见[公司清单 §5–§6](docs/starrocks-security-company-checklist.md#5-ab-故障恢复验收另获部署授权后执行)和 [C 计划 §7](docs/superpowers/plans/2026-10-23-security-plain-notification.md#7-沿用的业务验收样例与公司缺口)。A0/A3、真实 3.5.14 语义/容量、真实模型自主取证/归因/概括、渠道实收仍开放；代理省略 openUrl 行为未知，必填协议保持。此前报告呈现已随 [PR #132](https://github.com/shixian66/xiaowei-agent-sdk/pull/132) 合入，范围与公司验收见[原报告计划](docs/superpowers/plans/2026-10-23-security-inspection-report-presentation.md)。本次不打包、不部署，也不以离线或 CI 通过关闭这些验收项。
-
-### CI 小范围优化（PR #131）
-
-[批准计划](docs/superpowers/plans/2026-10-23-ci-small-optimization.md)已落实为发行目录归属调整及耗时统计，README 只保留命令和权威规则引用。现有九个 CI job 名称、触发、权限与失败退出语义保留，产品代码和业务测试断言未改。基线及最终 head、独立审查、远端 pytest/job/workflow 耗时、排队时间和慢用例集中记录在 [PR #131 的运行证据](https://github.com/shixian66/xiaowei-agent-sdk/pull/131)，避免为追记 CI 结果再提交文档触发全量。
-
-本地证据：三组 collect-only 使用同一环境并设置仓库固定的 SDK_TEST_POSTGRES_URL，只收集不执行；原默认集合 **5245 = integration 5161 + 发行目录 84**，按用例 ID 比较无遗漏、无额外、无交集，前两组均为 96 deselected。并行收集总墙钟 **4.554 秒**；临时明细在 `/tmp/xw-ci-small-optimization/collection-summary.json` 和同目录 `.ids` 文件。CI 命令改动先触发策略检查 5 项预期失败，同步受审命令/摘要后相关策略和文档检查 **30 passed，0.18 秒**；相关 Ruff 和 diff 检查通过。没有重跑本地业务全量。
-
-用户提供的历史本地实测为 **2028 秒（33分48秒）、4900 个用例**，未提供提交 SHA；只作历史参照，不作同版本性能对比。远端历史与收益估算见计划，最终收益仅按 PR 的实测记录报告，不把各并行 job 耗时相加为等待时间。
-
-**剩余慢点／下一步：** integration 当前按单进程顺序执行测试；本轮采集 `--durations=30`，主要慢点及其耗时见上述 PR。下一步主要候选是 **pytest-xdist**：结合这些数据，从少量 worker 验证耗时、共享资源竞争和稳定性，再决定是否采用及 worker 数量。#131 未安装或启用并行；已由用户授权合入 `main@729f960d`，不代表真实模型或公司服务可用。
-
-### 手动 StarRocks 安全巡检（2026-10-23，离线候选）
-
-[当前计划](docs/superpowers/plans/2026-10-22-manual-starrocks-security-inspection.md)在 `codex/manual-starrocks-security`、`/Users/kloenguyen/.codex/worktrees/manual-starrocks-security/agent-SDK`，原始基线 `1a92c58`，本次已 rebase 至 `main@b7d033caa36b47cae1d9cfab5bc099c0f46911b4`，无冲突；与「定时任务」对话工作树隔离。用户确认计划 blob 340af95 复审通过并授权输入/计数及 A1b。现已实现一个只读 inspect_audit_security、短 database_security Skill、全窗聚合/粗筛两条 SQL、纯分析与既有 SDK/治理/Evidence/报告接线，不改表结构。本次按用户批准移除将未开发/未验收误作禁止的自动工具拒绝及未登记能力提示词禁令；复用既有配置、权限和自动执行治理，保留 Skill 的不自动补取原文/口令/错误全文。产品规则唯一见 [ARCHITECTURE §6](ARCHITECTURE.md#6-只读查询保护)。
-
-运行时完整性只看候选是否截断及是否全部可判定；全窗超长数单列，非候选超长不触发 truncated。OR 夹注释、DELETE 等已知缺口保留；两条查询不承诺同一快照。样本两列多值特征转为文本以复用 Web 事实表，内部仍按列表/集合去重。新增 security 真实模型采集套件复用既有入口与同一 S1–S5，默认各一次；本地只用脚本模型，不是 Agent 自主能力验收。
-
-当前验证分版本记录：3988aefd92b45e2e68b7907c583e489a3fa3e08e 的 [CI 39834325687](https://github.com/shixian66/xiaowei-agent-sdk/actions/runs/39834325687) 9/9 通过，完整套件 4900 passed、235 skipped、89 deselected、5 warnings；这是修复前版本的证据。早期三项失败中的两项容量夹具已校准且未放宽生产限额/拒绝断言，SDK 暂停 spike 的早期偶发根因仍未证实。
-
-3988aef 的后续独立复审发现唯一阻断：SQLGlot 30.17.0 将 INSERT 后的优化器提示词分成 HINT，导致 INSERT /*+ SET_VAR(a=1) */ OVERWRITE 漏判。已先复现精判和粗筛包含关系两项失败，再仅在 _operations 取首/次关键字前过滤 HINT；保留仅含 Hint 的正常反例，避免空列表。共享 SIGNAL_CASES 同时覆盖精判与粗筛包含关系，公司清单已补同一条字面量。局部分析/采集及文档检查 98 项、相关 lint、mypy 38 文件和 diff 检查通过；修复代码 cb9dca32601a5ca2aeef7301732dc73af52f9077 已仅针对相对 3988aef 的差异独立复核通过，审查者独立复现旧版两项失败、当前两份相关测试 96 项通过，未发现新增阻断。3988aef 发行包不含此修复，不能当作修复后的验收包；该局部修复已随 #128 合入；本次新增两项调整仍须按最终 HEAD 独立复审，不合并、不打包、不部署。
-
-独立审查 5b51059 发现 S4 字节裁剪会丢掉本来放得下的晚出现操作代表；已沿正式 SDK/Evidence 入口先复现再修复。分析结果保持代表优先顺序，让既有字节裁剪保留各类样本，不增加容量或第二套选择器。修复版本 a451f573836df6c7be247035ab2bbd3cf7dc0057 已经独立复核，无其他阻断项；新增行数/字节两个配置的反例，作者与审查者分别运行分析/采集 93 项、正式入口 21 项全部通过，lint/type/diff 检查通过。
-
-首次远端 CI 另发现两项基线问题：opentelemetry-api 1.45.0 命中 CVE-2026-114603；密钥扫描自测将随机 Base64 的 +/ 删除，可能不足 40 字符。已仅将该传递依赖补丁更新为 1.45.1（[官方修复](https://github.com/open-telemetry/opentelemetry-python/releases/tag/v1.45.1)），strict pip-audit 无已知漏洞；自测仅删除换行，保留退出码 1 和全历史扫描要求。合成输入复现旧长度 20、新长度 40；同步受审 workflow 摘要，策略 28 项通过；补丁 33b265b46d5372960d19d69b72fa1453d20517f8 独立复核通过，审查者用 gitleaks 8.30.0 执行两段实际自测均检出样本。补丁后相关回归 214 项、安全 gate 63 项、lint/type 均通过；不把基线问题说成巡检新引入漏洞。
-
-公司验收仍开放：用户/DBA 回传 3.5.14-23a56ec / AuditLoader 5.0.0、固定列存在、一小时 237398/ERR3/按16000超长135、旧粗筛117、单次延迟约18秒。来源集群/账号安全引用、时区/截断配置、实际 SQL/候选字节限额、脱敏、多语句拆行和隔离测试环境仍待绑定。3.5.14 最终 LIKE/REGEXP 合成字面量验证、真实候选容量及两条查询成本是验收门槛，证据记在[公司侧清单](docs/starrocks-security-company-checklist.md)，不作运行时标记；4.1.4/Python/SQLite 不替代。
-
-[PR #128](https://github.com/shixian66/xiaowei-agent-sdk/pull/128) 已合入 main@96c965c；以下候选验证/发行记录不等于公司验收或部署授权。CI 结果以对应 head 的检查为准，本次不打包；旧 3988aef 包不能用于验收，后续获准合并后须按最终 SHA 重新打包。本次离线验证：新增配置用例先复现 2 failed，修改后 runtime 安全巡检 3 passed、既有审计相关 10 passed；指定 Skill、S1–S5、定时 Agent/任务、分析/采集及文档回归 276 passed（`/tmp/xiaowei-security-scope-regression.log`），额外文档核对 2 passed，ruff 全仓、mypy 39 源文件及 diff 检查通过。这些是分组离线结果，不作完整套件或真实模型证明；下一项为推送两个独立提交并等待 CI，由用户复审新增差异，之后按公司清单完成真实验证；本地代码审查通过不豁免这些门槛。A0/A1b 真实验证与 A3 由用户/DBA 在公司执行，本地不连公司 StarRocks 或模型 API。已选 A，仅在公司隔离测试环境生成无害样本，生产不回放；真实模型、渠道实收、部署和用户验收未开始。未授权部署。
-
-### 当前：S1 已复审通过，准备 PR 集成
-
-S2 独立复审结论保留，审查版本 44b0d5d、受测代码 d750a41，具体证据见 §5。用户已确认 v4 回退限制并授权本地 S1，依据[计划 v1.5](docs/superpowers/plans/2026-10-22-feishu-input-presentation-repair.md)实现默认业务回答、单技术区与版本兼容，模型 schema 不变。D 及原目录工作保持不动。
-
-下一项：按用户授权推送主题分支、创建 PR，确认远端 CI 全绿及 head 未变后合并；PR 记录精确 base/head、审查版本和集成证据。P1/P2 与 S2 均已独立复审通过，不重做整轮审查。已审查版本 ce52831 的源码/测试冻结于 b08c042；与最新 main 的唯一测试冲突保留主线实际请求容量校准，生产限额和前后 I/O 断言不变。c44bbdf 是集成前完整全套，不冒充集成后证据。真实模型、平台、公司源及部署不在当前授权内。v4 升级/前向修复的唯一权威契约见 [ARCHITECTURE](ARCHITECTURE.md#user-delivery-and-history)。
-
-### 已合入的监控可靠性修订（PR #121）
-
-产品只改 `app.py` 的两段监控指令和 `runtime.py` 的即时查询说明；未修改执行逻辑、治理策略、Evidence/Session 或交付。评测复用现有 `scripts.dialogue_real_model`，新增 `monitoring-reliability` 集；领域判据只展示给评审者，不进入 Agent 指令。
-
-外部审查在 `23c7185f38ade6c89d5a2fecfc93f60916db952d` 发现 `test_monitoring_read_recovery.py` 仍断言已删除的旧句，作者复现该测试的两个参数用例均失败。初版180项通过的记录漏了这个直接检查监控指令的文件，初次独立审查的“无阻断”结论也被该反例推翻，不能作为当前候选通过依据。本次只删除已有新契约测试覆盖的旧句断言，保留故障源隔离、成功证据保存和历史读取等行为断言，不把旧句加回产品说明。
-
-同时补齐history的单点up反例、scope扩围后的fat1资源未核实判据，并在评测文档说明复用字段的本套件含义。现为9场景/12轮；相对 `23c7185`，`src` 与采集器执行逻辑未改，产品仍仅三处文字替换。
-
-补充回归：`test_monitoring_read_recovery`、`test_monitoring_reliability`、`test_dialogue_real_model`、`test_prometheus_p2`、`test_database_skills`、`test_dialogue_contract`、`test_app`、文档命令检查合计 **220 passed、27 skipped、3 deselected**；27项均因官方 MCP 二进制未配置跳过，3项browser未选。`ruff check --no-cache .`、`mypy src`（35文件）、`git diff --check` 通过。没有新的全仓测试、CI或真实模型证据。
-
-独立复审重新检查 `23c7185..759c644790f280fc1cc7771502d6ed3d2195d699`，另复验30项通过（含原失败的两个参数用例），确认旧断言删除没有削弱必要行为检查，P1关闭、当前修订无阻断。文字引用搜索和测试字符串AST对照未发现其他直接依赖被删文字的遗漏。复审后只更新本交接记录，产品、采集器和测试未再变更。
-
-该修订已由 PR #121 合入 `main@143c4c8`；具体样例、依据及验证边界见[监控可靠性评测说明](docs/monitoring-reliability-evaluation.md)。真实模型对比仍需另获 Profile、端点/模型与费用授权。本套固定导出解释题不能替代自主查询、补证及真实源/飞书验收；求值窗口展示标签的问题未在该修订中解决。本次保留这组已合入的指令、评测和验证记录，不据此关闭真实验收。
-
-### 已合入的相关工作
-
-下表列主线合入版本与关键接续证据；测试与运行边界见后两节，详细实施仍查对应计划。
-
-| 工作 | 主线提交 / PR | 接续说明 |
-| --- | --- | --- |
-| P2 / P2.5 / 飞书单群基础阶段 | P2 `85d657c` / #21、#24–#30（方向文档 #22、#23）；P2.5 `a938a0f` / #32–#41；单群 F1–F4 `f32291b` / #44–#47 | 阶段代码与离线退出记录的检索入口；P2.5 原 Task 4 已取消，真实退出条件仍按 P3 分项验收 |
-| 生产对话回答修复 P2/P1 | `821ee8d` / [#119](https://github.com/shixian66/xiaowei-agent-sdk/pull/119) | 精确查询指引、brief 与正文/详情、可信短提醒及动作边界已合入；CI 与未关闭的 P4 条件见 §5 |
-| 数据库环境选择第一步 | `1378b75` / #108 | 两份数据库 Skill、环境规则与评测框架已合入；真实遵守率未验证，不再列为待实现或待推送 |
-| 生产轮次失败修复 | `4e0ab86` / #110 | 有界模型请求重试、监控只读失败反馈、选择器修正与最终回答改写已接入；原三选一回答约束已由 S3 替代 |
-| 引用契约修复 | `c00ede6` / #111 | 一次无工具改写及安全日志已实现；其旧的强制引用/分析关联规则由 S3 替代，不重复实现 |
-| 自由回答 S1 | `9231f45` / #112 | 小行为修正已合入；也是现有计划指定的真实评测基线 |
-| 自由回答 S2 | `897ee83` / #113 | schema 与旧 RunState 恢复离线实验已合入；不能证明真实 Vertex 接受新 schema |
-| 自由回答 S3 | `6c585d0` / [#114](https://github.com/shixian66/xiaowei-agent-sdk/pull/114) | 新回答、结果补全、来源分区、兼容与正式入口审批恢复已合入。Codex 对 `eff89960` 独立复审通过；[CI 39131473170](https://github.com/shixian66/xiaowei-agent-sdk/actions/runs/39131473170) 10 项全部通过、无重跑；以该 head 做 squash 合并，`6c585d0` 与候选文件树相同 |
-| 飞书结果交付 | #102–#105；平台门槛修复 `643858f` / #107 | 分项回执、完整文件拆分、自然正文与容量门槛已合入；真实平台和客户端验收仍开放 |
-| 模型自主报告 | `f7eabe6` / #116 | MD/静态 HTML、短 Skill、安全预览与回答版本 3 已实现；R3 真实模型/平台验收开放，不重复列入本次待开发 |
-| Vertex 诊断 | `76850bf` / #117 | 安全 429 分类、HTTP 尝试和轮次 usage 日志已合入；不是用户进度事件流，不改变模型/工具执行策略 |
-| 监控写与 SDK 复用 | D7 `7b66738` / #83，SDK-A/B/C #89/#93/#94，C8 `408fafb` / #95 | Dashboard、数据源非秘密字段、Annotation 与原生审批已有实现和离线/隔离协议证据；公司生产写开放不能由此推定 |
-| 监控曲线 D4 | `eda4a0b` / #106 | 协议前置核验完成，用户已决定暂不实现曲线；不作为当前待实现事项 |
-
-P1-B、P2、P2.5 与飞书单群的基础切片已有离线交付记录；P3-A/B 部署维护代码已合入。P1 Task 9、P2 诊断、P2.5 环境行为及单群的真实退出条件仍按 P3 分项验收，不把这些阶段统称为全部完成。
-
-### 主线旧回答结构与历史证据（版本 ≤3）
-
-以下记录版本 ≤3 的已合入行为，不覆盖本地 v4；当前差异和验证见 §5 S1，产品契约见长期交付规则。已合入的回答结构见[自由回答结构计划](docs/superpowers/plans/2026-10-17-free-answer-structure.md)。其中 S2 的“留 S3”等阶段文字是当时记录，当前合入状态以上表为准。
-
-已合入的[模型自主 HTML/MD 报告](docs/superpowers/plans/2026-10-19-model-authored-reports.md)复用 blocks 和现有治理/交付；MD 原生排版、独立 HTML 片段与短 Skill，事实就近由代码填入，主消息提取文字。版本 3 贯穿保存/读取，解决旧纯文本在升级时未绑定字节的兼容问题；旧 HTML 基线字节回归保持一致。禁止脚本/外部资源，解析 CSS 值控制布局，文件/试排/预览只清理一次。A1 仍保留通用模型失败回执，未扩大数据/权限或 SQL 取数限额。
-
-普通消息保留自由块顺序；本次 P1 复用 full/brief，本轮 brief 收起且完整交付，历史 brief 保持计数摘要及不自动导出原值的边界。remaining 与普通 metadata 默认收起；完整详情超卡片容量时沿既有分项附件交付。新 HTML 用静态详情，新 MD 分正文与证据明细文件，用绑定正文索引和文件内标题标明用途；旧绑定字节、键、uuid 不重排。未新增模型 schema、回答/数据库版本、持久化展示标志或展示服务；Web 保留 textContent。动作与审批材料沿完整专用契约。实现与离线验证不代表真实模型或飞书客户端达标。
-
-Vertex 诊断已随 #117 合入。其候选历史记录为合成响应与应用测试 **344 passed**，ruff、mypy（34 文件）通过；真实 429 样本、公司环境和部署仍未验证，本轮未重跑该套件。不解析日志充当进度回调；新增观察只使用 SDK 与实际应用事件。
-
-S3 的源码事实：`AgentAnswer` 为有序 `TextBlock | FactBlock`，另含 `report_format` 与 `awaiting_user`；模型文字累计上限为 16,000 UTF-8 字节、最多 64 块。归一化、输出预检、Session 提交与交付复用同一规则；本轮新事实的 brief 收起但完整交付，历史仍按可信原执行轮次生成摘要，重复引用取 full，不新增模型调用。符合补全类别的本轮结果进入“其余结果”，历史结果与未引用的诊断/发现原值不补全。动作区域置顶且不进附件；暂停材料显式引用本次请求执行的动作及本轮动作状态，不自动补入其他未请求执行的提案，暂停前已取得的需交付只读结果仍由交付补全。
-
-`repair_final_output` 已通过 Runner 的 `invalid_final_output` 接入一次无工具改写；失败时不重放工具，被拒的原回答不进入后续历史。旧回答投影不套新输出预算，已绑定报告与分项重发复用原字节。方案 1 已有正式群入口的离线恢复证据：旧历史/暂停材料的批准、拒绝、重复/并发批准、发起人失效；无需据旧阶段描述重新实现恢复方案。
-
-### 下一项工作与开放条件
-
-B 的当前离线单元已交付；真实 U5 的日期解释、工具选择、答案质量、调用/耗时/用量及测试机器人接受/群内表现仍须具体授权后验证。保持默认关闭，不自动部署，不把离线候选当作真实验收；D 未实现。C 的独立受治理 Agent 任务已形成离线候选，版本与未覆盖项见 §5；以下为并存的旧业务实战缺口，不作为 B/C 的真实验收证据。
-
-本次 P2 已在 `1c06a89d633753f70fb6e5829c0cc4fc5992cbfd` 独立复审通过，两个阻断（合法反引号 SQL 的夹具路由、普通 naive DATETIME 错标会话偏移）已补回归并修复。普通查询保留无偏移墙上时间，aware 时间及已知来源模板不变。旧历史/绑定附件可能保留原先错误偏移，本次不追溯修正、不批量失效旧 Evidence。
-
-P1a/P1b/P1d 首候选 `aa95773` 曾通过独立审查；后续反伪造反例发现折叠入口统一置后，未保留事实块位置，原通过结论随此反例收窄。修订将既有详情构造就地调用，旧 v0 仍置后；作者 36 种及独立审查者 22 种 v0 差分输出均一致。原字节重发、权限、审批与容量路径由扩展回归覆盖。已逐项核对批准计划 A2 的 Evidence 归一化与投影、`_raw_redundant`、`_data`、`fold_details`、卡片摘要/技术详情/容量捷径、自动报告参数、报告事实章节及 Web metadata；共用 `historical_brief` 只读属性据已有 summary 判定，不参与序列化。新 `brief` 无摘要仍有原值；显式历史导出正文保留摘要、原值放详情；自动历史摘要缺原文时有明确提示。
-
-B1 的短口径主视图修复已成立；原 B2 因复现形状不符合真实 validate_answer 而撤回。N1 撤回多余的动作报告收集与特殊渲染分支，保持 ARCHITECTURE 的“动作区域不进入数据附件”，不改变契约或已绑定文件原字节。P2/P1 已随 #119 合入，原精确 SHA、默认全量与复审结果见 §5。当前 P4 候选补齐六轮对话与同类场景、实际正文/文件人工核对、绑定回执指标、双源局部失败和正式 Web/HTML 浏览器回归；离线链路成立不等于模型能力验收。具体采集/测试命令见 README；真实模型与客户端联合验收仍需具体环境及费用授权。不部署。A1 目标 StarRocks 的 `CURDATE()/NOW()`、时区与 DATETIME 语义仍开放：审计写入时区非 Asia/Shanghai 时，普通 naive DATETIME 保留审计墙上值且可信表格无时区标注，须实测正文时区解释或获准 CONVERT_TZ 查询。P4 必须验证模型遇到直查可纠正拒绝后不偷换候选工具；该行为目前依赖指引，离线执行失败检查不证明模型遵守。真实模型任务能力、飞书桌面/手机多附件与详情展示、用户验收均继续开放。P3、P1c 不在本次范围。既有自主调查与进度工作仍保留以下验收条件，不据本次查询和布局测试关闭。
-
-1. P1 的审查修复只调整正常在途发送的顺序收尾、暂停结果投影与测试同步；失败/超时/取消仍停用，正式回复不等待进度。P1、P2、M1a、M1b 的离线证据见[实施计划 v1.7](docs/superpowers/plans/2026-10-20-agent-autonomy-progress.md) §7。下一项是由用户在公司环境沿同一 T1–T5 执行 P3，核对真实模型任务质量、平台权限、修复后的收尾与客户端体验；已批准产品取舍不重开。
-2. M1b 的七项验收已有离线证据，折叠、依据去重、附件完整与失败/未知恢复已覆盖；真实桌面/手机上的明细可达、代码复制及表现仍须 P3 验收。该历史切片不改变 schema；本轮 brief 已按用户确认改为收起且完整交付，历史 brief 摘要及导出边界保持，不为布局增加查询。
-3. 报告 R3、S4 的真实 provider/schema、模型质量及界面验收继续开放，执行时复用 T1–T5 和已有评测，不另建平台。原 S0 指定 `9231f45` 的历史基准安排不由本计划自动改变；本次进度对照基线为 `76850bf`，两种对照须明确差异与用途。
-4. 真实 Profile、数据/接收范围、预算与安全引用须具体获准。已有模型、公司部署或监控写的历史授权不扩展到本轮；缺环境仅保留对应验证缺口。
-
-报告 MD 拒收、N1 提示和已明确的 HTML 可见性修复已合入，不重开已关闭问题；历史审查覆盖、未覆盖的任意配色对比度和公司内网 R3 测试安排见报告计划 §9。该历史安排不代表本轮取得调用或部署授权。
-
-暂缓：监控曲线、SQL 大结果限额调整、任意全局 HTML/CSS/交互页面、数据库 MCP 及其他未批准写动作。数据源密码私聊命令有设计但未实施。
+| 方向 | 当前状态／继续条件 |
+| --- | --- |
+| CloudCanal | #134 `b208b2c` 合入一期计划和独立 CC0 脚本，产品未接入；用户在 6.4.0.2 公司环境确认只读账号链接、工具／错误／分页／日志语义后复核，再获授权推进 CC1。用法见 [README](README.md#cloudcanal-cc0) |
+| Node 核心巡检 D | 暂停、未实现；C 的通用 Agent 能调查不代表固定 Node 样例已验证，不自动重启 D |
+| 监控曲线 D4 | 暂缓，协议核验和候选方案留在[交付计划](docs/superpowers/plans/2026-10-14-result-delivery-documents.md)，仅在明确重启时接续 |
+| SQL 大结果限额调整 | 继续暂缓，保留当前执行／投影／交付限额；不因展示整理提高额度或关闭容量缺口 |
+| Grafana 密码私聊 | 已批准独立设计、未实现；当前仍由管理员在 Grafana UI 配置 |
+| I2／Wiki／通用历史扩展 | I2 按 I3 证据决定；Wiki 仅调研；定时读取群交互历史的 B1(b) 未批准 |
 
 ## 4. 实测环境与兼容性缺口
 
-下表区分代码/离线证据、隔离真实软件和公司运行。既有测试与用户反馈仅覆盖注明版本与范围，不自动覆盖当前版本验收。
+已有证据只覆盖原 SHA、配置和范围；本轮核对文档／源码，不重跑真实服务，也不把历史用户反馈当作当前服务器状态。
 
-| 对象 | 已有证据及范围 | 未关闭项 |
+| 对象 | 有效证据层 | 未关闭项 |
 | --- | --- | --- |
-| OpenAI Responses | SDK 路径与 HTTP 替身验证 | 获准端点/模型的真实工具闭环、结构化输出与 Session 追问 |
-| Gemini 兼容端点 | 2026-09-30 历史真实 API 部分验证：工具选择、签名回传、类型化回答；当时受 503/429 影响未闭环 | 当前具体模型的完整续轮、交付与签名回放；不把历史额度或模型可用性判断当作今天的事实 |
-| DeepSeek | 协议替身验证；历史第三方中转 V4 Flash 带输出格式时未调用工具，被判为该组合不兼容 | 官方端点未实测，其他端点/模型不能继承第三方结论 |
-| OpenAI 兼容网关 Gate 0 | `6389d78` 上 `glm-4.7-flash` Profile 的一次获准真实运行，使用合成工具/数据；当时临时凭据文件已删除，密钥作废由用户负责 | 只证明该历史组合，未证明稳定质量、真实 StarRocks 或飞书闭环 |
-| Vertex | 公开 Model 适配、多调用/签名回传及新 schema 转发已有离线协议证据；既有公司结果与 429/回答拒收日志证明曾实际调用 | I-V B/C 未完成；S3 `anyOf` 接受、模型遵守率、改写与退避效果、旧历史影响、12 图请求仍待对应真实验收 |
-| PostgreSQL / SDK Session | 历史隔离 PostgreSQL 16.15 覆盖初始化、迁移、密钥绑定、备份/恢复及拒绝路径；后续 v10 暂停恢复、v11 报告、v12 分项交付与 S3 旧格式兼容亦有测试记录 | 公司环境备份保留、容量、故障主机恢复与操作者演练；新 PG 镜像版本另验。schema v12 的存在不证明任意升级路径都已验收 |
-| StarRocks | 可丢弃 4.1.4 容器与合成数据验证只读工具、权限、EXPLAIN LOGICAL、复杂 SQL、视图/审计及原文执行；S1 真协议结果见 §5。公司对话中有实际查询与环境误选反馈 | 公司目标版本、TLS、账号权限、资源组/大查询限额及 P3 固定任务集仍需成套证据；本次 SQLite 替身不支持的合法语法亦须实际复核（见计划 §7），历史反馈不能替代这些退出条件 |
-| Prometheus MCP | 官方 v0.18.0 二进制连接本机合成 API，真 SDK 协议、治理及有限修正已有记录 | 公司服务端超时/样本/并发限额、真实指标调查质量与异常形态 |
-| Grafana MCP / Grafana | 官方 MCP v2.0.2；读取有本机协议证据，D7/C8 在可丢弃 Grafana 13.2.3 与隔离 PG 上有实际写入/回读及拒绝证据 | 公司组织/账号/插件/网络、写端认证和生产开放门槛；CI 未配置官方二进制/隔离 Grafana 的用例可能跳过，不能以 CI 绿代替 |
-| Alertmanager | API v2 替身及早期官方 v0.34.1 隔离协议记录；后续读取修正另有正式入口离线证据，已有公司错误反馈 | 公司版本、认证、HA、容量、写后回读及群审批验收；没有证据覆盖的版本组合不认定通过 |
-| 飞书 / Lark | 官方 SDK、长连接/消息协议替身、群入口、卡片/post、附件与分项恢复有离线证据；已有公司使用反馈 | 正式应用 create/reply/apatch 权限、回执/限频及原群回复位置、修复后的正常收尾、真实并发对正式发送的影响、桌面/手机折叠与代码复制、附件预览/文件一致性仍须 P3 验收；长连接重投、30,000 字节外的平台限制、uuid 去重、多文件时延和图片事件/模型识图沿原缺口保留 |
-| Web | 正式入口及真实 Chrome 的离线用例，模型与数据库按具体用例使用替身/隔离服务；S3 浏览器记录见 §5 | 当前版本真实模型下的业务验收及大量事实展示专项；端口占用未运行的用例不计通过 |
-| Docker / 公司部署 | P3-A/B 在本机 Linux/arm64 两容器验证升级、回退与隔离恢复；发行支持手动生成 amd64 离线镜像包。既有交接记录有公司安装/healthy 和 `4e0ab86` 部署反馈 | 后续版本部署、当前运行状态、真实路径、恢复与用户接受逐项记证，healthy 不等于业务验收 |
+| OpenAI Responses | 真 SDK＋HTTP 替身 | 具体获准端点／模型的真实工具闭环、结构化输出和追问 |
+| Gemini 兼容端点 | 2026-09-30 真实 API 曾验证部分工具／签名／类型回答，受 503/429 影响未闭环 | 当前模型完整续轮、交付和签名回放；历史额度不能当当前事实 |
+| DeepSeek／兼容网关 | DeepSeek 协议替身；历史第三方 V4 Flash 格式组合不兼容。`6389d78` 的 glm-4.7-flash Gate0 单次真实合成工具验证 | 不推广到官方端点或其他组合；稳定任务质量、业务工具与飞书未由此证明 |
+| Vertex | 公开 Model 薄适配、多调用／签名／schema 离线证据；公司结果及 429／回答拒收日志证明曾调用 | I-V B/C、当前 schema／改写／退避质量、旧历史影响、12 图请求；已有调用不等于完整模型验收 |
+| PostgreSQL／Session | 隔离 PG16.15，初始化、迁移至17、稳定密钥、SDK 暂停恢复／历史、备份与隔离恢复；最新 CI 发行84项 | 公司容量、备份保留、故障主机恢复演练；新 PG 镜像版本需另验 |
+| StarRocks | 可丢弃 4.1.4 真协议、权限、LOGICAL 零执行、原文 SQL；#101 的43项仅该版本。公司有查询／误选反馈及3.5.14安全巡检记录 | 每目标版本、TLS／资源组、实际账号、时区／日期函数和固定任务成套验收；其他集群版本不能推定 pre 版本 |
+| TiDB | 本地 TiUP 精确6.5.5／7.5.3、单PD/TiKV/TiDB、15诊断表、视图和计划、合成锁等待；真库＋脚本模型入口 | 公司三集群、TiFlash／监控、TLS／PROCESS／内存与资源行为、T1–T8真实模型；SLEEP返回1不证明数据库超时已中止 |
+| DS | 两版协议夹具、10 MiB 中间错误／超长行／截断／超时、真实应用／SDK／PG／Chrome；DS 与模型为替身 | 公司API、业务码、任务类型／动态子流程、权限／时区、日志负载／脱敏延迟、真实 Agent D1–D4／19变体 |
+| Prometheus MCP | 官方 v0.18.0 二进制连接合成本机 API，真 SDK 协议／治理 | 公司服务端超时／样本／并发、真实指标与自主调查质量 |
+| Grafana MCP／Grafana | 官方 MCP2.0.2 与可丢弃 Grafana13.2.3／PG，D7/C8 实际写／回读及拒绝 | 公司组织／账号／插件／网络、写端权限及竞争窗口；CI跳过的真实二进制用例不计通过 |
+| Alertmanager | APIv2 替身及早期0.34.1隔离记录，正式入口离线反馈 | 公司版本、认证／HA／容量、写后回读和群审批 |
+| 飞书／通知／定时 | 官方SDK、协议替身、卡片/post、附件、分项恢复和公司使用反馈；A/B/C及代理离线链 | 真实 mentions／图片形态、create/reply/apatch权限、原消息回复、限频／uuid、多附件、桌面手机折叠／复制、机器人实收；U5–U7成本及30任务并发 |
+| Web | 正式 Uvicorn／Chrome，用例各用替身或隔离真库 | 当前模型的真实任务质量和大量事实展示；无登录共用身份仍是已接受风险 |
+| 发行／公司运行 | 手动 publish-amd64 发行；历史公司916f57a/schema16启动回报 | 当前主线7565c6a/schema17未在本任务发行／部署；服务器现状、故障恢复及用户接受不能从 healthy 推定 |
 
-凭据仅在获准环境通过安全引用配置，不索要或粘贴明文。未提供环境信息不等于授权连接任意端点。上述实际软件/协议测试不等于公司服务验收，已有运行反馈也不能再总括为“从未运行”。
+关键遗漏继续显式保留：
+
+- 审批回执修复未证实“首轮未形成原生暂停”的生产唯一原因；#142 合入不关闭该缺口。公司仍须按[回执修复计划 §8.5](docs/superpowers/plans/2026-10-20-production-dialogue-answer-repair.md#approval-task-delivery-repair)完成实际暂停／恢复样例，完成判据见该计划第489行。
+- 监控选择器组合失败后的子集重试不做语义推导，是已接受的边界，不能从当前去重记录推定会阻止所有语义等价请求；此取舍保留，不新增规则。
+- P4 真实模型仍须验证遇到精确直查的可修正拒绝后不偷换候选工具；当前只靠工具／Skill 指引，离线错误路径不证明 Agent 遵守。任务规则见 [ARCHITECTURE §6](ARCHITECTURE.md#6-只读查询保护)，评测沿原 P4 样例。
+
+- StarRocks 审计时间按源写入时区，普通 naive DATETIME 不自动补偏移；公司目标 `CURDATE()/NOW()`、时区与既有展示口径须实测。当前窗口展示的北京时间口径限制及旧历史错误偏移不能靠排版追问自动重取／改写。
+- SDK 回答改写失败可能被安全日志归为 `sdk_configuration`、用户仍见 `model_failed`；OpenAI 协议族 `conversation_locked` 内置重试不经过应用429/503策略，Vertex不触发。这些记录未被本次文档修订关闭。
+- Grafana 数据源前后摘要检查不等于原子版本控制；Annotation 回读 limit=100 边缘未关闭。未知插件普通字段中的凭据识别缺口、写端令牌范围按已有取舍，不新增插件白名单。
+- 单大字段超限可能没有可展示预览；缺失格式／指标不能由模型补造。旧 Grafana 群重发整文件和 C8 取消落定的偶发失败留在版本记录，本轮未复现，也不根据单次重跑认定根因关闭。
+- 公司安全巡检 A0/A3、历史 H3／成文 I3、通知代理 openUrl／不带 at 的兼容和漏查目标检测的既有延期保持；任务质量、治理、源端能力、实收分别验收。
 
 ## 5. 验证记录与限制
 
-### S1/v4 P2(a) 附件回答优先级（用户确认独立复审通过）
+### 当前产品基线的完整 CI
 
-本次起点 d29c2f0d7cff3365ffe9da02f97b97808999a7a0；Claude 对 ac93a74..d29c2f0（源码/测试 af797c09ef140c3ec5129b15dd3415be57c3e426）确认 P1 任务时间可见和 P2(b) 业务文件通过，但指出 P2(a) 新路径先给完整技术区留位、再截模型文字，违背回答优先。这一反例收窄了此前内部“P1/P2 无新增阻断”的结论。本次只修该根因，不重做 S1 或扩大范围。
+[PR #145](https://github.com/shixian66/xiaowei-agent-sdk/pull/145) 的 [CI #421](https://github.com/shixian66/xiaowei-agent-sdk/actions/runs/40721039641)，精确 head `bba19d4ba72c43524211f5afb523b70862ba68f7`，9/9 成功、无重跑；本轮只读复核 job 状态，未重跑。
 
-feishu_render.build_feishu_message 的 v4 附件分支先试完整回答、必需说明和完整技术区，复用既有整行搜索安排业务预览；不能共存时整体去掉技术区，显示“技术详情超出消息容量，未附。”，再走既有回答优先路径。短技术区仍保留一个默认收起的面板；普通 v4、v2/v3/Legacy、已绑定内容原字节、权限/TTL/审批/unknown、模型与数据库版本不变。ARCHITECTURE 的长期规则已覆盖该优先级，无需新增契约。
-
-新增 test_v4_attachment_keeps_complete_answer_before_technical_details 经真实 _data_parts 自动附件路径，400 行事实与先通过 AgentAnswer 校验的 15,915 UTF-8 字节模型文字：短 SQL 保留面板，5,000 个带引号字符/13,000 个普通字符的长 SQL 整区省略，完整回答、附件索引与事实限制均可见。审查示例约 8,000 汉字超过当前 16,000 字节模型文字上限，因此使用预算内样本复现，不放宽限额。
-
-test_v4_attachment_uses_real_layout_when_empty_placeholders_are_larger 保留零行占位比完整行更大的边界，改为 22 条短事实、400 行大事实和 8,000 字节完整文字；旧样本的 16,000 字节文字原先被截断，不能再以保技术区为通过条件。新样本同时断言完整回答与面板可共存，并以独立变异确认遗漏下界搜索会失败，未删除该保护。
-
-同根因的无技术区回退也保留完整回答试放：test_v4_attachment_without_technical_details_keeps_answer_with_many_short_facts 使用 34 条普通单行事实、短 SQL 和合法 8,000 字节回答，断言正文全文与末行可见、面板为 0 且明确未附。实际完整布局仅 17,020 字节/138 个组件，零行占位却有 213 个组件，不能先按占位截文字。该分支由增量审查指出后先补 RED，再在同一附件分支修复；独立复核 b08c042 已确认关闭，无新增阻断。结论只覆盖本次实际差异，用户已确认 Claude 对 ce52831 的复审无问题，授权 PR 集成。
-
-源码/测试冻结 SHA：b08c042ad739ba5038999c9743bee8cc872f4875。以下正式检查均记录开始/结束 SHA 相同、工作区 clean、EXIT_CODE=0、VERSION_UNCHANGED=True；后续仅同步文档。日志目录 /tmp/xiaowei-s1-attachment-priority/：
-
-| 检查 | 证据与实际结果 |
+| 检查 | 原运行结果 |
 | --- | --- |
-| 目标 RED | red.log：2 failed、1 passed，两种长 SQL 均在“完整回答可见”断言失败，短 SQL 成功；many-facts-red.log：1 failed，命中多事实回退丢失回答（先用 32 条事实加长 SQL 复现，最终采用 34 条短事实的更小反例）。最终通过证据见冻结回归 |
-| 冻结版本相关回归 | related-b08c042.log：199 passed，29.99 秒；包含渲染、附件/报告、分项恢复、inline、v4/旧记录交付；命令全文在日志 |
-| 技术区优先回退变异 | mutations-b08c042/technical-first-*.log：基线 3 passed → 变异 2 failed/1 passed → 恢复 3 passed；两例均因回答被截断而失败 |
-| 零行占位提前拒收变异 | mutations-b08c042/zero-placeholder-rejection-*.log：基线 1 passed → 变异 1 failed → 恢复 1 passed；完整回答可保留的技术区被错删，命中面板数断言 |
-| 无技术区完整回答回退变异 | mutations-b08c042/no-technical-full-answer-*.log：基线 1 passed → 变异 1 failed → 恢复 1 passed；撤掉第二次完整回答试放即命中全文丢失断言 |
-| 静态与文档 | static-b08c042.log：全仓 Ruff、2 个修改 Python 文件 format、mypy 38 源文件、文档检查 2 passed、d29c2f0..HEAD 的 diff 检查通过 |
+| 非部署集成 `python -m pytest -q --ignore=tests/deployment --durations=30` | 5511 passed、235 skipped、100 deselected、5 warnings，1348.29秒 |
+| 发行／迁移／隔离恢复 `python -m pytest -q tests/deployment --durations=30` | 84 passed，566.47秒 |
+| 普通测试 / 安全门 | 1461 passed / 65 passed；与集成集有重叠，不相加 |
+| lint、types、product-entry、deps-audit、secret-scan | 全部成功；mypy44源码文件，锁定运行依赖 wheel 入口及全历史扫描 |
+| 本地 Chrome 正式 DS 入口 | 同一最终head，2 passed，4.13秒；模型／DS为替身 |
 
-三组变异均在临时副本中运行；加载路径、源码 hash、退出码在日志，恢复后 hash 与冻结工作树一致，副本已删除。旧 af797c0 的 512 项相关回归、37 项浏览器及六组变异保留在 /tmp/xiaowei-s1-review-fixes/，仅证明该旧版本，不用来替代本次新增边界。P1/P2(b) 未改，按 Claude 已通过结论保留。
+CI 实际测试 PR 合并提交 `52911c87e7e9adb9fd35c2c86caf2c03b6de5adc`，tree `dd79cdf2ca4c8a9bb681826d138f2e498b57e090`；与受审 head 及主线 squash `7565c6a` 相同。对应源码已经历 R1 与 C1/C2 独立复审；C1/C2 源码候选的相关620 passed／1 skipped／1 deselected及定向15项仅作局部证据，不与CI拼接成新全量。
 
-完整默认全套最后一次仍仅覆盖 c44bbdfce6a111784e435716820a71c670991d20：4873 passed、235 skipped、93 deselected、5 warnings，日志 /tmp/xiaowei-presentation-s1/full-c44bbdf.log。本次遵用户指令只跑受影响检查，不重跑或拼接称作全套通过。
+有效本地日志为 `/private/tmp/ds-c1c2-{related,final-browser}.log` 和独立复审 `/private/tmp/ds-c1c2-review-b469b5b.md`；这些是本机临时材料，不是仓库附件。可持续访问的版本与 CI 证据以 PR／运行链接为准，跳过或未选用例不计验收。
 
-未覆盖：真实模型的取证后澄清/SQL 草稿与补引用改写的自然度、调用/耗时/用量；拒绝审批恢复后的条件提示理解；真实 post/mentions/md、识图、桌面/手机折叠与飞书/代理实收。离线测试不证明真实任务能力，现有真实验收门槛保留。未推送/PR/合并/部署，未调用真实服务或读取公司配置凭据，D 保持暂停。
+### 本次四文档对齐
 
-PR 集成以 main@96c965c 为基线，保留 #128；仅 handoff 与容量测试发生文本冲突，容量测试保留主线按真实请求校准的版本，不回退到硬编码 40KB。54 项交集检查覆盖首请求/工具后容量拒绝、数据库 Skill、正式手动巡检及自动工具拒绝、v4 展示和文档；lint、format、mypy（39 源文件）通过。精确集成 head、远端 CI 与合并结果写入 PR，不把旧候选全套当作集成后证据。PR #129 首轮 CI 39892841592（head 0aad449）8/9 通过，完整集成为 5008 passed、1 failed、1 teardown error、235 skipped、96 deselected：同一安全巡检参数 cite_fact=False 的脚本仍依赖 v3 自动补全，v4 无工具补引用多出一次模型调用导致耗尽。已在隔离 PG 复现同一 RED；仅给该参数补一次无工具引用回复，保留全部事实/脱敏断言，并新增准确模型次数与采集仅一次的断言。安全巡检/v4/Skill/正式入口/自动范围共 54 项局部回归通过（security-v4-green.log），生产代码、权限和 v4 规则未改；修复后远端完整 CI 仍须全绿。
+只改 ARCHITECTURE、AGENT_HANDOFF、README、DEVELOPMENT_PLAN，产品 src/tests、配置、依赖、迁移和 CI 不改。按主线源码核对配置／SDK调用、Session与源绑定、数据库方言、DS／监控失败、历史快照、审批与交付、实例锁及发行路径；按 Git／GitHub 修正合入状态。 独立审查 `4a91fea` 后，撤回 B1 的文档追认、单列未修复的源码冲突，补回 V1 的四项缺口和 V2 的 P3 开放门槛；V3 恢复已批准但未实现的 tracing 设计，V4 已只读确认远端未前进。DS Evidence 归属措辞和 P1 离线反例入口也已澄清；DS 用途取舍已按用户决定登记为代码待修项。未修改执行路径或豁免验收。
 
-### 群输入 S0/S2（v1.4，局部修复独立复审通过）
+用途决定同步后执行 `.venv/bin/python -m pytest -q tests/security/test_docs_command_consistency.py tests/security/test_workflow_policy.py -p no:cacheprovider`：**30 passed**，日志为 `/private/tmp/xw-root-docs-scope-decision-tests.log`。临时脚本 `/private/tmp/xw_check_root_docs.py` 核对203处出链、仓内163处入链及其中219处锚点，DS的19个变体编号完整，错误为0；`git diff --check` 通过。上一文档候选两个正式入口的 `--help` 均以0退出，证据仍在 `/private/tmp/xw-root-docs-tests.log`；入口未改，本次未重复运行。临时材料只供本机复核，不新增仓库工具或测试。产品 src/tests 无变化，未重复执行产品全量、真实模型或公司服务检查；既有完整 CI 不冒充本次文档检查。
 
-Claude 对 44b0d5d57ff94dc0d425d0df4c94715a8302fc55 的独立复审结论由用户提供：**通过，无仍须修复的问题**。受测代码为 d750a41bfb5466d70c7092b9c2346b2436e9fe40，其后至审查版本只改文档，395 项回归证据适用于该版本。本轮只修文档提示前缀并记录结论，不新增业务验证。已通过的修复位于 feishu_post.parse_post 的文档选择：仅一个可选文档时接纳，多 locale 或外层正文与 locale 并存整条按 invalid 拒绝；单文档 content_v2 优先且不回退旧值。invalid 表示无法确定唯一完整输入，不新增提示种类。模型 schema、保存版本、S1 展示与既有图片/权限边界未变。
+### 历史证据的保存方式
 
-拒绝测试改用已开启 SessionImageStore 和 Vertex 图片开关的 image_group 装配，逐项精确断言固定说明：多图→images，非法键→image_key；md 图片/files/media/未知节点/md HTML→unsupported；非法段落/非法 v2/多个文档→invalid。每项都断言零下载、零模型、零请求。纯解析层另有四项反例；旧多语言丢图“成功”夹具已换成单 locale 成功对照。当前纯解析用例 17 项。
+逐轮 RED→GREEN、失败与复审过程不在当前 handoff 重复追加。需要核对旧结果时，读取[本次整理前的固定快照](https://github.com/shixian66/xiaowei-agent-sdk/blob/7565c6a73e863fd791878990d0fd23bc3f33560e/AGENT_HANDOFF.md)及相应 PR／切片计划；其中“当前／下一项／未合入”等词只属于当时记录，现状以上文合入索引为准。更早证据可用 `git show 7e66718:AGENT_HANDOFF.md` 追溯。
 
-RED：review-fix-red.log 中 5 failed、11 passed，失败分别为两种多文档各在解析/正式入口失守，以及两条错误 post 仅获一条说明；不是环境失败。最小修复后的局部回归 review-fix-green.log 为 57 passed。
-
-两组变异分别在临时源码副本完成，先验证四项基线通过并记录实际加载的模块路径/hash：多图拒绝改为 continue，解析和正式入口共 2 failed；精确恢复后 2 passed。删除键正则同样 2 failed→恢复后 2 passed。日志为 `/tmp/xiaowei-post-s2/review-fix-mutant-multiple-images.log`、`review-fix-restored-multiple-images.log`、`review-fix-mutant-image-key.log`、`review-fix-restored-image-key.log`；临时副本已删除、工作树源码未被变异；基线及两组恢复后的 SOURCE_SHA256 均与冻结代码 d750a41 的 feishu_post.py 一致。初次副本缺 scripts 导致的装配错误单存 review-fix-mutation-setup-error.log，补齐已存在依赖后重跑，不把装配错误算作变异命中。
-
-Claude 复审确认两种多文档在 _parse 阶段整条拒绝、零下载/模型/请求，11 项入口测试精确说明且不受容量/存储提前失败误导；本地两组变异因目标行为被破坏而命中，恢复源码 hash 与审查版本一致。审查方报告追加六组变异均被测试发现：多文档改取首个、多图只取首张、去键正则、post 错误回执去成员核对、去按消息去重、改回十分钟窗口。本轮仅记录审查方结论，未重跑这些变异。
-
-可选项 1 已做：仅 post 的 input_notice 先核当前成员，再沿 _first 按消息去重，避免十分钟窗口吞掉下一条修正失败的说明。新增连续错误/重复投递/撤权反例；真正未支持类型与身份提示仍用原窗口。复审接受两条非阻断记录，不再调整：①同一错误 post 重复投递，每次先查成员目录再去重，与既有图片/文件顺序一致；②只 @ 机器人的 post 仍提示 invalid，与 text 的 EMPTY_COMMAND 不同，保留空输入准入及空命令路径。
-
-最终代码冻结于 `d750a41bfb5466d70c7092b9c2346b2436e9fe40`。同次相关回归 **395 passed，83.95 秒，EXIT_CODE=0**，BEGIN/END_SHA 相同且 BEGIN/END_CLEAN、VERSION_UNCHANGED 均为 true；日志 `/tmp/xiaowei-post-s2/review-fix-regression-d750a41.log` 记录完整命令。覆盖用户指定的 6 个模块，加身份提示/真正未支持类型/群身份及原生批准恢复对照；不是完整默认全套。Ruff check、5 个相关 Python 文件 format、mypy（38 源文件）、文档命令检查（2 passed）、提交范围 diff 检查均通过。冻结后仅更新验证/复审记录和计划提示文案，源码和测试未变。本次不重跑完整默认全套；旧 4818 passed、235 skipped、89 deselected 的单次全套只覆盖 9f109374e57b89548b0aed2cd67e0a07f9819282（日志 full-9f10937.log），不能当成本次修复通过证据。早期 706/37 项记录及资源键隔离变异同样不替代本次检查，原始日志仍在 /tmp/xiaowei-post-s2/。
-
-以上 S2 受测版本中，S0 的 v4 贯穿/回退方案仅为方案；原三项 Gateway→SDK→隔离 PG 暂停可见性结论不变：未恢复/过期后普通轮不可见，拒绝经恢复提交后可见，零重查/生产写。未实施 S1/v4/D，未新增依赖/迁移，未读取公司配置凭据或调用真实服务。未覆盖真实平台 post/mentions/md 形态：md 中 HTML 形式的 `<at>` 会整条拒绝，外层其他字典字段也会按多文档拒绝；两者偏安全但可能阻断合法使用，须在另获授权的真实验收中确认。真实识图、客户端展示和真实模型能力未验收。截至该 S2 局部交付时，完整默认全套最后一次仅针对 9f10937；395 项相关回归与变异不能合称全套。后续 S1 的独立全套见本节 S1 记录。v4 回退限制及 S1 本地开发已获后续授权，当前状态见 §1/§3；这些 S2 证据不证明 S1。
-
-### 群输入与按需详情计划 v1.3（仅文档）
-
-v1.2 冻结版本 c37631f5bc0ec76b3cb01198d7fe7f92fab3314c 已获独立文档复审通过；结论只覆盖该版本。复审新增 R1 经本轮静态核实成立：ResultDelivery 从保存版本重建回答并调用当前 validate_answer；旧 v3 的空 blocks 或部分引用依赖默认补全。必须按可信保存版本保留旧语义，与 Provider schema 是否变化无关；TurnAnswer 严格解析只接受 2/3，RequestRecord 类型声明也仅覆盖 2/3，旧程序会拒绝新版本。原生报告也有版本 3 消费点，已纳入方案/回归要求。仅改计划与 handoff，ARCHITECTURE 及源码/测试/依赖不变。
-
-另核实 _paused 会 discard_pending，恢复上下文中的 Evidence 不等于普通 Session 已回放；计划要求实测未恢复/拒绝/过期后的索要路径，不可见时用可信材料说明尚未交付及条件，不承诺自动补发。仅监控失败的空回答、步骤用尽后的空收尾，需在实现时记录新增改写的实际调用与总预算约束；按版本的重发/历史矩阵已列入未来 RED，本轮未实施。
-
-v1.2 准备阶段的 5 项零网络 post 合成诊断与 39 项旧渲染记录仍仅证明原基线，本轮未重跑或把其计作新功能证据。R1 本轮为源码静态核实，尚无新版本实现、隔离 PG 重发测试或真实模型证据。
-
-文档检查：`PYTHONDONTWRITEBYTECODE=1 .venv/bin/python -m pytest -q -p no:cacheprovider tests/security/test_docs_command_consistency.py` 为 **2 passed**，`git diff --check` 通过；56 个本地链接/锚点有效，仅计划与 handoff 有差异，ARCHITECTURE/源码/测试/依赖未改。没有运行新功能测试、完整全套或真实模型/飞书/代理/公司源；未读取公司配置凭据。新 SHA 以本地交付 Git 输出为准，不为自写 SHA 再追加提交。
-
-### 自建代理本地交付（已合入）
-
-基线 be8c155638c4fa0c4eece912f8ff79fbef1c41ef；分支 codex/feishu-proxy-webhook。功能/测试冻结 SHA **163d2acb9ce4b1154d7cb3f995261c4075982c37**，文件树 **3b6b848ed689e172e9dac8c79a956678b8d0fbb3**；后续提交只补文档，不以新 SHA 冒充重跑全套。前候选 4f43d95 的独立审查发现 B/C get_task 未明确代理 HTTP 成功的界限，已补两类正式入口 RED，读取持久化 notification_reason 后提示“群内投递未确认”，重载为官方协议并更新目标版本后仍按历史回执说明。
-
-产品改动为 webhook.py 的机器人协议配置/固定字段校验、保密 HTTP 请求格式/代理结果原因及回执，runtime.py 的安全配置诊断措辞；独立审查要求补齐 scheduled_tasks.py 的任务状态回执说明，仅从实际 attempt.reason 映射提示，不改调度/权限或输出 schema。现有本地 Tool、claim/settle、主体核验、接收范围、unknown 门槛和调度不变，不新增依赖/迁移。代理字段增加后发现固定超限说明也可能被固定 title/openUrl 撑过20000字节，先补正式 C 入口失败用例，再在 send_fixed 的最终请求处拒绝；正常容量说明仍使用本次唯一机会。
-
-协议来源：用户提供 POST、JSON字符集、groupId 查询路由、title/message/openUrl 字符串及未知响应协议；用户最新决定不追加 at 标签。HTTP(S) 可信配置/唯一 groupId 校验、默认官方向后兼容和代理 2xx 的本地 reason 是落实既有接收与状态边界的实现选择，不是对真实代理行为的验证。不带 at 的实际兼容性、业务响应、飞书实收、真实模型 U5/U6/U7 及成本、30任务并发仍未覆盖。
-
-
-当前离线证据：代理专项 **36 passed**（/tmp/xiaowei-proxy-task-status-green.log）；含最小闭环、B/C 回执新旧协议归因。无 at/open_url 的 RED **8 failed/14 passed**（/tmp/xiaowei-proxy-no-at-red.log）；固定说明仍超限 RED **1 failed**（/tmp/xiaowei-proxy-capacity-red.log）；B/C 状态 RED **2 failed**（/tmp/xiaowei-proxy-task-status-red.log），均在对应修复前命中目标断言。初次相关回归 **443 passed/1 failed** 为切换虚拟环境期间找不到证书文件，独立环境定点重跑 **1 passed**（/tmp/xiaowei-proxy-runtime-env-recheck.log）；不将分批相加为全套。
-
-前候选 4f43d95 的全套在 /private/tmp 目录出现四项 Docker bind 源不存在的环境失败，为节省重复成本中止，**4 failed/1339 passed/1 skipped/89 deselected，EXIT_CODE=2，版本始终 clean/未变**（/tmp/xiaowei-proxy-full-4f43d95.log）；不是完整通过。已移动同一分支至上表 /Users 工作树，用离线缓存重建本项目独立 .venv，原失败的正式 Compose 入口 **1 passed/64.62秒**（/tmp/xiaowei-proxy-compose-after-move.log）。冻结 163d2ac 的完整默认全套结果如下。
-
-ruff check、mypy（37源文件）、4个改动 Python 文件 format 和 diff 检查通过。扩大到 src/tests/scripts 的 format 检查报告4个基线已存在文件（cli.py、test_dialogue_real_model.py、test_monitoring_reliability.py、test_progress_sdk_contract.py），与 be8c155 无差异，本轮不混入格式整理；不宣称全仓 format 通过。
-
-**最终有效证据（同一冻结版本，不拼接）：**
-
-| 检查 | 命令/证据及结果 |
-| --- | --- |
-| 完整默认全套 | `PYTHONDONTWRITEBYTECODE=1 SDK_TEST_POSTGRES_URL=<本机隔离PG> .venv/bin/python /tmp/xiaowei_run_versioned_check.py /tmp/xiaowei-proxy-full-163d2ac.log .venv/bin/python -m pytest -q -p no:cacheprovider`；**4780 passed、235 skipped、89 deselected、5 warnings，1769.24秒**。日志起止 HEAD 均为163d2acb9ce4b1154d7cb3f995261c4075982c37，起止clean，EXIT_CODE=0、VERSION_UNCHANGED=True；覆盖受影响 A/B/C、Action/渠道、Evidence/Session、配置、迁移与部署维护。默认未选的浏览器及需显式环境的跳过项不算验收；5项warning来自网络拒绝测试的预期socket拦截 |
-| 代理专项 | `.venv/bin/python -m pytest tests/sdk_core/test_webhook_proxy.py -q -p no:cacheprovider`（同上本机PG及禁字节码环境）；**36 passed**。正式群/SDK/治理/隔离PG保持，模型/HTTP/飞书/业务驱动为合成替身；不能证明真实自主选择或公司接口 |
-| 静态/文档 | `.venv/bin/ruff check --no-cache .`、`.venv/bin/mypy --cache-dir=/tmp/xiaowei-proxy-mypy src`（37文件）、`.venv/bin/ruff format --check src/xiaowei/webhook.py src/xiaowei/runtime.py src/xiaowei/scheduled_tasks.py tests/sdk_core/test_webhook_proxy.py`、`git diff --check`通过；受影响文档相对文件链接存在；默认全套包含文档命令检查 |
-| 隔离变异 | /tmp/xiaowei_proxy_mutations.py 以163d2ac独立复制src，覆盖 mention 屏蔽、代理2xx响应分支、固定说明容量门槛、持久化回执原因；**4/4被杀死**，各命中目标断言、非setup错误。日志 /tmp/xiaowei-proxy-mutation-{mention,response,capacity,receipt}.log 含基线SHA、源码副本及文件摘要；未改真实工作树 |
-| 独立审查 | be8c155..4f43d95发现任务状态回执P2；增量4f43d95..163d2ac只读复审关闭P2、无新增阻断。检查实际调用路径与新测试/RED/GREEN日志，未重跑重型全套；不是本线程自行复查冒充独立审查 |
-
-关键回归名称：`test_proxy_formal_entry_preserves_query_json_and_truthful_http_receipt`（含POST前已落库sending及秘密哨兵）、`test_proxy_same_intent_deduplicates_after_mention_sanitization`、`test_proxy_unknown_gate_requires_delivered_warning_before_explicit_resend`、`test_proxy_sender_recheck_prevents_claim_and_http`、`test_proxy_unapproved_receiver_has_zero_http`、`test_proxy_fixed_reminder_uses_same_once_only_path`、`test_proxy_scheduled_agent_delivers_facts_or_one_capacity_notice`、`test_proxy_static_fields_cannot_make_capacity_notice_exceed_limit`、`test_proxy_task_status_explains_persisted_http_receipt_even_after_config_change`、`test_official_and_proxy_bots_keep_distinct_wire_contracts`。
-
-仍未覆盖：真实代理对“不带at”的兼容、业务响应协议及真实飞书群实收；真实模型U5/U6/U7与成本、30任务并发实测。上述本地交付记录产生时尚无推送/PR/远端CI/合并/部署证据，也没有真实服务调用或公司配置/凭据读取；当前新增的 GitHub 集成授权见 §1/§3，D保持暂停。代理不新增迁移或依赖，C主线v15的停服/备份升级边界仍按README，不因本次通过而取得部署授权。
-
-### C 收尾修复与验证
-
-功能冻结版本 `69820b1e2809139117494294e5e0a15eb6b3b73f`，本轮比较基线 `c7b1412eb27669a6da19d89123fb398a864e66e4`；分支 `codex/scheduled-agent-tasks`。本轮仅修复 F1/F2 的用户提示，不改变权限、Evidence、审批、核验次数或调度契约。C 此前精简、B1/B2 关闭及删减/变异记录见 `git show c7b1412:AGENT_HANDOFF.md`；本轮独立复审只覆盖这两处差异，不能解释为重新审查全部 C。
-
-| 根因 | 修复与行为证据 |
-| --- | --- |
-| F1 后台静态授权撤销与定义失效共用异常，被误报为 definition_unavailable | TaskDefinitions.validate 用窄义 AuthorizationRevokedError 区分当前通知/工具/目标授权缺失；_current_definition 映射 authorization_revoked。不增加核验调用。`test_current_config_revocation_stops_before_model_and_business_post` 覆盖通知、查询工具、目标及 automatic_tools 撤销，断言具体停止原因/原群说明、零模型调用及零业务 POST；目标版本变化仍 recipient_changed。`test_definition_dependencies_obey_current_model_policy_before_background_run` 保留定义失效的 definition_unavailable 反例及允许对照 |
-| F2 控制更新未改变任何行时，未发送的 B 提醒也被覆盖为“发送已准入” | control_task 仅在 receipt_id 非空时显示发送已准入；已停止 Agent 仍显示任务已停止。新增 `test_cancelled_fixed_reminder_repeat_cancel_does_not_claim_send_admission`：正式群入口批准后连续取消两次，保持 cancelled，回复无发送准入、无 attempt/POST，到点也不发送；原 `test_completed_fixed_reminder_keeps_admitted_control_reason` 已发送对照保留 |
-
-**B 兼容说明：** c7b1412 已有的 send_fixed 类型结果也用于 B 固定提醒。发送前主体核验暂时失败（包括成员接口异常）返回 not_sent/sender_not_authorized，由提醒执行路径记 authorization_unverified、unverified_count 加 1，零 POST；不再抛普通异常。尚未占用发送机会的 active 提醒可在迟到窗口内再次核验；已占用或 unknown 的机会绝不自动重发。本轮仅补录此事实，没有新增重试或授权范围。
-
-| 检查 | 当前证据 |
-| --- | --- |
-| RED 先复现 | `/tmp/xiaowei-c-f1f2-red.log`：4 failed、4 passed，复现三类静态撤销原因及重复取消误报；产品源码当时仍为 c7b1412。该记录含测试工作区变更，不作冻结 SHA 的全套证据 |
-| C/B 相关回归 | **133 passed，115.88秒**，`/tmp/xiaowei-c-f1f2-green.log`；两个 scheduled 测试文件，正式入口、真 SDK、脚本模型、隔离 PG/传输替身。提交前局部检查，不拼作全套 |
-| 冻结版本单次完整默认全套 | **4744 passed, 235 skipped, 89 deselected, 5 warnings in 1732.13s (0:28:52)**；`/tmp/xiaowei-c-f1f2-69820b1-full.log`。开始/结束均为 `69820b1e2809139117494294e5e0a15eb6b3b73f`，工作树 clean、EXIT_CODE=0、VERSION_UNCHANGED=True。包含受影响 C/B/A、Action/群审批、Evidence/Session、迁移及本地 Docker 部署维护回归；跳过和未选项不算验收 |
-| 冻结版本静态 | `/tmp/xiaowei-c-f1f2-69820b1-static.log`：全仓 ruff、3 个受影响 Python 文件 format、mypy src（37 文件）、基线差异检查全部通过；同 SHA、前后 clean、EXIT_CODE=0 |
-| F1/F2 独立复审 | `69820b1e2809139117494294e5e0a15eb6b3b73f` 相对 c7b1412 的两处修复通过、无阻断；复审者另跑 **9 passed，10.82秒**，覆盖五类当前配置撤销、定义策略允许/拒绝和 B 未发送/已发送控制对照。`/tmp/xiaowei-c-f1f2-independent-69820b1.log` 保存 pytest 输出；前后 SHA/clean 由复审工具会话核对，该文件没有版本头，与冻结全套日志分别记录 |
-
-命令均在本工作树运行。pytest 使用 `SDK_TEST_POSTGRES_URL=postgresql+asyncpg://postgres@127.0.0.1:55432/postgres PYTHONDONTWRITEBYTECODE=1`，相关检查执行 `.venv/bin/python -m pytest -q -p no:cacheprovider tests/sdk_core/test_scheduled_agent.py tests/sdk_core/test_scheduled_tasks.py`；完整默认全套执行 `.venv/bin/python -m pytest -q -p no:cacheprovider`。冻结检查由 `/tmp/xiaowei_run_versioned_check.py LOG COMMAND...` 记录 SHA/树/clean/退出码。静态执行 `.venv/bin/ruff check --no-cache .`、`.venv/bin/ruff format --check src/xiaowei/scheduled_tasks.py tests/sdk_core/test_scheduled_agent.py tests/sdk_core/test_scheduled_tasks.py`、`.venv/bin/mypy --cache-dir=/tmp/xiaowei-c-f1f2-mypy src`、`git diff --check c7b1412..HEAD`。
-
-全套结束后仅更新本交接；文档命令一致性检查 2 passed（0.14秒），git diff --check 通过，git diff --exit-code 69820b1 -- src tests pyproject.toml uv.lock 确认源码、测试和依赖相对冻结版本无差异，不为文档提交重复运行重型全套。本轮未新增隔离变异：差异仅为原因分类/反馈，RED 已分别击中原错误，原治理与并发保护未改。
-
-用户已确认 Claude 对 `a6113eb57079e195341ef705ad20956ef376d967` 的 F1/F2 复审通过、无阻断，并授权推送、建 PR、远端 CI 全绿后合并；本次授权同步只修改交接，功能仍为上述冻结 SHA。远端 CI 和合入状态统一记录在 PR。剩余缺口：真实 U6/U7 的自主选择/调查/答案质量及模型耗时费用、真实飞书实收、30 任务实际并发/成本。D 未实现。继续默认关闭，暂不部署；真实环境和费用须另获授权。未调用真实模型/Webhook/飞书/公司源，未读取公司配置或凭据正文，原目录修改未混入。
-
-### 合并交付前主线集成
-
-B 已审查候选为 `815c00f7bff6212990748eb5abc370f8ee57c129`。交付前同步主线 PR #124（`de93ed183257d96a294376c166d6d18199b01020`）；源码自动合并，仅本交接快照冲突，保留 B 状态并更新授权。监控补查修复的有效说明、失败分类与真实验证缺口继续由 [监控评测说明](docs/monitoring-reliability-evaluation.md#监控补查修复候选2026-10-21) 和 [回退限制](deploy/OPERATIONS.md#监控补查修订的回退限制) 维护；不重复保留其已过期的“待用户授权”状态。合并后的精确SHA、检查结果和CI链接记录在本次PR；下列本地证据仍只覆盖注明SHA，不自动覆盖合并树。
-
-### 2026-10-22 B：R1 连续使用修复
-
-主线基线 `9284688bb8907c9968e84d5e49c23e551c53ac58`；本轮输入 `e055ca943e77030107ffdd37d802f27b9fb23d74`，产品修复 `6864bb758b76371ff1fb10acfc24f9a5291899fa`；`369435d9e961db5c669f85c44b688496a6719037` 仅补 README 扩权版本提醒，源码与测试不变，单次全套在369435d执行。后续只更新交接/计划状态。外部复审已确认 B1/C1/N1/N2/N3 关闭；对应实现和测试映射保存在 `git show e055ca9:AGENT_HANDOFF.md`，不能用其535项/4657项结果证明本轮 R1。
-
-**R1 已确认：** 原 README 只给业务查询接收范围，B 起草/激活/状态 Evidence 进入共享历史后，下一次即时通知或提醒因缺 scheduled 接收许可被拒。原 C1 测试两次 /新建 掩盖了此问题，这是验证遗漏。修复采用管理员显式配置（README 的最小完整列表），不自动给 scheduled 授权，也不跳过全部模型可见证据、定义依赖或业务源检查。缺配时模型工具说明、起草拒绝及通知的代码事实提醒指出 receive_tools/receive_targets 和 scheduled 依赖；不扩大结果 schema 或修改历史证据指纹。
-
-| 检查 | 当前证据 |
-| --- | --- |
-| TDD 工作区复现 | `/tmp/xiaowei-b-r1-red.log`：3 failed、1 passed，复现确认后即时通知被挡、第二次提醒被挡及缺配无指导；修改前未带版本头，不作为精确提交的正式QA记录 |
-| 工作区最小闭环 | `/tmp/xiaowei-b-r1-green.log`：6 passed，8.22秒。公开README策略直接进入正式群处理链/真SDK/治理/隔离PG/HTTP替身；两条提醒各发送一次、即时通知、C1共享门槛全程不 /新建；原业务源直接/传递拒绝保留。此记录不替代冻结版本检查 |
-| 冻结版本关联检查 | **476 passed，129.39秒**，`/tmp/xiaowei-b-r1-related.log`；B专项68项、通知、feishu_render、治理、飞书协议、Evidence范围及文档。HEAD=6864bb7，开始/结束均clean、版本不变。静态日志 `/tmp/xiaowei-b-r1-{lint,format,mypy,diff}.log` 同SHA，四项0退出，mypy37源文件 |
-| 单次完整默认全套 | **4660 passed, 235 skipped, 89 deselected, 5 warnings in 1576.51s (0:26:16)**，`/tmp/xiaowei-b-r1-full.log`；HEAD=369435d，开始/结束SHA相同、工作树clean、EXIT_CODE=0、VERSION_UNCHANGED=True。无变异插件；旧无版本头日志不用于覆盖R1，跳过/未选中项不算能力验收 |
-| 独立复审 | **6864bb7 本次差异复审通过，R1关闭**；独立8 passed，9.57秒（3新增、C1、传递False/True、2项TTL），差异检查通过、版本/工作区未变。唯一P3文档提醒已在369435d补齐：既有接收范围扩大须更新target_version并重新授权；非执行层变更 |
-
-**隔离变异：** `/tmp/xiaowei-b-r1-mutation-transitive.log` 移除 `TaskDefinitions.check_content` 后，原 `source_allowed=False` 由零POST变为一次POST，目标1 failed；`/tmp/xiaowei-b-r1-mutation-implicit.log` 自动补六项scheduled接收范围及目标后，缺配回归目标1 failed。两种均仅进程内变异，HEAD=6864bb7、前后clean/版本不变；预期失败不计为正式通过。
-
-正式检查使用本机 `/tmp/xiaowei_run_versioned_check.py`，开始记录 HEAD_SHA/TREE_SHA/WORKTREE_STATUS/COMMAND，结束记录 END_HEAD_SHA/END_WORKTREE_STATUS/EXIT_CODE/VERSION_UNCHANGED；要求干净工作树且版本不变，不输出环境变量全集或任何凭据。旧日志不会补写成当时已捕获SHA的新证据。
-
-新增/加强用例：`test_documented_receiver_supports_consecutive_reminders_and_immediate_send`、`test_missing_task_receiver_permission_explains_configuration_without_http`、`test_task_receiver_permission_never_inherits_business_source_permission`；原 `test_approved_reminders_ignore_other_unknown_but_immediate_send_still_warns` 改为同 Session 且读取公开配置，删除两次 /新建，不削弱断言。原跨任务材料传递的 source_allowed=False/True 对照继续保留。
-
-两项非阻断建议暂不扩展：过时批准的 Action/用户回执已确定拒绝、draft 不可再激活，不为 R1 改生命周期；旧v14自动探测不新增，沿 README 已接受的重建或恢复v13配对备份路径。应用仍schema14，本轮无迁移/依赖变更。
-
-可复现命令（在本工作树；pytest前缀为 `SDK_TEST_POSTGRES_URL=postgresql+asyncpg://postgres@127.0.0.1:55432/postgres PYTHONDONTWRITEBYTECODE=1`）：
-
-- 关联：`.venv/bin/python -m pytest -q -p no:cacheprovider tests/sdk_core/test_{scheduled_tasks,webhook_notification,feishu_render,governance,feishu,evidence_scope}.py tests/security/test_docs_command_consistency.py`。
-- 单次完整默认全套：`.venv/bin/python -m pytest -q -p no:cacheprovider`。
-- 静态：`.venv/bin/ruff check --no-cache .`；`.venv/bin/ruff format --check src/xiaowei/{feishu_render,tools,webhook}.py tests/sdk_core/test_scheduled_tasks.py`；`.venv/bin/mypy --cache-dir=/tmp/xiaowei-b-r1-mypy src`；`git diff --check e055ca9..HEAD`。
-- 这些命令由临时版本记录器包裹运行，实际展开的COMMAND保存在各日志；变异另加 `-p xiaowei_b_r1_mutations`，以 `XW_R1_MUTATION=transitive_scope/implicit_task_scope` 选择保护，插件路径 `/tmp/xiaowei_b_r1_mutations.py`。日志已写明MUTATION类别，不混入正式全套。
-
-**边界与下一步：** B 外部复审已通过，用户已授权推送、建PR并在远端CI全绿后合并；尚未部署；不读取公司配置/凭据，不调用真实模型、Webhook、飞书或公司源。离线脚本模型不证明真实 Agent 能力。真实 U5（日期理解、澄清、工具选择、成本及平台闭环）未验收；本轮单次完整默认全套已执行通过，精确结果见上表。C/D 不实施，原目录修改保留。
-
-### 已合入 A 的有效验证
-
-A 候选 `d0db9c35105b14f1dbf615df9d85bcee1ef512bf` 已经 [PR #123](https://github.com/shixian66/xiaowei-agent-sdk/pull/123) 合并为 `9284688bb8907c9968e84d5e49c23e551c53ac58`，树相同；[CI](https://github.com/shixian66/xiaowei-agent-sdk/actions/runs/39597464188) 9/9 首次通过。integration 单次4588 passed/235 skipped/89 deselected，p3-release84 passed，non-SDK1182 passed，security63 passed。该记录只证明 A 的精确版本；不代表 B、真实服务、部署或用户验收。A 的 N1 最终正文统一 mention_safe、审批命令省略及531项本地关联回归已获独立复审，无新依赖或权限扩大。
-
-### 有效证据摘要
-
-原交接曾引用 N1 的本机最终验证记录及全量日志，位于未随 Git 保存的 `.superpowers/sdd/2026-10-20-production-dialogue-answer-repair/`；本工作树无法复核，不提供失效链接或据此新增通过结论。已可查的 #119 合入/CI 证据见上文；下文较早本地统计保留其注明范围，不替代 CI 或真实环境验收，也不能拼作本次默认全量通过。
-
-B1 根因是布局规则误把“长原值收起”扩大成“影响结论的说明也收起”。动态候选过滤/未检查/容量和实际窗口由 `fact_limit_notices` 生成；固定口径复用 ToolPolicy.fact_note_summary，经 Evidence 到各渠道，不新增模型或持久化字段。计划、审计、Grafana 配置、历史引用、结构快照/布局、DDL、告警及数据源配置的语义会影响推断，保留短提醒；完整细则只在详情。普通查询仅在结果确实截断且 LIMIT 被系统调整时提示返回量限制；分页与通用截断合并为一个不完整提醒，原字段继续可核对。原 B2 已撤回，动作状态由消息正文展示，不收集为报告章节；N1 的 MD/HTML `_data_parts` 回归同时验证动作恰好一次、所有附件无动作字段、普通大结果完整交付。原来支持动作进报告的两组变异结论作废；N1 按用户要求不新增隔离变异。
-
-发行验证注意：03c75a3 的默认完整运行是 4494 passed、2 failed、235 skipped、86 deselected，不能视为全量通过。两项发行演练在 PG 启动前失败；独立空白 PG 复现 initdb 的 `No space left on device`，Docker 30G 根盘当时可用为 0。用户本轮另行批准清理清单中 7 个无容器引用的旧测试/Grafana 镜像；已逐项复核、非强制删除，保留全部容器/卷和 Python/uv 基础镜像，清理后约 2.4GiB 可用。最终 N1 候选须在冻结 SHA 重新单次完整运行，结果以本地记录为准。Grafana 与 hostile_plan 的短提醒、原值、来源及反伪造断言保持。
-
-Web 动作提示的可达依据：`action_status_catalog` 只要求 action_id/state，其他状态材料及 result 可因渠道投影容量省略，`Evidence._project` 会标记 truncated；提案和执行结果的必需字段仍是放不下即失败。当前动作策略没有 warnings 字段，生产适配器也未产生动作 warnings。Web 复用服务端 `_view` 的短提醒，对动作一并显示，保持 textContent；Chrome 组件回归使用真实状态策略投影与 `_view` 响应，fetch 是合成替身，不代表开放群动作的 Web 授权入口。查询窗口展示仍统一标注北京时间，不随会话时区切换；这只是显示口径限制，未改变 P2 的查询时区规则。
-
-非阻断建议：文件索引变量已改为 `file_index`；共享密度函数已公开为 `fold_details`。Web 按 JSON 行字节、飞书按排版文字与 SQL 字节决定初始展开，渠道原生排版不同，本轮保留差异；只影响展开密度，不影响必要提醒和完整交付。失败提醒仍使用绑定分项序号，正文索引与文件内标题可辨用途；不解析历史绑定字节猜测角色，不加持久化字段。若用户实收仍难定位失败文件，再单列兼容的用途映射方案。
-
-以下区分最终候选的独立复审/CI 与较早的本地测试记录，结果只覆盖注明的版本、配置与路径，不替代真实环境验收。S3 最终证据见下表的 PR 与 CI 链接；更早的命令、失败与复审过程可用 `git show 7e66718:AGENT_HANDOFF.md` 查阅。旧计划/ADR 只保留其阶段证据，不覆盖当前契约。
-
-| 对应工作 / 版本 | 保留的证据与限制 |
-| --- | --- |
-| 本轮精确查询与自然回答 / P2 `1c06a89d`、P1 `3a5d62ce` | 两片均完成独立复审；P2 相关 **676 passed**。P1 修订扩展 **478 passed（140.78 秒）**、另补位置 **2 passed**、最终 Chrome **4 passed（5.42 秒）**、文档 **2 passed**、Ruff/mypy 35 文件通过；最终独立检查 **12 passed（8.52 秒）**。首轮 `aa95773` 默认全量 **4446 passed、26 failed、235 skipped、78 deselected（1443.19 秒）**；旧断言/仅读第一文件/测试请求容量已同步，反伪造追查发现的入口位置遗漏已补 RED→GREEN，失败项在扩展回归通过。最终候选未重跑默认全量，不将分次检查拼作全量全绿。作者 36 种、独立审查者 22 种旧 v0 差分输出分别一致；未调用真实模型或公司服务，未部署 |
-| 自主调查、普通消息与进度 / 当前计划 | 各片精确独立审查、离线正式入口/隔离 PG/SDK 协议替身、完整检查及真实缺口统一见[计划 §7](docs/superpowers/plans/2026-10-20-agent-autonomy-progress.md#7-当前验证证据与审查输入)。本文件只保留当前状态与下一步；模型能力、真实客户端与生产服务尚未由该证据验证 |
-| N1 文案增量 / 基于 `9cb2e37b…` | 仅在既有渲染单点区分 MD 原文展示与 HTML 移除提示，内容处理及绑定字节机制不变；本次定向 **35 passed**、Chrome **5 passed**、文档 **2 passed**，Ruff/mypy/diff 检查通过；本轮用户已确认交付，已复核、已合并（随本 PR 合入 `main` 生效）。没有重跑全量或真实服务，命令与复现见报告计划 §9 |
-| MD 审查修复 / `1271517a…` | 内容/正式链 **72 passed**、相关交付/兼容 **162 passed**、Chrome **5 passed**、公共安全门 **63 passed**；Ruff、mypy 34 文件、diff 检查通过。先有失败用例再修复，跨块定义和围栏变异反例已检查；独立复审无阻断，另运行 37 项测试及 1936 组解析探针。本次未重跑全量，不把下一行历史结果复用为该 SHA 全量通过；无真实服务调用，详见报告计划 §9 |
-| 原生报告历史候选 / `3ddcb40…` | 默认完整回归 **4329 passed、235 skipped、75 deselected**；报告 Chrome **4 passed**、公共安全门 **63 passed**；ruff、mypy（34 文件）、依赖审计、生产 wheel 入口与 Git 历史敏感信息扫描通过。产品及测试树已独立复审，无遗留阻断；命令与审查覆盖见报告计划 §9。本地结果不代表远端 CI、真实模型或部署通过 |
-| 旧工程清理 / 基于 `0bd68f2` 的差异 | 本地默认完整回归 **4270 passed、235 skipped、73 deselected**，含隔离 PostgreSQL 与 Docker 发行用例；恢复公共检查后的定向验证 **92 passed**。ruff、mypy（33 文件）、锁文件与 diff 检查通过，独立复审通过。产品源码及旧回答兼容路径无差异；跳过/未选中项、远端 CI、真实模型与公司服务不计通过 |
-| S3 / #114 最终复审、CI 与合入 | [PR #114](https://github.com/shixian66/xiaowei-agent-sdk/pull/114) 记录 Codex 对 `eff89960b71fb660d4d264f3d70f5faba7e2cd22` 独立复审通过；该 head 的 [CI run 39131473170](https://github.com/shixian66/xiaowei-agent-sdk/actions/runs/39131473170) **10 项全部通过**（含 integration、p3-release），`run_attempt=1`，无重跑。以该 head 做 squash 合并为 `6c585d0`，Git 文件树与候选相同；不据此认定真实模型、公司服务或部署已验收 |
-| S3 本地定向回归（合入前） | 原审查版本 `73246593` 的三项发现已在 `eff89960` 修复：旧格式不套新预算、v0 截断卡片来源标签、旧审批测试数据与拒绝断言。修复后 16 个受影响文件 **680 passed**，ruff、mypy（33 文件）、diff 检查通过；作者本地未重跑全量与浏览器，最终 CI 另见上一行 |
-| S3 修复前全量与浏览器 | SDK/P1B/spike **3755 passed、8 failed**，8 项为旧 spike 格式，修后 spike **107 passed**。其余目录记录 **2123 passed、152 skipped**，另有 11 项失败：10 项日志捕获干扰单独重跑通过，1 项维护探针修后 Docker 升级用例通过。Chrome **21 passed**，3 项被本机 8501 占用阻断；不把这些运行拼成一次全绿 |
-| S2 / #113 | `test_answer_s2_protocol.py` **59 passed**，spike **107 passed**；真 SDK + 隔离 PG 验证候选 schema、旧历史和暂停恢复；三组变异分别 3/6/9 项失败。真实 provider 接受情况未由此证明 |
-| 引用契约 / #111 | 合入前 SDK/P1B **3612 passed、235 skipped、72 deselected**；其余所选目录 **2099 passed、152 skipped**。仅证明当时规则与改写链，旧强制引用断言不约束 S3 |
-| 轮次修复 `d019f40`，随 #110 合入 | SDK/P1B **3785 passed、1 failed、52 skipped、72 deselected**；唯一失败为 Grafana 群重发用例，既有基线整文件同样失败、单跑通过。被拒回答不入历史、Retry-After 封顶及选择器修正均有专项回归；官方 MCP 连接合成端点 |
-| 环境选择第一步 / #108 | 修复后 SDK/P1B **3570 passed、234 skipped、72 deselected**；评测计数缺陷另有先失败后通过与变异记录。7 个 StarRocks 工具策略指纹保持，未加入环境硬校验；真实遵守率未评测 |
-| 飞书平台门槛 `489ece6`，随 #107 合入 | SDK/P1B **3542 passed、234 skipped、72 deselected**，18 项新增回归在各自修复前失败；真实客户端及文件预览未验收 |
-| SQL 原文执行 / #101 | 锁定 sqlglot 30.17.0，可丢弃 StarRocks 4.1.4 真协议 **43 passed**，7 条 asyncmy 非缓冲查询 warning；合成库证据不证明公司 SQL 与资源限制 |
-| D7 / #83 | 审查候选 `4905736` 在官方 MCP + 隔离 Grafana/PG 上三个文件 **68 passed、0 skipped**；后续受限 Editor 反例另有记录。不能把早期候选数字当作所有后续改动的复验 |
-| C8 / #95 | `6fbebeb` 首轮 C8 **27 passed**、SDK/P1B **3412 passed**；B1 修订后 C8 **32 passed**、受影响文件 **473 passed**。完整回归、Docker 与 wheel 证据属于修订前候选；修订后不可继承为全量通过 |
-| P3-A/B / #49、#50 | 本机真实容器验证 A→B/回退、错密钥拒绝、原子 dump 与隔离 restore；核对实际连接数据库与数据差异以避免恢复假阳性。公司故障恢复与用户接受仍未关闭 |
-
-### 仍需保留的限制
-
-- 改写调用自身失败时，锁定 SDK 的脱敏错误包装可能把日志原因归为 `sdk_configuration`，用户仍见 `model_failed`；该诊断缺口仍待处理。
-- OpenAI 协议族的 SDK 内置 `conversation_locked` 重试不经过应用的 429/503 策略；Vertex 不触发。选择器组合失败后的子集重试不做语义推导；均为已有记录的边界。
-- C8 数据源写前摘要比对不等于原子版本控制，真实环境开放前须按架构核对竞争窗口；Annotation 回读 `limit=100` 边缘情况未关闭。未知插件普通字段中无法识别的凭据风险与写端令牌范围按既有取舍处理，不增加插件白名单。
-- 单个大字段超限时预览仍可能没有条目；监控工具返回格式与客户端显示缺口不能用模型编造数据补齐。图形 D4 暂缓，保留已完成的协议核验供明确重启时使用。
-- 历史 secret-scan 随机样本不稳定、Grafana 群重发整文件失败及 C8 取消落定偶发失败有记录；单次重跑通过不能核销原因，旧失败记录也不证明当前版本必然复现。
-- 显式开启 tracing 的真实字段/接收边界、真实模型任务质量与公司端到端验收仍需对应证据；默认关闭 tracing 的离线检查不能替代这些验证。
+未随 Git 保存的 `.superpowers/sdd/` 或已消失的临时日志不能作新的通过依据。文档一致、CI 通过和源码审查均不代替真实 Agent、公司 API、服务端负载、飞书实收或用户验收；本次不改变任何既有实战门槛。
