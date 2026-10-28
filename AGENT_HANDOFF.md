@@ -43,15 +43,15 @@
 
 <a id="dolphinscheduler-implementation"></a>
 
-### DolphinScheduler API 只读实现（2026-10-28，本次离线修订完成）
+### DolphinScheduler API 只读实现（2026-10-28，R1 补齐待小范围复核）
 
 本轮仅本地实现、离线测试、常规修复和隔离分支本地提交；不调用真实模型或公司 DS、不推送／合并／部署。工作树为 `/Users/kloenguyen/.codex/worktrees/dolphinscheduler-readonly-api/agent-SDK`，分支 `codex/ds-readonly-api`；产品基线 `916f57a26d2bac201b6772a48016f194af7d586e`，本次修订基点 `3b8f0a9f30043e8cbc2f9403fad3797a798f0a9f`。批准依据仍为 r3 blob `ae0598a41b52f2bdfdb76525a8330a1b7232405c`；契约只见 [ARCHITECTURE](ARCHITECTURE.md#dolphinscheduler-environment)，任务及处置仅在 [r5 计划 §11](docs/superpowers/plans/2026-10-28-dolphinscheduler-readonly-api.md#ds-implementation-plan) 维护。
 
 当前修订保留六项业务工具与本地选择、同一 SDK Agent/Runner、治理、失败记录、Evidence、Session、展示及 schema 17。可选子关联缺失在同次详情中保留父事实；业务码与结构错误分开；任务状态预检查；未知依赖／DAG 局部缺口；真实 grants 撤销后可信说明标不可用；固定响应上限和日志遮蔽字节数。M3 直接字面匹配保留每词取消点；M4 删除已无调用者且未部署的失败枚举／文案；M5 删除请求层重复头、重复 route 和局部 import，客户端 identity 及响应压缩拒绝保持。M1 已由用户撤回，保留 ds_read_scope 及原范围边界。C1／C2 未获确认，不改变绑定或关联列；当前超时／token_ref 仍影响绑定，M7 配置形状变化会使旧候选 DS 指纹失效，不能绕过旧会话／历史复核。
 
-本次代码候选为 `57e7430caca247407462e60b026e580c385163bc`；其后交付提交只更新本节和计划证据，代码／测试／依赖不变。独立复核人 `/root/ds_revision_independent_review` 针对修订基点→该候选的 19 文件差异及调用链审查，未发现阻断；另执行 M6 纯单元 5 passed、48 deselected，核对遮蔽计数及 SDK awaitable instructions。原始报告 `/private/tmp/ds-revision-review-57e7430.md`，SHA256 `d725892c6bce700741586443661116c5edf98cb58434ac82f5b2f87a4e057c64`。该报告没有提前认定当时仍在运行的完整检查或真实环境通过；不沿用旧版缺少记录的总括独立审查声明。
+上一轮代码候选为 `57e7430caca247407462e60b026e580c385163bc`；57e7430→865eb3f 只更新本节和计划证据，代码／测试／依赖不变。独立复核人 `/root/ds_revision_independent_review` 针对修订基点→该候选的 19 文件差异及调用链审查，未发现阻断；另执行 M6 纯单元 5 passed、48 deselected，核对遮蔽计数及 SDK awaitable instructions。原始报告 `/private/tmp/ds-revision-review-57e7430.md`，SHA256 `d725892c6bce700741586443661116c5edf98cb58434ac82f5b2f87a4e057c64`。该报告没有提前认定当时仍在运行的完整检查或真实环境通过；不沿用旧版缺少记录的总括独立审查声明。
 
-有效检查（日志位于 `/private/tmp/`，可能清理；候选日志首行含完整 SHA 和命令）：
+上一轮有效检查（对应下列 SHA，未当作 R1 新源码的重跑结果；日志位于 `/private/tmp/`，可能清理）：
 
 | 检查 | 版本／结果／日志 |
 | --- | --- |
@@ -63,9 +63,13 @@
 | lint／类型／泄漏 | ruff check .、mypy src（44 源文件）通过；gitleaks v8.30.0 对候选全部已提交历史 869 commits、0 泄漏；ds-revision-ruff.log、ds-revision-mypy.log、ds-revision-candidate-gitleaks.log |
 | 依赖审计复用 | pyproject.toml／uv.lock 未变；重新 export 的完整第三方输入去生成注释后与同日已通过的 ds-audit-requirements.txt 完全一致，沿用 ds-final-deps-audit.log 的 No known vulnerabilities found，不伪称本轮重跑网络审计 |
 | 文档 | 224 本地链接／锚点、19 个变体唯一完整、现有命令一致性 2 passed、git diff --check 通过；ds-revision-doccommands.log |
-| 最终提交 DS＋浏览器 | 最终交付提交后运行；ds-revision-final-ds.log、ds-revision-final-browser.log 首行提供实际最终 SHA 和完整命令，查看末尾结果；代码／测试与已复核候选相同，不在文档反复回填自己的提交 SHA |
+| 865eb3f 的 DS＋浏览器 | ds-revision-final-ds.log：121 passed；ds-revision-final-browser.log：2 passed。两日志首行包含该轮完整 SHA 和命令 |
 
 M3 删除 64 KiB 分块及两个专门测试，每词取消／ASCII 字节位置由 test_literal_search_preserves_ascii_folding_original_text_and_per_word_cancellation 覆盖，轮末取消释放由 test_cancellation_releases_inflight_log_and_turn_cache 覆盖。16／32 MiB 由 test_single_log_cap_discloses_prefix_without_claiming_eof、test_actual_32m_turn_cap_stops_third_log_without_extra_metadata 覆盖，完整值脱敏由参数化凭据单元及 test_quoted_credentials_are_excluded_from_all_persisted_audiences 覆盖。M4 删除无调用者失败枚举／文案，B1 正常缺口和 auth/connect/timeout 分别经单次详情及失败持久化回归。M5 只删请求层重复 Accept-Encoding；客户端 identity 与压缩正文零读取由 test_identity_header_and_compression_rejection_before_body_decoding 的 metadata／log 两分支覆盖，route 映射沿两版协议回归。
+
+**R1 局部补齐（基点 865eb3fe149bdd8af7907826c52dde3ed57513e2）。** 外部复审接受上一轮离线交付，并指出下载 JSON 错误仍一概归为 invalid_response。当前仅在下载现有字节额度内读取／计数并解析 JSON：非零整数业务码归 ds_object_missing；零码、布尔／字符串／小数码、畸形或超限未完整 JSON 仍 invalid_response，不生成日志事实。压缩拒绝、HTTP 状态分类、单对象失败缓存、16／32 MiB、源级授权和历史复核不变，无新增限制／配置／迁移；C1／C2 不动。
+
+R1 证据：修正入口夹具后，以 git show 的精确旧版 _download 作测试替身，两版正式入口均在缺少“对象或日志不可用”处失败（ds-r1-baseline-red.log，2 failed）；当前实现新增10项检查通过（ds-r1-green.log），包含真实 Web/SDK/治理/PG、仅一次下载、换读／搜仍不重发、同源项目读取继续、系统失败保存／历史回读、四种投影及 SDK Session 无上游正文。协议覆盖错误信封、实际字节计数和超限关流。该阶段测试尚未提交，精确候选复核及最终日志待补，不提前关闭 D2-F1 的 R1 离线项。
 
 配置、命令和单源示例见 [README](README.md)。下一步由公司按原 D1—D4／19 变体进行隔离环境验收；两版公司 API、真实模型能力与次数／耗时／用量、凭据权限与时区、服务端大日志负载／同步脱敏延迟、飞书群实收、用户接受均未验收。本轮不得自动关闭这些门槛。
 

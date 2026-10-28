@@ -244,3 +244,59 @@ def test_detail_schema_has_no_dynamic_mode_and_size_limits_are_fixed():
     assert "dynamic_sub_workflows" not in DetailArgs.model_fields
     assert "max_response_bytes" not in DSConfig.model_fields
     assert "max_log_bytes" not in DSConfig.model_fields
+
+
+@pytest.mark.parametrize(
+    "body,reason",
+    [
+        (b'{"code":-1,"msg":"private-error"}', "ds_object_missing"),
+        (b'{"code":0,"data":"private-error"}', "ds_invalid_response"),
+        (b'{"code":true}', "ds_invalid_response"),
+        (b'{"code":"10018"}', "ds_invalid_response"),
+        (b'{"code":1.5}', "ds_invalid_response"),
+        (b"[]", "ds_invalid_response"),
+        (b"not-json", "ds_invalid_response"),
+    ],
+)
+async def test_log_json_envelopes_never_become_log_evidence(adapter, body, reason):
+    from xiaowei.dolphinscheduler import DolphinScheduler
+
+    await transport(
+        adapter,
+        lambda _: httpx2.Response(200, content=body, headers={"Content-Type": "application/json"}),
+    )
+    received = []
+    with pytest.raises(DolphinSchedulerReadError) as caught:
+        await DolphinScheduler._download(adapter, 11, 801, 4096, received.append)
+    assert caught.value.reason == reason
+    assert sum(received) == len(body)
+    assert "private-error" not in str(caught.value)
+
+
+async def test_log_json_error_obeys_remaining_byte_limit_and_closes_stream(adapter):
+    from xiaowei.dolphinscheduler import DolphinScheduler
+
+    closed, reached_tail = [], []
+
+    class Oversized(httpx2.AsyncByteStream):
+        async def __aiter__(self):
+            yield b'{"code":10018,"msg":"'
+            yield b"x" * 64
+            reached_tail.append(True)
+            yield b'"}'
+
+        async def aclose(self):
+            closed.append(True)
+
+    await transport(
+        adapter,
+        lambda _: httpx2.Response(
+            200, stream=Oversized(), headers={"Content-Type": "application/json"}
+        ),
+    )
+    received = []
+    with pytest.raises(DolphinSchedulerReadError) as caught:
+        await DolphinScheduler._download(adapter, 11, 801, 32, received.append)
+    assert caught.value.reason == "ds_invalid_response"
+    assert sum(received) == 32
+    assert closed and not reached_tail

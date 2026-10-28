@@ -905,17 +905,30 @@ class DolphinScheduler:
                     raise DolphinSchedulerReadError("ds_object_missing")
                 if response.status_code != 200:
                     raise DolphinSchedulerReadError("ds_unavailable")
-                if "json" in response.headers.get("content-type", "") or response.headers.get(
-                    "content-encoding"
-                ):
+                if response.headers.get("content-encoding"):
                     raise DolphinSchedulerReadError("ds_invalid_response")
+                json_response = "json" in response.headers.get("content-type", "").lower()
                 body = bytearray()
                 async for chunk in response.aiter_bytes():
                     part = chunk[: limit - len(body)]
                     body.extend(part)
                     consumed(len(part))
                     if len(body) >= limit:
+                        if json_response:
+                            raise DolphinSchedulerReadError("ds_invalid_response")
                         return bytes(body), False
+                if json_response:
+                    try:
+                        envelope = json.loads(body)
+                    except (ValueError, UnicodeError):
+                        raise DolphinSchedulerReadError("ds_invalid_response") from None
+                    if (
+                        isinstance(envelope, dict)
+                        and type(envelope.get("code")) is int
+                        and envelope["code"] != 0
+                    ):
+                        raise DolphinSchedulerReadError("ds_object_missing")
+                    raise DolphinSchedulerReadError("ds_invalid_response")
                 return bytes(body), True
         except (httpx2.ConnectError, httpx2.ConnectTimeout):
             raise DolphinSchedulerReadError("ds_connect") from None

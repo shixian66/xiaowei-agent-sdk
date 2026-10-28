@@ -800,3 +800,98 @@ async def test_task_state_rejected_before_io_and_can_be_corrected(env, monkeypat
             assert result["state"] == "completed", result
             assert len(requests) == 1
             await served.finish()
+
+
+@pytest.mark.parametrize("version", ["3.1.8", "3.4.0"])
+async def test_log_business_failure_is_unavailable_cached_and_keeps_metadata_readable(
+    env, monkeypatch, version
+):
+    from tests.sdk_core.test_dolphinscheduler_dependencies import protocol
+
+    monkeypatch.setenv("XW_TEST_DS_TOKEN", "synthetic-token")
+    base = protocol(version)
+    owner = "processInstanceId" if version == "3.1.8" else "workflowInstanceId"
+
+    def respond(path, params):
+        if path.endswith("download-log"):
+            return {"code": 10018, "msg": "private-worker-error", "data": "private-error-body"}
+        if path.endswith("/task-instances"):
+            return {
+                "code": 0,
+                "data": {
+                    "total": 1,
+                    "totalList": [
+                        {
+                            "id": 801,
+                            owner: 701,
+                            "taskCode": 999,
+                            "state": "FAILURE",
+                            "retryTimes": 0,
+                        }
+                    ],
+                },
+            }
+        if path.endswith("/projects"):
+            return {"code": 0, "data": {"total": 0, "totalList": []}}
+        return base(path, params)
+
+    with ds_api(respond=respond) as (url, requests):
+        config = ServeConfig.model_validate(
+            config_values(env.port, [source(base_url=url, version=version)])
+        )
+        async with env.running(config) as served:
+            await served.page()
+            identity = dict(
+                cluster="ds-b",
+                project_code=11,
+                workflow_instance_id=701,
+                task_id=801,
+                task_page_no=1,
+            )
+            message = env.scripts.add(
+                "DS B 失败节点日志是什么错误",
+                tool_call("ds_select_clusters", clusters=["ds-b"]),
+                tool_call("ds_read_task_log", **identity, line=1, byte_offset=0, line_count=3),
+                tool_call(
+                    "ds_search_task_log",
+                    **identity,
+                    terms=["ERROR"],
+                    case_sensitive=False,
+                    max_snippets=2,
+                    context_lines=1,
+                ),
+                tool_call(
+                    "ds_list_projects", cluster="ds-b", keyword=None, page_no=1, page_size=10
+                ),
+                ds_answer,
+            )
+            result = (await served.turn(message)).json()
+            assert result["state"] == "completed", result
+            visible = result["delivery"]["content"]
+            assert "对象或日志不可用" in visible
+            assert "不符合已核实契约" not in visible
+            assert sum(path.endswith("download-log") for path, _, _ in requests) == 1
+            assert requests[-1][0].endswith("/projects")
+            assert len(result["delivery"]["facts"]) == 1
+            assert result["delivery"]["facts"][0]["tool_id"] == "local/ds_list_projects"
+            saved = await env.scalar("SELECT answer FROM xiaowei_request LIMIT 1")
+            assert "ds_object_missing" in str(saved) and "ds_invalid_response" not in str(saved)
+            audiences = [
+                result,
+                saved,
+                [call.input for call in env.scripts.calls[message]],
+                await env.scalar(
+                    "SELECT json_agg(row_to_json(e)) FROM (SELECT model_content, session_content, "
+                    "web_content, feishu_content FROM xiaowei_evidence) e"
+                ),
+                await env.scalar("SELECT json_agg(message_data) FROM agent_messages"),
+            ]
+            for value in audiences:
+                assert "private-worker-error" not in str(value)
+                assert "private-error-body" not in str(value)
+            # Re-reading the saved answer revalidates the same gap, without another DS request.
+            before = len(requests)
+            view = await served.client.get("/api/turns/r1")
+            assert view.status_code == 200 and "对象或日志不可用" in view.text
+            assert len(requests) == before
+            await served.finish()
