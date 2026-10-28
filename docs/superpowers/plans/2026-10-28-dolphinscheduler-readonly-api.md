@@ -1,6 +1,6 @@
 # DolphinScheduler API 只读接入设计与实施计划
 
-> 文档版本 **DS-RO-P1-r5（2026-10-28，审查修订；批准依据 r3）**。用户已授权连续实现、离线测试、常规修复及隔离分支本地提交；明确本轮不调用真实模型或公司 DS，不合并、不部署。按 §11 串行推进，当前状态与精确审查证据见 [handoff](../../../AGENT_HANDOFF.md#dolphinscheduler-implementation)。
+> 文档版本 **DS-RO-P1-r5（2026-10-28，离线审查修订已验证；批准依据 r3）**。用户已授权连续实现、离线测试、常规修复及隔离分支本地提交；明确本轮不调用真实模型或公司 DS，不合并、不部署。按 §11 串行推进，当前状态与精确审查证据见 [handoff](../../../AGENT_HANDOFF.md#dolphinscheduler-implementation)。
 
 > 产品契约唯一来源为 [ARCHITECTURE：DS](../../../ARCHITECTURE.md#dolphinscheduler-environment)。离线协议和脚本模型证明接线与边界，不代替真实 Agent 能力、公司 API 或正式群实收验收。
 
@@ -375,7 +375,7 @@ DS 官方源码（版本标签）：
 | A4 | 不沿用无法核实的总括独立审查结论；最终 DS／浏览器日志必须记录命令和精确 SHA，handoff 列实际复核人及记录 |
 | M1 | 用户已撤回：保留 ds_read_scope 和初次已锁范围语义；逐次缩小会额外禁止 {A,B}→{A}→{A,B}，并非等价删除 |
 | M2、M6、M7、M8 | 删除动态参数；局部依赖／DAG 异常不丢其余事实；容量改常量；凭据单元参数化＋四类接收方端到端，删除 DS 专用备份列断言、保留旧库迁移 |
-| M3、M4、M5 | 自动审批两次拒绝后，用户逐项确认删除范围，继续执行。删除 64 KiB 分块与两个专门测试、未部署且无调用者的 ds_related_unverified 枚举／文案、请求层重复头／route／局部 import。M3 反例：16 MiB 重复前缀的 200 字节不敏感词，直接 IGNORECASE finditer 约 4 秒；字节 ASCII lower 后普通 finditer 约 40 毫秒。若获准，采用后者并保留每词让出、字节额度和客户端 identity／压缩拒绝；不直接采用原性能假设 |
+| M3、M4、M5 | 自动审批两次拒绝后，用户逐项确认删除范围，继续执行。删除 64 KiB 分块与两个专门测试、未部署且无调用者的 ds_related_unverified 枚举／文案、请求层重复头／route／局部 import。M3 反例：16 MiB 重复前缀的 200 字节不敏感词，直接 IGNORECASE finditer 约 4 秒；字节 ASCII lower 后普通 finditer 约 40 毫秒。已采用后者，保留每词让出、字节额度和客户端 identity／压缩拒绝；上述一次性本地测量不是性能承诺，不直接采用原性能假设 |
 | N1 | 采纳遮蔽字节数和公司负载校准；不采纳单行／定长引号值上限，会泄漏跨行或超长凭据尾部。CPU 与过度遮蔽已明确为未知／缺口 |
 | N2、N3 | §11.4 登记实际限额、风险及最小范围；HTTP／HTTPS 既有能力及明文风险只在 DS 架构声明，推荐 HTTPS，无新运行时拒绝 |
 | C1、C2 | 按要求等用户确认后再改；保留当前 binding 和关联字段，M7 必需兼容影响已单列 |
