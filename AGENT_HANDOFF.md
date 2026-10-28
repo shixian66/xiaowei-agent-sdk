@@ -41,6 +41,16 @@
 
 ## 3. 当前计划与下一项工作
 
+### CI msgpack 与扫描器自测维护（2026-10-28，独立维护分支）
+
+分支 `codex/ci-msgpack-audit` 从最新 `origin/main@0b401b2e40e906c240de7bebd4bcacd8da0a10ae` 开始，与 PR #143 独立。只定向更新 `uv.lock` 中 msgpack 1.2.2 → 1.2.3，其他包及产品依赖不变；`requirements-audit.txt` 按既有 CI 命令生成且仍被忽略，不新增依赖清单或配置例外。
+
+CI #416 的 secret-scan 单项重跑通过（job `122600947638`），其余任务未请求重跑。官方 Gitleaks 8.30.0 本机二进制复现：同一合成值首字符为 `+`/`/` 时 exit 0，内部 `+` 仍 exit 1；两处自测改为已实测命中的固定合成值分段拼接，保留严格 `rc == 1`、既有扫描规则、豁免及全历史扫描。只同步受批准命令影响的工作流整体摘要和两段命令摘要，不放宽闭集断言。
+
+本地有效证据：`uv export --frozen --no-emit-project --extra dev -o requirements-audit.txt` 后运行 `uv run --locked --extra dev pip-audit --strict -r requirements-audit.txt` 无已知漏洞；`UV_OFFLINE=1 uv run --locked --extra dev python -m pytest tests/security/test_workflow_policy.py tests/security/test_docs_command_consistency.py -q` 为 30 passed；`UV_OFFLINE=1 uv run --locked --extra dev ruff check .`、diff 检查通过。直接执行实际 YAML 两段自测均通过；隔离替身分别返回 0/2 时两段都失败，证明未吞掉漏检或扫描器错误。原始对照与检查日志在 `/tmp/xw-ci-msgpack-audit/`。
+
+下一项：按用户授权推送并创建本维护 PR，记录最终 CI；不合并。维护 PR 合入后，需按后续授权更新 #143 并重跑 CI。本次不改 #143 分支，不打包/部署，不调用真实模型、公司服务或飞书；全部公司验收缺口保留。
+
 ### 审批与任务回执（2026-10-27，审核通过并获准合并，公司待验）
 
 用户批准[修复计划 §8 v1.5＋R1–R3](docs/superpowers/plans/2026-10-20-production-dialogue-answer-repair.md#approval-task-delivery-repair)的实现、测试和常规修复；本地只用替身/合成数据与真实 SDK、正式运行装配和隔离 PostgreSQL，真实模型由用户在公司隔离环境验证。已重新 fetch main@c1c28a2321e4849d9e3fba0cb4ba8167dbfe341e，分支 codex/approval-task-receipts，独立工作树 /Users/kloenguyen/.codex/worktrees/approval-task-receipts/agent-SDK；原桌面工作区及其未提交内容未动。

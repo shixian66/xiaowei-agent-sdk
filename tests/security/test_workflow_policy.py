@@ -85,7 +85,7 @@ _EXPECTED_JOBS = (
 # 「多出的东西」，挡不住删除必需命令、重复摘要顶替、把配置挪到无关 action 下、
 # 或加 `continue-on-error` 让 gate 形同虚设。整文件摘要是唯一能覆盖全部
 # 增/删/改/移位的锚点；合法修改 workflow 时必须显式更新此常量。
-_WORKFLOW_SHA256 = "b9ef416b333f6708abcdbd161e7a977db7062bd20b795b335b5a820208822f27"
+_WORKFLOW_SHA256 = "02875a9eb93bac2a2388e541e40288fffaec547da657c68939ab5f08dc68c628"
 
 # ---- 闭集白名单：改动 ci.yml 必须同步更新此处，否则测试变红 ----------------
 _ALLOWED_EXPRESSIONS = {"github.ref"}
@@ -98,9 +98,9 @@ _ALLOWED_USES = {
 # 多行 run block 的规范化 SHA-256；改一个字符即变红。
 _ALLOWED_RUN_BLOCK_DIGESTS = {
     "14dccc18ea3ff5aa544415f4682995d6076e600dd7708d760aebcb0373229e62",  # install gitleaks
-    "a9ec197626434d3802970c0f251a57194b6bdaa92541a5bdf94df440fe472957",  # scanner self-test
+    "e22117f8a083130b9ad069a7e689c0603d10c8178b790d5b54fea3baf744c74d",  # scanner self-test
     # allowlist narrowness self-test
-    "f345b83890f552ba8896c95847ff50893f80369fb64d0e6873b6b595152ec44c",
+    "5ab1df1be7bbcb8fc0f502701556d5cfe7f26a66cec3ee0a4a1056850f642ecf",
     "947c3f06267bb21abdbeb698f8f09a97f66602f03d2c862ee7c10d082af0d3fb",  # SDK test harness
     "e292c40ec636bdd26c85ecf53c85e70d28b4ee3b4c831c4c6e505a8396edb079",  # install product wheel
     "0547ae72dfd9441178e20b33269112011779bb7b941999027763294ce92c6077",  # product entries
