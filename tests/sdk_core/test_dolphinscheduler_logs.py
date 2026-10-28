@@ -83,7 +83,9 @@ async def logs(postgres_url, monkeypatch):
             )
             return await gov.invoke(ctx, req, lambda r: ds.execute(r, ctx, gov))
 
-        yield SimpleNamespace(ds=ds, gov=gov, ctx=ctx, control=control, calls=calls, invoke=invoke)
+        yield SimpleNamespace(
+            ds=ds, gov=gov, ctx=ctx, control=control, calls=calls, invoke=invoke, engine=engine
+        )
         await ds.end_turn(ctx.identity)
     await ds.aclose()
 
@@ -285,3 +287,103 @@ async def test_actual_32m_turn_cap_stops_third_log_without_extra_metadata(logs):
     with pytest.raises(DolphinSchedulerReadError):
         await logs.invoke("ds_read_task_log", task_id=803, line=1, byte_offset=0, line_count=1)
     assert logs.calls == before
+
+
+async def test_inflight_received_bytes_are_not_double_counted_against_reservation(logs):
+    first_received, release = asyncio.Event(), asyncio.Event()
+
+    class First(httpx2.AsyncByteStream):
+        async def __aiter__(self):
+            yield b"a" * 3072
+            first_received.set()
+            await release.wait()
+            yield b"a" * 1024
+
+    logs.ds._log_limit = 8192
+    adapter = logs.ds.adapters["ds-b"]
+    adapter.config = adapter.config.model_copy(update={"max_log_bytes": 4096})
+    await adapter.client.aclose()
+
+    def get(req):
+        logs.calls.append(req.url.path)
+        if req.url.path.endswith("download-log"):
+            if req.url.params["taskInstanceId"] == "801":
+                return httpx2.Response(200, stream=First())
+            return httpx2.Response(200, content=b"b" * 3000 + b" SQLState 42S02")
+        if req.url.path.endswith("/701"):
+            data = {"id": 701, "processDefinitionCode": 99}
+        else:
+            data = {
+                "total": 2,
+                "totalList": [{"id": t, "processInstanceId": 701} for t in (801, 802)],
+            }
+        return httpx2.Response(200, json={"code": 0, "data": data})
+
+    adapter.client = httpx2.AsyncClient(transport=httpx2.MockTransport(get))
+    pending = asyncio.create_task(
+        logs.invoke("ds_read_task_log", line=1, byte_offset=0, line_count=1)
+    )
+    try:
+        await asyncio.wait_for(first_received.wait(), 2)
+        second = await logs.invoke("ds_search_task_log", task_id=802, **search(terms=["SQLState"]))
+        assert "42S02" in second.model_content
+        assert json.loads(second.model_content)["data"]["coverage"]["reached_end"]
+    finally:
+        release.set()
+        await pending
+    assert logs.gov.turn_runs(logs.ctx.identity).ds_log_bytes == 4096 + len(
+        b"b" * 3000 + b" SQLState 42S02"
+    )
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [
+        b'{"password":"credential-should-not-leak", "token":"json-token"}',
+        b"{'password': 'python-secret', 'api_key': 'api-secret'}",
+    ],
+)
+def test_quoted_credential_keys_cannot_reach_projection(raw):
+    from xiaowei.dolphinscheduler_logs import redact_bytes
+
+    masked = redact_bytes(raw, "")
+    assert len(masked) == len(raw)
+    assert not any(
+        value in masked
+        for value in (b"credential-should-not-leak", b"json-token", b"python-secret", b"api-secret")
+    )
+
+
+def test_multiline_secret_mask_keeps_original_line_number_and_byte_offset():
+    from xiaowei.dolphinscheduler_logs import fragment, redact_bytes
+
+    raw = b'password="first\r\nsecond"\r\nSQLState 42S02'
+    masked = redact_bytes(raw, "")
+    result = fragment(masked, raw.index(b"SQLState"), len(raw))
+    assert len(masked) == len(raw)
+    assert result["line"] == 3
+    assert result["byte_offset"] == 0
+    assert b"first" not in masked and b"second" not in masked
+
+
+async def test_quoted_credentials_are_excluded_from_all_persisted_audiences(logs):
+    from sqlalchemy import text
+
+    logs.control.body = (
+        b'{"password":"credential-should-not-leak", "token":"json-token"}\nSQLState 42S02'
+    )
+    result = await logs.invoke("ds_read_task_log", line=1, byte_offset=0, line_count=2)
+    assert "credential-should-not-leak" not in result.model_content
+    assert "json-token" not in result.model_content
+    async with logs.engine.connect() as conn:
+        row = (
+            await conn.execute(
+                text(
+                    "SELECT model_content,session_content,web_content,feishu_content "
+                    "FROM xiaowei_evidence"
+                )
+            )
+        ).one()
+    for value in row:
+        assert "credential-should-not-leak" not in value and "json-token" not in value
+        assert "42S02" in value

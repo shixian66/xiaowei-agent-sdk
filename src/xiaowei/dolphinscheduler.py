@@ -534,12 +534,11 @@ class DolphinScheduler:
                 )
             task = turn.logs[key]
         sample = await task
-        token = adapter.client.headers.get("token", "")
         counts = None
         if name == "ds_search_task_log":
-            records, counts = await search_log(sample.raw, args, token)
+            records, counts = await search_log(sample.raw, args)
         else:
-            records = await read_log(sample.raw, args, token)
+            records = await read_log(sample.raw, args)
         coverage: dict[str, object] = {
             "read_byte_range": [0, len(sample.raw)],
             "received_bytes": sample.received_bytes,
@@ -569,7 +568,7 @@ class DolphinScheduler:
                 else:
                     from xiaowei.dolphinscheduler_logs import fragment
 
-                    records[0] = fragment(sample.raw, a, a + (b - a) // 2, token)
+                    records[0] = fragment(sample.raw, a, a + (b - a) // 2)
             else:
                 records.pop()
             coverage["projection_omitted"] = int(str(coverage["projection_omitted"])) + 1
@@ -636,17 +635,22 @@ class DolphinScheduler:
                 turn.reserved += allowance
             if not allowance:
                 raise DolphinSchedulerReadError("ds_response_limit")
+            remaining = allowance
+
+            def consumed(size: int) -> None:
+                nonlocal remaining
+                # 同一事件循环内无 await：预留和已收同步转换，不能将已收字节再扣一次。
+                remaining -= size
+                turn.reserved -= size
+                governance.add_dolphinscheduler_log_bytes(ctx.identity, size)
+
             try:
                 raw, reached_end = await self._download(
-                    adapter,
-                    key[1],
-                    key[3],
-                    allowance,
-                    lambda n: governance.add_dolphinscheduler_log_bytes(ctx.identity, n),
+                    adapter, key[1], key[3], allowance, consumed
                 )
             finally:
                 async with turn.lock:
-                    turn.reserved -= allowance
+                    turn.reserved -= remaining
             received = len(raw)
             if raw.startswith(b"[LOG-PATH]:"):
                 newline = raw.find(b"\n")

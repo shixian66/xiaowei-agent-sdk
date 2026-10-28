@@ -17,26 +17,32 @@ class LogSample:
 
 
 _SECRET_BYTES = re.compile(
-    rb"(?i)(\b(?:password|passwd|pwd|token|secret|api[_-]?key|authorization)\s*[:=]\s*)"
-    rb"(?:\"[^\"]*\"|'[^']*'|[^\s,;&]+)"
+    rb"(?i)([\"']?\b(?:password|passwd|pwd|token|secret|api[_-]?key|authorization)\b[\"']?\s*[:=]\s*)"
+    rb"(?:\"(?:\\.|[^\"\\])*\"|'(?:\\.|[^'\\])*'|[^\s,;&]+)"
 )
 _AUTH_BYTES = re.compile(rb"(?i)\b(Bearer|Basic)\s+[A-Za-z0-9+/=_\-.]+")
 _URL_BYTES = re.compile(rb"(\b[a-zA-Z][a-zA-Z0-9+.-]*://)[^\s/@]+:[^\s/@]+@")
+
+
+_MASK = bytes(value if value in {10, 13} else 42 for value in range(256))
+
+
+def _mask(match: re.Match[bytes]) -> bytes:
+    prefix = match.group(1)
+    return prefix + match.group()[len(prefix) :].translate(_MASK)
 
 
 def redact_bytes(raw: bytes, token: str) -> bytes:
     """采集时遮蔽完整值并保留原字节长度；片段从值中间开始也不会漏出后半段。"""
     if token:
         encoded = token.encode()
-        raw = raw.replace(encoded, b"*" * len(encoded))
+        raw = raw.replace(encoded, encoded.translate(_MASK))
     for pattern in (_AUTH_BYTES, _URL_BYTES, _SECRET_BYTES):
-        raw = pattern.sub(
-            lambda m: m.group(1) + b"*" * (m.end() - m.start() - len(m.group(1))), raw
-        )
+        raw = pattern.sub(_mask, raw)
     return raw
 
 
-def fragment(raw: bytes, start: int, end: int, token: str) -> dict[str, object]:
+def fragment(raw: bytes, start: int, end: int) -> dict[str, object]:
     line_start = raw.rfind(b"\n", 0, start) + 1
     text = raw[start:end].decode("utf-8", errors="replace")
     return {
@@ -50,7 +56,7 @@ def fragment(raw: bytes, start: int, end: int, token: str) -> dict[str, object]:
 
 
 async def search_log(
-    raw: bytes, args: dict[str, object], token: str
+    raw: bytes, args: dict[str, object]
 ) -> tuple[list[dict[str, object]], dict[str, int]]:
     terms = args["terms"]
     assert isinstance(terms, list)  # noqa: S101 - normalized arguments
@@ -92,10 +98,10 @@ async def search_log(
         spans.append((left, right))
         if len(spans) >= maximum:
             break
-    return [fragment(raw, a, b, token) for a, b in spans], counts
+    return [fragment(raw, a, b) for a, b in spans], counts
 
 
-async def read_log(raw: bytes, args: dict[str, object], token: str) -> list[dict[str, object]]:
+async def read_log(raw: bytes, args: dict[str, object]) -> list[dict[str, object]]:
     start = 0
     for n in range(1, int(str(args["line"]))):
         found = raw.find(b"\n", start)
@@ -112,4 +118,4 @@ async def read_log(raw: bytes, args: dict[str, object], token: str) -> list[dict
         found = raw.find(b"\n", end)
         end = len(raw) if found < 0 else found + 1
     end = min(end, start + 8192)
-    return [fragment(raw, start, end, token)] if start < len(raw) else []
+    return [fragment(raw, start, end)] if start < len(raw) else []
