@@ -41,7 +41,7 @@
 
 ## 3. 当前计划与下一项工作
 
-### 安全巡检攻击线索收窄（2026-10-28，本地离线候选）
+### 安全巡检攻击线索收窄（2026-10-28，PR #143 待最终 CI）
 
 分支 `codex/security-attack-signals`，隔离目录 `/Users/kloenguyen/.codex/worktrees/manual-starrocks-security/agent-SDK`；从 fetch 后的 `origin/main@0b401b2e40e906c240de7bebd4bcacd8da0a10ae` 开始。用户确认[计划](docs/superpowers/plans/2026-10-28-security-inspection-attack-signals.md) blob `1a43823a71ed4a0240d6ba9fc7b51ae4bff6420e` 通过外部审查并授权开始开发；四项删减建议已落实到本工作树计划，桌面原计划及全部已有修改保留。
 
@@ -67,9 +67,19 @@ SDK_TEST_POSTGRES_URL=postgresql+asyncpg://postgres@127.0.0.1:55432/postgres SDK
 - H1 保留一条真实 v1 结构投影写入 PostgreSQL、再用当前 catalog 的新 EvidenceStore 读取；原值不变且不重取审计。通用撤权保障未改，引用既有测试，不新增同边界复测。实际模板另覆盖完整超长 SLEEP 被选入并按 CASE 返回 NULL、完整超长覆盖写被排除；SDK 不可判定路径继续如实给下界。
 - 两次定时运行和普通 webhook/代理通知均沿真实本地应用路径验证：各次发送保留，61 条辅助多语句不展开样本。脚本输出只证明接线与展示，不证明真实模型自主判断。
 
-**审查与未覆盖：** 本地只读独立子 Agent 已核对上述源码/测试补丁：无 Critical/Important/Minor，结论可交外部复审；外部复审已完成、无阻断；本次仅收窄 Skill 的多语句措辞、删除重复参数、补旧事实说明注释并重命名行为测试。未推送、无 PR/CI 链接，未打包/部署。真实模型、公司源/客户端/代理实收、既有 A0/A3/H3 与 openUrl/漏查目标缺口继续开放。保留的粗筛表达式未改，不重复增加 DBA 语义任务；原先未完成的语义验证仍未完成。公司后续只测代表小时的新候选行数/字节/耗时和计划 S1–S5，不以旧 117 候选或离线记录代替。
+**审查与未覆盖：** 本地只读独立子 Agent 已核对上述源码/测试补丁：无 Critical/Important/Minor，结论可交外部复审；外部复审已完成、无阻断；本次仅收窄 Skill 的多语句措辞、删除重复参数、补旧事实说明注释并重命名行为测试。已推送并创建 [PR #143](https://github.com/shixian66/xiaowei-agent-sdk/pull/143)；原 CI #416 的两项既有问题由下述维护修复，本次合入最新 main 后重新验证。未打包/部署。真实模型、公司源/客户端/代理实收、既有 A0/A3/H3 与 openUrl/漏查目标缺口继续开放。保留的粗筛表达式未改，不重复增加 DBA 语义任务；原先未完成的语义验证仍未完成。公司后续只测代表小时的新候选行数/字节/耗时和计划 S1–S5，不以旧 117 候选或离线记录代替。
 
-**下一项：** 获准后推送 / PR / CI，不因本地通过自动进入公司验收。
+**下一项：** 完成本次更新后的 CI 并回报；#143 保持未合并，等待后续授权，不因 CI 通过自动进入公司验收。
+
+### CI msgpack 与扫描器自测维护（2026-10-28，PR #144 已合入 main）
+
+分支 `codex/ci-msgpack-audit` 从最新 `origin/main@0b401b2e40e906c240de7bebd4bcacd8da0a10ae` 开始，与 PR #143 独立。只定向更新 `uv.lock` 中 msgpack 1.2.2 → 1.2.3，其他包及产品依赖不变；`requirements-audit.txt` 按既有 CI 命令生成且仍被忽略，不新增依赖清单或配置例外。
+
+CI #416 的 secret-scan 单项重跑通过（job `122600947638`），其余任务未请求重跑。官方 Gitleaks 8.30.0 本机二进制复现：同一合成值首字符为 `+`/`/` 时 exit 0，内部 `+` 仍 exit 1；两处自测改为已实测命中的固定合成值分段拼接，保留严格 `rc == 1`、既有扫描规则、豁免及全历史扫描。只同步受批准命令影响的工作流整体摘要和两段命令摘要，不放宽闭集断言。
+
+本地有效证据：`uv export --frozen --no-emit-project --extra dev -o requirements-audit.txt` 后运行 `uv run --locked --extra dev pip-audit --strict -r requirements-audit.txt` 无已知漏洞；`UV_OFFLINE=1 uv run --locked --extra dev python -m pytest tests/security/test_workflow_policy.py tests/security/test_docs_command_consistency.py -q` 为 30 passed；`UV_OFFLINE=1 uv run --locked --extra dev ruff check .`、diff 检查通过。直接执行实际 YAML 两段自测均通过；隔离替身分别返回 0/2 时两段都失败，证明未吞掉漏检或扫描器错误。原始对照与检查日志在 `/tmp/xw-ci-msgpack-audit/`。
+
+[PR #144](https://github.com/shixian66/xiaowei-agent-sdk/pull/144) 的 [CI #417](https://github.com/shixian66/xiaowei-agent-sdk/actions/runs/40623598373) 为 9/9 成功（integration 5351 passed）；用户授权后已合入 main `350345df20bf639c9a1179b6ae8e16be6ba2bc60`，文件树与受测 head `15cca60dd1c6aed145e74d77603057d9ef689823` 一致。本次仅将 main 合入 #143；冲突仅为本文同位置的两段新增记录，均保留并更新状态。下一项归上方 #143，不打包/部署，不调用真实模型、公司服务或飞书；全部公司验收缺口保留。
 
 ### 审批与任务回执（2026-10-27，审核通过并获准合并，公司待验）
 

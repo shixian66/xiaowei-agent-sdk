@@ -196,8 +196,9 @@ jobs:
       - name: Self-test the scanner
         run: |
           set -uo pipefail
+          # 固定合成值分段拼接，避免随机首字符为 +/ 时不匹配规则。
           tmp="$(mktemp -d)"
-          printf 'aws_secret_access_key = "%s"\n' "$(head -c 30 /dev/urandom | base64 | tr -d '\n')" > "$tmp/bait.tf"
+          printf 'aws_secret_access_key = "%s"\n' "$(printf '%s' DkUOQw5FO5 VyOWLeK6F0 SWZFMwshsX zHn92sOwwK)" > "$tmp/bait.tf"
           set +e
           ./gitleaks dir --redact --no-banner "$tmp"
           rc=$?
@@ -220,7 +221,7 @@ jobs:
           cp .gitleaks.toml "$tmp/"
           mkdir -p "$tmp/tests/security"
           printf 'y = "token=%s"\n' \
-            "$(head -c 30 /dev/urandom | base64 | tr -d '\n')" \
+            "$(printf '%s' DkUOQw5FO5 VyOWLeK6F0 SWZFMwshsX zHn92sOwwK)" \
             > "$tmp/tests/security/test_trace_event_redaction.py"
           set +e
           ./gitleaks dir --redact --no-banner "$tmp"
