@@ -233,7 +233,7 @@ def test_exhausted_processing_deadline_cannot_return_a_success():
         analyze(batch("SELECT SLEEP(5)"), deadline=0)
 
 
-def test_removed_delete_ast_check_does_not_mark_delay_candidates_unclassified():
+def test_deeply_nested_delay_is_counted_and_complete():
     nested = "DELETE FROM t WHERE x = " + "(" * 150 + "SLEEP(1)" + ")" * 150
     result = analyze(batch("SELECT SLEEP(1)", nested))
     assert result.matched_rows == 2 and result.signal_counts["delay_call"] == 2

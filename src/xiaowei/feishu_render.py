@@ -258,6 +258,7 @@ def _security_presentation(fact: DeliveryFact, data: dict[str, object]) -> FactP
     ops = operations if isinstance(operations, dict) else {}
     complete = cov.get("match_counts_complete") is True
     signal_labels = dict(_SIGNAL_LABELS)
+    # 旧 v1 事实包含此键，新结果不再包含。
     if "high_risk_operation" not in counts:
         signal_labels.pop("high_risk_operation")
         signal_labels["stacked_statements"] = "多语句（辅助信息）"

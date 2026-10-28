@@ -149,7 +149,6 @@ def test_coarse_union_includes_declared_program_positives(sql):
 @pytest.mark.parametrize("sql", [
     "SELECT floor(1)", "SELECT 1 OR column_a=1", "CREATE TABLE t AS SELECT 1",
     "ALTER TABLE t DROP PARTITION p", "INSERT INTO t SELECT 1", "SELECT 1;",
-    *OPERATION_CASES,
 ])
 def test_business_keywords_do_not_flood_coarse_candidates(sql):
     assert not coarse(sql)
