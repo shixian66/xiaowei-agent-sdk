@@ -256,6 +256,7 @@ def test_detail_schema_has_no_dynamic_mode_and_size_limits_are_fixed():
         (b'{"code":1.5}', "ds_invalid_response"),
         (b"[]", "ds_invalid_response"),
         (b"not-json", "ds_invalid_response"),
+        (b'{"code":10018,"msg":' + b"[" * 1500 + b"0" + b"]" * 1500 + b"}", "ds_invalid_response"),
     ],
 )
 async def test_log_json_envelopes_never_become_log_evidence(adapter, body, reason):

@@ -920,7 +920,7 @@ class DolphinScheduler:
                 if json_response:
                     try:
                         envelope = json.loads(body)
-                    except (ValueError, UnicodeError):
+                    except (ValueError, UnicodeError, RecursionError):
                         raise DolphinSchedulerReadError("ds_invalid_response") from None
                     if (
                         isinstance(envelope, dict)
