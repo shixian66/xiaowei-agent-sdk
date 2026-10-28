@@ -659,6 +659,7 @@ async def test_d1_two_pages_and_d4_fresh_detail_keep_original_instance(env, monk
                     project_code=11,
                     workflow_instance_id=701,
                     task_id=None,
+                    dynamic_sub_workflows=False,
                 ),
                 ds_answer,
             )

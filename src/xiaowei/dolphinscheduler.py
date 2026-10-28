@@ -6,7 +6,7 @@ import json
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Annotated, Literal
+from typing import Annotated, Literal, cast
 from urllib.parse import urlsplit
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
@@ -17,6 +17,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 
 from xiaowei.config import is_secret_ref, resolve_secret_ref
 from xiaowei.dolphinscheduler_logs import LogSample, read_log, redact_bytes, search_log
+from xiaowei.dolphinscheduler_metadata import dag_projection, dependency_fields
 from xiaowei.governance import (
     DolphinSchedulerReadError,
     GovernedTools,
@@ -51,7 +52,6 @@ class DSConfig(BaseModel):
     timeout_seconds: float = Field(default=15, gt=0, le=300)
     max_response_bytes: int = Field(default=1_048_576, ge=4096)
     max_log_bytes: int = Field(default=16 * 1024 * 1024, gt=0, le=16 * 1024 * 1024)
-    max_turn_log_bytes: int = Field(default=32 * 1024 * 1024, gt=0, le=32 * 1024 * 1024)
 
     @field_validator("api_base_url")
     @classmethod
@@ -149,6 +149,13 @@ class DetailArgs(_Args):
     project_code: Annotated[int, Field(gt=0)]
     workflow_instance_id: Annotated[int, Field(gt=0)]
     task_id: Annotated[int, Field(gt=0)] | None
+    dynamic_sub_workflows: bool
+
+    @model_validator(mode="after")
+    def _dynamic_task(self) -> "DetailArgs":
+        if self.dynamic_sub_workflows and self.task_id is None:
+            raise ValueError("动态子流程关联须指定父任务实例 task_id")
+        return self
 
 
 class TaskArgs(ProjectArgs):
@@ -240,7 +247,18 @@ _FIELDS = (
     "duration",
     "dependentResult",
 )
-_PAYLOAD_FIELDS = ("environment", "cluster", "kind", "records", "coverage", "task")
+_PAYLOAD_FIELDS = (
+    "environment",
+    "cluster",
+    "kind",
+    "records",
+    "coverage",
+    "task",
+    "tasks",
+    "nodes",
+    "relations",
+    "related",
+)
 
 
 def catalog(
@@ -288,21 +306,30 @@ def catalog(
     return tuple(contracts), tuple(policies)
 
 
-def _record(value: object) -> dict[str, object]:
+def _record(value: object, token: str = "") -> dict[str, object]:
     if not isinstance(value, dict):
         raise DolphinSchedulerReadError("ds_invalid_response")
-    return {
-        key: (item[:4096] if isinstance(item, str) else item)
+    record: dict[str, object] = {
+        key: (
+            redact_bytes(item.encode(), token).decode(errors="replace")[:4096]
+            if isinstance(item, str)
+            else item
+        )
         for key, item in value.items()
         if key in _FIELDS and (item is None or isinstance(item, (str, int, float, bool)))
     }
+    record.update(dependency_fields(value))
+    return record
 
 
 class DSAdapter:
     def __init__(self, config: DSConfig, clock: Callable[[], datetime]) -> None:
         self.config, self.clock = config, clock
         self.client = httpx2.AsyncClient(
-            headers={"token": resolve_secret_ref(config.token_ref).get_secret_value()},
+            headers={
+                "token": resolve_secret_ref(config.token_ref).get_secret_value(),
+                "Accept-Encoding": "identity",
+            },
             timeout=config.timeout_seconds,
             follow_redirects=False,
             trust_env=False,
@@ -322,6 +349,11 @@ class DSAdapter:
                     raise DolphinSchedulerReadError("ds_object_missing")
                 if response.status_code != 200:
                     raise DolphinSchedulerReadError("ds_unavailable")
+                if (
+                    response.headers.get("content-encoding", "identity").strip().lower()
+                    != "identity"
+                ):
+                    raise DolphinSchedulerReadError("ds_invalid_response")
                 body = bytearray()
                 async for chunk in response.aiter_bytes():
                     if len(body) + len(chunk) > self.config.max_response_bytes:
@@ -331,7 +363,11 @@ class DSAdapter:
                     envelope = json.loads(body)
                 except (ValueError, UnicodeError):
                     raise DolphinSchedulerReadError("ds_invalid_response") from None
-                if not isinstance(envelope, dict) or envelope.get("code") != 0:
+                if (
+                    not isinstance(envelope, dict)
+                    or type(envelope.get("code")) is not int
+                    or envelope.get("code") != 0
+                ):
                     raise DolphinSchedulerReadError("ds_invalid_response")
                 return envelope.get("data")
         except (httpx2.ConnectError, httpx2.ConnectTimeout):
@@ -341,6 +377,33 @@ class DSAdapter:
         except httpx2.HTTPError:
             raise DolphinSchedulerReadError("ds_unavailable") from None
 
+    @property
+    def instance_route(self) -> str:
+        return "process-instances" if self.config.version == "3.1.8" else "workflow-instances"
+
+    async def workflow(self, project: int, instance: int) -> dict[str, object]:
+        value = await self._json(f"/projects/{project}/{self.instance_route}/{instance}", {})
+        if (
+            not isinstance(value, dict)
+            or type(value.get("id")) is not int
+            or value.get("id") != instance
+        ):
+            raise DolphinSchedulerReadError("ds_invalid_response")
+        if value.get("projectCode", project) != project:
+            raise DolphinSchedulerReadError("ds_invalid_response")
+        dag = value.get("dagData")
+        if isinstance(dag, dict):
+            key = "processDefinition" if self.config.version == "3.1.8" else "workflowDefinition"
+            definition = dag.get(key)
+            if isinstance(definition, dict):
+                if definition.get("projectCode") != project:
+                    raise DolphinSchedulerReadError("ds_invalid_response")
+                for suffix, field in (("Code", "code"), ("Version", "version")):
+                    expected = value.get(key + suffix)
+                    if expected is not None and definition.get(field) != expected:
+                        raise DolphinSchedulerReadError("ds_invalid_response")
+        return value
+
     async def execute(
         self, name: str, request: ToolRequest, *, output_limit: int = 16_384
     ) -> ToolObservation:
@@ -349,8 +412,6 @@ class DSAdapter:
         route = "process-instances" if self.config.version == "3.1.8" else "workflow-instances"
         if name == "ds_list_projects":
             path = "/projects"
-        elif name == "ds_get_workflow_instance":
-            path = f"/projects/{args['project_code']}/{route}/{args['workflow_instance_id']}"
         elif name == "ds_list_workflow_instances":
             path = f"/projects/{args['project_code']}/{route}"
             code = (
@@ -378,18 +439,16 @@ class DSAdapter:
             if args.get(key) is not None:
                 params[api_key] = str(args[key])
         data = await self._json(path, params)
-        if name == "ds_get_workflow_instance":
-            if not isinstance(data, dict) or data.get("id") != args["workflow_instance_id"]:
-                raise DolphinSchedulerReadError("ds_invalid_response")
-            records, total = [_record(data)], 1
-        else:
-            if not isinstance(data, dict) or not isinstance(data.get("totalList"), list):
-                raise DolphinSchedulerReadError("ds_invalid_response")
-            records = [_record(value) for value in data["totalList"][: int(str(args["page_size"]))]]
-            raw_total = data.get("total")
-            if not isinstance(raw_total, int) or raw_total < 0:
-                raise DolphinSchedulerReadError("ds_invalid_response")
-            total = raw_total
+        if not isinstance(data, dict) or not isinstance(data.get("totalList"), list):
+            raise DolphinSchedulerReadError("ds_invalid_response")
+        records = [
+            _record(value, self.client.headers.get("token", ""))
+            for value in data["totalList"][: int(str(args["page_size"]))]
+        ]
+        raw_total = data.get("total")
+        if not isinstance(raw_total, int) or raw_total < 0:
+            raise DolphinSchedulerReadError("ds_invalid_response")
+        total = raw_total
         if name == "ds_list_task_instances":
             owner = "processInstanceId" if self.config.version == "3.1.8" else "workflowInstanceId"
             if any(
@@ -468,7 +527,7 @@ class DolphinScheduler:
     def __init__(self, sources: Sequence[DSConfig], clock: Callable[[], datetime]) -> None:
         self.adapters = {s.cluster_id: DSAdapter(s, clock) for s in sources}
         self._turns: dict[tuple[str, str, str, str], _LogTurn] = {}
-        self._log_limit = min((s.max_turn_log_bytes for s in sources), default=32 * 1024 * 1024)
+        self._log_limit = 32 * 1024 * 1024  # 整轮跨源共享，不受未选源的单份限制影响。
 
     @property
     def available_tools(self) -> frozenset[str]:
@@ -502,6 +561,8 @@ class DolphinScheduler:
         adapter = self.adapters[request.target_id]
         name = request.tool_id.partition("/")[2]
         turn = self._turns.setdefault(_log_turn_key(ctx.identity), _LogTurn())
+        if name == "ds_get_workflow_instance":
+            return await self._detail(adapter, request, turn, output_limit)
         if name not in {"ds_read_task_log", "ds_search_task_log"}:
             observation = await adapter.execute(name, request, output_limit=output_limit)
             if name == "ds_list_task_instances":
@@ -578,6 +639,153 @@ class DolphinScheduler:
             truncated=not sample.reached_end or bool(coverage["projection_omitted"]),
         )
 
+    async def _detail(
+        self, adapter: DSAdapter, request: ToolRequest, turn: "_LogTurn", output_limit: int
+    ) -> ToolObservation:
+        args = request.arguments
+        project, instance = int(str(args["project_code"])), int(str(args["workflow_instance_id"]))
+        workflow = await adapter.workflow(project, instance)
+        coverage: dict[str, object] = {
+            "projection_omitted": 0,
+            "gaps": [],
+            "tasks_scope": "未读取任务",
+        }
+        task, tasks, related = None, [], []
+        token = adapter.client.headers.get("token", "")
+        task_id = args["task_id"]
+        if task_id is not None:
+            data = await adapter._json(
+                f"/projects/{project}/{adapter.instance_route}/{instance}/tasks", {}
+            )
+            if not isinstance(data, dict) or not isinstance(data.get("taskList"), list):
+                raise DolphinSchedulerReadError("ds_invalid_response")
+            owner = (
+                "processInstanceId" if adapter.config.version == "3.1.8" else "workflowInstanceId"
+            )
+            for raw in data["taskList"]:
+                if (
+                    not isinstance(raw, dict)
+                    or raw.get(owner) != instance
+                    or raw.get("projectCode", project) != project
+                ):
+                    raise DolphinSchedulerReadError("ds_invalid_response")
+                if raw.get("id") == task_id:
+                    task = _record(raw, token)
+            key = (request.target_id, project, instance, int(str(task_id)))
+            if task is None:
+                task = turn.tasks.get(key)
+                coverage["tasks_scope"] = "历史分页已核实尝试；有效任务列表未含所指节点"
+            else:
+                coverage["tasks_scope"] = "指定有效任务；非完整历史尝试"
+            if task is None:
+                coverage["gaps"] = [
+                    "有效任务列表未含指定 task_id；可查分页历史尝试，不代表任务不存在"
+                ]
+            else:
+                turn.tasks[key] = task
+                tasks = [task]
+                task_type = str(task.get("taskType", ""))
+                if args["dynamic_sub_workflows"]:
+                    if adapter.config.version != "3.4.0":
+                        coverage["gaps"] = ["3.1.8 未接入已核实的动态子运行端点"]
+                    else:
+                        children = await adapter._json(
+                            f"/projects/{project}/{adapter.instance_route}/query-dynamic-sub-workflows",
+                            {"taskId": str(task_id)},
+                        )
+                        if not isinstance(children, list):
+                            raise DolphinSchedulerReadError("ds_invalid_response")
+                        for child in children[:8]:
+                            if not isinstance(child, dict) or not isinstance(
+                                child.get("workflowInstanceId"), int
+                            ):
+                                raise DolphinSchedulerReadError("ds_invalid_response")
+                            related.append(
+                                {
+                                    "parent_task_id": task_id,
+                                    "workflow_instance_id": child["workflowInstanceId"],
+                                    "project_code": None,
+                                    "relation": "动态子运行实际关系；子项目未核实",
+                                }
+                            )
+                        coverage["gaps"] = [
+                            "动态关联未返回子项目；须用项目范围实例详情核实，不将父项目冒充子项目"
+                        ]
+                        coverage["related_omitted"] = max(0, len(children) - 8)
+                elif task_type in {"SUB_PROCESS", "SUB_WORKFLOW"}:
+                    relation = await adapter._json(
+                        f"/projects/{project}/{adapter.instance_route}/query-sub-by-parent",
+                        {"taskId": str(task_id)},
+                    )
+                    field = (
+                        "subProcessInstanceId"
+                        if adapter.config.version == "3.1.8"
+                        else "subWorkflowInstanceId"
+                    )
+                    if not isinstance(relation, dict) or not isinstance(relation.get(field), int):
+                        raise DolphinSchedulerReadError("ds_invalid_response")
+                    child_id = relation[field]
+                    # 先以父项目作候选读；仅上游实际项目验证成功才把它写成子项目事实。
+                    try:
+                        child = await adapter.workflow(project, child_id)
+                    except DolphinSchedulerReadError as exc:
+                        reason = (
+                            "ds_related_unverified"
+                            if exc.reason in {"ds_invalid_response", "ds_object_missing"}
+                            else exc.reason
+                        )
+                        raise DolphinSchedulerReadError(
+                            reason,
+                            object_ref=f"{request.target_id}:{project}:{instance}:{task_id}:child{child_id}",
+                        ) from None
+                    related = [
+                        {
+                            "parent_task_id": task_id,
+                            "project_code": project,
+                            "workflow_instance_id": child_id,
+                            "relation": "父任务实际关联；项目范围详情核实",
+                            "instance": _record(child, token),
+                        }
+                    ]
+        nodes, edges, dag_coverage = dag_projection(
+            workflow, adapter.config.version, task, adapter.client.headers.get("token", "")
+        )
+        prior_gaps = coverage["gaps"]
+        coverage.update(dag_coverage)
+        if isinstance(prior_gaps, list):
+            coverage["gaps"] = [*prior_gaps, *cast(list[str], dag_coverage.get("gaps", []))]
+        coverage["dependency_scope"] = (
+            "运行依赖状态不含等待起止；等待时长需带时间日志，静态 DAG 不证明耗时"
+        )
+        payload: dict[str, object] = {
+            "environment": adapter.config.description,
+            "cluster": request.target_id,
+            "kind": "ds_get_workflow_instance",
+            "records": [_record(workflow, token)],
+            "coverage": coverage,
+            "tasks": tasks,
+            "nodes": nodes,
+            "relations": edges,
+            "related": related,
+        }
+        sequences = [edges, nodes, related, tasks, payload["records"]]
+        while len(json.dumps(payload, ensure_ascii=False).encode()) > output_limit - 256:
+            sequence = next((items for items in sequences if items), None)
+            if not isinstance(sequence, list):
+                raise DolphinSchedulerReadError("ds_response_limit")
+            sequence.pop()
+            coverage["projection_omitted"] = int(str(coverage["projection_omitted"])) + 1
+        return ToolObservation(
+            payload=payload,
+            captured_at=adapter.clock(),
+            truncated=any(node.get("text_truncated") for node in nodes)
+            or any(t.get("dependency_results_omitted") for t in tasks)
+            or bool(coverage["projection_omitted"])
+            or bool(coverage.get("related_omitted"))
+            or bool(coverage.get("dag_nodes_omitted"))
+            or bool(coverage.get("dag_relations_omitted")),
+        )
+
     async def _capture(
         self,
         adapter: DSAdapter,
@@ -593,14 +801,7 @@ class DolphinScheduler:
                 raise DolphinSchedulerReadError("ds_response_limit")
             task = turn.tasks.get(key)
             if task is None:
-                route = (
-                    "process-instances"
-                    if adapter.config.version == "3.1.8"
-                    else "workflow-instances"
-                )
-                workflow = await adapter._json(f"/projects/{key[1]}/{route}/{key[2]}", {})
-                if not isinstance(workflow, dict) or workflow.get("id") != key[2]:
-                    raise DolphinSchedulerReadError("ds_invalid_response")
+                await adapter.workflow(key[1], key[2])
                 owner = (
                     "processInstanceId"
                     if adapter.config.version == "3.1.8"
@@ -621,7 +822,7 @@ class DolphinScheduler:
                 ]
                 if not candidates:
                     raise DolphinSchedulerReadError("ds_object_missing")
-                task = _record(candidates[0])
+                task = _record(candidates[0], adapter.client.headers.get("token", ""))
                 if task.get(owner) != key[2] or task.get("projectCode", key[1]) != key[1]:
                     raise DolphinSchedulerReadError("ds_invalid_response")
                 turn.tasks[key] = task

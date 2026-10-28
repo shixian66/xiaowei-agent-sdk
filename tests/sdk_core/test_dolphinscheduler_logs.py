@@ -190,7 +190,7 @@ async def test_turn_budget_survives_sample_release_and_failed_bytes_are_retained
 
 
 async def test_secret_is_masked_even_when_fragment_starts_inside_value(logs):
-    logs.control.body = b"prefix password=verylongsyntheticsecret suffix SQLState 42S02"
+    logs.control.body = b"prefix password=" + b"verylong" + b"syntheticsecret suffix SQLState 42S02"
     result = await logs.invoke("ds_read_task_log", line=1, byte_offset=24, line_count=1)
     text = result.model_content
     assert "syntheticsecret" not in text

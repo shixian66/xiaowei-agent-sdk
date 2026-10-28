@@ -205,3 +205,24 @@ async def test_instance_time_window_excludes_inclusive_api_endpoint(adapter):
     assert [r["id"] for r in result.payload["records"]] == [1]
     assert result.payload["coverage"]["boundary_excluded"] == 1
     assert result.payload["coverage"]["upstream_total"] == 2
+
+
+async def test_http200_false_is_not_numeric_success_code(adapter):
+    await transport(adapter, lambda _: httpx2.Response(200, json={"code": False, "data": {}}))
+    with pytest.raises(DolphinSchedulerReadError):
+        await adapter._json("/projects", {})
+
+
+async def test_unexpected_compression_is_rejected_before_decoding_body(adapter):
+    class Compressed(httpx2.AsyncByteStream):
+        async def __aiter__(self):
+            raise AssertionError("must not decode unbounded compressed body")
+            yield b""  # pragma: no cover
+
+    await transport(
+        adapter,
+        lambda _: httpx2.Response(200, headers={"Content-Encoding": "gzip"}, stream=Compressed()),
+    )
+    with pytest.raises(DolphinSchedulerReadError) as caught:
+        await adapter._json("/projects", {})
+    assert caught.value.reason == "ds_invalid_response"
