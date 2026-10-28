@@ -43,7 +43,7 @@
 
 <a id="dolphinscheduler-implementation"></a>
 
-### DolphinScheduler API 只读实现（2026-10-28，R1 补齐待小范围复核）
+### DolphinScheduler API 只读实现（2026-10-28，R1 离线补齐已复核）
 
 本轮仅本地实现、离线测试、常规修复和隔离分支本地提交；不调用真实模型或公司 DS、不推送／合并／部署。工作树为 `/Users/kloenguyen/.codex/worktrees/dolphinscheduler-readonly-api/agent-SDK`，分支 `codex/ds-readonly-api`；产品基线 `916f57a26d2bac201b6772a48016f194af7d586e`，本次修订基点 `3b8f0a9f30043e8cbc2f9403fad3797a798f0a9f`。批准依据仍为 r3 blob `ae0598a41b52f2bdfdb76525a8330a1b7232405c`；契约只见 [ARCHITECTURE](ARCHITECTURE.md#dolphinscheduler-environment)，任务及处置仅在 [r5 计划 §11](docs/superpowers/plans/2026-10-28-dolphinscheduler-readonly-api.md#ds-implementation-plan) 维护。
 
@@ -69,7 +69,9 @@ M3 删除 64 KiB 分块及两个专门测试，每词取消／ASCII 字节位置
 
 **R1 局部补齐（基点 865eb3fe149bdd8af7907826c52dde3ed57513e2）。** 外部复审接受上一轮离线交付，并指出下载 JSON 错误仍一概归为 invalid_response。当前仅在下载现有字节额度内读取／计数并解析 JSON：非零整数业务码归 ds_object_missing；零码、布尔／字符串／小数码、畸形或超限未完整 JSON 仍 invalid_response，不生成日志事实。压缩拒绝、HTTP 状态分类、单对象失败缓存、16／32 MiB、源级授权和历史复核不变，无新增限制／配置／迁移；C1／C2 不动。
 
-R1 证据：修正入口夹具后，以 git show 的精确旧版 _download 作测试替身，两版正式入口均在缺少“对象或日志不可用”处失败（ds-r1-baseline-red.log，2 failed）；当前实现新增10项检查通过（ds-r1-green.log），包含真实 Web/SDK/治理/PG、仅一次下载、换读／搜仍不重发、同源项目读取继续、系统失败保存／历史回读、四种投影及 SDK Session 无上游正文。协议覆盖错误信封、实际字节计数和超限关流；独立复核发现并复现额度内深层 JSON 的 RecursionError，新增解析块局部分类为 invalid_response（未新增深度门槛），反例已补。该阶段测试尚未提交，精确候选复核及最终日志待补，不提前关闭 D2-F1 的 R1 离线项。
+R1 证据：修正入口夹具后，以 git show 的精确旧版 _download 作测试替身，两版正式入口均在缺少“对象或日志不可用”处失败（ds-r1-baseline-red.log，2 failed）；当前实现新增11项检查通过（ds-r1-green-depth.log），包含真实 Web/SDK/治理/PG、仅一次下载、换读／搜仍不重发、同源项目读取继续、系统失败保存／历史回读、四种投影及 SDK Session 无上游正文。协议覆盖错误信封、实际字节计数和超限关流；独立复核发现并复现额度内深层 JSON 的 RecursionError，新增解析块局部分类为 invalid_response（未新增深度门槛），反例已补。代码候选 `3b8962cf3c479569ac844ec772d60508a19fcde8` 已由 `/root/ds_r1_independent_review` 独立复核，未发现剩余阻断；复核人另执行协议 11 passed、18 deselected，正式入口重跑被其沙箱 socket 权限阻止，未计通过。原始报告 /private/tmp/ds-r1-review-3b8962c.md（SHA256 `3c9de6b05ae2aefffbb51a04dc6c5f41d68f0b28a4e3a326d511b4d644648f11`）。候选 83a46e0 的治理／Evidence／读取失败相关回归 159 passed、1 skipped、1 deselected（ds-r1-governance.log），之后仅局部捕获已复现的解析异常。R1 对应的 D2-F1 离线分类、缓存与无原文外带项闭环，真实模型任务能力及公司 API 门槛不关闭。
+
+R1 最终交付提交仅补文档，源码／测试与上述候选一致；交付后 DS 全集／两条群相关与 Chrome 两路径按最终 SHA 重跑，结果分别见 `/private/tmp/ds-r1-final-ds.log`、`/private/tmp/ds-r1-final-browser.log`，首行含精确 SHA 与命令，以日志末尾结果为准。ruff／mypy（44文件）、224本地链接／锚点、19个变体、文档命令及空白检查通过。上轮完整非部署／发行／迁移／恢复和依赖检查按其原 SHA 保留，本次无配置、binding、迁移、依赖或入口协议变更，不重复重型检查。
 
 配置、命令和单源示例见 [README](README.md)。下一步由公司按原 D1—D4／19 变体进行隔离环境验收；两版公司 API、真实模型能力与次数／耗时／用量、凭据权限与时区、服务端大日志负载／同步脱敏延迟、飞书群实收、用户接受均未验收。本轮不得自动关闭这些门槛。
 
