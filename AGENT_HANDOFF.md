@@ -49,7 +49,7 @@
 
 产品契约只在 [ARCHITECTURE：DS](ARCHITECTURE.md#dolphinscheduler-environment)；原 r3 设计 blob `ae0598a41b52f2bdfdb76525a8330a1b7232405c` 加用户明确批准的 C1／C2，切片／限制及固定 D1—D4／19 变体见 [r6 计划](docs/superpowers/plans/2026-10-28-dolphinscheduler-readonly-api.md#ds-implementation-plan)。C1 已改四项数据身份绑定；C2 删除 ds_selection_turn／ds_selection_changed，每轮成功提交非空集合，原失败／暂停／撤权边界不变。schema17未发布，迁移只新增 ds_clusters，不改 SDK 表；不额外兼容旧 DS 测试候选。
 
-C1/C2 RED：绑定／真实重启历史／重发 5 failed、8 passed；独立16→17反例因多余列失败1项。GREEN：身份矩阵、运维调整后的 Web 历史与沿用、源改变拒绝旧历史、Feishu 正式重发／撤权、真实 PostgreSQL 迁移共15 passed，日志 `/private/tmp/ds-c1c2-{red,green}.log` 和 ds-c2-migration-red.log。初始绑定的默认超时15与显式15.0可能产生不同摘要，C1排除运维字段后也避免该漂移。当前全量相关回归、独立复审及 PR/CI 尚待最终精确版本记录，不提前宣称集成通过。
+C1/C2 RED：绑定／真实重启历史／重发 5 failed、8 passed；独立16→17反例因多余列失败1项。GREEN：身份矩阵、运维调整后的 Web 历史与沿用、源改变拒绝旧历史、Feishu 正式重发／撤权、真实 PostgreSQL 迁移共15 passed，日志 `/private/tmp/ds-c1c2-{red,green}.log` 和 ds-c2-migration-red.log。初始绑定的默认超时15与显式15.0可能产生不同摘要，C1排除运维字段后也避免该漂移。源码候选 `b469b5bcca51335fe40fa799346b886d9bae1061` 相关回归620 passed／1 skipped／1 deselected（199.83s），精确命令见 `/private/tmp/ds-c1c2-related.log`；Ruff、mypy44源码文件、文档命令2项、225链接／锚点及19变体检查通过；Gitleaks8.30.0扫描874提交无泄漏。独立复审 `/root/ds_c1c2_integration_review` 覆盖 `41615ce..b469b5b` 及主线公共集成路径，另验绑定矩阵／旧TurnLedger 9项与实际应用绑定8种变化，无代码阻断；唯一README旧轮次措辞已删除。源码与测试不再改动，最终文档提交后的精确head、完整CI及条件合并结果以PR记录为准，尚未宣称CI通过。
 
 既有证据按原 SHA 保留：`41615ce` 的 R1 DS／群相关132 passed、Chrome2 passed，`/private/tmp/ds-r1-final-{ds,browser}.log`；R1 独立复核 `/root/ds_r1_independent_review` 覆盖至源码候选 `3b8962c`，报告 `/private/tmp/ds-r1-review-3b8962c.md`，未发现剩余阻断。更早的 `57e7430` 完整非部署5488 passed、发行／迁移／隔离恢复84 passed；原日志不充当 C1/C2 的新验证。R1 的业务 JSON 分支和深层解析错误、M3每词取消及16／32MiB、凭据投影均保留；上轮过度概括的复核声明已移除。
 
