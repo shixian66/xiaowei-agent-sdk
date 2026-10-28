@@ -41,6 +41,23 @@
 
 ## 3. 当前计划与下一项工作
 
+### DolphinScheduler API 只读接入（2026-10-28，DS-RO-P1-r3）
+
+[设计与实施计划](docs/superpowers/plans/2026-10-28-dolphinscheduler-readonly-api.md#ds-implementation-plan)的 r2 独立复审未发现开工阻断，确认 A1／A2 落实。本版按 C1 区分两条路径：撤权或从配置移除走现有 I/O 前 not_allowed，零 I/O、不计 started、不留读取失败记录；源不可达或 Token 失效沿 D1-F1 保留系统读取失败记录及缺口说明。D4-E3 补此区别，D1-F1 本身不变，19 个变体编号保持。
+
+注入当前集合时沿用既有可信选择提示，以已有本地配置／权限结果标注已明确不可用的成员，不新增状态或远端探测。D4-E3／D1-E10 真实模型验收检查是否向用户提到 B、是否区分授权拒绝与读取失败；本轮未验证模型表现。待批期间追问、章节编号和 §11.8 进一步压缩三项非阻断建议暂留，不重开已收敛方案。
+
+修订前四份 r2 blob 均与指定版本一致；HEAD 仍为 b89d4ee71cb5082adcde396f3dece12fd169af48，产品源码依据沿用已核对的 916f57a26d2bac201b6772a48016f194af7d586e。产品契约唯一来源仍为 [DS 架构](ARCHITECTURE.md#dolphinscheduler-environment)和[DS 失败反馈](ARCHITECTURE.md#dolphinscheduler-read-failures)；A1 三条暂停兼容验收、B1 轮末提交、共用历史／交付权限复核、六项工具及 32 MiB 预算保持，TiDB／StarRocks 行为不改。
+
+本轮文档命令一致性检查 2 项通过；81 个本地链接、显式 DS 锚点、19 个变体编号及空白检查通过；D1-F1 和 A1 三条验收不变，仅澄清 D4-E3，非 DS 正文、HEAD 与改动文件清单未变。当前只做文档修订，未写功能代码、运行功能测试／SDK 探针、调用真实模型／公司 DS、提交、建分支或部署。迁移与暂停恢复、真实模型、两版公司 API、长日志负载和正式入口仍未验收；旧探针不证明产品功能。功能实施仍待授权，本版作者修订不等于新增差异已独立复审。
+
+| 当前文件 | Git blob 指纹（未提交工作区） |
+| --- | --- |
+| docs/superpowers/plans/2026-10-28-dolphinscheduler-readonly-api.md | ae0598a41b52f2bdfdb76525a8330a1b7232405c |
+| ARCHITECTURE.md | 28478e4eaf2098d7a31ca5092de2a3f3947aeecb |
+| DEVELOPMENT_PLAN.md | a9995937fc0a716153bbbc7d59714dd7eaeb137c |
+
+
 ### 安全巡检攻击线索收窄（2026-10-28，PR #143 待最终 CI）
 
 分支 `codex/security-attack-signals`，隔离目录 `/Users/kloenguyen/.codex/worktrees/manual-starrocks-security/agent-SDK`；从 fetch 后的 `origin/main@0b401b2e40e906c240de7bebd4bcacd8da0a10ae` 开始。用户确认[计划](docs/superpowers/plans/2026-10-28-security-inspection-attack-signals.md) blob `1a43823a71ed4a0240d6ba9fc7b51ae4bff6420e` 通过外部审查并授权开始开发；四项删减建议已落实到本工作树计划，桌面原计划及全部已有修改保留。
