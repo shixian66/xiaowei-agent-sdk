@@ -301,3 +301,31 @@ async def test_log_json_error_obeys_remaining_byte_limit_and_closes_stream(adapt
     assert caught.value.reason == "ds_invalid_response"
     assert sum(received) == 32
     assert closed and not reached_tail
+
+
+@pytest.mark.parametrize(
+    "change,retained",
+    [
+        ({}, True),
+        ({"timeout_seconds": 25}, True),
+        ({"token_ref": "env:XW_DS_ROTATED_TOKEN"}, True),
+        ({"description": "renamed source"}, True),
+        ({"cluster_id": "ds-b"}, False),
+        ({"version": "3.4.0"}, False),
+        ({"api_base_url": "https://other.invalid/api"}, False),
+        ({"time_zone": "UTC"}, False),
+    ],
+)
+def test_ds_binding_tracks_data_identity_only(change, retained):
+    original = DSConfig.model_validate(
+        {
+            "cluster_id": "ds-a",
+            "description": "source",
+            "version": "3.1.8",
+            "api_base_url": "https://ds.invalid/api",
+            "token_ref": "env:XW_DS_TOKEN",
+            "time_zone": "Asia/Shanghai",
+        }
+    )
+    changed = DSConfig.model_validate({**original.model_dump(), **change})
+    assert (original.binding == changed.binding) is retained

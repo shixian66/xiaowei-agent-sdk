@@ -313,7 +313,6 @@ def test_ds_turn_ledger_roundtrip_and_legacy_defaults():
         TurnRuns(),
         ds_clusters=("ds-a", "ds-b"),
         ds_read_scope=("ds-a", "ds-b"),
-        ds_selection_changed=True,
     )
     ledger = TurnLedger(3, runs)
     assert parser.validate_json(parser.dump_json(ledger), strict=True) == ledger
@@ -321,7 +320,6 @@ def test_ds_turn_ledger_roundtrip_and_legacy_defaults():
     for key in (
         "ds_clusters",
         "ds_read_scope",
-        "ds_selection_changed",
         "ds_log_reads",
         "ds_log_bytes",
     ):
@@ -329,7 +327,6 @@ def test_ds_turn_ledger_roundtrip_and_legacy_defaults():
     restored = parser.validate_json(json.dumps(old), strict=True)
     assert restored.runs.ds_clusters is None
     assert restored.runs.ds_read_scope is None
-    assert not restored.runs.ds_selection_changed
 
 
 @pytest.mark.parametrize(
@@ -430,7 +427,7 @@ async def test_ds_schema_16_upgrade_adds_nullable_selection_without_sdk_changes(
                 .scalars()
                 .all()
             )
-            assert "ds_clusters" in columns and "ds_selection_turn" in columns
+            assert "ds_clusters" in columns and "ds_selection_turn" not in columns
             assert not (
                 await conn.execute(
                     text(
@@ -894,4 +891,47 @@ async def test_log_business_failure_is_unavailable_cached_and_keeps_metadata_rea
             view = await served.client.get("/api/turns/r1")
             assert view.status_code == 200 and "对象或日志不可用" in view.text
             assert len(requests) == before
+            await served.finish()
+
+
+@pytest.mark.parametrize("identity_changed", [False, True])
+async def test_ds_restart_preserves_history_only_for_operational_changes(
+    env, monkeypatch, identity_changed
+):
+    monkeypatch.setenv("XW_TEST_DS_TOKEN", "synthetic-token")
+    monkeypatch.setenv("XW_TEST_DS_ROTATED_TOKEN", "synthetic-rotated-token")
+    with ds_api() as (url, requests):
+        values = config_values(env.port, [source(base_url=url)])
+        async with env.running(ServeConfig.model_validate(values)) as served:
+            await served.page()
+            message = env.scripts.add(
+                "查 DS B",
+                tool_call("ds_select_clusters", clusters=["ds-b"]),
+                list_failed(),
+                ds_answer,
+            )
+            assert (await served.turn(message)).json()["state"] == "completed"
+            cookies = dict(served.client.cookies)
+            assert len(requests) == 1
+            await served.finish()
+        values["dolphinscheduler_sources"][0].update(
+            timeout_seconds=25,
+            token_ref="env:XW_TEST_DS_ROTATED_TOKEN",  # noqa: S106 - synthetic environment reference
+        )
+        if identity_changed:
+            values["dolphinscheduler_sources"][0]["api_base_url"] += "/changed-source"
+        async with env.running(ServeConfig.model_validate(values)) as served:
+            served.client.cookies.update(cookies)
+            await served.page()
+            history = await served.client.get("/api/turns/r1")
+            assert history.status_code == (403 if identity_changed else 200), history.text
+            assert len(requests) == 1  # History must not re-fetch DS or invoke a model.
+            if not identity_changed:
+                assert "orders_failed" in history.text
+                follow = env.scripts.add("今天呢", list_failed(), ds_answer)
+                result = (await served.turn(follow, request_id="follow")).json()
+                assert result["state"] == "completed", result
+                assert len(requests) == 2
+                assert requests[-1][2] == "synthetic-rotated-token"
+                assert await env.scalar("SELECT ds_clusters FROM xiaowei_session") == ["ds-b"]
             await served.finish()

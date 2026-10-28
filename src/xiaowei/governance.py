@@ -472,7 +472,6 @@ class TurnRuns:
     limit_rescue_started: bool = False
     ds_clusters: tuple[str, ...] | None = None
     ds_read_scope: tuple[str, ...] | None = None
-    ds_selection_changed: bool = False
     ds_log_reads: tuple[str, ...] = ()
     ds_log_bytes: int = 0
     slot_busy: frozenset[str] = frozenset()
@@ -1043,9 +1042,7 @@ class GovernedTools:
         if runs.ds_read_scope is not None and not set(chosen) <= set(runs.ds_read_scope):
             raise ToolRejectedError("本轮已开始 DS 取数，不能扩大集合", code="not_allowed")
         self._reserve(ctx)
-        self._runs[_turn_key(ctx.identity)] = replace(
-            runs, ds_clusters=chosen, ds_selection_changed=True
-        )
+        self._runs[_turn_key(ctx.identity)] = replace(runs, ds_clusters=chosen)
 
     async def unavailable_dolphinscheduler(
         self, ctx: RunContext, clusters: tuple[str, ...]

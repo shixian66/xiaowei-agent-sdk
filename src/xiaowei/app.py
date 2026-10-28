@@ -993,7 +993,7 @@ class Application:
             inspection_failures=validated.inspection_failures,
             limit_reached=validated.limit_reached,
             source_records=source_records,
-            ds_clusters=runs.ds_clusters if runs.ds_selection_changed else None,
+            ds_clusters=runs.ds_clusters or None,
         )
         _stage(turn, "committed", started)
         return validated.model_copy(

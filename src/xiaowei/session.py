@@ -98,7 +98,7 @@ _TRANSITION = text(
 _COMMIT_DS = text(
     """
     UPDATE xiaowei_session SET state = 'active', turns = turns + 1,
-        ds_clusters = CAST(:ds_clusters AS JSONB), ds_selection_turn = :ds_selection_turn
+        ds_clusters = CAST(:ds_clusters AS JSONB)
     WHERE session_id = :session_id AND owner_kind = :owner_kind AND owner_id = :owner_id
       AND channel = :channel AND state = 'writing'
     """
@@ -509,7 +509,6 @@ class PolicySession:
                 {
                     **self._owner(),
                     "ds_clusters": json.dumps(ds_clusters),
-                    "ds_selection_turn": self._ctx.identity.turn_id,
                 },
             )
             == 1

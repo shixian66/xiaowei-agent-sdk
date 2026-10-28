@@ -95,7 +95,7 @@ class DSConfig(BaseModel):
 
     @property
     def binding(self) -> str:
-        values = self.model_dump(exclude={"description"})
+        values = self.model_dump(include={"cluster_id", "version", "api_base_url", "time_zone"})
         return hashlib.sha256(json.dumps(values, sort_keys=True).encode()).hexdigest()
 
 

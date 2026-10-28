@@ -22,11 +22,12 @@ from xiaowei.runtime import ServeConfig, resend
 pytestmark = pytest.mark.loopback
 
 
-@pytest.mark.parametrize("revoked", [False, True])
+@pytest.mark.parametrize("configuration", ["same", "revoked", "operational", "identity"])
 async def test_formal_ds_resend_rechecks_permissions_without_model_or_ds_io(
-    env, monkeypatch, revoked
+    env, monkeypatch, configuration
 ):
     monkeypatch.setenv("XW_TEST_DS_TOKEN", "synthetic-token")
+    monkeypatch.setenv("XW_TEST_DS_ROTATED_TOKEN", "synthetic-rotated-token")
     with ds_api() as (url, requests):
         values = config_values(env.port, [source(base_url=url)])
         values["feishu"] = feishu_config(max_reply_chars=3500)
@@ -50,10 +51,17 @@ async def test_formal_ds_resend_rechecks_permissions_without_model_or_ds_io(
         assert await env.scalar("SELECT delivery FROM xiaowei_request") == "failed"
         calls = len(env.scripts.calls[message])
         assert len(requests) == 1
-        if revoked:
+        if configuration == "revoked":
             values["access"]["grants"]["alice"] = [
                 t for t in values["access"]["grants"]["alice"] if t not in DS_TOOLS
             ]
+        if configuration == "operational":
+            values["dolphinscheduler_sources"][0].update(
+                timeout_seconds=25,
+                token_ref="env:XW_TEST_DS_ROTATED_TOKEN",  # noqa: S106 - synthetic environment reference
+            )
+        if configuration == "identity":
+            values["dolphinscheduler_sources"][0]["api_base_url"] += "/changed-source"
         current = ServeConfig.model_validate(values)
         sender = FakeChannel()
         arguments = dict(
@@ -64,7 +72,7 @@ async def test_formal_ds_resend_rechecks_permissions_without_model_or_ds_io(
             chat_id="oc_alice",
             message_id="om_ds_resend",
         )
-        if revoked:
+        if configuration in {"revoked", "identity"}:
             with pytest.raises(ResultUnavailableError):
                 await resend(current, **arguments)
             assert sender.sends == []
