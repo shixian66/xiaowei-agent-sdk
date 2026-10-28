@@ -207,7 +207,10 @@ _DESCRIPTIONS = {
         "通用ERROR噪声可换具体词，未见不证明不存在；位置可交给read工具补上下文。"
         "完整身份必填，task_page_no为100条/页的任务所在页；同轮复用，失败不重新下载。"
     ),
-    "ds_list_projects": "DS 项目不明确时按关键词找获准项目，一次只读指定页；空页可换词。",
+    "ds_list_projects": (
+        "DS 项目不明确时按关键词找获准项目，一次只读指定页；空页可换词。"
+        "projection_omitted>0须减小page_size，按page_start_offset重算页号补读。"
+    ),
     "ds_list_workflow_instances": (
         "查 DS 顶层失败/运行/历史实例，一次指定页。时间是带时区的绝对启动窗口，"
         "不是失败发生窗口；上游 total 不等于已读完整数量。定义 code 可从实例详情获得。"
@@ -215,10 +218,15 @@ _DESCRIPTIONS = {
         "不能直接跳过该页中未投影记录。"
     ),
     "ds_get_workflow_instance": (
-        "读取指定 DS 运行的状态、定义版本与时间；按运行 ID 定位，不拿最新同名运行替代。"
+        "读取指定 DS 运行状态、历史定义版本与时间；不拿最新同名运行替代。"
+        "task_id=null只取运行；指定任务时取有效任务、同版本节点必要文本及依赖状态。"
+        "有效任务不含旧尝试，缺失时用分页任务列表核实；依赖状态不证明等待时长。"
+        "普通子流程按实际关联核对项目；仅已知3.4动态任务时传dynamic_sub_workflows=true，"
+        "返回子ID不等于已核实项目；项目缺失须从可信上下文核实或问用户。"
     ),
     "ds_list_task_instances": (
         "读指定 DS 运行的任务及历史尝试，一次指定页；任务 ID、所属运行与重试字段分别保留。"
+        "projection_omitted>0须减小page_size，按page_start_offset重算页号补读。"
     ),
 }
 _FIELDS = (

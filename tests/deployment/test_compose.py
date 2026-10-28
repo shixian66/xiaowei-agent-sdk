@@ -22,6 +22,8 @@ import yaml
 from tests.deployment.conftest import docker
 from tests.deployment.test_release import APP_IMAGE, POSTGRES_IMAGE, ROOT, package
 
+from xiaowei.storage import APP_SCHEMA_VERSION
+
 POSTGRES_RUNTIME_IMAGE = (
     "postgres:16.15-bookworm@sha256:"
     "efedf3595f1d6f415c08568ba171029bf54052e754cc9f030e3f2412b21f3d67"
@@ -540,7 +542,10 @@ def test_formal_compose_entry_success_failure_network_and_signal(
             "upgrade",
             "--bind-existing-digest-key",
         )
-        assert restored.returncode == 0 and restored.stdout.strip() == "storage version 16"
+        assert (
+            restored.returncode == 0
+            and restored.stdout.strip() == f"storage version {APP_SCHEMA_VERSION}"
+        )
         upgrade_process = None
 
         wrong_key = "wrong digest $ # space ' quote"

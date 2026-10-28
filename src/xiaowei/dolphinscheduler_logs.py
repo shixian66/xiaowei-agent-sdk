@@ -18,7 +18,7 @@ class LogSample:
 
 _SECRET_BYTES = re.compile(
     rb"(?i)([\"']?\b(?:password|passwd|pwd|token|secret|api[_-]?key|authorization)\b[\"']?\s*[:=]\s*)"
-    rb"(?:\"(?:\\.|[^\"\\])*\"|'(?:\\.|[^'\\])*'|[^\s,;&]+)"
+    rb"(?:\"(?:\\[\s\S]|[^\"\\])*+(?:\"|\\?$)|'(?:\\[\s\S]|[^'\\])*+(?:'|\\?$)|[^\s,;&]+)"
 )
 _AUTH_BYTES = re.compile(rb"(?i)\b(Bearer|Basic)\s+[A-Za-z0-9+/=_\-.]+")
 _URL_BYTES = re.compile(rb"(\b[a-zA-Z][a-zA-Z0-9+.-]*://)[^\s/@]+:[^\s/@]+@")
@@ -69,12 +69,21 @@ async def search_log(
         )
         positions: list[tuple[int, int]] = []
         count = 0
-        for match in pattern.finditer(raw):
-            count += 1
-            if len(positions) < maximum:
-                positions.append((match.start(), match.end()))
-            if count % 4096 == 0:
-                await asyncio.sleep(0)
+        next_start = 0
+        # Yield on bytes scanned, including no-match input; overlap preserves literal boundaries.
+        for offset in range(0, len(raw), 65_536):
+            start = max(offset, next_start)
+            end = min(offset + 65_536, len(raw))
+            window = raw[start : min(len(raw), end + len(text.encode()) - 1)]
+            for match in pattern.finditer(window):
+                position, match_end = start + match.start(), start + match.end()
+                if position >= end:
+                    break
+                count += 1
+                next_start = match_end
+                if len(positions) < maximum:
+                    positions.append((position, match_end))
+            await asyncio.sleep(0)
         counts[text] = count
         representatives.append(positions)
         await asyncio.sleep(0)

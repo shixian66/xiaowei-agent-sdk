@@ -387,3 +387,44 @@ async def test_quoted_credentials_are_excluded_from_all_persisted_audiences(logs
     for value in row:
         assert "credential-should-not-leak" not in value and "json-token" not in value
         assert "42S02" in value
+
+
+async def test_truncated_quoted_secret_masks_the_entire_accepted_prefix(logs):
+    logs.control.body = b'password="first secret-tail never closes SQLState 42S02'
+    result = await logs.invoke("ds_read_task_log", line=1, byte_offset=0, line_count=1)
+    assert "secret-tail" not in result.model_content
+    assert "never closes" not in result.model_content
+
+
+async def test_search_yields_before_scanning_all_no_match_bytes(monkeypatch):
+    from xiaowei import dolphinscheduler_logs as module
+
+    # A pending turn cancellation must be observed during a no-match scan too.
+    calls = []
+    original = module.re.compile
+
+    class Pattern:
+        def __init__(self, value):
+            self.value = value
+
+        def finditer(self, data):
+            calls.append(len(data))
+            return self.value.finditer(data)
+
+    monkeypatch.setattr(module.re, "compile", lambda *args: Pattern(original(*args)))
+    task = asyncio.create_task(
+        module.search_log(b"x" * (2 * 1024 * 1024), search(terms=["not-present"]))
+    )
+    asyncio.get_running_loop().call_soon(task.cancel)
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert sum(calls) < 2 * 1024 * 1024
+
+
+async def test_literal_search_counts_boundary_and_overlapping_chunk_hits_once():
+    from xiaowei.dolphinscheduler_logs import search_log
+
+    raw = b"x" * (65536 - 2) + b"abcabcabc" + b"x" * 65536 + b"abc"
+    snippets, counts = await search_log(raw, search(terms=["abcabc", "abc"], context_lines=0))
+    assert counts == {"abcabc": 1, "abc": 4}
+    assert any("abcabcabc" in item["text"] for item in snippets)

@@ -178,11 +178,14 @@ async def actions(
             url, ds_requests = stack.enter_context(
                 ds_api(respond=ds_response if request.param == "ds-log" else None)
             )
-            sources = [DSConfig.model_validate(source(base_url=url))]
+            sources = [
+                DSConfig.model_validate(source(cluster, url + "/" + cluster))
+                for cluster in ("ds-a", "ds-b")
+            ]
             ds = DolphinScheduler(sources, clock)
             ds_contracts, ds_policies = ds_catalog(sources, dict.fromkeys(AUDIENCES, 20_000))
             ds_tools = frozenset(DS_TOOLS)
-            ds_targets = frozenset({"ds-b", "dolphinscheduler"})
+            ds_targets = frozenset({"ds-a", "ds-b", "dolphinscheduler"})
         shared = SHARED | ds_tools
         access = StaticAccess(
             AccessConfig(policy_version="w5", grants={A: shared | {WRITE}, B: shared | {WRITE}}),
@@ -511,3 +514,41 @@ async def test_native_pause_releases_raw_log_and_restores_nonzero_usage_without_
         ) == [("completed",)]
         assert await env.rows("SELECT ds_clusters FROM xiaowei_session") == [(["ds-b"],)]
     assert sum(r[0].endswith("download-log") for r in actions.ds_requests) == 1
+
+
+@pytest.mark.parametrize("actions", ["ds"], indirect=True)
+async def test_ds_e6_and_d4_e2_share_group_selection_and_clarify_old_object(actions):
+    from tests.sdk_core.test_app import clarify
+    from tests.sdk_core.test_dolphinscheduler_runtime import ds_answer, list_failed
+
+    env = actions.env
+    async with running(env, max_reply_chars=3500) as group:
+        for number, (actor, cluster, message) in enumerate(
+            ((A, "ds-a", "查 DS A 昨晚失败任务"), (B, "ds-b", "B 上也这样吗"))
+        ):
+            env.scripts.add(
+                attributed(actor, message),
+                tool_call("ds_select_clusters", clusters=[cluster]),
+                list_failed(cluster),
+                ds_answer,
+            )
+            await group.ask(message, sender=actor, message_id=f"om_ds_set_{number}")
+            assert await env.rows("SELECT ds_clusters FROM xiaowei_session") == [([cluster],)]
+        env.scripts.add(attributed(A, "今天呢"), list_failed("ds-b"), ds_answer)
+        await group.ask("今天呢", sender=A, message_id="om_ds_follow")
+        assert [r[0].split("/")[1] for r in actions.ds_requests] == ["ds-a", "ds-b", "ds-b"]
+        before = len(actions.ds_requests)
+        env.scripts.add(
+            attributed(B, "刚才那个恢复了吗"), clarify("请明确 A 的原实例，还是 B 的实例？")
+        )
+        await group.ask("刚才那个恢复了吗", sender=B, message_id="om_ds_conflict")
+        assert len(actions.ds_requests) == before
+        assert await env.rows("SELECT ds_clusters FROM xiaowei_session") == [(["ds-b"],)]
+    from tests.sdk_core.test_feishu_render import text_parts
+
+    visible = "\n".join(
+        message if isinstance(message, str) else "\n".join(text_parts(message, folded=False))
+        for _, message in group.outbox.sent
+    )
+    assert "生产 B" in visible and "ds-b" in visible
+    assert "请明确 A" in visible

@@ -33,6 +33,8 @@ from tests.deployment.test_compose import (
 )
 from tests.deployment.test_release import image_archive
 
+from xiaowei.storage import APP_SCHEMA_VERSION
+
 ROOT = Path(__file__).resolve().parents[2]
 PROBE = Path(__file__).with_name("maintenance_probe.py")
 P3_A_SHA = "9f69beba19736d293c22d50a59b50c90ac7f0d4e"
@@ -553,8 +555,13 @@ def test_different_image_upgrade_rollback_and_paired_restore(
             "storage",
             "upgrade",
         )
-        assert migrated.returncode == 0 and migrated.stdout.strip() == "storage version 16"
-        assert _pg(pg_id, "SELECT version FROM xiaowei_schema_version").stdout.strip() == "16"
+        assert (
+            migrated.returncode == 0
+            and migrated.stdout.strip() == f"storage version {APP_SCHEMA_VERSION}"
+        )
+        assert _pg(pg_id, "SELECT version FROM xiaowei_schema_version").stdout.strip() == str(
+            APP_SCHEMA_VERSION
+        )
         (active / "compose.next.yaml").replace(active / "compose.yaml")
         (active / "release.next.json").replace(active / "release.json")
         upgraded = _compose(
@@ -595,6 +602,14 @@ def test_different_image_upgrade_rollback_and_paired_restore(
             "personal:local-operator",
         ]
 
+        # Current schema DS choice must survive an isolated paired backup/restore too.
+        selected = _pg(
+            pg_id,
+            "UPDATE xiaowei_session SET ds_clusters='[\"ds-a\",\"ds-b\"]'::jsonb, "
+            "ds_selection_turn='ds-backup-turn'",
+        )
+        assert selected.returncode == 0, selected.stderr
+
         pair = host_tmp / "backup-pair"
         _install_private_directory(pair)
         _copy_preserving_mode(active / ".env", pair / "xiaowei.env")
@@ -612,6 +627,15 @@ def test_different_image_upgrade_rollback_and_paired_restore(
         assert marker.returncode == 0, marker.stderr
         restored = _restore(active, backup, "xiaowei_restore")
         assert restored.returncode == 0, restored.stderr.decode(errors="replace")
+
+        choices = docker(
+            "exec", pg_id, "psql", "-v", "ON_ERROR_STOP=1", "-Atq",
+            "-U", "xiaowei", "-d", "xiaowei_restore", "-c",
+            "SELECT count(*) FROM xiaowei_session WHERE "
+            "ds_clusters='[\"ds-a\",\"ds-b\"]'::jsonb "
+            "AND ds_selection_turn='ds-backup-turn'",
+        )
+        assert choices.returncode == 0 and int(choices.stdout.strip()) > 0
 
         restored_url = values["XW_DATABASE_URL"].rsplit("/", 1)[0] + "/xiaowei_restore"
         before_restore = active / ".env.before-restore"
@@ -851,7 +875,7 @@ def test_container_migration_v4_to_v5_to_v6_and_old_program_refusal(
         )
         assert (
             migrated_current.returncode == 0
-            and migrated_current.stdout.strip() == "storage version 16"
+            and migrated_current.stdout.strip() == f"storage version {APP_SCHEMA_VERSION}"
         )
         preserved = _pg(
             pg_id,
@@ -861,13 +885,18 @@ def test_container_migration_v4_to_v5_to_v6_and_old_program_refusal(
             "(SELECT count(*) FROM xiaowei_session WHERE owner_kind = 'group') || ':' || "
             "(SELECT count(*) FROM xiaowei_evidence) FROM xiaowei_schema_version",
         )
-        assert preserved.returncode == 0 and preserved.stdout.strip() == "16:1:1:1:2"
+        assert (
+            preserved.returncode == 0
+            and preserved.stdout.strip() == f"{APP_SCHEMA_VERSION}:1:1:1:2"
+        )
 
         _replace_app_image(directory, runtime_image, v5_image)
         old_upgrade = _historical_cli(directory, "storage", "upgrade")
         old_serve = _historical_cli(directory, "serve")
         assert old_upgrade.returncode == old_serve.returncode == 1
-        assert _pg(pg_id, "SELECT version FROM xiaowei_schema_version").stdout.strip() == "16"
+        assert _pg(pg_id, "SELECT version FROM xiaowei_schema_version").stdout.strip() == str(
+            APP_SCHEMA_VERSION
+        )
 
         restored = _restore(directory, pre_v6, "xiaowei_v5_rollback")
         assert restored.returncode == 0, restored.stderr.decode(errors="replace")
@@ -1036,8 +1065,13 @@ def test_feishu_users_upgrade_rollback_restores_the_config_the_old_image_reads(
             "storage",
             "upgrade",
         )
-        assert migrated.returncode == 0 and migrated.stdout.strip() == "storage version 16"
-        assert _pg(postgres_id, "SELECT version FROM xiaowei_schema_version").stdout.strip() == "16"
+        assert (
+            migrated.returncode == 0
+            and migrated.stdout.strip() == f"storage version {APP_SCHEMA_VERSION}"
+        )
+        assert _pg(postgres_id, "SELECT version FROM xiaowei_schema_version").stdout.strip() == str(
+            APP_SCHEMA_VERSION
+        )
         switched = _run_block(blocks["switch"], shims, log)
         assert switched.returncode == 0, switched.stderr
 

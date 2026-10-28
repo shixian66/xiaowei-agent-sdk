@@ -61,7 +61,11 @@ def protocol(version, *, dependent=False, missing_events=False, dynamic=False):
                 "taskDefinitionVersion": 1,
                 "taskType": "DEPENDENT"
                 if dependent
-                else ("SUB_PROCESS" if version == "3.1.8" else "SUB_WORKFLOW"),
+                else (
+                    "DYNAMIC"
+                    if dynamic
+                    else ("SUB_PROCESS" if version == "3.1.8" else "SUB_WORKFLOW")
+                ),
                 "retryTimes": 0,
                 "startTime": "2026-10-28 00:35:00",
                 "endTime": "2026-10-28 00:40:00",

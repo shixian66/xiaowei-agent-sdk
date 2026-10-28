@@ -72,8 +72,16 @@ def ds_api(*, fail=False, respond=None):
                             "id": 701,
                             "name": "orders_failed",
                             "state": "FAILURE",
-                            "processDefinitionCode": 99,
-                            "processDefinitionVersion": 2,
+                            (
+                                "workflowDefinitionCode"
+                                if "workflow-instances" in parsed.path
+                                else "processDefinitionCode"
+                            ): 99,
+                            (
+                                "workflowDefinitionVersion"
+                                if "workflow-instances" in parsed.path
+                                else "processDefinitionVersion"
+                            ): 2,
                             "startTime": "2026-10-27 20:01:00",
                             "endTime": "2026-10-27 20:02:00",
                         },

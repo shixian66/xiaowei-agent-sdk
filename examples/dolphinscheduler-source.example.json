@@ -1,0 +1,11 @@
+{
+  "cluster_id": "ds-pre",
+  "description": "DS 预发；请按实际用途填写",
+  "version": "3.4.0",
+  "api_base_url": "https://ds-pre.example.internal/dolphinscheduler",
+  "token_ref": "env:XW_DS_PRE_TOKEN",
+  "time_zone": "Asia/Shanghai",
+  "timeout_seconds": 15,
+  "max_response_bytes": 1048576,
+  "max_log_bytes": 16777216
+}
