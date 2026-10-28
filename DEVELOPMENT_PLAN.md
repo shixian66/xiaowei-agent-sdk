@@ -42,7 +42,7 @@ P0–P3 是最初 StarRocks 产品的交付分层；后续增量复用其基础�
 
 ## 4. P1：双入口查询与 MCP 基础
 
-P1-A 建立真 Runner、Model Profile、受治理工具、Evidence 和 SDK Session；P1-B 接 StarRocks Adapter／SQLGuard、Web 与飞书及请求／交付记录。详细依据见 [P1-A](docs/superpowers/plans/2026-09-29-p1a-sdk-governed-core.md) 和 [P1-B](docs/superpowers/plans/2026-09-30-p1b-starrocks-dual-entry.md)，当前入口和存储不恢复旧 Runtime、Worker 或 SQLite 后端。
+P1-A 建立真 Runner、Model Profile、受治理工具、Evidence 和 SDK Session；P1-B 接 StarRocks Adapter／SQLGuard、Web 与飞书及请求／交付记录。详细依据见 [P1-A](docs/superpowers/plans/2026-09-29-p1a-sdk-governed-core.md) 和 [P1-B](docs/superpowers/plans/2026-09-30-p1b-starrocks-dual-entry.md)，当前入口和存储不恢复旧 Runtime、Worker 或 SQLite 后端；离线反例清单继续沿已链接的 P1-B 计划核对。
 
 退出须同时覆盖：
 
@@ -81,7 +81,7 @@ P1-A 建立真 Runner、Model Profile、受治理工具、Evidence 和 SDK Sessi
 
 A/B 交付固定 SHA 的 amd64 离线包、两容器 Compose、配置预检、初始化／迁移、启动／停机、显式清理及配套备份／隔离恢复。升级保留配置、稳定密钥和卷；当前 v4 故障按前向修复保留生产发送／Action 账本，历史恢复实验不授权把生产库倒回副作用发生之前。
 
-C 按各源记录：目标版本、TLS、只读账号、当前权限、资源保护、模型／数据外发范围、真实 Web／飞书任务、失败路径和用户接受。StarRocks 的正常／超限资源对照、TiDB 的获准轻量检查分别遵循各自计划，不能混用。既有公司安装、healthy 和部分使用反馈只覆盖记录的版本／场景。
+C 按各源记录：目标版本、TLS、只读账号、当前权限、资源保护、模型／数据外发范围、真实 Web／飞书任务、失败路径和用户接受。DBA 资源组／大查询限制及权限须按目标类型和版本核实，未满足该目标既定保护门槛时不能开放业务查询。StarRocks 的正常／超限资源对照、TiDB 的获准轻量检查分别遵循各自计划，不能混用。既有公司安装、healthy 和部分使用反馈只覆盖记录的版本／场景。
 
 样例包括正常查询、连续追问、诊断、无数据、危险／越权拒绝、超时、重投、发送失败与重启。另做隔离恢复及请求编号排障，确认不重放中断任务、日志不携敏感内容。每项保留精确 SHA、配置摘要、命令、证据与未触发分支；不索取凭据正文。P1/P2/P2.5 的真实退出条件分别补齐，不用一个总“部署成功”替代。
 
@@ -129,6 +129,6 @@ T8 不新增执行权限或评估模式；普通查询不强制 EXPLAIN，DML／
 | S3 | 子运行定位与带时间的等待依据 | 两版实际字段／HTTP 上界、父事实与关联缺口同时保留；等待时长由带时间日志证明，不能只靠 dependentResult 状态 |
 | S4 | 同一 Agent 与正式入口 D1–D4 | 成功与关键失败、环境切换／比较／指代澄清、答案质量及调用／耗时／用量；真实 Agent 与离线治理分开验收 |
 
-按 S1→S2→S3→S4 实施；不新增定义目录、下载信号量、HTTP 轮内计数器或第二 Loop。DS 专属选择边界不改数据库行为，SDK 表不改；定时自动集合本期保持不含 DS。C1 四项源身份绑定、C2 删除多余选择字段的决定已进入架构，不再作为未决产品问题。
+按 S1→S2→S3→S4 实施；不新增定义目录、下载信号量、HTTP 轮内计数器或第二 Loop。DS 专属选择边界不改数据库行为，SDK 表不改；定时自动集合本期保持不含 DS。C1 四项源身份绑定、C2 删除多余选择字段的决定已进入架构，不再作为未决产品问题。显式 diagnose／带图轮暴露 DS 的源码与契约冲突另见 [handoff 待决项](AGENT_HANDOFF.md#ds-diagnose-contract-gap)，不因 S1–S4 离线通过而关闭，也不由本次文档批准该用途扩展。
 
 阶段退出仍需获准真实模型、两版公司 API／业务码、每源冒烟、服务端长日志负载与脱敏延迟、正式 Web／飞书和用户接受。用户选择本地仅做离线开发，不能用合成 HTTP、脚本模型或 CI 关闭这些实战项。合并、发行、公司部署和用户验收分别记录。

@@ -8,7 +8,7 @@
 
 | 项目 | 本次核对事实 |
 | --- | --- |
-| 仓库／产品基线 | [shixian66/xiaowei-agent-sdk](https://github.com/shixian66/xiaowei-agent-sdk)，fetch 后 `origin/main@7565c6a73e863fd791878990d0fd23bc3f33560e`，包含 DS PR #145 |
+| 仓库／产品基线 | [shixian66/xiaowei-agent-sdk](https://github.com/shixian66/xiaowei-agent-sdk)，`origin/main@7565c6a73e863fd791878990d0fd23bc3f33560e`，包含 DS PR #145；2026-10-29 另以只读 `git ls-remote origin refs/heads/main` 确认远端同 SHA，未前进 |
 | 当前任务 | 只修订四份根文档，使范围、实现状态、用法和路线与当前主线一致；分支 `codex/docs-architecture-alignment` 从上述主线建立，不改变产品或权限契约 |
 | 隔离与已有工作 | 复用干净隔离工作树；桌面旧 checkout `b89d4ee` 及其三份文档／其他任务未提交材料保持原样，不把旧 checkout 当最新实现 |
 | 源码／入口 | 唯一产品包 `src/xiaowei`；`xiaowei` 与 `python -m xiaowei` 为正式入口。旧 Runtime、Worker、专属测试／迁移入口已移除，兼容旧回答和已绑定交付的路径仍保留 |
@@ -37,7 +37,7 @@
 
 ## 3. 当前计划与下一项工作
 
-四份根文档已按上述产品基线完成对齐和下述文档检查，交付本地文档分支供审阅。下一项由用户选择业务工作或公司验收，不根据旧段落中的“下一步推送／开始开发”自动执行。新增功能、模型／数据授权、发行和部署各按当前明确指令办理。
+四份根文档按上述产品基线对齐；针对 `4a91fea` 的独立审查修正文档误写及遗漏，检查见 §5。DS 在显式 diagnose／带图轮中的用途扩展仍有下述源码与契约冲突，本次仅修文档，未改执行路径。下一项先由用户决定这一用途边界；其他业务工作或公司验收仍由用户选择，不根据旧段落中的“下一步推送／开始开发”自动执行。新增功能、模型／数据授权、发行和部署各按当前明确指令办理。
 
 ### 主线合入索引
 
@@ -67,6 +67,21 @@ PR base `916f57a26d2bac201b6772a48016f194af7d586e`，head `bba19d4ba72c43524211f
 
 用户明确本地只做离线开发，公司模型与 DS 隔离。下一步需由用户在公司按原样例验收：环境自然澄清／切换、失败定位、长日志中间数据库错误、子运行／等待／恢复追问、每源权限／时区／业务码、服务器大日志负载及脱敏延迟、飞书群实收。当前 CI 只能关闭相应离线项，不证明 Agent 自主诊断达标。
 
+<a id="ds-diagnose-contract-gap"></a>
+
+### 源码与契约冲突：DS 在显式诊断／带图轮中的用途待决
+
+**B1 源码冲突，仍未关闭。** 产品基线 `7565c6a` 的 [runtime.py](src/xiaowei/runtime.py) 第1442行在 diagnose 中登记 `ds | selection`；与父提交比较，确为 DS PR #145 新增。图片及 TXT/MD 入口复用 diagnose（[feishu.py](src/xiaowei/feishu.py) 第862、922行），故当前获准 DS 工具可能在这些轮次发出实时 API 请求或下载日志。DS 计划没有批准这一用途扩展；[群输入计划](docs/superpowers/plans/2026-10-22-feishu-input-presentation-repair.md) 第40、117、121、135行仍要求带图轮不做实时查询，并说明“本轮仅分析所附图片，未做实时查询”。既有结构／计划／审计取证与[历史计划](docs/superpowers/plans/2026-10-26-operations-history-and-knowledge.md)第111行的 query/diagnose 历史能力有独立依据，不能据此推导 DS 同样获准。以上行号均对应产品基线，文档修订未改源码。
+
+`4a91fea` 将该源码事实写成已批准能力的表述已撤回；不代表 DS 零 I/O 已由代码实现。仅诊断或图片入口不能作为当前 DS 隔离保证。现有 C1/C2、范围锁定、权限、HTTP 取舍及读取失败语义不变。
+
+待用户选择：
+
+- **建议 b，维持既有用途边界：** 后续独立代码切片把 `ds | selection` 移出 diagnose，普通 query 的 DS 诊断任务保持。验收显式诊断及图片／文件入口不暴露 DS 工具，强行调用时零 DS I/O，普通 DS D1–D4 不退化；不取消已有数据库诊断或历史能力。
+- **备选 a，批准用途扩展：** 明确 DS 可用于显式诊断及带图轮，再同步架构、输入计划／说明和对应 Agent／治理验收；当前“未做实时查询”的说明不能在实际读过 DS 后使用。此选择扩展已批准用途，不能仅凭工具只读或已有授权自动采用。
+
+本次只记录可审阅的取舍，没有产品代码修改或默认批准；真实模型与公司服务仍不调用。
+
 ### TiDB、历史与安全巡检
 
 - **TiDB A/B/C：** 已合入；精确 v6.5.5／v7.5.3 本地 TiUP、15 个诊断来源、结构／视图／计划／锁等待及正式 Web 真实库配脚本模型有证据。公司 3 集群、TiFlash、TLS／资源／权限、模型 T1–T8、真实渠道及用户接受仍按[公司清单](docs/superpowers/plans/2026-10-24-tidb-query-diagnosis.md#tidb-company-acceptance)逐项判断。不能再将 PR #137 写成未合并候选。
@@ -92,6 +107,7 @@ PR base `916f57a26d2bac201b6772a48016f194af7d586e`，head `bba19d4ba72c43524211f
 | CloudCanal | #134 `b208b2c` 合入一期计划和独立 CC0 脚本，产品未接入；用户在 6.4.0.2 公司环境确认只读账号链接、工具／错误／分页／日志语义后复核，再获授权推进 CC1。用法见 [README](README.md#cloudcanal-cc0) |
 | Node 核心巡检 D | 暂停、未实现；C 的通用 Agent 能调查不代表固定 Node 样例已验证，不自动重启 D |
 | 监控曲线 D4 | 暂缓，协议核验和候选方案留在[交付计划](docs/superpowers/plans/2026-10-14-result-delivery-documents.md)，仅在明确重启时接续 |
+| SQL 大结果限额调整 | 继续暂缓，保留当前执行／投影／交付限额；不因展示整理提高额度或关闭容量缺口 |
 | Grafana 密码私聊 | 已批准独立设计、未实现；当前仍由管理员在 Grafana UI 配置 |
 | I2／Wiki／通用历史扩展 | I2 按 I3 证据决定；Wiki 仅调研；定时读取群交互历史的 B1(b) 未批准 |
 
@@ -117,6 +133,10 @@ PR base `916f57a26d2bac201b6772a48016f194af7d586e`，head `bba19d4ba72c43524211f
 | 发行／公司运行 | 手动 publish-amd64 发行；历史公司916f57a/schema16启动回报 | 当前主线7565c6a/schema17未在本任务发行／部署；服务器现状、故障恢复及用户接受不能从 healthy 推定 |
 
 关键遗漏继续显式保留：
+
+- 审批回执修复未证实“首轮未形成原生暂停”的生产唯一原因；#142 合入不关闭该缺口。公司仍须按[回执修复计划 §8.5](docs/superpowers/plans/2026-10-20-production-dialogue-answer-repair.md#approval-task-delivery-repair)完成实际暂停／恢复样例，完成判据见该计划第489行。
+- 监控选择器组合失败后的子集重试不做语义推导，是已接受的边界，不能从当前去重记录推定会阻止所有语义等价请求；此取舍保留，不新增规则。
+- P4 真实模型仍须验证遇到精确直查的可修正拒绝后不偷换候选工具；当前只靠工具／Skill 指引，离线错误路径不证明 Agent 遵守。任务规则见 [ARCHITECTURE §6](ARCHITECTURE.md#6-只读查询保护)，评测沿原 P4 样例。
 
 - StarRocks 审计时间按源写入时区，普通 naive DATETIME 不自动补偏移；公司目标 `CURDATE()/NOW()`、时区与既有展示口径须实测。当前窗口展示的北京时间口径限制及旧历史错误偏移不能靠排版追问自动重取／改写。
 - SDK 回答改写失败可能被安全日志归为 `sdk_configuration`、用户仍见 `model_failed`；OpenAI 协议族 `conversation_locked` 内置重试不经过应用429/503策略，Vertex不触发。这些记录未被本次文档修订关闭。
@@ -144,9 +164,9 @@ CI 实际测试 PR 合并提交 `52911c87e7e9adb9fd35c2c86caf2c03b6de5adc`，tre
 
 ### 本次四文档对齐
 
-只改 ARCHITECTURE、AGENT_HANDOFF、README、DEVELOPMENT_PLAN，产品 src/tests、配置、依赖、迁移和 CI 不改。按主线源码核对配置／SDK调用、Session与源绑定、数据库方言、DS／监控失败、历史快照、审批与交付、实例锁及发行路径；按 Git／GitHub 修正合入状态。
+只改 ARCHITECTURE、AGENT_HANDOFF、README、DEVELOPMENT_PLAN，产品 src/tests、配置、依赖、迁移和 CI 不改。按主线源码核对配置／SDK调用、Session与源绑定、数据库方言、DS／监控失败、历史快照、审批与交付、实例锁及发行路径；按 Git／GitHub 修正合入状态。 独立审查 `4a91fea` 后，撤回 B1 的文档追认、单列未修复的源码冲突，补回 V1 的四项缺口和 V2 的 P3 开放门槛；V3 恢复已批准但未实现的 tracing 设计，V4 已只读确认远端未前进。DS Evidence 归属措辞和 P1 离线反例入口也已澄清；未新增执行限制或豁免验收。
 
-检查命令 `.venv/bin/python -m pytest -q tests/security/test_docs_command_consistency.py tests/security/test_workflow_policy.py -p no:cacheprovider`：**30 passed**；临时检查脚本核对四文档的188处出链、仓内163处入链及其中208处锚点，DS的19个变体编号完整，错误为0；`git diff --check` 通过。两个正式入口的 `--help` 均以0退出，不加载业务配置或连接真实服务。测试日志在 `/private/tmp/xw-root-docs-tests.log`；链接检查脚本在 `/private/tmp/xw_check_root_docs.py`，仅作本机复核材料，不新增仓库工具或测试。产品 src/tests 无变化，未重复执行产品全量、真实模型或公司服务检查；既有完整 CI 不冒充本次文档检查。
+审查修订后重新执行 `.venv/bin/python -m pytest -q tests/security/test_docs_command_consistency.py tests/security/test_workflow_policy.py -p no:cacheprovider`：**30 passed**，日志为 `/private/tmp/xw-root-docs-review-fixes-tests.log`。临时脚本 `/private/tmp/xw_check_root_docs.py` 核对199处出链、仓内163处入链及其中215处锚点，DS的19个变体编号完整，错误为0；`git diff --check` 通过。上一文档候选两个正式入口的 `--help` 均以0退出，证据仍在 `/private/tmp/xw-root-docs-tests.log`；入口未改，本次未重复运行。临时材料只供本机复核，不新增仓库工具或测试。产品 src/tests 无变化，未重复执行产品全量、真实模型或公司服务检查；既有完整 CI 不冒充本次文档检查。
 
 ### 历史证据的保存方式
 
