@@ -30,8 +30,9 @@ async def adapter(monkeypatch):
 
 
 async def transport(adapter, handler):
+    headers = dict(adapter.client.headers)
     await adapter.client.aclose()
-    adapter.client = httpx2.AsyncClient(transport=httpx2.MockTransport(handler))
+    adapter.client = httpx2.AsyncClient(headers=headers, transport=httpx2.MockTransport(handler))
 
 
 @pytest.mark.parametrize(
@@ -66,7 +67,7 @@ async def test_ds_transport_failure_classification_no_retry(adapter, exc, reason
         (404, {}, "ds_object_missing"),
         (302, {}, "ds_unavailable"),
         (500, {}, "ds_unavailable"),
-        (200, {"code": 10018, "msg": "private-error"}, "ds_invalid_response"),
+        (200, {"code": 10018, "msg": "private-error"}, "ds_object_missing"),
         (200, [], "ds_invalid_response"),
     ],
 )
@@ -213,16 +214,33 @@ async def test_http200_false_is_not_numeric_success_code(adapter):
         await adapter._json("/projects", {})
 
 
-async def test_unexpected_compression_is_rejected_before_decoding_body(adapter):
+@pytest.mark.parametrize("kind", ["metadata", "log"])
+async def test_identity_header_and_compression_rejection_before_body_decoding(adapter, kind):
     class Compressed(httpx2.AsyncByteStream):
         async def __aiter__(self):
             raise AssertionError("must not decode unbounded compressed body")
             yield b""  # pragma: no cover
 
-    await transport(
-        adapter,
-        lambda _: httpx2.Response(200, headers={"Content-Encoding": "gzip"}, stream=Compressed()),
-    )
+    def respond(request):
+        assert request.headers["Accept-Encoding"] == "identity"
+        return httpx2.Response(200, headers={"Content-Encoding": "gzip"}, stream=Compressed())
+
+    await transport(adapter, respond)
+    received = []
     with pytest.raises(DolphinSchedulerReadError) as caught:
-        await adapter._json("/projects", {})
+        if kind == "metadata":
+            await adapter._json("/projects", {})
+        else:
+            from xiaowei.dolphinscheduler import DolphinScheduler
+
+            await DolphinScheduler._download(adapter, 11, 801, 4096, received.append)
     assert caught.value.reason == "ds_invalid_response"
+    assert received == []
+
+
+def test_detail_schema_has_no_dynamic_mode_and_size_limits_are_fixed():
+    from xiaowei.dolphinscheduler import DetailArgs
+
+    assert "dynamic_sub_workflows" not in DetailArgs.model_fields
+    assert "max_response_bytes" not in DSConfig.model_fields
+    assert "max_log_bytes" not in DSConfig.model_fields

@@ -3,7 +3,6 @@
 import json
 
 from xiaowei.dolphinscheduler_logs import redact_bytes
-from xiaowei.governance import DolphinSchedulerReadError
 
 
 def _dependency_state(value: object) -> bool:
@@ -13,57 +12,65 @@ def _dependency_state(value: object) -> bool:
 
 
 def dependency_fields(task: dict[str, object], token: str = "") -> dict[str, object]:
-    """3.1.8 是 JSON 字符串；3.4.0 是 TaskInstanceDependentDetails 的上下文列表。"""
+    """局部状态未知只省略该项；原始参数不进入诊断投影。"""
 
-    def visible(value: str, limit: int = 200) -> str:
-        return redact_bytes(value.encode(), token).decode(errors="replace")[:limit]
+    def visible(value: str) -> str:
+        return redact_bytes(value.encode(), token).decode(errors="replace")[:200]
 
     result: dict[str, object] = {}
-    omitted = 0
+    gaps, omitted = [], 0
     legacy = task.get("dependentResult")
     if legacy:
         try:
             parsed = json.loads(legacy) if isinstance(legacy, str) else legacy
         except ValueError:
-            raise DolphinSchedulerReadError("ds_invalid_response") from None
-        if not isinstance(parsed, dict):
-            raise DolphinSchedulerReadError("ds_invalid_response")
-        if any(not _dependency_state(v) for v in parsed.values()):
-            raise DolphinSchedulerReadError("ds_invalid_response")
-        omitted += max(0, len(parsed) - 32)
-        result["dependentResult"] = {
-            visible(str(k)): (visible(str(v), 32) if v is not None else None)
-            for k, v in list(parsed.items())[:32]
-        }
+            parsed = None
+        if isinstance(parsed, dict):
+            states = {}
+            omitted += max(0, len(parsed) - 32)
+            for key, value in list(parsed.items())[:32]:
+                if _dependency_state(value):
+                    states[visible(str(key))] = visible(str(value)) if value is not None else None
+                else:
+                    omitted += 1
+                    gaps.append("依赖结果含未识别状态，该项未核实")
+            result["dependentResult"] = states
+        else:
+            gaps.append("旧版依赖结果结构未核实")
     current = task.get("taskInstanceDependentResults")
     if current is not None:
         if not isinstance(current, list):
-            raise DolphinSchedulerReadError("ds_invalid_response")
-        if any(
-            not isinstance(row, dict) or not _dependency_state(row.get("dependentResult"))
-            for row in current
-        ):
-            raise DolphinSchedulerReadError("ds_invalid_response")
-        omitted += max(0, len(current) - 32)
-        fields = {
-            "contextType",
-            "projectCode",
-            "workflowDefinitionCode",
-            "taskDefinitionCode",
-            "dateCycle",
-            "dependentResult",
-        }
-        result["taskInstanceDependentResults"] = [
-            {
-                k: visible(v) if isinstance(v, str) else v
-                for k, v in row.items()
-                if k in fields and (v is None or isinstance(v, (str, int, bool)))
+            gaps.append("依赖上下文列表结构未核实")
+        else:
+            omitted += max(0, len(current) - 32)
+            rows = []
+            fields = {
+                "contextType",
+                "projectCode",
+                "workflowDefinitionCode",
+                "taskDefinitionCode",
+                "dateCycle",
+                "dependentResult",
             }
-            for row in current[:32]
-            if isinstance(row, dict)
-        ]
+            for row in current[:32]:
+                if not isinstance(row, dict) or not _dependency_state(row.get("dependentResult")):
+                    omitted += 1
+                    gaps.append("依赖结果含未识别状态或结构，该项未核实")
+                    continue
+                shown = {}
+                for key, value in row.items():
+                    if key not in fields:
+                        continue
+                    if value is None or isinstance(value, (str, int, bool)):
+                        shown[key] = visible(value) if isinstance(value, str) else value
+                    else:
+                        gaps.append("依赖上下文字段结构未核实，已省略该字段")
+                rows.append(shown)
+            result["taskInstanceDependentResults"] = rows
     if omitted:
         result["dependency_results_omitted"] = omitted
+    if gaps:
+        result["dependency_gaps"] = list(dict.fromkeys(gaps))
     return result
 
 
@@ -74,11 +81,18 @@ def dag_projection(
     if not isinstance(dag, dict):
         return [], [], {"gaps": ["本次运行历史 DAG 未提供，未用当前定义代替"]}
     definitions = dag.get("taskDefinitionList")
-    relation_key = "processTaskRelationList" if version == "3.1.8" else "workflowTaskRelationList"
-    relations = dag.get(relation_key)
-    if not isinstance(definitions, list) or not isinstance(relations, list):
-        raise DolphinSchedulerReadError("ds_invalid_response")
-    ordered = definitions
+    relations = dag.get(
+        "processTaskRelationList" if version == "3.1.8" else "workflowTaskRelationList"
+    )
+    gaps = []
+    node_total = len(definitions) if isinstance(definitions, list) else None
+    edge_total = len(relations) if isinstance(relations, list) else None
+    if not isinstance(definitions, list):
+        gaps.append("历史 DAG 节点列表结构未核实")
+        definitions = []
+    if not isinstance(relations, list):
+        gaps.append("历史 DAG 关联列表结构未核实")
+        relations = []
     if selected is not None:
         requested = next(
             (
@@ -91,29 +105,34 @@ def dag_projection(
             None,
         )
         if requested is not None:
-            ordered = [
+            definitions = [
                 definitions[requested],
                 *definitions[:requested],
                 *definitions[requested + 1 :],
             ]
     nodes = []
-    for row in ordered[:100]:
-        if not isinstance(row, dict):
-            raise DolphinSchedulerReadError("ds_invalid_response")
-        node = {key: row[key] for key in ("code", "version", "name", "taskType") if key in row}
-        for key, value in node.items():
-            if value is not None and (
-                (key in {"code", "version"} and type(value) is not int)
-                or (key in {"name", "taskType"} and not isinstance(value, str))
-            ):
-                raise DolphinSchedulerReadError("ds_invalid_response")
-            if isinstance(value, str):
-                node[key] = redact_bytes(value.encode(), token).decode(errors="replace")[:4096]
-        # 仅该次运行选中节点、且版本一致时附必要文本，不返回整份参数或连接信息。
+    for row in definitions[:100]:
+        if not isinstance(row, dict) or any(
+            key in row and type(row[key]) is not int for key in ("code", "version")
+        ):
+            gaps.append("历史 DAG 节点身份字段未核实，已省略该节点")
+            continue
+        node: dict[str, object] = {}
+        for key in ("code", "version", "name", "taskType"):
+            if key not in row:
+                continue
+            value = row[key]
+            if key in {"name", "taskType"}:
+                if not isinstance(value, str):
+                    gaps.append("历史 DAG 节点说明字段未核实，已省略该字段")
+                    continue
+                value = redact_bytes(value.encode(), token).decode(errors="replace")[:4096]
+            node[key] = value
         if (
             selected
+            and type(row.get("version")) is int
             and row.get("code") == selected.get("taskCode")
-            and row.get("version") == selected.get("taskDefinitionVersion")
+            and row["version"] == selected.get("taskDefinitionVersion")
         ):
             params = row.get("taskParams")
             if isinstance(params, str):
@@ -122,45 +141,35 @@ def dag_projection(
                 except ValueError:
                     params = None
             if isinstance(params, dict):
-                texts = {}
-                text_truncated = False
+                texts, truncated = {}, False
                 for key in ("sql", "rawScript", "preStatements", "postStatements"):
                     value = params.get(key)
                     if isinstance(value, str):
                         masked = redact_bytes(value.encode(), token).decode(errors="replace")
                         texts[key] = masked[:2048]
-                        text_truncated = text_truncated or len(masked) > 2048
+                        truncated = truncated or len(masked) > 2048
                 if texts:
-                    node["diagnostic_text"] = texts
-                    node["text_limit_chars"] = 2048
-                    node["text_truncated"] = text_truncated
+                    node.update(
+                        diagnostic_text=texts, text_limit_chars=2048, text_truncated=truncated
+                    )
         nodes.append(node)
-    if any(
-        not isinstance(row, dict)
-        or any(
-            type(value) is not int
-            for key, value in row.items()
-            if key in {"preTaskCode", "postTaskCode", "preTaskVersion", "postTaskVersion"}
-        )
-        for row in relations[:100]
-    ):
-        raise DolphinSchedulerReadError("ds_invalid_response")
-    edges = [
-        {
-            k: row[k]
-            for k in ("preTaskCode", "postTaskCode", "preTaskVersion", "postTaskVersion")
-            if k in row
-        }
-        for row in relations[:100]
-        if isinstance(row, dict)
-    ]
+    edges = []
+    fields = ("preTaskCode", "postTaskCode", "preTaskVersion", "postTaskVersion")
+    for row in relations[:100]:
+        if not isinstance(row, dict) or any(
+            key in row and type(row[key]) is not int for key in fields
+        ):
+            gaps.append("历史 DAG 关联身份字段未核实，已省略该关联")
+            continue
+        edges.append({key: row[key] for key in fields if key in row})
     return (
         nodes,
         edges,
         {
-            "dag_nodes_total": len(definitions),
-            "dag_relations_total": len(relations),
-            "dag_nodes_omitted": max(0, len(definitions) - 100),
-            "dag_relations_omitted": max(0, len(relations) - 100),
+            "dag_nodes_total": node_total,
+            "dag_relations_total": edge_total,
+            "dag_nodes_omitted": len(definitions) - len(nodes),
+            "dag_relations_omitted": len(relations) - len(edges),
+            "gaps": list(dict.fromkeys(gaps)),
         },
     )

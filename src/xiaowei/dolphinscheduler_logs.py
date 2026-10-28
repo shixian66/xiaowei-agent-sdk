@@ -14,6 +14,7 @@ class LogSample:
     received_bytes: int
     reached_end: bool
     truncation_reason: str | None
+    redacted_bytes: int = 0
 
 
 _SECRET_BYTES = re.compile(
@@ -27,19 +28,32 @@ _URL_BYTES = re.compile(rb"(\b[a-zA-Z][a-zA-Z0-9+.-]*://)[^\s/@]+:[^\s/@]+@")
 _MASK = bytes(value if value in {10, 13} else 42 for value in range(256))
 
 
-def _mask(match: re.Match[bytes]) -> bytes:
-    prefix = match.group(1)
-    return prefix + match.group()[len(prefix) :].translate(_MASK)
+def redact_with_count(raw: bytes, token: str) -> tuple[bytes, int]:
+    """返回等长遮蔽及实际替换字节数；CR/LF 与已是星号的字节不计入。"""
+    changed = 0
+
+    def replaced(value: bytes) -> int:
+        return len(value) - value.count(b"*") - value.count(b"\r") - value.count(b"\n")
+
+    def mask(match: re.Match[bytes]) -> bytes:
+        nonlocal changed
+        prefix = match.group(1)
+        value = match.group()[len(prefix) :]
+        changed += replaced(value)
+        return prefix + value.translate(_MASK)
+
+    if token:
+        encoded = token.encode()
+        changed += raw.count(encoded) * replaced(encoded)
+        raw = raw.replace(encoded, encoded.translate(_MASK))
+    for pattern in (_AUTH_BYTES, _URL_BYTES, _SECRET_BYTES):
+        raw = pattern.sub(mask, raw)
+    return raw, changed
 
 
 def redact_bytes(raw: bytes, token: str) -> bytes:
-    """采集时遮蔽完整值并保留原字节长度；片段从值中间开始也不会漏出后半段。"""
-    if token:
-        encoded = token.encode()
-        raw = raw.replace(encoded, encoded.translate(_MASK))
-    for pattern in (_AUTH_BYTES, _URL_BYTES, _SECRET_BYTES):
-        raw = pattern.sub(_mask, raw)
-    return raw
+    """采集时遮蔽完整值并保留原字节长度；从值中间切片也不漏出后半段。"""
+    return redact_with_count(raw, token)[0]
 
 
 def fragment(raw: bytes, start: int, end: int) -> dict[str, object]:
@@ -62,28 +76,19 @@ async def search_log(
     assert isinstance(terms, list)  # noqa: S101 - normalized arguments
     maximum, context = int(str(args["max_snippets"])), int(str(args["context_lines"]))
     counts, representatives = {}, []
+    # bytes.lower is ASCII-only and preserves offsets; avoid slow IGNORECASE prefix scans.
+    data = raw if args["case_sensitive"] else raw.lower()
     for term in terms:
         text = str(term)
-        pattern = re.compile(
-            re.escape(text.encode()), 0 if args["case_sensitive"] else re.IGNORECASE
-        )
+        needle = text.encode()
+        if not args["case_sensitive"]:
+            needle = needle.lower()
         positions: list[tuple[int, int]] = []
         count = 0
-        next_start = 0
-        # Yield on bytes scanned, including no-match input; overlap preserves literal boundaries.
-        for offset in range(0, len(raw), 65_536):
-            start = max(offset, next_start)
-            end = min(offset + 65_536, len(raw))
-            window = raw[start : min(len(raw), end + len(text.encode()) - 1)]
-            for match in pattern.finditer(window):
-                position, match_end = start + match.start(), start + match.end()
-                if position >= end:
-                    break
-                count += 1
-                next_start = match_end
-                if len(positions) < maximum:
-                    positions.append((position, match_end))
-            await asyncio.sleep(0)
+        for match in re.finditer(re.escape(needle), data):
+            count += 1
+            if len(positions) < maximum:
+                positions.append((match.start(), match.end()))
         counts[text] = count
         representatives.append(positions)
         await asyncio.sleep(0)

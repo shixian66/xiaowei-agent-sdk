@@ -145,7 +145,6 @@ def detail(task_id=None, *, dynamic=False, instance=701):
         project_code=11,
         workflow_instance_id=instance,
         task_id=task_id,
-        dynamic_sub_workflows=dynamic,
     )
 
 
@@ -288,17 +287,18 @@ async def test_cross_project_child_keeps_independent_parent_fact_and_explicit_ga
             message = env.scripts.add(
                 "DS B 701，先确认父运行再定位跨项目子流程",
                 tool_call("ds_select_clusters", clusters=["ds-b"]),
-                detail(),
                 detail(801),
                 ds_answer,
             )
             body = (await served.turn(message, "diagnose")).json()
             assert body["state"] == "completed", body
             text = json.dumps(body["delivery"], ensure_ascii=False)
+            data = json.loads(body["delivery"]["facts"][0]["result_json"])
+            assert data["records"][0]["id"] == 701 and data["tasks"][0]["id"] == 801
             assert "701" in text and "生产 B" in text
             assert "子运行" in text and "项目未核实" in text
             assert not any(path.endswith("download-log") for path, _, _ in requests)
-            assert len(requests) == 5
+            assert len(requests) == 4
             await served.finish()
 
 
@@ -364,12 +364,12 @@ async def test_workflow_dag_version_disagrees_with_instance_is_not_accepted(env,
 
 def test_dependency_results_are_status_context_not_arbitrary_payload():
     from xiaowei.dolphinscheduler_metadata import dependency_fields
-    from xiaowei.governance import DolphinSchedulerReadError
 
-    with pytest.raises(DolphinSchedulerReadError):
-        dependency_fields(
-            {"taskInstanceDependentResults": [{"dependentResult": {"password": "must-drop"}}]}
-        )
+    result = dependency_fields(
+        {"taskInstanceDependentResults": [{"dependentResult": {"password": "must-drop"}}]}
+    )
+    assert result["taskInstanceDependentResults"] == []
+    assert result["dependency_gaps"] and "must-drop" not in json.dumps(result)
 
 
 def test_requested_node_beyond_summary_cap_is_still_available():
@@ -406,7 +406,6 @@ def test_long_diagnostic_text_discloses_truncation():
 
 def test_dag_scalar_fields_cannot_carry_nested_raw_parameters():
     from xiaowei.dolphinscheduler_metadata import dag_projection
-    from xiaowei.governance import DolphinSchedulerReadError
 
     workflow = {
         "dagData": {
@@ -414,8 +413,9 @@ def test_dag_scalar_fields_cannot_carry_nested_raw_parameters():
             "workflowTaskRelationList": [],
         }
     }
-    with pytest.raises(DolphinSchedulerReadError):
-        dag_projection(workflow, "3.4.0", None, "")
+    nodes, _, coverage = dag_projection(workflow, "3.4.0", None, "")
+    assert nodes == [{"code": 999, "version": 1}]
+    assert coverage["gaps"] and "must-drop" not in json.dumps(nodes)
 
 
 @pytest.mark.parametrize("version", ["3.1.8", "3.4.0"])
@@ -466,4 +466,112 @@ async def test_dependency_projection_masks_secrets_before_truncation_and_persist
                 assert "synthetic-" not in value
                 assert "dependency-secret" not in value
                 assert "SUCCESS" in value
+            await served.finish()
+
+
+@pytest.mark.parametrize("version,dynamic", [("3.1.8", False), ("3.4.0", False), ("3.4.0", True)])
+@pytest.mark.parametrize("failure", ["business_code", "empty", "malformed"])
+async def test_child_relation_gap_keeps_verified_parent_in_one_detail_call(
+    env, monkeypatch, version, dynamic, failure
+):
+    monkeypatch.setenv("XW_TEST_DS_TOKEN", "synthetic-token")
+    base = protocol(version, dynamic=dynamic)
+
+    def respond(path, params):
+        if path.endswith("query-sub-by-parent") or path.endswith("query-dynamic-sub-workflows"):
+            if failure == "business_code":
+                return {"code": 10018, "msg": "private upstream message"}
+            return {"code": 0, "data": [] if failure == "empty" else "malformed"}
+        return base(path, params)
+
+    with ds_api(respond=respond) as (url, requests):
+        config = ServeConfig.model_validate(
+            config_values(env.port, [source(base_url=url, version=version)])
+        )
+        async with env.running(config) as served:
+            await served.page()
+            message = env.scripts.add(
+                "DS B 的父节点为何失败",
+                tool_call("ds_select_clusters", clusters=["ds-b"]),
+                detail(801, dynamic=dynamic),
+                ds_answer,
+            )
+            result = (await served.turn(message)).json()
+            assert result["state"] == "completed", result
+            data = json.loads(result["delivery"]["facts"][0]["result_json"])
+            assert data["records"][0]["id"] == 701
+            assert data["tasks"][0]["id"] == 801
+            assert data["tasks"][0]["state"] == "FAILURE"
+            assert data["tasks"][0]["taskType"] in {"SUB_PROCESS", "SUB_WORKFLOW", "DYNAMIC"}
+            assert data["coverage"]["gaps"]
+            assert "private upstream" not in json.dumps(result)
+            assert len(requests) <= (3 if dynamic else 4)
+            assert "读取未核实" not in result["delivery"]["content"]
+            await served.finish()
+
+
+def test_unknown_dependency_and_malformed_node_do_not_drop_other_facts():
+    from xiaowei.dolphinscheduler_metadata import dag_projection, dependency_fields
+
+    fields = dependency_fields({"dependentResult": '{"good":"SUCCESS","new":"FUTURE_STATE"}'})
+    assert fields["dependentResult"] == {"good": "SUCCESS"}
+    assert fields["dependency_gaps"]
+    workflow = {
+        "dagData": {
+            "taskDefinitionList": [
+                {"code": 999, "version": 1, "name": "valid", "taskParams": {"sql": "select 1"}},
+                {"code": {"unexpected": "shape"}, "version": 2},
+            ],
+            "workflowTaskRelationList": [
+                {"preTaskCode": 999, "postTaskCode": 2},
+                {"preTaskCode": []},
+            ],
+        }
+    }
+    nodes, edges, coverage = dag_projection(
+        workflow, "3.4.0", {"taskCode": 999, "taskDefinitionVersion": 1}, ""
+    )
+    assert nodes[0]["diagnostic_text"]["sql"] == "select 1"
+    assert len(nodes) == len(edges) == 1
+    assert coverage["gaps"]
+
+
+@pytest.mark.parametrize("reason", ["ds_auth", "ds_connect", "ds_timeout"])
+@pytest.mark.parametrize("dynamic", [False, True])
+async def test_child_relation_transport_failures_keep_existing_failure_path(
+    env, monkeypatch, reason, dynamic
+):
+    from xiaowei.dolphinscheduler import DSAdapter
+    from xiaowei.governance import DolphinSchedulerReadError
+
+    monkeypatch.setenv("XW_TEST_DS_TOKEN", "synthetic-token")
+    original = DSAdapter._json
+
+    async def relation_failure(self, path, params):
+        if path.endswith("query-sub-by-parent") or path.endswith("query-dynamic-sub-workflows"):
+            raise DolphinSchedulerReadError(reason)
+        return await original(self, path, params)
+
+    monkeypatch.setattr(DSAdapter, "_json", relation_failure)
+    version = "3.4.0" if dynamic else "3.1.8"
+    with ds_api(respond=protocol(version, dynamic=dynamic)) as (url, requests):
+        config = ServeConfig.model_validate(
+            config_values(env.port, [source(base_url=url, version=version)])
+        )
+        async with env.running(config) as served:
+            await served.page()
+            message = env.scripts.add(
+                "查 DS B 父任务",
+                tool_call("ds_select_clusters", clusters=["ds-b"]),
+                detail(801),
+                ds_answer,
+            )
+            result = (await served.turn(message)).json()
+            assert result["state"] == "completed", result
+            assert result["delivery"]["facts"] == []
+            assert "读取未核实" in result["delivery"]["content"]
+            assert len(requests) == 2
+            assert await env.scalar("SELECT count(*) FROM xiaowei_evidence") == 0
+            saved = await env.scalar("SELECT answer FROM xiaowei_request LIMIT 1")
+            assert reason in str(saved)
             await served.finish()

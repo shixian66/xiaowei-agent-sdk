@@ -1037,14 +1037,8 @@ class GovernedTools:
             self._catalog.policy_for(contract), {"clusters": list(clusters)}
         )
         chosen = tuple(dict.fromkeys(cast(list[str], normalized["clusters"])))
-        for cluster in chosen:
-            candidates = [
-                c
-                for c in self.allowed_contracts(ctx)
-                if c.target_id == cluster and c.tool_id in DS_READ_TOOLS
-            ]
-            if not candidates or not await self._currently_authorized(ctx.identity, candidates[0]):
-                raise ToolRejectedError("DS 环境未配置或当前不可用", code="not_allowed")
+        if await self.unavailable_dolphinscheduler(ctx, chosen):
+            raise ToolRejectedError("DS 环境未配置或当前不可用", code="not_allowed")
         runs = self.turn_runs(ctx.identity)
         if runs.ds_read_scope is not None and not set(chosen) <= set(runs.ds_read_scope):
             raise ToolRejectedError("本轮已开始 DS 取数，不能扩大集合", code="not_allowed")
@@ -1052,6 +1046,25 @@ class GovernedTools:
         self._runs[_turn_key(ctx.identity)] = replace(
             runs, ds_clusters=chosen, ds_selection_changed=True
         )
+
+    async def unavailable_dolphinscheduler(
+        self, ctx: RunContext, clusters: tuple[str, ...]
+    ) -> tuple[str, ...]:
+        """可信 DS 目录的当前授权状态；既用于选择，也用于 Agent 的缺口说明。"""
+        contracts = self.allowed_contracts(ctx)
+        unavailable = []
+        for cluster in clusters:
+            candidates = [
+                c for c in contracts if c.target_id == cluster and c.tool_id in DS_READ_TOOLS
+            ]
+            authorized = False
+            for contract in candidates:
+                if await self._currently_authorized(ctx.identity, contract):
+                    authorized = True
+                    break
+            if not authorized:
+                unavailable.append(cluster)
+        return tuple(unavailable)
 
     def load_dolphinscheduler_selection(
         self, identity: Identity, clusters: tuple[str, ...] | None

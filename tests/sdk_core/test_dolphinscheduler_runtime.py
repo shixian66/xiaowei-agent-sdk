@@ -667,7 +667,6 @@ async def test_d1_two_pages_and_d4_fresh_detail_keep_original_instance(env, monk
                     project_code=11,
                     workflow_instance_id=701,
                     task_id=None,
-                    dynamic_sub_workflows=False,
                 ),
                 ds_answer,
             )
@@ -750,3 +749,54 @@ def test_config_check_validates_ds_secret_reference_before_any_client_or_io(monk
         validate_config(config)
     monkeypatch.setenv("XW_TEST_DS_TOKEN", "synthetic-token")
     validate_config(config)
+
+
+@pytest.mark.parametrize(
+    "version,state", [("3.1.8", "NOT_A_STATE"), ("3.4.0", "NOT_A_STATE"), ("3.4.0", "STOP")]
+)
+async def test_task_state_rejected_before_io_and_can_be_corrected(env, monkeypatch, version, state):
+    monkeypatch.setenv("XW_TEST_DS_TOKEN", "synthetic-token")
+    owner = "processInstanceId" if version == "3.1.8" else "workflowInstanceId"
+
+    def respond(path, params):
+        assert params["stateType"] == ["KILL"]
+        return {
+            "code": 0,
+            "data": {"total": 1, "totalList": [{"id": 801, owner: 701, "state": "KILL"}]},
+        }
+
+    with ds_api(respond=respond) as (url, requests):
+        config = ServeConfig.model_validate(
+            config_values(env.port, [source(base_url=url, version=version)])
+        )
+
+        def tasks(status):
+            return tool_call(
+                "ds_list_task_instances",
+                cluster="ds-b",
+                project_code=11,
+                workflow_instance_id=701,
+                state=status,
+                keyword=None,
+                page_no=1,
+                page_size=10,
+            )
+
+        def corrected(call):
+            assert requests == []
+            assert "rejected" in call.input[-1]["output"]
+            return tasks("KILL")(call)
+
+        async with env.running(config) as served:
+            await served.page()
+            message = env.scripts.add(
+                "DS B 停止的任务",
+                tool_call("ds_select_clusters", clusters=["ds-b"]),
+                tasks(state),
+                corrected,
+                ds_answer,
+            )
+            result = (await served.turn(message)).json()
+            assert result["state"] == "completed", result
+            assert len(requests) == 1
+            await served.finish()

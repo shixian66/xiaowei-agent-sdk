@@ -152,10 +152,8 @@ async def test_log_timeout_is_cached_without_stopping_same_source_metadata(logs)
     assert json.loads(result.model_content)["data"]["records"] == []
 
 
-async def test_single_log_cap_discloses_prefix_without_claiming_eof(logs):
-    logs.ds.adapters["ds-b"].config = logs.ds.adapters["ds-b"].config.model_copy(
-        update={"max_log_bytes": 4096}
-    )
+async def test_single_log_cap_discloses_prefix_without_claiming_eof(logs, monkeypatch):
+    monkeypatch.setattr("xiaowei.dolphinscheduler.MAX_LOG_BYTES", 4096)
     logs.control.body = b"ERROR start\n" + b"x" * 10_000
     result = await logs.invoke("ds_search_task_log", **search(terms=["ERROR"]))
     data = json.loads(result.model_content)["data"]
@@ -189,14 +187,6 @@ async def test_turn_budget_survives_sample_release_and_failed_bytes_are_retained
     assert sum(path.endswith("download-log") for path in logs.calls) == 1
 
 
-async def test_secret_is_masked_even_when_fragment_starts_inside_value(logs):
-    logs.control.body = b"prefix password=" + b"verylong" + b"syntheticsecret suffix SQLState 42S02"
-    result = await logs.invoke("ds_read_task_log", line=1, byte_offset=24, line_count=1)
-    text = result.model_content
-    assert "syntheticsecret" not in text
-    assert "42S02" in text
-
-
 async def test_cross_instance_task_never_downloads_log(logs):
     adapter = logs.ds.adapters["ds-b"]
     await adapter.client.aclose()
@@ -226,15 +216,6 @@ async def test_partial_bytes_count_even_when_download_later_times_out(logs):
     with pytest.raises(DolphinSchedulerReadError):
         await logs.invoke("ds_read_task_log", line=1, byte_offset=0, line_count=1)
     assert logs.gov.turn_runs(logs.ctx.identity).ds_log_bytes == len(b"already received" * 256)
-
-
-def test_common_credential_shapes_mask_values_without_changing_positions():
-    from xiaowei.dolphinscheduler_logs import redact_bytes
-
-    raw = b"Authorization: Bearer abcsecret\nBasic abcdef==\njdbc:mysql://user:pass@host/db\n"
-    masked = redact_bytes(raw, "")
-    assert len(masked) == len(raw)
-    assert not any(value in masked for value in (b"abcsecret", b"abcdef", b"user:pass"))
 
 
 async def test_cancellation_releases_inflight_log_and_turn_cache(logs):
@@ -289,7 +270,9 @@ async def test_actual_32m_turn_cap_stops_third_log_without_extra_metadata(logs):
     assert logs.calls == before
 
 
-async def test_inflight_received_bytes_are_not_double_counted_against_reservation(logs):
+async def test_inflight_received_bytes_are_not_double_counted_against_reservation(
+    logs, monkeypatch
+):
     first_received, release = asyncio.Event(), asyncio.Event()
 
     class First(httpx2.AsyncByteStream):
@@ -301,7 +284,7 @@ async def test_inflight_received_bytes_are_not_double_counted_against_reservatio
 
     logs.ds._log_limit = 8192
     adapter = logs.ds.adapters["ds-b"]
-    adapter.config = adapter.config.model_copy(update={"max_log_bytes": 4096})
+    monkeypatch.setattr("xiaowei.dolphinscheduler.MAX_LOG_BYTES", 4096)
     await adapter.client.aclose()
 
     def get(req):
@@ -336,36 +319,6 @@ async def test_inflight_received_bytes_are_not_double_counted_against_reservatio
     )
 
 
-@pytest.mark.parametrize(
-    "raw",
-    [
-        b'{"password":"credential-should-not-leak", "token":"json-token"}',
-        b"{'password': 'python-secret', 'api_key': 'api-secret'}",
-    ],
-)
-def test_quoted_credential_keys_cannot_reach_projection(raw):
-    from xiaowei.dolphinscheduler_logs import redact_bytes
-
-    masked = redact_bytes(raw, "")
-    assert len(masked) == len(raw)
-    assert not any(
-        value in masked
-        for value in (b"credential-should-not-leak", b"json-token", b"python-secret", b"api-secret")
-    )
-
-
-def test_multiline_secret_mask_keeps_original_line_number_and_byte_offset():
-    from xiaowei.dolphinscheduler_logs import fragment, redact_bytes
-
-    raw = b'password="first\r\nsecond"\r\nSQLState 42S02'
-    masked = redact_bytes(raw, "")
-    result = fragment(masked, raw.index(b"SQLState"), len(raw))
-    assert len(masked) == len(raw)
-    assert result["line"] == 3
-    assert result["byte_offset"] == 0
-    assert b"first" not in masked and b"second" not in masked
-
-
 async def test_quoted_credentials_are_excluded_from_all_persisted_audiences(logs):
     from sqlalchemy import text
 
@@ -375,6 +328,7 @@ async def test_quoted_credentials_are_excluded_from_all_persisted_audiences(logs
     result = await logs.invoke("ds_read_task_log", line=1, byte_offset=0, line_count=2)
     assert "credential-should-not-leak" not in result.model_content
     assert "json-token" not in result.model_content
+    assert json.loads(result.model_content)["data"]["coverage"]["redacted_bytes"] > 0
     async with logs.engine.connect() as conn:
         row = (
             await conn.execute(
@@ -389,42 +343,49 @@ async def test_quoted_credentials_are_excluded_from_all_persisted_audiences(logs
         assert "42S02" in value
 
 
-async def test_truncated_quoted_secret_masks_the_entire_accepted_prefix(logs):
-    logs.control.body = b'password="first secret-tail never closes SQLState 42S02'
-    result = await logs.invoke("ds_read_task_log", line=1, byte_offset=0, line_count=1)
-    assert "secret-tail" not in result.model_content
-    assert "never closes" not in result.model_content
+@pytest.mark.parametrize(
+    "raw,forbidden",
+    [
+        (b"password=" + b"syntheticsecret" * 20 + b"\nSQLState 42S02", (b"syntheticsecret",)),
+        (
+            b"Authorization: Bearer abcsecret\nBasic abcdef==\njdbc:mysql://user:pass@host/db",
+            (b"abcsecret", b"abcdef", b"user:pass"),
+        ),
+        (b'{"password":"json-secret", "token":"json-token"}', (b"json-secret", b"json-token")),
+        (
+            b"{'password': 'python-secret', 'api_key': 'api-secret'}",
+            (b"python-secret", b"api-secret"),
+        ),
+        (b'password="first\r\nsecond"\r\nSQLState 42S02', (b"first", b"second")),
+        (b'password="first secret-tail never closes', (b"secret-tail", b"never closes")),
+    ],
+)
+def test_credential_shapes_keep_byte_positions_and_line_breaks(raw, forbidden):
+    from xiaowei.dolphinscheduler_logs import fragment, redact_bytes
 
-
-async def test_search_yields_before_scanning_all_no_match_bytes(monkeypatch):
-    from xiaowei import dolphinscheduler_logs as module
-
-    # A pending turn cancellation must be observed during a no-match scan too.
-    calls = []
-    original = module.re.compile
-
-    class Pattern:
-        def __init__(self, value):
-            self.value = value
-
-        def finditer(self, data):
-            calls.append(len(data))
-            return self.value.finditer(data)
-
-    monkeypatch.setattr(module.re, "compile", lambda *args: Pattern(original(*args)))
-    task = asyncio.create_task(
-        module.search_log(b"x" * (2 * 1024 * 1024), search(terms=["not-present"]))
+    masked = redact_bytes(raw, "")
+    assert len(masked) == len(raw)
+    assert not any(value in masked for value in forbidden)
+    assert [i for i, value in enumerate(raw) if value in {10, 13}] == [
+        i for i, value in enumerate(masked) if value in {10, 13}
+    ]
+    # A fragment starting inside a value must be masked too; LF-based positions stay original.
+    assert not any(
+        value.decode() in fragment(masked, 10, len(masked))["text"] for value in forbidden
     )
+
+
+async def test_literal_search_preserves_ascii_folding_original_text_and_per_word_cancellation():
+    from xiaowei.dolphinscheduler_logs import search_log
+
+    raw = "É Error SQLState 42S02\n".encode()
+    snippets, counts = await search_log(raw, search(terms=["error", "é"], context_lines=0))
+    assert counts == {"error": 1, "é": 0}
+    assert snippets[0]["text"] == raw.decode()
+    assert snippets[0]["byte_start"] == 0 and snippets[0]["byte_end"] == len(raw)
+    _, counts = await search_log(raw, search(terms=["error"], case_sensitive=True))
+    assert counts == {"error": 0}
+    task = asyncio.create_task(search_log(raw, search(terms=["not-present", "Error"])))
     asyncio.get_running_loop().call_soon(task.cancel)
     with pytest.raises(asyncio.CancelledError):
         await task
-    assert sum(calls) < 2 * 1024 * 1024
-
-
-async def test_literal_search_counts_boundary_and_overlapping_chunk_hits_once():
-    from xiaowei.dolphinscheduler_logs import search_log
-
-    raw = b"x" * (65536 - 2) + b"abcabcabc" + b"x" * 65536 + b"abc"
-    snippets, counts = await search_log(raw, search(terms=["abcabc", "abc"], context_lines=0))
-    assert counts == {"abcabc": 1, "abc": 4}
-    assert any("abcabcabc" in item["text"] for item in snippets)

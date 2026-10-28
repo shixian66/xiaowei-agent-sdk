@@ -43,31 +43,18 @@
 
 <a id="dolphinscheduler-implementation"></a>
 
-### DolphinScheduler API 只读实现（2026-10-28，离线实施中）
+### DolphinScheduler API 只读实现（2026-10-28，审查修订中）
 
-用户已授权连续实现、离线测试、常规修复及本地提交；本轮明确不调用真实模型或公司 DS。隔离分支 `codex/ds-readonly-api` 以 `916f57a26d2bac201b6772a48016f194af7d586e` 为产品基线，桌面旧工作区及其他任务改动未动。批准依据为 DS-RO-P1-r3（设计 blob ae0598a41b52f2bdfdb76525a8330a1b7232405c）；任务与剩余门槛仅在 [当前计划](docs/superpowers/plans/2026-10-28-dolphinscheduler-readonly-api.md#ds-implementation-plan) 维护，产品边界见 [ARCHITECTURE](ARCHITECTURE.md#dolphinscheduler-environment)。
+本轮仅本地实现、离线测试、常规修复和隔离分支本地提交；不调用真实模型或公司 DS、不推送／合并／部署。工作树为 `/Users/kloenguyen/.codex/worktrees/dolphinscheduler-readonly-api/agent-SDK`，分支 `codex/ds-readonly-api`；产品基线 `916f57a26d2bac201b6772a48016f194af7d586e`，本次修订基点 `3b8f0a9f30043e8cbc2f9403fad3797a798f0a9f`。批准依据仍为 r3 blob `ae0598a41b52f2bdfdb76525a8330a1b7232405c`；契约只见 [ARCHITECTURE](ARCHITECTURE.md#dolphinscheduler-environment)，任务及处置仅在 [r5 计划 §11](docs/superpowers/plans/2026-10-28-dolphinscheduler-readonly-api.md#ds-implementation-plan) 维护。
 
-**离线实现与本轮必需检查已完成；真实模型／公司验收未完成。** 产品源码候选 `6d9dafd5977af2d5ac26dc36e3ce8b77cd1d2bec`，之后仅补文档与离线重发测试，产品源码不变。S1 `66de4bc`、S2 `6d413e4`、S3 `b5cb803`、S4 `4995606` 及最终配置预检增量 `6d9dafd` 均已按精确版本独立复核，当前无未解决阻断。最后增量只复用既有凭据预检核对 DS Token 引用，未新增网络请求或权限边界。
+当前修订保留六项业务工具与本地选择、同一 SDK Agent/Runner、治理、失败记录、Evidence、Session、展示及 schema 17。可选子关联缺失在同次详情中保留父事实；业务码与结构错误分开；任务状态预检查；未知依赖／DAG 局部缺口；真实 grants 撤销后可信说明标不可用；固定响应上限和日志遮蔽字节数。M3 直接字面匹配保留每词取消点；M4 删除已无调用者且未部署的失败枚举／文案；M5 删除请求层重复头、重复 route 和局部 import，客户端 identity 及响应压缩拒绝保持。M1 已由用户撤回，保留 ds_read_scope 及原范围边界。C1／C2 未获确认，不改变绑定或关联列；当前超时／token_ref 仍影响绑定，M7 配置形状变化会使旧候选 DS 指纹失效，不能绕过旧会话／历史复核。
 
-实现为六项只读业务工具与本地选择工具、两版薄 Adapter、临时日志缓存；复用同一 SDK Agent/Runner、治理、失败记录、Evidence、Session 与展示。schema 17 仅新增应用会话集合及关联轮次，SDK 表不改。未选／错对象零 I/O；选择轮末提交、暂停恢复和失败隔离均验证。部分撤权保留原历史／交付复核；配置移除仍走既有会话绑定。日志10 MiB中间错误、超长行、32 MiB跨源上限、并发共享下载、超时、遮蔽及取消已验证；真实 Agent 不由脚本测试证明。
+已核实的本轮证据：B1 RED 8 failed／3 passed → 单次父事实回归 11 passed；A1／A2 RED 4 failed → 修正后 10 passed；M2 12 passed；M6 27 passed；M7 协议／日志 42 passed；N1／M8 凭据 7 passed；A3 真实撤权 RED 2 failed／1 passed → 入口矩阵 16 passed；B1 认证／连接／超时保留失败路径 6 passed。上述修订前后测试日志为 `/private/tmp/ds-revision-*.log`，当时未提交，不能当最终 SHA 的验收证据。
 
-有效检查（本地隔离环境；临时日志位于 `/private/tmp/`，可能清理）：
+工作树受影响回归 700 passed／1 skipped／1 deselected（243.21 秒；后续 M3–M5 后会按精确候选复验）；M3–M5 协议／日志 41 passed。最终候选、DS／浏览器、发行／迁移／隔离恢复和独立复核记录尚待写入本节。旧 handoff 的总括“S1–S4 均已独立复核”缺少当前可核实的复核人／记录，已移除，不作为本次通过依据。离线使用真实 Web/Uvicorn、SDK、治理、Evidence 和隔离 PostgreSQL，模型和 DS HTTP 为替身；真实 Chrome 也不能证明真实 Agent 的自主选择／取证／澄清／修正。
 
-| 检查 | 命令／结果 |
-| --- | --- |
-| 最终非部署完整集 | `SDK_TEST_POSTGRES_URL=postgresql+asyncpg://postgres@127.0.0.1:55432/postgres .venv/bin/python -m pytest -q --ignore=tests/deployment --durations=30`；5465 passed、235 skipped、100 deselected、5项既有隔离警告，1601.94s；日志 ds-final-integration-6d9dafd.log |
-| 最终非SDK单元 | `.venv/bin/python -m pytest -q --ignore=tests/sdk_core --ignore=tests/deployment --ignore=tests/spike`；1461 passed、47 deselected，20.36s |
-| 最终安全 | `.venv/bin/python -m pytest -m security -q`；65 passed，5.52s；既有 socket 隔离警告未改变 |
-| 最终发行／迁移／隔离恢复 | `.venv/bin/python -m pytest -q tests/deployment --durations=30`；84 passed，478.47s；真实容器／PostgreSQL，含 DS 选择字段成对 pg_dump/隔离恢复及旧程序版本拒绝 |
-| DS 与群相关集 | runtime/protocol/dependencies/logs/acceptance/group_actions 六文件；118 passed、60.15s；正式 DS 重发／撤权2 passed、2.89s，确认零 DS/模型重跑；最终配置预检与现有 CLI/runtime 再验117 passed、110.88s；独立 S4 入口/日志/群集62 passed、37.69s |
-| 本地真实Chrome | `SDK_TEST_POSTGRES_URL=... SDK_TEST_CHROME="/Applications/Google Chrome.app/Contents/MacOS/Google Chrome" .venv/bin/python -m pytest -q tests/sdk_core/test_dolphinscheduler_browser.py -m browser`；2 passed、10.05s；成功／认证缺口、主结果环境及刷新不重读；模型和DS仍为替身 |
-| 运行时wheel | `uv build --wheel`，锁定 runtime 依赖的干净环境安装；两个正式入口及 DS 导入通过，无旧包或 Alembic，源码为6d9dafd；未变更依赖／锁文件 |
-| lint／类型／依赖 | `ruff check .`、`mypy src`（44文件）通过；锁定依赖 `pip-audit --strict -r ...` 无已知漏洞 |
-| 泄漏／文档 | gitleaks v8.30.0 对源码候选全部已提交历史0项，扫描器及窄豁免自测通过，未改扫描规则；224本地链接/锚点、19变体唯一完整、现有文档命令检查2项及 `git diff --check` 通过 |
+配置、命令和单源示例见 [README](README.md)。下一步完成本次精确候选复核及本地提交；两版公司 API、真实模型能力与次数／耗时／用量、凭据权限与时区、服务端大日志负载／同步脱敏延迟、飞书群实收、用户接受均未验收。本轮不得自动关闭这些门槛。
 
-配置按 [README](README.md) 和 [单源示例](examples/dolphinscheduler-source.example.json) 添加；实际源版本、API根路径、时区、账号权限与安全引用由公司核实。正式 `config check` 已用合成引用检查完整示例，不访问外部服务；不把它当作账号权限验证。保存与回放继续当前权限复核，不重放未知读取。升级／恢复沿 ARCHITECTURE 长期规则，不用旧备份回退外部副作用账本。
-
-本轮未调用真实模型或公司DS、未推送／建PR、未合并／部署。下一项为公司在隔离环境按原 D1—D4及19变体验证真实 Agent 的选择、取证、澄清、修正、诊断、次数／耗时／用量；两版API、每源权限／时区、大日志服务端负载、真实群实收及用户接受仍未验收。离线完成不关闭整期；本地Chrome仅关闭本地浏览器显示项，不证明公司工具或用户接受。
 
 ### 安全巡检攻击线索收窄（2026-10-28，PR #143 待最终 CI）
 

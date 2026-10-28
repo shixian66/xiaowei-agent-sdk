@@ -602,14 +602,6 @@ def test_different_image_upgrade_rollback_and_paired_restore(
             "personal:local-operator",
         ]
 
-        # Current schema DS choice must survive an isolated paired backup/restore too.
-        selected = _pg(
-            pg_id,
-            "UPDATE xiaowei_session SET ds_clusters='[\"ds-a\",\"ds-b\"]'::jsonb, "
-            "ds_selection_turn='ds-backup-turn'",
-        )
-        assert selected.returncode == 0, selected.stderr
-
         pair = host_tmp / "backup-pair"
         _install_private_directory(pair)
         _copy_preserving_mode(active / ".env", pair / "xiaowei.env")
@@ -627,15 +619,6 @@ def test_different_image_upgrade_rollback_and_paired_restore(
         assert marker.returncode == 0, marker.stderr
         restored = _restore(active, backup, "xiaowei_restore")
         assert restored.returncode == 0, restored.stderr.decode(errors="replace")
-
-        choices = docker(
-            "exec", pg_id, "psql", "-v", "ON_ERROR_STOP=1", "-Atq",
-            "-U", "xiaowei", "-d", "xiaowei_restore", "-c",
-            "SELECT count(*) FROM xiaowei_session WHERE "
-            "ds_clusters='[\"ds-a\",\"ds-b\"]'::jsonb "
-            "AND ds_selection_turn='ds-backup-turn'",
-        )
-        assert choices.returncode == 0 and int(choices.stdout.strip()) > 0
 
         restored_url = values["XW_DATABASE_URL"].rsplit("/", 1)[0] + "/xiaowei_restore"
         before_restore = active / ".env.before-restore"

@@ -1,7 +1,5 @@
 """S4 fixed business variants through real Web/SDK/PG; scripted choices are not Agent evals."""
 
-import json
-
 import pytest
 from tests.sdk_core.test_app import clarify, tool_call
 from tests.sdk_core.test_dolphinscheduler_runtime import (
@@ -247,7 +245,7 @@ async def test_d4_e3_partial_revocation_preserves_existing_history_boundary(
                 assert len(requests) == 1 and requests[0][0].startswith("/a/")
                 # I/O-before authorization rejection is not a DS read failure.
                 assert "读取未核实" not in result["delivery"]["content"]
-                assert "ds-b" in json.dumps(env.scripts.calls[follow][-1].input)
+                assert '当前不可用：["ds-b"]' in env.scripts.calls[follow][0].instructions
             await served.finish()
 
 
@@ -342,4 +340,47 @@ async def test_d4_fresh_attempt_and_failed_followup_do_not_claim_old_fact_is_cur
                     assert "private failure body" not in content
             assert len(requests) == 3 and all(path.endswith("/701") for path, _, _ in requests)
             assert await env.scalar("SELECT count(*) FROM xiaowei_evidence") == 2
+            await served.finish()
+
+
+async def test_current_unavailable_uses_real_grant_revocation_between_turns(env, monkeypatch):
+    from xiaowei.runtime import StaticAccess
+
+    monkeypatch.setenv("XW_TEST_DS_TOKEN", "synthetic-token")
+    instances = []
+    original_init = StaticAccess.__init__
+
+    def capture(self, *args, **kwargs):
+        original_init(self, *args, **kwargs)
+        instances.append(self)
+
+    monkeypatch.setattr(StaticAccess, "__init__", capture)
+    with ds_api() as (url, requests):
+        config = ServeConfig.model_validate(config_values(env.port, [source(base_url=url)]))
+        async with env.running(config) as served:
+            await served.page()
+            message = env.scripts.add(
+                "后面查 DS B",
+                tool_call("ds_select_clusters", clusters=["ds-b"]),
+                clarify("已选择 DS B"),
+            )
+            assert (await served.turn(message, request_id="select-only")).json()[
+                "state"
+            ] == "completed"
+            assert requests == []
+            assert instances
+            for access in instances:
+                # Keep the real authorization implementation; revoke actual DS grants only.
+                access._grants = {
+                    subject: frozenset(t for t in tools if not t.startswith("local/ds_"))
+                    for subject, tools in access._grants.items()
+                }
+            follow = env.scripts.add("今天呢", clarify("DS 生产 B 当前不可用，未查询"))
+            result = (await served.turn(follow, request_id="after-grants-revoked")).json()
+            assert result["state"] == "completed", result
+            instructions = env.scripts.calls[follow][0].instructions
+            assert '本轮 DS 集合：["ds-b"]' in instructions
+            assert '当前不可用：["ds-b"]' in instructions
+            assert requests == []
+            assert await env.scalar("SELECT ds_clusters FROM xiaowei_session") == ["ds-b"]
             await served.finish()

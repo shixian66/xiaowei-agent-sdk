@@ -145,7 +145,6 @@ UNSUPPORTED_FILE_NOTICE = "当前渠道不支持文件，结果以消息展示�
 LIMIT_NOTICE = "本轮步骤已用完，回答基于已取得的结果，可能不完整。"
 _MONITORING_REASONS = {
     "auth": "上游认证或授权失败",
-    "ds_related_unverified": "子运行关联或项目未核实；需补充可核实项目，不按最新同名运行猜测",
     "ds_sample_expired": "本轮临时日志已释放；保留原片段，下一轮才重新取样",
     "ds_auth": "DS 认证或授权失败",
     "ds_connect": "DS 连接建立失败",

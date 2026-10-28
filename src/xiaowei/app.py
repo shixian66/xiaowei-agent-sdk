@@ -33,7 +33,7 @@ import hashlib
 import json
 import logging
 import time
-from collections.abc import Callable, Iterator, Mapping, Sequence
+from collections.abc import Awaitable, Callable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -1116,7 +1116,9 @@ class Application:
                 "已激活不等于此刻运行或巡检完成；通知接口接受不等于群内实收，未来只说按计划发送。"
                 f"允许自动的工具ID：{sorted(tasks.automatic_tools)}。"
             )
-        instructions: str | Callable[[RunContextWrapper[RunContext], Agent[RunContext]], str] = (
+        instructions: (
+            str | Callable[[RunContextWrapper[RunContext], Agent[RunContext]], str | Awaitable[str]]
+        ) = (
             f"{self._instructions}{action_note}{report_note}\n"
             f"本轮当前时间（UTC）：{self._clock().astimezone(UTC).isoformat()}。"
             "相对日期须结合业务时区计算；历史结果的采集时间不是本轮当前时间。"
@@ -1124,11 +1126,11 @@ class Application:
         if self.dolphinscheduler is not None:
             base = str(instructions)
 
-            def ds_instructions(
+            async def ds_instructions(
                 wrapper: RunContextWrapper[RunContext], agent: Agent[RunContext]
             ) -> str:
                 assert self.dolphinscheduler is not None  # noqa: S101 - bound at assembly
-                return base + self.dolphinscheduler.prompt(wrapper.context, self._governance)
+                return base + await self.dolphinscheduler.prompt(wrapper.context, self._governance)
 
             instructions = ds_instructions
         return Agent[RunContext](
