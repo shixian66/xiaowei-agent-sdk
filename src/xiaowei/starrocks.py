@@ -583,23 +583,8 @@ SECURITY_SOURCE_COLUMNS: Final = (
 )
 _SECURITY_COLUMNS: Final = (*SECURITY_SOURCE_COLUMNS, "stmt_present")
 _SECURITY_TOTALS: Final = ("window_rows", "window_failed_rows", "window_oversize_rows")
-# 仅普通注释；不尝试解释可执行注释或实现 SQL 解析器。
-_SECURITY_GAP: Final = (
-    r"([[:space:]]|/\*([^*]|\*+[^*/])*\*+/|"
-    r"--[^\r\n]*(\r\n|\r|\n|$)|#[^\r\n]*(\r\n|\r|\n|$))"
-)
 SECURITY_OR_PATTERN: Final = r'''(^|[^A-Z_])OR([[:space:]]|[(])*[0-9'"]'''
 SECURITY_MULTIPLE_PATTERN: Final = r";([[:space:]]|;)*[^[:space:];]"
-SECURITY_OPERATION_PATTERN: Final = (
-    f"^{_SECURITY_GAP}*("
-    r"(GRANT|REVOKE|EXPORT)([^A-Z_]|$)|"
-    f"(CREATE|ALTER|DROP){_SECURITY_GAP}+(USER|ROLE)([^A-Z_]|$)|"
-    f"SET{_SECURITY_GAP}+PASSWORD([^A-Z_]|$)|"
-    f"DROP{_SECURITY_GAP}+(TABLE|DATABASE)([^A-Z_]|$)|"
-    f"TRUNCATE{_SECURITY_GAP}+TABLE([^A-Z_]|$)|"
-    f"INSERT{_SECURITY_GAP}+OVERWRITE([^A-Z_]|$))"
-)
-SECURITY_DELETE_PATTERN: Final = f"^{_SECURITY_GAP}*DELETE([^A-Z_]|$)"
 
 
 def security_window(
@@ -628,9 +613,7 @@ def _security_sql(audit: AuditSource) -> tuple[str, str]:
         "state, queryTime, `user`, clientIp, db, pendingTimeMs, "
         "(stmt IS NOT NULL AND stmt <> '') AS stmt_present "
         "FROM `{database}`.`{table}` WHERE `timestamp` >= %s AND `timestamp` < %s AND ("
-        "REGEXP(UPPER(stmt), %s) OR UPPER(stmt) LIKE %s OR REGEXP(stmt, %s) "
-        "OR REGEXP(UPPER(stmt), %s) "
-        "OR (REGEXP(UPPER(stmt), %s) AND UPPER(stmt) NOT LIKE %s)) "
+        "REGEXP(UPPER(stmt), %s) OR UPPER(stmt) LIKE %s OR REGEXP(stmt, %s)) "
         "ORDER BY `timestamp`, queryId LIMIT %s"
     )
     return (
@@ -955,7 +938,6 @@ class StarRocksAdapter:
         window_args = (self._target.policy.max_sql_bytes, start, end)
         candidate_args = (
             *window_args, SECURITY_OR_PATTERN, "%SLEEP%", SECURITY_MULTIPLE_PATTERN,
-            SECURITY_OPERATION_PATTERN, SECURITY_DELETE_PATTERN, "%WHERE%",
             audit.candidate_rows + 1,
         )
         limits = _ReadLimits(

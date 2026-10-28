@@ -257,6 +257,11 @@ def _security_presentation(fact: DeliveryFact, data: dict[str, object]) -> FactP
     counts = signals if isinstance(signals, dict) else {}
     ops = operations if isinstance(operations, dict) else {}
     complete = cov.get("match_counts_complete") is True
+    signal_labels = dict(_SIGNAL_LABELS)
+    # 旧 v1 事实包含此键，新结果不再包含。
+    if "high_risk_operation" not in counts:
+        signal_labels.pop("high_risk_operation")
+        signal_labels["stacked_statements"] = "多语句（辅助信息）"
 
     def number(value: object) -> str:
         return f"{value:,}" if isinstance(value, int) else "未提供"
@@ -275,7 +280,7 @@ def _security_presentation(fact: DeliveryFact, data: dict[str, object]) -> FactP
         return "已读取候选中未发现" if cov.get("scan_limited") else "已判定部分未发现"
 
     checks = []
-    for key, label in _SIGNAL_LABELS.items():
+    for key, label in signal_labels.items():
         shown = count(counts.get(key))
         if key == "high_risk_operation":
             details = [f"{name} {count(ops.get(op))}" for op, name in _OPERATION_LABELS.items()
@@ -324,7 +329,10 @@ def _security_presentation(fact: DeliveryFact, data: dict[str, object]) -> FactP
         return "、".join(names.get(key, key) for key in keys) or "无"
 
     source_rows = cast(Sequence[dict[str, object]], data.get("rows", fact.rows))
-    columns: tuple[str, ...] = ("样本", "时间", "账号", "信号", "操作", "执行状态")
+    columns: tuple[str, ...] = ("样本", "时间", "账号", "信号")
+    if any("operations" in row for row in source_rows):
+        columns += ("操作",)
+    columns += ("执行状态",)
     delay = any("delay_call" in str(row.get("signals", "")) for row in source_rows)
     if delay:
         columns += ("实际耗时（ms）", "排队时间（ms）", "请求延迟（s）")
@@ -337,8 +345,9 @@ def _security_presentation(fact: DeliveryFact, data: dict[str, object]) -> FactP
                           ("请求延迟（s）", "requested_delay_seconds")):
             if name in columns and key in row:
                 shown_row[name] = row[key]
-        shown_row["信号"] = labels(row.get("signals"), _SIGNAL_LABELS)
-        shown_row["操作"] = labels(row.get("operations"), _OPERATION_LABELS)
+        shown_row["信号"] = labels(row.get("signals"), signal_labels)
+        if "操作" in columns:
+            shown_row["操作"] = labels(row.get("operations"), _OPERATION_LABELS)
         rows.append(shown_row)
     return FactPresentation({}, columns, tuple(rows), scope, tuple(checks), tuple(notices))
 

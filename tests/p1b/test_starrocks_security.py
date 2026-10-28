@@ -46,34 +46,47 @@ def analyze(result, **kwargs):
 
 
 SIGNAL_CASES = [
-    ("SELECT * FROM shop.t WHERE id=1 OR 1=1 -- probe", "boolean_probe", set()),
-    ("SELECT * FROM shop.t WHERE id=1 OR ('x'='x')", "boolean_probe", set()),
-    ("SELECT IF(1=1,SLEEP(5),0)", "delay_call", set()),
-    ("SELECT 1; DROP TABLE shop.t", "stacked_statements", {"drop"}),
-    ("GRANT SELECT ON shop.t TO someone", "high_risk_operation", {"grant"}),
-    ("REVOKE SELECT ON shop.t FROM someone", "high_risk_operation", {"revoke"}),
-    ("CREATE USER someone IDENTIFIED BY 'dummy'", "high_risk_operation", {"account"}),
-    ("ALTER USER someone IDENTIFIED BY 'dummy'", "high_risk_operation", {"account"}),
-    ("DROP ROLE someone", "high_risk_operation", {"account"}),
-    ("SET PASSWORD FOR someone = 'dummy'", "high_risk_operation", {"password"}),
-    ("TRUNCATE TABLE shop.t", "high_risk_operation", {"truncate"}),
-    ("EXPORT TABLE shop.t TO 'dummy'", "high_risk_operation", {"export"}),
-    ("INSERT OVERWRITE shop.t SELECT 1", "high_risk_operation", {"insert_overwrite"}),
-    ("INSERT /*+ SET_VAR(a=1) */ OVERWRITE t SELECT 1",
-     "high_risk_operation", {"insert_overwrite"}),
-    ("DELETE FROM shop.t", "high_risk_operation", {"delete_no_where"}),
-    ("WITH x AS (SELECT id FROM shop.t WHERE id>0) DELETE FROM shop.t",
-     "high_risk_operation", {"delete_no_where"}),
+    ("SELECT * FROM shop.t WHERE id=1 OR 1=1 -- probe", "boolean_probe"),
+    ("SELECT * FROM shop.t WHERE id=1 OR ('x'='x')", "boolean_probe"),
+    ("SELECT IF(1=1,SLEEP(5),0)", "delay_call"),
+    ("SELECT 1; DROP TABLE shop.t", "stacked_statements"),
+    ("INSERT OVERWRITE t SELECT 0 OR 1=1", "boolean_probe"),
+    ("DELETE FROM t WHERE 0=1 OR 1=1", "boolean_probe"),
+]
+OPERATION_CASES = [
+    "GRANT SELECT ON shop.t TO someone",
+    "REVOKE SELECT ON shop.t FROM someone",
+    "CREATE USER someone IDENTIFIED BY 'dummy'",
+    "ALTER USER someone IDENTIFIED BY 'dummy'",
+    "DROP ROLE someone", "SET PASSWORD FOR someone = 'dummy'",
+    "DROP TABLE shop.t", "DROP DATABASE shop", "TRUNCATE TABLE shop.t",
+    "EXPORT TABLE shop.t TO 'dummy'", "INSERT OVERWRITE shop.t SELECT 1",
+    "INSERT /*+ SET_VAR(a=1) */ OVERWRITE t SELECT 1",
+    "/* ordinary comment */ INSERT OVERWRITE shop.t SELECT 1",
+    "DELETE FROM shop.t",
+    "WITH x AS (SELECT id FROM shop.t WHERE id>0) DELETE FROM shop.t",
 ]
 
 
-@pytest.mark.parametrize(("sql", "signal", "operations"), SIGNAL_CASES)
-def test_explainable_signals(sql, signal, operations):
+@pytest.mark.parametrize(("sql", "signal"), SIGNAL_CASES)
+def test_explainable_signals(sql, signal):
     result = analyze(batch(sql))
     assert result.matched_rows == 1
-    assert signal in result.rows[0]["signals"]
-    assert set(result.rows[0]["operations"]) == operations
+    assert result.rows[0]["signals"] == [signal]
+    assert "operations" not in result.rows[0]
     assert result.unclassified_candidate_rows == 0 and result.match_counts_complete
+
+
+@pytest.mark.parametrize("sql", OPERATION_CASES)
+def test_operation_type_alone_is_not_a_security_signal(sql):
+    result = analyze(batch(sql))
+    payload = result.as_payload()
+    assert result.matched_rows == 0 and result.rows == ()
+    assert payload["rules_version"] == "manual-security-v2"
+    assert payload["operation_counts"] == {}
+    assert "high_risk_operation" not in payload["signal_counts"]
+    assert "operations" not in payload["columns"]
+    assert result.match_counts_complete
 
 
 @pytest.mark.parametrize("sql", [
@@ -98,13 +111,12 @@ def test_s1_audit_row_counts_are_not_sample_counts():
         "GRANT SELECT ON shop.t TO someone",
         changes={1: {"state": "ERR"}},
         totals={"window_rows": 12, "window_failed_rows": 2, "window_oversize_rows": 0},
-    ), sample_limit=2)
-    assert (result.scanned_rows, result.matched_rows, result.failed_rows) == (12, 3, 2)
+    ), sample_limit=1)
+    assert (result.scanned_rows, result.matched_rows, result.failed_rows) == (12, 2, 2)
     assert result.signal_counts == {
         "boolean_probe": 1, "stacked_statements": 0, "delay_call": 1,
-        "high_risk_operation": 1,
     }
-    assert len(result.rows) == 2 and result.omitted_samples == 1
+    assert len(result.rows) == 1 and result.omitted_samples == 1
     assert result.truncated
     assert result.checked_candidate_rows == 3
     assert result.match_counts_complete  # 展示省略不改变分类计数。
@@ -128,24 +140,26 @@ def test_delay_argument_is_only_a_single_finite_constant(sql, expected):
     assert result.rows[0]["requested_delay_seconds"] == expected
 
 
-def test_s4_grant_is_not_hidden_by_earlier_etl_truncates():
-    result = analyze(batch(*(["TRUNCATE TABLE shop.t"] * 25),
-                           "GRANT SELECT ON shop.t TO someone"))
-    assert result.matched_rows == 26
-    assert result.operation_counts["truncate"] == 25
-    assert result.operation_counts["grant"] == 1
-    assert "q25" in {row["query_id"] for row in result.rows}
-    assert len(result.rows) == 20 and result.omitted_samples == 6
+def test_attack_representatives_precede_auxiliary_rows_with_two_sample_slots():
+    result = analyze(batch(*(["SHOW VARIABLES; SELECT 1"] * 25),
+                           "SELECT 0 OR 1=1", "SELECT SLEEP(1)"), sample_limit=2)
+    assert result.matched_rows == 27
+    assert result.signal_counts == {
+        "boolean_probe": 1, "delay_call": 1, "stacked_statements": 25,
+    }
+    assert {row["query_id"] for row in result.rows} == {"q25", "q26"}
+    assert result.omitted_samples == 25 and result.match_counts_complete
 
 
-def test_multiple_operations_in_one_audit_row_are_not_lost_or_double_counted():
+def test_multiple_operations_in_one_audit_row_are_only_auxiliary():
     result = analyze(batch("GRANT SELECT ON shop.t TO someone; DROP TABLE shop.t; "
                            "DROP TABLE shop.other"))
     assert result.matched_rows == 1
-    assert result.signal_counts["stacked_statements"] == 1
-    assert result.signal_counts["high_risk_operation"] == 1
-    assert result.operation_counts["grant"] == result.operation_counts["drop"] == 1
-    assert set(result.rows[0]["operations"]) == {"grant", "drop"}
+    assert result.rows[0]["signals"] == ["stacked_statements"]
+    assert result.signal_counts == {
+        "boolean_probe": 0, "delay_call": 0, "stacked_statements": 1,
+    }
+    assert result.as_payload()["operation_counts"] == {}
 
 
 def test_s5_distinguishes_absent_text_from_unread_sql_and_reports_scan_end():
@@ -177,7 +191,7 @@ def test_empty_window_has_no_invented_scan_end():
 
 def test_raw_sql_and_parser_error_text_are_not_output_or_product_logs(caplog):
     result = analyze(batch("SET PASSWORD FOR someone = 'secret-canary-42'",
-                           "DELETE FROM 'secret-canary-43' WHERE"))
+                           "SELECT 'secret-canary-43"))
     encoded = json.dumps(result.as_payload(), ensure_ascii=False)
     assert "secret-canary" not in encoded
     assert "statement_shape" not in encoded and "missing_fields" not in encoded
@@ -219,9 +233,9 @@ def test_exhausted_processing_deadline_cannot_return_a_success():
         analyze(batch("SELECT SLEEP(5)"), deadline=0)
 
 
-def test_deep_delete_parse_failure_preserves_other_signals_and_rows():
+def test_deeply_nested_delay_is_counted_and_complete():
     nested = "DELETE FROM t WHERE x = " + "(" * 150 + "SLEEP(1)" + ")" * 150
     result = analyze(batch("SELECT SLEEP(1)", nested))
     assert result.matched_rows == 2 and result.signal_counts["delay_call"] == 2
-    assert result.unclassified_candidate_rows == 1
-    assert not result.match_counts_complete and result.truncated
+    assert result.unclassified_candidate_rows == 0
+    assert result.match_counts_complete and not result.truncated

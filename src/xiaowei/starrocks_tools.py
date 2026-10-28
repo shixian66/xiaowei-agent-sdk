@@ -123,7 +123,7 @@ from xiaowei.starrocks_schema import (
     read_dependency,
 )
 from xiaowei.starrocks_security import (
-    OPERATIONS,
+    RULES_VERSION,
     SECURITY_COLUMNS,
     SECURITY_TOOL,
     SIGNALS,
@@ -228,16 +228,18 @@ SECURITY_FIELDS: Final = (
 SECURITY_LIMITATIONS: Final = (
     "仅为有限规则的安全线索，不证明 SQL 注入入口、攻击成功或维护未经授权。",
     "审计存在晚到与采集缺口；聚合、候选是两次读取，不保证同一快照或近期窗口已收齐。",
-    "OR 到常量间夹注释、全文含 WHERE 的无根 WHERE DELETE、WITH…DELETE、可执行注释未全覆盖。",
+    "OR 到常量间夹注释、可执行注释及其他注入/延迟手法未全覆盖。",
     "全窗超长数与无法判定候选数范围不同，不能相加；样本省略不改变分类计数。",
 )
 SECURITY_NOTE: Final = (
-    "scanned_rows/failed_rows 为读取时服务端全窗聚合；matched_rows/分类数来自候选精判，"
+    "scanned_rows/failed_rows 为读取时服务端全窗聚合；"
+    "matched_rows 是命中本份 signal_counts 所列任一特征的去重审计行数，分类数来自候选精判，"
     "match_counts_complete=false 时仅是已确认下界；true 也不消除规则或晚到日志缺口。"
     "window_oversize_rows 是全窗超长记录数，unclassified_candidate_rows 才是无法判定候选数。"
     "coverage.scanned_through=null 表示不提供扫描水位，不表示未扫描；"
     "范围和完整性看 window 与 coverage。"
-    "ERR 只表示执行失败，未提供错误原因或集中程度；多语句线索不说明业务用途。"
+    "ERR 只表示执行失败，未提供错误原因或集中程度；"
+    "多语句只作辅助，不单独支持攻击结论或说明业务用途。matched_rows 不等于攻击次数。"
     "统计单位为审计行，不能相加分类数当独立请求。样本只给 Query ID 和最小特征，不含审计原文。"
 )
 # JSON 转义膨胀最大的单字节字符：控制字符写作 \u00XX，一个字节变六个。
@@ -1117,12 +1119,12 @@ def starrocks_tools(
         )
         payload = {
             **security_metadata(*([datetime.max.replace(tzinfo=UTC).isoformat()] * 2)),
-            "rules_version": "manual-security-v1",
+            "rules_version": RULES_VERSION,
             **dict.fromkeys(
                 ("scanned_rows", "failed_rows", "matched_rows", "row_count"), _WIDEST_INT
             ),
             "signal_counts": dict.fromkeys(SIGNALS, _WIDEST_INT),
-            "operation_counts": dict.fromkeys(OPERATIONS, _WIDEST_INT),
+            "operation_counts": {},
             "columns": list(SECURITY_COLUMNS), "rows": worst.payload["rows"],
             "coverage": {
                 "scan_limited": False, "checked_candidate_rows": _WIDEST_INT,
@@ -1136,9 +1138,9 @@ def starrocks_tools(
         contracts.append(contract(
             SECURITY_TOOL, security_policy,
             "手动数据库安全巡检：读取获准审计表，统计全窗总行数/ERR/超长数，"
-            "粗筛后精判布尔探测、SLEEP 调用、多语句与指定高风险操作，返回分类计数与代表 Query ID。"
-            "信号不等于攻击成功；操作计数单位是审计行，不是SQL种类或调度作业数。"
-            "操作类型命中本身不代表需要人工核查，结合本轮证据说明关注理由；"
+            "粗筛后精判布尔探测与 SLEEP 调用线索，多语句仅作辅助信息，返回分类计数与代表 Query ID。"
+            "信号不等于攻击成功；统计单位是审计行，不是攻击次数或调度作业数。"
+            "不按操作类型检测高风险，结合本轮证据说明关注理由；"
             "不执行或 EXPLAIN 被审计 SQL。"
             f"{SECURITY_NOTE}"
             "start_time/end_time 必须是带 UTC offset 的 ISO 8601 绝对时刻，半开窗口 [start,end)，"

@@ -146,7 +146,7 @@ def test_cluster_name_does_not_classify_business_query_as_control_receipt(target
 
 def security_fact(*, coverage=None, payload_updates=None, **changes):
     """人工核对的报告夹具；统计不通过检测器或展示函数计算。"""
-    from xiaowei.starrocks_security import OPERATIONS, SECURITY_TOOL
+    from xiaowei.starrocks_security import SECURITY_TOOL
 
     rows = [{
         "query_id": "q-client-probe", "timestamp": "2026-10-23T15:04:37+08:00",
@@ -161,7 +161,10 @@ def security_fact(*, coverage=None, payload_updates=None, **changes):
         "scanned_rows": 29232, "failed_rows": 6, "matched_rows": 1,
         "signal_counts": {"boolean_probe": 0, "delay_call": 0,
                           "stacked_statements": 1, "high_risk_operation": 0},
-        "operation_counts": dict.fromkeys(OPERATIONS, 0),
+        "operation_counts": dict.fromkeys((
+            "grant", "revoke", "account", "password", "drop", "truncate", "export",
+            "insert_overwrite", "delete_no_where",
+        ), 0),
         "columns": list(rows[0]), "rows": rows, "row_count": 1,
         "coverage": {"scan_limited": False, "checked_candidate_rows": 1,
                      "scanned_through": None, "window_oversize_rows": 3,
@@ -177,6 +180,42 @@ def security_fact(*, coverage=None, payload_updates=None, **changes):
         result_json=json.dumps(data, ensure_ascii=False),
         **changes,
     )
+
+
+def v2_security_fact(**changes):
+    data = json.loads(security_fact().result_json)
+    data["rules_version"] = "manual-security-v2"
+    data["signal_counts"].pop("high_risk_operation")
+    data["operation_counts"] = {}
+    data["columns"].remove("operations")
+    for row in data["rows"]:
+        row.pop("operations")
+    return security_fact(payload_updates=data, **changes)
+
+
+@pytest.mark.parametrize("view", ["full", "brief"])
+def test_v2_security_report_keeps_counts_without_legacy_operation_fields(view):
+    from xiaowei.feishu_render import business_presentation, business_text
+    from xiaowei.feishu_report import build_report
+
+    source = v2_security_fact(view=view)
+    shown = business_presentation(source)
+    assert len(shown.checks) == 4
+    assert "操作" not in shown.columns
+    assert shown.rows[0]["信号"] == "多语句（辅助信息）"
+    value = business(source)
+    card = "\n".join(text_parts(build_feishu_message(value, 3500, "oc"), folded=False))
+    texts = [
+        card, business_text(value, plain_transport=True),
+        json.dumps(shown.for_web(), ensure_ascii=False),
+    ]
+    texts.extend(build_report(value.model_copy(update={"report_format": fmt})).content.decode()
+                 for fmt in ("md", "html"))
+    for text in texts:
+        assert "高风险操作" not in text and "九项" not in text
+        assert "多语句（辅助信息）" in text and "29,232" in text
+        assert "分类计数完整" in text and "无法判定候选 0" in text
+    assert json.loads(source.result_json)["rules_version"] == "manual-security-v2"
 
 
 @pytest.mark.parametrize("view", ["full", "brief"])
@@ -468,7 +507,8 @@ def test_security_missing_counts_are_unknown_and_nonzero_operations_stay_compact
     from xiaowei.feishu_render import business_presentation
 
     missing = business_presentation(security_fact(payload_updates={"signal_counts": {}}))
-    assert all(row["审计行数"] == "未提供" for row in missing.checks[:4])
+    assert len(missing.checks) == 4
+    assert all(row["审计行数"] == "未提供" for row in missing.checks[:-1])
     source = security_fact(payload_updates={
         "signal_counts": {"boolean_probe": 0, "delay_call": 0,
                           "stacked_statements": 0, "high_risk_operation": 3},
