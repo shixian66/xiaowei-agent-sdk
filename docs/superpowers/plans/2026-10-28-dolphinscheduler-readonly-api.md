@@ -225,13 +225,11 @@ DS 官方源码（版本标签）：
 - [3.1.8 实例版本与 DAG](https://github.com/apache/dolphinscheduler/blob/3.1.8/dolphinscheduler-api/src/main/java/org/apache/dolphinscheduler/api/service/impl/ProcessInstanceServiceImpl.java#L220)、[3.4.0 实例版本与 DAG](https://github.com/apache/dolphinscheduler/blob/3.4.0/dolphinscheduler-api/src/main/java/org/apache/dolphinscheduler/api/service/impl/WorkflowInstanceServiceImpl.java#L242)、[3.4.0 GET 切版本](https://github.com/apache/dolphinscheduler/blob/3.4.0/dolphinscheduler-api/src/main/java/org/apache/dolphinscheduler/api/controller/WorkflowDefinitionController.java#L299)、[官方 Token 说明](https://github.com/apache/dolphinscheduler/blob/3.4.0/docs/docs/en/guide/api/open-api.md)。
 - [3.1.8 列表请求参数](https://github.com/apache/dolphinscheduler/blob/3.1.8/dolphinscheduler-api/src/main/java/org/apache/dolphinscheduler/api/controller/ProcessInstanceController.java#L89)、[3.1.8 父任务查子运行](https://github.com/apache/dolphinscheduler/blob/3.1.8/dolphinscheduler-api/src/main/java/org/apache/dolphinscheduler/api/controller/ProcessInstanceController.java#L253)、[3.4.0 父任务查子运行](https://github.com/apache/dolphinscheduler/blob/3.4.0/dolphinscheduler-api/src/main/java/org/apache/dolphinscheduler/api/controller/WorkflowInstanceController.java#L255)、[3.1.8 依赖结果填充](https://github.com/apache/dolphinscheduler/blob/3.1.8/dolphinscheduler-api/src/main/java/org/apache/dolphinscheduler/api/service/impl/ProcessInstanceServiceImpl.java#L372)、[3.4.0 实例任务的依赖运行结果](https://github.com/apache/dolphinscheduler/blob/3.4.0/dolphinscheduler-api/src/main/java/org/apache/dolphinscheduler/api/service/impl/WorkflowInstanceServiceImpl.java#L419)。
 
-本轮文档验证及既有 SDK 探针证据见 handoff。旧稿审查不覆盖本版，当前作者自查不称独立审查；需针对 DS-RO-P1-r3 的精确文件指纹复审，不能由文档或探针通过推定产品实现。
-
-r2 独立复审未发现开工阻断，确认 A1／A2 落实；本版仅按 C1 区分授权拒绝与读取失败，并在已有选择提示／模型样例补不可用成员展示，新增差异尚未经独立复核。后续按用户指令推进；功能实现仍待授权。普通内部函数、模块拆分按实施时实际代码确定，不能重新设定 D1—D4。
+当前实施状态、精确独立审查版本及分层验证证据统一见 [handoff](../../../AGENT_HANDOFF.md#dolphinscheduler-implementation)。实现授权来自本次用户指令；独立审查和离线检查不证明真实 Agent、公司服务或部署可用，D1—D4 判断标准不变。
 
 <a id="ds-implementation-plan"></a>
 
-## 11. 最小实施计划：DS-RO-P1-r3
+## 11. 最小实施计划：DS-RO-P1-r4（批准依据 r3）
 
 **目标：** 同一个 Agent 在 Web／飞书完成 D1—D4，在已选集合内自主定位、补证和结束，返回有来源的诊断与具体缺口。
 
@@ -364,4 +362,15 @@ r2 独立复审未发现开工阻断，确认 A1／A2 落实；本版仅按 C1 �
 
 官方 [SDK 概览](https://developers.openai.com/api/docs/guides/agents/sdk)说明应用拥有工具与存储，SDK 负责循环；具体公开参数以本次锁定安装版为证。DS [实例列表 Mapper](https://github.com/apache/dolphinscheduler/blob/3.4.0/dolphinscheduler-dao/src/main/resources/org/apache/dolphinscheduler/dao/mapper/WorkflowInstanceMapper.xml#L105)及 §10 版本源码支撑范围和协议事实。
 
-复审覆盖 DS-RO-P1-r3 整份文件和关联 ARCHITECTURE DS 段落，以交接中精确 blob 指纹固定版本；重点检查选择回执／业务 Evidence 分支、共享失败兼容、日志成本与新增限制。r2 无开工阻断的复审结论不自动覆盖本版 C1 及提示差异；实施授权来自本次用户指令；独立审查和离线通过不构成真实源、合并或部署授权。
+离线审查以 handoff 中精确候选 SHA 为入口，覆盖实际源码差异及本计划的批准契约；不使用旧快照的“待授权／未审查”状态推断当前状态。实战验收沿 §9，不因离线用例通过减少标准。
+
+离线回归定位（复用上述业务样例，未新增业务标准）：
+
+| 已批准样例 | 仓库内可执行离线证据 | 仍不能证明 |
+| --- | --- | --- |
+| D1、环境 E1—E10、D4 环境 E1—E3 | test_dolphinscheduler_runtime.py、test_dolphinscheduler_acceptance.py；真 Web/SDK/PG、未选零 I/O、失败轮选择隔离、集合沿用、3/6源、部分撤权；test_group_actions.py 复用两个批准群变体 | 真实 Agent 能否正确理解自然语言、环境指代及当前不可用成员 |
+| D2 及长日志／子流程变体 | test_dolphinscheduler_logs.py、test_dolphinscheduler_dependencies.py；10 MiB 中间报错、超长行、原文遮蔽、单轮共享下载、真实历史关联与项目缺口 | 模型自主定位、公司任务类型和 DS 服务端负载 |
+| D3 等待、D4 恢复与各失败变体 | 两版原生字段与带时间日志、当前尝试的新读取、失败后的历史标注和系统缺口；不能用错误正文生成 Evidence | 模型依据质量、根因推断、是否重放及结束调查是否合理 |
+| D1／E10／F1 本地浏览器 | test_dolphinscheduler_browser.py，经正式 runtime.serve、真实 Chrome 验证成功／认证缺口与刷新，不展开依据也能看到环境 | 公司浏览器／真实服务和用户接受；飞书用协议替身，不证明群实收 |
+
+文件均位于 tests/sdk_core；完整命令与检查结果见 handoff，配置用法见 README。真实模型评测仍记录工具选择、取证、澄清／修正、结论、次数、耗时、用量和缺口；本轮没有获准配置，不运行或伪造该结果。离线脚本的固定选择不作为 Agent 能力通过条件。

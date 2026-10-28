@@ -651,6 +651,10 @@ def validate_config(
         )
         if ref is not None
     )
+    refs.extend(
+        (f"dolphinscheduler_sources.{index}.token_ref", source.token_ref)
+        for index, source in enumerate(config.dolphinscheduler_sources)
+    )
     if config.feishu is not None:
         refs.append(("feishu.app_secret_ref", config.feishu.app_secret_ref))
     for index, bot in enumerate(config.webhook_bots):

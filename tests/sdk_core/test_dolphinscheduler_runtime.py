@@ -736,3 +736,17 @@ async def test_d2_formal_web_locates_middle_database_error_and_persists_only_sni
         await env.scalar("SELECT max(octet_length(model_content)) FROM xiaowei_evidence") < 16_384
     )
     assert await env.scalar("SELECT count(*) FROM xiaowei_evidence") == 1
+
+
+def test_config_check_validates_ds_secret_reference_before_any_client_or_io(monkeypatch):
+    from tests.sdk_core.test_runtime import real_env
+
+    from xiaowei.runtime import ConfigError, validate_config
+
+    real_env(monkeypatch)
+    monkeypatch.delenv("XW_TEST_DS_TOKEN", raising=False)
+    config = ServeConfig.model_validate(config_values(8501, [source()]))
+    with pytest.raises(ConfigError, match=r"dolphinscheduler_sources\.0\.token_ref"):
+        validate_config(config)
+    monkeypatch.setenv("XW_TEST_DS_TOKEN", "synthetic-token")
+    validate_config(config)

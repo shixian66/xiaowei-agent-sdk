@@ -429,6 +429,8 @@ def test_formal_compose_entry_success_failure_network_and_signal(
             # 本机演练重建真实 v5 形状，不能只改版本而留下后来新增的表或列。
             "BEGIN; DROP TABLE xiaowei_notification_attempt; DROP TABLE xiaowei_scheduled_run; "
             "DROP TABLE xiaowei_scheduled_job; "
+            "ALTER TABLE xiaowei_session DROP COLUMN ds_clusters, "
+            "DROP COLUMN ds_selection_turn; "
             "ALTER TABLE xiaowei_session DROP COLUMN task_content_purged; "
             "DROP TABLE xiaowei_delivery_part; "
             "ALTER TABLE xiaowei_request DROP COLUMN delivery_version; "
@@ -457,6 +459,13 @@ def test_formal_compose_entry_success_failure_network_and_signal(
             "AND column_name = 'session_state'",
         )
         assert legacy_columns.returncode == 0 and legacy_columns.stdout.strip() == "0"
+        legacy_ds_columns = _pg(
+            pg_id,
+            "SELECT count(*) FROM information_schema.columns "
+            "WHERE table_schema=current_schema() AND table_name='xiaowei_session' "
+            "AND column_name IN ('ds_clusters','ds_selection_turn')",
+        )
+        assert legacy_ds_columns.returncode == 0 and legacy_ds_columns.stdout.strip() == "0"
         legacy_images = _pg(
             pg_id,
             "SELECT count(*) FROM pg_tables WHERE schemaname = current_schema() "
