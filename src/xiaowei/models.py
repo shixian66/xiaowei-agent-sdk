@@ -58,6 +58,15 @@ ALERTMANAGER_READ_POLICIES = frozenset(
 )
 ACTION_STATUS_POLICY = "monitoring.action_status"
 """动作状态查询：结果进入动作区域，不进“其余结果”；不因此获得完整审批材料保护。"""
+DS_CONTROL_TARGET = "dolphinscheduler"
+DS_SELECT_TOOL = "local/ds_select_clusters"
+DS_METADATA_TOOLS = frozenset({
+    "local/ds_list_projects", "local/ds_list_workflow_instances",
+    "local/ds_get_workflow_instance", "local/ds_list_task_instances",
+})
+DS_READ_TOOLS = DS_METADATA_TOOLS | {"local/ds_read_task_log", "local/ds_search_task_log"}
+
+
 MONITORING_READ_POLICIES = (
     PROMETHEUS_READ_POLICIES | GRAFANA_READ_POLICIES | ALERTMANAGER_READ_POLICIES
 )
@@ -378,6 +387,8 @@ MonitoringFailureReason = Literal[
     "silence_missing",
     "object_missing",
     "unclassified",
+    "ds_auth", "ds_connect", "ds_timeout", "ds_unavailable", "ds_object_missing",
+    "ds_response_limit", "ds_invalid_response",
 ]
 
 
@@ -387,6 +398,7 @@ class MonitoringFailure(_Trusted):
     tool_id: ToolId
     target_id: Label
     reason: MonitoringFailureReason
+    object_ref: str | None = Field(default=None, max_length=128, exclude_if=lambda v: v is None)
 
 
 SessionRejectReason = Literal[

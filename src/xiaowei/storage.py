@@ -30,7 +30,7 @@ SDK_SESSIONS_TABLE = "agent_sessions"
 SDK_MESSAGES_TABLE = "agent_messages"
 _SDK_TABLES = frozenset({SDK_SESSIONS_TABLE, SDK_MESSAGES_TABLE})
 
-APP_SCHEMA_VERSION = 16
+APP_SCHEMA_VERSION = 17
 APP_TABLES = frozenset(
     {
         "xiaowei_schema_version",
@@ -67,6 +67,7 @@ _MIGRATIONS = (
     "migrations/014_scheduled_reminders.sql",
     "migrations/015_scheduled_agent.sql",
     "migrations/016_scheduled_result.sql",
+    "migrations/017_dolphinscheduler_selection.sql",
 )
 # 实例锁：会话级（serve）与事务级（初始化、升级）共用同一个键，二者互斥。锁按数据库区分。
 _INSTANCE_LOCK_KEY = 0x7869_6177_6569_0001

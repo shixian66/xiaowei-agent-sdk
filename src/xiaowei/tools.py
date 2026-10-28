@@ -30,6 +30,7 @@ from agents.tool_context import ToolContext
 from xiaowei.governance import (
     TARGET_ARGUMENT,
     AlertmanagerCorrectionError,
+    DolphinSchedulerReadError,
     Execute,
     GovernedTools,
     GrafanaObjectMissingError,
@@ -405,6 +406,10 @@ def _function_tool(
                 },
                 ensure_ascii=False,
             )
+        except DolphinSchedulerReadError as exc:
+            return json.dumps({"status": "unverified", "source": contract.target_id,
+                "reason": exc.reason, "object_ref": exc.object_ref, "retry_this_turn": False},
+                ensure_ascii=False)
         except MonitoringReadError as exc:
             return json.dumps(
                 {

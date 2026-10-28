@@ -59,6 +59,7 @@ from xiaowei.governance import (
 )
 from xiaowei.models import (
     ACTION_STATUS_POLICY,
+    DS_READ_TOOLS,
     MONITORING_READ_POLICIES,
     PROMETHEUS_QUERY_POLICIES,
     AgentAnswer,
@@ -144,6 +145,13 @@ UNSUPPORTED_FILE_NOTICE = "当前渠道不支持文件，结果以消息展示�
 LIMIT_NOTICE = "本轮步骤已用完，回答基于已取得的结果，可能不完整。"
 _MONITORING_REASONS = {
     "auth": "上游认证或授权失败",
+    "ds_auth": "DS 认证或授权失败",
+    "ds_connect": "DS 连接建立失败",
+    "ds_timeout": "DS 读取超时，结果未知",
+    "ds_unavailable": "DS 上游读取不可用",
+    "ds_object_missing": "DS 对象或日志不可用",
+    "ds_response_limit": "DS 读取达到容量上限",
+    "ds_invalid_response": "DS 返回不符合已核实契约",
     "timeout": "读取超时，结果未知",
     "unavailable": "源连接不可用，结果未知",
     "upstream_5xx": "上游服务错误",
@@ -580,7 +588,8 @@ class EvidenceStore:
             }
             executed = {action_ids[e] for e in actions if self._effect(by_id[e]) == "approval"}
             actions = [
-                e for e in actions
+                e
+                for e in actions
                 if self._effect(by_id[e]) != "propose" or action_ids[e] not in executed
             ]
         body = [e for e in cited if e not in action_evidence]
@@ -710,8 +719,10 @@ class EvidenceStore:
                 ),
             }
         )
-        if modern and record.identity.turn_id != ctx.identity.turn_id and (
-            is_task_fact(fact) or record.policy_id == ACTION_STATUS_POLICY
+        if (
+            modern
+            and record.identity.turn_id != ctx.identity.turn_id
+            and (is_task_fact(fact) or record.policy_id == ACTION_STATUS_POLICY)
         ):
             fact = fact.model_copy(update={"note_summary": "此前查询时"})
         elif record.identity.turn_id != ctx.identity.turn_id and section != "action":
@@ -857,7 +868,10 @@ class EvidenceStore:
             contract = self._catalog.contract(failure.tool_id, failure.target_id)
             if (
                 contract is None
-                or contract.policy_id not in MONITORING_READ_POLICIES
+                or (
+                    contract.policy_id not in MONITORING_READ_POLICIES
+                    and contract.tool_id not in DS_READ_TOOLS
+                )
                 or failure.target_id not in ctx.target_scope
             ):
                 raise AnswerRejectedError(
@@ -873,17 +887,20 @@ class EvidenceStore:
                 raise AnswerRejectedError(
                     AnswerRejectCode.EVIDENCE_UNAVAILABLE, "监控失败源当前不可读"
                 )
-            descriptions.setdefault(failure.target_id, set()).add(
-                _MONITORING_REASONS[failure.reason]
-            )
+            label = failure.target_id
+            if contract.tool_id in DS_READ_TOOLS:
+                note = self._catalog.policy_for(contract).fact_note or "DS " + label
+                label = note.split("；", 1)[0]
+            descriptions.setdefault(label, set()).add(_MONITORING_REASONS[failure.reason])
         sources = "；".join(
             f"{source}（{'、'.join(sorted(reasons))}）"
             for source, reasons in sorted(descriptions.items())
         )
         return (
-            f"监控源部分读取未核实（系统记录）：{sources}。失败调用没有成功证据；"
-            "其他成功查询仅证明各自覆盖范围，不能据此判定整体健康。"
-        )
+            f"DS 环境部分读取未核实（系统记录）：{sources}。失败调用没有成功证据；"
+            if any(f.tool_id in DS_READ_TOOLS for f in turn.monitoring_failures)
+            else f"监控源部分读取未核实（系统记录）：{sources}。失败调用没有成功证据；"
+        ) + "其他成功查询仅证明各自覆盖范围，不能据此判定整体健康。"
 
     async def _context_readable(
         self,
@@ -1242,7 +1259,8 @@ def _shown(record: EvidenceRecord, channel: Audience, note: str | None) -> _Show
     envelope = json.loads(record.projections[channel])
     data = None if envelope["empty"] else envelope["data"]
     if data is not None and record.tool_id in {
-        "history/search_operations", "history/read_operation"
+        "history/search_operations",
+        "history/read_operation",
     }:
         # 来源绑定留在原投影供内部复核；渠道事实只展示业务记录，不展示检索/证据标识。
         data = {key: value for key, value in data.items() if key != "sources"}

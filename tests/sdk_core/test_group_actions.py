@@ -3,6 +3,7 @@
 import asyncio
 import json
 from collections.abc import AsyncIterator
+from contextlib import ExitStack
 from dataclasses import dataclass, field, replace
 from datetime import timedelta
 
@@ -34,6 +35,8 @@ from xiaowei.actions import (
     proposal_policy,
 )
 from xiaowei.app import Application, DataPolicy
+from xiaowei.dolphinscheduler import DolphinScheduler, DSConfig
+from xiaowei.dolphinscheduler import catalog as ds_catalog
 from xiaowei.evidence import EvidenceStore
 from xiaowei.feishu import attributed
 from xiaowei.governance import GovernedTools, Projection, ToolCatalog, ToolPolicy
@@ -148,14 +151,29 @@ async def actions(
     monkeypatch.setenv(PROFILE.api_key_ref.removeprefix("env:"), FAKE_MODEL_KEY)
     async with ready_engine(postgres_url) as engine:
         clock, members = Clock(), Members()
+        stack = ExitStack()
+        request.addfinalizer(stack.close)
+        ds, ds_contracts, ds_policies = None, (), ()
+        ds_tools, ds_targets = frozenset(), frozenset()
+        if getattr(request, "param", None) == "ds":
+            from tests.sdk_core.test_dolphinscheduler_runtime import DS_TOOLS, ds_api, source
+
+            monkeypatch.setenv("XW_TEST_DS_TOKEN", "synthetic-token")
+            url, _ = stack.enter_context(ds_api())
+            sources = [DSConfig.model_validate(source(base_url=url))]
+            ds = DolphinScheduler(sources, clock)
+            ds_contracts, ds_policies = ds_catalog(sources, dict.fromkeys(AUDIENCES, 20_000))
+            ds_tools = frozenset(DS_TOOLS)
+            ds_targets = frozenset({"ds-b", "dolphinscheduler"})
+        shared = SHARED | ds_tools
         access = StaticAccess(
-            AccessConfig(policy_version="w5", grants={A: SHARED | {WRITE}, B: SHARED | {WRITE}}),
-            frozenset({TARGET, SOURCE}),
-            GroupAccess(scope=GROUP, tools=SHARED, members=members),
+            AccessConfig(policy_version="w5", grants={A: shared | {WRITE}, B: shared | {WRITE}}),
+            frozenset({TARGET, SOURCE}) | ds_targets,
+            GroupAccess(scope=GROUP, tools=shared, members=members),
             write_tools=frozenset({WRITE}),
         )
         base = catalog()
-        if feishu_bytes := getattr(request, "param", None):
+        if isinstance(feishu_bytes := getattr(request, "param", None), int):
             base = ToolCatalog(
                 base.contracts,
                 [
@@ -190,7 +208,7 @@ async def actions(
         statuses, status_policies = action_status_catalog([SOURCE], 10_000)
         policies = [base.policy_for(c) for c in base.contracts]
         combined = ToolCatalog(
-            (*base.contracts, propose, write, *statuses),
+            (*base.contracts, propose, write, *statuses, *ds_contracts),
             (
                 *policies,
                 proposal_policy(propose.policy_id, ChangeArgs, 10_000),
@@ -201,6 +219,7 @@ async def actions(
                     effect="write",
                 ),
                 *status_policies,
+                *ds_policies,
             ),
         )
         evidence = EvidenceStore(
@@ -211,10 +230,10 @@ async def actions(
         async with open_model(PROFILE, transport=scripts.transport()) as bound:
             app = Application(
                 app_config(
-                    purposes={"query": SHARED | {WRITE}, "diagnose": frozenset({TOTAL_TOOL})},
+                    purposes={"query": shared | {WRITE}, "diagnose": frozenset({TOTAL_TOOL})},
                     data_policies={
                         PROFILE.data_policy_id: DataPolicy(
-                            input=SessionInputPolicy(max_bytes=500), model_tools=SHARED | {WRITE}
+                            input=SessionInputPolicy(max_bytes=500), model_tools=shared | {WRITE}
                         )
                     },
                 ),
@@ -226,6 +245,7 @@ async def actions(
                     (QUERY_TOOL, TARGET): adapter.execute,
                 },
                 clock=clock,
+                dolphinscheduler=ds,
             )
             env = Env(engine, clock, members, access, adapter, scripts, evidence, app)
             action_adapter = ActionAdapter(clock)
@@ -245,7 +265,11 @@ async def actions(
             )
             async with hold_instance_lock(engine, env.store.readiness) as lock:
                 await env.store.recover(lock)
-                yield Actions(env, action_adapter, governance, lock, binding)
+                try:
+                    yield Actions(env, action_adapter, governance, lock, binding)
+                finally:
+                    if ds is not None:
+                        await ds.aclose()
 
 
 @pytest.mark.parametrize("verb", ["批准", "拒绝"])
@@ -360,3 +384,27 @@ async def test_invalid_approval_has_zero_writes(actions: Actions, failure: str) 
     assert await env.rows("SELECT state FROM xiaowei_request WHERE reply_message_id='om_a'") == [
         ("failed",)
     ]
+
+
+@pytest.mark.parametrize("actions", ["ds"], indirect=True)
+async def test_ds_selection_survives_native_pause_and_commits_only_after_resume(actions):
+    from tests.sdk_core.test_dolphinscheduler_runtime import ds_answer, list_failed
+
+    env = actions.env
+    env.scripts.add(
+        attributed(A, "查 DS B 后提出监控动作"),
+        tool_call("ds_select_clusters", clusters=["ds-b"]),
+        list_failed(),
+        tool_call("am-synthetic__propose_change", value="after"),
+        request_execution,
+        ds_answer,
+    )
+    async with running(env) as group:
+        await group.ask("查 DS B 后提出监控动作", message_id="om_ds_pause")
+        assert await env.rows("SELECT ds_clusters FROM xiaowei_session") == [(None,)]
+        action_id = await actions.one()
+        assert actions.adapter.calls == []
+        await group.ask(f"/批准 {action_id}", sender=B, message_id="om_ds_resume")
+        assert len(actions.adapter.calls) == 1
+        assert await env.rows("SELECT ds_clusters FROM xiaowei_session") == [(["ds-b"],)]
+        assert await env.rows("SELECT state FROM xiaowei_session") == [("active",)]
