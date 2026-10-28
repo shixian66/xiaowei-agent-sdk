@@ -450,12 +450,12 @@ async def test_dependency_projection_masks_secrets_before_truncation_and_persist
             for value in [
                 json.dumps(body),
                 *[
-                    await env.scalar(f"SELECT {column} FROM xiaowei_evidence LIMIT 1")
-                    for column in (
-                        "model_content",
-                        "session_content",
-                        "web_content",
-                        "feishu_content",
+                    await env.scalar(query)
+                    for query in (
+                        "SELECT model_content FROM xiaowei_evidence LIMIT 1",
+                        "SELECT session_content FROM xiaowei_evidence LIMIT 1",
+                        "SELECT web_content FROM xiaowei_evidence LIMIT 1",
+                        "SELECT feishu_content FROM xiaowei_evidence LIMIT 1",
                     )
                 ],
             ]:
