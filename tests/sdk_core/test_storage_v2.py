@@ -78,6 +78,7 @@ async def _install_v1(engine: AsyncEngine, *, through: str = "001_initial.sql") 
         "013_notification_attempt.sql",
         "014_scheduled_reminders.sql",
         "015_scheduled_agent.sql",
+        "016_scheduled_result.sql",
     ]
     async with engine.begin() as conn:
         for name in names[: names.index(through) + 1]:
@@ -115,7 +116,7 @@ def test_v2_migration_only_touches_application_tables() -> None:
         "014_scheduled_reminders.sql",
     ):
         assert "agent_" not in _migration(name)
-    assert APP_SCHEMA_VERSION == 16
+    assert APP_SCHEMA_VERSION == 17
     assert _V2_TABLES <= APP_TABLES
     assert all(name.startswith("xiaowei_") for name in APP_TABLES)
 
@@ -520,7 +521,7 @@ async def test_initialization_advances_the_schema_version(postgres_url: URL) -> 
     """全新初始化推进到当前版本。旧程序只接受各自版本由基线源码保证，这里不复制旧实现。"""
     async with open_engine(secret(postgres_url)) as engine:
         await initialize_storage(engine, digest_key=_DIGEST_KEY)
-        assert await _version(engine) == APP_SCHEMA_VERSION == 16
+        assert await _version(engine) == APP_SCHEMA_VERSION == 17
 
 
 async def test_failed_upgrade_rolls_back_completely(postgres_url: URL) -> None:
@@ -1030,7 +1031,7 @@ async def test_v15_upgrade_preserves_runs_and_adds_nullable_result(postgres_url:
             ))
         session = SQLAlchemySession("retained-session", engine=engine)
         await session.add_items([{"role": "assistant", "content": "SDK history is not a snapshot"}])
-        assert await upgrade_storage(engine, digest_key=_DIGEST_KEY) == 16
+        assert await upgrade_storage(engine, digest_key=_DIGEST_KEY) == 17
         await check_storage(engine)
         async with engine.connect() as conn:
             row = (await conn.execute(text(

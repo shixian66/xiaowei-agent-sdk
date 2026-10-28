@@ -22,6 +22,8 @@ import yaml
 from tests.deployment.conftest import docker
 from tests.deployment.test_release import APP_IMAGE, POSTGRES_IMAGE, ROOT, package
 
+from xiaowei.storage import APP_SCHEMA_VERSION
+
 POSTGRES_RUNTIME_IMAGE = (
     "postgres:16.15-bookworm@sha256:"
     "efedf3595f1d6f415c08568ba171029bf54052e754cc9f030e3f2412b21f3d67"
@@ -427,6 +429,7 @@ def test_formal_compose_entry_success_failure_network_and_signal(
             # 本机演练重建真实 v5 形状，不能只改版本而留下后来新增的表或列。
             "BEGIN; DROP TABLE xiaowei_notification_attempt; DROP TABLE xiaowei_scheduled_run; "
             "DROP TABLE xiaowei_scheduled_job; "
+            "ALTER TABLE xiaowei_session DROP COLUMN ds_clusters; "
             "ALTER TABLE xiaowei_session DROP COLUMN task_content_purged; "
             "DROP TABLE xiaowei_delivery_part; "
             "ALTER TABLE xiaowei_request DROP COLUMN delivery_version; "
@@ -455,6 +458,13 @@ def test_formal_compose_entry_success_failure_network_and_signal(
             "AND column_name = 'session_state'",
         )
         assert legacy_columns.returncode == 0 and legacy_columns.stdout.strip() == "0"
+        legacy_ds_columns = _pg(
+            pg_id,
+            "SELECT count(*) FROM information_schema.columns "
+            "WHERE table_schema=current_schema() AND table_name='xiaowei_session' "
+            "AND column_name='ds_clusters'",
+        )
+        assert legacy_ds_columns.returncode == 0 and legacy_ds_columns.stdout.strip() == "0"
         legacy_images = _pg(
             pg_id,
             "SELECT count(*) FROM pg_tables WHERE schemaname = current_schema() "
@@ -540,7 +550,10 @@ def test_formal_compose_entry_success_failure_network_and_signal(
             "upgrade",
             "--bind-existing-digest-key",
         )
-        assert restored.returncode == 0 and restored.stdout.strip() == "storage version 16"
+        assert (
+            restored.returncode == 0
+            and restored.stdout.strip() == f"storage version {APP_SCHEMA_VERSION}"
+        )
         upgrade_process = None
 
         wrong_key = "wrong digest $ # space ' quote"

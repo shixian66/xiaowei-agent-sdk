@@ -41,6 +41,9 @@ from pydantic import BaseModel
 
 from xiaowei.models import (
     AUDIENCES,
+    DS_CONTROL_TARGET,
+    DS_READ_TOOLS,
+    DS_SELECT_TOOL,
     MONITORING_READ_POLICIES,
     PROMETHEUS_QUERY_POLICIES,
     PROMETHEUS_SELECTOR_POLICIES,
@@ -291,6 +294,14 @@ class AlertmanagerCorrectionError(MonitoringReadError):
         self.correction_allowed = False
 
 
+class DolphinSchedulerReadError(Exception):
+    """DS 已分类读取失败；内部错误不进入此例外。"""
+
+    def __init__(self, reason: MonitoringFailureReason, object_ref: str | None = None) -> None:
+        self.reason, self.object_ref = reason, object_ref
+        super().__init__(reason)
+
+
 class GrafanaObjectMissingError(MonitoringReadError):
     """锁版返回已明确绑定当前 UID 不存在；允许读取其他获准对象。"""
 
@@ -459,6 +470,10 @@ class TurnRuns:
     truncated: int = 0
     rejected: int = 0
     limit_rescue_started: bool = False
+    ds_clusters: tuple[str, ...] | None = None
+    ds_read_scope: tuple[str, ...] | None = None
+    ds_log_reads: tuple[str, ...] = ()
+    ds_log_bytes: int = 0
     slot_busy: frozenset[str] = frozenset()
     slot_retries: frozenset[str] = frozenset()  # 一次配额，成功不复位。
     slot_retrying: frozenset[str] = frozenset()  # 跨工具/参数的在途独占。
@@ -583,7 +598,20 @@ class GovernedTools:
             raise ToolRejectedError("批准主体归属不符", code="not_allowed")
         if not await self._currently_authorized(principal, contract):
             raise ToolRejectedError("当前无权调用该工具", code="not_allowed")
-        if any(
+        if contract.tool_id in DS_READ_TOOLS:
+            ds = self.turn_runs(ctx.identity)
+            if contract.target_id not in (ds.ds_clusters or ()):
+                raise ToolRejectedError(
+                    "DS 环境未选或与选择不符；先自然澄清目标", code="not_allowed"
+                )
+            if ds.ds_read_scope is not None and contract.target_id not in ds.ds_read_scope:
+                raise ToolRejectedError("本轮已开始 DS 取数，不能扩大集合", code="not_allowed")
+            if any(
+                f.target_id == contract.target_id and f.reason in {"ds_auth", "ds_connect"}
+                for f in ds.monitoring_failures
+            ):
+                raise ToolRejectedError("该 DS 源本轮已停止，不自动重试", code="source_stopped")
+        if contract.tool_id not in DS_READ_TOOLS and any(
             failure.target_id == contract.target_id
             and failure.reason
             not in {
@@ -678,6 +706,9 @@ class GovernedTools:
         self._runs[key] = replace(
             runs,
             started=(*runs.started, contract.tool_id),
+            ds_read_scope=(runs.ds_clusters if runs.ds_read_scope is None else runs.ds_read_scope)
+            if contract.tool_id in DS_READ_TOOLS
+            else runs.ds_read_scope,
             slot_retries=runs.slot_retries | {target} if slot_retry else runs.slot_retries,
             slot_retrying=runs.slot_retrying | {target} if slot_retry else runs.slot_retrying,
         )
@@ -702,6 +733,20 @@ class GovernedTools:
                     self._runs[key] = replace(
                         current,
                         proposal_rejections=(*current.proposal_rejections, contract.tool_id),
+                    )
+                    raise
+                except DolphinSchedulerReadError as exc:
+                    if contract.tool_id not in DS_READ_TOOLS:
+                        raise ToolExecutionError() from None
+                    current = self.turn_runs(ctx.identity)
+                    failure = MonitoringFailure(
+                        tool_id=contract.tool_id,
+                        target_id=contract.target_id,
+                        reason=exc.reason,
+                        object_ref=exc.object_ref,
+                    )
+                    self._runs[key] = replace(
+                        current, monitoring_failures=(*current.monitoring_failures, failure)
                     )
                     raise
                 except MonitoringReadError as exc:
@@ -894,8 +939,12 @@ class GovernedTools:
                 self._runs[key] = replace(current, slot_busy=current.slot_busy | {target})
                 if inspection_scope is not None:
                     self._inspection_failed(
-                        ctx, contract, inspection_scope, "busy",
-                        call_id=effective.call_id, counted=False,
+                        ctx,
+                        contract,
+                        inspection_scope,
+                        "busy",
+                        call_id=effective.call_id,
+                        counted=False,
                     )
                 remaining: Literal[0, 1] = 0 if target in current.slot_retries else 1
                 raise ToolRejectedError(
@@ -955,8 +1004,7 @@ class GovernedTools:
         )
         self._runs[key] = replace(runs, inspection_failures=(*runs.inspection_failures, failure))
         logger.info(
-            "security_inspection turn=%s call_ref=%s target=%s reason=%s "
-            "counted=%s sql_started=%s",
+            "security_inspection turn=%s call_ref=%s target=%s reason=%s counted=%s sql_started=%s",
             ctx.identity.turn_id,
             hashlib.sha256(call_id.encode()).hexdigest()[:16],
             contract.target_id,
@@ -976,6 +1024,63 @@ class GovernedTools:
         """已有证据且开始无工具收尾；失败阶段仍可取得整轮治理计数。"""
         key = _turn_key(identity)
         self._runs[key] = replace(self._runs.get(key, TurnRuns()), limit_rescue_started=True)
+
+    async def select_dolphinscheduler(self, ctx: RunContext, clusters: tuple[str, ...]) -> None:
+        """仅更新本轮可信选择；复用目录、当前授权及工具预算，不登记业务查询。"""
+        contract = self._catalog.contract(DS_SELECT_TOOL, DS_CONTROL_TARGET)
+        if contract is None or not _in_scope(ctx, contract):
+            raise ToolRejectedError("本轮不可选择 DS 环境", code="not_allowed")
+        if not await self._currently_authorized(ctx.identity, contract):
+            raise ToolRejectedError("当前无权选择 DS 环境", code="not_allowed")
+        normalized = normalize_arguments(
+            self._catalog.policy_for(contract), {"clusters": list(clusters)}
+        )
+        chosen = tuple(dict.fromkeys(cast(list[str], normalized["clusters"])))
+        if await self.unavailable_dolphinscheduler(ctx, chosen):
+            raise ToolRejectedError("DS 环境未配置或当前不可用", code="not_allowed")
+        runs = self.turn_runs(ctx.identity)
+        if runs.ds_read_scope is not None and not set(chosen) <= set(runs.ds_read_scope):
+            raise ToolRejectedError("本轮已开始 DS 取数，不能扩大集合", code="not_allowed")
+        self._reserve(ctx)
+        self._runs[_turn_key(ctx.identity)] = replace(runs, ds_clusters=chosen)
+
+    async def unavailable_dolphinscheduler(
+        self, ctx: RunContext, clusters: tuple[str, ...]
+    ) -> tuple[str, ...]:
+        """可信 DS 目录的当前授权状态；既用于选择，也用于 Agent 的缺口说明。"""
+        contracts = self.allowed_contracts(ctx)
+        unavailable = []
+        for cluster in clusters:
+            candidates = [
+                c for c in contracts if c.target_id == cluster and c.tool_id in DS_READ_TOOLS
+            ]
+            authorized = False
+            for contract in candidates:
+                if await self._currently_authorized(ctx.identity, contract):
+                    authorized = True
+                    break
+            if not authorized:
+                unavailable.append(cluster)
+        return tuple(unavailable)
+
+    def load_dolphinscheduler_selection(
+        self, identity: Identity, clusters: tuple[str, ...] | None
+    ) -> None:
+        runs = self.turn_runs(identity)
+        self._runs[_turn_key(identity)] = replace(runs, ds_clusters=clusters)
+
+    def begin_dolphinscheduler_log(self, identity: Identity, object_ref: str) -> bool:
+        runs = self.turn_runs(identity)
+        if object_ref in runs.ds_log_reads:
+            return False
+        self._runs[_turn_key(identity)] = replace(
+            runs, ds_log_reads=(*runs.ds_log_reads, object_ref)
+        )
+        return True
+
+    def add_dolphinscheduler_log_bytes(self, identity: Identity, size: int) -> None:
+        runs = self.turn_runs(identity)
+        self._runs[_turn_key(identity)] = replace(runs, ds_log_bytes=runs.ds_log_bytes + size)
 
     def turn_runs(self, identity: Identity) -> TurnRuns:
         """本轮已开始执行的调用与已交给模型的证据；I/O 前被拒绝的调用不在其中。"""

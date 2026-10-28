@@ -3,6 +3,7 @@
 import asyncio
 import json
 from collections.abc import AsyncIterator
+from contextlib import ExitStack
 from dataclasses import dataclass, field, replace
 from datetime import timedelta
 
@@ -34,6 +35,8 @@ from xiaowei.actions import (
     proposal_policy,
 )
 from xiaowei.app import Application, DataPolicy
+from xiaowei.dolphinscheduler import DolphinScheduler, DSConfig
+from xiaowei.dolphinscheduler import catalog as ds_catalog
 from xiaowei.evidence import EvidenceStore
 from xiaowei.feishu import attributed
 from xiaowei.governance import GovernedTools, Projection, ToolCatalog, ToolPolicy
@@ -125,6 +128,7 @@ class Actions:
     governance: GovernedTools
     lock: InstanceLock
     binding: ActionBinding
+    ds_requests: list[object] = field(default_factory=list)
 
     def rebind(self, **changes) -> None:
         self.binding = replace(self.binding, **changes)
@@ -148,14 +152,49 @@ async def actions(
     monkeypatch.setenv(PROFILE.api_key_ref.removeprefix("env:"), FAKE_MODEL_KEY)
     async with ready_engine(postgres_url) as engine:
         clock, members = Clock(), Members()
+        stack = ExitStack()
+        request.addfinalizer(stack.close)
+        ds, ds_contracts, ds_policies = None, (), ()
+        ds_requests = []
+        ds_tools, ds_targets = frozenset(), frozenset()
+        if getattr(request, "param", None) in {"ds", "ds-log"}:
+            from tests.sdk_core.test_dolphinscheduler_runtime import DS_TOOLS, ds_api, source
+
+            monkeypatch.setenv("XW_TEST_DS_TOKEN", "synthetic-token")
+
+            def ds_response(path, params):
+                if path.endswith("download-log"):
+                    return b"SQLState 42S02 ods.order_delta missing\n"
+                if path.endswith("/701"):
+                    return {"code": 0, "data": {"id": 701, "processDefinitionCode": 99}}
+                return {
+                    "code": 0,
+                    "data": {
+                        "total": 1,
+                        "totalList": [{"id": 801, "processInstanceId": 701, "retryTimes": 0}],
+                    },
+                }
+
+            url, ds_requests = stack.enter_context(
+                ds_api(respond=ds_response if request.param == "ds-log" else None)
+            )
+            sources = [
+                DSConfig.model_validate(source(cluster, url + "/" + cluster))
+                for cluster in ("ds-a", "ds-b")
+            ]
+            ds = DolphinScheduler(sources, clock)
+            ds_contracts, ds_policies = ds_catalog(sources, dict.fromkeys(AUDIENCES, 20_000))
+            ds_tools = frozenset(DS_TOOLS)
+            ds_targets = frozenset({"ds-a", "ds-b", "dolphinscheduler"})
+        shared = SHARED | ds_tools
         access = StaticAccess(
-            AccessConfig(policy_version="w5", grants={A: SHARED | {WRITE}, B: SHARED | {WRITE}}),
-            frozenset({TARGET, SOURCE}),
-            GroupAccess(scope=GROUP, tools=SHARED, members=members),
+            AccessConfig(policy_version="w5", grants={A: shared | {WRITE}, B: shared | {WRITE}}),
+            frozenset({TARGET, SOURCE}) | ds_targets,
+            GroupAccess(scope=GROUP, tools=shared, members=members),
             write_tools=frozenset({WRITE}),
         )
         base = catalog()
-        if feishu_bytes := getattr(request, "param", None):
+        if isinstance(feishu_bytes := getattr(request, "param", None), int):
             base = ToolCatalog(
                 base.contracts,
                 [
@@ -190,7 +229,7 @@ async def actions(
         statuses, status_policies = action_status_catalog([SOURCE], 10_000)
         policies = [base.policy_for(c) for c in base.contracts]
         combined = ToolCatalog(
-            (*base.contracts, propose, write, *statuses),
+            (*base.contracts, propose, write, *statuses, *ds_contracts),
             (
                 *policies,
                 proposal_policy(propose.policy_id, ChangeArgs, 10_000),
@@ -201,6 +240,7 @@ async def actions(
                     effect="write",
                 ),
                 *status_policies,
+                *ds_policies,
             ),
         )
         evidence = EvidenceStore(
@@ -211,10 +251,10 @@ async def actions(
         async with open_model(PROFILE, transport=scripts.transport()) as bound:
             app = Application(
                 app_config(
-                    purposes={"query": SHARED | {WRITE}, "diagnose": frozenset({TOTAL_TOOL})},
+                    purposes={"query": shared | {WRITE}, "diagnose": frozenset({TOTAL_TOOL})},
                     data_policies={
                         PROFILE.data_policy_id: DataPolicy(
-                            input=SessionInputPolicy(max_bytes=500), model_tools=SHARED | {WRITE}
+                            input=SessionInputPolicy(max_bytes=500), model_tools=shared | {WRITE}
                         )
                     },
                 ),
@@ -226,8 +266,21 @@ async def actions(
                     (QUERY_TOOL, TARGET): adapter.execute,
                 },
                 clock=clock,
+                dolphinscheduler=ds,
             )
             env = Env(engine, clock, members, access, adapter, scripts, evidence, app)
+            if getattr(request, "param", None) == "ds-log":
+                from tests.sdk_core.test_channel_service import BUDGET
+
+                from xiaowei.channel import ChannelService, ResultDelivery
+
+                env.results = ResultDelivery(
+                    env.store,
+                    evidence,
+                    access,
+                    budget=BUDGET.model_copy(update={"max_tool_calls": 16, "max_turns": 12}),
+                )
+                env.service = ChannelService(app, env.results)
             action_adapter = ActionAdapter(clock)
             binding = ActionBinding(
                 propose,
@@ -245,7 +298,11 @@ async def actions(
             )
             async with hold_instance_lock(engine, env.store.readiness) as lock:
                 await env.store.recover(lock)
-                yield Actions(env, action_adapter, governance, lock, binding)
+                try:
+                    yield Actions(env, action_adapter, governance, lock, binding, ds_requests)
+                finally:
+                    if ds is not None:
+                        await ds.aclose()
 
 
 @pytest.mark.parametrize("verb", ["批准", "拒绝"])
@@ -274,7 +331,9 @@ async def test_approval_like_question_remains_a_model_question(env: Env, message
 @pytest.mark.parametrize("verb", ["批准", "拒绝"])
 @pytest.mark.parametrize("body", ["", " abc", " 00000000-0000-4000-8000-000000000001 extra"])
 async def test_explicit_malformed_approval_returns_format_receipt_without_model(
-    env: Env, verb, body,
+    env: Env,
+    verb,
+    body,
 ):
     command = f"/{verb}{body}"
     asked = env.scripts.add(attributed(A, command), clarify())
@@ -360,3 +419,136 @@ async def test_invalid_approval_has_zero_writes(actions: Actions, failure: str) 
     assert await env.rows("SELECT state FROM xiaowei_request WHERE reply_message_id='om_a'") == [
         ("failed",)
     ]
+
+
+@pytest.mark.parametrize("actions", ["ds"], indirect=True)
+@pytest.mark.parametrize("fail_after_resume", [False, True])
+async def test_ds_selection_survives_native_pause_and_commits_only_after_resume(
+    actions, fail_after_resume
+):
+    from tests.sdk_core.test_dolphinscheduler_runtime import ds_answer, list_failed
+
+    env = actions.env
+    env.scripts.add(
+        attributed(A, "查 DS B 后提出监控动作"),
+        tool_call("ds_select_clusters", clusters=["ds-b"]),
+        list_failed(),
+        tool_call("am-synthetic__propose_change", value="after"),
+        request_execution,
+        tool_call("missing_tool_after_resume") if fail_after_resume else ds_answer,
+    )
+    async with running(env) as group:
+        await group.ask("查 DS B 后提出监控动作", message_id="om_ds_pause")
+        assert await env.rows("SELECT ds_clusters FROM xiaowei_session") == [(None,)]
+        action_id = await actions.one()
+        assert actions.adapter.calls == []
+        await group.ask(f"/批准 {action_id}", sender=B, message_id="om_ds_resume")
+        assert len(actions.adapter.calls) == 1
+        assert await env.rows("SELECT ds_clusters FROM xiaowei_session") == [
+            (None if fail_after_resume else ["ds-b"],)
+        ]
+        assert await env.rows("SELECT state FROM xiaowei_session") == [("active",)]
+
+
+@pytest.mark.parametrize("actions", ["ds-log"], indirect=True)
+async def test_native_pause_releases_raw_log_and_restores_nonzero_usage_without_redownload(actions):
+    from tests.sdk_core.test_dolphinscheduler_runtime import ds_answer
+
+    env = actions.env
+
+    def finish(call):
+        ((ledger_json,),) = awaitable_ledger  # snapshot obtained while paused
+        ledger = json.loads(ledger_json)
+        runs = actions.governance.turn_runs(call_context[0])
+        assert runs.ds_log_bytes == ledger["runs"]["ds_log_bytes"] > 0
+        assert list(runs.ds_log_reads) == ledger["runs"]["ds_log_reads"]
+        assert any(f.reason == "ds_sample_expired" for f in runs.monitoring_failures)
+        return ds_answer(call)
+
+    search = tool_call(
+        "ds_search_task_log",
+        cluster="ds-b",
+        project_code=11,
+        workflow_instance_id=701,
+        task_id=801,
+        task_page_no=1,
+        terms=["SQLState"],
+        case_sensitive=False,
+        max_snippets=2,
+        context_lines=1,
+    )
+    read = tool_call(
+        "ds_read_task_log",
+        cluster="ds-b",
+        project_code=11,
+        workflow_instance_id=701,
+        task_id=801,
+        task_page_no=1,
+        line=1,
+        byte_offset=0,
+        line_count=2,
+    )
+    env.scripts.add(
+        attributed(A, "查 DS B 日志后提出监控动作"),
+        tool_call("ds_select_clusters", clusters=["ds-b"]),
+        search,
+        tool_call("am-synthetic__propose_change", value="after"),
+        request_execution,
+        read,
+        finish,
+    )
+    async with running(env, max_reply_chars=3500) as group:
+        await group.ask("查 DS B 日志后提出监控动作", message_id="om_ds_log_pause")
+        assert env.app.dolphinscheduler is not None
+        assert not env.app.dolphinscheduler._turns
+        awaitable_ledger = await env.rows("SELECT ledger FROM xiaowei_action_run")
+        ((context_json,),) = await env.rows("SELECT context FROM xiaowei_action_run")
+        from xiaowei.models import RunContext
+
+        call_context = [RunContext.model_validate_json(context_json).identity]
+        assert await env.rows("SELECT ds_clusters FROM xiaowei_session") == [(None,)]
+        action_id = await actions.one()
+        await group.ask(f"/批准 {action_id}", sender=B, message_id="om_ds_log_resume")
+        assert await env.rows(
+            "SELECT state FROM xiaowei_request WHERE reply_message_id='om_ds_log_resume'"
+        ) == [("completed",)]
+        assert await env.rows("SELECT ds_clusters FROM xiaowei_session") == [(["ds-b"],)]
+    assert sum(r[0].endswith("download-log") for r in actions.ds_requests) == 1
+
+
+@pytest.mark.parametrize("actions", ["ds"], indirect=True)
+async def test_ds_e6_and_d4_e2_share_group_selection_and_clarify_old_object(actions):
+    from tests.sdk_core.test_app import clarify
+    from tests.sdk_core.test_dolphinscheduler_runtime import ds_answer, list_failed
+
+    env = actions.env
+    async with running(env, max_reply_chars=3500) as group:
+        for number, (actor, cluster, message) in enumerate(
+            ((A, "ds-a", "查 DS A 昨晚失败任务"), (B, "ds-b", "B 上也这样吗"))
+        ):
+            env.scripts.add(
+                attributed(actor, message),
+                tool_call("ds_select_clusters", clusters=[cluster]),
+                list_failed(cluster),
+                ds_answer,
+            )
+            await group.ask(message, sender=actor, message_id=f"om_ds_set_{number}")
+            assert await env.rows("SELECT ds_clusters FROM xiaowei_session") == [([cluster],)]
+        env.scripts.add(attributed(A, "今天呢"), list_failed("ds-b"), ds_answer)
+        await group.ask("今天呢", sender=A, message_id="om_ds_follow")
+        assert [r[0].split("/")[1] for r in actions.ds_requests] == ["ds-a", "ds-b", "ds-b"]
+        before = len(actions.ds_requests)
+        env.scripts.add(
+            attributed(B, "刚才那个恢复了吗"), clarify("请明确 A 的原实例，还是 B 的实例？")
+        )
+        await group.ask("刚才那个恢复了吗", sender=B, message_id="om_ds_conflict")
+        assert len(actions.ds_requests) == before
+        assert await env.rows("SELECT ds_clusters FROM xiaowei_session") == [(["ds-b"],)]
+    from tests.sdk_core.test_feishu_render import text_parts
+
+    visible = "\n".join(
+        message if isinstance(message, str) else "\n".join(text_parts(message, folded=False))
+        for _, message in group.outbox.sent
+    )
+    assert "生产 B" in visible and "ds-b" in visible
+    assert "请明确 A" in visible

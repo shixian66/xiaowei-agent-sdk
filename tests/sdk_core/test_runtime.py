@@ -88,6 +88,7 @@ from xiaowei.starrocks_tools import (
 )
 from xiaowei.storage import (
     _INSTANCE_LOCK_KEY,
+    APP_SCHEMA_VERSION,
     Readiness,
     StorageBusyError,
     StorageDigestKeyMismatchError,
@@ -2000,7 +2001,7 @@ async def test_resend_requires_feishu(env: Env) -> None:
 async def test_storage_commands_use_the_configured_database(env: Env) -> None:
     config = env.config()
     await runtime.initialize(config)  # 已初始化时幂等
-    assert await runtime.upgrade(config) == 16
+    assert await runtime.upgrade(config) == APP_SCHEMA_VERSION
     report = await runtime.cleanup(config, batch_size=10)
     assert (report.sessions, report.unregistered) == (0, 0)
 
@@ -2028,7 +2029,7 @@ async def test_maintenance_commands_reject_a_digest_key_mismatch_before_business
             starrocks_connect=env.connect(config),
         )
 
-    assert await env.scalar("SELECT version FROM xiaowei_schema_version") == 16
+    assert await env.scalar("SELECT version FROM xiaowei_schema_version") == APP_SCHEMA_VERSION
     assert env.drv.attempts == 0 and channel.sends == []
 
 

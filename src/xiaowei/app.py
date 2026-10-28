@@ -33,7 +33,7 @@ import hashlib
 import json
 import logging
 import time
-from collections.abc import Callable, Iterator, Mapping, Sequence
+from collections.abc import Awaitable, Callable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -44,6 +44,7 @@ from uuid import uuid4
 if TYPE_CHECKING:
     from xiaowei.actions import ActionService
     from xiaowei.channel_store import CallerFailureCode
+    from xiaowei.dolphinscheduler import DolphinScheduler
     from xiaowei.progress import Progress
     from xiaowei.scheduled_tasks import ScheduledTasks
 
@@ -98,6 +99,7 @@ from xiaowei.model_api import (
 from xiaowei.models import (
     ACTION_STATUS_POLICY,
     ALERTMANAGER_READ_POLICIES,
+    DS_READ_TOOLS,
     GRAFANA_READ_POLICIES,
     MAX_ANSWER_BLOCKS,
     MAX_ANSWER_TEXT_BYTES,
@@ -481,6 +483,7 @@ class Application:
         notifications: WebhookNotifications | None = None,
         scheduled_tasks: ScheduledTasks | None = None,
         history: OperationHistory | None = None,
+        dolphinscheduler: DolphinScheduler | None = None,
     ) -> None:
         if not isinstance(model, ModelBinding):
             raise TypeError("应用配置：模型必须是 open_model 生成的运行绑定")
@@ -503,6 +506,7 @@ class Application:
         for target in config.targets:
             if target.target_id not in capabilities:
                 raise ValueError(f"应用配置：目标 {target.target_id} 没有登记的工具")
+        self.dolphinscheduler = dolphinscheduler
         self._local = _local_tools(governance, local_tools)
         if actions is not None and actions.governance is not governance:
             raise ValueError("Action 必须复用应用治理对象")
@@ -515,6 +519,9 @@ class Application:
             if contract.policy_id in PROMETHEUS_DISCOVERY_POLICIES | GRAFANA_READ_POLICIES
         )
         self._queries = config.purposes["query"] - config.purposes["diagnose"] - discovery
+        self._queries |= frozenset(
+            c.tool_id for c in catalog.contracts if c.tool_id in DS_READ_TOOLS
+        )
         self._read_queries = self._queries - frozenset(
             c.tool_id for c in catalog.contracts if catalog.policy_for(c).effect != "read"
         )
@@ -537,7 +544,12 @@ class Application:
         )
         self._data_policy = data_policy
         self._model = model
-        self._binding = _binding_fingerprint(model.fingerprint, data_policy, config.targets)
+        self._binding = _binding_fingerprint(
+            model.fingerprint,
+            data_policy,
+            config.targets,
+            ds=None if dolphinscheduler is None else dolphinscheduler.binding,
+        )
         self._instructions = _instructions(config.instructions, config.targets, capabilities)
         if any(contract.policy_id in MONITORING_READ_POLICIES for contract in catalog.contracts):
             self._instructions += "\n" + MONITORING_INSTRUCTIONS
@@ -599,7 +611,12 @@ class Application:
             else frozenset()
         )
         history = HISTORY_TOOLS if self.history is not None else frozenset()
-        return frozenset(self._local) | remote | action_tools | notify | scheduled | history
+        ds = (
+            self.dolphinscheduler.available_tools
+            if self.dolphinscheduler is not None
+            else frozenset()
+        )
+        return frozenset(self._local) | remote | action_tools | notify | scheduled | history | ds
 
     def scope_for_turn(
         self, mode: Mode, authorized_tools: frozenset[str], available_tools: frozenset[str]
@@ -725,6 +742,8 @@ class Application:
                         }
                     ),
                 )
+            if self.dolphinscheduler is not None:
+                await self.dolphinscheduler.end_turn(ctx.identity)
             self._governance.end_turn(ctx.identity)
             if not reserved:
                 self._active.discard(session_id)
@@ -801,6 +820,9 @@ class Application:
                 )
             user_input = [cast(TResponseInputItem, {"role": "user", "content": pieces})]
         session = self._session(ctx, allow_image_parts=bool(saved_images))
+        if self.dolphinscheduler is not None and native is None:
+            selection = await session.dolphinscheduler_selection()
+            self._governance.load_dolphinscheduler_selection(ctx.identity, selection)
         agent = self._agent(
             ctx,
             approval_requests,
@@ -971,6 +993,7 @@ class Application:
             inspection_failures=validated.inspection_failures,
             limit_reached=validated.limit_reached,
             source_records=source_records,
+            ds_clusters=runs.ds_clusters or None,
         )
         _stage(turn, "committed", started)
         return validated.model_copy(
@@ -1093,13 +1116,26 @@ class Application:
                 "已激活不等于此刻运行或巡检完成；通知接口接受不等于群内实收，未来只说按计划发送。"
                 f"允许自动的工具ID：{sorted(tasks.automatic_tools)}。"
             )
+        instructions: (
+            str | Callable[[RunContextWrapper[RunContext], Agent[RunContext]], str | Awaitable[str]]
+        ) = (
+            f"{self._instructions}{action_note}{report_note}\n"
+            f"本轮当前时间（UTC）：{self._clock().astimezone(UTC).isoformat()}。"
+            "相对日期须结合业务时区计算；历史结果的采集时间不是本轮当前时间。"
+        )
+        if self.dolphinscheduler is not None:
+            base = str(instructions)
+
+            async def ds_instructions(
+                wrapper: RunContextWrapper[RunContext], agent: Agent[RunContext]
+            ) -> str:
+                assert self.dolphinscheduler is not None  # noqa: S101 - bound at assembly
+                return base + await self.dolphinscheduler.prompt(wrapper.context, self._governance)
+
+            instructions = ds_instructions
         return Agent[RunContext](
             name="xiaowei",
-            instructions=(
-                f"{self._instructions}{action_note}{report_note}\n"
-                f"本轮当前时间（UTC）：{self._clock().astimezone(UTC).isoformat()}。"
-                "相对日期须结合业务时区计算；历史结果的采集时间不是本轮当前时间。"
-            ),
+            instructions=(instructions),
             model=self._model.model,
             model_settings=self._model.settings,
             tools=self._tools_for(ctx, approval_requests, replayed=replayed),
@@ -1505,7 +1541,9 @@ class Application:
                         current = await store.get_action(action_id, approval_ctx.identity)
                         if current.state == "executing":
                             await store.finish_action(
-                                claimed, "rejected", "已作废，未执行",
+                                claimed,
+                                "rejected",
+                                "已作废，未执行",
                                 failure_code="action_rejected",
                             )
                 except BaseException:
@@ -1517,6 +1555,8 @@ class Application:
                 raise _turn_error(exc) from None
             raise
         finally:
+            if self.dolphinscheduler is not None:
+                await self.dolphinscheduler.end_turn(original.identity)
             self._governance.end_turn(original.identity)
             self._active.discard(session_id)
             if token is not None and metrics is not None:
@@ -1548,7 +1588,12 @@ class Application:
         )
         scheduled = self.scheduled_tasks.tools_for(ctx) if self.scheduled_tasks is not None else []
         history = self.history.tools_for(ctx, self._governance) if self.history is not None else []
-        return [*local, *remote, *actions, *notify, *scheduled, *history]
+        ds = (
+            self.dolphinscheduler.tools_for(ctx, self._governance)
+            if self.dolphinscheduler is not None
+            else []
+        )
+        return [*local, *remote, *actions, *notify, *scheduled, *history, *ds]
 
     @staticmethod
     def _refuse(turn: str, started: float, reason: TurnReason) -> TurnError:
@@ -1720,7 +1765,11 @@ def _instructions(
 
 
 def _binding_fingerprint(
-    profile_fingerprint: str, policy: DataPolicy, targets: tuple[TargetInfo, ...]
+    profile_fingerprint: str,
+    policy: DataPolicy,
+    targets: tuple[TargetInfo, ...],
+    *,
+    ds: dict[str, str] | None = None,
 ) -> str:
     """会话绑定：Profile 指纹、解析后的数据策略内容、目标集合与各目标业务口径（规范化），
     任一变化都开启新会话。目标的用途说明只影响阅读，不进入绑定。
@@ -1732,6 +1781,8 @@ def _binding_fingerprint(
         "input": policy.input.model_dump(mode="json"),
         "model_tools": sorted(policy.model_tools),
     }
+    if ds:
+        body["dolphinscheduler"] = ds
     if targets:
         body["targets"] = {
             t.target_id: None

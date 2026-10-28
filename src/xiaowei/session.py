@@ -82,7 +82,7 @@ _INSERT_IF_ABSENT = text(
 )
 _SELECT = text(
     """
-    SELECT owner_kind, owner_id, channel, profile_fingerprint, expires_at, turns, state
+    SELECT owner_kind, owner_id, channel, profile_fingerprint, expires_at, turns, state, ds_clusters
     FROM xiaowei_session WHERE session_id = :session_id
     """
 )
@@ -93,6 +93,14 @@ _TRANSITION = text(
     WHERE session_id = :session_id AND owner_kind = :owner_kind AND owner_id = :owner_id
       AND channel = :channel
       AND state = :from_state
+    """
+)
+_COMMIT_DS = text(
+    """
+    UPDATE xiaowei_session SET state = 'active', turns = turns + 1,
+        ds_clusters = CAST(:ds_clusters AS JSONB)
+    WHERE session_id = :session_id AND owner_kind = :owner_kind AND owner_id = :owner_id
+      AND channel = :channel AND state = 'writing'
     """
 )
 _CLOSE = text(
@@ -445,6 +453,7 @@ class PolicySession:
         inspection_failures: Sequence[SecurityInspectionFailure] = (),
         limit_reached: bool = False,
         source_records: Sequence[tuple[EvidenceRecord, RunContext]] = (),
+        ds_clusters: tuple[str, ...] | None = None,
     ) -> SessionSnapshot:
         """校验本轮最终回答与完整历史后写入底层 Session；任何失败都不保留本轮暂存项。
 
@@ -454,7 +463,11 @@ class PolicySession:
         self._bytes = None
         pending, self._pending = _without_superseded_answers(self._pending), []
         await self._validate_final_answer(
-            pending, context_evidence, monitoring_failures, inspection_failures, limit_reached,
+            pending,
+            context_evidence,
+            monitoring_failures,
+            inspection_failures,
+            limit_reached,
             source_records,
         )
         # 只给可信的实际失败调用保存来源依赖，不存失败原文或完整 TurnAnswer；
@@ -490,7 +503,19 @@ class PolicySession:
             await self._inner.add_items(pending)
         except (OSError, SQLAlchemyError):
             raise SessionStoreError("会话保存失败，该会话已停止使用，请新建会话") from None
-        if not await self._transition("writing", "active", add_turns=1):
+        committed = (
+            await self._execute(
+                _COMMIT_DS,
+                {
+                    **self._owner(),
+                    "ds_clusters": json.dumps(ds_clusters),
+                },
+            )
+            == 1
+            if ds_clusters is not None
+            else await self._transition("writing", "active", add_turns=1)
+        )
+        if not committed:
             raise SessionStoreError("会话保存失败，该会话已停止使用，请新建会话")
         self._turns = turns + 1
         self._phase = "after_commit"
@@ -583,6 +608,16 @@ class PolicySession:
         except (OSError, SQLAlchemyError):
             raise SessionStoreError("会话存储不可用") from None
         return None if row is None else dict(row)
+
+    async def dolphinscheduler_selection(self) -> tuple[str, ...] | None:
+        await self._open()
+        row = await self._load()
+        value = None if row is None else row.get("ds_clusters")
+        if value is None:
+            return None
+        if not isinstance(value, list) or not all(isinstance(v, str) for v in value):
+            raise self._unavailable()
+        return tuple(value)
 
     async def _committed(self) -> list[TResponseInputItem]:
         try:

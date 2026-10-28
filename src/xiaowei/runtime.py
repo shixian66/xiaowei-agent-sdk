@@ -86,6 +86,8 @@ from xiaowei.config import (
     is_secret_ref,
     resolve_secret_ref,
 )
+from xiaowei.dolphinscheduler import DolphinScheduler, DSConfig
+from xiaowei.dolphinscheduler import catalog as ds_catalog
 from xiaowei.evidence import EvidenceStore
 from xiaowei.feishu import FeishuGateway, LarkChannel, LarkTransport, lark_channel, send_delivery
 from xiaowei.governance import GovernedTools, Projection, ToolCatalog, ToolPolicy
@@ -102,6 +104,9 @@ from xiaowei.mcp import MCPIntegration
 from xiaowei.model_api import ModelProfile, open_model
 from xiaowei.models import (
     AUDIENCES,
+    DS_CONTROL_TARGET,
+    DS_READ_TOOLS,
+    DS_SELECT_TOOL,
     GRAFANA_READ_POLICIES,
     PROMETHEUS_READ_POLICIES,
     AgentAnswer,
@@ -309,6 +314,7 @@ class ServeConfig(_Config):
     targets: tuple[DatabaseTargetConfig, ...] = Field(min_length=1)
     mcp_servers: tuple[MCPServerConfig, ...] = ()
     alertmanager_sources: tuple[AlertmanagerConfig, ...] = ()
+    dolphinscheduler_sources: tuple[DSConfig, ...] = ()
     webhook_bots: tuple[WebhookBotConfig, ...] = ()
     scheduled_tasks: ScheduledConfig | None = None
     projection_bytes: dict[Audience, Annotated[int, Field(gt=0)]]
@@ -401,9 +407,15 @@ class ServeConfig(_Config):
     @model_validator(mode="after")
     def _consistent(self) -> "ServeConfig":
         registered = _registered_tools(self)
-        source_ids = [s.server_id for s in self.mcp_servers] + [
-            s.server_id for s in self.alertmanager_sources
-        ]
+        source_ids = (
+            [s.server_id for s in self.mcp_servers]
+            + [s.server_id for s in self.alertmanager_sources]
+            + [s.cluster_id for s in self.dolphinscheduler_sources]
+        )
+        if self.dolphinscheduler_sources and DS_CONTROL_TARGET in (
+            set(source_ids) | {t.target_id for t in self.targets}
+        ):
+            raise ValueError("dolphinscheduler 是 DS 本地选择保留目标")
         if self.scheduled_tasks is not None:
             if not self.webhook_bots or self.feishu is None or self.feishu.group is None:
                 raise ValueError("定时提醒须配置 Webhook 和指定飞书群")
@@ -511,7 +523,8 @@ def _error_path(loc: tuple[int | str, ...], *, error_type: str = "") -> str:
         if loc[2] in {"starrocks", "tidb"}:
             loc = (*loc[:2], *loc[3:])
     if (
-        len(loc) == 2 and loc[0] == "targets"
+        len(loc) == 2
+        and loc[0] == "targets"
         and error_type in {"union_tag_invalid", "union_tag_not_found"}
     ):
         loc = (*loc, "type")
@@ -637,6 +650,10 @@ def validate_config(
             ("password_ref", source.password_ref),
         )
         if ref is not None
+    )
+    refs.extend(
+        (f"dolphinscheduler_sources.{index}.token_ref", source.token_ref)
+        for index, source in enumerate(config.dolphinscheduler_sources)
     )
     if config.feishu is not None:
         refs.append(("feishu.app_secret_ref", config.feishu.app_secret_ref))
@@ -845,12 +862,13 @@ def _registered_tools(config: ServeConfig) -> frozenset[str]:
     }
     notify = {NOTIFY_TOOL} if config.webhook_bots else set()
     return (
-        HISTORY_TOOLS |
-        QUERY_TOOLS
+        HISTORY_TOOLS
+        | QUERY_TOOLS
         | ({"local/query_diagnostics"} if any(t.type == "tidb" for t in config.targets) else set())
         | (AUDIT_TOOLS if audited else frozenset())
         | ({SECURITY_TOOL} if audited else frozenset())
         | monitoring
+        | ((DS_READ_TOOLS | {DS_SELECT_TOOL}) if config.dolphinscheduler_sources else set())
         | notify
         | (TASK_TOOLS if config.scheduled_tasks is not None else frozenset())
     )
@@ -1393,17 +1411,35 @@ def _app_config(config: ServeConfig) -> AppConfig:
     }
     notify = frozenset({NOTIFY_TOOL}) if config.webhook_bots else frozenset()
     scheduled = TASK_TOOLS if config.scheduled_tasks is not None else frozenset()
+    ds = DS_READ_TOOLS if config.dolphinscheduler_sources else frozenset()
+    selection = {DS_SELECT_TOOL} if config.dolphinscheduler_sources else set()
     security = _registered_tools(config) & {SECURITY_TOOL}
     audit = (
-        _registered_tools(config) - QUERY_TOOLS - monitoring - write_tools - notify - scheduled
-        - security - HISTORY_TOOLS
+        _registered_tools(config)
+        - QUERY_TOOLS
+        - monitoring
+        - write_tools
+        - notify
+        - scheduled
+        - security
+        - HISTORY_TOOLS
+        - ds
+        - selection
     )
     return AppConfig(
         purposes={
             "query": (
-                QUERY_TOOLS | audit | security | monitoring | notify | scheduled | HISTORY_TOOLS
+                QUERY_TOOLS
+                | audit
+                | security
+                | monitoring
+                | notify
+                | scheduled
+                | HISTORY_TOOLS
+                | ds
+                | selection
             ),
-            "diagnose": (DIAGNOSE_TOOLS | audit | HISTORY_TOOLS),
+            "diagnose": (DIAGNOSE_TOOLS | audit | HISTORY_TOOLS | ds | selection),
         },
         data_policies={config.model.data_policy_id: config.data_policy},
         session_limits=config.session_limits,
@@ -1621,15 +1657,22 @@ def _delivery(
     api_contracts, api_policies = alertmanager_catalog(
         config.alertmanager_sources, config.projection_bytes
     )
+    ds_contracts, ds_policies = ds_catalog(config.dolphinscheduler_sources, config.projection_bytes)
     targets = (
-        frozenset(schemas) | {HISTORY_TARGET}
+        frozenset(schemas)
+        | {HISTORY_TARGET}
         | {server.server_id for server in config.mcp_servers}
         | {source.server_id for source in config.alertmanager_sources}
+        | {source.cluster_id for source in config.dolphinscheduler_sources}
+        | ({DS_CONTROL_TARGET} if config.dolphinscheduler_sources else set())
         | ({NOTIFY_TARGET} if config.webhook_bots else set())
         | ({TASK_TARGET} if config.scheduled_tasks is not None else set())
     )
     action_contracts, action_policies = action_status_catalog(
-        targets - frozenset(schemas) - {NOTIFY_TARGET, HISTORY_TARGET},
+        targets
+        - frozenset(schemas)
+        - {NOTIFY_TARGET, HISTORY_TARGET, DS_CONTROL_TARGET}
+        - {s.cluster_id for s in config.dolphinscheduler_sources},
         config.projection_bytes,
     )
     catalog = ToolCatalog(
@@ -1638,6 +1681,7 @@ def _delivery(
             *history_contracts,
             *monitoring_contracts,
             *api_contracts,
+            *ds_contracts,
             *action_contracts,
             *notify_contracts,
             *task_contracts,
@@ -1647,6 +1691,7 @@ def _delivery(
             *history_policies,
             *monitoring_policies,
             *api_policies,
+            *ds_policies,
             *action_policies,
             *notify_policies,
             *task_policies,
@@ -1694,13 +1739,18 @@ def _delivery(
         )
 
     history = OperationHistory(
-        engine, evidence, clock, execution_requests(config.data_policy.model_tools),
+        engine,
+        evidence,
+        clock,
+        execution_requests(config.data_policy.model_tools),
         max(t.connection.policy.max_rows for t in config.targets),
     )
 
     async def check_content(
-        record: EvidenceRecord, ctx: RunContext,
-        recipient_tools: frozenset[str] | None, recipient_targets: frozenset[str] | None,
+        record: EvidenceRecord,
+        ctx: RunContext,
+        recipient_tools: frozenset[str] | None,
+        recipient_targets: frozenset[str] | None,
     ) -> None:
         if definitions is not None:
             await definitions.check_content(record, ctx, recipient_tools, recipient_targets)
@@ -1775,11 +1825,13 @@ def _database_adapter(
 ) -> StarRocksAdapter:
     if target.type == "tidb":
         return (
-            open_tidb(target.tidb, clock=clock) if connects is None
+            open_tidb(target.tidb, clock=clock)
+            if connects is None
             else TiDBAdapter(target.tidb, connect=connects[target.target_id], clock=clock)
         )
     return (
-        open_starrocks(target.starrocks, clock=clock) if connects is None
+        open_starrocks(target.starrocks, clock=clock)
+        if connects is None
         else StarRocksAdapter(target.starrocks, connect=connects[target.target_id], clock=clock)
     )
 
@@ -1887,12 +1939,20 @@ async def open_runtime(
                 ),
             )
             await scheduled.recover()
+        ds = (
+            DolphinScheduler(config.dolphinscheduler_sources, clock)
+            if config.dolphinscheduler_sources
+            else None
+        )
+        if ds is not None:
+            stack.push_async_callback(ds.aclose)
         app = Application(
             _app_config(config),
             model=model,
             engine=engine,
             governance=governance,
             local_tools=executes,
+            dolphinscheduler=ds,
             history=parts.history,
             mcp=mcp,
             clock=clock,
