@@ -164,6 +164,8 @@ _DESCRIPTIONS = {
     "ds_list_workflow_instances": (
         "查 DS 顶层失败/运行/历史实例，一次指定页。时间是带时区的绝对启动窗口，"
         "不是失败发生窗口；上游 total 不等于已读完整数量。定义 code 可从实例详情获得。"
+        "projection_omitted>0 时须减小 page_size，按 page_start_offset 重算页号补读，"
+        "不能直接跳过该页中未投影记录。"
     ),
     "ds_get_workflow_instance": (
         "读取指定 DS 运行的状态、定义版本与时间；按运行 ID 定位，不拿最新同名运行替代。"
@@ -299,7 +301,9 @@ class DSAdapter:
         except httpx2.HTTPError:
             raise DolphinSchedulerReadError("ds_unavailable") from None
 
-    async def execute(self, name: str, request: ToolRequest) -> ToolObservation:
+    async def execute(
+        self, name: str, request: ToolRequest, *, output_limit: int = 16_384
+    ) -> ToolObservation:
         args = request.arguments
         params: dict[str, str] = {}
         route = "process-instances" if self.config.version == "3.1.8" else "workflow-instances"
@@ -344,25 +348,57 @@ class DSAdapter:
             if not isinstance(raw_total, int) or raw_total < 0:
                 raise DolphinSchedulerReadError("ds_invalid_response")
             total = raw_total
+        boundary_excluded = 0
+        if name == "ds_list_workflow_instances" and (args["start_time"] or args["end_time"]):
+            start = datetime.fromisoformat(str(args["start_time"])) if args["start_time"] else None
+            end = datetime.fromisoformat(str(args["end_time"])) if args["end_time"] else None
+            filtered = []
+            for row in records:
+                try:
+                    stamp = datetime.fromisoformat(str(row["startTime"]))
+                    if stamp.tzinfo is None:
+                        stamp = stamp.replace(tzinfo=ZoneInfo(self.config.time_zone))
+                except (KeyError, ValueError):
+                    raise DolphinSchedulerReadError("ds_invalid_response") from None
+                if (start is None or stamp >= start) and (end is None or stamp < end):
+                    filtered.append(row)
+            boundary_excluded = len(records) - len(filtered)
+            records = filtered
         page = int(str(args.get("page_no", 1)))
         size = int(str(args.get("page_size", 1)))
-        return ToolObservation(
-            payload={
-                "environment": self.config.description,
-                "cluster": self.config.cluster_id,
-                "kind": name,
-                "records": records,
-                "coverage": {
-                    "page_no": page,
-                    "upstream_total": total,
-                    "has_more": page * size < total,
-                    "scope": "顶层运行；按启动时间过滤"
-                    if name == "ds_list_workflow_instances"
-                    else "指定对象／页",
-                },
+        payload: dict[str, object] = {
+            "environment": self.config.description,
+            "cluster": self.config.cluster_id,
+            "kind": name,
+            "records": records,
+            "coverage": {
+                "page_no": page,
+                "page_size": size,
+                "page_start_offset": (page - 1) * size,
+                "upstream_total": total,
+                "has_more": page * size < total,
+                "boundary_excluded": boundary_excluded,
+                "projection_omitted": 0,
+                "scope": "顶层运行；按启动时间过滤"
+                if name == "ds_list_workflow_instances"
+                else "指定对象／页",
             },
+        }
+        coverage = payload["coverage"]
+        assert isinstance(coverage, dict)  # noqa: S101 - constructed above
+        # 既有 Evidence envelope 还含固定长度 ID 和标记，预留 256 字节；不拆开一条记录。
+        while (
+            len(json.dumps(payload, ensure_ascii=False, allow_nan=False).encode())
+            > output_limit - 256
+        ):
+            if not records:
+                raise DolphinSchedulerReadError("ds_response_limit")
+            records.pop()
+            coverage["projection_omitted"] += 1
+        return ToolObservation(
+            payload=payload,
             captured_at=self.clock(),
-            truncated=page * size < total,
+            truncated=page * size < total or bool(coverage["projection_omitted"]),
         )
 
 
@@ -430,7 +466,13 @@ class DolphinScheduler:
                 async def execute(
                     request: ToolRequest, *, bound: DSAdapter = adapter, operation: str = name
                 ) -> ToolObservation:
-                    return await bound.execute(operation, request)
+                    contract = governance.catalog.contract(request.tool_id, request.target_id)
+                    assert contract is not None  # noqa: S101 - governed registered request
+                    limit = min(
+                        p.max_bytes
+                        for p in governance.catalog.policy_for(contract).projections.values()
+                    )
+                    return await bound.execute(operation, request, output_limit=limit)
 
                 executes[cluster] = execute
             tool = routed_function_tool(tool_id, governance, executes)
