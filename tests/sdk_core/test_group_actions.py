@@ -387,7 +387,10 @@ async def test_invalid_approval_has_zero_writes(actions: Actions, failure: str) 
 
 
 @pytest.mark.parametrize("actions", ["ds"], indirect=True)
-async def test_ds_selection_survives_native_pause_and_commits_only_after_resume(actions):
+@pytest.mark.parametrize("fail_after_resume", [False, True])
+async def test_ds_selection_survives_native_pause_and_commits_only_after_resume(
+    actions, fail_after_resume
+):
     from tests.sdk_core.test_dolphinscheduler_runtime import ds_answer, list_failed
 
     env = actions.env
@@ -397,7 +400,7 @@ async def test_ds_selection_survives_native_pause_and_commits_only_after_resume(
         list_failed(),
         tool_call("am-synthetic__propose_change", value="after"),
         request_execution,
-        ds_answer,
+        tool_call("missing_tool_after_resume") if fail_after_resume else ds_answer,
     )
     async with running(env) as group:
         await group.ask("查 DS B 后提出监控动作", message_id="om_ds_pause")
@@ -406,5 +409,7 @@ async def test_ds_selection_survives_native_pause_and_commits_only_after_resume(
         assert actions.adapter.calls == []
         await group.ask(f"/批准 {action_id}", sender=B, message_id="om_ds_resume")
         assert len(actions.adapter.calls) == 1
-        assert await env.rows("SELECT ds_clusters FROM xiaowei_session") == [(["ds-b"],)]
+        assert await env.rows("SELECT ds_clusters FROM xiaowei_session") == [
+            (None if fail_after_resume else ["ds-b"],)
+        ]
         assert await env.rows("SELECT state FROM xiaowei_session") == [("active",)]

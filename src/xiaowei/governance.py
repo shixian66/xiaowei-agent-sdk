@@ -473,6 +473,8 @@ class TurnRuns:
     ds_clusters: tuple[str, ...] | None = None
     ds_read_scope: tuple[str, ...] | None = None
     ds_selection_changed: bool = False
+    ds_log_reads: tuple[str, ...] = ()
+    ds_log_bytes: int = 0
     slot_busy: frozenset[str] = frozenset()
     slot_retries: frozenset[str] = frozenset()  # 一次配额，成功不复位。
     slot_retrying: frozenset[str] = frozenset()  # 跨工具/参数的在途独占。
@@ -1056,6 +1058,19 @@ class GovernedTools:
     ) -> None:
         runs = self.turn_runs(identity)
         self._runs[_turn_key(identity)] = replace(runs, ds_clusters=clusters)
+
+    def begin_dolphinscheduler_log(self, identity: Identity, object_ref: str) -> bool:
+        runs = self.turn_runs(identity)
+        if object_ref in runs.ds_log_reads:
+            return False
+        self._runs[_turn_key(identity)] = replace(
+            runs, ds_log_reads=(*runs.ds_log_reads, object_ref)
+        )
+        return True
+
+    def add_dolphinscheduler_log_bytes(self, identity: Identity, size: int) -> None:
+        runs = self.turn_runs(identity)
+        self._runs[_turn_key(identity)] = replace(runs, ds_log_bytes=runs.ds_log_bytes + size)
 
     def turn_runs(self, identity: Identity) -> TurnRuns:
         """本轮已开始执行的调用与已交给模型的证据；I/O 前被拒绝的调用不在其中。"""

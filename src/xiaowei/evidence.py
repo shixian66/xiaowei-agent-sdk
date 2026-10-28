@@ -145,6 +145,7 @@ UNSUPPORTED_FILE_NOTICE = "当前渠道不支持文件，结果以消息展示�
 LIMIT_NOTICE = "本轮步骤已用完，回答基于已取得的结果，可能不完整。"
 _MONITORING_REASONS = {
     "auth": "上游认证或授权失败",
+    "ds_sample_expired": "本轮临时日志已释放；保留原片段，下一轮才重新取样",
     "ds_auth": "DS 认证或授权失败",
     "ds_connect": "DS 连接建立失败",
     "ds_timeout": "DS 读取超时，结果未知",
@@ -891,16 +892,20 @@ class EvidenceStore:
             if contract.tool_id in DS_READ_TOOLS:
                 note = self._catalog.policy_for(contract).fact_note or "DS " + label
                 label = note.split("；", 1)[0]
-            descriptions.setdefault(label, set()).add(_MONITORING_REASONS[failure.reason])
+            description = _MONITORING_REASONS[failure.reason]
+            if contract.tool_id in DS_READ_TOOLS and failure.object_ref:
+                description += f"；对象 {failure.object_ref}"
+            descriptions.setdefault(label, set()).add(description)
         sources = "；".join(
             f"{source}（{'、'.join(sorted(reasons))}）"
             for source, reasons in sorted(descriptions.items())
         )
+        ds_failures = [f.tool_id in DS_READ_TOOLS for f in turn.monitoring_failures]
+        title = "DS 环境" if all(ds_failures) else ("DS／监控源" if any(ds_failures) else "监控源")
         return (
-            f"DS 环境部分读取未核实（系统记录）：{sources}。失败调用没有成功证据；"
-            if any(f.tool_id in DS_READ_TOOLS for f in turn.monitoring_failures)
-            else f"监控源部分读取未核实（系统记录）：{sources}。失败调用没有成功证据；"
-        ) + "其他成功查询仅证明各自覆盖范围，不能据此判定整体健康。"
+            f"{title}部分读取未核实（系统记录）：{sources}。失败调用没有成功证据；"
+            "其他成功查询仅证明各自覆盖范围，不能据此判定整体健康。"
+        )
 
     async def _context_readable(
         self,

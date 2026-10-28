@@ -387,6 +387,7 @@ MonitoringFailureReason = Literal[
     "silence_missing",
     "object_missing",
     "unclassified",
+    "ds_sample_expired",
     "ds_auth", "ds_connect", "ds_timeout", "ds_unavailable", "ds_object_missing",
     "ds_response_limit", "ds_invalid_response",
 ]

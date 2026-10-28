@@ -742,6 +742,8 @@ class Application:
                         }
                     ),
                 )
+            if self.dolphinscheduler is not None:
+                await self.dolphinscheduler.end_turn(ctx.identity)
             self._governance.end_turn(ctx.identity)
             if not reserved:
                 self._active.discard(session_id)
@@ -1551,6 +1553,8 @@ class Application:
                 raise _turn_error(exc) from None
             raise
         finally:
+            if self.dolphinscheduler is not None:
+                await self.dolphinscheduler.end_turn(original.identity)
             self._governance.end_turn(original.identity)
             self._active.discard(session_id)
             if token is not None and metrics is not None:

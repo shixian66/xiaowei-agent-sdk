@@ -1,8 +1,10 @@
 """DolphinScheduler 3.1.8/3.4.0 的有界只读 API；依赖仅由应用装配。"""
 
+import asyncio
 import hashlib
 import json
 from collections.abc import Callable, Mapping, Sequence
+from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Annotated, Literal
 from urllib.parse import urlsplit
@@ -14,6 +16,7 @@ from agents.tool_context import ToolContext
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from xiaowei.config import is_secret_ref, resolve_secret_ref
+from xiaowei.dolphinscheduler_logs import LogSample, read_log, redact_bytes, search_log
 from xiaowei.governance import (
     DolphinSchedulerReadError,
     GovernedTools,
@@ -27,6 +30,7 @@ from xiaowei.models import (
     DS_SELECT_TOOL,
     Audience,
     ClusterId,
+    Identity,
     RunContext,
     ToolContract,
     ToolObservation,
@@ -46,8 +50,8 @@ class DSConfig(BaseModel):
     time_zone: str
     timeout_seconds: float = Field(default=15, gt=0, le=300)
     max_response_bytes: int = Field(default=1_048_576, ge=4096)
-    max_log_bytes: int = Field(default=16 * 1024 * 1024, gt=0)
-    max_turn_log_bytes: int = Field(default=32 * 1024 * 1024, gt=0)
+    max_log_bytes: int = Field(default=16 * 1024 * 1024, gt=0, le=16 * 1024 * 1024)
+    max_turn_log_bytes: int = Field(default=32 * 1024 * 1024, gt=0, le=32 * 1024 * 1024)
 
     @field_validator("api_base_url")
     @classmethod
@@ -153,13 +157,49 @@ class TaskArgs(ProjectArgs):
     state: str | None
 
 
+class LogArgs(_Args):
+    cluster: ClusterId
+    project_code: Annotated[int, Field(gt=0)]
+    workflow_instance_id: Annotated[int, Field(gt=0)]
+    task_id: Annotated[int, Field(gt=0)]
+    task_page_no: Annotated[int, Field(ge=1)]
+
+
+class ReadLogArgs(LogArgs):
+    line: Annotated[int, Field(ge=1)]
+    byte_offset: Annotated[int, Field(ge=0)]
+    line_count: Annotated[int, Field(ge=1, le=100)]
+
+
+class SearchLogArgs(LogArgs):
+    terms: tuple[Annotated[str, Field(min_length=1, max_length=200)], ...] = Field(
+        min_length=1, max_length=8
+    )
+    case_sensitive: bool
+    max_snippets: Annotated[int, Field(ge=1, le=8)]
+    context_lines: Annotated[int, Field(ge=0, le=5)]
+
+
 ARGS: dict[str, type[BaseModel]] = {
     "ds_list_projects": ProjectArgs,
     "ds_list_workflow_instances": InstanceArgs,
     "ds_get_workflow_instance": DetailArgs,
     "ds_list_task_instances": TaskArgs,
+    "ds_read_task_log": ReadLogArgs,
+    "ds_search_task_log": SearchLogArgs,
 }
 _DESCRIPTIONS = {
+    "ds_read_task_log": (
+        "按原文件1起始行号和行内UTF-8字节偏移补读 DS 日志；每次有限片段，单轮同任务只下载一次。"
+        "完整身份必填，task_page_no为任务列表所在页（100条/页），已有本轮任务事实则复用。"
+        "超过已接收范围不代表EOF；同轮改行号/偏移只读缓存，失败不重新下载。"
+    ),
+    "ds_search_task_log": (
+        "在 DS 日志未知位置找异常/SQLState/对象名/时间事件；最多8个字面词，非正则。"
+        "case_sensitive=false仅ASCII忽略大小写。返回每词命中数和有限代表片段；"
+        "通用ERROR噪声可换具体词，未见不证明不存在；位置可交给read工具补上下文。"
+        "完整身份必填，task_page_no为100条/页的任务所在页；同轮复用，失败不重新下载。"
+    ),
     "ds_list_projects": "DS 项目不明确时按关键词找获准项目，一次只读指定页；空页可换词。",
     "ds_list_workflow_instances": (
         "查 DS 顶层失败/运行/历史实例，一次指定页。时间是带时区的绝对启动窗口，"
@@ -200,7 +240,7 @@ _FIELDS = (
     "duration",
     "dependentResult",
 )
-_PAYLOAD_FIELDS = ("environment", "cluster", "kind", "records", "coverage")
+_PAYLOAD_FIELDS = ("environment", "cluster", "kind", "records", "coverage", "task")
 
 
 def catalog(
@@ -214,7 +254,7 @@ def catalog(
                 policy_id,
                 arguments,
                 {a: Projection(_PAYLOAD_FIELDS, limits[a]) for a in AUDIENCES},
-                required=_PAYLOAD_FIELDS,
+                required=("environment", "cluster", "kind", "records", "coverage"),
                 fact_note="DS " + source.description + "；只证明采集时刻及本次覆盖范围。",
             )
             contracts.append(
@@ -339,6 +379,8 @@ class DSAdapter:
                 params[api_key] = str(args[key])
         data = await self._json(path, params)
         if name == "ds_get_workflow_instance":
+            if not isinstance(data, dict) or data.get("id") != args["workflow_instance_id"]:
+                raise DolphinSchedulerReadError("ds_invalid_response")
             records, total = [_record(data)], 1
         else:
             if not isinstance(data, dict) or not isinstance(data.get("totalList"), list):
@@ -348,6 +390,14 @@ class DSAdapter:
             if not isinstance(raw_total, int) or raw_total < 0:
                 raise DolphinSchedulerReadError("ds_invalid_response")
             total = raw_total
+        if name == "ds_list_task_instances":
+            owner = "processInstanceId" if self.config.version == "3.1.8" else "workflowInstanceId"
+            if any(
+                row.get(owner) != args["workflow_instance_id"]
+                or row.get("projectCode", args["project_code"]) != args["project_code"]
+                for row in records
+            ):
+                raise DolphinSchedulerReadError("ds_invalid_response")
         boundary_excluded = 0
         if name == "ds_list_workflow_instances" and (args["start_time"] or args["end_time"]):
             start = datetime.fromisoformat(str(args["start_time"])) if args["start_time"] else None
@@ -417,6 +467,8 @@ class DolphinScheduler:
 
     def __init__(self, sources: Sequence[DSConfig], clock: Callable[[], datetime]) -> None:
         self.adapters = {s.cluster_id: DSAdapter(s, clock) for s in sources}
+        self._turns: dict[tuple[str, str, str, str], _LogTurn] = {}
+        self._log_limit = min((s.max_turn_log_bytes for s in sources), default=32 * 1024 * 1024)
 
     @property
     def available_tools(self) -> frozenset[str]:
@@ -429,6 +481,225 @@ class DolphinScheduler:
     async def aclose(self) -> None:
         for adapter in self.adapters.values():
             await adapter.aclose()
+
+    async def end_turn(self, identity: Identity) -> None:
+        turn = self._turns.pop(_log_turn_key(identity), None)
+        if turn is not None:
+            tasks = list(turn.logs.values())
+            for task in tasks:
+                if not task.done():
+                    task.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
+
+    async def execute(
+        self,
+        request: ToolRequest,
+        ctx: RunContext,
+        governance: GovernedTools,
+        *,
+        output_limit: int = 16_384,
+    ) -> ToolObservation:
+        adapter = self.adapters[request.target_id]
+        name = request.tool_id.partition("/")[2]
+        turn = self._turns.setdefault(_log_turn_key(ctx.identity), _LogTurn())
+        if name not in {"ds_read_task_log", "ds_search_task_log"}:
+            observation = await adapter.execute(name, request, output_limit=output_limit)
+            if name == "ds_list_task_instances":
+                rows = observation.payload["records"]
+                assert isinstance(rows, list)  # noqa: S101 - trusted adapter output
+                for row in rows:
+                    if isinstance(row, dict) and isinstance(row.get("id"), int):
+                        key = (
+                            request.target_id,
+                            int(str(request.arguments["project_code"])),
+                            int(str(request.arguments["workflow_instance_id"])),
+                            row["id"],
+                        )
+                        turn.tasks[key] = row
+            return observation
+        args = request.arguments
+        key = (
+            request.target_id,
+            int(str(args["project_code"])),
+            int(str(args["workflow_instance_id"])),
+            int(str(args["task_id"])),
+        )
+        object_ref = ":".join(map(str, key))
+        async with turn.lock:
+            if key not in turn.logs:
+                if not governance.begin_dolphinscheduler_log(ctx.identity, object_ref):
+                    raise DolphinSchedulerReadError("ds_sample_expired", object_ref=object_ref)
+                turn.logs[key] = asyncio.create_task(
+                    self._capture(adapter, request, ctx, governance, turn, key, object_ref)
+                )
+            task = turn.logs[key]
+        sample = await task
+        token = adapter.client.headers.get("token", "")
+        counts = None
+        if name == "ds_search_task_log":
+            records, counts = await search_log(sample.raw, args, token)
+        else:
+            records = await read_log(sample.raw, args, token)
+        coverage: dict[str, object] = {
+            "read_byte_range": [0, len(sample.raw)],
+            "received_bytes": sample.received_bytes,
+            "reached_end": sample.reached_end,
+            "truncation_reason": sample.truncation_reason,
+            "projection_omitted": 0,
+            "matches_in_read_range": counts,
+        }
+        payload: dict[str, object] = {
+            "environment": adapter.config.description,
+            "cluster": adapter.config.cluster_id,
+            "kind": name,
+            "records": records,
+            "coverage": coverage,
+            "task": {"project_code": key[1], "workflow_instance_id": key[2], **sample.task},
+        }
+        limit = min(16_384, output_limit)
+        while len(json.dumps(payload, ensure_ascii=False).encode()) > limit - 256:
+            if not records:
+                raise DolphinSchedulerReadError("ds_response_limit", object_ref=object_ref)
+            # 单个片段也可围绕原起点减短；位置同步，不用旧结尾冒充完整文本。
+            if len(records) == 1:
+                row = records[0]
+                a, b = int(str(row["byte_start"])), int(str(row["byte_end"]))
+                if b - a <= 256:
+                    records.pop()
+                else:
+                    from xiaowei.dolphinscheduler_logs import fragment
+
+                    records[0] = fragment(sample.raw, a, a + (b - a) // 2, token)
+            else:
+                records.pop()
+            coverage["projection_omitted"] = int(str(coverage["projection_omitted"])) + 1
+        return ToolObservation(
+            payload=payload,
+            captured_at=sample.captured_at,
+            truncated=not sample.reached_end or bool(coverage["projection_omitted"]),
+        )
+
+    async def _capture(
+        self,
+        adapter: DSAdapter,
+        request: ToolRequest,
+        ctx: RunContext,
+        governance: GovernedTools,
+        turn: "_LogTurn",
+        key: tuple[str, int, int, int],
+        object_ref: str,
+    ) -> LogSample:
+        try:
+            if governance.turn_runs(ctx.identity).ds_log_bytes >= self._log_limit:
+                raise DolphinSchedulerReadError("ds_response_limit")
+            task = turn.tasks.get(key)
+            if task is None:
+                route = (
+                    "process-instances"
+                    if adapter.config.version == "3.1.8"
+                    else "workflow-instances"
+                )
+                workflow = await adapter._json(f"/projects/{key[1]}/{route}/{key[2]}", {})
+                if not isinstance(workflow, dict) or workflow.get("id") != key[2]:
+                    raise DolphinSchedulerReadError("ds_invalid_response")
+                owner = (
+                    "processInstanceId"
+                    if adapter.config.version == "3.1.8"
+                    else "workflowInstanceId"
+                )
+                page = await adapter._json(
+                    f"/projects/{key[1]}/task-instances",
+                    {
+                        owner: str(key[2]),
+                        "pageNo": str(request.arguments["task_page_no"]),
+                        "pageSize": "100",
+                    },
+                )
+                if not isinstance(page, dict) or not isinstance(page.get("totalList"), list):
+                    raise DolphinSchedulerReadError("ds_invalid_response")
+                candidates = [
+                    r for r in page["totalList"] if isinstance(r, dict) and r.get("id") == key[3]
+                ]
+                if not candidates:
+                    raise DolphinSchedulerReadError("ds_object_missing")
+                task = _record(candidates[0])
+                if task.get(owner) != key[2] or task.get("projectCode", key[1]) != key[1]:
+                    raise DolphinSchedulerReadError("ds_invalid_response")
+                turn.tasks[key] = task
+            async with turn.lock:
+                available = (
+                    self._log_limit
+                    - governance.turn_runs(ctx.identity).ds_log_bytes
+                    - turn.reserved
+                )
+                allowance = min(adapter.config.max_log_bytes, max(0, available))
+                turn.reserved += allowance
+            if not allowance:
+                raise DolphinSchedulerReadError("ds_response_limit")
+            try:
+                raw, reached_end = await self._download(
+                    adapter,
+                    key[1],
+                    key[3],
+                    allowance,
+                    lambda n: governance.add_dolphinscheduler_log_bytes(ctx.identity, n),
+                )
+            finally:
+                async with turn.lock:
+                    turn.reserved -= allowance
+            received = len(raw)
+            if raw.startswith(b"[LOG-PATH]:"):
+                newline = raw.find(b"\n")
+                raw = raw[newline + 1 :] if newline >= 0 else b""
+            raw = redact_bytes(raw, adapter.client.headers.get("token", ""))
+            reason = (
+                None
+                if reached_end
+                else (
+                    "log_byte_limit"
+                    if allowance == adapter.config.max_log_bytes
+                    else "turn_byte_limit"
+                )
+            )
+            return LogSample(raw, task, adapter.clock(), received, reached_end, reason)
+        except DolphinSchedulerReadError as exc:
+            raise DolphinSchedulerReadError(exc.reason, object_ref=object_ref) from None
+
+    @staticmethod
+    async def _download(
+        adapter: DSAdapter, project: int, task: int, limit: int, consumed: Callable[[int], None]
+    ) -> tuple[bytes, bool]:
+        try:
+            async with adapter.client.stream(
+                "GET",
+                adapter.config.api_base_url + f"/log/{project}/download-log",
+                params={"taskInstanceId": str(task)},
+                headers={"Accept-Encoding": "identity"},
+            ) as response:
+                if response.status_code in {401, 403}:
+                    raise DolphinSchedulerReadError("ds_auth")
+                if response.status_code == 404:
+                    raise DolphinSchedulerReadError("ds_object_missing")
+                if response.status_code != 200:
+                    raise DolphinSchedulerReadError("ds_unavailable")
+                if "json" in response.headers.get("content-type", "") or response.headers.get(
+                    "content-encoding"
+                ):
+                    raise DolphinSchedulerReadError("ds_invalid_response")
+                body = bytearray()
+                async for chunk in response.aiter_bytes():
+                    part = chunk[: limit - len(body)]
+                    body.extend(part)
+                    consumed(len(part))
+                    if len(body) >= limit:
+                        return bytes(body), False
+                return bytes(body), True
+        except (httpx2.ConnectError, httpx2.ConnectTimeout):
+            raise DolphinSchedulerReadError("ds_connect") from None
+        except httpx2.TimeoutException:
+            raise DolphinSchedulerReadError("ds_timeout") from None
+        except httpx2.HTTPError:
+            raise DolphinSchedulerReadError("ds_unavailable") from None
 
     def prompt(self, ctx: RunContext, governance: GovernedTools) -> str:
         selected = governance.turn_runs(ctx.identity).ds_clusters
@@ -460,21 +731,17 @@ class DolphinScheduler:
             tool_id = "local/" + name
             if tool_id not in allowed:
                 continue
-            executes = {}
-            for cluster, adapter in self.adapters.items():
 
-                async def execute(
-                    request: ToolRequest, *, bound: DSAdapter = adapter, operation: str = name
-                ) -> ToolObservation:
-                    contract = governance.catalog.contract(request.tool_id, request.target_id)
-                    assert contract is not None  # noqa: S101 - governed registered request
-                    limit = min(
-                        p.max_bytes
-                        for p in governance.catalog.policy_for(contract).projections.values()
-                    )
-                    return await bound.execute(operation, request, output_limit=limit)
+            async def execute(request: ToolRequest) -> ToolObservation:
+                contract = governance.catalog.contract(request.tool_id, request.target_id)
+                assert contract is not None  # noqa: S101 - governed registered request
+                limit = min(
+                    p.max_bytes
+                    for p in governance.catalog.policy_for(contract).projections.values()
+                )
+                return await self.execute(request, ctx, governance, output_limit=limit)
 
-                executes[cluster] = execute
+            executes = dict.fromkeys(self.adapters, execute)
             tool = routed_function_tool(tool_id, governance, executes)
             tool.is_enabled = lambda context, agent: bool(
                 governance.turn_runs(context.context.identity).ds_clusters
@@ -510,3 +777,15 @@ class DolphinScheduler:
                 )
             )
         return tools
+
+
+@dataclass
+class _LogTurn:
+    lock: asyncio.Lock = field(default_factory=asyncio.Lock)
+    tasks: dict[tuple[str, int, int, int], dict[str, object]] = field(default_factory=dict)
+    logs: dict[tuple[str, int, int, int], asyncio.Task[LogSample]] = field(default_factory=dict)
+    reserved: int = 0
+
+
+def _log_turn_key(identity: Identity) -> tuple[str, str, str, str]:
+    return identity.channel, identity.owner.id, identity.session_id, identity.turn_id

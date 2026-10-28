@@ -105,7 +105,7 @@ from xiaowei.model_api import ModelProfile, open_model
 from xiaowei.models import (
     AUDIENCES,
     DS_CONTROL_TARGET,
-    DS_METADATA_TOOLS,
+    DS_READ_TOOLS,
     DS_SELECT_TOOL,
     GRAFANA_READ_POLICIES,
     PROMETHEUS_READ_POLICIES,
@@ -864,7 +864,7 @@ def _registered_tools(config: ServeConfig) -> frozenset[str]:
         | (AUDIT_TOOLS if audited else frozenset())
         | ({SECURITY_TOOL} if audited else frozenset())
         | monitoring
-        | ((DS_METADATA_TOOLS | {DS_SELECT_TOOL}) if config.dolphinscheduler_sources else set())
+        | ((DS_READ_TOOLS | {DS_SELECT_TOOL}) if config.dolphinscheduler_sources else set())
         | notify
         | (TASK_TOOLS if config.scheduled_tasks is not None else frozenset())
     )
@@ -1407,7 +1407,7 @@ def _app_config(config: ServeConfig) -> AppConfig:
     }
     notify = frozenset({NOTIFY_TOOL}) if config.webhook_bots else frozenset()
     scheduled = TASK_TOOLS if config.scheduled_tasks is not None else frozenset()
-    ds = DS_METADATA_TOOLS if config.dolphinscheduler_sources else frozenset()
+    ds = DS_READ_TOOLS if config.dolphinscheduler_sources else frozenset()
     selection = {DS_SELECT_TOOL} if config.dolphinscheduler_sources else set()
     security = _registered_tools(config) & {SECURITY_TOOL}
     audit = (

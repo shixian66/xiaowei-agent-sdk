@@ -21,6 +21,8 @@ DS_TOOLS = {
     "local/ds_list_workflow_instances",
     "local/ds_get_workflow_instance",
     "local/ds_list_task_instances",
+    "local/ds_read_task_log",
+    "local/ds_search_task_log",
 }
 
 
@@ -54,7 +56,7 @@ def test_ds_optional_config_accepts_versions_without_changing_database_targets(v
 
 
 @contextmanager
-def ds_api(*, fail=False):
+def ds_api(*, fail=False, respond=None):
     requests = []
 
     class API(BaseHTTPRequestHandler):
@@ -78,10 +80,15 @@ def ds_api(*, fail=False):
                     ],
                 },
             }
+            if respond is not None:
+                body = respond(parsed.path, parse_qs(parsed.query))
             self.send_response(401 if fail else 200)
-            self.send_header("Content-Type", "application/json")
+            self.send_header(
+                "Content-Type",
+                "application/octet-stream" if isinstance(body, bytes) else "application/json",
+            )
             self.end_headers()
-            self.wfile.write(json.dumps(body).encode())
+            self.wfile.write(body if isinstance(body, bytes) else json.dumps(body).encode())
 
         def log_message(self, *_):
             return
@@ -303,7 +310,13 @@ def test_ds_turn_ledger_roundtrip_and_legacy_defaults():
     ledger = TurnLedger(3, runs)
     assert parser.validate_json(parser.dump_json(ledger), strict=True) == ledger
     old = json.loads(parser.dump_json(ledger))
-    for key in ("ds_clusters", "ds_read_scope", "ds_selection_changed"):
+    for key in (
+        "ds_clusters",
+        "ds_read_scope",
+        "ds_selection_changed",
+        "ds_log_reads",
+        "ds_log_bytes",
+    ):
         old["runs"].pop(key)
     restored = parser.validate_json(json.dumps(old), strict=True)
     assert restored.runs.ds_clusters is None
@@ -511,3 +524,206 @@ async def test_scope_remains_frozen_after_pause_restore_and_revocation(postgres_
         assert gov.turn_runs(ctx.identity) == before
         assert len(calls) == 1
         assert replace(saved.runs, rejected=0).ds_read_scope == ("ds-a",)
+
+
+async def test_ds_configured_database_query_needs_no_ds_selection(env: Env, monkeypatch):
+    from tests.sdk_core.test_app import cite
+
+    monkeypatch.setenv("XW_TEST_DS_TOKEN", "synthetic-token")
+    with ds_api() as (url, requests):
+        config = ServeConfig.model_validate(config_values(env.port, [source(base_url=url)]))
+        async with env.running(config) as served:
+            await served.page()
+            message = env.scripts.add(
+                "查 StarRocks sr-test 销售额",
+                tool_call(
+                    "run_readonly_query",
+                    cluster="sr-test",
+                    sql="SELECT region, total FROM shop.sales",
+                ),
+                cite(),
+            )
+            body = (await served.turn(message, "query")).json()
+            assert body["state"] == "completed", body
+            assert body["delivery"]["facts"][0]["rows"] == [
+                {"region": "east", "total": 100},
+                {"region": "west", "total": 50},
+            ]
+            assert requests == []
+            await served.finish()
+    assert await env.scalar("SELECT ds_clusters FROM xiaowei_session") is None
+
+
+async def test_ds_selection_commit_failure_keeps_session_writing_and_blocks_replay(
+    env, monkeypatch
+):
+    from xiaowei import session as session_module
+    from xiaowei.session import PolicySession
+
+    monkeypatch.setenv("XW_TEST_DS_TOKEN", "synthetic-token")
+    execute = PolicySession._execute
+
+    async def fail_selection_commit(self, statement, parameters):
+        if statement is session_module._COMMIT_DS:
+            return 0
+        return await execute(self, statement, parameters)
+
+    monkeypatch.setattr(PolicySession, "_execute", fail_selection_commit)
+    with ds_api() as (url, requests):
+        config = ServeConfig.model_validate(config_values(env.port, [source(base_url=url)]))
+        async with env.running(config) as served:
+            await served.page()
+            message = env.scripts.add(
+                "查 DS B 后模拟提交失败",
+                tool_call("ds_select_clusters", clusters=["ds-b"]),
+                list_failed(),
+                ds_answer,
+            )
+            body = (await served.turn(message, "diagnose")).json()
+            assert body["state"] == "failed", body
+            assert await env.scalar("SELECT state FROM xiaowei_session") == "writing"
+            assert await env.scalar("SELECT ds_clusters FROM xiaowei_session") is None
+            follow = env.scripts.add("再查一次", list_failed(), ds_answer)
+            assert (await served.turn(follow, "diagnose", "next")).json()["state"] == "failed"
+            assert len(requests) == 1
+            assert not env.scripts.calls.get(follow)
+            await served.finish()
+
+
+async def test_d1_two_pages_and_d4_fresh_detail_keep_original_instance(env, monkeypatch):
+    monkeypatch.setenv("XW_TEST_DS_TOKEN", "synthetic-token")
+
+    def respond(path, params):
+        rows = [
+            {
+                "id": 701,
+                "name": "orders",
+                "state": "FAILURE",
+                "processDefinitionCode": 99,
+                "startTime": "2026-10-27 20:01:00",
+            },
+            {
+                "id": 702,
+                "name": "orders",
+                "state": "FAILURE",
+                "processDefinitionCode": 99,
+                "startTime": "2026-10-28 07:59:00",
+            },
+            {
+                "id": 703,
+                "name": "orders",
+                "state": "FAILURE",
+                "processDefinitionCode": 99,
+                "startTime": "2026-10-28 08:00:00",
+            },
+        ]
+        if path.endswith("/701"):
+            return {"code": 0, "data": rows[0]}
+        page = int(params["pageNo"][0])
+        return {"code": 0, "data": {"total": 3, "totalList": rows[(page - 1) * 2 : page * 2]}}
+
+    def page(number):
+        return tool_call(
+            "ds_list_workflow_instances",
+            cluster="ds-b",
+            project_code=11,
+            definition_code=99,
+            state="FAILURE",
+            keyword=None,
+            start_time="2026-10-27T20:00:00+08:00",
+            end_time="2026-10-28T08:00:00+08:00",
+            page_no=number,
+            page_size=2,
+        )
+
+    with ds_api(respond=respond) as (url, requests):
+        config = ServeConfig.model_validate(config_values(env.port, [source(base_url=url)]))
+        async with env.running(config) as served:
+            await served.page()
+            message = env.scripts.add(
+                "DS B 昨晚启动的失败订单",
+                tool_call("ds_select_clusters", clusters=["ds-b"]),
+                page(1),
+                page(2),
+                ds_answer,
+            )
+            body = (await served.turn(message, "diagnose")).json()
+            assert body["state"] == "completed", body
+            rendered = json.dumps(body["delivery"], ensure_ascii=False)
+            assert "701" in rendered and "702" in rendered and '"703"' not in rendered
+            follow = env.scripts.add(
+                "刚才的 701 恢复了吗",
+                tool_call(
+                    "ds_get_workflow_instance",
+                    cluster="ds-b",
+                    project_code=11,
+                    workflow_instance_id=701,
+                    task_id=None,
+                ),
+                ds_answer,
+            )
+            body = (await served.turn(follow, "diagnose", "fresh")).json()
+            assert body["state"] == "completed", body
+            assert requests[-1][0].endswith("/701")
+            assert len(requests) == 3
+            await served.finish()
+
+
+async def test_d2_formal_web_locates_middle_database_error_and_persists_only_snippets(
+    env, monkeypatch
+):
+    monkeypatch.setenv("XW_TEST_DS_TOKEN", "synthetic-token")
+    raw = (
+        b"[LOG-PATH]: private/path, [HOST]: private-host\n"
+        + b"normal task noise\n" * 320_000
+        + b"SQLSyntaxErrorException SQLState 42S02 code 1146 ods.order_delta missing\n"
+        + b"normal task noise\n" * 320_000
+    )
+
+    def respond(path, params):
+        if path.endswith("download-log"):
+            return raw
+        if path.endswith("/701"):
+            return {"code": 0, "data": {"id": 701, "processDefinitionCode": 99, "state": "FAILURE"}}
+        return {
+            "code": 0,
+            "data": {
+                "total": 1,
+                "totalList": [
+                    {"id": 801, "processInstanceId": 701, "state": "FAILURE", "retryTimes": 0}
+                ],
+            },
+        }
+
+    with ds_api(respond=respond) as (url, requests):
+        config = ServeConfig.model_validate(config_values(env.port, [source(base_url=url)]))
+        async with env.running(config) as served:
+            await served.page()
+            message = env.scripts.add(
+                "定位 DS B 701 的失败节点 801 数据库报错",
+                tool_call("ds_select_clusters", clusters=["ds-b"]),
+                tool_call(
+                    "ds_search_task_log",
+                    cluster="ds-b",
+                    project_code=11,
+                    workflow_instance_id=701,
+                    task_id=801,
+                    task_page_no=1,
+                    terms=["SQLSyntaxErrorException", "42S02", "1146"],
+                    case_sensitive=False,
+                    max_snippets=4,
+                    context_lines=1,
+                ),
+                ds_answer,
+            )
+            body = (await served.turn(message, "diagnose")).json()
+            assert body["state"] == "completed", body
+            rendered = json.dumps(body["delivery"], ensure_ascii=False)
+            assert all(word in rendered for word in ("ods.order_delta", "42S02", "1146", "生产 B"))
+            assert len(requests) == 3
+            assert "private-host" not in rendered
+            await served.finish()
+    assert (
+        await env.scalar("SELECT max(octet_length(model_content)) FROM xiaowei_evidence") < 16_384
+    )
+    assert await env.scalar("SELECT count(*) FROM xiaowei_evidence") == 1
