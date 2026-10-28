@@ -412,3 +412,54 @@ def test_dag_scalar_fields_cannot_carry_nested_raw_parameters():
     }
     with pytest.raises(DolphinSchedulerReadError):
         dag_projection(workflow, "3.4.0", None, "")
+
+
+@pytest.mark.parametrize("version", ["3.1.8", "3.4.0"])
+async def test_dependency_projection_masks_secrets_before_truncation_and_persistence(
+    env, monkeypatch, version
+):
+    monkeypatch.setenv("XW_TEST_DS_TOKEN", "synthetic-token")
+    base = protocol(version, dependent=True)
+    # The configured token crosses the 200-character key/string projection boundary.
+    sensitive = "x" * 190 + "synthetic-token" + ' password="dependency-secret"'
+
+    def respond(path, params):
+        body = base(path, params)
+        if path.endswith("/701/tasks"):
+            task = body["data"]["taskList"][0]
+            if version == "3.1.8":
+                task["dependentResult"] = json.dumps({sensitive: "SUCCESS"})
+            else:
+                task["taskInstanceDependentResults"][0]["dateCycle"] = sensitive
+        return body
+
+    with ds_api(respond=respond) as (url, _):
+        config = ServeConfig.model_validate(
+            config_values(env.port, [source(base_url=url, version=version)])
+        )
+        async with env.running(config) as served:
+            await served.page()
+            message = env.scripts.add(
+                "DS B 701 检查依赖状态",
+                tool_call("ds_select_clusters", clusters=["ds-b"]),
+                detail(801),
+                ds_answer,
+            )
+            body = (await served.turn(message, "diagnose")).json()
+            assert body["state"] == "completed", body
+            for value in [
+                json.dumps(body),
+                *[
+                    await env.scalar(f"SELECT {column} FROM xiaowei_evidence LIMIT 1")
+                    for column in (
+                        "model_content",
+                        "session_content",
+                        "web_content",
+                        "feishu_content",
+                    )
+                ],
+            ]:
+                assert "synthetic-" not in value
+                assert "dependency-secret" not in value
+                assert "SUCCESS" in value
+            await served.finish()

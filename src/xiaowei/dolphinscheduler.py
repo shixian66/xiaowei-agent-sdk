@@ -318,7 +318,7 @@ def _record(value: object, token: str = "") -> dict[str, object]:
         for key, item in value.items()
         if key in _FIELDS and (item is None or isinstance(item, (str, int, float, bool)))
     }
-    record.update(dependency_fields(value))
+    record.update(dependency_fields(value, token))
     return record
 
 

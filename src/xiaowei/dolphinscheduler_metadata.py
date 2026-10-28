@@ -12,8 +12,12 @@ def _dependency_state(value: object) -> bool:
     )
 
 
-def dependency_fields(task: dict[str, object]) -> dict[str, object]:
+def dependency_fields(task: dict[str, object], token: str = "") -> dict[str, object]:
     """3.1.8 是 JSON 字符串；3.4.0 是 TaskInstanceDependentDetails 的上下文列表。"""
+
+    def visible(value: str, limit: int = 200) -> str:
+        return redact_bytes(value.encode(), token).decode(errors="replace")[:limit]
+
     result: dict[str, object] = {}
     omitted = 0
     legacy = task.get("dependentResult")
@@ -28,7 +32,7 @@ def dependency_fields(task: dict[str, object]) -> dict[str, object]:
             raise DolphinSchedulerReadError("ds_invalid_response")
         omitted += max(0, len(parsed) - 32)
         result["dependentResult"] = {
-            str(k)[:200]: (str(v)[:32] if v is not None else None)
+            visible(str(k)): (visible(str(v), 32) if v is not None else None)
             for k, v in list(parsed.items())[:32]
         }
     current = task.get("taskInstanceDependentResults")
@@ -51,7 +55,7 @@ def dependency_fields(task: dict[str, object]) -> dict[str, object]:
         }
         result["taskInstanceDependentResults"] = [
             {
-                k: v[:200] if isinstance(v, str) else v
+                k: visible(v) if isinstance(v, str) else v
                 for k, v in row.items()
                 if k in fields and (v is None or isinstance(v, (str, int, bool)))
             }
