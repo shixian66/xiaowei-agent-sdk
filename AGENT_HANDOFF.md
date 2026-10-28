@@ -47,7 +47,7 @@
 
 用户已授权连续实现、离线测试、常规修复及本地提交；本轮明确不调用真实模型或公司 DS。隔离分支 `codex/ds-readonly-api` 以 `916f57a26d2bac201b6772a48016f194af7d586e` 为产品基线，桌面旧工作区及其他任务改动未动。批准依据为 DS-RO-P1-r3（设计 blob ae0598a41b52f2bdfdb76525a8330a1b7232405c）；任务与剩余门槛仅在 [当前计划](docs/superpowers/plans/2026-10-28-dolphinscheduler-readonly-api.md#ds-implementation-plan) 维护，产品边界见 [ARCHITECTURE](ARCHITECTURE.md#dolphinscheduler-environment)。
 
-**离线实现与本轮必需检查已完成；真实模型／公司验收未完成。** 产品源码候选 `6d9dafd5977af2d5ac26dc36e3ce8b77cd1d2bec`，之后只更新交接文档。S1 `66de4bc`、S2 `6d413e4`、S3 `b5cb803`、S4 `4995606` 及最终配置预检增量 `6d9dafd` 均已按精确版本独立复核，当前无未解决阻断。最后增量只复用既有凭据预检核对 DS Token 引用，未新增网络请求或权限边界。
+**离线实现与本轮必需检查已完成；真实模型／公司验收未完成。** 产品源码候选 `6d9dafd5977af2d5ac26dc36e3ce8b77cd1d2bec`，之后仅补文档与离线重发测试，产品源码不变。S1 `66de4bc`、S2 `6d413e4`、S3 `b5cb803`、S4 `4995606` 及最终配置预检增量 `6d9dafd` 均已按精确版本独立复核，当前无未解决阻断。最后增量只复用既有凭据预检核对 DS Token 引用，未新增网络请求或权限边界。
 
 实现为六项只读业务工具与本地选择工具、两版薄 Adapter、临时日志缓存；复用同一 SDK Agent/Runner、治理、失败记录、Evidence、Session 与展示。schema 17 仅新增应用会话集合及关联轮次，SDK 表不改。未选／错对象零 I/O；选择轮末提交、暂停恢复和失败隔离均验证。部分撤权保留原历史／交付复核；配置移除仍走既有会话绑定。日志10 MiB中间错误、超长行、32 MiB跨源上限、并发共享下载、超时、遮蔽及取消已验证；真实 Agent 不由脚本测试证明。
 
