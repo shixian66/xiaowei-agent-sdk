@@ -185,7 +185,7 @@ async def test_d2_c1_tracks_actual_child_not_later_success(env: Env, monkeypatch
                 ),
                 ds_answer,
             )
-            body = (await served.turn(message, "diagnose")).json()
+            body = (await served.turn(message, "query")).json()
             assert body["state"] == "completed", body
             text = json.dumps(body["delivery"], ensure_ascii=False)
             assert "ods.order_delta" in text and "702" in text
@@ -228,7 +228,7 @@ async def test_d3_w1_exposes_native_dependency_state_and_real_timestamps_only(
                 ),
                 ds_answer,
             )
-            body = (await served.turn(message, "diagnose")).json()
+            body = (await served.turn(message, "query")).json()
             assert body["state"] == "completed", body
             text = json.dumps(body["delivery"], ensure_ascii=False)
             field = "dependentResult" if version == "3.1.8" else "taskInstanceDependentResults"
@@ -254,7 +254,7 @@ async def test_dynamic_relation_returns_ids_without_guessing_child_project(env, 
                 detail(801, dynamic=True),
                 ds_answer,
             )
-            body = (await served.turn(message, "diagnose")).json()
+            body = (await served.turn(message, "query")).json()
             assert body["state"] == "completed", body
             text = json.dumps(body["delivery"], ensure_ascii=False)
             assert "702" in text and "703" in text and "must-drop" not in text
@@ -290,7 +290,7 @@ async def test_cross_project_child_keeps_independent_parent_fact_and_explicit_ga
                 detail(801),
                 ds_answer,
             )
-            body = (await served.turn(message, "diagnose")).json()
+            body = (await served.turn(message, "query")).json()
             assert body["state"] == "completed", body
             text = json.dumps(body["delivery"], ensure_ascii=False)
             data = json.loads(body["delivery"]["facts"][0]["result_json"])
@@ -324,7 +324,7 @@ async def test_history_task_definition_version_mismatch_does_not_expose_wrong_sq
                 detail(801),
                 ds_answer,
             )
-            body = (await served.turn(message, "diagnose")).json()
+            body = (await served.turn(message, "query")).json()
             assert body["state"] == "completed", body
             assert "select * from ods.order_delta" not in json.dumps(
                 body["delivery"], ensure_ascii=False
@@ -355,7 +355,7 @@ async def test_workflow_dag_version_disagrees_with_instance_is_not_accepted(env,
                 detail(),
                 ds_answer,
             )
-            body = (await served.turn(message, "diagnose")).json()
+            body = (await served.turn(message, "query")).json()
             assert body["state"] == "completed", body
             assert body["delivery"]["facts"] == []
             assert len(requests) == 1
@@ -449,7 +449,7 @@ async def test_dependency_projection_masks_secrets_before_truncation_and_persist
                 detail(801),
                 ds_answer,
             )
-            body = (await served.turn(message, "diagnose")).json()
+            body = (await served.turn(message, "query")).json()
             assert body["state"] == "completed", body
             for value in [
                 json.dumps(body),
@@ -496,7 +496,7 @@ async def test_child_relation_gap_keeps_verified_parent_in_one_detail_call(
                 detail(801, dynamic=dynamic),
                 ds_answer,
             )
-            result = (await served.turn(message)).json()
+            result = (await served.turn(message, mode="query")).json()
             assert result["state"] == "completed", result
             data = json.loads(result["delivery"]["facts"][0]["result_json"])
             assert data["records"][0]["id"] == 701
@@ -566,7 +566,7 @@ async def test_child_relation_transport_failures_keep_existing_failure_path(
                 detail(801),
                 ds_answer,
             )
-            result = (await served.turn(message)).json()
+            result = (await served.turn(message, mode="query")).json()
             assert result["state"] == "completed", result
             assert result["delivery"]["facts"] == []
             assert "读取未核实" in result["delivery"]["content"]

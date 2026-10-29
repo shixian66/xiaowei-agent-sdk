@@ -34,7 +34,7 @@ async def test_natural_choice_protocol_preserves_pending_task_and_explicit_scope
             await served.page()
             if variant == "D1-E2":
                 message = env.scripts.add("昨天失败任务", clarify("请选择 DS 环境：A、B、C"))
-                assert (await served.turn(message, request_id="clarify")).json()[
+                assert (await served.turn(message, mode="query", request_id="clarify")).json()[
                     "state"
                 ] == "completed"
                 assert requests == []
@@ -45,7 +45,7 @@ async def test_natural_choice_protocol_preserves_pending_task_and_explicit_scope
                     list_failed("ds-a"),
                     ds_answer,
                 )
-                assert (await served.turn(message, request_id="initial")).json()[
+                assert (await served.turn(message, mode="query", request_id="initial")).json()[
                     "state"
                 ] == "completed"
                 requests.clear()
@@ -57,7 +57,7 @@ async def test_natural_choice_protocol_preserves_pending_task_and_explicit_scope
                         "请明确生产 B 或 C" if variant == "D1-E4" else "仅提及 B，未更改 DS 选择"
                     ),
                 )
-                assert (await served.turn(message, request_id="mention")).json()[
+                assert (await served.turn(message, mode="query", request_id="mention")).json()[
                     "state"
                 ] == "completed"
                 assert requests == []
@@ -75,7 +75,7 @@ async def test_natural_choice_protocol_preserves_pending_task_and_explicit_scope
                 list_failed(cluster),
                 ds_answer,
             )
-            result = (await served.turn(message, request_id="continue")).json()
+            result = (await served.turn(message, mode="query", request_id="continue")).json()
             assert result["state"] == "completed", result
             assert await env.scalar("SELECT ds_clusters FROM xiaowei_session") == [cluster]
             assert len(requests) == 1 and requests[0][0].startswith("/" + cluster[-1] + "/")
@@ -99,7 +99,7 @@ async def test_d1_e10_main_web_shows_actual_environment_even_when_empty(env, mon
                 list_failed(),
                 ds_answer,
             )
-            result = (await served.turn(message)).json()
+            result = (await served.turn(message, mode="query")).json()
             assert result["state"] == "completed", result
             delivery = Delivery.model_validate(
                 {
@@ -142,12 +142,12 @@ async def test_d4_e2_conflicting_old_object_and_new_session_require_clarificatio
                     list_failed(cluster),
                     ds_answer,
                 )
-                assert (await served.turn(message, request_id=f"read-{n}")).json()[
+                assert (await served.turn(message, mode="query", request_id=f"read-{n}")).json()[
                     "state"
                 ] == "completed"
             requests.clear()
             message = env.scripts.add("刚才那个恢复了吗", clarify("刚才 A 的 701，还是 B 的实例？"))
-            result = (await served.turn(message, request_id="conflict")).json()
+            result = (await served.turn(message, mode="query", request_id="conflict")).json()
             assert result["state"] == "completed" and requests == []
             assert await env.scalar(
                 "SELECT s.ds_clusters FROM xiaowei_session s "
@@ -160,7 +160,7 @@ async def test_d4_e2_conflicting_old_object_and_new_session_require_clarificatio
             )
             assert response.status_code == 200, response.text
             message = env.scripts.add("旧任务恢复了吗", clarify("请明确 DS 环境及实例"))
-            assert (await served.turn(message, request_id="new-session")).json()[
+            assert (await served.turn(message, mode="query", request_id="new-session")).json()[
                 "state"
             ] == "completed"
             assert requests == []
@@ -190,7 +190,7 @@ async def test_three_or_six_source_directory_routes_only_explicit_member(env, mo
                 list_failed(names[-1]),
                 ds_answer,
             )
-            result = (await served.turn(message)).json()
+            result = (await served.turn(message, mode="query")).json()
             assert result["state"] == "completed", result
             assert len(requests) == 1 and requests[0][0].startswith("/" + names[-1] + "/")
             # DS work method and actual trusted directory reach the same native Agent.
@@ -229,13 +229,13 @@ async def test_d4_e3_partial_revocation_preserves_existing_history_boundary(
                 *([list_failed("ds-b")] if prior_b_evidence else []),
                 ds_answer,
             )
-            assert (await served.turn(message, request_id="before-revoke")).json()[
+            assert (await served.turn(message, mode="query", request_id="before-revoke")).json()[
                 "state"
             ] == "completed"
             requests.clear()
             revoked = True
             follow = env.scripts.add("今天呢", list_failed("ds-a"), list_failed("ds-b"), ds_answer)
-            result = (await served.turn(follow, request_id="after-revoke")).json()
+            result = (await served.turn(follow, mode="query", request_id="after-revoke")).json()
             assert await env.scalar("SELECT ds_clusters FROM xiaowei_session") == ["ds-a", "ds-b"]
             if prior_b_evidence:
                 assert result["state"] == "failed", result
@@ -263,7 +263,7 @@ async def test_d1_e8_database_and_ds_choices_stay_independent(env, monkeypatch):
             ):
                 if request_id == "db-after":
                     question = env.scripts.add("小海豚有哪些失败任务", clarify("需要查哪套 DS？"))
-                    assert (await served.turn(question, request_id="ds-ask")).json()[
+                    assert (await served.turn(question, mode="query", request_id="ds-ask")).json()[
                         "state"
                     ] == "completed"
                     assert requests == []
@@ -273,7 +273,7 @@ async def test_d1_e8_database_and_ds_choices_stay_independent(env, monkeypatch):
                         list_failed(),
                         ds_answer,
                     )
-                    assert (await served.turn(selected, request_id="ds-read")).json()[
+                    assert (await served.turn(selected, mode="query", request_id="ds-read")).json()[
                         "state"
                     ] == "completed"
                 env.scripts.add(
@@ -327,7 +327,9 @@ async def test_d4_fresh_attempt_and_failed_followup_do_not_claim_old_fact_is_cur
                     detail(),
                     ds_answer,
                 )
-                result = (await served.turn(message, request_id=f"fresh-{phase}")).json()
+                result = (
+                    await served.turn(message, mode="query", request_id=f"fresh-{phase}")
+                ).json()
                 assert result["state"] == "completed", result
                 if phase == 1:
                     fact = result["delivery"]["facts"][-1]
@@ -364,7 +366,7 @@ async def test_current_unavailable_uses_real_grant_revocation_between_turns(env,
                 tool_call("ds_select_clusters", clusters=["ds-b"]),
                 clarify("已选择 DS B"),
             )
-            assert (await served.turn(message, request_id="select-only")).json()[
+            assert (await served.turn(message, mode="query", request_id="select-only")).json()[
                 "state"
             ] == "completed"
             assert requests == []
@@ -376,7 +378,9 @@ async def test_current_unavailable_uses_real_grant_revocation_between_turns(env,
                     for subject, tools in access._grants.items()
                 }
             follow = env.scripts.add("今天呢", clarify("DS 生产 B 当前不可用，未查询"))
-            result = (await served.turn(follow, request_id="after-grants-revoked")).json()
+            result = (
+                await served.turn(follow, mode="query", request_id="after-grants-revoked")
+            ).json()
             assert result["state"] == "completed", result
             instructions = env.scripts.calls[follow][0].instructions
             assert '本轮 DS 集合：["ds-b"]' in instructions

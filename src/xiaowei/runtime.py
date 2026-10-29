@@ -1439,7 +1439,7 @@ def _app_config(config: ServeConfig) -> AppConfig:
                 | ds
                 | selection
             ),
-            "diagnose": (DIAGNOSE_TOOLS | audit | HISTORY_TOOLS | ds | selection),
+            "diagnose": DIAGNOSE_TOOLS | audit | HISTORY_TOOLS,
         },
         data_policies={config.model.data_policy_id: config.data_policy},
         session_limits=config.session_limits,

@@ -34,7 +34,7 @@ async def test_formal_ds_success_or_auth_gap_visible_without_expanding_basis(
         async with env.running(config), launch(chrome_binary) as chrome:
             page = await chrome.page()
             await page.navigate(env.origin + "/")
-            await send(page, message, "diagnose")
+            await send(page, message, "query")
             await settled(page, 0, "completed")
             visible = await page.evaluate(f"{item(0)}.innerText")
             assert "生产 B" in visible
