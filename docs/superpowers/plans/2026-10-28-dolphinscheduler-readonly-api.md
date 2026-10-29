@@ -1,6 +1,6 @@
 # DolphinScheduler API 只读接入设计与实施计划
 
-> 文档版本 **DS-RO-P1-r6（2026-10-28，含用户批准的 C1／C2；基础设计 r3）**。用户已授权连续实现、离线测试、常规修复及隔离分支本地提交；已授权推送、基于最新 origin/main rebase、开 PR 跑完整 CI，并在 CI 通过且冲突复审完成后合并；本轮不调用真实模型或公司 DS、不部署。按 §11 串行推进，当前状态与精确审查证据见 [handoff](../../../AGENT_HANDOFF.md#dolphinscheduler-implementation)。
+> 文档版本 **DS-RO-P1-r8（2026-10-29，修正 F1 并落实无 DS 工具时的中性说明；基础设计 r3）**。r6 的 DS 实现及 C1／C2 已随 PR #145 合入；本轮修正用途集合及模型状态说明、相关离线测试与文档，授权覆盖隔离分支本地提交，不沿用旧 PR 的推送／合并授权。不调用真实模型或公司 DS、不部署。当前状态与精确审查证据见 [handoff](../../../AGENT_HANDOFF.md#ds-diagnose-contract-gap)。
 
 > 产品契约唯一来源为 [ARCHITECTURE：DS](../../../ARCHITECTURE.md#dolphinscheduler-environment)。离线协议和脚本模型证明接线与边界，不代替真实 Agent 能力、公司 API 或正式群实收验收。
 
@@ -14,7 +14,7 @@
 - DS 有限失败反馈遵循 [ARCHITECTURE：DS 读取失败](../../../ARCHITECTURE.md#dolphinscheduler-read-failures)，实现与验收见 §11，不重复定义失败契约。
 - 本次授权已扩展到实现与离线验证；公司与本地隔离，本轮不请求模型配置、不调用公司 DS 或真实模型。10 MiB 合成数据只验证客户端路径，真实源负载留待公司验收。
 
-实现基线为已 fetch 的 `origin/main@916f57a26d2bac201b6772a48016f194af7d586e`，在独立工作树的 `codex/ds-readonly-api` 上开发。桌面 `codex/model-authored-report-plan@b89d4ee` 及其他任务改动保留；仅迁入已批准 DS 文档内容，不用旧 checkout 推断当前产品。
+初始 DS 实现基线为当时已 fetch 的 `origin/main@916f57a26d2bac201b6772a48016f194af7d586e`，在独立工作树的 `codex/ds-readonly-api` 上开发。桌面 `codex/model-authored-report-plan@b89d4ee` 及其他任务改动保留；仅迁入已批准 DS 文档内容，不用旧 checkout 推断当前产品。
 
 下列工具 schema 与限额已按锁版 SDK 和离线实现校准，实际代码见 src/xiaowei/dolphinscheduler*.py；离线事实不证明公司可用；已确认的行为与边界按 ARCHITECTURE 和本文验收落实。访问地址、凭据安全引用、集群时区和真实日志表现是接入准备项；不向用户索要凭据正文。
 
@@ -39,7 +39,7 @@
 
 每套 DS 配置稳定且全局不冲突的 ID、名称／别名、用途／环境、版本、固定 API 根地址、凭据安全引用及服务时区。本地目录供澄清，不请求 DS、不靠远端项目搜索选环境；数量按列表扩展，3／6 套测试不变成数量禁令。
 
-选择操作仅有 clusters 一个字段，SDK 严格 schema 负责拒绝多余字段；治理复用当前授权和预算。轮内结果写入可信 TurnRuns，应用已提交选择从会话元数据加载，具体提交接线见 §11.3。注入当前集合时，直接复用已有本地配置／权限核对结果，将已确认不可用的成员标注为“当前不可用”，集合不变；沿用现有可信选择提示，不另建可用性状态或远端探测。它不授予权限、不作业务 Evidence，也不属于 query 用途。与数据库共享 Agent 的 tools／instructions 有变化，仍须做数据库回归，不能只凭 Adapter 未改就宣称零影响。
+选择操作仅有 clusters 一个字段，SDK 严格 schema 负责拒绝多余字段；治理复用当前授权和预算。轮内结果写入可信 TurnRuns，应用已提交选择从会话元数据加载，具体提交接线见 §11.3。注入当前集合时，状态说明按 [ARCHITECTURE：DS 用途边界](../../../ARCHITECTURE.md#dolphinscheduler-environment) 区分本轮无工具与可用工具范围内的成员状态；直接复用现有本地配置／权限核对结果，集合不变，不另建可用性状态或远端探测。它不授予权限、不作业务 Evidence，也不登记为已开始的业务查询。与数据库共享 Agent 的 tools／instructions 有变化，仍须做数据库回归，不能只凭 Adapter 未改就宣称零影响。
 
 ### 4.2 确实需要强制落实的限制
 
@@ -229,13 +229,13 @@ DS 官方源码（版本标签）：
 
 <a id="ds-implementation-plan"></a>
 
-## 11. 最小实施计划：DS-RO-P1-r4（批准依据 r3）
+## 11. 最小实施计划（实施基线 r4；用途修复 r8）
 
 **目标：** 同一个 Agent 在 Web／飞书完成 D1—D4，在已选集合内自主定位、补证和结束，返回有来源的诊断与具体缺口。
 
 **架构：** SDK 运行循环，DS 只做薄 API 适配、应用选择记录和有界日志处理；复用治理、失败记录、Evidence、Session 与交付。配置和客户端由应用装配，RunContext 不携带依赖；不增加前置分类器、调度器或业务 MCP Server。
 
-**技术栈：** 现有 Python 3.11、openai-agents 0.22.3、httpx2、SQLAlchemySession／PostgreSQL、Pydantic；不新增运行依赖。本轮只修订文档，SDK 探针沿用上一版证据，不重跑。
+**技术栈：** 现有 Python 3.11、openai-agents 0.22.3、httpx2、SQLAlchemySession／PostgreSQL、Pydantic；不新增运行依赖。用途修复复用既有 SDK 动态工具与治理路径；协议探针沿用已有证据，不重复运行。
 
 ### 11.1 已核对的公开能力、复用与缺口
 
@@ -287,6 +287,7 @@ DS 官方源码（版本标签）：
 
 | 限制 | 具体触发风险／已有机制不足 | 最小作用范围与验证 |
 | --- | --- | --- |
+| 用途集合只在 query 开放 DS 选择／读取 | #145 错把 DS 加入 diagnose，获准用户的仅诊断／附件轮可实时取数；用户已确认恢复原用途。目标授权不能替代用途约束，但现有 Tool Scope 足够执行 | 移除 diagnose 的 DS 注册，复用现有 scope；清除无 DS 工具时的实时取证指引，选择不进入查询事实分类。强行调用零 DS I/O；状态说明按架构中的已确认取舍验收，无工具时不把用途收窄误报为撤权。数据库诊断、获准历史与 query 的 D1–D4 不变，不新增拦截器或提示词禁令 |
 | 固定 DS 端点及参数映射，不透传任意 URL／方法／路径 | 已证实 GET 切版本会修改业务；普通源授权不证明路径只读 | 仅 DS Adapter 精确 allowlist；拒绝切版本／任意透传时零远端 I/O，两版协议覆盖 |
 | 执行前核对本轮 DS 范围 | 现有 target_scope 只表示获准目标，不能挡住跨选择的误读 | 只约束 DS 新读取，具体契约见 [DS 执行范围](../../../ARCHITECTURE.md#dolphinscheduler-environment)；E1—E10 分开验证语义与零 I/O 边界，不改历史或数据库范围 |
 | 项目、实例、任务及尝试绑定 | 上游某些日志路径仅在定义存在时校验项目；目标授权只到集群 | 仅实际读取对象与子关联，复用本轮已验证事实，缺事实才补查；跨项目／重叠 ID 反例 |
@@ -398,6 +399,7 @@ DS 官方源码（版本标签）：
 | D1、环境 E1—E10、D4 环境 E1—E3 | test_dolphinscheduler_runtime.py、test_dolphinscheduler_acceptance.py；真 Web/SDK/PG、未选零 I/O、失败轮选择隔离、集合沿用、3/6源、部分撤权；test_group_actions.py 复用两个批准群变体，test_dolphinscheduler_resend.py 验证正式结果重发／撤权且不重跑工具 | 真实 Agent 能否正确理解自然语言、环境指代及当前不可用成员 |
 | D2 及长日志／子流程变体 | test_dolphinscheduler_logs.py、test_dolphinscheduler_dependencies.py；10 MiB 中间报错、超长行、原文遮蔽、单轮共享下载、真实历史关联与项目缺口 | 模型自主定位、公司任务类型和 DS 服务端负载 |
 | D3 等待、D4 恢复与各失败变体 | 两版原生字段与带时间日志、当前尝试的新读取、失败后的历史标注和系统缺口；不能用错误正文生成 Evidence | 模型依据质量、根因推断、是否重放及结束调查是否合理 |
+| diagnose 用途修复（2026-10-29 决定） | test_dolphinscheduler_purpose.py：正式 Web/SDK/PG 与飞书命令、TXT/MD、图片、群一图 post 不提供 DS，实际模型工具、工作方法与状态说明一致；无工具时不输出目录／撤权标注，全部撤权中性说明另由 acceptance 的实际 grants 变更验证，部分撤权沿 D4-E3；强行调用零 I/O；query→diagnose→query 保留选择、数据库 EXPLAIN 与 DS 历史读取。D1–D4 原有业务测试显式走 query，不改样例标准 | 真实模型应说明本轮不查实时 DS、引导改用普通对话，同时继续分析用户日志或获准历史；真实飞书实收，本地固定脚本不证明自主性 |
 | D1／E10／F1 本地浏览器 | test_dolphinscheduler_browser.py，经正式 runtime.serve、真实 Chrome 验证成功／认证缺口与刷新，不展开依据也能看到环境 | 公司浏览器／真实服务和用户接受；飞书用协议替身，不证明群实收 |
 
 文件均位于 tests/sdk_core；完整命令与检查结果见 handoff，配置用法见 README。真实模型评测仍记录工具选择、取证、澄清／修正、结论、次数、耗时、用量和缺口；本轮没有获准配置，不运行或伪造该结果。离线脚本的固定选择不作为 Agent 能力通过条件。

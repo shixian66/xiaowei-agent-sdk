@@ -169,7 +169,7 @@ async def test_d1_formal_web_selects_b_reads_and_commits_choice(
                 list_failed(),
                 ds_answer,
             )
-            body = (await served.turn(message, "diagnose")).json()
+            body = (await served.turn(message, "query")).json()
             assert body["state"] == "completed", body
             assert "orders_failed" in json.dumps(body, ensure_ascii=False)
             assert [r[0] for r in requests] == [f"/b/projects/11/{route}"]
@@ -194,7 +194,7 @@ async def test_d1_formal_web_auth_failure_is_recorded_without_retry(env: Env, mo
                 list_failed(),
                 ds_answer,
             )
-            body = (await served.turn(message, "diagnose")).json()
+            body = (await served.turn(message, "query")).json()
             assert body["state"] == "completed", body
             assert len(requests) == 1
             rendered = json.dumps(body["delivery"], ensure_ascii=False)
@@ -211,7 +211,7 @@ async def test_e1_formal_web_unselected_clarifies_with_zero_ds_io(env: Env, monk
         async with env.running(config) as served:
             await served.page()
             message = env.scripts.add("昨晚有哪些失败工作流", clarify("要查哪套 DS 环境？"))
-            body = (await served.turn(message, "diagnose")).json()
+            body = (await served.turn(message, "query")).json()
             assert body["state"] == "completed"
             assert requests == []
             assert await served.finish() == 0
@@ -240,7 +240,7 @@ async def test_selected_scope_rejects_a_without_ds_io(env: Env, monkeypatch):
                 bad,
                 clarify("DS A 不在本次选择中，请核实查询对象"),
             )
-            body = (await served.turn(message, "diagnose")).json()
+            body = (await served.turn(message, "query")).json()
             assert body["state"] == "completed", body
             assert requests == []
             assert await served.finish() == 0
@@ -258,7 +258,7 @@ async def test_only_selection_is_not_an_unfinished_query(env: Env, monkeypatch):
                 tool_call("ds_select_clusters", clusters=["ds-b"]),
                 clarify("需要查哪个项目？"),
             )
-            body = (await served.turn(message, "diagnose")).json()
+            body = (await served.turn(message, "query")).json()
             assert body["state"] == "completed", body
             assert requests == []
             assert await served.finish() == 0
@@ -286,17 +286,17 @@ async def test_failed_b_turn_keeps_committed_a_choice_for_followup(env: Env, mon
                 list_failed("ds-a"),
                 ds_answer,
             )
-            assert (await served.turn(first, "diagnose", "a1")).json()["state"] == "completed"
+            assert (await served.turn(first, "query", "a1")).json()["state"] == "completed"
             fail = env.scripts.add(
                 "改查 DS B 的失败工作流",
                 tool_call("ds_select_clusters", clusters=["ds-b"]),
                 list_failed(),
                 tool_call("not_a_registered_tool"),
             )
-            assert (await served.turn(fail, "diagnose", "b1")).json()["state"] == "failed"
+            assert (await served.turn(fail, "query", "b1")).json()["state"] == "failed"
             assert await env.scalar("SELECT ds_clusters FROM xiaowei_session") == ["ds-a"]
             follow = env.scripts.add("再查同一批实例", list_failed("ds-a"), ds_answer)
-            assert (await served.turn(follow, "diagnose", "a2")).json()["state"] == "completed"
+            assert (await served.turn(follow, "query", "a2")).json()["state"] == "completed"
             assert [r[0].split("/")[1] for r in requests] == ["a", "b", "a"]
             assert await served.finish() == 0
 
@@ -453,11 +453,9 @@ async def test_e6_e7_explicit_set_replaces_then_followup_retains_it(env: Env, mo
                 list_failed("ds-b"),
                 ds_answer,
             )
-            assert (await served.turn(compare, "diagnose", "compare")).json()[
-                "state"
-            ] == "completed"
+            assert (await served.turn(compare, "query", "compare")).json()["state"] == "completed"
             follow = env.scripts.add("今天呢", list_failed("ds-a"), list_failed("ds-b"), ds_answer)
-            assert (await served.turn(follow, "diagnose", "follow")).json()["state"] == "completed"
+            assert (await served.turn(follow, "query", "follow")).json()["state"] == "completed"
             assert await env.scalar("SELECT ds_clusters FROM xiaowei_session") == ["ds-a", "ds-b"]
             just_b = env.scripts.add(
                 "B 上也这样吗",
@@ -465,7 +463,7 @@ async def test_e6_e7_explicit_set_replaces_then_followup_retains_it(env: Env, mo
                 list_failed("ds-b"),
                 ds_answer,
             )
-            assert (await served.turn(just_b, "diagnose", "only-b")).json()["state"] == "completed"
+            assert (await served.turn(just_b, "query", "only-b")).json()["state"] == "completed"
             assert await env.scalar("SELECT ds_clusters FROM xiaowei_session") == ["ds-b"]
             assert [r[0].split("/")[1] for r in requests] == ["a", "b", "a", "b", "b"]
             await served.finish()
@@ -584,12 +582,12 @@ async def test_ds_selection_commit_failure_keeps_session_writing_and_blocks_repl
                 list_failed(),
                 ds_answer,
             )
-            body = (await served.turn(message, "diagnose")).json()
+            body = (await served.turn(message, "query")).json()
             assert body["state"] == "failed", body
             assert await env.scalar("SELECT state FROM xiaowei_session") == "writing"
             assert await env.scalar("SELECT ds_clusters FROM xiaowei_session") is None
             follow = env.scripts.add("再查一次", list_failed(), ds_answer)
-            assert (await served.turn(follow, "diagnose", "next")).json()["state"] == "failed"
+            assert (await served.turn(follow, "query", "next")).json()["state"] == "failed"
             assert len(requests) == 1
             assert not env.scripts.calls.get(follow)
             await served.finish()
@@ -652,7 +650,7 @@ async def test_d1_two_pages_and_d4_fresh_detail_keep_original_instance(env, monk
                 page(2),
                 ds_answer,
             )
-            body = (await served.turn(message, "diagnose")).json()
+            body = (await served.turn(message, "query")).json()
             assert body["state"] == "completed", body
             rendered = json.dumps(body["delivery"], ensure_ascii=False)
             assert "701" in rendered and "702" in rendered and '"703"' not in rendered
@@ -667,7 +665,7 @@ async def test_d1_two_pages_and_d4_fresh_detail_keep_original_instance(env, monk
                 ),
                 ds_answer,
             )
-            body = (await served.turn(follow, "diagnose", "fresh")).json()
+            body = (await served.turn(follow, "query", "fresh")).json()
             assert body["state"] == "completed", body
             assert requests[-1][0].endswith("/701")
             assert len(requests) == 3
@@ -721,7 +719,7 @@ async def test_d2_formal_web_locates_middle_database_error_and_persists_only_sni
                 ),
                 ds_answer,
             )
-            body = (await served.turn(message, "diagnose")).json()
+            body = (await served.turn(message, "query")).json()
             assert body["state"] == "completed", body
             rendered = json.dumps(body["delivery"], ensure_ascii=False)
             assert all(word in rendered for word in ("ods.order_delta", "42S02", "1146", "生产 B"))
@@ -793,7 +791,7 @@ async def test_task_state_rejected_before_io_and_can_be_corrected(env, monkeypat
                 corrected,
                 ds_answer,
             )
-            result = (await served.turn(message)).json()
+            result = (await served.turn(message, mode="query")).json()
             assert result["state"] == "completed", result
             assert len(requests) == 1
             await served.finish()
@@ -862,7 +860,7 @@ async def test_log_business_failure_is_unavailable_cached_and_keeps_metadata_rea
                 ),
                 ds_answer,
             )
-            result = (await served.turn(message)).json()
+            result = (await served.turn(message, mode="query")).json()
             assert result["state"] == "completed", result
             visible = result["delivery"]["content"]
             assert "对象或日志不可用" in visible
@@ -910,7 +908,7 @@ async def test_ds_restart_preserves_history_only_for_operational_changes(
                 list_failed(),
                 ds_answer,
             )
-            assert (await served.turn(message)).json()["state"] == "completed"
+            assert (await served.turn(message, mode="query")).json()["state"] == "completed"
             cookies = dict(served.client.cookies)
             assert len(requests) == 1
             await served.finish()
@@ -929,7 +927,7 @@ async def test_ds_restart_preserves_history_only_for_operational_changes(
             if not identity_changed:
                 assert "orders_failed" in history.text
                 follow = env.scripts.add("今天呢", list_failed(), ds_answer)
-                result = (await served.turn(follow, request_id="follow")).json()
+                result = (await served.turn(follow, mode="query", request_id="follow")).json()
                 assert result["state"] == "completed", result
                 assert len(requests) == 2
                 assert requests[-1][2] == "synthetic-rotated-token"

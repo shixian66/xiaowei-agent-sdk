@@ -100,6 +100,7 @@ from xiaowei.models import (
     ACTION_STATUS_POLICY,
     ALERTMANAGER_READ_POLICIES,
     DS_READ_TOOLS,
+    DS_SELECT_TOOL,
     GRAFANA_READ_POLICIES,
     MAX_ANSWER_BLOCKS,
     MAX_ANSWER_TEXT_BYTES,
@@ -518,7 +519,10 @@ class Application:
             for contract in catalog.contracts
             if contract.policy_id in PROMETHEUS_DISCOVERY_POLICIES | GRAFANA_READ_POLICIES
         )
-        self._queries = config.purposes["query"] - config.purposes["diagnose"] - discovery
+        # DS 选择只更新轮内集合，不产生查询事实或 Evidence。
+        self._queries = (
+            config.purposes["query"] - config.purposes["diagnose"] - discovery - {DS_SELECT_TOOL}
+        )
         self._queries |= frozenset(
             c.tool_id for c in catalog.contracts if c.tool_id in DS_READ_TOOLS
         )
