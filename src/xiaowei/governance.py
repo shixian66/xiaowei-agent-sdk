@@ -748,6 +748,14 @@ class GovernedTools:
                     self._runs[key] = replace(
                         current, monitoring_failures=(*current.monitoring_failures, failure)
                     )
+                    logger.info(
+                        "monitoring_read turn=%s call_ref=%s tool_id=%s target_id=%s status=%s",
+                        ctx.identity.turn_id,
+                        hashlib.sha256(request.call_id.encode()).hexdigest()[:16],
+                        contract.tool_id,
+                        target,
+                        exc.reason,
+                    )
                     raise
                 except MonitoringReadError as exc:
                     if contract.policy_id not in MONITORING_READ_POLICIES:
@@ -1025,8 +1033,8 @@ class GovernedTools:
         key = _turn_key(identity)
         self._runs[key] = replace(self._runs.get(key, TurnRuns()), limit_rescue_started=True)
 
-    async def select_dolphinscheduler(self, ctx: RunContext, clusters: tuple[str, ...]) -> None:
-        """仅更新本轮可信选择；复用目录、当前授权及工具预算，不登记业务查询。"""
+    async def select_dolphinscheduler(self, ctx: RunContext, clusters: tuple[str, ...]) -> bool:
+        """返回集合是否改变；已生效的相同选择免计费，仍复核当前授权和范围。"""
         contract = self._catalog.contract(DS_SELECT_TOOL, DS_CONTROL_TARGET)
         if contract is None or not _in_scope(ctx, contract):
             raise ToolRejectedError("本轮不可选择 DS 环境", code="not_allowed")
@@ -1041,8 +1049,12 @@ class GovernedTools:
         runs = self.turn_runs(ctx.identity)
         if runs.ds_read_scope is not None and not set(chosen) <= set(runs.ds_read_scope):
             raise ToolRejectedError("本轮已开始 DS 取数，不能扩大集合", code="not_allowed")
+        # 授权可能挂起；读取最新账本后比较、计费和更新之间不能 await。
+        if runs.ds_clusters == chosen:
+            return False
         self._reserve(ctx)
         self._runs[_turn_key(ctx.identity)] = replace(runs, ds_clusters=chosen)
+        return True
 
     async def unavailable_dolphinscheduler(
         self, ctx: RunContext, clusters: tuple[str, ...]
