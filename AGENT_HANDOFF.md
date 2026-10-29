@@ -9,7 +9,7 @@
 | 项目 | 本次核对事实 |
 | --- | --- |
 | 仓库／产品基线 | [shixian66/xiaowei-agent-sdk](https://github.com/shixian66/xiaowei-agent-sdk)，`origin/main@4c5f9705e23fe89ac0d2781604dd9bc8c99bf1ac`，包含 DS #145 及四文档对齐 #146；2026-10-29 本轮 fetch 后以 `git ls-remote origin refs/heads/main` 核对一致 |
-| 当前任务 | 修复已批准的 DS diagnose 用途缺口；隔离分支 `codex/ds-diagnose-purpose` 从上述主线建立，只有 runtime 的用途组合改动，不新增产品或权限契约 |
+| 当前任务 | 修复已批准的 DS diagnose 用途缺口；隔离分支 `codex/ds-diagnose-purpose` 从上述主线建立，修正用途组合及相应模型指引，不新增产品或权限契约 |
 | 隔离与已有工作 | 复用干净隔离工作树；桌面旧 checkout `b89d4ee` 及其三份文档／其他任务未提交材料保持原样，不把旧 checkout 当最新实现 |
 | 源码／入口 | 唯一产品包 `src/xiaowei`；`xiaowei` 与 `python -m xiaowei` 为正式入口。旧 Runtime、Worker、专属测试／迁移入口已移除，兼容旧回答和已绑定交付的路径仍保留 |
 | 存储与回答 | 应用 schema **17**：016 保存有界定时结果快照，017 只新增 `ds_clusters`；新回答为可信 v4，旧 v2/v3/Legacy 和已绑定原字节按原语义读取。SDK 表不改 |
@@ -74,7 +74,7 @@ PR base `916f57a26d2bac201b6772a48016f194af7d586e`，head `bba19d4ba72c43524211f
 
 #145 将 `ds | selection` 加入 [runtime.py](src/xiaowei/runtime.py) 的 diagnose，用途因此超出用户批准范围；Web“仅诊断”、飞书 `/诊断` 及复用 diagnose 的图片／TXT/MD 都可能调用 DS。原测试也把 DS 业务场景送入 diagnose，未识别这个偏差。#146 只记录用户“维持原用途，后续移出 DS”的决定。
 
-本候选只从 diagnose 的集合移除 DS，动态工具和 I/O 前 Tool Scope 继续使用原执行链；六项 DS 业务工具、一个选择工具仍在普通 query 可用。已有 D1–D4／19 变体改用明确的 query 入口，业务断言不变；新增正式 Web／飞书入口及直接治理反例。query→diagnose→query 验证选择不丢失、EXPLAIN 与获准 DS 历史仍能读取，诊断轮不重新访问 DS。无 SDK、Adapter、授权模型、存储、配置或迁移变更，C1/C2、范围锁定、失败语义及长日志边界不变。
+本候选从 diagnose 的集合移除 DS，动态工具和 I/O 前 Tool Scope 继续使用原执行链；另在应用查询分类排除只产选择回执的 DS_SELECT_TOOL，无 DS 工具时不加载实时取证 METHOD，保留已选集合与当前不可用提示；六项 DS 业务工具、一个选择工具仍在普通 query 可用。已有 D1–D4／19 变体改用明确的 query 入口，业务断言不变；新增正式 Web／飞书入口及直接治理反例。query→diagnose→query 验证选择不丢失、EXPLAIN 与获准 DS 历史仍能读取，诊断轮不重新访问 DS。无 SDK 升级、Adapter I/O、授权模型、存储、配置或迁移变更，C1/C2、范围锁定、失败语义及长日志边界不变。
 
 源码缺口在本地已修复；独立复审与离线证据见 §5，尚未推送／合并，不代表现有部署已修复。用途契约仍只在 [ARCHITECTURE](ARCHITECTURE.md#dolphinscheduler-environment) 维护，退出条件见 [DEVELOPMENT_PLAN §10](DEVELOPMENT_PLAN.md#10-dsapi-只读诊断增量)。真实模型、公司 DS／飞书与用户验收没有新增证据。
 
@@ -109,7 +109,7 @@ PR base `916f57a26d2bac201b6772a48016f194af7d586e`，head `bba19d4ba72c43524211f
 
 ## 4. 实测环境与兼容性缺口
 
-已有证据只覆盖原 SHA、配置和范围；本轮核对文档／源码，不重跑真实服务，也不把历史用户反馈当作当前服务器状态。
+已有证据只覆盖原 SHA、配置和范围；本轮只做源码／文档核对和离线验证，不调用真实服务，也不把历史用户反馈当作当前服务器状态。
 
 | 对象 | 有效证据层 | 未关闭项 |
 | --- | --- | --- |
@@ -126,7 +126,7 @@ PR base `916f57a26d2bac201b6772a48016f194af7d586e`，head `bba19d4ba72c43524211f
 | Alertmanager | APIv2 替身及早期0.34.1隔离记录，正式入口离线反馈 | 公司版本、认证／HA／容量、写后回读和群审批 |
 | 飞书／通知／定时 | 官方SDK、协议替身、卡片/post、附件、分项恢复和公司使用反馈；A/B/C及代理离线链 | 真实 mentions／图片形态、create/reply/apatch权限、原消息回复、限频／uuid、多附件、桌面手机折叠／复制、机器人实收；U5–U7成本及30任务并发 |
 | Web | 正式 Uvicorn／Chrome，用例各用替身或隔离真库 | 当前模型的真实任务质量和大量事实展示；无登录共用身份仍是已接受风险 |
-| 发行／公司运行 | 手动 publish-amd64 发行；历史公司916f57a/schema16启动回报 | 当前主线7565c6a/schema17未在本任务发行／部署；服务器现状、故障恢复及用户接受不能从 healthy 推定 |
+| 发行／公司运行 | 手动 publish-amd64 发行；历史公司916f57a/schema16启动回报 | 主线基线4c5f970/schema17及本候选未在本任务发行／部署；服务器现状、故障恢复及用户接受不能从 healthy 推定 |
 
 关键遗漏继续显式保留：
 
@@ -135,7 +135,7 @@ PR base `916f57a26d2bac201b6772a48016f194af7d586e`，head `bba19d4ba72c43524211f
 - P4 真实模型仍须验证遇到精确直查的可修正拒绝后不偷换候选工具；当前只靠工具／Skill 指引，离线错误路径不证明 Agent 遵守。任务规则见 [ARCHITECTURE §6](ARCHITECTURE.md#6-只读查询保护)，评测沿原 P4 样例。
 
 - StarRocks 审计时间按源写入时区，普通 naive DATETIME 不自动补偏移；公司目标 `CURDATE()/NOW()`、时区与既有展示口径须实测。当前窗口展示的北京时间口径限制及旧历史错误偏移不能靠排版追问自动重取／改写。
-- SDK 回答改写失败可能被安全日志归为 `sdk_configuration`、用户仍见 `model_failed`；OpenAI 协议族 `conversation_locked` 内置重试不经过应用429/503策略，Vertex不触发。这些记录未被本次文档修订关闭。
+- SDK 回答改写失败可能被安全日志归为 `sdk_configuration`、用户仍见 `model_failed`；OpenAI 协议族 `conversation_locked` 内置重试不经过应用429/503策略，Vertex不触发。这些记录本轮未关闭。
 - Grafana 数据源前后摘要检查不等于原子版本控制；Annotation 回读 limit=100 边缘未关闭。未知插件普通字段中的凭据识别缺口、写端令牌范围按已有取舍，不新增插件白名单。
 - 单大字段超限可能没有可展示预览；缺失格式／指标不能由模型补造。旧 Grafana 群重发整文件和 C8 取消落定的偶发失败留在版本记录，本轮未复现，也不根据单次重跑认定根因关闭。
 - 公司安全巡检 A0/A3、历史 H3／成文 I3、通知代理 openUrl／不带 at 的兼容和漏查目标检测的既有延期保持；任务质量、治理、源端能力、实收分别验收。
@@ -164,7 +164,13 @@ CI 实际测试 PR 合并提交 `52911c87e7e9adb9fd35c2c86caf2c03b6de5adc`，tre
 
 ### 本轮 DS 用途修复
 
-本地回归先在未改产品代码时复现 9 个失败：工具暴露、选择／读取错误放行及各附件入口；无真实模型或公司 DS。当前生产代码仅改 runtime 的用途集合；相关离线回归 **487 passed、2 deselected**（被排除的浏览器项另跑 **2 passed**），覆盖 DS、正式 runtime、TiDB、数据库诊断／历史、飞书图片／文件／群及 DS 群变体。`ruff check . --no-cache`、`mypy src`（44 文件）、文档／工作流 **30 passed**、链接／锚点 **0 错误、19 个 DS 变体**及 `git diff --check` 通过。测试文件与命令在 `/private/tmp/xw-ds-diagnose-related.log`，初始反例在 `xw-ds-diagnose-red.log`，浏览器在 `xw-ds-diagnose-browser.log`（同目录、本机临时证据）。本候选的独立复审尚待完成；没有运行全量 CI，完整 CI 留待另获推送／PR 授权后执行。离线脚本只证明实际调用链和边界，真实 Agent 如何解释缺工具、诊断质量、D1–D4／19 变体、两版公司 API、长日志负载／脱敏延迟、飞书实收及用户验收仍开放。
+本地修复先用 9 个反例证实原用途缺口；独立初审 `0d397ec` 又指出“选择被要求引用 fact”及“无 DS 工具仍加载实时工作方法”两处指引联动，已补实际模型输入反例并修正。选择仍不产业务 Evidence、不计已开始查询；已选集合及实际撤权后的不可用提示保留。源码修订只涉及 runtime 用途、app 查询分类和 DS 工作方法装配，小范围复审待记录。
+
+- 相关离线回归 **757 passed、2 deselected**，包含 DS D1–D4／19 变体、runtime、TiDB、数据库诊断／历史、飞书图片／文件／群、应用／治理及旧审批恢复；被排除的浏览器项另跑 **2 passed**。
+- `ruff check . --no-cache`、`mypy src`（44 文件）、文档／工作流 **30 passed**、链接／锚点 **0 错误、19 个 DS 变体**及 `git diff --check` 通过。没有运行本候选的完整 CI，留待另获推送／PR 授权后执行。
+- 本机临时证据：`/private/tmp/xw-ds-diagnose-final-related.log` 含命令、基线及三份源码 SHA256；`xw-ds-diagnose-final-browser.log` 为 Chrome，`xw-ds-diagnose-red.log` 与 `xw-ds-diagnose-instructions-red.log` 为两组修复前反例（均在同目录）。
+
+离线脚本只证明实际调用链和边界。真实 Agent 如何解释缺工具、诊断质量、D1–D4／19 变体、两版公司 API、长日志负载／脱敏延迟、飞书实收及用户验收仍开放；本轮没有调用真实模型或公司服务，没有发行／部署。
 
 ### 历史证据的保存方式
 

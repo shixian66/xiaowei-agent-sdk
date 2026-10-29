@@ -950,7 +950,7 @@ class DolphinScheduler:
         ]
         return (
             "\n"
-            + METHOD
+            + (METHOD if self.available_tools & ctx.tool_scope else "")
             + "\n可信 DS 本地目录："
             + json.dumps(directory, ensure_ascii=False)
             + (

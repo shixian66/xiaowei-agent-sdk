@@ -53,6 +53,11 @@ async def test_query_diagnose_query_preserves_ds_choice_and_database_diagnosis(
             )
             assert (await served.turn(first, "query", "first")).json()["state"] == "completed"
             assert len(requests) == 1
+            for call in env.scripts.calls[first]:
+                queries = call.instructions.split("以下是查询类工具：", 1)[1].split("。", 1)[0]
+                assert "ds_select_clusters" not in queries
+                assert "ds_list_workflow_instances" in queries
+                assert "DS 工作方法" in call.instructions
             old_turn = await env.scalar("SELECT turn_id FROM xiaowei_request")
 
             def plan_after_history(call):
@@ -75,6 +80,9 @@ async def test_query_diagnose_query_preserves_ds_choice_and_database_diagnosis(
                 assert "explain_query" in offered and "run_readonly_query" not in offered
                 assert {t.replace("/", "__") for t in HISTORY_TOOLS} <= offered
             assert len(requests) == 1
+            assert all(
+                "DS 工作方法" not in call.instructions for call in env.scripts.calls[message]
+            )
             follow = env.scripts.add("普通对话继续查 DS B 今天的失败", list_failed(), ds_answer)
             assert (await served.turn(follow, "query", "follow")).json()["state"] == "completed"
             assert len(requests) == 2  # 沿用已提交选择，不重复选择或额外查询。
@@ -233,6 +241,7 @@ async def test_formal_feishu_diagnose_entries_hide_ds(env: Env, monkeypatch, ent
             assert await env.scalar("SELECT mode FROM xiaowei_request") == "diagnose"
             assert await env.scalar("SELECT state FROM xiaowei_request") == "completed"
             assert len(calls) == 1
+            assert "DS 工作方法" not in str(calls[0]["systemInstruction"])
             offered = {d["name"] for t in calls[0]["tools"] for d in t["functionDeclarations"]}
             assert offered.isdisjoint(DS_NAMES)
             assert "explain_query" in offered and "run_readonly_query" not in offered

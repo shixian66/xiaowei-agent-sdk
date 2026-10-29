@@ -287,7 +287,7 @@ DS 官方源码（版本标签）：
 
 | 限制 | 具体触发风险／已有机制不足 | 最小作用范围与验证 |
 | --- | --- | --- |
-| 用途集合只在 query 开放 DS 选择／读取 | #145 错把 DS 加入 diagnose，获准用户的仅诊断／附件轮可实时取数；用户已确认恢复原用途。目标授权不能替代用途约束，但现有 Tool Scope 足够执行 | 只移除 diagnose 的 DS 注册，复用现有 scope；强行调用零 DS I/O。数据库诊断、获准历史与 query 的 D1–D4 不变，不新增拦截器或提示词禁令 |
+| 用途集合只在 query 开放 DS 选择／读取 | #145 错把 DS 加入 diagnose，获准用户的仅诊断／附件轮可实时取数；用户已确认恢复原用途。目标授权不能替代用途约束，但现有 Tool Scope 足够执行 | 移除 diagnose 的 DS 注册，复用现有 scope；清除无 DS 工具时的实时取证指引，选择不进入查询事实分类。强行调用零 DS I/O，当前不可用状态仍保留。数据库诊断、获准历史与 query 的 D1–D4 不变，不新增拦截器或提示词禁令 |
 | 固定 DS 端点及参数映射，不透传任意 URL／方法／路径 | 已证实 GET 切版本会修改业务；普通源授权不证明路径只读 | 仅 DS Adapter 精确 allowlist；拒绝切版本／任意透传时零远端 I/O，两版协议覆盖 |
 | 执行前核对本轮 DS 范围 | 现有 target_scope 只表示获准目标，不能挡住跨选择的误读 | 只约束 DS 新读取，具体契约见 [DS 执行范围](../../../ARCHITECTURE.md#dolphinscheduler-environment)；E1—E10 分开验证语义与零 I/O 边界，不改历史或数据库范围 |
 | 项目、实例、任务及尝试绑定 | 上游某些日志路径仅在定义存在时校验项目；目标授权只到集群 | 仅实际读取对象与子关联，复用本轮已验证事实，缺事实才补查；跨项目／重叠 ID 反例 |
@@ -399,7 +399,7 @@ DS 官方源码（版本标签）：
 | D1、环境 E1—E10、D4 环境 E1—E3 | test_dolphinscheduler_runtime.py、test_dolphinscheduler_acceptance.py；真 Web/SDK/PG、未选零 I/O、失败轮选择隔离、集合沿用、3/6源、部分撤权；test_group_actions.py 复用两个批准群变体，test_dolphinscheduler_resend.py 验证正式结果重发／撤权且不重跑工具 | 真实 Agent 能否正确理解自然语言、环境指代及当前不可用成员 |
 | D2 及长日志／子流程变体 | test_dolphinscheduler_logs.py、test_dolphinscheduler_dependencies.py；10 MiB 中间报错、超长行、原文遮蔽、单轮共享下载、真实历史关联与项目缺口 | 模型自主定位、公司任务类型和 DS 服务端负载 |
 | D3 等待、D4 恢复与各失败变体 | 两版原生字段与带时间日志、当前尝试的新读取、失败后的历史标注和系统缺口；不能用错误正文生成 Evidence | 模型依据质量、根因推断、是否重放及结束调查是否合理 |
-| diagnose 用途修复（2026-10-29 决定） | test_dolphinscheduler_purpose.py：正式 Web/SDK/PG 与飞书命令、TXT/MD、图片、群一图 post 不提供 DS；强行调用零 I/O；query→diagnose→query 保留选择、数据库 EXPLAIN 与 DS 历史读取。D1–D4 原有业务测试显式走 query，不改样例标准 | 真实模型遇到缺工具时的解释和引导、真实飞书实收；本地固定脚本不证明自主性 |
+| diagnose 用途修复（2026-10-29 决定） | test_dolphinscheduler_purpose.py：正式 Web/SDK/PG 与飞书命令、TXT/MD、图片、群一图 post 不提供 DS，实际模型工具和工作方法一致；强行调用零 I/O；query→diagnose→query 保留选择、数据库 EXPLAIN 与 DS 历史读取。D1–D4 原有业务测试显式走 query，不改样例标准 | 真实模型遇到缺工具时的解释和引导、真实飞书实收；本地固定脚本不证明自主性 |
 | D1／E10／F1 本地浏览器 | test_dolphinscheduler_browser.py，经正式 runtime.serve、真实 Chrome 验证成功／认证缺口与刷新，不展开依据也能看到环境 | 公司浏览器／真实服务和用户接受；飞书用协议替身，不证明群实收 |
 
 文件均位于 tests/sdk_core；完整命令与检查结果见 handoff，配置用法见 README。真实模型评测仍记录工具选择、取证、澄清／修正、结论、次数、耗时、用量和缺口；本轮没有获准配置，不运行或伪造该结果。离线脚本的固定选择不作为 Agent 能力通过条件。
