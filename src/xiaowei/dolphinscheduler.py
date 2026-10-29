@@ -939,6 +939,9 @@ class DolphinScheduler:
 
     async def prompt(self, ctx: RunContext, governance: GovernedTools) -> str:
         selected = governance.turn_runs(ctx.identity).ds_clusters
+        selection = "\n本轮 DS 集合：" + json.dumps(selected, ensure_ascii=False)
+        if not self.available_tools & ctx.tool_scope:
+            return selection + "\n本轮不提供 DS 实时读取工具；已选集合保留。"
         unavailable = await governance.unavailable_dolphinscheduler(
             ctx,
             tuple(dict.fromkeys((*self.adapters, *(selected or ())))),
@@ -950,17 +953,12 @@ class DolphinScheduler:
         ]
         return (
             "\n"
-            + (METHOD if self.available_tools & ctx.tool_scope else "")
+            + METHOD
             + "\n可信 DS 本地目录："
             + json.dumps(directory, ensure_ascii=False)
-            + (
-                "\n本轮 DS 集合："
-                + json.dumps(selected, ensure_ascii=False)
-                + "；当前不可用："
-                + json.dumps(
-                    [key for key in selected or () if key in unavailable], ensure_ascii=False
-                )
-            )
+            + selection
+            + "；当前不可用："
+            + json.dumps([key for key in selected or () if key in unavailable], ensure_ascii=False)
         )
 
     def _check_request(self, request: ToolRequest) -> ToolRequest:

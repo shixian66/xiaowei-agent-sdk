@@ -37,7 +37,7 @@
 
 ## 3. 当前计划与下一项工作
 
-四份根文档对齐已随 #146 合入。DS diagnose 用途缺口已在本地修复，并经独立复审接受为离线交付，见下文及 §5；尚未推送／合并。下一项由用户决定本分支的推送／PR／完整 CI 及合并；实战验收保持开放，不能从旧授权自动发行或部署。
+四份根文档对齐已随 #146 合入。DS diagnose 用途移除及 F1 状态说明误报已在本地修正；用户已确认无 DS 工具时统一中性说明，不新增用途字段。定向回归通过，提交后的相关回归及小范围复审待记录；尚未推送／合并，实战验收保持开放。
 
 ### 主线合入索引
 
@@ -62,7 +62,7 @@ A/B/C 通知与定时已分别随 #123 `9284688`、#125 `2bee11f`、#126 `be8c15
 
 ### DS：离线交付已合入，实战验收开放
 
-产品契约只见 [ARCHITECTURE](ARCHITECTURE.md#dolphinscheduler-environment)，工具、限制和固定 D1–D4／19 变体只见 [DS-RO-P1-r7](docs/superpowers/plans/2026-10-28-dolphinscheduler-readonly-api.md#ds-implementation-plan)。S1–S4 与审查修订、R1 日志业务 JSON 分类、C1 四项身份绑定、C2 删除多余选择字段均已合入；保留 `ds_read_scope` 原边界。schema17 只有 `ds_clusters`，不兼容从未发布的旧 DS 测试候选结构。
+产品契约只见 [ARCHITECTURE](ARCHITECTURE.md#dolphinscheduler-environment)，工具、限制和固定 D1–D4／19 变体只见 [DS-RO-P1-r8](docs/superpowers/plans/2026-10-28-dolphinscheduler-readonly-api.md#ds-implementation-plan)。S1–S4 与审查修订、R1 日志业务 JSON 分类、C1 四项身份绑定、C2 删除多余选择字段均已合入；保留 `ds_read_scope` 原边界。schema17 只有 `ds_clusters`，不兼容从未发布的旧 DS 测试候选结构。
 
 PR base `916f57a26d2bac201b6772a48016f194af7d586e`，head `bba19d4ba72c43524211f5afb523b70862ba68f7`。rebase 无冲突；独立 C1/C2 复审覆盖源码候选 `b469b5bcca51335fe40fa799346b886d9bae1061` 及集成路径，无代码阻断，另验 9 项和实际应用绑定 8 种变化。最终 head 只修文档，src/tests 不变；合并树与受测树一致，未部署。
 
@@ -74,7 +74,7 @@ PR base `916f57a26d2bac201b6772a48016f194af7d586e`，head `bba19d4ba72c43524211f
 
 #145 将 `ds | selection` 加入 [runtime.py](src/xiaowei/runtime.py) 的 diagnose，用途因此超出用户批准范围；Web“仅诊断”、飞书 `/诊断` 及复用 diagnose 的图片／TXT/MD 都可能调用 DS。原测试也把 DS 业务场景送入 diagnose，未识别这个偏差。#146 只记录用户“维持原用途，后续移出 DS”的决定。
 
-本候选从 diagnose 的集合移除 DS，动态工具和 I/O 前 Tool Scope 继续使用原执行链；另在应用查询分类排除只产选择回执的 DS_SELECT_TOOL，无 DS 工具时不加载实时取证 METHOD，保留已选集合与当前不可用提示；六项 DS 业务工具、一个选择工具仍在普通 query 可用。已有 D1–D4／19 变体改用明确的 query 入口，业务断言不变；新增正式 Web／飞书入口及直接治理反例。query→diagnose→query 验证选择不丢失、EXPLAIN 与获准 DS 历史仍能读取，诊断轮不重新访问 DS。无 SDK 升级、Adapter I/O、授权模型、存储、配置或迁移变更，C1/C2、范围锁定、失败语义及长日志边界不变。
+本候选从 diagnose 的集合移除 DS，动态工具和 I/O 前 Tool Scope 继续使用原执行链；另在应用查询分类排除只产选择回执的 DS_SELECT_TOOL，无 DS 工具时只保留已选集合和中性说明，不加载实时取证 METHOD、目录或不可用标注；仍有 DS 工具时继续显示当前授权下的目录和不可用成员。六项 DS 业务工具、一个选择工具仍在普通 query 可用。已有 D1–D4／19 变体改用明确的 query 入口，业务断言不变；新增正式 Web／飞书入口及直接治理反例。query→diagnose→query 验证选择不丢失、EXPLAIN 与获准 DS 历史仍能读取，诊断轮不重新访问 DS。无 SDK 升级、Adapter I/O、授权模型、存储、配置或迁移变更，C1/C2、范围锁定、失败语义及长日志边界不变。
 
 源码缺口在本地已修复；独立复审与离线证据见 §5，尚未推送／合并，不代表现有部署已修复。用途契约仍只在 [ARCHITECTURE](ARCHITECTURE.md#dolphinscheduler-environment) 维护，退出条件见 [DEVELOPMENT_PLAN §10](DEVELOPMENT_PLAN.md#10-dsapi-只读诊断增量)。真实模型、公司 DS／飞书与用户验收没有新增证据。
 
@@ -164,13 +164,12 @@ CI 实际测试 PR 合并提交 `52911c87e7e9adb9fd35c2c86caf2c03b6de5adc`，tre
 
 ### 本轮 DS 用途修复
 
-源码候选 `7719eb6fc640bd5da8b7ac5df2fd43b8408d498d` 已经独立复审，可接受本地离线交付，无剩余必须修复问题。原用途缺口及选择 fact／无工具仍加载工作方法两处指引联动，均已用修复前反例证实并修正；选择仍不产业务 Evidence、不计已开始查询，已选集合及实际撤权后的不可用提示保留。复审覆盖三处源码和相关入口／治理／模型输入测试，并核对最终源码 SHA256 与下述回归证据一致；后续仅记录复审结论，不改变该受测代码。
+`f4ee173` 外部复审发现 F1：diagnose 没有 DS 工具时，目录变空且已选环境被误标为当前不可用。原“无剩余必须修复问题”结论由此修正。本候选只调整 DS prompt：无工具时在计算目录／不可用状态前返回中性说明；有工具时沿用原路径。用户确认全部 DS 授权撤销也用中性说明，实际 grants 测试据此调整，权限拒绝、零 I/O、零 Evidence 和集合保留断言继续执行；部分撤权 D4-E3 不变。具体契约只在 ARCHITECTURE 维护。
 
-- 相关离线回归 **757 passed、2 deselected**，包含 DS D1–D4／19 变体、runtime、TiDB、数据库诊断／历史、飞书图片／文件／群、应用／治理及旧审批恢复；被排除的浏览器项另跑 **2 passed**。
-- `ruff check . --no-cache`、`mypy src`（44 文件）、文档／工作流 **30 passed**、链接／锚点 **0 错误、19 个 DS 变体**及 `git diff --check` 通过。没有运行本候选的完整 CI，留待另获推送／PR 授权后执行。
-- 本机临时证据：`/private/tmp/xw-ds-diagnose-final-related.log` 含命令、基线及三份源码 SHA256；`xw-ds-diagnose-final-browser.log` 为 Chrome，`xw-ds-diagnose-red.log` 与 `xw-ds-diagnose-instructions-red.log` 为两组修复前反例（均在同目录）。
+- F1 修复前正式入口反例 **6 failed、3 passed**；修复后含全部撤权、部分撤权两个分支的定向回归 **12 passed**。本机临时日志 `/private/tmp/xw-ds-purpose-f1-{red,green}.log` 同时记录源码及测试文件 SHA256。提交后的固定版本回归、静态／文档检查和增量复审待记录。
+- 前序 `f4ee173` 的相关 **757 passed、2 deselected** 及 Chrome **2 passed** 只证明修复前对应路径，日志 `/private/tmp/xw-ds-diagnose-final-{related,browser}.log` 保留参考，不作为 F1 关闭依据。本候选完整 CI 尚未运行；推送／PR／合并需另获授权。
 
-离线脚本只证明实际调用链和边界。真实 Agent 如何解释缺工具、诊断质量、D1–D4／19 变体、两版公司 API、长日志负载／脱敏延迟、飞书实收及用户验收仍开放；本轮没有调用真实模型或公司服务，没有发行／部署。
+离线脚本只证明实际调用链和边界。真实 Agent 是否能准确解释本轮缺工具、引导实时 DS 查询使用普通对话并继续分析用户日志／获准历史，诊断质量、D1–D4／19 变体、两版公司 API、长日志负载／脱敏延迟、飞书实收及用户验收仍开放；本轮没有调用真实模型或公司服务，没有发行／部署。
 
 ### 历史证据的保存方式
 

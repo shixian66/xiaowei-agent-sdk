@@ -345,7 +345,7 @@ async def test_d4_fresh_attempt_and_failed_followup_do_not_claim_old_fact_is_cur
             await served.finish()
 
 
-async def test_current_unavailable_uses_real_grant_revocation_between_turns(env, monkeypatch):
+async def test_all_ds_grants_revoked_after_diagnose_keeps_selection_without_cause(env, monkeypatch):
     from xiaowei.runtime import StaticAccess
 
     monkeypatch.setenv("XW_TEST_DS_TOKEN", "synthetic-token")
@@ -370,6 +370,11 @@ async def test_current_unavailable_uses_real_grant_revocation_between_turns(env,
                 "state"
             ] == "completed"
             assert requests == []
+            diagnose = env.scripts.add("仅诊断已有文本", clarify("请补充待分析的日志。"))
+            assert (await served.turn(diagnose, "diagnose", "diagnose")).json()[
+                "state"
+            ] == "completed"
+            assert await env.scalar("SELECT ds_clusters FROM xiaowei_session") == ["ds-b"]
             assert instances
             for access in instances:
                 # Keep the real authorization implementation; revoke actual DS grants only.
@@ -377,14 +382,23 @@ async def test_current_unavailable_uses_real_grant_revocation_between_turns(env,
                     subject: frozenset(t for t in tools if not t.startswith("local/ds_"))
                     for subject, tools in access._grants.items()
                 }
-            follow = env.scripts.add("今天呢", clarify("DS 生产 B 当前不可用，未查询"))
+            follow = env.scripts.add("今天呢", clarify("本轮没有 DS 实时读取工具，已选 B 保留。"))
             result = (
                 await served.turn(follow, mode="query", request_id="after-grants-revoked")
             ).json()
             assert result["state"] == "completed", result
             instructions = env.scripts.calls[follow][0].instructions
             assert '本轮 DS 集合：["ds-b"]' in instructions
-            assert '当前不可用：["ds-b"]' in instructions
+            assert "本轮不提供 DS 实时读取工具" in instructions
+            assert "已选集合保留" in instructions
+            assert "DS 工作方法" not in instructions
+            assert "可信 DS 本地目录：" not in instructions
+            assert "当前不可用：" not in instructions
+            assert all(
+                not any(name.startswith("ds_") for name in offered)
+                for offered in env.scripts.tools_seen(follow)
+            )
             assert requests == []
+            assert await env.scalar("SELECT count(*) FROM xiaowei_evidence") == 0
             assert await env.scalar("SELECT ds_clusters FROM xiaowei_session") == ["ds-b"]
             await served.finish()
