@@ -79,7 +79,7 @@ from xiaowei.governance import (
     ToolExecutionError,
     ToolRejectedError,
 )
-from xiaowei.model_api import ModelBinding, open_model
+from xiaowei.model_api import ModelBinding, ModelProfile, open_model
 from xiaowei.models import (
     AUDIENCES,
     AgentAnswer,
@@ -239,10 +239,15 @@ async def env(postgres_url: URL, monkeypatch: pytest.MonkeyPatch) -> AsyncIterat
 
 @asynccontextmanager
 async def assembled(
-    postgres_url: URL, monkeypatch: pytest.MonkeyPatch, drv: Driver, target: StarRocksTarget = SR
+    postgres_url: URL,
+    monkeypatch: pytest.MonkeyPatch,
+    drv: Driver,
+    target: StarRocksTarget = SR,
+    *,
+    profile: ModelProfile = PROFILE,
 ) -> AsyncIterator[Env]:
     """正式装配：真 Runner、治理、Evidence（含当前权限复核）与隔离 PostgreSQL；驱动由调用方给出。"""
-    monkeypatch.setenv(PROFILE.api_key_ref.removeprefix("env:"), "sk-test-starrocks-tools")
+    monkeypatch.setenv(profile.api_key_ref.removeprefix("env:"), "sk-test-starrocks-tools")
     async with ready_engine(postgres_url) as engine:
         adapter = StarRocksAdapter(target, connect=drv, clock=lambda: NOW)
         tools = starrocks_tools(
@@ -262,7 +267,7 @@ async def assembled(
         )
         governed = GovernedTools(evidence)
         scripts = RecordingScripts()
-        async with open_model(PROFILE, transport=scripts.transport()) as bound:
+        async with open_model(profile, transport=scripts.transport()) as bound:
             app = Application(
                 app_config(),
                 model=bound,

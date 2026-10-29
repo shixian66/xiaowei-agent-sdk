@@ -109,6 +109,7 @@ async def test_vertex_100_parallel_identical_selections_leave_budget_for_project
             assert "orders" in json.dumps(result["delivery"])
             assert result["delivery"]["facts"][0]["tool_id"] == "local/ds_list_projects"
             assert await served.finish() == 0
+    assert "tool_calls=101 duplicate_calls=99" in caplog.text
     assert len(feedback) == 100
     assert all(o == {"status": "selected", "clusters": ["ds-b"]} for o in feedback)
     assert len(requests) == 1

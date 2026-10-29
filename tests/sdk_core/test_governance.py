@@ -196,7 +196,7 @@ async def test_parallel_calls_share_one_budget(postgres_url: URL) -> None:
         results = await asyncio.gather(
             *(
                 governed.invoke(ctx, r, adapter.execute)
-                for r in (request(call_id="a"), request(call_id="b"))
+                for r in (request(call_id="a"), request(region="west", call_id="b"))
             ),
             return_exceptions=True,
         )
@@ -1266,7 +1266,11 @@ async def test_only_proposal_can_return_classified_preparation_rejection(
         assert runs.proposal_rejections == ((TOTAL_TOOL,) if effect == "propose" else ())
         assert runs.started == (TOTAL_TOOL,) and runs.produced == ()
         with pytest.raises(ToolRejectedError) as exhausted:
-            await governed.invoke(ctx, request(call_id="second"), reject)
+            await governed.invoke(
+                ctx,
+                request(region="east" if effect == "write" else "west", call_id="second"),
+                reject,
+            )
         assert exhausted.value.code == "budget_exhausted"
         assert len(calls) == 1
 

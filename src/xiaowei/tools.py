@@ -38,6 +38,7 @@ from xiaowei.governance import (
     PrometheusSelectorError,
     PromQLExpressionError,
     ProposalRejectedError,
+    ReusedToolResult,
     SecurityInspectionError,
     SqlParseError,
     ToolRejectCode,
@@ -442,7 +443,7 @@ def _governed(
     arguments: dict[str, Any],
     governance: GovernedTools,
     execute: Execute,
-) -> Awaitable[ToolResult]:
+) -> Awaitable[ToolResult | ReusedToolResult]:
     request = ToolRequest(
         tool_id=contract.tool_id,
         target_id=contract.target_id,

@@ -74,7 +74,7 @@ async def test_fixed_feedback_stops_or_corrects(
             grants.revoke_all()
         if case == "budget":
             ctx = context(max_tool_calls=1)
-            await governed.invoke(ctx, request(), adapter.execute)
+            await governed.invoke(ctx, request(region="west"), adapter.execute)
             adapter.calls.clear()
         if case == "unsafe_message":
 
@@ -174,7 +174,8 @@ async def test_one_busy_retry_claimed_before_any_await(postgres_url: URL) -> Non
         assert len(adapter.calls) == 1
 
 
-async def test_runner_busy_feedback_has_remaining_allowance(postgres_url: URL) -> None:
+@pytest.mark.parametrize("same", [False, True])
+async def test_runner_busy_feedback_has_remaining_allowance(postgres_url: URL, same: bool) -> None:
     grants = Grants()
     grants.grant("alice", TOTAL_TOOL)
     attempts = 0
@@ -192,8 +193,16 @@ async def test_runner_busy_feedback_has_remaining_allowance(postgres_url: URL) -
         model = ScriptedModel(
             [
                 [function_call("order_total", {"region": "east"}, call_id="r7-1")],
-                [function_call("order_total", {"region": "west"}, call_id="r7-2")],
-                [function_call("order_total", {"region": "third"}, call_id="r7-3")],
+                [
+                    function_call(
+                        "order_total", {"region": "east" if same else "west"}, call_id="r7-2"
+                    )
+                ],
+                [
+                    function_call(
+                        "order_total", {"region": "east" if same else "third"}, call_id="r7-3"
+                    )
+                ],
                 DONE,
             ]
         )
@@ -299,7 +308,7 @@ async def test_budget_and_authorization_rejections_do_not_spend_busy_retry(
         await governed.invoke(ctx, request(), adapter.execute)
         # Successful retry spends both the ordinary budget and the one-shot allowance.
         with pytest.raises(ToolRejectedError) as rejected:
-            await governed.invoke(ctx, request(), adapter.execute)
+            await governed.invoke(ctx, request(region="west"), adapter.execute)
         assert rejected.value.code == "budget_exhausted" and len(adapter.calls) == 1
         assert governed.turn_runs(ctx.identity).slot_retries == frozenset({TARGET})
 
