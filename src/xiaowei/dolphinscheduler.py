@@ -3,6 +3,7 @@
 import asyncio
 import hashlib
 import json
+import logging
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -46,6 +47,8 @@ from xiaowei.models import (
     ToolRequest,
 )
 from xiaowei.tools import _rejection_feedback, routed_function_tool
+
+logger = logging.getLogger(__name__)
 
 MAX_RESPONSE_BYTES = 1_048_576
 MAX_LOG_BYTES = 16 * 1024 * 1024
@@ -998,9 +1001,12 @@ class DolphinScheduler:
             assert contract is not None  # noqa: S101 - trusted catalog
 
             async def select(tool_ctx: ToolContext[RunContext], arguments: str) -> str:
+                code: str
                 try:
                     parsed = SelectArgs.model_validate_json(arguments)
-                    await governance.select_dolphinscheduler(tool_ctx.context, parsed.clusters)
+                    changed = await governance.select_dolphinscheduler(
+                        tool_ctx.context, parsed.clusters
+                    )
                 except (ValueError, ToolRejectedError) as exc:
                     governance.note_rejected(tool_ctx.context.identity)
                     rejection = (
@@ -1008,10 +1014,25 @@ class DolphinScheduler:
                         if isinstance(exc, ToolRejectedError)
                         else ToolRejectedError("参数不符合工具契约")
                     )
-                    return _rejection_feedback(rejection, "ds_select_clusters")
-                return json.dumps(
-                    {"status": "selected", "clusters": parsed.clusters}, ensure_ascii=False
+                    status, code = "rejected", rejection.code
+                    result = _rejection_feedback(rejection, "ds_select_clusters")
+                else:
+                    status, code = ("selected" if changed else "unchanged"), "-"
+                    result = json.dumps(
+                        {"status": "selected", "clusters": parsed.clusters}, ensure_ascii=False
+                    )
+                logger.info(
+                    "ds_selection turn=%s call_ref=%s tool_id=%s target_id=%s status=%s code=%s",
+                    tool_ctx.context.identity.turn_id,
+                    hashlib.sha256(
+                        tool_ctx.tool_call_id.encode("utf-8", errors="surrogatepass")
+                    ).hexdigest()[:16],
+                    DS_SELECT_TOOL,
+                    DS_CONTROL_TARGET,
+                    status,
+                    code,
                 )
+                return result
 
             tools.append(
                 FunctionTool(

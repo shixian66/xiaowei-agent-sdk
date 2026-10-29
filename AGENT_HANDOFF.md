@@ -8,15 +8,15 @@
 
 | 项目 | 本次核对事实 |
 | --- | --- |
-| 仓库／产品基线 | [shixian66/xiaowei-agent-sdk](https://github.com/shixian66/xiaowei-agent-sdk)，`origin/main@4c5f9705e23fe89ac0d2781604dd9bc8c99bf1ac`，包含 DS #145 及四文档对齐 #146；2026-10-29 本轮 fetch 后以 `git ls-remote origin refs/heads/main` 核对一致 |
-| 当前任务 | 修复已批准的 DS diagnose 用途缺口；隔离分支 `codex/ds-diagnose-purpose` 从上述主线建立，修正用途组合及相应模型指引，不新增产品或权限契约 |
-| 隔离与已有工作 | 复用干净隔离工作树；桌面旧 checkout `b89d4ee` 及其三份文档／其他任务未提交材料保持原样，不把旧 checkout 当最新实现 |
+| 仓库／产品基线 | [shixian66/xiaowei-agent-sdk](https://github.com/shixian66/xiaowei-agent-sdk)，固定基线 `3dc028421f4349a4d9fe86129e234c9a9abd1bb3`（用户提供的生产发行 SHA），本地 Git 核对包含 #145–#148；本轮离线修复未重新核对远端 main |
+| 当前任务 | 修复生产暴露的 DS 重复选择耗尽工具额度；隔离分支 `codex/ds-selection-budget-fix` 从固定基线建立，增加选择幂等计费与安全日志 |
+| 隔离与已有工作 | 新建干净隔离工作树；桌面旧 checkout `b89d4ee` 及其三份文档／其他任务未提交材料保持原样，不把旧 checkout 当最新实现 |
 | 源码／入口 | 唯一产品包 `src/xiaowei`；`xiaowei` 与 `python -m xiaowei` 为正式入口。旧 Runtime、Worker、专属测试／迁移入口已移除，兼容旧回答和已绑定交付的路径仍保留 |
 | 存储与回答 | 应用 schema **17**：016 保存有界定时结果快照，017 只新增 `ds_clusters`；新回答为可信 v4，旧 v2/v3/Legacy 和已绑定原字节按原语义读取。SDK 表不改 |
 | 锁定依赖 | Python 3.11；Agents SDK 0.22.3、OpenAI 3.20.0、MCP 2.2.0、Lark Channel 1.4.0、sqlglot 30.17.0、httpx2 2.13.1、nh3 0.3.7、tinycss2 1.5.1、Pillow 13.0.0；以 uv.lock 为准。CI 维护已锁 certifi 2026.10.19、开发链 filelock 4.2.1／msgpack 1.2.3 |
-| 最近完整产品代码集成证据 | [PR #145](https://github.com/shixian66/xiaowei-agent-sdk/pull/145) 的精确受测树与 #145 squash 合并树相同；#146 仅改四份文档，产品源码未变；[CI #421](https://github.com/shixian66/xiaowei-agent-sdk/actions/runs/40721039641) 9/9 成功，详情见 §5 |
-| 已记录发行／公司部署 | 2026-10-28 运维交接记录：用户操作部署 `916f57a26d2bac201b6772a48016f194af7d586e`，config valid、应用／PostgreSQL healthy、schema16；对应[发行运行](https://github.com/shixian66/xiaowei-agent-sdk/actions/runs/40653486879)。这是历史用户回报，本轮未核验服务器现状；不能推定 DS/schema17 已部署或业务已验收 |
-| 本轮授权边界 | 用途修复、测试、常规修复、相关文档及隔离分支本地提交；不调用真实模型或公司服务，不发行、不部署。旧 #145／#146 的推送合并授权已完成，不自动覆盖本分支 |
+| 此前保存的完整集成证据（非本次修复） | [PR #145](https://github.com/shixian66/xiaowei-agent-sdk/pull/145) 的精确受测树与 #145 squash 合并树相同；#146 仅改四份文档，产品源码未变；[CI #421](https://github.com/shixian66/xiaowei-agent-sdk/actions/runs/40721039641) 9/9 成功，详情见 §5 |
+| 已记录发行／公司部署 | 2026-10-29 用户回传 release.json、容器日志和数据库统计：发行 `3dc028421f4349a4d9fe86129e234c9a9abd1bb3`，max_tool_calls=32，DS 选择已提交，项目读取因额度耗尽未执行。证据为用户回传，本轮不直连服务器；不证明公司 API 或实战验收通过 |
+| 本轮授权边界 | 修复代码、测试、必要文档、离线验证及本地提交；不推送、不开 PR、不合并、不部署，不调用真实模型或公司服务 |
 
 接手仍先核对实际 HEAD、工作区和用户新指令。下列“已合入”只描述 Git 事实；独立审查、离线测试、隔离真实软件、公司部署、渠道实收和用户接受分别记证。
 
@@ -37,7 +37,7 @@
 
 ## 3. 当前计划与下一项工作
 
-四份根文档对齐已随 #146 合入。DS diagnose 用途移除及 F1 状态说明误报已在本地修正；用户已确认无 DS 工具时统一中性说明，不新增用途字段。固定版本回归及独立复审通过，可接受本地离线交付；尚未推送／合并。下一项由用户决定本分支推送／PR／完整 CI 及合并；实战验收保持开放。
+四份根文档对齐 #146、DS diagnose 用途修复／F1 中性说明 #147、协作规则 #148 已在本次固定基线中。本次只修 DS 选择重复扣费，离线证据见 §5；本地提交后等用户审阅，不推送。审阅及另行授权上线后，须在公司用同一问题、相同 Gemini／Vertex Profile 复测，既有实战门槛保持开放。
 
 ### 主线合入索引
 
@@ -70,13 +70,13 @@ PR base `916f57a26d2bac201b6772a48016f194af7d586e`，head `bba19d4ba72c43524211f
 
 <a id="ds-diagnose-contract-gap"></a>
 
-### DS 用途修复：本地离线候选
+### DS 用途修复：已合入 #147
 
 #145 将 `ds | selection` 加入 [runtime.py](src/xiaowei/runtime.py) 的 diagnose，用途因此超出用户批准范围；Web“仅诊断”、飞书 `/诊断` 及复用 diagnose 的图片／TXT/MD 都可能调用 DS。原测试也把 DS 业务场景送入 diagnose，未识别这个偏差。#146 只记录用户“维持原用途，后续移出 DS”的决定。
 
-本候选从 diagnose 的集合移除 DS，动态工具和 I/O 前 Tool Scope 继续使用原执行链；另在应用查询分类排除只产选择回执的 DS_SELECT_TOOL，无 DS 工具时只保留已选集合和中性说明，不加载实时取证 METHOD、目录或不可用标注；仍有 DS 工具时继续显示当前授权下的目录和不可用成员。六项 DS 业务工具、一个选择工具仍在普通 query 可用。已有 D1–D4／19 变体改用明确的 query 入口，业务断言不变；新增正式 Web／飞书入口及直接治理反例。query→diagnose→query 验证选择不丢失、EXPLAIN 与获准 DS 历史仍能读取，诊断轮不重新访问 DS。无 SDK 升级、Adapter I/O、授权模型、存储、配置或迁移变更，C1/C2、范围锁定、失败语义及长日志边界不变。
+该修复从 diagnose 的集合移除 DS，动态工具和 I/O 前 Tool Scope 继续使用原执行链；另在应用查询分类排除只产选择回执的 DS_SELECT_TOOL，无 DS 工具时只保留已选集合和中性说明，不加载实时取证 METHOD、目录或不可用标注；仍有 DS 工具时继续显示当前授权下的目录和不可用成员。六项 DS 业务工具、一个选择工具仍在普通 query 可用。已有 D1–D4／19 变体改用明确的 query 入口，业务断言不变；新增正式 Web／飞书入口及直接治理反例。query→diagnose→query 验证选择不丢失、EXPLAIN 与获准 DS 历史仍能读取，诊断轮不重新访问 DS。无 SDK 升级、Adapter I/O、授权模型、存储、配置或迁移变更，C1/C2、范围锁定、失败语义及长日志边界不变。
 
-源码缺口在本地已修复；独立复审与离线证据见 §5，尚未推送／合并，不代表现有部署已修复。用途契约仍只在 [ARCHITECTURE](ARCHITECTURE.md#dolphinscheduler-environment) 维护，退出条件见 [DEVELOPMENT_PLAN §10](DEVELOPMENT_PLAN.md#10-dsapi-只读诊断增量)。真实模型、公司 DS／飞书与用户验收没有新增证据。
+该修复已随 #147 `b12203991ee0b59a0a5f51fecb3ec8693620667c` 合入，本次固定基线包含它；独立复审与离线证据见 §5，不推定真实模型能力已验收。用途契约仍只在 [ARCHITECTURE](ARCHITECTURE.md#dolphinscheduler-environment) 维护，退出条件见 [DEVELOPMENT_PLAN §10](DEVELOPMENT_PLAN.md#10-dsapi-只读诊断增量)。真实模型、公司 DS／飞书与用户验收没有新增证据。
 
 ### TiDB、历史与安全巡检
 
@@ -142,7 +142,7 @@ PR base `916f57a26d2bac201b6772a48016f194af7d586e`，head `bba19d4ba72c43524211f
 
 ## 5. 验证记录与限制
 
-### 当前产品基线的完整 CI
+### 此前保存的完整 CI（#145）
 
 [PR #145](https://github.com/shixian66/xiaowei-agent-sdk/pull/145) 的 [CI #421](https://github.com/shixian66/xiaowei-agent-sdk/actions/runs/40721039641)，精确 head `bba19d4ba72c43524211f5afb523b70862ba68f7`，9/9 成功、无重跑；本轮只读复核 job 状态，未重跑。
 
@@ -164,15 +164,37 @@ CI 实际测试 PR 合并提交 `52911c87e7e9adb9fd35c2c86caf2c03b6de5adc`，tre
 
 ### 本轮 DS 用途修复
 
-`f4ee173` 外部复审发现 F1：diagnose 没有 DS 工具时，目录变空且已选环境被误标为当前不可用。原“无剩余必须修复问题”结论由此修正。本候选只调整 DS prompt：无工具时在计算目录／不可用状态前返回中性说明；有工具时沿用原路径。用户确认全部 DS 授权撤销也用中性说明，实际 grants 测试据此调整，权限拒绝、零 I/O、零 Evidence 和集合保留断言继续执行；部分撤权 D4-E3 不变。具体契约只在 ARCHITECTURE 维护。
+`f4ee173` 外部复审发现 F1：diagnose 没有 DS 工具时，目录变空且已选环境被误标为当前不可用。原“无剩余必须修复问题”结论由此修正。该修复只调整 DS prompt：无工具时在计算目录／不可用状态前返回中性说明；有工具时沿用原路径。用户确认全部 DS 授权撤销也用中性说明，实际 grants 测试据此调整，权限拒绝、零 I/O、零 Evidence 和集合保留断言继续执行；部分撤权 D4-E3 不变。具体契约只在 ARCHITECTURE 维护。
 
 - F1 修复前正式入口反例 **6 failed、3 passed**；修复后含全部撤权、部分撤权两个分支的定向回归 **12 passed**。本机临时日志 `/private/tmp/xw-ds-purpose-f1-{red,green}.log` 同时记录源码及测试文件 SHA256。
 - 干净提交 `2ee557922108f7addf42a94033470d31ceb05610` 上运行相关回归 **299 passed**：DS purpose／runtime／acceptance、正式 runtime、TiDB runtime 与 operations history。`/private/tmp/xw-ds-purpose-f1-final-related.log` 记录 HEAD、tree、完整命令、源码／测试／fixture 哈希，以及运行前后同一 HEAD 与干净工作区。
 - 同一提交的 `ruff`、`mypy`（44 文件）、文档／工作流 **30 passed**、链接／锚点 **0 错误、19 个 DS 变体**和 `git diff --check` 均通过，见 `/private/tmp/xw-ds-purpose-f1-final-checks.log`。本次已核对 55432 为本机 Colima 隔离测试库转发，启动标识为 `xiaowei-sdk-test`，数据使用 tmpfs；测试 harness 在每次 DDL 前仍复核该标识。
 - 独立复审覆盖 `f4ee173..2ee5579` 全部 7 个差异文件及相关入口／治理／历史路径，核对固定版本和日志哈希后接受为本地离线交付，F1 关闭，无必须修复项。此后仅补交接记录，受测源码与测试不变。
-- 前序 `f4ee173` 的相关 **757 passed、2 deselected** 及 Chrome **2 passed** 只证明修复前对应路径，日志 `/private/tmp/xw-ds-diagnose-final-{related,browser}.log` 保留参考，不作为 F1 关闭依据。本候选完整 CI 尚未运行；推送／PR／合并需另获授权。
+- 前序 `f4ee173` 的相关 **757 passed、2 deselected** 及 Chrome **2 passed** 只证明修复前对应路径，日志 `/private/tmp/xw-ds-diagnose-final-{related,browser}.log` 保留参考，不作为 F1 关闭依据。这是当时本地记录，用途修复后来随 #147 合入；旧合并授权和验证不代替本次预算修复的授权与证据。
 
 离线脚本只证明实际调用链和边界。真实 Agent 是否能在诊断轮准确说明本轮不查实时 DS、引导实时查询使用普通对话并继续分析用户日志／获准历史，诊断质量、D1–D4／19 变体、两版公司 API、长日志负载／脱敏延迟、飞书实收及用户验收仍开放；本轮没有调用真实模型或公司服务，没有发行／部署。
+
+<a id="ds-selection-budget-fix"></a>
+
+### DS 重复选择额度修复（2026-10-29，本地离线）
+
+**生产事实。** 用户回传 turn `XAJaHC0kkmUtN6jKMzQJYS83wqzQDVC7` 的 agent_messages 统计、xiaowei_request 与容器日志：部署 `3dc0284`，Vertex/Gemini，工具预算 32；澄清后的首个模型响应并行发出 100 个相同的 DS 选择调用。前 32 次成功并各扣一次，后 68 次拒绝但选择包装未写日志；随后项目列表被 budget_exhausted 拒绝。Evidence=0，monitoring_failures 为空，选择集合已提交。这里不保存业务参数或日志正文。最终回复说明额度用完且没有查询结果，不能解释为“DS 没有数据”；其“稍后重试／缩小范围”建议无法解决重复扣费，本次不改提示词或失败文案。
+
+**根因与最小修复。** 选择层原来无条件 _reserve；现在对相同有效选择免计费、不同选择仍计费，回执形状不变，唯一契约见 [DS 选择提交规则](ARCHITECTURE.md#dolphinscheduler-environment)。原校验仍先执行，比较到更新之间无 await。会话加载的集合已经生效，重复确认免计，不恢复 C2 已删除字段。选择日志记录 selected／unchanged／rejected 和闭集 code；DS 读取失败复用 monitoring_read 的 turn、call_ref 哈希、tool_id、target_id、status，不记参数、原始错误、日志或凭据。
+
+**SDK 核对与并发现状（只核实，未改）。** 锁文件及本地安装均为 openai-agents 0.22.3。公开 ModelSettings.parallel_tool_calls=False 可请求提供方每次最多一个调用，但 Vertex 薄适配未映射该开关；串行执行也不能消除重复计费。公开 ToolExecutionConfig.max_function_tool_concurrency 已由 [safe_run_config](src/xiaowei/app.py) 设为 4，SDK 按槽位调度全部调用，不按业务参数去重。未发现适用于本次语义的公开 SDK 去重接口，故只复用已有可信集合比较，不改 SDK 或模型策略。数据库 [StarRocksAdapter](src/xiaowei/starrocks.py) 按 target.pool_size 使用 Semaphore，TiDB 继承；DS 六项读取受每轮 function tools 的 4 并发限制，客户端没有额外按源信号量，日志同对象共享下载。应用 max_concurrent_turns 另限同时运行轮数；跨轮 DS 总负载及服务端日志内存仍待公司观察，不能把“4”当成全进程 HTTP 上限。
+
+**新增限制：无。** 本次只豁免相同 DS 选择的重复计费，原治理保持；不改其他工具预算、读取工具显示时机、提示词、配置、schema17／SDK 表、diagnose 用途、TiDB／StarRocks 或历史边界。临时调大预算只能推迟耗尽，不作为本次修复或验收条件。
+
+**离线验证。** 正式 Web→应用装配→真实 Runner／Vertex 适配器→治理→DS HTTP 替身→Evidence／SQLAlchemySession／隔离 PostgreSQL→用户结果；只在模型／DS HTTP 边界替换，沿用 runtime 夹具的启动数据库驱动，不替代本次治理与存储。用户请求→澄清→用户选环境→单响应 100 次相同选择→项目读取→业务事实回答，预算 32 与 2 均验证；并发授权挂起、规范化、不同顺序／集合计费、已提交选择沿用、当前授权、目录／用途／参数拒绝和无正文日志另有回归。原 D1–D4／19 变体不另定标准。
+
+日志集中在 `/private/tmp/xw-ds-selection-evidence/`，每次记录 HEAD、命令和受影响源码／测试 SHA256。修复前 red-confirmed.log 的早期 5 项反例失败，项目读取明确被 budget_exhausted 拒绝；最终新增回归 final-focused.log **12 passed**。final-related.log **699 passed、2 deselected**（浏览器未选）：包含全部 DS／固定 19 变体、app、governance、R7、runtime、TiDB runtime、Session policy、group actions 与 operations history；不与其中重叠的 12 项相加。final-security.log **65 passed**，5 条 warnings 来自禁网反例的预期拦截；final-ruff.log 全仓通过，final-mypy.log **44 源码文件通过**。文档／工作流 **30 passed**、链接／锚点 **0 错误、19 变体**，差异空白检查通过，最终日志为 final-docs.log／final-links.log／final-whitespace.log。
+
+旧候选的非部署全量尝试 full-offline.log 因审查发现日志问题主动中断：**2058 passed、16 skipped、100 deselected，EXIT=2**，不作为全量通过；最终只关闭上述相关离线回归。本轮未运行发行／容器部署测试或 GitHub 完整 CI，未调用真实模型／公司 DS，未推送、合并或部署。
+
+独立只读审查以本地候选 `7123888fa409d65dabd1d98df79bc5171f4b5112` 开始，覆盖全部 5 文件和调用链，报告 `/private/tmp/xw-ds-selection-evidence/review-7123888.md`。发现选择日志对当前 SDK 可接受的孤立代理字符调用 ID 使用 strict encode 会覆盖正常反馈；新增成功／重复／拒绝三个实际路径回归，修复前均为 UnicodeEncodeError，现沿用 tools.py 的 surrogatepass 哈希。读取调用的同类输入已由 ToolRequest 的 Pydantic Unicode 校验挡住，不增加重复处理。复核附录按最终两个源码文件及测试 SHA256 确认该问题关闭，无其他阻断；日志记录 HEAD 加工作区差异，实际受测内容以源码／测试哈希为准，最终提交只改变这些已验证文件和交接说明。
+
+**开放项。** 脚本模型只证明预算修复、调用链和边界，不证明 Gemini 不再重复调用或能自主诊断。公司须用同一问题复测，记录实际工具选择、次数、业务事实、耗时与用量，确认用户看到查询结果；D1–D4／19 真实 Agent、两版公司 API、长日志负载／脱敏延迟、飞书实收和用户验收仍开放。
 
 ### 历史证据的保存方式
 
