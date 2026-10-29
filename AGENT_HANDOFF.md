@@ -10,7 +10,7 @@
 | --- | --- |
 | 仓库／产品基线 | [shixian66/xiaowei-agent-sdk](https://github.com/shixian66/xiaowei-agent-sdk)，固定基线 `3dc028421f4349a4d9fe86129e234c9a9abd1bb3`（用户提供的生产发行 SHA），本地 Git 核对包含 #145–#148；本轮离线修复未重新核对远端 main |
 | 当前任务 | 修复生产暴露的 DS 重复选择耗尽工具额度；隔离分支 `codex/ds-selection-budget-fix` 从固定基线建立，增加选择幂等计费与安全日志 |
-| 隔离与已有工作 | 复用干净隔离工作树；桌面旧 checkout `b89d4ee` 及其三份文档／其他任务未提交材料保持原样，不把旧 checkout 当最新实现 |
+| 隔离与已有工作 | 新建干净隔离工作树；桌面旧 checkout `b89d4ee` 及其三份文档／其他任务未提交材料保持原样，不把旧 checkout 当最新实现 |
 | 源码／入口 | 唯一产品包 `src/xiaowei`；`xiaowei` 与 `python -m xiaowei` 为正式入口。旧 Runtime、Worker、专属测试／迁移入口已移除，兼容旧回答和已绑定交付的路径仍保留 |
 | 存储与回答 | 应用 schema **17**：016 保存有界定时结果快照，017 只新增 `ds_clusters`；新回答为可信 v4，旧 v2/v3/Legacy 和已绑定原字节按原语义读取。SDK 表不改 |
 | 锁定依赖 | Python 3.11；Agents SDK 0.22.3、OpenAI 3.20.0、MCP 2.2.0、Lark Channel 1.4.0、sqlglot 30.17.0、httpx2 2.13.1、nh3 0.3.7、tinycss2 1.5.1、Pillow 13.0.0；以 uv.lock 为准。CI 维护已锁 certifi 2026.10.19、开发链 filelock 4.2.1／msgpack 1.2.3 |
@@ -74,7 +74,7 @@ PR base `916f57a26d2bac201b6772a48016f194af7d586e`，head `bba19d4ba72c43524211f
 
 #145 将 `ds | selection` 加入 [runtime.py](src/xiaowei/runtime.py) 的 diagnose，用途因此超出用户批准范围；Web“仅诊断”、飞书 `/诊断` 及复用 diagnose 的图片／TXT/MD 都可能调用 DS。原测试也把 DS 业务场景送入 diagnose，未识别这个偏差。#146 只记录用户“维持原用途，后续移出 DS”的决定。
 
-本候选从 diagnose 的集合移除 DS，动态工具和 I/O 前 Tool Scope 继续使用原执行链；另在应用查询分类排除只产选择回执的 DS_SELECT_TOOL，无 DS 工具时只保留已选集合和中性说明，不加载实时取证 METHOD、目录或不可用标注；仍有 DS 工具时继续显示当前授权下的目录和不可用成员。六项 DS 业务工具、一个选择工具仍在普通 query 可用。已有 D1–D4／19 变体改用明确的 query 入口，业务断言不变；新增正式 Web／飞书入口及直接治理反例。query→diagnose→query 验证选择不丢失、EXPLAIN 与获准 DS 历史仍能读取，诊断轮不重新访问 DS。无 SDK 升级、Adapter I/O、授权模型、存储、配置或迁移变更，C1/C2、范围锁定、失败语义及长日志边界不变。
+该修复从 diagnose 的集合移除 DS，动态工具和 I/O 前 Tool Scope 继续使用原执行链；另在应用查询分类排除只产选择回执的 DS_SELECT_TOOL，无 DS 工具时只保留已选集合和中性说明，不加载实时取证 METHOD、目录或不可用标注；仍有 DS 工具时继续显示当前授权下的目录和不可用成员。六项 DS 业务工具、一个选择工具仍在普通 query 可用。已有 D1–D4／19 变体改用明确的 query 入口，业务断言不变；新增正式 Web／飞书入口及直接治理反例。query→diagnose→query 验证选择不丢失、EXPLAIN 与获准 DS 历史仍能读取，诊断轮不重新访问 DS。无 SDK 升级、Adapter I/O、授权模型、存储、配置或迁移变更，C1/C2、范围锁定、失败语义及长日志边界不变。
 
 该修复已随 #147 `b12203991ee0b59a0a5f51fecb3ec8693620667c` 合入，本次固定基线包含它；独立复审与离线证据见 §5，不推定真实模型能力已验收。用途契约仍只在 [ARCHITECTURE](ARCHITECTURE.md#dolphinscheduler-environment) 维护，退出条件见 [DEVELOPMENT_PLAN §10](DEVELOPMENT_PLAN.md#10-dsapi-只读诊断增量)。真实模型、公司 DS／飞书与用户验收没有新增证据。
 
@@ -164,7 +164,7 @@ CI 实际测试 PR 合并提交 `52911c87e7e9adb9fd35c2c86caf2c03b6de5adc`，tre
 
 ### 本轮 DS 用途修复
 
-`f4ee173` 外部复审发现 F1：diagnose 没有 DS 工具时，目录变空且已选环境被误标为当前不可用。原“无剩余必须修复问题”结论由此修正。本候选只调整 DS prompt：无工具时在计算目录／不可用状态前返回中性说明；有工具时沿用原路径。用户确认全部 DS 授权撤销也用中性说明，实际 grants 测试据此调整，权限拒绝、零 I/O、零 Evidence 和集合保留断言继续执行；部分撤权 D4-E3 不变。具体契约只在 ARCHITECTURE 维护。
+`f4ee173` 外部复审发现 F1：diagnose 没有 DS 工具时，目录变空且已选环境被误标为当前不可用。原“无剩余必须修复问题”结论由此修正。该修复只调整 DS prompt：无工具时在计算目录／不可用状态前返回中性说明；有工具时沿用原路径。用户确认全部 DS 授权撤销也用中性说明，实际 grants 测试据此调整，权限拒绝、零 I/O、零 Evidence 和集合保留断言继续执行；部分撤权 D4-E3 不变。具体契约只在 ARCHITECTURE 维护。
 
 - F1 修复前正式入口反例 **6 failed、3 passed**；修复后含全部撤权、部分撤权两个分支的定向回归 **12 passed**。本机临时日志 `/private/tmp/xw-ds-purpose-f1-{red,green}.log` 同时记录源码及测试文件 SHA256。
 - 干净提交 `2ee557922108f7addf42a94033470d31ceb05610` 上运行相关回归 **299 passed**：DS purpose／runtime／acceptance、正式 runtime、TiDB runtime 与 operations history。`/private/tmp/xw-ds-purpose-f1-final-related.log` 记录 HEAD、tree、完整命令、源码／测试／fixture 哈希，以及运行前后同一 HEAD 与干净工作区。
@@ -188,7 +188,11 @@ CI 实际测试 PR 合并提交 `52911c87e7e9adb9fd35c2c86caf2c03b6de5adc`，tre
 
 **离线验证。** 正式 Web→应用装配→真实 Runner／Vertex 适配器→治理→DS HTTP 替身→Evidence／SQLAlchemySession／隔离 PostgreSQL→用户结果；只在模型／DS HTTP 边界替换，沿用 runtime 夹具的启动数据库驱动，不替代本次治理与存储。用户请求→澄清→用户选环境→单响应 100 次相同选择→项目读取→业务事实回答，预算 32 与 2 均验证；并发授权挂起、规范化、不同顺序／集合计费、已提交选择沿用、当前授权、目录／用途／参数拒绝和无正文日志另有回归。原 D1–D4／19 变体不另定标准。
 
-日志集中在 `/private/tmp/xw-ds-selection-evidence/`，每次记录 HEAD、命令和受影响源码／测试 SHA256。修复前 red-confirmed.log 的 5 项反例失败，项目读取明确被 budget_exhausted 拒绝；修复后 focused.log **9 passed**。完整离线回归及静态／文档检查待完成后补入；未调用真实模型／公司 DS，未推送、合并或部署。
+日志集中在 `/private/tmp/xw-ds-selection-evidence/`，每次记录 HEAD、命令和受影响源码／测试 SHA256。修复前 red-confirmed.log 的早期 5 项反例失败，项目读取明确被 budget_exhausted 拒绝；最终新增回归 final-focused.log **12 passed**。final-related.log **699 passed、2 deselected**（浏览器未选）：包含全部 DS／固定 19 变体、app、governance、R7、runtime、TiDB runtime、Session policy、group actions 与 operations history；不与其中重叠的 12 项相加。final-security.log **65 passed**，5 条 warnings 来自禁网反例的预期拦截；final-ruff.log 全仓通过，final-mypy.log **44 源码文件通过**。文档／工作流 **30 passed**、链接／锚点 **0 错误、19 变体**，差异空白检查通过，最终日志为 final-docs.log／final-links.log／final-whitespace.log。
+
+旧候选的非部署全量尝试 full-offline.log 因审查发现日志问题主动中断：**2058 passed、16 skipped、100 deselected，EXIT=2**，不作为全量通过；最终只关闭上述相关离线回归。本轮未运行发行／容器部署测试或 GitHub 完整 CI，未调用真实模型／公司 DS，未推送、合并或部署。
+
+独立只读审查以本地候选 `7123888fa409d65dabd1d98df79bc5171f4b5112` 开始，覆盖全部 5 文件和调用链，报告 `/private/tmp/xw-ds-selection-evidence/review-7123888.md`。发现选择日志对当前 SDK 可接受的孤立代理字符调用 ID 使用 strict encode 会覆盖正常反馈；新增成功／重复／拒绝三个实际路径回归，修复前均为 UnicodeEncodeError，现沿用 tools.py 的 surrogatepass 哈希。读取调用的同类输入已由 ToolRequest 的 Pydantic Unicode 校验挡住，不增加重复处理。复核附录按最终两个源码文件及测试 SHA256 确认该问题关闭，无其他阻断；日志记录 HEAD 加工作区差异，实际受测内容以源码／测试哈希为准，最终提交只改变这些已验证文件和交接说明。
 
 **开放项。** 脚本模型只证明预算修复、调用链和边界，不证明 Gemini 不再重复调用或能自主诊断。公司须用同一问题复测，记录实际工具选择、次数、业务事实、耗时与用量，确认用户看到查询结果；D1–D4／19 真实 Agent、两版公司 API、长日志负载／脱敏延迟、飞书实收和用户验收仍开放。
 

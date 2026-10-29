@@ -7,6 +7,7 @@ import logging
 
 import httpx2
 import pytest
+from agents.tool_context import ToolContext
 from tests.sdk_core.synthetic_tools import Clock, Grants, context, ready_engine, store
 from tests.sdk_core.test_app import answer_body, tool_call
 from tests.sdk_core.test_dolphinscheduler_runtime import (
@@ -19,7 +20,7 @@ from tests.sdk_core.test_dolphinscheduler_runtime import (
 from tests.sdk_core.test_runtime import env as env
 from tests.sdk_core.test_vertex_model import VERTEX, _body, _call_part
 
-from xiaowei.dolphinscheduler import DSConfig, catalog
+from xiaowei.dolphinscheduler import DolphinScheduler, DSConfig, catalog
 from xiaowei.governance import GovernedTools, ToolCatalog, ToolRejectedError
 from xiaowei.models import AUDIENCES
 from xiaowei.runtime import ServeConfig
@@ -247,3 +248,39 @@ async def test_identical_selection_does_not_bypass_existing_validation(selection
     assert caught.value.code == ("invalid_arguments" if case == "arguments" else "not_allowed")
     assert gov.checkpoint(ctx.identity).used == 0
     assert gov.turn_runs(ctx.identity) is before
+
+
+@pytest.mark.parametrize("status", ["selected", "unchanged", "rejected"])
+async def test_call_id_hash_preserves_feedback_for_non_utf8_id(
+    selection, monkeypatch, caplog, status
+):
+    """选择包装接收 SDK 调用 ID；日志不能因其编码覆盖原本的安全回执。"""
+    gov, ctx, _ = selection
+    monkeypatch.setenv("XW_TEST_DS_TOKEN", "synthetic-token")
+    caplog.set_level(logging.INFO, logger="xiaowei")
+    ds = DolphinScheduler([DSConfig.model_validate(source(c)) for c in ("ds-a", "ds-b")], Clock())
+    try:
+        if status == "unchanged":
+            await gov.select_dolphinscheduler(ctx, ("ds-b",))
+        arguments = json.dumps({"clusters": ["unknown" if status == "rejected" else "ds-b"]})
+        tool = next(t for t in ds.tools_for(ctx, gov) if t.name == "ds_select_clusters")
+        call_id = "\ud800"
+        result = json.loads(
+            await tool.on_invoke_tool(
+                ToolContext(
+                    context=ctx,
+                    tool_name=tool.name,
+                    tool_call_id=call_id,
+                    tool_arguments=arguments,
+                ),
+                arguments,
+            )
+        )
+        assert result["status"] == ("rejected" if status == "rejected" else "selected")
+        digest = hashlib.sha256(b"\xed\xa0\x80").hexdigest()[:16]
+        logs = [r.getMessage() for r in caplog.records if "call_ref=" + digest in r.getMessage()]
+        assert len(logs) == 1
+        assert "status=" + status in logs[0]
+        assert call_id not in logs[0] and "clusters=" not in logs[0]
+    finally:
+        await ds.aclose()
