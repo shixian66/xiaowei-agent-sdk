@@ -820,7 +820,7 @@ Evidence 记录仅保存获准保留的最小事实、引用元数据与必要�
 
 现有模块按职责分工：runtime／cli 装配与维护，app 调用 SDK，governance／tools 做治理入口，数据库与 DS／监控 Adapter 做协议适配，session／evidence／storage 保存并复核，channel／web／feishu 处理渠道，operations_history／scheduled_tasks／webhook 承担已批准的有限业务服务。它们不构成第二个 Agent Loop；新增模块须有当前消费者，不预建通用平台。
 
-旧代码不是保留清单。参数处理、SQL 样本、脱敏函数、错误样本等只有在当前切片确实有价值且成本低于重写时才迁入；旧 Runtime、Resolver、PlanCompiler、Worker 与 TaskStore 不进入新应用的默认设计。历史由 Git 保留，源码清理列明范围并保护用户数据。
+旧工程已删除，历史由 Git 保留；旧 Runtime、Resolver、PlanCompiler、Worker 与 TaskStore 不进入新应用的默认设计。源码清理列明范围并保护用户数据。
 
 ## 11. 验收边界
 
