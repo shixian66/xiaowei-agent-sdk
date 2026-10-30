@@ -46,6 +46,9 @@ _BUSINESS_HIDDEN = _TECHNICAL | frozenset(
 )
 _PAGED = frozenset({"local/list_databases", "local/list_tables", "local/describe_table"})
 _ACTUAL_SQL = frozenset({"local/run_readonly_query", "local/explain_query"})
+_DS_LISTS = frozenset({
+    "local/ds_list_projects", "local/ds_list_workflow_instances", "local/ds_list_task_instances",
+})
 _ACTION_LABELS = {
     "action_id": "Action ID",
     "action": "动作",
@@ -83,6 +86,9 @@ def fact_limit_notices(fact: DeliveryFact) -> tuple[str, ...]:
     """从获准投影生成影响结论的简短范围和完整性提醒，供各渠道复用。"""
     cursor = fact.metadata.get("next_cursor")
     notices = []
+    ds_coverage = _ds_list_coverage(fact)
+    if ds_coverage is not None:
+        notices.append(ds_coverage)
     if (
         fact.tool_id == "notifications/send_webhook_message"
         and fact.metadata.get("reason") == "recipient_not_authorized"
@@ -146,6 +152,41 @@ def fact_limit_notices(fact: DeliveryFact) -> tuple[str, ...]:
     if fact.truncated and applied is not None and metadata.get("requested_limit") != applied:
         notices.append(f"返回量受限：实际 LIMIT {applied}，多取 1 行用于判断截断。")
     return tuple(notices)
+
+
+def _ds_list_coverage(fact: DeliveryFact) -> str | None:
+    """分页列表的覆盖说明；详情与日志继续保留各自的原覆盖结构。"""
+    if fact.tool_id not in _DS_LISTS:
+        return None
+    coverage = fact_values(fact).get("coverage")
+    if not isinstance(coverage, dict):
+        return None
+    total = coverage["upstream_total"]
+    offset = coverage["page_start_offset"]
+    page = coverage["page_no"]
+    excluded = coverage["boundary_excluded"]
+    omitted = coverage["projection_omitted"]
+    count = len(fact.rows)
+    parts = [f"覆盖：上游总数 {total} 条"]
+    if (offset == 0 and not coverage["has_more"] and count == total
+            and not (excluded or omitted or fact.truncated)):
+        parts.append(f"已全部列出（{count} 条）")
+    elif offset >= total:
+        parts.append(f"第 {page} 页超出结果范围，本次列出 {count} 条")
+    elif not (count or excluded or omitted):
+        parts.append(f"第 {page} 页未返回记录（起始偏移 {offset}），本次列出 0 条")
+    else:
+        end = min(offset + count + excluded + omitted, total)
+        parts.append(f"本页范围 {offset + 1}–{end}（第 {page} 页），本次列出 {count} 条")
+    if coverage["has_more"]:
+        parts.append("还有后续页")
+    if excluded:
+        parts.append(f"时间边界排除 {excluded} 条")
+    if omitted:
+        parts.append(f"投影省略 {omitted} 条")
+    if coverage.get("scope"):
+        parts.append(str(coverage["scope"]))
+    return "；".join(parts) + "。"
 
 
 def capacity_notice(
@@ -363,7 +404,7 @@ def business_presentation(fact: DeliveryFact) -> FactPresentation:
     return FactPresentation(
         {key: data[key] for key in shown.metadata if key in data},
         shown.columns,
-        tuple(cast(Sequence[dict[str, object]], data.get("rows", shown.rows)))
+        tuple(cast(Sequence[dict[str, object]], data.get("rows", data.get("records", shown.rows))))
         if shown.columns else (),
         notices=fact_limit_notices(fact),
     )
@@ -504,12 +545,15 @@ def business_fact(fact: DeliveryFact) -> DeliveryFact:
     """用户所需事实的展示视图；实际 SQL 保留在单一技术区，动作批准材料完整保留。"""
     if fact.requires_complete:
         return fact
+    hidden = _BUSINESS_HIDDEN
+    if fact.tool_id in _DS_LISTS:
+        hidden = hidden | {"environment", "cluster", "kind", "coverage"}
     return fact.model_copy(
         update={
             "metadata": {
                 k: v
                 for k, v in fact.metadata.items()
-                if k not in _BUSINESS_HIDDEN
+                if k not in hidden
                 and (k != "warnings" or v not in (None, "", "[]", "null"))
             },
             "result_json": None,

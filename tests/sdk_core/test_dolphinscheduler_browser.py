@@ -41,9 +41,17 @@ async def test_formal_ds_success_or_auth_gap_visible_without_expanding_basis(
             assert "synthetic-token" not in visible
             assert ("认证" in visible) is auth_failure
             assert ("orders_failed" in visible) is (not auth_failure)
+            if not auth_failure:
+                assert "覆盖：上游总数 1 条；已全部列出（1 条）" in visible
+                assert await page.evaluate(f"{item(0)}.querySelector('.fact table') !== null")
+                assert all(key not in visible for key in ("records:", "coverage:", "kind:"))
             assert not await page.evaluate(f"{item(0)}.querySelector('details[open]') !== null")
             assert len(requests) == 1
             await page.reload()
             await settled(page, 0, "completed")
-            assert "生产 B" in await page.evaluate(f"{item(0)}.innerText")
+            history = await page.evaluate(f"{item(0)}.innerText")
+            assert "生产 B" in history
+            if not auth_failure:
+                assert "已全部列出（1 条）" in history
+                assert '"records"' not in history
             assert len(requests) == 1
