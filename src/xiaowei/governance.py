@@ -15,6 +15,7 @@ JSON schema）。实际执行与证据都只使用规范化后的有效参数；
 
 from __future__ import annotations
 
+import asyncio
 import enum
 import hashlib
 import json
@@ -23,6 +24,7 @@ import math
 import types
 from collections.abc import Awaitable, Callable, Iterable, Mapping
 from dataclasses import dataclass, replace
+from dataclasses import field as dataclass_field
 from datetime import datetime
 from typing import (
     TYPE_CHECKING,
@@ -487,6 +489,37 @@ class TurnLedger:
     runs: TurnRuns
 
 
+@dataclass(frozen=True)
+class ReusedToolResult:
+    """重复调用的短回执，不携带首次调用的 Evidence 标识或业务数据。"""
+
+    model_content: str
+
+
+@dataclass
+class _RequestRun:
+    call_id: str
+    effect: str
+    outcome: asyncio.Future[BaseException | None]
+
+
+@dataclass
+class _CallCounts:
+    total: int = 0
+    duplicates: int = 0
+    seen: set[tuple[str, str, str]] = dataclass_field(default_factory=set)
+
+
+def _reusable_failure(exc: BaseException) -> str | None:
+    if isinstance(exc, SqlParseError):
+        return "invalid_sql"
+    if isinstance(exc, ProposalRejectedError):
+        return exc.code
+    if isinstance(exc, (MonitoringReadError, DolphinSchedulerReadError, SecurityInspectionError)):
+        return exc.reason if exc.reason != "unclassified" else None
+    return None
+
+
 class GovernedTools:
     """本地与 MCP 工具共用的治理入口；依赖由应用装配，``execute`` 只由应用绑定。
 
@@ -500,6 +533,9 @@ class GovernedTools:
         self._authorize = evidence.authorize
         self._used: dict[tuple[str, str, str], int] = {}
         self._runs: dict[tuple[str, str, str], TurnRuns] = {}
+        # 仅当前运行内存：不进入 TurnLedger，暂停/恢复不继承。
+        self._requests: dict[tuple[str, str, str], dict[tuple[str, str, str], _RequestRun]] = {}
+        self._calls: dict[tuple[str, str, str], _CallCounts] = {}
 
     @property
     def catalog(self) -> ToolCatalog:
@@ -534,7 +570,7 @@ class GovernedTools:
         ctx: RunContext,
         request: ToolRequest,
         execute: Execute,
-    ) -> ToolResult:
+    ) -> ToolResult | ReusedToolResult:
         """治理通过后以规范化的有效参数执行，并按同一有效请求记录证据。
 
         多目标工具的目标只能由参数 ``cluster`` 决定：请求目标与参数不一致时在 I/O 前拒绝，
@@ -542,6 +578,7 @@ class GovernedTools:
         """
         from xiaowei.evidence import EvidenceError
 
+        self._calls.setdefault(_turn_key(ctx.identity), _CallCounts()).total += 1
         contract = self._catalog.contract(request.tool_id, request.target_id)
         if contract is None:
             raise ToolRejectedError("工具不可用", code="not_allowed")
@@ -553,6 +590,9 @@ class GovernedTools:
         if (policy.group_only or policy.effect != "read") and not _group_context(ctx):
             raise ToolRejectedError("仅指定飞书群可使用此工具", code="not_allowed")
         arguments = normalize_arguments(policy, request.arguments)
+        reuse_key = self._note_request(
+            ctx.identity, contract.tool_id, contract.target_id, arguments
+        )
         if policy.effect == "approval":
             approval = ctx.approved_action
             # SDK 的 needs_approval=False 只跳过暂停；未经当前批准绑定的调用在这里
@@ -690,6 +730,26 @@ class GovernedTools:
                 raise ToolRejectedError(
                     "该 Dashboard UID 本轮已确认不存在，未重发", hint="grafana_change_object"
                 )
+        requests = self._requests.setdefault(key, {})
+        reusable = policy.effect in {"read", "propose"}
+        if reusable and (previous := requests.get(reuse_key)) is not None:
+            # 取消一个等待者不取消首个执行者；执行者取消/未知失败仍向等待者传播。
+            outcome = await asyncio.shield(previous.outcome)
+            receipt_code = _reusable_failure(outcome) if outcome is not None else None
+            if outcome is not None and receipt_code is None:
+                raise outcome
+            return ReusedToolResult(
+                json.dumps(
+                    {
+                        "status": "reused",
+                        "original_call_id": previous.call_id,
+                        "original_status": "failed" if outcome is not None else "succeeded",
+                        "code": receipt_code,
+                        "executed": False,
+                    },
+                    ensure_ascii=False,
+                )
+            )
         try:
             self._reserve(ctx)
         except ToolRejectedError:
@@ -703,6 +763,15 @@ class GovernedTools:
                     counted=False,
                 )
             raise
+        entry = (
+            _RequestRun(
+                effective.call_id, policy.effect, asyncio.get_running_loop().create_future()
+            )
+            if reusable
+            else None
+        )
+        if entry is not None:
+            requests[reuse_key] = entry
         self._runs[key] = replace(
             runs,
             started=(*runs.started, contract.tool_id),
@@ -713,6 +782,7 @@ class GovernedTools:
             slot_retrying=runs.slot_retrying | {target} if slot_retry else runs.slot_retrying,
         )
 
+        execution_error: BaseException | None = None
         try:
             observation: ToolObservation | None = None
             busy_before_sql = False
@@ -971,14 +1041,28 @@ class GovernedTools:
                 truncated=runs.truncated + int(result.truncated),
                 slot_busy=runs.slot_busy - {target} if slot_retry else runs.slot_busy,
             )
+            if policy.effect != "read":
+                for cached_key, cached in tuple(requests.items()):
+                    if cached.effect == "read":
+                        del requests[cached_key]
             return result
         except ToolExecutionError as exc:
+            execution_error = exc
             exc.tool_id = contract.tool_id
             raise
         except EvidenceError as exc:
+            execution_error = exc
             exc.tool_id = contract.tool_id
             raise
+        except BaseException as exc:
+            execution_error = exc
+            raise
         finally:
+            if entry is not None:
+                entry.outcome.set_result(execution_error)
+                if execution_error is not None and _reusable_failure(execution_error) is None:
+                    if requests.get(reuse_key) is entry:
+                        del requests[reuse_key]
             if slot_retry:
                 pending = self._runs.get(key)
                 if pending is not None:
@@ -1035,6 +1119,7 @@ class GovernedTools:
 
     async def select_dolphinscheduler(self, ctx: RunContext, clusters: tuple[str, ...]) -> bool:
         """返回集合是否改变；已生效的相同选择免计费，仍复核当前授权和范围。"""
+        self._calls.setdefault(_turn_key(ctx.identity), _CallCounts()).total += 1
         contract = self._catalog.contract(DS_SELECT_TOOL, DS_CONTROL_TARGET)
         if contract is None or not _in_scope(ctx, contract):
             raise ToolRejectedError("本轮不可选择 DS 环境", code="not_allowed")
@@ -1044,6 +1129,9 @@ class GovernedTools:
             self._catalog.policy_for(contract), {"clusters": list(clusters)}
         )
         chosen = tuple(dict.fromkeys(cast(list[str], normalized["clusters"])))
+        self._note_request(
+            ctx.identity, DS_SELECT_TOOL, DS_CONTROL_TARGET, {"clusters": list(chosen)}
+        )
         if await self.unavailable_dolphinscheduler(ctx, chosen):
             raise ToolRejectedError("DS 环境未配置或当前不可用", code="not_allowed")
         runs = self.turn_runs(ctx.identity)
@@ -1120,6 +1208,24 @@ class GovernedTools:
         """轮次结束时由应用调用，清理该轮计数与记录。"""
         self._used.pop(_turn_key(identity), None)
         self._runs.pop(_turn_key(identity), None)
+        self._requests.pop(_turn_key(identity), None)
+        self._calls.pop(_turn_key(identity), None)
+
+    def call_counts(self, identity: Identity) -> tuple[int, int]:
+        """本次运行进入治理的调用数、规范化后相同请求数；与执行预算独立。"""
+        counts = self._calls.get(_turn_key(identity), _CallCounts())
+        return counts.total, counts.duplicates
+
+    def _note_request(
+        self, identity: Identity, tool_id: str, target_id: str, arguments: Mapping[str, object]
+    ) -> tuple[str, str, str]:
+        from xiaowei.evidence import arguments_digest
+
+        request_key = (tool_id, target_id, arguments_digest(arguments))
+        counts = self._calls.setdefault(_turn_key(identity), _CallCounts())
+        counts.duplicates += int(request_key in counts.seen)
+        counts.seen.add(request_key)
+        return request_key
 
     async def _currently_authorized(self, identity: Identity, contract: ToolContract) -> bool:
         try:

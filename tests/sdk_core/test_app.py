@@ -121,7 +121,7 @@ def evidence_in(call: ModelCall) -> list[str]:
             envelope = json.loads(item["output"])
         except ValueError:
             continue
-        if envelope.get("status") in {"rejected", "invalid_sql"}:
+        if envelope.get("status") in {"rejected", "invalid_sql", "reused"}:
             assert "evidence_id" not in envelope  # R7 fixed feedback is not a success result.
             continue
         found.append(envelope["evidence_id"])
@@ -821,9 +821,11 @@ _STAGE = re.compile(
     r"(?: limit_rescue=failed)?"
 )
 _MODEL_SUMMARY = re.compile(
-    r"turn=\S+ stage=model_summary reason=- elapsed_ms=\d+ model_requests=\d+ http_429=\d+"
+    r"turn=\S+ stage=model_summary reason=- elapsed_ms=\d+"
+    r"(?: model_requests=\d+ http_429=\d+"
     r" retries=\d+ request_bytes_max=\d+ input_tokens=(?:\d+|unknown)"
-    r" output_tokens=(?:\d+|unknown)"
+    r" output_tokens=(?:\d+|unknown))?"
+    r" tool_calls=\d+ duplicate_calls=\d+"
     r"(?: rate_kind=(?:quota|no_quota_detail|unknown) status=[A-Z_]+"
     r" reason=[A-Za-z0-9._/-]+ domain=[A-Za-z0-9._/-]+"
     r" quota_metric=[A-Za-z0-9._/-]+ quota_id=[A-Za-z0-9._/-]+"
@@ -1306,11 +1308,18 @@ async def test_stage_logs_contain_only_safe_metadata(env: Env) -> None:
             await env.app.run_turn(env.ctx(turn="req-upstream"), upstream)
 
     stages: dict[str, list[tuple[str, str]]] = {}
+    summaries = []
     for record in records:
         if record.name == "xiaowei.app":
+            if "stage=model_summary" in record.getMessage():
+                assert _MODEL_SUMMARY.fullmatch(record.getMessage()) is not None
+                assert record.exc_info is None
+                summaries.append(record.getMessage().split("tool_calls=")[1])
+                continue
             match = _STAGE.fullmatch(record.getMessage())
             assert match is not None and record.exc_info is None
             stages.setdefault(match[1], []).append((match[2], match[3]))
+    assert summaries == ["2 duplicate_calls=0", "1 duplicate_calls=0", "0 duplicate_calls=0"]
     assert stages == {
         "req-ok": [
             ("received", "-"),
@@ -1914,7 +1923,11 @@ async def test_max_turns_tool_call_during_final_keeps_model_error_and_rescue_cou
     assert "reason=model_failed" in output and "error_kind=invalid_output" in output
     assert "limit_rescue=failed" in output
     assert "tool_calls=1 executed=1 truncated=1 rejected=0" in output
-    assert all(_STAGE.fullmatch(r.getMessage()) for r in records if r.name == "xiaowei.app")
+    assert all(
+        _STAGE.fullmatch(r.getMessage()) or _MODEL_SUMMARY.fullmatch(r.getMessage())
+        for r in records
+        if r.name == "xiaowei.app"
+    )
     assert MODEL_SECRET not in "\n".join(r.getMessage() for r in records)
     assert SYNTHETIC_SQL not in "\n".join(r.getMessage() for r in records)
     assert env.tool_ids() == [QUERY_TOOL] and await env.stored() == []

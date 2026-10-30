@@ -1,6 +1,6 @@
 # 小维：当前交接
 
-> 核对日期：2026-10-29，Asia/Shanghai。本文只维护当前代码／计划状态、验证证据、缺口和下一项工作。长期契约见 [ARCHITECTURE.md](ARCHITECTURE.md)，阶段与退出条件见 [DEVELOPMENT_PLAN.md](DEVELOPMENT_PLAN.md)，用法见 [README.md](README.md)／[OPERATIONS.md](deploy/OPERATIONS.md)。
+> 核对日期：2026-10-30，Asia/Shanghai。本文只维护当前代码／计划状态、验证证据、缺口和下一项工作。长期契约见 [ARCHITECTURE.md](ARCHITECTURE.md)，阶段与退出条件见 [DEVELOPMENT_PLAN.md](DEVELOPMENT_PLAN.md)，用法见 [README.md](README.md)／[OPERATIONS.md](deploy/OPERATIONS.md)。
 
 **OpenAI Agents SDK 负责 Agent Loop；小维负责权限、受治理工具执行、证据真实性和数据边界。**
 
@@ -8,14 +8,14 @@
 
 | 项目 | 本次核对事实 |
 | --- | --- |
-| 仓库／产品基线 | [shixian66/xiaowei-agent-sdk](https://github.com/shixian66/xiaowei-agent-sdk)，固定基线 `3dc028421f4349a4d9fe86129e234c9a9abd1bb3`（用户提供的生产发行 SHA），本地 Git 核对包含 #145–#148；本轮离线修复未重新核对远端 main |
-| 当前任务 | 修复生产暴露的 DS 重复选择耗尽工具额度；隔离分支 `codex/ds-selection-budget-fix` 从固定基线建立，增加选择幂等计费与安全日志 |
+| 仓库／产品基线 | [shixian66/xiaowei-agent-sdk](https://github.com/shixian66/xiaowei-agent-sdk)，`58d5e5d3e570249bba58396616fdb99356921d44`；2026-10-30 git fetch 核对 origin/main，包含 #149 的 DS 选择修复及 #150 的轻量验证规则 |
+| 当前任务 | 同一运行的 read／propose 请求复用，隔离分支 `codex/tool-request-reuse`；单个离线切片，本地提交后由用户对具体版本独立审查 |
 | 隔离与已有工作 | 新建干净隔离工作树；桌面旧 checkout `b89d4ee` 及其三份文档／其他任务未提交材料保持原样，不把旧 checkout 当最新实现 |
 | 源码／入口 | 唯一产品包 `src/xiaowei`；`xiaowei` 与 `python -m xiaowei` 为正式入口。旧 Runtime、Worker、专属测试／迁移入口已移除，兼容旧回答和已绑定交付的路径仍保留 |
 | 存储与回答 | 应用 schema **17**：016 保存有界定时结果快照，017 只新增 `ds_clusters`；新回答为可信 v4，旧 v2/v3/Legacy 和已绑定原字节按原语义读取。SDK 表不改 |
 | 锁定依赖 | Python 3.11；Agents SDK 0.22.3、OpenAI 3.20.0、MCP 2.2.0、Lark Channel 1.4.0、sqlglot 30.17.0、httpx2 2.13.1、nh3 0.3.7、tinycss2 1.5.1、Pillow 13.0.0；以 uv.lock 为准。CI 维护已锁 certifi 2026.10.19、开发链 filelock 4.2.1／msgpack 1.2.3 |
 | 此前保存的完整集成证据（非本次修复） | [PR #145](https://github.com/shixian66/xiaowei-agent-sdk/pull/145) 的精确受测树与 #145 squash 合并树相同；#146 仅改四份文档，产品源码未变；[CI #421](https://github.com/shixian66/xiaowei-agent-sdk/actions/runs/40721039641) 9/9 成功，详情见 §5 |
-| 已记录发行／公司部署 | 2026-10-29 用户回传 release.json、容器日志和数据库统计：发行 `3dc028421f4349a4d9fe86129e234c9a9abd1bb3`，max_tool_calls=32，DS 选择已提交，项目读取因额度耗尽未执行。证据为用户回传，本轮不直连服务器；不证明公司 API 或实战验收通过 |
+| 已记录发行／公司部署 | 用户回传容器运行 `58d5e5d`，仍出现单回复 100 个相同 DS 选择；#149 已免重复扣费，但调用壳进入后续模型请求和历史。DS 读取出现 ds_connect，另轮 Vertex 429；这些事实不证明 429 由请求体积导致，也不代表公司 API／真实 Agent 验收通过 |
 | 本轮授权边界 | 修复代码、测试、必要文档、离线验证及本地提交；不推送、不开 PR、不合并、不部署，不调用真实模型或公司服务 |
 
 接手仍先核对实际 HEAD、工作区和用户新指令。下列“已合入”只描述 Git 事实；独立审查、离线测试、隔离真实软件、公司部署、渠道实收和用户接受分别记证。
@@ -37,7 +37,7 @@
 
 ## 3. 当前计划与下一项工作
 
-四份根文档对齐 #146、DS diagnose 用途修复／F1 中性说明 #147、协作规则 #148 已在本次固定基线中。本次只修 DS 选择重复扣费，离线证据见 §5；本地提交后等用户审阅，不推送。审阅及另行授权上线后，须在公司用同一问题、相同 Gemini／Vertex Profile 复测，既有实战门槛保持开放。
+#149 的 DS 选择预算修复和 #150 的验证规则已在基线。本次按批准的收窄范围实现共享治理层复用，契约见 [同一运行内的相同请求复用](ARCHITECTURE.md#tool-request-reuse)，验证结论见 §5。下一项是用户独立审查本地提交；真实 Gemini 复测、推送、合并与部署均需后续授权。
 
 ### 主线合入索引
 
@@ -176,25 +176,17 @@ CI 实际测试 PR 合并提交 `52911c87e7e9adb9fd35c2c86caf2c03b6de5adc`，tre
 
 <a id="ds-selection-budget-fix"></a>
 
-### DS 重复选择额度修复（2026-10-29，本地离线）
+### DS 选择预算修复（已合入 #149）
 
-**生产事实。** 用户回传 turn `XAJaHC0kkmUtN6jKMzQJYS83wqzQDVC7` 的 agent_messages 统计、xiaowei_request 与容器日志：部署 `3dc0284`，Vertex/Gemini，工具预算 32；澄清后的首个模型响应并行发出 100 个相同的 DS 选择调用。前 32 次成功并各扣一次，后 68 次拒绝但选择包装未写日志；随后项目列表被 budget_exhausted 拒绝。Evidence=0，monitoring_failures 为空，选择集合已提交。这里不保存业务参数或日志正文。最终回复说明额度用完且没有查询结果，不能解释为“DS 没有数据”；其“稍后重试／缩小范围”建议无法解决重复扣费，本次不改提示词或失败文案。
+部署 `3dc0284` 曾因 100 个相同选择逐次扣费而耗尽 32 次额度，项目读取未执行。#149（`1212295`）让相同有效选择免计费，新增安全日志；原选择／权限边界不变。该切片的 699 项相关离线回归、65 项安全检查和公司复测缺口属于历史证据，细节可用 `git show 58d5e5d:AGENT_HANDOFF.md` 追溯，不代替本次验证。
 
-**根因与最小修复。** 选择层原来无条件 _reserve；现在对相同有效选择免计费、不同选择仍计费，回执形状不变，唯一契约见 [DS 选择提交规则](ARCHITECTURE.md#dolphinscheduler-environment)。原校验仍先执行，比较到更新之间无 await。会话加载的集合已经生效，重复确认免计，不恢复 C2 已删除字段。选择日志记录 selected／unchanged／rejected 和闭集 code；DS 读取失败复用 monitoring_read 的 turn、call_ref 哈希、tool_id、target_id、status，不记参数、原始错误、日志或凭据。
+### 共享工具请求复用（2026-10-30，本地离线）
 
-**SDK 核对与并发现状（只核实，未改）。** 锁文件及本地安装均为 openai-agents 0.22.3。公开 ModelSettings.parallel_tool_calls=False 可请求提供方每次最多一个调用，但 Vertex 薄适配未映射该开关；串行执行也不能消除重复计费。公开 ToolExecutionConfig.max_function_tool_concurrency 已由 [safe_run_config](src/xiaowei/app.py) 设为 4，SDK 按槽位调度全部调用，不按业务参数去重。未发现适用于本次语义的公开 SDK 去重接口，故只复用已有可信集合比较，不改 SDK 或模型策略。数据库 [StarRocksAdapter](src/xiaowei/starrocks.py) 按 target.pool_size 使用 Semaphore，TiDB 继承；DS 六项读取受每轮 function tools 的 4 并发限制，客户端没有额外按源信号量，日志同对象共享下载。应用 max_concurrent_turns 另限同时运行轮数；跨轮 DS 总负载及服务端日志内存仍待公司观察，不能把“4”当成全进程 HTTP 上限。
+**问题与修复。** 用户回传 `58d5e5d` 的重复选择计数为 100，request_bytes_max 为 95726；#149 未处理普通读取和提案重复执行，也未压缩调用壳。本次在同一 GovernedTools 入口复用 read／propose 的首次执行，复用在途结果，首个调用保留独占 Evidence，重复项只给短回执；DS 选择逻辑保持。新增本次运行的 tool_calls／duplicate_calls。权限、预算账本、Evidence 绑定、Session／暂停格式和现有并发限制沿用原机制，无配置、依赖或迁移变更。新增限制及失败／失效取舍只在 [架构契约](ARCHITECTURE.md#tool-request-reuse) 维护。
 
-**新增限制：无。** 本次只豁免相同 DS 选择的重复计费，原治理保持；不改其他工具预算、读取工具显示时机、提示词、配置、schema17／SDK 表、diagnose 用途、TiDB／StarRocks 或历史边界。临时调大预算只能推迟耗尽，不作为本次修复或验收条件。
+**验证结论。** 新增 11 项场景及 DS 失败范围、日志安全定向复测合计 **17 passed**；应用／治理、Session、审批恢复、数据库、DS 固定样例和监控相关套件已执行，干净提交上的完整相关复测结果随交付提供。ruff 通过，mypy 检查 44 个源码文件通过；文档／工作流 **30 passed**，链接／锚点 **0 错误、19 个 DS 变体**，差异空白检查通过。官方 Prometheus MCP v0.18.0 二进制未配置，对应既有协议项跳过；浏览器用例本次未选。固定基线在临时目录重放 100 调用反例：SQL 重复占满预算，提案准备 5 次；修复验证使用真实应用、SDK 0.22.3、隔离 PostgreSQL，仅模型和外部 I/O 使用合成替身。压力夹具使用足够的合成 Profile 请求容量，产品配置不变；这些测试验证执行／存储边界，不证明真实 Agent 自主选择或诊断能力。
 
-**离线验证。** 正式 Web→应用装配→真实 Runner／Vertex 适配器→治理→DS HTTP 替身→Evidence／SQLAlchemySession／隔离 PostgreSQL→用户结果；只在模型／DS HTTP 边界替换，沿用 runtime 夹具的启动数据库驱动，不替代本次治理与存储。用户请求→澄清→用户选环境→单响应 100 次相同选择→项目读取→业务事实回答，预算 32 与 2 均验证；并发授权挂起、规范化、不同顺序／集合计费、已提交选择沿用、当前授权、目录／用途／参数拒绝和无正文日志另有回归。原 D1–D4／19 变体不另定标准。
-
-日志集中在 `/private/tmp/xw-ds-selection-evidence/`，每次记录 HEAD、命令和受影响源码／测试 SHA256。修复前 red-confirmed.log 的早期 5 项反例失败，项目读取明确被 budget_exhausted 拒绝；最终新增回归 final-focused.log **12 passed**。final-related.log **699 passed、2 deselected**（浏览器未选）：包含全部 DS／固定 19 变体、app、governance、R7、runtime、TiDB runtime、Session policy、group actions 与 operations history；不与其中重叠的 12 项相加。final-security.log **65 passed**，5 条 warnings 来自禁网反例的预期拦截；final-ruff.log 全仓通过，final-mypy.log **44 源码文件通过**。文档／工作流 **30 passed**、链接／锚点 **0 错误、19 变体**，差异空白检查通过，最终日志为 final-docs.log／final-links.log／final-whitespace.log。
-
-旧候选的非部署全量尝试 full-offline.log 因审查发现日志问题主动中断：**2058 passed、16 skipped、100 deselected，EXIT=2**，不作为全量通过；最终只关闭上述相关离线回归。本轮未运行发行／容器部署测试或 GitHub 完整 CI，未调用真实模型／公司 DS，未推送、合并或部署。
-
-独立只读审查以本地候选 `7123888fa409d65dabd1d98df79bc5171f4b5112` 开始，覆盖全部 5 文件和调用链，报告 `/private/tmp/xw-ds-selection-evidence/review-7123888.md`。发现选择日志对当前 SDK 可接受的孤立代理字符调用 ID 使用 strict encode 会覆盖正常反馈；新增成功／重复／拒绝三个实际路径回归，修复前均为 UnicodeEncodeError，现沿用 tools.py 的 surrogatepass 哈希。读取调用的同类输入已由 ToolRequest 的 Pydantic Unicode 校验挡住，不增加重复处理。复核附录按最终两个源码文件及测试 SHA256 确认该问题关闭，无其他阻断；日志记录 HEAD 加工作区差异，实际受测内容以源码／测试哈希为准，最终提交只改变这些已验证文件和交接说明。
-
-**开放项。** 脚本模型只证明预算修复、调用链和边界，不证明 Gemini 不再重复调用或能自主诊断。公司须用同一问题复测，记录实际工具选择、次数、业务事实、耗时与用量，确认用户看到查询结果；D1–D4／19 真实 Agent、两版公司 API、长日志负载／脱敏延迟、飞书实收和用户验收仍开放。
+**开放项。** 本地不跑全量，完整 CI 等后续授权；真实 Gemini 须在公司用原问题复测工具选择、后续查询、材料份数、耗时和用量。重复调用壳和 Session 历史体积保留，可能触发现有容量上限；不做输入／历史压缩或签名保护改动。D1–D4／19 真实 Agent、两版公司 DS API、长日志负载／脱敏延迟、飞书实收、用户验收继续开放。离线三套 DS 的 12345 端口待运维放通；Vertex 429 先观察，频繁出现再核查 GCP 配额，当前不归因于体积。本次不调用公司服务、不部署。
 
 ### 历史证据的保存方式
 

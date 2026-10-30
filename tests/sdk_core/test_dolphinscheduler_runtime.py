@@ -389,7 +389,16 @@ async def test_ds_failure_stops_only_appropriate_scope_this_turn(postgres_url, r
             with pytest.raises(ToolRejectedError):
                 await gov.invoke(ctx, req, success)
         else:
-            await gov.invoke(ctx, req, success)
+            reused = await gov.invoke(ctx, req, success)
+            receipt = json.loads(reused.model_content)
+            assert receipt["status"] == "reused" and receipt["original_status"] == "failed"
+            assert receipt["code"] == reason and "evidence_id" not in receipt
+            assert len(calls) == 1
+            # 相同失败请求已复用；同源另一合法页仍可读取，不扩大成整源停读。
+            other_page = req.model_copy(
+                update={"call_id": "c2", "arguments": {**req.arguments, "page_no": 2}}
+            )
+            await gov.invoke(ctx, other_page, success)
         assert len(calls) == (1 if stopped else 2)
         gov.end_turn(ctx.identity)
         ctx2 = ctx.model_copy(

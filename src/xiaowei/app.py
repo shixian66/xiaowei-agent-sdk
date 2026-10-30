@@ -748,6 +748,7 @@ class Application:
                 )
             if self.dolphinscheduler is not None:
                 await self.dolphinscheduler.end_turn(ctx.identity)
+            call_counts = self._governance.call_counts(ctx.identity)
             self._governance.end_turn(ctx.identity)
             if not reserved:
                 self._active.discard(session_id)
@@ -755,7 +756,7 @@ class Application:
                 active_vertex_metrics.reset(token)
                 if turn_token is not None:
                     active_vertex_turn.reset(turn_token)
-                _model_summary(turn, started, metrics)
+            _model_summary(turn, started, metrics, call_counts)
         _stage(turn, "paused" if isinstance(answer, PausedTurn) else "completed", started)
         return answer
 
@@ -1561,13 +1562,14 @@ class Application:
         finally:
             if self.dolphinscheduler is not None:
                 await self.dolphinscheduler.end_turn(original.identity)
+            call_counts = self._governance.call_counts(original.identity)
             self._governance.end_turn(original.identity)
             self._active.discard(session_id)
             if token is not None and metrics is not None:
                 active_vertex_metrics.reset(token)
                 if turn_token is not None:
                     active_vertex_turn.reset(turn_token)
-                _model_summary(original.identity.turn_id, started, metrics)
+            _model_summary(original.identity.turn_id, started, metrics, call_counts)
 
     def _tools_for(
         self,
@@ -1883,8 +1885,18 @@ def _stage(
     logger.info(message, *fields)
 
 
-def _model_summary(turn: str, started: float, metrics: VertexTurnMetrics) -> None:
-    """Vertex 一次运行的安全计数；SDK 异常没有 run_data 时仍保留先前用量。"""
+def _model_summary(
+    turn: str, started: float, metrics: VertexTurnMetrics | None, call_counts: tuple[int, int]
+) -> None:
+    """本次运行的安全计数；Vertex 另保留供应商用量，不推算其他模型的缺失用量。"""
+    if metrics is None:
+        logger.info(
+            "turn=%s stage=model_summary reason=- elapsed_ms=%d tool_calls=%d duplicate_calls=%d",
+            turn,
+            int((time.monotonic() - started) * 1000),
+            *call_counts,
+        )
+        return
     message = (
         "turn=%s stage=model_summary reason=- elapsed_ms=%d model_requests=%d http_429=%d"
         " retries=%d request_bytes_max=%d input_tokens=%s output_tokens=%s"
@@ -1899,6 +1911,8 @@ def _model_summary(turn: str, started: float, metrics: VertexTurnMetrics) -> Non
         metrics.input_tokens if metrics.input_tokens is not None else "unknown",
         metrics.output_tokens if metrics.output_tokens is not None else "unknown",
     )
+    message += " tool_calls=%d duplicate_calls=%d"
+    fields += call_counts
     if detail := metrics.last_429:
         message += (
             " rate_kind=%s status=%s reason=%s domain=%s quota_metric=%s quota_id=%s"
