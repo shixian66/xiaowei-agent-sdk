@@ -1,6 +1,6 @@
 # 小维：当前交接
 
-> 核对日期：2026-10-29，Asia/Shanghai。本文只维护当前代码／计划状态、验证证据、缺口和下一项工作。长期契约见 [ARCHITECTURE.md](ARCHITECTURE.md)，阶段与退出条件见 [DEVELOPMENT_PLAN.md](DEVELOPMENT_PLAN.md)，用法见 [README.md](README.md)／[OPERATIONS.md](deploy/OPERATIONS.md)。
+> 核对日期：2026-10-31，Asia/Shanghai。本文只维护当前代码／计划状态、验证证据、缺口和下一项工作。长期契约见 [ARCHITECTURE.md](ARCHITECTURE.md)，阶段与退出条件见 [DEVELOPMENT_PLAN.md](DEVELOPMENT_PLAN.md)，用法见 [README.md](README.md)／[OPERATIONS.md](deploy/OPERATIONS.md)。
 
 **OpenAI Agents SDK 负责 Agent Loop；小维负责权限、受治理工具执行、证据真实性和数据边界。**
 
@@ -8,8 +8,8 @@
 
 | 项目 | 本次核对事实 |
 | --- | --- |
-| 仓库／产品基线 | [shixian66/xiaowei-agent-sdk](https://github.com/shixian66/xiaowei-agent-sdk)，固定基线 `3dc028421f4349a4d9fe86129e234c9a9abd1bb3`（用户提供的生产发行 SHA），本地 Git 核对包含 #145–#148；本轮离线修复未重新核对远端 main |
-| 当前任务 | 修复生产暴露的 DS 重复选择耗尽工具额度；隔离分支 `codex/ds-selection-budget-fix` 从固定基线建立，增加选择幂等计费与安全日志 |
+| 仓库／产品基线 | [shixian66/xiaowei-agent-sdk](https://github.com/shixian66/xiaowei-agent-sdk)，已 fetch 核对 `origin/main@58d5e5d3e570249bba58396616fdb99356921d44`，本地修复从此建立 |
+| 当前任务 | 隔离分支 `codex/records-business-view`：修复 DS/history 的 records 表格展示、DS 列表中文覆盖，登记展示回归与接入约定；见下方本地离线结论 |
 | 隔离与已有工作 | 新建干净隔离工作树；桌面旧 checkout `b89d4ee` 及其三份文档／其他任务未提交材料保持原样，不把旧 checkout 当最新实现 |
 | 源码／入口 | 唯一产品包 `src/xiaowei`；`xiaowei` 与 `python -m xiaowei` 为正式入口。旧 Runtime、Worker、专属测试／迁移入口已移除，兼容旧回答和已绑定交付的路径仍保留 |
 | 存储与回答 | 应用 schema **17**：016 保存有界定时结果快照，017 只新增 `ds_clusters`；新回答为可信 v4，旧 v2/v3/Legacy 和已绑定原字节按原语义读取。SDK 表不改 |
@@ -37,7 +37,17 @@
 
 ## 3. 当前计划与下一项工作
 
-四份根文档对齐 #146、DS diagnose 用途修复／F1 中性说明 #147、协作规则 #148 已在本次固定基线中。本次只修 DS 选择重复扣费，离线证据见 §5；本地提交后等用户审阅，不推送。审阅及另行授权上线后，须在公司用同一问题、相同 Gemini／Vertex Profile 复测，既有实战门槛保持开放。
+本次只修业务展示，基线已包含 DS 选择重复扣费修复。用户已确认实现提交 `65b3da49147a6a6cb0aed62a0a66d216d718c655` 独立审查通过；产品源码保持该版本，DS 验收断言同步按业务表格检查。CI 与合并状态见 [PR #152](https://github.com/shixian66/xiaowei-agent-sdk/pull/152)。合并部署后，按 AGENTS.md §6 在真实飞书查询一次 `ds-sr-fat` 项目列表，核对表格、覆盖说明及技术详情。既有实战门槛保持开放。
+
+<a id="records-business-view"></a>
+
+### records 业务展示（离线验证，待真实飞书验收）
+
+**问题与修复。** 列表型 records 原来落入“字段／值 + JSON”兜底；现与 rows 共用表格识别，同时存在时 rows 优先，另一份仅保留在技术原文。展示时即时读取原有渠道投影，旧记录无需迁移；payload、模型／Session 内容、Evidence 保存与权限验证未改。DS 三项分页列表的 coverage 由 fact_limit_notices 生成中文总数、完整性／页范围及排除／省略说明，正文不重复 environment/cluster/kind；原值仍在技术详情。ARCHITECTURE 增加新工具须声明展示方式并在 PR 附飞书样例的约定。
+
+**验证。** 相关模块回归 361 passed，DS 验收与展示契约检查 70 passed，本机 Chrome 的 DS 成功／鉴权缺口及历史重载 2 passed；修改模块的 ruff/mypy 与差异检查通过。DS 验收按空表／中文覆盖和业务行中的精确状态、尝试次数断言，保留请求次数、Evidence 数量及失败后不可冒充当前事实的检查。测试含 SQL、DS 六项、history、监控三类、安全巡检、动作状态、任务及通知的代表性 payload，明确限制 JSON 例外，保留必要业务值；覆盖说明还验证短页、空页、末页及排除／省略，不把请求页大小当作实际返回范围。使用脚本模型／DS 替身和已核身份的本机隔离 PostgreSQL；本地未跑全量，未调用真实模型或公司服务。
+
+**开放项。** 用户确认 history 的嵌套 facts/gaps 保留为已知例外；DS 详情的附属结构与日志不新增专门展示。Alertmanager get_alerts.data、Grafana get_annotations.annotations 已复现同类 JSON 兜底，本任务不修；Prometheus 非表格 brief 契约保持。四组完整前后文本见[渲染样例](docs/records-business-view-samples.md)。源码合并不代表发行或部署；真实飞书与公司验收仍待部署后完成。
 
 ### 主线合入索引
 

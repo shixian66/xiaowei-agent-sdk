@@ -117,7 +117,8 @@ async def test_d1_e10_main_web_shows_actual_environment_even_when_empty(env, mon
                 assert "采集" in text
             assert len(requests) == 1
             if empty:
-                assert delivery.facts[0].metadata["records"] == "[]"
+                assert delivery.facts[0].rows == ()
+                assert "上游总数 0 条；已全部列出（0 条）" in visible
             # Reading the saved result revalidates Evidence, without another DS read.
             view = await served.client.get("/api/turns/r1")
             assert view.status_code == 200, view.text
@@ -333,8 +334,9 @@ async def test_d4_fresh_attempt_and_failed_followup_do_not_claim_old_fact_is_cur
                 assert result["state"] == "completed", result
                 if phase == 1:
                     fact = result["delivery"]["facts"][-1]
-                    assert state in fact["metadata"]["records"]
-                    assert str(retry) in fact["metadata"]["records"]
+                    row = fact["presentation"]["rows"][0]
+                    assert row["state"] == state
+                    assert row["runTimes"] == str(retry)
                 if phase == 2:
                     content = result["delivery"]["content"]
                     assert "未核实" in content

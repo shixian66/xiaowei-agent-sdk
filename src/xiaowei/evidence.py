@@ -1295,14 +1295,16 @@ def _fact_lines(shown: _Shown) -> tuple[str, ...]:
 
 def _fact(shown: _Shown, channel: Channel) -> DeliveryFact:
     record, data = shown.record, shown.data
-    table = _table(data, complex_values=channel == "feishu") if data is not None else None
+    table = _table(
+        data, complex_values=channel == "feishu" or ("records" in data and "rows" not in data)
+    ) if data is not None else None
     columns, rows = table if table is not None else ((), ())
     # 声明列之外的获准行字段也必须可见；JSON 文本保留未经展示转换的完整值与类型。
     columns = tuple(dict.fromkeys((*columns, *(name for row in rows for name in row))))
     metadata = {
         name: _web_value(value)
         for name, value in (data or {}).items()
-        if table is None or name not in ("rows", "columns")
+        if table is None or name not in ("rows", "records", "columns")
     }
     return DeliveryFact(
         evidence_id=record.evidence_id,
@@ -1336,8 +1338,11 @@ def _table(
     *,
     complex_values: bool = False,
 ) -> tuple[tuple[str, ...], tuple[dict[str, JsonScalar], ...]] | None:
-    """``rows`` 是由标量组成的行对象列表时给出 (列, 行)；列取 ``columns``，否则按行键出现顺序。"""
-    raw = data.get("rows")
+    """行对象列表 ``rows`` / ``records`` 成表；两者同时存在时只取 rows（含空列表）。
+
+    列取 ``columns``，否则按行键出现顺序；非标量值只在允许时编码为展示文本。
+    """
+    raw = data.get("rows", data.get("records"))
     if not isinstance(raw, list):
         return None
     rows: list[dict[str, JsonScalar]] = []
