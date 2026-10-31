@@ -286,4 +286,4 @@ utf8_replacements: false
 
 ## 验证与后续
 
-相关模块回归、ruff/mypy 和本机 Chrome 的 DS 展示/历史重载检查见 [handoff](../AGENT_HANDOFF.md#records-business-view)。未跑本地全量；本任务不推送、合并、部署，不调用真实模型或公司服务。由用户独立审查本地提交；合并部署后，按 AGENTS.md §6 在真实飞书查询一次 `ds-sr-fat` 项目列表，确认表格、中文覆盖、技术详情和原始值。
+相关模块回归、ruff/mypy 和本机 Chrome 的 DS 展示/历史重载检查见 [handoff](../AGENT_HANDOFF.md#records-business-view)。未跑本地全量，未调用真实模型或公司服务；实现提交已由用户确认独立审查通过，CI 与合并状态见 [PR #152](https://github.com/shixian66/xiaowei-agent-sdk/pull/152)。合并部署后，按 AGENTS.md §6 在真实飞书查询一次 `ds-sr-fat` 项目列表，确认表格、中文覆盖、技术详情和原始值。

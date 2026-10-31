@@ -1,6 +1,6 @@
 # 小维：当前交接
 
-> 核对日期：2026-10-30，Asia/Shanghai。本文只维护当前代码／计划状态、验证证据、缺口和下一项工作。长期契约见 [ARCHITECTURE.md](ARCHITECTURE.md)，阶段与退出条件见 [DEVELOPMENT_PLAN.md](DEVELOPMENT_PLAN.md)，用法见 [README.md](README.md)／[OPERATIONS.md](deploy/OPERATIONS.md)。
+> 核对日期：2026-10-31，Asia/Shanghai。本文只维护当前代码／计划状态、验证证据、缺口和下一项工作。长期契约见 [ARCHITECTURE.md](ARCHITECTURE.md)，阶段与退出条件见 [DEVELOPMENT_PLAN.md](DEVELOPMENT_PLAN.md)，用法见 [README.md](README.md)／[OPERATIONS.md](deploy/OPERATIONS.md)。
 
 **OpenAI Agents SDK 负责 Agent Loop；小维负责权限、受治理工具执行、证据真实性和数据边界。**
 
@@ -37,17 +37,17 @@
 
 ## 3. 当前计划与下一项工作
 
-本次只修业务展示，基线已包含 DS 选择重复扣费修复。下一步由用户独立审查本地提交；合并部署后，按 AGENTS.md §6 在真实飞书查询一次 `ds-sr-fat` 项目列表，核对表格、覆盖说明及技术详情。既有实战门槛保持开放。
+本次只修业务展示，基线已包含 DS 选择重复扣费修复。用户已确认实现提交 `65b3da49147a6a6cb0aed62a0a66d216d718c655` 独立审查通过；产品源码保持该版本，DS 验收断言同步按业务表格检查。CI 与合并状态见 [PR #152](https://github.com/shixian66/xiaowei-agent-sdk/pull/152)。合并部署后，按 AGENTS.md §6 在真实飞书查询一次 `ds-sr-fat` 项目列表，核对表格、覆盖说明及技术详情。既有实战门槛保持开放。
 
 <a id="records-business-view"></a>
 
-### records 业务展示（本地离线，待独立审查）
+### records 业务展示（离线验证，待真实飞书验收）
 
 **问题与修复。** 列表型 records 原来落入“字段／值 + JSON”兜底；现与 rows 共用表格识别，同时存在时 rows 优先，另一份仅保留在技术原文。展示时即时读取原有渠道投影，旧记录无需迁移；payload、模型／Session 内容、Evidence 保存与权限验证未改。DS 三项分页列表的 coverage 由 fact_limit_notices 生成中文总数、完整性／页范围及排除／省略说明，正文不重复 environment/cluster/kind；原值仍在技术详情。ARCHITECTURE 增加新工具须声明展示方式并在 PR 附飞书样例的约定。
 
-**验证。** 相关模块回归通过；新增展示契约检查 54 passed，本机 Chrome 的 DS 成功／鉴权缺口及历史重载 2 passed；修改模块的 ruff/mypy 与差异检查通过。测试含 SQL、DS 六项、history、监控三类、安全巡检、动作状态、任务及通知的代表性 payload，明确限制 JSON 例外，保留必要业务值；覆盖说明还验证短页、空页、末页及排除／省略，不把请求页大小当作实际返回范围。使用脚本模型／DS 替身和已核身份的本机隔离 PostgreSQL；本地未跑全量，未调用真实模型或公司服务。
+**验证。** 相关模块回归 361 passed，DS 验收与展示契约检查 70 passed，本机 Chrome 的 DS 成功／鉴权缺口及历史重载 2 passed；修改模块的 ruff/mypy 与差异检查通过。DS 验收按空表／中文覆盖和业务行中的精确状态、尝试次数断言，保留请求次数、Evidence 数量及失败后不可冒充当前事实的检查。测试含 SQL、DS 六项、history、监控三类、安全巡检、动作状态、任务及通知的代表性 payload，明确限制 JSON 例外，保留必要业务值；覆盖说明还验证短页、空页、末页及排除／省略，不把请求页大小当作实际返回范围。使用脚本模型／DS 替身和已核身份的本机隔离 PostgreSQL；本地未跑全量，未调用真实模型或公司服务。
 
-**开放项。** 用户确认 history 的嵌套 facts/gaps 保留为已知例外；DS 详情的附属结构与日志不新增专门展示。Alertmanager get_alerts.data、Grafana get_annotations.annotations 已复现同类 JSON 兜底，本任务不修；Prometheus 非表格 brief 契约保持。四组完整前后文本见[渲染样例](docs/records-business-view-samples.md)。当前仅本地提交，无推送／合并／部署；独立审查、真实飞书与公司验收仍待完成。
+**开放项。** 用户确认 history 的嵌套 facts/gaps 保留为已知例外；DS 详情的附属结构与日志不新增专门展示。Alertmanager get_alerts.data、Grafana get_annotations.annotations 已复现同类 JSON 兜底，本任务不修；Prometheus 非表格 brief 契约保持。四组完整前后文本见[渲染样例](docs/records-business-view-samples.md)。源码合并不代表发行或部署；真实飞书与公司验收仍待部署后完成。
 
 ### 主线合入索引
 
