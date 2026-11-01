@@ -47,7 +47,7 @@ records 业务展示已合入 [PR #152](https://github.com/shixian66/xiaowei-age
 
 **第 2 步已做。** 删除 `tests/spike/`（锁版可行性实验，CI 普通 job 已排除；RunHooks 与 MCP 重连由 `test_progress.py`、`test_monitoring_r1b.py` 以真 SDK 覆盖）；`test_sql_parse_recovery.py` 原借用 spike 的检查点表，改为按正式暂停保存的形状在内存做 JSON 往返，旧账本缺 `sql_parse_failures` 的兼容用例保留；`grafana_c8.py` 改为复用 `grafana.py` 中逐字相同的 `_UID`／`_Args`／`_json`／`_pairs`／`_nonfinite`，两个 schema 钉值函数各钉各的集合，未合并。
 
-**后续（未开始）。** ③ 用户确认 v4 上线日期、生产保留期及是否有长于保留期的数据后，删除 v2/v3/Legacy 回答兼容路径；④ Evidence 一轮内重复实时复核（记录后重读、写 Session）先测量探测次数，再出方案并独立审查。
+**后续（未开始）。** ③ 用户确认 v4 上线日期、生产保留期及是否有长于保留期的数据后，删除 v2/v3/Legacy 回答兼容路径；④ Evidence 一轮内重复复核：已离线测量并写成 [计划](docs/superpowers/plans/2026-11-01-evidence-in-turn-recheck.md)（分支 `claude/evidence-recheck-plan`），待独立审查与用户决定，未实施。
 
 <a id="records-business-view"></a>
 
