@@ -61,7 +61,7 @@ testpaths = ["tests"]
 # 避免与 pytest 的 prepend 导入模式冲突。
 pythonpath = ["."]
 asyncio_mode = "auto"
-markers = ["security: 安全边界测试，独立 CI gate（ADR-008 D3）"]
+markers = ["security: 安全边界测试，独立 CI gate"]
 
 [tool.ruff]
 target-version = "py311"

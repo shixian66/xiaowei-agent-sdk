@@ -1511,30 +1511,6 @@ class ChannelStore:
             {"owner": owner_id, "turn": turn_id, "keep": tuple(keep), "now": self._clock()},
         )
 
-    async def proposal_request(self, action: ActionRecord) -> RequestRecord:
-        async with self._engine.connect() as conn:
-            row = (
-                (
-                    await conn.execute(
-                        text(
-                            "SELECT * FROM xiaowei_request WHERE turn_id = :turn "
-                            "AND channel = 'feishu' AND owner_kind = 'group' AND owner_id = :owner "
-                            "AND expires_at > :now"
-                        ),
-                        {
-                            "turn": action.proposal_turn_id,
-                            "owner": action.owner_id,
-                            "now": self._clock(),
-                        },
-                    )
-                )
-                .mappings()
-                .one_or_none()
-            )
-        if row is None:
-            raise RequestUnavailableError
-        return self._record(dict(row))
-
     async def proposal_request_for_turn(
         self, identity: Identity, *, approval: ApprovedAction | None = None
     ) -> RequestRecord:

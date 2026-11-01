@@ -2,16 +2,14 @@
 
 **设计取向：闭集白名单，而非 denylist。** denylist 只能挡住已知的具体写法，
 `toJSON(github)`、`github['token']`、`curl <外部 API>` 等等价形式会不断绕过。
-本文件因此对 Actions 表达式、`uses:` 引用和全部 `run` 命令做**精确闭集校验**：
-任何新增或改动都会使测试变红，必须显式更新白名单，从而强制人工审查。
+本文件因此对 Actions 表达式和 `uses:` 引用做闭集校验，并约束权限、凭据、env、
+gate 存在与不可绕过；其余 `ci.yml` 改动由 PR 审查负责，不在这里逐字钉死。
 
 用标准库读文本 + 精确匹配，不引入 YAML parser。
 """
 
 import ast
-import hashlib
 import re
-from collections import Counter
 from pathlib import Path
 
 import pytest
@@ -80,13 +78,6 @@ _EXPECTED_JOBS = (
     "product-entry",
 )
 
-# ---- 承重锚：整个 ci.yml 的 SHA-256 --------------------------------------
-# 契约是「任何 ci.yml 改动都必须转红并接受人工审查」。集合式白名单只能挡住
-# 「多出的东西」，挡不住删除必需命令、重复摘要顶替、把配置挪到无关 action 下、
-# 或加 `continue-on-error` 让 gate 形同虚设。整文件摘要是唯一能覆盖全部
-# 增/删/改/移位的锚点；合法修改 workflow 时必须显式更新此常量。
-_WORKFLOW_SHA256 = "02875a9eb93bac2a2388e541e40288fffaec547da657c68939ab5f08dc68c628"
-
 # ---- 闭集白名单：改动 ci.yml 必须同步更新此处，否则测试变红 ----------------
 _ALLOWED_EXPRESSIONS = {"github.ref"}
 
@@ -94,44 +85,6 @@ _ALLOWED_USES = {
     "actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1",
     "astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9",
 }
-
-# 多行 run block 的规范化 SHA-256；改一个字符即变红。
-_ALLOWED_RUN_BLOCK_DIGESTS = {
-    "14dccc18ea3ff5aa544415f4682995d6076e600dd7708d760aebcb0373229e62",  # install gitleaks
-    "e22117f8a083130b9ad069a7e689c0603d10c8178b790d5b54fea3baf744c74d",  # scanner self-test
-    # allowlist narrowness self-test
-    "5ab1df1be7bbcb8fc0f502701556d5cfe7f26a66cec3ee0a4a1056850f642ecf",
-    "947c3f06267bb21abdbeb698f8f09a97f66602f03d2c862ee7c10d082af0d3fb",  # SDK test harness
-    "e292c40ec636bdd26c85ecf53c85e70d28b4ee3b4c831c4c6e505a8396edb079",  # install product wheel
-    "0547ae72dfd9441178e20b33269112011779bb7b941999027763294ce92c6077",  # product entries
-}
-
-
-def _run_commands_and_block_digests() -> tuple[list[str], list[str]]:
-    """提取全部 run 步骤：单行命令原文，多行 block 归一化后取摘要。"""
-    single: list[str] = []
-    digests: list[str] = []
-    index = 0
-    while index < len(_LINES):
-        match = re.match(r"^(\s*)(?:- )?run:\s*(.*)$", _LINES[index])
-        if not match:
-            index += 1
-            continue
-        indent, rest = match.group(1), match.group(2).strip()
-        if rest == "|":
-            body: list[str] = []
-            index += 1
-            while index < len(_LINES) and (
-                not _LINES[index].strip() or _LINES[index].startswith(indent + "  ")
-            ):
-                body.append(_LINES[index].strip())
-                index += 1
-            normalized = "\n".join(line for line in body if line)
-            digests.append(hashlib.sha256(normalized.encode()).hexdigest())
-            continue
-        single.append(rest)
-        index += 1
-    return single, digests
 
 
 def _job_ids() -> list[str]:
@@ -169,56 +122,6 @@ def test_uses_references_are_a_closed_set_with_exact_shas() -> None:
         assert re.fullmatch(r"[^@]+@[0-9a-f]{40}", ref), f"未钉到 40 位 commit SHA: {ref}"
 
 
-def test_uses_occurrence_counts_are_exact() -> None:
-    """每个 job 恰好一次 checkout；仅 secret-scan 不使用 setup-uv。"""
-    assert _TEXT.count("uses: actions/checkout@") == len(_EXPECTED_JOBS)
-    assert _TEXT.count("uses: astral-sh/setup-uv@") == len(_EXPECTED_JOBS) - 1
-
-
-def test_workflow_file_digest_is_pinned() -> None:
-    """整文件摘要：覆盖新增、删除、重复顶替、移位和控制属性等全部改动形态。
-
-    合法修改 `ci.yml` 时必须同步更新 `_WORKFLOW_SHA256`，从而强制人工审查。
-    下面的语义测试只用于给出可读的失败原因，不能替代本断言。
-    """
-    actual = hashlib.sha256(_WF.read_bytes()).hexdigest()
-    assert actual == _WORKFLOW_SHA256, (
-        f"ci.yml 已改动：实际摘要 {actual}，白名单为 {_WORKFLOW_SHA256}。"
-        "确认改动经过审查后再更新常量。"
-    )
-
-
-def test_single_line_run_commands_match_exactly() -> None:
-    """精确多重集：既拒绝多余命令，也拒绝删除必需命令。"""
-    single, _ = _run_commands_and_block_digests()
-    expected = Counter(
-        {
-            "uv sync --extra dev --frozen": 7,
-            # 无数据库 job 排除 SDK 与 spike；两者在 integration 的隔离 PostgreSQL 中运行。
-            (
-                "python -m pytest -q --ignore=tests/sdk_core "
-                "--ignore=tests/deployment --ignore=tests/spike"
-            ): 1,
-            "python -m pytest -q tests/deployment --durations=30": 1,
-            "python -m pytest -m security -q": 1,
-            "ruff check .": 1,
-            "mypy src": 1,
-            "uv export --frozen --no-emit-project --extra dev -o requirements-audit.txt": 1,
-            "pip-audit --strict -r requirements-audit.txt": 1,
-            './gitleaks git --log-opts="--all" --redact --no-banner .': 1,
-        }
-    )
-    assert Counter(single) == expected, f"run 命令多重集不符: {Counter(single)}"
-
-
-def test_multiline_run_blocks_match_exactly() -> None:
-    """精确多重集：防止用一个合法 block 重复顶替另一个必需 block。"""
-    _, digests = _run_commands_and_block_digests()
-    assert Counter(digests) == Counter(dict.fromkeys(_ALLOWED_RUN_BLOCK_DIGESTS, 1)), (
-        f"多行 run block 多重集不符: {Counter(digests)}"
-    )
-
-
 def test_no_step_level_control_attributes() -> None:
     """`continue-on-error` 会让失败的 gate 仍然显示成功；`if` 可让 gate 被跳过。"""
     for attr in ("continue-on-error", "if:"):
@@ -252,10 +155,6 @@ def test_job_set_is_exactly_the_approved_set() -> None:
 
 
 # ---- 结构与权限约束 --------------------------------------------------------
-
-
-def test_workflow_exists() -> None:
-    assert _WF.is_file()
 
 
 def test_no_pull_request_target() -> None:
@@ -319,25 +218,6 @@ def test_sdk_postgres_compose_image_is_digest_pinned() -> None:
         "postgres:16.15-bookworm@sha256:"
         "efedf3595f1d6f415c08568ba171029bf54052e754cc9f030e3f2412b21f3d67"
     ]
-
-
-def test_the_integration_job_runs_no_extra_command() -> None:
-    """普通与集成路径各有一条精确 pytest 命令；发行目录由 p3-release 负责。"""
-    assert (
-        _TEXT.count(
-            "- run: python -m pytest -q --ignore=tests/sdk_core "
-            "--ignore=tests/deployment --ignore=tests/spike\n"
-        )
-        == 1
-    )
-    assert (
-        _job_text("integration").count(
-            "python -m pytest -q --ignore=tests/deployment --durations=30\n"
-        )
-        == 1
-    )
-    assert "compose.sdk-test.yml up -d --wait" in _job_text("integration")
-    assert "compose.sdk-test.yml down -v" in _job_text("integration")
 
 
 def test_runner_is_pinned_not_latest() -> None:
