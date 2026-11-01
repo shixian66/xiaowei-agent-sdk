@@ -287,13 +287,12 @@ async def test_native_pause_restores_sql_failure_ledger_without_replaying_querie
     monkeypatch: pytest.MonkeyPatch,
     legacy: bool,
 ) -> None:
-    from agents import Agent
-    from agents.testing import ModelStep, ScriptedModel, function_call
+    from agents import Agent, Runner, RunState
+    from agents.testing import ModelStep, ScriptedModel, assistant_message, function_call
     from pydantic import TypeAdapter
-    from sqlalchemy import text
-    from tests.spike.test_sdk_hitl_reuse import restore, run
-    from tests.spike.test_sdk_resume_ledger import cite_all, save_checkpoint
+    from tests.sdk_core.synthetic_tools import s3_answer
 
+    from xiaowei.app import safe_run_config
     from xiaowei.governance import GovernedTools, TurnLedger
     from xiaowei.models import AgentAnswer, RunContext, TurnAnswer
     from xiaowei.tools import routed_function_tool
@@ -301,6 +300,20 @@ async def test_native_pause_restores_sql_failure_ledger_without_replaying_querie
     async with assembled(postgres_url, monkeypatch, parse_driver()) as env:
         ctx = env.ctx(max_tool_calls=3)
         first_sql = PRIOR if legacy else BAD
+
+        async def run(agent, value, *, ctx=None, session=None):
+            return await Runner.run(
+                agent, value, context=ctx, session=session, run_config=safe_run_config()
+            )
+
+        def cite_all(call):
+            ids = [
+                envelope["evidence_id"]
+                for item in call.input
+                if item.get("type") == "function_call_output"
+                and "evidence_id" in (envelope := json.loads(item["output"]))
+            ]
+            return [assistant_message(json.dumps(s3_answer(ids)))]
 
         async def gate(_ctx, _arguments, call_id):
             # 测试只门控第二次读取，用 SDK 原生暂停验证账本；不新增生产审批能力。
@@ -338,19 +351,17 @@ async def test_native_pause_restores_sql_failure_ledger_without_replaying_querie
         paused = await run(first_agent, "SDK SQL 修正任务", ctx=ctx, session=session)
         assert len(paused.interruptions) == 1
         assert executed_sql(env.drv) == [f"{first_sql} LIMIT 6"]
-        await save_checkpoint(env, ctx, paused)
+        # 与正式暂停保存同形：原轮 context、SDK 状态与治理账本各自 JSON 往返。
+        raw_ctx = ctx.model_dump_json()
+        saved = paused.to_state().to_string(
+            context_serializer=lambda _ctx: ctx.model_dump(mode="json"), strict_context=True
+        )
+        raw_ledger = TypeAdapter(TurnLedger).dump_json(env.governed.checkpoint(ctx.identity))
         await session.discard_pending()
-        async with env.engine.begin() as conn:
-            raw_ctx, saved, raw_ledger = (
-                await conn.execute(text("SELECT context, state, ledger FROM sdk_spike_checkpoint"))
-            ).one()
-            if legacy:
-                old = json.loads(raw_ledger)
-                del old["runs"]["sql_parse_failures"]
-                raw_ledger = json.dumps(old)
-                await conn.execute(
-                    text("UPDATE sdk_spike_checkpoint SET ledger=:ledger"), {"ledger": raw_ledger}
-                )
+        if legacy:
+            old = json.loads(raw_ledger)
+            del old["runs"]["sql_parse_failures"]
+            raw_ledger = json.dumps(old).encode()
         resumed_ctx = RunContext.model_validate_json(raw_ctx)
         ledger = TypeAdapter(TurnLedger).validate_json(raw_ledger, strict=True)
         assert ledger.used == 1
@@ -358,7 +369,9 @@ async def test_native_pause_restores_sql_failure_ledger_without_replaying_querie
         governance = GovernedTools(env.evidence)
         governance.restore(resumed_ctx, ledger)
         resumed_agent = agent(ScriptedModel([ModelStep(responder=cite_all)]), governance)
-        state = await restore(resumed_agent, saved, resumed_ctx)
+        state = await RunState.from_string(
+            resumed_agent, saved, context_override=resumed_ctx, strict_context=True
+        )
         state.approve(state.get_interruptions()[0], always_approve=False)
         result = await run(resumed_agent, state)
         restored = governance.checkpoint(ctx.identity)

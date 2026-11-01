@@ -11,7 +11,7 @@ from typing import TYPE_CHECKING, Any, cast
 from urllib.parse import parse_qsl, urlsplit
 
 from mcp.types import CallToolResult, ResourceLink, TextContent
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import Field
 
 from xiaowei.config import MCPServerConfig
 from xiaowei.evidence import arguments_digest
@@ -24,6 +24,7 @@ from xiaowei.governance import (
     ToolRejectedError,
     schema_shape,
 )
+from xiaowei.grafana import _UID, _Args, _json, _nonfinite, _pairs
 from xiaowei.models import AUDIENCES, Audience, ToolContract, ToolObservation, ToolRequest
 
 if TYPE_CHECKING:
@@ -37,7 +38,6 @@ C8_SCHEMAS = {
     "get_datasource": "25e98dfb8425e0f07867ad457c44657732e00daa7b3b09c8d9af98902d1d1927",
 }
 C8_POLICIES = frozenset(f"grafana.{name}" for name in C8_SCHEMAS)
-_UID = re.compile(r"[a-zA-Z0-9_-]{1,40}")
 _MAX_MILLISECONDS = 253402300799000
 _CREATE_SETTINGS = frozenset(
     {"access", "basicAuth", "database", "fields", "isDefault", "url", "withCredentials"}
@@ -45,10 +45,6 @@ _CREATE_SETTINGS = frozenset(
 _UPDATE_SETTINGS = frozenset(
     {"access", "basicAuth", "database", "fields", "isDefault", "jsonData", "name", "url"}
 )
-
-
-class _Args(BaseModel):
-    model_config = ConfigDict(extra="forbid", strict=True)
 
 
 class AnnotationArgs(_Args):
@@ -81,25 +77,6 @@ class DatasourceReadArgs(_Args):
 
 class _WriteResult(_Args):
     result_json: str
-
-
-def _json(value: object) -> str:
-    return json.dumps(
-        value, ensure_ascii=False, sort_keys=True, separators=(",", ":"), allow_nan=False
-    )
-
-
-def _pairs(items: list[tuple[str, Any]]) -> dict[str, Any]:
-    result: dict[str, Any] = {}
-    for key, value in items:
-        if key in result:
-            raise ValueError("duplicate JSON key")
-        result[key] = value
-    return result
-
-
-def _nonfinite(_value: str) -> None:
-    raise ValueError("non-finite JSON value")
 
 
 def _credential_field(name: str) -> bool:

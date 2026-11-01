@@ -9,7 +9,7 @@
 | 项目 | 本次核对事实 |
 | --- | --- |
 | 仓库／产品基线 | [shixian66/xiaowei-agent-sdk](https://github.com/shixian66/xiaowei-agent-sdk)，本地 `origin/main@f6e824c`（#152 合并后；本轮网络不可用，未重新 fetch） |
-| 当前任务 | 隔离分支 `claude/slim-legacy-docs-tests`：巡检后的第 1 步纯删除，见下方 [精简第 1 步](#slim-step-1) |
+| 当前任务 | 隔离分支 `claude/slim-legacy-docs-tests`（第 1 步纯删除）与其上叠加的 `claude/slim-spike-grafana`（第 2 步），见下方 [精简](#slim-step-1) |
 | 隔离与已有工作 | 新建干净隔离工作树；桌面旧 checkout `b89d4ee` 及其三份文档／其他任务未提交材料保持原样，不把旧 checkout 当最新实现 |
 | 源码／入口 | 唯一产品包 `src/xiaowei`；`xiaowei` 与 `python -m xiaowei` 为正式入口。旧 Runtime、Worker、专属测试／迁移入口已移除，兼容旧回答和已绑定交付的路径仍保留 |
 | 存储与回答 | 应用 schema **17**：016 保存有界定时结果快照，017 只新增 `ds_clusters`；新回答为可信 v4，旧 v2/v3/Legacy 和已绑定原字节按原语义读取。SDK 表不改 |
@@ -41,11 +41,13 @@ records 业务展示已合入 [PR #152](https://github.com/shixian66/xiaowei-age
 
 <a id="slim-step-1"></a>
 
-### 精简第 1 步（本地离线，待审阅）
+### 精简第 1–2 步（本地离线，待审阅）
 
 **已删。** 旧系统文档 `docs/adr/`、`docs/plans/`（M2–M5）、`docs/handoff/` 与旧包生成的 `docs/CAPABILITIES.md`（核心文档与代码均不引用）；只保护 ADR-008 的 `test_docs_command_consistency.py`；无调用方的 `ChannelStore.proposal_request`；依赖基线中检查旧包导入和第三方 `py.typed` 事实的用例（直接导入无类型的 asyncpg 仍由 mypy strict 与固定 override 拦住）；CI workflow 测试中的整文件摘要、命令多重集与命令块摘要（权限、凭据、env、`uses` SHA、gate 存在与不可绕过等规则保留）。
 
-**后续（巡检结论，未开始）。** ② 删除 `tests/spike/`（保留两个纯 SDK 实验可选）、合并 `grafana.py`／`grafana_c8.py` 重复辅助函数；③ 用户确认 v4 上线日期、生产保留期及是否有长于保留期的数据后，删除 v2/v3/Legacy 回答兼容路径；④ Evidence 一轮内重复实时复核（记录后重读、写 Session）先测量探测次数，再出方案并独立审查。
+**第 2 步已做。** 删除 `tests/spike/`（锁版可行性实验，CI 普通 job 已排除；RunHooks 与 MCP 重连由 `test_progress.py`、`test_monitoring_r1b.py` 以真 SDK 覆盖）；`test_sql_parse_recovery.py` 原借用 spike 的检查点表，改为按正式暂停保存的形状在内存做 JSON 往返，旧账本缺 `sql_parse_failures` 的兼容用例保留；`grafana_c8.py` 改为复用 `grafana.py` 中逐字相同的 `_UID`／`_Args`／`_json`／`_pairs`／`_nonfinite`，两个 schema 钉值函数各钉各的集合，未合并。
+
+**后续（未开始）。** ③ 用户确认 v4 上线日期、生产保留期及是否有长于保留期的数据后，删除 v2/v3/Legacy 回答兼容路径；④ Evidence 一轮内重复实时复核（记录后重读、写 Session）先测量探测次数，再出方案并独立审查。
 
 <a id="records-business-view"></a>
 
