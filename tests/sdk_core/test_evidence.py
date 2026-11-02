@@ -52,12 +52,10 @@ from xiaowei.models import (
     Audience,
     Channel,
     FactBlock,
-    LegacyAnswer,
     RunContext,
     TextBlock,
     ToolCall,
     ToolObservation,
-    legacy_blocks,
 )
 from xiaowei.storage import (
     APP_TABLES,
@@ -416,12 +414,6 @@ async def test_unverified_advice_can_be_a_file_but_awaiting_user_ignores_format(
         # 非飞书渠道不拒绝：正文照常交付；只有真的要文件时才由代码说明不支持。
         assert web.report_format is None and web.texts == (text,)
         assert web.report_notice == (UNSUPPORTED_FILE_NOTICE if kind == "advice" else None)
-
-
-def test_answers_saved_before_advice_existed_still_load() -> None:
-    old = '{"evidence_ids": [], "inferences": [], "clarification": "请说明地区"}'
-    assert LegacyAnswer.model_validate_json(old).advice is None
-    assert legacy_blocks(LegacyAnswer.model_validate_json(old)).awaiting_user
 
 
 async def test_feishu_structured_fact_reads_only_its_own_projection(postgres_url: URL) -> None:

@@ -21,13 +21,8 @@ from pydantic import SecretStr
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncEngine
 
-from xiaowei.channel_store import ChannelStore
+from xiaowei.channel_store import ChannelStore, RequestUnavailableError
 from xiaowei.models import Owner, TurnAnswer
-
-try:  # 升级后镜像：S3 之前的回答以 LegacyAnswer 严格解析
-    from xiaowei.models import LegacyAnswer
-except ImportError:  # 升级前镜像：同一结构即当时的 AgentAnswer
-    from xiaowei.models import AgentAnswer as LegacyAnswer  # type: ignore[assignment]
 from xiaowei.storage import (
     Readiness,
     check_digest_key,
@@ -56,16 +51,24 @@ _GROUP = {
     "policy_version": "v1",
     "owner": _GROUP_OWNER,
 }
-_ANSWER = TurnAnswer(
-    # 升级前保存的结果：S3 之前的回答格式（缺答案版本），升级后按严格旧格式解析。
-    answer=LegacyAnswer(
-        evidence_ids=(),
-        inferences=[],
-        clarification=None,
-        advice="升级前保存的合成结果",
-    ),
-    context_evidence=(),
-)
+
+
+def _pre_upgrade_answer() -> TurnAnswer:
+    """只在升级前镜像（S3 之前）执行：当时的 ``AgentAnswer`` 即旧回答格式。
+
+    升级后只读取 v4 回答，这条记录按不可用处理；会话与归属仍须延续。
+    """
+    from xiaowei.models import AgentAnswer
+
+    return TurnAnswer(
+        answer=AgentAnswer(  # type: ignore[call-arg]
+            evidence_ids=(),
+            inferences=[],
+            clarification=None,
+            advice="升级前保存的合成结果",
+        ),
+        context_evidence=(),
+    )
 
 
 def _now() -> datetime:
@@ -175,6 +178,7 @@ async def _seed() -> dict[str, Any]:
         async with hold_instance_lock(engine, readiness) as lock:
             store = _store(engine, readiness)
             await store.recover(lock)
+            answer = _pre_upgrade_answer()
 
             personal = await store.accept(**_PERSONAL)  # type: ignore[arg-type]
             assert personal.created
@@ -183,7 +187,7 @@ async def _seed() -> dict[str, Any]:
                 message=_PERSONAL["message"],
                 policy_version=_PERSONAL["policy_version"],
             )
-            personal_record = await store.complete(personal_record, _ANSWER)
+            personal_record = await store.complete(personal_record, answer)
 
             group = await store.accept(**_GROUP)  # type: ignore[arg-type]
             assert group.created
@@ -192,7 +196,7 @@ async def _seed() -> dict[str, Any]:
                 message=_GROUP["message"],
                 policy_version=_GROUP["policy_version"],
             )
-            group_record = await store.complete(group_record, _ANSWER)
+            group_record = await store.complete(group_record, answer)
 
             await _register_session(
                 engine,
@@ -236,12 +240,25 @@ async def _verify() -> dict[str, Any]:
             store = _store(engine, readiness)
             await store.recover(lock)
             for values, suffix in ((_PERSONAL, "personal"), (_GROUP, "group")):
-                repeated = await store.accept(**values)  # type: ignore[arg-type]
-                assert not repeated.created and repeated.record.state == "completed"
+                # 升级前的回答格式不再读取：同一请求不重跑，按不可用处理。
+                try:
+                    await store.accept(**values)  # type: ignore[arg-type]
+                except RequestUnavailableError:
+                    pass
+                else:
+                    raise AssertionError("升级前格式的回答不应仍可读取")
+                async with engine.connect() as conn:
+                    seeded_session = await conn.scalar(
+                        text(
+                            "SELECT session_id FROM xiaowei_request "
+                            "WHERE channel = :channel AND subject_id = :subject"
+                        ),
+                        {"channel": values["channel"], "subject": values["subject_id"]},
+                    )
                 continued_values = {**values, "request_id": f"p3-after-upgrade-{suffix}"}
                 continued = await store.accept(**continued_values)  # type: ignore[arg-type]
                 assert continued.created
-                assert continued.record.session_id == repeated.record.session_id
+                assert continued.record.session_id == seeded_session
                 await store.fail(continued.record, "busy")
         return await _snapshot(engine)
 

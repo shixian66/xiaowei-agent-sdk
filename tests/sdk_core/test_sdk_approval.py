@@ -17,15 +17,6 @@ pytestmark = pytest.mark.loopback
 GATE = f"{SOURCE}__request_action_execution"
 
 
-@pytest.fixture
-def legacy_v3_answers(monkeypatch):
-    """构造既有 v3 暂停/交付记录；不改 SDK、治理或存储，覆盖旧 C7 数据分项兼容。
-
-    v4 不在暂停轮发送只读结果；新行为见本模块 test_v4_pause...。
-    """
-    monkeypatch.setattr("xiaowei.models.ANSWER_VERSION", 3)
-
-
 async def paused(actions: Actions, group, *, investigate=False):
     env = actions.env
     steps = [tool_call("order_total", region="east")] if investigate else []
@@ -42,125 +33,6 @@ async def paused(actions: Actions, group, *, investigate=False):
     ) == [("paused", "sent")]
     assert actions.adapter.calls == []
     return await actions.one(), script
-
-
-@pytest.mark.parametrize("failed_part", ["approval", "data"])
-@pytest.mark.parametrize("failure", ["failed", "unknown"])
-@pytest.mark.usefixtures("legacy_v3_answers")
-async def test_legacy_v3_mixed_round_material_receipt_independently_controls_approval(
-    actions, failed_part, failure
-):
-    from sqlalchemy import text
-    from tests.sdk_core.test_feishu import Outbox
-
-    env = actions.env
-    outbox = Outbox([failure, "sent"] if failed_part == "approval" else ["sent", failure])
-    env.scripts.add(
-        attributed(A, "查询并静默"),
-        tool_call("run_query", region="east"),
-        tool_call(f"{SOURCE}__propose_change", value="after"),
-        request_execution,
-        cite("根据实际执行事实反馈"),
-    )
-    async with running(env, outbox=outbox, max_reply_chars=3500) as group:
-        await group.ask("查询并静默", message_id="om_mixed")
-        action_id = await actions.one()
-        assert "/批准" in group.outbox.texts()[0]
-        assert "见附件" not in group.outbox.texts()[0]
-        async with env.engine.connect() as conn:
-            states = (
-                await conn.execute(
-                    text("SELECT kind,send_state FROM xiaowei_delivery_part ORDER BY sequence")
-                )
-            ).all()
-        assert states == [
-            ("approval", failure if failed_part == "approval" else "sent"),
-            ("body", "sent" if failed_part == "approval" else failure),
-        ]
-        assert await env.rows("SELECT delivery FROM xiaowei_request") == [(failure,)]
-        if failed_part == "approval":
-            async with env.engine.begin() as conn:
-                await conn.execute(text("UPDATE xiaowei_request SET delivery='sent'"))
-            # 新记录只认审批材料回执，父请求错误的sent缓存不能放行。
-        await group.ask(f"/批准 {action_id}", sender=B, message_id="om_mixed_approve")
-        assert len(actions.adapter.calls) == (0 if failed_part == "approval" else 1)
-
-
-@pytest.mark.parametrize("actions", [400_000], indirect=True)
-@pytest.mark.usefixtures("legacy_v3_answers")
-async def test_legacy_v3_resend_confirms_unknown_approval_even_when_reference_row_is_indivisible(
-    actions, monkeypatch
-):
-    from functools import partial
-
-    from tests.sdk_core.test_feishu import Outbox
-    from tests.sdk_core.test_group_identity import GROUP
-
-    from xiaowei.feishu import send_delivery
-    from xiaowei.feishu_report import ReportCapacityError, build_report
-
-    env = actions.env
-    env.adapter.rows, env.adapter.memo = 1, "x" * 210_000
-    monkeypatch.setattr("xiaowei.feishu_report.MAX_REPORT_BYTES", 100)
-    uuids, uploads = [], []
-
-    class Receipts(Outbox):
-        async def __call__(self, chat_id, message, *, uuid=None, **kwargs):
-            uuids.append(uuid)
-            return await super().__call__(chat_id, message, uuid=uuid, **kwargs)
-
-    async def upload(report):
-        uploads.append(report.content)
-        raise AssertionError("超容量数据不得上传")
-
-    script = env.scripts.add(
-        attributed(A, "大结果与独立静默"),
-        tool_call("run_query", region="east"),
-        tool_call("run_query", region="west"),
-        tool_call(f"{SOURCE}__propose_change", value="after"),
-        request_execution,
-        cite("根据实际执行事实反馈"),
-    )
-    async with running(env, outbox=Receipts(["unknown"]), max_reply_chars=3500) as group:
-        await group.ask("大结果与独立静默", message_id="om_large_mixed")
-        ref = group_ref("om_large_mixed", A)
-        record = await env.store.get("feishu", A, GROUP.chat_id, ref.request_id, owner=GROUP.owner)
-        before = await env.store.delivery_parts(record)
-        assert [(p.kind, p.send_state) for p in before] == [("approval", "unknown")]
-        view = await env.results.view(ref, first=True)
-        data = tuple(f for f in view.delivery.facts if not f.requires_complete)
-        assert len(data) == 2 and sum(len(f.result_json.encode()) for f in data) > 400_000
-        with pytest.raises(ReportCapacityError):
-            build_report(
-                view.delivery.model_copy(
-                    update={"facts": data, "report_format": "md", "requires_complete": False}
-                )
-            )
-        sent = len(group.outbox.sent)
-        transmit = partial(
-            send_delivery,
-            send=group.outbox,
-            upload_file=upload,
-            chat_id=GROUP.chat_id,
-            reply_to=ref.request_id,
-            max_chars=3500,
-            results=env.results,
-            ref=ref,
-            resend=True,
-        )
-        assert await env.results.send(ref, transmit, resend=True) == "failed"
-        after = await env.store.delivery_parts(record)
-        assert len(group.outbox.sent) == sent + 1
-        assert after[0].send_state == "sent" and after[0].message_id
-        assert uuids[-1] == before[0].uuid == after[0].uuid
-        assert uploads == []
-        assert await env.rows("SELECT delivery FROM xiaowei_request") == [("failed",)]
-        assert env.model_calls(script) == 4 and len(env.adapter.calls) == 2
-        action_id = await actions.one()
-        await group.ask(f"/批准 {action_id}", sender=B, message_id="om_large_approve")
-        await group.ask(f"/批准 {action_id}", sender=B, message_id="om_large_duplicate")
-        assert await env.rows("SELECT state FROM xiaowei_action") == [("succeeded",)]
-        assert len(actions.adapter.calls) == 1 and len(env.adapter.calls) == 2
 
 
 @pytest.mark.parametrize("actions", [400_000], indirect=True)
@@ -534,48 +406,6 @@ async def test_resend_still_checks_saved_approval_capacity_before_sending(action
         assert await env.results.send(ref, transmit, resend=True) == "unknown"
         assert len(group.outbox.sent) == sent
         assert await env.rows("SELECT send_state FROM xiaowei_delivery_part") == [("unknown",)]
-        assert actions.adapter.calls == []
-
-
-@pytest.mark.usefixtures("legacy_v3_answers")
-async def test_legacy_v3_material_capacity_failure_does_not_block_independent_query_data(actions):
-    from functools import partial
-
-    from tests.sdk_core.test_group_identity import GROUP
-
-    from xiaowei.feishu import send_delivery
-
-    env = actions.env
-    env.scripts.add(
-        attributed(A, "数据与长材料"),
-        tool_call("run_query", region="east"),
-        tool_call(f"{SOURCE}__propose_change", value="x" * 1700),
-        request_execution,
-        cite(),
-    )
-    async with running(env, max_reply_chars=3500) as group:
-        await group.ask("数据与长材料", message_id="om_material_capacity")
-        assert await env.rows("SELECT kind,send_state FROM xiaowei_delivery_part") == [
-            ("body", "sent")
-        ]
-        assert any('"east"' in shown and "100" in shown for shown in group.outbox.texts())
-        assert await env.rows("SELECT delivery FROM xiaowei_request") == [("failed",)]
-        before = len(group.outbox.sent)
-        ref = group_ref("om_material_capacity", A)
-        transmit = partial(
-            send_delivery,
-            send=group.outbox,
-            chat_id=GROUP.chat_id,
-            reply_to="om_material_capacity",
-            max_chars=3500,
-            results=env.results,
-            ref=ref,
-            resend=True,
-        )
-        assert await env.results.send(ref, transmit, resend=True) == "failed"
-        assert len(group.outbox.sent) == before
-        action_id = await actions.one()
-        await group.ask(f"/批准 {action_id}", sender=B, message_id="om_capacity_approve")
         assert actions.adapter.calls == []
 
 

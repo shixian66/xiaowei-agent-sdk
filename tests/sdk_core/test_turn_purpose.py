@@ -17,8 +17,6 @@ from typing import Any
 import pytest
 from agents.testing import assistant_message
 from asyncmy.errors import OperationalError
-from pydantic import SecretStr
-from sqlalchemy import text
 from tests.sdk_core.synthetic_tools import s3_answer
 from tests.sdk_core.test_app import (
     SEARCH_ALL,
@@ -38,7 +36,6 @@ from xiaowei.app import Mode
 from xiaowei.channel import InboundRequest, ResultUnavailableError, ResultUnverifiableError
 from xiaowei.channel_store import RequestRecord
 from xiaowei.starrocks import EXPLAIN_PREFIX, probe_sql
-from xiaowei.storage import open_engine
 
 pytestmark = pytest.mark.loopback
 
@@ -246,21 +243,6 @@ async def test_advice_and_clarification_are_delivered_apart_and_replayed(env: En
         replayed = json.dumps(env.scripts.calls[follow][0].input, ensure_ascii=False)
         assert "GROUP BY region" in replayed and outputs(env.scripts.calls[follow][0]) == []
         assert env.db.business() == []
-
-
-async def test_answers_saved_without_context_evidence_are_not_delivered(env: Env) -> None:
-    async with env.opened(env.config()) as rt:
-        vague = env.scripts.add("查一下订单", clarify())
-        assert (await turn(env, rt, vague, "om_1")).state == "completed"
-        # 模拟此前版本保存的回答：只有 AgentAnswer（也没有 advice 字段），没有本轮模型可见证据的
-        # 记录，无法确认它复述的数据当前仍可读：状态照常读出，但不交付。
-        old = '{"evidence_ids": [], "inferences": [], "clarification": "请说明地区"}'
-        async with open_engine(SecretStr(env.url.render_as_string(hide_password=False))) as e:
-            async with e.begin() as conn:
-                await conn.execute(text("UPDATE xiaowei_request SET answer = :old"), {"old": old})
-        with pytest.raises(ResultUnavailableError) as refused:
-            await rt.service.results.view(ref("om_1"))
-        assert not isinstance(refused.value, ResultUnverifiableError)
 
 
 # ---- 最终回答与可信证据的绑定（PR #40 审查） ---------------------------------------------------

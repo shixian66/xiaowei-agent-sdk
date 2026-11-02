@@ -436,6 +436,51 @@ async def test_unverifiable_dependency_is_reported_before_a_tampered_call_bindin
         assert message not in env.scripts.calls
 
 
+def _old_answer(saved: dict[str, Any], form: str) -> dict[str, Any]:
+    """S3 之前与 v2/v3 时期保存在请求表中的回答 JSON（按当时的字段逐项写出）。"""
+    if form in ("v2", "v3"):
+        return {**saved, "answer_version": int(form[1])}
+    cited = [b["evidence_id"] for b in saved["answer"]["blocks"] if b["type"] == "fact"]
+    legacy = {
+        "evidence_ids": cited,
+        "fact_views": [],
+        "inferences": [{"text": "旧格式回答", "evidence_ids": cited}],
+        "clarification": None,
+        "advice": None,
+        "report_format": None,
+    }
+    if form == "bare":  # 最早只保存回答本身
+        return legacy
+    return {
+        "answer": legacy,
+        "context_evidence": saved["context_evidence"],
+        "monitoring_failures": [],
+        "run_turn_id": saved.get("run_turn_id"),
+    }
+
+
+@pytest.mark.parametrize("form", ["v2", "v3", "legacy", "bare"])
+async def test_answers_saved_before_v4_are_unavailable_without_io(env: Env, form: str) -> None:
+    """只保留 v4 语义：旧格式回答与记录过期同样不可读、不重发，不调用模型或复核数据库。"""
+    config = env.config()
+    async with env.opened(config) as rt:
+        await saved(env, rt, "om_1")
+        saved_json = json.loads(await env.scalar("SELECT answer FROM xiaowei_request"))
+        async with open_engine(SecretStr(env.url.render_as_string(hide_password=False))) as e:
+            async with e.begin() as conn:
+                await conn.execute(
+                    text("UPDATE xiaowei_request SET answer = :a"),
+                    {"a": json.dumps(_old_answer(saved_json, form))},
+                )
+        env.db.forget()
+        with pytest.raises(RequestUnavailableError):
+            await rt.service.results.view(ref("om_1"))
+        assert env.db.probes() == []
+    with pytest.raises(RequestUnavailableError):
+        await env.resend(config, "om_1")
+    assert env.db.probes() == [] and env.db.business() == []
+
+
 # ---- 视图：当前权限与依赖有效时，跨轮回放、历史读取与重发可用 -------------------------------
 
 

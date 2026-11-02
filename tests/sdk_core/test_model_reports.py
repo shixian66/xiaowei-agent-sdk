@@ -10,7 +10,6 @@ import httpx2
 import pytest
 from lark_channel.channel.types import OutboundFile
 from markdown_it import MarkdownIt
-from sqlalchemy import text
 from tests.sdk_core.synthetic_tools import QUERY_TOOL, TARGET, TOTAL_TOOL
 from tests.sdk_core.test_app import answer, evidence_in, tool_call
 from tests.sdk_core.test_channel_service import Env, app_config
@@ -220,25 +219,6 @@ async def test_revoked_evidence_prevents_report_io(env: Env) -> None:
     assert len(env.adapter.calls) == 1 and env.model_calls(message) == 2
 
 
-async def test_saved_v2_pending_report_keeps_literal_text(env: Env) -> None:
-    ref, _ = await report_request(env)
-    record = await env.store.get("feishu", "alice", "oc_native", "om_native")
-    assert await env.store.delivery_parts(record) == ()
-    async with env.engine.begin() as conn:
-        raw = await conn.scalar(text("SELECT answer FROM xiaowei_request"))
-        saved = json.loads(raw)
-        saved["answer_version"] = 2
-        await conn.execute(
-            text("UPDATE xiaowei_request SET answer=:body"),
-            {"body": json.dumps(saved, ensure_ascii=False)},
-        )
-    delivery = (await env.service.results.view(ref, first=True)).delivery
-    assert delivery is not None
-    assert not delivery.report_native
-    tokens = MarkdownIt().parse(build_report(delivery).content.decode())
-    assert any(t.type == "fence" and PROSE in t.content for t in tokens)
-
-
 async def test_report_skill_without_starrocks_and_web_exclusion(env: Env) -> None:
     _, message = await report_request(env)
     instructions = env.scripts.calls[message][-1].instructions
@@ -341,7 +321,7 @@ async def test_previously_failed_unbound_md_can_be_resent_without_new_query(env:
 
     assert await env.service.results.send(ref, old_delivery_failure) == "failed"
     record = await env.store.get("feishu", "alice", "oc_d1a", "old_md_failure")
-    assert record.answer_version == 4 and await env.store.delivery_parts(record) == ()
+    assert await env.store.delivery_parts(record) == ()
     platform = Platform()
     assert (
         await env.service.results.send(ref, transmit(env, ref, platform, resend=True), resend=True)
@@ -522,25 +502,12 @@ def test_markdown_invalid_fence_closer_cannot_capture_fact_identity(closing: str
     assert "来源" not in first_code.content and "SQL 原文" not in first_code.content
 
 
-@pytest.mark.parametrize("legacy", [True, False])
-async def test_pending_html_upgrade_retains_literal_or_native_semantics(
-    env: Env, legacy: bool
-) -> None:
-    original = (
-        "a<b & <table> 很慢" if legacy else "<h1>发现</h1><p>a&lt;b &amp; &lt;table&gt; 很慢</p>"
-    )
+async def test_pending_html_report_keeps_native_semantics(env: Env) -> None:
+    original = "<h1>发现</h1><p>a&lt;b &amp; &lt;table&gt; 很慢</p>"
     message = env.scripts.add(
         "解释并生成 HTML", lambda call: answer([], original, report_format="html")
     )
     await env.run(message, "upgrade_html", channel="feishu", conversation="oc_upgrade")
-    if legacy:
-        async with env.engine.begin() as conn:
-            raw = await conn.scalar(text("SELECT answer FROM xiaowei_request"))
-            saved = json.loads(raw)
-            saved["answer_version"] = 2
-            await conn.execute(
-                text("UPDATE xiaowei_request SET answer=:body"), {"body": json.dumps(saved)}
-            )
     ref = RequestRef(
         channel="feishu",
         subject_id="alice",
@@ -548,7 +515,7 @@ async def test_pending_html_upgrade_retains_literal_or_native_semantics(
         request_id="upgrade_html",
     )
     delivery = (await env.service.results.view(ref, first=True)).delivery
-    assert delivery is not None and delivery.report_native is not legacy
+    assert delivery is not None and delivery.report_native
     content = build_report(delivery).content.decode()
-    assert ("<h1>发现</h1>" in content) is not legacy
+    assert "<h1>发现</h1>" in content
     assert "a&lt;b &amp; &lt;table&gt; 很慢" in content

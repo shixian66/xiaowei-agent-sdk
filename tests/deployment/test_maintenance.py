@@ -11,6 +11,7 @@ import stat
 import subprocess
 import sys
 import tarfile
+import urllib.error
 import urllib.request
 import uuid
 from collections.abc import Iterator
@@ -322,7 +323,8 @@ def _probe(directory: Path, action: str) -> dict[str, Any]:
     return json.loads(result.stdout.strip().splitlines()[-1])
 
 
-def _post_saved_turn(port: int) -> dict[str, Any]:
+def _post_saved_turn(port: int) -> int:
+    """重新提交升级前保存的同一请求；返回 HTTP 状态码。"""
     payload = json.dumps(
         {
             "request_id": "p3-upgrade-request",
@@ -341,9 +343,11 @@ def _post_saved_turn(port: int) -> dict[str, Any]:
         },
         method="POST",
     )
-    with urllib.request.urlopen(request, timeout=10) as response:  # noqa: S310 - 固定 loopback
-        assert response.status == 200
-        return json.load(response)
+    try:
+        with urllib.request.urlopen(request, timeout=10) as response:  # noqa: S310 - 固定 loopback
+            return int(response.status)
+    except urllib.error.HTTPError as error:
+        return int(error.code)
 
 
 def _safe_dump(
@@ -590,9 +594,8 @@ def test_different_image_upgrade_rollback_and_paired_restore(
             "max-file": "4",
             "max-size": "7m",
         }
-        replay = _post_saved_turn(port)
-        assert replay["state"] == "completed"
-        assert "升级前保存的合成结果" in replay["delivery"]["content"]
+        # 升级前格式的回答不再读取：与记录过期相同，返回 404，不重跑、不报 500。
+        assert _post_saved_turn(port) == 404
 
         assert _compose(active, "stop", "xiaowei").returncode == 0
         verified = _probe(active, "verify")

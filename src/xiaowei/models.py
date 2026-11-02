@@ -262,7 +262,7 @@ class _Answer(BaseModel):
 
 
 ANSWER_VERSION: Final = 4
-"""可信保存版本：4 选择所需事实，3/2 保留旧补全；模型不输出，缺失只表示 LegacyAnswer。"""
+"""可信保存版本：只有 4（选择所需事实）；模型不输出。更早的保存格式不再读取。"""
 MAX_ANSWER_TEXT_BYTES: Final = 16_000
 """模型文字累计上限（UTF-8 字节）；只约束模型输出规模，不保证卡片、报告或 Session 放得下。"""
 MAX_ANSWER_BLOCKS: Final = 64
@@ -289,11 +289,9 @@ AnswerBlock = TextBlock | FactBlock
 class AgentAnswer(_Answer):
     """SDK ``output_type``：按顺序排列的文字与事实块，外加文件格式与“等待用户”声明。
 
-    回答结构、顺序与语气由模型决定；可信事实、动作材料与系统说明由代码生成；旧 v2/v3
-    另补全未引用结果（``EvidenceStore.validate_answer``）。块的字段组合由类型约束；文字累计
-    字节与块数在这里校验，超限属于可改写的格式错误；这一预算只约束新模型输出，旧记录经
-    ``legacy_blocks`` 适配，不受此限。``awaiting_user`` 为真时忽略 ``report_format``，只交付
-    普通消息。
+    回答结构、顺序与语气由模型决定；可信事实、动作材料与系统说明由代码生成
+    （``EvidenceStore.validate_answer``）。块的字段组合由类型约束；文字累计字节与块数在这里校验，
+    超限属于可改写的格式错误。``awaiting_user`` 为真时忽略 ``report_format``，只交付普通消息。
     """
 
     blocks: tuple[AnswerBlock, ...]
@@ -304,7 +302,7 @@ class AgentAnswer(_Answer):
 
     @property
     def evidence_ids(self) -> tuple[str, ...]:
-        """模型显式放进正文的证据，按块顺序（不含交付时补全的动作与其余结果）。"""
+        """模型显式放进正文的证据，按块顺序（不含交付时补全的动作）。"""
         return tuple(b.evidence_id for b in self.blocks if isinstance(b, FactBlock))
 
     @property
@@ -320,59 +318,6 @@ class AgentAnswer(_Answer):
         if size > MAX_ANSWER_TEXT_BYTES:
             raise ValueError(f"回答文字累计超出 {MAX_ANSWER_TEXT_BYTES} 字节")
         return self
-
-
-class AnswerInference(_Answer):
-    text: str = Field(min_length=1, max_length=2000)
-    evidence_ids: tuple[str, ...]
-
-
-class AnswerFactView(_Answer):
-    """只选择已有引用的显示方式，不接受模型提供的摘要数值。"""
-
-    evidence_id: str
-    view: Literal["full", "brief"]
-
-
-class LegacyAnswer(_Answer):
-    """S3 之前保存的回答格式，只为严格解析历史记录；新轮次不再生成。
-
-    交付时由 ``legacy_blocks`` 转为当前块结构，再走同一验证与投影。``advice`` 的默认值只为
-    解析更早、没有该字段的回答（它们没有上下文证据记录，不再交付，见 ``ChannelStore``）。
-    """
-
-    evidence_ids: tuple[str, ...]
-    fact_views: tuple[AnswerFactView, ...] = ()
-    inferences: list[AnswerInference]
-    clarification: Annotated[str, Field(min_length=1, max_length=2000)] | None
-    advice: Annotated[str, Field(min_length=1, max_length=4000)] | None = None
-    report_format: Literal["md", "html"] | None = None
-
-
-def legacy_blocks(answer: LegacyAnswer) -> AgentAnswer:
-    """旧回答按原语义转为块：澄清即等待用户；引用的事实在前、分析文字在后。
-
-    这是已保存记录的投影适配，不是新的模型输出：旧回答已按旧版结构严格解析，每个块也逐一
-    校验，但不再套用 ``AgentAnswer`` 的新输出预算（文字字节与块数），否则旧版合法的长分析
-    或多段分析会在历史读取时失效。证据、权限与各渠道容量仍由交付链路照常检查。
-    """
-    if answer.clarification is not None:
-        return AgentAnswer.model_construct(
-            blocks=(TextBlock(type="text", text=answer.clarification),),
-            report_format=None,
-            awaiting_user=True,
-        )
-    views = {item.evidence_id: item.view for item in answer.fact_views}
-    blocks: list[AnswerBlock] = [
-        FactBlock(type="fact", evidence_id=e, view=views.get(e, "full"))
-        for e in answer.evidence_ids
-    ]
-    blocks.extend(TextBlock(type="text", text=i.text) for i in answer.inferences)
-    if answer.advice is not None:
-        blocks.append(TextBlock(type="text", text=answer.advice))
-    return AgentAnswer.model_construct(
-        blocks=tuple(blocks), report_format=answer.report_format, awaiting_user=False
-    )
 
 
 MonitoringFailureReason = Literal[
@@ -492,13 +437,12 @@ class TurnAnswer(_Trusted):
     可能复述其中任何一条，因此回答只能引用其中的证据，每次交付都按当前权限复核全部这些证据；
     任一条确定不可读时整条回答不交付。
 
-    ``answer_version`` 由可信代码写入：``2/3/4`` 只接受 ``AgentAnswer``；缺失只接受严格的旧
-    ``LegacyAnswer``；其他取值、两者不符或新格式解析失败都拒绝，不回退旧格式。代码直接以
-    ``AgentAnswer`` 对象构造时自动写入当前版本；JSON 输入不补版本。
+    ``answer_version`` 只接受当前版本；更早的保存格式（v2/v3 带其他版本号，S3 之前的格式没有
+    ``blocks``）解析失败，读取方按不可用处理。
     """
 
-    answer: AgentAnswer | LegacyAnswer
-    answer_version: Literal[2, 3, 4] | None = None
+    answer: AgentAnswer
+    answer_version: Literal[4] = ANSWER_VERSION
     context_evidence: tuple[Label, ...]
     monitoring_failures: tuple[MonitoringFailure, ...] = ()
     inspection_failures: tuple[SecurityInspectionFailure, ...] = ()
@@ -512,30 +456,6 @@ class TurnAnswer(_Trusted):
     session_state: SessionSnapshot | None = Field(default=None, exclude=True)
     """成功提交后由应用附加；请求表单独保存，不进入回答 JSON 或 SDK Session。"""
 
-    @model_validator(mode="before")
-    @classmethod
-    def _version_for_code(cls, data: object) -> object:
-        if (
-            isinstance(data, dict)
-            and isinstance(data.get("answer"), AgentAnswer)
-            and "answer_version" not in data
-        ):
-            return {**data, "answer_version": ANSWER_VERSION}
-        return data
-
-    @model_validator(mode="after")
-    def _version_matches(self) -> "TurnAnswer":
-        expected = AgentAnswer if self.answer_version in (2, 3, 4) else LegacyAnswer
-        if type(self.answer) is not expected:
-            raise ValueError("回答版本与内容不符")
-        return self
-
-    @property
-    def blocks_answer(self) -> AgentAnswer:
-        """当前块结构：新回答原样，旧回答按原语义转换。"""
-        if isinstance(self.answer, AgentAnswer):
-            return self.answer
-        return legacy_blocks(self.answer)
 
 
 FactSection = Literal["action", "body", "remaining"]

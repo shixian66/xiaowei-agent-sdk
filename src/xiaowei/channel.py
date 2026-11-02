@@ -510,12 +510,10 @@ class ResultDelivery:
     ) -> Delivery:
         if record.answer is None:  # 数据库约束保证不会发生；不按“有回答”继续
             raise ResultUnavailableError
-        if record.context_evidence is None:
-            # 此前格式保存的回答没有本轮模型可见证据的记录，无法确认它依赖的数据当前仍可读。
+        if record.context_evidence is None:  # 与 answer 同存同无
             raise ResultUnavailableError
         turn = TurnAnswer(
             answer=record.answer,
-            answer_version=record.answer_version,
             context_evidence=record.context_evidence,
             run_turn_id=record.run_turn_id,
             monitoring_failures=record.monitoring_failures,

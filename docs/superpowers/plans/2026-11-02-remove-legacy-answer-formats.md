@@ -1,9 +1,9 @@
 # 删除旧回答格式（v2/v3/Legacy）：最小修改计划
 
-> 状态：2026-11-02 草案；用户已决定现在删除（精简第 3 步选 A），接受保留期内旧回答不再可读、不再重发。未实施。
+> 状态：2026-11-02 r2。用户已决定现在删除（精简第 3 步选 A），接受保留期内旧回答不再可读、不再重发。实施中发现渲染层删除会牵动约 150 个按旧布局断言的测试，用户选择分两步（B）：**本切片 3a 只做数据边界**（§2 第 1–3、5 条，`Delivery` 字段与渲染层不动），渲染层清理（§2 第 4 条）另作 3b，草稿存于分支 `claude/remove-legacy-render-wip@d1820d3`，未审查。
 > 基线：分支 `claude/remove-legacy-answers`，叠在第 4 步 `b38f15e` 之上（无代码依赖）。
 
-**目标：** 只保留当前 v4 回答语义，删除 Legacy（S3 前固定栏目）、v2/v3（自由块 + 自动补“其余结果”）的解析、补全与渲染分支，渲染只剩一套。
+**目标：** 只保留当前 v4 回答语义。3a 删除 Legacy（S3 前固定栏目）、v2/v3（自由块 + 自动补“其余结果”）的解析与补全；3b 再删渲染分支，使渲染只剩一套。
 
 **事实：**
 - 生产 `evidence_retention_seconds`、`request_retention_seconds`、会话 `retention_seconds` 均为 30 天（用户 2026-11-02 回传）。v4 约 10-23 合入，部署日期未核实；旧回答最晚约在 11-22 之后自然清除。
@@ -20,18 +20,18 @@
 | Web 查看／重发 | 404，与记录过期相同 |
 | 飞书重发／历史 | `_WITHHELD`：不发送，记日志，与记录过期相同 |
 | 运维历史读取 | 解析失败按现有逻辑退回只读原事实，不带旧分析 |
-| 同一请求键重复到达 | `RequestUnavailableError`，不重新运行 |
+| 同一请求键重复到达 | `RequestUnavailableError`，不重新运行（Web 404）；同会话的新请求照常进入原会话 |
 | 审批暂停材料 | 审批有效期 15 分钟（`actions.py` 的 `APPROVAL_WINDOW`），v3 时期的材料早已过期；若读到即不可批准 |
 
 Session 回放不解析回答 JSON（旧助手消息只作为模型历史文字），不受影响。
 
 ## 2. 改动
 
-1. **`models.py`**：删除 `LegacyAnswer`、`legacy_blocks`、`AnswerInference`／`AnswerFactView`（源码中只有 `LegacyAnswer` 引用）。`TurnAnswer.answer: AgentAnswer`；`answer_version: Literal[4]`，JSON 输入必须带版本，代码构造时自动写入，删除 `_version_matches` 与 `blocks_answer`（调用方改用 `answer`）。`FactSection` 去掉 `"remaining"`。`Delivery` 删除 `answer_version`、`basis`、`report_native`（v4 下等价于 `report_format is not None`），`has_system_content` 去掉 basis 一项。
+1. **`models.py`**：删除 `LegacyAnswer`、`legacy_blocks`、`AnswerInference`／`AnswerFactView`（源码中只有 `LegacyAnswer` 引用）。`TurnAnswer.answer: AgentAnswer`；`answer_version: Literal[4] = ANSWER_VERSION`，删除 `_version_for_code`、`_version_matches` 与 `blocks_answer`（调用方改用 `answer`）。v2/v3 带其他版本号，S3 之前的格式没有 `blocks`，都解析失败；缺版本的 `AgentAnswer` 形状从未被写入（v2 起写入都带版本），默认为 4 不放宽任何已存在的数据。*3b：*`FactSection` 去掉 `"remaining"`；`Delivery` 删除 `answer_version`、`basis`、`report_native`（v4 下等价于 `report_format is not None`）。
 2. **`channel_store.py`**：`_saved_answer` 只解析 `TurnAnswer`；`RequestRecord.answer`／`answer_version` 类型同步收窄或删除。
-3. **`evidence.py` `validate_answer`**：删除 `include_remaining_results` 参数与“其余结果”、Legacy 不补动作的 `complete` 分支、旧 `content` 行拼装、`_basis`；动作归并与 `business_text` 成为唯一路径；`_delivery_fact` 删除 `modern` 参数，按 v4 分支保留。
-4. **渲染**：`feishu_render.py`、`feishu_report.py`、`feishu_delivery.py`、`webhook.py`、`web.py`、`static/app.js` 把 `modern`／`answer_version == 4` 视为恒真，删除另一分支和只服务旧布局的辅助函数（如 `_basis_panels`、remaining 区）。`channel.py` 的 `answer_version == 4` 判断同样恒真。
-5. **调用方**：`scheduled_tasks.py`、`webhook.py` 去掉 `include_remaining_results=False` 实参；`operations_history.py` 的 `blocks_answer` 改为 `answer`。
+3. **`evidence.py` `validate_answer`**：删除 `include_remaining_results` 参数与“其余结果”、Legacy 不补动作的 `complete` 分支、旧 `content` 行拼装、`_basis`；动作归并与 `business_text` 成为唯一路径；`_delivery_fact` 删除 `modern` 参数，按 v4 分支保留。产出的 `Delivery` 固定 `answer_version=4`、`report_native = report_format is not None`（与原 v4 取值相同），`basis` 不再计算（渲染层对 v4 本来就不展示）。
+4. **渲染（3b，本切片不做）**：`feishu_render.py`、`feishu_report.py`、`feishu_delivery.py`、`webhook.py`、`web.py`、`static/app.js` 把 `modern`／`answer_version == 4` 视为恒真，删除另一分支和只服务旧布局的辅助函数（如 `_basis_panels`、remaining 区）。`channel.py` 的 `answer_version == 4` 判断同样恒真。
+5. **调用方**：`scheduled_tasks.py`、`webhook.py` 去掉 `include_remaining_results=False` 实参；`operations_history.py` 的 `blocks_answer` 改为 `answer`；`channel.py` 构造 `TurnAnswer` 时不再传版本。
 
 不改：数据库 schema（不迁移、不清数据）、Session 表、已绑定交付原字节的重发路径、v4 的任何展示结果。
 
@@ -47,3 +47,11 @@ Session 回放不解析回答 JSON（旧助手消息只作为模型历史文字�
 1. **v4 展示是否被误改**：渲染分支删除最容易出错。按 §3 第二条，以“改动前 v4 输出”为基准逐条核对。
 2. **遗漏的落库位置**：如果有未发现的 `TurnAnswer` 落库位置，旧数据读到时会走解析失败；§1 的入口已按源码核对，审查请再确认。
 3. 本计划只删兼容代码，不改变权限、证据复核或 v4 行为；属于“数据/Evidence 与用户入口”类改动，实施后对具体差异做独立审查。
+
+## 5. 实施记录（3a，2026-11-02）
+
+- 测试：删除只验证旧格式的用例（Legacy／v2／v3 解析与交付、`legacy_v3_answers` 夹具及其 3 个用例、`test_s3_legacy_resume.py`、v3“其余结果”补全、v2 报告文字语义、两个浏览器测试的 v3 参数）；新增 `test_answers_saved_before_v4_are_unavailable_without_io`（v2／v3／S3 前信封／最早裸回答四种形状）与 `test_saved_answers_before_v4_are_unavailable`。
+- `test_delivery_parts.py` 的 `request()` 原把回答强制改为 v3，以覆盖旧版“正文 + 证据明细”双文件布局；v3 记录不再可读，改为 v4 原样，9 个投递机制用例（存储失败、补发保留字节与 UUID、结果不明、上传不明、每次投递一次权限快照、真实 SDK 复用 UUID 等）按 v4 的“一个报告文件 + 正文”调整分项与计数，测试意图不变。
+- 渲染单元测试直接构造不带版本的 `Delivery`，渲染层未改，保持原样。
+- `tests/deployment` 升级演练（`test_different_image_upgrade_rollback_and_paired_restore`）原断言 P3 镜像保存的 S3 前回答在升级后仍可重放。按本切片的决定改为：升级后重新提交同一请求得到 404（不重跑、不报 500）；`verify` 中同一请求键按不可用处理，新请求仍落在原会话。探测脚本的旧回答改为只在 `seed`（旧镜像内执行）中构造，避免新镜像导入即失败。
+- 发现：`delivery_version=0`（迁移 012，10-15 之前）的记录全部早于 v4，其回答现在都不可读，相关发送分支实际不再可达；留到 3b 一并评估。

@@ -502,7 +502,6 @@ class WebhookNotifications:
                         ctx,
                         recipient_tools=bot.config.receive_tools | {TOOL},
                         recipient_targets=bot.config.receive_targets | {TARGET},
-                        include_remaining_results=False,
                     )
                 except RecipientRejectedError:
                     return self._observation(args.bot_alias, "not_sent", "recipient_not_authorized")
