@@ -1,6 +1,6 @@
 # 小维：当前交接
 
-> 核对日期：2026-10-31，Asia/Shanghai。本文只维护当前代码／计划状态、验证证据、缺口和下一项工作。长期契约见 [ARCHITECTURE.md](ARCHITECTURE.md)，阶段与退出条件见 [DEVELOPMENT_PLAN.md](DEVELOPMENT_PLAN.md)，用法见 [README.md](README.md)／[OPERATIONS.md](deploy/OPERATIONS.md)。
+> 核对日期：2026-11-01，Asia/Shanghai。本文只维护当前代码／计划状态、验证证据、缺口和下一项工作。长期契约见 [ARCHITECTURE.md](ARCHITECTURE.md)，阶段与退出条件见 [DEVELOPMENT_PLAN.md](DEVELOPMENT_PLAN.md)，用法见 [README.md](README.md)／[OPERATIONS.md](deploy/OPERATIONS.md)。
 
 **OpenAI Agents SDK 负责 Agent Loop；小维负责权限、受治理工具执行、证据真实性和数据边界。**
 
@@ -8,15 +8,15 @@
 
 | 项目 | 本次核对事实 |
 | --- | --- |
-| 仓库／产品基线 | [shixian66/xiaowei-agent-sdk](https://github.com/shixian66/xiaowei-agent-sdk)，已 fetch 核对 `origin/main@58d5e5d3e570249bba58396616fdb99356921d44`，本地修复从此建立 |
-| 当前任务 | 隔离分支 `codex/records-business-view`：修复 DS/history 的 records 表格展示、DS 列表中文覆盖，登记展示回归与接入约定；见下方本地离线结论 |
+| 仓库／产品基线 | [shixian66/xiaowei-agent-sdk](https://github.com/shixian66/xiaowei-agent-sdk)，本地 `origin/main@f6e824c`（#152 合并后；本轮网络不可用，未重新 fetch） |
+| 当前任务 | 隔离分支 `claude/slim-legacy-docs-tests`（第 1 步纯删除），其上依次叠加 `claude/slim-spike-grafana`（第 2 步）、`claude/evidence-recheck-plan`（第 4 步）与 `claude/remove-legacy-answers`（第 3a 步），见下方 [精简](#slim-step-1) |
 | 隔离与已有工作 | 新建干净隔离工作树；桌面旧 checkout `b89d4ee` 及其三份文档／其他任务未提交材料保持原样，不把旧 checkout 当最新实现 |
 | 源码／入口 | 唯一产品包 `src/xiaowei`；`xiaowei` 与 `python -m xiaowei` 为正式入口。旧 Runtime、Worker、专属测试／迁移入口已移除，兼容旧回答和已绑定交付的路径仍保留 |
 | 存储与回答 | 应用 schema **17**：016 保存有界定时结果快照，017 只新增 `ds_clusters`；新回答为可信 v4，旧 v2/v3/Legacy 和已绑定原字节按原语义读取。SDK 表不改 |
 | 锁定依赖 | Python 3.11；Agents SDK 0.22.3、OpenAI 3.20.0、MCP 2.2.0、Lark Channel 1.4.0、sqlglot 30.17.0、httpx2 2.13.1、nh3 0.3.7、tinycss2 1.5.1、Pillow 13.0.0；以 uv.lock 为准。CI 维护已锁 certifi 2026.10.19、开发链 filelock 4.2.1／msgpack 1.2.3 |
 | 此前保存的完整集成证据（非本次修复） | [PR #145](https://github.com/shixian66/xiaowei-agent-sdk/pull/145) 的精确受测树与 #145 squash 合并树相同；#146 仅改四份文档，产品源码未变；[CI #421](https://github.com/shixian66/xiaowei-agent-sdk/actions/runs/40721039641) 9/9 成功，详情见 §5 |
 | 已记录发行／公司部署 | 2026-10-29 用户回传 release.json、容器日志和数据库统计：发行 `3dc028421f4349a4d9fe86129e234c9a9abd1bb3`，max_tool_calls=32，DS 选择已提交，项目读取因额度耗尽未执行。证据为用户回传，本轮不直连服务器；不证明公司 API 或实战验收通过 |
-| 本轮授权边界 | 修复代码、测试、必要文档、离线验证及本地提交；不推送、不开 PR、不合并、不部署，不调用真实模型或公司服务 |
+| 本轮授权边界 | 删除确认无用的文档／测试／代码；用户 2026-11-02 批准实施第 4 步、第 3 步选 A（现在删除旧回答格式，接受保留期内旧回答不再可读／重发）；离线验证及本地提交；不推送、不开 PR、不合并、不部署，不调用真实模型或公司服务 |
 
 接手仍先核对实际 HEAD、工作区和用户新指令。下列“已合入”只描述 Git 事实；独立审查、离线测试、隔离真实软件、公司部署、渠道实收和用户接受分别记证。
 
@@ -37,7 +37,21 @@
 
 ## 3. 当前计划与下一项工作
 
-本次只修业务展示，基线已包含 DS 选择重复扣费修复。用户已确认实现提交 `65b3da49147a6a6cb0aed62a0a66d216d718c655` 独立审查通过；产品源码保持该版本，DS 验收断言同步按业务表格检查。CI 与合并状态见 [PR #152](https://github.com/shixian66/xiaowei-agent-sdk/pull/152)。合并部署后，按 AGENTS.md §6 在真实飞书查询一次 `ds-sr-fat` 项目列表，核对表格、覆盖说明及技术详情。既有实战门槛保持开放。
+records 业务展示已合入 [PR #152](https://github.com/shixian66/xiaowei-agent-sdk/pull/152)；部署后仍须按 AGENTS.md §6 在真实飞书查询一次 `ds-sr-fat` 项目列表（建议加查工作流实例列表覆盖宽表），核对表格、覆盖说明及技术详情。既有实战门槛保持开放。
+
+<a id="slim-step-1"></a>
+
+### 精简第 1–4 步（本地离线；第 1、2 步待独立审查）
+
+**已删。** 旧系统文档 `docs/adr/`、`docs/plans/`（M2–M5）、`docs/handoff/` 与旧包生成的 `docs/CAPABILITIES.md`（核心文档与代码均不引用）；只保护 ADR-008 的 `test_docs_command_consistency.py`；无调用方的 `ChannelStore.proposal_request`；依赖基线中检查旧包导入和第三方 `py.typed` 事实的用例（直接导入无类型的 asyncpg 仍由 mypy strict 与固定 override 拦住）；CI workflow 测试中的整文件摘要、命令多重集与命令块摘要（权限、凭据、env、`uses` SHA、gate 存在与不可绕过等规则保留）。
+
+**第 2 步已做。** 删除 `tests/spike/`（锁版可行性实验，CI 普通 job 已排除；RunHooks 与 MCP 重连由 `test_progress.py`、`test_monitoring_r1b.py` 以真 SDK 覆盖）；`test_sql_parse_recovery.py` 原借用 spike 的检查点表，改为按正式暂停保存的形状在内存做 JSON 往返，旧账本缺 `sql_parse_failures` 的兼容用例保留；`grafana_c8.py` 改为复用 `grafana.py` 中逐字相同的 `_UID`／`_Args`／`_json`／`_pairs`／`_nonfinite`，两个 schema 钉值函数各钉各的集合，未合并。
+
+**第 4 步已做，代码独立审查结论“可以合并候选”。** 按经两轮独立审查的 [计划 r3](docs/superpowers/plans/2026-11-01-evidence-in-turn-recheck.md) 实施：`add_items` 只做结构检查；提交回放对已随最终回答复核的证据只做逐条检查与调用绑定，只为不在 `context_evidence` 的记录（群审批续跑时等待期间的新历史）补做依赖复核；`project_many` 拆出 `checked_calls`／`check_bindings`，顺序不变。一轮 6 对象宽查询探测由 24 降为 12；失败分类变化见计划 §4，与 §6 的出入见计划 §9。验证：CI integration 等价命令（除 `tests/deployment`）5463 passed／235 skipped，随后只改 3 条探测计数断言，所在两个文件 44 passed；`ruff check .`、`mypy src`、`git diff --check` 通过。未测：真实 StarRocks 耗时、公司环境。
+
+**第 3a 步已做，代码独立审查（含补测复审）结论“可以合并候选”。** 按 [计划 r2](docs/superpowers/plans/2026-11-02-remove-legacy-answer-formats.md)：只解析 v4 回答，Legacy／v2／v3 记录与记录过期同样不可用（Web 404、飞书不发送、无模型调用与数据库复核），删除 `LegacyAnswer`／`legacy_blocks`／“其余结果”补全与旧 `content` 拼装；`Delivery` 字段与渲染层不动。生产三项保留期均为 30 天（用户回传），用户接受保留期内旧回答不再可读。部署升级演练改为验证旧回答不可用但原样保留（状态与原文摘要不变）、会话映射延续（不等于完整 SDK 历史回放）。`/批准` 恢复不读材料回答，旧暂停不可批准依赖 15 分钟有效期，见计划 §1。实施记录与测试出入见计划 §5。
+
+**后续。** 3b 渲染层清理：草稿在 `claude/remove-legacy-render-wip@d1820d3`（未审查；约 150 个按旧布局断言的测试待逐条改写或删除），连同 `delivery_version=0` 不再可达的发送分支一起评估。
 
 <a id="records-business-view"></a>
 

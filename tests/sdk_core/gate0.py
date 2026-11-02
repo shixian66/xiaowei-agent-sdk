@@ -598,7 +598,7 @@ async def run_samples(gate: Gate0, samples: Sequence[Sample] = SAMPLES) -> list[
             answer = await gate.app.run_turn(ctx, sample.message)
             delivery = await gate.evidence.validate_answer(answer, ctx)
             cited = delivery.evidence_ids
-            model_cited = answer.blocks_answer.evidence_ids
+            model_cited = answer.answer.evidence_ids
             # 等待用户或没有任何事实时按澄清计；补全的事实不能把澄清记成交付。
             outcome = "delivered" if cited and not delivery.awaiting_user else "clarification"
         except TurnError as exc:

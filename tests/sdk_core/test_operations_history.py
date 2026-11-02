@@ -223,7 +223,8 @@ async def test_single_full_read_counts_all_old_analysis_dependencies_and_commits
         )
         result = await ask(env, rt, "满额历史读取", "full-read")
         assert result.state == "completed", result.failure_code
-        assert len(env.db.probes()) == 10
+        # 2个对象各经原来源验证、本轮记录与提交校验；暂存不复核，提交回放不重复已校验证据。
+        assert len(env.db.probes()) == 2 * 3
         assert env.db.business() == []
 
 
@@ -241,7 +242,8 @@ async def test_single_search_deduplicates_shared_object_across_original_turns(en
         env.scripts.add("单次查三条", search_step(env), finish)
         result = await ask(env, rt, "单次查三条", "shared-object")
         assert result.state == "completed", result.failure_code
-        assert len(env.db.probes()) == 5
+        # 同一对象在原来源验证、本轮记录与提交校验中各探测一次，三条记录不重复计。
+        assert len(env.db.probes()) == 3
         assert env.db.business() == []
 
 

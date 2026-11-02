@@ -35,7 +35,6 @@ from xiaowei.evidence import (
 from xiaowei.feishu_delivery import _data_parts, _preview
 from xiaowei.feishu_render import (
     MODEL_TEXT_LABEL,
-    REMAINING_LABEL,
     MessageCapacityError,
     build_feishu_message,
 )
@@ -44,14 +43,12 @@ from xiaowei.models import (
     MAX_ANSWER_BLOCKS,
     MAX_ANSWER_TEXT_BYTES,
     AgentAnswer,
-    AnswerInference,
     Delivery,
     DeliveryFactRef,
     DeliveryText,
     EvidenceRecord,
     FactBlock,
     Identity,
-    LegacyAnswer,
     TextBlock,
     TurnAnswer,
 )
@@ -92,30 +89,7 @@ async def test_diagnose_shared_results_are_not_completed(env: Env) -> None:
     assert delivery.facts == () and delivery.texts == ("汇总平稳",)
 
 
-async def test_completion_uses_the_original_turn_not_a_later_request(env: Env) -> None:
-    message = env.scripts.add("只查不说", tool_call("run_query", region="east"), cite())
-    ctx = env.ctx(turn="original")
-    result = await env.app.run_turn(ctx, message)
-    store = env.governed.evidence
-    result = result.model_copy(
-        update={
-            "answer_version": 3,
-            "answer": AgentAnswer(
-                blocks=(TextBlock(type="text", text="还要吗？"),),
-                report_format=None,
-                awaiting_user=False,
-            ),
-        }
-    )
-    original = await store.validate_answer(result, ctx, history=True)
-    assert [f.section for f in original.facts] == ["remaining"]
-    # 用另一请求的 turn ID（如审批请求的新编号）计算会丢掉原轮结果：交付必须传原执行轮次。
-    other = await store.validate_answer(result, env.ctx(turn="approval-request"), history=True)
-    assert other.facts == () and other.texts == ("还要吗？",)
-
-
-# v3 空 blocks 的保存记录兼容与 v4 空回答的单次改写见 test_delivery_v4.py；
-# 不再用当前 Runner 生成旧版允许的漏答来测试补全。
+# v4 空回答的单次改写见 test_delivery_v4.py。
 
 
 # ---- 授权：显式引用、补全结果与纯文字回答走同一条复核 -----------------------------------------
@@ -127,7 +101,7 @@ async def test_text_only_answer_still_rechecks_every_visible_evidence(env: Env) 
     message = env.scripts.add("复述一下", lambda call: answer([], MODEL_SECRET))
     ctx = env.ctx(turn="retell")
     result = await env.app.run_turn(ctx, message)
-    assert result.blocks_answer.evidence_ids == () and result.context_evidence
+    assert result.answer.evidence_ids == () and result.context_evidence
     env.grants.revoke_all()
     with pytest.raises(AnswerRejectedError) as rejected:
         await env.governed.evidence.validate_answer(result, ctx, history=True)
@@ -256,17 +230,20 @@ async def test_over_budget_answer_is_repaired_once_without_tools(env: Env) -> No
         repaired,
     )
     result = await env.app.run_turn(env.ctx(turn="long"), message)
-    assert result.blocks_answer.text == "已压缩"
+    assert result.answer.text == "已压缩"
     assert env.tool_ids() == [QUERY_TOOL] and len(env.scripts.calls[message]) == 3
 
 
-# ---- 新旧版本：缺版本只进旧格式；新格式失败不回退 ----------------------------------------------
+# ---- 保存版本：只解析当前 v4；更早的格式按不可用处理 ---------------------------------------
 
-LEGACY = LegacyAnswer(
-    evidence_ids=("ev_1",),
-    inferences=[AnswerInference(text="东区平稳", evidence_ids=("ev_1",))],
-    clarification=None,
-)
+LEGACY = {
+    "evidence_ids": ["ev_1"],
+    "fact_views": [],
+    "inferences": [{"text": "东区平稳", "evidence_ids": ["ev_1"]}],
+    "clarification": None,
+    "advice": None,
+    "report_format": None,
+}
 CURRENT = AgentAnswer(
     blocks=(TextBlock(type="text", text="你好"),), report_format=None, awaiting_user=False
 )
@@ -276,64 +253,28 @@ def _turn_json(answer: object, **extra: object) -> dict[str, Any]:
     return {"answer": answer, "context_evidence": ["ev_1"], **extra}
 
 
-@pytest.mark.parametrize(
-    ("raw", "kind"),
-    [
-        (json.dumps(_turn_json(LEGACY.model_dump(mode="json"))), LegacyAnswer),
-        (TurnAnswer(answer=CURRENT, context_evidence=("ev_1",)).model_dump_json(), AgentAnswer),
-        (LEGACY.model_dump_json(), LegacyAnswer),  # 最早只存回答：交付方因无上下文证据而拒绝
-    ],
-    ids=["legacy-without-version", "current", "earliest-bare-legacy"],
-)
-def test_saved_answer_versions_parse_strictly(raw: str, kind: type) -> None:
-    saved = _saved_answer(raw)
-    answer = saved.answer if isinstance(saved, TurnAnswer) else saved
-    assert type(answer) is kind
+def test_saved_current_answer_parses() -> None:
+    raw = TurnAnswer(answer=CURRENT, context_evidence=("ev_1",)).model_dump_json()
+    assert json.loads(raw)["answer_version"] == 4
+    assert _saved_answer(raw).answer == CURRENT
 
 
 @pytest.mark.parametrize(
     "raw",
     [
-        json.dumps(_turn_json(LEGACY.model_dump(mode="json"), answer_version=2)),  # 版本与内容不符
-        json.dumps(_turn_json(CURRENT.model_dump(mode="json"))),  # 新格式缺版本
-        json.dumps(_turn_json(CURRENT.model_dump(mode="json"), answer_version=5)),  # 未知版本
-        json.dumps(
-            _turn_json(
-                {"blocks": [{"type": "text", "text": "x"}], "report_format": None},
-                answer_version=2,
-            )
-        ),  # 新版本缺必需字段，不回退旧格式
+        json.dumps(_turn_json(LEGACY)),  # S3 之前的信封
+        json.dumps(LEGACY),  # 最早只存回答
+        json.dumps(_turn_json(LEGACY, answer_version=2)),
+        json.dumps(_turn_json(CURRENT.model_dump(mode="json"), answer_version=2)),
+        json.dumps(_turn_json(CURRENT.model_dump(mode="json"), answer_version=3)),
+        json.dumps(_turn_json(CURRENT.model_dump(mode="json"), answer_version=5)),
         '{"answer": ',  # 损坏
     ],
-    ids=["v2-legacy-body", "current-without-version", "unknown-version", "v2-missing", "broken"],
+    ids=["legacy", "bare-legacy", "v2-legacy-body", "v2", "v3", "unknown-version", "broken"],
 )
-def test_saved_answer_rejects_without_fallback(raw: str) -> None:
+def test_saved_answers_before_v4_are_unavailable(raw: str) -> None:
     with pytest.raises(RequestUnavailableError):
         _saved_answer(raw)
-
-
-async def test_legacy_answer_is_delivered_through_the_same_validation(env: Env) -> None:
-    seed = env.scripts.add("先查", tool_call("run_query", region="east"), cite())
-    seeded = await env.app.run_turn(env.ctx(turn="seed"), seed)
-    (eid,) = seeded.answer.evidence_ids
-    ctx = env.ctx(turn="seed")
-    legacy = TurnAnswer(
-        answer=LegacyAnswer(
-            evidence_ids=(eid,),
-            inferences=[AnswerInference(text="旧分析", evidence_ids=(eid,))],
-            clarification=None,
-        ),
-        context_evidence=(eid,),
-    )
-    assert legacy.answer_version is None
-    delivery = await env.governed.evidence.validate_answer(legacy, ctx, history=True)
-    assert [type(b).__name__ for b in delivery.blocks] == ["DeliveryFactRef", "DeliveryText"]
-    question = TurnAnswer(
-        answer=LegacyAnswer(evidence_ids=(), inferences=[], clarification="哪个地区？"),
-        context_evidence=(eid,),
-    )
-    asked = await env.governed.evidence.validate_answer(question, ctx, history=True)
-    assert asked.awaiting_user and asked.texts == ("哪个地区？",) and asked.report_format is None
 
 
 # ---- 文件请求、等待用户与收尾说明 --------------------------------------------------------------
@@ -457,7 +398,6 @@ def test_remaining_results_follow_the_body_with_a_collapsed_basis_entry() -> Non
         facts=(first, second),
     )
     texts = _texts(build_feishu_message(delivery, 3500, "oc", platform_limits=True))
-    assert REMAINING_LABEL not in texts
     assert texts.index("看第一项") < next(i for i, value in enumerate(texts) if "查看依据" in value)
     assert delivery.result_label("ev_b") == "结果 2"
 

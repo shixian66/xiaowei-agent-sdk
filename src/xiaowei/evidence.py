@@ -48,7 +48,7 @@ from sqlalchemy import text
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncEngine
 
-from xiaowei.feishu_render import business_text, display_text, is_task_fact
+from xiaowei.feishu_render import business_text, is_task_fact
 from xiaowei.governance import (
     Authorizer,
     ToolCatalog,
@@ -137,10 +137,6 @@ _UNAVAILABLE = "证据不存在、已过期或当前无权读取"
 _UNVERIFIABLE = "暂时无法确认证据所依赖的数据当前仍可读，本次未交付"
 # 依赖的保存格式；格式改变时旧格式的记录不可读。
 _DEPENDENCY_FORMAT = 1
-_ACTION_HEADER = "动作（系统根据记录生成）"
-_FACTS_HEADER = "工具结果（系统根据证据生成）"
-_TEXT_HEADER = "模型说明（未经系统核实）"
-_REMAINING_HEADER = "其余结果（系统补全本轮获准结果）"
 UNSUPPORTED_FILE_NOTICE = "当前渠道不支持文件，结果以消息展示。"
 LIMIT_NOTICE = "本轮步骤已用完，回答基于已取得的结果，可能不完整。"
 _MONITORING_REASONS = {
@@ -460,14 +456,30 @@ class EvidenceStore:
     ) -> list[str]:
         """一批读取：逐条按 ``project`` 的规则核对，依赖按目标合并后只复核一次。"""
         records = await self._readable(ctx, audience, [e for e, _ in references], history=False)
-        for record, (_, call) in zip(records, references, strict=True):
+        self.check_bindings(records, [call for _, call in references])
+        return [record.projections[audience] for record in records]
+
+    async def checked_calls(
+        self, evidence_ids: Sequence[str], ctx: RunContext, audience: Audience
+    ) -> list[EvidenceRecord]:
+        """Session 提交回放的逐条检查：未验证对象依赖与调用绑定，不可直接交付。
+
+        依赖已在同一提交的最终回答校验中复核的记录，调用方只为其余记录补做
+        ``validate_records``，再 ``check_bindings``；顺序与 ``project_many`` 相同。
+        """
+        return [await self._checked(e, ctx, audience, history=False) for e in evidence_ids]
+
+    def check_bindings(
+        self, records: Sequence[EvidenceRecord], calls: Sequence[ToolCall | None]
+    ) -> None:
+        """给出调用时证据须由同一次调用生成：调用标识、SDK 函数名与有效执行参数一致。"""
+        for record, call in zip(records, calls, strict=True):
             if call is not None and (
                 record.call_id != call.call_id
                 or record.tool_name != call.tool_name
                 or record.arguments_digest != self._effective_digest(record, call.arguments)
             ):
                 raise EvidenceUnavailableError
-        return [record.projections[audience] for record in records]
 
     async def inspect(self, evidence_id: str, ctx: RunContext) -> EvidenceRecord:
         """历史候选的归属/策略/当前工具权限检查；尚未验证对象依赖，不可直接交付。"""
@@ -515,27 +527,21 @@ class EvidenceStore:
         history: bool = False,
         recipient_tools: frozenset[str] | None = None,
         recipient_targets: frozenset[str] | None = None,
-        include_remaining_results: bool | None = None,
         source_records: Sequence[tuple[EvidenceRecord, RunContext]] = (),
     ) -> Delivery:
         """最终回答出口：核对引用关系与当前可读性，再为接收渠道生成内容。
 
         回答只能引用本轮模型可见的证据（``turn.context_evidence``）；这些证据不论是否被引用、
         回答是否只有文字，每次都按当前权限一批复核。复核通过的记录中：动作类证据（显式引用的，
-        与原执行轮次产生的）置顶；正文事实按模型块顺序；原执行轮次中需交付类别、未被引用的结果
-        仅在旧 v2/v3 中按产生顺序补为“其余结果”，v4 默认只选择所需事实。原执行轮次即
+        与原执行轮次产生的）置顶；正文事实按模型块顺序，未被引用的结果不补交。原执行轮次即
         ``ctx.identity.turn_id``（审批恢复与历史读取都传原轮）。归一化与补全后仍没有任何可交付内容时拒绝。
         ``history`` 为真表示历史读取或显式重发；所有证据均复核当前权限与依赖。
-        默认 None 按可信保存版本选择补全；通知显式设为假，只输出选择的事实；
-        全部模型可见证据仍须通过数据权限和接收权限复核。
         ``source_records`` 只接受可信调用方已inspect的附加原始资料及各自语境，与回答依赖同批复核，
         不作为模型引用或交付事实；用于后台结果的冻结定义来源。
         确定不可读抛出 ``AnswerRejectedError``；暂时无法复核时 ``EvidenceUnverifiableError`` 原样
         传播。
         """
-        if include_remaining_results is None:
-            include_remaining_results = turn.answer_version in (2, 3)
-        answer = normalize_answer(turn.blocks_answer)
+        answer = normalize_answer(turn.answer)
         context = tuple(dict.fromkeys(turn.context_evidence))
         channel = ctx.identity.channel
         monitoring_notice = await self._monitoring_failure_notice(turn, ctx)
@@ -567,55 +573,29 @@ class EvidenceStore:
         def current(evidence_id: str) -> bool:
             return by_id[evidence_id].identity.turn_id == turn_id
 
-        # 旧格式回答保存时已引用全部须交付的结果与动作（旧规则强制），按原样展示、不补全；
         # 暂停材料只展示本次请求执行的动作，同轮未请求的提案不进入审批材料。
-        complete = isinstance(turn.answer, AgentAnswer)
         actions = [e for e in cited if self.category(by_id[e]) == "action"] + [
             e
             for e in unshown
-            if complete
-            and not turn.material_only
-            and current(e)
-            and self.category(by_id[e]) == "action"
+            if not turn.material_only and current(e) and self.category(by_id[e]) == "action"
         ]
         # 执行结果（approval）在前，与恢复轮次的既有顺序一致；其余保持引用/产生顺序。
         actions.sort(key=lambda e: self._effect(by_id[e]) != "approval")
         action_evidence = set(actions)
-        if turn.answer_version == 4:
-            # 原证据已全部复核；这里只归并展示，不删除提案或依赖。
-            action_ids = {
-                e: json.loads(by_id[e].projections[channel])["data"].get("action_id")
-                for e in actions
-            }
-            executed = {action_ids[e] for e in actions if self._effect(by_id[e]) == "approval"}
-            actions = [
-                e
-                for e in actions
-                if self._effect(by_id[e]) != "propose" or action_ids[e] not in executed
-            ]
-        body = [e for e in cited if e not in action_evidence]
-        remaining = [
+        # 原证据已全部复核；这里只归并展示，不删除提案或依赖。
+        action_ids = {
+            e: json.loads(by_id[e].projections[channel])["data"].get("action_id") for e in actions
+        }
+        executed = {action_ids[e] for e in actions if self._effect(by_id[e]) == "approval"}
+        actions = [
             e
-            for e in unshown
-            if complete
-            and include_remaining_results
-            and current(e)
-            and self.category(by_id[e]) == "result"
+            for e in actions
+            if self._effect(by_id[e]) != "propose" or action_ids[e] not in executed
         ]
+        body = [e for e in cited if e not in action_evidence]
         facts = [
-            *(
-                self._delivery_fact(
-                    by_id[e], "action", views.get(e), ctx, modern=turn.answer_version == 4
-                )
-                for e in actions
-            ),
-            *(
-                self._delivery_fact(
-                    by_id[e], "body", views.get(e), ctx, modern=turn.answer_version == 4
-                )
-                for e in body
-            ),
-            *(self._delivery_fact(by_id[e], "remaining", None, ctx) for e in remaining),
+            *(self._delivery_fact(by_id[e], "action", views.get(e), ctx) for e in actions),
+            *(self._delivery_fact(by_id[e], "body", views.get(e), ctx) for e in body),
         ]
         blocks: list[DeliveryBlock] = [
             DeliveryFactRef(evidence_id=b.evidence_id)
@@ -632,8 +612,7 @@ class EvidenceStore:
         if report_format is not None and channel != "feishu":
             report_format, report_notice = None, UNSUPPORTED_FILE_NOTICE
         if (
-            turn.answer_version == 4
-            and turn.material_only
+            turn.material_only
             and turn.run_turn_id is not None
             and any(current(e) and self.category(by_id[e]) != "action" for e in unshown)
         ):
@@ -641,30 +620,9 @@ class EvidenceStore:
             report_notice = (
                 "本次查询结果尚未交付；获准并恢复后随最终回答交付，仍受当前权限和有效期限制。"
             )
-        shown_ids = {f.evidence_id for f in facts}
-        limit_notice = LIMIT_NOTICE if turn.limit_reached else None
-        lines: list[str] = []
-        if turn.answer_version != 4:
-            # 旧保存语义的 content；v4 不生成再丢弃一份完整 JSON/内部包装。
-            shown = {e: _shown(by_id[e], channel, self._fact_note(by_id[e])) for e in shown_ids}
-            for notice in (inspection_notice, report_notice, limit_notice, monitoring_notice):
-                if notice:
-                    lines.append(notice)
-            if actions:
-                lines.append(_ACTION_HEADER)
-                lines.extend(line for e in actions for line in _fact_lines(shown[e]))
-            for block in blocks:
-                if isinstance(block, DeliveryText):
-                    lines.extend((_TEXT_HEADER, _one_line(block.text)))
-                else:
-                    lines.append(_FACTS_HEADER)
-                    lines.extend(_fact_lines(shown[block.evidence_id]))
-            if remaining:
-                lines.append(_REMAINING_HEADER)
-                lines.extend(line for e in remaining for line in _fact_lines(shown[e]))
         delivery = Delivery(
             answer_version=turn.answer_version,
-            content="\n".join(lines),
+            content="",
             evidence_ids=tuple(f.evidence_id for f in facts),
             channel=channel,
             facts=tuple(facts),
@@ -672,20 +630,16 @@ class EvidenceStore:
             monitoring_notice=monitoring_notice,
             inspection_notice=inspection_notice,
             report_notice=report_notice,
-            limit_notice=limit_notice,
+            limit_notice=LIMIT_NOTICE if turn.limit_reached else None,
             requires_complete=any(f.requires_complete for f in facts),
             awaiting_user=answer.awaiting_user,
             report_format=report_format,
-            report_native=turn.answer_version in (3, 4) and report_format is not None,
-            basis=_basis([r for r in records if r.evidence_id not in shown_ids], ctx),
+            report_native=report_format is not None,
             content_expires_at=min(
                 (r.expires_at for r in [*records, *(r for r, _ in source_records)]), default=None
             ),
         )
-
-        if turn.answer_version == 4:
-            delivery = delivery.model_copy(update={"content": business_text(delivery)})
-        return delivery
+        return delivery.model_copy(update={"content": business_text(delivery)})
 
     def _effect(self, record: EvidenceRecord) -> str:
         contract = self._catalog.contract(record.tool_id, record.target_id)
@@ -697,8 +651,6 @@ class EvidenceStore:
         section: FactSection,
         view: Literal["full", "brief"] | None,
         ctx: RunContext,
-        *,
-        modern: bool = False,
     ) -> DeliveryFact:
         channel = ctx.identity.channel
         item = _shown(record, channel, self._fact_note(record))
@@ -720,10 +672,8 @@ class EvidenceStore:
                 ),
             }
         )
-        if (
-            modern
-            and record.identity.turn_id != ctx.identity.turn_id
-            and (is_task_fact(fact) or record.policy_id == ACTION_STATUS_POLICY)
+        if record.identity.turn_id != ctx.identity.turn_id and (
+            is_task_fact(fact) or record.policy_id == ACTION_STATUS_POLICY
         ):
             fact = fact.model_copy(update={"note_summary": "此前查询时"})
         elif record.identity.turn_id != ctx.identity.turn_id and section != "action":
@@ -734,17 +684,14 @@ class EvidenceStore:
                     )
                 }
             )
-        # 必要执行状态不能因 brief 隐藏；旧版本和已绑定内容保持原语义。
-        if modern and (
-            is_task_fact(fact) or record.tool_id == "notifications/send_webhook_message"
-        ):
+        # 必要执行状态不能因 brief 隐藏。
+        if is_task_fact(fact) or record.tool_id == "notifications/send_webhook_message":
             return fact
-        # 仅当前结果和 v4 Prometheus 非表格补充原文可只收起、不生成计数摘要。
+        # 仅当前结果和 Prometheus 非表格补充原文可只收起、不生成计数摘要。
         # 结构化历史没有可信计数时仍回 full，不能把业务行误收进技术区。
         if view == "brief" and not complete and section != "action":
             if record.identity.turn_id == ctx.identity.turn_id or (
-                modern
-                and not fact.columns
+                not fact.columns
                 and contract is not None
                 and contract.policy_id in PROMETHEUS_QUERY_POLICIES
             ):
@@ -1247,19 +1194,6 @@ class _Shown:
     note: str | None
 
 
-def _basis(records: Sequence[EvidenceRecord], ctx: RunContext) -> tuple[tuple[str, str], ...]:
-    if ctx.identity.channel != "feishu":
-        return ()
-    return tuple(
-        dict.fromkeys(
-            (r.tool_id, f"{d.database}.{d.name}" if d else r.target_id)
-            for r in records
-            if r.identity.turn_id == ctx.identity.turn_id
-            for d in (r.dependencies or (None,))
-        )
-    )
-
-
 def _shown(record: EvidenceRecord, channel: Audience, note: str | None) -> _Shown:
     envelope = json.loads(record.projections[channel])
     data = None if envelope["empty"] else envelope["data"]
@@ -1274,23 +1208,6 @@ def _shown(record: EvidenceRecord, channel: Audience, note: str | None) -> _Show
             for item in data["records"]
         ]
     return _Shown(record=record, data=data, truncated=bool(envelope["truncated"]), note=note)
-
-
-def _fact_lines(shown: _Shown) -> tuple[str, ...]:
-    """保留 Web content 的既有文本契约；结构化渠道展示不从这些文字恢复原值。"""
-    record, data = shown.record, shown.data
-    meta = (
-        f"[{record.evidence_id}] 来源 {record.tool_id} · 目标 {record.target_id}"
-        f" · 采集于 {record.captured_at.isoformat()}"
-    )
-    if shown.truncated:
-        meta += " · 结果已截断"
-    head = [meta]
-    if shown.note is not None:
-        head.append(f"说明：{_one_line(shown.note)}")
-    if data is None:
-        return (*head, "（无结果）")
-    return (*head, _one_line(json.dumps(data, ensure_ascii=False)))
 
 
 def _fact(shown: _Shown, channel: Channel) -> DeliveryFact:
@@ -1363,8 +1280,3 @@ def _table(
     else:
         columns = tuple(dict.fromkeys(name for row in rows for name in row))
     return columns, tuple(rows)
-
-
-def _one_line(content: str) -> str:
-    """旧 content 契约也复用纯文字控制符编码，不改变已有保存语义。"""
-    return display_text(content, multiline=False)

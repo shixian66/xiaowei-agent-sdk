@@ -393,7 +393,7 @@ class OperationHistory:
             for key in ("limit_reached", "monitoring_failures", "inspection_failures"):
                 if getattr(saved, key):
                     gaps[key] = True
-            if saved.blocks_answer.awaiting_user:
+            if saved.answer.awaiting_user:
                 gaps["awaiting_user"] = True
         facts = []
         for record in records:
@@ -419,7 +419,7 @@ class OperationHistory:
         )
         if turn is not None:
             item["analysis"] = "\n".join(
-                b.text for b in turn.blocks_answer.blocks if isinstance(b, TextBlock)
+                b.text for b in turn.answer.blocks if isinstance(b, TextBlock)
             )
             item["analysis_kind"] = "历史模型分析，未经因果验证"
         expires = [r.expires_at for r in scope_records]

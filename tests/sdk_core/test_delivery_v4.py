@@ -1,4 +1,4 @@
-"""v4 仅改变新交付语义；旧保存回答仍按保存版本验证。真 Runner/隔离 PG。"""
+"""v4 交付：只选择所需事实，未展示的可见证据仍复核。真 Runner/隔离 PG。"""
 
 import pytest
 from tests.sdk_core.synthetic_tools import QUERY_TOOL, TARGET, TOTAL_TOOL
@@ -6,36 +6,9 @@ from tests.sdk_core.test_app import Env, answer, cite, evidence_in, tool_call
 from tests.sdk_core.test_app import env as env
 
 from xiaowei.evidence import AnswerRejectedError
-from xiaowei.models import AgentAnswer, FactBlock, TextBlock, TurnAnswer
+from xiaowei.models import TextBlock
 
 pytestmark = pytest.mark.loopback
-
-
-@pytest.mark.parametrize("partial", [False, True], ids=["v3-empty", "v3-partial"])
-async def test_saved_v3_keeps_remaining_results(env: Env, partial: bool) -> None:
-    message = env.scripts.add(
-        "旧轮次两个结果",
-        tool_call("run_query", region="east"),
-        tool_call("run_query", region="west"),
-        cite(),
-    )
-    ctx = env.ctx(turn="old")
-    turn = await env.app.run_turn(ctx, message)
-    ids = turn.context_evidence
-    saved = TurnAnswer(
-        answer=AgentAnswer(
-            blocks=(FactBlock(type="fact", evidence_id=ids[0], view="full"),) if partial else (),
-            report_format=None,
-            awaiting_user=False,
-        ),
-        answer_version=3,
-        context_evidence=ids,
-    )
-    # 模拟请求读取的 JSON 边界，不能按当前版本重建。
-    saved = TurnAnswer.model_validate_json(saved.model_dump_json())
-    output = await env.governed.evidence.validate_answer(saved, ctx, history=True)
-    assert output.evidence_ids == ids
-    assert len(output.section("remaining")) == (1 if partial else 2)
 
 
 async def test_new_v4_selects_only_cited_but_rechecks_unshown(env: Env) -> None:
@@ -50,8 +23,6 @@ async def test_new_v4_selects_only_cited_but_rechecks_unshown(env: Env) -> None:
     assert turn.answer_version == 4
     output = await env.governed.evidence.validate_answer(turn, ctx)
     assert output.evidence_ids == turn.context_evidence[:1]
-    assert not output.section("remaining")
-    assert output.answer_version == 4
     env.grants.allowed.remove(("alice", TARGET, QUERY_TOOL))
     assert ("alice", TARGET, TOTAL_TOOL) in env.grants.allowed
     with pytest.raises(AnswerRejectedError):
@@ -81,7 +52,7 @@ async def test_new_query_without_fact_is_rewritten_once_without_requery(
 async def test_no_query_explanation_stays_text_only(env: Env) -> None:
     message = env.scripts.add("解释，不查询", lambda c: answer([], "这是未执行的建议"))
     turn = await env.app.run_turn(env.ctx(), message)
-    assert turn.blocks_answer.blocks == (TextBlock(type="text", text="这是未执行的建议"),)
+    assert turn.answer.blocks == (TextBlock(type="text", text="这是未执行的建议"),)
     assert not env.adapter.calls
 
 

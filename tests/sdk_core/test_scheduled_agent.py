@@ -1198,7 +1198,7 @@ async def test_background_can_correct_query_and_delivers_partial_when_clarificat
         saved = TurnAnswer.model_validate_json(
             await env.scalar("SELECT result_snapshot FROM xiaowei_scheduled_run")
         )
-        assert saved.blocks_answer.awaiting_user is True
+        assert saved.answer.awaiting_user is True
 
 
 async def test_poll_loop_admits_later_due_job_while_prior_run_is_waiting(env, monkeypatch):

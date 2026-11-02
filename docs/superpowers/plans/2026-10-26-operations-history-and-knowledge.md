@@ -264,7 +264,7 @@ H2 对应实现验收：
 
 文档阶段使用既有锁定调查环境；H1在独立工作树按pyproject/uv.lock安装自己的.venv，使用真实SDK与可控模型，PG沿[现有harness](../../../tests/sdk_core/postgres_harness.py)的回环55432、实例marker及测试自有库边界。不能借旧项目环境或临时调查探针宣称H1通过。H2沿用同一锁定环境和隔离PG；真实模型、公司数据与部署仍须另获授权。
 
-文档修订阶段检查现有[命令一致性](../../../tests/security/test_docs_command_consistency.py)、相对链接及锚点、git diff --check与未跟踪计划空白。H1按§8先失败测试再实现，以真实SDK/隔离PG/可控模型验证；候选代码SHA由用户独立审查，不沿用文档复审结论。
+文档修订阶段检查当时的命令一致性测试（已删除，历史版本见 `f6e824c:tests/security/test_docs_command_consistency.py`）、相对链接及锚点、git diff --check与未跟踪计划空白。H1按§8先失败测试再实现，以真实SDK/隔离PG/可控模型验证；候选代码SHA由用户独立审查，不沿用文档复审结论。
 
 H1无schema变化；恢复时可停用新工具并保留数据。旧程序不认识历史工具Evidence时会拒绝依赖它的会话/结果，沿既有提示新建；不恢复旧备份覆盖账本。本轮只说明恢复方法，不操作配置或执行回退。
 

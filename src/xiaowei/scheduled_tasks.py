@@ -439,7 +439,6 @@ class TaskDefinitions:
                 if recipient_targets is not None
                 else bot.receive_targets | {"notifications"}
             ),
-            include_remaining_results=False,
         )
         return ctx
 
@@ -606,7 +605,6 @@ class ScheduledTasks:
                 ctx,
                 recipient_tools=bot.receive_tools | {NOTIFY},
                 recipient_targets=bot.receive_targets | {"notifications"},
-                include_remaining_results=False,
             )
         except RecipientRejectedError:
             raise ProposalRejectedError(
@@ -768,7 +766,6 @@ class ScheduledTasks:
                 ctx,
                 recipient_tools=bot.receive_tools | {NOTIFY},
                 recipient_targets=bot.receive_targets | {"notifications"},
-                include_remaining_results=False,
             )
         except RecipientRejectedError:
             raise ProposalRejectedError(

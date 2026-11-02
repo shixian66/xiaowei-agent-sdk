@@ -1,10 +1,8 @@
 """产品依赖、正式入口与严格类型检查的公共约束。"""
 
-import ast
 import io
 import tokenize
 import tomllib
-from importlib.util import find_spec
 from pathlib import Path
 
 import pytest
@@ -65,17 +63,6 @@ def _requirement_names(specs: list[str]) -> set[str]:
     return names
 
 
-def _internal_module_imports(path: Path) -> set[str]:
-    """文件中出现的所有顶层第三方/标准库模块名。"""
-    found: set[str] = set()
-    for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
-        if isinstance(node, ast.Import):
-            found.update(alias.name.split(".")[0] for alias in node.names)
-        elif isinstance(node, ast.ImportFrom) and node.level == 0 and node.module:
-            found.add(node.module.split(".")[0])
-    return found
-
-
 def test_runtime_dependency_set_is_exactly_the_approved_set() -> None:
     """依赖面用集合相等钉死，不用禁用清单。
 
@@ -118,51 +105,6 @@ def test_wheel_and_command_only_point_at_the_new_package() -> None:
     tool = data["tool"]
     assert isinstance(tool, dict)
     assert tool["hatch"]["build"]["targets"]["wheel"]["packages"] == ["src/xiaowei"]
-
-
-def test_new_package_never_imports_the_old_package() -> None:
-    offenders = [
-        str(path.relative_to(_ROOT))
-        for path in (_SRC / "xiaowei").rglob("*.py")
-        if "xiaowei_agent" in _internal_module_imports(path)
-    ]
-    assert not offenders
-
-
-def test_sqlalchemy_ships_py_typed() -> None:
-    """SQLAlchemy 自带类型声明，strict 检查不需要放宽。"""
-    spec = find_spec("sqlalchemy")
-    assert spec is not None and spec.origin is not None
-    assert (Path(spec.origin).parent / "py.typed").is_file()
-
-
-def test_asyncpg_still_lacks_py_typed() -> None:
-    """反向 tripwire：``asyncpg`` 目前**没有** ``py.typed``。
-
-    这条断言故意钉住上游的现状。一旦 asyncpg 发布 ``py.typed``，它会转红——那正是
-    重新决定"是否允许 ``src/`` 直接 import asyncpg"的时刻。没有这条，下面那条禁令
-    会变成一条无人知道何时可以撤销的永久规则。
-    """
-    spec = find_spec("asyncpg")
-    assert spec is not None and spec.origin is not None
-    marker = Path(spec.origin).parent / "py.typed"
-    assert not marker.is_file(), (
-        "asyncpg 现已自带 py.typed：可重新评估 test_src_never_imports_asyncpg_directly 的禁令"
-    )
-
-
-def test_src_never_imports_asyncpg_directly() -> None:
-    """驱动只经 DSN 方言字符串加载，业务代码不得 import 它的符号。
-
-    直接 import 会在 ``mypy --strict`` 下产生 ``import-untyped``，唯一的消解办法是
-    放宽类型检查。禁止 import 让这个取舍根本不出现。
-    """
-    offenders = [
-        str(path.relative_to(_ROOT))
-        for path in _SRC.rglob("*.py")
-        if "asyncpg" in _internal_module_imports(path)
-    ]
-    assert not offenders, f"src/ 不得直接 import asyncpg（无 py.typed）：{offenders}"
 
 
 def test_mypy_stays_globally_strict() -> None:

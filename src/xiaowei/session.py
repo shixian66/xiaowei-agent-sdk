@@ -7,7 +7,9 @@ Evidence 读取边界按当前权限、目标范围、策略与过期取回 Sess
 按目标合并复核一次）；任一条历史确定不能安全回放时整段拒绝并提示新建会话，不裁掉半组工具项、
 不以无来源文字替代失效证据。只是暂时无法复核（目标不可达、超时）时抛出
 ``SessionUnverifiableError``：本轮不运行或不提交，会话状态与历史不变，之后的新请求重新复核。证据须由历史
-中同一次调用（调用标识、函数名、参数）生成，暂存与回放都经 Evidence 读取边界核对。
+中同一次调用（调用标识、函数名、参数）生成，回放时经 Evidence 读取边界核对。暂存只做结构
+检查：工具结果刚经 ``record`` 复核后交给模型，暂存项只在内存，任何读出（``get_items``、提交）
+都会重新复核。
 
 应用表 ``xiaowei_session`` 记录会话归属（owner：个人或指定群，与本轮发起人分开）、运行绑定
 （应用传入 Profile 与数据策略的组合指纹，列名沿用 ``profile_fingerprint``）、失效时间、
@@ -481,7 +483,9 @@ class PolicySession:
         turns = await self._open()
         if turns >= self._limits.max_history_turns:
             raise self._limit("history_turn_limit")
-        replay = await self._replay([*await self._committed(), *pending])
+        replay = await self._replay(
+            [*await self._committed(), *pending], verified=frozenset(context_evidence)
+        )
         self._bytes = _size(replay)
         if self._bytes > self._limits.max_history_bytes:
             # 本轮已执行的工具不重跑，也不裁剪历史凑数；封存后提示新建。
@@ -642,16 +646,9 @@ class PolicySession:
             evidence_id = _envelope_evidence_id(output)
             if evidence_id is None:
                 return _output(call_id, NO_EVIDENCE_OUTPUT)
-            call = _tool_call(self._pending_call(call_id))
-            try:
-                if call is None:
-                    raise EvidenceUnavailableError
-                await self._evidence.project(evidence_id, self._ctx, "session", call=call)
-            except EvidenceUnavailableError:
+            if _tool_call(self._pending_call(call_id)) is None:
                 # 模型已看到该结果，后续文字可能引用它；不能只丢掉这一项继续保存。
-                raise SessionItemRejectedError("本轮工具结果无法保存到会话") from None
-            except EvidenceUnverifiableError:
-                raise SessionUnverifiableError from None
+                raise SessionItemRejectedError("本轮工具结果无法保存到会话")
             return _output(call_id, json.dumps({_EVIDENCE_REF: evidence_id}))
         raise SessionItemRejectedError("本轮包含不支持保存的会话内容")
 
@@ -663,11 +660,16 @@ class PolicySession:
         return None
 
     async def _replay(
-        self, stored: list[TResponseInputItem], *, seen: dict[str, None] | None = None
+        self,
+        stored: list[TResponseInputItem],
+        *,
+        seen: dict[str, None] | None = None,
+        verified: frozenset[str] = frozenset(),
     ) -> list[TResponseInputItem]:
         """把保存形式转换为回放形式：证据引用经读取边界（一批）换成当前 Session 投影。
 
         给出 ``seen`` 时，回放成功后把其中的证据标识记入它（交给模型的历史证据）。
+        ``verified`` 是同一提交中已随最终回答复核过依赖的证据，只对其余证据补做依赖复核。
         """
         replay: list[TResponseInputItem] = []
         self._bytes = None  # 本次完整回放尚未成功，不能沿用另一观察阶段的字节计数。
@@ -724,19 +726,31 @@ class PolicySession:
             raise self._unavailable() from None
         except EvidenceUnverifiableError:
             raise SessionUnverifiableError from None
-        for (index, _, _), content in zip(references, await self._project(references), strict=True):
+        contents = await self._project(references, verified)
+        for (index, _, _), content in zip(references, contents, strict=True):
             replay[index] = _output(cast(dict[str, Any], replay[index])["call_id"], content)
         if seen is not None:
             seen.update(dict.fromkeys(evidence_id for _, evidence_id, _ in references))
         return replay
 
-    async def _project(self, references: list[tuple[int, str, ToolCall]]) -> list[str]:
+    async def _project(
+        self, references: list[tuple[int, str, ToolCall]], verified: frozenset[str]
+    ) -> list[str]:
         if not references:
             return []
+        evidence_ids = [evidence_id for _, evidence_id, _ in references]
+        calls = [call for _, _, call in references]
         try:
-            return await self._evidence.project_many(
-                [(evidence_id, call) for _, evidence_id, call in references], self._ctx, "session"
+            if not verified:
+                return await self._evidence.project_many(
+                    list(zip(evidence_ids, calls, strict=True)), self._ctx, "session"
+                )
+            records = await self._evidence.checked_calls(evidence_ids, self._ctx, "session")
+            await self._evidence.validate_records(
+                [(r, self._ctx) for r in records if r.evidence_id not in verified]
             )
+            self._evidence.check_bindings(records, calls)
+            return [record.projections["session"] for record in records]
         except EvidenceUnavailableError:
             raise self._unavailable() from None
         except EvidenceUnverifiableError:

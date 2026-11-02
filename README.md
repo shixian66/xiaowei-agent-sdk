@@ -295,7 +295,7 @@ export SDK_TEST_POSTGRES_URL=postgresql+asyncpg://postgres@127.0.0.1:55432/postg
 相关测试示例（替换为受影响的测试文件，也可用 `文件路径::用例名` 选择单个用例）、lint 和 type：
 
 ```bash
-uv run --locked --extra dev python -m pytest -q tests/security/test_workflow_policy.py tests/security/test_docs_command_consistency.py
+uv run --locked --extra dev python -m pytest -q tests/security/test_workflow_policy.py
 uv run --locked --extra dev ruff check .
 uv run --locked --extra dev mypy src
 ```

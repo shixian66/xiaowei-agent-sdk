@@ -12,11 +12,7 @@ from tests.sdk_core.test_web_browser import item, send, settled
 pytestmark = [pytest.mark.loopback, pytest.mark.browser]
 
 
-@pytest.mark.parametrize("version", [3, 4])
-async def test_real_chrome_brief_and_explicit_full_history(
-    env: Env, chrome_binary: str, monkeypatch: pytest.MonkeyPatch, version: int
-):
-    monkeypatch.setattr("xiaowei.models.ANSWER_VERSION", version)
+async def test_real_chrome_brief_and_explicit_full_history(env: Env, chrome_binary: str):
     assert env.port != 8501
     full = env.scripts.add(
         "Read five sales",
@@ -133,11 +129,7 @@ async def test_html_review_notices_and_action_fields_are_visible(chrome_binary, 
             assert "ACTION_CANARY" not in report.content.decode()
 
 
-@pytest.mark.parametrize("version", [3, 4])
-async def test_web_filtered_candidates_and_historical_warning_are_visible(
-    env, chrome_binary, monkeypatch, version
-):
-    monkeypatch.setattr("xiaowei.models.ANSWER_VERSION", version)
+async def test_web_filtered_candidates_and_historical_warning_are_visible(env, chrome_binary):
     from tests.sdk_core.gate0 import SyntheticStarRocks
     from tests.sdk_core.test_diagnosis import SLOW_SQL, UNAPPROVED_SQL
     from tests.sdk_core.test_runtime import audit_config
@@ -173,10 +165,7 @@ async def test_web_filtered_candidates_and_historical_warning_are_visible(
         visible = await page.evaluate(f"{item(0)}.innerText")
         assert "规则或权限过滤 17 条" in visible and "仅列获准候选" in visible
         assert "结果已截断" not in visible
-        if version == 3:
-            assert "omitted_sqlguard" not in visible
-        else:
-            assert "omitted_sqlguard: 17" in visible
+        assert "omitted_sqlguard: 17" in visible
         assert "local/list_slow_queries" not in visible
         await page.evaluate(f"{item(0)}.querySelector('details').open = true")
         assert "omitted_sqlguard" in await page.evaluate(f"{item(0)}.innerText")

@@ -57,7 +57,6 @@ from xiaowei.models import (
     ApprovedAction,
     Channel,
     Identity,
-    LegacyAnswer,
     MonitoringFailure,
     Owner,
     SecurityInspectionFailure,
@@ -371,10 +370,10 @@ class RequestRecord:
     mode: Mode
     state: RequestState
     delivery: DeliveryState
-    answer: AgentAnswer | LegacyAnswer | None
-    """``TurnAnswer.answer`` 按其可信版本严格解析的结果；新旧格式不互相回退。"""
+    answer: AgentAnswer | None
+    """``TurnAnswer.answer``；只解析当前版本，更早格式的记录不可用。"""
     context_evidence: tuple[str, ...] | None
-    """回答保存时记录的本轮模型可见证据（``TurnAnswer``）；此前格式保存的回答没有，为 ``None``。"""
+    """回答保存时记录的本轮模型可见证据（``TurnAnswer``）；没有回答时为 ``None``。"""
     monitoring_failures: tuple[MonitoringFailure, ...]
     failure_code: FailureCode | None
     created_at: datetime
@@ -387,7 +386,6 @@ class RequestRecord:
     delivery_version: int = 0
     limit_reached: bool = False
     material_only: bool = False
-    answer_version: Literal[2, 3, 4] | None = None
 
 
 @dataclass(frozen=True)
@@ -832,7 +830,6 @@ class ChannelStore:
             record,
             state="completed",
             answer=turn.answer,
-            answer_version=turn.answer_version,
             context_evidence=turn.context_evidence,
             monitoring_failures=turn.monitoring_failures,
             inspection_failures=turn.inspection_failures,
@@ -1511,30 +1508,6 @@ class ChannelStore:
             {"owner": owner_id, "turn": turn_id, "keep": tuple(keep), "now": self._clock()},
         )
 
-    async def proposal_request(self, action: ActionRecord) -> RequestRecord:
-        async with self._engine.connect() as conn:
-            row = (
-                (
-                    await conn.execute(
-                        text(
-                            "SELECT * FROM xiaowei_request WHERE turn_id = :turn "
-                            "AND channel = 'feishu' AND owner_kind = 'group' AND owner_id = :owner "
-                            "AND expires_at > :now"
-                        ),
-                        {
-                            "turn": action.proposal_turn_id,
-                            "owner": action.owner_id,
-                            "now": self._clock(),
-                        },
-                    )
-                )
-                .mappings()
-                .one_or_none()
-            )
-        if row is None:
-            raise RequestUnavailableError
-        return self._record(dict(row))
-
     async def proposal_request_for_turn(
         self, identity: Identity, *, approval: ApprovedAction | None = None
     ) -> RequestRecord:
@@ -2016,9 +1989,8 @@ class ChannelStore:
         return None if row is None else dict(row)
 
     def _record(self, row: Mapping[str, Any]) -> RequestRecord:
-        answer: AgentAnswer | LegacyAnswer | None = None
+        answer: AgentAnswer | None = None
         context, run_turn_id, limit_reached, material_only = None, None, False, False
-        answer_version: Literal[2, 3, 4] | None = None
         monitoring_failures: tuple[MonitoringFailure, ...] = ()
         inspection_failures: tuple[SecurityInspectionFailure, ...] = ()
         if row["answer"] is not None:
@@ -2026,14 +1998,10 @@ class ChannelStore:
             if len(raw.encode()) > self._max_answer_bytes:
                 raise RequestUnavailableError
             saved = _saved_answer(raw)
-            if isinstance(saved, TurnAnswer):
-                answer, context = saved.answer, saved.context_evidence
-                answer_version = saved.answer_version
-                monitoring_failures, run_turn_id = saved.monitoring_failures, saved.run_turn_id
-                inspection_failures = saved.inspection_failures
-                limit_reached, material_only = saved.limit_reached, saved.material_only
-            else:
-                answer = saved
+            answer, context = saved.answer, saved.context_evidence
+            monitoring_failures, run_turn_id = saved.monitoring_failures, saved.run_turn_id
+            inspection_failures = saved.inspection_failures
+            limit_reached, material_only = saved.limit_reached, saved.material_only
         if row["failure_code"] is not None and row["failure_code"] not in _FAILURE_CODES:
             raise RequestUnavailableError
         snapshot = _read_session_state(row["session_state"], row["state"], row["failure_code"])
@@ -2049,7 +2017,6 @@ class ChannelStore:
             state=row["state"],
             delivery=row["delivery"],
             answer=answer,
-            answer_version=answer_version,
             context_evidence=context,
             monitoring_failures=monitoring_failures,
             inspection_failures=inspection_failures,
@@ -2176,16 +2143,11 @@ def _session_state(
     return raw
 
 
-def _saved_answer(raw: str) -> TurnAnswer | LegacyAnswer:
-    """读取保存的回答：``TurnAnswer`` JSON（按可信版本严格解析新旧回答），或最早只保存旧回答
-    的格式（没有上下文证据记录，交付方据此拒绝）。缺版本只进入旧格式；未知版本、损坏或新版本
-    缺字段都按不可用处理，不回退旧格式。"""
+def _saved_answer(raw: str) -> TurnAnswer:
+    """读取保存的回答：只解析当前版本的 ``TurnAnswer`` JSON；v2/v3、S3 之前的格式与损坏的记录
+    都按不可用处理，与记录过期相同。"""
     try:
         return TurnAnswer.model_validate_json(raw)
-    except ValidationError:
-        pass
-    try:
-        return LegacyAnswer.model_validate_json(raw)
     except ValidationError:
         raise RequestUnavailableError from None
 

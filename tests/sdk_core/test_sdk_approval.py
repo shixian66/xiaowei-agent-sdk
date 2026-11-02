@@ -17,15 +17,6 @@ pytestmark = pytest.mark.loopback
 GATE = f"{SOURCE}__request_action_execution"
 
 
-@pytest.fixture
-def legacy_v3_answers(monkeypatch):
-    """构造既有 v3 暂停/交付记录；不改 SDK、治理或存储，覆盖旧 C7 数据分项兼容。
-
-    v4 不在暂停轮发送只读结果；新行为见本模块 test_v4_pause...。
-    """
-    monkeypatch.setattr("xiaowei.models.ANSWER_VERSION", 3)
-
-
 async def paused(actions: Actions, group, *, investigate=False):
     env = actions.env
     steps = [tool_call("order_total", region="east")] if investigate else []
@@ -42,125 +33,6 @@ async def paused(actions: Actions, group, *, investigate=False):
     ) == [("paused", "sent")]
     assert actions.adapter.calls == []
     return await actions.one(), script
-
-
-@pytest.mark.parametrize("failed_part", ["approval", "data"])
-@pytest.mark.parametrize("failure", ["failed", "unknown"])
-@pytest.mark.usefixtures("legacy_v3_answers")
-async def test_legacy_v3_mixed_round_material_receipt_independently_controls_approval(
-    actions, failed_part, failure
-):
-    from sqlalchemy import text
-    from tests.sdk_core.test_feishu import Outbox
-
-    env = actions.env
-    outbox = Outbox([failure, "sent"] if failed_part == "approval" else ["sent", failure])
-    env.scripts.add(
-        attributed(A, "查询并静默"),
-        tool_call("run_query", region="east"),
-        tool_call(f"{SOURCE}__propose_change", value="after"),
-        request_execution,
-        cite("根据实际执行事实反馈"),
-    )
-    async with running(env, outbox=outbox, max_reply_chars=3500) as group:
-        await group.ask("查询并静默", message_id="om_mixed")
-        action_id = await actions.one()
-        assert "/批准" in group.outbox.texts()[0]
-        assert "见附件" not in group.outbox.texts()[0]
-        async with env.engine.connect() as conn:
-            states = (
-                await conn.execute(
-                    text("SELECT kind,send_state FROM xiaowei_delivery_part ORDER BY sequence")
-                )
-            ).all()
-        assert states == [
-            ("approval", failure if failed_part == "approval" else "sent"),
-            ("body", "sent" if failed_part == "approval" else failure),
-        ]
-        assert await env.rows("SELECT delivery FROM xiaowei_request") == [(failure,)]
-        if failed_part == "approval":
-            async with env.engine.begin() as conn:
-                await conn.execute(text("UPDATE xiaowei_request SET delivery='sent'"))
-            # 新记录只认审批材料回执，父请求错误的sent缓存不能放行。
-        await group.ask(f"/批准 {action_id}", sender=B, message_id="om_mixed_approve")
-        assert len(actions.adapter.calls) == (0 if failed_part == "approval" else 1)
-
-
-@pytest.mark.parametrize("actions", [400_000], indirect=True)
-@pytest.mark.usefixtures("legacy_v3_answers")
-async def test_legacy_v3_resend_confirms_unknown_approval_even_when_reference_row_is_indivisible(
-    actions, monkeypatch
-):
-    from functools import partial
-
-    from tests.sdk_core.test_feishu import Outbox
-    from tests.sdk_core.test_group_identity import GROUP
-
-    from xiaowei.feishu import send_delivery
-    from xiaowei.feishu_report import ReportCapacityError, build_report
-
-    env = actions.env
-    env.adapter.rows, env.adapter.memo = 1, "x" * 210_000
-    monkeypatch.setattr("xiaowei.feishu_report.MAX_REPORT_BYTES", 100)
-    uuids, uploads = [], []
-
-    class Receipts(Outbox):
-        async def __call__(self, chat_id, message, *, uuid=None, **kwargs):
-            uuids.append(uuid)
-            return await super().__call__(chat_id, message, uuid=uuid, **kwargs)
-
-    async def upload(report):
-        uploads.append(report.content)
-        raise AssertionError("超容量数据不得上传")
-
-    script = env.scripts.add(
-        attributed(A, "大结果与独立静默"),
-        tool_call("run_query", region="east"),
-        tool_call("run_query", region="west"),
-        tool_call(f"{SOURCE}__propose_change", value="after"),
-        request_execution,
-        cite("根据实际执行事实反馈"),
-    )
-    async with running(env, outbox=Receipts(["unknown"]), max_reply_chars=3500) as group:
-        await group.ask("大结果与独立静默", message_id="om_large_mixed")
-        ref = group_ref("om_large_mixed", A)
-        record = await env.store.get("feishu", A, GROUP.chat_id, ref.request_id, owner=GROUP.owner)
-        before = await env.store.delivery_parts(record)
-        assert [(p.kind, p.send_state) for p in before] == [("approval", "unknown")]
-        view = await env.results.view(ref, first=True)
-        data = tuple(f for f in view.delivery.facts if not f.requires_complete)
-        assert len(data) == 2 and sum(len(f.result_json.encode()) for f in data) > 400_000
-        with pytest.raises(ReportCapacityError):
-            build_report(
-                view.delivery.model_copy(
-                    update={"facts": data, "report_format": "md", "requires_complete": False}
-                )
-            )
-        sent = len(group.outbox.sent)
-        transmit = partial(
-            send_delivery,
-            send=group.outbox,
-            upload_file=upload,
-            chat_id=GROUP.chat_id,
-            reply_to=ref.request_id,
-            max_chars=3500,
-            results=env.results,
-            ref=ref,
-            resend=True,
-        )
-        assert await env.results.send(ref, transmit, resend=True) == "failed"
-        after = await env.store.delivery_parts(record)
-        assert len(group.outbox.sent) == sent + 1
-        assert after[0].send_state == "sent" and after[0].message_id
-        assert uuids[-1] == before[0].uuid == after[0].uuid
-        assert uploads == []
-        assert await env.rows("SELECT delivery FROM xiaowei_request") == [("failed",)]
-        assert env.model_calls(script) == 4 and len(env.adapter.calls) == 2
-        action_id = await actions.one()
-        await group.ask(f"/批准 {action_id}", sender=B, message_id="om_large_approve")
-        await group.ask(f"/批准 {action_id}", sender=B, message_id="om_large_duplicate")
-        assert await env.rows("SELECT state FROM xiaowei_action") == [("succeeded",)]
-        assert len(actions.adapter.calls) == 1 and len(env.adapter.calls) == 2
 
 
 @pytest.mark.parametrize("actions", [400_000], indirect=True)
@@ -537,48 +409,6 @@ async def test_resend_still_checks_saved_approval_capacity_before_sending(action
         assert actions.adapter.calls == []
 
 
-@pytest.mark.usefixtures("legacy_v3_answers")
-async def test_legacy_v3_material_capacity_failure_does_not_block_independent_query_data(actions):
-    from functools import partial
-
-    from tests.sdk_core.test_group_identity import GROUP
-
-    from xiaowei.feishu import send_delivery
-
-    env = actions.env
-    env.scripts.add(
-        attributed(A, "数据与长材料"),
-        tool_call("run_query", region="east"),
-        tool_call(f"{SOURCE}__propose_change", value="x" * 1700),
-        request_execution,
-        cite(),
-    )
-    async with running(env, max_reply_chars=3500) as group:
-        await group.ask("数据与长材料", message_id="om_material_capacity")
-        assert await env.rows("SELECT kind,send_state FROM xiaowei_delivery_part") == [
-            ("body", "sent")
-        ]
-        assert any('"east"' in shown and "100" in shown for shown in group.outbox.texts())
-        assert await env.rows("SELECT delivery FROM xiaowei_request") == [("failed",)]
-        before = len(group.outbox.sent)
-        ref = group_ref("om_material_capacity", A)
-        transmit = partial(
-            send_delivery,
-            send=group.outbox,
-            chat_id=GROUP.chat_id,
-            reply_to="om_material_capacity",
-            max_chars=3500,
-            results=env.results,
-            ref=ref,
-            resend=True,
-        )
-        assert await env.results.send(ref, transmit, resend=True) == "failed"
-        assert len(group.outbox.sent) == before
-        action_id = await actions.one()
-        await group.ask(f"/批准 {action_id}", sender=B, message_id="om_capacity_approve")
-        assert actions.adapter.calls == []
-
-
 async def test_failed_approval_material_has_nonempty_incomplete_hint(actions):
     from tests.sdk_core.test_feishu import Outbox
 
@@ -595,6 +425,35 @@ async def test_failed_approval_material_has_nonempty_incomplete_hint(actions):
         hint = group.outbox.texts()[-1]
         assert "完整结果尚未交付" in hint and "om_material_failure" in hint
         assert "/批准" not in hint
+
+
+@pytest.mark.parametrize("failure", ["failed", "unknown"])
+async def test_approval_needs_material_part_receipt_not_parent_request_state(actions, failure):
+    from sqlalchemy import text
+    from tests.sdk_core.test_feishu import Outbox
+
+    env = actions.env
+    env.scripts.add(
+        attributed(A, "仅审批材料"),
+        tool_call(f"{SOURCE}__propose_change", value="after"),
+        request_execution,
+        cite("根据实际执行事实反馈"),
+    )
+    async with running(env, outbox=Outbox([failure]), max_reply_chars=3500) as group:
+        await group.ask("仅审批材料", message_id="om_material_receipt")
+        action_id = await actions.one()
+        assert await env.rows(
+            "SELECT kind,send_state FROM xiaowei_delivery_part ORDER BY sequence"
+        ) == [("approval", failure)]
+        assert await env.rows("SELECT delivery_version,delivery FROM xiaowei_request") == [
+            (1, failure)
+        ]
+        async with env.engine.begin() as conn:
+            await conn.execute(text("UPDATE xiaowei_request SET delivery='sent'"))
+        # 只认审批材料分项回执，父请求错误的sent缓存不能放行。
+        await group.ask(f"/批准 {action_id}", sender=B, message_id="om_material_approve")
+        assert actions.adapter.calls == []
+        assert await env.rows("SELECT state FROM xiaowei_action") == [("pending",)]
 
 
 @pytest.mark.parametrize("settle_failure", [False, True])
@@ -1257,6 +1116,49 @@ async def test_restart_restores_original_budget_and_cannot_call_extra_tool(actio
     assert len(rejected) == 1 and rejected[0]["code"] == "budget_exhausted"
 
 
+async def test_resume_does_not_reset_native_model_turn_budget():
+    """恢复以保存的 RunState 续跑同一 ``max_turns``；两次暂停经 JSON 往返后不得获得新额度。"""
+    from agents import Agent, Runner, RunState, function_tool
+    from agents.exceptions import MaxTurnsExceeded
+    from agents.testing import ScriptedModel, assistant_message, function_call
+
+    from xiaowei.app import safe_run_config
+
+    effects = []
+
+    @function_tool(needs_approval=True, failure_error_function=None)
+    async def write(value: str) -> str:
+        effects.append(value)
+        return value
+
+    agent = Agent(
+        name="budget",
+        tools=[write],
+        model=ScriptedModel(
+            [
+                [function_call("write", {"value": "first"}, call_id="c1")],
+                [function_call("write", {"value": "second"}, call_id="c2")],
+                [assistant_message("not reached")],
+            ]
+        ),
+    )
+
+    async def approve_after_round_trip(result):
+        saved = result.to_state().to_string(strict_context=True)
+        state = await RunState.from_string(agent, saved, context_override={}, strict_context=True)
+        state.approve(state.get_interruptions()[0], always_approve=False)
+        return await Runner.run(agent, state, max_turns=2, run_config=safe_run_config())
+
+    paused = await Runner.run(
+        agent, "申请两项", context={}, max_turns=2, run_config=safe_run_config()
+    )
+    second = await approve_after_round_trip(paused)
+    assert len(second.interruptions) == 1 and effects == ["first"]
+    with pytest.raises(MaxTurnsExceeded):
+        await approve_after_round_trip(second)
+    assert effects == ["first", "second"]
+
+
 async def test_partial_approvals_save_new_version_and_keep_original_turn(actions):
     from agents.testing import function_call
 
@@ -1739,6 +1641,71 @@ async def test_waiting_releases_group_and_resume_commits_after_other_investigati
     assert any("等待时查订单" in str(json.loads(r[0])) for r in rows) and any(
         "SDK 静默请求" in str(json.loads(r[0])) for r in rows
     )
+
+
+@pytest.mark.parametrize("change", ["valid", "invalid", "unverifiable"])
+async def test_resume_commit_rechecks_history_committed_while_waiting(actions, monkeypatch, change):
+    """续跑的模型可见证据是暂停时的集合；等待期间他人提交的历史不在其中，提交回放须单独补验。
+
+    故障在续跑最后一次读取历史之后、提交补验时注入：审批已领取、动作已执行，本轮不写 Session。
+    """
+    from xiaowei.evidence import (
+        EvidenceStore,
+        EvidenceUnavailableError,
+        EvidenceUnverifiableError,
+    )
+    from xiaowei.session import PolicySession
+
+    env = actions.env
+    async with running(env, max_reply_chars=3500) as group:
+        aid, _original = await paused(actions, group)
+        env.scripts.add(
+            attributed(B, "等待时查订单"), tool_call("order_total", region="east"), cite()
+        )
+        await group.ask("等待时查订单", sender=B, message_id="om_while_paused")
+        before = await env.rows("SELECT count(*) FROM agent_messages")
+
+        committing = False
+        supplemented: list[list[str]] = []
+        commit, validate = PolicySession.commit_validated, EvidenceStore.validate_records
+
+        async def commit_validated(self, *args, **kwargs):
+            nonlocal committing
+            committing = True
+            try:
+                return await commit(self, *args, **kwargs)
+            finally:
+                committing = False
+
+        async def validate_records(self, entries, **kwargs):
+            if committing and any(r.tool_id == TOTAL_TOOL for r, _ in entries):
+                supplemented.append([r.tool_id for r, _ in entries])
+                if change == "invalid":
+                    raise EvidenceUnavailableError
+                if change == "unverifiable":
+                    raise EvidenceUnverifiableError
+            return await validate(self, entries, **kwargs)
+
+        monkeypatch.setattr(PolicySession, "commit_validated", commit_validated)
+        monkeypatch.setattr(EvidenceStore, "validate_records", validate_records)
+        await group.ask(f"/批准 {aid}", sender=B, message_id="om_after_wait")
+        # 只为未覆盖的那条历史证据补验一批，不重复复核已随最终回答复核过的证据。
+        assert supplemented == [[TOTAL_TOOL]]
+        assert len(actions.adapter.calls) == 1
+        assert await env.rows("SELECT state FROM xiaowei_action") == [("succeeded",)]
+        (row,) = await env.rows(
+            "SELECT state, failure_code FROM xiaowei_request WHERE reply_message_id='om_after_wait'"
+        )
+        if change == "valid":
+            assert row == ("completed", None)
+            assert await env.rows("SELECT turns FROM xiaowei_session") == [(2,)]
+            return
+        # 动作已执行：渠道按动作实际状态回执，确定失效与暂时无法复核都提示勿重复批准。
+        assert row == ("failed", "action_feedback_failed")
+        assert await env.rows("SELECT turns FROM xiaowei_session") == [(1,)]
+        assert await env.rows("SELECT count(*) FROM agent_messages") == before
+        await group.ask(f"/批准 {aid}", sender=B, message_id="om_approve_again")
+        assert len(actions.adapter.calls) == 1  # 已执行的动作不重复执行
 
 
 @pytest.mark.parametrize("old_ledger", [False, True])

@@ -90,8 +90,8 @@ from tests.sdk_core.test_app import evidence_in
 from xiaowei import models
 scripts = Scripts()
 def cite_for_source(call):
-    # 基线源码早于 S3，只接受旧回答格式；当前源码只接受新格式。
-    if hasattr(models, "LegacyAnswer"):
+    # 基线源码早于 S3，只接受旧回答格式；当前源码的 AgentAnswer 是块结构。
+    if "blocks" in models.AgentAnswer.model_fields:
         return cite()(call)
     ids = evidence_in(call)
     body = {"evidence_ids": ids, "inferences": [], "clarification": None}
