@@ -279,6 +279,65 @@ async def test_real_runner_hooks_keep_parallel_tools_and_never_leak_payloads():
     assert "最终结果以正式回复为准" in rendered
 
 
+async def test_tools_stage_lasts_until_the_last_parallel_call_ends_including_rejection():
+    """真 Runner 按调用 ID 配对 start/end；以数据返回的治理拒绝同样结束该调用。"""
+    from agents import RunHooks
+
+    progress = observer(Sink())
+    both_entered, release_slow = asyncio.Event(), asyncio.Event()
+    entered, started, ended = [], [], []
+
+    @function_tool
+    async def slow_read() -> str:
+        """合成读取，不访问外部服务。"""
+        entered.append("slow")
+        if len(entered) == 2:
+            both_entered.set()
+        await release_slow.wait()
+        return "ok"
+
+    @function_tool
+    async def rejected_read() -> str:
+        """合成治理拒绝，以数据返回。"""
+        entered.append("rejected")
+        if len(entered) == 2:
+            both_entered.set()
+        await both_entered.wait()
+        return '{"status":"rejected","code":"scope_rejected"}'
+
+    class Observed(RunHooks):
+        async def on_tool_start(self, context, agent, tool):
+            started.append(context.tool_call_id)
+            await progress.hooks.on_tool_start(context, agent, tool)
+
+        async def on_tool_end(self, context, agent, tool, result):
+            await progress.hooks.on_tool_end(context, agent, tool, result)
+            ended.append((context.tool_call_id, progress._stage))
+            if context.tool_call_id == "r":
+                release_slow.set()
+
+    model = ScriptedModel(
+        [
+            [
+                function_call("slow_read", {}, call_id="s"),
+                function_call("rejected_read", {}, call_id="r"),
+            ],
+            [assistant_message("done")],
+        ]
+    )
+    result = await asyncio.wait_for(
+        Runner.run(
+            Agent(name="test", model=model, tools=[slow_read, rejected_read]),
+            "question",
+            hooks=Observed(),
+        ),
+        2,
+    )
+    assert result.final_output == "done"
+    assert sorted(started) == ["r", "s"]
+    assert ended == [("r", "tools"), ("s", "model")]
+
+
 async def test_hook_publication_failure_does_not_abort_real_runner(monkeypatch):
     sink = Sink()
     progress = observer(sink)

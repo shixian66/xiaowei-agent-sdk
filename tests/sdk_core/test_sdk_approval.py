@@ -1116,6 +1116,49 @@ async def test_restart_restores_original_budget_and_cannot_call_extra_tool(actio
     assert len(rejected) == 1 and rejected[0]["code"] == "budget_exhausted"
 
 
+async def test_resume_does_not_reset_native_model_turn_budget():
+    """恢复以保存的 RunState 续跑同一 ``max_turns``；两次暂停经 JSON 往返后不得获得新额度。"""
+    from agents import Agent, Runner, RunState, function_tool
+    from agents.exceptions import MaxTurnsExceeded
+    from agents.testing import ScriptedModel, assistant_message, function_call
+
+    from xiaowei.app import safe_run_config
+
+    effects = []
+
+    @function_tool(needs_approval=True, failure_error_function=None)
+    async def write(value: str) -> str:
+        effects.append(value)
+        return value
+
+    agent = Agent(
+        name="budget",
+        tools=[write],
+        model=ScriptedModel(
+            [
+                [function_call("write", {"value": "first"}, call_id="c1")],
+                [function_call("write", {"value": "second"}, call_id="c2")],
+                [assistant_message("not reached")],
+            ]
+        ),
+    )
+
+    async def approve_after_round_trip(result):
+        saved = result.to_state().to_string(strict_context=True)
+        state = await RunState.from_string(agent, saved, context_override={}, strict_context=True)
+        state.approve(state.get_interruptions()[0], always_approve=False)
+        return await Runner.run(agent, state, max_turns=2, run_config=safe_run_config())
+
+    paused = await Runner.run(
+        agent, "申请两项", context={}, max_turns=2, run_config=safe_run_config()
+    )
+    second = await approve_after_round_trip(paused)
+    assert len(second.interruptions) == 1 and effects == ["first"]
+    with pytest.raises(MaxTurnsExceeded):
+        await approve_after_round_trip(second)
+    assert effects == ["first", "second"]
+
+
 async def test_partial_approvals_save_new_version_and_keep_original_turn(actions):
     from agents.testing import function_call
 

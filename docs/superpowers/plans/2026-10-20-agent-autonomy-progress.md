@@ -136,7 +136,7 @@ M1 对象是未请求文件的正常业务正文；显式 HTML/MD 报告继续�
 
 | 锁版能力 | 源码/实验依据与用途 |
 | --- | --- |
-| Agents SDK 0.22.3 `Runner.run(..., hooks=...)` / `RunHooks` | `agents.lifecycle` 和实际工具执行调用处；支持模型及工具事件，保留原 loop。5 项[离线探针](../../../tests/spike/test_progress_sdk_contract.py)验证事件、等待、失败传播、并发与审批 |
+| Agents SDK 0.22.3 `Runner.run(..., hooks=...)` / `RunHooks` | `agents.lifecycle` 和实际工具执行调用处；支持模型及工具事件，保留原 loop。当时 5 项离线探针验证事件、等待、失败传播、并发与审批（探针已删除，历史版本见 `f6e824c:tests/spike/test_progress_sdk_contract.py`；现行覆盖在 `tests/sdk_core/test_progress.py`） |
 | `ToolContext.tool_call_id` | 可关联同轮并发调用，仅供内存关联、不输出或保存。hook 不读取参数、模型输入/响应和工具结果 |
 | 原生审批/错误处理器 | `Application._turn` 的主运行、无工具收尾、无工具改写，以及 `resume_action` 复用同一可选观察；不重建 RunState 或错误分类 |
 | 现有 MCP 工具 | 经 `MCPIntegration._function_tool` → `governed_function_tool` → SDK FunctionTool，能复用相同工具事件，不另接 MCP 调度 |
@@ -279,7 +279,7 @@ FeishuGateway._consume
 
 ```bash
 PYTHONDONTWRITEBYTECODE=1 .venv/bin/python -m pytest \
-  tests/sdk_core/test_progress.py tests/spike/test_progress_sdk_contract.py \
+  tests/sdk_core/test_progress.py \
   tests/sdk_core/test_autonomy_tasks.py tests/sdk_core/test_feishu_format.py \
   tests/sdk_core/test_feishu_details.py tests/sdk_core/test_delivery_parts.py \
   -q -p no:cacheprovider
