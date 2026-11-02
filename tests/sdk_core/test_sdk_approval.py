@@ -427,6 +427,35 @@ async def test_failed_approval_material_has_nonempty_incomplete_hint(actions):
         assert "/批准" not in hint
 
 
+@pytest.mark.parametrize("failure", ["failed", "unknown"])
+async def test_approval_needs_material_part_receipt_not_parent_request_state(actions, failure):
+    from sqlalchemy import text
+    from tests.sdk_core.test_feishu import Outbox
+
+    env = actions.env
+    env.scripts.add(
+        attributed(A, "仅审批材料"),
+        tool_call(f"{SOURCE}__propose_change", value="after"),
+        request_execution,
+        cite("根据实际执行事实反馈"),
+    )
+    async with running(env, outbox=Outbox([failure]), max_reply_chars=3500) as group:
+        await group.ask("仅审批材料", message_id="om_material_receipt")
+        action_id = await actions.one()
+        assert await env.rows(
+            "SELECT kind,send_state FROM xiaowei_delivery_part ORDER BY sequence"
+        ) == [("approval", failure)]
+        assert await env.rows("SELECT delivery_version,delivery FROM xiaowei_request") == [
+            (1, failure)
+        ]
+        async with env.engine.begin() as conn:
+            await conn.execute(text("UPDATE xiaowei_request SET delivery='sent'"))
+        # 只认审批材料分项回执，父请求错误的sent缓存不能放行。
+        await group.ask(f"/批准 {action_id}", sender=B, message_id="om_material_approve")
+        assert actions.adapter.calls == []
+        assert await env.rows("SELECT state FROM xiaowei_action") == [("pending",)]
+
+
 @pytest.mark.parametrize("settle_failure", [False, True])
 async def test_runner_cancellation_waits_for_started_write_to_settle_once(
     actions, monkeypatch, settle_failure

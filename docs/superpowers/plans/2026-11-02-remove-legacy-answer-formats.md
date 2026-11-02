@@ -21,9 +21,11 @@
 | 飞书重发／历史 | `_WITHHELD`：不发送，记日志，与记录过期相同 |
 | 运维历史读取 | 解析失败按现有逻辑退回只读原事实，不带旧分析 |
 | 同一请求键重复到达 | `RequestUnavailableError`，不重新运行（Web 404）；同会话的新请求照常进入原会话 |
-| 审批暂停材料 | 审批有效期 15 分钟（`actions.py` 的 `APPROVAL_WINDOW`），v3 时期的材料早已过期；若读到即不可批准 |
+| 审批暂停材料 | 查看／重发材料同上（不可用）。**`/批准` 恢复不读材料回答**：`resume_action → native_run → verify_material → claim_native_action` 只核对动作、SDK 快照、提案 Evidence、材料请求 `paused` 状态与审批分项回执，以及 `min(approval_expires_at, 快照 expires_at)`，不解析请求表 `answer`。因此旧暂停不可批准依赖 15 分钟有效期（`actions.py` 的 `APPROVAL_WINDOW`），而不是解析失败 |
 
 Session 回放不解析回答 JSON（旧助手消息只作为模型历史文字），不受影响。
+
+**暂停恢复的事实与假设：** 上表恢复路径是源码事实。“不存在尚未过期的旧暂停”是假设：只有从 v4 之前的版本直接升级到本版本，且升级前 15 分钟内留下暂停时，才会出现；若生产已运行 v4 超过 15 分钟，就不存在这种暂停（部署日期未核实）。即使出现，审批人批准的是当时已送达的材料（分项回执仍须为 `sent`），执行与旧版相同，恢复后的最终回答按 v4 生成；只是材料不能再查看或重发。本切片不为此新增版本拒绝逻辑。
 
 ## 2. 改动
 
@@ -53,5 +55,6 @@ Session 回放不解析回答 JSON（旧助手消息只作为模型历史文字�
 - 测试：删除只验证旧格式的用例（Legacy／v2／v3 解析与交付、`legacy_v3_answers` 夹具及其 3 个用例、`test_s3_legacy_resume.py`、v3“其余结果”补全、v2 报告文字语义、两个浏览器测试的 v3 参数）；新增 `test_answers_saved_before_v4_are_unavailable_without_io`（v2／v3／S3 前信封／最早裸回答四种形状）与 `test_saved_answers_before_v4_are_unavailable`。
 - `test_delivery_parts.py` 的 `request()` 原把回答强制改为 v3，以覆盖旧版“正文 + 证据明细”双文件布局；v3 记录不再可读，改为 v4 原样，9 个投递机制用例（存储失败、补发保留字节与 UUID、结果不明、上传不明、每次投递一次权限快照、真实 SDK 复用 UUID 等）按 v4 的“一个报告文件 + 正文”调整分项与计数，测试意图不变。
 - 渲染单元测试直接构造不带版本的 `Delivery`，渲染层未改，保持原样。
-- `tests/deployment` 升级演练（`test_different_image_upgrade_rollback_and_paired_restore`）原断言 P3 镜像保存的 S3 前回答在升级后仍可重放。按本切片的决定改为：升级后重新提交同一请求得到 404（不重跑、不报 500）；`verify` 中同一请求键按不可用处理，新请求仍落在原会话。探测脚本的旧回答改为只在 `seed`（旧镜像内执行）中构造，避免新镜像导入即失败。
+- `tests/deployment` 升级演练（`test_different_image_upgrade_rollback_and_paired_restore`）原断言 P3 镜像保存的 S3 前回答在升级后仍可重放。按本切片的决定改为：升级后重新提交同一请求得到 404（不重跑、不报 500）；`verify` 中同一请求键按不可用处理，新请求仍落在原会话。探测脚本的旧回答改为只在 `seed`（旧镜像内执行）中构造，避免新镜像导入即失败。探测快照记录每条请求的 `state` 与原始 `answer` 的 SHA-256，演练断言两条种子请求在升级前快照、升级后 `verify`、配套备份恢复、恢复原库与回退中保持不变（不迁移、不改写旧数据）。该演练证明的是请求归属与会话映射延续，不等于完整 SDK 历史回放或追问验收。
+- 补回现行审批边界回归 `test_approval_needs_material_part_receipt_not_parent_request_state[failed|unknown]`：原 `legacy_v3_mixed_round...` 用例中 `failed_part="approval"` 分支验证的是 `delivery_version=1` 下只认审批分项回执，与回答格式无关；改为只含审批材料的 v4 用例，父请求被改为 `sent` 后 `/批准` 仍不执行。仅属 v3 暂停轮数据交付的分支不恢复。
 - 发现：`delivery_version=0`（迁移 012，10-15 之前）的记录全部早于 v4，其回答现在都不可读，相关发送分支实际不再可达；留到 3b 一并评估。

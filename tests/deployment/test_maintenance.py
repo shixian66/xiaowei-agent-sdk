@@ -503,6 +503,13 @@ def test_different_image_upgrade_rollback_and_paired_restore(
         seeded = _probe(active, "seed")
         assert seeded["schema_version"] == 6  # 固定 P3_A_SHA 的历史镜像事实。
         assert seeded["counts"]["xiaowei_request"] == 2
+        seeded_requests = seeded["requests"]
+        assert [(channel, state) for channel, _, state, _ in seeded_requests] == [
+            ("feishu", "completed"),
+            ("web", "completed"),
+        ]
+        assert all(digest for *_, digest in seeded_requests)
+        seeded_turns = {turn for _, turn, _, _ in seeded_requests}
         assert _compose(active, "up", "-d", "xiaowei", "--wait").returncode == 0
 
         pull_failed = docker(
@@ -546,6 +553,7 @@ def test_different_image_upgrade_rollback_and_paired_restore(
         # 历史镜像为 v6：停旧应用并备份，再用预检过的当前候选升到 v11。
         assert _compose(active, "stop", "xiaowei").returncode == 0
         before_upgrade = _probe(active, "snapshot")
+        assert before_upgrade["requests"] == seeded_requests
         pre_upgrade = host_tmp / "pre-upgrade.dump"
         assert _safe_dump(active, pre_upgrade).returncode == 0
         migrated = _compose(
@@ -599,6 +607,9 @@ def test_different_image_upgrade_rollback_and_paired_restore(
 
         assert _compose(active, "stop", "xiaowei").returncode == 0
         verified = _probe(active, "verify")
+        # 旧回答不可读但原样保留（状态与原文摘要不变）；新请求只追加。下方恢复与回退
+        # 快照与 verified／before_upgrade 整体相等，同样覆盖这两条种子请求。
+        assert [row for row in verified["requests"] if row[1] in seeded_turns] == seeded_requests
         assert verified["binding_rows"] == 1 and verified["binding_length"] == 64
         assert verified["owners"]["xiaowei_request"] == [
             "group:p3-maintenance-group",

@@ -41,7 +41,7 @@ records 业务展示已合入 [PR #152](https://github.com/shixian66/xiaowei-age
 
 <a id="slim-step-1"></a>
 
-### 精简第 1–4 步（本地离线，待审阅）
+### 精简第 1–4 步（本地离线；第 1、2 步待独立审查）
 
 **已删。** 旧系统文档 `docs/adr/`、`docs/plans/`（M2–M5）、`docs/handoff/` 与旧包生成的 `docs/CAPABILITIES.md`（核心文档与代码均不引用）；只保护 ADR-008 的 `test_docs_command_consistency.py`；无调用方的 `ChannelStore.proposal_request`；依赖基线中检查旧包导入和第三方 `py.typed` 事实的用例（直接导入无类型的 asyncpg 仍由 mypy strict 与固定 override 拦住）；CI workflow 测试中的整文件摘要、命令多重集与命令块摘要（权限、凭据、env、`uses` SHA、gate 存在与不可绕过等规则保留）。
 
@@ -49,7 +49,7 @@ records 业务展示已合入 [PR #152](https://github.com/shixian66/xiaowei-age
 
 **第 4 步已做，代码独立审查结论“可以合并候选”。** 按经两轮独立审查的 [计划 r3](docs/superpowers/plans/2026-11-01-evidence-in-turn-recheck.md) 实施：`add_items` 只做结构检查；提交回放对已随最终回答复核的证据只做逐条检查与调用绑定，只为不在 `context_evidence` 的记录（群审批续跑时等待期间的新历史）补做依赖复核；`project_many` 拆出 `checked_calls`／`check_bindings`，顺序不变。一轮 6 对象宽查询探测由 24 降为 12；失败分类变化见计划 §4，与 §6 的出入见计划 §9。验证：CI integration 等价命令（除 `tests/deployment`）5463 passed／235 skipped，随后只改 3 条探测计数断言，所在两个文件 44 passed；`ruff check .`、`mypy src`、`git diff --check` 通过。未测：真实 StarRocks 耗时、公司环境。
 
-**第 3a 步已做（待代码独立审查）。** 按 [计划 r2](docs/superpowers/plans/2026-11-02-remove-legacy-answer-formats.md)：只解析 v4 回答，Legacy／v2／v3 记录与记录过期同样不可用（Web 404、飞书不发送、无模型调用与数据库复核），删除 `LegacyAnswer`／`legacy_blocks`／“其余结果”补全与旧 `content` 拼装；`Delivery` 字段与渲染层不动。生产三项保留期均为 30 天（用户回传），用户接受保留期内旧回答不再可读。部署升级演练改为验证旧回答不可用、会话延续。实施记录与测试出入见计划 §5。
+**第 3a 步已做，代码独立审查（含补测复审）结论“可以合并候选”。** 按 [计划 r2](docs/superpowers/plans/2026-11-02-remove-legacy-answer-formats.md)：只解析 v4 回答，Legacy／v2／v3 记录与记录过期同样不可用（Web 404、飞书不发送、无模型调用与数据库复核），删除 `LegacyAnswer`／`legacy_blocks`／“其余结果”补全与旧 `content` 拼装；`Delivery` 字段与渲染层不动。生产三项保留期均为 30 天（用户回传），用户接受保留期内旧回答不再可读。部署升级演练改为验证旧回答不可用但原样保留（状态与原文摘要不变）、会话映射延续（不等于完整 SDK 历史回放）。`/批准` 恢复不读材料回答，旧暂停不可批准依赖 15 分钟有效期，见计划 §1。实施记录与测试出入见计划 §5。
 
 **后续。** 3b 渲染层清理：草稿在 `claude/remove-legacy-render-wip@d1820d3`（未审查；约 150 个按旧布局断言的测试待逐条改写或删除），连同 `delivery_version=0` 不再可达的发送分支一起评估。
 

@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import hashlib
 import json
 import os
 from collections.abc import AsyncIterator
@@ -304,6 +305,10 @@ async def _snapshot(engine: AsyncEngine) -> dict[str, Any]:
                 "FROM xiaowei_evidence ORDER BY evidence_id"
             )
         )
+        # 原始回答只比摘要：升级不迁移、不改写旧回答，即使新程序已不再读取它。
+        requests = await conn.execute(
+            text("SELECT channel, turn_id, state, answer FROM xiaowei_request ORDER BY 1, 2")
+        )
     return {
         "database": database,
         "post_backup_marker": bool(post_backup_marker),
@@ -313,6 +318,15 @@ async def _snapshot(engine: AsyncEngine) -> dict[str, Any]:
         "counts": counts,
         "owners": owners,
         "evidence": [list(row) for row in evidence],
+        "requests": [
+            [
+                channel,
+                turn_id,
+                state,
+                None if answer is None else hashlib.sha256(answer.encode()).hexdigest(),
+            ]
+            for channel, turn_id, state, answer in requests
+        ],
     }
 
 
