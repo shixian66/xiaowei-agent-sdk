@@ -1741,6 +1741,71 @@ async def test_waiting_releases_group_and_resume_commits_after_other_investigati
     )
 
 
+@pytest.mark.parametrize("change", ["valid", "invalid", "unverifiable"])
+async def test_resume_commit_rechecks_history_committed_while_waiting(actions, monkeypatch, change):
+    """续跑的模型可见证据是暂停时的集合；等待期间他人提交的历史不在其中，提交回放须单独补验。
+
+    故障在续跑最后一次读取历史之后、提交补验时注入：审批已领取、动作已执行，本轮不写 Session。
+    """
+    from xiaowei.evidence import (
+        EvidenceStore,
+        EvidenceUnavailableError,
+        EvidenceUnverifiableError,
+    )
+    from xiaowei.session import PolicySession
+
+    env = actions.env
+    async with running(env, max_reply_chars=3500) as group:
+        aid, _original = await paused(actions, group)
+        env.scripts.add(
+            attributed(B, "等待时查订单"), tool_call("order_total", region="east"), cite()
+        )
+        await group.ask("等待时查订单", sender=B, message_id="om_while_paused")
+        before = await env.rows("SELECT count(*) FROM agent_messages")
+
+        committing = False
+        supplemented: list[list[str]] = []
+        commit, validate = PolicySession.commit_validated, EvidenceStore.validate_records
+
+        async def commit_validated(self, *args, **kwargs):
+            nonlocal committing
+            committing = True
+            try:
+                return await commit(self, *args, **kwargs)
+            finally:
+                committing = False
+
+        async def validate_records(self, entries, **kwargs):
+            if committing and any(r.tool_id == TOTAL_TOOL for r, _ in entries):
+                supplemented.append([r.tool_id for r, _ in entries])
+                if change == "invalid":
+                    raise EvidenceUnavailableError
+                if change == "unverifiable":
+                    raise EvidenceUnverifiableError
+            return await validate(self, entries, **kwargs)
+
+        monkeypatch.setattr(PolicySession, "commit_validated", commit_validated)
+        monkeypatch.setattr(EvidenceStore, "validate_records", validate_records)
+        await group.ask(f"/批准 {aid}", sender=B, message_id="om_after_wait")
+        # 只为未覆盖的那条历史证据补验一批，不重复复核已随最终回答复核过的证据。
+        assert supplemented == [[TOTAL_TOOL]]
+        assert len(actions.adapter.calls) == 1
+        assert await env.rows("SELECT state FROM xiaowei_action") == [("succeeded",)]
+        (row,) = await env.rows(
+            "SELECT state, failure_code FROM xiaowei_request WHERE reply_message_id='om_after_wait'"
+        )
+        if change == "valid":
+            assert row == ("completed", None)
+            assert await env.rows("SELECT turns FROM xiaowei_session") == [(2,)]
+            return
+        # 动作已执行：渠道按动作实际状态回执，确定失效与暂时无法复核都提示勿重复批准。
+        assert row == ("failed", "action_feedback_failed")
+        assert await env.rows("SELECT turns FROM xiaowei_session") == [(1,)]
+        assert await env.rows("SELECT count(*) FROM agent_messages") == before
+        await group.ask(f"/批准 {aid}", sender=B, message_id="om_approve_again")
+        assert len(actions.adapter.calls) == 1  # 已执行的动作不重复执行
+
+
 @pytest.mark.parametrize("old_ledger", [False, True])
 async def test_native_binding_keeps_execution_actor_separate_and_snapshot_contains_no_raw_result(
     actions,

@@ -344,9 +344,9 @@ async def test_scope_checks_can_stop_large_catalog_before_history_or_request_lim
     recorder = CapacityRecorder(scenario="small")
     recorder.install(monkeypatch)
     caplog.set_level("INFO", logger="xiaowei.app")
-    # 工具记录、Session 暂存、提交最终校验和提交前整段回放共四类复核；
-    # 4 个满页调用在 2048 内已可完成，使用合法的 1600 预算仍能触发复核上限。
-    config = capacity_config(env, budget={"max_scope_checks": 1600})
+    # 一轮内工具记录与提交最终校验各复核一次；合法最小预算为 5 × 一页（200）= 1000。
+    # 5 个满页调用的记录恰好用完，提交校验同一批 200 个对象时触发复核上限。
+    config = capacity_config(env, budget={"max_scope_checks": 1000})
     connectors = drivers(config)
     connectors["pre"].tables.update(
         {("data_center", f"table{i:03}"): ("region",) for i in range(199)}
@@ -360,7 +360,7 @@ async def test_scope_checks_can_stop_large_catalog_before_history_or_request_lim
         cursor=None,
     )
     endpoint = VertexLikeEndpoint(
-        {question(1, "small"): [parallel(call, call, call, call), finish]}
+        {question(1, "small"): [parallel(call, call, call, call, call), finish]}
     )
     async with env.running(
         config, model_transport=recorder.network(endpoint), starrocks_connect=connectors
@@ -375,6 +375,6 @@ async def test_scope_checks_can_stop_large_catalog_before_history_or_request_lim
         assert report["io"]["query"] == 0 and report["io"]["probe"] > 0
         assert await env.scalar("SELECT count(*) FROM agent_messages") == 0
         report["first_limit"] = "scope_checks"
-        report["workload"] = {"parallel_calls": 4, "objects_per_call": 200}
-        assert report["limits"]["max_scope_checks"] == 1600
+        report["workload"] = {"parallel_calls": 5, "objects_per_call": 200}
+        assert report["limits"]["max_scope_checks"] == 1000
         save_report(tmp_path, report)

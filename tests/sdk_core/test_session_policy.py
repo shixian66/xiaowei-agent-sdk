@@ -586,14 +586,49 @@ async def test_evidence_is_bound_to_its_tool_call(postgres_url: URL) -> None:
         await h.refused(context(turn="t2"))
 
 
-async def test_staging_rejects_evidence_outside_this_session(postgres_url: URL) -> None:
+_FINAL = {"role": "assistant", "content": json.dumps(s3_answer(text="已查询"))}
+
+
+async def _commit_refused(h: Harness, session: PolicySession) -> None:
+    """暂存只查结构；证据归属与调用绑定在提交回放时复核，拒绝前不写底层 Session。"""
+    await session.add_items([_FINAL])  # type: ignore[list-item]
+    with pytest.raises(SessionUnavailableError):
+        await session.commit_validated(())
+    assert await h.stored() == []
+
+
+async def test_commit_rejects_evidence_outside_this_session(postgres_url: URL) -> None:
     async with harness(postgres_url) as h:
         _, result = await h.turn(context(session="other"), [_call(), _cite()])
         (foreign,) = result.final_output.evidence_ids
         envelope = json.dumps({"evidence_id": foreign, "data": {}, "truncated": False})
         session = h.session(context())
-        with pytest.raises(SessionItemRejectedError):
-            await session.add_items(_pair(envelope, output_call="c7"))  # type: ignore[arg-type]
+        await session.add_items(_pair(envelope, output_call="c7"))  # type: ignore[arg-type]
+        await _commit_refused(h, session)
+
+
+async def test_grant_revoked_after_the_tool_result_fails_the_answer_at_commit(
+    postgres_url: URL, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """工具结果交给模型后撤权：暂存不再复核，运行跑完；提交时最终回答校验拒绝，不写入。"""
+    async with harness(postgres_url) as h:
+        ctx = context()
+        record = h.evidence.record
+
+        async def record_then_revoke(*args: Any, **kwargs: Any) -> Any:
+            result = await record(*args, **kwargs)
+            h.grants.revoke_all()
+            return result
+
+        monkeypatch.setattr(h.evidence, "record", record_then_revoke)
+        session = h.session(ctx)
+        await Runner.run(
+            h.agent(ScriptedModel([_call(), _cite()])), "东区订单？", context=ctx, session=session
+        )
+        with pytest.raises(SessionItemRejectedError) as rejected:
+            await session.commit_validated(h.seen(session, ctx))
+        assert isinstance(rejected.value.__cause__, AnswerRejectedError)
+        assert await h.stored() == []
 
 
 @pytest.mark.parametrize("intruder", ["other-subject", "other-channel"])
@@ -743,19 +778,20 @@ async def test_replay_binds_evidence_to_the_whole_call(postgres_url: URL, change
 
 
 @pytest.mark.parametrize(
-    ("name", "arguments", "accepted"),
+    ("name", "arguments", "outcome"),
     [
-        ("order_total", {"region": "east"}, True),
-        ("run_query", {"region": "east"}, False),
-        ("order_total", {"region": "west"}, False),
-        ("order_total", None, False),
-        (None, None, False),
+        ("order_total", {"region": "east"}, "committed"),
+        ("run_query", {"region": "east"}, "commit_refused"),
+        ("order_total", {"region": "west"}, "commit_refused"),
+        ("order_total", None, "staging_refused"),
+        (None, None, "staging_refused"),
     ],
     ids=["intact", "tool-name", "arguments", "unparsable-arguments", "no-call"],
 )
-async def test_staging_binds_evidence_to_the_whole_call(
-    postgres_url: URL, name: str | None, arguments: dict[str, str] | None, accepted: bool
+async def test_evidence_is_bound_to_the_whole_call(
+    postgres_url: URL, name: str | None, arguments: dict[str, str] | None, outcome: str
 ) -> None:
+    """找不到可核对的调用在暂存时拒绝；函数名或参数与证据不符在提交回放时拒绝。"""
     async with harness(postgres_url) as h:
         ctx = context()
         req = request(call_id="c7")
@@ -770,11 +806,17 @@ async def test_staging_binds_evidence_to_the_whole_call(
         output = {"type": "function_call_output", "call_id": "c7", "output": envelope}
         batch = [output] if name is None else [call, output]
         session = h.session(ctx)
-        if accepted:
-            await session.add_items(batch)  # type: ignore[arg-type]
-        else:
+        if outcome == "staging_refused":
             with pytest.raises(SessionItemRejectedError):
                 await session.add_items(batch)  # type: ignore[arg-type]
+            return
+        await session.add_items(batch)  # type: ignore[arg-type]
+        if outcome == "commit_refused":
+            await _commit_refused(h, session)
+        else:
+            await session.add_items([_FINAL])  # type: ignore[list-item]
+            await session.commit_validated(())
+            assert len(await h.stored()) == 3
 
 
 ROWS_MARKER = "ROWS_ONLY_MARKER".ljust(40, "x")

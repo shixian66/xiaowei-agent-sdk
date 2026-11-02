@@ -410,6 +410,32 @@ async def test_unverifiable_access_at_the_end_of_a_turn_keeps_the_session(env: E
         assert await session_state(env) == "active"
 
 
+async def test_unverifiable_dependency_is_reported_before_a_tampered_call_binding(
+    env: Env,
+) -> None:
+    """回放先复核依赖、后核对调用绑定：两者同时有问题时报暂时无法复核，恢复后才报失效。"""
+    config = env.config()
+    async with env.opened(config) as rt:
+        await saved(env, rt, "om_1", sql="SELECT region FROM shop.sales")
+        async with open_engine(SecretStr(env.url.render_as_string(hide_password=False))) as e:
+            async with e.begin() as conn:
+                changed = await conn.execute(
+                    text(
+                        "UPDATE agent_messages SET message_data = replace(message_data,"
+                        " 'SELECT region FROM shop.sales', 'SELECT total FROM shop.sales')"
+                        " WHERE message_data LIKE '%function_call\"%'"
+                    )
+                )
+                assert changed.rowcount == 1
+        env.db.down = True
+        record, message = await followup(env, rt, "om_2")
+        assert (record.state, record.failure_code) == ("failed", "scope_unverifiable")
+        env.db.down = False
+        record, message = await followup(env, rt, "om_3")
+        assert (record.state, record.failure_code) == ("failed", "session_failed")
+        assert message not in env.scripts.calls
+
+
 # ---- 视图：当前权限与依赖有效时，跨轮回放、历史读取与重发可用 -------------------------------
 
 
@@ -937,9 +963,9 @@ async def test_a_turn_succeeds_at_the_check_limit_and_stops_before_io_beyond_it(
     async with env.opened(capped(env, 1000)) as rt:
         assert (await env.turn(rt, wide(env, "量一轮", SR.target_id), "om_0")).state == "completed"
         needed = len(env.db.probes())
-    # 6个对象各经工具记录、Session暂存、提交时最终校验及提交前整段回放；
-    # 应用不在同一提交入口重复最终校验。上限不足时仍须在探测前拒绝。
-    assert needed == 6 * 4
+    # 6个对象各经工具记录与提交时最终校验各复核一次；暂存只查结构，提交回放只为
+    # 未在最终校验中的证据补做依赖复核。上限不足时仍须在探测前拒绝。
+    assert needed == 6 * 2
 
     async with env.opened(capped(env, needed)) as rt:
         await fresh_session(rt)
@@ -1030,7 +1056,7 @@ async def test_the_same_object_on_two_clusters_is_checked_and_counted_on_each(en
 
 async def test_a_full_listing_page_fits_the_smallest_allowed_limit(env: Env) -> None:
     """启动校验的下界（5 × 一页）足够一轮新会话搜出满页：搜表自身对本页对象的探测（至多一页）
-    不计入，普通列表的1个对象在4次复核中各计一次；历史读取另需一次来源验证。"""
+    不计入，普通列表的1个对象在记录与提交两次复核中各计一次；历史读取另需一次来源验证。"""
     async with env.opened(capped(env, 5)) as rt:
         page = {**SEARCH_ALL, "page_size": 1}  # capped 把 max_rows 设为 1
         message = env.scripts.add(
@@ -1039,4 +1065,4 @@ async def test_a_full_listing_page_fits_the_smallest_allowed_limit(env: Env) -> 
         record = await env.turn(rt, message, "om_1")
         assert record.state == "completed", record.failure_code
         listed = [sql for sql in env.db.probes() if sql == probe_sql("shop", "regions")]
-        assert len(listed) == 1 + 4
+        assert len(listed) == 1 + 2

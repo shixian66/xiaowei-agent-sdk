@@ -117,3 +117,12 @@ def check_bindings(
 ## 8. 实施与交付
 
 获准后在主题分支实施，按 §3.1 → §3.3 顺序串行，测试同步。属于 §6 表中“数据/Evidence、Session”类改动：须正常与拒绝路径、真 SDK 与实际存储验证，并对具体差异做独立审查。不推送、不合并、不部署，不调用真实模型或公司服务。
+
+## 9. 实施记录（2026-11-02，分支 `claude/evidence-recheck-plan`）
+
+按 r3 实施。与 §6 的出入：
+
+- “一轮 3 次同表查询 + 首次发送 = 5”的新回归没有单独写：已有的 `test_a_turn_succeeds_at_the_check_limit_and_stops_before_io_beyond_it`（6 对象宽查询，由 `6 * 4` 改为 `6 * 2`）和 `test_a_full_listing_page_fits_the_smallest_allowed_limit`（由 `1 + 4` 改为 `1 + 2`）已经按探测条数锁定同一行为。
+- 群审批续跑失败时，渠道回执是 `action_feedback_failed`，不是 §4 表中应用层的 `session_unavailable`／`scope_unverifiable`：动作已执行后，`channel.py` 按动作实际状态回执，提示“动作已执行、勿重复批准”。这是现有行为，改动前提交回放失败也走同一路径。
+- 定时任务来源没有新增用例：来源失效被拒已由 `test_scheduled_history_snapshot.py::test_text_snapshot_rechecks_definition_source_after_model[before_commit]` 覆盖；来源记录只在第 2 步与 `context_evidence` 同批复核，这一步没有改，来源证据也不会进入本轮回放的补验批次。
+- 复合故障用例用变异检查确认有效：把 `project_many` 改成先核对绑定、后复核依赖时，该用例失败。

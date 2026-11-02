@@ -460,14 +460,30 @@ class EvidenceStore:
     ) -> list[str]:
         """一批读取：逐条按 ``project`` 的规则核对，依赖按目标合并后只复核一次。"""
         records = await self._readable(ctx, audience, [e for e, _ in references], history=False)
-        for record, (_, call) in zip(records, references, strict=True):
+        self.check_bindings(records, [call for _, call in references])
+        return [record.projections[audience] for record in records]
+
+    async def checked_calls(
+        self, evidence_ids: Sequence[str], ctx: RunContext, audience: Audience
+    ) -> list[EvidenceRecord]:
+        """Session 提交回放的逐条检查：未验证对象依赖与调用绑定，不可直接交付。
+
+        依赖已在同一提交的最终回答校验中复核的记录，调用方只为其余记录补做
+        ``validate_records``，再 ``check_bindings``；顺序与 ``project_many`` 相同。
+        """
+        return [await self._checked(e, ctx, audience, history=False) for e in evidence_ids]
+
+    def check_bindings(
+        self, records: Sequence[EvidenceRecord], calls: Sequence[ToolCall | None]
+    ) -> None:
+        """给出调用时证据须由同一次调用生成：调用标识、SDK 函数名与有效执行参数一致。"""
+        for record, call in zip(records, calls, strict=True):
             if call is not None and (
                 record.call_id != call.call_id
                 or record.tool_name != call.tool_name
                 or record.arguments_digest != self._effective_digest(record, call.arguments)
             ):
                 raise EvidenceUnavailableError
-        return [record.projections[audience] for record in records]
 
     async def inspect(self, evidence_id: str, ctx: RunContext) -> EvidenceRecord:
         """历史候选的归属/策略/当前工具权限检查；尚未验证对象依赖，不可直接交付。"""

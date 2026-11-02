@@ -482,8 +482,9 @@ class ServeConfig(_Config):
                 raise ValueError("feishu.group.tools 只能包含已登记的工具")
             if group is not None and group.max_wait_seconds >= storage.request_retention_seconds:
                 raise ValueError("feishu.group.max_wait_seconds 必须短于请求保留期")
-        # 普通结果经记录、Session暂存、提交最终校验和整段回放复核；历史读取另验证原来源。
-        # 保留5倍静态规则，单次纳入最多一页对象（含旧分析全部依赖），不做运行时预留。
+        # 普通结果一轮内经记录与提交最终校验各复核一次（群审批续跑另补等待期间的新历史）；
+        # 历史读取另验证原来源。5倍静态规则沿用旧的四次复核时的取值，降低需单独决定；
+        # 单次纳入最多一页对象（含旧分析全部依赖），不做运行时预留。
         page = max(t.connection.policy.max_rows for t in self.targets)
         if self.budget.max_scope_checks < _CHECKS_PER_LISTED_OBJECT * page:
             raise ValueError(

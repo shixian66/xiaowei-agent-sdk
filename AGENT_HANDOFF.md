@@ -9,14 +9,14 @@
 | 项目 | 本次核对事实 |
 | --- | --- |
 | 仓库／产品基线 | [shixian66/xiaowei-agent-sdk](https://github.com/shixian66/xiaowei-agent-sdk)，本地 `origin/main@f6e824c`（#152 合并后；本轮网络不可用，未重新 fetch） |
-| 当前任务 | 隔离分支 `claude/slim-legacy-docs-tests`（第 1 步纯删除）与其上叠加的 `claude/slim-spike-grafana`（第 2 步），见下方 [精简](#slim-step-1) |
+| 当前任务 | 隔离分支 `claude/slim-legacy-docs-tests`（第 1 步纯删除），其上依次叠加 `claude/slim-spike-grafana`（第 2 步）与 `claude/evidence-recheck-plan`（第 4 步），见下方 [精简](#slim-step-1) |
 | 隔离与已有工作 | 新建干净隔离工作树；桌面旧 checkout `b89d4ee` 及其三份文档／其他任务未提交材料保持原样，不把旧 checkout 当最新实现 |
 | 源码／入口 | 唯一产品包 `src/xiaowei`；`xiaowei` 与 `python -m xiaowei` 为正式入口。旧 Runtime、Worker、专属测试／迁移入口已移除，兼容旧回答和已绑定交付的路径仍保留 |
 | 存储与回答 | 应用 schema **17**：016 保存有界定时结果快照，017 只新增 `ds_clusters`；新回答为可信 v4，旧 v2/v3/Legacy 和已绑定原字节按原语义读取。SDK 表不改 |
 | 锁定依赖 | Python 3.11；Agents SDK 0.22.3、OpenAI 3.20.0、MCP 2.2.0、Lark Channel 1.4.0、sqlglot 30.17.0、httpx2 2.13.1、nh3 0.3.7、tinycss2 1.5.1、Pillow 13.0.0；以 uv.lock 为准。CI 维护已锁 certifi 2026.10.19、开发链 filelock 4.2.1／msgpack 1.2.3 |
 | 此前保存的完整集成证据（非本次修复） | [PR #145](https://github.com/shixian66/xiaowei-agent-sdk/pull/145) 的精确受测树与 #145 squash 合并树相同；#146 仅改四份文档，产品源码未变；[CI #421](https://github.com/shixian66/xiaowei-agent-sdk/actions/runs/40721039641) 9/9 成功，详情见 §5 |
 | 已记录发行／公司部署 | 2026-10-29 用户回传 release.json、容器日志和数据库统计：发行 `3dc028421f4349a4d9fe86129e234c9a9abd1bb3`，max_tool_calls=32，DS 选择已提交，项目读取因额度耗尽未执行。证据为用户回传，本轮不直连服务器；不证明公司 API 或实战验收通过 |
-| 本轮授权边界 | 删除确认无用的文档／测试／代码、离线验证及本地提交；不推送、不开 PR、不合并、不部署，不调用真实模型或公司服务 |
+| 本轮授权边界 | 删除确认无用的文档／测试／代码；用户 2026-11-02 批准实施第 4 步、第 3 步选 A（现在删除旧回答格式，接受保留期内旧回答不再可读／重发）；离线验证及本地提交；不推送、不开 PR、不合并、不部署，不调用真实模型或公司服务 |
 
 接手仍先核对实际 HEAD、工作区和用户新指令。下列“已合入”只描述 Git 事实；独立审查、离线测试、隔离真实软件、公司部署、渠道实收和用户接受分别记证。
 
@@ -41,13 +41,15 @@ records 业务展示已合入 [PR #152](https://github.com/shixian66/xiaowei-age
 
 <a id="slim-step-1"></a>
 
-### 精简第 1–2 步（本地离线，待审阅）
+### 精简第 1、2、4 步（本地离线，待审阅）
 
 **已删。** 旧系统文档 `docs/adr/`、`docs/plans/`（M2–M5）、`docs/handoff/` 与旧包生成的 `docs/CAPABILITIES.md`（核心文档与代码均不引用）；只保护 ADR-008 的 `test_docs_command_consistency.py`；无调用方的 `ChannelStore.proposal_request`；依赖基线中检查旧包导入和第三方 `py.typed` 事实的用例（直接导入无类型的 asyncpg 仍由 mypy strict 与固定 override 拦住）；CI workflow 测试中的整文件摘要、命令多重集与命令块摘要（权限、凭据、env、`uses` SHA、gate 存在与不可绕过等规则保留）。
 
 **第 2 步已做。** 删除 `tests/spike/`（锁版可行性实验，CI 普通 job 已排除；RunHooks 与 MCP 重连由 `test_progress.py`、`test_monitoring_r1b.py` 以真 SDK 覆盖）；`test_sql_parse_recovery.py` 原借用 spike 的检查点表，改为按正式暂停保存的形状在内存做 JSON 往返，旧账本缺 `sql_parse_failures` 的兼容用例保留；`grafana_c8.py` 改为复用 `grafana.py` 中逐字相同的 `_UID`／`_Args`／`_json`／`_pairs`／`_nonfinite`，两个 schema 钉值函数各钉各的集合，未合并。
 
-**后续（未开始）。** ③ 用户确认 v4 上线日期、生产保留期及是否有长于保留期的数据后，删除 v2/v3/Legacy 回答兼容路径；④ Evidence 一轮内重复复核：已离线测量并写成 [计划](docs/superpowers/plans/2026-11-01-evidence-in-turn-recheck.md)（分支 `claude/evidence-recheck-plan`），待独立审查与用户决定，未实施。
+**第 4 步已做（待代码独立审查）。** 按经两轮独立审查的 [计划 r3](docs/superpowers/plans/2026-11-01-evidence-in-turn-recheck.md) 实施：`add_items` 只做结构检查；提交回放对已随最终回答复核的证据只做逐条检查与调用绑定，只为不在 `context_evidence` 的记录（群审批续跑时等待期间的新历史）补做依赖复核；`project_many` 拆出 `checked_calls`／`check_bindings`，顺序不变。一轮 6 对象宽查询探测由 24 降为 12；失败分类变化见计划 §4，与 §6 的出入见计划 §9。验证：CI integration 等价命令（除 `tests/deployment`）5463 passed／235 skipped，随后只改 3 条探测计数断言，所在两个文件 44 passed；`ruff check .`、`mypy src`、`git diff --check` 通过。未测：真实 StarRocks 耗时、公司环境。
+
+**后续。** ③ 删除 v2/v3/Legacy 回答兼容路径：生产 `evidence_retention_seconds`／`request_retention_seconds`／会话 `retention_seconds` 均为 2592000（用户 2026-11-02 回传）；用户选择现在删除，先写简短计划（接口、旧记录被读到时的失败行为、验证）再实施。
 
 <a id="records-business-view"></a>
 
