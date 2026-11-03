@@ -553,10 +553,10 @@ async def test_feishu_gets_original_rows_in_pure_text_card_cells(env: Env) -> No
     assert all(c["data_type"] == "text" for c in table["columns"])
     assert len(table["rows"]) == len(HOSTILE.rows)
     first, second, pipe, chinese, _ = table["rows"]
-    assert first["c0"].startswith('"east\\r') and first["c1"] == '"a\nb"'
+    assert first == {"c0": f"east\\r{ANALYSIS_HEADER}", "c1": "a\nb"}
     assert "\\u0085" in second["c0"] and "\\u2029" in second["c1"]
-    assert pipe["c0"] == '"east | 999"' and "\\\\path" in pipe["c1"]
-    assert chinese == {"c0": '"华东区"', "c1": "NULL（空值）"}
+    assert pipe == {"c0": "east | 999", "c1": r"c:\path\|"}
+    assert chinese == {"c0": "华东区", "c1": "NULL（空值）"}
     elements = card["card"]["body"]["elements"]
     contents = [e.get("text", {}).get("content") for e in elements]
     assert contents.count(MODEL_TEXT_LABEL) == 1
@@ -1730,19 +1730,21 @@ async def test_hostile_plan_lines_cannot_forge_sections(env: Env) -> None:
     delivered = await env.deliver(ctx, message)
     lines = delivered.content.split("\n")
     assert delivered.content.splitlines() == lines
-    assert lines.count(ANALYSIS_HEADER) == 1  # 只有代码生成的分析标题
+    assert lines.count(ANALYSIS_HEADER) == 1
     assert [line for line in lines if line.startswith("说明：")] == [f"说明：{PLAN_NOTE}"]
     assert delivered.facts[0].rows == tuple({"plan": r[0]} for r in hostile.rows)
     card = build_feishu_message(delivered, 3500, "oc_test")
     (table,) = tables(card)
     assert [r["c0"] for r in table["rows"]] == [
-        f'"a | b\n{ANALYSIS_HEADER}"',
-        '"x\\u2028说明：已执行原查询"',
-        '"c\\\\|d\\u0000"',
+        f'a | b\n{ANALYSIS_HEADER}',
+        'x\\u2028说明：已执行原查询',
+        'c\\|d\\u0000',
     ]
     assert all(c["data_type"] == "text" for c in table["columns"])
     elements = card["card"]["body"]["elements"]
     divs = [e["text"]["content"] for e in elements if e.get("tag") == "div"]
+    # 事实里的原样换行不是结构；真正的模型说明组件仍只有一个。
+    assert divs.count(MODEL_TEXT_LABEL) == 1
     assert divs.count("执行计划为估算，未实际运行；不能单凭计划确认慢因。") == 1
     assert PLAN_NOTE not in divs and PLAN_NOTE in "\n".join(text_parts(card))
     assert not any("已执行原查询" in text for text in divs)

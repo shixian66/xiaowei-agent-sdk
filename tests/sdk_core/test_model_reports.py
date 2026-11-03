@@ -97,11 +97,11 @@ async def test_raw_md_common_markup_keeps_facts_and_resends_original_parts(
     assert any(t.type == "inline" and t.content == "后续建议" for t in tokens)
     detail_tokens = MarkdownIt().parse(files[0].decode())
     assert [
-        json.loads(t.content) for t in detail_tokens if t.type == "fence" and t.info == "json"
-    ] == [
-        "east",
-        100,
-    ]
+        (detail_tokens[i - 2].content, t.info, t.content.strip())
+        for i, t in enumerate(detail_tokens)
+        if t.type == "fence" and i >= 2
+        and detail_tokens[i - 2].content in {"**region**", "**total**"}
+    ] == [("**region**", "text", "east"), ("**total**", "text", "100")]
     assert "数据范围：" in files[0].decode()
     assert "private_note" not in content + files[0].decode()
     ref = RequestRef(

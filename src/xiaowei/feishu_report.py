@@ -10,6 +10,7 @@ from dataclasses import dataclass, replace
 from typing import Literal
 
 from xiaowei.feishu_render import (
+    _control_fact,
     business_fact,
     business_presentation,
     display_text,
@@ -17,6 +18,7 @@ from xiaowei.feishu_render import (
     fact_limit_notices,
     fact_scope,
     fold_details,
+    readable_value,
 )
 from xiaowei.models import Delivery, DeliveryFact, DeliveryFactRef
 from xiaowei.report_content import FORMAT_NOTICE, ReportContent, prepare_content
@@ -307,15 +309,17 @@ def _json_value(value: object, *, indent: int | None = None) -> str:
     return json.dumps(value, ensure_ascii=False, allow_nan=False, indent=indent)
 
 
-def _html_fact(value: str, *, presented: bool = False) -> str:
+def _html_fact(value: str, *, presented: bool = False, readable: bool = False) -> str:
+    value_text = str if presented else readable_value if readable else _json_value
     data = _decoded(value)
     if data is _INVALID:
         return f'<pre class="raw-code"><code>{_escaped(value)}</code></pre>'
     table = _table(data)
     if not isinstance(data, dict):
-        return f'<pre class="raw-code"><code>{_escaped(_json_value(data, indent=2))}</code></pre>'
+        text = readable_value(data) if readable else _json_value(data, indent=2)
+        return f'<pre class="raw-code"><code>{_escaped(text)}</code></pre>'
     if not data:
-        return '<pre class="raw-code"><code>{}</code></pre>'
+        return '<pre class="raw-code"><code>' + ("（无）" if readable else "{}") + '</code></pre>'
     fields = []
     for key, item in data.items():
         if table is not None and key in ("columns", "rows"):
@@ -330,7 +334,7 @@ def _html_fact(value: str, *, presented: bool = False) -> str:
             fields.append(
                 f'<div class="field"><div class="field-name">{_escaped(str(key))}</div>'
                 f'<code class="field-value">'
-                f'{_escaped(str(item) if presented else _json_value(item))}</code></div>'
+                f'{_escaped(value_text(item))}</code></div>'
             )
     body = '<div class="field-grid">' + "".join(fields) + "</div>" if fields else ""
     if table is None:
@@ -343,13 +347,14 @@ def _html_fact(value: str, *, presented: bool = False) -> str:
             values = []
             for column in columns:
                 if column not in row:
-                    values.append('<td><span class="missing">未提供</span></td>')
+                    missing = "（未提供）" if readable else "未提供"
+                    values.append(f'<td><span class="missing">{missing}</span></td>')
                 elif column in _RAW_FIELDS and isinstance(item := row[column], str):
                     values.append(
                         f'<td><pre class="sql-code"><code>{_escaped(item)}</code></pre></td>'
                     )
                 else:
-                    rendered = _escaped(str(row[column]) if presented else _json_value(row[column]))
+                    rendered = _escaped(value_text(row[column]))
                     values.append(f'<td><code class="cell">{rendered}</code></td>')
             cells.append("<tr>" + "".join(values) + "</tr>")
         body += (
@@ -378,14 +383,20 @@ def _safe_md_cell(value: str) -> bool:
 _MD_CELL_MAX = 120
 
 
-def _md_cell(value: object, *, presented: bool = False) -> str | None:
+def _md_cell(
+    value: object, *, presented: bool = False, readable: bool = False
+) -> str | None:
     """表格单元格：简单值直出，其余放代码片段；多行或过长值返回 None，放表下明细。"""
-    text = str(value) if presented else _json_value(value)
-    if (isinstance(value, str) and ("\n" in value or "\r" in value)) or len(text) > _MD_CELL_MAX:
+    text = str(value) if presented else readable_value(value) if readable else _json_value(value)
+    if readable and (text != text.strip() or text.startswith("`") or text.endswith("`")):
+        # Markdown 表格/行内代码会吃掉边缘空白或反引号；沿用表下原文明细。
+        return None
+    if ("\n" in text or "\r" in text or len(text) > _MD_CELL_MAX
+            or (isinstance(value, str) and ("\n" in value or "\r" in value))):
         return None
     if _safe_md_cell(text):
         return text
-    # 代码片段内不解析强调、链接与 HTML；JSON 已把字面反斜杠加倍，故每个 \| 都是竖线转义。
+    # 代码片段内不解析强调、链接与 HTML；竖线只作 Markdown 表格转义。
     return _inline_code(display_text(text).replace("|", "\\|"))
 
 
@@ -399,14 +410,20 @@ def _md_label(name: str) -> str:
     return _inline_code(display_text(_json_value(name)))
 
 
-def _md_fact(value: str, first_row: int = 1, *, presented: bool = False) -> str:
+def _md_fact(
+    value: str, first_row: int = 1, *, presented: bool = False, readable: bool = False
+) -> str:
     data = _decoded(value)
     if data is _INVALID:
         return _fence(display_text(value))
     table = _table(data)
     if not isinstance(data, dict):
+        if readable:
+            return _fence(readable_value(data))
         return _fence(_json_value(data, indent=2), "json")
     if not data:
+        if readable:
+            return _fence("（无）")
         return _fence("{}", "json")
     blocks = []
     for key, item in data.items():
@@ -417,6 +434,8 @@ def _md_fact(value: str, first_row: int = 1, *, presented: bool = False) -> str:
             blocks.append(f"**{key.upper()} 原文**\n\n{_fence(item, language)}")
         elif presented:
             blocks.append(f"**{_md_label(key)}**\n\n{_md_escape(str(item))}")
+        elif readable:
+            blocks.append(f"**{_md_label(key)}**\n\n{_fence(readable_value(item))}")
         else:
             blocks.append(f"**{_md_label(key)}**\n\n{_fence(_json_value(item, indent=2), 'json')}")
     if table is not None:
@@ -436,7 +455,9 @@ def _md_fact(value: str, first_row: int = 1, *, presented: bool = False) -> str:
                         cells.append("（未提供）")
                         continue
                     item = row[column]
-                    cell = None if column in _RAW_FIELDS else _md_cell(item, presented=presented)
+                    cell = None if column in _RAW_FIELDS else _md_cell(
+                        item, presented=presented, readable=readable
+                    )
                     if cell is not None:
                         cells.append(cell)
                         continue
@@ -445,13 +466,18 @@ def _md_fact(value: str, first_row: int = 1, *, presented: bool = False) -> str:
                     if isinstance(item, str) and display_text(item) == item:
                         language = "sql" if column in ("sql", "ddl") else "text"
                         details.append(f"{title}（字符串原文）\n\n{_fence(item, language)}")
+                    elif readable:
+                        details.append(f"{title}\n\n{_fence(readable_value(item))}")
                     else:
                         details.append(f"{title}\n\n{_fence(_json_value(item, indent=2), 'json')}")
                 lines.append("| " + " | ".join(cells) + " |")
             blocks.append("\n".join(lines))
             blocks.extend(details)
         elif "columns" in data:
-            blocks.append("**列定义**\n\n" + _fence(_json_value(columns), "json"))
+            blocks.append("**列定义**\n\n" + (
+                _fence(readable_value(columns))
+                if readable else _fence(_json_value(columns), "json")
+            ))
         blocks.append(f"本文件展示 {len(rows)} 行。")
     return "\n\n".join(blocks)
 
@@ -494,7 +520,11 @@ def _render(
         blocks = []
         for index, section in enumerate(sections, start=1):
             content = (
-                _md_fact(section.value, section.first_row, presented=section.presented)
+                _md_fact(
+                    section.value, section.first_row, presented=section.presented,
+                    readable=section.business and not section.fact.requires_complete
+                    and not _control_fact(section.fact),
+                )
                 if section.fact
                 else section.value
                 if section.native
@@ -537,7 +567,11 @@ def _render(
                 )
                 continue
             detail = (
-                _html_fact(section.value, presented=section.presented)
+                _html_fact(
+                    section.value, presented=section.presented,
+                    readable=section.business and not section.fact.requires_complete
+                    and not _control_fact(section.fact),
+                )
                 if section.fact else _html_prose(section.value)
             )
             meta = f'<p class="meta">{_escaped(section.meta)}</p>' if section.meta else ""

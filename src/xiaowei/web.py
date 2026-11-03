@@ -45,7 +45,12 @@ from xiaowei.channel_store import (
     SessionBusyError,
 )
 from xiaowei.config import WebConfig
-from xiaowei.feishu_render import business_presentation, fact_capture_time, fact_limit_notices
+from xiaowei.feishu_render import (
+    _control_fact,
+    business_presentation,
+    fact_capture_time,
+    fact_limit_notices,
+)
 from xiaowei.starrocks_security import SECURITY_TOOL
 from xiaowei.storage import Readiness
 
@@ -186,7 +191,9 @@ def _view(request_id: str, view: RequestView, readiness: Readiness) -> JSONRespo
                 "\n".join(filter(None, (fact.note_summary, *fact_limit_notices(fact)))) or None
             )
             if view.delivery.answer_version == 4 and not fact.requires_complete:
-                shown["presentation"] = business_presentation(fact).for_web()
+                shown["presentation"] = business_presentation(fact).for_web(
+                    readable=not _control_fact(fact)
+                )
                 if fact.tool_id == SECURITY_TOOL:
                     shown["captured_at"] = fact_capture_time(fact)
     status = 202 if unfinished else 200

@@ -1441,8 +1441,8 @@ async def test_formal_thousand_rows_complete_single_or_split_files(
             from re import MULTILINE, findall
 
             values = [
-                {"region": json.loads(name), "total": int(total)}
-                for name, total in findall(r'^\| ("row\d+") \| (\d+) \|$', document, MULTILINE)
+                {"region": name, "total": int(total)}
+                for name, total in findall(r'^\| (row\d+) \| (\d+) \|$', document, MULTILINE)
             ]
             assert len(values) == 1000
             assert values[-1] == {"region": "row999", "total": 999}
@@ -1469,8 +1469,8 @@ async def test_formal_thousand_rows_complete_single_or_split_files(
                         assert len(cells) == 2
                         seen.append(
                             {
-                                "region": json.loads(unescape(cells[0])),
-                                "total": json.loads(unescape(cells[1])),
+                                "region": unescape(cells[0]),
+                                "total": int(unescape(cells[1])),
                             }
                         )
             assert seen == [{"region": f"{region}{i}", "total": i} for i in range(1000)]
@@ -3135,7 +3135,7 @@ async def test_a_cluster_failing_mid_task_changes_nothing_on_the_others(env: Env
         assert "数据范围：sr-c" in text
         from tests.sdk_core.test_feishu_render import tables
 
-        assert tables(channel.sends[0][1])[0]["rows"] == [{"c0": '"east"', "c1": "3"}]
+        assert tables(channel.sends[0][1])[0]["rows"] == [{"c0": "east", "c1": "3"}]
         assert len(statements(drivers["sr-c"])) == 1
         assert drivers["sr-b"].attempts == attempts_b
 

@@ -934,7 +934,7 @@ async def test_group_member_can_query_the_readable_audit_table(runtime_env: Runt
     assert len(env.scripts.calls[asked]) == 2
     ((to, message, _),) = channel.sends
     assert to == CHAT
-    assert [row["c0"] for table in tables(message) for row in table["rows"]] == ['"q-group"']
+    assert [row["c0"] for table in tables(message) for row in table["rows"]] == ["q-group"]
     assert len(statements(env.drv)) == 1
     assert "starrocks_audit_tbl__" in statements(env.drv)[0]
 

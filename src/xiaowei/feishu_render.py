@@ -15,6 +15,7 @@ from collections.abc import Mapping, Sequence
 from collections.abc import Set as AbstractSet
 from dataclasses import dataclass
 from datetime import datetime
+from textwrap import indent
 from typing import Any, Final, cast
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
@@ -230,6 +231,34 @@ def _web_cell(row: Mapping[str, object], name: str) -> str | None:
     return _cell(row, name)
 
 
+def readable_value(value: object) -> str:
+    """普通业务事实的单元格文字；字符串不猜测解码，渠道继续负责安全呈现。"""
+    if value is None:
+        return "NULL（空值）"
+    if isinstance(value, str):
+        return display_text(value) if value else "（空字符串）"
+    if isinstance(value, bool):
+        return ("true" if value else "false") + "（布尔值）"
+    if isinstance(value, Mapping):
+        parts = []
+        for key, item in value.items():
+            key = display_text(str(key))
+            text = readable_value(item)
+            nested = (isinstance(item, Mapping) and bool(item)) or "\n" in text
+            parts.append(f"{key}=\n{indent(text, '  ')}" if nested else f"{key}={text}")
+        return ("\n" if any("\n" in part for part in parts) else "；").join(parts) or "（无）"
+    if isinstance(value, (list, tuple)):
+        nested = any(isinstance(item, (Mapping, list, tuple)) for item in value)
+        separator = "\n" if nested else "、"
+        return separator.join(readable_value(item) for item in value) or "（无）"
+    return str(value)
+
+
+def readable_cell(row: Mapping[str, object], name: str) -> str:
+    """缺失与空值分开；供普通事实的卡片、Web、通知和行明细共用。"""
+    return readable_value(row[name]) if name in row else "（未提供）"
+
+
 @dataclass(frozen=True)
 class FactPresentation:
     """从当前渠道获准事实即时派生；不保存、不授予权限，也不进入模型。"""
@@ -241,12 +270,13 @@ class FactPresentation:
     checks: tuple[dict[str, str], ...] = ()
     notices: tuple[str, ...] = ()
 
-    def for_web(self) -> dict[str, object]:
+    def for_web(self, *, readable: bool = False) -> dict[str, object]:
         """保留 Web 标量显示；嵌套值和大整数在服务端保真格式化。"""
+        cell = readable_cell if readable else _web_cell
         return {
-            "fields": {key: _web_cell(self.fields, key) for key in self.fields},
+            "fields": {key: cell(self.fields, key) for key in self.fields},
             "columns": self.columns,
-            "rows": [{key: _web_cell(row, key) for key in self.columns} for row in self.rows],
+            "rows": [{key: cell(row, key) for key in self.columns} for row in self.rows],
             "coverage": self.coverage, "checks": self.checks, "notices": self.notices,
         }
 
@@ -401,8 +431,36 @@ def business_presentation(fact: DeliveryFact) -> FactPresentation:
     if _control_fact(fact):
         return _control_presentation(fact, data)
     shown = business_fact(fact)
+    fields = {key: data[key] for key in shown.metadata if key in data}
+    name = fact.tool_id.partition("/")[2]
+    # 这些精确名字由正式配置绑定固定投影；局部导入避免 evidence 的装配循环。
+    from xiaowei.grafana import D7_SCHEMAS
+    from xiaowei.grafana_c8 import C8_SCHEMAS
+
+    if (not fact.requires_complete and (name in D7_SCHEMAS or name in C8_SCHEMAS)
+            and isinstance(data.get("result_json"), str)):
+        fields["result_json"] = json.loads(cast(str, data["result_json"]))
+    lists = {
+        "get_alerts": ("data", ("labels", "annotations", "fingerprint", "startsAt", "endsAt",
+                                "updatedAt", "status", "receivers")),
+        "get_alert_groups": ("data", ("group_index", "labels", "receiver", "alert_count",
+                                      "alerts_truncated")),
+        "get_silences": ("data", ("id", "matchers", "startsAt", "endsAt", "updatedAt",
+                                  "status", "comment")),
+        "get_receivers": ("data", ("name",)),
+        "get_annotations": ("annotations", ("id", "dashboardUID", "panelId", "time", "timeEnd",
+                                            "text", "tags")),
+    }
+    if name in lists:
+        key, columns = lists[name]
+        if isinstance(data.get(key), list):
+            fields.pop(key, None)
+            return FactPresentation(
+                fields, columns, tuple(cast(list[dict[str, object]], data[key])),
+                notices=fact_limit_notices(fact),
+            )
     return FactPresentation(
-        {key: data[key] for key in shown.metadata if key in data},
+        fields,
         shown.columns,
         tuple(cast(Sequence[dict[str, object]], data.get("rows", data.get("records", shown.rows))))
         if shown.columns else (),
@@ -602,17 +660,6 @@ def business_text(
         if delivery.answer_version == 4 and not fact.requires_complete:
             view = business_presentation(fact)
 
-            def value_text(row: Mapping[str, object], key: str) -> str:
-                if key not in row:
-                    return "（未提供）"
-                value = row[key]
-                if plain_transport and isinstance(value, str):
-                    return value
-                return json.dumps(
-                    value, ensure_ascii=False, allow_nan=False,
-                    indent=2 if isinstance(value, (dict, list)) else None,
-                )
-
             result = [fact_scope(fact)]
             if view.coverage is not None:
                 result.append(view.coverage)
@@ -632,13 +679,14 @@ def business_text(
             if fact.historical_brief:
                 return [*result, fact.summary or ""]
             result.extend(
-                rendered(f"{_ACTION_LABELS.get(key, key)}: {value_text(view.fields, key)}")
+                rendered(f"{_ACTION_LABELS.get(key, key)}: {readable_cell(view.fields, key)}")
                 for key in view.fields if key != "approval_command" or include_approval_command
             )
             for index, business_row in enumerate(view.rows, 1):
                 result.append(f"第 {index} 行")
                 result.extend(
-                    rendered(f"{key}: {value_text(business_row, key)}") for key in view.columns
+                    rendered(f"{key}: {readable_cell(business_row, key)}")
+                    for key in view.columns
                 )
             if view.columns and not view.rows:
                 result.append("（无数据行）")
@@ -726,12 +774,13 @@ def _row_text(
     fact: DeliveryFact, rows: Sequence[dict[str, object]], *, business: bool = False
 ) -> str:
     columns, _ = _data(fact, business=business)
+    cell = readable_cell if business else _cell
     return "\n\n".join(
         f"第 {index} 行\n"
         + "\n".join(
             str(row[name])
             if name == "ddl" and fact.tool_id == "local/show_create_table"
-            else f"{name}: {_cell(row, name)}"
+            else f"{name}: {cell(row, name)}"
             for name in columns
         )
         for index, row in enumerate(rows, 1)
@@ -827,12 +876,15 @@ def _card(
     index_of = {fact.evidence_id: i for i, fact in enumerate(delivery.facts)}
 
     def add_table(
-        columns: tuple[str, ...], rows: Sequence[Mapping[str, object]], *, formatted: bool = False
+        columns: tuple[str, ...], rows: Sequence[Mapping[str, object]], *, formatted: bool = False,
+        readable: bool = False,
     ) -> None:
         nonlocal tables
 
         def cell(row: Mapping[str, object], name: str) -> str:
-            return display_text(str(row[name])) if formatted else _cell(row, name)
+            if formatted:
+                return display_text(str(row[name]))
+            return readable_cell(row, name) if readable else _cell(row, name)
 
         if len(columns) <= 50 and tables < 5:
             elements.append({
@@ -875,6 +927,7 @@ def _card(
             elements.append(_div("动作材料" if fact.section == "action" else FACT_LABEL))
         region = fact.section
         shown = business_presentation(fact) if modern and not fact.requires_complete else None
+        has_columns = bool(shown.columns if shown is not None else fact.columns)
         columns, all_rows = _data(fact, business=modern)
         rows = all_rows[: counts[index]]
         if fact.requires_complete:
@@ -922,20 +975,21 @@ def _card(
         if shown is not None and shown.coverage is not None:
             elements.append(_div(shown.coverage))
             add_table(("检查项", "审计行数"), shown.checks, formatted=True)
+        cell = readable_cell if modern else _cell
         visible_metadata = (
             {
                 key: value
                 for key, value in (
                     shown.fields if shown is not None else fact.metadata
                 ).items()
-                if key not in _TECHNICAL and fact.columns and (modern or value is not None)
+                if key not in _TECHNICAL and has_columns and (modern or value is not None)
             }
             if modern or not preview or fact.section == "action"
             else {}
         )
         if visible_metadata:
             elements.extend(
-                _div(f"{key}: {_cell({key: value}, key)}")
+                _div(f"{key}: {cell({key: value}, key)}")
                 for key, value in visible_metadata.items()
             )
         elements.extend(_div(notice) for notice in (
@@ -954,7 +1008,7 @@ def _card(
                     elements.append(
                         _div(
                             f"展示 {len(rows)}／本次返回 {len(all_rows)} 行"
-                            if fact.columns
+                            if has_columns
                             else "部分明细未展示；完整原值尚未交付。"
                         )
                     )
@@ -968,7 +1022,7 @@ def _card(
                     ("预览" if preview else "展示")
                     + (
                         f" {len(rows)}／本次返回 {len(all_rows)} 行"
-                        if fact.columns
+                        if has_columns
                         else f" {len(rows)}／共 {len(all_rows)} 个字段"
                     )
                 )
@@ -989,10 +1043,10 @@ def _card(
                 for name in columns:
                     # DDL 原文是默认可见结果，用纯文本而不是代码围栏或表格单元格。
                     elements.append(
-                        _div(str(row[name]) if name == "ddl" else f"{name}: {_cell(row, name)}")
+                        _div(str(row[name]) if name == "ddl" else f"{name}: {cell(row, name)}")
                     )
         else:
-            add_table(columns, rows)
+            add_table(columns, rows, readable=modern)
 
     def fact_details(index: int) -> None:
         fact = delivery.facts[index]
@@ -1029,8 +1083,8 @@ def _card(
                 details_area.append(_div(fact.note))
             if index in row_details:
                 details_area.append(_div(row_details[index]))
-            if fact.result_json is not None and (fact.historical_brief or not _raw_redundant(fact)):
-                # 不能由已展示值保真替代时，原始获准投影仍可在同一区核对。
+            if fact.result_json is not None and not attachment:
+                # 非附件卡片保留类型核对入口；附件预览不让原文挤占结果行。
                 details_area.append(_div(fact.result_json))
             return
         details: list[Message] = [

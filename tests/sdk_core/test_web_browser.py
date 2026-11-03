@@ -463,8 +463,11 @@ async def test_compact_preserves_exact_values(
             cells = await page.evaluate(
                 f"[...{item(0)}.querySelectorAll('td')].map(cell => cell.textContent)"
             )
-            assert cells == [str(big), str(-big), "NULL（空值）", "（空字符串）", "true", "NULL"]
-            assert await page.evaluate(f"{item(0)}.querySelectorAll('td.null-value').length") == 1
+            assert cells == [
+                str(big), str(-big), "NULL（空值）", "（空字符串）", "true（布尔值）", "NULL",
+            ]
+            # 普通事实已由服务端统一成文字，以可见标注区分 NULL 与业务字符串。
+            assert cells.count("NULL（空值）") == 1 and cells.count("NULL") == 1
         original = await page.evaluate(f"{item(0)}.querySelector('pre.original').textContent")
         assert json.loads(original) == {k: v for k, v in payload.items() if k != "private_note"}
 
@@ -663,7 +666,7 @@ async def test_v4_business_values_visible_with_one_closed_technical_area(
         assert await page.evaluate(f"{item(0)}.querySelector('details').open") is False
         visible = await page.evaluate(f"{item(0)}.innerText")
         assert "east" in visible and "west" in visible and "继续关注" in visible
-        assert '"text": "null"' in visible and '"tags": null' in visible
+        assert "text=null" in visible and "tags=NULL（空值）" in visible
         assert '\\"tags\\"' not in visible
         assert "<script>literal</script>" in visible
         assert await page.evaluate("document.scripts.length") == 1

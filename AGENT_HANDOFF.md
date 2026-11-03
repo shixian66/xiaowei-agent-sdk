@@ -1,6 +1,6 @@
 # 小维：当前交接
 
-> 核对日期：2026-11-01，Asia/Shanghai。本文只维护当前代码／计划状态、验证证据、缺口和下一项工作。长期契约见 [ARCHITECTURE.md](ARCHITECTURE.md)，阶段与退出条件见 [DEVELOPMENT_PLAN.md](DEVELOPMENT_PLAN.md)，用法见 [README.md](README.md)／[OPERATIONS.md](deploy/OPERATIONS.md)。
+> 核对日期：2026-11-03，Asia/Shanghai。本文只维护当前代码／计划状态、验证证据、缺口和下一项工作。长期契约见 [ARCHITECTURE.md](ARCHITECTURE.md)，阶段与退出条件见 [DEVELOPMENT_PLAN.md](DEVELOPMENT_PLAN.md)，用法见 [README.md](README.md)／[OPERATIONS.md](deploy/OPERATIONS.md)。
 
 **OpenAI Agents SDK 负责 Agent Loop；小维负责权限、受治理工具执行、证据真实性和数据边界。**
 
@@ -8,15 +8,15 @@
 
 | 项目 | 本次核对事实 |
 | --- | --- |
-| 仓库／产品基线 | [shixian66/xiaowei-agent-sdk](https://github.com/shixian66/xiaowei-agent-sdk)，本地 `origin/main@f6e824c`（#152 合并后；本轮网络不可用，未重新 fetch） |
-| 当前任务 | 隔离分支 `claude/slim-legacy-docs-tests`（第 1 步纯删除），其上依次叠加 `claude/slim-spike-grafana`（第 2 步）、`claude/evidence-recheck-plan`（第 4 步）与 `claude/remove-legacy-answers`（第 3a 步），见下方 [精简](#slim-step-1) |
+| 仓库／产品基线 | [shixian66/xiaowei-agent-sdk](https://github.com/shixian66/xiaowei-agent-sdk)，`origin/main@a98fb89`（#153 精简第 1–4 步合并后） |
+| 当前任务 | 分支 `codex/readable-facts`：普通事实可读展示修复，见下方 [可读事实展示](#readable-facts) |
 | 隔离与已有工作 | 新建干净隔离工作树；桌面旧 checkout `b89d4ee` 及其三份文档／其他任务未提交材料保持原样，不把旧 checkout 当最新实现 |
-| 源码／入口 | 唯一产品包 `src/xiaowei`；`xiaowei` 与 `python -m xiaowei` 为正式入口。旧 Runtime、Worker、专属测试／迁移入口已移除，兼容旧回答和已绑定交付的路径仍保留 |
-| 存储与回答 | 应用 schema **17**：016 保存有界定时结果快照，017 只新增 `ds_clusters`；新回答为可信 v4，旧 v2/v3/Legacy 和已绑定原字节按原语义读取。SDK 表不改 |
+| 源码／入口 | 唯一产品包 `src/xiaowei`；`xiaowei` 与 `python -m xiaowei` 为正式入口。旧 Runtime、Worker、专属测试／迁移入口已移除，已绑定交付的原字节补发路径仍保留 |
+| 存储与回答 | 应用 schema **17**：016 保存有界定时结果快照，017 只新增 `ds_clusters`；只解析可信 v4 回答，旧 v2/v3/Legacy 记录与过期记录同样不可用；已绑定交付的原字节按原语义补发。SDK 表不改 |
 | 锁定依赖 | Python 3.11；Agents SDK 0.22.3、OpenAI 3.20.0、MCP 2.2.0、Lark Channel 1.4.0、sqlglot 30.17.0、httpx2 2.13.1、nh3 0.3.7、tinycss2 1.5.1、Pillow 13.0.0；以 uv.lock 为准。CI 维护已锁 certifi 2026.10.19、开发链 filelock 4.2.1／msgpack 1.2.3 |
 | 此前保存的完整集成证据（非本次修复） | [PR #145](https://github.com/shixian66/xiaowei-agent-sdk/pull/145) 的精确受测树与 #145 squash 合并树相同；#146 仅改四份文档，产品源码未变；[CI #421](https://github.com/shixian66/xiaowei-agent-sdk/actions/runs/40721039641) 9/9 成功，详情见 §5 |
 | 已记录发行／公司部署 | 2026-10-29 用户回传 release.json、容器日志和数据库统计：发行 `3dc028421f4349a4d9fe86129e234c9a9abd1bb3`，max_tool_calls=32，DS 选择已提交，项目读取因额度耗尽未执行。证据为用户回传，本轮不直连服务器；不证明公司 API 或实战验收通过 |
-| 本轮授权边界 | 删除确认无用的文档／测试／代码；用户 2026-11-02 批准实施第 4 步、第 3 步选 A（现在删除旧回答格式，接受保留期内旧回答不再可读／重发）；离线验证及本地提交；不推送、不开 PR、不合并、不部署，不调用真实模型或公司服务 |
+| 本轮授权边界 | 用户 2026-11-03 批准可读事实展示修复的离线实施、提交、推送与开 PR；合并须用户另行确认；不部署，不调用真实模型或公司服务 |
 
 接手仍先核对实际 HEAD、工作区和用户新指令。下列“已合入”只描述 Git 事实；独立审查、离线测试、隔离真实软件、公司部署、渠道实收和用户接受分别记证。
 
@@ -41,7 +41,7 @@ records 业务展示已合入 [PR #152](https://github.com/shixian66/xiaowei-age
 
 <a id="slim-step-1"></a>
 
-### 精简第 1–4 步（本地离线；第 1、2 步待独立审查）
+### 精简第 1–4 步（已合入 [#153](https://github.com/shixian66/xiaowei-agent-sdk/pull/153) `a98fb89`）
 
 **已删。** 旧系统文档 `docs/adr/`、`docs/plans/`（M2–M5）、`docs/handoff/` 与旧包生成的 `docs/CAPABILITIES.md`（核心文档与代码均不引用）；只保护 ADR-008 的 `test_docs_command_consistency.py`；无调用方的 `ChannelStore.proposal_request`；依赖基线中检查旧包导入和第三方 `py.typed` 事实的用例（直接导入无类型的 asyncpg 仍由 mypy strict 与固定 override 拦住）；CI workflow 测试中的整文件摘要、命令多重集与命令块摘要（权限、凭据、env、`uses` SHA、gate 存在与不可绕过等规则保留）。
 
@@ -53,6 +53,16 @@ records 业务展示已合入 [PR #152](https://github.com/shixian66/xiaowei-age
 
 **后续。** 3b 渲染层清理：草稿在 `claude/remove-legacy-render-wip@d1820d3`（未审查；约 150 个按旧布局断言的测试待逐条改写或删除），连同 `delivery_version=0` 不再可达的发送分支一起评估。
 
+<a id="readable-facts"></a>
+
+### 可读事实展示（离线验证，待真实模型与飞书验收）
+
+**问题与修复。** 按经五轮独立审查的[计划](docs/superpowers/specs/2026-11-03-readable-facts-output-design.md)：普通业务事实的卡片、预览、Web、纯文字通知和 MD/HTML 报告共用 `readable_value`／`readable_cell`，字符串不再加 JSON 引号和转义，嵌套值显示为“键=值”，空列表／映射为“（无）”，NULL／缺失／空字符串／false 分别标注；Alertmanager 四个列表工具与 Grafana `get_annotations` 映射为业务表格行；Grafana D7/C8 契约编码的 `result_json` 按工具解码。非附件 v4 卡片的折叠区始终保留获准原文，附件预览不附普通事实原文（不挤占正文预览行）。控制事实（任务列表、动作）、审批材料、`business_text` 的非通知换行转义、报告内部 JSON 包装与按行分片、无版本失败回执保持原样；冻结 DeliveryPart 按原字节补发。
+
+**验证。** 独立代码审查与 B1 限定复审均无遗留阻断。CI integration 等价命令（除 `tests/deployment`）5481 passed／235 skipped；Chrome 浏览器 38 passed／1 failed；`ruff check .`、`mypy src`、`git diff --check` 通过。唯一的浏览器失败 `test_answer_repair_eval.py::test_explicit_mixed_html_body_is_concise_but_details_keep_authorized_originals` 在 a98fb89 上同样失败（`:593`，绕过后 `:594`），后半段断言在任何版本都未执行，与本修复无关。
+
+**开放项。** 上述浏览器测试单独修复；DolphinScheduler 动态 instructions 在步数收尾／改写路径丢失系统提示词（`app.py` 中 `f"{agent.instructions}"`）作为独立先行小切片；3b 渲染层清理基于本修复结果重做；控制事实卡片的任务列表仍带 JSON 引号，待有断言锁定后再评估。真实模型（三类任务样例的事实选择与详略）、飞书实收与部署均未进行。
+
 <a id="records-business-view"></a>
 
 ### records 业务展示（离线验证，待真实飞书验收）
@@ -61,7 +71,7 @@ records 业务展示已合入 [PR #152](https://github.com/shixian66/xiaowei-age
 
 **验证。** 相关模块回归 361 passed，DS 验收与展示契约检查 70 passed，本机 Chrome 的 DS 成功／鉴权缺口及历史重载 2 passed；修改模块的 ruff/mypy 与差异检查通过。DS 验收按空表／中文覆盖和业务行中的精确状态、尝试次数断言，保留请求次数、Evidence 数量及失败后不可冒充当前事实的检查。测试含 SQL、DS 六项、history、监控三类、安全巡检、动作状态、任务及通知的代表性 payload，明确限制 JSON 例外，保留必要业务值；覆盖说明还验证短页、空页、末页及排除／省略，不把请求页大小当作实际返回范围。使用脚本模型／DS 替身和已核身份的本机隔离 PostgreSQL；本地未跑全量，未调用真实模型或公司服务。
 
-**开放项。** 用户确认 history 的嵌套 facts/gaps 保留为已知例外；DS 详情的附属结构与日志不新增专门展示。Alertmanager get_alerts.data、Grafana get_annotations.annotations 已复现同类 JSON 兜底，本任务不修；Prometheus 非表格 brief 契约保持。四组完整前后文本见[渲染样例](docs/records-business-view-samples.md)。源码合并不代表发行或部署；真实飞书与公司验收仍待部署后完成。
+**开放项。** 用户确认 history 的嵌套 facts/gaps 保留为已知例外；DS 详情的附属结构与日志不新增专门展示。Alertmanager get_alerts.data、Grafana get_annotations.annotations 的同类 JSON 兜底由[可读事实展示](#readable-facts)修复；Prometheus 非表格 brief 契约保持。四组完整前后文本见[渲染样例](docs/records-business-view-samples.md)。源码合并不代表发行或部署；真实飞书与公司验收仍待部署后完成。
 
 ### 主线合入索引
 
@@ -79,6 +89,7 @@ records 业务展示已合入 [PR #152](https://github.com/shixian66/xiaowei-age
 | CI 审计与扫描自测维护 | [#144](https://github.com/shixian66/xiaowei-agent-sdk/pull/144)，`350345d` | 已修复当时 msgpack 审计及随机扫描诱饵问题；不再列为未解决缺陷 |
 | 四份根文档对齐 | [#146](https://github.com/shixian66/xiaowei-agent-sdk/pull/146)，`4c5f970` | 已记录 DS 用途决定及未关闭的实战项；该 PR 本身不修产品代码 |
 | DS API 只读 | [#145](https://github.com/shixian66/xiaowei-agent-sdk/pull/145)，`7565c6a` | 两版公司 API、D1–D4／19 变体、长日志负载和用户验收 |
+| 精简第 1–4 步（含 3a 删除旧回答格式） | [#153](https://github.com/shixian66/xiaowei-agent-sdk/pull/153)，`a98fb89` | 3b 渲染层清理；部署后旧回答不可用的实际表现 |
 
 A/B/C 通知与定时已分别随 #123 `9284688`、#125 `2bee11f`、#126 `be8c155` 合入；自建代理 #127 `1a92c58`。原生报告、自主调查、普通消息和进度已在主线，后续 #129 统一了 v4 交付，不能再从旧计划标题推定未实现。手动安全巡检 #128、权限简化 #130、展示 #132 和定时失败通知 #133 同样是当前实现的前序，不是待开发切片。
 
