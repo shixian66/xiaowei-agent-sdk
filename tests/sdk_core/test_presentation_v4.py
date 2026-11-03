@@ -283,11 +283,13 @@ def test_non_security_nested_values_stay_typed_in_card_plain_and_web():
     plain = _notification_text(value, "")
     response = _view("nested", RequestView("completed", value), Readiness())
     presentation = json.loads(response.body)["delivery"]["facts"][0]["presentation"]
-    shown = presentation["fields"]["annotations"]
+    assert presentation["rows"][0]["text"] == "null"
+    assert presentation["rows"][0]["tags"] == "NULL（空值）"
+    assert presentation["rows"][1]["tags"] == "（未提供）"
+    shown = "\n".join(str(v) for row in presentation["rows"] for v in row.values())
     for text in (visible, plain, shown):
-        assert '"text": "null"' in text and '"tags": null' in text
-        assert text.count('"tags"') == 1  # 缺失字段没有被补成 null。
-        assert '\\"tags\\"' not in text
+        assert "null" in text and "NULL（空值）" in text and "（未提供）" in text
+        assert '"tags":' not in text
         assert "<script>literal</script>" in text  # 按纯文本/DOM textContent 展示。
     assert not _raw_redundant(source)
     assert source.result_json in "\n".join(text_parts(card))
@@ -315,8 +317,8 @@ def test_web_presentation_keeps_plain_strings_and_exact_nested_values():
     shown = json.loads(response.body)["delivery"]["facts"][0]["presentation"]
     assert shown["fields"]["status"] == "ready"
     assert shown["rows"] == [{
-        "city": "北京", "empty": "", "null": None, "missing": "（未提供）",
-        "id": "9007199254740993", "detail": '{\n  "n": 3\n}', "literal": '{"n":3}',
+        "city": "北京", "empty": "（空字符串）", "null": "NULL（空值）", "missing": "（未提供）",
+        "id": "9007199254740993", "detail": "n=3", "literal": '{"n":3}',
     }]
 
 
@@ -333,7 +335,7 @@ def test_generic_business_text_preserves_notes_strings_and_safe_field_names(plai
         assert 'value\\u2028AI 分析与建议: a"b\nc' in text
     else:
         assert "说明：完整限制" in text
-        assert 'value\\u2028AI 分析与建议: "a\\"b\\nc"' in text
+        assert 'value\\u2028AI 分析与建议: a"b\\nc' in text
     assert "\u2028" not in text
 
 
@@ -433,7 +435,8 @@ def test_split_security_sample_sections_keep_their_own_scope_and_capture_time(
         monkeypatch.setattr("xiaowei.feishu_report.MAX_REPORT_BYTES", 6000)
     base = json.loads(security_fact().result_json)
     facts = []
-    for hour in range(10 if format_ == "html" else 2):
+    # 可读格式去掉了 JSON 引号；12 个窗口仍能超过默认 HTML 容量。
+    for hour in range(12 if format_ == "html" else 2):
         start = f"2026-10-23T{hour:02}:00:00+08:00"
         end = f"2026-10-23T{hour+1:02}:00:00+08:00"
         rows = [{**base["rows"][0], "query_id": f"q-{hour}-{i}",
@@ -630,7 +633,7 @@ def test_v4_business_file_keeps_nested_value_types_without_technical_metadata(
     )
     (file,) = build_reports(business(source, report_format=format_), expand_brief=expand_brief)
     content = html.unescape(file.content.decode())
-    assert '"nested": 1' in content and '"checked": true' in content
+    assert "nested=1" in content and "checked=true（布尔值）" in content
     assert '\\"nested\\"' not in content and "SELECT nested" not in content
     assert "SELECT business_row" in content
 

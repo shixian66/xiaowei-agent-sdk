@@ -84,6 +84,7 @@ class Reply:
     card: dict[str, Any] | None = None
     files: tuple[bytes, ...] = ()
     post: dict[str, Any] | None = None
+    blocks: list[dict[str, Any]] | None = None
 
 
 @dataclass
@@ -102,7 +103,8 @@ class Turns:
         if self.channel == "web":
             body = (await self.served.turn(message, mode, f"r{self.count}")).json()
             delivery = body["delivery"] or {}
-            return Reply(body["state"], delivery.get("content", ""), delivery.get("facts"))
+            return Reply(body["state"], delivery.get("content", ""), delivery.get("facts"),
+                         blocks=delivery.get("blocks"))
         completed, failed = await self.terminal("completed"), await self.terminal("failed")
         before = len(self.feishu.sends)
         before_files = len(self.feishu.uploads)
@@ -492,6 +494,15 @@ async def test_instructions_inside_audit_sql_and_plans_change_nothing(
         assert any("说明：" + PLAN_NOTE == line for line in visible_lines(reply))
     elif reply.card is None:
         assert lines(reply).count(ANALYSIS_HEADER) == 1
+        # Web 按结构化 blocks 呈现；事实中的原样换行不能被当成新的模型文字块。
+        assert reply.blocks is not None
+        assert [b["text"] for b in reply.blocks if b["kind"] == "text"] == ["计划为估算"]
+        assert any(
+            value == env.drv.plan[-1]
+            for fact in reply.facts or []
+            for row in fact.get("presentation", {}).get("rows", [])
+            for value in row.values()
+        )
     else:
         # 原文可含换行；它只能是纯文本单元格，不能新增分析组件或驱动 Agent 执行。
         assert (
@@ -601,7 +612,8 @@ async def test_feishu_cut_with_forged_headers_uses_only_structured_sections(diag
     )
     plan = (
         *forged,
-        *(f"    - SCAN [sales] partitionRatio: {i}/80" for i in range(450)),
+        # 可读格式更短；仍用 450 行，让完整正文实际超过原消息容量。
+        *(f"    - SCAN [sales] partitionRatio: {i}/80; tabletRatio: 1/16" for i in range(450)),
     )
     reply, _ = await feishu_diagnosis(diag, plan)
 

@@ -1,12 +1,11 @@
 """登记工具的业务展示契约；使用渠道投影，不调用模型或业务服务。"""
 
 import json
-from collections import Counter
 from copy import deepcopy
 from datetime import UTC, datetime, timedelta
 
 import pytest
-from tests.sdk_core.test_feishu_render import delivery, text_parts
+from tests.sdk_core.test_feishu_render import delivery, tables, text_parts
 from tests.sdk_core.test_presentation_v4 import v2_security_fact
 
 from xiaowei.channel import RequestView
@@ -190,7 +189,7 @@ def test_history_table_keeps_nested_values_typed_without_changing_saved_projecti
     assert source.columns == ("time", "state", "facts", "gaps")
     assert len(source.rows) == 1
     text = visible_text(value, channel)
-    assert '"total": 7' in text and "completed" in text
+    assert "total=7" in text and "completed" in text
     assert '\\"total\\"' not in text
     data = json.loads(source.result_json)
     assert "sources" not in data and "record_ref" not in data["records"][0]
@@ -214,48 +213,44 @@ def json_containers(text):
     return found
 
 
-# 外层列表不得再出现 JSON 兜底；例外只覆盖已有契约或本次明确不改的具体嵌套字段。
+# 固定业务字段保留内容；容器用可读文字，不把传输 JSON 当作正文。
 CASES = [
     ("sql", "local/run_readonly_query",
      {"columns": ["total"], "rows": [{"total": 7}], "row_count": 1, "sql": "SELECT 7"},
-     (), {}),
-    *((name, "local/" + payload["kind"], payload, (), {})
+     {}),
+    *((name, "local/" + payload["kind"], payload, {})
       for name, payload in (("ds_projects", PROJECTS), ("ds_workflows", WORKFLOWS),
                             ("ds_tasks", TASKS))),
-    ("ds_detail", "local/ds_get_workflow_instance", DETAIL,
-     tuple(DETAIL[key] for key in ("coverage", "tasks", "nodes", "relations", "related")), {}),
-    ("ds_log", "local/ds_read_task_log", LOG, (LOG["coverage"], LOG["task"]), {}),
-    ("ds_search_log", "local/ds_search_task_log", SEARCH_LOG,
-     (SEARCH_LOG["coverage"], SEARCH_LOG["task"]), {}),
-    # 用户确认仅修外层成表；facts/gaps 的专门展示留待独立任务。
-    ("history", "history/search_operations", HISTORY,
-     (HISTORY["records"][0]["facts"], HISTORY["records"][0]["gaps"], HISTORY["gaps"]), {}),
+    ("ds_detail", "local/ds_get_workflow_instance", DETAIL, {}),
+    ("ds_log", "local/ds_read_task_log", LOG, {}),
+    ("ds_search_log", "local/ds_search_task_log", SEARCH_LOG, {}),
+    ("history", "history/search_operations", HISTORY, {}),
     ("alertmanager", "alertmanager/get_alerts",
      {"data": [{"labels": {"alertname": "HostDown"}, "status": {"state": "active"}}],
       "total": 1, "offset": 0, "limit": 20, "has_more": False},
-     ([{"labels": {"alertname": "HostDown"}, "status": {"state": "active"}}],), {}),
+     {}),
     ("grafana", "grafana/get_annotations",
      {"annotations": [{"id": 1, "text": "deploy", "tags": ["ops"]}]},
-     ([{"id": 1, "text": "deploy", "tags": ["ops"]}],), {}),
+     {}),
     ("prometheus", "prometheus/query", {"result": "up{instance=host} => 1 @[1792673695]"},
-     (), {"view": "brief", "summary": "补充原值见技术详情。"}),
-    ("security", v2_security_fact().tool_id, json.loads(v2_security_fact().result_json), (), {}),
+     {"view": "brief", "summary": "补充原值见技术详情。"}),
+    ("security", v2_security_fact().tool_id, json.loads(v2_security_fact().result_json), {}),
     ("action", "alertmanager/get_action_status",
      {"action_id": "action-test", "state": "unknown", "reason": "执行结果未确认"},
-     (), {"section": "action"}),
+     {"section": "action"}),
     ("task", "scheduled/list_tasks",
      {"tasks": [{"job_id": "task-test", "text": "定时巡检", "state": "active",
-                 "next_run": "2026-10-30T14:00:00+08:00"}]}, (), {}),
+                 "next_run": "2026-10-30T14:00:00+08:00"}]}, {}),
     ("notification", "notifications/send_webhook_message",
-     {"bot_alias": "测试群", "text": "测试完成", "status": "accepted"}, (), {}),
+     {"bot_alias": "测试群", "text": "测试完成", "status": "accepted"}, {}),
 ]
 
 
 @pytest.mark.parametrize("channel", ["feishu", "web"])
-@pytest.mark.parametrize("name,tool,payload,allowed,changes", CASES,
+@pytest.mark.parametrize("name,tool,payload,changes", CASES,
                          ids=[case[0] for case in CASES])
 def test_registered_business_views_do_not_dump_unlisted_json(
-    channel, name, tool, payload, allowed, changes,
+    channel, name, tool, payload, changes,
 ):
     _, value = rendered(tool, payload, channel=channel, **changes)
     visible = visible_text(value, channel)
@@ -268,11 +263,32 @@ def test_registered_business_views_do_not_dump_unlisted_json(
         "notification": "测试完成",
     }
     assert expected[name] in visible
-    containers = json_containers(visible)
-    # 逐值、逐次数限定例外，不能靠隐藏值或增加同类 JSON 字段让检查变绿。
-    assert Counter(json.dumps(item, sort_keys=True) for item in containers) == Counter(
-        json.dumps(item, sort_keys=True) for item in allowed
-    ), (name, containers)
+    if name == "task":
+        columns = ["任务", "状态", "计划时间", "有效期", "说明"]
+        if channel == "feishu":
+            table = tables(build_feishu_message(value, 3500, "oc_test"))[0]
+            assert [c["display_name"] for c in table["columns"]] == columns
+            assert list(table["rows"][0].values()) == [
+                '"定时巡检"', '"已激活"', '"2026-10-30T14:00:00+08:00"',
+                "（未提供）", "（未提供）",
+            ]
+        else:
+            response = json.loads(
+                _view("sample", RequestView("completed", value), Readiness()).body
+            )
+            shown = response["delivery"]["facts"][0]["presentation"]
+            assert shown["columns"] == columns
+            assert list(shown["rows"][0].values()) == [
+                "定时巡检", "已激活", "2026-10-30T14:00:00+08:00", "（未提供）", "（未提供）",
+            ]
+    nested = {
+        "ds_detail": "state=FAILURE", "ds_log": "project_code=101",
+        "ds_search_log": "ERROR=1", "history": "total=7",
+        "alertmanager": "alertname=HostDown", "grafana": "ops",
+    }
+    if name in nested:
+        assert nested[name] in visible
+    assert json_containers(visible) == []
 
 
 def test_business_view_samples_cover_all_registered_ds_read_tools():

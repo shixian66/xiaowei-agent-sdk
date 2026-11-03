@@ -89,7 +89,7 @@ async def test_group_large_result_delivers_all_files_before_body(actions):
         assert len(sent_at) == len(files) + 1
         assert all(b - a >= 0.19 for a, b in pairwise(sent_at))
         body = "\n".join(report.content.decode() for report in files)
-        assert body.count('| "2026-09-01" |') == 2
+        assert body.count('| 2026-09-01 |') == 2
         assert await env.rows("SELECT delivery FROM xiaowei_request") == [("sent",)]
 
 
