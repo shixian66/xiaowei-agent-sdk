@@ -166,6 +166,8 @@ PR base `916f57a26d2bac201b6772a48016f194af7d586e`，head `bba19d4ba72c43524211f
 关键遗漏继续显式保留：
 
 - 审批回执修复未证实“首轮未形成原生暂停”的生产唯一原因；#142 合入不关闭该缺口。公司仍须按[回执修复计划 §8.5](docs/superpowers/plans/2026-10-20-production-dialogue-answer-repair.md#approval-task-delivery-repair)完成实际暂停／恢复样例，完成判据见该计划第489行。
+<a id="governance-core-debt"></a>
+- **治理核心中的数据源专属逻辑（已接受技术债，用户 2026-11-18 决定）。** 现状：`governance.py` 的 `TurnRuns` 含 DS（`ds_clusters`、`ds_read_scope`、`ds_log_reads`、`ds_log_bytes`）、监控（`promql_errors`、`selector_errors`、`alertmanager_errors`、`grafana_missing`）与 StarRocks（SQL 解析失败、槽位重试、安全巡检）专属字段；`GovernedTools.invoke` 按这些工具／策略／异常分支，另有 5 个 DS 专用方法。暂不迁移的理由：DS 已合入并等待公司验收，迁移须同时处理三处成本——暂停账本按严格模式解析，字段改形会使已保存的待批暂停无法恢复；DS 日志去重与 32 MiB 计数在执行期间更新，仅靠执行前检查的扩展无法承载，移入内存缓存会在暂停恢复后丢失；按 Adapter 范围停源须改监控抛出点及已保存的失败记录结构。新数据源按 [ARCHITECTURE §5](ARCHITECTURE.md#5-动态工具与受治理执行) 不再加入此类分支。复查触发：新数据源无法在不改核心的前提下接入；计划迁出监控记账（届时 DS 与监控作为同一通用扩展的两个消费者一起迁移）；或出现由 `invoke` 跨源分支耦合引起的缺陷。迁移计划须基于当时主线，覆盖上述三处并附监控失败语义前后对照。
 - 监控选择器组合失败后的子集重试不做语义推导，是已接受的边界，不能从当前去重记录推定会阻止所有语义等价请求；此取舍保留，不新增规则。
 - P4 真实模型仍须验证遇到精确直查的可修正拒绝后不偷换候选工具；当前只靠工具／Skill 指引，离线错误路径不证明 Agent 遵守。任务规则见 [ARCHITECTURE §6](ARCHITECTURE.md#6-只读查询保护)，评测沿原 P4 样例。
 
